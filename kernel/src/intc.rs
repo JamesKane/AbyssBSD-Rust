@@ -8,6 +8,11 @@
 //! aarch64: GICv3, with the distributor routing to the boot CPU and one
 //! redistributor per CPU; the virtual timer's PPI comes from the GTDT.
 //!
+//! Device interrupts go through `sys/irq`'s handler table: this module
+//! provides the domains that program the controllers (the I/O APICs over
+//! GSIs, the GIC distributor over SPIs) and hands every interrupt it does
+//! not handle itself to `irq::dispatch`.
+//!
 //! Every interrupt ends with a preemption check, so a thread woken by an
 //! interrupt (or a slice that ran out) gets the CPU on the way out.
 
@@ -92,6 +97,7 @@ fn handle(irq: arch::Interrupt) {
             RESCHED_VECTOR => crate::time::rearm(),
             CALL_VECTOR => crate::smp::on_call_ipi(),
             arch::apic::ERROR_VECTOR => kprintln!("apic: error interrupt"),
+            v if ::irq::dispatch(u32::from(v), &cx) => {}
             v => stray(u32::from(v)),
         }
         arch::apic::eoi();
@@ -108,7 +114,7 @@ fn handle(irq: arch::Interrupt) {
             crate::smp::on_call_ipi();
         } else if id == TIMER_PPI.load(Ordering::Relaxed) {
             crate::time::on_timer(&cx);
-        } else {
+        } else if !::irq::dispatch(id, &cx) {
             stray(id);
         }
         arch::gic::eoi(id);
@@ -327,4 +333,180 @@ fn init_this_cpu(cpu: CpuId) {
     gic::enable_private(gicr, TIMER_PPI.load(Ordering::Relaxed), edge);
     gic::enable_private(gicr, u32::from(RESCHED_SGI), true);
     gic::enable_private(gicr, u32::from(CALL_SGI), true);
+}
+
+/// Sets up `sys/irq`'s handler table for this platform. Call once, on the
+/// boot CPU, after the clock is calibrated.
+pub(crate) fn init_dispatch() {
+    #[cfg(target_arch = "x86_64")]
+    let (per_cpu_ids, global_ids, allocatable) = (256, 256, 0x30..0xf0);
+    #[cfg(target_arch = "aarch64")]
+    let (per_cpu_ids, global_ids, allocatable) = (32, 1020, 0..0);
+    ::irq::init(::irq::Config {
+        per_cpu_ids,
+        global_ids,
+        allocatable,
+        now: crate::time::counter,
+        frequency: crate::time::frequency(),
+        storm_threshold: 1000,
+    });
+}
+
+/// The I/O APICs, as one domain over global system interrupts.
+#[cfg(target_arch = "x86_64")]
+#[cfg_attr(not(feature = "ktest"), allow(dead_code))]
+struct IoApicDomain;
+
+#[cfg(target_arch = "x86_64")]
+#[cfg_attr(not(feature = "ktest"), allow(dead_code))]
+impl IoApicDomain {
+    /// Runs `f` on the I/O APIC serving `gsi` with the input's pin.
+    fn with<R>(gsi: u32, f: impl FnOnce(&arch::apic::IoApic, u32) -> R) -> Option<R> {
+        let ioapics = IOAPICS.lock();
+        let io = ioapics
+            .iter()
+            .find(|io| (io.gsi_base..io.gsi_base + io.inputs).contains(&gsi))?;
+        Some(f(io, gsi - io.gsi_base))
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+impl ::irq::IrqDomain for IoApicDomain {
+    fn name(&self) -> &'static str {
+        "ioapic"
+    }
+
+    fn connect(
+        &self,
+        gsi: u32,
+        trigger: ::irq::Trigger,
+        polarity: ::irq::Polarity,
+        cpu: CpuId,
+    ) -> Result<u32, ::irq::IrqError> {
+        let dest = hw_id(cpu)
+            .and_then(|id| u32::try_from(id).ok())
+            .ok_or(::irq::IrqError::NoVector)?;
+        let vector = ::irq::alloc_vector(cpu).ok_or(::irq::IrqError::NoVector)?;
+        let v = u8::try_from(vector).map_err(|_| ::irq::IrqError::NoVector)?;
+        let routed = Self::with(gsi, |io, pin| {
+            io.route(
+                pin,
+                v,
+                dest,
+                trigger == ::irq::Trigger::Level,
+                polarity == ::irq::Polarity::Low,
+                true,
+            );
+        });
+        if routed.is_none() {
+            ::irq::free_vector(cpu, vector);
+            return Err(::irq::IrqError::NoSuchInput);
+        }
+        Ok(vector)
+    }
+
+    fn disconnect(&self, gsi: u32, cpu: CpuId, root: u32) {
+        Self::with(gsi, |io, pin| io.set_masked(pin, true));
+        ::irq::free_vector(cpu, root);
+    }
+
+    fn mask(&self, gsi: u32) {
+        Self::with(gsi, |io, pin| io.set_masked(pin, true));
+    }
+
+    fn unmask(&self, gsi: u32) {
+        Self::with(gsi, |io, pin| io.set_masked(pin, false));
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[cfg_attr(not(feature = "ktest"), allow(dead_code))]
+static IOAPIC_DOMAIN: IoApicDomain = IoApicDomain;
+
+/// The domain for global system interrupts (the I/O APICs).
+#[cfg(target_arch = "x86_64")]
+#[cfg_attr(not(feature = "ktest"), allow(dead_code))]
+pub(crate) fn gsi_domain() -> &'static dyn ::irq::IrqDomain {
+    &IOAPIC_DOMAIN
+}
+
+/// The GSI, trigger, and polarity of ISA interrupt `irq`, after the MADT's
+/// interrupt source overrides (ISA defaults: identity, edge, active high).
+#[cfg(target_arch = "x86_64")]
+#[cfg_attr(not(feature = "ktest"), allow(dead_code))]
+pub(crate) fn isa_irq(irq: u8) -> (u32, ::irq::Trigger, ::irq::Polarity) {
+    let mut out = (u32::from(irq), ::irq::Trigger::Edge, ::irq::Polarity::High);
+    let overrides = madt().into_iter().flat_map(|m| {
+        m.entries()
+            .filter_map(Result::ok)
+            .collect::<alloc::vec::Vec<_>>()
+    });
+    for e in overrides {
+        if let MadtEntry::InterruptSourceOverride(o) = e
+            && o.bus == 0
+            && o.source == irq
+        {
+            out.0 = o.gsi;
+            if matches!(o.flags.trigger(), madt::Trigger::Level) {
+                out.1 = ::irq::Trigger::Level;
+            }
+            if matches!(o.flags.polarity(), madt::Polarity::ActiveLow) {
+                out.2 = ::irq::Polarity::Low;
+            }
+        }
+    }
+    out
+}
+
+/// The GIC distributor, as a domain over shared peripheral interrupts
+/// (the SPI's INTID is also its root id).
+#[cfg(target_arch = "aarch64")]
+#[cfg_attr(not(feature = "ktest"), allow(dead_code))]
+struct GicSpiDomain;
+
+#[cfg(target_arch = "aarch64")]
+impl ::irq::IrqDomain for GicSpiDomain {
+    fn name(&self) -> &'static str {
+        "gic-spi"
+    }
+
+    fn connect(
+        &self,
+        spi: u32,
+        trigger: ::irq::Trigger,
+        _polarity: ::irq::Polarity,
+        cpu: CpuId,
+    ) -> Result<u32, ::irq::IrqError> {
+        if !(32..1020).contains(&spi) {
+            return Err(::irq::IrqError::NoSuchInput);
+        }
+        let mpidr = hw_id(cpu).ok_or(::irq::IrqError::NoVector)?;
+        arch::gic::set_spi_enabled(spi, false);
+        arch::gic::configure_spi(spi, trigger == ::irq::Trigger::Edge);
+        arch::gic::route_spi(spi, mpidr);
+        Ok(spi)
+    }
+
+    fn disconnect(&self, spi: u32, _cpu: CpuId, _root: u32) {
+        arch::gic::set_spi_enabled(spi, false);
+    }
+
+    fn mask(&self, spi: u32) {
+        arch::gic::set_spi_enabled(spi, false);
+    }
+
+    fn unmask(&self, spi: u32) {
+        arch::gic::set_spi_enabled(spi, true);
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[cfg_attr(not(feature = "ktest"), allow(dead_code))]
+static GIC_SPI_DOMAIN: GicSpiDomain = GicSpiDomain;
+
+/// The domain for global system interrupts (GIC SPIs).
+#[cfg(target_arch = "aarch64")]
+#[cfg_attr(not(feature = "ktest"), allow(dead_code))]
+pub(crate) fn gsi_domain() -> &'static dyn ::irq::IrqDomain {
+    &GIC_SPI_DOMAIN
 }

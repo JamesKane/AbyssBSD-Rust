@@ -27,7 +27,7 @@ mod bench;
 mod boot;
 mod errata;
 mod firmware;
-mod irq;
+mod intc;
 mod mm;
 mod panic;
 mod qemu;
@@ -48,7 +48,7 @@ arch::kernel_hooks!(
     main = kmain,
     ap_main = smp::ap_main,
     fatal_trap = panic::fatal_trap,
-    interrupt = irq::dispatch,
+    interrupt = intc::dispatch,
 );
 
 fn kmain(boot_info: PhysAddr) -> ! {
@@ -74,7 +74,8 @@ fn kmain(boot_info: PhysAddr) -> ! {
     let tables = mm::init(info);
     firmware::init(info, tables.firmware_root);
     kprintln!("kernel page tables live (W^X, DMAP, no identity map)");
-    irq::init_boot_cpu();
+    intc::init_boot_cpu();
+    intc::init_dispatch();
     threads::init_fpu(true);
     threads::init();
     time::init_cpu();

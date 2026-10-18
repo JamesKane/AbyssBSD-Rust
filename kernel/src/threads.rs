@@ -38,7 +38,7 @@ impl sched::Platform for Platform {
     }
 
     fn kick(&self, cpu: hal::CpuId) {
-        crate::irq::send_resched(cpu);
+        crate::intc::send_resched(cpu);
     }
 
     fn rearm_timer(&self) {

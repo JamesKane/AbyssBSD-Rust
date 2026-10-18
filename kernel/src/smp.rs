@@ -47,7 +47,7 @@ pub(crate) fn start_cpus() -> usize {
         kprintln!("smp: no MADT; running on one CPU");
         return 1;
     };
-    let boot = crate::irq::hw_id(CpuId::BOOT);
+    let boot = crate::intc::hw_id(CpuId::BOOT);
     let mut next = 1u32;
     let mut failed = 0;
     for cpu in madt.cpus().filter(|c| c.enabled) {
@@ -90,7 +90,7 @@ fn start(cpu: CpuId, hw: u64) -> bool {
     let top = stack.top().get();
     // The stack becomes the CPU's idle thread stack for good.
     core::mem::forget(stack);
-    crate::irq::set_hw_id(cpu, hw);
+    crate::intc::set_hw_id(cpu, hw);
     if !arch_start(cpu, hw, top) {
         kprintln!("smp: cpu{} (id {hw:#x}) did not start", cpu.0);
         return false;
@@ -110,7 +110,7 @@ fn start(cpu: CpuId, hw: u64) -> bool {
 /// The first kernel code on a started CPU (from the arch AP entry).
 pub(crate) fn ap_main(_arg: usize) -> ! {
     let cpu = hal::cpu_id();
-    crate::irq::init_ap(cpu);
+    crate::intc::init_ap(cpu);
     crate::time::init_cpu();
     crate::threads::init_fpu(false);
     crate::topology::record_this_cpu(cpu);
@@ -325,12 +325,12 @@ fn cross_call(va: VirtAddr, len: u64, targets: Targets) {
     CALL_PENDING.store(n, Ordering::Release);
     #[cfg(target_arch = "x86_64")]
     if matches!(targets, Targets::AllOthers) && BROADCAST.load(Ordering::Acquire) {
-        crate::irq::send_call_all_but_self();
+        crate::intc::send_call_all_but_self();
     } else {
-        online().for_each(crate::irq::send_call);
+        online().for_each(crate::intc::send_call);
     }
     #[cfg(target_arch = "aarch64")]
-    online().for_each(crate::irq::send_call);
+    online().for_each(crate::intc::send_call);
     while CALL_PENDING.load(Ordering::Acquire) != 0 {
         core::hint::spin_loop();
     }

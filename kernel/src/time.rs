@@ -274,7 +274,7 @@ impl Timer {
             if self.cpu == hal::cpu_id() {
                 reprogram();
             } else {
-                crate::irq::send_resched(self.cpu);
+                crate::intc::send_resched(self.cpu);
             }
         }
         drop(q);

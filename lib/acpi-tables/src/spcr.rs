@@ -11,10 +11,18 @@ pub struct Spcr {
     pub port: SerialPort,
     /// Configured baud rate, if the table states one.
     pub baud: Option<u32>,
+    /// The global system interrupt (I/O APIC, GIC, …), if the table
+    /// states one.
+    pub gsiv: Option<u32>,
+    /// The PC-AT (8259) IRQ, if the table states one.
+    pub pc_irq: Option<u8>,
 }
 
 const INTERFACE_TYPE: usize = 36;
 const BASE_ADDRESS: usize = 40;
+const INTERRUPT_TYPE: usize = 52;
+const PC_IRQ: usize = 53;
+const GSIV: usize = 54;
 const BAUD_RATE: usize = 58;
 /// The fields up to and including the terminal type.
 const MIN_LEN: usize = 63;
@@ -44,8 +52,16 @@ pub fn parse(t: &Sdt<'_>) -> Result<Spcr, Error> {
         7 => Some(115_200),
         _ => None,
     };
+    // Interrupt type: bit 0 PC-AT 8259, bits 1–4 an interrupt controller
+    // numbered by GSI (I/O APIC, I/O SAPIC, GIC, RISC-V PLIC).
+    let itype = b[INTERRUPT_TYPE];
+    let gsiv = (itype & 0x1e != 0)
+        .then(|| u32::from_le_bytes([b[GSIV], b[GSIV + 1], b[GSIV + 2], b[GSIV + 3]]));
+    let pc_irq = (itype & 1 != 0).then_some(b[PC_IRQ]);
     Ok(Spcr {
         port: SerialPort { kind, base },
         baud,
+        gsiv,
+        pc_irq,
     })
 }

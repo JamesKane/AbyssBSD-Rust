@@ -241,6 +241,26 @@ pub fn enable_private(gicr: u64, id: u32, edge: bool) {
     sgi.write(GicrSgi::ISENABLER0, bit(id));
 }
 
+/// Sets shared interrupt `id` (32 or above) edge- or level-triggered.
+pub fn configure_spi(id: u32, edge: bool) {
+    gicd().modify(Gicd::ICFGR.at(index(id / 16)), |c| icfg(c, id, edge));
+}
+
+/// Routes shared interrupt `id` to the CPU with `mpidr`.
+pub fn route_spi(id: u32, mpidr: u64) {
+    gicd().write(Gicd::IROUTER.at(index(id)), affinity(mpidr));
+}
+
+/// Enables or disables shared interrupt `id`.
+pub fn set_spi_enabled(id: u32, enabled: bool) {
+    let d = gicd();
+    if enabled {
+        d.write(Gicd::ISENABLER.at(index(id / 32)), bit(id));
+    } else {
+        d.write(Gicd::ICENABLER.at(index(id / 32)), bit(id));
+    }
+}
+
 /// Enables shared interrupt `id` (32 or above) in the distributor.
 pub fn enable_shared(id: u32, edge: bool) {
     let d = gicd();

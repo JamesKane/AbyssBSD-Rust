@@ -351,8 +351,16 @@ impl IoApic {
         }
     }
 
-    /// Routes input `pin` to `vector` on APIC `dest`, unmasked.
-    pub fn route(&self, pin: u32, vector: u8, dest: u32, level: bool, active_low: bool) {
+    /// Routes input `pin` to `vector` on APIC `dest`, masked or not.
+    pub fn route(
+        &self,
+        pin: u32,
+        vector: u8,
+        dest: u32,
+        level: bool,
+        active_low: bool,
+        masked: bool,
+    ) {
         let mut low = u32::from(vector);
         if active_low {
             low |= 1 << 13;
@@ -360,7 +368,21 @@ impl IoApic {
         if level {
             low |= 1 << 15;
         }
+        if masked {
+            low |= LVT_MASKED;
+        }
         self.write(0x11 + 2 * pin, dest << 24);
+        self.write(0x10 + 2 * pin, low);
+    }
+
+    /// Masks or unmasks input `pin`, keeping its routing.
+    pub fn set_masked(&self, pin: u32, masked: bool) {
+        let low = self.read(0x10 + 2 * pin);
+        let low = if masked {
+            low | LVT_MASKED
+        } else {
+            low & !LVT_MASKED
+        };
         self.write(0x10 + 2 * pin, low);
     }
 }

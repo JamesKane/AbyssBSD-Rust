@@ -300,6 +300,9 @@ fn aarch64_console() {
     let m = corpus!("qemu-aarch64/spcr.dat");
     let s = spcr::parse(&sdt(&m)).unwrap();
     assert_eq!(s.port.base.address, 0x0900_0000);
+    // QEMU virt's PL011 is SPI 1, INTID 33.
+    assert_eq!(s.gsiv, Some(33));
+    assert_eq!(s.pc_irq, None);
     let m = corpus!("qemu-aarch64/dbg2.dat");
     let ports: Vec<_> = dbg2::serial_ports(&sdt(&m)).collect();
     assert_eq!(ports.len(), 1);

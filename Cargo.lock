@@ -98,6 +98,15 @@ name = "hal"
 version = "0.0.0"
 
 [[package]]
+name = "irq"
+version = "0.0.0"
+dependencies = [
+ "hal",
+ "sched",
+ "sync",
+]
+
+[[package]]
 name = "kernel"
 version = "0.0.0"
 dependencies = [
@@ -112,6 +121,7 @@ dependencies = [
  "elf",
  "fb-console",
  "hal",
+ "irq",
  "ktest",
  "logring",
  "pt",
