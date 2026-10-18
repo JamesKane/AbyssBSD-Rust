@@ -55,6 +55,7 @@ pub(crate) fn find(sig: [u8; 4]) -> Option<Sdt<'static>> {
 /// Prints every table, hex-encoded, for `cargo xtask acpidump`
 /// (`abyss.acpidump`): `acpidump: table SIG LEN`, then the bytes 48 to a
 /// line, then `acpidump: end`; `acpidump: done` after the last table.
+#[cfg_attr(feature = "ktest", allow(dead_code))]
 pub(crate) fn dump() {
     let Some(t) = tables() else {
         kprintln!("acpidump: no tables");
