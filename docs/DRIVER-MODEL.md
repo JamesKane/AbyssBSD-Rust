@@ -1113,10 +1113,10 @@ These are not Day-1 work. The design keeps room for them so they do not need a n
 
 | Phase | Driver-model work |
 |---|---|
-| **P3** | `lib/devtree`. `sys/bus` manager, lifecycle, ledger, gates, contexts, parallel attach. `sys/irq` domains (LAPIC, I/O APIC, GIC distributor, ITS, PCI MSI/MSI-X). Early-device adoption. ACPI bus (including the dependency sources in §6.1 that AML provides) and PCI bus (ECAM, BARs, capabilities). `vm::dma` direct and bounce backends, `DmaCoherent`, `DmaStream`, `DmaPool`. virtio-pci transport. virtio-blk, NVMe, AHCI on the storage class. Watchdogs, RTC, entropy. Shutdown ordering. `hw.bus.*` and `dev.*` sysctls. Verifier mode. The detach stress test |
+| **P3** | `lib/devtree`. `sys/bus` manager, lifecycle, ledger, gates, contexts, parallel attach. `sys/irq` domains (LAPIC, I/O APIC, GIC distributor, ITS, PCI MSI/MSI-X, and the threaded-only ACPI GED domain, which the arm64 power button needs). The kernel sysctl tree that `hw.bus.*` and `dev.*` hang from. Early-device adoption. ACPI bus (including the dependency sources in §6.1 that AML provides) and PCI bus (ECAM, BARs, capabilities). `vm::dma` direct and bounce backends, `DmaCoherent`, `DmaStream`, `DmaPool`. virtio-pci transport. virtio-blk, NVMe, AHCI on the storage class. Watchdogs, RTC, entropy. Shutdown ordering. `hw.bus.*` and `dev.*` sysctls. Verifier mode. The detach stress test |
 | **P4** | cdev publication through devfs (gated). The tty class on the serial console. `/dev/devctl` queue (readable once userland exists) |
 | **P5** | The storage class grows GEOM-lite partition providers and FreeBSD disk naming |
-| **USB track** | USB bus, hubs, surprise removal, threaded-only interrupt domains (the first users: GPIO and GED on arm64), input class |
+| **USB track** | USB bus, hubs, surprise removal, threaded-only GPIO interrupt domains on arm64 (GED's arrives in P3), input class |
 | **P6** | `/dev/devctl2`, `/dev/pci`, devd running on stock rules, `devinfo`/`devctl`/`pciconf` differential tests. Device reset and rebind. IRQ affinity through `cpuset` |
 | **P7** | Net class (queue pairs, offloads), virtio-net, e1000e, igc, rge |
 | **P8** | IOMMU backends and interrupt remapping. IORT, DMAR, and IVRS dependency edges. Suspend and resume (stretch). Runtime PM. SCMI providers |

@@ -73,7 +73,7 @@ boots a stub UEFI app that prints "AbyssBSD" on QEMU.
 **Exit:** both arches boot in QEMU to a kernel banner on serial and framebuffer, run kernel unit
 tests, deliberately take and report a page fault, and exit cleanly. Boot also works on bhyve.
 
-## Phase 2: Core kernel (L) — done 2026-10-18
+## Phase 2: Core kernel (L) — functional exit met 2026-10-18; performance exit open
 
 **Goal:** SMP, preemptive, timed, and memory-managed.
 
@@ -93,7 +93,8 @@ tests, deliberately take and report a page fault, and exit cleanly. Boot also wo
 
 **Exit:** a stress test of 64 kernel threads doing lock ping-pong, allocator churn, and sleeps with
 timeouts runs for 10 minutes on `-smp 8` on both arches, with no witness violations and no leaks
-(allocator accounting balances).
+(allocator accounting balances). The P2 performance suite (context switch, locks, zone and page
+allocators, callouts, IPIs and TLB shootdown) is within 2% of FreeBSD's `kbench` module on bhyve.
 
 **As delivered.** `cargo xtask test --tier stress` runs the exit test on both architectures
 (10 minutes, 8 CPUs, 64 threads). The threads do lock ping-pong, ordered multi-lock
@@ -111,33 +112,157 @@ Where Phase 2 departs from the plan above:
   levels.
 - **GIC erratum 2941627:** the errata framework and the GICD_IIDR boot log are in place. The
   erratum itself is to be assessed against Arm's published errata notice at Sky1 bring-up
-  (P6), since only that hardware can confirm it. The P2 performance suite (context switch, locks, zone and page
-allocators, callouts, IPIs and TLB shootdown) is within 2% of FreeBSD's `kbench` module on bhyve.
+  (P6), since only that hardware can confirm it.
+- **Performance: not yet measured.** Neither `tests/perf/kbench` nor the in-kernel benchmark
+  harness exists, so the performance half of the exit criterion is open. It is the first step of
+  Phase 3 (P3.0), and Phase 2 is done when it passes.
 
 ## Phase 3: Device framework, PCIe, ACPI AML, storage (L/XL)
 
-**Goal:** discover and drive real hardware.
+**Goal:** discover and drive real hardware through the driver model of
+[DRIVER-MODEL.md](DRIVER-MODEL.md) ([ADR-0012](adr/0012-driver-model.md)).
 
-- Bus model (`Driver`/`Device` traits, typestate attach, owned resources), device tree exported for
-  later `devinfo`/`sysctl dev.*`.
-- AML interpreter: parse DSDT/SSDTs, namespace, method execution, `_STA`/`_INI`/`_CRS`/`_PRT`/
-  `_OSC`/`_S5`, power resources, GPE/SCI and GED events, and PCC operation regions (PCCT
-  channels). Host-tested against an `acpidump` corpus (QEMU, bhyve, the Orange Pi 6 Plus, and
-  every other physical machine we can reach).
-- Watchdogs, so hangs on the physical machines become resets: SBSA generic watchdog (GTDT),
-  including Sky1's `WOR`-refresh quirk, and the AMD FCH watchdog (WDRT).
-- PCIe: ECAM enumeration, BAR sizing/assignment validation, capabilities, MSI/MSI-X (LAPIC / ITS).
-- busdma-equivalent (no IOMMU yet).
-- virtio-pci modern transport, virtio-blk, virtio-rng.
-- NVMe (admin + I/O queues, MSI-X per queue), AHCI.
-- RTC, entropy pool (RDRAND/RNDR/virtio-rng → fxrng-like CSPRNG), UEFI runtime services, ACPI power
-  off / reset, and the power button.
+**Scope.** Everything in DRIVER-MODEL.md §16's P3 row, plus the AML interpreter, platform services,
+and the storage drivers below. Two items move earlier than DRIVER-MODEL.md §16 placed them: the
+threaded-only interrupt domain for ACPI GED (the aarch64 power button needs it), and the kernel
+sysctl tree (`hw.bus.*` and `dev.*` need a home before the `__sysctl` syscall arrives in P4).
 
-**Exit:** on both arches the kernel enumerates PCIe, attaches NVMe, AHCI, and virtio-blk, reads the
-GPT and dumps partition tables, sustains a multi-queue random-read stress test, and powers off via
-ACPI/PSCI when the power button is pressed (QEMU `system_powerdown`). The AML corpus (QEMU and
-public tables) passes on the host. The P3 performance suite (interrupt latency, virtio-blk and NVMe
-IOPS and latency) is within 2% of FreeBSD.
+**Reference machines.** Every step is tested on the same device configurations:
+- **x86_64:** QEMU `q35`.
+- **aarch64:** QEMU `virt`.
+- **bhyve:** on the build server.
+
+Each configuration has virtio-blk, two NVMe controllers (one with two namespaces), an AHCI disk, and
+virtio-rng. FreeBSD 15.1 guests on the build server, in bhyve and QEMU with the same configurations,
+supply two things: `kbench` baselines, and recorded `devinfo -rv`, `sysctl dev`, `pciconf -lv`, and
+devd event logs for differential tests.
+
+### Milestones
+
+Each milestone ends green on both architectures, with CI passing.
+
+```
+P3.0 ─► P3.1 ─┬─► P3.2 ─────────┐
+              └─► P3.4 ─► P3.5 ─┴─► P3.6 ─┬─► P3.7 ─┐
+P3.3 (from the start, pure crate) ────────┘   P3.8 ─┴─► P3.9
+```
+
+**P3.0 Benchmark harness, and closing Phase 2.**
+- `tests/perf/kbench`: a FreeBSD kernel module, built on the server against the 15.1 sources.
+- An in-kernel harness that prints the same format.
+- `cargo xtask bench`: runs both in identical bhyve VMs and compares the results.
+- The P2 suite at ≤2% on bhyve (aarch64 numbers recorded under TCG).
+- The FreeBSD reference VMs, and the first recordings from them.
+
+**P3.1 Groundwork for the model.**
+- The sched locks take a `Sleepable` proof, and the context tokens (`IrqCx`, `ThreadCx`) exist.
+- A typed register-block macro in `lib/regs`, prototyped against the NVMe and GICv3 register maps
+  (DRIVER-MODEL.md open question 4).
+- `DeviceShared`, with explicit padding fields and a `const` size assertion (open question 5).
+- Per-CPU counters, for gates and for dispatch epochs.
+- The kernel sysctl tree: typed nodes with FreeBSD's OID numbering.
+
+**P3.2 `lib/devtree`** (pure, host-tested).
+- Match ranking, and the ambiguity check, wired into `cargo xtask check`.
+- The dependency graph: cycle breaking, topological order, and the "what is blocking whom" report.
+- Unit allocation.
+- pnpinfo and location strings, `u_businfo`/`u_device` encoding, and the devctl event grammar, all
+  compared byte for byte with the P3.0 recordings.
+- Resolves open question 2 (unit numbering after a failed attach) from FreeBSD's source.
+
+**P3.3 `lib/aml`** (pure, host-tested, fuzzed; runs in parallel with P3.0–P3.2).
+- Parser, namespace, and interpreter.
+- Operation regions behind a trait: SystemMemory, SystemIO, PCI_Config, and PCC. EmbeddedControl,
+  GeneralPurposeIo, and GenericSerialBus are hooks.
+- `_OSI` answered as FreeBSD answers it; `Notify`, `Mutex`, and `Event`.
+- Resource-template decoding for `_CRS` and `_PRS`.
+- Malformed AML is an error, never a panic, and loops are bounded.
+- Corpus: the DSDT and SSDTs of QEMU `q35`, `pc`, and `virt`, and of bhyve, plus the existing Radxa
+  Q8B capture. Physical-machine captures wait for P6.
+
+**P3.4 Interrupts and DMA.**
+- `sys/irq`, split out of the arch crates.
+  - Domains: LAPIC vectors, I/O APIC, GIC distributor, GICv3 ITS, PCI MSI/MSI-X, and the
+    threaded-only domain for GED.
+  - Filters and ithreads; direct dispatch, drained by epoch; storm detection; affinity from the
+    topology.
+- `sys/vm::dma`.
+  - Tags that inherit constraints; Direct and Bounce backends.
+  - `DmaCoherent`, the `DmaStream` typestate, and `DmaPool`.
+  - Cache maintenance for non-coherent devices (`_CCA`).
+
+**P3.5 Device manager (`sys/bus`).**
+- Node table with generational IDs, the lifecycle state machine, and the topology lock at a witness
+  level.
+- Parallel attach workers (`abyss.bus.serial=1` forces one).
+- `Binding`, its ledger, `Gate`, the binding serializer, and the contexts.
+- The detach protocol and the attach-failure paths.
+- The platform root, adopting the early console, interrupt controllers, and timers.
+- The resource broker: resource spaces, claims of firmware-reserved ranges, and refusal of
+  sensitive ranges.
+- `hw.bus.*`, `dev.*`, and `kern.abyss.bus.*`.
+- Shutdown ordering.
+- Verifier mode with seeded fault injection.
+- Logic tested on the host against a fake bus.
+
+**P3.6 Buses.**
+- `sys/acpi`.
+  - Namespace load at boot, the `_INI`/`_STA` walk, and `_OSC`.
+  - Nodes from `_HID`/`_CID`/`_UID`/`_ADR`, and `_CRS` decoded into resource lists.
+  - Dependency edges from `_DEP` and resource sources; power resources (`_PR0`, `_PS0`).
+  - `_PRT`; SCI and GPEs on x86, GED on aarch64.
+  - `_CPC` for CPU capacities.
+- `sys/pci`.
+  - Host bridges from MCFG and `PNP0A08`; ECAM; depth-first enumeration.
+  - BAR validation, capabilities, and bus-owned config-space fields.
+  - MSI/MSI-X, with INTx through `_PRT` as the fallback.
+- The virtio-pci modern transport, as a bus.
+
+**P3.7 Storage.**
+- `sys/storage`.
+  - The batch `DiskQueues` trait, and owned `Bio`s completed exactly once.
+  - The per-CPU deferred resubmit list.
+  - The GEOM-lite disk provider, and FreeBSD names (`nda`, `ada`, `vtbd`).
+- Drivers:
+  - `vtblk`.
+  - `nvme`: an admin queue, and per-CPU I/O queues on MSI-X.
+  - `ahci`, whose `ahcich` children publish `ada`, matching FreeBSD's names.
+- The GPT read and partition dump, through `lib/gpt`.
+
+**P3.8 Platform services.**
+- Entropy: RDRAND, RNDR, and virtio-rng feeding an fxrng-style CSPRNG.
+- RTC: `atrtc` on x86; PL031 or `efirtc` on aarch64.
+- UEFI runtime services.
+- ACPI reset, and `_S5` or PSCI `SYSTEM_OFF`.
+- The power button, triggering an ordered shutdown and then power-off.
+- Watchdogs.
+  - `ichwd` runs in QEMU on `q35`.
+  - The SBSA generic watchdog (with Sky1's `WOR` quirk) and the AMD FCH watchdog are tested on the
+    host against fake register blocks. The SBSA watchdog also boots on QEMU `sbsa-ref` if that
+    firmware is available; otherwise it is validated at P6.
+
+**P3.9 Verification and performance.**
+- The detach stress test: virtio-blk and NVMe detached and re-attached under random I/O, with
+  ledger and allocator checks after every cycle.
+- The verifier on in the CI boot and stress tiers.
+- Differential name tests against the FreeBSD recordings.
+- The P3 suite: interrupt latency; IOPS at queue depths 1 and 32 with p50/p99 latency; sequential
+  bandwidth; AML namespace load and `_STA`/`_CRS` evaluation; gate cost at 1 and 8 CPUs; attach
+  time; DMA map throughput; and detach-cycle time.
+
+**Exit:** on both arches:
+- The kernel enumerates PCIe through the device manager and attaches NVMe, AHCI, and virtio-blk
+  with FreeBSD's device names and units, matching the FreeBSD recordings.
+- It reads the GPT and dumps partition tables.
+- It sustains a multi-queue random-read stress test.
+- It passes the detach stress test with balanced ledgers.
+- It powers off via ACPI or PSCI when the power button is pressed (QEMU `system_powerdown`), after
+  quiescing devices in reverse dependency order.
+
+Also required:
+- The AML corpus and `lib/devtree` pass on the host.
+- CI runs with the verifier on.
+- The P3 performance suite is within 2% of FreeBSD on bhyve.
 
 
 ## Phase 4: First userspace: `/rescue/sh` (L)

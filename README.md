@@ -28,12 +28,13 @@ userland.
 
 ## Status
 
-Phases 1 and 2 are complete (2026-10-18). Our loader boots our kernel on x86_64 and aarch64 in
+Phase 1 is complete, and Phase 2 meets its functional exit criterion (2026-10-18); its
+performance benchmarks are not yet run. Our loader boots our kernel on x86_64 and aarch64 in
 QEMU and on bhyve. The kernel manages physical and virtual memory with a buddy allocator,
 slab heap, and guard-paged stacks, and runs preemptive SMP kernel threads. It has sleepable
 locks with priority propagation and a lock witness, tickless timers, and FP/SIMD state
 switching (including SVE and AVX-512). Phase 3 (device framework, PCIe, ACPI AML, storage)
-is next. See [docs/ROADMAP.md](docs/ROADMAP.md).
+is next, starting with those benchmarks. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## License
 
