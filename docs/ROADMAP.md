@@ -32,7 +32,7 @@ P0 Foundations ─► P1 Boot ─► P2 Core kernel ─► P3 Devices & ACPI ─
 
 ---
 
-## Phase 0: Foundations (S)
+## Phase 0: Foundations (S) — done 2026-10-17
 
 **Goal:** an empty but complete engineering loop.
 

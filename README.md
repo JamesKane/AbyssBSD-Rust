@@ -28,7 +28,8 @@ userland.
 
 ## Status
 
-Phase 0 (foundations). See [docs/ROADMAP.md](docs/ROADMAP.md).
+Phase 0 (foundations) is complete (2026-10-17). Phase 1 (boot to Rust on both architectures)
+is next. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## License
 
