@@ -28,10 +28,12 @@ userland.
 
 ## Status
 
-Phase 1 (boot to Rust on both architectures) is complete (2026-10-18): our loader boots our
-kernel on x86_64 and aarch64 in QEMU (and on bhyve), and the kernel runs on its own W^X page
-tables with serial and framebuffer consoles. Phase 2 (core kernel) is next. See
-[docs/ROADMAP.md](docs/ROADMAP.md).
+Phases 1 and 2 are complete (2026-10-18). Our loader boots our kernel on x86_64 and aarch64 in
+QEMU and on bhyve. The kernel manages physical and virtual memory with a buddy allocator,
+slab heap, and guard-paged stacks, and runs preemptive SMP kernel threads. It has sleepable
+locks with priority propagation and a lock witness, tickless timers, and FP/SIMD state
+switching (including SVE and AVX-512). Phase 3 (device framework, PCIe, ACPI AML, storage)
+is next. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## License
 

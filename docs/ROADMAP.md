@@ -73,7 +73,7 @@ boots a stub UEFI app that prints "AbyssBSD" on QEMU.
 **Exit:** both arches boot in QEMU to a kernel banner on serial and framebuffer, run kernel unit
 tests, deliberately take and report a page fault, and exit cleanly. Boot also works on bhyve.
 
-## Phase 2: Core kernel (L)
+## Phase 2: Core kernel (L) — done 2026-10-18
 
 **Goal:** SMP, preemptive, timed, and memory-managed.
 
@@ -93,7 +93,25 @@ tests, deliberately take and report a page fault, and exit cleanly. Boot also wo
 
 **Exit:** a stress test of 64 kernel threads doing lock ping-pong, allocator churn, and sleeps with
 timeouts runs for 10 minutes on `-smp 8` on both arches, with no witness violations and no leaks
-(allocator accounting balances). The P2 performance suite (context switch, locks, zone and page
+(allocator accounting balances).
+
+**As delivered.** `cargo xtask test --tier stress` runs the exit test on both architectures
+(10 minutes, 8 CPUs, 64 threads). The threads do lock ping-pong, ordered multi-lock
+contention, sx locking, allocator churn, timed sleeps, and FP/SIMD register checks. The run
+passes with no witness violations and with heap, page, and kernel-stack accounting balanced.
+Where Phase 2 departs from the plan above:
+
+- **Lock order:** levels are declared per lock class and enforced by the runtime witness on
+  every acquisition, in all builds. Compile-time level tokens are not built yet.
+- **NUMA:** the allocator keeps per-domain free lists, but domains from the SRAT are not wired
+  in yet. Every machine so far is one node.
+- **Interrupt controllers:** the GICv3 ITS and I/O APIC routing come with MSI and devices in
+  Phase 3. HPET is parsed but unused; the TSC is calibrated against the ACPI PM timer.
+- **CPU capacities:** set by core type until CPPC (`_CPC`, Phase 3) supplies real performance
+  levels.
+- **GIC erratum 2941627:** the errata framework and the GICD_IIDR boot log are in place. The
+  erratum itself is to be assessed against Arm's published errata notice at Sky1 bring-up
+  (P6), since only that hardware can confirm it. The P2 performance suite (context switch, locks, zone and page
 allocators, callouts, IPIs and TLB shootdown) is within 2% of FreeBSD's `kbench` module on bhyve.
 
 ## Phase 3: Device framework, PCIe, ACPI AML, storage (L/XL)
