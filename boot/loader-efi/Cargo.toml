@@ -24,6 +24,7 @@ efi = { path = "../efi" }
 elf = { path = "../../lib/elf" }
 guid = { path = "../../lib/guid" }
 ktest = { path = "../../lib/ktest" }
+logring = { path = "../../lib/logring" }
 pt = { path = "../../lib/pt" }
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]

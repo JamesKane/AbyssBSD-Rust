@@ -206,6 +206,51 @@ impl SystemTable {
         unsafe { File::from_raw(root) }
     }
 
+    /// Reads variable `name` (NUL-terminated UCS-2, see [`ucs2`]) of
+    /// `vendor` into `buf`, returning its size.
+    pub fn get_variable(&self, name: &[u16], vendor: Guid, buf: &mut [u8]) -> Result<usize> {
+        if name.last() != Some(&0) {
+            return Err(Status::INVALID_PARAMETER);
+        }
+        let guid = raw::RawGuid::new(vendor);
+        let mut size = buf.len();
+        let mut attrs = 0;
+        // SAFETY: valid NUL-terminated name, GUID, and buffer; the runtime
+        // services table is valid while boot services run.
+        unsafe {
+            ((*self.raw.runtime_services).get_variable)(
+                name.as_ptr(),
+                &raw const guid,
+                &raw mut attrs,
+                &raw mut size,
+                buf.as_mut_ptr(),
+            )
+        }
+        .ok()?;
+        Ok(size)
+    }
+
+    /// Writes non-volatile variable `name` of `vendor`, visible at boot and
+    /// run time.
+    pub fn set_variable(&self, name: &[u16], vendor: Guid, data: &[u8]) -> Result<()> {
+        const NV_BS_RT: u32 = 0x7;
+        if name.last() != Some(&0) {
+            return Err(Status::INVALID_PARAMETER);
+        }
+        let guid = raw::RawGuid::new(vendor);
+        // SAFETY: as for `get_variable`.
+        unsafe {
+            ((*self.raw.runtime_services).set_variable)(
+                name.as_ptr(),
+                &raw const guid,
+                NV_BS_RT,
+                data.len(),
+                data.as_ptr(),
+            )
+        }
+        .ok()
+    }
+
     /// Disables the firmware watchdog (which otherwise resets the machine
     /// five minutes after boot).
     pub fn disable_watchdog(&self) -> Result<()> {
@@ -301,6 +346,26 @@ impl RuntimeTable {
     pub fn reset(&self, kind: ResetKind, status: Status) -> ! {
         reset(self.raw, kind, status)
     }
+}
+
+/// An ASCII string as NUL-terminated UCS-2, for variable names. `N` must
+/// be the length plus one; anything else fails to compile when used in a
+/// constant.
+#[must_use]
+pub const fn ucs2<const N: usize>(s: &str) -> [u16; N] {
+    let b = s.as_bytes();
+    assert!(
+        b.len() + 1 == N,
+        "ucs2: N must be the string length plus one"
+    );
+    let mut out = [0u16; N];
+    let mut i = 0;
+    while i < b.len() {
+        assert!(b[i].is_ascii(), "ucs2: ASCII only");
+        out[i] = b[i] as u16;
+        i += 1;
+    }
+    out
 }
 
 /// Where [`SystemTable::allocate_pages`] may place memory.

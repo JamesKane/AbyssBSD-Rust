@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! The early console: the serial port and the framebuffer the loader found,
-//! written together.
+//! written together, and mirrored into the persistent log ring that the
+//! loader saves to the ESP on the next boot.
 
 use core::fmt::{self, Write};
 
@@ -34,6 +35,7 @@ enum SerialSink {
 struct Sinks {
     serial: Option<SerialSink>,
     fb: Option<fb_console::Console<'static>>,
+    ring: Option<logring::Ring<'static>>,
 }
 
 impl Write for Sinks {
@@ -48,6 +50,9 @@ impl Write for Sinks {
         if let Some(fb) = &mut self.fb {
             fb.write_str(s)?;
         }
+        if let Some(ring) = &mut self.ring {
+            ring.write(s.as_bytes());
+        }
         Ok(())
     }
 }
@@ -55,6 +60,7 @@ impl Write for Sinks {
 static CONSOLE: SpinLock<Sinks> = SpinLock::new(Sinks {
     serial: None,
     fb: None,
+    ring: None,
 });
 
 /// Takes over the devices the loader described.
@@ -105,7 +111,15 @@ pub(crate) fn init(info: &BootInfo) {
         )
         .ok()
     });
-    *CONSOLE.lock() = Sinks { serial, fb };
+    let ring = info.log.get().and_then(|l| {
+        let va = bootproto::layout::dmap(l.region.start)?;
+        let len = usize::try_from(l.region.len()).ok()?;
+        // SAFETY: the loader reserved the ring as log-ring memory, which is
+        // RAM in the DMAP; the console is its only user.
+        let buf = unsafe { core::slice::from_raw_parts_mut(va.get() as *mut u8, len) };
+        logring::Ring::open(buf).ok()
+    });
+    *CONSOLE.lock() = Sinks { serial, fb, ring };
 }
 
 /// # Safety

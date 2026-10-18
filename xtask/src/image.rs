@@ -64,6 +64,18 @@ pub(crate) fn build(arch: Arch, opts: build::Options, cmdline: &str) -> Result<P
     Ok(path)
 }
 
+/// Reads a file from the ESP of a disk image `build` made.
+pub(crate) fn read_esp_file(disk: &std::path::Path, path: &str) -> Result<Vec<u8>> {
+    let bytes = fs::read(disk).map_err(|e| format!("{}: {e}", disk.display()))?;
+    let start = usize::try_from(ESP_FIRST_LBA).unwrap_or(0) * gpt::SECTOR;
+    let esp = bytes
+        .get(start..start + ESP_BYTES)
+        .ok_or("disk image too small")?;
+    let v = fat::Volume::open(esp).map_err(|e| format!("ESP: {e:?}"))?;
+    v.read_file(path)
+        .map_err(|e| format!("ESP {path}: {e:?}").into())
+}
+
 /// A GUID derived from a stable name, so rebuilt images are identical.
 fn stable_guid(name: &str) -> guid::Guid {
     let mut bytes = [0u8; 16];

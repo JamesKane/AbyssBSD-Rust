@@ -184,6 +184,22 @@ pub struct BootInfo {
     pub symbols: Opt<Symbols>,
     /// Random bytes from the firmware RNG, or zero if it had none.
     pub entropy: Entropy,
+    /// The persistent log ring, formatted and empty.
+    pub log: Opt<LogRing>,
+}
+
+/// The persistent log ring (format: `lib/logring`), in memory of kind
+/// [`MemoryKind::LogRing`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LogRing {
+    /// Where it is.
+    pub region: PhysRange,
+    /// Bytes of the previous boot's log the loader saved to the ESP
+    /// (`EFI/ABYSS/PREVLOG.TXT`); zero if there was none.
+    pub recovered: u64,
+    /// Boots since the ring was first created.
+    pub boots: u64,
 }
 
 /// Placement of the kernel image.

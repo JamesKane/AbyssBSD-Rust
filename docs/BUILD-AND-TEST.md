@@ -24,7 +24,7 @@ Host abyss-build
 On the server:
 
 ```sh
-doas pkg install rustup-init qemu edk2-qemu-x64 edk2-bhyve git gmake
+doas pkg install rustup-init qemu edk2-qemu-x64 edk2-bhyve git gmake rsync
 rustup-init -y --default-toolchain none     # toolchain comes from rust-toolchain.toml
 ```
 
@@ -35,14 +35,15 @@ ships inside the `qemu` package (`/usr/local/share/qemu/edk2-aarch64-code.fd`).
 ## 2. Build orchestration: `cargo xtask`
 
 `xtask` is a workspace crate (host `std`, no external crates). It is the single entry point.
-Implemented in Phase 0:
+Implemented so far:
 
 ```
-cargo xtask build   --arch <x86_64|aarch64|all> [--release] [--ktest]
-cargo xtask image   --arch <a> [--release] [--ktest]     # GPT disk with a FAT32 ESP -> build/<arch>/
-cargo xtask run     --arch <a> [--release] [--ktest] [--smp N] [--mem SIZE] [--gdb] [--display]
+cargo xtask build   --arch <x86_64|aarch64|all> [--release] [--ktest]   # loader + kernel
+cargo xtask image   --arch <a> [--release] [--ktest] [--cmdline "..."]  # GPT disk, FAT32 ESP -> build/<arch>/
+cargo xtask run     --arch <a> [--release] [--ktest] [--cmdline "..."] [--smp N] [--mem SIZE]
+                    [--gdb] [--display] [--el2] [--vmm qemu|bhyve]
 cargo xtask test    [--tier unit|boot|all] [--arch <a|all>] [--verbose]
-cargo xtask check                                        # rustfmt, clippy (host + UEFI targets), policy
+cargo xtask check                                        # rustfmt, clippy (host, loader, kernel), policy
 cargo xtask policy                                       # path-only dependencies, SPDX headers
 cargo xtask syscallgen [--src ../freebsd-src] [--check]  # regenerate lib/abi syscall tables
 cargo xtask abi-check  [--arch <a|all>]                  # layouts vs FreeBSD headers, on the build server
@@ -50,11 +51,25 @@ cargo xtask unsafe-report
 cargo xtask --remote <command> ...                       # run any command on the build server
 ```
 
+The ESP holds the loader at the removable-media path (`EFI/BOOT/BOOTX64.EFI`,
+`EFI/BOOT/BOOTAA64.EFI`), the kernel at `EFI/ABYSS/KERNEL`, and the kernel command line at
+`EFI/ABYSS/CMDLINE`. Names are 8.3 until `lib/fat` writes long names. `--el2` starts aarch64
+firmware at EL2 (`virtualization=on`, TCG only), so the kernel takes its EL2 exit path.
+`--vmm bhyve` runs amd64 under bhyve and needs a FreeBSD host (use `--remote`).
+
+Kernel command-line words understood so far:
+
+| Word | Effect |
+|---|---|
+| `kaslr=0` | The loader uses slide 0 (the default with `run --gdb`) |
+| `abyss.halt=1` | Halt at the end instead of powering off, so the framebuffer stays visible |
+| `abyss.qemu_exit=1` | Test kernels report their verdict as QEMU's exit status (set by `xtask test`) |
+| `abyss.test.warm_reset=1` | Test kernels warm-reset once to exercise the persistent log ring |
+
 Planned for later phases:
 
 ```
 cargo xtask image   ... [--root base.txz] [--fs ufs2|md]   # UFS2 root (P4/P5)
-cargo xtask run     ... [--vmm bhyve]                       # bhyve on the build server (P1)
 cargo xtask deploy  --board {opi6p|x870e} [--usb <serial> | --media]   # install, set BootNext, collect logs
                     # targets are identified by disk serial number; anything else is refused
 cargo xtask test    [--tier compat|full]
@@ -80,6 +95,8 @@ cargo xtask fetch-base --version 15.1 --arch <a>   # download & verify base.txz 
 Devices used in CI configurations: virtio-blk, virtio-net, virtio-rng, NVMe (`-device nvme`), AHCI
 (`-device ahci` + `ide-hd`), xHCI + usb-kbd/usb-storage, and `-device isa-debug-exit` (amd64) or
 semihosting / PSCI `SYSTEM_OFF` (arm64) so tests can report pass/fail through the exit code.
+On arm64, `-device ramfb` gives edk2 a GOP with a linear framebuffer (virtio-gpu's GOP is
+blit-only).
 
 The serial console is wired to stdio or a socket for expect-style test drivers written in Rust
 inside `tests/`.
@@ -96,6 +113,19 @@ inside `tests/`.
 | **Differential** | Same program on AbyssBSD vs FreeBSD 15.1 (server). Compare output and `kdump` traces | Server | Nightly |
 | **Corpus** | `acpidump` DSDT/SSDT blobs from real machines through the AML interpreter. `fsck_ffs` validation of images AbyssBSD wrote | Host + server | Every commit |
 | **Hardware** | Boot matrix on physical machines | Lab | Per milestone |
+
+The boot tier currently runs these configurations, each booting the test loader and test kernel,
+running both sets of in-image tests, and ending with a deliberate fatal page fault on the boot
+stack's guard page. xtask checks the serial log for the decoded fault, the register dump and a
+symbolized backtrace, and checks the VMM's exit status:
+
+| Case | Platform | Also checks |
+|---|---|---|
+| `x86_64` | QEMU q35 + OVMF | |
+| `aarch64` | QEMU virt + edk2, firmware at EL1 | |
+| `aarch64-el2` | QEMU virt + edk2, firmware at EL2 | the EL2 stub and drop to EL1 |
+| `aarch64-warm-reset`, `x86_64-warm-reset` | QEMU, two boots | the loader saved the first boot's log to `EFI/ABYSS/PREVLOG.TXT` |
+| `x86_64-bhyve` | bhyve + `BHYVE_UEFI` (FreeBSD hosts only; skipped elsewhere) | power-off through UEFI runtime services |
 
 ### Rules
 
@@ -123,8 +153,10 @@ pipeline definition stays thin.
 
 ## 6. Debugging
 
-- `cargo xtask run --gdb` starts QEMU with `-s -S` and prints a ready-to-use `gdb`/`lldb` command
-  line with the kernel symbol file and the KASLR slide.
+- `cargo xtask run --gdb` starts QEMU with `-s -S`, boots with `kaslr=0`, and prints a ready-to-use
+  `gdb` command line with the kernel symbol file.
+- The kernel mirrors its console into a persistent RAM ring. After a reset, the loader saves the
+  previous boot's log to `EFI/ABYSS/PREVLOG.TXT` on the ESP (the X870E has no serial port).
 - Panics print a symbolized backtrace. Frame pointers are kept in all kernel builds
   (`-C force-frame-pointers=yes`).
 - Serial logs from all test runs are kept as artifacts.

@@ -28,8 +28,10 @@ userland.
 
 ## Status
 
-Phase 0 (foundations) is complete (2026-10-17). Phase 1 (boot to Rust on both architectures)
-is next. See [docs/ROADMAP.md](docs/ROADMAP.md).
+Phase 1 (boot to Rust on both architectures) is complete (2026-10-18): our loader boots our
+kernel on x86_64 and aarch64 in QEMU (and on bhyve), and the kernel runs on its own W^X page
+tables with serial and framebuffer consoles. Phase 2 (core kernel) is next. See
+[docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## License
 

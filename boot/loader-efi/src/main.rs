@@ -17,6 +17,7 @@ mod devices;
 mod handoff;
 mod heap;
 mod kernel;
+mod logring;
 mod paging;
 mod rng;
 #[cfg(feature = "ktest")]
@@ -132,6 +133,19 @@ fn boot(image: Handle, st: SystemTable) -> Result<core::convert::Infallible, Err
         Err(_) => Vec::new(),
     };
     let file = kernel::read_file(&st, &root, KERNEL_PATH)?;
+    let log = logring::setup(&st, &root);
+    match &log {
+        Some((ring, outcome)) => {
+            let _ = writeln!(
+                con,
+                "loader: log ring at {:#x}, boot {}: {outcome}",
+                ring.region.start, ring.boots
+            );
+        }
+        None => {
+            let _ = writeln!(con, "loader: no log ring");
+        }
+    }
     drop(root);
 
     let entropy = rng::gather(&st);
@@ -214,6 +228,7 @@ fn boot(image: Handle, st: SystemTable) -> Result<core::convert::Infallible, Err
             firmware,
             symbols: kernel.symbols,
             entropy,
+            log: log.map(|(ring, _)| ring),
         },
     );
     // SAFETY: the entry point follows the `bootproto` calling contract, the

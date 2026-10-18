@@ -67,6 +67,15 @@ pub(crate) fn all(arch: Arch, opts: Options) -> Result<Images> {
     })
 }
 
+/// Where [`all`] leaves the kernel ELF (with full symbols, for debuggers).
+pub(crate) fn kernel_path(arch: Arch, opts: Options) -> PathBuf {
+    util::root()
+        .join(opts.target_dir())
+        .join(arch.kernel_target())
+        .join(opts.profile_dir())
+        .join("kernel")
+}
+
 fn package(arch: Arch, opts: Options, pkg: &str, target: &str, file: &str) -> Result<PathBuf> {
     let _ = arch;
     let mut cargo = util::cargo();

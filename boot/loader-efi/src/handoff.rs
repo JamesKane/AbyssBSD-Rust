@@ -56,6 +56,7 @@ pub(crate) struct Fields {
     pub(crate) firmware: bootproto::Firmware,
     pub(crate) symbols: Option<bootproto::Symbols>,
     pub(crate) entropy: bootproto::Entropy,
+    pub(crate) log: Option<bootproto::LogRing>,
 }
 
 impl Handoff {
@@ -94,6 +95,7 @@ impl Handoff {
             cmdline: Table::new(self.cmdline, self.cmdline_len as u64),
             symbols: f.symbols.into(),
             entropy: f.entropy,
+            log: f.log.into(),
         };
         // SAFETY: `prepare` reserved `INFO_SPACE` bytes at `info`, suitably
         // aligned (page start).

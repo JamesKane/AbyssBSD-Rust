@@ -15,7 +15,23 @@ use ktest::ktest;
 use crate::arch;
 
 /// Runs every test, then the deliberate fault. Does not return.
+///
+/// With `abyss.test.warm_reset`, the first boot instead writes a marker to
+/// the console (and so the log ring) and warm-resets; the loader saves that
+/// log to the ESP on the second boot, which then runs the tests. xtask
+/// checks the saved file.
 pub(crate) fn run() -> ! {
+    if crate::boot::flag("abyss.test.warm_reset") {
+        let log = crate::boot::info().log.get().expect("log ring");
+        if log.recovered == 0 {
+            kprintln!("logring: first boot marker, boot {}", log.boots);
+            crate::firmware::reset(efi::ResetKind::Warm);
+        }
+        kprintln!(
+            "logring: loader recovered {} bytes from the previous boot",
+            log.recovered
+        );
+    }
     let _ = ktest::run_tests(&mut crate::console::Writer);
     crate::panic::EXPECT_FATAL_TRAP.store(true, Ordering::Relaxed);
     kprintln!("ktest: taking a deliberate fatal page fault on the stack guard page");
@@ -122,6 +138,16 @@ ktest! {
 #[inline(never)]
 fn symbol_probe() -> u64 {
     core::hint::black_box(42)
+}
+
+ktest! {
+    fn log_ring_is_live() {
+        let log = crate::boot::info().log.get().expect("log ring");
+        assert!(log.boots >= 1);
+        let va = bootproto::layout::dmap(log.region.start).unwrap();
+        let t = crate::mm::translate(va).expect("ring in the DMAP");
+        assert!(t.attrs.write && !t.attrs.exec);
+    }
 }
 
 ktest! {

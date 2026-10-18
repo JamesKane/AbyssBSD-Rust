@@ -61,6 +61,10 @@ fn kmain(boot_info: PhysAddr) -> ! {
 
     #[cfg(not(feature = "ktest"))]
     {
+        if boot::flag("abyss.halt") {
+            kprintln!("Phase 1 kernel: nothing more to do yet. Halted (abyss.halt).");
+            arch::cpu::halt_forever();
+        }
         kprintln!("Phase 1 kernel: nothing more to do yet. Powering off.");
         firmware::reset(efi::ResetKind::Shutdown)
     }

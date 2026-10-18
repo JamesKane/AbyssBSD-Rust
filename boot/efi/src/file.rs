@@ -128,6 +128,15 @@ impl File<'_> {
         Ok(())
     }
 
+    /// Deletes the file (which must be open for writing) and closes it.
+    pub fn delete(self) -> Result<()> {
+        let raw = self.raw;
+        core::mem::forget(self);
+        // SAFETY: we own the open handle; Delete closes it, so Drop must not
+        // run (hence the `forget`).
+        unsafe { ((*raw).delete)(raw) }.ok()
+    }
+
     /// Flushes written data to the device.
     pub fn flush(&self) -> Result<()> {
         // SAFETY: the handle is open.

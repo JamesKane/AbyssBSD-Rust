@@ -8,7 +8,7 @@ use crate::build;
 use crate::cli::Args;
 use crate::image;
 use crate::policy;
-use crate::qemu::{Outcome, Vm};
+use crate::qemu::{Outcome, Vm, Vmm};
 use crate::util::{self, Result};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,7 +37,14 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     if matches!(tier, Tier::Boot | Tier::All) {
         let mut failed = Vec::new();
         for case in BOOT_CASES.iter().filter(|c| arches.contains(&c.arch)) {
-            println!("== boot tests ({}, QEMU)", case.name);
+            if !case.vmm.available(case.arch) {
+                println!(
+                    "== boot tests ({}): skipped, needs a FreeBSD host",
+                    case.name
+                );
+                continue;
+            }
+            println!("== boot tests ({}, {:?})", case.name, case.vmm);
             match boot(case, release, verbose)? {
                 Ok(()) => println!("{}: PASS", case.name),
                 Err(why) => {
@@ -57,9 +64,13 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
 #[derive(Debug)]
 struct BootCase {
     name: &'static str,
+    vmm: Vmm,
     arch: Arch,
     /// aarch64 firmware at EL2, exercising the kernel's EL2 exit.
     el2: bool,
+    /// Boot twice through a warm reset and check that the loader saved the
+    /// first boot's log to the ESP.
+    warm_reset: bool,
     /// QEMU's exit status when the kernel reports a pass.
     pass_status: i32,
 }
@@ -67,24 +78,58 @@ struct BootCase {
 const BOOT_CASES: &[BootCase] = &[
     BootCase {
         name: "x86_64",
+        vmm: Vmm::Qemu,
         arch: Arch::X86_64,
         el2: false,
+        warm_reset: false,
         // isa-debug-exit: (0x10 << 1) | 1.
         pass_status: 33,
     },
     BootCase {
         name: "aarch64",
+        vmm: Vmm::Qemu,
         arch: Arch::Aarch64,
         el2: false,
+        warm_reset: false,
         pass_status: 0,
     },
     BootCase {
         name: "aarch64-el2",
+        vmm: Vmm::Qemu,
         arch: Arch::Aarch64,
         el2: true,
+        warm_reset: false,
         pass_status: 0,
     },
+    BootCase {
+        name: "aarch64-warm-reset",
+        vmm: Vmm::Qemu,
+        arch: Arch::Aarch64,
+        el2: false,
+        warm_reset: true,
+        pass_status: 0,
+    },
+    BootCase {
+        name: "x86_64-warm-reset",
+        vmm: Vmm::Qemu,
+        arch: Arch::X86_64,
+        el2: false,
+        warm_reset: true,
+        pass_status: 33,
+    },
+    BootCase {
+        name: "x86_64-bhyve",
+        vmm: Vmm::Bhyve,
+        arch: Arch::X86_64,
+        el2: false,
+        warm_reset: false,
+        // bhyve's status when the guest powers off.
+        pass_status: 1,
+    },
 ];
+
+/// The line the first boot of a warm-reset case leaves in the log ring.
+const WARM_RESET_MARKER: &str = "logring: first boot marker";
 
 /// Lines the kernel's deliberate fatal fault must produce: a decoded page
 /// fault, a register dump, and a symbolized backtrace through the test.
@@ -98,16 +143,31 @@ const FAULT_REPORT: &[&str] = &[
 ];
 
 fn boot(case: &BootCase, release: bool, verbose: bool) -> Result<std::result::Result<(), String>> {
+    // bhyve has no exit device: the kernel powers off after a pass.
+    let cmdline = match (case.vmm, case.warm_reset) {
+        (Vmm::Bhyve, _) => "",
+        (Vmm::Qemu, true) => "abyss.qemu_exit=1 abyss.test.warm_reset=1",
+        (Vmm::Qemu, false) => "abyss.qemu_exit=1",
+    };
     let disk = image::build(
         case.arch,
         build::Options {
             release,
             ktest: true,
         },
-        "abyss.qemu_exit=1",
+        cmdline,
     )?;
+    let disk = if case.warm_reset {
+        // Its own copy: the guest writes to it.
+        let copy = disk.with_file_name(format!("disk-{}.img", case.name));
+        std::fs::copy(&disk, &copy)?;
+        copy
+    } else {
+        disk
+    };
     let log = disk.with_file_name(format!("boot-{}.log", case.name));
     let vm = Vm {
+        vmm: case.vmm,
         arch: case.arch,
         disk,
         smp: 2,
@@ -116,24 +176,45 @@ fn boot(case: &BootCase, release: bool, verbose: bool) -> Result<std::result::Re
         display: false,
         el2: case.el2,
         test_devices: true,
+        allow_reset: case.warm_reset,
     };
     // Emulated aarch64 firmware is slow to start; leave generous headroom.
     let run = vm.run_captured(Duration::from_secs(240), &log, verbose)?;
     let text = std::fs::read_to_string(&log).unwrap_or_default();
     let verdict = match run.outcome {
-        Outcome::Passed => check_log(&text, case).and_then(|()| match run.exit_code {
-            Some(code) if code == case.pass_status => Ok(()),
-            other => Err(format!(
-                "QEMU exit status {other:?}, expected {}",
-                case.pass_status
-            )),
-        }),
+        Outcome::Passed => check_log(&text, case)
+            .and_then(|()| check_saved_log(&vm, case))
+            .and_then(|()| match run.exit_code {
+                Some(code) if code == case.pass_status => Ok(()),
+                other => Err(format!(
+                    "QEMU exit status {other:?}, expected {}",
+                    case.pass_status
+                )),
+            }),
         other => Err(format!("{other:?}")),
     };
     if verdict.is_err() {
         println!("{}: serial log at {}", case.name, log.display());
     }
     Ok(verdict)
+}
+
+/// For a warm-reset case: the ESP holds the first boot's log.
+fn check_saved_log(vm: &Vm, case: &BootCase) -> std::result::Result<(), String> {
+    if !case.warm_reset {
+        return Ok(());
+    }
+    let saved =
+        image::read_esp_file(&vm.disk, "EFI/ABYSS/PREVLOG.TXT").map_err(|e| e.to_string())?;
+    let saved = String::from_utf8_lossy(&saved);
+    if saved.contains(WARM_RESET_MARKER) && saved.contains("AbyssBSD") {
+        Ok(())
+    } else {
+        Err(format!(
+            "PREVLOG.TXT lacks the first boot's log ({} bytes)",
+            saved.len()
+        ))
+    }
 }
 
 fn check_log(text: &str, case: &BootCase) -> std::result::Result<(), String> {
@@ -144,6 +225,9 @@ fn check_log(text: &str, case: &BootCase) -> std::result::Result<(), String> {
         .collect();
     if case.el2 && !text.contains("entered at EL2") {
         missing.push("entered at EL2");
+    }
+    if case.warm_reset && !text.contains("logring: loader recovered") {
+        missing.push("logring: loader recovered");
     }
     if missing.is_empty() {
         Ok(())

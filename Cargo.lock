@@ -96,6 +96,7 @@ dependencies = [
  "elf",
  "fb-console",
  "ktest",
+ "logring",
  "pt",
  "regs",
  "sync",
@@ -120,8 +121,13 @@ dependencies = [
  "elf",
  "guid",
  "ktest",
+ "logring",
  "pt",
 ]
+
+[[package]]
+name = "logring"
+version = "0.0.0"
 
 [[package]]
 name = "pt"

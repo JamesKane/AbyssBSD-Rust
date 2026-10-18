@@ -50,11 +50,16 @@ AbyssBSD-Rust/
 │   └── loader-efi/            # our UEFI application (PE/COFF)
 ├── kernel/                    # the kernel binary crate: glue + init order only
 ├── arch/
-│   ├── hal/                   # arch-neutral traits and types (PhysAddr, VirtAddr, …)
+│   ├── hal/                   # arch-neutral traits (P2; P1 uses a mirrored module interface)
 │   ├── x86_64/
 │   ├── aarch64/
 │   └── riscv64/               # Day 2
 ├── lib/                       # pure, host-testable no_std libraries
+│   ├── addr/                  # PhysAddr, VirtAddr, ranges, alignment
+│   ├── pt/                    # 4-level page tables, x86_64 and AArch64 encodings
+│   ├── logring/               # persistent RAM log ring format
+│   ├── demangle/              # Rust v0 and legacy symbol demangling
+│   ├── font/                  # the console font (original 8x16)
 │   ├── abi/                   # FreeBSD ABI: errno, syscall nums, structs (per arch)
 │   ├── elf/                   # ELF parsing (loader + exec + linker)
 │   ├── collections/           # intrusive lists, radix trees, rb-trees, bitmaps
@@ -71,7 +76,7 @@ AbyssBSD-Rust/
 │   └── bus/   acpi/  pci/  iommu/
 ├── drivers/
 │   ├── nvme/  ahci/  virtio/  xhci/  usb-hid/  usb-msc/
-│   ├── uart-16550/  uart-pl011/  fb-gop/  console/
+│   ├── uart-16550/  uart-pl011/  fb-console/
 │   ├── intc-apic/  intc-gic/  timer-hpet/  timer-generic/  rtc/
 │   └── nic-virtio/  nic-e1000e/  nic-igc/
 ├── tools/
@@ -140,21 +145,40 @@ leak: port I/O, `cli`/`sti` semantics, a strongly ordered memory model, and fixe
 ## 4. Boot flow
 
 1. **`loader-efi`** (Rust UEFI app, `x86_64-unknown-uefi` / `aarch64-unknown-uefi`):
-   - reads `\EFI\ABYSS\loader.conf` and the kernel ELF from the ESP (FAT32 via UEFI
-     SimpleFileSystem). Later it can read the kernel from UFS2 directly, using `lib/ufs2`.
-   - loads the kernel's PT_LOAD segments and applies KASLR slide relocations.
+   - reads the kernel ELF from `\EFI\ABYSS\KERNEL` and the command line from
+     `\EFI\ABYSS\CMDLINE` on the volume it was loaded from (FAT32 via UEFI SimpleFileSystem; 8.3
+     names until `lib/fat` writes long names). Later it can read the kernel from UFS2 directly,
+     using `lib/ufs2`.
+   - places the kernel (a static PIE linked at `0xffff_ffff_8000_0000`) at a random 2 MiB-aligned
+     slide, seeded from `EFI_RNG_PROTOCOL`, else `RDRAND`, else timer jitter, and applies its
+     RELATIVE relocations. On aarch64 it cleans the image to the point of coherency.
    - gathers the memory map, RSDP (ACPI 2.0+ only), GOP framebuffer, SMBIOS, UEFI runtime services
-     table, command line, and optional preloaded modules (e.g. an initial memory-disk image).
-   - builds initial page tables (identity map of the trampoline, DMAP, and kernel image).
-   - `ExitBootServices`, then jumps to the kernel with a pointer to a versioned `bootproto::BootInfo`.
-2. **Kernel early init** (single CPU, no allocator): on arm64, leave EL2 if entered there; set up
-   the CPU, install trap vectors, start the early console (SPCR, then DBG2, then GOP), parse the memory map into the physical allocator, and switch to the kernel's own
-   page tables.
+     table, command line, the kernel's ELF symbol table (for backtraces), and entropy. It finds
+     the serial console through SPCR, then DBG2 (COM1 on x86 when neither exists).
+   - sets up the persistent log ring. Its address is kept in an NV variable; if the ring survived
+     a reset, the previous boot's log is saved to `\EFI\ABYSS\PREVLOG.TXT`.
+   - builds the initial page tables: every RAM range identity-mapped and in the DMAP, the kernel
+     segments W^X at their slid addresses, and the console devices in the device window.
+   - `ExitBootServices`, then calls the kernel's entry point at its physical address with
+     `(BootInfo, kernel_root, identity_root)`.
+2. **Kernel early init** (single CPU, no allocator): the entry stub enables NX and the PAT (x86)
+   or leaves EL2 through a resident EL2 stub, then programs MAIR/TCR/TTBRn (arm64). It switches
+   to the loader's tables and jumps to the linked address. Rust code then installs the GDT, TSS
+   and IDT (x86) or the EL1 vectors (arm64) and the per-CPU pointer, validates the handoff,
+   starts the serial and framebuffer consoles, ingests the memory map, and builds and switches to
+   the kernel's own tables. Those have the DMAP, a W^X image with an unmapped boot-stack guard
+   page, and no identity map. UEFI runtime services are called in physical mode under a separate
+   table that maps the runtime regions 1:1 and shares the kernel half (as FreeBSD's `efirt`
+   does).
 3. **Core init**: slab allocator, ACPI static tables (MADT, MCFG, SPCR, FADT, HPET/GTDT, SRAT/SLIT),
    interrupt controller, timers, SMP bring-up, scheduler start.
 4. **Device init**: AML namespace load (DSDT/SSDTs), `_OSC`, bus enumeration (ACPI + PCIe), driver
    attach.
 5. **Mount root** (UFS2 by GPT partition UUID/label, or a memory disk). Then `exec("/sbin/init")`.
+
+The kernel virtual layout is the same on both architectures (`bootproto::layout`): DMAP at
+`0xffff_8000_0000_0000` (64 TiB), kernel virtual memory from `0xffff_c000_0000_0000`, the device
+window at `0xffff_f000_0000_0000`, and the kernel image at `0xffff_ffff_8000_0000` plus the slide.
 
 `bootproto` is a separate crate with explicit versioning, so the loader and kernel can evolve
 independently and the kernel can reject handoffs it does not understand.

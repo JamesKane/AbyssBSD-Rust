@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! Running images under QEMU, interactively or captured for tests.
+//! Running images under QEMU (both architectures) or bhyve (amd64, on a
+//! FreeBSD host), interactively or captured for tests.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -44,9 +45,39 @@ const AARCH64_VARS: &[&str] = &[
     "/usr/share/qemu/edk2-arm-vars.fd",
 ];
 
+const BHYVE_CODE: &str = "/usr/local/share/uefi-firmware/BHYVE_UEFI_CODE.fd";
+const BHYVE_VARS: &str = "/usr/local/share/uefi-firmware/BHYVE_UEFI_VARS.fd";
+
+/// Which hypervisor runs the machine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Vmm {
+    Qemu,
+    /// bhyve, through `doas`; amd64 guests on FreeBSD hosts only.
+    Bhyve,
+}
+
+impl Vmm {
+    pub(crate) fn parse(s: &str) -> Result<Self> {
+        match s {
+            "qemu" => Ok(Self::Qemu),
+            "bhyve" => Ok(Self::Bhyve),
+            _ => Err(format!("unknown VMM `{s}` (qemu, bhyve)").into()),
+        }
+    }
+
+    /// Whether this host can run the VMM for `arch`.
+    pub(crate) fn available(self, arch: Arch) -> bool {
+        match self {
+            Self::Qemu => true,
+            Self::Bhyve => cfg!(target_os = "freebsd") && arch == Arch::X86_64,
+        }
+    }
+}
+
 /// One virtual machine to start.
 #[derive(Debug)]
 pub(crate) struct Vm {
+    pub(crate) vmm: Vmm,
     pub(crate) arch: Arch,
     pub(crate) disk: PathBuf,
     pub(crate) smp: u32,
@@ -59,6 +90,8 @@ pub(crate) struct Vm {
     /// Attach the devices tests report through: `isa-debug-exit` on x86,
     /// semihosting on aarch64.
     pub(crate) test_devices: bool,
+    /// Let a guest reset restart the machine instead of ending QEMU.
+    pub(crate) allow_reset: bool,
 }
 
 /// A captured run: the verdict and QEMU's exit status, if it exited by
@@ -91,6 +124,10 @@ pub(crate) fn cmd_run(mut args: Args) -> Result<()> {
     let gdb = args.take_flag("--gdb");
     let display = args.take_flag("--display");
     let el2 = args.take_flag("--el2");
+    let vmm = Vmm::parse(&args.take_value("--vmm")?.unwrap_or_else(|| "qemu".into()))?;
+    if !vmm.available(arch) {
+        return Err(format!("{vmm:?} cannot run {arch} guests on this host").into());
+    }
     // A fixed kernel address makes debugger sessions repeatable.
     let default_cmdline = if gdb { "kaslr=0" } else { "" };
     let cmdline = args
@@ -100,6 +137,7 @@ pub(crate) fn cmd_run(mut args: Args) -> Result<()> {
 
     let disk = image::build(arch, opts, &cmdline)?;
     let vm = Vm {
+        vmm,
         arch,
         disk,
         smp,
@@ -108,14 +146,35 @@ pub(crate) fn cmd_run(mut args: Args) -> Result<()> {
         display,
         el2,
         test_devices: false,
+        allow_reset: false,
     };
     let mut cmd = vm.command()?;
-    cmd.arg("-serial").arg("mon:stdio");
-    if gdb {
-        eprintln!("xtask: QEMU is waiting for a debugger on localhost:1234");
+    if vmm == Vmm::Qemu {
+        cmd.arg("-serial").arg("mon:stdio");
     }
-    eprintln!("xtask: starting QEMU ({arch}); Ctrl-A X quits");
-    util::run(&mut cmd)
+    if gdb {
+        let kernel = build::kernel_path(arch, opts);
+        let gdb = match arch {
+            Arch::X86_64 => "gdb",
+            Arch::Aarch64 => "gdb-multiarch (or gdb with aarch64 support)",
+        };
+        eprintln!("xtask: QEMU is waiting for a debugger on localhost:1234; the kernel is unslid");
+        eprintln!(
+            "xtask:   {gdb} {} -ex 'target remote localhost:1234'",
+            kernel.display()
+        );
+    }
+    match vmm {
+        Vmm::Qemu => eprintln!("xtask: starting QEMU ({arch}); Ctrl-A X quits"),
+        Vmm::Bhyve => eprintln!("xtask: starting bhyve ({arch}); the guest powering off ends it"),
+    }
+    let result = util::run(&mut cmd);
+    vm.cleanup();
+    // bhyve exits 1 when the guest powers off, which is success here.
+    match (vmm, result) {
+        (Vmm::Bhyve, Err(e)) if e.to_string().contains("exit status: 1") => Ok(()),
+        (_, r) => r,
+    }
 }
 
 fn find(env: &str, candidates: &[&str]) -> Result<PathBuf> {
@@ -145,8 +204,64 @@ fn kvm_available(arch: Arch) -> bool {
 }
 
 impl Vm {
-    /// The QEMU command line, without a serial backend.
+    /// The hypervisor command line. For QEMU, without a serial backend.
     fn command(&self) -> Result<Command> {
+        match self.vmm {
+            Vmm::Qemu => self.qemu_command(),
+            Vmm::Bhyve => self.bhyve_command(),
+        }
+    }
+
+    /// The bhyve instance name: unique per xtask process.
+    fn bhyve_name(&self) -> String {
+        format!("abyss-{}", std::process::id())
+    }
+
+    fn bhyve_command(&self) -> Result<Command> {
+        if !self.vmm.available(self.arch) {
+            return Err("bhyve runs amd64 guests on FreeBSD hosts only".into());
+        }
+        let vars = self.disk.with_extension("bhyve-vars.fd");
+        fs::copy(BHYVE_VARS, &vars)
+            .map_err(|e| format!("{BHYVE_VARS}: {e} (pkg install edk2-bhyve)"))?;
+        // A stale instance with our name would make bhyve refuse to start.
+        self.cleanup();
+        let status = Command::new("doas").args(["kldload", "-n", "vmm"]).status();
+        if !status.is_ok_and(|s| s.success()) {
+            return Err("cannot load vmm.ko (doas kldload vmm)".into());
+        }
+        let mut c = Command::new("doas");
+        c.arg("bhyve");
+        c.arg("-c").arg(self.smp.to_string());
+        c.arg("-m").arg(&self.mem);
+        // Yield on HLT, tolerate unimplemented MSRs, destroy on power-off.
+        c.args(["-H", "-w", "-D"]);
+        c.args(["-s", "0,hostbridge", "-s", "31,lpc", "-l", "com1,stdio"]);
+        c.arg("-l")
+            .arg(format!("bootrom,{BHYVE_CODE},{}", vars.display()));
+        c.arg("-s")
+            .arg(format!("2,virtio-blk,{}", self.disk.display()));
+        c.args(["-s", "3,virtio-rnd"]);
+        // A framebuffer so the guest gets a GOP; VNC on a per-process port.
+        let port = 5900 + std::process::id() % 1000;
+        c.arg("-s")
+            .arg(format!("29,fbuf,tcp=127.0.0.1:{port},w=1024,h=768"));
+        c.arg(self.bhyve_name());
+        Ok(c)
+    }
+
+    /// Releases hypervisor state a run may leave behind.
+    pub(crate) fn cleanup(&self) {
+        if self.vmm == Vmm::Bhyve {
+            let _ = Command::new("doas")
+                .args(["bhyvectl", "--destroy"])
+                .arg(format!("--vm={}", self.bhyve_name()))
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+
+    fn qemu_command(&self) -> Result<Command> {
         let (bin, code, vars) = match self.arch {
             Arch::X86_64 => (
                 "qemu-system-x86_64",
@@ -199,7 +314,10 @@ impl Vm {
             // GOP (virtio-gpu's GOP is blit-only).
             c.args(["-device", "ramfb"]);
         }
-        c.args(["-nic", "none", "-no-reboot"]);
+        c.args(["-nic", "none"]);
+        if !self.allow_reset {
+            c.arg("-no-reboot");
+        }
         if !self.display {
             c.args(["-display", "none"]);
         }
@@ -218,7 +336,9 @@ impl Vm {
         echo: bool,
     ) -> Result<Captured> {
         let mut cmd = self.command()?;
-        cmd.args(["-serial", "stdio", "-monitor", "none"]);
+        if self.vmm == Vmm::Qemu {
+            cmd.args(["-serial", "stdio", "-monitor", "none"]);
+        }
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
@@ -270,11 +390,14 @@ impl Vm {
         let exit_code = match child.try_wait()? {
             Some(status) => status.code(),
             None => {
+                // Under doas, killing the child would leave bhyve running.
+                self.cleanup();
                 let _ = child.kill();
                 let _ = child.wait();
                 None
             }
         };
+        self.cleanup();
         let _ = reader.join();
         Ok(Captured {
             outcome: verdict.unwrap_or(Outcome::TimedOut),

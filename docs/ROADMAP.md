@@ -48,7 +48,7 @@ P0 Foundations ─► P1 Boot ─► P2 Core kernel ─► P3 Devices & ACPI ─
 **Exit:** `cargo xtask test --tier unit` passes on both hosts. `cargo xtask run --arch {x86_64,aarch64}`
 boots a stub UEFI app that prints "AbyssBSD" on QEMU.
 
-## Phase 1: Boot to Rust on both architectures (M)
+## Phase 1: Boot to Rust on both architectures (M) — done 2026-10-18
 
 **Goal:** our loader hands off to our kernel, which owns the machine.
 
