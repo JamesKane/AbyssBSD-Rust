@@ -21,8 +21,16 @@ out of scope for Day 1.
 |---|---|---|
 | **Tier 1, virtual** (CI gate) | QEMU q35 + OVMF; bhyve UEFI | QEMU virt (gicv3, acpi=on) + edk2 |
 | **Tier 1, physical** (untouched until P6, gating from P6) | **Ryzen 9 7900X on Gigabyte X870E AORUS ELITE WIFI7**, see [§5](#5-board-profile-amd64-ryzen-9-7900x--x870e-aorus-elite-wifi7) and [ADR-0009](adr/0009-amd64-reference-machine-ryzen-x870e.md) | **Orange Pi 6 Plus** (CIX P1 / Sky1), see [§4](#4-board-profile-orange-pi-6-plus-cix-p1--sky1) and [ADR-0008](adr/0008-arm64-reference-board-orange-pi-6-plus.md) |
-| **Tier 2, best effort** | Other UEFI desktops/laptops | Radxa Orion O6 (same SoC), other SystemReady boards, Raspberry Pi 4/5 with community UEFI+ACPI firmware |
-| **Not targeted** | — | Radxa Dragon Q8B (Qualcomm; ACPI written for Windows PEP, and a vendor hypervisor polices EL2 and SMMU writes) |
+| **Tier 2, best effort** | Other UEFI desktops/laptops | Radxa Orion O6 (same SoC), **Radxa Dragon Q8B** (see below), other SystemReady boards, Raspberry Pi 4/5 with community UEFI+ACPI firmware |
+
+The **Radxa Dragon Q8B** (Qualcomm SC8280XP) runs FreeBSD under ACPI in the sibling project
+`../AbyssBSD`: stock GENERIC, root on NVMe, Ethernet, USB, power and thermal, GPU and display. Its
+board notes (`../AbyssBSD/docs/boards/radxa-dragon-q8b/`) are our ground truth, and `lessons.md`
+there is required reading. Its quirks are driver work, not reasons to exclude it: the kernel runs
+at EL1 under Qualcomm's hypervisor, which polices SMMU programming, and ACPI routes clocks and
+power through Windows' PEP, so those need native drivers keyed on the SoC. Its GPU, NPU and video
+drivers there go through LinuxKPI; here they are rebuilt in Rust ([ROADMAP](ROADMAP.md) open
+decision 7).
 
 The build server (Alder Lake i7-12700KF, hybrid P/E cores) is a good
 *occasional* amd64 boot target from USB, which exercises the hybrid-core scheduler, but it is not
