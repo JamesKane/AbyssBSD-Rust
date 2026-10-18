@@ -6,6 +6,7 @@
 //! tests/perf/README.md, and `cargo xtask perf` compares their output; a
 //! change to a workload changes both.
 
+use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::alloc::Layout;
@@ -18,7 +19,7 @@ use sched::lock::{LockClass, Mutex, RwLock, SxLock};
 use sched::{Priority, WaitQueue};
 use vm::Order;
 
-use crate::time::{self, Callout};
+use crate::time::{self, Timer};
 
 /// The VM size the suites assume.
 const CPUS: usize = 8;
@@ -30,10 +31,14 @@ const RUN_NS: u64 = time::NANOS;
 
 /// Runs `suite`; returns whether it was known and ran.
 pub(crate) fn run(suite: &str) -> bool {
-    if suite != "p2" {
-        kprintln!("bench: unknown suite {suite:?}");
-        return false;
-    }
+    let body: fn() = match suite {
+        "p2" => suite_p2,
+        "diag" => suite_diag,
+        _ => {
+            kprintln!("bench: unknown suite {suite:?}");
+            return false;
+        }
+    };
     let cpus = sched::online_cpus();
     if cpus < CPUS {
         kprintln!("bench: needs {CPUS} CPUs, have {cpus}");
@@ -48,7 +53,7 @@ pub(crate) fn run(suite: &str) -> bool {
     let t = sched::Builder::new("bench")
         .priority(Priority::KERNEL)
         .bind(CpuId(0))
-        .spawn(suite_p2)
+        .spawn(body)
         .expect("bench: spawn coordinator");
     t.join();
     kprintln!("kbench end {suite}");
@@ -59,6 +64,8 @@ pub(crate) fn run(suite: &str) -> bool {
 struct Run {
     ready: AtomicUsize,
     go: AtomicBool,
+    /// Workers sleep here until the start (as the FreeBSD side does).
+    start: WaitQueue,
     stop: AtomicBool,
     ops: [Slot; CPUS],
 }
@@ -72,6 +79,7 @@ impl Run {
         Arc::new(Self {
             ready: AtomicUsize::new(0),
             go: AtomicBool::new(false),
+            start: WaitQueue::new(),
             stop: AtomicBool::new(false),
             ops: [const { Slot(AtomicU64::new(0)) }; CPUS],
         })
@@ -106,9 +114,7 @@ fn launch(
                 .bind(cpu)
                 .spawn(move || {
                     run.ready.fetch_add(1, Ordering::AcqRel);
-                    while !run.go.load(Ordering::Acquire) {
-                        core::hint::spin_loop();
-                    }
+                    run.start.wait_until(|| run.go.load(Ordering::Acquire));
                     body(&run, i);
                 })
                 .expect("bench: spawn worker")
@@ -119,6 +125,7 @@ fn launch(
     }
     let t0 = time::counter();
     run.go.store(true, Ordering::Release);
+    run.start.wake_all();
     let mut t1 = 0;
     if run_ns > 0 {
         time::sleep_ns(run_ns);
@@ -270,10 +277,16 @@ fn suite_p2() {
         },
     );
 
-    throughput("callout.armcancel", 1, || {
-        black_box(Callout::after(RUN_NS, || {}).cancel());
-        1
-    });
+    throughput_with(
+        "callout.armcancel",
+        1,
+        || Box::pin(Timer::new()),
+        |t| {
+            t.as_ref().reset(RUN_NS, |_| {}, 0);
+            black_box(t.stop());
+            1
+        },
+    );
     callout_latency();
     wakeup_latency();
 
@@ -282,6 +295,42 @@ fn suite_p2() {
         1
     });
     tlb_shootdown();
+}
+
+/// AbyssBSD-only diagnostics: the cost of the pieces fast paths are made
+/// of, for finding where time goes. Not compared with FreeBSD.
+fn suite_diag() {
+    throughput("diag.irq_pair", 1, || {
+        let irq = hal::irq::disable();
+        hal::irq::restore(black_box(irq));
+        1
+    });
+    throughput("diag.cpu_id", 1, || {
+        black_box(hal::cpu_id());
+        1
+    });
+    throughput("diag.current", 1, || {
+        black_box(sched::current());
+        1
+    });
+    throughput_with(
+        "diag.alloc_then_free_1024",
+        1,
+        || alloc::vec![core::ptr::null_mut(); 1024],
+        |p| {
+            for slot in p.iter_mut() {
+                *slot = alloc_256();
+            }
+            for &q in p.iter() {
+                free_256(q);
+            }
+            1024
+        },
+    );
+    throughput("diag.counter", 1, || {
+        black_box(time::counter());
+        1
+    });
 }
 
 /// Strict alternation between two workers on `a` and `b`.
@@ -322,26 +371,31 @@ fn callout_latency() {
         fired: AtomicBool,
         at: AtomicU64,
     }
+    fn fire(arg: usize) {
+        // SAFETY: `arg` is the worker's `Fire`, which outlives its timer.
+        let f = unsafe { &*core::ptr::with_exposed_provenance::<Fire>(arg) };
+        f.at.store(time::counter(), Ordering::Relaxed);
+        f.fired.store(true, Ordering::Release);
+        f.q.wake_all();
+    }
     let samples = Arc::new(sync::SpinLock::new(Vec::with_capacity(LAT_CALLOUT)));
     let out = Arc::clone(&samples);
     let run = Run::new();
     launch(&run, &[default_cpu(0)], 0, move |_, _| {
         let one_ms = time::ns_to_ticks(1_000_000);
         let mut local = Vec::with_capacity(LAT_CALLOUT);
+        let f = Fire {
+            q: WaitQueue::new(),
+            fired: AtomicBool::new(false),
+            at: AtomicU64::new(0),
+        };
+        let timer = core::pin::pin!(Timer::new());
         for _ in 0..LAT_CALLOUT {
-            let f = Arc::new(Fire {
-                q: WaitQueue::new(),
-                fired: AtomicBool::new(false),
-                at: AtomicU64::new(0),
-            });
-            let f2 = Arc::clone(&f);
+            f.fired.store(false, Ordering::Relaxed);
             let t0 = time::counter();
-            Callout::after(1_000_000, move || {
-                f2.at.store(time::counter(), Ordering::Relaxed);
-                f2.fired.store(true, Ordering::Release);
-                f2.q.wake_all();
-            })
-            .forget();
+            timer
+                .as_ref()
+                .reset(1_000_000, fire, core::ptr::from_ref(&f).expose_provenance());
             f.q.wait_until(|| f.fired.load(Ordering::Acquire));
             let late = f.at.load(Ordering::Relaxed).saturating_sub(t0 + one_ms);
             local.push(time::ticks_to_ns(late));

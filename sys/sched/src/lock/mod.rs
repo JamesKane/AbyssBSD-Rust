@@ -11,6 +11,14 @@ mod mutex;
 mod rw;
 pub mod witness;
 
+/// The longest pause between looks at a contended lock, in spin-loop hints:
+/// FreeBSD's `lock_delay` default, 256 per CPU rounded up to a power of
+/// two. Long pauses keep the lock's cache line from bouncing.
+fn max_backoff() -> u32 {
+    let cpus = u32::try_from(crate::online_cpus()).unwrap_or(1).max(1);
+    cpus.next_power_of_two().saturating_mul(256).min(32_767)
+}
+
 pub use epoch::{Epoch, EpochGuard};
 pub use mutex::{Mutex, MutexCore, MutexGuard};
 pub use rw::{ReadGuard, RwLock, SxLock, WriteGuard};

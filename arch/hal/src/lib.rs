@@ -243,6 +243,20 @@ pub type CpuLocalFn = fn() -> *mut ();
 pub type SetCpuLocalFn = fn(*mut ());
 /// Signature of `abyss_hal_wait_for_interrupt`.
 pub type WaitForInterruptFn = fn();
+/// Signature of `abyss_hal_critical_enter`.
+pub type CriticalEnterFn = fn();
+/// Signature of `abyss_hal_critical_exit`: true when the outermost section
+/// ended.
+pub type CriticalExitFn = fn() -> bool;
+/// Signature of `abyss_hal_critical_depth`.
+pub type CriticalDepthFn = fn() -> u32;
+/// Signature of `abyss_hal_owe_preempt`.
+pub type OwePreemptFn = fn(bool);
+/// Signature of `abyss_hal_preempt_owed`.
+pub type PreemptOwedFn = fn() -> bool;
+/// Signature of `abyss_hal_interrupt_nest`: adds `delta` to this CPU's
+/// interrupt nesting and returns the new value.
+pub type InterruptNestFn = fn(i32) -> u32;
 /// Signature of `abyss_hal_current_thread`.
 pub type CurrentThreadFn = fn() -> *const ();
 /// Signature of `abyss_hal_set_current_thread`.
@@ -266,6 +280,12 @@ unsafe extern "Rust" {
     fn abyss_hal_set_cpu_local(p: *mut ());
     fn abyss_hal_wait_for_interrupt();
     fn abyss_hal_current_thread() -> *const ();
+    fn abyss_hal_critical_enter();
+    fn abyss_hal_critical_exit() -> bool;
+    fn abyss_hal_critical_depth() -> u32;
+    fn abyss_hal_owe_preempt(owed: bool);
+    fn abyss_hal_preempt_owed() -> bool;
+    fn abyss_hal_interrupt_nest(delta: i32) -> u32;
     fn abyss_hal_set_current_thread(p: *const ());
     fn abyss_hal_fpu_size() -> usize;
     fn abyss_hal_fpu_init(area: *mut u8);
@@ -276,6 +296,116 @@ unsafe extern "Rust" {
 #[cfg(target_os = "none")]
 unsafe extern "C" {
     fn abyss_context_switch(from: *mut Context, to: *const Context);
+}
+
+/// Critical sections: preemption held off on this CPU without masking
+/// interrupts (FreeBSD's `critical_enter`). Masking interrupts is costly on
+/// some CPUs (about 12 ns a pair on Alder Lake under bhyve); a critical
+/// section is a per-CPU counter changed with one instruction.
+///
+/// An interrupt that wants to preempt inside a critical section records
+/// that it owes one ([`owe_preempt`]); leaving the outermost section then
+/// runs the scheduler's handler ([`set_preempt_handler`]). Code in a
+/// critical section must not sleep. Interrupt handlers may still run, so
+/// per-CPU data used in a critical section must not be touched from
+/// interrupt context (see [`crate::interrupt::active`]).
+pub mod critical {
+    use core::sync::atomic::{AtomicPtr, Ordering};
+
+    static HANDLER: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+
+    /// Enters a critical section (nests).
+    #[inline]
+    pub fn enter() {
+        #[cfg(target_os = "none")]
+        // SAFETY: defined by the linked arch crate with this signature.
+        unsafe {
+            super::abyss_hal_critical_enter();
+        }
+    }
+
+    /// Leaves a critical section; at the outermost level, runs an owed
+    /// preemption.
+    #[inline]
+    pub fn exit() {
+        #[cfg(target_os = "none")]
+        // SAFETY: defined by the linked arch crate with this signature.
+        if unsafe { super::abyss_hal_critical_exit() } && unsafe { super::abyss_hal_preempt_owed() }
+        {
+            let h = HANDLER.load(Ordering::Acquire);
+            if !h.is_null() {
+                // SAFETY: only `set_preempt_handler` stores here, a `fn()`.
+                let f: fn() = unsafe { core::mem::transmute::<*mut (), fn()>(h) };
+                f();
+            }
+        }
+    }
+
+    /// The nesting depth on this CPU.
+    #[inline]
+    #[must_use]
+    pub fn depth() -> u32 {
+        #[cfg(target_os = "none")]
+        // SAFETY: defined by the linked arch crate with this signature.
+        return unsafe { super::abyss_hal_critical_depth() };
+        #[cfg(not(target_os = "none"))]
+        0
+    }
+
+    /// Records (or clears) an owed preemption on this CPU. Interrupts must
+    /// be masked.
+    #[inline]
+    pub fn owe_preempt(owed: bool) {
+        #[cfg(target_os = "none")]
+        // SAFETY: defined by the linked arch crate with this signature.
+        unsafe {
+            super::abyss_hal_owe_preempt(owed);
+        }
+        #[cfg(not(target_os = "none"))]
+        let _ = owed;
+    }
+
+    /// Sets what [`exit`] runs when a preemption is owed.
+    pub fn set_preempt_handler(f: fn()) {
+        HANDLER.store(f as *mut (), Ordering::Release);
+    }
+}
+
+/// Interrupt-context tracking, maintained by the kernel's dispatcher.
+pub mod interrupt {
+    /// An interrupt handler starts on this CPU (interrupts masked).
+    #[inline]
+    pub fn enter() {
+        #[cfg(target_os = "none")]
+        // SAFETY: defined by the linked arch crate with this signature.
+        unsafe {
+            super::abyss_hal_interrupt_nest(1);
+        }
+    }
+
+    /// The handler is done (interrupts masked).
+    #[inline]
+    pub fn exit() {
+        #[cfg(target_os = "none")]
+        // SAFETY: defined by the linked arch crate with this signature.
+        unsafe {
+            super::abyss_hal_interrupt_nest(-1);
+        }
+    }
+
+    /// Whether this CPU is running an interrupt handler. In thread context
+    /// a racing migration can make this read another CPU's state and
+    /// answer true; callers only use a true answer to take a slower, safe
+    /// path.
+    #[inline]
+    #[must_use]
+    pub fn active() -> bool {
+        #[cfg(target_os = "none")]
+        // SAFETY: defined by the linked arch crate with this signature.
+        return unsafe { super::abyss_hal_interrupt_nest(0) } != 0;
+        #[cfg(not(target_os = "none"))]
+        false
+    }
 }
 
 /// Interrupt masking on the current CPU.

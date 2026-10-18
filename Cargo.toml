@@ -90,4 +90,5 @@ opt-level = 2
 [profile.release]
 panic = "abort"
 debug = true
-lto = "thin"
+lto = "fat"
+codegen-units = 1

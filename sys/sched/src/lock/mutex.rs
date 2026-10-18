@@ -35,8 +35,6 @@ use crate::list::ThreadList;
 use crate::thread::{Priority, State, Thread};
 
 const CONTESTED: usize = 1;
-/// The longest pause between looks at a running owner, in spin-loop hints.
-const MAX_BACKOFF: u32 = 64;
 /// How far priority lending follows a chain of blocked owners.
 const PROPAGATE_DEPTH: usize = 8;
 
@@ -78,6 +76,7 @@ impl MutexCore {
 
     #[cold]
     fn lock_slow(&self, me: &Thread, me_word: usize) {
+        let max_backoff = super::max_backoff();
         let mut backoff = 1;
         loop {
             let word = self.owner.load(Ordering::Relaxed);
@@ -101,7 +100,7 @@ impl MutexCore {
                 for _ in 0..backoff {
                     core::hint::spin_loop();
                 }
-                backoff = (backoff * 2).min(MAX_BACKOFF);
+                backoff = (backoff * 2).min(max_backoff);
                 continue;
             }
             if self.block(me, me_word) {

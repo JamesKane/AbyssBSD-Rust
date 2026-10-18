@@ -28,7 +28,7 @@ use crate::util::{self, Result};
 const RELEASE: &str = "15.1-RELEASE";
 const VM_IMAGE: &str = "FreeBSD-15.1-RELEASE-amd64-ufs.raw.xz";
 /// Bumped whenever [`prepare_image`] changes what it writes.
-const PREP_VERSION: &str = "1";
+const PREP_VERSION: &str = "3";
 /// The bound: AbyssBSD's median over FreeBSD's.
 const BOUND: f64 = 1.02;
 /// FreeBSD-side coefficient of variation above which a benchmark cannot
@@ -127,7 +127,15 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
                 .join("logs")
                 .join(format!("{}-{run:02}.log", side.name()));
             eprintln!("xtask: perf: run {}/{runs}: {}", run + 1, side.name());
-            let results = run_one(disk, &bench_disk, &log)?;
+            // One retry: a VM run can fail for reasons outside the kernels
+            // (a console glitch, a host hiccup); the first log is kept.
+            let results = match run_one(disk, &bench_disk, &log) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("xtask: perf: {e}; retrying once");
+                    run_one(disk, &bench_disk, &log.with_extension("retry.log"))?
+                }
+            };
             for (name, value, unit) in results {
                 let _ = writeln!(raw, "{}\t{run}\t{name}\t{value}\t{unit}", side.name());
                 units.insert(name.clone(), unit);
@@ -284,8 +292,8 @@ fn configure_guest(mnt: &Path) -> Result<()> {
             "etc/rc.local",
             "755",
             "#!/bin/sh\n# kbench (AbyssBSD cargo xtask perf): run the suite, then power off.\n\
-             if mount -t msdosfs -o ro /dev/vtbd1 /mnt; then\n\
-             \tkldload /mnt/kbench.ko && sysctl debug.kbench.run=\"$(cat /mnt/suite)\"\n\
+             if mount -o ro /dev/vtbd1 /mnt; then\n\
+             \tkldload /mnt/kbench.ko && sysctl debug.kbench.run=\"$(cat /mnt/suite)\" >/dev/null\n\
              \tumount /mnt\nfi\npoweroff\n",
         ),
     ];
@@ -342,7 +350,7 @@ fn build_kbench(dirs: &Dirs) -> Result<PathBuf> {
     Ok(obj.join("kbench.ko"))
 }
 
-/// The second disk: a FAT file system holding `kbench.ko` and the suite
+/// The second disk: a UFS file system holding `kbench.ko` and the suite
 /// name. Attached to both kernels' VMs, so the configurations match.
 fn make_bench_disk(out: &Path, kbench: &Path, suite: &str) -> Result<PathBuf> {
     let dir = out.join("bench-disk");
@@ -352,7 +360,7 @@ fn make_bench_disk(out: &Path, kbench: &Path, suite: &str) -> Result<PathBuf> {
     let disk = out.join("bench-disk.img");
     util::run(
         Command::new("makefs")
-            .args(["-t", "msdos", "-s", "16m"])
+            .args(["-t", "ffs", "-s", "16m"])
             .arg(&disk)
             .arg(&dir),
     )?;

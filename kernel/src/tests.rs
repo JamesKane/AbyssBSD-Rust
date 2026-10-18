@@ -314,27 +314,41 @@ ktest! {
 }
 
 ktest! {
-    fn callouts_fire_in_order_and_cancel() {
-        use alloc::sync::Arc;
+    fn timers_fire_in_order_and_stop() {
+        use core::pin::pin;
         use core::sync::atomic::AtomicU64;
-        use crate::time::Callout;
-        let log = Arc::new(AtomicU64::new(0));
-        let q = Arc::new(sched::WaitQueue::new());
-        let push = |digit: u64| {
-            let (log, q) = (Arc::clone(&log), Arc::clone(&q));
-            move || {
-                let v = log.load(Ordering::Relaxed);
-                log.store(v * 10 + digit, Ordering::Release);
-                q.wake_all();
-            }
+        use crate::time::Timer;
+        struct Log {
+            digits: AtomicU64,
+            q: sched::WaitQueue,
+        }
+        static LOG: Log = Log {
+            digits: AtomicU64::new(0),
+            q: sched::WaitQueue::new(),
         };
-        Callout::after(30_000_000, push(3)).forget();
-        Callout::after(10_000_000, push(1)).forget();
-        let cancelled = Callout::after(20_000_000, push(9));
-        Callout::after(20_000_000, push(2)).forget();
-        assert!(cancelled.cancel());
-        q.wait_until(|| log.load(Ordering::Acquire) >= 100);
-        assert_eq!(log.load(Ordering::Relaxed), 123);
+        fn push(digit: usize) {
+            let v = LOG.digits.load(Ordering::Relaxed);
+            LOG.digits.store(v * 10 + digit as u64, Ordering::Release);
+            LOG.q.wake_all();
+        }
+        let timers = [
+            pin!(Timer::new()),
+            pin!(Timer::new()),
+            pin!(Timer::new()),
+            pin!(Timer::new()),
+        ];
+        timers[0].as_ref().reset(30_000_000, push, 3);
+        timers[1].as_ref().reset(10_000_000, push, 1);
+        timers[2].as_ref().reset(20_000_000, push, 9);
+        timers[3].as_ref().reset(20_000_000, push, 2);
+        assert!(timers[2].stop());
+        assert!(!timers[2].stop(), "already stopped");
+        // Re-arming replaces the pending deadline.
+        timers[0].as_ref().reset(40_000_000, push, 4);
+        timers[0].as_ref().reset(30_000_000, push, 3);
+        LOG.q.wait_until(|| LOG.digits.load(Ordering::Acquire) >= 100);
+        assert_eq!(LOG.digits.load(Ordering::Relaxed), 123);
+        assert!(!timers[0].stop(), "fired");
     }
 }
 

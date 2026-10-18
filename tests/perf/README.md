@@ -30,6 +30,8 @@ operations completed, so the inverse of throughput) or `ns` (a latency percentil
 - The VM has 8 vCPUs. The coordinator runs bound to CPU 0. Worker *i* of *T* runs bound to CPU
   `(i + 1) mod 8`, so a one-thread benchmark never shares a CPU with the coordinator.
 - Workers run at kernel thread priority (FreeBSD `PRI_MIN_KERN`, AbyssBSD `Priority::KERNEL`).
+- Workers sleep until the coordinator's start signal (a spinning worker could keep another
+  bound to the same CPU from starting: FreeBSD does not time-slice kernel-priority threads).
 - Throughput benchmarks start all workers together, run them for 1 s of wall time, and report
   `elapsed / total operations`. Workers check a shared stop flag once per operation (or per batch).
 - Latency benchmarks collect the stated number of samples and report the 50th and 99th percentiles

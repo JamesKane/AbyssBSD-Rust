@@ -62,6 +62,12 @@ struct CpuLocal {
     kernel: *mut (),
     /// The running thread (`hal::current_thread`).
     thread: *const (),
+    /// Critical-section depth (`hal::critical`).
+    critical: u32,
+    /// A preemption is owed (`hal::critical::owe_preempt`).
+    owed: u32,
+    /// Interrupt nesting (`hal::interrupt`).
+    interrupts: u32,
 }
 
 /// One CPU's descriptor tables, interrupt stacks, and `GS` block. The
@@ -93,6 +99,9 @@ impl CpuBlock {
                 cpu: 0,
                 kernel: core::ptr::null_mut(),
                 thread: core::ptr::null(),
+                critical: 0,
+                owed: 0,
+                interrupts: 0,
             },
             gdt: [0; 7],
             tss: TSS_INIT,
@@ -244,3 +253,63 @@ pub(crate) fn set_current_thread(p: *const ()) {
 
 const _: () = assert!(core::mem::offset_of!(CpuLocal, kernel) == 16);
 const _: () = assert!(core::mem::offset_of!(CpuLocal, thread) == 24);
+const _: () = assert!(core::mem::offset_of!(CpuLocal, critical) == 32);
+const _: () = assert!(core::mem::offset_of!(CpuLocal, owed) == 36);
+const _: () = assert!(core::mem::offset_of!(CpuLocal, interrupts) == 40);
+
+// Each per-CPU counter below changes in one instruction: an interrupt (and
+// so a migration) cannot fall between finding this CPU's block and
+// updating it.
+
+/// Enters a critical section.
+pub(crate) fn critical_enter() {
+    // SAFETY: as for `cpu_local`; `critical` is at offset 32.
+    unsafe { asm!("inc dword ptr gs:[32]", options(nostack)) };
+}
+
+/// Leaves one; true when the outermost section ended.
+pub(crate) fn critical_exit() -> bool {
+    let zero: u8;
+    // SAFETY: as above.
+    unsafe { asm!("dec dword ptr gs:[32]", "setz {}", out(reg_byte) zero, options(nostack)) };
+    zero != 0
+}
+
+/// The critical-section depth.
+pub(crate) fn critical_depth() -> u32 {
+    let d: u32;
+    // SAFETY: as above.
+    unsafe { asm!("mov {:e}, gs:[32]", out(reg) d, options(nostack, readonly)) };
+    d
+}
+
+/// Records or clears an owed preemption.
+pub(crate) fn owe_preempt(owed: bool) {
+    // SAFETY: as above; `owed` is at offset 36.
+    unsafe { asm!("mov dword ptr gs:[36], {:e}", in(reg) u32::from(owed), options(nostack)) };
+}
+
+/// Whether a preemption is owed.
+pub(crate) fn preempt_owed() -> bool {
+    let o: u32;
+    // SAFETY: as above.
+    unsafe { asm!("mov {:e}, gs:[36]", out(reg) o, options(nostack, readonly)) };
+    o != 0
+}
+
+/// Adds `delta` to the interrupt nesting; returns the new value.
+pub(crate) fn interrupt_nest(delta: i32) -> u32 {
+    let n: u32;
+    // SAFETY: as above; `interrupts` is at offset 40. Changed only with
+    // interrupts masked; read anywhere.
+    unsafe {
+        asm!(
+            "add dword ptr gs:[40], {d:e}",
+            "mov {n:e}, gs:[40]",
+            d = in(reg) delta,
+            n = out(reg) n,
+            options(nostack),
+        );
+    }
+    n
+}

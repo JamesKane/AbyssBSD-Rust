@@ -10,10 +10,17 @@
 //! handed out by a bump index, so a new slab is not touched up front. Each
 //! class keeps one empty slab cached and returns others to the source.
 //!
-//! In front of the classes, every CPU has a small cache ("magazine") of
-//! free objects per class, used with interrupts masked, so the common
-//! allocation and free take no lock. Magazines refill from and flush to the
-//! class in batches.
+//! In front of the classes sit magazines, Bonwick-style (UMA's buckets):
+//! every CPU holds two per class, a loaded one and the previous one, used
+//! in a critical section (preemption held off, interrupts left on, as
+//! UMA does), so the common allocation and free take no lock. Interrupt
+//! handlers, which could interrupt that use, go to the classes directly.
+//! When both are exhausted the CPU trades a whole magazine with the class's
+//! depot of full and empty magazines, so a refill or flush moves one
+//! pointer under a lock rather than many objects. Only when the depot has
+//! no full magazine are objects taken from slabs. A magazine holds about
+//! 32 KiB of objects (16 to 256 of them) and lives in one page from the
+//! page source.
 //!
 //! Requests larger than the largest class, or more aligned than a page, go
 //! straight to the page source as one buddy block.
@@ -103,11 +110,41 @@ const NCLASSES: usize = CLASSES.len();
 /// The largest request served from a size class.
 pub const MAX_SMALL: usize = 2048;
 
+/// The smallest class holding each 16-byte granule count, `0..=MAX_SMALL / 16`.
+const CLASS_BY_GRANULE: [u8; MAX_SMALL / 16 + 1] = {
+    let mut t = [0u8; MAX_SMALL / 16 + 1];
+    let mut g = 0;
+    while g < t.len() {
+        let mut c = 0;
+        while CLASSES[c].size < g * 16 {
+            c += 1;
+        }
+        // Fourteen classes: the index fits.
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            t[g] = c as u8;
+        }
+        g += 1;
+    }
+    t
+};
+
 /// The class for `layout`, or `None` for a large allocation.
+#[inline]
 fn class_for(layout: Layout) -> Option<usize> {
-    CLASSES
+    let size = layout.size();
+    if size > MAX_SMALL {
+        return None;
+    }
+    let c = usize::from(CLASS_BY_GRANULE[size.div_ceil(16)]);
+    // Every class is at least 16-aligned; stricter alignment is rare.
+    if layout.align() <= 16 {
+        return Some(c);
+    }
+    CLASSES[c..]
         .iter()
-        .position(|c| c.size >= layout.size() && c.align >= layout.align())
+        .position(|k| k.align >= layout.align())
+        .map(|i| c + i)
 }
 
 #[repr(C)]
@@ -134,19 +171,95 @@ struct ClassState {
 // its lock.
 unsafe impl Send for ClassState {}
 
-const MAGAZINE: usize = 32;
+/// The most objects a magazine page holds.
+const MAG_SLOTS: usize = (PAGE - 2 * size_of::<usize>()) / size_of::<*mut u8>();
 
-struct Magazine {
-    objects: [*mut u8; MAGAZINE],
-    count: AtomicUsize,
+/// A magazine: a stack of free objects of one class, in its own page.
+#[repr(C)]
+struct Mag {
+    /// The next magazine on a depot list.
+    next: *mut Mag,
+    count: usize,
+    objects: [*mut u8; MAG_SLOTS],
 }
 
-impl Magazine {
-    const fn empty() -> Self {
+const _: () = assert!(size_of::<Mag>() <= PAGE);
+
+/// Objects a magazine of class `c` holds: about 32 KiB worth.
+const fn capacity(c: usize) -> usize {
+    let n = 32 * 1024 / CLASSES[c].size;
+    if n < 16 {
+        16
+    } else if n > 256 {
+        256
+    } else {
+        n
+    }
+}
+
+/// One CPU's magazines for one class (null until first needed).
+struct CpuMags {
+    loaded: *mut Mag,
+    prev: *mut Mag,
+    /// Objects in both, for [`Heap::stats`] from other CPUs.
+    cached: AtomicUsize,
+}
+
+impl CpuMags {
+    const fn new() -> Self {
         Self {
-            objects: [ptr::null_mut(); MAGAZINE],
-            count: AtomicUsize::new(0),
+            loaded: ptr::null_mut(),
+            prev: ptr::null_mut(),
+            cached: AtomicUsize::new(0),
         }
+    }
+}
+
+/// A class's spare magazines.
+struct Depot {
+    full: *mut Mag,
+    nfull: usize,
+    empty: *mut Mag,
+}
+
+// SAFETY: the magazines are owned by the depot and only touched under its
+// lock.
+unsafe impl Send for Depot {}
+
+impl Depot {
+    const fn new() -> Self {
+        Self {
+            full: ptr::null_mut(),
+            nfull: 0,
+            empty: ptr::null_mut(),
+        }
+    }
+
+    /// # Safety
+    ///
+    /// `m` is a magazine no one else holds.
+    unsafe fn push(list: &mut *mut Mag, m: *mut Mag) {
+        // SAFETY: per the contract.
+        unsafe { (*m).next = *list };
+        *list = m;
+    }
+
+    fn pop(list: &mut *mut Mag) -> *mut Mag {
+        let m = *list;
+        if !m.is_null() {
+            // SAFETY: magazines on a depot list are live and the depot's.
+            *list = unsafe { (*m).next };
+        }
+        m
+    }
+}
+
+fn mag_count(m: *mut Mag) -> usize {
+    if m.is_null() {
+        0
+    } else {
+        // SAFETY: a CPU's magazines are live and that CPU's (see callers).
+        unsafe { (*m).count }
     }
 }
 
@@ -155,8 +268,10 @@ impl Magazine {
 pub struct HeapStats {
     /// Small objects held by callers.
     pub live_objects: u64,
-    /// Small objects cached in per-CPU magazines.
+    /// Small objects cached in magazines (per-CPU and depot).
     pub cached_objects: u64,
+    /// Pages holding magazines.
+    pub magazine_pages: u64,
     /// Slabs, across all classes.
     pub slabs: u64,
     /// Pages in slabs.
@@ -170,7 +285,9 @@ pub struct HeapStats {
 pub struct Heap<S, const CPUS: usize> {
     source: S,
     classes: [SpinLock<ClassState>; NCLASSES],
-    magazines: [[UnsafeCell<Magazine>; NCLASSES]; CPUS],
+    depots: [SpinLock<Depot>; NCLASSES],
+    magazines: [[UnsafeCell<CpuMags>; NCLASSES]; CPUS],
+    magazine_pages: AtomicU64,
     large_pages: AtomicU64,
 }
 
@@ -202,7 +319,9 @@ impl<S: PageSource, const CPUS: usize> Heap<S, CPUS> {
                     used: 0,
                 })
             }; NCLASSES],
-            magazines: [const { [const { UnsafeCell::new(Magazine::empty()) }; NCLASSES] }; CPUS],
+            depots: [const { SpinLock::new(Depot::new()) }; NCLASSES],
+            magazines: [const { [const { UnsafeCell::new(CpuMags::new()) }; NCLASSES] }; CPUS],
+            magazine_pages: AtomicU64::new(0),
             large_pages: AtomicU64::new(0),
         }
     }
@@ -235,87 +354,232 @@ impl<S: PageSource, const CPUS: usize> Heap<S, CPUS> {
         }
     }
 
+    #[inline]
     fn alloc_small(&self, c: usize) -> *mut u8 {
-        if CPUS == 0 {
+        if CPUS == 0 || hal::interrupt::active() {
             return self.classes[c].lock().alloc(c, &self.source);
         }
-        self.with_magazine(c, |m| {
-            let n = m.count.load(Ordering::Relaxed);
-            if n > 0 {
-                m.count.store(n - 1, Ordering::Relaxed);
-                return m.objects[n - 1];
-            }
-            // Refill half a magazine under one lock, then hand out one.
-            let mut class = self.classes[c].lock();
-            let mut got = 0;
-            while got < MAGAZINE / 2 {
-                let p = class.alloc(c, &self.source);
-                if p.is_null() {
-                    break;
+        self.with_mags(c, |m| {
+            let l = m.loaded;
+            // SAFETY: this CPU's magazines are live and only this CPU's
+            // (`with_mags`).
+            unsafe {
+                if !l.is_null() && (*l).count > 0 {
+                    (*l).count -= 1;
+                    return (*l).objects[(*l).count];
                 }
-                m.objects[got] = p;
-                got += 1;
             }
-            drop(class);
-            if got == 0 {
+            self.alloc_refill(c, m)
+        })
+    }
+
+    /// The loaded magazine is empty: swap in the previous one if it has
+    /// objects, else trade the previous (empty) one for a full one from
+    /// the depot, else fill from slabs.
+    #[cold]
+    fn alloc_refill(&self, c: usize, m: &mut CpuMags) -> *mut u8 {
+        if mag_count(m.prev) > 0 {
+            core::mem::swap(&mut m.loaded, &mut m.prev);
+        } else {
+            let mut d = self.depots[c].lock();
+            let full = Depot::pop(&mut d.full);
+            if !full.is_null() {
+                d.nfull -= 1;
+                if !m.prev.is_null() {
+                    // SAFETY: an empty magazine of ours, handed over.
+                    unsafe { Depot::push(&mut d.empty, m.prev) };
+                }
+                m.prev = m.loaded;
+                m.loaded = full;
+            } else {
+                // No full magazine anywhere: take this object from a slab,
+                // then fill a magazine half full for the next ones.
+                if m.loaded.is_null() {
+                    m.loaded = Depot::pop(&mut d.empty);
+                }
+                drop(d);
+                let mut class = self.classes[c].lock();
+                let first = class.alloc(c, &self.source);
+                if first.is_null() {
+                    return first;
+                }
+                if m.loaded.is_null() {
+                    drop(class);
+                    m.loaded = self.new_mag();
+                    if m.loaded.is_null() {
+                        return first;
+                    }
+                    class = self.classes[c].lock();
+                }
+                let l = m.loaded;
+                // SAFETY: our (empty) magazine.
+                unsafe {
+                    while (*l).count < capacity(c) / 2 {
+                        let p = class.alloc(c, &self.source);
+                        if p.is_null() {
+                            break;
+                        }
+                        (*l).objects[(*l).count] = p;
+                        (*l).count += 1;
+                    }
+                }
+                return first;
+            }
+        }
+        let l = m.loaded;
+        // SAFETY: our magazine.
+        unsafe {
+            if (*l).count == 0 {
                 return ptr::null_mut();
             }
-            m.count.store(got - 1, Ordering::Relaxed);
-            m.objects[got - 1]
-        })
+            (*l).count -= 1;
+            (*l).objects[(*l).count]
+        }
     }
 
     /// # Safety
     ///
     /// `p` is an object of class `c` from this heap.
+    #[inline]
     unsafe fn free_small(&self, c: usize, p: *mut u8) {
-        if CPUS == 0 {
+        if CPUS == 0 || hal::interrupt::active() {
             // SAFETY: per the caller's contract.
             unsafe { self.classes[c].lock().free(c, p, &self.source) };
             return;
         }
-        self.with_magazine(c, |m| {
-            let mut n = m.count.load(Ordering::Relaxed);
-            if n == MAGAZINE {
-                // Flush the older half to the class.
-                let mut class = self.classes[c].lock();
-                for &q in &m.objects[..MAGAZINE / 2] {
-                    // SAFETY: magazines hold only free objects of class `c`.
-                    unsafe { class.free(c, q, &self.source) };
+        self.with_mags(c, |m| {
+            let l = m.loaded;
+            // SAFETY: our magazines (`with_mags`).
+            unsafe {
+                if !l.is_null() && (*l).count < capacity(c) {
+                    (*l).objects[(*l).count] = p;
+                    (*l).count += 1;
+                    return;
                 }
-                drop(class);
-                m.objects.copy_within(MAGAZINE / 2.., 0);
-                n -= MAGAZINE / 2;
+                self.free_flush(c, m, p);
             }
-            m.objects[n] = p;
-            m.count.store(n + 1, Ordering::Relaxed);
         });
     }
 
-    /// Runs `f` on this CPU's magazine for class `c`, interrupts masked.
-    fn with_magazine<R>(&self, c: usize, f: impl FnOnce(&mut Magazine) -> R) -> R {
-        let irq = hal::irq::disable();
+    /// The loaded magazine is full (or missing): swap in the previous one
+    /// if it has room, else trade the previous (full) one to the depot for
+    /// an empty one.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Self::free_small`].
+    #[cold]
+    unsafe fn free_flush(&self, c: usize, m: &mut CpuMags, p: *mut u8) {
+        if !m.prev.is_null() && mag_count(m.prev) < capacity(c) {
+            core::mem::swap(&mut m.loaded, &mut m.prev);
+        } else {
+            let mut d = self.depots[c].lock();
+            if !m.prev.is_null() {
+                // SAFETY: a full magazine of ours, handed over.
+                unsafe { Depot::push(&mut d.full, m.prev) };
+                d.nfull += 1;
+            }
+            m.prev = m.loaded;
+            m.loaded = Depot::pop(&mut d.empty);
+            drop(d);
+            if m.loaded.is_null() {
+                m.loaded = self.new_mag();
+            }
+            if m.loaded.is_null() {
+                // No page for a magazine: free straight to the slab.
+                // SAFETY: per the caller's contract.
+                unsafe { self.classes[c].lock().free(c, p, &self.source) };
+                return;
+            }
+        }
+        let l = m.loaded;
+        // SAFETY: our magazine, with room.
+        unsafe {
+            (*l).objects[(*l).count] = p;
+            (*l).count += 1;
+        }
+    }
+
+    /// A fresh empty magazine page, or null.
+    fn new_mag(&self) -> *mut Mag {
+        let Some(page) = self.source.alloc_pages(Order::ZERO) else {
+            return ptr::null_mut();
+        };
+        self.magazine_pages.fetch_add(1, Ordering::Relaxed);
+        let m = page.as_ptr().cast::<Mag>();
+        // SAFETY: the page is ours and big enough; only the header needs
+        // initializing (slots beyond `count` are never read).
+        unsafe {
+            (&raw mut (*m).next).write(ptr::null_mut());
+            (&raw mut (*m).count).write(0);
+        }
+        m
+    }
+
+    /// Runs `f` on this CPU's magazines for class `c` in a critical
+    /// section, then publishes how many objects they hold. Not from
+    /// interrupt context.
+    #[inline]
+    fn with_mags<R>(&self, c: usize, f: impl FnOnce(&mut CpuMags) -> R) -> R {
+        hal::critical::enter();
         let cpu = hal::cpu_id().index();
         assert!(cpu < CPUS, "cpu{cpu} has no heap magazines");
-        // SAFETY: only this CPU uses its magazines, and with interrupts
-        // masked nothing else on this CPU can run until `f` returns.
-        let r = f(unsafe { &mut *self.magazines[cpu][c].get() });
-        hal::irq::restore(irq);
+        // SAFETY: only this CPU uses its magazines, from thread context; in
+        // the critical section no other thread runs on this CPU until `f`
+        // returns, and interrupt handlers bypass the magazines.
+        let m = unsafe { &mut *self.magazines[cpu][c].get() };
+        let r = f(m);
+        m.cached
+            .store(mag_count(m.loaded) + mag_count(m.prev), Ordering::Relaxed);
+        hal::critical::exit();
         r
     }
 
-    /// Returns this CPU's cached objects to their classes.
+    /// Returns this CPU's cached objects, and every full magazine in the
+    /// depots, to their classes, and frees the magazines involved.
     pub fn drain_this_cpu(&self) {
         for c in 0..if CPUS == 0 { 0 } else { NCLASSES } {
-            self.with_magazine(c, |m| {
-                let n = m.count.load(Ordering::Relaxed);
-                let mut class = self.classes[c].lock();
-                for &q in &m.objects[..n] {
-                    // SAFETY: magazines hold only free objects of class `c`.
-                    unsafe { class.free(c, q, &self.source) };
+            let mut d = self.depots[c].lock();
+            let mut mags = core::mem::replace(&mut d.full, ptr::null_mut());
+            d.nfull = 0;
+            let mut empties = core::mem::replace(&mut d.empty, ptr::null_mut());
+            drop(d);
+            self.with_mags(c, |m| {
+                for own in [&mut m.loaded, &mut m.prev] {
+                    let x = core::mem::replace(own, ptr::null_mut());
+                    if !x.is_null() {
+                        // SAFETY: ours, now unreachable from the CPU.
+                        unsafe { Depot::push(&mut mags, x) };
+                    }
                 }
-                m.count.store(0, Ordering::Relaxed);
             });
+            let mut class = self.classes[c].lock();
+            loop {
+                let x = Depot::pop(&mut mags);
+                if x.is_null() {
+                    break;
+                }
+                // SAFETY: magazines hold only free objects of class `c`,
+                // and these are no longer reachable by anyone else.
+                unsafe {
+                    let mag = &mut *x;
+                    for &q in &mag.objects[..mag.count] {
+                        class.free(c, q, &self.source);
+                    }
+                    mag.count = 0;
+                    Depot::push(&mut empties, x);
+                }
+            }
+            drop(class);
+            loop {
+                let x = Depot::pop(&mut empties);
+                let Some(page) = NonNull::new(x.cast::<u8>()) else {
+                    break;
+                };
+                self.magazine_pages.fetch_sub(1, Ordering::Relaxed);
+                // SAFETY: the page came from `new_mag` and is unused now.
+                unsafe { self.source.free_pages(page, Order::ZERO) };
+            }
         }
     }
 
@@ -365,10 +629,14 @@ impl<S: PageSource, const CPUS: usize> Heap<S, CPUS> {
         for cpu in &self.magazines {
             for m in cpu {
                 // SAFETY: only the atomic count is read.
-                let n = unsafe { &(*m.get()).count }.load(Ordering::Relaxed);
+                let n = unsafe { &(*m.get()).cached }.load(Ordering::Relaxed);
                 s.cached_objects += n as u64;
             }
         }
+        for (c, d) in self.depots.iter().enumerate() {
+            s.cached_objects += (d.lock().nfull * capacity(c)) as u64;
+        }
+        s.magazine_pages = self.magazine_pages.load(Ordering::Relaxed);
         s.live_objects -= s.cached_objects;
         s
     }
@@ -555,6 +823,19 @@ mod tests {
     }
 
     #[test]
+    fn class_table_matches_search() {
+        for size in 0..=MAX_SMALL + 1 {
+            for align in [1, 2, 4, 8, 16, 32, 64, 256, 2048, 4096] {
+                let l = Layout::from_size_align(size, align).unwrap();
+                let want = CLASSES
+                    .iter()
+                    .position(|c| c.size >= size && c.align >= align);
+                assert_eq!(class_for(l), want, "size {size} align {align}");
+            }
+        }
+    }
+
+    #[test]
     fn classes_are_sound() {
         for c in &CLASSES {
             assert!(c.objects() >= 2, "{c:?}");
@@ -620,6 +901,7 @@ mod tests {
         // At most one empty slab stays cached per class.
         assert!(s.slabs <= NCLASSES as u64, "{s:?}");
         let out = heap.source().out.load(Ordering::Relaxed);
+        assert_eq!(s.magazine_pages, 0);
         assert_eq!(out, i64::try_from(s.slab_pages).unwrap());
     }
 

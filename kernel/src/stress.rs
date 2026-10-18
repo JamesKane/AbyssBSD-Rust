@@ -156,8 +156,10 @@ pub(crate) fn run(seconds: u64) -> bool {
     if kva1 != kva0 {
         fail("kernel stacks leaked");
     }
-    // Slabs and page tables may have grown; everything else came back.
-    let slab_growth = heap1.slab_pages.saturating_sub(heap0.slab_pages);
+    // Slabs, magazines, and page tables may have grown; everything else
+    // came back.
+    let slab_growth = heap1.slab_pages.saturating_sub(heap0.slab_pages)
+        + heap1.magazine_pages.saturating_sub(heap0.magazine_pages);
     if free0.saturating_sub(free1) > slab_growth + 64 {
         fail("pages leaked");
     }

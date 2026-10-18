@@ -41,7 +41,6 @@ const ONE_READER: usize = 1 << SHIFT;
 const UNLOCKED: usize = READ;
 /// Spins on a lock held by readers before sleeping.
 const READER_SPINS: u32 = 1000;
-const MAX_BACKOFF: u32 = 64;
 
 const fn readers(w: usize) -> usize {
     w >> SHIFT
@@ -109,6 +108,7 @@ impl RwCore {
 
     #[cold]
     fn read_slow(&self) {
+        let max_backoff = super::max_backoff();
         let mut backoff = 1;
         loop {
             if self.try_read() {
@@ -119,7 +119,7 @@ impl RwCore {
                 for _ in 0..backoff {
                     core::hint::spin_loop();
                 }
-                backoff = (backoff * 2).min(MAX_BACKOFF);
+                backoff = (backoff * 2).min(max_backoff);
                 continue;
             }
             let mut got = false;
@@ -219,6 +219,7 @@ impl RwCore {
 
     #[cold]
     fn write_slow(&self, me: usize) {
+        let max_backoff = super::max_backoff();
         let mut backoff = 1;
         let mut reader_spins = 0;
         loop {
@@ -236,7 +237,7 @@ impl RwCore {
                 for _ in 0..backoff {
                     core::hint::spin_loop();
                 }
-                backoff = (backoff * 2).min(MAX_BACKOFF);
+                backoff = (backoff * 2).min(max_backoff);
                 continue;
             }
             let mut got = false;

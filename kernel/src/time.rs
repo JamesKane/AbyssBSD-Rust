@@ -13,14 +13,18 @@
 //!   is no longer needed is left to fire: the handler finds nothing due
 //!   and programs the next one, if any. Context switches and cancelled
 //!   callouts therefore touch no timer hardware.
-//! - Callouts run in interrupt context on the CPU that armed them.
+//! - Timers ([`Timer`], FreeBSD's callouts) are caller-owned and pinned;
+//!   arming one allocates nothing. Each CPU keeps its armed timers in a
+//!   binary heap and runs their callbacks in interrupt context.
 //!
 //! Behavior reference: sys/kern/kern_tc.c, sys/kern/kern_clocksource.c,
 //! sys/kern/kern_timeout.c.
 
-use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
-use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::cell::UnsafeCell;
+use core::marker::PhantomPinned;
+use core::pin::{Pin, pin};
+use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use hal::{CpuId, MAX_CPUS};
@@ -79,68 +83,245 @@ pub(crate) fn init_clock(frequency: u64) {
     );
 }
 
-type Callback = Box<dyn FnOnce() + Send>;
+/// A timer callback and its argument (FreeBSD's callout function and its
+/// `void *`). It runs in interrupt context on the timer's CPU.
+pub(crate) type TimerFn = fn(usize);
 
-/// One CPU's pending callouts, keyed by (deadline in ticks, id).
-struct CpuTimers {
-    pending: BTreeMap<(u64, u64), Callback>,
-    /// The callout running now, if any (for [`Callout::cancel`]).
-    running: Option<u64>,
+/// Not in a CPU's queue.
+const NOT_QUEUED: usize = usize::MAX;
+
+/// A caller-owned timer, like FreeBSD's `struct callout`: arming and
+/// stopping it allocate nothing. It belongs to the CPU that created it and
+/// fires there. It must be pinned to be armed, and dropping it stops it
+/// and waits for a running callback, so a callback never outlives it.
+pub(crate) struct Timer {
+    cpu: CpuId,
+    /// Guarded by `QUEUES[cpu]`.
+    st: UnsafeCell<TimerState>,
+    _pinned: PhantomPinned,
 }
 
-static TIMERS: [SpinLock<CpuTimers>; MAX_CPUS] = [const {
-    SpinLock::new(CpuTimers {
-        pending: BTreeMap::new(),
-        running: None,
+struct TimerState {
+    deadline: u64,
+    /// Index in the CPU's heap, or [`NOT_QUEUED`].
+    slot: usize,
+    func: TimerFn,
+    arg: usize,
+}
+
+// SAFETY: the state is only touched under the owning CPU's queue lock.
+unsafe impl Sync for Timer {}
+// SAFETY: as above; the CPU is fixed.
+unsafe impl Send for Timer {}
+
+impl core::fmt::Debug for Timer {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Timer")
+            .field("cpu", &self.cpu)
+            .finish_non_exhaustive()
+    }
+}
+
+/// One CPU's armed timers: a binary min-heap on deadline.
+struct CpuQueue {
+    heap: Vec<*const Timer>,
+    /// The timer whose callback is running now (for [`Timer::drain`]).
+    running: *const Timer,
+}
+
+// SAFETY: the pointers are to pinned timers that stay alive while queued
+// (a timer leaves its queue before it is dropped).
+unsafe impl Send for CpuQueue {}
+
+static QUEUES: [SpinLock<CpuQueue>; MAX_CPUS] = [const {
+    SpinLock::new(CpuQueue {
+        heap: Vec::new(),
+        running: ptr::null(),
     })
 }; MAX_CPUS];
-static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
-/// A pending callout; cancel it or let it fire.
-#[derive(Debug)]
-#[must_use = "a callout that is never cancelled runs anyway; drop with `forget` to make that explicit"]
-pub(crate) struct Callout {
-    cpu: CpuId,
-    key: (u64, u64),
-}
-
-impl Callout {
-    /// Runs `f` in interrupt context on this CPU, `ns` nanoseconds from
-    /// now.
-    pub(crate) fn after(ns: u64, f: impl FnOnce() + Send + 'static) -> Self {
-        let deadline = counter().saturating_add(ns_to_ticks(ns));
-        let irq = hal::irq::disable();
-        let cpu = hal::cpu_id();
-        // Relaxed: uniqueness only.
-        let key = (deadline, NEXT_ID.fetch_add(1, Ordering::Relaxed));
-        TIMERS[cpu.index()].lock().pending.insert(key, Box::new(f));
-        reprogram();
-        hal::irq::restore(irq);
-        Self { cpu, key }
+impl CpuQueue {
+    /// # Safety (all methods)
+    ///
+    /// Every timer in the heap is alive, and the caller holds this queue's
+    /// lock, which guards those timers' state.
+    fn st(t: *const Timer) -> &'static mut TimerState {
+        // SAFETY: see above.
+        unsafe { &mut *(*t).st.get() }
     }
 
-    /// Cancels the callout. Returns whether it was cancelled before
-    /// running; if it is running on another CPU, waits for it to finish.
-    pub(crate) fn cancel(self) -> bool {
+    fn deadline(&self, i: usize) -> u64 {
+        Self::st(self.heap[i]).deadline
+    }
+
+    fn place(&mut self, i: usize, t: *const Timer) {
+        self.heap[i] = t;
+        Self::st(t).slot = i;
+    }
+
+    fn sift_up(&mut self, mut i: usize) {
+        let t = self.heap[i];
+        let d = Self::st(t).deadline;
+        while i > 0 {
+            let parent = (i - 1) / 2;
+            if self.deadline(parent) <= d {
+                break;
+            }
+            self.place(i, self.heap[parent]);
+            i = parent;
+        }
+        self.place(i, t);
+    }
+
+    fn sift_down(&mut self, mut i: usize) {
+        let t = self.heap[i];
+        let d = Self::st(t).deadline;
         loop {
-            let mut t = TIMERS[self.cpu.index()].lock();
-            if t.pending.remove(&self.key).is_some() {
-                return true;
+            let l = 2 * i + 1;
+            if l >= self.heap.len() {
+                break;
             }
-            if t.running != Some(self.key.1) {
-                return false;
+            let r = l + 1;
+            let c = if r < self.heap.len() && self.deadline(r) < self.deadline(l) {
+                r
+            } else {
+                l
+            };
+            if self.deadline(c) >= d {
+                break;
             }
-            drop(t);
-            core::hint::spin_loop();
+            self.place(i, self.heap[c]);
+            i = c;
+        }
+        self.place(i, t);
+    }
+
+    fn push(&mut self, t: *const Timer) {
+        self.heap.push(t);
+        self.sift_up(self.heap.len() - 1);
+    }
+
+    fn remove(&mut self, i: usize) -> *const Timer {
+        let t = self.heap.swap_remove(i);
+        Self::st(t).slot = NOT_QUEUED;
+        if i < self.heap.len() {
+            // The last timer moved into the hole: restore heap order
+            // around it, in whichever direction it is out of place.
+            let moved = self.heap[i];
+            Self::st(moved).slot = i;
+            self.sift_down(i);
+            self.sift_up(Self::st(moved).slot);
+        }
+        t
+    }
+
+    fn first_deadline(&self) -> u64 {
+        if self.heap.is_empty() {
+            UNARMED
+        } else {
+            self.deadline(0)
+        }
+    }
+}
+
+/// Room for this many armed timers per CPU before the heap grows.
+const QUEUE_RESERVE: usize = 64;
+
+/// Sets up this CPU's timer queue (its heap is allocated once, here, so
+/// steady-state arming allocates nothing and heap accounting is stable).
+pub(crate) fn init_cpu() {
+    let mut q = QUEUES[hal::cpu_id().index()].lock();
+    let need = QUEUE_RESERVE.saturating_sub(q.heap.len());
+    q.heap.reserve(need);
+}
+
+impl Timer {
+    /// A disarmed timer on this CPU.
+    pub(crate) fn new() -> Self {
+        Self {
+            cpu: hal::cpu_id(),
+            st: UnsafeCell::new(TimerState {
+                deadline: 0,
+                slot: NOT_QUEUED,
+                func: |_| {},
+                arg: 0,
+            }),
+            _pinned: PhantomPinned,
         }
     }
 
-    /// Lets the callout fire without keeping a handle.
-    pub(crate) fn forget(self) {}
+    /// Arms the timer to run `func(arg)` `ns` nanoseconds from now,
+    /// replacing any pending arming (FreeBSD's `callout_reset`).
+    pub(crate) fn reset(self: Pin<&Self>, ns: u64, func: TimerFn, arg: usize) {
+        let deadline = counter().saturating_add(ns_to_ticks(ns));
+        let me = ptr::from_ref(self.get_ref());
+        let c = self.cpu.index();
+        // The queue lock masks interrupts, as `reprogram` needs.
+        let mut q = QUEUES[c].lock();
+        let st = CpuQueue::st(me);
+        if st.slot != NOT_QUEUED {
+            q.remove(st.slot);
+        }
+        st.deadline = deadline;
+        st.func = func;
+        st.arg = arg;
+        q.push(me);
+        NEXT_CALLOUT[c].store(q.first_deadline(), Ordering::Relaxed);
+        // Only a deadline earlier than the armed one needs the timer.
+        if deadline < PROGRAMMED[c].load(Ordering::Relaxed) {
+            if self.cpu == hal::cpu_id() {
+                reprogram();
+            } else {
+                crate::irq::send_resched(self.cpu);
+            }
+        }
+        drop(q);
+    }
+
+    /// Disarms the timer. Returns whether it was pending (FreeBSD's
+    /// `callout_stop`); a callback already running is not waited for.
+    pub(crate) fn stop(&self) -> bool {
+        let me = ptr::from_ref(self);
+        let c = self.cpu.index();
+        let mut q = QUEUES[c].lock();
+        let slot = CpuQueue::st(me).slot;
+        if slot == NOT_QUEUED {
+            return false;
+        }
+        q.remove(slot);
+        NEXT_CALLOUT[c].store(q.first_deadline(), Ordering::Relaxed);
+        true
+    }
+
+    /// Disarms the timer and waits for a running callback to finish
+    /// (FreeBSD's `callout_drain`). Not from the timer's own callback.
+    pub(crate) fn drain(&self) -> bool {
+        let me = ptr::from_ref(self);
+        loop {
+            if self.stop() {
+                return true;
+            }
+            if !ptr::eq(QUEUES[self.cpu.index()].lock().running, me) {
+                return false;
+            }
+            core::hint::spin_loop();
+        }
+    }
+}
+
+impl Drop for Timer {
+    fn drop(&mut self) {
+        self.drain();
+    }
 }
 
 /// No deadline programmed.
 const UNARMED: u64 = u64::MAX;
+
+/// Each CPU's earliest pending callout deadline, or [`UNARMED`]. Never
+/// later than the truth: a cancel leaves it early, which costs at most a
+/// timer interrupt that finds nothing due. Written only by its own CPU.
+static NEXT_CALLOUT: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(UNARMED) }; MAX_CPUS];
 
 /// Each CPU's programmed deadline, in counter ticks, or [`UNARMED`].
 /// Written only by its own CPU with interrupts masked.
@@ -150,11 +331,8 @@ static PROGRAMMED: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(UNARMED) }; M
 /// Interrupts must be masked.
 fn reprogram() {
     let cpu = hal::cpu_id();
-    let next_callout = TIMERS[cpu.index()]
-        .lock()
-        .pending
-        .first_key_value()
-        .map(|(k, _)| k.0);
+    let next_callout =
+        Some(NEXT_CALLOUT[cpu.index()].load(Ordering::Relaxed)).filter(|&d| d != UNARMED);
     let slice = sched::slice_deadline(ns_to_ticks(SLICE_NS));
     let programmed = &PROGRAMMED[cpu.index()];
     if let Some(deadline) = [next_callout, slice].into_iter().flatten().min()
@@ -184,18 +362,23 @@ pub(crate) fn on_timer() {
     PROGRAMMED[cpu.index()].store(UNARMED, Ordering::Relaxed);
     loop {
         let now = counter();
-        let mut t = TIMERS[cpu.index()].lock();
-        let Some(entry) = t.pending.first_entry() else {
-            break;
-        };
-        if entry.key().0 > now {
+        let mut q = QUEUES[cpu.index()].lock();
+        let first = q.first_deadline();
+        if first > now {
+            NEXT_CALLOUT[cpu.index()].store(first, Ordering::Relaxed);
             break;
         }
-        let ((_, id), f) = entry.remove_entry();
-        t.running = Some(id);
-        drop(t);
-        f();
-        TIMERS[cpu.index()].lock().running = None;
+        let t = q.remove(0);
+        let (func, arg) = {
+            let st = CpuQueue::st(t);
+            (st.func, st.arg)
+        };
+        q.running = t;
+        drop(q);
+        // The timer may be dropped once its callback returns: only the
+        // queue is touched afterwards.
+        func(arg);
+        QUEUES[cpu.index()].lock().running = ptr::null();
     }
     sched::tick(ns_to_ticks(SLICE_NS));
     reprogram();
@@ -220,39 +403,51 @@ pub(crate) fn ticks(cpu: CpuId) -> u64 {
     TICKS[cpu.index()].load(Ordering::Relaxed)
 }
 
+/// A thread waiting for a timer, woken by [`wake_waiter`].
+struct Waiter<'a> {
+    q: &'a sched::WaitQueue,
+    fired: AtomicBool,
+}
+
+/// Timer callback: `arg` is a `&Waiter`.
+fn wake_waiter(arg: usize) {
+    // SAFETY: the waiter outlives its timer (declared before it, so the
+    // timer drops, and drains, first).
+    let w = unsafe { &*ptr::with_exposed_provenance::<Waiter<'_>>(arg) };
+    // Release pairs with the waiter's Acquire.
+    w.fired.store(true, Ordering::Release);
+    w.q.wake_all();
+}
+
 /// Sleeps the current thread for at least `ns` nanoseconds.
 pub(crate) fn sleep_ns(ns: u64) {
-    let q = Arc::new(sched::WaitQueue::new());
-    let done = Arc::new(AtomicBool::new(false));
-    let (q2, done2) = (Arc::clone(&q), Arc::clone(&done));
-    Callout::after(ns, move || {
-        // Release pairs with the waiter's Acquire.
-        done2.store(true, Ordering::Release);
-        q2.wake_all();
-    })
-    .forget();
-    q.wait_until(|| done.load(Ordering::Acquire));
+    let q = sched::WaitQueue::new();
+    let w = Waiter {
+        q: &q,
+        fired: AtomicBool::new(false),
+    };
+    let t = pin!(Timer::new());
+    t.as_ref()
+        .reset(ns, wake_waiter, ptr::from_ref(&w).expose_provenance());
+    q.wait_until(|| w.fired.load(Ordering::Acquire));
 }
 
 /// Waits on `q` until `cond` holds or `ns` nanoseconds pass. Returns
 /// whether `cond` held.
-pub(crate) fn wait_timeout(
-    q: &Arc<sched::WaitQueue>,
-    mut cond: impl FnMut() -> bool,
-    ns: u64,
-) -> bool {
-    let expired = Arc::new(AtomicBool::new(false));
-    let (q2, expired2) = (Arc::clone(q), Arc::clone(&expired));
-    let callout = Callout::after(ns, move || {
-        expired2.store(true, Ordering::Release);
-        q2.wake_all();
-    });
+pub(crate) fn wait_timeout(q: &sched::WaitQueue, mut cond: impl FnMut() -> bool, ns: u64) -> bool {
+    let w = Waiter {
+        q,
+        fired: AtomicBool::new(false),
+    };
+    let t = pin!(Timer::new());
+    t.as_ref()
+        .reset(ns, wake_waiter, ptr::from_ref(&w).expose_provenance());
     let mut ok = false;
     q.wait_until(|| {
         ok = cond();
-        ok || expired.load(Ordering::Acquire)
+        ok || w.fired.load(Ordering::Acquire)
     });
-    callout.cancel();
+    t.stop();
     ok
 }
 

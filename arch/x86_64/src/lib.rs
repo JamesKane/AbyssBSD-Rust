@@ -119,6 +119,12 @@ mod hal_hooks {
     const _: hal::SetCpuLocalFn = abyss_hal_set_cpu_local;
     const _: hal::WaitForInterruptFn = abyss_hal_wait_for_interrupt;
     const _: hal::CurrentThreadFn = abyss_hal_current_thread;
+    const _: hal::CriticalEnterFn = abyss_hal_critical_enter;
+    const _: hal::CriticalExitFn = abyss_hal_critical_exit;
+    const _: hal::CriticalDepthFn = abyss_hal_critical_depth;
+    const _: hal::OwePreemptFn = abyss_hal_owe_preempt;
+    const _: hal::PreemptOwedFn = abyss_hal_preempt_owed;
+    const _: hal::InterruptNestFn = abyss_hal_interrupt_nest;
     const _: hal::SetCurrentThreadFn = abyss_hal_set_current_thread;
     const _: hal::FpuSizeFn = abyss_hal_fpu_size;
     const _: hal::FpuAreaFn = abyss_hal_fpu_init;
@@ -163,6 +169,36 @@ mod hal_hooks {
     #[unsafe(no_mangle)]
     fn abyss_hal_current_thread() -> *const () {
         crate::gdt::current_thread()
+    }
+
+    #[unsafe(no_mangle)]
+    fn abyss_hal_critical_enter() {
+        crate::gdt::critical_enter();
+    }
+
+    #[unsafe(no_mangle)]
+    fn abyss_hal_critical_exit() -> bool {
+        crate::gdt::critical_exit()
+    }
+
+    #[unsafe(no_mangle)]
+    fn abyss_hal_critical_depth() -> u32 {
+        crate::gdt::critical_depth()
+    }
+
+    #[unsafe(no_mangle)]
+    fn abyss_hal_owe_preempt(owed: bool) {
+        crate::gdt::owe_preempt(owed);
+    }
+
+    #[unsafe(no_mangle)]
+    fn abyss_hal_preempt_owed() -> bool {
+        crate::gdt::preempt_owed()
+    }
+
+    #[unsafe(no_mangle)]
+    fn abyss_hal_interrupt_nest(delta: i32) -> u32 {
+        crate::gdt::interrupt_nest(delta)
     }
 
     #[unsafe(no_mangle)]

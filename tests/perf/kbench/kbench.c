@@ -48,7 +48,9 @@ MALLOC_DEFINE(M_KBENCH, "kbench", "kbench benchmark buffers");
 static uint64_t
 tsc_ns(uint64_t t)
 {
-	return ((uint64_t)((__uint128_t)t * 1000000000 / tsc_freq));
+	/* No 128-bit division in the kernel; this cannot overflow. */
+	return (t / tsc_freq * 1000000000 +
+	    t % tsc_freq * 1000000000 / tsc_freq);
 }
 
 /* One benchmark run: workers, start/stop flags, and per-worker results. */
@@ -77,6 +79,7 @@ struct kb_arg {
 };
 
 static struct kb_arg kb_args[KB_MAXT];
+static struct mtx kb_go_mtx;
 
 static void
 kb_bind(int cpu)
@@ -94,9 +97,16 @@ kb_worker(void *arg)
 	struct kb_run *r = a->run;
 
 	kb_bind(r->cpus[a->idx]);
-	atomic_add_int(&r->ready, 1);
-	while (atomic_load_acq_int(&r->go) == 0)
-		cpu_spinwait();
+	/*
+	 * Sleep until the start: kernel-priority threads are not time-sliced,
+	 * so a spinning worker would keep another bound to its CPU from ever
+	 * checking in.
+	 */
+	mtx_lock(&kb_go_mtx);
+	r->ready++;
+	while (r->go == 0)
+		mtx_sleep(__DEVOLATILE(void *, &r->go), &kb_go_mtx, 0, "kbgo", 0);
+	mtx_unlock(&kb_go_mtx);
 	r->body(r, a->idx);
 	atomic_add_rel_int(&r->done, 1);
 	kthread_exit();
@@ -129,10 +139,17 @@ kb_launch(struct kb_run *r, int seconds)
 		    "kbench%d", i) != 0)
 			panic("kbench: kthread_add");
 	}
-	while (atomic_load_acq_int(&r->ready) < r->nthreads)
+	for (;;) {
+		mtx_lock(&kb_go_mtx);
+		if (r->ready == r->nthreads)
+			break;
+		mtx_unlock(&kb_go_mtx);
 		pause("kbrdy", 1);
+	}
 	t0 = rdtsc();
-	atomic_store_rel_int(&r->go, 1);
+	r->go = 1;
+	wakeup(__DEVOLATILE(void *, &r->go));
+	mtx_unlock(&kb_go_mtx);
 	if (seconds > 0) {
 		pause("kbrun", seconds * hz);
 		atomic_store_rel_int(&r->stop, 1);
@@ -154,7 +171,7 @@ kb_report_ops(const char *name, struct kb_run *r, uint64_t ticks)
 		ops += r->slot[i].ops;
 	if (ops == 0)
 		ops = 1;
-	milli = (uint64_t)((__uint128_t)tsc_ns(ticks) * 1000 / ops);
+	milli = tsc_ns(ticks) * 1000 / ops;
 	printf("kbench %s %ju.%03ju ns/op\n", name, (uintmax_t)(milli / 1000),
 	    (uintmax_t)(milli % 1000));
 }
@@ -598,7 +615,8 @@ kb_sysctl_run(SYSCTL_HANDLER_ARGS)
 		return (ENXIO);
 	}
 	kb_bind(0);
-	printf("kbench begin %s cpus=%d\n", suite, mp_ncpus);
+	/* A fresh line, in case other console output is mid-line. */
+	printf("\nkbench begin %s cpus=%d\n", suite, mp_ncpus);
 	kb_suite_p2();
 	printf("kbench end %s\n", suite);
 	thread_lock(curthread);
@@ -619,6 +637,7 @@ kb_modevent(module_t mod __unused, int type, void *data __unused)
 	switch (type) {
 	case MOD_LOAD:
 		mtx_init(&kb_mtx, "kbench mtx", NULL, MTX_DEF);
+		mtx_init(&kb_go_mtx, "kbench go", NULL, MTX_DEF);
 		mtx_init(&kb_spin, "kbench spin", NULL, MTX_SPIN);
 		rw_init(&kb_rw, "kbench rw");
 		sx_init(&kb_sx, "kbench sx");
@@ -629,6 +648,7 @@ kb_modevent(module_t mod __unused, int type, void *data __unused)
 		sx_destroy(&kb_sx);
 		rw_destroy(&kb_rw);
 		mtx_destroy(&kb_spin);
+		mtx_destroy(&kb_go_mtx);
 		mtx_destroy(&kb_mtx);
 		return (0);
 	default:

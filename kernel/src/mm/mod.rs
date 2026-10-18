@@ -109,12 +109,13 @@ static FRAMES: SpinLock<BootFrames> = SpinLock::new(BootFrames::new());
 /// The buddy allocator, once [`init`] has built it.
 static PHYS: SpinLock<Option<PhysAllocator<'static>>> = SpinLock::new(None);
 
-/// Each CPU's cache of single pages, touched only by that CPU with
-/// interrupts masked.
+/// Each CPU's cache of single pages, touched only by that CPU, from thread
+/// context, in a critical section.
 struct PageCaches([UnsafeCell<PageMagazine>; MAX_CPUS]);
 
 // SAFETY: see the type's comment: a CPU's slot is only used by that CPU,
-// with interrupts masked so nothing on it can interleave.
+// in a critical section (no other thread runs there meanwhile), and never
+// from interrupt context (which could interrupt that use).
 unsafe impl Sync for PageCaches {}
 
 static PAGE_CACHES: PageCaches =
@@ -125,23 +126,24 @@ static PAGE_CACHES: PageCaches =
 struct CachedCount(AtomicU64);
 static CACHED_PAGES: [CachedCount; MAX_CPUS] = [const { CachedCount(AtomicU64::new(0)) }; MAX_CPUS];
 
-/// Runs `f` on this CPU's page cache with interrupts masked, then
-/// publishes the cache's size.
+/// Runs `f` on this CPU's page cache in a critical section, then
+/// publishes the cache's size. Not from interrupt context.
 fn with_page_cache<R>(f: impl FnOnce(&mut PageMagazine) -> R) -> R {
-    let irq = hal::irq::disable();
+    hal::critical::enter();
     let cpu = hal::cpu_id().index();
-    // SAFETY: this CPU's slot, interrupts masked (see `PageCaches`).
+    // SAFETY: this CPU's slot, in a critical section, from thread context
+    // (see `PageCaches`).
     let m = unsafe { &mut *PAGE_CACHES.0[cpu].get() };
     let r = f(m);
     CACHED_PAGES[cpu].0.store(m.len() as u64, Ordering::Relaxed);
-    hal::irq::restore(irq);
+    hal::critical::exit();
     r
 }
 
 /// Allocates a block of `order` from the buddy allocator (single pages
 /// through this CPU's cache).
 pub(crate) fn alloc_pages(order: Order) -> Option<PhysAddr> {
-    if order != Order::ZERO {
+    if order != Order::ZERO || hal::interrupt::active() {
         return PHYS
             .lock()
             .as_mut()?
@@ -159,7 +161,7 @@ pub(crate) fn alloc_pages(order: Order) -> Option<PhysAddr> {
 /// Returns a block from [`alloc_pages`]. A bad free is a kernel bug.
 pub(crate) fn free_pages(pa: PhysAddr, order: Order) {
     let pfn = Pfn::containing(pa);
-    if order == Order::ZERO {
+    if order == Order::ZERO && !hal::interrupt::active() {
         let cached = with_page_cache(|m| {
             if m.push(pfn).is_ok() {
                 return true;

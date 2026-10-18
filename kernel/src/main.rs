@@ -76,6 +76,7 @@ fn kmain(boot_info: PhysAddr) -> ! {
     irq::init_boot_cpu();
     threads::init_fpu(true);
     threads::init();
+    time::init_cpu();
     topology::record_this_cpu(hal::CpuId::BOOT);
     hal::irq::enable();
     smp::start_cpus();

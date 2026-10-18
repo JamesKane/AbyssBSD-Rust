@@ -111,6 +111,7 @@ fn start(cpu: CpuId, hw: u64) -> bool {
 pub(crate) fn ap_main(_arg: usize) -> ! {
     let cpu = hal::cpu_id();
     crate::irq::init_ap(cpu);
+    crate::time::init_cpu();
     crate::threads::init_fpu(false);
     crate::topology::record_this_cpu(cpu);
     ONLINE[cpu.index()].store(true, Ordering::Release);

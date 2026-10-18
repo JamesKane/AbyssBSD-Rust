@@ -99,6 +99,60 @@ fn account(inner: &mut thread::Inner, ev: thread::Event, now: u64) -> Priority {
     inner.account(ev, now, f * ts::WINDOW_SECONDS, f * ts::WAIT_STEP_MS / 1000)
 }
 
+/// A run queue whose length can be read without its lock.
+struct LockedRunQueue {
+    q: SpinLock<RunQueue>,
+    /// The queue's length as of the last unlock.
+    len: AtomicUsize,
+}
+
+impl LockedRunQueue {
+    const fn new() -> Self {
+        Self {
+            q: SpinLock::new(RunQueue::new()),
+            len: AtomicUsize::new(0),
+        }
+    }
+
+    fn lock(&self) -> RunQueueGuard<'_> {
+        RunQueueGuard {
+            q: self.q.lock(),
+            len: &self.len,
+        }
+    }
+
+    /// The length at the last unlock (racy; exact under the lock).
+    fn len_hint(&self) -> usize {
+        self.len.load(Ordering::Relaxed)
+    }
+}
+
+/// A locked run queue; publishes its length when unlocked.
+struct RunQueueGuard<'a> {
+    q: sync::SpinGuard<'a, RunQueue>,
+    len: &'a AtomicUsize,
+}
+
+impl core::ops::Deref for RunQueueGuard<'_> {
+    type Target = RunQueue;
+    fn deref(&self) -> &RunQueue {
+        &self.q
+    }
+}
+
+impl core::ops::DerefMut for RunQueueGuard<'_> {
+    fn deref_mut(&mut self) -> &mut RunQueue {
+        &mut self.q
+    }
+}
+
+impl Drop for RunQueueGuard<'_> {
+    fn drop(&mut self) {
+        // Before the lock is released (fields drop after this).
+        self.len.store(self.q.len(), Ordering::Relaxed);
+    }
+}
+
 /// A CPU's scheduling state.
 pub struct PerCpu {
     id: CpuId,
@@ -110,15 +164,15 @@ pub struct PerCpu {
     /// The previous thread's reference, when the switch path still owns
     /// it (it slept or died rather than going back on a queue).
     prev_owned: Cell<Option<Arc<Thread>>>,
-    runq: SpinLock<RunQueue>,
+    runq: LockedRunQueue,
     need_resched: AtomicBool,
+    /// When the running thread's slice started, in platform time.
+    slice_start: Cell<u64>,
     /// The running thread's priority, for remote wakeups deciding whether
     /// to preempt.
     current_prio: AtomicU8,
     /// Relative capacity (1024 for the fastest CPUs).
     capacity: AtomicU16,
-    /// Nesting depth of preemption-disabled sections.
-    preempt_off: Cell<u32>,
     /// The idle thread is halted (or about to): a waker must interrupt it.
     /// While the idle thread spins this is false and a waker need not.
     halted: AtomicBool,
@@ -181,6 +235,22 @@ pub fn online_cpus() -> usize {
 /// Sets the platform hooks. Call once, before [`init_cpu`].
 pub fn init(p: &'static dyn Platform) {
     assert!(PLATFORM.set(p).is_ok(), "sched::init called twice");
+    hal::critical::set_preempt_handler(owed_preempt);
+}
+
+/// A critical section ended with a preemption owed: switch now if still
+/// wanted and allowed.
+fn owed_preempt() {
+    let irq = hal::irq::disable();
+    hal::critical::owe_preempt(false);
+    if hal::irq::were_enabled(&irq)
+        && !hal::interrupt::active()
+        && hal::critical::depth() == 0
+        && this_cpu().need_resched.load(Ordering::Relaxed)
+    {
+        switch_away();
+    }
+    hal::irq::restore(irq);
 }
 
 fn new_percpu(id: CpuId) -> &'static mut PerCpu {
@@ -190,11 +260,11 @@ fn new_percpu(id: CpuId) -> &'static mut PerCpu {
         idle: Cell::new(ptr::null()),
         prev: Cell::new(ptr::null()),
         prev_owned: Cell::new(None),
-        runq: SpinLock::new(RunQueue::new()),
+        runq: LockedRunQueue::new(),
+        slice_start: Cell::new(0),
         need_resched: AtomicBool::new(false),
         current_prio: AtomicU8::new(Priority::KERNEL.get()),
         capacity: AtomicU16::new(1024),
-        preempt_off: Cell::new(0),
         halted: AtomicBool::new(false),
         switches: Cell::new((0, 0)),
         window_end: Cell::new(0),
@@ -207,6 +277,7 @@ fn adopt_running(pcpu: &PerCpu, t: Arc<Thread>) {
         let mut inner = t.inner.lock();
         inner.state = State::Running;
         inner.since = platform().now();
+        pcpu.slice_start.set(inner.since);
         pcpu.current_prio
             .store(inner.priority.get(), Ordering::Relaxed);
     }
@@ -423,7 +494,7 @@ fn choose_cpu(last: CpuId, bound: Option<CpuId>) -> CpuId {
     // Waiting threads plus the running one, unless the CPU is idle.
     let load = |c: &PerCpu| {
         let busy = c.current_prio.load(Ordering::Relaxed) != Priority::IDLE_THREAD.get();
-        c.runq.lock().len() + usize::from(busy)
+        c.runq.len_hint() + usize::from(busy)
     };
     let capacity = |c: &PerCpu| c.capacity.load(Ordering::Relaxed);
     let mut best = last;
@@ -562,20 +633,14 @@ pub fn yield_now() {
 
 /// Disables preemption on this CPU until the guard drops.
 pub fn preempt_disable() -> PreemptGuard {
-    let irq = hal::irq::disable();
-    let c = this_cpu();
-    c.preempt_off.set(c.preempt_off.get() + 1);
-    hal::irq::restore(irq);
+    hal::critical::enter();
     PreemptGuard { _private: () }
 }
 
 /// Whether the current CPU has preemption disabled.
 #[must_use]
 pub fn preemption_disabled() -> bool {
-    let irq = hal::irq::disable();
-    let off = this_cpu().preempt_off.get() > 0;
-    hal::irq::restore(irq);
-    off
+    hal::critical::depth() > 0
 }
 
 /// Proof that preemption is disabled; see [`preempt_disable`].
@@ -586,15 +651,8 @@ pub struct PreemptGuard {
 
 impl Drop for PreemptGuard {
     fn drop(&mut self) {
-        let irq = hal::irq::disable();
-        let c = this_cpu();
-        let n = c.preempt_off.get() - 1;
-        c.preempt_off.set(n);
-        let resched = n == 0 && c.need_resched.load(Ordering::Relaxed);
-        if resched && hal::irq::were_enabled(&irq) {
-            switch_away();
-        }
-        hal::irq::restore(irq);
+        // Runs an owed preemption (`owed_preempt`) at the outermost level.
+        hal::critical::exit();
     }
 }
 
@@ -607,11 +665,10 @@ pub fn slice_deadline(slice: u64) -> Option<u64> {
     let cur = unsafe { &*c.current.get() };
     // A pending reschedule (held off by a preemption-disabled section)
     // needs no timer: it happens when the section ends.
-    if cur.idle || c.need_resched.load(Ordering::Relaxed) || c.runq.lock().is_empty() {
+    if cur.idle || c.need_resched.load(Ordering::Relaxed) || c.runq.len_hint() == 0 {
         return None;
     }
-    let since = cur.inner.lock().since;
-    Some(since.saturating_add(slice))
+    Some(c.slice_start.get().saturating_add(slice))
 }
 
 /// Timer-interrupt bookkeeping: asks for a reschedule if the current
@@ -637,8 +694,13 @@ pub fn tick(slice: u64) {
 /// reschedule is pending and preemption is allowed, switches threads.
 pub fn preempt_point() {
     let c = this_cpu();
-    if c.preempt_off.get() == 0 && c.need_resched.load(Ordering::Relaxed) {
-        switch_away();
+    if c.need_resched.load(Ordering::Relaxed) {
+        if hal::critical::depth() == 0 {
+            switch_away();
+        } else {
+            // The critical section's end will switch.
+            hal::critical::owe_preempt(true);
+        }
     }
 }
 
@@ -687,6 +749,7 @@ pub(crate) fn switch_away() {
         let mut inner = next.inner.lock();
         inner.state = State::Running;
         inner.since = now;
+        c.slice_start.set(now);
         let p = account(&mut inner, thread::Event::Scheduled, now);
         c.current_prio.store(p.get(), Ordering::Relaxed);
         drop(inner);
@@ -708,6 +771,7 @@ pub(crate) fn switch_away() {
         inner.state = State::Running;
         inner.cpu = c.id;
         inner.since = now;
+        c.slice_start.set(now);
         let p = account(&mut inner, thread::Event::Scheduled, now);
         c.current_prio.store(p.get(), Ordering::Relaxed);
     }

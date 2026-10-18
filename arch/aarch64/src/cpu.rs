@@ -90,6 +90,12 @@ pub(crate) struct CpuLocal {
     kernel: *mut (),
     /// The running thread (`hal::current_thread`).
     thread: *const (),
+    /// Critical-section depth (`hal::critical`).
+    critical: u32,
+    /// A preemption is owed (`hal::critical::owe_preempt`).
+    owed: u32,
+    /// Interrupt nesting (`hal::interrupt`).
+    interrupts: u32,
 }
 
 // Written once by `init_boot_cpu`, on the boot CPU, before anything reads it.
@@ -98,6 +104,9 @@ static CPU0: Racy<CpuLocal> = Racy::new(CpuLocal {
     cpu: 0,
     kernel: core::ptr::null_mut(),
     thread: core::ptr::null(),
+    critical: 0,
+    owed: 0,
+    interrupts: 0,
 });
 
 /// Points `TPIDR_EL1` at the boot CPU's block.
@@ -128,6 +137,9 @@ impl CpuBlock {
             cpu: 0,
             kernel: core::ptr::null_mut(),
             thread: core::ptr::null(),
+            critical: 0,
+            owed: 0,
+            interrupts: 0,
         })
     }
 }
@@ -184,6 +196,58 @@ pub fn current_thread() -> *const () {
     // SAFETY: restores the saved mask.
     unsafe { asm!("msr daif, {}", in(reg) daif, options(nomem, nostack)) };
     t
+}
+
+/// Runs `f` on this CPU's block with IRQs masked: finding the block and
+/// updating it take several instructions, and a preemption between them
+/// could move the thread to another CPU.
+fn with_local<R>(f: impl FnOnce(&mut CpuLocal) -> R) -> R {
+    let daif = read_sysreg!("daif");
+    // SAFETY: masking IRQs on this CPU; restored below.
+    unsafe { asm!("msr daifset, #2", options(nomem, nostack)) };
+    let p = read_sysreg!("tpidr_el1") as *mut CpuLocal;
+    // SAFETY: TPIDR_EL1 points at this CPU's block, and with IRQs masked
+    // nothing else on this CPU touches it.
+    let r = f(unsafe { &mut *p });
+    // SAFETY: restores the saved mask.
+    unsafe { asm!("msr daif, {}", in(reg) daif, options(nomem, nostack)) };
+    r
+}
+
+/// Enters a critical section.
+pub fn critical_enter() {
+    with_local(|l| l.critical += 1);
+}
+
+/// Leaves one; true when the outermost section ended.
+pub fn critical_exit() -> bool {
+    with_local(|l| {
+        l.critical -= 1;
+        l.critical == 0
+    })
+}
+
+/// The critical-section depth.
+pub fn critical_depth() -> u32 {
+    with_local(|l| l.critical)
+}
+
+/// Records or clears an owed preemption.
+pub fn owe_preempt(owed: bool) {
+    with_local(|l| l.owed = u32::from(owed));
+}
+
+/// Whether a preemption is owed.
+pub fn preempt_owed() -> bool {
+    with_local(|l| l.owed != 0)
+}
+
+/// Adds `delta` to the interrupt nesting; returns the new value.
+pub fn interrupt_nest(delta: i32) -> u32 {
+    with_local(|l| {
+        l.interrupts = l.interrupts.wrapping_add_signed(delta);
+        l.interrupts
+    })
 }
 
 /// Records the running thread. Interrupts must be masked.

@@ -111,8 +111,13 @@ impl<T> DerefMut for SpinGuard<'_, T> {
 
 impl<T> Drop for SpinGuard<'_, T> {
     fn drop(&mut self) {
-        // Release publishes our writes to the next holder.
-        self.lock.serving.fetch_add(1, Ordering::Release);
+        // Only the holder writes `serving`, so a plain store does (no
+        // read-modify-write). Release publishes our writes to the next
+        // holder.
+        let s = self.lock.serving.load(Ordering::Relaxed);
+        self.lock
+            .serving
+            .store(s.wrapping_add(1), Ordering::Release);
         if let Some(irq) = self.irq.take() {
             hal::irq::restore(irq);
         }

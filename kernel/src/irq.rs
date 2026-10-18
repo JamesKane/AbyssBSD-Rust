@@ -70,8 +70,16 @@ pub(crate) fn send_resched(cpu: CpuId) {
     arch::gic::send_sgi(id, RESCHED_SGI);
 }
 
-/// Handles one interrupt (from the arch trap code, interrupts masked).
+/// Handles one interrupt (from the arch trap code, interrupts masked),
+/// then switches threads if the handler asked for it.
 pub(crate) fn dispatch(irq: arch::Interrupt) {
+    hal::interrupt::enter();
+    handle(irq);
+    hal::interrupt::exit();
+    sched::preempt_point();
+}
+
+fn handle(irq: arch::Interrupt) {
     #[cfg(target_arch = "x86_64")]
     {
         match irq.vector {
@@ -103,7 +111,6 @@ pub(crate) fn dispatch(irq: arch::Interrupt) {
         }
         arch::gic::eoi(id);
     }
-    sched::preempt_point();
 }
 
 fn stray(id: u32) {
