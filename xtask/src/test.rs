@@ -144,6 +144,8 @@ struct BootCase {
     pass_status: i32,
     /// A line the log must contain (how the run powered off).
     expect: Option<&'static str>,
+    /// A line the first boot's saved log must contain (warm-reset cases).
+    expect_saved: Option<&'static str>,
 }
 
 const BOOT_CASES: &[BootCase] = &[
@@ -157,6 +159,7 @@ const BOOT_CASES: &[BootCase] = &[
         // isa-debug-exit: (0x10 << 1) | 1.
         pass_status: 33,
         expect: None,
+        expect_saved: None,
     },
     BootCase {
         name: "aarch64",
@@ -167,6 +170,7 @@ const BOOT_CASES: &[BootCase] = &[
         cmdline: "",
         pass_status: 0,
         expect: None,
+        expect_saved: None,
     },
     BootCase {
         name: "aarch64-el2",
@@ -179,6 +183,7 @@ const BOOT_CASES: &[BootCase] = &[
         cmdline: "abyss.bus.serial=1 hw.pci.enable_msix=0 abyss.test.poweroff=1",
         pass_status: 0,
         expect: Some("power: off (PSCI SYSTEM_OFF)"),
+        expect_saved: None,
     },
     BootCase {
         name: "aarch64-warm-reset",
@@ -189,6 +194,7 @@ const BOOT_CASES: &[BootCase] = &[
         cmdline: "",
         pass_status: 0,
         expect: None,
+        expect_saved: None,
     },
     BootCase {
         name: "x86_64-warm-reset",
@@ -200,6 +206,20 @@ const BOOT_CASES: &[BootCase] = &[
         cmdline: "abyss.test.poweroff=1",
         pass_status: 0,
         expect: Some("power: off (ACPI S5)"),
+        expect_saved: None,
+    },
+    BootCase {
+        name: "x86_64-watchdog",
+        vmm: Vmm::Qemu,
+        arch: Arch::X86_64,
+        el2: false,
+        warm_reset: true,
+        // The first boot arms ichwd and hangs; its expiry must reset the
+        // machine, and the second boot runs the tests.
+        cmdline: "abyss.test.watchdog_reset=1",
+        pass_status: 33,
+        expect: None,
+        expect_saved: Some("watchdog: armed for"),
     },
     BootCase {
         name: "x86_64-bhyve",
@@ -211,6 +231,7 @@ const BOOT_CASES: &[BootCase] = &[
         cmdline: "",
         pass_status: 1,
         expect: Some("power: off (ACPI S5)"),
+        expect_saved: None,
     },
 ];
 
@@ -328,6 +349,11 @@ fn check_saved_log(vm: &Vm, case: &BootCase) -> std::result::Result<(), String> 
     let saved =
         image::read_esp_file(&vm.disk, "EFI/ABYSS/PREVLOG.TXT").map_err(|e| e.to_string())?;
     let saved = String::from_utf8_lossy(&saved);
+    if let Some(line) = case.expect_saved
+        && !saved.contains(line)
+    {
+        return Err(format!("PREVLOG.TXT lacks {line:?}"));
+    }
     if saved.contains(WARM_RESET_MARKER) && saved.contains("AbyssBSD") {
         Ok(())
     } else {

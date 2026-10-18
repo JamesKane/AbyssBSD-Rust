@@ -1,0 +1,15 @@
+[package]
+name = "ichwd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bus = { path = "../../sys/bus" }
+regs = { path = "../../lib/regs" }
+sync = { path = "../../sys/sync" }
+watchdog = { path = "../../sys/watchdog" }
+
+[lints]
+workspace = true

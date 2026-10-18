@@ -32,6 +32,16 @@ pub(crate) fn run(_s: &sched::Sleepable) -> ! {
         let log = crate::boot::info().log.get().expect("log ring");
         if log.recovered == 0 {
             kprintln!("logring: first boot marker, boot {}", log.boots);
+            if crate::boot::flag("abyss.test.watchdog_reset") {
+                // Hang with a watchdog armed: its expiry must reset us.
+                let w = watchdog::first().expect("a watchdog to arm");
+                let ms = w.arm(3000).expect("arm");
+                kprintln!("watchdog: armed for {ms} ms on {}; hanging", w.name());
+                crate::arch::cpu::disable_interrupts();
+                loop {
+                    core::hint::spin_loop();
+                }
+            }
             // The ACPI reset register (x86) or PSCI (arm64); RAM survives
             // either under QEMU, so the loader finds the log.
             crate::power::reset();
@@ -2071,5 +2081,34 @@ ktest! {
             let secs = t.unix_seconds().expect("valid");
             assert!(secs.abs_diff(now) <= 3, "{name} is {secs}, the kernel {now}");
         }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+ktest! {
+    fn ichwd_counts_down_and_is_patted() {
+        let s = cx();
+        let m = bus::manager();
+        let nexus = crate::devices::nexus();
+        let Some((isa, dog)) = find_named(m, &s, nexus, "ichwd0") else {
+            // bhyve's LPC bridge (a PIIX3) has no TCO watchdog.
+            assert!(find_named(m, &s, nexus, "isa0").is_some(), "isa0");
+            kprintln!("(no ICH watchdog on this chipset)");
+            return;
+        };
+        assert_eq!(m.nameunit(isa, &s).as_deref(), Some("isa0"));
+        assert_eq!(m.description(dog, &s).as_deref(), Some("Intel ICH9 watchdog timer"));
+        let w = watchdog::first().expect("a registered watchdog");
+        assert_eq!(w.arm(60_000), Ok(60_000));
+        let first = w.remaining_ms().expect("counting");
+        crate::time::sleep_ns(&s, 1_500_000_000);
+        let later = w.remaining_ms().expect("counting");
+        assert!(later < first, "{later} ms left after {first}: not counting down");
+        w.pat();
+        let patted = w.remaining_ms().expect("counting");
+        assert!(patted > later, "a pat restarts the count ({patted} vs {later})");
+        w.disarm();
+        assert_eq!(w.remaining_ms(), None, "stopped");
+        kprintln!("{}: {first} ms, then {later} ms, patted to {patted} ms", w.name());
     }
 }

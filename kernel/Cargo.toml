@@ -30,6 +30,7 @@ driver-table = { path = "table" }
 random = { path = "../sys/random" }
 storage = { path = "../sys/storage" }
 virtio-random = { path = "../drivers/virtio-random" }
+watchdog = { path = "../sys/watchdog" }
 demangle = { path = "../lib/demangle" }
 efi = { path = "../boot/efi" }
 elf = { path = "../lib/elf" }

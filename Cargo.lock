@@ -132,6 +132,8 @@ dependencies = [
  "atrtc",
  "bus",
  "devtree",
+ "ichwd",
+ "isa",
  "nvme",
  "pci",
  "virtio",
@@ -182,12 +184,32 @@ name = "hal"
 version = "0.0.0"
 
 [[package]]
+name = "ichwd"
+version = "0.0.0"
+dependencies = [
+ "bus",
+ "regs",
+ "sync",
+ "watchdog",
+]
+
+[[package]]
 name = "irq"
 version = "0.0.0"
 dependencies = [
  "hal",
  "sched",
  "sync",
+]
+
+[[package]]
+name = "isa"
+version = "0.0.0"
+dependencies = [
+ "bus",
+ "devtree",
+ "ichwd",
+ "pci",
 ]
 
 [[package]]
@@ -226,6 +248,7 @@ dependencies = [
  "uart-pl011",
  "virtio-random",
  "vm",
+ "watchdog",
 ]
 
 [[package]]
@@ -396,6 +419,13 @@ dependencies = [
  "addr",
  "hal",
  "regs",
+ "sync",
+]
+
+[[package]]
+name = "watchdog"
+version = "0.0.0"
+dependencies = [
  "sync",
 ]
 

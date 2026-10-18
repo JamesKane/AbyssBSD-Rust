@@ -11,6 +11,8 @@ members = [
     "drivers/ahci",
     "drivers/atrtc",
     "drivers/fb-console",
+    "drivers/isa",
+    "drivers/ichwd",
     "drivers/nvme",
     "drivers/uart-16550",
     "drivers/uart-pl011",
@@ -47,6 +49,7 @@ members = [
     "sys/sysctl",
     "sys/virtio",
     "sys/vm",
+    "sys/watchdog",
     "tools/syscallgen",
 ]
 # Firmware and kernel binaries only build for their own targets; everything
@@ -59,6 +62,8 @@ default-members = [
     "drivers/ahci",
     "drivers/atrtc",
     "drivers/fb-console",
+    "drivers/isa",
+    "drivers/ichwd",
     "drivers/nvme",
     "drivers/uart-16550",
     "drivers/uart-pl011",
@@ -94,6 +99,7 @@ default-members = [
     "sys/sysctl",
     "sys/virtio",
     "sys/vm",
+    "sys/watchdog",
     "tools/syscallgen",
 ]
 

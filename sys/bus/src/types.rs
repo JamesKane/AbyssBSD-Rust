@@ -65,6 +65,14 @@ pub enum Ident {
     Pci(PciIdent, PciAddress, Option<String>),
     /// A virtio device on a transport.
     Virtio(VirtioIdent),
+    /// A child a bus adds for a driver by name, with the description it
+    /// knows for it (FreeBSD's identify routines: `ichwd` on `isa0`).
+    Child {
+        /// The class (the driver's name).
+        class: &'static str,
+        /// The description.
+        desc: &'static str,
+    },
     /// A controller's channel, a child with a fixed class (`ahcich` at
     /// `channel=0`), as FreeBSD adds them by name.
     Channel {
@@ -112,9 +120,10 @@ impl Ids {
             }
         }
         match (self, ident) {
-            (Self::Nexus(names), Ident::Nexus(n) | Ident::Channel { class: n, .. }) => {
-                names.contains(n).then_some(Rank::DEFAULT)
-            }
+            (
+                Self::Nexus(names),
+                Ident::Nexus(n) | Ident::Channel { class: n, .. } | Ident::Child { class: n, .. },
+            ) => names.contains(n).then_some(Rank::DEFAULT),
             (Self::PciBus, Ident::PciBus { .. }) => Some(Rank::DEFAULT),
             (Self::Acpi(t), Ident::Acpi(i, _)) => best(t, i),
             (Self::Pci(t), Ident::Pci(i, _, _)) => best(t, i),
@@ -330,7 +339,8 @@ impl Ident {
             | Self::Platform
             | Self::Nexus(_)
             | Self::PciBus { .. }
-            | Self::Channel { .. } => Ok(()),
+            | Self::Channel { .. }
+            | Self::Child { .. } => Ok(()),
             Self::Acpi(i, _) => strings::acpi_pnpinfo(out, i),
             Self::Pci(i, _, _) => strings::pci_pnpinfo(out, i),
             Self::Virtio(i) => strings::virtio_pnpinfo(out, i),
@@ -346,7 +356,8 @@ impl Ident {
             | Self::Platform
             | Self::Nexus(_)
             | Self::PciBus { .. }
-            | Self::Virtio(_) => Ok(()),
+            | Self::Virtio(_)
+            | Self::Child { .. } => Ok(()),
             Self::Acpi(_, path) => strings::acpi_location(out, path, None),
             Self::Pci(_, a, path) => strings::pci_location(out, a, path.as_deref(), None),
             Self::Channel { channel, .. } => {
