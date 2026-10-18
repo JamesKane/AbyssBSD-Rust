@@ -35,6 +35,8 @@ system to rule out whole classes of kernel bugs.
 8. **Idiomatic modern Rust**: algebraic data types, typestate, newtypes, `Result`-based errors, and
    `unsafe` confined to a small number of audited modules.
 9. **RV64 as the Day-2 port**, proving that the architecture seams were drawn correctly.
+10. **At least as fast as FreeBSD**: never more than 2% slower than the FreeBSD component being
+    replaced, measured like for like, and faster where we can be.
 
 ## Non-goals (Day 1)
 
@@ -87,3 +89,6 @@ FreeBSD-compatible userland interfaces:
 - At least 90% of FreeBSD's kyua test suite passes for supported subsystems, and every failure is
   triaged.
 - No known memory-safety bugs. All `unsafe` blocks are documented and reviewed.
+- Every benchmark in the cumulative suite ([PERFORMANCE.md](PERFORMANCE.md)) is **no more than 2%
+  slower** than stock FreeBSD 15.1 on the same machine, on bhyve and on both physical reference
+  machines. The aim is to be faster ([ADR-0011](adr/0011-performance-parity.md)).

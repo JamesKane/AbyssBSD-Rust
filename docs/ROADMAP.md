@@ -4,6 +4,14 @@ The roadmap is a sequence of **phases with hard exit criteria**. A phase is done
 criteria pass in CI on **both AMD64 and ARM64**, not when the code is written. Sizes are relative
 (S < M < L < XL) rather than calendar estimates.
 
+**Performance parity** ([ADR-0011](adr/0011-performance-parity.md)). From P2 on, every exit
+criterion includes the phase's benchmark suite: on each benchmark, AbyssBSD is **no more than 2%
+slower** than stock FreeBSD 15.1 on the same machine and configuration, and the goal is to be
+faster. Suites are cumulative and run nightly after the phase that introduces them. Method,
+fairness rules, and the full benchmark list: [PERFORMANCE.md](PERFORMANCE.md). Before P6 the
+gating platform is bhyve (amd64). aarch64 numbers are recorded, but only gate from P6, when real
+ARM64 hardware is in the loop.
+
 **QEMU first** ([ADR-0010](adr/0010-qemu-first-development.md)). Through P5, development and every
 exit criterion run under QEMU (plus bhyve for amd64). **No physical hardware is touched until
 FreeBSD userland runs end to end in QEMU**: no smoke checks, no table captures. At P6 the physical
@@ -85,7 +93,8 @@ tests, deliberately take and report a page fault, and exit cleanly. Boot also wo
 
 **Exit:** a stress test of 64 kernel threads doing lock ping-pong, allocator churn, and sleeps with
 timeouts runs for 10 minutes on `-smp 8` on both arches, with no witness violations and no leaks
-(allocator accounting balances).
+(allocator accounting balances). The P2 performance suite (context switch, locks, zone and page
+allocators, callouts, IPIs and TLB shootdown) is within 2% of FreeBSD's `kbench` module on bhyve.
 
 ## Phase 3: Device framework, PCIe, ACPI AML, storage (L/XL)
 
@@ -109,7 +118,8 @@ timeouts runs for 10 minutes on `-smp 8` on both arches, with no witness violati
 **Exit:** on both arches the kernel enumerates PCIe, attaches NVMe, AHCI, and virtio-blk, reads the
 GPT and dumps partition tables, sustains a multi-queue random-read stress test, and powers off via
 ACPI/PSCI when the power button is pressed (QEMU `system_powerdown`). The AML corpus (QEMU and
-public tables) passes on the host.
+public tables) passes on the host. The P3 performance suite (interrupt latency, virtio-blk and NVMe
+IOPS and latency) is within 2% of FreeBSD.
 
 
 ## Phase 4: First userspace: `/rescue/sh` (L)
@@ -129,7 +139,9 @@ public tables) passes on the host.
 
 **Exit:** both arches boot to an interactive `/rescue/sh` (from FreeBSD 15.1 `base.txz`) on the
 serial console. Pipelines, job control (`^Z`, `fg`), `ls`, `cat`, `sysctl kern.ostype`, and
-`/rescue/ps` work. A boot-to-shell expect test is in CI.
+`/rescue/ps` work. A boot-to-shell expect test is in CI. The P4 performance suite (syscall, process,
+VM-fault, signal, and pipe microbenchmarks, run as the same static binaries on both kernels) is
+within 2% of FreeBSD.
 
 ## Phase 5: VFS and file systems (L)
 
@@ -149,7 +161,8 @@ serial console. Pipelines, job control (`^Z`, `fg`), `ls`, `cat`, `sysctl kern.o
 
 **Exit:** both arches boot with the root on UFS2 on NVMe and `/rescue/sh` as init. A file-system
 stress workload (fsx-style, run unmodified from FreeBSD's tests) completes, and the image passes
-`fsck_ffs` afterwards. The loader can read the kernel from UFS2.
+`fsck_ffs` afterwards. The loader can read the kernel from UFS2. The P5 performance suite (namecache,
+directory, UFS2 and tmpfs I/O, `fsync`, `base.txz` extraction) is within 2% of FreeBSD.
 
 ## Track: USB and input (parallel, starts after P3) (M)
 
@@ -182,7 +195,9 @@ GOP console and a USB keyboard.
 **Exit:** unmodified FreeBSD 15.1 `base.txz` boots **multi-user** from UFS2 on both arches (QEMU,
 bhyve, and **both physical reference machines**, which gate from this phase on). Login works on the serial console and on `ttyv0`.
 `syslogd`, `cron`, and `devd` run. The kyua pass rate meets the agreed target for kern/, lib/libc,
-bin/, and usr.bin/.
+bin/, and usr.bin/. The P6 performance suite (boot time, `libthr`/umtx, `kqueue`, UNIX sockets, ptys,
+dynamic exec) is within 2% of FreeBSD, and every earlier suite now also holds on both physical
+machines against FreeBSD on bare metal.
 
 ## Phase 7: Networking (XL)
 
@@ -199,8 +214,10 @@ bin/, and usr.bin/.
 - Differential tests against the build server for TCP behavior (packet captures).
 
 **Exit:** both arches obtain an address with `dhclient` and SLAAC. `sshd` accepts logins.
-`fetch`/`pkg update && pkg install <curated set>` succeed. Sustained `iperf3`-class throughput
-(target set in Phase 7 planning) completes without stalls or leaks.
+`fetch`/`pkg update && pkg install <curated set>` succeed. Sustained `iperf3` runs complete without
+stalls or leaks. The P7 performance suite (TCP/UDP throughput, request/response latency, connection
+rate, `sendfile`, CPU per gigabit) is within 2% of FreeBSD over loopback, virtio-net, and the physical
+NICs.
 
 ## Phase 8: Self-hosting and hardening = **v1.0 / Day 1 complete** (L)
 
@@ -215,8 +232,9 @@ bin/, and usr.bin/.
 - Security hardening: SMEP/SMAP/PAN enforced, KASLR, stack canaries in the loader, kernel W^X
   audit, speculative-execution mitigations, and arm64 PAC/BTI if stable-toolchain support allows.
 - Suspend/resume (S3 / s2idle) is a **stretch goal**.
-- Performance pass: lock contention profiling, scheduler tuning on hybrid cores, NVMe and network
-  throughput targets.
+- Performance pass: lock contention profiling and scheduler tuning on hybrid cores, aimed at
+  beating FreeBSD rather than matching it. The P8 suite adds self-hosted build time, SU+J
+  metadata workloads, and swap throughput.
 - Documentation: installation guide, supported-hardware list, compat-deviations list.
 
 **Exit (v1.0):** the success criteria in [VISION.md](VISION.md#success-criteria-for-day-1-v10) are
@@ -275,6 +293,7 @@ an ADR or follow-up, which tells us how well the seams held.
 | Weak memory ordering bugs only visible on ARM64 | Heisenbugs | Both arches gate every merge, real ARM64 hardware early, Miri/loom-style in-house model checks for lock-free code |
 | No external crates means everything is built here | Scope creep | Keep `lib/*` crates minimal and purpose-built, and favor the simplest correct design |
 | Rust stable-toolchain gaps (e.g. arm64 branch protection) | Hardening delayed | Track upstream. ADR required for any nightly opt-in |
+| Performance below FreeBSD's | AbyssBSD is not a credible replacement | The 2% bound gates every phase from P2 ([ADR-0011](adr/0011-performance-parity.md)), so losses are caught in the layer that causes them. Nightly cumulative suites. Hot-path designs weighed against ARM64 costs before P6 makes arm64 gating |
 | Physical hardware variety | Slow v1.0 | A small set of Tier 1 machines, SystemReady-only on ARM64 |
 | The X870E holds user data (Fedora NVMe, RAID array) | Catastrophic data loss | Non-designated disks attach read-only until P8. `xtask deploy` identifies the media NVMe by serial number. AbyssBSD never writes the Fedora ESP or boot entries |
 | No serial console on the X870E | Blind debugging of early hangs | Framebuffer console, persistent RAM log saved by the loader, FCH watchdog, an optional PCIe serial card or polled network log |
