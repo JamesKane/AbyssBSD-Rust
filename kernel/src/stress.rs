@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! The Phase 2 stress test (`abyss.stress=SECONDS`): 64 kernel threads
 //! doing lock ping-pong, ordered multi-lock contention, shared/exclusive
-//! locking, allocator churn, and sleeps with timeouts, for the given time.
+//! locking, allocator churn, sleeps with timeouts, and FP/SIMD register
+//! checks across switches and migrations, for the given time.
 //! At the end every thread must have made progress, the witness must have
 //! seen no violations, and heap and page accounting must balance.
 //!
@@ -55,6 +56,7 @@ struct Shared {
     table: SxLock<Vec<u64>>,
     wake_q: Arc<sched::WaitQueue>,
     sleep_errors: AtomicU64,
+    fpu_errors: AtomicU64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -64,6 +66,7 @@ enum Role {
     Table,
     Churn,
     Sleeper,
+    Fpu,
 }
 
 fn role(i: usize) -> Role {
@@ -75,7 +78,8 @@ fn role(i: usize) -> Role {
         2 | 3 => Role::Ordered,
         4 => Role::Table,
         5 | 6 => Role::Churn,
-        _ => Role::Sleeper,
+        _ if (i / 8).is_multiple_of(2) => Role::Sleeper,
+        _ => Role::Fpu,
     }
 }
 
@@ -103,6 +107,7 @@ pub(crate) fn run(seconds: u64) -> bool {
         total,
         stalled,
         sleep_errors,
+        fpu_errors,
     } = phase(seconds, true);
     settle();
 
@@ -113,7 +118,7 @@ pub(crate) fn run(seconds: u64) -> bool {
     kprintln!(
         "stress: done: {total} iterations; heap objects {} -> {}, large pages {} -> {}, \
          free pages {free0} -> {free1}, KVA {kva0:#x} -> {kva1:#x}, witness violations {violations}, \
-         short sleeps {sleep_errors}, stalled threads {stalled:?}",
+         short sleeps {sleep_errors}, FP/SIMD mismatches {fpu_errors}, stalled threads {stalled:?}",
         heap0.live_objects,
         heap1.live_objects,
         heap0.large_pages,
@@ -135,6 +140,9 @@ pub(crate) fn run(seconds: u64) -> bool {
     }
     if heap1.live_objects != heap0.live_objects || heap1.large_pages != heap0.large_pages {
         fail("heap accounting does not balance");
+    }
+    if fpu_errors != 0 || warm.fpu_errors != 0 {
+        fail("FP/SIMD registers changed across switches");
     }
     if kva1 != kva0 {
         fail("kernel stacks leaked");
@@ -158,6 +166,7 @@ struct Outcome {
     total: u64,
     stalled: Vec<usize>,
     sleep_errors: u64,
+    fpu_errors: u64,
 }
 
 /// Runs the workload for `seconds`, reporting every ten if `report`.
@@ -178,6 +187,7 @@ fn phase(seconds: u64, report: bool) -> Outcome {
         table: SxLock::new(&SX, alloc::vec![0; 64]),
         wake_q: Arc::new(sched::WaitQueue::new()),
         sleep_errors: AtomicU64::new(0),
+        fpu_errors: AtomicU64::new(0),
     });
     let progress: Vec<Arc<AtomicU64>> = (0..THREADS).map(|_| Arc::new(AtomicU64::new(0))).collect();
     let threads: Vec<_> = (0..THREADS)
@@ -186,7 +196,13 @@ fn phase(seconds: u64, report: bool) -> Outcome {
             // Time-sharing, with four niceness levels.
             let prio =
                 Priority::new(Priority::TIMESHARE.get() + u8::try_from(i % 4).unwrap_or(0) * 10);
-            sched::spawn("stress", prio, move || worker(i, &shared, &progress))
+            let b = sched::Builder::new("stress").priority(prio);
+            let b = if matches!(role(i), Role::Fpu) {
+                b.fpu()
+            } else {
+                b
+            };
+            b.spawn(move || worker(i, &shared, &progress))
                 .expect("stress thread")
         })
         .collect();
@@ -230,6 +246,7 @@ fn phase(seconds: u64, report: bool) -> Outcome {
         total: progress.iter().map(|p| p.load(Ordering::Relaxed)).sum(),
         stalled,
         sleep_errors: shared.sleep_errors.load(Ordering::Relaxed),
+        fpu_errors: shared.fpu_errors.load(Ordering::Relaxed),
     }
 }
 
@@ -303,6 +320,11 @@ fn worker(i: usize, s: &Shared, progress: &AtomicU64) {
                     assert!(b.iter().all(|&x| x == tag), "heap object overwritten");
                 }
             }
+            Role::Fpu => {
+                if !fpu_round(&mut rng) {
+                    s.fpu_errors.fetch_add(1, Ordering::Relaxed);
+                }
+            }
             Role::Sleeper => {
                 let ns = 1_000_000 + rng.below(20_000_000);
                 let t0 = crate::time::now_ns();
@@ -318,5 +340,44 @@ fn worker(i: usize, s: &Shared, progress: &AtomicU64) {
             }
         }
         progress.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+extern "C" fn yield_between() {
+    sched::yield_now();
+}
+
+/// Loads a fresh pattern into the vector registers, yields (possibly
+/// migrating), and checks the registers kept it.
+fn fpu_round(rng: &mut Rng) -> bool {
+    let mut pattern = [0u8; 512];
+    for chunk in pattern.chunks_mut(8) {
+        chunk.copy_from_slice(&rng.next().to_le_bytes());
+    }
+    let mut out = [0u8; 512];
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: stress FP threads are spawned with FP state; buffers
+        // are 512 bytes.
+        unsafe { crate::arch::fpu::load_call_store(&pattern, &mut out, yield_between) };
+        let n = crate::arch::fpu::compared_bytes();
+        (0..16).all(|r| out[r * 32..r * 32 + n] == pattern[r * 32..r * 32 + n])
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let vl = crate::arch::fpu::vector_length();
+        let sve_pattern: Vec<u8> = (0..32 * vl).map(|_| rng.next().to_le_bytes()[0]).collect();
+        let mut sve_out = alloc::vec![0u8; 32 * vl];
+        // SAFETY: as above; the SVE buffers hold 32 vectors.
+        unsafe {
+            crate::arch::fpu::load_call_store(
+                &pattern,
+                &mut out,
+                &sve_pattern,
+                &mut sve_out,
+                yield_between,
+            );
+        }
+        out == pattern && sve_out == sve_pattern
     }
 }
