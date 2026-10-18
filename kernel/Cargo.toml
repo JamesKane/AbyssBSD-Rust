@@ -25,6 +25,7 @@ clock = { path = "../sys/clock" }
 devtree = { path = "../lib/devtree" }
 pci = { path = "../sys/pci" }
 acpi = { path = "../sys/acpi" }
+aml = { path = "../lib/aml" }
 driver-table = { path = "table" }
 random = { path = "../sys/random" }
 storage = { path = "../sys/storage" }

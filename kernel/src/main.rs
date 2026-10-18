@@ -36,6 +36,7 @@ mod its;
 mod mm;
 mod panic;
 mod pci;
+mod power;
 mod qemu;
 mod random;
 mod smp;
@@ -136,8 +137,10 @@ fn kmain(boot_info: PhysAddr) -> ! {
     }
 }
 
-/// Stops the devices, then powers off through firmware.
+/// An orderly power-off: firmware is told (`\_PTS`), the devices stop,
+/// then the machine powers off.
 pub(crate) fn power_off(s: &sched::Sleepable) -> ! {
+    power::prepare(s);
     devices::shutdown(s);
-    firmware::reset(efi::ResetKind::Shutdown)
+    power::off()
 }

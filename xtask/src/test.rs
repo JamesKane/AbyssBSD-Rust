@@ -142,6 +142,8 @@ struct BootCase {
     cmdline: &'static str,
     /// QEMU's exit status when the kernel reports a pass.
     pass_status: i32,
+    /// A line the log must contain (how the run powered off).
+    expect: Option<&'static str>,
 }
 
 const BOOT_CASES: &[BootCase] = &[
@@ -154,6 +156,7 @@ const BOOT_CASES: &[BootCase] = &[
         cmdline: "",
         // isa-debug-exit: (0x10 << 1) | 1.
         pass_status: 33,
+        expect: None,
     },
     BootCase {
         name: "aarch64",
@@ -163,6 +166,7 @@ const BOOT_CASES: &[BootCase] = &[
         warm_reset: false,
         cmdline: "",
         pass_status: 0,
+        expect: None,
     },
     BootCase {
         name: "aarch64-el2",
@@ -170,11 +174,11 @@ const BOOT_CASES: &[BootCase] = &[
         arch: Arch::Aarch64,
         el2: true,
         warm_reset: false,
-        // One attach worker here, many elsewhere.
-        // One attach worker, and INTx instead of MSI-X (through _PRT
-        // and the root port's swizzle).
-        cmdline: "abyss.bus.serial=1 hw.pci.enable_msix=0",
+        // One attach worker, INTx instead of MSI-X (through _PRT and the
+        // root port's swizzle), and a real power-off at the end.
+        cmdline: "abyss.bus.serial=1 hw.pci.enable_msix=0 abyss.test.poweroff=1",
         pass_status: 0,
+        expect: Some("power: off (PSCI SYSTEM_OFF)"),
     },
     BootCase {
         name: "aarch64-warm-reset",
@@ -184,6 +188,7 @@ const BOOT_CASES: &[BootCase] = &[
         warm_reset: true,
         cmdline: "",
         pass_status: 0,
+        expect: None,
     },
     BootCase {
         name: "x86_64-warm-reset",
@@ -191,8 +196,10 @@ const BOOT_CASES: &[BootCase] = &[
         arch: Arch::X86_64,
         el2: false,
         warm_reset: true,
-        cmdline: "",
-        pass_status: 33,
+        // A real power-off at the end: QEMU exits 0 on ACPI S5.
+        cmdline: "abyss.test.poweroff=1",
+        pass_status: 0,
+        expect: Some("power: off (ACPI S5)"),
     },
     BootCase {
         name: "x86_64-bhyve",
@@ -203,6 +210,7 @@ const BOOT_CASES: &[BootCase] = &[
         // bhyve's status when the guest powers off.
         cmdline: "",
         pass_status: 1,
+        expect: Some("power: off (ACPI S5)"),
     },
 ];
 
@@ -341,6 +349,11 @@ fn check_log(text: &str, case: &BootCase) -> std::result::Result<(), String> {
     }
     if case.warm_reset && !text.contains("logring: loader recovered") {
         missing.push("logring: loader recovered");
+    }
+    if let Some(line) = case.expect
+        && !text.contains(line)
+    {
+        missing.push(line);
     }
     if missing.is_empty() {
         Ok(())

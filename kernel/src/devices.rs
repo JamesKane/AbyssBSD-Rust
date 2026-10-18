@@ -197,6 +197,7 @@ pub(crate) fn init(s: &Sleepable) {
     }
     if crate::acpi_bus::init(s) {
         crate::acpi_bus::apply_cppc(s);
+        crate::power::init(s);
         m.add_child(
             s,
             nexus,

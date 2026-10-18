@@ -75,33 +75,56 @@ pub enum Conduit {
     Hvc,
 }
 
-/// PSCI `CPU_ON` (64-bit): starts the CPU with affinity `mpidr` at
-/// physical `entry` with `x0` = `context`. Returns the PSCI status (0 is
-/// success).
-pub fn psci_cpu_on(conduit: Conduit, mpidr: u64, entry: u64, context: u64) -> i64 {
-    const CPU_ON: u64 = 0xc400_0003;
+/// A PSCI call: function `fid` with three arguments, returning `x0`.
+///
+/// # Safety
+///
+/// `fid` must be a PSCI function whose effects the caller accepts
+/// (starting a CPU, powering the machine off).
+pub unsafe fn psci_call(conduit: Conduit, fid: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     let ret: i64;
-    // SAFETY: a firmware call with the PSCI calling convention; it only
-    // starts another CPU.
+    // SAFETY: a firmware call with the PSCI calling convention, whose
+    // effects the caller vouched for.
     unsafe {
         match conduit {
             Conduit::Smc => asm!(
                 "smc #0",
-                inout("x0") CPU_ON => ret,
-                inout("x1") mpidr => _,
-                inout("x2") entry => _,
-                inout("x3") context => _,
+                inout("x0") fid => ret,
+                inout("x1") a1 => _,
+                inout("x2") a2 => _,
+                inout("x3") a3 => _,
                 options(nostack),
             ),
             Conduit::Hvc => asm!(
                 "hvc #0",
-                inout("x0") CPU_ON => ret,
-                inout("x1") mpidr => _,
-                inout("x2") entry => _,
-                inout("x3") context => _,
+                inout("x0") fid => ret,
+                inout("x1") a1 => _,
+                inout("x2") a2 => _,
+                inout("x3") a3 => _,
                 options(nostack),
             ),
         }
     }
     ret
+}
+
+/// PSCI `CPU_ON` (64-bit): starts the CPU with affinity `mpidr` at
+/// physical `entry` with `x0` = `context`. Returns the PSCI status (0 is
+/// success).
+pub fn psci_cpu_on(conduit: Conduit, mpidr: u64, entry: u64, context: u64) -> i64 {
+    const CPU_ON: u64 = 0xc400_0003;
+    // SAFETY: CPU_ON only starts another CPU.
+    unsafe { psci_call(conduit, CPU_ON, mpidr, entry, context) }
+}
+
+/// PSCI `SYSTEM_OFF`. Returns only if firmware refuses.
+pub fn psci_system_off(conduit: Conduit) {
+    // SAFETY: powering off is what the caller asked for.
+    let _ = unsafe { psci_call(conduit, 0x8400_0008, 0, 0, 0) };
+}
+
+/// PSCI `SYSTEM_RESET`. Returns only if firmware refuses.
+pub fn psci_system_reset(conduit: Conduit) {
+    // SAFETY: resetting is what the caller asked for.
+    let _ = unsafe { psci_call(conduit, 0x8400_0009, 0, 0, 0) };
 }

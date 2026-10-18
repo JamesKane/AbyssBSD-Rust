@@ -198,6 +198,7 @@ dependencies = [
  "acpi",
  "acpi-tables",
  "addr",
+ "aml",
  "arch-aarch64",
  "arch-x86_64",
  "bootproto",

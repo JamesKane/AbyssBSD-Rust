@@ -32,7 +32,9 @@ pub(crate) fn run(_s: &sched::Sleepable) -> ! {
         let log = crate::boot::info().log.get().expect("log ring");
         if log.recovered == 0 {
             kprintln!("logring: first boot marker, boot {}", log.boots);
-            crate::firmware::reset(efi::ResetKind::Warm);
+            // The ACPI reset register (x86) or PSCI (arm64); RAM survives
+            // either under QEMU, so the loader finds the log.
+            crate::power::reset();
         }
         kprintln!(
             "logring: loader recovered {} bytes from the previous boot",

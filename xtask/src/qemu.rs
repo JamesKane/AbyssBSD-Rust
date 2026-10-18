@@ -466,10 +466,21 @@ impl Vm {
                 }
             }
         }
-        // Give the image a moment to power off by itself, then make sure.
+        // Give the image a moment to power off by itself, then make sure;
+        // what it prints meanwhile (how it powered off) is logged too.
         let grace = Instant::now() + Duration::from_secs(5);
         while Instant::now() < grace && child.try_wait()?.is_none() {
-            std::thread::sleep(Duration::from_millis(50));
+            if let Ok(line) = rx.recv_timeout(Duration::from_millis(50)) {
+                let line = strip_ansi(&line);
+                writeln!(logfile, "{line}")?;
+                if echo {
+                    println!("  | {line}");
+                }
+            }
+        }
+        // And whatever was still in flight when it exited.
+        while let Ok(line) = rx.recv_timeout(Duration::from_millis(100)) {
+            writeln!(logfile, "{}", strip_ansi(&line))?;
         }
         let exit_code = match child.try_wait()? {
             Some(status) => status.code(),

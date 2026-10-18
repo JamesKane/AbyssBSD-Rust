@@ -244,17 +244,7 @@ fn arch_start(cpu: CpuId, hw: u64, stack_top: u64) -> bool {
     let boot_pa =
         bootproto::layout::dmap_to_phys(VirtAddr::new(boot_va as u64)).expect("heap in the DMAP");
     let entry = info.kernel.phys.get() + (smp::entry_point() - info.kernel.virt.get());
-    let conduit = crate::acpi::find(*b"FACP")
-        .and_then(|t| acpi_tables::fadt::parse(&t).ok())
-        .and_then(|f| f.arm_boot_arch())
-        .map_or(smp::Conduit::Smc, |a| {
-            if a.psci_use_hvc() {
-                smp::Conduit::Hvc
-            } else {
-                smp::Conduit::Smc
-            }
-        });
-    let r = smp::psci_cpu_on(conduit, hw, entry, boot_pa.get());
+    let r = smp::psci_cpu_on(psci_conduit(), hw, entry, boot_pa.get());
     if r != 0 {
         kprintln!("smp: PSCI CPU_ON for {hw:#x} failed: {r}");
     }
@@ -347,4 +337,19 @@ pub(crate) fn on_call_ipi() {
         crate::mm::flush_range(va, len);
     }
     CALL_PENDING.fetch_sub(1, Ordering::AcqRel);
+}
+
+/// How PSCI calls reach firmware: the FADT's `PSCI_USE_HVC`, else SMC.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn psci_conduit() -> arch::smp::Conduit {
+    crate::acpi::find(*b"FACP")
+        .and_then(|t| acpi_tables::fadt::parse(&t).ok())
+        .and_then(|f| f.arm_boot_arch())
+        .map_or(arch::smp::Conduit::Smc, |a| {
+            if a.psci_use_hvc() {
+                arch::smp::Conduit::Hvc
+            } else {
+                arch::smp::Conduit::Smc
+            }
+        })
 }

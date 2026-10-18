@@ -56,11 +56,14 @@ fn backtrace(fp: u64) {
 }
 
 /// Ends the run: report to QEMU if asked, power off after a pass, halt
-/// after a failure so the screen stays readable.
+/// after a failure so the screen stays readable. `abyss.test.poweroff`
+/// skips QEMU's report so a pass powers off for real.
 fn stop(passed: bool) -> ! {
-    crate::qemu::exit(passed);
+    if !crate::boot::flag("abyss.test.poweroff") {
+        crate::qemu::exit(passed);
+    }
     if passed {
-        crate::firmware::reset(efi::ResetKind::Shutdown)
+        crate::power::off()
     }
     arch::cpu::halt_forever()
 }
