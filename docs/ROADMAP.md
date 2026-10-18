@@ -263,7 +263,7 @@ P3.3 (from the start, pure crate) ────────┘   P3.8 ─┴─�
   first drivers that carry real PCI and ACPI IDs. Adopting the console UART and the timers as
   devices comes with their drivers (P3.8).
 
-**P3.6 Buses.**
+**P3.6 Buses.** Done 2026-10-18.
 - `sys/acpi`.
   - Namespace load at boot, the `_INI`/`_STA` walk, and `_OSC`.
   - Nodes from `_HID`/`_CID`/`_UID`/`_ADR`, and `_CRS` decoded into resource lists.
@@ -275,6 +275,49 @@ P3.3 (from the start, pure crate) ────────┘   P3.8 ─┴─�
   - BAR validation, capabilities, and bus-owned config-space fields.
   - MSI/MSI-X, with INTx through `_PRT` as the fallback.
 - The virtio-pci modern transport, as a bus.
+- As delivered:
+  - **ACPI.** `acpi0` has one child per `_HID`/`_CID` device, in namespace order, matching FreeBSD
+    15.1's `devinfo` on bhyve exactly. Every child is added first and the edges after, so a
+    `_DEP` or resource source (interrupt, GPIO, or serial bus controller) may name a later device;
+    on the Radxa Q8B's DSDT that is 32 of 107 edges. A dependency cycle is broken and logged.
+    `_PR0` power resources (shared, counted) and `_PS0` bring each device to D0 first.
+  - **ACPI host bridges.** `_OSC` is asked exactly as FreeBSD asks: support bits, no control.
+    `_PRT` routes INTx, directly or through link devices.
+  - **ACPI events.**
+    - amd64: `acpi0` takes the SCI, enters ACPI mode through `SMI_CMD` if needed, and handles the
+      fixed power button and every runtime GPE (`_Lxx`/`_Exx`).
+    - arm64: `acpi_ged` runs `_EVT` from threaded handlers.
+    - `Notify` reaches handlers after each AML job. `acpi_button` powers off on a press.
+    - Tested end to end: xtask presses the button over QMP. On q35 it arrives as the fixed event;
+      on arm64 virt through GED → `_EVT` → `Notify` → `acpi_button`.
+  - **`_CPC`.** Levels from integers or memory/I/O registers set the CPU capacities.
+  - **PCI.**
+    - `pcib`/`pci` pairs for host bridges and PCI-PCI bridges: the generic bridge swizzles INTx,
+      and the ACPI bridge uses its `_PRT`. QEMU's virtio-rng now sits behind a root port on both
+      architectures.
+    - Drivers see configuration space through `PciChild`. They may write device-specific
+      registers only; the header, capability links, and the MSI and MSI-X capabilities belong to
+      the bus.
+  - **MSI/MSI-X.** One `PCI_MSI` domain. The message comes from the local APIC on amd64 and from
+      the GICv3 ITS on arm64; the ITS maps devices, events, and LPIs, with device IDs from IORT.
+      `hw.pci.enable_msix=0` keeps INTx, and the arm64 EL2 boot case uses it so INTx stays tested.
+      MSI-X tables are unmapped when their last vector goes.
+  - **virtio.** Two `virtio_pci` drivers, as in FreeBSD 16: modern at the default rank, legacy as
+    the low-priority fallback for bhyve's legacy-only devices. Each adds one child that gets a
+    `VirtioDevice` and split virtqueues hardened against a misbehaving device. `vtrnd` (the
+    entropy device) is the first child driver: interrupt-driven, published behind a gate. It is
+    tested by reads by MSI-X on q35, arm64, and bhyve, and by a detach/re-attach cycle that checks
+    the mappings are returned. That cycle also found grants a bus's deleted children still held.
+  - **Driver table.** It is its own host-buildable crate. `cargo xtask check` fails on any
+    unresolved tie over recorded and per-entry witness identities.
+  - **Not yet.**
+    - bhyve's power button (SIGTERM) is not pressed by the harness.
+    - `_CPC` levels in FFH or PCC are skipped.
+    - Power resources are never switched off.
+    - GED is a driver, not an interrupt domain other devices' interrupts route through. No
+      firmware seen needs that.
+    - If the GIC will not snoop its tables, MSI stays off (cache maintenance for that waits for
+      hardware, P6).
 
 **P3.7 Storage.**
 - `sys/storage`.
