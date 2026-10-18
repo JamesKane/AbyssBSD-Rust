@@ -1,0 +1,20 @@
+[package]
+name = "bus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+abi = { path = "../../lib/abi" }
+devtree = { path = "../../lib/devtree" }
+hal = { path = "../../arch/hal" }
+irq = { path = "../irq" }
+regs = { path = "../../lib/regs" }
+sched = { path = "../sched" }
+sync = { path = "../sync" }
+sysctl = { path = "../sysctl" }
+vm = { path = "../vm" }
+
+[lints]
+workspace = true

@@ -20,6 +20,8 @@ abi = { path = "../lib/abi" }
 acpi-tables = { path = "../lib/acpi-tables" }
 addr = { path = "../lib/addr" }
 bootproto = { path = "../boot/bootproto" }
+bus = { path = "../sys/bus" }
+devtree = { path = "../lib/devtree" }
 demangle = { path = "../lib/demangle" }
 efi = { path = "../boot/efi" }
 elf = { path = "../lib/elf" }

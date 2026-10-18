@@ -25,6 +25,7 @@ mod acpi;
 #[cfg(not(feature = "ktest"))]
 mod bench;
 mod boot;
+mod devices;
 mod errata;
 mod firmware;
 mod intc;
@@ -87,6 +88,7 @@ fn kmain(boot_info: PhysAddr) -> ! {
     let s = unsafe { sched::Sleepable::assume() };
     smp::start_cpus();
     topology::summarize();
+    devices::init();
 
     #[cfg(feature = "ktest")]
     tests::run(&s);

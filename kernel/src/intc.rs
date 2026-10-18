@@ -154,7 +154,7 @@ pub(crate) fn init_boot_cpu() {
         apic::mask_legacy_pics();
     }
     let xapic_va = (!apic::x2apic_supported()).then(|| {
-        crate::mm::map_device(PhysAddr::new(apic::xapic_phys()), 4096)
+        crate::devices::map_reserved(PhysAddr::new(apic::xapic_phys()), 4096)
             .expect("xAPIC mapping")
             .get()
     });
@@ -174,7 +174,8 @@ pub(crate) fn init_boot_cpu() {
         .filter_map(Result::ok)
     {
         if let MadtEntry::IoApic(io) = e {
-            let Ok(va) = crate::mm::map_device(PhysAddr::new(u64::from(io.address)), 4096) else {
+            let Ok(va) = crate::devices::map_reserved(PhysAddr::new(u64::from(io.address)), 4096)
+            else {
                 kprintln!("irq: cannot map I/O APIC {}", io.id);
                 continue;
             };
@@ -267,14 +268,14 @@ pub(crate) fn init_boot_cpu() {
     let gicd = madt
         .gic_distributor()
         .expect("no GIC distributor in the MADT");
-    let gicd_va =
-        crate::mm::map_device(PhysAddr::new(gicd.physical_base), 0x1_0000).expect("GICD mapping");
+    let gicd_va = crate::devices::map_reserved(PhysAddr::new(gicd.physical_base), 0x1_0000)
+        .expect("GICD mapping");
     let mut regions = GICR_REGIONS.lock();
     for e in madt.entries().filter_map(Result::ok) {
         match e {
             MadtEntry::GicRedistributor(r) => {
                 let len = u64::from(r.length);
-                match crate::mm::map_device(PhysAddr::new(r.base), len) {
+                match crate::devices::map_reserved(PhysAddr::new(r.base), len) {
                     Ok(va) => regions.push((va.get(), len)),
                     Err(e) => kprintln!("irq: cannot map GICR at {:#x}: {e:?}", r.base),
                 }
@@ -282,7 +283,7 @@ pub(crate) fn init_boot_cpu() {
             // Without GICR structures, each GICC names its own frame.
             MadtEntry::GicCpuInterface(c) if c.gicr_base.is_some_and(|b| b != 0) => {
                 let base = c.gicr_base.unwrap_or(0);
-                if let Ok(va) = crate::mm::map_device(PhysAddr::new(base), 0x2_0000) {
+                if let Ok(va) = crate::devices::map_reserved(PhysAddr::new(base), 0x2_0000) {
                     regions.push((va.get(), 0x2_0000));
                 }
             }

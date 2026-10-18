@@ -914,3 +914,235 @@ ktest! {
         crate::mm::free_pages(page.0, vm::Order::ZERO);
     }
 }
+
+/// Drivers for the device manager's tests, listed in the ktest build's
+/// driver table (`devices::DRIVERS`).
+pub(crate) mod bus_test {
+    use alloc::string::String;
+    use alloc::vec;
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    use bus::{
+        AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, MmioGrant, Resource, StartCx,
+        StopCx, StopReason, TestId, TestIdent,
+    };
+    use devtree::matching::Rank;
+
+    regs::register_block! {
+        /// A fake device's registers (a RAM page stands in).
+        pub(crate) struct Fake: 4096 {
+            VALUE @ 0 => u32, Rw;
+        }
+    }
+
+    /// RAM pages the test bus hands its devices as "registers".
+    pub(crate) static PAGES: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+
+    pub(crate) struct TestBus;
+
+    impl Driver for TestBus {
+        const NAME: &'static str = "testbus";
+        const IDS: Ids = Ids::Test(&[TestId {
+            model: 1,
+            rank: Rank::DEFAULT,
+        }]);
+        fn describe(_: &Ident) -> String {
+            "Test bus".into()
+        }
+        fn attach(_: &mut AttachCx<'_>) -> Result<Self, AttachError> {
+            Ok(Self)
+        }
+        fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
+            for page in &PAGES {
+                let mem = Resource::Memory {
+                    base: page.load(Ordering::Relaxed),
+                    len: 4096,
+                    prefetchable: false,
+                };
+                cx.add_child(Ident::Test(TestIdent { model: 2 }), None, vec![mem]);
+            }
+            cx.add_child(Ident::Test(TestIdent { model: 4 }), None, vec![]);
+            cx.add_child(Ident::Test(TestIdent { model: 5 }), None, vec![]);
+            Ok(())
+        }
+        fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
+    }
+
+    pub(crate) struct TestDev {
+        regs: MmioGrant<Fake>,
+    }
+
+    impl Driver for TestDev {
+        const NAME: &'static str = "testdev";
+        const IDS: Ids = Ids::Test(&[TestId {
+            model: 2,
+            rank: Rank::DEFAULT,
+        }]);
+        fn describe(_: &Ident) -> String {
+            "Test device".into()
+        }
+        fn attach(cx: &mut AttachCx<'_>) -> Result<Self, AttachError> {
+            let regs = cx.mmio::<Fake>(0)?;
+            regs.write(Fake::VALUE, 0xabcd_0000 | cx.unit());
+            Ok(Self { regs })
+        }
+        fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {
+            self.regs.write(Fake::VALUE, 0x5709);
+        }
+    }
+
+    /// Claims model 4 at a high rank, then declines it.
+    pub(crate) struct Picky;
+
+    impl Driver for Picky {
+        const NAME: &'static str = "picky";
+        const IDS: Ids = Ids::Test(&[TestId {
+            model: 4,
+            rank: Rank::VENDOR,
+        }]);
+        fn describe(_: &Ident) -> String {
+            "Picky".into()
+        }
+        fn attach(_: &mut AttachCx<'_>) -> Result<Self, AttachError> {
+            Err(AttachError::Decline)
+        }
+        fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
+    }
+
+    /// Takes model 4 at a generic rank.
+    pub(crate) struct Fallback;
+
+    impl Driver for Fallback {
+        const NAME: &'static str = "fallback";
+        const IDS: Ids = Ids::Test(&[TestId {
+            model: 4,
+            rank: Rank::GENERIC,
+        }]);
+        fn describe(_: &Ident) -> String {
+            "Fallback".into()
+        }
+        fn attach(_: &mut AttachCx<'_>) -> Result<Self, AttachError> {
+            Ok(Self)
+        }
+        fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
+    }
+
+    /// Fails to attach model 5.
+    pub(crate) struct Broken;
+
+    impl Driver for Broken {
+        const NAME: &'static str = "broken";
+        const IDS: Ids = Ids::Test(&[TestId {
+            model: 5,
+            rank: Rank::DEFAULT,
+        }]);
+        fn describe(_: &Ident) -> String {
+            "Broken".into()
+        }
+        fn attach(_: &mut AttachCx<'_>) -> Result<Self, AttachError> {
+            Err(AttachError::Device("broken on purpose"))
+        }
+        fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
+    }
+
+    pub(crate) const TEST_BUS: DriverDecl = DriverDecl::of::<TestBus>();
+    pub(crate) const TEST_DEV: DriverDecl = DriverDecl::of::<TestDev>();
+    pub(crate) const PICKY: DriverDecl = DriverDecl::of::<Picky>();
+    pub(crate) const FALLBACK: DriverDecl = DriverDecl::of::<Fallback>();
+    pub(crate) const BROKEN: DriverDecl = DriverDecl::of::<Broken>();
+}
+
+ktest! {
+    fn device_manager_lifecycle() {
+        use bus::{DetachReason, Ident, NodeState, TestIdent};
+        use bus_test::PAGES;
+        let s = cx();
+        let m = bus::manager();
+        let pages: alloc::vec::Vec<addr::PhysAddr> =
+            (0..2).map(|_| crate::mm::alloc_pages(vm::Order::ZERO).expect("page")).collect();
+        for (slot, pa) in PAGES.iter().zip(&pages) {
+            slot.store(pa.get(), Ordering::Relaxed);
+        }
+        let word = |pa: addr::PhysAddr| {
+            let va = bootproto::layout::dmap(pa).unwrap().get() as *const u32;
+            // SAFETY: a RAM page this test owns, through the direct map.
+            unsafe { va.read_volatile() }
+        };
+        let _ = m.take_events();
+
+        for round in 0..2 {
+            let tb = m.add_child(&s, m.root(), Ident::Test(TestIdent { model: 1 }), None, alloc::vec![], &[]);
+            m.wait_idle(&s);
+            let snap = m.snapshot(&s);
+            let names: alloc::vec::Vec<&str> = snap.iter().map(|n| n.2.as_str()).collect();
+            for want in ["testbus0", "testdev0", "testdev1", "fallback0"] {
+                assert!(names.contains(&want), "round {round}: {want} missing from {names:?}");
+            }
+            assert!(!names.contains(&"picky0"), "the declining driver keeps no unit");
+            let broken = snap.iter().find(|n| matches!(n.4, NodeState::Failed(_)));
+            assert!(broken.is_some(), "the failing device is Failed");
+            assert_eq!(broken.unwrap().2, "", "a failed attach frees its unit");
+            // The drivers wrote through their mappings.
+            let mut written = [word(pages[0]), word(pages[1])];
+            written.sort_unstable();
+            assert_eq!(written, [0xabcd_0000, 0xabcd_0001]);
+
+            let events = m.take_events();
+            assert!(events.iter().any(|e| e.starts_with("+testbus0 at  model=1 on root0")), "{events:?}");
+            assert!(events.iter().any(|e| e.starts_with("+testdev1 at  model=2 on testbus0")), "{events:?}");
+
+            // Detach: children first, stop runs, mappings go, children are
+            // deleted with their bus.
+            m.detach(tb, DetachReason::Requested, &s).expect("detach");
+            assert_eq!(word(pages[0]), 0x5709, "stop ran before the unmap");
+            let after: alloc::vec::Vec<alloc::string::String> =
+                m.snapshot(&s).into_iter().map(|n| n.2).collect();
+            assert!(!after.iter().any(|n| n.starts_with("testdev") || n.starts_with("fallback")), "{after:?}");
+            let events = m.take_events();
+            assert!(events.iter().any(|e| e.starts_with("-testdev0 at ")), "{events:?}");
+            assert!(events.iter().any(|e| e.starts_with("-testbus0 at ")), "{events:?}");
+            assert_eq!(m.state(tb, &s), Some(NodeState::NotPresent));
+        }
+        for pa in pages {
+            crate::mm::free_pages(pa, vm::Order::ZERO);
+        }
+    }
+}
+
+ktest! {
+    fn gates_drain_and_refuse() {
+        use alloc::sync::Arc;
+        use core::sync::atomic::{AtomicBool, AtomicU64};
+        let s = cx();
+        let gate = Arc::new(bus::Gate::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let entered = Arc::new(AtomicU64::new(0));
+        let workers: alloc::vec::Vec<_> = (0..3)
+            .map(|_| {
+                let (g, st, n) = (Arc::clone(&gate), Arc::clone(&stop), Arc::clone(&entered));
+                sched::spawn("gate", sched::Priority::KERNEL, move |_| {
+                    while !st.load(Ordering::Acquire) {
+                        if let Ok(_guard) = g.enter() {
+                            n.fetch_add(1, Ordering::Relaxed);
+                            core::hint::spin_loop();
+                        }
+                    }
+                })
+                .unwrap()
+            })
+            .collect();
+        while entered.load(Ordering::Relaxed) < 1000 {
+            crate::time::sleep_ns(&s, 100_000);
+        }
+        gate.revoke(&s);
+        let after = entered.load(Ordering::Relaxed);
+        crate::time::sleep_ns(&s, 2_000_000);
+        assert!(gate.enter().is_err());
+        // Calls that entered before the revocation finished; none since.
+        assert!(entered.load(Ordering::Relaxed) <= after + 3);
+        stop.store(true, Ordering::Release);
+        for w in workers {
+            w.join(&s);
+        }
+    }
+}

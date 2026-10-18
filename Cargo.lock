@@ -41,6 +41,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "bus"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "devtree",
+ "hal",
+ "irq",
+ "regs",
+ "sched",
+ "sync",
+ "sysctl",
+ "vm",
+]
+
+[[package]]
 name = "crc"
 version = "0.0.0"
 
@@ -116,7 +131,9 @@ dependencies = [
  "arch-aarch64",
  "arch-x86_64",
  "bootproto",
+ "bus",
  "demangle",
+ "devtree",
  "efi",
  "elf",
  "fb-console",

@@ -496,6 +496,26 @@ pub(crate) fn map_device(pa: PhysAddr, len: u64) -> Result<VirtAddr, DeviceMapEr
 /// Unmaps `[va, va + len)` from the kernel table, removes the stale
 /// translations from every CPU, and frees the frames. Call from thread
 /// context with interrupts enabled (the shootdown waits for other CPUs).
+/// Undoes [`map_device`]: unmaps the registers (the frames are the
+/// device's, not freed) and returns the address range.
+pub(crate) fn unmap_device(va: VirtAddr, len: u64) {
+    let off = va.get() % 4096;
+    let Some(span) = addr::align_up(len + off, 4096) else {
+        return;
+    };
+    let base = va - off;
+    {
+        let mut map = KERNEL_MAP.lock();
+        map.as_mut()
+            .expect("kernel map")
+            .unmap(&mut Frames, base, span, |_| {})
+            .unwrap_or_else(|e| panic!("unmapping device {va:?}+{len:#x}: {e:?}"));
+    }
+    flush_range(base, span);
+    crate::smp::shootdown(base, span);
+    let _ = KVA.lock().free(base.get(), span);
+}
+
 pub(crate) fn unmap_and_free(va: VirtAddr, len: u64) {
     let mut freed = alloc::vec::Vec::new();
     {
