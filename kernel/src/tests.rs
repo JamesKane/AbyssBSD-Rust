@@ -1541,7 +1541,7 @@ ktest! {
             virtio += usize::from(i.vendor == 0x1af4);
             lines.push(line);
         }
-        assert!(virtio >= 2, "virtio functions on pci0");
+        assert!(virtio >= 1, "virtio functions on pci0");
         if m.description(acpi0, &s).as_deref() == Some("BHYVE BVFACP ") {
             // Differential: each function's pnpinfo and location as FreeBSD
             // 15.1 recorded them in bhyve (the recording's VM has more
@@ -1665,5 +1665,44 @@ ktest! {
         );
         assert!(nonzero, "the device wrote entropy");
         assert!(taken >= READS, "each completion arrived by interrupt");
+    }
+}
+
+ktest! {
+    fn pci_bridge_and_the_bus_behind_it() {
+        let s = cx();
+        let m = bus::manager();
+        let nexus = crate::devices::nexus();
+        let acpi0 = find_named(m, &s, nexus, "acpi0").map(|(_, a)| a);
+        if acpi0.and_then(|a| m.description(a, &s)).as_deref() == Some("BHYVE BVFACP ") {
+            kprintln!("(the bhyve VM has no bridges)");
+            return;
+        }
+        // QEMU's virtio-rng sits behind a PCIe root port (xtask).
+        let (_, pci0) = find_named(m, &s, nexus, "pci0").expect("pci0");
+        let bridge = m
+            .children(pci0, &s)
+            .into_iter()
+            .find(|&c| m.nameunit(c, &s).is_some_and(|n| n.starts_with("pcib")))
+            .expect("a PCI-PCI bridge on pci0");
+        let desc = m.description(bridge, &s).unwrap_or_default();
+        assert!(desc == "ACPI PCI-PCI bridge" || desc == "PCI-PCI bridge", "{desc:?}");
+        let buses = m.children(bridge, &s);
+        assert_eq!(buses.len(), 1, "one bus behind the bridge");
+        let pci1 = buses[0];
+        let Some(bus::Ident::PciBus { bus: number, acpi, .. }) = m.ident(pci1, &s) else {
+            panic!("the bridge's child is not a PCI bus");
+        };
+        assert!(number > 0);
+        assert_eq!(acpi, desc.starts_with("ACPI"), "pci1 is an ACPI bus when its bridge is");
+        assert_eq!(m.state(pci1, &s), Some(bus::NodeState::Attached));
+        let (transport, _) = find_named(m, &s, pci1, "vtrnd0").expect("vtrnd0 behind the bridge");
+        kprintln!(
+            "{} <{desc}> -> {} <{}> (bus {number}) -> {} -> vtrnd0",
+            m.nameunit(bridge, &s).unwrap_or_default(),
+            m.nameunit(pci1, &s).unwrap_or_default(),
+            m.description(pci1, &s).unwrap_or_default(),
+            m.nameunit(transport, &s).unwrap_or_default(),
+        );
     }
 }

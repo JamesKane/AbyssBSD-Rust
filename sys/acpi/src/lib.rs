@@ -23,7 +23,7 @@ pub mod pcib;
 pub mod service;
 
 pub use bus::{AcpiBus, AcpiDevice, DRIVER};
-pub use pcib::{AcpiPcib, PCIB};
+pub use pcib::{AcpiPciBridge, AcpiPcib, PCI_PCI_BRIDGE, PCIB};
 pub use service::{LoadSummary, init, service};
 
 use alloc::vec::Vec;

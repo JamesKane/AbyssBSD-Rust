@@ -281,3 +281,60 @@ fn ecam_rejects_out_of_range_addresses() {
     assert_eq!(ecam.read32(a, 4096), u32::MAX);
     ecam.write32(PciAddress { bus: 3, ..a }, 0, 0);
 }
+
+#[test]
+fn interrupts_swizzle_through_bridges() {
+    use ::bus::Resource;
+    use alloc::vec::Vec;
+    let line = |hw| Resource::Irq {
+        domain: &irq_test::NONE,
+        hw,
+        trigger: irq::Trigger::Level,
+        polarity: irq::Polarity::Low,
+    };
+    // A bridge in slot 2 whose four pins reach lines 10..13.
+    let parent: Vec<(u8, u8, Resource)> = (0..4).map(|p| (2, p, line(10 + u32::from(p)))).collect();
+    let routes = crate::bridge::swizzle(&parent, 2);
+    assert_eq!(routes.len(), 32 * 4);
+    let hw = |slot: u8, pin: u8| {
+        routes
+            .iter()
+            .find(|(s, p, _)| *s == slot && *p == pin)
+            .map(|(_, _, r)| match r {
+                Resource::Irq { hw, .. } => *hw,
+                _ => unreachable!(),
+            })
+    };
+    // Slot 0 INTA arrives at the bridge's INTA; slot 1 INTA at its INTB;
+    // slot 3 INTD at INTC ((3 + 3) % 4 = 2).
+    assert_eq!(hw(0, 0), Some(10));
+    assert_eq!(hw(1, 0), Some(11));
+    assert_eq!(hw(3, 3), Some(12));
+    // A bridge with no routes of its own passes none on.
+    assert!(crate::bridge::swizzle(&parent, 5).is_empty());
+}
+
+mod irq_test {
+    /// A domain for resources that are never installed.
+    pub(super) struct None;
+
+    impl irq::IrqDomain for None {
+        fn name(&self) -> &'static str {
+            "none"
+        }
+        fn connect(
+            &self,
+            _: u32,
+            _: irq::Trigger,
+            _: irq::Polarity,
+            _: hal::CpuId,
+        ) -> Result<u32, irq::IrqError> {
+            Err(irq::IrqError::NoSuchInput)
+        }
+        fn disconnect(&self, _: u32, _: hal::CpuId, _: u32) {}
+        fn mask(&self, _: u32) {}
+        fn unmask(&self, _: u32) {}
+    }
+
+    pub(super) static NONE: None = None;
+}

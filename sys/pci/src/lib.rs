@@ -9,6 +9,7 @@
 //! - [`enumerate`]: scanning a bus, and the depth-first walk of a host
 //!   bridge's buses.
 //! - [`bus`]: the `pci` bus driver.
+//! - [`bridge`]: the PCI-PCI bridge driver.
 //! - [`msi`]: MSI and MSI-X as an interrupt domain.
 //!
 //! Everything read from a device is untrusted: lists are walked with
@@ -27,6 +28,7 @@
 extern crate alloc;
 
 pub mod bar;
+pub mod bridge;
 pub mod bus;
 pub mod caps;
 pub mod config;

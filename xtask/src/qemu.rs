@@ -354,7 +354,15 @@ impl Vm {
             c.args(["-device", "virtio-blk-pci,drive=disk1"]);
         }
         // Gives firmware an EFI_RNG_PROTOCOL, the loader's KASLR source.
-        c.args(["-device", "virtio-rng-pci"]);
+        // It sits behind a PCIe root port so a PCI-PCI bridge, and
+        // interrupts through one, are always under test.
+        // (Conventional PCI machines such as `pc` have no root ports.)
+        if self.machine.is_none() {
+            c.args(["-device", "pcie-root-port,id=rp0,chassis=1,slot=1"]);
+            c.args(["-device", "virtio-rng-pci,bus=rp0"]);
+        } else {
+            c.args(["-device", "virtio-rng-pci"]);
+        }
         if self.arch == Arch::Aarch64 {
             // `virt` has no display; ramfb gives edk2 a linear-framebuffer
             // GOP (virtio-gpu's GOP is blit-only).

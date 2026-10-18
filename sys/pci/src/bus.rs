@@ -29,6 +29,8 @@ pub struct PciBusData {
     pub adr_paths: Vec<(u32, String)>,
     /// INTx routing: (slot, pin 0 = INTA .. 3 = INTD) to an interrupt.
     pub intx: Vec<(u8, u8, Resource)>,
+    /// Bridges above the bus (0 behind a host bridge).
+    pub depth: u8,
 }
 
 impl core::fmt::Debug for PciBusData {
@@ -46,6 +48,8 @@ pub struct PciChild {
     pub cfg: &'static (dyn ConfigSpace + Sync),
     /// What enumeration found.
     pub function: Function,
+    /// The bus it is on (a bridge routes its interrupts through it).
+    pub bus: Arc<PciBusData>,
 }
 
 impl core::fmt::Debug for PciChild {
@@ -146,13 +150,14 @@ impl Driver for PciBus {
     }
 
     fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
-        for f in scan(self.data.cfg, self.domain, self.bus, 0) {
+        for f in scan(self.data.cfg, self.domain, self.bus, self.data.depth) {
             let res = resources(&f, &self.data);
             let path = acpi_path(&self.data, f.addr);
             let ident = Ident::Pci(f.header.ident, f.addr, path);
             let child = PciChild {
                 cfg: self.data.cfg,
                 function: f,
+                bus: Arc::clone(&self.data),
             };
             cx.add_child(ident, Some(Arc::new(child)), res);
         }

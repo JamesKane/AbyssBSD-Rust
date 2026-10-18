@@ -19,7 +19,9 @@ use bus::DriverDecl;
 pub static DRIVERS: &[DriverDecl] = &[
     acpi::DRIVER,
     acpi::PCIB,
+    acpi::PCI_PCI_BRIDGE,
     pci::bus::DRIVER,
+    pci::bridge::DRIVER,
     virtio::pci::MODERN,
     virtio::pci::LEGACY,
     virtio_random::DRIVER,
