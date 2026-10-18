@@ -17,12 +17,16 @@
 mod heap;
 pub(crate) mod kstack;
 
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use addr::{PhysAddr, VirtAddr};
 use bootproto::layout::{KVA_BASE, KVA_SIZE, dmap};
 use bootproto::{BootInfo, MemoryKind, MemoryRegion};
+use hal::MAX_CPUS;
 use pt::{Attrs, Frame, PageTable};
 use sync::SpinLock;
-use vm::phys::{self, DomainId, PhysAllocator, Segment, VmPage};
+use vm::phys::{self, DomainId, PageMagazine, PhysAllocator, Segment, VmPage};
 use vm::vmem::{Vmem, VmemError};
 use vm::{Order, Pfn};
 
@@ -105,31 +109,97 @@ static FRAMES: SpinLock<BootFrames> = SpinLock::new(BootFrames::new());
 /// The buddy allocator, once [`init`] has built it.
 static PHYS: SpinLock<Option<PhysAllocator<'static>>> = SpinLock::new(None);
 
-/// Allocates a block of `order` from the buddy allocator.
+/// Each CPU's cache of single pages, touched only by that CPU with
+/// interrupts masked.
+struct PageCaches([UnsafeCell<PageMagazine>; MAX_CPUS]);
+
+// SAFETY: see the type's comment: a CPU's slot is only used by that CPU,
+// with interrupts masked so nothing on it can interleave.
+unsafe impl Sync for PageCaches {}
+
+static PAGE_CACHES: PageCaches =
+    PageCaches([const { UnsafeCell::new(PageMagazine::new()) }; MAX_CPUS]);
+/// How many pages each CPU's cache holds (they count as free in
+/// [`phys_stats`]). Written only by the owning CPU, on its own cache line.
+#[repr(align(64))]
+struct CachedCount(AtomicU64);
+static CACHED_PAGES: [CachedCount; MAX_CPUS] = [const { CachedCount(AtomicU64::new(0)) }; MAX_CPUS];
+
+/// Runs `f` on this CPU's page cache with interrupts masked, then
+/// publishes the cache's size.
+fn with_page_cache<R>(f: impl FnOnce(&mut PageMagazine) -> R) -> R {
+    let irq = hal::irq::disable();
+    let cpu = hal::cpu_id().index();
+    // SAFETY: this CPU's slot, interrupts masked (see `PageCaches`).
+    let m = unsafe { &mut *PAGE_CACHES.0[cpu].get() };
+    let r = f(m);
+    CACHED_PAGES[cpu].0.store(m.len() as u64, Ordering::Relaxed);
+    hal::irq::restore(irq);
+    r
+}
+
+/// Allocates a block of `order` from the buddy allocator (single pages
+/// through this CPU's cache).
 pub(crate) fn alloc_pages(order: Order) -> Option<PhysAddr> {
-    PHYS.lock()
-        .as_mut()?
-        .alloc(order, DomainId(0))
-        .map(Pfn::addr)
+    if order != Order::ZERO {
+        return PHYS
+            .lock()
+            .as_mut()?
+            .alloc(order, DomainId(0))
+            .map(Pfn::addr);
+    }
+    with_page_cache(|m| {
+        if m.is_empty() {
+            m.refill(PHYS.lock().as_mut()?, DomainId(0));
+        }
+        m.pop().map(Pfn::addr)
+    })
 }
 
 /// Returns a block from [`alloc_pages`]. A bad free is a kernel bug.
 pub(crate) fn free_pages(pa: PhysAddr, order: Order) {
+    let pfn = Pfn::containing(pa);
+    if order == Order::ZERO {
+        let cached = with_page_cache(|m| {
+            if m.push(pfn).is_ok() {
+                return true;
+            }
+            let r = m.drain(
+                PHYS.lock()
+                    .as_mut()
+                    .expect("free_pages before the buddy allocator"),
+                false,
+            );
+            if let Err(e) = r {
+                panic!("free_pages: {e}");
+            }
+            m.push(pfn).is_ok()
+        });
+        if cached {
+            return;
+        }
+    }
     let mut phys = PHYS.lock();
     let phys = phys
         .as_mut()
         .expect("free_pages before the buddy allocator");
-    if let Err(e) = phys.free(Pfn::containing(pa), order) {
+    if let Err(e) = phys.free(pfn, order) {
         panic!("free_pages: {e}");
     }
 }
 
-/// Frame counts from the buddy allocator.
+/// Frame counts from the buddy allocator; cached pages count as free.
 pub(crate) fn phys_stats() -> phys::Stats {
-    PHYS.lock()
+    let mut s = PHYS
+        .lock()
         .as_ref()
         .map(PhysAllocator::stats)
-        .unwrap_or_default()
+        .unwrap_or_default();
+    s.free += CACHED_PAGES
+        .iter()
+        .map(|c| c.0.load(Ordering::Relaxed))
+        .sum::<u64>();
+    s
 }
 
 /// Page-table frames: from the boot allocator, then the buddy allocator.

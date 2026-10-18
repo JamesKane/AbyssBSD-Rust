@@ -176,6 +176,12 @@ pub fn send_ipi(dest: u32, vector: u8) {
     send_icr(dest, u32::from(vector));
 }
 
+/// Sends `vector` to every CPU but this one (the "all excluding self"
+/// shorthand: one register write instead of one per CPU).
+pub fn send_ipi_all_but_self(vector: u8) {
+    send_icr(0, u32::from(vector) | (0b11 << 18));
+}
+
 /// Sends INIT to `dest` (SMP start-up).
 pub fn send_init(dest: u32) {
     // INIT, level assert, edge.

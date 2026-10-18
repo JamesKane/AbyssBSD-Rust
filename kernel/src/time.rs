@@ -8,6 +8,11 @@
 //!   virtual timer). It is programmed for the earliest of that CPU's
 //!   pending callouts and, when threads are waiting to run, the end of the
 //!   current time slice. With neither, it stays off (tickless idle).
+//! - Programming the timer is costly (under a hypervisor, a VM exit), so
+//!   it is reprogrammed only to move the deadline earlier. A deadline that
+//!   is no longer needed is left to fire: the handler finds nothing due
+//!   and programs the next one, if any. Context switches and cancelled
+//!   callouts therefore touch no timer hardware.
 //! - Callouts run in interrupt context on the CPU that armed them.
 //!
 //! Behavior reference: sys/kern/kern_tc.c, sys/kern/kern_clocksource.c,
@@ -134,8 +139,15 @@ impl Callout {
     pub(crate) fn forget(self) {}
 }
 
-/// Programs this CPU's event timer for its next deadline. Interrupts must
-/// be masked.
+/// No deadline programmed.
+const UNARMED: u64 = u64::MAX;
+
+/// Each CPU's programmed deadline, in counter ticks, or [`UNARMED`].
+/// Written only by its own CPU with interrupts masked.
+static PROGRAMMED: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(UNARMED) }; MAX_CPUS];
+
+/// Makes sure this CPU's event timer fires by its next deadline.
+/// Interrupts must be masked.
 fn reprogram() {
     let cpu = hal::cpu_id();
     let next_callout = TIMERS[cpu.index()]
@@ -144,9 +156,12 @@ fn reprogram() {
         .first_key_value()
         .map(|(k, _)| k.0);
     let slice = sched::slice_deadline(ns_to_ticks(SLICE_NS));
-    match [next_callout, slice].into_iter().flatten().min() {
-        Some(deadline) => set_deadline(deadline),
-        None => cancel_deadline(),
+    let programmed = &PROGRAMMED[cpu.index()];
+    if let Some(deadline) = [next_callout, slice].into_iter().flatten().min()
+        && deadline < programmed.load(Ordering::Relaxed)
+    {
+        programmed.store(deadline, Ordering::Relaxed);
+        set_deadline(deadline);
     }
 }
 
@@ -157,13 +172,6 @@ fn set_deadline(ticks: u64) {
     arch::timer::set_deadline(ticks);
 }
 
-fn cancel_deadline() {
-    #[cfg(target_arch = "x86_64")]
-    arch::apic::cancel_deadline();
-    #[cfg(target_arch = "aarch64")]
-    arch::timer::cancel_deadline();
-}
-
 /// Timer interrupts taken, per CPU (diagnostics).
 static TICKS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
@@ -172,6 +180,8 @@ static TICKS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 pub(crate) fn on_timer() {
     let cpu = hal::cpu_id();
     TICKS[cpu.index()].fetch_add(1, Ordering::Relaxed);
+    // The one-shot deadline is spent.
+    PROGRAMMED[cpu.index()].store(UNARMED, Ordering::Relaxed);
     loop {
         let now = counter();
         let mut t = TIMERS[cpu.index()].lock();
@@ -189,6 +199,13 @@ pub(crate) fn on_timer() {
     }
     sched::tick(ns_to_ticks(SLICE_NS));
     reprogram();
+    // The generic timer's interrupt is a level: left enabled with a past
+    // deadline it fires again at once. (x86's one-shot modes disarm
+    // themselves.)
+    #[cfg(target_arch = "aarch64")]
+    if PROGRAMMED[cpu.index()].load(Ordering::Relaxed) == UNARMED {
+        arch::timer::cancel_deadline();
+    }
 }
 
 /// Re-arms this CPU's timer after a context switch or wakeup changed what

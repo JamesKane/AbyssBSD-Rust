@@ -52,6 +52,7 @@ cargo xtask test --tier unit          # host unit tests (bare `cargo test` does 
 cargo xtask test --tier boot          # test loader + kernel in QEMU: x86_64, aarch64 (EL1, EL2), warm reset
 cargo xtask --remote test --tier boot --arch x86_64   # the same on the server, plus bhyve
 cargo xtask test --tier stress --duration 600   # P2 stress test, 64 threads on -smp 8, both arches
+cargo xtask --remote perf --suite p2  # benchmarks vs FreeBSD 15.1 in bhyve (PERFORMANCE.md §6)
 cargo xtask run --arch aarch64        # interactive QEMU (Ctrl-A X quits); --cmdline abyss.halt=1 keeps it up
 cargo xtask check                     # fmt, clippy for host and UEFI targets, policy
 cargo xtask syscallgen --check        # generated syscall table matches ../freebsd-src

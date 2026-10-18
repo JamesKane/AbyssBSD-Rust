@@ -132,6 +132,8 @@ mod hal_hooks {
     const _: hal::CpuLocalFn = abyss_hal_cpu_local;
     const _: hal::SetCpuLocalFn = abyss_hal_set_cpu_local;
     const _: hal::WaitForInterruptFn = abyss_hal_wait_for_interrupt;
+    const _: hal::CurrentThreadFn = abyss_hal_current_thread;
+    const _: hal::SetCurrentThreadFn = abyss_hal_set_current_thread;
     const _: hal::FpuSizeFn = abyss_hal_fpu_size;
     const _: hal::FpuAreaFn = abyss_hal_fpu_init;
     const _: hal::FpuAreaFn = abyss_hal_fpu_save;
@@ -170,6 +172,16 @@ mod hal_hooks {
     #[unsafe(no_mangle)]
     fn abyss_hal_set_cpu_local(p: *mut ()) {
         crate::cpu::set_cpu_local(p);
+    }
+
+    #[unsafe(no_mangle)]
+    fn abyss_hal_current_thread() -> *const () {
+        crate::cpu::current_thread()
+    }
+
+    #[unsafe(no_mangle)]
+    fn abyss_hal_set_current_thread(p: *const ()) {
+        crate::cpu::set_current_thread(p);
     }
 
     #[unsafe(no_mangle)]

@@ -150,7 +150,7 @@ P3.3 (from the start, pure crate) ────────┘   P3.8 ─┴─�
 **P3.0 Benchmark harness, and closing Phase 2.**
 - `tests/perf/kbench`: a FreeBSD kernel module, built on the server against the 15.1 sources.
 - An in-kernel harness that prints the same format.
-- `cargo xtask bench`: runs both in identical bhyve VMs and compares the results.
+- `cargo xtask perf`: runs both in identical bhyve VMs and compares the results.
 - The P2 suite at ≤2% on bhyve (aarch64 numbers recorded under TCG).
 - The FreeBSD reference VMs, and the first recordings from them.
 

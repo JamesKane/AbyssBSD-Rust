@@ -439,6 +439,102 @@ impl<'a> PhysAllocator<'a> {
     }
 }
 
+/// A per-CPU cache of free single pages in front of the buddy allocator,
+/// so that most single-page allocations and frees take no shared lock. It
+/// refills and drains [`Self::BATCH`] pages at a time, so a CPU that
+/// alternates between allocating and freeing settles in the middle.
+///
+/// Pages in a magazine count as allocated to the buddy allocator. A double
+/// free of a cached page is not caught here, only once it is drained.
+///
+/// Behavior reference: sys/vm/vm_page.c (the per-CPU page caches).
+#[derive(Debug)]
+pub struct PageMagazine {
+    pfns: [Pfn; PageMagazine::CAPACITY],
+    len: usize,
+}
+
+impl PageMagazine {
+    /// Pages a magazine holds.
+    pub const CAPACITY: usize = 64;
+    /// Pages moved to or from the buddy allocator at a time.
+    pub const BATCH: usize = Self::CAPACITY / 2;
+
+    /// An empty magazine.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            pfns: [Pfn(0); Self::CAPACITY],
+            len: 0,
+        }
+    }
+
+    /// Pages held.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether it holds no pages.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Takes a cached page.
+    pub fn pop(&mut self) -> Option<Pfn> {
+        self.len = self.len.checked_sub(1)?;
+        Some(self.pfns[self.len])
+    }
+
+    /// Caches a free page; gives it back if the magazine is full.
+    pub fn push(&mut self, pfn: Pfn) -> Result<(), Pfn> {
+        if self.len == Self::CAPACITY {
+            return Err(pfn);
+        }
+        self.pfns[self.len] = pfn;
+        self.len += 1;
+        Ok(())
+    }
+
+    /// Moves up to [`Self::BATCH`] single pages from `a` (from `domain`)
+    /// into the magazine. Returns how many.
+    pub fn refill(&mut self, a: &mut PhysAllocator<'_>, domain: DomainId) -> usize {
+        let want = Self::BATCH.min(Self::CAPACITY - self.len);
+        let mut got = 0;
+        while got < want {
+            let Some(p) = a.alloc(Order::ZERO, domain) else {
+                break;
+            };
+            self.pfns[self.len] = p;
+            self.len += 1;
+            got += 1;
+        }
+        got
+    }
+
+    /// Returns up to [`Self::BATCH`] pages to `a`: half the magazine when
+    /// it is full, or everything (`all`).
+    pub fn drain(&mut self, a: &mut PhysAllocator<'_>, all: bool) -> Result<(), FreeError> {
+        let n = if all {
+            self.len
+        } else {
+            Self::BATCH.min(self.len)
+        };
+        for _ in 0..n {
+            self.len -= 1;
+            a.free(self.pfns[self.len], Order::ZERO)?;
+        }
+        Ok(())
+    }
+}
+
+impl Default for PageMagazine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -643,6 +739,34 @@ mod tests {
             for d in [DomainId(0), DomainId(1)] {
                 assert_eq!(a.free_blocks(d), fresh.free_blocks(d));
             }
+        });
+    }
+
+    #[test]
+    fn magazine_batches() {
+        with(&[seg(0, 256, 0)], |a| {
+            a.add_free(Pfn(0), Pfn(256));
+            let total = a.stats().free;
+            let mut m = PageMagazine::new();
+            assert_eq!(m.pop(), None);
+            assert_eq!(m.refill(a, DomainId(0)), PageMagazine::BATCH);
+            assert_eq!(a.stats().free, total - PageMagazine::BATCH as u64);
+            let mut held: Vec<Pfn> = (0..PageMagazine::BATCH).map(|_| m.pop().unwrap()).collect();
+            assert!(m.is_empty());
+            for p in held.drain(..) {
+                m.push(p).unwrap();
+            }
+            // Fill to capacity, then the next push is refused.
+            m.refill(a, DomainId(0));
+            assert_eq!(m.len(), PageMagazine::CAPACITY);
+            let extra = a.alloc(Order::ZERO, DomainId(0)).unwrap();
+            assert_eq!(m.push(extra), Err(extra));
+            m.drain(a, false).unwrap();
+            assert_eq!(m.len(), PageMagazine::CAPACITY - PageMagazine::BATCH);
+            m.push(extra).unwrap();
+            m.drain(a, true).unwrap();
+            assert!(m.is_empty());
+            assert_eq!(a.stats().free, total);
         });
     }
 }

@@ -40,15 +40,23 @@ pub(crate) fn set_hw_id(cpu: CpuId, id: u64) {
     HW_ID[cpu.index()].store(id, Ordering::Release);
 }
 
-/// Sends the TLB shootdown IPI to `cpu` (x86 only).
-#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
-pub(crate) fn send_tlb_shootdown(cpu: CpuId) {
+/// Sends the cross-call IPI (TLB shootdowns, pings) to `cpu`.
+pub(crate) fn send_call(cpu: CpuId) {
+    let Some(id) = hw_id(cpu) else {
+        return;
+    };
     #[cfg(target_arch = "x86_64")]
-    if let Some(id) = hw_id(cpu) {
-        arch::apic::send_ipi(u32::try_from(id).unwrap_or(0), TLB_VECTOR);
-    }
+    arch::apic::send_ipi(u32::try_from(id).unwrap_or(0), CALL_VECTOR);
     #[cfg(target_arch = "aarch64")]
-    let _ = cpu;
+    arch::gic::send_sgi(id, CALL_SGI);
+}
+
+/// Sends the cross-call IPI to every CPU but this one, with one write
+/// (x86's destination shorthand). Every CPU that can take it must be
+/// online: see `smp::BROADCAST`.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn send_call_all_but_self() {
+    arch::apic::send_ipi_all_but_self(CALL_VECTOR);
 }
 
 /// Asks `cpu` to reschedule.
@@ -72,7 +80,7 @@ pub(crate) fn dispatch(irq: arch::Interrupt) {
             // The waker set `need_resched` if the newcomer should preempt;
             // either way, re-arm for the changed run queue.
             RESCHED_VECTOR => crate::time::rearm(),
-            TLB_VECTOR => crate::smp::on_shootdown_ipi(),
+            CALL_VECTOR => crate::smp::on_call_ipi(),
             arch::apic::ERROR_VECTOR => kprintln!("apic: error interrupt"),
             v => stray(u32::from(v)),
         }
@@ -86,6 +94,8 @@ pub(crate) fn dispatch(irq: arch::Interrupt) {
         };
         if id == u32::from(RESCHED_SGI) {
             crate::time::rearm();
+        } else if id == u32::from(CALL_SGI) {
+            crate::smp::on_call_ipi();
         } else if id == TIMER_PPI.load(Ordering::Relaxed) {
             crate::time::on_timer();
         } else {
@@ -105,7 +115,7 @@ fn stray(id: u32) {
 #[cfg(target_arch = "x86_64")]
 const RESCHED_VECTOR: u8 = arch::apic::IPI_BASE;
 #[cfg(target_arch = "x86_64")]
-const TLB_VECTOR: u8 = arch::apic::IPI_BASE + 1;
+const CALL_VECTOR: u8 = arch::apic::IPI_BASE + 1;
 
 /// Sets up this (non-boot) CPU's local APIC.
 #[cfg(target_arch = "x86_64")]
@@ -218,6 +228,8 @@ fn pm_wait_tsc(ns: u64) -> Option<u64> {
 
 #[cfg(target_arch = "aarch64")]
 const RESCHED_SGI: u8 = 0;
+#[cfg(target_arch = "aarch64")]
+const CALL_SGI: u8 = 1;
 
 /// The timer's interrupt ID.
 #[cfg(target_arch = "aarch64")]
@@ -303,4 +315,5 @@ fn init_this_cpu(cpu: CpuId) {
     let edge = timer.is_some_and(|t| t.flags.edge_triggered());
     gic::enable_private(gicr, TIMER_PPI.load(Ordering::Relaxed), edge);
     gic::enable_private(gicr, u32::from(RESCHED_SGI), true);
+    gic::enable_private(gicr, u32::from(CALL_SGI), true);
 }

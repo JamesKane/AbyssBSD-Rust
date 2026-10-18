@@ -53,8 +53,13 @@ pub(crate) fn sync() -> Result<()> {
 pub(crate) fn run(args: &[String]) -> Result<()> {
     sync()?;
     let quoted: Vec<String> = args.iter().map(|a| quote(a)).collect();
+    // The mirror has no .git; tell the remote side what it is running.
+    let rev =
+        util::output(Command::new("git").args(["describe", "--always", "--dirty", "--abbrev=12"]))
+            .map_or_else(|_| "unknown".into(), |r| r.trim().to_owned());
     let script = format!(
-        "cd {REMOTE_DIR} && PATH=$HOME/.cargo/bin:$PATH cargo xtask {}",
+        "cd {REMOTE_DIR} && ABYSS_REV={} PATH=$HOME/.cargo/bin:$PATH cargo xtask {}",
+        quote(&rev),
         quoted.join(" ")
     );
     eprintln!(

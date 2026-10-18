@@ -11,13 +11,15 @@
 //! Violations are counted and the first few are reported; tests and the
 //! stress run assert there are none.
 //!
+//! The witness is compiled into builds with debug assertions only, as
+//! FreeBSD's `WITNESS` is a debug option (release builds are what the
+//! performance comparison measures, docs/PERFORMANCE.md §2).
+//!
 //! Behavior reference: sys/kern/subr_witness.c (the checks, not its
 //! learned lock-order graph: here the order is declared).
 
 use core::ptr;
 use core::sync::atomic::{AtomicU64, Ordering};
-
-use super::MutexCore;
 
 /// A class of locks sharing a name, level, and sleep rule.
 #[derive(Debug)]
@@ -57,15 +59,12 @@ const MAX_HELD: usize = 16;
 #[derive(Clone, Copy, Debug)]
 struct Entry {
     class: *const LockClass,
-    /// The mutex, for priority un-lending; null for other lock kinds.
-    mutex: *const MutexCore,
     /// Identifies this acquisition for release (the lock's address).
     lock: usize,
 }
 
 const EMPTY: Entry = Entry {
     class: ptr::null(),
-    mutex: ptr::null(),
     lock: 0,
 };
 
@@ -82,14 +81,6 @@ impl Held {
             entries: [EMPTY; MAX_HELD],
             len: 0,
         }
-    }
-
-    /// The mutexes held, for priority un-lending.
-    pub(crate) fn mutexes(&self) -> impl Iterator<Item = *const MutexCore> + '_ {
-        self.entries[..self.len]
-            .iter()
-            .map(|e| e.mutex)
-            .filter(|m| !m.is_null())
     }
 }
 
@@ -117,8 +108,14 @@ fn held() -> &'static mut Held {
     unsafe { &mut *crate::current().held.get() }
 }
 
+/// Whether the checks are compiled in.
+pub const ENABLED: bool = cfg!(debug_assertions);
+
 /// Checks and records the acquisition of `lock` (of `class`).
-pub(crate) fn acquire(class: &'static LockClass, lock: usize, mutex: *const MutexCore) {
+pub(crate) fn acquire(class: &'static LockClass, lock: usize) {
+    if !ENABLED {
+        return;
+    }
     let h = held();
     for e in &h.entries[..h.len] {
         // SAFETY: classes are statics.
@@ -135,12 +132,15 @@ pub(crate) fn acquire(class: &'static LockClass, lock: usize, mutex: *const Mute
         violation(format_args!("witness: more than {MAX_HELD} locks held"));
         return;
     }
-    h.entries[h.len] = Entry { class, mutex, lock };
+    h.entries[h.len] = Entry { class, lock };
     h.len += 1;
 }
 
 /// Records the release of `lock`.
 pub(crate) fn release(lock: usize) {
+    if !ENABLED {
+        return;
+    }
     let h = held();
     match h.entries[..h.len].iter().rposition(|e| e.lock == lock) {
         Some(i) => {
@@ -154,6 +154,9 @@ pub(crate) fn release(lock: usize) {
 /// Checks that the current thread may sleep. `irqs_were_enabled` is the
 /// interrupt state before the sleeping code masked them.
 pub(crate) fn check_sleep(irqs_were_enabled: bool) {
+    if !ENABLED {
+        return;
+    }
     if !irqs_were_enabled {
         violation(format_args!("witness: sleeping with interrupts masked"));
     }
@@ -168,9 +171,4 @@ pub(crate) fn check_sleep(irqs_were_enabled: bool) {
             violation(format_args!("witness: sleeping while holding {}", c.name));
         }
     }
-}
-
-/// The current thread's held mutexes (for un-lending).
-pub(crate) fn held_mutexes() -> &'static Held {
-    held()
 }

@@ -83,8 +83,15 @@ same format. It is test code that runs only on FreeBSD.
 
 ## 6. Tooling
 
-Planned: `cargo xtask perf [--suite p2|…|all] [--platform bhyve|x870e|opi6p] [--compare <rev>]`.
-It boots both kernels with the same image, interleaves the runs, applies the rules above, writes
-raw samples and a report to `~/abyss/ci/perf/<date>-<rev>/`, and exits non-zero if any benchmark
-exceeds the bound. Comparing two AbyssBSD revisions (`--compare`) uses the same statistics, for
-checking a change before it lands.
+`cargo xtask --remote perf [--suite p2] [--runs N] [--prepare]` runs on the build server. It
+boots each kernel in an identical bhyve VM (8 vCPUs pinned one per P-core, 2 GiB, the same
+devices), alternating between the two kernels, for `N` runs each (default 10). It applies the rules
+above, writes raw samples, console logs, host facts, and a report to
+`~/abyss/ci/perf/<time>-<rev>/`, and exits non-zero if any benchmark exceeds the bound. It takes
+CI's lock, so a perf run never overlaps a CI run. The workloads and the output format are specified
+in [tests/perf/README.md](../tests/perf/README.md). The FreeBSD side is the 15.1-RELEASE VM image
+with `kbench.ko` (built against the release's sources, both checked against the release's
+published SHA-256 sums) loaded at boot from a second disk.
+
+Still planned: `--platform x870e|opi6p` (P6), and `--compare <rev>`, which compares two AbyssBSD
+revisions with the same statistics to check a change before it lands.

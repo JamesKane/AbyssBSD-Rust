@@ -6,28 +6,50 @@
 //! threads sleep on wait queues. [`RwLock`] holders must not sleep (the
 //! witness checks); [`SxLock`] holders may.
 //!
+//! The state is one word, so uncontended operations are one
+//! compare-and-swap: either [`READ`] plus a reader count (unlocked is
+//! `READ` with no readers), or the writing thread's address. Two bits say
+//! which queues have sleepers. A sleeper sets its bit while holding its
+//! queue's lock, in the same critical section that queues it; an unlocker
+//! that sees a bit takes that queue's lock to wake, so no wakeup is lost.
+//! Woken threads compete again rather than being handed the lock.
+//!
+//! A thread spins rather than sleeps while a writer holding the lock is on
+//! a CPU, and for a short while when readers hold it (their count says
+//! nothing about whether they run).
+//!
 //! Behavior reference: sys/kern/kern_rwlock.c, sys/kern/kern_sx.c.
 
 use core::cell::UnsafeCell;
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::ptr;
-
-use sync::SpinLock;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use super::witness::{self, LockClass};
-use crate::WaitQueue;
+use crate::{Thread, WaitQueue};
 
-#[derive(Debug)]
-struct State {
-    readers: u32,
-    writer: bool,
-    writers_waiting: u32,
+/// Read mode (or unlocked); the count is in the bits above [`SHIFT`].
+const READ: usize = 1;
+/// Readers are sleeping on `readers_q`.
+const READ_WAITERS: usize = 2;
+/// Writers are sleeping on `writers_q`.
+const WRITE_WAITERS: usize = 4;
+const FLAGS: usize = READ | READ_WAITERS | WRITE_WAITERS;
+const SHIFT: u32 = 3;
+const ONE_READER: usize = 1 << SHIFT;
+const UNLOCKED: usize = READ;
+/// Spins on a lock held by readers before sleeping.
+const READER_SPINS: u32 = 1000;
+const MAX_BACKOFF: u32 = 64;
+
+const fn readers(w: usize) -> usize {
+    w >> SHIFT
 }
 
 #[derive(Debug)]
 struct RwCore {
-    state: SpinLock<State>,
+    word: AtomicUsize,
     readers_q: WaitQueue,
     writers_q: WaitQueue,
     class: &'static LockClass,
@@ -36,67 +58,283 @@ struct RwCore {
 impl RwCore {
     const fn new(class: &'static LockClass) -> Self {
         Self {
-            state: SpinLock::new(State {
-                readers: 0,
-                writer: false,
-                writers_waiting: 0,
-            }),
+            word: AtomicUsize::new(UNLOCKED),
             readers_q: WaitQueue::new(),
             writers_q: WaitQueue::new(),
             class,
         }
     }
 
-    fn read(&self) {
-        self.readers_q.wait_until(|| {
-            let mut s = self.state.lock();
-            let ok = !s.writer && s.writers_waiting == 0;
-            if ok {
-                s.readers += 1;
-            }
-            ok
-        });
-        // Recorded once held, so waiting is not "sleeping while holding".
-        witness::acquire(self.class, ptr::from_ref(self).addr(), ptr::null());
+    /// Whether the writer holding `w` (not read mode) is on a CPU.
+    fn writer_running(w: usize) -> bool {
+        let owner: *const Thread = ptr::with_exposed_provenance(w & !FLAGS);
+        // SAFETY: the writer was alive while it held the lock; a released
+        // and exited writer is freed only after leaving every CPU, and the
+        // answer only steers spinning.
+        !owner.is_null() && unsafe { (*owner).on_cpu.load(Ordering::Relaxed) }
     }
 
-    fn read_unlock(&self) {
-        witness::release(ptr::from_ref(self).addr());
-        let wake = {
-            let mut s = self.state.lock();
-            s.readers -= 1;
-            s.readers == 0 && s.writers_waiting > 0
-        };
-        if wake {
-            self.writers_q.wake_one();
+    #[inline]
+    fn read(&self) {
+        let w = self.word.load(Ordering::Relaxed);
+        // Acquire: the last writer's writes are visible to us.
+        if w & (READ | WRITE_WAITERS) != READ
+            || self
+                .word
+                .compare_exchange_weak(w, w + ONE_READER, Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+        {
+            self.read_slow();
+        }
+        // Recorded once held, so waiting is not "sleeping while holding".
+        witness::acquire(self.class, ptr::from_ref(self).addr());
+    }
+
+    /// Takes a read hold if readers may enter now.
+    fn try_read(&self) -> bool {
+        let mut w = self.word.load(Ordering::Relaxed);
+        while w & (READ | WRITE_WAITERS) == READ {
+            match self.word.compare_exchange_weak(
+                w,
+                w + ONE_READER,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(v) => w = v,
+            }
+        }
+        false
+    }
+
+    #[cold]
+    fn read_slow(&self) {
+        let mut backoff = 1;
+        loop {
+            if self.try_read() {
+                return;
+            }
+            let w = self.word.load(Ordering::Relaxed);
+            if w & READ == 0 && Self::writer_running(w) {
+                for _ in 0..backoff {
+                    core::hint::spin_loop();
+                }
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+                continue;
+            }
+            let mut got = false;
+            self.readers_q.wait_until(|| {
+                let mut w = self.word.load(Ordering::Relaxed);
+                loop {
+                    if w & (READ | WRITE_WAITERS) == READ {
+                        match self.word.compare_exchange_weak(
+                            w,
+                            w + ONE_READER,
+                            Ordering::Acquire,
+                            Ordering::Relaxed,
+                        ) {
+                            Ok(_) => {
+                                got = true;
+                                return true;
+                            }
+                            Err(v) => w = v,
+                        }
+                    } else if w & READ_WAITERS != 0 {
+                        return false;
+                    } else {
+                        match self.word.compare_exchange_weak(
+                            w,
+                            w | READ_WAITERS,
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                        ) {
+                            Ok(_) => return false,
+                            Err(v) => w = v,
+                        }
+                    }
+                }
+            });
+            if got {
+                return;
+            }
+            backoff = 1;
         }
     }
 
-    fn write(&self) {
-        self.state.lock().writers_waiting += 1;
-        self.writers_q.wait_until(|| {
-            let mut s = self.state.lock();
-            let ok = !s.writer && s.readers == 0;
-            if ok {
-                s.writer = true;
-                s.writers_waiting -= 1;
+    #[inline]
+    fn read_unlock(&self) {
+        witness::release(ptr::from_ref(self).addr());
+        let mut w = self.word.load(Ordering::Relaxed);
+        loop {
+            // The last reader out wakes sleepers; others just leave.
+            let last_with_waiters = readers(w) == 1 && w & (READ_WAITERS | WRITE_WAITERS) != 0;
+            if last_with_waiters {
+                self.release_and_wake(w);
+                return;
             }
-            ok
-        });
-        witness::acquire(self.class, ptr::from_ref(self).addr(), ptr::null());
+            // Release: our reads happen before a writer's writes.
+            match self.word.compare_exchange_weak(
+                w,
+                w - ONE_READER,
+                Ordering::Release,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(v) => w = v,
+            }
+        }
     }
 
+    #[inline]
+    fn write(&self) {
+        let me = ptr::from_ref(crate::current()).expose_provenance();
+        if self
+            .word
+            .compare_exchange(UNLOCKED, me, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            self.write_slow(me);
+        }
+        witness::acquire(self.class, ptr::from_ref(self).addr());
+    }
+
+    /// Takes the write hold if the lock is free (waiter bits may be set;
+    /// `READ_WAITERS` is kept, `WRITE_WAITERS` is the caller's business).
+    fn try_write(&self, me: usize) -> bool {
+        let mut w = self.word.load(Ordering::Relaxed);
+        while w & READ != 0 && readers(w) == 0 {
+            let keep = w & (READ_WAITERS | WRITE_WAITERS);
+            match self.word.compare_exchange_weak(
+                w,
+                me | keep,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(v) => w = v,
+            }
+        }
+        false
+    }
+
+    #[cold]
+    fn write_slow(&self, me: usize) {
+        let mut backoff = 1;
+        let mut reader_spins = 0;
+        loop {
+            if self.try_write(me) {
+                return;
+            }
+            let w = self.word.load(Ordering::Relaxed);
+            let spin = if w & READ == 0 {
+                Self::writer_running(w)
+            } else {
+                reader_spins += 1;
+                reader_spins < READER_SPINS
+            };
+            if spin {
+                for _ in 0..backoff {
+                    core::hint::spin_loop();
+                }
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+                continue;
+            }
+            let mut got = false;
+            self.writers_q.wait_until(|| {
+                let mut w = self.word.load(Ordering::Relaxed);
+                loop {
+                    if w & READ != 0 && readers(w) == 0 {
+                        // Keep both bits: other writers may still sleep.
+                        let keep = w & (READ_WAITERS | WRITE_WAITERS);
+                        match self.word.compare_exchange_weak(
+                            w,
+                            me | keep,
+                            Ordering::Acquire,
+                            Ordering::Relaxed,
+                        ) {
+                            Ok(_) => {
+                                got = true;
+                                return true;
+                            }
+                            Err(v) => w = v,
+                        }
+                    } else if w & WRITE_WAITERS != 0 {
+                        return false;
+                    } else {
+                        match self.word.compare_exchange_weak(
+                            w,
+                            w | WRITE_WAITERS,
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                        ) {
+                            Ok(_) => return false,
+                            Err(v) => w = v,
+                        }
+                    }
+                }
+            });
+            if got {
+                return;
+            }
+            backoff = 1;
+            reader_spins = 0;
+        }
+    }
+
+    #[inline]
     fn write_unlock(&self) {
         witness::release(ptr::from_ref(self).addr());
-        let writers = {
-            let mut s = self.state.lock();
-            s.writer = false;
-            s.writers_waiting > 0
-        };
-        if writers {
-            self.writers_q.wake_one();
-        } else {
-            self.readers_q.wake_all();
+        let w = self.word.load(Ordering::Relaxed);
+        // Release: our writes are visible to the next holder.
+        if w & (READ_WAITERS | WRITE_WAITERS) != 0
+            || self
+                .word
+                .compare_exchange(w, UNLOCKED, Ordering::Release, Ordering::Relaxed)
+                .is_err()
+        {
+            self.release_and_wake(self.word.load(Ordering::Relaxed));
+        }
+    }
+
+    /// Releases the last hold (the writer's, or the last reader's) when
+    /// sleepers may be waiting. Writers are preferred: if any sleep, they
+    /// are woken and readers keep sleeping (their bit stays set, so the
+    /// next release wakes them).
+    #[cold]
+    fn release_and_wake(&self, mut w: usize) {
+        loop {
+            // Readers arrived meanwhile: we are not the last; just leave.
+            if w & READ != 0 && readers(w) > 1 {
+                match self.word.compare_exchange_weak(
+                    w,
+                    w - ONE_READER,
+                    Ordering::Release,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => return,
+                    Err(v) => {
+                        w = v;
+                        continue;
+                    }
+                }
+            }
+            let writers = w & WRITE_WAITERS != 0;
+            let new = UNLOCKED | if writers { w & READ_WAITERS } else { 0 };
+            match self
+                .word
+                .compare_exchange_weak(w, new, Ordering::Release, Ordering::Relaxed)
+            {
+                Ok(_) => {
+                    if writers {
+                        self.writers_q.wake_all();
+                    } else if w & READ_WAITERS != 0 {
+                        self.readers_q.wake_all();
+                    }
+                    return;
+                }
+                // Waiter bits were set, or readers arrived.
+                Err(v) => w = v,
+            }
         }
     }
 }

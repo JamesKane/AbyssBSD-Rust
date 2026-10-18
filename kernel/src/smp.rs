@@ -70,6 +70,9 @@ pub(crate) fn start_cpus() -> usize {
         }
     }
     let online = sched::online_cpus();
+    // A CPU that failed to check in might still come up and take a
+    // broadcast it is not counted for.
+    BROADCAST.store(failed == 0, Ordering::Release);
     kprintln!(
         "smp: {online} CPUs online{}",
         if failed > 0 {
@@ -257,53 +260,90 @@ fn arch_start(cpu: CpuId, hw: u64, stack_top: u64) -> bool {
     r == 0
 }
 
-/// The pending TLB shootdown (x86; aarch64 TLBI broadcasts).
-static SHOOT_BUSY: AtomicBool = AtomicBool::new(false);
-static SHOOT_VA: AtomicU64 = AtomicU64::new(0);
-static SHOOT_LEN: AtomicU64 = AtomicU64::new(0);
-static SHOOT_PENDING: AtomicU32 = AtomicU32::new(0);
+/// The pending cross-call: a TLB range to flush (empty for a ping).
+static CALL_BUSY: AtomicBool = AtomicBool::new(false);
+static CALL_VA: AtomicU64 = AtomicU64::new(0);
+static CALL_LEN: AtomicU64 = AtomicU64::new(0);
+static CALL_PENDING: AtomicU32 = AtomicU32::new(0);
+
+/// Whether a cross-call to every other CPU may use one broadcast IPI: true
+/// once every CPU the firmware listed (and we could take) is online.
+static BROADCAST: AtomicBool = AtomicBool::new(false);
+
+/// Which CPUs a cross-call interrupts.
+#[derive(Clone, Copy)]
+enum Targets {
+    AllOthers,
+    One(CpuId),
+}
 
 /// Removes stale translations for `[va, va + len)` from every other CPU
 /// and waits until they have. Call with interrupts enabled and no spin
 /// locks held: other initiators must be able to interrupt the wait.
+///
+/// On aarch64 the TLBI instructions broadcast, so there is nothing to do.
 pub(crate) fn shootdown(va: VirtAddr, len: u64) {
     if cfg!(target_arch = "aarch64") || sched::online_cpus() <= 1 {
         return;
     }
-    while SHOOT_BUSY
+    cross_call(va, len, Targets::AllOthers);
+}
+
+/// Interrupts `cpu` and waits until it has acknowledged (an IPI round
+/// trip). Same calling rules as [`shootdown`].
+#[cfg_attr(feature = "ktest", allow(dead_code))]
+pub(crate) fn ping(cpu: CpuId) {
+    if cpu != hal::cpu_id() {
+        cross_call(VirtAddr::new(0), 0, Targets::One(cpu));
+    }
+}
+
+/// Sends the cross-call IPI to `targets`, asking each to flush
+/// `[va, va + len)`, and waits for all to acknowledge.
+fn cross_call(va: VirtAddr, len: u64, targets: Targets) {
+    while CALL_BUSY
         .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_err()
     {
         core::hint::spin_loop();
     }
-    SHOOT_VA.store(va.get(), Ordering::Relaxed);
-    SHOOT_LEN.store(len, Ordering::Relaxed);
+    CALL_VA.store(va.get(), Ordering::Relaxed);
+    CALL_LEN.store(len, Ordering::Relaxed);
     let me = hal::cpu_id();
-    let targets: alloc::vec::Vec<CpuId> = (0..sched::online_cpus())
-        .filter_map(|i| u32::try_from(i).ok().map(CpuId))
-        .filter(|&c| c != me && ONLINE[c.index()].load(Ordering::Acquire))
-        .collect();
-    let n = u32::try_from(targets.len()).unwrap_or(u32::MAX);
+    let selected = |c: CpuId| match targets {
+        Targets::AllOthers => c != me,
+        Targets::One(t) => c == t,
+    };
+    let online = || {
+        (0..sched::online_cpus())
+            .filter_map(|i| u32::try_from(i).ok().map(CpuId))
+            .filter(|&c| selected(c) && ONLINE[c.index()].load(Ordering::Acquire))
+    };
+    let n = u32::try_from(online().count()).unwrap_or(u32::MAX);
     // Release: the range is visible to targets before they see the count.
-    SHOOT_PENDING.store(n, Ordering::Release);
-    for c in targets {
-        crate::irq::send_tlb_shootdown(c);
+    CALL_PENDING.store(n, Ordering::Release);
+    #[cfg(target_arch = "x86_64")]
+    if matches!(targets, Targets::AllOthers) && BROADCAST.load(Ordering::Acquire) {
+        crate::irq::send_call_all_but_self();
+    } else {
+        online().for_each(crate::irq::send_call);
     }
-    while SHOOT_PENDING.load(Ordering::Acquire) != 0 {
+    #[cfg(target_arch = "aarch64")]
+    online().for_each(crate::irq::send_call);
+    while CALL_PENDING.load(Ordering::Acquire) != 0 {
         core::hint::spin_loop();
     }
-    SHOOT_BUSY.store(false, Ordering::Release);
+    CALL_BUSY.store(false, Ordering::Release);
 }
 
-/// The shootdown IPI arrived: flush the range and acknowledge.
-#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
-pub(crate) fn on_shootdown_ipi() {
-    let va = VirtAddr::new(SHOOT_VA.load(Ordering::Acquire));
-    let len = SHOOT_LEN.load(Ordering::Acquire);
+/// The cross-call IPI arrived: flush the range and acknowledge.
+pub(crate) fn on_call_ipi() {
+    let va = VirtAddr::new(CALL_VA.load(Ordering::Acquire));
+    let len = CALL_LEN.load(Ordering::Acquire);
     if len > 64 * 4096 {
         arch::mmu::flush_all();
-    } else {
+    } else if len > 0 {
         crate::mm::flush_range(va, len);
     }
-    SHOOT_PENDING.fetch_sub(1, Ordering::AcqRel);
+    CALL_PENDING.fetch_sub(1, Ordering::AcqRel);
 }

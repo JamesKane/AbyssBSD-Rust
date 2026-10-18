@@ -92,7 +92,15 @@ pub(crate) struct Vm {
     pub(crate) test_devices: bool,
     /// Let a guest reset restart the machine instead of ending QEMU.
     pub(crate) allow_reset: bool,
+    /// A second raw disk (bhyve slot 4, or a second virtio-blk on QEMU).
+    pub(crate) extra_disk: Option<PathBuf>,
+    /// bhyve: pin vCPU *i* to host CPU [`PIN_STRIDE`]` * i`, one per
+    /// physical core (docs/PERFORMANCE.md §3).
+    pub(crate) pin: bool,
 }
+
+/// Host CPUs per physical core on the build server (P-cores have SMT).
+pub(crate) const PIN_STRIDE: u32 = 2;
 
 /// A captured run: the verdict and QEMU's exit status, if it exited by
 /// itself.
@@ -147,6 +155,8 @@ pub(crate) fn cmd_run(mut args: Args) -> Result<()> {
         el2,
         test_devices: false,
         allow_reset: false,
+        extra_disk: None,
+        pin: false,
     };
     let mut cmd = vm.command()?;
     if vmm == Vmm::Qemu {
@@ -242,6 +252,14 @@ impl Vm {
         c.arg("-s")
             .arg(format!("2,virtio-blk,{}", self.disk.display()));
         c.args(["-s", "3,virtio-rnd"]);
+        if let Some(d) = &self.extra_disk {
+            c.arg("-s").arg(format!("4,virtio-blk,{}", d.display()));
+        }
+        if self.pin {
+            for v in 0..self.smp {
+                c.arg("-p").arg(format!("{v}:{}", v * PIN_STRIDE));
+            }
+        }
         // A framebuffer so the guest gets a GOP; VNC on a per-process port.
         let port = 5900 + std::process::id() % 1000;
         c.arg("-s")
@@ -307,6 +325,11 @@ impl Vm {
             self.disk.display()
         ));
         c.args(["-device", "virtio-blk-pci,drive=disk0,bootindex=0"]);
+        if let Some(d) = &self.extra_disk {
+            c.arg("-drive")
+                .arg(format!("if=none,id=disk1,format=raw,file={}", d.display()));
+            c.args(["-device", "virtio-blk-pci,drive=disk1"]);
+        }
         // Gives firmware an EFI_RNG_PROTOCOL, the loader's KASLR source.
         c.args(["-device", "virtio-rng-pci"]);
         if self.arch == Arch::Aarch64 {
@@ -331,12 +354,23 @@ impl Vm {
     }
 
     /// Runs headless with the serial console captured to `log`, until the
-    /// image reports a verdict, exits, or `timeout` passes.
+    /// image reports a ktest verdict, exits, or `timeout` passes.
     pub(crate) fn run_captured(
         &self,
         timeout: Duration,
         log: &Path,
         echo: bool,
+    ) -> Result<Captured> {
+        self.run_until(timeout, log, echo, &ktest_verdict)
+    }
+
+    /// As [`Self::run_captured`], with `verdict` judging each console line.
+    pub(crate) fn run_until(
+        &self,
+        timeout: Duration,
+        log: &Path,
+        echo: bool,
+        verdict_of: &dyn Fn(&str) -> Option<Outcome>,
     ) -> Result<Captured> {
         let mut cmd = self.command()?;
         if self.vmm == Vmm::Qemu {
@@ -373,11 +407,7 @@ impl Vm {
                     if echo {
                         println!("  | {line}");
                     }
-                    if line.contains(ktest::PASS_MARKER) {
-                        verdict = Some(Outcome::Passed);
-                    } else if line.contains(ktest::FAIL_MARKER) {
-                        verdict = Some(Outcome::Failed("image reported failure".into()));
-                    }
+                    verdict = verdict_of(&line);
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => verdict = Some(Outcome::TimedOut),
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -406,6 +436,17 @@ impl Vm {
             outcome: verdict.unwrap_or(Outcome::TimedOut),
             exit_code,
         })
+    }
+}
+
+/// The ktest pass and fail markers.
+fn ktest_verdict(line: &str) -> Option<Outcome> {
+    if line.contains(ktest::PASS_MARKER) {
+        Some(Outcome::Passed)
+    } else if line.contains(ktest::FAIL_MARKER) {
+        Some(Outcome::Failed("image reported failure".into()))
+    } else {
+        None
     }
 }
 

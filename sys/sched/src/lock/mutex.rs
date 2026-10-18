@@ -2,17 +2,23 @@
 //! Sleepable mutexes with priority propagation.
 //!
 //! The owner word holds the owning thread's address, with bit 0 set when
-//! threads are waiting (contested). An uncontested lock and unlock are one
+//! threads are waiting (contested). An uncontended lock and unlock are one
 //! compare-and-swap each; a contested unlock takes the slow path because
 //! the swap fails on the set bit, so a wakeup cannot be lost.
 //!
-//! A thread that cannot get the lock spins briefly while the owner is on a
-//! CPU (it will likely release soon), then blocks on the mutex's turnstile
-//! (its waiter list). Before sleeping it lends its priority to the owner,
-//! and on along the chain if the owner is itself blocked on a mutex, so a
-//! low-priority owner cannot be starved by middling threads while an
-//! urgent one waits. Unlock hands the lock directly to the most urgent
-//! waiter and drops any priority the releasing thread no longer needs.
+//! A thread that cannot get the lock spins while the owner is on a CPU (it
+//! will likely release soon), backing off exponentially, and blocks on the
+//! mutex's turnstile (its waiter list) only once the owner is off-CPU.
+//! Before sleeping it lends its priority to the owner, and on along the
+//! chain if the owner is itself blocked on a mutex, so a low-priority owner
+//! cannot be starved by middling threads while an urgent one waits.
+//!
+//! A contested unlock releases the lock and wakes every waiter; they
+//! compete again, and the losers block again (lending their priority to the
+//! winner). Handing the lock straight to a sleeping waiter would be fairer,
+//! but every handoff would then cost a wakeup while running threads stand
+//! by: a convoy. The releasing thread then drops any priority it no longer
+//! needs, found from its list of contested mutexes.
 //!
 //! Behavior reference: sys/kern/kern_mutex.c, sys/kern/subr_turnstile.c.
 
@@ -22,7 +28,6 @@ use core::ops::{Deref, DerefMut};
 use core::ptr;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use alloc::sync::Arc;
 use sync::SpinLock;
 
 use super::witness::{self, LockClass};
@@ -30,8 +35,8 @@ use crate::list::ThreadList;
 use crate::thread::{Priority, State, Thread};
 
 const CONTESTED: usize = 1;
-/// Spins while the owner runs, before blocking.
-const SPIN_LIMIT: u32 = 2000;
+/// The longest pause between looks at a running owner, in spin-loop hints.
+const MAX_BACKOFF: u32 = 64;
 /// How far priority lending follows a chain of blocked owners.
 const PROPAGATE_DEPTH: usize = 8;
 
@@ -56,42 +61,59 @@ impl MutexCore {
         ptr::with_exposed_provenance(self.owner.load(Ordering::Relaxed) & !CONTESTED)
     }
 
+    #[inline]
     fn lock(&self) {
         let me = crate::current();
         let me_word = ptr::from_ref(me).expose_provenance();
-        witness::acquire(self.class, ptr::from_ref(self).addr(), self);
-        let mut spins = 0;
-        loop {
-            // Acquire: the previous owner's writes are visible to us.
-            if self
-                .owner
-                .compare_exchange_weak(0, me_word, Ordering::Acquire, Ordering::Relaxed)
-                .is_ok()
-            {
-                return;
-            }
-            let owner = self.owner_thread();
-            // SAFETY: an owner stays alive while it owns the lock; if it
-            // released meanwhile, `on_cpu` of a live thread is still safe
-            // to read because threads are freed only after they exit, and
-            // an exiting thread holds no mutexes.
-            let running = !owner.is_null() && unsafe { (*owner).on_cpu.load(Ordering::Relaxed) };
-            if running && spins < SPIN_LIMIT {
-                spins += 1;
-                core::hint::spin_loop();
-                continue;
-            }
-            spins = 0;
-            self.block(me, me_word);
-            // Handoff: unlock made us the owner before waking us.
-            if self.owner.load(Ordering::Acquire) & !CONTESTED == me_word {
-                return;
-            }
+        witness::acquire(self.class, ptr::from_ref(self).addr());
+        // Acquire: the previous owner's writes are visible to us.
+        if self
+            .owner
+            .compare_exchange(0, me_word, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            self.lock_slow(me, me_word);
         }
     }
 
-    /// Sleeps on the turnstile until the lock is handed to us (or freed).
-    fn block(&self, me: &Thread, me_word: usize) {
+    #[cold]
+    fn lock_slow(&self, me: &Thread, me_word: usize) {
+        let mut backoff = 1;
+        loop {
+            let word = self.owner.load(Ordering::Relaxed);
+            if word == 0 {
+                if self
+                    .owner
+                    .compare_exchange_weak(0, me_word, Ordering::Acquire, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    return;
+                }
+                continue;
+            }
+            let owner: *const Thread = ptr::with_exposed_provenance(word & !CONTESTED);
+            // SAFETY: the owner was alive when it owned the lock. If it has
+            // released since, it may have exited, but threads are freed
+            // only after the reaper has seen them off every CPU, and this
+            // read only steers spinning.
+            let running = unsafe { (*owner).on_cpu.load(Ordering::Relaxed) };
+            if running {
+                for _ in 0..backoff {
+                    core::hint::spin_loop();
+                }
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+                continue;
+            }
+            if self.block(me, me_word) {
+                return;
+            }
+            backoff = 1;
+        }
+    }
+
+    /// Sleeps on the turnstile until the lock is released. Returns true if
+    /// it took the lock instead (it was free by the time we looked).
+    fn block(&self, me: &Thread, me_word: usize) -> bool {
         let irq = hal::irq::disable();
         witness::check_sleep(hal::irq::were_enabled(&irq));
         let mut q = self.waiters.lock();
@@ -99,16 +121,20 @@ impl MutexCore {
         let mut cur = self.owner.load(Ordering::Relaxed);
         loop {
             if cur == 0 {
+                let waiters = !q.is_empty();
                 match self.owner.compare_exchange(
                     0,
-                    me_word | if q.is_empty() { 0 } else { CONTESTED },
+                    me_word | if waiters { CONTESTED } else { 0 },
                     Ordering::Acquire,
                     Ordering::Relaxed,
                 ) {
                     Ok(_) => {
+                        if waiters {
+                            me.inner.lock().contested.insert(self);
+                        }
                         drop(q);
                         hal::irq::restore(irq);
-                        return;
+                        return true;
                     }
                     Err(v) => {
                         cur = v;
@@ -137,12 +163,17 @@ impl MutexCore {
         // SAFETY: the owner cannot release (and so cannot exit) while we
         // hold the waiter lock with the contested bit set: its unlock
         // needs this lock.
-        unsafe { propagate(owner, my_prio) };
+        unsafe {
+            (*owner).inner.lock().contested.insert(self);
+            propagate(owner, my_prio);
+        }
         drop(q);
         crate::switch_away();
         hal::irq::restore(irq);
+        false
     }
 
+    #[inline]
     fn unlock(&self) {
         let me = crate::current();
         let me_word = ptr::from_ref(me).expose_provenance();
@@ -151,39 +182,27 @@ impl MutexCore {
         if self
             .owner
             .compare_exchange(me_word, 0, Ordering::Release, Ordering::Relaxed)
-            .is_ok()
+            .is_err()
         {
-            return;
+            self.unlock_slow(me);
         }
+    }
+
+    /// A contested unlock: release, and wake every waiter to compete.
+    #[cold]
+    fn unlock_slow(&self, me: &Thread) {
         let irq = hal::irq::disable();
         let mut q = self.waiters.lock();
-        // Hand off to the most urgent waiter (first among equals).
-        let best = q
-            .iter()
-            .min_by_key(|t| t.inner.lock().priority)
-            .map(ptr::from_ref);
-        let next = best.and_then(|p| {
-            // SAFETY: `p` is on the list we hold.
-            q.remove(unsafe { &*p })
-        });
-        match &next {
-            Some(t) => {
-                let word = Arc::as_ptr(t).expose_provenance();
-                let contested = if q.is_empty() { 0 } else { CONTESTED };
-                self.owner.store(word | contested, Ordering::Release);
-                t.inner.lock().blocked_on = ptr::null();
-            }
-            None => self.owner.store(0, Ordering::Release),
+        let mut woken = ThreadList::new();
+        while let Some(t) = q.pop_front() {
+            t.inner.lock().blocked_on = ptr::null();
+            woken.push_back(t);
         }
-        // Waiters left behind lend their priority to the new owner.
-        let remaining = q.iter().map(|t| t.inner.lock().priority).min();
+        self.owner.store(0, Ordering::Release);
+        me.inner.lock().contested.remove(self);
         drop(q);
         unlend(me);
-        if let Some(t) = next {
-            if let Some(p) = remaining {
-                // SAFETY: we hold a reference to the new owner.
-                unsafe { propagate(Arc::as_ptr(&t), p) };
-            }
+        while let Some(t) = woken.pop_front() {
             crate::make_runnable(t);
         }
         hal::irq::restore(irq);
@@ -230,10 +249,14 @@ unsafe fn propagate(owner: *const Thread, prio: Priority) {
 }
 
 /// Recomputes the releasing thread's priority: its base, or what waiters
-/// on mutexes it still holds need.
+/// on contested mutexes it still holds need.
 fn unlend(me: &Thread) {
-    let mut want = me.inner.lock().base;
-    for m in witness::held_mutexes().mutexes() {
+    let (base, (held, n)) = {
+        let inner = me.inner.lock();
+        (inner.base, inner.contested.snapshot())
+    };
+    let mut want = base;
+    for &m in &held[..n] {
         // SAFETY: a held mutex is alive.
         if let Some(p) = unsafe { (*m).best_waiter() }
             && p.beats(want)

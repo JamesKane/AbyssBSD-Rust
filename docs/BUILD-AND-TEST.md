@@ -77,6 +77,12 @@ Setting `ABYSS_QEMU_GDB=1` gives test VMs a gdb stub on `localhost:1234` without
 at start, so you can attach to a hung run. Test images use KASLR, so subtract the slide the
 loader prints before symbolizing addresses.
 
+Performance comparison against FreeBSD (on the build server; PERFORMANCE.md §6):
+
+```
+cargo xtask --remote perf [--suite p2] [--runs N] [--prepare]
+```
+
 Planned for later phases:
 
 ```
@@ -84,7 +90,7 @@ cargo xtask image   ... [--root base.txz] [--fs ufs2|md]   # UFS2 root (P4/P5)
 cargo xtask deploy  --board {opi6p|x870e} [--usb <serial> | --media]   # install, set BootNext, collect logs
                     # targets are identified by disk serial number; anything else is refused
 cargo xtask test    [--tier compat|full]
-cargo xtask perf    [--suite p2|...|all] [--platform bhyve|x870e|opi6p] [--compare <rev>]   # PERFORMANCE.md §6
+cargo xtask perf    [--platform x870e|opi6p] [--compare <rev>]   # PERFORMANCE.md §6
 cargo xtask fetch-base --version 15.1 --arch <a>   # download & verify base.txz (sha256 pinned)
 ```
 

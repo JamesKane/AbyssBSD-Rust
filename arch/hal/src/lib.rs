@@ -127,6 +127,35 @@ pub unsafe fn set_cpu_local(p: *mut ()) {
     let _ = p;
 }
 
+/// The running thread's pointer, as last set on this CPU by
+/// [`set_current_thread`] (null until then). Safe to call with interrupts
+/// enabled: a preemption cannot make it return another CPU's thread.
+#[inline]
+#[must_use]
+pub fn current_thread() -> *const () {
+    #[cfg(target_os = "none")]
+    // SAFETY: defined by the linked arch crate with this signature.
+    return unsafe { abyss_hal_current_thread() };
+    #[cfg(not(target_os = "none"))]
+    core::ptr::null()
+}
+
+/// Records the thread now running on this CPU.
+///
+/// # Safety
+///
+/// Call with interrupts masked, as part of a context switch; `p` must
+/// stay valid while it runs here (readers of [`current_thread`] trust it).
+pub unsafe fn set_current_thread(p: *const ()) {
+    #[cfg(target_os = "none")]
+    // SAFETY: defined by the linked arch crate with this signature.
+    unsafe {
+        abyss_hal_set_current_thread(p);
+    }
+    #[cfg(not(target_os = "none"))]
+    let _ = p;
+}
+
 /// Waits until an interrupt is pending. Call with interrupts masked; it
 /// returns with them masked, possibly after servicing the interrupt.
 pub fn wait_for_interrupt() {
@@ -214,6 +243,10 @@ pub type CpuLocalFn = fn() -> *mut ();
 pub type SetCpuLocalFn = fn(*mut ());
 /// Signature of `abyss_hal_wait_for_interrupt`.
 pub type WaitForInterruptFn = fn();
+/// Signature of `abyss_hal_current_thread`.
+pub type CurrentThreadFn = fn() -> *const ();
+/// Signature of `abyss_hal_set_current_thread`.
+pub type SetCurrentThreadFn = fn(*const ());
 
 /// Signature of `abyss_hal_irq_disable`: masks interrupts on this CPU and
 /// returns whether they were enabled.
@@ -232,6 +265,8 @@ unsafe extern "Rust" {
     fn abyss_hal_cpu_local() -> *mut ();
     fn abyss_hal_set_cpu_local(p: *mut ());
     fn abyss_hal_wait_for_interrupt();
+    fn abyss_hal_current_thread() -> *const ();
+    fn abyss_hal_set_current_thread(p: *const ());
     fn abyss_hal_fpu_size() -> usize;
     fn abyss_hal_fpu_init(area: *mut u8);
     fn abyss_hal_fpu_save(area: *mut u8);

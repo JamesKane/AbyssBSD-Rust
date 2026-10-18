@@ -20,6 +20,11 @@
 //!
 //! Locks nest as wait queue → thread → run queue.
 //!
+//! An idle CPU that has been switching often spins for a while before
+//! halting, and a waker skips the IPI to an idle CPU that is still
+//! spinning: in rapid hand-offs between CPUs, waking from a halt would cost
+//! more than the work. A CPU that switches rarely halts at once.
+//!
 //! Behavior reference: sys/kern/sched_ule.c, sys/kern/kern_synch.c,
 //! sys/kern/kern_thread.c.
 
@@ -40,7 +45,9 @@ use alloc::sync::Arc;
 use core::cell::Cell;
 use core::fmt;
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU16, AtomicUsize, Ordering};
+use core::sync::atomic::{
+    AtomicBool, AtomicPtr, AtomicU8, AtomicU16, AtomicUsize, Ordering, fence,
+};
 
 use hal::{CpuId, MAX_CPUS};
 use sync::{Once, SpinLock};
@@ -112,6 +119,13 @@ pub struct PerCpu {
     capacity: AtomicU16,
     /// Nesting depth of preemption-disabled sections.
     preempt_off: Cell<u32>,
+    /// The idle thread is halted (or about to): a waker must interrupt it.
+    /// While the idle thread spins this is false and a waker need not.
+    halted: AtomicBool,
+    /// Context switches in the current and the previous window.
+    switches: Cell<(u32, u32)>,
+    /// When the current switch-counting window ends, in platform time.
+    window_end: Cell<u64>,
 }
 
 // SAFETY: the `Cell`s are only touched by the owning CPU with interrupts
@@ -181,6 +195,9 @@ fn new_percpu(id: CpuId) -> &'static mut PerCpu {
         current_prio: AtomicU8::new(Priority::KERNEL.get()),
         capacity: AtomicU16::new(1024),
         preempt_off: Cell::new(0),
+        halted: AtomicBool::new(false),
+        switches: Cell::new((0, 0)),
+        window_end: Cell::new(0),
     }))
 }
 
@@ -194,7 +211,16 @@ fn adopt_running(pcpu: &PerCpu, t: Arc<Thread>) {
             .store(inner.priority.get(), Ordering::Relaxed);
     }
     t.on_cpu.store(true, Ordering::Relaxed);
-    pcpu.current.set(Arc::into_raw(t));
+    set_current(pcpu, Arc::into_raw(t));
+}
+
+/// Makes `t` this CPU's running thread, for the scheduler and for
+/// [`current`]. Interrupts must be masked.
+fn set_current(pcpu: &PerCpu, t: *const Thread) {
+    pcpu.current.set(t);
+    // SAFETY: interrupts are masked (our contract), and `t` holds the
+    // reference `current` owns while the thread runs here.
+    unsafe { hal::set_current_thread(t.cast()) };
 }
 
 fn publish(pcpu: &'static mut PerCpu) {
@@ -254,12 +280,10 @@ pub fn run_idle() -> ! {
 /// The running thread.
 #[must_use]
 pub fn current() -> &'static Thread {
-    // Interrupts masked: otherwise the thread could be preempted and
-    // migrate between finding its CPU and reading that CPU's current
-    // thread, and get another CPU's.
-    let irq = hal::irq::disable();
-    let p = this_cpu().current.get();
-    hal::irq::restore(irq);
+    // The HAL's read cannot be split by a preemption (which could move the
+    // thread and return another CPU's).
+    let p = hal::current_thread().cast::<Thread>();
+    assert!(!p.is_null(), "scheduler not running on this CPU");
     // SAFETY: `current` always holds a live reference while the thread
     // runs, and the running thread cannot be freed under itself.
     unsafe { &*p }
@@ -468,7 +492,14 @@ pub(crate) fn make_runnable(t: Arc<Thread>) {
     // A remote CPU needs a nudge to preempt, or to start its slice timer
     // now that it has a waiting thread.
     if !local && (preempt || was_empty) {
-        platform().kick(c.id);
+        // Pairs with the idle loop's fence: an idle CPU that is still
+        // spinning will see the queued thread without an IPI.
+        fence(Ordering::SeqCst);
+        let spinning = c.current_prio.load(Ordering::Relaxed) == Priority::IDLE_THREAD.get()
+            && !c.halted.load(Ordering::Relaxed);
+        if !spinning {
+            platform().kick(c.id);
+        }
     }
     if local {
         // A queued thread may need the slice timer started.
@@ -660,7 +691,7 @@ pub(crate) fn switch_away() {
         c.current_prio.store(p.get(), Ordering::Relaxed);
         drop(inner);
         drop(owned);
-        c.current.set(Arc::into_raw(next));
+        set_current(c, Arc::into_raw(next));
         platform().rearm_timer();
         return;
     }
@@ -681,6 +712,7 @@ pub(crate) fn switch_away() {
         c.current_prio.store(p.get(), Ordering::Relaxed);
     }
     next.switches.fetch_add(1, Ordering::Relaxed);
+    count_switch(c, now);
     // `owned` is dropped by the incoming side unless the thread is dead,
     // in which case the reaper takes it.
     let keep = match owned {
@@ -693,7 +725,7 @@ pub(crate) fn switch_away() {
     };
     c.prev.set(cur_ptr);
     c.prev_owned.set(keep);
-    c.current.set(Arc::into_raw(next));
+    set_current(c, Arc::into_raw(next));
 
     // SAFETY: interrupts are masked; `next`'s context was saved by a
     // switch or made by `Context::init`, its stack is mapped, and no other
@@ -840,13 +872,63 @@ pub fn reaper() -> ! {
     }
 }
 
+/// Idle-spin parameters (FreeBSD's `sched_idlespins`,
+/// `sched_idlespinthresh`, and its switch-count window of one stat tick).
+const IDLE_SPINS: u32 = 10_000;
+const IDLE_SPIN_THRESHOLD: u32 = 157;
+const SWITCH_WINDOW_MS: u64 = 8;
+
+/// Counts a context switch on `c` at `now`. Interrupts must be masked.
+fn count_switch(c: &PerCpu, now: u64) {
+    let (mut cur, mut prev) = c.switches.get();
+    let window = platform().frequency() * SWITCH_WINDOW_MS / 1000;
+    if now >= c.window_end.get() {
+        // A window passed; if more than one did, the last one was empty.
+        prev = if now < c.window_end.get().saturating_add(window) {
+            cur
+        } else {
+            0
+        };
+        cur = 0;
+        c.window_end.set(now.saturating_add(window));
+    }
+    c.switches.set((cur.saturating_add(1), prev));
+}
+
+/// Whether `c` has been switching often enough that its idle thread
+/// should spin before halting. Interrupts must be masked.
+fn switching_often(c: &PerCpu) -> bool {
+    let (cur, prev) = c.switches.get();
+    let window = platform().frequency() * SWITCH_WINDOW_MS / 1000;
+    let stale = platform().now() >= c.window_end.get().saturating_add(window);
+    !stale && cur + prev > IDLE_SPIN_THRESHOLD
+}
+
 fn idle_loop() {
     loop {
         let irq = hal::irq::disable();
         let c = this_cpu();
+        let spin = switching_often(c);
+        hal::irq::restore(irq);
+        if spin {
+            // A waker sees `halted` clear and sets `need_resched` instead
+            // of sending an IPI.
+            for _ in 0..IDLE_SPINS {
+                if c.need_resched.load(Ordering::Relaxed) {
+                    break;
+                }
+                core::hint::spin_loop();
+            }
+        }
+        let irq = hal::irq::disable();
+        c.halted.store(true, Ordering::Relaxed);
+        // Pairs with the waker's fence in `make_runnable`: either it sees
+        // `halted` and interrupts us, or we see its thread queued.
+        fence(Ordering::SeqCst);
         if c.runq.lock().is_empty() && !c.need_resched.load(Ordering::Relaxed) {
             hal::wait_for_interrupt();
         }
+        c.halted.store(false, Ordering::Relaxed);
         switch_away();
         hal::irq::restore(irq);
     }

@@ -80,6 +80,9 @@ pub(crate) struct Inner {
     pub(crate) base: Priority,
     /// The mutex the thread is blocked on, for priority propagation.
     pub(crate) blocked_on: *const crate::lock::MutexCore,
+    /// Mutexes this thread owns that have waiters, for priority
+    /// un-lending (FreeBSD's `td_contested`).
+    pub(crate) contested: Contested,
     /// The CPU the thread last ran on, or is queued for.
     pub(crate) cpu: CpuId,
     /// Pinned to one CPU.
@@ -88,6 +91,46 @@ pub(crate) struct Inner {
     pub(crate) since: u64,
     /// Time-sharing state, for threads in the time-sharing range.
     pub(crate) ts: Option<crate::ts::Usage>,
+}
+
+/// A small set of mutexes (see [`Inner::contested`]).
+#[derive(Debug)]
+pub(crate) struct Contested {
+    items: [*const crate::lock::MutexCore; Self::CAPACITY],
+    len: usize,
+}
+
+impl Contested {
+    /// Beyond this many contested mutexes held at once, further ones are
+    /// not tracked: their waiters still lend priority, but releasing
+    /// another mutex may drop it early. Holding this many is a bug anyway.
+    const CAPACITY: usize = 16;
+
+    const fn new() -> Self {
+        Self {
+            items: [core::ptr::null(); Self::CAPACITY],
+            len: 0,
+        }
+    }
+
+    pub(crate) fn insert(&mut self, m: *const crate::lock::MutexCore) {
+        if !self.items[..self.len].contains(&m) && self.len < Self::CAPACITY {
+            self.items[self.len] = m;
+            self.len += 1;
+        }
+    }
+
+    pub(crate) fn remove(&mut self, m: *const crate::lock::MutexCore) {
+        if let Some(i) = self.items[..self.len].iter().position(|&x| x == m) {
+            self.len -= 1;
+            self.items[i] = self.items[self.len];
+        }
+    }
+
+    /// A copy, to examine without the thread's lock.
+    pub(crate) fn snapshot(&self) -> ([*const crate::lock::MutexCore; Self::CAPACITY], usize) {
+        (self.items, self.len)
+    }
 }
 
 /// What happened to a thread, for time-sharing accounting.
@@ -283,6 +326,7 @@ impl Thread {
                 priority,
                 base: priority,
                 blocked_on: core::ptr::null(),
+                contested: Contested::new(),
                 cpu,
                 bound: None,
                 since: 0,

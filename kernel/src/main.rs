@@ -22,6 +22,8 @@ use arch_x86_64 as arch;
 #[macro_use]
 mod console;
 mod acpi;
+#[cfg(not(feature = "ktest"))]
+mod bench;
 mod boot;
 mod errata;
 mod firmware;
@@ -96,6 +98,11 @@ fn kmain(boot_info: PhysAddr) -> ! {
         if let Some(secs) = boot::value("abyss.stress").and_then(|v| v.parse().ok()) {
             let passed = stress::run(secs);
             qemu::exit(passed);
+            firmware::reset(efi::ResetKind::Shutdown)
+        }
+        if let Some(suite) = boot::value("abyss.bench") {
+            let ran = bench::run(suite);
+            qemu::exit(ran);
             firmware::reset(efi::ResetKind::Shutdown)
         }
         if boot::flag("abyss.halt") {

@@ -116,6 +116,8 @@ fn stress(
         el2: false,
         test_devices: true,
         allow_reset: false,
+        extra_disk: None,
+        pin: false,
     };
     let run = vm.run_captured(Duration::from_secs(duration + 300), &log, verbose)?;
     let pass_status = match arch {
@@ -250,6 +252,8 @@ fn boot(case: &BootCase, release: bool, verbose: bool) -> Result<std::result::Re
         el2: case.el2,
         test_devices: true,
         allow_reset: case.warm_reset,
+        extra_disk: None,
+        pin: false,
     };
     // Emulated aarch64 firmware is slow to start; leave generous headroom.
     let run = vm.run_captured(Duration::from_secs(240), &log, verbose)?;

@@ -111,7 +111,16 @@ pub(crate) fn run(seconds: u64) -> bool {
     } = phase(seconds, true);
     settle();
 
-    let heap1 = crate::mm::heap_stats();
+    // The callout that ended the last sleep may still be freeing its
+    // closure on another CPU after waking us; a leak never balances.
+    let mut heap1 = crate::mm::heap_stats();
+    for _ in 0..20 {
+        if heap1.live_objects == heap0.live_objects && heap1.large_pages == heap0.large_pages {
+            break;
+        }
+        crate::time::sleep_ns(10_000_000);
+        heap1 = crate::mm::heap_stats();
+    }
     let free1 = crate::mm::phys_stats().free;
     let kva1 = crate::mm::kstack::kva_allocated();
     let violations = witness::violations() - witness0;

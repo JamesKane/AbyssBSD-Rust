@@ -546,6 +546,9 @@ ktest! {
         static INNER: LockClass = LockClass::new("test inner", 21);
         let a = Mutex::new(&OUTER, ());
         let b = Mutex::new(&INNER, ());
+        if !witness::ENABLED {
+            return;
+        }
         let before = witness::violations();
         {
             let _a = a.lock();

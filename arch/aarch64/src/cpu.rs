@@ -88,6 +88,8 @@ pub(crate) struct CpuLocal {
     cpu: u32,
     /// The kernel's per-CPU data (`hal::cpu_local`).
     kernel: *mut (),
+    /// The running thread (`hal::current_thread`).
+    thread: *const (),
 }
 
 // Written once by `init_boot_cpu`, on the boot CPU, before anything reads it.
@@ -95,6 +97,7 @@ static CPU0: Racy<CpuLocal> = Racy::new(CpuLocal {
     self_ptr: core::ptr::null(),
     cpu: 0,
     kernel: core::ptr::null_mut(),
+    thread: core::ptr::null(),
 });
 
 /// Points `TPIDR_EL1` at the boot CPU's block.
@@ -124,6 +127,7 @@ impl CpuBlock {
             self_ptr: core::ptr::null(),
             cpu: 0,
             kernel: core::ptr::null_mut(),
+            thread: core::ptr::null(),
         })
     }
 }
@@ -165,6 +169,28 @@ pub fn set_cpu_local(v: *mut ()) {
     let p = read_sysreg!("tpidr_el1") as *mut CpuLocal;
     // SAFETY: as above; only this CPU writes its block.
     unsafe { (*p).kernel = v };
+}
+
+/// The running thread. Finding the block and reading it are two loads, so
+/// interrupts are masked between them: a preemption there could move the
+/// thread to another CPU and return that CPU's thread.
+pub fn current_thread() -> *const () {
+    let daif = read_sysreg!("daif");
+    // SAFETY: masking IRQs on this CPU; restored below.
+    unsafe { asm!("msr daifset, #2", options(nomem, nostack)) };
+    let p = read_sysreg!("tpidr_el1") as *const CpuLocal;
+    // SAFETY: TPIDR_EL1 points at this CPU's block from `init_boot_cpu` on.
+    let t = unsafe { (*p).thread };
+    // SAFETY: restores the saved mask.
+    unsafe { asm!("msr daif, {}", in(reg) daif, options(nomem, nostack)) };
+    t
+}
+
+/// Records the running thread. Interrupts must be masked.
+pub fn set_current_thread(t: *const ()) {
+    let p = read_sysreg!("tpidr_el1") as *mut CpuLocal;
+    // SAFETY: as above; only this CPU writes its block.
+    unsafe { (*p).thread = t };
 }
 
 /// Waits for an interrupt with interrupts masked; WFI wakes on a pending

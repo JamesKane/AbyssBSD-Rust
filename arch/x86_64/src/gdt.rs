@@ -60,6 +60,8 @@ struct CpuLocal {
     cpu: u32,
     /// The kernel's per-CPU data (`hal::cpu_local`).
     kernel: *mut (),
+    /// The running thread (`hal::current_thread`).
+    thread: *const (),
 }
 
 /// One CPU's descriptor tables, interrupt stacks, and `GS` block. The
@@ -90,6 +92,7 @@ impl CpuBlock {
                 self_ptr: core::ptr::null(),
                 cpu: 0,
                 kernel: core::ptr::null_mut(),
+                thread: core::ptr::null(),
             },
             gdt: [0; 7],
             tss: TSS_INIT,
@@ -223,3 +226,21 @@ pub(crate) fn set_cpu_local(p: *mut ()) {
     // SAFETY: as for `cpu_local`; only this CPU writes its block.
     unsafe { asm!("mov gs:[16], {}", in(reg) p, options(nostack)) };
 }
+
+/// The running thread. One `GS`-relative load, so a preemption cannot
+/// split finding this CPU's block from reading it.
+pub(crate) fn current_thread() -> *const () {
+    let p: *const ();
+    // SAFETY: as for `cpu_local`; `thread` is at offset 24.
+    unsafe { asm!("mov {}, gs:[24]", out(reg) p, options(nostack, readonly)) };
+    p
+}
+
+/// Records the running thread.
+pub(crate) fn set_current_thread(p: *const ()) {
+    // SAFETY: as for `set_cpu_local`.
+    unsafe { asm!("mov gs:[24], {}", in(reg) p, options(nostack)) };
+}
+
+const _: () = assert!(core::mem::offset_of!(CpuLocal, kernel) == 16);
+const _: () = assert!(core::mem::offset_of!(CpuLocal, thread) == 24);

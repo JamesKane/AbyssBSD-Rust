@@ -214,8 +214,11 @@ Modeled on FreeBSD's lock classes, with Rust guards and lock ordering checked in
 `sys/sync`. The blocking locks (`Mutex`, `RwLock`, `SxLock`, `Epoch`) and `WaitQueue` live in
 `sys/sched` (`sched::lock`), because they are built on the scheduler. Each lock belongs to a
 `LockClass` with a declared level and sleep rule. The witness checks every acquisition and every
-sleep at runtime, in all builds. The compile-time level tokens and context tokens below are not
-built yet.
+sleep at runtime in debug builds (release builds compile it out, as FreeBSD's `GENERIC` omits
+`WITNESS`). Uncontended `Mutex`, `RwLock`, and `SxLock` operations are one compare-and-swap.
+Contended waiters spin while the owner runs and sleep otherwise. A release wakes the sleepers to
+compete, as FreeBSD does; it doesn't hand the lock to one of them. The compile-time level tokens
+and context tokens below are not built yet.
 
 - **Lock levels as types.** Each lock is declared with a level (`Mutex<L3, T>`). Acquiring a lock
   requires a token proving that only lower levels are held. Most ordering bugs fail at compile time.
@@ -256,7 +259,10 @@ We follow FreeBSD's Mach-derived design, adapted to Rust ownership:
   Time-sharing threads, from 120 up, take their priority from decayed CPU usage plus a waiting
   bonus, which bounds how long any of them can starve. The idle class is at the bottom.
 - **Preemption:** time slices are 10 ms on the per-CPU one-shot timer, and an idle CPU stops
-  its timer (tickless).
+  its timer (tickless). The timer is reprogrammed only to move a deadline earlier, so context
+  switches touch no timer hardware.
+- **Idle:** a CPU that has been switching often spins before halting, and wakers skip the IPI to
+  a spinning idle CPU (ULE's idle spin).
 - **Switching rule:** a thread is queued only once it has left its CPU, so a switching CPU
   never waits on another.
 - **Topology:** read from the PPTT or CPUID, with capacities set by core type.
