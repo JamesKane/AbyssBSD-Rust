@@ -73,7 +73,7 @@ boots a stub UEFI app that prints "AbyssBSD" on QEMU.
 **Exit:** both arches boot in QEMU to a kernel banner on serial and framebuffer, run kernel unit
 tests, deliberately take and report a page fault, and exit cleanly. Boot also works on bhyve.
 
-## Phase 2: Core kernel (L) — functional exit met 2026-10-18; performance exit open
+## Phase 2: Core kernel (L) — done 2026-10-18
 
 **Goal:** SMP, preemptive, timed, and memory-managed.
 
@@ -113,9 +113,20 @@ Where Phase 2 departs from the plan above:
 - **GIC erratum 2941627:** the errata framework and the GICD_IIDR boot log are in place. The
   erratum itself is to be assessed against Arm's published errata notice at Sky1 bring-up
   (P6), since only that hardware can confirm it.
-- **Performance: not yet measured.** Neither `tests/perf/kbench` nor the in-kernel benchmark
-  harness exists, so the performance half of the exit criterion is open. It is the first step of
-  Phase 3 (P3.0), and Phase 2 is done when it passes.
+- **Performance (measured in P3.0).** `cargo xtask perf` compares the P2 suite with FreeBSD
+  15.1's `kbench` module in identical pinned bhyve VMs, 10 runs per side. No benchmark exceeds
+  the bound: 16 are faster with a confidence interval below 1.0, 2 tie, and the geometric mean
+  ratio is 0.63. 18 contended or latency benchmarks vary by more than 1% from run to run on the
+  FreeBSD side (up to 11%), so by PERFORMANCE.md's rule they cannot resolve 2%. One of those,
+  `rw.rd.t4`, has a median ratio above 1.02 (1.036, with a confidence interval spanning 1.0).
+  Getting there took a round of fixes:
+  - critical sections in place of interrupt masking;
+  - depot magazines in the heap and per-CPU page caches;
+  - caller-owned timers with no allocation;
+  - lazy timer reprogramming;
+  - lock-word rw/sx locks and FreeBSD-style mutex spinning;
+  - ULE's idle spin.
+  The aarch64 numbers are not yet recorded.
 
 ## Phase 3: Device framework, PCIe, ACPI AML, storage (L/XL)
 

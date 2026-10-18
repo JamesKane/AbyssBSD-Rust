@@ -28,6 +28,8 @@ const LAT_WAKEUP: usize = 10_000;
 const MISS_OBJS: usize = 4096;
 const MISS_PAGES: usize = 1024;
 const RUN_NS: u64 = time::NANOS;
+/// Rounds of each throughput benchmark; the median is reported.
+const ROUNDS: usize = 3;
 
 /// Runs `suite`; returns whether it was known and ran.
 pub(crate) fn run(suite: &str) -> bool {
@@ -141,12 +143,20 @@ fn launch(
     t1 - t0
 }
 
-fn report_ops(name: &str, run: &Run, workers: usize, ticks: u64) {
+/// One round's result: thousandths of a nanosecond per operation.
+fn milli_ns_per_op(run: &Run, workers: usize, ticks: u64) -> u128 {
     let ops: u64 = run.ops[..workers]
         .iter()
         .map(|s| s.0.load(Ordering::Relaxed))
         .sum();
-    let milli = u128::from(time::ticks_to_ns(ticks)) * 1000 / u128::from(ops.max(1));
+    u128::from(time::ticks_to_ns(ticks)) * 1000 / u128::from(ops.max(1))
+}
+
+/// Runs `round` [`ROUNDS`] times and reports the median.
+fn report_median(name: &str, mut round: impl FnMut() -> u128) {
+    let mut r: [u128; ROUNDS] = core::array::from_fn(|_| round());
+    r.sort_unstable();
+    let milli = r[ROUNDS / 2];
     kprintln!("kbench {name} {}.{:03} ns/op", milli / 1000, milli % 1000);
 }
 
@@ -169,26 +179,76 @@ fn throughput_with<S: 'static>(
     init: fn() -> S,
     op: impl Fn(&mut S) -> u64 + Send + Sync + Clone + 'static,
 ) {
-    let run = Run::new();
     let cpus: Vec<CpuId> = (0..workers).map(default_cpu).collect();
-    let ticks = launch(&run, &cpus, RUN_NS, move |run, i| {
-        let mut state = init();
-        let mut n = 0;
-        while !run.stopped() {
-            n += op(&mut state);
-        }
-        run.ops[i].0.store(n, Ordering::Relaxed);
+    report_median(name, || {
+        let run = Run::new();
+        let op = op.clone();
+        let ticks = launch(&run, &cpus, RUN_NS, move |run, i| {
+            let mut state = init();
+            let mut n = 0;
+            while !run.stopped() {
+                n += op(&mut state);
+            }
+            run.ops[i].0.store(n, Ordering::Relaxed);
+        });
+        milli_ns_per_op(&run, workers, ticks)
     });
-    report_ops(name, &run, workers, ticks);
 }
 
 static BENCH_MTX: LockClass = LockClass::new("bench mtx", 900);
 static BENCH_RW: LockClass = LockClass::non_sleepable("bench rw", 900);
 static BENCH_SX: LockClass = LockClass::new("bench sx", 900);
 
-static MTX: Mutex<u64> = Mutex::new(&BENCH_MTX, 0);
-static RW: RwLock<u64> = RwLock::new(&BENCH_RW, 0);
-static SX: SxLock<u64> = SxLock::new(&BENCH_SX, 0);
+/// Lock benchmarks run on this many lock sets, each in its own page, and
+/// report the mean: a contended lock's cost depends on where its cache line
+/// lives (its L3 slice), by up to 2x on the build server.
+const PLACEMENTS: usize = 8;
+const PLACEMENT_NS: u64 = 250_000_000;
+
+/// One placement's locks (each guards its own counter).
+#[repr(align(4096))]
+struct LockSet {
+    mtx: Mutex<u64>,
+    rw: RwLock<u64>,
+    sx: SxLock<u64>,
+}
+
+fn lock_sets() -> Vec<&'static LockSet> {
+    (0..PLACEMENTS)
+        .map(|_| {
+            &*Box::leak(Box::new(LockSet {
+                mtx: Mutex::new(&BENCH_MTX, 0),
+                rw: RwLock::new(&BENCH_RW, 0),
+                sx: SxLock::new(&BENCH_SX, 0),
+            }))
+        })
+        .collect()
+}
+
+/// A lock benchmark: `workers` threads run `op` on each lock set in turn
+/// for [`PLACEMENT_NS`]; reports the mean.
+fn lock_throughput<F: Fn(&LockSet) -> u64 + Copy + Send + Sync + 'static>(
+    name: &str,
+    workers: usize,
+    sets: &[&'static LockSet],
+    op: F,
+) {
+    let cpus: Vec<CpuId> = (0..workers).map(default_cpu).collect();
+    let mut sum = 0;
+    for &set in sets {
+        let run = Run::new();
+        let ticks = launch(&run, &cpus, PLACEMENT_NS, move |run, i| {
+            let mut n = 0;
+            while !run.stopped() {
+                n += op(set);
+            }
+            run.ops[i].0.store(n, Ordering::Relaxed);
+        });
+        sum += milli_ns_per_op(&run, workers, ticks);
+    }
+    let milli = sum / sets.len() as u128;
+    kprintln!("kbench {name} {}.{:03} ns/op", milli / 1000, milli % 1000);
+}
 
 fn layout() -> Layout {
     Layout::from_size_align(256, 8).expect("layout")
@@ -210,25 +270,26 @@ fn suite_p2() {
     ctxsw("ctxsw.same", CpuId(1), CpuId(1));
     ctxsw("ctxsw.cross", CpuId(1), CpuId(2));
 
+    let sets = lock_sets();
     for t in [1, 2, 4, 8] {
-        throughput(&alloc::format!("mtx.t{t}"), t, || {
-            *MTX.lock() += 1;
+        lock_throughput(&alloc::format!("mtx.t{t}"), t, &sets, |s| {
+            *s.mtx.lock() += 1;
             1
         });
-        throughput(&alloc::format!("rw.rd.t{t}"), t, || {
-            black_box(*RW.read());
+        lock_throughput(&alloc::format!("rw.rd.t{t}"), t, &sets, |s| {
+            black_box(*s.rw.read());
             1
         });
-        throughput(&alloc::format!("rw.wr.t{t}"), t, || {
-            *RW.write() += 1;
+        lock_throughput(&alloc::format!("rw.wr.t{t}"), t, &sets, |s| {
+            *s.rw.write() += 1;
             1
         });
-        throughput(&alloc::format!("sx.rd.t{t}"), t, || {
-            black_box(*SX.read());
+        lock_throughput(&alloc::format!("sx.rd.t{t}"), t, &sets, |s| {
+            black_box(*s.sx.read());
             1
         });
-        throughput(&alloc::format!("sx.wr.t{t}"), t, || {
-            *SX.write() += 1;
+        lock_throughput(&alloc::format!("sx.wr.t{t}"), t, &sets, |s| {
+            *s.sx.write() += 1;
             1
         });
     }
@@ -327,6 +388,61 @@ fn suite_diag() {
             1024
         },
     );
+    #[cfg(target_arch = "x86_64")]
+    {
+        throughput("diag.apic_read", 1, || {
+            black_box(crate::arch::apic::probe_read());
+            1
+        });
+        throughput("diag.apic_write", 1, || {
+            crate::arch::apic::probe_write();
+            1
+        });
+    }
+    throughput("diag.ping_idle", 1, || {
+        crate::smp::ping(CpuId(2));
+        1
+    });
+    // The same with CPU 2 running a spinning thread: no halt to wake from.
+    static SPIN: AtomicBool = AtomicBool::new(true);
+    SPIN.store(true, Ordering::Relaxed);
+    let spinner = sched::Builder::new("spinner")
+        .priority(Priority::KERNEL)
+        .bind(CpuId(2))
+        .spawn(|| {
+            while SPIN.load(Ordering::Relaxed) {
+                core::hint::spin_loop();
+            }
+        })
+        .expect("bench: spinner");
+    time::sleep_ns(10_000_000);
+    throughput("diag.ping_busy", 1, || {
+        crate::smp::ping(CpuId(2));
+        1
+    });
+    SPIN.store(false, Ordering::Relaxed);
+    spinner.join();
+    // Contended reads on locks in eight different pages: does the cost
+    // depend on where the lock lives (its L3 slice)?
+    let locks: Vec<&'static RwLock<u64>> = (0..8)
+        .map(|_| {
+            let page = Layout::from_size_align(4096, 4096).expect("layout");
+            // SAFETY: nonzero size; the page is leaked for the benchmark.
+            let p = unsafe { alloc::alloc::alloc(page) }.cast::<RwLock<u64>>();
+            assert!(!p.is_null());
+            // SAFETY: fresh, page-aligned, large enough.
+            unsafe {
+                p.write(RwLock::new(&BENCH_RW, 0));
+                &*p
+            }
+        })
+        .collect();
+    for (i, l) in locks.into_iter().enumerate() {
+        throughput(&alloc::format!("diag.rw_rd_t2_page{i}"), 2, move || {
+            black_box(*l.read());
+            1
+        });
+    }
     throughput("diag.counter", 1, || {
         black_box(time::counter());
         1
@@ -339,29 +455,31 @@ fn ctxsw(name: &str, a: CpuId, b: CpuId) {
         q: WaitQueue,
         turn: AtomicUsize,
     }
-    let shared = Arc::new(Turn {
-        q: WaitQueue::new(),
-        turn: AtomicUsize::new(0),
-    });
-    let run = Run::new();
-    let ticks = launch(&run, &[a, b], RUN_NS, move |run, me| {
-        let other = 1 - me;
-        let mut n = 0;
-        loop {
-            shared
-                .q
-                .wait_until(|| shared.turn.load(Ordering::Acquire) == me || run.stopped());
-            shared.turn.store(other, Ordering::Release);
-            if run.stopped() {
-                shared.q.wake_all();
-                break;
+    report_median(name, || {
+        let shared = Arc::new(Turn {
+            q: WaitQueue::new(),
+            turn: AtomicUsize::new(0),
+        });
+        let run = Run::new();
+        let ticks = launch(&run, &[a, b], RUN_NS, move |run, me| {
+            let other = 1 - me;
+            let mut n = 0;
+            loop {
+                shared
+                    .q
+                    .wait_until(|| shared.turn.load(Ordering::Acquire) == me || run.stopped());
+                shared.turn.store(other, Ordering::Release);
+                if run.stopped() {
+                    shared.q.wake_all();
+                    break;
+                }
+                n += 1;
+                shared.q.wake_one();
             }
-            n += 1;
-            shared.q.wake_one();
-        }
-        run.ops[me].0.store(n, Ordering::Relaxed);
+            run.ops[me].0.store(n, Ordering::Relaxed);
+        });
+        milli_ns_per_op(&run, 2, ticks)
     });
-    report_ops(name, &run, 2, ticks);
 }
 
 /// How late a 1 ms callout's handler starts, from a sleeping worker.

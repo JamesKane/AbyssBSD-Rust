@@ -36,7 +36,7 @@ const BOUND: f64 = 1.02;
 const MAX_CV: f64 = 0.01;
 const BOOTSTRAP: usize = 2000;
 
-const USAGE: &str = "usage: cargo xtask --remote perf [--suite p2] [--runs N] [--prepare]";
+const USAGE: &str = "usage: cargo xtask --remote perf [--suite p2|diag] [--runs N] [--prepare]";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Side {
@@ -61,8 +61,10 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
         .map_err(|_| "bad --runs")?;
     let prepare_only = args.take_flag("--prepare");
     args.finish()?;
-    if suite != "p2" {
-        return Err(format!("unknown suite `{suite}` (p2)").into());
+    // `diag` holds AbyssBSD-side diagnostics, some with FreeBSD
+    // counterparts; it is for investigation, not gating.
+    if suite != "p2" && suite != "diag" {
+        return Err(format!("unknown suite `{suite}` (p2, diag)").into());
     }
     if !cfg!(target_os = "freebsd") {
         return Err(format!("perf needs bhyve: run it on the build server\n{USAGE}").into());

@@ -19,7 +19,7 @@
 //! depot of full and empty magazines, so a refill or flush moves one
 //! pointer under a lock rather than many objects. Only when the depot has
 //! no full magazine are objects taken from slabs. A magazine holds about
-//! 32 KiB of objects (16 to 256 of them) and lives in one page from the
+//! 64 KiB of objects (16 to 510 of them) and lives in one page from the
 //! page source.
 //!
 //! Requests larger than the largest class, or more aligned than a page, go
@@ -185,13 +185,14 @@ struct Mag {
 
 const _: () = assert!(size_of::<Mag>() <= PAGE);
 
-/// Objects a magazine of class `c` holds: about 32 KiB worth.
+/// Objects a magazine of class `c` holds: about 64 KiB worth (256 for
+/// 256-byte objects, UMA's largest bucket), at least 16, at most a page.
 const fn capacity(c: usize) -> usize {
-    let n = 32 * 1024 / CLASSES[c].size;
+    let n = 64 * 1024 / CLASSES[c].size;
     if n < 16 {
         16
-    } else if n > 256 {
-        256
+    } else if n > MAG_SLOTS {
+        MAG_SLOTS
     } else {
         n
     }

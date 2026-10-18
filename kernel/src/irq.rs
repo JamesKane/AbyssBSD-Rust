@@ -130,6 +130,7 @@ pub(crate) fn init_ap(_cpu: CpuId) {
     // SAFETY: once per CPU, interrupts masked, after the boot CPU chose
     // the register interface.
     unsafe { arch::apic::init_cpu() };
+    arch::apic::configure_timer();
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -181,6 +182,7 @@ pub(crate) fn init_boot_cpu() {
     crate::time::init_clock(freq);
     // SAFETY: boot CPU, after `init_cpu`, interrupts masked.
     unsafe { apic::calibrate_timer(|| pm_wait_tsc(10_000_000).unwrap_or(freq / 100)) };
+    apic::configure_timer();
     kprintln!(
         "irq: local APIC {mode:?} id {}, {ioapics} I/O APIC(s), timer {}",
         apic::id(),

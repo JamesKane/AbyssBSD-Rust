@@ -989,11 +989,18 @@ fn idle_loop() {
         // Pairs with the waker's fence in `make_runnable`: either it sees
         // `halted` and interrupts us, or we see its thread queued.
         fence(Ordering::SeqCst);
+        let before = c.switches.get();
         if c.runq.lock().is_empty() && !c.need_resched.load(Ordering::Relaxed) {
             hal::wait_for_interrupt();
         }
         c.halted.store(false, Ordering::Relaxed);
         switch_away();
+        // A wakeup that switched to no thread (an interrupt served from
+        // idle) counts as a switch, as ULE counts it: a CPU taking frequent
+        // interrupts spins rather than halting between them.
+        if c.switches.get() == before {
+            count_switch(c, platform().now());
+        }
         hal::irq::restore(irq);
     }
 }

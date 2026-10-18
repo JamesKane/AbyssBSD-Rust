@@ -262,7 +262,13 @@ We follow FreeBSD's Mach-derived design, adapted to Rust ownership:
   its timer (tickless). The timer is reprogrammed only to move a deadline earlier, so context
   switches touch no timer hardware.
 - **Idle:** a CPU that has been switching often spins before halting, and wakers skip the IPI to
-  a spinning idle CPU (ULE's idle spin).
+  a spinning idle CPU (ULE's idle spin). Interrupts served from idle count as switches.
+- **Critical sections:** `hal::critical` holds off preemption with a per-CPU counter changed in
+  one instruction (FreeBSD's `critical_enter`); an interrupt that wants to preempt inside one
+  leaves a flag the outermost exit acts on. The heap's and page allocator's per-CPU caches use
+  it instead of masking interrupts, and code running in interrupt context bypasses those caches.
+- **Timers:** `time::Timer` is caller-owned and pinned, like `struct callout`. Each CPU keeps
+  its armed timers in a binary heap, and arming or stopping one allocates nothing.
 - **Switching rule:** a thread is queued only once it has left its CPU, so a switching CPU
   never waits on another.
 - **Topology:** read from the PPTT or CPUID, with capacities set by core type.

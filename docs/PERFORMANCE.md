@@ -83,7 +83,7 @@ same format. It is test code that runs only on FreeBSD.
 
 ## 6. Tooling
 
-`cargo xtask --remote perf [--suite p2] [--runs N] [--prepare]` runs on the build server. It
+`cargo xtask --remote perf [--suite p2|diag] [--runs N] [--prepare]` runs on the build server. It
 boots each kernel in an identical bhyve VM (8 vCPUs pinned one per P-core, 2 GiB, the same
 devices), alternating between the two kernels, for `N` runs each (default 10). It applies the rules
 above, writes raw samples, console logs, host facts, and a report to

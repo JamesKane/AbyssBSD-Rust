@@ -171,6 +171,17 @@ pub fn eoi() {
     write(REG_EOI, 0);
 }
 
+/// Reads the ICR low half (for measuring register access cost).
+pub fn probe_read() -> u32 {
+    read(REG_ICR_LOW)
+}
+
+/// Writes the task priority (0, its normal value) (for measuring register
+/// access cost).
+pub fn probe_write() {
+    write(REG_TPR, 0);
+}
+
 /// Sends a fixed IPI with `vector` to the CPU with APIC ID `dest`.
 pub fn send_ipi(dest: u32, vector: u8) {
     send_icr(dest, u32::from(vector));
@@ -198,12 +209,17 @@ fn send_icr(dest: u32, low: u32) {
         // SAFETY: x2APIC mode; the ICR is one 64-bit MSR.
         unsafe { wrmsr(0x830, (u64::from(dest) << 32) | u64::from(low)) };
     } else {
-        write(REG_ICR_HIGH, dest << 24);
-        write(REG_ICR_LOW, low);
-        // Wait for delivery (bit 12, send pending).
+        // Wait for an earlier IPI to leave (bit 12, send pending) before
+        // reusing the register, rather than after each send: under a
+        // hypervisor every access is an exit, and delivery is usually done.
         while read(REG_ICR_LOW) & (1 << 12) != 0 {
             core::hint::spin_loop();
         }
+        // A destination shorthand ignores the high half.
+        if low & (0b11 << 18) == 0 {
+            write(REG_ICR_HIGH, dest << 24);
+        }
+        write(REG_ICR_LOW, low);
     }
 }
 
@@ -228,6 +244,19 @@ pub unsafe fn calibrate_timer(wait: impl FnOnce() -> u64) {
     }
 }
 
+/// Puts this CPU's timer in its working mode (TSC-deadline, or one-shot
+/// counting at divide-by-1), so arming it is then a single register write.
+/// Call once per CPU after [`calibrate_timer`] ran on the boot CPU.
+pub fn configure_timer() {
+    if TSC_DEADLINE.load(Ordering::Relaxed) {
+        write(REG_LVT_TIMER, LVT_TSC_DEADLINE | u32::from(TIMER_VECTOR));
+    } else {
+        write(REG_TIMER_INITIAL, 0);
+        write(REG_TIMER_DIVIDE, 0b1011);
+        write(REG_LVT_TIMER, u32::from(TIMER_VECTOR));
+    }
+}
+
 /// Whether the timer uses TSC-deadline mode.
 #[must_use]
 pub fn uses_tsc_deadline() -> bool {
@@ -235,22 +264,18 @@ pub fn uses_tsc_deadline() -> bool {
 }
 
 /// Arms this CPU's timer to fire once at TSC value `deadline` (at once if
-/// it has passed).
+/// it has passed). One register write (each is a VM exit under a
+/// hypervisor); [`configure_timer`] set the mode.
 pub fn set_deadline(deadline: u64) {
     if TSC_DEADLINE.load(Ordering::Relaxed) {
-        write(REG_LVT_TIMER, LVT_TSC_DEADLINE | u32::from(TIMER_VECTOR));
-        // SAFETY: TSC-deadline mode is supported and selected; this MSR
-        // write arms the timer. An MFENCE-less write is fine: the SDM only
-        // requires ordering against the LVT write, which is serializing in
-        // x2APIC mode and uncached in xAPIC mode.
+        // SAFETY: TSC-deadline mode is supported and selected
+        // (`configure_timer`); this MSR write arms the timer.
         unsafe { wrmsr(MSR_TSC_DEADLINE, deadline.max(1)) };
     } else {
         let now = cpu::timestamp();
         let delta = deadline.saturating_sub(now).max(1);
         let ticks = (u128::from(delta) * u128::from(TIMER_PER_TSC.load(Ordering::Relaxed))) >> 32;
         let ticks = u32::try_from(ticks).unwrap_or(u32::MAX).max(1);
-        write(REG_TIMER_DIVIDE, 0b1011);
-        write(REG_LVT_TIMER, u32::from(TIMER_VECTOR));
         write(REG_TIMER_INITIAL, ticks);
     }
 }

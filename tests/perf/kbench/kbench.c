@@ -39,6 +39,7 @@
 MALLOC_DEFINE(M_KBENCH, "kbench", "kbench benchmark buffers");
 
 #define	KB_MAXT		8
+#define	KB_ROUNDS	3	/* rounds per throughput benchmark; median */
 #define	KB_NCPU		8
 #define	KB_LAT_CALLOUT	1000
 #define	KB_LAT_WAKEUP	10000
@@ -121,11 +122,12 @@ kb_default_cpus(struct kb_run *r)
 }
 
 /*
- * Starts the workers, lets them run for `seconds` (0: until they finish by
- * themselves), and returns the elapsed TSC ticks between go and stop.
+ * Starts the workers, lets them run for `ms` milliseconds (0: until they
+ * finish by themselves), and returns the elapsed TSC ticks between go and
+ * stop.
  */
 static uint64_t
-kb_launch(struct kb_run *r, int seconds)
+kb_launch(struct kb_run *r, int ms)
 {
 	struct thread *td;
 	uint64_t t0, t1;
@@ -150,28 +152,43 @@ kb_launch(struct kb_run *r, int seconds)
 	r->go = 1;
 	wakeup(__DEVOLATILE(void *, &r->go));
 	mtx_unlock(&kb_go_mtx);
-	if (seconds > 0) {
-		pause("kbrun", seconds * hz);
+	if (ms > 0) {
+		pause("kbrun", ms * hz / 1000);
 		atomic_store_rel_int(&r->stop, 1);
 		t1 = rdtsc();
 	}
 	while (atomic_load_acq_int(&r->done) < r->nthreads)
 		pause("kbdone", 1);
-	if (seconds == 0)
+	if (ms == 0)
 		t1 = rdtsc();
 	return (t1 - t0);
 }
 
-static void
-kb_report_ops(const char *name, struct kb_run *r, uint64_t ticks)
+/* One round's result: thousandths of a nanosecond per operation. */
+static uint64_t
+kb_milli_per_op(struct kb_run *r, uint64_t ticks)
 {
-	uint64_t ops = 0, milli;
+	uint64_t ops = 0;
 
 	for (int i = 0; i < r->nthreads; i++)
 		ops += r->slot[i].ops;
 	if (ops == 0)
 		ops = 1;
-	milli = tsc_ns(ticks) * 1000 / ops;
+	return (tsc_ns(ticks) * 1000 / ops);
+}
+
+static int kb_cmp(const void *, const void *);
+
+/* Runs KB_ROUNDS rounds of `r` and reports the median. */
+static void
+kb_report_median(const char *name, struct kb_run *r)
+{
+	uint64_t m[KB_ROUNDS], milli;
+
+	for (int i = 0; i < KB_ROUNDS; i++)
+		m[i] = kb_milli_per_op(r, kb_launch(r, 1000));
+	qsort(m, KB_ROUNDS, sizeof(m[0]), kb_cmp);
+	milli = m[KB_ROUNDS / 2];
 	printf("kbench %s %ju.%03ju ns/op\n", name, (uintmax_t)(milli / 1000),
 	    (uintmax_t)(milli % 1000));
 }
@@ -207,15 +224,31 @@ kb_throughput(const char *name, kb_body_t *body, int nthreads)
 	r.body = body;
 	r.nthreads = nthreads;
 	kb_default_cpus(&r);
-	kb_report_ops(name, &r, kb_launch(&r, 1));
+	kb_report_median(name, &r);
 }
 
 /* Locks. */
 
-static struct mtx kb_mtx;
-static struct rwlock kb_rw;
-static struct sx kb_sx;
-static volatile uint64_t kb_shared;
+/*
+ * Lock benchmarks run on KB_PLACEMENTS lock sets, each in its own page,
+ * and report the mean: a contended lock's cost depends on where its cache
+ * line lives (its L3 slice), by up to 2x on the build server.
+ */
+#define	KB_PLACEMENTS	8
+#define	KB_PLACEMENT_MS	250
+
+struct kb_lockset {
+	struct mtx	m;
+	uint64_t	mc;
+	struct rwlock	rw;
+	uint64_t	rwc;
+	struct sx	sx;
+	uint64_t	sxc;
+};
+
+static struct kb_lockset *kb_sets[KB_PLACEMENTS];
+static struct kb_lockset *kb_ls;	/* the set in use */
+static struct mtx kb_mtx;		/* for ctxsw and wakeup */
 
 static void
 kb_mtx_body(struct kb_run *r, int idx)
@@ -223,9 +256,9 @@ kb_mtx_body(struct kb_run *r, int idx)
 	uint64_t n = 0;
 
 	while (!kb_stopped(r)) {
-		mtx_lock(&kb_mtx);
-		kb_shared++;
-		mtx_unlock(&kb_mtx);
+		mtx_lock(&kb_ls->m);
+		kb_ls->mc++;
+		mtx_unlock(&kb_ls->m);
 		n++;
 	}
 	r->slot[idx].ops = n;
@@ -237,9 +270,9 @@ kb_rw_rd_body(struct kb_run *r, int idx)
 	uint64_t n = 0, sink = 0;
 
 	while (!kb_stopped(r)) {
-		rw_rlock(&kb_rw);
-		sink += kb_shared;
-		rw_runlock(&kb_rw);
+		rw_rlock(&kb_ls->rw);
+		sink += *(volatile uint64_t *)&kb_ls->rwc;
+		rw_runlock(&kb_ls->rw);
 		n++;
 	}
 	r->slot[idx].ops = n + (sink & 0);
@@ -251,9 +284,9 @@ kb_rw_wr_body(struct kb_run *r, int idx)
 	uint64_t n = 0;
 
 	while (!kb_stopped(r)) {
-		rw_wlock(&kb_rw);
-		kb_shared++;
-		rw_wunlock(&kb_rw);
+		rw_wlock(&kb_ls->rw);
+		kb_ls->rwc++;
+		rw_wunlock(&kb_ls->rw);
 		n++;
 	}
 	r->slot[idx].ops = n;
@@ -265,9 +298,9 @@ kb_sx_rd_body(struct kb_run *r, int idx)
 	uint64_t n = 0, sink = 0;
 
 	while (!kb_stopped(r)) {
-		sx_slock(&kb_sx);
-		sink += kb_shared;
-		sx_sunlock(&kb_sx);
+		sx_slock(&kb_ls->sx);
+		sink += *(volatile uint64_t *)&kb_ls->sxc;
+		sx_sunlock(&kb_ls->sx);
 		n++;
 	}
 	r->slot[idx].ops = n + (sink & 0);
@@ -279,12 +312,31 @@ kb_sx_wr_body(struct kb_run *r, int idx)
 	uint64_t n = 0;
 
 	while (!kb_stopped(r)) {
-		sx_xlock(&kb_sx);
-		kb_shared++;
-		sx_xunlock(&kb_sx);
+		sx_xlock(&kb_ls->sx);
+		kb_ls->sxc++;
+		sx_xunlock(&kb_ls->sx);
 		n++;
 	}
 	r->slot[idx].ops = n;
+}
+
+/* A lock benchmark: the mean over the lock placements. */
+static void
+kb_lock_throughput(const char *name, kb_body_t *body, int nthreads)
+{
+	static struct kb_run r;
+	uint64_t sum = 0, milli;
+
+	r.body = body;
+	r.nthreads = nthreads;
+	kb_default_cpus(&r);
+	for (int i = 0; i < KB_PLACEMENTS; i++) {
+		kb_ls = kb_sets[i];
+		sum += kb_milli_per_op(&r, kb_launch(&r, KB_PLACEMENT_MS));
+	}
+	milli = sum / KB_PLACEMENTS;
+	printf("kbench %s %ju.%03ju ns/op\n", name, (uintmax_t)(milli / 1000),
+	    (uintmax_t)(milli % 1000));
 }
 
 /* Allocators. */
@@ -387,7 +439,7 @@ kb_ctxsw(const char *name, int cpu0, int cpu1)
 	r.nthreads = 2;
 	r.cpus[0] = cpu0;
 	r.cpus[1] = cpu1;
-	kb_report_ops(name, &r, kb_launch(&r, 1));
+	kb_report_median(name, &r);
 }
 
 /* Callouts. */
@@ -548,15 +600,15 @@ kb_suite_p2(void)
 		int t = threads[i];
 
 		snprintf(name, sizeof(name), "mtx.t%d", t);
-		kb_throughput(name, kb_mtx_body, t);
+		kb_lock_throughput(name, kb_mtx_body, t);
 		snprintf(name, sizeof(name), "rw.rd.t%d", t);
-		kb_throughput(name, kb_rw_rd_body, t);
+		kb_lock_throughput(name, kb_rw_rd_body, t);
 		snprintf(name, sizeof(name), "rw.wr.t%d", t);
-		kb_throughput(name, kb_rw_wr_body, t);
+		kb_lock_throughput(name, kb_rw_wr_body, t);
 		snprintf(name, sizeof(name), "sx.rd.t%d", t);
-		kb_throughput(name, kb_sx_rd_body, t);
+		kb_lock_throughput(name, kb_sx_rd_body, t);
 		snprintf(name, sizeof(name), "sx.wr.t%d", t);
-		kb_throughput(name, kb_sx_wr_body, t);
+		kb_lock_throughput(name, kb_sx_wr_body, t);
 	}
 
 	kb_throughput("malloc.hit.t1", kb_malloc_hit_body, 1);
@@ -599,6 +651,33 @@ kb_suite_p2(void)
 	vm_page_free(m);
 }
 
+/* Diagnostics: IPI round trips to an idle and to a busy CPU 2. */
+static volatile int kb_spinning;
+
+static void
+kb_spinner(void *arg __unused)
+{
+	kb_bind(2);
+	while (atomic_load_acq_int((volatile u_int *)&kb_spinning))
+		cpu_spinwait();
+	kthread_exit();
+}
+
+static void
+kb_suite_diag(void)
+{
+	struct thread *td;
+
+	kb_throughput("diag.ping_idle", kb_ipi_body, 1);
+	kb_spinning = 1;
+	if (kthread_add(kb_spinner, NULL, NULL, &td, 0, 0, "kbspin") != 0)
+		panic("kbench: kthread_add");
+	pause("kbsp", hz / 100);
+	kb_throughput("diag.ping_busy", kb_ipi_body, 1);
+	atomic_store_rel_int((volatile u_int *)&kb_spinning, 0);
+	pause("kbsp", hz / 100);
+}
+
 static int
 kb_sysctl_run(SYSCTL_HANDLER_ARGS)
 {
@@ -608,7 +687,7 @@ kb_sysctl_run(SYSCTL_HANDLER_ARGS)
 	error = sysctl_handle_string(oidp, suite, sizeof(suite), req);
 	if (error != 0 || req->newptr == NULL)
 		return (error);
-	if (strcmp(suite, "p2") != 0)
+	if (strcmp(suite, "p2") != 0 && strcmp(suite, "diag") != 0)
 		return (EINVAL);
 	if (mp_ncpus < KB_NCPU) {
 		printf("kbench: needs %d CPUs, have %d\n", KB_NCPU, mp_ncpus);
@@ -617,7 +696,10 @@ kb_sysctl_run(SYSCTL_HANDLER_ARGS)
 	kb_bind(0);
 	/* A fresh line, in case other console output is mid-line. */
 	printf("\nkbench begin %s cpus=%d\n", suite, mp_ncpus);
-	kb_suite_p2();
+	if (strcmp(suite, "p2") == 0)
+		kb_suite_p2();
+	else
+		kb_suite_diag();
 	printf("kbench end %s\n", suite);
 	thread_lock(curthread);
 	sched_unbind(curthread);
@@ -639,14 +721,23 @@ kb_modevent(module_t mod __unused, int type, void *data __unused)
 		mtx_init(&kb_mtx, "kbench mtx", NULL, MTX_DEF);
 		mtx_init(&kb_go_mtx, "kbench go", NULL, MTX_DEF);
 		mtx_init(&kb_spin, "kbench spin", NULL, MTX_SPIN);
-		rw_init(&kb_rw, "kbench rw");
-		sx_init(&kb_sx, "kbench sx");
+		for (int i = 0; i < KB_PLACEMENTS; i++) {
+			kb_sets[i] = malloc(PAGE_SIZE, M_KBENCH,
+			    M_WAITOK | M_ZERO);
+			mtx_init(&kb_sets[i]->m, "kbench mtx", NULL, MTX_DEF);
+			rw_init(&kb_sets[i]->rw, "kbench rw");
+			sx_init(&kb_sets[i]->sx, "kbench sx");
+		}
 		callout_init(&kb_callout, 1);
 		return (0);
 	case MOD_UNLOAD:
 		callout_drain(&kb_callout);
-		sx_destroy(&kb_sx);
-		rw_destroy(&kb_rw);
+		for (int i = 0; i < KB_PLACEMENTS; i++) {
+			sx_destroy(&kb_sets[i]->sx);
+			rw_destroy(&kb_sets[i]->rw);
+			mtx_destroy(&kb_sets[i]->m);
+			free(kb_sets[i], M_KBENCH);
+		}
 		mtx_destroy(&kb_spin);
 		mtx_destroy(&kb_go_mtx);
 		mtx_destroy(&kb_mtx);

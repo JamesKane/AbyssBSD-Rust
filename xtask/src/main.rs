@@ -28,7 +28,7 @@ commands:
   image       --arch <a> [--release] [--ktest]           build a GPT disk image with an ESP
   run         --arch <a> [--release] [--ktest] [--smp N] [--mem SIZE] [--gdb] [--display]
   test        [--tier unit|boot|all] [--arch <a|all>]    run tests (default: all tiers)
-  perf        [--suite p2] [--runs N] [--prepare]        compare with FreeBSD in bhyve (server only)
+  perf        [--suite p2|diag] [--runs N] [--prepare]   compare with FreeBSD in bhyve (server only)
   check                                                  fmt, clippy (host and targets), policy
   policy                                                 dependency and license-header rules
   syscallgen  [--src DIR] [--check]                      regenerate lib/abi syscall tables

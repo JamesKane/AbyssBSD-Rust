@@ -32,8 +32,14 @@ operations completed, so the inverse of throughput) or `ns` (a latency percentil
 - Workers run at kernel thread priority (FreeBSD `PRI_MIN_KERN`, AbyssBSD `Priority::KERNEL`).
 - Workers sleep until the coordinator's start signal (a spinning worker could keep another
   bound to the same CPU from starting: FreeBSD does not time-slice kernel-priority threads).
-- Throughput benchmarks start all workers together, run them for 1 s of wall time, and report
-  `elapsed / total operations`. Workers check a shared stop flag once per operation (or per batch).
+- Throughput benchmarks start all workers together, run them for 1 s of wall time, and compute
+  `elapsed / total operations`. They do this three times and report the median round, which
+  damps the run-to-run variation of contended benchmarks.
+- Lock benchmarks (`mtx`, `rw`, `sx`) instead run on eight lock sets, each in its own page with
+  each lock's counter beside it, for 250 ms each, and report the mean. A contended lock's cost
+  depends on where its cache line lives (its L3 slice): on the build server the same benchmark
+  measures about 50 or about 90 ns/op depending on the lock's address, which made single-lock
+  results bimodal from boot to boot on both kernels. Workers check a shared stop flag once per operation (or per batch).
 - Latency benchmarks collect the stated number of samples and report the 50th and 99th percentiles
   as `<name>.p50` and `<name>.p99`.
 - Time comes from the CPU counter (TSC), converted with each kernel's calibrated frequency.
@@ -59,3 +65,14 @@ operations completed, so the inverse of throughput) or `ns` (a latency percentil
 | `wakeup.latency` | 2: sleeper on CPU 1, waker on CPU 2 | 10000 samples. The sleeper announces it is about to sleep and sleeps. The waker waits for the announcement, spins 50 µs so the sleeper's CPU goes idle, stamps the time, and wakes it. The sample is from the stamp to the sleeper running. FreeBSD: `mtx_sleep`/`wakeup` (the announcement is made under the mutex); AbyssBSD: `WaitQueue` (the announcement is made in the condition check, under the queue lock) |
 | `ipi.rtt` | 1 (CPU 1) | Run an empty function on CPU 2 and wait for it to finish. FreeBSD `smp_rendezvous_cpus` with no barriers; AbyssBSD `smp::ping` |
 | `tlb.shootdown` | 1 (CPU 1) | Invalidate one kernel page on every CPU and wait. FreeBSD `pmap_invalidate_page(kernel_pmap, va)`; AbyssBSD `mm::flush_range` plus `smp::shootdown` |
+
+## Suite `diag`
+
+For investigation, not gating: `cargo xtask perf --suite diag`. AbyssBSD reports the cost of the
+pieces its fast paths are made of (interrupt mask and unmask, `cpu_id`, `current`, an APIC register
+read and write, a batch of allocations). Both kernels report:
+
+| Name | Operation |
+|---|---|
+| `diag.ping_idle` | `ipi.rtt` to an idle CPU 2 |
+| `diag.ping_busy` | `ipi.rtt` while CPU 2 runs a spinning kernel thread, so no halted CPU has to wake |

@@ -80,7 +80,7 @@ loader prints before symbolizing addresses.
 Performance comparison against FreeBSD (on the build server; PERFORMANCE.md §6):
 
 ```
-cargo xtask --remote perf [--suite p2] [--runs N] [--prepare]
+cargo xtask --remote perf [--suite p2|diag] [--runs N] [--prepare]
 ```
 
 Planned for later phases:
