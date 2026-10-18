@@ -28,6 +28,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use hal::{CpuId, MAX_CPUS};
+use sched::{IrqCx, Sleepable};
 use sync::SpinLock;
 
 use crate::arch;
@@ -84,8 +85,9 @@ pub(crate) fn init_clock(frequency: u64) {
 }
 
 /// A timer callback and its argument (FreeBSD's callout function and its
-/// `void *`). It runs in interrupt context on the timer's CPU.
-pub(crate) type TimerFn = fn(usize);
+/// `void *`). It runs in interrupt context on the timer's CPU, so it gets
+/// an [`IrqCx`] and cannot sleep.
+pub(crate) type TimerFn = fn(usize, &IrqCx);
 
 /// Not in a CPU's queue.
 const NOT_QUEUED: usize = usize::MAX;
@@ -243,7 +245,7 @@ impl Timer {
             st: UnsafeCell::new(TimerState {
                 deadline: 0,
                 slot: NOT_QUEUED,
-                func: |_| {},
+                func: |_, _| {},
                 arg: 0,
             }),
             _pinned: PhantomPinned,
@@ -355,7 +357,7 @@ static TICKS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
 /// The event timer fired: runs due callouts, checks the time slice, and
 /// re-arms. Interrupt context, interrupts masked.
-pub(crate) fn on_timer() {
+pub(crate) fn on_timer(cx: &IrqCx) {
     let cpu = hal::cpu_id();
     TICKS[cpu.index()].fetch_add(1, Ordering::Relaxed);
     // The one-shot deadline is spent.
@@ -377,7 +379,7 @@ pub(crate) fn on_timer() {
         drop(q);
         // The timer may be dropped once its callback returns: only the
         // queue is touched afterwards.
-        func(arg);
+        func(arg, cx);
         QUEUES[cpu.index()].lock().running = ptr::null();
     }
     sched::tick(ns_to_ticks(SLICE_NS));
@@ -410,7 +412,7 @@ struct Waiter<'a> {
 }
 
 /// Timer callback: `arg` is a `&Waiter`.
-fn wake_waiter(arg: usize) {
+fn wake_waiter(arg: usize, _: &IrqCx) {
     // SAFETY: the waiter outlives its timer (declared before it, so the
     // timer drops, and drains, first).
     let w = unsafe { &*ptr::with_exposed_provenance::<Waiter<'_>>(arg) };
@@ -420,7 +422,7 @@ fn wake_waiter(arg: usize) {
 }
 
 /// Sleeps the current thread for at least `ns` nanoseconds.
-pub(crate) fn sleep_ns(ns: u64) {
+pub(crate) fn sleep_ns(s: &Sleepable, ns: u64) {
     let q = sched::WaitQueue::new();
     let w = Waiter {
         q: &q,
@@ -429,12 +431,17 @@ pub(crate) fn sleep_ns(ns: u64) {
     let t = pin!(Timer::new());
     t.as_ref()
         .reset(ns, wake_waiter, ptr::from_ref(&w).expose_provenance());
-    q.wait_until(|| w.fired.load(Ordering::Acquire));
+    q.wait_until(s, || w.fired.load(Ordering::Acquire));
 }
 
 /// Waits on `q` until `cond` holds or `ns` nanoseconds pass. Returns
 /// whether `cond` held.
-pub(crate) fn wait_timeout(q: &sched::WaitQueue, mut cond: impl FnMut() -> bool, ns: u64) -> bool {
+pub(crate) fn wait_timeout(
+    s: &Sleepable,
+    q: &sched::WaitQueue,
+    mut cond: impl FnMut() -> bool,
+    ns: u64,
+) -> bool {
     let w = Waiter {
         q,
         fired: AtomicBool::new(false),
@@ -443,7 +450,7 @@ pub(crate) fn wait_timeout(q: &sched::WaitQueue, mut cond: impl FnMut() -> bool,
     t.as_ref()
         .reset(ns, wake_waiter, ptr::from_ref(&w).expose_provenance());
     let mut ok = false;
-    q.wait_until(|| {
+    q.wait_until(s, || {
         ok = cond();
         ok || w.fired.load(Ordering::Acquire)
     });

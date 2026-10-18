@@ -31,6 +31,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use sync::SpinLock;
 
 use super::witness::{self, LockClass};
+use crate::Sleepable;
 use crate::list::ThreadList;
 use crate::thread::{Priority, State, Thread};
 
@@ -60,7 +61,7 @@ impl MutexCore {
     }
 
     #[inline]
-    fn lock(&self) {
+    fn lock(&self, s: &Sleepable) {
         let me = crate::current();
         let me_word = ptr::from_ref(me).expose_provenance();
         witness::acquire(self.class, ptr::from_ref(self).addr());
@@ -70,12 +71,12 @@ impl MutexCore {
             .compare_exchange(0, me_word, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
-            self.lock_slow(me, me_word);
+            self.lock_slow(s, me, me_word);
         }
     }
 
     #[cold]
-    fn lock_slow(&self, me: &Thread, me_word: usize) {
+    fn lock_slow(&self, _s: &Sleepable, me: &Thread, me_word: usize) {
         let max_backoff = super::max_backoff();
         let mut backoff = 1;
         loop {
@@ -298,8 +299,8 @@ impl<T> Mutex<T> {
     }
 
     /// Locks, sleeping if needed. Thread context only.
-    pub fn lock(&self) -> MutexGuard<'_, T> {
-        self.core.lock();
+    pub fn lock(&self, s: &Sleepable) -> MutexGuard<'_, T> {
+        self.core.lock(s);
         MutexGuard {
             mutex: self,
             _not_send: PhantomData,

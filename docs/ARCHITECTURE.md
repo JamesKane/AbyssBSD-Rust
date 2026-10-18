@@ -217,8 +217,10 @@ Modeled on FreeBSD's lock classes, with Rust guards and lock ordering checked in
 sleep at runtime in debug builds (release builds compile it out, as FreeBSD's `GENERIC` omits
 `WITNESS`). Uncontended `Mutex`, `RwLock`, and `SxLock` operations are one compare-and-swap.
 Contended waiters spin while the owner runs and sleep otherwise. A release wakes the sleepers to
-compete, as FreeBSD does; it doesn't hand the lock to one of them. The compile-time level tokens
-and context tokens below are not built yet.
+compete, as FreeBSD does; it doesn't hand the lock to one of them. Context tokens are built
+(P3.1): everything that can block takes a `sched::Sleepable`, which each thread's entry function
+receives, while timer callbacks get a `sched::IrqCx` that cannot produce one. The compile-time
+level tokens below are not built yet.
 
 - **Lock levels as types.** Each lock is declared with a level (`Mutex<L3, T>`). Acquiring a lock
   requires a token proving that only lower levels are held. Most ordering bugs fail at compile time.

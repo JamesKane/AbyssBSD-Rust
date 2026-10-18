@@ -79,11 +79,14 @@ fn kmain(boot_info: PhysAddr) -> ! {
     time::init_cpu();
     topology::record_this_cpu(hal::CpuId::BOOT);
     hal::irq::enable();
+    // SAFETY: kmain is now a thread (`threads::init`) with interrupts
+    // enabled, holding no locks: it may sleep.
+    let s = unsafe { sched::Sleepable::assume() };
     smp::start_cpus();
     topology::summarize();
 
     #[cfg(feature = "ktest")]
-    tests::run();
+    tests::run(&s);
 
     #[cfg(not(feature = "ktest"))]
     {
@@ -97,12 +100,12 @@ fn kmain(boot_info: PhysAddr) -> ! {
             heap.large_pages
         );
         if let Some(secs) = boot::value("abyss.stress").and_then(|v| v.parse().ok()) {
-            let passed = stress::run(secs);
+            let passed = stress::run(&s, secs);
             qemu::exit(passed);
             firmware::reset(efi::ResetKind::Shutdown)
         }
         if let Some(suite) = boot::value("abyss.bench") {
-            let ran = bench::run(suite);
+            let ran = bench::run(&s, suite);
             qemu::exit(ran);
             firmware::reset(efi::ResetKind::Shutdown)
         }

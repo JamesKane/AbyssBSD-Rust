@@ -14,13 +14,20 @@ use ktest::ktest;
 
 use crate::arch;
 
+/// A [`sched::Sleepable`] for test code, which runs only in threads (the
+/// boot thread or ones it spawns), never in interrupt handlers.
+fn cx() -> sched::Sleepable {
+    // SAFETY: see above; tests take no spin locks around their sleeps.
+    unsafe { sched::Sleepable::assume() }
+}
+
 /// Runs every test, then the deliberate fault. Does not return.
 ///
 /// With `abyss.test.warm_reset`, the first boot instead writes a marker to
 /// the console (and so the log ring) and warm-resets; the loader saves that
 /// log to the ESP on the second boot, which then runs the tests. xtask
 /// checks the saved file.
-pub(crate) fn run() -> ! {
+pub(crate) fn run(_s: &sched::Sleepable) -> ! {
     if crate::boot::flag("abyss.test.warm_reset") {
         let log = crate::boot::info().log.get().expect("log ring");
         if log.recovered == 0 {
@@ -239,7 +246,7 @@ ktest! {
         let threads: Vec<_> = (0..8)
             .map(|i| {
                 let count = Arc::clone(&count);
-                sched::spawn("worker", sched::Priority::KERNEL, move || {
+                sched::spawn("worker", sched::Priority::KERNEL, move |_| {
                     for _ in 0..100 {
                         count.fetch_add(i, Ordering::Relaxed);
                         sched::yield_now();
@@ -249,7 +256,7 @@ ktest! {
             })
             .collect();
         for t in &threads {
-            t.join();
+            t.join(&cx());
             assert!(t.has_exited());
         }
         assert_eq!(count.load(Ordering::Relaxed), 100 * (0..8).sum::<u64>());
@@ -267,10 +274,10 @@ ktest! {
         let court = Arc::new(Court { turn: AtomicU64::new(0), q: sched::WaitQueue::new() });
         let player = |me: u64| {
             let court = Arc::clone(&court);
-            move || {
+            move |_: &sched::Sleepable| {
                 for round in 0..500u64 {
                     let want = round * 2 + me;
-                    court.q.wait_until(|| court.turn.load(Ordering::Acquire) == want);
+                    court.q.wait_until(&cx(), || court.turn.load(Ordering::Acquire) == want);
                     court.turn.store(want + 1, Ordering::Release);
                     court.q.wake_all();
                 }
@@ -278,8 +285,8 @@ ktest! {
         };
         let a = sched::spawn("ping", sched::Priority::KERNEL, player(0)).unwrap();
         let b = sched::spawn("pong", sched::Priority::KERNEL, player(1)).unwrap();
-        a.join();
-        b.join();
+        a.join(&cx());
+        b.join(&cx());
         assert_eq!(court.turn.load(Ordering::Relaxed), 1000);
     }
 }
@@ -287,8 +294,8 @@ ktest! {
 ktest! {
     fn exited_threads_are_reaped() {
         let kva = crate::mm::kstack::kva_allocated();
-        let t = sched::spawn("short", sched::Priority::KERNEL, || {}).unwrap();
-        t.join();
+        let t = sched::spawn("short", sched::Priority::KERNEL, |_| {}).unwrap();
+        t.join(&cx());
         drop(t);
         // The reaper frees the stack once it runs (and any left over from
         // earlier tests, so the total may drop below the baseline).
@@ -296,7 +303,7 @@ ktest! {
             if crate::mm::kstack::kva_allocated() <= kva {
                 return;
             }
-            crate::time::sleep_ns(1_000_000);
+            crate::time::sleep_ns(&cx(), 1_000_000);
         }
         panic!("stack not reaped: {:#x} bytes of KVA out, {kva:#x} before", crate::mm::kstack::kva_allocated());
     }
@@ -305,7 +312,7 @@ ktest! {
 ktest! {
     fn clock_advances_and_sleeps_last() {
         let t0 = crate::time::now_ns();
-        crate::time::sleep_ns(20_000_000);
+        crate::time::sleep_ns(&cx(), 20_000_000);
         let slept = crate::time::now_ns() - t0;
         assert!(slept >= 20_000_000, "slept only {slept} ns");
         assert!(slept < 2_000_000_000, "slept {slept} ns");
@@ -326,7 +333,7 @@ ktest! {
             digits: AtomicU64::new(0),
             q: sched::WaitQueue::new(),
         };
-        fn push(digit: usize) {
+        fn push(digit: usize, _: &sched::IrqCx) {
             let v = LOG.digits.load(Ordering::Relaxed);
             LOG.digits.store(v * 10 + digit as u64, Ordering::Release);
             LOG.q.wake_all();
@@ -346,7 +353,7 @@ ktest! {
         // Re-arming replaces the pending deadline.
         timers[0].as_ref().reset(40_000_000, push, 4);
         timers[0].as_ref().reset(30_000_000, push, 3);
-        LOG.q.wait_until(|| LOG.digits.load(Ordering::Acquire) >= 100);
+        LOG.q.wait_until(&cx(), || LOG.digits.load(Ordering::Acquire) >= 100);
         assert_eq!(LOG.digits.load(Ordering::Relaxed), 123);
         assert!(!timers[0].stop(), "fired");
     }
@@ -357,9 +364,9 @@ ktest! {
         use alloc::sync::Arc;
         let q = Arc::new(sched::WaitQueue::new());
         let t0 = crate::time::now_ns();
-        assert!(!crate::time::wait_timeout(&q, || false, 15_000_000));
+        assert!(!crate::time::wait_timeout(&cx(), &q, || false, 15_000_000));
         assert!(crate::time::now_ns() - t0 >= 15_000_000);
-        assert!(crate::time::wait_timeout(&q, || true, 15_000_000));
+        assert!(crate::time::wait_timeout(&cx(), &q, || true, 15_000_000));
     }
 }
 
@@ -376,7 +383,7 @@ ktest! {
             .iter()
             .map(|c| {
                 let (c, stop) = (Arc::clone(c), Arc::clone(&stop));
-                sched::spawn_on("spinner", sched::Priority::KERNEL, Some(hal::CpuId::BOOT), move || {
+                sched::spawn_on("spinner", sched::Priority::KERNEL, Some(hal::CpuId::BOOT), move |_| {
                     while !stop.load(Ordering::Relaxed) {
                         c.fetch_add(1, Ordering::Relaxed);
                     }
@@ -384,10 +391,10 @@ ktest! {
                 .unwrap()
             })
             .collect();
-        crate::time::sleep_ns(100_000_000);
+        crate::time::sleep_ns(&cx(), 100_000_000);
         stop.store(true, Ordering::Relaxed);
         for t in &threads {
-            t.join();
+            t.join(&cx());
         }
         for (i, c) in counts.iter().enumerate() {
             assert!(
@@ -415,9 +422,9 @@ ktest! {
         let threads: Vec<_> = (0..6)
             .map(|_| {
                 let m = Arc::clone(&m);
-                sched::spawn("locker", sched::Priority::KERNEL, move || {
+                sched::spawn("locker", sched::Priority::KERNEL, move |_| {
                     for i in 0..2000u64 {
-                        let mut g = m.lock();
+                        let mut g = m.lock(&cx());
                         let v = *g;
                         if i % 64 == 0 {
                             sched::yield_now();
@@ -429,9 +436,9 @@ ktest! {
             })
             .collect();
         for t in &threads {
-            t.join();
+            t.join(&cx());
         }
-        assert_eq!(*m.lock(), 12_000);
+        assert_eq!(*m.lock(&cx()), 12_000);
         assert!(!m.is_locked());
     }
 }
@@ -449,22 +456,22 @@ ktest! {
         let low = {
             let (m, held, release) = (Arc::clone(&m), Arc::clone(&held), Arc::clone(&release));
             // A fixed (kernel-range) priority; time-sharing ones float.
-            sched::spawn("low", Priority::new(110), move || {
-                let _g = m.lock();
+            sched::spawn("low", Priority::new(110), move |_| {
+                let _g = m.lock(&cx());
                 held.store(true, Ordering::Release);
                 while !release.load(Ordering::Acquire) {
-                    crate::time::sleep_ns(1_000_000);
+                    crate::time::sleep_ns(&cx(), 1_000_000);
                 }
             })
             .unwrap()
         };
         while !held.load(Ordering::Acquire) {
-            crate::time::sleep_ns(1_000_000);
+            crate::time::sleep_ns(&cx(), 1_000_000);
         }
         let high = {
             let m = Arc::clone(&m);
-            sched::spawn("high", Priority::new(40), move || {
-                drop(m.lock());
+            sched::spawn("high", Priority::new(40), move |_| {
+                drop(m.lock(&cx()));
             })
             .unwrap()
         };
@@ -475,11 +482,11 @@ ktest! {
                 lent = true;
                 break;
             }
-            crate::time::sleep_ns(1_000_000);
+            crate::time::sleep_ns(&cx(), 1_000_000);
         }
         release.store(true, Ordering::Release);
-        high.join();
-        low.join();
+        high.join(&cx());
+        low.join(&cx());
         assert!(lent, "priority was not lent (low at {:?})", low.priority());
         assert_eq!(low.priority(), Priority::new(110), "lent priority returned");
     }
@@ -497,15 +504,15 @@ ktest! {
         let threads: Vec<_> = (0..6)
             .map(|i| {
                 let (l, readers_in) = (Arc::clone(&l), Arc::clone(&readers_in));
-                sched::spawn("rw", sched::Priority::KERNEL, move || {
+                sched::spawn("rw", sched::Priority::KERNEL, move |_| {
                     for _ in 0..500 {
                         if i % 3 == 0 {
-                            let mut g = l.write();
+                            let mut g = l.write(&cx());
                             assert_eq!(readers_in.load(Ordering::Relaxed), 0);
                             g.0 += 1;
                             g.1 += 1;
                         } else {
-                            let g = l.read();
+                            let g = l.read(&cx());
                             readers_in.fetch_add(1, Ordering::Relaxed);
                             assert_eq!(g.0, g.1, "torn write seen");
                             readers_in.fetch_sub(1, Ordering::Relaxed);
@@ -516,9 +523,9 @@ ktest! {
             })
             .collect();
         for t in &threads {
-            t.join();
+            t.join(&cx());
         }
-        assert_eq!(l.read().0, 1000);
+        assert_eq!(l.read(&cx()).0, 1000);
     }
 }
 
@@ -532,7 +539,7 @@ ktest! {
         let left = Arc::new(AtomicBool::new(false));
         let reader = {
             let (inside, left) = (Arc::clone(&inside), Arc::clone(&left));
-            sched::spawn("reader", sched::Priority::KERNEL, move || {
+            sched::spawn("reader", sched::Priority::KERNEL, move |_| {
                 let g = EPOCH.enter();
                 inside.store(true, Ordering::Release);
                 // A section must not sleep; stay in it by spinning.
@@ -543,11 +550,11 @@ ktest! {
             .unwrap()
         };
         while !inside.load(Ordering::Acquire) {
-            crate::time::sleep_ns(1_000_000);
+            crate::time::sleep_ns(&cx(), 1_000_000);
         }
-        EPOCH.synchronize(|| crate::time::sleep_ns(1_000_000));
+        EPOCH.synchronize(|| crate::time::sleep_ns(&cx(), 1_000_000));
         assert!(left.load(Ordering::Acquire), "synchronize returned while a reader was inside");
-        reader.join();
+        reader.join(&cx());
         // With no readers it returns at once.
         EPOCH.synchronize(|| panic!("no reader to wait for"));
     }
@@ -565,13 +572,13 @@ ktest! {
         }
         let before = witness::violations();
         {
-            let _a = a.lock();
-            let _b = b.lock();
+            let _a = a.lock(&cx());
+            let _b = b.lock(&cx());
         }
         assert_eq!(witness::violations(), before, "declared order");
         {
-            let _b = b.lock();
-            let _a = a.lock();
+            let _b = b.lock(&cx());
+            let _a = a.lock(&cx());
         }
         assert_eq!(witness::violations(), before + 1, "reversal reported");
     }
@@ -591,12 +598,12 @@ ktest! {
                 sched::Builder::new("fpu")
                     .bind(hal::CpuId::BOOT)
                     .fpu()
-                    .spawn(move || fpu_rounds(id))
+                    .spawn(move |_| fpu_rounds(id))
                     .expect("spawn")
             })
             .collect();
         for t in &threads {
-            t.join();
+            t.join(&cx());
         }
     }
 }

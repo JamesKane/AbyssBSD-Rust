@@ -14,6 +14,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use sched::Priority;
+use sched::Sleepable;
 use sched::lock::{LockClass, Mutex, SxLock, witness};
 
 const THREADS: usize = 64;
@@ -84,21 +85,21 @@ fn role(i: usize) -> Role {
 }
 
 /// Runs the stress test for `seconds`; returns whether it passed.
-pub(crate) fn run(seconds: u64) -> bool {
+pub(crate) fn run(cx: &Sleepable, seconds: u64) -> bool {
     kprintln!(
         "stress: {THREADS} threads for {seconds} s on {} CPUs",
         sched::online_cpus()
     );
     // A short warm-up first, so per-CPU caches and lazily allocated
     // structures exist before the baseline is taken.
-    let warm = phase(3, false);
+    let warm = phase(cx, 3, false);
     if !warm.stalled.is_empty() {
         kprintln!(
             "stress: warm-up: threads {:?} had not run yet",
             warm.stalled
         );
     }
-    settle();
+    settle(cx);
     let heap0 = crate::mm::heap_stats();
     let free0 = crate::mm::phys_stats().free;
     let kva0 = crate::mm::kstack::kva_allocated();
@@ -108,8 +109,8 @@ pub(crate) fn run(seconds: u64) -> bool {
         stalled,
         sleep_errors,
         fpu_errors,
-    } = phase(seconds, true);
-    settle();
+    } = phase(cx, seconds, true);
+    settle(cx);
 
     // The callout that ended the last sleep may still be freeing its
     // closure on another CPU after waking us; a leak never balances.
@@ -118,7 +119,7 @@ pub(crate) fn run(seconds: u64) -> bool {
         if heap1.live_objects == heap0.live_objects && heap1.large_pages == heap0.large_pages {
             break;
         }
-        crate::time::sleep_ns(10_000_000);
+        crate::time::sleep_ns(cx, 10_000_000);
         heap1 = crate::mm::heap_stats();
     }
     let free1 = crate::mm::phys_stats().free;
@@ -181,7 +182,7 @@ struct Outcome {
 }
 
 /// Runs the workload for `seconds`, reporting every ten if `report`.
-fn phase(seconds: u64, report: bool) -> Outcome {
+fn phase(cx: &Sleepable, seconds: u64, report: bool) -> Outcome {
     let witness0 = witness::violations();
 
     let shared = Arc::new(Shared {
@@ -213,7 +214,7 @@ fn phase(seconds: u64, report: bool) -> Outcome {
             } else {
                 b
             };
-            b.spawn(move || worker(i, &shared, &progress))
+            b.spawn(move |cx| worker(cx, i, &shared, &progress))
                 .expect("stress thread")
         })
         .collect();
@@ -222,7 +223,7 @@ fn phase(seconds: u64, report: bool) -> Outcome {
     let end = start + seconds * crate::time::NANOS;
     let mut next_report = start + 10 * crate::time::NANOS;
     while crate::time::now_ns() < end {
-        crate::time::sleep_ns(100_000_000);
+        crate::time::sleep_ns(cx, 100_000_000);
         // Nudge the timed waiters now and then.
         shared.wake_q.wake_one();
         if report && crate::time::now_ns() >= next_report {
@@ -245,7 +246,7 @@ fn phase(seconds: u64, report: bool) -> Outcome {
     }
     shared.wake_q.wake_all();
     for t in &threads {
-        t.join();
+        t.join(cx);
     }
     let stalled = progress
         .iter()
@@ -262,13 +263,13 @@ fn phase(seconds: u64, report: bool) -> Outcome {
 }
 
 /// Lets exited threads be reaped and per-CPU caches settle.
-fn settle() {
+fn settle(cx: &Sleepable) {
     for _ in 0..50 {
-        crate::time::sleep_ns(10_000_000);
+        crate::time::sleep_ns(cx, 10_000_000);
     }
 }
 
-fn worker(i: usize, s: &Shared, progress: &AtomicU64) {
+fn worker(cx: &Sleepable, i: usize, s: &Shared, progress: &AtomicU64) {
     let seed = u64::try_from(i).unwrap_or(0) + 1;
     let mut rng = Rng(0x9e37_79b9_7f4a_7c15 ^ seed.wrapping_mul(0x1234_5679));
     let r = role(i);
@@ -278,14 +279,14 @@ fn worker(i: usize, s: &Shared, progress: &AtomicU64) {
             Role::PingPong { court, me } => {
                 let c = &s.courts[court];
                 // Wait for our turn (or the end), then pass it.
-                c.q.wait_until(|| {
+                c.q.wait_until(cx, || {
                     s.stop.load(Ordering::Acquire) || c.seen.load(Ordering::Acquire) % 2 == me
                 });
                 if s.stop.load(Ordering::Acquire) {
                     break;
                 }
                 {
-                    let mut t = c.turn.lock();
+                    let mut t = c.turn.lock(cx);
                     if *t % 2 == me {
                         *t += 1;
                         c.seen.store(*t, Ordering::Release);
@@ -297,8 +298,8 @@ fn worker(i: usize, s: &Shared, progress: &AtomicU64) {
                 // Two locks, always level a before level b.
                 let a = &s.level_a[usize::try_from(rng.below(4)).unwrap_or(0)];
                 let b = &s.level_b[usize::try_from(rng.below(4)).unwrap_or(0)];
-                let mut ga = a.lock();
-                let mut gb = b.lock();
+                let mut ga = a.lock(cx);
+                let mut gb = b.lock(cx);
                 *ga += 1;
                 *gb += 1;
                 if rng.below(16) == 0 {
@@ -307,11 +308,11 @@ fn worker(i: usize, s: &Shared, progress: &AtomicU64) {
             }
             Role::Table => {
                 if rng.below(8) == 0 {
-                    let mut t = s.table.write();
+                    let mut t = s.table.write(cx);
                     let v = t[0] + 1;
                     t.fill(v);
                 } else {
-                    let t = s.table.read();
+                    let t = s.table.read(cx);
                     let first = t[0];
                     assert!(t.iter().all(|&v| v == first), "torn table write");
                 }
@@ -340,12 +341,12 @@ fn worker(i: usize, s: &Shared, progress: &AtomicU64) {
                 let ns = 1_000_000 + rng.below(20_000_000);
                 let t0 = crate::time::now_ns();
                 if rng.below(2) == 0 {
-                    crate::time::sleep_ns(ns);
+                    crate::time::sleep_ns(cx, ns);
                     if crate::time::now_ns() - t0 < ns {
                         s.sleep_errors.fetch_add(1, Ordering::Relaxed);
                     }
                 } else {
-                    let woken = crate::time::wait_timeout(&s.wake_q, || false, ns);
+                    let woken = crate::time::wait_timeout(cx, &s.wake_q, || false, ns);
                     let _ = woken;
                 }
             }

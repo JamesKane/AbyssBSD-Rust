@@ -16,7 +16,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use addr::VirtAddr;
 use hal::CpuId;
 use sched::lock::{LockClass, Mutex, RwLock, SxLock};
-use sched::{Priority, WaitQueue};
+use sched::{IrqCx, Priority, Sleepable, WaitQueue};
 use vm::Order;
 
 use crate::time::{self, Timer};
@@ -32,8 +32,8 @@ const RUN_NS: u64 = time::NANOS;
 const ROUNDS: usize = 3;
 
 /// Runs `suite`; returns whether it was known and ran.
-pub(crate) fn run(suite: &str) -> bool {
-    let body: fn() = match suite {
+pub(crate) fn run(s: &Sleepable, suite: &str) -> bool {
+    let body: fn(&Sleepable) = match suite {
         "p2" => suite_p2,
         "diag" => suite_diag,
         _ => {
@@ -57,7 +57,7 @@ pub(crate) fn run(suite: &str) -> bool {
         .bind(CpuId(0))
         .spawn(body)
         .expect("bench: spawn coordinator");
-    t.join();
+    t.join(s);
     kprintln!("kbench end {suite}");
     true
 }
@@ -101,10 +101,11 @@ fn default_cpu(i: usize) -> CpuId {
 /// lets them run for `run_ns` (0: until they return), and returns the
 /// counter ticks between go and stop.
 fn launch(
+    s: &Sleepable,
     run: &Arc<Run>,
     cpus: &[CpuId],
     run_ns: u64,
-    body: impl Fn(&Run, usize) + Send + Sync + Clone + 'static,
+    body: impl Fn(&Run, usize, &Sleepable) + Send + Sync + Clone + 'static,
 ) -> u64 {
     let threads: Vec<_> = cpus
         .iter()
@@ -114,28 +115,28 @@ fn launch(
             sched::Builder::new("kbench")
                 .priority(Priority::KERNEL)
                 .bind(cpu)
-                .spawn(move || {
+                .spawn(move |ws| {
                     run.ready.fetch_add(1, Ordering::AcqRel);
-                    run.start.wait_until(|| run.go.load(Ordering::Acquire));
-                    body(&run, i);
+                    run.start.wait_until(ws, || run.go.load(Ordering::Acquire));
+                    body(&run, i, ws);
                 })
                 .expect("bench: spawn worker")
         })
         .collect();
     while run.ready.load(Ordering::Acquire) < cpus.len() {
-        time::sleep_ns(1_000_000);
+        time::sleep_ns(s, 1_000_000);
     }
     let t0 = time::counter();
     run.go.store(true, Ordering::Release);
     run.start.wake_all();
     let mut t1 = 0;
     if run_ns > 0 {
-        time::sleep_ns(run_ns);
+        time::sleep_ns(s, run_ns);
         run.stop.store(true, Ordering::Release);
         t1 = time::counter();
     }
     for t in threads {
-        t.join();
+        t.join(s);
     }
     if run_ns == 0 {
         t1 = time::counter();
@@ -168,26 +169,32 @@ fn report_lat(name: &str, ns: &mut [u64]) {
 
 /// A throughput benchmark: `workers` threads in the default placement, each
 /// running `op` until stopped; `op` returns how many operations it did.
-fn throughput(name: &str, workers: usize, op: impl Fn() -> u64 + Send + Sync + Clone + 'static) {
-    throughput_with(name, workers, || (), move |()| op());
+fn throughput(
+    s: &Sleepable,
+    name: &str,
+    workers: usize,
+    op: impl Fn(&Sleepable) -> u64 + Send + Sync + Clone + 'static,
+) {
+    throughput_with(s, name, workers, || (), move |(), ws| op(ws));
 }
 
 /// As [`throughput`], with per-worker state made by `init` before the start.
 fn throughput_with<S: 'static>(
+    s: &Sleepable,
     name: &str,
     workers: usize,
     init: fn() -> S,
-    op: impl Fn(&mut S) -> u64 + Send + Sync + Clone + 'static,
+    op: impl Fn(&mut S, &Sleepable) -> u64 + Send + Sync + Clone + 'static,
 ) {
     let cpus: Vec<CpuId> = (0..workers).map(default_cpu).collect();
     report_median(name, || {
         let run = Run::new();
         let op = op.clone();
-        let ticks = launch(&run, &cpus, RUN_NS, move |run, i| {
+        let ticks = launch(s, &run, &cpus, RUN_NS, move |run, i, ws| {
             let mut state = init();
             let mut n = 0;
             while !run.stopped() {
-                n += op(&mut state);
+                n += op(&mut state, ws);
             }
             run.ops[i].0.store(n, Ordering::Relaxed);
         });
@@ -227,7 +234,8 @@ fn lock_sets() -> Vec<&'static LockSet> {
 
 /// A lock benchmark: `workers` threads run `op` on each lock set in turn
 /// for [`PLACEMENT_NS`]; reports the mean.
-fn lock_throughput<F: Fn(&LockSet) -> u64 + Copy + Send + Sync + 'static>(
+fn lock_throughput<F: Fn(&LockSet, &Sleepable) -> u64 + Copy + Send + Sync + 'static>(
+    s: &Sleepable,
     name: &str,
     workers: usize,
     sets: &[&'static LockSet],
@@ -237,10 +245,10 @@ fn lock_throughput<F: Fn(&LockSet) -> u64 + Copy + Send + Sync + 'static>(
     let mut sum = 0;
     for &set in sets {
         let run = Run::new();
-        let ticks = launch(&run, &cpus, PLACEMENT_NS, move |run, i| {
+        let ticks = launch(s, &run, &cpus, PLACEMENT_NS, move |run, i, ws| {
             let mut n = 0;
             while !run.stopped() {
-                n += op(set);
+                n += op(set, ws);
             }
             run.ops[i].0.store(n, Ordering::Relaxed);
         });
@@ -266,46 +274,47 @@ fn free_256(p: *mut u8) {
     unsafe { alloc::alloc::dealloc(p, layout()) }
 }
 
-fn suite_p2() {
-    ctxsw("ctxsw.same", CpuId(1), CpuId(1));
-    ctxsw("ctxsw.cross", CpuId(1), CpuId(2));
+fn suite_p2(s: &Sleepable) {
+    ctxsw(s, "ctxsw.same", CpuId(1), CpuId(1));
+    ctxsw(s, "ctxsw.cross", CpuId(1), CpuId(2));
 
     let sets = lock_sets();
     for t in [1, 2, 4, 8] {
-        lock_throughput(&alloc::format!("mtx.t{t}"), t, &sets, |s| {
-            *s.mtx.lock() += 1;
+        lock_throughput(s, &alloc::format!("mtx.t{t}"), t, &sets, |l, ws| {
+            *l.mtx.lock(ws) += 1;
             1
         });
-        lock_throughput(&alloc::format!("rw.rd.t{t}"), t, &sets, |s| {
-            black_box(*s.rw.read());
+        lock_throughput(s, &alloc::format!("rw.rd.t{t}"), t, &sets, |l, ws| {
+            black_box(*l.rw.read(ws));
             1
         });
-        lock_throughput(&alloc::format!("rw.wr.t{t}"), t, &sets, |s| {
-            *s.rw.write() += 1;
+        lock_throughput(s, &alloc::format!("rw.wr.t{t}"), t, &sets, |l, ws| {
+            *l.rw.write(ws) += 1;
             1
         });
-        lock_throughput(&alloc::format!("sx.rd.t{t}"), t, &sets, |s| {
-            black_box(*s.sx.read());
+        lock_throughput(s, &alloc::format!("sx.rd.t{t}"), t, &sets, |l, ws| {
+            black_box(*l.sx.read(ws));
             1
         });
-        lock_throughput(&alloc::format!("sx.wr.t{t}"), t, &sets, |s| {
-            *s.sx.write() += 1;
+        lock_throughput(s, &alloc::format!("sx.wr.t{t}"), t, &sets, |l, ws| {
+            *l.sx.write(ws) += 1;
             1
         });
     }
 
     for t in [1, 8] {
-        throughput(&alloc::format!("malloc.hit.t{t}"), t, || {
+        throughput(s, &alloc::format!("malloc.hit.t{t}"), t, |_| {
             free_256(alloc_256());
             1
         });
     }
     for t in [1, 8] {
         throughput_with(
+            s,
             &alloc::format!("malloc.miss.t{t}"),
             t,
             || alloc::vec![core::ptr::null_mut(); MISS_OBJS],
-            |p| {
+            |p, _| {
                 for slot in p.iter_mut() {
                     *slot = alloc_256();
                 }
@@ -317,17 +326,18 @@ fn suite_p2() {
         );
     }
     for t in [1, 8] {
-        throughput(&alloc::format!("page.hit.t{t}"), t, || {
+        throughput(s, &alloc::format!("page.hit.t{t}"), t, |_| {
             let pa = crate::mm::alloc_pages(Order::ZERO).expect("bench: out of pages");
             crate::mm::free_pages(black_box(pa), Order::ZERO);
             1
         });
     }
     throughput_with(
+        s,
         "page.miss.t1",
         1,
         || alloc::vec![None; MISS_PAGES],
-        |p| {
+        |p, _| {
             for slot in p.iter_mut() {
                 *slot = crate::mm::alloc_pages(Order::ZERO);
             }
@@ -339,46 +349,48 @@ fn suite_p2() {
     );
 
     throughput_with(
+        s,
         "callout.armcancel",
         1,
         || Box::pin(Timer::new()),
-        |t| {
-            t.as_ref().reset(RUN_NS, |_| {}, 0);
+        |t, _| {
+            t.as_ref().reset(RUN_NS, |_, _| {}, 0);
             black_box(t.stop());
             1
         },
     );
-    callout_latency();
-    wakeup_latency();
+    callout_latency(s);
+    wakeup_latency(s);
 
-    throughput("ipi.rtt", 1, || {
+    throughput(s, "ipi.rtt", 1, |_| {
         crate::smp::ping(CpuId(2));
         1
     });
-    tlb_shootdown();
+    tlb_shootdown(s);
 }
 
 /// AbyssBSD-only diagnostics: the cost of the pieces fast paths are made
 /// of, for finding where time goes. Not compared with FreeBSD.
-fn suite_diag() {
-    throughput("diag.irq_pair", 1, || {
+fn suite_diag(s: &Sleepable) {
+    throughput(s, "diag.irq_pair", 1, |_| {
         let irq = hal::irq::disable();
         hal::irq::restore(black_box(irq));
         1
     });
-    throughput("diag.cpu_id", 1, || {
+    throughput(s, "diag.cpu_id", 1, |_| {
         black_box(hal::cpu_id());
         1
     });
-    throughput("diag.current", 1, || {
+    throughput(s, "diag.current", 1, |_| {
         black_box(sched::current());
         1
     });
     throughput_with(
+        s,
         "diag.alloc_then_free_1024",
         1,
         || alloc::vec![core::ptr::null_mut(); 1024],
-        |p| {
+        |p, _| {
             for slot in p.iter_mut() {
                 *slot = alloc_256();
             }
@@ -390,16 +402,16 @@ fn suite_diag() {
     );
     #[cfg(target_arch = "x86_64")]
     {
-        throughput("diag.apic_read", 1, || {
+        throughput(s, "diag.apic_read", 1, |_| {
             black_box(crate::arch::apic::probe_read());
             1
         });
-        throughput("diag.apic_write", 1, || {
+        throughput(s, "diag.apic_write", 1, |_| {
             crate::arch::apic::probe_write();
             1
         });
     }
-    throughput("diag.ping_idle", 1, || {
+    throughput(s, "diag.ping_idle", 1, |_| {
         crate::smp::ping(CpuId(2));
         1
     });
@@ -409,19 +421,19 @@ fn suite_diag() {
     let spinner = sched::Builder::new("spinner")
         .priority(Priority::KERNEL)
         .bind(CpuId(2))
-        .spawn(|| {
+        .spawn(|_| {
             while SPIN.load(Ordering::Relaxed) {
                 core::hint::spin_loop();
             }
         })
         .expect("bench: spinner");
-    time::sleep_ns(10_000_000);
-    throughput("diag.ping_busy", 1, || {
+    time::sleep_ns(s, 10_000_000);
+    throughput(s, "diag.ping_busy", 1, |_| {
         crate::smp::ping(CpuId(2));
         1
     });
     SPIN.store(false, Ordering::Relaxed);
-    spinner.join();
+    spinner.join(s);
     // Contended reads on locks in eight different pages: does the cost
     // depend on where the lock lives (its L3 slice)?
     let locks: Vec<&'static RwLock<u64>> = (0..8)
@@ -438,19 +450,19 @@ fn suite_diag() {
         })
         .collect();
     for (i, l) in locks.into_iter().enumerate() {
-        throughput(&alloc::format!("diag.rw_rd_t2_page{i}"), 2, move || {
-            black_box(*l.read());
+        throughput(s, &alloc::format!("diag.rw_rd_t2_page{i}"), 2, move |ws| {
+            black_box(*l.read(ws));
             1
         });
     }
-    throughput("diag.counter", 1, || {
+    throughput(s, "diag.counter", 1, |_| {
         black_box(time::counter());
         1
     });
 }
 
 /// Strict alternation between two workers on `a` and `b`.
-fn ctxsw(name: &str, a: CpuId, b: CpuId) {
+fn ctxsw(s: &Sleepable, name: &str, a: CpuId, b: CpuId) {
     struct Turn {
         q: WaitQueue,
         turn: AtomicUsize,
@@ -461,13 +473,13 @@ fn ctxsw(name: &str, a: CpuId, b: CpuId) {
             turn: AtomicUsize::new(0),
         });
         let run = Run::new();
-        let ticks = launch(&run, &[a, b], RUN_NS, move |run, me| {
+        let ticks = launch(s, &run, &[a, b], RUN_NS, move |run, me, ws| {
             let other = 1 - me;
             let mut n = 0;
             loop {
-                shared
-                    .q
-                    .wait_until(|| shared.turn.load(Ordering::Acquire) == me || run.stopped());
+                shared.q.wait_until(ws, || {
+                    shared.turn.load(Ordering::Acquire) == me || run.stopped()
+                });
                 shared.turn.store(other, Ordering::Release);
                 if run.stopped() {
                     shared.q.wake_all();
@@ -483,13 +495,13 @@ fn ctxsw(name: &str, a: CpuId, b: CpuId) {
 }
 
 /// How late a 1 ms callout's handler starts, from a sleeping worker.
-fn callout_latency() {
+fn callout_latency(s: &Sleepable) {
     struct Fire {
         q: WaitQueue,
         fired: AtomicBool,
         at: AtomicU64,
     }
-    fn fire(arg: usize) {
+    fn fire(arg: usize, _: &IrqCx) {
         // SAFETY: `arg` is the worker's `Fire`, which outlives its timer.
         let f = unsafe { &*core::ptr::with_exposed_provenance::<Fire>(arg) };
         f.at.store(time::counter(), Ordering::Relaxed);
@@ -499,7 +511,7 @@ fn callout_latency() {
     let samples = Arc::new(sync::SpinLock::new(Vec::with_capacity(LAT_CALLOUT)));
     let out = Arc::clone(&samples);
     let run = Run::new();
-    launch(&run, &[default_cpu(0)], 0, move |_, _| {
+    launch(s, &run, &[default_cpu(0)], 0, move |_, _, ws| {
         let one_ms = time::ns_to_ticks(1_000_000);
         let mut local = Vec::with_capacity(LAT_CALLOUT);
         let f = Fire {
@@ -514,7 +526,7 @@ fn callout_latency() {
             timer
                 .as_ref()
                 .reset(1_000_000, fire, core::ptr::from_ref(&f).expose_provenance());
-            f.q.wait_until(|| f.fired.load(Ordering::Acquire));
+            f.q.wait_until(ws, || f.fired.load(Ordering::Acquire));
             let late = f.at.load(Ordering::Relaxed).saturating_sub(t0 + one_ms);
             local.push(time::ticks_to_ns(late));
         }
@@ -524,7 +536,7 @@ fn callout_latency() {
 }
 
 /// Cross-CPU wakeup latency of a sleeping thread on an idle CPU.
-fn wakeup_latency() {
+fn wakeup_latency(s: &Sleepable) {
     struct Shared {
         q: WaitQueue,
         /// The iteration the sleeper is sleeping for, plus one.
@@ -540,38 +552,38 @@ fn wakeup_latency() {
         stamp: AtomicU64::new(0),
         samples: sync::SpinLock::new(Vec::new()),
     });
-    let s = Arc::clone(&shared);
+    let sh = Arc::clone(&shared);
     let run = Run::new();
-    launch(&run, &[CpuId(1), CpuId(2)], 0, move |_, me| {
+    launch(s, &run, &[CpuId(1), CpuId(2)], 0, move |_, me, ws| {
         if me == 0 {
             let mut local = Vec::with_capacity(LAT_WAKEUP);
             for i in 0..LAT_WAKEUP {
-                s.q.wait_until(|| {
-                    let woken = s.seq.load(Ordering::Acquire) != i;
+                sh.q.wait_until(ws, || {
+                    let woken = sh.seq.load(Ordering::Acquire) != i;
                     if !woken {
                         // Announced under the queue lock: once the waker
                         // sees it, the sleeper is queued.
-                        s.asleep.store(i + 1, Ordering::Release);
+                        sh.asleep.store(i + 1, Ordering::Release);
                     }
                     woken
                 });
                 let t1 = time::counter();
-                local.push(time::ticks_to_ns(t1 - s.stamp.load(Ordering::Acquire)));
+                local.push(time::ticks_to_ns(t1 - sh.stamp.load(Ordering::Acquire)));
             }
-            *s.samples.lock() = local;
+            *sh.samples.lock() = local;
         } else {
             let spin = time::ns_to_ticks(50_000);
             for i in 0..LAT_WAKEUP {
-                while s.asleep.load(Ordering::Acquire) != i + 1 {
+                while sh.asleep.load(Ordering::Acquire) != i + 1 {
                     core::hint::spin_loop();
                 }
                 let t = time::counter();
                 while time::counter() - t < spin {
                     core::hint::spin_loop();
                 }
-                s.stamp.store(time::counter(), Ordering::Release);
-                s.seq.store(i + 1, Ordering::Release);
-                s.q.wake_one();
+                sh.stamp.store(time::counter(), Ordering::Release);
+                sh.seq.store(i + 1, Ordering::Release);
+                sh.q.wake_one();
             }
         }
     });
@@ -579,13 +591,13 @@ fn wakeup_latency() {
 }
 
 /// One kernel page invalidated on every CPU.
-fn tlb_shootdown() {
+fn tlb_shootdown(s: &Sleepable) {
     let page = Layout::from_size_align(4096, 4096).expect("layout");
     // SAFETY: the layout has a nonzero size.
     let p = unsafe { alloc::alloc::alloc(page) };
     assert!(!p.is_null(), "bench: out of memory");
     let va = VirtAddr::new(p as u64);
-    throughput("tlb.shootdown", 1, move || {
+    throughput(s, "tlb.shootdown", 1, move |_| {
         crate::mm::flush_range(va, 4096);
         crate::smp::shootdown(va, 4096);
         1

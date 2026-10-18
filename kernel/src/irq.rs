@@ -80,11 +80,13 @@ pub(crate) fn dispatch(irq: arch::Interrupt) {
 }
 
 fn handle(irq: arch::Interrupt) {
+    // SAFETY: we are the interrupt dispatcher, interrupts masked.
+    let cx = unsafe { sched::IrqCx::assume() };
     #[cfg(target_arch = "x86_64")]
     {
         match irq.vector {
             arch::apic::SPURIOUS_VECTOR => return,
-            arch::apic::TIMER_VECTOR => crate::time::on_timer(),
+            arch::apic::TIMER_VECTOR => crate::time::on_timer(&cx),
             // The waker set `need_resched` if the newcomer should preempt;
             // either way, re-arm for the changed run queue.
             RESCHED_VECTOR => crate::time::rearm(),
@@ -105,7 +107,7 @@ fn handle(irq: arch::Interrupt) {
         } else if id == u32::from(CALL_SGI) {
             crate::smp::on_call_ipi();
         } else if id == TIMER_PPI.load(Ordering::Relaxed) {
-            crate::time::on_timer();
+            crate::time::on_timer(&cx);
         } else {
             stray(id);
         }

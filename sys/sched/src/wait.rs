@@ -31,7 +31,7 @@ impl WaitQueue {
 
     /// Sleeps until `done` returns true. `done` runs with the queue locked
     /// (and interrupts masked), so it must be short and must not sleep.
-    pub fn wait_until(&self, mut done: impl FnMut() -> bool) {
+    pub fn wait_until(&self, _s: &crate::Sleepable, mut done: impl FnMut() -> bool) {
         loop {
             // Mask interrupts before taking the queue lock, so they stay
             // masked from the check until the switch: a preemption between

@@ -215,7 +215,7 @@ impl fmt::Debug for Name {
     }
 }
 
-type Entry = Box<dyn FnOnce() + Send>;
+type Entry = Box<dyn FnOnce(&crate::Sleepable) + Send>;
 
 /// A thread's saved FP/SIMD registers (`hal::fpu`).
 pub(crate) struct FpuArea {
@@ -387,8 +387,8 @@ impl Thread {
     }
 
     /// Waits for the thread to exit.
-    pub fn join(&self) {
-        self.joiners.wait_until(|| self.has_exited());
+    pub fn join(&self, s: &crate::Sleepable) {
+        self.joiners.wait_until(s, || self.has_exited());
     }
 
     /// CPU time consumed, in platform time units, as of its last switch.

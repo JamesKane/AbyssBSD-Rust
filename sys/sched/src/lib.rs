@@ -33,6 +33,7 @@
 
 extern crate alloc;
 
+mod context;
 mod list;
 pub mod lock;
 mod runq;
@@ -52,6 +53,7 @@ use core::sync::atomic::{
 use hal::{CpuId, MAX_CPUS};
 use sync::{Once, SpinLock};
 
+pub use crate::context::{IrqCx, Sleepable};
 use crate::list::ThreadList;
 use crate::runq::RunQueue;
 pub use crate::thread::{Name, Priority, State, Thread, Tid};
@@ -317,7 +319,7 @@ pub fn init_cpu(name: &str) {
         Priority::IDLE_THREAD,
         id,
         Some(stack),
-        Some(Box::new(idle_loop)),
+        Some(Box::new(|_: &Sleepable| idle_loop())),
         true,
     ));
     idle.inner.lock().bound = Some(id);
@@ -423,8 +425,11 @@ impl<'a> Builder<'a> {
         self
     }
 
-    /// Starts the thread running `f`.
-    pub fn spawn(self, f: impl FnOnce() + Send + 'static) -> Result<Arc<Thread>, SpawnError> {
+    /// Starts the thread running `f`, which gets the thread's [`Sleepable`].
+    pub fn spawn(
+        self,
+        f: impl FnOnce(&Sleepable) + Send + 'static,
+    ) -> Result<Arc<Thread>, SpawnError> {
         let fpu = if self.fpu {
             Some(thread::FpuArea::new().ok_or(SpawnError::NoFpuArea)?)
         } else {
@@ -451,7 +456,7 @@ impl<'a> Builder<'a> {
 pub fn spawn(
     name: &str,
     priority: Priority,
-    f: impl FnOnce() + Send + 'static,
+    f: impl FnOnce(&Sleepable) + Send + 'static,
 ) -> Result<Arc<Thread>, SpawnError> {
     Builder::new(name).priority(priority).spawn(f)
 }
@@ -461,7 +466,7 @@ pub fn spawn_on(
     name: &str,
     priority: Priority,
     bound: Option<CpuId>,
-    f: impl FnOnce() + Send + 'static,
+    f: impl FnOnce(&Sleepable) + Send + 'static,
 ) -> Result<Arc<Thread>, SpawnError> {
     let b = Builder::new(name).priority(priority);
     match bound {
@@ -895,7 +900,10 @@ pub(crate) extern "C" fn thread_start(_: usize) -> ! {
     let entry = current().entry.lock().take();
     hal::irq::enable();
     if let Some(f) = entry {
-        f();
+        // SAFETY: a fresh thread, interrupts enabled, holding nothing: it
+        // may sleep.
+        let s = unsafe { Sleepable::assume() };
+        f(&s);
     }
     exit()
 }
@@ -916,9 +924,9 @@ static ZOMBIES: SpinLock<ThreadList> = SpinLock::new(ThreadList::new());
 static REAPER: WaitQueue = WaitQueue::new();
 
 /// Frees the stacks of exited threads. Runs as its own thread.
-pub fn reaper() -> ! {
+pub fn reaper(s: &Sleepable) -> ! {
     loop {
-        REAPER.wait_until(|| !ZOMBIES.lock().is_empty());
+        REAPER.wait_until(s, || !ZOMBIES.lock().is_empty());
         loop {
             // A separate statement: the list lock (which masks interrupts)
             // must not be held while the stack is freed, since freeing

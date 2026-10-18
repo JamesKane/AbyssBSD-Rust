@@ -27,7 +27,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use super::witness::{self, LockClass};
-use crate::{Thread, WaitQueue};
+use crate::{Sleepable, Thread, WaitQueue};
 
 /// Read mode (or unlocked); the count is in the bits above [`SHIFT`].
 const READ: usize = 1;
@@ -74,7 +74,7 @@ impl RwCore {
     }
 
     #[inline]
-    fn read(&self) {
+    fn read(&self, s: &Sleepable) {
         let w = self.word.load(Ordering::Relaxed);
         // Acquire: the last writer's writes are visible to us.
         if w & (READ | WRITE_WAITERS) != READ
@@ -83,7 +83,7 @@ impl RwCore {
                 .compare_exchange_weak(w, w + ONE_READER, Ordering::Acquire, Ordering::Relaxed)
                 .is_err()
         {
-            self.read_slow();
+            self.read_slow(s);
         }
         // Recorded once held, so waiting is not "sleeping while holding".
         witness::acquire(self.class, ptr::from_ref(self).addr());
@@ -107,7 +107,7 @@ impl RwCore {
     }
 
     #[cold]
-    fn read_slow(&self) {
+    fn read_slow(&self, s: &Sleepable) {
         let max_backoff = super::max_backoff();
         let mut backoff = 1;
         loop {
@@ -123,7 +123,7 @@ impl RwCore {
                 continue;
             }
             let mut got = false;
-            self.readers_q.wait_until(|| {
+            self.readers_q.wait_until(s, || {
                 let mut w = self.word.load(Ordering::Relaxed);
                 loop {
                     if w & (READ | WRITE_WAITERS) == READ {
@@ -186,14 +186,14 @@ impl RwCore {
     }
 
     #[inline]
-    fn write(&self) {
+    fn write(&self, s: &Sleepable) {
         let me = ptr::from_ref(crate::current()).expose_provenance();
         if self
             .word
             .compare_exchange(UNLOCKED, me, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
-            self.write_slow(me);
+            self.write_slow(s, me);
         }
         witness::acquire(self.class, ptr::from_ref(self).addr());
     }
@@ -218,7 +218,7 @@ impl RwCore {
     }
 
     #[cold]
-    fn write_slow(&self, me: usize) {
+    fn write_slow(&self, s: &Sleepable, me: usize) {
         let max_backoff = super::max_backoff();
         let mut backoff = 1;
         let mut reader_spins = 0;
@@ -241,7 +241,7 @@ impl RwCore {
                 continue;
             }
             let mut got = false;
-            self.writers_q.wait_until(|| {
+            self.writers_q.wait_until(s, || {
                 let mut w = self.word.load(Ordering::Relaxed);
                 loop {
                     if w & READ != 0 && readers(w) == 0 {
@@ -378,8 +378,8 @@ macro_rules! shared_exclusive {
             }
 
             /// Shared access, sleeping while a writer holds or waits.
-            pub fn read(&self) -> ReadGuard<'_, T> {
-                self.core.read();
+            pub fn read(&self, s: &Sleepable) -> ReadGuard<'_, T> {
+                self.core.read(s);
                 ReadGuard {
                     core: &self.core,
                     value: &self.value,
@@ -388,8 +388,8 @@ macro_rules! shared_exclusive {
             }
 
             /// Exclusive access.
-            pub fn write(&self) -> WriteGuard<'_, T> {
-                self.core.write();
+            pub fn write(&self, s: &Sleepable) -> WriteGuard<'_, T> {
+                self.core.write(s);
                 WriteGuard {
                     core: &self.core,
                     value: &self.value,

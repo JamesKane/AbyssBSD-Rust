@@ -56,7 +56,7 @@ pub(crate) fn init() {
     let irq = hal::irq::disable();
     sched::init_cpu("kmain");
     hal::irq::restore(irq);
-    sched::spawn("reaper", sched::Priority::KERNEL, || sched::reaper()).expect("reaper thread");
+    sched::spawn("reaper", sched::Priority::KERNEL, |s| sched::reaper(s)).expect("reaper thread");
     kprintln!("sched: boot CPU running threads");
 }
 
