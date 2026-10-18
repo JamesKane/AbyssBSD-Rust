@@ -43,6 +43,7 @@ impl WaitQueue {
                 hal::irq::restore(irq);
                 return;
             }
+            crate::lock::witness::check_sleep(hal::irq::were_enabled(&irq));
             let me = crate::current_arc();
             me.inner.lock().state = State::Sleeping;
             q.push_back(me);

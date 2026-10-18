@@ -30,3 +30,19 @@ pub fn prepare_code(addr: usize, len: usize) {
     // memory contents.
     unsafe { asm!("dsb sy", "ic iallu", "dsb sy", "isb", options(nostack)) };
 }
+
+/// Cleans `[addr, addr + len)` to the point of coherency, so an agent
+/// reading memory with caches off (a CPU starting with its MMU off) sees
+/// what was written.
+pub fn clean_to_poc(addr: usize, len: usize) {
+    let (dline, _) = line_sizes();
+    let end = addr.saturating_add(len);
+    let mut p = addr & !(dline - 1);
+    while p < end {
+        // SAFETY: as in `prepare_code`.
+        unsafe { asm!("dc cvac, {}", in(reg) p, options(nostack)) };
+        p += dline;
+    }
+    // SAFETY: a barrier.
+    unsafe { asm!("dsb sy", options(nostack)) };
+}

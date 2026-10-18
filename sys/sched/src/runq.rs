@@ -62,6 +62,56 @@ impl RunQueue {
         Some(t)
     }
 
+    /// Recomputes every queued thread's priority with `f` (`None`: leave
+    /// it) and moves those whose queue changed. Order among threads that
+    /// stay put is kept.
+    pub(crate) fn reprioritize(&mut self, mut f: impl FnMut(&Thread) -> Option<Priority>) {
+        let mut moved = ThreadList::new();
+        let mut prios = alloc::vec::Vec::new();
+        for i in 0..QUEUES {
+            if self.bits & (1 << i) == 0 {
+                continue;
+            }
+            let mut keep = ThreadList::new();
+            while let Some(t) = self.queues[i].pop_front() {
+                match f(&t) {
+                    Some(p) if Self::index(p) != i => {
+                        prios.push(p);
+                        moved.push_back(t);
+                    }
+                    _ => keep.push_back(t),
+                }
+            }
+            core::mem::swap(&mut self.queues[i], &mut keep);
+            if self.queues[i].is_empty() {
+                self.bits &= !(1 << i);
+            }
+        }
+        self.len -= prios.len();
+        for p in prios {
+            if let Some(t) = moved.pop_front() {
+                self.push(t, p);
+            }
+        }
+    }
+
+    /// Removes `t`, wherever it is queued.
+    pub(crate) fn remove(&mut self, t: &Thread) -> Option<Arc<Thread>> {
+        let mut bits = self.bits;
+        while bits != 0 {
+            let i = usize::try_from(bits.trailing_zeros()).unwrap_or(0);
+            bits &= !(1 << i);
+            if let Some(found) = self.queues[i].remove(t) {
+                if self.queues[i].is_empty() {
+                    self.bits &= !(1 << i);
+                }
+                self.len -= 1;
+                return Some(found);
+            }
+        }
+        None
+    }
+
     /// Takes the best thread that `ok` accepts, for stealing.
     pub(crate) fn pop_if(&mut self, mut ok: impl FnMut(&Thread) -> bool) -> Option<Arc<Thread>> {
         let mut bits = self.bits;

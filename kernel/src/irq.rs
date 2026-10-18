@@ -35,6 +35,22 @@ fn madt() -> Option<madt::Madt<'static>> {
     madt::parse(&t).ok()
 }
 
+/// Records `cpu`'s interrupt-controller ID (before starting it).
+pub(crate) fn set_hw_id(cpu: CpuId, id: u64) {
+    HW_ID[cpu.index()].store(id, Ordering::Release);
+}
+
+/// Sends the TLB shootdown IPI to `cpu` (x86 only).
+#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
+pub(crate) fn send_tlb_shootdown(cpu: CpuId) {
+    #[cfg(target_arch = "x86_64")]
+    if let Some(id) = hw_id(cpu) {
+        arch::apic::send_ipi(u32::try_from(id).unwrap_or(0), TLB_VECTOR);
+    }
+    #[cfg(target_arch = "aarch64")]
+    let _ = cpu;
+}
+
 /// Asks `cpu` to reschedule.
 pub(crate) fn send_resched(cpu: CpuId) {
     let Some(id) = hw_id(cpu) else {
@@ -53,7 +69,10 @@ pub(crate) fn dispatch(irq: arch::Interrupt) {
         match irq.vector {
             arch::apic::SPURIOUS_VECTOR => return,
             arch::apic::TIMER_VECTOR => crate::time::on_timer(),
-            RESCHED_VECTOR => sched::this_cpu().request_resched(),
+            // The waker set `need_resched` if the newcomer should preempt;
+            // either way, re-arm for the changed run queue.
+            RESCHED_VECTOR => crate::time::rearm(),
+            TLB_VECTOR => crate::smp::on_shootdown_ipi(),
             arch::apic::ERROR_VECTOR => kprintln!("apic: error interrupt"),
             v => stray(u32::from(v)),
         }
@@ -66,7 +85,7 @@ pub(crate) fn dispatch(irq: arch::Interrupt) {
             return;
         };
         if id == u32::from(RESCHED_SGI) {
-            sched::this_cpu().request_resched();
+            crate::time::rearm();
         } else if id == TIMER_PPI.load(Ordering::Relaxed) {
             crate::time::on_timer();
         } else {
@@ -85,6 +104,16 @@ fn stray(id: u32) {
 
 #[cfg(target_arch = "x86_64")]
 const RESCHED_VECTOR: u8 = arch::apic::IPI_BASE;
+#[cfg(target_arch = "x86_64")]
+const TLB_VECTOR: u8 = arch::apic::IPI_BASE + 1;
+
+/// Sets up this (non-boot) CPU's local APIC.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn init_ap(_cpu: CpuId) {
+    // SAFETY: once per CPU, interrupts masked, after the boot CPU chose
+    // the register interface.
+    unsafe { arch::apic::init_cpu() };
+}
 
 #[cfg(target_arch = "x86_64")]
 static IOAPICS: sync::SpinLock<alloc::vec::Vec<arch::apic::IoApic>> =
@@ -244,6 +273,12 @@ pub(crate) fn init_boot_cpu() {
         gicd.version,
         TIMER_PPI.load(Ordering::Relaxed)
     );
+}
+
+/// Sets up this (non-boot) CPU's redistributor and timer interrupt.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn init_ap(cpu: CpuId) {
+    init_this_cpu(cpu);
 }
 
 /// Wakes this CPU's redistributor and enables its timer interrupt.

@@ -15,6 +15,7 @@ use crate::util::{self, Result};
 enum Tier {
     Unit,
     Boot,
+    Stress,
     All,
 }
 
@@ -23,8 +24,13 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
         None | Some("all") => Tier::All,
         Some("unit") => Tier::Unit,
         Some("boot") => Tier::Boot,
-        Some(t) => return Err(format!("unknown tier `{t}` (unit, boot, all)").into()),
+        Some("stress") => Tier::Stress,
+        Some(t) => return Err(format!("unknown tier `{t}` (unit, boot, stress, all)").into()),
     };
+    let duration: u64 = args
+        .take_value("--duration")?
+        .map_or(Ok(600), |s| s.parse())
+        .map_err(|_| "bad --duration (seconds)")?;
     let arches = Arch::from_args(&mut args)?;
     let release = args.take_flag("--release");
     let verbose = args.take_flag("--verbose");
@@ -57,7 +63,74 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
             return Err(format!("boot tests failed on {failed:?}; logs in build/<arch>/").into());
         }
     }
+    if tier == Tier::Stress {
+        let mut failed = Vec::new();
+        for &arch in &arches {
+            println!("== stress test ({arch}, {duration} s, 8 CPUs)");
+            match stress(arch, duration, release, verbose)? {
+                Ok(()) => println!("stress-{arch}: PASS"),
+                Err(why) => {
+                    println!("stress-{arch}: FAIL: {why}");
+                    failed.push(arch);
+                }
+            }
+        }
+        if !failed.is_empty() {
+            return Err(format!("stress test failed on {failed:?}; logs in build/<arch>/").into());
+        }
+    }
     Ok(())
+}
+
+/// The Phase 2 stress test: 64 kernel threads on 8 CPUs for `duration`
+/// seconds (see kernel/src/stress.rs).
+fn stress(
+    arch: Arch,
+    duration: u64,
+    release: bool,
+    verbose: bool,
+) -> Result<std::result::Result<(), String>> {
+    let cmdline = format!("abyss.qemu_exit=1 abyss.stress={duration}");
+    let disk = image::build(
+        arch,
+        build::Options {
+            release,
+            ktest: false,
+        },
+        &cmdline,
+    )?;
+    let disk = {
+        let copy = disk.with_file_name("disk-stress.img");
+        std::fs::copy(&disk, &copy)?;
+        copy
+    };
+    let log = disk.with_file_name("stress.log");
+    let vm = Vm {
+        vmm: Vmm::Qemu,
+        arch,
+        disk,
+        smp: 8,
+        mem: "2G".into(),
+        gdb: false,
+        display: false,
+        el2: false,
+        test_devices: true,
+        allow_reset: false,
+    };
+    let run = vm.run_captured(Duration::from_secs(duration + 300), &log, verbose)?;
+    let pass_status = match arch {
+        Arch::X86_64 => 33,
+        Arch::Aarch64 => 0,
+    };
+    let verdict = match run.outcome {
+        Outcome::Passed if run.exit_code == Some(pass_status) => Ok(()),
+        Outcome::Passed => Err(format!("QEMU exit status {:?}", run.exit_code)),
+        other => Err(format!("{other:?}")),
+    };
+    if verdict.is_err() {
+        println!("stress-{arch}: serial log at {}", log.display());
+    }
+    Ok(verdict)
 }
 
 /// One boot-test configuration.
@@ -170,7 +243,7 @@ fn boot(case: &BootCase, release: bool, verbose: bool) -> Result<std::result::Re
         vmm: case.vmm,
         arch: case.arch,
         disk,
-        smp: 2,
+        smp: 4,
         mem: "1G".into(),
         gdb: false,
         display: false,

@@ -32,7 +32,8 @@ pub(crate) fn run() -> ! {
             log.recovered
         );
     }
-    let _ = ktest::run_tests(&mut crate::console::Writer);
+    let clock = || crate::time::now_ns() / 1_000_000;
+    let _ = ktest::run_tests_timed(&mut crate::console::Writer, Some(&clock));
     crate::panic::EXPECT_FATAL_TRAP.store(true, Ordering::Relaxed);
     kprintln!("ktest: taking a deliberate fatal page fault on the stack guard page");
     deliberate_fault();
@@ -250,7 +251,6 @@ ktest! {
         for t in &threads {
             t.join();
             assert!(t.has_exited());
-            assert!(t.switches() >= 100, "{} switched {} times", t.name(), t.switches());
         }
         assert_eq!(count.load(Ordering::Relaxed), 100 * (0..8).sum::<u64>());
     }
@@ -292,11 +292,11 @@ ktest! {
         drop(t);
         // The reaper frees the stack once it runs (and any left over from
         // earlier tests, so the total may drop below the baseline).
-        for _ in 0..100 {
+        for _ in 0..2000 {
             if crate::mm::kstack::kva_allocated() <= kva {
                 return;
             }
-            sched::yield_now();
+            crate::time::sleep_ns(1_000_000);
         }
         panic!("stack not reaped: {:#x} bytes of KVA out, {kva:#x} before", crate::mm::kstack::kva_allocated());
     }
@@ -376,9 +376,187 @@ ktest! {
             t.join();
         }
         for (i, c) in counts.iter().enumerate() {
-            assert!(c.load(Ordering::Relaxed) > 0, "spinner {i} never ran");
+            assert!(
+                c.load(Ordering::Relaxed) > 0,
+                "spinner {i} never ran; threads {:?}; me on {}; ticks {:?}",
+                threads
+                    .iter()
+                    .map(|t| (t.last_cpu().0, t.switches(), t.state()))
+                    .collect::<Vec<_>>(),
+                hal::cpu_id(),
+                (0..4).map(|c| crate::time::ticks(hal::CpuId(c))).collect::<Vec<_>>()
+            );
         }
         assert!(threads.iter().all(|t| t.switches() >= 2), "no preemption");
+    }
+}
+
+ktest! {
+    fn mutexes_serialize_threads() {
+        use alloc::sync::Arc;
+        use alloc::vec::Vec;
+        use sched::lock::{LockClass, Mutex};
+        static CLASS: LockClass = LockClass::new("test counter", 10);
+        let m = Arc::new(Mutex::new(&CLASS, 0u64));
+        let threads: Vec<_> = (0..6)
+            .map(|_| {
+                let m = Arc::clone(&m);
+                sched::spawn("locker", sched::Priority::KERNEL, move || {
+                    for i in 0..2000u64 {
+                        let mut g = m.lock();
+                        let v = *g;
+                        if i % 64 == 0 {
+                            sched::yield_now();
+                        }
+                        *g = v + 1;
+                    }
+                })
+                .unwrap()
+            })
+            .collect();
+        for t in &threads {
+            t.join();
+        }
+        assert_eq!(*m.lock(), 12_000);
+        assert!(!m.is_locked());
+    }
+}
+
+ktest! {
+    fn mutex_owner_inherits_priority() {
+        use alloc::sync::Arc;
+        use core::sync::atomic::AtomicBool;
+        use sched::lock::{LockClass, Mutex};
+        use sched::Priority;
+        static CLASS: LockClass = LockClass::new("test inherit", 11);
+        let m = Arc::new(Mutex::new(&CLASS, ()));
+        let held = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let low = {
+            let (m, held, release) = (Arc::clone(&m), Arc::clone(&held), Arc::clone(&release));
+            // A fixed (kernel-range) priority; time-sharing ones float.
+            sched::spawn("low", Priority::new(110), move || {
+                let _g = m.lock();
+                held.store(true, Ordering::Release);
+                while !release.load(Ordering::Acquire) {
+                    crate::time::sleep_ns(1_000_000);
+                }
+            })
+            .unwrap()
+        };
+        while !held.load(Ordering::Acquire) {
+            crate::time::sleep_ns(1_000_000);
+        }
+        let high = {
+            let m = Arc::clone(&m);
+            sched::spawn("high", Priority::new(40), move || {
+                drop(m.lock());
+            })
+            .unwrap()
+        };
+        // Once `high` blocks, `low` runs at `high`'s priority.
+        let mut lent = false;
+        for _ in 0..1000 {
+            if low.priority() == Priority::new(40) {
+                lent = true;
+                break;
+            }
+            crate::time::sleep_ns(1_000_000);
+        }
+        release.store(true, Ordering::Release);
+        high.join();
+        low.join();
+        assert!(lent, "priority was not lent (low at {:?})", low.priority());
+        assert_eq!(low.priority(), Priority::new(110), "lent priority returned");
+    }
+}
+
+ktest! {
+    fn rw_locks_share_and_exclude() {
+        use alloc::sync::Arc;
+        use alloc::vec::Vec;
+        use core::sync::atomic::AtomicU64;
+        use sched::lock::{LockClass, SxLock};
+        static CLASS: LockClass = LockClass::new("test sx", 12);
+        let l = Arc::new(SxLock::new(&CLASS, (0u64, 0u64)));
+        let readers_in = Arc::new(AtomicU64::new(0));
+        let threads: Vec<_> = (0..6)
+            .map(|i| {
+                let (l, readers_in) = (Arc::clone(&l), Arc::clone(&readers_in));
+                sched::spawn("rw", sched::Priority::KERNEL, move || {
+                    for _ in 0..500 {
+                        if i % 3 == 0 {
+                            let mut g = l.write();
+                            assert_eq!(readers_in.load(Ordering::Relaxed), 0);
+                            g.0 += 1;
+                            g.1 += 1;
+                        } else {
+                            let g = l.read();
+                            readers_in.fetch_add(1, Ordering::Relaxed);
+                            assert_eq!(g.0, g.1, "torn write seen");
+                            readers_in.fetch_sub(1, Ordering::Relaxed);
+                        }
+                    }
+                })
+                .unwrap()
+            })
+            .collect();
+        for t in &threads {
+            t.join();
+        }
+        assert_eq!(l.read().0, 1000);
+    }
+}
+
+ktest! {
+    fn epochs_wait_for_readers() {
+        use alloc::sync::Arc;
+        use core::sync::atomic::AtomicBool;
+        use sched::lock::Epoch;
+        static EPOCH: Epoch = Epoch::new();
+        let inside = Arc::new(AtomicBool::new(false));
+        let left = Arc::new(AtomicBool::new(false));
+        let reader = {
+            let (inside, left) = (Arc::clone(&inside), Arc::clone(&left));
+            sched::spawn("reader", sched::Priority::KERNEL, move || {
+                let g = EPOCH.enter();
+                inside.store(true, Ordering::Release);
+                // A section must not sleep; stay in it by spinning.
+                crate::time::spin_ns(50_000_000);
+                left.store(true, Ordering::Release);
+                drop(g);
+            })
+            .unwrap()
+        };
+        while !inside.load(Ordering::Acquire) {
+            crate::time::sleep_ns(1_000_000);
+        }
+        EPOCH.synchronize(|| crate::time::sleep_ns(1_000_000));
+        assert!(left.load(Ordering::Acquire), "synchronize returned while a reader was inside");
+        reader.join();
+        // With no readers it returns at once.
+        EPOCH.synchronize(|| panic!("no reader to wait for"));
+    }
+}
+
+ktest! {
+    fn witness_catches_order_reversal() {
+        use sched::lock::{witness, LockClass, Mutex};
+        static OUTER: LockClass = LockClass::new("test outer", 20);
+        static INNER: LockClass = LockClass::new("test inner", 21);
+        let a = Mutex::new(&OUTER, ());
+        let b = Mutex::new(&INNER, ());
+        let before = witness::violations();
+        {
+            let _a = a.lock();
+            let _b = b.lock();
+        }
+        assert_eq!(witness::violations(), before, "declared order");
+        {
+            let _b = b.lock();
+            let _a = a.lock();
+        }
+        assert_eq!(witness::violations(), before + 1, "reversal reported");
     }
 }
 

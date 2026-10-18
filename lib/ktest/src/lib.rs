@@ -143,13 +143,26 @@ pub fn run_all(out: &mut impl Write) -> Result<Summary, fmt::Error> {
 /// Runs every registered test without printing a verdict, for images that
 /// have more checks to make (or another stage to boot) afterwards.
 pub fn run_tests(out: &mut impl Write) -> Result<Summary, fmt::Error> {
+    run_tests_timed(out, None)
+}
+
+/// Like [`run_tests`], also printing each test's duration from `clock`
+/// (milliseconds).
+pub fn run_tests_timed(
+    out: &mut impl Write,
+    clock: Option<&dyn Fn() -> u64>,
+) -> Result<Summary, fmt::Error> {
     let total = tests().count();
     writeln!(out, "{BEGIN_MARKER} ({total} tests)")?;
     let mut passed = 0;
     for t in tests() {
         write!(out, "ktest: {} ... ", t.name)?;
+        let start = clock.map(|c| c());
         (t.run)();
-        writeln!(out, "ok")?;
+        match (clock, start) {
+            (Some(c), Some(s)) => writeln!(out, "ok ({} ms)", c().saturating_sub(s))?,
+            _ => writeln!(out, "ok")?,
+        }
         passed += 1;
     }
     writeln!(out, "ktest: {passed} passed")?;

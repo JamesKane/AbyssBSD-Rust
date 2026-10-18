@@ -28,19 +28,20 @@ mod irq;
 mod mm;
 mod panic;
 mod qemu;
+mod smp;
+#[cfg(not(feature = "ktest"))]
+mod stress;
 mod symbols;
 #[cfg(feature = "ktest")]
 mod tests;
 mod threads;
-// Callouts and timed waits are only exercised by tests until SMP bring-up
-// and the stress test use them.
-#[cfg_attr(not(feature = "ktest"), allow(dead_code))]
 mod time;
 
 use addr::PhysAddr;
 
 arch::kernel_hooks!(
     main = kmain,
+    ap_main = smp::ap_main,
     fatal_trap = panic::fatal_trap,
     interrupt = irq::dispatch,
 );
@@ -71,6 +72,7 @@ fn kmain(boot_info: PhysAddr) -> ! {
     irq::init_boot_cpu();
     threads::init();
     hal::irq::enable();
+    smp::start_cpus();
 
     #[cfg(feature = "ktest")]
     tests::run();
@@ -86,6 +88,11 @@ fn kmain(boot_info: PhysAddr) -> ! {
             heap.slabs,
             heap.large_pages
         );
+        if let Some(secs) = boot::value("abyss.stress").and_then(|v| v.parse().ok()) {
+            let passed = stress::run(secs);
+            qemu::exit(passed);
+            firmware::reset(efi::ResetKind::Shutdown)
+        }
         if boot::flag("abyss.halt") {
             kprintln!("Phase 1 kernel: nothing more to do yet. Halted (abyss.halt).");
             arch::cpu::halt_forever();

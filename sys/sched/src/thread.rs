@@ -73,13 +73,68 @@ pub enum State {
 #[derive(Debug)]
 pub(crate) struct Inner {
     pub(crate) state: State,
+    /// The effective priority: `base`, or better while lent by waiters on
+    /// a mutex this thread holds.
     pub(crate) priority: Priority,
+    /// The priority the thread asked for.
+    pub(crate) base: Priority,
+    /// The mutex the thread is blocked on, for priority propagation.
+    pub(crate) blocked_on: *const crate::lock::MutexCore,
     /// The CPU the thread last ran on, or is queued for.
     pub(crate) cpu: CpuId,
     /// Pinned to one CPU.
     pub(crate) bound: Option<CpuId>,
     /// When the thread last went on a CPU, in platform time.
     pub(crate) since: u64,
+    /// Time-sharing state, for threads in the time-sharing range.
+    pub(crate) ts: Option<crate::ts::Usage>,
+}
+
+/// What happened to a thread, for time-sharing accounting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Event {
+    /// Woken, about to be queued.
+    Woken,
+    /// Coming off its CPU; `requeued` if it goes back on a run queue.
+    Descheduled { requeued: bool },
+    /// Coming off its run queue onto a CPU.
+    Scheduled,
+    /// Still waiting on a run queue (aging).
+    Waiting,
+}
+
+impl Inner {
+    /// Updates time-sharing state for `ev` at `now` and recomputes the base
+    /// priority; the effective priority follows unless a mutex waiter lent
+    /// a better one. Returns the effective priority.
+    pub(crate) fn account(&mut self, ev: Event, now: u64, window: u64, step: u64) -> Priority {
+        if let Some(u) = &mut self.ts {
+            match ev {
+                Event::Woken => {
+                    u.update(now, false, window);
+                    u.enqueue(now);
+                }
+                Event::Descheduled { requeued } => {
+                    u.update(now, true, window);
+                    if requeued {
+                        u.enqueue(now);
+                    }
+                }
+                Event::Scheduled => {
+                    u.update(now, false, window);
+                    u.dequeue();
+                }
+                Event::Waiting => u.update(now, false, window),
+            }
+            let base = u.priority(now, step);
+            let lent = self.priority.beats(self.base);
+            self.base = base;
+            if !lent || base.beats(self.priority) {
+                self.priority = base;
+            }
+        }
+        self.priority
+    }
 }
 
 /// A fixed-size thread name.
@@ -141,10 +196,15 @@ pub struct Thread {
     /// CPU time consumed, in platform time units.
     pub(crate) runtime: AtomicU64,
     pub(crate) switches: AtomicU64,
+    /// Locks held, for the witness and priority un-lending. Only the
+    /// thread itself touches it.
+    pub(crate) held: UnsafeCell<crate::lock::witness::Held>,
 }
 
-// SAFETY: `link` is protected by the owning list's lock and `context` by
-// the `on_cpu` handoff (see the field docs); everything else is atomic or
+// SAFETY: `link` is protected by the owning list's lock, `context` by the
+// `on_cpu` handoff, and `held` is only touched by the thread itself (see
+// the field docs); `Inner::blocked_on` is read under the thread lock and
+// points at a mutex that outlives the wait; everything else is atomic or
 // locked.
 unsafe impl Sync for Thread {}
 // SAFETY: as above.
@@ -172,9 +232,13 @@ impl Thread {
             inner: SpinLock::new(Inner {
                 state: State::New,
                 priority,
+                base: priority,
+                blocked_on: core::ptr::null(),
                 cpu,
                 bound: None,
                 since: 0,
+                ts: (priority >= Priority::TIMESHARE && priority < Priority::IDLE)
+                    .then(|| crate::ts::Usage::new(priority.get() - Priority::TIMESHARE.get(), 0)),
             }),
             link: UnsafeCell::new(Link::new()),
             context: UnsafeCell::new(context),
@@ -186,6 +250,7 @@ impl Thread {
             joiners: WaitQueue::new(),
             runtime: AtomicU64::new(0),
             switches: AtomicU64::new(0),
+            held: UnsafeCell::new(crate::lock::witness::Held::new()),
         }
     }
 

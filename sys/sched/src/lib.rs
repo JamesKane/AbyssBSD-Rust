@@ -11,9 +11,10 @@
 //!    reaper.
 //! 2. The best runnable thread is taken from this CPU's queue (or stolen
 //!    from another CPU's, or the idle thread runs).
-//! 3. Before resuming it, the CPU waits for the thread's `on_cpu` flag to
-//!    clear: a thread woken on one CPU while still saving its registers on
-//!    another must not resume early.
+//! 3. A thread is queued only once it is off every CPU: a wakeup waits for
+//!    a thread still saving its registers elsewhere (`on_cpu`), and
+//!    stealing skips such threads. So a switching CPU never waits for
+//!    another CPU.
 //! 4. After the switch, the incoming side clears the outgoing thread's
 //!    `on_cpu` ([`finish_switch`]).
 //!
@@ -28,8 +29,10 @@
 extern crate alloc;
 
 mod list;
+pub mod lock;
 mod runq;
 mod thread;
+mod ts;
 mod wait;
 
 use alloc::boxed::Box;
@@ -37,7 +40,7 @@ use alloc::sync::Arc;
 use core::cell::Cell;
 use core::fmt;
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicUsize, Ordering};
 
 use hal::{CpuId, MAX_CPUS};
 use sync::{Once, SpinLock};
@@ -65,7 +68,11 @@ pub trait Platform: Sync {
     fn free_stack(&self, stack: Stack);
     /// A monotonic clock for CPU-time accounting.
     fn now(&self) -> u64;
-    /// Makes `cpu` reschedule soon (an IPI, or nothing if it is this CPU).
+    /// [`Platform::now`]'s ticks per second.
+    fn frequency(&self) -> u64;
+    /// Interrupts `cpu` so it notices its run queue changed: on arrival it
+    /// re-arms its timer and passes a preemption point (which switches if
+    /// [`PerCpu::request_resched`] was called).
     fn kick(&self, cpu: CpuId);
     /// Reprograms this CPU's event timer because what it waits for may
     /// have changed (a switch, or a newly queued thread). Interrupts are
@@ -77,6 +84,12 @@ static PLATFORM: Once<&'static dyn Platform> = Once::new();
 
 fn platform() -> &'static dyn Platform {
     *PLATFORM.get().expect("scheduler used before init")
+}
+
+/// Time-sharing accounting for `ev` (see [`thread::Event`]).
+fn account(inner: &mut thread::Inner, ev: thread::Event, now: u64) -> Priority {
+    let f = platform().frequency();
+    inner.account(ev, now, f * ts::WINDOW_SECONDS, f * ts::WAIT_STEP_MS / 1000)
 }
 
 /// A CPU's scheduling state.
@@ -92,6 +105,9 @@ pub struct PerCpu {
     prev_owned: Cell<Option<Arc<Thread>>>,
     runq: SpinLock<RunQueue>,
     need_resched: AtomicBool,
+    /// The running thread's priority, for remote wakeups deciding whether
+    /// to preempt.
+    current_prio: AtomicU8,
     /// Nesting depth of preemption-disabled sections.
     preempt_off: Cell<u32>,
 }
@@ -151,11 +167,8 @@ pub fn init(p: &'static dyn Platform) {
     assert!(PLATFORM.set(p).is_ok(), "sched::init called twice");
 }
 
-/// Starts scheduling on this CPU: the code running now becomes a thread
-/// named `name`, and an idle thread is created. Interrupts must be masked.
-pub fn init_cpu(name: &str) {
-    let id = hal::cpu_id();
-    let pcpu = Box::leak(Box::new(PerCpu {
+fn new_percpu(id: CpuId) -> &'static mut PerCpu {
+    Box::leak(Box::new(PerCpu {
         id,
         current: Cell::new(ptr::null()),
         idle: Cell::new(ptr::null()),
@@ -163,16 +176,40 @@ pub fn init_cpu(name: &str) {
         prev_owned: Cell::new(None),
         runq: SpinLock::new(RunQueue::new()),
         need_resched: AtomicBool::new(false),
+        current_prio: AtomicU8::new(Priority::KERNEL.get()),
         preempt_off: Cell::new(0),
-    }));
-    let boot = Arc::new(Thread::new(name, Priority::KERNEL, id, None, None, false));
+    }))
+}
+
+/// Makes `t` the thread already running on this CPU.
+fn adopt_running(pcpu: &PerCpu, t: Arc<Thread>) {
     {
-        let mut inner = boot.inner.lock();
+        let mut inner = t.inner.lock();
         inner.state = State::Running;
         inner.since = platform().now();
+        pcpu.current_prio
+            .store(inner.priority.get(), Ordering::Relaxed);
     }
-    boot.on_cpu.store(true, Ordering::Relaxed);
-    pcpu.current.set(Arc::into_raw(boot));
+    t.on_cpu.store(true, Ordering::Relaxed);
+    pcpu.current.set(Arc::into_raw(t));
+}
+
+fn publish(pcpu: &'static mut PerCpu) {
+    let id = pcpu.id;
+    // SAFETY: the block is leaked, so it outlives every reader.
+    unsafe { hal::set_cpu_local(ptr::from_mut(pcpu).cast()) };
+    CPUS[id.index()].store(pcpu, Ordering::Release);
+    ONLINE.fetch_add(1, Ordering::AcqRel);
+}
+
+/// Starts scheduling on the boot CPU: the code running now becomes a
+/// thread named `name`, and an idle thread is created. Interrupts must be
+/// masked.
+pub fn init_cpu(name: &str) {
+    let id = hal::cpu_id();
+    let pcpu = new_percpu(id);
+    let boot = Arc::new(Thread::new(name, Priority::KERNEL, id, None, None, false));
+    adopt_running(pcpu, boot);
 
     let stack = platform().alloc_stack().expect("idle thread stack");
     let idle = Arc::new(Thread::new(
@@ -185,24 +222,49 @@ pub fn init_cpu(name: &str) {
     ));
     idle.inner.lock().bound = Some(id);
     pcpu.idle.set(Arc::into_raw(idle));
+    publish(pcpu);
+}
 
-    // SAFETY: the block is leaked, so it outlives every reader.
-    unsafe { hal::set_cpu_local(ptr::from_mut(pcpu).cast()) };
-    CPUS[id.index()].store(pcpu, Ordering::Release);
-    ONLINE.fetch_add(1, Ordering::AcqRel);
+/// Starts scheduling on another CPU: the code running now (on a stack the
+/// caller keeps forever) becomes this CPU's idle thread, and the CPU
+/// starts taking work. Interrupts must be masked; they are enabled here.
+pub fn run_idle() -> ! {
+    let id = hal::cpu_id();
+    let pcpu = new_percpu(id);
+    let idle = Arc::new(Thread::new(
+        "idle",
+        Priority::IDLE_THREAD,
+        id,
+        None,
+        None,
+        true,
+    ));
+    idle.inner.lock().bound = Some(id);
+    pcpu.idle.set(Arc::into_raw(Arc::clone(&idle)));
+    adopt_running(pcpu, idle);
+    publish(pcpu);
+    hal::irq::enable();
+    idle_loop();
+    unreachable!("the idle loop returned")
 }
 
 /// The running thread.
 #[must_use]
 pub fn current() -> &'static Thread {
+    // Interrupts masked: otherwise the thread could be preempted and
+    // migrate between finding its CPU and reading that CPU's current
+    // thread, and get another CPU's.
+    let irq = hal::irq::disable();
+    let p = this_cpu().current.get();
+    hal::irq::restore(irq);
     // SAFETY: `current` always holds a live reference while the thread
     // runs, and the running thread cannot be freed under itself.
-    unsafe { &*this_cpu().current.get() }
+    unsafe { &*p }
 }
 
 /// A new reference to the running thread.
 pub(crate) fn current_arc() -> Arc<Thread> {
-    let p = this_cpu().current.get();
+    let p = ptr::from_ref(current());
     // SAFETY: `current` holds a reference; bump the count for the copy.
     unsafe {
         Arc::increment_strong_count(p);
@@ -254,7 +316,11 @@ fn choose_cpu(last: CpuId, bound: Option<CpuId>) -> CpuId {
     if let Some(b) = bound {
         return b;
     }
-    let load = |c: &PerCpu| c.runq.lock().len();
+    // Waiting threads plus the running one, unless the CPU is idle.
+    let load = |c: &PerCpu| {
+        let busy = c.current_prio.load(Ordering::Relaxed) != Priority::IDLE_THREAD.get();
+        c.runq.lock().len() + usize::from(busy)
+    };
     let mut best = last;
     let mut best_load = cpu(last).map_or(usize::MAX, load);
     if best_load == 0 {
@@ -276,43 +342,98 @@ fn choose_cpu(last: CpuId, bound: Option<CpuId>) -> CpuId {
 /// Makes a sleeping or new thread runnable and queues it. Threads in any
 /// other state are left alone (a racing wakeup already did it).
 pub(crate) fn make_runnable(t: Arc<Thread>) {
+    // A thread woken while still switching out on some CPU is queued only
+    // once its registers are saved. So a queued thread is never on a CPU
+    // (except one requeued by its own CPU, which only that CPU takes), and
+    // a switching CPU never waits for another: no cycle of CPUs waiting on
+    // each other's outgoing threads can form. That CPU is mid-switch with
+    // interrupts masked and waits for nothing, so this spin is short.
+    while t.on_cpu.load(Ordering::Acquire) {
+        core::hint::spin_loop();
+    }
     let mut inner = t.inner.lock();
     if !matches!(inner.state, State::Sleeping | State::New) {
         return;
     }
     inner.state = State::Runnable;
+    // Time asleep lowers usage, raising a time-sharing thread's priority.
+    let prio = account(&mut inner, thread::Event::Woken, platform().now());
     let target = choose_cpu(inner.cpu, inner.bound);
     inner.cpu = target;
-    let prio = inner.priority;
     let Some(c) = cpu(target) else {
         panic!("waking {} onto offline {target}", t.name());
     };
-    drop(inner);
-    c.runq.lock().push(t, prio);
-    // Preempt the target if the newcomer beats what it runs. Reading the
-    // remote current thread's priority is racy but only steers a hint.
-    // SAFETY: `current` is always a live thread on an online CPU.
-    let running = unsafe { &*c.current.get() };
-    let running_prio = if running.idle {
-        Priority::IDLE_THREAD
-    } else {
-        running
-            .inner
-            .try_lock()
-            .map_or(Priority::KERNEL, |i| i.priority)
+    // Queue under the thread lock, so a priority change never sees the
+    // thread runnable but on no queue.
+    let was_empty = {
+        let mut q = c.runq.lock();
+        let empty = q.is_empty();
+        q.push(Arc::clone(&t), prio);
+        empty
     };
+    drop(inner);
+    drop(t);
+    // Preempt the target if the newcomer beats what it runs (racy, but
+    // only a hint: the target rechecks its queue when it reschedules).
+    let running_prio = Priority::new(c.current_prio.load(Ordering::Relaxed));
     let local = c.id == hal::cpu_id();
-    if prio.beats(running_prio) {
+    let preempt = prio.beats(running_prio);
+    if preempt {
         c.request_resched();
-        if !local {
-            platform().kick(c.id);
-        }
+    }
+    // A remote CPU needs a nudge to preempt, or to start its slice timer
+    // now that it has a waiting thread.
+    if !local && (preempt || was_empty) {
+        platform().kick(c.id);
     }
     if local {
         // A queued thread may need the slice timer started.
         let irq = hal::irq::disable();
         platform().rearm_timer();
         hal::irq::restore(irq);
+    }
+}
+
+/// Changes `t`'s effective priority, requeueing it if it is waiting to
+/// run. The caller holds `t`'s lock (`inner`).
+pub(crate) fn set_priority_locked(t: &Thread, inner: &mut thread::Inner, p: Priority) {
+    if inner.priority == p {
+        return;
+    }
+    inner.priority = p;
+    match inner.state {
+        State::Runnable => {
+            if let Some(c) = cpu(inner.cpu) {
+                let mut q = c.runq.lock();
+                if let Some(arc) = q.remove(t) {
+                    q.push(arc, p);
+                }
+                drop(q);
+                if p.beats(Priority::new(c.current_prio.load(Ordering::Relaxed))) {
+                    c.request_resched();
+                    if c.id != hal::cpu_id() {
+                        platform().kick(c.id);
+                    }
+                }
+            }
+        }
+        State::Running => {
+            if let Some(c) = cpu(inner.cpu) {
+                c.current_prio.store(p.get(), Ordering::Relaxed);
+            }
+        }
+        State::New | State::Sleeping | State::Dead => {}
+    }
+}
+
+/// Sets the current thread's base priority.
+pub fn set_base_priority(p: Priority) {
+    let me = current();
+    let mut inner = me.inner.lock();
+    let lent = inner.priority.beats(inner.base);
+    inner.base = p;
+    if !lent || p.beats(inner.priority) {
+        set_priority_locked(me, &mut inner, p);
     }
 }
 
@@ -331,6 +452,15 @@ pub fn preempt_disable() -> PreemptGuard {
     c.preempt_off.set(c.preempt_off.get() + 1);
     hal::irq::restore(irq);
     PreemptGuard { _private: () }
+}
+
+/// Whether the current CPU has preemption disabled.
+#[must_use]
+pub fn preemption_disabled() -> bool {
+    let irq = hal::irq::disable();
+    let off = this_cpu().preempt_off.get() > 0;
+    hal::irq::restore(irq);
+    off
 }
 
 /// Proof that preemption is disabled; see [`preempt_disable`].
@@ -360,7 +490,9 @@ pub fn slice_deadline(slice: u64) -> Option<u64> {
     let c = this_cpu();
     // SAFETY: `current` is live while it runs on this CPU.
     let cur = unsafe { &*c.current.get() };
-    if cur.idle || c.runq.lock().is_empty() {
+    // A pending reschedule (held off by a preemption-disabled section)
+    // needs no timer: it happens when the section ends.
+    if cur.idle || c.need_resched.load(Ordering::Relaxed) || c.runq.lock().is_empty() {
         return None;
     }
     let since = cur.inner.lock().since;
@@ -372,9 +504,18 @@ pub fn slice_deadline(slice: u64) -> Option<u64> {
 /// be masked.
 pub fn tick(slice: u64) {
     let c = this_cpu();
-    if slice_deadline(slice).is_some_and(|d| platform().now() >= d) {
+    let now = platform().now();
+    if slice_deadline(slice).is_some_and(|d| now >= d) {
         c.request_resched();
     }
+    // Age the waiting time-sharing threads: their usage falls, so their
+    // priority rises until they run.
+    let mut q = c.runq.lock();
+    q.reprioritize(|t| {
+        t.inner
+            .try_lock()
+            .map(|mut i| account(&mut i, thread::Event::Waiting, now))
+    });
 }
 
 /// Called on the way out of an interrupt handler, interrupts masked: if a
@@ -399,21 +540,27 @@ pub(crate) fn switch_away() {
     let mut inner = cur.inner.lock();
     let state = inner.state;
     let elapsed = now.saturating_sub(inner.since);
-    let prio = inner.priority;
+    let prio = account(
+        &mut inner,
+        thread::Event::Descheduled {
+            requeued: state == State::Running && !cur.idle,
+        },
+        now,
+    );
     if state == State::Running {
         inner.state = State::Runnable;
+        if !cur.idle {
+            // Queued under the thread lock (see `make_runnable`).
+            c.runq.lock().push(Arc::clone(&cur), prio);
+        }
     }
-    // Release the thread's lock before touching any queue (lock order),
-    // and never carry it across the switch.
+    // Never carry the thread lock across the switch.
     drop(inner);
     cur.runtime.fetch_add(elapsed, Ordering::Relaxed);
     let owned = match state {
         // The idle thread is never queued; it is the fallback.
         State::Running if cur.idle => None,
-        State::Running => {
-            c.runq.lock().push(Arc::clone(&cur), prio);
-            Some(cur)
-        }
+        State::Running => Some(cur),
         State::Sleeping | State::Runnable | State::Dead => Some(cur),
         State::New => unreachable!("a new thread cannot be running"),
     };
@@ -425,6 +572,8 @@ pub(crate) fn switch_away() {
         let mut inner = next.inner.lock();
         inner.state = State::Running;
         inner.since = now;
+        let p = account(&mut inner, thread::Event::Scheduled, now);
+        c.current_prio.store(p.get(), Ordering::Relaxed);
         drop(inner);
         drop(owned);
         c.current.set(Arc::into_raw(next));
@@ -432,7 +581,9 @@ pub(crate) fn switch_away() {
         return;
     }
 
-    // Wait until the CPU that last ran `next` has saved its registers.
+    // Queued threads are off every CPU (see `make_runnable`), so this
+    // never waits in practice; the Acquire pairs with the Release in
+    // `finish_switch`, ordering the saved context before we load it.
     while next.on_cpu.load(Ordering::Acquire) {
         core::hint::spin_loop();
     }
@@ -442,6 +593,8 @@ pub(crate) fn switch_away() {
         inner.state = State::Running;
         inner.cpu = c.id;
         inner.since = now;
+        let p = account(&mut inner, thread::Event::Scheduled, now);
+        c.current_prio.store(p.get(), Ordering::Relaxed);
     }
     next.switches.fetch_add(1, Ordering::Relaxed);
     // `owned` is dropped by the incoming side unless the thread is dead,
@@ -506,7 +659,12 @@ fn steal(c: &PerCpu) -> Option<Arc<Thread>> {
     let t = o
         .runq
         .lock()
-        .pop_if(|t| t.inner.try_lock().is_some_and(|i| i.bound.is_none()))?;
+        // Not a thread still switching out (one its CPU requeued itself):
+        // only that CPU may take it (see `make_runnable`).
+        .pop_if(|t| {
+            !t.on_cpu.load(Ordering::Acquire)
+                && t.inner.try_lock().is_some_and(|i| i.bound.is_none())
+        })?;
     t.inner.lock().cpu = c.id;
     Some(t)
 }
@@ -535,7 +693,10 @@ fn finish_switch() {
 
 /// The first code a new thread runs.
 pub(crate) extern "C" fn thread_start(_: usize) -> ! {
+    // The switch that got here did not return into `switch_away`, so do
+    // its epilogue: release the previous thread and arm the slice timer.
     finish_switch();
+    platform().rearm_timer();
     let entry = current().entry.lock().take();
     hal::irq::enable();
     if let Some(f) = entry {
@@ -563,7 +724,14 @@ static REAPER: WaitQueue = WaitQueue::new();
 pub fn reaper() -> ! {
     loop {
         REAPER.wait_until(|| !ZOMBIES.lock().is_empty());
-        while let Some(t) = ZOMBIES.lock().pop_front() {
+        loop {
+            // A separate statement: the list lock (which masks interrupts)
+            // must not be held while the stack is freed, since freeing
+            // may wait for other CPUs.
+            let next = ZOMBIES.lock().pop_front();
+            let Some(t) = next else {
+                break;
+            };
             // The thread is off every CPU: `finish_switch` queued it only
             // after clearing `on_cpu`.
             if let Some(stack) = t.stack.lock().take() {

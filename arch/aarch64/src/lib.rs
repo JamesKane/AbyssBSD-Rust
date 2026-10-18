@@ -30,6 +30,8 @@ pub mod gic;
 #[cfg(target_os = "none")]
 pub mod mmu;
 #[cfg(target_os = "none")]
+pub mod smp;
+#[cfg(target_os = "none")]
 pub mod timer;
 #[cfg(target_os = "none")]
 pub mod trap;
@@ -48,17 +50,28 @@ pub const NAME: &str = "arm64";
 /// Defines the kernel's entry point and fatal-trap handler.
 ///
 /// ```ignore
-/// arch::kernel_hooks!(main = kmain, fatal_trap = on_fatal_trap, interrupt = on_irq);
+/// arch::kernel_hooks!(
+///     main = kmain,
+///     ap_main = ap_main,
+///     fatal_trap = on_fatal_trap,
+///     interrupt = on_irq,
+/// );
 /// fn kmain(boot_info: arch::PhysAddr) -> ! { … }
+/// fn ap_main(arg: usize) -> ! { … }
 /// fn on_fatal_trap(report: &arch::TrapReport) -> ! { … }
 /// fn on_irq(irq: arch::Interrupt) { … }
 /// ```
 #[macro_export]
 macro_rules! kernel_hooks {
-    (main = $main:path, fatal_trap = $trap:path, interrupt = $irq:path $(,)?) => {
+    (main = $main:path, ap_main = $ap:path, fatal_trap = $trap:path, interrupt = $irq:path $(,)?) => {
         #[unsafe(no_mangle)]
         fn abyss_kernel_main(boot_info: $crate::PhysAddr) -> ! {
             $main(boot_info)
+        }
+
+        #[unsafe(no_mangle)]
+        fn abyss_ap_main(arg: usize) -> ! {
+            $ap(arg)
         }
 
         #[unsafe(no_mangle)]
@@ -77,6 +90,8 @@ macro_rules! kernel_hooks {
 unsafe extern "Rust" {
     /// Defined by [`kernel_hooks!`].
     fn abyss_kernel_main(boot_info: PhysAddr) -> !;
+    /// Defined by [`kernel_hooks!`].
+    fn abyss_ap_main(arg: usize) -> !;
     /// Defined by [`kernel_hooks!`].
     fn abyss_fatal_trap(report: &TrapReport) -> !;
     /// Defined by [`kernel_hooks!`].

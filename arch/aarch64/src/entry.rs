@@ -9,6 +9,9 @@
 //! continues under the identity map), programs MAIR/TCR/TTBR0/TTBR1 for the
 //! loader's tables, turns the MMU back on, and jumps to its linked address.
 //!
+//! Other CPUs enter at `abyss_ap_start` (from PSCI) and share the same
+//! path, then switch to their own stack and call `smp::ap_start`.
+//!
 //! The MMU-off window makes no data accesses, so no cache maintenance is
 //! needed: the table walker is coherent with the caches the loader wrote
 //! the tables through.
@@ -42,6 +45,25 @@ global_asm!(
     .type _start, %function
 _start:
     msr daifset, #0xf
+    mov x21, #0                    /* the boot CPU */
+    b 0f
+
+    /*
+     * Other CPUs (PSCI CPU_ON): x0 = physical address of an `ApBoot`,
+     * cleaned to the point of coherency because caches are off here.
+     */
+    .global abyss_ap_start
+    .type abyss_ap_start, %function
+abyss_ap_start:
+    msr daifset, #0xf
+    mov x20, x0
+    ldr x1, [x20, #0]              /* kernel root */
+    ldr x2, [x20, #8]              /* identity root */
+    ldr x22, [x20, #16]            /* stack top (virtual) */
+    ldr x23, [x20, #24]            /* argument */
+    mov x21, #1
+
+0:
     mov x19, #0
     mrs x9, CurrentEL
     lsr x9, x9, #2
@@ -122,6 +144,7 @@ _start:
     ldr x9, [x9, :lo12:4f]
     br x9
 3:
+    cbnz x21, 5f
     adrp x9, __boot_stack_top
     add x9, x9, :lo12:__boot_stack_top
     mov sp, x9
@@ -129,6 +152,13 @@ _start:
     mov x30, #0
     mov x1, x19
     bl {start}
+    brk #0
+5:
+    mov sp, x22
+    mov x29, #0
+    mov x30, #0
+    mov x0, x23
+    bl {ap_start}
     brk #0
     .size _start, . - _start
 
@@ -162,6 +192,7 @@ abyss_el2_vectors:
     mair = const pt::aarch64::MAIR,
     tcr = const TCR,
     start = sym start,
+    ap_start = sym crate::smp::ap_start,
 );
 
 static BOOTED_AT_EL2: AtomicBool = AtomicBool::new(false);

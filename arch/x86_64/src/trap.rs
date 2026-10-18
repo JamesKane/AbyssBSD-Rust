@@ -161,17 +161,27 @@ pub(crate) unsafe fn init_boot_cpu() {
                 reserved: 0,
             };
         }
-        #[repr(C, packed)]
-        struct Pointer {
-            limit: u16,
-            base: u64,
-        }
-        let ptr = Pointer {
-            limit: crate::to_u16(size_of::<[Gate; 256]>() - 1),
-            base: idt as u64,
-        };
-        asm!("lidt [{}]", in(reg) &raw const ptr, options(nostack));
+        load_idt();
     }
+}
+
+/// Loads the (shared) IDT on this CPU.
+///
+/// # Safety
+///
+/// [`init_boot_cpu`] must have filled the IDT.
+pub(crate) unsafe fn load_idt() {
+    #[repr(C, packed)]
+    struct Pointer {
+        limit: u16,
+        base: u64,
+    }
+    let ptr = Pointer {
+        limit: crate::to_u16(size_of::<[Gate; 256]>() - 1),
+        base: IDT.get() as u64,
+    };
+    // SAFETY: the IDT is filled and static.
+    unsafe { asm!("lidt [{}]", in(reg) &raw const ptr, options(nostack)) };
 }
 
 /// An external or local-APIC interrupt, for the kernel's handler.

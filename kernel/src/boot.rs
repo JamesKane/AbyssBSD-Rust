@@ -70,3 +70,11 @@ pub(crate) fn flag(word: &str) -> bool {
         .split_ascii_whitespace()
         .any(|w| w == word || w.strip_prefix(word).and_then(|r| r.strip_prefix('=')) == Some("1"))
 }
+
+/// The value of `key=value` on the command line.
+#[cfg_attr(feature = "ktest", allow(dead_code))]
+pub(crate) fn value(key: &str) -> Option<&'static str> {
+    cmdline()
+        .split_ascii_whitespace()
+        .find_map(|w| w.strip_prefix(key)?.strip_prefix('='))
+}

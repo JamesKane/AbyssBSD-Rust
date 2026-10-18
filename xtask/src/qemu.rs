@@ -323,6 +323,9 @@ impl Vm {
         }
         if self.gdb {
             c.args(["-s", "-S"]);
+        } else if std::env::var_os("ABYSS_QEMU_GDB").is_some() {
+            // A stub to attach to a hung test run (not waiting at start).
+            c.arg("-s");
         }
         Ok(c)
     }

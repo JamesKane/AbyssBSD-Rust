@@ -31,6 +31,10 @@ impl sched::Platform for Platform {
         crate::time::counter()
     }
 
+    fn frequency(&self) -> u64 {
+        crate::time::frequency()
+    }
+
     fn kick(&self, cpu: hal::CpuId) {
         crate::irq::send_resched(cpu);
     }
@@ -46,6 +50,7 @@ static PLATFORM: Platform = Platform;
 /// "kmain".
 pub(crate) fn init() {
     sched::init(&PLATFORM);
+    sched::lock::set_reporter(|args| kprintln!("{args}"));
     let irq = hal::irq::disable();
     sched::init_cpu("kmain");
     hal::irq::restore(irq);

@@ -420,21 +420,87 @@ pub(crate) fn map_device(pa: PhysAddr, len: u64) -> Result<VirtAddr, DeviceMapEr
     Ok(va + off)
 }
 
-/// Unmaps `[va, va + len)` from the kernel table and frees the frames.
+/// Unmaps `[va, va + len)` from the kernel table, removes the stale
+/// translations from every CPU, and frees the frames. Call from thread
+/// context with interrupts enabled (the shootdown waits for other CPUs).
 pub(crate) fn unmap_and_free(va: VirtAddr, len: u64) {
-    let mut map = KERNEL_MAP.lock();
-    unmap_locked(map.as_mut().expect("kernel map"), va, len);
+    let mut freed = alloc::vec::Vec::new();
+    {
+        let mut map = KERNEL_MAP.lock();
+        map.as_mut()
+            .expect("kernel map")
+            .unmap(&mut Frames, va, len, |pa| freed.push(pa))
+            .unwrap_or_else(|e| panic!("unmapping {va:?}+{len:#x}: {e:?}"));
+    }
+    flush_range(va, len);
+    crate::smp::shootdown(va, len);
+    for pa in freed {
+        free_pages(pa, Order::ZERO);
+    }
 }
 
+/// Unmaps a range nobody has used yet (a failed `map_fresh`): no other
+/// CPU can have cached it, so no shootdown.
 fn unmap_locked(table: &mut PageTable<Format>, va: VirtAddr, len: u64) {
     table
         .unmap(&mut Frames, va, len, |pa| free_pages(pa, Order::ZERO))
         .unwrap_or_else(|e| panic!("unmapping {va:?}+{len:#x}: {e:?}"));
+    flush_range(va, len);
+}
+
+/// Drops this CPU's translations for `[va, va + len)` (every CPU's on
+/// aarch64, where TLBI broadcasts).
+pub(crate) fn flush_range(va: VirtAddr, len: u64) {
     let mut off = 0;
     while off < len {
         arch::mmu::flush_page(va + off);
         off += 4096;
     }
+}
+
+/// The kernel page table's root, for loading on other CPUs.
+pub(crate) fn kernel_root() -> PhysAddr {
+    KERNEL_MAP.lock().as_ref().expect("kernel map").root()
+}
+
+/// A page table identity-mapping `[pa, pa + len)` (executable), for CPUs
+/// turning their MMU on. Built from buddy frames; never freed.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn identity_table(pa: PhysAddr, len: u64) -> PhysAddr {
+    let mut t =
+        PageTable::<Format>::new(&mut Frames, arch::mmu::max_leaf()).expect("identity root");
+    let start = pa.align_down(2 << 20);
+    let end = addr::align_up(pa.get() + len, 2 << 20).expect("identity range");
+    t.map(
+        &mut Frames,
+        VirtAddr::new(start.get()),
+        start,
+        end - start.get(),
+        Attrs::IDENTITY,
+    )
+    .expect("identity map");
+    t.root()
+}
+
+/// `n` contiguous free pages below 1 MiB (which the buddy allocator never
+/// manages), for the x86 start-up trampoline. Reserved for good.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn low_pages(n: u64) -> Option<PhysAddr> {
+    static TAKEN: SpinLock<u64> = SpinLock::new(0);
+    let mut taken = TAKEN.lock();
+    if *taken != 0 {
+        return None;
+    }
+    let bytes = n * 4096;
+    let found = crate::boot::memory_map().iter().rev().find_map(|r| {
+        let range = r.range();
+        let end = range.end.get().min(LOW_RESERVE);
+        // Page 0 holds the real-mode IVT; keep away from it.
+        let start = range.start.get().max(0x1000);
+        (r.kind == MemoryKind::Free && end >= start + bytes).then(|| end - bytes)
+    })?;
+    *taken = found;
+    Some(PhysAddr::new(found))
 }
 
 impl Frames {

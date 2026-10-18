@@ -238,3 +238,12 @@ pub(crate) fn wait_timeout(
     callout.cancel();
     ok
 }
+
+/// Busy-waits `ns` nanoseconds on the counter.
+#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
+pub(crate) fn spin_ns(ns: u64) {
+    let end = counter().saturating_add(ns_to_ticks(ns));
+    while counter() < end {
+        core::hint::spin_loop();
+    }
+}

@@ -46,6 +46,30 @@ pub unsafe fn install_kernel_tables(root: PhysAddr) {
     }
 }
 
+/// Stops lower-half walks (a starting CPU's identity map) and flushes this
+/// CPU's TLB.
+///
+/// # Safety
+///
+/// Nothing in use may live in the lower half.
+pub unsafe fn disable_lower_half() {
+    // SAFETY: per the caller's contract.
+    unsafe {
+        asm!(
+            "mrs {tcr}, tcr_el1",
+            "orr {tcr}, {tcr}, {epd0}",
+            "msr tcr_el1, {tcr}",
+            "isb",
+            "tlbi vmalle1",
+            "dsb nsh",
+            "isb",
+            epd0 = in(reg) TCR_EPD0,
+            tcr = out(reg) _,
+            options(nostack),
+        );
+    }
+}
+
 /// Runs `f` with `root` as the lower-half table, then disables the lower
 /// half again. Used for UEFI runtime calls, whose table maps the runtime
 /// regions 1:1.

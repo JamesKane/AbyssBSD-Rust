@@ -111,6 +111,41 @@ pub(crate) unsafe fn init_boot_cpu() {
     }
 }
 
+/// One CPU's `TPIDR_EL1` block. The boot CPU's is static; the kernel
+/// allocates one per other CPU. All-zero memory is a valid unused block.
+#[derive(Debug)]
+pub struct CpuBlock(CpuLocal);
+
+impl CpuBlock {
+    /// An unused block.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self(CpuLocal {
+            self_ptr: core::ptr::null(),
+            cpu: 0,
+            kernel: core::ptr::null_mut(),
+        })
+    }
+}
+
+impl Default for CpuBlock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Points `TPIDR_EL1` at `block`, as CPU `cpu`.
+///
+/// # Safety
+///
+/// Call once per CPU; `block` must live forever and belong to this CPU.
+pub(crate) unsafe fn init_cpu(block: &'static mut CpuBlock, cpu: u32) {
+    block.0.cpu = cpu;
+    block.0.self_ptr = &raw const block.0;
+    // SAFETY: per the contract.
+    unsafe { asm!("msr tpidr_el1, {}", in(reg) &raw const block.0, options(nostack)) };
+}
+
 /// The current CPU's number.
 pub fn cpu_id() -> u32 {
     let p = read_sysreg!("tpidr_el1") as *const CpuLocal;

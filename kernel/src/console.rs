@@ -154,7 +154,6 @@ pub(crate) fn print_panic(args: fmt::Arguments<'_>) {
 }
 
 /// A `fmt::Write` sink for code that takes one (the test harness).
-#[cfg_attr(not(feature = "ktest"), allow(dead_code))]
 pub(crate) struct Writer;
 
 impl Write for Writer {
