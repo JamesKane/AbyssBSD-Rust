@@ -9,6 +9,7 @@ publish.workspace = true
 addr = { path = "../../lib/addr" }
 hal = { path = "../hal" }
 pt = { path = "../../lib/pt" }
+regs = { path = "../../lib/regs" }
 
 [lints]
 workspace = true

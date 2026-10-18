@@ -21,6 +21,7 @@ dependencies = [
  "addr",
  "hal",
  "pt",
+ "regs",
 ]
 
 [[package]]

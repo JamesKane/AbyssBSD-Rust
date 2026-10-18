@@ -2,9 +2,14 @@
 //! Device register access.
 //!
 //! [`Mmio`] is a register block at a fixed virtual address, read and written
-//! with volatile accesses of an explicit width. [`RegisterIo`] abstracts a
-//! byte-register device over MMIO and x86 port I/O so one driver serves
-//! both (a 16550 can sit at an I/O port or in MMIO with a register stride).
+//! with volatile accesses. `Mmio<B>` for a block declared with
+//! [`register_block!`] names its registers and fixes their widths and
+//! access modes in the types ([`block`]); the untyped `Mmio` (that is,
+//! `Mmio<Bytes>`) takes byte offsets and an explicit width. [`RegisterIo`]
+//! abstracts a byte-register device over MMIO and x86 port I/O so one
+//! driver serves both (a 16550 can sit at an I/O port or in MMIO with a
+//! register stride). [`DeviceShared`] marks the plain-old-data types laid
+//! over memory a device shares with the CPU ([`shared`]).
 //!
 //! This crate is one of the few allowed to touch raw device memory
 //! (docs/ENGINEERING.md §4).
@@ -12,14 +17,95 @@
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
 
-/// A block of memory-mapped device registers.
+pub mod block;
+pub mod shared;
+
+use core::marker::PhantomData;
+
+pub use block::{Bits, Field, Readable, Reg, RegArray, RegisterBlock, Ro, Rw, Width, Wo, Writable};
+pub use shared::DeviceShared;
+
+/// The untyped register block: byte offsets, explicit widths.
 #[derive(Clone, Copy, Debug)]
-pub struct Mmio {
+pub struct Bytes;
+
+/// A block of memory-mapped device registers: typed (`B` a
+/// [`RegisterBlock`]) or untyped ([`Bytes`]).
+pub struct Mmio<B = Bytes> {
     base: usize,
     len: usize,
+    _block: PhantomData<fn() -> B>,
 }
 
-impl Mmio {
+impl<B> Clone for Mmio<B> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<B> Copy for Mmio<B> {}
+impl<B> core::fmt::Debug for Mmio<B> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Mmio")
+            .field("base", &format_args!("{:#x}", self.base))
+            .field("len", &format_args!("{:#x}", self.len))
+            .finish()
+    }
+}
+
+impl<B> Mmio<B> {
+    /// The block's virtual address.
+    #[must_use]
+    pub const fn base(&self) -> usize {
+        self.base
+    }
+}
+
+impl<B: RegisterBlock> Mmio<B> {
+    /// Wraps the register block `B` at virtual address `base`.
+    ///
+    /// # Safety
+    ///
+    /// `[base, base + B::SIZE)` must be mapped as device memory holding a
+    /// `B` for as long as the value (and its copies) are used, and
+    /// accesses through it must be acceptable to the device.
+    #[must_use]
+    pub const unsafe fn block(base: usize) -> Self {
+        Self {
+            base,
+            len: B::SIZE,
+            _block: PhantomData,
+        }
+    }
+
+    fn reg_ptr<T>(&self, r: Reg<B, T, impl Sized>) -> *mut T {
+        // In bounds and aligned: `register_block!` checked the offset
+        // against `B::SIZE` and `T`'s alignment at compile time.
+        (self.base + r.offset()) as *mut T
+    }
+
+    /// Reads register `r`.
+    #[inline]
+    pub fn read<T: Width, A: Readable>(&self, r: Reg<B, T, A>) -> T {
+        // SAFETY: in bounds and aligned (see `reg_ptr`); mapped per the
+        // constructor's contract.
+        unsafe { T::read(self.reg_ptr(r)) }
+    }
+
+    /// Writes register `r`.
+    #[inline]
+    pub fn write<T: Width, A: Writable>(&self, r: Reg<B, T, A>, v: T) {
+        // SAFETY: as for `read`.
+        unsafe { T::write(self.reg_ptr(r), v) }
+    }
+
+    /// Reads, changes, and writes back register `r` (not atomic).
+    #[inline]
+    pub fn modify<T: Width>(&self, r: Reg<B, T, Rw>, f: impl FnOnce(T) -> T) {
+        self.write(r, f(self.read(r)));
+    }
+}
+
+impl Mmio<Bytes> {
     /// Wraps `len` bytes of registers at virtual address `base`.
     ///
     /// # Safety
@@ -28,7 +114,11 @@ impl Mmio {
     /// the value (and its copies) are used, and accesses through it must be
     /// acceptable to the device.
     pub const unsafe fn new(base: usize, len: usize) -> Self {
-        Self { base, len }
+        Self {
+            base,
+            len,
+            _block: PhantomData,
+        }
     }
 
     fn ptr<T>(&self, offset: usize) -> *mut T {

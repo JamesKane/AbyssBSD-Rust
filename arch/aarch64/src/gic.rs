@@ -13,26 +13,54 @@
 use core::arch::asm;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-const GICD_CTLR: usize = 0x0;
-const GICD_TYPER: usize = 0x4;
-const GICD_IIDR: usize = 0x8;
-const GICD_IGROUPR: usize = 0x80;
-const GICD_ISENABLER: usize = 0x100;
-const GICD_ICENABLER: usize = 0x180;
-const GICD_IPRIORITYR: usize = 0x400;
-const GICD_ICFGR: usize = 0xc00;
-const GICD_IROUTER: usize = 0x6000;
-const GICD_CTLR_RWP: u32 = 1 << 31;
-const GICD_CTLR_ARE_NS: u32 = 1 << 4;
-const GICD_CTLR_ENABLE_G1: u32 = 1 << 1;
+use regs::{Bits, Field, Mmio};
 
-const GICR_TYPER: usize = 0x8;
-const GICR_WAKER: usize = 0x14;
-const GICR_SGI: usize = 0x1_0000;
-const GICR_TYPER_LAST: u64 = 1 << 4;
-const GICR_TYPER_VLPIS: u64 = 1 << 1;
-const GICR_WAKER_SLEEP: u32 = 1 << 1;
-const GICR_WAKER_ASLEEP: u32 = 1 << 2;
+regs::register_block! {
+    /// The distributor (IHI 0069 §12.9).
+    struct Gicd: 0x1_0000 {
+        CTLR @ 0x0000 => u32, Rw;
+        TYPER @ 0x0004 => u32, Ro;
+        IIDR @ 0x0008 => u32, Ro;
+        IGROUPR @ 0x0080 => [u32; 32], Rw;
+        ISENABLER @ 0x0100 => [u32; 32], Rw;
+        ICENABLER @ 0x0180 => [u32; 32], Rw;
+        IPRIORITYR @ 0x0400 => [u8; 1020], Rw;
+        ICFGR @ 0x0c00 => [u32; 64], Rw;
+        IROUTER @ 0x6000 => [u64; 1020], Rw;
+    }
+}
+
+regs::register_block! {
+    /// A redistributor's control frame (IHI 0069 §12.11).
+    struct GicrRd: 0x1_0000 {
+        TYPER @ 0x0008 => u64, Ro;
+        WAKER @ 0x0014 => u32, Rw;
+    }
+}
+
+regs::register_block! {
+    /// A redistributor's SGI and PPI frame, the second 64 KiB (§12.11).
+    struct GicrSgi: 0x1_0000 {
+        IGROUPR0 @ 0x0080 => u32, Rw;
+        ISENABLER0 @ 0x0100 => u32, Rw;
+        ICENABLER0 @ 0x0180 => u32, Rw;
+        IPRIORITYR @ 0x0400 => [u8; 32], Rw;
+        ICFGR @ 0x0c00 => [u32; 2], Rw;
+    }
+}
+
+const CTLR_RWP: Field<u32> = Field::new(31, 1);
+const CTLR_ARE_NS: Field<u32> = Field::new(4, 1);
+const CTLR_ENABLE_G1: Field<u32> = Field::new(1, 1);
+const TYPER_LINES: Field<u32> = Field::new(0, 5);
+const RTYPER_VLPIS: Field<u64> = Field::new(1, 1);
+const RTYPER_LAST: Field<u64> = Field::new(4, 1);
+const RTYPER_AFFINITY: Field<u64> = Field::new(32, 32);
+const WAKER_SLEEP: Field<u32> = Field::new(1, 1);
+const WAKER_ASLEEP: Field<u32> = Field::new(2, 1);
+
+/// A redistributor's frames: control, then SGI and PPI.
+const GICR_FRAME: u64 = 0x1_0000;
 
 /// Default priority for every interrupt (lower is more urgent).
 const PRIORITY: u8 = 0xa0;
@@ -43,18 +71,43 @@ const SPURIOUS: core::ops::Range<u32> = 1020..1024;
 /// The distributor window (kernel virtual address). Set once at boot.
 static GICD: AtomicU64 = AtomicU64::new(0);
 
-fn mmio32(base: u64, off: usize) -> *mut u32 {
-    (base + off as u64) as *mut u32
+/// The distributor, once [`init_distributor`] has recorded it.
+fn gicd() -> Mmio<Gicd> {
+    // SAFETY: `init_distributor`'s caller mapped the window for good.
+    unsafe { Mmio::block(va(GICD.load(Ordering::Relaxed))) }
 }
 
-fn rd(base: u64, off: usize) -> u32 {
-    // SAFETY: callers pass a mapped GIC window and a register offset in it.
-    unsafe { mmio32(base, off).read_volatile() }
+/// The redistributor frames at `gicr`.
+///
+/// # Safety
+///
+/// `gicr` maps a redistributor (both frames) for as long as the values
+/// are used.
+unsafe fn redistributor(gicr: u64) -> (Mmio<GicrRd>, Mmio<GicrSgi>) {
+    // SAFETY: per the contract.
+    unsafe { (Mmio::block(va(gicr)), Mmio::block(va(gicr + GICR_FRAME))) }
 }
 
-fn wr(base: u64, off: usize, v: u32) {
-    // SAFETY: as in `rd`.
-    unsafe { mmio32(base, off).write_volatile(v) }
+/// A kernel virtual address as a pointer-sized integer (lossless on this
+/// 64-bit target).
+#[allow(clippy::cast_possible_truncation)]
+const fn va(a: u64) -> usize {
+    a as usize
+}
+
+/// Bit `id % 32`, for the 32-bit enable registers.
+fn bit(id: u32) -> u32 {
+    1 << (id % 32)
+}
+
+/// The `ICFGR` value with interrupt `id` set edge- or level-triggered.
+fn icfg(cfg: u32, id: u32, edge: bool) -> u32 {
+    let shift = (id % 16) * 2;
+    cfg.with(Field::new(shift + 1, 1), u32::from(edge))
+}
+
+fn index(n: u32) -> usize {
+    usize::try_from(n).unwrap_or(usize::MAX)
 }
 
 /// Sets up the distributor: all SPIs Group 1, disabled, default
@@ -66,34 +119,28 @@ fn wr(base: u64, off: usize, v: u32) {
 /// Call once, on the boot CPU, with interrupts masked.
 pub unsafe fn init_distributor(gicd: u64, boot_mpidr: u64) -> u32 {
     GICD.store(gicd, Ordering::Relaxed);
-    wr(gicd, GICD_CTLR, 0);
-    wait_rwp(gicd);
-    let lines = ((rd(gicd, GICD_TYPER) & 0x1f) + 1) * 32;
-    let lines = lines.min(1020);
-    let mut i = 32;
-    while i < lines {
-        let word = usize::try_from(i / 32).unwrap_or(0) * 4;
-        wr(gicd, GICD_IGROUPR + word, u32::MAX);
-        wr(gicd, GICD_ICENABLER + word, u32::MAX);
-        i += 32;
+    let d = self::gicd();
+    d.write(Gicd::CTLR, 0);
+    wait_rwp(d);
+    let lines = ((d.read(Gicd::TYPER).field(TYPER_LINES) + 1) * 32).min(1020);
+    for word in 1..index(lines / 32) {
+        d.write(Gicd::IGROUPR.at(word), u32::MAX);
+        d.write(Gicd::ICENABLER.at(word), u32::MAX);
     }
-    for i in 32..lines {
-        let i = usize::try_from(i).unwrap_or(0);
-        // SAFETY: byte-wide priority registers within the window.
-        unsafe { ((gicd + (GICD_IPRIORITYR + i) as u64) as *mut u8).write_volatile(PRIORITY) };
-        // SAFETY: 64-bit routing registers within the window.
-        unsafe {
-            ((gicd + (GICD_IROUTER + 8 * i) as u64) as *mut u64)
-                .write_volatile(affinity(boot_mpidr));
-        }
+    for i in 32..index(lines) {
+        d.write(Gicd::IPRIORITYR.at(i), PRIORITY);
+        d.write(Gicd::IROUTER.at(i), affinity(boot_mpidr));
     }
-    wr(gicd, GICD_CTLR, GICD_CTLR_ARE_NS | GICD_CTLR_ENABLE_G1);
-    wait_rwp(gicd);
+    d.write(
+        Gicd::CTLR,
+        0u32.with(CTLR_ARE_NS, 1).with(CTLR_ENABLE_G1, 1),
+    );
+    wait_rwp(d);
     lines
 }
 
-fn wait_rwp(gicd: u64) {
-    while rd(gicd, GICD_CTLR) & GICD_CTLR_RWP != 0 {
+fn wait_rwp(d: Mmio<Gicd>) {
+    while d.read(Gicd::CTLR).has(CTLR_RWP) {
         core::hint::spin_loop();
     }
 }
@@ -107,7 +154,7 @@ fn affinity(mpidr: u64) -> u64 {
 /// interrupt-controller errata.
 #[must_use]
 pub fn distributor_iidr() -> u32 {
-    rd(GICD.load(Ordering::Relaxed), GICD_IIDR)
+    gicd().read(Gicd::IIDR)
 }
 
 /// Finds the redistributor for the CPU with `mpidr` in the region at
@@ -117,20 +164,18 @@ pub fn find_redistributor(base: u64, len: u64, mpidr: u64) -> Option<u64> {
     // GICR_TYPER's affinity is Aff3.Aff2.Aff1.Aff0 in 32 bits.
     let want = (((mpidr >> 32) & 0xff) << 24) | (mpidr & 0xff_ffff);
     let mut rd_base = base;
-    while rd_base + 0x2_0000 <= base + len {
-        // SAFETY: a mapped redistributor frame in the region.
-        let typer = unsafe { ((rd_base + GICR_TYPER as u64) as *const u64).read_volatile() };
-        if typer >> 32 == want {
+    while rd_base + 2 * GICR_FRAME <= base + len {
+        // SAFETY: a mapped redistributor in the region.
+        let (r, _) = unsafe { redistributor(rd_base) };
+        let typer = r.read(GicrRd::TYPER);
+        if typer.field(RTYPER_AFFINITY) == want {
             return Some(rd_base);
         }
-        if typer & GICR_TYPER_LAST != 0 {
+        if typer.has(RTYPER_LAST) {
             return None;
         }
-        rd_base += if typer & GICR_TYPER_VLPIS != 0 {
-            0x4_0000
-        } else {
-            0x2_0000
-        };
+        // With virtual LPIs, two more frames follow.
+        rd_base += if typer.has(RTYPER_VLPIS) { 4 } else { 2 } * GICR_FRAME;
     }
     None
 }
@@ -144,17 +189,16 @@ pub fn find_redistributor(base: u64, len: u64, mpidr: u64) -> Option<u64> {
 /// lifetime. Call once per CPU, with interrupts masked, after
 /// [`init_distributor`].
 pub unsafe fn init_cpu(gicr: u64) {
-    let waker = rd(gicr, GICR_WAKER);
-    wr(gicr, GICR_WAKER, waker & !GICR_WAKER_SLEEP);
-    while rd(gicr, GICR_WAKER) & GICR_WAKER_ASLEEP != 0 {
+    // SAFETY: per our contract.
+    let (r, sgi) = unsafe { redistributor(gicr) };
+    r.modify(GicrRd::WAKER, |w| w.with(WAKER_SLEEP, 0));
+    while r.read(GicrRd::WAKER).has(WAKER_ASLEEP) {
         core::hint::spin_loop();
     }
-    let sgi = gicr + GICR_SGI as u64;
-    wr(sgi, GICD_IGROUPR, u32::MAX);
-    wr(sgi, GICD_ICENABLER, u32::MAX);
-    for i in 0..32 {
-        // SAFETY: byte-wide priority registers in the SGI frame.
-        unsafe { ((sgi + (GICD_IPRIORITYR + i) as u64) as *mut u8).write_volatile(PRIORITY) };
+    sgi.write(GicrSgi::IGROUPR0, u32::MAX);
+    sgi.write(GicrSgi::ICENABLER0, u32::MAX);
+    for i in 0..GicrSgi::IPRIORITYR.len() {
+        sgi.write(GicrSgi::IPRIORITYR.at(i), PRIORITY);
     }
     // SAFETY: the CPU interface system registers exist on a GICv3 system;
     // enabling them is what the caller asked for.
@@ -188,37 +232,20 @@ pub unsafe fn init_cpu(gicr: u64) {
 /// Enables a private interrupt (SGI or PPI, `id < 32`) on this CPU, whose
 /// redistributor is at `gicr`.
 pub fn enable_private(gicr: u64, id: u32, edge: bool) {
-    let sgi = gicr + GICR_SGI as u64;
+    // SAFETY: the caller passes this CPU's mapped redistributor.
+    let (_, sgi) = unsafe { redistributor(gicr) };
     if (16..32).contains(&id) {
-        let shift = (id % 16) * 2;
-        let cfg = rd(sgi, GICD_ICFGR + 4);
-        let cfg = if edge {
-            cfg | (2 << shift)
-        } else {
-            cfg & !(2 << shift)
-        };
-        wr(sgi, GICD_ICFGR + 4, cfg);
+        // SGIs are always edge-triggered; PPIs are configured in ICFGR1.
+        sgi.modify(GicrSgi::ICFGR.at(1), |c| icfg(c, id, edge));
     }
-    wr(sgi, GICD_ISENABLER, 1 << (id % 32));
+    sgi.write(GicrSgi::ISENABLER0, bit(id));
 }
 
 /// Enables shared interrupt `id` (32 or above) in the distributor.
 pub fn enable_shared(id: u32, edge: bool) {
-    let gicd = GICD.load(Ordering::Relaxed);
-    let reg = usize::try_from(id / 16).unwrap_or(0) * 4;
-    let shift = (id % 16) * 2;
-    let cfg = rd(gicd, GICD_ICFGR + reg);
-    let cfg = if edge {
-        cfg | (2 << shift)
-    } else {
-        cfg & !(2 << shift)
-    };
-    wr(gicd, GICD_ICFGR + reg, cfg);
-    wr(
-        gicd,
-        GICD_ISENABLER + usize::try_from(id / 32).unwrap_or(0) * 4,
-        1 << (id % 32),
-    );
+    let d = gicd();
+    d.modify(Gicd::ICFGR.at(index(id / 16)), |c| icfg(c, id, edge));
+    d.write(Gicd::ISENABLER.at(index(id / 32)), bit(id));
 }
 
 /// Acknowledges the highest-priority pending interrupt, if any.
