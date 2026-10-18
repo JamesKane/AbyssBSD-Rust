@@ -1,0 +1,317 @@
+# Architecture
+
+This document describes how the AbyssBSD kernel is structured. FreeBSD is the behavioral
+specification. The internal design is ours, and it is shaped by Rust's ownership model.
+
+## 1. Overall shape
+
+- **Monolithic, statically linked kernel.** It is a single ELF image. Drivers and file systems are
+  compiled in and chosen by Cargo features and per-platform configuration crates. A Rust-native
+  module system may come later ([ADR-0005](adr/0005-monolithic-static-kernel.md)).
+- **SMP and fully preemptible** from Phase 2. There is no "giant lock" stage.
+- **Higher-half kernel with a physical direct map (DMAP)** on all architectures, as FreeBSD does.
+  User space occupies the lower half.
+- **Workspace of many small crates.** Layering is enforced by the crate dependency graph, not by
+  convention. Pure-logic crates build for the host so they can use `cargo test` and Miri.
+
+```
+            ┌──────────────────────────────────────────────────────────────┐
+ user       │  FreeBSD userland (libc, rtld, libthr, base utilities)       │
+────────────┼──────────────────────────────────────────────────────────────┤
+ syscall    │  abi::<arch>  →  syscall dispatch (generated from            │
+ boundary   │  syscalls.master)  →  copyin/copyout (UserPtr<T>)            │
+            ├──────────────────────────────────────────────────────────────┤
+ kernel     │ proc/thread  signals  exec  sysctl  kqueue  tty  umtx  jail   │
+ services   │ vfs(namecache, vnode) ── ufs2  msdosfs  tmpfs  devfs          │
+            │ net(ifnet, ether, ip/ip6, tcp/udp, unix, rtsock, netlink)     │
+            │ storage(disk, gpt, bio)                                        │
+            ├──────────────────────────────────────────────────────────────┤
+ core       │ vm(map, object, page, fault, pager) ── slab allocator         │
+            │ sched(ULE-like)  sync(spin, mutex, rw, sx, epoch)  time       │
+            ├──────────────────────────────────────────────────────────────┤
+ device     │ bus model ── acpi(tables, AML) ── pci(ECAM, MSI-X) ── iommu   │
+ framework  │ drivers: nvme ahci virtio xhci uart fb nic …                  │
+            ├──────────────────────────────────────────────────────────────┤
+ HAL        │ arch::x86_64 │ arch::aarch64 │ (arch::riscv64, Day 2)        │
+            │ cpu, mmu/pmap, traps, irq ctrl, timers, smp, context switch    │
+            └──────────────────────────────────────────────────────────────┘
+ firmware      UEFI (boot services → runtime services), ACPI tables
+```
+
+## 2. Repository / crate layout (target)
+
+```
+AbyssBSD-Rust/
+├── Cargo.toml                 # workspace
+├── rust-toolchain.toml        # pinned stable toolchain + targets
+├── xtask/                     # host build orchestration (std allowed)
+├── boot/
+│   ├── bootproto/             # loader→kernel handoff types (no_std, versioned)
+│   └── loader-efi/            # our UEFI application (PE/COFF)
+├── kernel/                    # the kernel binary crate: glue + init order only
+├── arch/
+│   ├── hal/                   # arch-neutral traits and types (PhysAddr, VirtAddr, …)
+│   ├── x86_64/
+│   ├── aarch64/
+│   └── riscv64/               # Day 2
+├── lib/                       # pure, host-testable no_std libraries
+│   ├── abi/                   # FreeBSD ABI: errno, syscall nums, structs (per arch)
+│   ├── elf/                   # ELF parsing (loader + exec + linker)
+│   ├── collections/           # intrusive lists, radix trees, rb-trees, bitmaps
+│   ├── regs/                  # typed MMIO / sysreg register framework
+│   ├── acpi-tables/           # static table parsing
+│   ├── aml/                   # AML interpreter
+│   ├── gpt/  ufs2/  fat/      # on-disk formats (parsing/serialization only)
+│   └── nettypes/              # packet header types, checksums
+├── sys/                       # kernel subsystems (no_std, kernel-only)
+│   ├── sync/  vm/  sched/  time/  proc/  signal/  exec/  syscall/
+│   ├── sysctl/  kqueue/  tty/  umtx/  cred/  jail/  capsicum/
+│   ├── vfs/   fs-ufs/  fs-msdos/  fs-tmpfs/  fs-devfs/
+│   ├── storage/  net/
+│   └── bus/   acpi/  pci/  iommu/
+├── drivers/
+│   ├── nvme/  ahci/  virtio/  xhci/  usb-hid/  usb-msc/
+│   ├── uart-16550/  uart-pl011/  fb-gop/  console/
+│   ├── intc-apic/  intc-gic/  timer-hpet/  timer-generic/  rtc/
+│   └── nic-virtio/  nic-e1000e/  nic-igc/
+├── tools/
+│   ├── syscallgen/            # syscalls.master → Rust tables
+│   └── abi-check/             # struct layout verification against real FreeBSD headers
+├── tests/                     # QEMU-driven integration and compatibility tests
+└── docs/
+```
+
+### Layering rules
+
+1. `lib/*` must not depend on `sys/*`, `drivers/*`, or `arch/*`. These crates are pure and run on
+   the host for tests.
+2. `drivers/*` depend on `sys/bus`, `sys/sync`, `sys/vm` (DMA), and `arch/hal` traits. They never
+   depend on a concrete `arch/<isa>` crate.
+3. Only `arch/<isa>` crates may contain inline assembly. Only `arch/*`, `lib/regs`, and the DMA/MMIO
+   parts of `sys/vm` may perform raw pointer MMIO.
+4. `kernel/` is the only crate that names a concrete architecture. It wires the HAL implementation
+   into everything else.
+
+## 3. The architecture seam (HAL)
+
+AMD64 and ARM64 differ in almost every privileged mechanism. The seam is defined in `arch/hal` as
+traits and associated types, with one implementation per ISA. Selection is compile-time (static
+dispatch) and costs nothing at runtime.
+
+```rust
+pub trait Arch: 'static {
+    type Pmap: Pmap;                 // page-table management for one address space
+    type TrapFrame: TrapFrame;       // saved user/kernel register state
+    type FpuState: FpuState;         // lazily or eagerly saved FP/SIMD
+    type IrqController: IrqController;
+    type CpuLocal;                   // per-CPU data reachable via GS / TPIDR_EL1 / tp
+
+    const PAGE_SIZES: &'static [PageSize];
+    const USER_VA: Range<VirtAddr>;
+    const KERNEL_BASE: VirtAddr;
+
+    fn current_cpu() -> CpuId;
+    fn interrupts() -> &'static dyn InterruptState;   // enable/disable/save/restore
+    fn halt_until_interrupt();
+    unsafe fn switch_context(from: &mut Context, to: &Context);
+    fn enter_user(frame: &Self::TrapFrame) -> !;
+}
+```
+
+| Concern | AMD64 | ARM64 | RV64 (Day 2) |
+|---|---|---|---|
+| Firmware handoff | UEFI → our loader | UEFI → our loader. Entry may be at **EL2** (Sky1: VHE-capable): install an EL2 stub, drop to EL1 | UEFI → our loader |
+| Per-CPU pointer | `GS_BASE` / `swapgs` | `TPIDR_EL1` | `tp` + `sscratch` |
+| Paging | 4-level (LA57 later), PCID | 4 KiB granule, 48-bit VA, TTBR0/TTBR1, ASID | Sv48 (Sv57 later), ASID |
+| Syscall entry | `syscall`/`sysret` | `svc #0` → EL1 sync vector | `ecall` → S-mode trap |
+| Interrupt controller | x2APIC/xAPIC + IOAPIC (MADT) | GICv3 + ITS (MADT GICC/GICD/GICR/ITS) | AIA: IMSIC + APLIC (MADT) |
+| Timer | TSC-deadline / LAPIC; HPET for calibration | Generic Timer (GTDT) | SBI timer / Sstc |
+| SMP bring-up | INIT-SIPI-SIPI (MADT) | PSCI `CPU_ON` (FADT/MADT) | SBI HSM |
+| Power off / reset | ACPI S5 via AML, FADT reset reg | PSCI `SYSTEM_OFF`/`RESET` | SBI SRST |
+| Early console | 16550 (SPCR) + GOP fb | PL011 / SBSA UART (SPCR, else DBG2) + GOP fb | 16550 (SPCR) + GOP fb |
+| FP/SIMD state | x87/SSE/AVX/AVX-512 via XSAVE | FP/NEON + **SVE** (and SME later), vector length restored after power-down | V extension |
+| Errata | CPUID-keyed table | MIDR-keyed table (e.g. GIC erratum 2941627 on Sky1) | `mvendorid`/`marchid`-keyed table |
+| IOMMU (later) | VT-d (DMAR) / AMD-Vi (IVRS) | SMMUv3 (IORT) | RISC-V IOMMU (RIMT) |
+| Kernel hardening | SMEP, SMAP, NX, CET-IBT (later) | PAN, PXN/UXN, PAC, BTI (later) | Smepmp, SUM discipline |
+
+Exercising both ISAs from the start keeps x86 assumptions out of the HAL. Examples of what must not
+leak: port I/O, `cli`/`sti` semantics, a strongly ordered memory model, and fixed 4 KiB pages.
+
+## 4. Boot flow
+
+1. **`loader-efi`** (Rust UEFI app, `x86_64-unknown-uefi` / `aarch64-unknown-uefi`):
+   - reads `\EFI\ABYSS\loader.conf` and the kernel ELF from the ESP (FAT32 via UEFI
+     SimpleFileSystem). Later it can read the kernel from UFS2 directly, using `lib/ufs2`.
+   - loads the kernel's PT_LOAD segments and applies KASLR slide relocations.
+   - gathers the memory map, RSDP (ACPI 2.0+ only), GOP framebuffer, SMBIOS, UEFI runtime services
+     table, command line, and optional preloaded modules (e.g. an initial memory-disk image).
+   - builds initial page tables (identity map of the trampoline, DMAP, and kernel image).
+   - `ExitBootServices`, then jumps to the kernel with a pointer to a versioned `bootproto::BootInfo`.
+2. **Kernel early init** (single CPU, no allocator): on arm64, leave EL2 if entered there; set up
+   the CPU, install trap vectors, start the early console (SPCR, then DBG2, then GOP), parse the memory map into the physical allocator, and switch to the kernel's own
+   page tables.
+3. **Core init**: slab allocator, ACPI static tables (MADT, MCFG, SPCR, FADT, HPET/GTDT, SRAT/SLIT),
+   interrupt controller, timers, SMP bring-up, scheduler start.
+4. **Device init**: AML namespace load (DSDT/SSDTs), `_OSC`, bus enumeration (ACPI + PCIe), driver
+   attach.
+5. **Mount root** (UFS2 by GPT partition UUID/label, or a memory disk). Then `exec("/sbin/init")`.
+
+`bootproto` is a separate crate with explicit versioning, so the loader and kernel can evolve
+independently and the kernel can reject handoffs it does not understand.
+
+## 5. Core subsystems
+
+### 5.1 Synchronization (`sys/sync`)
+
+Modeled on FreeBSD's lock classes, with Rust guards and lock ordering checked in the type system:
+
+| Primitive | FreeBSD analogue | Notes |
+|---|---|---|
+| `SpinLock<T>` | `mtx` (spin) | Disables interrupts/preemption; for IRQ-shared state |
+| `Mutex<T>` | `mtx` (default) | Adaptive spin, then turnstile with priority propagation |
+| `RwLock<T>` | `rwlock` | Turnstile-based, non-sleepable holders |
+| `SxLock<T>` | `sx` | Sleepable shared/exclusive |
+| `Epoch` / `Rcu<T>` | `epoch(9)` | Read-mostly structures (ifnet lists, routing, namecache) |
+| `Atomic*`, `SeqLock` | `atomic(9)`, `seqc` | Timekeeping, stats |
+| `WaitQueue`, `Condvar` | `sleepqueue`, `cv` | Sleep/wakeup with signal interruptibility as a typed result |
+
+- **Lock levels as types.** Each lock is declared with a level (`Mutex<L3, T>`). Acquiring a lock
+  requires a token proving that only lower levels are held. Most ordering bugs fail at compile time.
+- **Runtime witness** (`WITNESS` equivalent) in debug builds catches what the types cannot, such as
+  dynamically chosen locks and sleeping with a spinlock held.
+- **Context typing.** Functions that may sleep take a `&Sleepable` context token. Interrupt
+  handlers receive an `IrqContext` that cannot produce one.
+
+### 5.2 Memory (`sys/vm`)
+
+We follow FreeBSD's Mach-derived design, adapted to Rust ownership:
+
+- **Physical**: buddy allocator over per-NUMA-domain free lists (`vm_phys`). Page metadata lives
+  in a `VmPage` array. `Pfn`, `PhysAddr`, and `VirtAddr` are distinct newtypes.
+- **Kernel allocation**: slab/zone allocator (UMA-equivalent) with per-CPU caches, which also backs
+  `alloc::GlobalAlloc`. Typed zones (`Zone<T>`) return `ZBox<T>`.
+- **Address spaces**: `VmMap` (an ordered map of `VmEntry`), `VmObject` (anonymous, vnode,
+  device, physical), and shadow chains for COW. `Pmap` is the per-arch page-table backend behind
+  the HAL trait.
+- **Fault handling**: `vm_fault` resolves through the map and object chain, using `Result` types
+  that separate "retry", "signal SIGSEGV/SIGBUS", and "kernel bug".
+- **User memory access**: only through `UserPtr<T>` / `UserSlice<T>`, which can be consumed solely
+  by fallible `copyin`/`copyout` using arch fault-recovery tables. Kernel code cannot dereference
+  user pointers by construction.
+- **Unified buffer/page cache** for file data (FreeBSD's VMIO model). Metadata is cached through a
+  small buffer cache API used by UFS2 and msdosfs.
+- **Paging out / swap**: Phase 6+. The design leaves room for it from the start (pager trait on
+  `VmObject`).
+
+### 5.3 Scheduling (`sys/sched`)
+
+- A ULE-inspired design: per-CPU run queues, interactivity scoring, timeshare/realtime/idle classes,
+  and topology-aware load balancing.
+- **Heterogeneous cores are first-class.** The topology (from ACPI PPTT, CPPC/`_CPC`, and on x86
+  CPUID hybrid leaves/HFI) feeds capacity-aware placement.
+- Tickless idle and high-resolution event timers (FreeBSD `eventtimers` + `callout` semantics).
+- Threads are kernel objects. Processes are containers (address space, file table, credentials,
+  signal state), as in FreeBSD.
+
+### 5.4 Time (`sys/time`)
+
+- A `timecounter` abstraction (TSC, ARM generic counter, HPET fallback), driven by NTP-disciplined
+  `timehands`.
+- The **shared page** exports `vdso_timehands` so FreeBSD libc's userspace `clock_gettime` fast
+  path works.
+
+## 6. Device model (`sys/bus`)
+
+FreeBSD's newbus (`device_t`, devclasses, kobj method tables) maps naturally onto Rust traits and
+typestate:
+
+```rust
+pub trait Driver: Sync {
+    const NAME: &'static str;
+    fn probe(dev: &DeviceInfo) -> Probe;                  // enum: NoMatch | Generic | Specific | Vendor
+    fn attach(dev: Unattached<'_>) -> Result<Attached<Self::State>, AttachError>;
+    type State: Device;
+}
+
+pub trait Device: Send + Sync {
+    fn detach(&self) -> Result<(), DetachError> { Err(DetachError::Unsupported) }
+    fn suspend(&self) -> Result<(), PmError> { Ok(()) }
+    fn resume(&self) -> Result<(), PmError> { Ok(()) }
+}
+```
+
+- **Resources are owned values.** `MmioRegion`, `IrqHandle`, and `DmaBuffer<T>` are acquired from
+  the parent bus and released on drop, so resource leaks on detach are impossible to express.
+- **Buses**: ACPI (namespace devices with `_HID`/`_CID`/`_CRS`), PCIe (ECAM from MCFG,
+  capabilities, MSI/MSI-X, hotplug later), USB (xHCI root hub → hubs → functions), and virtio
+  (modern PCI transport only, VIRTIO 1.x).
+- **Interrupts**: an `IrqDomain` hierarchy (e.g. MSI → ITS → GIC), similar to FreeBSD `intr_pic`.
+  Handlers are split into a filter (IRQ context) and an ithread (sleepable).
+- **DMA**: a `busdma`-equivalent with typed coherent/streaming buffers and IOMMU awareness, which is
+  a no-op until the IOMMU driver lands.
+
+### ACPI
+
+We write our own ACPI implementation (no ACPICA):
+
+- `lib/acpi-tables`: zero-copy, validated parsing of RSDP/XSDT, MADT, FADT, MCFG, SPCR, DBG2, HPET,
+  GTDT, SRAT, SLIT, PPTT, PCCT, IORT, DMAR, IVRS, BGRT, and later RHCT/RIMT for RISC-V.
+- `lib/aml`: an AML interpreter (parser, namespace, method execution, operation regions, `Notify`,
+  mutexes, events). It is host-testable against DSDT/SSDT dumps collected from real machines
+  (`acpidump` on FreeBSD). Operation-region spaces are a trait implemented by the kernel:
+  SystemMemory, SystemIO, PCI_Config, EmbeddedControl, GenericSerialBus, and
+  **PlatformCommChannel (PCC)**. PCC matters because on Sky1 the clock methods talk to the SCMI
+  firmware through PCC mailboxes. Firmware bugs such as references to nonexistent objects
+  produce typed, logged errors, never panics.
+- `sys/acpi`: OS services glue (`_OSC`, `_OSI`, power button via GPE/SCI or GED, S5 shutdown,
+  power resources `_PRx`/`_PSx`, EC, PCC channels from PCCT). Later: `_LPI`, CPPC, and thermal
+  zones.
+
+The AML interpreter is one of the highest-risk components, so it gets its own fuzzing and corpus.
+
+## 7. Process model and syscalls
+
+- `syscalls.master` is the source of truth. `tools/syscallgen` generates the syscall number enum,
+  argument structs, and a dispatch table. Unimplemented entries return `ENOSYS`, and the first
+  use of each is logged.
+- Syscall handlers have the signature `fn(&mut ThreadCtx, Args) -> SysResult<Ret>`, where `Errno` is
+  an enum with FreeBSD's numeric values. The arch layer encodes success and failure into the native
+  convention (carry flag + `rax`/`x0`).
+- `exec`: an ELF64 image activator with FreeBSD branding checks (`NT_FREEBSD_ABI_TAG`, `ELFOSABI`),
+  PT_INTERP (`/libexec/ld-elf.so.1`), auxv, ps_strings, the shared page, and ASLR.
+- Signals: FreeBSD `sigframe`/`ucontext_t` layouts per arch, `sigreturn`, alternate stacks, and
+  `SA_RESTART` semantics.
+- Credentials, jails, Capsicum, and resource limits are first-class from Phase 6. Many base
+  utilities enter capability mode.
+
+## 8. Storage and file systems
+
+- `sys/storage`: a small GEOM replacement. A `BlockDevice` trait provides async `Bio` requests,
+  GPT partition providers, and `/dev` nodes named FreeBSD-style (`nda0p2`, `ada0p1`, `vtbd0p3`) so
+  stock `fstab` conventions and tools work.
+- `sys/vfs`: vnodes as refcounted `Arc<Vnode>` with a typed `VnodeKind` enum, a namecache with
+  negative entries, mount points, and a FreeBSD-compatible `struct stat`, `statfs`, and `dirent`.
+- File systems: **devfs**, **tmpfs**, **msdosfs** (FAT12/16/32 + VFAT LFN), and **UFS2** (read →
+  write → soft updates → SU+J). On-disk formats live in host-testable `lib/` crates. For UFS2 we
+  check against FreeBSD's `fsck_ffs` on images round-tripped through the build server.
+
+## 9. Networking
+
+- `ifnet` with an epoch-protected interface list, mbuf-equivalent packet buffers (`Packet` with
+  typed headroom), and Ethernet, ARP, IPv4, IPv6/ND, ICMP, UDP, TCP (NewReno + CUBIC), and loopback.
+- Sockets: UNIX domain (stream/dgram/seqpacket, SCM_RIGHTS, SCM_CREDS) early, because base daemons
+  need them. INET/INET6 come later.
+- Control plane: routing socket (`PF_ROUTE`) and **netlink** (FreeBSD 14+ `ifconfig`/`route` use
+  it), plus the `ioctl` set used by `ifconfig`.
+- Drivers: virtio-net first, then Intel e1000e (I219), igc (I225/I226), and later ixgbe/ice or
+  Realtek, depending on target hardware.
+
+## 10. Debugging and observability
+
+- Serial console from the first instruction after the loader. Panic dumps include a symbolized
+  backtrace (embedded symbol table generated by `xtask`).
+- A GDB remote stub over serial, plus the QEMU gdbstub during bring-up.
+- An in-kernel debugger (DDB-like) with commands for threads, locks, VM maps, and the device tree.
+- `ktrace`-compatible syscall tracing (FreeBSD `kdump` works unmodified), and later a DTrace-like
+  facility.
+- Kernel statistics exported via sysctl so `top`, `vmstat`, `systat`, and `netstat` work.
