@@ -4,3 +4,4 @@
 *.fd.vars
 .idea/
 .vscode/
+/.claude/worktrees/
