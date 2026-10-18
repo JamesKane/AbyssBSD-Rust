@@ -137,6 +137,25 @@ pub(crate) fn with<R>(s: &Sleepable, f: impl FnOnce(&mut Tree) -> R) -> R {
     f(&mut tree().write(s))
 }
 
+/// Reads the value at `oid` as the syscall will: a node handler is called
+/// after the tree's lock is dropped, so it may take lower-ordered locks.
+#[cfg_attr(not(feature = "ktest"), allow(dead_code))]
+pub(crate) fn read_oid(
+    s: &Sleepable,
+    oid: &[i32],
+    out: &mut alloc::vec::Vec<u8>,
+) -> Result<(), sysctl::ReadError> {
+    let handler = {
+        let t = tree().read(s);
+        match t.handler(oid) {
+            Some(h) => h,
+            None => return t.read(oid, out),
+        }
+    };
+    let (h, rest) = handler;
+    h(&rest, out)
+}
+
 /// Runs `f` on the tree, shared (to read).
 #[cfg_attr(not(feature = "ktest"), allow(dead_code))]
 pub(crate) fn read<R>(s: &Sleepable, f: impl FnOnce(&Tree) -> R) -> R {

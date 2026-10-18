@@ -200,3 +200,46 @@ fn removal_invalidates_ids() {
     assert!(t.oid(fresh).is_some());
     assert!(!t.remove(t.root()));
 }
+
+#[test]
+fn handler_nodes() {
+    let mut t = Tree::new();
+    let hw = t.child(t.root(), "hw").unwrap();
+    let bus = t.add_node(hw, Number::Auto, "bus", "").unwrap();
+    let info = t
+        .add_value(bus, Number::Auto, "info", "", Value::int(7))
+        .unwrap();
+    let h: NodeFn = alloc::sync::Arc::new(|rest: &[i32], out: &mut Vec<u8>| {
+        let [g, i] = rest else {
+            return Err(ReadError::Invalid);
+        };
+        if *i > 2 {
+            return Err(ReadError::NotFound);
+        }
+        out.extend_from_slice(&(g * 100 + i).to_ne_bytes());
+        Ok(())
+    });
+    let devices = t
+        .add_handler(bus, Number::Auto, "devices", "system device tree", h)
+        .unwrap();
+    let base = t.oid(devices).unwrap();
+    let mut oid = base.clone();
+    oid.extend([5, 2]);
+    let mut out = Vec::new();
+    t.read(&oid, &mut out).unwrap();
+    assert_eq!(out, 502i32.to_ne_bytes());
+    oid[base.len() + 1] = 3;
+    assert_eq!(t.read(&oid, &mut out), Err(ReadError::NotFound));
+    assert_eq!(t.read(&base, &mut out), Err(ReadError::Invalid));
+    // The kernel's path: the handler and its components.
+    let (_, rest) = t.handler(&oid).unwrap();
+    assert_eq!(rest, [5, 3]);
+    assert!(t.handler(&t.oid(info).unwrap()).is_none());
+    // Listed as a leaf, nothing under it.
+    assert_eq!(t.next(&t.oid(info).unwrap(), true), Some(base.clone()));
+    assert_eq!(t.format(&base).unwrap().1, "N");
+    assert_eq!(
+        t.add_node(devices, Number::Auto, "x", ""),
+        Err(AddError::NoParent)
+    );
+}

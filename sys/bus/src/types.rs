@@ -43,8 +43,10 @@ impl Matches<TestIdent> for TestId {
 /// What a bus knows about a child before any driver runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ident {
-    /// The platform root.
+    /// The root of the tree.
     Root,
+    /// A platform device with no bus address (`nexus0`, `apic0`).
+    Platform,
     /// An ACPI namespace device and its path (`\\_SB_.PCI0`).
     Acpi(AcpiIdent, String),
     /// A PCI function at an address, with its ACPI path if it has a
@@ -283,11 +285,21 @@ pub enum ResourceError {
 }
 
 impl Ident {
+    /// The node's ACPI namespace path, if it has one.
+    #[must_use]
+    pub fn acpi_path(&self) -> Option<&str> {
+        match self {
+            Self::Acpi(_, p) => Some(p),
+            Self::Pci(_, _, p) => p.as_deref(),
+            _ => None,
+        }
+    }
+
     /// FreeBSD's pnpinfo string for the node (DRIVER-MODEL.md §11.2).
     pub fn pnpinfo(&self, out: &mut String) {
         use devtree::strings;
         let _ = match self {
-            Self::Root => Ok(()),
+            Self::Root | Self::Platform => Ok(()),
             Self::Acpi(i, _) => strings::acpi_pnpinfo(out, i),
             Self::Pci(i, _, _) => strings::pci_pnpinfo(out, i),
             Self::Virtio(i) => strings::virtio_pnpinfo(out, i),
@@ -299,7 +311,7 @@ impl Ident {
     pub fn location(&self, out: &mut String) {
         use devtree::strings;
         let _ = match self {
-            Self::Root | Self::Virtio(_) => Ok(()),
+            Self::Root | Self::Platform | Self::Virtio(_) => Ok(()),
             Self::Acpi(_, path) => strings::acpi_location(out, path, None),
             Self::Pci(_, a, path) => strings::pci_location(out, a, path.as_deref(), None),
             Self::Test(_) => Ok(()),

@@ -25,6 +25,7 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -34,6 +35,11 @@ use abi::sysctl::{CTL_AUTO_START, CTL_MAXNAME, ctl, ctlflag, ctltype};
 pub type StrFn = Box<dyn Fn(&mut String) + Send + Sync>;
 /// Reads a value's raw bytes (for [`Value::Opaque`]).
 pub type BytesFn = Box<dyn Fn(&mut Vec<u8>) + Send + Sync>;
+/// A node handler: reads the value named by the OID components after the
+/// node (`hw.bus.devices.<generation>.<index>`). It is shared so the
+/// kernel can call it after dropping the tree's lock (see
+/// [`Tree::handler`]), as FreeBSD runs handlers.
+pub type NodeFn = Arc<dyn Fn(&[i32], &mut Vec<u8>) -> Result<(), ReadError> + Send + Sync>;
 
 /// What a leaf holds, read on demand. Integers are in native byte order,
 /// strings NUL-terminated, as FreeBSD returns them.
@@ -179,6 +185,8 @@ pub enum ReadError {
     NotFound,
     /// An interior node with no value (`EISDIR`).
     IsNode,
+    /// A handler rejected the trailing components (`EINVAL`).
+    Invalid,
 }
 
 struct Node {
@@ -189,6 +197,8 @@ struct Node {
     /// `CTLTYPE_*` plus `CTLFLAG_*`.
     kind: u32,
     value: Option<Value>,
+    /// For a node read through a handler.
+    handler: Option<NodeFn>,
     parent: Option<u32>,
     /// Children's slots, in increasing number.
     children: Vec<u32>,
@@ -236,6 +246,7 @@ impl Tree {
             description: String::new(),
             kind: ctltype::NODE | ctlflag::RD,
             value: None,
+            handler: None,
             parent: None,
             children: Vec::new(),
             next_auto: CTL_AUTO_START,
@@ -306,7 +317,7 @@ impl Tree {
     /// Adds a node under `parent`.
     pub fn add(&mut self, parent: NodeId, spec: Spec<'_>) -> Result<NodeId, AddError> {
         let p = self.node(parent).ok_or(AddError::NoParent)?;
-        if p.value.is_some() {
+        if p.value.is_some() || p.handler.is_some() {
             return Err(AddError::NoParent);
         }
         if spec.name.is_empty() || spec.name.contains('.') {
@@ -350,6 +361,7 @@ impl Tree {
             description: String::from(spec.description),
             kind,
             value: spec.value,
+            handler: None,
             parent: Some(parent.index),
             children: Vec::new(),
             next_auto: CTL_AUTO_START,
@@ -416,6 +428,40 @@ impl Tree {
                 value: Some(value),
             },
         )
+    }
+
+    /// Adds a node read through `handler`, which gets the OID components
+    /// after the node (FreeBSD's `SYSCTL_NODE` with a handler).
+    pub fn add_handler(
+        &mut self,
+        parent: NodeId,
+        number: Number,
+        name: &str,
+        description: &str,
+        handler: NodeFn,
+    ) -> Result<NodeId, AddError> {
+        let id = self.add_node(parent, number, name, description)?;
+        self.at_mut(id.index).handler = Some(handler);
+        Ok(id)
+    }
+
+    /// The handler serving `oid` and the components it is passed, if a
+    /// handler node is on the path: the kernel clones it under the lock
+    /// and calls it after releasing the lock.
+    #[must_use]
+    pub fn handler(&self, oid: &[i32]) -> Option<(NodeFn, Vec<i32>)> {
+        let mut cur = ROOT;
+        for (i, &n) in oid.iter().enumerate() {
+            cur = *self
+                .at(cur)
+                .children
+                .iter()
+                .find(|&&c| self.at(c).number == n)?;
+            if let Some(h) = &self.at(cur).handler {
+                return Some((Arc::clone(h), oid[i + 1..].to_vec()));
+            }
+        }
+        None
     }
 
     /// Removes a node and everything under it. Removing a stale id is a
@@ -528,7 +574,8 @@ impl Tree {
             // Prune subtrees that lie wholly before `after`.
             let before = path.as_slice() < after && !after.starts_with(path);
             if !before {
-                if n.value.is_some() && path.as_slice() > after {
+                // A handler node lists as a leaf, as in FreeBSD.
+                if (n.value.is_some() || n.handler.is_some()) && path.as_slice() > after {
                     return Some(path.clone());
                 }
                 if let Some(found) = self.next_under(c, path, after, honor_skip) {
@@ -554,8 +601,12 @@ impl Tree {
         Some(&self.node(self.lookup(oid)?)?.description)
     }
 
-    /// Appends the value at `oid` to `out`.
+    /// Appends the value at `oid` to `out`, calling a handler node's
+    /// handler in place (the kernel uses [`Tree::handler`] instead).
     pub fn read(&self, oid: &[i32], out: &mut Vec<u8>) -> Result<(), ReadError> {
+        if let Some((h, rest)) = self.handler(oid) {
+            return h(&rest, out);
+        }
         let id = self.lookup(oid).ok_or(ReadError::NotFound)?;
         let n = self.node(id).ok_or(ReadError::NotFound)?;
         let v = n.value.as_ref().ok_or(ReadError::IsNode)?;

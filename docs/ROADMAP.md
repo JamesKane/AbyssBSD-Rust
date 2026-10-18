@@ -190,7 +190,7 @@ P3.3 (from the start, pure crate) ────────┘   P3.8 ─┴─�
   question 2's answer: a failed attach frees the unit unless the devclass was fixed or
   `hw.bus.disable_failed_devices` is set, and a hint-disabled device keeps its unit. Running the
   ambiguity check over each build's driver table in `cargo xtask check` waits for that table
-  (P3.5).
+  (now P3.6).
 
 **P3.3 `lib/aml`** (pure, host-tested, fuzzed; runs in parallel with P3.0–P3.2).
 - Parser, namespace, and interpreter.
@@ -219,7 +219,7 @@ P3.3 (from the start, pure crate) ────────┘   P3.8 ─┴─�
   bounce). The GICv3 ITS and the PCI MSI/MSI-X domain move to P3.6, where PCI devices first exist
   to exercise them; the threaded-only GED domain comes with the ACPI bus in P3.6.
 
-**P3.5 Device manager (`sys/bus`).**
+**P3.5 Device manager (`sys/bus`).** Done 2026-10-18.
 - Node table with generational IDs, the lifecycle state machine, and the topology lock at a witness
   level.
 - Parallel attach workers (`abyss.bus.serial=1` forces one).
@@ -232,6 +232,21 @@ P3.3 (from the start, pure crate) ────────┘   P3.8 ─┴─�
 - Shutdown ordering.
 - Verifier mode with seeded fault injection.
 - Logic tested on the host against a fake bus.
+- As delivered: the node table, matching with decline and fallback, units chosen at match time,
+  dependency-graph gating (a named `Need` from attach becomes a graph edge), parallel attach
+  workers, the `Driver` trait with `DriverDecl` erasure for the build's driver table, bindings with
+  the grant ledger, `MmioGrant`/`IrqLine`/`DmaTag` grants, `Gate`, the binding serializer, the
+  detach protocol, and devctl `+`/`-`/`?` events. `hw.bus.info`, `hw.bus.devices` (read through
+  a new sysctl handler node, called outside the tree lock), `dev.<driver>.<unit>.%…`, and
+  `kern.abyss.bus.*`. The platform root is `root0 → nexus0` (plus `apic0` on amd64), as FreeBSD
+  shows it, through `Manager::adopt`. Interrupt controller and early-console ranges are refused to
+  drivers. Shutdown detaches consumers before suppliers; kernel-owned nodes stay. Verifier mode
+  (`abyss.verifier`, or `Manager::inject_faults`) fails grants from a seed. The manager needs the
+  scheduler, so instead of a host fake bus it is tested in ktests with a test bus and drivers that
+  decline, fail, wait on a slower sibling, and run under injected faults, with `abyss.bus.serial=1`
+  in the aarch64-el2 boot case. The ambiguity check over the driver table moves to P3.6, with the
+  first drivers that carry real PCI and ACPI IDs. Adopting the console UART and the timers as
+  devices comes with their drivers (P3.8).
 
 **P3.6 Buses.**
 - `sys/acpi`.

@@ -33,8 +33,10 @@ use sync::{Once, SpinLock};
 
 use crate::driver::{AttachCx, Bound, DriverDecl, Faults, Ledger};
 use crate::platform::Platform;
+use crate::sysctl::DeviceStrings;
 use crate::types::{
-    AttachError, DetachReason, DeviceId, Ident, NodeState, Resource, ResourceError, WaitReason,
+    AttachError, DetachReason, DeviceId, Ident, Need, NodeState, Resource, ResourceError,
+    WaitReason,
 };
 
 static TOPOLOGY: LockClass = LockClass::new("bus topology", 300);
@@ -49,11 +51,22 @@ struct Node {
     state: NodeState,
     /// The chosen driver (an index into the table).
     driver: Option<usize>,
+    /// The class of a device the kernel owns itself ([`Manager::adopt`]).
+    adopted: Option<&'static str>,
     unit: Option<u32>,
     desc: String,
     /// Drivers that declined this node.
     declined: Vec<usize>,
     binding: Option<Box<dyn Bound>>,
+    /// `dev.<driver>.<unit>`, while attached.
+    sysctl: Option<sysctl::NodeId>,
+}
+
+impl Node {
+    /// The devclass: the driver's name, or an adopted device's class.
+    fn class(&self, drivers: &[DriverDecl]) -> Option<&'static str> {
+        self.driver.map(|d| drivers[d].name).or(self.adopted)
+    }
 }
 
 struct Topology {
@@ -90,8 +103,8 @@ impl Topology {
         let Some(n) = self.nodes.get(index as usize).and_then(Option::as_ref) else {
             return String::new();
         };
-        match (n.driver, n.unit) {
-            (Some(d), Some(u)) => alloc::format!("{}{u}", drivers[d].name),
+        match (n.class(drivers), n.unit) {
+            (Some(c), Some(u)) => alloc::format!("{c}{u}"),
             _ if n.parent.is_none() => String::from("root0"),
             _ => String::new(),
         }
@@ -160,6 +173,7 @@ pub struct Options {
 ///
 /// If called twice, or if the workers cannot start.
 pub fn init(
+    s: &Sleepable,
     platform: &'static dyn Platform,
     drivers: &'static [DriverDecl],
     o: Options,
@@ -179,10 +193,12 @@ pub fn init(
         resources: Vec::new(),
         state: NodeState::Attached,
         driver: None,
+        adopted: None,
         unit: None,
         desc: String::from("System root bus"),
         declined: Vec::new(),
         binding: None,
+        sysctl: None,
     }));
     topo.graph.add_node(0);
     let faults = (o.fault_one_in > 0).then_some(Faults {
@@ -214,6 +230,7 @@ pub fn init(
             })
             .expect("bus attach worker");
     }
+    crate::sysctl::register(manager(), s, o.workers.max(1));
     manager().root()
 }
 
@@ -297,6 +314,75 @@ impl Manager {
         self.events.lock().drain(..).collect()
     }
 
+    /// Adds a device the kernel drives itself (the platform root, the
+    /// interrupt controllers it set up at boot) as an attached node of
+    /// class `class`, so the tree shows it as FreeBSD's does. It has no
+    /// binding and refuses a requested detach.
+    pub fn adopt(
+        &self,
+        s: &Sleepable,
+        parent: DeviceId,
+        class: &'static str,
+        desc: &str,
+        ident: Ident,
+    ) -> DeviceId {
+        let (id, unit, strings) = {
+            let mut t = self.topo.write(s);
+            let unit = t.units.alloc(class, None).unwrap_or(0);
+            let (index, generation) = t
+                .free
+                .pop()
+                .unwrap_or((u32::try_from(t.nodes.len()).expect("node count"), 0));
+            let node = Node {
+                generation,
+                parent: Some(parent.index),
+                children: Vec::new(),
+                ident,
+                bus_data: None,
+                resources: Vec::new(),
+                state: NodeState::Attached,
+                driver: None,
+                adopted: Some(class),
+                unit: Some(unit),
+                desc: String::from(desc),
+                declined: Vec::new(),
+                binding: None,
+                sysctl: None,
+            };
+            if index as usize == t.nodes.len() {
+                t.nodes.push(Some(node));
+            } else {
+                t.nodes[index as usize] = Some(node);
+            }
+            if let Some(p) = t.node_mut(parent) {
+                p.children.push(index);
+            }
+            t.graph.add_edge(Edge {
+                supplier: parent.index,
+                consumer: index,
+                kind: EdgeKind::Required,
+                origin: Origin::Tree,
+            });
+            let strings = DeviceStrings {
+                desc: String::from(desc),
+                driver: class,
+                parent: t.nameunit(self.drivers, parent.index),
+                ..DeviceStrings::default()
+            };
+            (DeviceId { index, generation }, unit, strings)
+        };
+        let node = crate::sysctl::add_device(self, s, unit, strings);
+        let mut t = self.topo.write(s);
+        if let Some(n) = t.node_mut(id) {
+            n.sysctl = node;
+        }
+        let line = self.device_line(&t, '+', &alloc::format!("{class}{unit}"), id.index);
+        drop(t);
+        self.event(line);
+        self.bump();
+        id
+    }
+
     /// Adds a child of `parent` and matches it. `deps` are firmware
     /// suppliers beyond the parent. The caller holds no manager lock.
     pub fn add_child(
@@ -318,10 +404,12 @@ impl Manager {
             resources,
             state: NodeState::NotPresent,
             driver: None,
+            adopted: None,
             unit: None,
             desc: String::new(),
             declined: Vec::new(),
             binding: None,
+            sysctl: None,
         };
         let (index, generation) = match t.free.pop() {
             Some((i, g)) => (i, g),
@@ -351,6 +439,24 @@ impl Manager {
             });
         }
         let id = DeviceId { index, generation };
+        // Nodes that asked for this one by firmware path can now wait on it.
+        if let Some(path) = t
+            .node(id)
+            .and_then(|n| n.ident.acpi_path())
+            .map(String::from)
+        {
+            let waiting: Vec<DeviceId> = (0..u32::try_from(t.nodes.len()).unwrap_or(u32::MAX))
+                .filter_map(|i| t.id(i))
+                .filter(|&w| {
+                    t.node(w).is_some_and(|n| {
+                        matches!(&n.state, NodeState::Waiting(WaitReason::Need(Need::Firmware(p))) if *p == path)
+                    })
+                })
+                .collect();
+            for w in waiting {
+                self.add_driver_edge(&mut t, id, w);
+            }
+        }
         self.match_node(&mut t, id);
         drop(t);
         self.bump();
@@ -433,7 +539,7 @@ impl Manager {
     /// Runs attach and start for `id`, which is `Attaching`.
     fn attach(&'static self, id: DeviceId, s: &Sleepable) {
         // Gather what attach needs without holding the lock across it.
-        let (decl_index, ident, resources, bus_data, unit) = {
+        let (decl_index, ident, resources, bus_data, unit, strings) = {
             let t = self.topo.read(s);
             let Some(n) = t.node(id) else {
                 return;
@@ -441,15 +547,28 @@ impl Manager {
             let (Some(d), Some(u)) = (n.driver, n.unit) else {
                 return;
             };
+            let mut strings = DeviceStrings {
+                desc: n.desc.clone(),
+                driver: self.drivers[d].name,
+                parent: t.nameunit(self.drivers, n.parent.unwrap_or(0)),
+                ..DeviceStrings::default()
+            };
+            n.ident.location(&mut strings.location);
+            n.ident.pnpinfo(&mut strings.pnpinfo);
             (
                 d,
                 n.ident.clone(),
                 n.resources.clone(),
                 n.bus_data.clone(),
                 u,
+                strings,
             )
         };
         let decl = self.drivers[decl_index];
+        // As in FreeBSD, the device's sysctl node exists during attach
+        // (drivers will add their own nodes under it) and goes if attach
+        // fails.
+        let node = crate::sysctl::add_device(self, s, unit, strings);
         let ledger = Arc::new(Ledger::default());
         let mut faults = self.faults.lock().take();
         let result = {
@@ -469,9 +588,15 @@ impl Manager {
         if let Some(f) = faults {
             *self.faults.lock() = Some(f);
         }
+        let drop_node = || {
+            if let Some(n) = node {
+                crate::sysctl::remove_device(self, s, n);
+            }
+        };
         let mut binding = match result {
             Ok(b) => b,
             Err(e) => {
+                drop_node();
                 self.attach_failed(id, decl_index, e, s);
                 return;
             }
@@ -479,6 +604,7 @@ impl Manager {
         if let Err(e) = binding.start(self, s) {
             let report = binding.detach(DetachReason::StartFailed, s);
             self.check_ledger(decl.name, unit, report.leaked_grants);
+            drop_node();
             self.attach_failed(id, decl_index, e, s);
             return;
         }
@@ -490,6 +616,7 @@ impl Manager {
         let line = self.device_line(&t, '+', &alloc::format!("{}{unit}", decl.name), id.index);
         if let Some(n) = t.node_mut(id) {
             n.binding = Some(binding);
+            n.sysctl = node;
             n.state = NodeState::Attached;
             self.platform.log(format_args!(
                 "{}{unit}: <{}> on {parent}",
@@ -504,7 +631,7 @@ impl Manager {
             };
             let ready = t.graph.missing(c, |i| t.attached(i)).is_empty();
             if let Some(n) = t.node_mut(cid)
-                && matches!(n.state, NodeState::Waiting(WaitReason::Suppliers(_)))
+                && matches!(n.state, NodeState::Waiting(_))
                 && ready
             {
                 n.state = NodeState::Attaching;
@@ -538,7 +665,13 @@ impl Manager {
                 // met.
                 n.driver = Some(decl_index);
                 n.unit = unit;
-                n.state = NodeState::Waiting(WaitReason::Need(need));
+                n.state = NodeState::Waiting(WaitReason::Need(need.clone()));
+                // A need that names a node becomes a graph edge, so the
+                // node is rechecked when its supplier attaches; a firmware
+                // path not in the tree yet is resolved in `add_child`.
+                if let Some(sup) = Self::resolve(&t, &need) {
+                    self.add_driver_edge(&mut t, sup, id);
+                }
             }
             other => {
                 self.platform.log(format_args!(
@@ -556,6 +689,41 @@ impl Manager {
         self.bump();
     }
 
+    /// The node a need names, if it is in the tree.
+    fn resolve(t: &Topology, need: &Need) -> Option<DeviceId> {
+        match need {
+            Need::Device(d) => t.node(*d).map(|_| *d),
+            Need::Firmware(path) => t
+                .nodes
+                .iter()
+                .enumerate()
+                .find(|(_, n)| {
+                    n.as_ref()
+                        .is_some_and(|n| n.ident.acpi_path() == Some(path))
+                })
+                .and_then(|(i, _)| t.id(u32::try_from(i).ok()?)),
+        }
+    }
+
+    /// Records that `consumer` needs `supplier`, queueing it at once if the
+    /// supplier is already attached.
+    fn add_driver_edge(&self, t: &mut Topology, supplier: DeviceId, consumer: DeviceId) {
+        t.graph.add_edge(Edge {
+            supplier: supplier.index,
+            consumer: consumer.index,
+            kind: EdgeKind::Required,
+            origin: Origin::Driver,
+        });
+        if t.graph
+            .missing(consumer.index, |i| t.attached(i))
+            .is_empty()
+            && let Some(n) = t.node_mut(consumer)
+        {
+            n.state = NodeState::Attaching;
+            self.queue(consumer);
+        }
+    }
+
     fn check_ledger(&self, name: &str, unit: u32, leaked: u32) {
         if leaked != 0 {
             self.platform.log(format_args!(
@@ -563,6 +731,21 @@ impl Manager {
             ));
             debug_assert_eq!(leaked, 0, "{name}{unit} leaked grants");
         }
+    }
+
+    /// Sets verifier-mode fault injection: one grant in `one_in` fails
+    /// (0 turns it off), from a generator seeded with `seed`.
+    pub fn inject_faults(&self, one_in: u64, seed: u64) {
+        *self.faults.lock() = (one_in > 0).then_some(Faults {
+            state: seed | 1,
+            one_in,
+        });
+    }
+
+    /// Memory ranges currently granted to drivers.
+    #[must_use]
+    pub fn claims(&self) -> usize {
+        self.claims.lock().len()
     }
 
     /// Waits until no attach is queued or running.
@@ -590,12 +773,13 @@ impl Manager {
                 return Err(DetachError::NotAttached);
             }
             if why == DetachReason::Requested
-                && n.binding.as_ref().is_some_and(|b| b.may_detach().is_err())
+                && (n.adopted.is_some()
+                    || n.binding.as_ref().is_some_and(|b| b.may_detach().is_err()))
             {
                 return Err(DetachError::Busy);
             }
             let unit = n.unit.unwrap_or(0);
-            let name = n.driver.map_or("", |d| self.drivers[d].name);
+            let name = n.class(self.drivers).unwrap_or("");
             let mut children: Vec<DeviceId> = n.children.iter().filter_map(|&c| t.id(c)).collect();
             let n = t.node_mut(id).expect("checked above");
             n.state = NodeState::Detaching(why);
@@ -631,13 +815,18 @@ impl Manager {
         let line = t
             .node(id)
             .map(|_| self.device_line(&t, '-', &alloc::format!("{name}{unit}"), id.index));
+        let mut node = None;
         if let Some(n) = t.node_mut(id) {
             n.state = NodeState::NotPresent;
             n.driver = None;
             n.unit = None;
+            node = n.sysctl.take();
         }
         t.units.release(name, unit);
         drop(t);
+        if let Some(n) = node {
+            crate::sysctl::remove_device(self, s, n);
+        }
         if let Some(l) = line {
             self.event(l);
         }
@@ -662,8 +851,8 @@ impl Manager {
             let children: Vec<DeviceId> = n.children.iter().filter_map(|&c| t.id(c)).collect();
             stack.extend(children);
             let parent = n.parent;
-            if let (Some(d), Some(u)) = (n.driver, n.unit) {
-                t.units.release(self.drivers[d].name, u);
+            if let (Some(c), Some(u)) = (n.class(self.drivers), n.unit) {
+                t.units.release(c, u);
             }
             if let Some(p) = parent.and_then(|p| t.id(p))
                 && let Some(pn) = t.node_mut(p)
@@ -689,12 +878,65 @@ impl Manager {
                 .unwrap_or_default()
                 .into_iter()
                 .filter(|&i| i != 0 && t.attached(i))
+                // Adopted devices are the kernel's: they outlive the drivers.
+                .filter(|&i| {
+                    t.nodes[i as usize]
+                        .as_ref()
+                        .is_some_and(|n| n.adopted.is_none())
+                })
                 .filter_map(|i| t.id(i))
                 .collect()
         };
         for id in order {
             let _ = self.detach(id, DetachReason::Shutdown, s);
         }
+    }
+
+    /// The `index`th device's `hw.bus.devices` record, in node-table
+    /// order (any order serves: `devinfo` links records by handle).
+    pub(crate) fn udevice(&self, s: &Sleepable, index: usize) -> Option<abi::bus::UDevice> {
+        use abi::bus::{df, ds};
+        use devtree::udevice::{Fields, encode};
+        let t = self.topo.read(s);
+        let (i, n) = t
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, n)| Some((i, n.as_ref()?)))
+            .nth(index)?;
+        let i = u32::try_from(i).ok()?;
+        let handle = |i: u32| {
+            t.nodes[i as usize].as_ref().map_or(0, |n| {
+                (usize::try_from(n.generation).unwrap_or(0) << 32) | (i as usize + 1)
+            })
+        };
+        let root = n.parent.is_none();
+        let nameunit = t.nameunit(self.drivers, i);
+        let driver = match n.class(self.drivers) {
+            Some(c) => c,
+            None if root => "root",
+            None => "",
+        };
+        let (mut loc, mut pnp) = (String::new(), String::new());
+        n.ident.location(&mut loc);
+        n.ident.pnpinfo(&mut pnp);
+        let state = if root {
+            ds::ATTACHED
+        } else {
+            n.state.freebsd()
+        };
+        let mut flags = df::ENABLED;
+        if state == ds::ATTACHED {
+            flags |= df::ATTACHED_ONCE;
+        }
+        let f = Fields {
+            nameunit: &nameunit,
+            desc: &n.desc,
+            driver,
+            pnpinfo: &pnp,
+            location: &loc,
+        };
+        encode(handle(i), n.parent.map_or(0, handle), 0, flags, state, &f).ok()
     }
 
     /// The state of `id`.

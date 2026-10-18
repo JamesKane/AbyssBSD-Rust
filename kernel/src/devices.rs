@@ -59,6 +59,15 @@ impl Platform for KernelPlatform {
 
 static PLATFORM: KernelPlatform = KernelPlatform;
 
+/// `nexus0`, the platform root firmware buses attach under.
+static NEXUS: sync::Once<bus::DeviceId> = sync::Once::new();
+
+/// `nexus0`.
+#[cfg_attr(not(feature = "ktest"), allow(dead_code))]
+pub(crate) fn nexus() -> bus::DeviceId {
+    *NEXUS.get().expect("devices::init")
+}
+
 /// The drivers this build includes (DRIVER-MODEL.md §7.1): reviewable code
 /// rather than linker sections. Real buses and drivers arrive in P3.6 and
 /// P3.7; ktest builds add the manager's test drivers.
@@ -73,17 +82,43 @@ static DRIVERS: &[DriverDecl] = &[
     crate::tests::bus_test::FALLBACK,
     #[cfg(feature = "ktest")]
     crate::tests::bus_test::BROKEN,
+    #[cfg(feature = "ktest")]
+    crate::tests::bus_test::SLOW,
+    #[cfg(feature = "ktest")]
+    crate::tests::bus_test::NEEDY,
 ];
 
+/// Keeps drivers off the devices the console took over from the loader;
+/// their real drivers will adopt them explicitly (P3.8).
+fn reserve_boot_devices() {
+    let info = crate::boot::info();
+    let mut r = SENSITIVE.lock();
+    if let Some(bootproto::Serial::Ns16550Mmio(m) | bootproto::Serial::Pl011(m)) = info.serial.get()
+    {
+        r.push((m.phys.get(), m.size.max(4096)));
+    }
+    if let Some(f) = info.framebuffer.get() {
+        r.push((f.phys.get(), f.size));
+    }
+}
+
+/// Detaches every device, consumers before suppliers, so none is still
+/// doing DMA when firmware takes over.
+pub(crate) fn shutdown(s: &Sleepable) {
+    bus::manager().shutdown(s);
+}
+
 /// Starts the device manager. Call once, after the other CPUs are up.
-pub(crate) fn init() {
+pub(crate) fn init(s: &Sleepable) {
+    reserve_boot_devices();
     let workers = if crate::boot::flag("abyss.bus.serial") {
         1
     } else {
         sched::online_cpus().clamp(1, 4)
     };
     let verifier = crate::boot::flag("abyss.verifier");
-    bus::init(
+    let root = bus::init(
+        s,
         &PLATFORM,
         DRIVERS,
         bus::Options {
@@ -92,6 +127,13 @@ pub(crate) fn init() {
             fault_seed: crate::time::counter(),
         },
     );
+    // The platform root, and the devices the kernel set up itself, as
+    // FreeBSD's tree shows them.
+    let m = bus::manager();
+    let nexus = m.adopt(s, root, "nexus", "", bus::Ident::Platform);
+    #[cfg(target_arch = "x86_64")]
+    m.adopt(s, nexus, "apic", "APIC resources", bus::Ident::Platform);
+    let _ = NEXUS.set(nexus);
     kprintln!(
         "bus: device manager up, {} driver(s), {workers} attach worker(s){}",
         DRIVERS.len(),

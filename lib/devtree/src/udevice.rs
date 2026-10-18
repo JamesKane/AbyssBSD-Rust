@@ -70,6 +70,24 @@ pub fn fields(d: &UDevice) -> [&[u8]; 5] {
     out
 }
 
+/// The record's bytes as `struct u_device` lays them out, padding zeroed.
+pub fn to_bytes(d: &UDevice, out: &mut alloc::vec::Vec<u8>) {
+    use core::mem::{offset_of, size_of};
+    let base = out.len();
+    out.resize(base + size_of::<UDevice>(), 0);
+    let o = &mut out[base..];
+    let mut put = |at: usize, b: &[u8]| o[at..at + b.len()].copy_from_slice(b);
+    put(offset_of!(UDevice, dv_handle), &d.dv_handle.to_ne_bytes());
+    put(offset_of!(UDevice, dv_parent), &d.dv_parent.to_ne_bytes());
+    put(
+        offset_of!(UDevice, dv_devflags),
+        &d.dv_devflags.to_ne_bytes(),
+    );
+    put(offset_of!(UDevice, dv_flags), &d.dv_flags.to_ne_bytes());
+    put(offset_of!(UDevice, dv_state), &d.dv_state.to_ne_bytes());
+    put(offset_of!(UDevice, dv_fields), &d.dv_fields);
+}
+
 #[cfg(test)]
 mod tests {
     use abi::bus::{df, ds};
@@ -94,6 +112,26 @@ mod tests {
         let used: usize = got.iter().map(|g| g.len() + 1).sum();
         assert!(d.dv_fields[used..].iter().all(|&b| b == 0));
         assert_eq!(d.dv_fields[f.nameunit.len() + 1 + f.desc.len()], 0);
+    }
+
+    #[test]
+    fn bytes_follow_the_layout() {
+        let f = Fields {
+            nameunit: "nvme0",
+            ..Fields::default()
+        };
+        let d = encode(0x1122, 7, 0, 1, 30, &f).unwrap();
+        let mut out = alloc::vec![0xee];
+        to_bytes(&d, &mut out);
+        assert_eq!(out.len(), 1 + size_of::<UDevice>());
+        let b = &out[1..];
+        assert_eq!(b[..8], 0x1122usize.to_ne_bytes());
+        assert_eq!(b[8..16], 7usize.to_ne_bytes());
+        assert_eq!(b[20..22], 1u16.to_ne_bytes());
+        // dv_flags is followed by two padding bytes, zeroed.
+        assert_eq!(b[22..24], [0, 0]);
+        assert_eq!(b[24..28], 30i32.to_ne_bytes());
+        assert_eq!(&b[28..34], b"nvme0\0");
     }
 
     #[test]

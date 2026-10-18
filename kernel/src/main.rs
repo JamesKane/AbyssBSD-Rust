@@ -88,7 +88,7 @@ fn kmain(boot_info: PhysAddr) -> ! {
     let s = unsafe { sched::Sleepable::assume() };
     smp::start_cpus();
     topology::summarize();
-    devices::init();
+    devices::init(&s);
 
     #[cfg(feature = "ktest")]
     tests::run(&s);
@@ -107,22 +107,29 @@ fn kmain(boot_info: PhysAddr) -> ! {
         if let Some(secs) = boot::value("abyss.stress").and_then(|v| v.parse().ok()) {
             let passed = stress::run(&s, secs);
             qemu::exit(passed);
-            firmware::reset(efi::ResetKind::Shutdown)
+            power_off(&s)
         }
         if boot::flag("abyss.acpidump") {
             acpi::dump();
-            firmware::reset(efi::ResetKind::Shutdown)
+            power_off(&s)
         }
         if let Some(suite) = boot::value("abyss.bench") {
             let ran = bench::run(&s, suite);
             qemu::exit(ran);
-            firmware::reset(efi::ResetKind::Shutdown)
+            power_off(&s)
         }
         if boot::flag("abyss.halt") {
             kprintln!("Phase 1 kernel: nothing more to do yet. Halted (abyss.halt).");
             arch::cpu::halt_forever();
         }
         kprintln!("Phase 1 kernel: nothing more to do yet. Powering off.");
-        firmware::reset(efi::ResetKind::Shutdown)
+        power_off(&s)
     }
+}
+
+/// Stops the devices, then powers off through firmware.
+#[cfg_attr(feature = "ktest", allow(dead_code))]
+fn power_off(s: &sched::Sleepable) -> ! {
+    devices::shutdown(s);
+    firmware::reset(efi::ResetKind::Shutdown)
 }

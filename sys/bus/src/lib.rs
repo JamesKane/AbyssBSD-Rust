@@ -21,6 +21,7 @@ pub mod driver;
 pub mod gate;
 pub mod manager;
 pub mod platform;
+mod sysctl;
 pub mod types;
 
 pub use driver::{

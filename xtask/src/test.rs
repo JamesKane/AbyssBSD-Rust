@@ -138,6 +138,8 @@ struct BootCase {
     /// Boot twice through a warm reset and check that the loader saved the
     /// first boot's log to the ESP.
     warm_reset: bool,
+    /// Extra kernel command line options.
+    cmdline: &'static str,
     /// QEMU's exit status when the kernel reports a pass.
     pass_status: i32,
 }
@@ -149,6 +151,7 @@ const BOOT_CASES: &[BootCase] = &[
         arch: Arch::X86_64,
         el2: false,
         warm_reset: false,
+        cmdline: "",
         // isa-debug-exit: (0x10 << 1) | 1.
         pass_status: 33,
     },
@@ -158,6 +161,7 @@ const BOOT_CASES: &[BootCase] = &[
         arch: Arch::Aarch64,
         el2: false,
         warm_reset: false,
+        cmdline: "",
         pass_status: 0,
     },
     BootCase {
@@ -166,6 +170,8 @@ const BOOT_CASES: &[BootCase] = &[
         arch: Arch::Aarch64,
         el2: true,
         warm_reset: false,
+        // One attach worker here, many elsewhere.
+        cmdline: "abyss.bus.serial=1",
         pass_status: 0,
     },
     BootCase {
@@ -174,6 +180,7 @@ const BOOT_CASES: &[BootCase] = &[
         arch: Arch::Aarch64,
         el2: false,
         warm_reset: true,
+        cmdline: "",
         pass_status: 0,
     },
     BootCase {
@@ -182,6 +189,7 @@ const BOOT_CASES: &[BootCase] = &[
         arch: Arch::X86_64,
         el2: false,
         warm_reset: true,
+        cmdline: "",
         pass_status: 33,
     },
     BootCase {
@@ -191,6 +199,7 @@ const BOOT_CASES: &[BootCase] = &[
         el2: false,
         warm_reset: false,
         // bhyve's status when the guest powers off.
+        cmdline: "",
         pass_status: 1,
     },
 ];
@@ -211,11 +220,13 @@ const FAULT_REPORT: &[&str] = &[
 
 fn boot(case: &BootCase, release: bool, verbose: bool) -> Result<std::result::Result<(), String>> {
     // bhyve has no exit device: the kernel powers off after a pass.
-    let cmdline = match (case.vmm, case.warm_reset) {
+    let base = match (case.vmm, case.warm_reset) {
         (Vmm::Bhyve, _) => "",
         (Vmm::Qemu, true) => "abyss.qemu_exit=1 abyss.test.warm_reset=1",
         (Vmm::Qemu, false) => "abyss.qemu_exit=1",
     };
+    let cmdline = format!("{base} {}", case.cmdline);
+    let cmdline = cmdline.trim();
     let disk = image::build(
         case.arch,
         build::Options {

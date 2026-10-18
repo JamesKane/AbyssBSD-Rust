@@ -963,9 +963,24 @@ pub(crate) mod bus_test {
             }
             cx.add_child(Ident::Test(TestIdent { model: 4 }), None, vec![]);
             cx.add_child(Ident::Test(TestIdent { model: 5 }), None, vec![]);
+            let slow = cx.add_child(Ident::Test(TestIdent { model: 7 }), None, vec![]);
+            cx.add_child(
+                Ident::Test(TestIdent { model: 6 }),
+                Some(alloc::sync::Arc::new(slow)),
+                vec![],
+            );
             Ok(())
         }
-        fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
+        fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {
+            // Children stop before their bus.
+            for page in &PAGES {
+                let pa = addr::PhysAddr::new(page.load(Ordering::Relaxed));
+                let va = bootproto::layout::dmap(pa).unwrap().get() as *const u32;
+                // SAFETY: the test's RAM page, through the direct map.
+                let word = unsafe { va.read_volatile() };
+                assert_eq!(word, 0x5709, "a child outlived its bus's stop");
+            }
+        }
     }
 
     pub(crate) struct TestDev {
@@ -1045,6 +1060,54 @@ pub(crate) mod bus_test {
         fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
     }
 
+    /// Takes a while to attach (model 7).
+    pub(crate) struct Slow;
+
+    impl Driver for Slow {
+        const NAME: &'static str = "slow";
+        const IDS: Ids = Ids::Test(&[TestId {
+            model: 7,
+            rank: Rank::DEFAULT,
+        }]);
+        fn describe(_: &Ident) -> String {
+            "Slow".into()
+        }
+        fn attach(cx: &mut AttachCx<'_>) -> Result<Self, AttachError> {
+            crate::time::sleep_ns(cx.sleepable(), 20_000_000);
+            Ok(Self)
+        }
+        fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
+    }
+
+    /// Needs the slow device (named by its bus data) attached first, and
+    /// says so rather than failing (model 6).
+    pub(crate) struct Needy;
+
+    /// How many times `Needy::attach` ran.
+    pub(crate) static NEEDY_TRIES: AtomicU64 = AtomicU64::new(0);
+
+    impl Driver for Needy {
+        const NAME: &'static str = "needy";
+        const IDS: Ids = Ids::Test(&[TestId {
+            model: 6,
+            rank: Rank::DEFAULT,
+        }]);
+        fn describe(_: &Ident) -> String {
+            "Needy".into()
+        }
+        fn attach(cx: &mut AttachCx<'_>) -> Result<Self, AttachError> {
+            NEEDY_TRIES.fetch_add(1, Ordering::Relaxed);
+            let sup = *cx.bus_data::<bus::DeviceId>().expect("supplier id");
+            if bus::manager().state(sup, cx.sleepable()) != Some(bus::NodeState::Attached) {
+                return Err(AttachError::Wait(bus::Need::Device(sup)));
+            }
+            Ok(Self)
+        }
+        fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
+    }
+
+    pub(crate) const SLOW: DriverDecl = DriverDecl::of::<Slow>();
+    pub(crate) const NEEDY: DriverDecl = DriverDecl::of::<Needy>();
     pub(crate) const TEST_BUS: DriverDecl = DriverDecl::of::<TestBus>();
     pub(crate) const TEST_DEV: DriverDecl = DriverDecl::of::<TestDev>();
     pub(crate) const PICKY: DriverDecl = DriverDecl::of::<Picky>();
@@ -1075,7 +1138,7 @@ ktest! {
             m.wait_idle(&s);
             let snap = m.snapshot(&s);
             let names: alloc::vec::Vec<&str> = snap.iter().map(|n| n.2.as_str()).collect();
-            for want in ["testbus0", "testdev0", "testdev1", "fallback0"] {
+            for want in ["testbus0", "testdev0", "testdev1", "fallback0", "slow0", "needy0"] {
                 assert!(names.contains(&want), "round {round}: {want} missing from {names:?}");
             }
             assert!(!names.contains(&"picky0"), "the declining driver keeps no unit");
@@ -1087,6 +1150,8 @@ ktest! {
             written.sort_unstable();
             assert_eq!(written, [0xabcd_0000, 0xabcd_0001]);
 
+            check_bus_sysctls(&s);
+
             let events = m.take_events();
             assert!(events.iter().any(|e| e.starts_with("+testbus0 at  model=1 on root0")), "{events:?}");
             assert!(events.iter().any(|e| e.starts_with("+testdev1 at  model=2 on testbus0")), "{events:?}");
@@ -1097,12 +1162,167 @@ ktest! {
             assert_eq!(word(pages[0]), 0x5709, "stop ran before the unmap");
             let after: alloc::vec::Vec<alloc::string::String> =
                 m.snapshot(&s).into_iter().map(|n| n.2).collect();
-            assert!(!after.iter().any(|n| n.starts_with("testdev") || n.starts_with("fallback")), "{after:?}");
+            assert!(!after.iter().any(|n| n.starts_with("testdev") || n.starts_with("fallback") || n.starts_with("needy")), "{after:?}");
             let events = m.take_events();
             assert!(events.iter().any(|e| e.starts_with("-testdev0 at ")), "{events:?}");
             assert!(events.iter().any(|e| e.starts_with("-testbus0 at ")), "{events:?}");
             assert_eq!(m.state(tb, &s), Some(NodeState::NotPresent));
+            let gone = crate::sysctl::read(&s, |t| t.name2oid("dev.testdev.0"));
+            assert!(gone.is_none(), "detach removes dev.testdev.0");
         }
+        for pa in pages {
+            crate::mm::free_pages(pa, vm::Order::ZERO);
+        }
+    }
+}
+
+/// `devinfo`'s view (hw.bus.info, hw.bus.devices) and `dev.*` match the
+/// tree.
+fn check_bus_sysctls(s: &sched::Sleepable) {
+    use abi::bus::{UDevice, ds};
+    let read = |oid: &[i32]| {
+        let mut out = alloc::vec::Vec::new();
+        crate::sysctl::read_oid(s, oid, &mut out).map(|()| out)
+    };
+    let oid = |name: &str| {
+        crate::sysctl::read(s, |t| t.name2oid(name)).unwrap_or_else(|| panic!("{name}"))
+    };
+    let text = |name: &str| {
+        let v = read(&oid(name)).unwrap();
+        alloc::string::String::from_utf8(v[..v.len() - 1].to_vec()).unwrap()
+    };
+    assert_eq!(text("dev.nexus.0.%parent"), "root0");
+    assert_eq!(text("dev.nexus.0.%driver"), "nexus");
+    #[cfg(target_arch = "x86_64")]
+    assert_eq!(text("dev.apic.0.%desc"), "APIC resources");
+    let m = bus::manager();
+    assert_eq!(
+        m.nameunit(crate::devices::nexus(), s).as_deref(),
+        Some("nexus0")
+    );
+    assert_eq!(
+        m.detach(crate::devices::nexus(), bus::DetachReason::Requested, s),
+        Err(bus::DetachError::Busy),
+        "the platform root refuses a requested detach"
+    );
+    assert_eq!(text("dev.testdev.1.%parent"), "testbus0");
+    assert_eq!(text("dev.testdev.1.%driver"), "testdev");
+    assert_eq!(text("dev.testdev.1.%desc"), "Test device");
+    assert_eq!(text("dev.testdev.1.%pnpinfo"), "model=2");
+    assert!(
+        crate::sysctl::read(s, |t| t.name2oid("dev.broken.0")).is_none(),
+        "failed attach leaves no node"
+    );
+
+    let info = read(&oid("hw.bus.info")).unwrap();
+    assert_eq!(info.len(), 8);
+    let generation = i32::from_ne_bytes(info[4..8].try_into().unwrap());
+    let devices = oid("hw.bus.devices");
+    let mut names = alloc::vec::Vec::new();
+    let mut root_handle = 0;
+    for index in 0.. {
+        let mut o = devices.clone();
+        o.extend([generation, index]);
+        match read(&o) {
+            Ok(b) => {
+                assert_eq!(b.len(), size_of::<UDevice>());
+                let handle = usize::from_ne_bytes(b[..8].try_into().unwrap());
+                let parent = usize::from_ne_bytes(b[8..16].try_into().unwrap());
+                let state = i32::from_ne_bytes(b[24..28].try_into().unwrap());
+                let name: alloc::vec::Vec<u8> =
+                    b[28..].iter().copied().take_while(|&c| c != 0).collect();
+                let name = alloc::string::String::from_utf8(name).unwrap();
+                if parent == 0 {
+                    assert_eq!(name, "root0");
+                    root_handle = handle;
+                }
+                if name == "testbus0" {
+                    assert_eq!(parent, root_handle);
+                    assert_eq!(state, ds::ATTACHED);
+                }
+                names.push(name);
+            }
+            Err(sysctl::ReadError::NotFound) => break,
+            Err(e) => panic!("hw.bus.devices.{generation}.{index}: {e:?}"),
+        }
+    }
+    for want in [
+        "root0", "nexus0", "testbus0", "testdev0", "testdev1", "needy0",
+    ] {
+        assert!(names.iter().any(|n| n == want), "{want} not in {names:?}");
+    }
+    // A stale generation is refused, as devinfo expects.
+    let mut o = devices.clone();
+    o.extend([generation.wrapping_sub(1), 0]);
+    assert_eq!(read(&o), Err(sysctl::ReadError::Invalid));
+}
+
+ktest! {
+    fn device_shutdown_order() {
+        use bus::{Ident, NodeState, TestIdent};
+        let s = cx();
+        let m = bus::manager();
+        let pages: alloc::vec::Vec<addr::PhysAddr> =
+            (0..2).map(|_| crate::mm::alloc_pages(vm::Order::ZERO).expect("page")).collect();
+        for (slot, pa) in bus_test::PAGES.iter().zip(&pages) {
+            slot.store(pa.get(), Ordering::Relaxed);
+        }
+        let tb = m.add_child(&s, m.root(), Ident::Test(TestIdent { model: 1 }), None, alloc::vec![], &[]);
+        m.wait_idle(&s);
+        assert_eq!(m.state(tb, &s), Some(NodeState::Attached));
+        // TestBus::stop checks its children were stopped first.
+        crate::devices::shutdown(&s);
+        assert_eq!(m.state(tb, &s), Some(NodeState::NotPresent));
+        assert_eq!(m.state(crate::devices::nexus(), &s), Some(NodeState::Attached), "kernel-owned devices stay");
+        let attached: alloc::vec::Vec<_> = m
+            .snapshot(&s)
+            .into_iter()
+            .filter(|n| n.0 != m.root() && n.4 == NodeState::Attached)
+            .filter(|n| !matches!(n.2.as_str(), "nexus0" | "apic0"))
+            .map(|n| n.2)
+            .collect();
+        assert!(attached.is_empty(), "still attached after shutdown: {attached:?}");
+        let _ = m.take_events();
+        for pa in pages {
+            crate::mm::free_pages(pa, vm::Order::ZERO);
+        }
+    }
+}
+
+ktest! {
+    fn device_attach_fault_injection() {
+        use bus::{DetachReason, Ident, NodeState, TestIdent};
+        let s = cx();
+        let m = bus::manager();
+        let pages: alloc::vec::Vec<addr::PhysAddr> =
+            (0..2).map(|_| crate::mm::alloc_pages(vm::Order::ZERO).expect("page")).collect();
+        for (slot, pa) in bus_test::PAGES.iter().zip(&pages) {
+            slot.store(pa.get(), Ordering::Relaxed);
+        }
+        let claims = m.claims();
+        // Every other grant fails, with varying seeds: attach error paths
+        // must give back what they claimed (the ledger check asserts it
+        // per detach) and free their units.
+        for seed in 1..=8 {
+            m.inject_faults(2, seed);
+            let tb = m.add_child(&s, m.root(), Ident::Test(TestIdent { model: 1 }), None, alloc::vec![], &[]);
+            m.wait_idle(&s);
+            if m.state(tb, &s) == Some(NodeState::Attached) {
+                m.detach(tb, DetachReason::Requested, &s).expect("detach");
+            }
+            m.inject_faults(0, 0);
+            assert_eq!(m.claims(), claims, "seed {seed}: a failed attach kept a claim");
+        }
+        // With faults off, units start from 0 again: none leaked.
+        let tb = m.add_child(&s, m.root(), Ident::Test(TestIdent { model: 1 }), None, alloc::vec![], &[]);
+        m.wait_idle(&s);
+        let names: alloc::vec::Vec<_> = m.snapshot(&s).into_iter().map(|n| n.2).collect();
+        for want in ["testdev0", "testdev1", "needy0"] {
+            assert!(names.iter().any(|n| n == want), "{want} missing: {names:?}");
+        }
+        m.detach(tb, DetachReason::Requested, &s).expect("detach");
+        assert_eq!(m.claims(), claims);
+        let _ = m.take_events();
         for pa in pages {
             crate::mm::free_pages(pa, vm::Order::ZERO);
         }
