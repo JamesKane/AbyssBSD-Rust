@@ -199,7 +199,9 @@ version = "0.0.0"
 name = "pci"
 version = "0.0.0"
 dependencies = [
+ "bus",
  "devtree",
+ "irq",
 ]
 
 [[package]]

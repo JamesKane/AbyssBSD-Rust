@@ -6,7 +6,9 @@
 //! - [`header`]: identity and header fields of a function.
 //! - [`bar`]: sizing and decoding base address registers.
 //! - [`caps`]: the standard and extended capability lists.
-//! - [`enumerate`]: the depth-first walk of a host bridge's buses.
+//! - [`enumerate`]: scanning a bus, and the depth-first walk of a host
+//!   bridge's buses.
+//! - [`bus`]: the `pci` bus driver.
 //!
 //! Everything read from a device is untrusted: lists are walked with
 //! bounds, BARs are validated, and a function reading all-ones is absent.
@@ -24,6 +26,7 @@
 extern crate alloc;
 
 pub mod bar;
+pub mod bus;
 pub mod caps;
 pub mod config;
 pub mod enumerate;
@@ -33,7 +36,7 @@ pub use bar::{Bar, BarError, BarKind};
 pub use caps::{Capability, ExtCapability};
 pub use config::{ConfigSpace, Ecam};
 pub use devtree::strings::PciAddress;
-pub use enumerate::{Function, enumerate};
+pub use enumerate::{Function, enumerate, scan};
 
 #[cfg(test)]
 mod tests;

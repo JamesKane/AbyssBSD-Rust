@@ -6,7 +6,9 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+bus = { path = "../bus" }
 devtree = { path = "../../lib/devtree" }
+irq = { path = "../irq" }
 
 [lints]
 workspace = true

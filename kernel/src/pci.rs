@@ -56,10 +56,9 @@ pub(crate) fn windows() -> &'static [Ecam] {
 }
 
 /// The window serving `a`.
-#[cfg_attr(not(feature = "ktest"), allow(dead_code))]
-pub(crate) fn config_for(a: PciAddress) -> Option<&'static dyn ConfigSpace> {
+pub(crate) fn config_for(a: PciAddress) -> Option<&'static (dyn ConfigSpace + Sync)> {
     windows()
         .iter()
         .find(|w| w.segment() == a.domain && w.buses().contains(&a.bus))
-        .map(|w| w as &dyn ConfigSpace)
+        .map(|w| w as &(dyn ConfigSpace + Sync))
 }

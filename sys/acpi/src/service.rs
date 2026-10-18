@@ -94,6 +94,9 @@ pub fn init(ops: &'static dyn Ops, s: &Sleepable) -> Option<LoadSummary> {
             }
         }
         sum.init_errors = interp.initialize(host).len();
+        // Interrupts are routed through the APIC or GIC, not the 8259
+        // (`_PIC(1)`, as FreeBSD tells firmware); absent on most arm64.
+        let _ = interp.evaluate_path("\\_PIC", alloc::vec![aml::Value::Integer(1)], host);
         sum.nodes = interp.node_count();
         sum
     }))

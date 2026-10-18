@@ -8,6 +8,7 @@
 //!   deeply on some firmware, so it runs on its own large stack, and every
 //!   evaluation is a job sent to it.
 //! - [`bus`]: the `acpi` bus driver.
+//! - [`pcib`]: the ACPI host-PCI bridge.
 //!
 //! Behavior reference: sys/dev/acpica/acpi.c.
 
@@ -18,9 +19,11 @@ extern crate alloc;
 
 pub mod bus;
 mod host;
+pub mod pcib;
 pub mod service;
 
 pub use bus::{AcpiBus, AcpiDevice, DRIVER};
+pub use pcib::{AcpiPcib, PCIB};
 pub use service::{LoadSummary, init, service};
 
 use alloc::vec::Vec;
@@ -36,7 +39,7 @@ pub trait Ops: Sync {
     /// Writes `bytes` to an I/O port (x86 only).
     fn io_write(&self, port: u16, bytes: u8, v: u32) -> Option<()>;
     /// The configuration space serving `a`.
-    fn pci_config(&self, a: pci::PciAddress) -> Option<&'static dyn pci::ConfigSpace>;
+    fn pci_config(&self, a: pci::PciAddress) -> Option<&'static (dyn pci::ConfigSpace + Sync)>;
     /// Sleeps for `ms` milliseconds.
     fn sleep_ms(&self, s: &sched::Sleepable, ms: u64);
     /// Busy-waits for `us` microseconds.

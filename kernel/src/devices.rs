@@ -73,6 +73,8 @@ pub(crate) fn nexus() -> bus::DeviceId {
 /// P3.7; ktest builds add the manager's test drivers.
 static DRIVERS: &[DriverDecl] = &[
     acpi::DRIVER,
+    acpi::PCIB,
+    pci::bus::DRIVER,
     #[cfg(feature = "ktest")]
     crate::tests::bus_test::TEST_BUS,
     #[cfg(feature = "ktest")]

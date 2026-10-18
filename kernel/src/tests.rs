@@ -1479,3 +1479,52 @@ ktest! {
         }
     }
 }
+
+ktest! {
+    fn pci_bus_children() {
+        use bus::Ident;
+        let s = cx();
+        let m = bus::manager();
+        let named = |parent, name: &str| {
+            m.children(parent, &s)
+                .into_iter()
+                .find(|&c| m.nameunit(c, &s).as_deref() == Some(name))
+                .unwrap_or_else(|| panic!("{name} missing"))
+        };
+        let acpi0 = named(crate::devices::nexus(), "acpi0");
+        let pcib0 = named(acpi0, "pcib0");
+        assert_eq!(m.description(pcib0, &s).as_deref(), Some("ACPI Host-PCI bridge"));
+        let pci0 = named(pcib0, "pci0");
+        assert_eq!(m.description(pci0, &s).as_deref(), Some("ACPI PCI bus"));
+        let mut lines = alloc::vec::Vec::new();
+        let mut virtio = 0;
+        for c in m.children(pci0, &s) {
+            let Some(ident @ Ident::Pci(i, ..)) = m.ident(c, &s) else {
+                panic!("a non-PCI child of pci0");
+            };
+            let mut line = alloc::string::String::new();
+            ident.pnpinfo(&mut line);
+            line.push_str(" at ");
+            ident.location(&mut line);
+            kprintln!("pci0: {line}");
+            virtio += usize::from(i.vendor == 0x1af4);
+            lines.push(line);
+        }
+        assert!(virtio >= 2, "virtio functions on pci0");
+        if m.description(acpi0, &s).as_deref() == Some("BHYVE BVFACP ") {
+            // Differential: each function's pnpinfo and location as FreeBSD
+            // 15.1 recorded them in bhyve (the recording's VM has more
+            // devices than the boot test's).
+            let recorded: alloc::vec::Vec<&str> =
+                include_str!("../../tests/corpus/freebsd/bhyve/devinfo-rv.txt")
+                    .lines()
+                    .filter(|l| l.starts_with("        ") && !l.starts_with("         "))
+                    .filter_map(|l| l.split_once(" pnpinfo ").map(|(_, rest)| rest))
+                    .collect();
+            for l in &lines {
+                assert!(recorded.contains(&l.as_str()), "{l:?} not in FreeBSD's recording");
+            }
+            assert!(lines.iter().any(|l| l.ends_with("handle=\\_SB_.PC00.ISA_")), "isab's ACPI handle");
+        }
+    }
+}

@@ -49,6 +49,15 @@ pub enum Ident {
     Platform,
     /// A child of `nexus0` that a driver claims by name (`acpi`).
     Nexus(&'static str),
+    /// A PCI bus (`pci0`) behind a host or PCI-PCI bridge.
+    PciBus {
+        /// The segment.
+        domain: u32,
+        /// The bus number.
+        bus: u8,
+        /// Firmware describes it in ACPI (FreeBSD's `acpi_pci`).
+        acpi: bool,
+    },
     /// An ACPI namespace device and its path (`\\_SB_.PCI0`).
     Acpi(AcpiIdent, String),
     /// A PCI function at an address, with its ACPI path if it has a
@@ -67,6 +76,8 @@ pub enum Ids {
     None,
     /// `nexus0` children by name.
     Nexus(&'static [&'static str]),
+    /// PCI buses.
+    PciBus,
     /// ACPI `_HID`/`_CID`s.
     Acpi(&'static [AcpiId]),
     /// PCI vendor/device/class entries.
@@ -94,6 +105,7 @@ impl Ids {
         }
         match (self, ident) {
             (Self::Nexus(names), Ident::Nexus(n)) => names.contains(n).then_some(Rank::DEFAULT),
+            (Self::PciBus, Ident::PciBus { .. }) => Some(Rank::DEFAULT),
             (Self::Acpi(t), Ident::Acpi(i, _)) => best(t, i),
             (Self::Pci(t), Ident::Pci(i, _, _)) => best(t, i),
             (Self::Virtio(t), Ident::Virtio(i)) => best(t, i),
@@ -304,7 +316,7 @@ impl Ident {
     pub fn pnpinfo(&self, out: &mut String) {
         use devtree::strings;
         let _ = match self {
-            Self::Root | Self::Platform | Self::Nexus(_) => Ok(()),
+            Self::Root | Self::Platform | Self::Nexus(_) | Self::PciBus { .. } => Ok(()),
             Self::Acpi(i, _) => strings::acpi_pnpinfo(out, i),
             Self::Pci(i, _, _) => strings::pci_pnpinfo(out, i),
             Self::Virtio(i) => strings::virtio_pnpinfo(out, i),
@@ -316,7 +328,11 @@ impl Ident {
     pub fn location(&self, out: &mut String) {
         use devtree::strings;
         let _ = match self {
-            Self::Root | Self::Platform | Self::Nexus(_) | Self::Virtio(_) => Ok(()),
+            Self::Root
+            | Self::Platform
+            | Self::Nexus(_)
+            | Self::PciBus { .. }
+            | Self::Virtio(_) => Ok(()),
             Self::Acpi(_, path) => strings::acpi_location(out, path, None),
             Self::Pci(_, a, path) => strings::pci_location(out, a, path.as_deref(), None),
             Self::Test(_) => Ok(()),

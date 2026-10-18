@@ -63,18 +63,11 @@ pub fn enumerate(
     (out, problems)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn scan_bus(
-    cfg: &dyn ConfigSpace,
-    segment: u32,
-    bus: u8,
-    range: &core::ops::RangeInclusive<u8>,
-    depth: u8,
-    seen: &mut [u64; 4],
-    out: &mut Vec<Function>,
-    problems: &mut Vec<BridgeProblem>,
-) {
-    seen[usize::from(bus / 64)] |= 1 << (bus % 64);
+/// The functions on one bus, by slot and function, without following
+/// bridges: a bridge's own driver scans the bus behind it, as FreeBSD's
+/// `pcib`/`pci` pairs do.
+pub fn scan(cfg: &dyn ConfigSpace, segment: u32, bus: u8, depth: u8) -> Vec<Function> {
+    let mut out = Vec::new();
     for slot in 0..32 {
         let f0 = PciAddress {
             domain: segment,
@@ -99,40 +92,65 @@ fn scan_bus(
             if let HeaderType::Unknown(_) = h.kind {
                 continue;
             }
-            let mut bars = Vec::new();
-            let mut bad_bars = Vec::new();
-            for b in bar::read_all(cfg, addr, h.kind.bars()) {
-                match b {
-                    Ok(b) => bars.push(b),
-                    Err(e) => bad_bars.push(e),
-                }
-            }
-            let caps = caps::list(cfg, addr);
-            let ext_caps = if caps::find(&caps, caps::id::PCIE).is_some() {
-                caps::ext_list(cfg, addr)
-            } else {
-                Vec::new()
-            };
-            let bridge = (h.kind == HeaderType::Bridge).then(|| header::bridge_buses(cfg, addr));
-            out.push(Function {
-                addr,
-                header: h,
-                bars,
-                bad_bars,
-                caps,
-                ext_caps,
-                bridge,
-                depth,
-            });
-            if let Some(b) = bridge {
-                let next = b.secondary;
-                let fresh = seen[usize::from(next / 64)] & (1 << (next % 64)) == 0;
-                if next > bus && range.contains(&next) && fresh {
-                    scan_bus(cfg, segment, next, range, depth + 1, seen, out, problems);
-                } else if next != 0 {
-                    // Secondary 0: firmware left the bridge unconfigured.
-                    problems.push(BridgeProblem::BadBus(addr));
-                }
+            out.push(probe(cfg, addr, h, depth));
+        }
+    }
+    out
+}
+
+/// Sizes a present function's BARs and reads its capabilities.
+fn probe(cfg: &dyn ConfigSpace, addr: PciAddress, h: Header, depth: u8) -> Function {
+    let mut bars = Vec::new();
+    let mut bad_bars = Vec::new();
+    for b in bar::read_all(cfg, addr, h.kind.bars()) {
+        match b {
+            Ok(b) => bars.push(b),
+            Err(e) => bad_bars.push(e),
+        }
+    }
+    let caps = caps::list(cfg, addr);
+    let ext_caps = if caps::find(&caps, caps::id::PCIE).is_some() {
+        caps::ext_list(cfg, addr)
+    } else {
+        Vec::new()
+    };
+    let bridge = (h.kind == HeaderType::Bridge).then(|| header::bridge_buses(cfg, addr));
+    Function {
+        addr,
+        header: h,
+        bars,
+        bad_bars,
+        caps,
+        ext_caps,
+        bridge,
+        depth,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_bus(
+    cfg: &dyn ConfigSpace,
+    segment: u32,
+    bus: u8,
+    range: &core::ops::RangeInclusive<u8>,
+    depth: u8,
+    seen: &mut [u64; 4],
+    out: &mut Vec<Function>,
+    problems: &mut Vec<BridgeProblem>,
+) {
+    seen[usize::from(bus / 64)] |= 1 << (bus % 64);
+    for f in scan(cfg, segment, bus, depth) {
+        let bridge = f.bridge;
+        let addr = f.addr;
+        out.push(f);
+        if let Some(b) = bridge {
+            let next = b.secondary;
+            let fresh = seen[usize::from(next / 64)] & (1 << (next % 64)) == 0;
+            if next > bus && range.contains(&next) && fresh {
+                scan_bus(cfg, segment, next, range, depth + 1, seen, out, problems);
+            } else if next != 0 {
+                // Secondary 0: firmware left the bridge unconfigured.
+                problems.push(BridgeProblem::BadBus(addr));
             }
         }
     }

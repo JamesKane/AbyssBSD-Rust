@@ -260,6 +260,13 @@ impl AttachCx<'_> {
         self.bus_data.as_deref()?.downcast_ref::<T>()
     }
 
+    /// The parent bus's data for this child as a shared `Arc<T>`, for a
+    /// driver that keeps it.
+    #[must_use]
+    pub fn bus_data_arc<T: Any + Send + Sync>(&self) -> Option<Arc<T>> {
+        Arc::clone(self.bus_data.as_ref()?).downcast::<T>().ok()
+    }
+
     fn injected(&mut self) -> bool {
         self.faults.as_mut().is_some_and(|f| f.fail())
     }

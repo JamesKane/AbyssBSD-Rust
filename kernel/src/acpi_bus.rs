@@ -130,7 +130,7 @@ impl acpi::Ops for KernelAcpi {
         None
     }
 
-    fn pci_config(&self, a: pci::PciAddress) -> Option<&'static dyn pci::ConfigSpace> {
+    fn pci_config(&self, a: pci::PciAddress) -> Option<&'static (dyn pci::ConfigSpace + Sync)> {
         crate::pci::config_for(a)
     }
 
