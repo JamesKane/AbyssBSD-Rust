@@ -189,14 +189,22 @@ impl acpi::Ops for KernelAcpi {
             return String::new();
         };
         let x = t.xsdt();
-        let field = |b: &[u8]| {
-            String::from_utf8_lossy(b)
-                .trim_end_matches([' ', '\0'])
-                .into()
+        // As FreeBSD builds it: each field whole, trailing whitespace
+        // trimmed (a NUL stops the trim), joined by a space, and the
+        // result read as a C string. bhyve's "BVFACP \0" keeps its space.
+        let mut b: Vec<u8> = Vec::new();
+        let trim = |b: &mut Vec<u8>| {
+            while b.last().is_some_and(u8::is_ascii_whitespace) {
+                b.pop();
+            }
         };
-        let id: String = field(x.oem_id());
-        let table: String = field(x.oem_table_id());
-        alloc::format!("{id} {table}")
+        b.extend_from_slice(x.oem_id());
+        trim(&mut b);
+        b.push(b' ');
+        b.extend_from_slice(x.oem_table_id());
+        trim(&mut b);
+        let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+        String::from_utf8_lossy(&b[..end]).into()
     }
 
     fn log(&self, args: core::fmt::Arguments<'_>) {

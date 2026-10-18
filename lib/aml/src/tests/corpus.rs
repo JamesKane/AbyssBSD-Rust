@@ -361,6 +361,14 @@ fn bhyve_devices_and_pci_config_region() {
     assert_eq!(i.devices().len(), 22);
     let pc00 = node(&i, "\\_SB.PC00");
     assert_eq!(i.hid(pc00, &mut h).unwrap().as_deref(), Some("PNP0A03"));
+    // String IDs come back in upper case, as FreeBSD's devinfo shows them
+    // ("_HID=BHYVE_V_GEN_COUNTER_V1 ... _CID=VM_GEN_COUNTER").
+    let genc = node(&i, "\\_SB.GENC");
+    assert_eq!(
+        i.hid(genc, &mut h).unwrap().as_deref(),
+        Some("BHYVE_V_GEN_COUNTER_V1")
+    );
+    assert_eq!(i.cids(genc, &mut h).unwrap(), ["VM_GEN_COUNTER"]);
     // PIC mode routes through ISA_.LNKH/LNKA; APIC mode hard-wires GSIs.
     let prt = i.prt(pc00, &mut h).unwrap().unwrap();
     let got: Vec<_> = prt.iter().map(|e| (e.device, link(&i, e))).collect();

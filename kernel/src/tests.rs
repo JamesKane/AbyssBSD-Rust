@@ -1384,8 +1384,7 @@ ktest! {
         let host = fns.first().expect("functions on the root bus");
         assert_eq!((host.addr.bus, host.addr.slot, host.addr.function), (0, 0, 0));
         assert_eq!(host.header.ident.class, 0x06_00_00, "a host bridge at 00:00.0");
-        // virtio-blk and virtio-rng: memory BARs sized in RAM-free space,
-        // and the vendor capabilities the modern transport uses.
+        // virtio-blk and virtio-rng, with sized memory BARs.
         let virtio: alloc::vec::Vec<_> = fns.iter().filter(|f| f.header.ident.vendor == 0x1af4).collect();
         assert!(virtio.len() >= 2, "virtio functions: {}", virtio.len());
         for f in virtio {
@@ -1401,7 +1400,11 @@ ktest! {
                 "a memory BAR on {:?}",
                 f.addr
             );
-            assert!(pci::caps::find(&f.caps, pci::caps::id::VENDOR).is_some());
+            // Modern devices (IDs from 0x1040) describe their transport in
+            // vendor capabilities; bhyve's are legacy-only.
+            if f.header.ident.device >= 0x1040 {
+                assert!(pci::caps::find(&f.caps, pci::caps::id::VENDOR).is_some());
+            }
             // Config space reads back the same through the lookup.
             let cfg = crate::pci::config_for(f.addr).unwrap();
             assert_eq!(cfg.read16(f.addr, 0), 0x1af4);
@@ -1423,7 +1426,9 @@ ktest! {
             .expect("acpi0 on nexus0");
         let desc = m.description(acpi0, &s).unwrap();
         kprintln!("acpi: acpi0 <{desc}>");
-        assert!(desc.starts_with("BOCHS "), "QEMU's OEM ID: {desc}");
+        // QEMU's OEM ID, or bhyve's, which FreeBSD shows as
+        // "BHYVE BVFACP " (tests/corpus/freebsd/bhyve).
+        assert!(desc.starts_with("BOCHS ") || desc == "BHYVE BVFACP ", "{desc:?}");
         let children = m.children(acpi0, &s);
         let paths: alloc::vec::Vec<(alloc::string::String, alloc::string::String)> = children
             .iter()
@@ -1435,9 +1440,34 @@ ktest! {
         for (hid, path) in &paths {
             kprintln!("acpi:   {hid} at {path}");
         }
+        if desc == "BHYVE BVFACP " {
+            // Differential: the same children, in the same order, with the
+            // same pnpinfo, as FreeBSD 15.1's devinfo in the same VM.
+            let ours: alloc::vec::Vec<alloc::string::String> = children
+                .iter()
+                .filter_map(|&c| {
+                    let mut line = alloc::string::String::new();
+                    let ident = m.ident(c, &s)?;
+                    ident.pnpinfo(&mut line);
+                    line.push_str(" at ");
+                    ident.location(&mut line);
+                    Some(line)
+                })
+                .collect();
+            let recorded: alloc::vec::Vec<&str> =
+                include_str!("../../tests/corpus/freebsd/bhyve/devinfo-rv.txt")
+                    .lines()
+                    .filter(|l| l.starts_with("    ") && !l.starts_with("     "))
+                    .filter_map(|l| l.split_once(" pnpinfo ").map(|(_, rest)| rest))
+                    .filter(|rest| rest.starts_with("_HID="))
+                    .collect();
+            assert_eq!(recorded.len(), 21, "the recording's ACPI children");
+            assert_eq!(ours, recorded);
+        }
         // The host bridge, a flat child of acpi0 as on FreeBSD.
+        // (PNP0A08 at \_SB_.PCI0 on QEMU, PNP0A03 at \_SB_.PC00 on bhyve.)
         assert!(
-            paths.iter().any(|(h, p)| h == "PNP0A08" && p == "\\_SB_.PCI0"),
+            paths.iter().any(|(h, p)| (h == "PNP0A08" || h == "PNP0A03") && p.starts_with("\\_SB_.PC")),
             "{paths:?}"
         );
         #[cfg(target_arch = "x86_64")]

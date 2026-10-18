@@ -105,10 +105,13 @@ pub enum DepRef {
     Unresolved(String),
 }
 
+/// An ID as FreeBSD reports it: an EISA ID decoded, or a string in upper
+/// case (bhyve's `Bhyve_V_Gen_Counter_V1` is `_HID=BHYVE_V_GEN_COUNTER_V1`
+/// in FreeBSD's `devinfo`, tests/corpus/freebsd/bhyve).
 fn id_string(v: &Value) -> Option<String> {
     match v {
         Value::Integer(x) => Some(eisa_id_to_string(u32::try_from(*x & 0xffff_ffff).ok()?)),
-        Value::String(s) => Some(s.clone()),
+        Value::String(s) => Some(s.to_ascii_uppercase()),
         _ => None,
     }
 }
