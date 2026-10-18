@@ -1,0 +1,18 @@
+[package]
+name = "virtio-random"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bus = { path = "../../sys/bus" }
+devtree = { path = "../../lib/devtree" }
+irq = { path = "../../sys/irq" }
+sched = { path = "../../sys/sched" }
+sync = { path = "../../sys/sync" }
+virtio = { path = "../../sys/virtio" }
+vm = { path = "../../sys/vm" }
+
+[lints]
+workspace = true

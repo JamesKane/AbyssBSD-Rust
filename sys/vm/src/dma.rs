@@ -370,6 +370,42 @@ impl<T: DeviceShared> DmaCoherent<T> {
     }
 }
 
+impl<T: DeviceShared> DmaCoherent<T> {
+    fn at<U: DeviceShared>(&self, off: usize) -> *mut U {
+        assert!(
+            off.is_multiple_of(align_of::<U>())
+                && off
+                    .checked_add(size_of::<U>())
+                    .is_some_and(|end| end <= self.n * size_of::<T>()),
+            "DMA offset out of range"
+        );
+        self.va.as_ptr().cast::<u8>().wrapping_add(off).cast()
+    }
+
+    /// Reads a `U` at byte offset `off`, for memory a device lays out in
+    /// mixed types (a virtqueue's rings). Untrusted, as for `read`.
+    ///
+    /// # Panics
+    ///
+    /// If `off` is misaligned for `U` or out of range.
+    #[must_use]
+    pub fn read_at<U: DeviceShared>(&self, off: usize) -> U {
+        // SAFETY: in bounds and aligned (checked by `at`); every bit
+        // pattern is a valid `U`.
+        unsafe { self.at::<U>(off).read_volatile() }
+    }
+
+    /// Writes a `U` at byte offset `off`.
+    ///
+    /// # Panics
+    ///
+    /// If `off` is misaligned for `U` or out of range.
+    pub fn write_at<U: DeviceShared>(&self, off: usize, v: U) {
+        // SAFETY: as for `read_at`.
+        unsafe { self.at::<U>(off).write_volatile(v) }
+    }
+}
+
 impl<T: DeviceShared> Drop for DmaCoherent<T> {
     fn drop(&mut self) {
         // SAFETY: from `alloc` with these values; the binding (and so the

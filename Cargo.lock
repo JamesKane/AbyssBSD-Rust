@@ -167,6 +167,8 @@ dependencies = [
  "sysctl",
  "uart-16550",
  "uart-pl011",
+ "virtio",
+ "virtio-random",
  "vm",
 ]
 
@@ -255,6 +257,32 @@ name = "uart-pl011"
 version = "0.0.0"
 dependencies = [
  "regs",
+]
+
+[[package]]
+name = "virtio"
+version = "0.0.0"
+dependencies = [
+ "bus",
+ "devtree",
+ "irq",
+ "pci",
+ "regs",
+ "sched",
+ "vm",
+]
+
+[[package]]
+name = "virtio-random"
+version = "0.0.0"
+dependencies = [
+ "bus",
+ "devtree",
+ "irq",
+ "sched",
+ "sync",
+ "virtio",
+ "vm",
 ]
 
 [[package]]

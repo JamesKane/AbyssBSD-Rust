@@ -154,6 +154,10 @@ static MANAGER: Once<Manager> = Once::new();
 /// (`hw.bus.devctl_queue`'s default).
 const EVENT_QUEUE: usize = 1000;
 
+/// Marks a claim as I/O ports rather than memory: the spaces overlap
+/// numerically but never in fact.
+pub(crate) const IO_SPACE: u64 = 1 << 63;
+
 /// Options for [`init`].
 #[derive(Clone, Copy, Debug)]
 pub struct Options {
@@ -267,6 +271,8 @@ impl Manager {
         self.generation.load(Ordering::Relaxed)
     }
 
+    /// Claims `[base, base + len)`: memory addresses, or I/O ports with
+    /// [`IO_SPACE`] set.
     pub(crate) fn claim(&self, base: u64, len: u64) -> Result<(), ResourceError> {
         let mut c = self.claims.lock();
         if c.iter().any(|&(b, l)| base < b + l && b < base + len) {

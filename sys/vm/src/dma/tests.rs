@@ -196,6 +196,34 @@ fn coherent_index_is_checked() {
 }
 
 #[test]
+fn coherent_byte_offsets() {
+    let mem = Fake::new(MIB);
+    let block: DmaCoherent<u8> = DmaTag::new(mem, bits(64), MIB).coherent(64).unwrap();
+    block.write_at::<u64>(8, 0x1122_3344_5566_7788);
+    block.write_at::<u16>(18, 0xabcd);
+    assert_eq!(block.read_at::<u32>(8), 0x5566_7788);
+    assert_eq!(block.read(18), 0xcd);
+    assert_eq!(block.read_at::<u16>(18), 0xabcd);
+    assert_eq!(block.read_at::<u64>(56), 0, "the last word is in range");
+}
+
+#[test]
+#[should_panic(expected = "DMA offset out of range")]
+fn coherent_offsets_are_checked() {
+    let mem = Fake::new(MIB);
+    let block: DmaCoherent<u8> = DmaTag::new(mem, bits(64), MIB).coherent(64).unwrap();
+    let _ = block.read_at::<u32>(62);
+}
+
+#[test]
+#[should_panic(expected = "DMA offset out of range")]
+fn coherent_offsets_must_be_aligned() {
+    let mem = Fake::new(MIB);
+    let block: DmaCoherent<u8> = DmaTag::new(mem, bits(64), MIB).coherent(64).unwrap();
+    block.write_at::<u16>(3, 1);
+}
+
+#[test]
 fn direct_stream_segments() {
     let mem = Fake::new(8 * MIB);
     let c = DmaConstraints {

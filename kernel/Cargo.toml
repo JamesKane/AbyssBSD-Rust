@@ -24,6 +24,8 @@ bus = { path = "../sys/bus" }
 devtree = { path = "../lib/devtree" }
 pci = { path = "../sys/pci" }
 acpi = { path = "../sys/acpi" }
+virtio = { path = "../sys/virtio" }
+virtio-random = { path = "../drivers/virtio-random" }
 demangle = { path = "../lib/demangle" }
 efi = { path = "../boot/efi" }
 elf = { path = "../lib/elf" }

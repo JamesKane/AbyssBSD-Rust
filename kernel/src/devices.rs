@@ -52,6 +52,43 @@ impl Platform for KernelPlatform {
         crate::sysctl::with(s, |t| f(t));
     }
 
+    #[cfg(target_arch = "x86_64")]
+    fn io_read(&self, port: u16, width: u8) -> u32 {
+        // SAFETY: the port is in a range the manager granted a driver from
+        // a bus-described resource (a BAR), claimed by that driver alone.
+        unsafe {
+            match width {
+                1 => u32::from(crate::arch::cpu::inb(port)),
+                2 => u32::from(crate::arch::cpu::inw(port)),
+                _ => crate::arch::cpu::inl(port),
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    fn io_read(&self, _port: u16, _width: u8) -> u32 {
+        u32::MAX
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "the value is `width` bytes wide"
+    )]
+    fn io_write(&self, port: u16, width: u8, v: u32) {
+        // SAFETY: as in `io_read`.
+        unsafe {
+            match width {
+                1 => crate::arch::cpu::outb(port, v as u8),
+                2 => crate::arch::cpu::outw(port, v as u16),
+                _ => crate::arch::cpu::outl(port, v),
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    fn io_write(&self, _port: u16, _width: u8, _v: u32) {}
+
     fn log(&self, args: core::fmt::Arguments<'_>) {
         kprintln!("{args}");
     }
@@ -75,6 +112,9 @@ static DRIVERS: &[DriverDecl] = &[
     acpi::DRIVER,
     acpi::PCIB,
     pci::bus::DRIVER,
+    virtio::pci::MODERN,
+    virtio::pci::LEGACY,
+    virtio_random::DRIVER,
     #[cfg(feature = "ktest")]
     crate::tests::bus_test::TEST_BUS,
     #[cfg(feature = "ktest")]

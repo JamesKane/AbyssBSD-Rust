@@ -22,7 +22,7 @@ use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use irq::{Filter, Installed};
-use regs::{Mmio, RegisterBlock};
+use regs::{Bytes, Mmio, RegisterBlock};
 use sched::lock::{LockClass, Mutex};
 use sched::{IrqCx, Sleepable};
 use vm::dma::{DmaConstraints, DmaTag};
@@ -143,8 +143,9 @@ impl Ledger {
     }
 }
 
-/// A granted register block; unmapped when dropped.
-pub struct MmioGrant<B: RegisterBlock> {
+/// A granted register block (typed, or [`Bytes`]); unmapped when
+/// dropped.
+pub struct MmioGrant<B> {
     regs: Mmio<B>,
     va: usize,
     len: u64,
@@ -153,7 +154,7 @@ pub struct MmioGrant<B: RegisterBlock> {
     ledger: Arc<Ledger>,
 }
 
-impl<B: RegisterBlock> core::fmt::Debug for MmioGrant<B> {
+impl<B> core::fmt::Debug for MmioGrant<B> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("MmioGrant")
             .field("pa", &format_args!("{:#x}", self.pa))
@@ -162,17 +163,110 @@ impl<B: RegisterBlock> core::fmt::Debug for MmioGrant<B> {
     }
 }
 
-impl<B: RegisterBlock> core::ops::Deref for MmioGrant<B> {
+impl<B> core::ops::Deref for MmioGrant<B> {
     type Target = Mmio<B>;
     fn deref(&self) -> &Mmio<B> {
         &self.regs
     }
 }
 
-impl<B: RegisterBlock> Drop for MmioGrant<B> {
+impl<B> Drop for MmioGrant<B> {
     fn drop(&mut self) {
         self.mgr.platform().unmap_device(self.va, self.len);
         self.mgr.release_claim(self.pa);
+        self.ledger.give_back();
+    }
+}
+
+/// A granted range of I/O ports (x86); released when dropped.
+pub struct IoGrant {
+    base: u16,
+    len: u16,
+    mgr: &'static Manager,
+    ledger: Arc<Ledger>,
+}
+
+impl core::fmt::Debug for IoGrant {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("IoGrant")
+            .field("base", &format_args!("{:#x}", self.base))
+            .field("len", &self.len)
+            .finish()
+    }
+}
+
+impl IoGrant {
+    fn port(&self, offset: u16, width: u16) -> u16 {
+        assert!(
+            offset.is_multiple_of(width)
+                && u32::from(offset) + u32::from(width) <= u32::from(self.len),
+            "I/O port offset out of range"
+        );
+        self.base + offset
+    }
+
+    /// The number of ports.
+    #[must_use]
+    pub fn len(&self) -> u16 {
+        self.len
+    }
+
+    /// Whether the range is empty (never: resources have ports).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Reads the 8-bit port at `offset`.
+    #[must_use]
+    pub fn read8(&self, offset: u16) -> u8 {
+        self.mgr
+            .platform()
+            .io_read(self.port(offset, 1), 1)
+            .to_le_bytes()[0]
+    }
+
+    /// Reads the 16-bit port at `offset`.
+    #[must_use]
+    pub fn read16(&self, offset: u16) -> u16 {
+        let [a, b, ..] = self
+            .mgr
+            .platform()
+            .io_read(self.port(offset, 2), 2)
+            .to_le_bytes();
+        u16::from_le_bytes([a, b])
+    }
+
+    /// Reads the 32-bit port at `offset`.
+    #[must_use]
+    pub fn read32(&self, offset: u16) -> u32 {
+        self.mgr.platform().io_read(self.port(offset, 4), 4)
+    }
+
+    /// Writes the 8-bit port at `offset`.
+    pub fn write8(&self, offset: u16, v: u8) {
+        self.mgr
+            .platform()
+            .io_write(self.port(offset, 1), 1, v.into());
+    }
+
+    /// Writes the 16-bit port at `offset`.
+    pub fn write16(&self, offset: u16, v: u16) {
+        self.mgr
+            .platform()
+            .io_write(self.port(offset, 2), 2, v.into());
+    }
+
+    /// Writes the 32-bit port at `offset`.
+    pub fn write32(&self, offset: u16, v: u32) {
+        self.mgr.platform().io_write(self.port(offset, 4), 4, v);
+    }
+}
+
+impl Drop for IoGrant {
+    fn drop(&mut self) {
+        self.mgr
+            .release_claim(crate::manager::IO_SPACE | u64::from(self.base));
         self.ledger.give_back();
     }
 }
@@ -271,8 +365,8 @@ impl AttachCx<'_> {
         self.faults.as_mut().is_some_and(|f| f.fail())
     }
 
-    /// Maps the `index`th memory resource as register block `B`.
-    pub fn mmio<B: RegisterBlock>(&mut self, index: usize) -> Result<MmioGrant<B>, ResourceError> {
+    /// Claims and maps the `index`th memory resource, at least `min` bytes.
+    fn map_memory(&mut self, index: usize, min: usize) -> Result<(usize, u64, u64), ResourceError> {
         if self.injected() {
             return Err(ResourceError::MapFailed);
         }
@@ -285,7 +379,7 @@ impl AttachCx<'_> {
             })
             .nth(index)
             .ok_or(ResourceError::NoSuchResource)?;
-        if len < B::SIZE as u64 {
+        if len < min as u64 {
             return Err(ResourceError::TooSmall);
         }
         if self.mgr.platform().sensitive(base, len) {
@@ -297,6 +391,12 @@ impl AttachCx<'_> {
             return Err(ResourceError::MapFailed);
         };
         self.ledger.issue();
+        Ok((va, base, len))
+    }
+
+    /// Maps the `index`th memory resource as register block `B`.
+    pub fn mmio<B: RegisterBlock>(&mut self, index: usize) -> Result<MmioGrant<B>, ResourceError> {
+        let (va, pa, len) = self.map_memory(index, B::SIZE)?;
         Ok(MmioGrant {
             // SAFETY: the platform mapped `len >= B::SIZE` bytes of this
             // device's registers for us alone (the claim), until the grant
@@ -304,7 +404,48 @@ impl AttachCx<'_> {
             regs: unsafe { Mmio::block(va) },
             va,
             len,
-            pa: base,
+            pa,
+            mgr: self.mgr,
+            ledger: Arc::clone(&self.ledger),
+        })
+    }
+
+    /// Maps the `index`th memory resource whole, untyped, for registers
+    /// at offsets the device itself reports (capability structures).
+    pub fn mmio_bytes(&mut self, index: usize) -> Result<MmioGrant<Bytes>, ResourceError> {
+        let (va, pa, len) = self.map_memory(index, 1)?;
+        let bytes = usize::try_from(len).map_err(|_| ResourceError::MapFailed)?;
+        Ok(MmioGrant {
+            // SAFETY: as in `mmio`, for all `len` bytes.
+            regs: unsafe { Mmio::new(va, bytes) },
+            va,
+            len,
+            pa,
+            mgr: self.mgr,
+            ledger: Arc::clone(&self.ledger),
+        })
+    }
+
+    /// Claims the `index`th I/O-port resource.
+    pub fn io_ports(&mut self, index: usize) -> Result<IoGrant, ResourceError> {
+        if self.injected() {
+            return Err(ResourceError::NoSuchResource);
+        }
+        let (base, len) = self
+            .resources
+            .iter()
+            .filter_map(|r| match r {
+                Resource::IoPort { base, len } => Some((*base, *len)),
+                _ => None,
+            })
+            .nth(index)
+            .ok_or(ResourceError::NoSuchResource)?;
+        self.mgr
+            .claim(crate::manager::IO_SPACE | u64::from(base), len.into())?;
+        self.ledger.issue();
+        Ok(IoGrant {
+            base,
+            len,
             mgr: self.mgr,
             ledger: Arc::clone(&self.ledger),
         })
@@ -339,6 +480,13 @@ impl AttachCx<'_> {
             resource: r,
             ledger: Arc::clone(&self.ledger),
         })
+    }
+
+    /// The resources the bus described for the device, to hand on to a
+    /// child (a transport bus passes its interrupt on).
+    #[must_use]
+    pub fn resources(&self) -> &[Resource] {
+        self.resources
     }
 
     /// A DMA tag with the device's constraints (and, later, its bus's).

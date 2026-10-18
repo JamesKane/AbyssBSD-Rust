@@ -56,6 +56,20 @@ impl PciId {
         }
     }
 
+    /// Any device of a vendor, at [`Rank::VENDOR`] (for a driver that
+    /// sorts its vendor's devices out in attach).
+    #[must_use]
+    pub const fn vendor(vendor: u16) -> Self {
+        Self {
+            vendor: Some(vendor),
+            device: None,
+            subsystem: None,
+            class: None,
+            rank: Rank::VENDOR,
+            quirks: 0,
+        }
+    }
+
     /// A full 24-bit class code, at [`Rank::GENERIC`].
     #[must_use]
     pub const fn class(code: u32) -> Self {

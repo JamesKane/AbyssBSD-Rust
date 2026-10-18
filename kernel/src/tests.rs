@@ -1556,108 +1556,114 @@ ktest! {
                 assert!(recorded.contains(&l.as_str()), "{l:?} not in FreeBSD's recording");
             }
             assert!(lines.iter().any(|l| l.ends_with("handle=\\_SB_.PC00.ISA_")), "isab's ACPI handle");
+            // The virtio transports and the entropy device on its
+            // transport, line for line (block devices wait for vtblk).
+            let full: alloc::vec::Vec<&str> =
+                include_str!("../../tests/corpus/freebsd/bhyve/devinfo-rv.txt")
+                    .lines()
+                    .map(str::trim_start)
+                    .collect();
+            let line = |id: bus::DeviceId| {
+                let ident = m.ident(id, &s).unwrap();
+                let mut l = alloc::format!(
+                    "{} <{}> pnpinfo ",
+                    m.nameunit(id, &s).unwrap_or_default(),
+                    m.description(id, &s).unwrap_or_default()
+                );
+                ident.pnpinfo(&mut l);
+                let mut loc = alloc::string::String::new();
+                ident.location(&mut loc);
+                if !loc.is_empty() {
+                    l.push_str(" at ");
+                    l.push_str(&loc);
+                }
+                l
+            };
+            let mut transports = 0;
+            for c in m.children(pci0, &s) {
+                if !m.nameunit(c, &s).is_some_and(|n| n.starts_with("virtio_pci")) {
+                    continue;
+                }
+                transports += 1;
+                let l = line(c);
+                kprintln!("pci0: {l}");
+                assert!(full.contains(&l.as_str()), "{l:?} not in FreeBSD's recording");
+                for v in m.children(c, &s) {
+                    if m.nameunit(v, &s).as_deref() == Some("vtrnd0") {
+                        let l = line(v);
+                        assert!(full.contains(&l.as_str()), "{l:?} not in FreeBSD's recording");
+                    }
+                }
+            }
+            assert!(transports >= 2, "virtio_pci attached to the virtio functions");
         }
     }
 }
 
-/// MSI-X deliveries the virtio-rng test saw.
-#[cfg(target_arch = "x86_64")]
-static MSIX_HITS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-
-#[cfg(target_arch = "x86_64")]
-fn msix_test_filter(_: usize, _: &sched::IrqCx) -> irq::Filter {
-    MSIX_HITS.fetch_add(1, Ordering::AcqRel);
-    irq::Filter::Handled
+/// A node named `name` under `root`, with its parent.
+fn find_named(
+    m: &bus::Manager,
+    s: &sched::Sleepable,
+    root: bus::DeviceId,
+    name: &str,
+) -> Option<(bus::DeviceId, bus::DeviceId)> {
+    let mut todo = alloc::vec![root];
+    while let Some(p) = todo.pop() {
+        for c in m.children(p, s) {
+            if m.nameunit(c, s).as_deref() == Some(name) {
+                return Some((p, c));
+            }
+            todo.push(c);
+        }
+    }
+    None
 }
 
-#[cfg(target_arch = "x86_64")]
 ktest! {
-    fn msix_delivers_from_virtio_rng() {
-        use crate::arch::cpu::{inb, inw, inl, outb, outw, outl};
+    fn vtrnd_reads_entropy_by_interrupt() {
         let s = cx();
-        let w = &crate::pci::windows()[0];
-        let cfg = crate::pci::config_for(pci::PciAddress { domain: 0, bus: 0, slot: 0, function: 0 }).unwrap();
-        let (fns, _) = pci::enumerate(w, w.segment(), w.buses());
-        let f = fns
-            .iter()
-            .find(|f| f.header.ident.vendor == 0x1af4 && f.header.ident.device == 0x1005)
-            .expect("virtio-rng (transitional)");
-        let io = f.bars.iter().find(|b| b.kind == pci::BarKind::Io).expect("legacy I/O BAR");
-        let port = u16::try_from(io.base).unwrap();
-        assert!(pci::msi::msix_count(cfg, f).unwrap() >= 1);
-        // Turn on I/O decoding and bus mastering for the device to DMA.
-        let cmd = cfg.read16(f.addr, pci::header::COMMAND);
-        cfg.write16(f.addr, pci::header::COMMAND, cmd | pci::header::CMD_IO | pci::header::CMD_BUS_MASTER);
-        let hws = pci::msi::enable_msix(cfg, f, 2).expect("MSI-X");
-        let installed = irq::install(
-            &pci::msi::PCI_MSI,
-            hws[0],
-            irq::Trigger::Edge,
-            irq::Polarity::High,
-            hal::CpuId::BOOT,
-            irq::Handler { name: "ktest-msix", filter: Some(msix_test_filter), thread: None, arg: 0 },
-        )
-        .expect("install on the MSI domain");
+        let m = bus::manager();
+        let nexus = crate::devices::nexus();
+        let (transport, vtrnd) = find_named(m, &s, nexus, "vtrnd0").expect("vtrnd0 attached");
+        let tname = m.nameunit(transport, &s).unwrap_or_default();
+        let tdesc = m.description(transport, &s).unwrap_or_default();
+        assert!(tname.starts_with("virtio_pci"), "vtrnd0 is on {tname}");
+        // bhyve's devices are legacy-only; QEMU's are transitional, and
+        // driven through the modern interface as FreeBSD 16 does.
+        let bhyve = find_named(m, &s, nexus, "acpi0")
+            .and_then(|(_, a)| m.description(a, &s))
+            .as_deref()
+            == Some("BHYVE BVFACP ");
+        let kind = if bhyve { "legacy" } else { "modern" };
+        assert_eq!(tdesc, alloc::format!("VirtIO PCI ({kind}) Entropy adapter"));
+        assert_eq!(m.description(vtrnd, &s).as_deref(), Some("VirtIO Entropy Adapter"));
+        assert_eq!(m.state(vtrnd, &s), Some(bus::NodeState::Attached));
 
-        // Legacy virtio over I/O ports (virtio 1.2 §4.1.4.8), with MSI-X on.
-        let order = vm::Order::new(2).unwrap();
-        let ring = crate::mm::alloc_pages(order).expect("ring pages");
-        let buf = crate::mm::alloc_pages(vm::Order::ZERO).expect("buffer page");
-        let rva = bootproto::layout::dmap(ring).unwrap().get() as *mut u8;
-        let bva = bootproto::layout::dmap(buf).unwrap().get() as *mut u8;
-        // SAFETY: both blocks are ours, in the DMAP; the device only DMAs
-        // into them after we hand them over below. Ports are the device's
-        // legacy BAR.
-        unsafe {
-            core::ptr::write_bytes(rva, 0, 4 * 4096);
-            core::ptr::write_bytes(bva, 0, 4096);
-            outb(port + 0x12, 0); // reset
-            outb(port + 0x12, 1 | 2); // ACKNOWLEDGE | DRIVER
-            let _ = inl(port);
-            outl(port + 0x04, 0);
-            outw(port + 0x0e, 0); // queue 0
-            let qsz = usize::from(inw(port + 0x0c));
-            assert!(qsz > 0 && 16 * qsz + 6 + 2 * qsz <= 8192, "queue size {qsz}");
-            outw(port + 0x16, 0); // queue vector: MSI-X entry 0
-            assert_eq!(inw(port + 0x16), 0, "the device took the vector");
-            outl(port + 0x08, u32::try_from(ring.get() >> 12).unwrap());
-            outb(port + 0x12, 1 | 2 | 4); // DRIVER_OK
-            // Descriptor 0: 64 device-writable bytes.
-            let desc = rva.cast::<u64>();
-            desc.write_volatile(buf.get());
-            desc.add(1).cast::<u32>().write_volatile(64);
-            desc.add(1).cast::<u16>().add(2).write_volatile(2); // VRING_DESC_F_WRITE
-            let avail = rva.add(16 * qsz).cast::<u16>();
-            avail.add(2).write_volatile(0); // ring[0] = desc 0
-            core::sync::atomic::fence(Ordering::SeqCst);
-            avail.add(1).write_volatile(1); // idx = 1
-            core::sync::atomic::fence(Ordering::SeqCst);
-            outw(port + 0x10, 0); // notify queue 0
-            let used_off = (16 * qsz + 6 + 2 * qsz).next_multiple_of(4096);
-            let used = rva.add(used_off).cast::<u16>();
-            let start = crate::time::counter();
-            let ms = || (crate::time::counter() - start) * 1000 / crate::time::frequency();
-            let (mut completed, mut hit) = (None, None);
-            while (completed.is_none() || hit.is_none()) && ms() < 5000 {
-                if completed.is_none() && used.add(1).read_volatile() == 1 {
-                    completed = Some(ms());
-                }
-                if hit.is_none() && MSIX_HITS.load(Ordering::Acquire) > 0 {
-                    hit = Some(ms());
-                }
-                core::hint::spin_loop();
-            }
-            kprintln!("msix: device completed at {completed:?} ms, interrupt at {hit:?} ms");
-            assert!(MSIX_HITS.load(Ordering::Acquire) >= 1, "no MSI-X arrived");
-            assert_eq!(used.add(1).read_volatile(), 1, "used.idx");
-            let got = core::slice::from_raw_parts(bva, 64);
-            assert!(got.iter().any(|&b| b != 0), "entropy written");
-            outb(port + 0x12, 0); // reset: the device lets go of the ring
-            let _ = inb(port + 0x13);
+        let before = virtio_random::interrupts().expect("an entropy source");
+        let mut buf = [0u8; 64];
+        let mut nonzero = false;
+        const READS: u64 = 32;
+        let start = crate::time::counter();
+        for _ in 0..READS {
+            buf.fill(0);
+            assert_eq!(virtio_random::read(&s, &mut buf), Some(64));
+            nonzero |= buf.iter().any(|&b| b != 0);
         }
-        installed.remove(&s);
-        pci::msi::PCI_MSI.remove(&hws);
-        crate::mm::free_pages(ring, order);
-        crate::mm::free_pages(buf, vm::Order::ZERO);
+        let ns = (crate::time::counter() - start) * 1_000_000_000 / crate::time::frequency();
+        // A device may complete a request before its interrupt arrives
+        // (bhyve does the work in the notify exit): let the last land.
+        for _ in 0..100 {
+            if virtio_random::interrupts().unwrap() - before >= READS {
+                break;
+            }
+            crate::time::sleep_ns(&s, 1_000_000);
+        }
+        let taken = virtio_random::interrupts().unwrap() - before;
+        kprintln!(
+            "vtrnd: {READS} reads of 64 bytes, {} us each, {taken} interrupt(s), on {tname} <{tdesc}>",
+            ns / READS / 1000
+        );
+        assert!(nonzero, "the device wrote entropy");
+        assert!(taken >= READS, "each completion arrived by interrupt");
     }
 }

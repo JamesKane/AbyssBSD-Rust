@@ -11,6 +11,7 @@ members = [
     "drivers/fb-console",
     "drivers/uart-16550",
     "drivers/uart-pl011",
+    "drivers/virtio-random",
     "kernel",
     "lib/abi",
     "lib/acpi-tables",
@@ -35,6 +36,7 @@ members = [
     "sys/sched",
     "sys/sync",
     "sys/sysctl",
+    "sys/virtio",
     "sys/vm",
     "tools/syscallgen",
 ]
@@ -48,6 +50,7 @@ default-members = [
     "drivers/fb-console",
     "drivers/uart-16550",
     "drivers/uart-pl011",
+    "drivers/virtio-random",
     "lib/abi",
     "lib/acpi-tables",
     "lib/addr",
@@ -71,6 +74,7 @@ default-members = [
     "sys/sched",
     "sys/sync",
     "sys/sysctl",
+    "sys/virtio",
     "sys/vm",
     "tools/syscallgen",
 ]
