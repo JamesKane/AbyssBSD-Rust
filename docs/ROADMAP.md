@@ -279,6 +279,12 @@ an ADR or follow-up, which tells us how well the seams held.
   configuration (in the spirit of Hyprland, with new code and design).
 - Wayland protocol library, renderer (software → Vulkan), panel/launcher/notifications,
   terminal emulator, and a minimal toolkit.
+- Built for BSD, not ported to it ([VISION](VISION.md) goal 11 applies here most of all). Most
+  existing desktop stacks assume Linux: systemd/logind for seats and sessions, udev for hotplug,
+  epoll/timerfd/signalfd event loops, D-Bus as the system bus. Ours is designed for AbyssBSD's
+  interfaces from the start: kqueue event loops, devd for hotplug, Capsicum for sandboxing
+  clients, sysctl and rc for configuration and services. Portability to other systems is a
+  non-goal.
 - Prerequisites: M-G, plus audio (HDA/USB audio, later) and power management maturity.
 
 ### M-Z: OpenZFS

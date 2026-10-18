@@ -43,6 +43,8 @@ system to rule out whole classes of kernel bugs.
     Linux interface, idiom, or driver model because it is familiar or convenient. The exception is
     an interface FreeBSD itself has adopted (netlink, inotify, evdev), since it is then part of the
     ABI we implement. A Linuxulator, if it ever comes, stays a separate ABI personality.
+    This applies most of all to the desktop stack (ROADMAP M-D), which should fit naturally on
+    top of BSD rather than carry over Linux assumptions, and need not be portable.
 
 ## Non-goals (Day 1)
 
