@@ -2024,3 +2024,31 @@ ktest! {
         );
     }
 }
+
+ktest! {
+    fn random_is_seeded_and_fed() {
+        let s = cx();
+        assert!(random::seeded(), "seeded at boot (EFI_RNG, or the CPU's RNG)");
+        let (mut a, mut b) = ([0u8; 64], [0u8; 64]);
+        crate::random::fill(&mut a).unwrap();
+        crate::random::fill(&mut b).unwrap();
+        assert_ne!(a, b);
+        // Bits set about half the time: a gross check that it is not
+        // stuck (the RFC vectors check the primitives on the host).
+        let mut big = alloc::vec![0u8; 4096];
+        crate::random::fill(&mut big).unwrap();
+        let ones: u32 = big.iter().map(|b| b.count_ones()).sum();
+        assert!((15_000..17_800).contains(&ones), "{ones} of 32768 bits set");
+        // The harvester reseeds the root as the CPU's RNG and the entropy
+        // device feed it.
+        let g = random::generation();
+        let start = crate::time::counter();
+        while random::generation() == g
+            && (crate::time::counter() - start) < 5 * crate::time::frequency()
+        {
+            crate::time::sleep_ns(&s, 10_000_000);
+        }
+        assert!(random::generation() > g, "no reseed in 5 s");
+        kprintln!("random: generation {} (from {g})", random::generation());
+    }
+}

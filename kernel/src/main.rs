@@ -36,6 +36,7 @@ mod mm;
 mod panic;
 mod pci;
 mod qemu;
+mod random;
 mod smp;
 #[cfg(not(feature = "ktest"))]
 mod stress;
@@ -90,10 +91,12 @@ fn kmain(boot_info: PhysAddr) -> ! {
     // SAFETY: kmain is now a thread (`threads::init`) with interrupts
     // enabled, holding no locks: it may sleep.
     let s = unsafe { sched::Sleepable::assume() };
+    random::init();
     smp::start_cpus();
     topology::summarize();
     pci::init();
     devices::init(&s);
+    random::start_harvester();
 
     #[cfg(feature = "ktest")]
     tests::run(&s);

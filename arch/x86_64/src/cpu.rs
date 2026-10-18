@@ -239,3 +239,33 @@ pub const fn split(v: u64) -> (u32, u32) {
         u32::from_le_bytes([b[4], b[5], b[6], b[7]]),
     )
 }
+
+/// 64 bits from the CPU's entropy source: RDSEED (conditioned entropy)
+/// where the CPU has it, else RDRAND (its DRBG). `None` if it has neither
+/// or they keep failing.
+#[must_use]
+pub fn hardware_random() -> Option<u64> {
+    let seed = core::arch::x86_64::__cpuid_count(7, 0).ebx & (1 << 18) != 0;
+    let rand = core::arch::x86_64::__cpuid(1).ecx & (1 << 30) != 0;
+    for _ in 0..10 {
+        let (v, ok): (u64, u8);
+        if seed {
+            // SAFETY: the CPU has RDSEED (CPUID.7.EBX[18]); it only writes
+            // the output register and the carry flag.
+            unsafe {
+                core::arch::asm!("rdseed {}", "setc {}", out(reg) v, out(reg_byte) ok, options(nomem, nostack))
+            };
+        } else if rand {
+            // SAFETY: the CPU has RDRAND (CPUID.1.ECX[30]); as above.
+            unsafe {
+                core::arch::asm!("rdrand {}", "setc {}", out(reg) v, out(reg_byte) ok, options(nomem, nostack))
+            };
+        } else {
+            return None;
+        }
+        if ok != 0 {
+            return Some(v);
+        }
+    }
+    None
+}

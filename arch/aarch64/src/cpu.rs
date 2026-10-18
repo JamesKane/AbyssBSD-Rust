@@ -290,3 +290,32 @@ pub fn semihosting_exit(code: u64) {
         );
     }
 }
+
+/// 64 bits from the CPU's random number generator (`RNDR`, FEAT_RNG).
+/// `None` if the CPU has none, or it reports failure.
+#[must_use]
+pub fn hardware_random() -> Option<u64> {
+    // ID_AA64ISAR0_EL1.RNDR, bits 63:60.
+    if read_sysreg!("id_aa64isar0_el1") >> 60 == 0 {
+        return None;
+    }
+    for _ in 0..10 {
+        let (v, nzcv): (u64, u64);
+        // SAFETY: the CPU implements RNDR (checked above); reading it
+        // writes the destination and NZCV, which we read back.
+        unsafe {
+            core::arch::asm!(
+                "mrs {v}, s3_3_c2_c4_0",
+                "mrs {f}, nzcv",
+                v = out(reg) v,
+                f = out(reg) nzcv,
+                options(nomem, nostack),
+            );
+        }
+        // Z set means no random number was available.
+        if nzcv & (1 << 30) == 0 {
+            return Some(v);
+        }
+    }
+    None
+}

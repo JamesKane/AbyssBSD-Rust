@@ -92,6 +92,10 @@ name = "crc"
 version = "0.0.0"
 
 [[package]]
+name = "crypto"
+version = "0.0.0"
+
+[[package]]
 name = "demangle"
 version = "0.0.0"
 
@@ -192,6 +196,7 @@ dependencies = [
  "logring",
  "pci",
  "pt",
+ "random",
  "regs",
  "sched",
  "storage",
@@ -259,6 +264,15 @@ name = "pt"
 version = "0.0.0"
 dependencies = [
  "addr",
+]
+
+[[package]]
+name = "random"
+version = "0.0.0"
+dependencies = [
+ "crypto",
+ "hal",
+ "sync",
 ]
 
 [[package]]
