@@ -1270,16 +1270,15 @@ ktest! {
         let tb = m.add_child(&s, m.root(), Ident::Test(TestIdent { model: 1 }), None, alloc::vec![], &[]);
         m.wait_idle(&s);
         assert_eq!(m.state(tb, &s), Some(NodeState::Attached));
-        // TestBus::stop checks its children were stopped first.
-        crate::devices::shutdown(&s);
+        // TestBus::stop checks its children were stopped first. Only the
+        // test bus's subtree: other tests need acpi0.
+        m.shutdown_under(tb, &s);
         assert_eq!(m.state(tb, &s), Some(NodeState::NotPresent));
         assert_eq!(m.state(crate::devices::nexus(), &s), Some(NodeState::Attached), "kernel-owned devices stay");
         let attached: alloc::vec::Vec<_> = m
-            .snapshot(&s)
+            .children(tb, &s)
             .into_iter()
-            .filter(|n| n.0 != m.root() && n.4 == NodeState::Attached)
-            .filter(|n| !matches!(n.2.as_str(), "nexus0" | "apic0"))
-            .map(|n| n.2)
+            .filter(|&c| m.state(c, &s) == Some(NodeState::Attached))
             .collect();
         assert!(attached.is_empty(), "still attached after shutdown: {attached:?}");
         let _ = m.take_events();
@@ -1406,6 +1405,47 @@ ktest! {
             // Config space reads back the same through the lookup.
             let cfg = crate::pci::config_for(f.addr).unwrap();
             assert_eq!(cfg.read16(f.addr, 0), 0x1af4);
+        }
+    }
+}
+
+ktest! {
+    fn acpi_bus_children() {
+        use bus::Ident;
+        let s = cx();
+        let m = bus::manager();
+        m.wait_idle(&s);
+        let nexus = crate::devices::nexus();
+        let acpi0 = m
+            .children(nexus, &s)
+            .into_iter()
+            .find(|&c| m.nameunit(c, &s).as_deref() == Some("acpi0"))
+            .expect("acpi0 on nexus0");
+        let desc = m.description(acpi0, &s).unwrap();
+        kprintln!("acpi: acpi0 <{desc}>");
+        assert!(desc.starts_with("BOCHS "), "QEMU's OEM ID: {desc}");
+        let children = m.children(acpi0, &s);
+        let paths: alloc::vec::Vec<(alloc::string::String, alloc::string::String)> = children
+            .iter()
+            .filter_map(|&c| match m.ident(c, &s) {
+                Some(Ident::Acpi(i, p)) => Some((i.hid.unwrap_or_default(), p)),
+                _ => None,
+            })
+            .collect();
+        for (hid, path) in &paths {
+            kprintln!("acpi:   {hid} at {path}");
+        }
+        // The host bridge, a flat child of acpi0 as on FreeBSD.
+        assert!(
+            paths.iter().any(|(h, p)| h == "PNP0A08" && p == "\\_SB_.PCI0"),
+            "{paths:?}"
+        );
+        #[cfg(target_arch = "x86_64")]
+        {
+            // q35's PCI interrupt links and an ISA device under the LPC
+            // bridge (\_SB_.PCI0.SF8_ is q35's LPC).
+            assert!(paths.iter().filter(|(h, _)| h == "PNP0C0F").count() >= 4, "{paths:?}");
+            assert!(paths.iter().any(|(h, _)| h == "PNP0303" || h == "PNP0501" || h == "PNP0B00"));
         }
     }
 }

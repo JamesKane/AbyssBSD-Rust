@@ -22,6 +22,7 @@ use arch_x86_64 as arch;
 #[macro_use]
 mod console;
 mod acpi;
+mod acpi_bus;
 #[cfg(not(feature = "ktest"))]
 mod bench;
 mod boot;

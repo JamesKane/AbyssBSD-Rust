@@ -47,6 +47,8 @@ pub enum Ident {
     Root,
     /// A platform device with no bus address (`nexus0`, `apic0`).
     Platform,
+    /// A child of `nexus0` that a driver claims by name (`acpi`).
+    Nexus(&'static str),
     /// An ACPI namespace device and its path (`\\_SB_.PCI0`).
     Acpi(AcpiIdent, String),
     /// A PCI function at an address, with its ACPI path if it has a
@@ -63,6 +65,8 @@ pub enum Ident {
 pub enum Ids {
     /// Never matched; the driver is attached explicitly (adoption, root).
     None,
+    /// `nexus0` children by name.
+    Nexus(&'static [&'static str]),
     /// ACPI `_HID`/`_CID`s.
     Acpi(&'static [AcpiId]),
     /// PCI vendor/device/class entries.
@@ -89,6 +93,7 @@ impl Ids {
             }
         }
         match (self, ident) {
+            (Self::Nexus(names), Ident::Nexus(n)) => names.contains(n).then_some(Rank::DEFAULT),
             (Self::Acpi(t), Ident::Acpi(i, _)) => best(t, i),
             (Self::Pci(t), Ident::Pci(i, _, _)) => best(t, i),
             (Self::Virtio(t), Ident::Virtio(i)) => best(t, i),
@@ -299,7 +304,7 @@ impl Ident {
     pub fn pnpinfo(&self, out: &mut String) {
         use devtree::strings;
         let _ = match self {
-            Self::Root | Self::Platform => Ok(()),
+            Self::Root | Self::Platform | Self::Nexus(_) => Ok(()),
             Self::Acpi(i, _) => strings::acpi_pnpinfo(out, i),
             Self::Pci(i, _, _) => strings::pci_pnpinfo(out, i),
             Self::Virtio(i) => strings::virtio_pnpinfo(out, i),
@@ -311,7 +316,7 @@ impl Ident {
     pub fn location(&self, out: &mut String) {
         use devtree::strings;
         let _ = match self {
-            Self::Root | Self::Platform | Self::Virtio(_) => Ok(()),
+            Self::Root | Self::Platform | Self::Nexus(_) | Self::Virtio(_) => Ok(()),
             Self::Acpi(_, path) => strings::acpi_location(out, path, None),
             Self::Pci(_, a, path) => strings::pci_location(out, a, path.as_deref(), None),
             Self::Test(_) => Ok(()),

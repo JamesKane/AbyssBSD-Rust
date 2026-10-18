@@ -7,6 +7,19 @@ name = "abi"
 version = "0.0.0"
 
 [[package]]
+name = "acpi"
+version = "0.0.0"
+dependencies = [
+ "aml",
+ "bus",
+ "devtree",
+ "irq",
+ "pci",
+ "sched",
+ "sync",
+]
+
+[[package]]
 name = "acpi-tables"
 version = "0.0.0"
 
@@ -130,6 +143,7 @@ name = "kernel"
 version = "0.0.0"
 dependencies = [
  "abi",
+ "acpi",
  "acpi-tables",
  "addr",
  "arch-aarch64",

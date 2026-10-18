@@ -23,6 +23,7 @@ bootproto = { path = "../boot/bootproto" }
 bus = { path = "../sys/bus" }
 devtree = { path = "../lib/devtree" }
 pci = { path = "../sys/pci" }
+acpi = { path = "../sys/acpi" }
 demangle = { path = "../lib/demangle" }
 efi = { path = "../boot/efi" }
 elf = { path = "../lib/elf" }

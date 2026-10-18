@@ -455,9 +455,21 @@ impl<D: Driver> StartCx<'_, D> {
         bus_data: Option<Arc<dyn Any + Send + Sync>>,
         resources: Vec<Resource>,
     ) -> DeviceId {
+        self.add_child_with_deps(ident, bus_data, resources, &[])
+    }
+
+    /// [`StartCx::add_child`] with firmware dependencies (`_DEP`, resource
+    /// sources) beyond this parent.
+    pub fn add_child_with_deps(
+        &mut self,
+        ident: Ident,
+        bus_data: Option<Arc<dyn Any + Send + Sync>>,
+        resources: Vec<Resource>,
+        deps: &[(DeviceId, devtree::graph::EdgeKind)],
+    ) -> DeviceId {
         let id = self
             .mgr
-            .add_child(self.s, self.binding.node, ident, bus_data, resources, &[]);
+            .add_child(self.s, self.binding.node, ident, bus_data, resources, deps);
         self.binding.sources.push(Source::Child(id));
         id
     }

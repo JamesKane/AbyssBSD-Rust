@@ -72,6 +72,7 @@ pub(crate) fn nexus() -> bus::DeviceId {
 /// rather than linker sections. Real buses and drivers arrive in P3.6 and
 /// P3.7; ktest builds add the manager's test drivers.
 static DRIVERS: &[DriverDecl] = &[
+    acpi::DRIVER,
     #[cfg(feature = "ktest")]
     crate::tests::bus_test::TEST_BUS,
     #[cfg(feature = "ktest")]
@@ -134,6 +135,19 @@ pub(crate) fn init(s: &Sleepable) {
     #[cfg(target_arch = "x86_64")]
     m.adopt(s, nexus, "apic", "APIC resources", bus::Ident::Platform);
     let _ = NEXUS.set(nexus);
+    if crate::acpi_bus::init(s) {
+        m.add_child(
+            s,
+            nexus,
+            bus::Ident::Nexus("acpi"),
+            None,
+            alloc::vec![],
+            &[],
+        );
+    }
+    // Boot goes on once the devices found so far have attached, as
+    // FreeBSD finishes autoconfiguration before mounting root.
+    bus::manager().wait_idle(s);
     kprintln!(
         "bus: device manager up, {} driver(s), {workers} attach worker(s){}",
         DRIVERS.len(),

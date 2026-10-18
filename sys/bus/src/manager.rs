@@ -870,14 +870,27 @@ impl Manager {
     /// Detaches every attached node, consumers before suppliers, for
     /// shutdown, so devices stop DMA before firmware takes over.
     pub fn shutdown(&self, s: &Sleepable) {
+        self.shutdown_under(self.root(), s);
+    }
+
+    /// [`Manager::shutdown`] for `top`'s subtree only.
+    pub fn shutdown_under(&self, top: DeviceId, s: &Sleepable) {
         let order: Vec<DeviceId> = {
             let t = self.topo.read(s);
+            let mut under = alloc::vec![false; t.nodes.len()];
+            let mut stack = alloc::vec![top.index];
+            while let Some(i) = stack.pop() {
+                if let Some(n) = t.nodes.get(i as usize).and_then(Option::as_ref) {
+                    under[i as usize] = true;
+                    stack.extend(&n.children);
+                }
+            }
             let mut g = t.graph.clone();
             let _ = g.break_cycles();
             g.shutdown_order()
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|&i| i != 0 && t.attached(i))
+                .filter(|&i| i != 0 && t.attached(i) && under.get(i as usize) == Some(&true))
                 // Adopted devices are the kernel's: they outlive the drivers.
                 .filter(|&i| {
                     t.nodes[i as usize]
@@ -937,6 +950,27 @@ impl Manager {
             location: &loc,
         };
         encode(handle(i), n.parent.map_or(0, handle), 0, flags, state, &f).ok()
+    }
+
+    /// `id`'s children, in the order they were added.
+    #[must_use]
+    pub fn children(&self, id: DeviceId, s: &Sleepable) -> Vec<DeviceId> {
+        let t = self.topo.read(s);
+        t.node(id)
+            .map(|n| n.children.iter().filter_map(|&c| t.id(c)).collect())
+            .unwrap_or_default()
+    }
+
+    /// `id`'s identity.
+    #[must_use]
+    pub fn ident(&self, id: DeviceId, s: &Sleepable) -> Option<Ident> {
+        Some(self.topo.read(s).node(id)?.ident.clone())
+    }
+
+    /// `id`'s description.
+    #[must_use]
+    pub fn description(&self, id: DeviceId, s: &Sleepable) -> Option<String> {
+        Some(self.topo.read(s).node(id)?.desc.clone())
     }
 
     /// The state of `id`.

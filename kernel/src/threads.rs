@@ -14,8 +14,9 @@ pub(crate) const STACK_PAGES: u64 = 4;
 struct Platform;
 
 impl sched::Platform for Platform {
-    fn alloc_stack(&self) -> Option<sched::Stack> {
-        let stack = KernelStack::new(STACK_PAGES).ok()?;
+    fn alloc_stack(&self, min_bytes: Option<usize>) -> Option<sched::Stack> {
+        let pages = min_bytes.map_or(STACK_PAGES, |b| (b as u64).div_ceil(4096).max(STACK_PAGES));
+        let stack = KernelStack::new(pages).ok()?;
         let top = stack.top().get();
         Some(sched::Stack {
             top,

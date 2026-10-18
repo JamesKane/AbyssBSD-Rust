@@ -94,6 +94,28 @@ pub unsafe fn inb(port: u16) -> u8 {
     v
 }
 
+/// Writes a 16-bit value to an I/O port.
+///
+/// # Safety
+///
+/// As for [`outb`].
+pub unsafe fn outw(port: u16, v: u16) {
+    // SAFETY: per the caller's contract.
+    unsafe { asm!("out dx, ax", in("dx") port, in("ax") v, options(nomem, nostack)) };
+}
+
+/// Reads a 16-bit I/O port.
+///
+/// # Safety
+///
+/// As for [`inb`].
+pub unsafe fn inw(port: u16) -> u16 {
+    let v;
+    // SAFETY: per the caller's contract.
+    unsafe { asm!("in ax, dx", in("dx") port, out("ax") v, options(nomem, nostack)) };
+    v
+}
+
 /// Writes a 32-bit value to an I/O port.
 ///
 /// # Safety

@@ -70,8 +70,9 @@ pub struct Stack {
 
 /// What the scheduler needs from the rest of the kernel.
 pub trait Platform: Sync {
-    /// A fresh kernel stack.
-    fn alloc_stack(&self) -> Option<Stack>;
+    /// A fresh kernel stack of at least `min_bytes`, or the platform's
+    /// default size when `None`.
+    fn alloc_stack(&self, min_bytes: Option<usize>) -> Option<Stack>;
     /// Frees a stack from [`Platform::alloc_stack`]; never called on the
     /// stack in use.
     fn free_stack(&self, stack: Stack);
@@ -313,7 +314,7 @@ pub fn init_cpu(name: &str) {
     let boot = Arc::new(Thread::new(name, Priority::KERNEL, id, None, None, false));
     adopt_running(pcpu, boot);
 
-    let stack = platform().alloc_stack().expect("idle thread stack");
+    let stack = platform().alloc_stack(None).expect("idle thread stack");
     let idle = Arc::new(Thread::new(
         "idle",
         Priority::IDLE_THREAD,
@@ -388,6 +389,7 @@ pub struct Builder<'a> {
     priority: Priority,
     bound: Option<CpuId>,
     fpu: bool,
+    stack: Option<usize>,
 }
 
 impl<'a> Builder<'a> {
@@ -400,7 +402,16 @@ impl<'a> Builder<'a> {
             priority: Priority::KERNEL,
             bound: None,
             fpu: false,
+            stack: None,
         }
+    }
+
+    /// Gives the thread a stack of at least `bytes` rather than the
+    /// default (for deep recursion such as the AML interpreter).
+    #[must_use]
+    pub const fn stack(mut self, bytes: usize) -> Self {
+        self.stack = Some(bytes);
+        self
     }
 
     /// Runs at `p`.
@@ -435,7 +446,9 @@ impl<'a> Builder<'a> {
         } else {
             None
         };
-        let stack = platform().alloc_stack().ok_or(SpawnError::NoStack)?;
+        let stack = platform()
+            .alloc_stack(self.stack)
+            .ok_or(SpawnError::NoStack)?;
         let here = hal::cpu_id();
         let t = Arc::new(Thread::with_fpu(
             self.name,

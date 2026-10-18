@@ -132,6 +132,12 @@ impl<'a> Sdt<'a> {
         &self.bytes[10..16]
     }
 
+    /// The OEM table ID.
+    #[must_use]
+    pub fn oem_table_id(&self) -> &'a [u8] {
+        &self.bytes[16..24]
+    }
+
     /// The whole table, header included.
     #[must_use]
     pub fn bytes(&self) -> &'a [u8] {
@@ -194,6 +200,12 @@ impl<'a, M: PhysMem<'a>> Tables<'a, M> {
         let mut oem_id = [0; 6];
         oem_id.copy_from_slice(&v1[9..15]);
         Ok(Self { mem, xsdt, oem_id })
+    }
+
+    /// The XSDT itself.
+    #[must_use]
+    pub fn xsdt(&self) -> Sdt<'a> {
+        self.xsdt
     }
 
     /// The physical addresses listed in the XSDT.

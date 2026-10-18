@@ -1,0 +1,18 @@
+[package]
+name = "acpi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+aml = { path = "../../lib/aml" }
+bus = { path = "../bus" }
+devtree = { path = "../../lib/devtree" }
+irq = { path = "../irq" }
+pci = { path = "../pci" }
+sched = { path = "../sched" }
+sync = { path = "../sync" }
+
+[lints]
+workspace = true
