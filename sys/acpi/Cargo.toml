@@ -14,5 +14,8 @@ pci = { path = "../pci" }
 sched = { path = "../sched" }
 sync = { path = "../sync" }
 
+[dev-dependencies]
+aml = { path = "../../lib/aml", features = ["asm"] }
+
 [lints]
 workspace = true

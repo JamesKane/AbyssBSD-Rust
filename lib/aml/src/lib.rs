@@ -126,5 +126,7 @@ pub enum Error {
     Internal,
 }
 
+#[cfg(any(test, feature = "asm"))]
+pub mod asm;
 #[cfg(test)]
 mod tests;

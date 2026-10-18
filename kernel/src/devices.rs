@@ -180,6 +180,7 @@ pub(crate) fn init(s: &Sleepable) {
     m.adopt(s, nexus, "apic", "APIC resources", bus::Ident::Platform);
     let _ = NEXUS.set(nexus);
     if crate::acpi_bus::init(s) {
+        crate::acpi_bus::apply_cppc(s);
         m.add_child(
             s,
             nexus,

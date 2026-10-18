@@ -5,8 +5,9 @@
 //! uses to prefer faster CPUs.
 //!
 //! Capacities are a first approximation by core type (little cores, and
-//! x86 hybrid efficiency cores, at about half); CPPC (`_CPC`, Phase 3)
-//! refines them with real performance levels.
+//! x86 hybrid efficiency cores, at about half); CPPC (`_CPC`) replaces
+//! them with each processor's highest performance level, scaled so the
+//! fastest is 1024, once ACPI is up.
 //!
 //! Behavior reference: sys/arm64/arm64/identcpu.c, sys/x86/x86/mp_x86.c
 //! (topology), sys/kern/subr_smp.c (cpu_topo).
@@ -292,4 +293,43 @@ pub(crate) fn summarize() {
     for (name, capacity, n) in classes {
         kprintln!("topology:   {n} x {name} (capacity {capacity})");
     }
+}
+
+/// Sets capacities from CPPC: each CPU's highest performance, scaled so
+/// the fastest is 1024. `levels` holds (ACPI processor UID, highest
+/// performance); CPUs without a level keep their estimate.
+pub(crate) fn apply_cppc(levels: &[(u32, u64)]) {
+    let Some(max) = levels.iter().map(|&(_, h)| h).max().filter(|&m| m > 0) else {
+        return;
+    };
+    let Some(madt) = crate::acpi::find(*b"APIC").and_then(|t| acpi_tables::madt::parse(&t).ok())
+    else {
+        return;
+    };
+    let mut changed = 0;
+    for i in 0..u32::try_from(sched::online_cpus()).unwrap_or(0) {
+        let cpu = CpuId(i);
+        let Some(hw) = crate::intc::hw_id(cpu) else {
+            continue;
+        };
+        let uid = madt.cpus().find_map(|c| {
+            let id = match c.hw_id {
+                acpi_tables::madt::HwId::Apic(a) => u64::from(a),
+                acpi_tables::madt::HwId::Mpidr(m) => m,
+                acpi_tables::madt::HwId::GicCpuInterface(_) => return None,
+            };
+            (id == hw).then_some(c.uid)
+        });
+        let Some(&(_, highest)) = uid.and_then(|u| levels.iter().find(|(l, _)| *l == u)) else {
+            continue;
+        };
+        let capacity =
+            u16::try_from((highest.saturating_mul(1024) / max).clamp(1, 1024)).unwrap_or(1024);
+        if let Some(info) = CPUS.lock()[cpu.index()].as_mut() {
+            info.capacity = capacity;
+        }
+        sched::set_capacity(cpu, capacity);
+        changed += 1;
+    }
+    kprintln!("topology: CPPC levels for {changed} CPU(s), highest {max}");
 }

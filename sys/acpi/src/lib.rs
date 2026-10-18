@@ -19,10 +19,12 @@ extern crate alloc;
 
 pub mod bus;
 pub mod button;
+pub mod cpc;
 pub mod events;
 pub mod ged;
 mod host;
 pub mod pcib;
+pub mod power;
 pub mod service;
 
 pub use bus::{AcpiBus, AcpiDevice, DRIVER};

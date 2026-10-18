@@ -41,10 +41,10 @@ pub struct AcpiDevice {
 }
 
 /// One device found in the namespace.
-struct Found {
-    device: AcpiDevice,
-    ident: AcpiIdent,
-    deps: Vec<String>,
+pub(crate) struct Found {
+    pub(crate) device: AcpiDevice,
+    pub(crate) ident: AcpiIdent,
+    pub(crate) deps: Vec<String>,
 }
 
 /// IDs FreeBSD keeps even when `_STA` says absent.
@@ -55,7 +55,7 @@ fn always_present(ident: &AcpiIdent) -> bool {
         .is_some_and(|h| h == "PNP0C0F" || h == "PNP0B00")
 }
 
-fn walk(interp: &mut aml::Interpreter, host: &mut dyn aml::Host) -> Vec<Found> {
+pub(crate) fn walk(interp: &mut aml::Interpreter, host: &mut dyn aml::Host) -> Vec<Found> {
     let mut out = Vec::new();
     for node in interp.devices() {
         let path = alloc::format!("{}", interp.path(node));
@@ -76,6 +76,8 @@ fn walk(interp: &mut aml::Interpreter, host: &mut dyn aml::Host) -> Vec<Found> {
         if !present && !always_present(&ident) {
             continue;
         }
+        // D0 before any driver sees it.
+        let _ = crate::power::to_d0(interp, node, host);
         let crs = interp.crs(node, host).ok().flatten().unwrap_or_default();
         let mut deps: Vec<String> = interp
             .dep(node, host)

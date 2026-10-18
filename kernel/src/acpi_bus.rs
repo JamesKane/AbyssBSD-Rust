@@ -280,6 +280,16 @@ pub(crate) static POWER_BUTTON_TEST: core::sync::atomic::AtomicBool =
 
 static OPS: KernelAcpi = KernelAcpi;
 
+/// CPU capacities from `_CPC`, where firmware gives performance levels.
+pub(crate) fn apply_cppc(s: &sched::Sleepable) {
+    let Some(svc) = acpi::service() else { return };
+    let levels = svc.run(s, |interp, host| acpi::cpc::levels(interp, host, &OPS));
+    let levels: Vec<(u32, u64)> = levels.iter().map(|c| (c.uid, c.highest)).collect();
+    if !levels.is_empty() {
+        crate::topology::apply_cppc(&levels);
+    }
+}
+
 /// Loads the AML namespace on its own thread. Returns whether ACPI is
 /// usable.
 pub(crate) fn init(s: &sched::Sleepable) -> bool {
