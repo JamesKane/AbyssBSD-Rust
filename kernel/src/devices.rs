@@ -105,31 +105,30 @@ pub(crate) fn nexus() -> bus::DeviceId {
     *NEXUS.get().expect("devices::init")
 }
 
-/// The drivers this build includes (DRIVER-MODEL.md §7.1): reviewable code
-/// rather than linker sections. Real buses and drivers arrive in P3.6 and
-/// P3.7; ktest builds add the manager's test drivers.
-static DRIVERS: &[DriverDecl] = &[
-    acpi::DRIVER,
-    acpi::PCIB,
-    pci::bus::DRIVER,
-    virtio::pci::MODERN,
-    virtio::pci::LEGACY,
-    virtio_random::DRIVER,
-    #[cfg(feature = "ktest")]
+/// The manager's test drivers, which ktest builds add to the table.
+#[cfg(feature = "ktest")]
+static TEST_DRIVERS: &[DriverDecl] = &[
     crate::tests::bus_test::TEST_BUS,
-    #[cfg(feature = "ktest")]
     crate::tests::bus_test::TEST_DEV,
-    #[cfg(feature = "ktest")]
     crate::tests::bus_test::PICKY,
-    #[cfg(feature = "ktest")]
     crate::tests::bus_test::FALLBACK,
-    #[cfg(feature = "ktest")]
     crate::tests::bus_test::BROKEN,
-    #[cfg(feature = "ktest")]
     crate::tests::bus_test::SLOW,
-    #[cfg(feature = "ktest")]
     crate::tests::bus_test::NEEDY,
 ];
+
+/// The build's drivers (`driver-table`, checked on the host for ties),
+/// plus the test drivers in ktest builds.
+fn drivers() -> &'static [DriverDecl] {
+    #[cfg(feature = "ktest")]
+    {
+        let mut all = alloc::vec::Vec::from(driver_table::DRIVERS);
+        all.extend_from_slice(TEST_DRIVERS);
+        alloc::vec::Vec::leak(all)
+    }
+    #[cfg(not(feature = "ktest"))]
+    driver_table::DRIVERS
+}
 
 /// Keeps drivers off the devices the console took over from the loader;
 /// their real drivers will adopt them explicitly (P3.8).
@@ -160,10 +159,11 @@ pub(crate) fn init(s: &Sleepable) {
         sched::online_cpus().clamp(1, 4)
     };
     let verifier = crate::boot::flag("abyss.verifier");
+    let drivers = drivers();
     let root = bus::init(
         s,
         &PLATFORM,
-        DRIVERS,
+        drivers,
         bus::Options {
             workers,
             fault_one_in: if verifier { 64 } else { 0 },
@@ -192,7 +192,7 @@ pub(crate) fn init(s: &Sleepable) {
     bus::manager().wait_idle(s);
     kprintln!(
         "bus: device manager up, {} driver(s), {workers} attach worker(s){}",
-        DRIVERS.len(),
+        drivers.len(),
         if verifier { ", verifier on" } else { "" }
     );
 }

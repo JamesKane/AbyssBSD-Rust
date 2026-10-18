@@ -1,0 +1,19 @@
+[package]
+name = "driver-table"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+acpi = { path = "../../sys/acpi" }
+bus = { path = "../../sys/bus" }
+pci = { path = "../../sys/pci" }
+virtio = { path = "../../sys/virtio" }
+virtio-random = { path = "../../drivers/virtio-random" }
+
+[dev-dependencies]
+devtree = { path = "../../lib/devtree" }
+
+[lints]
+workspace = true

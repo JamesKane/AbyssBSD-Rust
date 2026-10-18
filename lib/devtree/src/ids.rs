@@ -10,7 +10,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::matching::{Matches, Rank};
+use crate::matching::{Matches, Rank, Witness};
 
 /// A PCI function's identity, from configuration space.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,6 +131,20 @@ impl Matches<PciIdent> for PciId {
     }
 }
 
+impl Witness<PciIdent> for PciId {
+    fn witness(&self) -> PciIdent {
+        let (subvendor, subdevice) = self.subsystem.unwrap_or((0, 0));
+        PciIdent {
+            vendor: self.vendor.unwrap_or(0),
+            device: self.device.unwrap_or(0),
+            subvendor,
+            subdevice,
+            class: self.class.map_or(0, |(c, _)| c),
+            revision: 0,
+        }
+    }
+}
+
 /// A virtio device's identity, from its transport.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VirtioIdent {
@@ -172,6 +186,17 @@ impl VirtioId {
 impl Matches<VirtioIdent> for VirtioId {
     fn rank_for(&self, i: &VirtioIdent) -> Option<Rank> {
         (i.device_type == self.device_type).then_some(self.rank)
+    }
+}
+
+impl Witness<VirtioIdent> for VirtioId {
+    fn witness(&self) -> VirtioIdent {
+        VirtioIdent {
+            vendor: 0,
+            device: 0,
+            subvendor: 0,
+            device_type: self.device_type,
+        }
     }
 }
 
@@ -225,5 +250,14 @@ impl Matches<AcpiIdent> for AcpiId {
     fn rank_for(&self, i: &AcpiIdent) -> Option<Rank> {
         let hit = i.hid.as_deref() == Some(self.id) || i.cids.iter().any(|c| c == self.id);
         hit.then_some(self.rank)
+    }
+}
+
+impl Witness<AcpiIdent> for AcpiId {
+    fn witness(&self) -> AcpiIdent {
+        AcpiIdent {
+            hid: Some(self.id.into()),
+            ..AcpiIdent::default()
+        }
     }
 }

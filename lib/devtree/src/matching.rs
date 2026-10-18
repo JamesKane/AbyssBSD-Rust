@@ -60,6 +60,15 @@ impl<Id> Candidate<'_, Id> {
     }
 }
 
+/// An ID entry that can produce an identity it matches, so the build-time
+/// ambiguity check covers every entry of every table, not only devices
+/// someone recorded.
+pub trait Witness<I> {
+    /// An identity this entry matches (fields it does not constrain are
+    /// zero or empty).
+    fn witness(&self) -> I;
+}
+
 /// The outcome of matching one device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Selection {

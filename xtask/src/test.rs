@@ -353,6 +353,10 @@ pub(crate) fn cmd_check(args: Args) -> Result<()> {
             }
         }
     }
+    // DRIVER-MODEL.md §7.2: two drivers tied on a device with neither
+    // yielding is a build error.
+    println!("== driver table");
+    util::run(util::cargo().args(["test", "--quiet", "--package", "driver-table"]))?;
     println!("== policy");
     policy::check()
 }

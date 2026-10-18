@@ -88,6 +88,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "driver-table"
+version = "0.0.0"
+dependencies = [
+ "acpi",
+ "bus",
+ "devtree",
+ "pci",
+ "virtio",
+ "virtio-random",
+]
+
+[[package]]
 name = "efi"
 version = "0.0.0"
 dependencies = [
@@ -152,6 +164,7 @@ dependencies = [
  "bus",
  "demangle",
  "devtree",
+ "driver-table",
  "efi",
  "elf",
  "fb-console",
@@ -167,7 +180,6 @@ dependencies = [
  "sysctl",
  "uart-16550",
  "uart-pl011",
- "virtio",
  "virtio-random",
  "vm",
 ]
