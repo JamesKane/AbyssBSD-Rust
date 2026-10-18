@@ -67,6 +67,10 @@ pub trait Platform: Sync {
     fn now(&self) -> u64;
     /// Makes `cpu` reschedule soon (an IPI, or nothing if it is this CPU).
     fn kick(&self, cpu: CpuId);
+    /// Reprograms this CPU's event timer because what it waits for may
+    /// have changed (a switch, or a newly queued thread). Interrupts are
+    /// masked.
+    fn rearm_timer(&self);
 }
 
 static PLATFORM: Once<&'static dyn Platform> = Once::new();
@@ -297,11 +301,18 @@ pub(crate) fn make_runnable(t: Arc<Thread>) {
             .try_lock()
             .map_or(Priority::KERNEL, |i| i.priority)
     };
+    let local = c.id == hal::cpu_id();
     if prio.beats(running_prio) {
         c.request_resched();
-        if c.id != hal::cpu_id() {
+        if !local {
             platform().kick(c.id);
         }
+    }
+    if local {
+        // A queued thread may need the slice timer started.
+        let irq = hal::irq::disable();
+        platform().rearm_timer();
+        hal::irq::restore(irq);
     }
 }
 
@@ -342,6 +353,30 @@ impl Drop for PreemptGuard {
     }
 }
 
+/// When the current time slice ends, if threads are waiting for this CPU
+/// (nothing to preempt otherwise). Interrupts must be masked.
+#[must_use]
+pub fn slice_deadline(slice: u64) -> Option<u64> {
+    let c = this_cpu();
+    // SAFETY: `current` is live while it runs on this CPU.
+    let cur = unsafe { &*c.current.get() };
+    if cur.idle || c.runq.lock().is_empty() {
+        return None;
+    }
+    let since = cur.inner.lock().since;
+    Some(since.saturating_add(slice))
+}
+
+/// Timer-interrupt bookkeeping: asks for a reschedule if the current
+/// thread has used up its slice and others are waiting. Interrupts must
+/// be masked.
+pub fn tick(slice: u64) {
+    let c = this_cpu();
+    if slice_deadline(slice).is_some_and(|d| platform().now() >= d) {
+        c.request_resched();
+    }
+}
+
 /// Called on the way out of an interrupt handler, interrupts masked: if a
 /// reschedule is pending and preemption is allowed, switches threads.
 pub fn preempt_point() {
@@ -364,24 +399,22 @@ pub(crate) fn switch_away() {
     let mut inner = cur.inner.lock();
     let state = inner.state;
     let elapsed = now.saturating_sub(inner.since);
+    let prio = inner.priority;
+    if state == State::Running {
+        inner.state = State::Runnable;
+    }
+    // Release the thread's lock before touching any queue (lock order),
+    // and never carry it across the switch.
+    drop(inner);
     cur.runtime.fetch_add(elapsed, Ordering::Relaxed);
     let owned = match state {
-        State::Running if cur.idle => {
-            // The idle thread is never queued; it is the fallback.
-            inner.state = State::Runnable;
-            None
-        }
+        // The idle thread is never queued; it is the fallback.
+        State::Running if cur.idle => None,
         State::Running => {
-            inner.state = State::Runnable;
-            let prio = inner.priority;
-            drop(inner);
             c.runq.lock().push(Arc::clone(&cur), prio);
             Some(cur)
         }
-        State::Sleeping | State::Runnable | State::Dead => {
-            drop(inner);
-            Some(cur)
-        }
+        State::Sleeping | State::Runnable | State::Dead => Some(cur),
         State::New => unreachable!("a new thread cannot be running"),
     };
 
@@ -395,6 +428,7 @@ pub(crate) fn switch_away() {
         drop(inner);
         drop(owned);
         c.current.set(Arc::into_raw(next));
+        platform().rearm_timer();
         return;
     }
 
@@ -432,6 +466,7 @@ pub(crate) fn switch_away() {
         hal::switch((*cur_ptr).context.get(), (*next_ptr).context.get());
     }
     finish_switch();
+    platform().rearm_timer();
 }
 
 /// Takes the next thread for `c`: its own queue, then another CPU's, then

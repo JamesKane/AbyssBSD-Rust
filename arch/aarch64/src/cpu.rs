@@ -75,6 +75,11 @@ pub fn midr() -> u64 {
     read_sysreg!("midr_el1")
 }
 
+/// `MPIDR_EL1`, the CPU's affinity (hardware ID).
+pub fn mpidr() -> u64 {
+    read_sysreg!("mpidr_el1") & 0xff_00ff_ffff
+}
+
 /// Per-CPU data reached through `TPIDR_EL1`.
 #[repr(C)]
 #[derive(Debug)]

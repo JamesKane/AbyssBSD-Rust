@@ -104,6 +104,18 @@ pub unsafe fn outl(port: u16, v: u32) {
     unsafe { asm!("out dx, eax", in("dx") port, in("eax") v, options(nomem, nostack)) };
 }
 
+/// Reads a 32-bit I/O port.
+///
+/// # Safety
+///
+/// As for [`inb`].
+pub unsafe fn inl(port: u16) -> u32 {
+    let v;
+    // SAFETY: per the caller's contract.
+    unsafe { asm!("in eax, dx", in("dx") port, out("eax") v, options(nomem, nostack)) };
+    v
+}
+
 /// Disables interrupts.
 pub fn disable_interrupts() {
     // SAFETY: CLI only masks interrupts.

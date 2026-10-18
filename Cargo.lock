@@ -93,6 +93,7 @@ version = "0.0.0"
 name = "kernel"
 version = "0.0.0"
 dependencies = [
+ "acpi-tables",
  "addr",
  "arch-aarch64",
  "arch-x86_64",

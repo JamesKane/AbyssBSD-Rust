@@ -26,7 +26,11 @@ mod entry;
 #[cfg(target_os = "none")]
 pub mod fixup;
 #[cfg(target_os = "none")]
+pub mod gic;
+#[cfg(target_os = "none")]
 pub mod mmu;
+#[cfg(target_os = "none")]
+pub mod timer;
 #[cfg(target_os = "none")]
 pub mod trap;
 
@@ -36,7 +40,7 @@ pub use cpu::cpu_id;
 #[cfg(target_os = "none")]
 pub use entry::booted_at_el2;
 #[cfg(target_os = "none")]
-pub use trap::TrapReport;
+pub use trap::{Interrupt, TrapReport};
 
 /// The architecture name FreeBSD uses (`uname -m`).
 pub const NAME: &str = "arm64";
@@ -44,13 +48,14 @@ pub const NAME: &str = "arm64";
 /// Defines the kernel's entry point and fatal-trap handler.
 ///
 /// ```ignore
-/// arch::kernel_hooks!(main = kmain, fatal_trap = on_fatal_trap);
+/// arch::kernel_hooks!(main = kmain, fatal_trap = on_fatal_trap, interrupt = on_irq);
 /// fn kmain(boot_info: arch::PhysAddr) -> ! { … }
 /// fn on_fatal_trap(report: &arch::TrapReport) -> ! { … }
+/// fn on_irq(irq: arch::Interrupt) { … }
 /// ```
 #[macro_export]
 macro_rules! kernel_hooks {
-    (main = $main:path, fatal_trap = $trap:path $(,)?) => {
+    (main = $main:path, fatal_trap = $trap:path, interrupt = $irq:path $(,)?) => {
         #[unsafe(no_mangle)]
         fn abyss_kernel_main(boot_info: $crate::PhysAddr) -> ! {
             $main(boot_info)
@@ -59,6 +64,11 @@ macro_rules! kernel_hooks {
         #[unsafe(no_mangle)]
         fn abyss_fatal_trap(report: &$crate::TrapReport) -> ! {
             $trap(report)
+        }
+
+        #[unsafe(no_mangle)]
+        fn abyss_interrupt(irq: $crate::Interrupt) {
+            $irq(irq)
         }
     };
 }
@@ -69,6 +79,8 @@ unsafe extern "Rust" {
     fn abyss_kernel_main(boot_info: PhysAddr) -> !;
     /// Defined by [`kernel_hooks!`].
     fn abyss_fatal_trap(report: &TrapReport) -> !;
+    /// Defined by [`kernel_hooks!`].
+    fn abyss_interrupt(irq: Interrupt);
 }
 
 #[cfg(target_os = "none")]

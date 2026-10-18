@@ -21,8 +21,10 @@ use arch_x86_64 as arch;
 
 #[macro_use]
 mod console;
+mod acpi;
 mod boot;
 mod firmware;
+mod irq;
 mod mm;
 mod panic;
 mod qemu;
@@ -30,10 +32,18 @@ mod symbols;
 #[cfg(feature = "ktest")]
 mod tests;
 mod threads;
+// Callouts and timed waits are only exercised by tests until SMP bring-up
+// and the stress test use them.
+#[cfg_attr(not(feature = "ktest"), allow(dead_code))]
+mod time;
 
 use addr::PhysAddr;
 
-arch::kernel_hooks!(main = kmain, fatal_trap = panic::fatal_trap);
+arch::kernel_hooks!(
+    main = kmain,
+    fatal_trap = panic::fatal_trap,
+    interrupt = irq::dispatch,
+);
 
 fn kmain(boot_info: PhysAddr) -> ! {
     let Ok(info) = boot::take(boot_info) else {
@@ -58,7 +68,9 @@ fn kmain(boot_info: PhysAddr) -> ! {
     let tables = mm::init(info);
     firmware::init(info, tables.firmware_root);
     kprintln!("kernel page tables live (W^X, DMAP, no identity map)");
+    irq::init_boot_cpu();
     threads::init();
+    hal::irq::enable();
 
     #[cfg(feature = "ktest")]
     tests::run();

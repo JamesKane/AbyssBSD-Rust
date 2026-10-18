@@ -16,6 +16,7 @@ bench = false
 ktest = []
 
 [dependencies]
+acpi-tables = { path = "../lib/acpi-tables" }
 addr = { path = "../lib/addr" }
 bootproto = { path = "../boot/bootproto" }
 demangle = { path = "../lib/demangle" }

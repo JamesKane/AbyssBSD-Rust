@@ -302,6 +302,86 @@ ktest! {
     }
 }
 
+ktest! {
+    fn clock_advances_and_sleeps_last() {
+        let t0 = crate::time::now_ns();
+        crate::time::sleep_ns(20_000_000);
+        let slept = crate::time::now_ns() - t0;
+        assert!(slept >= 20_000_000, "slept only {slept} ns");
+        assert!(slept < 2_000_000_000, "slept {slept} ns");
+        assert!(crate::time::ticks(hal::CpuId::BOOT) > 0, "timer interrupts arrive");
+    }
+}
+
+ktest! {
+    fn callouts_fire_in_order_and_cancel() {
+        use alloc::sync::Arc;
+        use core::sync::atomic::AtomicU64;
+        use crate::time::Callout;
+        let log = Arc::new(AtomicU64::new(0));
+        let q = Arc::new(sched::WaitQueue::new());
+        let push = |digit: u64| {
+            let (log, q) = (Arc::clone(&log), Arc::clone(&q));
+            move || {
+                let v = log.load(Ordering::Relaxed);
+                log.store(v * 10 + digit, Ordering::Release);
+                q.wake_all();
+            }
+        };
+        Callout::after(30_000_000, push(3)).forget();
+        Callout::after(10_000_000, push(1)).forget();
+        let cancelled = Callout::after(20_000_000, push(9));
+        Callout::after(20_000_000, push(2)).forget();
+        assert!(cancelled.cancel());
+        q.wait_until(|| log.load(Ordering::Acquire) >= 100);
+        assert_eq!(log.load(Ordering::Relaxed), 123);
+    }
+}
+
+ktest! {
+    fn timed_waits_time_out() {
+        use alloc::sync::Arc;
+        let q = Arc::new(sched::WaitQueue::new());
+        let t0 = crate::time::now_ns();
+        assert!(!crate::time::wait_timeout(&q, || false, 15_000_000));
+        assert!(crate::time::now_ns() - t0 >= 15_000_000);
+        assert!(crate::time::wait_timeout(&q, || true, 15_000_000));
+    }
+}
+
+ktest! {
+    fn busy_threads_are_preempted() {
+        use alloc::sync::Arc;
+        use alloc::vec::Vec;
+        use core::sync::atomic::{AtomicBool, AtomicU64};
+        // Two threads spin without yielding; both must make progress, which
+        // only time-slice preemption allows on one CPU.
+        let stop = Arc::new(AtomicBool::new(false));
+        let counts: Vec<Arc<AtomicU64>> = (0..2).map(|_| Arc::new(AtomicU64::new(0))).collect();
+        let threads: Vec<_> = counts
+            .iter()
+            .map(|c| {
+                let (c, stop) = (Arc::clone(c), Arc::clone(&stop));
+                sched::spawn_on("spinner", sched::Priority::KERNEL, Some(hal::CpuId::BOOT), move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        c.fetch_add(1, Ordering::Relaxed);
+                    }
+                })
+                .unwrap()
+            })
+            .collect();
+        crate::time::sleep_ns(100_000_000);
+        stop.store(true, Ordering::Relaxed);
+        for t in &threads {
+            t.join();
+        }
+        for (i, c) in counts.iter().enumerate() {
+            assert!(c.load(Ordering::Relaxed) > 0, "spinner {i} never ran");
+        }
+        assert!(threads.iter().all(|t| t.switches() >= 2), "no preemption");
+    }
+}
+
 /// A small fixed buffer for formatting in tests.
 struct Buf {
     bytes: [u8; 128],

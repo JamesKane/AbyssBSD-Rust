@@ -23,6 +23,7 @@ use bootproto::{BootInfo, MemoryKind, MemoryRegion};
 use pt::{Attrs, Frame, PageTable};
 use sync::SpinLock;
 use vm::phys::{self, DomainId, PhysAllocator, Segment, VmPage};
+use vm::vmem::{Vmem, VmemError};
 use vm::{Order, Pfn};
 
 use crate::arch;
@@ -382,6 +383,41 @@ pub(crate) fn map_fresh(va: VirtAddr, len: u64, attrs: Attrs) -> Result<(), pt::
     }
     arch::mmu::sync_new_mappings();
     Ok(())
+}
+
+/// The kernel virtual memory arena: stacks and device mappings.
+pub(crate) static KVA: SpinLock<Vmem<1024>> = SpinLock::new(Vmem::new(KVA_BASE, KVA_SIZE, 4096));
+
+/// Why a device could not be mapped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeviceMapError {
+    /// No kernel virtual memory.
+    Address(VmemError),
+    /// The page tables could not be extended.
+    Map(pt::MapError),
+}
+
+/// Maps the device registers at `[pa, pa + len)` (uncached) into kernel
+/// virtual memory for the life of the kernel, returning the address of
+/// `pa`.
+pub(crate) fn map_device(pa: PhysAddr, len: u64) -> Result<VirtAddr, DeviceMapError> {
+    let off = pa.get() % 4096;
+    let span =
+        addr::align_up(len + off, 4096).ok_or(DeviceMapError::Map(pt::MapError::Misaligned))?;
+    let va = VirtAddr::new(
+        KVA.lock()
+            .alloc(span, 4096)
+            .map_err(DeviceMapError::Address)?,
+    );
+    let mut map = KERNEL_MAP.lock();
+    let table = map.as_mut().expect("kernel map");
+    if let Err(e) = table.map(&mut Frames, va, pa - off, span, Attrs::DEVICE) {
+        // Mappings made before an out-of-memory failure stay, and the
+        // address range is leaked with them rather than reused.
+        return Err(DeviceMapError::Map(e));
+    }
+    arch::mmu::sync_new_mappings();
+    Ok(va + off)
 }
 
 /// Unmaps `[va, va + len)` from the kernel table and frees the frames.

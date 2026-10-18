@@ -120,8 +120,26 @@ pub(crate) unsafe fn init_boot_cpu() {
     unsafe { asm!("msr vbar_el1, {}", "isb", in(reg) base, options(nostack)) };
 }
 
+/// An IRQ or FIQ; the kernel acknowledges it at the GIC.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Interrupt {
+    /// Taken from EL0 rather than EL1.
+    pub from_user: bool,
+}
+
 /// Called from the common path with interrupts masked.
 extern "C" fn dispatch(frame: &mut TrapFrame) {
+    // Slots: 4-7 current EL with SP_ELx, 8-11 lower EL AArch64; within
+    // each group of four, 1 is IRQ and 2 is FIQ.
+    if matches!(frame.slot, 5 | 6 | 9 | 10) {
+        // SAFETY: defined by the kernel through `kernel_hooks!`.
+        unsafe {
+            crate::abyss_interrupt(Interrupt {
+                from_user: frame.slot >= 8,
+            });
+        }
+        return;
+    }
     let trap = Trap::decode(frame);
     let same_el = frame.slot < 8;
     if same_el

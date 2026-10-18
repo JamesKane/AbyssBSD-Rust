@@ -33,16 +33,19 @@ impl WaitQueue {
     /// (and interrupts masked), so it must be short and must not sleep.
     pub fn wait_until(&self, mut done: impl FnMut() -> bool) {
         loop {
+            // Mask interrupts before taking the queue lock, so they stay
+            // masked from the check until the switch: a preemption between
+            // queueing and switching would run the scheduler twice.
+            let irq = hal::irq::disable();
             let mut q = self.waiters.lock();
             if done() {
+                drop(q);
+                hal::irq::restore(irq);
                 return;
             }
             let me = crate::current_arc();
             me.inner.lock().state = State::Sleeping;
             q.push_back(me);
-            // The queue lock's guard masks interrupts; keep them masked
-            // until the switch so the sleep is not preempted half-done.
-            let irq = hal::irq::disable();
             drop(q);
             crate::switch_away();
             hal::irq::restore(irq);

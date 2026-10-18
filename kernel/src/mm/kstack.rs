@@ -3,13 +3,10 @@
 //! guard page below, so an overflow faults instead of corrupting memory.
 
 use addr::VirtAddr;
-use bootproto::layout::{KVA_BASE, KVA_SIZE};
 use pt::Attrs;
-use sync::SpinLock;
-use vm::vmem::{Vmem, VmemError};
+use vm::vmem::VmemError;
 
-/// The kernel virtual memory arena.
-static KVA: SpinLock<Vmem<1024>> = SpinLock::new(Vmem::new(KVA_BASE, KVA_SIZE, 4096));
+use super::KVA;
 
 /// Why a stack could not be made.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

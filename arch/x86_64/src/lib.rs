@@ -8,11 +8,12 @@
 //! exported through the `arch/hal` hooks at the end of this file.
 //!
 //! The kernel binary connects to this crate with [`kernel_hooks!`], which
-//! defines the two functions the entry and trap code call into.
+//! defines the functions the entry and trap code call into.
 
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+pub mod apic;
 pub mod backtrace;
 mod context;
 pub mod cpu;
@@ -24,7 +25,7 @@ pub mod trap;
 
 pub use addr::{PhysAddr, VirtAddr};
 pub use gdt::cpu_id;
-pub use trap::TrapReport;
+pub use trap::{Interrupt, TrapReport};
 
 /// The architecture name FreeBSD uses (`uname -m`).
 pub const NAME: &str = "amd64";
@@ -32,13 +33,14 @@ pub const NAME: &str = "amd64";
 /// Defines the kernel's entry point and fatal-trap handler.
 ///
 /// ```ignore
-/// arch::kernel_hooks!(main = kmain, fatal_trap = on_fatal_trap);
+/// arch::kernel_hooks!(main = kmain, fatal_trap = on_fatal_trap, interrupt = on_irq);
 /// fn kmain(boot_info: arch::PhysAddr) -> ! { … }
 /// fn on_fatal_trap(report: &arch::TrapReport) -> ! { … }
+/// fn on_irq(irq: arch::Interrupt) { … }
 /// ```
 #[macro_export]
 macro_rules! kernel_hooks {
-    (main = $main:path, fatal_trap = $trap:path $(,)?) => {
+    (main = $main:path, fatal_trap = $trap:path, interrupt = $irq:path $(,)?) => {
         #[unsafe(no_mangle)]
         fn abyss_kernel_main(boot_info: $crate::PhysAddr) -> ! {
             $main(boot_info)
@@ -48,6 +50,11 @@ macro_rules! kernel_hooks {
         fn abyss_fatal_trap(report: &$crate::TrapReport) -> ! {
             $trap(report)
         }
+
+        #[unsafe(no_mangle)]
+        fn abyss_interrupt(irq: $crate::Interrupt) {
+            $irq(irq)
+        }
     };
 }
 
@@ -56,6 +63,8 @@ unsafe extern "Rust" {
     fn abyss_kernel_main(boot_info: PhysAddr) -> !;
     /// Defined by [`kernel_hooks!`].
     fn abyss_fatal_trap(report: &TrapReport) -> !;
+    /// Defined by [`kernel_hooks!`].
+    fn abyss_interrupt(irq: Interrupt);
 }
 
 /// Wraps a value that is only touched on the boot CPU before SMP, or under

@@ -4,7 +4,6 @@
 
 use alloc::boxed::Box;
 
-use crate::arch;
 use crate::mm::kstack::KernelStack;
 
 /// Pages per kernel thread stack (plus a guard page).
@@ -29,10 +28,16 @@ impl sched::Platform for Platform {
     }
 
     fn now(&self) -> u64 {
-        arch::cpu::timestamp()
+        crate::time::counter()
     }
 
-    fn kick(&self, _cpu: hal::CpuId) {}
+    fn kick(&self, cpu: hal::CpuId) {
+        crate::irq::send_resched(cpu);
+    }
+
+    fn rearm_timer(&self) {
+        crate::time::rearm();
+    }
 }
 
 static PLATFORM: Platform = Platform;

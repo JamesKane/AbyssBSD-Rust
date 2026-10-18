@@ -174,8 +174,22 @@ pub(crate) unsafe fn init_boot_cpu() {
     }
 }
 
+/// An external or local-APIC interrupt, for the kernel's handler.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Interrupt {
+    /// The IDT vector (32 or above).
+    pub vector: u8,
+}
+
 /// Called from the common stub with interrupts disabled.
 extern "C" fn dispatch(frame: &mut TrapFrame) {
+    if let Ok(vector) = u8::try_from(frame.vector)
+        && vector >= 32
+    {
+        // SAFETY: defined by the kernel through `kernel_hooks!`.
+        unsafe { crate::abyss_interrupt(Interrupt { vector }) };
+        return;
+    }
     let trap = Trap::decode(frame);
     if matches!(
         trap,
