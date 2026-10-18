@@ -124,7 +124,7 @@ impl B {
 /// Runs every parser and drains every iterator and helper over `t`; the
 /// point is that none of it panics or loops.
 pub(crate) fn exercise(t: &crate::Sdt<'_>) {
-    use crate::{fadt, gtdt, hpet, madt, mcfg, pptt, slit, srat};
+    use crate::{fadt, gtdt, hpet, iort, madt, mcfg, pptt, slit, srat};
     if let Ok(m) = madt::parse(t) {
         let _ = m.entries().count();
         let _ = m.enabled_cpu_count();
@@ -138,6 +138,12 @@ pub(crate) fn exercise(t: &crate::Sdt<'_>) {
     }
     if let Ok(m) = mcfg::parse(t) {
         let _ = m.regions().count();
+    }
+    if let Ok(i) = iort::parse(t) {
+        let _ = i.its_groups();
+        for rid in [0, 1, 3, 0x100, 0xffff] {
+            let _ = i.its_for_pci(0, rid);
+        }
     }
     let _ = hpet::parse(t);
     if let Ok(g) = gtdt::parse(t) {

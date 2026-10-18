@@ -30,6 +30,8 @@ mod devices;
 mod errata;
 mod firmware;
 mod intc;
+#[cfg(target_arch = "aarch64")]
+mod its;
 mod mm;
 mod panic;
 mod pci;

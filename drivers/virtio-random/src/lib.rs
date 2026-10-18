@@ -59,6 +59,8 @@ pub struct Source {
     done: WaitQueue,
     /// No interrupt: readers poll.
     polled: bool,
+    /// The interrupt is a shared INTx line rather than a message.
+    shared: bool,
     interrupts: AtomicU64,
 }
 
@@ -125,6 +127,18 @@ pub fn interrupts() -> Option<u64> {
     SOURCES.lock().first().map(|(_, s)| s.interrupts())
 }
 
+/// How the first entropy device interrupts: `Some(true)` on a shared INTx
+/// line, `Some(false)` by message (MSI-X), `None` if it polls or there is
+/// no device.
+#[must_use]
+pub fn shared_line() -> Option<bool> {
+    SOURCES
+        .lock()
+        .first()
+        .filter(|(_, s)| !s.polled)
+        .map(|(_, s)| s.shared)
+}
+
 /// A `vtrndN` instance.
 #[derive(Debug)]
 pub struct VtRnd {
@@ -183,6 +197,7 @@ impl Driver for VtRnd {
                 queue: Mutex::new(&QUEUE_LOCK, queue),
                 done: WaitQueue::new(),
                 polled: line.is_none(),
+                shared: dev.shared_line(),
                 interrupts: AtomicU64::new(0),
             }),
             dev,

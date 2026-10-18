@@ -24,11 +24,13 @@ use crate::header::{CMD_INTX_DISABLE, COMMAND};
 
 /// What message-signalled interrupts need from the platform.
 pub trait MsiPlatform: Sync {
-    /// A message that interrupts `cpu`: (address, data, the root id
-    /// dispatch will see), with the root allocated.
-    fn compose(&self, cpu: CpuId) -> Option<(u64, u32, u32)>;
+    /// A message from function `from` that interrupts `cpu`: (address,
+    /// data, the root id dispatch will see), with the root allocated. (On
+    /// arm64 the ITS translates by the sender, so the message depends on
+    /// it.)
+    fn compose(&self, from: PciAddress, cpu: CpuId) -> Option<(u64, u32, u32)>;
     /// Frees a root from [`MsiPlatform::compose`].
-    fn release(&self, cpu: CpuId, root: u32);
+    fn release(&self, from: PciAddress, cpu: CpuId, root: u32);
     /// Maps `len` bytes of device memory at `pa` uncached.
     fn map(&self, pa: u64, len: u64) -> Option<usize>;
 }
@@ -51,7 +53,11 @@ pub fn available() -> bool {
 #[derive(Clone, Copy)]
 enum Source {
     /// MSI-X table entry `entry`, whose table is mapped at `table`.
-    MsiX { table: usize, entry: u16 },
+    MsiX {
+        table: usize,
+        entry: u16,
+        addr: PciAddress,
+    },
     /// A function's MSI capability.
     Msi {
         cfg: &'static (dyn ConfigSpace + Sync),
@@ -94,9 +100,16 @@ fn entry_ptr(table: usize, entry: u16, dword: usize) -> *mut u32 {
 }
 
 impl Source {
+    /// The function sending the messages.
+    fn function(self) -> PciAddress {
+        match self {
+            Self::MsiX { addr, .. } | Self::Msi { addr, .. } => addr,
+        }
+    }
+
     fn write_message(self, addr: u64, data: u32) {
         match self {
-            Self::MsiX { table, entry } => {
+            Self::MsiX { table, entry, .. } => {
                 // SAFETY: the table was mapped for its entries by
                 // `enable_msix`, and the entry is ours.
                 unsafe {
@@ -121,7 +134,7 @@ impl Source {
 
     fn set_masked(self, masked: bool) {
         match self {
-            Self::MsiX { table, entry } => {
+            Self::MsiX { table, entry, .. } => {
                 let p = entry_ptr(table, entry, 3);
                 // SAFETY: as in `write_message`.
                 unsafe {
@@ -183,19 +196,20 @@ impl IrqDomain for MsiDomain {
     fn connect(&self, hw: u32, _: Trigger, _: Polarity, cpu: CpuId) -> Result<u32, IrqError> {
         let src = self.source(hw).ok_or(IrqError::NoSuchInput)?;
         let p = PLATFORM.get().ok_or(IrqError::NoSuchInput)?;
-        let (addr, data, root) = p.compose(cpu).ok_or(IrqError::NoVector)?;
+        let (addr, data, root) = p.compose(src.function(), cpu).ok_or(IrqError::NoVector)?;
         src.set_masked(true);
         src.write_message(addr, data);
         Ok(root)
     }
 
     fn disconnect(&self, hw: u32, cpu: CpuId, root: u32) {
-        if let Some(src) = self.source(hw) {
-            src.set_masked(true);
-            src.write_message(0, 0);
-        }
+        let Some(src) = self.source(hw) else {
+            return;
+        };
+        src.set_masked(true);
+        src.write_message(0, 0);
         if let Some(p) = PLATFORM.get() {
-            p.release(cpu, root);
+            p.release(src.function(), cpu, root);
         }
     }
 
@@ -262,7 +276,11 @@ pub fn enable_msix(child: &PciChild, want: u16) -> Result<Vec<u32>, MsiError> {
     cfg.write16(a, COMMAND, cmd | CMD_INTX_DISABLE);
     let hws = (0..n)
         .map(|entry| {
-            let s = Source::MsiX { table: va, entry };
+            let s = Source::MsiX {
+                table: va,
+                entry,
+                addr: a,
+            };
             s.set_masked(true);
             PCI_MSI.add(s)
         })

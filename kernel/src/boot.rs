@@ -72,7 +72,6 @@ pub(crate) fn flag(word: &str) -> bool {
 }
 
 /// The value of `key=value` on the command line.
-#[cfg_attr(feature = "ktest", allow(dead_code))]
 pub(crate) fn value(key: &str) -> Option<&'static str> {
     cmdline()
         .split_ascii_whitespace()

@@ -137,6 +137,7 @@ mod corpus;
 mod fadt;
 mod gtdt;
 mod hpet;
+mod iort;
 mod madt;
 mod mcfg;
 mod pptt;

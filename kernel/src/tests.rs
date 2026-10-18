@@ -1659,12 +1659,25 @@ ktest! {
             crate::time::sleep_ns(&s, 1_000_000);
         }
         let taken = virtio_random::interrupts().unwrap() - before;
+        let shared = virtio_random::shared_line();
+        let via = match shared {
+            Some(false) => "MSI-X",
+            Some(true) => "INTx",
+            None => "polling",
+        };
         kprintln!(
-            "vtrnd: {READS} reads of 64 bytes, {} us each, {taken} interrupt(s), on {tname} <{tdesc}>",
+            "vtrnd: {READS} reads of 64 bytes, {} us each, {taken} interrupt(s) by {via}, on {tname} <{tdesc}>",
             ns / READS / 1000
         );
         assert!(nonzero, "the device wrote entropy");
-        assert!(taken >= READS, "each completion arrived by interrupt");
+        // Messages for an LPI or vector still pending merge into one (the
+        // next request can complete first), so not one per read; but the
+        // reads slept on interrupts, and a lost one would have hung them.
+        assert!((1..=READS).contains(&taken), "{taken} interrupts");
+        // Every platform here composes messages (amd64's local APIC, the
+        // arm64 ITS) unless the boot case turned them off.
+        let msix = crate::boot::value("hw.pci.enable_msix") != Some("0");
+        assert_eq!(shared, Some(!msix), "MSI-X {}", if msix { "on" } else { "off" });
     }
 }
 

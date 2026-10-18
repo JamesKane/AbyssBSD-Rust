@@ -255,10 +255,21 @@ static TIMER_PPI: AtomicU32 = AtomicU32::new(27);
 /// Each CPU's redistributor (kernel virtual address).
 #[cfg(target_arch = "aarch64")]
 static GICR: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
-/// The redistributor regions, mapped: (virtual base, length).
+/// Each CPU's redistributor (physical address, for the ITS).
 #[cfg(target_arch = "aarch64")]
-static GICR_REGIONS: sync::SpinLock<alloc::vec::Vec<(u64, u64)>> =
+static GICR_PA: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+/// The redistributor regions, mapped: (virtual base, length, physical
+/// base).
+#[cfg(target_arch = "aarch64")]
+static GICR_REGIONS: sync::SpinLock<alloc::vec::Vec<(u64, u64, u64)>> =
     sync::SpinLock::new(alloc::vec::Vec::new());
+
+/// CPU `cpu`'s redistributor: (kernel virtual, physical) address.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn redistributor(cpu: CpuId) -> Option<(u64, u64)> {
+    let va = GICR.get(cpu.index())?.load(Ordering::Relaxed);
+    (va != 0).then(|| (va, GICR_PA[cpu.index()].load(Ordering::Relaxed)))
+}
 
 /// Sets up interrupt controllers and the clock on the boot CPU.
 #[cfg(target_arch = "aarch64")]
@@ -276,7 +287,7 @@ pub(crate) fn init_boot_cpu() {
             MadtEntry::GicRedistributor(r) => {
                 let len = u64::from(r.length);
                 match crate::devices::map_reserved(PhysAddr::new(r.base), len) {
-                    Ok(va) => regions.push((va.get(), len)),
+                    Ok(va) => regions.push((va.get(), len, r.base)),
                     Err(e) => kprintln!("irq: cannot map GICR at {:#x}: {e:?}", r.base),
                 }
             }
@@ -284,7 +295,7 @@ pub(crate) fn init_boot_cpu() {
             MadtEntry::GicCpuInterface(c) if c.gicr_base.is_some_and(|b| b != 0) => {
                 let base = c.gicr_base.unwrap_or(0);
                 if let Ok(va) = crate::devices::map_reserved(PhysAddr::new(base), 0x2_0000) {
-                    regions.push((va.get(), 0x2_0000));
+                    regions.push((va.get(), 0x2_0000, base));
                 }
             }
             _ => {}
@@ -317,12 +328,15 @@ pub(crate) fn init_ap(cpu: CpuId) {
 fn init_this_cpu(cpu: CpuId) {
     use arch::gic;
     let mpidr = arch::cpu::mpidr();
-    let gicr = GICR_REGIONS
+    let (gicr, pa) = GICR_REGIONS
         .lock()
         .iter()
-        .find_map(|&(base, len)| gic::find_redistributor(base, len, mpidr))
+        .find_map(|&(base, len, pa)| {
+            gic::find_redistributor(base, len, mpidr).map(|g| (g, pa + (g - base)))
+        })
         .expect("no redistributor for this CPU");
     GICR[cpu.index()].store(gicr, Ordering::Relaxed);
+    GICR_PA[cpu.index()].store(pa, Ordering::Relaxed);
     // SAFETY: the redistributor is mapped for good; interrupts are masked.
     unsafe { gic::init_cpu(gicr) };
     let gtdt = crate::acpi::find(*b"GTDT").and_then(|t| acpi_tables::gtdt::parse(&t).ok());
@@ -341,8 +355,9 @@ fn init_this_cpu(cpu: CpuId) {
 pub(crate) fn init_dispatch() {
     #[cfg(target_arch = "x86_64")]
     let (per_cpu_ids, global_ids, allocatable) = (256, 256, 0x30..0xf0);
+    // arm64: SPIs, then the LPIs the ITS hands out.
     #[cfg(target_arch = "aarch64")]
-    let (per_cpu_ids, global_ids, allocatable) = (32, 1020, 0..0);
+    let (per_cpu_ids, global_ids, allocatable) = (32, crate::its::LPI_END, 0..0);
     ::irq::init(::irq::Config {
         per_cpu_ids,
         global_ids,
@@ -438,7 +453,7 @@ struct LapicMsi;
 
 #[cfg(target_arch = "x86_64")]
 impl pci::msi::MsiPlatform for LapicMsi {
-    fn compose(&self, cpu: CpuId) -> Option<(u64, u32, u32)> {
+    fn compose(&self, _: pci::PciAddress, cpu: CpuId) -> Option<(u64, u32, u32)> {
         // The address holds an 8-bit destination; larger APIC IDs need
         // interrupt remapping (P8).
         let dest = u8::try_from(hw_id(cpu)?).ok()?;
@@ -446,7 +461,7 @@ impl pci::msi::MsiPlatform for LapicMsi {
         Some((0xfee0_0000 | (u64::from(dest) << 12), vector, vector))
     }
 
-    fn release(&self, cpu: CpuId, root: u32) {
+    fn release(&self, _: pci::PciAddress, cpu: CpuId, root: u32) {
         ::irq::free_vector(cpu, root);
     }
 
@@ -456,13 +471,23 @@ impl pci::msi::MsiPlatform for LapicMsi {
     }
 }
 
-/// Installs the platform's MSI support (amd64; arm64 needs the ITS).
+/// Installs the platform's MSI support: local APIC messages on amd64,
+/// the GICv3 ITS on arm64 (if the machine has one). FreeBSD's
+/// `hw.pci.enable_msix=0` (or `enable_msi=0`) leaves functions on INTx.
 pub(crate) fn init_msi() {
+    if crate::boot::value("hw.pci.enable_msix") == Some("0")
+        || crate::boot::value("hw.pci.enable_msi") == Some("0")
+    {
+        kprintln!("pci: message-signalled interrupts off (hw.pci.enable_msi[x]=0)");
+        return;
+    }
     #[cfg(target_arch = "x86_64")]
     {
         static MSI: LapicMsi = LapicMsi;
         pci::msi::set_platform(&MSI);
     }
+    #[cfg(target_arch = "aarch64")]
+    crate::its::init();
 }
 
 /// The GSI, trigger, and polarity of ISA interrupt `irq`, after the MADT's

@@ -171,7 +171,9 @@ const BOOT_CASES: &[BootCase] = &[
         el2: true,
         warm_reset: false,
         // One attach worker here, many elsewhere.
-        cmdline: "abyss.bus.serial=1",
+        // One attach worker, and INTx instead of MSI-X (through _PRT
+        // and the root port's swizzle).
+        cmdline: "abyss.bus.serial=1 hw.pci.enable_msix=0",
         pass_status: 0,
     },
     BootCase {

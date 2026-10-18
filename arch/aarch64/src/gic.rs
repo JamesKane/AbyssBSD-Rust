@@ -5,7 +5,8 @@
 //!
 //! All interrupts are non-secure Group 1, routed with affinity routing.
 //! Interrupt IDs: 0–15 SGIs (IPIs), 16–31 PPIs (per-CPU devices such as
-//! the timer), 32–1019 SPIs.
+//! the timer), 32–1019 SPIs, and from 8192 LPIs (message-signalled, through
+//! an ITS), configured in memory tables each redistributor points at.
 //!
 //! Behavior reference: sys/arm64/arm64/gic_v3.c (the GICv3 architecture
 //! specification, IHI 0069, for the registers).
@@ -33,8 +34,11 @@ regs::register_block! {
 regs::register_block! {
     /// A redistributor's control frame (IHI 0069 §12.11).
     struct GicrRd: 0x1_0000 {
+        CTLR @ 0x0000 => u32, Rw;
         TYPER @ 0x0008 => u64, Ro;
         WAKER @ 0x0014 => u32, Rw;
+        PROPBASER @ 0x0070 => u64, Rw;
+        PENDBASER @ 0x0078 => u64, Rw;
     }
 }
 
@@ -53,6 +57,12 @@ const CTLR_RWP: Field<u32> = Field::new(31, 1);
 const CTLR_ARE_NS: Field<u32> = Field::new(4, 1);
 const CTLR_ENABLE_G1: Field<u32> = Field::new(1, 1);
 const TYPER_LINES: Field<u32> = Field::new(0, 5);
+const TYPER_LPIS: Field<u32> = Field::new(17, 1);
+const TYPER_ID_BITS: Field<u32> = Field::new(19, 5);
+const RCTLR_ENABLE_LPIS: Field<u32> = Field::new(0, 1);
+const RTYPER_PLPIS: Field<u64> = Field::new(0, 1);
+const RTYPER_PROCESSOR: Field<u64> = Field::new(8, 16);
+const BASER_SHAREABILITY: Field<u64> = Field::new(10, 2);
 const RTYPER_VLPIS: Field<u64> = Field::new(1, 1);
 const RTYPER_LAST: Field<u64> = Field::new(4, 1);
 const RTYPER_AFFINITY: Field<u64> = Field::new(32, 32);
@@ -63,7 +73,14 @@ const WAKER_ASLEEP: Field<u32> = Field::new(2, 1);
 const GICR_FRAME: u64 = 0x1_0000;
 
 /// Default priority for every interrupt (lower is more urgent).
-const PRIORITY: u8 = 0xa0;
+pub const PRIORITY: u8 = 0xa0;
+
+/// The first LPI.
+pub const FIRST_LPI: u32 = 8192;
+
+/// Attributes of memory the GIC reads tables from: inner shareable,
+/// write-back cacheable (outer as inner).
+pub const TABLE_ATTRS: u64 = (0b111 << 7) | (0b01 << 10);
 
 /// First and one-past-last spurious interrupt IDs.
 const SPURIOUS: core::ops::Range<u32> = 1020..1024;
@@ -227,6 +244,69 @@ pub unsafe fn init_cpu(gicr: u64) {
         // ICC_IGRPEN1_EL1: enable Group 1.
         asm!("msr S3_0_C12_C12_7, {}", "isb", in(reg) 1u64, options(nostack));
     }
+}
+
+/// The interrupt ID bits the distributor implements, if it supports LPIs.
+#[must_use]
+pub fn lpi_id_bits() -> Option<u32> {
+    let t = gicd().read(Gicd::TYPER);
+    t.has(TYPER_LPIS).then(|| t.field(TYPER_ID_BITS) + 1)
+}
+
+/// Why a redistributor's LPIs were not enabled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LpiError {
+    /// The redistributor has no physical LPIs.
+    Unsupported,
+    /// Firmware left LPIs enabled, with tables we cannot replace (the
+    /// tables may not change while they are on).
+    AlreadyEnabled,
+}
+
+/// The redistributor's processor number (an ITS without physical target
+/// addresses names redistributors by it).
+#[must_use]
+pub fn processor_number(gicr: u64) -> u16 {
+    // SAFETY: the caller passes a mapped redistributor.
+    let (r, _) = unsafe { redistributor(gicr) };
+    // A 16-bit field.
+    u16::try_from(r.read(GicrRd::TYPER).field(RTYPER_PROCESSOR)).unwrap_or(0)
+}
+
+/// Points the redistributor at `gicr` at the LPI configuration table at
+/// physical `prop` (for `id_bits` interrupt ID bits) and its pending table
+/// at physical `pend` (zeroed, 64 KiB aligned), then enables LPIs. Returns
+/// whether the GIC snoops the tables (it kept inner shareability); if not,
+/// writes to the configuration table must be cleaned from the caches.
+///
+/// # Safety
+///
+/// `gicr` maps a redistributor; the tables are physically contiguous,
+/// large enough for `id_bits`, owned by the GIC from now on, and written
+/// (the configuration table) before this call.
+pub unsafe fn enable_lpis(gicr: u64, prop: u64, id_bits: u32, pend: u64) -> Result<bool, LpiError> {
+    // SAFETY: per the contract.
+    let (r, _) = unsafe { redistributor(gicr) };
+    if !r.read(GicrRd::TYPER).has(RTYPER_PLPIS) {
+        return Err(LpiError::Unsupported);
+    }
+    if r.read(GicrRd::CTLR).has(RCTLR_ENABLE_LPIS) {
+        return Err(LpiError::AlreadyEnabled);
+    }
+    r.write(
+        GicrRd::PROPBASER,
+        (prop & 0x000f_ffff_ffff_f000) | TABLE_ATTRS | u64::from(id_bits - 1),
+    );
+    let snooped = r.read(GicrRd::PROPBASER).field(BASER_SHAREABILITY) != 0;
+    // PTZ: the pending table is zero.
+    r.write(
+        GicrRd::PENDBASER,
+        (1 << 62) | (pend & 0x000f_ffff_ffff_0000) | TABLE_ATTRS,
+    );
+    // The tables' contents before the GIC may read them.
+    crate::cpu::write_barrier();
+    r.modify(GicrRd::CTLR, |c| c.with(RCTLR_ENABLE_LPIS, 1));
+    Ok(snooped)
 }
 
 /// Enables a private interrupt (SGI or PPI, `id < 32`) on this CPU, whose

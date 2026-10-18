@@ -17,7 +17,8 @@
 //! `sys/dev/uart/uart_cpu_acpi.c` (SPCR/DBG2 console selection),
 //! `sys/x86/acpica/madt.c` (MADT), `sys/dev/acpica/acpi_pxm.c` (SRAT/SLIT),
 //! `sys/dev/acpica/acpi_hpet.c` (HPET), `sys/arm/arm/generic_timer.c` (GTDT),
-//! `sys/dev/pci/pci_host_generic_acpi.c` (MCFG).
+//! `sys/dev/pci/pci_host_generic_acpi.c` (MCFG), `sys/arm64/acpica/acpi_iort.c`
+//! (IORT).
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -27,6 +28,7 @@ pub mod fadt;
 pub mod gas;
 pub mod gtdt;
 pub mod hpet;
+pub mod iort;
 pub mod madt;
 pub mod mcfg;
 pub mod pptt;

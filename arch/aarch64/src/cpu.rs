@@ -70,6 +70,14 @@ pub fn timestamp_frequency() -> u64 {
     read_sysreg!("cntfrq_el0")
 }
 
+/// Orders this CPU's earlier memory writes before its later device
+/// writes, as seen by any observer (DSB ST): a device told by a register
+/// write to read memory then sees what was written.
+pub fn write_barrier() {
+    // SAFETY: a barrier; no memory or register effects.
+    unsafe { asm!("dsb st", options(nostack, preserves_flags)) };
+}
+
 /// `MIDR_EL1`, the CPU's implementer and part number.
 pub fn midr() -> u64 {
     read_sysreg!("midr_el1")
