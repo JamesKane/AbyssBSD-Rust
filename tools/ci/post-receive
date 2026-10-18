@@ -10,6 +10,8 @@
 ci="$HOME/abyss/ci"
 work="$HOME/abyss/ci-work"
 repo="$(cd "${GIT_DIR:-.}" && pwd)"
+# Git runs hooks with GIT_DIR set; it must not leak into the work tree's git.
+unset GIT_DIR
 mkdir -p "$ci"
 
 while read -r _old new ref; do
