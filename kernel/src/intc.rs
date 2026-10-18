@@ -431,6 +431,40 @@ pub(crate) fn gsi_domain() -> &'static dyn ::irq::IrqDomain {
     &IOAPIC_DOMAIN
 }
 
+/// Message-signalled interrupts on amd64: a fixed, edge-triggered message
+/// at the target CPU's local APIC (physical destination mode).
+#[cfg(target_arch = "x86_64")]
+struct LapicMsi;
+
+#[cfg(target_arch = "x86_64")]
+impl pci::msi::MsiPlatform for LapicMsi {
+    fn compose(&self, cpu: CpuId) -> Option<(u64, u32, u32)> {
+        // The address holds an 8-bit destination; larger APIC IDs need
+        // interrupt remapping (P8).
+        let dest = u8::try_from(hw_id(cpu)?).ok()?;
+        let vector = ::irq::alloc_vector(cpu)?;
+        Some((0xfee0_0000 | (u64::from(dest) << 12), vector, vector))
+    }
+
+    fn release(&self, cpu: CpuId, root: u32) {
+        ::irq::free_vector(cpu, root);
+    }
+
+    fn map(&self, pa: u64, len: u64) -> Option<usize> {
+        let va = crate::mm::map_device(addr::PhysAddr::new(pa), len).ok()?;
+        usize::try_from(va.get()).ok()
+    }
+}
+
+/// Installs the platform's MSI support (amd64; arm64 needs the ITS).
+pub(crate) fn init_msi() {
+    #[cfg(target_arch = "x86_64")]
+    {
+        static MSI: LapicMsi = LapicMsi;
+        pci::msi::set_platform(&MSI);
+    }
+}
+
 /// The GSI, trigger, and polarity of ISA interrupt `irq`, after the MADT's
 /// interrupt source overrides (ISA defaults: identity, edge, active high).
 #[cfg(target_arch = "x86_64")]

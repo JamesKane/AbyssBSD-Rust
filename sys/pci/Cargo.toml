@@ -8,7 +8,9 @@ publish.workspace = true
 [dependencies]
 bus = { path = "../bus" }
 devtree = { path = "../../lib/devtree" }
+hal = { path = "../../arch/hal" }
 irq = { path = "../irq" }
+sync = { path = "../sync" }
 
 [lints]
 workspace = true

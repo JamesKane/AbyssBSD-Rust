@@ -18,6 +18,8 @@ struct FakeFn {
     bar_masks: BTreeMap<u16, u32>,
     /// Set if a BAR was written while its decoding was on.
     sized_while_decoding: bool,
+    /// Writes to the command register (each is costly under a hypervisor).
+    command_writes: u32,
 }
 
 #[derive(Default)]
@@ -44,6 +46,9 @@ impl ConfigSpace for Fake {
         let Some(f) = fns.get_mut(&(a.bus, a.slot, a.function)) else {
             return;
         };
+        if offset == COMMAND {
+            f.command_writes += 1;
+        }
         if let Some(&mask) = f.bar_masks.get(&offset) {
             let cmd = *f.regs.get(&COMMAND).unwrap_or(&0) as u16;
             let io = f.regs.get(&offset).is_some_and(|r| r & 1 != 0);
@@ -140,6 +145,8 @@ fn bars_are_sized_with_decoding_off_and_restored() {
     assert_eq!(f.regs[&0x10], 0xfe00_0000, "BAR restored");
     assert_eq!(f.regs[&0x1c], 0x8, "upper half restored");
     assert_eq!(f.regs[&COMMAND] as u16, CMD_MEMORY, "decoding restored");
+    // Decoding goes off and back on once for all six slots.
+    assert_eq!(f.command_writes, 2);
 }
 
 #[test]

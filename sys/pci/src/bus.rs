@@ -56,6 +56,30 @@ impl core::fmt::Debug for PciChild {
     }
 }
 
+/// Enables MSI-X on the function being attached with up to `want`
+/// vectors, and returns a line for each, in table order.
+pub fn msix_lines(
+    cx: &mut AttachCx<'_>,
+    want: u16,
+) -> Result<Vec<bus::IrqLine>, crate::msi::MsiError> {
+    let child = cx
+        .bus_data_arc::<PciChild>()
+        .ok_or(crate::msi::MsiError::NoCapability)?;
+    let hws = crate::msi::enable_msix(child.cfg, &child.function, want)?;
+    Ok(hws
+        .into_iter()
+        .filter_map(|hw| {
+            cx.irq_line(Resource::Irq {
+                domain: &crate::msi::PCI_MSI,
+                hw,
+                trigger: irq::Trigger::Edge,
+                polarity: irq::Polarity::High,
+            })
+            .ok()
+        })
+        .collect())
+}
+
 /// `pciN`.
 #[derive(Debug)]
 pub struct PciBus {

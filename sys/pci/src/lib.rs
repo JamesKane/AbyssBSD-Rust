@@ -9,6 +9,7 @@
 //! - [`enumerate`]: scanning a bus, and the depth-first walk of a host
 //!   bridge's buses.
 //! - [`bus`]: the `pci` bus driver.
+//! - [`msi`]: MSI and MSI-X as an interrupt domain.
 //!
 //! Everything read from a device is untrusted: lists are walked with
 //! bounds, BARs are validated, and a function reading all-ones is absent.
@@ -31,6 +32,7 @@ pub mod caps;
 pub mod config;
 pub mod enumerate;
 pub mod header;
+pub mod msi;
 
 pub use bar::{Bar, BarError, BarKind};
 pub use caps::{Capability, ExtCapability};

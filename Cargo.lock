@@ -201,7 +201,9 @@ version = "0.0.0"
 dependencies = [
  "bus",
  "devtree",
+ "hal",
  "irq",
+ "sync",
 ]
 
 [[package]]

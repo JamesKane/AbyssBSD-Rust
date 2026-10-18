@@ -48,6 +48,7 @@ pub(crate) fn init() {
         }
     }
     let _ = WINDOWS.set(windows);
+    crate::intc::init_msi();
 }
 
 /// The ECAM windows.

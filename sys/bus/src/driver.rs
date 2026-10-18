@@ -328,6 +328,19 @@ impl AttachCx<'_> {
         })
     }
 
+    /// A line for an interrupt the parent bus set up for this device during
+    /// attach (message-signalled vectors), granted like a described one.
+    pub fn irq_line(&mut self, r: Resource) -> Result<IrqLine, ResourceError> {
+        if !matches!(r, Resource::Irq { .. }) {
+            return Err(ResourceError::NoSuchResource);
+        }
+        self.ledger.issue();
+        Ok(IrqLine {
+            resource: r,
+            ledger: Arc::clone(&self.ledger),
+        })
+    }
+
     /// A DMA tag with the device's constraints (and, later, its bus's).
     pub fn dma_tag(&mut self, c: DmaConstraints) -> Result<DmaTag, ResourceError> {
         if self.injected() {

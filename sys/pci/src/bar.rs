@@ -51,10 +51,46 @@ pub enum BarError {
     Overflow,
 }
 
-/// Sizes BAR `index` of `a` (of `count` in its header). Returns the
-/// BAR, `Ok(None)` if it is not implemented, and how many BAR slots it
-/// took (2 for a 64-bit BAR).
+/// Sizes BAR `index` of `a` (of `count` in its header), with decoding of
+/// its space turned off around it. Returns the BAR, `Ok(None)` if it is not
+/// implemented, and how many BAR slots it took (2 for a 64-bit BAR).
 pub fn read(
+    cfg: &dyn ConfigSpace,
+    a: PciAddress,
+    index: u8,
+    count: u8,
+) -> (Result<Option<Bar>, BarError>, u8) {
+    let reg = BAR0 + 4 * u16::from(index);
+    let off = if cfg.read32(a, reg) & 1 != 0 {
+        CMD_IO
+    } else {
+        CMD_MEMORY
+    };
+    with_decoding_off(cfg, a, off, || size(cfg, a, index, count))
+}
+
+/// Runs `f` with the `bits` decoding enables of `a` cleared, writing the
+/// command register only if that changes it. Each write can be costly: a
+/// hypervisor remaps the function's BARs (bhyve takes ~25 ms).
+fn with_decoding_off<R>(
+    cfg: &dyn ConfigSpace,
+    a: PciAddress,
+    bits: u16,
+    f: impl FnOnce() -> R,
+) -> R {
+    let cmd = cfg.read16(a, COMMAND);
+    if cmd & bits != 0 {
+        cfg.write16(a, COMMAND, cmd & !bits);
+    }
+    let r = f();
+    if cmd & bits != 0 {
+        cfg.write16(a, COMMAND, cmd);
+    }
+    r
+}
+
+/// Sizes a BAR; the caller has turned decoding off.
+fn size(
     cfg: &dyn ConfigSpace,
     a: PciAddress,
     index: u8,
@@ -72,9 +108,6 @@ pub fn read(
     }
     let hi = if wide { cfg.read32(a, reg + 4) } else { 0 };
 
-    let cmd = cfg.read16(a, COMMAND);
-    let off = if io { CMD_IO } else { CMD_MEMORY };
-    cfg.write16(a, COMMAND, cmd & !off);
     cfg.write32(a, reg, u32::MAX);
     if wide {
         cfg.write32(a, reg + 4, u32::MAX);
@@ -85,7 +118,6 @@ pub fn read(
     if wide {
         cfg.write32(a, reg + 4, hi);
     }
-    cfg.write16(a, COMMAND, cmd);
 
     let slots = if wide { 2 } else { 1 };
     let flags: u32 = if io { 0x3 } else { 0xf };
@@ -130,22 +162,25 @@ pub fn read(
     (Ok(Some(bar)), slots)
 }
 
-/// Sizes every BAR of a function with `count` BAR slots.
+/// Sizes every BAR of a function with `count` BAR slots, with memory and
+/// I/O decoding off once for all of them.
 pub fn read_all(
     cfg: &dyn ConfigSpace,
     a: PciAddress,
     count: u8,
 ) -> alloc::vec::Vec<Result<Bar, (u8, BarError)>> {
-    let mut out = alloc::vec::Vec::new();
-    let mut i = 0;
-    while i < count {
-        let (r, slots) = read(cfg, a, i, count);
-        match r {
-            Ok(Some(b)) => out.push(Ok(b)),
-            Ok(None) => {}
-            Err(e) => out.push(Err((i, e))),
+    with_decoding_off(cfg, a, CMD_IO | CMD_MEMORY, || {
+        let mut out = alloc::vec::Vec::new();
+        let mut i = 0;
+        while i < count {
+            let (r, slots) = size(cfg, a, i, count);
+            match r {
+                Ok(Some(b)) => out.push(Ok(b)),
+                Ok(None) => {}
+                Err(e) => out.push(Err((i, e))),
+            }
+            i += slots;
         }
-        i += slots;
-    }
-    out
+        out
+    })
 }
