@@ -29,7 +29,7 @@ pub use driver::{
     StopCx,
 };
 pub use gate::{Gate, GateGuard, Revoked};
-pub use manager::{DetachError, Manager, Options, init, manager};
+pub use manager::{AttachRequestError, DetachError, Manager, Options, init, manager};
 pub use platform::Platform;
 pub use types::{
     AttachError, Busy, Concurrency, DetachReason, DeviceId, Ident, Ids, Need, NodeState, Resource,

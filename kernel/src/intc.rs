@@ -469,6 +469,10 @@ impl pci::msi::MsiPlatform for LapicMsi {
         let va = crate::mm::map_device(addr::PhysAddr::new(pa), len).ok()?;
         usize::try_from(va.get()).ok()
     }
+
+    fn unmap(&self, va: usize, len: u64) {
+        crate::mm::unmap_device(addr::VirtAddr::new(va as u64), len);
+    }
 }
 
 /// Installs the platform's MSI support: local APIC messages on amd64,

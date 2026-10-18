@@ -465,6 +465,10 @@ impl pci::msi::MsiPlatform for ItsMsi {
         let va = crate::mm::map_device(PhysAddr::new(pa), len).ok()?;
         usize::try_from(va.get()).ok()
     }
+
+    fn unmap(&self, va: usize, len: u64) {
+        crate::mm::unmap_device(addr::VirtAddr::new(va as u64), len);
+    }
 }
 
 /// Sets up the ITS and makes it the MSI composer. Call once, with every

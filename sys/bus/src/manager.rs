@@ -852,16 +852,15 @@ impl Manager {
         for c in children.into_iter().rev() {
             let _ = self.detach(c, DetachReason::Parent, s);
         }
-        // 3-7. The binding's own teardown.
-        let mut created = Vec::new();
+        // 3-7. The binding's own teardown. Children a bus driver created
+        // go with it, before its instance: their bus data may hold the
+        // bus's grants (a transport's registers).
         if let Some(b) = binding {
-            created = b.children();
+            for c in b.children() {
+                self.delete(c, s);
+            }
             let report = b.detach(why, s);
             self.check_ledger(name, unit, report.leaked_grants);
-        }
-        // Children a bus driver created go with it: their bus is gone.
-        for c in created {
-            self.delete(c, s);
         }
         // 8. Release.
         let mut t = self.topo.write(s);
@@ -883,6 +882,25 @@ impl Manager {
         if let Some(l) = line {
             self.event(l);
         }
+        self.bump();
+        Ok(())
+    }
+
+    /// Matches and attaches a node that has no driver, again offering it
+    /// drivers that declined it before (`devctl attach`, FreeBSD's
+    /// `device_probe_and_attach`).
+    pub fn probe_and_attach(&self, id: DeviceId, s: &Sleepable) -> Result<(), AttachRequestError> {
+        let mut t = self.topo.write(s);
+        let Some(n) = t.node_mut(id) else {
+            return Err(AttachRequestError::NoSuchDevice);
+        };
+        if !matches!(n.state, NodeState::NotPresent | NodeState::Failed(_)) {
+            return Err(AttachRequestError::HasDriver);
+        }
+        n.declined.clear();
+        n.state = NodeState::NotPresent;
+        self.match_node(&mut t, id);
+        drop(t);
         self.bump();
         Ok(())
     }
@@ -1066,6 +1084,15 @@ impl Manager {
         }
         out
     }
+}
+
+/// Why an attach request was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttachRequestError {
+    /// No such node.
+    NoSuchDevice,
+    /// It has a driver already (attached, attaching, or waiting).
+    HasDriver,
 }
 
 /// Why a detach was refused.

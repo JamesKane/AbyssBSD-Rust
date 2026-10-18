@@ -1837,3 +1837,35 @@ ktest! {
         kprintln!("power button press arrived after {} ms", ms());
     }
 }
+
+ktest! {
+    fn virtio_transport_detach_and_reattach() {
+        let s = cx();
+        let m = bus::manager();
+        let nexus = crate::devices::nexus();
+        let (transport, _) = find_named(m, &s, nexus, "vtrnd0").expect("vtrnd0");
+        let kva = || crate::mm::KVA.lock().allocated();
+        let before = kva();
+        // devctl detach: vtrnd first (its gate revoked, the device reset),
+        // then the transport (vectors removed, MSI-X off, the table and BARs
+        // unmapped).
+        m.detach(transport, bus::DetachReason::Requested, &s).expect("detach");
+        assert_eq!(m.state(transport, &s), Some(bus::NodeState::NotPresent));
+        assert_eq!(virtio_random::read(&s, &mut [0u8; 16]), None, "no entropy source after detach");
+        // At least the MSI-X table's page; a modern transport's register
+        // BAR too (a legacy one's registers are I/O ports).
+        let freed = before.saturating_sub(kva());
+        assert!(freed >= 4096, "detach gave back {freed} bytes of mappings");
+        // devctl attach: the same transport and a new vtrnd, working.
+        m.probe_and_attach(transport, &s).expect("attach");
+        m.wait_idle(&s);
+        assert_eq!(m.state(transport, &s), Some(bus::NodeState::Attached));
+        let (again, _) = find_named(m, &s, nexus, "vtrnd0").expect("vtrnd0 again");
+        assert_eq!(again, transport);
+        let mut buf = [0u8; 64];
+        assert_eq!(virtio_random::read(&s, &mut buf), Some(64));
+        assert!(buf.iter().any(|&b| b != 0));
+        kprintln!("detach freed {} KiB of device mappings; re-attached and read", freed / 1024);
+        let _ = m.take_events();
+    }
+}

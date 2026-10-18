@@ -33,6 +33,8 @@ pub trait MsiPlatform: Sync {
     fn release(&self, from: PciAddress, cpu: CpuId, root: u32);
     /// Maps `len` bytes of device memory at `pa` uncached.
     fn map(&self, pa: u64, len: u64) -> Option<usize>;
+    /// Unmaps a mapping from [`MsiPlatform::map`].
+    fn unmap(&self, va: usize, len: u64);
 }
 
 static PLATFORM: Once<&'static dyn MsiPlatform> = Once::new();
@@ -55,6 +57,8 @@ enum Source {
     /// MSI-X table entry `entry`, whose table is mapped at `table`.
     MsiX {
         table: usize,
+        /// The table mapping's length, unmapped with its last entry.
+        table_len: u64,
         entry: u16,
         addr: PciAddress,
     },
@@ -177,12 +181,32 @@ impl MsiDomain {
         u32::try_from(i).unwrap_or(u32::MAX)
     }
 
-    /// Forgets inputs (after their handlers are removed).
+    /// Forgets inputs (after their handlers are removed), unmapping an
+    /// MSI-X table once its last entry goes.
     pub fn remove(&self, hws: &[u32]) {
         let mut v = self.sources.lock();
+        let mut tables = Vec::new();
         for &h in hws {
-            if let Some(slot) = v.get_mut(h as usize) {
-                *slot = None;
+            if let Some(slot) = v.get_mut(h as usize)
+                && let Some(Source::MsiX {
+                    table, table_len, ..
+                }) = slot.take()
+                && !tables.contains(&(table, table_len))
+            {
+                tables.push((table, table_len));
+            }
+        }
+        let unused: Vec<(usize, u64)> = tables
+            .into_iter()
+            .filter(|&(t, _)| {
+                !v.iter()
+                    .any(|s| matches!(s, Some(Source::MsiX { table, .. }) if *table == t))
+            })
+            .collect();
+        drop(v);
+        if let Some(p) = PLATFORM.get() {
+            for (va, len) in unused {
+                p.unmap(va, len);
             }
         }
     }
@@ -278,6 +302,7 @@ pub fn enable_msix(child: &PciChild, want: u16) -> Result<Vec<u32>, MsiError> {
         .map(|entry| {
             let s = Source::MsiX {
                 table: va,
+                table_len: len,
                 entry,
                 addr: a,
             };
