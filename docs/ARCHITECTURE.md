@@ -67,13 +67,14 @@ AbyssBSD-Rust/
 │   ├── acpi-tables/           # static table parsing
 │   ├── aml/                   # AML interpreter
 │   ├── gpt/  ufs2/  fat/      # on-disk formats (parsing/serialization only)
-│   └── nettypes/              # packet header types, checksums
+│   ├── nettypes/              # packet header types, checksums
+│   └── devtree/               # driver matching, dependency graph, devinfo/devctl encodings
 ├── sys/                       # kernel subsystems (no_std, kernel-only)
 │   ├── sync/  vm/  sched/  time/  proc/  signal/  exec/  syscall/
 │   ├── sysctl/  kqueue/  tty/  umtx/  cred/  jail/  capsicum/
 │   ├── vfs/   fs-ufs/  fs-msdos/  fs-tmpfs/  fs-devfs/
 │   ├── storage/  net/
-│   └── bus/   acpi/  pci/  iommu/
+│   └── bus/   irq/   acpi/  pci/  virtio/  usb/  iommu/
 ├── drivers/
 │   ├── nvme/  ahci/  virtio/  xhci/  usb-hid/  usb-msc/
 │   ├── uart-16550/  uart-pl011/  fb-console/
@@ -277,33 +278,35 @@ We follow FreeBSD's Mach-derived design, adapted to Rust ownership:
 
 ## 6. Device model (`sys/bus`)
 
-FreeBSD's newbus (`device_t`, devclasses, kobj method tables) maps naturally onto Rust traits and
-typestate:
+The driver model is specified in [DRIVER-MODEL.md](DRIVER-MODEL.md)
+([ADR-0012](adr/0012-driver-model.md)), and the survey behind it is
+[DRIVER-MODEL-SURVEY.md](DRIVER-MODEL-SURVEY.md). In summary:
 
-```rust
-pub trait Driver: Sync {
-    const NAME: &'static str;
-    fn probe(dev: &DeviceInfo) -> Probe;                  // enum: NoMatch | Generic | Specific | Vendor
-    fn attach(dev: Unattached<'_>) -> Result<Attached<Self::State>, AttachError>;
-    type State: Device;
-}
-
-pub trait Device: Send + Sync {
-    fn detach(&self) -> Result<(), DetachError> { Err(DetachError::Unsupported) }
-    fn suspend(&self) -> Result<(), PmError> { Ok(()) }
-    fn resume(&self) -> Result<(), PmError> { Ok(()) }
-}
-```
-
-- **Resources are owned values.** `MmioRegion`, `IrqHandle`, and `DmaBuffer<T>` are acquired from
-  the parent bus and released on drop, so resource leaks on detach are impossible to express.
-- **Buses**: ACPI (namespace devices with `_HID`/`_CID`/`_CRS`), PCIe (ECAM from MCFG,
-  capabilities, MSI/MSI-X, hotplug later), USB (xHCI root hub → hubs → functions), and virtio
-  (modern PCI transport only, VIRTIO 1.x).
-- **Interrupts**: an `IrqDomain` hierarchy (e.g. MSI → ITS → GIC), similar to FreeBSD `intr_pic`.
-  Handlers are split into a filter (IRQ context) and an ithread (sleepable).
-- **DMA**: a `busdma`-equivalent with typed coherent/streaming buffers and IOMMU awareness, which is
-  a no-op until the IOMMU driver lands.
+- **FreeBSD's userland view, byte for byte.** Device names and units, `hw.bus.*`, `dev.*`,
+  `/dev/devctl` events, `/dev/devctl2` ioctls, `/dev/pci`, and the pnpinfo and location strings
+  that devd rules match on.
+- **The framework owns the lifecycle.** Drivers implement `attach` (claim resources, build the
+  instance), `start` (install handlers, publish), and `stop` (quiesce the hardware). Detach is a
+  fixed framework sequence: revoke publications, stop, tear down async sources, drop, check the
+  ledger. Every way into a driver is created through its binding, so detach can drain all of them.
+- **Three lifetimes**: the device node (`DeviceRef`), the binding (owned by the manager), and
+  user-visible handles (cdevs, disks, ifnets), which reach the driver only through a revocation
+  `Gate`.
+- **Matching is `const` data** with FreeBSD's `BUS_PROBE_*` ranks. A build fails if two drivers
+  match the same device at equal rank. Each bus gives drivers a typed child view in place of ivars.
+- **One dependency graph** built from ACPI (`_DEP`, `_CRS` resource sources, power resources, PCC,
+  IORT) orders attach, shutdown, suspend, and resume, replacing bus passes. Early devices
+  (consoles, interrupt controllers, timers) are initialized before the tree and adopted into it.
+- **Declared concurrency**: drivers are serialized by default and concurrent by opt-in. Context
+  tokens (`IrqCx`, `ThreadCx`) separate filters from sleepable code. Nothing on the data path hops
+  threads.
+- **Resources are typed grants** from a platform broker: `Mmio<R>` register blocks, `IrqLine` and
+  MSI-X vectors from an `IrqDomain` hierarchy (MSI → ITS → GIC, MSI → LAPIC), and DMA tags with
+  direct, bounce, and IOMMU backends. `DmaCoherent<T: DeviceShared>`, a `DmaStream` ownership
+  typestate, and pre-mapped pools keep DMA safe and fast. Driver crates are
+  `#![forbid(unsafe_code)]`.
+- **Classes** (storage, net, tty, console, input) own protocol logic and user interfaces behind
+  batch-first, queue-shaped driver traits. Requests are completed exactly once, by move.
 
 ### ACPI
 
