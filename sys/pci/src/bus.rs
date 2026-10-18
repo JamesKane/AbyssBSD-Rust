@@ -163,19 +163,38 @@ impl PciChild {
     }
 }
 
-/// Enables MSI-X on the function being attached with up to `want`
-/// vectors, and returns a line for each, in table order.
-pub fn msix_lines(
-    cx: &mut AttachCx<'_>,
-    want: u16,
-) -> Result<Vec<bus::IrqLine>, crate::msi::MsiError> {
-    let child = cx
-        .bus_data_arc::<PciChild>()
-        .ok_or(crate::msi::MsiError::NoCapability)?;
-    let hws = crate::msi::enable_msix(&child, want)?;
-    Ok(hws
-        .into_iter()
-        .filter_map(|hw| {
+/// A function's message-signalled vectors, owned by its driver: dropping
+/// it (after the handlers are gone, as detach orders it) removes them and
+/// turns MSI or MSI-X off again.
+pub struct Messages {
+    child: Arc<PciChild>,
+    hws: Vec<u32>,
+    msix: bool,
+}
+
+impl core::fmt::Debug for Messages {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Messages")
+            .field("vectors", &self.hws.len())
+            .field("msix", &self.msix)
+            .finish()
+    }
+}
+
+impl Drop for Messages {
+    fn drop(&mut self) {
+        crate::msi::PCI_MSI.remove(&self.hws);
+        if self.msix {
+            crate::msi::disable_msix(&self.child);
+        } else {
+            crate::msi::disable_msi(&self.child);
+        }
+    }
+}
+
+fn lines(cx: &mut AttachCx<'_>, hws: &[u32]) -> Vec<bus::IrqLine> {
+    hws.iter()
+        .filter_map(|&hw| {
             cx.irq_line(Resource::Irq {
                 domain: &crate::msi::PCI_MSI,
                 hw,
@@ -184,7 +203,43 @@ pub fn msix_lines(
             })
             .ok()
         })
-        .collect())
+        .collect()
+}
+
+/// Enables MSI-X on the function being attached with up to `want`
+/// vectors: a line for each, in table order, and their owner.
+pub fn msix_lines(
+    cx: &mut AttachCx<'_>,
+    want: u16,
+) -> Result<(Vec<bus::IrqLine>, Messages), crate::msi::MsiError> {
+    let child = cx
+        .bus_data_arc::<PciChild>()
+        .ok_or(crate::msi::MsiError::NoCapability)?;
+    let hws = crate::msi::enable_msix(&child, want)?;
+    let owner = Messages {
+        child,
+        hws,
+        msix: true,
+    };
+    Ok((lines(cx, &owner.hws), owner))
+}
+
+/// Enables MSI with one message on the function being attached: its line
+/// and its owner.
+pub fn msi_line(cx: &mut AttachCx<'_>) -> Result<(bus::IrqLine, Messages), crate::msi::MsiError> {
+    let child = cx
+        .bus_data_arc::<PciChild>()
+        .ok_or(crate::msi::MsiError::NoCapability)?;
+    let hw = crate::msi::enable_msi(&child)?;
+    let owner = Messages {
+        child,
+        hws: alloc::vec![hw],
+        msix: false,
+    };
+    let line = lines(cx, &owner.hws)
+        .pop()
+        .ok_or(crate::msi::MsiError::NoCapability)?;
+    Ok((line, owner))
 }
 
 /// `pciN`.

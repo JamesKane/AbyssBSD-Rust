@@ -490,6 +490,8 @@ pub struct Nvme {
     lines: SpinLock<Vec<IrqLine>>,
     /// MSI-X vector count handed out (0: INTx).
     msix: usize,
+    /// The MSI-X vectors, given back when the instance goes.
+    _messages: Option<pci::bus::Messages>,
     identity: String,
 }
 
@@ -627,7 +629,10 @@ impl Driver for Nvme {
                 },
             )
             .map_or(1, |dw0| ((dw0 & 0xffff).min(dw0 >> 16) + 1) as usize);
-        let mut lines = pci::bus::msix_lines(cx, granted.min(cpus) as u16).unwrap_or_default();
+        let (mut lines, messages) = match pci::bus::msix_lines(cx, granted.min(cpus) as u16) {
+            Ok((l, m)) => (l, Some(m)),
+            Err(_) => (Vec::new(), None),
+        };
         let msix = lines.len();
         if lines.is_empty() {
             lines.push(cx.irq(0)?);
@@ -739,6 +744,7 @@ impl Driver for Nvme {
             namespaces,
             lines: SpinLock::new(lines),
             msix,
+            _messages: messages,
         })
     }
 

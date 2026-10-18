@@ -626,6 +626,16 @@ impl<D: Driver> StartCx<'_, D> {
         self.add_child_with_deps(ident, bus_data, resources, &[])
     }
 
+    /// Adds a disabled channel (FreeBSD's `device_disable`): named with
+    /// its class's next unit, never attached.
+    pub fn add_disabled_child(&mut self, ident: Ident) -> DeviceId {
+        let id = self
+            .mgr
+            .add_disabled_child(self.s, self.binding.node, ident);
+        self.binding.sources.push(Source::Child(id));
+        id
+    }
+
     /// [`StartCx::add_child`] with firmware dependencies (`_DEP`, resource
     /// sources) beyond this parent.
     pub fn add_child_with_deps(

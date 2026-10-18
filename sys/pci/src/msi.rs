@@ -328,6 +328,19 @@ pub fn disable_msix(child: &PciChild) {
     cfg.write16(f.addr, COMMAND, cmd & !CMD_INTX_DISABLE);
 }
 
+/// Turns MSI off on `f` and INTx back on, once its vector is removed.
+pub fn disable_msi(child: &PciChild) {
+    let (cfg, f) = (child.cfg, &child.function);
+    let Some(cap) = caps::find(&f.caps, caps::id::MSI) else {
+        return;
+    };
+    let at = u16::from(cap.offset);
+    let ctl = cfg.read16(f.addr, at + 2);
+    cfg.write16(f.addr, at + 2, ctl & !MSI_ENABLE);
+    let cmd = cfg.read16(f.addr, COMMAND);
+    cfg.write16(f.addr, COMMAND, cmd & !CMD_INTX_DISABLE);
+}
+
 /// Enables MSI on `f` with one message, masked where the function allows,
 /// INTx disabled. Returns the domain input.
 pub fn enable_msi(child: &PciChild) -> Result<u32, MsiError> {

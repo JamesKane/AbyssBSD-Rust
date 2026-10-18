@@ -14,9 +14,12 @@
 //! - **filters**, run in interrupt context ([`IrqCx`]), and **interrupt
 //!   threads** for work that must sleep ([`Sleepable`]), FreeBSD's
 //!   filter/ithread split;
+//! - shared lines: level-triggered handlers on one input (PCI INTx) are
+//!   chained; each filter says whether the interrupt was its device's, and
+//!   the line stays masked until every thread it woke has run;
 //! - synchronous removal: a handler is unlinked, then removal waits until
-//!   no CPU is still running it, so a removed handler's data can be freed
-//!   at once;
+//!   no CPU is still walking its line, so a removed handler's data can be
+//!   freed at once;
 //! - storm detection: a line that keeps firing with nobody claiming it is
 //!   masked and reported, as FreeBSD's `hw.intr_storm_threshold` does;
 //! - per-CPU allocation of root ids for controllers that have per-CPU
@@ -35,7 +38,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use hal::{CpuId, MAX_CPUS};
 use sched::{IrqCx, Priority, Sleepable, Thread, WaitQueue};
@@ -83,7 +86,8 @@ pub enum IrqError {
     NoSuchInput,
     /// No free root id on the target CPU.
     NoVector,
-    /// The input already has a handler (sharing is not supported yet).
+    /// The input has a handler it cannot share (only level-triggered
+    /// handlers share), or the root id is taken by another input.
     Busy,
     /// A threaded-only domain was given a filter.
     NeedsThread,
@@ -133,19 +137,30 @@ pub struct Handler {
     pub arg: usize,
 }
 
-/// One connected input with its handler.
-struct Entry {
-    handler: Handler,
+/// One connected input: its handlers, and what they share.
+struct Line {
     domain: &'static dyn IrqDomain,
     hw: u32,
     trigger: Trigger,
     cpu: CpuId,
     root: u32,
-    count: AtomicU64,
+    /// The first handler; each links to the next.
+    entries: AtomicPtr<Entry>,
+    /// Threads woken for this (level-triggered) line that have not run
+    /// yet; the line is unmasked when the last one has.
+    busy: AtomicU32,
     strays: AtomicU64,
     /// Strays in the current storm window, and when it started (ticks).
     storm: SpinLock<(u64, u64)>,
     masked_by_storm: AtomicBool,
+}
+
+/// One handler on a line.
+struct Entry {
+    handler: Handler,
+    line: *const Line,
+    next: AtomicPtr<Entry>,
+    count: AtomicU64,
     ithread: Option<Arc<IThread>>,
 }
 
@@ -155,6 +170,8 @@ struct IThread {
     exit: AtomicBool,
     q: WaitQueue,
     thread: Once<Arc<Thread>>,
+    /// Its entry's address, once installed.
+    entry: Once<usize>,
 }
 
 /// The platform's choices, set once by [`init`].
@@ -179,15 +196,21 @@ pub struct Config {
 struct Table {
     config: Config,
     /// `per_cpu_ids` slots for each CPU, then the global slots.
-    slots: Box<[AtomicPtr<Entry>]>,
+    slots: Box<[AtomicPtr<Line>]>,
     /// Allocated per-CPU ids (bit per id), per CPU.
     used: SpinLock<Vec<Vec<u64>>>,
 }
 
 static TABLE: Once<Table> = Once::new();
-/// The entry each CPU is dispatching, for synchronous removal.
-static RUNNING: [AtomicPtr<Entry>; MAX_CPUS] =
-    [const { AtomicPtr::new(ptr::null_mut()) }; MAX_CPUS];
+/// The line each CPU is dispatching, for synchronous removal.
+static RUNNING: [AtomicPtr<Line>; MAX_CPUS] = [const { AtomicPtr::new(ptr::null_mut()) }; MAX_CPUS];
+
+/// Connected lines by input, for sharing. Installs and removals hold it.
+struct Lines(Vec<*mut Line>);
+// SAFETY: the pointers are only followed under the lock, and lines are
+// freed only after being unlinked from it.
+unsafe impl Send for Lines {}
+static LINES: SpinLock<Lines> = SpinLock::new(Lines(Vec::new()));
 /// Interrupts with no handler.
 static STRAYS: AtomicU64 = AtomicU64::new(0);
 
@@ -199,7 +222,7 @@ static STRAYS: AtomicU64 = AtomicU64::new(0);
 pub fn init(config: Config) {
     let per_cpu = config.per_cpu_ids as usize;
     let n = per_cpu * MAX_CPUS + config.global_ids.saturating_sub(config.per_cpu_ids) as usize;
-    let slots: Box<[AtomicPtr<Entry>]> = (0..n).map(|_| AtomicPtr::new(ptr::null_mut())).collect();
+    let slots: Box<[AtomicPtr<Line>]> = (0..n).map(|_| AtomicPtr::new(ptr::null_mut())).collect();
     let words = (per_cpu).div_ceil(64);
     let used = SpinLock::new((0..MAX_CPUS).map(|_| alloc::vec![0u64; words]).collect());
     let ok = TABLE
@@ -217,7 +240,7 @@ fn table() -> &'static Table {
 }
 
 impl Table {
-    fn slot(&self, cpu: CpuId, root: u32) -> Option<&AtomicPtr<Entry>> {
+    fn slot(&self, cpu: CpuId, root: u32) -> Option<&AtomicPtr<Line>> {
         let c = &self.config;
         let i = if root < c.per_cpu_ids {
             cpu.index() * c.per_cpu_ids as usize + root as usize
@@ -266,19 +289,26 @@ unsafe impl Send for Installed {}
 
 impl fmt::Debug for Installed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // SAFETY: the entry lives until `remove`, which consumes us.
-        let e = unsafe { &*self.entry };
+        // SAFETY: the entry, and its line, live until `remove`, which
+        // consumes us.
+        let (e, l) = unsafe { (&*self.entry, &*(*self.entry).line) };
         f.debug_struct("Installed")
             .field("name", &e.handler.name)
-            .field("domain", &e.domain.name())
-            .field("hw", &e.hw)
-            .field("root", &e.root)
+            .field("domain", &l.domain.name())
+            .field("hw", &l.hw)
+            .field("root", &l.root)
             .finish()
     }
 }
 
+fn same_domain(a: &'static dyn IrqDomain, b: &'static dyn IrqDomain) -> bool {
+    core::ptr::addr_eq(a, b)
+}
+
 /// Connects input `hw` of `domain` to `cpu` and installs `handler` for it,
-/// then unmasks the input.
+/// then unmasks the input. A level-triggered input that already has
+/// level-triggered handlers gets this one too (a shared line), on the CPU
+/// the first chose.
 pub fn install(
     domain: &'static dyn IrqDomain,
     hw: u32,
@@ -293,60 +323,97 @@ pub fn install(
     if domain.threaded_only() && handler.filter.is_some() {
         return Err(IrqError::NeedsThread);
     }
-    let ithread = if let Some(f) = handler.thread {
-        Some(start_ithread(
-            handler.name,
-            f,
-            handler.arg,
-            domain,
-            hw,
-            trigger,
-        )?)
-    } else {
-        None
+    let mut lines = LINES.lock();
+    // SAFETY: registered lines live until removed from the list, which
+    // needs the lock we hold.
+    let shared = lines
+        .0
+        .iter()
+        .copied()
+        .find(|&l| unsafe { same_domain((*l).domain, domain) && (*l).hw == hw });
+    if let Some(l) = shared {
+        // SAFETY: as above.
+        let line = unsafe { &*l };
+        if line.trigger != Trigger::Level || trigger != Trigger::Level {
+            return Err(IrqError::Busy);
+        }
+    }
+    let ithread = match handler.thread {
+        Some(f) => Some(start_ithread(handler.name, f, handler.arg)?),
+        None => None,
     };
-    let root = domain.connect(hw, trigger, polarity, cpu)?;
+    let line = match shared {
+        Some(l) => l,
+        None => {
+            let root = domain.connect(hw, trigger, polarity, cpu)?;
+            let l = Box::into_raw(Box::new(Line {
+                domain,
+                hw,
+                trigger,
+                cpu,
+                root,
+                entries: AtomicPtr::new(ptr::null_mut()),
+                busy: AtomicU32::new(0),
+                strays: AtomicU64::new(0),
+                storm: SpinLock::new((0, 0)),
+                masked_by_storm: AtomicBool::new(false),
+            }));
+            let Some(slot) = table().slot(cpu, root) else {
+                domain.disconnect(hw, cpu, root);
+                // SAFETY: never published.
+                drop(unsafe { Box::from_raw(l) });
+                return Err(IrqError::NoVector);
+            };
+            if slot
+                .compare_exchange(ptr::null_mut(), l, Ordering::Release, Ordering::Relaxed)
+                .is_err()
+            {
+                domain.disconnect(hw, cpu, root);
+                // SAFETY: never published.
+                drop(unsafe { Box::from_raw(l) });
+                return Err(IrqError::Busy);
+            }
+            lines.0.push(l);
+            l
+        }
+    };
     let entry = Box::into_raw(Box::new(Entry {
         handler,
-        domain,
-        hw,
-        trigger,
-        cpu,
-        root,
+        line,
+        next: AtomicPtr::new(ptr::null_mut()),
         count: AtomicU64::new(0),
-        strays: AtomicU64::new(0),
-        storm: SpinLock::new((0, 0)),
-        masked_by_storm: AtomicBool::new(false),
         ithread,
     }));
-    let slot = table().slot(cpu, root).ok_or(IrqError::NoVector)?;
-    // Release: the entry is fully built before dispatch can load it.
-    if slot
-        .compare_exchange(ptr::null_mut(), entry, Ordering::Release, Ordering::Relaxed)
-        .is_err()
-    {
-        domain.disconnect(hw, cpu, root);
-        // SAFETY: never published.
-        drop(unsafe { Box::from_raw(entry) });
-        return Err(IrqError::Busy);
+    // SAFETY: the entry is ours until published below.
+    if let Some(it) = unsafe { &(*entry).ithread } {
+        let _ = it.entry.set(entry.expose_provenance());
     }
+    // Append. Release: the entry is fully built before dispatch can load
+    // it.
+    // SAFETY: the line is registered and we hold the lock.
+    let l = unsafe { &*line };
+    let mut link = &l.entries;
+    loop {
+        let next = link.load(Ordering::Acquire);
+        if next.is_null() {
+            break;
+        }
+        // SAFETY: chained entries live until unlinked under the lock.
+        link = unsafe { &(*next).next };
+    }
+    link.store(entry, Ordering::Release);
+    drop(lines);
     domain.unmask(hw);
     Ok(Installed { entry })
 }
 
-fn start_ithread(
-    name: &'static str,
-    f: ThreadFn,
-    arg: usize,
-    domain: &'static dyn IrqDomain,
-    hw: u32,
-    trigger: Trigger,
-) -> Result<Arc<IThread>, IrqError> {
+fn start_ithread(name: &'static str, f: ThreadFn, arg: usize) -> Result<Arc<IThread>, IrqError> {
     let it = Arc::new(IThread {
         pending: AtomicBool::new(false),
         exit: AtomicBool::new(false),
         q: WaitQueue::new(),
         thread: Once::new(),
+        entry: Once::new(),
     });
     let me = Arc::clone(&it);
     let t = sched::Builder::new(name)
@@ -361,9 +428,7 @@ fn start_ithread(
                 }
                 me.pending.store(false, Ordering::Release);
                 f(arg, s);
-                if trigger == Trigger::Level {
-                    domain.unmask(hw);
-                }
+                me.done();
             }
         })
         .map_err(|_| IrqError::NoThread)?;
@@ -371,44 +436,83 @@ fn start_ithread(
     Ok(it)
 }
 
+impl IThread {
+    /// The thread ran for its line: the last of a level line's woken
+    /// threads unmasks it.
+    fn done(&self) {
+        let Some(&e) = self.entry.get() else { return };
+        // SAFETY: the thread is joined before its entry and line are freed.
+        let line = unsafe { &*(*core::ptr::with_exposed_provenance::<Entry>(e)).line };
+        if line.trigger == Trigger::Level && line.busy.fetch_sub(1, Ordering::AcqRel) == 1 {
+            line.domain.unmask(line.hw);
+        }
+    }
+}
+
 impl Installed {
+    fn line(&self) -> &Line {
+        // SAFETY: the entry and its line live until `remove`.
+        unsafe { &*(*self.entry).line }
+    }
+
     /// The root id the input arrives at.
     #[must_use]
     pub fn root(&self) -> u32 {
-        // SAFETY: the entry lives until `remove`.
-        unsafe { (*self.entry).root }
+        self.line().root
     }
 
     /// Interrupts handled so far (filter or thread).
     #[must_use]
     pub fn count(&self) -> u64 {
-        // SAFETY: as above.
+        // SAFETY: as in `line`.
         unsafe { (*self.entry).count.load(Ordering::Relaxed) }
     }
 
     /// Whether storm detection masked the line.
     #[must_use]
     pub fn storm_masked(&self) -> bool {
-        // SAFETY: as above.
-        unsafe { (*self.entry).masked_by_storm.load(Ordering::Relaxed) }
+        self.line().masked_by_storm.load(Ordering::Relaxed)
     }
 
-    /// Masks the input, unlinks the handler, waits until no CPU is still
-    /// running it, stops its interrupt thread, and disconnects the input.
-    /// When this returns nothing will call the handler again.
+    /// Unlinks the handler, waits until no CPU is still walking its line,
+    /// stops its interrupt thread, and, for the line's last handler, masks
+    /// and disconnects the input. When this returns nothing will call the
+    /// handler again.
     pub fn remove(self, s: &Sleepable) {
         let e = self.entry;
-        // SAFETY: the entry lives until we free it below.
-        let entry = unsafe { &*e };
-        entry.domain.mask(entry.hw);
-        if let Some(slot) = table().slot(entry.cpu, entry.root) {
-            slot.store(ptr::null_mut(), Ordering::Release);
+        let mut lines = LINES.lock();
+        // SAFETY: the entry and its line live until freed below; the lock
+        // keeps the chain still.
+        let (entry, lp) = unsafe { (&*e, (*e).line.cast_mut()) };
+        // SAFETY: as above.
+        let line = unsafe { &*lp };
+        let mut link = &line.entries;
+        loop {
+            let cur = link.load(Ordering::Acquire);
+            if cur.is_null() {
+                break;
+            }
+            if cur == e {
+                link.store(entry.next.load(Ordering::Acquire), Ordering::Release);
+                break;
+            }
+            // SAFETY: chained entries live until unlinked under the lock.
+            link = unsafe { &(*cur).next };
         }
-        // A CPU that loaded the entry before the store marked it running
-        // first; wait for every such CPU to finish.
+        let last = line.entries.load(Ordering::Acquire).is_null();
+        if last {
+            line.domain.mask(line.hw);
+            if let Some(slot) = table().slot(line.cpu, line.root) {
+                slot.store(ptr::null_mut(), Ordering::Release);
+            }
+            lines.0.retain(|&l| l != lp);
+        }
+        drop(lines);
+        // A CPU that loaded the line before the unlink marked it running
+        // first; wait for every such CPU to finish walking it.
         core::sync::atomic::fence(Ordering::SeqCst);
         for r in &RUNNING {
-            while r.load(Ordering::Acquire) == e {
+            while r.load(Ordering::Acquire) == lp {
                 core::hint::spin_loop();
             }
         }
@@ -418,15 +522,26 @@ impl Installed {
             if let Some(t) = it.thread.get() {
                 t.join(s);
             }
+            // Woken but never run: it no longer holds the line masked.
+            if it.pending.swap(false, Ordering::AcqRel) && !last {
+                it.done();
+            }
         }
-        entry.domain.disconnect(entry.hw, entry.cpu, entry.root);
-        // SAFETY: unlinked, no CPU is running it, and its thread is gone:
-        // nothing else holds the pointer.
-        drop(unsafe { Box::from_raw(e) });
+        if last {
+            line.domain.disconnect(line.hw, line.cpu, line.root);
+        }
+        // SAFETY: unlinked, no CPU is walking the line, and its thread is
+        // gone: nothing else holds the entry (or, for the last, the line).
+        unsafe {
+            drop(Box::from_raw(e));
+            if last {
+                drop(Box::from_raw(lp));
+            }
+        }
     }
 }
 
-/// Runs the handler for root id `root` on this CPU. Called by the
+/// Runs the handlers for root id `root` on this CPU. Called by the
 /// kernel's interrupt entry with interrupts masked, before it signals end
 /// of interrupt to the controller. Returns false for an interrupt with no
 /// handler.
@@ -439,42 +554,59 @@ pub fn dispatch(root: u32, cx: &IrqCx) -> bool {
         return false;
     };
     let running = &RUNNING[cpu.index()];
-    // Load, mark, fence, re-check. A remover clears the slot, fences, then
-    // waits for marks: either it sees our mark, or we see its clear.
-    let e = slot.load(Ordering::Acquire);
-    if e.is_null() {
+    // Load, mark, fence, re-check. A remover unlinks, fences, then waits
+    // for marks: either it sees our mark, or we see its unlink.
+    let l = slot.load(Ordering::Acquire);
+    if l.is_null() {
         STRAYS.fetch_add(1, Ordering::Relaxed);
         return false;
     }
-    running.store(e, Ordering::Relaxed);
+    running.store(l, Ordering::Relaxed);
     core::sync::atomic::fence(Ordering::SeqCst);
-    // Re-check: the remover may have cleared the slot before seeing us.
-    if slot.load(Ordering::Acquire) != e {
+    if slot.load(Ordering::Acquire) != l {
         running.store(ptr::null_mut(), Ordering::Release);
         return false;
     }
-    // SAFETY: published by `install`, and `remove` cannot free it while
-    // this CPU's RUNNING mark names it.
-    let entry = unsafe { &*e };
-    let result = match entry.handler.filter {
-        Some(f) => f(entry.handler.arg, cx),
-        None => Filter::Schedule,
-    };
-    match result {
-        Filter::Handled => {
-            entry.count.fetch_add(1, Ordering::Relaxed);
-        }
-        Filter::Schedule => {
-            entry.count.fetch_add(1, Ordering::Relaxed);
-            if let Some(it) = &entry.ithread {
-                if entry.trigger == Trigger::Level {
-                    entry.domain.mask(entry.hw);
-                }
-                it.pending.store(true, Ordering::Release);
-                it.q.wake_one();
+    // SAFETY: published by `install`, and `remove` cannot free the line or
+    // an entry on it while this CPU's mark names the line.
+    let line = unsafe { &*l };
+    let mut claimed = false;
+    let mut masked = false;
+    let mut e = line.entries.load(Ordering::Acquire);
+    while !e.is_null() {
+        // SAFETY: as above.
+        let entry = unsafe { &*e };
+        let result = match entry.handler.filter {
+            Some(f) => f(entry.handler.arg, cx),
+            None => Filter::Schedule,
+        };
+        match result {
+            Filter::Handled => {
+                claimed = true;
+                entry.count.fetch_add(1, Ordering::Relaxed);
             }
+            Filter::Schedule => {
+                claimed = true;
+                entry.count.fetch_add(1, Ordering::Relaxed);
+                if let Some(it) = &entry.ithread
+                    && !it.pending.swap(true, Ordering::AcqRel)
+                {
+                    if line.trigger == Trigger::Level {
+                        line.busy.fetch_add(1, Ordering::AcqRel);
+                        if !masked {
+                            line.domain.mask(line.hw);
+                            masked = true;
+                        }
+                    }
+                    it.q.wake_one();
+                }
+            }
+            Filter::Stray => {}
         }
-        Filter::Stray => storm_check(t, entry),
+        e = entry.next.load(Ordering::Acquire);
+    }
+    if !claimed {
+        storm_check(t, line);
     }
     running.store(ptr::null_mut(), Ordering::Release);
     true
@@ -482,20 +614,20 @@ pub fn dispatch(root: u32, cx: &IrqCx) -> bool {
 
 /// Counts a stray and masks the line if strays exceed the threshold
 /// within a second.
-fn storm_check(t: &Table, e: &Entry) {
-    e.strays.fetch_add(1, Ordering::Relaxed);
+fn storm_check(t: &Table, l: &Line) {
+    l.strays.fetch_add(1, Ordering::Relaxed);
     let c = &t.config;
     if c.storm_threshold == 0 {
         return;
     }
     let now = (c.now)();
-    let mut w = e.storm.lock();
+    let mut w = l.storm.lock();
     if now.saturating_sub(w.1) > c.frequency {
         *w = (0, now);
     }
     w.0 += 1;
-    if w.0 > c.storm_threshold && !e.masked_by_storm.swap(true, Ordering::Relaxed) {
-        e.domain.mask(e.hw);
+    if w.0 > c.storm_threshold && !l.masked_by_storm.swap(true, Ordering::Relaxed) {
+        l.domain.mask(l.hw);
     }
 }
 

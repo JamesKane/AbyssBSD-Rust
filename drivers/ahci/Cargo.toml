@@ -1,0 +1,20 @@
+[package]
+name = "ahci"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bus = { path = "../../sys/bus" }
+devtree = { path = "../../lib/devtree" }
+irq = { path = "../../sys/irq" }
+pci = { path = "../../sys/pci" }
+regs = { path = "../../lib/regs" }
+sched = { path = "../../sys/sched" }
+storage = { path = "../../sys/storage" }
+sync = { path = "../../sys/sync" }
+vm = { path = "../../sys/vm" }
+
+[lints]
+workspace = true

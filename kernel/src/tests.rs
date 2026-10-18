@@ -1656,24 +1656,33 @@ ktest! {
                     .lines()
                     .map(str::trim_start)
                     .collect();
+            // As `devinfo -v` prints a device: empty fields left out.
             let line = |id: bus::DeviceId| {
                 let ident = m.ident(id, &s).unwrap();
-                let mut l = alloc::format!(
-                    "{} <{}> pnpinfo ",
-                    m.nameunit(id, &s).unwrap_or_default(),
-                    m.description(id, &s).unwrap_or_default()
-                );
-                ident.pnpinfo(&mut l);
+                let mut l = m.nameunit(id, &s).unwrap_or_default();
+                let desc = m.description(id, &s).unwrap_or_default();
+                if !desc.is_empty() {
+                    l.push_str(&alloc::format!(" <{desc}>"));
+                }
+                let mut pnp = alloc::string::String::new();
+                ident.pnpinfo(&mut pnp);
+                if !pnp.is_empty() {
+                    l.push_str(" pnpinfo ");
+                    l.push_str(&pnp);
+                }
                 let mut loc = alloc::string::String::new();
                 ident.location(&mut loc);
                 if !loc.is_empty() {
                     l.push_str(" at ");
                     l.push_str(&loc);
                 }
+                if m.is_disabled(id, &s) {
+                    l.push_str(" (disabled)");
+                }
                 l
             };
-            // Every attached function (the virtio transports, nvme0) and
-            // what is attached below it.
+            // Every attached function (the virtio transports, nvme0,
+            // ahci0) and its children, attached or disabled.
             let mut transports = 0;
             for c in m.children(pci0, &s) {
                 if m.state(c, &s) != Some(bus::NodeState::Attached) {
@@ -1970,5 +1979,32 @@ ktest! {
         exercise_disk(&s, &nda);
         let ms = (crate::time::counter() - start) * 1000 / crate::time::frequency();
         kprintln!("{}: written and read back in {ms} ms", nda.name());
+    }
+}
+
+ktest! {
+    fn ahci_writes_and_reads_back() {
+        let s = cx();
+        let m = bus::manager();
+        let (_, ahci) = find_named(m, &s, crate::devices::nexus(), "ahci0").expect("ahci0");
+        let desc = m.description(ahci, &s).unwrap_or_default();
+        assert!(desc.ends_with("AHCI SATA controller"), "{desc:?}");
+        let channels = m.children(ahci, &s);
+        let attached = channels
+            .iter()
+            .filter(|&&c| m.state(c, &s) == Some(bus::NodeState::Attached))
+            .count();
+        assert!(attached >= 1, "an attached channel");
+        let ada = storage::find("ada0").expect("ada0");
+        assert_eq!(ada.bytes(), 16 << 20);
+        let start = crate::time::counter();
+        exercise_disk(&s, &ada);
+        let ms = (crate::time::counter() - start) * 1000 / crate::time::frequency();
+        kprintln!(
+            "{}: written and read back in {ms} ms ({} <{desc}>, {} channel(s), {attached} attached)",
+            ada.name(),
+            m.nameunit(ahci, &s).unwrap_or_default(),
+            channels.len()
+        );
     }
 }

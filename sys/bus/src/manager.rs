@@ -62,6 +62,8 @@ struct Node {
     sysctl: Option<sysctl::NodeId>,
     /// Where an `Attaching` node is between attach and start.
     start: StartPhase,
+    /// Disabled (FreeBSD's `device_disable`): named, never attached.
+    disabled: Option<&'static str>,
 }
 
 /// Starts run in tree order (DRIVER-MODEL.md §4.3): a bus adds children
@@ -89,7 +91,10 @@ enum Job {
 impl Node {
     /// The devclass: the driver's name, or an adopted device's class.
     fn class(&self, drivers: &[DriverDecl]) -> Option<&'static str> {
-        self.driver.map(|d| drivers[d].name).or(self.adopted)
+        self.driver
+            .map(|d| drivers[d].name)
+            .or(self.adopted)
+            .or(self.disabled)
     }
 }
 
@@ -228,6 +233,7 @@ pub fn init(
         binding: None,
         sysctl: None,
         start: StartPhase::Attach,
+        disabled: None,
     }));
     topo.graph.add_node(0);
     let faults = (o.fault_one_in > 0).then_some(Faults {
@@ -391,6 +397,7 @@ impl Manager {
                 binding: None,
                 sysctl: None,
                 start: StartPhase::Attach,
+                disabled: None,
             };
             if index as usize == t.nodes.len() {
                 t.nodes.push(Some(node));
@@ -454,6 +461,7 @@ impl Manager {
             binding: None,
             sysctl: None,
             start: StartPhase::Attach,
+            disabled: None,
         };
         let (index, generation) = match t.free.pop() {
             Some((i, g)) => (i, g),
@@ -552,6 +560,56 @@ impl Manager {
         }
         drop(t);
         self.bump();
+    }
+
+    /// Adds a disabled channel under `parent`: it takes a unit of its
+    /// class, as FreeBSD's named children do, but is never attached
+    /// (`devinfo` shows it "(disabled)").
+    pub(crate) fn add_disabled_child(
+        &self,
+        s: &Sleepable,
+        parent: DeviceId,
+        ident: Ident,
+    ) -> DeviceId {
+        let Ident::Channel { class, .. } = ident else {
+            return self.add_child(s, parent, ident, None, Vec::new(), &[]);
+        };
+        let mut t = self.topo.write(s);
+        let unit = t.units.alloc(class, None).unwrap_or(0);
+        let node = Node {
+            generation: 0,
+            parent: Some(parent.index),
+            children: Vec::new(),
+            ident,
+            bus_data: None,
+            resources: Vec::new(),
+            state: NodeState::NotPresent,
+            driver: None,
+            adopted: None,
+            unit: Some(unit),
+            desc: String::new(),
+            declined: Vec::new(),
+            binding: None,
+            sysctl: None,
+            start: StartPhase::Attach,
+            disabled: Some(class),
+        };
+        let (index, generation) = match t.free.pop() {
+            Some((i, g)) => (i, g),
+            None => (u32::try_from(t.nodes.len()).expect("node count"), 0),
+        };
+        let node = Node { generation, ..node };
+        if index as usize == t.nodes.len() {
+            t.nodes.push(Some(node));
+        } else {
+            t.nodes[index as usize] = Some(node);
+        }
+        if let Some(p) = t.node_mut(parent) {
+            p.children.push(index);
+        }
+        drop(t);
+        self.bump();
+        DeviceId { index, generation }
     }
 
     /// Chooses a driver for `id`, allocates its unit, and queues it if its
@@ -1141,7 +1199,7 @@ impl Manager {
         } else {
             n.state.freebsd()
         };
-        let mut flags = df::ENABLED;
+        let mut flags = if n.disabled.is_some() { 0 } else { df::ENABLED };
         if state == ds::ATTACHED {
             flags |= df::ATTACHED_ONCE;
         }
@@ -1153,6 +1211,15 @@ impl Manager {
             location: &loc,
         };
         encode(handle(i), n.parent.map_or(0, handle), 0, flags, state, &f).ok()
+    }
+
+    /// Whether `id` is disabled (FreeBSD's `device_disable`).
+    #[must_use]
+    pub fn is_disabled(&self, id: DeviceId, s: &Sleepable) -> bool {
+        self.topo
+            .read(s)
+            .node(id)
+            .is_some_and(|n| n.disabled.is_some())
     }
 
     /// `id`'s children, in the order they were added.

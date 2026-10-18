@@ -256,14 +256,32 @@ fn boot(case: &BootCase, release: bool, verbose: bool) -> Result<std::result::Re
     };
     let scratch = blank("scratch")?;
     let nvme = blank("nvme")?;
+    let sata = blank("sata")?;
     let devices = match case.vmm {
-        Vmm::Bhyve => vec![format!("5,nvme,{}", nvme.display())],
-        Vmm::Qemu => vec![
-            "-drive".into(),
-            format!("if=none,id=nvm0,format=raw,file={}", nvme.display()),
-            "-device".into(),
-            "nvme,serial=abyss0,drive=nvm0".into(),
+        Vmm::Bhyve => vec![
+            format!("5,nvme,{}", nvme.display()),
+            format!("6,ahci-hd,{}", sata.display()),
         ],
+        Vmm::Qemu => {
+            let mut d = vec![
+                "-drive".into(),
+                format!("if=none,id=nvm0,format=raw,file={}", nvme.display()),
+                "-device".into(),
+                "nvme,serial=abyss0,drive=nvm0".into(),
+                "-drive".into(),
+                format!("if=none,id=sata0,format=raw,file={}", sata.display()),
+            ];
+            // q35 has an ICH9 AHCI controller built in; virt needs one.
+            let bus = match case.arch {
+                Arch::X86_64 => "ide.0",
+                Arch::Aarch64 => {
+                    d.extend(["-device".into(), "ahci,id=ahci0".into()]);
+                    "ahci0.0"
+                }
+            };
+            d.extend(["-device".into(), format!("ide-hd,drive=sata0,bus={bus}")]);
+            d
+        }
     };
     let vm = Vm {
         el2: case.el2,

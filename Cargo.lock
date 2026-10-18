@@ -28,6 +28,21 @@ name = "addr"
 version = "0.0.0"
 
 [[package]]
+name = "ahci"
+version = "0.0.0"
+dependencies = [
+ "bus",
+ "devtree",
+ "irq",
+ "pci",
+ "regs",
+ "sched",
+ "storage",
+ "sync",
+ "vm",
+]
+
+[[package]]
 name = "aml"
 version = "0.0.0"
 
@@ -92,6 +107,7 @@ name = "driver-table"
 version = "0.0.0"
 dependencies = [
  "acpi",
+ "ahci",
  "bus",
  "devtree",
  "nvme",

@@ -65,6 +65,14 @@ pub enum Ident {
     Pci(PciIdent, PciAddress, Option<String>),
     /// A virtio device on a transport.
     Virtio(VirtioIdent),
+    /// A controller's channel, a child with a fixed class (`ahcich` at
+    /// `channel=0`), as FreeBSD adds them by name.
+    Channel {
+        /// The class (the driver's name).
+        class: &'static str,
+        /// The channel number.
+        channel: u32,
+    },
     /// A test bus child.
     Test(TestIdent),
 }
@@ -74,7 +82,7 @@ pub enum Ident {
 pub enum Ids {
     /// Never matched; the driver is attached explicitly (adoption, root).
     None,
-    /// `nexus0` children by name.
+    /// Children claimed by name: `nexus0`'s, and channels by class.
     Nexus(&'static [&'static str]),
     /// PCI buses.
     PciBus,
@@ -104,7 +112,9 @@ impl Ids {
             }
         }
         match (self, ident) {
-            (Self::Nexus(names), Ident::Nexus(n)) => names.contains(n).then_some(Rank::DEFAULT),
+            (Self::Nexus(names), Ident::Nexus(n) | Ident::Channel { class: n, .. }) => {
+                names.contains(n).then_some(Rank::DEFAULT)
+            }
             (Self::PciBus, Ident::PciBus { .. }) => Some(Rank::DEFAULT),
             (Self::Acpi(t), Ident::Acpi(i, _)) => best(t, i),
             (Self::Pci(t), Ident::Pci(i, _, _)) => best(t, i),
@@ -316,7 +326,11 @@ impl Ident {
     pub fn pnpinfo(&self, out: &mut String) {
         use devtree::strings;
         let _ = match self {
-            Self::Root | Self::Platform | Self::Nexus(_) | Self::PciBus { .. } => Ok(()),
+            Self::Root
+            | Self::Platform
+            | Self::Nexus(_)
+            | Self::PciBus { .. }
+            | Self::Channel { .. } => Ok(()),
             Self::Acpi(i, _) => strings::acpi_pnpinfo(out, i),
             Self::Pci(i, _, _) => strings::pci_pnpinfo(out, i),
             Self::Virtio(i) => strings::virtio_pnpinfo(out, i),
@@ -335,6 +349,9 @@ impl Ident {
             | Self::Virtio(_) => Ok(()),
             Self::Acpi(_, path) => strings::acpi_location(out, path, None),
             Self::Pci(_, a, path) => strings::pci_location(out, a, path.as_deref(), None),
+            Self::Channel { channel, .. } => {
+                fmt::Write::write_fmt(out, format_args!("channel={channel}"))
+            }
             Self::Test(_) => Ok(()),
         };
     }
