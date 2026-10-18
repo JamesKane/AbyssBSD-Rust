@@ -141,6 +141,7 @@ dependencies = [
  "irq",
  "ktest",
  "logring",
+ "pci",
  "pt",
  "regs",
  "sched",
@@ -175,6 +176,13 @@ dependencies = [
 [[package]]
 name = "logring"
 version = "0.0.0"
+
+[[package]]
+name = "pci"
+version = "0.0.0"
+dependencies = [
+ "devtree",
+]
 
 [[package]]
 name = "pt"

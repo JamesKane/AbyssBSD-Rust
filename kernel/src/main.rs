@@ -31,6 +31,7 @@ mod firmware;
 mod intc;
 mod mm;
 mod panic;
+mod pci;
 mod qemu;
 mod smp;
 #[cfg(not(feature = "ktest"))]
@@ -88,6 +89,7 @@ fn kmain(boot_info: PhysAddr) -> ! {
     let s = unsafe { sched::Sleepable::assume() };
     smp::start_cpus();
     topology::summarize();
+    pci::init();
     devices::init(&s);
 
     #[cfg(feature = "ktest")]

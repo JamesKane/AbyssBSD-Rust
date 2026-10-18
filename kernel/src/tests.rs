@@ -1366,3 +1366,46 @@ ktest! {
         }
     }
 }
+
+ktest! {
+    fn pci_enumeration_through_ecam() {
+        let windows = crate::pci::windows();
+        assert!(!windows.is_empty(), "MCFG gave no ECAM window");
+        let w = &windows[0];
+        let (fns, problems) = pci::enumerate(w, w.segment(), w.buses());
+        for f in &fns {
+            let i = &f.header.ident;
+            kprintln!(
+                "pci: {:02x}:{:02x}.{} {:04x}:{:04x} class {:06x} bars {} caps {}",
+                f.addr.bus, f.addr.slot, f.addr.function, i.vendor, i.device, i.class,
+                f.bars.len(), f.caps.len()
+            );
+        }
+        assert!(problems.is_empty(), "{problems:?}");
+        let host = fns.first().expect("functions on the root bus");
+        assert_eq!((host.addr.bus, host.addr.slot, host.addr.function), (0, 0, 0));
+        assert_eq!(host.header.ident.class, 0x06_00_00, "a host bridge at 00:00.0");
+        // virtio-blk and virtio-rng: memory BARs sized in RAM-free space,
+        // and the vendor capabilities the modern transport uses.
+        let virtio: alloc::vec::Vec<_> = fns.iter().filter(|f| f.header.ident.vendor == 0x1af4).collect();
+        assert!(virtio.len() >= 2, "virtio functions: {}", virtio.len());
+        for f in virtio {
+            // Firmware may leave a BAR unassigned (aarch64 EDK2 does the
+            // legacy I/O BAR); nothing else is acceptable.
+            assert!(
+                f.bad_bars.iter().all(|(_, e)| *e == pci::BarError::Unassigned),
+                "{:?}",
+                f.bad_bars
+            );
+            assert!(
+                f.bars.iter().any(|b| b.kind != pci::BarKind::Io && b.size >= 0x1000),
+                "a memory BAR on {:?}",
+                f.addr
+            );
+            assert!(pci::caps::find(&f.caps, pci::caps::id::VENDOR).is_some());
+            // Config space reads back the same through the lookup.
+            let cfg = crate::pci::config_for(f.addr).unwrap();
+            assert_eq!(cfg.read16(f.addr, 0), 0x1af4);
+        }
+    }
+}
