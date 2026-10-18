@@ -1,0 +1,25 @@
+[package]
+name = "loader-efi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "loader-efi"
+path = "src/main.rs"
+test = false
+bench = false
+
+[features]
+# Builds the image's in-firmware tests and runs them instead of booting.
+ktest = []
+
+[dependencies]
+crc = { path = "../../lib/crc" }
+efi = { path = "../efi" }
+guid = { path = "../../lib/guid" }
+ktest = { path = "../../lib/ktest" }
+
+[lints]
+workspace = true

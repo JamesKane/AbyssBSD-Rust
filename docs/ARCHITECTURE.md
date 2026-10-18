@@ -76,7 +76,7 @@ AbyssBSD-Rust/
 │   └── nic-virtio/  nic-e1000e/  nic-igc/
 ├── tools/
 │   ├── syscallgen/            # syscalls.master → Rust tables
-│   └── abi-check/             # struct layout verification against real FreeBSD headers
+│   └── (abi-check lives in xtask; layouts come from lib/abi::layout)
 ├── tests/                     # QEMU-driven integration and compatibility tests
 └── docs/
 ```

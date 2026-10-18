@@ -41,7 +41,7 @@ P0 Foundations ─► P1 Boot ─► P2 Core kernel ─► P3 Devices & ACPI ─
 - `xtask` skeleton: `build`, `run`, `test`, `image` (FAT32 ESP via our own `lib/fat` writer),
   and `--remote` execution on the build server.
 - `tools/syscallgen` producing `lib/abi` syscall tables from `../freebsd-src/sys/kern/syscalls.master`.
-- `tools/abi-check` pipeline proven on a handful of structs (`timespec`, `stat`, `sigaction`).
+- `cargo xtask abi-check` pipeline proven on a handful of structs (`timespec`, `stat`, `sigaction`).
 - Build server provisioned (rustup, qemu, edk2, bare git repo, CI hook).
 - In-house test harness for kernel tests (`#[ktest]` collection via linker section).
 

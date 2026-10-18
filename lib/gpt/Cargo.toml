@@ -1,0 +1,13 @@
+[package]
+name = "gpt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+crc = { path = "../crc" }
+guid = { path = "../guid" }
+
+[lints]
+workspace = true

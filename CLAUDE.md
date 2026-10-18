@@ -40,3 +40,17 @@ that runs unmodified FreeBSD userland. Read `docs/ROADMAP.md` for the current ph
   - There is no serial console. Use the framebuffer, the persistent log the loader saves to the
     ESP, and the watchdog.
 - Entry point for everything: `cargo xtask …` (see `docs/BUILD-AND-TEST.md`).
+
+## Common commands
+
+```sh
+cargo xtask test --tier unit          # host unit tests (bare `cargo test` does the same)
+cargo xtask test --tier boot          # boot the ktest loader in QEMU, both arches
+cargo xtask run --arch aarch64        # interactive QEMU (Ctrl-A X quits)
+cargo xtask check                     # fmt, clippy for host and UEFI targets, policy
+cargo xtask syscallgen --check        # generated syscall table matches ../freebsd-src
+cargo xtask abi-check                 # lib/abi layouts vs FreeBSD headers (on the build server)
+cargo xtask --remote test --tier unit # anything, on the build server
+```
+
+`lib/abi/src/syscall/generated.rs` is generated; edit `tools/syscallgen` instead.

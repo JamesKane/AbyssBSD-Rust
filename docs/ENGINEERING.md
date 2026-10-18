@@ -107,7 +107,7 @@ early boot and init-only code.
    intrusive-collection primitives.
 5. Changes that add or modify `unsafe` need a second reviewer (or, for solo work, a written
    self-review note in the PR), plus a Miri run where the code is host-testable.
-6. `tools/unsafe-report` (via `xtask`) counts `unsafe` per crate. The total is tracked in CI and
+6. `cargo xtask unsafe-report` counts `unsafe` per crate. The total is tracked in CI and
    should trend down relative to code size.
 
 ## 5. Concurrency rules

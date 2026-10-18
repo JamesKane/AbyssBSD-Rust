@@ -22,23 +22,35 @@ ships inside the `qemu` package (`/usr/local/share/qemu/edk2-aarch64-code.fd`).
 
 ## 2. Build orchestration: `cargo xtask`
 
-`xtask` is a workspace crate (host `std`, no external crates). It is the single entry point:
+`xtask` is a workspace crate (host `std`, no external crates). It is the single entry point.
+Implemented in Phase 0:
 
 ```
-cargo xtask build   --arch {x86_64|aarch64|riscv64} [--release] [--profile <platform>]
-cargo xtask image   --arch <a> [--root base.txz] [--fs ufs2|md]   # GPT disk: ESP (FAT32) + UFS2 root
-cargo xtask run     --arch <a> [--vmm qemu|bhyve] [--smp N] [--mem 4G] [--gdb] [--remote]
-cargo xtask deploy  --board {opi6p|x870e} [--usb <serial> | --media]   # install loader+kernel, set BootNext, collect logs
-                    # targets are identified by disk serial number; anything else is refused
-cargo xtask test    [--tier unit|boot|compat|full] [--arch <a>|all]
-cargo xtask abi-check [--remote]          # struct layouts vs real FreeBSD headers
-cargo xtask syscallgen --src ../freebsd-src
-cargo xtask fetch-base --version 15.1 --arch <a>   # download & verify base.txz (sha256 pinned)
+cargo xtask build   --arch <x86_64|aarch64|all> [--release] [--ktest]
+cargo xtask image   --arch <a> [--release] [--ktest]     # GPT disk with a FAT32 ESP -> build/<arch>/
+cargo xtask run     --arch <a> [--release] [--ktest] [--smp N] [--mem SIZE] [--gdb] [--display]
+cargo xtask test    [--tier unit|boot|all] [--arch <a|all>] [--verbose]
+cargo xtask check                                        # rustfmt, clippy (host + UEFI targets), policy
+cargo xtask policy                                       # path-only dependencies, SPDX headers
+cargo xtask syscallgen [--src ../freebsd-src] [--check]  # regenerate lib/abi syscall tables
+cargo xtask abi-check  [--arch <a|all>]                  # layouts vs FreeBSD headers, on the build server
 cargo xtask unsafe-report
+cargo xtask --remote <command> ...                       # run any command on the build server
 ```
 
-- `--remote` runs the step on the build server: rsync the tree to `~/abyss/`, run `cargo xtask` over
-  `ssh`, and copy artifacts and logs back. Building UFS2 images (`makefs -t ffs -o version=2`),
+Planned for later phases:
+
+```
+cargo xtask image   ... [--root base.txz] [--fs ufs2|md]   # UFS2 root (P4/P5)
+cargo xtask run     ... [--vmm bhyve]                       # bhyve on the build server (P1)
+cargo xtask deploy  --board {opi6p|x870e} [--usb <serial> | --media]   # install, set BootNext, collect logs
+                    # targets are identified by disk serial number; anything else is refused
+cargo xtask test    [--tier compat|full]
+cargo xtask fetch-base --version 15.1 --arch <a>   # download & verify base.txz (sha256 pinned)
+```
+
+- `--remote` mirrors the working tree to the build server with rsync (`~/abyss/src`) and runs
+  `cargo xtask` there over `ssh`. The server is `$ABYSS_BUILD_HOST` (default `192.168.0.31`). Building UFS2 images (`makefs -t ffs -o version=2`),
   running `fsck_ffs` on images, `abi-check`, and bhyve runs default to remote.
 - Until our own `newfs`/`makefs` equivalents exist in Rust, UFS2 root images are built on the server
   from `base.txz` plus our kernel. FAT32 ESPs are built locally by our own `lib/fat` writer, which

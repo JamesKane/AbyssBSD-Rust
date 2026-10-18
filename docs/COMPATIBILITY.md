@@ -20,8 +20,9 @@ compatibility test suite.
 
 ### 2.1 System calls
 
-- `sys/kern/syscalls.master` has **569** numbered slots. **425** of them are live (not OBSOL,
-  UNIMPL, RESERVED, or COMPAT*). We implement only the live slots, and only the ones current libc
+- `sys/kern/syscalls.master` has **606** slots (ranges expanded). **415** of them are live (not
+  OBSOL, UNIMPL, RESERVED, COMPAT*, or the `lkmnosys` module slots), as counted by `syscallgen` at
+  `fe90f180047b`. We implement only the live slots, and only the ones current libc
   can reach.
 - **Calling convention**:
   - amd64: `syscall` instruction, number in `rax`, arguments in `rdi, rsi, rdx, r10, r8, r9`.
@@ -52,12 +53,17 @@ Every structure that crosses the boundary (`stat`, `statfs`, `dirent`, `sigactio
 `kinfo_file`, `xvnode`, `if_data`, `rt_msghdr`, netlink messages, and others) is defined
 `#[repr(C)]` in `lib/abi` with compile-time size and offset assertions.
 
-**`tools/abi-check`** checks that those assertions are correct, rather than merely self-consistent:
+**`cargo xtask abi-check`** checks that those layouts are correct, rather than merely
+self-consistent:
 
-1. Emit a C program that prints `sizeof`/`offsetof`/`_Alignof` for every mirrored struct and field.
-2. Compile and run it on the build server (FreeBSD 15.1 amd64 headers). For arm64, cross-compile
-   with `--target=aarch64-unknown-freebsd` against the arm64 sysroot extracted from `base.txz`.
-3. Diff the result against the Rust constants. Any mismatch fails CI.
+1. `lib/abi::layout::LAYOUTS` lists every mirrored struct, with sizes and offsets taken from the
+   Rust definitions (`size_of`, `offset_of!`).
+2. `abi-check` turns them into C11 `_Static_assert`s on `sizeof`, `_Alignof`, `offsetof`, and
+   field sizes.
+3. The C is compiled with `-fsyntax-only` on the build server against real FreeBSD 15.1 headers:
+   natively for amd64, and with `--target=aarch64-unknown-freebsd15.1` plus an arm64 sysroot
+   extracted from `base.txz` for arm64. Nothing runs, so no arm64 machine is needed. Any mismatch
+   is a compile error and fails CI.
 
 ### 2.3 sysctl
 
@@ -105,7 +111,7 @@ libc, rtld, and the base utilities read sysctls heavily. These are required earl
 
 | Layer | Method |
 |---|---|
-| Struct layout | `tools/abi-check` against real FreeBSD headers (amd64 natively, arm64 via cross-sysroot) |
+| Struct layout | `cargo xtask abi-check` against real FreeBSD headers (amd64 natively, arm64 via cross-sysroot) |
 | Syscall numbering | Generated from `syscalls.master`. A CI check confirms the generator ran on the pinned revision |
 | Behavioral | **FreeBSD's own test suite** (`/usr/tests`, run with `kyua`) inside an AbyssBSD VM. Pass rates are tracked per directory |
 | Differential | `tests/diff/`: the same program and inputs run on AbyssBSD (QEMU) and real FreeBSD (build server). stdout, exit status, and `ktrace`/`kdump` syscall traces are compared, with known-nondeterministic fields normalized |

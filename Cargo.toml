@@ -1,0 +1,54 @@
+[workspace]
+resolver = "3"
+members = [
+    "xtask",
+    "boot/efi",
+    "boot/loader-efi",
+    "lib/abi",
+    "lib/crc",
+    "lib/fat",
+    "lib/gpt",
+    "lib/guid",
+    "lib/ktest",
+    "tools/syscallgen",
+]
+# Firmware and kernel binaries only build for their own targets; everything
+# else runs on the host and is what a bare `cargo test` exercises.
+default-members = [
+    "xtask",
+    "boot/efi",
+    "lib/abi",
+    "lib/crc",
+    "lib/fat",
+    "lib/gpt",
+    "lib/guid",
+    "lib/ktest",
+    "tools/syscallgen",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "BSD-2-Clause"
+publish = false
+rust-version = "1.99"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"
+cast_possible_truncation = "warn"
+cast_sign_loss = "warn"
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+debug = true
+lto = "thin"
