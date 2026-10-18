@@ -14,8 +14,8 @@ to the OS (no vendor hypervisor).
 
 ## Decision
 
-The Orange Pi 6 Plus is the ARM64 Tier 1 physical machine: smoke-checked at P1 and P3, and gating
-from P6 ([ADR-0010](0010-qemu-first-development.md)).
+The Orange Pi 6 Plus is the ARM64 Tier 1 physical machine: untouched until FreeBSD runs end to end
+in QEMU, and gating from P6 ([ADR-0010](0010-qemu-first-development.md)).
 The Radxa Orion O6 (same SoC) is Tier 2. Board facts live in [HARDWARE.md §4](../HARDWARE.md#4-board-profile-orange-pi-6-plus-cix-p1--sky1).
 
 ## Consequences

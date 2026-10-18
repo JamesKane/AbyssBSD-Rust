@@ -20,7 +20,7 @@ out of scope for Day 1.
 | Tier | AMD64 | ARM64 |
 |---|---|---|
 | **Tier 1, virtual** (CI gate) | QEMU q35 + OVMF; bhyve UEFI | QEMU virt (gicv3, acpi=on) + edk2 |
-| **Tier 1, physical** (smoke checks P1–P5, gating from P6) | **Ryzen 9 7900X on Gigabyte X870E AORUS ELITE WIFI7**, see [§5](#5-board-profile-amd64-ryzen-9-7900x--x870e-aorus-elite-wifi7) and [ADR-0009](adr/0009-amd64-reference-machine-ryzen-x870e.md) | **Orange Pi 6 Plus** (CIX P1 / Sky1), see [§4](#4-board-profile-orange-pi-6-plus-cix-p1--sky1) and [ADR-0008](adr/0008-arm64-reference-board-orange-pi-6-plus.md) |
+| **Tier 1, physical** (untouched until P6, gating from P6) | **Ryzen 9 7900X on Gigabyte X870E AORUS ELITE WIFI7**, see [§5](#5-board-profile-amd64-ryzen-9-7900x--x870e-aorus-elite-wifi7) and [ADR-0009](adr/0009-amd64-reference-machine-ryzen-x870e.md) | **Orange Pi 6 Plus** (CIX P1 / Sky1), see [§4](#4-board-profile-orange-pi-6-plus-cix-p1--sky1) and [ADR-0008](adr/0008-arm64-reference-board-orange-pi-6-plus.md) |
 | **Tier 2, best effort** | Other UEFI desktops/laptops | Radxa Orion O6 (same SoC), other SystemReady boards, Raspberry Pi 4/5 with community UEFI+ACPI firmware |
 | **Not targeted** | — | Radxa Dragon Q8B (Qualcomm; ACPI written for Windows PEP, and a vendor hypervisor polices EL2 and SMMU writes) |
 
@@ -121,9 +121,8 @@ for this hardware, and its Q8B `lessons.md` has the general bring-up hazards.
 
 **Access and workflow**
 
-- Today the board runs Ubuntu (CIX kernel) and FreeBSD 16-CURRENT from its NVMe. Early smoke
-  checks boot AbyssBSD from a USB stick. When the board's gating phase arrives (P6), **it is
-  reimaged for AbyssBSD**. Before that, capture the ground truth (`acpidump` tables, `devinfo`,
+- Today the board runs Ubuntu (CIX kernel) and FreeBSD 16-CURRENT from its NVMe. Nothing touches
+  it before P6. When the board's gating phase arrives (P6), **it is reimaged for AbyssBSD**. Before that, capture the ground truth (`acpidump` tables, `devinfo`,
   `pciconf`, Linux register dumps) into `tests/corpus/opi6p/`, because the reference OSes will be
   gone afterwards.
 - Network: Ubuntu at `192.168.0.27` (user `jkane`, key login; root steps go through a script the

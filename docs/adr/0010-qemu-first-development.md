@@ -14,16 +14,16 @@ iteration, a gdbstub, and deterministic CI.
 
 - Through P5, all development and all phase exit criteria run under QEMU (q35 + OVMF, virt +
   edk2), plus bhyve for amd64.
-- The physical reference machines get **non-blocking smoke checks** at P1 (boot to banner) and P3
-  (ACPI load, storage attach, watchdog). Real-firmware ACPI tables from both machines are part of
-  the host-side AML corpus from P3 onward.
-- From **P6** (stable FreeBSD userspace), both physical machines are **gating**. The Orange Pi 6
+- **No physical hardware is touched until FreeBSD userland runs end to end in QEMU**: no smoke
+  checks, no table captures, no boots from USB.
+- From **P6** (stable FreeBSD userspace), both physical machines are brought up and are
+  **gating**. Their real-firmware ACPI tables join the host-side AML corpus then. The Orange Pi 6
   Plus is reimaged for AbyssBSD at that point, after its Linux and FreeBSD ground truth has been
   captured into `tests/corpus/opi6p/`.
 
 ## Consequences
 
-- Fast iteration through the core phases, with real-hardware surprises still surfacing early
-  through the smoke checks and the AML corpus.
+- Fast iteration through the core phases. Real-hardware surprises (firmware quirks, AML the QEMU
+  tables never exercise) surface late, at P6, and P6 is sized for that.
 - Hardware-only drivers (RTL8125/8126, the watchdogs, the CIX GPT, deep idle, CPPC) can trail their
   QEMU-testable counterparts. Their phase placement stays, but they block nothing before P6.

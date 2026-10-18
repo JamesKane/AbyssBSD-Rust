@@ -5,9 +5,9 @@ criteria pass in CI on **both AMD64 and ARM64**, not when the code is written. S
 (S < M < L < XL) rather than calendar estimates.
 
 **QEMU first** ([ADR-0010](adr/0010-qemu-first-development.md)). Through P5, development and every
-exit criterion run under QEMU (plus bhyve for amd64). The physical reference machines get
-**non-blocking smoke checks** at P1 and P3 to catch real-hardware surprises early. From P6, when
-userspace is stable, they become **gating**.
+exit criterion run under QEMU (plus bhyve for amd64). **No physical hardware is touched until
+FreeBSD userland runs end to end in QEMU**: no smoke checks, no table captures. At P6 the physical
+reference machines are brought up and become **gating**.
 
 ```
 P0 Foundations ─► P1 Boot ─► P2 Core kernel ─► P3 Devices & ACPI ─► P4 First userspace
@@ -64,9 +64,6 @@ boots a stub UEFI app that prints "AbyssBSD" on QEMU.
 
 **Exit:** both arches boot in QEMU to a kernel banner on serial and framebuffer, run kernel unit
 tests, deliberately take and report a page fault, and exit cleanly. Boot also works on bhyve.
-*Hardware smoke check (non-blocking):* the **Orange Pi 6 Plus** boots from USB to the banner on its debug-header UART (found through DBG2)
-and on the GOP framebuffer. The **X870E** boots from its media NVMe to the banner on the GOP
-framebuffer, and the loader recovers the previous boot's persistent log to the ESP.
 
 ## Phase 2: Core kernel (L)
 
@@ -111,13 +108,9 @@ timeouts runs for 10 minutes on `-smp 8` on both arches, with no witness violati
 
 **Exit:** on both arches the kernel enumerates PCIe, attaches NVMe, AHCI, and virtio-blk, reads the
 GPT and dumps partition tables, sustains a multi-queue random-read stress test, and powers off via
-ACPI/PSCI when the power button is pressed (QEMU `system_powerdown`). The real-firmware AML corpus
-(Orange Pi 6 Plus, X870E) passes on the host.
+ACPI/PSCI when the power button is pressed (QEMU `system_powerdown`). The AML corpus (QEMU and
+public tables) passes on the host.
 
-*Hardware smoke check (non-blocking):* on the Orange Pi 6 Plus, the full DSDT/SSDTs load without
-fatal errors, the NVMe attaches, and the watchdog resets a deliberately hung kernel. On the X870E: the DSDT
-and 15 SSDTs load, NVMe (media disk) and AHCI attach, the FCH watchdog resets a hung kernel, and
-ACPI S5 powers the machine off.
 
 ## Phase 4: First userspace: `/rescue/sh` (L)
 

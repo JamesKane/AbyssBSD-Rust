@@ -12,7 +12,7 @@ current-generation AMD desktop platform with modern AMI UEFI firmware, a large A
 
 ## Decision
 
-This machine is the AMD64 Tier 1 physical machine: smoke-checked at P1 and P3, and gating from P6
+This machine is the AMD64 Tier 1 physical machine: untouched until FreeBSD runs end to end in QEMU, and gating from P6
 ([ADR-0010](0010-qemu-first-development.md)). AbyssBSD
 is installed only on the second NVMe, with its own ESP and boot entry. Board facts live in
 [HARDWARE.md §5](../HARDWARE.md#5-board-profile-amd64-ryzen-9-7900x--x870e-aorus-elite-wifi7).

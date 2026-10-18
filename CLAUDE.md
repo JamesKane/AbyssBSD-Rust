@@ -13,6 +13,8 @@ that runs unmodified FreeBSD userland. Read `docs/ROADMAP.md` for the current ph
 - Algebraic types: enums for states, newtypes for addresses/IDs/units, typestate for lifecycles,
   `Result<_, Errno>` on syscall paths, no panics on untrusted input.
 - Every `unsafe` block has a `// SAFETY:` comment. Inline asm only in `arch/*`.
+- **Don't touch the physical machines** (no ssh, no captures, no boots) until FreeBSD userland
+  runs end to end in QEMU (P6, ADR-0010).
 - FreeBSD source is a behavioral **reference**, not something to transliterate. Never consult GPL
   code.
 
