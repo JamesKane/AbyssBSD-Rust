@@ -66,6 +66,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "atrtc"
+version = "0.0.0"
+dependencies = [
+ "bus",
+ "clock",
+ "devtree",
+ "sync",
+]
+
+[[package]]
 name = "bootproto"
 version = "0.0.0"
 dependencies = [
@@ -85,6 +95,13 @@ dependencies = [
  "sync",
  "sysctl",
  "vm",
+]
+
+[[package]]
+name = "clock"
+version = "0.0.0"
+dependencies = [
+ "sync",
 ]
 
 [[package]]
@@ -112,6 +129,7 @@ version = "0.0.0"
 dependencies = [
  "acpi",
  "ahci",
+ "atrtc",
  "bus",
  "devtree",
  "nvme",
@@ -184,6 +202,7 @@ dependencies = [
  "arch-x86_64",
  "bootproto",
  "bus",
+ "clock",
  "demangle",
  "devtree",
  "driver-table",

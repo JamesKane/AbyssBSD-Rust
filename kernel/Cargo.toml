@@ -21,6 +21,7 @@ acpi-tables = { path = "../lib/acpi-tables" }
 addr = { path = "../lib/addr" }
 bootproto = { path = "../boot/bootproto" }
 bus = { path = "../sys/bus" }
+clock = { path = "../sys/clock" }
 devtree = { path = "../lib/devtree" }
 pci = { path = "../sys/pci" }
 acpi = { path = "../sys/acpi" }

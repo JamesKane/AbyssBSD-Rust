@@ -27,6 +27,7 @@ mod acpi_bus;
 mod bench;
 mod boot;
 mod devices;
+mod efirtc;
 mod errata;
 mod firmware;
 mod intc;

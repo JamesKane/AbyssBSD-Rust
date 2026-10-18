@@ -45,6 +45,30 @@ static FREQUENCY: AtomicU64 = AtomicU64::new(0);
 static EPOCH: AtomicU64 = AtomicU64::new(0);
 
 /// Counter ticks per second.
+/// The Unix time, in nanoseconds, at counter zero (0 until a clock has
+/// been read).
+static REALTIME_BASE: AtomicU64 = AtomicU64::new(0);
+
+/// Sets the time of day from the real-time clocks (FreeBSD's
+/// `inittodr`).
+pub(crate) fn set_realtime() {
+    match clock::read() {
+        Some((name, t)) => {
+            let unix_ns = t.unix_seconds().unwrap_or(0) * 1_000_000_000 + u64::from(t.nanosecond);
+            REALTIME_BASE.store(unix_ns.saturating_sub(now_ns()), Ordering::Release);
+            kprintln!("clock: {t} from {name}");
+        }
+        None => kprintln!("clock: no real-time clock answered; the time of day is unknown"),
+    }
+}
+
+/// The Unix time in nanoseconds, if a real-time clock has set it.
+#[cfg_attr(not(feature = "ktest"), allow(dead_code))]
+pub(crate) fn realtime_ns() -> Option<u64> {
+    let base = REALTIME_BASE.load(Ordering::Acquire);
+    (base != 0).then(|| base + now_ns())
+}
+
 pub(crate) fn frequency() -> u64 {
     FREQUENCY.load(Ordering::Relaxed)
 }

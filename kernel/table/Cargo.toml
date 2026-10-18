@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 ahci = { path = "../../drivers/ahci" }
+atrtc = { path = "../../drivers/atrtc" }
 acpi = { path = "../../sys/acpi" }
 bus = { path = "../../sys/bus" }
 nvme = { path = "../../drivers/nvme" }

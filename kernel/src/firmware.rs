@@ -27,6 +27,28 @@ pub(crate) fn init(info: &BootInfo, table: PhysAddr) {
     });
 }
 
+/// The time from UEFI's `GetTime`, if runtime services are available.
+pub(crate) fn time() -> Option<efi::raw::Time> {
+    // Held across the call: runtime services are not reentrant.
+    let guard = RUNTIME.lock();
+    let rt = (*guard)?;
+    let mut t = efi::raw::Time::default();
+    let saved = arch::cpu::save_disable_interrupts();
+    // SAFETY: as in `reset`; `t` is on the kernel stack, mapped under the
+    // firmware table too, and the capabilities pointer may be null.
+    let status = unsafe {
+        arch::mmu::with_tables(rt.table, || {
+            let services = &*(rt.services.get() as *const efi::raw::RuntimeServices);
+            (services.get_time)(&raw mut t, core::ptr::null_mut())
+        })
+    };
+    drop(guard);
+    if saved {
+        arch::cpu::enable_interrupts();
+    }
+    (!status.is_error()).then_some(t)
+}
+
 /// Resets or powers off the machine through firmware.
 pub(crate) fn reset(kind: ResetKind) -> ! {
     arch::cpu::disable_interrupts();

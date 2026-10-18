@@ -142,12 +142,31 @@ pub struct SimpleTextOutput {
 }
 
 /// `EFI_RUNTIME_SERVICES`.
+/// `EFI_TIME` (UEFI 2.10 §8.3).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+#[allow(missing_docs)]
+pub struct Time {
+    pub year: u16,
+    pub month: u8,
+    pub day: u8,
+    pub hour: u8,
+    pub minute: u8,
+    pub second: u8,
+    pub pad1: u8,
+    pub nanosecond: u32,
+    /// Minutes from UTC, or 2047 for local time.
+    pub time_zone: i16,
+    pub daylight: u8,
+    pub pad2: u8,
+}
+
 #[repr(C)]
 #[derive(Debug)]
 #[allow(missing_docs)]
 pub struct RuntimeServices {
     pub hdr: TableHeader,
-    pub get_time: Slot,
+    pub get_time: unsafe extern "efiapi" fn(*mut Time, *mut c_void) -> Status,
     pub set_time: Slot,
     pub get_wakeup_time: Slot,
     pub set_wakeup_time: Slot,

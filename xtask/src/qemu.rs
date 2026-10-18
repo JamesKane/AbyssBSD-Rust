@@ -264,8 +264,10 @@ impl Vm {
         c.arg("bhyve");
         c.arg("-c").arg(self.smp.to_string());
         c.arg("-m").arg(&self.mem);
-        // Yield on HLT, tolerate unimplemented MSRs, destroy on power-off.
-        c.args(["-H", "-w", "-D"]);
+        // Yield on HLT, tolerate unimplemented MSRs, destroy on power-off,
+        // and keep the RTC in UTC (what FreeBSD assumes without
+        // /etc/wall_cmos_clock).
+        c.args(["-H", "-w", "-D", "-u"]);
         c.args(["-s", "0,hostbridge", "-s", "31,lpc", "-l", "com1,stdio"]);
         c.arg("-l")
             .arg(format!("bootrom,{BHYVE_CODE},{}", vars.display()));

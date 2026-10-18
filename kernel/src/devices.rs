@@ -123,17 +123,17 @@ static TEST_DRIVERS: &[DriverDecl] = &[
     crate::tests::bus_test::ORDERED,
 ];
 
+/// Drivers that call into the kernel itself (firmware services).
+static KERNEL_DRIVERS: &[DriverDecl] = &[crate::efirtc::DRIVER];
+
 /// The build's drivers (`driver-table`, checked on the host for ties),
-/// plus the test drivers in ktest builds.
+/// the kernel's own, and the test drivers in ktest builds.
 fn drivers() -> &'static [DriverDecl] {
+    let mut all = alloc::vec::Vec::from(driver_table::DRIVERS);
+    all.extend_from_slice(KERNEL_DRIVERS);
     #[cfg(feature = "ktest")]
-    {
-        let mut all = alloc::vec::Vec::from(driver_table::DRIVERS);
-        all.extend_from_slice(TEST_DRIVERS);
-        alloc::vec::Vec::leak(all)
-    }
-    #[cfg(not(feature = "ktest"))]
-    driver_table::DRIVERS
+    all.extend_from_slice(TEST_DRIVERS);
+    alloc::vec::Vec::leak(all)
 }
 
 /// Keeps drivers off the devices the console took over from the loader;
@@ -183,6 +183,18 @@ pub(crate) fn init(s: &Sleepable) {
     #[cfg(target_arch = "x86_64")]
     m.adopt(s, nexus, "apic", "APIC resources", bus::Ident::Platform);
     let _ = NEXUS.set(nexus);
+    // The firmware clock, where runtime services answer (FreeBSD's
+    // efirtc identify).
+    if crate::firmware::time().is_some() {
+        m.add_child(
+            s,
+            nexus,
+            bus::Ident::Nexus("efirtc"),
+            None,
+            alloc::vec![],
+            &[],
+        );
+    }
     if crate::acpi_bus::init(s) {
         crate::acpi_bus::apply_cppc(s);
         m.add_child(
@@ -197,6 +209,7 @@ pub(crate) fn init(s: &Sleepable) {
     // Boot goes on once the devices found so far have attached, as
     // FreeBSD finishes autoconfiguration before mounting root.
     bus::manager().wait_idle(s);
+    crate::time::set_realtime();
     kprintln!(
         "bus: device manager up, {} driver(s), {workers} attach worker(s){}",
         drivers.len(),
