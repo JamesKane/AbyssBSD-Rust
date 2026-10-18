@@ -77,7 +77,7 @@ fn walk(interp: &mut aml::Interpreter, host: &mut dyn aml::Host) -> Vec<Found> {
             continue;
         }
         let crs = interp.crs(node, host).ok().flatten().unwrap_or_default();
-        let deps = interp
+        let mut deps: Vec<String> = interp
             .dep(node, host)
             .unwrap_or_default()
             .into_iter()
@@ -86,6 +86,22 @@ fn walk(interp: &mut aml::Interpreter, host: &mut dyn aml::Host) -> Vec<Found> {
                 DepRef::Unresolved(_) => None,
             })
             .collect();
+        // The producers of its resources: interrupt controllers, GPIO
+        // controllers, serial bus controllers.
+        for r in &crs {
+            let source = match r {
+                AmlResource::ExtendedIrq(e) => e.source.as_ref(),
+                AmlResource::Gpio(g) => Some(&g.source),
+                AmlResource::SerialBus(b) => Some(&b.source),
+                _ => None,
+            };
+            if let Some(n) = source.and_then(|src| interp.resolve(node, &src.name)) {
+                let p = alloc::format!("{}", interp.path(n));
+                if p != path && !deps.contains(&p) {
+                    deps.push(p);
+                }
+            }
+        }
         out.push(Found {
             device: AcpiDevice { node, path, crs },
             ident,
@@ -226,27 +242,26 @@ impl Driver for AcpiBus {
             }
         }
         let found = svc.run(cx.sleepable(), walk);
-        let mut added: Vec<(String, bus::DeviceId)> = Vec::new();
+        // Every child first, in namespace order (FreeBSD's creation
+        // order), then the edges between them: a dependency may name a
+        // device that comes later. None attaches before this returns.
+        let mut added: Vec<(String, bus::DeviceId, Vec<String>)> = Vec::new();
         for f in found {
             let res = resources(svc.ops(), &f.device.crs);
-            let deps: Vec<(bus::DeviceId, EdgeKind)> = f
-                .deps
-                .iter()
-                .filter_map(|p| {
-                    added
-                        .iter()
-                        .find(|(q, _)| q == p)
-                        .map(|(_, id)| (*id, EdgeKind::Required))
-                })
-                .collect();
             let path = f.device.path.clone();
-            let id = cx.add_child_with_deps(
+            let id = cx.add_child(
                 Ident::Acpi(f.ident, path.clone()),
                 Some(Arc::new(f.device)),
                 res,
-                &deps,
             );
-            added.push((path, id));
+            added.push((path, id, f.deps));
+        }
+        for (_, id, deps) in &added {
+            for d in deps {
+                if let Some((_, sup, _)) = added.iter().find(|(p, _, _)| p == d) {
+                    cx.add_dependency(*id, *sup, EdgeKind::Required);
+                }
+            }
         }
         Ok(())
     }

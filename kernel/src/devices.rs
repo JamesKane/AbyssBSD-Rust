@@ -115,6 +115,8 @@ static TEST_DRIVERS: &[DriverDecl] = &[
     crate::tests::bus_test::BROKEN,
     crate::tests::bus_test::SLOW,
     crate::tests::bus_test::NEEDY,
+    crate::tests::bus_test::DEP_BUS,
+    crate::tests::bus_test::ORDERED,
 ];
 
 /// The build's drivers (`driver-table`, checked on the host for ties),

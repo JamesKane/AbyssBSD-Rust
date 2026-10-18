@@ -1113,6 +1113,99 @@ pub(crate) mod bus_test {
     pub(crate) const PICKY: DriverDecl = DriverDecl::of::<Picky>();
     pub(crate) const FALLBACK: DriverDecl = DriverDecl::of::<Fallback>();
     pub(crate) const BROKEN: DriverDecl = DriverDecl::of::<Broken>();
+
+    /// The models `Ordered` attached, in order.
+    pub(crate) static ATTACHED: sync::SpinLock<alloc::vec::Vec<u32>> =
+        sync::SpinLock::new(alloc::vec::Vec::new());
+
+    /// A bus whose children name dependencies after adding them: model 8
+    /// needs model 9, added after it; models 10 and 11 need each other.
+    pub(crate) struct DepBus;
+
+    impl Driver for DepBus {
+        const NAME: &'static str = "depbus";
+        const IDS: Ids = Ids::Test(&[TestId {
+            model: 12,
+            rank: Rank::DEFAULT,
+        }]);
+        fn describe(_: &Ident) -> String {
+            "Dependency test bus".into()
+        }
+        fn attach(_: &mut AttachCx<'_>) -> Result<Self, AttachError> {
+            Ok(Self)
+        }
+        fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
+            let mut add = |model| cx.add_child(Ident::Test(TestIdent { model }), None, vec![]);
+            let (early, late, a, b) = (add(8), add(9), add(10), add(11));
+            use devtree::graph::EdgeKind::Required;
+            cx.add_dependency(early, late, Required);
+            cx.add_dependency(a, b, Required);
+            cx.add_dependency(b, a, Required);
+            Ok(())
+        }
+        fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
+    }
+
+    /// Records the order its devices attach in.
+    pub(crate) struct Ordered;
+
+    impl Driver for Ordered {
+        const NAME: &'static str = "ordered";
+        const IDS: Ids = Ids::Test(&[
+            TestId {
+                model: 8,
+                rank: Rank::DEFAULT,
+            },
+            TestId {
+                model: 9,
+                rank: Rank::DEFAULT,
+            },
+            TestId {
+                model: 10,
+                rank: Rank::DEFAULT,
+            },
+            TestId {
+                model: 11,
+                rank: Rank::DEFAULT,
+            },
+        ]);
+        fn describe(_: &Ident) -> String {
+            "Ordered test device".into()
+        }
+        fn attach(cx: &mut AttachCx<'_>) -> Result<Self, AttachError> {
+            if let Ident::Test(t) = cx.ident() {
+                ATTACHED.lock().push(t.model);
+            }
+            Ok(Self)
+        }
+        fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
+    }
+
+    pub(crate) const DEP_BUS: DriverDecl = DriverDecl::of::<DepBus>();
+    pub(crate) const ORDERED: DriverDecl = DriverDecl::of::<Ordered>();
+}
+
+ktest! {
+    fn forward_dependencies_and_cycles() {
+        use bus::{Ident, NodeState, TestIdent};
+        let s = cx();
+        let m = bus::manager();
+        bus_test::ATTACHED.lock().clear();
+        let db = m.add_child(&s, m.root(), Ident::Test(TestIdent { model: 12 }), None, alloc::vec![], &[]);
+        m.wait_idle(&s);
+        assert_eq!(m.state(db, &s), Some(NodeState::Attached));
+        let order = bus_test::ATTACHED.lock().clone();
+        let at = |model| order.iter().position(|&x| x == model).unwrap_or_else(|| panic!("model {model} never attached: {order:?}"));
+        // A dependency on a sibling added later still holds the device
+        // back; a cycle is broken so both attach.
+        assert!(at(9) < at(8), "model 8 attached before the model 9 it needs: {order:?}");
+        let _ = (at(10), at(11));
+        for c in m.children(db, &s) {
+            assert_eq!(m.state(c, &s), Some(NodeState::Attached));
+        }
+        m.shutdown_under(db, &s);
+        let _ = m.take_events();
+    }
 }
 
 ktest! {

@@ -469,6 +469,53 @@ impl Manager {
         id
     }
 
+    /// Records that `consumer` also needs `supplier`: a firmware dependency
+    /// found once both exist (a forward `_DEP`). A consumer already
+    /// attaching is not held back. An edge that closes a cycle is broken
+    /// again, as firmware cycles are, and reported.
+    pub(crate) fn add_dependency(
+        &self,
+        s: &Sleepable,
+        consumer: DeviceId,
+        supplier: DeviceId,
+        kind: EdgeKind,
+    ) {
+        let mut t = self.topo.write(s);
+        if consumer == supplier || t.node(consumer).is_none() || t.node(supplier).is_none() {
+            return;
+        }
+        t.graph.add_edge(Edge {
+            supplier: supplier.index,
+            consumer: consumer.index,
+            kind,
+            origin: Origin::Dep,
+        });
+        if let Ok(broken) = t.graph.break_cycles() {
+            for e in broken {
+                let (a, b) = (
+                    t.nameunit(self.drivers, e.supplier),
+                    t.nameunit(self.drivers, e.consumer),
+                );
+                self.platform.log(format_args!(
+                    "bus: dependency cycle: {b} no longer waits for {a}"
+                ));
+            }
+        }
+        let missing: Vec<DeviceId> = t
+            .graph
+            .missing(consumer.index, |i| t.attached(i))
+            .iter()
+            .filter_map(|&i| t.id(i))
+            .collect();
+        if let Some(n) = t.node_mut(consumer)
+            && let NodeState::Waiting(WaitReason::Suppliers(list)) = &mut n.state
+        {
+            *list = missing;
+        }
+        drop(t);
+        self.bump();
+    }
+
     /// Chooses a driver for `id`, allocates its unit, and queues it if its
     /// suppliers are attached. Topology lock held.
     fn match_node(&self, t: &mut Topology, id: DeviceId) {

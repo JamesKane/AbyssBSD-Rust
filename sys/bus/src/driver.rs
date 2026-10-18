@@ -643,6 +643,30 @@ impl<D: Driver> StartCx<'_, D> {
     }
 }
 
+impl<D: Driver> StartCx<'_, D> {
+    /// Makes child `consumer` wait for `supplier` (another node), for a
+    /// firmware dependency that names a sibling added after it. Children
+    /// do not attach before their parent's `start` returns, so edges added
+    /// here always hold them back.
+    pub fn add_dependency(
+        &mut self,
+        consumer: DeviceId,
+        supplier: DeviceId,
+        kind: devtree::graph::EdgeKind,
+    ) {
+        if self.children_contains(consumer) {
+            self.mgr.add_dependency(self.s, consumer, supplier, kind);
+        }
+    }
+
+    fn children_contains(&self, id: DeviceId) -> bool {
+        self.binding
+            .sources
+            .iter()
+            .any(|s| matches!(s, Source::Child(c) if *c == id))
+    }
+}
+
 // SAFETY: the shim's raw pointers point into the binding, which the
 // installed handler never outlives (see `Binding::detach`).
 unsafe impl<D: Driver> Send for IrqShim<D> {}
