@@ -37,6 +37,12 @@ system to rule out whole classes of kernel bugs.
 9. **RV64 as the Day-2 port**, proving that the architecture seams were drawn correctly.
 10. **At least as fast as FreeBSD**: never more than 2% slower than the FreeBSD component being
     replaced, measured like for like, and faster where we can be.
+11. **Avoid Linuxisms.** Where FreeBSD and Linux differ, follow FreeBSD's design and semantics:
+    kqueue rather than epoll, GEOM rather than device-mapper, devfs/devd rather than udev, sysctl
+    rather than procfs/sysfs, jails and Capsicum rather than namespaces and seccomp. Don't adopt a
+    Linux interface, idiom, or driver model because it is familiar or convenient. The exception is
+    an interface FreeBSD itself has adopted (netlink, inotify, evdev), since it is then part of the
+    ABI we implement. A Linuxulator, if it ever comes, stays a separate ABI personality.
 
 ## Non-goals (Day 1)
 
