@@ -1,0 +1,30 @@
+#!/bin/sh
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# CI hook for the build server's bare repository (docs/BUILD-AND-TEST.md §5).
+# Install as ~/abyss/repo.git/hooks/post-receive. Each push to main runs
+# `cargo xtask test` in a persistent work tree (so target/ is reused) and
+# writes ~/abyss/ci/<time>-<rev>.log ending in PASS or FAIL. The push
+# returns immediately; runs are serialised with a lock file.
+
+ci="$HOME/abyss/ci"
+work="$HOME/abyss/ci-work"
+repo="$(cd "${GIT_DIR:-.}" && pwd)"
+mkdir -p "$ci"
+
+while read -r _old new ref; do
+	[ "$ref" = "refs/heads/main" ] || continue
+	log="$ci/$(date +%Y%m%d-%H%M%S)-$(echo "$new" | cut -c1-12).log"
+	echo "ci: testing $new, log $log"
+	nohup sh -c '
+		lockf -k "$1/.lock" sh -c "
+			set -e
+			[ -d \"$2/.git\" ] || git clone -q \"$3\" \"$2\"
+			cd \"$2\"
+			git fetch -q origin
+			git checkout -qf \"$4\"
+			git clean -fdq -e target -e build
+			PATH=\$HOME/.cargo/bin:\$PATH cargo xtask test --tier all
+		" && echo PASS || echo FAIL
+	' ci "$ci" "$work" "$repo" "$new" >"$log" 2>&1 </dev/null &
+done
