@@ -281,6 +281,22 @@ an ADR or follow-up, which tells us how well the seams held.
   terminal emulator, and a minimal toolkit.
 - Prerequisites: M-G, plus audio (HDA/USB audio, later) and power management maturity.
 
+### M-Z: OpenZFS
+
+- Host the upstream **OpenZFS** C code on our kernel rather than rewriting it. A Rust ZFS would
+  be a project of its own, and OpenZFS's on-disk format and pool semantics are defined by that
+  codebase in practice.
+- The work is the plumbing: a Solaris Porting Layer equivalent (memory, locks, condvars, taskqs,
+  threads, time, kstats, the `vnode`/`uio` shapes ZPL expects), a VFS adapter so ZPL datasets
+  mount like any other file system, a GEOM-style vdev provider over our disk stack, and the
+  `/dev/zfs` ioctl interface so stock `zpool`/`zfs` binaries work unmodified.
+- Needs its own ADR before work starts: it breaks the no-C rule (ADR-0002/0003 build policy),
+  brings CDDL code into a BSD-2-Clause tree (kept in a separate, clearly licensed directory, as
+  FreeBSD does), and must fit the static-kernel model (ADR-0005), so it is linked in at build time
+  rather than loaded as `zfs.ko`.
+- Prerequisites: VFS and buffer/page cache maturity (P5), GEOM-equivalent disk providers (P3),
+  and SMP-safe sleep locks.
+
 ---
 
 ## Key risks
