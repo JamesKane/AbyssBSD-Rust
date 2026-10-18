@@ -314,7 +314,7 @@ fn modern_capabilities_as_qemu_lays_them_out() {
         (4, 4, 0x2000, 0x1000),
         (2, 4, 0x3000, 0x1000),
     ]);
-    let c = modern_caps(&cfg, &f).expect("all structures found");
+    let c = modern_caps(|at| cfg.read32(f.addr, at), &f).expect("all structures found");
     assert_eq!(
         c.common,
         CapRef {
@@ -339,18 +339,18 @@ fn modern_capabilities_are_validated() {
         (3, 4, 0x1000, 1),
         (2, 4, 0x2000, 2),
     ]);
-    let c = modern_caps(&cfg, &f).unwrap();
+    let c = modern_caps(|at| cfg.read32(f.addr, at), &f).unwrap();
     assert_eq!(c.common.offset, 0);
     assert_eq!(c.device, None, "the device configuration is optional");
     // A BAR that is not implemented, a common structure too small for its
     // registers: nothing usable, so the modern driver declines.
     let (cfg, f) = function(&[(1, 2, 0, 0x1000), (3, 4, 0x1000, 1), (2, 4, 0x2000, 2)]);
-    assert_eq!(modern_caps(&cfg, &f), None);
+    assert_eq!(modern_caps(|at| cfg.read32(f.addr, at), &f), None);
     let (cfg, f) = function(&[(1, 4, 0, 0x37), (3, 4, 0x1000, 1), (2, 4, 0x2000, 2)]);
-    assert_eq!(modern_caps(&cfg, &f), None);
+    assert_eq!(modern_caps(|at| cfg.read32(f.addr, at), &f), None);
     // Legacy devices have no vendor capabilities at all.
     let (cfg, f) = function(&[]);
-    assert_eq!(modern_caps(&cfg, &f), None);
+    assert_eq!(modern_caps(|at| cfg.read32(f.addr, at), &f), None);
 }
 
 #[test]

@@ -19,8 +19,7 @@ use bus::{
 use devtree::ids::{PciId, PciIdent, VirtioIdent};
 use devtree::matching::Rank;
 use pci::bus::PciChild;
-use pci::header::{CMD_BUS_MASTER, CMD_IO, CMD_MEMORY, COMMAND};
-use pci::{BarKind, ConfigSpace, Function, caps};
+use pci::{BarKind, Function, caps};
 
 use crate::transport::{COMMON_SIZE, Regs, Vectors, Window};
 use crate::{VENDOR, VirtioDevice, device_name};
@@ -82,20 +81,22 @@ pub(crate) struct ModernCaps {
 }
 
 /// Finds the modern structures: the first of each type whose BAR is an
-/// implemented memory BAR that holds it whole (§4.1.4.1).
-pub(crate) fn modern_caps(cfg: &dyn ConfigSpace, f: &Function) -> Option<ModernCaps> {
+/// implemented memory BAR that holds it whole (§4.1.4.1). `read32` reads
+/// the function's configuration space (capabilities are dword-aligned).
+pub(crate) fn modern_caps(read32: impl Fn(u16) -> u32, f: &Function) -> Option<ModernCaps> {
+    let read8 = |at: u16| read32(at & !3).to_le_bytes()[usize::from(at & 3)];
     let (mut common, mut notify, mut isr, mut device) = (None, None, None, None);
     let mut multiplier = 0;
     for c in f.caps.iter().filter(|c| c.id == caps::id::VENDOR) {
         let at = u16::from(c.offset);
-        let len = cfg.read8(f.addr, at + 2);
+        let len = read8(at + 2);
         if len < 16 {
             continue;
         }
         let r = CapRef {
-            bar: cfg.read8(f.addr, at + 4),
-            offset: cfg.read32(f.addr, at + 8),
-            len: cfg.read32(f.addr, at + 12),
+            bar: read8(at + 4),
+            offset: read32(at + 8),
+            len: read32(at + 12),
         };
         let fits = f.bars.iter().any(|b| {
             b.index == r.bar
@@ -105,11 +106,11 @@ pub(crate) fn modern_caps(cfg: &dyn ConfigSpace, f: &Function) -> Option<ModernC
         if !fits {
             continue;
         }
-        match cfg.read8(f.addr, at + 3) {
+        match read8(at + 3) {
             CAP_COMMON if common.is_none() && r.len as usize >= COMMON_SIZE => common = Some(r),
             CAP_NOTIFY if notify.is_none() && len >= 20 && r.len >= 2 => {
                 notify = Some(r);
-                multiplier = cfg.read32(f.addr, at + 16);
+                multiplier = read32(at + 16);
             }
             CAP_ISR if isr.is_none() && r.len >= 1 => isr = Some(r),
             CAP_DEVICE if device.is_none() => device = Some(r),
@@ -142,17 +143,15 @@ impl VirtioPci {
         cx: &mut AttachCx<'_>,
         child: Arc<PciChild>,
         mut dev: VirtioDevice,
-        decode: u16,
     ) -> Result<Self, AttachError> {
-        let (cfg, f) = (child.cfg, &child.function);
-        let cmd = cfg.read16(f.addr, COMMAND);
-        cfg.write16(f.addr, COMMAND, cmd | decode | CMD_BUS_MASTER);
+        child.enable_decoding();
+        child.set_bus_master(true);
         dev.reset();
         let mut msix = Vec::new();
         let mut irqs = Vec::new();
         if pci::msi::available()
-            && let Some(table) = pci::msi::msix_count(cfg, f)
-            && let Ok(hws) = pci::msi::enable_msix(cfg, f, table.min(dev.queues.saturating_add(1)))
+            && let Some(table) = pci::msi::msix_count(&child)
+            && let Ok(hws) = pci::msi::enable_msix(&child, table.min(dev.queues.saturating_add(1)))
         {
             irqs = hws
                 .iter()
@@ -179,7 +178,7 @@ impl VirtioPci {
             irqs.push(*r);
             dev.vectors = Vectors::Intx;
         }
-        let i = f.header.ident;
+        let i = child.function.header.ident;
         Ok(Self {
             ident: VirtioIdent {
                 vendor: u32::from(i.vendor),
@@ -205,13 +204,11 @@ impl VirtioPci {
 
 impl Drop for VirtioPci {
     fn drop(&mut self) {
-        let (cfg, f) = (self.child.cfg, &self.child.function);
         if !self.msix.is_empty() {
             pci::msi::PCI_MSI.remove(&self.msix);
-            pci::msi::disable_msix(cfg, f);
+            pci::msi::disable_msix(&self.child);
         }
-        let cmd = cfg.read16(f.addr, COMMAND);
-        cfg.write16(f.addr, COMMAND, cmd & !CMD_BUS_MASTER);
+        self.child.set_bus_master(false);
     }
 }
 
@@ -231,7 +228,7 @@ impl Driver for Modern {
         let child = cx.bus_data_arc::<PciChild>().ok_or(AttachError::Decline)?;
         let f = &child.function;
         let device_type = device_type(&f.header.ident).ok_or(AttachError::Decline)?;
-        let caps = modern_caps(child.cfg, f).ok_or(AttachError::Decline)?;
+        let caps = modern_caps(|at| child.read32(at), f).ok_or(AttachError::Decline)?;
         // Map each BAR the structures use once; resources list the memory
         // BARs in order.
         let mut bars: Vec<u8> = Vec::new();
@@ -275,7 +272,7 @@ impl Driver for Modern {
         };
         dev.reset();
         dev.queues = dev.modern_queues();
-        VirtioPci::finish(cx, child, dev, CMD_MEMORY).map(Self)
+        VirtioPci::finish(cx, child, dev).map(Self)
     }
 
     fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
@@ -321,7 +318,7 @@ impl Driver for Legacy {
         dev.queues = (0..LEGACY_MAX_QUEUES)
             .find(|&q| dev.queue_max(q) == 0)
             .unwrap_or(LEGACY_MAX_QUEUES);
-        VirtioPci::finish(cx, child, dev, CMD_IO).map(Self)
+        VirtioPci::finish(cx, child, dev).map(Self)
     }
 
     fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {

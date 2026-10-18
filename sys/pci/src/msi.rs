@@ -17,9 +17,9 @@ use hal::CpuId;
 use irq::{IrqDomain, IrqError, Polarity, Trigger};
 use sync::{Once, SpinLock};
 
+use crate::bus::PciChild;
 use crate::caps::{self, Capability};
 use crate::config::ConfigSpace;
-use crate::enumerate::Function;
 use crate::header::{CMD_INTX_DISABLE, COMMAND};
 
 /// What message-signalled interrupts need from the platform.
@@ -227,19 +227,16 @@ pub enum MsiError {
 
 /// The MSI-X vectors a function supports, if it has the capability.
 #[must_use]
-pub fn msix_count(cfg: &dyn ConfigSpace, f: &Function) -> Option<u16> {
-    let cap = caps::find(&f.caps, caps::id::MSIX)?;
-    Some((cfg.read16(f.addr, u16::from(cap.offset) + 2) & 0x7ff) + 1)
+pub fn msix_count(child: &PciChild) -> Option<u16> {
+    let cap = caps::find(&child.function.caps, caps::id::MSIX)?;
+    Some((child.read16(u16::from(cap.offset) + 2) & 0x7ff) + 1)
 }
 
 /// Enables MSI-X on `f` with `want` vectors (at most its table size),
 /// every entry masked and INTx disabled. Returns the domain inputs, one per
 /// vector, in table order.
-pub fn enable_msix(
-    cfg: &'static (dyn ConfigSpace + Sync),
-    f: &Function,
-    want: u16,
-) -> Result<Vec<u32>, MsiError> {
+pub fn enable_msix(child: &PciChild, want: u16) -> Result<Vec<u32>, MsiError> {
+    let (cfg, f) = (child.cfg, &child.function);
     let p = PLATFORM.get().ok_or(MsiError::Unavailable)?;
     let cap: Capability = caps::find(&f.caps, caps::id::MSIX).ok_or(MsiError::NoCapability)?;
     let a = f.addr;
@@ -276,7 +273,8 @@ pub fn enable_msix(
 
 /// Turns MSI-X off on `f` and INTx back on, once its vectors are
 /// removed from [`PCI_MSI`].
-pub fn disable_msix(cfg: &dyn ConfigSpace, f: &Function) {
+pub fn disable_msix(child: &PciChild) {
+    let (cfg, f) = (child.cfg, &child.function);
     let Some(cap) = caps::find(&f.caps, caps::id::MSIX) else {
         return;
     };
@@ -289,7 +287,8 @@ pub fn disable_msix(cfg: &dyn ConfigSpace, f: &Function) {
 
 /// Enables MSI on `f` with one message, masked where the function allows,
 /// INTx disabled. Returns the domain input.
-pub fn enable_msi(cfg: &'static (dyn ConfigSpace + Sync), f: &Function) -> Result<u32, MsiError> {
+pub fn enable_msi(child: &PciChild) -> Result<u32, MsiError> {
+    let (cfg, f) = (child.cfg, &child.function);
     if PLATFORM.get().is_none() {
         return Err(MsiError::Unavailable);
     }

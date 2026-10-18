@@ -19,6 +19,7 @@ use devtree::strings::PciAddress;
 use crate::bar::BarKind;
 use crate::config::ConfigSpace;
 use crate::enumerate::{Function, scan};
+use crate::header::{CMD_BUS_MASTER, CMD_IO, CMD_MEMORY, COMMAND};
 
 /// What a bridge hands its `pci` child.
 pub struct PciBusData {
@@ -42,14 +43,21 @@ impl core::fmt::Debug for PciBusData {
     }
 }
 
-/// What a PCI function's driver gets as bus data.
+/// What a PCI function's driver gets as bus data: what enumeration found,
+/// and its configuration space through a view that keeps bus-owned fields
+/// to the bus.
+///
+/// The bus owns the header (BARs, command, bus numbers, the interrupt
+/// line), the capability list's links, and the MSI and MSI-X capabilities
+/// (DRIVER-MODEL.md §5): drivers read anything, write only
+/// device-specific registers, and turn on decoding and bus mastering, and
+/// message-signalled interrupts, through the bus.
 pub struct PciChild {
-    /// Configuration space for the function's bus.
-    pub cfg: &'static (dyn ConfigSpace + Sync),
+    pub(crate) cfg: &'static (dyn ConfigSpace + Sync),
     /// What enumeration found.
     pub function: Function,
     /// The bus it is on (a bridge routes its interrupts through it).
-    pub bus: Arc<PciBusData>,
+    pub(crate) bus: Arc<PciBusData>,
 }
 
 impl core::fmt::Debug for PciChild {
@@ -57,6 +65,101 @@ impl core::fmt::Debug for PciChild {
         f.debug_struct("PciChild")
             .field("addr", &self.function.addr)
             .finish_non_exhaustive()
+    }
+}
+
+/// A write to a field the bus owns, or outside configuration space.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Protected;
+
+/// Bytes of an MSI capability (the largest form: 64-bit, per-vector
+/// masking) and of an MSI-X capability.
+const MSI_BYTES: u16 = 24;
+const MSIX_BYTES: u16 = 12;
+
+impl PciChild {
+    /// Reads the byte at `offset`.
+    #[must_use]
+    pub fn read8(&self, offset: u16) -> u8 {
+        self.cfg.read8(self.function.addr, offset)
+    }
+
+    /// Reads the 16-bit register at `offset`.
+    #[must_use]
+    pub fn read16(&self, offset: u16) -> u16 {
+        self.cfg.read16(self.function.addr, offset)
+    }
+
+    /// Reads the 32-bit register at `offset`.
+    #[must_use]
+    pub fn read32(&self, offset: u16) -> u32 {
+        self.cfg.read32(self.function.addr, offset)
+    }
+
+    /// Whether a driver may write `width` bytes at `offset`.
+    fn writable(&self, offset: u16, width: u16) -> Result<(), Protected> {
+        let end = offset.checked_add(width).ok_or(Protected)?;
+        if !offset.is_multiple_of(width) || end > 4096 || offset < 0x40 {
+            return Err(Protected);
+        }
+        let overlaps = |start: u16, len: u16| offset < start + len && start < end;
+        let caps = self.function.caps.iter().any(|c| {
+            let at = u16::from(c.offset);
+            match c.id {
+                crate::caps::id::MSI => overlaps(at, MSI_BYTES),
+                crate::caps::id::MSIX => overlaps(at, MSIX_BYTES),
+                _ => overlaps(at, 2),
+            }
+        });
+        let ext = self.function.ext_caps.iter().any(|c| overlaps(c.offset, 4));
+        if caps || ext { Err(Protected) } else { Ok(()) }
+    }
+
+    /// Writes the byte at `offset`, a device-specific register.
+    pub fn write8(&self, offset: u16, v: u8) -> Result<(), Protected> {
+        self.writable(offset, 1)?;
+        let shift = 8 * u32::from(offset & 3);
+        let old = self.read32(offset & !3) & !(0xff << shift);
+        self.cfg
+            .write32(self.function.addr, offset & !3, old | u32::from(v) << shift);
+        Ok(())
+    }
+
+    /// Writes the 16-bit register at `offset`, a device-specific register.
+    pub fn write16(&self, offset: u16, v: u16) -> Result<(), Protected> {
+        self.writable(offset, 2)?;
+        self.cfg.write16(self.function.addr, offset, v);
+        Ok(())
+    }
+
+    /// Writes the 32-bit register at `offset`, a device-specific register.
+    pub fn write32(&self, offset: u16, v: u32) -> Result<(), Protected> {
+        self.writable(offset, 4)?;
+        self.cfg.write32(self.function.addr, offset, v);
+        Ok(())
+    }
+
+    fn set_command(&self, set: u16, clear: u16) {
+        let a = self.function.addr;
+        let cmd = self.cfg.read16(a, COMMAND);
+        self.cfg.write16(a, COMMAND, (cmd | set) & !clear);
+    }
+
+    /// Turns on decoding of the function's BARs: memory, and I/O ports if
+    /// it has I/O BARs.
+    pub fn enable_decoding(&self) {
+        let io = self.function.bars.iter().any(|b| b.kind == BarKind::Io);
+        self.set_command(CMD_MEMORY | if io { CMD_IO } else { 0 }, 0);
+    }
+
+    /// Lets the function master the bus (DMA, and message-signalled
+    /// interrupts), or stops it.
+    pub fn set_bus_master(&self, on: bool) {
+        if on {
+            self.set_command(CMD_BUS_MASTER, 0);
+        } else {
+            self.set_command(0, CMD_BUS_MASTER);
+        }
     }
 }
 
@@ -69,7 +172,7 @@ pub fn msix_lines(
     let child = cx
         .bus_data_arc::<PciChild>()
         .ok_or(crate::msi::MsiError::NoCapability)?;
-    let hws = crate::msi::enable_msix(child.cfg, &child.function, want)?;
+    let hws = crate::msi::enable_msix(&child, want)?;
     Ok(hws
         .into_iter()
         .filter_map(|hw| {

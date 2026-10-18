@@ -58,3 +58,6 @@ pub trait Ops: Sync {
     /// A console line.
     fn log(&self, args: core::fmt::Arguments<'_>);
 }
+
+#[cfg(test)]
+mod tests;

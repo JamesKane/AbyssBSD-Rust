@@ -338,3 +338,112 @@ mod irq_test {
 
     pub(super) static NONE: None = None;
 }
+
+/// Configuration space a `PciChild` can hold: one function's dwords.
+struct Shared(std::sync::Mutex<[u32; 1024]>);
+
+impl ConfigSpace for Shared {
+    fn read32(&self, _: PciAddress, offset: u16) -> u32 {
+        self.0.lock().unwrap()[usize::from(offset / 4)]
+    }
+
+    fn write32(&self, _: PciAddress, offset: u16, v: u32) {
+        self.0.lock().unwrap()[usize::from(offset / 4)] = v;
+    }
+}
+
+#[test]
+fn drivers_write_only_device_registers() {
+    use crate::bus::{PciBusData, PciChild, Protected};
+    use crate::header::{CMD_BUS_MASTER, CMD_IO};
+    use alloc::sync::Arc;
+    use alloc::vec::Vec;
+
+    let cfg: &'static Shared = alloc::boxed::Box::leak(alloc::boxed::Box::new(Shared(
+        std::sync::Mutex::new([0; 1024]),
+    )));
+    let addr = PciAddress {
+        domain: 0,
+        bus: 0,
+        slot: 4,
+        function: 0,
+    };
+    let function = Function {
+        addr,
+        header: header::read(
+            &{
+                let f = Fake::default();
+                f.add(0, 4, 0, device(0x1af4, 0x1041, 0x02_00_00, 0));
+                f
+            },
+            addr,
+        )
+        .unwrap(),
+        bars: vec![Bar {
+            index: 0,
+            kind: BarKind::Io,
+            base: 0x1000,
+            size: 0x40,
+            prefetchable: false,
+        }],
+        bad_bars: Vec::new(),
+        caps: vec![
+            Capability {
+                id: caps::id::MSIX,
+                offset: 0x40,
+            },
+            Capability {
+                id: caps::id::VENDOR,
+                offset: 0x50,
+            },
+            Capability {
+                id: caps::id::MSI,
+                offset: 0x60,
+            },
+        ],
+        ext_caps: vec![ExtCapability {
+            id: 1,
+            version: 1,
+            offset: 0x100,
+        }],
+        bridge: None,
+        depth: 0,
+    };
+    let child = PciChild {
+        cfg,
+        function,
+        bus: Arc::new(PciBusData {
+            cfg,
+            adr_paths: Vec::new(),
+            intx: Vec::new(),
+            depth: 0,
+        }),
+    };
+    // The header: command, BARs, bus numbers, the interrupt line.
+    for off in [0x04, 0x10, 0x18, 0x3c] {
+        assert_eq!(child.write32(off, 0), Err(Protected), "{off:#x}");
+    }
+    // MSI-X and MSI capabilities whole; other capabilities' links.
+    assert_eq!(child.write32(0x48, 0), Err(Protected));
+    assert_eq!(child.write32(0x4c, 1), Ok(()));
+    assert_eq!(child.write16(0x50, 0), Err(Protected));
+    assert_eq!(child.write16(0x52, 7), Ok(()));
+    assert_eq!(child.write32(0x74, 0), Err(Protected));
+    assert_eq!(child.write32(0x78, 2), Ok(()));
+    assert_eq!(child.write32(0x100, 0), Err(Protected));
+    assert_eq!(child.write32(0x104, 3), Ok(()));
+    // Alignment and the end of the space.
+    assert_eq!(child.write16(0x53, 0), Err(Protected));
+    assert_eq!(child.write16(0xffe, 4), Ok(()));
+    assert_eq!(child.write32(0xffe, 0), Err(Protected));
+    // A byte write changes only its byte.
+    child.write32(0x80, 0x1122_3344).unwrap();
+    child.write8(0x82, 0xaa).unwrap();
+    assert_eq!(child.read32(0x80), 0x11aa_3344);
+    // Decoding and bus mastering go through the bus.
+    child.enable_decoding();
+    child.set_bus_master(true);
+    assert_eq!(child.read16(COMMAND), CMD_MEMORY | CMD_IO | CMD_BUS_MASTER);
+    child.set_bus_master(false);
+    assert_eq!(child.read16(COMMAND), CMD_MEMORY | CMD_IO);
+}
