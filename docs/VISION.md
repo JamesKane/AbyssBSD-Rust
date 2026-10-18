@@ -49,6 +49,7 @@ system to rule out whole classes of kernel bugs.
 | `COMPAT_FREEBSD4..14` syscalls | Only the syscalls current libc actually uses |
 | Linuxulator | May come later as a separate ABI personality |
 | ZFS | Too large for Day 1. UFS2 is the native FS. Later, host upstream OpenZFS through a porting layer rather than rewrite it (ROADMAP M-Z) |
+| LinuxKPI (FreeBSD's Linux driver compatibility layer) | Leaning against it (ROADMAP open decision 7). Drivers such as GPU and Wi-Fi are rebuilt in Rust for our kernel's semantics, from published specifications and clean-room reverse engineering where required, treating vendor firmware blobs as part of the hardware |
 | Loadable C kernel modules (KLD binary compat) | Kernel-internal ABI is Rust and not stable. See [ADR-0005](adr/0005-monolithic-static-kernel.md) |
 | Xen, Hyper-V enlightenments, bhyve as a *host* | Can come later |
 | Netgraph, IPsec, SCTP, InfiniBand/OFED, NFS | Can come later, each on its own merits |

@@ -329,3 +329,11 @@ Decided items are struck through. Each decision is recorded as an ADR.
    hardware phase arrives.
 5. **Hosting / forge**: self-hosted on the build server initially, with public hosting later.
 6. **Graphics ABI** (DRM-compatible or new), decided at the start of M-G.
+7. **Drivers ported from Linux**: leaning against adopting FreeBSD's LinuxKPI compatibility layer
+   (and so against porting `drm-kmod`, `iwlwifi`, and similar). Instead, rebuild each driver in
+   Rust for our kernel's semantics. Vendor firmware blobs are treated as part of the hardware:
+   loaded and talked to, never reimplemented. Drivers are written from published specifications,
+   with clean-room reverse engineering where none exist (observing the device and documenting it,
+   never reading GPL driver source, per [ADR-0007](adr/0007-license-and-clean-implementation.md)).
+   Support a limited set of hardware and expand organically, driven by the reference machines.
+   Decided by ADR at the start of M-G, the first milestone that would need it.
