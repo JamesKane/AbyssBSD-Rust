@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 acpi = { path = "../../sys/acpi" }
 bus = { path = "../../sys/bus" }
+nvme = { path = "../../drivers/nvme" }
 pci = { path = "../../sys/pci" }
 virtio = { path = "../../sys/virtio" }
 virtio-blk = { path = "../../drivers/virtio-blk" }

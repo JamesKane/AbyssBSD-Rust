@@ -1672,12 +1672,14 @@ ktest! {
                 }
                 l
             };
+            // Every attached function (the virtio transports, nvme0) and
+            // what is attached below it.
             let mut transports = 0;
             for c in m.children(pci0, &s) {
-                if !m.nameunit(c, &s).is_some_and(|n| n.starts_with("virtio_pci")) {
+                if m.state(c, &s) != Some(bus::NodeState::Attached) {
                     continue;
                 }
-                transports += 1;
+                transports += usize::from(m.nameunit(c, &s).is_some_and(|n| n.starts_with("virtio_pci")));
                 let l = line(c);
                 kprintln!("pci0: {l}");
                 assert!(full.contains(&l.as_str()), "{l:?} not in FreeBSD's recording");
@@ -1894,52 +1896,79 @@ ktest! {
     }
 }
 
+/// Writes and reads back patterns at the start, across a 64 KiB boundary,
+/// and at the end of `disk`, then 256 requests from four threads at once.
+fn exercise_disk(s: &sched::Sleepable, disk: &alloc::sync::Arc<storage::Disk>) {
+    let mut seed = crate::time::counter() | 1;
+    let mut pattern = |n: usize| -> alloc::vec::Vec<u8> {
+        (0..n)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed.to_le_bytes()[0]
+            })
+            .collect()
+    };
+    let tail = disk.sector_size() as usize * 300;
+    let end = disk.bytes();
+    for (at, len) in [(0, 4096), (65536 - 1024, 8192), (end - tail as u64, tail)] {
+        let data = pattern(len);
+        disk.write(s, at, &data).expect("write");
+        let back = disk.read(s, at, len).expect("read back");
+        if let Some(i) = back.iter().zip(&data).position(|(a, b)| a != b) {
+            panic!(
+                "{}: {len} bytes at {at:#x} differ from byte {i:#x}",
+                disk.name()
+            );
+        }
+    }
+    disk.flush(s).expect("flush");
+    let threads: alloc::vec::Vec<_> = (0..4u64)
+        .map(|t| {
+            let d = alloc::sync::Arc::clone(disk);
+            sched::spawn("disk-test", sched::Priority::KERNEL, move |s| {
+                for i in 0..64u64 {
+                    let at = (t * 64 + i) * 4096;
+                    let data = alloc::vec![(t * 64 + i).to_le_bytes()[0]; 4096];
+                    d.write(s, at, &data).expect("write");
+                    assert_eq!(d.read(s, at, 4096).expect("read"), data);
+                }
+            })
+            .unwrap()
+        })
+        .collect();
+    for t in threads {
+        t.join(s);
+    }
+    assert_eq!(
+        storage::bio::dropped(),
+        0,
+        "no request was dropped uncompleted"
+    );
+}
+
 ktest! {
     fn vtblk_writes_and_reads_back() {
         let s = cx();
-        let scratch = storage::disks()
-            .iter()
-            .filter_map(|n| storage::find(n))
-            .find(|d| d.bytes() == 16 << 20 && !d.name().contains('p'))
-            .expect("the 16 MiB scratch disk");
-        // Patterns at the start, across a 64 KiB boundary, and at the end.
-        let mut seed = crate::time::counter() | 1;
-        let mut pattern = |n: usize| -> alloc::vec::Vec<u8> {
-            (0..n)
-                .map(|_| {
-                    seed ^= seed << 13;
-                    seed ^= seed >> 7;
-                    seed ^= seed << 17;
-                    seed.to_le_bytes()[0]
-                })
-                .collect()
-        };
-        let end = scratch.bytes();
-        for (at, len) in [(0, 4096), (65536 - 1024, 8192), (end - 512 * 300, 512 * 300)] {
-            let data = pattern(len);
-            scratch.write(&s, at, &data).expect("write");
-            assert_eq!(scratch.read(&s, at, len).expect("read back"), data, "at {at:#x}");
-        }
-        scratch.flush(&s).expect("flush");
-        // Many requests in flight at once, from several threads.
-        let threads: alloc::vec::Vec<_> = (0..4u64)
-            .map(|t| {
-                let d = alloc::sync::Arc::clone(&scratch);
-                sched::spawn("vtblk-test", sched::Priority::KERNEL, move |s| {
-                    for i in 0..64u64 {
-                        let at = (t * 64 + i) * 4096;
-                        let data = alloc::vec![(t * 64 + i).to_le_bytes()[0]; 4096];
-                        d.write(s, at, &data).expect("write");
-                        assert_eq!(d.read(s, at, 4096).expect("read"), data);
-                    }
-                })
-                .unwrap()
-            })
-            .collect();
-        for t in threads {
-            t.join(&s);
-        }
-        assert_eq!(storage::bio::dropped(), 0, "no request was dropped uncompleted");
-        kprintln!("{}: {} MiB scratch disk written and read back", scratch.name(), scratch.bytes() >> 20);
+        let scratch = storage::find("vtbd1").expect("the scratch disk, vtbd1");
+        assert_eq!(scratch.bytes(), 16 << 20);
+        exercise_disk(&s, &scratch);
+        kprintln!("{}: written and read back", scratch.name());
+    }
+}
+
+ktest! {
+    fn nvme_writes_and_reads_back() {
+        let s = cx();
+        let m = bus::manager();
+        let (_, nvme) = find_named(m, &s, crate::devices::nexus(), "nvme0").expect("nvme0");
+        assert_eq!(m.description(nvme, &s).as_deref(), Some("Generic NVMe Device"));
+        let nda = storage::find("nda0").expect("nda0");
+        assert_eq!(nda.bytes(), 16 << 20);
+        let start = crate::time::counter();
+        exercise_disk(&s, &nda);
+        let ms = (crate::time::counter() - start) * 1000 / crate::time::frequency();
+        kprintln!("{}: written and read back in {ms} ms", nda.name());
     }
 }

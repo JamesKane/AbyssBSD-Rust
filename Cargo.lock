@@ -94,6 +94,7 @@ dependencies = [
  "acpi",
  "bus",
  "devtree",
+ "nvme",
  "pci",
  "virtio",
  "virtio-blk",
@@ -210,6 +211,21 @@ dependencies = [
 [[package]]
 name = "logring"
 version = "0.0.0"
+
+[[package]]
+name = "nvme"
+version = "0.0.0"
+dependencies = [
+ "bus",
+ "devtree",
+ "irq",
+ "pci",
+ "regs",
+ "sched",
+ "storage",
+ "sync",
+ "vm",
+]
 
 [[package]]
 name = "pci"

@@ -273,6 +273,12 @@ pub fn manager() -> &'static Manager {
 }
 
 impl Manager {
+    /// Sleeps for `ms` milliseconds: a driver's bounded wait for hardware
+    /// (a controller reset) in attach or stop.
+    pub fn sleep_ms(&self, s: &Sleepable, ms: u64) {
+        self.platform.sleep_ns(s, ms.saturating_mul(1_000_000));
+    }
+
     /// Writes a console line (attach announcements, driver messages).
     pub fn log(&self, args: core::fmt::Arguments<'_>) {
         self.platform.log(args);

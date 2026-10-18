@@ -328,7 +328,7 @@ impl core::fmt::Debug for AttachCx<'_> {
     }
 }
 
-impl AttachCx<'_> {
+impl<'a> AttachCx<'a> {
     /// The device's identity.
     #[must_use]
     pub fn ident(&self) -> &Ident {
@@ -343,7 +343,7 @@ impl AttachCx<'_> {
 
     /// The thread context, for bounded sleeps during attach.
     #[must_use]
-    pub fn sleepable(&self) -> &Sleepable {
+    pub fn sleepable(&self) -> &'a Sleepable {
         self.s
     }
 

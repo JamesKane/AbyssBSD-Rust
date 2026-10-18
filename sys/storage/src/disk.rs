@@ -93,6 +93,22 @@ impl core::fmt::Debug for Disk {
 /// The published disks and partitions.
 static DISKS: SpinLock<Vec<Arc<Disk>>> = SpinLock::new(Vec::new());
 
+/// Units handed out by [`alloc_unit`]: (name, unit).
+static UNITS: SpinLock<Vec<(&'static str, u32)>> = SpinLock::new(Vec::new());
+
+/// The lowest free unit for disks named `name` (`nda`, `ada`), for disks
+/// whose unit is not their driver's (as CAM numbers its peripherals).
+/// Freed when the disk is withdrawn.
+#[must_use]
+pub fn alloc_unit(name: &'static str) -> u32 {
+    let mut units = UNITS.lock();
+    let unit = (0..)
+        .find(|u| !units.iter().any(|&(n, v)| n == name && v == *u))
+        .unwrap_or(0);
+    units.push((name, unit));
+    unit
+}
+
 impl Disk {
     /// Its name (`vtbd0`, `vtbd0p1`).
     #[must_use]
@@ -323,6 +339,12 @@ pub fn publish(s: &Sleepable, info: DiskInfo, queues: Arc<dyn DiskQueues>) -> Ar
 /// requests are failed. Call from the driver's `stop`, before it resets
 /// the hardware (which must then fail what the hardware still holds).
 pub fn withdraw(s: &Sleepable, disk: &Arc<Disk>) {
+    if let Some(i) = disk.name.find(|c: char| c.is_ascii_digit())
+        && let Ok(unit) = disk.name[i..].parse::<u32>()
+    {
+        let base = &disk.name[..i];
+        UNITS.lock().retain(|&(n, u)| !(n == base && u == unit));
+    }
     DISKS.lock().retain(|d| {
         !Arc::ptr_eq(d, disk)
             && !matches!(&d.target, Target::Partition { parent, .. } if Arc::ptr_eq(parent, disk))

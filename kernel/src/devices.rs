@@ -89,6 +89,10 @@ impl Platform for KernelPlatform {
     #[cfg(not(target_arch = "x86_64"))]
     fn io_write(&self, _port: u16, _width: u8, _v: u32) {}
 
+    fn sleep_ns(&self, s: &Sleepable, ns: u64) {
+        crate::time::sleep_ns(s, ns);
+    }
+
     fn log(&self, args: core::fmt::Arguments<'_>) {
         kprintln!("{args}");
     }

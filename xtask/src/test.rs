@@ -247,14 +247,30 @@ fn boot(case: &BootCase, release: bool, verbose: bool) -> Result<std::result::Re
         disk
     };
     let log = disk.with_file_name(format!("boot-{}.log", case.name));
-    // A blank 16 MiB disk the storage tests may write (vtbd1).
-    let scratch = disk.with_file_name(format!("scratch-{}.img", case.name));
-    std::fs::File::create(&scratch)?.set_len(16 << 20)?;
+    // Blank 16 MiB disks the storage tests may write: virtio-blk (vtbd1)
+    // and NVMe (nda0), in the bhyve slots FreeBSD's recording uses.
+    let blank = |what: &str| -> Result<std::path::PathBuf> {
+        let p = disk.with_file_name(format!("{what}-{}.img", case.name));
+        std::fs::File::create(&p)?.set_len(16 << 20)?;
+        Ok(p)
+    };
+    let scratch = blank("scratch")?;
+    let nvme = blank("nvme")?;
+    let devices = match case.vmm {
+        Vmm::Bhyve => vec![format!("5,nvme,{}", nvme.display())],
+        Vmm::Qemu => vec![
+            "-drive".into(),
+            format!("if=none,id=nvm0,format=raw,file={}", nvme.display()),
+            "-device".into(),
+            "nvme,serial=abyss0,drive=nvm0".into(),
+        ],
+    };
     let vm = Vm {
         el2: case.el2,
         test_devices: true,
         allow_reset: case.warm_reset,
         extra_disk: Some(scratch),
+        devices,
         ..Vm::new(case.vmm, case.arch, disk)
     };
     // Emulated aarch64 firmware is slow to start; leave generous headroom.
