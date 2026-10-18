@@ -5,7 +5,8 @@
 # Install as ~/abyss/repo.git/hooks/post-receive. Each push to main runs
 # `cargo xtask test` in a persistent work tree (so target/ is reused) and
 # writes ~/abyss/ci/<time>-<rev>.log ending in PASS or FAIL. The push
-# returns immediately; runs are serialised with a lock file.
+# returns immediately (the job closes every descriptor git passed in);
+# runs are serialised with a lock file.
 
 ci="$HOME/abyss/ci"
 work="$HOME/abyss/ci-work"
@@ -28,5 +29,6 @@ while read -r _old new ref; do
 			git clean -fdq -e target -e build
 			PATH=\$HOME/.cargo/bin:\$PATH cargo xtask test --tier all
 		" && echo PASS || echo FAIL
-	' ci "$ci" "$work" "$repo" "$new" >"$log" 2>&1 </dev/null &
+	' ci "$ci" "$work" "$repo" "$new" >"$log" 2>&1 </dev/null \
+		3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- &
 done

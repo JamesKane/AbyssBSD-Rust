@@ -114,9 +114,12 @@ fn compile_remote(arch: Arch, source: &str) -> Result<()> {
             },
             arch.freebsd_name()
         );
+        // Extract beside the final path and rename on success, so an
+        // interrupted download never leaves a half-populated sysroot.
         let setup = format!(
-            "test -d {root}/usr/include || {{ mkdir -p {root} && \
-             fetch -q -o - {url} | tar -xf - -C {root} ./usr/include ./usr/lib/crt1.o; }}"
+            "test -d {root} || {{ rm -rf {root}.tmp && mkdir -p {root}.tmp && \
+             fetch -q -o - {url} | tar -xf - -C {root}.tmp ./usr/include && \
+             mv {root}.tmp {root}; }}"
         );
         util::run(&mut remote::ssh(&setup))?;
         let _ = write!(flags, " --sysroot=$HOME/{root}");

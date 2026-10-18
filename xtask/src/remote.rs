@@ -8,7 +8,7 @@ use std::process::Command;
 
 use crate::util::{self, Result};
 
-const DEFAULT_HOST: &str = "192.168.0.31";
+const DEFAULT_HOST: &str = "192.168.0.2";
 /// Mirror location, relative to the remote home directory.
 pub(crate) const REMOTE_DIR: &str = "abyss/src";
 

@@ -20,7 +20,7 @@ that runs unmodified FreeBSD userland. Read `docs/ROADMAP.md` for the current ph
 
 - FreeBSD reference source: `../freebsd-src` (16.0-CURRENT). The ABI target is FreeBSD 15.x
   userland (ADR-0004).
-- Build/test server: `ssh 192.168.0.31` (FreeBSD 15.1 amd64, 20 threads, 128 GiB, `doas`). Used
+- Build/test server: `ssh 192.168.0.2` (FreeBSD 15.1 amd64, 20 threads, 128 GiB, `doas`). Used
   for UFS2 images (`makefs`), `fsck_ffs`, `abi-check`, bhyve, kyua, and differential tests.
 - Local: Rust 1.99, `qemu-system-{x86_64,aarch64}`, edk2 firmware under `/usr/share/edk2/`.
 - ARM64 reference board: **Orange Pi 6 Plus** (CIX P1/Sky1), Ubuntu at `192.168.0.27` (key login;
