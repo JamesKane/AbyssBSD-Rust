@@ -3,9 +3,10 @@
 //! that cross the user/kernel boundary.
 //!
 //! Every structure here mirrors a FreeBSD C definition exactly. Each one is
-//! listed in [`layout::LAYOUTS`], which `cargo xtask abi-check` turns into C
-//! static assertions and compiles against real FreeBSD headers, so a layout
-//! mismatch fails CI instead of corrupting user memory.
+//! listed in [`layout::LAYOUTS`], and each ABI constant in
+//! [`layout::CONSTANTS`], which `cargo xtask abi-check` turns into C static
+//! assertions and compiles against real FreeBSD headers, so a mismatch fails
+//! CI instead of corrupting user memory.
 //!
 //! See docs/COMPATIBILITY.md.
 
@@ -16,4 +17,5 @@ pub mod layout;
 pub mod signal;
 pub mod stat;
 pub mod syscall;
+pub mod sysctl;
 pub mod time;

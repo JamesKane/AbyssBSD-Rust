@@ -16,6 +16,7 @@ bench = false
 ktest = []
 
 [dependencies]
+abi = { path = "../lib/abi" }
 acpi-tables = { path = "../lib/acpi-tables" }
 addr = { path = "../lib/addr" }
 bootproto = { path = "../boot/bootproto" }
@@ -30,6 +31,7 @@ pt = { path = "../lib/pt" }
 regs = { path = "../lib/regs" }
 sched = { path = "../sys/sched" }
 sync = { path = "../sys/sync" }
+sysctl = { path = "../sys/sysctl" }
 uart-16550 = { path = "../drivers/uart-16550" }
 uart-pl011 = { path = "../drivers/uart-pl011" }
 vm = { path = "../sys/vm" }

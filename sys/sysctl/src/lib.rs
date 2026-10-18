@@ -1,0 +1,568 @@
+// SPDX-License-Identifier: BSD-2-Clause
+//! The sysctl tree: FreeBSD's management information base.
+//!
+//! Every node has a number, unique among its siblings, and a name; a node's
+//! OID is the path of numbers from the root, and its full name the path of
+//! names joined by dots (`kern.ostype` is `{1, 1}`). Nodes with a fixed
+//! number in FreeBSD (`lib/abi::sysctl`) keep it, because userland asks for
+//! them by number; the rest are numbered from `CTL_AUTO_START` as they are
+//! registered and found by name, as in FreeBSD.
+//!
+//! Interior nodes group children; leaves have a [`Value`] that is read on
+//! demand. The tree answers the queries the `__sysctl` syscall serves:
+//! read by OID, name to OID and back, the next OID in listing order, a
+//! node's kind and format, and its description. Writes and tunables come
+//! with the syscall (P4). The tree does no locking; the kernel keeps it
+//! behind a lock.
+//!
+//! Behavior reference: sys/kern/kern_sysctl.c.
+
+#![no_std]
+#![deny(unsafe_op_in_unsafe_fn)]
+#![forbid(unsafe_code)]
+
+extern crate alloc;
+
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::fmt;
+
+use abi::sysctl::{CTL_AUTO_START, CTL_MAXNAME, ctl, ctlflag, ctltype};
+
+/// Reads a value into a string (for [`Value::Str`]).
+pub type StrFn = Box<dyn Fn(&mut String) + Send + Sync>;
+/// Reads a value's raw bytes (for [`Value::Opaque`]).
+pub type BytesFn = Box<dyn Fn(&mut Vec<u8>) + Send + Sync>;
+
+/// What a leaf holds, read on demand. Integers are in native byte order,
+/// strings NUL-terminated, as FreeBSD returns them.
+pub enum Value {
+    /// `int`.
+    Int(Box<dyn Fn() -> i32 + Send + Sync>),
+    /// `u_int`.
+    Uint(Box<dyn Fn() -> u32 + Send + Sync>),
+    /// `long` (64 bits on every supported architecture).
+    Long(Box<dyn Fn() -> i64 + Send + Sync>),
+    /// `u_long`.
+    Ulong(Box<dyn Fn() -> u64 + Send + Sync>),
+    /// `int64_t`.
+    S64(Box<dyn Fn() -> i64 + Send + Sync>),
+    /// `uint64_t`.
+    U64(Box<dyn Fn() -> u64 + Send + Sync>),
+    /// A string.
+    Str(StrFn),
+    /// A structure, described by `format` (for example `S,timeval`).
+    Opaque {
+        /// FreeBSD's format string for the structure.
+        format: &'static str,
+        /// Produces the bytes.
+        read: BytesFn,
+    },
+}
+
+impl Value {
+    /// A fixed string.
+    #[must_use]
+    pub fn text(s: &'static str) -> Self {
+        Self::Str(Box::new(move |out| out.push_str(s)))
+    }
+
+    /// A fixed `int`.
+    #[must_use]
+    pub fn int(v: i32) -> Self {
+        Self::Int(Box::new(move || v))
+    }
+
+    fn ctltype(&self) -> u32 {
+        match self {
+            Self::Int(_) => ctltype::INT,
+            Self::Uint(_) => ctltype::UINT,
+            Self::Long(_) => ctltype::LONG,
+            Self::Ulong(_) => ctltype::ULONG,
+            Self::S64(_) => ctltype::S64,
+            Self::U64(_) => ctltype::U64,
+            Self::Str(_) => ctltype::STRING,
+            Self::Opaque { .. } => ctltype::OPAQUE,
+        }
+    }
+
+    /// FreeBSD's format string for the type.
+    fn format(&self) -> &'static str {
+        match self {
+            Self::Int(_) => "I",
+            Self::Uint(_) => "IU",
+            Self::Long(_) => "L",
+            Self::Ulong(_) => "LU",
+            Self::S64(_) => "Q",
+            Self::U64(_) => "QU",
+            Self::Str(_) => "A",
+            Self::Opaque { format, .. } => format,
+        }
+    }
+
+    fn read(&self, out: &mut Vec<u8>) {
+        match self {
+            Self::Int(f) => out.extend_from_slice(&f().to_ne_bytes()),
+            Self::Uint(f) => out.extend_from_slice(&f().to_ne_bytes()),
+            Self::Long(f) | Self::S64(f) => out.extend_from_slice(&f().to_ne_bytes()),
+            Self::Ulong(f) | Self::U64(f) => out.extend_from_slice(&f().to_ne_bytes()),
+            Self::Str(f) => {
+                let mut s = String::new();
+                f(&mut s);
+                out.extend_from_slice(s.as_bytes());
+                out.push(0);
+            }
+            Self::Opaque { read, .. } => read(out),
+        }
+    }
+}
+
+impl fmt::Debug for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Value({})", self.format())
+    }
+}
+
+/// A node's number: FreeBSD's fixed one, or the next free one
+/// (`OID_AUTO`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Number {
+    /// A fixed number (ABI for well-known nodes).
+    Fixed(i32),
+    /// The parent's next free number from `CTL_AUTO_START`.
+    Auto,
+}
+
+/// A node, identified by slot and generation: an id from a removed node
+/// never reaches a node that reused its slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NodeId {
+    index: u32,
+    generation: u32,
+}
+
+/// What [`Tree::add`] needs to make a node.
+#[derive(Debug)]
+pub struct Spec<'a> {
+    /// The number.
+    pub number: Number,
+    /// The name: unique among siblings, no dots.
+    pub name: &'a str,
+    /// The description (`sysctl -d`).
+    pub description: &'a str,
+    /// `CTLFLAG_*` bits beyond the access mode, which the value implies.
+    pub flags: u32,
+    /// The value, or `None` for an interior node.
+    pub value: Option<Value>,
+}
+
+/// Why a node could not be added.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AddError {
+    /// The parent does not exist (or is a leaf).
+    NoParent,
+    /// A sibling already has the name.
+    NameTaken,
+    /// A sibling already has the number.
+    NumberTaken,
+    /// The name is empty or contains a dot.
+    BadName,
+    /// The OID would exceed `CTL_MAXNAME` components.
+    TooDeep,
+}
+
+/// Why a read failed (mapped to errno values by the syscall layer).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadError {
+    /// No such OID (`ENOENT`).
+    NotFound,
+    /// An interior node with no value (`EISDIR`).
+    IsNode,
+}
+
+struct Node {
+    generation: u32,
+    number: i32,
+    name: String,
+    description: String,
+    /// `CTLTYPE_*` plus `CTLFLAG_*`.
+    kind: u32,
+    value: Option<Value>,
+    parent: Option<u32>,
+    /// Children's slots, in increasing number.
+    children: Vec<u32>,
+    /// The next number for an `OID_AUTO` child.
+    next_auto: i32,
+    depth: usize,
+}
+
+/// The tree.
+pub struct Tree {
+    slots: Vec<Option<Node>>,
+    /// Generations of freed slots, so reuse gets a new one.
+    free: Vec<(u32, u32)>,
+}
+
+impl fmt::Debug for Tree {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Tree")
+            .field("nodes", &self.slots.iter().flatten().count())
+            .finish()
+    }
+}
+
+const ROOT: u32 = 0;
+
+impl Default for Tree {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Tree {
+    /// A tree with FreeBSD's fixed top-level nodes (`kern`, `vm`, `vfs`,
+    /// `net`, `debug`, `hw`, `machdep`, `user`, `p1003_1b`).
+    #[must_use]
+    pub fn new() -> Self {
+        let mut t = Self {
+            slots: Vec::new(),
+            free: Vec::new(),
+        };
+        t.slots.push(Some(Node {
+            generation: 0,
+            number: 0,
+            name: String::new(),
+            description: String::new(),
+            kind: ctltype::NODE | ctlflag::RD,
+            value: None,
+            parent: None,
+            children: Vec::new(),
+            next_auto: CTL_AUTO_START,
+            depth: 0,
+        }));
+        let top = [
+            (ctl::KERN, "kern", "High kernel, proc, limits &c"),
+            (ctl::VM, "vm", "Virtual memory"),
+            (ctl::VFS, "vfs", "File system"),
+            (ctl::NET, "net", "Network, (see socket.h)"),
+            (ctl::DEBUG, "debug", "Debugging"),
+            (ctl::HW, "hw", "hardware"),
+            (ctl::MACHDEP, "machdep", "machine dependent"),
+            (ctl::USER, "user", "user-level"),
+            (ctl::P1003_1B, "p1003_1b", "p1003_1b, (see p1003_1b.h)"),
+        ];
+        for (n, name, description) in top {
+            let added = t.add(
+                t.root(),
+                Spec {
+                    number: Number::Fixed(n),
+                    name,
+                    description,
+                    flags: 0,
+                    value: None,
+                },
+            );
+            debug_assert!(added.is_ok());
+        }
+        t
+    }
+
+    /// The root (its OID is empty).
+    #[must_use]
+    pub fn root(&self) -> NodeId {
+        NodeId {
+            index: ROOT,
+            generation: 0,
+        }
+    }
+
+    fn node(&self, id: NodeId) -> Option<&Node> {
+        self.slots
+            .get(usize::try_from(id.index).ok()?)?
+            .as_ref()
+            .filter(|n| n.generation == id.generation)
+    }
+
+    fn at(&self, index: u32) -> &Node {
+        self.slots[index as usize]
+            .as_ref()
+            .expect("tree links point at live nodes")
+    }
+
+    fn at_mut(&mut self, index: u32) -> &mut Node {
+        self.slots[index as usize]
+            .as_mut()
+            .expect("tree links point at live nodes")
+    }
+
+    fn id(&self, index: u32) -> NodeId {
+        NodeId {
+            index,
+            generation: self.at(index).generation,
+        }
+    }
+
+    /// Adds a node under `parent`.
+    pub fn add(&mut self, parent: NodeId, spec: Spec<'_>) -> Result<NodeId, AddError> {
+        let p = self.node(parent).ok_or(AddError::NoParent)?;
+        if p.value.is_some() {
+            return Err(AddError::NoParent);
+        }
+        if spec.name.is_empty() || spec.name.contains('.') {
+            return Err(AddError::BadName);
+        }
+        if p.depth >= CTL_MAXNAME {
+            return Err(AddError::TooDeep);
+        }
+        if p.children.iter().any(|&c| self.at(c).name == spec.name) {
+            return Err(AddError::NameTaken);
+        }
+        let number = match spec.number {
+            Number::Fixed(n) => n,
+            Number::Auto => {
+                let mut n = p.next_auto;
+                while p.children.iter().any(|&c| self.at(c).number == n) {
+                    n += 1;
+                }
+                n
+            }
+        };
+        if p.children.iter().any(|&c| self.at(c).number == number) {
+            return Err(AddError::NumberTaken);
+        }
+        let kind = match &spec.value {
+            None => ctltype::NODE | ctlflag::RD,
+            Some(v) => v.ctltype() | ctlflag::RD,
+        } | spec.flags;
+        let depth = p.depth + 1;
+        let (index, generation) = match self.free.pop() {
+            Some((i, g)) => (i, g),
+            None => (
+                u32::try_from(self.slots.len()).expect("sysctl tree size"),
+                0,
+            ),
+        };
+        let node = Node {
+            generation,
+            number,
+            name: String::from(spec.name),
+            description: String::from(spec.description),
+            kind,
+            value: spec.value,
+            parent: Some(parent.index),
+            children: Vec::new(),
+            next_auto: CTL_AUTO_START,
+            depth,
+        };
+        if index as usize == self.slots.len() {
+            self.slots.push(Some(node));
+        } else {
+            self.slots[index as usize] = Some(node);
+        }
+        // Keep siblings sorted by number; an auto number moves the
+        // parent's counter past it, as FreeBSD never reuses one.
+        let pos = {
+            let p = self.at(parent.index);
+            p.children
+                .iter()
+                .position(|&c| self.at(c).number > number)
+                .unwrap_or(p.children.len())
+        };
+        let p = self.at_mut(parent.index);
+        p.children.insert(pos, index);
+        if spec.number == Number::Auto {
+            p.next_auto = number + 1;
+        }
+        Ok(NodeId { index, generation })
+    }
+
+    /// Adds an interior node.
+    pub fn add_node(
+        &mut self,
+        parent: NodeId,
+        number: Number,
+        name: &str,
+        description: &str,
+    ) -> Result<NodeId, AddError> {
+        self.add(
+            parent,
+            Spec {
+                number,
+                name,
+                description,
+                flags: 0,
+                value: None,
+            },
+        )
+    }
+
+    /// Adds a read-only leaf.
+    pub fn add_value(
+        &mut self,
+        parent: NodeId,
+        number: Number,
+        name: &str,
+        description: &str,
+        value: Value,
+    ) -> Result<NodeId, AddError> {
+        self.add(
+            parent,
+            Spec {
+                number,
+                name,
+                description,
+                flags: 0,
+                value: Some(value),
+            },
+        )
+    }
+
+    /// Removes a node and everything under it. Removing a stale id is a
+    /// no-op (it returns false).
+    pub fn remove(&mut self, id: NodeId) -> bool {
+        if id.index == ROOT || self.node(id).is_none() {
+            return false;
+        }
+        let parent = self.at(id.index).parent.unwrap_or(ROOT);
+        self.at_mut(parent).children.retain(|&c| c != id.index);
+        let mut stack = alloc::vec![id.index];
+        while let Some(i) = stack.pop() {
+            if let Some(n) = self.slots[i as usize].take() {
+                stack.extend(n.children);
+                self.free.push((i, n.generation.wrapping_add(1)));
+            }
+        }
+        true
+    }
+
+    /// The child of `parent` named `name`.
+    #[must_use]
+    pub fn child(&self, parent: NodeId, name: &str) -> Option<NodeId> {
+        self.node(parent)?
+            .children
+            .iter()
+            .find(|&&c| self.at(c).name == name)
+            .map(|&c| self.id(c))
+    }
+
+    /// The node at `oid`.
+    #[must_use]
+    pub fn lookup(&self, oid: &[i32]) -> Option<NodeId> {
+        let mut cur = ROOT;
+        for &n in oid {
+            cur = *self
+                .at(cur)
+                .children
+                .iter()
+                .find(|&&c| self.at(c).number == n)?;
+        }
+        Some(self.id(cur))
+    }
+
+    /// A node's OID.
+    #[must_use]
+    pub fn oid(&self, id: NodeId) -> Option<Vec<i32>> {
+        let mut path = Vec::new();
+        let mut cur = self.node(id)?;
+        while let Some(p) = cur.parent {
+            path.push(cur.number);
+            cur = self.at(p);
+        }
+        path.reverse();
+        Some(path)
+    }
+
+    /// The OID of a full name (`kern.ostype`); FreeBSD's `sysctl.name2oid`.
+    #[must_use]
+    pub fn name2oid(&self, name: &str) -> Option<Vec<i32>> {
+        let mut cur = self.root();
+        for part in name.split('.') {
+            cur = self.child(cur, part)?;
+        }
+        self.oid(cur)
+    }
+
+    /// The full name of an OID; FreeBSD's `sysctl.name`.
+    #[must_use]
+    pub fn name(&self, oid: &[i32]) -> Option<String> {
+        let mut cur = ROOT;
+        let mut name = String::new();
+        for &n in oid {
+            cur = *self
+                .at(cur)
+                .children
+                .iter()
+                .find(|&&c| self.at(c).number == n)?;
+            if !name.is_empty() {
+                name.push('.');
+            }
+            name.push_str(&self.at(cur).name);
+        }
+        Some(name)
+    }
+
+    /// The next readable OID after `oid` in listing order (depth first,
+    /// siblings by number), as `sysctl -a` walks the tree; FreeBSD's
+    /// `sysctl.next` (`honor_skip`) and `sysctl.nextnoskip`. `CTLFLAG_SKIP`
+    /// nodes and their subtrees are left out when `honor_skip`.
+    #[must_use]
+    pub fn next(&self, oid: &[i32], honor_skip: bool) -> Option<Vec<i32>> {
+        let mut path = Vec::new();
+        self.next_under(ROOT, &mut path, oid, honor_skip)
+    }
+
+    fn next_under(
+        &self,
+        index: u32,
+        path: &mut Vec<i32>,
+        after: &[i32],
+        honor_skip: bool,
+    ) -> Option<Vec<i32>> {
+        for &c in &self.at(index).children {
+            let n = self.at(c);
+            if honor_skip && n.kind & ctlflag::SKIP != 0 {
+                continue;
+            }
+            path.push(n.number);
+            // Prune subtrees that lie wholly before `after`.
+            let before = path.as_slice() < after && !after.starts_with(path);
+            if !before {
+                if n.value.is_some() && path.as_slice() > after {
+                    return Some(path.clone());
+                }
+                if let Some(found) = self.next_under(c, path, after, honor_skip) {
+                    return Some(found);
+                }
+            }
+            path.pop();
+        }
+        None
+    }
+
+    /// An OID's kind (`CTLTYPE_*` with `CTLFLAG_*`) and format string;
+    /// FreeBSD's `sysctl.oidfmt`.
+    #[must_use]
+    pub fn format(&self, oid: &[i32]) -> Option<(u32, &str)> {
+        let n = self.node(self.lookup(oid)?)?;
+        Some((n.kind, n.value.as_ref().map_or("N", Value::format)))
+    }
+
+    /// An OID's description; FreeBSD's `sysctl.oiddescr`.
+    #[must_use]
+    pub fn description(&self, oid: &[i32]) -> Option<&str> {
+        Some(&self.node(self.lookup(oid)?)?.description)
+    }
+
+    /// Appends the value at `oid` to `out`.
+    pub fn read(&self, oid: &[i32], out: &mut Vec<u8>) -> Result<(), ReadError> {
+        let id = self.lookup(oid).ok_or(ReadError::NotFound)?;
+        let n = self.node(id).ok_or(ReadError::NotFound)?;
+        let v = n.value.as_ref().ok_or(ReadError::IsNode)?;
+        v.read(out);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests;

@@ -685,3 +685,32 @@ impl core::fmt::Write for Buf {
         Ok(())
     }
 }
+
+ktest! {
+    fn sysctl_boot_nodes() {
+        let s = cx();
+        let (oid, value, next) = crate::sysctl::read(&s, |t| {
+            let oid = t.name2oid("kern.osreldate").expect("kern.osreldate");
+            let mut v = alloc::vec::Vec::new();
+            t.read(&oid, &mut v).expect("read");
+            (oid, v, t.next(&[1, 1], true))
+        });
+        assert_eq!(oid, [1, 24]);
+        assert_eq!(value, 1_501_000i32.to_ne_bytes());
+        assert_eq!(next, Some(alloc::vec![1, 2]), "kern.osrelease follows kern.ostype");
+        let ncpu = crate::sysctl::read(&s, |t| {
+            let mut v = alloc::vec::Vec::new();
+            t.read(&[6, 3], &mut v).expect("hw.ncpu");
+            i32::from_ne_bytes(v.try_into().expect("an int"))
+        });
+        assert_eq!(usize::try_from(ncpu).unwrap(), sched::online_cpus());
+        // Dynamic nodes come and go.
+        let id = crate::sysctl::with(&s, |t| {
+            let d = t.add_node(t.root(), sysctl::Number::Auto, "ktest", "").unwrap();
+            assert!(t.name2oid("ktest").unwrap()[0] >= abi::sysctl::CTL_AUTO_START);
+            d
+        });
+        crate::sysctl::with(&s, |t| assert!(t.remove(id)));
+        assert!(crate::sysctl::read(&s, |t| t.name2oid("ktest")).is_none());
+    }
+}

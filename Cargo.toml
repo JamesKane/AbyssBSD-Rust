@@ -28,6 +28,7 @@ members = [
     "lib/regs",
     "sys/sched",
     "sys/sync",
+    "sys/sysctl",
     "sys/vm",
     "tools/syscallgen",
 ]
@@ -57,6 +58,7 @@ default-members = [
     "lib/regs",
     "sys/sched",
     "sys/sync",
+    "sys/sysctl",
     "sys/vm",
     "tools/syscallgen",
 ]

@@ -4,10 +4,15 @@
 //! [`SpinLock`] is a ticket lock that masks interrupts on the holding CPU,
 //! so state shared with interrupt handlers can use it. The rest of the set
 //! (sleepable mutexes, rw/sx locks, epoch) builds on the scheduler
-//! (docs/ARCHITECTURE.md §5.1).
+//! (docs/ARCHITECTURE.md §5.1). [`PerCpuCounter`] counts without sharing
+//! cache lines between CPUs.
 
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
+
+mod percpu;
+
+pub use percpu::PerCpuCounter;
 
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};

@@ -35,6 +35,7 @@ mod smp;
 #[cfg(not(feature = "ktest"))]
 mod stress;
 mod symbols;
+mod sysctl;
 #[cfg(feature = "ktest")]
 mod tests;
 mod threads;
@@ -77,6 +78,7 @@ fn kmain(boot_info: PhysAddr) -> ! {
     threads::init_fpu(true);
     threads::init();
     time::init_cpu();
+    sysctl::init();
     topology::record_this_cpu(hal::CpuId::BOOT);
     hal::irq::enable();
     // SAFETY: kmain is now a thread (`threads::init`) with interrupts

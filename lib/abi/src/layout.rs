@@ -47,6 +47,20 @@ pub struct StructLayout {
     pub fields: &'static [FieldLayout],
 }
 
+/// An ABI constant: a C macro or enumerator and the value we use for it.
+#[derive(Clone, Copy, Debug)]
+pub struct ConstValue {
+    /// The C name.
+    pub c_name: &'static str,
+    /// The header that defines it.
+    pub header: &'static str,
+    /// Our value.
+    pub value: i64,
+}
+
+/// Every ABI constant checked against FreeBSD's headers.
+pub const CONSTANTS: &[&[ConstValue]] = &[crate::sysctl::CONSTANTS];
+
 /// Size of the field selected by `_f`. The function pointer only carries
 /// the field type; it is never called.
 #[doc(hidden)]

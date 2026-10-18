@@ -12,7 +12,7 @@ use std::fs;
 use std::io::Write as _;
 use std::process::Stdio;
 
-use abi::layout::{Arches, LAYOUTS};
+use abi::layout::{Arches, CONSTANTS, LAYOUTS};
 
 use crate::arch::Arch;
 use crate::cli::Args;
@@ -52,6 +52,7 @@ fn generate(arch: Arch) -> String {
     for h in layouts
         .iter()
         .flat_map(|l| l.headers.iter())
+        .chain(CONSTANTS.iter().flat_map(|g| g.iter().map(|k| &k.header)))
         .chain(&["stddef.h"])
     {
         if !headers.contains(h) {
@@ -90,6 +91,11 @@ fn generate(arch: Arch) -> String {
                 f.size
             );
         }
+    }
+    let _ = writeln!(c, "\n/* Constants. */");
+    for k in CONSTANTS.iter().flat_map(|g| g.iter()) {
+        let n = k.c_name;
+        let _ = writeln!(c, "_Static_assert({n} == {}, \"{n}\");", k.value);
     }
     c
 }
@@ -156,5 +162,8 @@ mod tests {
         assert!(c.contains("_Static_assert(sizeof(struct stat) == 224,"));
         assert!(c.contains("offsetof(struct sigaction, sa_mask) == 12"));
         assert_eq!(c.matches("#include <sys/types.h>").count(), 1);
+        assert!(c.contains("#include <sys/sysctl.h>"));
+        assert!(c.contains("_Static_assert(KERN_OSRELDATE == 24, \"KERN_OSRELDATE\");"));
+        assert!(c.contains("_Static_assert(CTLFLAG_RD == 2147483648,"));
     }
 }

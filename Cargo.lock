@@ -94,6 +94,7 @@ version = "0.0.0"
 name = "kernel"
 version = "0.0.0"
 dependencies = [
+ "abi",
  "acpi-tables",
  "addr",
  "arch-aarch64",
@@ -110,6 +111,7 @@ dependencies = [
  "regs",
  "sched",
  "sync",
+ "sysctl",
  "uart-16550",
  "uart-pl011",
  "vm",
@@ -169,6 +171,13 @@ dependencies = [
 [[package]]
 name = "syscallgen"
 version = "0.0.0"
+
+[[package]]
+name = "sysctl"
+version = "0.0.0"
+dependencies = [
+ "abi",
+]
 
 [[package]]
 name = "uart-16550"

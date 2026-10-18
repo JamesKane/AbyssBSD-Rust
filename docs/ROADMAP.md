@@ -165,13 +165,17 @@ P3.3 (from the start, pure crate) ────────┘   P3.8 ─┴─�
 - The P2 suite at ≤2% on bhyve (aarch64 numbers recorded under TCG).
 - The FreeBSD reference VMs, and the first recordings from them.
 
-**P3.1 Groundwork for the model.**
+**P3.1 Groundwork for the model.** Done 2026-10-18.
 - The sched locks take a `Sleepable` proof, and the context tokens (`IrqCx`, `ThreadCx`) exist.
 - A typed register-block macro in `lib/regs`, prototyped against the NVMe and GICv3 register maps
   (DRIVER-MODEL.md open question 4).
 - `DeviceShared`, with explicit padding fields and a `const` size assertion (open question 5).
 - Per-CPU counters, for gates and for dispatch epochs.
 - The kernel sysctl tree: typed nodes with FreeBSD's OID numbering.
+- As delivered: `regs::register_block!` with `Mmio<B>` (the GICv3 driver uses it);
+  `device_shared!`; `sched::Sleepable` and `sched::IrqCx` (the binding contexts follow in P3.5);
+  `sync::PerCpuCounter`; and the `sys/sysctl` tree with the identity and `hw.*` boot nodes.
+  `abi-check` now also verifies the sysctl constants against FreeBSD's headers.
 
 **P3.2 `lib/devtree`** (pure, host-tested).
 - Match ranking, and the ambiguity check, wired into `cargo xtask check`.
