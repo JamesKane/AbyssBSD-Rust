@@ -118,6 +118,13 @@ impl Ring {
         self.free
     }
 
+    /// The head the next [`Ring::push`] will return, if a descriptor is
+    /// free (for per-request state indexed by head).
+    #[must_use]
+    pub fn next_head(&self) -> Option<u16> {
+        (self.free > 0).then_some(self.free_head)
+    }
+
     /// The descriptor table's bus address.
     #[must_use]
     pub fn desc_addr(&self) -> u64 {

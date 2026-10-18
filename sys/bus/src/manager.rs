@@ -60,6 +60,30 @@ struct Node {
     binding: Option<Box<dyn Bound>>,
     /// `dev.<driver>.<unit>`, while attached.
     sysctl: Option<sysctl::NodeId>,
+    /// Where an `Attaching` node is between attach and start.
+    start: StartPhase,
+}
+
+/// Starts run in tree order (DRIVER-MODEL.md §4.3): a bus adds children
+/// in `start`, and they are matched (their units chosen) as they are
+/// added, so starting in depth-first order gives every device the unit
+/// FreeBSD's serial attach would. Attaches still run in parallel.
+#[derive(Default)]
+enum StartPhase {
+    /// Attach queued or running.
+    #[default]
+    Attach,
+    /// Attached, waiting for every earlier node to start.
+    Parked(Box<dyn Bound>, Option<sysctl::NodeId>),
+    /// Start queued or running.
+    Starting,
+}
+
+/// A worker's job.
+#[derive(Clone, Copy, Debug)]
+enum Job {
+    Attach(DeviceId),
+    Start(DeviceId),
 }
 
 impl Node {
@@ -124,7 +148,7 @@ pub struct Manager {
     drivers: &'static [DriverDecl],
     topo: SxLock<Topology>,
     /// Nodes waiting for a worker.
-    jobs: SpinLock<VecDeque<DeviceId>>,
+    jobs: SpinLock<VecDeque<Job>>,
     jobs_q: WaitQueue,
     /// Attaches queued or running, for [`Manager::wait_idle`].
     busy: AtomicUsize,
@@ -203,6 +227,7 @@ pub fn init(
         declined: Vec::new(),
         binding: None,
         sysctl: None,
+        start: StartPhase::Attach,
     }));
     topo.graph.add_node(0);
     let faults = (o.fault_one_in > 0).then_some(Faults {
@@ -248,6 +273,11 @@ pub fn manager() -> &'static Manager {
 }
 
 impl Manager {
+    /// Writes a console line (attach announcements, driver messages).
+    pub fn log(&self, args: core::fmt::Arguments<'_>) {
+        self.platform.log(args);
+    }
+
     pub(crate) fn platform(&self) -> &'static dyn Platform {
         self.platform
     }
@@ -354,6 +384,7 @@ impl Manager {
                 declined: Vec::new(),
                 binding: None,
                 sysctl: None,
+                start: StartPhase::Attach,
             };
             if index as usize == t.nodes.len() {
                 t.nodes.push(Some(node));
@@ -416,6 +447,7 @@ impl Manager {
             declined: Vec::new(),
             binding: None,
             sysctl: None,
+            start: StartPhase::Attach,
         };
         let (index, generation) = match t.free.pop() {
             Some((i, g)) => (i, g),
@@ -568,8 +600,12 @@ impl Manager {
     }
 
     fn queue(&self, id: DeviceId) {
+        self.push(Job::Attach(id));
+    }
+
+    fn push(&self, job: Job) {
         self.busy.fetch_add(1, Ordering::AcqRel);
-        self.jobs.lock().push_back(id);
+        self.jobs.lock().push_back(job);
         self.jobs_q.wake_one();
     }
 
@@ -580,16 +616,73 @@ impl Manager {
                 job = self.jobs.lock().pop_front();
                 job.is_some()
             });
-            if let Some(id) = job {
-                self.attach(id, s);
-                if self.busy.fetch_sub(1, Ordering::AcqRel) == 1 {
-                    self.idle_q.wake_all();
-                }
+            match job {
+                Some(Job::Attach(id)) => self.attach(id, s),
+                Some(Job::Start(id)) => self.start(id, s),
+                None => continue,
             }
+            self.done_one();
         }
     }
 
-    /// Runs attach and start for `id`, which is `Attaching`.
+    fn done_one(&self) {
+        if self.busy.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.idle_q.wake_all();
+        }
+    }
+
+    /// A node's position in depth-first creation order: its child index
+    /// at each level from the root.
+    fn tree_key(t: &Topology, mut i: u32) -> Vec<u32> {
+        let mut key = Vec::new();
+        while let Some(p) = t
+            .nodes
+            .get(i as usize)
+            .and_then(Option::as_ref)
+            .and_then(|n| n.parent)
+        {
+            let pos = t.nodes[p as usize]
+                .as_ref()
+                .and_then(|pn| pn.children.iter().position(|&c| c == i))
+                .unwrap_or(usize::MAX);
+            key.push(u32::try_from(pos).unwrap_or(u32::MAX));
+            i = p;
+        }
+        key.reverse();
+        key
+    }
+
+    /// Starts the earliest attaching node, in tree order, if it is parked.
+    /// Topology lock held.
+    fn release_starts(&self, t: &mut Topology) {
+        let earliest = (0..u32::try_from(t.nodes.len()).unwrap_or(0))
+            .filter(|&i| {
+                t.nodes[i as usize]
+                    .as_ref()
+                    .is_some_and(|n| n.state == NodeState::Attaching)
+            })
+            .min_by_key(|&i| Self::tree_key(t, i));
+        let Some(i) = earliest else {
+            return;
+        };
+        let Some(id) = t.id(i) else {
+            return;
+        };
+        if let Some(n) = t.node_mut(id)
+            && matches!(n.start, StartPhase::Parked(..))
+            && let StartPhase::Parked(b, sysctl) =
+                core::mem::replace(&mut n.start, StartPhase::Starting)
+        {
+            n.binding = Some(b);
+            n.sysctl = sysctl;
+            // The parked count becomes the start job's.
+            self.push(Job::Start(id));
+            self.done_one();
+        }
+    }
+
+    /// Runs attach for `id`, which is `Attaching`, and parks it for its
+    /// start.
     fn attach(&'static self, id: DeviceId, s: &Sleepable) {
         // Gather what attach needs without holding the lock across it.
         let (decl_index, ident, resources, bus_data, unit, strings) = {
@@ -646,12 +739,40 @@ impl Manager {
                 crate::sysctl::remove_device(self, s, n);
             }
         };
-        let mut binding = match result {
+        let binding = match result {
             Ok(b) => b,
             Err(e) => {
                 drop_node();
                 self.attach_failed(id, decl_index, e, s);
                 return;
+            }
+        };
+        // Parked until every earlier node has started; counted as work.
+        let mut t = self.topo.write(s);
+        let Some(n) = t.node_mut(id) else {
+            return;
+        };
+        n.start = StartPhase::Parked(binding, node);
+        self.busy.fetch_add(1, Ordering::AcqRel);
+        self.release_starts(&mut t);
+    }
+
+    /// Runs `start` for a parked node whose turn has come.
+    fn start(&'static self, id: DeviceId, s: &Sleepable) {
+        let (mut binding, node, decl_index, unit) = {
+            let mut t = self.topo.write(s);
+            let Some(n) = t.node_mut(id) else {
+                return;
+            };
+            let (Some(b), Some(d), Some(u)) = (n.binding.take(), n.driver, n.unit) else {
+                return;
+            };
+            (b, n.sysctl.take(), d, u)
+        };
+        let decl = self.drivers[decl_index];
+        let drop_node = || {
+            if let Some(n) = node {
+                crate::sysctl::remove_device(self, s, n);
             }
         };
         if let Err(e) = binding.start(self, s) {
@@ -671,6 +792,7 @@ impl Manager {
             n.binding = Some(binding);
             n.sysctl = node;
             n.state = NodeState::Attached;
+            n.start = StartPhase::Attach;
             self.platform.log(format_args!(
                 "{}{unit}: <{}> on {parent}",
                 decl.name, n.desc
@@ -691,6 +813,7 @@ impl Manager {
                 self.queue(cid);
             }
         }
+        self.release_starts(&mut t);
         drop(t);
         self.event(line);
         self.bump();
@@ -704,6 +827,7 @@ impl Manager {
         };
         let unit = n.unit.take();
         n.driver = None;
+        n.start = StartPhase::Attach;
         match e {
             AttachError::Decline => {
                 n.declined.push(decl_index);
@@ -738,6 +862,8 @@ impl Manager {
                 }
             }
         }
+        // It no longer holds back the nodes after it.
+        self.release_starts(&mut t);
         drop(t);
         self.bump();
     }

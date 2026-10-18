@@ -26,6 +26,7 @@ pub static DRIVERS: &[DriverDecl] = &[
     pci::bridge::DRIVER,
     virtio::pci::MODERN,
     virtio::pci::LEGACY,
+    virtio_blk::DRIVER,
     virtio_random::DRIVER,
 ];
 

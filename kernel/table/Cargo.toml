@@ -10,6 +10,7 @@ acpi = { path = "../../sys/acpi" }
 bus = { path = "../../sys/bus" }
 pci = { path = "../../sys/pci" }
 virtio = { path = "../../sys/virtio" }
+virtio-blk = { path = "../../drivers/virtio-blk" }
 virtio-random = { path = "../../drivers/virtio-random" }
 
 [dev-dependencies]

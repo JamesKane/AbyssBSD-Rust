@@ -140,9 +140,11 @@ fn chains_go_round_and_come_back() {
     let mut dev = Device { seen: 0, used: 0 };
     // Many more chains than entries: indices wrap, descriptors recycle.
     for i in 0..50u64 {
+        let next = r.next_head();
         let h = r
             .push(&[(0x1000 + i, 16)], &[(0x2000 + i, 512), (0x3000, 1)])
             .unwrap();
+        assert_eq!(next, Some(h), "next_head names the head push returns");
         assert_eq!(r.free(), 1);
         let got = dev.take(&r);
         assert_eq!(got.len(), 1);

@@ -259,13 +259,28 @@ pub struct Table<'a> {
     entry_size: usize,
 }
 
-impl<'a> Table<'a> {
-    /// Reads and validates the primary table of `disk`.
-    pub fn read(disk: &'a [u8]) -> Result<Self, Error> {
-        if disk.len() < lba_offset(2) {
-            return Err(Error::DiskSize);
-        }
-        let h = &disk[SECTOR..SECTOR + HEADER_SIZE as usize];
+/// A validated primary header: the table's identity and where its entry
+/// array is, for a reader that fetches the array itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PrimaryHeader {
+    /// The disk's GUID.
+    pub disk_guid: Guid,
+    /// First sector partitions may use.
+    pub first_usable: u64,
+    /// Last sector partitions may use.
+    pub last_usable: u64,
+    /// First sector of the entry array.
+    pub entries_lba: u64,
+    /// The entry array's length in bytes.
+    pub entries_len: usize,
+    entry_size: usize,
+    entries_crc: u32,
+}
+
+impl PrimaryHeader {
+    /// Validates the primary header in `sector` (LBA 1).
+    pub fn read(sector: &[u8]) -> Result<Self, Error> {
+        let h = sector.get(..HEADER_SIZE as usize).ok_or(Error::DiskSize)?;
         if &h[0..8] != SIGNATURE {
             return Err(Error::Signature);
         }
@@ -278,29 +293,60 @@ impl<'a> Table<'a> {
         if crc32(&copy) != le32(h, 16) {
             return Err(Error::HeaderCrc);
         }
-        let entries_lba = le64(h, 72);
         let count = usize::try_from(le32(h, 80)).map_err(|_| Error::Unsupported)?;
         let entry_size = usize::try_from(le32(h, 84)).map_err(|_| Error::Unsupported)?;
         if entry_size < 128 || !entry_size.is_power_of_two() {
             return Err(Error::Unsupported);
         }
-        let start = usize::try_from(entries_lba)
-            .ok()
-            .and_then(|lba| lba.checked_mul(SECTOR))
-            .ok_or(Error::DiskSize)?;
-        let len = count.checked_mul(entry_size).ok_or(Error::Unsupported)?;
-        let entries = disk.get(start..start + len).ok_or(Error::DiskSize)?;
-        if crc32(entries) != le32(h, 88) {
-            return Err(Error::EntriesCrc);
-        }
+        // At most a 4 MiB entry array: far beyond any real table.
+        let entries_len = count
+            .checked_mul(entry_size)
+            .filter(|&n| n <= 4 << 20)
+            .ok_or(Error::Unsupported)?;
         let mut guid = [0u8; 16];
         guid.copy_from_slice(&h[56..72]);
         Ok(Self {
             disk_guid: Guid::from_uefi_bytes(guid),
             first_usable: le64(h, 40),
             last_usable: le64(h, 48),
-            entries,
+            entries_lba: le64(h, 72),
+            entries_len,
             entry_size,
+            entries_crc: le32(h, 88),
+        })
+    }
+}
+
+impl<'a> Table<'a> {
+    /// Reads and validates the primary table of `disk`.
+    pub fn read(disk: &'a [u8]) -> Result<Self, Error> {
+        if disk.len() < lba_offset(2) {
+            return Err(Error::DiskSize);
+        }
+        let h = PrimaryHeader::read(&disk[SECTOR..2 * SECTOR])?;
+        let start = usize::try_from(h.entries_lba)
+            .ok()
+            .and_then(|lba| lba.checked_mul(SECTOR))
+            .ok_or(Error::DiskSize)?;
+        let entries = disk
+            .get(start..start + h.entries_len)
+            .ok_or(Error::DiskSize)?;
+        Self::from_parts(&h, entries)
+    }
+
+    /// The table of header `h` with its entry array `entries`, checked
+    /// against the header's CRC.
+    pub fn from_parts(h: &PrimaryHeader, entries: &'a [u8]) -> Result<Self, Error> {
+        let entries = entries.get(..h.entries_len).ok_or(Error::DiskSize)?;
+        if crc32(entries) != h.entries_crc {
+            return Err(Error::EntriesCrc);
+        }
+        Ok(Self {
+            disk_guid: h.disk_guid,
+            first_usable: h.first_usable,
+            last_usable: h.last_usable,
+            entries,
+            entry_size: h.entry_size,
         })
     }
 

@@ -25,6 +25,7 @@ devtree = { path = "../lib/devtree" }
 pci = { path = "../sys/pci" }
 acpi = { path = "../sys/acpi" }
 driver-table = { path = "table" }
+storage = { path = "../sys/storage" }
 virtio-random = { path = "../drivers/virtio-random" }
 demangle = { path = "../lib/demangle" }
 efi = { path = "../boot/efi" }

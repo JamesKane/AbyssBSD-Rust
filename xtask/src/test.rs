@@ -247,10 +247,14 @@ fn boot(case: &BootCase, release: bool, verbose: bool) -> Result<std::result::Re
         disk
     };
     let log = disk.with_file_name(format!("boot-{}.log", case.name));
+    // A blank 16 MiB disk the storage tests may write (vtbd1).
+    let scratch = disk.with_file_name(format!("scratch-{}.img", case.name));
+    std::fs::File::create(&scratch)?.set_len(16 << 20)?;
     let vm = Vm {
         el2: case.el2,
         test_devices: true,
         allow_reset: case.warm_reset,
+        extra_disk: Some(scratch),
         ..Vm::new(case.vmm, case.arch, disk)
     };
     // Emulated aarch64 firmware is slow to start; leave generous headroom.

@@ -96,6 +96,7 @@ dependencies = [
  "devtree",
  "pci",
  "virtio",
+ "virtio-blk",
  "virtio-random",
 ]
 
@@ -176,6 +177,7 @@ dependencies = [
  "pt",
  "regs",
  "sched",
+ "storage",
  "sync",
  "sysctl",
  "uart-16550",
@@ -240,6 +242,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "storage"
+version = "0.0.0"
+dependencies = [
+ "bus",
+ "gpt",
+ "sched",
+ "sync",
+]
+
+[[package]]
 name = "sync"
 version = "0.0.0"
 dependencies = [
@@ -281,6 +293,20 @@ dependencies = [
  "pci",
  "regs",
  "sched",
+ "vm",
+]
+
+[[package]]
+name = "virtio-blk"
+version = "0.0.0"
+dependencies = [
+ "bus",
+ "devtree",
+ "irq",
+ "sched",
+ "storage",
+ "sync",
+ "virtio",
  "vm",
 ]
 

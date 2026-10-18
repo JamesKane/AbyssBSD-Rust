@@ -1649,8 +1649,8 @@ ktest! {
                 assert!(recorded.contains(&l.as_str()), "{l:?} not in FreeBSD's recording");
             }
             assert!(lines.iter().any(|l| l.ends_with("handle=\\_SB_.PC00.ISA_")), "isab's ACPI handle");
-            // The virtio transports and the entropy device on its
-            // transport, line for line (block devices wait for vtblk).
+            // The virtio transports and the devices on them (vtblk0, vtrnd0,
+            // vtblk1), line for line.
             let full: alloc::vec::Vec<&str> =
                 include_str!("../../tests/corpus/freebsd/bhyve/devinfo-rv.txt")
                     .lines()
@@ -1682,10 +1682,9 @@ ktest! {
                 kprintln!("pci0: {l}");
                 assert!(full.contains(&l.as_str()), "{l:?} not in FreeBSD's recording");
                 for v in m.children(c, &s) {
-                    if m.nameunit(v, &s).as_deref() == Some("vtrnd0") {
-                        let l = line(v);
-                        assert!(full.contains(&l.as_str()), "{l:?} not in FreeBSD's recording");
-                    }
+                    let l = line(v);
+                    kprintln!("pci0:   {l}");
+                    assert!(full.contains(&l.as_str()), "{l:?} not in FreeBSD's recording");
                 }
             }
             assert!(transports >= 2, "virtio_pci attached to the virtio functions");
@@ -1867,5 +1866,80 @@ ktest! {
         assert!(buf.iter().any(|&b| b != 0));
         kprintln!("detach freed {} KiB of device mappings; re-attached and read", freed / 1024);
         let _ = m.take_events();
+    }
+}
+
+ktest! {
+    fn vtblk_reads_the_boot_disk_and_its_gpt() {
+        let s = cx();
+        let names = storage::disks();
+        kprintln!("disks: {}", names.join(" "));
+        let boot = storage::find("vtbd0").expect("vtbd0");
+        assert_eq!(boot.sector_size(), 512);
+        // The protective MBR's signature, then the GPT header.
+        let head = boot.read(&s, 0, 1024).expect("read");
+        assert_eq!(&head[510..512], &[0x55, 0xaa], "MBR signature");
+        assert_eq!(&head[512..520], b"EFI PART", "GPT header");
+        // The ESP was found and published as a partition.
+        let esp = storage::find("vtbd0p1").expect("vtbd0p1, the ESP");
+        let boot_sector = esp.read(&s, 0, 512).expect("ESP boot sector");
+        assert_eq!(&boot_sector[510..512], &[0x55, 0xaa], "FAT boot sector");
+        assert_eq!(boot_sector[11..13], 512u16.to_le_bytes(), "FAT bytes per sector");
+        // Requests are checked: misaligned and past the end are refused.
+        assert_eq!(boot.read(&s, 3, 512), Err(storage::BioError::Invalid));
+        assert_eq!(boot.read(&s, boot.bytes(), 512), Err(storage::BioError::Invalid));
+        // A large read goes in several requests.
+        let big = boot.read(&s, 0, 1 << 20).expect("1 MiB");
+        assert_eq!(&big[..1024], &head[..]);
+    }
+}
+
+ktest! {
+    fn vtblk_writes_and_reads_back() {
+        let s = cx();
+        let scratch = storage::disks()
+            .iter()
+            .filter_map(|n| storage::find(n))
+            .find(|d| d.bytes() == 16 << 20 && !d.name().contains('p'))
+            .expect("the 16 MiB scratch disk");
+        // Patterns at the start, across a 64 KiB boundary, and at the end.
+        let mut seed = crate::time::counter() | 1;
+        let mut pattern = |n: usize| -> alloc::vec::Vec<u8> {
+            (0..n)
+                .map(|_| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    seed.to_le_bytes()[0]
+                })
+                .collect()
+        };
+        let end = scratch.bytes();
+        for (at, len) in [(0, 4096), (65536 - 1024, 8192), (end - 512 * 300, 512 * 300)] {
+            let data = pattern(len);
+            scratch.write(&s, at, &data).expect("write");
+            assert_eq!(scratch.read(&s, at, len).expect("read back"), data, "at {at:#x}");
+        }
+        scratch.flush(&s).expect("flush");
+        // Many requests in flight at once, from several threads.
+        let threads: alloc::vec::Vec<_> = (0..4u64)
+            .map(|t| {
+                let d = alloc::sync::Arc::clone(&scratch);
+                sched::spawn("vtblk-test", sched::Priority::KERNEL, move |s| {
+                    for i in 0..64u64 {
+                        let at = (t * 64 + i) * 4096;
+                        let data = alloc::vec![(t * 64 + i).to_le_bytes()[0]; 4096];
+                        d.write(s, at, &data).expect("write");
+                        assert_eq!(d.read(s, at, 4096).expect("read"), data);
+                    }
+                })
+                .unwrap()
+            })
+            .collect();
+        for t in threads {
+            t.join(&s);
+        }
+        assert_eq!(storage::bio::dropped(), 0, "no request was dropped uncompleted");
+        kprintln!("{}: {} MiB scratch disk written and read back", scratch.name(), scratch.bytes() >> 20);
     }
 }
