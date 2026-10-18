@@ -560,6 +560,75 @@ ktest! {
     }
 }
 
+extern "C" fn yield_between() {
+    sched::yield_now();
+}
+
+ktest! {
+    fn fpu_state_survives_switches() {
+        use alloc::vec::Vec;
+        // Four FP threads share one CPU, so every yield switches between
+        // them; each checks its registers still hold its own pattern.
+        let threads: Vec<_> = (0..4u8)
+            .map(|id| {
+                sched::Builder::new("fpu")
+                    .bind(hal::CpuId::BOOT)
+                    .fpu()
+                    .spawn(move || fpu_rounds(id))
+                    .expect("spawn")
+            })
+            .collect();
+        for t in &threads {
+            t.join();
+        }
+    }
+}
+
+fn fpu_rounds(id: u8) {
+    for round in 0..50u8 {
+        let mut pattern = [0u8; 512];
+        for (i, b) in pattern.iter_mut().enumerate() {
+            *b = id.wrapping_mul(97) ^ round.wrapping_mul(13) ^ i.to_le_bytes()[0];
+        }
+        let mut out = [0u8; 512];
+        #[cfg(target_arch = "x86_64")]
+        {
+            // SAFETY: this thread has FP state; buffers are 512 bytes.
+            unsafe { arch::fpu::load_call_store(&pattern, &mut out, yield_between) };
+            let n = arch::fpu::compared_bytes();
+            for r in 0..16 {
+                let s = r * 32;
+                assert_eq!(
+                    &out[s..s + n],
+                    &pattern[s..s + n],
+                    "fpu {id}: register {r} changed"
+                );
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            let vl = arch::fpu::vector_length();
+            let sve_pattern: alloc::vec::Vec<u8> = (0..32 * vl)
+                .map(|i: usize| id.wrapping_mul(31) ^ round ^ i.to_le_bytes()[0].rotate_left(3))
+                .collect();
+            let mut sve_out = alloc::vec![0u8; 32 * vl];
+            // SAFETY: this thread has FP state; buffers are sized as
+            // documented.
+            unsafe {
+                arch::fpu::load_call_store(
+                    &pattern,
+                    &mut out,
+                    &sve_pattern,
+                    &mut sve_out,
+                    yield_between,
+                );
+            }
+            assert_eq!(out, pattern, "fpu {id}: V registers changed");
+            assert_eq!(sve_out, sve_pattern, "fpu {id}: Z registers changed");
+        }
+    }
+}
+
 /// A small fixed buffer for formatting in tests.
 struct Buf {
     bytes: [u8; 128],

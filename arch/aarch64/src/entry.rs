@@ -79,11 +79,25 @@ abyss_ap_start:
 
     adr x9, abyss_el2_vectors
     msr vbar_el2, x9
+    /*
+     * HCR_EL2 first: firmware may have left E2H (VHE) set, which changes
+     * the layout of CPTR_EL2 and CNTHCTL_EL2 programmed below.
+     */
+    ldr x9, ={hcr}
+    msr hcr_el2, x9
+    isb
     mov x9, #3                     /* EL1PCTEN | EL1PCEN */
     msr cnthctl_el2, x9
     msr cntvoff_el2, xzr
-    mov x9, #0x33ff                /* CPTR_EL2: RES1 bits only, no traps */
+    mov x9, #0x32ff                /* CPTR_EL2: RES1 bits, no traps (TZ clear: SVE allowed) */
     msr cptr_el2, x9
+    /* SVE: let EL1 use the largest vector length (ZCR_EL2.LEN = max). */
+    mrs x9, id_aa64pfr0_el1
+    ubfx x9, x9, #32, #4
+    cbz x9, 6f
+    mov x9, #0x1ff
+    msr S3_4_C1_C2_0, x9
+6:
     msr hstr_el2, xzr
     msr vttbr_el2, xzr
     mrs x9, midr_el1
@@ -100,8 +114,6 @@ abyss_ap_start:
     msr S3_4_C12_C9_5, x9
     isb
 2:
-    ldr x9, ={hcr}
-    msr hcr_el2, x9
     ldr x9, ={sctlr_res1}
     msr sctlr_el1, x9
     mov x9, #0x3c5                 /* EL1h, DAIF masked */

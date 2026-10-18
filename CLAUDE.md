@@ -51,6 +51,7 @@ that runs unmodified FreeBSD userland. Read `docs/ROADMAP.md` for the current ph
 cargo xtask test --tier unit          # host unit tests (bare `cargo test` does the same)
 cargo xtask test --tier boot          # test loader + kernel in QEMU: x86_64, aarch64 (EL1, EL2), warm reset
 cargo xtask --remote test --tier boot --arch x86_64   # the same on the server, plus bhyve
+cargo xtask test --tier stress --duration 600   # P2 stress test, 64 threads on -smp 8, both arches
 cargo xtask run --arch aarch64        # interactive QEMU (Ctrl-A X quits); --cmdline abyss.halt=1 keeps it up
 cargo xtask check                     # fmt, clippy for host and UEFI targets, policy
 cargo xtask syscallgen --check        # generated syscall table matches ../freebsd-src

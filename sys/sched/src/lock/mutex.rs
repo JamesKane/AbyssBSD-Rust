@@ -175,9 +175,15 @@ impl MutexCore {
             }
             None => self.owner.store(0, Ordering::Release),
         }
+        // Waiters left behind lend their priority to the new owner.
+        let remaining = q.iter().map(|t| t.inner.lock().priority).min();
         drop(q);
         unlend(me);
         if let Some(t) = next {
+            if let Some(p) = remaining {
+                // SAFETY: we hold a reference to the new owner.
+                unsafe { propagate(Arc::as_ptr(&t), p) };
+            }
             crate::make_runnable(t);
         }
         hal::irq::restore(irq);

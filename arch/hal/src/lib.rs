@@ -137,6 +137,75 @@ pub fn wait_for_interrupt() {
     }
 }
 
+/// FP/SIMD register state, saved and restored for threads that use it
+/// (the kernel itself is soft-float).
+pub mod fpu {
+    /// Bytes in a save area.
+    #[must_use]
+    pub fn area_size() -> usize {
+        #[cfg(target_os = "none")]
+        // SAFETY: defined by the linked arch crate with this signature.
+        return unsafe { super::abyss_hal_fpu_size() };
+        #[cfg(not(target_os = "none"))]
+        0
+    }
+
+    /// The alignment save areas need.
+    pub const ALIGN: usize = 64;
+
+    /// Fills `area` with the initial state.
+    ///
+    /// # Safety
+    ///
+    /// `area` is [`area_size`] writable bytes aligned to [`ALIGN`].
+    pub unsafe fn init(area: *mut u8) {
+        #[cfg(target_os = "none")]
+        // SAFETY: per the contract.
+        unsafe {
+            super::abyss_hal_fpu_init(area);
+        }
+        #[cfg(not(target_os = "none"))]
+        let _ = area;
+    }
+
+    /// Saves this CPU's FP/SIMD registers into `area`.
+    ///
+    /// # Safety
+    ///
+    /// As for [`init`].
+    pub unsafe fn save(area: *mut u8) {
+        #[cfg(target_os = "none")]
+        // SAFETY: per the contract.
+        unsafe {
+            super::abyss_hal_fpu_save(area);
+        }
+        #[cfg(not(target_os = "none"))]
+        let _ = area;
+    }
+
+    /// Loads this CPU's FP/SIMD registers from `area`.
+    ///
+    /// # Safety
+    ///
+    /// As for [`init`]; `area` holds a state from [`init`] or [`save`].
+    pub unsafe fn restore(area: *const u8) {
+        #[cfg(target_os = "none")]
+        // SAFETY: per the contract.
+        unsafe {
+            super::abyss_hal_fpu_restore(area);
+        }
+        #[cfg(not(target_os = "none"))]
+        let _ = area;
+    }
+}
+
+/// Signature of `abyss_hal_fpu_size`.
+pub type FpuSizeFn = fn() -> usize;
+/// Signature of `abyss_hal_fpu_init`, `abyss_hal_fpu_save`.
+pub type FpuAreaFn = unsafe fn(*mut u8);
+/// Signature of `abyss_hal_fpu_restore`.
+pub type FpuRestoreFn = unsafe fn(*const u8);
+
 /// Signature of `abyss_hal_context_init`.
 pub type ContextInitFn = fn(&mut Context, u64, ThreadEntry, usize);
 /// Signature of `abyss_hal_cpu_local`.
@@ -163,6 +232,10 @@ unsafe extern "Rust" {
     fn abyss_hal_cpu_local() -> *mut ();
     fn abyss_hal_set_cpu_local(p: *mut ());
     fn abyss_hal_wait_for_interrupt();
+    fn abyss_hal_fpu_size() -> usize;
+    fn abyss_hal_fpu_init(area: *mut u8);
+    fn abyss_hal_fpu_save(area: *mut u8);
+    fn abyss_hal_fpu_restore(area: *const u8);
 }
 
 #[cfg(target_os = "none")]

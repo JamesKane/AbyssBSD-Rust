@@ -26,6 +26,8 @@ mod entry;
 #[cfg(target_os = "none")]
 pub mod fixup;
 #[cfg(target_os = "none")]
+pub mod fpu;
+#[cfg(target_os = "none")]
 pub mod gic;
 #[cfg(target_os = "none")]
 pub mod mmu;
@@ -130,6 +132,10 @@ mod hal_hooks {
     const _: hal::CpuLocalFn = abyss_hal_cpu_local;
     const _: hal::SetCpuLocalFn = abyss_hal_set_cpu_local;
     const _: hal::WaitForInterruptFn = abyss_hal_wait_for_interrupt;
+    const _: hal::FpuSizeFn = abyss_hal_fpu_size;
+    const _: hal::FpuAreaFn = abyss_hal_fpu_init;
+    const _: hal::FpuAreaFn = abyss_hal_fpu_save;
+    const _: hal::FpuRestoreFn = abyss_hal_fpu_restore;
 
     #[unsafe(no_mangle)]
     fn abyss_hal_irq_disable() -> bool {
@@ -169,5 +175,37 @@ mod hal_hooks {
     #[unsafe(no_mangle)]
     fn abyss_hal_wait_for_interrupt() {
         crate::cpu::wait_for_interrupt();
+    }
+
+    #[unsafe(no_mangle)]
+    fn abyss_hal_fpu_size() -> usize {
+        crate::fpu::area_size()
+    }
+
+    /// # Safety
+    ///
+    /// See `hal::fpu::init`.
+    #[unsafe(no_mangle)]
+    unsafe fn abyss_hal_fpu_init(area: *mut u8) {
+        // SAFETY: the hal's contract is the arch function's.
+        unsafe { crate::fpu::init_area(area) }
+    }
+
+    /// # Safety
+    ///
+    /// See `hal::fpu::save`.
+    #[unsafe(no_mangle)]
+    unsafe fn abyss_hal_fpu_save(area: *mut u8) {
+        // SAFETY: as above.
+        unsafe { crate::fpu::save(area) }
+    }
+
+    /// # Safety
+    ///
+    /// See `hal::fpu::restore`.
+    #[unsafe(no_mangle)]
+    unsafe fn abyss_hal_fpu_restore(area: *const u8) {
+        // SAFETY: as above.
+        unsafe { crate::fpu::restore(area) }
     }
 }

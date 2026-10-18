@@ -15,6 +15,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 const GICD_CTLR: usize = 0x0;
 const GICD_TYPER: usize = 0x4;
+const GICD_IIDR: usize = 0x8;
 const GICD_IGROUPR: usize = 0x80;
 const GICD_ISENABLER: usize = 0x100;
 const GICD_ICENABLER: usize = 0x180;
@@ -100,6 +101,13 @@ fn wait_rwp(gicd: u64) {
 /// The affinity fields of an MPIDR, in IROUTER / GICR_TYPER order.
 fn affinity(mpidr: u64) -> u64 {
     mpidr & 0xff_00ff_ffff
+}
+
+/// The distributor's implementer and product (`GICD_IIDR`), which keys
+/// interrupt-controller errata.
+#[must_use]
+pub fn distributor_iidr() -> u32 {
+    rd(GICD.load(Ordering::Relaxed), GICD_IIDR)
 }
 
 /// Finds the redistributor for the CPU with `mpidr` in the region at

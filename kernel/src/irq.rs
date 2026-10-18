@@ -269,8 +269,9 @@ pub(crate) fn init_boot_cpu() {
 
     crate::time::init_clock(arch::timer::frequency());
     kprintln!(
-        "irq: GICv{} distributor, {lines} interrupt lines, timer PPI {}",
+        "irq: GICv{} distributor (IIDR {:#010x}), {lines} interrupt lines, timer PPI {}",
         gicd.version,
+        gic::distributor_iidr(),
         TIMER_PPI.load(Ordering::Relaxed)
     );
 }

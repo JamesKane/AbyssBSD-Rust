@@ -50,7 +50,7 @@ AbyssBSD-Rust/
 │   └── loader-efi/            # our UEFI application (PE/COFF)
 ├── kernel/                    # the kernel binary crate: glue + init order only
 ├── arch/
-│   ├── hal/                   # arch-neutral traits (P2; P1 uses a mirrored module interface)
+│   ├── hal/                   # arch-neutral CPU primitives, bound at link time
 │   ├── x86_64/
 │   ├── aarch64/
 │   └── riscv64/               # Day 2
@@ -102,6 +102,16 @@ AbyssBSD-Rust/
 AMD64 and ARM64 differ in almost every privileged mechanism. The seam is defined in `arch/hal` as
 traits and associated types, with one implementation per ISA. Selection is compile-time (static
 dispatch) and costs nothing at runtime.
+
+**As built (Phase 2).** `arch/hal` declares `extern "Rust"` hooks that the one linked
+`arch/<isa>` crate defines (each definition is checked against a function-pointer type in
+`hal`). They cover what arch-neutral crates need today: interrupt masking, the CPU number, the
+kernel's per-CPU pointer, context creation and switching (`hal::Context`, 16 words),
+waiting for an interrupt, and FP/SIMD save areas (`hal::fpu`). On the host the hooks are inert,
+so `sys/*` crates still run their unit tests. The kernel crate reaches everything else (page
+tables, trap frames, interrupt controllers, timers, SMP start-up) through the concrete arch
+crate's modules, which `arch-x86_64` and `arch-aarch64` mirror name for name. The trait sketch
+below remains the shape the seam grows into as more of it is shared.
 
 ```rust
 pub trait Arch: 'static {
@@ -199,6 +209,13 @@ Modeled on FreeBSD's lock classes, with Rust guards and lock ordering checked in
 | `Atomic*`, `SeqLock` | `atomic(9)`, `seqc` | Timekeeping, stats |
 | `WaitQueue`, `Condvar` | `sleepqueue`, `cv` | Sleep/wakeup with signal interruptibility as a typed result |
 
+**As built (Phase 2).** `SpinLock` (interrupt-masking ticket lock) and `Once` live in
+`sys/sync`. The blocking locks (`Mutex`, `RwLock`, `SxLock`, `Epoch`) and `WaitQueue` live in
+`sys/sched` (`sched::lock`), because they are built on the scheduler. Each lock belongs to a
+`LockClass` with a declared level and sleep rule. The witness checks every acquisition and every
+sleep at runtime, in all builds. The compile-time level tokens and context tokens below are not
+built yet.
+
 - **Lock levels as types.** Each lock is declared with a level (`Mutex<L3, T>`). Acquiring a lock
   requires a token proving that only lower levels are held. Most ordering bugs fail at compile time.
 - **Runtime witness** (`WITNESS` equivalent) in debug builds catches what the types cannot, such as
@@ -228,6 +245,20 @@ We follow FreeBSD's Mach-derived design, adapted to Rust ownership:
   `VmObject`).
 
 ### 5.3 Scheduling (`sys/sched`)
+
+**As built (Phase 2):**
+
+- **Run queues:** one per CPU, 64 FIFO levels with a bitmap. Idle CPUs steal from the busiest
+  CPU. A woken thread goes to its last CPU, or to the least-loaded CPU, preferring higher
+  capacity.
+- **Priority classes:** fixed priorities below 120 (interrupt, real-time, kernel).
+  Time-sharing threads, from 120 up, take their priority from decayed CPU usage plus a waiting
+  bonus, which bounds how long any of them can starve. The idle class is at the bottom.
+- **Preemption:** time slices are 10 ms on the per-CPU one-shot timer, and an idle CPU stops
+  its timer (tickless).
+- **Switching rule:** a thread is queued only once it has left its CPU, so a switching CPU
+  never waits on another.
+- **Topology:** read from the PPTT or CPUID, with capacities set by core type.
 
 - A ULE-inspired design: per-CPU run queues, interactivity scoring, timeshare/realtime/idle classes,
   and topology-aware load balancing.

@@ -40,7 +40,7 @@ use alloc::sync::Arc;
 use core::cell::Cell;
 use core::fmt;
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU16, AtomicUsize, Ordering};
 
 use hal::{CpuId, MAX_CPUS};
 use sync::{Once, SpinLock};
@@ -108,6 +108,8 @@ pub struct PerCpu {
     /// The running thread's priority, for remote wakeups deciding whether
     /// to preempt.
     current_prio: AtomicU8,
+    /// Relative capacity (1024 for the fastest CPUs).
+    capacity: AtomicU16,
     /// Nesting depth of preemption-disabled sections.
     preempt_off: Cell<u32>,
 }
@@ -177,6 +179,7 @@ fn new_percpu(id: CpuId) -> &'static mut PerCpu {
         runq: SpinLock::new(RunQueue::new()),
         need_resched: AtomicBool::new(false),
         current_prio: AtomicU8::new(Priority::KERNEL.get()),
+        capacity: AtomicU16::new(1024),
         preempt_off: Cell::new(0),
     }))
 }
@@ -277,6 +280,76 @@ pub(crate) fn current_arc() -> Arc<Thread> {
 pub enum SpawnError {
     /// No kernel stack.
     NoStack,
+    /// No memory for the FP/SIMD save area.
+    NoFpuArea,
+}
+
+/// Options for a new thread; see [`Builder::spawn`].
+#[derive(Clone, Copy, Debug)]
+pub struct Builder<'a> {
+    name: &'a str,
+    priority: Priority,
+    bound: Option<CpuId>,
+    fpu: bool,
+}
+
+impl<'a> Builder<'a> {
+    /// A kernel thread named `name` at [`Priority::KERNEL`], unbound,
+    /// without FP/SIMD state.
+    #[must_use]
+    pub const fn new(name: &'a str) -> Self {
+        Self {
+            name,
+            priority: Priority::KERNEL,
+            bound: None,
+            fpu: false,
+        }
+    }
+
+    /// Runs at `p`.
+    #[must_use]
+    pub const fn priority(mut self, p: Priority) -> Self {
+        self.priority = p;
+        self
+    }
+
+    /// Runs only on `cpu`.
+    #[must_use]
+    pub const fn bind(mut self, cpu: CpuId) -> Self {
+        self.bound = Some(cpu);
+        self
+    }
+
+    /// Gives the thread FP/SIMD registers of its own, saved and restored
+    /// across switches.
+    #[must_use]
+    pub const fn fpu(mut self) -> Self {
+        self.fpu = true;
+        self
+    }
+
+    /// Starts the thread running `f`.
+    pub fn spawn(self, f: impl FnOnce() + Send + 'static) -> Result<Arc<Thread>, SpawnError> {
+        let fpu = if self.fpu {
+            Some(thread::FpuArea::new().ok_or(SpawnError::NoFpuArea)?)
+        } else {
+            None
+        };
+        let stack = platform().alloc_stack().ok_or(SpawnError::NoStack)?;
+        let here = hal::cpu_id();
+        let t = Arc::new(Thread::with_fpu(
+            self.name,
+            self.priority,
+            self.bound.unwrap_or(here),
+            Some(stack),
+            Some(Box::new(f)),
+            false,
+            fpu,
+        ));
+        t.inner.lock().bound = self.bound;
+        make_runnable(Arc::clone(&t));
+        Ok(t)
+    }
 }
 
 /// Starts a kernel thread running `f` at `priority`.
@@ -285,7 +358,7 @@ pub fn spawn(
     priority: Priority,
     f: impl FnOnce() + Send + 'static,
 ) -> Result<Arc<Thread>, SpawnError> {
-    spawn_on(name, priority, None, f)
+    Builder::new(name).priority(priority).spawn(f)
 }
 
 /// Starts a kernel thread bound to `cpu` (or unbound with `None`).
@@ -295,19 +368,26 @@ pub fn spawn_on(
     bound: Option<CpuId>,
     f: impl FnOnce() + Send + 'static,
 ) -> Result<Arc<Thread>, SpawnError> {
-    let stack = platform().alloc_stack().ok_or(SpawnError::NoStack)?;
-    let here = hal::cpu_id();
-    let t = Arc::new(Thread::new(
-        name,
-        priority,
-        bound.unwrap_or(here),
-        Some(stack),
-        Some(Box::new(f)),
-        false,
-    ));
-    t.inner.lock().bound = bound;
-    make_runnable(Arc::clone(&t));
-    Ok(t)
+    let b = Builder::new(name).priority(priority);
+    match bound {
+        Some(c) => b.bind(c),
+        None => b,
+    }
+    .spawn(f)
+}
+
+/// Sets `cpu`'s relative capacity (1024 = the fastest CPUs).
+pub fn set_capacity(cpu: CpuId, capacity: u16) {
+    if let Some(c) = self::cpu(cpu) {
+        c.capacity.store(capacity, Ordering::Relaxed);
+    }
+}
+
+/// Whether a CPU with (`load`, `capacity`) is a better place for a thread
+/// than one with (`best_load`, `best_capacity`): less loaded, or as loaded
+/// and faster.
+fn better_cpu(load: usize, capacity: u16, best_load: usize, best_capacity: u16) -> bool {
+    load < best_load || (load == best_load && capacity > best_capacity)
 }
 
 /// Picks the CPU a waking thread should run on: its binding, else the
@@ -321,19 +401,23 @@ fn choose_cpu(last: CpuId, bound: Option<CpuId>) -> CpuId {
         let busy = c.current_prio.load(Ordering::Relaxed) != Priority::IDLE_THREAD.get();
         c.runq.lock().len() + usize::from(busy)
     };
+    let capacity = |c: &PerCpu| c.capacity.load(Ordering::Relaxed);
     let mut best = last;
-    let mut best_load = cpu(last).map_or(usize::MAX, load);
-    if best_load == 0 {
+    let (mut best_load, mut best_capacity) =
+        cpu(last).map_or((usize::MAX, 0), |c| (load(c), capacity(c)));
+    // Its last CPU, if idle and of the fastest class: warm caches.
+    if best_load == 0 && best_capacity == 1024 {
         return best;
     }
     for i in 0..online_cpus() {
         let Some(c) = cpu(CpuId(u32::try_from(i).unwrap_or(0))) else {
             continue;
         };
-        let l = load(c);
-        if l < best_load {
+        let (l, cap) = (load(c), capacity(c));
+        if better_cpu(l, cap, best_load, best_capacity) {
             best = c.id;
             best_load = l;
+            best_capacity = cap;
         }
     }
     best
@@ -616,9 +700,13 @@ pub(crate) fn switch_away() {
     // CPU runs it (`on_cpu` was clear). `cur_ptr` stays valid: the run
     // queue, a wait queue, or `prev_owned` holds a reference.
     unsafe {
+        if let Some(f) = &(*cur_ptr).fpu {
+            hal::fpu::save(f.as_ptr());
+        }
         hal::switch((*cur_ptr).context.get(), (*next_ptr).context.get());
     }
     finish_switch();
+    restore_fpu();
     platform().rearm_timer();
 }
 
@@ -691,11 +779,22 @@ fn finish_switch() {
     }
 }
 
+/// Loads the current thread's FP/SIMD registers, if it has its own.
+fn restore_fpu() {
+    if let Some(f) = &current().fpu {
+        // SAFETY: the area holds this thread's state, saved when it last
+        // left a CPU (or the initial state); `on_cpu` ordered that save
+        // before this load.
+        unsafe { hal::fpu::restore(f.as_ptr()) };
+    }
+}
+
 /// The first code a new thread runs.
 pub(crate) extern "C" fn thread_start(_: usize) -> ! {
     // The switch that got here did not return into `switch_away`, so do
     // its epilogue: release the previous thread and arm the slice timer.
     finish_switch();
+    restore_fpu();
     platform().rearm_timer();
     let entry = current().entry.lock().take();
     hal::irq::enable();
@@ -771,4 +870,17 @@ pub fn snapshot() -> impl Iterator<Item = CpuSnapshot> {
             queued: c.runq.lock().len(),
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::better_cpu;
+
+    #[test]
+    fn placement_prefers_idle_then_fast() {
+        assert!(better_cpu(0, 512, 1, 1024), "idle little beats busy big");
+        assert!(better_cpu(1, 1024, 1, 512), "equal load: faster wins");
+        assert!(!better_cpu(1, 512, 1, 1024));
+        assert!(!better_cpu(2, 1024, 1, 512), "load first");
+    }
 }

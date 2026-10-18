@@ -23,6 +23,7 @@ use arch_x86_64 as arch;
 mod console;
 mod acpi;
 mod boot;
+mod errata;
 mod firmware;
 mod irq;
 mod mm;
@@ -36,6 +37,7 @@ mod symbols;
 mod tests;
 mod threads;
 mod time;
+mod topology;
 
 use addr::PhysAddr;
 
@@ -70,9 +72,12 @@ fn kmain(boot_info: PhysAddr) -> ! {
     firmware::init(info, tables.firmware_root);
     kprintln!("kernel page tables live (W^X, DMAP, no identity map)");
     irq::init_boot_cpu();
+    threads::init_fpu(true);
     threads::init();
+    topology::record_this_cpu(hal::CpuId::BOOT);
     hal::irq::enable();
     smp::start_cpus();
+    topology::summarize();
 
     #[cfg(feature = "ktest")]
     tests::run();

@@ -174,6 +174,38 @@ impl fmt::Debug for Name {
 
 type Entry = Box<dyn FnOnce() + Send>;
 
+/// A thread's saved FP/SIMD registers (`hal::fpu`).
+pub(crate) struct FpuArea {
+    ptr: core::ptr::NonNull<u8>,
+    layout: core::alloc::Layout,
+}
+
+impl FpuArea {
+    /// A save area holding the initial state, or `None` when out of
+    /// memory.
+    pub(crate) fn new() -> Option<Self> {
+        let layout =
+            core::alloc::Layout::from_size_align(hal::fpu::area_size().max(16), hal::fpu::ALIGN)
+                .ok()?;
+        // SAFETY: nonzero size.
+        let ptr = core::ptr::NonNull::new(unsafe { alloc::alloc::alloc(layout) })?;
+        // SAFETY: a fresh allocation of the right size and alignment.
+        unsafe { hal::fpu::init(ptr.as_ptr()) };
+        Some(Self { ptr, layout })
+    }
+
+    pub(crate) fn as_ptr(&self) -> *mut u8 {
+        self.ptr.as_ptr()
+    }
+}
+
+impl Drop for FpuArea {
+    fn drop(&mut self) {
+        // SAFETY: allocated in `new` with this layout.
+        unsafe { alloc::alloc::dealloc(self.ptr.as_ptr(), self.layout) };
+    }
+}
+
 /// A kernel thread.
 pub struct Thread {
     tid: Tid,
@@ -199,10 +231,15 @@ pub struct Thread {
     /// Locks held, for the witness and priority un-lending. Only the
     /// thread itself touches it.
     pub(crate) held: UnsafeCell<crate::lock::witness::Held>,
+    /// FP/SIMD state, for threads that use it. Written by the CPU switching
+    /// the thread out, read by the one switching it in (the `on_cpu`
+    /// handoff orders the two).
+    pub(crate) fpu: Option<FpuArea>,
 }
 
-// SAFETY: `link` is protected by the owning list's lock, `context` by the
-// `on_cpu` handoff, and `held` is only touched by the thread itself (see
+// SAFETY: `link` is protected by the owning list's lock, `context` and
+// `fpu` by the `on_cpu` handoff, and `held` is only touched by the thread
+// itself (see
 // the field docs); `Inner::blocked_on` is read under the thread lock and
 // points at a mutex that outlives the wait; everything else is atomic or
 // locked.
@@ -220,6 +257,18 @@ impl Thread {
         stack: Option<Stack>,
         entry: Option<Entry>,
         idle: bool,
+    ) -> Self {
+        Self::with_fpu(name, priority, cpu, stack, entry, idle, None)
+    }
+
+    pub(crate) fn with_fpu(
+        name: &str,
+        priority: Priority,
+        cpu: CpuId,
+        stack: Option<Stack>,
+        entry: Option<Entry>,
+        idle: bool,
+        fpu: Option<FpuArea>,
     ) -> Self {
         let context = match &stack {
             Some(s) => hal::Context::init(s.top, crate::thread_start, 0),
@@ -251,6 +300,7 @@ impl Thread {
             runtime: AtomicU64::new(0),
             switches: AtomicU64::new(0),
             held: UnsafeCell::new(crate::lock::witness::Held::new()),
+            fpu,
         }
     }
 

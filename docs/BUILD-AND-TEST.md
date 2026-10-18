@@ -42,7 +42,7 @@ cargo xtask build   --arch <x86_64|aarch64|all> [--release] [--ktest]   # loader
 cargo xtask image   --arch <a> [--release] [--ktest] [--cmdline "..."]  # GPT disk, FAT32 ESP -> build/<arch>/
 cargo xtask run     --arch <a> [--release] [--ktest] [--cmdline "..."] [--smp N] [--mem SIZE]
                     [--gdb] [--display] [--el2] [--vmm qemu|bhyve]
-cargo xtask test    [--tier unit|boot|all] [--arch <a|all>] [--verbose]
+cargo xtask test    [--tier unit|boot|stress|all] [--arch <a|all>] [--duration S] [--verbose]
 cargo xtask check                                        # rustfmt, clippy (host, loader, kernel), policy
 cargo xtask policy                                       # path-only dependencies, SPDX headers
 cargo xtask syscallgen [--src ../freebsd-src] [--check]  # regenerate lib/abi syscall tables
@@ -65,6 +65,17 @@ Kernel command-line words understood so far:
 | `abyss.halt=1` | Halt at the end instead of powering off, so the framebuffer stays visible |
 | `abyss.qemu_exit=1` | Test kernels report their verdict as QEMU's exit status (set by `xtask test`) |
 | `abyss.test.warm_reset=1` | Test kernels warm-reset once to exercise the persistent log ring |
+| `abyss.stress=S` | Run the Phase 2 stress test for S seconds, then report and power off |
+
+`--tier stress` runs the Phase 2 stress test on both architectures with 8 CPUs and 2 GiB,
+for `--duration` seconds (default 600). It uses 64 threads doing lock ping-pong, ordered
+locking, sx locking, allocator churn, and timed sleeps. It passes when every thread made
+progress, the witness saw no violations, and heap, page, and kernel-stack accounting balance.
+The tier is not part of `all`. Boot tests run with 4 CPUs.
+
+Setting `ABYSS_QEMU_GDB=1` gives test VMs a gdb stub on `localhost:1234` without waiting
+at start, so you can attach to a hung run. Test images use KASLR, so subtract the slide the
+loader prints before symbolizing addresses.
 
 Planned for later phases:
 
