@@ -1,0 +1,12 @@
+[package]
+name = "uart-pl011"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+regs = { path = "../../lib/regs" }
+
+[lints]
+workspace = true

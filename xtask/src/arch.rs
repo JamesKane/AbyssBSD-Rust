@@ -47,6 +47,13 @@ impl Arch {
         }
     }
 
+    pub(crate) const fn kernel_target(self) -> &'static str {
+        match self {
+            Self::X86_64 => "x86_64-unknown-none",
+            Self::Aarch64 => "aarch64-unknown-none-softfloat",
+        }
+    }
+
     /// The removable-media boot path firmware looks for.
     pub(crate) const fn efi_boot_file(self) -> &'static str {
         match self {

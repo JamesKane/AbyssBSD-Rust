@@ -7,7 +7,42 @@ name = "abi"
 version = "0.0.0"
 
 [[package]]
+name = "acpi-tables"
+version = "0.0.0"
+
+[[package]]
+name = "addr"
+version = "0.0.0"
+
+[[package]]
+name = "arch-aarch64"
+version = "0.0.0"
+dependencies = [
+ "addr",
+ "pt",
+]
+
+[[package]]
+name = "arch-x86_64"
+version = "0.0.0"
+dependencies = [
+ "addr",
+ "pt",
+]
+
+[[package]]
+name = "bootproto"
+version = "0.0.0"
+dependencies = [
+ "addr",
+]
+
+[[package]]
 name = "crc"
+version = "0.0.0"
+
+[[package]]
+name = "demangle"
 version = "0.0.0"
 
 [[package]]
@@ -18,7 +53,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "elf"
+version = "0.0.0"
+
+[[package]]
 name = "fat"
+version = "0.0.0"
+
+[[package]]
+name = "fb-console"
+version = "0.0.0"
+dependencies = [
+ "font",
+]
+
+[[package]]
+name = "font"
 version = "0.0.0"
 
 [[package]]
@@ -34,6 +84,26 @@ name = "guid"
 version = "0.0.0"
 
 [[package]]
+name = "kernel"
+version = "0.0.0"
+dependencies = [
+ "addr",
+ "arch-aarch64",
+ "arch-x86_64",
+ "bootproto",
+ "demangle",
+ "efi",
+ "elf",
+ "fb-console",
+ "ktest",
+ "pt",
+ "regs",
+ "sync",
+ "uart-16550",
+ "uart-pl011",
+]
+
+[[package]]
 name = "ktest"
 version = "0.0.0"
 
@@ -41,15 +111,50 @@ version = "0.0.0"
 name = "loader-efi"
 version = "0.0.0"
 dependencies = [
+ "acpi-tables",
+ "addr",
+ "arch-aarch64",
+ "bootproto",
  "crc",
  "efi",
+ "elf",
  "guid",
  "ktest",
+ "pt",
 ]
+
+[[package]]
+name = "pt"
+version = "0.0.0"
+dependencies = [
+ "addr",
+]
+
+[[package]]
+name = "regs"
+version = "0.0.0"
+
+[[package]]
+name = "sync"
+version = "0.0.0"
 
 [[package]]
 name = "syscallgen"
 version = "0.0.0"
+
+[[package]]
+name = "uart-16550"
+version = "0.0.0"
+dependencies = [
+ "regs",
+]
+
+[[package]]
+name = "uart-pl011"
+version = "0.0.0"
+dependencies = [
+ "regs",
+]
 
 [[package]]
 name = "xtask"

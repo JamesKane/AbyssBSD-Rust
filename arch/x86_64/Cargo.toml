@@ -1,0 +1,13 @@
+[package]
+name = "arch-x86_64"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+addr = { path = "../../lib/addr" }
+pt = { path = "../../lib/pt" }
+
+[lints]
+workspace = true

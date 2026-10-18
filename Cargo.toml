@@ -2,27 +2,54 @@
 resolver = "3"
 members = [
     "xtask",
+    "arch/aarch64",
+    "arch/x86_64",
+    "boot/bootproto",
     "boot/efi",
     "boot/loader-efi",
+    "drivers/fb-console",
+    "drivers/uart-16550",
+    "drivers/uart-pl011",
+    "kernel",
     "lib/abi",
+    "lib/acpi-tables",
+    "lib/addr",
     "lib/crc",
+    "lib/demangle",
+    "lib/elf",
     "lib/fat",
+    "lib/font",
     "lib/gpt",
     "lib/guid",
     "lib/ktest",
+    "lib/pt",
+    "lib/regs",
+    "sys/sync",
     "tools/syscallgen",
 ]
 # Firmware and kernel binaries only build for their own targets; everything
 # else runs on the host and is what a bare `cargo test` exercises.
 default-members = [
     "xtask",
+    "boot/bootproto",
     "boot/efi",
+    "drivers/fb-console",
+    "drivers/uart-16550",
+    "drivers/uart-pl011",
     "lib/abi",
+    "lib/acpi-tables",
+    "lib/addr",
     "lib/crc",
+    "lib/demangle",
+    "lib/elf",
     "lib/fat",
+    "lib/font",
     "lib/gpt",
     "lib/guid",
     "lib/ktest",
+    "lib/pt",
+    "lib/regs",
+    "sys/sync",
     "tools/syscallgen",
 ]
 
@@ -47,6 +74,10 @@ cast_sign_loss = "warn"
 [profile.dev]
 panic = "abort"
 opt-level = 1
+
+# docs/ENGINEERING.md §1: the kernel is optimized even in debug builds.
+[profile.dev.package.kernel]
+opt-level = 2
 
 [profile.release]
 panic = "abort"

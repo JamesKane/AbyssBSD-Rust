@@ -1,13 +1,8 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! In-firmware tests: run under QEMU by `cargo xtask test --tier boot`.
+//! In-firmware tests: run under QEMU by `cargo xtask test --tier boot`
+//! before the loader boots the (test) kernel.
 
 use ktest::ktest;
-
-ktest! {
-    fn harness_runs() {
-        assert!(ktest::tests().count() >= 3);
-    }
-}
 
 ktest! {
     fn crc32_matches_host() {
@@ -20,10 +15,18 @@ ktest! {
         let st = super::SYSTEM_TABLE.load(core::sync::atomic::Ordering::Acquire);
         // SAFETY: `efi_main` stored the live system table before running tests.
         let system = unsafe { efi::SystemTable::from_raw(st) }.expect("system table");
-        let acpi = system
-            .configuration_tables()
-            .iter()
-            .any(|t| t.vendor_guid.get() == efi::tables::ACPI_20);
-        assert!(acpi, "no ACPI 2.0+ RSDP: AbyssBSD requires ACPI");
+        assert!(
+            system.configuration_table(efi::tables::ACPI_20).is_some(),
+            "no ACPI 2.0+ RSDP: AbyssBSD requires ACPI"
+        );
+    }
+}
+
+ktest! {
+    fn heap_allocates() {
+        let v: alloc::vec::Vec<u64> = (0..1000).collect();
+        assert_eq!(v.iter().sum::<u64>(), 499_500);
+        let b = alloc::boxed::Box::new([0u8; 9000]);
+        assert_eq!(b.len(), 9000);
     }
 }

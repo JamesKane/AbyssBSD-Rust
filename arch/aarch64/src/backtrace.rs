@@ -1,0 +1,30 @@
+// SPDX-License-Identifier: BSD-2-Clause
+//! Frame-record stack walking (AAPCS64 §6.2.3). The kernel is built with
+//! frame pointers; every read goes through
+//! [`probe_read`](crate::fixup::probe_read) so a corrupt chain ends the walk
+//! instead of faulting again.
+
+use crate::fixup::probe_read;
+
+/// Return addresses up the stack, starting from frame pointer `fp`.
+pub fn walk(fp: u64) -> impl Iterator<Item = u64> {
+    let mut fp = fp;
+    core::iter::from_fn(move || {
+        if fp == 0 || !fp.is_multiple_of(8) {
+            return None;
+        }
+        let next = probe_read(fp).ok()?;
+        let ret = probe_read(fp + 8).ok()?;
+        fp = if next > fp { next } else { 0 };
+        // The saved LR is the instruction after the call; step back into
+        // the call for symbolization.
+        (ret != 0).then_some(ret)
+    })
+    .take(64)
+}
+
+/// The current frame pointer.
+#[inline(always)]
+pub fn here() -> u64 {
+    crate::cpu::frame_pointer()
+}

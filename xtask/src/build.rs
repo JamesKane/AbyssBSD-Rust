@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! Building the firmware and kernel images.
+//! Building the loader and kernel images.
 
 use std::path::PathBuf;
 
@@ -11,7 +11,7 @@ use crate::util::{self, Result};
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Options {
     pub(crate) release: bool,
-    /// Build the in-image test runner instead of the normal boot path.
+    /// Build the in-image test runners instead of the normal boot path.
     pub(crate) ktest: bool,
 }
 
@@ -26,6 +26,19 @@ impl Options {
     fn profile_dir(self) -> &'static str {
         if self.release { "release" } else { "debug" }
     }
+
+    /// Test and normal builds use separate target directories so they do
+    /// not rebuild each other.
+    fn target_dir(self) -> &'static str {
+        if self.ktest { "target/ktest" } else { "target" }
+    }
+}
+
+/// The built images for one architecture.
+#[derive(Debug)]
+pub(crate) struct Images {
+    pub(crate) loader: PathBuf,
+    pub(crate) kernel: PathBuf,
 }
 
 pub(crate) fn cmd(mut args: Args) -> Result<()> {
@@ -33,35 +46,42 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     let opts = Options::from_args(&mut args);
     args.finish()?;
     for arch in arches {
-        let path = loader(arch, opts)?;
-        println!("{arch}: {}", path.display());
+        let images = all(arch, opts)?;
+        println!("{arch}: {}", images.loader.display());
+        println!("{arch}: {}", images.kernel.display());
     }
     Ok(())
 }
 
-/// Builds the UEFI loader and returns the path of the `.efi` image.
-pub(crate) fn loader(arch: Arch, opts: Options) -> Result<PathBuf> {
+/// Builds the loader and the kernel.
+pub(crate) fn all(arch: Arch, opts: Options) -> Result<Images> {
+    Ok(Images {
+        loader: package(
+            arch,
+            opts,
+            "loader-efi",
+            arch.uefi_target(),
+            "loader-efi.efi",
+        )?,
+        kernel: package(arch, opts, "kernel", arch.kernel_target(), "kernel")?,
+    })
+}
+
+fn package(arch: Arch, opts: Options, pkg: &str, target: &str, file: &str) -> Result<PathBuf> {
+    let _ = arch;
     let mut cargo = util::cargo();
-    cargo.args([
-        "build",
-        "--package",
-        "loader-efi",
-        "--target",
-        arch.uefi_target(),
-    ]);
+    cargo.args(["build", "--package", pkg, "--target", target]);
+    cargo.args(["--target-dir", opts.target_dir()]);
     if opts.release {
         cargo.arg("--release");
     }
     if opts.ktest {
-        // A separate target directory keeps test and normal builds from
-        // rebuilding each other.
-        cargo.args(["--features", "ktest", "--target-dir", "target/ktest"]);
+        cargo.args(["--features", "ktest"]);
     }
     util::run(&mut cargo)?;
-    let target_dir = if opts.ktest { "target/ktest" } else { "target" };
     Ok(util::root()
-        .join(target_dir)
-        .join(arch.uefi_target())
+        .join(opts.target_dir())
+        .join(target)
         .join(opts.profile_dir())
-        .join("loader-efi.efi"))
+        .join(file))
 }

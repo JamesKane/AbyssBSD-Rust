@@ -53,6 +53,20 @@ pub(crate) struct Vm {
     pub(crate) mem: String,
     pub(crate) gdb: bool,
     pub(crate) display: bool,
+    /// aarch64: firmware runs at EL2 (`virtualization=on`), so the kernel
+    /// takes its EL2 entry path.
+    pub(crate) el2: bool,
+    /// Attach the devices tests report through: `isa-debug-exit` on x86,
+    /// semihosting on aarch64.
+    pub(crate) test_devices: bool,
+}
+
+/// A captured run: the verdict and QEMU's exit status, if it exited by
+/// itself.
+#[derive(Debug)]
+pub(crate) struct Captured {
+    pub(crate) outcome: Outcome,
+    pub(crate) exit_code: Option<i32>,
 }
 
 /// How a captured run ended.
@@ -76,9 +90,15 @@ pub(crate) fn cmd_run(mut args: Args) -> Result<()> {
     let mem = args.take_value("--mem")?.unwrap_or_else(|| "2G".into());
     let gdb = args.take_flag("--gdb");
     let display = args.take_flag("--display");
+    let el2 = args.take_flag("--el2");
+    // A fixed kernel address makes debugger sessions repeatable.
+    let default_cmdline = if gdb { "kaslr=0" } else { "" };
+    let cmdline = args
+        .take_value("--cmdline")?
+        .unwrap_or_else(|| default_cmdline.into());
     args.finish()?;
 
-    let disk = image::build(arch, opts)?;
+    let disk = image::build(arch, opts, &cmdline)?;
     let vm = Vm {
         arch,
         disk,
@@ -86,6 +106,8 @@ pub(crate) fn cmd_run(mut args: Args) -> Result<()> {
         mem,
         gdb,
         display,
+        el2,
+        test_devices: false,
     };
     let mut cmd = vm.command()?;
     cmd.arg("-serial").arg("mon:stdio");
@@ -144,9 +166,19 @@ impl Vm {
         let mut c = Command::new(bin);
         match self.arch {
             Arch::X86_64 => c.args(["-machine", "q35"]),
+            Arch::Aarch64 if self.el2 => {
+                c.args(["-machine", "virt,gic-version=3,acpi=on,virtualization=on"])
+            }
             Arch::Aarch64 => c.args(["-machine", "virt,gic-version=3,acpi=on"]),
         };
-        if kvm_available(self.arch) {
+        if self.test_devices {
+            match self.arch {
+                Arch::X86_64 => c.args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]),
+                Arch::Aarch64 => c.args(["-semihosting-config", "enable=on,target=native"]),
+            };
+        }
+        // EL2 for the guest needs TCG (KVM would need nested virtualization).
+        if kvm_available(self.arch) && !self.el2 {
             c.args(["-accel", "kvm", "-cpu", "host"]);
         } else {
             c.args(["-accel", "tcg", "-cpu", "max"]);
@@ -160,6 +192,13 @@ impl Vm {
             self.disk.display()
         ));
         c.args(["-device", "virtio-blk-pci,drive=disk0,bootindex=0"]);
+        // Gives firmware an EFI_RNG_PROTOCOL, the loader's KASLR source.
+        c.args(["-device", "virtio-rng-pci"]);
+        if self.arch == Arch::Aarch64 {
+            // `virt` has no display; ramfb gives edk2 a linear-framebuffer
+            // GOP (virtio-gpu's GOP is blit-only).
+            c.args(["-device", "ramfb"]);
+        }
         c.args(["-nic", "none", "-no-reboot"]);
         if !self.display {
             c.args(["-display", "none"]);
@@ -177,7 +216,7 @@ impl Vm {
         timeout: Duration,
         log: &Path,
         echo: bool,
-    ) -> Result<Outcome> {
+    ) -> Result<Captured> {
         let mut cmd = self.command()?;
         cmd.args(["-serial", "stdio", "-monitor", "none"]);
         cmd.stdin(Stdio::null())
@@ -228,12 +267,19 @@ impl Vm {
         while Instant::now() < grace && child.try_wait()?.is_none() {
             std::thread::sleep(Duration::from_millis(50));
         }
-        if child.try_wait()?.is_none() {
-            let _ = child.kill();
-        }
-        let _ = child.wait();
+        let exit_code = match child.try_wait()? {
+            Some(status) => status.code(),
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                None
+            }
+        };
         let _ = reader.join();
-        Ok(verdict.unwrap_or(Outcome::TimedOut))
+        Ok(Captured {
+            outcome: verdict.unwrap_or(Outcome::TimedOut),
+            exit_code,
+        })
     }
 }
 

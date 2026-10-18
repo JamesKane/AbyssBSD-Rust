@@ -1,0 +1,12 @@
+[package]
+name = "bootproto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+addr = { path = "../../lib/addr" }
+
+[lints]
+workspace = true

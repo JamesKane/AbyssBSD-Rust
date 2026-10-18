@@ -129,11 +129,20 @@ pub struct Summary {
     pub passed: usize,
 }
 
-/// Runs every registered test, reporting to `out`.
+/// Runs every registered test, reporting to `out`, then prints the pass
+/// verdict.
 ///
 /// Returns only if all tests pass; a failing test panics into the image's
 /// panic handler.
 pub fn run_all(out: &mut impl Write) -> Result<Summary, fmt::Error> {
+    let summary = run_tests(out)?;
+    report_pass(out)?;
+    Ok(summary)
+}
+
+/// Runs every registered test without printing a verdict, for images that
+/// have more checks to make (or another stage to boot) afterwards.
+pub fn run_tests(out: &mut impl Write) -> Result<Summary, fmt::Error> {
     let total = tests().count();
     writeln!(out, "{BEGIN_MARKER} ({total} tests)")?;
     let mut passed = 0;
@@ -144,8 +153,12 @@ pub fn run_all(out: &mut impl Write) -> Result<Summary, fmt::Error> {
         passed += 1;
     }
     writeln!(out, "ktest: {passed} passed")?;
-    writeln!(out, "{PASS_MARKER}")?;
     Ok(Summary { passed })
+}
+
+/// Prints the pass verdict.
+pub fn report_pass(out: &mut impl Write) -> fmt::Result {
+    writeln!(out, "{PASS_MARKER}")
 }
 
 /// Reports a panic in the line protocol. Call from the image's panic handler.

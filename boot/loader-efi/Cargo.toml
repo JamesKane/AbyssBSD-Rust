@@ -12,14 +12,22 @@ test = false
 bench = false
 
 [features]
-# Builds the image's in-firmware tests and runs them instead of booting.
+# Runs the loader's in-firmware tests before booting the kernel.
 ktest = []
 
 [dependencies]
+acpi-tables = { path = "../../lib/acpi-tables" }
+addr = { path = "../../lib/addr" }
+bootproto = { path = "../bootproto" }
 crc = { path = "../../lib/crc" }
 efi = { path = "../efi" }
+elf = { path = "../../lib/elf" }
 guid = { path = "../../lib/guid" }
 ktest = { path = "../../lib/ktest" }
+pt = { path = "../../lib/pt" }
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+arch-aarch64 = { path = "../../arch/aarch64" }
 
 [lints]
 workspace = true

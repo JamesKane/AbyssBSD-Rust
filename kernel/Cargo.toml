@@ -1,0 +1,39 @@
+[package]
+name = "kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "kernel"
+path = "src/main.rs"
+test = false
+bench = false
+
+[features]
+# Runs the in-kernel tests instead of the normal boot path.
+ktest = []
+
+[dependencies]
+addr = { path = "../lib/addr" }
+bootproto = { path = "../boot/bootproto" }
+demangle = { path = "../lib/demangle" }
+efi = { path = "../boot/efi" }
+elf = { path = "../lib/elf" }
+fb-console = { path = "../drivers/fb-console" }
+ktest = { path = "../lib/ktest" }
+pt = { path = "../lib/pt" }
+regs = { path = "../lib/regs" }
+sync = { path = "../sys/sync" }
+uart-16550 = { path = "../drivers/uart-16550" }
+uart-pl011 = { path = "../drivers/uart-pl011" }
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+arch-x86_64 = { path = "../arch/x86_64" }
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+arch-aarch64 = { path = "../arch/aarch64" }
+
+[lints]
+workspace = true

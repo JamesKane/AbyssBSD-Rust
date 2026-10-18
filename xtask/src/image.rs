@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! Disk images: a GPT disk with a FAT32 EFI System Partition holding the
-//! loader at the removable-media boot path.
+//! loader at the removable-media boot path, the kernel at
+//! `EFI/ABYSS/KERNEL`, and the command line at `EFI/ABYSS/CMDLINE`.
 //!
 //! Images are reproducible: GUIDs and the volume serial derive from stable
 //! names, and FAT timestamps are fixed.
@@ -22,17 +23,35 @@ const ESP_BYTES: usize = 64 * MIB;
 pub(crate) fn cmd(mut args: Args) -> Result<()> {
     let arch = Arch::one_from_args(&mut args)?;
     let opts = build::Options::from_args(&mut args);
+    let cmdline = args.take_value("--cmdline")?.unwrap_or_default();
     args.finish()?;
-    let path = build(arch, opts)?;
+    let path = build(arch, opts, &cmdline)?;
     println!("{}", path.display());
     Ok(())
 }
 
-/// Builds the loader and the disk image, returning the image's path.
-pub(crate) fn build(arch: Arch, opts: build::Options) -> Result<PathBuf> {
-    let loader = build::loader(arch, opts)?;
-    let efi = fs::read(&loader).map_err(|e| format!("{}: {e}", loader.display()))?;
-    let disk = make_disk(arch, &efi)?;
+/// The files to put on the ESP.
+#[derive(Debug)]
+struct Contents<'a> {
+    loader: &'a [u8],
+    kernel: &'a [u8],
+    cmdline: &'a str,
+}
+
+/// Builds the loader, the kernel, and the disk image, returning the image's
+/// path.
+pub(crate) fn build(arch: Arch, opts: build::Options, cmdline: &str) -> Result<PathBuf> {
+    let images = build::all(arch, opts)?;
+    let read = |p: &PathBuf| fs::read(p).map_err(|e| format!("{}: {e}", p.display()));
+    let (loader, kernel) = (read(&images.loader)?, read(&images.kernel)?);
+    let disk = make_disk(
+        arch,
+        &Contents {
+            loader: &loader,
+            kernel: &kernel,
+            cmdline,
+        },
+    )?;
     let dir = util::root().join("build").join(arch.to_string());
     fs::create_dir_all(&dir)?;
     let name = if opts.ktest {
@@ -57,7 +76,7 @@ fn stable_guid(name: &str) -> guid::Guid {
     guid::Guid::v8_from_bytes(bytes)
 }
 
-fn make_disk(arch: Arch, efi: &[u8]) -> Result<Vec<u8>> {
+fn make_disk(arch: Arch, contents: &Contents<'_>) -> Result<Vec<u8>> {
     let mut disk = vec![0u8; DISK_BYTES];
     let esp_sectors = (ESP_BYTES / gpt::SECTOR) as u64;
     let esp = gpt::PartitionSpec {
@@ -76,8 +95,14 @@ fn make_disk(arch: Arch, efi: &[u8]) -> Result<Vec<u8>> {
     .map_err(|e| format!("GPT: {e:?}"))?;
 
     let mut root = fat::Dir::new();
-    root.insert_file(arch.efi_boot_file(), efi)
-        .map_err(|e| format!("ESP tree: {e:?}"))?;
+    for (path, data) in [
+        (arch.efi_boot_file(), contents.loader),
+        ("EFI/ABYSS/KERNEL", contents.kernel),
+        ("EFI/ABYSS/CMDLINE", contents.cmdline.as_bytes()),
+    ] {
+        root.insert_file(path, data)
+            .map_err(|e| format!("ESP tree ({path}): {e:?}"))?;
+    }
     let opts = fat::FormatOptions {
         volume_id: crc::crc32(format!("abyss-{arch}-esp").as_bytes()),
         label: fat::VolumeLabel::new("ABYSS_ESP").map_err(|e| format!("{e:?}"))?,
@@ -95,11 +120,16 @@ fn make_disk(arch: Arch, efi: &[u8]) -> Result<Vec<u8>> {
     }
     let v = fat::Volume::open(&disk[start..start + ESP_BYTES])
         .map_err(|e| format!("FAT read-back: {e:?}"))?;
-    if v.read_file(arch.efi_boot_file())
-        .map_err(|e| format!("FAT read-back: {e:?}"))?
-        != efi
-    {
-        return Err("FAT read-back: loader contents differ".into());
+    for (path, data) in [
+        (arch.efi_boot_file(), contents.loader),
+        ("EFI/ABYSS/KERNEL", contents.kernel),
+    ] {
+        if v.read_file(path)
+            .map_err(|e| format!("FAT read-back ({path}): {e:?}"))?
+            != data
+        {
+            return Err(format!("FAT read-back: {path} contents differ").into());
+        }
     }
     Ok(disk)
 }
@@ -110,10 +140,15 @@ mod tests {
 
     #[test]
     fn images_are_reproducible() {
-        let a = make_disk(Arch::X86_64, b"MZ fake loader").unwrap();
-        let b = make_disk(Arch::X86_64, b"MZ fake loader").unwrap();
+        let contents = Contents {
+            loader: b"MZ fake loader",
+            kernel: b"\x7fELF fake kernel",
+            cmdline: "kaslr=0",
+        };
+        let a = make_disk(Arch::X86_64, &contents).unwrap();
+        let b = make_disk(Arch::X86_64, &contents).unwrap();
         assert!(a == b);
-        let c = make_disk(Arch::Aarch64, b"MZ fake loader").unwrap();
+        let c = make_disk(Arch::Aarch64, &contents).unwrap();
         assert!(a != c);
     }
 }

@@ -1,2 +1,24 @@
 [alias]
 xtask = "run --quiet --package xtask --"
+
+# The kernel: a static PIE (the loader applies the KASLR slide), with frame
+# pointers for backtraces and 4 KiB segment alignment for W^X mapping.
+[target.x86_64-unknown-none]
+rustflags = [
+    "-C", "relocation-model=pie",
+    "-C", "link-arg=-pie",
+    "-C", "link-arg=-zmax-page-size=4096",
+    "-C", "force-frame-pointers=yes",
+]
+
+# The prebuilt aarch64 `core` is not PIC, so it has absolute relocations in
+# read-only sections; `-z notext` allows them. The loader applies every
+# relocation before page permissions take effect.
+[target.aarch64-unknown-none-softfloat]
+rustflags = [
+    "-C", "relocation-model=pie",
+    "-C", "link-arg=-pie",
+    "-C", "link-arg=-znotext",
+    "-C", "link-arg=-zmax-page-size=4096",
+    "-C", "force-frame-pointers=yes",
+]
