@@ -192,7 +192,7 @@ P3.3 (from the start, pure crate) ────────┘   P3.8 ─┴─�
   ambiguity check over each build's driver table in `cargo xtask check` waits for that table
   (now P3.6).
 
-**P3.3 `lib/aml`** (pure, host-tested, fuzzed; runs in parallel with P3.0–P3.2).
+**P3.3 `lib/aml`** (pure, host-tested, fuzzed; runs in parallel with P3.0–P3.2). Done 2026-10-18.
 - Parser, namespace, and interpreter.
 - Operation regions behind a trait: SystemMemory, SystemIO, PCI_Config, and PCC. EmbeddedControl,
   GeneralPurposeIo, and GenericSerialBus are hooks.
@@ -201,6 +201,21 @@ P3.3 (from the start, pure crate) ────────┘   P3.8 ─┴─�
 - Malformed AML is an error, never a panic, and loops are bounded.
 - Corpus: the DSDT and SSDTs of QEMU `q35`, `pc`, and `virt`, and of bhyve, plus the existing Radxa
   Q8B capture. Physical-machine captures wait for P6.
+- **As delivered.** `lib/aml` executes AML straight from the table bytes: loading runs module-level
+  code, method bodies are parsed when invoked, and a failure inside a scope body during loading
+  becomes a `LoadWarning`. Every region space goes through the `Host` trait (integer accesses,
+  buffer transfers for SMBus/IPMI/GenericSerialBus, GPIO hooks, PCI addresses derived through
+  bridges), with access widths, update rules, `IndexField`/`BankField` sequencing, and the lock
+  rule. `_OSI` answers FreeBSD's list (the Windows strings, not `Linux`), `_REV` is 2, and slack
+  mode is on, as in FreeBSD. Resource templates decode to typed descriptors (pin descriptors are
+  kept as `Unknown`); device queries cover `_HID`, `_CID`, `_UID`, `_ADR`, `_STA`, `_CRS`, `_PRT`,
+  and `_DEP`. All five corpus DSDTs load with no warnings, and every Q8B device answers `_STA` and
+  `_CRS`. Nesting is bounded by measured stack use: a level costs ~0.5 KiB, so the default 10 KiB
+  budget (for a 16 KiB kernel stack) runs the QEMU and bhyve firmware, but the Q8B's AML needs
+  ~13 KiB and should run on a dedicated thread with a 32–64 KiB stack (`Limits::for_stack`).
+  Not done: `Load`/`LoadTable`/`Unload` (return `Unsupported`), real concurrency for `Wait` and
+  `Acquire` timeouts (the interpreter is single-threaded), and SSDTs in the corpus (none
+  captured yet).
 
 **P3.4 Interrupts and DMA.**
 - `sys/irq`, split out of the arch crates.

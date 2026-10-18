@@ -334,7 +334,9 @@ We write our own ACPI implementation (no ACPICA):
   SystemMemory, SystemIO, PCI_Config, EmbeddedControl, GenericSerialBus, and
   **PlatformCommChannel (PCC)**. PCC matters because on Sky1 the clock methods talk to the SCMI
   firmware through PCC mailboxes. Firmware bugs such as references to nonexistent objects
-  produce typed, logged errors, never panics.
+  produce typed, logged errors, never panics. The interpreter recurses over nested terms with
+  its stack use measured and bounded, so `sys/acpi` evaluates AML on a dedicated thread with a
+  32–64 KiB stack rather than on an ordinary 16 KiB kernel stack.
 - `sys/acpi`: OS services glue (`_OSC`, `_OSI`, power button via GPE/SCI or GED, S5 shutdown,
   power resources `_PRx`/`_PSx`, EC, PCC channels from PCCT). Later: `_LPI`, CPPC, and thermal
   zones.
