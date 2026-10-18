@@ -319,7 +319,7 @@ P3.3 (from the start, pure crate) ────────┘   P3.8 ─┴─�
     - If the GIC will not snoop its tables, MSI stays off (cache maintenance for that waits for
       hardware, P6).
 
-**P3.7 Storage.**
+**P3.7 Storage.** Done 2026-10-18.
 - `sys/storage`.
   - The batch `DiskQueues` trait, and owned `Bio`s completed exactly once.
   - The per-CPU deferred resubmit list.
@@ -329,6 +329,34 @@ P3.3 (from the start, pure crate) ────────┘   P3.8 ─┴─�
   - `nvme`: an admin queue, and per-CPU I/O queues on MSI-X.
   - `ahci`, whose `ahcich` children publish `ada`, matching FreeBSD's names.
 - The GPT read and partition dump, through `lib/gpt`.
+- As delivered:
+  - **`sys/storage`.**
+    - `Bio`s are completed exactly once; one dropped uncompleted is completed with `EIO` and counted.
+    - `DiskQueues` takes batches per hardware queue. What does not fit waits, in order, on a
+      per-queue list until the driver reports room; with a queue per CPU, that is the per-CPU
+      resubmit list.
+    - Disks are published behind a gate with FreeBSD's names and announcement. Requests are
+      checked for alignment, range, and size.
+    - Every disk is tasted for a GPT, and each partition is a disk of its own (`vtbd0p1`).
+  - **Drivers.**
+    - `vtblk`.
+    - `nvme`: polled admin commands, I/O queue pairs per CPU on MSI-X (one on INTx), PRP lists,
+      and namespaces as `nda`.
+    - `ahci`/`ahcich`: channels named as FreeBSD names them, disabled where not implemented. NCQ
+      when the drive supports it; disks as `ada`.
+  - **Determinism.** Units are now deterministic under parallel attach: attaches run in parallel,
+    and `start` (where buses add children) runs in depth-first tree order.
+  - **Shared interrupts.** Level-triggered interrupt lines can be shared (INTx), which the arm64
+    EL2 case needs for AHCI.
+  - **Tests.** Every boot case has blank virtio-blk, NVMe, and AHCI disks. Each is written and
+    read back, including 256 concurrent requests. The runs cover MSI-X on q35, arm64 virt, and
+    bhyve, and shared INTx in the EL2 case.
+  - **FreeBSD match.** On bhyve these match FreeBSD 15.1's `devinfo` line for line: `vtblk0`,
+    `vtblk1`, `nvme0`, `ahci0`, `ahcich0`, and the 31 disabled channels.
+  - **Not yet.**
+    - A dropped `Bio` is counted but not yet reported with its driver's name in verifier mode.
+    - Abort callbacks for requests on hardware.
+    - 4Kn GPT (lib/gpt reads 512-byte sectors only).
 
 **P3.8 Platform services.**
 - Entropy: RDRAND, RNDR, and virtio-rng feeding an fxrng-style CSPRNG.

@@ -68,7 +68,34 @@ enum Target {
         parent: Arc<Disk>,
         /// Byte offset on the parent.
         first: u64,
+        entry: PartitionEntry,
     },
+}
+
+/// What a partition's GPT entry says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PartitionEntry {
+    /// Its index in the table (`p1` is index 0).
+    pub index: u32,
+    /// Its type.
+    pub type_guid: gpt::Guid,
+    /// Its first sector on the parent.
+    pub first_lba: u64,
+    /// Its name.
+    pub label: String,
+}
+
+impl PartitionEntry {
+    /// The type's `gpart` name (`efi`, `freebsd-ufs`, …), or its GUID.
+    #[must_use]
+    pub fn type_name(&self) -> String {
+        match self.type_guid {
+            g if g == gpt::types::EFI_SYSTEM => "efi".into(),
+            g if g == gpt::types::FREEBSD_UFS => "freebsd-ufs".into(),
+            g if g == gpt::types::FREEBSD_SWAP => "freebsd-swap".into(),
+            g => format!("{g}"),
+        }
+    }
 }
 
 /// A published disk or partition.
@@ -140,6 +167,15 @@ impl Disk {
         self.max_transfer
     }
 
+    /// For a partition: its parent and GPT entry.
+    #[must_use]
+    pub fn partition(&self) -> Option<(&Arc<Disk>, &PartitionEntry)> {
+        match &self.target {
+            Target::Partition { parent, entry, .. } => Some((parent, entry)),
+            Target::Device { .. } => None,
+        }
+    }
+
     fn check(&self, bio: &Bio) -> Result<(), BioError> {
         if bio.op == BioOp::Flush {
             return Ok(());
@@ -169,7 +205,7 @@ impl Disk {
             return;
         }
         match &self.target {
-            Target::Partition { parent, first } => {
+            Target::Partition { parent, first, .. } => {
                 bio.offset += first;
                 parent.strategy(s, bio);
             }
@@ -290,6 +326,8 @@ fn taste(s: &Sleepable, disk: &Arc<Disk>) -> Vec<Arc<Disk>> {
         .partitions()
         .filter(|p| p.first_lba <= p.last_lba && p.last_lba < disk.sectors)
         .map(|p| {
+            let mut label = String::new();
+            let _ = p.write_name(&mut label);
             Arc::new(Disk {
                 name: format!("{}p{}", disk.name, p.index + 1),
                 sector_size: disk.sector_size,
@@ -299,6 +337,12 @@ fn taste(s: &Sleepable, disk: &Arc<Disk>) -> Vec<Arc<Disk>> {
                 target: Target::Partition {
                     parent: Arc::clone(disk),
                     first: p.first_lba * ss,
+                    entry: PartitionEntry {
+                        index: p.index,
+                        type_guid: p.type_guid,
+                        first_lba: p.first_lba,
+                        label,
+                    },
                 },
             })
         })
@@ -357,6 +401,19 @@ pub fn withdraw(s: &Sleepable, disk: &Arc<Disk>) {
             }
         }
     }
+}
+
+/// The partitions found on `disk`, in table order.
+#[must_use]
+pub fn partitions(disk: &Arc<Disk>) -> Vec<Arc<Disk>> {
+    let mut out: Vec<Arc<Disk>> = DISKS
+        .lock()
+        .iter()
+        .filter(|d| d.partition().is_some_and(|(p, _)| Arc::ptr_eq(p, disk)))
+        .cloned()
+        .collect();
+    out.sort_by_key(|d| d.partition().map(|(_, e)| e.index));
+    out
 }
 
 /// The disk or partition named `name`.

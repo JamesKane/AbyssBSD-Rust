@@ -1891,7 +1891,23 @@ ktest! {
         let head = boot.read(&s, 0, 1024).expect("read");
         assert_eq!(&head[510..512], &[0x55, 0xaa], "MBR signature");
         assert_eq!(&head[512..520], b"EFI PART", "GPT header");
+        // The table, as `gpart show` lays it out.
+        let parts = storage::partitions(&boot);
+        kprintln!("=> {:>9} {:>9}  {}  GPT  ({}M)", 34, boot.sectors() - 67, boot.name(), boot.bytes() >> 20);
+        for p in &parts {
+            let (_, e) = p.partition().expect("a partition");
+            kprintln!(
+                "   {:>9} {:>9}  {:>2}  {}  ({}M) {}",
+                e.first_lba,
+                p.sectors(),
+                e.index + 1,
+                e.type_name(),
+                p.bytes() >> 20,
+                e.label
+            );
+        }
         // The ESP was found and published as a partition.
+        assert_eq!(parts.first().and_then(|p| p.partition()).map(|(_, e)| e.type_name()).as_deref(), Some("efi"));
         let esp = storage::find("vtbd0p1").expect("vtbd0p1, the ESP");
         let boot_sector = esp.read(&s, 0, 512).expect("ESP boot sector");
         assert_eq!(&boot_sector[510..512], &[0x55, 0xaa], "FAT boot sector");
