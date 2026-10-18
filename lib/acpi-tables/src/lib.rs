@@ -8,15 +8,32 @@
 //! same code runs in the loader (identity mapped), the kernel (DMAP), and
 //! host tests (a byte vector).
 //!
-//! Behavior reference: sys/dev/acpica/acpi.c (table discovery) and
-//! sys/dev/uart/uart_cpu_acpi.c (SPCR/DBG2 console selection).
+//! Each table module has a `parse(&Sdt) -> Result<_, Error>` that checks the
+//! signature; the parsed views borrow the table bytes. Structure lists are
+//! iterators whose items are `Result`s: a malformed entry yields an error
+//! rather than a panic or an endless loop.
+//!
+//! Behavior reference: `sys/dev/acpica/acpi.c` (table discovery),
+//! `sys/dev/uart/uart_cpu_acpi.c` (SPCR/DBG2 console selection),
+//! `sys/x86/acpica/madt.c` (MADT), `sys/dev/acpica/acpi_pxm.c` (SRAT/SLIT),
+//! `sys/dev/acpica/acpi_hpet.c` (HPET), `sys/arm/arm/generic_timer.c` (GTDT),
+//! `sys/dev/pci/pci_host_generic_acpi.c` (MCFG).
 
 #![no_std]
 #![forbid(unsafe_code)]
 
 pub mod dbg2;
+pub mod fadt;
 pub mod gas;
+pub mod gtdt;
+pub mod hpet;
+pub mod madt;
+pub mod mcfg;
+pub mod pptt;
+mod raw;
+pub mod slit;
 pub mod spcr;
+pub mod srat;
 
 pub use gas::{AddressSpace, Gas};
 
@@ -74,6 +91,11 @@ pub struct Sdt<'a> {
 
 impl<'a> Sdt<'a> {
     /// Reads and validates the table at `pa`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Unreachable`] if the memory cannot be read,
+    /// [`Error::BadLength`] or [`Error::BadChecksum`] for a corrupt table.
     pub fn read(mem: &impl PhysMem<'a>, pa: u64) -> Result<Self, Error> {
         let header = mem.bytes(pa, HEADER_LEN).ok_or(Error::Unreachable(pa))?;
         let mut sig = [0; 4];
@@ -128,6 +150,10 @@ pub struct Tables<'a, M> {
 
 impl<'a, M: PhysMem<'a>> Tables<'a, M> {
     /// Validates the RSDP at `rsdp` and the XSDT it points to.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Error`] describing why the RSDP or XSDT was rejected.
     pub fn new(mem: M, rsdp: u64) -> Result<Self, Error> {
         let v1 = mem
             .bytes(rsdp, RSDP_V1_LEN)

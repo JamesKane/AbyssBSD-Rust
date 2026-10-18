@@ -110,6 +110,37 @@ pub fn disable_interrupts() {
     unsafe { asm!("cli", options(nomem, nostack)) };
 }
 
+/// Masks interrupts, returning whether they were enabled. A compiler
+/// barrier: memory accesses do not move across it.
+pub fn save_disable_interrupts() -> bool {
+    let flags: u64;
+    // SAFETY: reads RFLAGS and masks interrupts.
+    unsafe { asm!("pushfq", "pop {}", "cli", out(reg) flags) };
+    flags & (1 << 9) != 0
+}
+
+/// Unmasks interrupts. A compiler barrier.
+pub fn enable_interrupts() {
+    // SAFETY: the caller is ready for interrupts.
+    unsafe { asm!("sti", options(nostack)) };
+}
+
+/// Whether interrupts are enabled.
+pub fn interrupts_enabled() -> bool {
+    let flags: u64;
+    // SAFETY: reads RFLAGS.
+    unsafe { asm!("pushfq", "pop {}", out(reg) flags, options(nomem)) };
+    flags & (1 << 9) != 0
+}
+
+/// Waits for an interrupt with interrupts masked: `STI; HLT` opens the
+/// interrupt window only while halted (STI's one-instruction shadow
+/// covers HLT), services what arrives, and masks again.
+pub fn wait_for_interrupt() {
+    // SAFETY: the caller is ready for interrupts while halted.
+    unsafe { asm!("sti", "hlt", "cli", options(nostack)) };
+}
+
 /// Stops this CPU for good.
 pub fn halt_forever() -> ! {
     loop {

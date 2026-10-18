@@ -7,7 +7,7 @@
 //!
 //! ```text
 //! 0xffff_8000_0000_0000  DMAP: all RAM at phys + DMAP_BASE (64 TiB)
-//! 0xffff_c000_0000_0000  (kernel virtual memory, from P2)
+//! 0xffff_c000_0000_0000  kernel virtual memory: stacks, kmem (4 TiB)
 //! 0xffff_f000_0000_0000  device window: loader-made MMIO mappings (64 GiB)
 //! 0xffff_ffff_8000_0000  kernel image link address, + KASLR slide
 //! ```
@@ -18,6 +18,11 @@ use addr::{PhysAddr, VirtAddr};
 pub const DMAP_BASE: u64 = 0xffff_8000_0000_0000;
 /// Size of the DMAP window. RAM above this is not mapped.
 pub const DMAP_SIZE: u64 = 1 << 46;
+
+/// Base of the kernel virtual memory arena (kernel stacks, `kmem`).
+pub const KVA_BASE: u64 = 0xffff_c000_0000_0000;
+/// Size of the kernel virtual memory arena.
+pub const KVA_SIZE: u64 = 1 << 42;
 
 /// Base of the window the loader puts early device mappings in.
 pub const DEVICE_WINDOW_BASE: u64 = 0xffff_f000_0000_0000;
@@ -57,7 +62,8 @@ pub const fn dmap_to_phys(v: VirtAddr) -> Option<PhysAddr> {
 // The windows must not overlap and must stay in the top 128 TiB.
 const _: () = {
     assert!(DMAP_BASE == 0xffff_8000_0000_0000);
-    assert!(DMAP_BASE + DMAP_SIZE <= DEVICE_WINDOW_BASE);
+    assert!(DMAP_BASE + DMAP_SIZE <= KVA_BASE);
+    assert!(KVA_BASE + KVA_SIZE <= DEVICE_WINDOW_BASE);
     assert!(DEVICE_WINDOW_BASE + DEVICE_WINDOW_SIZE <= KERNEL_LINK_BASE);
     assert!(
         KERNEL_LINK_BASE

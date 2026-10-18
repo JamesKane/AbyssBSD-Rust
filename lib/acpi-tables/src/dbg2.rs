@@ -7,11 +7,10 @@ const PORT_TYPE_SERIAL: u16 = 0x8000;
 const DEVICE_MIN_LEN: usize = 22;
 
 /// The serial ports a DBG2 table lists, using each device's first address.
+#[must_use]
 pub fn serial_ports<'a>(t: &Sdt<'a>) -> SerialPorts<'a> {
     let b = t.bytes;
-    let state = if t.signature() != *b"DBG2" {
-        State::Failed(Some(Error::BadSignature))
-    } else {
+    let state = if t.signature() == *b"DBG2" {
         match (u32_at(b, HEADER_LEN), u32_at(b, HEADER_LEN + 4)) {
             (Some(off), Some(left)) => match usize::try_from(off) {
                 Ok(off) => State::Walking { off, left },
@@ -19,6 +18,8 @@ pub fn serial_ports<'a>(t: &Sdt<'a>) -> SerialPorts<'a> {
             },
             _ => State::Failed(Some(Error::BadLength(*b"DBG2"))),
         }
+    } else {
+        State::Failed(Some(Error::BadSignature))
     };
     SerialPorts { bytes: b, state }
 }

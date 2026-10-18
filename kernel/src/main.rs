@@ -12,6 +12,8 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 #[cfg(target_arch = "aarch64")]
 use arch_aarch64 as arch;
 #[cfg(target_arch = "x86_64")]
@@ -27,6 +29,7 @@ mod qemu;
 mod symbols;
 #[cfg(feature = "ktest")]
 mod tests;
+mod threads;
 
 use addr::PhysAddr;
 
@@ -55,12 +58,22 @@ fn kmain(boot_info: PhysAddr) -> ! {
     let tables = mm::init(info);
     firmware::init(info, tables.firmware_root);
     kprintln!("kernel page tables live (W^X, DMAP, no identity map)");
+    threads::init();
 
     #[cfg(feature = "ktest")]
     tests::run();
 
     #[cfg(not(feature = "ktest"))]
     {
+        let (phys, heap) = (mm::phys_stats(), mm::heap_stats());
+        kprintln!(
+            "memory: {} MiB free of {} MiB; heap {} objects in {} slabs, {} large pages",
+            (phys.free * 4096) >> 20,
+            (phys.managed * 4096) >> 20,
+            heap.live_objects,
+            heap.slabs,
+            heap.large_pages
+        );
         if boot::flag("abyss.halt") {
             kprintln!("Phase 1 kernel: nothing more to do yet. Halted (abyss.halt).");
             arch::cpu::halt_forever();

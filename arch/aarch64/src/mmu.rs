@@ -98,3 +98,26 @@ pub fn flush_all() {
     // SAFETY: TLB invalidation has no effect on memory contents.
     unsafe { asm!("tlbi vmalle1", "dsb ish", "isb", options(nostack)) };
 }
+
+/// Makes entries that changed from invalid to valid visible to table
+/// walks: the stores must complete before a walk can observe them.
+pub fn sync_new_mappings() {
+    // SAFETY: barriers only.
+    unsafe { asm!("dsb ishst", "isb", options(nostack)) };
+}
+
+/// Invalidates the TLB entries for the page at `va` on every CPU in the
+/// inner-shareable domain (the broadcast form of TLBI).
+pub fn flush_page(va: addr::VirtAddr) {
+    // SAFETY: TLB invalidation has no effect on memory contents.
+    unsafe {
+        asm!(
+            "dsb ishst",
+            "tlbi vaae1is, {}",
+            "dsb ish",
+            "isb",
+            in(reg) (va.get() >> 12) & ((1 << 44) - 1),
+            options(nostack),
+        );
+    }
+}

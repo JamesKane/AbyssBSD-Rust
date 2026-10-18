@@ -36,6 +36,10 @@ pub struct Gas {
 
 impl Gas {
     /// Parses the 12 bytes at `off`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Malformed`] if the structure runs past `b`.
     pub fn parse(b: &[u8], off: usize) -> Result<Self, Error> {
         let raw = b
             .get(off..off + GAS_LEN)

@@ -80,7 +80,7 @@ ktest! {
         static VALUE: u64 = 0x5a5a_1234_abcd_0001;
         assert_eq!(arch::fixup::probe_read((&raw const VALUE) as u64), Ok(VALUE));
         // Unmapped kernel address: the fault is taken and recovered.
-        let hole = 0xffff_c000_0000_0000;
+        let hole = bootproto::layout::KVA_BASE + bootproto::layout::KVA_SIZE - 4096;
         assert_eq!(arch::fixup::probe_read(hole), Err(arch::fixup::Fault));
     }
 }
@@ -155,6 +155,150 @@ ktest! {
         let info = crate::boot::info();
         assert!(info.serial.get().is_some(), "serial console");
         assert!(info.framebuffer.get().is_some(), "GOP framebuffer");
+    }
+}
+
+ktest! {
+    fn buddy_allocator_round_trips() {
+        let before = crate::mm::phys_stats();
+        assert!(before.free > 0 && before.free <= before.managed);
+        let order = vm::Order::new(3).unwrap();
+        let pa = crate::mm::alloc_pages(order).expect("eight pages");
+        assert!(pa.is_aligned(order.bytes()));
+        assert!(pa.get() >= crate::mm::LOW_RESERVE);
+        let va = bootproto::layout::dmap(pa).unwrap();
+        // SAFETY: the block is ours and mapped in the DMAP.
+        let block = unsafe {
+            core::slice::from_raw_parts_mut(va.get() as *mut u64, 8 * 512)
+        };
+        block.fill(0x0bad_cafe);
+        assert_eq!(crate::mm::phys_stats().free, before.free - 8);
+        crate::mm::free_pages(pa, order);
+        assert_eq!(crate::mm::phys_stats(), before);
+    }
+}
+
+ktest! {
+    fn heap_serves_collections() {
+        use alloc::boxed::Box;
+        use alloc::vec::Vec;
+        let before = crate::mm::heap_stats();
+        {
+            let mut v: Vec<u64> = Vec::new();
+            for i in 0..50_000 {
+                v.push(i);
+            }
+            assert_eq!(v.iter().sum::<u64>(), 50_000 * 49_999 / 2);
+            let boxes: Vec<Box<[u8; 100]>> = (0..1000u32).map(|i| Box::new([i.to_le_bytes()[0]; 100])).collect();
+            assert!(boxes.iter().enumerate().all(|(i, b)| b[99] == i.to_le_bytes()[0]));
+            let big = alloc::vec![7u8; 3 << 20];
+            assert_eq!(big[(3 << 20) - 1], 7);
+            assert!(crate::mm::heap_stats().large_pages >= 768);
+        }
+        let after = crate::mm::heap_stats();
+        assert_eq!(after.live_objects, before.live_objects);
+        assert_eq!(after.large_pages, before.large_pages);
+    }
+}
+
+ktest! {
+    fn kernel_stacks_have_guard_pages() {
+        use crate::mm::kstack::KernelStack;
+        // The first stack in a region also creates intermediate page
+        // tables, which stay; measure after one has come and gone.
+        drop(KernelStack::new(4).expect("stack"));
+        let kva = crate::mm::kstack::kva_allocated();
+        let free = crate::mm::phys_stats().free;
+        let stack = KernelStack::new(4).expect("stack");
+        assert_eq!(stack.top() - stack.bottom().get(), VirtAddr::new(4 * 4096));
+        let t = crate::mm::translate(stack.top() - 8).expect("stack mapped");
+        assert!(t.attrs.write && !t.attrs.exec);
+        assert!(crate::mm::translate(stack.guard()).is_none());
+        assert_eq!(arch::fixup::probe_read(stack.guard().get()), Err(arch::fixup::Fault));
+        // Fresh stacks are zeroed, and usable.
+        assert_eq!(arch::fixup::probe_read(stack.bottom().get()), Ok(0));
+        // SAFETY: the stack's pages are mapped and ours.
+        unsafe { (stack.bottom().get() as *mut u64).write_volatile(5) };
+        assert_eq!(arch::fixup::probe_read(stack.bottom().get()), Ok(5));
+        let bottom = stack.bottom();
+        drop(stack);
+        assert!(crate::mm::translate(bottom).is_none());
+        assert_eq!(arch::fixup::probe_read(bottom.get()), Err(arch::fixup::Fault));
+        assert_eq!(crate::mm::kstack::kva_allocated(), kva);
+        assert_eq!(crate::mm::phys_stats().free, free);
+    }
+}
+
+ktest! {
+    fn threads_run_and_join() {
+        use alloc::sync::Arc;
+        use alloc::vec::Vec;
+        use core::sync::atomic::AtomicU64;
+        let count = Arc::new(AtomicU64::new(0));
+        let threads: Vec<_> = (0..8)
+            .map(|i| {
+                let count = Arc::clone(&count);
+                sched::spawn("worker", sched::Priority::KERNEL, move || {
+                    for _ in 0..100 {
+                        count.fetch_add(i, Ordering::Relaxed);
+                        sched::yield_now();
+                    }
+                })
+                .expect("spawn")
+            })
+            .collect();
+        for t in &threads {
+            t.join();
+            assert!(t.has_exited());
+            assert!(t.switches() >= 100, "{} switched {} times", t.name(), t.switches());
+        }
+        assert_eq!(count.load(Ordering::Relaxed), 100 * (0..8).sum::<u64>());
+    }
+}
+
+ktest! {
+    fn wait_queues_ping_pong() {
+        use alloc::sync::Arc;
+        use core::sync::atomic::AtomicU64;
+        struct Court {
+            turn: AtomicU64,
+            q: sched::WaitQueue,
+        }
+        let court = Arc::new(Court { turn: AtomicU64::new(0), q: sched::WaitQueue::new() });
+        let player = |me: u64| {
+            let court = Arc::clone(&court);
+            move || {
+                for round in 0..500u64 {
+                    let want = round * 2 + me;
+                    court.q.wait_until(|| court.turn.load(Ordering::Acquire) == want);
+                    court.turn.store(want + 1, Ordering::Release);
+                    court.q.wake_all();
+                }
+            }
+        };
+        let a = sched::spawn("ping", sched::Priority::KERNEL, player(0)).unwrap();
+        let b = sched::spawn("pong", sched::Priority::KERNEL, player(1)).unwrap();
+        a.join();
+        b.join();
+        assert_eq!(court.turn.load(Ordering::Relaxed), 1000);
+    }
+}
+
+ktest! {
+    fn exited_threads_are_reaped() {
+        let kva = crate::mm::kstack::kva_allocated();
+        let t = sched::spawn("short", sched::Priority::KERNEL, || {}).unwrap();
+        t.join();
+        drop(t);
+        // The reaper frees the stack once it runs (and any left over from
+        // earlier tests, so the total may drop below the baseline).
+        for _ in 0..100 {
+            if crate::mm::kstack::kva_allocated() <= kva {
+                return;
+            }
+            sched::yield_now();
+        }
+        panic!("stack not reaped: {:#x} bytes of KVA out, {kva:#x} before", crate::mm::kstack::kva_allocated());
     }
 }
 

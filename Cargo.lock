@@ -19,6 +19,7 @@ name = "arch-aarch64"
 version = "0.0.0"
 dependencies = [
  "addr",
+ "hal",
  "pt",
 ]
 
@@ -27,6 +28,7 @@ name = "arch-x86_64"
 version = "0.0.0"
 dependencies = [
  "addr",
+ "hal",
  "pt",
 ]
 
@@ -84,6 +86,10 @@ name = "guid"
 version = "0.0.0"
 
 [[package]]
+name = "hal"
+version = "0.0.0"
+
+[[package]]
 name = "kernel"
 version = "0.0.0"
 dependencies = [
@@ -95,13 +101,16 @@ dependencies = [
  "efi",
  "elf",
  "fb-console",
+ "hal",
  "ktest",
  "logring",
  "pt",
  "regs",
+ "sched",
  "sync",
  "uart-16550",
  "uart-pl011",
+ "vm",
 ]
 
 [[package]]
@@ -141,8 +150,19 @@ name = "regs"
 version = "0.0.0"
 
 [[package]]
+name = "sched"
+version = "0.0.0"
+dependencies = [
+ "hal",
+ "sync",
+]
+
+[[package]]
 name = "sync"
 version = "0.0.0"
+dependencies = [
+ "hal",
+]
 
 [[package]]
 name = "syscallgen"
@@ -160,6 +180,15 @@ name = "uart-pl011"
 version = "0.0.0"
 dependencies = [
  "regs",
+]
+
+[[package]]
+name = "vm"
+version = "0.0.0"
+dependencies = [
+ "addr",
+ "hal",
+ "sync",
 ]
 
 [[package]]

@@ -60,3 +60,14 @@ pub fn flush_all() {
         crate::cpu::set_cr4(cr4);
     }
 }
+
+/// Makes entries that changed from invalid to valid visible to this CPU's
+/// table walks. Nothing to do on x86: walks are coherent with stores.
+pub fn sync_new_mappings() {}
+
+/// Invalidates this CPU's TLB entries for the page at `va`. Other CPUs
+/// need a shootdown.
+pub fn flush_page(va: addr::VirtAddr) {
+    // SAFETY: INVLPG only drops cached translations.
+    unsafe { asm!("invlpg [{}]", in(reg) va.get(), options(nostack)) };
+}

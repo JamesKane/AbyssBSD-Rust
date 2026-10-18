@@ -22,6 +22,26 @@ pub fn disable_interrupts() {
     unsafe { asm!("msr daifset, #0xf", options(nomem, nostack)) };
 }
 
+/// Masks IRQs and FIQs, returning whether IRQs were enabled. A compiler
+/// barrier: memory accesses do not move across it.
+pub fn save_disable_interrupts() -> bool {
+    let daif: u64;
+    // SAFETY: reads DAIF and masks interrupts.
+    unsafe { asm!("mrs {}, daif", "msr daifset, #3", out(reg) daif, options(nostack)) };
+    daif & (1 << 7) == 0
+}
+
+/// Unmasks IRQs and FIQs. A compiler barrier.
+pub fn enable_interrupts() {
+    // SAFETY: the caller is ready for interrupts.
+    unsafe { asm!("msr daifclr, #3", options(nostack)) };
+}
+
+/// Whether IRQs are enabled.
+pub fn interrupts_enabled() -> bool {
+    read_sysreg!("daif") & (1 << 7) == 0
+}
+
 /// Stops this CPU for good.
 pub fn halt_forever() -> ! {
     disable_interrupts();
@@ -61,12 +81,15 @@ pub fn midr() -> u64 {
 pub(crate) struct CpuLocal {
     self_ptr: *const CpuLocal,
     cpu: u32,
+    /// The kernel's per-CPU data (`hal::cpu_local`).
+    kernel: *mut (),
 }
 
 // Written once by `init_boot_cpu`, on the boot CPU, before anything reads it.
 static CPU0: Racy<CpuLocal> = Racy::new(CpuLocal {
     self_ptr: core::ptr::null(),
     cpu: 0,
+    kernel: core::ptr::null_mut(),
 });
 
 /// Points `TPIDR_EL1` at the boot CPU's block.
@@ -88,6 +111,27 @@ pub fn cpu_id() -> u32 {
     let p = read_sysreg!("tpidr_el1") as *const CpuLocal;
     // SAFETY: TPIDR_EL1 points at this CPU's block from `init_boot_cpu` on.
     unsafe { (*p).cpu }
+}
+
+/// The kernel's per-CPU pointer.
+pub fn cpu_local() -> *mut () {
+    let p = read_sysreg!("tpidr_el1") as *const CpuLocal;
+    // SAFETY: TPIDR_EL1 points at this CPU's block from `init_boot_cpu` on.
+    unsafe { (*p).kernel }
+}
+
+/// Sets the kernel's per-CPU pointer.
+pub fn set_cpu_local(v: *mut ()) {
+    let p = read_sysreg!("tpidr_el1") as *mut CpuLocal;
+    // SAFETY: as above; only this CPU writes its block.
+    unsafe { (*p).kernel = v };
+}
+
+/// Waits for an interrupt with interrupts masked; WFI wakes on a pending
+/// interrupt even when it is masked.
+pub fn wait_for_interrupt() {
+    // SAFETY: WFI only idles.
+    unsafe { asm!("dsb sy", "wfi", options(nostack)) };
 }
 
 /// Ends a QEMU session through semihosting (`SYS_EXIT_EXTENDED`).

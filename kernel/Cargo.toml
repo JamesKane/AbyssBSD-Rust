@@ -22,13 +22,16 @@ demangle = { path = "../lib/demangle" }
 efi = { path = "../boot/efi" }
 elf = { path = "../lib/elf" }
 fb-console = { path = "../drivers/fb-console" }
+hal = { path = "../arch/hal" }
 ktest = { path = "../lib/ktest" }
 logring = { path = "../lib/logring" }
 pt = { path = "../lib/pt" }
 regs = { path = "../lib/regs" }
+sched = { path = "../sys/sched" }
 sync = { path = "../sys/sync" }
 uart-16550 = { path = "../drivers/uart-16550" }
 uart-pl011 = { path = "../drivers/uart-pl011" }
+vm = { path = "../sys/vm" }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 arch-x86_64 = { path = "../arch/x86_64" }

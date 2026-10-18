@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "xtask",
     "arch/aarch64",
+    "arch/hal",
     "arch/x86_64",
     "boot/bootproto",
     "boot/efi",
@@ -25,13 +26,16 @@ members = [
     "lib/logring",
     "lib/pt",
     "lib/regs",
+    "sys/sched",
     "sys/sync",
+    "sys/vm",
     "tools/syscallgen",
 ]
 # Firmware and kernel binaries only build for their own targets; everything
 # else runs on the host and is what a bare `cargo test` exercises.
 default-members = [
     "xtask",
+    "arch/hal",
     "boot/bootproto",
     "boot/efi",
     "drivers/fb-console",
@@ -51,7 +55,9 @@ default-members = [
     "lib/logring",
     "lib/pt",
     "lib/regs",
+    "sys/sched",
     "sys/sync",
+    "sys/vm",
     "tools/syscallgen",
 ]
 

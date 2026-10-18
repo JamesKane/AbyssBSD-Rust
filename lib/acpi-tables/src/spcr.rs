@@ -20,6 +20,11 @@ const BAUD_RATE: usize = 58;
 const MIN_LEN: usize = 63;
 
 /// Parses an SPCR table.
+///
+/// # Errors
+///
+/// [`Error::BadSignature`] for another table, [`Error::BadLength`] if it is
+/// too short, [`Error::Malformed`] for a bad address.
 pub fn parse(t: &Sdt<'_>) -> Result<Spcr, Error> {
     if t.signature() != *b"SPCR" {
         return Err(Error::BadSignature);

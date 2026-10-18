@@ -27,10 +27,10 @@ impl Mem {
     }
 
     /// Writes a table with a correct header and checksum.
-    pub(crate) fn table(&mut self, at: usize, sig: &[u8; 4], rev: u8, body: &[u8]) {
+    pub(crate) fn table(&mut self, at: usize, sig: [u8; 4], rev: u8, body: &[u8]) {
         let len = 36 + body.len();
         let mut t = std::vec![0u8; len];
-        t[..4].copy_from_slice(sig);
+        t[..4].copy_from_slice(&sig);
         t[4..8].copy_from_slice(&u32::try_from(len).unwrap().to_le_bytes());
         t[8] = rev;
         t[10..16].copy_from_slice(b"ABYSS ");
@@ -70,4 +70,133 @@ pub(crate) fn gas(space: u8, bits: u8, access: u8, addr: u64) -> [u8; 12] {
     g[3] = access;
     g[4..].copy_from_slice(&addr.to_le_bytes());
     g
+}
+
+/// Memory holding exactly one table at address 0.
+pub(crate) fn one(sig: [u8; 4], rev: u8, body: &[u8]) -> Mem {
+    let mut m = Mem(std::vec![0; 36 + body.len()]);
+    m.table(0, sig, rev, body);
+    m
+}
+
+/// A little-endian byte builder for table bodies.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct B(pub(crate) Vec<u8>);
+
+impl B {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+    pub(crate) fn u8(mut self, v: u8) -> Self {
+        self.0.push(v);
+        self
+    }
+    pub(crate) fn u16(mut self, v: u16) -> Self {
+        self.0.extend_from_slice(&v.to_le_bytes());
+        self
+    }
+    pub(crate) fn u32(mut self, v: u32) -> Self {
+        self.0.extend_from_slice(&v.to_le_bytes());
+        self
+    }
+    pub(crate) fn u64(mut self, v: u64) -> Self {
+        self.0.extend_from_slice(&v.to_le_bytes());
+        self
+    }
+    pub(crate) fn bytes(mut self, b: &[u8]) -> Self {
+        self.0.extend_from_slice(b);
+        self
+    }
+    pub(crate) fn zeros(mut self, n: usize) -> Self {
+        self.0.resize(self.0.len() + n, 0);
+        self
+    }
+    /// Appends a type/length-prefixed structure, with `len` as its u8 length.
+    pub(crate) fn entry(self, kind: u8, rest: &B) -> Self {
+        let len = u8::try_from(rest.0.len() + 2).unwrap();
+        self.u8(kind).u8(len).bytes(&rest.0)
+    }
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+/// Runs every parser and drains every iterator and helper over `t`; the
+/// point is that none of it panics or loops.
+pub(crate) fn exercise(t: &crate::Sdt<'_>) {
+    use crate::{fadt, gtdt, hpet, madt, mcfg, pptt, slit, srat};
+    if let Ok(m) = madt::parse(t) {
+        let _ = m.entries().count();
+        let _ = m.enabled_cpu_count();
+        let _ = (m.local_apic_address(), m.gic_distributor(), m.pcat_compat());
+    }
+    if let Ok(f) = fadt::parse(t) {
+        let _ = (f.facs(), f.dsdt(), f.pm_timer(), f.reset_register());
+        let _ = (f.pm1a_event_block(), f.gpe0_block(), f.gpe1_block());
+        let _ = (f.sleep_control_register(), f.hypervisor_vendor());
+        let _ = (f.iapc_boot_arch(), f.arm_boot_arch(), f.minor_version());
+    }
+    if let Ok(m) = mcfg::parse(t) {
+        let _ = m.regions().count();
+    }
+    let _ = hpet::parse(t);
+    if let Ok(g) = gtdt::parse(t) {
+        let _ = (g.virtual_el2(), g.cnt_read_base());
+        for p in g.platform_timers().flatten() {
+            if let gtdt::PlatformTimer::GtBlock(b) = p {
+                let _ = b.frames().count();
+            }
+        }
+    }
+    if let Ok(s) = srat::parse(t) {
+        let _ = s.entries().count();
+    }
+    if let Ok(s) = slit::parse(t) {
+        let n = s.locality_count();
+        let _ = (
+            s.distance(0, 0),
+            s.distance(n, 0),
+            s.distance(n.saturating_sub(1), n.saturating_sub(1)),
+        );
+    }
+    if let Ok(p) = pptt::parse(t) {
+        for n in p.nodes().flatten() {
+            if let pptt::PpttNode::ProcessorHierarchy(node) = n {
+                let _ = p.ancestors(&node).count();
+                let _ = node
+                    .private_resources()
+                    .filter_map(|r| p.node_at(r))
+                    .count();
+                let _ = p.topology(node.acpi_processor_id);
+            }
+        }
+    }
+}
+
+/// Exercises every truncation of `body` and a few thousand deterministic
+/// single- and multi-byte corruptions of it, as table `sig`.
+pub(crate) fn torture(sig: [u8; 4], rev: u8, body: &[u8]) {
+    for n in 0..=body.len() {
+        let m = one(sig, rev, &body[..n]);
+        exercise(&crate::Sdt::read(&&m, 0).unwrap());
+    }
+    let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut rnd = move || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x
+    };
+    if body.is_empty() {
+        return;
+    }
+    for _ in 0..2000 {
+        let mut b = body.to_vec();
+        for _ in 0..=rnd() % 4 {
+            let i = usize::try_from(rnd() % u64::try_from(b.len()).unwrap()).unwrap();
+            b[i] = rnd().to_le_bytes()[0];
+        }
+        let m = one(sig, rev, &b);
+        exercise(&crate::Sdt::read(&&m, 0).unwrap());
+    }
 }

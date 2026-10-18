@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause
+// Test code: terse bindings and long table-driven cases are clearer here.
+#![allow(clippy::many_single_char_names, clippy::too_many_lines)]
 
 extern crate std;
 use std::vec::Vec;
@@ -39,10 +41,10 @@ fn firmware(tables: &[(&[u8; 4], Vec<u8>)]) -> Mem {
     let mut xsdt = Vec::new();
     for (i, (sig, body)) in tables.iter().enumerate() {
         let at = 0x400 + i * 0x200;
-        m.table(at, sig, 2, body);
+        m.table(at, **sig, 2, body);
         xsdt.extend_from_slice(&u64::try_from(at).unwrap().to_le_bytes());
     }
-    m.table(0x100, b"XSDT", 1, &xsdt);
+    m.table(0x100, *b"XSDT", 1, &xsdt);
     m.rsdp(0x40, 0x100);
     m
 }
@@ -130,3 +132,13 @@ fn every_truncation_is_handled() {
         }
     }
 }
+
+mod corpus;
+mod fadt;
+mod gtdt;
+mod hpet;
+mod madt;
+mod mcfg;
+mod pptt;
+mod slit;
+mod srat;

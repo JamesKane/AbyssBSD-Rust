@@ -3,9 +3,9 @@
 //! if firmware ran there), exception vectors, MMU control, and the system
 //! registers the rest of the kernel needs.
 //!
-//! Phase 1 exposes a plain module interface that `arch-x86_64` mirrors name
-//! for name; it becomes the `arch/hal` trait set in Phase 2.
-
+//! The kernel crate uses this crate's modules directly (`arch-x86_64`
+//! mirrors them name for name); the primitives arch-neutral crates need are
+//! exported through the `arch/hal` hooks at the end of this file.
 //!
 //! Only [`cache`] builds for the UEFI target too; the loader uses it to make
 //! the kernel image visible to instruction fetch before jumping to it.
@@ -17,6 +17,8 @@ pub mod cache;
 
 #[cfg(target_os = "none")]
 pub mod backtrace;
+#[cfg(target_os = "none")]
+mod context;
 #[cfg(target_os = "none")]
 pub mod cpu;
 #[cfg(target_os = "none")]
@@ -88,5 +90,57 @@ impl<T> Racy<T> {
 
     pub(crate) fn get(&self) -> *mut T {
         self.0.get()
+    }
+}
+
+/// The `arch/hal` hooks.
+#[cfg(target_os = "none")]
+mod hal_hooks {
+    const _: hal::IrqDisableFn = abyss_hal_irq_disable;
+    const _: hal::IrqEnableFn = abyss_hal_irq_enable;
+    const _: hal::CpuIdFn = abyss_hal_cpu_id;
+    const _: hal::ContextInitFn = abyss_hal_context_init;
+    const _: hal::CpuLocalFn = abyss_hal_cpu_local;
+    const _: hal::SetCpuLocalFn = abyss_hal_set_cpu_local;
+    const _: hal::WaitForInterruptFn = abyss_hal_wait_for_interrupt;
+
+    #[unsafe(no_mangle)]
+    fn abyss_hal_irq_disable() -> bool {
+        crate::cpu::save_disable_interrupts()
+    }
+
+    #[unsafe(no_mangle)]
+    fn abyss_hal_irq_enable() {
+        crate::cpu::enable_interrupts();
+    }
+
+    #[unsafe(no_mangle)]
+    fn abyss_hal_cpu_id() -> u32 {
+        crate::cpu_id()
+    }
+
+    #[unsafe(no_mangle)]
+    fn abyss_hal_context_init(
+        c: &mut hal::Context,
+        stack_top: u64,
+        entry: hal::ThreadEntry,
+        arg: usize,
+    ) {
+        crate::context::init(c.words_mut(), stack_top, entry, arg);
+    }
+
+    #[unsafe(no_mangle)]
+    fn abyss_hal_cpu_local() -> *mut () {
+        crate::cpu::cpu_local()
+    }
+
+    #[unsafe(no_mangle)]
+    fn abyss_hal_set_cpu_local(p: *mut ()) {
+        crate::cpu::set_cpu_local(p);
+    }
+
+    #[unsafe(no_mangle)]
+    fn abyss_hal_wait_for_interrupt() {
+        crate::cpu::wait_for_interrupt();
     }
 }

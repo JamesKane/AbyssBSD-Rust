@@ -190,6 +190,17 @@ pub enum MapError {
     OutOfMemory,
 }
 
+/// Why an unmapping failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnmapError {
+    /// Address or length are not 4 KiB aligned.
+    Misaligned,
+    /// Part of the range is not mapped.
+    NotMapped(VirtAddr),
+    /// Part of the range is mapped by a 2 MiB or 1 GiB leaf.
+    LargePage(VirtAddr),
+}
+
 /// A page-table hierarchy rooted at one top-level frame.
 #[derive(Debug)]
 pub struct PageTable<F: Format> {
@@ -315,6 +326,80 @@ impl<F: Format> PageTable<F> {
         Ok(())
     }
 
+    /// Gives every root entry covering `[va, va + len)` a next-level
+    /// table, so that roots which copy this root's entries (the firmware
+    /// table, later address spaces) see mappings added there afterwards.
+    pub fn populate_root(
+        &mut self,
+        mem: &mut impl Memory,
+        va: VirtAddr,
+        len: u64,
+    ) -> Result<(), MapError> {
+        let span = 1u64 << 39;
+        let mut v = va.align_down(span);
+        let end = va.checked_add(len).ok_or(MapError::BadAddress(va))?;
+        while v < end {
+            let i = Level::ROOT.index(v);
+            let e = mem.frame(self.root)[i];
+            if !F::is_valid(e) {
+                let next = mem.alloc_frame().ok_or(MapError::OutOfMemory)?;
+                mem.frame(self.root)[i] = F::table(next);
+            } else if !F::is_table(e, Level::ROOT) {
+                return Err(MapError::AlreadyMapped(v));
+            }
+            match v.checked_add(span) {
+                Some(n) => v = n,
+                None => break,
+            }
+        }
+        Ok(())
+    }
+
+    /// Removes the 4 KiB mappings covering `[va, va + len)`, passing each
+    /// unmapped physical page to `f`. Intermediate tables stay in place.
+    ///
+    /// The range must be mapped entirely with 4 KiB leaves; on error,
+    /// pages before the failure are already unmapped. The caller flushes
+    /// the TLB.
+    pub fn unmap(
+        &mut self,
+        mem: &mut impl Memory,
+        va: VirtAddr,
+        len: u64,
+        mut f: impl FnMut(PhysAddr),
+    ) -> Result<(), UnmapError> {
+        let small = PageSize::Size4K.bytes();
+        if !va.is_aligned(small) || !len.is_multiple_of(small) {
+            return Err(UnmapError::Misaligned);
+        }
+        let mut done = 0;
+        while done < len {
+            let v = va + done;
+            let mut table = self.root;
+            let mut level = Level::ROOT;
+            while level.0 > 1 {
+                let e = mem.frame(table)[level.index(v)];
+                if !F::is_valid(e) {
+                    return Err(UnmapError::NotMapped(v));
+                }
+                if !F::is_table(e, level) {
+                    return Err(UnmapError::LargePage(v));
+                }
+                table = F::address(e, level);
+                level = Level(level.0 - 1);
+            }
+            let slot = &mut mem.frame(table)[level.index(v)];
+            if !F::is_valid(*slot) {
+                return Err(UnmapError::NotMapped(v));
+            }
+            let pa = F::address(*slot, level);
+            *slot = 0;
+            f(pa);
+            done += small;
+        }
+        Ok(())
+    }
+
     /// Looks up the mapping for `va`.
     pub fn translate(&self, mem: &mut impl Memory, va: VirtAddr) -> Option<Translation> {
         let mut table = self.root;
@@ -388,6 +473,72 @@ mod tests {
         fn frame(&mut self, pa: PhysAddr) -> &mut Frame {
             &mut self.frames[usize::try_from(pa.get() / 4096 - 1).unwrap()]
         }
+    }
+
+    fn unmaps<F: Format>() {
+        let mut mem = VecMemory::default();
+        let mut pt = PageTable::<F>::new(&mut mem, PageSize::Size1G).unwrap();
+        let va = VirtAddr::new(0xffff_c000_0000_0000);
+        pt.map(
+            &mut mem,
+            va,
+            PhysAddr::new(0x10_0000),
+            0x3000,
+            Attrs::KERNEL_RW,
+        )
+        .unwrap();
+        let mut freed = Vec::new();
+        pt.unmap(&mut mem, va + 0x1000, 0x2000, |pa| freed.push(pa.get()))
+            .unwrap();
+        assert_eq!(freed, [0x10_1000, 0x10_2000]);
+        assert!(pt.translate(&mut mem, va).is_some());
+        assert_eq!(pt.translate(&mut mem, va + 0x1000), None);
+        assert_eq!(
+            pt.unmap(&mut mem, va + 0x1000, 0x1000, |_| {}),
+            Err(UnmapError::NotMapped(va + 0x1000))
+        );
+        // Remapping the freed range works.
+        pt.map(
+            &mut mem,
+            va + 0x1000,
+            PhysAddr::new(0x20_0000),
+            0x1000,
+            Attrs::KERNEL_RW,
+        )
+        .unwrap();
+        let big = VirtAddr::new(0xffff_8000_0000_0000);
+        pt.map(&mut mem, big, PhysAddr::ZERO, 2 << 20, Attrs::KERNEL_RW)
+            .unwrap();
+        assert_eq!(
+            pt.unmap(&mut mem, big, 0x1000, |_| {}),
+            Err(UnmapError::LargePage(big))
+        );
+    }
+
+    #[test]
+    fn populates_root_entries() {
+        let mut mem = VecMemory::default();
+        let mut pt = PageTable::<crate::x86_64::X86_64>::new(&mut mem, PageSize::Size4K).unwrap();
+        let va = VirtAddr::new(0xffff_c000_0000_0000);
+        pt.populate_root(&mut mem, va, 3 << 39).unwrap();
+        assert_eq!(pt.frames_used(&mut mem), 4);
+        // Idempotent, and mappings land in the populated tables.
+        pt.populate_root(&mut mem, va, 3 << 39).unwrap();
+        pt.map(
+            &mut mem,
+            va,
+            PhysAddr::new(0x1000),
+            0x1000,
+            Attrs::KERNEL_RW,
+        )
+        .unwrap();
+        assert_eq!(pt.frames_used(&mut mem), 6);
+    }
+
+    #[test]
+    fn unmap_both_formats() {
+        unmaps::<crate::x86_64::X86_64>();
+        unmaps::<crate::aarch64::Aarch64>();
     }
 
     fn exercise<F: Format>() {

@@ -57,6 +57,8 @@ pub(crate) struct CpuLocal {
     self_ptr: *const CpuLocal,
     /// Logical CPU number.
     cpu: u32,
+    /// The kernel's per-CPU data (`hal::cpu_local`).
+    kernel: *mut (),
 }
 
 // Boot CPU state. Written once in `init_boot_cpu`, on the boot CPU, before
@@ -67,6 +69,7 @@ static IST_STACKS: Racy<[Stack; 3]> = Racy::new([const { Stack([0; IST_STACK_SIZ
 static CPU0: Racy<CpuLocal> = Racy::new(CpuLocal {
     self_ptr: core::ptr::null(),
     cpu: 0,
+    kernel: core::ptr::null_mut(),
 });
 
 /// A code or data descriptor: present, DPL, S=1, and type bits.
@@ -156,4 +159,18 @@ pub fn cpu_id() -> u32 {
     // `cpu` is at offset 8.
     unsafe { asm!("mov {:e}, gs:[8]", out(reg) id, options(nostack, readonly)) };
     id
+}
+
+/// The kernel's per-CPU pointer.
+pub(crate) fn cpu_local() -> *mut () {
+    let p: *mut ();
+    // SAFETY: as for `cpu_id`; `kernel` is at offset 16.
+    unsafe { asm!("mov {}, gs:[16]", out(reg) p, options(nostack, readonly)) };
+    p
+}
+
+/// Sets the kernel's per-CPU pointer.
+pub(crate) fn set_cpu_local(p: *mut ()) {
+    // SAFETY: as for `cpu_local`; only this CPU writes its block.
+    unsafe { asm!("mov gs:[16], {}", in(reg) p, options(nostack)) };
 }

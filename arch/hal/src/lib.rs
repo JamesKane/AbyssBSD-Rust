@@ -1,0 +1,233 @@
+// SPDX-License-Identifier: BSD-2-Clause
+//! The architecture seam: the CPU primitives that arch-neutral kernel
+//! crates (`sys/*`, `drivers/*`) need, without naming an architecture.
+//!
+//! Binding is static and happens at link time: this crate declares
+//! `extern "Rust"` hooks, and the one `arch/<isa>` crate linked into the
+//! kernel defines them (checked against the `*Fn` types below). On the
+//! host, where `sys/*` crates run their unit tests, the hooks are inert:
+//! one CPU, interrupts always "off".
+//!
+//! Richer per-architecture interfaces (page tables, trap frames, context
+//! switching) are reached by the kernel crate through the concrete arch
+//! crate; this crate holds only what lower layers must share.
+
+#![no_std]
+#![deny(unsafe_op_in_unsafe_fn)]
+
+use core::fmt;
+
+/// A logical CPU number, dense from 0 (the boot CPU).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CpuId(pub u32);
+
+impl CpuId {
+    /// The boot CPU.
+    pub const BOOT: Self = Self(0);
+
+    /// The number as an index.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl fmt::Display for CpuId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "cpu{}", self.0)
+    }
+}
+
+/// The most CPUs the kernel supports.
+pub const MAX_CPUS: usize = 64;
+
+/// Saved callee-saved register state of a thread that is not running.
+/// The layout is the arch crate's business; 16 words fit both ISAs.
+#[repr(C, align(16))]
+#[derive(Clone, Debug, Default)]
+pub struct Context {
+    regs: [u64; 16],
+}
+
+impl Context {
+    /// The raw words, for the arch crate that defines their meaning.
+    pub fn words_mut(&mut self) -> &mut [u64; 16] {
+        &mut self.regs
+    }
+}
+
+/// A new thread's first function: called with the argument given to
+/// [`Context::init`], on the fresh stack, with interrupts masked.
+pub type ThreadEntry = extern "C" fn(usize) -> !;
+
+impl Context {
+    /// A context that, when switched to, calls `entry(arg)` on the stack
+    /// whose top (16-byte aligned) is `stack_top`.
+    #[must_use]
+    pub fn init(stack_top: u64, entry: ThreadEntry, arg: usize) -> Self {
+        #[cfg_attr(not(target_os = "none"), allow(unused_mut))]
+        let mut c = Self::default();
+        #[cfg(target_os = "none")]
+        // SAFETY: defined by the linked arch crate with this signature.
+        unsafe {
+            abyss_hal_context_init(&mut c, stack_top, entry, arg);
+        }
+        #[cfg(not(target_os = "none"))]
+        let _ = (stack_top, entry, arg);
+        c
+    }
+}
+
+/// Saves the current thread's registers into `from` and resumes `to`.
+/// Returns when something switches back to `from`.
+///
+/// # Safety
+///
+/// Interrupts must be masked. `to` must hold a context saved by this
+/// function or made by [`Context::init`], whose stack is still mapped and
+/// not in use by any other CPU, and `from` must stay valid until it is
+/// resumed.
+pub unsafe fn switch(from: *mut Context, to: *const Context) {
+    // SAFETY: per the caller's contract; the symbol is the arch crate's
+    // assembly routine with this C signature.
+    #[cfg(target_os = "none")]
+    unsafe {
+        abyss_context_switch(from, to);
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = (from, to);
+        unimplemented!("context switching needs a kernel target");
+    }
+}
+
+/// The per-CPU pointer the kernel keeps for this CPU (null until set).
+#[inline]
+#[must_use]
+pub fn cpu_local() -> *mut () {
+    #[cfg(target_os = "none")]
+    // SAFETY: defined by the linked arch crate with this signature.
+    return unsafe { abyss_hal_cpu_local() };
+    #[cfg(not(target_os = "none"))]
+    core::ptr::null_mut()
+}
+
+/// Sets this CPU's kernel per-CPU pointer.
+///
+/// # Safety
+///
+/// `p` must stay valid for as long as anything on this CPU may read it.
+pub unsafe fn set_cpu_local(p: *mut ()) {
+    #[cfg(target_os = "none")]
+    // SAFETY: defined by the linked arch crate with this signature.
+    unsafe {
+        abyss_hal_set_cpu_local(p);
+    }
+    #[cfg(not(target_os = "none"))]
+    let _ = p;
+}
+
+/// Waits until an interrupt is pending. Call with interrupts masked; it
+/// returns with them masked, possibly after servicing the interrupt.
+pub fn wait_for_interrupt() {
+    #[cfg(target_os = "none")]
+    // SAFETY: defined by the linked arch crate with this signature.
+    unsafe {
+        abyss_hal_wait_for_interrupt();
+    }
+}
+
+/// Signature of `abyss_hal_context_init`.
+pub type ContextInitFn = fn(&mut Context, u64, ThreadEntry, usize);
+/// Signature of `abyss_hal_cpu_local`.
+pub type CpuLocalFn = fn() -> *mut ();
+/// Signature of `abyss_hal_set_cpu_local`.
+pub type SetCpuLocalFn = fn(*mut ());
+/// Signature of `abyss_hal_wait_for_interrupt`.
+pub type WaitForInterruptFn = fn();
+
+/// Signature of `abyss_hal_irq_disable`: masks interrupts on this CPU and
+/// returns whether they were enabled.
+pub type IrqDisableFn = fn() -> bool;
+/// Signature of `abyss_hal_irq_enable`: unmasks interrupts on this CPU.
+pub type IrqEnableFn = fn();
+/// Signature of `abyss_hal_cpu_id`: the current CPU's number.
+pub type CpuIdFn = fn() -> u32;
+
+#[cfg(target_os = "none")]
+unsafe extern "Rust" {
+    fn abyss_hal_irq_disable() -> bool;
+    fn abyss_hal_irq_enable();
+    fn abyss_hal_cpu_id() -> u32;
+    fn abyss_hal_context_init(c: &mut Context, stack_top: u64, entry: ThreadEntry, arg: usize);
+    fn abyss_hal_cpu_local() -> *mut ();
+    fn abyss_hal_set_cpu_local(p: *mut ());
+    fn abyss_hal_wait_for_interrupt();
+}
+
+#[cfg(target_os = "none")]
+unsafe extern "C" {
+    fn abyss_context_switch(from: *mut Context, to: *const Context);
+}
+
+/// Interrupt masking on the current CPU.
+pub mod irq {
+    /// Interrupt state saved by [`disable`]; restore it with [`restore`].
+    #[must_use = "interrupts stay masked until the state is restored"]
+    #[derive(Debug)]
+    pub struct Saved {
+        were_enabled: bool,
+    }
+
+    /// Masks interrupts, returning the previous state.
+    #[inline]
+    pub fn disable() -> Saved {
+        #[cfg(target_os = "none")]
+        // SAFETY: defined by the linked arch crate with this signature.
+        let were_enabled = unsafe { super::abyss_hal_irq_disable() };
+        #[cfg(not(target_os = "none"))]
+        let were_enabled = false;
+        Saved { were_enabled }
+    }
+
+    /// Restores the state [`disable`] saved.
+    #[inline]
+    pub fn restore(saved: Saved) {
+        if saved.were_enabled {
+            // SAFETY: as above.
+            #[cfg(target_os = "none")]
+            unsafe {
+                super::abyss_hal_irq_enable();
+            }
+        }
+    }
+
+    /// Unmasks interrupts unconditionally (a new thread's first step).
+    #[inline]
+    pub fn enable() {
+        #[cfg(target_os = "none")]
+        // SAFETY: defined by the linked arch crate with this signature.
+        unsafe {
+            super::abyss_hal_irq_enable();
+        }
+    }
+
+    /// Whether `saved` recorded interrupts as enabled.
+    #[must_use]
+    pub fn were_enabled(saved: &Saved) -> bool {
+        saved.were_enabled
+    }
+}
+
+/// The current CPU. Only stable while the caller cannot migrate
+/// (interrupts masked, or preemption disabled).
+#[inline]
+#[must_use]
+pub fn cpu_id() -> CpuId {
+    #[cfg(target_os = "none")]
+    // SAFETY: defined by the linked arch crate with this signature.
+    let id = unsafe { abyss_hal_cpu_id() };
+    #[cfg(not(target_os = "none"))]
+    let id = 0;
+    CpuId(id)
+}

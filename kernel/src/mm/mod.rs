@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! Early memory management: the physical memory map, a boot-time frame
-//! allocator, and the kernel's own page tables.
+//! Memory management glue: the boot-time frame allocator, the kernel's own
+//! page tables, and the hand-over to `sys/vm`'s buddy allocator and heap.
 //!
 //! The kernel tables replace the loader's: the DMAP covers every RAM
 //! range, the image is mapped W^X with an unmapped guard page under the
@@ -8,29 +8,41 @@
 //! the identity map is gone. A second table maps the UEFI runtime regions
 //! 1:1 for firmware calls.
 //!
-//! The frame allocator here hands out pages in address order and never
-//! frees; the buddy allocator replaces it in Phase 2 (docs/ROADMAP.md).
+//! Until the buddy allocator exists, page-table frames come from
+//! [`BootFrames`], which hands out free frames in address order. [`init`]
+//! then carves the `VmPage` array out of free memory, gives every frame
+//! nobody has used yet to the buddy allocator, and retires the boot
+//! allocator.
+
+mod heap;
+pub(crate) mod kstack;
 
 use addr::{PhysAddr, VirtAddr};
-use bootproto::layout::dmap;
+use bootproto::layout::{KVA_BASE, KVA_SIZE, dmap};
 use bootproto::{BootInfo, MemoryKind, MemoryRegion};
 use pt::{Attrs, Frame, PageTable};
 use sync::SpinLock;
+use vm::phys::{self, DomainId, PhysAllocator, Segment, VmPage};
+use vm::{Order, Pfn};
 
 use crate::arch;
+
+pub(crate) use heap::heap_stats;
 
 type Format = arch::mmu::Format;
 
 /// Frames below this are left alone (x86 real-mode trampolines later).
-const LOW_RESERVE: u64 = 1 << 20;
+pub(crate) const LOW_RESERVE: u64 = 1 << 20;
 
-/// Hands out free frames in address order.
+/// Hands out free frames in address order until the buddy allocator takes
+/// over.
 #[derive(Debug)]
-pub(crate) struct BootFrames {
+struct BootFrames {
     region: usize,
     next: u64,
     /// Frames handed out so far.
-    pub(crate) used: u64,
+    used: u64,
+    retired: bool,
 }
 
 impl BootFrames {
@@ -39,10 +51,14 @@ impl BootFrames {
             region: 0,
             next: 0,
             used: 0,
+            retired: false,
         }
     }
 
     fn take(&mut self) -> Option<PhysAddr> {
+        if self.retired {
+            return None;
+        }
         let map = crate::boot::memory_map();
         while let Some(r) = map.get(self.region) {
             let range = r.range();
@@ -56,24 +72,84 @@ impl BootFrames {
         }
         None
     }
+
+    /// The part of free region `i` this allocator has not handed out.
+    fn unused_part(&self, i: usize, r: &MemoryRegion) -> Option<(u64, u64)> {
+        if r.kind != MemoryKind::Free || i < self.region {
+            return None;
+        }
+        let range = r.range();
+        let mut start = range.start.get().max(LOW_RESERVE);
+        if i == self.region {
+            start = start.max(self.next);
+        }
+        (start < range.end.get()).then_some((start, range.end.get()))
+    }
+
+    /// `pages` contiguous frames from the top of the highest free region
+    /// that has room, outside what [`BootFrames::take`] handed out. Only
+    /// valid as the last allocation before retiring.
+    fn carve(&mut self, pages: u64) -> Option<PhysAddr> {
+        let map = crate::boot::memory_map();
+        let bytes = pages * 4096;
+        map.iter().enumerate().rev().find_map(|(i, r)| {
+            let (start, end) = self.unused_part(i, r)?;
+            (end - start >= bytes).then(|| PhysAddr::new(end - bytes))
+        })
+    }
 }
 
 static FRAMES: SpinLock<BootFrames> = SpinLock::new(BootFrames::new());
 
+/// The buddy allocator, once [`init`] has built it.
+static PHYS: SpinLock<Option<PhysAllocator<'static>>> = SpinLock::new(None);
+
+/// Allocates a block of `order` from the buddy allocator.
+pub(crate) fn alloc_pages(order: Order) -> Option<PhysAddr> {
+    PHYS.lock()
+        .as_mut()?
+        .alloc(order, DomainId(0))
+        .map(Pfn::addr)
+}
+
+/// Returns a block from [`alloc_pages`]. A bad free is a kernel bug.
+pub(crate) fn free_pages(pa: PhysAddr, order: Order) {
+    let mut phys = PHYS.lock();
+    let phys = phys
+        .as_mut()
+        .expect("free_pages before the buddy allocator");
+    if let Err(e) = phys.free(Pfn::containing(pa), order) {
+        panic!("free_pages: {e}");
+    }
+}
+
+/// Frame counts from the buddy allocator.
+pub(crate) fn phys_stats() -> phys::Stats {
+    PHYS.lock()
+        .as_ref()
+        .map(PhysAllocator::stats)
+        .unwrap_or_default()
+}
+
+/// Page-table frames: from the boot allocator, then the buddy allocator.
 struct Frames;
 
 impl pt::Memory for Frames {
     fn alloc_frame(&mut self) -> Option<PhysAddr> {
-        let pa = FRAMES.lock().take()?;
+        let pa = match alloc_pages(Order::ZERO) {
+            Some(pa) => pa,
+            None => FRAMES.lock().take()?,
+        };
         self.frame(pa).fill(0);
         Some(pa)
     }
 
     fn frame(&mut self, pa: PhysAddr) -> &mut Frame {
         let va = dmap(pa).expect("page-table frame outside the DMAP");
-        // SAFETY: `pa` is a page-table frame (from `alloc_frame`, or the
-        // root being copied), RAM in the DMAP, used only by the table
-        // builder while it runs.
+        // SAFETY: `pa` is a page-table frame (from `alloc_frame`, or a
+        // root being read), RAM in the DMAP, used only by the table code
+        // while it holds the kernel map lock (or during single-threaded
+        // init).
         unsafe { &mut *(va.get() as *mut Frame) }
     }
 }
@@ -113,10 +189,12 @@ pub(crate) struct Tables {
     pub(crate) firmware_root: PhysAddr,
 }
 
-static KERNEL_ROOT: SpinLock<Option<PhysAddr>> = SpinLock::new(None);
+/// The live kernel page table. Changes to it (kernel stacks, `kmem`) go
+/// through this lock.
+static KERNEL_MAP: SpinLock<Option<PageTable<Format>>> = SpinLock::new(None);
 
-/// Summarizes the memory map, builds the kernel tables, and switches to
-/// them.
+/// Summarizes the memory map, builds the kernel tables, switches to them,
+/// and starts the buddy allocator.
 pub(crate) fn init(info: &BootInfo) -> Tables {
     let map = crate::boot::memory_map();
     let pages =
@@ -186,26 +264,156 @@ pub(crate) fn init(info: &BootInfo) -> Tables {
         map_or_die(&mut kernel, va, pa, len, Attrs::FRAMEBUFFER);
     }
 
+    // Kernel virtual memory gets its top-level tables now, before the
+    // firmware table copies the upper half.
+    kernel
+        .populate_root(&mut mem, VirtAddr::new(KVA_BASE), KVA_SIZE)
+        .expect("KVA tables");
+
     let firmware = firmware_table(&mut mem, &kernel, map);
 
     // SAFETY: the new table maps the image (code, data, the boot stack),
     // the DMAP (boot info, page tables), and the console devices at the
     // addresses in use now.
     unsafe { arch::mmu::install_kernel_tables(kernel.root()) };
-    *KERNEL_ROOT.lock() = Some(kernel.root());
+    *KERNEL_MAP.lock() = Some(kernel);
     let used = FRAMES.lock().used;
     kprintln!("page tables: {} KiB in {used} frames", used * 4);
+
+    init_phys(map);
     Tables {
         firmware_root: firmware,
+    }
+}
+
+/// Builds the buddy allocator over all RAM above [`LOW_RESERVE`] and hands
+/// it every free frame the boot allocator has not used.
+fn init_phys(map: &[MemoryRegion]) {
+    let mut segs = [Segment {
+        start: Pfn(0),
+        end: Pfn(0),
+        domain: DomainId(0),
+    }; phys::MAX_SEGMENTS];
+    let mut n = 0;
+    for (start, end) in ram_ranges(map) {
+        let start = Pfn::containing(PhysAddr::new(start.get().max(LOW_RESERVE)));
+        let end = Pfn::containing(end);
+        if start >= end {
+            continue;
+        }
+        if n == segs.len() {
+            kprintln!("phys: more than {n} RAM ranges; ignoring the rest");
+            break;
+        }
+        segs[n] = Segment {
+            start,
+            end,
+            domain: DomainId(0),
+        };
+        n += 1;
+    }
+    let segs = &segs[..n];
+    let entries = phys::pages_needed(segs);
+    let array_pages = (entries * size_of::<VmPage>() as u64).div_ceil(4096);
+
+    let mut frames = FRAMES.lock();
+    let array = frames
+        .carve(array_pages)
+        .expect("no room for the page array");
+    let va = dmap(array).expect("page array outside the DMAP");
+    // SAFETY: `carve` reserved these frames (free RAM in the DMAP) for the
+    // array, and the boot allocator is retired below, so nothing else will
+    // ever use them.
+    let pages = unsafe {
+        core::slice::from_raw_parts_mut(
+            va.get() as *mut VmPage,
+            usize::try_from(entries).expect("page array size"),
+        )
+    };
+    let mut alloc = PhysAllocator::new(pages, segs).expect("buddy allocator setup");
+    let carved = (array.get(), array.get() + array_pages * 4096);
+    for (i, r) in map.iter().enumerate() {
+        let Some((start, end)) = frames.unused_part(i, r) else {
+            continue;
+        };
+        for (s, e) in [(start, end.min(carved.0)), (start.max(carved.1), end)] {
+            if s < e {
+                alloc.add_free(
+                    Pfn::containing(PhysAddr::new(s)),
+                    Pfn::containing(PhysAddr::new(e)),
+                );
+            }
+        }
+    }
+    frames.retired = true;
+    drop(frames);
+    let stats = alloc.stats();
+    kprintln!(
+        "phys: {} MiB in {n} segments, {} MiB free, page array {} KiB",
+        (stats.managed * 4096) >> 20,
+        (stats.free * 4096) >> 20,
+        array_pages * 4
+    );
+    *PHYS.lock() = Some(alloc);
+}
+
+/// Maps `[va, va + len)` to fresh frames in the kernel table, zeroed. On
+/// failure nothing stays mapped.
+pub(crate) fn map_fresh(va: VirtAddr, len: u64, attrs: Attrs) -> Result<(), pt::MapError> {
+    let mut map = KERNEL_MAP.lock();
+    let table = map.as_mut().expect("kernel map");
+    let mut done = 0;
+    while done < len {
+        let r = Frames
+            .alloc_frame_checked()
+            .ok_or(pt::MapError::OutOfMemory)
+            .and_then(|pa| {
+                table
+                    .map(&mut Frames, va + done, pa, 4096, attrs)
+                    .inspect_err(|_| {
+                        free_pages(pa, Order::ZERO);
+                    })
+            });
+        if let Err(e) = r {
+            unmap_locked(table, va, done);
+            return Err(e);
+        }
+        done += 4096;
+    }
+    arch::mmu::sync_new_mappings();
+    Ok(())
+}
+
+/// Unmaps `[va, va + len)` from the kernel table and frees the frames.
+pub(crate) fn unmap_and_free(va: VirtAddr, len: u64) {
+    let mut map = KERNEL_MAP.lock();
+    unmap_locked(map.as_mut().expect("kernel map"), va, len);
+}
+
+fn unmap_locked(table: &mut PageTable<Format>, va: VirtAddr, len: u64) {
+    table
+        .unmap(&mut Frames, va, len, |pa| free_pages(pa, Order::ZERO))
+        .unwrap_or_else(|e| panic!("unmapping {va:?}+{len:#x}: {e:?}"));
+    let mut off = 0;
+    while off < len {
+        arch::mmu::flush_page(va + off);
+        off += 4096;
+    }
+}
+
+impl Frames {
+    /// A zeroed frame from the buddy allocator only (no boot fallback).
+    fn alloc_frame_checked(&mut self) -> Option<PhysAddr> {
+        let pa = alloc_pages(Order::ZERO)?;
+        pt::Memory::frame(self, pa).fill(0);
+        Some(pa)
     }
 }
 
 /// Looks up `va` in the live kernel tables.
 #[cfg_attr(not(feature = "ktest"), allow(dead_code))]
 pub(crate) fn translate(va: VirtAddr) -> Option<pt::Translation> {
-    let root = (*KERNEL_ROOT.lock())?;
-    // Rebuild a handle on the live root; `translate` only reads.
-    PageTable::<Format>::from_root(root).translate(&mut Frames, va)
+    KERNEL_MAP.lock().as_ref()?.translate(&mut Frames, va)
 }
 
 /// The page-aligned span covering `[virt, virt + size)`.
