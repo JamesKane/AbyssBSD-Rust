@@ -1719,3 +1719,28 @@ ktest! {
         );
     }
 }
+
+ktest! {
+    fn acpi_power_button() {
+        use core::sync::atomic::Ordering;
+        use crate::acpi_bus::{POWER_BUTTON_PRESSES, POWER_BUTTON_TEST};
+        if crate::boot::value("abyss.test.power_button") != Some("1") {
+            kprintln!("(no way to press this VM's power button)");
+            return;
+        }
+        let s = cx();
+        // Counted, not acted on, from now to the end of the run.
+        POWER_BUTTON_TEST.store(true, Ordering::Release);
+        let before = POWER_BUTTON_PRESSES.load(Ordering::Acquire);
+        // q35: a fixed PM1 event on the SCI. arm64 virt: a GED interrupt
+        // whose _EVT notifies the PNP0C0C device.
+        kprintln!("{}", ktest::POWER_BUTTON_MARKER);
+        let start = crate::time::counter();
+        let ms = || (crate::time::counter() - start) * 1000 / crate::time::frequency();
+        while POWER_BUTTON_PRESSES.load(Ordering::Acquire) == before && ms() < 10_000 {
+            crate::time::sleep_ns(&s, 1_000_000);
+        }
+        assert!(POWER_BUTTON_PRESSES.load(Ordering::Acquire) > before, "no press arrived");
+        kprintln!("power button press arrived after {} ms", ms());
+    }
+}

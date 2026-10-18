@@ -27,6 +27,9 @@ pub const BEGIN_MARKER: &str = "ABYSS-TEST-BEGIN";
 pub const PASS_MARKER: &str = "ABYSS-TEST-RESULT: PASS";
 /// Printed when a test failed or the image panicked.
 pub const FAIL_MARKER: &str = "ABYSS-TEST-RESULT: FAIL";
+/// Printed by a test that wants the harness to press the VM's power
+/// button (QEMU's `system_powerdown`).
+pub const POWER_BUTTON_MARKER: &str = "ABYSS-TEST-PRESS-POWER-BUTTON";
 
 /// One registered test.
 #[derive(Debug)]

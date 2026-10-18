@@ -405,8 +405,18 @@ impl Vm {
         verdict_of: &dyn Fn(&str) -> Option<Outcome>,
     ) -> Result<Captured> {
         let mut cmd = self.command()?;
+        // A QMP socket, for tests that press the power button.
+        let qmp = (self.vmm == Vmm::Qemu && self.test_devices).then(|| {
+            let sock = log.with_extension("qmp");
+            let _ = fs::remove_file(&sock);
+            sock
+        });
         if self.vmm == Vmm::Qemu {
             cmd.args(["-serial", "stdio", "-monitor", "none"]);
+        }
+        if let Some(sock) = &qmp {
+            cmd.arg("-qmp")
+                .arg(format!("unix:{},server=on,wait=off", sock.display()));
         }
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -440,6 +450,13 @@ impl Vm {
                         println!("  | {line}");
                     }
                     verdict = verdict_of(&line);
+                    if let Some(sock) = qmp
+                        .as_ref()
+                        .filter(|_| line.contains(ktest::POWER_BUTTON_MARKER))
+                        && let Err(e) = press_power_button(sock)
+                    {
+                        println!("  (could not press the power button: {e})");
+                    }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => verdict = Some(Outcome::TimedOut),
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -469,6 +486,25 @@ impl Vm {
             exit_code,
         })
     }
+}
+
+/// Presses the VM's power button through its QMP socket.
+fn press_power_button(sock: &Path) -> Result<()> {
+    use std::io::Read;
+    use std::os::unix::net::UnixStream;
+    let mut s = UnixStream::connect(sock)?;
+    s.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let mut buf = [0u8; 4096];
+    // The greeting, then each command's reply.
+    let _ = s.read(&mut buf)?;
+    for cmd in [
+        r#"{"execute":"qmp_capabilities"}"#,
+        r#"{"execute":"system_powerdown"}"#,
+    ] {
+        writeln!(s, "{cmd}")?;
+        let _ = s.read(&mut buf)?;
+    }
+    Ok(())
 }
 
 /// The ktest pass and fail markers.

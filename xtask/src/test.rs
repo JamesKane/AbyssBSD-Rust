@@ -224,8 +224,9 @@ fn boot(case: &BootCase, release: bool, verbose: bool) -> Result<std::result::Re
     // bhyve has no exit device: the kernel powers off after a pass.
     let base = match (case.vmm, case.warm_reset) {
         (Vmm::Bhyve, _) => "",
-        (Vmm::Qemu, true) => "abyss.qemu_exit=1 abyss.test.warm_reset=1",
-        (Vmm::Qemu, false) => "abyss.qemu_exit=1",
+        // QEMU runs can press the power button (QMP).
+        (Vmm::Qemu, true) => "abyss.qemu_exit=1 abyss.test.warm_reset=1 abyss.test.power_button=1",
+        (Vmm::Qemu, false) => "abyss.qemu_exit=1 abyss.test.power_button=1",
     };
     let cmdline = format!("{base} {}", case.cmdline);
     let cmdline = cmdline.trim();

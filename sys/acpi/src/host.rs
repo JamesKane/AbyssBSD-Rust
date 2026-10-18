@@ -14,6 +14,8 @@ use crate::Ops;
 pub(crate) struct AmlHost<'a> {
     pub(crate) ops: &'static dyn Ops,
     pub(crate) s: &'a Sleepable,
+    /// `Notify`s sent during the current job, delivered after it.
+    pub(crate) notified: alloc::vec::Vec<(NodeId, u64)>,
 }
 
 fn bytes(w: AccessWidth) -> u8 {
@@ -129,8 +131,8 @@ impl Host for AmlHost<'_> {
         self.ops.timer_100ns()
     }
 
-    fn notify(&mut self, _node: NodeId, _value: u64) {
-        // Notify handlers arrive with the drivers that register them.
+    fn notify(&mut self, node: NodeId, value: u64) {
+        self.notified.push((node, value));
     }
 
     fn fatal(&mut self, kind: u8, code: u32, arg: u64) {

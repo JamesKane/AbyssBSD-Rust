@@ -5,12 +5,17 @@
 //! The interpreter is single-threaded, so serializing on one thread costs
 //! nothing, and that thread gets a stack sized for the deepest firmware we
 //! know (the Radxa Q8B's AML needs about 13 KiB; DRIVER-MODEL.md §5.1).
+//!
+//! `Notify` from AML is queued while a job runs and delivered to the
+//! node's handlers after it, still on the AML thread: handlers must not
+//! wait on the service themselves.
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 
-use aml::{Config, Host, Interpreter, Limits};
+use aml::{Config, Host, Interpreter, Limits, NodeId};
 use sched::{Sleepable, WaitQueue};
 use sync::{Once, SpinLock};
 
@@ -22,11 +27,21 @@ const STACK: usize = 64 * 1024;
 
 type Job = Box<dyn FnOnce(&mut Interpreter, &mut dyn Host) + Send>;
 
+/// A `Notify` handler: called with the notification value, on the AML
+/// thread.
+pub type NotifyFn = Arc<dyn Fn(u64) + Send + Sync>;
+
+/// A registered handler, for [`Service::remove_notify`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NotifyId(u64);
+
 /// The running service.
 pub struct Service {
     ops: &'static dyn Ops,
     jobs: SpinLock<VecDeque<Job>>,
     queue: WaitQueue,
+    handlers: SpinLock<Vec<(NotifyId, NodeId, NotifyFn)>>,
+    next_handler: core::sync::atomic::AtomicU64,
 }
 
 impl core::fmt::Debug for Service {
@@ -71,6 +86,8 @@ pub fn init(ops: &'static dyn Ops, s: &Sleepable) -> Option<LoadSummary> {
             ops,
             jobs: SpinLock::new(VecDeque::new()),
             queue: WaitQueue::new(),
+            handlers: SpinLock::new(Vec::new()),
+            next_handler: core::sync::atomic::AtomicU64::new(0),
         })
         .is_err()
     {
@@ -109,7 +126,11 @@ impl Service {
             ..Config::default()
         };
         let mut interp = Interpreter::new(config);
-        let mut host = AmlHost { ops: self.ops, s };
+        let mut host = AmlHost {
+            ops: self.ops,
+            s,
+            notified: Vec::new(),
+        };
         loop {
             let mut job = None;
             self.queue.wait_until(s, || {
@@ -119,7 +140,35 @@ impl Service {
             if let Some(j) = job {
                 j(&mut interp, &mut host);
             }
+            for (node, value) in core::mem::take(&mut host.notified) {
+                let handlers: Vec<NotifyFn> = self
+                    .handlers
+                    .lock()
+                    .iter()
+                    .filter(|(_, n, _)| *n == node)
+                    .map(|(_, _, f)| Arc::clone(f))
+                    .collect();
+                for f in handlers {
+                    f(value);
+                }
+            }
         }
+    }
+
+    /// Calls `f` with the value of every `Notify` AML sends to `node`.
+    pub fn on_notify(&self, node: NodeId, f: NotifyFn) -> NotifyId {
+        let id = NotifyId(
+            self.next_handler
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed),
+        );
+        self.handlers.lock().push((id, node, f));
+        id
+    }
+
+    /// Removes a handler from [`Service::on_notify`]. It may still be
+    /// running on the AML thread when this returns.
+    pub fn remove_notify(&self, id: NotifyId) {
+        self.handlers.lock().retain(|(h, _, _)| *h != id);
     }
 
     /// Runs `f` on the AML thread and waits for its result. Must not be

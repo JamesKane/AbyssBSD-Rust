@@ -518,6 +518,32 @@ pub(crate) fn isa_irq(irq: u8) -> (u32, ::irq::Trigger, ::irq::Polarity) {
     out
 }
 
+/// The SCI's GSI, trigger, and polarity: ISA interrupt `irq` after any
+/// override, defaulting (and conforming) to level, active low, as ACPI
+/// defines the SCI.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn sci_irq(irq: u8) -> (u32, ::irq::Trigger, ::irq::Polarity) {
+    let mut out = (u32::from(irq), ::irq::Trigger::Level, ::irq::Polarity::Low);
+    let Some(m) = madt() else {
+        return out;
+    };
+    for e in m.entries().filter_map(Result::ok) {
+        if let MadtEntry::InterruptSourceOverride(o) = e
+            && o.bus == 0
+            && o.source == irq
+        {
+            out.0 = o.gsi;
+            if matches!(o.flags.trigger(), madt::Trigger::Edge) {
+                out.1 = ::irq::Trigger::Edge;
+            }
+            if matches!(o.flags.polarity(), madt::Polarity::ActiveHigh) {
+                out.2 = ::irq::Polarity::High;
+            }
+        }
+    }
+    out
+}
+
 /// The GIC distributor, as a domain over shared peripheral interrupts
 /// (the SPI's INTID is also its root id).
 #[cfg(target_arch = "aarch64")]

@@ -133,8 +133,7 @@ fn kmain(boot_info: PhysAddr) -> ! {
 }
 
 /// Stops the devices, then powers off through firmware.
-#[cfg_attr(feature = "ktest", allow(dead_code))]
-fn power_off(s: &sched::Sleepable) -> ! {
+pub(crate) fn power_off(s: &sched::Sleepable) -> ! {
     devices::shutdown(s);
     firmware::reset(efi::ResetKind::Shutdown)
 }

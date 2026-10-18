@@ -207,10 +207,76 @@ impl acpi::Ops for KernelAcpi {
         String::from_utf8_lossy(&b[..end]).into()
     }
 
+    #[cfg(target_arch = "x86_64")]
+    fn fixed_hardware(&self) -> Option<acpi::FixedHardware> {
+        let f = crate::acpi::find(*b"FACP")?;
+        let f = acpi_tables::fadt::parse(&f).ok()?;
+        if f.flags().is_some_and(|fl| fl.hw_reduced_acpi()) {
+            return None;
+        }
+        let block = |g: Option<acpi_tables::Gas>, len: Option<u8>| {
+            let g = g.filter(|g| g.address != 0)?;
+            let space = match g.space {
+                acpi_tables::AddressSpace::Io => acpi::Space::Io,
+                acpi_tables::AddressSpace::Memory => acpi::Space::Memory,
+                _ => return None,
+            };
+            Some(acpi::Block {
+                space,
+                address: g.address,
+                len: len.filter(|&l| l > 0)?,
+            })
+        };
+        let (gsi, trigger, polarity) = crate::intc::sci_irq(u8::try_from(f.sci_interrupt()?).ok()?);
+        let (domain, hw) = self.gsi(gsi)?;
+        Some(acpi::FixedHardware {
+            sci: bus::Resource::Irq {
+                domain,
+                hw,
+                trigger,
+                polarity,
+            },
+            pm1a: block(f.pm1a_event_block(), f.pm1_event_len())?,
+            pm1b: block(f.pm1b_event_block(), f.pm1_event_len()),
+            pm1a_control: block(f.pm1a_control_block(), f.pm1_control_len()),
+            pm1b_control: block(f.pm1b_control_block(), f.pm1_control_len()),
+            gpe0: block(f.gpe0_block(), f.gpe0_len()),
+            gpe1: block(f.gpe1_block(), f.gpe1_len()).zip(f.gpe1_base()),
+            smi_command: f
+                .smi_command_port()
+                .and_then(|p| u16::try_from(p).ok())
+                .zip(f.acpi_enable_disable().map(|(on, _)| on)),
+            power_button: !f.flags().is_some_and(|fl| fl.pwr_button()),
+        })
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    fn fixed_hardware(&self) -> Option<acpi::FixedHardware> {
+        None
+    }
+
+    fn power_button(&self) {
+        POWER_BUTTON_PRESSES.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+        if POWER_BUTTON_TEST.load(core::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        kprintln!("acpi: power button pressed: powering off");
+        // Not on this (AML or SCI) thread: shutdown detaches acpi0.
+        let _ = sched::spawn("shutdown", sched::Priority::KERNEL, |s| crate::power_off(s));
+    }
+
     fn log(&self, args: core::fmt::Arguments<'_>) {
         kprintln!("{args}");
     }
 }
+
+/// Power button presses seen.
+pub(crate) static POWER_BUTTON_PRESSES: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+/// Set while a test presses the button: presses are counted, not acted on.
+#[cfg_attr(not(feature = "ktest"), allow(dead_code))]
+pub(crate) static POWER_BUTTON_TEST: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 
 static OPS: KernelAcpi = KernelAcpi;
 

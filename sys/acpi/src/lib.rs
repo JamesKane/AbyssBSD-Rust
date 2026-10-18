@@ -18,11 +18,17 @@
 extern crate alloc;
 
 pub mod bus;
+pub mod button;
+pub mod events;
+pub mod ged;
 mod host;
 pub mod pcib;
 pub mod service;
 
 pub use bus::{AcpiBus, AcpiDevice, DRIVER};
+pub use button::BUTTON;
+pub use events::{Block, FixedHardware, Space};
+pub use ged::GED;
 pub use pcib::{AcpiPciBridge, AcpiPcib, PCI_PCI_BRIDGE, PCIB};
 pub use service::{LoadSummary, init, service};
 
@@ -55,6 +61,13 @@ pub trait Ops: Sync {
     fn definition_blocks(&self) -> Vec<&'static [u8]>;
     /// `acpi0`'s description: the root table's OEM ID and OEM table ID.
     fn oem_description(&self) -> alloc::string::String;
+    /// The FADT's fixed hardware, or `None` on a hardware-reduced
+    /// platform (arm64), whose events come through GED devices.
+    fn fixed_hardware(&self) -> Option<FixedHardware>;
+    /// The power button was pressed: power off (FreeBSD's
+    /// `shutdown_nice(RB_POWEROFF)`). Called on the AML or SCI thread, so
+    /// it must not wait on ACPI.
+    fn power_button(&self);
     /// A console line.
     fn log(&self, args: core::fmt::Arguments<'_>);
 }

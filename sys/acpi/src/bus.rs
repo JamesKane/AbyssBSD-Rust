@@ -173,7 +173,23 @@ fn resources(ops: &dyn Ops, crs: &[AmlResource]) -> Vec<Resource> {
 
 /// `acpi0`.
 #[derive(Debug)]
-pub struct AcpiBus;
+pub struct AcpiBus {
+    events: Option<crate::events::Events>,
+    sci: sync::SpinLock<Option<bus::IrqLine>>,
+}
+
+fn sci_filter(d: &AcpiBus, _: usize, _: &sched::IrqCx) -> irq::Filter {
+    match &d.events {
+        Some(e) if e.filter() => irq::Filter::Schedule,
+        _ => irq::Filter::Stray,
+    }
+}
+
+fn sci_thread(d: &AcpiBus, _: usize, s: &sched::Sleepable) {
+    if let Some(e) = &d.events {
+        e.run(s);
+    }
+}
 
 impl Driver for AcpiBus {
     const NAME: &'static str = "acpi";
@@ -185,15 +201,30 @@ impl Driver for AcpiBus {
             .unwrap_or_default()
     }
 
-    fn attach(_: &mut AttachCx<'_>) -> Result<Self, AttachError> {
-        if service().is_none() {
-            return Err(AttachError::Device("no ACPI namespace"));
-        }
-        Ok(Self)
+    fn attach(cx: &mut AttachCx<'_>) -> Result<Self, AttachError> {
+        let svc = service().ok_or(AttachError::Device("no ACPI namespace"))?;
+        let ops = svc.ops();
+        let events = ops
+            .fixed_hardware()
+            .map(|hw| crate::events::Events::start(ops, hw, svc, cx.sleepable()));
+        let sci = events.as_ref().map(|e| cx.irq_line(e.sci())).transpose()?;
+        Ok(Self {
+            events,
+            sci: sync::SpinLock::new(sci),
+        })
     }
 
     fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
         let svc = service().ok_or(AttachError::Device("no ACPI namespace"))?;
+        if let Some(line) = self.sci.lock().take() {
+            cx.interrupt(line, Some(sci_filter), Some(sci_thread), 0)?;
+            if let Some(e) = &self.events {
+                svc.ops().log(format_args!(
+                    "acpi0: SCI on, {} GPE(s) enabled",
+                    e.gpe_count()
+                ));
+            }
+        }
         let found = svc.run(cx.sleepable(), walk);
         let mut added: Vec<(String, bus::DeviceId)> = Vec::new();
         for f in found {

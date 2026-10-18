@@ -20,6 +20,8 @@ pub static DRIVERS: &[DriverDecl] = &[
     acpi::DRIVER,
     acpi::PCIB,
     acpi::PCI_PCI_BRIDGE,
+    acpi::BUTTON,
+    acpi::GED,
     pci::bus::DRIVER,
     pci::bridge::DRIVER,
     virtio::pci::MODERN,
