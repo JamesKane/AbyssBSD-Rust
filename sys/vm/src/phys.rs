@@ -297,9 +297,33 @@ impl<'a> PhysAllocator<'a> {
     }
 
     fn alloc_in(&mut self, order: Order, d: usize) -> Option<Pfn> {
-        let dom = &self.domains[d];
-        let mut found = (order.index()..ORDERS).find(|&o| dom.heads[o] != NIL)?;
-        let i = ix(self.domains[d].heads[found]);
+        self.alloc_in_where(order, d, |_| true)
+    }
+
+    /// Allocates a block of `order` lying wholly below frame `limit` (for
+    /// devices that cannot address all of memory). Slower than
+    /// [`PhysAllocator::alloc`]: it searches the free lists.
+    pub fn alloc_below(&mut self, order: Order, limit: Pfn) -> Option<Pfn> {
+        let n = self.ndomains.max(1);
+        (0..n).find_map(|d| {
+            self.alloc_in_where(order, d, |p| p.0.saturating_add(order.pages()) <= limit.0)
+        })
+    }
+
+    /// Takes the first free block of at least `order` in domain `d` whose
+    /// start `ok` accepts, and carves `order` from its low end.
+    fn alloc_in_where(&mut self, order: Order, d: usize, ok: impl Fn(Pfn) -> bool) -> Option<Pfn> {
+        let (i, mut found) = (order.index()..ORDERS).find_map(|o| {
+            let mut cur = self.domains[d].heads[o];
+            while cur != NIL {
+                let i = ix(cur);
+                if ok(self.pfn_at(i)) {
+                    return Some((i, o));
+                }
+                cur = self.pages[i].next;
+            }
+            None
+        })?;
         self.unlink(d, i, found);
         // Split down to the requested order, freeing the upper halves.
         while found > order.index() {
@@ -767,6 +791,27 @@ mod tests {
             m.drain(a, true).unwrap();
             assert!(m.is_empty());
             assert_eq!(a.stats().free, total);
+        });
+    }
+
+    #[test]
+    fn alloc_below_a_limit() {
+        with(&[seg(0, 256, 0)], |a| {
+            a.add_free(Pfn(0), Pfn(256));
+            // Take the low blocks so the free lists start high.
+            let low: Vec<Pfn> = (0..8)
+                .map(|_| a.alloc(Order(3), DomainId(0)).unwrap())
+                .collect();
+            assert!(
+                a.alloc_below(Order(3), Pfn(64)).is_none(),
+                "nothing free below 64"
+            );
+            for p in low.iter().take(2) {
+                a.free(*p, Order(3)).unwrap();
+            }
+            let p = a.alloc_below(Order(2), Pfn(64)).unwrap();
+            assert!(p.0 + 4 <= 64, "{p:?}");
+            assert!(a.alloc_below(Order(0), Pfn(1)).is_none_or(|q| q.0 == 0));
         });
     }
 }

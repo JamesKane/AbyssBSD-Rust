@@ -828,3 +828,89 @@ ktest! {
         }
     }
 }
+
+ktest! {
+    fn dma_direct_coherent_and_bounced() {
+        use vm::dma::{dir, Backend, DmaBuf, DmaConstraints, DmaMemory, DmaStream, DmaTag};
+        let top = crate::mm::dma::top_of_ram();
+        let mem: &'static dyn DmaMemory = &crate::mm::dma::KERNEL_DMA;
+
+        // Coherent memory for a device that reaches everything.
+        regs::device_shared! { struct Desc { addr: u64, len: u32, flags: u32 } }
+        let tag = DmaTag::new(mem, DmaConstraints::UNLIMITED, top);
+        assert_eq!(tag.backend(), Backend::Direct);
+        let ring = tag.coherent::<Desc>(256).expect("coherent");
+        ring.write(5, Desc { addr: 0x1234, len: 64, flags: 1 });
+        assert_eq!(ring.read(5).addr, 0x1234);
+        assert_eq!(mem.phys(mem.virt(ring.bus_addr()).as_ptr()), Some(ring.bus_addr()));
+        drop(ring);
+
+        // A heap buffer, mapped directly: the segments are its bytes.
+        let s = DmaStream::new(&tag, alloc::vec![5u8; 10_000]);
+        let out = s.map::<dir::ToDevice>().map_err(|(_, e)| e).expect("map");
+        assert!(!out.bounced());
+        let total: u64 = out.segments().iter().map(|g| g.len).sum();
+        assert_eq!(total, 10_000);
+        for g in out.segments() {
+            // SAFETY: reading the device's view of our own buffer.
+            assert_eq!(unsafe { mem.virt(g.bus).as_ptr().read() }, 5);
+        }
+        drop(out.unmap());
+
+        // A device that reaches only the memory below the highest power of
+        // two under the top of RAM: a page above it must bounce.
+        let bits = u8::try_from(63 - (top - 1).leading_zeros()).unwrap();
+        let low = DmaTag::new(mem, DmaConstraints { addr_bits: bits, ..DmaConstraints::UNLIMITED }, top);
+        assert_eq!(low.backend(), Backend::Bounce);
+        let limit = 1u64 << bits;
+        // With RAM starting at the limit (aarch64 `virt` with 1 GiB at
+        // 1 GiB), no power-of-two limit splits RAM: nothing to bounce into.
+        let Some(probe) = mem.alloc(4096, 4096, limit) else {
+            kprintln!("ktest: no RAM below {limit:#x}; bounce path not exercised");
+            return;
+        };
+        // SAFETY: just allocated, unused.
+        unsafe { mem.free(probe, 4096) };
+        let mut held = alloc::vec::Vec::new();
+        let high = loop {
+            let pa = crate::mm::alloc_pages(vm::Order::ZERO).expect("a page");
+            if pa.get() >= limit {
+                break pa;
+            }
+            held.push(pa);
+            assert!(held.len() < 1_000_000, "no page above {limit:#x}");
+        };
+        for pa in held.drain(..) {
+            crate::mm::free_pages(pa, vm::Order::ZERO);
+        }
+        struct Page(addr::PhysAddr);
+        impl DmaBuf for Page {
+            fn bytes(&self) -> &[u8] {
+                let va = bootproto::layout::dmap(self.0).unwrap().get() as *const u8;
+                // SAFETY: a page we own, through the direct map.
+                unsafe { core::slice::from_raw_parts(va, 4096) }
+            }
+            fn bytes_mut(&mut self) -> &mut [u8] {
+                let va = bootproto::layout::dmap(self.0).unwrap().get() as *mut u8;
+                // SAFETY: as above, exclusively.
+                unsafe { core::slice::from_raw_parts_mut(va, 4096) }
+            }
+        }
+        let mut s = DmaStream::new(&low, Page(high));
+        s.buf_mut().bytes_mut().fill(0xa5);
+        let out = s.map::<dir::ToDevice>().map_err(|(_, e)| e).expect("bounce map");
+        assert!(out.bounced());
+        let g = out.segments()[0];
+        assert!(g.bus + g.len <= limit);
+        // SAFETY: the bounce page the device would read.
+        assert_eq!(unsafe { mem.virt(g.bus).as_ptr().add(4095).read() }, 0xa5);
+        let s = out.unmap();
+        let inn = s.map::<dir::FromDevice>().map_err(|(_, e)| e).expect("bounce map");
+        let g = inn.segments()[0];
+        // SAFETY: the device writing its bounce page.
+        unsafe { mem.virt(g.bus).as_ptr().write_bytes(0x3c, 4096) };
+        let page = inn.unmap().into_inner();
+        assert!(page.bytes().iter().all(|&b| b == 0x3c), "copied back");
+        crate::mm::free_pages(page.0, vm::Order::ZERO);
+    }
+}

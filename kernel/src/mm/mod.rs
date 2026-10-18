@@ -14,6 +14,7 @@
 //! nobody has used yet to the buddy allocator, and retires the boot
 //! allocator.
 
+pub(crate) mod dma;
 mod heap;
 pub(crate) mod kstack;
 

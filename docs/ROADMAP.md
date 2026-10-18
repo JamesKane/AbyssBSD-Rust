@@ -212,6 +212,12 @@ P3.3 (from the start, pure crate) ────────┘   P3.8 ─┴─�
   - Tags that inherit constraints; Direct and Bounce backends.
   - `DmaCoherent`, the `DmaStream` typestate, and `DmaPool`.
   - Cache maintenance for non-coherent devices (`_CCA`).
+- As delivered (2026-10-18): `sys/irq` with the I/O APIC and GIC SPI domains, filters, interrupt
+  threads, synchronous removal, and storm detection, proven on the console UART's interrupt on
+  both architectures; `vm::dma` with direct and bounce backends, `DmaCoherent`, the `DmaStream`
+  typestate, and `DmaPool`, host-tested and run on the kernel's memory (including a forced
+  bounce). The GICv3 ITS and the PCI MSI/MSI-X domain move to P3.6, where PCI devices first exist
+  to exercise them; the threaded-only GED domain comes with the ACPI bus in P3.6.
 
 **P3.5 Device manager (`sys/bus`).**
 - Node table with generational IDs, the lifecycle state machine, and the topology lock at a witness

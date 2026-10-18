@@ -46,3 +46,21 @@ pub fn clean_to_poc(addr: usize, len: usize) {
     // SAFETY: a barrier.
     unsafe { asm!("dsb sy", options(nostack)) };
 }
+
+/// Cleans and invalidates `[addr, addr + len)` to the point of coherency,
+/// so the CPU next reads what a non-coherent device wrote. Clean and
+/// invalidate rather than invalidate alone: lines at the range's edges may
+/// hold the CPU's own data beside the buffer.
+pub fn invalidate_to_poc(addr: usize, len: usize) {
+    let (dline, _) = line_sizes();
+    let end = addr.saturating_add(len);
+    let mut p = addr & !(dline - 1);
+    while p < end {
+        // SAFETY: cleaning and invalidating a line writes back dirty data
+        // first, so no memory contents are lost.
+        unsafe { asm!("dc civac, {}", in(reg) p, options(nostack)) };
+        p += dline;
+    }
+    // SAFETY: a barrier.
+    unsafe { asm!("dsb sy", options(nostack)) };
+}
