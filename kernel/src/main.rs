@@ -106,6 +106,10 @@ fn kmain(boot_info: PhysAddr) -> ! {
             qemu::exit(passed);
             firmware::reset(efi::ResetKind::Shutdown)
         }
+        if boot::flag("abyss.acpidump") {
+            acpi::dump();
+            firmware::reset(efi::ResetKind::Shutdown)
+        }
         if let Some(suite) = boot::value("abyss.bench") {
             let ran = bench::run(&s, suite);
             qemu::exit(ran);

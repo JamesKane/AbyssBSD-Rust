@@ -384,6 +384,7 @@ fn run_one(disk: &Path, bench_disk: &Path, log: &Path) -> Result<Vec<(String, f6
         allow_reset: false,
         extra_disk: Some(bench_disk.to_path_buf()),
         pin: true,
+        machine: None,
     };
     // Both kernels power off when done; stop early only on a panic.
     let panic = |line: &str| {

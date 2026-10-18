@@ -132,6 +132,12 @@ impl<'a> Sdt<'a> {
         &self.bytes[10..16]
     }
 
+    /// The whole table, header included.
+    #[must_use]
+    pub fn bytes(&self) -> &'a [u8] {
+        self.bytes
+    }
+
     /// The bytes after the header.
     #[must_use]
     pub fn body(&self) -> &'a [u8] {
@@ -204,6 +210,16 @@ impl<'a, M: PhysMem<'a>> Tables<'a, M> {
     /// the walk.
     pub fn iter(&self) -> impl Iterator<Item = Result<Sdt<'a>, Error>> + '_ {
         self.addresses().map(|pa| Sdt::read(&self.mem, pa))
+    }
+
+    /// The table at physical address `pa` (for tables the XSDT does not
+    /// list, such as the DSDT).
+    ///
+    /// # Errors
+    ///
+    /// As for [`Sdt::read`].
+    pub fn read(&self, pa: u64) -> Result<Sdt<'a>, Error> {
+        Sdt::read(&self.mem, pa)
     }
 
     /// The first valid table with signature `sig`.

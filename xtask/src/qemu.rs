@@ -97,6 +97,8 @@ pub(crate) struct Vm {
     /// bhyve: pin vCPU *i* to host CPU [`PIN_STRIDE`]` * i`, one per
     /// physical core (docs/PERFORMANCE.md §3).
     pub(crate) pin: bool,
+    /// QEMU x86 machine type instead of `q35` (for example `pc`).
+    pub(crate) machine: Option<String>,
 }
 
 /// Host CPUs per physical core on the build server (P-cores have SMT).
@@ -157,6 +159,7 @@ pub(crate) fn cmd_run(mut args: Args) -> Result<()> {
         allow_reset: false,
         extra_disk: None,
         pin: false,
+        machine: None,
     };
     let mut cmd = vm.command()?;
     if vmm == Vmm::Qemu {
@@ -298,7 +301,7 @@ impl Vm {
 
         let mut c = Command::new(bin);
         match self.arch {
-            Arch::X86_64 => c.args(["-machine", "q35"]),
+            Arch::X86_64 => c.args(["-machine", self.machine.as_deref().unwrap_or("q35")]),
             Arch::Aarch64 if self.el2 => {
                 c.args(["-machine", "virt,gic-version=3,acpi=on,virtualization=on"])
             }

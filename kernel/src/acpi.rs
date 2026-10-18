@@ -51,3 +51,47 @@ pub(crate) fn tables() -> Option<&'static Tables<'static, DmapMem>> {
 pub(crate) fn find(sig: [u8; 4]) -> Option<Sdt<'static>> {
     tables()?.find(sig)
 }
+
+/// Prints every table, hex-encoded, for `cargo xtask acpidump`
+/// (`abyss.acpidump`): `acpidump: table SIG LEN`, then the bytes 48 to a
+/// line, then `acpidump: end`; `acpidump: done` after the last table.
+pub(crate) fn dump() {
+    let Some(t) = tables() else {
+        kprintln!("acpidump: no tables");
+        return;
+    };
+    let emit = |sdt: Sdt<'_>| {
+        let sig = sdt.signature();
+        kprintln!(
+            "acpidump: table {} {}",
+            core::str::from_utf8(&sig).unwrap_or("????"),
+            sdt.bytes().len()
+        );
+        for chunk in sdt.bytes().chunks(48) {
+            let mut line = alloc::string::String::with_capacity(96);
+            for b in chunk {
+                use core::fmt::Write;
+                let _ = write!(line, "{b:02x}");
+            }
+            kprintln!("acpidump: {line}");
+        }
+        kprintln!("acpidump: end");
+    };
+    for sdt in t.iter() {
+        match sdt {
+            Ok(sdt) => emit(sdt),
+            Err(e) => kprintln!("acpidump: bad table: {e:?}"),
+        }
+    }
+    // The DSDT is reached through the FADT, not the XSDT.
+    let dsdt = find(*b"FACP")
+        .and_then(|f| acpi_tables::fadt::parse(&f).ok())
+        .and_then(|f| f.dsdt());
+    if let Some(pa) = dsdt {
+        match t.read(pa) {
+            Ok(sdt) => emit(sdt),
+            Err(e) => kprintln!("acpidump: bad DSDT: {e:?}"),
+        }
+    }
+    kprintln!("acpidump: done");
+}
