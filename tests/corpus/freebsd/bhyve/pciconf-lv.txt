@@ -1,0 +1,35 @@
+hostb0@pci0:0:0:0:	class=0x060000 rev=0x00 hdr=0x00 vendor=0x1275 device=0x1275 subvendor=0x0000 subdevice=0x0000
+    vendor     = 'Network Appliance Corporation'
+    class      = bridge
+    subclass   = HOST-PCI
+virtio_pci0@pci0:0:2:0:	class=0x010000 rev=0x00 hdr=0x00 vendor=0x1af4 device=0x1001 subvendor=0x1af4 subdevice=0x0002
+    vendor     = 'Red Hat, Inc.'
+    device     = 'Virtio block device'
+    class      = mass storage
+    subclass   = SCSI
+virtio_pci1@pci0:0:3:0:	class=0x100000 rev=0x00 hdr=0x00 vendor=0x1af4 device=0x1005 subvendor=0x1af4 subdevice=0x0004
+    vendor     = 'Red Hat, Inc.'
+    device     = 'Virtio RNG'
+    class      = encrypt/decrypt
+    subclass   = network/computer crypto
+virtio_pci2@pci0:0:4:0:	class=0x010000 rev=0x00 hdr=0x00 vendor=0x1af4 device=0x1001 subvendor=0x1af4 subdevice=0x0002
+    vendor     = 'Red Hat, Inc.'
+    device     = 'Virtio block device'
+    class      = mass storage
+    subclass   = SCSI
+nvme0@pci0:0:5:0:	class=0x010802 rev=0x00 hdr=0x00 vendor=0xfb5d device=0x0a0a subvendor=0x0000 subdevice=0x0000
+    class      = mass storage
+    subclass   = NVM
+ahci0@pci0:0:6:0:	class=0x010601 rev=0x00 hdr=0x00 vendor=0x8086 device=0x2821 subvendor=0x0000 subdevice=0x0000
+    vendor     = 'Intel Corporation'
+    device     = '82801HR/HO/HH (ICH8R/DO/DH) 6 port SATA Controller [AHCI mode]'
+    class      = mass storage
+    subclass   = SATA
+vgapci0@pci0:0:29:0:	class=0x030000 rev=0x00 hdr=0x00 vendor=0xfb5d device=0x40fb subvendor=0x0000 subdevice=0x0000
+    class      = display
+    subclass   = VGA
+isab0@pci0:0:31:0:	class=0x060100 rev=0x00 hdr=0x00 vendor=0x8086 device=0x7000 subvendor=0x0000 subdevice=0x0000
+    vendor     = 'Intel Corporation'
+    device     = '82371SB PIIX3 ISA [Natoma/Triton II]'
+    class      = bridge
+    subclass   = PCI-ISA

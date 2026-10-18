@@ -31,6 +31,7 @@ commands:
   test        [--tier unit|boot|all] [--arch <a|all>]    run tests (default: all tiers)
   perf        [--suite p2|diag] [--runs N] [--prepare]   compare with FreeBSD in bhyve (server only)
   acpidump    --arch <a> [--vmm qemu|bhyve] [--machine M] --out DIR   capture a VM's ACPI tables
+  freebsd-record [--out DIR]                             record FreeBSD's device tree in bhyve (server only)
   check                                                  fmt, clippy (host and targets), policy
   policy                                                 dependency and license-header rules
   syscallgen  [--src DIR] [--check]                      regenerate lib/abi syscall tables
@@ -69,6 +70,7 @@ fn run() -> Result<()> {
         "run" => qemu::cmd_run(args),
         "test" => test::cmd(args),
         "perf" => perf::cmd(args),
+        "freebsd-record" => perf::cmd_record(args),
         "acpidump" => acpidump::cmd(args),
         "check" => test::cmd_check(args),
         "policy" => policy::cmd(args),

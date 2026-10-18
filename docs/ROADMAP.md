@@ -177,13 +177,20 @@ P3.3 (from the start, pure crate) ────────┘   P3.8 ─┴─�
   `sync::PerCpuCounter`; and the `sys/sysctl` tree with the identity and `hw.*` boot nodes.
   `abi-check` now also verifies the sysctl constants against FreeBSD's headers.
 
-**P3.2 `lib/devtree`** (pure, host-tested).
+**P3.2 `lib/devtree`** (pure, host-tested). Done 2026-10-18.
 - Match ranking, and the ambiguity check, wired into `cargo xtask check`.
 - The dependency graph: cycle breaking, topological order, and the "what is blocking whom" report.
 - Unit allocation.
 - pnpinfo and location strings, `u_businfo`/`u_device` encoding, and the devctl event grammar, all
   compared byte for byte with the P3.0 recordings.
 - Resolves open question 2 (unit numbering after a failed attach) from FreeBSD's source.
+- As delivered: matching with PCI, ACPI, and virtio IDs; the dependency graph (fuzzed); units;
+  pnpinfo, location, `u_device`, and devctl formats, checked byte for byte against FreeBSD 15.1's
+  `devinfo -rv` and `pciconf -lv` recorded in bhyve (`cargo xtask --remote freebsd-record`). Open
+  question 2's answer: a failed attach frees the unit unless the devclass was fixed or
+  `hw.bus.disable_failed_devices` is set, and a hint-disabled device keeps its unit. Running the
+  ambiguity check over each build's driver table in `cargo xtask check` waits for that table
+  (P3.5).
 
 **P3.3 `lib/aml`** (pure, host-tested, fuzzed; runs in parallel with P3.0–P3.2).
 - Parser, namespace, and interpreter.

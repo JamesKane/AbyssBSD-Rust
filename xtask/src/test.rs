@@ -106,19 +106,10 @@ fn stress(
     };
     let log = disk.with_file_name("stress.log");
     let vm = Vm {
-        vmm: Vmm::Qemu,
-        arch,
-        disk,
         smp: 8,
         mem: "2G".into(),
-        gdb: false,
-        display: false,
-        el2: false,
         test_devices: true,
-        allow_reset: false,
-        extra_disk: None,
-        pin: false,
-        machine: None,
+        ..Vm::new(Vmm::Qemu, arch, disk)
     };
     let run = vm.run_captured(Duration::from_secs(duration + 300), &log, verbose)?;
     let pass_status = match arch {
@@ -243,19 +234,10 @@ fn boot(case: &BootCase, release: bool, verbose: bool) -> Result<std::result::Re
     };
     let log = disk.with_file_name(format!("boot-{}.log", case.name));
     let vm = Vm {
-        vmm: case.vmm,
-        arch: case.arch,
-        disk,
-        smp: 4,
-        mem: "1G".into(),
-        gdb: false,
-        display: false,
         el2: case.el2,
         test_devices: true,
         allow_reset: case.warm_reset,
-        extra_disk: None,
-        pin: false,
-        machine: None,
+        ..Vm::new(case.vmm, case.arch, disk)
     };
     // Emulated aarch64 firmware is slow to start; leave generous headroom.
     let run = vm.run_captured(Duration::from_secs(240), &log, verbose)?;

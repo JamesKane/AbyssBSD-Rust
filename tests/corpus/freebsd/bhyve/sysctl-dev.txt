@@ -1,0 +1,434 @@
+dev.vtrnd.0.%iommu: 
+dev.vtrnd.0.%parent: virtio_pci1
+dev.vtrnd.0.%pnpinfo: vendor=0x00001af4 device=0x1005 subvendor=0x1af4 device_type=0x00000004
+dev.vtrnd.0.%location: 
+dev.vtrnd.0.%driver: vtrnd
+dev.vtrnd.0.%desc: VirtIO Entropy Adapter
+dev.vtrnd.%parent: 
+dev.vga.0.%iommu: 
+dev.vga.0.%parent: isa0
+dev.vga.0.%pnpinfo: pnpid=PNP0900
+dev.vga.0.%location: 
+dev.vga.0.%driver: vga
+dev.vga.0.%desc: Generic ISA VGA
+dev.vga.%parent: 
+dev.apic.0.%iommu: 
+dev.apic.0.%parent: nexus0
+dev.apic.0.%pnpinfo: 
+dev.apic.0.%location: 
+dev.apic.0.%driver: apic
+dev.apic.0.%desc: APIC resources
+dev.apic.%parent: 
+dev.uart.3.rclk: 1843200
+dev.uart.3.rx_overruns: 0
+dev.uart.3.pps_mode: 2
+dev.uart.3.%iommu: 
+dev.uart.3.%parent: acpi0
+dev.uart.3.%pnpinfo: _HID=PNP0501 _UID=4 _CID=none
+dev.uart.3.%location: handle=\_SB_.PC00.ISA_.COM4
+dev.uart.3.%driver: uart
+dev.uart.3.%desc: 16550 or compatible
+dev.uart.2.rclk: 1843200
+dev.uart.2.rx_overruns: 0
+dev.uart.2.pps_mode: 2
+dev.uart.2.%iommu: 
+dev.uart.2.%parent: acpi0
+dev.uart.2.%pnpinfo: _HID=PNP0501 _UID=3 _CID=none
+dev.uart.2.%location: handle=\_SB_.PC00.ISA_.COM3
+dev.uart.2.%driver: uart
+dev.uart.2.%desc: 16550 or compatible
+dev.uart.1.rclk: 1843200
+dev.uart.1.rx_overruns: 0
+dev.uart.1.pps_mode: 2
+dev.uart.1.%iommu: 
+dev.uart.1.%parent: acpi0
+dev.uart.1.%pnpinfo: _HID=PNP0501 _UID=2 _CID=none
+dev.uart.1.%location: handle=\_SB_.PC00.ISA_.COM2
+dev.uart.1.%driver: uart
+dev.uart.1.%desc: 16550 or compatible
+dev.uart.0.rclk: 1843200
+dev.uart.0.rx_overruns: 0
+dev.uart.0.pps_mode: 2
+dev.uart.0.%iommu: 
+dev.uart.0.%parent: acpi0
+dev.uart.0.%pnpinfo: _HID=PNP0501 _UID=1 _CID=none
+dev.uart.0.%location: handle=\_SB_.PC00.ISA_.COM1
+dev.uart.0.%driver: uart
+dev.uart.0.%desc: 16550 or compatible
+dev.uart.%parent: 
+dev.psm.0.%iommu: 
+dev.psm.0.%parent: atkbdc0
+dev.psm.0.%pnpinfo: 
+dev.psm.0.%location: 
+dev.psm.0.%driver: psm
+dev.psm.0.%desc: PS/2 Mouse
+dev.psm.%parent: 
+dev.psmcpnp.0.%iommu: 
+dev.psmcpnp.0.%parent: acpi0
+dev.psmcpnp.0.%pnpinfo: _HID=PNP0F13 _UID=0 _CID=none
+dev.psmcpnp.0.%location: handle=\_SB_.PC00.ISA_.MOU_
+dev.psmcpnp.0.%driver: psmcpnp
+dev.psmcpnp.0.%desc: PS/2 mouse port
+dev.psmcpnp.%parent: 
+dev.atkbd.0.%iommu: 
+dev.atkbd.0.%parent: atkbdc0
+dev.atkbd.0.%pnpinfo: 
+dev.atkbd.0.%location: 
+dev.atkbd.0.%driver: atkbd
+dev.atkbd.0.%desc: AT Keyboard
+dev.atkbd.%parent: 
+dev.atkbdc.0.%iommu: 
+dev.atkbdc.0.%parent: acpi0
+dev.atkbdc.0.%pnpinfo: _HID=PNP0303 _UID=0 _CID=none
+dev.atkbdc.0.%location: handle=\_SB_.PC00.ISA_.KBD_
+dev.atkbdc.0.%driver: atkbdc
+dev.atkbdc.0.%desc: Keyboard controller (i8042)
+dev.atkbdc.%parent: 
+dev.vmgenc.0.%iommu: 
+dev.vmgenc.0.%parent: acpi0
+dev.vmgenc.0.%pnpinfo: _HID=BHYVE_V_GEN_COUNTER_V1 _UID=0 _CID=VM_GEN_COUNTER
+dev.vmgenc.0.%location: handle=\_SB_.GENC
+dev.vmgenc.0.%driver: vmgenc
+dev.vmgenc.0.%desc: VM Generation Counter
+dev.vmgenc.%parent: 
+dev.isa.0.%iommu: 
+dev.isa.0.%parent: isab0
+dev.isa.0.%pnpinfo: 
+dev.isa.0.%location: 
+dev.isa.0.%driver: isa
+dev.isa.0.%desc: ISA bus
+dev.isa.%parent: 
+dev.isab.0.%iommu: rid=0xf8
+dev.isab.0.%parent: pci0
+dev.isab.0.%pnpinfo: vendor=0x8086 device=0x7000 subvendor=0x0000 subdevice=0x0000 class=0x060100
+dev.isab.0.%location: slot=31 function=0 dbsf=pci0:0:31:0 handle=\_SB_.PC00.ISA_
+dev.isab.0.%driver: isab
+dev.isab.0.%desc: PCI-ISA bridge
+dev.isab.%parent: 
+dev.vgapci.0.%iommu: rid=0xe8
+dev.vgapci.0.%parent: pci0
+dev.vgapci.0.%pnpinfo: vendor=0xfb5d device=0x40fb subvendor=0x0000 subdevice=0x0000 class=0x030000
+dev.vgapci.0.%location: slot=29 function=0 dbsf=pci0:0:29:0
+dev.vgapci.0.%driver: vgapci
+dev.vgapci.0.%desc: VGA-compatible display
+dev.vgapci.%parent: 
+dev.ahcich.0.disable_phy: 0
+dev.ahcich.0.%iommu: 
+dev.ahcich.0.%parent: ahci0
+dev.ahcich.0.%pnpinfo: 
+dev.ahcich.0.%location: channel=0
+dev.ahcich.0.%driver: ahcich
+dev.ahcich.0.%desc: AHCI channel
+dev.ahcich.%parent: 
+dev.ahci.0.%iommu: rid=0x30
+dev.ahci.0.%parent: pci0
+dev.ahci.0.%pnpinfo: vendor=0x8086 device=0x2821 subvendor=0x0000 subdevice=0x0000 class=0x010601
+dev.ahci.0.%location: slot=6 function=0 dbsf=pci0:0:6:0
+dev.ahci.0.%driver: ahci
+dev.ahci.0.%desc: Intel ICH8 AHCI SATA controller
+dev.ahci.%parent: 
+dev.nvme.0.alignment_splits: 0
+dev.nvme.0.ioq.1.dump_debug: 0
+dev.nvme.0.ioq.1.recovery: 0
+dev.nvme.0.ioq.1.num_recovery_nolock: 0
+dev.nvme.0.ioq.1.num_ignored: 0
+dev.nvme.0.ioq.1.num_failures: 0
+dev.nvme.0.ioq.1.num_retries: 0
+dev.nvme.0.ioq.1.num_intr_handler_calls: 16
+dev.nvme.0.ioq.1.num_cmds: 16
+dev.nvme.0.ioq.1.cq_head: 16
+dev.nvme.0.ioq.1.sq_tail: 16
+dev.nvme.0.ioq.1.sq_head: 15
+dev.nvme.0.ioq.1.num_trackers: 128
+dev.nvme.0.ioq.1.num_entries: 256
+dev.nvme.0.ioq.0.dump_debug: 0
+dev.nvme.0.ioq.0.recovery: 0
+dev.nvme.0.ioq.0.num_recovery_nolock: 0
+dev.nvme.0.ioq.0.num_ignored: 0
+dev.nvme.0.ioq.0.num_failures: 0
+dev.nvme.0.ioq.0.num_retries: 0
+dev.nvme.0.ioq.0.num_intr_handler_calls: 17
+dev.nvme.0.ioq.0.num_cmds: 17
+dev.nvme.0.ioq.0.cq_head: 17
+dev.nvme.0.ioq.0.sq_tail: 17
+dev.nvme.0.ioq.0.sq_head: 16
+dev.nvme.0.ioq.0.num_trackers: 128
+dev.nvme.0.ioq.0.num_entries: 256
+dev.nvme.0.adminq.dump_debug: 0
+dev.nvme.0.adminq.recovery: 0
+dev.nvme.0.adminq.num_recovery_nolock: 0
+dev.nvme.0.adminq.num_ignored: 0
+dev.nvme.0.adminq.num_failures: 0
+dev.nvme.0.adminq.num_retries: 0
+dev.nvme.0.adminq.num_intr_handler_calls: 12
+dev.nvme.0.adminq.num_cmds: 17
+dev.nvme.0.adminq.cq_head: 12
+dev.nvme.0.adminq.sq_tail: 17
+dev.nvme.0.adminq.sq_head: 16
+dev.nvme.0.adminq.num_trackers: 16
+dev.nvme.0.adminq.num_entries: 128
+dev.nvme.0.fail_on_reset: 0
+dev.nvme.0.cap_hi: 32
+dev.nvme.0.cap_lo: 1006700543
+dev.nvme.0.reset_stats: 0
+dev.nvme.0.num_recovery_nolock: 0
+dev.nvme.0.num_ignored: 0
+dev.nvme.0.num_failures: 0
+dev.nvme.0.num_retries: 0
+dev.nvme.0.num_intr_handler_calls: 45
+dev.nvme.0.num_cmds: 50
+dev.nvme.0.timeout_period: 30
+dev.nvme.0.admin_timeout_period: 60
+dev.nvme.0.int_coal_threshold: 0
+dev.nvme.0.int_coal_time: 0
+dev.nvme.0.num_io_queues: 2
+dev.nvme.0.%iommu: rid=0x28
+dev.nvme.0.%parent: pci0
+dev.nvme.0.%pnpinfo: vendor=0xfb5d device=0x0a0a subvendor=0x0000 subdevice=0x0000 class=0x010802
+dev.nvme.0.%location: slot=5 function=0 dbsf=pci0:0:5:0
+dev.nvme.0.%driver: nvme
+dev.nvme.0.%desc: Generic NVMe Device
+dev.nvme.%parent: 
+dev.vtblk.1.writecache_mode: 1
+dev.vtblk.1.%iommu: 
+dev.vtblk.1.%parent: virtio_pci2
+dev.vtblk.1.%pnpinfo: vendor=0x00001af4 device=0x1001 subvendor=0x1af4 device_type=0x00000002
+dev.vtblk.1.%location: 
+dev.vtblk.1.%driver: vtblk
+dev.vtblk.1.%desc: VirtIO Block Adapter
+dev.vtblk.0.writecache_mode: 1
+dev.vtblk.0.%iommu: 
+dev.vtblk.0.%parent: virtio_pci0
+dev.vtblk.0.%pnpinfo: vendor=0x00001af4 device=0x1001 subvendor=0x1af4 device_type=0x00000002
+dev.vtblk.0.%location: 
+dev.vtblk.0.%driver: vtblk
+dev.vtblk.0.%desc: VirtIO Block Adapter
+dev.vtblk.%parent: 
+dev.virtio_pci.2.negotiated_features: 0x10002644 <RingIndirectDesc,Discard,Topology,FlushCmd,BlockSize,MaxNumSegs>
+dev.virtio_pci.2.host_features: 0x10002644 <RingIndirectDesc,Discard,Topology,FlushCmd,BlockSize,MaxNumSegs>
+dev.virtio_pci.2.nvqs: 1
+dev.virtio_pci.2.%iommu: rid=0x20
+dev.virtio_pci.2.%parent: pci0
+dev.virtio_pci.2.%pnpinfo: vendor=0x1af4 device=0x1001 subvendor=0x1af4 subdevice=0x0002 class=0x010000
+dev.virtio_pci.2.%location: slot=4 function=0 dbsf=pci0:0:4:0
+dev.virtio_pci.2.%driver: virtio_pci
+dev.virtio_pci.2.%desc: VirtIO PCI (legacy) Block adapter
+dev.virtio_pci.1.negotiated_features: 0
+dev.virtio_pci.1.host_features: 0
+dev.virtio_pci.1.nvqs: 1
+dev.virtio_pci.1.%iommu: rid=0x18
+dev.virtio_pci.1.%parent: pci0
+dev.virtio_pci.1.%pnpinfo: vendor=0x1af4 device=0x1005 subvendor=0x1af4 subdevice=0x0004 class=0x100000
+dev.virtio_pci.1.%location: slot=3 function=0 dbsf=pci0:0:3:0
+dev.virtio_pci.1.%driver: virtio_pci
+dev.virtio_pci.1.%desc: VirtIO PCI (legacy) Entropy adapter
+dev.virtio_pci.0.negotiated_features: 0x10002644 <RingIndirectDesc,Discard,Topology,FlushCmd,BlockSize,MaxNumSegs>
+dev.virtio_pci.0.host_features: 0x10002644 <RingIndirectDesc,Discard,Topology,FlushCmd,BlockSize,MaxNumSegs>
+dev.virtio_pci.0.nvqs: 1
+dev.virtio_pci.0.%iommu: rid=0x10
+dev.virtio_pci.0.%parent: pci0
+dev.virtio_pci.0.%pnpinfo: vendor=0x1af4 device=0x1001 subvendor=0x1af4 subdevice=0x0002 class=0x010000
+dev.virtio_pci.0.%location: slot=2 function=0 dbsf=pci0:0:2:0
+dev.virtio_pci.0.%driver: virtio_pci
+dev.virtio_pci.0.%desc: VirtIO PCI (legacy) Block adapter
+dev.virtio_pci.%parent: 
+dev.hostb.0.%iommu: rid=0
+dev.hostb.0.%parent: pci0
+dev.hostb.0.%pnpinfo: vendor=0x1275 device=0x1275 subvendor=0x0000 subdevice=0x0000 class=0x060000
+dev.hostb.0.%location: slot=0 function=0 dbsf=pci0:0:0:0
+dev.hostb.0.%driver: hostb
+dev.hostb.0.%desc: Host to PCI bridge
+dev.hostb.%parent: 
+dev.pci.0.%iommu: 
+dev.pci.0.%parent: pcib0
+dev.pci.0.%pnpinfo: 
+dev.pci.0.%location: 
+dev.pci.0.%driver: pci
+dev.pci.0.%desc: ACPI PCI bus
+dev.pci.%parent: 
+dev.pcib.0.%iommu: 
+dev.pcib.0.%parent: acpi0
+dev.pcib.0.%pnpinfo: _HID=PNP0A03 _UID=0 _CID=none
+dev.pcib.0.%location: handle=\_SB_.PC00
+dev.pcib.0.%driver: pcib
+dev.pcib.0.%desc: ACPI Host-PCI bridge
+dev.pcib.%parent: 
+dev.pci_link.7.%iommu: 
+dev.pci_link.7.%parent: acpi0
+dev.pci_link.7.%pnpinfo: _HID=PNP0C0F _UID=8 _CID=none
+dev.pci_link.7.%location: handle=\_SB_.PC00.ISA_.LNKH
+dev.pci_link.7.%driver: pci_link
+dev.pci_link.7.%desc: ACPI PCI Link LNKH
+dev.pci_link.6.%iommu: 
+dev.pci_link.6.%parent: acpi0
+dev.pci_link.6.%pnpinfo: _HID=PNP0C0F _UID=7 _CID=none
+dev.pci_link.6.%location: handle=\_SB_.PC00.ISA_.LNKG
+dev.pci_link.6.%driver: pci_link
+dev.pci_link.6.%desc: ACPI PCI Link LNKG
+dev.pci_link.5.%iommu: 
+dev.pci_link.5.%parent: acpi0
+dev.pci_link.5.%pnpinfo: _HID=PNP0C0F _UID=6 _CID=none
+dev.pci_link.5.%location: handle=\_SB_.PC00.ISA_.LNKF
+dev.pci_link.5.%driver: pci_link
+dev.pci_link.5.%desc: ACPI PCI Link LNKF
+dev.pci_link.4.%iommu: 
+dev.pci_link.4.%parent: acpi0
+dev.pci_link.4.%pnpinfo: _HID=PNP0C0F _UID=5 _CID=none
+dev.pci_link.4.%location: handle=\_SB_.PC00.ISA_.LNKE
+dev.pci_link.4.%driver: pci_link
+dev.pci_link.4.%desc: ACPI PCI Link LNKE
+dev.pci_link.3.%iommu: 
+dev.pci_link.3.%parent: acpi0
+dev.pci_link.3.%pnpinfo: _HID=PNP0C0F _UID=4 _CID=none
+dev.pci_link.3.%location: handle=\_SB_.PC00.ISA_.LNKD
+dev.pci_link.3.%driver: pci_link
+dev.pci_link.3.%desc: ACPI PCI Link LNKD
+dev.pci_link.2.%iommu: 
+dev.pci_link.2.%parent: acpi0
+dev.pci_link.2.%pnpinfo: _HID=PNP0C0F _UID=3 _CID=none
+dev.pci_link.2.%location: handle=\_SB_.PC00.ISA_.LNKC
+dev.pci_link.2.%driver: pci_link
+dev.pci_link.2.%desc: ACPI PCI Link LNKC
+dev.pci_link.1.%iommu: 
+dev.pci_link.1.%parent: acpi0
+dev.pci_link.1.%pnpinfo: _HID=PNP0C0F _UID=2 _CID=none
+dev.pci_link.1.%location: handle=\_SB_.PC00.ISA_.LNKB
+dev.pci_link.1.%driver: pci_link
+dev.pci_link.1.%desc: ACPI PCI Link LNKB
+dev.pci_link.0.%iommu: 
+dev.pci_link.0.%parent: acpi0
+dev.pci_link.0.%pnpinfo: _HID=PNP0C0F _UID=1 _CID=none
+dev.pci_link.0.%location: handle=\_SB_.PC00.ISA_.LNKA
+dev.pci_link.0.%driver: pci_link
+dev.pci_link.0.%desc: ACPI PCI Link LNKA
+dev.pci_link.%parent: 
+dev.acpi_timer.0.%iommu: 
+dev.acpi_timer.0.%parent: acpi0
+dev.acpi_timer.0.%pnpinfo: unknown
+dev.acpi_timer.0.%location: 
+dev.acpi_timer.0.%driver: acpi_timer
+dev.acpi_timer.0.%desc: 32-bit timer at 3.579545MHz
+dev.acpi_timer.%parent: 
+dev.hpet.0.mmap_allow_write: 0
+dev.hpet.0.mmap_allow: 1
+dev.hpet.0.%iommu: 
+dev.hpet.0.%parent: acpi0
+dev.hpet.0.%pnpinfo: _HID=PNP0103 _UID=0 _CID=none
+dev.hpet.0.%location: handle=\_SB_.PC00.HPET
+dev.hpet.0.%driver: hpet
+dev.hpet.0.%desc: High Precision Event Timer
+dev.hpet.%parent: 
+dev.attimer.0.%iommu: 
+dev.attimer.0.%parent: acpi0
+dev.attimer.0.%pnpinfo: _HID=PNP0100 _UID=0 _CID=none
+dev.attimer.0.%location: handle=\_SB_.PC00.ISA_.TIMR
+dev.attimer.0.%driver: attimer
+dev.attimer.0.%desc: AT timer
+dev.attimer.%parent: 
+dev.atrtc.0.%iommu: 
+dev.atrtc.0.%parent: acpi0
+dev.atrtc.0.%pnpinfo: _HID=PNP0B00 _UID=0 _CID=none
+dev.atrtc.0.%location: handle=\_SB_.PC00.ISA_.RTC_
+dev.atrtc.0.%driver: atrtc
+dev.atrtc.0.%desc: AT realtime clock
+dev.atrtc.%parent: 
+dev.acpi_sysresource.0.%iommu: 
+dev.acpi_sysresource.0.%parent: acpi0
+dev.acpi_sysresource.0.%pnpinfo: _HID=PNP0C02 _UID=0 _CID=none
+dev.acpi_sysresource.0.%location: handle=\_SB_.PC00.ISA_.SIO_
+dev.acpi_sysresource.0.%driver: acpi_sysresource
+dev.acpi_sysresource.0.%desc: System Resource
+dev.acpi_sysresource.%parent: 
+dev.acpi.0.%iommu: 
+dev.acpi.0.%parent: nexus0
+dev.acpi.0.%pnpinfo: 
+dev.acpi.0.%location: 
+dev.acpi.0.%driver: acpi
+dev.acpi.0.%desc: BHYVE BVFACP 
+dev.acpi.%parent: 
+dev.aesni.0.%iommu: 
+dev.aesni.0.%parent: nexus0
+dev.aesni.0.%pnpinfo: 
+dev.aesni.0.%location: 
+dev.aesni.0.%driver: aesni
+dev.aesni.0.%desc: AES-CBC,AES-CCM,AES-GCM,AES-ICM,AES-XTS,SHA1,SHA256
+dev.aesni.%parent: 
+dev.cryptosoft.0.%iommu: 
+dev.cryptosoft.0.%parent: nexus0
+dev.cryptosoft.0.%pnpinfo: 
+dev.cryptosoft.0.%location: 
+dev.cryptosoft.0.%driver: cryptosoft
+dev.cryptosoft.0.%desc: software crypto
+dev.cryptosoft.%parent: 
+dev.smbios.0.%iommu: 
+dev.smbios.0.%parent: nexus0
+dev.smbios.0.%pnpinfo: 
+dev.smbios.0.%location: 
+dev.smbios.0.%driver: smbios
+dev.smbios.0.%desc: System Management BIOS
+dev.smbios.%parent: 
+dev.ram.0.%iommu: 
+dev.ram.0.%parent: nexus0
+dev.ram.0.%pnpinfo: 
+dev.ram.0.%location: 
+dev.ram.0.%driver: ram
+dev.ram.0.%desc: System RAM
+dev.ram.%parent: 
+dev.efirtc.0.%iommu: 
+dev.efirtc.0.%parent: nexus0
+dev.efirtc.0.%pnpinfo: 
+dev.efirtc.0.%location: 
+dev.efirtc.0.%driver: efirtc
+dev.efirtc.0.%desc: EFI Realtime Clock
+dev.efirtc.%parent: 
+dev.nexus.0.%iommu: 
+dev.nexus.0.%parent: root0
+dev.nexus.0.%pnpinfo: 
+dev.nexus.0.%location: 
+dev.nexus.0.%driver: nexus
+dev.nexus.0.%desc: 
+dev.nexus.%parent: 
+dev.xen.xsd_kva: 0
+dev.xen.xsd_port: 0
+dev.xen.balloon.high_mem: 0
+dev.xen.balloon.low_mem: 0
+dev.xen.balloon.hard_limit: 0
+dev.xen.balloon.driver_pages: 0
+dev.xen.balloon.target: 0
+dev.xen.balloon.current: 0
+dev.netmap.iflib_rx_miss_bufs: 0
+dev.netmap.iflib_rx_miss: 0
+dev.netmap.iflib_crcstrip: 1
+dev.netmap.max_bridges: 8
+dev.netmap.bridge_batch: 1024
+dev.netmap.default_pipes: 0
+dev.netmap.port_numa_affinity: 0
+dev.netmap.priv_buf_num: 4098
+dev.netmap.priv_buf_size: 2048
+dev.netmap.buf_curr_num: 0
+dev.netmap.buf_num: 163840
+dev.netmap.buf_curr_size: 0
+dev.netmap.buf_size: 2048
+dev.netmap.priv_ring_num: 4
+dev.netmap.priv_ring_size: 20480
+dev.netmap.ring_curr_num: 0
+dev.netmap.ring_num: 200
+dev.netmap.ring_curr_size: 0
+dev.netmap.ring_size: 36864
+dev.netmap.priv_if_num: 2
+dev.netmap.priv_if_size: 1024
+dev.netmap.if_curr_num: 0
+dev.netmap.if_num: 100
+dev.netmap.if_curr_size: 0
+dev.netmap.if_size: 1024
+dev.netmap.ptnet_vnet_hdr: 1
+dev.netmap.generic_rings: 1
+dev.netmap.generic_ringsize: 1024
+dev.netmap.generic_mit: 100000
+dev.netmap.generic_hwcsum: 0
+dev.netmap.admode: 0
+dev.netmap.fwd: 0
+dev.netmap.txsync_retry: 2
+dev.netmap.no_pendintr: 1
+dev.netmap.no_timestamp: 0
+dev.netmap.verbose: 0

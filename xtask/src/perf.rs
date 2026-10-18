@@ -28,7 +28,7 @@ use crate::util::{self, Result};
 const RELEASE: &str = "15.1-RELEASE";
 const VM_IMAGE: &str = "FreeBSD-15.1-RELEASE-amd64-ufs.raw.xz";
 /// Bumped whenever [`prepare_image`] changes what it writes.
-const PREP_VERSION: &str = "3";
+const PREP_VERSION: &str = "4";
 /// The bound: AbyssBSD's median over FreeBSD's.
 const BOUND: f64 = 1.02;
 /// FreeBSD-side coefficient of variation above which a benchmark cannot
@@ -293,9 +293,14 @@ fn configure_guest(mnt: &Path) -> Result<()> {
         (
             "etc/rc.local",
             "755",
-            "#!/bin/sh\n# kbench (AbyssBSD cargo xtask perf): run the suite, then power off.\n\
+            "#!/bin/sh\n# AbyssBSD cargo xtask perf / freebsd-record: run the second disk's\n\
+             # script, or the kbench suite it names; then power off.\n\
              if mount -o ro /dev/vtbd1 /mnt; then\n\
-             \tkldload /mnt/kbench.ko && sysctl debug.kbench.run=\"$(cat /mnt/suite)\" >/dev/null\n\
+             \tif [ -f /mnt/run.sh ]; then\n\
+             \t\tsh /mnt/run.sh\n\
+             \telse\n\
+             \t\tkldload /mnt/kbench.ko && sysctl debug.kbench.run=\"$(cat /mnt/suite)\" >/dev/null\n\
+             \tfi\n\
              \tumount /mnt\nfi\npoweroff\n",
         ),
     ];
@@ -369,22 +374,116 @@ fn make_bench_disk(out: &Path, kbench: &Path, suite: &str) -> Result<PathBuf> {
     Ok(disk)
 }
 
+/// The commands `freebsd-record` captures, with the file each lands in.
+const RECORDINGS: &[(&str, &str)] = &[
+    ("devinfo -rv", "devinfo-rv.txt"),
+    ("pciconf -lv", "pciconf-lv.txt"),
+    ("sysctl dev", "sysctl-dev.txt"),
+    ("devinfo -u", "devinfo-u.txt"),
+];
+
+/// `cargo xtask --remote freebsd-record [--out DIR]`: boots FreeBSD 15.1 in
+/// bhyve with the P3 reference devices (virtio-blk, NVMe, AHCI, virtio-rng)
+/// and records how it names and describes them, for `lib/devtree`'s
+/// differential tests. Writes into `DIR` (default
+/// `tests/corpus/freebsd/bhyve`) on the server.
+pub(crate) fn cmd_record(mut args: Args) -> Result<()> {
+    let out = PathBuf::from(
+        args.take_value("--out")?
+            .unwrap_or_else(|| "tests/corpus/freebsd/bhyve".into()),
+    );
+    args.finish()?;
+    if !cfg!(target_os = "freebsd") {
+        return Err("freebsd-record needs bhyve: run it on the build server".into());
+    }
+    let dirs = Dirs::new();
+    fs::create_dir_all(&dirs.perf)?;
+    let freebsd = prepare_image(&dirs)?;
+    let work = dirs.perf.join("record");
+    let script_dir = work.join("disk");
+    fs::create_dir_all(&script_dir)?;
+    let mut script = String::from("#!/bin/sh\n");
+    for (cmd, _) in RECORDINGS {
+        let _ = writeln!(
+            script,
+            "echo 'record: begin {cmd}'\n{cmd} 2>&1 | sed 's/^/record: | /'\necho 'record: end'"
+        );
+    }
+    script.push_str("echo 'record: done'\n");
+    fs::write(script_dir.join("run.sh"), script)?;
+    let disk = work.join("script.img");
+    util::run(
+        Command::new("makefs")
+            .args(["-t", "ffs", "-s", "16m"])
+            .arg(&disk)
+            .arg(&script_dir),
+    )?;
+    let ahci = work.join("ahci.img");
+    fs::File::create(&ahci)?.set_len(64 << 20)?;
+    let vm = Vm {
+        smp: 4,
+        mem: "2G".into(),
+        extra_disk: Some(disk),
+        devices: vec![
+            "5,nvme,ram=64".into(),
+            format!("6,ahci-hd,{}", ahci.display()),
+        ],
+        ..Vm::new(Vmm::Bhyve, Arch::X86_64, freebsd)
+    };
+    let log = work.join("console.log");
+    let done = |line: &str| line.contains("record: done").then_some(Outcome::Passed);
+    let run = vm.run_until(Duration::from_secs(600), &log, false, &done)?;
+    if run.outcome != Outcome::Passed {
+        return Err(format!(
+            "recording incomplete ({:?}); see {}",
+            run.outcome,
+            log.display()
+        )
+        .into());
+    }
+    let recorded = split_recordings(&fs::read_to_string(&log)?);
+    fs::create_dir_all(&out)?;
+    for (cmd, file) in RECORDINGS {
+        let text = recorded
+            .get(*cmd)
+            .ok_or_else(|| format!("no output for `{cmd}` in {}", log.display()))?;
+        fs::write(out.join(file), text)?;
+        eprintln!("xtask: freebsd-record: {}", out.join(file).display());
+    }
+    Ok(())
+}
+
+/// The output of each recorded command, from the console log.
+fn split_recordings(log: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let mut cur: Option<(String, String)> = None;
+    for line in log.lines() {
+        if let Some(cmd) = line.split("record: begin ").nth(1) {
+            cur = Some((cmd.to_owned(), String::new()));
+        } else if line.ends_with("record: end") {
+            if let Some((cmd, text)) = cur.take() {
+                out.insert(cmd, text);
+            }
+        } else if let (Some((_, text)), Some(rest)) =
+            (cur.as_mut(), line.split("record: | ").nth(1))
+        {
+            text.push_str(rest);
+            text.push('\n');
+        } else if let (Some((_, text)), true) = (cur.as_mut(), line.ends_with("record: |")) {
+            text.push('\n');
+        }
+    }
+    out
+}
+
 /// Boots `disk` in the benchmark VM and returns its results.
 fn run_one(disk: &Path, bench_disk: &Path, log: &Path) -> Result<Vec<(String, f64, String)>> {
     let vm = Vm {
-        vmm: Vmm::Bhyve,
-        arch: Arch::X86_64,
-        disk: disk.to_path_buf(),
         smp: 8,
         mem: "2G".into(),
-        gdb: false,
-        display: false,
-        el2: false,
-        test_devices: false,
-        allow_reset: false,
         extra_disk: Some(bench_disk.to_path_buf()),
         pin: true,
-        machine: None,
+        ..Vm::new(Vmm::Bhyve, Arch::X86_64, disk.to_path_buf())
     };
     // Both kernels power off when done; stop early only on a panic.
     let panic = |line: &str| {

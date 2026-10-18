@@ -49,6 +49,13 @@ name = "demangle"
 version = "0.0.0"
 
 [[package]]
+name = "devtree"
+version = "0.0.0"
+dependencies = [
+ "abi",
+]
+
+[[package]]
 name = "efi"
 version = "0.0.0"
 dependencies = [

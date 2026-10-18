@@ -33,19 +33,8 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     };
     let disk = image::build(arch, opts, "abyss.acpidump=1")?;
     let vm = Vm {
-        vmm,
-        arch,
-        disk: disk.clone(),
-        smp: 4,
-        mem: "1G".into(),
-        gdb: false,
-        display: false,
-        el2: false,
-        test_devices: false,
-        allow_reset: false,
-        extra_disk: None,
-        pin: false,
         machine,
+        ..Vm::new(vmm, arch, disk.clone())
     };
     let log = disk.with_file_name("acpidump.log");
     let done = |line: &str| line.contains("acpidump: done").then_some(Outcome::Passed);

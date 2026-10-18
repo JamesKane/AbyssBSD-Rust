@@ -1,0 +1,205 @@
+nexus0
+  efirtc0 <EFI Realtime Clock>
+  smbios0 <System Management BIOS>
+  cryptosoft0 <software crypto>
+  aesni0 <AES-CBC,AES-CCM,AES-GCM,AES-ICM,AES-XTS,SHA1,SHA256>
+  ram0 <System RAM>
+      I/O memory addresses:
+          0x0-0x9ffff
+          0x100000-0x7e20bfff
+          0x7e20d000-0x7e68dfff
+          0x7e68f000-0x7e880fff
+          0x7eb1b000-0x7fb9afff
+          0x7fbff000-0x7ff7bfff
+  apic0 <APIC resources>
+      I/O memory addresses:
+          0xfec00000-0xfec0001f
+          0xfee00000-0xfee0053f
+  acpi0 <BHYVE BVFACP >
+      Interrupt request lines:
+          0x9
+      I/O ports:
+          0x61
+          0x72-0x77
+          0x84
+          0xb2
+          0x400-0x407
+          0x4d0-0x4d1
+      I/O memory addresses:
+          0xe0000000-0xefffffff
+    pcib0 <ACPI Host-PCI bridge> pnpinfo _HID=PNP0A03 _UID=0 _CID=none at handle=\_SB_.PC00
+        I/O ports:
+            0xcf8-0xcff
+      pci0 <ACPI PCI bus>
+          PCI domain 0 bus numbers:
+              0
+        hostb0 <Host to PCI bridge> pnpinfo vendor=0x1275 device=0x1275 subvendor=0x0000 subdevice=0x0000 class=0x060000 at slot=0 function=0 dbsf=pci0:0:0:0
+        virtio_pci0 <VirtIO PCI (legacy) Block adapter> pnpinfo vendor=0x1af4 device=0x1001 subvendor=0x1af4 subdevice=0x0002 class=0x010000 at slot=2 function=0 dbsf=pci0:0:2:0
+            Interrupt request lines:
+                0x28
+                0x29
+            I/O ports:
+                0x2080-0x20ff
+            I/O memory addresses:
+                0xc2008000-0xc2009fff
+          vtblk0 <VirtIO Block Adapter> pnpinfo vendor=0x00001af4 device=0x1001 subvendor=0x1af4 device_type=0x00000002
+        virtio_pci1 <VirtIO PCI (legacy) Entropy adapter> pnpinfo vendor=0x1af4 device=0x1005 subvendor=0x1af4 subdevice=0x0004 class=0x100000 at slot=3 function=0 dbsf=pci0:0:3:0
+            I/O ports:
+                0x2100-0x211f
+            I/O memory addresses:
+                0xc2006000-0xc2007fff
+          vtrnd0 <VirtIO Entropy Adapter> pnpinfo vendor=0x00001af4 device=0x1005 subvendor=0x1af4 device_type=0x00000004
+        virtio_pci2 <VirtIO PCI (legacy) Block adapter> pnpinfo vendor=0x1af4 device=0x1001 subvendor=0x1af4 subdevice=0x0002 class=0x010000 at slot=4 function=0 dbsf=pci0:0:4:0
+            Interrupt request lines:
+                0x2a
+                0x2b
+            I/O ports:
+                0x2000-0x207f
+            I/O memory addresses:
+                0xc2004000-0xc2005fff
+          vtblk1 <VirtIO Block Adapter> pnpinfo vendor=0x00001af4 device=0x1001 subvendor=0x1af4 device_type=0x00000002
+        nvme0 <Generic NVMe Device> pnpinfo vendor=0xfb5d device=0x0a0a subvendor=0x0000 subdevice=0x0000 class=0x010802 at slot=5 function=0 dbsf=pci0:0:5:0
+            Interrupt request lines:
+                0x2c
+                0x2d
+                0x2e
+            I/O memory addresses:
+                0xc2002000-0xc2003fff
+                0x800000000-0x800003fff
+        ahci0 <Intel ICH8 AHCI SATA controller> pnpinfo vendor=0x8086 device=0x2821 subvendor=0x0000 subdevice=0x0000 class=0x010601 at slot=6 function=0 dbsf=pci0:0:6:0
+            Interrupt request lines:
+                0x2f
+                0x30
+                0x31
+                0x32
+                0x33
+                0x34
+                0x35
+                0x36
+                0x37
+                0x38
+                0x39
+                0x3a
+                0x3b
+                0x3c
+                0x3d
+                0x3e
+            I/O memory addresses:
+                0xc2000000-0xc2001fff
+          ahcich0 <AHCI channel> at channel=0
+              I/O memory addresses:
+                  0xc2000100-0xc200017f
+          ahcich1 at channel=1 (disabled)
+          ahcich2 at channel=2 (disabled)
+          ahcich3 at channel=3 (disabled)
+          ahcich4 at channel=4 (disabled)
+          ahcich5 at channel=5 (disabled)
+          ahcich6 at channel=6 (disabled)
+          ahcich7 at channel=7 (disabled)
+          ahcich8 at channel=8 (disabled)
+          ahcich9 at channel=9 (disabled)
+          ahcich10 at channel=10 (disabled)
+          ahcich11 at channel=11 (disabled)
+          ahcich12 at channel=12 (disabled)
+          ahcich13 at channel=13 (disabled)
+          ahcich14 at channel=14 (disabled)
+          ahcich15 at channel=15 (disabled)
+          ahcich16 at channel=16 (disabled)
+          ahcich17 at channel=17 (disabled)
+          ahcich18 at channel=18 (disabled)
+          ahcich19 at channel=19 (disabled)
+          ahcich20 at channel=20 (disabled)
+          ahcich21 at channel=21 (disabled)
+          ahcich22 at channel=22 (disabled)
+          ahcich23 at channel=23 (disabled)
+          ahcich24 at channel=24 (disabled)
+          ahcich25 at channel=25 (disabled)
+          ahcich26 at channel=26 (disabled)
+          ahcich27 at channel=27 (disabled)
+          ahcich28 at channel=28 (disabled)
+          ahcich29 at channel=29 (disabled)
+          ahcich30 at channel=30 (disabled)
+          ahcich31 at channel=31 (disabled)
+        vgapci0 <VGA-compatible display> pnpinfo vendor=0xfb5d device=0x40fb subvendor=0x0000 subdevice=0x0000 class=0x030000 at slot=29 function=0 dbsf=pci0:0:29:0
+            I/O memory addresses:
+                0xc0000000-0xc1ffffff
+                0xc200a000-0xc200a07f
+          drmn0
+        isab0 <PCI-ISA bridge> pnpinfo vendor=0x8086 device=0x7000 subvendor=0x0000 subdevice=0x0000 class=0x060100 at slot=31 function=0 dbsf=pci0:0:31:0 handle=\_SB_.PC00.ISA_
+          isa0 <ISA bus>
+            sc0
+            vga0 <Generic ISA VGA> pnpinfo pnpid=PNP0900
+                I/O ports:
+                    0x3b0-0x3bb
+                I/O memory addresses:
+                    0xb0000-0xb7fff
+    pci_link0 <ACPI PCI Link LNKA> pnpinfo _HID=PNP0C0F _UID=1 _CID=none at handle=\_SB_.PC00.ISA_.LNKA
+    pci_link1 <ACPI PCI Link LNKB> pnpinfo _HID=PNP0C0F _UID=2 _CID=none at handle=\_SB_.PC00.ISA_.LNKB
+    pci_link2 <ACPI PCI Link LNKC> pnpinfo _HID=PNP0C0F _UID=3 _CID=none at handle=\_SB_.PC00.ISA_.LNKC
+    pci_link3 <ACPI PCI Link LNKD> pnpinfo _HID=PNP0C0F _UID=4 _CID=none at handle=\_SB_.PC00.ISA_.LNKD
+    pci_link4 <ACPI PCI Link LNKE> pnpinfo _HID=PNP0C0F _UID=5 _CID=none at handle=\_SB_.PC00.ISA_.LNKE
+    pci_link5 <ACPI PCI Link LNKF> pnpinfo _HID=PNP0C0F _UID=6 _CID=none at handle=\_SB_.PC00.ISA_.LNKF
+    pci_link6 <ACPI PCI Link LNKG> pnpinfo _HID=PNP0C0F _UID=7 _CID=none at handle=\_SB_.PC00.ISA_.LNKG
+    pci_link7 <ACPI PCI Link LNKH> pnpinfo _HID=PNP0C0F _UID=8 _CID=none at handle=\_SB_.PC00.ISA_.LNKH
+    atkbdc0 <Keyboard controller (i8042)> pnpinfo _HID=PNP0303 _UID=0 _CID=none at handle=\_SB_.PC00.ISA_.KBD_
+        Interrupt request lines:
+            0x1
+        I/O ports:
+            0x60
+            0x64
+      atkbd0 <AT Keyboard>
+      psm0 <PS/2 Mouse>
+          Interrupt request lines:
+              0xc
+    psmcpnp0 <PS/2 mouse port> pnpinfo _HID=PNP0F13 _UID=0 _CID=none at handle=\_SB_.PC00.ISA_.MOU_
+    acpi_sysresource0 <System Resource> pnpinfo _HID=PNP0C02 _UID=0 _CID=none at handle=\_SB_.PC00.ISA_.SIO_
+    uart0 <16550 or compatible> pnpinfo _HID=PNP0501 _UID=1 _CID=none at handle=\_SB_.PC00.ISA_.COM1
+        Interrupt request lines:
+            0x4
+        I/O ports:
+            0x3f8-0x3ff
+    uart1 <16550 or compatible> pnpinfo _HID=PNP0501 _UID=2 _CID=none at handle=\_SB_.PC00.ISA_.COM2
+        Interrupt request lines:
+            0x3
+        I/O ports:
+            0x2f8-0x2ff
+    uart2 <16550 or compatible> pnpinfo _HID=PNP0501 _UID=3 _CID=none at handle=\_SB_.PC00.ISA_.COM3
+        Interrupt request lines:
+            0x4
+        I/O ports:
+            0x3e8-0x3ef
+    uart3 <16550 or compatible> pnpinfo _HID=PNP0501 _UID=4 _CID=none at handle=\_SB_.PC00.ISA_.COM4
+        Interrupt request lines:
+            0x3
+        I/O ports:
+            0x2e8-0x2ef
+    atrtc0 <AT realtime clock> pnpinfo _HID=PNP0B00 _UID=0 _CID=none at handle=\_SB_.PC00.ISA_.RTC_
+        Interrupt request lines:
+            0x8
+        I/O ports:
+            0x70-0x71
+    unknown pnpinfo _HID=PNP0000 _UID=0 _CID=none at handle=\_SB_.PC00.ISA_.PIC_
+        I/O ports:
+            0x20-0x21
+            0xa0-0xa1
+    attimer0 <AT timer> pnpinfo _HID=PNP0100 _UID=0 _CID=none at handle=\_SB_.PC00.ISA_.TIMR
+        Interrupt request lines:
+            0x0
+        I/O ports:
+            0x40-0x43
+    hpet0 <High Precision Event Timer> pnpinfo _HID=PNP0103 _UID=0 _CID=none at handle=\_SB_.PC00.HPET
+        Interrupt request lines:
+            0x20
+            0x21
+            0x22
+            0x23
+            0x24
+            0x25
+            0x26
+            0x27
+        I/O memory addresses:
+            0xfed00000-0xfed003ff
+    vmgenc0 <VM Generation Counter> pnpinfo _HID=BHYVE_V_GEN_COUNTER_V1 _UID=0 _CID=VM_GEN_COUNTER at handle=\_SB_.GENC
+    acpi_timer0 <32-bit timer at 3.579545MHz> pnpinfo unknown
+        I/O ports:
+            0x408-0x40b

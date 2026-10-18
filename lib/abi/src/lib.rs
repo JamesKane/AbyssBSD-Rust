@@ -13,6 +13,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+pub mod bus;
 pub mod layout;
 pub mod signal;
 pub mod stat;

@@ -6,7 +6,7 @@
 //! (`offset_of!`, `size_of`), so the check compares what the kernel will
 //! actually use against what FreeBSD's C compiler computes.
 
-use crate::{signal, stat, time};
+use crate::{bus, signal, stat, time};
 
 /// Architectures a layout applies to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,7 +59,35 @@ pub struct ConstValue {
 }
 
 /// Every ABI constant checked against FreeBSD's headers.
-pub const CONSTANTS: &[&[ConstValue]] = &[crate::sysctl::CONSTANTS];
+pub const CONSTANTS: &[&[ConstValue]] = &[crate::sysctl::CONSTANTS, BUS_CONSTANTS];
+
+const fn bus_const(c_name: &'static str, value: i64) -> ConstValue {
+    ConstValue {
+        c_name,
+        header: "sys/bus.h",
+        value,
+    }
+}
+
+const BUS_CONSTANTS: &[ConstValue] = &[
+    bus_const("BUS_USER_VERSION", bus::BUS_USER_VERSION as i64),
+    bus_const("BUS_USER_BUFFER", bus::BUS_USER_BUFFER as i64),
+    bus_const("DS_NOTPRESENT", bus::ds::NOTPRESENT as i64),
+    bus_const("DS_ALIVE", bus::ds::ALIVE as i64),
+    bus_const("DS_ATTACHING", bus::ds::ATTACHING as i64),
+    bus_const("DS_ATTACHED", bus::ds::ATTACHED as i64),
+    bus_const("DF_ENABLED", bus::df::ENABLED as i64),
+    bus_const("DF_FIXEDCLASS", bus::df::FIXEDCLASS as i64),
+    bus_const("DF_WILDCARD", bus::df::WILDCARD as i64),
+    bus_const("DF_DESCMALLOCED", bus::df::DESCMALLOCED as i64),
+    bus_const("DF_QUIET", bus::df::QUIET as i64),
+    bus_const("DF_DONENOMATCH", bus::df::DONENOMATCH as i64),
+    bus_const("DF_EXTERNALSOFTC", bus::df::EXTERNALSOFTC as i64),
+    bus_const("DF_SUSPENDED", bus::df::SUSPENDED as i64),
+    bus_const("DF_QUIET_CHILDREN", bus::df::QUIET_CHILDREN as i64),
+    bus_const("DF_ATTACHED_ONCE", bus::df::ATTACHED_ONCE as i64),
+    bus_const("DF_NEEDNOMATCH", bus::df::NEEDNOMATCH as i64),
+];
 
 /// Size of the field selected by `_f`. The function pointer only carries
 /// the field type; it is never called.
@@ -87,6 +115,18 @@ macro_rules! layout {
 
 /// Every structure checked by `abi-check`.
 pub static LAYOUTS: &[StructLayout] = &[
+    layout!(bus::UBusinfo, "struct u_businfo", ["sys/types.h", "sys/bus.h"], All, {
+        ub_version => "ub_version",
+        ub_generation => "ub_generation",
+    }),
+    layout!(bus::UDevice, "struct u_device", ["sys/types.h", "sys/bus.h"], All, {
+        dv_handle => "dv_handle",
+        dv_parent => "dv_parent",
+        dv_devflags => "dv_devflags",
+        dv_flags => "dv_flags",
+        dv_state => "dv_state",
+        dv_fields => "dv_fields",
+    }),
     layout!(time::Timespec, "struct timespec", ["sys/types.h", "time.h"], All, {
         tv_sec => "tv_sec",
         tv_nsec => "tv_nsec",

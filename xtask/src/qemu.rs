@@ -99,6 +99,9 @@ pub(crate) struct Vm {
     pub(crate) pin: bool,
     /// QEMU x86 machine type instead of `q35` (for example `pc`).
     pub(crate) machine: Option<String>,
+    /// Extra devices: bhyve `-s` slot specifications (`5,nvme,ram=64`) or
+    /// QEMU `-device`/`-drive` argument pairs, passed through as given.
+    pub(crate) devices: Vec<String>,
 }
 
 /// Host CPUs per physical core on the build server (P-cores have SMT).
@@ -147,20 +150,14 @@ pub(crate) fn cmd_run(mut args: Args) -> Result<()> {
 
     let disk = image::build(arch, opts, &cmdline)?;
     let vm = Vm {
-        vmm,
-        arch,
-        disk,
         smp,
         mem,
         gdb,
         display,
         el2,
-        test_devices: false,
-        allow_reset: false,
-        extra_disk: None,
-        pin: false,
-        machine: None,
+        ..Vm::new(vmm, arch, disk)
     };
+
     let mut cmd = vm.command()?;
     if vmm == Vmm::Qemu {
         cmd.arg("-serial").arg("mon:stdio");
@@ -217,6 +214,26 @@ fn kvm_available(arch: Arch) -> bool {
 }
 
 impl Vm {
+    /// A machine with the defaults: 4 CPUs, 1 GiB, no test devices.
+    pub(crate) fn new(vmm: Vmm, arch: Arch, disk: PathBuf) -> Self {
+        Self {
+            vmm,
+            arch,
+            disk,
+            smp: 4,
+            mem: "1G".into(),
+            gdb: false,
+            display: false,
+            el2: false,
+            test_devices: false,
+            allow_reset: false,
+            extra_disk: None,
+            pin: false,
+            machine: None,
+            devices: Vec::new(),
+        }
+    }
+
     /// The hypervisor command line. For QEMU, without a serial backend.
     fn command(&self) -> Result<Command> {
         match self.vmm {
@@ -257,6 +274,9 @@ impl Vm {
         c.args(["-s", "3,virtio-rnd"]);
         if let Some(d) = &self.extra_disk {
             c.arg("-s").arg(format!("4,virtio-blk,{}", d.display()));
+        }
+        for d in &self.devices {
+            c.arg("-s").arg(d);
         }
         if self.pin {
             for v in 0..self.smp {
@@ -340,6 +360,7 @@ impl Vm {
             // GOP (virtio-gpu's GOP is blit-only).
             c.args(["-device", "ramfb"]);
         }
+        c.args(&self.devices);
         c.args(["-nic", "none"]);
         if !self.allow_reset {
             c.arg("-no-reboot");

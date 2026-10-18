@@ -1128,8 +1128,12 @@ These are not Day-1 work. The design keeps room for them so they do not need a n
    the serializer (simpler drivers, the IOKit default), or run concurrently with class calls (the
    FreeBSD default, with lower latency)? This design takes the serializer, to be revisited if the
    P3 interrupt-latency benchmark shows a cost.
-2. **Unit numbering on attach failure.** FreeBSD's exact behavior when attach fails and another
-   driver later claims the device needs checking against the source and a differential test.
+2. **Unit numbering on attach failure.** Resolved (P3.2, from `device_attach` in
+   sys/kern/subr_bus.c): a failed attach removes the device from its devclass, freeing the unit,
+   unless the devclass was fixed at creation or `hw.bus.disable_failed_devices` is set (then the
+   device stays, disabled, keeping its unit). A driver that later claims the device takes the
+   lowest free unit of its own devclass. A device disabled by a hint keeps its unit.
+   `lib/devtree::units` implements this.
 3. **Where class traits live.** One crate per class (`sys/storage`, `sys/net`), or a single
    `sys/class` with features? This doc assumes one crate per class, matching the existing plan.
 4. **Typed register macro.** `lib/regs` needs a register-block macro without external crates. A
