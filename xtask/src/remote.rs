@@ -8,7 +8,9 @@ use std::process::Command;
 
 use crate::util::{self, Result};
 
-const DEFAULT_HOST: &str = "192.168.0.2";
+/// An ssh alias (`Host abyss-build` in ~/.ssh/config), so an address change is
+/// a one-line edit outside the repository.
+const DEFAULT_HOST: &str = "abyss-build";
 /// Mirror location, relative to the remote home directory.
 pub(crate) const REMOTE_DIR: &str = "abyss/src";
 

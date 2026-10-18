@@ -34,7 +34,7 @@ commands:
   unsafe-report                                          count unsafe per crate
 
 architectures: x86_64, aarch64
---remote runs the command on the build server ($ABYSS_BUILD_HOST, default 192.168.0.2)";
+--remote runs the command on the build server ($ABYSS_BUILD_HOST, default ssh alias abyss-build)";
 
 fn main() -> ExitCode {
     match run() {
