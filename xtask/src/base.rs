@@ -257,7 +257,7 @@ pub(crate) fn cc_static(arch: Arch, source: &Path, out: &Path) -> Result<()> {
 
 /// The memory-disk image for `arch`, if `fetch-base` has run: `/rescue`
 /// plus each `tests/user/*.c` built into `usr/tests/abyss/` (rebuilt when
-/// its source changes).
+/// its source or xtask changes).
 pub(crate) fn md_image(arch: Arch) -> Result<Option<Vec<u8>>> {
     let Some(rescue) = existing_rescue_image(arch) else {
         return Ok(None);
@@ -286,17 +286,23 @@ pub(crate) fn md_image(arch: Arch) -> Result<Option<Vec<u8>>> {
         };
         append(&mut md, &format!("{dir}/"), b'5', 0o755, &[])?;
     }
+    let built_by = std::env::current_exe()
+        .and_then(fs::metadata)
+        .and_then(|m| m.modified())
+        .ok();
     for src in sources {
         let name = src
             .file_stem()
             .and_then(|s| s.to_str())
             .ok_or("bad test name")?;
         let bin = out_dir.join(name);
+        // Stale if older than its source or than xtask itself, whose
+        // build flags may have changed.
         let stale = match (
             fs::metadata(&src)?.modified(),
             fs::metadata(&bin).and_then(|m| m.modified()),
         ) {
-            (Ok(s), Ok(b)) => s > b,
+            (Ok(s), Ok(b)) => s > b || built_by.is_none_or(|x| x > b),
             _ => true,
         };
         if stale {
