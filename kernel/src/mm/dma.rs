@@ -61,6 +61,12 @@ unsafe impl DmaMemory for KernelDma {
             .or_else(|| super::translate(v).map(|t| t.pa.get()))
     }
 
+    fn linear(&self) -> Option<(usize, usize)> {
+        let base = usize::try_from(bootproto::layout::DMAP_BASE).ok()?;
+        let len = usize::try_from(bootproto::layout::DMAP_SIZE).ok()?;
+        Some((base, len))
+    }
+
     fn clean(&self, va: *const u8, len: usize) {
         #[cfg(target_arch = "aarch64")]
         crate::arch::cache::clean_to_poc(va as usize, len);

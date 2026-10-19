@@ -537,16 +537,27 @@ fn bench_disk(s: &Sleepable, dev: &str, name: &str) {
     });
 }
 
+/// The nodes the AML benchmark evaluates: every device, plus the predefined
+/// `\_SB` and `\_TZ` scopes, which ACPICA's device walk also visits.
+fn aml_walk(interp: &aml::Interpreter) -> Vec<aml::NodeId> {
+    let mut nodes = interp.devices();
+    let root = interp.root();
+    nodes.extend(["_SB", "_TZ"].iter().filter_map(|n| interp.child(root, n)));
+    nodes
+}
+
 /// `_STA` and `_CRS` of every namespace device, per device.
 fn bench_aml(s: &Sleepable) {
     let Some(svc) = acpi::service() else {
         kprintln!("kbench: no ACPI namespace");
         return;
     };
+    let n = svc.run(s, |interp, _| aml_walk(interp).len());
+    kprintln!("kbench: aml devices {n}");
     report_median("aml.sta_crs", || {
         let (ticks, n) = svc.run(s, |interp, host| {
             let t0 = time::counter();
-            let devices = interp.devices();
+            let devices = aml_walk(interp);
             for &d in &devices {
                 let _ = black_box(interp.sta(d, host));
                 let _ = black_box(interp.crs(d, host));

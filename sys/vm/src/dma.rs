@@ -61,6 +61,12 @@ pub unsafe trait DmaMemory: Sync {
     fn virt(&self, pa: u64) -> NonNull<u8>;
     /// The physical address of kernel virtual address `va`.
     fn phys(&self, va: *const u8) -> Option<u64>;
+    /// A window `(va, len)` of kernel virtual memory mapped linearly from
+    /// physical address 0 (a direct map), which mapping translates inline,
+    /// as FreeBSD's `pmap_kextract` does; `phys` serves the rest.
+    fn linear(&self) -> Option<(usize, usize)> {
+        None
+    }
     /// Writes back cache lines over `[va, va + len)` (before the device
     /// reads). Not called for coherent devices.
     fn clean(&self, va: *const u8, len: usize);
@@ -239,6 +245,8 @@ pub struct DmaTag {
     constraints: DmaConstraints,
     backend: Backend,
     mem: &'static dyn DmaMemory,
+    /// `mem.linear()`, or an empty window.
+    linear: (usize, usize),
 }
 
 impl core::fmt::Debug for DmaTag {
@@ -273,6 +281,17 @@ impl DmaTag {
             constraints,
             backend,
             mem,
+            linear: mem.linear().unwrap_or((0, 0)),
+        }
+    }
+
+    /// The physical address of `va`.
+    #[inline]
+    fn phys(&self, va: *const u8) -> Option<u64> {
+        let (base, len) = self.linear;
+        match (va as usize).checked_sub(base) {
+            Some(off) if off < len => Some(off as u64),
+            _ => self.mem.phys(va),
         }
     }
 
@@ -609,7 +628,7 @@ impl DmaTag {
         let mut off = 0usize;
         while off < bytes.len() {
             let va = bytes[off..].as_ptr();
-            let pa = self.mem.phys(va).ok_or(DmaError::BadBuffer)?;
+            let pa = self.phys(va).ok_or(DmaError::BadBuffer)?;
             let in_page = to_usize(PAGE_SIZE - (pa % PAGE_SIZE));
             let n = in_page.min(bytes.len() - off);
             // A direct tag reaches all RAM (decided once, at creation, as

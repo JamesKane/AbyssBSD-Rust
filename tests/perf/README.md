@@ -75,12 +75,23 @@ their first 16 MiB. Offsets are 4 KiB-aligned, from xorshift64 seeded with 1. Re
 the disk: FreeBSD through a GEOM consumer of its own class on the provider (`g_io_request`),
 AbyssBSD through `Disk::strategy`. Buffers are page-aligned.
 
+Both sides run under the same conditions. Where the two differ by default, the benchmark matches
+FreeBSD to how it really runs:
+- **Direct dispatch.** The FreeBSD consumer sets `G_CF_DIRECT_SEND | G_CF_DIRECT_RECEIVE`, as
+  `g_vfs` and `geom_dev` do. Without it, every request takes the `g_down` and `g_up` thread hops,
+  which no file system pays.
+- **Interrupt placement.** FreeBSD's `rc.local` pins the virtio and NVMe interrupts to CPU 0
+  (`cpuset -x`), where AbyssBSD routes them. With FreeBSD's default spread, `blk.nda.qd32` ran
+  five times slower.
+- **Nothing mounted.** `vtbd1` is unmounted before the suite runs. `rc.local` copies `kbench.ko`
+  off it first.
+
 | Name | Workers | Operation |
 |---|---|---|
 | `blk.<d>.qd1` | 1 (CPU 1) | 10000 random 4 KiB reads, one at a time, waiting for each. Latency samples, p50 and p99. FreeBSD `biowait`; AbyssBSD a sleeping waiter |
-| `blk.<d>.qd32` | 1 (CPU 1) | Random 4 KiB reads with 32 outstanding: each completion issues the next, until the stop. One op = one completed read. FreeBSD resubmits from the `bio_done` callback (in `g_up`); AbyssBSD's completion callback hands the buffer to the worker, which resubmits (resubmitting in the driver's interrupt thread never lets it sleep) |
+| `blk.<d>.qd32` | 1 (CPU 1) | Random 4 KiB reads with 32 outstanding: each completion issues the next, until the stop. One op = one completed read. On both sides the completion hands the request to the worker, which resubmits it. With direct dispatch the completion runs in the driver's interrupt thread, and resubmitting there never lets that thread sleep |
 | `blk.<d>.seq` | 1 (CPU 1) | Sequential 128 KiB reads, one at a time, wrapping at 16 MiB. One op = one read |
-| `aml.sta_crs` | coordinator | Evaluate `_STA` and `_CRS` of every namespace device (`_CRS` decoded into resources). One op = one device; the median of three passes. FreeBSD `AcpiWalkNamespace`, `AcpiEvaluateObjectTyped`, `AcpiGetCurrentResources`; AbyssBSD the AML service |
+| `aml.sta_crs` | coordinator | Evaluate `_STA` and `_CRS` of every namespace device (`_CRS` decoded into resources). One op = one node; the median of three passes. The nodes are every device plus the predefined `\_SB` and `\_TZ` scopes, which ACPICA types as devices. FreeBSD `AcpiWalkNamespace`, `AcpiEvaluateObjectTyped`, `AcpiGetCurrentResources`; AbyssBSD the AML service |
 | `dma.map` | 1 (CPU 1) | Map a page-aligned 4 KiB buffer for a device read, then unmap it. FreeBSD `bus_dmamap_load`, `bus_dmamap_sync` (PREREAD, POSTREAD), `bus_dmamap_unload` on a tag with no constraints; AbyssBSD `DmaTag::map` and `Mapped::unmap` on an unconstrained tag |
 | `gate.t<T>` | 1, 8 | Enter and leave a driver's revocation gate. FreeBSD's counterpart is the reference devfs takes around a cdevsw call: `dev_refthread`, `dev_relthread` on a cdev of the module's own |
 | `dev.vtblk.attach` | coordinator | Probe and attach vtblk1's transport (`virtio_pci`), until GEOM (FreeBSD `g_waitidle`) or the device manager (AbyssBSD `wait_idle`) is idle. Median of 16 cycles |

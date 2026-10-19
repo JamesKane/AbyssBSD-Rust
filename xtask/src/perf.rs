@@ -28,7 +28,7 @@ use crate::util::{self, Result};
 const RELEASE: &str = "15.1-RELEASE";
 const VM_IMAGE: &str = "FreeBSD-15.1-RELEASE-amd64-ufs.raw.xz";
 /// Bumped whenever [`prepare_image`] changes what it writes.
-const PREP_VERSION: &str = "4";
+const PREP_VERSION: &str = "5";
 /// The bound: AbyssBSD's median over FreeBSD's.
 const BOUND: f64 = 1.02;
 /// FreeBSD-side coefficient of variation above which a benchmark cannot
@@ -295,13 +295,22 @@ fn configure_guest(mnt: &Path) -> Result<()> {
             "755",
             "#!/bin/sh\n# AbyssBSD cargo xtask perf / freebsd-record: run the second disk's\n\
              # script, or the kbench suite it names; then power off.\n\
+             # kbench runs with vtbd1 unmounted: it reads and detaches it.\n\
+             # Device interrupts go to CPU 0, where AbyssBSD puts them.\n\
              if mount -o ro /dev/vtbd1 /mnt; then\n\
              \tif [ -f /mnt/run.sh ]; then\n\
              \t\tsh /mnt/run.sh\n\
+             \t\tumount /mnt\n\
              \telse\n\
-             \t\tkldload /mnt/kbench.ko && sysctl debug.kbench.run=\"$(cat /mnt/suite)\" >/dev/null\n\
+             \t\tcp /mnt/kbench.ko /mnt/suite /tmp/\n\
+             \t\tumount /mnt\n\
+             \t\tfor irq in $(vmstat -ai | awk '/virtio_pci|nvme/ { sub(/^irq/, \"\", $1); sub(/:$/, \"\", $1); print $1 }'); do\n\
+             \t\t\tcpuset -l 0 -x \"$irq\"\n\
+             \t\tdone\n\
+             \t\tvmstat -ai | grep -E 'virtio_pci|nvme'\n\
+             \t\tkldload /tmp/kbench.ko && sysctl debug.kbench.run=\"$(cat /tmp/suite)\" >/dev/null\n\
              \tfi\n\
-             \tumount /mnt\nfi\npoweroff\n",
+             fi\npoweroff\n",
         ),
     ];
     let staging = mnt.with_file_name("staging");

@@ -714,6 +714,8 @@ kb_open(const char *name)
 	}
 	gp = g_new_geomf(&kb_class, "kbench.%s", name);
 	kb_cp = g_new_consumer(gp);
+	/* Direct dispatch both ways, as g_vfs and geom_dev consumers use. */
+	kb_cp->flags |= G_CF_DIRECT_SEND | G_CF_DIRECT_RECEIVE;
 	error = g_attach(kb_cp, pp);
 	if (error == 0)
 		error = g_access(kb_cp, 1, 0, 0);
@@ -767,62 +769,76 @@ kb_qd1_body(struct kb_run *r __unused, int idx __unused)
 	free(buf, M_KBENCH);
 }
 
-/* QD32: each completion issues the next read until the stop. */
+/*
+ * QD32: each completion hands its bio to the worker, which issues the next
+ * read until the stop. With direct dispatch the completion runs in the
+ * driver's interrupt thread, and resubmitting there never lets it sleep;
+ * AbyssBSD's bench takes the same one hop.
+ */
 static struct kb_run *kb_qd_run;
 static struct mtx kb_qd_mtx;
-static volatile int kb_inflight;
+static struct bio_queue_head kb_qd_q;
+static int kb_inflight;
 
 static void
 kb_qd_done(struct bio *bp)
 {
-	struct kb_run *r = kb_qd_run;
-
 	if (bp->bio_error != 0)
 		panic("kbench: read failed");
-	r->slot[0].ops++;
-	if (!kb_stopped(r)) {
-		void *buf = bp->bio_data;
-
-		g_reset_bio(bp);
-		bp->bio_cmd = BIO_READ;
-		mtx_lock(&kb_qd_mtx);
-		bp->bio_offset = kb_rand_off();
-		mtx_unlock(&kb_qd_mtx);
-		bp->bio_length = 4096;
-		bp->bio_data = buf;
-		bp->bio_done = kb_qd_done;
-		g_io_request(bp, kb_cp);
-		return;
-	}
-	free(bp->bio_data, M_KBENCH);
-	g_destroy_bio(bp);
 	mtx_lock(&kb_qd_mtx);
-	if (--kb_inflight == 0)
-		wakeup(__DEVOLATILE(void *, &kb_inflight));
+	kb_qd_run->slot[0].ops++;
+	bioq_insert_tail(&kb_qd_q, bp);
+	wakeup(&kb_qd_q);
 	mtx_unlock(&kb_qd_mtx);
+}
+
+static void
+kb_qd_issue(struct bio *bp, void *buf, off_t off)
+{
+	g_reset_bio(bp);
+	bp->bio_cmd = BIO_READ;
+	bp->bio_offset = off;
+	bp->bio_length = 4096;
+	bp->bio_data = buf;
+	bp->bio_done = kb_qd_done;
+	g_io_request(bp, kb_cp);
 }
 
 static void
 kb_qd32_body(struct kb_run *r, int idx __unused)
 {
+	struct bio *bp;
+	off_t off;
+
 	kb_qd_run = r;
+	bioq_init(&kb_qd_q);
 	kb_inflight = KB_QD;
 	for (int i = 0; i < KB_QD; i++) {
-		struct bio *bp = g_alloc_bio();
-
-		bp->bio_cmd = BIO_READ;
 		mtx_lock(&kb_qd_mtx);
-		bp->bio_offset = kb_rand_off();
+		off = kb_rand_off();
 		mtx_unlock(&kb_qd_mtx);
-		bp->bio_length = 4096;
-		bp->bio_data = malloc(4096, M_KBENCH, M_WAITOK);
-		bp->bio_done = kb_qd_done;
-		g_io_request(bp, kb_cp);
+		kb_qd_issue(g_alloc_bio(), malloc(4096, M_KBENCH, M_WAITOK),
+		    off);
 	}
 	mtx_lock(&kb_qd_mtx);
-	while (kb_inflight > 0)
-		mtx_sleep(__DEVOLATILE(void *, &kb_inflight), &kb_qd_mtx, 0,
-		    "kbqd", 0);
+	while (kb_inflight > 0) {
+		bp = bioq_takefirst(&kb_qd_q);
+		if (bp == NULL) {
+			mtx_sleep(&kb_qd_q, &kb_qd_mtx, 0, "kbqd", 0);
+			continue;
+		}
+		if (kb_stopped(r)) {
+			kb_inflight--;
+			mtx_unlock(&kb_qd_mtx);
+			free(bp->bio_data, M_KBENCH);
+			g_destroy_bio(bp);
+		} else {
+			off = kb_rand_off();
+			mtx_unlock(&kb_qd_mtx);
+			kb_qd_issue(bp, bp->bio_data, off);
+		}
+		mtx_lock(&kb_qd_mtx);
+	}
 	mtx_unlock(&kb_qd_mtx);
 }
 
@@ -885,6 +901,14 @@ kb_aml_one(ACPI_HANDLE h, UINT32 level __unused, void *ctx, void **ret __unused)
 	return (AE_OK);
 }
 
+static ACPI_STATUS
+kb_aml_count(ACPI_HANDLE h __unused, UINT32 level __unused, void *ctx,
+    void **ret __unused)
+{
+	(*(int *)ctx)++;
+	return (AE_OK);
+}
+
 static void
 kb_aml(void)
 {
@@ -900,6 +924,13 @@ kb_aml(void)
 	}
 	qsort(m, KB_ROUNDS, sizeof(m[0]), kb_cmp);
 	milli = m[KB_ROUNDS / 2];
+	{
+		int n = 0;
+
+		AcpiWalkNamespace(ACPI_TYPE_DEVICE, ACPI_ROOT_OBJECT, 100,
+		    kb_aml_count, NULL, &n, NULL);
+		printf("kbench: aml devices %d\n", n);
+	}
 	printf("kbench aml.sta_crs %ju.%03ju ns/op\n",
 	    (uintmax_t)(milli / 1000), (uintmax_t)(milli % 1000));
 }
