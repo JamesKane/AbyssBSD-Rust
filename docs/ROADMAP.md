@@ -408,9 +408,17 @@ P3.3 (from the start, pure crate) ────────┘   P3.8 ─┴─�
   sequential reads on vtbd and nda; AML `_STA`/`_CRS`; DMA map; gate cost at 1 and 8 CPUs; and
   vtblk attach and detach-cycle time. An audit of the order-of-magnitude wins found harness bugs
   that handicapped FreeBSD, now fixed: no GEOM direct dispatch, interrupts spread across CPUs, and
-  vtbd1 left mounted (tests/perf/README.md). Five runs on bhyve: every benchmark is faster than
-  FreeBSD (geometric mean 0.43). FreeBSD's own run-to-run spread exceeds 1% on 10 of 14. Still
-  to do: interrupt latency (bhyve's HPET as an MSI source on both sides) and AML namespace load.
+  vtbd1 left mounted (tests/perf/README.md). A second pass found AbyssBSD idle-spinning where
+  FreeBSD halted (bhyve passes the host's CPUID leaf 0x1F through; both now read it, and neither
+  spins on SMT siblings) and both attach times dominated by console output (now muted on both
+  sides). Five runs on bhyve: every benchmark is faster than FreeBSD (geometric mean 0.38); the
+  large attach and `gate.t8` leads are design differences (newbus zeroes every candidate driver's
+  softc, about 9 MB per PCI attach; `dev_refthread` takes a per-cdev mutex).
+  Known issues, accepted for now: FreeBSD's QD1 p99 tail (about 5% of reads over 3x the median,
+  against 0.02% on AbyssBSD) is unexplained beyond lying in its idle wake-up path, possibly the
+  event timer's idle mode; and FreeBSD's `blk.vtbd.seq` varies 110% run to run.
+  Still to do: interrupt latency (bhyve's HPET as an MSI source on both sides) and AML namespace
+  load.
 
 **Exit:** on both arches:
 - The kernel enumerates PCIe through the device manager and attaches NVMe, AHCI, and virtio-blk
