@@ -7,7 +7,9 @@
 //! with a generation count a wake bumps. A waiter reads the generation,
 //! then the user word, then sleeps until the generation moves: a wake
 //! between the read and the sleep is not lost, and a spurious wake-up is
-//! allowed (the caller rechecks), as with FreeBSD's.
+//! allowed (the caller rechecks), as with FreeBSD's. A wait may carry a
+//! timeout, a duration or a time on any clock, and then fails with
+//! `ETIMEDOUT` when it passes.
 //!
 //! Behavior reference: sys/kern/kern_thr.c, sys/kern/kern_umtx.c.
 
@@ -15,6 +17,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use abi::errno::Errno;
 use abi::thr::*;
+use abi::time::{Timespec, clock};
 use sched::{Sleepable, WaitQueue};
 
 use super::SysResult;
@@ -22,6 +25,8 @@ use crate::uaccess::{Plain, UserPtr};
 
 // SAFETY: two `u16`s, no padding.
 unsafe impl Plain for Rtprio {}
+// SAFETY: integers only, no padding.
+unsafe impl Plain for UmtxTime {}
 
 fn tid() -> u64 {
     sched::current().tid().0
@@ -89,6 +94,42 @@ fn bucket(addr: u64) -> &'static Bucket {
     &BUCKETS[((addr >> 2) % 64) as usize]
 }
 
+/// How long a wait may last, in nanoseconds (`None`: no limit), from
+/// `_umtx_op`'s `uaddr` (the size of what `uaddr2` points at) and `uaddr2`:
+/// a `struct timespec` duration, or a `struct _umtx_time`.
+fn wait_limit(size: u64, at: u64) -> Result<Option<u64>, Errno> {
+    if at == 0 {
+        return Ok(None);
+    }
+    let t = if size <= size_of::<Timespec>() as u64 {
+        UmtxTime {
+            timeout: UserPtr::<Timespec>::new(at)
+                .read()
+                .map_err(|_| Errno::EFAULT)?,
+            flags: 0,
+            clockid: clock::REALTIME,
+        }
+    } else {
+        UserPtr::<UmtxTime>::new(at)
+            .read()
+            .map_err(|_| Errno::EFAULT)?
+    };
+    let Timespec { tv_sec, tv_nsec } = t.timeout;
+    let (Ok(sec), Ok(nsec)) = (u64::try_from(tv_sec), u64::try_from(tv_nsec)) else {
+        return Err(Errno::EINVAL);
+    };
+    if nsec >= 1_000_000_000 {
+        return Err(Errno::EINVAL);
+    }
+    let ns = sec.saturating_mul(1_000_000_000).saturating_add(nsec);
+    let now = super::time::read(u64::from(t.clockid))?;
+    Ok(Some(if t.flags & UMTX_ABSTIME != 0 {
+        ns.saturating_sub(now)
+    } else {
+        ns
+    }))
+}
+
 /// `_umtx_op(obj, op, val, uaddr, uaddr2)`: waits and wakes.
 pub(super) fn umtx_op(
     s: &Sleepable,
@@ -106,10 +147,7 @@ pub(super) fn umtx_op(
             Ok(0)
         }
         op @ (UMTX_OP_WAIT | UMTX_OP_WAIT_UINT | UMTX_OP_WAIT_UINT_PRIVATE) => {
-            // Timed waits come with the clock calls.
-            if uaddr != 0 || uaddr2 != 0 {
-                return Err(Errno::EINVAL);
-            }
+            let limit = wait_limit(uaddr, uaddr2)?;
             let b = bucket(obj);
             let generation = b.generation.load(Ordering::Acquire);
             let current = if op == UMTX_OP_WAIT {
@@ -123,9 +161,17 @@ pub(super) fn umtx_op(
             } else {
                 val & 0xffff_ffff
             };
-            if current == want {
-                b.waiters
-                    .wait_until(s, || b.generation.load(Ordering::Acquire) != generation);
+            if current != want {
+                return Ok(0);
+            }
+            let woken = || b.generation.load(Ordering::Acquire) != generation;
+            match limit {
+                None => b.waiters.wait_until(s, woken),
+                Some(ns) => {
+                    if !crate::time::wait_timeout(s, &b.waiters, woken, ns) {
+                        return Err(Errno::ETIMEDOUT);
+                    }
+                }
             }
             Ok(0)
         }

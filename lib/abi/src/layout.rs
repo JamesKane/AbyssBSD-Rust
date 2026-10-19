@@ -178,6 +178,11 @@ pub static LAYOUTS: &[StructLayout] = &[
         type_ => "type",
         prio => "prio",
     }),
+    layout!(crate::thr::UmtxTime, "struct _umtx_time", ["sys/types.h", "sys/umtx.h"], All, {
+        timeout => "_timeout",
+        flags => "_flags",
+        clockid => "_clockid",
+    }),
     layout!(crate::uio::Iovec, "struct iovec", ["sys/types.h", "sys/uio.h"], All, {
         iov_base => "iov_base",
         iov_len => "iov_len",

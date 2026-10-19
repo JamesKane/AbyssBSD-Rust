@@ -10,6 +10,19 @@ pub const UMTX_OP_WAKE: u32 = 3;
 pub const UMTX_OP_WAIT_UINT: u32 = 11;
 pub const UMTX_OP_WAIT_UINT_PRIVATE: u32 = 15;
 pub const UMTX_OP_WAKE_PRIVATE: u32 = 16;
+/// `_umtx_time._flags`: the timeout is a time on the clock, not a
+/// duration.
+pub const UMTX_ABSTIME: u32 = 1;
+
+/// `struct _umtx_time`: a wait's timeout, when the size `_umtx_op` is
+/// given exceeds a `struct timespec`'s.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UmtxTime {
+    pub timeout: crate::time::Timespec,
+    pub flags: u32,
+    pub clockid: u32,
+}
 
 pub const RTP_LOOKUP: u32 = 0;
 pub const RTP_SET: u32 = 1;
@@ -52,6 +65,7 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
         "sys/umtx.h",
     ),
     c("UMTX_OP_WAKE_PRIVATE", UMTX_OP_WAKE_PRIVATE, "sys/umtx.h"),
+    c("UMTX_ABSTIME", UMTX_ABSTIME, "sys/umtx.h"),
     c("RTP_LOOKUP", RTP_LOOKUP, "sys/rtprio.h"),
     c("RTP_SET", RTP_SET, "sys/rtprio.h"),
     c("RTP_PRIO_NORMAL", RTP_PRIO_NORMAL as u32, "sys/rtprio.h"),

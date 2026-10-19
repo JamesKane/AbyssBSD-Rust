@@ -588,8 +588,10 @@ P4.0 ─► P4.1 ─► P4.2 ─► P4.3 ─┬─► P4.4 ─┐
     user mode on both architectures: each libc reading falls between two system-call readings,
     and readings stay monotonic across updates. Under QEMU/KVM, a libc read costs about 18 ns.
     Test programs from `tests/user/` are now built into the memory disk.
+  - **Timed waits**: `_umtx_op` waits take a relative or absolute timeout on any clock and fail
+    with `ETIMEDOUT` (`tests/user/umtx.c`). The kernel test runs every `tests/user` program.
   - **Left**: the signal trampoline in the shared page (with P4.4), stack ASLR, PIE executables,
-    `pdfork` (it returns a descriptor, P4.5), and `_umtx_op`'s timed waits.
+    and `pdfork` (it returns a descriptor, P4.5).
 
 **P4.4 Signals.**
 - `sigaction`, `sigprocmask`, `sigfastblock`, `kill`, pending sets, and default actions (including

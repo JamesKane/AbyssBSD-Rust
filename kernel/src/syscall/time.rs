@@ -29,7 +29,7 @@ fn timespec(ns: u64) -> Timespec {
 /// A clock's reading in nanoseconds. The time of day and uptime come from
 /// the shared page's timehands, as libc reads them without the system
 /// call, so the two always agree.
-fn read(id: u64) -> Result<u64, Errno> {
+pub(super) fn read(id: u64) -> Result<u64, Errno> {
     use crate::shared_page::{realtime, to_ns, uptime};
     let id = u32::try_from(id).map_err(|_| Errno::EINVAL)?;
     Ok(match id {

@@ -2644,17 +2644,32 @@ mod user_memory {
     }
 
     ktest! {
-        fn user_clock_reads_the_shared_page() {
+        /// Runs each program `tests/user/*.c` built into the memory disk;
+        /// each checks something from user mode and exits 0 when it holds.
+        fn user_test_programs_pass() {
+            use alloc::vec::Vec;
+            const DIR: &[u8] = b"usr/tests/abyss/";
             let s = cx();
-            let p = crate::proc::Process::spawn(
-                &s,
-                b"/usr/tests/abyss/vdso",
-                &[b"vdso"],
-                &[],
-                Some(hal::cpu_id()),
-            )
-            .unwrap();
-            assert_eq!(p.wait(&s), 0);
+            let archive = crate::md::archive().expect("no memory disk: run `cargo xtask fetch-base`");
+            let mut ran = 0;
+            for e in archive.entries() {
+                let e = e.unwrap();
+                if e.kind != ustar::Kind::File {
+                    continue;
+                }
+                let mut path = Vec::from(&b"/"[..]);
+                e.path_parts(|p| path.extend_from_slice(p));
+                let Some(name) = path[1..].strip_prefix(DIR) else {
+                    continue;
+                };
+                let name = Vec::from(name);
+                let p = crate::proc::Process::spawn(&s, &path, &[&name], &[], Some(hal::cpu_id()))
+                    .unwrap();
+                let status = p.wait(&s);
+                assert_eq!(status, 0, "{} exited with {status}", core::str::from_utf8(&path).unwrap_or("?"));
+                ran += 1;
+            }
+            assert!(ran >= 2, "only {ran} test programs on the memory disk");
         }
     }
 
