@@ -2699,6 +2699,33 @@ mod user_memory {
     }
 
     ktest! {
+        fn rescue_ps_lists_processes() {
+            use crate::proc::Process;
+            let s = cx();
+            // Earlier tests' processes are all gone: none is left a zombie
+            // with no one to reap it, nor kept by a reference.
+            assert!(
+                crate::proc::all().is_empty(),
+                "processes outlived their tests: {:?}",
+                crate::proc::all().iter().map(|p| p.pid()).collect::<Vec<_>>()
+            );
+            // `ps` finds itself and its shell; `-p $$` selects by pid.
+            let script: &[u8] = b"ps -axo pid,ppid,pgid,stat,comm && \
+                [ \"$(ps -p $$ -o comm=)\" = sh ] && \
+                [ \"$(ps -o pid,comm -p $$ | sed -n '1s/^ *//p')\" = 'PID COMMAND' ] && exit 9";
+            let p = Process::spawn(
+                &s,
+                b"/rescue/sh",
+                &[b"sh", b"-c", script],
+                &[b"PATH=/rescue", b"HOME=/"],
+                Some(hal::cpu_id()),
+            )
+            .unwrap();
+            assert_eq!(p.wait(&s), crate::proc::Exit::Code(9));
+        }
+    }
+
+    ktest! {
         fn interactive_sh_job_control_on_the_console() {
             // /rescue/sh on the console as its controlling terminal, typed
             // at through the terminal's input path: ^C ends a foreground

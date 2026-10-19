@@ -213,6 +213,20 @@ impl Signals {
         self.action(sig).sa_handler > SIG_IGN
     }
 
+    /// The signals ignored and the signals caught (`ki_sigignore`,
+    /// `ki_sigcatch`).
+    pub(crate) fn dispositions(&self) -> (Sigset, Sigset) {
+        let (mut ignored, mut caught) = (Sigset::default(), Sigset::default());
+        for sig in 1..=SIG_MAXSIG {
+            if self.ignored(sig) {
+                ignored.add(sig);
+            } else if self.caught(sig) {
+                caught.add(sig);
+            }
+        }
+        (ignored, caught)
+    }
+
     pub(crate) fn pending(&self) -> Sigset {
         self.pending
     }
@@ -585,10 +599,13 @@ fn deliver(s: &Sleepable, frame: &mut TrapFrame) -> bool {
         t.clear_interrupted();
         match next(&p) {
             None => break,
-            Some(Next::Kill(sig)) => kill_self(s, &p, sig),
+            // The process goes with its last reference from this stack.
+            Some(Next::Kill(sig)) => kill_self(s, p, sig),
             Some(Next::Stop(sig)) => stop(s, &p, sig),
             Some(Next::Handle(sig, info, action)) => {
-                handle(s, &p, frame, sig, &info, &action);
+                if !handle(s, &p, frame, sig, &info, &action) {
+                    kill_self(s, p, SIGILL);
+                }
                 built = true;
             }
         }
@@ -602,23 +619,27 @@ fn deliver(s: &Sleepable, frame: &mut TrapFrame) -> bool {
 }
 
 /// Ends the current process by `sig` (FreeBSD's `sigexit`; there are no
-/// core dumps).
-fn kill_self(s: &Sleepable, p: &Arc<Process>, sig: u32) -> ! {
+/// core dumps). Takes the caller's reference: nothing on a stack that
+/// never unwinds may keep the process.
+pub(super) fn kill_self(s: &Sleepable, p: Arc<Process>, sig: u32) -> ! {
     p.exit(s, Exit::Signal(sig));
+    drop(p);
     sched::exit()
 }
 
 /// Builds `sig`'s handler frame on the user stack and updates the mask
-/// (FreeBSD's `postsig`). A stack the frame cannot be written to ends
-/// the process with `SIGILL`.
+/// (FreeBSD's `postsig`). Returns `false` if the frame cannot be written:
+/// the caller ends the process with `SIGILL` (with the reference it
+/// holds, see [`kill_self`]).
+#[must_use]
 fn handle(
-    s: &Sleepable,
+    _s: &Sleepable,
     p: &Arc<Process>,
     frame: &mut TrapFrame,
     sig: u32,
     info: &Siginfo,
     action: &Sigaction,
-) {
+) -> bool {
     let (mask, altstack) = {
         let mut st = p.signals.lock();
         (st.saved_mask.take().unwrap_or(st.mask), st.altstack)
@@ -636,7 +657,7 @@ fn handle(
             "pid {}: cannot write a signal frame for signal {sig}; killing it",
             p.pid()
         );
-        kill_self(s, p, SIGILL);
+        return false;
     }
     let mut st = p.signals.lock();
     st.mask = st.mask.union(action.sa_mask);
@@ -647,6 +668,7 @@ fn handle(
     if action.sa_flags & SA_RESETHAND != 0 && sig != SIGILL && sig != SIGTRAP {
         st.actions[(sig - 1) as usize] = Sigaction::default();
     }
+    true
 }
 
 /// After the current thread unblocked signals or changed its pending set:

@@ -42,6 +42,13 @@ plain!(u8, u16, u32, u64, usize, i8, i16, i32, i64, isize);
 // SAFETY: an array of plain elements has no padding between them.
 unsafe impl<T: Plain, const N: usize> Plain for [T; N] {}
 
+/// The bytes of a [`Plain`] value (for replies built in the kernel).
+pub(crate) fn bytes_of<T: Plain>(v: &T) -> &[u8] {
+    // SAFETY: a `Plain` value has no padding, so all its bytes are
+    // initialized; the slice borrows `v` for its lifetime.
+    unsafe { core::slice::from_raw_parts(core::ptr::from_ref(v).cast::<u8>(), size_of::<T>()) }
+}
+
 /// Whether `[addr, addr + len)` lies in the user half.
 fn in_user(addr: u64, len: usize) -> bool {
     u64::try_from(len)

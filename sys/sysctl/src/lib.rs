@@ -187,6 +187,9 @@ pub enum ReadError {
     IsNode,
     /// A handler rejected the trailing components (`EINVAL`).
     Invalid,
+    /// A handler failed for its own reason (`ESRCH` for a process that
+    /// is not there, and the like).
+    Failed(abi::errno::Errno),
 }
 
 struct Node {

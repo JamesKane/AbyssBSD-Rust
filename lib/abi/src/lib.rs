@@ -19,6 +19,7 @@ pub mod errno;
 pub mod exec;
 pub mod fcntl;
 pub mod ioctl;
+pub mod kinfo;
 pub mod layout;
 pub mod mman;
 pub mod mount;

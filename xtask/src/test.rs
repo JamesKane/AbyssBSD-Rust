@@ -59,6 +59,32 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
                 }
             }
         }
+        for &arch in &arches {
+            for vmm in [Vmm::Qemu, Vmm::Bhyve] {
+                let name = match vmm {
+                    Vmm::Qemu => format!("{arch}-shell"),
+                    Vmm::Bhyve => format!("{arch}-bhyve-shell"),
+                };
+                if !vmm.available(arch) {
+                    if vmm == Vmm::Bhyve && arch == Arch::X86_64 {
+                        println!("== boot tests ({name}): skipped, needs a FreeBSD host");
+                    }
+                    continue;
+                }
+                println!("== boot tests ({name}, {vmm:?})");
+                match shell(arch, vmm, release)? {
+                    Ok(()) => println!("{name}: PASS"),
+                    Err(why) => {
+                        println!("{name}: FAIL: {why}");
+                        failed.push(if vmm == Vmm::Qemu {
+                            "shell"
+                        } else {
+                            "bhyve-shell"
+                        });
+                    }
+                }
+            }
+        }
         if !failed.is_empty() {
             return Err(format!("boot tests failed on {failed:?}; logs in build/<arch>/").into());
         }
@@ -237,6 +263,47 @@ const BOOT_CASES: &[BootCase] = &[
 
 /// The line the first boot of a warm-reset case leaves in the log ring.
 const WARM_RESET_MARKER: &str = "logring: first boot marker";
+
+/// The boot-to-shell test (ROADMAP P4.7): a normal boot ends in
+/// `/rescue/sh` on the serial console. The script `freebsd-shell` proves
+/// against FreeBSD runs against it, and `exit` must power the machine off.
+fn shell(arch: Arch, vmm: Vmm, release: bool) -> Result<std::result::Result<(), String>> {
+    let disk = image::build(
+        arch,
+        build::Options {
+            release,
+            ktest: false,
+        },
+        "abyss.verifier=1",
+    )?;
+    let suffix = if vmm == Vmm::Bhyve { "-bhyve" } else { "" };
+    let disk = {
+        let copy = disk.with_file_name(format!("disk-shell{suffix}.img"));
+        std::fs::copy(&disk, &copy)?;
+        copy
+    };
+    let log = disk.with_file_name(format!("shell{suffix}.log"));
+    let vm = Vm {
+        smp: 4,
+        ..Vm::new(vmm, arch, disk)
+    };
+    let mut session = crate::expect::Session::start(vm, &log)?;
+    let result = (|| -> Result<()> {
+        session.expect("# ", Duration::from_secs(240))?;
+        session.script(crate::expect::SHELL, Duration::from_secs(30))?;
+        session.send("exit\n")
+    })();
+    let exited = session.finish(Duration::from_secs(60))?;
+    let verdict = match result {
+        Err(e) => Err(e.to_string()),
+        Ok(()) if !exited => Err("the machine did not power off after `exit`".into()),
+        Ok(()) => Ok(()),
+    };
+    if verdict.is_err() {
+        println!("{arch}-shell{suffix}: serial log at {}", log.display());
+    }
+    Ok(verdict)
+}
 
 /// Lines the kernel's deliberate fatal fault must produce: a decoded page
 /// fault, a register dump, and a symbolized backtrace through the test.

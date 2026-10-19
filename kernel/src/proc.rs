@@ -45,7 +45,7 @@ use crate::mm::space::{self, AddressSpace};
 use crate::signal::Signals;
 
 /// The highest pid (`PID_MAX`); allocation wraps to 2 past it.
-const PID_MAX: i32 = 99_999;
+pub(crate) const PID_MAX: i32 = 99_999;
 /// init's pid, which inherits orphans.
 const INIT: i32 = 1;
 
@@ -225,6 +225,54 @@ pub(crate) struct Process {
     pub(crate) cwd: SpinLock<Arc<Vnode>>,
     /// The file creation mask.
     pub(crate) umask: AtomicU16,
+    /// What `ps` shows of the program it runs.
+    image: SpinLock<Image>,
+    /// When it was created, in nanoseconds since boot.
+    started: u64,
+    /// It has called `execve` (FreeBSD's `P_EXEC`).
+    execed: AtomicBool,
+}
+
+/// The program a process runs, as `kern.proc` reports it.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Image {
+    /// The command name (`ki_comm`): the file name it was run as.
+    pub(crate) comm: Vec<u8>,
+    /// The arguments, each NUL-terminated (`kern.proc.args`).
+    pub(crate) args: Arc<[u8]>,
+    /// The executable's path (`kern.proc.pathname`).
+    pub(crate) path: Arc<[u8]>,
+}
+
+impl Image {
+    /// For the program at `path` (as given, from directory `cwd`) run with
+    /// `argv`.
+    fn new(cwd: &Arc<Vnode>, path: &[u8], argv: &[&[u8]]) -> Self {
+        let name = path.rsplit(|&b| b == b'/').next().unwrap_or(path);
+        let comm = name[..name.len().min(abi::kinfo::MAXCOMLEN)].to_vec();
+        let mut args = Vec::new();
+        for a in argv {
+            args.extend_from_slice(a);
+            args.push(0);
+        }
+        let full = if path.first() == Some(&b'/') {
+            path.to_vec()
+        } else {
+            let mut dir = crate::fs::namespace()
+                .path_of(cwd, &crate::fs::root())
+                .unwrap_or_else(|_| b"/".to_vec());
+            if dir.last() != Some(&b'/') {
+                dir.push(b'/');
+            }
+            dir.extend_from_slice(path);
+            dir
+        };
+        Self {
+            comm,
+            args: args.into(),
+            path: full.into(),
+        }
+    }
 }
 
 /// How a process's thread enters user mode.
@@ -251,6 +299,8 @@ impl Process {
         };
         let cwd = parent.map_or_else(crate::fs::root, |p| Arc::clone(&p.cwd.lock()));
         let umask = parent.map_or(0o022, |p| p.umask.load(Ordering::Relaxed));
+        let image = parent.map(|p| p.image.lock().clone()).unwrap_or_default();
+        let execed = parent.is_some_and(|p| p.execed.load(Ordering::Relaxed));
         let p = Arc::new_cyclic(|me| {
             let pid = alloc_pid(me);
             Self {
@@ -279,6 +329,9 @@ impl Process {
                 files: Mutex::new(&FILEDESC_LOCK, files),
                 cwd: SpinLock::new(cwd),
                 umask: AtomicU16::new(umask),
+                image: SpinLock::new(image),
+                started: crate::time::now_ns(),
+                execed: AtomicBool::new(execed),
             }
         });
         if let Some(parent) = parent {
@@ -296,6 +349,26 @@ impl Process {
     /// `P_PPWAIT`).
     pub(crate) fn vforked(&self) -> bool {
         self.vforked.load(Ordering::Acquire)
+    }
+
+    /// The program it runs.
+    pub(crate) fn image(&self) -> Image {
+        self.image.lock().clone()
+    }
+
+    /// When it was created, in nanoseconds since boot.
+    pub(crate) const fn started(&self) -> u64 {
+        self.started
+    }
+
+    /// Whether it has called `execve`.
+    pub(crate) fn execed(&self) -> bool {
+        self.execed.load(Ordering::Relaxed)
+    }
+
+    /// Whether it has exited (a zombie, until reaped).
+    pub(crate) fn is_zombie(&self) -> bool {
+        self.zombie.load(Ordering::Acquire)
     }
 
     /// The address space the process runs in now.
@@ -348,7 +421,7 @@ impl Process {
     /// arguments `argv` and environment `envp`, started by the kernel (no
     /// parent: a session leader, as init is) with the console open on
     /// descriptors 0 to 2; its thread is bound to `cpu` if given.
-    #[cfg_attr(not(feature = "ktest"), allow(dead_code))] // boot-to-shell (P4.7)
+    #[cfg_attr(not(feature = "ktest"), allow(dead_code))]
     pub(crate) fn spawn(
         s: &Sleepable,
         path: &[u8],
@@ -361,7 +434,6 @@ impl Process {
 
     /// As [`Process::spawn`], with `ctty` as the new session's controlling
     /// terminal from the start, as init gives a shell its terminal.
-    #[cfg_attr(not(feature = "ktest"), allow(dead_code))] // boot-to-shell (P4.7)
     pub(crate) fn spawn_session(
         s: &Sleepable,
         path: &[u8],
@@ -384,6 +456,7 @@ impl Process {
         let data_max = default_limits()[rlimit::DATA as usize].rlim_max;
         let image = crate::exec::load(s, &space, &file, path, argv, envp, data_max)?;
         let p = Self::create(space, image.layout, None, crate::fs::console_table());
+        *p.image.lock() = Image::new(&root, path, argv);
         if let Some(t) = ctty {
             crate::tty::make_controlling(t, &p);
         }
@@ -577,6 +650,9 @@ impl Process {
         self.signals.lock().exec();
         let closed = self.files.lock(s).exec();
         drop(closed);
+        let cwd = Arc::clone(&self.cwd.lock());
+        *self.image.lock() = Image::new(&cwd, path, argv);
+        self.execed.store(true, Ordering::Relaxed);
         self.exterr.store(0, Ordering::Relaxed);
         self.set_tls_base(None);
         // SAFETY: this thread runs in the new image; the kernel does not
@@ -701,7 +777,6 @@ impl Process {
     }
 
     /// Waits for the process to exit (kernel code); returns how it ended.
-    #[cfg_attr(not(feature = "ktest"), allow(dead_code))] // boot-to-shell (P4.7)
     pub(crate) fn wait(&self, s: &Sleepable) -> Exit {
         self.waiters
             .wait_until(s, || self.exited.load(Ordering::Acquire));

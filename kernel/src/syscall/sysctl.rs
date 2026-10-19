@@ -24,6 +24,7 @@ fn read_error(e: ReadError) -> Errno {
         ReadError::NotFound => Errno::ENOENT,
         ReadError::IsNode => Errno::EISDIR,
         ReadError::Invalid => Errno::EINVAL,
+        ReadError::Failed(e) => e,
     }
 }
 

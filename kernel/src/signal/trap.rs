@@ -211,7 +211,11 @@ pub(crate) fn trap(s: &Sleepable, report: &crate::arch::TrapReport, frame: &mut 
         }
     };
     match action {
-        Some(action) => handle(s, &p, frame, fault.sig, &info, &action),
+        Some(action) => {
+            if !handle(s, &p, frame, fault.sig, &info, &action) {
+                super::kill_self(s, p, SIGILL);
+            }
+        }
         None => {
             let _ = post(&p, info);
         }

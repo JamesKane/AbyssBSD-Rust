@@ -35,6 +35,7 @@ mod fs;
 mod intc;
 #[cfg(target_arch = "aarch64")]
 mod its;
+mod kinfo;
 mod md;
 mod mm;
 mod panic;
@@ -117,6 +118,7 @@ fn kmain(boot_info: PhysAddr) -> ! {
     random::start_harvester();
     // After the clock is set, as FreeBSD mounts root once devices attach.
     fs::init();
+    kinfo::init(&s);
 
     #[cfg(feature = "ktest")]
     tests::run(&s);
@@ -150,8 +152,28 @@ fn kmain(boot_info: PhysAddr) -> ! {
             kprintln!("Phase 1 kernel: nothing more to do yet. Halted (abyss.halt).");
             arch::cpu::halt_forever();
         }
-        kprintln!("Phase 1 kernel: nothing more to do yet. Powering off.");
+        run_shell(&s);
         power_off(&s)
+    }
+}
+
+/// The shell a single-user boot gives the console (until init, P6): FreeBSD's
+/// `/rescue/sh`, as a login shell (`-sh`) leading its own session, with the
+/// console as its controlling terminal. Returns when it exits.
+#[cfg(not(feature = "ktest"))]
+fn run_shell(s: &sched::Sleepable) {
+    // The memory disk holds only /rescue.
+    const ENV: &[&[u8]] = &[b"HOME=/", b"PATH=/rescue"];
+    let console = tty::console();
+    if console.is_none() {
+        kprintln!("shell: the console cannot be typed at; starting it anyway");
+    }
+    match proc::Process::spawn_session(s, b"/rescue/sh", &[b"-sh"], ENV, None, console.as_deref()) {
+        Ok(p) => {
+            let how = p.wait(s);
+            kprintln!("shell: exited ({how:?})");
+        }
+        Err(e) => kprintln!("shell: cannot start /rescue/sh: {e:?}"),
     }
 }
 

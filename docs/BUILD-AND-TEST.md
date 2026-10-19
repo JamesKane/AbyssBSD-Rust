@@ -96,8 +96,9 @@ into `build/dist/`, so clang and lld build the same programs locally. Each image
 programs check FreeBSD's behavior, not ours, so each also passes on FreeBSD 15.1 itself
 (`cc -static` on the server): a check that fails there is wrong.
 `freebsd-shell` boots FreeBSD single-user in bhyve and runs `xtask/src/expect.rs`'s `SHELL`
-script against its `/rescue/sh`. That is the script the boot-to-shell test will run against
-AbyssBSD.
+script against its `/rescue/sh`. The boot tier runs the same script against AbyssBSD: each
+architecture's `<arch>-shell` case (and `x86_64-bhyve-shell` on the server) boots a normal kernel
+to `/rescue/sh` on the serial console, runs it, and checks that `exit` powers the machine off.
 
 Planned for later phases:
 

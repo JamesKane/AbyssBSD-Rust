@@ -737,6 +737,20 @@ P4.0 ─► P4.1 ─► P4.2 ─► P4.3 ─┬─► P4.4 ─┐
 - A syscall fuzzer pass over Tier A (random arguments and pointers from a user process), with no
   kernel panics and balanced accounting.
 - The P4 suite against FreeBSD 15.1 on bhyve, the same static binaries on both kernels.
+- Progress (2026-10-19):
+  - **Boot to a shell.** A normal boot ends in FreeBSD's `/rescue/sh`, run as single-user init
+    runs it: a login shell (`-sh`) leading its own session, with the console as its controlling
+    terminal. When it exits the machine powers off. `cargo xtask test --tier boot` now boots each
+    architecture to that shell (and bhyve on the server) and runs `xtask/src/expect.rs`'s script,
+    the one `freebsd-shell` runs against FreeBSD: arithmetic, a pipeline, `ls`, `sysctl
+    kern.ostype`, `ps`, `^Z`, `jobs`, `fg`, `^C`, and `exit`. It passes on both architectures.
+  - **`kern.proc`** for `ps`: `struct kinfo_proc` (1088 bytes, checked by `abi-check`), every
+    selection with its `_td` twin, `args`, and `pathname`, plus `kern.pid_max`. Processes record
+    their command name, arguments, executable path, and start time.
+  - **Bug found:** a process killed by a signal leaked. Signal delivery held a reference to it on
+    a stack that never unwinds, so it lived on as a zombie with no parent, holding its page-table
+    root. `ps` showed them. The `ps` kernel test now checks that no process outlives its test.
+  - **Left:** the fuzzer, the P4 suite against FreeBSD, and the PTI question.
 
 **Exit:** both arches boot to an interactive `/rescue/sh` (from FreeBSD 15.1 `base.txz`) on the
 serial console. Pipelines, job control (`^Z`, `fg`), `ls`, `cat`, `sysctl kern.ostype`, and

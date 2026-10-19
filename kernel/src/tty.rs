@@ -120,6 +120,19 @@ fn controlling(sid: i32) -> Option<Arc<Tty>> {
         .cloned()
 }
 
+/// The controlling terminal of session `sid`: its device number and its
+/// foreground process group (`ki_tdev`, `ki_tpgid`).
+pub(crate) fn of_session(sid: i32) -> Option<(u64, i32)> {
+    let t = controlling(sid)?;
+    let pgrp = t.ctty.lock().pgrp;
+    let rdev = t
+        .vnode
+        .get()
+        .and_then(Weak::upgrade)
+        .map_or(abi::kinfo::NODEV, |v| v.stat().st_rdev);
+    Some((rdev, pgrp))
+}
+
 /// A session's leader exited: its terminal's foreground group gets
 /// `SIGHUP` (and `SIGCONT`, to act on it), and the terminal is free.
 pub(crate) fn session_ended(sid: i32) {
@@ -138,7 +151,6 @@ pub(crate) fn session_ended(sid: i32) {
 /// Makes `t` the controlling terminal of `p`'s session, with `p`'s group
 /// in the foreground, as `TIOCSCTTY` by a session leader does (for the
 /// kernel's own processes, which start as session leaders).
-#[cfg_attr(not(feature = "ktest"), allow(dead_code))]
 pub(crate) fn make_controlling(t: &Tty, p: &Process) {
     *t.ctty.lock() = Ctty {
         sid: p.sid(),
