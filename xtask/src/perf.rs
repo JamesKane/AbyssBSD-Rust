@@ -27,7 +27,7 @@ use crate::qemu::{Outcome, Vm, Vmm};
 use crate::util::{self, Result};
 const VM_IMAGE: &str = "FreeBSD-15.1-RELEASE-amd64-ufs.raw.xz";
 /// Bumped whenever [`prepare_image`] changes what it writes.
-const PREP_VERSION: &str = "15";
+const PREP_VERSION: &str = "16";
 /// The bound: AbyssBSD's median over FreeBSD's.
 const BOUND: f64 = 1.02;
 /// FreeBSD-side coefficient of variation above which a benchmark cannot
@@ -235,9 +235,6 @@ fn verify(file: &Path, name: &str, sums: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The FreeBSD VM image, configured to run the benchmark at boot and power
-/// off: serial console, no daemons that need not run, and an `rc.local`
-/// that loads `kbench.ko` from the second disk.
 /// The prepared FreeBSD VM image booting single-user, and a directory for
 /// work beside it. In single-user mode init gives the shell the console as
 /// its controlling terminal, as AbyssBSD's boot-to-shell does.
@@ -301,6 +298,9 @@ fn with_root(dirs: &Dirs, img: &Path, f: impl FnOnce(&Path) -> Result<()>) -> Re
     result
 }
 
+/// The FreeBSD VM image, configured to run the benchmark at boot and power
+/// off: serial console, no daemons that need not run, and an `rc.local`
+/// that loads `kbench.ko` from the second disk.
 fn prepare_image(dirs: &Dirs) -> Result<PathBuf> {
     let img = dirs.perf.join(format!("freebsd-{RELEASE}-kbench.img"));
     let stamp = img.with_extension("img.prepared");
@@ -343,12 +343,19 @@ fn rootfs_partition(md: &str) -> Result<String> {
 }
 
 /// Writes the guest configuration into the mounted root at `mnt`.
+///
+/// PTI is off, as stock FreeBSD sets it on this hardware: it decides from
+/// `IA32_ARCH_CAPABILITIES.RDCL_NO`, which bhyve does not pass through, so
+/// a guest on a CPU immune to Meltdown would otherwise isolate its page
+/// tables anyway and pay for it on every kernel entry (`getpid` 240 ns
+/// against 67 ns on the host). `rc.local` prints the mitigations in force.
 fn configure_guest(mnt: &Path) -> Result<()> {
     let files: [(&str, &str, &str); 3] = [
         (
             "boot/loader.conf.local",
             "644",
-            "autoboot_delay=\"0\"\nbeastie_disable=\"YES\"\nconsole=\"comconsole\"\n",
+            "autoboot_delay=\"0\"\nbeastie_disable=\"YES\"\nconsole=\"comconsole\"\n\
+             vm.pmap.pti=\"0\"\n",
         ),
         (
             "etc/rc.conf.local",
@@ -364,6 +371,7 @@ fn configure_guest(mnt: &Path) -> Result<()> {
              # script, or the kbench suite it names; then power off.\n\
              # kbench runs with vtbd1 unmounted: it reads and detaches it.\n\
              # Device interrupts go to CPU 0, where AbyssBSD puts them.\n\
+             sysctl vm.pmap.pti hw.ibrs_active hw.mds_disable_state\n\
              if mount -o ro /dev/vtbd1 /mnt; then\n\
              \tif [ -f /mnt/run.sh ]; then\n\
              \t\tsh /mnt/run.sh\n\

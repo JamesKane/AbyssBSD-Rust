@@ -93,5 +93,13 @@ in [tests/perf/README.md](../tests/perf/README.md). The FreeBSD side is the 15.1
 with `kbench.ko` (built against the release's sources, both checked against the release's
 published SHA-256 sums) loaded at boot from a second disk.
 
+The FreeBSD guest boots with `vm.pmap.pti=0`. Stock FreeBSD on the bare i7-12700KF runs without
+PTI, because the CPU reports itself immune to Meltdown (`RDCL_NO` in `IA32_ARCH_CAPABILITIES`).
+bhyve does not pass that register through, so a default guest turns PTI on. Its `getpid` then
+costs 240 ns against 67 ns on the host, and the comparison would break the same-security-posture
+rule in the other direction. The guest prints `vm.pmap.pti`, `hw.ibrs_active`, and
+`hw.mds_disable_state` into its console log before each run. PTI is the only mitigation whose
+default the missing register changes.
+
 Still planned: `--platform x870e|opi6p` (P6), and `--compare <rev>`, which compares two AbyssBSD
 revisions with the same statistics to check a change before it lands.
