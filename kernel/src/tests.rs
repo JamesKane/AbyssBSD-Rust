@@ -1583,7 +1583,9 @@ ktest! {
                 .iter()
                 .filter_map(|&c| {
                     let mut line = alloc::string::String::new();
-                    let ident = m.ident(c, &s)?;
+                    let ident @ Ident::Acpi(..) = m.ident(c, &s)? else {
+                        return None;
+                    };
                     ident.pnpinfo(&mut line);
                     line.push_str(" at ");
                     ident.location(&mut line);
@@ -1599,6 +1601,31 @@ ktest! {
                     .collect();
             assert_eq!(recorded.len(), 21, "the recording's ACPI children");
             assert_eq!(ours, recorded);
+            // Each attached namespace child named and described as FreeBSD
+            // names it (uart0, attimer0, hpet0, atrtc0, pcib0, ...).
+            let full: alloc::vec::Vec<&str> =
+                include_str!("../../tests/corpus/freebsd/bhyve/devinfo-rv.txt")
+                    .lines()
+                    .map(str::trim_start)
+                    .collect();
+            let mut named = 0;
+            for &c in &children {
+                let Some(ident @ Ident::Acpi(..)) = m.ident(c, &s) else { continue };
+                if m.state(c, &s) != Some(bus::NodeState::Attached) {
+                    continue;
+                }
+                let mut l = alloc::format!(
+                    "{} <{}> pnpinfo ",
+                    m.nameunit(c, &s).unwrap_or_default(),
+                    m.description(c, &s).unwrap_or_default()
+                );
+                ident.pnpinfo(&mut l);
+                l.push_str(" at ");
+                ident.location(&mut l);
+                assert!(full.contains(&l.as_str()), "{l:?} not in FreeBSD's recording");
+                named += 1;
+            }
+            assert!(named >= 8, "{named} attached ACPI children");
         }
         // The host bridge, a flat child of acpi0 as on FreeBSD.
         // (PNP0A08 at \_SB_.PCI0 on QEMU, PNP0A03 at \_SB_.PC00 on bhyve.)

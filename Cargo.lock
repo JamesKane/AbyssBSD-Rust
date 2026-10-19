@@ -148,6 +148,8 @@ dependencies = [
  "nvme",
  "pci",
  "sbsa-gwdt",
+ "timers",
+ "uart",
  "virtio",
  "virtio-blk",
  "virtio-random",
@@ -380,6 +382,22 @@ name = "sysctl"
 version = "0.0.0"
 dependencies = [
  "abi",
+]
+
+[[package]]
+name = "timers"
+version = "0.0.0"
+dependencies = [
+ "bus",
+ "devtree",
+]
+
+[[package]]
+name = "uart"
+version = "0.0.0"
+dependencies = [
+ "bus",
+ "devtree",
 ]
 
 [[package]]

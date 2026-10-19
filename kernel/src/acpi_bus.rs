@@ -247,6 +247,7 @@ impl acpi::Ops for KernelAcpi {
                 .and_then(|p| u16::try_from(p).ok())
                 .zip(f.acpi_enable_disable().map(|(on, _)| on)),
             power_button: !f.flags().is_some_and(|fl| fl.pwr_button()),
+            pm_timer_bits: f.pm_timer().map(|t| t.bits),
         })
     }
 

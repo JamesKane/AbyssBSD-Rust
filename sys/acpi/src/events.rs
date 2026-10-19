@@ -75,6 +75,8 @@ pub struct FixedHardware {
     pub smi_command: Option<(u16, u8)>,
     /// The power button is a fixed feature (not a PNP0C0C device).
     pub power_button: bool,
+    /// The PM timer's width in bits (24 or 32), if there is one.
+    pub pm_timer_bits: Option<u8>,
 }
 
 /// PM1 status and enable bits.

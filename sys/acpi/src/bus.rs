@@ -243,6 +243,22 @@ impl Driver for AcpiBus {
                 ));
             }
         }
+        // The PM timer, as FreeBSD's acpi_timer identify adds it first.
+        if let Some(bits) = svc.ops().fixed_hardware().and_then(|h| h.pm_timer_bits) {
+            let desc = if bits == 32 {
+                "32-bit timer at 3.579545MHz"
+            } else {
+                "24-bit timer at 3.579545MHz"
+            };
+            cx.add_child(
+                Ident::Child {
+                    class: "acpi_timer",
+                    desc,
+                },
+                None,
+                Vec::new(),
+            );
+        }
         let found = svc.run(cx.sleepable(), walk);
         // Every child first, in namespace order (FreeBSD's creation
         // order), then the edges between them: a dependency may name a

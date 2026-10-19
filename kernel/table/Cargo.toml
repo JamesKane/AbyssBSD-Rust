@@ -16,6 +16,8 @@ bus = { path = "../../sys/bus" }
 nvme = { path = "../../drivers/nvme" }
 pci = { path = "../../sys/pci" }
 sbsa-gwdt = { path = "../../drivers/sbsa-gwdt" }
+timers = { path = "../../drivers/timers" }
+uart = { path = "../../drivers/uart" }
 virtio = { path = "../../sys/virtio" }
 virtio-blk = { path = "../../drivers/virtio-blk" }
 virtio-random = { path = "../../drivers/virtio-random" }
