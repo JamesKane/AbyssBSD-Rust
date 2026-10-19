@@ -43,6 +43,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "amdsbwd"
+version = "0.0.0"
+dependencies = [
+ "bus",
+ "regs",
+ "sync",
+ "watchdog",
+]
+
+[[package]]
 name = "aml"
 version = "0.0.0"
 
@@ -129,6 +139,7 @@ version = "0.0.0"
 dependencies = [
  "acpi",
  "ahci",
+ "amdsbwd",
  "atrtc",
  "bus",
  "devtree",
@@ -136,6 +147,7 @@ dependencies = [
  "isa",
  "nvme",
  "pci",
+ "sbsa-gwdt",
  "virtio",
  "virtio-blk",
  "virtio-random",
@@ -206,6 +218,7 @@ dependencies = [
 name = "isa"
 version = "0.0.0"
 dependencies = [
+ "amdsbwd",
  "bus",
  "devtree",
  "ichwd",
@@ -240,6 +253,7 @@ dependencies = [
  "pt",
  "random",
  "regs",
+ "sbsa-gwdt",
  "sched",
  "storage",
  "sync",
@@ -321,6 +335,16 @@ dependencies = [
 [[package]]
 name = "regs"
 version = "0.0.0"
+
+[[package]]
+name = "sbsa-gwdt"
+version = "0.0.0"
+dependencies = [
+ "bus",
+ "regs",
+ "sync",
+ "watchdog",
+]
 
 [[package]]
 name = "sched"

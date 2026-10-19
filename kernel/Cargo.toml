@@ -28,6 +28,7 @@ acpi = { path = "../sys/acpi" }
 aml = { path = "../lib/aml" }
 driver-table = { path = "table" }
 random = { path = "../sys/random" }
+sbsa-gwdt = { path = "../drivers/sbsa-gwdt" }
 storage = { path = "../sys/storage" }
 virtio-random = { path = "../drivers/virtio-random" }
 watchdog = { path = "../sys/watchdog" }

@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+amdsbwd = { path = "../amdsbwd" }
 bus = { path = "../../sys/bus" }
 devtree = { path = "../../lib/devtree" }
 ichwd = { path = "../ichwd" }

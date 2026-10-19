@@ -2,12 +2,16 @@
 //! The PCI-ISA (LPC) bridge (`isab`) and the ISA bus behind it (`isa`).
 //!
 //! ISA devices themselves come from ACPI here; what the bus adds is what
-//! FreeBSD's identify routines add on chipsets that have it: the Intel
-//! TCO watchdog (`ichwd`), at the TCO registers in the ACPI PM I/O block,
-//! with the chipset's GCS register for its NO_REBOOT bit.
+//! FreeBSD's identify routines add on chipsets that have them:
+//!
+//! - the Intel TCO watchdog (`ichwd`), at the TCO registers in the ACPI
+//!   PM I/O block, with the chipset's GCS register for its NO_REBOOT bit;
+//! - the AMD FCH watchdog (`amdsbwd`, FCH 41h and later: every Zen
+//!   platform), with the PM index/data ports and the two places its
+//!   registers can be.
 //!
 //! Behavior reference: sys/dev/pci/isa_pci.c, sys/isa/isa_common.c,
-//! sys/dev/ichwd/ichwd.c (identify).
+//! sys/dev/ichwd/ichwd.c and sys/dev/amdsbwd/amdsbwd.c (identify).
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -100,6 +104,34 @@ impl Isa {
     }
 }
 
+impl Isa {
+    /// The FCH watchdog's resources, on AMD (or Hygon) FCH LPC bridges.
+    fn amdsbwd(&self) -> Option<(&'static str, Vec<Resource>)> {
+        let id = self.bridge.function.header.ident;
+        let desc = match (id.vendor, id.device) {
+            (0x1022, 0x790e) => "AMD FCH Rev 41h+ Watchdog Timer",
+            (0x1d94, 0x790e) => "Hygon FCH Rev 41h+ Watchdog Timer",
+            _ => return None,
+        };
+        let regs = |base| Resource::Memory {
+            base,
+            len: 8,
+            prefetchable: false,
+        };
+        Some((
+            desc,
+            alloc::vec![
+                Resource::IoPort {
+                    base: 0xcd6,
+                    len: 2
+                },
+                regs(amdsbwd::MMIO_WDT),
+                regs(amdsbwd::FIXED_WDT),
+            ],
+        ))
+    }
+}
+
 impl Driver for Isa {
     const NAME: &'static str = "isa";
     const IDS: Ids = Ids::Nexus(&["isa"]);
@@ -114,17 +146,27 @@ impl Driver for Isa {
     }
 
     fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
-        if cfg!(target_arch = "x86_64")
-            && let Some((desc, res)) = self.ichwd()
-        {
-            cx.add_child(
-                Ident::Child {
-                    class: "ichwd",
-                    desc,
-                },
-                None,
-                res,
-            );
+        if cfg!(target_arch = "x86_64") {
+            if let Some((desc, res)) = self.ichwd() {
+                cx.add_child(
+                    Ident::Child {
+                        class: "ichwd",
+                        desc,
+                    },
+                    None,
+                    res,
+                );
+            }
+            if let Some((desc, res)) = self.amdsbwd() {
+                cx.add_child(
+                    Ident::Child {
+                        class: "amdsbwd",
+                        desc,
+                    },
+                    None,
+                    res,
+                );
+            }
         }
         Ok(())
     }

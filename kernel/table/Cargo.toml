@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 ahci = { path = "../../drivers/ahci" }
+amdsbwd = { path = "../../drivers/amdsbwd" }
 atrtc = { path = "../../drivers/atrtc" }
 ichwd = { path = "../../drivers/ichwd" }
 isa = { path = "../../drivers/isa" }
@@ -14,6 +15,7 @@ acpi = { path = "../../sys/acpi" }
 bus = { path = "../../sys/bus" }
 nvme = { path = "../../drivers/nvme" }
 pci = { path = "../../sys/pci" }
+sbsa-gwdt = { path = "../../drivers/sbsa-gwdt" }
 virtio = { path = "../../sys/virtio" }
 virtio-blk = { path = "../../drivers/virtio-blk" }
 virtio-random = { path = "../../drivers/virtio-random" }

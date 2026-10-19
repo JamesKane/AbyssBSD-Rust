@@ -150,6 +150,21 @@ fn reserve_boot_devices() {
     }
 }
 
+/// The GTDT's non-secure SBSA generic watchdogs.
+fn sbsa_watchdogs() -> alloc::vec::Vec<acpi_tables::gtdt::Watchdog> {
+    let Some(g) = crate::acpi::find(*b"GTDT").and_then(|t| acpi_tables::gtdt::parse(&t).ok())
+    else {
+        return alloc::vec::Vec::new();
+    };
+    g.platform_timers()
+        .flatten()
+        .filter_map(|t| match t {
+            acpi_tables::gtdt::PlatformTimer::Watchdog(w) if !w.secure => Some(w),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Detaches every device, consumers before suppliers, so none is still
 /// doing DMA when firmware takes over.
 pub(crate) fn shutdown(s: &Sleepable) {
@@ -183,6 +198,32 @@ pub(crate) fn init(s: &Sleepable) {
     #[cfg(target_arch = "x86_64")]
     m.adopt(s, nexus, "apic", "APIC resources", bus::Ident::Platform);
     let _ = NEXUS.set(nexus);
+    // The GTDT's non-secure SBSA watchdogs.
+    for w in sbsa_watchdogs() {
+        let res = alloc::vec![
+            bus::Resource::Memory {
+                base: w.refresh_frame,
+                len: 0x1000,
+                prefetchable: false,
+            },
+            bus::Resource::Memory {
+                base: w.control_frame,
+                len: 0x1000,
+                prefetchable: false,
+            },
+        ];
+        let timebase = sbsa_gwdt::Timebase {
+            frequency: crate::time::frequency(),
+        };
+        m.add_child(
+            s,
+            nexus,
+            bus::Ident::Nexus("sbsa_gwdt"),
+            Some(alloc::sync::Arc::new(timebase)),
+            res,
+            &[],
+        );
+    }
     // The firmware clock, where runtime services answer (FreeBSD's
     // efirtc identify).
     if crate::firmware::time().is_some() {

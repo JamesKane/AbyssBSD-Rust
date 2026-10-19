@@ -26,6 +26,8 @@ pub static DRIVERS: &[DriverDecl] = &[
     isa::ISAB,
     isa::ISA,
     ichwd::DRIVER,
+    amdsbwd::DRIVER,
+    sbsa_gwdt::DRIVER,
     pci::bus::DRIVER,
     pci::bridge::DRIVER,
     virtio::pci::MODERN,
