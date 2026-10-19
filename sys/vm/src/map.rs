@@ -15,7 +15,6 @@
 //! Behavior reference: sys/vm/vm_map.c (entries, clipping, `fork`
 //! inheritance, `vm_map_find` first fit).
 
-use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
@@ -23,6 +22,7 @@ use core::ops::Range;
 
 use crate::object::{Object, PageIndex, PageOps};
 use crate::{PAGE_SIZE, VirtAddr};
+use entries::Entries;
 
 /// Access rights, with FreeBSD's `PROT_*` values.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -250,7 +250,7 @@ pub enum MapError {
 
 /// A process address space's map.
 pub struct VmMap {
-    entries: BTreeMap<u64, Entry>,
+    entries: Entries,
     bounds: Range<VirtAddr>,
     pub(crate) pages: &'static dyn PageOps,
 }
@@ -270,7 +270,7 @@ impl VmMap {
     #[must_use]
     pub fn new(bounds: Range<VirtAddr>, pages: &'static dyn PageOps) -> Self {
         Self {
-            entries: BTreeMap::new(),
+            entries: Entries::default(),
             bounds,
             pages,
         }
@@ -283,19 +283,19 @@ impl VmMap {
 
     /// The entries, in address order.
     pub fn entries(&self) -> impl Iterator<Item = &Entry> {
-        self.entries.values()
+        self.entries.iter()
     }
 
     /// The entry containing `va`.
     #[must_use]
     pub fn entry(&self, va: VirtAddr) -> Option<&Entry> {
-        let (_, e) = self.entries.range(..=va.get()).next_back()?;
-        (va < e.end).then_some(e)
+        self.entries.at_or_before(va.get()).filter(|e| va < e.end)
     }
 
     pub(crate) fn entry_mut(&mut self, va: VirtAddr) -> Option<&mut Entry> {
-        let (_, e) = self.entries.range_mut(..=va.get()).next_back()?;
-        (va < e.end).then_some(e)
+        self.entries
+            .at_or_before_mut(va.get())
+            .filter(|e| va < e.end)
     }
 
     fn check(&self, range: &Range<VirtAddr>) -> Result<(), MapError> {
@@ -314,9 +314,8 @@ impl VmMap {
     /// Whether any entry overlaps `range`.
     fn overlaps(&self, range: &Range<VirtAddr>) -> bool {
         self.entries
-            .range(..range.end.get())
-            .next_back()
-            .is_some_and(|(_, e)| e.end > range.start)
+            .before(range.end.get())
+            .is_some_and(|e| e.end > range.start)
     }
 
     /// Whether nothing is mapped in `range`.
@@ -332,7 +331,7 @@ impl VmMap {
         if self.overlaps(&range) {
             return Err(MapError::Overlap);
         }
-        self.entries.insert(range.start.get(), entry);
+        self.entries.insert(entry);
         Ok(())
     }
 
@@ -354,12 +353,12 @@ impl VmMap {
         // Start in the gap holding `from`: after the entry before it, if
         // that entry reaches past it.
         let mut cursor = from;
-        if let Some((_, e)) = self.entries.range(..from.get()).next_back()
+        if let Some(e) = self.entries.before(from.get())
             && e.end > cursor
         {
             cursor = e.end;
         }
-        for e in self.entries.range(from.get()..).map(|(_, e)| e) {
+        for e in self.entries.starting_at(from.get()) {
             let start = cursor.align_up(align)?;
             if start.get().checked_add(len)? <= e.start.get() {
                 return Some(start);
@@ -376,7 +375,7 @@ impl VmMap {
             && e.start < at
         {
             let right = e.split_at(at);
-            self.entries.insert(at.get(), right);
+            self.entries.insert(right);
         }
     }
 
@@ -387,17 +386,18 @@ impl VmMap {
         self.check(&range)?;
         self.clip(range.start);
         self.clip(range.end);
-        let doomed: Vec<u64> = self
-            .entries
-            .range(range.start.get()..range.end.get())
-            .map(|(&k, _)| k)
-            .collect();
-        for k in doomed {
-            if let Some(e) = self.entries.remove(&k) {
-                e.release();
-            }
-        }
+        self.entries
+            .remove_range(range.start.get(), range.end.get(), Entry::release);
         Ok(())
+    }
+
+    /// The entries starting in `range` (after clipping at its ends, those
+    /// it covers), to change in place.
+    fn range_mut(&mut self, range: &Range<VirtAddr>) -> impl Iterator<Item = &mut Entry> {
+        let end = range.end;
+        self.entries
+            .starting_at_mut(range.start.get())
+            .take_while(move |e| e.start < end)
     }
 
     /// Whether every page of `range` is mapped.
@@ -422,16 +422,17 @@ impl VmMap {
         }
         if self
             .entries
-            .range(..range.end.get())
-            .rev()
-            .take_while(|(_, e)| e.end > range.start)
-            .any(|(_, e)| !e.max_prot.contains(prot))
+            .at_or_before(range.start.get())
+            .into_iter()
+            .chain(self.entries.starting_at(range.start.get()))
+            .take_while(|e| e.start < range.end)
+            .any(|e| e.end > range.start && !e.max_prot.contains(prot))
         {
             return Err(MapError::Protection);
         }
         self.clip(range.start);
         self.clip(range.end);
-        for (_, e) in self.entries.range_mut(range.start.get()..range.end.get()) {
+        for e in self.range_mut(&range) {
             e.prot = prot;
         }
         Ok(())
@@ -447,7 +448,7 @@ impl VmMap {
         self.check(&range)?;
         self.clip(range.start);
         self.clip(range.end);
-        for (_, e) in self.entries.range_mut(range.start.get()..range.end.get()) {
+        for e in self.range_mut(&range) {
             e.inherit = inherit;
         }
         Ok(())
@@ -457,7 +458,7 @@ impl VmMap {
     pub fn fork(&mut self) -> Forked {
         let mut child = Self::new(self.bounds.clone(), self.pages);
         let mut write_protect = Vec::new();
-        for e in self.entries.values_mut() {
+        for e in self.entries.iter_mut() {
             // Fold away what only this entry still reaches: the last fork's
             // child has usually exited, and without this every fork whose
             // parent writes after it stacks one more shadow (FreeBSD
@@ -476,7 +477,7 @@ impl VmMap {
                         needs_copy: false,
                         ..e.clone()
                     };
-                    child.entries.insert(fresh.start.get(), fresh);
+                    child.entries.insert(fresh);
                 }
                 Inherit::Share => {
                     // Both must reach the same object: make it now, and if
@@ -491,7 +492,7 @@ impl VmMap {
                     }
                     object.set_shared();
                     let shared = e.clone();
-                    child.entries.insert(shared.start.get(), shared);
+                    child.entries.insert(shared);
                 }
                 Inherit::Copy => {
                     if let Some(object) = &e.object {
@@ -502,7 +503,7 @@ impl VmMap {
                         }
                     }
                     let copy = e.clone();
-                    child.entries.insert(copy.start.get(), copy);
+                    child.entries.insert(copy);
                 }
             }
         }
@@ -515,17 +516,17 @@ impl VmMap {
 
 impl Drop for VmMap {
     fn drop(&mut self) {
-        for (_, e) in core::mem::take(&mut self.entries) {
-            e.release();
-        }
+        self.entries.clear(Entry::release);
     }
 }
 
 impl fmt::Debug for VmMap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_list().entries(self.entries.values()).finish()
+        f.debug_list().entries(self.entries.iter()).finish()
     }
 }
+
+mod entries;
 
 #[cfg(test)]
 mod tests;
