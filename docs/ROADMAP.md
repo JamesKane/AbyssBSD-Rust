@@ -358,7 +358,7 @@ P3.3 (from the start, pure crate) ────────┘   P3.8 ─┴─�
     - Abort callbacks for requests on hardware.
     - 4Kn GPT (lib/gpt reads 512-byte sectors only).
 
-**P3.8 Platform services.**
+**P3.8 Platform services.** Done 2026-10-18.
 - Entropy: RDRAND, RNDR, and virtio-rng feeding an fxrng-style CSPRNG.
 - RTC: `atrtc` on x86; PL031 or `efirtc` on aarch64.
 - UEFI runtime services.
@@ -369,6 +369,31 @@ P3.3 (from the start, pure crate) ────────┘   P3.8 ─┴─�
   - The SBSA generic watchdog (with Sky1's `WOR` quirk) and the AMD FCH watchdog are tested on the
     host against fake register blocks. The SBSA watchdog also boots on QEMU `sbsa-ref` if that
     firmware is available; otherwise it is validated at P6.
+- As delivered:
+  - **Entropy.** `lib/crypto` has ChaCha20 and BLAKE2b, checked against the RFC vectors.
+    `sys/random` follows fxrng: a fast-key-erasure root, reseeds through BLAKE2b, and per-CPU
+    generators.
+    - It is seeded at boot from the loader's EFI_RNG bytes and RDSEED/RDRAND or RNDR.
+    - A harvester thread keeps feeding it from the CPU's RNG, vtrnd, and timing.
+  - **Clocks.** `sys/clock` holds the real-time clock class. `atrtc` and `efirtc` (UEFI
+    `GetTime`) set the time of day, and the ktest checks they agree. QEMU's `virt` describes no
+    PL031 in ACPI, so arm64 uses `efirtc`.
+  - **Power.** Power-off and reset go through ACPI S5 or the reset register on amd64, PSCI on
+    arm64, then UEFI as the fallback.
+    - Each is tested: two boot cases end with a real power-off, and the warm-reset cases reboot
+      through the reset register or PSCI.
+    - An orderly power-off (the power button) runs `_PTS(5)`, then the device shutdown.
+  - **Watchdogs.** `sys/watchdog` holds the watchdog class.
+    - `isab`/`isa` add `ichwd` on Intel and `amdsbwd` on AMD, as FreeBSD's identify routines do.
+    - `ichwd` counts down and is patted on q35. A boot case lets it expire and checks the VM
+      reset.
+    - `sbsa_gwdt` (with Sky1's refresh-through-`WOR` detection) and `amdsbwd` are host-tested
+      against fakes. There is no `sbsa-ref` firmware here, so both wait for P6.
+  - **Adopted devices.** `uart`, `attimer`, `hpet`, and `acpi_timer` attach under FreeBSD's names
+    and claim nothing yet. On bhyve every attached ACPI child matches FreeBSD's `devinfo` line for
+    line.
+  - **Not yet.** PL031; the console UART's hand-over to a tty driver (P4); `/dev/fido` and
+    `/dev/random` (devfs, P4).
 
 **P3.9 Verification and performance.**
 - The detach stress test: virtio-blk and NVMe detached and re-attached under random I/O, with
