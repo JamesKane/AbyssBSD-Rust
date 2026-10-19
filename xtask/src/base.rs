@@ -249,7 +249,7 @@ pub(crate) fn cc_static(arch: Arch, source: &Path, out: &Path) -> Result<()> {
     util::run(
         cc.arg(format!("--target={}", arch.clang_target()))
             .arg(format!("--sysroot={}", root.display()))
-            .args(["-static", "-O2", "-Wall", "-Wextra", "-Werror", "-o"])
+            .args(["-static", "-s", "-O2", "-Wall", "-Wextra", "-Werror", "-o"])
             .arg(out)
             .arg(source),
     )

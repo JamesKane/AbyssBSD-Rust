@@ -9,9 +9,14 @@
 //! their first argument.
 //!
 //! Numbers come from `syscalls.master` through the generated
-//! [`abi::syscall`] table. Calls not implemented yet return `ENOSYS`; the
-//! first use of each is logged. (FreeBSD also sends `SIGSYS`; that comes
-//! with signals.)
+//! [`abi::syscall`] table. A number that is no system call gets `SIGSYS`
+//! and `ENOSYS`, as on FreeBSD. Calls FreeBSD has that are not
+//! implemented yet return `ENOSYS` without the signal (libc probes some),
+//! and the first use of each is logged.
+//!
+//! A call a signal interrupted may ask to be re-executed (`ERESTART`):
+//! the program counter goes back to the `syscall`/`svc` instruction, whose
+//! number and arguments are still in place.
 //!
 //! Behavior reference: sys/kern/subr_syscall.c, sys/amd64/amd64/trap.c,
 //! sys/arm64/arm64/trap.c.
@@ -66,6 +71,9 @@ fn decode(f: &TrapFrame) -> Call {
 fn encode(f: &mut TrapFrame, r: SysResult) {
     const CARRY: u64 = 1;
     match r {
+        Err(Errno::EJUSTRETURN) => {}
+        // `syscall` is 2 bytes; rax still holds the number.
+        Err(Errno::ERESTART) => f.rip -= 2,
         Ok(v) => {
             f.rax = v;
             f.rflags &= !CARRY;
@@ -81,6 +89,9 @@ fn encode(f: &mut TrapFrame, r: SysResult) {
 fn encode(f: &mut TrapFrame, r: SysResult) {
     const CARRY: u64 = 1 << 29;
     match r {
+        Err(Errno::EJUSTRETURN) => {}
+        // `svc` is 4 bytes; x8 and the arguments are as they were.
+        Err(Errno::ERESTART) => f.elr -= 4,
         Ok(v) => {
             f.x[0] = v;
             f.spsr &= !CARRY;
@@ -160,6 +171,20 @@ fn run(s: &Sleepable, frame: &mut TrapFrame, call: Call) -> Result<Option<u64>, 
         Sysno::Madvise => mem::madvise(a0, a1, a2),
         Sysno::Sigaction => sig::sigaction(a0, a1, a2),
         Sysno::Sigprocmask => sig::sigprocmask(a0, a1, a2),
+        Sysno::Sigpending => sig::sigpending(a0),
+        Sysno::Sigsuspend => sig::sigsuspend(s, a0),
+        Sysno::Sigreturn => sig::sigreturn(frame, a0),
+        Sysno::Getcontext => sig::getcontext(frame, a0),
+        Sysno::Setcontext => sig::setcontext(frame, a0),
+        Sysno::Swapcontext => sig::swapcontext(frame, a0, a1),
+        Sysno::Sigaltstack => sig::sigaltstack(frame, a0, a1),
+        Sysno::Kill => sig::kill(a0, a1),
+        Sysno::ThrKill => sig::thr_kill(a0, a1),
+        Sysno::ThrKill2 => sig::thr_kill2(a0, a1, a2),
+        Sysno::Sigqueue => sig::sigqueue(a0, a1, a2),
+        Sysno::Sigtimedwait => sig::sigtimedwait(s, a0, a1, a2),
+        Sysno::Sigwaitinfo => sig::sigwaitinfo(s, a0, a1),
+        Sysno::Sigwait => sig::sigwait(s, a0, a1),
         Sysno::Sigfastblock => sig::sigfastblock(a0, a1),
         Sysno::ThrSelf => thr::thr_self(a0),
         Sysno::ThrWake => thr::thr_wake(a0),
@@ -201,28 +226,31 @@ fn nosys(number: u64) -> SysResult {
             _ => kprintln!("syscall: {number} is not a system call"),
         }
     }
+    if !matches!(lookup(number), Some(Slot::Live(_)))
+        && let Some(p) = Process::current()
+    {
+        let _ = crate::signal::post(
+            &p,
+            crate::signal::user_info(abi::signal::SIGSYS, 0, abi::signal::code::SI_KERNEL),
+        );
+    }
     Err(Errno::ENOSYS)
 }
 
 /// `_exit(rval)`: ends the process.
 fn exit(s: &Sleepable, rval: u64) -> ! {
-    let status = int(rval);
     if let Some(p) = Process::current() {
-        p.exit(s, status);
+        p.exit(s, crate::proc::Exit::Code(int(rval)));
     }
     sched::exit()
 }
 
 /// The `kernel_hooks!` hook for a trap from user mode the VM did not
-/// resolve. Until there are signals (P4.4), the process is killed.
-pub(crate) fn user_trap(report: &arch::TrapReport, _frame: &mut TrapFrame) {
-    kprintln!("user trap: {}", report.trap);
+/// resolve: it becomes a signal. Interrupts masked on entry and exit.
+pub(crate) fn user_trap(report: &arch::TrapReport, frame: &mut TrapFrame) {
     hal::irq::enable();
     // SAFETY: as for a system call: the thread came from user mode.
     let s = unsafe { Sleepable::assume() };
-    if let Some(p) = Process::current() {
-        // FreeBSD's status for a death by signal; SIGSEGV for now.
-        p.exit(&s, 11);
-    }
-    sched::exit()
+    crate::signal::trap(&s, report, frame);
+    let _ = hal::irq::disable();
 }

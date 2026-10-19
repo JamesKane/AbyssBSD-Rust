@@ -50,7 +50,7 @@ pub const NAME: &str = "amd64";
 /// ```
 #[macro_export]
 macro_rules! kernel_hooks {
-    (main = $main:path, ap_main = $ap:path, fatal_trap = $trap:path, interrupt = $irq:path, page_fault = $pf:path, syscall = $sc:path, user_trap = $ut:path $(,)?) => {
+    (main = $main:path, ap_main = $ap:path, fatal_trap = $trap:path, interrupt = $irq:path, page_fault = $pf:path, syscall = $sc:path, user_trap = $ut:path, user_return = $ur:path $(,)?) => {
         #[unsafe(no_mangle)]
         fn abyss_kernel_main(boot_info: $crate::PhysAddr) -> ! {
             $main(boot_info)
@@ -85,6 +85,11 @@ macro_rules! kernel_hooks {
         fn abyss_user_trap(report: &$crate::TrapReport, frame: &mut $crate::trap::TrapFrame) {
             $ut(report, frame)
         }
+
+        #[unsafe(no_mangle)]
+        fn abyss_user_return(frame: &mut $crate::trap::TrapFrame) -> bool {
+            $ur(frame)
+        }
     };
 }
 
@@ -105,6 +110,12 @@ unsafe extern "Rust" {
     /// Defined by [`kernel_hooks!`]: a trap from user mode the kernel did
     /// not resolve (a signal, once there are signals). Interrupts masked.
     fn abyss_user_trap(report: &TrapReport, frame: &mut trap::TrapFrame);
+    /// Defined by [`kernel_hooks!`]: the last word before `frame` returns
+    /// to user mode, on every path but NMIs, double faults, and machine
+    /// checks (pending signals, FreeBSD's `ast`). Interrupts masked, and
+    /// masked again on return. Returns whether it rewrote the frame (which
+    /// then needs a full restore).
+    fn abyss_user_return(frame: &mut trap::TrapFrame) -> bool;
 }
 
 /// Wraps a value that is only touched on the boot CPU before SMP, or under

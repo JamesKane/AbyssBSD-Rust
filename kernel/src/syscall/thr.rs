@@ -165,15 +165,13 @@ pub(super) fn umtx_op(
                 return Ok(0);
             }
             let woken = || b.generation.load(Ordering::Acquire) != generation;
-            match limit {
-                None => b.waiters.wait_until(s, woken),
-                Some(ns) => {
-                    if !crate::time::wait_timeout(s, &b.waiters, woken, ns) {
-                        return Err(Errno::ETIMEDOUT);
-                    }
-                }
+            // A signal ends the wait with EINTR, never a restart (as
+            // FreeBSD's `do_wait`); libthr retries.
+            match crate::signal::sleep(s, &b.waiters, woken, limit) {
+                Ok(crate::signal::Woke::Done) => Ok(0),
+                Ok(crate::signal::Woke::TimedOut) => Err(Errno::ETIMEDOUT),
+                Err(_) => Err(Errno::EINTR),
             }
-            Ok(0)
         }
         _ => Err(Errno::EINVAL),
     }

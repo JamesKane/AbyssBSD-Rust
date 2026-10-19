@@ -4,7 +4,7 @@
 use alloc::boxed::Box;
 use core::cell::UnsafeCell;
 use core::fmt;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use hal::CpuId;
 use sync::SpinLock;
@@ -298,6 +298,19 @@ pub struct Thread {
     /// What the kernel runs the thread for (its process), opaque here.
     /// Written only by the thread itself.
     pub(crate) owner: UnsafeCell<Option<alloc::sync::Arc<dyn core::any::Any + Send + Sync>>>,
+    /// Work to do before the thread next returns to user mode, as bits
+    /// the kernel defines (FreeBSD's `td_ast`).
+    pub(crate) ast: AtomicU32,
+    /// Set by [`Thread::interrupt`]: interruptible sleeps end at once
+    /// until the kernel clears it.
+    pub(crate) interrupted: AtomicBool,
+    /// The queue of the interruptible sleep in progress, or null; set by
+    /// the sleeper under the queue's lock.
+    pub(crate) wchan: AtomicPtr<WaitQueue>,
+    /// Held by [`Thread::interrupt`] while it uses `wchan`, and taken by a
+    /// sleeper before it leaves an interruptible sleep, so the queue
+    /// outlives every use of the pointer.
+    pub(crate) abort: SpinLock<()>,
 }
 
 // SAFETY: `link` is protected by the owning list's lock, `context`, `fpu`,
@@ -370,6 +383,10 @@ impl Thread {
             kstack_top,
             tls: UnsafeCell::new(0),
             owner: UnsafeCell::new(None),
+            ast: AtomicU32::new(0),
+            interrupted: AtomicBool::new(false),
+            wchan: AtomicPtr::new(core::ptr::null_mut()),
+            abort: SpinLock::new(()),
         }
     }
 
@@ -426,6 +443,68 @@ impl Thread {
     #[must_use]
     pub fn switches(&self) -> u64 {
         self.switches.load(Ordering::Relaxed)
+    }
+
+    /// Asks for `bits` of work before the thread next returns to user mode
+    /// (the kernel's return path checks [`Thread::ast_pending`]). Another
+    /// CPU running the thread is not told; [`Thread::interrupt`] is.
+    pub fn request_ast(&self, bits: u32) {
+        self.ast.fetch_or(bits, Ordering::SeqCst);
+    }
+
+    /// Whether any work is pending for the return to user mode: one load,
+    /// for the return path.
+    #[must_use]
+    pub fn ast_pending(&self) -> bool {
+        self.ast.load(Ordering::Relaxed) != 0
+    }
+
+    /// Takes the pending work bits.
+    pub fn take_ast(&self) -> u32 {
+        self.ast.swap(0, Ordering::SeqCst)
+    }
+
+    /// Whether interruptible sleeps end at once (see [`Thread::interrupt`]).
+    #[must_use]
+    pub fn is_interrupted(&self) -> bool {
+        self.interrupted.load(Ordering::SeqCst)
+    }
+
+    /// Lets interruptible sleeps proceed again (the kernel found nothing
+    /// left to interrupt for).
+    pub fn clear_interrupted(&self) {
+        self.interrupted.store(false, Ordering::SeqCst);
+    }
+
+    /// Interrupts the thread (FreeBSD's `tdsignal` wakeup): sets `ast` bits
+    /// and the interrupted flag, ends an interruptible sleep in progress,
+    /// and makes another CPU running the thread enter the kernel, so the
+    /// work is done before the thread next runs in user mode. Sleeps that
+    /// cannot be interrupted are left alone.
+    pub fn interrupt(self: &alloc::sync::Arc<Self>, ast: u32) {
+        // SeqCst pairs with the sleeper's: it publishes `wchan` and then
+        // checks the flag, and we set the flag and then read `wchan`, so
+        // one of us sees the other.
+        self.interrupted.store(true, Ordering::SeqCst);
+        self.request_ast(ast);
+        let woken = {
+            let _abort = self.abort.lock();
+            let q = self.wchan.load(Ordering::SeqCst);
+            // SAFETY: a sleeper takes `abort` before leaving its sleep, so
+            // the queue it published is alive while we hold it.
+            unsafe { q.as_ref() }.and_then(|q| q.remove(self))
+        };
+        if let Some(t) = woken {
+            crate::make_runnable(t);
+            return;
+        }
+        let (state, cpu) = {
+            let inner = self.inner.lock();
+            (inner.state, inner.cpu)
+        };
+        if state == State::Running && cpu != hal::cpu_id() {
+            crate::platform().kick(cpu);
+        }
     }
 }
 

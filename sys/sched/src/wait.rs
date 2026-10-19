@@ -9,10 +9,18 @@
 //!
 //! Behavior reference: sys/kern/subr_sleepqueue.c, sys/kern/kern_condvar.c.
 
+use core::sync::atomic::Ordering;
+
 use sync::SpinLock;
 
+use crate::Thread;
 use crate::list::ThreadList;
 use crate::thread::State;
+
+/// An interruptible sleep ended because the thread was interrupted
+/// ([`Thread::interrupt`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Interrupted;
 
 /// Threads waiting for something.
 #[derive(Debug)]
@@ -51,6 +59,61 @@ impl WaitQueue {
             crate::switch_away();
             hal::irq::restore(irq);
         }
+    }
+
+    /// Sleeps until `done` returns true, or until the thread is interrupted
+    /// ([`Thread::interrupt`]; at once if it already is). `done` runs as in
+    /// [`WaitQueue::wait_until`], and wins if both hold.
+    pub fn wait_until_interruptible(
+        &self,
+        _s: &crate::Sleepable,
+        mut done: impl FnMut() -> bool,
+    ) -> Result<(), Interrupted> {
+        let me = crate::current();
+        loop {
+            let irq = hal::irq::disable();
+            let mut q = self.waiters.lock();
+            if done() {
+                drop(q);
+                hal::irq::restore(irq);
+                return Ok(());
+            }
+            if me.is_interrupted() {
+                drop(q);
+                hal::irq::restore(irq);
+                return Err(Interrupted);
+            }
+            crate::lock::witness::check_sleep(hal::irq::were_enabled(&irq));
+            let arc = crate::current_arc();
+            arc.inner.lock().state = State::Sleeping;
+            q.push_back(arc);
+            me.wchan
+                .store(core::ptr::from_ref(self).cast_mut(), Ordering::SeqCst);
+            // An interrupt that read `wchan` before we published it set
+            // the flag before it looked: see it now, and do not sleep.
+            let raced = me.is_interrupted();
+            if raced {
+                let unqueued = q.remove(me);
+                me.inner.lock().state = State::Running;
+                drop(q);
+                drop(unqueued);
+            } else {
+                drop(q);
+                crate::switch_away();
+            }
+            // Whoever woke us unqueued us. An interrupt may still hold our
+            // `wchan`: wait for it before the queue can go away.
+            {
+                let _abort = me.abort.lock();
+                me.wchan.store(core::ptr::null_mut(), Ordering::SeqCst);
+            }
+            hal::irq::restore(irq);
+        }
+    }
+
+    /// Unqueues `t` if it sleeps here (an interrupted sleeper).
+    pub(crate) fn remove(&self, t: &Thread) -> Option<alloc::sync::Arc<Thread>> {
+        self.waiters.lock().remove(t)
     }
 
     /// Wakes the longest waiter. Returns whether there was one.

@@ -43,6 +43,7 @@ mod proc;
 mod qemu;
 mod random;
 mod shared_page;
+mod signal;
 mod smp;
 #[cfg(not(feature = "ktest"))]
 mod stress;
@@ -66,6 +67,7 @@ arch::kernel_hooks!(
     page_fault = mm::space::page_fault,
     syscall = syscall::entry,
     user_trap = syscall::user_trap,
+    user_return = signal::user_return,
 );
 
 fn kmain(boot_info: PhysAddr) -> ! {

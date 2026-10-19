@@ -57,7 +57,7 @@ pub use crate::context::{IrqCx, Sleepable};
 use crate::list::ThreadList;
 use crate::runq::RunQueue;
 pub use crate::thread::{Name, Priority, State, Thread, Tid};
-pub use crate::wait::WaitQueue;
+pub use crate::wait::{Interrupted, WaitQueue};
 
 /// A kernel stack, owned by the platform's allocator.
 #[derive(Debug)]
@@ -384,6 +384,12 @@ pub fn current() -> &'static Thread {
     // SAFETY: `current` always holds a live reference while the thread
     // runs, and the running thread cannot be freed under itself.
     unsafe { &*p }
+}
+
+/// A new reference to the running thread.
+#[must_use]
+pub fn current_thread() -> Arc<Thread> {
+    current_arc()
 }
 
 /// A new reference to the running thread.

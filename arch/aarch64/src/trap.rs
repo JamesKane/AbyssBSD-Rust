@@ -140,6 +140,16 @@ pub struct Interrupt {
 
 /// Called from the common path with interrupts masked.
 extern "C" fn dispatch(frame: &mut TrapFrame) {
+    handle(frame);
+    // Back to EL0: the kernel's last word. The exit path restores the
+    // whole frame, so a rewrite needs nothing more.
+    if frame.slot >= 8 {
+        // SAFETY: defined by the kernel through `kernel_hooks!`.
+        let _ = unsafe { crate::abyss_user_return(frame) };
+    }
+}
+
+fn handle(frame: &mut TrapFrame) {
     // Slots: 4-7 current EL with SP_ELx, 8-11 lower EL AArch64; within
     // each group of four, 1 is IRQ and 2 is FIQ.
     if matches!(frame.slot, 5 | 6 | 9 | 10) {

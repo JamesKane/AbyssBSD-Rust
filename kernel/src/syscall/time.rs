@@ -104,13 +104,22 @@ pub(super) fn nanosleep(s: &Sleepable, rqtp: u64, rmtp: u64) -> SysResult {
         .unwrap_or(0)
         .saturating_mul(NANOS)
         .saturating_add(u64::try_from(t.tv_nsec).unwrap_or(0));
-    crate::time::sleep_ns(s, ns);
-    if rmtp != 0 {
-        UserPtr::<Timespec>::new(rmtp)
-            .write(&Timespec::default())
-            .map_err(|_| Errno::EFAULT)?;
+    let start = crate::time::now_ns();
+    let q = sched::WaitQueue::new();
+    match crate::signal::sleep(s, &q, || false, Some(ns)) {
+        Ok(_) => Ok(0),
+        // Interrupted: the time left, and EINTR even for SA_RESTART (a
+        // restart would sleep the whole time again).
+        Err(_) => {
+            if rmtp != 0 {
+                let left = ns.saturating_sub(crate::time::now_ns().saturating_sub(start));
+                UserPtr::<Timespec>::new(rmtp)
+                    .write(&timespec(left))
+                    .map_err(|_| Errno::EFAULT)?;
+            }
+            Err(Errno::EINTR)
+        }
     }
-    Ok(0)
 }
 
 fn limit_index(which: u64) -> Result<usize, Errno> {

@@ -496,6 +496,46 @@ pub(crate) fn wait_timeout(
     ok
 }
 
+/// How an interruptible timed wait ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Wait {
+    /// The condition held.
+    Done,
+    TimedOut,
+    /// The thread was interrupted (a signal).
+    Interrupted,
+}
+
+/// Waits on `q` until `cond` holds, `ns` nanoseconds pass, or the thread
+/// is interrupted (`None`: no time limit).
+pub(crate) fn wait_interruptible(
+    s: &Sleepable,
+    q: &sched::WaitQueue,
+    mut cond: impl FnMut() -> bool,
+    ns: Option<u64>,
+) -> Wait {
+    let w = Waiter {
+        q,
+        fired: AtomicBool::new(false),
+    };
+    let t = pin!(Timer::new());
+    if let Some(ns) = ns {
+        t.as_ref()
+            .reset(ns, wake_waiter, ptr::from_ref(&w).expose_provenance());
+    }
+    let mut ok = false;
+    let r = q.wait_until_interruptible(s, || {
+        ok = cond();
+        ok || w.fired.load(Ordering::Acquire)
+    });
+    t.stop();
+    match r {
+        Err(sched::Interrupted) => Wait::Interrupted,
+        Ok(()) if ok => Wait::Done,
+        Ok(()) => Wait::TimedOut,
+    }
+}
+
 /// Busy-waits `ns` nanoseconds on the counter.
 #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
 pub(crate) fn spin_ns(ns: u64) {

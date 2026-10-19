@@ -6,7 +6,7 @@
 //! (`offset_of!`, `size_of`), so the check compares what the kernel will
 //! actually use against what FreeBSD's C compiler computes.
 
-use crate::{bus, signal, stat, time, vdso};
+use crate::{bus, signal, stat, time, ucontext, vdso};
 
 /// Architectures a layout applies to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +73,7 @@ pub const CONSTANTS: &[&[ConstValue]] = &[
     crate::time::CONSTANTS,
     crate::resource::CONSTANTS,
     crate::vdso::CONSTANTS,
+    crate::ucontext::CONSTANTS,
 ];
 
 const fn bus_const(c_name: &'static str, value: i64) -> ConstValue {
@@ -255,6 +256,110 @@ pub static LAYOUTS: &[StructLayout] = &[
         th_physical => "th_physical",
         th_res => "th_res",
     }),
+    layout!(signal::Siginfo, "siginfo_t", ["sys/types.h", "signal.h"], All, {
+        si_signo => "si_signo",
+        si_errno => "si_errno",
+        si_code => "si_code",
+        si_pid => "si_pid",
+        si_uid => "si_uid",
+        si_status => "si_status",
+        si_addr => "si_addr",
+        si_value => "si_value",
+        si_trapno => "si_trapno",
+    }),
+    layout!(signal::StackT, "stack_t", ["sys/types.h", "signal.h"], All, {
+        ss_sp => "ss_sp",
+        ss_size => "ss_size",
+        ss_flags => "ss_flags",
+    }),
+    layout!(ucontext::McontextX86, "mcontext_t", ["sys/types.h", "ucontext.h"], Amd64, {
+        mc_onstack => "mc_onstack",
+        mc_rdi => "mc_rdi",
+        mc_rsi => "mc_rsi",
+        mc_rdx => "mc_rdx",
+        mc_rcx => "mc_rcx",
+        mc_r8 => "mc_r8",
+        mc_r9 => "mc_r9",
+        mc_rax => "mc_rax",
+        mc_rbx => "mc_rbx",
+        mc_rbp => "mc_rbp",
+        mc_r10 => "mc_r10",
+        mc_r11 => "mc_r11",
+        mc_r12 => "mc_r12",
+        mc_r13 => "mc_r13",
+        mc_r14 => "mc_r14",
+        mc_r15 => "mc_r15",
+        mc_trapno => "mc_trapno",
+        mc_fs => "mc_fs",
+        mc_gs => "mc_gs",
+        mc_addr => "mc_addr",
+        mc_flags => "mc_flags",
+        mc_es => "mc_es",
+        mc_ds => "mc_ds",
+        mc_err => "mc_err",
+        mc_rip => "mc_rip",
+        mc_cs => "mc_cs",
+        mc_rflags => "mc_rflags",
+        mc_rsp => "mc_rsp",
+        mc_ss => "mc_ss",
+        mc_len => "mc_len",
+        mc_fpformat => "mc_fpformat",
+        mc_ownedfp => "mc_ownedfp",
+        mc_fpstate => "mc_fpstate",
+        mc_fsbase => "mc_fsbase",
+        mc_gsbase => "mc_gsbase",
+        mc_xfpustate => "mc_xfpustate",
+        mc_xfpustate_len => "mc_xfpustate_len",
+        mc_tlsbase => "mc_tlsbase",
+        mc_spare => "mc_spare",
+    }),
+    layout!(ucontext::McontextArm, "mcontext_t", ["sys/types.h", "ucontext.h"], Arm64, {
+        mc_gpregs => "mc_gpregs",
+        mc_fpregs => "mc_fpregs",
+        mc_flags => "mc_flags",
+        mc_pad => "mc_pad",
+        mc_ptr => "mc_ptr",
+        mc_spare => "mc_spare",
+    }),
+    layout!(ucontext::Gpregs, "struct gpregs", ["sys/types.h", "ucontext.h"], Arm64, {
+        gp_x => "gp_x",
+        gp_lr => "gp_lr",
+        gp_sp => "gp_sp",
+        gp_elr => "gp_elr",
+        gp_spsr => "gp_spsr",
+    }),
+    layout!(ucontext::Fpregs, "struct fpregs", ["sys/types.h", "ucontext.h"], Arm64, {
+        fp_q => "fp_q",
+        fp_sr => "fp_sr",
+        fp_cr => "fp_cr",
+        fp_flags => "fp_flags",
+        fp_pad => "fp_pad",
+    }),
+    layout!(ucontext::Ucontext<ucontext::McontextX86>, "ucontext_t", ["sys/types.h", "ucontext.h"], Amd64, {
+        uc_sigmask => "uc_sigmask",
+        uc_mcontext => "uc_mcontext",
+        uc_link => "uc_link",
+        uc_stack => "uc_stack",
+        uc_flags => "uc_flags",
+        uc_spare => "__spare__",
+    }),
+    layout!(ucontext::Ucontext<ucontext::McontextArm>, "ucontext_t", ["sys/types.h", "ucontext.h"], Arm64, {
+        uc_sigmask => "uc_sigmask",
+        uc_mcontext => "uc_mcontext",
+        uc_link => "uc_link",
+        uc_stack => "uc_stack",
+        uc_flags => "uc_flags",
+        uc_spare => "__spare__",
+    }),
+    layout!(ucontext::SigframeX86, "struct sigframe", ["sys/types.h", "ucontext.h", "machine/sigframe.h"], Amd64, {
+        sf_ahu => "sf_ahu",
+        sf_uc => "sf_uc",
+        sf_si => "sf_si",
+    }),
+    layout!(ucontext::SigframeArm, "struct sigframe", ["sys/types.h", "ucontext.h", "machine/frame.h"], Arm64, {
+        sf_si => "sf_si",
+        sf_uc => "sf_uc",
+    }),
 ];
 
 #[cfg(test)]
@@ -269,6 +374,13 @@ mod tests {
         assert_eq!(size_of::<stat::Stat>(), 224);
         assert_eq!(size_of::<signal::Sigaction>(), 32);
         assert_eq!(size_of::<vdso::Timekeep>(), 16);
+        assert_eq!(size_of::<signal::Siginfo>(), 80);
+        assert_eq!(size_of::<ucontext::McontextX86>(), 800);
+        assert_eq!(size_of::<ucontext::McontextArm>(), 880);
+        assert_eq!(size_of::<ucontext::Ucontext<ucontext::McontextX86>>(), 880);
+        assert_eq!(size_of::<ucontext::Ucontext<ucontext::McontextArm>>(), 960);
+        assert_eq!(size_of::<ucontext::SigframeX86>(), 976);
+        assert_eq!(size_of::<ucontext::SigframeArm>(), 1040);
         assert_eq!(size_of::<vdso::TimehandsX86>(), 88);
         assert_eq!(size_of::<vdso::TimehandsArm>(), 88);
     }

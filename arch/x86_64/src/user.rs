@@ -114,6 +114,57 @@ pub unsafe fn set_tls(v: u64) {
     }
 }
 
+/// The user code and data (stack) selectors.
+pub const USER_CS: u16 = crate::gdt::USER_CS;
+pub const USER_DS: u16 = crate::gdt::USER_DS;
+
+/// `sigreturn`'s system-call number, which the trampoline makes.
+pub const SYS_SIGRETURN: u64 = 417;
+/// Where `struct sigframe` keeps the handler (`sf_ahu`) and the context
+/// (`sf_uc`).
+pub const SIGF_HANDLER: u64 = 0;
+pub const SIGF_UC: u64 = 16;
+
+// The signal trampoline, copied into the shared page (FreeBSD's
+// `sigcode`). The kernel enters it with `rsp` at the signal frame and the
+// handler's arguments set; it calls the handler, then `sigreturn` with
+// the frame's context. `sigreturn` does not return; if it fails, `hlt`
+// faults.
+global_asm!(
+    ".section .rodata.sigcode, \"a\"",
+    ".balign 16",
+    ".global abyss_sigcode",
+    "abyss_sigcode:",
+    "call qword ptr [rsp + {handler}]",
+    "lea rdi, [rsp + {uc}]",
+    // A fake return address, where a call would have left one.
+    "push 0",
+    "mov eax, {sigreturn}",
+    "syscall",
+    "2: hlt",
+    "jmp 2b",
+    ".global abyss_sigcode_end",
+    "abyss_sigcode_end:",
+    handler = const SIGF_HANDLER,
+    uc = const SIGF_UC,
+    sigreturn = const SYS_SIGRETURN,
+);
+
+unsafe extern "C" {
+    static abyss_sigcode: u8;
+    static abyss_sigcode_end: u8;
+}
+
+/// The signal trampoline's code.
+#[must_use]
+pub fn sigcode() -> &'static [u8] {
+    let start = &raw const abyss_sigcode;
+    let end = &raw const abyss_sigcode_end;
+    // SAFETY: the two symbols bracket the trampoline in read-only data,
+    // which lives as long as the kernel.
+    unsafe { core::slice::from_raw_parts(start, end.offset_from_unsigned(start)) }
+}
+
 /// A frame that enters user mode at `entry` with stack `sp`, interrupts
 /// enabled, and `arg` in `rdi`.
 #[must_use]
@@ -248,9 +299,10 @@ pub unsafe fn copy_to_user(dst: u64, src: *const u8, len: usize) -> Result<(), F
 }
 
 // A user program for the kernel's tests (no libc): `write(1, "hello\n", 6)`,
-// then an unknown system call, then `exit(w * 1000 + e + c)` where `w` is
-// what `write` returned, `e` the unknown call's error number, and `c` 5000
-// if the carry flag (error) was clear. A correct kernel exits with 6078.
+// then `kill(0, 1000)` (no such signal), then `exit(w * 1000 + e + c)`
+// where `w` is what `write` returned, `e` the failed call's error number,
+// and `c` 5000 if the carry flag (error) was clear. A correct kernel exits
+// with 6022 (EINVAL).
 global_asm!(
     r#"
     .section .rodata.abyss_user_test, "a"
@@ -262,7 +314,9 @@ abyss_user_test_start:
     mov edx, 6
     syscall
     mov r12, rax
-    mov eax, 9999
+    mov eax, 37
+    xor edi, edi
+    mov esi, 1000
     syscall
     mov r13, rax
     mov r14d, 0

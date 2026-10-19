@@ -3,8 +3,8 @@
 //! every process (at a random address, see [`crate::exec`]; FreeBSD's
 //! shared page). It holds the time keeping, `struct vdso_timekeep`, from
 //! which libc answers `clock_gettime` and `gettimeofday` without a system
-//! call (`AT_TIMEKEEP` points at it). The signal trampoline joins it in
-//! P4.4.
+//! call (`AT_TIMEKEEP` points at it), and the signal trampoline, at its
+//! start.
 //!
 //! Time keeping follows FreeBSD's timecounters:
 //! - Readers take the counter's low 32 bits (on amd64 after shifting the
@@ -46,8 +46,8 @@ use vm::object::Object;
 use crate::mm::space::{AddressSpace, SpaceError};
 use crate::time::{NANOS, Timer};
 
-/// Where the time keeping starts in the page (the start is kept for the
-/// signal trampoline).
+/// Where the time keeping starts in the page; the signal trampoline is at
+/// the start.
 const TIMEKEEP_OFFSET: usize = 2048;
 /// Timehands slots (FreeBSD's `VDSO_TH_NUM`).
 const SLOTS: u32 = 4;
@@ -281,6 +281,10 @@ pub(crate) fn init() {
     let kva = bootproto::layout::dmap(pfn.addr())
         .expect("RAM outside the DMAP")
         .get() as *mut u8;
+    let code = crate::arch::user::sigcode();
+    assert!(code.len() <= TIMEKEEP_OFFSET, "signal trampoline too long");
+    // SAFETY: the page is fresh, ours, and a page long.
+    unsafe { core::ptr::copy_nonoverlapping(code.as_ptr(), kva, code.len()) };
     if PAGE.set(Page { object, kva }).is_err() {
         return;
     }
@@ -354,6 +358,12 @@ pub(crate) fn map(s: &Sleepable, space: &AddressSpace, at: u64) -> Result<(), Sp
         Prot::READ.union(Prot::EXEC),
         Prot::READ.union(Prot::EXEC),
     )
+}
+
+/// The user address of the signal trampoline in a shared page mapped at
+/// `page`.
+pub(crate) fn sigcode_address(page: u64) -> u64 {
+    page
 }
 
 /// The user address of the time keeping (`AT_TIMEKEEP`) in a shared page

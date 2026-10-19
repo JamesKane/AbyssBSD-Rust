@@ -24,7 +24,8 @@ use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
 use abi::errno::Errno;
 use abi::resource::{RLIM_INFINITY, Rlimit, WNOHANG, WNOWAIT, exit_status, rlimit};
-use abi::signal::{SIG_DFL, SIG_IGN, SIG_MAXSIG, Sigaction, Sigset};
+use abi::resource::{WCONTINUED, WUNTRACED};
+use abi::signal::code::{CLD_EXITED, CLD_KILLED};
 use sched::{Sleepable, WaitQueue};
 use sync::SpinLock;
 
@@ -32,11 +33,33 @@ use crate::arch;
 use crate::arch::trap::TrapFrame;
 use crate::exec::Layout;
 use crate::mm::space::{self, AddressSpace};
+use crate::signal::Signals;
 
 /// The highest pid (`PID_MAX`); allocation wraps to 2 past it.
 const PID_MAX: i32 = 99_999;
 /// init's pid, which inherits orphans.
 const INIT: i32 = 1;
+
+/// Whether process group `pgid` is orphaned: no member has a parent in
+/// another group of the same session (POSIX; FreeBSD's `pg_jobc == 0`).
+/// Stops from the terminal do not stop an orphaned group.
+pub(crate) fn pgrp_orphaned(pgid: i32) -> bool {
+    let members: Vec<Arc<Process>> = PROCS
+        .lock()
+        .values()
+        .filter_map(Weak::upgrade)
+        .filter(|p| p.pgid() == pgid && !p.exited.load(Ordering::Acquire))
+        .collect();
+    !members.iter().any(|m| {
+        m.parent()
+            .is_some_and(|parent| parent.pgid() != pgid && parent.sid() == m.sid())
+    })
+}
+
+/// Every live process.
+pub(crate) fn all() -> Vec<Arc<Process>> {
+    PROCS.lock().values().filter_map(Weak::upgrade).collect()
+}
 
 /// Live processes by pid.
 static PROCS: SpinLock<BTreeMap<i32, Weak<Process>>> = SpinLock::new(BTreeMap::new());
@@ -74,15 +97,46 @@ pub(crate) fn find(pid: i32) -> Option<Arc<Process>> {
     PROCS.lock().get(&pid)?.upgrade()
 }
 
-/// Signal dispositions and the blocked set (delivery comes with P4.4).
-#[derive(Clone)]
-pub(crate) struct Signals {
-    /// Indexed by signal number minus one.
-    pub(crate) actions: [Sigaction; SIG_MAXSIG as usize],
-    /// Blocked signals (per thread once processes have several).
-    pub(crate) mask: Sigset,
-    /// The `sigfastblock` word's address, 0 for none.
-    pub(crate) fastblock: u64,
+/// How a process ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Exit {
+    /// `_exit(code)`.
+    Code(i32),
+    /// Killed by a signal.
+    Signal(u32),
+}
+
+impl Exit {
+    /// The status `wait4` reports.
+    const fn status(self) -> i32 {
+        match self {
+            Self::Code(c) => exit_status(c),
+            Self::Signal(sig) => (sig & 0x7f).cast_signed(),
+        }
+    }
+
+    const fn from_status(st: i32) -> Self {
+        if st & 0x7f == 0 {
+            // The whole code, as `_exit` gave it (`WEXITSTATUS` would keep
+            // 8 bits).
+            Self::Code(st >> 8)
+        } else {
+            Self::Signal((st & 0x7f).cast_unsigned())
+        }
+    }
+}
+
+/// Job control: whether the process is stopped, and what its parent's
+/// `wait4` has yet to hear.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Job {
+    /// The signal that stopped the process, 0 while it runs.
+    pub(crate) stopped: u32,
+    /// A stop `wait4(WUNTRACED)` has not reported (FreeBSD's `P_WAITED`
+    /// clear).
+    pub(crate) stop_report: bool,
+    /// A continue `wait4(WCONTINUED)` has not reported (`P_CONTINUED`).
+    pub(crate) cont_report: bool,
 }
 
 /// FreeBSD's default limits, as `ulimit -a` shows them on a 15.1 system,
@@ -138,10 +192,16 @@ pub(crate) struct Process {
     /// Kernel code waiting for this process to exit (it may have no
     /// parent).
     waiters: WaitQueue,
-    /// Bumped when a child exits or stops borrowing the address space;
-    /// `wait4` and `vfork` sleep on it.
+    /// Bumped when a child exits, stops, continues, or stops borrowing
+    /// the address space; `wait4` and `vfork` sleep on it.
     child_gen: AtomicU64,
     child_wait: WaitQueue,
+    /// The process's thread, for signals to interrupt; set by the thread
+    /// itself, and cleared when it exits.
+    thread: SpinLock<Option<Arc<sched::Thread>>>,
+    pub(crate) job: SpinLock<Job>,
+    /// Where the thread waits while the process is stopped.
+    pub(crate) stop_wait: WaitQueue,
 }
 
 /// How a process's thread enters user mode.
@@ -157,15 +217,8 @@ impl Process {
     /// session), or a new session's leader laid out as `layout` says.
     fn create(space: Arc<AddressSpace>, layout: Layout, parent: Option<&Arc<Self>>) -> Arc<Self> {
         let (signals, limits) = match parent {
-            Some(p) => (p.signals.lock().clone(), *p.limits.lock()),
-            None => (
-                Signals {
-                    actions: [Sigaction::default(); SIG_MAXSIG as usize],
-                    mask: Sigset::default(),
-                    fastblock: 0,
-                },
-                default_limits(),
-            ),
+            Some(p) => (p.signals.lock().forked(), *p.limits.lock()),
+            None => (Signals::new(), default_limits()),
         };
         let p = Arc::new_cyclic(|me| {
             let pid = alloc_pid(me);
@@ -187,6 +240,9 @@ impl Process {
                 waiters: WaitQueue::new(),
                 child_gen: AtomicU64::new(0),
                 child_wait: WaitQueue::new(),
+                thread: SpinLock::new(None),
+                job: SpinLock::new(Job::default()),
+                stop_wait: WaitQueue::new(),
             }
         });
         if let Some(parent) = parent {
@@ -389,18 +445,7 @@ impl Process {
             old.clear(s);
         }
         drop(old);
-        {
-            let mut sigs = self.signals.lock();
-            for a in &mut sigs.actions {
-                if a.sa_handler != SIG_IGN {
-                    *a = Sigaction {
-                        sa_handler: SIG_DFL,
-                        ..Sigaction::default()
-                    };
-                }
-            }
-            sigs.fastblock = 0;
-        }
+        self.signals.lock().exec();
         self.exterr.store(0, Ordering::Relaxed);
         self.set_tls_base(None);
         // SAFETY: this thread runs in the new image; the kernel does not
@@ -411,10 +456,10 @@ impl Process {
         Ok(())
     }
 
-    /// Exits with `code` (the caller's thread then exits): the memory
-    /// goes now, the children go to init, and the parent (or the kernel)
-    /// is told.
-    pub(crate) fn exit(&self, s: &Sleepable, code: i32) {
+    /// Ends the process as `how` says (the caller's thread then exits):
+    /// the memory goes now, the children go to init, and the parent gets
+    /// `SIGCHLD` (or, if it keeps no zombies, init gets the zombie).
+    pub(crate) fn exit(&self, s: &Sleepable, how: Exit) {
         if self.vforked.load(Ordering::Acquire) {
             self.release_parent();
         } else {
@@ -424,13 +469,19 @@ impl Process {
         // until they load another).
         sched::set_address_space(None);
         space::unload();
-        self.status.store(exit_status(code), Ordering::Relaxed);
+        // The thread holds the process (its owner); this breaks the cycle.
+        *self.thread.lock() = None;
+        self.status.store(how.status(), Ordering::Relaxed);
         // Release: the status is visible to whoever sees `exited`.
         self.exited.store(true, Ordering::Release);
-        let parent = {
+        let parent = self.parent();
+        let reaps_nothing = parent
+            .as_ref()
+            .is_some_and(|p| crate::signal::parent_reaps_nothing(p));
+        {
             let mut tree = TREE.lock();
+            let init = (self.pid != INIT).then(|| find(INIT)).flatten();
             if let Some(orphans) = tree.children.remove(&self.pid) {
-                let init = (self.pid != INIT).then(|| find(INIT)).flatten();
                 for o in orphans {
                     match &init {
                         Some(init) => {
@@ -443,30 +494,92 @@ impl Process {
                     }
                 }
             }
-            tree.parent.get(&self.pid).copied()
-        };
-        if let Some(init) = find(INIT) {
-            init.child_gen.fetch_add(1, Ordering::AcqRel);
-            init.child_wait.wake_all();
+            if reaps_nothing && let Some(parent) = &parent {
+                // FreeBSD's `PS_NOCLDWAIT`: init reaps this one.
+                let me = tree.children.get_mut(&parent.pid).and_then(|kids| {
+                    kids.iter()
+                        .position(|c| c.pid == self.pid)
+                        .map(|i| kids.remove(i))
+                });
+                match (&init, me) {
+                    (Some(init), Some(me)) => {
+                        tree.parent.insert(self.pid, init.pid);
+                        tree.children.entry(init.pid).or_default().push(me);
+                    }
+                    _ => {
+                        tree.parent.remove(&self.pid);
+                    }
+                }
+            }
         }
-        if let Some(parent) = parent.and_then(find) {
-            parent.child_gen.fetch_add(1, Ordering::AcqRel);
-            parent.child_wait.wake_all();
+        if let Some(init) = find(INIT) {
+            init.child_changed();
+        }
+        if let Some(parent) = parent {
+            if reaps_nothing {
+                parent.child_changed();
+            } else {
+                let (code, status) = match how {
+                    Exit::Code(c) => (CLD_EXITED, c),
+                    Exit::Signal(sig) => (CLD_KILLED, sig.cast_signed()),
+                };
+                crate::signal::notify_parent(self, code, status);
+            }
         }
         self.waiters.wake_all();
     }
 
-    /// Waits for the process to exit (kernel code); returns its exit code.
+    /// Waits for the process to exit (kernel code); returns how it ended.
     #[cfg_attr(not(feature = "ktest"), allow(dead_code))] // boot-to-shell (P4.7)
-    pub(crate) fn wait(&self, s: &Sleepable) -> i32 {
+    pub(crate) fn wait(&self, s: &Sleepable) -> Exit {
         self.waiters
             .wait_until(s, || self.exited.load(Ordering::Acquire));
-        self.status.load(Ordering::Relaxed) >> 8
+        Exit::from_status(self.status.load(Ordering::Relaxed))
     }
 
-    /// `wait4`'s search: a child that exited, among those `pid` selects
-    /// (a pid, -1 for any, 0 for this group, below -1 for that group).
-    /// `Ok(None)` with `WNOHANG` when none has exited yet.
+    /// The parent, if it is still around.
+    pub(crate) fn parent(&self) -> Option<Arc<Self>> {
+        let ppid = TREE.lock().parent.get(&self.pid).copied()?;
+        find(ppid)
+    }
+
+    /// A child exited, stopped, or continued: wakes `wait4`.
+    pub(crate) fn child_changed(&self) {
+        self.child_gen.fetch_add(1, Ordering::AcqRel);
+        self.child_wait.wake_all();
+    }
+
+    /// The thread, if it has started.
+    pub(crate) fn thread(&self) -> Option<Arc<sched::Thread>> {
+        self.thread.lock().clone()
+    }
+
+    /// Where exec put the randomized parts of the image.
+    pub(crate) fn layout(&self) -> Layout {
+        *self.layout.lock()
+    }
+
+    /// Ends a stop (for `SIGCONT`, reported to `wait4(WCONTINUED)` if
+    /// `report`). Returns whether the process was stopped.
+    pub(crate) fn resume(&self, report: bool) -> bool {
+        {
+            let mut job = self.job.lock();
+            if job.stopped == 0 {
+                return false;
+            }
+            job.stopped = 0;
+            job.stop_report = false;
+            job.cont_report = report;
+        }
+        self.stop_wait.wake_all();
+        true
+    }
+
+    /// `wait4`'s search: a child that exited (or, as `options` asks,
+    /// stopped or continued), among those `pid` selects (a pid, -1 for
+    /// any, 0 for this group, below -1 for that group), with its status.
+    /// `Ok(None)` with `WNOHANG` when none has. Interrupted by a signal:
+    /// `EINTR` or `ERESTART`.
     pub(crate) fn wait_child(
         &self,
         s: &Sleepable,
@@ -499,12 +612,33 @@ impl Process {
                     drop(tree);
                     return Ok(Some((c.pid, c.status.load(Ordering::Relaxed))));
                 }
+                for c in kids.iter().filter(|c| selects(c)) {
+                    let mut job = c.job.lock();
+                    if options & WUNTRACED != 0 && job.stopped != 0 && job.stop_report {
+                        if options & WNOWAIT == 0 {
+                            job.stop_report = false;
+                        }
+                        // WIFSTOPPED: the signal, then 0177.
+                        return Ok(Some((c.pid, (job.stopped.cast_signed() << 8) | 0o177)));
+                    }
+                    if options & WCONTINUED != 0 && job.cont_report {
+                        if options & WNOWAIT == 0 {
+                            job.cont_report = false;
+                        }
+                        // WIFCONTINUED: SIGCONT's number.
+                        return Ok(Some((c.pid, abi::signal::SIGCONT.cast_signed())));
+                    }
+                }
             }
             if options & WNOHANG != 0 {
                 return Ok(None);
             }
-            self.child_wait
-                .wait_until(s, || self.child_gen.load(Ordering::Acquire) != generation);
+            crate::signal::sleep(
+                s,
+                &self.child_wait,
+                || self.child_gen.load(Ordering::Acquire) != generation,
+                None,
+            )?;
         }
     }
 
@@ -596,11 +730,17 @@ fn enter(_s: &Sleepable, arg: usize) -> ! {
     let tls = start.tls;
     drop(start);
     sched::set_address_space(Some(process.space() as Arc<dyn sched::AddressSpace>));
+    // Signals posted from here on interrupt the thread; ones posted before
+    // are looked at below.
+    *process.thread.lock() = Some(sched::current_thread());
+    crate::signal::recheck(&process);
     sched::set_owner(Some(process));
+    let mut frame = frame;
     let _ = hal::irq::disable();
     // SAFETY: this thread runs in its process's space; the kernel does not
     // use the thread pointer.
     unsafe { hal::user::set_tls(tls) };
+    crate::signal::user_return(&mut frame);
     // SAFETY: the thread now runs in the process's space, its kernel stack
     // is set (`set_address_space` loads it), interrupts are masked, and
     // everything this function owned was moved or dropped.

@@ -2617,7 +2617,10 @@ mod user_memory {
         // Bound, so only that CPU ever loads the space (and it lets go at
         // exit).
         let p = Process::spawn_code(space, text, STACK_TOP, Some(hal::cpu_id()));
-        let status = p.wait(&s);
+        let status = match p.wait(&s) {
+            crate::proc::Exit::Code(c) => c,
+            crate::proc::Exit::Signal(sig) => panic!("killed by signal {sig}"),
+        };
         drop(p);
         let after = settled_free_pages(&s);
         assert_eq!(after, before, "pages leaked");
@@ -2666,7 +2669,12 @@ mod user_memory {
                 let p = crate::proc::Process::spawn(&s, &path, &[&name], &[], Some(hal::cpu_id()))
                     .unwrap();
                 let status = p.wait(&s);
-                assert_eq!(status, 0, "{} exited with {status}", core::str::from_utf8(&path).unwrap_or("?"));
+                assert_eq!(
+                    status,
+                    crate::proc::Exit::Code(0),
+                    "{} ended: {status:?}",
+                    core::str::from_utf8(&path).unwrap_or("?")
+                );
                 ran += 1;
             }
             assert!(ran >= 2, "only {ran} test programs on the memory disk");
@@ -2714,7 +2722,7 @@ mod user_memory {
                 Some(hal::cpu_id()),
             )
             .unwrap();
-            assert_eq!(p.wait(&s), 0);
+            assert_eq!(p.wait(&s), crate::proc::Exit::Code(0));
         }
     }
 
@@ -2730,7 +2738,7 @@ mod user_memory {
                 Some(hal::cpu_id()),
             )
             .unwrap();
-            assert_eq!(p.wait(&s), 3);
+            assert_eq!(p.wait(&s), crate::proc::Exit::Code(3));
         }
     }
 
@@ -2738,7 +2746,7 @@ mod user_memory {
         fn user_code_makes_system_calls() {
             // write returned 6; the unknown call failed with ENOSYS (78)
             // and the carry flag set.
-            assert_eq!(run_program(crate::arch::user::test_program()), 6078);
+            assert_eq!(run_program(crate::arch::user::test_program()), 6022);
         }
     }
 

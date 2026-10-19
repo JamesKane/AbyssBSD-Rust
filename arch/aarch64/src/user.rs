@@ -15,6 +15,52 @@ use core::arch::{asm, global_asm};
 
 use addr::PhysAddr;
 
+/// `sigreturn`'s and `exit`'s system-call numbers, which the trampoline
+/// makes.
+pub const SYS_SIGRETURN: u64 = 417;
+pub const SYS_EXIT: u64 = 1;
+/// Where `struct sigframe` keeps the context (`sf_uc`).
+pub const SIGF_UC: u64 = 80;
+
+// The signal trampoline, copied into the shared page (FreeBSD's
+// `sigcode`). The kernel enters it with `sp` at the signal frame, the
+// handler in `x8`, and its arguments in `x0`-`x2`; it calls the handler,
+// then `sigreturn` with the frame's context, and exits if that fails.
+global_asm!(
+    ".section .rodata.sigcode, \"a\"",
+    ".balign 16",
+    ".global abyss_sigcode",
+    "abyss_sigcode:",
+    "blr x8",
+    "mov x0, sp",
+    "add x0, x0, #{uc}",
+    "1: mov x8, #{sigreturn}",
+    "svc 0",
+    "mov x8, #{exit}",
+    "svc 0",
+    "b 1b",
+    ".global abyss_sigcode_end",
+    "abyss_sigcode_end:",
+    uc = const SIGF_UC,
+    sigreturn = const SYS_SIGRETURN,
+    exit = const SYS_EXIT,
+);
+
+unsafe extern "C" {
+    static abyss_sigcode: u8;
+    static abyss_sigcode_end: u8;
+}
+
+/// The signal trampoline's code.
+#[must_use]
+pub fn sigcode() -> &'static [u8] {
+    let start = &raw const abyss_sigcode;
+    let end = &raw const abyss_sigcode_end;
+    // SAFETY: the two symbols bracket the trampoline in read-only data,
+    // which lives as long as the kernel.
+    unsafe { core::slice::from_raw_parts(start, end.offset_from_unsigned(start)) }
+}
+
 /// The end of the user half: TTBR0's 48-bit range.
 pub const USER_END: u64 = 0x0001_0000_0000_0000;
 
@@ -277,9 +323,10 @@ pub unsafe fn copy_to_user(dst: u64, src: *const u8, len: usize) -> Result<(), F
 }
 
 // A user program for the kernel's tests (no libc): `write(1, "hello\n", 6)`,
-// then an unknown system call, then `exit(w * 1000 + e + c)` where `w` is
-// what `write` returned, `e` the unknown call's error number, and `c` 5000
-// if the carry flag (error) was clear. A correct kernel exits with 6078.
+// then `kill(0, 1000)` (no such signal), then `exit(w * 1000 + e + c)`
+// where `w` is what `write` returned, `e` the failed call's error number,
+// and `c` 5000 if the carry flag (error) was clear. A correct kernel exits
+// with 6022 (EINVAL).
 global_asm!(
     r#"
     .section .rodata.abyss_user_test, "a"
@@ -291,7 +338,9 @@ abyss_user_test_start:
     mov x2, #6
     svc #0
     mov x19, x0
-    mov x8, #9999
+    mov x8, #37
+    mov x0, #0
+    mov x1, #1000
     svc #0
     mov x20, x0
     mov x21, #0

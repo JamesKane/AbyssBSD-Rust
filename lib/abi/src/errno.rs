@@ -12,6 +12,12 @@ use crate::layout::ConstValue;
 #[repr(i32)]
 #[allow(clippy::upper_case_acronyms)]
 pub enum Errno {
+    /// Kernel-internal: re-execute the system call (after a signal
+    /// handler with `SA_RESTART`). Never reaches user mode.
+    ERESTART = -1,
+    /// Kernel-internal: the call set the user registers itself
+    /// (`sigreturn`). Never reaches user mode.
+    EJUSTRETURN = -2,
     EPERM = 1,
     ENOENT = 2,
     ESRCH = 3,

@@ -313,6 +313,17 @@ pub struct Interrupt {
 
 /// Called from the common stub with interrupts disabled.
 extern "C" fn dispatch(frame: &mut TrapFrame) {
+    handle(frame);
+    // Back to user mode: the kernel's last word, except after the
+    // paranoid vectors, which may have interrupted anything.
+    if frame.cs & 3 != 0 && !matches!(frame.vector, 2 | 8 | 18) {
+        // SAFETY: defined by the kernel through `kernel_hooks!`. The trap
+        // exit restores the whole frame, so a rewrite needs nothing more.
+        let _ = unsafe { crate::abyss_user_return(frame) };
+    }
+}
+
+fn handle(frame: &mut TrapFrame) {
     if let Ok(vector) = u8::try_from(frame.vector)
         && vector >= 32
     {
@@ -380,9 +391,14 @@ extern "C" fn dispatch(frame: &mut TrapFrame) {
 extern "C" fn syscall_dispatch(frame: &mut TrapFrame) -> u64 {
     // SAFETY: defined by the kernel through `kernel_hooks!`.
     unsafe { crate::abyss_syscall(frame) };
-    // `sysret` restores only rip and rflags, and faults in kernel mode on
-    // a non-canonical rip (so would run the fault on the user's stack).
-    let plain = frame.rip < crate::user::USER_END
+    // SAFETY: as above.
+    let rewritten = unsafe { crate::abyss_user_return(frame) };
+    // `sysret` loads rcx and r11 from rip and rflags (a rewritten frame,
+    // such as a signal handler's, may set them), and faults in kernel
+    // mode on a non-canonical rip (so would run the fault on the user's
+    // stack).
+    let plain = !rewritten
+        && frame.rip < crate::user::USER_END
         && frame.cs == u64::from(crate::gdt::USER_CS)
         && frame.ss == u64::from(crate::gdt::USER_DS);
     u64::from(!plain)

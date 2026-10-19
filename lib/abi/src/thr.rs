@@ -51,6 +51,11 @@ pub const CPUSET_BYTES: usize = CPU_SETSIZE as usize / 8;
 pub const SIGFASTBLOCK_SETPTR: u32 = 1;
 pub const SIGFASTBLOCK_UNBLOCK: u32 = 2;
 pub const SIGFASTBLOCK_UNSETPTR: u32 = 3;
+/// The word's low bits: a signal waits for `SIGFASTBLOCK_UNBLOCK`.
+pub const SIGFASTBLOCK_PEND: u32 = 0x1;
+pub const SIGFASTBLOCK_FLAGS: u32 = 0xf;
+/// What libthr adds to the word per nested block.
+pub const SIGFASTBLOCK_INC: u32 = 0x10;
 
 pub const EXTERRCTL_ENABLE: u32 = 1;
 pub const EXTERRCTL_DISABLE: u32 = 2;
@@ -91,6 +96,9 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
         SIGFASTBLOCK_UNSETPTR,
         "sys/signalvar.h",
     ),
+    c("SIGFASTBLOCK_PEND", SIGFASTBLOCK_PEND, "sys/signalvar.h"),
+    c("SIGFASTBLOCK_FLAGS", SIGFASTBLOCK_FLAGS, "sys/signalvar.h"),
+    c("SIGFASTBLOCK_INC", SIGFASTBLOCK_INC, "sys/signalvar.h"),
     c("EXTERRCTL_ENABLE", EXTERRCTL_ENABLE, "sys/exterrvar.h"),
     c("EXTERRCTL_DISABLE", EXTERRCTL_DISABLE, "sys/exterrvar.h"),
 ];

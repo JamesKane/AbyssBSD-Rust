@@ -601,12 +601,43 @@ P4.0 ─► P4.1 ─► P4.2 ─► P4.3 ─┬─► P4.4 ─┐
   - **Left**: the signal trampoline in the shared page (with P4.4), PIE (with the run-time linker,
     which is the only thing that loads `ET_DYN`), and `pdfork` (it returns a descriptor, P4.5).
 
-**P4.4 Signals.**
+**P4.4 Signals.** Done 2026-10-19.
 - `sigaction`, `sigprocmask`, `sigfastblock`, `kill`, pending sets, and default actions (including
   stop and continue).
 - Delivery on return to user mode, with FreeBSD's `sigframe`, `ucontext_t`, and `mcontext_t` per
   arch; `sigreturn` validating the restored context; `SA_RESTART` and `EINTR`; alternate stacks.
 - Faults become `SIGSEGV`, `SIGBUS`, `SIGILL`, and `SIGFPE` with FreeBSD's `si_code`s.
+- As delivered:
+  - **Return path.** A new `user_return` hook runs on every way back to user mode (system calls,
+    traps, and interrupts from user mode, but not NMIs or machine checks). It costs one load when
+    nothing is pending. The trampoline is in the shared page.
+  - **Interruptible sleeps.** Each thread records the queue it sleeps on, and a signal unqueues it
+    under a per-thread abort lock, so the queue cannot vanish mid-wakeup. A stop happens inside the
+    sleep, as FreeBSD's `sleepq_catch_signals` does. `nanosleep`, `wait4`, `_umtx_op`,
+    `sigsuspend`, and the `sigwait` family can be interrupted.
+  - **System calls.** `sigreturn`, `getcontext`, `setcontext`, `swapcontext`, `sigaltstack`,
+    `sigpending`, `sigsuspend`, `sigtimedwait`, `sigwaitinfo`, `sigwait`, `sigqueue` (real-time
+    signals queue, with their values), `kill` (including process groups and -1), `thr_kill`, and
+    `thr_kill2`. SIGSYS goes to numbers that are not system calls.
+  - **Job control.** `wait4` reports stops (`WUNTRACED`) and continues (`WCONTINUED`). SIGCHLD
+    carries `CLD_*` codes, honoring `SA_NOCLDSTOP` and `SA_NOCLDWAIT`. Stops from the terminal do
+    not stop an orphaned process group.
+  - **ABI.** `abi-check` now covers `siginfo_t`, `stack_t`, both architectures' `mcontext_t`,
+    `ucontext_t`, and `struct sigframe`, and every signal constant. It caught one difference:
+    `mc_esr` exists only in 16-CURRENT, while 15.1 has `mc_spare[7]`.
+  - **Tests.** `tests/user/signals.c` passes on both architectures. It covers handlers and their
+    arguments, blocking, `SA_RESETHAND` and `SA_NODEFER`, the alternate stack, a caught `SIGSEGV`,
+    default kills and stop/continue seen through `wait4`, `EINTR` against `SA_RESTART`,
+    `sigsuspend`, `sigwait`/`sigtimedwait`/`sigqueue`, the context calls, `thr_kill`, and SIGSYS.
+  - **Bugs found on the way:**
+    - XSAVE leaves most of its header unwritten, so stale heap bytes in `XCOMP_BV` made
+      `sigreturn` reject about one context in three.
+    - `sigreturn`'s RFLAGS check lacked RF, which a frame saved on the way back from a fault
+      carries.
+    - A signal that arrived while blocked did not end a later `sigsuspend`. Lowering the mask now
+      marks the thread interrupted.
+  - **Deviations** (no SVE signal context, no core dumps, process-wide signal state) are listed in
+    [compat-deviations.md](compat-deviations.md).
 
 **P4.5 Files** (runs in parallel with P4.4).
 - File descriptor tables (`dup2`, `fcntl`, close-on-exec), shared by `fork`.

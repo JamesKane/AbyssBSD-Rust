@@ -90,6 +90,33 @@ fn control_offset() -> usize {
     area_size() - 16
 }
 
+/// Where V register `n` (Z register `n`'s low 128 bits, with SVE) starts
+/// in a save area.
+#[must_use]
+pub fn vreg_offset(n: usize) -> usize {
+    n * vector_length().max(16)
+}
+
+/// Where FPSR and FPCR are in a save area (8 bytes each).
+#[must_use]
+pub fn status_offsets() -> (usize, usize) {
+    (control_offset(), control_offset() + 8)
+}
+
+/// Clears what SVE adds to the V registers in a save area (the Z
+/// registers' upper bits, the P registers, FFR), as writing the V
+/// registers does architecturally.
+pub fn clear_sve_extra(area: &mut [u8]) {
+    let vl = vector_length();
+    if vl == 0 {
+        return;
+    }
+    for n in 0..32 {
+        area[n * vl + 16..(n + 1) * vl].fill(0);
+    }
+    area[32 * vl..32 * vl + 17 * (vl / 8)].fill(0);
+}
+
 /// Saves this CPU's FP/SIMD registers to `area`.
 ///
 /// # Safety
