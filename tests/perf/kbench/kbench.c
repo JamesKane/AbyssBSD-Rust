@@ -21,6 +21,7 @@
 #include <sys/mutex.h>
 #include <sys/priority.h>
 #include <sys/proc.h>
+#include <sys/resourcevar.h>
 #include <sys/rwlock.h>
 #include <sys/sched.h>
 #include <sys/smp.h>
@@ -29,6 +30,7 @@
 #include <sys/bio.h>
 #include <sys/bus.h>
 #include <sys/conf.h>
+#include <sys/cons.h>
 
 #include <machine/bus.h>
 
@@ -754,14 +756,50 @@ kb_read_sync(void *buf, off_t off, int len)
 	g_destroy_bio(bp);
 }
 
+static uint64_t *kb_starts;
+
+/*
+ * Diagnostics for a latency run (not compared): the tail, and how often
+ * samples over 3x the median come (periodic ones point at a timer).
+ */
+static void
+kb_tail(const char *name, const uint64_t *ns, const uint64_t *starts, int n)
+{
+	uint64_t *s = malloc(n * sizeof(*s), M_KBENCH, M_WAITOK);
+	uint64_t *gaps = malloc(n * sizeof(*gaps), M_KBENCH, M_WAITOK);
+	uint64_t p50, last = 0;
+	int over = 0, ngaps = 0;
+
+	memcpy(s, ns, n * sizeof(*s));
+	qsort(s, n, sizeof(*s), kb_cmp);
+	p50 = s[n / 2];
+	for (int i = 0; i < n; i++) {
+		if (ns[i] <= 3 * p50)
+			continue;
+		if (over++ > 0)
+			gaps[ngaps++] = starts[i] - last;
+		last = starts[i];
+	}
+	qsort(gaps, ngaps, sizeof(*gaps), kb_cmp);
+	printf("kbench: tail %s p50 %ju p90 %ju p999 %ju max %ju over3x %d "
+	    "gap %ju ns\n", name, (uintmax_t)p50, (uintmax_t)s[n * 9 / 10],
+	    (uintmax_t)s[n * 999 / 1000], (uintmax_t)s[n - 1], over,
+	    (uintmax_t)(ngaps > 0 ? gaps[ngaps / 2] : 0));
+	free(gaps, M_KBENCH);
+	free(s, M_KBENCH);
+}
+
 static void
 kb_qd1_body(struct kb_run *r __unused, int idx __unused)
 {
 	void *buf = malloc(4096, M_KBENCH, M_WAITOK);
+	uint64_t base = rdtsc();
 
 	for (int i = 0; i < KB_BLK_LAT; i++) {
 		off_t off = kb_rand_off();
 		uint64_t t0 = rdtsc();
+
+		kb_starts[i] = tsc_ns(t0 - base);
 
 		kb_read_sync(buf, off, 4096);
 		kb_samples[i] = tsc_ns(rdtsc() - t0);
@@ -870,9 +908,13 @@ kb_blk(const char *dev, const char *name)
 	kb_default_cpus(&r);
 	kb_samples = malloc(KB_BLK_LAT * sizeof(*kb_samples), M_KBENCH,
 	    M_WAITOK | M_ZERO);
+	kb_starts = malloc(KB_BLK_LAT * sizeof(*kb_starts), M_KBENCH,
+	    M_WAITOK | M_ZERO);
 	r.body = kb_qd1_body;
 	kb_launch(&r, 0);
 	snprintf(n, sizeof(n), "blk.%s.qd1", name);
+	kb_tail(n, kb_samples, kb_starts, KB_BLK_LAT);
+	free(kb_starts, M_KBENCH);
 	kb_report_lat(n, kb_samples, KB_BLK_LAT);
 	free(kb_samples, M_KBENCH);
 	r.body = kb_qd32_body;
@@ -1010,7 +1052,8 @@ kb_gate_body(struct kb_run *r, int idx)
 
 /*
  * Attach and detach: vtblk1's transport, detached and probed again, each
- * until GEOM is idle (the disk gone, or tasted). Median of the cycles.
+ * until GEOM is idle (the disk gone, or tasted), with the console muted.
+ * Median of the cycles.
  */
 #define	KB_DEV_CYCLES	16
 
@@ -1031,6 +1074,8 @@ kb_dev(void)
 	thread_lock(curthread);
 	sched_unbind(curthread);
 	thread_unlock(curthread);
+	/* Muted: an emulated UART is slower than the attach. */
+	cn_mute = 1;
 	for (int i = 0; i < KB_DEV_CYCLES; i++) {
 		uint64_t t0, t1, t2;
 
@@ -1050,6 +1095,7 @@ kb_dev(void)
 		attach[i] = tsc_ns(t2 - t1);
 		cycle[i] = tsc_ns(t2 - t0);
 	}
+	cn_mute = 0;
 	kb_bind(0);
 	qsort(attach, KB_DEV_CYCLES, sizeof(attach[0]), kb_cmp);
 	qsort(cycle, KB_DEV_CYCLES, sizeof(cycle[0]), kb_cmp);

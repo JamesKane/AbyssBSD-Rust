@@ -85,6 +85,13 @@ FreeBSD to how it really runs:
   five times slower.
 - **Nothing mounted.** `vtbd1` is unmounted before the suite runs. `rc.local` copies `kbench.ko`
   off it first.
+- **Same topology reading.** bhyve 15.1 virtualizes CPUID leaf 0xB but passes leaf 0x1F through
+  from the host, whose P-cores have SMT. FreeBSD prefers 0x1F, so it sees SMT pairs, and ULE never
+  idle-spins on an SMT sibling. AbyssBSD reads the same leaf and applies the same rule. Before that
+  fix, AbyssBSD idle-spun where FreeBSD halted, and much of its QD1 lead was halted-vCPU wake-up
+  time on FreeBSD's side.
+- **Console muted for attach.** Both kernels print attach lines to an emulated UART that costs about
+  a millisecond a line. `dev.vtblk.*` runs with the console muted on both sides (FreeBSD `cn_mute`).
 
 | Name | Workers | Operation |
 |---|---|---|

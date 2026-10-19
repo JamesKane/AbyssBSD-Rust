@@ -162,6 +162,30 @@ fn report_median(name: &str, mut round: impl FnMut() -> u128) {
     kprintln!("kbench {name} {}.{:03} ns/op", milli / 1000, milli % 1000);
 }
 
+/// Diagnostics for a latency run (not compared): the tail, and how often
+/// samples over 3x the median come (periodic ones point at a timer).
+fn report_tail(name: &str, ns: &[u64], starts: &[u64]) {
+    let mut s = ns.to_vec();
+    s.sort_unstable();
+    let p50 = s[s.len() / 2];
+    let outliers: Vec<u64> = ns
+        .iter()
+        .zip(starts)
+        .filter(|&(&v, _)| v > 3 * p50)
+        .map(|(_, &t)| t)
+        .collect();
+    let mut gaps: Vec<u64> = outliers.windows(2).map(|w| w[1] - w[0]).collect();
+    gaps.sort_unstable();
+    kprintln!(
+        "kbench: tail {name} p50 {p50} p90 {} p999 {} max {} over3x {} gap {} ns",
+        s[s.len() * 9 / 10],
+        s[s.len() * 999 / 1000],
+        s[s.len() - 1],
+        outliers.len(),
+        gaps.get(gaps.len() / 2).copied().unwrap_or(0)
+    );
+}
+
 fn report_lat(name: &str, ns: &mut [u64]) {
     ns.sort_unstable();
     kprintln!("kbench {name}.p50 {} ns", ns[ns.len() / 2]);
@@ -457,24 +481,31 @@ fn bench_disk(s: &Sleepable, dev: &str, name: &str) {
     let cpus = [default_cpu(0)];
 
     // QD1 latency.
-    let samples = Arc::new(sync::SpinLock::new(alloc::vec![0u64; BLK_LAT]));
+    let samples = Arc::new(sync::SpinLock::new((
+        alloc::vec![0u64; BLK_LAT],
+        alloc::vec![0u64; BLK_LAT],
+    )));
     {
         let (d, samples) = (Arc::clone(&disk), Arc::clone(&samples));
         let run = Run::new();
         launch(s, &run, &cpus, 0, move |_, _, ws| {
             let mut offs = Offsets::new(&d);
             let mut buf = alloc::vec![0u8; 4096];
-            let mut ns = samples.lock().clone();
-            for slot in &mut ns {
+            let (mut ns, mut starts) = samples.lock().clone();
+            let base = time::counter();
+            for (slot, start) in ns.iter_mut().zip(&mut starts) {
                 let at = offs.next();
                 let t0 = time::counter();
+                *start = time::ticks_to_ns(t0 - base);
                 buf = read_sync(ws, &d, buf, at);
                 *slot = time::ticks_to_ns(time::counter() - t0);
             }
-            *samples.lock() = ns;
+            *samples.lock() = (ns, starts);
         });
     }
-    report_lat(&alloc::format!("blk.{name}.qd1"), &mut samples.lock());
+    let (mut ns, starts) = samples.lock().clone();
+    report_tail(&alloc::format!("blk.{name}.qd1"), &ns, &starts);
+    report_lat(&alloc::format!("blk.{name}.qd1"), &mut ns);
 
     // QD32 throughput.
     report_median(&alloc::format!("blk.{name}.qd32"), || {
@@ -591,7 +622,7 @@ fn bench_dma(s: &Sleepable) {
 }
 
 /// Attach and detach: vtblk1's transport, detached and probed again, each
-/// until the manager is idle. Median of the cycles.
+/// until the manager is idle, with the console muted. Median of the cycles.
 fn bench_dev(s: &Sleepable) {
     const CYCLES: usize = 16;
     let m = bus::manager();
@@ -600,6 +631,8 @@ fn bench_dev(s: &Sleepable) {
         kprintln!("kbench: no vtblk1");
         return;
     };
+    // Muted, as FreeBSD's is: an emulated UART is slower than the attach.
+    crate::console::set_muted(true);
     let (mut attach, mut cycle) = ([0u64; CYCLES], [0u64; CYCLES]);
     for i in 0..CYCLES {
         let t0 = time::counter();
@@ -613,6 +646,7 @@ fn bench_dev(s: &Sleepable) {
         attach[i] = time::ticks_to_ns(t2 - t1);
         cycle[i] = time::ticks_to_ns(t2 - t0);
     }
+    crate::console::set_muted(false);
     attach.sort_unstable();
     cycle.sort_unstable();
     kprintln!("kbench dev.vtblk.attach {} ns", attach[CYCLES / 2]);

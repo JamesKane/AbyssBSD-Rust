@@ -28,7 +28,7 @@ use crate::util::{self, Result};
 const RELEASE: &str = "15.1-RELEASE";
 const VM_IMAGE: &str = "FreeBSD-15.1-RELEASE-amd64-ufs.raw.xz";
 /// Bumped whenever [`prepare_image`] changes what it writes.
-const PREP_VERSION: &str = "5";
+const PREP_VERSION: &str = "12";
 /// The bound: AbyssBSD's median over FreeBSD's.
 const BOUND: f64 = 1.02;
 /// FreeBSD-side coefficient of variation above which a benchmark cannot

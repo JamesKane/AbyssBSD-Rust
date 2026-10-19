@@ -176,6 +176,8 @@ pub struct PerCpu {
     current_prio: AtomicU8,
     /// Relative capacity (1024 for the fastest CPUs).
     capacity: AtomicU16,
+    /// The CPU shares its core with SMT siblings.
+    smt: AtomicBool,
     /// The idle thread is halted (or about to): a waker must interrupt it.
     /// While the idle thread spins this is false and a waker need not.
     halted: AtomicBool,
@@ -268,6 +270,7 @@ fn new_percpu(id: CpuId) -> &'static mut PerCpu {
         need_resched: AtomicBool::new(false),
         current_prio: AtomicU8::new(Priority::KERNEL.get()),
         capacity: AtomicU16::new(1024),
+        smt: AtomicBool::new(false),
         halted: AtomicBool::new(false),
         switches: Cell::new((0, 0)),
         window_end: Cell::new(0),
@@ -493,6 +496,13 @@ pub fn spawn_on(
 pub fn set_capacity(cpu: CpuId, capacity: u16) {
     if let Some(c) = self::cpu(cpu) {
         c.capacity.store(capacity, Ordering::Relaxed);
+    }
+}
+
+/// Records whether `cpu` shares its core with SMT siblings.
+pub fn set_smt(cpu: CpuId, smt: bool) {
+    if let Some(c) = self::cpu(cpu) {
+        c.smt.store(smt, Ordering::Relaxed);
     }
 }
 
@@ -995,7 +1005,9 @@ fn idle_loop() {
     loop {
         let irq = hal::irq::disable();
         let c = this_cpu();
-        let spin = switching_often(c);
+        // As ULE's TDQ_IDLESPIN: never on an SMT sibling, where spinning
+        // takes the core from the other thread.
+        let spin = !c.smt.load(Ordering::Relaxed) && switching_often(c);
         hal::irq::restore(irq);
         if spin {
             // A waker sees `halted` clear and sets `need_resched` instead

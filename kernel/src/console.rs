@@ -38,8 +38,23 @@ struct Sinks {
     ring: Option<logring::Ring<'static>>,
 }
 
+/// Output goes to the log ring only (FreeBSD's `kern.consmute`).
+static MUTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Mutes or unmutes the serial and framebuffer consoles.
+#[cfg_attr(feature = "ktest", allow(dead_code))]
+pub(crate) fn set_muted(muted: bool) {
+    MUTED.store(muted, core::sync::atomic::Ordering::Relaxed);
+}
+
 impl Write for Sinks {
     fn write_str(&mut self, s: &str) -> fmt::Result {
+        if MUTED.load(core::sync::atomic::Ordering::Relaxed) {
+            if let Some(ring) = &mut self.ring {
+                ring.write(s.as_bytes());
+            }
+            return Ok(());
+        }
         match &mut self.serial {
             #[cfg(target_arch = "x86_64")]
             Some(SerialSink::Port(u)) => u.write_str(s)?,

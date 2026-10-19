@@ -204,6 +204,7 @@ pub(crate) fn record_this_cpu(cpu: CpuId) {
     };
     CPUS.lock()[cpu.index()] = Some(info);
     sched::set_capacity(cpu, info.capacity);
+    sched::set_smt(cpu, smt_core(smt_thread));
     crate::errata::apply(cpu, &ident);
 }
 
@@ -237,17 +238,30 @@ fn place() -> (u32, u32, u32, bool) {
     }
 }
 
+/// The extended topology leaf: 0x1F where it is enumerated (as Intel
+/// recommends and FreeBSD prefers), else 0xB. Under a hypervisor the two
+/// can disagree (bhyve 15.1 passes the host's 0x1F through); reading the
+/// same one keeps scheduling decisions such as idle spinning in step.
+#[cfg(target_arch = "x86_64")]
+fn topology_leaf() -> Option<u32> {
+    use core::arch::x86_64::{__cpuid, __cpuid_count};
+    let max = __cpuid(0).eax;
+    [0x1f, 0xb]
+        .into_iter()
+        .find(|&leaf| max >= leaf && __cpuid_count(leaf, 0).ebx & 0xffff != 0)
+}
+
 /// (package, cluster, core, is an SMT thread) for this CPU.
 #[cfg(target_arch = "x86_64")]
 fn place() -> (u32, u32, u32, bool) {
-    use core::arch::x86_64::{__cpuid, __cpuid_count};
-    if __cpuid(0).eax < 0xb {
+    use core::arch::x86_64::__cpuid_count;
+    let Some(leaf) = topology_leaf() else {
         return (0, 0, crate::arch::apic::id(), false);
-    }
-    // Leaf 0xB: subleaf 0 is the SMT level, 1 the core level; EAX[4:0]
-    // is how far to shift the x2APIC ID to get the next level up.
-    let smt = __cpuid_count(0xb, 0);
-    let core = __cpuid_count(0xb, 1);
+    };
+    // Subleaf 0 is the SMT level, 1 the core level; EAX[4:0] is how far to
+    // shift the x2APIC ID to get the next level up.
+    let smt = __cpuid_count(leaf, 0);
+    let core = __cpuid_count(leaf, 1);
     let id = smt.edx;
     let smt_shift = smt.eax & 0x1f;
     let core_shift = core.eax & 0x1f;
@@ -258,6 +272,23 @@ fn place() -> (u32, u32, u32, bool) {
         id.checked_shr(smt_shift).unwrap_or(id),
         id & ((1u32 << smt_shift) - 1) != 0,
     )
+}
+
+/// Whether this CPU's core runs more than one thread. `smt_thread` (this
+/// CPU is a core's second or later thread) is enough on aarch64, where the
+/// PPTT marks every thread of such a core.
+#[cfg(target_arch = "aarch64")]
+fn smt_core(smt_thread: bool) -> bool {
+    smt_thread
+}
+
+/// Whether this CPU's core runs more than one thread: the topology leaf's
+/// SMT level counts the logical processors per core.
+#[cfg(target_arch = "x86_64")]
+fn smt_core(smt_thread: bool) -> bool {
+    smt_thread
+        || topology_leaf()
+            .is_some_and(|leaf| core::arch::x86_64::__cpuid_count(leaf, 0).ebx & 0xffff > 1)
 }
 
 /// Prints a summary once every CPU is up.

@@ -870,15 +870,13 @@ impl Manager {
         };
         let parent = t.nameunit(self.drivers, n.parent.unwrap_or(0));
         let line = self.device_line(&t, '+', &alloc::format!("{}{unit}", decl.name), id.index);
+        let mut desc = None;
         if let Some(n) = t.node_mut(id) {
             n.binding = Some(binding);
             n.sysctl = node;
             n.state = NodeState::Attached;
             n.start = StartPhase::Attach;
-            self.platform.log(format_args!(
-                "{}{unit}: <{}> on {parent}",
-                decl.name, n.desc
-            ));
+            desc = Some(n.desc.clone());
         }
         // Only this node's consumers can have become ready.
         let consumers: Vec<u32> = t.graph.consumers(id.index).map(|e| e.consumer).collect();
@@ -897,6 +895,11 @@ impl Manager {
         }
         self.release_starts(&mut t);
         drop(t);
+        // After the lock: a serial console takes about a millisecond a line.
+        if let Some(desc) = desc {
+            self.platform
+                .log(format_args!("{}{unit}: <{desc}> on {parent}", decl.name));
+        }
         self.event(line);
         self.bump();
     }
