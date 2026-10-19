@@ -405,11 +405,12 @@ P3.3 (from the start, pure crate) ────────┘   P3.8 ─┴─�
   time; DMA map throughput; and detach-cycle time.
 - Progress (2026-10-19): the detach stress test (vtblk1 and nvme0, 8 cycles each, under I/O) and
   the verifier run in every boot case. The perf suite `p3` covers block QD1 p50/p99, QD32, and
-  sequential reads on vtbd and nda, plus AML `_STA`/`_CRS`. In a single run on bhyve, everything
-  is faster than FreeBSD except `blk.vtbd.qd32` at 1.076. That gap is not notifications or
-  interrupts: `EVENT_IDX` (which bhyve does not offer) and interrupt suppression while draining
-  left it unchanged. Still to do: close that gap, run the suite with several runs, and add the
-  remaining items (interrupt latency, gate cost, attach time, DMA map, detach-cycle time).
+  sequential reads on vtbd and nda; AML `_STA`/`_CRS`; DMA map; gate cost at 1 and 8 CPUs; and
+  vtblk attach and detach-cycle time. An audit of the order-of-magnitude wins found harness bugs
+  that handicapped FreeBSD, now fixed: no GEOM direct dispatch, interrupts spread across CPUs, and
+  vtbd1 left mounted (tests/perf/README.md). Five runs on bhyve: every benchmark is faster than
+  FreeBSD (geometric mean 0.43). FreeBSD's own run-to-run spread exceeds 1% on 10 of 14. Still
+  to do: interrupt latency (bhyve's HPET as an MSI source on both sides) and AML namespace load.
 
 **Exit:** on both arches:
 - The kernel enumerates PCIe through the device manager and attaches NVMe, AHCI, and virtio-blk
