@@ -599,6 +599,176 @@ fn bench_aml(s: &Sleepable) {
     });
 }
 
+/// Interrupt latency (x86): an HPET comparator delivered as an MSI to
+/// CPU 0, from the counter reaching it to the filter running, while the
+/// CPU spins (so no vCPU wake-up is in the way). FreeBSD's kbench drives
+/// its per-CPU HPET event timer the same way. AbyssBSD's `hpet` driver
+/// claims nothing, so this programs a timer itself.
+#[cfg(target_arch = "x86_64")]
+mod intr {
+    use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    use super::{CpuId, Sleepable, time};
+
+    const CAP: usize = 0x00;
+    const PERIOD_FS: usize = 0x04;
+    const CONFIG: usize = 0x10;
+    const COUNTER: usize = 0xf0;
+    const fn timer_config(n: usize) -> usize {
+        0x100 + 0x20 * n
+    }
+    const fn comparator(n: usize) -> usize {
+        0x108 + 0x20 * n
+    }
+    const fn fsb_route(n: usize) -> usize {
+        0x110 + 0x20 * n
+    }
+    const ENABLE: u32 = 1;
+    const LEGACY_ROUTE: u32 = 1 << 1;
+    const INT_ENABLE: u32 = 1 << 2;
+    const MODE_32: u32 = 1 << 8;
+    const FSB_ENABLE: u32 = 1 << 14;
+    const FSB_CAPABLE: u32 = 1 << 15;
+    const SAMPLES: usize = 1000;
+    /// How far ahead each comparator is set.
+    const AHEAD_NS: u64 = 20_000;
+
+    /// The mapped registers and the timer in use.
+    static BASE: AtomicUsize = AtomicUsize::new(0);
+    static TIMER: AtomicUsize = AtomicUsize::new(0);
+    /// The TSC when the filter ran; 0 while waiting.
+    static FIRED: AtomicU64 = AtomicU64::new(0);
+
+    fn regs() -> regs::Mmio {
+        // SAFETY: the HPET block mapped in `run`, for good.
+        unsafe { regs::Mmio::new(BASE.load(Ordering::Relaxed), 1024) }
+    }
+
+    fn set_enabled(on: bool) {
+        let n = TIMER.load(Ordering::Relaxed);
+        let c = regs().read32(timer_config(n));
+        regs().write32(
+            timer_config(n),
+            if on { c | INT_ENABLE } else { c & !INT_ENABLE },
+        );
+    }
+
+    /// The timer's MSI: fixed delivery, edge, to `cpu`'s local APIC.
+    struct Domain;
+
+    impl ::irq::IrqDomain for Domain {
+        fn name(&self) -> &'static str {
+            "hpet"
+        }
+        fn connect(
+            &self,
+            _: u32,
+            _: ::irq::Trigger,
+            _: ::irq::Polarity,
+            cpu: CpuId,
+        ) -> Result<u32, ::irq::IrqError> {
+            let dest = crate::intc::hw_id(cpu)
+                .and_then(|id| u32::try_from(id).ok())
+                .filter(|&id| id < 256)
+                .ok_or(::irq::IrqError::NoSuchInput)?;
+            let vector = ::irq::alloc_vector(cpu).ok_or(::irq::IrqError::NoVector)?;
+            let n = TIMER.load(Ordering::Relaxed);
+            regs().write32(fsb_route(n), vector);
+            regs().write32(fsb_route(n) + 4, 0xfee0_0000 | (dest << 12));
+            let c = regs().read32(timer_config(n));
+            regs().write32(timer_config(n), (c & !INT_ENABLE) | FSB_ENABLE | MODE_32);
+            Ok(vector)
+        }
+        fn disconnect(&self, _: u32, cpu: CpuId, root: u32) {
+            let n = TIMER.load(Ordering::Relaxed);
+            let c = regs().read32(timer_config(n));
+            regs().write32(timer_config(n), c & !(INT_ENABLE | FSB_ENABLE));
+            ::irq::free_vector(cpu, root);
+        }
+        fn mask(&self, _: u32) {
+            set_enabled(false);
+        }
+        fn unmask(&self, _: u32) {
+            set_enabled(true);
+        }
+    }
+
+    static DOMAIN: Domain = Domain;
+
+    fn filter(_: usize, _: &sched::IrqCx) -> ::irq::Filter {
+        FIRED.store(time::counter(), Ordering::Release);
+        ::irq::Filter::Handled
+    }
+
+    /// Latency samples in ns, or `None` without an HPET that can send MSIs.
+    pub(super) fn run(s: &Sleepable) -> Option<alloc::vec::Vec<u64>> {
+        let t = crate::acpi::find(*b"HPET")?;
+        let h = acpi_tables::hpet::parse(&t).ok()?;
+        let va = crate::mm::map_device(addr::PhysAddr::new(h.base.address), 1024).ok()?;
+        BASE.store(usize::try_from(va.get()).ok()?, Ordering::Relaxed);
+        let r = regs();
+        let timers = ((r.read32(CAP) >> 8) & 0x1f) as usize + 1;
+        let n = (0..timers)
+            .rev()
+            .find(|&n| r.read32(timer_config(n)) & FSB_CAPABLE != 0)?;
+        TIMER.store(n, Ordering::Relaxed);
+        let period_fs = u64::from(r.read32(PERIOD_FS));
+        if period_fs == 0 {
+            return None;
+        }
+        let ahead = u32::try_from(AHEAD_NS * 1_000_000 / period_fs).ok()?;
+        // The main counter runs; interrupts go where each timer says.
+        r.write32(CONFIG, (r.read32(CONFIG) & !LEGACY_ROUTE) | ENABLE);
+        let installed = ::irq::install(
+            &DOMAIN,
+            0,
+            ::irq::Trigger::Edge,
+            ::irq::Polarity::High,
+            CpuId::BOOT,
+            ::irq::Handler {
+                name: "hpet-bench",
+                filter: Some(filter),
+                thread: None,
+                arg: 0,
+            },
+        )
+        .ok()?;
+        let ahead_ticks = time::ns_to_ticks(AHEAD_NS);
+        let mut ns = alloc::vec::Vec::with_capacity(SAMPLES);
+        for _ in 0..SAMPLES {
+            FIRED.store(0, Ordering::Relaxed);
+            let t0 = time::counter();
+            let now = r.read32(COUNTER);
+            r.write32(comparator(n), now.wrapping_add(ahead));
+            let deadline = t0 + time::ns_to_ticks(10_000_000);
+            let fired = loop {
+                let f = FIRED.load(Ordering::Acquire);
+                if f != 0 || time::counter() > deadline {
+                    break f;
+                }
+                core::hint::spin_loop();
+            };
+            if fired == 0 {
+                break;
+            }
+            ns.push(time::ticks_to_ns(fired.saturating_sub(t0 + ahead_ticks)));
+        }
+        installed.remove(s);
+        (ns.len() == SAMPLES).then_some(ns)
+    }
+}
+
+/// Interrupt latency, where there is an HPET to measure it with.
+fn bench_intr(s: &Sleepable) {
+    #[cfg(target_arch = "x86_64")]
+    match intr::run(s) {
+        Some(mut ns) => report_lat("intr.latency", &mut ns),
+        None => kprintln!("kbench: no HPET timer with MSI delivery"),
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = s;
+}
+
 /// The `aml.load` payload: QEMU q35's DSDT moved under `\KBNS`
 /// (tests/perf/kbench/ssdt-q35.dsl).
 static AML_SSDT: &[u8] = include_bytes!("../../tests/perf/kbench/ssdt-q35.aml");
@@ -696,6 +866,7 @@ fn suite_p3(s: &Sleepable) {
     bench_disk(s, "nda0", "nda");
     bench_aml(s);
     bench_aml_load(s);
+    bench_intr(s);
     bench_dma(s);
     for t in [1, 8] {
         throughput(s, &alloc::format!("gate.t{t}"), t, |_| {

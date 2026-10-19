@@ -395,7 +395,7 @@ P3.3 (from the start, pure crate) ────────┘   P3.8 ─┴─�
   - **Not yet.** PL031; the console UART's hand-over to a tty driver (P4); `/dev/fido` and
     `/dev/random` (devfs, P4).
 
-**P3.9 Verification and performance.**
+**P3.9 Verification and performance.** Done 2026-10-19.
 - The detach stress test: virtio-blk and NVMe detached and re-attached under random I/O, with
   ledger and allocator checks after every cycle.
 - The verifier on in the CI boot and stress tiers.
@@ -403,22 +403,21 @@ P3.3 (from the start, pure crate) ────────┘   P3.8 ─┴─�
 - The P3 suite: interrupt latency; IOPS at queue depths 1 and 32 with p50/p99 latency; sequential
   bandwidth; AML namespace load and `_STA`/`_CRS` evaluation; gate cost at 1 and 8 CPUs; attach
   time; DMA map throughput; and detach-cycle time.
-- Progress (2026-10-19): the detach stress test (vtblk1 and nvme0, 8 cycles each, under I/O) and
-  the verifier run in every boot case. The perf suite `p3` covers block QD1 p50/p99, QD32, and
-  sequential reads on vtbd and nda; AML `_STA`/`_CRS`; DMA map; gate cost at 1 and 8 CPUs; and
-  vtblk attach and detach-cycle time. An audit of the order-of-magnitude wins found harness bugs
-  that handicapped FreeBSD, now fixed: no GEOM direct dispatch, interrupts spread across CPUs, and
-  vtbd1 left mounted (tests/perf/README.md). A second pass found AbyssBSD idle-spinning where
-  FreeBSD halted (bhyve passes the host's CPUID leaf 0x1F through; both now read it, and neither
-  spins on SMT siblings) and both attach times dominated by console output (now muted on both
-  sides). Five runs on bhyve: every benchmark is faster than FreeBSD (geometric mean 0.38); the
-  large attach and `gate.t8` leads are design differences (newbus zeroes every candidate driver's
-  softc, about 9 MB per PCI attach; `dev_refthread` takes a per-cdev mutex).
-  Known issues, accepted for now: FreeBSD's QD1 p99 tail (about 5% of reads over 3x the median,
-  against 0.02% on AbyssBSD) is unexplained beyond lying in its idle wake-up path, possibly the
-  event timer's idle mode; and FreeBSD's `blk.vtbd.seq` varies 110% run to run.
-  Still to do: interrupt latency (bhyve's HPET as an MSI source on both sides) and AML namespace
-  load.
+- As delivered: the detach stress test (vtblk1 and nvme0, 8 cycles each, under I/O) and the
+  verifier run in every boot case. The perf suite `p3` (tests/perf/README.md) has 17 benchmarks:
+  block QD1 p50/p99, QD32, and sequential reads on vtbd and nda; AML namespace load (q35's DSDT as
+  an SSDT) and `_STA`/`_CRS`; HPET-to-handler interrupt latency; DMA map; gate cost at 1 and 8
+  CPUs; and vtblk attach and detach-cycle time. An audit of the order-of-magnitude wins fixed
+  harness bugs that handicapped FreeBSD (no GEOM direct dispatch, interrupts spread across CPUs,
+  vtbd1 left mounted, console output in attach) and one that favored AbyssBSD (it idle-spun where
+  FreeBSD halted; both now read CPUID leaf 0x1F and neither spins on SMT siblings). Five runs on
+  bhyve: every benchmark is faster than FreeBSD (geometric mean 0.34). The largest leads are
+  design differences, each traced on FreeBSD with DTrace: newbus zeroes every candidate driver's
+  softc (about 9 MB per PCI attach); ACPICA spends about 70% of a table load in its OS mutex
+  layer; `dev_refthread` takes a per-cdev mutex.
+- Known issues, accepted for now: FreeBSD's p99 tails (QD1 reads, interrupt latency) are
+  unexplained beyond lying in its idle wake-up path, possibly the event timer's idle mode; and
+  FreeBSD's `blk.vtbd.seq` varies 100% run to run.
 
 **Exit:** on both arches:
 - The kernel enumerates PCIe through the device manager and attaches NVMe, AHCI, and virtio-blk

@@ -27,6 +27,7 @@
 #include <sys/smp.h>
 #include <sys/sx.h>
 #include <sys/sysctl.h>
+#include <sys/timeet.h>
 #include <sys/bio.h>
 #include <sys/bus.h>
 #include <sys/conf.h>
@@ -1148,6 +1149,60 @@ kb_aml_load(void)
 	printf("kbench aml.load %ju ns\n", (uintmax_t)m[KB_AML_LOADS / 2]);
 }
 
+/*
+ * Interrupt latency: an HPET comparator delivered as an MSI to CPU 0 (the
+ * per-CPU HPET event timer), from the counter reaching it to the event
+ * callback, which runs in the HPET filter. CPU 0 spins meanwhile, so no
+ * vCPU wake-up is in the way.
+ */
+#define	KB_INTR_SAMPLES		1000
+#define	KB_INTR_AHEAD_NS	20000
+
+static volatile uint64_t kb_intr_fired;
+
+static void
+kb_et_cb(struct eventtimer *et __unused, void *arg __unused)
+{
+	atomic_store_rel_64(&kb_intr_fired, rdtsc());
+}
+
+static void
+kb_intr(void)
+{
+	struct eventtimer *et;
+	uint64_t *ns, ahead;
+	int n = 0;
+
+	et = et_find("HPET", ET_FLAGS_ONESHOT, ET_FLAGS_ONESHOT);
+	if (et == NULL || et_init(et, kb_et_cb, NULL, NULL) != 0) {
+		printf("kbench: no free HPET event timer\n");
+		return;
+	}
+	ns = malloc(KB_INTR_SAMPLES * sizeof(*ns), M_KBENCH, M_WAITOK);
+	ahead = tsc_freq * KB_INTR_AHEAD_NS / 1000000000;
+	for (int i = 0; i < KB_INTR_SAMPLES; i++) {
+		uint64_t t0, f, deadline;
+
+		atomic_store_rel_64(&kb_intr_fired, 0);
+		t0 = rdtsc();
+		et_start(et, nstosbt(KB_INTR_AHEAD_NS), 0);
+		deadline = t0 + tsc_freq / 100;
+		while ((f = atomic_load_acq_64(&kb_intr_fired)) == 0 &&
+		    rdtsc() < deadline)
+			cpu_spinwait();
+		if (f == 0)
+			break;
+		ns[n++] = f > t0 + ahead ? tsc_ns(f - t0 - ahead) : 0;
+	}
+	et_stop(et);
+	et_free(et);
+	if (n == KB_INTR_SAMPLES)
+		kb_report_lat("intr.latency", ns, n);
+	else
+		printf("kbench: the HPET did not fire\n");
+	free(ns, M_KBENCH);
+}
+
 static void
 kb_suite_p3(void)
 {
@@ -1155,6 +1210,7 @@ kb_suite_p3(void)
 	kb_blk("nda0", "nda");
 	kb_aml();
 	kb_aml_load();
+	kb_intr();
 	kb_dma();
 	kb_throughput("gate.t1", kb_gate_body, 1);
 	kb_throughput("gate.t8", kb_gate_body, 8);
