@@ -231,6 +231,8 @@ pub(crate) struct Process {
     started: u64,
     /// It has called `execve` (FreeBSD's `P_EXEC`).
     execed: AtomicBool,
+    /// The CPUs it may run on, one bit each (its `cpuset`); inherited.
+    cpus: AtomicU64,
 }
 
 /// The program a process runs, as `kern.proc` reports it.
@@ -301,6 +303,7 @@ impl Process {
         let umask = parent.map_or(0o022, |p| p.umask.load(Ordering::Relaxed));
         let image = parent.map(|p| p.image.lock().clone()).unwrap_or_default();
         let execed = parent.is_some_and(|p| p.execed.load(Ordering::Relaxed));
+        let cpus = parent.map_or(u64::MAX, |p| p.cpus.load(Ordering::Relaxed));
         let p = Arc::new_cyclic(|me| {
             let pid = alloc_pid(me);
             Self {
@@ -332,6 +335,7 @@ impl Process {
                 image: SpinLock::new(image),
                 started: crate::time::now_ns(),
                 execed: AtomicBool::new(execed),
+                cpus: AtomicU64::new(cpus),
             }
         });
         if let Some(parent) = parent {
@@ -364,6 +368,34 @@ impl Process {
     /// Whether it has called `execve`.
     pub(crate) fn execed(&self) -> bool {
         self.execed.load(Ordering::Relaxed)
+    }
+
+    /// The CPUs it may run on, one bit each.
+    pub(crate) fn cpus(&self) -> u64 {
+        self.cpus.load(Ordering::Relaxed)
+    }
+
+    /// Restricts it to the CPUs in `mask` (`cpuset_setaffinity`). Its
+    /// thread is bound when that is one CPU; otherwise it runs anywhere
+    /// (the scheduler binds to one CPU or none). The caller's own thread
+    /// moves at once.
+    pub(crate) fn set_cpus(&self, s: &Sleepable, mask: u64) {
+        self.cpus.store(mask, Ordering::Relaxed);
+        let one = (mask.count_ones() == 1).then(|| hal::CpuId(mask.trailing_zeros()));
+        let mine = Process::current().is_some_and(|p| p.pid == self.pid);
+        if mine {
+            sched::set_binding(one);
+            if one.is_some_and(|c| c != hal::cpu_id()) {
+                // The wakeup puts it on its CPU.
+                crate::time::sleep_ns(s, 1);
+            }
+        }
+    }
+
+    /// The CPU its threads are bound to, if its set is one CPU.
+    fn bound_cpu(&self) -> Option<hal::CpuId> {
+        let mask = self.cpus();
+        (mask.count_ones() == 1).then(|| hal::CpuId(mask.trailing_zeros()))
     }
 
     /// Whether it has exited (a zombie, until reaped).
@@ -421,7 +453,6 @@ impl Process {
     /// arguments `argv` and environment `envp`, started by the kernel (no
     /// parent: a session leader, as init is) with the console open on
     /// descriptors 0 to 2; its thread is bound to `cpu` if given.
-    #[cfg_attr(not(feature = "ktest"), allow(dead_code))]
     pub(crate) fn spawn(
         s: &Sleepable,
         path: &[u8],
@@ -586,7 +617,10 @@ impl Process {
         };
         let mut cf = *frame;
         arch_fork_return(&mut cf);
-        if child.start(cf, hal::user::tls(), true, None).is_err() {
+        if child
+            .start(cf, hal::user::tls(), true, child.bound_cpu())
+            .is_err()
+        {
             if let Some(fd) = fd {
                 let closed = self.files.lock(s).close(fd);
                 drop(closed);

@@ -44,10 +44,21 @@ struct Contents<'a> {
 /// Builds the loader, the kernel, and the disk image, returning the image's
 /// path.
 pub(crate) fn build(arch: Arch, opts: build::Options, cmdline: &str) -> Result<PathBuf> {
+    build_with(arch, opts, cmdline, &[])
+}
+
+/// As [`build`], with `extra` files (path on the memory disk, file here)
+/// added to the memory disk.
+pub(crate) fn build_with(
+    arch: Arch,
+    opts: build::Options,
+    cmdline: &str,
+    extra: &[(&str, &std::path::Path)],
+) -> Result<PathBuf> {
     let images = build::all(arch, opts)?;
     let read = |p: &PathBuf| fs::read(p).map_err(|e| format!("{}: {e}", p.display()));
     let (loader, kernel) = (read(&images.loader)?, read(&images.kernel)?);
-    let md = crate::base::md_image(arch)?;
+    let md = crate::base::md_image(arch, extra)?;
     let disk = make_disk(
         arch,
         &Contents {

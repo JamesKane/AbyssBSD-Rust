@@ -78,7 +78,7 @@ impl SerialSink {
         }
     }
 
-    /// Clears the receive interrupt, the FIFO having been read empty.
+    /// Clears the receive interrupt (before the FIFO is read empty).
     fn ack_rx(&self) {
         if let Self::Pl011(u) = self {
             u.ack_rx();
@@ -336,6 +336,10 @@ impl uart::ConsolePort for Port {
         };
         let mut r = RECEIVED.lock();
         let mut got = false;
+        // Cleared before draining: a byte arriving after the last read
+        // raises the interrupt again (cleared after, its receive timeout
+        // would be lost and the byte left in the FIFO).
+        serial.ack_rx();
         while let Some(b) = serial.get() {
             got = true;
             // A full buffer drops what the thread has not taken yet.
@@ -345,7 +349,6 @@ impl uart::ConsolePort for Port {
                 r.len += 1;
             }
         }
-        serial.ack_rx();
         got
     }
 

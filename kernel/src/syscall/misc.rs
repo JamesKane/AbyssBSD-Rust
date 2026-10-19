@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! Process identity and odds and ends: `getpid`, `issetugid`, `getrandom`,
-//! `exterrctl`, `cpuset_getaffinity`, `sysarch`.
+//! `exterrctl`, `cpuset_getaffinity`, `cpuset_setaffinity`, `sysarch`.
 
 use core::sync::atomic::Ordering;
 
@@ -89,10 +89,71 @@ pub(super) fn cpuset_getaffinity(
         return Err(Errno::ESRCH);
     }
     let mut set = [0u8; CPUSET_BYTES];
-    for cpu in 0..sched::online_cpus() {
-        set[cpu / 8] |= 1 << (cpu % 8);
+    // The root and the process's set are every CPU; its own, its mask.
+    let allowed = if level == CPU_LEVEL_WHICH {
+        p.cpus()
+    } else {
+        u64::MAX
+    };
+    for cpu in 0..sched::online_cpus().min(64) {
+        if allowed & (1 << cpu) != 0 {
+            set[cpu / 8] |= 1 << (cpu % 8);
+        }
     }
     uaccess::copy_out(mask, &set[..size]).map_err(|_| Errno::EFAULT)?;
+    Ok(0)
+}
+
+/// `cpuset_setaffinity(level, which, id, setsize, mask)`: the CPUs a
+/// process (this one, or another by pid) may run on.
+pub(super) fn cpuset_setaffinity(
+    s: &sched::Sleepable,
+    level: u64,
+    which: u64,
+    id: u64,
+    setsize: u64,
+    mask: u64,
+) -> SysResult {
+    let me = process()?;
+    let size = usize::try_from(setsize).map_err(|_| Errno::ERANGE)?;
+    if size < size_of::<u64>() || size > 4096 {
+        return Err(Errno::ERANGE);
+    }
+    if u32::try_from(level).map_err(|_| Errno::EINVAL)? != CPU_LEVEL_WHICH {
+        return Err(Errno::EINVAL);
+    }
+    let target = match u32::try_from(which).map_err(|_| Errno::EINVAL)? {
+        _ if int(id) == -1 => me,
+        CPU_WHICH_PID | CPU_WHICH_TIDPID => crate::proc::find(int(id)).ok_or(Errno::ESRCH)?,
+        CPU_WHICH_TID if id == sched::current().tid().0 => me,
+        CPU_WHICH_TID => return Err(Errno::ESRCH),
+        _ => return Err(Errno::EINVAL),
+    };
+    let mut set = alloc::vec![0u8; size];
+    uaccess::copy_in(&mut set, mask).map_err(|_| Errno::EFAULT)?;
+    let online = sched::online_cpus();
+    let mut bits = 0u64;
+    for (i, &b) in set.iter().enumerate() {
+        for bit in 0..8 {
+            if b & (1 << bit) == 0 {
+                continue;
+            }
+            let cpu = i * 8 + bit;
+            // A CPU that does not exist (FreeBSD: beyond the kernel's set
+            // size, EINVAL; an absent one is simply never used).
+            if cpu >= CPUSET_BYTES * 8 {
+                return Err(Errno::EINVAL);
+            }
+            if cpu < online.min(64) {
+                bits |= 1 << cpu;
+            }
+        }
+    }
+    // A thread with nowhere to run.
+    if bits == 0 {
+        return Err(Errno::EDEADLK);
+    }
+    target.set_cpus(s, bits);
     Ok(0)
 }
 

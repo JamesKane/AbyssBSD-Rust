@@ -573,6 +573,19 @@ fn better_cpu(load: usize, capacity: u16, best_load: usize, best_capacity: u16) 
     load < best_load || (load == best_load && capacity > best_capacity)
 }
 
+/// Binds the current thread to `cpu`, or lets it run anywhere (`None`).
+/// It moves to a newly bound CPU the next time it wakes: a short sleep
+/// moves it at once.
+pub fn set_binding(cpu: Option<CpuId>) {
+    current().inner.lock().bound = cpu;
+}
+
+/// The current thread's binding.
+#[must_use]
+pub fn binding() -> Option<CpuId> {
+    current().inner.lock().bound
+}
+
 /// Picks the CPU a waking thread should run on: its binding, else the
 /// least loaded CPU, preferring the one it last ran on.
 fn choose_cpu(last: CpuId, bound: Option<CpuId>) -> CpuId {

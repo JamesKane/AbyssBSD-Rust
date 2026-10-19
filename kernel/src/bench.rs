@@ -31,8 +31,25 @@ const RUN_NS: u64 = time::NANOS;
 /// Rounds of each throughput benchmark; the median is reported.
 const ROUNDS: usize = 3;
 
+/// The userland suite: FreeBSD's static `ubench`, the same binary FreeBSD
+/// runs, from the memory disk as `/tmp/ubench p4` (it prints the `kbench`
+/// lines itself).
+fn run_ubench(s: &Sleepable) -> bool {
+    const PATH: &[u8] = b"/tmp/ubench";
+    match crate::proc::Process::spawn(s, PATH, &[PATH, b"p4"], &[], None) {
+        Ok(p) => p.wait(s) == crate::proc::Exit::Code(0),
+        Err(e) => {
+            kprintln!("bench: cannot run /tmp/ubench: {e:?}");
+            false
+        }
+    }
+}
+
 /// Runs `suite`; returns whether it was known and ran.
 pub(crate) fn run(s: &Sleepable, suite: &str) -> bool {
+    if suite == "p4" {
+        return run_ubench(s);
+    }
     let body: fn(&Sleepable) = match suite {
         "p2" => suite_p2,
         "p3" => suite_p3,

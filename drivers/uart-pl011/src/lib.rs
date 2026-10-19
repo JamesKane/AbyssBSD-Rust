@@ -68,7 +68,8 @@ impl Uart {
         self.regs.write32(IMSC, RX_INTERRUPTS);
     }
 
-    /// Clears the receive interrupts, once the FIFO has been read empty.
+    /// Clears the receive interrupts. Done before reading the FIFO empty,
+    /// so a byte that arrives meanwhile raises them again.
     pub fn ack_rx(&self) {
         self.regs.write32(ICR, RX_INTERRUPTS);
     }

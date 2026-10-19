@@ -257,8 +257,9 @@ pub(crate) fn cc_static(arch: Arch, source: &Path, out: &Path) -> Result<()> {
 
 /// The memory-disk image for `arch`, if `fetch-base` has run: `/rescue`,
 /// an empty `/dev`, and each `tests/user/*.c` built into
-/// `usr/tests/abyss/` (rebuilt when its source or xtask changes).
-pub(crate) fn md_image(arch: Arch) -> Result<Option<Vec<u8>>> {
+/// `usr/tests/abyss/` (rebuilt when its source or xtask changes), then
+/// the `extra` files (path on the memory disk, file here).
+pub(crate) fn md_image(arch: Arch, extra: &[(&str, &Path)]) -> Result<Option<Vec<u8>>> {
     let Some(rescue) = existing_rescue_image(arch) else {
         return Ok(None);
     };
@@ -312,6 +313,13 @@ pub(crate) fn md_image(arch: Arch) -> Result<Option<Vec<u8>>> {
         }
         let data = fs::read(&bin)?;
         append(&mut md, &format!("{TESTS_DIR}/{name}"), b'0', 0o555, &data)?;
+    }
+    for (path, file) in extra {
+        if let Some((dir, _)) = path.rsplit_once('/') {
+            append(&mut md, &format!("{dir}/"), b'5', 0o755, &[])?;
+        }
+        let data = fs::read(file).map_err(|e| format!("{}: {e}", file.display()))?;
+        append(&mut md, path, b'0', 0o555, &data)?;
     }
     md.resize(md.len() + 2 * ustar::BLOCK, 0);
     Ok(Some(md))

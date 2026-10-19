@@ -114,7 +114,14 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
         release: true,
         ktest: false,
     };
-    let abyss = image::build(Arch::X86_64, opts, &format!("abyss.bench={suite}"))?;
+    // The userland suite runs the same ubench on AbyssBSD, from the memory
+    // disk (no UFS yet to read the bench disk).
+    let extra: &[(&str, &Path)] = if suite == "p4" {
+        &[("tmp/ubench", ubench.as_path())]
+    } else {
+        &[]
+    };
+    let abyss = image::build_with(Arch::X86_64, opts, &format!("abyss.bench={suite}"), extra)?;
 
     let mut samples: BTreeMap<String, BTreeMap<Side, Vec<f64>>> = BTreeMap::new();
     let mut raw = String::from("side\trun\tname\tvalue\tunit\n");
