@@ -2541,10 +2541,24 @@ mod user_memory {
     /// Runs `code` as a process: its own read+execute page, a stack, and
     /// one thread bound to this CPU. Returns the exit status once every
     /// page is back.
+    /// [`free_pages`] once it has stopped changing: the reaper frees
+    /// earlier tests' threads in its own time.
+    fn settled_free_pages(s: &sched::Sleepable) -> u64 {
+        let mut last = free_pages();
+        loop {
+            crate::time::sleep_ns(s, 10_000_000);
+            let now = free_pages();
+            if now == last {
+                return now;
+            }
+            last = now;
+        }
+    }
+
     fn run_program(code: &[u8]) -> i32 {
         use crate::proc::{Process, STACK_TOP};
         let s = cx();
-        let before = free_pages();
+        let before = settled_free_pages(&s);
         let space = AddressSpace::new().unwrap();
         let text = 0x40_0000;
         assert!(code.len() as u64 <= PAGE);
@@ -2573,24 +2587,29 @@ mod user_memory {
         let p = Process::new(space);
         // Bound, so only that CPU ever loads the space (and it lets go at
         // exit).
-        p.start(text, STACK_TOP, Some(hal::cpu_id())).unwrap();
+        p.start(text, STACK_TOP, 0, Some(hal::cpu_id())).unwrap();
         let status = p.wait(&s);
         drop(p);
-        // The reaper frees the thread's stack in its own time.
-        let mut settled = false;
-        for _ in 0..200 {
-            if free_pages() == before {
-                settled = true;
-                break;
-            }
-            crate::time::sleep_ns(&s, 5_000_000);
-        }
-        assert!(
-            settled,
-            "pages leaked: {} free now, {before} before",
-            free_pages()
-        );
+        let after = settled_free_pages(&s);
+        assert_eq!(after, before, "pages leaked");
         status
+    }
+
+    ktest! {
+        fn rescue_echo_runs() {
+            use crate::proc::Process;
+            let s = cx();
+            assert!(crate::md::archive().is_some(), "no memory disk: run `cargo xtask fetch-base`");
+            let p = Process::spawn(
+                &s,
+                b"/rescue/echo",
+                &[b"echo", b"hello", b"from", b"FreeBSD's", b"echo"],
+                &[b"PATH=/rescue", b"HOME=/"],
+                Some(hal::cpu_id()),
+            )
+            .unwrap();
+            assert_eq!(p.wait(&s), 0);
+        }
     }
 
     ktest! {

@@ -123,6 +123,28 @@ impl Entry {
         }
     }
 
+    /// A private mapping of `object` from page `offset` on over `range`
+    /// (a file's text or data): shared until written, then copied.
+    #[must_use]
+    pub fn private(
+        range: Range<VirtAddr>,
+        prot: Prot,
+        max_prot: Prot,
+        object: Arc<Object>,
+        offset: PageIndex,
+    ) -> Self {
+        Self {
+            start: range.start,
+            end: range.end,
+            prot,
+            max_prot,
+            inherit: Inherit::Copy,
+            object: Some(object),
+            offset,
+            needs_copy: true,
+        }
+    }
+
     /// `self`, inherited by a child as `inherit` says.
     #[must_use]
     pub const fn with_inherit(mut self, inherit: Inherit) -> Self {
@@ -297,6 +319,12 @@ impl VmMap {
             .is_some_and(|(_, e)| e.end > range.start)
     }
 
+    /// Whether nothing is mapped in `range`.
+    #[must_use]
+    pub fn is_free(&self, range: &Range<VirtAddr>) -> bool {
+        !self.overlaps(range)
+    }
+
     /// Adds `entry`, which must not overlap any other.
     pub fn insert(&mut self, entry: Entry) -> Result<(), MapError> {
         let range = entry.range();
@@ -409,17 +437,14 @@ impl VmMap {
         Ok(())
     }
 
-    /// Sets what a child inherits of `range`, which must be mapped
-    /// throughout (`minherit`).
+    /// Sets what a child inherits of the mapped parts of `range`
+    /// (`minherit`; holes are skipped, as FreeBSD does).
     pub fn set_inherit(
         &mut self,
         range: Range<VirtAddr>,
         inherit: Inherit,
     ) -> Result<(), MapError> {
         self.check(&range)?;
-        if !self.covered(&range) {
-            return Err(MapError::NotMapped);
-        }
         self.clip(range.start);
         self.clip(range.end);
         for (_, e) in self.entries.range_mut(range.start.get()..range.end.get()) {

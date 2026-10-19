@@ -109,6 +109,9 @@ impl Format for Aarch64 {
     }
 
     fn is_canonical(va: VirtAddr) -> bool {
-        crate::is_canonical_48(va)
+        // TTBR0 covers all of [0, 2^48) (bit 47 included, unlike x86's
+        // sign-extended halves); TTBR1 the top 2^48.
+        let top = va.get() >> 48;
+        top == 0 || top == 0xffff
     }
 }

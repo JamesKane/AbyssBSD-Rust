@@ -16,6 +16,13 @@
 //! Behavior reference: sys/kern/subr_syscall.c, sys/amd64/amd64/trap.c,
 //! sys/arm64/arm64/trap.c.
 
+mod io;
+mod mem;
+mod misc;
+mod sig;
+mod thr;
+
+use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use abi::errno::Errno;
@@ -25,7 +32,6 @@ use sched::Sleepable;
 use crate::arch;
 use crate::arch::trap::TrapFrame;
 use crate::proc::Process;
-use crate::uaccess;
 
 /// What a system call returns.
 pub(crate) type SysResult = Result<u64, Errno>;
@@ -103,13 +109,47 @@ pub(crate) fn entry(frame: &mut TrapFrame) {
 }
 
 fn run(s: &Sleepable, call: Call) -> SysResult {
-    let [a0, a1, a2, ..] = call.args;
-    match lookup(call.number) {
-        Some(Slot::Live(Sysno::Exit)) => exit(s, a0),
-        Some(Slot::Live(Sysno::Write)) => write(a0, a1, a2),
-        Some(Slot::Live(Sysno::Sysarch)) => sysarch(a0, a1),
+    let [a0, a1, a2, a3, a4, a5] = call.args;
+    let Some(Slot::Live(n)) = lookup(call.number) else {
+        return nosys(call.number);
+    };
+    match n {
+        Sysno::Exit => exit(s, a0),
+        Sysno::Write => io::write(a0, a1, a2),
+        Sysno::Writev => io::writev(a0, a1, a2),
+        Sysno::Getpid => misc::getpid(),
+        Sysno::Issetugid => misc::issetugid(),
+        Sysno::Readlink => misc::readlink(a0, a1, a2),
+        Sysno::Getrandom => misc::getrandom(a0, a1, a2),
+        Sysno::Exterrctl => misc::exterrctl(a0, a1, a2),
+        Sysno::CpusetGetaffinity => misc::cpuset_getaffinity(a0, a1, a2, a3, a4),
+        Sysno::Sysarch => misc::sysarch(a0, a1),
+        Sysno::Mmap => mem::mmap(s, a0, a1, a2, a3, a4, a5),
+        Sysno::Munmap => mem::munmap(s, a0, a1),
+        Sysno::Mprotect => mem::mprotect(s, a0, a1, a2),
+        Sysno::Minherit => mem::minherit(s, a0, a1, a2),
+        Sysno::Madvise => mem::madvise(a0, a1, a2),
+        Sysno::Sigaction => sig::sigaction(a0, a1, a2),
+        Sysno::Sigprocmask => sig::sigprocmask(a0, a1, a2),
+        Sysno::Sigfastblock => sig::sigfastblock(a0, a1),
+        Sysno::ThrSelf => thr::thr_self(a0),
+        Sysno::ThrWake => thr::thr_wake(a0),
+        Sysno::RtprioThread => thr::rtprio_thread(a0, a1, a2),
+        Sysno::UmtxOp => thr::umtx_op(s, a0, a1, a2, a3, a4),
         _ => nosys(call.number),
     }
+}
+
+/// The current thread's process (every thread that makes system calls
+/// has one).
+fn process() -> Result<Arc<Process>, Errno> {
+    Process::current().ok_or(Errno::EINVAL)
+}
+
+/// An `int` argument: the low 32 bits.
+const fn int(a: u64) -> i32 {
+    let [b0, b1, b2, b3, ..] = a.to_le_bytes();
+    i32::from_le_bytes([b0, b1, b2, b3])
 }
 
 /// Numbers already reported as unimplemented, one bit each; one more bit
@@ -136,71 +176,11 @@ fn nosys(number: u64) -> SysResult {
 
 /// `_exit(rval)`: ends the process.
 fn exit(s: &Sleepable, rval: u64) -> ! {
-    // The low 32 bits are the C `int`.
-    let [b0, b1, b2, b3, ..] = rval.to_le_bytes();
-    let status = i32::from_le_bytes([b0, b1, b2, b3]);
+    let status = int(rval);
     if let Some(p) = Process::current() {
         p.exit(s, status);
     }
     sched::exit()
-}
-
-/// `write(fd, buf, nbyte)`. Until there are file descriptors (P4.5),
-/// descriptors 1 and 2 are the console.
-fn write(fd: u64, buf: u64, nbyte: u64) -> SysResult {
-    if fd != 1 && fd != 2 {
-        return Err(Errno::EBADF);
-    }
-    let len = usize::try_from(nbyte).map_err(|_| Errno::EINVAL)?;
-    let mut chunk = [0u8; 256];
-    let mut done = 0;
-    while done < len {
-        let n = (len - done).min(chunk.len());
-        let at = buf.checked_add(done as u64).ok_or(Errno::EFAULT)?;
-        uaccess::copy_in(&mut chunk[..n], at).map_err(|_| Errno::EFAULT)?;
-        crate::console::write_bytes(&chunk[..n]);
-        done += n;
-    }
-    Ok(nbyte)
-}
-
-/// `sysarch(op, parms)`: amd64's thread pointer (the FS base, which
-/// libc's start-up sets as the TLS base).
-#[cfg(target_arch = "x86_64")]
-fn sysarch(op: u64, parms: u64) -> SysResult {
-    use abi::sysarch::amd64;
-    let p = Process::current().ok_or(Errno::EINVAL)?;
-    let base = uaccess::UserPtr::<u64>::new(parms);
-    match op {
-        amd64::GET_FSBASE => base.write(&hal::user::tls()).map_err(|_| Errno::EFAULT)?,
-        amd64::SET_FSBASE | amd64::SET_TLSBASE => {
-            let v = base.read().map_err(|_| Errno::EFAULT)?;
-            if v >= crate::mm::space::USER_END {
-                return Err(Errno::EINVAL);
-            }
-            // SAFETY: the current thread is a user thread; the kernel does
-            // not use FS.
-            unsafe { hal::user::set_tls(v) };
-            if op == amd64::SET_TLSBASE {
-                p.set_tls_base(Some(v));
-            }
-        }
-        amd64::GET_TLSBASE => {
-            let v = p.tls_base().ok_or(Errno::ESRCH)?;
-            base.write(&v).map_err(|_| Errno::EFAULT)?;
-        }
-        amd64::DISABLE_TLSBASE => p.set_tls_base(None),
-        // GS bases need switching per thread first.
-        _ => return Err(Errno::EINVAL),
-    }
-    Ok(0)
-}
-
-/// `sysarch(op, parms)`: arm64 sets its thread pointer from user mode;
-/// its own operations are not in yet.
-#[cfg(target_arch = "aarch64")]
-fn sysarch(_op: u64, _parms: u64) -> SysResult {
-    Err(Errno::EINVAL)
 }
 
 /// The `kernel_hooks!` hook for a trap from user mode the VM did not

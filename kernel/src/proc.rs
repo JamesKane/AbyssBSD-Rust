@@ -3,23 +3,67 @@
 //! `struct proc`).
 //!
 //! So far a process has one thread, created in user mode at a given entry
-//! point, and an exit status its creator can wait for. `fork`, `exec`,
-//! process IDs, and the process tree come with P4.3.
+//! point, and an exit status its creator can wait for. It has a pid from
+//! the process table, the signal state system calls set (delivered from
+//! P4.4), and a randomized base for `mmap` placement. `fork` and the
+//! process tree come next.
 
 // The system calls' tests create processes; `exec` (P4.3) will too.
 #![cfg_attr(not(feature = "ktest"), allow(dead_code))]
 
-use alloc::sync::Arc;
+use alloc::collections::BTreeMap;
+use alloc::sync::{Arc, Weak};
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
+use abi::signal::{SIG_MAXSIG, Sigaction, Sigset};
 use sched::{Sleepable, WaitQueue};
+use sync::SpinLock;
 
 use crate::arch;
 use crate::mm::space::{self, AddressSpace};
 
+/// The highest pid (`PID_MAX`); allocation wraps to 2 past it.
+const PID_MAX: i32 = 99_999;
+
+/// Live processes by pid.
+static PROCS: SpinLock<BTreeMap<i32, Weak<Process>>> = SpinLock::new(BTreeMap::new());
+/// The pid handed out last.
+static LAST_PID: AtomicI32 = AtomicI32::new(0);
+
+/// The next free pid after the last one, recorded for `p`.
+fn alloc_pid(p: &Weak<Process>) -> i32 {
+    let mut procs = PROCS.lock();
+    let mut pid = LAST_PID.load(Ordering::Relaxed);
+    loop {
+        pid = if pid >= PID_MAX { 2 } else { pid + 1 };
+        if !procs.contains_key(&pid) {
+            break;
+        }
+    }
+    LAST_PID.store(pid, Ordering::Relaxed);
+    procs.insert(pid, Weak::clone(p));
+    pid
+}
+
+/// Signal dispositions and the blocked set (delivery comes with P4.4).
+pub(crate) struct Signals {
+    /// Indexed by signal number minus one.
+    pub(crate) actions: [Sigaction; SIG_MAXSIG as usize],
+    /// Blocked signals (per thread once processes have several).
+    pub(crate) mask: Sigset,
+    /// The `sigfastblock` word's address, 0 for none.
+    pub(crate) fastblock: u64,
+}
+
 /// A process.
 pub(crate) struct Process {
+    pid: i32,
     space: Arc<AddressSpace>,
+    /// Where `mmap` without an address starts looking (randomized).
+    mmap_base: u64,
+    pub(crate) signals: SpinLock<Signals>,
+    /// The `exterrctl` buffer, 0 for none.
+    pub(crate) exterr: AtomicU64,
     /// The exit status, valid once `exited` is set.
     status: AtomicI32,
     exited: AtomicBool,
@@ -34,13 +78,27 @@ struct Start {
     process: Arc<Process>,
     entry: u64,
     sp: u64,
+    arg: u64,
 }
 
 impl Process {
     /// A process running in `space`, with no threads yet.
     pub(crate) fn new(space: Arc<AddressSpace>) -> Arc<Self> {
-        Arc::new(Self {
+        let mut r = [0u8; 8];
+        // Unseeded (early boot) leaves the base unrandomized.
+        let _ = crate::random::fill(&mut r);
+        // 64 GiB up, plus up to 8 TiB in 2 MiB steps.
+        let mmap_base = (64 << 30) + (u64::from_le_bytes(r) % (1 << 22)) * (2 << 20);
+        Arc::new_cyclic(|me| Self {
+            pid: alloc_pid(me),
             space,
+            mmap_base,
+            signals: SpinLock::new(Signals {
+                actions: [Sigaction::default(); SIG_MAXSIG as usize],
+                mask: Sigset::default(),
+                fastblock: 0,
+            }),
+            exterr: AtomicU64::new(0),
             status: AtomicI32::new(0),
             exited: AtomicBool::new(false),
             waiters: WaitQueue::new(),
@@ -50,6 +108,14 @@ impl Process {
 
     pub(crate) fn space(&self) -> &Arc<AddressSpace> {
         &self.space
+    }
+
+    pub(crate) const fn pid(&self) -> i32 {
+        self.pid
+    }
+
+    pub(crate) const fn mmap_base(&self) -> u64 {
+        self.mmap_base
     }
 
     /// The TLS base `sysarch(AMD64_SET_TLSBASE)` recorded.
@@ -70,18 +136,39 @@ impl Process {
         sched::owner()?.downcast::<Self>().ok()
     }
 
-    /// Starts a thread in user mode at `entry` with stack pointer `sp`,
-    /// bound to `cpu` if given.
+    /// A new process running the memory-disk program at `path`, with
+    /// arguments `argv` and environment `envp`; its thread is bound to
+    /// `cpu` if given.
+    pub(crate) fn spawn(
+        s: &Sleepable,
+        path: &[u8],
+        argv: &[&[u8]],
+        envp: &[&[u8]],
+        cpu: Option<hal::CpuId>,
+    ) -> Result<Arc<Self>, abi::errno::Errno> {
+        use abi::errno::Errno;
+        let space = AddressSpace::new().map_err(|_| Errno::ENOMEM)?;
+        let image = crate::exec::load(s, &space, path, argv, envp)?;
+        let p = Self::new(space);
+        p.start(image.entry, image.sp, image.arg, cpu)
+            .map_err(|_| Errno::EAGAIN)?;
+        Ok(p)
+    }
+
+    /// Starts a thread in user mode at `entry` with stack pointer `sp` and
+    /// first argument `arg`, bound to `cpu` if given.
     pub(crate) fn start(
         self: &Arc<Self>,
         entry: u64,
         sp: u64,
+        arg: u64,
         cpu: Option<hal::CpuId>,
     ) -> Result<(), sched::SpawnError> {
         let start = Arc::new(Start {
             process: Arc::clone(self),
             entry,
             sp,
+            arg,
         });
         let arg = Arc::into_raw(start) as usize;
         let mut b = sched::Builder::new("user")
@@ -119,13 +206,19 @@ impl Process {
     }
 }
 
+impl Drop for Process {
+    fn drop(&mut self) {
+        PROCS.lock().remove(&self.pid);
+    }
+}
+
 /// A new user thread's first code: joins its process and leaves for user
 /// mode. Nothing on this stack outlives the jump.
 fn enter(_s: &Sleepable, arg: usize) -> ! {
     // SAFETY: `start` made `arg` with `Arc::into_raw` and handed it over.
     let start = unsafe { Arc::from_raw(arg as *const Start) };
     let process = Arc::clone(&start.process);
-    let frame = arch::user::user_frame(start.entry, start.sp, 0);
+    let frame = arch::user::user_frame(start.entry, start.sp, start.arg);
     drop(start);
     sched::set_address_space(Some(
         Arc::clone(process.space()) as Arc<dyn sched::AddressSpace>

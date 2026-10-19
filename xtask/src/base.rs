@@ -49,6 +49,22 @@ pub(crate) fn dir(arch: Arch) -> PathBuf {
 pub(crate) fn cmd(mut args: Args) -> Result<()> {
     let arches = Arch::from_args(&mut args)?;
     args.finish()?;
+    if !cfg!(target_os = "freebsd") {
+        // Elsewhere, copy the memory-disk images the server built.
+        for arch in arches {
+            let local = local_rescue_image(arch);
+            fs::create_dir_all(local.parent().ok_or("no parent")?)?;
+            let remote = format!(
+                "{}:abyss/dist/{RELEASE}/{}/rescue.tar",
+                crate::remote::host(),
+                arch.freebsd_name()
+            );
+            util::run(Command::new("scp").arg("-q").arg(&remote).arg(&local))
+                .map_err(|e| format!("{e} (run `cargo xtask --remote fetch-base` first)"))?;
+            println!("fetch-base: {arch}: {}", local.display());
+        }
+        return Ok(());
+    }
     for arch in arches {
         let root = root(arch)?;
         let tar = rescue_image(arch)?;
@@ -107,6 +123,26 @@ pub(crate) fn root(arch: Arch) -> Result<PathBuf> {
     )?;
     fs::rename(&tmp, &root)?;
     Ok(root)
+}
+
+/// Where a non-FreeBSD host keeps its copy of `arch`'s `rescue.tar`.
+fn local_rescue_image(arch: Arch) -> PathBuf {
+    util::root()
+        .join("build/dist")
+        .join(RELEASE)
+        .join(arch.freebsd_name())
+        .join("rescue.tar")
+}
+
+/// `arch`'s memory-disk image, if it has been fetched (on the server, by
+/// `fetch-base`; elsewhere, copied by it).
+pub(crate) fn existing_rescue_image(arch: Arch) -> Option<PathBuf> {
+    let p = if cfg!(target_os = "freebsd") {
+        dir(arch).join("rescue.tar")
+    } else {
+        local_rescue_image(arch)
+    };
+    p.exists().then_some(p)
 }
 
 /// `/rescue` as a ustar archive: the memory-disk image the loader preloads

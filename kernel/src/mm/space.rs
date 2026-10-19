@@ -80,12 +80,25 @@ impl PageOps for KernelPages {
         Some(pfn)
     }
 
+    fn alloc_filled(&self, fill: &mut dyn FnMut(&mut [u8])) -> Option<Pfn> {
+        let pa = alloc_pages(Order::ZERO)?;
+        let pfn = Pfn::containing(pa);
+        // SAFETY: a fresh page, reached through the DMAP, used by no one.
+        fill(unsafe { core::slice::from_raw_parts_mut(Self::page(pfn), PAGE_BYTES) });
+        Some(pfn)
+    }
+
     fn free(&self, pfn: Pfn) {
         free_pages(pfn.addr(), Order::ZERO);
     }
 }
 
 static PAGES: KernelPages = KernelPages;
+
+/// The physical page operations `vm` objects use.
+pub(crate) fn page_ops() -> &'static dyn PageOps {
+    &PAGES
+}
 
 /// The page-table attributes for a mapping with rights `prot`.
 const fn attrs(prot: Prot) -> Attrs {
@@ -123,6 +136,38 @@ fn free_asid(asid: u16) {
         // No CPU may keep translations tagged with it for the next owner.
         arch::user::flush_asid(asid);
         ASIDS.lock()[usize::from(asid / 64)] &= !(1 << (asid % 64));
+    }
+}
+
+/// An anonymous mapping request.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Anon {
+    /// Exactly here, replacing what is there (`MAP_FIXED`).
+    pub(crate) fixed: Option<VirtAddr>,
+    /// With `fixed`, fail rather than replace (`MAP_EXCL`).
+    pub(crate) exclusive: bool,
+    /// Otherwise, the lowest free range at or above this.
+    pub(crate) hint: VirtAddr,
+    pub(crate) len: u64,
+    /// A power of two of at least a page.
+    pub(crate) align: u64,
+    pub(crate) prot: Prot,
+    pub(crate) max_prot: Prot,
+    pub(crate) inherit: vm::map::Inherit,
+}
+
+impl Default for Anon {
+    fn default() -> Self {
+        Self {
+            fixed: None,
+            exclusive: false,
+            hint: VirtAddr::new(USER_START),
+            len: 0,
+            align: PAGE_SIZE,
+            prot: Prot::RW,
+            max_prot: Prot::ALL,
+            inherit: vm::map::Inherit::Copy,
+        }
     }
 }
 
@@ -225,20 +270,98 @@ impl AddressSpace {
         len: u64,
         prot: Prot,
     ) -> Result<VirtAddr, SpaceError> {
+        self.map_anon(
+            s,
+            &Anon {
+                fixed,
+                hint,
+                len,
+                prot,
+                ..Anon::default()
+            },
+        )
+    }
+
+    /// Maps anonymous memory as `a` says (`mmap` with `MAP_ANON`).
+    pub(crate) fn map_anon(&self, s: &Sleepable, a: &Anon) -> Result<VirtAddr, SpaceError> {
         let mut map = self.map.lock(s);
-        let start = match fixed {
+        let start = match a.fixed {
             Some(at) => {
-                let end = at.checked_add(len).ok_or(MapError::OutOfRange)?;
+                let end = at.checked_add(a.len).ok_or(MapError::OutOfRange)?;
+                if a.exclusive && !map.is_free(&(at..end)) {
+                    return Err(MapError::Overlap.into());
+                }
                 self.unmap_locked(&mut map, at..end)?;
                 at
             }
             None => map
-                .find_space(len, PAGE_SIZE, hint)
+                .find_space(a.len, a.align.max(PAGE_SIZE), a.hint)
                 .ok_or(MapError::NoSpace)?,
         };
-        let end = start.checked_add(len).ok_or(MapError::OutOfRange)?;
-        map.insert(Entry::anonymous(start..end, prot, Prot::ALL))?;
+        let end = start.checked_add(a.len).ok_or(MapError::OutOfRange)?;
+        let entry = Entry::anonymous(start..end, a.prot, a.max_prot).with_inherit(a.inherit);
+        map.insert(entry)?;
         Ok(start)
+    }
+
+    /// Sets what a child inherits of `range` (`minherit`).
+    pub(crate) fn set_inherit(
+        &self,
+        s: &Sleepable,
+        range: core::ops::Range<VirtAddr>,
+        inherit: vm::map::Inherit,
+    ) -> Result<(), SpaceError> {
+        self.map.lock(s).set_inherit(range, inherit)?;
+        Ok(())
+    }
+
+    /// Maps `object` from page `offset` on over `range`, privately (a
+    /// file's text or data: shared until written, then copied).
+    pub(crate) fn map_private(
+        &self,
+        s: &Sleepable,
+        range: core::ops::Range<VirtAddr>,
+        object: Arc<vm::object::Object>,
+        offset: u64,
+        prot: Prot,
+    ) -> Result<(), SpaceError> {
+        let mut map = self.map.lock(s);
+        map.insert(Entry::private(range, prot, Prot::ALL, object, offset))?;
+        Ok(())
+    }
+
+    /// Writes `bytes` at `va` through the kernel, faulting the pages in for
+    /// writing as user mode would (so copy-on-write applies), whether or
+    /// not this space is loaded anywhere. For building a new image.
+    pub(crate) fn poke(&self, s: &Sleepable, va: VirtAddr, bytes: &[u8]) -> Result<(), FaultError> {
+        let mut done = 0;
+        while done < bytes.len() {
+            let at = va.get() + done as u64;
+            let in_page = (at % PAGE_SIZE) as usize;
+            let n = (PAGE_BYTES - in_page).min(bytes.len() - done);
+            let mut map = self.map.lock(s);
+            let r = fault::resolve(&mut map, VirtAddr::new(at), Access::Write)?;
+            let replaced = self
+                .tables
+                .lock()
+                .set(&mut Frames, r.page, r.pfn.addr(), attrs(r.prot))
+                .map_err(|_| FaultError::OutOfMemory)?;
+            if replaced.is_some() {
+                self.flush(r.page, PAGE_SIZE);
+            }
+            // SAFETY: the page is this space's (just resolved for writing,
+            // under the map lock), reached through the DMAP.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    bytes[done..].as_ptr(),
+                    KernelPages::page(r.pfn).add(in_page),
+                    n,
+                );
+            }
+            drop(map);
+            done += n;
+        }
+        Ok(())
     }
 
     fn unmap_locked(

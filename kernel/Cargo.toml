@@ -35,6 +35,7 @@ watchdog = { path = "../sys/watchdog" }
 demangle = { path = "../lib/demangle" }
 efi = { path = "../boot/efi" }
 elf = { path = "../lib/elf" }
+ustar = { path = "../lib/ustar" }
 fb-console = { path = "../drivers/fb-console" }
 hal = { path = "../arch/hal" }
 irq = { path = "../sys/irq" }

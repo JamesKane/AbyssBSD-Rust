@@ -29,10 +29,12 @@ mod boot;
 mod devices;
 mod efirtc;
 mod errata;
+mod exec;
 mod firmware;
 mod intc;
 #[cfg(target_arch = "aarch64")]
 mod its;
+mod md;
 mod mm;
 mod panic;
 mod pci;
@@ -84,6 +86,7 @@ fn kmain(boot_info: PhysAddr) -> ! {
     }
     kprintln!("command line: {:?}", boot::cmdline());
     symbols::init(info);
+    md::init(info);
 
     let tables = mm::init(info);
     firmware::init(info, tables.firmware_root);

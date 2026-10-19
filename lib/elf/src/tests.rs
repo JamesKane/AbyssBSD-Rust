@@ -198,3 +198,59 @@ fn rejects_garbage() {
         }
     }
 }
+
+/// A FreeBSD-branded executable header with one `PT_NOTE` holding the ABI
+/// tag (name "FreeBSD", type 1, the 32-bit `__FreeBSD_version`) and a
+/// second note after it.
+#[test]
+fn branding_and_notes() {
+    let mut b = vec![0u8; 0x200];
+    put(&mut b, 0, b"\x7fELF\x02\x01\x01\x09");
+    put(&mut b, 16, &2u16.to_le_bytes()); // ET_EXEC
+    put(&mut b, 18, &62u16.to_le_bytes());
+    put(&mut b, 20, &1u32.to_le_bytes());
+    put(&mut b, 32, &64u64.to_le_bytes());
+    put(&mut b, 48, &0x1234u32.to_le_bytes()); // e_flags
+    put(&mut b, 54, &56u16.to_le_bytes());
+    put(&mut b, 56, &1u16.to_le_bytes());
+    // PT_NOTE at 0x100.
+    put(&mut b, 64, &4u32.to_le_bytes());
+    put(&mut b, 64 + 8, &0x100u64.to_le_bytes());
+    let mut notes = Vec::new();
+    for (name, kind, desc) in [
+        (&b"FreeBSD\0"[..], 1u32, &1_501_000u32.to_le_bytes()[..]),
+        (b"X\0", 7, b"abcde"),
+    ] {
+        notes.extend_from_slice(&u32::try_from(name.len()).unwrap().to_le_bytes());
+        notes.extend_from_slice(&u32::try_from(desc.len()).unwrap().to_le_bytes());
+        notes.extend_from_slice(&kind.to_le_bytes());
+        notes.extend_from_slice(name);
+        notes.resize(notes.len().next_multiple_of(4), 0);
+        notes.extend_from_slice(desc);
+        notes.resize(notes.len().next_multiple_of(4), 0);
+    }
+    put(&mut b, 64 + 32, &(notes.len() as u64).to_le_bytes());
+    put(&mut b, 64 + 40, &(notes.len() as u64).to_le_bytes());
+    put(&mut b, 0x100, &notes);
+    let elf = Elf::parse(&b).unwrap();
+    assert_eq!(
+        (elf.os_abi, elf.flags, elf.file_type),
+        (9, 0x1234, FileType::Executable)
+    );
+    assert_eq!(elf.program_headers(), (64, 1));
+    let seg = elf.segments().next().unwrap().unwrap();
+    assert_eq!(seg.kind, SegmentKind::Note);
+    let found: Vec<_> = elf.notes(&seg).unwrap().collect();
+    assert_eq!(found.len(), 2);
+    assert_eq!((found[0].name, found[0].kind), (&b"FreeBSD"[..], 1));
+    assert_eq!(found[0].desc, 1_501_000u32.to_le_bytes());
+    assert_eq!(
+        (found[1].name, found[1].kind, found[1].desc),
+        (&b"X"[..], 7, &b"abcde"[..])
+    );
+    // A truncated note ends the list instead of failing.
+    let short = Notes {
+        data: &notes[..notes.len() - 6],
+    };
+    assert_eq!(short.count(), 1);
+}

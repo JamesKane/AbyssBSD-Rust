@@ -18,7 +18,7 @@
 use alloc::sync::Arc;
 
 use crate::map::{Prot, VmMap};
-use crate::object::{Found, Object};
+use crate::object::{Found, LookupError, Object};
 use crate::{PAGE_SIZE, Pfn, VirtAddr};
 
 /// The kind of access that faulted.
@@ -48,6 +48,8 @@ pub enum FaultError {
     Protection,
     /// No memory for the page; the caller may wait and retry.
     OutOfMemory,
+    /// Past the end of the object a file mapping reaches (`SIGBUS`).
+    PastEnd,
 }
 
 /// What to map.
@@ -86,7 +88,11 @@ pub fn resolve(map: &mut VmMap, va: VirtAddr, access: Access) -> Result<Resolved
     }
     let index = entry.index_of(page);
     let read_only = entry.prot.without(Prot::WRITE);
-    let (pfn, prot) = match object.lookup(index) {
+    let found = object.lookup(index).map_err(|e| match e {
+        LookupError::OutOfMemory => FaultError::OutOfMemory,
+        LookupError::PastEnd => FaultError::PastEnd,
+    })?;
+    let (pfn, prot) = match found {
         Found::Top(pfn) if entry.needs_copy => (pfn, read_only),
         Found::Top(pfn) => (pfn, entry.prot),
         Found::Backing(pfn) if write => (

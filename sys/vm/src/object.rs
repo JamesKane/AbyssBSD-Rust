@@ -13,6 +13,11 @@
 //! other sharers exited or wrote their own copies), [`Object::collapse`]
 //! folds it into the shadow, so chains do not grow with every `fork`.
 //!
+//! An object may instead have a *pager*, which supplies its pages: a file
+//! (FreeBSD's vnode object). Its pages are filled on first touch and kept,
+//! shared by every mapping of the file; private mappings shadow it as
+//! usual. A pager object has a size, and has no backing object.
+//!
 //! Each object has its own spin lock, held for page lookups and inserts.
 //! Locks are taken top-down along a chain (shadow before backing), never
 //! the other way.
@@ -34,8 +39,29 @@ pub trait PageOps: Sync {
     /// A new page holding a copy of `from`, or `None` when memory is
     /// exhausted.
     fn alloc_copy(&self, from: Pfn) -> Option<Pfn>;
+    /// A new page that `fill` writes (all of it), or `None` when memory is
+    /// exhausted.
+    fn alloc_filled(&self, fill: &mut dyn FnMut(&mut [u8])) -> Option<Pfn>;
     /// Returns a page that no page table maps any more.
     fn free(&self, pfn: Pfn);
+}
+
+/// Where a pager object's pages come from.
+pub trait Pager: Send + Sync {
+    /// The object's size in pages; a page past it does not exist.
+    fn size(&self) -> PageIndex;
+    /// Writes page `index`'s contents into `page` (a whole page, zero
+    /// past the end of the data).
+    fn fill(&self, index: PageIndex, page: &mut [u8]);
+}
+
+/// Why a page lookup found nothing to map.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LookupError {
+    /// No memory to fill a pager's page.
+    OutOfMemory,
+    /// Past the end of a pager object (`SIGBUS`).
+    PastEnd,
 }
 
 /// A page index within an object.
@@ -49,6 +75,7 @@ pub struct Object {
     /// reaches this object, so unmapping a range may free its pages
     /// (`OBJ_ONEMAPPING`). Cleared for good once shared.
     one_mapping: AtomicBool,
+    pager: Option<Arc<dyn Pager>>,
 }
 
 struct Inner {
@@ -80,6 +107,7 @@ impl Object {
             }),
             pages_ops: ops,
             one_mapping: AtomicBool::new(true),
+            pager: None,
         })
     }
 
@@ -94,6 +122,22 @@ impl Object {
             }),
             pages_ops: ops,
             one_mapping: AtomicBool::new(true),
+            pager: None,
+        })
+    }
+
+    /// An object whose pages `pager` supplies. It counts as shared from
+    /// the start: unmapping never frees its pages, which stay cached.
+    #[must_use]
+    pub fn with_pager(ops: &'static dyn PageOps, pager: Arc<dyn Pager>) -> Arc<Self> {
+        Arc::new(Self {
+            inner: SpinLock::new(Inner {
+                pages: BTreeMap::new(),
+                backing: None,
+            }),
+            pages_ops: ops,
+            one_mapping: AtomicBool::new(false),
+            pager: Some(pager),
         })
     }
 
@@ -108,28 +152,49 @@ impl Object {
         self.one_mapping.store(false, Ordering::Relaxed);
     }
 
-    /// Finds page `index` along the chain.
-    pub fn lookup(&self, index: PageIndex) -> Found {
-        let inner = self.inner.lock();
-        if let Some(&pfn) = inner.pages.get(&index) {
-            return Found::Top(pfn);
+    /// Finds page `index` along the chain, filling it from a pager object
+    /// that should have it.
+    pub fn lookup(&self, index: PageIndex) -> Result<Found, LookupError> {
+        if let Some(pfn) = self.page_or_fill(index)? {
+            return Ok(Found::Top(pfn));
         }
-        let mut next = inner
-            .backing
-            .as_ref()
-            .map(|(o, off)| (Arc::clone(o), index + off));
-        drop(inner);
-        while let Some((object, index)) = next {
-            let inner = object.inner.lock();
-            if let Some(&pfn) = inner.pages.get(&index) {
-                return Found::Backing(pfn);
+        let mut next = self.backing();
+        let mut index = index;
+        while let Some((object, off)) = next {
+            index += off;
+            if let Some(pfn) = object.page_or_fill(index)? {
+                return Ok(Found::Backing(pfn));
             }
-            next = inner
-                .backing
-                .as_ref()
-                .map(|(o, off)| (Arc::clone(o), index + off));
+            next = object.backing();
         }
-        Found::Absent
+        Ok(Found::Absent)
+    }
+
+    /// This object's page `index`: present, or filled now if this is a
+    /// pager object.
+    fn page_or_fill(&self, index: PageIndex) -> Result<Option<Pfn>, LookupError> {
+        if let Some(&pfn) = self.inner.lock().pages.get(&index) {
+            return Ok(Some(pfn));
+        }
+        let Some(pager) = &self.pager else {
+            return Ok(None);
+        };
+        if index >= pager.size() {
+            return Err(LookupError::PastEnd);
+        }
+        // Fill outside the lock; a racing fill of the same page loses.
+        let new = self
+            .pages_ops
+            .alloc_filled(&mut |page| pager.fill(index, page))
+            .ok_or(LookupError::OutOfMemory)?;
+        let mut inner = self.inner.lock();
+        if let Some(&pfn) = inner.pages.get(&index) {
+            drop(inner);
+            self.pages_ops.free(new);
+            return Ok(Some(pfn));
+        }
+        inner.pages.insert(index, new);
+        Ok(Some(new))
     }
 
     /// The page at `index` of this object (not the chain), creating it if
@@ -212,7 +277,9 @@ impl Object {
             // Ours is the only reference: no other map or shadow can reach
             // it, or take a new reference, since all of those go through
             // an object that holds one.
-            if Arc::strong_count(&backing) != 1 {
+            // A pager object's absent pages are its pager's, not zeros: it
+            // never folds into a shadow.
+            if Arc::strong_count(&backing) != 1 || backing.pager.is_some() {
                 inner.backing = Some((backing, offset));
                 return;
             }

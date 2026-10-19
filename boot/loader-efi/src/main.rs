@@ -37,6 +37,7 @@ static SYSTEM_TABLE: AtomicPtr<raw::SystemTable> = AtomicPtr::new(core::ptr::nul
 
 const KERNEL_PATH: &str = "EFI/ABYSS/KERNEL";
 const CMDLINE_PATH: &str = "EFI/ABYSS/CMDLINE";
+const MD_PATH: &str = "EFI/ABYSS/MD";
 
 /// UEFI memory types the loader tags its allocations with, so the final
 /// memory map tells the kernel what each region holds.
@@ -133,6 +134,18 @@ fn boot(image: Handle, st: SystemTable) -> Result<core::convert::Infallible, Err
         Err(_) => Vec::new(),
     };
     let file = kernel::read_file(&st, &root, KERNEL_PATH)?;
+    // The memory disk is optional.
+    let md = kernel::read_file(&st, &root, MD_PATH)
+        .ok()
+        .and_then(|f| bootproto::PhysRange::from_len(f.phys, f.len as u64));
+    if let Some(md) = &md {
+        let _ = writeln!(
+            con,
+            "loader: memory disk {} KiB at {:#x}",
+            (md.end.get() - md.start.get()) / 1024,
+            md.start
+        );
+    }
     let log = logring::setup(&st, &root);
     match &log {
         Some((ring, outcome)) => {
@@ -229,6 +242,7 @@ fn boot(image: Handle, st: SystemTable) -> Result<core::convert::Infallible, Err
             symbols: kernel.symbols,
             entropy,
             log: log.map(|(ring, _)| ring),
+            md,
         },
     );
     // SAFETY: the entry point follows the `bootproto` calling contract, the

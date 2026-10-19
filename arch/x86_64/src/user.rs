@@ -68,8 +68,12 @@ pub fn init_cpu() {
     // selectors the GDT has (`sysret` derives user CS/SS from STAR).
     unsafe {
         crate::cpu::set_cr4(cr4);
-        let star = (u64::from(crate::gdt::USER_DS & !3) - 8) << 48
-            | u64::from(crate::gdt::KERNEL_CS) << 32;
+        // `sysret` loads CS from STAR[63:48] + 16 and SS from it + 8. On
+        // AMD it takes their RPL from the field too, so the field carries
+        // RPL 3 (with RPL 0, user code ran with SS 0x18 and the next
+        // trap's `iretq` faulted).
+        let star =
+            (u64::from(crate::gdt::USER_DS) - 8) << 48 | u64::from(crate::gdt::KERNEL_CS) << 32;
         crate::cpu::wrmsr(MSR_STAR, star);
         crate::cpu::wrmsr(MSR_LSTAR, abyss_syscall_entry as *const () as u64);
         crate::cpu::wrmsr(MSR_SFMASK, SYSCALL_MASK);

@@ -57,6 +57,7 @@ pub(crate) struct Fields {
     pub(crate) symbols: Option<bootproto::Symbols>,
     pub(crate) entropy: bootproto::Entropy,
     pub(crate) log: Option<bootproto::LogRing>,
+    pub(crate) md: Option<bootproto::PhysRange>,
 }
 
 impl Handoff {
@@ -96,6 +97,7 @@ impl Handoff {
             symbols: f.symbols.into(),
             entropy: f.entropy,
             log: f.log.into(),
+            md: f.md.into(),
         };
         // SAFETY: `prepare` reserved `INFO_SPACE` bytes at `info`, suitably
         // aligned (page start).

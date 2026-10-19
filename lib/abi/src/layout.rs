@@ -66,6 +66,10 @@ pub const CONSTANTS: &[&[ConstValue]] = &[
     BUS_CONSTANTS,
     crate::errno::CONSTANTS,
     crate::sysarch::CONSTANTS,
+    crate::exec::CONSTANTS,
+    crate::mman::CONSTANTS,
+    crate::thr::CONSTANTS,
+    crate::signal::CONSTANTS,
 ];
 
 const fn bus_const(c_name: &'static str, value: i64) -> ConstValue {
@@ -160,6 +164,20 @@ pub static LAYOUTS: &[StructLayout] = &[
         st_gen => "st_gen",
         st_filerev => "st_filerev",
         st_spare => "st_spare",
+    }),
+    layout!(crate::exec::PsStrings, "struct ps_strings", ["sys/types.h", "sys/exec.h"], All, {
+        ps_argvstr => "ps_argvstr",
+        ps_nargvstr => "ps_nargvstr",
+        ps_envstr => "ps_envstr",
+        ps_nenvstr => "ps_nenvstr",
+    }),
+    layout!(crate::thr::Rtprio, "struct rtprio", ["sys/types.h", "sys/rtprio.h"], All, {
+        type_ => "type",
+        prio => "prio",
+    }),
+    layout!(crate::uio::Iovec, "struct iovec", ["sys/types.h", "sys/uio.h"], All, {
+        iov_base => "iov_base",
+        iov_len => "iov_len",
     }),
     layout!(signal::Sigset, "sigset_t", ["sys/types.h", "signal.h"], All, {
         bits => "__bits",

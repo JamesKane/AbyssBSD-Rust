@@ -35,7 +35,7 @@ pub use addr::{PhysAddr, PhysRange, VirtAddr};
 /// `"ABYSSBI\0"`, little-endian.
 pub const MAGIC: u64 = u64::from_le_bytes(*b"ABYSSBI\0");
 /// The handoff version this crate describes.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// A C-layout optional value.
 ///
@@ -186,6 +186,9 @@ pub struct BootInfo {
     pub entropy: Entropy,
     /// The persistent log ring, formatted and empty.
     pub log: Opt<LogRing>,
+    /// The memory disk (`EFI/ABYSS/MD` on the ESP, a ustar archive), in
+    /// [`MemoryKind::BootData`], if there was one.
+    pub md: Opt<PhysRange>,
 }
 
 /// The persistent log ring (format: `lib/logring`), in memory of kind

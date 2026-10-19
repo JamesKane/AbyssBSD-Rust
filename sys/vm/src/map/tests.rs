@@ -68,6 +68,13 @@ impl PageOps for Pages {
         Some(self.alloc(v))
     }
 
+    fn alloc_filled(&self, fill: &mut dyn FnMut(&mut [u8])) -> Option<Pfn> {
+        let mut page = std::vec![0u8; 4096];
+        fill(&mut page);
+        let v = u64::from_le_bytes(page[..8].try_into().unwrap());
+        Some(self.alloc(v))
+    }
+
     fn free(&self, pfn: Pfn) {
         assert!(
             self.state.lock().unwrap().1.remove(&pfn.0).is_some(),
@@ -428,4 +435,109 @@ fn a_long_chain_drops_without_recursing() {
     drop(keep);
     drop(p);
     assert_eq!(pages.live(), 0);
+}
+
+/// A file of `pages` pages whose page `i` holds `1000 + i`, counting fills.
+struct File {
+    pages: u64,
+    fills: std::sync::atomic::AtomicU64,
+}
+
+impl crate::object::Pager for File {
+    fn size(&self) -> u64 {
+        self.pages
+    }
+
+    fn fill(&self, index: u64, page: &mut [u8]) {
+        self.fills
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        page.fill(0);
+        page[..8].copy_from_slice(&(1000 + index).to_le_bytes());
+    }
+}
+
+impl Proc {
+    /// Maps `file` pages `[offset, offset + n)` at page `first`, private.
+    fn map_file(
+        &mut self,
+        first: u64,
+        n: u64,
+        file: &Arc<crate::object::Object>,
+        offset: u64,
+        prot: Prot,
+    ) {
+        self.map
+            .insert(Entry::private(
+                range(first, n),
+                prot,
+                Prot::ALL,
+                Arc::clone(file),
+                offset,
+            ))
+            .unwrap();
+    }
+}
+
+#[test]
+fn file_pages_are_filled_once_and_shared() {
+    let pages = Pages::new();
+    let file = Arc::new(File {
+        pages: 4,
+        fills: std::sync::atomic::AtomicU64::new(0),
+    });
+    let object = crate::object::Object::with_pager(
+        pages,
+        Arc::clone(&file) as Arc<dyn crate::object::Pager>,
+    );
+    let mut a = Proc::new(pages);
+    let mut b = Proc::new(pages);
+    // Text: read-only, at file page 1.
+    a.map_file(0, 2, &object, 1, Prot::READ.union(Prot::EXEC));
+    b.map_file(8, 2, &object, 1, Prot::READ.union(Prot::EXEC));
+    assert_eq!(a.read(0), Ok(1001));
+    assert_eq!(b.read(8), Ok(1001));
+    assert_eq!(a.ptes[&0].0, b.ptes[&8].0, "one cached page");
+    assert_eq!(file.fills.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(a.write(0, 5), Err(FaultError::Protection));
+
+    // Data: private and writable; a write copies, the file page stays.
+    a.map_file(4, 3, &object, 2, Prot::RW);
+    assert_eq!(a.read(4), Ok(1002));
+    a.write(4, 7).unwrap();
+    assert_eq!(a.read(4), Ok(7));
+    assert_eq!(b.read(9), Ok(1002));
+    // Page 6 maps file page 4: past the end.
+    assert_eq!(a.read(6), Err(FaultError::PastEnd));
+
+    // Unmapping never frees cached file pages; the object's end does.
+    a.munmap(0, 8);
+    b.munmap(8, 2);
+    assert_eq!(pages.live(), 2);
+    drop(object);
+    drop((a, b));
+    assert_eq!(pages.live(), 0);
+}
+
+#[test]
+fn fork_of_a_file_mapping_copies_on_write() {
+    let pages = Pages::new();
+    let file = Arc::new(File {
+        pages: 2,
+        fills: std::sync::atomic::AtomicU64::new(0),
+    });
+    let object = crate::object::Object::with_pager(pages, file as Arc<dyn crate::object::Pager>);
+    let mut p = Proc::new(pages);
+    p.map_file(0, 2, &object, 0, Prot::RW);
+    p.write(0, 1).unwrap();
+    for i in 1..6 {
+        let mut c = p.fork();
+        assert_eq!(c.read(0), Ok(i));
+        assert_eq!(c.read(1), Ok(1001));
+        c.write(1, 9).unwrap();
+        drop(c);
+        p.write(0, i + 1).unwrap();
+        // The file object never folds into the private copy.
+        assert!(p.depth(0) <= 2, "depth {}", p.depth(0));
+    }
+    assert_eq!(p.read(1), Ok(1001));
 }

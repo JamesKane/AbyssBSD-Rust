@@ -350,15 +350,26 @@ extern "C" fn dispatch(frame: &mut TrapFrame) {
         frame.rip = fixup;
         return;
     }
-    let report = TrapReport {
+    let mut report = TrapReport {
         frame: *frame,
         trap,
         cr3: crate::cpu::cr3(),
+        user_gs: false,
     };
     if user {
         // SAFETY: defined by the kernel through `kernel_hooks!`.
         unsafe { crate::abyss_user_trap(&report, frame) };
         return;
+    }
+    // A kernel-mode trap should run on the kernel's GS; if it does not (a
+    // bug on a user-mode boundary), fix it so the report can be printed,
+    // and say so.
+    // SAFETY: reading GS_BASE; kernel bases are upper-half addresses.
+    if unsafe { crate::cpu::rdmsr(crate::cpu::MSR_GS_BASE) } >> 63 == 0 {
+        // SAFETY: GS holds a user base, so the kernel's is the swapped
+        // one; nothing returns to the trapped code.
+        unsafe { asm!("swapgs", options(nostack)) };
+        report.user_gs = true;
     }
     // SAFETY: defined by the kernel through `kernel_hooks!`.
     unsafe { crate::abyss_fatal_trap(&report) }
@@ -507,6 +518,9 @@ pub struct TrapReport {
     pub trap: Trap,
     /// The page-table root at the time.
     pub cr3: u64,
+    /// The trap came from kernel mode but GS held the user's base (a bug
+    /// on a user-mode boundary); the handler swapped it back.
+    pub user_gs: bool,
 }
 
 impl TrapReport {
@@ -532,6 +546,9 @@ impl fmt::Display for TrapReport {
             r.error,
             crate::gdt::cpu_id()
         )?;
+        if self.user_gs {
+            writeln!(f, "  (in kernel mode with the user's GS)")?;
+        }
         let regs = [
             ("rax", r.rax),
             ("rbx", r.rbx),

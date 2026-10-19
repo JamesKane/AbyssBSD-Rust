@@ -89,6 +89,10 @@ pub struct Elf<'a> {
     pub machine: Machine,
     /// `e_entry`.
     pub entry: u64,
+    /// `EI_OSABI`.
+    pub os_abi: u8,
+    /// `e_flags`.
+    pub flags: u32,
     phoff: usize,
     phnum: usize,
     shoff: usize,
@@ -127,6 +131,8 @@ impl<'a> Elf<'a> {
             file_type,
             machine: Machine::from_raw(u16_at(data, 18)?),
             entry: u64_at(data, 24)?,
+            os_abi: read::<1>(data, 7)?[0],
+            flags: u32_at(data, 48)?,
             phoff: usize_from(u64_at(data, 32)?)?,
             phnum,
             shoff: usize_from(u64_at(data, 40)?)?,
@@ -148,6 +154,19 @@ impl<'a> Elf<'a> {
             return Err(Error::Truncated);
         }
         Ok(end)
+    }
+
+    /// The program header table's file offset and entry count.
+    #[must_use]
+    pub const fn program_headers(&self) -> (u64, usize) {
+        (self.phoff as u64, self.phnum)
+    }
+
+    /// The notes in a `PT_NOTE` segment (malformed ones end the list).
+    pub fn notes(&self, s: &Segment) -> Result<Notes<'a>, Error> {
+        Ok(Notes {
+            data: self.segment_data(s)?,
+        })
     }
 
     /// The whole file.
@@ -287,6 +306,45 @@ pub(crate) fn cstr(table: &[u8], off: u32) -> Result<&[u8], Error> {
     Ok(&rest[..len])
 }
 
+/// One ELF note.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Note<'a> {
+    /// The owner, without its NUL.
+    pub name: &'a [u8],
+    /// `n_type`.
+    pub kind: u32,
+    pub desc: &'a [u8],
+}
+
+/// The notes of a segment.
+#[derive(Clone, Debug)]
+pub struct Notes<'a> {
+    data: &'a [u8],
+}
+
+impl<'a> Iterator for Notes<'a> {
+    type Item = Note<'a>;
+
+    fn next(&mut self) -> Option<Note<'a>> {
+        let b = self.data;
+        let namesz = usize::try_from(u32_at(b, 0).ok()?).ok()?;
+        let descsz = usize::try_from(u32_at(b, 4).ok()?).ok()?;
+        let kind = u32_at(b, 8).ok()?;
+        // Name and descriptor are each padded to 4 bytes.
+        let name_end = 12usize.checked_add(namesz)?;
+        let desc_at = 12 + namesz.next_multiple_of(4);
+        let desc_end = desc_at.checked_add(descsz)?;
+        let name = b.get(12..name_end)?;
+        let desc = b.get(desc_at..desc_end)?;
+        self.data = b.get(desc_end.next_multiple_of(4).min(b.len())..)?;
+        Some(Note {
+            name: name.strip_suffix(&[0]).unwrap_or(name),
+            kind,
+            desc,
+        })
+    }
+}
+
 /// `p_type`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SegmentKind {
@@ -296,6 +354,10 @@ pub enum SegmentKind {
     Dynamic,
     /// `PT_INTERP`.
     Interp,
+    /// `PT_NOTE`.
+    Note,
+    /// `PT_PHDR`.
+    Phdr,
     /// `PT_TLS`.
     Tls,
     /// `PT_GNU_RELRO`.
@@ -344,6 +406,8 @@ impl Segment {
                 1 => SegmentKind::Load,
                 2 => SegmentKind::Dynamic,
                 3 => SegmentKind::Interp,
+                4 => SegmentKind::Note,
+                6 => SegmentKind::Phdr,
                 7 => SegmentKind::Tls,
                 0x6474_e551 => SegmentKind::GnuStack,
                 0x6474_e552 => SegmentKind::GnuRelro,

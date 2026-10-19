@@ -262,6 +262,7 @@ dependencies = [
  "sysctl",
  "uart-16550",
  "uart-pl011",
+ "ustar",
  "virtio-random",
  "vm",
  "watchdog",
@@ -413,6 +414,10 @@ version = "0.0.0"
 dependencies = [
  "regs",
 ]
+
+[[package]]
+name = "ustar"
+version = "0.0.0"
 
 [[package]]
 name = "virtio"

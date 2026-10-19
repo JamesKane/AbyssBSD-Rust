@@ -748,6 +748,20 @@ mod tests {
     }
 
     #[test]
+    fn canonical_ranges() {
+        use crate::aarch64::Aarch64;
+        use crate::x86_64::X86_64;
+        let top_user = VirtAddr::new(0x0000_ffff_ffff_f000);
+        assert!(Aarch64::is_canonical(top_user));
+        assert!(!X86_64::is_canonical(top_user));
+        assert!(X86_64::is_canonical(VirtAddr::new(0x0000_7fff_ffff_f000)));
+        assert!(Aarch64::is_canonical(VirtAddr::new(0xffff_0000_0000_0000)));
+        assert!(!Aarch64::is_canonical(VirtAddr::new(0x0001_0000_0000_0000)));
+        assert!(X86_64::is_canonical(VirtAddr::new(0xffff_8000_0000_0000)));
+        assert!(!X86_64::is_canonical(VirtAddr::new(0xffff_0000_0000_0000)));
+    }
+
+    #[test]
     fn user_tables_both_formats() {
         user_tables::<crate::x86_64::X86_64>();
         user_tables::<crate::aarch64::Aarch64>();
@@ -894,7 +908,8 @@ mod tests {
             pt.map(&mut mem, va + 1, pa, 0x1000, Attrs::KERNEL_RO),
             Err(MapError::Misaligned)
         );
-        let hole = VirtAddr::new(0x0000_8000_0000_0000);
+        // Outside both formats' halves.
+        let hole = VirtAddr::new(0x0001_0000_0000_0000);
         assert_eq!(
             pt.map(&mut mem, hole, pa, 0x1000, Attrs::KERNEL_RO),
             Err(MapError::BadAddress(hole))

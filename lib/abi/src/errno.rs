@@ -112,6 +112,9 @@ pub enum Errno {
 }
 
 impl Errno {
+    /// `ENOTSUP`, the same number as `EOPNOTSUPP`.
+    pub const ENOTSUP: Self = Self::EOPNOTSUPP;
+
     /// The number, as user mode sees it.
     #[must_use]
     pub const fn get(self) -> i32 {
@@ -218,6 +221,7 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     errno("ENOTRECOVERABLE", Errno::ENOTRECOVERABLE),
     errno("EOWNERDEAD", Errno::EOWNERDEAD),
     errno("EINTEGRITY", Errno::EINTEGRITY),
+    errno("ENOTSUP", Errno::ENOTSUP),
 ];
 
 const fn errno(c_name: &'static str, e: Errno) -> ConstValue {

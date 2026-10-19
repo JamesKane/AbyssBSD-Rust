@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! Disk images: a GPT disk with a FAT32 EFI System Partition holding the
 //! loader at the removable-media boot path, the kernel at
-//! `EFI/ABYSS/KERNEL`, and the command line at `EFI/ABYSS/CMDLINE`.
+//! `EFI/ABYSS/KERNEL`, the command line at `EFI/ABYSS/CMDLINE`, and the
+//! memory disk (FreeBSD's `/rescue` as a ustar archive, once `cargo xtask
+//! fetch-base` has it) at `EFI/ABYSS/MD`.
 //!
 //! Images are reproducible: GUIDs and the volume serial derive from stable
 //! names, and FAT timestamps are fixed.
@@ -36,6 +38,7 @@ struct Contents<'a> {
     loader: &'a [u8],
     kernel: &'a [u8],
     cmdline: &'a str,
+    md: Option<&'a [u8]>,
 }
 
 /// Builds the loader, the kernel, and the disk image, returning the image's
@@ -44,12 +47,16 @@ pub(crate) fn build(arch: Arch, opts: build::Options, cmdline: &str) -> Result<P
     let images = build::all(arch, opts)?;
     let read = |p: &PathBuf| fs::read(p).map_err(|e| format!("{}: {e}", p.display()));
     let (loader, kernel) = (read(&images.loader)?, read(&images.kernel)?);
+    let md = crate::base::existing_rescue_image(arch)
+        .map(|p| read(&p))
+        .transpose()?;
     let disk = make_disk(
         arch,
         &Contents {
             loader: &loader,
             kernel: &kernel,
             cmdline,
+            md: md.as_deref(),
         },
     )?;
     let dir = util::root().join("build").join(arch.to_string());
@@ -107,11 +114,15 @@ fn make_disk(arch: Arch, contents: &Contents<'_>) -> Result<Vec<u8>> {
     .map_err(|e| format!("GPT: {e:?}"))?;
 
     let mut root = fat::Dir::new();
+    let md = contents.md.map(|m| ("EFI/ABYSS/MD", m));
     for (path, data) in [
         (arch.efi_boot_file(), contents.loader),
         ("EFI/ABYSS/KERNEL", contents.kernel),
         ("EFI/ABYSS/CMDLINE", contents.cmdline.as_bytes()),
-    ] {
+    ]
+    .into_iter()
+    .chain(md)
+    {
         root.insert_file(path, data)
             .map_err(|e| format!("ESP tree ({path}): {e:?}"))?;
     }
@@ -156,6 +167,7 @@ mod tests {
             loader: b"MZ fake loader",
             kernel: b"\x7fELF fake kernel",
             cmdline: "kaslr=0",
+            md: Some(b"ustar"),
         };
         let a = make_disk(Arch::X86_64, &contents).unwrap();
         let b = make_disk(Arch::X86_64, &contents).unwrap();
