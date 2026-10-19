@@ -569,6 +569,20 @@ P4.0 ─► P4.1 ─► P4.2 ─► P4.3 ─┬─► P4.4 ─┐
 - The rest of Tier A that needs no files: `getpid`, the `getuid` family, `issetugid`, `getrandom`,
   `clock_gettime`, `nanosleep`, `getrlimit`, `thr_self`, `_umtx_op` (wait and wake), `minherit`,
   `madvise`, `mmap`/`munmap`/`mprotect`, and `__sysctl`/`__sysctlbyname` over the P3.1 tree.
+- Progress (2026-10-19): FreeBSD 15.1's own `/rescue` runs on both architectures. The ktests run
+  `/rescue/echo`, and `/rescue/sh -c` forking and exec'ing `/rescue/echo` and `/rescue/sysctl
+  kern.ostype hw.ncpu`, waiting for each, and exiting with the status it was given.
+  - **Memory disk** (moved up from P4.5, since exec needs files): the loader preloads
+    `EFI/ABYSS/MD`, the `/rescue` ustar image, read by `lib/ustar`.
+  - **Pager objects**: a file's pages fill on first touch and stay cached, shared by every
+    process running it (FreeBSD's vnode object).
+  - **Done**: the process tree, groups and sessions, `fork`, `vfork`, `execve`, `wait4`, the ELF
+    activator and FreeBSD's initial stack, and the system calls listed above. The kernel tests
+    found two bugs. First, `STAR` lacked RPL 3: on AMD, user code then ran with SS 0x18, and its
+    next trap faulted on `iretq` with the user's GS live. Second, aarch64 rejected user addresses
+    with bit 47 set.
+  - **Left**: the shared page (`vdso_timehands`, and the signal trampoline P4.4 needs), stack
+    ASLR, PIE executables, `pdfork` (it returns a descriptor, P4.5), and `_umtx_op`'s timed waits.
 
 **P4.4 Signals.**
 - `sigaction`, `sigprocmask`, `sigfastblock`, `kill`, pending sets, and default actions (including
