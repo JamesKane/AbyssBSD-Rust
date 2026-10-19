@@ -12,6 +12,13 @@ pub trait ConfigSpace {
     /// Writes the dword at `offset`.
     fn write32(&self, a: PciAddress, offset: u16, v: u32);
 
+    /// Called with `true` before a window in which function `a`'s memory or
+    /// I/O decoding is off (BAR sizing), and with `false` after it. Nothing
+    /// may touch what the function decodes meanwhile (a boot framebuffer,
+    /// say): the access is lost, or on bhyve stops the machine. The default
+    /// does nothing.
+    fn decoding_paused(&self, _a: PciAddress, _paused: bool) {}
+
     /// Reads the word at `offset` (2-byte aligned).
     fn read16(&self, a: PciAddress, offset: u16) -> u16 {
         (self.read32(a, offset & !3) >> ((offset & 2) * 8)) as u16
@@ -48,6 +55,8 @@ pub struct Ecam {
     segment: u32,
     first_bus: u8,
     last_bus: u8,
+    /// Run for [`ConfigSpace::decoding_paused`].
+    on_pause: Option<fn(bool)>,
 }
 
 impl Ecam {
@@ -65,7 +74,16 @@ impl Ecam {
             segment,
             first_bus,
             last_bus,
+            on_pause: None,
         }
+    }
+
+    /// Runs `f` for [`ConfigSpace::decoding_paused`] (whatever the
+    /// function).
+    #[must_use]
+    pub fn with_pause_hook(mut self, f: fn(bool)) -> Self {
+        self.on_pause = Some(f);
+        self
     }
 
     /// The bus range.
@@ -112,6 +130,12 @@ impl ConfigSpace for Ecam {
         if let Some(p) = self.addr(a, offset) {
             // SAFETY: as in `read32`.
             unsafe { p.write_volatile(v) }
+        }
+    }
+
+    fn decoding_paused(&self, _a: PciAddress, paused: bool) {
+        if let Some(f) = self.on_pause {
+            f(paused);
         }
     }
 }

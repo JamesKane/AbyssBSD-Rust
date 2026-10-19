@@ -36,7 +36,15 @@ struct Sinks {
     serial: Option<SerialSink>,
     fb: Option<fb_console::Console<'static>>,
     ring: Option<logring::Ring<'static>>,
+    /// Framebuffer output is held while this is nonzero.
+    fb_holds: u32,
+    /// Text held back from the framebuffer (the rest is dropped).
+    fb_held: [u8; HELD],
+    fb_held_len: usize,
 }
+
+/// Bytes of framebuffer output held at most.
+const HELD: usize = 2048;
 
 /// Output goes to the log ring only (FreeBSD's `kern.consmute`).
 static MUTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
@@ -63,7 +71,13 @@ impl Write for Sinks {
             None => {}
         }
         if let Some(fb) = &mut self.fb {
-            fb.write_str(s)?;
+            if self.fb_holds == 0 {
+                fb.write_str(s)?;
+            } else {
+                let n = s.len().min(HELD - self.fb_held_len);
+                self.fb_held[self.fb_held_len..][..n].copy_from_slice(&s.as_bytes()[..n]);
+                self.fb_held_len += n;
+            }
         }
         if let Some(ring) = &mut self.ring {
             ring.write(s.as_bytes());
@@ -72,10 +86,42 @@ impl Write for Sinks {
     }
 }
 
+/// Holds (`true`) or releases (`false`) framebuffer output; calls nest.
+/// Text printed meanwhile still reaches the serial console and the log
+/// ring, and reaches the screen on release (up to [`HELD`] bytes). PCI
+/// holds it while sizing a function's BARs with its decoding off, since
+/// the framebuffer may be that function's memory.
+pub(crate) fn hold_framebuffer(hold: bool) {
+    let mut c = CONSOLE.lock();
+    if hold {
+        c.fb_holds += 1;
+        return;
+    }
+    c.fb_holds = c.fb_holds.saturating_sub(1);
+    if c.fb_holds == 0 && c.fb_held_len > 0 {
+        let Sinks {
+            fb,
+            fb_held,
+            fb_held_len,
+            ..
+        } = &mut *c;
+        if let Some(fb) = fb {
+            // The cut at `HELD` may split a character: draw what is valid.
+            for chunk in fb_held[..*fb_held_len].utf8_chunks() {
+                let _ = fb.write_str(chunk.valid());
+            }
+        }
+        *fb_held_len = 0;
+    }
+}
+
 static CONSOLE: SpinLock<Sinks> = SpinLock::new(Sinks {
     serial: None,
     fb: None,
     ring: None,
+    fb_holds: 0,
+    fb_held: [0; HELD],
+    fb_held_len: 0,
 });
 
 /// Takes over the devices the loader described.
@@ -134,7 +180,10 @@ pub(crate) fn init(info: &BootInfo) {
         let buf = unsafe { core::slice::from_raw_parts_mut(va.get() as *mut u8, len) };
         logring::Ring::open(buf).ok()
     });
-    *CONSOLE.lock() = Sinks { serial, fb, ring };
+    let mut c = CONSOLE.lock();
+    c.serial = serial;
+    c.fb = fb;
+    c.ring = ring;
 }
 
 /// # Safety

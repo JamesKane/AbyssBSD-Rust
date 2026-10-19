@@ -4,6 +4,7 @@ extern crate std;
 
 use alloc::collections::BTreeMap;
 use alloc::vec;
+use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use super::*;
@@ -25,6 +26,8 @@ struct FakeFn {
 #[derive(Default)]
 struct Fake {
     fns: RefCell<BTreeMap<(u8, u8, u8), FakeFn>>,
+    /// `decoding_paused` calls, with the command register at the time.
+    pauses: RefCell<Vec<(bool, u16)>>,
 }
 
 impl Fake {
@@ -34,6 +37,11 @@ impl Fake {
 }
 
 impl ConfigSpace for Fake {
+    fn decoding_paused(&self, a: PciAddress, paused: bool) {
+        let cmd = self.read16(a, COMMAND);
+        self.pauses.borrow_mut().push((paused, cmd));
+    }
+
     fn read32(&self, a: PciAddress, offset: u16) -> u32 {
         self.fns
             .borrow()
@@ -147,6 +155,12 @@ fn bars_are_sized_with_decoding_off_and_restored() {
     assert_eq!(f.regs[&COMMAND] as u16, CMD_MEMORY, "decoding restored");
     // Decoding goes off and back on once for all six slots.
     assert_eq!(f.command_writes, 2);
+    // The window is announced while decoding is still on, and closed once
+    // it is back on.
+    assert_eq!(
+        *fake.pauses.borrow(),
+        [(true, CMD_MEMORY), (false, CMD_MEMORY)]
+    );
 }
 
 #[test]

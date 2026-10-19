@@ -42,6 +42,7 @@ pub(crate) fn init() {
                         r.start_bus,
                         r.end_bus,
                     )
+                    .with_pause_hook(crate::console::hold_framebuffer)
                 });
             }
             Err(e) => kprintln!("pci: cannot map ECAM at {pa:#x}: {e:?}"),

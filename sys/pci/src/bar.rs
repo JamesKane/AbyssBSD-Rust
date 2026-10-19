@@ -80,11 +80,13 @@ fn with_decoding_off<R>(
 ) -> R {
     let cmd = cfg.read16(a, COMMAND);
     if cmd & bits != 0 {
+        cfg.decoding_paused(a, true);
         cfg.write16(a, COMMAND, cmd & !bits);
     }
     let r = f();
     if cmd & bits != 0 {
         cfg.write16(a, COMMAND, cmd);
+        cfg.decoding_paused(a, false);
     }
     r
 }
