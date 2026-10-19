@@ -500,8 +500,9 @@ P4.0 ─► P4.1 ─► P4.2 ─► P4.3 ─┬─► P4.4 ─┐
     will. All 12 steps pass, `^Z`/`jobs`/`fg`/`^C` included.
   - **Open:** `getpid` costs 240 ns in the guest against 67 ns on the host. FreeBSD may run with
     PTI in bhyve, where the CPU's immunity is not visible; to settle before P4.7 compares.
-  - **Not done:** the aarch64 TCG numbers. They wait for FreeBSD's arm64 VM image, which is
-    downloading over a slow link.
+  - **Not done:** the aarch64 TCG numbers. FreeBSD's arm64 VM image is now downloaded and its
+    checksum verified. What remains is building `kbench.ko` for arm64 and giving the perf harness
+    a QEMU TCG path for both kernels.
 
 **P4.1 Address spaces** (`sys/vm`, pure parts host-tested). Done 2026-10-19.
 - `VmMap` (an ordered map of `VmEntry` with protections, inheritance, and `MAP_*` flags) and
@@ -560,7 +561,7 @@ P4.0 ─► P4.1 ─► P4.2 ─► P4.3 ─┬─► P4.4 ─┐
   - **Not yet.** User GS bases on amd64; arm64's own `sysarch` operations; a test of user
     FP/SIMD state across switches, which waits for real binaries (P4.3).
 
-**P4.3 Processes and exec.**
+**P4.3 Processes and exec.** Done 2026-10-19, apart from three items that belong to later work (see Left below).
 - `Proc` and `Thread` as in ARCHITECTURE.md §5.3: pid allocation, process groups, sessions, the
   process tree, and credentials (root only until P6).
 - `execve`: ELF64 with FreeBSD branding (`NT_FREEBSD_ABI_TAG`, `ELFOSABI_FREEBSD`), auxv,
