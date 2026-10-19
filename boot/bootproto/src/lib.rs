@@ -427,8 +427,11 @@ mod tests {
     fn header_validation() {
         assert_eq!(Header::CURRENT.validate(), Ok(()));
         let mut h = Header::CURRENT;
-        h.version = 2;
-        assert_eq!(h.validate(), Err(HandoffError::UnsupportedVersion(2)));
+        h.version = VERSION + 1;
+        assert_eq!(
+            h.validate(),
+            Err(HandoffError::UnsupportedVersion(VERSION + 1))
+        );
         h = Header::CURRENT;
         h.size += 8;
         assert!(matches!(
