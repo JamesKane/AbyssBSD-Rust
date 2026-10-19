@@ -2628,9 +2628,9 @@ mod user_memory {
         fn shared_page_is_mapped_read_only() {
             let s = cx();
             let space = AddressSpace::new().unwrap();
-            crate::shared_page::map(&s, &space).unwrap();
-            let page = crate::exec::USRSTACK;
-            let tk = crate::shared_page::timekeep_address();
+            let page = 0x7000_0000_0000;
+            crate::shared_page::map(&s, &space, page).unwrap();
+            let tk = crate::shared_page::timekeep_address(page);
             assert!((page..page + PAGE).contains(&tk));
             enter(&space);
             // tk_ver 1, tk_enabled 1.
@@ -2670,6 +2670,34 @@ mod user_memory {
                 ran += 1;
             }
             assert!(ran >= 2, "only {ran} test programs on the memory disk");
+        }
+    }
+
+    ktest! {
+        fn exec_layout_is_randomized_within_bounds() {
+            use crate::exec::{Layout, MAXDSIZ, STACK_SIZE, USRSTACK};
+            let s = cx();
+            let load = || {
+                let space = AddressSpace::new().unwrap();
+                let image = crate::exec::load(&s, &space, b"/rescue/echo", &[b"echo"], &[], MAXDSIZ)
+                    .unwrap();
+                // The top page is a guard: mapped, with no access at all.
+                let top = VirtAddr::new(USRSTACK);
+                assert!(space.fault(&s, top, vm::fault::Access::Read).is_err());
+                space.clear(&s);
+                image.layout
+            };
+            let (a, b) = (load(), load());
+            assert!(a.anon_loc != b.anon_loc && a.stack_top != b.stack_top, "{a:?} {b:?}");
+            for Layout { anon_loc, stack_top, shared_page } in [a, b] {
+                // /rescue/echo's data is below 64 MiB; the layout is above
+                // the data limit, anon_loc in the lower half of what is left.
+                assert!((MAXDSIZ..USRSTACK / 2 + (MAXDSIZ + (64 << 20)) / 2).contains(&anon_loc));
+                assert!(anon_loc.is_multiple_of(2 << 20));
+                assert!((MAXDSIZ + STACK_SIZE..=USRSTACK).contains(&stack_top));
+                assert!(stack_top.is_multiple_of(8));
+                assert!((MAXDSIZ..USRSTACK).contains(&shared_page));
+            }
         }
     }
 

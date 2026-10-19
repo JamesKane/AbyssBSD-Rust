@@ -282,6 +282,13 @@ impl AddressSpace {
         )
     }
 
+    /// The lowest free, page-aligned range of `len` bytes at or above
+    /// `hint` (wrapping around), as a mapping without a fixed address
+    /// would take.
+    pub(crate) fn find_space(&self, s: &Sleepable, len: u64, hint: VirtAddr) -> Option<VirtAddr> {
+        self.map.lock(s).find_space(len, PAGE_SIZE, hint)
+    }
+
     /// Maps anonymous memory as `a` says (`mmap` with `MAP_ANON`).
     pub(crate) fn map_anon(&self, s: &Sleepable, a: &Anon) -> Result<VirtAddr, SpaceError> {
         let mut map = self.map.lock(s);

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! The shared page: one page the kernel writes, mapped read-only at
-//! [`USRSTACK`](crate::exec::USRSTACK) into every process (FreeBSD's
+//! The shared page: one page the kernel writes, mapped read-only into
+//! every process (at a random address, see [`crate::exec`]; FreeBSD's
 //! shared page). It holds the time keeping, `struct vdso_timekeep`, from
 //! which libc answers `clock_gettime` and `gettimeofday` without a system
 //! call (`AT_TIMEKEEP` points at it). The signal trampoline joins it in
@@ -43,7 +43,6 @@ use vm::PAGE_SIZE;
 use vm::map::Prot;
 use vm::object::Object;
 
-use crate::exec::USRSTACK;
 use crate::mm::space::{AddressSpace, SpaceError};
 use crate::time::{NANOS, Timer};
 
@@ -342,14 +341,14 @@ pub(crate) fn init() {
     );
 }
 
-/// Maps the shared page into `space` at [`USRSTACK`].
-pub(crate) fn map(s: &Sleepable, space: &AddressSpace) -> Result<(), SpaceError> {
+/// Maps the shared page into `space` at `at`.
+pub(crate) fn map(s: &Sleepable, space: &AddressSpace, at: u64) -> Result<(), SpaceError> {
     let Some(p) = PAGE.get() else {
         return Ok(());
     };
     space.map_private(
         s,
-        VirtAddr::new(USRSTACK)..VirtAddr::new(USRSTACK + PAGE_SIZE),
+        VirtAddr::new(at)..VirtAddr::new(at + PAGE_SIZE),
         Arc::clone(&p.object),
         0,
         Prot::READ.union(Prot::EXEC),
@@ -357,12 +356,12 @@ pub(crate) fn map(s: &Sleepable, space: &AddressSpace) -> Result<(), SpaceError>
     )
 }
 
-/// The user address of the time keeping (`AT_TIMEKEEP`), or 0 without
-/// one.
-pub(crate) fn timekeep_address() -> u64 {
+/// The user address of the time keeping (`AT_TIMEKEEP`) in a shared page
+/// mapped at `page`, or 0 without one.
+pub(crate) fn timekeep_address(page: u64) -> u64 {
     if PAGE.get().is_none() {
         0
     } else {
-        USRSTACK + TIMEKEEP_OFFSET as u64
+        page + TIMEKEEP_OFFSET as u64
     }
 }

@@ -590,8 +590,15 @@ P4.0 ─► P4.1 ─► P4.2 ─► P4.3 ─┬─► P4.4 ─┐
     Test programs from `tests/user/` are now built into the memory disk.
   - **Timed waits**: `_umtx_op` waits take a relative or absolute timeout on any clock and fail
     with `ETIMEDOUT` (`tests/user/umtx.c`). The kernel test runs every `tests/user` program.
-  - **Left**: the signal trampoline in the shared page (with P4.4), stack ASLR, PIE executables,
-    and `pdfork` (it returns a descriptor, P4.5).
+  - **ASLR** follows FreeBSD 15's 64-bit defaults (`kern.elf64.aslr.*`).
+    - `anon_loc` is random between `vm_daddr + RLIMIT_DATA` and the middle of user space.
+    - The stack and the shared page are placed above the data limit, with random gaps of up to
+      4096 pages; the stack's top also moves within its page.
+    - The top page of user space is a guard.
+    - `RLIMIT_DATA` defaults to `MAXDSIZ` (32 GiB on amd64, 1 GiB on arm64), as on FreeBSD.
+    - `tests/user/aslr.c` checks that the auxiliary vector matches the real layout.
+  - **Left**: the signal trampoline in the shared page (with P4.4), PIE (with the run-time linker,
+    which is the only thing that loads `ET_DYN`), and `pdfork` (it returns a descriptor, P4.5).
 
 **P4.4 Signals.**
 - `sigaction`, `sigprocmask`, `sigfastblock`, `kill`, pending sets, and default actions (including

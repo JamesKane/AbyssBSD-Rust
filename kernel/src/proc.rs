@@ -30,6 +30,7 @@ use sync::SpinLock;
 
 use crate::arch;
 use crate::arch::trap::TrapFrame;
+use crate::exec::Layout;
 use crate::mm::space::{self, AddressSpace};
 
 /// The highest pid (`PID_MAX`); allocation wraps to 2 past it.
@@ -97,6 +98,10 @@ fn default_limits() -> [Rlimit; rlimit::NLIMITS] {
         rlim_cur: stack,
         rlim_max: stack,
     };
+    l[rlimit::DATA as usize] = Rlimit {
+        rlim_cur: crate::exec::MAXDSIZ,
+        rlim_max: crate::exec::MAXDSIZ,
+    };
     l[rlimit::CORE as usize] = inf;
     l[rlimit::NOFILE as usize] = Rlimit {
         rlim_cur: 116_964,
@@ -116,8 +121,8 @@ pub(crate) struct Process {
     /// This process borrows its parent's address space (`vfork`) until it
     /// execs or exits; the parent sleeps meanwhile.
     vforked: AtomicBool,
-    /// Where `mmap` without an address starts looking (randomized).
-    mmap_base: AtomicU64,
+    /// Where exec put the randomized parts of the image.
+    layout: SpinLock<Layout>,
     pub(crate) signals: SpinLock<Signals>,
     pub(crate) limits: SpinLock<[Rlimit; rlimit::NLIMITS]>,
     /// The `exterrctl` buffer, 0 for none.
@@ -146,19 +151,11 @@ struct Start {
     tls: u64,
 }
 
-fn random_mmap_base() -> u64 {
-    let mut r = [0u8; 8];
-    // Unseeded (early boot) leaves the base unrandomized.
-    let _ = crate::random::fill(&mut r);
-    // 64 GiB up, plus up to 8 TiB in 2 MiB steps.
-    (64 << 30) + (u64::from_le_bytes(r) % (1 << 22)) * (2 << 20)
-}
-
 impl Process {
     /// A process running in `space`, with no threads yet: a child of
-    /// `parent` (inheriting its signal state, limits, group and session),
-    /// or a new session's leader.
-    fn create(space: Arc<AddressSpace>, parent: Option<&Arc<Self>>) -> Arc<Self> {
+    /// `parent` (inheriting its signal state, limits, layout, group and
+    /// session), or a new session's leader laid out as `layout` says.
+    fn create(space: Arc<AddressSpace>, layout: Layout, parent: Option<&Arc<Self>>) -> Arc<Self> {
         let (signals, limits) = match parent {
             Some(p) => (p.signals.lock().clone(), *p.limits.lock()),
             None => (
@@ -176,9 +173,7 @@ impl Process {
                 pid,
                 space: SpinLock::new(space),
                 vforked: AtomicBool::new(false),
-                mmap_base: AtomicU64::new(
-                    parent.map_or_else(random_mmap_base, |p| p.mmap_base.load(Ordering::Relaxed)),
-                ),
+                layout: SpinLock::new(parent.map_or(layout, |p| *p.layout.lock())),
                 signals: SpinLock::new(signals),
                 limits: SpinLock::new(limits),
                 exterr: AtomicU64::new(parent.map_or(0, |p| p.exterr.load(Ordering::Relaxed))),
@@ -228,8 +223,9 @@ impl Process {
         TREE.lock().parent.get(&self.pid).copied().unwrap_or(0)
     }
 
+    /// Where `mmap` without an address starts looking.
     pub(crate) fn mmap_base(&self) -> u64 {
-        self.mmap_base.load(Ordering::Relaxed)
+        self.layout.lock().anon_loc
     }
 
     /// The TLS base `sysarch(AMD64_SET_TLSBASE)` recorded.
@@ -263,8 +259,9 @@ impl Process {
         cpu: Option<hal::CpuId>,
     ) -> Result<Arc<Self>, Errno> {
         let space = AddressSpace::new().map_err(|_| Errno::ENOMEM)?;
-        let image = crate::exec::load(s, &space, path, argv, envp)?;
-        let p = Self::create(space, None);
+        let data_max = default_limits()[rlimit::DATA as usize].rlim_max;
+        let image = crate::exec::load(s, &space, path, argv, envp, data_max)?;
+        let p = Self::create(space, image.layout, None);
         let frame = arch::user::user_frame(image.entry, image.sp, image.arg);
         p.start(frame, 0, false, cpu).map_err(|_| Errno::EAGAIN)?;
         Ok(p)
@@ -279,7 +276,12 @@ impl Process {
         sp: u64,
         cpu: Option<hal::CpuId>,
     ) -> Arc<Self> {
-        let p = Self::create(space, None);
+        let layout = Layout {
+            anon_loc: 64 << 30,
+            stack_top: sp,
+            shared_page: 0,
+        };
+        let p = Self::create(space, layout, None);
         let frame = arch::user::user_frame(entry, sp, 0);
         p.start(frame, 0, false, cpu)
             .expect("a thread for the test process");
@@ -328,7 +330,7 @@ impl Process {
         } else {
             self.space().fork(s).map_err(|_| Errno::ENOMEM)?
         };
-        let child = Self::create(space, Some(self));
+        let child = Self::create(space, Layout::default(), Some(self));
         child.vforked.store(vfork, Ordering::Relaxed);
         let mut cf = *frame;
         arch_fork_return(&mut cf);
@@ -375,7 +377,8 @@ impl Process {
         envp: &[&[u8]],
     ) -> Result<(), Errno> {
         let space = AddressSpace::new().map_err(|_| Errno::ENOMEM)?;
-        let image = crate::exec::load(s, &space, path, argv, envp)?;
+        let data_max = self.limits.lock()[rlimit::DATA as usize].rlim_max;
+        let image = crate::exec::load(s, &space, path, argv, envp, data_max)?;
         // No way back from here.
         let old = core::mem::replace(&mut *self.space.lock(), Arc::clone(&space));
         sched::set_address_space(Some(space as Arc<dyn sched::AddressSpace>));
@@ -403,7 +406,7 @@ impl Process {
         // SAFETY: this thread runs in the new image; the kernel does not
         // use the thread pointer.
         unsafe { hal::user::set_tls(0) };
-        self.mmap_base.store(random_mmap_base(), Ordering::Relaxed);
+        *self.layout.lock() = image.layout;
         *frame = arch::user::user_frame(image.entry, image.sp, image.arg);
         Ok(())
     }
