@@ -412,6 +412,8 @@ pub struct Builder<'a> {
     priority: Priority,
     bound: Option<CpuId>,
     fpu: bool,
+    /// The FP/SIMD registers start as a copy of the creating thread's.
+    fpu_inherit: bool,
     stack: Option<usize>,
 }
 
@@ -425,6 +427,7 @@ impl<'a> Builder<'a> {
             priority: Priority::KERNEL,
             bound: None,
             fpu: false,
+            fpu_inherit: false,
             stack: None,
         }
     }
@@ -459,6 +462,16 @@ impl<'a> Builder<'a> {
         self
     }
 
+    /// Gives the thread FP/SIMD registers of its own, starting as a copy of
+    /// the calling thread's (a forked user thread's). The kernel itself
+    /// never uses them, so the live registers are the caller's.
+    #[must_use]
+    pub const fn fpu_inherit(mut self) -> Self {
+        self.fpu = true;
+        self.fpu_inherit = true;
+        self
+    }
+
     /// Starts the thread running `f`, which gets the thread's [`Sleepable`].
     pub fn spawn(
         self,
@@ -480,7 +493,13 @@ impl<'a> Builder<'a> {
 
     fn start(self, entry: thread::Entry) -> Result<Arc<Thread>, SpawnError> {
         let fpu = if self.fpu {
-            Some(thread::FpuArea::new().ok_or(SpawnError::NoFpuArea)?)
+            let area = thread::FpuArea::new().ok_or(SpawnError::NoFpuArea)?;
+            if self.fpu_inherit {
+                // SAFETY: the area is this size and alignment; saving only
+                // reads the registers.
+                unsafe { hal::fpu::save(area.as_ptr()) };
+            }
+            Some(area)
         } else {
             None
         };

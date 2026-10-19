@@ -70,6 +70,8 @@ pub const CONSTANTS: &[&[ConstValue]] = &[
     crate::mman::CONSTANTS,
     crate::thr::CONSTANTS,
     crate::signal::CONSTANTS,
+    crate::time::CONSTANTS,
+    crate::resource::CONSTANTS,
 ];
 
 const fn bus_const(c_name: &'static str, value: i64) -> ConstValue {
@@ -178,6 +180,32 @@ pub static LAYOUTS: &[StructLayout] = &[
     layout!(crate::uio::Iovec, "struct iovec", ["sys/types.h", "sys/uio.h"], All, {
         iov_base => "iov_base",
         iov_len => "iov_len",
+    }),
+    layout!(crate::time::Timeval, "struct timeval", ["sys/types.h", "sys/time.h"], All, {
+        tv_sec => "tv_sec",
+        tv_usec => "tv_usec",
+    }),
+    layout!(crate::resource::Rlimit, "struct rlimit", ["sys/types.h", "sys/resource.h"], All, {
+        rlim_cur => "rlim_cur",
+        rlim_max => "rlim_max",
+    }),
+    layout!(crate::resource::Rusage, "struct rusage", ["sys/types.h", "sys/resource.h"], All, {
+        ru_utime => "ru_utime",
+        ru_stime => "ru_stime",
+        ru_maxrss => "ru_maxrss",
+        ru_ixrss => "ru_ixrss",
+        ru_idrss => "ru_idrss",
+        ru_isrss => "ru_isrss",
+        ru_minflt => "ru_minflt",
+        ru_majflt => "ru_majflt",
+        ru_nswap => "ru_nswap",
+        ru_inblock => "ru_inblock",
+        ru_oublock => "ru_oublock",
+        ru_msgsnd => "ru_msgsnd",
+        ru_msgrcv => "ru_msgrcv",
+        ru_nsignals => "ru_nsignals",
+        ru_nvcsw => "ru_nvcsw",
+        ru_nivcsw => "ru_nivcsw",
     }),
     layout!(signal::Sigset, "sigset_t", ["sys/types.h", "signal.h"], All, {
         bits => "__bits",

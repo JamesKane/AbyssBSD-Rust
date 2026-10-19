@@ -2584,10 +2584,9 @@ mod user_memory {
                 Prot::RW,
             )
             .unwrap();
-        let p = Process::new(space);
         // Bound, so only that CPU ever loads the space (and it lets go at
         // exit).
-        p.start(text, STACK_TOP, 0, Some(hal::cpu_id())).unwrap();
+        let p = Process::spawn_code(space, text, STACK_TOP, Some(hal::cpu_id()));
         let status = p.wait(&s);
         drop(p);
         let after = settled_free_pages(&s);
@@ -2609,6 +2608,22 @@ mod user_memory {
             )
             .unwrap();
             assert_eq!(p.wait(&s), 0);
+        }
+    }
+
+    ktest! {
+        fn rescue_sh_forks_execs_and_waits() {
+            use crate::proc::Process;
+            let s = cx();
+            let p = Process::spawn(
+                &s,
+                b"/rescue/sh",
+                &[b"sh", b"-c", b"/rescue/echo child; echo \"status $?\"; exit 3"],
+                &[b"PATH=/rescue", b"HOME=/"],
+                Some(hal::cpu_id()),
+            )
+            .unwrap();
+            assert_eq!(p.wait(&s), 3);
         }
     }
 

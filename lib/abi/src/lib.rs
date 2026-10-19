@@ -18,6 +18,7 @@ pub mod errno;
 pub mod exec;
 pub mod layout;
 pub mod mman;
+pub mod resource;
 pub mod signal;
 pub mod stat;
 pub mod sysarch;

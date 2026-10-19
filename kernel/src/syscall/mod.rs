@@ -19,8 +19,10 @@
 mod io;
 mod mem;
 mod misc;
+mod proc;
 mod sig;
 mod thr;
+mod time;
 
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -103,17 +105,41 @@ pub(crate) fn entry(frame: &mut TrapFrame) {
         call.args.copy_within(1.., 0);
         call.args[5] = 0;
     }
-    let r = run(&s, call);
-    encode(frame, r);
+    // `None`: the handler set the frame itself (`execve`).
+    match run(&s, frame, call) {
+        Ok(Some(v)) => encode(frame, Ok(v)),
+        Ok(None) => {}
+        Err(e) => encode(frame, Err(e)),
+    }
     let _ = hal::irq::disable();
 }
 
-fn run(s: &Sleepable, call: Call) -> SysResult {
+fn run(s: &Sleepable, frame: &mut TrapFrame, call: Call) -> Result<Option<u64>, Errno> {
     let [a0, a1, a2, a3, a4, a5] = call.args;
     let Some(Slot::Live(n)) = lookup(call.number) else {
-        return nosys(call.number);
+        return nosys(call.number).map(Some);
     };
-    match n {
+    let r = match n {
+        Sysno::Execve => return proc::execve(s, frame, a0, a1, a2),
+        Sysno::Fork => proc::fork(s, frame, false),
+        Sysno::Vfork => proc::fork(s, frame, true),
+        Sysno::Wait4 => proc::wait4(s, a0, a1, a2, a3),
+        Sysno::Getppid => proc::getppid(),
+        Sysno::Getpgrp => proc::getpgrp(),
+        Sysno::Getpgid => proc::getpgid(a0, false),
+        Sysno::Getsid => proc::getpgid(a0, true),
+        Sysno::Setsid => proc::setsid(),
+        Sysno::Setpgid => proc::setpgid(a0, a1),
+        Sysno::Getuid | Sysno::Geteuid | Sysno::Getgid | Sysno::Getegid => proc::root(),
+        Sysno::Getgroups => proc::getgroups(a0, a1),
+        Sysno::Getresuid | Sysno::Getresgid => proc::getres(a0, a1, a2),
+        Sysno::Setuid | Sysno::Seteuid | Sysno::Setgid | Sysno::Setegid => proc::set_id(a0),
+        Sysno::ClockGettime => time::clock_gettime(a0, a1),
+        Sysno::ClockGetres => time::clock_getres(a0, a1),
+        Sysno::Gettimeofday => time::gettimeofday(a0, a1),
+        Sysno::Nanosleep => time::nanosleep(s, a0, a1),
+        Sysno::Getrlimit => time::getrlimit(a0, a1),
+        Sysno::Setrlimit => time::setrlimit(a0, a1),
         Sysno::Exit => exit(s, a0),
         Sysno::Write => io::write(a0, a1, a2),
         Sysno::Writev => io::writev(a0, a1, a2),
@@ -137,7 +163,8 @@ fn run(s: &Sleepable, call: Call) -> SysResult {
         Sysno::RtprioThread => thr::rtprio_thread(a0, a1, a2),
         Sysno::UmtxOp => thr::umtx_op(s, a0, a1, a2, a3, a4),
         _ => nosys(call.number),
-    }
+    };
+    r.map(Some)
 }
 
 /// The current thread's process (every thread that makes system calls
