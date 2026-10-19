@@ -42,9 +42,21 @@ const LEGACY: usize = 512;
 /// The XSAVE header that follows it.
 const HEADER: usize = 64;
 /// RFLAGS bits user code may change (FreeBSD's `PSL_USERCHANGE`): the
-/// arithmetic flags, TF, DF, OF, NT, AC, and ID.
-const RFLAGS_USER: u64 =
-    0x1 | 0x4 | 0x10 | 0x40 | 0x80 | 0x100 | 0x400 | 0x800 | 0x4000 | 0x4_0000 | 0x20_0000;
+/// arithmetic flags, TF, DF, OF, NT, RF, AC, and ID. RF matters: the CPU
+/// sets it in the flags it saves for a fault, so a context from a signal
+/// delivered on the way out of a page fault carries it.
+const RFLAGS_USER: u64 = 0x1
+    | 0x4
+    | 0x10
+    | 0x40
+    | 0x80
+    | 0x100
+    | 0x400
+    | 0x800
+    | 0x4000
+    | 0x1_0000
+    | 0x4_0000
+    | 0x20_0000;
 const RFLAGS_CF: u64 = 0x1;
 const RFLAGS_TF: u64 = 0x100;
 const RFLAGS_DF: u64 = 0x400;
@@ -194,16 +206,22 @@ pub(crate) fn set_context(frame: &mut TrapFrame, mc: &McontextX86) -> Result<(),
     if mc.mc_len != size_of::<McontextX86>() as i64 || mc.mc_flags & !MC_FLAG_MASK != 0 {
         return Err(Errno::EINVAL);
     }
+    // FreeBSD tells the console why it refuses a context; so do we.
+    let pid = || crate::proc::Process::current().map_or(0, |p| p.pid());
     if (mc.mc_rflags ^ frame.rflags) & !RFLAGS_USER != 0 {
+        kprintln!("pid {}: sigreturn rflags = {:#x}", pid(), mc.mc_rflags);
         return Err(Errno::EINVAL);
     }
     if mc.mc_cs != user_cs() || mc.mc_ss != user_ds() {
+        kprintln!("pid {}: sigreturn cs = {:#x}", pid(), mc.mc_cs);
         return Err(Errno::EINVAL);
     }
     if mc.mc_flags & MC_HASBASES != 0 && !canonical(mc.mc_fsbase) {
         return Err(Errno::EINVAL);
     }
-    let fpu = fpu_image(mc)?;
+    let fpu = fpu_image(mc).inspect_err(|e| {
+        kprintln!("pid {}: sigreturn set_fpcontext err {}", pid(), e.get());
+    })?;
     // Checked: from here on nothing fails.
     if let Some(fpu) = fpu {
         // SAFETY: `fpu_image` checked everything XRSTOR checks.

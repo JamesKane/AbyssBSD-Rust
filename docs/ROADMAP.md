@@ -633,7 +633,8 @@ P4.0 ─► P4.1 ─► P4.2 ─► P4.3 ─┬─► P4.4 ─┐
     - XSAVE leaves most of its header unwritten, so stale heap bytes in `XCOMP_BV` made
       `sigreturn` reject about one context in three.
     - `sigreturn`'s RFLAGS check lacked RF, which a frame saved on the way back from a fault
-      carries.
+      carries. (The fix itself did not land with P4.4; it did with P4.5, after CI under TCG
+      showed the failure.)
     - A signal that arrived while blocked did not end a later `sigsuspend`. Lowering the mask now
       marks the thread interrupted.
   - **Deviations** (no SVE signal context, no core dumps, process-wide signal state) are listed in
@@ -678,10 +679,19 @@ P4.0 ─► P4.1 ─► P4.2 ─► P4.3 ─┬─► P4.4 ─┐
     FreeBSD 15.1 natively, which caught one wrong assumption (a pipe holds 64 KiB, not 16). A
     kernel test runs `/rescue/sh` over pipelines, `cd`, `ls -l`, `sed`, `head`, `tail`, `md5`,
     and `realpath`.
-  - **Bug found on the way:** on arm64, a successful system call left `x1` as it was; FreeBSD
-    writes the second result (0) there. libc's `vfork` computes `x0 & (x1 - 1)`, so the parent's
-    pid came back garbled, sometimes 0, and the parent then ran the child's code. The arm64
-    machine-code test now checks `x1`.
+  - **Bugs found on the way:**
+    - On arm64, a successful system call left `x1` as it was; FreeBSD writes the second result
+      (0) there. libc's `vfork` computes `x0 & (x1 - 1)`, so the parent's pid came back garbled,
+      sometimes 0, and the parent then ran the child's code. The arm64 machine-code test now
+      checks `x1`.
+    - P4.4's RF fix had not landed: a signal delivered on the way out of a page fault saved RF,
+      `sigreturn` refused the context, and the trampoline's `hlt` became `SIGBUS`. CI under TCG
+      hit it. `tests/user/signals.c` now returns from a fault handler, which fails every time
+      without the fix, and amd64's `sigreturn` reports refusals on the console, as FreeBSD's does.
+    - Running `signals.c` on FreeBSD showed the test itself was wrong: a `SIGCHLD` handler without
+      `SA_RESTART` makes the parent's `wait4` fail with `EINTR`, because FreeBSD signals the
+      parent before waking it, and a sleep a signal interrupted reports it even if what it
+      waited for also came. The kernel now does both, and the test checks both cases.
   - **Deviations** (read-only files, the console's input, advisory locks, `SIGIO`) are in
     [compat-deviations.md](compat-deviations.md).
 

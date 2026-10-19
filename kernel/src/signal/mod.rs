@@ -418,11 +418,13 @@ pub(crate) fn notify_parent(child: &Process, code: i32, status: i32) {
     let Some(parent) = child.parent() else {
         return;
     };
-    parent.child_changed();
     let nocldstop = parent.signals.lock().action(SIGCHLD).sa_flags & SA_NOCLDSTOP != 0;
     if nocldstop && (code == code::CLD_STOPPED || code == code::CLD_CONTINUED) {
+        parent.child_changed();
         return;
     }
+    // The signal first, then the wakeup, as FreeBSD's exit does: a
+    // parent waiting with a handler (and no `SA_RESTART`) sees `EINTR`.
     let _ = post(
         &parent,
         Siginfo {
@@ -433,6 +435,7 @@ pub(crate) fn notify_parent(child: &Process, code: i32, status: i32) {
             ..Siginfo::default()
         },
     );
+    parent.child_changed();
 }
 
 /// Whether `p`'s parent asked not to keep zombies (`SIGCHLD` ignored, or

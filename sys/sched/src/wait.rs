@@ -63,16 +63,26 @@ impl WaitQueue {
 
     /// Sleeps until `done` returns true, or until the thread is interrupted
     /// ([`Thread::interrupt`]; at once if it already is). `done` runs as in
-    /// [`WaitQueue::wait_until`], and wins if both hold.
+    /// [`WaitQueue::wait_until`]. Before sleeping, `done` wins if both
+    /// hold; once the thread has slept, an interruption wins, as FreeBSD's
+    /// interruptible sleeps report a signal that came during the sleep even
+    /// if the awaited event came too (a parent sees `SIGCHLD` interrupt its
+    /// `wait4`).
     pub fn wait_until_interruptible(
         &self,
         _s: &crate::Sleepable,
         mut done: impl FnMut() -> bool,
     ) -> Result<(), Interrupted> {
         let me = crate::current();
+        let mut slept = false;
         loop {
             let irq = hal::irq::disable();
             let mut q = self.waiters.lock();
+            if slept && me.is_interrupted() {
+                drop(q);
+                hal::irq::restore(irq);
+                return Err(Interrupted);
+            }
             if done() {
                 drop(q);
                 hal::irq::restore(irq);
@@ -100,6 +110,7 @@ impl WaitQueue {
             } else {
                 drop(q);
                 crate::switch_away();
+                slept = true;
             }
             // Whoever woke us unqueued us. An interrupt may still hold our
             // `wchan`: wait for it before the queue can go away.

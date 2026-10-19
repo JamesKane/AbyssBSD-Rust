@@ -11,6 +11,7 @@
  */
 
 #include <sys/types.h>
+#include <sys/mman.h>
 #include <sys/syscall.h>
 #include <sys/thr.h>
 #include <sys/wait.h>
@@ -59,6 +60,18 @@ on_plain(int sig)
 {
 	hits++;
 	last_sig = sig;
+}
+
+/* A page a handler makes accessible. */
+static char *fixable;
+
+static void
+on_fixable(int sig, siginfo_t *si, void *uc)
+{
+	(void)uc;
+	last_sig = sig;
+	last_addr = si->si_addr;
+	mprotect(fixable, (size_t)getpagesize(), PROT_READ | PROT_WRITE);
 }
 
 static void
@@ -210,6 +223,20 @@ faults(void)
 	CHECK(last_sig == SIGSEGV);
 	CHECK(last_code == SEGV_MAPERR);
 	CHECK(last_addr == (void *)bad);
+
+	/*
+	 * A handler that fixes the fault and returns: the access runs again.
+	 * The context comes from a fault, whose saved flags carry amd64's RF.
+	 */
+	fixable = mmap(NULL, (size_t)getpagesize(), PROT_NONE,
+	    MAP_ANON | MAP_PRIVATE, -1, 0);
+	CHECK(fixable != MAP_FAILED);
+	catch_info(SIGSEGV, on_fixable, 0);
+	last_sig = 0;
+	fixable[5] = 42;
+	CHECK(last_sig == SIGSEGV && last_addr == fixable + 5);
+	CHECK(fixable[5] == 42);
+	munmap(fixable, (size_t)getpagesize());
 	signal(SIGSEGV, SIG_DFL);
 }
 
@@ -226,8 +253,22 @@ children(void)
 	pid_t pid;
 	int st;
 
-	/* A default action kills, and the parent hears of it. */
+	/*
+	 * Without SA_RESTART, the child's SIGCHLD interrupts the wait for it
+	 * (it comes before the wakeup); the child is still there to collect.
+	 */
 	catch(SIGCHLD, on_chld, 0);
+	pid = fork();
+	if (pid == 0) {
+		usleep(50000);
+		_exit(0);
+	}
+	errno = 0;
+	CHECK(waitpid(pid, &st, 0) == -1 && errno == EINTR);
+	CHECK(waitpid(pid, &st, 0) == pid && WIFEXITED(st));
+
+	/* A default action kills, and the parent hears of it. */
+	catch(SIGCHLD, on_chld, SA_RESTART);
 	hits = 0;
 	pid = fork();
 	if (pid == 0) {
