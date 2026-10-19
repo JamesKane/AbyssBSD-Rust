@@ -44,7 +44,6 @@ static FREQUENCY: AtomicU64 = AtomicU64::new(0);
 /// Counter value at boot (time zero).
 static EPOCH: AtomicU64 = AtomicU64::new(0);
 
-/// Counter ticks per second.
 /// The Unix time, in nanoseconds, at counter zero (0 until a clock has
 /// been read).
 static REALTIME_BASE: AtomicU64 = AtomicU64::new(0);
@@ -56,6 +55,7 @@ pub(crate) fn set_realtime() {
         Some((name, t)) => {
             let unix_ns = t.unix_seconds().unwrap_or(0) * 1_000_000_000 + u64::from(t.nanosecond);
             REALTIME_BASE.store(unix_ns.saturating_sub(now_ns()), Ordering::Release);
+            crate::shared_page::set_realtime(unix_ns);
             kprintln!("clock: {t} from {name}");
         }
         None => kprintln!("clock: no real-time clock answered; the time of day is unknown"),
@@ -67,6 +67,20 @@ pub(crate) fn set_realtime() {
 pub(crate) fn realtime_ns() -> Option<u64> {
     let base = REALTIME_BASE.load(Ordering::Acquire);
     (base != 0).then(|| base + now_ns())
+}
+
+/// The Unix time, in nanoseconds, at boot (0 while unknown).
+pub(crate) fn realtime_base_ns() -> u64 {
+    REALTIME_BASE.load(Ordering::Acquire)
+}
+
+/// The raw counter and, at that count, the nanoseconds since boot.
+pub(crate) fn counter_and_uptime() -> (u64, u64) {
+    let c = counter();
+    (
+        c,
+        ticks_to_ns(c.saturating_sub(EPOCH.load(Ordering::Relaxed))),
+    )
 }
 
 pub(crate) fn frequency() -> u64 {

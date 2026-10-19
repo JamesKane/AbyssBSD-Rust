@@ -581,8 +581,15 @@ P4.0 ─► P4.1 ─► P4.2 ─► P4.3 ─┬─► P4.4 ─┐
     found two bugs. First, `STAR` lacked RPL 3: on AMD, user code then ran with SS 0x18, and its
     next trap faulted on `iretq` with the user's GS live. Second, aarch64 rejected user addresses
     with bit 47 set.
-  - **Left**: the shared page (`vdso_timehands`, and the signal trampoline P4.4 needs), stack
-    ASLR, PIE executables, `pdfork` (it returns a descriptor, P4.5), and `_umtx_op`'s timed waits.
+  - **Shared page**: mapped read-only at `USRSTACK`. It holds `vdso_timekeep`, which a timer
+    updates at least four times per wrap of the 32-bit count (on amd64, the TSC shifted under
+    2^31 Hz). libc reads it through `AT_TIMEKEEP` without a system call, and the kernel's clock
+    calls read it the same way, so the two always agree. `tests/user/vdso.c` checks this from
+    user mode on both architectures: each libc reading falls between two system-call readings,
+    and readings stay monotonic across updates. Under QEMU/KVM, a libc read costs about 18 ns.
+    Test programs from `tests/user/` are now built into the memory disk.
+  - **Left**: the signal trampoline in the shared page (with P4.4), stack ASLR, PIE executables,
+    `pdfork` (it returns a descriptor, P4.5), and `_umtx_op`'s timed waits.
 
 **P4.4 Signals.**
 - `sigaction`, `sigprocmask`, `sigfastblock`, `kill`, pending sets, and default actions (including

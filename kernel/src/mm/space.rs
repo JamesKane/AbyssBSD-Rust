@@ -316,7 +316,8 @@ impl AddressSpace {
     }
 
     /// Maps `object` from page `offset` on over `range`, privately (a
-    /// file's text or data: shared until written, then copied).
+    /// file's text or data: shared until written, then copied), with
+    /// rights `prot` that `mprotect` may raise to `max_prot`.
     pub(crate) fn map_private(
         &self,
         s: &Sleepable,
@@ -324,9 +325,10 @@ impl AddressSpace {
         object: Arc<vm::object::Object>,
         offset: u64,
         prot: Prot,
+        max_prot: Prot,
     ) -> Result<(), SpaceError> {
         let mut map = self.map.lock(s);
-        map.insert(Entry::private(range, prot, Prot::ALL, object, offset))?;
+        map.insert(Entry::private(range, prot, max_prot, object, offset))?;
         Ok(())
     }
 

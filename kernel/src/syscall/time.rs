@@ -26,20 +26,23 @@ fn timespec(ns: u64) -> Timespec {
     }
 }
 
-/// A clock's reading in nanoseconds.
+/// A clock's reading in nanoseconds. The time of day and uptime come from
+/// the shared page's timehands, as libc reads them without the system
+/// call, so the two always agree.
 fn read(id: u64) -> Result<u64, Errno> {
+    use crate::shared_page::{realtime, to_ns, uptime};
     let id = u32::try_from(id).map_err(|_| Errno::EINVAL)?;
     Ok(match id {
         clock::REALTIME | clock::REALTIME_PRECISE | clock::REALTIME_FAST | clock::TAI => {
-            crate::time::realtime_ns().unwrap_or_else(crate::time::now_ns)
+            to_ns(realtime())
         }
         clock::MONOTONIC
         | clock::MONOTONIC_PRECISE
         | clock::MONOTONIC_FAST
         | clock::UPTIME
         | clock::UPTIME_PRECISE
-        | clock::UPTIME_FAST => crate::time::now_ns(),
-        clock::SECOND => crate::time::now_ns() / NANOS * NANOS,
+        | clock::UPTIME_FAST => to_ns(uptime()),
+        clock::SECOND => to_ns(realtime()) / NANOS * NANOS,
         clock::THREAD_CPUTIME_ID | clock::PROCESS_CPUTIME_ID | clock::VIRTUAL | clock::PROF => {
             crate::time::ticks_to_ns(sched::current().runtime())
         }
@@ -71,10 +74,10 @@ pub(super) fn clock_getres(id: u64, tp: u64) -> SysResult {
 /// `gettimeofday(tp, tzp)`.
 pub(super) fn gettimeofday(tp: u64, tzp: u64) -> SysResult {
     if tp != 0 {
-        let ns = read(u64::from(clock::REALTIME))?;
+        let us = crate::shared_page::to_us(crate::shared_page::realtime());
         let tv = Timeval {
-            tv_sec: i64::try_from(ns / NANOS).unwrap_or(i64::MAX),
-            tv_usec: i64::try_from(ns % NANOS / 1000).unwrap_or(0),
+            tv_sec: i64::try_from(us / 1_000_000).unwrap_or(i64::MAX),
+            tv_usec: i64::try_from(us % 1_000_000).unwrap_or(0),
         };
         UserPtr::<Timeval>::new(tp)
             .write(&tv)

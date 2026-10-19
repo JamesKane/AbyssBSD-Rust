@@ -6,7 +6,7 @@
 //! (`offset_of!`, `size_of`), so the check compares what the kernel will
 //! actually use against what FreeBSD's C compiler computes.
 
-use crate::{bus, signal, stat, time};
+use crate::{bus, signal, stat, time, vdso};
 
 /// Architectures a layout applies to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +72,7 @@ pub const CONSTANTS: &[&[ConstValue]] = &[
     crate::signal::CONSTANTS,
     crate::time::CONSTANTS,
     crate::resource::CONSTANTS,
+    crate::vdso::CONSTANTS,
 ];
 
 const fn bus_const(c_name: &'static str, value: i64) -> ConstValue {
@@ -215,6 +216,40 @@ pub static LAYOUTS: &[StructLayout] = &[
         sa_flags => "sa_flags",
         sa_mask => "sa_mask",
     }),
+    layout!(vdso::Bintime, "struct bintime", ["sys/types.h", "sys/time.h"], All, {
+        sec => "sec",
+        frac => "frac",
+    }),
+    layout!(vdso::Timekeep, "struct vdso_timekeep", ["sys/types.h", "sys/time.h", "sys/vdso.h"], All, {
+        tk_ver => "tk_ver",
+        tk_enabled => "tk_enabled",
+        tk_current => "tk_current",
+    }),
+    layout!(vdso::TimehandsX86, "struct vdso_timehands", ["sys/types.h", "sys/time.h", "sys/vdso.h"], Amd64, {
+        th_algo => "th_algo",
+        th_gen => "th_gen",
+        th_scale => "th_scale",
+        th_offset_count => "th_offset_count",
+        th_counter_mask => "th_counter_mask",
+        th_offset => "th_offset",
+        th_boottime => "th_boottime",
+        th_x86_shift => "th_x86_shift",
+        th_x86_hpet_idx => "th_x86_hpet_idx",
+        th_x86_pvc_last_systime => "th_x86_pvc_last_systime",
+        th_x86_pvc_stable_mask => "th_x86_pvc_stable_mask",
+        th_res => "th_res",
+    }),
+    layout!(vdso::TimehandsArm, "struct vdso_timehands", ["sys/types.h", "sys/time.h", "sys/vdso.h"], Arm64, {
+        th_algo => "th_algo",
+        th_gen => "th_gen",
+        th_scale => "th_scale",
+        th_offset_count => "th_offset_count",
+        th_counter_mask => "th_counter_mask",
+        th_offset => "th_offset",
+        th_boottime => "th_boottime",
+        th_physical => "th_physical",
+        th_res => "th_res",
+    }),
 ];
 
 #[cfg(test)]
@@ -228,6 +263,9 @@ mod tests {
         assert_eq!(size_of::<time::Timespec>(), 16);
         assert_eq!(size_of::<stat::Stat>(), 224);
         assert_eq!(size_of::<signal::Sigaction>(), 32);
+        assert_eq!(size_of::<vdso::Timekeep>(), 16);
+        assert_eq!(size_of::<vdso::TimehandsX86>(), 88);
+        assert_eq!(size_of::<vdso::TimehandsArm>(), 88);
     }
 
     #[test]

@@ -487,4 +487,5 @@ dependencies = [
  "guid",
  "ktest",
  "syscallgen",
+ "ustar",
 ]

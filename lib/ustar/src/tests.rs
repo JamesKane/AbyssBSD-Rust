@@ -121,6 +121,13 @@ fn malformed_archives_are_errors() {
         Some(Err(Error::BadChecksum { offset: 0 }))
     );
 
+    // The entries end where the end blocks start.
+    assert_eq!(Archive::new(&good).entries_len(), Ok(2 * BLOCK));
+    assert_eq!(
+        Archive::new(&bad_sum).entries_len(),
+        Err(Error::BadChecksum { offset: 0 })
+    );
+
     // Data past the end.
     let short = &good[..BLOCK + 2];
     assert_eq!(

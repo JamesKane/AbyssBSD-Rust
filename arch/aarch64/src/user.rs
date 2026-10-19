@@ -31,10 +31,32 @@ const TCR_EPD0: u64 = 1 << 7;
 /// `SCTLR_EL1.SPAN`: when clear, taking an exception to EL1 sets PAN.
 const SCTLR_SPAN: u64 = 1 << 23;
 
-/// Prepares this CPU for user mode: turns on PAN (no kernel access to user
-/// pages except through the unprivileged loads and stores) where the CPU
-/// has it, and keeps it on across exceptions. Call on every CPU.
+/// `CNTKCTL_EL1`: EL0 may read the virtual count (`EL0VCTEN`), and nothing
+/// else of the timers (`EL0PCTEN`, `EL0VTEN`, `EL0PTEN` clear).
+const CNTKCTL_EL0VCTEN: u64 = 1 << 1;
+const CNTKCTL_EL0_BITS: u64 = 0b11 << 8 | 0b11;
+
+/// Prepares this CPU for user mode: lets user code read the virtual count
+/// (libc's `clock_gettime` reads it through the shared page's timehands),
+/// and turns on PAN (no kernel access to user pages except through the
+/// unprivileged loads and stores) where the CPU has it, keeping it on
+/// across exceptions. Call on every CPU.
 pub fn init_cpu() {
+    // SAFETY: this CPU's timer access controls for EL0; the kernel's own
+    // timer use is unaffected.
+    unsafe {
+        asm!(
+            "mrs {v}, cntkctl_el1",
+            "bic {v}, {v}, {clear}",
+            "orr {v}, {v}, {set}",
+            "msr cntkctl_el1, {v}",
+            "isb",
+            v = out(reg) _,
+            clear = in(reg) CNTKCTL_EL0_BITS,
+            set = in(reg) CNTKCTL_EL0VCTEN,
+            options(nostack),
+        );
+    }
     let mmfr1: u64;
     // SAFETY: reading an ID register.
     unsafe { asm!("mrs {}, id_aa64mmfr1_el1", out(reg) mmfr1, options(nomem, nostack)) };

@@ -27,3 +27,4 @@ pub mod sysctl;
 pub mod thr;
 pub mod time;
 pub mod uio;
+pub mod vdso;

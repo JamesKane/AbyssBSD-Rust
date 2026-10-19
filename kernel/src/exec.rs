@@ -126,6 +126,7 @@ pub(crate) fn load(
             _ => {}
         }
     }
+    crate::shared_page::map(s, space).map_err(space_error)?;
     let stack_base = VirtAddr::new(USRSTACK - STACK_SIZE);
     space
         .map_anonymous(s, Some(stack_base), stack_base, STACK_SIZE, stack_prot)
@@ -168,6 +169,7 @@ fn map_segment(
                 alloc::sync::Arc::clone(object),
                 seg.offset / page,
                 prot,
+                Prot::ALL,
             )
             .map_err(space_error)?;
     }
@@ -295,6 +297,7 @@ fn build_stack(
         (at::ENVC, envp.len() as u64),
         (at::ENVV, envp_at),
         (at::PS_STRINGS, ps_strings),
+        (at::TIMEKEEP, crate::shared_page::timekeep_address()),
         (at::USRSTACKBASE, USRSTACK),
         (at::USRSTACKLIM, STACK_SIZE),
         (at::NULL, 0),

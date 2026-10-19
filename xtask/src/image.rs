@@ -2,8 +2,8 @@
 //! Disk images: a GPT disk with a FAT32 EFI System Partition holding the
 //! loader at the removable-media boot path, the kernel at
 //! `EFI/ABYSS/KERNEL`, the command line at `EFI/ABYSS/CMDLINE`, and the
-//! memory disk (FreeBSD's `/rescue` as a ustar archive, once `cargo xtask
-//! fetch-base` has it) at `EFI/ABYSS/MD`.
+//! memory disk (FreeBSD's `/rescue` and our test programs as a ustar
+//! archive, once `cargo xtask fetch-base` has run) at `EFI/ABYSS/MD`.
 //!
 //! Images are reproducible: GUIDs and the volume serial derive from stable
 //! names, and FAT timestamps are fixed.
@@ -47,9 +47,7 @@ pub(crate) fn build(arch: Arch, opts: build::Options, cmdline: &str) -> Result<P
     let images = build::all(arch, opts)?;
     let read = |p: &PathBuf| fs::read(p).map_err(|e| format!("{}: {e}", p.display()));
     let (loader, kernel) = (read(&images.loader)?, read(&images.kernel)?);
-    let md = crate::base::existing_rescue_image(arch)
-        .map(|p| read(&p))
-        .transpose()?;
+    let md = crate::base::md_image(arch)?;
     let disk = make_disk(
         arch,
         &Contents {

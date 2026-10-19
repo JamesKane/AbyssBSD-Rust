@@ -13,6 +13,7 @@ gpt = { path = "../lib/gpt" }
 guid = { path = "../lib/guid" }
 ktest = { path = "../lib/ktest" }
 syscallgen = { path = "../tools/syscallgen" }
+ustar = { path = "../lib/ustar" }
 
 [lints]
 workspace = true

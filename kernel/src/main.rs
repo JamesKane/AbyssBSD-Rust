@@ -42,6 +42,7 @@ mod power;
 mod proc;
 mod qemu;
 mod random;
+mod shared_page;
 mod smp;
 #[cfg(not(feature = "ktest"))]
 mod stress;
@@ -97,6 +98,7 @@ fn kmain(boot_info: PhysAddr) -> ! {
     arch::user::init_cpu();
     threads::init();
     time::init_cpu();
+    shared_page::init();
     sysctl::init();
     topology::record_this_cpu(hal::CpuId::BOOT);
     hal::irq::enable();

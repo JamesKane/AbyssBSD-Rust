@@ -88,7 +88,11 @@ cargo xtask --remote freebsd-shell                 # the boot-to-shell script ag
 `--freebsd-only` records FreeBSD's numbers alone, for a suite AbyssBSD cannot run yet (`p4`
 until P4.7). `fetch-base` keeps each architecture's `base.txz` under
 `~/abyss/dist/15.1-RELEASE/<arch>/`: the archive, `root/` (`/rescue`, `/lib`, `/usr/include`,
-`/usr/lib`; a sysroot for static test binaries), and `rescue.tar`, the memory-disk image.
+`/usr/lib`; a sysroot for static test binaries), and `rescue.tar`. Run without `--remote` on a
+workstation, it copies `rescue.tar` and a trimmed sysroot (headers, start files, static libraries)
+into `build/dist/`, so clang and lld build the same programs locally. Each image's memory disk is
+`rescue.tar` plus every `tests/user/*.c`, built static and appended as `/usr/tests/abyss/<name>`
+(rebuilt when its source changes); the boot tests run them.
 `freebsd-shell` boots FreeBSD single-user in bhyve and runs `xtask/src/expect.rs`'s `SHELL`
 script against its `/rescue/sh`. That is the script the boot-to-shell test will run against
 AbyssBSD.

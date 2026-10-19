@@ -152,6 +152,16 @@ impl<'a> Archive<'a> {
         }
     }
 
+    /// Where the end-of-archive blocks start: the length of the entries,
+    /// where more entries can be appended.
+    pub fn entries_len(&self) -> Result<usize, Error> {
+        let mut it = self.entries();
+        for e in &mut it {
+            e?;
+        }
+        Ok(it.offset)
+    }
+
     /// The entry at `path`, following hard links to the entry holding the
     /// data (the returned entry has the link's path but the target's kind
     /// and data). Symbolic links are not followed.

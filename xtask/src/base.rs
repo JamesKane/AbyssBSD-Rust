@@ -6,7 +6,15 @@
 //! SHA-256 pinned below (from the release's `MANIFEST`), and partly
 //! unpacked into a root: `/rescue` for the memory-disk image, and the
 //! headers and libraries that make it a sysroot for building static test
-//! binaries (`tests/perf/ubench`) for either architecture.
+//! binaries (`tests/user`, `tests/perf/ubench`) for either architecture.
+//!
+//! Elsewhere (a Linux workstation), `fetch-base` copies what the server
+//! built: `rescue.tar`, and a trimmed sysroot (headers, start files, and
+//! the static libraries a test program links) for clang and lld to build
+//! the same programs with.
+//!
+//! The memory disk is `rescue.tar` with the test programs appended under
+//! `usr/tests/abyss/`, rebuilt with each image.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,6 +25,26 @@ use crate::cli::Args;
 use crate::util::{self, Result};
 
 pub(crate) const RELEASE: &str = "15.1-RELEASE";
+
+/// What a workstation copies of the root to build test programs.
+const SYSROOT_MEMBERS: &[&str] = &[
+    "usr/include",
+    "usr/lib/crt1.o",
+    "usr/lib/crti.o",
+    "usr/lib/crtn.o",
+    "usr/lib/crtbeginT.o",
+    "usr/lib/crtend.o",
+    "usr/lib/libc.a",
+    "usr/lib/libsys.a",
+    "usr/lib/libcompiler_rt.a",
+    "usr/lib/libgcc.a",
+    "usr/lib/libgcc_eh.a",
+    "usr/lib/libthr.a",
+    "usr/lib/libm.a",
+];
+
+/// Where the memory disk puts the test programs.
+const TESTS_DIR: &str = "usr/tests/abyss";
 
 /// What is unpacked from `base.txz`.
 const MEMBERS: &[&str] = &["./rescue", "./lib", "./usr/include", "./usr/lib"];
@@ -50,7 +78,8 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     let arches = Arch::from_args(&mut args)?;
     args.finish()?;
     if !cfg!(target_os = "freebsd") {
-        // Elsewhere, copy the memory-disk images the server built.
+        // Elsewhere, copy the memory-disk images and sysroots the server
+        // built.
         for arch in arches {
             let local = local_rescue_image(arch);
             fs::create_dir_all(local.parent().ok_or("no parent")?)?;
@@ -61,7 +90,25 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
             );
             util::run(Command::new("scp").arg("-q").arg(&remote).arg(&local))
                 .map_err(|e| format!("{e} (run `cargo xtask --remote fetch-base` first)"))?;
-            println!("fetch-base: {arch}: {}", local.display());
+            let sysroot = local_sysroot(arch);
+            let tmp = sysroot.with_extension("tmp");
+            let _ = fs::remove_dir_all(&tmp);
+            fs::create_dir_all(&tmp)?;
+            let copy = format!(
+                "ssh -n {} 'cd abyss/dist/{RELEASE}/{}/root && tar -cf - {}' | tar -xf - -C {}",
+                crate::remote::host(),
+                arch.freebsd_name(),
+                SYSROOT_MEMBERS.join(" "),
+                tmp.display()
+            );
+            util::run(Command::new("sh").arg("-c").arg(&copy))?;
+            let _ = fs::remove_dir_all(&sysroot);
+            fs::rename(&tmp, &sysroot)?;
+            println!(
+                "fetch-base: {arch}: {} and {}",
+                local.display(),
+                sysroot.display()
+            );
         }
         return Ok(());
     }
@@ -127,16 +174,38 @@ pub(crate) fn root(arch: Arch) -> Result<PathBuf> {
 
 /// Where a non-FreeBSD host keeps its copy of `arch`'s `rescue.tar`.
 fn local_rescue_image(arch: Arch) -> PathBuf {
+    local_dir(arch).join("rescue.tar")
+}
+
+/// Where a non-FreeBSD host keeps its copies of `arch`'s base.
+fn local_dir(arch: Arch) -> PathBuf {
     util::root()
         .join("build/dist")
         .join(RELEASE)
         .join(arch.freebsd_name())
-        .join("rescue.tar")
+}
+
+/// Where a non-FreeBSD host keeps `arch`'s trimmed sysroot.
+fn local_sysroot(arch: Arch) -> PathBuf {
+    local_dir(arch).join("sysroot")
+}
+
+/// The sysroot to build `arch`'s FreeBSD programs against.
+fn sysroot(arch: Arch) -> Result<PathBuf> {
+    if cfg!(target_os = "freebsd") {
+        return root(arch);
+    }
+    let s = local_sysroot(arch);
+    if s.join("usr/lib/libc.a").exists() {
+        Ok(s)
+    } else {
+        Err(format!("{}: no sysroot (run `cargo xtask fetch-base`)", s.display()).into())
+    }
 }
 
 /// `arch`'s memory-disk image, if it has been fetched (on the server, by
 /// `fetch-base`; elsewhere, copied by it).
-pub(crate) fn existing_rescue_image(arch: Arch) -> Option<PathBuf> {
+fn existing_rescue_image(arch: Arch) -> Option<PathBuf> {
     let p = if cfg!(target_os = "freebsd") {
         dir(arch).join("rescue.tar")
     } else {
@@ -166,15 +235,107 @@ pub(crate) fn rescue_image(arch: Arch) -> Result<PathBuf> {
 }
 
 /// Builds a static FreeBSD program from C `source` for `arch`, against that
-/// architecture's base as the sysroot.
+/// architecture's base as the sysroot (with the base system's `cc` on
+/// FreeBSD, clang and lld elsewhere).
 pub(crate) fn cc_static(arch: Arch, source: &Path, out: &Path) -> Result<()> {
-    let root = root(arch)?;
-    util::run(
+    let root = sysroot(arch)?;
+    let mut cc = if cfg!(target_os = "freebsd") {
         Command::new("cc")
-            .arg(format!("--target={}", arch.clang_target()))
+    } else {
+        let mut c = Command::new("clang");
+        c.arg("-fuse-ld=lld");
+        c
+    };
+    util::run(
+        cc.arg(format!("--target={}", arch.clang_target()))
             .arg(format!("--sysroot={}", root.display()))
             .args(["-static", "-O2", "-Wall", "-Wextra", "-Werror", "-o"])
             .arg(out)
             .arg(source),
     )
+}
+
+/// The memory-disk image for `arch`, if `fetch-base` has run: `/rescue`
+/// plus each `tests/user/*.c` built into `usr/tests/abyss/` (rebuilt when
+/// its source changes).
+pub(crate) fn md_image(arch: Arch) -> Result<Option<Vec<u8>>> {
+    let Some(rescue) = existing_rescue_image(arch) else {
+        return Ok(None);
+    };
+    let mut md = fs::read(&rescue).map_err(|e| format!("{}: {e}", rescue.display()))?;
+    let end = ustar::Archive::new(&md)
+        .entries_len()
+        .map_err(|e| format!("{}: {e:?}", rescue.display()))?;
+    md.truncate(end);
+    let out_dir = util::root()
+        .join("build")
+        .join(arch.to_string())
+        .join("user");
+    fs::create_dir_all(&out_dir)?;
+    let mut sources: Vec<PathBuf> = fs::read_dir(util::root().join("tests/user"))?
+        .map(|e| e.map(|e| e.path()))
+        .collect::<std::io::Result<_>>()?;
+    sources.retain(|p| p.extension().is_some_and(|x| x == "c"));
+    sources.sort();
+    let mut dir = String::new();
+    for part in TESTS_DIR.split('/') {
+        dir = if dir.is_empty() {
+            part.to_string()
+        } else {
+            format!("{dir}/{part}")
+        };
+        append(&mut md, &format!("{dir}/"), b'5', 0o755, &[])?;
+    }
+    for src in sources {
+        let name = src
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or("bad test name")?;
+        let bin = out_dir.join(name);
+        let stale = match (
+            fs::metadata(&src)?.modified(),
+            fs::metadata(&bin).and_then(|m| m.modified()),
+        ) {
+            (Ok(s), Ok(b)) => s > b,
+            _ => true,
+        };
+        if stale {
+            cc_static(arch, &src, &bin)?;
+        }
+        let data = fs::read(&bin)?;
+        append(&mut md, &format!("{TESTS_DIR}/{name}"), b'0', 0o555, &data)?;
+    }
+    md.resize(md.len() + 2 * ustar::BLOCK, 0);
+    Ok(Some(md))
+}
+
+/// Appends a ustar entry (root-owned, time zero, so images are
+/// reproducible).
+fn append(tar: &mut Vec<u8>, path: &str, kind: u8, mode: u32, data: &[u8]) -> Result<()> {
+    let mut h = [0u8; ustar::BLOCK];
+    if path.len() > 100 {
+        return Err(format!("{path}: name too long for ustar").into());
+    }
+    h[..path.len()].copy_from_slice(path.as_bytes());
+    let octal = |field: &mut [u8], v: u64| {
+        let s = format!("{v:0w$o}\0", w = field.len() - 1);
+        field.copy_from_slice(s.as_bytes());
+    };
+    octal(&mut h[100..108], u64::from(mode));
+    octal(&mut h[108..116], 0);
+    octal(&mut h[116..124], 0);
+    octal(&mut h[124..136], data.len() as u64);
+    octal(&mut h[136..148], 0);
+    h[156] = kind;
+    h[257..263].copy_from_slice(b"ustar\0");
+    h[263..265].copy_from_slice(b"00");
+    h[265..269].copy_from_slice(b"root");
+    h[297..302].copy_from_slice(b"wheel");
+    h[148..156].fill(b' ');
+    let sum: u32 = h.iter().map(|&b| u32::from(b)).sum();
+    h[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+    tar.extend_from_slice(&h);
+    tar.extend_from_slice(data);
+    tar.resize(tar.len().next_multiple_of(ustar::BLOCK), 0);
+    Ok(())
 }

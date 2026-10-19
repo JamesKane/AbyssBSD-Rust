@@ -384,6 +384,36 @@ ktest! {
 }
 
 ktest! {
+    fn shared_page_clock_is_monotonic_and_agrees() {
+        use crate::shared_page::{realtime, to_ns, uptime, wind};
+        let mut last = uptime();
+        for i in 0..20_000 {
+            if i % 1000 == 0 {
+                wind();
+            }
+            let t = uptime();
+            assert!((t.sec, t.frac) >= (last.sec, last.frac), "{t:?} after {last:?}");
+            last = t;
+        }
+        // The kernel's own clock and the timehands agree to well under a
+        // microsecond plus the read gap.
+        let (a, b) = (to_ns(uptime()), crate::time::now_ns());
+        assert!(a.abs_diff(b) < 100_000, "timehands {a} ns, clock {b} ns");
+        // The time of day moves with the uptime: each sample bounds the
+        // boot time between two uptime reads, and the bounds overlap.
+        let boot = || {
+            let (u1, r, u2) = (to_ns(uptime()), to_ns(realtime()), to_ns(uptime()));
+            (r - u2, r - u1)
+        };
+        let (lo1, hi1) = boot();
+        wind();
+        let (lo2, hi2) = boot();
+        // Rounding to nanoseconds may cost one each way.
+        assert!(lo2 <= hi1 + 2 && lo1 <= hi2 + 2, "boot time moved: {lo1}..{hi1} then {lo2}..{hi2}");
+    }
+}
+
+ktest! {
     fn busy_threads_are_preempted() {
         use alloc::sync::Arc;
         use alloc::vec::Vec;
@@ -2592,6 +2622,40 @@ mod user_memory {
         let after = settled_free_pages(&s);
         assert_eq!(after, before, "pages leaked");
         status
+    }
+
+    ktest! {
+        fn shared_page_is_mapped_read_only() {
+            let s = cx();
+            let space = AddressSpace::new().unwrap();
+            crate::shared_page::map(&s, &space).unwrap();
+            let page = crate::exec::USRSTACK;
+            let tk = crate::shared_page::timekeep_address();
+            assert!((page..page + PAGE).contains(&tk));
+            enter(&space);
+            // tk_ver 1, tk_enabled 1.
+            assert_eq!(read_u64(tk), Ok(1 | 1 << 32));
+            assert!(copy_out(tk, &[0]).is_err(), "user writes are refused");
+            leave();
+            let range = VirtAddr::new(page)..VirtAddr::new(page + PAGE);
+            assert!(space.protect(&s, range, Prot::RW).is_err(), "write is beyond max_prot");
+            space.clear(&s);
+        }
+    }
+
+    ktest! {
+        fn user_clock_reads_the_shared_page() {
+            let s = cx();
+            let p = crate::proc::Process::spawn(
+                &s,
+                b"/usr/tests/abyss/vdso",
+                &[b"vdso"],
+                &[],
+                Some(hal::cpu_id()),
+            )
+            .unwrap();
+            assert_eq!(p.wait(&s), 0);
+        }
     }
 
     ktest! {
