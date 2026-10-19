@@ -139,6 +139,36 @@ fn free_asid(asid: u16) {
     }
 }
 
+/// Pages whose translations changed, to flush: listed while they are few.
+struct Batch {
+    pages: [VirtAddr; 64],
+    /// How many there were; more than `pages` holds means too many.
+    n: usize,
+}
+
+impl Default for Batch {
+    fn default() -> Self {
+        Self {
+            pages: [VirtAddr::ZERO; 64],
+            n: 0,
+        }
+    }
+}
+
+impl Batch {
+    fn push(&mut self, va: VirtAddr) {
+        if let Some(slot) = self.pages.get_mut(self.n) {
+            *slot = va;
+        }
+        self.n = self.n.saturating_add(1);
+    }
+
+    /// The pages, or `None` if there were too many to list.
+    fn pages(&self) -> Option<&[VirtAddr]> {
+        self.pages.get(..self.n)
+    }
+}
+
 /// Where and how to map: anonymous memory, or an object.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Anon {
@@ -263,6 +293,37 @@ impl AddressSpace {
                     arch::user::flush_page(va.get() + off, self.asid);
                     off += PAGE_SIZE;
                 }
+            }
+        }
+    }
+
+    /// [`Self::flush`] for a few scattered pages: one barrier and one
+    /// look at the CPUs for all of them.
+    fn flush_pages(&self, pages: &[VirtAddr]) {
+        let (Some(first), Some(last)) = (pages.iter().min(), pages.iter().max()) else {
+            return;
+        };
+        #[cfg(target_arch = "x86_64")]
+        {
+            let me = 1u64 << hal::cpu_id().0;
+            // As in `flush`.
+            core::sync::atomic::fence(Ordering::SeqCst);
+            let loaded = self.loaded_on.load(Ordering::SeqCst);
+            if loaded & me != 0 {
+                for va in pages {
+                    arch::user::flush_page(va.get());
+                }
+            }
+            if loaded & !me != 0 {
+                let len = last.get() - first.get() + PAGE_SIZE;
+                crate::smp::shootdown_cpus(*first, len, loaded & !me);
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            let _ = (first, last);
+            for va in pages {
+                arch::user::flush_page(va.get(), self.asid);
             }
         }
     }
@@ -477,19 +538,26 @@ impl AddressSpace {
     pub(crate) fn fork(&self, s: &Sleepable) -> Result<Arc<Self>, SpaceError> {
         let mut map = self.map.lock(s);
         let forked = map.fork();
-        for r in forked.write_protect {
-            let len = r.end.get() - r.start.get();
-            let mut changed = false;
-            self.tables.lock().protect(
-                &mut Frames,
-                r.start,
-                len,
-                |a| Attrs { write: false, ..a },
-                |_| changed = true,
-            );
-            if changed {
-                self.flush(r.start, len);
+        // The pages that lose write: usually the few the parent wrote since
+        // the last fork, which are flushed one by one; past a batch, the
+        // whole space.
+        let mut changed = Batch::default();
+        {
+            let mut tables = self.tables.lock();
+            for r in forked.write_protect {
+                let len = r.end.get() - r.start.get();
+                tables.protect(
+                    &mut Frames,
+                    r.start,
+                    len,
+                    |a| Attrs { write: false, ..a },
+                    |va| changed.push(va),
+                );
             }
+        }
+        match changed.pages() {
+            Some(pages) => self.flush_pages(pages),
+            None => self.flush(VirtAddr::new(USER_START), USER_END - USER_START),
         }
         drop(map);
         Self::with_map(forked.child)

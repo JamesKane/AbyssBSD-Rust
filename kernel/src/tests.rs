@@ -225,13 +225,14 @@ ktest! {
 ktest! {
     fn kernel_stacks_have_guard_pages() {
         use crate::mm::kstack::KernelStack;
+        // Five pages: threads' usual four would come from the stack cache.
         // The first stack in a region also creates intermediate page
         // tables, which stay; measure after one has come and gone.
-        drop(KernelStack::new(4).expect("stack"));
+        drop(KernelStack::new(5).expect("stack"));
         let kva = crate::mm::kstack::kva_allocated();
         let free = crate::mm::phys_stats().free;
-        let stack = KernelStack::new(4).expect("stack");
-        assert_eq!(stack.top() - stack.bottom().get(), VirtAddr::new(4 * 4096));
+        let stack = KernelStack::new(5).expect("stack");
+        assert_eq!(stack.top() - stack.bottom().get(), VirtAddr::new(5 * 4096));
         let t = crate::mm::translate(stack.top() - 8).expect("stack mapped");
         assert!(t.attrs.write && !t.attrs.exec);
         assert!(crate::mm::translate(stack.guard()).is_none());
@@ -247,6 +248,33 @@ ktest! {
         assert_eq!(arch::fixup::probe_read(bottom.get()), Err(arch::fixup::Fault));
         assert_eq!(crate::mm::kstack::kva_allocated(), kva);
         assert_eq!(crate::mm::phys_stats().free, free);
+    }
+}
+
+ktest! {
+    fn freed_thread_stacks_are_reused_mapped() {
+        use crate::mm::kstack::{KernelStack, cached_pages, kva_allocated};
+        let pages = crate::threads::STACK_PAGES;
+        let kva = kva_allocated();
+        let stack = KernelStack::new(pages).expect("stack");
+        // After the stack, which may have come out of the cache itself.
+        let cached = cached_pages();
+        let guard = stack.guard();
+        drop(stack);
+        // Counted as free either way.
+        assert_eq!(kva_allocated(), kva);
+        if cached_pages() > cached {
+            // Kept, still mapped below its guard page; the next stack is
+            // that one.
+            assert!(crate::mm::translate(guard + 4096).is_some());
+            assert!(crate::mm::translate(guard).is_none());
+            let again = KernelStack::new(pages).expect("stack");
+            assert_eq!(again.guard(), guard);
+            assert_eq!(arch::fixup::probe_read(again.guard().get()), Err(arch::fixup::Fault));
+        } else {
+            // The cache was full: freed outright.
+            assert!(crate::mm::translate(guard + 4096).is_none());
+        }
     }
 }
 
@@ -2367,10 +2395,15 @@ mod user_memory {
     const HINT: VirtAddr = VirtAddr::new(0x1000_0000);
 
     /// Pages that are free or held by the heap (whose caches keep pages
-    /// for the map's nodes): a page leaked by the VM drops this.
+    /// for the map's nodes) or by cached kernel stacks: a page leaked by
+    /// the VM drops this.
     fn free_pages() -> u64 {
         let h = crate::mm::heap_stats();
-        crate::mm::phys_stats().free + h.slab_pages + h.magazine_pages + h.large_pages
+        crate::mm::phys_stats().free
+            + h.slab_pages
+            + h.magazine_pages
+            + h.large_pages
+            + crate::mm::kstack::cached_pages()
     }
 
     fn enter(space: &Arc<AddressSpace>) {

@@ -101,7 +101,7 @@ pub(crate) fn run(cx: &Sleepable, seconds: u64) -> bool {
     }
     settle(cx);
     let heap0 = crate::mm::heap_stats();
-    let free0 = crate::mm::phys_stats().free;
+    let free0 = crate::mm::phys_stats().free + crate::mm::kstack::cached_pages();
     let kva0 = crate::mm::kstack::kva_allocated();
     let witness0 = witness::violations();
     let Outcome {
@@ -122,7 +122,7 @@ pub(crate) fn run(cx: &Sleepable, seconds: u64) -> bool {
         crate::time::sleep_ns(cx, 10_000_000);
         heap1 = crate::mm::heap_stats();
     }
-    let free1 = crate::mm::phys_stats().free;
+    let free1 = crate::mm::phys_stats().free + crate::mm::kstack::cached_pages();
     let kva1 = crate::mm::kstack::kva_allocated();
     let violations = witness::violations() - witness0;
     kprintln!(
