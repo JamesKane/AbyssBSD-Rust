@@ -103,6 +103,25 @@ fn path(addr: u64) -> Result<Vec<u8>, Errno> {
     Ok(buf)
 }
 
+/// The string at `addr`, at most `limit` bytes with its NUL. The buffer
+/// starts small and doubles: arguments are short, and a buffer sized for
+/// the largest possible one costs its zeroing every time.
+fn string(addr: u64, limit: usize) -> Result<Vec<u8>, Errno> {
+    let mut size = 256.min(limit.max(1));
+    loop {
+        let mut buf = alloc::vec![0u8; size];
+        match uaccess::copy_in_str(addr, &mut buf) {
+            Ok(n) => {
+                buf.truncate(n);
+                return Ok(buf);
+            }
+            Err(uaccess::StrError::Fault) => return Err(Errno::EFAULT),
+            Err(uaccess::StrError::TooLong) if size < limit => size = (size * 2).min(limit),
+            Err(uaccess::StrError::TooLong) => return Err(Errno::E2BIG),
+        }
+    }
+}
+
 /// A NULL-terminated array of string pointers, its strings counted
 /// against `budget`.
 fn strings(addr: u64, budget: &mut usize) -> Result<Vec<Vec<u8>>, Errno> {
@@ -117,13 +136,8 @@ fn strings(addr: u64, budget: &mut usize) -> Result<Vec<Vec<u8>>, Errno> {
         if p == 0 {
             break;
         }
-        let mut buf = alloc::vec![0u8; (*budget).min(256 * 1024)];
-        let n = uaccess::copy_in_str(p, &mut buf).map_err(|e| match e {
-            uaccess::StrError::Fault => Errno::EFAULT,
-            uaccess::StrError::TooLong => Errno::E2BIG,
-        })?;
-        *budget = budget.checked_sub(n + 1).ok_or(Errno::E2BIG)?;
-        buf.truncate(n);
+        let buf = string(p, *budget)?;
+        *budget = budget.checked_sub(buf.len() + 1).ok_or(Errno::E2BIG)?;
         out.push(buf);
     }
     Ok(out)

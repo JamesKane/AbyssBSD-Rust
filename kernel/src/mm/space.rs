@@ -605,13 +605,9 @@ impl Drop for AddressSpace {
         let mut frames = Frames;
         let table = self.tables.get_mut();
         // No CPU has it loaded (the scheduler holds a reference while one
-        // does), so no TLB holds its entries but under its ASID.
-        table.clear(
-            &mut frames,
-            VirtAddr::new(USER_START),
-            USER_END - USER_START,
-            |_, _| {},
-        );
+        // does), so no TLB holds its entries but under its ASID. The leaf
+        // entries need no clearing: the tables holding them go, and the
+        // pages they map belong to the map's objects.
         table.free_tables(&mut frames, VirtAddr::ZERO, USER_END);
         pt::Memory::free_frame(&mut frames, table.root());
         #[cfg(target_arch = "aarch64")]

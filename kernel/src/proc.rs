@@ -672,9 +672,12 @@ impl Process {
         if self.vforked.load(Ordering::Acquire) {
             // The old space is the parent's.
             self.release_parent();
-        } else {
+        } else if Arc::strong_count(&old) > 1 {
+            // Another CPU still has it loaded: empty it now, so its memory
+            // does not wait for that CPU to load another.
             old.clear(s);
         }
+        // Dropping the last reference frees the tables and the pages.
         drop(old);
         self.signals.lock().exec();
         let closed = self.files.lock(s).exec();
@@ -696,15 +699,29 @@ impl Process {
     /// the memory goes now, the children go to init, and the parent gets
     /// `SIGCHLD` (or, if it keeps no zombies, init gets the zombie).
     pub(crate) fn exit(&self, s: &Sleepable, how: Exit) {
-        if self.vforked.load(Ordering::Acquire) {
+        let vforked = self.vforked.load(Ordering::Acquire);
+        if vforked {
             self.release_parent();
-        } else {
-            self.space().clear(s);
         }
         // This CPU lets go of the space too (others it ran on hold it
         // until they load another).
         sched::set_address_space(None);
         space::unload();
+        // The process keeps an empty space; the old one goes now. Dropping
+        // its last reference frees the tables and pages at once; if some
+        // other CPU still has it loaded, it is emptied first so the memory
+        // does not wait for that CPU. (The parent's, after a vfork, stays.)
+        match AddressSpace::new() {
+            Ok(empty) => {
+                let old = core::mem::replace(&mut *self.space.lock(), empty);
+                if !vforked && Arc::strong_count(&old) > 1 {
+                    old.clear(s);
+                }
+                drop(old);
+            }
+            Err(_) if !vforked => self.space().clear(s),
+            Err(_) => {}
+        }
         // Descriptors close before the parent hears: a pipe's reader sees
         // the end first.
         let closed = self.files.lock(s).take_all();
