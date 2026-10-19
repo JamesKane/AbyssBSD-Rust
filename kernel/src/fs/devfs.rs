@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! devfs, as far as the shell needs it: `console`, `null`, `zero`,
-//! `random`, and `urandom` (a link to `random`, as on FreeBSD).
+//! `random`, `urandom` (a link to `random`, as on FreeBSD), `tty` (the
+//! caller's controlling terminal), and the terminals (`ttyu0`).
 //!
-//! The console reads as end of file until the TTY layer takes it over
-//! (P4.6). Each device's number is its inode number, as FreeBSD's devfs
-//! numbers them; the numbers themselves follow creation order.
+//! `console` is the console's terminal when its port can be typed at;
+//! otherwise it only prints, and reads as end of file. Each device's
+//! number is its inode number, as FreeBSD's devfs numbers them; the
+//! numbers themselves follow creation order.
 //!
 //! Behavior reference: sys/fs/devfs/devfs_vnops.c, sys/dev/null/null.c,
 //! sys/dev/random/randomdev.c.
@@ -114,7 +116,11 @@ pub(crate) fn build(fsid: u64) -> Arc<Vnode> {
         // A fixed tree of fixed names: nothing to fail.
         let _ = b.leaf(name, Meta::root(perm, now), leaf, Meta::root(0o555, now));
     };
-    add(&mut b, b"console", 0o600, Arc::new(Console));
+    let console: Arc<dyn CharDevice> = match crate::tty::console() {
+        Some(t) => Arc::new(crate::tty::TtyDevice(t)),
+        None => Arc::new(Console),
+    };
+    add(&mut b, b"console", 0o600, console);
     add(&mut b, b"null", 0o666, Arc::new(Null));
     add(&mut b, b"random", 0o644, Arc::new(Random));
     let _ = b.leaf(
@@ -123,8 +129,25 @@ pub(crate) fn build(fsid: u64) -> Arc<Vnode> {
         Leaf::Symlink(b"random".as_slice().into()),
         Meta::root(0o555, now),
     );
+    add(&mut b, b"tty", 0o666, Arc::new(crate::tty::ControllingTty));
+    let ttys = crate::tty::all();
+    for t in &ttys {
+        add(
+            &mut b,
+            t.name().as_bytes(),
+            0o600,
+            Arc::new(crate::tty::TtyDevice(Arc::clone(t))),
+        );
+    }
     add(&mut b, b"zero", 0o666, Arc::new(Zero));
     let root = b.finish();
+    if let Some(dir) = root.as_dir() {
+        for t in &ttys {
+            if let Ok(v) = dir.lookup(t.name().as_bytes()) {
+                t.set_vnode(&v);
+            }
+        }
+    }
     if let Some(dir) = root.as_dir()
         && let Ok(c) = dir.lookup(b"console")
     {

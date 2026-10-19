@@ -56,6 +56,7 @@ mod tests;
 mod threads;
 mod time;
 mod topology;
+mod tty;
 mod uaccess;
 
 use addr::PhysAddr;

@@ -292,6 +292,12 @@ impl Process {
         p
     }
 
+    /// Whether this is a `vfork` child its parent waits for (FreeBSD's
+    /// `P_PPWAIT`).
+    pub(crate) fn vforked(&self) -> bool {
+        self.vforked.load(Ordering::Acquire)
+    }
+
     /// The address space the process runs in now.
     pub(crate) fn space(&self) -> Arc<AddressSpace> {
         Arc::clone(&self.space.lock())
@@ -350,6 +356,20 @@ impl Process {
         envp: &[&[u8]],
         cpu: Option<hal::CpuId>,
     ) -> Result<Arc<Self>, Errno> {
+        Self::spawn_session(s, path, argv, envp, cpu, None)
+    }
+
+    /// As [`Process::spawn`], with `ctty` as the new session's controlling
+    /// terminal from the start, as init gives a shell its terminal.
+    #[cfg_attr(not(feature = "ktest"), allow(dead_code))] // boot-to-shell (P4.7)
+    pub(crate) fn spawn_session(
+        s: &Sleepable,
+        path: &[u8],
+        argv: &[&[u8]],
+        envp: &[&[u8]],
+        cpu: Option<hal::CpuId>,
+        ctty: Option<&crate::tty::Tty>,
+    ) -> Result<Arc<Self>, Errno> {
         let root = crate::fs::root();
         let file = crate::fs::namespace().lookup(
             &vfs::namei::Lookup {
@@ -364,6 +384,9 @@ impl Process {
         let data_max = default_limits()[rlimit::DATA as usize].rlim_max;
         let image = crate::exec::load(s, &space, &file, path, argv, envp, data_max)?;
         let p = Self::create(space, image.layout, None, crate::fs::console_table());
+        if let Some(t) = ctty {
+            crate::tty::make_controlling(t, &p);
+        }
         let frame = arch::user::user_frame(image.entry, image.sp, image.arg);
         p.start(frame, 0, false, cpu).map_err(|_| Errno::EAGAIN)?;
         Ok(p)
@@ -581,8 +604,26 @@ impl Process {
         // the end first.
         let closed = self.files.lock(s).take_all();
         drop(closed);
+        if self.pid == self.sid() {
+            crate::tty::session_ended(self.pid);
+        }
         // The thread holds the process (its owner); this breaks the cycle.
         *self.thread.lock() = None;
+        // The groups this exit may orphan (its own, its children's):
+        // those not orphaned yet.
+        let groups: Vec<i32> = {
+            let tree = TREE.lock();
+            let mut g: Vec<i32> = tree
+                .children
+                .get(&self.pid)
+                .map(|kids| kids.iter().map(|c| c.pgid()).collect())
+                .unwrap_or_default();
+            g.push(self.pgid());
+            g.sort_unstable();
+            g.dedup();
+            g
+        };
+        let groups: Vec<i32> = groups.into_iter().filter(|&g| !pgrp_orphaned(g)).collect();
         self.status.store(how.status(), Ordering::Relaxed);
         // Release: the status is visible to whoever sees `exited`.
         self.exited.store(true, Ordering::Release);
@@ -632,6 +673,18 @@ impl Process {
         };
         if let Some(init) = find(INIT) {
             init.child_changed();
+        }
+        // A group this exit orphaned, with stopped members, is told to
+        // hang up and continue: nothing could ever continue it otherwise
+        // (FreeBSD's `orphanpg`).
+        for g in groups {
+            let stopped = all()
+                .iter()
+                .any(|p| p.pgid() == g && p.job.lock().stopped != 0);
+            if stopped && pgrp_orphaned(g) {
+                crate::signal::post_group(g, abi::signal::SIGHUP);
+                crate::signal::post_group(g, abi::signal::SIGCONT);
+            }
         }
         if let Some(parent) = parent {
             if described || reaps_nothing {

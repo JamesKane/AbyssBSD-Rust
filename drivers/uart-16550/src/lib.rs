@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! NS16550-compatible UART, polled.
+//! NS16550-compatible UART: output polled, input polled or by interrupt.
 //!
 //! The early console keeps the line settings firmware programmed (from
 //! SPCR); [`Uart::init`] only masks interrupts and enables the FIFOs.
+//! [`Uart::enable_rx_interrupt`] interrupts on received data, which
+//! [`Uart::get`] then reads until the receiver is empty.
 //!
 //! Behavior reference: sys/dev/uart/uart_dev_ns8250.c.
 
@@ -15,7 +17,13 @@ const THR: usize = 0;
 const RBR: usize = 0;
 const IER: usize = 1;
 const FCR: usize = 2;
+const MCR: usize = 4;
 const LSR: usize = 5;
+
+const IER_RXRDY: u8 = 1 << 0;
+const MCR_LOOP: u8 = 1 << 4;
+/// On a PC, OUT2 gates the UART's interrupt to the interrupt controller.
+const MCR_OUT2: u8 = 1 << 3;
 
 const FCR_ENABLE: u8 = 1 << 0;
 const LSR_DATA_READY: u8 = 1 << 0;
@@ -53,6 +61,21 @@ impl<R: RegisterIo> Uart<R> {
     /// A received byte, if one is waiting.
     pub fn get(&self) -> Option<u8> {
         (self.regs.read(LSR) & LSR_DATA_READY != 0).then(|| self.regs.read(RBR))
+    }
+
+    /// Loops what is sent back to the receiver instead of the line (for
+    /// tests of the receive path).
+    pub fn set_loopback(&self, on: bool) {
+        let mcr = self.regs.read(MCR) & !MCR_LOOP;
+        self.regs.write(MCR, if on { mcr | MCR_LOOP } else { mcr });
+    }
+
+    /// Interrupts when data arrives (or the FIFO times out with some).
+    /// Reading everything with [`Uart::get`] clears the interrupt.
+    pub fn enable_rx_interrupt(&self) {
+        let mcr = self.regs.read(MCR);
+        self.regs.write(MCR, mcr | MCR_OUT2);
+        self.regs.write(IER, IER_RXRDY);
     }
 }
 

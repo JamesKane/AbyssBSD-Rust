@@ -260,6 +260,8 @@ dependencies = [
  "storage",
  "sync",
  "sysctl",
+ "tty",
+ "uart",
  "uart-16550",
  "uart-pl011",
  "ustar",
@@ -395,11 +397,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tty"
+version = "0.0.0"
+dependencies = [
+ "abi",
+]
+
+[[package]]
 name = "uart"
 version = "0.0.0"
 dependencies = [
  "bus",
  "devtree",
+ "irq",
+ "sched",
+ "sync",
 ]
 
 [[package]]

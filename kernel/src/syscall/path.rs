@@ -111,6 +111,11 @@ pub(super) fn openat(s: &Sleepable, fd: u64, path_ptr: u64, flags: u64, _mode: u
     if flags & O_DIRECTORY != 0 && !v.is_dir() {
         return Err(Errno::ENOTDIR);
     }
+    // A device may open as another (`/dev/tty`).
+    let v = match v.kind() {
+        VnodeKind::CharDevice(d) if flags & O_PATH == 0 => d.ops.open()?.unwrap_or(v),
+        _ => v,
+    };
     if flags & O_PATH == 0 {
         let writes = fflags & FWRITE != 0 || flags & O_TRUNC != 0;
         match v.kind() {

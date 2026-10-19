@@ -2,13 +2,21 @@
 //! The early console: the serial port and the framebuffer the loader found,
 //! written together, and mirrored into the persistent log ring that the
 //! loader saves to the ESP on the next boot.
+//!
+//! The serial port is also the console terminal's (`ttyu0`): the `uart`
+//! driver on the same registers takes its interrupt, and through
+//! [`PORT`] has received bytes moved to a small buffer in the filter and
+//! on to the terminal in the interrupt thread. Terminal output is written
+//! as it is (the line discipline already turned NL into CR NL).
 
 use core::fmt::{self, Write};
 
 use bootproto::{BootInfo, PixelFormat, Serial};
+use bus::Resource;
 use fb_console::PixelLayout;
 use regs::{AccessWidth, Mmio, StridedMmio};
-use sync::SpinLock;
+use sched::Sleepable;
+use sync::{Once, SpinLock};
 
 /// A 16550 in x86 port space.
 #[cfg(target_arch = "x86_64")]
@@ -31,6 +39,61 @@ enum SerialSink {
     Mmio16550(uart_16550::Uart<StridedMmio>),
     Pl011(uart_pl011::Uart),
 }
+
+impl SerialSink {
+    fn put(&self, b: u8) {
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            Self::Port(u) => u.put(b),
+            Self::Mmio16550(u) => u.put(b),
+            Self::Pl011(u) => u.put(b),
+        }
+    }
+
+    fn get(&self) -> Option<u8> {
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            Self::Port(u) => u.get(),
+            Self::Mmio16550(u) => u.get(),
+            Self::Pl011(u) => u.get(),
+        }
+    }
+
+    fn enable_rx_interrupt(&self) {
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            Self::Port(u) => u.enable_rx_interrupt(),
+            Self::Mmio16550(u) => u.enable_rx_interrupt(),
+            Self::Pl011(u) => u.enable_rx_interrupt(),
+        }
+    }
+
+    #[cfg(feature = "ktest")]
+    fn set_loopback(&self, on: bool) {
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            Self::Port(u) => u.set_loopback(on),
+            Self::Mmio16550(u) => u.set_loopback(on),
+            Self::Pl011(u) => u.set_loopback(on),
+        }
+    }
+
+    /// Clears the receive interrupt, the FIFO having been read empty.
+    fn ack_rx(&self) {
+        if let Self::Pl011(u) = self {
+            u.ack_rx();
+        }
+    }
+}
+
+/// Where the serial port's registers are, to know its `uart` device by.
+#[derive(Clone, Copy, Debug)]
+enum SerialAt {
+    Port(u16),
+    Mmio(u64),
+}
+
+static SERIAL_AT: Once<SerialAt> = Once::new();
 
 struct Sinks {
     serial: Option<SerialSink>,
@@ -180,10 +243,130 @@ pub(crate) fn init(info: &BootInfo) {
         let buf = unsafe { core::slice::from_raw_parts_mut(va.get() as *mut u8, len) };
         logring::Ring::open(buf).ok()
     });
+    let at = info.serial.get().map(|s| match s {
+        Serial::Ns16550Port { port } => SerialAt::Port(port),
+        Serial::Ns16550Mmio(m) | Serial::Pl011(m) => SerialAt::Mmio(m.phys.get()),
+    });
     let mut c = CONSOLE.lock();
     c.serial = serial;
     c.fb = fb;
     c.ring = ring;
+    drop(c);
+    if let Some(at) = at {
+        let _ = SERIAL_AT.set(at);
+        let _ = uart::CONSOLE.set(&PORT);
+    }
+}
+
+/// Writes a terminal's output to the serial port and the screen as it
+/// is.
+fn write_tty(bytes: &[u8]) {
+    let mut c = CONSOLE.lock();
+    if let Some(serial) = &c.serial {
+        for &b in bytes {
+            serial.put(b);
+        }
+    }
+    if c.fb_holds == 0
+        && let Some(fb) = &mut c.fb
+    {
+        for chunk in bytes.utf8_chunks() {
+            let _ = fb.write_str(chunk.valid());
+        }
+    }
+}
+
+/// Has the serial port receive `b` as if typed, by looping it back (for
+/// tests of the input path). Nothing else is written meanwhile: the
+/// console lock is held throughout.
+#[cfg(feature = "ktest")]
+pub(crate) fn loop_back(b: u8) {
+    let c = CONSOLE.lock();
+    if let Some(serial) = &c.serial {
+        serial.set_loopback(true);
+        serial.put(b);
+        // The byte has gone round once the transmitter is empty again; a
+        // newline after it keeps the terminal's echo of both tidy.
+        serial.put(b'\n');
+        serial.set_loopback(false);
+    }
+}
+
+/// Bytes received, between the filter and the interrupt thread.
+struct Received {
+    buf: [u8; 256],
+    len: usize,
+}
+
+static RECEIVED: SpinLock<Received> = SpinLock::new(Received {
+    buf: [0; 256],
+    len: 0,
+});
+
+/// The console's serial port, for the `uart` driver.
+pub(crate) struct Port;
+
+/// The one [`Port`].
+pub(crate) static PORT: Port = Port;
+
+impl uart::ConsolePort for Port {
+    fn is(&self, resources: &[Resource]) -> bool {
+        match SERIAL_AT.get() {
+            Some(SerialAt::Port(p)) => resources
+                .iter()
+                .any(|r| matches!(r, Resource::IoPort { base, .. } if base == p)),
+            Some(SerialAt::Mmio(a)) => resources
+                .iter()
+                .any(|r| matches!(r, Resource::Memory { base, .. } if base == a)),
+            None => false,
+        }
+    }
+
+    fn enable_input(&self, unit: u32) {
+        crate::tty::create_console(unit, write_tty);
+        if let Some(serial) = &CONSOLE.lock().serial {
+            serial.enable_rx_interrupt();
+        }
+    }
+
+    fn receive(&self) -> bool {
+        let c = CONSOLE.lock();
+        let Some(serial) = &c.serial else {
+            return false;
+        };
+        let mut r = RECEIVED.lock();
+        let mut got = false;
+        while let Some(b) = serial.get() {
+            got = true;
+            // A full buffer drops what the thread has not taken yet.
+            if r.len < r.buf.len() {
+                let at = r.len;
+                r.buf[at] = b;
+                r.len += 1;
+            }
+        }
+        serial.ack_rx();
+        got
+    }
+
+    fn deliver(&self, s: &Sleepable) {
+        loop {
+            let mut buf = [0u8; 256];
+            let n = {
+                let mut r = RECEIVED.lock();
+                let n = r.len;
+                buf[..n].copy_from_slice(&r.buf[..n]);
+                r.len = 0;
+                n
+            };
+            if n == 0 {
+                return;
+            }
+            if let Some(t) = crate::tty::console() {
+                t.input(s, &buf[..n]);
+            }
+        }
+    }
 }
 
 /// # Safety

@@ -80,6 +80,7 @@ pub const CONSTANTS: &[&[ConstValue]] = &[
     crate::ioctl::CONSTANTS,
     crate::procdesc::CONSTANTS,
     crate::stat::CONSTANTS,
+    crate::termios::CONSTANTS,
 ];
 
 const fn bus_const(c_name: &'static str, value: i64) -> ConstValue {
@@ -210,6 +211,21 @@ pub static LAYOUTS: &[StructLayout] = &[
         f_fstypename => "f_fstypename",
         f_mntfromname => "f_mntfromname",
         f_mntonname => "f_mntonname",
+    }),
+    layout!(crate::termios::Termios, "struct termios", ["termios.h"], All, {
+        c_iflag => "c_iflag",
+        c_oflag => "c_oflag",
+        c_cflag => "c_cflag",
+        c_lflag => "c_lflag",
+        c_cc => "c_cc",
+        c_ispeed => "c_ispeed",
+        c_ospeed => "c_ospeed",
+    }),
+    layout!(crate::termios::Winsize, "struct winsize", ["sys/ioctl.h"], All, {
+        ws_row => "ws_row",
+        ws_col => "ws_col",
+        ws_xpixel => "ws_xpixel",
+        ws_ypixel => "ws_ypixel",
     }),
     layout!(crate::exec::PsStrings, "struct ps_strings", ["sys/types.h", "sys/exec.h"], All, {
         ps_argvstr => "ps_argvstr",

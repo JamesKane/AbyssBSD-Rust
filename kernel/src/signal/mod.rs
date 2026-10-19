@@ -438,6 +438,20 @@ pub(crate) fn notify_parent(child: &Process, code: i32, status: i32) {
     parent.child_changed();
 }
 
+/// Sends `sig` from the kernel to every process in group `pgid`.
+pub(crate) fn post_group(pgid: i32, sig: u32) {
+    for p in crate::proc::all().iter().filter(|p| p.pgid() == pgid) {
+        let _ = post(p, user_info(sig, 0, code::SI_KERNEL));
+    }
+}
+
+/// Whether `p` ignores or blocks `sig` (a terminal then does not send
+/// it, FreeBSD's `tty_wait_background`).
+pub(crate) fn ignores_or_blocks(p: &Process, sig: u32) -> bool {
+    let st = p.signals.lock();
+    st.action(sig).sa_handler == SIG_IGN || st.mask.has(sig)
+}
+
 /// Whether `p`'s parent asked not to keep zombies (`SIGCHLD` ignored, or
 /// `SA_NOCLDWAIT`).
 pub(crate) fn parent_reaps_nothing(parent: &Process) -> bool {
@@ -654,14 +668,25 @@ pub(crate) fn recheck(p: &Process) {
 /// handler with `SA_RESTART`. `None` means sleep on: what interrupted it
 /// was blocked, ignored, or a stop (done here, in place).
 pub(crate) fn interruption(s: &Sleepable) -> Option<Errno> {
-    let p = Process::current()?;
+    interrupted_by(s).0
+}
+
+/// [`interruption`], and whether the process stopped (and has been
+/// continued) meanwhile.
+fn interrupted_by(s: &Sleepable) -> (Option<Errno>, bool) {
+    let Some(p) = Process::current() else {
+        return (None, false);
+    };
     let t = sched::current();
+    let mut stopped = false;
     loop {
         t.clear_interrupted();
         let fast = fastblocked(&p);
         let orphaned = crate::proc::pgrp_orphaned(p.pgid());
         let mut st = p.signals.lock();
-        let sig = st.pending.minus(st.mask).minus(fast).first()?;
+        let Some(sig) = st.pending.minus(st.mask).minus(fast).first() else {
+            return (None, stopped);
+        };
         let action = st.action(sig);
         if st.ignored(sig) {
             st.discard(sig);
@@ -672,16 +697,18 @@ pub(crate) fn interruption(s: &Sleepable) -> Option<Errno> {
             drop(st);
             if !(prop(sig) & TTYSTOP != 0 && orphaned) {
                 stop(s, &p, sig);
+                stopped = true;
             }
             continue;
         }
         // Delivery happens on the way out; the thread looks again there.
         t.request_ast(AST_SIGNAL);
-        return Some(if st.caught(sig) && action.sa_flags & SA_RESTART != 0 {
+        let e = if st.caught(sig) && action.sa_flags & SA_RESTART != 0 {
             Errno::ERESTART
         } else {
             Errno::EINTR
-        });
+        };
+        return (Some(e), stopped);
     }
 }
 
@@ -714,6 +741,27 @@ pub(crate) fn sleep(
                     return Err(e);
                 }
             }
+        }
+    }
+}
+
+/// [`sleep`] (with no timeout) for a thread that just sent its own group a
+/// stop signal (a terminal's `SIGTTIN` or `SIGTTOU`): once the stop is
+/// over, the sleep ends with `EINTR`, as FreeBSD's does.
+pub(crate) fn sleep_after_stop_signal(
+    s: &Sleepable,
+    q: &WaitQueue,
+    mut cond: impl FnMut() -> bool,
+) -> Result<(), Errno> {
+    loop {
+        match crate::time::wait_interruptible(s, q, &mut cond, None) {
+            Wait::Done => return Ok(()),
+            Wait::TimedOut => {}
+            Wait::Interrupted => match interrupted_by(s) {
+                (Some(e), _) => return Err(e),
+                (None, true) => return Err(Errno::EINTR),
+                (None, false) => {}
+            },
         }
     }
 }

@@ -759,116 +759,21 @@ ktest! {
 }
 
 ktest! {
-    fn device_interrupt_through_irq_domain() {
-        use core::sync::atomic::{AtomicU64, AtomicUsize};
-        static HITS: AtomicU64 = AtomicU64::new(0);
-        static BASE: AtomicUsize = AtomicUsize::new(0);
+    fn console_input_through_the_uart_interrupt() {
+        // A byte looped back through the console UART raises its receive
+        // interrupt: through the IRQ domain to the `uart` driver's filter,
+        // which takes it off the port, and its interrupt thread, which
+        // hands it to the console's terminal.
         let s = cx();
-        HITS.store(0, Ordering::Relaxed);
-
-        // The console UART raises a transmit interrupt on request; the
-        // filter acknowledges it and turns it off again.
-        #[cfg(target_arch = "x86_64")]
-        let (domain, hw, trigger, polarity, filter, start, stop) = {
-            fn filter(arg: usize, _: &sched::IrqCx) -> ::irq::Filter {
-                // SAFETY: COM1's IIR and IER; the console only polls LSR
-                // and writes THR, which this does not disturb.
-                unsafe {
-                    if arch::cpu::inb(0x3fa) & 1 != 0 {
-                        return ::irq::Filter::Stray;
-                    }
-                    arch::cpu::outb(0x3f9, 0);
-                }
-                // `arg` 1: leave the counting to the interrupt thread.
-                if arg == 1 {
-                    return ::irq::Filter::Schedule;
-                }
-                HITS.fetch_add(1, Ordering::Relaxed);
-                ::irq::Filter::Handled
-            }
-            fn start() {
-                // SAFETY: COM1's MCR (OUT2 gates the IRQ line) and IER
-                // (enable the transmit-empty interrupt).
-                unsafe {
-                    let mcr = arch::cpu::inb(0x3fc);
-                    arch::cpu::outb(0x3fc, mcr | 0x08);
-                    arch::cpu::outb(0x3f9, 0x02);
-                }
-            }
-            fn stop() {
-                // SAFETY: as in `start`.
-                unsafe { arch::cpu::outb(0x3f9, 0) };
-            }
-            let (gsi, trigger, polarity) = crate::intc::isa_irq(4);
-            (crate::intc::gsi_domain(), gsi, trigger, polarity, filter as ::irq::FilterFn, start as fn(), stop as fn())
-        };
-        #[cfg(target_arch = "aarch64")]
-        let (domain, hw, trigger, polarity, filter, start, stop) = {
-            let spcr = crate::acpi::find(*b"SPCR")
-                .and_then(|t| acpi_tables::spcr::parse(&t).ok())
-                .expect("SPCR");
-            let va = crate::mm::map_device(addr::PhysAddr::new(spcr.port.base.address), 4096)
-                .expect("map the PL011");
-            BASE.store(usize::try_from(va.get()).unwrap(), Ordering::Relaxed);
-            fn uart() -> regs::Mmio {
-                // SAFETY: the PL011 window mapped above, for good.
-                unsafe { regs::Mmio::new(BASE.load(Ordering::Relaxed), 4096) }
-            }
-            fn filter(arg: usize, _: &sched::IrqCx) -> ::irq::Filter {
-                let u = uart();
-                // UARTMIS bit 5: transmit interrupt.
-                if u.read32(0x40) & (1 << 5) == 0 {
-                    return ::irq::Filter::Stray;
-                }
-                u.write32(0x44, 1 << 5); // UARTICR
-                u.write32(0x38, u.read32(0x38) & !(1 << 5)); // UARTIMSC
-                // `arg` 1: leave the counting to the interrupt thread.
-                if arg == 1 {
-                    return ::irq::Filter::Schedule;
-                }
-                HITS.fetch_add(1, Ordering::Relaxed);
-                ::irq::Filter::Handled
-            }
-            fn start() {
-                let u = uart();
-                u.write32(0x38, u.read32(0x38) | (1 << 5));
-                // A transmitted character raises it.
-                kprintln!("ktest: pl011 transmit interrupt requested");
-            }
-            fn stop() {
-                let u = uart();
-                u.write32(0x38, u.read32(0x38) & !(1 << 5));
-            }
-            (crate::intc::gsi_domain(), spcr.gsiv.expect("SPCR GSIV"), ::irq::Trigger::Level, ::irq::Polarity::High, filter as ::irq::FilterFn, start as fn(), stop as fn())
-        };
-        let _ = &BASE;
-        fn thread(_: usize, _: &sched::Sleepable) {
-            HITS.fetch_add(1, Ordering::Relaxed);
+        let tty = crate::tty::console().expect("the console's uart took its interrupt");
+        let before = tty.received();
+        crate::console::loop_back(b'Z');
+        let t0 = crate::time::now_ns();
+        while tty.received() < before + 2 && crate::time::now_ns() - t0 < 500_000_000 {
+            crate::time::sleep_ns(&s, 1_000_000);
         }
-        // First a filter alone, then a filter that hands off to an
-        // interrupt thread.
-        for (arg, thread) in [(0, None), (1, Some(thread as ::irq::ThreadFn))] {
-            HITS.store(0, Ordering::Relaxed);
-            let h = ::irq::install(
-                domain,
-                hw,
-                trigger,
-                polarity,
-                hal::CpuId::BOOT,
-                ::irq::Handler { name: "ktest-uart", filter: Some(filter), thread, arg },
-            )
-            .expect("install");
-            start();
-            let t0 = crate::time::now_ns();
-            while HITS.load(Ordering::Relaxed) == 0 && crate::time::now_ns() - t0 < 500_000_000 {
-                crate::time::sleep_ns(&s, 1_000_000);
-            }
-            stop();
-            assert!(HITS.load(Ordering::Relaxed) >= 1, "no interrupt from the UART (arg {arg})");
-            assert!(h.count() >= 1);
-            assert!(!h.storm_masked());
-            h.remove(&s);
-        }
+        assert!(tty.received() >= before + 2, "no input from the UART");
+        tty.flush_input(&s);
     }
 }
 
@@ -2574,6 +2479,20 @@ mod user_memory {
     /// [`free_pages`] once it has stopped changing: the reaper frees
     /// earlier tests' threads in its own time.
     fn settled_free_pages(s: &sched::Sleepable) -> u64 {
+        // A CPU keeps the last address space it ran until it loads
+        // another; earlier tests' spaces would otherwise go mid-count.
+        let ncpu = u32::try_from(sched::online_cpus()).unwrap();
+        let workers: Vec<_> = (0..ncpu)
+            .map(|cpu| {
+                sched::Builder::new("unload")
+                    .bind(hal::CpuId(cpu))
+                    .spawn(|_| crate::mm::space::unload())
+                    .unwrap()
+            })
+            .collect();
+        for w in workers {
+            w.join(s);
+        }
         let mut last = free_pages();
         loop {
             crate::time::sleep_ns(s, 10_000_000);
@@ -2776,6 +2695,48 @@ mod user_memory {
             )
             .unwrap();
             assert_eq!(p.wait(&s), crate::proc::Exit::Code(7));
+        }
+    }
+
+    ktest! {
+        fn interactive_sh_job_control_on_the_console() {
+            // /rescue/sh on the console as its controlling terminal, typed
+            // at through the terminal's input path: ^C ends a foreground
+            // job, ^Z stops one, `fg` continues it. Every sleep would take
+            // 30 s if a keystroke did not reach it.
+            use crate::proc::{Exit, Process};
+            let s = cx();
+            let tty = crate::tty::console().expect("the console is a terminal");
+            tty.flush_input(&s);
+            let p = Process::spawn_session(
+                &s,
+                b"/rescue/sh",
+                &[b"sh"],
+                &[b"PATH=/rescue", b"HOME=/", b"TERM=dumb"],
+                None,
+                Some(&tty),
+            )
+            .unwrap();
+            let pause = |ms: u64| crate::time::sleep_ns(&s, ms * 1_000_000);
+            let t0 = crate::time::now_ns();
+            pause(300);
+            tty.input(&s, b"echo typed at the console\n");
+            tty.input(&s, b"sleep 30\n");
+            pause(400);
+            tty.input(&s, b"\x03");
+            pause(200);
+            tty.input(&s, b"sleep 30\n");
+            pause(400);
+            tty.input(&s, b"\x1a");
+            pause(300);
+            tty.input(&s, b"jobs\nfg\n");
+            pause(400);
+            tty.input(&s, b"\x03");
+            pause(200);
+            tty.input(&s, b"exit 6\n");
+            assert_eq!(p.wait(&s), Exit::Code(6));
+            let took = (crate::time::now_ns() - t0) / 1_000_000;
+            assert!(took < 15_000, "the shell took {took} ms: a keystroke went astray");
         }
     }
 

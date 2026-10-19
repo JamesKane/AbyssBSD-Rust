@@ -29,6 +29,7 @@ pub mod stat;
 pub mod sysarch;
 pub mod syscall;
 pub mod sysctl;
+pub mod termios;
 pub mod thr;
 pub mod time;
 pub mod ucontext;

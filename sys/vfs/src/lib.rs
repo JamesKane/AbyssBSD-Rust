@@ -191,6 +191,11 @@ pub trait Directory: Send + Sync {
 
 /// A character device's operations.
 pub trait CharDevice: Send + Sync {
+    /// Called when the device is opened: `Some` opens that vnode instead
+    /// (`/dev/tty` opens the caller's controlling terminal).
+    fn open(&self) -> Result<Option<Arc<Vnode>>, Errno> {
+        Ok(None)
+    }
     /// Reads into `uio`; `nonblock` asks for `EAGAIN` instead of waiting.
     fn read(&self, s: &Sleepable, uio: &mut dyn Uio, nonblock: bool) -> Result<usize, Errno>;
     /// Writes from `uio`.

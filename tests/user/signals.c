@@ -17,6 +17,7 @@
 #include <sys/wait.h>
 
 #include <errno.h>
+#include <fcntl.h>
 #include <setjmp.h>
 #include <signal.h>
 #include <stdint.h>
@@ -296,6 +297,44 @@ children(void)
 	kill(pid, SIGKILL);
 	CHECK(waitpid(pid, &st, 0) == pid);
 	CHECK(WIFSIGNALED(st) && WTERMSIG(st) == SIGKILL);
+
+	/*
+	 * A group left orphaned with a stopped member gets SIGHUP and
+	 * SIGCONT: a child starts a group, forks a member that stops, and
+	 * exits. The member dies of the hangup, closing its end of a pipe.
+	 */
+	{
+		int p[2], i;
+		char c;
+		ssize_t r = -1;
+
+		CHECK(pipe2(p, O_NONBLOCK) == 0);
+		pid = fork();
+		if (pid == 0) {
+			pid_t member;
+
+			setpgid(0, 0);
+			member = fork();
+			if (member == 0) {
+				close(p[0]);
+				raise(SIGSTOP);
+				_exit(0);
+			}
+			close(p[1]);
+			waitpid(member, &st, WUNTRACED);
+			_exit(0);
+		}
+		close(p[1]);
+		CHECK(waitpid(pid, &st, 0) == pid);
+		for (i = 0; i < 300; i++) {
+			r = read(p[0], &c, 1);
+			if (r == 0)
+				break;
+			usleep(10000);
+		}
+		CHECK(r == 0);
+		close(p[0]);
+	}
 
 	/* SIGKILL ends a stop too. */
 	pid = fork();

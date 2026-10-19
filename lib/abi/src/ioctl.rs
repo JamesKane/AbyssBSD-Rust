@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! `ioctl` requests (`sys/ioccom.h`, `sys/filio.h`, `sys/ttycom.h`).
+//! `ioctl` requests (`sys/ioccom.h`, `sys/filio.h`, `sys/ttycom.h`), and
+//! the terminal ones' modem bits and line discipline.
 //!
 //! A request encodes its direction, the size of its argument, a group
 //! letter, and a number. The kernel copies the argument in or out by that
@@ -38,11 +39,51 @@ pub const FIODTYPE: u32 = ioc(IOC_OUT, b'f', 122, 4);
 pub const FIONWRITE: u32 = ioc(IOC_OUT, b'f', 119, 4);
 pub const FIONSPACE: u32 = ioc(IOC_OUT, b'f', 118, 4);
 
-/// `struct termios` is 44 bytes.
-pub const TIOCGETA: u32 = ioc(IOC_OUT, b't', 19, 44);
-/// `struct winsize` is 8 bytes.
-pub const TIOCGWINSZ: u32 = ioc(IOC_OUT, b't', 104, 8);
+/// `struct termios` is 44 bytes, `struct winsize` 8.
+const TERMIOS: u32 = 44;
+const WINSIZE: u32 = 8;
+
+pub const TIOCEXCL: u32 = ioc(IOC_VOID, b't', 13, 0);
+pub const TIOCNXCL: u32 = ioc(IOC_VOID, b't', 14, 0);
+pub const TIOCFLUSH: u32 = ioc(IOC_IN, b't', 16, 4);
+pub const TIOCGETA: u32 = ioc(IOC_OUT, b't', 19, TERMIOS);
+pub const TIOCSETA: u32 = ioc(IOC_IN, b't', 20, TERMIOS);
+pub const TIOCSETAW: u32 = ioc(IOC_IN, b't', 21, TERMIOS);
+pub const TIOCSETAF: u32 = ioc(IOC_IN, b't', 22, TERMIOS);
+pub const TIOCGETD: u32 = ioc(IOC_OUT, b't', 26, 4);
+pub const TIOCSETD: u32 = ioc(IOC_IN, b't', 27, 4);
+pub const TIOCDRAIN: u32 = ioc(IOC_VOID, b't', 94, 0);
+pub const TIOCSCTTY: u32 = ioc(IOC_VOID, b't', 97, 0);
+pub const TIOCGSID: u32 = ioc(IOC_OUT, b't', 99, 4);
+pub const TIOCSTAT: u32 = ioc(IOC_VOID, b't', 101, 0);
+pub const TIOCSWINSZ: u32 = ioc(IOC_IN, b't', 103, WINSIZE);
+pub const TIOCGWINSZ: u32 = ioc(IOC_OUT, b't', 104, WINSIZE);
+pub const TIOCMGET: u32 = ioc(IOC_OUT, b't', 106, 4);
+pub const TIOCMBIC: u32 = ioc(IOC_IN, b't', 107, 4);
+pub const TIOCMBIS: u32 = ioc(IOC_IN, b't', 108, 4);
+pub const TIOCMSET: u32 = ioc(IOC_IN, b't', 109, 4);
+pub const TIOCSTART: u32 = ioc(IOC_VOID, b't', 110, 0);
+pub const TIOCSTOP: u32 = ioc(IOC_VOID, b't', 111, 0);
+pub const TIOCNOTTY: u32 = ioc(IOC_VOID, b't', 113, 0);
+pub const TIOCSTI: u32 = ioc(IOC_IN, b't', 114, 1);
+pub const TIOCOUTQ: u32 = ioc(IOC_OUT, b't', 115, 4);
+pub const TIOCSPGRP: u32 = ioc(IOC_IN, b't', 118, 4);
 pub const TIOCGPGRP: u32 = ioc(IOC_OUT, b't', 119, 4);
+pub const TIOCCDTR: u32 = ioc(IOC_VOID, b't', 120, 0);
+pub const TIOCSDTR: u32 = ioc(IOC_VOID, b't', 121, 0);
+pub const TIOCCBRK: u32 = ioc(IOC_VOID, b't', 122, 0);
+pub const TIOCSBRK: u32 = ioc(IOC_VOID, b't', 123, 0);
+
+/// Modem lines (`TIOCM_*`).
+pub const TIOCM_LE: u32 = 0o001;
+pub const TIOCM_DTR: u32 = 0o002;
+pub const TIOCM_RTS: u32 = 0o004;
+pub const TIOCM_CTS: u32 = 0o040;
+pub const TIOCM_DCD: u32 = 0o100;
+pub const TIOCM_DSR: u32 = 0o400;
+
+/// `TIOCGETD`'s one line discipline.
+pub const TTYDISC: u32 = 0;
 
 pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("IOC_VOID", "sys/ioccom.h", IOC_VOID),
@@ -60,9 +101,43 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("FIODTYPE", "sys/filio.h", FIODTYPE),
     c("FIONWRITE", "sys/filio.h", FIONWRITE),
     c("FIONSPACE", "sys/filio.h", FIONSPACE),
-    c("TIOCGETA", "termios.h", TIOCGETA),
+    c("TIOCEXCL", "sys/ioctl.h", TIOCEXCL),
+    c("TIOCNXCL", "sys/ioctl.h", TIOCNXCL),
+    c("TIOCFLUSH", "sys/ioctl.h", TIOCFLUSH),
+    c("TIOCGETA", "sys/ioctl.h", TIOCGETA),
+    c("TIOCSETA", "sys/ioctl.h", TIOCSETA),
+    c("TIOCSETAW", "sys/ioctl.h", TIOCSETAW),
+    c("TIOCSETAF", "sys/ioctl.h", TIOCSETAF),
+    c("TIOCGETD", "sys/ioctl.h", TIOCGETD),
+    c("TIOCSETD", "sys/ioctl.h", TIOCSETD),
+    c("TIOCDRAIN", "sys/ioctl.h", TIOCDRAIN),
+    c("TIOCSCTTY", "sys/ioctl.h", TIOCSCTTY),
+    c("TIOCGSID", "sys/ioctl.h", TIOCGSID),
+    c("TIOCSTAT", "sys/ioctl.h", TIOCSTAT),
+    c("TIOCSWINSZ", "sys/ioctl.h", TIOCSWINSZ),
     c("TIOCGWINSZ", "sys/ioctl.h", TIOCGWINSZ),
+    c("TIOCMGET", "sys/ioctl.h", TIOCMGET),
+    c("TIOCMBIC", "sys/ioctl.h", TIOCMBIC),
+    c("TIOCMBIS", "sys/ioctl.h", TIOCMBIS),
+    c("TIOCMSET", "sys/ioctl.h", TIOCMSET),
+    c("TIOCSTART", "sys/ioctl.h", TIOCSTART),
+    c("TIOCSTOP", "sys/ioctl.h", TIOCSTOP),
+    c("TIOCNOTTY", "sys/ioctl.h", TIOCNOTTY),
+    c("TIOCSTI", "sys/ioctl.h", TIOCSTI),
+    c("TIOCOUTQ", "sys/ioctl.h", TIOCOUTQ),
+    c("TIOCSPGRP", "sys/ioctl.h", TIOCSPGRP),
     c("TIOCGPGRP", "sys/ioctl.h", TIOCGPGRP),
+    c("TIOCCDTR", "sys/ioctl.h", TIOCCDTR),
+    c("TIOCSDTR", "sys/ioctl.h", TIOCSDTR),
+    c("TIOCCBRK", "sys/ioctl.h", TIOCCBRK),
+    c("TIOCSBRK", "sys/ioctl.h", TIOCSBRK),
+    c("TIOCM_LE", "sys/ioctl.h", TIOCM_LE),
+    c("TIOCM_DTR", "sys/ioctl.h", TIOCM_DTR),
+    c("TIOCM_RTS", "sys/ioctl.h", TIOCM_RTS),
+    c("TIOCM_CTS", "sys/ioctl.h", TIOCM_CTS),
+    c("TIOCM_DCD", "sys/ioctl.h", TIOCM_DCD),
+    c("TIOCM_DSR", "sys/ioctl.h", TIOCM_DSR),
+    c("TTYDISC", "sys/ioctl.h", TTYDISC),
 ];
 
 const fn c(c_name: &'static str, header: &'static str, value: u32) -> ConstValue {

@@ -695,10 +695,41 @@ P4.0 ─► P4.1 ─► P4.2 ─► P4.3 ─┬─► P4.4 ─┐
   - **Deviations** (read-only files, the console's input, advisory locks, `SIGIO`) are in
     [compat-deviations.md](compat-deviations.md).
 
-**P4.6 TTY.**
+**P4.6 TTY.** Done 2026-10-19.
 - The console UART handed over from the kernel log to a tty driver (`uart` attaches as `ttyu0`).
 - TTY layer v1: line discipline, `termios`, the `ioctl` subset, the controlling terminal, and job
   control (`SIGINT`, `SIGTSTP`, `SIGTTIN`/`SIGTTOU`, foreground process groups).
+- As delivered:
+  - **Input.** The `uart` on the console's registers takes the port's interrupt. Its filter has
+    the console move received bytes off the 16550 or PL011, and its interrupt thread hands them
+    to the terminal. The console keeps writing the port, so kernel messages and terminal output
+    share it. `/dev/console` and `/dev/ttyu0` are the terminal, and `/dev/tty` opens the caller's
+    controlling terminal.
+  - **`sys/tty`** (host-tested): FreeBSD's line discipline. Canonical editing (erase, kill, word
+    erase, reprint, literal next, UTF-8 characters erased whole), echo with `^X`, the signal
+    characters, `^S`/`^Q` and `IXANY`, CR/NL mapping, `VEOF`, `OPOST` output (`ONLCR`, `TAB3`,
+    `OCRNL`, `ONOCR`, `ONLRET`, `ONOEOT`), and raw reads with `VMIN` and `VTIME`. `termios`,
+    `winsize`, the defaults, and every terminal `ioctl` number are checked by `abi-check`.
+  - **Job control.** Only a session leader takes a controlling terminal (`TIOCSCTTY`). The
+    background gets `SIGTTIN` for reads, and `SIGTTOU` for writes under `TOSTOP` and for changes
+    (`TIOCSETA`, `TIOCSPGRP`, `TIOCSTI`, and the rest FreeBSD lists), or `EIO` as FreeBSD decides.
+    The read retried after such a stop fails with `EINTR`, as FreeBSD's does. When a session
+    leader exits, its foreground group gets `SIGHUP`. A group an exit orphans with stopped
+    members gets `SIGHUP` and `SIGCONT` (FreeBSD's `orphanpg`).
+  - **Tests.** `tests/user/tty.c` runs a session on the terminal: lines, erase, end of file, raw
+    reads and their timer, `^C`, `SIGWINCH`, and background reads and writes. It passes on both
+    architectures, and on FreeBSD 15.1 over a pty. A kernel test runs an interactive
+    `/rescue/sh` on the console and types at it: `^C` ends a `sleep 30`, `^Z` suspends one, and
+    `jobs` and `fg` bring it back. Another loops a byte back through the UART and waits for it
+    to arrive by interrupt at the terminal.
+  - **Found on the way:** `TIOCSTI` and the other changes must wait from the background, which
+    the first version missed. FreeBSD showed it: the test's session leader typed from the
+    background and stopped. Programs run over ssh inherit `SIGTTIN` and `SIGTTOU` ignored, so the
+    test sets them back. A memory-leak check in the kernel tests counted earlier tests' address
+    spaces, which each CPU let go only when it next loaded another; it now has every CPU let go
+    first.
+  - **Deviations** (no ptys, no `^T` status line, a fixed console line) are in
+    [compat-deviations.md](compat-deviations.md).
 
 **P4.7 Verification and performance.**
 - The boot-to-shell expect test in CI on both architectures: pipelines, `^Z` and `fg`, `ls`, `cat`,
