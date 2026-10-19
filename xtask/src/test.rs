@@ -90,7 +90,7 @@ fn stress(
     release: bool,
     verbose: bool,
 ) -> Result<std::result::Result<(), String>> {
-    let cmdline = format!("abyss.qemu_exit=1 abyss.stress={duration}");
+    let cmdline = format!("abyss.verifier=1 abyss.qemu_exit=1 abyss.stress={duration}");
     let disk = image::build(
         arch,
         build::Options {
@@ -251,11 +251,14 @@ const FAULT_REPORT: &[&str] = &[
 
 fn boot(case: &BootCase, release: bool, verbose: bool) -> Result<std::result::Result<(), String>> {
     // bhyve has no exit device: the kernel powers off after a pass.
+    // CI runs with the verifier on (DRIVER-MODEL.md §13.1).
     let base = match (case.vmm, case.warm_reset) {
-        (Vmm::Bhyve, _) => "",
+        (Vmm::Bhyve, _) => "abyss.verifier=1",
         // QEMU runs can press the power button (QMP).
-        (Vmm::Qemu, true) => "abyss.qemu_exit=1 abyss.test.warm_reset=1 abyss.test.power_button=1",
-        (Vmm::Qemu, false) => "abyss.qemu_exit=1 abyss.test.power_button=1",
+        (Vmm::Qemu, true) => {
+            "abyss.verifier=1 abyss.qemu_exit=1 abyss.test.warm_reset=1 abyss.test.power_button=1"
+        }
+        (Vmm::Qemu, false) => "abyss.verifier=1 abyss.qemu_exit=1 abyss.test.power_button=1",
     };
     let cmdline = format!("{base} {}", case.cmdline);
     let cmdline = cmdline.trim();

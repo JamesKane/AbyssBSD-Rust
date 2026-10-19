@@ -351,7 +351,9 @@ impl Driver for VtBlk {
     }
 
     fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
-        if let Some(line) = self.line.lock().take() {
+        // Taken in its own statement: installing may sleep.
+        let line = self.line.lock().take();
+        if let Some(line) = line {
             cx.interrupt(line, Some(filter), Some(completions), 0)?;
         }
         self.dev.ready();
@@ -362,7 +364,9 @@ impl Driver for VtBlk {
 
     fn stop(&self, cx: &mut StopCx<'_>, _: StopReason) {
         let s = cx.sleepable();
-        if let Some(disk) = self.shared.disk.lock().take() {
+        // Taken in its own statement: no spinlock held while withdrawing.
+        let disk = self.shared.disk.lock().take();
+        if let Some(disk) = disk {
             storage::withdraw(s, &disk);
         }
         self.dev.reset();

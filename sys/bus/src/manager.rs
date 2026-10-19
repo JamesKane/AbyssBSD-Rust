@@ -179,6 +179,24 @@ impl core::fmt::Debug for Manager {
 
 static MANAGER: Once<Manager> = Once::new();
 
+/// The manager, if [`init`] has run (gates work without it, in host tests).
+pub(crate) fn try_manager() -> Option<&'static Manager> {
+    MANAGER.get()
+}
+
+/// Sleeps `ms` through the manager's platform if there is one; returns
+/// the milliseconds slept (0 without a manager, so callers keep counting
+/// iterations instead).
+pub(crate) fn try_sleep_ms(s: &Sleepable, ms: u64) -> u64 {
+    match MANAGER.get() {
+        Some(m) => {
+            m.sleep_ms(s, ms);
+            ms
+        }
+        None => 0,
+    }
+}
+
 /// Events kept for /dev/devctl before the oldest are dropped
 /// (`hw.bus.devctl_queue`'s default).
 const EVENT_QUEUE: usize = 1000;

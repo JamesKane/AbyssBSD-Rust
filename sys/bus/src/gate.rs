@@ -68,10 +68,22 @@ impl Gate {
     pub fn revoke(&self, s: &Sleepable) {
         self.revoked.store(true, Ordering::Relaxed);
         fence(Ordering::SeqCst);
-        // Calls inside may be sleeping: give way rather than spin.
-        let _ = s;
+        // Calls inside may be sleeping: give way rather than spin, and say
+        // so if the drain stalls (the verifier's detach timeout).
+        let mut waited_ms = 0u64;
         while self.inside.sum(Ordering::Acquire) != 0 {
-            sched::yield_now();
+            if waited_ms < 5000 {
+                sched::yield_now();
+                waited_ms += crate::manager::try_sleep_ms(s, 1);
+            } else {
+                if let Some(m) = crate::manager::try_manager() {
+                    m.log(format_args!(
+                        "gate: {} call(s) still inside after 5 s of draining",
+                        self.inside.sum(Ordering::Acquire)
+                    ));
+                }
+                waited_ms = 0;
+            }
         }
     }
 }

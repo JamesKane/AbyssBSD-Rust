@@ -234,7 +234,9 @@ impl Driver for AcpiBus {
 
     fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
         let svc = service().ok_or(AttachError::Device("no ACPI namespace"))?;
-        if let Some(line) = self.sci.lock().take() {
+        // Taken in its own statement: installing may sleep.
+        let line = self.sci.lock().take();
+        if let Some(line) = line {
             cx.interrupt(line, Some(sci_filter), Some(sci_thread), 0)?;
             if let Some(e) = &self.events {
                 svc.ops().log(format_args!(

@@ -950,7 +950,9 @@ pub fn reaper(s: &Sleepable) -> ! {
             };
             // The thread is off every CPU: `finish_switch` queued it only
             // after clearing `on_cpu`.
-            if let Some(stack) = t.stack.lock().take() {
+            // Taken in its own statement, for the same reason.
+            let stack = t.stack.lock().take();
+            if let Some(stack) = stack {
                 platform().free_stack(stack);
             }
         }

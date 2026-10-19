@@ -207,7 +207,9 @@ impl Driver for VtRnd {
     }
 
     fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
-        if let Some(line) = self.line.lock().take() {
+        // Taken in its own statement: installing may sleep.
+        let line = self.line.lock().take();
+        if let Some(line) = line {
             cx.interrupt(line, Some(interrupt), None, 0)?;
         }
         self.dev.ready();

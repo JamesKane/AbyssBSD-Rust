@@ -292,6 +292,11 @@ pub(crate) fn ping(cpu: CpuId) {
 /// Sends the cross-call IPI to `targets`, asking each to flush
 /// `[va, va + len)`, and waits for all to acknowledge.
 fn cross_call(va: VirtAddr, len: u64, targets: Targets) {
+    // With interrupts masked this CPU cannot answer another initiator's
+    // call while it waits for CALL_BUSY: both stop forever.
+    if !arch::cpu::interrupts_enabled() {
+        sched::lock::report(format_args!("smp: cross-call with interrupts masked"));
+    }
     while CALL_BUSY
         .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_err()

@@ -53,7 +53,11 @@ static PLATFORM: Platform = Platform;
 /// "kmain".
 pub(crate) fn init() {
     sched::init(&PLATFORM);
-    sched::lock::set_reporter(|args| kprintln!("{args}"));
+    // A witness report comes with where it happened.
+    sched::lock::set_reporter(|args| {
+        kprintln!("{args}");
+        crate::panic::backtrace_here();
+    });
     let irq = hal::irq::disable();
     sched::init_cpu("kmain");
     hal::irq::restore(irq);

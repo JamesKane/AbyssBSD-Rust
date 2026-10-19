@@ -33,3 +33,11 @@ static REPORTER: sync::Once<Reporter> = sync::Once::new();
 pub fn set_reporter(r: Reporter) {
     let _ = REPORTER.set(r);
 }
+
+/// Prints a report the same way (with the kernel's backtrace): for other
+/// subsystems' stall diagnostics.
+pub fn report(args: core::fmt::Arguments<'_>) {
+    if let Some(r) = REPORTER.get() {
+        r(args);
+    }
+}

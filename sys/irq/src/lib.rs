@@ -146,9 +146,13 @@ struct Line {
     root: u32,
     /// The first handler; each links to the next.
     entries: AtomicPtr<Entry>,
-    /// Threads woken for this (level-triggered) line that have not run
-    /// yet; the line is unmasked when the last one has.
+    /// Holds on the line's mask: threads woken for this (level-triggered)
+    /// line that have not run yet, and installs in progress; the line is
+    /// unmasked when the last is released.
     busy: AtomicU32,
+    /// Its last handler is being removed: a thread finishing late must
+    /// not unmask it (with no slot, a held level input would storm).
+    dead: AtomicBool,
     strays: AtomicU64,
     /// Strays in the current storm window, and when it started (ticks).
     storm: SpinLock<(u64, u64)>,
@@ -323,6 +327,19 @@ pub fn install(
     if domain.threaded_only() && handler.filter.is_some() {
         return Err(IrqError::NeedsThread);
     }
+    // The thread first: spawning may sleep, and the lock below masks
+    // interrupts. A refused install tells it to exit.
+    let ithread = match handler.thread {
+        Some(f) => Some(start_ithread(handler.name, f, handler.arg)?),
+        None => None,
+    };
+    let refuse = |e: IrqError| {
+        if let Some(it) = &ithread {
+            it.exit.store(true, Ordering::Release);
+            it.q.wake_all();
+        }
+        Err(e)
+    };
     let mut lines = LINES.lock();
     // SAFETY: registered lines live until removed from the list, which
     // needs the lock we hold.
@@ -335,17 +352,20 @@ pub fn install(
         // SAFETY: as above.
         let line = unsafe { &*l };
         if line.trigger != Trigger::Level || trigger != Trigger::Level {
-            return Err(IrqError::Busy);
+            drop(lines);
+            return refuse(IrqError::Busy);
         }
     }
-    let ithread = match handler.thread {
-        Some(f) => Some(start_ithread(handler.name, f, handler.arg)?),
-        None => None,
-    };
     let line = match shared {
         Some(l) => l,
         None => {
-            let root = domain.connect(hw, trigger, polarity, cpu)?;
+            let root = match domain.connect(hw, trigger, polarity, cpu) {
+                Ok(r) => r,
+                Err(e) => {
+                    drop(lines);
+                    return refuse(e);
+                }
+            };
             let l = Box::into_raw(Box::new(Line {
                 domain,
                 hw,
@@ -354,6 +374,7 @@ pub fn install(
                 root,
                 entries: AtomicPtr::new(ptr::null_mut()),
                 busy: AtomicU32::new(0),
+                dead: AtomicBool::new(false),
                 strays: AtomicU64::new(0),
                 storm: SpinLock::new((0, 0)),
                 masked_by_storm: AtomicBool::new(false),
@@ -362,7 +383,8 @@ pub fn install(
                 domain.disconnect(hw, cpu, root);
                 // SAFETY: never published.
                 drop(unsafe { Box::from_raw(l) });
-                return Err(IrqError::NoVector);
+                drop(lines);
+                return refuse(IrqError::NoVector);
             };
             if slot
                 .compare_exchange(ptr::null_mut(), l, Ordering::Release, Ordering::Relaxed)
@@ -371,7 +393,8 @@ pub fn install(
                 domain.disconnect(hw, cpu, root);
                 // SAFETY: never published.
                 drop(unsafe { Box::from_raw(l) });
-                return Err(IrqError::Busy);
+                drop(lines);
+                return refuse(IrqError::Busy);
             }
             lines.0.push(l);
             l
@@ -392,6 +415,9 @@ pub fn install(
     // it.
     // SAFETY: the line is registered and we hold the lock.
     let l = unsafe { &*line };
+    // Held while linking, released like a thread's: a shared line that a
+    // thread holds masked stays masked until that thread is done.
+    l.busy.fetch_add(1, Ordering::AcqRel);
     let mut link = &l.entries;
     loop {
         let next = link.load(Ordering::Acquire);
@@ -403,7 +429,7 @@ pub fn install(
     }
     link.store(entry, Ordering::Release);
     drop(lines);
-    domain.unmask(hw);
+    l.release();
     Ok(Installed { entry })
 }
 
@@ -443,8 +469,22 @@ impl IThread {
         let Some(&e) = self.entry.get() else { return };
         // SAFETY: the thread is joined before its entry and line are freed.
         let line = unsafe { &*(*core::ptr::with_exposed_provenance::<Entry>(e)).line };
-        if line.trigger == Trigger::Level && line.busy.fetch_sub(1, Ordering::AcqRel) == 1 {
-            line.domain.unmask(line.hw);
+        if line.trigger == Trigger::Level {
+            line.release();
+        }
+    }
+}
+
+impl Line {
+    /// Drops one hold on the line's mask; the last unmasks it.
+    fn release(&self) {
+        if self.busy.fetch_sub(1, Ordering::AcqRel) == 1 && !self.dead.load(Ordering::SeqCst) {
+            self.domain.unmask(self.hw);
+            // `remove` sets `dead` before it masks: if it masked between
+            // our check and our unmask, put its mask back.
+            if self.dead.load(Ordering::SeqCst) {
+                self.domain.mask(self.hw);
+            }
         }
     }
 }
@@ -501,6 +541,7 @@ impl Installed {
         }
         let last = line.entries.load(Ordering::Acquire).is_null();
         if last {
+            line.dead.store(true, Ordering::SeqCst);
             line.domain.mask(line.hw);
             if let Some(slot) = table().slot(line.cpu, line.root) {
                 slot.store(ptr::null_mut(), Ordering::Release);
@@ -511,15 +552,38 @@ impl Installed {
         // A CPU that loaded the line before the unlink marked it running
         // first; wait for every such CPU to finish walking it.
         core::sync::atomic::fence(Ordering::SeqCst);
-        for r in &RUNNING {
+        for (cpu, r) in RUNNING.iter().enumerate() {
+            let mut spins = 0u64;
             while r.load(Ordering::Acquire) == lp {
                 core::hint::spin_loop();
+                spins += 1;
+                if spins == 1 << 30 {
+                    sched::lock::report(format_args!(
+                        "irq: removing {} (hw {}): CPU {cpu} is still dispatching its line",
+                        entry.handler.name, line.hw
+                    ));
+                }
             }
         }
         if let Some(it) = &entry.ithread {
             it.exit.store(true, Ordering::Release);
             it.q.wake_all();
             if let Some(t) = it.thread.get() {
+                let mut yields = 0u64;
+                while !t.has_exited() {
+                    sched::yield_now();
+                    yields += 1;
+                    if yields == 1 << 20 {
+                        sched::lock::report(format_args!(
+                            "irq: removing {} (hw {}): its thread has not exited (state {:?}, \
+                             pending {})",
+                            entry.handler.name,
+                            line.hw,
+                            t.state(),
+                            it.pending.load(Ordering::Relaxed)
+                        ));
+                    }
+                }
                 t.join(s);
             }
             // Woken but never run: it no longer holds the line masked.

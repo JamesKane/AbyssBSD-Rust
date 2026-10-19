@@ -842,6 +842,183 @@ ktest! {
 }
 
 ktest! {
+    fn irq_remove_keeps_a_held_level_line_masked() {
+        // Removing a level line's last handler while its thread is still
+        // running: the thread finishing must not unmask the line (an
+        // input still held would then storm with no handler).
+        use core::sync::atomic::{AtomicBool, AtomicU32, Ordering::SeqCst};
+        static MASKS: AtomicU32 = AtomicU32::new(0);
+        static UNMASKS: AtomicU32 = AtomicU32::new(0);
+        static DISCONNECTED: AtomicBool = AtomicBool::new(false);
+        static IN_HANDLER: AtomicBool = AtomicBool::new(false);
+        static RELEASE: AtomicBool = AtomicBool::new(false);
+        struct Fake;
+        impl ::irq::IrqDomain for Fake {
+            fn name(&self) -> &'static str {
+                "ktest-fake"
+            }
+            fn connect(
+                &self,
+                _: u32,
+                _: ::irq::Trigger,
+                _: ::irq::Polarity,
+                cpu: hal::CpuId,
+            ) -> Result<u32, ::irq::IrqError> {
+                // A root no real input arrives at.
+                #[cfg(target_arch = "x86_64")]
+                return ::irq::alloc_vector(cpu).ok_or(::irq::IrqError::NoVector);
+                #[cfg(target_arch = "aarch64")]
+                {
+                    let _ = cpu;
+                    Ok(287)
+                }
+            }
+            fn disconnect(&self, _: u32, cpu: hal::CpuId, root: u32) {
+                #[cfg(target_arch = "x86_64")]
+                ::irq::free_vector(cpu, root);
+                let _ = (cpu, root);
+                DISCONNECTED.store(true, SeqCst);
+            }
+            fn mask(&self, _: u32) {
+                MASKS.fetch_add(1, SeqCst);
+            }
+            fn unmask(&self, _: u32) {
+                UNMASKS.fetch_add(1, SeqCst);
+            }
+        }
+        static FAKE: Fake = Fake;
+        fn thread(_: usize, _: &sched::Sleepable) {
+            IN_HANDLER.store(true, SeqCst);
+            while !RELEASE.load(SeqCst) {
+                sched::yield_now();
+            }
+        }
+        let s = cx();
+        let h = ::irq::install(
+            &FAKE,
+            0,
+            ::irq::Trigger::Level,
+            ::irq::Polarity::High,
+            hal::CpuId::BOOT,
+            ::irq::Handler { name: "ktest-fake", filter: None, thread: Some(thread), arg: 0 },
+        )
+        .expect("install");
+        let root = h.root();
+        let unmasks = UNMASKS.load(SeqCst);
+        // One interrupt, dispatched on the line's CPU: it masks the line
+        // and wakes the thread.
+        let fire = sched::spawn_on("ktest-fire", sched::Priority::KERNEL, Some(hal::CpuId::BOOT), move |_| {
+            let irq = hal::irq::disable();
+            // SAFETY: interrupts are masked for as long as the token is
+            // used, as in the dispatcher.
+            let cx = unsafe { sched::IrqCx::assume() };
+            assert!(::irq::dispatch(root, &cx), "fake interrupt dispatched");
+            hal::irq::restore(irq);
+        })
+        .expect("spawn");
+        fire.join(&s);
+        while !IN_HANDLER.load(SeqCst) {
+            crate::time::sleep_ns(&s, 1_000_000);
+        }
+        let masks = MASKS.load(SeqCst);
+        // Remove from another thread; once it has masked the line, let the
+        // handler finish.
+        let remover = sched::spawn("ktest-remove", sched::Priority::KERNEL, move |s| h.remove(s))
+            .expect("spawn");
+        while MASKS.load(SeqCst) == masks {
+            crate::time::sleep_ns(&s, 1_000_000);
+        }
+        RELEASE.store(true, SeqCst);
+        remover.join(&s);
+        assert!(DISCONNECTED.load(SeqCst), "line disconnected");
+        assert_eq!(UNMASKS.load(SeqCst), unmasks, "the line was unmasked after remove masked it");
+    }
+}
+
+ktest! {
+    fn irq_install_leaves_a_held_shared_line_masked() {
+        // A second handler joining a level line while the first one's
+        // thread holds it masked: the line stays masked until that thread
+        // is done (unmasked early, a held input storms unmasked).
+        use core::sync::atomic::{AtomicBool, AtomicU32, Ordering::SeqCst};
+        static UNMASKS: AtomicU32 = AtomicU32::new(0);
+        static IN_HANDLER: AtomicBool = AtomicBool::new(false);
+        static RELEASE: AtomicBool = AtomicBool::new(false);
+        struct Fake;
+        impl ::irq::IrqDomain for Fake {
+            fn name(&self) -> &'static str {
+                "ktest-fake-shared"
+            }
+            fn connect(
+                &self,
+                _: u32,
+                _: ::irq::Trigger,
+                _: ::irq::Polarity,
+                cpu: hal::CpuId,
+            ) -> Result<u32, ::irq::IrqError> {
+                // A root no real input arrives at.
+                #[cfg(target_arch = "x86_64")]
+                return ::irq::alloc_vector(cpu).ok_or(::irq::IrqError::NoVector);
+                #[cfg(target_arch = "aarch64")]
+                {
+                    let _ = cpu;
+                    Ok(286)
+                }
+            }
+            fn disconnect(&self, _: u32, cpu: hal::CpuId, root: u32) {
+                #[cfg(target_arch = "x86_64")]
+                ::irq::free_vector(cpu, root);
+                let _ = (cpu, root);
+            }
+            fn mask(&self, _: u32) {}
+            fn unmask(&self, _: u32) {
+                UNMASKS.fetch_add(1, SeqCst);
+            }
+        }
+        static FAKE: Fake = Fake;
+        fn held(_: usize, _: &sched::Sleepable) {
+            IN_HANDLER.store(true, SeqCst);
+            while !RELEASE.load(SeqCst) {
+                sched::yield_now();
+            }
+        }
+        fn other(_: usize, _: &sched::Sleepable) {}
+        let s = cx();
+        let handler = |name, thread| ::irq::Handler { name, filter: None, thread: Some(thread), arg: 0 };
+        let install = |h| {
+            ::irq::install(&FAKE, 0, ::irq::Trigger::Level, ::irq::Polarity::High, hal::CpuId::BOOT, h)
+                .expect("install")
+        };
+        let first = install(handler("ktest-held", held as ::irq::ThreadFn));
+        let root = first.root();
+        let fire = sched::spawn_on("ktest-fire", sched::Priority::KERNEL, Some(hal::CpuId::BOOT), move |_| {
+            let irq = hal::irq::disable();
+            // SAFETY: interrupts are masked for as long as the token is
+            // used, as in the dispatcher.
+            let cx = unsafe { sched::IrqCx::assume() };
+            assert!(::irq::dispatch(root, &cx), "fake interrupt dispatched");
+            hal::irq::restore(irq);
+        })
+        .expect("spawn");
+        fire.join(&s);
+        while !IN_HANDLER.load(SeqCst) {
+            crate::time::sleep_ns(&s, 1_000_000);
+        }
+        let unmasks = UNMASKS.load(SeqCst);
+        let second = install(handler("ktest-other", other as ::irq::ThreadFn));
+        assert_eq!(UNMASKS.load(SeqCst), unmasks, "install unmasked a line a thread holds");
+        RELEASE.store(true, SeqCst);
+        let t0 = crate::time::now_ns();
+        while UNMASKS.load(SeqCst) == unmasks && crate::time::now_ns() - t0 < 1_000_000_000 {
+            crate::time::sleep_ns(&s, 1_000_000);
+        }
+        assert_eq!(UNMASKS.load(SeqCst), unmasks + 1, "unmasked once the thread was done");
+        second.remove(&s);
+        first.remove(&s);
+    }
+}
+
+ktest! {
     fn dma_direct_coherent_and_bounced() {
         use vm::dma::{dir, Backend, DmaBuf, DmaConstraints, DmaMemory, DmaStream, DmaTag};
         let top = crate::mm::dma::top_of_ram();
@@ -2137,5 +2314,119 @@ ktest! {
         w.disarm();
         assert_eq!(w.remaining_ms(), None, "stopped");
         kprintln!("{}: {first} ms, then {later} ms, patted to {patted} ms", w.name());
+    }
+}
+
+/// Detaches and re-attaches `node` (a disk's controller) `cycles` times
+/// while four threads do random I/O on `disk`, checking after every cycle
+/// that grants balanced (the manager asserts it), nothing was dropped, and
+/// memory came back.
+fn detach_stress(node_name: &str, disk: &'static str, cycles: u32) {
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicBool, AtomicU64};
+    let s = cx();
+    let m = bus::manager();
+    let (_, node) = find_named(m, &s, crate::devices::nexus(), node_name)
+        .unwrap_or_else(|| panic!("{node_name}"));
+    let stop = Arc::new(AtomicBool::new(false));
+    let (ops, gone) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+    let workers: alloc::vec::Vec<_> = (0..4u64)
+        .map(|t| {
+            let (stop, ops, gone) = (Arc::clone(&stop), Arc::clone(&ops), Arc::clone(&gone));
+            sched::spawn("detach-io", sched::Priority::KERNEL, move |s| {
+                let mut seed = crate::time::counter() ^ ((t + 1) * 0x9e37_79b9);
+                while !stop.load(Ordering::Acquire) {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    let Some(d) = storage::find(disk) else {
+                        crate::time::sleep_ns(s, 1_000_000);
+                        continue;
+                    };
+                    // Each thread keeps to its own quarter of the disk.
+                    let quarter = d.bytes() / 4 / 4096;
+                    let at = (t * quarter + seed % quarter) * 4096;
+                    let data = alloc::vec![(seed >> 8).to_le_bytes()[0]; 4096];
+                    let w = d.write(s, at, &data);
+                    let r = d.read(s, at, 4096);
+                    for res in [w.map(|()| alloc::vec::Vec::new()), r.clone()] {
+                        match res {
+                            Ok(_) => {}
+                            Err(storage::BioError::Gone) => {
+                                gone.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Err(e) => panic!("{disk}: {e:?} at {at:#x}"),
+                        }
+                    }
+                    // Both succeeded: the data must have stuck, across a
+                    // detach if one came between them.
+                    if let (Ok(()), Ok(back)) = (w, r) {
+                        assert_eq!(back, data, "{disk} at {at:#x}");
+                    }
+                    ops.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+            .unwrap()
+        })
+        .collect();
+    let free_pages = || crate::mm::phys_stats().free;
+    let mut baseline = None;
+    let start = crate::time::counter();
+    for cycle in 0..cycles {
+        crate::time::sleep_ns(&s, 30_000_000);
+        m.detach(node, bus::DetachReason::Requested, &s)
+            .expect("detach");
+        assert!(storage::find(disk).is_none(), "{disk} withdrawn");
+        m.probe_and_attach(node, &s).expect("attach");
+        m.wait_idle(&s);
+        assert_eq!(
+            m.state(node, &s),
+            Some(bus::NodeState::Attached),
+            "cycle {cycle}"
+        );
+        assert!(
+            storage::find(disk).is_some(),
+            "{disk} back after cycle {cycle}"
+        );
+        // The first cycle warms caches; after it, memory must not drift.
+        let free = free_pages();
+        match baseline {
+            None => baseline = Some(free),
+            Some(b) => assert!(
+                free + 64 >= b,
+                "cycle {cycle}: {} pages fewer free than after the first",
+                b - free
+            ),
+        }
+    }
+    stop.store(true, Ordering::Release);
+    for w in workers {
+        w.join(&s);
+    }
+    let ms = (crate::time::counter() - start) * 1000 / crate::time::frequency();
+    assert_eq!(storage::bio::dropped(), 0, "no request was dropped");
+    assert!(ops.load(Ordering::Relaxed) > 0);
+    kprintln!(
+        "{node_name}: {cycles} detach cycles in {ms} ms under I/O ({} ops, {} refused while gone)",
+        ops.load(Ordering::Relaxed),
+        gone.load(Ordering::Relaxed)
+    );
+    let _ = m.take_events();
+}
+
+ktest! {
+    fn detach_stress_vtblk() {
+        let s = cx();
+        let m = bus::manager();
+        // vtbd1's transport.
+        let (transport, _) = find_named(m, &s, crate::devices::nexus(), "vtblk1").expect("vtblk1");
+        let name = m.nameunit(transport, &s).unwrap();
+        detach_stress(alloc::string::String::leak(name), "vtbd1", 8);
+    }
+}
+
+ktest! {
+    fn detach_stress_nvme() {
+        detach_stress("nvme0", "nda0", 8);
     }
 }

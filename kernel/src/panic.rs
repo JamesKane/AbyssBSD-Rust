@@ -48,6 +48,11 @@ pub(crate) fn fatal_trap(report: &arch::TrapReport) -> ! {
     stop(false)
 }
 
+/// Prints this thread's backtrace (witness reports).
+pub(crate) fn backtrace_here() {
+    backtrace(arch::cpu::frame_pointer());
+}
+
 fn backtrace(fp: u64) {
     out!("backtrace:\n");
     for (i, ret) in arch::backtrace::walk(fp).enumerate() {

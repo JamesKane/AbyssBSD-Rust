@@ -51,6 +51,13 @@ pub type Done = Box<dyn FnOnce(Vec<u8>, Result<(), BioError>) + Send>;
 
 /// Requests dropped without being completed (driver bugs).
 static DROPPED: AtomicU64 = AtomicU64::new(0);
+/// Verifier mode: a dropped request is a panic, not a count.
+static VERIFIER: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Turns verifier mode on or off (DRIVER-MODEL.md §13.1).
+pub fn set_verifier(on: bool) {
+    VERIFIER.store(on, Ordering::Relaxed);
+}
 
 /// Requests dropped without being completed since boot.
 #[must_use]
@@ -121,6 +128,13 @@ impl Drop for Bio {
     fn drop(&mut self) {
         if let Some(done) = self.done.take() {
             DROPPED.fetch_add(1, Ordering::Relaxed);
+            assert!(
+                !VERIFIER.load(Ordering::Relaxed),
+                "verifier: a {:?} of {} bytes at {:#x} was dropped uncompleted",
+                self.op,
+                self.buf.len(),
+                self.offset
+            );
             done(core::mem::take(&mut self.buf), Err(BioError::Io));
         }
     }

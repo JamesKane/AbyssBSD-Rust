@@ -60,7 +60,10 @@ static DEFERRED: LockClass = LockClass::new("disk deferred", 450);
 
 enum Target {
     Device {
-        queues: Arc<dyn DiskQueues>,
+        /// The driver's queues, dropped at withdrawal (once the gate has
+        /// drained) so a disk that outlives its driver holds none of the
+        /// driver's grants.
+        queues: SpinLock<Option<Arc<dyn DiskQueues>>>,
         gate: alloc::boxed::Box<Gate>,
         deferred: Vec<Mutex<Vec<Bio>>>,
     },
@@ -218,6 +221,14 @@ impl Disk {
                     bio.complete(Err(BioError::Gone));
                     return;
                 };
+                // Inside the gate the queues are there: withdrawal drops
+                // them only after draining it. (Cloned in its own
+                // statement: no spinlock across `submit`.)
+                let queues = queues.lock().clone();
+                let Some(queues) = queues else {
+                    bio.complete(Err(BioError::Gone));
+                    return;
+                };
                 let q = sched::this_cpu().id().index() % deferred.len();
                 let mut waiting = deferred[q].lock(s);
                 // Behind anything already waiting, to keep order.
@@ -232,18 +243,23 @@ impl Disk {
     /// Resubmits what waits on queue `q`. The driver calls it when a
     /// completion has made room, with none of its own locks held.
     pub fn resume(&self, s: &Sleepable, q: usize) {
-        if let Target::Device {
+        let Target::Device {
             queues,
             gate,
             deferred,
         } = &self.target
-            && let Ok(_inside) = gate.enter()
-            && let Some(list) = deferred.get(q)
-        {
-            let mut waiting = list.lock(s);
-            if !waiting.is_empty() {
-                queues.submit(s, q, &mut waiting);
-            }
+        else {
+            return;
+        };
+        let Ok(_inside) = gate.enter() else { return };
+        let Some(list) = deferred.get(q) else { return };
+        // Cloned in its own statement: the spinlock must not be held
+        // across `submit`, which sleeps on the driver's lock.
+        let queues = queues.lock().clone();
+        let Some(queues) = queues else { return };
+        let mut waiting = list.lock(s);
+        if !waiting.is_empty() {
+            queues.submit(s, q, &mut waiting);
         }
     }
 
@@ -353,6 +369,7 @@ fn taste(s: &Sleepable, disk: &Arc<Disk>) -> Vec<Arc<Disk>> {
 /// partitions. Call from the driver's `start`, ready for I/O.
 pub fn publish(s: &Sleepable, info: DiskInfo, queues: Arc<dyn DiskQueues>) -> Arc<Disk> {
     let n = queues.queues().max(1);
+    let queues = SpinLock::new(Some(queues));
     let disk = Arc::new(Disk {
         name: format!("{}{}", info.name, info.unit),
         sector_size: info.sector_size,
@@ -393,13 +410,20 @@ pub fn withdraw(s: &Sleepable, disk: &Arc<Disk>) {
         !Arc::ptr_eq(d, disk)
             && !matches!(&d.target, Target::Partition { parent, .. } if Arc::ptr_eq(parent, disk))
     });
-    if let Target::Device { gate, deferred, .. } = &disk.target {
+    if let Target::Device {
+        gate,
+        deferred,
+        queues,
+    } = &disk.target
+    {
         gate.revoke(s);
         for list in deferred {
             for bio in core::mem::take(&mut *list.lock(s)) {
                 bio.complete(Err(BioError::Gone));
             }
         }
+        // Nothing can reach the driver now; let go of its state.
+        queues.lock().take();
     }
 }
 

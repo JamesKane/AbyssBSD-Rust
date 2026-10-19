@@ -179,7 +179,16 @@ pub(crate) fn init(s: &Sleepable) {
     } else {
         sched::online_cpus().clamp(1, 4)
     };
+    // Verifier mode (DRIVER-MODEL.md §13.1): the checks that are always
+    // safe (dropped requests panic, stalled drains are reported).
+    // Injected grant failures are their own knob, `abyss.verifier.faults`
+    // (one grant in N fails), as tests that need their devices cannot
+    // take them.
     let verifier = crate::boot::flag("abyss.verifier");
+    let faults = crate::boot::value("abyss.verifier.faults")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    storage::bio::set_verifier(verifier);
     let drivers = drivers();
     let root = bus::init(
         s,
@@ -187,7 +196,7 @@ pub(crate) fn init(s: &Sleepable) {
         drivers,
         bus::Options {
             workers,
-            fault_one_in: if verifier { 64 } else { 0 },
+            fault_one_in: faults,
             fault_seed: crate::time::counter(),
         },
     );
@@ -255,6 +264,10 @@ pub(crate) fn init(s: &Sleepable) {
     kprintln!(
         "bus: device manager up, {} driver(s), {workers} attach worker(s){}",
         drivers.len(),
-        if verifier { ", verifier on" } else { "" }
+        match (verifier, faults) {
+            (false, 0) => alloc::string::String::new(),
+            (true, 0) => ", verifier on".into(),
+            (_, n) => alloc::format!(", verifier on, failing one grant in {n}"),
+        }
     );
 }

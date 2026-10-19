@@ -466,6 +466,18 @@ impl Vm {
                 }
             }
         }
+        // A hang: record where every CPU is, for symbolizing.
+        if matches!(verdict, Some(Outcome::TimedOut))
+            && let Some(sock) = &qmp
+        {
+            match qmp_command(sock, "info registers -a") {
+                Ok(regs) => {
+                    writeln!(logfile, "xtask: timed out; CPU registers:")?;
+                    writeln!(logfile, "{regs}")?;
+                }
+                Err(e) => writeln!(logfile, "xtask: timed out; no registers ({e})")?,
+            }
+        }
         // Give the image a moment to power off by itself, then make sure;
         // what it prints meanwhile (how it powered off) is logged too.
         let grace = Instant::now() + Duration::from_secs(5);
@@ -499,6 +511,34 @@ impl Vm {
             exit_code,
         })
     }
+}
+
+/// Runs a human monitor command through the QMP socket; returns its
+/// output.
+fn qmp_command(sock: &Path, command: &str) -> Result<String> {
+    use std::io::Read;
+    use std::os::unix::net::UnixStream;
+    let mut s = UnixStream::connect(sock)?;
+    s.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let mut buf = vec![0u8; 1 << 20];
+    let _ = s.read(&mut buf)?;
+    writeln!(s, r#"{{"execute":"qmp_capabilities"}}"#)?;
+    let _ = s.read(&mut buf)?;
+    writeln!(
+        s,
+        r#"{{"execute":"human-monitor-command","arguments":{{"command-line":"{command}"}}}}"#
+    )?;
+    let mut out = Vec::new();
+    // The reply can span reads; it ends with a newline after the JSON.
+    loop {
+        let n = s.read(&mut buf)?;
+        out.extend_from_slice(&buf[..n]);
+        if n == 0 || out.ends_with(b"\n") {
+            break;
+        }
+    }
+    let text = String::from_utf8_lossy(&out);
+    Ok(text.replace("\\r\\n", "\n").replace("\\n", "\n"))
 }
 
 /// Presses the VM's power button through its QMP socket.

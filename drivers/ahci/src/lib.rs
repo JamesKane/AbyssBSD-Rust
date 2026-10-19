@@ -682,7 +682,9 @@ impl Driver for Ahci {
     }
 
     fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
-        if let Some(line) = self.line.lock().take() {
+        // Taken in its own statement: installing may sleep.
+        let line = self.line.lock().take();
+        if let Some(line) = line {
             cx.interrupt(line, Some(ctlr_filter), Some(ctlr_thread), 0)?;
         }
         let m = &self.ctlr.mmio;
@@ -769,7 +771,9 @@ impl Driver for AhciCh {
 
     fn stop(&self, cx: &mut StopCx<'_>, _: StopReason) {
         let s = cx.sleepable();
-        if let Some(disk) = self.port.disk.lock().take() {
+        // Taken in its own statement: no spinlock held while withdrawing.
+        let disk = self.port.disk.lock().take();
+        if let Some(disk) = disk {
             storage::withdraw(s, &disk);
         }
         self.port.stop_all(s);

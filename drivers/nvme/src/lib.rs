@@ -784,8 +784,25 @@ impl Driver for Nvme {
 
     fn stop(&self, cx: &mut StopCx<'_>, _: StopReason) {
         let s = cx.sleepable();
-        for disk in core::mem::take(&mut *self.ctrl.disks.lock()) {
+        // Taken in its own statement: no spinlock held while withdrawing.
+        let disks = core::mem::take(&mut *self.ctrl.disks.lock());
+        for disk in disks {
             storage::withdraw(s, &disk);
+        }
+        // Withdrawing stops new I/O; commands already sent finish first
+        // (the handlers are still installed), for at most a second.
+        let in_flight = || {
+            self.ctrl
+                .queues
+                .iter()
+                .map(|q| q.lock(s).slots.iter().filter(|f| f.is_some()).count())
+                .sum::<usize>()
+        };
+        for _ in 0..1000 {
+            if in_flight() == 0 {
+                break;
+            }
+            sleep_ms(s, 1);
         }
         let regs = &self.ctrl.regs;
         // A normal shutdown, then disabled: no more DMA.
@@ -797,6 +814,9 @@ impl Driver for Nvme {
             }
             sleep_ms(s, 1);
         }
+        // Masked first: the controller must not leave its INTx input
+        // asserted once our handler is gone.
+        regs.mmio.write32(reg::INTMS, u32::MAX);
         regs.mmio.write32(reg::CC, 0);
         for q in &self.ctrl.queues {
             let held: Vec<InFlight> = q
