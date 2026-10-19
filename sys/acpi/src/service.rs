@@ -120,12 +120,24 @@ pub fn init(ops: &'static dyn Ops, s: &Sleepable) -> Option<LoadSummary> {
 }
 
 impl Service {
-    fn thread(&self, s: &Sleepable) {
-        let config = Config {
+    /// The configuration of interpreters on the AML thread, whose stack
+    /// bounds their recursion.
+    #[must_use]
+    pub fn config(&self) -> Config {
+        Config {
             limits: Limits::for_stack(STACK),
             ..Config::default()
-        };
-        let mut interp = Interpreter::new(config);
+        }
+    }
+
+    /// The firmware's definition blocks: the DSDT, then the SSDTs.
+    #[must_use]
+    pub fn definition_blocks(&self) -> Vec<&'static [u8]> {
+        self.ops.definition_blocks()
+    }
+
+    fn thread(&self, s: &Sleepable) {
+        let mut interp = Interpreter::new(self.config());
         let mut host = AmlHost {
             ops: self.ops,
             s,

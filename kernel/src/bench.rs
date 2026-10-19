@@ -599,6 +599,40 @@ fn bench_aml(s: &Sleepable) {
     });
 }
 
+/// The `aml.load` payload: QEMU q35's DSDT moved under `\KBNS`
+/// (tests/perf/kbench/ssdt-q35.dsl).
+static AML_SSDT: &[u8] = include_bytes!("../../tests/perf/kbench/ssdt-q35.aml");
+const AML_LOADS: usize = 16;
+
+/// AML namespace load: the payload loaded as an SSDT into a fresh
+/// interpreter holding the firmware's tables (loaded untimed), as FreeBSD
+/// loads it into its live namespace. Median of the loads.
+fn bench_aml_load(s: &Sleepable) {
+    let Some(svc) = acpi::service() else {
+        return;
+    };
+    let (blocks, config) = (svc.definition_blocks(), svc.config());
+    let mut ns = svc.run(s, move |_, host| {
+        let mut ns = Vec::with_capacity(AML_LOADS);
+        for _ in 0..AML_LOADS {
+            let mut interp = aml::Interpreter::new(config.clone());
+            for b in &blocks {
+                let _ = interp.load_table(b, host);
+            }
+            let t0 = time::counter();
+            let r = interp.load_table(AML_SSDT, host);
+            ns.push(time::ticks_to_ns(time::counter() - t0));
+            assert!(
+                r.is_ok_and(|r| r.warnings.is_empty()),
+                "bench: aml.load failed"
+            );
+        }
+        ns
+    });
+    ns.sort_unstable();
+    kprintln!("kbench aml.load {} ns", ns[AML_LOADS / 2]);
+}
+
 /// DMA: map one page-aligned 4 KiB buffer for a read, and unmap it.
 fn bench_dma(s: &Sleepable) {
     let tag = vm::dma::DmaTag::new(
@@ -661,6 +695,7 @@ fn suite_p3(s: &Sleepable) {
     bench_disk(s, "vtbd1", "vtbd");
     bench_disk(s, "nda0", "nda");
     bench_aml(s);
+    bench_aml_load(s);
     bench_dma(s);
     for t in [1, 8] {
         throughput(s, &alloc::format!("gate.t{t}"), t, |_| {

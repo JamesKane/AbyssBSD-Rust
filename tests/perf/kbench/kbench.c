@@ -38,6 +38,8 @@
 
 #include <contrib/dev/acpica/include/acpi.h>
 
+#include "kb_ssdt.h"
+
 #include <vm/vm.h>
 #include <vm/pmap.h>
 #include <vm/vm_extern.h>
@@ -1105,12 +1107,54 @@ kb_dev(void)
 	    (uintmax_t)cycle[KB_DEV_CYCLES / 2]);
 }
 
+/*
+ * AML namespace load: QEMU q35's DSDT, moved under \KBNS (ssdt-q35.dsl),
+ * loaded as an SSDT and unloaded again. Each load gets its own OEM
+ * revision so no two copies are the same table. Median of the loads.
+ */
+#define	KB_AML_LOADS	16
+
+static void
+kb_aml_load(void)
+{
+	uint64_t m[KB_AML_LOADS];
+	ACPI_TABLE_HEADER *t;
+
+	t = malloc(sizeof(kb_ssdt), M_KBENCH, M_WAITOK);
+	for (int i = 0; i < KB_AML_LOADS; i++) {
+		ACPI_STATUS st;
+		UINT32 idx;
+		uint8_t sum = 0;
+		uint64_t t0;
+
+		memcpy(t, kb_ssdt, sizeof(kb_ssdt));
+		t->OemRevision = i + 1;
+		t->Checksum = 0;
+		for (size_t j = 0; j < sizeof(kb_ssdt); j++)
+			sum += ((uint8_t *)t)[j];
+		t->Checksum = -sum;
+		t0 = rdtsc();
+		st = AcpiLoadTable(t, &idx);
+		m[i] = tsc_ns(rdtsc() - t0);
+		if (ACPI_FAILURE(st))
+			panic("kbench: AcpiLoadTable: %s", AcpiFormatException(st));
+		st = AcpiUnloadTable(idx);
+		if (ACPI_FAILURE(st))
+			panic("kbench: AcpiUnloadTable: %s",
+			    AcpiFormatException(st));
+	}
+	free(t, M_KBENCH);
+	qsort(m, KB_AML_LOADS, sizeof(m[0]), kb_cmp);
+	printf("kbench aml.load %ju ns\n", (uintmax_t)m[KB_AML_LOADS / 2]);
+}
+
 static void
 kb_suite_p3(void)
 {
 	kb_blk("vtbd1", "vtbd");
 	kb_blk("nda0", "nda");
 	kb_aml();
+	kb_aml_load();
 	kb_dma();
 	kb_throughput("gate.t1", kb_gate_body, 1);
 	kb_throughput("gate.t8", kb_gate_body, 8);

@@ -592,3 +592,21 @@ fn exercise_methods() {
         }
     }
 }
+
+/// The `aml.load` benchmark's payload (q35's DSDT moved under `\KBNS`)
+/// loads beside bhyve's namespace without warnings.
+#[test]
+fn bench_ssdt_loads_beside_bhyve() {
+    let (mut i, mut h) = load(dsdt("bhyve"));
+    let before = i.node_count();
+    let ssdt = include_bytes!("../../../../tests/perf/kbench/ssdt-q35.aml");
+    let r = i.load_table(ssdt, &mut h).unwrap();
+    assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    assert!(
+        i.node_count() > before + 250,
+        "{before} -> {}",
+        i.node_count()
+    );
+    node(&i, "\\KBNS.KSB.PCI0");
+    node(&i, "\\KBNS.KSB.HPET");
+}
