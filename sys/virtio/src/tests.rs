@@ -311,6 +311,23 @@ fn rearm_reports_completions_that_raced_it() {
     assert!(r.rearm());
 }
 
+#[test]
+fn interrupt_mask_suppresses_until_rearm() {
+    let mut r = Ring::new(&tag(), 4).unwrap();
+    let flags = 16 * 4;
+    let mask = r.interrupt_mask();
+    mask.suppress();
+    assert_eq!(r.memory().read_at::<u16>(flags), 1, "NO_INTERRUPT");
+    assert!(r.rearm());
+    assert_eq!(r.memory().read_at::<u16>(flags), 0);
+    // With event indices the flags stay 0 (virtio 1.2 §2.7.7).
+    r.set_event_idx(true);
+    let mask = r.interrupt_mask();
+    mask.suppress();
+    r.set_interrupts(false);
+    assert_eq!(r.memory().read_at::<u16>(flags), 0);
+}
+
 /// One function's configuration space.
 struct Cfg(RefCell<[u8; 256]>);
 

@@ -144,8 +144,8 @@ impl Shared {
     fn reap(&self, s: &Sleepable) -> Vec<(Bio, Result<(), BioError>)> {
         let mut out = Vec::new();
         let mut q = self.queue.lock(s);
-        // No interrupts while draining, as FreeBSD's vtblk does: under load
-        // the device would raise one per completion we are already taking.
+        // No interrupts while draining (the filter has already turned them
+        // off, unless the drain did not come from an interrupt).
         q.vq.set_interrupts(false);
         loop {
             let used = match q.vq.pop() {
@@ -263,12 +263,18 @@ pub struct VtBlk {
     shared: Arc<Shared>,
     info: DiskInfo,
     line: SpinLock<Option<IrqLine>>,
+    /// The request queue's interrupts, for the filter.
+    intr: virtio::InterruptMask,
 }
 
 fn filter(d: &VtBlk, _: usize, _: &IrqCx) -> Filter {
     if d.dev.shared_line() && d.dev.isr() == 0 {
         return Filter::Stray;
     }
+    // Off until the drain catches up (as Linux's virtio callbacks do):
+    // under load the device would interrupt for each completion it posts
+    // before the drain runs.
+    d.intr.suppress();
     Filter::Schedule
 }
 
@@ -331,6 +337,7 @@ impl Driver for VtBlk {
                 .queue(&tag, 0, QUEUE)
                 .map_err(|_| AttachError::Device("request queue"))?;
             let size = usize::from(vq.ring().size());
+            let intr = vq.interrupt_mask();
             // Without SEG_MAX the device takes chains as long as the ring.
             let seg_max = if features & F_SEG_MAX != 0 {
                 (dev.config32(CFG_SEG_MAX) as usize).clamp(1, size.saturating_sub(2).max(1))
@@ -363,9 +370,9 @@ impl Driver for VtBlk {
                 seg_max,
                 disk: SpinLock::new(None),
             };
-            Ok((shared, info, line))
+            Ok((shared, info, line, intr))
         })();
-        let (shared, info, line) = built.inspect_err(|_| dev.reset())?;
+        let (shared, info, line, intr) = built.inspect_err(|_| dev.reset())?;
         if line.is_none() {
             dev.reset();
             return Err(AttachError::Device("no interrupt"));
@@ -375,6 +382,7 @@ impl Driver for VtBlk {
             shared: Arc::new(shared),
             info,
             line: SpinLock::new(line),
+            intr,
         })
     }
 

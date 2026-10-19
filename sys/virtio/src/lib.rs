@@ -37,7 +37,7 @@ pub mod pci;
 pub mod ring;
 mod transport;
 
-pub use ring::{Full, RingError, Used, Virtqueue};
+pub use ring::{Full, InterruptMask, RingError, Used, Virtqueue};
 pub use transport::{NegotiateError, QueueError, VirtioDevice};
 
 /// The PCI vendor ID of virtio devices.

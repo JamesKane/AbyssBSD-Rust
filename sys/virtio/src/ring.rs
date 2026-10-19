@@ -57,7 +57,8 @@ pub struct Used {
 /// A split ring in DMA memory.
 #[derive(Debug)]
 pub struct Ring {
-    mem: DmaCoherent<u8>,
+    /// Shared with [`InterruptMask`]s.
+    mem: Arc<DmaCoherent<u8>>,
     size: u16,
     avail: usize,
     used: usize,
@@ -97,7 +98,7 @@ impl Ring {
             return Err(DmaError::Unsatisfiable);
         }
         let n = usize::from(size);
-        let mem = tag.coherent::<u8>(Self::bytes(size))?;
+        let mem = Arc::new(tag.coherent::<u8>(Self::bytes(size))?);
         let avail = 16 * n;
         let mut next: Vec<u16> = (1..=size).collect();
         next[n - 1] = NONE;
@@ -288,15 +289,56 @@ impl Ring {
     }
 
     /// Asks the device for interrupts on completion, or not (a hint).
+    /// With event indices the flags stay 0 (virtio 1.2 §2.7.7): `pop`
+    /// asks for the next interrupt only once it has caught up.
     pub fn set_interrupts(&self, on: bool) {
-        let flags = if on { 0 } else { AVAIL_NO_INTERRUPT };
-        self.mem.write_at::<u16>(self.avail, flags);
+        if !self.event_idx {
+            let flags = if on { 0 } else { AVAIL_NO_INTERRUPT };
+            self.mem.write_at::<u16>(self.avail, flags);
+        }
+    }
+
+    /// A handle that turns completion interrupts off without the ring.
+    #[must_use]
+    pub fn interrupt_mask(&self) -> InterruptMask {
+        InterruptMask {
+            mem: Arc::clone(&self.mem),
+            avail: self.avail,
+            event_idx: self.event_idx,
+        }
     }
 
     /// The ring's memory, for tests that play the device.
     #[cfg(test)]
     pub(crate) fn memory(&self) -> &DmaCoherent<u8> {
         &self.mem
+    }
+}
+
+/// Turns a ring's completion interrupts off from an interrupt filter,
+/// which cannot take the lock around the ring: the device stops
+/// interrupting for completions the scheduled drain will take anyway.
+/// The drain turns them back on with [`Ring::rearm`].
+#[derive(Clone)]
+pub struct InterruptMask {
+    mem: Arc<DmaCoherent<u8>>,
+    avail: usize,
+    event_idx: bool,
+}
+
+impl core::fmt::Debug for InterruptMask {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("InterruptMask").finish_non_exhaustive()
+    }
+}
+
+impl InterruptMask {
+    /// No interrupts until the next rearm (a hint). With event indices the
+    /// device already waits for the drain to catch up.
+    pub fn suppress(&self) {
+        if !self.event_idx {
+            self.mem.write_at::<u16>(self.avail, AVAIL_NO_INTERRUPT);
+        }
     }
 }
 
@@ -356,5 +398,11 @@ impl Virtqueue {
     /// See [`Ring::set_interrupts`].
     pub fn set_interrupts(&self, on: bool) {
         self.ring.set_interrupts(on);
+    }
+
+    /// See [`Ring::interrupt_mask`].
+    #[must_use]
+    pub fn interrupt_mask(&self) -> InterruptMask {
+        self.ring.interrupt_mask()
     }
 }
