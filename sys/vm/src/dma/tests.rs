@@ -106,6 +106,12 @@ struct FakeBuf {
     len: usize,
 }
 
+impl core::fmt::Debug for FakeBuf {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "FakeBuf({:#x}, {})", self.pa, self.len)
+    }
+}
+
 impl DmaBuf for FakeBuf {
     fn bytes(&self) -> &[u8] {
         // SAFETY: the test reserved these bytes of the arena.
@@ -236,8 +242,9 @@ fn direct_stream_segments() {
     // Three pages' worth starting mid-page: pieces of at most 4 KiB that
     // never cross an 8 KiB line (crossing a page line is fine).
     mem.take(MIB, 4 * PAGE_SIZE);
-    let s = DmaStream::new(&tag, mem.buf_at(MIB + 512, 3 * 4096));
-    let s = s.map::<dir::ToDevice>().unwrap();
+    let s = tag
+        .map::<dir::ToDevice, _>(mem.buf_at(MIB + 512, 3 * 4096))
+        .unwrap();
     assert!(!s.bounced());
     let total: u64 = s.segments().iter().map(|g| g.len).sum();
     assert_eq!(total, 3 * 4096);
@@ -261,8 +268,8 @@ fn direct_stream_segments() {
             .iter()
             .all(|g| g.len <= 4096 && g.bus / 8192 == (g.bus + g.len - 1) / 8192)
     );
-    let s = s.unmap();
-    // Too many segments: the stream comes back unmapped.
+    let buf = s.unmap();
+    // Too many segments: the buffer comes back.
     let few = DmaTag::new(
         mem,
         DmaConstraints {
@@ -271,14 +278,13 @@ fn direct_stream_segments() {
         },
         8 * MIB,
     );
-    let s = DmaStream::new(&few, s.into_inner());
-    let (s, e) = s.map::<dir::FromDevice>().unwrap_err();
+    let (buf, e) = few.map::<dir::FromDevice, _>(buf).unwrap_err();
     assert_eq!(e, DmaError::TooManySegments);
-    assert_eq!(s.buf().len, 3 * 4096);
+    assert_eq!(buf.len, 3 * 4096);
 }
 
 #[test]
-fn many_segments_spill_from_inline() {
+fn many_segments_spill() {
     let mem = Fake::new(8 * MIB);
     let c = DmaConstraints {
         max_segment: 512,
@@ -286,8 +292,9 @@ fn many_segments_spill_from_inline() {
     };
     let tag = DmaTag::new(mem, c, 8 * MIB);
     mem.take(MIB, 2 * PAGE_SIZE);
-    let s = DmaStream::new(&tag, mem.buf_at(MIB, 2 * 4096));
-    let s = s.map::<dir::FromDevice>().unwrap();
+    let s = tag
+        .map::<dir::FromDevice, _>(mem.buf_at(MIB, 2 * 4096))
+        .unwrap();
     let want: Vec<Segment> = (0..16)
         .map(|i| Segment {
             bus: MIB + i * 512,
@@ -295,11 +302,21 @@ fn many_segments_spill_from_inline() {
         })
         .collect();
     assert_eq!(s.segments(), &want[..]);
-    // Mapped again, from the inline storage up.
-    let s = DmaStream::new(&tag, s.unmap().into_inner())
-        .map::<dir::ToDevice>()
-        .unwrap();
+    // Mapped again: the same segments.
+    let s = tag.map::<dir::ToDevice, _>(s.unmap()).unwrap();
     assert_eq!(s.segments(), &want[..]);
+    // A single page is one segment, kept without spilling.
+    let one = DmaTag::new(mem, DmaConstraints::UNLIMITED, 8 * MIB)
+        .map::<dir::ToDevice, _>(s.unmap())
+        .unwrap();
+    assert!(matches!(one.map, Map::One(_)));
+    assert_eq!(
+        one.segments(),
+        [Segment {
+            bus: MIB,
+            len: 2 * 4096
+        }]
+    );
 }
 
 #[test]
@@ -309,25 +326,25 @@ fn bounced_stream_round_trip() {
     let before = mem.pages_used();
     // A buffer at 6 MiB is out of a 22-bit device's reach.
     mem.take(6 * MIB, PAGE_SIZE);
-    let mut s = DmaStream::new(&tag, mem.buf_at(6 * MIB, 100));
-    s.buf_mut().bytes_mut().copy_from_slice(&[7u8; 100]);
-    let out = s.map::<dir::ToDevice>().unwrap();
+    let mut buf = mem.buf_at(6 * MIB, 100);
+    buf.bytes_mut().copy_from_slice(&[7u8; 100]);
+    let out = tag.map::<dir::ToDevice, _>(buf).unwrap();
     assert!(out.bounced());
     let seg = out.segments()[0];
     assert!(seg.bus + seg.len <= 4 * MIB);
     // SAFETY: the bounce page the device would read.
     let seen = unsafe { core::slice::from_raw_parts(mem.virt(seg.bus).as_ptr(), 100) };
     assert!(seen.iter().all(|&b| b == 7), "data copied out");
-    let s = out.unmap();
+    let buf = out.unmap();
     assert_eq!(mem.pages_used(), before + 1, "bounce page freed");
 
     // The device writes: data is copied back on unmap.
-    let inn = s.map::<dir::FromDevice>().unwrap();
+    let inn = tag.map::<dir::FromDevice, _>(buf).unwrap();
     let seg = inn.segments()[0];
     // SAFETY: the device's write into the bounce page.
     unsafe { mem.virt(seg.bus).as_ptr().write_bytes(9, 100) };
-    let s = inn.unmap();
-    assert!(s.buf().bytes().iter().all(|&b| b == 9));
+    let buf = inn.unmap();
+    assert!(buf.bytes().iter().all(|&b| b == 9));
 }
 
 #[test]
@@ -343,10 +360,11 @@ fn non_coherent_syncs() {
     );
     mem.take(MIB, PAGE_SIZE);
     mem.log.lock().unwrap().clear();
-    let s = DmaStream::new(&tag, mem.buf_at(MIB, 64));
-    let s = s.map::<dir::ToDevice>().unwrap().unmap();
-    let s = s.map::<dir::FromDevice>().unwrap().unmap();
-    drop(s);
+    let buf = tag
+        .map::<dir::ToDevice, _>(mem.buf_at(MIB, 64))
+        .unwrap()
+        .unmap();
+    let _ = tag.map::<dir::FromDevice, _>(buf).unwrap().unmap();
     let log = mem.log.lock().unwrap().clone();
     assert_eq!(
         log,

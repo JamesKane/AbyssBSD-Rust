@@ -570,11 +570,10 @@ fn bench_dma(s: &Sleepable) {
         1,
         || alloc::vec![0u8; 4096],
         move |buf, _| {
-            let stream = vm::dma::DmaStream::new(&tag, core::mem::take(buf));
-            let Ok(mapped) = stream.map::<vm::dma::dir::FromDevice>() else {
+            let Ok(mapped) = tag.map::<vm::dma::dir::FromDevice, _>(core::mem::take(buf)) else {
                 panic!("bench: dma map failed");
             };
-            *buf = black_box(mapped).unmap().into_inner();
+            *buf = black_box(mapped).unmap();
             1
         },
     );

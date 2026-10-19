@@ -105,7 +105,7 @@ Each principle comes from a failure that a surveyed system documented.
 | `lib/devtree` (new) | Pure logic: match ranking, ID table types, dependency graph and topological order, unit allocation, pnpinfo and location formatting, `u_device`/`u_rman` encoding, devctl event grammar. Host-tested and fuzzed | forbidden |
 | `sys/bus` | Device manager, node table, lifecycle state machine, `Binding`, `Gate`, contexts, attach workers, `Driver` and `Bus` traits, devctl/devctl2, `hw.bus.*` and `dev.*` export | small, audited (binding storage) |
 | `sys/irq` (new, split out of the arch crates) | `IrqDomain` hierarchy, filter and ithread dispatch, MSI/MSI-X allocation, affinity | small (dispatch tables) |
-| `sys/vm::dma` | `DmaTag`, backends (direct, bounce, IOMMU), `DmaCoherent`, `DmaStream`, pools | yes (it is the DMA layer) |
+| `sys/vm::dma` | `DmaTag`, backends (direct, bounce, IOMMU), `DmaCoherent`, `Mapped`, pools | yes (it is the DMA layer) |
 | `sys/acpi`, `sys/pci`, `sys/virtio`, `sys/usb` | Bus drivers: enumeration, per-bus device views, child resources | `sys/pci`: config-space MMIO only |
 | `sys/iommu` (P8) | VT-d, AMD-Vi, SMMUv3 backends for `vm::dma` and interrupt remapping | yes |
 | `lib/regs` | Typed MMIO register blocks (extended with field-level definitions) | yes (already) |
@@ -702,11 +702,16 @@ impl AttachCx<'_, B> {
   a declarative macro for `#[repr(C)]` types made only of integers, arrays, and other
   `DeviceShared` types. They contain no references, no pointers, and no `bool` or `enum`s that a
   device could set to an invalid value.
-- `DmaStream<B, S>` is for I/O buffers (bio pages, packet buffers). Its state parameter `S` is
-  `CpuOwned` or `DeviceOwned<Dir>`:
-  - `map(self, dir) -> DmaStream<B, DeviceOwned<Dir>>` does the PRE sync and yields the bus
-    segments.
-  - `unmap(self) -> DmaStream<B, CpuOwned>` does the POST sync.
+- I/O buffers (bio pages, packet buffers) are mapped by the tag, as FreeBSD's
+  `bus_dmamap_load` is:
+  - `tag.map::<Dir, B>(buf) -> Result<Mapped<B, Dir>, (B, DmaError)>` does the PRE sync and yields
+    the bus segments.
+  - `Mapped::unmap(self) -> B` does the POST sync and gives the buffer back.
+
+  The mapping refers to the tag's decisions rather than carrying the tag. A coherent,
+  single-segment, unbounced mapping is just the buffer and one segment. Bounce pages, extra
+  segments, and non-coherent syncs go in a boxed record. Moving a value larger than 64 bytes costs
+  a `rep movs` in a kernel built without SSE, and this keeps the common path below that size.
 
   While the device owns a buffer, the CPU has no reference to it, because the value moved (the
   RedLeaf `RRef` idea, S§9). A forgotten sync cannot compile. On coherent devices the syncs are
@@ -997,7 +1002,7 @@ The design keeps the framework off every hot path:
 | Interrupt dispatch | `intr_event` → filter function pointer | Handler slot → one indirect call to `fn(&D, usize, &IrqCx)` | None. No lock or lookup. The epoch enter on the dispatch path is a per-CPU increment |
 | I/O submission | GEOM → `d_strategy` pointer → driver | Class → gate enter (per-CPU) → `&dyn DiskQueues` call | Gate enter is comparable to `si_threadcount`. Batching amortizes it |
 | Completion | Filter or ithread → `biodone` | Filter or ithread → class completion, batched | None |
-| DMA map (no IOMMU) | `_bus_dmamap_load_*` with callbacks | `DmaStream::map`: address arithmetic, inline no-op syncs when coherent | Expected faster (no callback, no deferred-load machinery) |
+| DMA map (no IOMMU) | `_bus_dmamap_load_*` with callbacks | `DmaTag::map`: address arithmetic, inline no-op syncs when coherent | Expected faster (no callback, no deferred-load machinery) |
 | DMA map (IOMMU, P8) | DMAR or SMMU page-table updates, deferred invalidation | Pools for steady-state buffers, batched invalidation for the rest | Same or better, and measured |
 | Serialized driver | Driver's own mutex | Framework mutex around the entry point | None. Same lock, taken in a different place |
 

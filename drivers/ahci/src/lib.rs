@@ -45,7 +45,7 @@ use sched::lock::{LockClass, Mutex};
 use sched::{IrqCx, Sleepable};
 use storage::{Bio, BioError, BioOp, Disk, DiskInfo, DiskQueues};
 use sync::SpinLock;
-use vm::dma::{DeviceOwned, DmaCoherent, DmaConstraints, DmaStream, DmaTag, dir};
+use vm::dma::{DmaCoherent, DmaConstraints, DmaTag, Mapped, dir};
 
 /// Generic host control registers.
 const CAP: usize = 0x00;
@@ -141,8 +141,8 @@ impl core::fmt::Debug for Ctlr {
 
 enum Data {
     None,
-    Read(DmaStream<Vec<u8>, DeviceOwned<dir::FromDevice>>),
-    Write(DmaStream<Vec<u8>, DeviceOwned<dir::ToDevice>>),
+    Read(Mapped<Vec<u8>, dir::FromDevice>),
+    Write(Mapped<Vec<u8>, dir::ToDevice>),
 }
 
 struct InFlight {
@@ -155,8 +155,8 @@ impl InFlight {
         let Self { mut bio, data } = self;
         match data {
             Data::None => {}
-            Data::Read(d) => bio.buf = d.unmap().into_inner(),
-            Data::Write(d) => bio.buf = d.unmap().into_inner(),
+            Data::Read(d) => bio.buf = d.unmap(),
+            Data::Write(d) => bio.buf = d.unmap(),
         }
         bio
     }
@@ -449,20 +449,18 @@ impl Port {
     }
 
     fn map(&self, bio: &mut Bio) -> Result<Data, ()> {
-        let stream = DmaStream::new(&self.tag, core::mem::take(&mut bio.buf));
         match bio.op {
-            BioOp::Flush => {
-                bio.buf = stream.into_inner();
-                Ok(Data::None)
-            }
-            BioOp::Read => stream
-                .map::<dir::FromDevice>()
+            BioOp::Flush => Ok(Data::None),
+            BioOp::Read => self
+                .tag
+                .map(core::mem::take(&mut bio.buf))
                 .map(Data::Read)
-                .map_err(|(s, _)| bio.buf = s.into_inner()),
-            BioOp::Write => stream
-                .map::<dir::ToDevice>()
+                .map_err(|(buf, _)| bio.buf = buf),
+            BioOp::Write => self
+                .tag
+                .map(core::mem::take(&mut bio.buf))
                 .map(Data::Write)
-                .map_err(|(s, _)| bio.buf = s.into_inner()),
+                .map_err(|(buf, _)| bio.buf = buf),
         }
     }
 }

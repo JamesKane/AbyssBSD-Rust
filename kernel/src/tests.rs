@@ -1021,7 +1021,7 @@ ktest! {
 
 ktest! {
     fn dma_direct_coherent_and_bounced() {
-        use vm::dma::{dir, Backend, DmaBuf, DmaConstraints, DmaMemory, DmaStream, DmaTag};
+        use vm::dma::{dir, Backend, DmaBuf, DmaConstraints, DmaMemory, DmaTag};
         let top = crate::mm::dma::top_of_ram();
         let mem: &'static dyn DmaMemory = &crate::mm::dma::KERNEL_DMA;
 
@@ -1036,8 +1036,7 @@ ktest! {
         drop(ring);
 
         // A heap buffer, mapped directly: the segments are its bytes.
-        let s = DmaStream::new(&tag, alloc::vec![5u8; 10_000]);
-        let out = s.map::<dir::ToDevice>().map_err(|(_, e)| e).expect("map");
+        let out = tag.map::<dir::ToDevice, _>(alloc::vec![5u8; 10_000]).map_err(|(_, e)| e).expect("map");
         assert!(!out.bounced());
         let total: u64 = out.segments().iter().map(|g| g.len).sum();
         assert_eq!(total, 10_000);
@@ -1086,20 +1085,20 @@ ktest! {
                 unsafe { core::slice::from_raw_parts_mut(va, 4096) }
             }
         }
-        let mut s = DmaStream::new(&low, Page(high));
-        s.buf_mut().bytes_mut().fill(0xa5);
-        let out = s.map::<dir::ToDevice>().map_err(|(_, e)| e).expect("bounce map");
+        let mut page = Page(high);
+        page.bytes_mut().fill(0xa5);
+        let out = low.map::<dir::ToDevice, _>(page).map_err(|(_, e)| e).expect("bounce map");
         assert!(out.bounced());
         let g = out.segments()[0];
         assert!(g.bus + g.len <= limit);
         // SAFETY: the bounce page the device would read.
         assert_eq!(unsafe { mem.virt(g.bus).as_ptr().add(4095).read() }, 0xa5);
-        let s = out.unmap();
-        let inn = s.map::<dir::FromDevice>().map_err(|(_, e)| e).expect("bounce map");
+        let page = out.unmap();
+        let inn = low.map::<dir::FromDevice, _>(page).map_err(|(_, e)| e).expect("bounce map");
         let g = inn.segments()[0];
         // SAFETY: the device writing its bounce page.
         unsafe { mem.virt(g.bus).as_ptr().write_bytes(0x3c, 4096) };
-        let page = inn.unmap().into_inner();
+        let page = inn.unmap();
         assert!(page.bytes().iter().all(|&b| b == 0x3c), "copied back");
         crate::mm::free_pages(page.0, vm::Order::ZERO);
     }

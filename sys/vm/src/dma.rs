@@ -11,13 +11,14 @@
 //! - [`DmaCoherent`] is memory shared for a binding's whole life (queues,
 //!   rings), allocated within the device's reach and accessed only through
 //!   volatile reads and writes of whole [`DeviceShared`] elements.
-//! - [`DmaStream`] is an I/O buffer handed back and forth. Its state
-//!   parameter says who owns it: [`CpuOwned`] or [`DeviceOwned`].
-//!   [`DmaStream::map`] does the pre-transfer sync (bounce copy, cache
-//!   clean) and yields the bus segments; [`DmaStream::unmap`] does the
-//!   post-transfer sync. While the device owns a buffer the CPU has no
+//! - [`DmaTag::map`] hands an I/O buffer to the device as a [`Mapped`]:
+//!   it does the pre-transfer sync (bounce copy, cache clean) and yields
+//!   the bus segments; [`Mapped::unmap`] does the post-transfer sync and
+//!   gives the buffer back. While the device owns a buffer the CPU has no
 //!   reference to it, because the value moved, so a missed sync cannot
-//!   compile. On coherent devices the cache syncs are no-ops.
+//!   compile. On coherent devices the cache syncs are no-ops. As in
+//!   FreeBSD, the mapping refers to the tag's decisions instead of
+//!   carrying the tag: the common mapping is the buffer and one segment.
 //! - [`DmaPool`] keeps fixed-size buffers allocated and within reach, so
 //!   steady-state I/O allocates nothing.
 //!
@@ -26,6 +27,7 @@
 //!
 //! Behavior reference: sys/kern/subr_bus_dma.c, sys/x86/x86/busdma_bounce.c.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 use core::ptr::NonNull;
@@ -222,8 +224,12 @@ impl Segments {
         }
     }
 
-    fn clear(&mut self) {
-        *self = Self::None;
+    fn into_vec(self) -> Vec<Segment> {
+        match self {
+            Self::None => Vec::new(),
+            Self::One(seg) => alloc::vec![seg],
+            Self::Many(v) => v,
+        }
     }
 }
 
@@ -472,13 +478,6 @@ impl<T: DeviceShared> Drop for DmaCoherent<T> {
     }
 }
 
-/// A buffer the CPU owns.
-#[derive(Debug)]
-pub struct CpuOwned;
-/// A buffer the device owns, for transfers in direction `D`.
-#[derive(Debug)]
-pub struct DeviceOwned<D>(PhantomData<D>);
-
 /// Transfer directions.
 pub mod dir {
     /// The device reads the buffer.
@@ -545,79 +544,61 @@ struct Bounce {
     bytes: u64,
 }
 
-/// An I/O buffer, owned by the CPU (`S` = [`CpuOwned`]) or the device
-/// (`S` = [`DeviceOwned`]).
-pub struct DmaStream<B: DmaBuf, S> {
-    buf: B,
-    tag: DmaTag,
-    segments: Segments,
+/// What a mapping needs beyond one segment: more segments, bounce pages,
+/// or cache maintenance when it ends. Boxed, so the common mapping stays
+/// small: moving a value over 64 bytes costs a `rep movs` here.
+struct Spill {
+    segments: Vec<Segment>,
     bounce: Option<Bounce>,
-    _state: PhantomData<S>,
+    mem: &'static dyn DmaMemory,
+    non_coherent: bool,
 }
 
-impl<B: DmaBuf, S> core::fmt::Debug for DmaStream<B, S> {
+/// A mapping's bus side.
+enum Map {
+    /// One segment of a coherent device, no bounce pages: nothing to do
+    /// when the transfer ends.
+    One(Segment),
+    Spill(Box<Spill>),
+}
+
+/// A buffer the device owns, for transfers in direction `D`, from
+/// [`DmaTag::map`]. The CPU gets it back from [`Mapped::unmap`].
+pub struct Mapped<B: DmaBuf, D: Direction> {
+    buf: B,
+    map: Map,
+    _dir: PhantomData<D>,
+}
+
+impl<B: DmaBuf, D: Direction> core::fmt::Debug for Mapped<B, D> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("DmaStream")
+        f.debug_struct("Mapped")
             .field("len", &self.buf.bytes().len())
-            .field("segments", &self.segments)
-            .field("bounced", &self.bounce.is_some())
+            .field("segments", &self.segments())
+            .field("bounced", &self.bounced())
             .finish()
     }
 }
 
-impl<B: DmaBuf> DmaStream<B, CpuOwned> {
-    /// Wraps `buf` for transfers through `tag`.
-    pub fn new(tag: &DmaTag, buf: B) -> Self {
-        Self {
-            buf,
-            tag: *tag,
-            segments: Segments::new(),
-            bounce: None,
-            _state: PhantomData,
-        }
-    }
-
-    /// The buffer (the CPU owns it).
-    pub fn buf(&self) -> &B {
-        &self.buf
-    }
-
-    /// The buffer, writable.
-    pub fn buf_mut(&mut self) -> &mut B {
-        &mut self.buf
-    }
-
-    /// Gives the buffer back.
-    pub fn into_inner(self) -> B {
-        self.buf
-    }
-
-    /// Hands the buffer to the device for direction `D`: bounces it if the
+impl DmaTag {
+    /// Hands `buf` to the device for direction `D`: bounces it if the
     /// device cannot reach it, does the pre-transfer sync, and computes the
-    /// segments. On error the stream comes back unchanged.
+    /// segments. On error the buffer comes back.
     #[inline]
-    pub fn map<D: Direction>(mut self) -> Result<DmaStream<B, DeviceOwned<D>>, (Self, DmaError)> {
-        match self.build::<D>() {
-            Ok(()) => Ok(DmaStream {
-                buf: self.buf,
-                tag: self.tag,
-                segments: self.segments,
-                bounce: self.bounce,
-                _state: PhantomData,
+    pub fn map<D: Direction, B: DmaBuf>(&self, buf: B) -> Result<Mapped<B, D>, (B, DmaError)> {
+        match self.build::<D>(buf.bytes()) {
+            Ok(map) => Ok(Mapped {
+                buf,
+                map,
+                _dir: PhantomData,
             }),
-            Err(e) => Err((self, e)),
+            Err(e) => Err((buf, e)),
         }
     }
 
-    #[inline]
-    fn build<D: Direction>(&mut self) -> Result<(), DmaError> {
-        let mem = self.tag.mem;
-        let c = self.tag.constraints;
-        let bytes = self.buf.bytes();
-        self.segments.clear();
-        if bytes.is_empty() {
-            return Ok(());
-        }
+    fn build<D: Direction>(&self, bytes: &[u8]) -> Result<Map, DmaError> {
+        let c = &self.constraints;
+        let mut segments = Segments::new();
         // Direct when every byte is within reach and the start is aligned
         // (later ranges start on page boundaries, so alignment beyond a
         // page needs a single range). The buffer's physical ranges are
@@ -628,12 +609,12 @@ impl<B: DmaBuf> DmaStream<B, CpuOwned> {
         let mut off = 0usize;
         while off < bytes.len() {
             let va = bytes[off..].as_ptr();
-            let pa = mem.phys(va).ok_or(DmaError::BadBuffer)?;
+            let pa = self.mem.phys(va).ok_or(DmaError::BadBuffer)?;
             let in_page = to_usize(PAGE_SIZE - (pa % PAGE_SIZE));
             let n = in_page.min(bytes.len() - off);
             // A direct tag reaches all RAM (decided once, at creation, as
             // FreeBSD's BUS_DMA_COULD_BOUNCE is).
-            let reach = self.tag.backend == Backend::Direct || pa + n as u64 <= c.limit();
+            let reach = self.backend == Backend::Direct || pa + n as u64 <= c.limit();
             if !reach || (off == 0 && pa & (c.align - 1) != 0) {
                 direct = false;
                 break;
@@ -648,7 +629,7 @@ impl<B: DmaBuf> DmaStream<B, CpuOwned> {
                     // Keep looking on failure: an unreachable page later
                     // means bouncing, which may need fewer segments.
                     if split_err.is_none() {
-                        split_err = self.tag.split(p, l, &mut self.segments).err();
+                        split_err = self.split(p, l, &mut segments).err();
                     }
                     Some((pa, n as u64))
                 }
@@ -656,38 +637,45 @@ impl<B: DmaBuf> DmaStream<B, CpuOwned> {
             };
             off += n;
         }
-        if direct {
-            if let Some(e) = split_err {
-                self.segments.clear();
-                return Err(e);
-            }
-            if let Some((p, l)) = range
-                && let Err(e) = self.tag.split(p, l, &mut self.segments)
-            {
-                self.segments.clear();
-                return Err(e);
-            }
-            if c.coherency == Coherency::NonCoherent {
-                if D::READS {
-                    mem.clean(bytes.as_ptr(), bytes.len());
-                } else {
-                    mem.invalidate(bytes.as_ptr(), bytes.len());
-                }
-            }
-            return Ok(());
+        if !direct {
+            return self.bounce::<D>(bytes);
         }
-        self.segments.clear();
-        self.bounce::<D>()
+        if let Some(e) = split_err {
+            return Err(e);
+        }
+        if let Some((p, l)) = range {
+            self.split(p, l, &mut segments)?;
+        }
+        let non_coherent = c.coherency == Coherency::NonCoherent;
+        if non_coherent {
+            if D::READS {
+                self.mem.clean(bytes.as_ptr(), bytes.len());
+            } else {
+                self.mem.invalidate(bytes.as_ptr(), bytes.len());
+            }
+        }
+        Ok(match segments {
+            Segments::One(seg) if !non_coherent => Map::One(seg),
+            other => self.spill(other.into_vec(), None),
+        })
+    }
+
+    fn spill(&self, segments: Vec<Segment>, bounce: Option<Bounce>) -> Map {
+        Map::Spill(Box::new(Spill {
+            segments,
+            bounce,
+            mem: self.mem,
+            non_coherent: self.constraints.coherency == Coherency::NonCoherent,
+        }))
     }
 
     /// Bounce: one contiguous allocation within reach. Out of line, so the
     /// direct path stays small enough to inline into drivers.
     #[cold]
     #[inline(never)]
-    fn bounce<D: Direction>(&mut self) -> Result<(), DmaError> {
-        let mem = self.tag.mem;
-        let c = self.tag.constraints;
-        let bytes = self.buf.bytes();
+    fn bounce<D: Direction>(&self, bytes: &[u8]) -> Result<Map, DmaError> {
+        let mem = self.mem;
+        let c = &self.constraints;
         let len = bytes.len() as u64;
         let align = c.align.max(PAGE_SIZE);
         let alloc = len.next_multiple_of(align);
@@ -709,41 +697,52 @@ impl<B: DmaBuf> DmaStream<B, CpuOwned> {
                 mem.invalidate(bva.as_ptr(), bytes.len());
             }
         }
-        if let Err(e) = self.tag.split(pa, len, &mut self.segments) {
+        let mut segments = Segments::new();
+        if let Err(e) = self.split(pa, len, &mut segments) {
             // SAFETY: just allocated, unused.
             unsafe { mem.free(pa, alloc) };
-            self.segments.clear();
             return Err(e);
         }
-        self.bounce = Some(Bounce { pa, bytes: alloc });
-        Ok(())
+        Ok(self.spill(segments.into_vec(), Some(Bounce { pa, bytes: alloc })))
     }
 }
 
-impl<B: DmaBuf, D: Direction> DmaStream<B, DeviceOwned<D>> {
+impl<B: DmaBuf, D: Direction> Mapped<B, D> {
     /// The bus segments to program into the device.
     #[must_use]
     pub fn segments(&self) -> &[Segment] {
-        self.segments.as_slice()
+        match &self.map {
+            Map::One(seg) => core::slice::from_ref(seg),
+            Map::Spill(s) => &s.segments,
+        }
     }
 
     /// Whether the buffer went through bounce pages.
     #[must_use]
     pub fn bounced(&self) -> bool {
-        self.bounce.is_some()
+        matches!(&self.map, Map::Spill(s) if s.bounce.is_some())
     }
 
     /// Takes the buffer back after the transfer: copies bounced data in
     /// (if the device wrote), does the post-transfer sync, and frees the
     /// bounce pages.
-    pub fn unmap(mut self) -> DmaStream<B, CpuOwned> {
-        let mem = self.tag.mem;
-        let non_coherent = self.tag.constraints.coherency == Coherency::NonCoherent;
-        if let Some(b) = self.bounce.take() {
+    #[inline]
+    pub fn unmap(self) -> B {
+        let Self { mut buf, map, .. } = self;
+        if let Map::Spill(s) = map {
+            Self::finish(&mut buf, *s);
+        }
+        buf
+    }
+
+    #[cold]
+    fn finish(buf: &mut B, s: Spill) {
+        let mem = s.mem;
+        let out = buf.bytes_mut();
+        if let Some(b) = s.bounce {
             let bva = mem.virt(b.pa);
-            let out = self.buf.bytes_mut();
             if D::WRITES {
-                if non_coherent {
+                if s.non_coherent {
                     mem.invalidate(bva.as_ptr(), out.len());
                 }
                 // SAFETY: the bounce pages hold at least `out.len()` bytes.
@@ -752,20 +751,11 @@ impl<B: DmaBuf, D: Direction> DmaStream<B, DeviceOwned<D>> {
                         .copy_from_nonoverlapping(bva.as_ptr(), out.len())
                 };
             }
-            // SAFETY: allocated in `build` with these values; the device
+            // SAFETY: allocated in `bounce` with these values; the device
             // is done with them.
             unsafe { mem.free(b.pa, b.bytes) };
-        } else if D::WRITES && non_coherent {
-            let out = self.buf.bytes_mut();
+        } else if D::WRITES && s.non_coherent {
             mem.invalidate(out.as_ptr(), out.len());
-        }
-        self.segments.clear();
-        DmaStream {
-            buf: self.buf,
-            tag: self.tag,
-            segments: Segments::new(),
-            bounce: None,
-            _state: PhantomData,
         }
     }
 }

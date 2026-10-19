@@ -316,7 +316,7 @@ The driver model is specified in [DRIVER-MODEL.md](DRIVER-MODEL.md)
   threads.
 - **Resources are typed grants** from a platform broker: `Mmio<R>` register blocks, `IrqLine` and
   MSI-X vectors from an `IrqDomain` hierarchy (MSI → ITS → GIC, MSI → LAPIC), and DMA tags with
-  direct, bounce, and IOMMU backends. `DmaCoherent<T: DeviceShared>`, a `DmaStream` ownership
+  direct, bounce, and IOMMU backends. `DmaCoherent<T: DeviceShared>`, a `Mapped` ownership
   typestate, and pre-mapped pools keep DMA safe and fast. Driver crates are
   `#![forbid(unsafe_code)]`.
 - **Classes** (storage, net, tty, console, input) own protocol logic and user interfaces behind
