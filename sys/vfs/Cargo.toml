@@ -1,0 +1,15 @@
+[package]
+name = "vfs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+abi = { path = "../../lib/abi" }
+sched = { path = "../sched" }
+sync = { path = "../sync" }
+ustar = { path = "../../lib/ustar" }
+
+[lints]
+workspace = true

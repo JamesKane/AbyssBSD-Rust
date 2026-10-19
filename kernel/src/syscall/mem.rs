@@ -1,8 +1,14 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! Memory: `mmap` (anonymous memory and guards), `munmap`, `mprotect`,
-//! `minherit`, and `madvise`.
+//! Memory: `mmap` (anonymous memory, guards, files, and `/dev/zero`),
+//! `munmap`, `mprotect`, `minherit`, and `madvise`.
+//!
+//! A file is mapped privately: its pages are shared until written, then
+//! copied. That is also what `MAP_SHARED` gives, since no file can be
+//! open for writing yet, so no shared mapping can be writable.
 //!
 //! Behavior reference: sys/vm/vm_mmap.c.
+
+use alloc::sync::Arc;
 
 use abi::errno::Errno;
 use abi::mman::*;
@@ -48,6 +54,58 @@ fn pages(addr: u64, len: u64) -> Result<(VirtAddr, VirtAddr), Errno> {
     Ok((VirtAddr::new(start), VirtAddr::new(end)))
 }
 
+/// What a descriptor maps as.
+enum Backing {
+    /// Zero-filled memory (`/dev/zero`), as `MAP_ANON` gives.
+    Zeros,
+    /// A file's object, from a page on.
+    Object(Arc<vm::object::Object>, u64),
+}
+
+/// What a descriptor maps as, for `mmap` at page-aligned `pos`, and the
+/// most rights the mapping may have (FreeBSD's `vn_mmap`).
+fn file_object(
+    s: &Sleepable,
+    fd: u64,
+    pos: u64,
+    len: u64,
+    prot: Prot,
+    flags: u32,
+) -> Result<(Backing, Prot), Errno> {
+    use crate::fs::file::FileKind;
+    use abi::fcntl::{FREAD, FWRITE};
+    let f = super::io::current_file(s, fd)?;
+    let FileKind::Vnode(v) = f.kind() else {
+        return Err(Errno::ENODEV);
+    };
+    match v.kind() {
+        vfs::VnodeKind::Regular(_) => {
+            let mut max = Prot::EXEC;
+            if f.flags() & FREAD != 0 {
+                max = max.union(Prot::READ);
+            } else if prot.contains(Prot::READ) {
+                return Err(Errno::EACCES);
+            }
+            if flags & MAP_SHARED == 0 || f.flags() & FWRITE != 0 {
+                max = max.union(Prot::WRITE);
+            } else if prot.contains(Prot::WRITE) {
+                return Err(Errno::EACCES);
+            }
+            // Offsets are `off_t`s: no negative ones, no wrapping past the
+            // largest.
+            let size = len.next_multiple_of(PAGE_SIZE);
+            if pos > i64::MAX.cast_unsigned() - size {
+                return Err(Errno::EINVAL);
+            }
+            let object = crate::fs::object(v).ok_or(Errno::ENODEV)?;
+            Ok((Backing::Object(object, pos / PAGE_SIZE), max))
+        }
+        vfs::VnodeKind::CharDevice(d) if d.ops.maps_as_zeros() => Ok((Backing::Zeros, Prot::ALL)),
+        vfs::VnodeKind::CharDevice(_) => Err(Errno::ENODEV),
+        _ => Err(Errno::EINVAL),
+    }
+}
+
 /// `mmap(addr, len, prot, flags, fd, pos)`.
 pub(super) fn mmap(
     s: &Sleepable,
@@ -87,13 +145,33 @@ pub(super) fn mmap(
     {
         return Err(Errno::EINVAL);
     }
-    if !guard && flags & MAP_ANON == 0 {
-        // File mappings come with file descriptors (P4.5).
-        return Err(Errno::EBADF);
-    }
-    if int(fd) != -1 || pos != 0 {
-        return Err(Errno::EINVAL);
-    }
+    let mut max_prot = max_prot;
+    // A file's mapping starts at a page; the result keeps `pos`'s offset
+    // into it.
+    let mut pageoff = 0;
+    let object = if guard || flags & MAP_ANON != 0 {
+        if int(fd) != -1 || pos != 0 {
+            return Err(Errno::EINVAL);
+        }
+        Backing::Zeros
+    } else {
+        if flags & (MAP_SHARED | MAP_PRIVATE) == 0 {
+            return Err(Errno::EINVAL);
+        }
+        pageoff = pos & (PAGE_SIZE - 1);
+        let (object, file_max) = file_object(s, fd, pos - pageoff, len, prot, flags)?;
+        max_prot = Prot::from_bits(max_prot.bits() & file_max.bits()).unwrap_or(Prot::NONE);
+        if !max_prot.contains(prot) {
+            return Err(Errno::EACCES);
+        }
+        object
+    };
+    let len = len.checked_add(pageoff).ok_or(Errno::ENOMEM)?;
+    let addr = if flags & MAP_FIXED != 0 {
+        addr.wrapping_sub(pageoff)
+    } else {
+        addr
+    };
     let align = match (flags & MAP_ALIGNMENT_MASK) >> MAP_ALIGNMENT_SHIFT {
         0 => PAGE_SIZE,
         // A superpage: 2 MiB on both architectures.
@@ -136,8 +214,12 @@ pub(super) fn mmap(
     if a.exclusive && !fixed {
         return Err(Errno::EINVAL);
     }
-    let at = p.space().map_anon(s, &a).map_err(map_error)?;
-    Ok(at.get())
+    let at = match object {
+        Backing::Object(object, page) => p.space().map_object(s, &a, object, page),
+        Backing::Zeros => p.space().map_anon(s, &a),
+    }
+    .map_err(map_error)?;
+    Ok(at.get() + pageoff)
 }
 
 /// `munmap(addr, len)`.

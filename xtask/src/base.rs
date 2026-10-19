@@ -255,9 +255,9 @@ pub(crate) fn cc_static(arch: Arch, source: &Path, out: &Path) -> Result<()> {
     )
 }
 
-/// The memory-disk image for `arch`, if `fetch-base` has run: `/rescue`
-/// plus each `tests/user/*.c` built into `usr/tests/abyss/` (rebuilt when
-/// its source or xtask changes).
+/// The memory-disk image for `arch`, if `fetch-base` has run: `/rescue`,
+/// an empty `/dev`, and each `tests/user/*.c` built into
+/// `usr/tests/abyss/` (rebuilt when its source or xtask changes).
 pub(crate) fn md_image(arch: Arch) -> Result<Option<Vec<u8>>> {
     let Some(rescue) = existing_rescue_image(arch) else {
         return Ok(None);
@@ -277,6 +277,8 @@ pub(crate) fn md_image(arch: Arch) -> Result<Option<Vec<u8>>> {
         .collect::<std::io::Result<_>>()?;
     sources.retain(|p| p.extension().is_some_and(|x| x == "c"));
     sources.sort();
+    // devfs's mount point.
+    append(&mut md, "dev/", b'5', 0o555, &[])?;
     let mut dir = String::new();
     for part in TESTS_DIR.split('/') {
         dir = if dir.is_empty() {

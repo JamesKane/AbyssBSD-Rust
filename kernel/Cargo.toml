@@ -48,6 +48,7 @@ sync = { path = "../sys/sync" }
 sysctl = { path = "../sys/sysctl" }
 uart-16550 = { path = "../drivers/uart-16550" }
 uart-pl011 = { path = "../drivers/uart-pl011" }
+vfs = { path = "../sys/vfs" }
 vm = { path = "../sys/vm" }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]

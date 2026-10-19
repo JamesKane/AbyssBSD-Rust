@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! Processes: `fork`, `vfork`, `execve`, `wait4`, process groups and
-//! sessions, and credentials (everything runs as root until P6).
+//! Processes: `fork`, `vfork`, `pdfork` and its descriptors, `execve`,
+//! `wait4`, process groups and sessions, and credentials (everything runs
+//! as root until P6).
 
 use alloc::vec::Vec;
 
 use abi::errno::Errno;
+use abi::procdesc::{PD_ALLOWED_AT_FORK, PD_CLOEXEC, PD_DAEMON};
 use abi::resource::{Rusage, WCONTINUED, WEXITED, WNOHANG, WNOWAIT, WTRAPPED, WUNTRACED};
 use sched::Sleepable;
 
@@ -29,6 +31,66 @@ pub(super) fn fork(s: &Sleepable, frame: &mut TrapFrame, vfork: bool) -> SysResu
         frame.rdx = 0;
     }
     Ok(u64::from(pid.unsigned_abs()))
+}
+
+/// `pdfork(fdp, flags)`: the child's pid, its descriptor written to `fdp`.
+pub(super) fn pdfork(s: &Sleepable, frame: &mut TrapFrame, fdp: u64, flags: u64) -> SysResult {
+    let flags = u32::try_from(flags).map_err(|_| Errno::EINVAL)?;
+    if flags & !PD_ALLOWED_AT_FORK != 0 {
+        return Err(Errno::EINVAL);
+    }
+    let p = process()?;
+    let limit = super::io::max_files(&p);
+    let (pid, fd) = p.pdfork(
+        s,
+        frame,
+        flags & PD_DAEMON != 0,
+        flags & PD_CLOEXEC != 0,
+        limit,
+    )?;
+    #[cfg(target_arch = "x86_64")]
+    {
+        frame.rdx = 0;
+    }
+    // The child runs already; a bad pointer only fails the call.
+    UserPtr::<i32>::new(fdp)
+        .write(&fd)
+        .map_err(|_| Errno::EFAULT)?;
+    Ok(u64::from(pid.unsigned_abs()))
+}
+
+/// The process behind descriptor `fd` (`EBADF` if it is not a process
+/// descriptor).
+fn described(s: &Sleepable, fd: u64) -> Result<alloc::sync::Arc<crate::proc::Process>, Errno> {
+    let f = super::io::current_file(s, fd)?;
+    match f.kind() {
+        crate::fs::file::FileKind::Process(pd) => Ok(alloc::sync::Arc::clone(pd.process())),
+        _ => Err(Errno::EBADF),
+    }
+}
+
+/// `pdgetpid(fd, pidp)`.
+pub(super) fn pdgetpid(s: &Sleepable, fd: u64, pidp: u64) -> SysResult {
+    let pid = described(s, fd)?.pid();
+    UserPtr::<i32>::new(pidp)
+        .write(&pid)
+        .map_err(|_| Errno::EFAULT)?;
+    Ok(0)
+}
+
+/// `pdkill(fd, signum)`.
+pub(super) fn pdkill(s: &Sleepable, fd: u64, signum: u64) -> SysResult {
+    let sig = u32::try_from(signum).map_err(|_| Errno::EINVAL)?;
+    if sig == 0 || sig > abi::signal::SIG_MAXSIG {
+        return Err(Errno::EINVAL);
+    }
+    let target = described(s, fd)?;
+    let from = process()?.pid();
+    let _ = crate::signal::post(
+        &target,
+        crate::signal::user_info(sig, from, abi::signal::code::SI_USER),
+    );
+    Ok(0)
 }
 
 fn path(addr: u64) -> Result<Vec<u8>, Errno> {

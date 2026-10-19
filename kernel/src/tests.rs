@@ -2685,10 +2685,23 @@ mod user_memory {
         fn exec_layout_is_randomized_within_bounds() {
             use crate::exec::{Layout, MAXDSIZ, STACK_SIZE, USRSTACK};
             let s = cx();
+            let root = crate::fs::root();
+            let echo = crate::fs::namespace()
+                .lookup(
+                    &vfs::namei::Lookup {
+                        start: &root,
+                        root: &root,
+                        follow: true,
+                        beneath: false,
+                    },
+                    b"/rescue/echo",
+                )
+                .unwrap();
             let load = || {
                 let space = AddressSpace::new().unwrap();
-                let image = crate::exec::load(&s, &space, b"/rescue/echo", &[b"echo"], &[], MAXDSIZ)
-                    .unwrap();
+                let image =
+                    crate::exec::load(&s, &space, &echo, b"/rescue/echo", &[b"echo"], &[], MAXDSIZ)
+                        .unwrap();
                 // The top page is a guard: mapped, with no access at all.
                 let top = VirtAddr::new(USRSTACK);
                 assert!(space.fault(&s, top, vm::fault::Access::Read).is_err());
@@ -2739,6 +2752,30 @@ mod user_memory {
             )
             .unwrap();
             assert_eq!(p.wait(&s), crate::proc::Exit::Code(3));
+        }
+    }
+
+    ktest! {
+        fn rescue_sh_runs_pipelines_over_files() {
+            use crate::proc::Process;
+            let s = cx();
+            // Every step must succeed for the exit status to be 7.
+            let script: &[u8] = b"cd /dev && [ \"$(pwd)\" = /dev ] && [ \"$(/rescue/pwd)\" = /dev ] && \
+                ls -l null && echo hello | sed s/hello/HELLO/ | cat && \
+                [ \"$(ls /rescue | head -1)\" = [ ] && \
+                [ \"$(echo a b c | sed 's/ /\\n/g' | tail -1)\" = c ] && \
+                [ \"$(md5 -q /dev/null)\" = d41d8cd98f00b204e9800998ecf8427e ] && \
+                [ \"$(realpath /dev/../rescue/sh)\" = /rescue/sh ] && \
+                cat /rescue/../dev/null && exit 7";
+            let p = Process::spawn(
+                &s,
+                b"/rescue/sh",
+                &[b"sh", b"-c", script],
+                &[b"PATH=/rescue", b"HOME=/"],
+                Some(hal::cpu_id()),
+            )
+            .unwrap();
+            assert_eq!(p.wait(&s), crate::proc::Exit::Code(7));
         }
     }
 

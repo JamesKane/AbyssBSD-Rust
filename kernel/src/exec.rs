@@ -163,26 +163,33 @@ fn branded(elf: &Elf<'_>) -> bool {
         })
 }
 
-/// Loads the memory-disk file at `path` into `space` (which must be empty)
-/// with arguments `argv` and environment `envp`; `data_max` is the
-/// process's hard `RLIMIT_DATA`.
+/// Loads `file` (found at `path`) into `space` (which must be empty) with
+/// arguments `argv` and environment `envp`; `data_max` is the process's
+/// hard `RLIMIT_DATA`.
 pub(crate) fn load(
     s: &Sleepable,
     space: &AddressSpace,
+    file: &vfs::Vnode,
     path: &[u8],
     argv: &[&[u8]],
     envp: &[&[u8]],
     data_max: u64,
 ) -> Result<Image, Errno> {
-    let file = crate::md::file(path).ok_or(Errno::ENOENT)?;
-    if file.mode & 0o111 == 0 {
+    // A regular file with an execute bit (root needs one too).
+    let vfs::VnodeKind::Regular(contents) = file.kind() else {
+        return Err(Errno::EACCES);
+    };
+    if file.meta().perm & 0o111 == 0 {
         return Err(Errno::EACCES);
     }
-    let elf = Elf::parse(file.data).map_err(|_| Errno::ENOEXEC)?;
+    // Only files held in memory can be mapped until Phase 5's page cache.
+    let (Some(data), Some(object)) = (contents.resident(), crate::fs::object(file)) else {
+        return Err(Errno::ENOEXEC);
+    };
+    let elf = Elf::parse(data).map_err(|_| Errno::ENOEXEC)?;
     if elf.machine != MACHINE || elf.file_type != FileType::Executable || !branded(&elf) {
         return Err(Errno::ENOEXEC);
     }
-    let object = crate::md::object(&file);
     let (phoff, phnum) = elf.program_headers();
     let mut phdr = None;
     let mut stack_prot = Prot::RW;

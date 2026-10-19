@@ -263,6 +263,7 @@ dependencies = [
  "uart-16550",
  "uart-pl011",
  "ustar",
+ "vfs",
  "virtio-random",
  "vm",
  "watchdog",
@@ -418,6 +419,16 @@ dependencies = [
 [[package]]
 name = "ustar"
 version = "0.0.0"
+
+[[package]]
+name = "vfs"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "sched",
+ "sync",
+ "ustar",
+]
 
 [[package]]
 name = "virtio"

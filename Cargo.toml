@@ -54,6 +54,7 @@ members = [
     "sys/sysctl",
     "sys/virtio",
     "sys/vm",
+    "sys/vfs",
     "sys/watchdog",
     "tools/syscallgen",
 ]
@@ -109,6 +110,7 @@ default-members = [
     "sys/sysctl",
     "sys/virtio",
     "sys/vm",
+    "sys/vfs",
     "sys/watchdog",
     "tools/syscallgen",
 ]

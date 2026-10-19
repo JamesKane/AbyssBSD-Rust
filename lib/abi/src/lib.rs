@@ -14,10 +14,15 @@
 #![forbid(unsafe_code)]
 
 pub mod bus;
+pub mod dirent;
 pub mod errno;
 pub mod exec;
+pub mod fcntl;
+pub mod ioctl;
 pub mod layout;
 pub mod mman;
+pub mod mount;
+pub mod procdesc;
 pub mod resource;
 pub mod signal;
 pub mod stat;

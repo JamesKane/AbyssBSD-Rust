@@ -5,7 +5,8 @@
 //! amd64 passes the number in `rax` and arguments in `rdi, rsi, rdx, r10,
 //! r8, r9`; arm64 the number in `x8` and arguments in `x0..x7`. A result
 //! comes back in `rax`/`x0` with the carry flag clear; an error number
-//! with it set. `syscall(2)` and `__syscall(2)` take the real number as
+//! with it set. A second result goes in `rdx`/`x1`: on arm64 it is always
+//! written (0 unless the call has one), on amd64 `rdx` keeps its value. `syscall(2)` and `__syscall(2)` take the real number as
 //! their first argument.
 //!
 //! Numbers come from `syscalls.master` through the generated
@@ -24,6 +25,7 @@
 mod io;
 mod mem;
 mod misc;
+mod path;
 mod proc;
 mod sig;
 mod sysctl;
@@ -93,7 +95,11 @@ fn encode(f: &mut TrapFrame, r: SysResult) {
         // `svc` is 4 bytes; x8 and the arguments are as they were.
         Err(Errno::ERESTART) => f.elr -= 4,
         Ok(v) => {
+            // The second result (`td_retval[1]`), 0 for every call here.
+            // libc's `vfork` computes `x0 & (x1 - 1)`, so a stale x1
+            // garbles the parent's pid.
             f.x[0] = v;
+            f.x[1] = 0;
             f.spsr &= !CARRY;
         }
         Err(e) => {
@@ -135,6 +141,9 @@ fn run(s: &Sleepable, frame: &mut TrapFrame, call: Call) -> Result<Option<u64>, 
         Sysno::Execve => return proc::execve(s, frame, a0, a1, a2),
         Sysno::Fork => proc::fork(s, frame, false),
         Sysno::Vfork => proc::fork(s, frame, true),
+        Sysno::Pdfork => proc::pdfork(s, frame, a0, a1),
+        Sysno::Pdgetpid => proc::pdgetpid(s, a0, a1),
+        Sysno::Pdkill => proc::pdkill(s, a0, a1),
         Sysno::Wait4 => proc::wait4(s, a0, a1, a2, a3),
         Sysno::Getppid => proc::getppid(),
         Sysno::Getpgrp => proc::getpgrp(),
@@ -155,11 +164,42 @@ fn run(s: &Sleepable, frame: &mut TrapFrame, call: Call) -> Result<Option<u64>, 
         Sysno::Sysctl => sysctl::sysctl(s, a0, a1, a2, a3, a4, a5),
         Sysno::Sysctlbyname => sysctl::sysctlbyname(s, a0, a1, a2, a3, a4, a5),
         Sysno::Exit => exit(s, a0),
-        Sysno::Write => io::write(a0, a1, a2),
-        Sysno::Writev => io::writev(a0, a1, a2),
+        Sysno::Read => io::read(s, a0, a1, a2),
+        Sysno::Readv => io::readv(s, a0, a1, a2),
+        Sysno::Pread => io::pread(s, a0, a1, a2, a3),
+        Sysno::Preadv => io::preadv(s, a0, a1, a2, a3),
+        Sysno::Write => io::write(s, a0, a1, a2),
+        Sysno::Writev => io::writev(s, a0, a1, a2),
+        Sysno::Pwrite => io::pwrite(s, a0, a1, a2, a3),
+        Sysno::Pwritev => io::pwritev(s, a0, a1, a2, a3),
+        Sysno::Lseek => io::lseek(s, a0, a1, a2),
+        Sysno::Close => io::close(s, a0),
+        Sysno::CloseRange => io::close_range(s, a0, a1, a2),
+        Sysno::Dup => io::dup(s, a0),
+        Sysno::Dup2 => io::dup2(s, a0, a1),
+        Sysno::Fcntl => io::fcntl(s, a0, a1, a2),
+        Sysno::Ioctl => io::ioctl(s, a0, a1, a2),
+        Sysno::Pipe2 => io::pipe2(s, a0, a1),
+        Sysno::Fstat => io::fstat(s, a0, a1),
+        Sysno::Fstatfs => io::fstatfs(s, a0, a1),
+        Sysno::Getdirentries => io::getdirentries(s, a0, a1, a2, a3),
+        Sysno::CopyFileRange => io::copy_file_range(s, a0, a1, a2, a3, a4, a5),
+        Sysno::Open => path::open(s, a0, a1, a2),
+        Sysno::Openat => path::openat(s, a0, a1, a2, a3),
+        Sysno::Fstatat => path::fstatat(s, a0, a1, a2, a3),
+        Sysno::Chdir => path::chdir(s, a0),
+        Sysno::Fchdir => path::fchdir(s, a0),
+        Sysno::Getcwd => path::getcwd(a0, a1),
+        Sysno::Access => path::access(s, a0, a1, false),
+        Sysno::Eaccess => path::access(s, a0, a1, true),
+        Sysno::Faccessat => path::faccessat(s, a0, a1, a2, a3),
+        Sysno::Readlink => path::readlink(s, a0, a1, a2),
+        Sysno::Readlinkat => path::readlinkat(s, a0, a1, a2, a3),
+        Sysno::Statfs => path::statfs(s, a0, a1),
+        Sysno::Getfsstat => path::getfsstat(a0, a1, a2),
+        Sysno::Umask => path::umask(a0),
         Sysno::Getpid => misc::getpid(),
         Sysno::Issetugid => misc::issetugid(),
-        Sysno::Readlink => misc::readlink(a0, a1, a2),
         Sysno::Getrandom => misc::getrandom(a0, a1, a2),
         Sysno::Exterrctl => misc::exterrctl(a0, a1, a2),
         Sysno::CpusetGetaffinity => misc::cpuset_getaffinity(a0, a1, a2, a3, a4),

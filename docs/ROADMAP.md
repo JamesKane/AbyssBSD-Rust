@@ -598,8 +598,8 @@ P4.0 ─► P4.1 ─► P4.2 ─► P4.3 ─┬─► P4.4 ─┐
     - The top page of user space is a guard.
     - `RLIMIT_DATA` defaults to `MAXDSIZ` (32 GiB on amd64, 1 GiB on arm64), as on FreeBSD.
     - `tests/user/aslr.c` checks that the auxiliary vector matches the real layout.
-  - **Left**: the signal trampoline in the shared page (with P4.4), PIE (with the run-time linker,
-    which is the only thing that loads `ET_DYN`), and `pdfork` (it returns a descriptor, P4.5).
+  - **Left**: the signal trampoline in the shared page (done in P4.4), PIE (with the run-time
+    linker, which is the only thing that loads `ET_DYN`), and `pdfork` (done in P4.5).
 
 **P4.4 Signals.** Done 2026-10-19.
 - `sigaction`, `sigprocmask`, `sigfastblock`, `kill`, pending sets, and default actions (including
@@ -639,12 +639,51 @@ P4.0 ─► P4.1 ─► P4.2 ─► P4.3 ─┬─► P4.4 ─┐
   - **Deviations** (no SVE signal context, no core dumps, process-wide signal state) are listed in
     [compat-deviations.md](compat-deviations.md).
 
-**P4.5 Files** (runs in parallel with P4.4).
+**P4.5 Files.** Done 2026-10-19.
 - File descriptor tables (`dup2`, `fcntl`, close-on-exec), shared by `fork`.
 - A minimal VFS: vnodes, path lookup, `chdir`/`fchdir`/`__getcwd`, `openat`, `fstat`/`fstatat`,
   `lseek`, `getdirentries`, over a read-only in-memory file system on the preloaded memory disk.
 - devfs with `console`, `null`, `zero`, and `random` (the last on `sys/random`).
 - Pipes (`pipe2`), with FreeBSD's buffer sizes and the direct-write path deferred.
+- As delivered:
+  - **`sys/vfs`** (host-tested). A vnode's kind is an enum (regular file, directory, symlink,
+    device), so only a directory can be looked in. Path lookup crosses mounts both ways, follows
+    symlinks (at most `MAXSYMLINKS`), and supports `O_RESOLVE_BENEATH`. `__getcwd` walks back up
+    through the parents. A builder makes fixed trees: tarfs (the memory disk, mounted read-only as
+    `/`) and devfs (on `/dev`). File system type numbers and ids match FreeBSD's (`lsvfs` agrees:
+    devfs 0x71, tarfs 0x31).
+  - **Descriptors.** Open files share their offset and status flags across `dup` and `fork`.
+    Tables are copied by `fork` (dropping close-on-fork), trimmed by `execve` (close-on-exec), and
+    emptied at exit before the parent hears. Kernel-started processes get the console on 0 to 2.
+  - **System calls.** `open`/`openat` (with `O_PATH`, `O_EMPTY_PATH`, and FreeBSD's error
+    order), `read`/`write` with their vector and positioned forms, `lseek`, `close`,
+    `close_range`, `dup`, `dup2`, `fcntl` (the dup commands, descriptor and status flags,
+    `F_DUP3FD`, `F_ISUNIONSTACK`), `ioctl` (`FIOCLEX`, `FIONCLEX`, `FIONBIO`, `FIONREAD`,
+    devices), `pipe2`, `fstat`, `fstatat`, `fstatfs`, `statfs`, `getfsstat`, `getdirentries`,
+    `chdir`, `fchdir`, `__getcwd`, `access`/`eaccess`/`faccessat`, `readlink`/`readlinkat`,
+    `umask`, and `copy_file_range`'s checks (no regular file is writable yet, so `cat` falls back
+    to `read` and `write`, as FreeBSD's does on a pipe).
+  - **Pipes.** Both ends read and write, as FreeBSD's do. Buffers size themselves as FreeBSD's
+    do: 16 KiB for the forward direction and a page for the reverse, doubling to 64 KiB for what
+    is queued plus the write. Writes up to `PIPE_BUF` bytes are atomic. Closing an end gives the
+    other end EOF, or `EPIPE` with `SIGPIPE`.
+  - **`mmap` of files.** Private mappings of the memory disk's files share its cached pages until
+    written. `/dev/zero` maps as anonymous memory,
+    and FreeBSD's rights checks apply.
+  - **`pdfork`, `pdgetpid`, `pdkill`** (from P4.3). A child with an open descriptor sends no
+    `SIGCHLD`. `wait4(-1)` skips it, though its pid or its group still collects it. Closing the last
+    descriptor reaps it if it has exited, and otherwise kills it unless `PD_DAEMON` is set.
+    FreeBSD 15.1 answered these questions: 16-CURRENT's process-descriptor code has moved on.
+  - **Tests.** `tests/user/files.c`, `pipes.c`, and `pdfork.c` pass on both architectures and on
+    FreeBSD 15.1 natively, which caught one wrong assumption (a pipe holds 64 KiB, not 16). A
+    kernel test runs `/rescue/sh` over pipelines, `cd`, `ls -l`, `sed`, `head`, `tail`, `md5`,
+    and `realpath`.
+  - **Bug found on the way:** on arm64, a successful system call left `x1` as it was; FreeBSD
+    writes the second result (0) there. libc's `vfork` computes `x0 & (x1 - 1)`, so the parent's
+    pid came back garbled, sometimes 0, and the parent then ran the child's code. The arm64
+    machine-code test now checks `x1`.
+  - **Deviations** (read-only files, the console's input, advisory locks, `SIGIO`) are in
+    [compat-deviations.md](compat-deviations.md).
 
 **P4.6 TTY.**
 - The console UART handed over from the kernel log to a tty driver (`uart` attaches as `ttyu0`).

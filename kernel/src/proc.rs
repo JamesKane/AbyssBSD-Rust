@@ -3,9 +3,15 @@
 //! of parents and children (FreeBSD's `struct proc`).
 //!
 //! A process has one thread so far. It has a pid from the process table,
-//! a process group and session, the signal state system calls set
-//! (delivered from P4.4), resource limits, and a randomized base for
-//! `mmap` placement.
+//! a process group and session, its signal state, resource limits, a
+//! randomized base for `mmap` placement, its descriptor table, and its
+//! working directory.
+//!
+//! A child made by `pdfork` has a process descriptor (a [`ProcDesc`] file)
+//! while one is open: its exit sends its parent no `SIGCHLD`, and only a
+//! wait naming its pid or group collects it. Closing the last descriptor
+//! reaps it if it has exited, and otherwise hands it to init and, unless
+//! it is a daemon (`PD_DAEMON`), kills it.
 //!
 //! The tree is one map under one lock (FreeBSD's `proctree_lock`): each
 //! process's parent, and each parent's children, which it holds until it
@@ -15,23 +21,26 @@
 //! bump, so it never takes the tree lock inside a wait-queue condition.
 //!
 //! Behavior reference: sys/kern/kern_fork.c, sys/kern/kern_exit.c,
-//! sys/kern/kern_exec.c.
+//! sys/kern/kern_exec.c, sys/kern/sys_procdesc.c.
 
 use alloc::collections::BTreeMap;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU64, Ordering};
 
 use abi::errno::Errno;
 use abi::resource::{RLIM_INFINITY, Rlimit, WNOHANG, WNOWAIT, exit_status, rlimit};
 use abi::resource::{WCONTINUED, WUNTRACED};
 use abi::signal::code::{CLD_EXITED, CLD_KILLED};
+use sched::lock::{LockClass, Mutex};
 use sched::{Sleepable, WaitQueue};
 use sync::SpinLock;
+use vfs::Vnode;
 
 use crate::arch;
 use crate::arch::trap::TrapFrame;
 use crate::exec::Layout;
+use crate::fs::fdtable::FdTable;
 use crate::mm::space::{self, AddressSpace};
 use crate::signal::Signals;
 
@@ -39,6 +48,8 @@ use crate::signal::Signals;
 const PID_MAX: i32 = 99_999;
 /// init's pid, which inherits orphans.
 const INIT: i32 = 1;
+
+static FILEDESC_LOCK: LockClass = LockClass::new("filedesc", 200);
 
 /// Whether process group `pgid` is orphaned: no member has a parent in
 /// another group of the same session (POSIX; FreeBSD's `pg_jobc == 0`).
@@ -189,6 +200,11 @@ pub(crate) struct Process {
     /// The exit status, as `wait` reports it, valid once `exited` is set.
     status: AtomicI32,
     exited: AtomicBool,
+    /// Set with the tree locked once exit has decided whom to tell (a
+    /// zombie); a closing process descriptor decides by it.
+    zombie: AtomicBool,
+    /// A process descriptor is open for it (changes with the tree locked).
+    procdesc: AtomicBool,
     /// Kernel code waiting for this process to exit (it may have no
     /// parent).
     waiters: WaitQueue,
@@ -202,6 +218,13 @@ pub(crate) struct Process {
     pub(crate) job: SpinLock<Job>,
     /// Where the thread waits while the process is stopped.
     pub(crate) stop_wait: WaitQueue,
+    /// Open descriptors. Shared by the process's threads (when there are
+    /// several), so behind a sleepable lock (FreeBSD's `fd_sx`).
+    pub(crate) files: Mutex<FdTable>,
+    /// The working directory.
+    pub(crate) cwd: SpinLock<Arc<Vnode>>,
+    /// The file creation mask.
+    pub(crate) umask: AtomicU16,
 }
 
 /// How a process's thread enters user mode.
@@ -212,14 +235,22 @@ struct Start {
 }
 
 impl Process {
-    /// A process running in `space`, with no threads yet: a child of
-    /// `parent` (inheriting its signal state, limits, layout, group and
-    /// session), or a new session's leader laid out as `layout` says.
-    fn create(space: Arc<AddressSpace>, layout: Layout, parent: Option<&Arc<Self>>) -> Arc<Self> {
+    /// A process running in `space` with descriptors `files`, with no
+    /// threads yet: a child of `parent` (inheriting its signal state,
+    /// limits, layout, group, session, working directory, and umask), or a
+    /// new session's leader laid out as `layout` says, in the root.
+    fn create(
+        space: Arc<AddressSpace>,
+        layout: Layout,
+        parent: Option<&Arc<Self>>,
+        files: FdTable,
+    ) -> Arc<Self> {
         let (signals, limits) = match parent {
             Some(p) => (p.signals.lock().forked(), *p.limits.lock()),
             None => (Signals::new(), default_limits()),
         };
+        let cwd = parent.map_or_else(crate::fs::root, |p| Arc::clone(&p.cwd.lock()));
+        let umask = parent.map_or(0o022, |p| p.umask.load(Ordering::Relaxed));
         let p = Arc::new_cyclic(|me| {
             let pid = alloc_pid(me);
             Self {
@@ -237,12 +268,17 @@ impl Process {
                 sid: AtomicI32::new(parent.map_or(pid, |p| p.sid())),
                 status: AtomicI32::new(0),
                 exited: AtomicBool::new(false),
+                zombie: AtomicBool::new(false),
+                procdesc: AtomicBool::new(false),
                 waiters: WaitQueue::new(),
                 child_gen: AtomicU64::new(0),
                 child_wait: WaitQueue::new(),
                 thread: SpinLock::new(None),
                 job: SpinLock::new(Job::default()),
                 stop_wait: WaitQueue::new(),
+                files: Mutex::new(&FILEDESC_LOCK, files),
+                cwd: SpinLock::new(cwd),
+                umask: AtomicU16::new(umask),
             }
         });
         if let Some(parent) = parent {
@@ -302,10 +338,10 @@ impl Process {
         sched::owner()?.downcast::<Self>().ok()
     }
 
-    /// A new process running the memory-disk program at `path`, with
+    /// A new process running the program at `path` (from the root), with
     /// arguments `argv` and environment `envp`, started by the kernel (no
-    /// parent: a session leader, as init is); its thread is bound to
-    /// `cpu` if given.
+    /// parent: a session leader, as init is) with the console open on
+    /// descriptors 0 to 2; its thread is bound to `cpu` if given.
     #[cfg_attr(not(feature = "ktest"), allow(dead_code))] // boot-to-shell (P4.7)
     pub(crate) fn spawn(
         s: &Sleepable,
@@ -314,10 +350,20 @@ impl Process {
         envp: &[&[u8]],
         cpu: Option<hal::CpuId>,
     ) -> Result<Arc<Self>, Errno> {
+        let root = crate::fs::root();
+        let file = crate::fs::namespace().lookup(
+            &vfs::namei::Lookup {
+                start: &root,
+                root: &root,
+                follow: true,
+                beneath: false,
+            },
+            path,
+        )?;
         let space = AddressSpace::new().map_err(|_| Errno::ENOMEM)?;
         let data_max = default_limits()[rlimit::DATA as usize].rlim_max;
-        let image = crate::exec::load(s, &space, path, argv, envp, data_max)?;
-        let p = Self::create(space, image.layout, None);
+        let image = crate::exec::load(s, &space, &file, path, argv, envp, data_max)?;
+        let p = Self::create(space, image.layout, None, crate::fs::console_table());
         let frame = arch::user::user_frame(image.entry, image.sp, image.arg);
         p.start(frame, 0, false, cpu).map_err(|_| Errno::EAGAIN)?;
         Ok(p)
@@ -337,7 +383,7 @@ impl Process {
             stack_top: sp,
             shared_page: 0,
         };
-        let p = Self::create(space, layout, None);
+        let p = Self::create(space, layout, None, crate::fs::console_table());
         let frame = arch::user::user_frame(entry, sp, 0);
         p.start(frame, 0, false, cpu)
             .expect("a thread for the test process");
@@ -381,16 +427,74 @@ impl Process {
         frame: &TrapFrame,
         vfork: bool,
     ) -> Result<i32, Errno> {
+        self.fork_with(s, frame, vfork, None).map(|(pid, _)| pid)
+    }
+
+    /// `pdfork`: `fork`, with a process descriptor for the child installed
+    /// in this process's table (not the child's). Returns the child's pid
+    /// and the descriptor.
+    pub(crate) fn pdfork(
+        self: &Arc<Self>,
+        s: &Sleepable,
+        frame: &TrapFrame,
+        daemon: bool,
+        cloexec: bool,
+        limit: usize,
+    ) -> Result<(i32, i32), Errno> {
+        let (pid, fd) = self.fork_with(s, frame, false, Some((daemon, cloexec, limit)))?;
+        Ok((pid, fd.unwrap_or(-1)))
+    }
+
+    fn fork_with(
+        self: &Arc<Self>,
+        s: &Sleepable,
+        frame: &TrapFrame,
+        vfork: bool,
+        pd: Option<(bool, bool, usize)>,
+    ) -> Result<(i32, Option<i32>), Errno> {
         let space = if vfork {
             self.space()
         } else {
             self.space().fork(s).map_err(|_| Errno::ENOMEM)?
         };
-        let child = Self::create(space, Layout::default(), Some(self));
+        let files = self.files.lock(s).fork()?;
+        let child = Self::create(space, Layout::default(), Some(self), files);
         child.vforked.store(vfork, Ordering::Relaxed);
+        // The descriptor exists before the child runs, so its exit is a
+        // descriptor's from the start.
+        let fd = match pd {
+            Some((daemon, cloexec, limit)) => {
+                child.procdesc.store(true, Ordering::Release);
+                let file = crate::fs::file::File::new(
+                    crate::fs::file::FileKind::Process(ProcDesc {
+                        process: Arc::clone(&child),
+                        daemon,
+                    }),
+                    0,
+                );
+                let flags = crate::fs::fdtable::FdFlags {
+                    cloexec,
+                    clofork: false,
+                };
+                let installed = self.files.lock(s).alloc(file, flags, 0, limit);
+                match installed {
+                    Ok(fd) => Some(fd),
+                    Err(e) => {
+                        // The descriptor's file is gone; the child never ran.
+                        child.detach();
+                        return Err(e);
+                    }
+                }
+            }
+            None => None,
+        };
         let mut cf = *frame;
         arch_fork_return(&mut cf);
         if child.start(cf, hal::user::tls(), true, None).is_err() {
+            if let Some(fd) = fd {
+                let closed = self.files.lock(s).close(fd);
+                drop(closed);
+            }
             child.detach();
             return Err(Errno::EAGAIN);
         }
@@ -398,7 +502,7 @@ impl Process {
             self.child_wait
                 .wait_until(s, || !child.vforked.load(Ordering::Acquire));
         }
-        Ok(child.pid)
+        Ok((child.pid, fd))
     }
 
     /// Takes a child that could not start out of the tree.
@@ -421,9 +525,10 @@ impl Process {
         }
     }
 
-    /// Replaces the image with the memory-disk program at `path` (the
-    /// current thread is this process's): a new address space, caught
-    /// signals reset, and `frame` set to start the new program.
+    /// Replaces the image with the program at `path` (the current thread
+    /// is this process's): a new address space, caught signals reset,
+    /// close-on-exec descriptors closed, and `frame` set to start the new
+    /// program.
     pub(crate) fn exec(
         &self,
         s: &Sleepable,
@@ -432,9 +537,10 @@ impl Process {
         argv: &[&[u8]],
         envp: &[&[u8]],
     ) -> Result<(), Errno> {
+        let file = crate::fs::lookup(s, self, crate::fs::At::Cwd, path, crate::fs::Walk::FOLLOW)?;
         let space = AddressSpace::new().map_err(|_| Errno::ENOMEM)?;
         let data_max = self.limits.lock()[rlimit::DATA as usize].rlim_max;
-        let image = crate::exec::load(s, &space, path, argv, envp, data_max)?;
+        let image = crate::exec::load(s, &space, &file, path, argv, envp, data_max)?;
         // No way back from here.
         let old = core::mem::replace(&mut *self.space.lock(), Arc::clone(&space));
         sched::set_address_space(Some(space as Arc<dyn sched::AddressSpace>));
@@ -446,6 +552,8 @@ impl Process {
         }
         drop(old);
         self.signals.lock().exec();
+        let closed = self.files.lock(s).exec();
+        drop(closed);
         self.exterr.store(0, Ordering::Relaxed);
         self.set_tls_base(None);
         // SAFETY: this thread runs in the new image; the kernel does not
@@ -469,6 +577,10 @@ impl Process {
         // until they load another).
         sched::set_address_space(None);
         space::unload();
+        // Descriptors close before the parent hears: a pipe's reader sees
+        // the end first.
+        let closed = self.files.lock(s).take_all();
+        drop(closed);
         // The thread holds the process (its owner); this breaks the cycle.
         *self.thread.lock() = None;
         self.status.store(how.status(), Ordering::Relaxed);
@@ -478,8 +590,13 @@ impl Process {
         let reaps_nothing = parent
             .as_ref()
             .is_some_and(|p| crate::signal::parent_reaps_nothing(p));
-        {
+        let described = {
             let mut tree = TREE.lock();
+            self.zombie.store(true, Ordering::Release);
+            // A process descriptor holds this zombie for its parent: no
+            // SIGCHLD, and init does not take it.
+            let described = self.procdesc.load(Ordering::Acquire);
+            let reaps_nothing = reaps_nothing && !described;
             let init = (self.pid != INIT).then(|| find(INIT)).flatten();
             if let Some(orphans) = tree.children.remove(&self.pid) {
                 for o in orphans {
@@ -511,12 +628,13 @@ impl Process {
                     }
                 }
             }
-        }
+            described
+        };
         if let Some(init) = find(INIT) {
             init.child_changed();
         }
         if let Some(parent) = parent {
-            if reaps_nothing {
+            if described || reaps_nothing {
                 parent.child_changed();
             } else {
                 let (code, status) = match how {
@@ -587,7 +705,9 @@ impl Process {
         options: u32,
     ) -> Result<Option<(i32, i32)>, Errno> {
         let selects = |c: &Process| match pid {
-            -1 => true,
+            // Children with a process descriptor answer only to their pid
+            // or group.
+            -1 => !c.procdesc.load(Ordering::Acquire),
             0 => c.pgid() == self.pgid(),
             p if p > 0 => c.pid == p,
             p => c.pgid() == -p,
@@ -717,6 +837,69 @@ fn arch_fork_return(f: &mut TrapFrame) {
         f.x[0] = 0;
         f.x[1] = 0;
         f.spsr &= !(1 << 29);
+    }
+}
+
+/// A process descriptor (`pdfork`): the file behind the descriptor.
+/// Dropping it is closing the last descriptor.
+pub(crate) struct ProcDesc {
+    process: Arc<Process>,
+    daemon: bool,
+}
+
+impl ProcDesc {
+    pub(crate) fn process(&self) -> &Arc<Process> {
+        &self.process
+    }
+
+    /// `fstat`: a regular file, owner-accessible while the process lives;
+    /// its times are when it started (unrecorded yet: zero).
+    pub(crate) fn stat(&self) -> abi::stat::Stat {
+        let alive = !self.process.zombie.load(Ordering::Acquire);
+        abi::stat::Stat {
+            st_mode: abi::stat::S_IFREG | if alive { 0o700 } else { 0 },
+            ..abi::stat::Stat::default()
+        }
+    }
+}
+
+impl Drop for ProcDesc {
+    fn drop(&mut self) {
+        let p = &self.process;
+        let kill = {
+            let mut tree = TREE.lock();
+            p.procdesc.store(false, Ordering::Release);
+            if p.zombie.load(Ordering::Acquire) {
+                // Reaped now, unless its parent already collected it.
+                if let Some(ppid) = tree.parent.remove(&p.pid)
+                    && let Some(kids) = tree.children.get_mut(&ppid)
+                {
+                    kids.retain(|c| c.pid != p.pid);
+                }
+                false
+            } else {
+                // To init, which reaps it when it goes.
+                if let Some(ppid) = tree.parent.get(&p.pid).copied()
+                    && ppid != INIT
+                    && let Some(init) = find(INIT)
+                {
+                    if let Some(kids) = tree.children.get_mut(&ppid) {
+                        kids.retain(|c| c.pid != p.pid);
+                    }
+                    tree.parent.insert(p.pid, INIT);
+                    tree.children.entry(INIT).or_default().push(Arc::clone(p));
+                    drop(tree);
+                    init.child_changed();
+                }
+                !self.daemon
+            }
+        };
+        if kill {
+            let _ = crate::signal::post(
+                p,
+                crate::signal::user_info(abi::signal::SIGKILL, 0, abi::signal::code::SI_KERNEL),
+            );
+        }
     }
 }
 

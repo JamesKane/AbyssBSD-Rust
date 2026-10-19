@@ -2,6 +2,7 @@
 //! File status. Behavior reference: sys/sys/stat.h (the 64-bit layout, without
 //! i386's `__STAT_TIME_T_EXT` padding).
 
+use crate::layout::{Arches, ConstValue};
 use crate::time::Timespec;
 
 /// `dev_t`.
@@ -49,4 +50,37 @@ pub struct Stat {
     pub st_gen: u64,
     pub st_filerev: u64,
     pub st_spare: [u64; 9],
+}
+
+/// The file type bits of `st_mode`, and the types.
+pub const S_IFMT: u16 = 0o170_000;
+pub const S_IFIFO: u16 = 0o010_000;
+pub const S_IFCHR: u16 = 0o020_000;
+pub const S_IFDIR: u16 = 0o040_000;
+pub const S_IFBLK: u16 = 0o060_000;
+pub const S_IFREG: u16 = 0o100_000;
+pub const S_IFLNK: u16 = 0o120_000;
+pub const S_IFSOCK: u16 = 0o140_000;
+/// The permission bits, set-id and sticky bits included (`ALLPERMS`).
+pub const ALLPERMS: u16 = 0o7777;
+
+pub(crate) const CONSTANTS: &[ConstValue] = &[
+    c("S_IFMT", S_IFMT),
+    c("S_IFIFO", S_IFIFO),
+    c("S_IFCHR", S_IFCHR),
+    c("S_IFDIR", S_IFDIR),
+    c("S_IFBLK", S_IFBLK),
+    c("S_IFREG", S_IFREG),
+    c("S_IFLNK", S_IFLNK),
+    c("S_IFSOCK", S_IFSOCK),
+    c("ALLPERMS", ALLPERMS),
+];
+
+const fn c(c_name: &'static str, value: u16) -> ConstValue {
+    ConstValue {
+        c_name,
+        header: "sys/stat.h",
+        value: value as i64,
+        arches: Arches::All,
+    }
 }

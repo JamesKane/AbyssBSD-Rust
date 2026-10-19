@@ -139,7 +139,7 @@ fn free_asid(asid: u16) {
     }
 }
 
-/// An anonymous mapping request.
+/// Where and how to map: anonymous memory, or an object.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Anon {
     /// Exactly here, replacing what is there (`MAP_FIXED`).
@@ -291,6 +291,33 @@ impl AddressSpace {
 
     /// Maps anonymous memory as `a` says (`mmap` with `MAP_ANON`).
     pub(crate) fn map_anon(&self, s: &Sleepable, a: &Anon) -> Result<VirtAddr, SpaceError> {
+        self.map_entry(s, a, |range| {
+            Entry::anonymous(range, a.prot, a.max_prot).with_inherit(a.inherit)
+        })
+    }
+
+    /// Maps `object` from page `offset` on, placed as `a` says, privately
+    /// (`mmap` of a file: shared until written, then copied).
+    pub(crate) fn map_object(
+        &self,
+        s: &Sleepable,
+        a: &Anon,
+        object: Arc<vm::object::Object>,
+        offset: u64,
+    ) -> Result<VirtAddr, SpaceError> {
+        self.map_entry(s, a, |range| {
+            Entry::private(range, a.prot, a.max_prot, object, offset).with_inherit(a.inherit)
+        })
+    }
+
+    /// Places a mapping as `a` says and inserts the entry `make` builds
+    /// for its range.
+    fn map_entry(
+        &self,
+        s: &Sleepable,
+        a: &Anon,
+        make: impl FnOnce(core::ops::Range<VirtAddr>) -> Entry,
+    ) -> Result<VirtAddr, SpaceError> {
         let mut map = self.map.lock(s);
         let start = match a.fixed {
             Some(at) => {
@@ -306,8 +333,7 @@ impl AddressSpace {
                 .ok_or(MapError::NoSpace)?,
         };
         let end = start.checked_add(a.len).ok_or(MapError::OutOfRange)?;
-        let entry = Entry::anonymous(start..end, a.prot, a.max_prot).with_inherit(a.inherit);
-        map.insert(entry)?;
+        map.insert(make(start..end))?;
         Ok(start)
     }
 

@@ -323,10 +323,11 @@ pub unsafe fn copy_to_user(dst: u64, src: *const u8, len: usize) -> Result<(), F
 }
 
 // A user program for the kernel's tests (no libc): `write(1, "hello\n", 6)`,
-// then `kill(0, 1000)` (no such signal), then `exit(w * 1000 + e + c)`
+// then `kill(0, 1000)` (no such signal), then `exit(w * 1000 + e + c + x)`
 // where `w` is what `write` returned, `e` the failed call's error number,
-// and `c` 5000 if the carry flag (error) was clear. A correct kernel exits
-// with 6022 (EINVAL).
+// `c` 5000 if the carry flag (error) was clear, and `x` 7 if `write` left
+// its second result register (x1, which held the buffer) nonzero. A
+// correct kernel exits with 6022 (EINVAL).
 global_asm!(
     r#"
     .section .rodata.abyss_user_test, "a"
@@ -338,7 +339,10 @@ abyss_user_test_start:
     mov x2, #6
     svc #0
     mov x19, x0
-    mov x8, #37
+    mov x22, #0
+    cbz x1, 3f
+    mov x22, #7
+3:  mov x8, #37
     mov x0, #0
     mov x1, #1000
     svc #0
@@ -350,6 +354,7 @@ abyss_user_test_start:
     mul x0, x19, x9
     add x0, x0, x20
     add x0, x0, x21
+    add x0, x0, x22
     mov x8, #1
     svc #0
     brk #0

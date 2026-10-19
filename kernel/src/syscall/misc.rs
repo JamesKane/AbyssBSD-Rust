@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! Process identity and odds and ends: `getpid`, `issetugid`, `readlink`,
-//! `getrandom`, `exterrctl`, `cpuset_getaffinity`, `sysarch`.
+//! Process identity and odds and ends: `getpid`, `issetugid`, `getrandom`,
+//! `exterrctl`, `cpuset_getaffinity`, `sysarch`.
 
 use core::sync::atomic::Ordering;
 
@@ -13,9 +13,6 @@ use abi::thr::{
 use super::{SysResult, int, process};
 use crate::uaccess;
 
-/// `MAXPATHLEN`.
-const MAXPATHLEN: usize = 1024;
-
 /// `getpid()`.
 pub(super) fn getpid() -> SysResult {
     Ok(u64::from(process()?.pid().unsigned_abs()))
@@ -24,29 +21,6 @@ pub(super) fn getpid() -> SysResult {
 /// `issetugid()`: no set-id programs yet.
 pub(super) fn issetugid() -> SysResult {
     Ok(0)
-}
-
-/// `readlink(path, buf, count)`, on the memory disk. The working directory
-/// is `/` until there is a VFS (P4.5).
-pub(super) fn readlink(path: u64, buf: u64, count: u64) -> SysResult {
-    let mut name = [0u8; MAXPATHLEN];
-    let n = uaccess::copy_in_str(path, &mut name).map_err(|e| match e {
-        uaccess::StrError::Fault => Errno::EFAULT,
-        uaccess::StrError::TooLong => Errno::ENAMETOOLONG,
-    })?;
-    let archive = crate::md::archive().ok_or(Errno::ENOENT)?;
-    let entry = archive
-        .find(&name[..n])
-        .map_err(|_| Errno::EIO)?
-        .ok_or(Errno::ENOENT)?;
-    let ustar::Kind::Symlink(target) = entry.kind else {
-        return Err(Errno::EINVAL);
-    };
-    let len = target
-        .len()
-        .min(usize::try_from(count).unwrap_or(usize::MAX));
-    uaccess::copy_out(buf, &target[..len]).map_err(|_| Errno::EFAULT)?;
-    Ok(len as u64)
 }
 
 /// `getrandom(buf, buflen, flags)`.

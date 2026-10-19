@@ -31,6 +31,7 @@ mod efirtc;
 mod errata;
 mod exec;
 mod firmware;
+mod fs;
 mod intc;
 #[cfg(target_arch = "aarch64")]
 mod its;
@@ -113,6 +114,8 @@ fn kmain(boot_info: PhysAddr) -> ! {
     pci::init();
     devices::init(&s);
     random::start_harvester();
+    // After the clock is set, as FreeBSD mounts root once devices attach.
+    fs::init();
 
     #[cfg(feature = "ktest")]
     tests::run(&s);
