@@ -75,6 +75,7 @@ fn run() -> Result<()> {
         "run" => qemu::cmd_run(args),
         "test" => test::cmd(args),
         "perf" => perf::cmd(args),
+        "ubench" => perf::cmd_ubench(args),
         "freebsd-record" => perf::cmd_record(args),
         "fetch-base" => base::cmd(args),
         "freebsd-shell" => expect::cmd_freebsd_shell(args),

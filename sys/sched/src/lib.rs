@@ -88,6 +88,10 @@ pub trait Platform: Sync {
     /// have changed (a switch, or a newly queued thread). Interrupts are
     /// masked.
     fn rearm_timer(&self);
+    /// Points the MMU at kernel-only tables (no user half), so a CPU can
+    /// let go of the user address space it had loaded. Interrupts are
+    /// masked.
+    fn load_kernel_tables(&self);
 }
 
 /// A user address space, as the scheduler sees one: something to load
@@ -180,6 +184,9 @@ pub struct PerCpu {
     /// The previous thread's reference, when the switch path still owns
     /// it (it slept or died rather than going back on a queue).
     prev_owned: Cell<Option<Arc<Thread>>>,
+    /// The previous thread is moving to the CPU it is bound to: once it is
+    /// off this one, it is woken there.
+    prev_moving: Cell<bool>,
     runq: LockedRunQueue,
     need_resched: AtomicBool,
     /// When the running thread's slice started, in platform time.
@@ -282,6 +289,7 @@ fn new_percpu(id: CpuId) -> &'static mut PerCpu {
         idle: Cell::new(ptr::null()),
         prev: Cell::new(ptr::null()),
         prev_owned: Cell::new(None),
+        prev_moving: Cell::new(false),
         runq: LockedRunQueue::new(),
         slice_start: Cell::new(0),
         need_resched: AtomicBool::new(false),
@@ -573,17 +581,13 @@ fn better_cpu(load: usize, capacity: u16, best_load: usize, best_capacity: u16) 
     load < best_load || (load == best_load && capacity > best_capacity)
 }
 
-/// Binds the current thread to `cpu`, or lets it run anywhere (`None`).
-/// It moves to a newly bound CPU the next time it wakes: a short sleep
-/// moves it at once.
-pub fn set_binding(cpu: Option<CpuId>) {
+/// Binds the current thread to `cpu`, or lets it run anywhere (`None`),
+/// and moves it there now if it runs elsewhere.
+pub fn move_to(cpu: Option<CpuId>) {
     current().inner.lock().bound = cpu;
-}
-
-/// The current thread's binding.
-#[must_use]
-pub fn binding() -> Option<CpuId> {
-    current().inner.lock().bound
+    if cpu.is_some_and(|c| c != hal::cpu_id()) {
+        yield_now();
+    }
 }
 
 /// Picks the CPU a waking thread should run on: its binding, else the
@@ -825,19 +829,27 @@ pub(crate) fn switch_away() {
         },
         now,
     );
-    if state == State::Running {
+    // A running thread bound elsewhere goes there instead of back on this
+    // CPU's queue: it is woken once it is off this CPU (`finish_switch`).
+    let moving = state == State::Running && !cur.idle && inner.bound.is_some_and(|b| b != c.id);
+    if moving {
+        inner.state = State::Sleeping;
+    } else if state == State::Running {
         inner.state = State::Runnable;
         if !cur.idle {
             // Queued under the thread lock (see `make_runnable`).
             c.runq.lock().push(Arc::clone(&cur), prio);
         }
     }
+    c.prev_moving.set(moving);
     // Never carry the thread lock across the switch.
     drop(inner);
     cur.runtime.fetch_add(elapsed, Ordering::Relaxed);
     let owned = match state {
         // The idle thread is never queued; it is the fallback.
         State::Running if cur.idle => None,
+        // Requeued (the queue has its own reference), or moving (owned
+        // here until it is woken on its CPU).
         State::Running => Some(cur),
         State::Sleeping | State::Runnable | State::Dead => Some(cur),
         State::New => unreachable!("a new thread cannot be running"),
@@ -881,7 +893,7 @@ pub(crate) fn switch_away() {
     // `owned` is dropped by the incoming side unless the thread is dead,
     // in which case the reaper takes it.
     let keep = match owned {
-        Some(t) if state == State::Running => {
+        Some(t) if state == State::Running && !moving => {
             // Queued already; the queue holds its own reference.
             drop(t);
             None
@@ -974,11 +986,15 @@ fn finish_switch() {
     // Release: everything the outgoing thread did, and its saved context,
     // is visible to the next CPU that resumes it.
     prev_thread.on_cpu.store(false, Ordering::Release);
-    if let Some(t) = owned
-        && t.inner.lock().state == State::Dead
-    {
-        ZOMBIES.lock().push_back(t);
-        REAPER.wake_one();
+    let moving = c.prev_moving.replace(false);
+    if let Some(t) = owned {
+        if moving {
+            // Off this CPU now: wake it where it is bound.
+            make_runnable(t);
+        } else if t.inner.lock().state == State::Dead {
+            ZOMBIES.lock().push_back(t);
+            REAPER.wake_one();
+        }
     }
 }
 
@@ -1169,6 +1185,21 @@ fn switching_often(c: &PerCpu) -> bool {
     !stale && cur + prev > IDLE_SPIN_THRESHOLD
 }
 
+/// About to halt: lets go of the user address space this CPU still has
+/// loaded, as FreeBSD's idle thread runs on the kernel's pmap. Shootdowns
+/// for that space then pass over this CPU instead of waking it.
+fn release_space(c: &PerCpu) {
+    let irq = hal::irq::disable();
+    let loaded = c.space.take();
+    if let Some(l) = &loaded {
+        platform().load_kernel_tables();
+        l.deactivate();
+    }
+    hal::irq::restore(irq);
+    // A last reference frees the tables, with interrupts enabled.
+    drop(loaded);
+}
+
 fn idle_loop() {
     loop {
         let irq = hal::irq::disable();
@@ -1187,6 +1218,7 @@ fn idle_loop() {
                 core::hint::spin_loop();
             }
         }
+        release_space(c);
         let irq = hal::irq::disable();
         c.halted.store(true, Ordering::Relaxed);
         // Pairs with the waker's fence in `make_runnable`: either it sees

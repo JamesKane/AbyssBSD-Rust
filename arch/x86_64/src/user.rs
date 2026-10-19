@@ -211,6 +211,15 @@ pub unsafe fn activate(root: PhysAddr) {
     unsafe { asm!("mov cr3, {}", in(reg) root.get(), options(nostack)) };
 }
 
+/// Drops all of this CPU's user TLB entries. Reloading CR3 leaves the
+/// kernel's global entries alone, and a hypervisor with nested paging
+/// does not trap it (it traps a CR4.PGE toggle, which flushes those too).
+pub fn flush_user() {
+    let root = crate::cpu::cr3();
+    // SAFETY: reloading the current root changes no mapping.
+    unsafe { asm!("mov cr3, {}", in(reg) root, options(nostack)) };
+}
+
 /// Drops this CPU's TLB entry for user page `va`.
 pub fn flush_page(va: u64) {
     // SAFETY: INVLPG only drops a cached translation.

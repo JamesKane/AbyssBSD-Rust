@@ -449,6 +449,64 @@ fn build_ubench(dirs: &Dirs) -> Result<PathBuf> {
     Ok(out)
 }
 
+/// `cargo xtask ubench [--arch A] [--runs N]`: the P4 suite on AbyssBSD
+/// alone, in local QEMU (KVM where it can), for comparing AbyssBSD with
+/// itself while working on it. The numbers that count come from `perf`,
+/// against FreeBSD on the same bhyve host.
+pub(crate) fn cmd_ubench(mut args: Args) -> Result<()> {
+    let arches = Arch::from_args(&mut args)?;
+    let runs: usize = args
+        .take_value("--runs")?
+        .map_or(Ok(1), |s| s.parse())
+        .map_err(|_| "bad --runs")?;
+    args.finish()?;
+    for arch in arches {
+        let dir = util::root().join("build").join(arch.to_string());
+        fs::create_dir_all(&dir)?;
+        let bin = dir.join("ubench");
+        base::cc_static(arch, &util::root().join("tests/perf/ubench/ubench.c"), &bin)?;
+        let opts = build::Options {
+            release: true,
+            ktest: false,
+        };
+        let disk = image::build_with(
+            arch,
+            opts,
+            "abyss.bench=p4 abyss.qemu_exit=1",
+            &[("tmp/ubench", bin.as_path())],
+        )?;
+        let mut all: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+        let mut units = BTreeMap::new();
+        for run in 0..runs {
+            let log = dir.join(format!("ubench-{run}.log"));
+            let vm = Vm {
+                smp: 8,
+                mem: "2G".into(),
+                test_devices: true,
+                ..Vm::new(Vmm::Qemu, arch, disk.clone())
+            };
+            vm.run_until(Duration::from_secs(900), &log, false, &|line: &str| {
+                (line.contains("panic:") || line.contains("fatal trap"))
+                    .then(|| Outcome::Failed(line.to_owned()))
+            })?;
+            let text = fs::read_to_string(&log)?;
+            for (name, value, unit) in
+                parse(&text).map_err(|e| format!("{}: {e}", log.display()))?
+            {
+                units.insert(name.clone(), unit);
+                all.entry(name).or_default().push(value);
+            }
+        }
+        println!("ubench p4 on AbyssBSD ({arch}, local QEMU), median of {runs}");
+        for (name, mut v) in all {
+            v.sort_by(f64::total_cmp);
+            let unit = units.get(&name).map_or("", String::as_str);
+            println!("{name:<24} {:>12.1} {unit}", v[v.len() / 2]);
+        }
+    }
+    Ok(())
+}
+
 /// The second disk: a UFS file system holding the benchmark (`kbench.ko`,
 /// or the `ubench` binary) and the suite name. Attached to both kernels'
 /// VMs, so the configurations match.

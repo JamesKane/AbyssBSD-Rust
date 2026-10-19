@@ -353,6 +353,14 @@ pub(crate) fn on_call_ipi() {
     let va = VirtAddr::new(CALL_VA.load(Ordering::Acquire));
     let len = CALL_LEN.load(Ordering::Acquire);
     if len > 64 * 4096 {
+        // A user range needs only the user entries gone.
+        #[cfg(target_arch = "x86_64")]
+        if va.get() < crate::mm::space::USER_END {
+            arch::user::flush_user();
+        } else {
+            arch::mmu::flush_all();
+        }
+        #[cfg(target_arch = "aarch64")]
         arch::mmu::flush_all();
     } else if len > 0 {
         crate::mm::flush_range(va, len);

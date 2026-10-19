@@ -55,19 +55,18 @@ static FILEDESC_LOCK: LockClass = LockClass::new("filedesc", 200);
 /// another group of the same session (POSIX; FreeBSD's `pg_jobc == 0`).
 /// Stops from the terminal do not stop an orphaned group.
 pub(crate) fn pgrp_orphaned(pgid: i32) -> bool {
-    let members: Vec<Arc<Process>> = PROCS
-        .lock()
-        .values()
-        .filter_map(Weak::upgrade)
-        .filter(|p| p.pgid() == pgid && !p.exited.load(Ordering::Acquire))
-        .collect();
-    !members.iter().any(|m| {
-        m.parent()
-            .is_some_and(|parent| parent.pgid() != pgid && parent.sid() == m.sid())
+    !all().iter().any(|m| {
+        m.pgid() == pgid
+            && !m.exited.load(Ordering::Acquire)
+            && m.parent()
+                .is_some_and(|parent| parent.pgid() != pgid && parent.sid() == m.sid())
     })
 }
 
-/// Every live process.
+/// Every live process. The only way to look through the table: a process
+/// whose last reference goes takes the table's lock to leave it, so no
+/// reference may be dropped while it is held. Here none is (each moves
+/// into the list); callers drop theirs after.
 pub(crate) fn all() -> Vec<Arc<Process>> {
     PROCS.lock().values().filter_map(Weak::upgrade).collect()
 }
@@ -379,16 +378,12 @@ impl Process {
     /// thread is bound when that is one CPU; otherwise it runs anywhere
     /// (the scheduler binds to one CPU or none). The caller's own thread
     /// moves at once.
-    pub(crate) fn set_cpus(&self, s: &Sleepable, mask: u64) {
+    pub(crate) fn set_cpus(&self, mask: u64) {
         self.cpus.store(mask, Ordering::Relaxed);
         let one = (mask.count_ones() == 1).then(|| hal::CpuId(mask.trailing_zeros()));
         let mine = Process::current().is_some_and(|p| p.pid == self.pid);
         if mine {
-            sched::set_binding(one);
-            if one.is_some_and(|c| c != hal::cpu_id()) {
-                // The wakeup puts it on its CPU.
-                crate::time::sleep_ns(s, 1);
-            }
+            sched::move_to(one);
         }
     }
 
@@ -927,12 +922,7 @@ impl Process {
     /// Makes this process the leader of a new session and group
     /// (`setsid`); fails for a group leader.
     pub(crate) fn setsid(&self) -> Result<i32, Errno> {
-        let procs = PROCS.lock();
-        let leads = self.pgid() == self.pid
-            || procs
-                .values()
-                .filter_map(Weak::upgrade)
-                .any(|p| p.pgid() == self.pid);
+        let leads = self.pgid() == self.pid || all().iter().any(|p| p.pgid() == self.pid);
         if leads {
             return Err(Errno::EPERM);
         }
@@ -965,10 +955,8 @@ impl Process {
         }
         if pgid != target.pid {
             // Joining a group: it must exist in this session.
-            let exists = PROCS
-                .lock()
-                .values()
-                .filter_map(Weak::upgrade)
+            let exists = all()
+                .iter()
                 .any(|p| p.pgid() == pgid && p.sid() == self.sid());
             if !exists {
                 return Err(Errno::EPERM);
@@ -981,6 +969,8 @@ impl Process {
 
 impl Drop for Process {
     fn drop(&mut self) {
+        // See `all`: nothing holds the table's lock while a reference
+        // drops.
         PROCS.lock().remove(&self.pid);
     }
 }

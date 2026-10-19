@@ -107,7 +107,6 @@ pub(super) fn cpuset_getaffinity(
 /// `cpuset_setaffinity(level, which, id, setsize, mask)`: the CPUs a
 /// process (this one, or another by pid) may run on.
 pub(super) fn cpuset_setaffinity(
-    s: &sched::Sleepable,
     level: u64,
     which: u64,
     id: u64,
@@ -153,7 +152,7 @@ pub(super) fn cpuset_setaffinity(
     if bits == 0 {
         return Err(Errno::EDEADLK);
     }
-    target.set_cpus(s, bits);
+    target.set_cpus(bits);
     Ok(0)
 }
 

@@ -45,6 +45,10 @@ impl sched::Platform for Platform {
     fn rearm_timer(&self) {
         crate::time::rearm();
     }
+
+    fn load_kernel_tables(&self) {
+        crate::mm::space::load_kernel_tables();
+    }
 }
 
 static PLATFORM: Platform = Platform;

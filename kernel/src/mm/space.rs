@@ -230,10 +230,17 @@ impl AddressSpace {
         #[cfg(target_arch = "x86_64")]
         {
             let me = 1u64 << hal::cpu_id().0;
-            let loaded = self.loaded_on.load(Ordering::Acquire);
+            // The table stores just made must be visible before the CPUs
+            // that load this space are read: a CPU that sets its bit after
+            // this read then walks the new tables. x86 lets a load pass an
+            // earlier store, so without the fence that CPU could cache an
+            // old entry and be skipped (`activate` sets its bit with a
+            // locked instruction, a full barrier on its side).
+            core::sync::atomic::fence(Ordering::SeqCst);
+            let loaded = self.loaded_on.load(Ordering::SeqCst);
             if loaded & me != 0 {
                 if len > 64 * PAGE_SIZE {
-                    arch::mmu::flush_all();
+                    arch::user::flush_user();
                 } else {
                     let mut off = 0;
                     while off < len {
@@ -584,19 +591,22 @@ impl Drop for AddressSpace {
 /// Stops this CPU using the user space it has loaded, if the current
 /// thread runs in none, so the space can be freed.
 pub(crate) fn unload() {
-    sched::unload_address_space(|| {
-        #[cfg(target_arch = "x86_64")]
-        // SAFETY: the kernel's own tables map the kernel as every user
-        // root does.
-        unsafe {
-            arch::user::activate(super::kernel_root());
-        }
-        #[cfg(target_arch = "aarch64")]
-        // SAFETY: the kernel keeps nothing in the lower half.
-        unsafe {
-            arch::mmu::disable_lower_half();
-        }
-    });
+    sched::unload_address_space(load_kernel_tables);
+}
+
+/// Points the MMU at tables with no user half. Interrupts are masked.
+pub(crate) fn load_kernel_tables() {
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: the kernel's own tables map the kernel as every user root
+    // does.
+    unsafe {
+        arch::user::activate(super::kernel_root());
+    }
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: the kernel keeps nothing in the lower half.
+    unsafe {
+        arch::mmu::disable_lower_half();
+    }
 }
 
 /// The page-fault hook: resolves faults on user addresses from user mode,
