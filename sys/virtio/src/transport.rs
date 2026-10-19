@@ -116,6 +116,8 @@ pub struct VirtioDevice {
     pub(crate) device_type: u32,
     pub(crate) vectors: Vectors,
     pub(crate) queues: u16,
+    /// `RING_EVENT_IDX` was negotiated: rings use the event fields.
+    pub(crate) event_idx: core::sync::atomic::AtomicBool,
 }
 
 impl VirtioDevice {
@@ -262,7 +264,8 @@ impl VirtioDevice {
         // Device-specific bits are 0-23 and 50-127; the transport keeps
         // the rest for itself.
         let device_bits = ((1u64 << 24) - 1) | !((1u64 << 50) - 1);
-        let mut want = wanted & device_bits & offered;
+        // Of the transport's bits, the driver may ask for event indices.
+        let mut want = wanted & (device_bits | feature::RING_EVENT_IDX) & offered;
         let modern = self.is_modern();
         if modern {
             if offered & feature::VERSION_1 == 0 {
@@ -274,6 +277,10 @@ impl VirtioDevice {
             want |= feature::VERSION_1 | offered & feature::ACCESS_PLATFORM;
         }
         self.set_driver_features(want);
+        self.event_idx.store(
+            want & feature::RING_EVENT_IDX != 0,
+            core::sync::atomic::Ordering::Relaxed,
+        );
         if modern {
             self.set_status(status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK);
             if self.status() & status::FEATURES_OK == 0 {
@@ -393,7 +400,8 @@ impl VirtioDevice {
             }
             Regs::Legacy { .. } => dev_max,
         };
-        let ring = Ring::new(tag, size).map_err(|_| QueueError::NoMemory)?;
+        let mut ring = Ring::new(tag, size).map_err(|_| QueueError::NoMemory)?;
+        ring.set_event_idx(self.event_idx.load(core::sync::atomic::Ordering::Relaxed));
         let vector = self.queue_vector(q);
         match &self.regs {
             Regs::Modern { .. } => {

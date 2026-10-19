@@ -228,7 +228,7 @@ fn hostile_device_is_refused() {
 
 #[test]
 fn device_flags() {
-    let r = Ring::new(&tag(), 8).unwrap();
+    let mut r = Ring::new(&tag(), 8).unwrap();
     let used = r.used_addr() - r.desc_addr();
     r.memory().write_at::<u16>(used as usize, 1);
     assert!(!r.needs_notify(), "the device said not to notify");
@@ -236,6 +236,79 @@ fn device_flags() {
     assert_eq!(r.memory().read_at::<u16>(16 * 8), 1);
     r.set_interrupts(true);
     assert_eq!(r.memory().read_at::<u16>(16 * 8), 0);
+}
+
+#[test]
+fn event_indices_decide_notifications() {
+    let mut r = Ring::new(&tag(), 8).unwrap();
+    r.set_event_idx(true);
+    let n = 8usize;
+    let used = (r.used_addr() - r.desc_addr()) as usize;
+    let avail_event = used + 4 + 8 * n;
+    // The flag no longer counts: the device asks by index.
+    r.memory().write_at::<u16>(used, 1);
+    // It wants to hear when entry 0 is made available.
+    r.memory().write_at::<u16>(avail_event, 0);
+    r.push(&[(1, 1)], &[]).unwrap();
+    assert!(r.needs_notify(), "entry 0 published: notify");
+    // Still wants entry 0, which it was told about: no notification.
+    r.push(&[(1, 1)], &[]).unwrap();
+    assert!(
+        !r.needs_notify(),
+        "the device has not caught up to its event"
+    );
+    // It asks for entry 2; entries 2 and 3 published in one batch.
+    r.memory().write_at::<u16>(avail_event, 2);
+    r.push(&[(1, 1)], &[]).unwrap();
+    r.push(&[(1, 1)], &[]).unwrap();
+    assert!(r.needs_notify(), "the batch passed the event: notify once");
+    assert!(!r.needs_notify(), "nothing new");
+}
+
+#[test]
+fn event_indices_rearm_interrupts() {
+    let mut r = Ring::new(&tag(), 4).unwrap();
+    r.set_event_idx(true);
+    let mut dev = Device { seen: 0, used: 0 };
+    let used_event = 16 * 4 + 4 + 2 * 4;
+    // Wrap the ring several times: after catching up, the driver always
+    // asks for an interrupt at its next completion.
+    for i in 0..20u32 {
+        let h = r.push(&[], &[(1, 8)]).unwrap();
+        for (head, _) in dev.take(&r) {
+            dev.complete(&r, u32::from(head), 8);
+        }
+        assert_eq!(r.pop().unwrap().map(|u| u.head), Some(h), "completion {i}");
+        assert_eq!(r.pop().unwrap(), None);
+        assert_eq!(
+            r.memory().read_at::<u16>(used_event),
+            dev.used,
+            "used_event after {i}"
+        );
+    }
+    // Caught up, with the event written: the next completion is found.
+    let h = r.push(&[], &[(1, 8)]).unwrap();
+    for (head, _) in dev.take(&r) {
+        dev.complete(&r, u32::from(head), 8);
+    }
+    assert_eq!(r.pop().unwrap().map(|u| u.head), Some(h));
+}
+
+#[test]
+fn rearm_reports_completions_that_raced_it() {
+    let mut r = Ring::new(&tag(), 4).unwrap();
+    let mut dev = Device { seen: 0, used: 0 };
+    r.set_interrupts(false);
+    assert!(r.rearm(), "nothing pending: interrupts back on");
+    assert_eq!(r.memory().read_at::<u16>(16 * 4), 0);
+    let h = r.push(&[], &[(1, 8)]).unwrap();
+    r.set_interrupts(false);
+    for (head, _) in dev.take(&r) {
+        dev.complete(&r, u32::from(head), 8);
+    }
+    assert!(!r.rearm(), "a completion landed while interrupts were off");
+    assert_eq!(r.pop().unwrap().map(|u| u.head), Some(h));
+    assert!(r.rearm());
 }
 
 /// One function's configuration space.

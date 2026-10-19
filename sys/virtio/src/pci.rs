@@ -269,6 +269,7 @@ impl Driver for Modern {
             device_type,
             vectors: Vectors::None,
             queues: 0,
+            event_idx: core::sync::atomic::AtomicBool::new(false),
         };
         dev.reset();
         dev.queues = dev.modern_queues();
@@ -313,6 +314,7 @@ impl Driver for Legacy {
             device_type: u32::from(i.subdevice),
             vectors: Vectors::None,
             queues: 0,
+            event_idx: core::sync::atomic::AtomicBool::new(false),
         };
         dev.reset();
         dev.queues = (0..LEGACY_MAX_QUEUES)

@@ -71,6 +71,16 @@ pub struct Ring {
     writable: Vec<u32>,
     avail_idx: u16,
     last_used: u16,
+    /// `RING_EVENT_IDX` negotiated: the event fields replace the flags.
+    event_idx: bool,
+    /// The available index as of the last notification decision.
+    kicked: u16,
+}
+
+/// Whether moving an index from `old` to `new` passed `event` (the
+/// virtio spec's `vring_need_event`).
+fn passed(event: u16, new: u16, old: u16) -> bool {
+    new.wrapping_sub(event).wrapping_sub(1) < new.wrapping_sub(old)
 }
 
 impl Ring {
@@ -103,6 +113,8 @@ impl Ring {
             writable: vec![0; n],
             avail_idx: 0,
             last_used: 0,
+            event_idx: false,
+            kicked: 0,
         })
     }
 
@@ -190,13 +202,31 @@ impl Ring {
         Ok(head)
     }
 
-    /// Whether the device wants to be told about new buffers.
+    /// Whether the device wants to be told about the buffers pushed since
+    /// the last call.
     #[must_use]
-    pub fn needs_notify(&self) -> bool {
-        // The index store before the flag load (the device does the
+    pub fn needs_notify(&mut self) -> bool {
+        // The index store before the flag or event load (the device does
+        // the reverse).
+        fence(Ordering::SeqCst);
+        if self.event_idx {
+            let (new, old) = (self.avail_idx, self.kicked);
+            self.kicked = new;
+            let avail_event = self.used + 4 + 8 * usize::from(self.size);
+            return passed(self.mem.read_at::<u16>(avail_event), new, old);
+        }
+        self.mem.read_at::<u16>(self.used) & USED_NO_NOTIFY == 0
+    }
+
+    /// Turns interrupts back on after draining with them off; false if
+    /// completions arrived meanwhile (drain again: the device may not
+    /// have interrupted for them).
+    pub fn rearm(&self) -> bool {
+        self.set_interrupts(true);
+        // The flag store before the index load (the device does the
         // reverse).
         fence(Ordering::SeqCst);
-        self.mem.read_at::<u16>(self.used) & USED_NO_NOTIFY == 0
+        !self.has_used()
     }
 
     /// Whether completions are waiting.
@@ -205,11 +235,27 @@ impl Ring {
         self.mem.read_at::<u16>(self.used + 2) != self.last_used
     }
 
+    /// Uses the event index fields (`RING_EVENT_IDX` was negotiated).
+    pub fn set_event_idx(&mut self, on: bool) {
+        self.event_idx = on;
+    }
+
     /// Takes the next completion, if any, and frees its chain.
     pub fn pop(&mut self) -> Result<Option<Used>, RingError> {
-        let idx = self.mem.read_at::<u16>(self.used + 2);
+        let mut idx = self.mem.read_at::<u16>(self.used + 2);
         if idx == self.last_used {
-            return Ok(None);
+            if !self.event_idx {
+                return Ok(None);
+            }
+            // Caught up: ask for an interrupt at the next completion, then
+            // look again, in case it landed before the device saw that.
+            let used_event = self.avail + 4 + 2 * usize::from(self.size);
+            self.mem.write_at::<u16>(used_event, self.last_used);
+            fence(Ordering::SeqCst);
+            idx = self.mem.read_at::<u16>(self.used + 2);
+            if idx == self.last_used {
+                return Ok(None);
+            }
         }
         let outstanding = self.size - self.free;
         let ahead = idx.wrapping_sub(self.last_used);
@@ -285,7 +331,7 @@ impl Virtqueue {
     }
 
     /// Tells the device about buffers pushed, unless it said not to.
-    pub fn kick(&self) {
+    pub fn kick(&mut self) {
         if self.ring.needs_notify() {
             self.dev.notify(self.index);
         }
@@ -300,6 +346,11 @@ impl Virtqueue {
     /// See [`Ring::pop`].
     pub fn pop(&mut self) -> Result<Option<Used>, RingError> {
         self.ring.pop()
+    }
+
+    /// See [`Ring::rearm`].
+    pub fn rearm(&self) -> bool {
+        self.ring.rearm()
     }
 
     /// See [`Ring::set_interrupts`].

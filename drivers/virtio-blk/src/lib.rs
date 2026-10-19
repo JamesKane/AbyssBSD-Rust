@@ -144,7 +144,26 @@ impl Shared {
     fn reap(&self, s: &Sleepable) -> Vec<(Bio, Result<(), BioError>)> {
         let mut out = Vec::new();
         let mut q = self.queue.lock(s);
-        while let Ok(Some(used)) = q.vq.pop() {
+        // No interrupts while draining, as FreeBSD's vtblk does: under load
+        // the device would raise one per completion we are already taking.
+        q.vq.set_interrupts(false);
+        loop {
+            let used = match q.vq.pop() {
+                Ok(Some(u)) => u,
+                Ok(None) if q.vq.rearm() => break,
+                Ok(None) => {
+                    q.vq.set_interrupts(false);
+                    continue;
+                }
+                Err(e) => {
+                    // The device broke the ring's rules; what it still
+                    // holds is failed when the instance stops.
+                    bus::manager()
+                        .log(format_args!("vtblk: bad completion from the device: {e:?}"));
+                    q.vq.set_interrupts(true);
+                    break;
+                }
+            };
             let head = usize::from(used.head);
             let status = q.headers.read(head * SLOT + 16);
             if let Some(f) = q.slots.get_mut(head).and_then(Option::take) {
@@ -277,7 +296,16 @@ impl Driver for VtBlk {
             .bus_data_arc::<VirtioDevice>()
             .ok_or(AttachError::Decline)?;
         let features = dev
-            .negotiate(F_SIZE_MAX | F_SEG_MAX | F_RO | F_BLK_SIZE | F_FLUSH)
+            .negotiate(
+                F_SIZE_MAX
+                    | F_SEG_MAX
+                    | F_RO
+                    | F_BLK_SIZE
+                    | F_FLUSH
+                    // Notifications and interrupts only when the other side
+                    // asks (as FreeBSD's vtblk does): far fewer VM exits.
+                    | virtio::feature::RING_EVENT_IDX,
+            )
             .map_err(|_| AttachError::Device("feature negotiation failed"))?;
         let built = (|| {
             let sectors = dev.config64(CFG_CAPACITY);

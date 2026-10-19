@@ -424,25 +424,27 @@ struct Qd {
     offsets: sync::SpinLock<Offsets>,
     completed: AtomicU64,
     inflight: AtomicUsize,
-    drained: WaitQueue,
+    /// Buffers of completed reads, for the worker to resubmit.
+    done: sync::SpinLock<Vec<Vec<u8>>>,
+    /// The worker sleeps here for completed reads, or the drain.
+    wake: WaitQueue,
 }
 
 fn qd_issue(q: &Arc<Qd>, s: &Sleepable, buf: Vec<u8>) {
     let at = q.offsets.lock().next();
     let q2 = Arc::clone(q);
+    // The completion hands the buffer to the worker, which resubmits: one
+    // thread hop, as FreeBSD's `bio_done` runs in `g_up`, not in the
+    // driver's interrupt thread (resubmitting there never lets it sleep).
     let bio = storage::Bio::new(storage::BioOp::Read, at, buf, move |buf, r| {
         assert!(r.is_ok(), "bench: read failed: {r:?}");
         q2.completed.fetch_add(1, Ordering::Relaxed);
         if q2.run.stopped() {
-            if q2.inflight.fetch_sub(1, Ordering::AcqRel) == 1 {
-                q2.drained.wake_all();
-            }
+            q2.inflight.fetch_sub(1, Ordering::AcqRel);
         } else {
-            // SAFETY: completions run in a disk driver's interrupt thread
-            // (or in thread context when it stops), which may sleep.
-            let s = unsafe { Sleepable::assume() };
-            qd_issue(&q2, &s, buf);
+            q2.done.lock().push(buf);
         }
+        q2.wake.wake_all();
     });
     q.disk.strategy(s, bio);
 }
@@ -483,15 +485,32 @@ fn bench_disk(s: &Sleepable, dev: &str, name: &str) {
             offsets: sync::SpinLock::new(Offsets::new(&disk)),
             completed: AtomicU64::new(0),
             inflight: AtomicUsize::new(QD),
-            drained: WaitQueue::new(),
+            done: sync::SpinLock::new(Vec::new()),
+            wake: WaitQueue::new(),
         });
         let q2 = Arc::clone(&q);
         let ticks = launch(s, &run, &cpus, RUN_NS, move |run, i, ws| {
             for _ in 0..QD {
                 qd_issue(&q2, ws, alloc::vec![0u8; 4096]);
             }
-            q2.drained
-                .wait_until(ws, || q2.inflight.load(Ordering::Acquire) == 0);
+            loop {
+                q2.wake.wait_until(ws, || {
+                    !q2.done.lock().is_empty() || q2.inflight.load(Ordering::Acquire) == 0
+                });
+                // Taken in its own statement: no spinlock across submit.
+                let bufs = core::mem::take(&mut *q2.done.lock());
+                if run.stopped() {
+                    // Completed after the stop, before being resubmitted.
+                    q2.inflight.fetch_sub(bufs.len(), Ordering::AcqRel);
+                } else {
+                    for buf in bufs {
+                        qd_issue(&q2, ws, buf);
+                    }
+                }
+                if q2.inflight.load(Ordering::Acquire) == 0 {
+                    break;
+                }
+            }
             run.ops[i]
                 .0
                 .store(q2.completed.load(Ordering::Relaxed), Ordering::Relaxed);

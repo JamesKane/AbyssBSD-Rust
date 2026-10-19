@@ -403,6 +403,13 @@ P3.3 (from the start, pure crate) ────────┘   P3.8 ─┴─�
 - The P3 suite: interrupt latency; IOPS at queue depths 1 and 32 with p50/p99 latency; sequential
   bandwidth; AML namespace load and `_STA`/`_CRS` evaluation; gate cost at 1 and 8 CPUs; attach
   time; DMA map throughput; and detach-cycle time.
+- Progress (2026-10-19): the detach stress test (vtblk1 and nvme0, 8 cycles each, under I/O) and
+  the verifier run in every boot case. The perf suite `p3` covers block QD1 p50/p99, QD32, and
+  sequential reads on vtbd and nda, plus AML `_STA`/`_CRS`. In a single run on bhyve, everything
+  is faster than FreeBSD except `blk.vtbd.qd32` at 1.076. That gap is not notifications or
+  interrupts: `EVENT_IDX` (which bhyve does not offer) and interrupt suppression while draining
+  left it unchanged. Still to do: close that gap, run the suite with several runs, and add the
+  remaining items (interrupt latency, gate cost, attach time, DMA map, detach-cycle time).
 
 **Exit:** on both arches:
 - The kernel enumerates PCIe through the device manager and attaches NVMe, AHCI, and virtio-blk
