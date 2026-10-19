@@ -36,7 +36,7 @@ const BOUND: f64 = 1.02;
 const MAX_CV: f64 = 0.01;
 const BOOTSTRAP: usize = 2000;
 
-const USAGE: &str = "usage: cargo xtask --remote perf [--suite p2|diag] [--runs N] [--prepare]";
+const USAGE: &str = "usage: cargo xtask --remote perf [--suite p2|p3|diag] [--runs N] [--prepare]";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Side {
@@ -63,8 +63,8 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     args.finish()?;
     // `diag` holds AbyssBSD-side diagnostics, some with FreeBSD
     // counterparts; it is for investigation, not gating.
-    if suite != "p2" && suite != "diag" {
-        return Err(format!("unknown suite `{suite}` (p2, diag)").into());
+    if !["p2", "p3", "diag"].contains(&suite.as_str()) {
+        return Err(format!("unknown suite `{suite}` (p2, p3, diag)").into());
     }
     if !cfg!(target_os = "freebsd") {
         return Err(format!("perf needs bhyve: run it on the build server\n{USAGE}").into());
@@ -364,6 +364,8 @@ fn make_bench_disk(out: &Path, kbench: &Path, suite: &str) -> Result<PathBuf> {
     fs::create_dir_all(&dir)?;
     fs::copy(kbench, dir.join("kbench.ko"))?;
     fs::write(dir.join("suite"), suite)?;
+    // The NVMe disk the P3 suite reads (zeros are fine for reads).
+    fs::File::create(out.join("nvme.img"))?.set_len(64 << 20)?;
     let disk = out.join("bench-disk.img");
     util::run(
         Command::new("makefs")
@@ -482,6 +484,13 @@ fn run_one(disk: &Path, bench_disk: &Path, log: &Path) -> Result<Vec<(String, f6
         smp: 8,
         mem: "2G".into(),
         extra_disk: Some(bench_disk.to_path_buf()),
+        // The P3 suite's NVMe disk, beside the bench disk; the same on
+        // both sides. File-backed: bhyve's RAM-backed namespaces fail
+        // 128 KiB reads (EIO, under FreeBSD too).
+        devices: vec![format!(
+            "5,nvme,{}",
+            bench_disk.with_file_name("nvme.img").display()
+        )],
         pin: true,
         ..Vm::new(Vmm::Bhyve, Arch::X86_64, disk.to_path_buf())
     };

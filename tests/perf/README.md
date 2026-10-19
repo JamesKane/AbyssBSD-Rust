@@ -66,6 +66,24 @@ operations completed, so the inverse of throughput) or `ns` (a latency percentil
 | `ipi.rtt` | 1 (CPU 1) | Run an empty function on CPU 2 and wait for it to finish. FreeBSD `smp_rendezvous_cpus` with no barriers; AbyssBSD `smp::ping` |
 | `tlb.shootdown` | 1 (CPU 1) | Invalidate one kernel page on every CPU and wait. FreeBSD `pmap_invalidate_page(kernel_pmap, va)`; AbyssBSD `mm::flush_range` plus `smp::shootdown` |
 
+## Suite `p3`
+
+The VM also has a 64 MiB file-backed NVMe disk (`5,nvme,<file>`; bhyve's RAM-backed namespaces fail
+128 KiB reads). Block benchmarks read the second
+virtio-blk disk (`vtbd1`, the 16 MiB bench disk, read-only) and the NVMe namespace (`nda0`), within
+their first 16 MiB. Offsets are 4 KiB-aligned, from xorshift64 seeded with 1. Requests go straight to
+the disk: FreeBSD through a GEOM consumer of its own class on the provider (`g_io_request`),
+AbyssBSD through `Disk::strategy`. Buffers are page-aligned.
+
+| Name | Workers | Operation |
+|---|---|---|
+| `blk.<d>.qd1` | 1 (CPU 1) | 10000 random 4 KiB reads, one at a time, waiting for each. Latency samples, p50 and p99. FreeBSD `biowait`; AbyssBSD a sleeping waiter |
+| `blk.<d>.qd32` | 1 (CPU 1) | Random 4 KiB reads with 32 outstanding: each completion issues the next, until the stop. One op = one completed read. FreeBSD resubmits from the `bio_done` callback; AbyssBSD from the completion callback |
+| `blk.<d>.seq` | 1 (CPU 1) | Sequential 128 KiB reads, one at a time, wrapping at 16 MiB. One op = one read |
+| `aml.sta_crs` | coordinator | Evaluate `_STA` and `_CRS` of every namespace device (`_CRS` decoded into resources). One op = one device; the median of three passes. FreeBSD `AcpiWalkNamespace`, `AcpiEvaluateObjectTyped`, `AcpiGetCurrentResources`; AbyssBSD the AML service |
+
+`<d>` is `vtbd` or `nda`.
+
 ## Suite `diag`
 
 For investigation, not gating: `cargo xtask perf --suite diag`. AbyssBSD reports the cost of the

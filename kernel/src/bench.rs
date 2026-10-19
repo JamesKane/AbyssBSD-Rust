@@ -35,6 +35,7 @@ const ROUNDS: usize = 3;
 pub(crate) fn run(s: &Sleepable, suite: &str) -> bool {
     let body: fn(&Sleepable) = match suite {
         "p2" => suite_p2,
+        "p3" => suite_p3,
         "diag" => suite_diag,
         _ => {
             kprintln!("bench: unknown suite {suite:?}");
@@ -367,6 +368,180 @@ fn suite_p2(s: &Sleepable) {
         1
     });
     tlb_shootdown(s);
+}
+
+/// Suite p3: block reads, as tests/perf/README.md specifies them.
+const BLK_RANGE: u64 = 16 << 20;
+const BLK_LAT: usize = 10_000;
+const QD: usize = 32;
+const SEQ: usize = 128 << 10;
+
+/// The workload's offsets: xorshift64 from 1, 4 KiB-aligned.
+struct Offsets {
+    seed: u64,
+    range: u64,
+}
+
+impl Offsets {
+    fn new(disk: &storage::Disk) -> Self {
+        Self {
+            seed: 1,
+            range: disk.bytes().min(BLK_RANGE),
+        }
+    }
+
+    fn next(&mut self) -> u64 {
+        self.seed ^= self.seed << 13;
+        self.seed ^= self.seed >> 7;
+        self.seed ^= self.seed << 17;
+        self.seed % (self.range / 4096) * 4096
+    }
+}
+
+/// One synchronous read (QD1 and sequential).
+fn read_sync(s: &Sleepable, disk: &storage::Disk, buf: Vec<u8>, at: u64) -> Vec<u8> {
+    let done: Arc<(sync::SpinLock<Option<Vec<u8>>>, WaitQueue)> =
+        Arc::new((sync::SpinLock::new(None), WaitQueue::new()));
+    let back = Arc::clone(&done);
+    let bio = storage::Bio::new(storage::BioOp::Read, at, buf, move |buf, r| {
+        assert!(r.is_ok(), "bench: read failed: {r:?}");
+        *back.0.lock() = Some(buf);
+        back.1.wake_all();
+    });
+    disk.strategy(s, bio);
+    let mut out = None;
+    done.1.wait_until(s, || {
+        out = done.0.lock().take();
+        out.is_some()
+    });
+    out.expect("completion")
+}
+
+/// QD32: each completion issues the next read, until the stop.
+struct Qd {
+    disk: Arc<storage::Disk>,
+    run: Arc<Run>,
+    offsets: sync::SpinLock<Offsets>,
+    completed: AtomicU64,
+    inflight: AtomicUsize,
+    drained: WaitQueue,
+}
+
+fn qd_issue(q: &Arc<Qd>, s: &Sleepable, buf: Vec<u8>) {
+    let at = q.offsets.lock().next();
+    let q2 = Arc::clone(q);
+    let bio = storage::Bio::new(storage::BioOp::Read, at, buf, move |buf, r| {
+        assert!(r.is_ok(), "bench: read failed: {r:?}");
+        q2.completed.fetch_add(1, Ordering::Relaxed);
+        if q2.run.stopped() {
+            if q2.inflight.fetch_sub(1, Ordering::AcqRel) == 1 {
+                q2.drained.wake_all();
+            }
+        } else {
+            // SAFETY: completions run in a disk driver's interrupt thread
+            // (or in thread context when it stops), which may sleep.
+            let s = unsafe { Sleepable::assume() };
+            qd_issue(&q2, &s, buf);
+        }
+    });
+    q.disk.strategy(s, bio);
+}
+
+fn bench_disk(s: &Sleepable, dev: &str, name: &str) {
+    let Some(disk) = storage::find(dev) else {
+        kprintln!("kbench: no disk {dev}");
+        return;
+    };
+    let cpus = [default_cpu(0)];
+
+    // QD1 latency.
+    let samples = Arc::new(sync::SpinLock::new(alloc::vec![0u64; BLK_LAT]));
+    {
+        let (d, samples) = (Arc::clone(&disk), Arc::clone(&samples));
+        let run = Run::new();
+        launch(s, &run, &cpus, 0, move |_, _, ws| {
+            let mut offs = Offsets::new(&d);
+            let mut buf = alloc::vec![0u8; 4096];
+            let mut ns = samples.lock().clone();
+            for slot in &mut ns {
+                let at = offs.next();
+                let t0 = time::counter();
+                buf = read_sync(ws, &d, buf, at);
+                *slot = time::ticks_to_ns(time::counter() - t0);
+            }
+            *samples.lock() = ns;
+        });
+    }
+    report_lat(&alloc::format!("blk.{name}.qd1"), &mut samples.lock());
+
+    // QD32 throughput.
+    report_median(&alloc::format!("blk.{name}.qd32"), || {
+        let run = Run::new();
+        let q = Arc::new(Qd {
+            disk: Arc::clone(&disk),
+            run: Arc::clone(&run),
+            offsets: sync::SpinLock::new(Offsets::new(&disk)),
+            completed: AtomicU64::new(0),
+            inflight: AtomicUsize::new(QD),
+            drained: WaitQueue::new(),
+        });
+        let q2 = Arc::clone(&q);
+        let ticks = launch(s, &run, &cpus, RUN_NS, move |run, i, ws| {
+            for _ in 0..QD {
+                qd_issue(&q2, ws, alloc::vec![0u8; 4096]);
+            }
+            q2.drained
+                .wait_until(ws, || q2.inflight.load(Ordering::Acquire) == 0);
+            run.ops[i]
+                .0
+                .store(q2.completed.load(Ordering::Relaxed), Ordering::Relaxed);
+        });
+        milli_ns_per_op(&run, 1, ticks)
+    });
+
+    // Sequential 128 KiB reads.
+    let d = Arc::clone(&disk);
+    report_median(&alloc::format!("blk.{name}.seq"), || {
+        let run = Run::new();
+        let d = Arc::clone(&d);
+        let ticks = launch(s, &run, &cpus, RUN_NS, move |run, i, ws| {
+            let range = d.bytes().min(BLK_RANGE);
+            let (mut at, mut n, mut buf) = (0, 0, alloc::vec![0u8; SEQ]);
+            while !run.stopped() {
+                buf = read_sync(ws, &d, buf, at);
+                at = (at + SEQ as u64) % range;
+                n += 1;
+            }
+            run.ops[i].0.store(n, Ordering::Relaxed);
+        });
+        milli_ns_per_op(&run, 1, ticks)
+    });
+}
+
+/// `_STA` and `_CRS` of every namespace device, per device.
+fn bench_aml(s: &Sleepable) {
+    let Some(svc) = acpi::service() else {
+        kprintln!("kbench: no ACPI namespace");
+        return;
+    };
+    report_median("aml.sta_crs", || {
+        let (ticks, n) = svc.run(s, |interp, host| {
+            let t0 = time::counter();
+            let devices = interp.devices();
+            for &d in &devices {
+                let _ = black_box(interp.sta(d, host));
+                let _ = black_box(interp.crs(d, host));
+            }
+            (time::counter() - t0, devices.len())
+        });
+        u128::from(time::ticks_to_ns(ticks)) * 1000 / (n.max(1) as u128)
+    });
+}
+
+fn suite_p3(s: &Sleepable) {
+    bench_disk(s, "vtbd1", "vtbd");
+    bench_disk(s, "nda0", "nda");
+    bench_aml(s);
 }
 
 /// AbyssBSD-only diagnostics: the cost of the pieces fast paths are made

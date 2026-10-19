@@ -26,6 +26,11 @@
 #include <sys/smp.h>
 #include <sys/sx.h>
 #include <sys/sysctl.h>
+#include <sys/bio.h>
+
+#include <geom/geom.h>
+
+#include <contrib/dev/acpica/include/acpi.h>
 
 #include <vm/vm.h>
 #include <vm/pmap.h>
@@ -651,6 +656,258 @@ kb_suite_p2(void)
 	vm_page_free(m);
 }
 
+/*
+ * Suite p3: block reads through GEOM, and AML evaluation.
+ */
+#define	KB_BLK_RANGE	(16 << 20)
+#define	KB_BLK_LAT	10000
+#define	KB_QD		32
+#define	KB_SEQ		(128 << 10)
+
+static void
+kb_orphan(struct g_consumer *cp __unused)
+{
+}
+
+static struct g_class kb_class = {
+	.name = "KBENCH",
+	.version = G_VERSION,
+	.orphan = kb_orphan,
+};
+
+static struct g_consumer *kb_cp;
+static off_t kb_range;
+static uint64_t kb_seed;
+
+static uint64_t
+kb_rand(void)
+{
+	kb_seed ^= kb_seed << 13;
+	kb_seed ^= kb_seed >> 7;
+	kb_seed ^= kb_seed << 17;
+	return (kb_seed);
+}
+
+static off_t
+kb_rand_off(void)
+{
+	return ((off_t)(kb_rand() % (kb_range / 4096)) * 4096);
+}
+
+/* Opens provider `name` for reading; 0 on success. */
+static int
+kb_open(const char *name)
+{
+	struct g_provider *pp;
+	struct g_geom *gp;
+	int error;
+
+	g_topology_lock();
+	pp = g_provider_by_name(name);
+	if (pp == NULL) {
+		g_topology_unlock();
+		return (ENXIO);
+	}
+	gp = g_new_geomf(&kb_class, "kbench.%s", name);
+	kb_cp = g_new_consumer(gp);
+	error = g_attach(kb_cp, pp);
+	if (error == 0)
+		error = g_access(kb_cp, 1, 0, 0);
+	kb_range = MIN(pp->mediasize, KB_BLK_RANGE);
+	g_topology_unlock();
+	kb_seed = 1;
+	return (error);
+}
+
+static void
+kb_close(void)
+{
+	struct g_geom *gp = kb_cp->geom;
+
+	g_topology_lock();
+	g_access(kb_cp, -1, 0, 0);
+	g_detach(kb_cp);
+	g_destroy_consumer(kb_cp);
+	g_destroy_geom(gp);
+	g_topology_unlock();
+}
+
+static void
+kb_read_sync(void *buf, off_t off, int len)
+{
+	struct bio *bp = g_alloc_bio();
+
+	bp->bio_cmd = BIO_READ;
+	bp->bio_offset = off;
+	bp->bio_length = len;
+	bp->bio_data = buf;
+	g_io_request(bp, kb_cp);
+	if (biowait(bp, "kbrd") != 0)
+		panic("kbench: read of %d bytes at %jd failed: error %d", len,
+		    (intmax_t)off, bp->bio_error);
+	g_destroy_bio(bp);
+}
+
+static void
+kb_qd1_body(struct kb_run *r __unused, int idx __unused)
+{
+	void *buf = malloc(4096, M_KBENCH, M_WAITOK);
+
+	for (int i = 0; i < KB_BLK_LAT; i++) {
+		off_t off = kb_rand_off();
+		uint64_t t0 = rdtsc();
+
+		kb_read_sync(buf, off, 4096);
+		kb_samples[i] = tsc_ns(rdtsc() - t0);
+	}
+	free(buf, M_KBENCH);
+}
+
+/* QD32: each completion issues the next read until the stop. */
+static struct kb_run *kb_qd_run;
+static struct mtx kb_qd_mtx;
+static volatile int kb_inflight;
+
+static void
+kb_qd_done(struct bio *bp)
+{
+	struct kb_run *r = kb_qd_run;
+
+	if (bp->bio_error != 0)
+		panic("kbench: read failed");
+	r->slot[0].ops++;
+	if (!kb_stopped(r)) {
+		void *buf = bp->bio_data;
+
+		g_reset_bio(bp);
+		bp->bio_cmd = BIO_READ;
+		mtx_lock(&kb_qd_mtx);
+		bp->bio_offset = kb_rand_off();
+		mtx_unlock(&kb_qd_mtx);
+		bp->bio_length = 4096;
+		bp->bio_data = buf;
+		bp->bio_done = kb_qd_done;
+		g_io_request(bp, kb_cp);
+		return;
+	}
+	free(bp->bio_data, M_KBENCH);
+	g_destroy_bio(bp);
+	mtx_lock(&kb_qd_mtx);
+	if (--kb_inflight == 0)
+		wakeup(__DEVOLATILE(void *, &kb_inflight));
+	mtx_unlock(&kb_qd_mtx);
+}
+
+static void
+kb_qd32_body(struct kb_run *r, int idx __unused)
+{
+	kb_qd_run = r;
+	kb_inflight = KB_QD;
+	for (int i = 0; i < KB_QD; i++) {
+		struct bio *bp = g_alloc_bio();
+
+		bp->bio_cmd = BIO_READ;
+		mtx_lock(&kb_qd_mtx);
+		bp->bio_offset = kb_rand_off();
+		mtx_unlock(&kb_qd_mtx);
+		bp->bio_length = 4096;
+		bp->bio_data = malloc(4096, M_KBENCH, M_WAITOK);
+		bp->bio_done = kb_qd_done;
+		g_io_request(bp, kb_cp);
+	}
+	mtx_lock(&kb_qd_mtx);
+	while (kb_inflight > 0)
+		mtx_sleep(__DEVOLATILE(void *, &kb_inflight), &kb_qd_mtx, 0,
+		    "kbqd", 0);
+	mtx_unlock(&kb_qd_mtx);
+}
+
+static void
+kb_seq_body(struct kb_run *r, int idx)
+{
+	void *buf = malloc(KB_SEQ, M_KBENCH, M_WAITOK);
+	off_t off = 0;
+
+	while (!kb_stopped(r)) {
+		kb_read_sync(buf, off, KB_SEQ);
+		off = (off + KB_SEQ) % kb_range;
+		r->slot[idx].ops++;
+	}
+	free(buf, M_KBENCH);
+}
+
+static void
+kb_blk(const char *dev, const char *name)
+{
+	static struct kb_run r;
+	char n[32];
+
+	if (kb_open(dev) != 0) {
+		printf("kbench: no disk %s\n", dev);
+		return;
+	}
+	r.nthreads = 1;
+	kb_default_cpus(&r);
+	kb_samples = malloc(KB_BLK_LAT * sizeof(*kb_samples), M_KBENCH,
+	    M_WAITOK | M_ZERO);
+	r.body = kb_qd1_body;
+	kb_launch(&r, 0);
+	snprintf(n, sizeof(n), "blk.%s.qd1", name);
+	kb_report_lat(n, kb_samples, KB_BLK_LAT);
+	free(kb_samples, M_KBENCH);
+	r.body = kb_qd32_body;
+	snprintf(n, sizeof(n), "blk.%s.qd32", name);
+	kb_report_median(n, &r);
+	r.body = kb_seq_body;
+	snprintf(n, sizeof(n), "blk.%s.seq", name);
+	kb_report_median(n, &r);
+	kb_close();
+}
+
+static ACPI_STATUS
+kb_aml_one(ACPI_HANDLE h, UINT32 level __unused, void *ctx, void **ret __unused)
+{
+	ACPI_BUFFER buf = { ACPI_ALLOCATE_BUFFER, NULL };
+	int *n = ctx;
+
+	if (ACPI_SUCCESS(AcpiEvaluateObjectTyped(h, "_STA", NULL, &buf,
+	    ACPI_TYPE_INTEGER)))
+		AcpiOsFree(buf.Pointer);
+	buf.Length = ACPI_ALLOCATE_BUFFER;
+	buf.Pointer = NULL;
+	if (ACPI_SUCCESS(AcpiGetCurrentResources(h, &buf)))
+		AcpiOsFree(buf.Pointer);
+	(*n)++;
+	return (AE_OK);
+}
+
+static void
+kb_aml(void)
+{
+	uint64_t m[KB_ROUNDS], milli;
+
+	for (int i = 0; i < KB_ROUNDS; i++) {
+		int n = 0;
+		uint64_t t0 = rdtsc();
+
+		AcpiWalkNamespace(ACPI_TYPE_DEVICE, ACPI_ROOT_OBJECT, 100,
+		    kb_aml_one, NULL, &n, NULL);
+		m[i] = tsc_ns(rdtsc() - t0) * 1000 / MAX(n, 1);
+	}
+	qsort(m, KB_ROUNDS, sizeof(m[0]), kb_cmp);
+	milli = m[KB_ROUNDS / 2];
+	printf("kbench aml.sta_crs %ju.%03ju ns/op\n",
+	    (uintmax_t)(milli / 1000), (uintmax_t)(milli % 1000));
+}
+
+static void
+kb_suite_p3(void)
+{
+	kb_blk("vtbd1", "vtbd");
+	kb_blk("nda0", "nda");
+	kb_aml();
+}
+
 /* Diagnostics: IPI round trips to an idle and to a busy CPU 2. */
 static volatile int kb_spinning;
 
@@ -687,7 +944,8 @@ kb_sysctl_run(SYSCTL_HANDLER_ARGS)
 	error = sysctl_handle_string(oidp, suite, sizeof(suite), req);
 	if (error != 0 || req->newptr == NULL)
 		return (error);
-	if (strcmp(suite, "p2") != 0 && strcmp(suite, "diag") != 0)
+	if (strcmp(suite, "p2") != 0 && strcmp(suite, "p3") != 0 &&
+	    strcmp(suite, "diag") != 0)
 		return (EINVAL);
 	if (mp_ncpus < KB_NCPU) {
 		printf("kbench: needs %d CPUs, have %d\n", KB_NCPU, mp_ncpus);
@@ -698,6 +956,8 @@ kb_sysctl_run(SYSCTL_HANDLER_ARGS)
 	printf("\nkbench begin %s cpus=%d\n", suite, mp_ncpus);
 	if (strcmp(suite, "p2") == 0)
 		kb_suite_p2();
+	else if (strcmp(suite, "p3") == 0)
+		kb_suite_p3();
 	else
 		kb_suite_diag();
 	printf("kbench end %s\n", suite);
@@ -711,7 +971,7 @@ static SYSCTL_NODE(_debug, OID_AUTO, kbench, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
     "In-kernel benchmarks");
 SYSCTL_PROC(_debug_kbench, OID_AUTO, run,
     CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_MPSAFE, NULL, 0, kb_sysctl_run, "A",
-    "Run a benchmark suite (p2)");
+    "Run a benchmark suite (p2, p3, diag)");
 
 static int
 kb_modevent(module_t mod __unused, int type, void *data __unused)
@@ -729,8 +989,11 @@ kb_modevent(module_t mod __unused, int type, void *data __unused)
 			sx_init(&kb_sets[i]->sx, "kbench sx");
 		}
 		callout_init(&kb_callout, 1);
-		return (0);
+		mtx_init(&kb_qd_mtx, "kbench qd", NULL, MTX_DEF);
+		return (g_modevent(NULL, MOD_LOAD, &kb_class));
 	case MOD_UNLOAD:
+		g_modevent(NULL, MOD_UNLOAD, &kb_class);
+		mtx_destroy(&kb_qd_mtx);
 		callout_drain(&kb_callout);
 		for (int i = 0; i < KB_PLACEMENTS; i++) {
 			sx_destroy(&kb_sets[i]->sx);
@@ -750,3 +1013,4 @@ kb_modevent(module_t mod __unused, int type, void *data __unused)
 static moduledata_t kb_mod = { "kbench", kb_modevent, NULL };
 DECLARE_MODULE(kbench, kb_mod, SI_SUB_DRIVERS, SI_ORDER_ANY);
 MODULE_VERSION(kbench, 1);
+MODULE_DEPEND(kbench, acpi, 1, 1, 1);
