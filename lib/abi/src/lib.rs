@@ -14,9 +14,11 @@
 #![forbid(unsafe_code)]
 
 pub mod bus;
+pub mod errno;
 pub mod layout;
 pub mod signal;
 pub mod stat;
+pub mod sysarch;
 pub mod syscall;
 pub mod sysctl;
 pub mod time;

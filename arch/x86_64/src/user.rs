@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! User address spaces: loading their tables, flushing their TLB entries,
-//! keeping the kernel out of them (SMEP, SMAP), and copying across the
-//! boundary.
+//! User mode: entering it and taking `syscall` back (the entry code is in
+//! `trap`), the thread pointer, and user address spaces: loading their
+//! tables, flushing their TLB entries, keeping the kernel out of them
+//! (SMEP, SMAP), and copying across the boundary.
 //!
 //! The copy routines are the only kernel code that touches user memory.
 //! Each faulting instruction has a fixup entry: the trap handler first
@@ -22,16 +23,37 @@ pub struct Fault;
 
 /// Whether SMAP is on (so the copy routines must open user access).
 static SMAP: AtomicBool = AtomicBool::new(false);
+/// Whether `rdfsbase`/`wrfsbase` work (CR4.FSGSBASE).
+static FSGSBASE: AtomicBool = AtomicBool::new(false);
 
+const CR4_FSGSBASE: u64 = 1 << 16;
 const CR4_SMEP: u64 = 1 << 20;
 const CR4_SMAP: u64 = 1 << 21;
 
-/// Turns on SMEP (no executing user pages in kernel mode) and SMAP (no
+const MSR_STAR: u32 = 0xc000_0081;
+const MSR_LSTAR: u32 = 0xc000_0082;
+const MSR_SFMASK: u32 = 0xc000_0084;
+const MSR_FS_BASE: u32 = 0xc000_0100;
+const EFER_SCE: u64 = 1 << 0;
+
+/// RFLAGS bits `syscall` clears on entry: TF, IF, DF, NT, AC.
+const SYSCALL_MASK: u64 = (1 << 8) | (1 << 9) | (1 << 10) | (1 << 14) | (1 << 18);
+
+unsafe extern "C" {
+    fn abyss_syscall_entry();
+}
+
+/// Prepares this CPU for user mode: `syscall` entry, `rdfsbase` and
+/// friends, SMEP (no executing user pages in kernel mode) and SMAP (no
 /// touching them outside the copy routines) where the CPU has them. Call
 /// on every CPU.
-pub fn enable_protections() {
+pub fn init_cpu() {
     let leaf7 = core::arch::x86_64::__cpuid_count(7, 0);
     let mut cr4 = crate::cpu::cr4();
+    let fsgsbase = leaf7.ebx & 1 != 0;
+    if fsgsbase {
+        cr4 |= CR4_FSGSBASE;
+    }
     if leaf7.ebx & (1 << 7) != 0 {
         cr4 |= CR4_SMEP;
     }
@@ -39,12 +61,88 @@ pub fn enable_protections() {
     if smap {
         cr4 |= CR4_SMAP;
     }
-    // SAFETY: both bits only restrict kernel access to user pages, which
-    // the kernel makes only through the copy routines below.
-    unsafe { crate::cpu::set_cr4(cr4) };
-    // Relaxed: every CPU sets the same value before any user memory
-    // exists.
+    // SAFETY: SMEP and SMAP only restrict kernel access to user pages,
+    // which the kernel makes only through the copy routines below;
+    // FSGSBASE lets user mode set its own FS and GS bases, as FreeBSD
+    // allows. The MSRs point `syscall` at our entry code, with the
+    // selectors the GDT has (`sysret` derives user CS/SS from STAR).
+    unsafe {
+        crate::cpu::set_cr4(cr4);
+        let star = (u64::from(crate::gdt::USER_DS & !3) - 8) << 48
+            | u64::from(crate::gdt::KERNEL_CS) << 32;
+        crate::cpu::wrmsr(MSR_STAR, star);
+        crate::cpu::wrmsr(MSR_LSTAR, abyss_syscall_entry as *const () as u64);
+        crate::cpu::wrmsr(MSR_SFMASK, SYSCALL_MASK);
+        let efer = crate::cpu::rdmsr(crate::cpu::MSR_EFER);
+        crate::cpu::wrmsr(crate::cpu::MSR_EFER, efer | EFER_SCE);
+    }
+    // Relaxed: every CPU sets the same values before any user code runs.
     SMAP.store(smap, Ordering::Relaxed);
+    FSGSBASE.store(fsgsbase, Ordering::Relaxed);
+}
+
+/// The user thread pointer (FS base).
+pub fn tls() -> u64 {
+    if FSGSBASE.load(Ordering::Relaxed) {
+        let v: u64;
+        // SAFETY: CR4.FSGSBASE is set; reading the base changes nothing.
+        unsafe { asm!("rdfsbase {}", out(reg) v, options(nomem, nostack)) };
+        v
+    } else {
+        // SAFETY: reading the FS base MSR.
+        unsafe { crate::cpu::rdmsr(MSR_FS_BASE) }
+    }
+}
+
+/// Sets the user thread pointer (FS base).
+///
+/// # Safety
+///
+/// The kernel must not rely on FS (it does not).
+pub unsafe fn set_tls(v: u64) {
+    if FSGSBASE.load(Ordering::Relaxed) {
+        // SAFETY: CR4.FSGSBASE is set; per the caller, only user mode
+        // uses FS.
+        unsafe { asm!("wrfsbase {}", in(reg) v, options(nomem, nostack)) };
+    } else {
+        // SAFETY: as above.
+        unsafe { crate::cpu::wrmsr(MSR_FS_BASE, v) };
+    }
+}
+
+/// A frame that enters user mode at `entry` with stack `sp`, interrupts
+/// enabled, and `arg` in `rdi`.
+#[must_use]
+pub fn user_frame(entry: u64, sp: u64, arg: u64) -> crate::trap::TrapFrame {
+    crate::trap::TrapFrame {
+        rdi: arg,
+        rip: entry,
+        cs: u64::from(crate::gdt::USER_CS),
+        rflags: 1 << 9,
+        rsp: sp,
+        ss: u64::from(crate::gdt::USER_DS),
+        ..crate::trap::TrapFrame::default()
+    }
+}
+
+/// Leaves the kernel for user mode with `frame`'s registers.
+///
+/// # Safety
+///
+/// The thread must run in a user address space where `frame` makes
+/// sense, with its kernel stack set (`hal::user::set_kernel_stack`); its
+/// kernel stack above the caller is abandoned. Interrupts must be masked.
+pub unsafe fn enter_user(frame: &crate::trap::TrapFrame) -> ! {
+    // SAFETY: per the caller's contract; the trap exit path pops `frame`
+    // and returns to user mode with `iretq`, swapping GS.
+    unsafe {
+        asm!(
+            "mov rsp, {}",
+            "jmp abyss_trap_exit",
+            in(reg) core::ptr::from_ref(frame),
+            options(noreturn),
+        );
+    }
 }
 
 /// Loads the user tables rooted at `root`, whose upper half is the
@@ -143,4 +241,105 @@ pub unsafe fn copy_from_user(dst: *mut u8, src: u64, len: usize) -> Result<(), F
 pub unsafe fn copy_to_user(dst: u64, src: *const u8, len: usize) -> Result<(), Fault> {
     // SAFETY: per the caller's contract.
     unsafe { copy(dst as *mut u8, src, len) }
+}
+
+// A user program for the kernel's tests (no libc): `write(1, "hello\n", 6)`,
+// then an unknown system call, then `exit(w * 1000 + e + c)` where `w` is
+// what `write` returned, `e` the unknown call's error number, and `c` 5000
+// if the carry flag (error) was clear. A correct kernel exits with 6078.
+global_asm!(
+    r#"
+    .section .rodata.abyss_user_test, "a"
+    .global abyss_user_test_start
+abyss_user_test_start:
+    mov eax, 4
+    mov edi, 1
+    lea rsi, [rip + 2f]
+    mov edx, 6
+    syscall
+    mov r12, rax
+    mov eax, 9999
+    syscall
+    mov r13, rax
+    mov r14d, 0
+    jc 1f
+    mov r14d, 5000
+1:  imul rdi, r12, 1000
+    add rdi, r13
+    add rdi, r14
+    mov eax, 1
+    syscall
+    ud2
+2:  .ascii "hello\n"
+    .global abyss_user_test_end
+abyss_user_test_end:
+    "#
+);
+
+unsafe extern "C" {
+    static abyss_user_test_start: u8;
+    static abyss_user_test_end: u8;
+}
+
+/// The test program's position-independent machine code.
+#[must_use]
+pub fn test_program() -> &'static [u8] {
+    let start = &raw const abyss_user_test_start;
+    let end = &raw const abyss_user_test_end;
+    // SAFETY: the two labels bracket the program's bytes in read-only
+    // data, which lives as long as the kernel.
+    unsafe { core::slice::from_raw_parts(start, end as usize - start as usize) }
+}
+
+// A second test program: sets its TLS base (FS) with
+// `sysarch(AMD64_SET_TLSBASE)` to a stack slot holding 0x1234, reads it
+// back through `fs:[0]`, checks `sysarch(AMD64_GET_TLSBASE)`, and exits
+// with 42 if all held (1 otherwise).
+global_asm!(
+    r#"
+    .section .rodata.abyss_user_test, "a"
+    .global abyss_tls_test_start
+abyss_tls_test_start:
+    sub rsp, 64
+    mov qword ptr [rsp], 0x1234
+    mov [rsp + 8], rsp
+    mov eax, 165
+    mov edi, 136
+    lea rsi, [rsp + 8]
+    syscall
+    jc 1f
+    mov rax, fs:[0]
+    cmp rax, 0x1234
+    jne 1f
+    mov eax, 165
+    mov edi, 135
+    lea rsi, [rsp + 16]
+    syscall
+    jc 1f
+    cmp [rsp + 16], rsp
+    jne 1f
+    mov edi, 42
+    mov eax, 1
+    syscall
+1:  mov edi, 1
+    mov eax, 1
+    syscall
+    ud2
+    .global abyss_tls_test_end
+abyss_tls_test_end:
+    "#
+);
+
+unsafe extern "C" {
+    static abyss_tls_test_start: u8;
+    static abyss_tls_test_end: u8;
+}
+
+/// The TLS test program's position-independent machine code.
+#[must_use]
+pub fn tls_test_program() -> &'static [u8] {
+    let start = &raw const abyss_tls_test_start;
+    let end = &raw const abyss_tls_test_end;
+    // SAFETY: as for `test_program`.
+    unsafe { core::slice::from_raw_parts(start, end as usize - start as usize) }
 }

@@ -152,6 +152,19 @@ pub(crate) fn print(args: fmt::Arguments<'_>) {
     let _ = CONSOLE.lock().write_fmt(args);
 }
 
+/// Writes bytes from user mode to every console; bytes that are not UTF-8
+/// show as U+FFFD (the consoles are text devices until the tty layer).
+#[cfg_attr(not(feature = "ktest"), allow(dead_code))] // processes come in P4.3
+pub(crate) fn write_bytes(bytes: &[u8]) {
+    let mut c = CONSOLE.lock();
+    for chunk in bytes.utf8_chunks() {
+        let _ = c.write_str(chunk.valid());
+        if !chunk.invalid().is_empty() {
+            let _ = c.write_str("\u{fffd}");
+        }
+    }
+}
+
 /// Prints on the panic path, breaking the console lock if its holder is
 /// the code that panicked.
 pub(crate) fn print_panic(args: fmt::Arguments<'_>) {

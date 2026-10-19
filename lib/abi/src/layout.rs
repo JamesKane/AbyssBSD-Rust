@@ -56,16 +56,24 @@ pub struct ConstValue {
     pub header: &'static str,
     /// Our value.
     pub value: i64,
+    /// Where it exists.
+    pub arches: Arches,
 }
 
 /// Every ABI constant checked against FreeBSD's headers.
-pub const CONSTANTS: &[&[ConstValue]] = &[crate::sysctl::CONSTANTS, BUS_CONSTANTS];
+pub const CONSTANTS: &[&[ConstValue]] = &[
+    crate::sysctl::CONSTANTS,
+    BUS_CONSTANTS,
+    crate::errno::CONSTANTS,
+    crate::sysarch::CONSTANTS,
+];
 
 const fn bus_const(c_name: &'static str, value: i64) -> ConstValue {
     ConstValue {
         c_name,
         header: "sys/bus.h",
         value,
+        arches: Arches::All,
     }
 }
 

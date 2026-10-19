@@ -339,6 +339,13 @@ impl AddressSpace {
     ) -> Result<(), FaultError> {
         let mut map = self.map.lock(s);
         let r = fault::resolve(&mut map, va, access)?;
+        // Code reaches instruction fetch only once synced (aarch64; x86
+        // keeps the caches coherent).
+        #[cfg(target_arch = "aarch64")]
+        if r.prot.contains(Prot::EXEC) {
+            let kva = KernelPages::page(r.pfn);
+            arch::cache::sync_icache(kva as usize, PAGE_BYTES);
+        }
         let replaced = self
             .tables
             .lock()

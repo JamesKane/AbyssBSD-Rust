@@ -93,7 +93,11 @@ fn generate(arch: Arch) -> String {
         }
     }
     let _ = writeln!(c, "\n/* Constants. */");
-    for k in CONSTANTS.iter().flat_map(|g| g.iter()) {
+    for k in CONSTANTS
+        .iter()
+        .flat_map(|g| g.iter())
+        .filter(|k| applies(k.arches, arch))
+    {
         let n = k.c_name;
         let _ = writeln!(c, "_Static_assert({n} == {}, \"{n}\");", k.value);
     }

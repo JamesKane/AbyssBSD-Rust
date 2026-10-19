@@ -252,6 +252,58 @@ pub mod fpu {
     }
 }
 
+/// Per-thread state of user mode that the scheduler switches: where traps
+/// from user mode enter the kernel, and the user's thread pointer (TLS).
+pub mod user {
+    /// Sets the kernel stack traps from user mode switch to (x86_64's TSS
+    /// `rsp0`; aarch64 needs nothing: `SP_EL1` stays the thread's).
+    ///
+    /// # Safety
+    ///
+    /// Call with interrupts masked, for the thread about to run here;
+    /// `top` is the top of its kernel stack.
+    pub unsafe fn set_kernel_stack(top: u64) {
+        #[cfg(target_os = "none")]
+        // SAFETY: per the contract.
+        unsafe {
+            super::abyss_hal_set_kernel_stack(top);
+        }
+        #[cfg(not(target_os = "none"))]
+        let _ = top;
+    }
+
+    /// This CPU's user thread pointer (`FS` base; `TPIDR_EL0`).
+    #[must_use]
+    pub fn tls() -> u64 {
+        #[cfg(target_os = "none")]
+        // SAFETY: defined by the linked arch crate with this signature.
+        return unsafe { super::abyss_hal_user_tls() };
+        #[cfg(not(target_os = "none"))]
+        0
+    }
+
+    /// Sets this CPU's user thread pointer.
+    ///
+    /// # Safety
+    ///
+    /// Call for the thread running (or about to run) here; the kernel
+    /// itself does not use the register.
+    pub unsafe fn set_tls(v: u64) {
+        #[cfg(target_os = "none")]
+        // SAFETY: per the contract.
+        unsafe {
+            super::abyss_hal_set_user_tls(v);
+        }
+        #[cfg(not(target_os = "none"))]
+        let _ = v;
+    }
+}
+
+/// Signature of `abyss_hal_set_kernel_stack`, `abyss_hal_set_user_tls`.
+pub type SetU64Fn = unsafe fn(u64);
+/// Signature of `abyss_hal_user_tls`.
+pub type GetU64Fn = fn() -> u64;
+
 /// Signature of `abyss_hal_fpu_size`.
 pub type FpuSizeFn = fn() -> usize;
 /// Signature of `abyss_hal_fpu_init`, `abyss_hal_fpu_save`.
@@ -315,6 +367,9 @@ unsafe extern "Rust" {
     fn abyss_hal_fpu_init(area: *mut u8);
     fn abyss_hal_fpu_save(area: *mut u8);
     fn abyss_hal_fpu_restore(area: *const u8);
+    fn abyss_hal_set_kernel_stack(top: u64);
+    fn abyss_hal_user_tls() -> u64;
+    fn abyss_hal_set_user_tls(v: u64);
 }
 
 #[cfg(target_os = "none")]

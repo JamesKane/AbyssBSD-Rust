@@ -14,11 +14,11 @@ use core::fmt;
 /// Registers saved on exception entry. The layout is shared with the
 /// assembly below.
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct TrapFrame {
     /// `x0`–`x30`.
     pub x: [u64; 31],
-    /// The interrupted stack pointer.
+    /// The interrupted stack pointer (`SP_EL0` for a trap from EL0).
     pub sp: u64,
     /// `ELR_EL1`: where to resume.
     pub elr: u64,
@@ -68,7 +68,11 @@ abyss_el1_common:
     stp x26, x27, [sp, #208]
     stp x28, x29, [sp, #224]
     add x1, sp, #{frame}
-    stp x30, x1, [sp, #240]
+    /* Slots 8 and up come from EL0: its stack pointer is SP_EL0. */
+    cmp x0, #8
+    b.lo 1f
+    mrs x1, sp_el0
+1:  stp x30, x1, [sp, #240]
     mrs x1, elr_el1
     mrs x2, spsr_el1
     stp x1, x2, [sp, #256]
@@ -78,10 +82,17 @@ abyss_el1_common:
     str x0, [sp, #288]
     mov x0, sp
     bl {dispatch}
+    .global abyss_el1_exit
+abyss_el1_exit:
     ldp x1, x2, [sp, #256]
     msr elr_el1, x1
     msr spsr_el1, x2
-    ldp x2, x3, [sp, #16]
+    /* Returning to EL0 (SPSR.M = EL0t): restore its stack pointer. */
+    tst x2, #0xf
+    b.ne 2f
+    ldr x1, [sp, #248]
+    msr sp_el0, x1
+2:  ldp x2, x3, [sp, #16]
     ldp x4, x5, [sp, #32]
     ldp x6, x7, [sp, #48]
     ldp x8, x9, [sp, #64]
@@ -142,6 +153,11 @@ extern "C" fn dispatch(frame: &mut TrapFrame) {
     }
     let trap = Trap::decode(frame);
     let same_el = frame.slot < 8;
+    if !same_el && matches!(trap, Trap::Svc(_)) {
+        // SAFETY: defined by the kernel through `kernel_hooks!`.
+        unsafe { crate::abyss_syscall(frame) };
+        return;
+    }
     let fixup = same_el.then(|| crate::fixup::lookup(frame.elr)).flatten();
     let fault = match trap {
         Trap::DataAbort {
@@ -191,6 +207,11 @@ extern "C" fn dispatch(frame: &mut TrapFrame) {
         ttbr0: crate::cpu::read_sysreg!("ttbr0_el1"),
         ttbr1: crate::cpu::read_sysreg!("ttbr1_el1"),
     };
+    if !same_el {
+        // SAFETY: defined by the kernel through `kernel_hooks!`.
+        unsafe { crate::abyss_user_trap(&report, frame) };
+        return;
+    }
     // SAFETY: defined by the kernel through `kernel_hooks!`.
     unsafe { crate::abyss_fatal_trap(&report) }
 }

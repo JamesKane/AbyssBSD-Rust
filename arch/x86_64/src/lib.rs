@@ -50,7 +50,7 @@ pub const NAME: &str = "amd64";
 /// ```
 #[macro_export]
 macro_rules! kernel_hooks {
-    (main = $main:path, ap_main = $ap:path, fatal_trap = $trap:path, interrupt = $irq:path, page_fault = $pf:path $(,)?) => {
+    (main = $main:path, ap_main = $ap:path, fatal_trap = $trap:path, interrupt = $irq:path, page_fault = $pf:path, syscall = $sc:path, user_trap = $ut:path $(,)?) => {
         #[unsafe(no_mangle)]
         fn abyss_kernel_main(boot_info: $crate::PhysAddr) -> ! {
             $main(boot_info)
@@ -75,6 +75,16 @@ macro_rules! kernel_hooks {
         fn abyss_page_fault(fault: &$crate::PageFault) -> bool {
             $pf(fault)
         }
+
+        #[unsafe(no_mangle)]
+        fn abyss_syscall(frame: &mut $crate::trap::TrapFrame) {
+            $sc(frame)
+        }
+
+        #[unsafe(no_mangle)]
+        fn abyss_user_trap(report: &$crate::TrapReport, frame: &mut $crate::trap::TrapFrame) {
+            $ut(report, frame)
+        }
     };
 }
 
@@ -89,6 +99,12 @@ unsafe extern "Rust" {
     fn abyss_interrupt(irq: Interrupt);
     /// Defined by [`kernel_hooks!`]: whether the VM resolved the fault.
     fn abyss_page_fault(fault: &hal::PageFault) -> bool;
+    /// Defined by [`kernel_hooks!`]: a system call from user mode, with
+    /// interrupts masked; returns with them masked.
+    fn abyss_syscall(frame: &mut trap::TrapFrame);
+    /// Defined by [`kernel_hooks!`]: a trap from user mode the kernel did
+    /// not resolve (a signal, once there are signals). Interrupts masked.
+    fn abyss_user_trap(report: &TrapReport, frame: &mut trap::TrapFrame);
 }
 
 /// Wraps a value that is only touched on the boot CPU before SMP, or under
@@ -139,6 +155,9 @@ mod hal_hooks {
     const _: hal::FpuAreaFn = abyss_hal_fpu_init;
     const _: hal::FpuAreaFn = abyss_hal_fpu_save;
     const _: hal::FpuRestoreFn = abyss_hal_fpu_restore;
+    const _: hal::SetU64Fn = abyss_hal_set_kernel_stack;
+    const _: hal::GetU64Fn = abyss_hal_user_tls;
+    const _: hal::SetU64Fn = abyss_hal_set_user_tls;
 
     #[unsafe(no_mangle)]
     fn abyss_hal_irq_disable() -> bool {
@@ -250,5 +269,27 @@ mod hal_hooks {
     unsafe fn abyss_hal_fpu_restore(area: *const u8) {
         // SAFETY: as above.
         unsafe { crate::fpu::restore(area) }
+    }
+
+    /// # Safety
+    ///
+    /// See `hal::user::set_kernel_stack`.
+    #[unsafe(no_mangle)]
+    unsafe fn abyss_hal_set_kernel_stack(top: u64) {
+        crate::gdt::set_kernel_stack(top);
+    }
+
+    #[unsafe(no_mangle)]
+    fn abyss_hal_user_tls() -> u64 {
+        crate::user::tls()
+    }
+
+    /// # Safety
+    ///
+    /// See `hal::user::set_tls`.
+    #[unsafe(no_mangle)]
+    unsafe fn abyss_hal_set_user_tls(v: u64) {
+        // SAFETY: the hal's contract is the arch function's.
+        unsafe { crate::user::set_tls(v) }
     }
 }

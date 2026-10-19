@@ -2538,6 +2538,76 @@ mod user_memory {
         }
     }
 
+    /// Runs `code` as a process: its own read+execute page, a stack, and
+    /// one thread bound to this CPU. Returns the exit status once every
+    /// page is back.
+    fn run_program(code: &[u8]) -> i32 {
+        use crate::proc::{Process, STACK_TOP};
+        let s = cx();
+        let before = free_pages();
+        let space = AddressSpace::new().unwrap();
+        let text = 0x40_0000;
+        assert!(code.len() as u64 <= PAGE);
+        space
+            .map_anonymous(&s, Some(VirtAddr::new(text)), HINT, PAGE, Prot::RW)
+            .unwrap();
+        enter(&space);
+        copy_out(text, code).unwrap();
+        leave();
+        space
+            .protect(
+                &s,
+                VirtAddr::new(text)..VirtAddr::new(text + PAGE),
+                Prot::READ.union(Prot::EXEC),
+            )
+            .unwrap();
+        space
+            .map_anonymous(
+                &s,
+                Some(VirtAddr::new(STACK_TOP - 4 * PAGE)),
+                HINT,
+                4 * PAGE,
+                Prot::RW,
+            )
+            .unwrap();
+        let p = Process::new(space);
+        // Bound, so only that CPU ever loads the space (and it lets go at
+        // exit).
+        p.start(text, STACK_TOP, Some(hal::cpu_id())).unwrap();
+        let status = p.wait(&s);
+        drop(p);
+        // The reaper frees the thread's stack in its own time.
+        let mut settled = false;
+        for _ in 0..200 {
+            if free_pages() == before {
+                settled = true;
+                break;
+            }
+            crate::time::sleep_ns(&s, 5_000_000);
+        }
+        assert!(
+            settled,
+            "pages leaked: {} free now, {before} before",
+            free_pages()
+        );
+        status
+    }
+
+    ktest! {
+        fn user_code_makes_system_calls() {
+            // write returned 6; the unknown call failed with ENOSYS (78)
+            // and the carry flag set.
+            assert_eq!(run_program(crate::arch::user::test_program()), 6078);
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    ktest! {
+        fn user_sets_its_tls_base() {
+            assert_eq!(run_program(crate::arch::user::tls_test_program()), 42);
+        }
+    }
+
     ktest! {
         fn concurrent_faults_and_cross_cpu_unmap() {
             let s = cx();

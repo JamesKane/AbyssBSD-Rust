@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! User address spaces: loading their tables (TTBR0, tagged with an
-//! ASID), flushing their TLB entries, keeping the kernel out of them
-//! (PAN), and copying across the boundary.
+//! User mode: entering it (traps and `svc` come back through `trap`), the
+//! thread pointer, and user address spaces: loading their tables (TTBR0,
+//! tagged with an ASID), flushing their TLB entries, keeping the kernel
+//! out of them (PAN), and copying across the boundary.
 //!
 //! The copy routines are the only kernel code that touches user memory.
 //! They use the unprivileged `ldtr`/`sttr` forms, which access memory with
@@ -30,10 +31,10 @@ const TCR_EPD0: u64 = 1 << 7;
 /// `SCTLR_EL1.SPAN`: when clear, taking an exception to EL1 sets PAN.
 const SCTLR_SPAN: u64 = 1 << 23;
 
-/// Turns on PAN (no kernel access to user pages except through the
-/// unprivileged loads and stores) where the CPU has it, and keeps it on
-/// across exceptions. Call on every CPU.
-pub fn enable_protections() {
+/// Prepares this CPU for user mode: turns on PAN (no kernel access to user
+/// pages except through the unprivileged loads and stores) where the CPU
+/// has it, and keeps it on across exceptions. Call on every CPU.
+pub fn init_cpu() {
     let mmfr1: u64;
     // SAFETY: reading an ID register.
     unsafe { asm!("mrs {}, id_aa64mmfr1_el1", out(reg) mmfr1, options(nomem, nostack)) };
@@ -54,6 +55,59 @@ pub fn enable_protections() {
             s = out(reg) _,
             span = in(reg) SCTLR_SPAN,
             options(nostack),
+        );
+    }
+}
+
+/// The user thread pointer (`TPIDR_EL0`).
+pub fn tls() -> u64 {
+    let v: u64;
+    // SAFETY: reading a system register.
+    unsafe { asm!("mrs {}, tpidr_el0", out(reg) v, options(nomem, nostack)) };
+    v
+}
+
+/// Sets the user thread pointer.
+///
+/// # Safety
+///
+/// The kernel must not rely on `TPIDR_EL0` (it does not).
+pub unsafe fn set_tls(v: u64) {
+    // SAFETY: per the caller; only user mode uses the register.
+    unsafe { asm!("msr tpidr_el0, {}", in(reg) v, options(nomem, nostack)) };
+}
+
+/// A frame that enters user mode (EL0t, interrupts unmasked) at `entry`
+/// with stack `sp` and `arg` in `x0`.
+#[must_use]
+pub fn user_frame(entry: u64, sp: u64, arg: u64) -> crate::trap::TrapFrame {
+    let mut f = crate::trap::TrapFrame::default();
+    f.x[0] = arg;
+    f.elr = entry;
+    // EL0t, nothing masked.
+    f.spsr = 0;
+    f.sp = sp;
+    // A synchronous exception from EL0, for anything that looks.
+    f.slot = 8;
+    f
+}
+
+/// Leaves the kernel for user mode with `frame`'s registers.
+///
+/// # Safety
+///
+/// The thread must run in a user address space where `frame` makes
+/// sense; its kernel stack above the caller is abandoned (`SP_EL1` ends
+/// where the frame did). Interrupts must be masked.
+pub unsafe fn enter_user(frame: &crate::trap::TrapFrame) -> ! {
+    // SAFETY: per the caller's contract; the exception return path pops
+    // `frame`, sets SP_EL0, and `eret`s to EL0.
+    unsafe {
+        asm!(
+            "mov sp, {}",
+            "b abyss_el1_exit",
+            in(reg) core::ptr::from_ref(frame),
+            options(noreturn),
         );
     }
 }
@@ -198,4 +252,53 @@ pub unsafe fn copy_to_user(dst: u64, src: *const u8, len: usize) -> Result<(), F
     // SAFETY: per the caller's contract; user accesses have fixups.
     let faulted = unsafe { abyss_copy_to_user(dst, src, len) };
     if faulted == 0 { Ok(()) } else { Err(Fault) }
+}
+
+// A user program for the kernel's tests (no libc): `write(1, "hello\n", 6)`,
+// then an unknown system call, then `exit(w * 1000 + e + c)` where `w` is
+// what `write` returned, `e` the unknown call's error number, and `c` 5000
+// if the carry flag (error) was clear. A correct kernel exits with 6078.
+global_asm!(
+    r#"
+    .section .rodata.abyss_user_test, "a"
+    .global abyss_user_test_start
+abyss_user_test_start:
+    mov x8, #4
+    mov x0, #1
+    adr x1, 2f
+    mov x2, #6
+    svc #0
+    mov x19, x0
+    mov x8, #9999
+    svc #0
+    mov x20, x0
+    mov x21, #0
+    b.cs 1f
+    mov x21, #5000
+1:  mov x9, #1000
+    mul x0, x19, x9
+    add x0, x0, x20
+    add x0, x0, x21
+    mov x8, #1
+    svc #0
+    brk #0
+2:  .ascii "hello\n"
+    .global abyss_user_test_end
+abyss_user_test_end:
+    "#
+);
+
+unsafe extern "C" {
+    static abyss_user_test_start: u8;
+    static abyss_user_test_end: u8;
+}
+
+/// The test program's position-independent machine code.
+#[must_use]
+pub fn test_program() -> &'static [u8] {
+    let start = &raw const abyss_user_test_start;
+    let end = &raw const abyss_user_test_end;
+    // SAFETY: the two labels bracket the program's bytes in read-only
+    // data, which lives as long as the kernel.
+    unsafe { core::slice::from_raw_parts(start, end as usize - start as usize) }
 }

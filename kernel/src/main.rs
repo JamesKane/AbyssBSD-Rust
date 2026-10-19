@@ -37,12 +37,14 @@ mod mm;
 mod panic;
 mod pci;
 mod power;
+mod proc;
 mod qemu;
 mod random;
 mod smp;
 #[cfg(not(feature = "ktest"))]
 mod stress;
 mod symbols;
+mod syscall;
 mod sysctl;
 #[cfg(feature = "ktest")]
 mod tests;
@@ -59,6 +61,8 @@ arch::kernel_hooks!(
     fatal_trap = panic::fatal_trap,
     interrupt = intc::dispatch,
     page_fault = mm::space::page_fault,
+    syscall = syscall::entry,
+    user_trap = syscall::user_trap,
 );
 
 fn kmain(boot_info: PhysAddr) -> ! {
@@ -87,7 +91,7 @@ fn kmain(boot_info: PhysAddr) -> ! {
     intc::init_boot_cpu();
     intc::init_dispatch();
     threads::init_fpu(true);
-    arch::user::enable_protections();
+    arch::user::init_cpu();
     threads::init();
     time::init_cpu();
     sysctl::init();

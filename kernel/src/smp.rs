@@ -113,7 +113,7 @@ pub(crate) fn ap_main(_arg: usize) -> ! {
     crate::intc::init_ap(cpu);
     crate::time::init_cpu();
     crate::threads::init_fpu(false);
-    arch::user::enable_protections();
+    arch::user::init_cpu();
     crate::topology::record_this_cpu(cpu);
     ONLINE[cpu.index()].store(true, Ordering::Release);
     sched::run_idle()

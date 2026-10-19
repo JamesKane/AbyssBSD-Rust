@@ -272,5 +272,6 @@ const fn c(c_name: &'static str, value: i64) -> ConstValue {
         c_name,
         header: "sys/sysctl.h",
         value,
+        arches: crate::layout::Arches::All,
     }
 }

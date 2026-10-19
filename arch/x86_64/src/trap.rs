@@ -16,7 +16,7 @@ use crate::gdt::{IST_DOUBLE_FAULT, IST_MACHINE_CHECK, IST_NMI, KERNEL_CS};
 /// Registers saved on trap entry, in stack order. The layout is shared with
 /// the assembly below.
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 #[allow(missing_docs)]
 pub struct TrapFrame {
     pub r15: u64,
@@ -57,11 +57,44 @@ abyss_trap_vectors:
     push 0
     .endif
     push vector
+    .if vector == 2 || vector == 8 || vector == 18
+    jmp abyss_trap_paranoid
+    .else
     jmp abyss_trap_common
+    .endif
     .set vector, vector + 1
     .endr
 
+    /*
+     * NMI, double fault, machine check: they can arrive anywhere, even
+     * between `syscall` and its `swapgs`, so the privilege level does not
+     * say which GS is live. Kernel GS bases are upper-half addresses.
+     * These have no error code of their own (a double fault's is 0); the
+     * slot records whether to swap back.
+     */
+abyss_trap_paranoid:
+    push rax
+    push rcx
+    push rdx
+    mov ecx, {gs_base}
+    rdmsr
+    xor eax, eax
+    test edx, edx
+    js 1f
+    swapgs
+    mov eax, 1
+1:  mov [rsp + 32], rax
+    pop rdx
+    pop rcx
+    pop rax
+    jmp abyss_trap_saved
+
 abyss_trap_common:
+    /* From user mode: switch to the kernel's GS. */
+    test byte ptr [rsp + 24], 3
+    jz abyss_trap_saved
+    swapgs
+abyss_trap_saved:
     push rax
     push rbx
     push rcx
@@ -80,6 +113,78 @@ abyss_trap_common:
     mov rdi, rsp
     cld
     call {dispatch}
+    .global abyss_trap_exit
+abyss_trap_exit:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    /* The paranoid vectors swap back if they swapped. */
+    cmp qword ptr [rsp], 2
+    je 3f
+    cmp qword ptr [rsp], 8
+    je 3f
+    cmp qword ptr [rsp], 18
+    je 3f
+    /* Back to user mode: the user's GS. */
+    test byte ptr [rsp + 24], 3
+    jz 2f
+    swapgs
+2:  add rsp, 16
+    iretq
+3:  cmp qword ptr [rsp + 8], 0
+    je 2b
+    swapgs
+    jmp 2b
+
+    /*
+     * `syscall`: rcx = user rip, r11 = user rflags, interrupts masked by
+     * SFMASK. Builds the same frame a trap from user mode does.
+     */
+    .global abyss_syscall_entry
+abyss_syscall_entry:
+    swapgs
+    mov gs:[{scratch}], rsp
+    mov rsp, gs:[{kstack}]
+    push {user_ds}
+    push qword ptr gs:[{scratch}]
+    push r11
+    push {user_cs}
+    push rcx
+    push 0
+    push {syscall_vector}
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    mov rdi, rsp
+    cld
+    call {syscall_dispatch}
+    /* A frame `sysret` cannot restore takes the trap path. */
+    test eax, eax
+    jnz abyss_trap_exit
     pop r15
     pop r14
     pop r13
@@ -96,10 +201,25 @@ abyss_trap_common:
     pop rbx
     pop rax
     add rsp, 16
-    iretq
+    /* rip, cs, rflags, rsp, ss */
+    mov rcx, [rsp]
+    mov r11, [rsp + 16]
+    mov rsp, [rsp + 24]
+    swapgs
+    sysretq
     "#,
     dispatch = sym dispatch,
+    syscall_dispatch = sym syscall_dispatch,
+    gs_base = const crate::cpu::MSR_GS_BASE,
+    scratch = const crate::gdt::SCRATCH_OFFSET,
+    kstack = const crate::gdt::KSTACK_OFFSET,
+    user_ds = const crate::gdt::USER_DS,
+    user_cs = const crate::gdt::USER_CS,
+    syscall_vector = const SYSCALL_VECTOR,
 );
+
+/// The `vector` a frame built by `syscall` entry carries.
+pub const SYSCALL_VECTOR: u64 = 256;
 
 unsafe extern "C" {
     static abyss_trap_vectors: [[u8; 16]; 256];
@@ -235,8 +355,26 @@ extern "C" fn dispatch(frame: &mut TrapFrame) {
         trap,
         cr3: crate::cpu::cr3(),
     };
+    if user {
+        // SAFETY: defined by the kernel through `kernel_hooks!`.
+        unsafe { crate::abyss_user_trap(&report, frame) };
+        return;
+    }
     // SAFETY: defined by the kernel through `kernel_hooks!`.
     unsafe { crate::abyss_fatal_trap(&report) }
+}
+
+/// Called from the `syscall` entry with interrupts masked. Returns nonzero
+/// if the frame must go back through `iretq` rather than `sysret`.
+extern "C" fn syscall_dispatch(frame: &mut TrapFrame) -> u64 {
+    // SAFETY: defined by the kernel through `kernel_hooks!`.
+    unsafe { crate::abyss_syscall(frame) };
+    // `sysret` restores only rip and rflags, and faults in kernel mode on
+    // a non-canonical rip (so would run the fault on the user's stack).
+    let plain = frame.rip < crate::user::USER_END
+        && frame.cs == u64::from(crate::gdt::USER_CS)
+        && frame.ss == u64::from(crate::gdt::USER_DS);
+    u64::from(!plain)
 }
 
 /// How a page fault happened (the error code).

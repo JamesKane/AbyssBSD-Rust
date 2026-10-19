@@ -215,7 +215,14 @@ impl fmt::Debug for Name {
     }
 }
 
-type Entry = Box<dyn FnOnce(&crate::Sleepable) + Send>;
+/// What a new thread runs.
+pub(crate) enum Entry {
+    /// A closure, which returns when the thread is done.
+    Closure(Box<dyn FnOnce(&crate::Sleepable) + Send>),
+    /// A function that never returns (it leaves for user mode), with its
+    /// argument: nothing is left to free on a stack it abandons.
+    Raw(fn(&crate::Sleepable, usize) -> !, usize),
+}
 
 /// A thread's saved FP/SIMD registers (`hal::fpu`).
 pub(crate) struct FpuArea {
@@ -282,6 +289,15 @@ pub struct Thread {
     /// the thread itself ([`crate::set_address_space`]); read by the CPU
     /// switching it in (the `on_cpu` handoff orders the two).
     pub(crate) space: UnsafeCell<Option<alloc::sync::Arc<dyn crate::AddressSpace>>>,
+    /// The top of the kernel stack, where traps from user mode land (0 for
+    /// threads on a borrowed stack, which never enter user mode).
+    pub(crate) kstack_top: u64,
+    /// The user thread pointer while the thread is off CPU (same rules as
+    /// `space`).
+    pub(crate) tls: UnsafeCell<u64>,
+    /// What the kernel runs the thread for (its process), opaque here.
+    /// Written only by the thread itself.
+    pub(crate) owner: UnsafeCell<Option<alloc::sync::Arc<dyn core::any::Any + Send + Sync>>>,
 }
 
 // SAFETY: `link` is protected by the owning list's lock, `context`, `fpu`,
@@ -321,6 +337,7 @@ impl Thread {
             Some(s) => hal::Context::init(s.top, crate::thread_start, 0),
             None => hal::Context::default(),
         };
+        let kstack_top = stack.as_ref().map_or(0, |s| s.top);
         Self {
             // Relaxed: uniqueness is all that matters.
             tid: Tid(NEXT_TID.fetch_add(1, Ordering::Relaxed)),
@@ -350,6 +367,9 @@ impl Thread {
             held: UnsafeCell::new(crate::lock::witness::Held::new()),
             fpu,
             space: UnsafeCell::new(None),
+            kstack_top,
+            tls: UnsafeCell::new(0),
+            owner: UnsafeCell::new(None),
         }
     }
 

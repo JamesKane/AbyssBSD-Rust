@@ -341,7 +341,9 @@ pub fn init_cpu(name: &str) {
         Priority::IDLE_THREAD,
         id,
         Some(stack),
-        Some(Box::new(|_: &Sleepable| idle_loop())),
+        Some(thread::Entry::Closure(Box::new(|_: &Sleepable| {
+            idle_loop()
+        }))),
         true,
     ));
     idle.inner.lock().bound = Some(id);
@@ -462,6 +464,21 @@ impl<'a> Builder<'a> {
         self,
         f: impl FnOnce(&Sleepable) + Send + 'static,
     ) -> Result<Arc<Thread>, SpawnError> {
+        self.start(thread::Entry::Closure(Box::new(f)))
+    }
+
+    /// Starts the thread running `f(arg)`, which never returns: a thread
+    /// that leaves for user mode, and ends in a system call on a fresh
+    /// stack. `arg` is typically an `Arc::into_raw`.
+    pub fn spawn_raw(
+        self,
+        f: fn(&Sleepable, usize) -> !,
+        arg: usize,
+    ) -> Result<Arc<Thread>, SpawnError> {
+        self.start(thread::Entry::Raw(f, arg))
+    }
+
+    fn start(self, entry: thread::Entry) -> Result<Arc<Thread>, SpawnError> {
         let fpu = if self.fpu {
             Some(thread::FpuArea::new().ok_or(SpawnError::NoFpuArea)?)
         } else {
@@ -476,7 +493,7 @@ impl<'a> Builder<'a> {
             self.priority,
             self.bound.unwrap_or(here),
             Some(stack),
-            Some(Box::new(f)),
+            Some(entry),
             false,
             fpu,
         ));
@@ -845,6 +862,11 @@ pub(crate) fn switch_away() {
         if let Some(f) = &(*cur_ptr).fpu {
             hal::fpu::save(f.as_ptr());
         }
+        // A user thread's thread pointer may have changed (`sysarch`, or
+        // user mode itself): keep it for its return.
+        if (*(*cur_ptr).space.get()).is_some() {
+            *(*cur_ptr).tls.get() = hal::user::tls();
+        }
         hal::switch((*cur_ptr).context.get(), (*next_ptr).context.get());
     }
     finish_switch();
@@ -925,13 +947,21 @@ fn finish_switch() {
 /// Loads the current thread's address space into the MMU, unless it has
 /// none or it is loaded already. Interrupts are masked.
 fn load_space(c: &PerCpu) {
-    // SAFETY: only the thread itself writes its `space`, and it is the
-    // current thread here (or its previous CPU's write is ordered before
-    // this by the `on_cpu` handoff).
-    let want = unsafe { &*current().space.get() };
+    let t = current();
+    // SAFETY: only the thread itself writes its `space` and `tls`, and it
+    // is the current thread here (or its previous CPU's writes are ordered
+    // before this by the `on_cpu` handoff).
+    let (want, tls) = unsafe { (&*t.space.get(), *t.tls.get()) };
     let Some(want) = want else {
         return;
     };
+    // A user thread: traps from user mode land on its stack, and its
+    // thread pointer is back.
+    // SAFETY: interrupts are masked and `t` is about to run here.
+    unsafe {
+        hal::user::set_kernel_stack(t.kstack_top);
+        hal::user::set_tls(tls);
+    }
     let loaded = c.space.take();
     if loaded.as_ref().is_some_and(|l| Arc::ptr_eq(l, want)) {
         c.space.set(loaded);
@@ -978,6 +1008,22 @@ pub fn unload_address_space(to_kernel: impl FnOnce()) {
     drop(loaded);
 }
 
+/// Sets what the kernel runs the current thread for (FreeBSD's
+/// `td_proc`); returns the old value.
+pub fn set_owner(
+    owner: Option<Arc<dyn core::any::Any + Send + Sync>>,
+) -> Option<Arc<dyn core::any::Any + Send + Sync>> {
+    // SAFETY: only the current thread writes its own `owner`.
+    unsafe { core::mem::replace(&mut *current().owner.get(), owner) }
+}
+
+/// What the kernel runs the current thread for, if it said.
+#[must_use]
+pub fn owner() -> Option<Arc<dyn core::any::Any + Send + Sync>> {
+    // SAFETY: only the current thread writes it, and that is us.
+    unsafe { (*current().owner.get()).clone() }
+}
+
 /// The current thread's user address space.
 #[must_use]
 pub fn address_space() -> Option<Arc<dyn AddressSpace>> {
@@ -1004,11 +1050,13 @@ pub(crate) extern "C" fn thread_start(_: usize) -> ! {
     platform().rearm_timer();
     let entry = current().entry.lock().take();
     hal::irq::enable();
-    if let Some(f) = entry {
-        // SAFETY: a fresh thread, interrupts enabled, holding nothing: it
-        // may sleep.
-        let s = unsafe { Sleepable::assume() };
-        f(&s);
+    // SAFETY: a fresh thread, interrupts enabled, holding nothing: it may
+    // sleep.
+    let s = unsafe { Sleepable::assume() };
+    match entry {
+        Some(thread::Entry::Closure(f)) => f(&s),
+        Some(thread::Entry::Raw(f, arg)) => f(&s, arg),
+        None => {}
     }
     exit()
 }

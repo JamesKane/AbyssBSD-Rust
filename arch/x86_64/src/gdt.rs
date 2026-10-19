@@ -14,6 +14,9 @@ use crate::cpu::{self, MSR_GS_BASE};
 /// Kernel code selector.
 pub(crate) const KERNEL_CS: u16 = 0x08;
 const KERNEL_DS: u16 = 0x10;
+/// User data and code selectors, with RPL 3.
+pub(crate) const USER_DS: u16 = 0x18 | 3;
+pub(crate) const USER_CS: u16 = 0x20 | 3;
 const TSS_SEL: u16 = 0x28;
 
 /// Interrupt stack table slots (1-based, as the IDT encodes them).
@@ -68,6 +71,11 @@ struct CpuLocal {
     owed: u32,
     /// Interrupt nesting (`hal::interrupt`).
     interrupts: u32,
+    /// The running thread's kernel stack top, where `syscall` entry
+    /// switches to (the TSS's `rsp0` holds the same, for traps).
+    kstack: u64,
+    /// The user stack pointer, while `syscall` entry switches stacks.
+    scratch: u64,
 }
 
 /// One CPU's descriptor tables, interrupt stacks, and `GS` block. The
@@ -102,6 +110,8 @@ impl CpuBlock {
                 critical: 0,
                 owed: 0,
                 interrupts: 0,
+                kstack: 0,
+                scratch: 0,
             },
             gdt: [0; 7],
             tss: TSS_INIT,
@@ -256,6 +266,28 @@ const _: () = assert!(core::mem::offset_of!(CpuLocal, thread) == 24);
 const _: () = assert!(core::mem::offset_of!(CpuLocal, critical) == 32);
 const _: () = assert!(core::mem::offset_of!(CpuLocal, owed) == 36);
 const _: () = assert!(core::mem::offset_of!(CpuLocal, interrupts) == 40);
+const _: () = assert!(core::mem::offset_of!(CpuLocal, kstack) == KSTACK_OFFSET);
+const _: () = assert!(core::mem::offset_of!(CpuLocal, scratch) == SCRATCH_OFFSET);
+
+/// `gs:` offsets of [`CpuLocal::kstack`] and `scratch`, for the `syscall`
+/// entry code.
+pub(crate) const KSTACK_OFFSET: usize = 48;
+pub(crate) const SCRATCH_OFFSET: usize = 56;
+
+/// Sets the stack traps and `syscall` from user mode switch to: the
+/// thread about to run's kernel stack top.
+pub(crate) fn set_kernel_stack(top: u64) {
+    let block: *mut CpuBlock;
+    // SAFETY: `gs:[0]` is this CPU's block (`CpuLocal` comes first in
+    // `CpuBlock`), touched only by this CPU, with interrupts masked here
+    // (the scheduler's switch path).
+    unsafe {
+        asm!("mov {}, gs:[0]", out(reg) block, options(nostack, readonly));
+        (*block).local.kstack = top;
+        let rsp0 = (&raw mut (*block).tss.rsp).cast::<u64>();
+        rsp0.write_unaligned(top);
+    }
+}
 
 // Each per-CPU counter below changes in one instruction: an interrupt (and
 // so a migration) cannot fall between finding this CPU's block and

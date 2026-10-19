@@ -13,6 +13,42 @@ fn line_sizes() -> (usize, usize) {
     (d, i)
 }
 
+/// Makes code written at `[addr, addr + len)` visible to instruction
+/// fetches on every CPU (the inner-shareable domain): cleans the data
+/// cache to the point of unification and invalidates the instruction
+/// cache by address, each skipped when `CTR_EL0` says the hardware keeps
+/// them coherent (IDC, DIC).
+pub fn sync_icache(addr: usize, len: usize) {
+    let ctr: u64;
+    // SAFETY: CTR_EL0 is readable at EL1 and has no side effects.
+    unsafe { asm!("mrs {}, ctr_el0", out(reg) ctr, options(nomem, nostack)) };
+    let (dline, iline) = line_sizes();
+    let end = addr.saturating_add(len);
+    if ctr & (1 << 28) == 0 {
+        let mut p = addr & !(dline - 1);
+        while p < end {
+            // SAFETY: cleaning a line leaves memory contents unchanged.
+            unsafe { asm!("dc cvau, {}", in(reg) p, options(nostack)) };
+            p += dline;
+        }
+    }
+    // SAFETY: a barrier.
+    unsafe { asm!("dsb ish", options(nostack)) };
+    if ctr & (1 << 29) == 0 {
+        let mut p = addr & !(iline - 1);
+        while p < end {
+            // SAFETY: invalidating instruction cache lines has no effect
+            // on memory.
+            unsafe { asm!("ic ivau, {}", in(reg) p, options(nostack)) };
+            p += iline;
+        }
+        // SAFETY: a barrier.
+        unsafe { asm!("dsb ish", options(nostack)) };
+    }
+    // SAFETY: a barrier.
+    unsafe { asm!("isb", options(nostack)) };
+}
+
 /// Makes freshly written code at `[addr, addr + len)` safe to execute,
 /// including with the MMU and caches off: cleans the data cache to the
 /// point of coherency and invalidates the instruction cache.
