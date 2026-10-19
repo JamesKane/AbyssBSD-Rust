@@ -78,9 +78,13 @@ AbyssBSD through `Disk::strategy`. Buffers are page-aligned.
 | Name | Workers | Operation |
 |---|---|---|
 | `blk.<d>.qd1` | 1 (CPU 1) | 10000 random 4 KiB reads, one at a time, waiting for each. Latency samples, p50 and p99. FreeBSD `biowait`; AbyssBSD a sleeping waiter |
-| `blk.<d>.qd32` | 1 (CPU 1) | Random 4 KiB reads with 32 outstanding: each completion issues the next, until the stop. One op = one completed read. FreeBSD resubmits from the `bio_done` callback; AbyssBSD from the completion callback |
+| `blk.<d>.qd32` | 1 (CPU 1) | Random 4 KiB reads with 32 outstanding: each completion issues the next, until the stop. One op = one completed read. FreeBSD resubmits from the `bio_done` callback (in `g_up`); AbyssBSD's completion callback hands the buffer to the worker, which resubmits (resubmitting in the driver's interrupt thread never lets it sleep) |
 | `blk.<d>.seq` | 1 (CPU 1) | Sequential 128 KiB reads, one at a time, wrapping at 16 MiB. One op = one read |
 | `aml.sta_crs` | coordinator | Evaluate `_STA` and `_CRS` of every namespace device (`_CRS` decoded into resources). One op = one device; the median of three passes. FreeBSD `AcpiWalkNamespace`, `AcpiEvaluateObjectTyped`, `AcpiGetCurrentResources`; AbyssBSD the AML service |
+| `dma.map` | 1 (CPU 1) | Map a page-aligned 4 KiB buffer for a device read, then unmap it. FreeBSD `bus_dmamap_load`, `bus_dmamap_sync` (PREREAD, POSTREAD), `bus_dmamap_unload` on a tag with no constraints; AbyssBSD `DmaStream::map` and `unmap` on an unconstrained tag |
+| `gate.t<T>` | 1, 8 | Enter and leave a driver's revocation gate. FreeBSD's counterpart is the reference devfs takes around a cdevsw call: `dev_refthread`, `dev_relthread` on a cdev of the module's own |
+| `dev.vtblk.attach` | coordinator | Probe and attach vtblk1's transport (`virtio_pci`), until GEOM (FreeBSD `g_waitidle`) or the device manager (AbyssBSD `wait_idle`) is idle. Median of 16 cycles |
+| `dev.vtblk.cycle` | coordinator | Detach that transport, wait for idle, attach it again, wait for idle. Median of 16 cycles. Runs last, since it re-creates vtbd1 |
 
 `<d>` is `vtbd` or `nda`.
 

@@ -27,6 +27,10 @@
 #include <sys/sx.h>
 #include <sys/sysctl.h>
 #include <sys/bio.h>
+#include <sys/bus.h>
+#include <sys/conf.h>
+
+#include <machine/bus.h>
 
 #include <geom/geom.h>
 
@@ -900,12 +904,141 @@ kb_aml(void)
 	    (uintmax_t)(milli / 1000), (uintmax_t)(milli % 1000));
 }
 
+/* DMA: load, sync for a read, and unload one page-aligned 4 KiB buffer. */
+static bus_dma_tag_t kb_dtag;
+static bus_dmamap_t kb_dmap;
+static void *kb_dbuf;
+
+static void
+kb_dma_cb(void *arg, bus_dma_segment_t *segs, int nseg, int error)
+{
+	if (error != 0 || nseg != 1)
+		panic("kbench: dma load: error %d, %d segments", error, nseg);
+	*(bus_addr_t *)arg = segs[0].ds_addr;
+}
+
+static void
+kb_dma_body(struct kb_run *r, int idx)
+{
+	uint64_t n = 0;
+	bus_addr_t pa;
+
+	while (!kb_stopped(r)) {
+		if (bus_dmamap_load(kb_dtag, kb_dmap, kb_dbuf, PAGE_SIZE,
+		    kb_dma_cb, &pa, BUS_DMA_NOWAIT) != 0)
+			panic("kbench: bus_dmamap_load");
+		bus_dmamap_sync(kb_dtag, kb_dmap, BUS_DMASYNC_PREREAD);
+		bus_dmamap_sync(kb_dtag, kb_dmap, BUS_DMASYNC_POSTREAD);
+		bus_dmamap_unload(kb_dtag, kb_dmap);
+		n++;
+	}
+	r->slot[idx].ops = n;
+}
+
+static void
+kb_dma(void)
+{
+	if (bus_dma_tag_create(NULL, 1, 0, BUS_SPACE_MAXADDR,
+	    BUS_SPACE_MAXADDR, NULL, NULL, PAGE_SIZE, 1, PAGE_SIZE, 0, NULL,
+	    NULL, &kb_dtag) != 0)
+		panic("kbench: bus_dma_tag_create");
+	if (bus_dmamap_create(kb_dtag, 0, &kb_dmap) != 0)
+		panic("kbench: bus_dmamap_create");
+	kb_dbuf = malloc(PAGE_SIZE, M_KBENCH, M_WAITOK);
+	kb_throughput("dma.map", kb_dma_body, 1);
+	free(kb_dbuf, M_KBENCH);
+	bus_dmamap_destroy(kb_dtag, kb_dmap);
+	bus_dma_tag_destroy(kb_dtag);
+}
+
+/*
+ * Gate cost: AbyssBSD's gate keeps calls out of a detaching driver; the
+ * FreeBSD counterpart is the reference devfs takes around each cdevsw call
+ * against destroy_dev.
+ */
+static struct cdevsw kb_cdevsw = {
+	.d_version = D_VERSION,
+	.d_name = "kbench",
+};
+static struct cdev *kb_cdev;
+
+static void
+kb_gate_body(struct kb_run *r, int idx)
+{
+	uint64_t n = 0;
+	int ref;
+
+	while (!kb_stopped(r)) {
+		if (dev_refthread(kb_cdev, &ref) == NULL)
+			panic("kbench: dev_refthread");
+		dev_relthread(kb_cdev, ref);
+		n++;
+	}
+	r->slot[idx].ops = n;
+}
+
+/*
+ * Attach and detach: vtblk1's transport, detached and probed again, each
+ * until GEOM is idle (the disk gone, or tasted). Median of the cycles.
+ */
+#define	KB_DEV_CYCLES	16
+
+static void
+kb_dev(void)
+{
+	uint64_t attach[KB_DEV_CYCLES], cycle[KB_DEV_CYCLES];
+	devclass_t dc = devclass_find("vtblk");
+	device_t dev = dc != NULL ? devclass_get_device(dc, 1) : NULL;
+	device_t parent;
+
+	if (dev == NULL) {
+		printf("kbench: no vtblk1\n");
+		return;
+	}
+	parent = device_get_parent(dev);
+	/* Freeing MSI-X vectors binds the thread (apic_free_vector). */
+	thread_lock(curthread);
+	sched_unbind(curthread);
+	thread_unlock(curthread);
+	for (int i = 0; i < KB_DEV_CYCLES; i++) {
+		uint64_t t0, t1, t2;
+
+		t0 = rdtsc();
+		bus_topo_lock();
+		if (device_detach(parent) != 0)
+			panic("kbench: detach");
+		bus_topo_unlock();
+		g_waitidle(curthread);
+		t1 = rdtsc();
+		bus_topo_lock();
+		if (device_probe_and_attach(parent) != 0)
+			panic("kbench: attach");
+		bus_topo_unlock();
+		g_waitidle(curthread);
+		t2 = rdtsc();
+		attach[i] = tsc_ns(t2 - t1);
+		cycle[i] = tsc_ns(t2 - t0);
+	}
+	kb_bind(0);
+	qsort(attach, KB_DEV_CYCLES, sizeof(attach[0]), kb_cmp);
+	qsort(cycle, KB_DEV_CYCLES, sizeof(cycle[0]), kb_cmp);
+	printf("kbench dev.vtblk.attach %ju ns\n",
+	    (uintmax_t)attach[KB_DEV_CYCLES / 2]);
+	printf("kbench dev.vtblk.cycle %ju ns\n",
+	    (uintmax_t)cycle[KB_DEV_CYCLES / 2]);
+}
+
 static void
 kb_suite_p3(void)
 {
 	kb_blk("vtbd1", "vtbd");
 	kb_blk("nda0", "nda");
 	kb_aml();
+	kb_dma();
+	kb_throughput("gate.t1", kb_gate_body, 1);
+	kb_throughput("gate.t8", kb_gate_body, 8);
+	/* Last: it re-creates vtbd1. */
+	kb_dev();
 }
 
 /* Diagnostics: IPI round trips to an idle and to a busy CPU 2. */
@@ -990,9 +1123,12 @@ kb_modevent(module_t mod __unused, int type, void *data __unused)
 		}
 		callout_init(&kb_callout, 1);
 		mtx_init(&kb_qd_mtx, "kbench qd", NULL, MTX_DEF);
+		kb_cdev = make_dev(&kb_cdevsw, 0, UID_ROOT, GID_WHEEL, 0600,
+		    "kbench");
 		return (g_modevent(NULL, MOD_LOAD, &kb_class));
 	case MOD_UNLOAD:
 		g_modevent(NULL, MOD_UNLOAD, &kb_class);
+		destroy_dev(kb_cdev);
 		mtx_destroy(&kb_qd_mtx);
 		callout_drain(&kb_callout);
 		for (int i = 0; i < KB_PLACEMENTS; i++) {

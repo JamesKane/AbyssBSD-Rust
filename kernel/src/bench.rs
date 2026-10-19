@@ -557,10 +557,78 @@ fn bench_aml(s: &Sleepable) {
     });
 }
 
+/// DMA: map one page-aligned 4 KiB buffer for a read, and unmap it.
+fn bench_dma(s: &Sleepable) {
+    let tag = vm::dma::DmaTag::new(
+        &crate::mm::dma::KERNEL_DMA,
+        vm::dma::DmaConstraints::UNLIMITED,
+        crate::mm::dma::top_of_ram(),
+    );
+    throughput_with(
+        s,
+        "dma.map",
+        1,
+        || alloc::vec![0u8; 4096],
+        move |buf, _| {
+            let stream = vm::dma::DmaStream::new(&tag, core::mem::take(buf));
+            let Ok(mapped) = stream.map::<vm::dma::dir::FromDevice>() else {
+                panic!("bench: dma map failed");
+            };
+            *buf = black_box(mapped).unmap().into_inner();
+            1
+        },
+    );
+}
+
+/// Attach and detach: vtblk1's transport, detached and probed again, each
+/// until the manager is idle. Median of the cycles.
+fn bench_dev(s: &Sleepable) {
+    const CYCLES: usize = 16;
+    let m = bus::manager();
+    let Some((transport, _)) = crate::devices::find_named(m, s, crate::devices::nexus(), "vtblk1")
+    else {
+        kprintln!("kbench: no vtblk1");
+        return;
+    };
+    let (mut attach, mut cycle) = ([0u64; CYCLES], [0u64; CYCLES]);
+    for i in 0..CYCLES {
+        let t0 = time::counter();
+        m.detach(transport, bus::DetachReason::Requested, s)
+            .expect("bench: detach");
+        m.wait_idle(s);
+        let t1 = time::counter();
+        m.probe_and_attach(transport, s).expect("bench: attach");
+        m.wait_idle(s);
+        let t2 = time::counter();
+        attach[i] = time::ticks_to_ns(t2 - t1);
+        cycle[i] = time::ticks_to_ns(t2 - t0);
+    }
+    attach.sort_unstable();
+    cycle.sort_unstable();
+    kprintln!("kbench dev.vtblk.attach {} ns", attach[CYCLES / 2]);
+    kprintln!("kbench dev.vtblk.cycle {} ns", cycle[CYCLES / 2]);
+}
+
+/// Gate cost: an enter and exit. FreeBSD's counterpart is the reference
+/// devfs takes around each cdevsw call (`dev_refthread`).
+static GATE: bus::Gate = bus::Gate::new();
+
 fn suite_p3(s: &Sleepable) {
     bench_disk(s, "vtbd1", "vtbd");
     bench_disk(s, "nda0", "nda");
     bench_aml(s);
+    bench_dma(s);
+    for t in [1, 8] {
+        throughput(s, &alloc::format!("gate.t{t}"), t, |_| {
+            let Ok(guard) = GATE.enter() else {
+                panic!("bench: gate revoked");
+            };
+            drop(black_box(guard));
+            1
+        });
+    }
+    // Last: it re-creates vtbd1.
+    bench_dev(s);
 }
 
 /// AbyssBSD-only diagnostics: the cost of the pieces fast paths are made

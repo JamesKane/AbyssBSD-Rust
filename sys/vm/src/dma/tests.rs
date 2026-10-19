@@ -278,6 +278,31 @@ fn direct_stream_segments() {
 }
 
 #[test]
+fn many_segments_spill_from_inline() {
+    let mem = Fake::new(8 * MIB);
+    let c = DmaConstraints {
+        max_segment: 512,
+        ..DmaConstraints::UNLIMITED
+    };
+    let tag = DmaTag::new(mem, c, 8 * MIB);
+    mem.take(MIB, 2 * PAGE_SIZE);
+    let s = DmaStream::new(&tag, mem.buf_at(MIB, 2 * 4096));
+    let s = s.map::<dir::FromDevice>().unwrap();
+    let want: Vec<Segment> = (0..16)
+        .map(|i| Segment {
+            bus: MIB + i * 512,
+            len: 512,
+        })
+        .collect();
+    assert_eq!(s.segments(), &want[..]);
+    // Mapped again, from the inline storage up.
+    let s = DmaStream::new(&tag, s.unmap().into_inner())
+        .map::<dir::ToDevice>()
+        .unwrap();
+    assert_eq!(s.segments(), &want[..]);
+}
+
+#[test]
 fn bounced_stream_round_trip() {
     let mem = Fake::new(8 * MIB);
     let tag = DmaTag::new(mem, bits(22), 8 * MIB);

@@ -13,6 +13,7 @@ use bootproto::MemoryKind;
 use ktest::ktest;
 
 use crate::arch;
+use crate::devices::find_named;
 
 /// A [`sched::Sleepable`] for test code, which runs only in threads (the
 /// boot thread or ones it spawns), never in interrupt handlers.
@@ -1917,25 +1918,6 @@ ktest! {
             assert!(transports >= 2, "virtio_pci attached to the virtio functions");
         }
     }
-}
-
-/// A node named `name` under `root`, with its parent.
-fn find_named(
-    m: &bus::Manager,
-    s: &sched::Sleepable,
-    root: bus::DeviceId,
-    name: &str,
-) -> Option<(bus::DeviceId, bus::DeviceId)> {
-    let mut todo = alloc::vec![root];
-    while let Some(p) = todo.pop() {
-        for c in m.children(p, s) {
-            if m.nameunit(c, s).as_deref() == Some(name) {
-                return Some((p, c));
-            }
-            todo.push(c);
-        }
-    }
-    None
 }
 
 ktest! {

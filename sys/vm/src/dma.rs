@@ -179,6 +179,54 @@ pub struct Segment {
     pub len: u64,
 }
 
+/// A mapping's segments. Most buffers are physically contiguous (heap
+/// blocks are buddy blocks), so one segment is kept without allocating,
+/// as FreeBSD's tags keep a preallocated segment array.
+#[derive(Clone, Debug)]
+enum Segments {
+    None,
+    One(Segment),
+    Many(Vec<Segment>),
+}
+
+impl Segments {
+    const fn new() -> Self {
+        Self::None
+    }
+
+    fn as_slice(&self) -> &[Segment] {
+        match self {
+            Self::None => &[],
+            Self::One(s) => core::slice::from_ref(s),
+            Self::Many(v) => v,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+
+    fn last_mut(&mut self) -> Option<&mut Segment> {
+        match self {
+            Self::None => None,
+            Self::One(s) => Some(s),
+            Self::Many(v) => v.last_mut(),
+        }
+    }
+
+    fn push(&mut self, seg: Segment) {
+        match self {
+            Self::None => *self = Self::One(seg),
+            Self::One(first) => *self = Self::Many(alloc::vec![*first, seg]),
+            Self::Many(v) => v.push(seg),
+        }
+    }
+
+    fn clear(&mut self) {
+        *self = Self::None;
+    }
+}
+
 /// A device's DMA tag.
 #[derive(Clone, Copy)]
 pub struct DmaTag {
@@ -200,7 +248,16 @@ impl DmaTag {
     /// A tag for `constraints` on a machine whose RAM ends below
     /// `top_of_ram`.
     #[must_use]
-    pub fn new(mem: &'static dyn DmaMemory, constraints: DmaConstraints, top_of_ram: u64) -> Self {
+    pub fn new(
+        mem: &'static dyn DmaMemory,
+        mut constraints: DmaConstraints,
+        top_of_ram: u64,
+    ) -> Self {
+        // Powers of two, as documented, so mapping tests them with masks
+        // (as FreeBSD's busdma does) rather than divisions: a stray value
+        // is made stricter, never looser.
+        constraints.align = constraints.align.max(1).next_power_of_two();
+        constraints.boundary = constraints.boundary.map(|b| 1 << b.max(1).ilog2());
         let backend = if top_of_ram <= constraints.limit() {
             Backend::Direct
         } else {
@@ -237,7 +294,7 @@ impl DmaTag {
 
     /// Splits physical range `[pa, pa + len)` into segments the device
     /// accepts, appending them to `out`.
-    fn split(&self, mut pa: u64, mut len: u64, out: &mut Vec<Segment>) -> Result<(), DmaError> {
+    fn split(&self, mut pa: u64, mut len: u64, out: &mut Segments) -> Result<(), DmaError> {
         let c = &self.constraints;
         while len > 0 {
             let mut n = len.min(c.max_segment.max(1));
@@ -250,7 +307,8 @@ impl DmaTag {
                 Some(last)
                     if last.bus + last.len == pa
                         && last.len + n <= c.max_segment
-                        && c.boundary.is_none_or(|b| last.bus / b == (pa + n - 1) / b) =>
+                        && c.boundary
+                            .is_none_or(|b| last.bus & !(b - 1) == (pa + n - 1) & !(b - 1)) =>
                 {
                     last.len += n;
                 }
@@ -492,7 +550,7 @@ struct Bounce {
 pub struct DmaStream<B: DmaBuf, S> {
     buf: B,
     tag: DmaTag,
-    segments: Vec<Segment>,
+    segments: Segments,
     bounce: Option<Bounce>,
     _state: PhantomData<S>,
 }
@@ -513,7 +571,7 @@ impl<B: DmaBuf> DmaStream<B, CpuOwned> {
         Self {
             buf,
             tag: *tag,
-            segments: Vec::new(),
+            segments: Segments::new(),
             bounce: None,
             _state: PhantomData,
         }
@@ -537,6 +595,7 @@ impl<B: DmaBuf> DmaStream<B, CpuOwned> {
     /// Hands the buffer to the device for direction `D`: bounces it if the
     /// device cannot reach it, does the pre-transfer sync, and computes the
     /// segments. On error the stream comes back unchanged.
+    #[inline]
     pub fn map<D: Direction>(mut self) -> Result<DmaStream<B, DeviceOwned<D>>, (Self, DmaError)> {
         match self.build::<D>() {
             Ok(()) => Ok(DmaStream {
@@ -550,6 +609,7 @@ impl<B: DmaBuf> DmaStream<B, CpuOwned> {
         }
     }
 
+    #[inline]
     fn build<D: Direction>(&mut self) -> Result<(), DmaError> {
         let mem = self.tag.mem;
         let c = self.tag.constraints;
@@ -558,29 +618,54 @@ impl<B: DmaBuf> DmaStream<B, CpuOwned> {
         if bytes.is_empty() {
             return Ok(());
         }
-        // Physical ranges of the buffer, page by page.
-        let mut ranges: Vec<(u64, u64)> = Vec::new();
+        // Direct when every byte is within reach and the start is aligned
+        // (later ranges start on page boundaries, so alignment beyond a
+        // page needs a single range). The buffer's physical ranges are
+        // split into segments as they are found, page by page.
+        let mut direct = true;
+        let mut split_err = None;
+        let mut range: Option<(u64, u64)> = None;
         let mut off = 0usize;
         while off < bytes.len() {
             let va = bytes[off..].as_ptr();
             let pa = mem.phys(va).ok_or(DmaError::BadBuffer)?;
             let in_page = to_usize(PAGE_SIZE - (pa % PAGE_SIZE));
             let n = in_page.min(bytes.len() - off);
-            match ranges.last_mut() {
-                Some((p, l)) if *p + *l == pa => *l += n as u64,
-                _ => ranges.push((pa, n as u64)),
+            // A direct tag reaches all RAM (decided once, at creation, as
+            // FreeBSD's BUS_DMA_COULD_BOUNCE is).
+            let reach = self.tag.backend == Backend::Direct || pa + n as u64 <= c.limit();
+            if !reach || (off == 0 && pa & (c.align - 1) != 0) {
+                direct = false;
+                break;
             }
+            range = match range {
+                Some((p, l)) if p + l == pa => Some((p, l + n as u64)),
+                Some(_) if c.align > PAGE_SIZE => {
+                    direct = false;
+                    break;
+                }
+                Some((p, l)) => {
+                    // Keep looking on failure: an unreachable page later
+                    // means bouncing, which may need fewer segments.
+                    if split_err.is_none() {
+                        split_err = self.tag.split(p, l, &mut self.segments).err();
+                    }
+                    Some((pa, n as u64))
+                }
+                None => Some((pa, n as u64)),
+            };
             off += n;
         }
-        // Direct when every byte is within reach and the start is aligned
-        // (later ranges start on page boundaries, so alignment beyond a
-        // page needs a single range).
-        let reachable = ranges.iter().all(|&(pa, len)| pa + len <= c.limit())
-            && ranges[0].0.is_multiple_of(c.align)
-            && (c.align <= PAGE_SIZE || ranges.len() == 1);
-        if reachable {
-            for &(pa, len) in &ranges {
-                self.tag.split(pa, len, &mut self.segments)?;
+        if direct {
+            if let Some(e) = split_err {
+                self.segments.clear();
+                return Err(e);
+            }
+            if let Some((p, l)) = range
+                && let Err(e) = self.tag.split(p, l, &mut self.segments)
+            {
+                self.segments.clear();
+                return Err(e);
             }
             if c.coherency == Coherency::NonCoherent {
                 if D::READS {
@@ -591,7 +676,18 @@ impl<B: DmaBuf> DmaStream<B, CpuOwned> {
             }
             return Ok(());
         }
-        // Bounce: one contiguous allocation within reach.
+        self.segments.clear();
+        self.bounce::<D>()
+    }
+
+    /// Bounce: one contiguous allocation within reach. Out of line, so the
+    /// direct path stays small enough to inline into drivers.
+    #[cold]
+    #[inline(never)]
+    fn bounce<D: Direction>(&mut self) -> Result<(), DmaError> {
+        let mem = self.tag.mem;
+        let c = self.tag.constraints;
+        let bytes = self.buf.bytes();
         let len = bytes.len() as u64;
         let align = c.align.max(PAGE_SIZE);
         let alloc = len.next_multiple_of(align);
@@ -628,7 +724,7 @@ impl<B: DmaBuf, D: Direction> DmaStream<B, DeviceOwned<D>> {
     /// The bus segments to program into the device.
     #[must_use]
     pub fn segments(&self) -> &[Segment] {
-        &self.segments
+        self.segments.as_slice()
     }
 
     /// Whether the buffer went through bounce pages.
@@ -667,7 +763,7 @@ impl<B: DmaBuf, D: Direction> DmaStream<B, DeviceOwned<D>> {
         DmaStream {
             buf: self.buf,
             tag: self.tag,
-            segments: Vec::new(),
+            segments: Segments::new(),
             bounce: None,
             _state: PhantomData,
         }
