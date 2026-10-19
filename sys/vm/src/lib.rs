@@ -8,13 +8,17 @@
 //!   [`slab::PageSource`]; the kernel's `GlobalAlloc` (`uma`, `malloc(9)`).
 //! - [`vmem`]: a boundary-tag arena for kernel virtual address ranges
 //!   (`vmem(9)`), which kernel stacks and later `kmem` mappings come from.
+//! - [`map`], [`object`], [`fault`]: process address spaces (`vm_map`),
+//!   the memory objects behind them with copy-on-write shadow chains
+//!   (`vm_object`), and page-fault resolution (`vm_fault`).
 //!
 //! Everything here is independent of the architecture and of how physical
 //! memory is reached, so it runs in host tests; the kernel crate supplies
 //! the page tables and the direct map.
 //!
 //! Behavior reference: sys/vm/vm_phys.c, sys/vm/uma_core.c,
-//! sys/kern/subr_vmem.c.
+//! sys/kern/subr_vmem.c, sys/vm/vm_map.c, sys/vm/vm_object.c,
+//! sys/vm/vm_fault.c.
 
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
@@ -22,6 +26,9 @@
 extern crate alloc;
 
 pub mod dma;
+pub mod fault;
+pub mod map;
+pub mod object;
 pub mod phys;
 pub mod slab;
 pub mod vmem;

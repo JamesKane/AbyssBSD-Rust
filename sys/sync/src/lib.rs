@@ -56,6 +56,11 @@ impl<T> SpinLock<T> {
         }
     }
 
+    /// The value, through exclusive access to the lock (no locking needed).
+    pub fn get_mut(&mut self) -> &mut T {
+        self.value.get_mut()
+    }
+
     /// Takes the lock only if nobody holds or waits for it.
     pub fn try_lock(&self) -> Option<SpinGuard<'_, T>> {
         let irq = hal::irq::disable();
