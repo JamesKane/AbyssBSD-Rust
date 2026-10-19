@@ -27,6 +27,8 @@ pub(crate) struct Step {
     pub(crate) prompt: bool,
     /// What the step checks, for the failure message.
     pub(crate) what: &'static str,
+    /// How long to let the system settle before the next step.
+    pub(crate) settle: Duration,
 }
 
 const fn step(send: &'static str, expect: &'static str, what: &'static str) -> Step {
@@ -35,6 +37,7 @@ const fn step(send: &'static str, expect: &'static str, what: &'static str) -> S
         expect,
         prompt: true,
         what,
+        settle: Duration::ZERO,
     }
 }
 
@@ -45,6 +48,21 @@ const fn job(send: &'static str, expect: &'static str, what: &'static str) -> St
         expect,
         prompt: false,
         what,
+        settle: Duration::ZERO,
+    }
+}
+
+/// A job step after which the shell still has work to do (`fg` prints the
+/// job before giving it the terminal): the next keystroke waits a moment,
+/// or it would reach the shell instead of the job. Emulated systems are
+/// slow enough to lose that race.
+const fn job_then_settle(send: &'static str, expect: &'static str, what: &'static str) -> Step {
+    Step {
+        send,
+        expect,
+        prompt: false,
+        what,
+        settle: Duration::from_secs(1),
     }
 }
 
@@ -75,7 +93,7 @@ pub(crate) const SHELL: &[Step] = &[
     ),
     step("\x1a", "^Z[1] + Suspended", "^Z stops it"),
     step("jobs\n", "\n[1] + Suspended", "jobs lists it"),
-    job("fg\n", "sleep 60", "fg resumes it"),
+    job_then_settle("fg\n", "sleep 60", "fg resumes it"),
     step("\x03", "\n", "^C ends it"),
     step("jobs; echo done\n", "\ndone\r\n", "no jobs left"),
 ];
@@ -177,6 +195,7 @@ impl Session {
                     }
                 })
                 .map_err(|e| format!("step {} ({}): {e}", i + 1, s.what))?;
+            std::thread::sleep(s.settle);
         }
         Ok(())
     }

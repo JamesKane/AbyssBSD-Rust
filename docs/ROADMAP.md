@@ -750,7 +750,18 @@ P4.0 ─► P4.1 ─► P4.2 ─► P4.3 ─┬─► P4.4 ─┐
   - **Bug found:** a process killed by a signal leaked. Signal delivery held a reference to it on
     a stack that never unwinds, so it lived on as a zombie with no parent, holding its page-table
     root. `ps` showed them. The `ps` kernel test now checks that no process outlives its test.
-  - **Left:** the fuzzer, the P4 suite against FreeBSD, and the PTI question.
+  - **Fuzzer** (`tests/user/fuzz.c`). Children make random calls, from every implemented call
+    but those that would reach outside them: no fork, exec, or exit; signals only to themselves;
+    no sysctl writes; files opened read-only. Arguments are small, huge, -1, pointers to random
+    bytes, pointers running into an unmapped page, NULL, or kernel addresses. Memory calls work
+    mostly in a scratch region, and calls that would wait for good are given timeouts. Each boot
+    test makes about 120,000 calls on each architecture with no panic. A kernel test runs it
+    twice with one seed: the second run leaves free memory exactly where the first did, and no
+    process behind.
+  - The expect script waits a second after `fg` before typing `^C`: `fg` prints the job before
+    giving it the terminal, and emulated arm64 in CI lost that race (FreeBSD has the same
+    window). `freebsd-shell` still passes it against FreeBSD.
+  - **Left:** the P4 suite against FreeBSD, and the PTI question.
 
 **Exit:** both arches boot to an interactive `/rescue/sh` (from FreeBSD 15.1 `base.txz`) on the
 serial console. Pipelines, job control (`^Z`, `fg`), `ls`, `cat`, `sysctl kern.ostype`, and

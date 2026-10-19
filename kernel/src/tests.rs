@@ -2699,6 +2699,37 @@ mod user_memory {
     }
 
     ktest! {
+        fn fuzzing_leaves_nothing_behind() {
+            // The fuzzer twice with the same seed: the first run warms
+            // whatever the kernel caches; the second must leave free
+            // memory exactly where the first did, and no process behind.
+            use crate::proc::{Exit, Process};
+            let s = cx();
+            let run = || {
+                let p = Process::spawn(
+                    &s,
+                    b"/usr/tests/abyss/fuzz",
+                    &[b"fuzz", b"7", b"16", b"2000"],
+                    &[],
+                    Some(hal::cpu_id()),
+                )
+                .unwrap();
+                assert_eq!(p.wait(&s), Exit::Code(0));
+            };
+            run();
+            let warm = settled_free_pages(&s);
+            run();
+            let after = settled_free_pages(&s);
+            assert_eq!(after, warm, "pages leaked by fuzzing");
+            assert!(
+                crate::proc::all().is_empty(),
+                "processes left by fuzzing: {:?}",
+                crate::proc::all().iter().map(|p| p.pid()).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    ktest! {
         fn rescue_ps_lists_processes() {
             use crate::proc::Process;
             let s = cx();
