@@ -80,8 +80,18 @@ loader prints before symbolizing addresses.
 Performance comparison against FreeBSD (on the build server; PERFORMANCE.md §6):
 
 ```
-cargo xtask --remote perf [--suite p2|diag] [--runs N] [--prepare]
+cargo xtask --remote perf [--suite p2|p3|p4|diag] [--runs N] [--prepare] [--freebsd-only]
+cargo xtask --remote fetch-base [--arch <a|all>]   # base.txz, SHA-256 pinned: /rescue image, sysroot
+cargo xtask --remote freebsd-shell                 # the boot-to-shell script against FreeBSD
 ```
+
+`--freebsd-only` records FreeBSD's numbers alone, for a suite AbyssBSD cannot run yet (`p4`
+until P4.7). `fetch-base` keeps each architecture's `base.txz` under
+`~/abyss/dist/15.1-RELEASE/<arch>/`: the archive, `root/` (`/rescue`, `/lib`, `/usr/include`,
+`/usr/lib`; a sysroot for static test binaries), and `rescue.tar`, the memory-disk image.
+`freebsd-shell` boots FreeBSD single-user in bhyve and runs `xtask/src/expect.rs`'s `SHELL`
+script against its `/rescue/sh`. That is the script the boot-to-shell test will run against
+AbyssBSD.
 
 Planned for later phases:
 
@@ -91,7 +101,6 @@ cargo xtask deploy  --board {opi6p|x870e} [--usb <serial> | --media]   # install
                     # targets are identified by disk serial number; anything else is refused
 cargo xtask test    [--tier compat|full]
 cargo xtask perf    [--platform x870e|opi6p] [--compare <rev>]   # PERFORMANCE.md §6
-cargo xtask fetch-base --version 15.1 --arch <a>   # download & verify base.txz (sha256 pinned)
 ```
 
 - `--remote` mirrors the working tree to the build server with rsync (`~/abyss/src`) and runs

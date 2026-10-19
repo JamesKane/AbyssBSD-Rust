@@ -39,6 +39,8 @@ compatibility test suite.
     `issetugid`, `getrandom`, `clock_gettime`, `nanosleep`, `getdirentries`, `chdir`, `fchdir`,
     `__getcwd`, `pipe2`, `dup2`, `fcntl`, `getrlimit`, `sysarch` (amd64 TLS), `thr_self`,
     `_umtx_op` (minimal), `sigfastblock`, `minherit`, `madvise`, `kill`, `setsid`, `getuid` family.
+    FreeBSD 15.1's static libc also calls `readlink` (`/etc/malloc.conf`), `exterrctl`, and
+    `cpuset_getaffinity` before `main`, and `ubench` binds itself with `cpuset_setaffinity`.
   - **Tier B, dynamic multi-user boot** (Phase 6): the full process, credential, file, socket
     (UNIX), kqueue, `thr_*`, `_umtx_op`, `cap_*`, `procctl`, `jail_*`, `kenv`, `reboot`, `mount`
     family, `ptrace` (basic), `posix_openpt`, `utimensat`, `copy_file_range`, `__realpathat`, and

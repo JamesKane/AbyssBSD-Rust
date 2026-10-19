@@ -19,16 +19,15 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::arch::Arch;
+use crate::base::{self, RELEASE};
 use crate::build;
 use crate::cli::Args;
 use crate::image;
 use crate::qemu::{Outcome, Vm, Vmm};
 use crate::util::{self, Result};
-
-const RELEASE: &str = "15.1-RELEASE";
 const VM_IMAGE: &str = "FreeBSD-15.1-RELEASE-amd64-ufs.raw.xz";
 /// Bumped whenever [`prepare_image`] changes what it writes.
-const PREP_VERSION: &str = "14";
+const PREP_VERSION: &str = "15";
 /// The bound: AbyssBSD's median over FreeBSD's.
 const BOUND: f64 = 1.02;
 /// FreeBSD-side coefficient of variation above which a benchmark cannot
@@ -36,7 +35,7 @@ const BOUND: f64 = 1.02;
 const MAX_CV: f64 = 0.01;
 const BOOTSTRAP: usize = 2000;
 
-const USAGE: &str = "usage: cargo xtask --remote perf [--suite p2|p3|diag] [--runs N] [--prepare]";
+const USAGE: &str = "usage: cargo xtask --remote perf [--suite p2|p3|p4|diag] [--runs N] [--prepare] [--freebsd-only]";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Side {
@@ -60,11 +59,14 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
         .map_or(Ok(10), |s| s.parse())
         .map_err(|_| "bad --runs")?;
     let prepare_only = args.take_flag("--prepare");
+    // FreeBSD's numbers alone: a baseline for a suite AbyssBSD cannot run
+    // yet (p4 until its system calls are in).
+    let freebsd_only = args.take_flag("--freebsd-only");
     args.finish()?;
     // `diag` holds AbyssBSD-side diagnostics, some with FreeBSD
     // counterparts; it is for investigation, not gating.
-    if !["p2", "p3", "diag"].contains(&suite.as_str()) {
-        return Err(format!("unknown suite `{suite}` (p2, p3, diag)").into());
+    if !["p2", "p3", "p4", "diag"].contains(&suite.as_str()) {
+        return Err(format!("unknown suite `{suite}` (p2, p3, p4, diag)").into());
     }
     if !cfg!(target_os = "freebsd") {
         return Err(format!("perf needs bhyve: run it on the build server\n{USAGE}").into());
@@ -87,11 +89,13 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     fs::create_dir_all(&dirs.perf)?;
     let freebsd = prepare_image(&dirs)?;
     let kbench = build_kbench(&dirs)?;
+    let ubench = build_ubench(&dirs)?;
     if prepare_only {
         eprintln!(
-            "xtask: perf: prepared {} and {}",
+            "xtask: perf: prepared {}, {} and {}",
             freebsd.display(),
-            kbench.display()
+            kbench.display(),
+            ubench.display()
         );
         return Ok(());
     }
@@ -103,7 +107,9 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
         .join(format!("{}-{}", stamp.trim(), rev));
     fs::create_dir_all(out.join("logs"))?;
 
-    let bench_disk = make_bench_disk(&out, &kbench, &suite)?;
+    // The userland suites run ubench; the earlier ones, kbench.
+    let bench = if suite == "p4" { &ubench } else { &kbench };
+    let bench_disk = make_bench_disk(&out, bench, &suite)?;
     let opts = build::Options {
         release: true,
         ktest: false,
@@ -121,6 +127,9 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
             [Side::Abyss, Side::FreeBsd]
         };
         for side in order {
+            if freebsd_only && side == Side::Abyss {
+                continue;
+            }
             let disk = match side {
                 Side::FreeBsd => &freebsd,
                 Side::Abyss => &abyss,
@@ -154,10 +163,17 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     fs::write(out.join("environment.txt"), environment(&rev))?;
 
     let report = Report::new(&samples, &units);
-    let text = report.render(&suite, &rev, runs);
+    let text = if freebsd_only {
+        report.render_baseline(&suite, runs)
+    } else {
+        report.render(&suite, &rev, runs)
+    };
     fs::write(out.join("report.txt"), &text)?;
     print!("{text}");
     eprintln!("xtask: perf: results in {}", out.display());
+    if freebsd_only {
+        return Ok(());
+    }
     if report.failures() > 0 {
         return Err(format!("{} benchmark(s) over the bound", report.failures()).into());
     }
@@ -215,6 +231,69 @@ fn verify(file: &Path, name: &str, sums: &Path) -> Result<()> {
 /// The FreeBSD VM image, configured to run the benchmark at boot and power
 /// off: serial console, no daemons that need not run, and an `rc.local`
 /// that loads `kbench.ko` from the second disk.
+/// The prepared FreeBSD VM image booting single-user, and a directory for
+/// work beside it. In single-user mode init gives the shell the console as
+/// its controlling terminal, as AbyssBSD's boot-to-shell does.
+pub(crate) fn freebsd_single_user_image() -> Result<(PathBuf, PathBuf)> {
+    let dirs = Dirs::new();
+    fs::create_dir_all(&dirs.perf)?;
+    let base = prepare_image(&dirs)?;
+    let img = dirs.perf.join(format!("freebsd-{RELEASE}-single.img"));
+    let stamp = img.with_extension("img.prepared");
+    if img.exists() && fs::read_to_string(&stamp).is_ok_and(|s| s.trim() == PREP_VERSION) {
+        return Ok((img, dirs.perf));
+    }
+    let tmp = img.with_extension("img.tmp");
+    fs::copy(&base, &tmp)?;
+    with_root(&dirs, &tmp, |mnt| {
+        let conf = mnt.join("boot/loader.conf.local");
+        let text = fs::read_to_string(&conf)? + "boot_single=\"YES\"\n";
+        let staging = mnt.with_file_name("staging");
+        fs::create_dir_all(&staging)?;
+        let src = staging.join("loader.conf.local");
+        fs::write(&src, text)?;
+        doas(&[
+            "install",
+            "-o",
+            "root",
+            "-g",
+            "wheel",
+            "-m",
+            "644",
+            &src.to_string_lossy(),
+            &conf.to_string_lossy(),
+        ])?;
+        Ok(())
+    })?;
+    fs::rename(&tmp, &img)?;
+    fs::write(&stamp, PREP_VERSION)?;
+    Ok((img, dirs.perf))
+}
+
+/// Runs `f` on the root file system of raw disk image `img`, mounted.
+fn with_root(dirs: &Dirs, img: &Path, f: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
+    let md = doas(&[
+        "mdconfig",
+        "-a",
+        "-t",
+        "vnode",
+        "-f",
+        &img.to_string_lossy(),
+    ])?;
+    let md = md.trim().to_owned();
+    let mnt = dirs.perf.join("mnt");
+    fs::create_dir_all(&mnt)?;
+    let result = (|| -> Result<()> {
+        let part = rootfs_partition(&md)?;
+        doas(&["mount", &format!("/dev/{part}"), &mnt.to_string_lossy()])?;
+        let r = f(&mnt);
+        doas(&["umount", &mnt.to_string_lossy()])?;
+        r
+    })();
+    let _ = doas(&["mdconfig", "-d", "-u", &md]);
+    result
+}
+
 fn prepare_image(dirs: &Dirs) -> Result<PathBuf> {
     let img = dirs.perf.join(format!("freebsd-{RELEASE}-kbench.img"));
     let stamp = img.with_extension("img.prepared");
@@ -239,26 +318,7 @@ fn prepare_image(dirs: &Dirs) -> Result<PathBuf> {
         return Err("xz failed".into());
     }
 
-    let md = doas(&[
-        "mdconfig",
-        "-a",
-        "-t",
-        "vnode",
-        "-f",
-        &tmp.to_string_lossy(),
-    ])?;
-    let md = md.trim().to_owned();
-    let mnt = dirs.perf.join("mnt");
-    fs::create_dir_all(&mnt)?;
-    let result = (|| -> Result<()> {
-        let part = rootfs_partition(&md)?;
-        doas(&["mount", &format!("/dev/{part}"), &mnt.to_string_lossy()])?;
-        let r = configure_guest(&mnt);
-        doas(&["umount", &mnt.to_string_lossy()])?;
-        r
-    })();
-    let _ = doas(&["mdconfig", "-d", "-u", &md]);
-    result?;
+    with_root(dirs, &tmp, configure_guest)?;
     fs::rename(&tmp, &img)?;
     fs::write(&stamp, PREP_VERSION)?;
     Ok(img)
@@ -302,13 +362,18 @@ fn configure_guest(mnt: &Path) -> Result<()> {
              \t\tsh /mnt/run.sh\n\
              \t\tumount /mnt\n\
              \telse\n\
-             \t\tcp /mnt/kbench.ko /mnt/suite /tmp/\n\
+             \t\trm -f /tmp/kbench.ko /tmp/ubench\n\
+             \t\tcp /mnt/kbench.ko /mnt/ubench /mnt/suite /tmp/ 2>/dev/null\n\
              \t\tumount /mnt\n\
              \t\tfor irq in $(vmstat -ai | awk '/virtio_pci|nvme/ { sub(/^irq/, \"\", $1); sub(/:$/, \"\", $1); print $1 }'); do\n\
              \t\t\tcpuset -l 0 -x \"$irq\"\n\
              \t\tdone\n\
              \t\tvmstat -ai | grep -E 'virtio_pci|nvme'\n\
-             \t\tkldload /tmp/kbench.ko && sysctl debug.kbench.run=\"$(cat /tmp/suite)\" >/dev/null\n\
+             \t\tif [ -f /tmp/ubench ]; then\n\
+             \t\t\t/tmp/ubench \"$(cat /tmp/suite)\"\n\
+             \t\telse\n\
+             \t\t\tkldload /tmp/kbench.ko && sysctl debug.kbench.run=\"$(cat /tmp/suite)\" >/dev/null\n\
+             \t\tfi\n\
              \tfi\n\
              fi\npoweroff\n",
         ),
@@ -366,12 +431,25 @@ fn build_kbench(dirs: &Dirs) -> Result<PathBuf> {
     Ok(obj.join("kbench.ko"))
 }
 
-/// The second disk: a UFS file system holding `kbench.ko` and the suite
-/// name. Attached to both kernels' VMs, so the configurations match.
-fn make_bench_disk(out: &Path, kbench: &Path, suite: &str) -> Result<PathBuf> {
+/// Builds `ubench`, the userland suites' static binary, for the bhyve guests.
+fn build_ubench(dirs: &Dirs) -> Result<PathBuf> {
+    let out = dirs.perf.join("ubench");
+    base::cc_static(
+        Arch::X86_64,
+        &util::root().join("tests/perf/ubench/ubench.c"),
+        &out,
+    )?;
+    Ok(out)
+}
+
+/// The second disk: a UFS file system holding the benchmark (`kbench.ko`,
+/// or the `ubench` binary) and the suite name. Attached to both kernels'
+/// VMs, so the configurations match.
+fn make_bench_disk(out: &Path, bench: &Path, suite: &str) -> Result<PathBuf> {
     let dir = out.join("bench-disk");
     fs::create_dir_all(&dir)?;
-    fs::copy(kbench, dir.join("kbench.ko"))?;
+    let name = bench.file_name().ok_or("bench has no file name")?;
+    fs::copy(bench, dir.join(name))?;
     fs::write(dir.join("suite"), suite)?;
     // The NVMe disk the P3 suite reads (zeros are fine for reads).
     fs::File::create(out.join("nvme.img"))?.set_len(64 << 20)?;
@@ -604,7 +682,7 @@ impl Report {
                         abyss: median(a),
                         ratio: f64::NAN,
                         ci: (f64::NAN, f64::NAN),
-                        cv: f64::NAN,
+                        cv: cv(f),
                         verdict: Verdict::Missing,
                     };
                 }
@@ -641,6 +719,26 @@ impl Report {
             .iter()
             .filter(|r| matches!(r.verdict, Verdict::Fail | Verdict::Missing))
             .count()
+    }
+
+    /// FreeBSD's side alone, for `--freebsd-only`.
+    fn render_baseline(&self, suite: &str, runs: usize) -> String {
+        let mut s = format!(
+            "perf suite {suite}, FreeBSD {RELEASE} baseline, bhyve, {runs} runs\n\
+             noisy = CV > {:.0}%\n\n",
+            MAX_CV * 100.0
+        );
+        let _ = writeln!(s, "{:<22} {:>14} {:>6}", "benchmark", "FreeBSD", "CV");
+        for r in &self.rows {
+            let _ = writeln!(
+                s,
+                "{:<22} {:>14} {:>5.1}%",
+                r.name,
+                format!("{:.1} {}", r.freebsd, r.unit),
+                r.cv * 100.0
+            );
+        }
+        s
     }
 
     fn render(&self, suite: &str, rev: &str, runs: usize) -> String {

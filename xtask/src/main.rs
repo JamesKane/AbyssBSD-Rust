@@ -5,8 +5,10 @@
 mod abicheck;
 mod acpidump;
 mod arch;
+mod base;
 mod build;
 mod cli;
+mod expect;
 mod image;
 mod perf;
 mod policy;
@@ -29,7 +31,10 @@ commands:
   image       --arch <a> [--release] [--ktest]           build a GPT disk image with an ESP
   run         --arch <a> [--release] [--ktest] [--smp N] [--mem SIZE] [--gdb] [--display]
   test        [--tier unit|boot|all] [--arch <a|all>]    run tests (default: all tiers)
-  perf        [--suite p2|diag] [--runs N] [--prepare]   compare with FreeBSD in bhyve (server only)
+  perf        [--suite p2|p3|p4|diag] [--runs N] [--prepare] [--freebsd-only]
+                                                         compare with FreeBSD in bhyve (server only)
+  freebsd-shell                                          run the boot-to-shell script against FreeBSD (server only)
+  fetch-base  [--arch <a|all>]                           FreeBSD base.txz: /rescue image, sysroot (server only)
   acpidump    --arch <a> [--vmm qemu|bhyve] [--machine M] --out DIR   capture a VM's ACPI tables
   freebsd-record [--out DIR]                             record FreeBSD's device tree in bhyve (server only)
   check                                                  fmt, clippy (host and targets), policy
@@ -71,6 +76,8 @@ fn run() -> Result<()> {
         "test" => test::cmd(args),
         "perf" => perf::cmd(args),
         "freebsd-record" => perf::cmd_record(args),
+        "fetch-base" => base::cmd(args),
+        "freebsd-shell" => expect::cmd_freebsd_shell(args),
         "acpidump" => acpidump::cmd(args),
         "check" => test::cmd_check(args),
         "policy" => policy::cmd(args),

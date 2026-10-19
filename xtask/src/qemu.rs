@@ -235,7 +235,7 @@ impl Vm {
     }
 
     /// The hypervisor command line. For QEMU, without a serial backend.
-    fn command(&self) -> Result<Command> {
+    pub(crate) fn command(&self) -> Result<Command> {
         match self.vmm {
             Vmm::Qemu => self.qemu_command(),
             Vmm::Bhyve => self.bhyve_command(),

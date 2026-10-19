@@ -1,12 +1,14 @@
-# In-kernel benchmarks
+# Benchmarks
 
-Until P4 there is no userland to share, so each phase's benchmarks run inside the kernel, once in
+Until P4 there is no userland to share, so the P2 and P3 benchmarks run inside the kernel, once in
 AbyssBSD and once in FreeBSD ([PERFORMANCE.md §5](../../docs/PERFORMANCE.md#5-benchmark-suites-by-phase)).
-This file is the workload specification both implementations follow:
+From P4 on they are userland programs, the same binary on both kernels (suite `p4`). This file is
+the workload specification every implementation follows:
 
 - AbyssBSD: `kernel/src/bench.rs`, run with the boot option `abyss.bench=<suite>`.
 - FreeBSD: `kbench/`, a kernel module (test code; it only ever runs on FreeBSD), run with
   `sysctl debug.kbench.run=<suite>`.
+- Both, from P4: `ubench/`, a static FreeBSD binary.
 
 `cargo xtask perf` boots both in identical bhyve VMs, interleaves the runs, and applies the
 statistics in PERFORMANCE.md. A change to a workload changes both implementations in the same
@@ -107,6 +109,35 @@ FreeBSD to how it really runs:
 | `dev.vtblk.cycle` | coordinator | Detach that transport, wait for idle, attach it again, wait for idle. Median of 16 cycles. Runs last, since it re-creates vtbd1 |
 
 `<d>` is `vtbd` or `nda`.
+
+## Suite `p4`
+
+From P4 on, benchmarks run in userland: `ubench/ubench.c`, one static FreeBSD binary built on the
+server (`cargo xtask perf` builds it against the release's `base.txz`), run unchanged on both
+kernels as `/tmp/ubench p4`. Until AbyssBSD runs it, `cargo xtask perf --suite p4 --freebsd-only`
+records FreeBSD's baseline.
+
+- `ubench` binds itself to CPU 1 (`cpuset_setaffinity`), and the processes it creates inherit
+  that. Unbound, FreeBSD put each freshly exec'd child on an idle CPU, and `proc.vfork_exec`
+  measured that CPU's wake-up and cold caches (550 µs on the build server, against 100 µs bound).
+- The pipe benchmarks' partner process binds itself to CPU 2.
+- Every benchmark is a throughput benchmark: three rounds of 1 s, median round, time from
+  `clock_gettime(CLOCK_MONOTONIC)`.
+
+| Name | Operation |
+|---|---|
+| `syscall.getpid` | `getpid()` (libc does not cache it) |
+| `io.null.write` | Write 1 byte to `/dev/null` |
+| `io.zero.read` | Read 4 KiB from `/dev/zero` |
+| `proc.fork` | `fork`; the child `_exit`s at once; the parent reaps it with `wait4` |
+| `proc.vfork_exec` | `vfork`; the child `execve`s `ubench exit`, which returns from `main`; `wait4` |
+| `proc.exec` | A child `execve`s `ubench` 100 times in a row, each image counting down; the last writes the elapsed time to a pipe. One op = one `execve` (and the image's libc start-up), with the child's `fork` and exit outside the timed span |
+| `vm.fault.anon` | `mmap` 64 MiB of anonymous memory, write one byte per 4 KiB page, `munmap`. One op = one page |
+| `vm.fault.cow` | The parent writes every page of a 16 MiB anonymous region once, then repeatedly forks a child that writes every page again and reports the time its writes took. One op = one copy-on-write fault |
+| `vm.mmap` | `mmap` one anonymous page, untouched, and `munmap` it |
+| `sig.deliver` | `kill(getpid(), SIGUSR1)` with a handler installed: delivery on return from `kill`, the handler, and `sigreturn` |
+| `pipe.pingpong` | One byte to the partner over one pipe and back over another. One op = one round trip |
+| `pipe.bw` | 64 KiB `write`s to a partner that reads and discards. One op = one write |
 
 ## Suite `diag`
 
