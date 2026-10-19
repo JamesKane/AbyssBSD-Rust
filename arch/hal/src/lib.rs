@@ -41,6 +41,30 @@ impl fmt::Display for CpuId {
 /// The most CPUs the kernel supports.
 pub const MAX_CPUS: usize = 64;
 
+/// What a faulting access tried to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaultAccess {
+    Read,
+    Write,
+    Execute,
+}
+
+/// A page fault, offered to the kernel's VM before it is treated as a
+/// fixup or as fatal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageFault {
+    /// The faulting address.
+    pub address: u64,
+    pub access: FaultAccess,
+    /// From user mode.
+    pub user: bool,
+    /// From kernel code allowed to fault (a user-copy routine).
+    pub in_copy: bool,
+    /// Interrupts were enabled where the fault happened, so resolving it
+    /// may sleep.
+    pub interrupts_enabled: bool,
+}
+
 /// Saved callee-saved register state of a thread that is not running.
 /// The layout is the arch crate's business; 16 words fit both ISAs.
 #[repr(C, align(16))]

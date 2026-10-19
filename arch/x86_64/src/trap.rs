@@ -201,11 +201,31 @@ extern "C" fn dispatch(frame: &mut TrapFrame) {
         return;
     }
     let trap = Trap::decode(frame);
+    let user = frame.cs & 3 != 0;
+    let fixup = (!user).then(|| crate::fixup::lookup(frame.rip)).flatten();
+    if let Trap::PageFault { address, cause } = trap {
+        let fault = hal::PageFault {
+            address,
+            access: if cause.fetch {
+                hal::FaultAccess::Execute
+            } else if cause.write {
+                hal::FaultAccess::Write
+            } else {
+                hal::FaultAccess::Read
+            },
+            user,
+            in_copy: fixup.is_some(),
+            interrupts_enabled: frame.rflags & (1 << 9) != 0,
+        };
+        // SAFETY: defined by the kernel through `kernel_hooks!`.
+        if unsafe { crate::abyss_page_fault(&fault) } {
+            return;
+        }
+    }
     if matches!(
         trap,
         Trap::PageFault { .. } | Trap::GeneralProtection { .. }
-    ) && frame.cs & 3 == 0
-        && let Some(fixup) = crate::fixup::lookup(frame.rip)
+    ) && let Some(fixup) = fixup
     {
         frame.rip = fixup;
         return;

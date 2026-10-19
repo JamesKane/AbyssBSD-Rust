@@ -113,6 +113,7 @@ pub(crate) fn ap_main(_arg: usize) -> ! {
     crate::intc::init_ap(cpu);
     crate::time::init_cpu();
     crate::threads::init_fpu(false);
+    arch::user::enable_protections();
     crate::topology::record_this_cpu(cpu);
     ONLINE[cpu.index()].store(true, Ordering::Release);
     sched::run_idle()
@@ -266,6 +267,9 @@ static BROADCAST: AtomicBool = AtomicBool::new(false);
 enum Targets {
     AllOthers,
     One(CpuId),
+    /// A set of CPUs, one bit each, never this one.
+    #[cfg_attr(target_arch = "aarch64", allow(dead_code))] // TLBI broadcasts there
+    Mask(u64),
 }
 
 /// Removes stale translations for `[va, va + len)` from every other CPU
@@ -278,6 +282,17 @@ pub(crate) fn shootdown(va: VirtAddr, len: u64) {
         return;
     }
     cross_call(va, len, Targets::AllOthers);
+}
+
+/// As [`shootdown`], for the CPUs in `mask` only (one bit per CPU; this
+/// CPU's is ignored): those a user address space is loaded on.
+#[cfg_attr(target_arch = "aarch64", allow(dead_code))] // TLBI broadcasts there
+pub(crate) fn shootdown_cpus(va: VirtAddr, len: u64, mask: u64) {
+    let mask = mask & !(1 << hal::cpu_id().0);
+    if cfg!(target_arch = "aarch64") || mask == 0 {
+        return;
+    }
+    cross_call(va, len, Targets::Mask(mask));
 }
 
 /// Interrupts `cpu` and waits until it has acknowledged (an IPI round
@@ -309,6 +324,7 @@ fn cross_call(va: VirtAddr, len: u64, targets: Targets) {
     let selected = |c: CpuId| match targets {
         Targets::AllOthers => c != me,
         Targets::One(t) => c == t,
+        Targets::Mask(m) => c != me && m & (1 << c.0) != 0,
     };
     let online = || {
         (0..sched::online_cpus())

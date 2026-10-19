@@ -24,9 +24,11 @@ mod gdt;
 pub mod mmu;
 pub mod smp;
 pub mod trap;
+pub mod user;
 
 pub use addr::{PhysAddr, VirtAddr};
 pub use gdt::{CpuBlock, cpu_id};
+pub use hal::{FaultAccess, PageFault};
 pub use trap::{Interrupt, TrapReport};
 
 /// The architecture name FreeBSD uses (`uname -m`).
@@ -48,7 +50,7 @@ pub const NAME: &str = "amd64";
 /// ```
 #[macro_export]
 macro_rules! kernel_hooks {
-    (main = $main:path, ap_main = $ap:path, fatal_trap = $trap:path, interrupt = $irq:path $(,)?) => {
+    (main = $main:path, ap_main = $ap:path, fatal_trap = $trap:path, interrupt = $irq:path, page_fault = $pf:path $(,)?) => {
         #[unsafe(no_mangle)]
         fn abyss_kernel_main(boot_info: $crate::PhysAddr) -> ! {
             $main(boot_info)
@@ -68,6 +70,11 @@ macro_rules! kernel_hooks {
         fn abyss_interrupt(irq: $crate::Interrupt) {
             $irq(irq)
         }
+
+        #[unsafe(no_mangle)]
+        fn abyss_page_fault(fault: &$crate::PageFault) -> bool {
+            $pf(fault)
+        }
     };
 }
 
@@ -80,6 +87,8 @@ unsafe extern "Rust" {
     fn abyss_fatal_trap(report: &TrapReport) -> !;
     /// Defined by [`kernel_hooks!`].
     fn abyss_interrupt(irq: Interrupt);
+    /// Defined by [`kernel_hooks!`]: whether the VM resolved the fault.
+    fn abyss_page_fault(fault: &hal::PageFault) -> bool;
 }
 
 /// Wraps a value that is only touched on the boot CPU before SMP, or under

@@ -142,9 +142,45 @@ extern "C" fn dispatch(frame: &mut TrapFrame) {
     }
     let trap = Trap::decode(frame);
     let same_el = frame.slot < 8;
-    if same_el
-        && matches!(trap, Trap::DataAbort { .. })
-        && let Some(fixup) = crate::fixup::lookup(frame.elr)
+    let fixup = same_el.then(|| crate::fixup::lookup(frame.elr)).flatten();
+    let fault = match trap {
+        Trap::DataAbort {
+            address,
+            write,
+            user,
+            status: FaultStatus::Translation(_) | FaultStatus::Permission(_),
+        } => Some((
+            address,
+            if write {
+                hal::FaultAccess::Write
+            } else {
+                hal::FaultAccess::Read
+            },
+            user,
+        )),
+        Trap::InstructionAbort {
+            address,
+            user,
+            status: FaultStatus::Translation(_) | FaultStatus::Permission(_),
+        } => Some((address, hal::FaultAccess::Execute, user)),
+        _ => None,
+    };
+    if let Some((address, access, user)) = fault {
+        let fault = hal::PageFault {
+            address,
+            access,
+            user,
+            in_copy: fixup.is_some(),
+            // SPSR.I: IRQs were masked.
+            interrupts_enabled: frame.spsr & (1 << 7) == 0,
+        };
+        // SAFETY: defined by the kernel through `kernel_hooks!`.
+        if unsafe { crate::abyss_page_fault(&fault) } {
+            return;
+        }
+    }
+    if matches!(trap, Trap::DataAbort { .. })
+        && let Some(fixup) = fixup
     {
         frame.elr = fixup;
         return;

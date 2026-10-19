@@ -51,6 +51,10 @@ impl pt::Memory for Frames<'_> {
         // being built.
         unsafe { &mut *(pa.get() as *mut Frame) }
     }
+
+    fn free_frame(&mut self, _pa: PhysAddr) {
+        // The loader only builds tables; nothing it maps is torn down.
+    }
 }
 
 /// The built hierarchy and where the console devices ended up.

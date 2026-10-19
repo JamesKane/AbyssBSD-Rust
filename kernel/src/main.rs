@@ -49,6 +49,7 @@ mod tests;
 mod threads;
 mod time;
 mod topology;
+mod uaccess;
 
 use addr::PhysAddr;
 
@@ -57,6 +58,7 @@ arch::kernel_hooks!(
     ap_main = smp::ap_main,
     fatal_trap = panic::fatal_trap,
     interrupt = intc::dispatch,
+    page_fault = mm::space::page_fault,
 );
 
 fn kmain(boot_info: PhysAddr) -> ! {
@@ -85,6 +87,7 @@ fn kmain(boot_info: PhysAddr) -> ! {
     intc::init_boot_cpu();
     intc::init_dispatch();
     threads::init_fpu(true);
+    arch::user::enable_protections();
     threads::init();
     time::init_cpu();
     sysctl::init();

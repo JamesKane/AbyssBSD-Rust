@@ -175,6 +175,8 @@ pub trait Memory {
     fn alloc_frame(&mut self) -> Option<PhysAddr>;
     /// The frame at `pa`, which an earlier [`Memory::alloc_frame`] returned.
     fn frame(&mut self, pa: PhysAddr) -> &mut Frame;
+    /// Returns a table frame [`PageTable::free_tables`] took out of use.
+    fn free_frame(&mut self, pa: PhysAddr);
 }
 
 /// Why a mapping failed.
@@ -400,6 +402,182 @@ impl<F: Format> PageTable<F> {
         Ok(())
     }
 
+    /// The level-1 table covering `va`, creating the tables on the way if
+    /// `create`; `Err` if a larger leaf covers it.
+    fn leaf_table(
+        &mut self,
+        mem: &mut impl Memory,
+        va: VirtAddr,
+        create: bool,
+    ) -> Result<Option<PhysAddr>, MapError> {
+        let mut table = self.root;
+        let mut level = Level::ROOT;
+        while level.0 > 1 {
+            let i = level.index(va);
+            let e = mem.frame(table)[i];
+            table = if F::is_valid(e) {
+                if !F::is_table(e, level) {
+                    return Err(MapError::AlreadyMapped(va));
+                }
+                F::address(e, level)
+            } else if create {
+                let next = mem.alloc_frame().ok_or(MapError::OutOfMemory)?;
+                mem.frame(table)[i] = F::table(next);
+                next
+            } else {
+                return Ok(None);
+            };
+            level = Level(level.0 - 1);
+        }
+        Ok(Some(table))
+    }
+
+    /// Maps the 4 KiB page at `va` to `pa`, replacing any 4 KiB mapping
+    /// there; returns the replaced one. The caller flushes the TLB if
+    /// something was replaced.
+    pub fn set(
+        &mut self,
+        mem: &mut impl Memory,
+        va: VirtAddr,
+        pa: PhysAddr,
+        attrs: Attrs,
+    ) -> Result<Option<Translation>, MapError> {
+        let small = PageSize::Size4K.bytes();
+        if !va.is_aligned(small) || !pa.is_aligned(small) {
+            return Err(MapError::Misaligned);
+        }
+        if !F::is_canonical(va) {
+            return Err(MapError::BadAddress(va));
+        }
+        let table = self
+            .leaf_table(mem, va, true)?
+            .ok_or(MapError::OutOfMemory)?;
+        let slot = &mut mem.frame(table)[Level(1).index(va)];
+        let old = F::is_valid(*slot).then(|| Translation {
+            pa: F::address(*slot, Level(1)),
+            size: PageSize::Size4K,
+            attrs: F::attrs(*slot, Level(1)),
+        });
+        *slot = F::leaf(pa, PageSize::Size4K, attrs);
+        Ok(old)
+    }
+
+    /// Calls `f` with each 4 KiB leaf in `[va, va + len)` and its virtual
+    /// address; `f` returns the new entry (0 to clear it). Absent tables
+    /// are skipped whole at every level, so a sparse range costs what is
+    /// mapped in it, and larger leaves are left alone.
+    fn each_leaf(
+        &mut self,
+        mem: &mut impl Memory,
+        va: VirtAddr,
+        len: u64,
+        mut f: impl FnMut(VirtAddr, u64) -> u64,
+    ) {
+        let end = va.get().saturating_add(len);
+        Self::walk(mem, self.root, Level::ROOT, va.get(), end, &mut f);
+    }
+
+    /// [`Self::each_leaf`] within `table` (at `level`) for `[start, end)`.
+    fn walk(
+        mem: &mut impl Memory,
+        table: PhysAddr,
+        level: Level,
+        start: u64,
+        end: u64,
+        f: &mut impl FnMut(VirtAddr, u64) -> u64,
+    ) {
+        let shift = 12 + 9 * (u32::from(level.0) - 1);
+        let span = 1u64 << shift;
+        let mut v = start;
+        while v < end {
+            // The next boundary of this level's entries, or `end`.
+            let next = (v | (span - 1)).saturating_add(1).min(end);
+            let i = level.index(VirtAddr::new(v));
+            let e = mem.frame(table)[i];
+            if F::is_valid(e) {
+                if level.0 == 1 {
+                    mem.frame(table)[i] = f(VirtAddr::new(v), e);
+                } else if F::is_table(e, level) {
+                    Self::walk(mem, F::address(e, level), Level(level.0 - 1), v, next, f);
+                }
+            }
+            if next == u64::MAX {
+                break;
+            }
+            v = next;
+        }
+    }
+
+    /// Removes the 4 KiB mappings in `[va, va + len)`, skipping holes, and
+    /// passes each removed one to `f`. The caller flushes the TLB.
+    pub fn clear(
+        &mut self,
+        mem: &mut impl Memory,
+        va: VirtAddr,
+        len: u64,
+        mut f: impl FnMut(VirtAddr, PhysAddr),
+    ) {
+        self.each_leaf(mem, va, len, |v, e| {
+            f(v, F::address(e, Level(1)));
+            0
+        });
+    }
+
+    /// Rewrites the attributes of the 4 KiB mappings in `[va, va + len)`
+    /// with `f`, calling `changed` for each mapping that changed. The
+    /// caller flushes the TLB.
+    pub fn protect(
+        &mut self,
+        mem: &mut impl Memory,
+        va: VirtAddr,
+        len: u64,
+        f: impl Fn(Attrs) -> Attrs,
+        mut changed: impl FnMut(VirtAddr),
+    ) {
+        self.each_leaf(mem, va, len, |v, e| {
+            let old = F::attrs(e, Level(1));
+            let new = f(old);
+            if new == old {
+                return e;
+            }
+            changed(v);
+            F::leaf(F::address(e, Level(1)), PageSize::Size4K, new)
+        });
+    }
+
+    /// Frees the tables below the root entries covering `[va, va + len)`
+    /// and clears those entries. The leaves' pages are the caller's; it
+    /// clears them first and flushes the TLB after.
+    pub fn free_tables(&mut self, mem: &mut impl Memory, va: VirtAddr, len: u64) {
+        let span = 1u64 << 39;
+        let end = va.get().saturating_add(len);
+        let mut v = va.get() & !(span - 1);
+        while v < end {
+            let i = Level::ROOT.index(VirtAddr::new(v));
+            let e = mem.frame(self.root)[i];
+            if F::is_valid(e) && F::is_table(e, Level::ROOT) {
+                Self::free_below(mem, F::address(e, Level::ROOT), Level(3));
+                mem.frame(self.root)[i] = 0;
+            }
+            v = match v.checked_add(span) {
+                Some(n) => n,
+                None => break,
+            };
+        }
+    }
+
+    fn free_below(mem: &mut impl Memory, table: PhysAddr, level: Level) {
+        if level.0 > 1 {
+            let entries = *mem.frame(table);
+            for e in entries {
+                if F::is_valid(e) && F::is_table(e, level) {
+                    Self::free_below(mem, F::address(e, level), Level(level.0 - 1));
+                }
+            }
+        }
+        mem.free_frame(table);
+    }
+
     /// Looks up the mapping for `va`.
     pub fn translate(&self, mem: &mut impl Memory, va: VirtAddr) -> Option<Translation> {
         let mut table = self.root;
@@ -459,6 +637,7 @@ mod tests {
     pub(crate) struct VecMemory {
         frames: Vec<Box<Frame>>,
         pub(crate) limit: Option<usize>,
+        freed: usize,
     }
 
     impl Memory for VecMemory {
@@ -473,6 +652,105 @@ mod tests {
         fn frame(&mut self, pa: PhysAddr) -> &mut Frame {
             &mut self.frames[usize::try_from(pa.get() / 4096 - 1).unwrap()]
         }
+
+        fn free_frame(&mut self, pa: PhysAddr) {
+            let frame = self.frame(pa);
+            assert!(frame[0] != FREED, "table frame {pa:?} freed twice");
+            frame.fill(0);
+            frame[0] = FREED;
+            self.freed += 1;
+        }
+    }
+
+    /// Marks a freed frame (never a valid entry: bit 0 clear).
+    const FREED: u64 = 0xdead_0000;
+
+    fn user_tables<F: Format>() {
+        let mut mem = VecMemory::default();
+        let mut pt = PageTable::<F>::new(&mut mem, PageSize::Size4K).unwrap();
+        let user = Attrs {
+            write: true,
+            exec: false,
+            user: true,
+            global: false,
+            cache: Cache::WriteBack,
+        };
+        let va = VirtAddr::new(0x7fff_ffe0_0000);
+        for i in 0..4 {
+            assert_eq!(
+                pt.set(
+                    &mut mem,
+                    va + i * 0x1000,
+                    PhysAddr::new(0x10_0000 + i * 0x1000),
+                    user
+                ),
+                Ok(None)
+            );
+        }
+        // A page in another 2 MiB region and another root entry.
+        pt.set(
+            &mut mem,
+            VirtAddr::new(0x1000),
+            PhysAddr::new(0x50_0000),
+            user,
+        )
+        .unwrap();
+        // Replacing returns what was there.
+        let old = pt
+            .set(
+                &mut mem,
+                va,
+                PhysAddr::new(0x40_0000),
+                Attrs {
+                    write: false,
+                    ..user
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!((old.pa, old.attrs), (PhysAddr::new(0x10_0000), user));
+        let t = pt.translate(&mut mem, va).unwrap();
+        assert_eq!(
+            (t.pa, t.attrs.write, t.attrs.user),
+            (PhysAddr::new(0x40_0000), false, true)
+        );
+
+        // Protect reports only what changed.
+        let mut changed = Vec::new();
+        pt.protect(
+            &mut mem,
+            va,
+            0x10_0000,
+            |a| Attrs { write: false, ..a },
+            |v| changed.push(v.get()),
+        );
+        assert_eq!(
+            changed,
+            [0x7fff_ffe0_1000, 0x7fff_ffe0_2000, 0x7fff_ffe0_3000]
+        );
+        assert!(!pt.translate(&mut mem, va + 0x3000).unwrap().attrs.write);
+
+        // Clear skips holes and missing tables.
+        let mut cleared = Vec::new();
+        pt.clear(&mut mem, VirtAddr::ZERO, 0x8000_0000_0000, |v, pa| {
+            cleared.push((v.get(), pa.get()));
+        });
+        assert_eq!(cleared.len(), 5);
+        assert_eq!(cleared[0], (0x1000, 0x50_0000));
+        assert_eq!(pt.translate(&mut mem, va + 0x1000), None);
+
+        // Free the lower half's tables: two root entries, each with three
+        // levels below.
+        let used = pt.frames_used(&mut mem);
+        pt.free_tables(&mut mem, VirtAddr::ZERO, 0x8000_0000_0000);
+        assert_eq!(mem.freed, used - 1);
+        assert_eq!(pt.frames_used(&mut mem), 1);
+    }
+
+    #[test]
+    fn user_tables_both_formats() {
+        user_tables::<crate::x86_64::X86_64>();
+        user_tables::<crate::aarch64::Aarch64>();
     }
 
     fn unmaps<F: Format>() {

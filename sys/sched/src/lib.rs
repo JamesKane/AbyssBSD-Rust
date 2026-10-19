@@ -90,6 +90,19 @@ pub trait Platform: Sync {
     fn rearm_timer(&self);
 }
 
+/// A user address space, as the scheduler sees one: something to load
+/// into the MMU when a thread running in it is switched in.
+pub trait AddressSpace: Send + Sync {
+    /// Makes this the address space the MMU translates user addresses
+    /// with, on this CPU. Called with interrupts masked.
+    fn activate(&self);
+    /// This CPU is about to load another address space instead. Called
+    /// with interrupts masked.
+    fn deactivate(&self) {}
+    /// The concrete type, for the kernel's own use.
+    fn as_any(&self) -> &dyn core::any::Any;
+}
+
 static PLATFORM: Once<&'static dyn Platform> = Once::new();
 
 fn platform() -> &'static dyn Platform {
@@ -185,6 +198,10 @@ pub struct PerCpu {
     switches: Cell<(u32, u32)>,
     /// When the current switch-counting window ends, in platform time.
     window_end: Cell<u64>,
+    /// The address space loaded in the MMU. Kernel threads (with none)
+    /// leave it loaded, as FreeBSD's do, so switching between a process
+    /// and kernel threads reloads nothing.
+    space: Cell<Option<Arc<dyn AddressSpace>>>,
 }
 
 // SAFETY: the `Cell`s are only touched by the owning CPU with interrupts
@@ -274,6 +291,7 @@ fn new_percpu(id: CpuId) -> &'static mut PerCpu {
         halted: AtomicBool::new(false),
         switches: Cell::new((0, 0)),
         window_end: Cell::new(0),
+        space: Cell::new(None),
     }))
 }
 
@@ -885,6 +903,7 @@ fn steal(c: &PerCpu) -> Option<Arc<Thread>> {
 /// to other CPUs and disposes of it if it died.
 fn finish_switch() {
     let c = this_cpu();
+    load_space(c);
     let prev = c.prev.replace(ptr::null());
     let owned = c.prev_owned.take();
     if prev.is_null() {
@@ -901,6 +920,69 @@ fn finish_switch() {
         ZOMBIES.lock().push_back(t);
         REAPER.wake_one();
     }
+}
+
+/// Loads the current thread's address space into the MMU, unless it has
+/// none or it is loaded already. Interrupts are masked.
+fn load_space(c: &PerCpu) {
+    // SAFETY: only the thread itself writes its `space`, and it is the
+    // current thread here (or its previous CPU's write is ordered before
+    // this by the `on_cpu` handoff).
+    let want = unsafe { &*current().space.get() };
+    let Some(want) = want else {
+        return;
+    };
+    let loaded = c.space.take();
+    if loaded.as_ref().is_some_and(|l| Arc::ptr_eq(l, want)) {
+        c.space.set(loaded);
+        return;
+    }
+    if let Some(l) = &loaded {
+        l.deactivate();
+    }
+    want.activate();
+    c.space.set(Some(Arc::clone(want)));
+    // The previously loaded space, if this was its last reference, goes
+    // here; its owner tore its mappings down already, so little is left.
+    drop(loaded);
+}
+
+/// Sets the current thread's user address space (at `exec`, or when a new
+/// process's first thread starts) and loads it. With `None` the thread
+/// runs on whatever is loaded, like a kernel thread. Returns the old one.
+pub fn set_address_space(space: Option<Arc<dyn AddressSpace>>) -> Option<Arc<dyn AddressSpace>> {
+    let irq = hal::irq::disable();
+    // SAFETY: the current thread writes its own `space`, with interrupts
+    // masked so no switch reads it meanwhile.
+    let old = unsafe { core::mem::replace(&mut *current().space.get(), space) };
+    load_space(this_cpu());
+    hal::irq::restore(irq);
+    old
+}
+
+/// Drops this CPU's hold on the address space it has loaded, when the
+/// current thread runs in none (a process's last thread exited, or a
+/// test is done). `to_kernel` must first point the MMU at kernel-only
+/// tables, so nothing still walks the space's tables when they are freed.
+pub fn unload_address_space(to_kernel: impl FnOnce()) {
+    let irq = hal::irq::disable();
+    let c = this_cpu();
+    // SAFETY: only the current thread writes its own `space`.
+    let mine = unsafe { (*current().space.get()).is_some() };
+    let loaded = if mine { None } else { c.space.take() };
+    if let Some(l) = &loaded {
+        to_kernel();
+        l.deactivate();
+    }
+    hal::irq::restore(irq);
+    drop(loaded);
+}
+
+/// The current thread's user address space.
+#[must_use]
+pub fn address_space() -> Option<Arc<dyn AddressSpace>> {
+    // SAFETY: only the current thread writes it, and that is us.
+    unsafe { (*current().space.get()).clone() }
 }
 
 /// Loads the current thread's FP/SIMD registers, if it has its own.

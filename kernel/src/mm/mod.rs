@@ -17,6 +17,7 @@
 pub(crate) mod dma;
 mod heap;
 pub(crate) mod kstack;
+pub(crate) mod space;
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -225,6 +226,10 @@ impl pt::Memory for Frames {
         // while it holds the kernel map lock (or during single-threaded
         // init).
         unsafe { &mut *(va.get() as *mut Frame) }
+    }
+
+    fn free_frame(&mut self, pa: PhysAddr) {
+        free_pages(pa, Order::ZERO);
     }
 }
 

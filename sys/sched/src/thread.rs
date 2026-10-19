@@ -278,11 +278,15 @@ pub struct Thread {
     /// the thread out, read by the one switching it in (the `on_cpu`
     /// handoff orders the two).
     pub(crate) fpu: Option<FpuArea>,
+    /// The user address space the thread runs in, if any. Written only by
+    /// the thread itself ([`crate::set_address_space`]); read by the CPU
+    /// switching it in (the `on_cpu` handoff orders the two).
+    pub(crate) space: UnsafeCell<Option<alloc::sync::Arc<dyn crate::AddressSpace>>>,
 }
 
-// SAFETY: `link` is protected by the owning list's lock, `context` and
-// `fpu` by the `on_cpu` handoff, and `held` is only touched by the thread
-// itself (see
+// SAFETY: `link` is protected by the owning list's lock, `context`, `fpu`,
+// and `space` by the `on_cpu` handoff, and `held` (and writes to `space`)
+// only by the thread itself (see
 // the field docs); `Inner::blocked_on` is read under the thread lock and
 // points at a mutex that outlives the wait; everything else is atomic or
 // locked.
@@ -345,6 +349,7 @@ impl Thread {
             switches: AtomicU64::new(0),
             held: UnsafeCell::new(crate::lock::witness::Held::new()),
             fpu,
+            space: UnsafeCell::new(None),
         }
     }
 

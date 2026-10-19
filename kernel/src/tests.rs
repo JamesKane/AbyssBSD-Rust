@@ -2411,3 +2411,212 @@ ktest! {
         detach_stress("nvme0", "nda0", 8);
     }
 }
+
+/// Address spaces (P4.1): user memory reached through the copy routines,
+/// faulted in on demand, copy-on-write across `fork`, and torn down with
+/// every page accounted for.
+mod user_memory {
+    use alloc::sync::Arc;
+    use alloc::vec::Vec;
+    use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+    use addr::VirtAddr;
+    use ktest::ktest;
+    use vm::map::Prot;
+
+    use super::cx;
+    use crate::mm::space::{self, AddressSpace};
+    use crate::uaccess::{Fault, StrError, UserPtr, copy_in, copy_in_str, copy_out};
+
+    const PAGE: u64 = 4096;
+    const HINT: VirtAddr = VirtAddr::new(0x1000_0000);
+
+    /// Pages that are free or held by the heap (whose caches keep pages
+    /// for the map's nodes): a page leaked by the VM drops this.
+    fn free_pages() -> u64 {
+        let h = crate::mm::heap_stats();
+        crate::mm::phys_stats().free + h.slab_pages + h.magazine_pages + h.large_pages
+    }
+
+    fn enter(space: &Arc<AddressSpace>) {
+        sched::set_address_space(Some(Arc::clone(space) as Arc<dyn sched::AddressSpace>));
+    }
+
+    fn leave() {
+        sched::set_address_space(None);
+        space::unload();
+    }
+
+    fn read_u64(at: u64) -> Result<u64, Fault> {
+        UserPtr::<u64>::new(at).read()
+    }
+
+    ktest! {
+        fn user_memory_faults_in_through_copies() {
+            let s = cx();
+            let before = free_pages();
+            let space = AddressSpace::new().unwrap();
+            enter(&space);
+            let a = space.map_anonymous(&s, None, HINT, 16 * PAGE, Prot::RW).unwrap().get();
+            assert_eq!(a, HINT.get());
+            assert!(space.translate(VirtAddr::new(a)).is_none());
+            // Untouched memory reads as zeros; writes stick.
+            assert_eq!(read_u64(a + 8), Ok(0));
+            copy_out(a + PAGE - 2, b"spans").unwrap();
+            let mut buf = [0u8; 5];
+            copy_in(&mut buf, a + PAGE - 2).unwrap();
+            assert_eq!(&buf, b"spans");
+            UserPtr::<u64>::new(a + 3 * PAGE).write(&0x1234_5678).unwrap();
+            assert_eq!(read_u64(a + 3 * PAGE), Ok(0x1234_5678));
+            assert!(space.translate(VirtAddr::new(a + 3 * PAGE)).is_some());
+            // Beyond the mapping, and outside the user half.
+            assert_eq!(read_u64(a + 16 * PAGE), Err(Fault));
+            assert_eq!(copy_in(&mut buf, a + 16 * PAGE - 2), Err(Fault));
+            assert_eq!(copy_in(&mut buf, space::USER_END - 2), Err(Fault));
+            assert_eq!(copy_in(&mut buf, u64::MAX - 1), Err(Fault));
+            assert_eq!(read_u64(0), Err(Fault));
+            // A string that ends at the mapping's last byte.
+            let end = a + 16 * PAGE;
+            copy_out(end - 4, b"abc\0").unwrap();
+            let mut name = [0u8; 64];
+            assert_eq!(copy_in_str(end - 4, &mut name), Ok(3));
+            assert_eq!(&name[..3], b"abc");
+            // Unterminated up to the mapping's end: the next page faults.
+            copy_out(end - 2, b"xy").unwrap();
+            assert_eq!(copy_in_str(end - 2, &mut name), Err(StrError::Fault));
+            copy_out(a + 8, b"abcdefgh").unwrap();
+            assert_eq!(copy_in_str(a + 8, &mut name[..4]), Err(StrError::TooLong));
+            // Read-only: writes fault, reads still work.
+            space.protect(&s, VirtAddr::new(a)..VirtAddr::new(a + 4 * PAGE), Prot::READ).unwrap();
+            assert_eq!(copy_out(a + 3 * PAGE, b"x"), Err(Fault));
+            assert_eq!(read_u64(a + 3 * PAGE), Ok(0x1234_5678));
+            // Unmapped: gone from the tables too.
+            space.unmap(&s, VirtAddr::new(a + 3 * PAGE)..VirtAddr::new(a + 4 * PAGE)).unwrap();
+            assert_eq!(read_u64(a + 3 * PAGE), Err(Fault));
+            assert!(space.translate(VirtAddr::new(a + 3 * PAGE)).is_none());
+            leave();
+            drop(space);
+            assert_eq!(free_pages(), before, "pages leaked");
+        }
+    }
+
+    ktest! {
+        fn fork_copies_on_write_between_spaces() {
+            let s = cx();
+            let before = free_pages();
+            let parent = AddressSpace::new().unwrap();
+            enter(&parent);
+            let a = parent.map_anonymous(&s, None, HINT, 4 * PAGE, Prot::RW).unwrap().get();
+            for i in 0..4 {
+                UserPtr::<u64>::new(a + i * PAGE).write(&(100 + i)).unwrap();
+            }
+            let child = parent.fork(&s).unwrap();
+            let shared = parent.translate(VirtAddr::new(a));
+
+            enter(&child);
+            assert_eq!(read_u64(a), Ok(100));
+            assert_eq!(child.translate(VirtAddr::new(a)), shared);
+            UserPtr::<u64>::new(a).write(&200).unwrap();
+            assert_ne!(child.translate(VirtAddr::new(a)), shared);
+
+            enter(&parent);
+            assert_eq!(read_u64(a), Ok(100));
+            UserPtr::<u64>::new(a + PAGE).write(&300).unwrap();
+
+            enter(&child);
+            assert_eq!(read_u64(a), Ok(200));
+            assert_eq!(read_u64(a + PAGE), Ok(101));
+            assert_eq!(read_u64(a + 3 * PAGE), Ok(103));
+
+            leave();
+            drop(child);
+            enter(&parent);
+            assert_eq!(read_u64(a + PAGE), Ok(300));
+            leave();
+            drop(parent);
+            assert_eq!(free_pages(), before, "pages leaked");
+        }
+    }
+
+    ktest! {
+        fn concurrent_faults_and_cross_cpu_unmap() {
+            let s = cx();
+            let space = AddressSpace::new().unwrap();
+            let a = space.map_anonymous(&s, None, HINT, 64 * PAGE, Prot::RW).unwrap().get();
+            let ncpu = u32::try_from(sched::online_cpus()).unwrap();
+            // Every thread faults every page, writing its own slot in it.
+            let workers: Vec<_> = (0..ncpu)
+                .map(|cpu| {
+                    let space = Arc::clone(&space);
+                    sched::Builder::new("faulter")
+                        .bind(hal::CpuId(cpu))
+                        .spawn(move |_| {
+                            enter(&space);
+                            for p in 0..64 {
+                                UserPtr::<u32>::new(a + p * PAGE + u64::from(cpu) * 4)
+                                    .write(&(cpu + 1))
+                                    .unwrap();
+                            }
+                            leave();
+                        })
+                        .unwrap()
+                })
+                .collect();
+            for w in &workers {
+                w.join(&s);
+            }
+            enter(&space);
+            for p in 0..64 {
+                for cpu in 0..ncpu {
+                    let v = UserPtr::<u32>::new(a + p * PAGE + u64::from(cpu) * 4).read();
+                    assert_eq!(v, Ok(cpu + 1));
+                }
+            }
+
+            // A reader on another CPU keeps the page in its TLB; once this
+            // CPU unmaps it, the reader must fault, not read the stale
+            // translation.
+            let other = hal::CpuId((hal::cpu_id().0 + 1) % ncpu);
+            let unmapped = Arc::new(AtomicBool::new(false));
+            let reads = Arc::new(AtomicU32::new(0));
+            let reader = {
+                let (space, unmapped, reads) =
+                    (Arc::clone(&space), Arc::clone(&unmapped), Arc::clone(&reads));
+                sched::Builder::new("reader")
+                    .bind(other)
+                    .spawn(move |_| {
+                        enter(&space);
+                        loop {
+                            // Once the unmap (and its shootdown) is done,
+                            // before the flag, a read must fault.
+                            let done = unmapped.load(Ordering::Acquire);
+                            let r = read_u64(a);
+                            if done {
+                                assert_eq!(r, Err(Fault), "stale TLB entry");
+                                break;
+                            }
+                            if r.is_ok() {
+                                reads.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                        leave();
+                    })
+                    .unwrap()
+            };
+            while reads.load(Ordering::Relaxed) < 100 {
+                sched::yield_now();
+            }
+            space.unmap(&s, VirtAddr::new(a)..VirtAddr::new(a + PAGE)).unwrap();
+            unmapped.store(true, Ordering::Release);
+            reader.join(&s);
+            // Exit's teardown: every page goes now, though CPUs the space
+            // was loaded on may hold its (empty) tables until they load
+            // another. (Page balance is left to the single-threaded tests:
+            // the reaper frees the workers' stacks in its own time.)
+            space.clear(&s);
+            assert!(space.translate(VirtAddr::new(a + PAGE)).is_none());
+            assert_eq!(read_u64(a + PAGE), Err(Fault));
+            leave();
+        }
+    }
+}
