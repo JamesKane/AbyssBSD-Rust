@@ -2618,7 +2618,7 @@ mod user_memory {
             let p = Process::spawn(
                 &s,
                 b"/rescue/sh",
-                &[b"sh", b"-c", b"/rescue/echo child; echo \"status $?\"; exit 3"],
+                &[b"sh", b"-c", b"/rescue/echo child; echo \"status $?\"; /rescue/sysctl kern.ostype hw.ncpu; exit 3"],
                 &[b"PATH=/rescue", b"HOME=/"],
                 Some(hal::cpu_id()),
             )

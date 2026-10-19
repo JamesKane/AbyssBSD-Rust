@@ -21,6 +21,7 @@ mod mem;
 mod misc;
 mod proc;
 mod sig;
+mod sysctl;
 mod thr;
 mod time;
 
@@ -140,6 +141,8 @@ fn run(s: &Sleepable, frame: &mut TrapFrame, call: Call) -> Result<Option<u64>, 
         Sysno::Nanosleep => time::nanosleep(s, a0, a1),
         Sysno::Getrlimit => time::getrlimit(a0, a1),
         Sysno::Setrlimit => time::setrlimit(a0, a1),
+        Sysno::Sysctl => sysctl::sysctl(s, a0, a1, a2, a3, a4, a5),
+        Sysno::Sysctlbyname => sysctl::sysctlbyname(s, a0, a1, a2, a3, a4, a5),
         Sysno::Exit => exit(s, a0),
         Sysno::Write => io::write(a0, a1, a2),
         Sysno::Writev => io::writev(a0, a1, a2),
