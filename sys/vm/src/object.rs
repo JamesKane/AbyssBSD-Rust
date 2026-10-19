@@ -170,6 +170,25 @@ impl Object {
         Ok(Found::Absent)
     }
 
+    /// Page `index` along the chain if some object already holds it: no
+    /// filling, no allocating (for prefaulting).
+    #[must_use]
+    pub fn resident_page(&self, index: PageIndex) -> Option<Pfn> {
+        if let Some(&pfn) = self.inner.lock().pages.get(&index) {
+            return Some(pfn);
+        }
+        let mut next = self.backing();
+        let mut index = index;
+        while let Some((object, off)) = next {
+            index += off;
+            if let Some(&pfn) = object.inner.lock().pages.get(&index) {
+                return Some(pfn);
+            }
+            next = object.backing();
+        }
+        None
+    }
+
     /// This object's page `index`: present, or filled now if this is a
     /// pager object.
     fn page_or_fill(&self, index: PageIndex) -> Result<Option<Pfn>, LookupError> {

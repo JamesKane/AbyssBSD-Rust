@@ -119,3 +119,48 @@ pub fn resolve(map: &mut VmMap, va: VirtAddr, access: Access) -> Result<Resolved
     };
     Ok(Resolved { page, pfn, prot })
 }
+
+/// Pages around a fault worth mapping with it (FreeBSD's
+/// `vm_fault_prefault`): up to `around` pages each side of `va` within its
+/// entry, in an outward spiral, that some object of the entry's chain
+/// already holds. The first one missing ends the search. Each is to be
+/// mapped read-only (the first write still faults, for copy-on-write and
+/// dirtiness) and only where nothing is mapped yet.
+#[must_use]
+pub fn prefault(map: &VmMap, va: VirtAddr, around: u64) -> alloc::vec::Vec<Resolved> {
+    let mut out = alloc::vec::Vec::new();
+    let page = va.align_down(PAGE_SIZE);
+    let Some(entry) = map.entry(page) else {
+        return out;
+    };
+    let Some(object) = &entry.object else {
+        return out;
+    };
+    let prot = entry.prot.without(Prot::WRITE);
+    if prot == Prot::NONE {
+        return out;
+    }
+    for i in 0..2 * around {
+        let step = (i / 2 + 1) * PAGE_SIZE;
+        let addr = if i % 2 == 0 {
+            page.get().checked_sub(step)
+        } else {
+            page.get().checked_add(step)
+        };
+        let Some(addr) = addr.map(VirtAddr::new) else {
+            continue;
+        };
+        if addr < entry.start() || addr >= entry.end() {
+            continue;
+        }
+        match object.resident_page(entry.index_of(addr)) {
+            Some(pfn) => out.push(Resolved {
+                page: addr,
+                pfn,
+                prot,
+            }),
+            None => break,
+        }
+    }
+    out
+}

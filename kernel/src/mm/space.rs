@@ -519,7 +519,39 @@ impl AddressSpace {
         if replaced.is_some() {
             self.flush(r.page, PAGE_SIZE);
         }
+        // Not after a write: the neighbors would be mapped read-only, and
+        // a process writing a run of copy-on-write pages would then take a
+        // protection fault and a flush for each instead of a cheap fault.
+        if access != Access::Write {
+            self.prefault(&map, va);
+        }
         Ok(())
+    }
+
+    /// Maps the resident pages around a read or execute fault, read-only,
+    /// where nothing is mapped yet (FreeBSD's `vm_fault_prefault`, four
+    /// pages each side): a program touching its text or data in order
+    /// faults once per few pages instead of once per page. New entries
+    /// need no flush.
+    fn prefault(&self, map: &VmMap, va: VirtAddr) {
+        const AROUND: u64 = 4;
+        let near = fault::prefault(map, va, AROUND);
+        if near.is_empty() {
+            return;
+        }
+        let mut tables = self.tables.lock();
+        for r in near {
+            if tables.translate(&mut Frames, r.page).is_some() {
+                continue;
+            }
+            #[cfg(target_arch = "aarch64")]
+            if r.prot.contains(Prot::EXEC) {
+                let kva = KernelPages::page(r.pfn);
+                arch::cache::sync_icache(kva as usize, PAGE_BYTES);
+            }
+            // Out of table memory: the page faults in later instead.
+            let _ = tables.set(&mut Frames, r.page, r.pfn.addr(), attrs(r.prot));
+        }
     }
 
     /// Unmaps everything (at exit); the empty space stays loaded until its

@@ -271,6 +271,28 @@ fn repeated_forks_do_not_grow_the_chain() {
 }
 
 #[test]
+fn forks_whose_parent_writes_first_do_not_grow_the_chain() {
+    // The parent writes while the child still lives (the shared object
+    // then has two referrers and cannot fold), and the child goes after:
+    // the next fork must fold what only the parent reaches by then.
+    let pages = Pages::new();
+    let mut parent = Proc::new(pages);
+    parent.mmap(0, 4);
+    parent.write(0, 1).unwrap();
+    for i in 0..50 {
+        let child = parent.fork();
+        parent.write(0, i).unwrap();
+        drop(child);
+        assert!(
+            parent.depth(0) <= 2,
+            "depth {} after {i} forks",
+            parent.depth(0)
+        );
+    }
+    assert_eq!(parent.read(0), Ok(49));
+}
+
+#[test]
 fn inheritance_share_zero_and_none() {
     let pages = Pages::new();
     let mut parent = Proc::new(pages);

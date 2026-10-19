@@ -458,6 +458,15 @@ impl VmMap {
         let mut child = Self::new(self.bounds.clone(), self.pages);
         let mut write_protect = Vec::new();
         for e in self.entries.values_mut() {
+            // Fold away what only this entry still reaches: the last fork's
+            // child has usually exited, and without this every fork whose
+            // parent writes after it stacks one more shadow (FreeBSD
+            // collapses as references go).
+            if let Some(object) = &e.object
+                && !e.needs_copy
+            {
+                object.collapse();
+            }
             match e.inherit {
                 Inherit::None => {}
                 Inherit::Zero => {
