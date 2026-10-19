@@ -444,6 +444,20 @@ impl Process {
         sched::owner()?.downcast::<Self>().ok()
     }
 
+    /// Whether the calling thread is the process's only one, so that only
+    /// it can change what the process's threads share (its descriptor
+    /// table). Every process has one thread until P6 brings more; this
+    /// must count them then.
+    pub(crate) fn sole_thread(&self) -> bool {
+        true
+    }
+
+    /// Runs `f` on the current process, borrowed (no reference taken):
+    /// `None` on a kernel thread.
+    pub(crate) fn with_current<R>(f: impl FnOnce(&Self) -> R) -> Option<R> {
+        sched::with_owner(|o| o?.downcast_ref::<Self>().map(f))
+    }
+
     /// A new process running the program at `path` (from the root), with
     /// arguments `argv` and environment `envp`, started by the kernel (no
     /// parent: a session leader, as init is) with the console open on

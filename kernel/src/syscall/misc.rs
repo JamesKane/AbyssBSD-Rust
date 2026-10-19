@@ -11,11 +11,12 @@ use abi::thr::{
 };
 
 use super::{SysResult, int, process};
+use crate::proc::Process;
 use crate::uaccess;
 
 /// `getpid()`.
 pub(super) fn getpid() -> SysResult {
-    Ok(u64::from(process()?.pid().unsigned_abs()))
+    Process::with_current(|p| u64::from(p.pid().unsigned_abs())).ok_or(Errno::EINVAL)
 }
 
 /// `issetugid()`: no set-id programs yet.

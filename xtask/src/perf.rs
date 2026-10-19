@@ -467,7 +467,11 @@ pub(crate) fn cmd_ubench(mut args: Args) -> Result<()> {
         .take_value("--runs")?
         .map_or(Ok(1), |s| s.parse())
         .map_err(|_| "bad --runs")?;
+    let bhyve = args.take_flag("--bhyve");
     args.finish()?;
+    if bhyve && !cfg!(target_os = "freebsd") {
+        return Err("ubench --bhyve needs bhyve: run it on the build server".into());
+    }
     for arch in arches {
         let dir = util::root().join("build").join(arch.to_string());
         fs::create_dir_all(&dir)?;
@@ -487,11 +491,21 @@ pub(crate) fn cmd_ubench(mut args: Args) -> Result<()> {
         let mut units = BTreeMap::new();
         for run in 0..runs {
             let log = dir.join(format!("ubench-{run}.log"));
-            let vm = Vm {
-                smp: 8,
-                mem: "2G".into(),
-                test_devices: true,
-                ..Vm::new(Vmm::Qemu, arch, disk.clone())
+            let vm = if bhyve {
+                // As `perf` runs AbyssBSD, without its disks.
+                Vm {
+                    smp: 8,
+                    mem: "2G".into(),
+                    pin: true,
+                    ..Vm::new(Vmm::Bhyve, arch, disk.clone())
+                }
+            } else {
+                Vm {
+                    smp: 8,
+                    mem: "2G".into(),
+                    test_devices: true,
+                    ..Vm::new(Vmm::Qemu, arch, disk.clone())
+                }
             };
             vm.run_until(Duration::from_secs(900), &log, false, &|line: &str| {
                 (line.contains("panic:") || line.contains("fatal trap"))
@@ -505,7 +519,8 @@ pub(crate) fn cmd_ubench(mut args: Args) -> Result<()> {
                 all.entry(name).or_default().push(value);
             }
         }
-        println!("ubench p4 on AbyssBSD ({arch}, local QEMU), median of {runs}");
+        let vmm = if bhyve { "bhyve" } else { "local QEMU" };
+        println!("ubench p4 on AbyssBSD ({arch}, {vmm}), median of {runs}");
         for (name, mut v) in all {
             v.sort_by(f64::total_cmp);
             let unit = units.get(&name).map_or("", String::as_str);

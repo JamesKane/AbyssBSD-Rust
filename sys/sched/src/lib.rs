@@ -1078,6 +1078,15 @@ pub fn owner() -> Option<Arc<dyn core::any::Any + Send + Sync>> {
     unsafe { (*current().owner.get()).clone() }
 }
 
+/// Runs `f` on what the kernel runs the current thread for, borrowed: no
+/// reference count changes, for paths as short as `getpid`. `f` must not
+/// call [`set_owner`].
+pub fn with_owner<R>(f: impl FnOnce(Option<&(dyn core::any::Any + Send + Sync)>) -> R) -> R {
+    // SAFETY: only the current thread writes it, and that is us; `f`
+    // does not, so the value outlives the borrow.
+    f(unsafe { (*current().owner.get()).as_deref() })
+}
+
 /// The current thread's user address space.
 #[must_use]
 pub fn address_space() -> Option<Arc<dyn AddressSpace>> {

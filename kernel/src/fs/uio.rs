@@ -18,10 +18,26 @@ unsafe impl Plain for Iovec {}
 
 /// User buffers, consumed from the front.
 pub(crate) struct UserIo {
-    iov: Vec<Iovec>,
+    iov: Buffers,
     /// The first buffer not yet used up.
     at: usize,
     resid: usize,
+}
+
+/// The buffers: one (`read`, `write`) kept inline, so the common calls
+/// allocate nothing, or a vector's.
+enum Buffers {
+    One(Iovec),
+    Many(Vec<Iovec>),
+}
+
+impl Buffers {
+    fn get_mut(&mut self, i: usize) -> Option<&mut Iovec> {
+        match self {
+            Self::One(v) => (i == 0).then_some(v),
+            Self::Many(v) => v.get_mut(i),
+        }
+    }
 }
 
 impl UserIo {
@@ -32,10 +48,10 @@ impl UserIo {
             .filter(|&l| isize::try_from(l).is_ok())
             .ok_or(Errno::EINVAL)?;
         Ok(Self {
-            iov: alloc::vec![Iovec {
+            iov: Buffers::One(Iovec {
                 iov_base: base,
                 iov_len: len,
-            }],
+            }),
             at: 0,
             resid,
         })
@@ -63,7 +79,7 @@ impl UserIo {
             v.push(e);
         }
         Ok(Self {
-            iov: v,
+            iov: Buffers::Many(v),
             at: 0,
             resid,
         })

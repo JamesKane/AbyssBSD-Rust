@@ -47,9 +47,37 @@ pub(super) fn file(s: &Sleepable, p: &Process, fd: u64) -> Result<Arc<File>, Err
     p.files.lock(s).get(int(fd))
 }
 
-/// The file open on `fd` in the current process.
+/// The file open on `fd` in the current process (borrowed, so no
+/// reference to the process is taken).
 pub(super) fn current_file(s: &Sleepable, fd: u64) -> Result<Arc<File>, Errno> {
-    file(s, &*process()?, fd)
+    Process::with_current(|p| file(s, p, fd)).unwrap_or(Err(Errno::EINVAL))
+}
+
+/// Runs `f` on the file open on `fd` in the current process. A process
+/// with one thread lends the file straight from its table, without the
+/// table's lock or a reference: each would be a locked instruction, and
+/// `read` and `write` would pay for them on every call. With several
+/// threads, one could close `fd` meanwhile, so the file is referenced.
+///
+/// `f` must not touch the descriptor table (it is a transfer).
+fn with_file<R>(
+    s: &Sleepable,
+    fd: u64,
+    f: impl FnOnce(&File) -> Result<R, Errno>,
+) -> Result<R, Errno> {
+    Process::with_current(|p| {
+        if p.sole_thread() {
+            // SAFETY: only the process's threads reach its table, this is
+            // the only one, and it does nothing else with the table until
+            // `f` returns, which the borrow cannot outlive.
+            let table = unsafe { p.files.get_unlocked() };
+            f(&table.slot(int(fd))?.file)
+        } else {
+            let file = file(s, p, fd)?;
+            f(&file)
+        }
+    })
+    .unwrap_or(Err(Errno::EINVAL))
 }
 
 /// Installs `file` at the lowest free descriptor.
@@ -61,12 +89,12 @@ pub(super) fn install(s: &Sleepable, p: &Process, file: Arc<File>, flags: FdFlag
 
 /// A transfer's count: `EPIPE` also sends `SIGPIPE` (FreeBSD's
 /// `dofilewrite`; sockets will decide for themselves).
-fn wrote(p: &Arc<Process>, r: Result<usize, Errno>) -> SysResult {
+fn wrote(r: Result<usize, Errno>) -> SysResult {
     match r {
         Ok(n) => Ok(n as u64),
         Err(Errno::EPIPE) => {
             let _ = crate::signal::post(
-                p,
+                &process()?,
                 crate::signal::user_info(abi::signal::SIGPIPE, 0, abi::signal::code::SI_KERNEL),
             );
             Err(Errno::EPIPE)
@@ -86,65 +114,57 @@ fn check_len(n: u64) -> Result<(), Errno> {
 /// `read(fd, buf, nbyte)`.
 pub(super) fn read(s: &Sleepable, fd: u64, buf: u64, nbyte: u64) -> SysResult {
     check_len(nbyte)?;
-    let f = current_file(s, fd)?;
     let mut uio = UserIo::one(buf, nbyte)?;
-    f.read(s, &mut uio).map(|n| n as u64)
+    with_file(s, fd, |f| f.read(s, &mut uio)).map(|n| n as u64)
 }
 
 /// `readv(fd, iovp, iovcnt)`.
 pub(super) fn readv(s: &Sleepable, fd: u64, iov: u64, iovcnt: u64) -> SysResult {
-    let f = current_file(s, fd)?;
     let mut uio = UserIo::vector(iov, iovcnt)?;
-    f.read(s, &mut uio).map(|n| n as u64)
+    with_file(s, fd, |f| f.read(s, &mut uio)).map(|n| n as u64)
 }
 
 /// `pread(fd, buf, nbyte, offset)`.
 pub(super) fn pread(s: &Sleepable, fd: u64, buf: u64, nbyte: u64, offset: u64) -> SysResult {
     check_len(nbyte)?;
-    let f = current_file(s, fd)?;
     let mut uio = UserIo::one(buf, nbyte)?;
-    f.pread(s, &mut uio, offset.cast_signed()).map(|n| n as u64)
+    with_file(s, fd, |f| f.pread(s, &mut uio, offset.cast_signed())).map(|n| n as u64)
 }
 
 /// `preadv(fd, iovp, iovcnt, offset)`.
 pub(super) fn preadv(s: &Sleepable, fd: u64, iov: u64, iovcnt: u64, offset: u64) -> SysResult {
-    let f = current_file(s, fd)?;
     let mut uio = UserIo::vector(iov, iovcnt)?;
-    f.pread(s, &mut uio, offset.cast_signed()).map(|n| n as u64)
+    with_file(s, fd, |f| f.pread(s, &mut uio, offset.cast_signed())).map(|n| n as u64)
 }
 
 /// `write(fd, buf, nbyte)`.
 pub(super) fn write(s: &Sleepable, fd: u64, buf: u64, nbyte: u64) -> SysResult {
     check_len(nbyte)?;
-    let p = process()?;
-    let f = file(s, &p, fd)?;
     let mut uio = UserIo::one(buf, nbyte)?;
-    wrote(&p, f.write(s, &mut uio))
+    wrote(with_file(s, fd, |f| f.write(s, &mut uio)))
 }
 
 /// `writev(fd, iovp, iovcnt)`.
 pub(super) fn writev(s: &Sleepable, fd: u64, iov: u64, iovcnt: u64) -> SysResult {
-    let p = process()?;
-    let f = file(s, &p, fd)?;
     let mut uio = UserIo::vector(iov, iovcnt)?;
-    wrote(&p, f.write(s, &mut uio))
+    wrote(with_file(s, fd, |f| f.write(s, &mut uio)))
 }
 
 /// `pwrite(fd, buf, nbyte, offset)`.
 pub(super) fn pwrite(s: &Sleepable, fd: u64, buf: u64, nbyte: u64, offset: u64) -> SysResult {
     check_len(nbyte)?;
-    let p = process()?;
-    let f = file(s, &p, fd)?;
     let mut uio = UserIo::one(buf, nbyte)?;
-    wrote(&p, f.pwrite(s, &mut uio, offset.cast_signed()))
+    wrote(with_file(s, fd, |f| {
+        f.pwrite(s, &mut uio, offset.cast_signed())
+    }))
 }
 
 /// `pwritev(fd, iovp, iovcnt, offset)`.
 pub(super) fn pwritev(s: &Sleepable, fd: u64, iov: u64, iovcnt: u64, offset: u64) -> SysResult {
-    let p = process()?;
-    let f = file(s, &p, fd)?;
     let mut uio = UserIo::vector(iov, iovcnt)?;
-    wrote(&p, f.pwrite(s, &mut uio, offset.cast_signed()))
+    wrote(with_file(s, fd, |f| {
+        f.pwrite(s, &mut uio, offset.cast_signed())
+    }))
 }
 
 /// `lseek(fd, offset, whence)`.

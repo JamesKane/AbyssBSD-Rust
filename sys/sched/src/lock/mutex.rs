@@ -298,6 +298,19 @@ impl<T> Mutex<T> {
         }
     }
 
+    /// The value, without taking the lock.
+    ///
+    /// # Safety
+    ///
+    /// No thread may hold or take the lock, or otherwise reach the value,
+    /// while the reference lives: the caller knows by some other rule that
+    /// it alone can.
+    pub unsafe fn get_unlocked(&self) -> &T {
+        // SAFETY: per the caller's contract, nothing writes the value
+        // while the reference lives.
+        unsafe { &*self.value.get() }
+    }
+
     /// Locks, sleeping if needed. Thread context only.
     pub fn lock(&self, s: &Sleepable) -> MutexGuard<'_, T> {
         self.core.lock(s);
