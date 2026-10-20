@@ -13,6 +13,7 @@
 
 extern crate alloc;
 
+pub mod fs;
 mod name;
 mod read;
 
