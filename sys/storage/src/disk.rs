@@ -365,6 +365,34 @@ fn taste(s: &Sleepable, disk: &Arc<Disk>) -> Vec<Arc<Disk>> {
         .collect()
 }
 
+/// What happened to a disk or partition, for whoever names them in `/dev`.
+#[derive(Debug)]
+pub enum Event<'a> {
+    Published(&'a Arc<Disk>),
+    Withdrawn(&'a Arc<Disk>),
+}
+
+static LISTENER: sync::Once<fn(&Sleepable, Event<'_>)> = sync::Once::new();
+
+/// Sets the function told of every disk and partition published or
+/// withdrawn from now on (devfs's). Disks published before are in
+/// [`all`].
+pub fn set_listener(f: fn(&Sleepable, Event<'_>)) {
+    let _ = LISTENER.set(f);
+}
+
+fn tell(s: &Sleepable, e: Event<'_>) {
+    if let Some(f) = LISTENER.get() {
+        f(s, e);
+    }
+}
+
+/// Every published disk and partition.
+#[must_use]
+pub fn all() -> Vec<Arc<Disk>> {
+    DISKS.lock().clone()
+}
+
 /// Publishes a disk, announces it as FreeBSD does, and publishes its GPT
 /// partitions. Call from the driver's `start`, ready for I/O.
 pub fn publish(s: &Sleepable, info: DiskInfo, queues: Arc<dyn DiskQueues>) -> Arc<Disk> {
@@ -390,8 +418,12 @@ pub fn publish(s: &Sleepable, info: DiskInfo, queues: Arc<dyn DiskQueues>) -> Ar
         disk.sector_size
     ));
     DISKS.lock().push(Arc::clone(&disk));
+    tell(s, Event::Published(&disk));
     let parts = taste(s, &disk);
-    DISKS.lock().extend(parts);
+    DISKS.lock().extend(parts.iter().cloned());
+    for p in &parts {
+        tell(s, Event::Published(p));
+    }
     disk
 }
 
@@ -406,10 +438,18 @@ pub fn withdraw(s: &Sleepable, disk: &Arc<Disk>) {
         let base = &disk.name[..i];
         UNITS.lock().retain(|&(n, u)| !(n == base && u == unit));
     }
+    let mut gone = Vec::new();
     DISKS.lock().retain(|d| {
-        !Arc::ptr_eq(d, disk)
-            && !matches!(&d.target, Target::Partition { parent, .. } if Arc::ptr_eq(parent, disk))
+        let keep = !Arc::ptr_eq(d, disk)
+            && !matches!(&d.target, Target::Partition { parent, .. } if Arc::ptr_eq(parent, disk));
+        if !keep {
+            gone.push(Arc::clone(d));
+        }
+        keep
     });
+    for d in &gone {
+        tell(s, Event::Withdrawn(d));
+    }
     if let Target::Device {
         gate,
         deferred,

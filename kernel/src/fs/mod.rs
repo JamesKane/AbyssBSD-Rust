@@ -93,6 +93,7 @@ pub(crate) fn init() {
             }
         }
     };
+    devfs::init();
     let dev = Mount::new(
         MountInfo {
             type_name: "devfs",
@@ -100,7 +101,7 @@ pub(crate) fn init() {
             from: b"devfs".to_vec(),
             io_size: 4096,
         },
-        Box::new(devfs::build()),
+        Box::new(devfs::DevFs),
     );
     let root = Arc::clone(ns.root());
     let at = Lookup {

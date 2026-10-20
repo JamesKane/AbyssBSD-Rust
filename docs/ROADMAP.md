@@ -887,12 +887,29 @@ P5.0 ─► P5.1 ─┬─► P5.2 ───────────────
     trailing slash `ENOENT`.
   - `sched` locks now work in host tests, and the witness lets vnode locks nest (`dup_ok`).
 
-**P5.2 tmpfs and devfs.**
+**P5.2 tmpfs and devfs.** Done 2026-10-19, except pjdfstest (see below).
 - tmpfs (§10.2) mounted on `/tmp`. The first writable file system: every P5.1 syscall works on it,
   and pjdfstest passes on it as FreeBSD's tmpfs does.
 - devfs made dynamic (§10.1): disk and partition nodes with raw block access, and names, modes, and
   `stat` matching FreeBSD.
 - `fsx` on tmpfs.
+- As delivered:
+  - Boot mounts a tmpfs on `/tmp`. FreeBSD's fsx (built from the FreeBSD tree beside this one,
+    never copied here) runs 20,000 operations on it in a kernel test, without mapped I/O until
+    P5.3. Another test runs `/rescue`'s `mkdir`, `cp`, `ln`, `mv`, `chmod`, `tar`, and `rm` over a
+    tree there.
+  - What those tools needed: `pathconf` and its relatives, `vfs.conflist` (for `getvfsbyname`),
+    `lseek` with `SEEK_DATA`/`SEEK_HOLE`, and `EOPNOTSUPP` from the ACL and extattr calls.
+  - devfs is a file system over a registry. Disks and partitions appear and go as `sys/storage`
+    publishes and withdraws them (`crw-r----- root:operator`, as on FreeBSD), and a gone device's
+    vnode is doomed. A disk node reads and writes whole sectors and answers the `DIOCG*` requests.
+    `chmod`, `chown`, `touch`, and symbolic links work on devfs. `tests/user/disks.c` checks a disk
+    node read-only, and passes on FreeBSD 15.1 too.
+  - `CharDevice` reads and writes now take the file offset, which advances for devices as on
+    FreeBSD.
+  - **Moved to P5.9:** pjdfstest. Most of it switches credentials (`-u`/`-g`), and every process is
+    root until Phase 6, so it needs a minimal credential model (`setuid`, `setgid`, `setgroups`,
+    per-process `Cred`) first.
 
 **P5.3 Page cache, buffer cache, write-back.**
 - The vnode pager with fill and write-back (§8.1), dirty tracking by write fault for shared

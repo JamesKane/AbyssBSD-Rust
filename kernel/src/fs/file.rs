@@ -126,11 +126,11 @@ impl File {
         }
         match &self.kind {
             FileKind::Vnode(f) => {
-                if let Some(d) = &f.device {
-                    return d.ops.read(s, uio, self.nonblock());
-                }
                 let mut off = self.offset.lock(s);
-                let n = f.vnode.read_at(s, *off, uio)?;
+                let n = match &f.device {
+                    Some(d) => d.ops.read(s, uio, *off, self.nonblock())?,
+                    None => f.vnode.read_at(s, *off, uio)?,
+                };
                 *off += n as u64;
                 Ok(n)
             }
@@ -151,11 +151,11 @@ impl File {
         }
         match &self.kind {
             FileKind::Vnode(f) => {
-                if let Some(d) = &f.device {
-                    return d.ops.read(s, uio, self.nonblock());
-                }
                 let offset = u64::try_from(offset).map_err(|_| Errno::EINVAL)?;
-                f.vnode.read_at(s, offset, uio)
+                match &f.device {
+                    Some(d) => d.ops.read(s, uio, offset, self.nonblock()),
+                    None => f.vnode.read_at(s, offset, uio),
+                }
             }
             FileKind::Pipe(_) | FileKind::Process(_) => Err(Errno::ESPIPE),
         }
@@ -168,14 +168,16 @@ impl File {
         }
         match &self.kind {
             FileKind::Vnode(f) => {
-                if let Some(d) = &f.device {
-                    return d.ops.write(s, uio, self.nonblock());
-                }
                 let mut off = self.offset.lock(s);
-                if self.flags() & O_APPEND != 0 {
-                    *off = f.vnode.size(s)?;
-                }
-                let n = f.vnode.write_at(s, *off, uio)?;
+                let n = match &f.device {
+                    Some(d) => d.ops.write(s, uio, *off, self.nonblock())?,
+                    None => {
+                        if self.flags() & O_APPEND != 0 {
+                            *off = f.vnode.size(s)?;
+                        }
+                        f.vnode.write_at(s, *off, uio)?
+                    }
+                };
                 *off += n as u64;
                 Ok(n)
             }
@@ -198,7 +200,8 @@ impl File {
             FileKind::Pipe(_) | FileKind::Process(_) => Err(Errno::ESPIPE),
             FileKind::Vnode(f) => {
                 if let Some(d) = &f.device {
-                    return d.ops.write(s, uio, self.nonblock());
+                    let at = u64::try_from(offset).map_err(|_| Errno::EINVAL)?;
+                    return d.ops.write(s, uio, at, self.nonblock());
                 }
                 let at = if self.flags() & O_APPEND != 0 {
                     f.vnode.size(s)?

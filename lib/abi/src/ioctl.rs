@@ -39,6 +39,19 @@ pub const FIODTYPE: u32 = ioc(IOC_OUT, b'f', 122, 4);
 pub const FIONWRITE: u32 = ioc(IOC_OUT, b'f', 119, 4);
 pub const FIONSPACE: u32 = ioc(IOC_OUT, b'f', 118, 4);
 
+/// Disk requests (`sys/disk.h`), which raw disk nodes answer.
+pub const DIOCGSECTORSIZE: u32 = ioc(IOC_OUT, b'd', 128, 4);
+pub const DIOCGMEDIASIZE: u32 = ioc(IOC_OUT, b'd', 129, 8);
+pub const DIOCGFWSECTORS: u32 = ioc(IOC_OUT, b'd', 130, 4);
+pub const DIOCGFWHEADS: u32 = ioc(IOC_OUT, b'd', 131, 4);
+pub const DIOCGFLUSH: u32 = ioc(IOC_VOID, b'd', 135, 0);
+/// `DISK_IDENT_SIZE` bytes.
+pub const DIOCGIDENT: u32 = ioc(IOC_OUT, b'd', 137, 256);
+/// `MAXPATHLEN` bytes.
+pub const DIOCGPROVIDERNAME: u32 = ioc(IOC_OUT, b'd', 138, 1024);
+pub const DIOCGSTRIPESIZE: u32 = ioc(IOC_OUT, b'd', 139, 8);
+pub const DIOCGSTRIPEOFFSET: u32 = ioc(IOC_OUT, b'd', 140, 8);
+
 /// `struct termios` is 44 bytes, `struct winsize` 8.
 const TERMIOS: u32 = 44;
 const WINSIZE: u32 = 8;
@@ -87,6 +100,15 @@ pub const TTYDISC: u32 = 0;
 
 pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("IOC_VOID", "sys/ioccom.h", IOC_VOID),
+    c("DIOCGSECTORSIZE", "sys/disk.h", DIOCGSECTORSIZE),
+    c("DIOCGMEDIASIZE", "sys/disk.h", DIOCGMEDIASIZE),
+    c("DIOCGFWSECTORS", "sys/disk.h", DIOCGFWSECTORS),
+    c("DIOCGFWHEADS", "sys/disk.h", DIOCGFWHEADS),
+    c("DIOCGFLUSH", "sys/disk.h", DIOCGFLUSH),
+    c("DIOCGIDENT", "sys/disk.h", DIOCGIDENT),
+    c("DIOCGPROVIDERNAME", "sys/disk.h", DIOCGPROVIDERNAME),
+    c("DIOCGSTRIPESIZE", "sys/disk.h", DIOCGSTRIPESIZE),
+    c("DIOCGSTRIPEOFFSET", "sys/disk.h", DIOCGSTRIPEOFFSET),
     c("IOC_OUT", "sys/ioccom.h", IOC_OUT),
     c("IOC_IN", "sys/ioccom.h", IOC_IN),
     c("IOCPARM_MASK", "sys/ioccom.h", IOCPARM_MASK),

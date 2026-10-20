@@ -475,7 +475,13 @@ fn winsize_to(w: &Winsize, arg: &mut [u8]) {
 pub(crate) struct TtyDevice(pub(crate) Arc<Tty>);
 
 impl CharDevice for TtyDevice {
-    fn read(&self, s: &Sleepable, uio: &mut dyn Uio, nonblock: bool) -> Result<usize, Errno> {
+    fn read(
+        &self,
+        s: &Sleepable,
+        uio: &mut dyn Uio,
+        _: u64,
+        nonblock: bool,
+    ) -> Result<usize, Errno> {
         if uio.resid() == 0 {
             return Ok(0);
         }
@@ -487,7 +493,13 @@ impl CharDevice for TtyDevice {
         }
     }
 
-    fn write(&self, s: &Sleepable, uio: &mut dyn Uio, nonblock: bool) -> Result<usize, Errno> {
+    fn write(
+        &self,
+        s: &Sleepable,
+        uio: &mut dyn Uio,
+        _: u64,
+        nonblock: bool,
+    ) -> Result<usize, Errno> {
         let tty = &self.0;
         if tty.disc.lock(s).termios().c_lflag & TOSTOP != 0 {
             tty.background(s, SIGTTOU)?;
@@ -644,11 +656,11 @@ impl CharDevice for ControllingTty {
             .ok_or(Errno::ENXIO)
     }
 
-    fn read(&self, _: &Sleepable, _: &mut dyn Uio, _: bool) -> Result<usize, Errno> {
+    fn read(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
         Err(Errno::ENXIO)
     }
 
-    fn write(&self, _: &Sleepable, _: &mut dyn Uio, _: bool) -> Result<usize, Errno> {
+    fn write(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
         Err(Errno::ENXIO)
     }
 }

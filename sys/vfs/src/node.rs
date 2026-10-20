@@ -248,10 +248,24 @@ pub trait CharDevice: Send + Sync {
     fn open(&self) -> Result<Option<Arc<crate::Vnode>>, Errno> {
         Ok(None)
     }
-    /// Reads into `uio`; `nonblock` asks for `EAGAIN` instead of waiting.
-    fn read(&self, s: &Sleepable, uio: &mut dyn Uio, nonblock: bool) -> Result<usize, Errno>;
-    /// Writes from `uio`.
-    fn write(&self, s: &Sleepable, uio: &mut dyn Uio, nonblock: bool) -> Result<usize, Errno>;
+    /// Reads into `uio` from `offset` (the file's offset, which disks use
+    /// and terminals ignore); `nonblock` asks for `EAGAIN` instead of
+    /// waiting.
+    fn read(
+        &self,
+        s: &Sleepable,
+        uio: &mut dyn Uio,
+        offset: u64,
+        nonblock: bool,
+    ) -> Result<usize, Errno>;
+    /// Writes from `uio` at `offset`.
+    fn write(
+        &self,
+        s: &Sleepable,
+        uio: &mut dyn Uio,
+        offset: u64,
+        nonblock: bool,
+    ) -> Result<usize, Errno>;
     /// Whether mapping it gives zero-filled anonymous memory, as
     /// `/dev/zero` does; other devices cannot be mapped yet.
     fn maps_as_zeros(&self) -> bool {

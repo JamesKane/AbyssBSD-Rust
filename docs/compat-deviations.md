@@ -36,7 +36,7 @@ FreeBSD's behavior wins unless this table says otherwise ([COMPATIBILITY.md](COM
 | `fsync`, `fdatasync`, `sync` | Succeed having nothing to write | Every writable file system is in memory | P5.3 |
 | `mknod(S_IFBLK)` | Fails with `EINVAL`; FreeBSD makes the (useless) node | No block-device node kind; FreeBSD serves disks as character devices anyway | Permanent |
 | `rmdir("a/b/..")` | Always `EINVAL`; FreeBSD answers `EINVAL` or `ENOTEMPTY`, apparently by which lookup path ran | `vfs_lookup`'s rule for `..` as the last component of a removal | Permanent |
-| devfs | Only `console`, `tty`, `ttyu0`, `null`, `zero`, `random`, and `urandom`; no `/dev/fd`, `/dev/stdin` and the like, no `cuau0` or `ttyu0.init`, and no disk nodes | The shell needs no more | P5 (devfs complete) |
+| devfs | No `/dev/fd`, `/dev/stdin` and the like, no `cuau0` or `ttyu0.init`, no `devctl`/`pci` nodes, no rules (`devfs.rules`); removing a device node deletes it (FreeBSD hides it). Disks have no serial number for `DIOCGIDENT` | Not needed yet | When a program needs them |
 | Advisory locks | `O_SHLOCK` and `O_EXLOCK` are ignored at open (`flock` and `fcntl` locks work) | Not reached by the base system's shell path | When a program needs it |
 | `SIGIO` | `F_GETOWN` and `F_SETOWN` fail with `EINVAL`; `O_ASYNC` is recorded but sends nothing | Nothing in the base system's shell path uses it | When a program needs it |
 | `fcntl(F_KINFO)` | Fails with `EINVAL` | No `kinfo_file` yet | With `kern.proc.filedesc` (`procstat`) |
