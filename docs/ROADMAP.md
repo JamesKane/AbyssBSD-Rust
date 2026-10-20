@@ -498,8 +498,8 @@ P4.0 ─► P4.1 ─► P4.2 ─► P4.3 ─┬─► P4.4 ─┐
   - **`freebsd-shell`** runs the boot-to-shell script (`xtask/src/expect.rs`) against FreeBSD's
     `/rescue/sh` in single-user mode, where init gives the shell the console, as AbyssBSD's boot
     will. All 12 steps pass, `^Z`/`jobs`/`fg`/`^C` included.
-  - **Open:** `getpid` costs 240 ns in the guest against 67 ns on the host. FreeBSD may run with
-    PTI in bhyve, where the CPU's immunity is not visible; to settle before P4.7 compares.
+  - **Settled in P4.7:** `getpid` cost 240 ns in the guest against 67 ns on the host because the
+    guest ran with PTI, which bare-metal FreeBSD does not use on this CPU.
   - **Not done:** the aarch64 TCG numbers. FreeBSD's arm64 VM image is now downloaded and its
     checksum verified. What remains is building `kbench.ko` for arm64 and giving the perf harness
     a QEMU TCG path for both kernels.
@@ -731,7 +731,7 @@ P4.0 ─► P4.1 ─► P4.2 ─► P4.3 ─┬─► P4.4 ─┐
   - **Deviations** (no ptys, no `^T` status line, a fixed console line) are in
     [compat-deviations.md](compat-deviations.md).
 
-**P4.7 Verification and performance.**
+**P4.7 Verification and performance.** Done 2026-10-19.
 - The boot-to-shell expect test in CI on both architectures: pipelines, `^Z` and `fg`, `ls`, `cat`,
   `sysctl kern.ostype`, and `/rescue/ps`.
 - A syscall fuzzer pass over Tier A (random arguments and pointers from a user process), with no
@@ -761,7 +761,40 @@ P4.0 ─► P4.1 ─► P4.2 ─► P4.3 ─┬─► P4.4 ─┐
   - The expect script waits a second after `fg` before typing `^C`: `fg` prints the job before
     giving it the terminal, and emulated arm64 in CI lost that race (FreeBSD has the same
     window). `freebsd-shell` still passes it against FreeBSD.
-  - **Left:** the P4 suite against FreeBSD, and the PTI question.
+  - **PTI settled.** bhyve does not pass `IA32_ARCH_CAPABILITIES` through, so a FreeBSD guest on
+    the i7-12700KF cannot see `RDCL_NO` and turns PTI on, which bare-metal FreeBSD on that CPU does
+    not do. That explained `getpid` at 240 ns in the guest against 67 ns on the host. The perf
+    guest now boots with `vm.pmap.pti=0`, the posture `PERFORMANCE.md` asks for, and logs its
+    mitigations. Every earlier P4 comparison flattered AbyssBSD.
+  - **The P4 suite against FreeBSD 15.1** (bhyve, 10 runs each, revision 1662758): no benchmark
+    over the bound, geometric mean ratio 0.674. `getpid` 0.96, `write` 0.91, `read` 0.87,
+    `fork` 0.98, `exec` 0.83, `vfork`+`exec` 0.81, anonymous fault 0.17, COW fault 0.93,
+    `mmap`/`munmap` 0.97, signal delivery 0.93, pipe ping-pong 0.20, pipe bandwidth 0.61.
+  - **What it took** (FreeBSD was ahead on half the suite at first):
+    - Fault-around: a read or execute fault also maps up to four resident pages each side, read
+      only (FreeBSD's `vm_fault_prefault`).
+    - Shadow chains grew a level with every fork whose parent wrote while its child lived. They
+      now fold at fork, and during a fault's own lookup when nothing else reaches the backing
+      object.
+    - Freeing a kernel stack unmapped it, which sent every other CPU a TLB shootdown at each
+      thread exit. Freed stacks of the usual size now stay mapped in a 32-entry cache.
+    - Fork flushes only the pages it write-protects. Exec and exit free the old address space
+      by dropping it, not by emptying it entry by entry first.
+    - Map entries are kept in short sorted chunks rather than a `BTreeMap`, whose node split and
+      merge at a size boundary cost 150 ns per `mmap`. An exact one-entry `munmap` takes one
+      search, and `munmap` of untouched memory skips the page tables.
+    - On the gating CPU a locked instruction costs about 9 ns. Syscalls now borrow the current
+      process and address space instead of cloning `Arc`s. A one-thread process's `read` and
+      `write` borrow the file from the table without its lock or a reference (with several
+      threads, at P6, the file is referenced). The process layout needs no lock.
+    - `compiler_builtins`' `memcpy` and `memmove` start three string instructions per copy, and
+      copy overlapping data backwards a byte at a time. `arch/x86_64/mem` replaces them for the
+      kernel.
+  - `cargo xtask ubench [--bhyve]` runs the suite on AbyssBSD alone, locally or in bhyve on the
+    server.
+  - **Left for later:** `proc.fork`'s spread across runs is wide (95% CI up to 1.03), so it is
+    the benchmark to watch. A one-thread process's descriptor fast path has to be revisited when
+    threads arrive (`Process::sole_thread`).
 
 **Exit:** both arches boot to an interactive `/rescue/sh` (from FreeBSD 15.1 `base.txz`) on the
 serial console. Pipelines, job control (`^Z`, `fg`), `ls`, `cat`, `sysctl kern.ostype`, and
