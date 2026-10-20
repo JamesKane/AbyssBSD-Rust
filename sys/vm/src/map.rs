@@ -398,6 +398,10 @@ impl VmMap {
     /// the range from the page tables first.
     pub fn remove(&mut self, range: Range<VirtAddr>) -> Result<(), MapError> {
         self.check(&range)?;
+        if let Some(e) = self.entries.take_exact(range.start.get(), range.end.get()) {
+            e.release();
+            return Ok(());
+        }
         self.clip(range.start);
         self.clip(range.end);
         self.entries

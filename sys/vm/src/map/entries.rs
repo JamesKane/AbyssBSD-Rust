@@ -138,6 +138,20 @@ impl Entries {
         }
     }
 
+    /// Removes and returns the entry covering exactly `[start, end)`, if
+    /// there is one: `munmap`'s usual case, in one search.
+    pub(super) fn take_exact(&mut self, start: u64, end: u64) -> Option<Entry> {
+        let Pos(c, i) = self.locate(start);
+        let chunk = self.chunks.get_mut(c)?;
+        let e = chunk.get(i)?;
+        if e.start.get() != start || e.end.get() != end {
+            return None;
+        }
+        let e = chunk.remove(i);
+        self.rebalance(c);
+        Some(e)
+    }
+
     /// Removes the entries starting in `[from, to)`, handing each to
     /// `gone`.
     pub(super) fn remove_range(&mut self, from: u64, to: u64, mut gone: impl FnMut(Entry)) {
@@ -234,6 +248,12 @@ mod tests {
                 if model.insert(page, ()).is_none() {
                     ours.insert(entry(page));
                 }
+            } else if next() % 4 == 0 {
+                // One page, exactly: the entry if there is one there.
+                let got = ours
+                    .take_exact(page << 12, (page + 1) << 12)
+                    .map(|e| e.start.get() >> 12);
+                assert_eq!(got, model.remove(&page).map(|()| page));
             } else {
                 let n = next() % 8 + 1;
                 let mut removed = Vec::new();
