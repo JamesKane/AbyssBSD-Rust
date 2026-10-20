@@ -2831,6 +2831,97 @@ mod user_memory {
         }
     }
 
+    /// The whole of the file at `path`, if it exists.
+    fn read_whole(s: &sched::Sleepable, path: &[u8]) -> Option<alloc::vec::Vec<u8>> {
+        let root = crate::fs::root();
+        let l = vfs::namei::Lookup {
+            start: &root,
+            root: &root,
+            follow: true,
+            beneath: false,
+            cred: crate::fs::cred(),
+        };
+        let v = crate::fs::namespace().lookup(s, &l, path).ok()?;
+        let size = usize::try_from(v.size(s).ok()?).ok()?;
+        let mut buf = alloc::vec![0u8; size];
+        let mut r = vfs::ReadBuf::new(&mut buf);
+        let n = v.read_at(s, 0, &mut r).ok()?;
+        buf.truncate(n);
+        Some(buf)
+    }
+
+    /// Prints where `got` first differs from `want`, line by line.
+    fn first_difference(what: &str, got: &[u8], want: &[u8]) {
+        let mut g = got.split(|&c| c == b'\n');
+        let mut w = want.split(|&c| c == b'\n');
+        for line in 1.. {
+            match (g.next(), w.next()) {
+                (None, None) => return,
+                (a, b) if a == b => {}
+                (a, b) => {
+                    let show = |x: Option<&[u8]>| {
+                        x.map_or_else(
+                            || "(end)".into(),
+                            |l| alloc::string::String::from_utf8_lossy(l).into_owned(),
+                        )
+                    };
+                    kprintln!("{what}: line {line}: got {:?}", show(a));
+                    kprintln!("{what}: line {line}: want {:?}", show(b));
+                    return;
+                }
+            }
+        }
+    }
+
+    ktest! {
+        /// The UFS2 test disk (vtbd2) mounts read-only with `/rescue`'s
+        /// `mount`, and `ls -lRnT` and `md5 -r` over it print exactly what
+        /// FreeBSD's printed over the same image. Skipped when the disk or
+        /// FreeBSD's listings are not there (no `fetch-base` from the
+        /// server).
+        fn ufs_reads_as_freebsd_reads_it() {
+            use crate::proc::Process;
+            let s = cx();
+            let (Some(want_ls), Some(want_md5)) = (
+                read_whole(&s, b"/usr/tests/ufs/ufs-test.ls"),
+                read_whole(&s, b"/usr/tests/ufs/ufs-test.md5"),
+            ) else {
+                kprintln!("ufs: no test disk listings; skipped");
+                return;
+            };
+            if storage::find("vtbd2").is_none() {
+                kprintln!("ufs: no test disk; skipped");
+                return;
+            }
+            let script: &[u8] = b"mount -t ufs -o ro /dev/vtbd2 /mnt || exit 1; \
+                cd /mnt && TZ=UTC ls -lRnT . > /tmp/ufs.ls || exit 2; \
+                md5 -r $(cat /usr/tests/ufs/ufs-test.files) > /tmp/ufs.md5 || exit 3; \
+                touch /mnt/x 2>/dev/null && exit 4; \
+                cd / && umount /mnt || exit 5; exit 7";
+            let p = Process::spawn(
+                &s,
+                b"/rescue/sh",
+                &[b"sh", b"-c", script],
+                &[b"PATH=/rescue", b"HOME=/"],
+                Some(hal::cpu_id()),
+            )
+            .unwrap();
+            let exit = p.wait(&s);
+            let got_ls = read_whole(&s, b"/tmp/ufs.ls").unwrap_or_default();
+            let got_md5 = read_whole(&s, b"/tmp/ufs.md5").unwrap_or_default();
+            first_difference("ufs: ls -lRnT", &got_ls, &want_ls);
+            first_difference("ufs: md5 -r", &got_md5, &want_md5);
+            assert_eq!(exit, crate::proc::Exit::Code(7));
+            assert!(got_ls == want_ls && got_md5 == want_md5);
+            let lines = want_md5.iter().filter(|&&c| c == b'\n').count();
+            kprintln!("ufs: {lines} files and their listing match FreeBSD's");
+            for f in [&b"/tmp/ufs.ls"[..], b"/tmp/ufs.md5"] {
+                let _ = crate::fs::parent_of(&s, &p, crate::fs::At::Cwd, f, false)
+                    .and_then(|d| vfs::ops::remove(&s, &d.dir, &d.name, crate::fs::cred(), false));
+            }
+        }
+    }
+
     ktest! {
         fn fuzzing_leaves_nothing_behind() {
             // The fuzzer twice with the same seed: the first run warms

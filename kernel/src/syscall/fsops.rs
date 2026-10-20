@@ -608,6 +608,24 @@ pub(super) fn nmount(s: &Sleepable, iov: u64, iovcnt: u64, flags: u64) -> SysRes
                 )),
             )
         }
+        b"ufs" => {
+            // Read-only until UFS writes (P5.5).
+            if flags & abi::mount::MNT_RDONLY == 0 {
+                return Err(Errno::EROFS);
+            }
+            let from = get(b"from").ok_or(Errno::EINVAL)?;
+            let disk = disk_at(s, &p, from)?;
+            let fs = crate::fs::ufs::UfsFs::mount(s, disk)?;
+            vfs::Mount::new(
+                vfs::MountInfo {
+                    type_name: "ufs",
+                    flags: abi::mount::MNT_LOCAL | flags,
+                    from: from.strip_suffix(b"\0").unwrap_or(from).to_vec(),
+                    io_size: fs.block_size(),
+                },
+                Box::new(fs),
+            )
+        }
         _ => return Err(Errno::ENODEV),
     };
     let on = crate::fs::namespace().path_of(s, &covered, &crate::fs::root())?;
@@ -615,19 +633,53 @@ pub(super) fn nmount(s: &Sleepable, iov: u64, iovcnt: u64, flags: u64) -> SysRes
     Ok(0)
 }
 
+/// The disk device node at `path` (a mount's `from`): its name in devfs
+/// is the disk's.
+fn disk_at(
+    s: &Sleepable,
+    p: &crate::proc::Process,
+    path: &[u8],
+) -> Result<Arc<storage::Disk>, Errno> {
+    let path = path.strip_suffix(b"\0").unwrap_or(path);
+    let v = crate::fs::lookup(s, p, At::Cwd, path, Walk::FOLLOW)?;
+    if v.kind() != vfs::Kind::CharDevice {
+        return Err(Errno::ENOTBLK);
+    }
+    let name = path.rsplit(|&c| c == b'/').next().unwrap_or(path);
+    let name = core::str::from_utf8(name).map_err(|_| Errno::ENXIO)?;
+    storage::find(name).ok_or(Errno::ENXIO)
+}
+
 /// `unmount(path, flags)`.
+/// With `MNT_BYFSID` the path is `FSID:<val0>:<val1>`, a mount's
+/// `f_fsid` (what `umount(8)` passes).
 pub(super) fn unmount(s: &Sleepable, path_ptr: u64, flags: u64) -> SysResult {
     let p = process()?;
     let path = path(path_ptr)?;
-    let v = crate::fs::lookup(s, &p, At::Cwd, &path, Walk::FOLLOW)?;
-    if !v.is_mount_root() {
-        return Err(Errno::EINVAL);
-    }
     let force = flags & abi::mount::MNT_FORCE != 0;
-    let m = Arc::clone(v.mount());
-    drop(v);
+    let m = if flags & abi::mount::MNT_BYFSID != 0 {
+        let want = parse_fsid(&path).ok_or(Errno::EINVAL)?;
+        crate::fs::namespace()
+            .mounts()
+            .into_iter()
+            .find(|m| super::path::fsid(m) == want)
+            .ok_or(Errno::ENOENT)?
+    } else {
+        let v = crate::fs::lookup(s, &p, At::Cwd, &path, Walk::FOLLOW)?;
+        if !v.is_mount_root() {
+            return Err(Errno::EINVAL);
+        }
+        Arc::clone(v.mount())
+    };
     crate::fs::namespace().unmount(s, &m, force)?;
     Ok(0)
+}
+
+/// `FSID:<a>:<b>` (FreeBSD's `sscanf("FSID:%d:%d")`).
+fn parse_fsid(path: &[u8]) -> Option<[i32; 2]> {
+    let rest = core::str::from_utf8(path.strip_prefix(b"FSID:")?).ok()?;
+    let (a, b) = rest.split_once(':')?;
+    Some([a.parse().ok()?, b.parse().ok()?])
 }
 
 /// The ACL and extended-attribute calls (`__acl_*`, `extattr_*`): the

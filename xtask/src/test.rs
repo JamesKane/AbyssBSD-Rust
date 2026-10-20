@@ -356,7 +356,9 @@ fn boot(case: &BootCase, release: bool, verbose: bool) -> Result<std::result::Re
     let scratch = blank("scratch")?;
     let nvme = blank("nvme")?;
     let sata = blank("sata")?;
-    let devices = match case.vmm {
+    // The UFS2 test disk, read-only (vtbd2), if fetch-base made it.
+    let ufs = crate::base::ufs_test_file("ufs-test.img");
+    let mut devices = match case.vmm {
         Vmm::Bhyve => vec![
             format!("5,nvme,{}", nvme.display()),
             format!("6,ahci-hd,{}", sata.display()),
@@ -382,6 +384,20 @@ fn boot(case: &BootCase, release: bool, verbose: bool) -> Result<std::result::Re
             d
         }
     };
+    if let Some(img) = &ufs {
+        match case.vmm {
+            Vmm::Bhyve => devices.push(format!("7,virtio-blk,{},ro", img.display())),
+            Vmm::Qemu => devices.extend([
+                "-drive".into(),
+                format!(
+                    "if=none,id=ufs0,format=raw,readonly=on,file={}",
+                    img.display()
+                ),
+                "-device".into(),
+                "virtio-blk-pci,drive=ufs0".into(),
+            ]),
+        }
+    }
     let vm = Vm {
         el2: case.el2,
         test_devices: true,

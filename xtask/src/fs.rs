@@ -151,6 +151,62 @@ fn problems(output: &str, status: Option<i32>) -> Vec<String> {
     found
 }
 
+/// An `md` device over an image file, detached (and unmounted first, if
+/// mounted) when dropped, whatever happened meanwhile.
+pub(crate) struct Md {
+    unit: String,
+    mnt: Option<PathBuf>,
+}
+
+impl Md {
+    /// Attaches `img` (read-only if `readonly`).
+    pub(crate) fn attach(img: &Path, readonly: bool) -> Result<Self> {
+        let mut c = Command::new("doas");
+        c.args(["mdconfig", "-a", "-t", "vnode"]);
+        if readonly {
+            c.args(["-o", "readonly"]);
+        }
+        let out = c.arg("-f").arg(img).output()?;
+        if !out.status.success() {
+            return Err(format!("mdconfig: {}", String::from_utf8_lossy(&out.stderr)).into());
+        }
+        let unit = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        if !unit.starts_with("md") {
+            return Err(format!("mdconfig printed {unit:?}").into());
+        }
+        Ok(Self { unit, mnt: None })
+    }
+
+    /// The device node.
+    pub(crate) fn dev(&self) -> String {
+        format!("/dev/{}", self.unit)
+    }
+
+    /// Mounts the device's UFS on `mnt`.
+    pub(crate) fn mount(&mut self, mnt: &Path, readonly: bool) -> Result<()> {
+        std::fs::create_dir_all(mnt)?;
+        let mut c = Command::new("doas");
+        c.arg("mount");
+        if readonly {
+            c.args(["-o", "ro"]);
+        }
+        util::run(c.arg(self.dev()).arg(mnt))?;
+        self.mnt = Some(mnt.to_owned());
+        Ok(())
+    }
+}
+
+impl Drop for Md {
+    fn drop(&mut self) {
+        if let Some(m) = self.mnt.take() {
+            let _ = Command::new("doas").arg("umount").arg(&m).status();
+        }
+        let _ = Command::new("doas")
+            .args(["mdconfig", "-d", "-u", &self.unit])
+            .status();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

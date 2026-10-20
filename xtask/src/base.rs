@@ -110,8 +110,26 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
                 sysroot.display()
             );
         }
+        // The UFS2 test disk and FreeBSD's listings of it.
+        let local = local_dir(Arch::X86_64);
+        fs::create_dir_all(&local)?;
+        for name in UFS_TEST {
+            let remote = format!(
+                "{}:abyss/dist/{RELEASE}/{}/{name}",
+                crate::remote::host(),
+                Arch::X86_64.freebsd_name()
+            );
+            util::run(
+                Command::new("scp")
+                    .arg("-q")
+                    .arg(&remote)
+                    .arg(local.join(name)),
+            )?;
+        }
+        println!("fetch-base: the UFS2 test disk in {}", local.display());
         return Ok(());
     }
+    ufs_test(&dir(Arch::X86_64), &root(Arch::X86_64)?)?;
     for arch in arches {
         let root = root(arch)?;
         let tar = rescue_image(arch)?;
@@ -212,6 +230,72 @@ fn existing_rescue_image(arch: Arch) -> Option<PathBuf> {
         local_rescue_image(arch)
     };
     p.exists().then_some(p)
+}
+
+/// The UFS2 test disk (P5.4) and FreeBSD's view of it: `ufs-test.img`,
+/// which `makefs` made of `/rescue`, `/lib`, and `/usr/include`; and from
+/// FreeBSD's own tools over it, mounted read-only, `ufs-test.ls`
+/// (`ls -lRnT` in UTC, in 512-byte blocks as with no `BLOCKSIZE`),
+/// `ufs-test.files` (every regular file), and
+/// `ufs-test.md5` (`md5 -r` of those). The kernel test mounts the disk
+/// and must print the same.
+pub(crate) const UFS_TEST: [&str; 4] = [
+    "ufs-test.img",
+    "ufs-test.ls",
+    "ufs-test.files",
+    "ufs-test.md5",
+];
+
+/// A UFS2 test file, if it has been made (on the server) or copied.
+pub(crate) fn ufs_test_file(name: &str) -> Option<PathBuf> {
+    let dir = if cfg!(target_os = "freebsd") {
+        dir(Arch::X86_64)
+    } else {
+        local_dir(Arch::X86_64)
+    };
+    Some(dir.join(name)).filter(|p| p.exists())
+}
+
+/// Makes the [`UFS_TEST`] files in `dir` from base tree `root`, unless
+/// they are there.
+fn ufs_test(dir: &Path, root: &Path) -> Result<()> {
+    if UFS_TEST.iter().all(|f| dir.join(f).exists()) {
+        return Ok(());
+    }
+    eprintln!("xtask: fetch-base: making the UFS2 test disk");
+    let stage = dir.join("ufs-tree");
+    let _ = fs::remove_dir_all(&stage);
+    fs::create_dir_all(&stage)?;
+    let copy = format!(
+        "tar -C '{}' -cf - rescue lib usr/include | tar -C '{}' -xf -",
+        root.display(),
+        stage.display()
+    );
+    util::run(Command::new("sh").arg("-c").arg(&copy))?;
+    let tmp = dir.join("ufs-test.img.tmp");
+    let _ = fs::remove_file(&tmp);
+    util::run(
+        Command::new("makefs")
+            .args(["-t", "ffs", "-o", "version=2"])
+            .arg(&tmp)
+            .arg(&stage),
+    )?;
+    {
+        let mut md = crate::fs::Md::attach(&tmp, true)?;
+        let mnt = dir.join("ufs-mnt");
+        md.mount(&mnt, true)?;
+        let list = format!(
+            "cd '{m}' && TZ=UTC BLOCKSIZE=512 ls -lRnT . > '{d}/ufs-test.ls' && \
+             find . -type f | sort > '{d}/ufs-test.files' && \
+             md5 -r $(cat '{d}/ufs-test.files') > '{d}/ufs-test.md5'",
+            m = mnt.display(),
+            d = dir.display()
+        );
+        util::run(Command::new("sh").arg("-c").arg(&list))?;
+    }
+    fs::rename(&tmp, dir.join("ufs-test.img"))?;
+    let _ = fs::remove_dir_all(&stage);
+    Ok(())
 }
 
 /// `/rescue` as a ustar archive: the memory-disk image the loader preloads
@@ -353,6 +437,22 @@ pub(crate) fn md_image(arch: Arch, extra: &[(&str, &Path)]) -> Result<Option<Vec
         }
         append(&mut md, "usr/tests/fsx/", b'5', 0o755, &[])?;
         append(&mut md, "usr/tests/fsx/fsx", b'0', 0o555, &fs::read(&bin)?)?;
+    }
+    // FreeBSD's view of the UFS2 test disk, for the kernel test (not
+    // beside the test programs, which are all run).
+    if ufs_test_file(UFS_TEST[1]).is_some() {
+        append(&mut md, "usr/tests/ufs/", b'5', 0o755, &[])?;
+    }
+    for name in &UFS_TEST[1..] {
+        if let Some(file) = ufs_test_file(name) {
+            append(
+                &mut md,
+                &format!("usr/tests/ufs/{name}"),
+                b'0',
+                0o444,
+                &fs::read(file)?,
+            )?;
+        }
     }
     for (path, file) in extra {
         if let Some((dir, _)) = path.rsplit_once('/') {

@@ -1,24 +1,22 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! CRC-32 (IEEE 802.3, reflected polynomial `0xEDB88320`), as used by GPT,
-//! Ethernet, gzip and zlib.
+//! Ethernet, gzip and zlib; and CRC-32C (Castagnoli, reflected polynomial
+//! `0x82F63B78`), as UFS check-hashes use it.
 
 #![no_std]
 #![forbid(unsafe_code)]
 
-const TABLE: [u32; 256] = build_table();
+const TABLE: [u32; 256] = build_table(0xEDB8_8320);
+const TABLE_C: [u32; 256] = build_table(0x82F6_3B78);
 
-const fn build_table() -> [u32; 256] {
+const fn build_table(poly: u32) -> [u32; 256] {
     let mut table = [0u32; 256];
     let mut i: u32 = 0;
     while i < 256 {
         let mut c = i;
         let mut k = 0;
         while k < 8 {
-            c = if c & 1 != 0 {
-                0xEDB8_8320 ^ (c >> 1)
-            } else {
-                c >> 1
-            };
+            c = if c & 1 != 0 { poly ^ (c >> 1) } else { c >> 1 };
             k += 1;
         }
         table[i as usize] = c;
@@ -67,9 +65,29 @@ pub fn crc32(data: &[u8]) -> u32 {
     c.finish()
 }
 
+/// Continues CRC-32C `crc` over `data` as FreeBSD's `calculate_crc32c`
+/// does: from the caller's starting value (`!0` to begin), with no final
+/// inversion.
+#[must_use]
+pub fn crc32c(crc: u32, data: &[u8]) -> u32 {
+    data.iter().fold(crc, |c, &b| {
+        TABLE_C[usize::from(c.to_le_bytes()[0] ^ b)] ^ (c >> 8)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crc32c_check_value() {
+        // CRC-32C's standard check value inverts at both ends.
+        assert_eq!(crc32c(!0, b"123456789") ^ !0, 0xE306_9283);
+        assert_eq!(
+            crc32c(crc32c(!0, b"1234"), b"56789"),
+            crc32c(!0, b"123456789")
+        );
+    }
 
     #[test]
     fn check_value() {

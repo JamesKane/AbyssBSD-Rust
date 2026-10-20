@@ -278,6 +278,7 @@ dependencies = [
  "uart",
  "uart-16550",
  "uart-pl011",
+ "ufs",
  "ustar",
  "vfs",
  "virtio-random",
@@ -443,6 +444,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ufs"
+version = "0.0.0"
+dependencies = [
+ "crc",
+]
+
+[[package]]
 name = "ustar"
 version = "0.0.0"
 
@@ -525,5 +533,6 @@ dependencies = [
  "guid",
  "ktest",
  "syscallgen",
+ "ufs",
  "ustar",
 ]

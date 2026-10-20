@@ -14,6 +14,7 @@ pub(crate) mod devfs;
 pub(crate) mod fdtable;
 pub(crate) mod file;
 pub(crate) mod pipe;
+pub(crate) mod ufs;
 pub(crate) mod uio;
 
 use alloc::boxed::Box;

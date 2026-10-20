@@ -771,4 +771,15 @@ fn clean_pages_nothing_maps_are_reclaimed() {
     file.runs.lock().unwrap().clear();
     object.fill(0).unwrap();
     assert_eq!(file.runs.lock().unwrap().len(), 1);
+    // Mapped, after the file system let go: the mapping's reference alone
+    // keeps the pages.
+    let mut b = Proc::new(pages);
+    b.map_file(0, 4, &object, 0, Prot::READ);
+    object.disown();
+    // `held` stands for the reclaimer's own reference.
+    let held = Arc::clone(&object);
+    drop(object);
+    assert_eq!(held.drop_clean(usize::MAX), 0);
+    drop(b);
+    assert_eq!(held.drop_clean(usize::MAX), 1);
 }

@@ -362,12 +362,7 @@ fn statfs_mount(s: &Sleepable, m: &vfs::Mount) -> Result<Statfs, Errno> {
         f_files: c.files,
         f_ffree: c.ffree,
         f_namemax: u32::try_from(NAME_MAX).unwrap_or(u32::MAX),
-        f_fsid: abi::mount::Fsid {
-            val: [
-                i32::from_ne_bytes(u32::try_from(m.id & 0xffff_ffff).unwrap_or(0).to_ne_bytes()),
-                i32::try_from(m.type_num).unwrap_or(0),
-            ],
-        },
+        f_fsid: abi::mount::Fsid { val: fsid(m) },
         ..Statfs::default()
     };
     name_field(&mut st.f_fstypename, info.type_name.as_bytes());
@@ -445,4 +440,12 @@ pub(super) fn umask(newmask: u64) -> SysResult {
     let mask = u16::try_from(newmask & u64::from(abi::stat::ALLPERMS)).unwrap_or(0);
     let old = p.umask.swap(mask, core::sync::atomic::Ordering::Relaxed);
     Ok(u64::from(old))
+}
+
+/// Mount `m`'s `f_fsid`: its id's low half and its type number.
+pub(super) fn fsid(m: &vfs::Mount) -> [i32; 2] {
+    [
+        i32::from_ne_bytes(u32::try_from(m.id & 0xffff_ffff).unwrap_or(0).to_ne_bytes()),
+        i32::try_from(m.type_num).unwrap_or(0),
+    ]
 }

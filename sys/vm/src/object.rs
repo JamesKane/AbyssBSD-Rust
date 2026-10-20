@@ -154,6 +154,9 @@ pub struct Object {
     /// Page-cache transfers and write-backs under way, which hold page
     /// frames outside the lock: reclaiming leaves the object alone.
     io: AtomicUsize,
+    /// A pager object's file system still holds its reference (see
+    /// [`Object::disown`]).
+    owned: AtomicBool,
     /// Read-ahead: the page a sequential fill would ask next, and how many
     /// pages the next fill reads.
     ra_next: AtomicU64,
@@ -213,6 +216,7 @@ impl Object {
             pages_ops: ops,
             one_mapping: AtomicBool::new(true),
             pager: None,
+            owned: AtomicBool::new(false),
             io: AtomicUsize::new(0),
             ra_next: AtomicU64::new(0),
             ra_window: AtomicU64::new(1),
@@ -233,6 +237,7 @@ impl Object {
             pages_ops: ops,
             one_mapping: AtomicBool::new(true),
             pager: None,
+            owned: AtomicBool::new(false),
             io: AtomicUsize::new(0),
             ra_next: AtomicU64::new(0),
             ra_window: AtomicU64::new(1),
@@ -242,8 +247,9 @@ impl Object {
     /// An object whose pages `pager` supplies. It counts as shared from
     /// the start: unmapping never frees its pages, which stay cached.
     ///
-    /// Its file system must hold it for as long as the file lives: that
-    /// reference is how [`reclaim_clean`] tells an object nothing maps.
+    /// Its file system holds a reference until it calls [`Self::disown`]
+    /// (when the file's vnode goes): knowing which reference is the file
+    /// system's is how [`reclaim_clean`] tells an object nothing maps.
     #[must_use]
     pub fn with_pager(ops: &'static dyn PageOps, pager: Arc<dyn Pager>) -> Arc<Self> {
         let o = Arc::new(Self {
@@ -256,6 +262,7 @@ impl Object {
             pages_ops: ops,
             one_mapping: AtomicBool::new(false),
             pager: Some(pager),
+            owned: AtomicBool::new(true),
             io: AtomicUsize::new(0),
             ra_next: AtomicU64::new(0),
             ra_window: AtomicU64::new(1),
@@ -271,9 +278,15 @@ impl Object {
         IoGuard(self)
     }
 
+    /// The file system lets go of its reference (it drops it next): any
+    /// reference left is a mapping's or a shadow's.
+    pub fn disown(&self) {
+        self.owned.store(false, Ordering::SeqCst);
+    }
+
     /// Frees up to `want` of this object's clean pages, if nothing maps it
     /// and no transfer is under way. `self` is a reference of the caller's
-    /// own, beside the file system's (see [`Self::with_pager`]).
+    /// own, beside the file system's if it has not disowned the object.
     pub fn drop_clean(self: &Arc<Self>, want: usize) -> usize {
         let Some(mut inner) = self.inner.try_lock() else {
             return 0;
@@ -281,7 +294,8 @@ impl Object {
         // Ours and the file system's: no map entry or shadow reaches it,
         // and a new one finds the pages gone when it looks (under this
         // lock). A transfer takes its guard before it looks.
-        if Arc::strong_count(self) > 2 || self.io.load(Ordering::SeqCst) != 0 {
+        let expected = 1 + usize::from(self.owned.load(Ordering::SeqCst));
+        if Arc::strong_count(self) > expected || self.io.load(Ordering::SeqCst) != 0 {
             return 0;
         }
         let Inner { pages, dirty, .. } = &mut *inner;
