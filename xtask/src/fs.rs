@@ -103,6 +103,35 @@ pub(crate) fn cmd_check(mut args: Args) -> Result<()> {
     }
 }
 
+/// On a FreeBSD host, `fsck_ffs -f -n` of `img` if it holds a UFS2 file
+/// system (its superblock magic at 64 KiB): an error unless clean.
+/// Elsewhere, or with no UFS2 there, nothing to check.
+pub(crate) fn check_ufs_if_any(img: &Path) -> std::result::Result<(), String> {
+    if !cfg!(target_os = "freebsd") {
+        return Ok(());
+    }
+    let Ok(bytes) = std::fs::read(img) else {
+        return Ok(());
+    };
+    let magic = bytes
+        .get(65536 + 1372..65536 + 1376)
+        .map(|m| u32::from_le_bytes([m[0], m[1], m[2], m[3]]));
+    if magic != Some(0x1954_0119) {
+        return Ok(());
+    }
+    let report = check(Fs::Ufs2, img).map_err(|e| e.to_string())?;
+    if report.problems.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "fsck_ffs {}: {}\n{}",
+            img.display(),
+            report.problems.join("; "),
+            report.output
+        ))
+    }
+}
+
 /// What a check found.
 struct Report {
     output: String,

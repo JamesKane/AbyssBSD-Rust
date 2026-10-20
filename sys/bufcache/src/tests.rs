@@ -215,3 +215,23 @@ fn a_new_size_rewrites_the_old_buffer() {
     assert_eq!(c.read(&s, 0, 32768, |d| d[4000]), Ok(8));
     assert_eq!(disk.at(4000), 8);
 }
+
+#[test]
+fn discarded_buffers_are_never_written() {
+    let disk = Disk::new(1 << 20);
+    let c = cache(&disk, Limits::default());
+    let s = s();
+    c.write(&s, 8192, 8192, Fill::Overwrite, WriteMode::Delayed, |d| {
+        d.fill(3)
+    })
+    .unwrap();
+    c.write(&s, 32768, 4096, Fill::Overwrite, WriteMode::Delayed, |d| {
+        d.fill(4)
+    })
+    .unwrap();
+    // A range that overlaps the first buffer's tail only.
+    c.discard(&s, 12288, 4096);
+    assert_eq!(c.usage(), (4096, 4096));
+    c.sync(&s).unwrap();
+    assert_eq!((disk.at(8192), disk.at(32768)), (0, 4));
+}

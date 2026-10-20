@@ -21,13 +21,18 @@
 
 extern crate alloc;
 
+mod allocate;
+mod balloc;
+pub mod cg;
 pub mod dir;
 mod inode;
+pub mod ops;
 pub mod sb;
 
 #[cfg(test)]
 mod tests;
 
+pub use allocate::{Reserve, Summary};
 pub use dir::DirEntry;
 pub use inode::{Inode, Kind, Timestamp};
 pub use sb::{Stats, Superblock};
@@ -45,6 +50,40 @@ pub enum Error {
     Corrupt(&'static str),
     /// A check-hash did not match (FreeBSD's `EINTEGRITY`).
     Integrity(&'static str),
+    /// The device cannot write (`EROFS`).
+    ReadOnly,
+    /// No blocks or inodes left (`ENOSPC`).
+    NoSpace,
+    /// Past the largest file (`EFBIG`).
+    TooBig,
+    /// A directory operation's name exists already (`EEXIST`).
+    Exists,
+    /// A directory operation's name is not there (`ENOENT`).
+    NotFound,
+    /// A directory to remove still has entries (`ENOTEMPTY`).
+    NotEmpty,
+    /// A name longer than 255 bytes (`ENAMETOOLONG`).
+    NameTooLong,
+    /// A link count would pass `LINK_MAX` (`EMLINK`).
+    TooManyLinks,
+}
+
+/// How a changed block goes to the disk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// Now, before returning (`bwrite`): where order matters.
+    Sync,
+    /// Later (`bdwrite`).
+    Delayed,
+}
+
+/// What a changed block starts from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fill {
+    /// Its contents on the disk.
+    Read,
+    /// Zeros: the block is new and overwritten whole.
+    Zero,
 }
 
 /// Where the bytes come from.
@@ -60,6 +99,41 @@ pub trait BlockIo {
         len: usize,
         f: &mut dyn FnMut(&[u8]),
     ) -> Result<(), Error>;
+
+    /// Changes the `len` metadata bytes at `offset` with `f`, starting
+    /// from `fill`, and writes them as `mode` says. Offsets and lengths of
+    /// one block never change between calls, as with [`Self::read`].
+    fn modify(
+        &self,
+        _cx: &Self::Cx,
+        _offset: u64,
+        _len: usize,
+        _fill: Fill,
+        _mode: Mode,
+        _f: &mut dyn FnMut(&mut [u8]),
+    ) -> Result<(), Error> {
+        Err(Error::ReadOnly)
+    }
+
+    /// Reads file data at `offset` straight from the device, past any
+    /// metadata cache.
+    fn read_data(&self, cx: &Self::Cx, offset: u64, buf: &mut [u8]) -> Result<(), Error> {
+        self.read(cx, offset, buf.len(), &mut |b| buf.copy_from_slice(b))
+    }
+
+    /// Writes file data at `offset` straight to the device, now.
+    fn write_data(&self, _cx: &Self::Cx, _offset: u64, _data: &[u8]) -> Result<(), Error> {
+        Err(Error::ReadOnly)
+    }
+
+    /// Blocks at `offset` were freed: cached metadata over them must never
+    /// be written (the blocks may hold file data next).
+    fn forget(&self, _cx: &Self::Cx, _offset: u64, _len: usize) {}
+
+    /// Writes everything delayed, then makes it durable.
+    fn flush(&self, _cx: &Self::Cx) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 impl<T: BlockIo + ?Sized> BlockIo for &T {
@@ -73,6 +147,34 @@ impl<T: BlockIo + ?Sized> BlockIo for &T {
         f: &mut dyn FnMut(&[u8]),
     ) -> Result<(), Error> {
         (**self).read(cx, offset, len, f)
+    }
+
+    fn modify(
+        &self,
+        cx: &T::Cx,
+        offset: u64,
+        len: usize,
+        fill: Fill,
+        mode: Mode,
+        f: &mut dyn FnMut(&mut [u8]),
+    ) -> Result<(), Error> {
+        (**self).modify(cx, offset, len, fill, mode, f)
+    }
+
+    fn read_data(&self, cx: &T::Cx, offset: u64, buf: &mut [u8]) -> Result<(), Error> {
+        (**self).read_data(cx, offset, buf)
+    }
+
+    fn write_data(&self, cx: &T::Cx, offset: u64, data: &[u8]) -> Result<(), Error> {
+        (**self).write_data(cx, offset, data)
+    }
+
+    fn forget(&self, cx: &T::Cx, offset: u64, len: usize) {
+        (**self).forget(cx, offset, len);
+    }
+
+    fn flush(&self, cx: &T::Cx) -> Result<(), Error> {
+        (**self).flush(cx)
     }
 }
 
@@ -88,10 +190,52 @@ impl BlockIo for [u8] {
     }
 }
 
+// Conversions between the integer widths the format mixes. Every value
+// they see is bounded by the format (block sizes, group sizes, counts in
+// a block), so on the 32- and 64-bit targets built for none of them can
+// truncate; they saturate rather than wrap if one ever did.
+
+/// A `u32` as an index.
+pub(crate) fn idx(x: u32) -> usize {
+    usize::try_from(x).unwrap_or(usize::MAX)
+}
+
+/// A `u64` offset or length within a block, as an index.
+pub(crate) fn idx64(x: u64) -> usize {
+    usize::try_from(x).unwrap_or(usize::MAX)
+}
+
+/// A length as a `u64`.
+pub(crate) fn len64(x: usize) -> u64 {
+    u64::try_from(x).unwrap_or(u64::MAX)
+}
+
+/// A `u64` count or block number as an `i64`.
+pub(crate) fn int64(x: u64) -> i64 {
+    i64::try_from(x).unwrap_or(i64::MAX)
+}
+
+/// An index as an `i64`.
+pub(crate) fn ix64(x: usize) -> i64 {
+    i64::try_from(x).unwrap_or(i64::MAX)
+}
+
+/// A small `u32` count (fragments in a block) as an `i32`.
+pub(crate) fn int32(x: u32) -> i32 {
+    i32::try_from(x).unwrap_or(i32::MAX)
+}
+
+/// A count or index as a `u32`.
+pub(crate) fn count32(x: usize) -> u32 {
+    u32::try_from(x).unwrap_or(u32::MAX)
+}
+
 /// The inode number of every file system's root.
 pub const ROOT_INO: u32 = 2;
 /// Direct block pointers in an inode.
 pub const NDADDR: u64 = 12;
+/// [`NDADDR`] as an index.
+pub(crate) const NDIRECT: usize = 12;
 /// Indirect block pointers in an inode (single, double, triple).
 pub const NIADDR: usize = 3;
 
@@ -134,7 +278,7 @@ impl<B: BlockIo> Ufs<B> {
         }
         let (block, within) = sb.inode_location(ino);
         let mut out = Err(Error::Io);
-        self.io.read(cx, block, sb.bsize as usize, &mut |b| {
+        self.io.read(cx, block, idx(sb.bsize), &mut |b| {
             out = Inode::parse(&b[within..within + inode::SIZE], sb);
         })?;
         out
@@ -179,15 +323,11 @@ impl<B: BlockIo> Ufs<B> {
             return Err(Error::Corrupt("indirect block address"));
         }
         let mut out = 0;
-        self.io.read(
-            cx,
-            addr * u64::from(sb.fsize),
-            sb.bsize as usize,
-            &mut |b| {
+        self.io
+            .read(cx, addr * u64::from(sb.fsize), idx(sb.bsize), &mut |b| {
                 let at = index * 8;
                 out = u64::from_le_bytes(b[at..at + 8].try_into().unwrap_or([0; 8]));
-            },
-        )?;
+            })?;
         if out >= sb.size {
             return Err(Error::Corrupt("block address"));
         }
@@ -240,7 +380,7 @@ impl<B: BlockIo> Ufs<B> {
         while done < buf.len() && at < ip.size {
             let lbn = at / bsize;
             let within = usize::try_from(at % bsize).unwrap_or(0);
-            let size = sb.block_size(ip.size, lbn) as usize;
+            let size = idx(sb.block_size(ip.size, lbn));
             let n = (size - within)
                 .min(buf.len() - done)
                 .min(usize::try_from(ip.size - at).unwrap_or(usize::MAX));
@@ -254,7 +394,7 @@ impl<B: BlockIo> Ufs<B> {
                     })?,
             }
             done += n;
-            at += n as u64;
+            at += len64(n);
         }
         Ok(done)
     }
@@ -278,7 +418,7 @@ impl<B: BlockIo> Ufs<B> {
         // one, so skipping those before `start` resynchronizes.
         let mut lbn = start / bsize;
         while lbn * bsize < dir.size {
-            let size = sb.block_size(dir.size, lbn) as usize;
+            let size = idx(sb.block_size(dir.size, lbn));
             let base = lbn * bsize;
             let mut block = Vec::new();
             match self.bmap(cx, dir, lbn)? {
@@ -289,8 +429,9 @@ impl<B: BlockIo> Ufs<B> {
                         block = b.to_vec();
                     })?,
             }
-            let skip = start.saturating_sub(base) / dir::DIRBLKSIZ as u64 * dir::DIRBLKSIZ as u64;
-            let limit = usize::try_from((dir.size - base).min(size as u64)).unwrap_or(size);
+            let chunk = len64(dir::DIRBLKSIZ);
+            let skip = start.saturating_sub(base) / chunk * chunk;
+            let limit = usize::try_from((dir.size - base).min(len64(size))).unwrap_or(size);
             let mut more = true;
             dir::entries(
                 &block[..limit],

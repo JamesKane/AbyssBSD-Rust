@@ -39,24 +39,24 @@ nexus0
                 0x28
                 0x29
             I/O ports:
-                0x2100-0x217f
+                0x2180-0x21ff
             I/O memory addresses:
-                0xc200e000-0xc200ffff
+                0xc2010000-0xc2011fff
           vtblk0 <VirtIO Block Adapter> pnpinfo vendor=0x00001af4 device=0x1001 subvendor=0x1af4 device_type=0x00000002
         virtio_pci1 <VirtIO PCI (legacy) Entropy adapter> pnpinfo vendor=0x1af4 device=0x1005 subvendor=0x1af4 subdevice=0x0004 class=0x100000 at slot=3 function=0 dbsf=pci0:0:3:0
             I/O ports:
-                0x2180-0x219f
+                0x2200-0x221f
             I/O memory addresses:
-                0xc200c000-0xc200dfff
+                0xc200e000-0xc200ffff
           vtrnd0 <VirtIO Entropy Adapter> pnpinfo vendor=0x00001af4 device=0x1005 subvendor=0x1af4 device_type=0x00000004
         virtio_pci2 <VirtIO PCI (legacy) Block adapter> pnpinfo vendor=0x1af4 device=0x1001 subvendor=0x1af4 subdevice=0x0002 class=0x010000 at slot=4 function=0 dbsf=pci0:0:4:0
             Interrupt request lines:
                 0x2a
                 0x2b
             I/O ports:
-                0x2080-0x20ff
+                0x2100-0x217f
             I/O memory addresses:
-                0xc200a000-0xc200bfff
+                0xc200c000-0xc200dfff
           vtblk1 <VirtIO Block Adapter> pnpinfo vendor=0x00001af4 device=0x1001 subvendor=0x1af4 device_type=0x00000002
         nvme0 <Generic NVMe Device> pnpinfo vendor=0xfb5d device=0x0a0a subvendor=0x0000 subdevice=0x0000 class=0x010802 at slot=5 function=0 dbsf=pci0:0:5:0
             Interrupt request lines:
@@ -64,7 +64,7 @@ nexus0
                 0x2d
                 0x2e
             I/O memory addresses:
-                0xc2008000-0xc2009fff
+                0xc200a000-0xc200bfff
                 0x800004000-0x800007fff
         ahci0 <Intel ICH8 AHCI SATA controller> pnpinfo vendor=0x8086 device=0x2821 subvendor=0x0000 subdevice=0x0000 class=0x010601 at slot=6 function=0 dbsf=pci0:0:6:0
             Interrupt request lines:
@@ -85,10 +85,10 @@ nexus0
                 0x3d
                 0x3e
             I/O memory addresses:
-                0xc2006000-0xc2007fff
+                0xc2008000-0xc2009fff
           ahcich0 <AHCI channel> at channel=0
               I/O memory addresses:
-                  0xc2006100-0xc200617f
+                  0xc2008100-0xc200817f
           ahcich1 at channel=1 (disabled)
           ahcich2 at channel=2 (disabled)
           ahcich3 at channel=3 (disabled)
@@ -125,9 +125,9 @@ nexus0
                 0x3f
                 0x40
             I/O ports:
-                0x2000-0x207f
+                0x2080-0x20ff
             I/O memory addresses:
-                0xc2004000-0xc2005fff
+                0xc2006000-0xc2007fff
           vtblk2 <VirtIO Block Adapter> pnpinfo vendor=0x00001af4 device=0x1001 subvendor=0x1af4 device_type=0x00000002
         nvme1 <Generic NVMe Device> pnpinfo vendor=0xfb5d device=0x0a0a subvendor=0x0000 subdevice=0x0000 class=0x010802 at slot=8 function=0 dbsf=pci0:0:8:0
             Interrupt request lines:
@@ -135,7 +135,7 @@ nexus0
                 0x42
                 0x43
             I/O memory addresses:
-                0xc2002000-0xc2003fff
+                0xc2004000-0xc2005fff
                 0x800000000-0x800003fff
         ahci1 <Intel ICH8 AHCI SATA controller> pnpinfo vendor=0x8086 device=0x2821 subvendor=0x0000 subdevice=0x0000 class=0x010601 at slot=9 function=0 dbsf=pci0:0:9:0
             Interrupt request lines:
@@ -156,10 +156,10 @@ nexus0
                 0x52
                 0x53
             I/O memory addresses:
-                0xc2000000-0xc2001fff
+                0xc2002000-0xc2003fff
           ahcich32 <AHCI channel> at channel=0
               I/O memory addresses:
-                  0xc2000100-0xc200017f
+                  0xc2002100-0xc200217f
           ahcich33 at channel=1 (disabled)
           ahcich34 at channel=2 (disabled)
           ahcich35 at channel=3 (disabled)
@@ -191,10 +191,19 @@ nexus0
           ahcich61 at channel=29 (disabled)
           ahcich62 at channel=30 (disabled)
           ahcich63 at channel=31 (disabled)
+        virtio_pci4 <VirtIO PCI (legacy) Block adapter> pnpinfo vendor=0x1af4 device=0x1001 subvendor=0x1af4 subdevice=0x0002 class=0x010000 at slot=10 function=0 dbsf=pci0:0:10:0
+            Interrupt request lines:
+                0x54
+                0x55
+            I/O ports:
+                0x2000-0x207f
+            I/O memory addresses:
+                0xc2000000-0xc2001fff
+          vtblk3 <VirtIO Block Adapter> pnpinfo vendor=0x00001af4 device=0x1001 subvendor=0x1af4 device_type=0x00000002
         vgapci0 <VGA-compatible display> pnpinfo vendor=0xfb5d device=0x40fb subvendor=0x0000 subdevice=0x0000 class=0x030000 at slot=29 function=0 dbsf=pci0:0:29:0
             I/O memory addresses:
                 0xc0000000-0xc1ffffff
-                0xc2010000-0xc201007f
+                0xc2012000-0xc201207f
           drmn0
         isab0 <PCI-ISA bridge> pnpinfo vendor=0x8086 device=0x7000 subvendor=0x0000 subdevice=0x0000 class=0x060100 at slot=31 function=0 dbsf=pci0:0:31:0 handle=\_SB_.PC00.ISA_
           isa0 <ISA bus>

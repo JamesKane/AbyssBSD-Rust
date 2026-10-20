@@ -647,15 +647,23 @@ impl Object {
 
     /// Cuts the object to `pages` pages: those past it go, if nothing but
     /// the caller holds the object (no mapping can still reach them, since
-    /// every map entry and shadow holds a reference). Otherwise they stay
-    /// until the object goes: a mapping keeps seeing what it saw, as no
-    /// page table is searched for them here.
+    /// every map entry and shadow holds a reference). Otherwise they stay,
+    /// zeroed, until the object goes (no page table is searched for them
+    /// here): what was cut off never reads back if the file grows again.
     pub fn truncate(self: &Arc<Self>, pages: PageIndex) {
         let mut inner = self.inner.lock();
         let cut = inner.dirty.split_off(&pages);
         DIRTY.fetch_sub(cut.len(), Ordering::Relaxed);
         let _ = inner.mapped_writable.split_off(&pages);
         if Arc::strong_count(self) > 1 {
+            // Kept for whoever still holds the object, but zeroed: should
+            // the file grow again, they must read as zeros, not as what
+            // was cut off.
+            let kept: Vec<Pfn> = inner.pages.range(pages..).map(|(_, &p)| p).collect();
+            drop(inner);
+            for pfn in kept {
+                self.pages_ops.access(pfn, &mut |p| p.fill(0));
+            }
             return;
         }
         let doomed = inner.pages.split_off(&pages);

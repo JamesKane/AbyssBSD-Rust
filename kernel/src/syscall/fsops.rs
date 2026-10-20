@@ -609,13 +609,11 @@ pub(super) fn nmount(s: &Sleepable, iov: u64, iovcnt: u64, flags: u64) -> SysRes
             )
         }
         b"ufs" => {
-            // Read-only until UFS writes (P5.5).
-            if flags & abi::mount::MNT_RDONLY == 0 {
-                return Err(Errno::EROFS);
-            }
             let from = get(b"from").ok_or(Errno::EINVAL)?;
             let disk = disk_at(s, &p, from)?;
-            let fs = crate::fs::ufs::UfsFs::mount(s, disk)?;
+            let read_only = flags & abi::mount::MNT_RDONLY != 0;
+            let force = flags & abi::mount::MNT_FORCE != 0 || get(b"force").is_some();
+            let fs = crate::fs::ufs::UfsFs::mount(s, disk, read_only, force)?;
             vfs::Mount::new(
                 vfs::MountInfo {
                     type_name: "ufs",

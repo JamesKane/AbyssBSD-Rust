@@ -676,7 +676,8 @@ pub(crate) fn cmd_record(mut args: Args) -> Result<()> {
     let ahci = work.join("ahci.img");
     fs::File::create(&ahci)?.set_len(64 << 20)?;
     // The boot tests' read-only UFS2 disk, on virtio-blk, NVMe, and AHCI
-    // (slots 7 to 9), as they attach it.
+    // (slots 7 to 9), and their read-write one (slot 10), as they attach
+    // them.
     let ufs = work.join("ufs.img");
     fs::File::create(&ufs)?.set_len(16 << 20)?;
     let vm = Vm {
@@ -689,6 +690,7 @@ pub(crate) fn cmd_record(mut args: Args) -> Result<()> {
             format!("7,virtio-blk,{},ro", ufs.display()),
             format!("8,nvme,{},ro", ufs.display()),
             format!("9,ahci-hd,{},ro", ufs.display()),
+            format!("10,virtio-blk,{}", ufs.display()),
         ],
         ..Vm::new(Vmm::Bhyve, Arch::X86_64, freebsd)
     };

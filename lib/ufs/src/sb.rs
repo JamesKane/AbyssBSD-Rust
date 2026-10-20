@@ -54,6 +54,8 @@ mod off {
     pub(super) const FSIZE: usize = 52;
     pub(super) const FRAG: usize = 56;
     pub(super) const MINFREE: usize = 60;
+    pub(super) const MAXCONTIG: usize = 88;
+    pub(super) const MAXBPG: usize = 92;
     pub(super) const BMASK: usize = 72;
     pub(super) const BSHIFT: usize = 80;
     pub(super) const FSHIFT: usize = 84;
@@ -61,15 +63,18 @@ mod off {
     pub(super) const SBSIZE: usize = 104;
     pub(super) const NINDIR: usize = 116;
     pub(super) const INOPB: usize = 120;
+    pub(super) const OPTIM: usize = 128;
     pub(super) const ID: usize = 144;
     pub(super) const CSSIZE: usize = 156;
     pub(super) const CGSIZE: usize = 160;
     pub(super) const IPG: usize = 184;
     pub(super) const FPG: usize = 188;
+    pub(super) const FMOD: usize = 208;
     pub(super) const CLEAN: usize = 209;
     pub(super) const FSMNT: usize = 212;
     pub(super) const VOLNAME: usize = 680;
     pub(super) const MAXBSIZE: usize = 860;
+    pub(super) const METASPACE: usize = 880;
     pub(super) const SBLOCKACTUALLOC: usize = 992;
     pub(super) const SBLOCKLOC: usize = 1000;
     pub(super) const CSTOTAL: usize = 1008;
@@ -79,9 +84,12 @@ mod off {
     pub(super) const CSADDR: usize = 1096;
     pub(super) const PENDINGBLOCKS: usize = 1104;
     pub(super) const PENDINGINODES: usize = 1112;
+    pub(super) const AVGFILESIZE: usize = 1196;
+    pub(super) const AVGFPDIR: usize = 1200;
     pub(super) const CKHASH: usize = 1304;
     pub(super) const METACKHASH: usize = 1308;
     pub(super) const FLAGS: usize = 1312;
+    pub(super) const CONTIGSUMSIZE: usize = 1316;
     pub(super) const MAXSYMLINKLEN: usize = 1320;
     pub(super) const MAXFILESIZE: usize = 1328;
     pub(super) const MAGIC: usize = 1372;
@@ -169,6 +177,21 @@ pub struct Superblock {
     pub metackhash: u32,
     pub maxsymlinklen: u32,
     pub maxfilesize: u64,
+    /// Blocks laid out together, and the most blocks a file puts in one
+    /// cylinder group before moving on.
+    pub maxcontig: u32,
+    pub maxbpg: u32,
+    /// `FS_OPTTIME` (0) or `FS_OPTSPACE` (1).
+    pub optim: u32,
+    /// Fragments at the start of each group's data reserved for
+    /// metadata (`fs_metaspace`).
+    pub metaspace: u64,
+    pub avgfilesize: u32,
+    pub avgfpdir: u32,
+    /// The largest cluster size the groups' cluster summaries count.
+    pub contigsumsize: u32,
+    /// The superblock as read ([`SBLOCKSIZE`] bytes), for writing back.
+    pub raw: alloc::vec::Vec<u8>,
 }
 
 impl Superblock {
@@ -239,6 +262,14 @@ impl Superblock {
             metackhash,
             maxsymlinklen: u(off::MAXSYMLINKLEN),
             maxfilesize: unsigned(i(off::MAXFILESIZE), "fs_maxfilesize")?,
+            maxcontig: u(off::MAXCONTIG),
+            maxbpg: u(off::MAXBPG).max(1),
+            optim: u(off::OPTIM),
+            metaspace: unsigned(i(off::METASPACE), "fs_metaspace")?,
+            avgfilesize: u(off::AVGFILESIZE),
+            avgfpdir: u(off::AVGFPDIR),
+            contigsumsize: u(off::CONTIGSUMSIZE),
+            raw: b[..SBLOCKSIZE].to_vec(),
         };
         sb.validate(b, at, sector)?;
         // A file system last mounted by a kernel without check-hashes:
@@ -247,7 +278,7 @@ impl Superblock {
             metackhash = 0;
         }
         if metackhash & CK_SUPERBLOCK != 0 {
-            let sbsize = sb.sbsize as usize;
+            let sbsize = crate::idx(sb.sbsize);
             let mut crc = crc32c(!0, &b[..off::CKHASH]);
             crc = crc32c(crc, &[0; 4]);
             crc = crc32c(crc, &b[off::CKHASH + 4..sbsize]);
@@ -268,10 +299,11 @@ impl Superblock {
             }
         };
         let pow2 = |x: u32| x != 0 && x.is_power_of_two();
-        check(i64_at(b, off::SBLOCKLOC) == SBLOCK as i64, "fs_sblockloc")?;
+        let sblock = SBLOCK.cast_signed();
+        check(i64_at(b, off::SBLOCKLOC) == sblock, "fs_sblockloc")?;
         let actual = i64_at(b, off::SBLOCKACTUALLOC);
         check(
-            at == SBLOCK && (actual == 0 || actual == SBLOCK as i64),
+            at == SBLOCK && (actual == 0 || actual == sblock),
             "superblock location",
         )?;
         check(
@@ -345,7 +377,7 @@ impl Superblock {
         let frag = cg * u64::from(self.fpg)
             + u64::from(self.iblkno)
             + u64::from(within_cg / self.inopb) * u64::from(self.frag);
-        let within = (within_cg % self.inopb) as usize * crate::inode::SIZE;
+        let within = crate::idx(within_cg % self.inopb) * crate::inode::SIZE;
         (frag * u64::from(self.fsize), within)
     }
 
@@ -382,6 +414,94 @@ impl Superblock {
             files: u64::from(self.ncg) * u64::from(self.ipg) - u64::from(crate::ROOT_INO),
             ffree: t.nifree + i64::from(self.pending_inodes),
         }
+    }
+
+    /// The superblock to write back: as read, with the summary `totals`,
+    /// the clean flag, the time written (`fs_time`), and the check-hash
+    /// recomputed (FreeBSD's `ffs_sbupdate`).
+    #[must_use]
+    pub fn encode(
+        &self,
+        totals: &Totals,
+        clean: bool,
+        time: i64,
+        optim: u32,
+    ) -> alloc::vec::Vec<u8> {
+        let mut b = self.raw.clone();
+        let put64 =
+            |b: &mut [u8], at: usize, v: i64| b[at..at + 8].copy_from_slice(&v.to_le_bytes());
+        put64(&mut b, off::CSTOTAL, totals.ndir);
+        put64(&mut b, off::CSTOTAL + 8, totals.nbfree);
+        put64(&mut b, off::CSTOTAL + 16, totals.nifree);
+        put64(&mut b, off::CSTOTAL + 24, totals.nffree);
+        put64(&mut b, off::TIME, time);
+        b[off::OPTIM..off::OPTIM + 4].copy_from_slice(&optim.to_le_bytes());
+        b[off::CLEAN] = u8::from(clean);
+        b[off::FMOD] = 0;
+        if self.metackhash & CK_SUPERBLOCK != 0 {
+            b[off::CKHASH..off::CKHASH + 4].fill(0);
+            let crc = crc32c(!0, &b[..crate::idx(self.sbsize)]);
+            b[off::CKHASH..off::CKHASH + 4].copy_from_slice(&crc.to_le_bytes());
+        }
+        b
+    }
+
+    // Addresses, in fragments (FreeBSD's fs.h macros, for UFS2).
+
+    /// The first fragment of cylinder group `cg` (`cgbase`, `cgstart`).
+    #[must_use]
+    pub fn cgbase(&self, cg: u32) -> u64 {
+        u64::from(self.fpg) * u64::from(cg)
+    }
+
+    /// Where group `cg`'s header lives (`cgtod`).
+    #[must_use]
+    pub fn cgtod(&self, cg: u32) -> u64 {
+        self.cgbase(cg) + u64::from(self.cblkno)
+    }
+
+    /// Group `cg`'s first data fragment (`cgdmin`, also `cgmeta`).
+    #[must_use]
+    pub fn cgdmin(&self, cg: u32) -> u64 {
+        self.cgbase(cg) + u64::from(self.dblkno)
+    }
+
+    /// Group `cg`'s data zone, past the metadata reserve (`cgdata`).
+    #[must_use]
+    pub fn cgdata(&self, cg: u32) -> u64 {
+        self.cgdmin(cg) + self.metaspace
+    }
+
+    /// The group fragment `d` lies in (`dtog`).
+    #[must_use]
+    pub fn dtog(&self, d: u64) -> u32 {
+        u32::try_from(d / u64::from(self.fpg)).unwrap_or(u32::MAX)
+    }
+
+    /// Fragment `d`'s place within its group (`dtogd`).
+    #[must_use]
+    pub fn dtogd(&self, d: u64) -> u32 {
+        u32::try_from(d % u64::from(self.fpg)).unwrap_or(0)
+    }
+
+    /// Fragments in `bytes` (`numfrags`).
+    #[must_use]
+    pub fn numfrags(&self, bytes: u64) -> u32 {
+        u32::try_from(bytes >> self.fshift).unwrap_or(u32::MAX)
+    }
+
+    /// `bytes` rounded up to whole fragments (`fragroundup`).
+    #[must_use]
+    pub fn fragroundup(&self, bytes: u64) -> u64 {
+        bytes.next_multiple_of(u64::from(self.fsize))
+    }
+
+    /// Free space counting the reserve (`freespace(fs, minfree)`), in
+    /// fragments.
+    #[must_use]
+    pub fn freespace(&self, totals: &Totals) -> i64 {
+        totals.nbfree * i64::from(self.frag) + totals.nffree
+            - i64::try_from(self.dsize).unwrap_or(i64::MAX) * i64::from(self.minfree) / 100
     }
 
     /// The volume label, up to its NUL.

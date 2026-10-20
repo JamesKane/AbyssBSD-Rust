@@ -245,3 +245,488 @@ fn makefs_images_read_back_whole() {
     }
     let _ = std::fs::remove_dir_all(&work);
 }
+
+// ---- Writing, against a model and fsck_ffs ----
+
+/// An image in memory that the engine may write.
+struct Mem(core::cell::RefCell<Vec<u8>>);
+
+impl BlockIo for Mem {
+    type Cx = ();
+
+    fn read(&self, _: &(), offset: u64, len: usize, f: &mut dyn FnMut(&[u8])) -> Result<(), Error> {
+        let b = self.0.borrow();
+        let o = offset as usize;
+        f(b.get(o..o + len).ok_or(Error::Io)?);
+        Ok(())
+    }
+
+    fn modify(
+        &self,
+        _: &(),
+        offset: u64,
+        len: usize,
+        fill: Fill,
+        _: Mode,
+        f: &mut dyn FnMut(&mut [u8]),
+    ) -> Result<(), Error> {
+        let mut b = self.0.borrow_mut();
+        let o = offset as usize;
+        let s = b.get_mut(o..o + len).ok_or(Error::Io)?;
+        if fill == Fill::Zero {
+            s.fill(0);
+        }
+        f(s);
+        Ok(())
+    }
+
+    fn write_data(&self, _: &(), offset: u64, data: &[u8]) -> Result<(), Error> {
+        let mut b = self.0.borrow_mut();
+        let o = offset as usize;
+        b.get_mut(o..o + data.len())
+            .ok_or(Error::Io)?
+            .copy_from_slice(data);
+        Ok(())
+    }
+}
+
+/// A small PRNG (xorshift).
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+
+    fn below(&mut self, n: u64) -> u64 {
+        if n == 0 { 0 } else { self.next() % n }
+    }
+}
+
+/// The model of what the file system should hold.
+#[derive(Clone, Debug)]
+enum MNode {
+    File(Vec<u8>),
+    Dir(std::collections::BTreeMap<Vec<u8>, u32>),
+    Link(Vec<u8>),
+}
+
+struct Model {
+    nodes: std::collections::BTreeMap<u32, MNode>,
+    /// Each directory's parent.
+    parent: std::collections::BTreeMap<u32, u32>,
+}
+
+impl Model {
+    fn dirs(&self) -> Vec<u32> {
+        self.nodes
+            .iter()
+            .filter(|(_, n)| matches!(n, MNode::Dir(_)))
+            .map(|(i, _)| *i)
+            .collect()
+    }
+
+    fn entries(&self, d: u32) -> Vec<(Vec<u8>, u32)> {
+        match &self.nodes[&d] {
+            MNode::Dir(m) => m.iter().map(|(n, i)| (n.clone(), *i)).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn dir_mut(&mut self, d: u32) -> &mut std::collections::BTreeMap<Vec<u8>, u32> {
+        match self.nodes.get_mut(&d) {
+            Some(MNode::Dir(m)) => m,
+            _ => panic!("not a directory"),
+        }
+    }
+
+    /// How many entries name `ino` (and for a directory, its `.` and its
+    /// subdirectories' `..`).
+    fn links(&self, ino: u32) -> u16 {
+        let named = self
+            .nodes
+            .values()
+            .filter_map(|n| match n {
+                MNode::Dir(m) => Some(m.values().filter(|&&i| i == ino).count()),
+                _ => None,
+            })
+            .sum::<usize>();
+        match &self.nodes[&ino] {
+            MNode::Dir(m) => {
+                let subdirs = m
+                    .values()
+                    .filter(|i| matches!(self.nodes[i], MNode::Dir(_)))
+                    .count();
+                // The root's `..` is itself.
+                let root = usize::from(ino == ROOT_INO);
+                (named + 1 + subdirs + root) as u16
+            }
+            _ => named as u16,
+        }
+    }
+
+    fn is_under(&self, mut d: u32, ancestor: u32) -> bool {
+        loop {
+            if d == ancestor {
+                return true;
+            }
+            if d == ROOT_INO {
+                return false;
+            }
+            d = self.parent[&d];
+        }
+    }
+}
+
+fn maker(rng: &mut Rng, reserve: Reserve) -> ops::Maker {
+    ops::Maker {
+        perm: 0o644,
+        uid: 1001,
+        gid: 1001,
+        now: Timestamp {
+            sec: 1_760_000_000,
+            nsec: 0,
+        },
+        random: rng.next() as u32,
+        reserve,
+    }
+}
+
+/// Runs `n` random operations on the file system in `img`, mirrored in a
+/// model; returns the model. Out of space is fine.
+fn workload(fs: &Ufs<Mem>, sum: &mut Summary, seed: u64, n: usize) -> Model {
+    let mut rng = Rng(seed);
+    let mut m = Model {
+        nodes: std::collections::BTreeMap::new(),
+        parent: std::collections::BTreeMap::new(),
+    };
+    m.nodes
+        .insert(ROOT_INO, MNode::Dir(std::collections::BTreeMap::new()));
+    m.parent.insert(ROOT_INO, ROOT_INO);
+    // What the image starts with (newfs makes an empty `.snap`).
+    let root = fs.inode(&(), ROOT_INO).unwrap();
+    for (name, ino) in fs.names(&(), &root).unwrap() {
+        assert_eq!(
+            fs.inode(&(), ino).unwrap().kind(),
+            Kind::Directory,
+            "unexpected starting entry"
+        );
+        m.dir_mut(ROOT_INO).insert(name, ino);
+        m.nodes
+            .insert(ino, MNode::Dir(std::collections::BTreeMap::new()));
+        m.parent.insert(ino, ROOT_INO);
+    }
+    let bsize = u64::from(fs.superblock().bsize);
+    let now = Timestamp {
+        sec: 1_760_000_000,
+        nsec: 0,
+    };
+    let r = Reserve::Allowed;
+    for step in 0..n {
+        let dirs = m.dirs();
+        let d = dirs[rng.below(dirs.len() as u64) as usize];
+        let name = std::format!("n{}", rng.below(40)).into_bytes();
+        let op = rng.below(100);
+        let mut dip = fs.inode(&(), d).unwrap();
+        let existing = m
+            .entries(d)
+            .into_iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, i)| i);
+        let res: Result<(), Error> = (|| {
+            match op {
+                // Make something.
+                0..=29 if existing.is_none() => {
+                    let kind = match rng.below(10) {
+                        0..=5 => ops::NewKind::Regular,
+                        6..=7 => ops::NewKind::Directory,
+                        _ => ops::NewKind::Symlink(b""),
+                    };
+                    let long = rng.below(2) == 0;
+                    let target: Vec<u8> = (0..1 + rng.below(if long { 400 } else { 100 }))
+                        .map(|i| b'a' + (i % 26) as u8)
+                        .collect();
+                    let kind = match kind {
+                        ops::NewKind::Symlink(_) => ops::NewKind::Symlink(&target),
+                        k => k,
+                    };
+                    let (ino, _) =
+                        fs.create(&(), sum, d, &mut dip, &name, kind, &maker(&mut rng, r))?;
+                    m.dir_mut(d).insert(name.clone(), ino);
+                    let node = match kind {
+                        ops::NewKind::Directory => {
+                            m.parent.insert(ino, d);
+                            MNode::Dir(std::collections::BTreeMap::new())
+                        }
+                        ops::NewKind::Symlink(t) => MNode::Link(t.to_vec()),
+                        _ => MNode::File(Vec::new()),
+                    };
+                    m.nodes.insert(ino, node);
+                }
+                // Write into a file.
+                30..=59 => {
+                    let Some(ino) = existing.filter(|i| matches!(m.nodes[i], MNode::File(_)))
+                    else {
+                        return Ok(());
+                    };
+                    let mut ip = fs.inode(&(), ino).unwrap();
+                    let span = if rng.below(4) == 0 {
+                        bsize * 600
+                    } else {
+                        bsize * 30
+                    };
+                    let off = rng.below(span);
+                    let len = 1 + rng.below(bsize * 3);
+                    let data: Vec<u8> = (0..len).map(|_| rng.next() as u8).collect();
+                    let res = fs.write_data_range(&(), sum, ino, &mut ip, off, &data, r);
+                    fs.write_inode(&(), ino, &ip, Mode::Sync)?;
+                    res?;
+                    if let MNode::File(f) = m.nodes.get_mut(&ino).unwrap() {
+                        let end = (off + len) as usize;
+                        if f.len() < end {
+                            f.resize(end, 0);
+                        }
+                        f[off as usize..end].copy_from_slice(&data);
+                    }
+                }
+                // Truncate a file.
+                60..=69 => {
+                    let Some(ino) = existing.filter(|i| matches!(m.nodes[i], MNode::File(_)))
+                    else {
+                        return Ok(());
+                    };
+                    let mut ip = fs.inode(&(), ino).unwrap();
+                    let new = rng.below((ip.size * 2).max(bsize * 20));
+                    fs.truncate(&(), sum, ino, &mut ip, new, r, false)?;
+                    fs.write_inode(&(), ino, &ip, Mode::Sync)?;
+                    if let MNode::File(f) = m.nodes.get_mut(&ino).unwrap() {
+                        f.resize(new as usize, 0);
+                    }
+                }
+                // Link a file elsewhere.
+                70..=74 => {
+                    let Some(ino) = existing.filter(|i| matches!(m.nodes[i], MNode::File(_)))
+                    else {
+                        return Ok(());
+                    };
+                    let to = dirs[rng.below(dirs.len() as u64) as usize];
+                    let to_name = std::format!("l{}", rng.below(40)).into_bytes();
+                    if m.entries(to).iter().any(|(n, _)| *n == to_name) {
+                        return Ok(());
+                    }
+                    let mut tip = fs.inode(&(), to).unwrap();
+                    let mut ip = fs.inode(&(), ino).unwrap();
+                    fs.link(&(), sum, to, &mut tip, &to_name, ino, &mut ip, now, r)?;
+                    m.dir_mut(to).insert(to_name, ino);
+                }
+                // Remove something.
+                75..=87 => {
+                    let Some(ino) = existing else {
+                        return Ok(());
+                    };
+                    let mut ip = fs.inode(&(), ino).unwrap();
+                    if let MNode::Dir(c) = &m.nodes[&ino] {
+                        if !c.is_empty() {
+                            return Ok(());
+                        }
+                        fs.rmdir(&(), sum, d, &mut dip, &name, ino, &mut ip, now)?;
+                        fs.free_inode(&(), sum, ino, &mut ip, r)?;
+                        m.nodes.remove(&ino);
+                        m.parent.remove(&ino);
+                    } else {
+                        fs.unlink(&(), d, &mut dip, &name, ino, &mut ip, now)?;
+                        if ip.nlink == 0 {
+                            fs.free_inode(&(), sum, ino, &mut ip, r)?;
+                            m.nodes.remove(&ino);
+                        }
+                    }
+                    m.dir_mut(d).remove(&name);
+                }
+                // Rename something.
+                88..=99 => {
+                    let Some(ino) = existing else {
+                        return Ok(());
+                    };
+                    let to = dirs[rng.below(dirs.len() as u64) as usize];
+                    let to_name = std::format!("n{}", rng.below(40)).into_bytes();
+                    let is_dir = matches!(m.nodes[&ino], MNode::Dir(_));
+                    if (is_dir && m.is_under(to, ino)) || (to == d && to_name == name) {
+                        return Ok(());
+                    }
+                    let target = m
+                        .entries(to)
+                        .into_iter()
+                        .find(|(n, _)| *n == to_name)
+                        .map(|(_, i)| i);
+                    if let Some(t) = target {
+                        let t_dir = matches!(m.nodes[&t], MNode::Dir(_));
+                        if t == ino || t_dir != is_dir || (t_dir && !m.entries(t).is_empty()) {
+                            return Ok(());
+                        }
+                    }
+                    let mut ip = fs.inode(&(), ino).unwrap();
+                    let mut tdir = fs.inode(&(), to).unwrap();
+                    let mut tip = target.map(|t| fs.inode(&(), t).unwrap());
+                    let to_dir = if to == d { None } else { Some((to, &mut tdir)) };
+                    let tgt = target.zip(tip.as_mut());
+                    fs.rename(
+                        &(),
+                        sum,
+                        d,
+                        &mut dip,
+                        &name,
+                        ino,
+                        &mut ip,
+                        to_dir,
+                        &to_name,
+                        tgt,
+                        now,
+                        r,
+                    )?;
+                    if let (Some(t), Some(tip)) = (target, tip.as_mut())
+                        && tip.nlink == 0
+                    {
+                        fs.free_inode(&(), sum, t, tip, r)?;
+                        m.nodes.remove(&t);
+                        m.parent.remove(&t);
+                    }
+                    m.dir_mut(d).remove(&name);
+                    m.dir_mut(to).insert(to_name, ino);
+                    if is_dir {
+                        m.parent.insert(ino, to);
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        })();
+        match res {
+            Ok(()) | Err(Error::NoSpace) => {}
+            Err(e) => panic!("step {step} (op {op}): {e:?}"),
+        }
+    }
+    m
+}
+
+/// The image holds what the model says, link counts included.
+fn check_model(fs: &Ufs<&[u8]>, m: &Model, ino: u32) {
+    let ip = fs.inode(&(), ino).unwrap();
+    assert_eq!(ip.nlink, m.links(ino), "links of {ino}");
+    match &m.nodes[&ino] {
+        MNode::Dir(want) => {
+            let got: std::collections::BTreeMap<Vec<u8>, u32> =
+                fs.names(&(), &ip).unwrap().into_iter().collect();
+            assert_eq!(&got, want, "entries of {ino}");
+            let dotdot = fs.lookup(&(), &ip, b"..").unwrap().unwrap();
+            assert_eq!(dotdot, m.parent[&ino], ".. of {ino}");
+            for &c in want.values() {
+                if matches!(m.nodes[&c], MNode::Dir(_)) && m.parent[&c] != ino {
+                    continue;
+                }
+                check_model(fs, m, c);
+            }
+        }
+        MNode::File(want) => {
+            assert_eq!(ip.size, want.len() as u64, "size of {ino}");
+            let mut got = alloc::vec![0u8; want.len()];
+            assert_eq!(fs.read(&(), &ip, 0, &mut got).unwrap(), want.len());
+            assert!(got == *want, "contents of {ino}");
+        }
+        MNode::Link(want) => assert_eq!(&fs.readlink(&(), &ip).unwrap(), want, "link {ino}"),
+    }
+}
+
+/// `fsck_ffs -f -n` finds nothing wrong with the image at `path` (but the
+/// questions FreeBSD asks of any makefs image).
+fn fsck_clean(path: &Path) {
+    let out = Command::new("fsck_ffs")
+        .args(["-f", "-n"])
+        .arg(path)
+        .output()
+        .unwrap();
+    let text = std::string::String::from_utf8_lossy(&out.stdout).into_owned()
+        + &std::string::String::from_utf8_lossy(&out.stderr);
+    let benign = ["CONTINUE?", "UPDATE FILESYSTEM TO TRACK DIRECTORY DEPTH?"];
+    let bad: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains('?') && !benign.iter().any(|b| l.contains(b)))
+        .collect();
+    assert!(bad.is_empty() && out.status.success(), "fsck_ffs:\n{text}");
+}
+
+#[test]
+fn random_workloads_leave_fsck_clean_images() {
+    if !have_makefs() {
+        std::eprintln!("no makefs (not FreeBSD): skipped");
+        return;
+    }
+    let work = scratch("write");
+    let empty = work.join("empty");
+    std::fs::create_dir(&empty).unwrap();
+    // makefs images, and newfs images (which carry the superblock,
+    // group, and inode check-hashes).
+    let cases = [
+        ("makefs", 4096u32, 512u32, "24m", 1u64),
+        ("makefs", 32768, 4096, "48m", 7),
+        ("makefs", 4096, 512, "6m", 3),
+        ("newfs", 32768, 4096, "64m", 11),
+        ("newfs", 4096, 512, "32m", 13),
+    ];
+    for (tool, bsize, fsize, size, seed) in cases {
+        let img = work.join(std::format!("w-{tool}-{bsize}-{seed}.img"));
+        let ok = if tool == "makefs" {
+            Command::new("makefs")
+                .args(["-t", "ffs", "-o", "version=2", "-s", size])
+                .args(["-o", &std::format!("bsize={bsize},fsize={fsize}")])
+                .arg(&img)
+                .arg(&empty)
+                .status()
+                .unwrap()
+                .success()
+        } else {
+            Command::new("truncate")
+                .args(["-s", size])
+                .arg(&img)
+                .status()
+                .unwrap()
+                .success()
+                && Command::new("newfs")
+                    .args([
+                        "-b",
+                        &std::format!("{bsize}"),
+                        "-f",
+                        &std::format!("{fsize}"),
+                    ])
+                    .arg(&img)
+                    .stdout(std::process::Stdio::null())
+                    .status()
+                    .unwrap()
+                    .success()
+        };
+        assert!(ok, "{tool}");
+        let fs = Ufs::open(
+            &(),
+            Mem(core::cell::RefCell::new(std::fs::read(&img).unwrap())),
+            512,
+        )
+        .unwrap();
+        let mut sum = fs.load_summary(&()).unwrap();
+        let model = workload(&fs, &mut sum, seed, 3000);
+        fs.write_summary(&(), &mut sum, true, 1_760_000_100)
+            .unwrap();
+        let bytes = fs.io().0.borrow().clone();
+        let back = Ufs::open(&(), &bytes[..], 512).unwrap();
+        check_model(&back, &model, ROOT_INO);
+        std::fs::write(&img, &bytes).unwrap();
+        fsck_clean(&img);
+        let ck = fs.superblock().metackhash;
+        std::eprintln!(
+            "{tool} {bsize}/{fsize} seed {seed} (check-hashes {ck:#x}): {} nodes, clean",
+            model.nodes.len()
+        );
+    }
+    let _ = std::fs::remove_dir_all(&work);
+}

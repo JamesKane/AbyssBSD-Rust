@@ -31,6 +31,7 @@ mod off {
     pub(super) const EXTSIZE: usize = 92;
     pub(super) const DB: usize = 112;
     pub(super) const IB: usize = 208;
+    pub(super) const DIRDEPTH: usize = 240;
     pub(super) const CKHASH: usize = 244;
 }
 
@@ -81,6 +82,10 @@ pub struct Inode {
     /// double, and triple indirect blocks; 0 is a hole.
     pub db: [u64; 12],
     pub ib: [u64; NIADDR],
+    /// A directory's depth from the root (`di_dirdepth`).
+    pub dirdepth: u32,
+    /// The inode as read, so writing it back keeps what is not decoded.
+    pub raw: [u8; SIZE],
 }
 
 fn u16_at(b: &[u8], at: usize) -> u16 {
@@ -98,7 +103,7 @@ fn u64_at(b: &[u8], at: usize) -> u64 {
 }
 
 fn i64_at(b: &[u8], at: usize) -> i64 {
-    u64_at(b, at) as i64
+    u64_at(b, at).cast_signed()
 }
 
 impl Inode {
@@ -128,7 +133,11 @@ impl Inode {
         for (i, d) in ib.iter_mut().enumerate() {
             *d = u64_at(b, off::IB + i * 8);
         }
+        let mut raw = [0u8; SIZE];
+        raw.copy_from_slice(b);
         let ip = Self {
+            dirdepth: u32_at(b, off::DIRDEPTH),
+            raw,
             mode,
             nlink: u16_at(b, off::NLINK),
             uid: u32_at(b, off::UID),
@@ -163,6 +172,64 @@ impl Inode {
             return Err(Error::Corrupt("inode block address"));
         }
         Ok(ip)
+    }
+
+    /// The inode's bytes, from its fields and what was read, with its
+    /// check-hash if the file system keeps them (FreeBSD's
+    /// `ffs_update_dinode_ckhash`).
+    #[must_use]
+    pub fn encode(&self, sb: &Superblock) -> [u8; SIZE] {
+        let mut b = self.raw;
+        let p16 =
+            |b: &mut [u8; SIZE], at: usize, v: u16| b[at..at + 2].copy_from_slice(&v.to_le_bytes());
+        let p32 =
+            |b: &mut [u8; SIZE], at: usize, v: u32| b[at..at + 4].copy_from_slice(&v.to_le_bytes());
+        let p64 =
+            |b: &mut [u8; SIZE], at: usize, v: u64| b[at..at + 8].copy_from_slice(&v.to_le_bytes());
+        p16(&mut b, off::MODE, self.mode);
+        p16(&mut b, off::NLINK, self.nlink);
+        p32(&mut b, off::UID, self.uid);
+        p32(&mut b, off::GID, self.gid);
+        p32(&mut b, off::BLKSIZE, self.blksize);
+        p64(&mut b, off::SIZE, self.size);
+        p64(&mut b, off::BLOCKS, self.blocks);
+        for (at, ns, t) in [
+            (off::ATIME, off::ATIMENSEC, self.atime),
+            (off::MTIME, off::MTIMENSEC, self.mtime),
+            (off::CTIME, off::CTIMENSEC, self.ctime),
+            (off::BIRTHTIME, off::BIRTHNSEC, self.birthtime),
+        ] {
+            p64(&mut b, at, t.sec.cast_unsigned());
+            p32(&mut b, ns, t.nsec);
+        }
+        p32(&mut b, off::GEN, self.generation);
+        p32(&mut b, off::FLAGS, self.flags);
+        p32(&mut b, off::EXTSIZE, self.extsize);
+        for (i, a) in self.db.iter().enumerate() {
+            p64(&mut b, off::DB + i * 8, *a);
+        }
+        for (i, a) in self.ib.iter().enumerate() {
+            p64(&mut b, off::IB + i * 8, *a);
+        }
+        p32(&mut b, off::DIRDEPTH, self.dirdepth);
+        p32(&mut b, off::CKHASH, 0);
+        if self.mode != 0 && sb.metackhash & CK_INODE != 0 {
+            let crc = crc32c(!0, &b);
+            p32(&mut b, off::CKHASH, crc);
+        }
+        b
+    }
+
+    /// Sets a short symbolic link's target into the address fields.
+    pub fn set_shortlink(&mut self, target: &[u8]) {
+        let mut bytes = [0u8; 120];
+        bytes[..target.len().min(120)].copy_from_slice(&target[..target.len().min(120)]);
+        for (i, a) in self.db.iter_mut().chain(self.ib.iter_mut()).enumerate() {
+            let mut x = [0u8; 8];
+            x.copy_from_slice(&bytes[i * 8..i * 8 + 8]);
+            *a = u64::from_le_bytes(x);
+        }
+        self.size = crate::len64(target.len());
     }
 
     #[must_use]

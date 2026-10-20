@@ -383,6 +383,10 @@ fn boot(case: &BootCase, release: bool, verbose: bool) -> Result<std::result::Re
         Ok(p)
     };
     let scratch = blank("scratch")?;
+    // The UFS2 read-write test's own disk (32 MiB, which tells it apart),
+    // which no other test writes.
+    let ufsrw = disk.with_file_name(format!("ufsrw-{}.img", case.name));
+    std::fs::File::create(&ufsrw)?.set_len(32 << 20)?;
     let nvme = blank("nvme")?;
     let sata = blank("sata")?;
     // The UFS2 test disk, read-only (vtbd2), if fetch-base made it.
@@ -422,6 +426,7 @@ fn boot(case: &BootCase, release: bool, verbose: bool) -> Result<std::result::Re
                 format!("7,virtio-blk,{img},ro"),
                 format!("8,nvme,{img},ro"),
                 format!("9,ahci-hd,{img},ro"),
+                format!("10,virtio-blk,{}", ufsrw.display()),
             ]),
             Vmm::Qemu => {
                 let ahci_port = match case.arch {
@@ -441,6 +446,10 @@ fn boot(case: &BootCase, release: bool, verbose: bool) -> Result<std::result::Re
                     format!("if=none,id=ufs2,format=raw,snapshot=on,file={img}"),
                     "-device".into(),
                     format!("ide-hd,drive=ufs2,bus={ahci_port}"),
+                    "-drive".into(),
+                    format!("if=none,id=ufsrw,format=raw,file={}", ufsrw.display()),
+                    "-device".into(),
+                    "virtio-blk-pci,drive=ufsrw".into(),
                 ]);
             }
         }
@@ -468,6 +477,9 @@ fn boot(case: &BootCase, release: bool, verbose: bool) -> Result<std::result::Re
             }),
         other => Err(format!("{other:?}")),
     };
+    // The kernel test left a UFS2 file system on its disk: on a FreeBSD
+    // host, FreeBSD's own fsck_ffs must find it clean too.
+    let verdict = verdict.and_then(|()| crate::fs::check_ufs_if_any(&ufsrw));
     if verdict.is_err() {
         println!("{}: serial log at {}", case.name, log.display());
     }

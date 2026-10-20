@@ -66,8 +66,8 @@ pub(crate) fn entries(
                 ino,
                 kind,
                 name,
-                offset: base + at as u64,
-                next: base + next as u64,
+                offset: base + crate::len64(at),
+                next: base + crate::len64(next),
             };
             if !f(entry) {
                 return Ok(());
@@ -76,4 +76,315 @@ pub(crate) fn entries(
         at = next;
     }
     Ok(())
+}
+
+/// A slot found while scanning a directory: where its block is, where
+/// the entry is in the block, and its fields.
+struct Slot {
+    addr: u64,
+    bsz: usize,
+    at: usize,
+    ino: u32,
+    reclen: usize,
+    namlen: usize,
+    /// The entry before it in its chunk, if any.
+    prev: Option<usize>,
+}
+
+/// Writes an entry at `at` of block bytes `b`.
+fn put_entry(b: &mut [u8], at: usize, ino: u32, reclen: usize, kind: u8, name: &[u8]) {
+    b[at..at + 4].copy_from_slice(&ino.to_le_bytes());
+    b[at + 4..at + 6].copy_from_slice(&reclen16(reclen).to_le_bytes());
+    b[at + 6] = kind;
+    // Names are checked to fit (at most `MAXNAMLEN`).
+    b[at + 7] = u8::try_from(name.len()).unwrap_or(u8::MAX);
+    b[at + HEADER..at + HEADER + name.len()].copy_from_slice(name);
+    let end = at + dirsiz(name.len());
+    b[at + HEADER + name.len()..end].fill(0);
+}
+
+/// The `DT_*` type of a file of `mode`.
+#[must_use]
+pub fn dtype_of(mode: u16) -> u8 {
+    match mode & 0o170_000 {
+        0o010_000 => 1,
+        0o020_000 => 2,
+        0o040_000 => 4,
+        0o060_000 => 6,
+        0o100_000 => 8,
+        0o120_000 => 10,
+        0o140_000 => 12,
+        0o160_000 => 14,
+        _ => 0,
+    }
+}
+
+/// A record length (at most `DIRBLKSIZ`) as stored.
+fn reclen16(len: usize) -> u16 {
+    u16::try_from(len).unwrap_or(u16::MAX)
+}
+
+fn check_name(name: &[u8]) -> Result<(), Error> {
+    if name.len() > MAXNAMLEN {
+        return Err(Error::NameTooLong);
+    }
+    if name.is_empty() || name.contains(&0) || name.contains(&b'/') {
+        return Err(Error::Corrupt("directory entry name"));
+    }
+    Ok(())
+}
+
+impl<B: crate::BlockIo> crate::Ufs<B> {
+    /// Calls `f` with every entry (free ones too) of directory `dir`, in
+    /// order, until it returns true; returns the slot it stopped at.
+    fn scan(
+        &self,
+        cx: &B::Cx,
+        dir: &crate::Inode,
+        mut f: impl FnMut(&Slot, &[u8]) -> bool,
+    ) -> Result<Option<Slot>, Error> {
+        let sb = &self.sb;
+        let bsize = u64::from(sb.bsize);
+        let mut lbn = 0;
+        while lbn * bsize < dir.size {
+            let bsz = crate::idx(sb.block_size(dir.size, lbn));
+            let addr = self.bmap(cx, dir, lbn)?;
+            if addr == 0 {
+                return Err(Error::Corrupt("hole in a directory"));
+            }
+            let limit = crate::idx64(dir.size - lbn * bsize).min(bsz);
+            let mut found = Ok(None);
+            self.io
+                .read(cx, addr * u64::from(sb.fsize), bsz, &mut |b| {
+                    let mut at = 0;
+                    let mut prev = None;
+                    while at < limit {
+                        if at % DIRBLKSIZ == 0 {
+                            prev = None;
+                        }
+                        let room = DIRBLKSIZ - at % DIRBLKSIZ;
+                        let reclen = usize::from(u16::from_le_bytes([b[at + 4], b[at + 5]]));
+                        if reclen == 0 || reclen % 4 != 0 || reclen > room {
+                            found = Err(Error::Corrupt("directory entry length"));
+                            return;
+                        }
+                        let slot = Slot {
+                            addr,
+                            bsz,
+                            at,
+                            ino: u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]),
+                            reclen,
+                            namlen: usize::from(b[at + 7]),
+                            prev,
+                        };
+                        let name_end = (at + HEADER + slot.namlen).min(at + reclen);
+                        if f(&slot, &b[at + HEADER..name_end]) {
+                            found = Ok(Some(slot));
+                            return;
+                        }
+                        prev = Some(at);
+                        at += reclen;
+                    }
+                })?;
+            if let Some(s) = found? {
+                return Ok(Some(s));
+            }
+            lbn += 1;
+        }
+        Ok(None)
+    }
+
+    /// The live entry `name` of directory `dir`.
+    fn find_entry(
+        &self,
+        cx: &B::Cx,
+        dir: &crate::Inode,
+        name: &[u8],
+    ) -> Result<Option<Slot>, Error> {
+        self.scan(cx, dir, |s, n| s.ino != 0 && n == name)
+    }
+
+    /// Adds entry `name` for inode `ino` of type `kind` to directory
+    /// `dir_ino` (FreeBSD's `ufs_direnter`): in a free slot or the slack
+    /// of an entry if one is big enough, else in a new chunk at the end.
+    /// The block is written now; the caller writes the directory's inode
+    /// (its size may grow) and the new inode first.
+    #[allow(clippy::too_many_arguments)]
+    pub fn dir_enter(
+        &self,
+        cx: &B::Cx,
+        sum: &mut crate::Summary,
+        dir_ino: u32,
+        dir: &mut crate::Inode,
+        name: &[u8],
+        ino: u32,
+        kind: u8,
+        reserve: crate::Reserve,
+    ) -> Result<(), Error> {
+        check_name(name)?;
+        let need = dirsiz(name.len());
+        let mut exists = false;
+        let slot = self.scan(cx, dir, |s, n| {
+            if s.ino != 0 && n == name {
+                exists = true;
+                return true;
+            }
+            let free = if s.ino == 0 {
+                s.reclen
+            } else {
+                s.reclen - dirsiz(s.namlen)
+            };
+            free >= need
+        })?;
+        if exists {
+            return Err(Error::Exists);
+        }
+        let sb = &self.sb;
+        let fsize = u64::from(sb.fsize);
+        if let Some(s) = slot {
+            return self.io.modify(
+                cx,
+                s.addr * fsize,
+                s.bsz,
+                crate::Fill::Read,
+                crate::Mode::Sync,
+                &mut |b| {
+                    if s.ino == 0 {
+                        put_entry(b, s.at, ino, s.reclen, kind, name);
+                    } else {
+                        let used = dirsiz(s.namlen);
+                        b[s.at + 4..s.at + 6].copy_from_slice(&reclen16(used).to_le_bytes());
+                        put_entry(b, s.at + used, ino, s.reclen - used, kind, name);
+                    }
+                },
+            );
+        }
+        // A new chunk at the end.
+        let offset = dir.size;
+        let addr = self.balloc(
+            cx,
+            sum,
+            dir_ino,
+            dir,
+            offset,
+            crate::len64(DIRBLKSIZ),
+            reserve,
+            false,
+            true,
+        )?;
+        dir.size = offset + crate::len64(DIRBLKSIZ);
+        let bsize = u64::from(sb.bsize);
+        let lbn = offset / bsize;
+        let bsz = crate::idx(sb.block_size(dir.size, lbn));
+        let at = crate::idx64(offset % bsize);
+        self.io.modify(
+            cx,
+            addr * fsize,
+            bsz,
+            crate::Fill::Read,
+            crate::Mode::Sync,
+            &mut |b| {
+                b[at..at + DIRBLKSIZ].fill(0);
+                put_entry(b, at, ino, DIRBLKSIZ, kind, name);
+            },
+        )
+    }
+
+    /// Removes entry `name` from directory `dir` (FreeBSD's
+    /// `ufs_dirremove`): the first entry of a chunk is marked free, any
+    /// other joins the one before it. The block is written now. Returns the
+    /// inode the entry named.
+    pub fn dir_remove(&self, cx: &B::Cx, dir: &crate::Inode, name: &[u8]) -> Result<u32, Error> {
+        let s = self.find_entry(cx, dir, name)?.ok_or(Error::NotFound)?;
+        let fsize = u64::from(self.sb.fsize);
+        self.io.modify(
+            cx,
+            s.addr * fsize,
+            s.bsz,
+            crate::Fill::Read,
+            crate::Mode::Sync,
+            &mut |b| match s.prev {
+                None => b[s.at..s.at + 4].fill(0),
+                Some(p) => {
+                    let len = usize::from(u16::from_le_bytes([b[p + 4], b[p + 5]])) + s.reclen;
+                    b[p + 4..p + 6].copy_from_slice(&reclen16(len).to_le_bytes());
+                }
+            },
+        )?;
+        Ok(s.ino)
+    }
+
+    /// Points entry `name` of directory `dir` at inode `ino` of type
+    /// `kind` (FreeBSD's `ufs_dirrewrite`: a rename over an existing name,
+    /// or a moved directory's `..`). The block is written now. Returns the
+    /// inode it named before.
+    pub fn dir_rewrite(
+        &self,
+        cx: &B::Cx,
+        dir: &crate::Inode,
+        name: &[u8],
+        ino: u32,
+        kind: u8,
+    ) -> Result<u32, Error> {
+        let s = self.find_entry(cx, dir, name)?.ok_or(Error::NotFound)?;
+        let fsize = u64::from(self.sb.fsize);
+        self.io.modify(
+            cx,
+            s.addr * fsize,
+            s.bsz,
+            crate::Fill::Read,
+            crate::Mode::Sync,
+            &mut |b| {
+                b[s.at..s.at + 4].copy_from_slice(&ino.to_le_bytes());
+                b[s.at + 6] = kind;
+            },
+        )?;
+        Ok(s.ino)
+    }
+
+    /// Gives new directory `ino` its first chunk, with `.` and `..`
+    /// (`parent`) (FreeBSD's `ufs_mkdir`). The block is written now; the
+    /// caller writes the inode.
+    pub fn dir_init(
+        &self,
+        cx: &B::Cx,
+        sum: &mut crate::Summary,
+        ino: u32,
+        ip: &mut crate::Inode,
+        parent: u32,
+        reserve: crate::Reserve,
+    ) -> Result<(), Error> {
+        let addr = self.balloc(
+            cx,
+            sum,
+            ino,
+            ip,
+            0,
+            crate::len64(DIRBLKSIZ),
+            reserve,
+            false,
+            true,
+        )?;
+        ip.size = crate::len64(DIRBLKSIZ);
+        let bsz = crate::idx(self.sb.block_size(ip.size, 0));
+        let fsize = u64::from(self.sb.fsize);
+        self.io.modify(
+            cx,
+            addr * fsize,
+            bsz,
+            crate::Fill::Zero,
+            crate::Mode::Sync,
+            &mut |b| {
+                put_entry(b, 0, ino, dirsiz(1), 4, b".");
+                put_entry(b, dirsiz(1), parent, DIRBLKSIZ - dirsiz(1), 4, b"..");
+            },
+        )
+    }
+
+    /// Whether directory `dir` holds nothing but `.` and `..` (FreeBSD's
+    /// `ufs_dirempty`).
+    pub fn dir_empty(&self, cx: &B::Cx, dir: &crate::Inode) -> Result<bool, Error> {
+        let other = self.scan(cx, dir, |s, n| s.ino != 0 && n != b"." && n != b"..")?;
+        Ok(other.is_none())
+    }
 }

@@ -2850,6 +2850,28 @@ mod user_memory {
         Some(buf)
     }
 
+    /// The first disk named `prefix` and a number (no partitions) that
+    /// `pick` accepts: units may be renumbered once the detach tests have
+    /// run, so tests find their disks by what they hold.
+    fn find_disk(
+        s: &sched::Sleepable,
+        prefix: &str,
+        mut pick: impl FnMut(&sched::Sleepable, &storage::Disk) -> bool,
+    ) -> Option<alloc::sync::Arc<storage::Disk>> {
+        storage::disk::all().into_iter().find(|d| {
+            d.name()
+                .strip_prefix(prefix)
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()))
+                && pick(s, d)
+        })
+    }
+
+    /// Whether disk `d` holds a UFS2 file system.
+    fn holds_ufs2(s: &sched::Sleepable, d: &storage::Disk) -> bool {
+        d.read(s, 65536, 8192)
+            .is_ok_and(|b| u32::from_le_bytes([b[1372], b[1373], b[1374], b[1375]]) == 0x1954_0119)
+    }
+
     /// Prints where `got` first differs from `want`, line by line.
     fn first_difference(what: &str, got: &[u8], want: &[u8]) {
         let mut g = got.split(|&c| c == b'\n');
@@ -2895,11 +2917,14 @@ mod user_memory {
                 .find(|l| l.ends_with(b" ./rescue/rescue"))
                 .map(|l| [l, b"\n"].concat())
                 .unwrap_or_default();
-            for (disk, all) in [("vtbd2", true), ("nda1", false), ("ada1", false)] {
-                if storage::find(disk).is_none() {
-                    kprintln!("ufs: no {disk}; skipped");
+            // The UFS2 test disk: on each controller, the one holding UFS2
+            // that is not a 16 MiB scratch disk.
+            for (prefix, all) in [("vtbd", true), ("nda", false), ("ada", false)] {
+                let Some(d) = find_disk(&s, prefix, |s, d| d.bytes() != 16 << 20 && holds_ufs2(s, d)) else {
+                    kprintln!("ufs: no UFS2 test disk on {prefix}; skipped");
                     continue;
-                }
+                };
+                let disk = d.name();
                 let files: &[u8] = if all {
                     b"$(cat /usr/tests/ufs/ufs-test.files)"
                 } else {
@@ -2937,6 +2962,73 @@ mod user_memory {
                         |d| vfs::ops::remove(&s, &d.dir, &d.name, crate::fs::cred(), false),
                     );
                 }
+            }
+        }
+    }
+
+    ktest! {
+        /// UFS2 read-write on its own disk (32 MiB, virtio): FreeBSD's `newfs`
+        /// makes it, `/rescue`'s tools work over it mounted read-write
+        /// (directories, copies, links, renames, an archive, removal, and
+        /// fsx when the memory disk has it), and after unmounting,
+        /// FreeBSD's `fsck_ffs -f -n` finds nothing wrong; mounted again,
+        /// it holds what was written.
+        fn ufs_read_write_survives_fsck() {
+            use crate::proc::Process;
+            let s = cx();
+            // Its own 32 MiB virtio disk, whatever its unit now.
+            let Some(scratch) = find_disk(&s, "vtbd", |_, d| d.bytes() == 32 << 20) else {
+                kprintln!("ufs: no read-write test disk; skipped");
+                return;
+            };
+            let dev = alloc::format!("/dev/{}", scratch.name());
+            kprintln!("ufs: read-write on {dev}");
+            let fsx = read_whole(&s, b"/usr/tests/fsx/fsx").is_some();
+            let script_text = alloc::string::String::from("newfs DEV > /dev/null || exit 1; \
+                mount -t ufs DEV /mnt || exit 2; cd /mnt || exit 2; \
+                mkdir -p a/b c && echo hello > a/b/f && dd if=/rescue/rescue of=big bs=64k count=80 2>/dev/null && \
+                ln a/b/f hard && ln -s a/b/f soft && mv big c/big && \
+                [ \"$(cat soft)\" = hello ] && [ \"$(cat hard)\" = hello ] || exit 3; \
+                [ \"$(md5 -q c/big)\" = \"$(dd if=/rescue/rescue bs=64k count=80 2>/dev/null | md5 -q)\" ] || exit 4; \
+                tar -cf /tmp/t.tar -C / usr/tests && mkdir x && tar -xf /tmp/t.tar -C x && rm /tmp/t.tar || exit 5; \
+                for f in $(ls x/usr/tests/abyss); do \
+                    [ \"$(md5 -q x/usr/tests/abyss/$f)\" = \"$(md5 -q /usr/tests/abyss/$f)\" ] || exit 6; done; \
+                rm -r a/b x/usr && [ ! -e a/b ] || exit 8; \
+                if [ -x /usr/tests/fsx/fsx ]; then /usr/tests/fsx/fsx -q -N 3000 -S 5 /mnt/fsx.data > /tmp/fsx.out 2>&1 || exit 9; rm -f /mnt/fsx.data*; fi; \
+                cd / && umount /mnt || exit 10; \
+                fsck_ffs -f -n DEV > /tmp/fsck.out 2>&1 || exit 11; \
+                mount -t ufs -o ro DEV /mnt || exit 12; \
+                [ \"$(cat /mnt/hard)\" = hello ] && \
+                [ \"$(md5 -q /mnt/c/big)\" = \"$(dd if=/rescue/rescue bs=64k count=80 2>/dev/null | md5 -q)\" ] || exit 13; \
+                umount /mnt || exit 14; exit 7").replace("DEV", &dev);
+            let p = Process::spawn(
+                &s,
+                b"/rescue/sh",
+                &[b"sh", b"-c", script_text.as_bytes()],
+                &[b"PATH=/rescue", b"HOME=/"],
+                Some(hal::cpu_id()),
+            )
+            .unwrap();
+            let exit = p.wait(&s);
+            if exit != crate::proc::Exit::Code(7) {
+                for f in [&b"/tmp/fsck.out"[..], b"/tmp/fsx.out"] {
+                    if let Some(out) = read_whole(&s, f) {
+                        kprintln!("{}:\n{}", core::str::from_utf8(f).unwrap_or("?"), alloc::string::String::from_utf8_lossy(&out));
+                    }
+                }
+            }
+            assert_eq!(exit, crate::proc::Exit::Code(7));
+            let fsck = read_whole(&s, b"/tmp/fsck.out").unwrap_or_default();
+            let text = alloc::string::String::from_utf8_lossy(&fsck);
+            let questions: alloc::vec::Vec<&str> = text
+                .lines()
+                .filter(|l| l.contains('?') && !l.contains("CONTINUE?"))
+                .collect();
+            assert!(questions.is_empty(), "fsck_ffs asked: {questions:?}\n{text}");
+            kprintln!("ufs: read-write on {dev} is fsck clean{}", if fsx { ", fsx included" } else { "" });
+            for f in [&b"/tmp/fsck.out"[..], b"/tmp/fsx.out"] {
+                let _ = crate::fs::parent_of(&s, &p, crate::fs::At::Cwd, f, false)
+                    .and_then(|d| vfs::ops::remove(&s, &d.dir, &d.name, crate::fs::cred(), false));
             }
         }
     }

@@ -56,6 +56,9 @@ pub trait BlockDev: Send + Sync {
     fn flush(&self, s: &Sleepable) -> Result<(), IoError>;
 }
 
+/// The largest buffer (`MAXBSIZE`).
+const MAX_BUFFER: u64 = 64 << 10;
+
 /// Buffer locks: under vnode locks, before the disk's.
 static BUF: LockClass = LockClass::new("buffer", 380);
 
@@ -421,6 +424,39 @@ impl BufCache {
             }
             t.remove(&b.offset);
             self.bytes.fetch_sub(g.bytes.len(), Ordering::Relaxed);
+        }
+    }
+
+    /// Drops the buffers overlapping `[offset, offset + len)`, dirty or
+    /// not: the blocks were freed, and may hold file data written past
+    /// the cache next (a stale buffer written back would corrupt it).
+    pub fn discard(&self, s: &Sleepable, offset: u64, len: usize) {
+        let end = offset.saturating_add(len as u64);
+        // A buffer starting before `offset` may reach into the range.
+        let candidates: Vec<Arc<Buffer>> = self
+            .buffers
+            .lock()
+            .range(..end)
+            .rev()
+            .take_while(|(o, _)| o.saturating_add(MAX_BUFFER) > offset)
+            .map(|(_, b)| Arc::clone(b))
+            .collect();
+        for b in candidates {
+            let data = b.data.lock(s);
+            let blen = data.bytes.len();
+            if b.offset.saturating_add(blen as u64) <= offset {
+                continue;
+            }
+            let mut t = self.buffers.lock();
+            if !t.get(&b.offset).is_some_and(|x| Arc::ptr_eq(x, &b)) {
+                continue;
+            }
+            t.remove(&b.offset);
+            drop(t);
+            self.bytes.fetch_sub(blen, Ordering::Relaxed);
+            if data.dirty.is_some() {
+                self.dirty.fetch_sub(blen, Ordering::Relaxed);
+            }
         }
     }
 

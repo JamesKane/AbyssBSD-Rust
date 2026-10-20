@@ -147,11 +147,11 @@ dev.nvme.1.ioq.1.num_recovery_nolock: 0
 dev.nvme.1.ioq.1.num_ignored: 0
 dev.nvme.1.ioq.1.num_failures: 0
 dev.nvme.1.ioq.1.num_retries: 0
-dev.nvme.1.ioq.1.num_intr_handler_calls: 17
-dev.nvme.1.ioq.1.num_cmds: 17
-dev.nvme.1.ioq.1.cq_head: 17
-dev.nvme.1.ioq.1.sq_tail: 17
-dev.nvme.1.ioq.1.sq_head: 17
+dev.nvme.1.ioq.1.num_intr_handler_calls: 29
+dev.nvme.1.ioq.1.num_cmds: 29
+dev.nvme.1.ioq.1.cq_head: 29
+dev.nvme.1.ioq.1.sq_tail: 29
+dev.nvme.1.ioq.1.sq_head: 29
 dev.nvme.1.ioq.1.num_trackers: 128
 dev.nvme.1.ioq.1.num_entries: 256
 dev.nvme.1.ioq.0.dump_debug: 0
@@ -160,11 +160,11 @@ dev.nvme.1.ioq.0.num_recovery_nolock: 0
 dev.nvme.1.ioq.0.num_ignored: 0
 dev.nvme.1.ioq.0.num_failures: 0
 dev.nvme.1.ioq.0.num_retries: 0
-dev.nvme.1.ioq.0.num_intr_handler_calls: 17
-dev.nvme.1.ioq.0.num_cmds: 17
-dev.nvme.1.ioq.0.cq_head: 17
-dev.nvme.1.ioq.0.sq_tail: 17
-dev.nvme.1.ioq.0.sq_head: 17
+dev.nvme.1.ioq.0.num_intr_handler_calls: 5
+dev.nvme.1.ioq.0.num_cmds: 5
+dev.nvme.1.ioq.0.cq_head: 5
+dev.nvme.1.ioq.0.sq_tail: 5
+dev.nvme.1.ioq.0.sq_head: 5
 dev.nvme.1.ioq.0.num_trackers: 128
 dev.nvme.1.ioq.0.num_entries: 256
 dev.nvme.1.adminq.dump_debug: 0
@@ -173,7 +173,7 @@ dev.nvme.1.adminq.num_recovery_nolock: 0
 dev.nvme.1.adminq.num_ignored: 0
 dev.nvme.1.adminq.num_failures: 0
 dev.nvme.1.adminq.num_retries: 0
-dev.nvme.1.adminq.num_intr_handler_calls: 10
+dev.nvme.1.adminq.num_intr_handler_calls: 11
 dev.nvme.1.adminq.num_cmds: 17
 dev.nvme.1.adminq.cq_head: 12
 dev.nvme.1.adminq.sq_tail: 17
@@ -188,7 +188,7 @@ dev.nvme.1.num_recovery_nolock: 0
 dev.nvme.1.num_ignored: 0
 dev.nvme.1.num_failures: 0
 dev.nvme.1.num_retries: 0
-dev.nvme.1.num_intr_handler_calls: 44
+dev.nvme.1.num_intr_handler_calls: 45
 dev.nvme.1.num_cmds: 51
 dev.nvme.1.timeout_period: 30
 dev.nvme.1.admin_timeout_period: 60
@@ -208,11 +208,11 @@ dev.nvme.0.ioq.1.num_recovery_nolock: 0
 dev.nvme.0.ioq.1.num_ignored: 0
 dev.nvme.0.ioq.1.num_failures: 0
 dev.nvme.0.ioq.1.num_retries: 0
-dev.nvme.0.ioq.1.num_intr_handler_calls: 14
-dev.nvme.0.ioq.1.num_cmds: 14
-dev.nvme.0.ioq.1.cq_head: 14
-dev.nvme.0.ioq.1.sq_tail: 14
-dev.nvme.0.ioq.1.sq_head: 13
+dev.nvme.0.ioq.1.num_intr_handler_calls: 25
+dev.nvme.0.ioq.1.num_cmds: 25
+dev.nvme.0.ioq.1.cq_head: 25
+dev.nvme.0.ioq.1.sq_tail: 25
+dev.nvme.0.ioq.1.sq_head: 24
 dev.nvme.0.ioq.1.num_trackers: 128
 dev.nvme.0.ioq.1.num_entries: 256
 dev.nvme.0.ioq.0.dump_debug: 0
@@ -221,11 +221,11 @@ dev.nvme.0.ioq.0.num_recovery_nolock: 0
 dev.nvme.0.ioq.0.num_ignored: 0
 dev.nvme.0.ioq.0.num_failures: 0
 dev.nvme.0.ioq.0.num_retries: 0
-dev.nvme.0.ioq.0.num_intr_handler_calls: 19
-dev.nvme.0.ioq.0.num_cmds: 19
-dev.nvme.0.ioq.0.cq_head: 19
-dev.nvme.0.ioq.0.sq_tail: 19
-dev.nvme.0.ioq.0.sq_head: 18
+dev.nvme.0.ioq.0.num_intr_handler_calls: 8
+dev.nvme.0.ioq.0.num_cmds: 8
+dev.nvme.0.ioq.0.cq_head: 8
+dev.nvme.0.ioq.0.sq_tail: 8
+dev.nvme.0.ioq.0.sq_head: 7
 dev.nvme.0.ioq.0.num_trackers: 128
 dev.nvme.0.ioq.0.num_entries: 256
 dev.nvme.0.adminq.dump_debug: 0
@@ -263,6 +263,13 @@ dev.nvme.0.%location: slot=5 function=0 dbsf=pci0:0:5:0
 dev.nvme.0.%driver: nvme
 dev.nvme.0.%desc: Generic NVMe Device
 dev.nvme.%parent: 
+dev.vtblk.3.writecache_mode: 1
+dev.vtblk.3.%iommu: 
+dev.vtblk.3.%parent: virtio_pci4
+dev.vtblk.3.%pnpinfo: vendor=0x00001af4 device=0x1001 subvendor=0x1af4 device_type=0x00000002
+dev.vtblk.3.%location: 
+dev.vtblk.3.%driver: vtblk
+dev.vtblk.3.%desc: VirtIO Block Adapter
 dev.vtblk.2.writecache_mode: 1
 dev.vtblk.2.%iommu: 
 dev.vtblk.2.%parent: virtio_pci3
@@ -285,6 +292,15 @@ dev.vtblk.0.%location:
 dev.vtblk.0.%driver: vtblk
 dev.vtblk.0.%desc: VirtIO Block Adapter
 dev.vtblk.%parent: 
+dev.virtio_pci.4.negotiated_features: 0x10002644 <RingIndirectDesc,Discard,Topology,FlushCmd,BlockSize,MaxNumSegs>
+dev.virtio_pci.4.host_features: 0x10002644 <RingIndirectDesc,Discard,Topology,FlushCmd,BlockSize,MaxNumSegs>
+dev.virtio_pci.4.nvqs: 1
+dev.virtio_pci.4.%iommu: rid=0x50
+dev.virtio_pci.4.%parent: pci0
+dev.virtio_pci.4.%pnpinfo: vendor=0x1af4 device=0x1001 subvendor=0x1af4 subdevice=0x0002 class=0x010000
+dev.virtio_pci.4.%location: slot=10 function=0 dbsf=pci0:0:10:0
+dev.virtio_pci.4.%driver: virtio_pci
+dev.virtio_pci.4.%desc: VirtIO PCI (legacy) Block adapter
 dev.virtio_pci.3.negotiated_features: 0x10002644 <RingIndirectDesc,Discard,Topology,FlushCmd,BlockSize,MaxNumSegs>
 dev.virtio_pci.3.host_features: 0x10002644 <RingIndirectDesc,Discard,Topology,FlushCmd,BlockSize,MaxNumSegs>
 dev.virtio_pci.3.nvqs: 1
