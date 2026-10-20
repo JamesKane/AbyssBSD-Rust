@@ -139,6 +139,33 @@ records FreeBSD's baseline.
 | `pipe.pingpong` | One byte to the partner over one pipe and back over another. One op = one round trip |
 | `pipe.bw` | 64 KiB `write`s to a partner that reads and discards. One op = one write |
 
+## Suite `p5`
+
+The file systems, in the same `ubench` binary: `/tmp/ubench p5`, as root. It formats the VM's NVMe
+scratch disk (`/rescue/newfs -U /dev/nda0`: UFS2 with soft updates, FreeBSD's default without a
+journal), mounts it on `/bench` and a tmpfs on `/benchtmp` with `nmount`, and runs every benchmark
+on each, named `fs.ufs.*` and `fs.tmpfs.*`. The bench disk also carries `tree.tar` (`base.txz`'s
+`/usr/share` and `/usr/include`, about 25,600 files and 124 MiB, uncompressed so the benchmark
+measures the file system rather than xz) and `fsx` (built from the release's `src.txz`; it is under
+the APSL and is not kept in this repository). Throughput benchmarks follow the `p4` rules; the
+others run three rounds and report the median.
+
+| Name | Operation |
+|---|---|
+| `stat.hit` | `stat` of `<fs>/a/b/c/file` (a name-cache hit). One op = one `stat` |
+| `stat.miss` | `stat` of `<fs>/a/b/c/missing`, which fails with `ENOENT` (a negative-entry hit) |
+| `open_close` | `open(O_RDONLY)` and `close` of the `stat.hit` file |
+| `readdir` | `getdirentries` over a 10,000-entry directory with a 64 KiB buffer. One op = one entry |
+| `create`, `rename`, `unlink` | Per round, 1,000 files created with `O_CREAT \| O_EXCL` and closed, then each renamed in the same directory, then each unlinked, timed apart. One op = one file |
+| `seq_write` | Rewrite a 64 MiB file from offset 0 in 64 KiB `write`s (opened with `O_TRUNC`, no `fsync`). One op = one write |
+| `seq_read.warm` | Sequential 64 KiB `pread`s of the 64 MiB file, which is in the cache |
+| `seq_read.cold` | UFS only: unmount and mount `/bench`, then read the whole file in 64 KiB `read`s |
+| `rand_read`, `rand_write` | 4 KiB `pread`/`pwrite` at random page-aligned offsets of the 64 MiB file |
+| `fsync` | `pwrite` 4 KiB at offset 0 of a 1 MiB file, then `fsync` |
+| `extract` | `/rescue/tar -xf tree.tar` into an empty directory (removed with `rm -rf` before each round, untimed). One op = one extraction |
+| `find` | One `fts` walk of the extracted tree with `FTS_PHYSICAL`, every entry `stat`'ed. One op = one walk |
+| `fsx` | `fsx -q -N 10000 -S <round>` on a file in the file system. One op = one run |
+
 ## Suite `diag`
 
 For investigation, not gating: `cargo xtask perf --suite diag`. AbyssBSD reports the cost of the

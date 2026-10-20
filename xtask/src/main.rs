@@ -31,7 +31,7 @@ commands:
   image       --arch <a> [--release] [--ktest]           build a GPT disk image with an ESP
   run         --arch <a> [--release] [--ktest] [--smp N] [--mem SIZE] [--gdb] [--display]
   test        [--tier unit|boot|all] [--arch <a|all>]    run tests (default: all tiers)
-  perf        [--suite p2|p3|p4|diag] [--runs N] [--prepare] [--freebsd-only]
+  perf        [--suite p2|p3|p4|p5|diag] [--runs N] [--prepare] [--freebsd-only]
                                                          compare with FreeBSD in bhyve (server only)
   ubench      [--arch <a|all>] [--runs N] [--bhyve]      the P4 suite on AbyssBSD alone (QEMU, or bhyve on the server)
   freebsd-shell                                          run the boot-to-shell script against FreeBSD (server only)

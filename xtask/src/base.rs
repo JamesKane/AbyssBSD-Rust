@@ -255,6 +255,26 @@ pub(crate) fn cc_static(arch: Arch, source: &Path, out: &Path) -> Result<()> {
     )
 }
 
+/// [`cc_static`] for third-party sources (FreeBSD's test programs): their
+/// warnings are not ours to fix.
+pub(crate) fn cc_static_foreign(arch: Arch, source: &Path, out: &Path) -> Result<()> {
+    let root = sysroot(arch)?;
+    let mut cc = if cfg!(target_os = "freebsd") {
+        Command::new("cc")
+    } else {
+        let mut c = Command::new("clang");
+        c.arg("-fuse-ld=lld");
+        c
+    };
+    util::run(
+        cc.arg(format!("--target={}", arch.clang_target()))
+            .arg(format!("--sysroot={}", root.display()))
+            .args(["-static", "-s", "-O2", "-w", "-o"])
+            .arg(out)
+            .arg(source),
+    )
+}
+
 /// The memory-disk image for `arch`, if `fetch-base` has run: `/rescue`,
 /// an empty `/dev`, and each `tests/user/*.c` built into
 /// `usr/tests/abyss/` (rebuilt when its source or xtask changes), then

@@ -8,18 +8,25 @@
  * specified in tests/perf/README.md; it prints the kbench line format.
  *
  *	./ubench p4
+ *	./ubench p5	(as root: makes and mounts its file systems)
  *
- * It uses Tier A system calls (docs/COMPATIBILITY.md §2.1), plus
- * cpuset_setaffinity to bind itself as kbench binds its workers.
+ * p4 uses Tier A system calls (docs/COMPATIBILITY.md §2.1), plus
+ * cpuset_setaffinity to bind itself as kbench binds its workers. p5 adds
+ * the file-system calls, and runs /rescue's newfs, tar, and rm, and fsx.
  */
 
 #include <sys/param.h>
 #include <sys/cpuset.h>
 #include <sys/mman.h>
+#include <sys/mount.h>
+#include <sys/stat.h>
+#include <sys/uio.h>
 #include <sys/wait.h>
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <fts.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -35,6 +42,13 @@
 #define	UB_COW		(16UL << 20)	/* vm.fault.cow region */
 #define	UB_PIPE_BW	65536		/* pipe.bw transfer size */
 #define	UB_EXEC_CHAIN	100		/* execs per proc.exec round */
+#define	UB_DIR_ENTRIES	10000		/* fs.*.readdir directory size */
+#define	UB_STORM	1000		/* files per create/rename/unlink round */
+#define	UB_FILE		(64UL << 20)	/* fs.*.seq_* and rand_* file size */
+#define	UB_IO		65536		/* fs.*.seq_* transfer size */
+#define	UB_DISK		"/dev/nda0"	/* the scratch disk p5 formats */
+#define	UB_TREE		"/tmp/tree.tar"	/* fs.*.extract input */
+#define	UB_FSX		"/tmp/fsx"
 
 static const char *self;
 
@@ -476,6 +490,434 @@ suite_p4(void)
 	partner_done(&pp);
 }
 
+
+/*
+ * Suite p5: the file systems. Each benchmark runs on a UFS2 file system
+ * (newfs -U on the scratch disk: soft updates, FreeBSD's default without a
+ * journal) and on tmpfs, as fs.ufs.* and fs.tmpfs.*.
+ */
+
+#define	UB_UFS		"/bench"
+#define	UB_TMPFS	"/benchtmp"
+
+/* Runs `argv` (a full path first) with output discarded, and waits. */
+static void
+run_quiet(char *const argv[])
+{
+	pid_t pid = vfork();
+
+	if (pid < 0)
+		die("vfork");
+	if (pid == 0) {
+		int null = open("/dev/null", O_WRONLY);
+
+		if (null >= 0) {
+			dup2(null, 1);
+			dup2(null, 2);
+		}
+		execv(argv[0], argv);
+		_exit(127);
+	}
+	reap(pid);
+}
+
+static void
+iov_set(struct iovec *iov, const char *name, const char *value)
+{
+	iov[0].iov_base = (void *)(uintptr_t)name;
+	iov[0].iov_len = strlen(name) + 1;
+	iov[1].iov_base = (void *)(uintptr_t)value;
+	iov[1].iov_len = strlen(value) + 1;
+}
+
+static void
+mount_fs(const char *type, const char *path, const char *from)
+{
+	struct iovec iov[6];
+	int n = 4;
+
+	iov_set(&iov[0], "fstype", type);
+	iov_set(&iov[2], "fspath", path);
+	if (from != NULL) {
+		iov_set(&iov[4], "from", from);
+		n = 6;
+	}
+	if (mkdir(path, 0755) != 0 && errno != EEXIST)
+		die(path);
+	if (nmount(iov, n, 0) != 0)
+		die("nmount");
+}
+
+/* `<dir>/<name>`, in a static buffer per slot. */
+static const char *
+at(int slot, const char *dir, const char *name)
+{
+	static char buf[4][PATH_MAX];
+
+	snprintf(buf[slot], sizeof(buf[slot]), "%s/%s", dir, name);
+	return (buf[slot]);
+}
+
+static void
+create_file(const char *path, size_t size)
+{
+	static char chunk[UB_IO];
+	int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+
+	if (fd < 0)
+		die(path);
+	for (size_t off = 0; off < size; off += sizeof(chunk))
+		if (write(fd, chunk, sizeof(chunk)) != sizeof(chunk))
+			die("write");
+	if (fsync(fd) != 0)
+		die("fsync");
+	close(fd);
+}
+
+static const char *fs_hit, *fs_miss;
+
+static uint64_t
+op_stat_hit(void *arg __unused)
+{
+	struct stat st;
+
+	for (int i = 0; i < 1000; i++)
+		if (stat(fs_hit, &st) != 0)
+			die("stat");
+	return (1000);
+}
+
+static uint64_t
+op_stat_miss(void *arg __unused)
+{
+	struct stat st;
+
+	for (int i = 0; i < 1000; i++)
+		if (stat(fs_miss, &st) == 0 || errno != ENOENT)
+			die("stat of a missing file");
+	return (1000);
+}
+
+static uint64_t
+op_open_close(void *arg __unused)
+{
+	for (int i = 0; i < 1000; i++) {
+		int fd = open(fs_hit, O_RDONLY);
+
+		if (fd < 0)
+			die("open");
+		close(fd);
+	}
+	return (1000);
+}
+
+/* One pass over a large directory; one op = one entry. */
+static uint64_t
+op_readdir(void *arg)
+{
+	static char buf[65536];
+	uint64_t entries = 0;
+	off_t base;
+	ssize_t n;
+	int fd = open(arg, O_RDONLY | O_DIRECTORY);
+
+	if (fd < 0)
+		die("open directory");
+	while ((n = getdirentries(fd, buf, sizeof(buf), &base)) > 0) {
+		for (char *p = buf; p < buf + n;
+		    p += ((struct dirent *)(void *)p)->d_reclen)
+			entries++;
+	}
+	if (n < 0)
+		die("getdirentries");
+	close(fd);
+	return (entries);
+}
+
+/* Creates, renames, and unlinks UB_STORM files per round, timed apart. */
+static void
+bench_storms(const char *fs, const char *dir)
+{
+	double vc[UB_ROUNDS], vr[UB_ROUNDS], vu[UB_ROUNDS];
+	char a[PATH_MAX], b[PATH_MAX], name[64];
+	uint64_t t0, t1, t2, t3;
+
+	if (mkdir(dir, 0755) != 0 && errno != EEXIST)
+		die("mkdir");
+	for (int r = 0; r < UB_ROUNDS; r++) {
+		t0 = now();
+		for (int i = 0; i < UB_STORM; i++) {
+			snprintf(a, sizeof(a), "%s/f%d", dir, i);
+			int fd = open(a, O_WRONLY | O_CREAT | O_EXCL, 0644);
+
+			if (fd < 0)
+				die("create");
+			close(fd);
+		}
+		t1 = now();
+		for (int i = 0; i < UB_STORM; i++) {
+			snprintf(a, sizeof(a), "%s/f%d", dir, i);
+			snprintf(b, sizeof(b), "%s/g%d", dir, i);
+			if (rename(a, b) != 0)
+				die("rename");
+		}
+		t2 = now();
+		for (int i = 0; i < UB_STORM; i++) {
+			snprintf(b, sizeof(b), "%s/g%d", dir, i);
+			if (unlink(b) != 0)
+				die("unlink");
+		}
+		t3 = now();
+		vc[r] = (double)(t1 - t0) / UB_STORM;
+		vr[r] = (double)(t2 - t1) / UB_STORM;
+		vu[r] = (double)(t3 - t2) / UB_STORM;
+	}
+	snprintf(name, sizeof(name), "fs.%s.create", fs);
+	report(name, vc);
+	snprintf(name, sizeof(name), "fs.%s.rename", fs);
+	report(name, vr);
+	snprintf(name, sizeof(name), "fs.%s.unlink", fs);
+	report(name, vu);
+}
+
+/* Rewrites the whole file sequentially; one op = one UB_IO write. */
+static void
+bench_seq_write(const char *name, const char *path)
+{
+	static char chunk[UB_IO];
+	double v[UB_ROUNDS];
+
+	for (int r = 0; r < UB_ROUNDS; r++) {
+		int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+		uint64_t t0;
+
+		if (fd < 0)
+			die("open");
+		t0 = now();
+		for (size_t off = 0; off < UB_FILE; off += sizeof(chunk))
+			if (write(fd, chunk, sizeof(chunk)) != sizeof(chunk))
+				die("write");
+		v[r] = (double)(now() - t0) / (UB_FILE / UB_IO);
+		close(fd);
+	}
+	report(name, v);
+}
+
+static int io_fd;
+static off_t io_off;
+static uint64_t io_rng = 0x9e3779b97f4a7c15ULL;
+
+static uint64_t
+next_rand(void)
+{
+	io_rng ^= io_rng << 13;
+	io_rng ^= io_rng >> 7;
+	io_rng ^= io_rng << 17;
+	return (io_rng);
+}
+
+/* Sequential UB_IO reads, wrapping at the end; warm. */
+static uint64_t
+op_seq_read(void *arg __unused)
+{
+	static char chunk[UB_IO];
+
+	for (int i = 0; i < 64; i++) {
+		if (pread(io_fd, chunk, sizeof(chunk), io_off) != sizeof(chunk))
+			die("pread");
+		io_off = (io_off + UB_IO) % UB_FILE;
+	}
+	return (64);
+}
+
+static uint64_t
+op_rand_read(void *arg __unused)
+{
+	for (int i = 0; i < 256; i++) {
+		off_t off = (off_t)(next_rand() % (UB_FILE / UB_PAGE)) * UB_PAGE;
+
+		if (pread(io_fd, io_buf, UB_PAGE, off) != UB_PAGE)
+			die("pread");
+	}
+	return (256);
+}
+
+static uint64_t
+op_rand_write(void *arg __unused)
+{
+	for (int i = 0; i < 256; i++) {
+		off_t off = (off_t)(next_rand() % (UB_FILE / UB_PAGE)) * UB_PAGE;
+
+		if (pwrite(io_fd, io_buf, UB_PAGE, off) != UB_PAGE)
+			die("pwrite");
+	}
+	return (256);
+}
+
+/* fsync latency: rewrite one block, then fsync. */
+static uint64_t
+op_fsync(void *arg __unused)
+{
+	for (int i = 0; i < 16; i++) {
+		if (pwrite(io_fd, io_buf, UB_PAGE, 0) != UB_PAGE)
+			die("pwrite");
+		if (fsync(io_fd) != 0)
+			die("fsync");
+	}
+	return (16);
+}
+
+/* Cold sequential read: unmount and mount UFS between rounds. */
+static void
+bench_cold_read(const char *path)
+{
+	static char chunk[UB_IO];
+	double v[UB_ROUNDS];
+
+	for (int r = 0; r < UB_ROUNDS; r++) {
+		uint64_t t0;
+		int fd;
+
+		if (unmount(UB_UFS, 0) != 0)
+			die("unmount");
+		mount_fs("ufs", UB_UFS, UB_DISK);
+		if ((fd = open(path, O_RDONLY)) < 0)
+			die("open");
+		t0 = now();
+		for (size_t off = 0; off < UB_FILE; off += sizeof(chunk))
+			if (read(fd, chunk, sizeof(chunk)) != sizeof(chunk))
+				die("read");
+		v[r] = (double)(now() - t0) / (UB_FILE / UB_IO);
+		close(fd);
+	}
+	report("fs.ufs.seq_read.cold", v);
+}
+
+/* Extracts the tree; one op = one whole extraction. */
+static void
+bench_extract(const char *name, const char *dir)
+{
+	char *rm[] = { "/rescue/rm", "-rf", (char *)(uintptr_t)dir, NULL };
+	char *tar[] = { "/rescue/tar", "-xf", UB_TREE, "-C",
+	    (char *)(uintptr_t)dir, NULL };
+	double v[UB_ROUNDS];
+
+	for (int r = 0; r < UB_ROUNDS; r++) {
+		uint64_t t0;
+
+		run_quiet(rm);
+		if (mkdir(dir, 0755) != 0)
+			die("mkdir");
+		t0 = now();
+		run_quiet(tar);
+		v[r] = (double)(now() - t0);
+	}
+	report(name, v);
+}
+
+/* One walk of the extracted tree, every entry stat'ed (as find(1) does). */
+static uint64_t
+op_find(void *arg)
+{
+	char *paths[] = { arg, NULL };
+	FTS *fts = fts_open(paths, FTS_PHYSICAL | FTS_NOCHDIR, NULL);
+	FTSENT *e;
+
+	if (fts == NULL)
+		die("fts_open");
+	while ((e = fts_read(fts)) != NULL)
+		;
+	fts_close(fts);
+	return (1);
+}
+
+/* FreeBSD's fsx with a fixed seed; one op = one run. */
+static void
+bench_fsx(const char *name, const char *dir)
+{
+	double v[UB_ROUNDS];
+
+	for (int r = 0; r < UB_ROUNDS; r++) {
+		char seed[16];
+		char *fsx[] = { UB_FSX, "-q", "-N", "10000", "-S", seed,
+		    (char *)(uintptr_t)at(3, dir, "fsx.file"), NULL };
+		uint64_t t0;
+
+		snprintf(seed, sizeof(seed), "%d", r + 1);
+		t0 = now();
+		run_quiet(fsx);
+		v[r] = (double)(now() - t0);
+	}
+	report(name, v);
+}
+
+static void
+suite_fs(const char *fs, const char *root)
+{
+	char name[64], d[PATH_MAX];
+
+#define	NAME(n)	(snprintf(name, sizeof(name), "fs.%s.%s", fs, n), name)
+	snprintf(d, sizeof(d), "%s/a/b/c", root);
+	mkdir(at(0, root, "a"), 0755);
+	mkdir(at(0, root, "a/b"), 0755);
+	if (mkdir(d, 0755) != 0)
+		die("mkdir");
+	create_file(at(1, d, "file"), 0);
+	fs_hit = at(1, d, "file");
+	fs_miss = at(2, d, "missing");
+	throughput(NAME("stat.hit"), op_stat_hit, NULL);
+	throughput(NAME("stat.miss"), op_stat_miss, NULL);
+	throughput(NAME("open_close"), op_open_close, NULL);
+
+	if (mkdir(at(0, root, "big"), 0755) != 0)
+		die("mkdir");
+	for (int i = 0; i < UB_DIR_ENTRIES; i++) {
+		char n[32];
+
+		snprintf(n, sizeof(n), "big/entry-%05d", i);
+		create_file(at(0, root, n), 0);
+	}
+	throughput(NAME("readdir"), op_readdir, (void *)(uintptr_t)at(0, root, "big"));
+
+	bench_storms(fs, at(0, root, "storm"));
+
+	bench_seq_write(NAME("seq_write"), at(1, root, "data"));
+	create_file(at(1, root, "data"), UB_FILE);
+	if ((io_fd = open(at(1, root, "data"), O_RDWR)) < 0)
+		die("open");
+	throughput(NAME("seq_read.warm"), op_seq_read, NULL);
+	throughput(NAME("rand_read"), op_rand_read, NULL);
+	throughput(NAME("rand_write"), op_rand_write, NULL);
+	close(io_fd);
+	if (strcmp(fs, "ufs") == 0)
+		bench_cold_read(at(1, root, "data"));
+
+	create_file(at(1, root, "small"), 1 << 20);
+	if ((io_fd = open(at(1, root, "small"), O_RDWR)) < 0)
+		die("open");
+	throughput(NAME("fsync"), op_fsync, NULL);
+	close(io_fd);
+
+	bench_extract(NAME("extract"), at(1, root, "tree"));
+	throughput(NAME("find"), op_find, (void *)(uintptr_t)at(1, root, "tree"));
+	bench_fsx(NAME("fsx"), root);
+#undef NAME
+}
+
+static void
+suite_p5(void)
+{
+	char *newfs[] = { "/rescue/newfs", "-U", UB_DISK, NULL };
+
+	run_quiet(newfs);
+	mount_fs("ufs", UB_UFS, UB_DISK);
+	mount_fs("tmpfs", UB_TMPFS, NULL);
+	suite_fs("ufs", UB_UFS);
+	suite_fs("tmpfs", UB_TMPFS);
+	if (unmount(UB_UFS, 0) != 0 || unmount(UB_TMPFS, 0) != 0)
+		die("unmount");
+}
+
 int
 main(int argc, char **argv)
 {
@@ -484,14 +926,19 @@ main(int argc, char **argv)
 		return (0);
 	if (argc == 5 && strcmp(argv[1], "chain") == 0)
 		return (exec_chain(argv));
-	if (argc != 2 || strcmp(argv[1], "p4") != 0) {
-		fprintf(stderr, "usage: ubench p4\n");
+	if (argc != 2 || (strcmp(argv[1], "p4") != 0 &&
+	    strcmp(argv[1], "p5") != 0)) {
+		fprintf(stderr, "usage: ubench p4 | p5\n");
 		return (2);
 	}
-	printf("kbench begin p4 cpus=%ld\n", sysconf(_SC_NPROCESSORS_ONLN));
+	printf("kbench begin %s cpus=%ld\n", argv[1],
+	    sysconf(_SC_NPROCESSORS_ONLN));
 	fflush(stdout);
 	bind_cpu(1);
-	suite_p4();
-	printf("kbench end p4\n");
+	if (strcmp(argv[1], "p4") == 0)
+		suite_p4();
+	else
+		suite_p5();
+	printf("kbench end %s\n", argv[1]);
 	return (0);
 }

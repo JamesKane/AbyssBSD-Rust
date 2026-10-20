@@ -27,7 +27,7 @@ use crate::qemu::{Outcome, Vm, Vmm};
 use crate::util::{self, Result};
 const VM_IMAGE: &str = "FreeBSD-15.1-RELEASE-amd64-ufs.raw.xz";
 /// Bumped whenever [`prepare_image`] changes what it writes.
-const PREP_VERSION: &str = "16";
+const PREP_VERSION: &str = "17";
 /// The bound: AbyssBSD's median over FreeBSD's.
 const BOUND: f64 = 1.02;
 /// FreeBSD-side coefficient of variation above which a benchmark cannot
@@ -65,8 +65,8 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     args.finish()?;
     // `diag` holds AbyssBSD-side diagnostics, some with FreeBSD
     // counterparts; it is for investigation, not gating.
-    if !["p2", "p3", "p4", "diag"].contains(&suite.as_str()) {
-        return Err(format!("unknown suite `{suite}` (p2, p3, p4, diag)").into());
+    if !["p2", "p3", "p4", "p5", "diag"].contains(&suite.as_str()) {
+        return Err(format!("unknown suite `{suite}` (p2, p3, p4, p5, diag)").into());
     }
     if !cfg!(target_os = "freebsd") {
         return Err(format!("perf needs bhyve: run it on the build server\n{USAGE}").into());
@@ -107,9 +107,16 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
         .join(format!("{}-{}", stamp.trim(), rev));
     fs::create_dir_all(out.join("logs"))?;
 
-    // The userland suites run ubench; the earlier ones, kbench.
-    let bench = if suite == "p4" { &ubench } else { &kbench };
-    let bench_disk = make_bench_disk(&out, bench, &suite)?;
+    // The userland suites run ubench; the earlier ones, kbench. The file
+    // systems' suite also needs its tree and fsx beside it.
+    let userland = suite == "p4" || suite == "p5";
+    let bench = if userland { &ubench } else { &kbench };
+    let extras = if suite == "p5" {
+        vec![build_tree(&dirs)?, build_fsx(&dirs)?]
+    } else {
+        Vec::new()
+    };
+    let bench_disk = make_bench_disk(&out, bench, &suite, &extras)?;
     let opts = build::Options {
         release: true,
         ktest: false,
@@ -377,8 +384,8 @@ fn configure_guest(mnt: &Path) -> Result<()> {
              \t\tsh /mnt/run.sh\n\
              \t\tumount /mnt\n\
              \telse\n\
-             \t\trm -f /tmp/kbench.ko /tmp/ubench\n\
-             \t\tcp /mnt/kbench.ko /mnt/ubench /mnt/suite /tmp/ 2>/dev/null\n\
+             \t\trm -f /tmp/kbench.ko /tmp/ubench /tmp/tree.tar /tmp/fsx\n\
+             \t\tcp /mnt/kbench.ko /mnt/ubench /mnt/suite /mnt/tree.tar /mnt/fsx /tmp/ 2>/dev/null\n\
              \t\tumount /mnt\n\
              \t\tfor irq in $(vmstat -ai | awk '/virtio_pci|nvme/ { sub(/^irq/, \"\", $1); sub(/:$/, \"\", $1); print $1 }'); do\n\
              \t\t\tcpuset -l 0 -x \"$irq\"\n\
@@ -444,6 +451,72 @@ fn build_kbench(dirs: &Dirs) -> Result<PathBuf> {
             .arg(format!("MAKEOBJDIR={}", obj.display())),
     )?;
     Ok(obj.join("kbench.ko"))
+}
+
+/// Extracts one file or directory of the release's `src.txz` into the
+/// perf directory's `src/`, once.
+fn release_source(dirs: &Dirs, path: &str) -> Result<PathBuf> {
+    let src = dirs.perf.join("src");
+    let at = src.join(path);
+    if !at.exists() {
+        let txz = dirs.dist.join("src.txz");
+        verify(&txz, "src.txz", &dirs.dist.join("MANIFEST"))?;
+        fs::create_dir_all(&src)?;
+        eprintln!("xtask: perf: extracting {path}");
+        util::run(
+            Command::new("tar")
+                .arg("-xf")
+                .arg(&txz)
+                .arg("-C")
+                .arg(&src)
+                .arg(path),
+        )?;
+    }
+    Ok(at)
+}
+
+/// Builds FreeBSD's `fsx` (from the release's sources: it is under the
+/// APSL, and never copied into this repository) as a static binary.
+fn build_fsx(dirs: &Dirs) -> Result<PathBuf> {
+    let source = release_source(dirs, "usr/src/tools/regression/fsx")?.join("fsx.c");
+    let out = dirs.perf.join("fsx");
+    base::cc_static_foreign(Arch::X86_64, &source, &out)?;
+    Ok(out)
+}
+
+/// The tree `fs.*.extract` unpacks and `fs.*.find` walks: `base.txz`'s
+/// `/usr/share` and `/usr/include` (about 25,600 files, 124 MiB) as an
+/// uncompressed tar, so the benchmark measures the file system, not xz.
+fn build_tree(dirs: &Dirs) -> Result<PathBuf> {
+    let out = dirs.perf.join("tree.tar");
+    if out.exists() {
+        return Ok(out);
+    }
+    let txz = base::dir(Arch::X86_64).join("base.txz");
+    let work = dirs.perf.join("tree");
+    let _ = fs::remove_dir_all(&work);
+    fs::create_dir_all(&work)?;
+    eprintln!("xtask: perf: building {}", out.display());
+    util::run(
+        Command::new("tar")
+            .arg("-xf")
+            .arg(&txz)
+            .arg("-C")
+            .arg(&work)
+            .args(["./usr/share", "./usr/include"]),
+    )?;
+    let tmp = out.with_extension("tar.tmp");
+    util::run(
+        Command::new("tar")
+            .arg("-cf")
+            .arg(&tmp)
+            .arg("-C")
+            .arg(&work)
+            .arg("usr"),
+    )?;
+    fs::rename(&tmp, &out)?;
+    let _ = fs::remove_dir_all(&work);
+    Ok(out)
 }
 
 /// Builds `ubench`, the userland suites' static binary, for the bhyve guests.
@@ -531,20 +604,25 @@ pub(crate) fn cmd_ubench(mut args: Args) -> Result<()> {
 }
 
 /// The second disk: a UFS file system holding the benchmark (`kbench.ko`,
-/// or the `ubench` binary) and the suite name. Attached to both kernels'
-/// VMs, so the configurations match.
-fn make_bench_disk(out: &Path, bench: &Path, suite: &str) -> Result<PathBuf> {
+/// or the `ubench` binary), the suite name, and the suite's `extras`.
+/// Attached to both kernels' VMs, so the configurations match.
+fn make_bench_disk(out: &Path, bench: &Path, suite: &str, extras: &[PathBuf]) -> Result<PathBuf> {
     let dir = out.join("bench-disk");
     fs::create_dir_all(&dir)?;
-    let name = bench.file_name().ok_or("bench has no file name")?;
-    fs::copy(bench, dir.join(name))?;
+    for file in core::iter::once(bench).chain(extras.iter().map(PathBuf::as_path)) {
+        let name = file.file_name().ok_or("bench file has no name")?;
+        fs::copy(file, dir.join(name))?;
+    }
     fs::write(dir.join("suite"), suite)?;
-    // The NVMe disk the P3 suite reads (zeros are fine for reads).
-    fs::File::create(out.join("nvme.img"))?.set_len(64 << 20)?;
+    // The NVMe disk: the P3 suite reads it (zeros are fine), the P5 suite
+    // formats it. Sparse.
+    let nvme = if suite == "p5" { 4 << 30 } else { 64 << 20 };
+    fs::File::create(out.join("nvme.img"))?.set_len(nvme)?;
     let disk = out.join("bench-disk.img");
+    // Sized to fit, with room for makefs's own overhead.
     util::run(
         Command::new("makefs")
-            .args(["-t", "ffs", "-s", "16m"])
+            .args(["-t", "ffs", "-M", "16m", "-f", "64", "-b", "10%"])
             .arg(&disk)
             .arg(&dir),
     )?;
