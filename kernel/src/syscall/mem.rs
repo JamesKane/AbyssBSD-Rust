@@ -27,7 +27,29 @@ fn map_error(e: SpaceError) -> Errno {
         SpaceError::Map(MapError::NotMapped) => Errno::ENOMEM,
         SpaceError::Map(MapError::Protection) => Errno::EACCES,
         SpaceError::Map(_) => Errno::EINVAL,
+        SpaceError::Io => Errno::EIO,
     }
+}
+
+/// `msync(addr, len, flags)`: the dirty pages of the files mapped there go
+/// back (FreeBSD's `kern_msync`). `MS_INVALIDATE` drops nothing: pages are
+/// kept coherent with the file anyway.
+pub(super) fn msync(s: &Sleepable, addr: u64, len: u64, flags: u64) -> SysResult {
+    let flags = u32::try_from(flags).map_err(|_| Errno::EINVAL)?;
+    if flags & (MS_ASYNC | MS_INVALIDATE) == MS_ASYNC | MS_INVALIDATE {
+        return Err(Errno::EINVAL);
+    }
+    let start = addr & !(PAGE_SIZE - 1);
+    let end = addr
+        .checked_add(len)
+        .and_then(|e| e.checked_next_multiple_of(PAGE_SIZE))
+        .ok_or(Errno::EINVAL)?;
+    if start == end {
+        return Ok(0);
+    }
+    let (start, end) = pages(start, end - start).map_err(|_| Errno::ENOMEM)?;
+    in_space(|space| space.msync(s, start..end))?;
+    Ok(0)
 }
 
 /// `PROT_*` bits (and a `PROT_MAX`) as rights; anything else is invalid.

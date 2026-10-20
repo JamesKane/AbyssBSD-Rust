@@ -2745,7 +2745,9 @@ mod user_memory {
                 case \"$(ls -l x/h)\" in -rw-------*) ;; *) exit 3;; esac && \
                 tar -cf t.tar x && rm -r x && [ ! -e x ] && tar -xf t.tar && \
                 [ \"$(cat x/y/f)\" = hello ] && case \"$(ls -l x/l)\" in *' -> y/f') ;; *) exit 4;; esac && \
-                rm -rf x t.tar && [ ! -e x ] && [ ! -e t.tar ] && exit 7";
+                rm -rf x t.tar && [ ! -e x ] && [ ! -e t.tar ] && \
+                mkdir bin && cp /rescue/echo bin/echo && [ \"$(bin/echo from tmpfs)\" = 'from tmpfs' ] && \
+                rm -r bin && exit 7";
             let p = Process::spawn(
                 &s,
                 b"/rescue/sh",
@@ -2759,9 +2761,9 @@ mod user_memory {
     }
 
     ktest! {
-        /// FreeBSD's fsx on the tmpfs at `/tmp`, without mapped reads and
-        /// writes until the page cache (P5.3). Skipped when the memory disk
-        /// has no fsx (no FreeBSD tree beside this one to build it from).
+        /// FreeBSD's fsx on the tmpfs at `/tmp`, mapped reads and writes
+        /// included. Skipped when the memory disk has no fsx (no FreeBSD
+        /// tree beside this one to build it from).
         fn fsx_passes_on_tmpfs() {
             use crate::proc::Process;
             let s = cx();
@@ -2781,7 +2783,7 @@ mod user_memory {
             let p = Process::spawn(
                 &s,
                 FSX,
-                &[b"fsx", b"-q", b"-R", b"-W", b"-N", b"20000", b"-S", b"7", b"/tmp/fsx.data"],
+                &[b"fsx", b"-q", b"-N", b"20000", b"-S", b"7", b"/tmp/fsx.data"],
                 &[],
                 Some(hal::cpu_id()),
             )

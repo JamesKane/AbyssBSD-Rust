@@ -117,6 +117,20 @@ fn header_and_segments() {
 }
 
 #[test]
+fn the_head_of_a_file_parses_for_loading() {
+    // Only the start of the file: the program headers, not the sections.
+    let b = image(62, 8);
+    let head = &b[..0x200];
+    assert!(Elf::parse(head).is_err(), "the sections lie past the head");
+    let elf = Elf::parse_head(head).unwrap();
+    assert_eq!(elf.entry, BASE + 0x100);
+    assert_eq!(elf.segments().count(), 2);
+    assert_eq!(elf.sections().count(), 0);
+    // The program headers themselves must be there.
+    assert!(Elf::parse_head(&b[..80]).is_err());
+}
+
+#[test]
 fn relocations_x86_64() {
     let b = image(62, 8);
     let relocs = Elf::parse(&b).unwrap().relocations().unwrap();

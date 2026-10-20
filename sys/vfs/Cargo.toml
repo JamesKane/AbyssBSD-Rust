@@ -10,6 +10,7 @@ abi = { path = "../../lib/abi" }
 sched = { path = "../sched" }
 sync = { path = "../sync" }
 ustar = { path = "../../lib/ustar" }
+vm = { path = "../vm" }
 
 [lints]
 workspace = true

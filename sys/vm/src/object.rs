@@ -18,14 +18,21 @@
 //! shared by every mapping of the file; private mappings shadow it as
 //! usual. A pager object has a size, and has no backing object.
 //!
+//! A pager object may write its pages back (a file on a disk): it tracks
+//! which pages are dirty, and [`Object::sync`] writes them. Filling a page
+//! may sleep, so a fault never fills under its map lock: [`Object::lookup`]
+//! with `fill` false reports [`Found::Fill`], and the caller fills with
+//! [`Object::fill`] after letting the lock go, then looks again.
+//!
 //! Each object has its own spin lock, held for page lookups and inserts.
 //! Locks are taken top-down along a chain (shadow before backing), never
 //! the other way.
 //!
 //! Behavior reference: sys/vm/vm_object.c (shadow chains and collapse).
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use sync::SpinLock;
@@ -44,15 +51,30 @@ pub trait PageOps: Sync {
     fn alloc_filled(&self, fill: &mut dyn FnMut(&mut [u8])) -> Option<Pfn>;
     /// Returns a page that no page table maps any more.
     fn free(&self, pfn: Pfn);
+    /// Calls `f` with page `pfn`'s contents.
+    fn access(&self, pfn: Pfn, f: &mut dyn FnMut(&mut [u8]));
 }
 
-/// Where a pager object's pages come from.
+/// A pager could not move a page (an I/O error).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PagerError;
+
+/// Where a pager object's pages come from, and where dirty ones go.
 pub trait Pager: Send + Sync {
     /// The object's size in pages; a page past it does not exist.
     fn size(&self) -> PageIndex;
     /// Writes page `index`'s contents into `page` (a whole page, zero
-    /// past the end of the data).
-    fn fill(&self, index: PageIndex, page: &mut [u8]);
+    /// past the end of the data). May sleep.
+    fn fill(&self, index: PageIndex, page: &mut [u8]) -> Result<(), PagerError>;
+    /// Whether pages written through mappings or the page cache go back
+    /// to the pager (then the object tracks which are dirty).
+    fn writes_back(&self) -> bool {
+        false
+    }
+    /// Writes page `index` back. May sleep.
+    fn write_back(&self, _index: PageIndex, _page: &[u8]) -> Result<(), PagerError> {
+        Ok(())
+    }
 }
 
 /// Why a page lookup found nothing to map.
@@ -62,6 +84,8 @@ pub enum LookupError {
     OutOfMemory,
     /// Past the end of a pager object (`SIGBUS`).
     PastEnd,
+    /// The pager could not read the page (`SIGBUS`, or `EIO` to a read).
+    Io,
 }
 
 /// A page index within an object.
@@ -80,13 +104,20 @@ pub struct Object {
 
 struct Inner {
     pages: BTreeMap<PageIndex, Pfn>,
+    /// Pages written since they were last written back (only for pagers
+    /// that write back).
+    dirty: BTreeSet<PageIndex>,
+    /// Pages a shared mapping has mapped writable: writing one back
+    /// leaves it dirty, since writes through that mapping are not seen
+    /// (no page table is searched to take the write right back).
+    mapped_writable: BTreeSet<PageIndex>,
     /// The object this one shadows, and where this one's index 0 falls in
     /// it.
     backing: Option<(Arc<Object>, PageIndex)>,
 }
 
 /// Where a page lookup found the page.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub enum Found {
     /// In the object asked (the top of the chain): it may be written.
     Top(Pfn),
@@ -94,6 +125,9 @@ pub enum Found {
     Backing(Pfn),
     /// Nowhere in the chain: the page reads as zeros.
     Absent,
+    /// A pager object of the chain should have it but has not read it
+    /// yet: fill it (with no map lock held) and look again.
+    Fill(Arc<Object>, PageIndex),
 }
 
 impl Object {
@@ -103,6 +137,8 @@ impl Object {
         Arc::new(Self {
             inner: SpinLock::new(Inner {
                 pages: BTreeMap::new(),
+                dirty: BTreeSet::new(),
+                mapped_writable: BTreeSet::new(),
                 backing: None,
             }),
             pages_ops: ops,
@@ -118,6 +154,8 @@ impl Object {
         Arc::new(Self {
             inner: SpinLock::new(Inner {
                 pages: BTreeMap::new(),
+                dirty: BTreeSet::new(),
+                mapped_writable: BTreeSet::new(),
                 backing: Some((backing, offset)),
             }),
             pages_ops: ops,
@@ -133,6 +171,8 @@ impl Object {
         Arc::new(Self {
             inner: SpinLock::new(Inner {
                 pages: BTreeMap::new(),
+                dirty: BTreeSet::new(),
+                mapped_writable: BTreeSet::new(),
                 backing: None,
             }),
             pages_ops: ops,
@@ -158,11 +198,20 @@ impl Object {
     /// reaches, as [`Self::collapse`] does, if the look at this object
     /// shows there is some: a fault in a shared chain then pays nothing
     /// for it.
-    pub fn lookup(&self, index: PageIndex, fold: bool) -> Result<Found, LookupError> {
+    ///
+    /// With `fill` false, a page a pager object of the chain has not read
+    /// is reported as [`Found::Fill`] instead of read here.
+    pub fn lookup(
+        self: &Arc<Self>,
+        index: PageIndex,
+        fold: bool,
+        fill: bool,
+    ) -> Result<Found, LookupError> {
         if self.pager.is_some() {
-            if let Some(pfn) = self.page_or_fill(index)? {
+            if let Some(pfn) = self.page_or_fill(index, fill)? {
                 return Ok(Found::Top(pfn));
             }
+            return Ok(Found::Fill(Arc::clone(self), index));
         } else {
             let inner = self.inner.lock();
             if let Some(&pfn) = inner.pages.get(&index) {
@@ -176,15 +225,18 @@ impl Object {
             drop(inner);
             if foldable {
                 self.collapse();
-                return self.lookup(index, false);
+                return self.lookup(index, false, fill);
             }
         }
         let mut next = self.backing();
         let mut index = index;
         while let Some((object, off)) = next {
             index += off;
-            if let Some(pfn) = object.page_or_fill(index)? {
+            if let Some(pfn) = object.page_or_fill(index, fill)? {
                 return Ok(Found::Backing(pfn));
+            }
+            if object.pager.is_some() {
+                return Ok(Found::Fill(object, index));
             }
             next = object.backing();
         }
@@ -210,9 +262,9 @@ impl Object {
         None
     }
 
-    /// This object's page `index`: present, or filled now if this is a
-    /// pager object.
-    fn page_or_fill(&self, index: PageIndex) -> Result<Option<Pfn>, LookupError> {
+    /// This object's page `index`: present, or (with `fill`) filled now if
+    /// this is a pager object.
+    fn page_or_fill(&self, index: PageIndex, fill: bool) -> Result<Option<Pfn>, LookupError> {
         if let Some(&pfn) = self.inner.lock().pages.get(&index) {
             return Ok(Some(pfn));
         }
@@ -222,11 +274,19 @@ impl Object {
         if index >= pager.size() {
             return Err(LookupError::PastEnd);
         }
+        if !fill {
+            return Ok(None);
+        }
         // Fill outside the lock; a racing fill of the same page loses.
+        let mut failed = false;
         let new = self
             .pages_ops
-            .alloc_filled(&mut |page| pager.fill(index, page))
+            .alloc_filled(&mut |page| failed = pager.fill(index, page).is_err())
             .ok_or(LookupError::OutOfMemory)?;
+        if failed {
+            self.pages_ops.free(new);
+            return Err(LookupError::Io);
+        }
         let mut inner = self.inner.lock();
         if let Some(&pfn) = inner.pages.get(&index) {
             drop(inner);
@@ -277,6 +337,129 @@ impl Object {
         let mut doomed = keep.split_off(&end);
         core::mem::swap(&mut doomed, &mut keep);
         inner.pages.append(&mut keep);
+        drop(inner);
+        for pfn in doomed.into_values() {
+            self.pages_ops.free(pfn);
+        }
+    }
+
+    /// Page `index` of this object, read from its pager if need be (may
+    /// sleep: call with no map lock held).
+    pub fn fill(&self, index: PageIndex) -> Result<Pfn, LookupError> {
+        self.page_or_fill(index, true)?.ok_or(LookupError::PastEnd)
+    }
+
+    /// Page `index` of this object, if it holds it.
+    #[must_use]
+    pub fn page_here(&self, index: PageIndex) -> Option<Pfn> {
+        self.inner.lock().pages.get(&index).copied()
+    }
+
+    /// Page `index` of this object to write into: held, read from the
+    /// pager, or (for an anonymous object, or past the pager's data) a new
+    /// zeroed page.
+    pub fn page_for_write(&self, index: PageIndex) -> Result<Pfn, LookupError> {
+        match self.page_or_fill(index, true) {
+            Ok(Some(pfn)) => Ok(pfn),
+            Ok(None) | Err(LookupError::PastEnd) => self
+                .get_or_insert(index, None)
+                .ok_or(LookupError::OutOfMemory),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Calls `f` with page `pfn`'s contents (a page of this object).
+    pub fn access(&self, pfn: Pfn, f: &mut dyn FnMut(&mut [u8])) {
+        self.pages_ops.access(pfn, f);
+    }
+
+    /// Whether a pager supplies this object's pages.
+    #[must_use]
+    pub fn has_pager(&self) -> bool {
+        self.pager.is_some()
+    }
+
+    /// Whether written pages must go back to the pager.
+    #[must_use]
+    pub fn tracks_dirty(&self) -> bool {
+        self.pager.as_ref().is_some_and(|p| p.writes_back())
+    }
+
+    /// Records that page `index` was written.
+    pub fn mark_dirty(&self, index: PageIndex) {
+        if self.tracks_dirty() {
+            self.inner.lock().dirty.insert(index);
+        }
+    }
+
+    /// Records that a shared mapping maps page `index` writable (it was
+    /// just marked dirty): it stays dirty for good.
+    pub fn mark_mapped_writable(&self, index: PageIndex) {
+        if self.tracks_dirty() {
+            let mut inner = self.inner.lock();
+            inner.dirty.insert(index);
+            inner.mapped_writable.insert(index);
+        }
+    }
+
+    /// Whether page `index` was written since it was last written back.
+    #[must_use]
+    pub fn is_dirty(&self, index: PageIndex) -> bool {
+        self.inner.lock().dirty.contains(&index)
+    }
+
+    /// How many pages are dirty.
+    #[must_use]
+    pub fn dirty_pages(&self) -> usize {
+        self.inner.lock().dirty.len()
+    }
+
+    /// Writes the dirty pages in `[start, end)` back to the pager (each is
+    /// clean from just before its write; one that fails is dirty again).
+    pub fn sync(&self, start: PageIndex, end: PageIndex) -> Result<(), PagerError> {
+        let Some(pager) = &self.pager else {
+            return Ok(());
+        };
+        let todo: Vec<(PageIndex, Pfn)> = {
+            let mut inner = self.inner.lock();
+            let indexes: Vec<PageIndex> = inner.dirty.range(start..end).copied().collect();
+            let mut out = Vec::with_capacity(indexes.len());
+            for i in indexes {
+                if !inner.mapped_writable.contains(&i) {
+                    inner.dirty.remove(&i);
+                }
+                if let Some(&pfn) = inner.pages.get(&i) {
+                    out.push((i, pfn));
+                }
+            }
+            out
+        };
+        let mut result = Ok(());
+        for (i, pfn) in todo {
+            let mut r = Ok(());
+            self.pages_ops
+                .access(pfn, &mut |page| r = pager.write_back(i, page));
+            if r.is_err() {
+                self.inner.lock().dirty.insert(i);
+                result = r;
+            }
+        }
+        result
+    }
+
+    /// Cuts the object to `pages` pages: those past it go, if nothing but
+    /// the caller holds the object (no mapping can still reach them, since
+    /// every map entry and shadow holds a reference). Otherwise they stay
+    /// until the object goes: a mapping keeps seeing what it saw, as no
+    /// page table is searched for them here.
+    pub fn truncate(self: &Arc<Self>, pages: PageIndex) {
+        let mut inner = self.inner.lock();
+        let _ = inner.dirty.split_off(&pages);
+        let _ = inner.mapped_writable.split_off(&pages);
+        if Arc::strong_count(self) > 1 {
+            return;
+        }
+        let doomed = inner.pages.split_off(&pages);
         drop(inner);
         for pfn in doomed.into_values() {
             self.pages_ops.free(pfn);

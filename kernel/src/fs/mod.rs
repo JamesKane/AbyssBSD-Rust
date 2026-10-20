@@ -127,7 +127,12 @@ pub(crate) fn init() {
                 from: b"tmpfs".to_vec(),
                 io_size: 4096,
             },
-            Box::new(vfs::tmpfs::TmpFs::new(0o1777, 0, 0)),
+            Box::new(vfs::tmpfs::TmpFs::new(
+                0o1777,
+                0,
+                0,
+                crate::mm::space::page_ops(),
+            )),
         );
         if let Err(e) = ns.mount(&s, t, tmp, b"/tmp") {
             kprintln!("fs: tmpfs not mounted on /tmp ({e:?})");
@@ -374,12 +379,13 @@ impl vm::object::Pager for ResidentPager {
         (self.data.len() as u64).div_ceil(vm::PAGE_SIZE)
     }
 
-    fn fill(&self, index: u64, page: &mut [u8]) {
+    fn fill(&self, index: u64, page: &mut [u8]) -> Result<(), vm::object::PagerError> {
         let start = usize::try_from(index * vm::PAGE_SIZE).unwrap_or(usize::MAX);
         let src = self.data.get(start..).unwrap_or(&[]);
         let n = src.len().min(page.len());
         page[..n].copy_from_slice(&src[..n]);
         page[n..].fill(0);
+        Ok(())
     }
 }
 
@@ -389,9 +395,13 @@ impl vm::object::Pager for ResidentPager {
 static OBJECTS: SpinLock<BTreeMap<NodeId, Arc<vm::object::Object>>> =
     SpinLock::new(BTreeMap::new());
 
-/// `v`'s memory object, if it is a regular file that can be mapped (so
-/// far, the memory disk's files; the page cache brings the rest in P5.3).
+/// `v`'s memory object, if it is a regular file that can be mapped: its
+/// file system's (tmpfs's), or for a memory-disk file one over its
+/// resident contents, made at the first mapping and kept.
 pub(crate) fn object(s: &Sleepable, v: &Vnode) -> Option<Arc<vm::object::Object>> {
+    if let Some(o) = v.object(s) {
+        return Some(o);
+    }
     let data = v.resident(s)?;
     let mut objects = OBJECTS.lock();
     Some(Arc::clone(objects.entry(v.id()).or_insert_with(|| {

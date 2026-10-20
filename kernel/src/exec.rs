@@ -134,6 +134,7 @@ fn space_error(e: SpaceError) -> Errno {
     match e {
         SpaceError::OutOfMemory => Errno::ENOMEM,
         SpaceError::Map(_) => Errno::ENOEXEC,
+        SpaceError::Io => Errno::EIO,
     }
 }
 
@@ -186,11 +187,23 @@ pub(crate) fn load(
         crate::fs::cred(),
         vfs::ops::VEXEC,
     )?;
-    // Only files held in memory can be mapped until the page cache (P5.3).
-    let (Some(data), Some(object)) = (file.resident(s), crate::fs::object(s, file)) else {
-        return Err(Errno::ENOEXEC);
+    let object = crate::fs::object(s, file).ok_or(Errno::ENOEXEC)?;
+    // The headers, program headers, and branding note sit at the start:
+    // read that much (the memory disk's files are there already).
+    let head;
+    let data = match file.resident(s) {
+        Some(d) => d,
+        None => {
+            let size = usize::try_from(file.size(s)?).unwrap_or(usize::MAX);
+            let mut buf = alloc::vec![0u8; size.min(HEAD_MAX)];
+            let mut r = vfs::ReadBuf::new(&mut buf);
+            let n = file.read_at(s, 0, &mut r)?;
+            buf.truncate(n);
+            head = buf;
+            &head[..]
+        }
     };
-    let elf = Elf::parse(data).map_err(|_| Errno::ENOEXEC)?;
+    let elf = Elf::parse_head(data).map_err(|_| Errno::ENOEXEC)?;
     if elf.machine != MACHINE || elf.file_type != FileType::Executable || !branded(&elf) {
         return Err(Errno::ENOEXEC);
     }
@@ -265,6 +278,11 @@ pub(crate) fn load(
     let stack = build_stack(s, space, path, argv, envp, &aux, &layout)?;
     Ok(registers(elf.entry, stack, layout))
 }
+
+/// How much of a file `exec` reads to parse its headers (FreeBSD reads a
+/// page, then whatever the headers point at): everything it needs lies
+/// in the first pages of any executable the base system has.
+const HEAD_MAX: usize = 64 * 1024;
 
 /// Maps one `PT_LOAD` segment.
 fn map_segment(

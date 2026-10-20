@@ -604,6 +604,7 @@ pub(super) fn nmount(s: &Sleepable, iov: u64, iovcnt: u64, flags: u64) -> SysRes
                     u16::try_from(mode & 0o7777).unwrap_or(0o755),
                     uid,
                     gid,
+                    crate::mm::space::page_ops(),
                 )),
             )
         }

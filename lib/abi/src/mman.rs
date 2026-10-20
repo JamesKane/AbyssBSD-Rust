@@ -44,6 +44,11 @@ pub const MADV_NOCORE: u32 = 8;
 pub const MADV_CORE: u32 = 9;
 pub const MADV_PROTECT: u32 = 10;
 
+/// `msync` flags.
+pub const MS_SYNC: u32 = 0x0000;
+pub const MS_ASYNC: u32 = 0x0001;
+pub const MS_INVALIDATE: u32 = 0x0002;
+
 pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("MAP_SHARED", MAP_SHARED),
     c("MAP_PRIVATE", MAP_PRIVATE),
@@ -74,6 +79,9 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("MADV_NOCORE", MADV_NOCORE),
     c("MADV_CORE", MADV_CORE),
     c("MADV_PROTECT", MADV_PROTECT),
+    c("MS_SYNC", MS_SYNC),
+    c("MS_ASYNC", MS_ASYNC),
+    c("MS_INVALIDATE", MS_INVALIDATE),
     c("PROT_MAX(1)", 1 << PROT_MAX_SHIFT),
 ];
 

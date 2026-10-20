@@ -183,6 +183,12 @@ pub trait RegularNode: Node {
     fn resident(&self) -> Option<&'static [u8]> {
         None
     }
+
+    /// The VM object holding the file's pages, which mappings share
+    /// (FreeBSD's `v_object`), if the file system keeps one.
+    fn object(&self) -> Option<Arc<vm::object::Object>> {
+        None
+    }
 }
 
 /// A directory.

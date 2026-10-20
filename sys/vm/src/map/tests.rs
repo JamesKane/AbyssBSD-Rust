@@ -81,6 +81,13 @@ impl PageOps for Pages {
             "double free of {pfn:?}"
         );
     }
+
+    fn access(&self, pfn: Pfn, f: &mut dyn FnMut(&mut [u8])) {
+        let mut page = std::vec![0u8; 4096];
+        page[..8].copy_from_slice(&self.get(pfn).to_le_bytes());
+        f(&mut page);
+        self.set(pfn, u64::from_le_bytes(page[..8].try_into().unwrap()));
+    }
 }
 
 const BASE: u64 = 0x1000_0000;
@@ -131,7 +138,15 @@ impl Proc {
             return Ok(pfn);
         }
         self.faults += 1;
-        let r = resolve(&mut self.map, va(page) + 123, access)?;
+        let r = loop {
+            match resolve(&mut self.map, va(page) + 123, access)? {
+                crate::fault::Outcome::Map(r) => break r,
+                // The map lock would be let go here.
+                crate::fault::Outcome::Fill(o, i) => {
+                    o.fill(i).map_err(|_| FaultError::PastEnd)?;
+                }
+            }
+        };
         assert_eq!(r.page, va(page));
         self.ptes.insert(page, (r.pfn, r.prot));
         Ok(r.pfn)
@@ -483,12 +498,90 @@ impl crate::object::Pager for File {
         self.pages
     }
 
-    fn fill(&self, index: u64, page: &mut [u8]) {
+    fn fill(&self, index: u64, page: &mut [u8]) -> Result<(), crate::object::PagerError> {
         self.fills
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         page.fill(0);
         page[..8].copy_from_slice(&(1000 + index).to_le_bytes());
+        Ok(())
     }
+}
+
+/// A file that takes writes back, recording them.
+struct WrittenFile {
+    pages: u64,
+    written: std::sync::Mutex<Vec<(u64, u64)>>,
+}
+
+impl crate::object::Pager for WrittenFile {
+    fn size(&self) -> u64 {
+        self.pages
+    }
+
+    fn fill(&self, index: u64, page: &mut [u8]) -> Result<(), crate::object::PagerError> {
+        page.fill(0);
+        page[..8].copy_from_slice(&(1000 + index).to_le_bytes());
+        Ok(())
+    }
+
+    fn writes_back(&self) -> bool {
+        true
+    }
+
+    fn write_back(&self, index: u64, page: &[u8]) -> Result<(), crate::object::PagerError> {
+        let v = u64::from_le_bytes(page[..8].try_into().unwrap());
+        self.written.lock().unwrap().push((index, v));
+        Ok(())
+    }
+}
+
+#[test]
+fn shared_file_mappings_share_writes_and_track_dirt() {
+    let pages = Pages::new();
+    let file = Arc::new(WrittenFile {
+        pages: 4,
+        written: std::sync::Mutex::new(Vec::new()),
+    });
+    let object = crate::object::Object::with_pager(
+        pages,
+        Arc::clone(&file) as Arc<dyn crate::object::Pager>,
+    );
+    let mut a = Proc::new(pages);
+    let mut b = Proc::new(pages);
+    a.map
+        .insert(Entry::shared(
+            range(0, 4),
+            Prot::RW,
+            Prot::ALL,
+            Arc::clone(&object),
+            0,
+        ))
+        .unwrap();
+    b.map
+        .insert(Entry::shared(
+            range(8, 4),
+            Prot::RW,
+            Prot::ALL,
+            Arc::clone(&object),
+            0,
+        ))
+        .unwrap();
+    // A read maps a clean page without write; the write then faults again.
+    assert_eq!(a.read(1), Ok(1001));
+    assert!(!a.ptes[&1].1.contains(Prot::WRITE));
+    assert!(!object.is_dirty(1));
+    a.write(1, 42).unwrap();
+    assert!(object.is_dirty(1));
+    // One page for both mappings.
+    assert_eq!(b.read(9), Ok(42));
+    object.sync(0, 4).unwrap();
+    assert_eq!(*file.written.lock().unwrap(), [(1, 42)]);
+    // Mapped writable: it stays dirty, so later writes are not lost.
+    assert!(object.is_dirty(1));
+    // A fork shares the mapping.
+    let mut c = a.fork();
+    c.write(2, 7).unwrap();
+    assert_eq!(a.read(2), Ok(7));
 }
 
 impl Proc {

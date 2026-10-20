@@ -68,16 +68,77 @@ fn namespace() -> Namespace {
     ns
 }
 
+/// Pages on the heap, for tmpfs's files.
+#[derive(Default)]
+struct HeapPages {
+    pages: std::sync::Mutex<std::collections::HashMap<u64, alloc::boxed::Box<[u8; 4096]>>>,
+    next: core::sync::atomic::AtomicU64,
+}
+
+impl HeapPages {
+    fn insert(&self, page: alloc::boxed::Box<[u8; 4096]>) -> vm::Pfn {
+        let n = self
+            .next
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+            + 1;
+        self.pages.lock().unwrap().insert(n, page);
+        vm::Pfn(n)
+    }
+
+    fn live(&self) -> usize {
+        self.pages.lock().unwrap().len()
+    }
+}
+
+impl vm::object::PageOps for HeapPages {
+    fn alloc_zeroed(&self) -> Option<vm::Pfn> {
+        Some(self.insert(alloc::boxed::Box::new([0; 4096])))
+    }
+
+    fn alloc_copy(&self, from: vm::Pfn) -> Option<vm::Pfn> {
+        let copy = alloc::boxed::Box::new(*self.pages.lock().unwrap()[&from.0]);
+        Some(self.insert(copy))
+    }
+
+    fn alloc_filled(&self, fill: &mut dyn FnMut(&mut [u8])) -> Option<vm::Pfn> {
+        let mut page = alloc::boxed::Box::new([0; 4096]);
+        fill(&mut page[..]);
+        Some(self.insert(page))
+    }
+
+    fn free(&self, pfn: vm::Pfn) {
+        assert!(
+            self.pages.lock().unwrap().remove(&pfn.0).is_some(),
+            "double free"
+        );
+    }
+
+    fn access(&self, pfn: vm::Pfn, f: &mut dyn FnMut(&mut [u8])) {
+        let mut pages = self.pages.lock().unwrap();
+        f(&mut pages.get_mut(&pfn.0).expect("freed page")[..]);
+    }
+}
+
+fn heap_pages() -> &'static HeapPages {
+    alloc::boxed::Box::leak(alloc::boxed::Box::default())
+}
+
+/// A tmpfs with its own pages.
+fn tmpfs_mount(pages: &'static HeapPages) -> Arc<Mount> {
+    Mount::new(
+        info("tmpfs", 0),
+        alloc::boxed::Box::new(tmpfs::TmpFs::new(0o755, 0, 0, pages)),
+    )
+}
+
+/// A tmpfs as the root, with its own pages.
+fn tmp_with(pages: &'static HeapPages) -> Namespace {
+    Namespace::new(&s(), tmpfs_mount(pages)).unwrap()
+}
+
 /// A tmpfs as the root.
 fn tmp() -> Namespace {
-    Namespace::new(
-        &s(),
-        Mount::new(
-            info("tmpfs", 0),
-            alloc::boxed::Box::new(tmpfs::TmpFs::new(0o755, 0, 0)),
-        ),
-    )
-    .unwrap()
+    tmp_with(heap_pages())
 }
 
 fn lookup_as(ns: &Namespace, cred: &Cred, path: &[u8], follow: bool) -> Result<Arc<Vnode>, Errno> {
@@ -413,6 +474,43 @@ fn tmpfs_create_read_write_truncate() {
 }
 
 #[test]
+fn tmpfs_pages_holes_and_freeing() {
+    let pages = heap_pages();
+    let ns = tmp_with(pages);
+    let s = s();
+    let f = mk(&ns, b"/f", NewNode::Regular).unwrap();
+    // A write far out leaves a hole: only the written page exists.
+    write_all(&f, 3 * 4096 + 10, b"end");
+    assert_eq!(f.stat(&s).unwrap().st_size, 3 * 4096 + 13);
+    assert_eq!(pages.live(), 1);
+    let all = read_all(&f);
+    assert!(all[..3 * 4096 + 10].iter().all(|&b| b == 0));
+    assert_eq!(&all[3 * 4096 + 10..], b"end");
+    // Truncating into a page zeroes its tail, so growing reads zeros.
+    write_all(&f, 0, &[7; 100]);
+    let size = |n| SetAttr {
+        size: Some(n),
+        ..SetAttr::default()
+    };
+    ops::setattr(&s, &f, &size(50), &Cred::root(), false).unwrap();
+    assert_eq!(pages.live(), 1, "the pages past the end went");
+    ops::setattr(&s, &f, &size(100), &Cred::root(), false).unwrap();
+    let all = read_all(&f);
+    assert!(all[..50].iter().all(|&b| b == 7) && all[50..].iter().all(|&b| b == 0));
+    // A holder of the object (a mapping) keeps the pages past the end.
+    let object = f.object(&s).unwrap();
+    write_all(&f, 8192, b"x");
+    assert_eq!(pages.live(), 2);
+    ops::setattr(&s, &f, &size(10), &Cred::root(), false).unwrap();
+    assert_eq!(pages.live(), 2);
+    drop(object);
+    // The pages go with the file.
+    drop(f);
+    rm(&ns, b"/f", false).unwrap();
+    assert_eq!(pages.live(), 0);
+}
+
+#[test]
 fn tmpfs_link_counts_and_removal() {
     let ns = tmp();
     let s = s();
@@ -554,10 +652,7 @@ fn renaming_across_mounts_is_exdev() {
     let s = s();
     let d = mk(&ns, b"/m", NewNode::Directory).unwrap();
     mk(&ns, b"/f", NewNode::Regular).unwrap();
-    let other = Mount::new(
-        info("tmpfs", 0),
-        alloc::boxed::Box::new(tmpfs::TmpFs::new(0o755, 0, 0)),
-    );
+    let other = tmpfs_mount(heap_pages());
     ns.mount(&s, d, Arc::clone(&other), b"/m").unwrap();
     assert_eq!(mv(&ns, b"/f", b"/m/f"), Err(Errno::EXDEV));
     // Busy while in use; then gone.

@@ -106,6 +106,18 @@ const SHDR_SIZE: usize = 64;
 impl<'a> Elf<'a> {
     /// Parses and validates the file header.
     pub fn parse(data: &'a [u8]) -> Result<Self, Error> {
+        Self::parse_with(data, true)
+    }
+
+    /// Parses the file header from the start of a file, for loading it:
+    /// only the program header table must lie in `head`. The sections,
+    /// which loading never reads and which usually sit at the end, are
+    /// left out (as if there were none).
+    pub fn parse_head(head: &'a [u8]) -> Result<Self, Error> {
+        Self::parse_with(head, false)
+    }
+
+    fn parse_with(data: &'a [u8], sections: bool) -> Result<Self, Error> {
         if read::<4>(data, 0)? != *b"\x7fELF" {
             return Err(Error::BadMagic);
         }
@@ -119,7 +131,11 @@ impl<'a> Elf<'a> {
             t => FileType::Other(t),
         };
         let phnum = usize::from(u16_at(data, 56)?);
-        let shnum = usize::from(u16_at(data, 60)?);
+        let shnum = if sections {
+            usize::from(u16_at(data, 60)?)
+        } else {
+            0
+        };
         if phnum > 0 && usize::from(u16_at(data, 54)?) != PHDR_SIZE {
             return Err(Error::Malformed("e_phentsize"));
         }
@@ -135,13 +151,19 @@ impl<'a> Elf<'a> {
             flags: u32_at(data, 48)?,
             phoff: usize_from(u64_at(data, 32)?)?,
             phnum,
-            shoff: usize_from(u64_at(data, 40)?)?,
+            shoff: if sections {
+                usize_from(u64_at(data, 40)?)?
+            } else {
+                0
+            },
             shnum,
             shstrndx: usize::from(u16_at(data, 62)?),
         };
         // Both tables must lie inside the file.
         elf.table_end(elf.phoff, elf.phnum, PHDR_SIZE)?;
-        elf.table_end(elf.shoff, elf.shnum, SHDR_SIZE)?;
+        if sections {
+            elf.table_end(elf.shoff, elf.shnum, SHDR_SIZE)?;
+        }
         Ok(elf)
     }
 

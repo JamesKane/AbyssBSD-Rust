@@ -30,6 +30,7 @@ pub mod mount;
 pub mod namei;
 pub mod node;
 pub mod ops;
+pub mod pagecache;
 pub mod tarfs;
 pub mod tmpfs;
 pub mod tree;

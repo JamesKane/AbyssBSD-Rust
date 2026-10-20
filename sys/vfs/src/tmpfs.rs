@@ -6,8 +6,10 @@
 //! `reclaim`). Directories map names to inodes; each entry gets a cookie
 //! when it is made, so `getdirentries` resumes where it left off however
 //! the directory changes meanwhile (0 is `.`, 1 is `..`, as FreeBSD's
-//! tmpfs numbers them). File data is a byte vector for now; it moves to
-//! a VM object with the page cache (P5.3).
+//! tmpfs numbers them). A file's data is an anonymous VM object, read and
+//! written through the page cache and mapped as it is (FreeBSD's tmpfs
+//! uses a swap object): a page never written is a hole that reads as
+//! zeros.
 //!
 //! Behavior reference: sys/fs/tmpfs.
 
@@ -26,7 +28,7 @@ use crate::node::{
     Attr, Create, DirEntry, DirectoryNode, Kind, NewNode, Node, NodeOps, RegularNode, SetAttr,
     SymlinkNode,
 };
-use crate::{Uio, now};
+use crate::{Uio, now, pagecache};
 
 /// The root directory's inode, as FreeBSD's tmpfs numbers it.
 pub const ROOT_INO: u64 = 2;
@@ -36,7 +38,8 @@ const LINK_MAX: u64 = i32::MAX as u64;
 
 /// What a node holds.
 enum Data {
-    Regular(Vec<u8>),
+    /// The data's pages, and the size.
+    Regular(Arc<vm::object::Object>, u64),
     Directory(Dir),
     Symlink(Vec<u8>),
     /// A FIFO, a socket, or a device node.
@@ -93,6 +96,8 @@ struct TmpNode {
 
 /// The state every node of one mount shares.
 struct Shared {
+    /// Where file pages come from.
+    pages: &'static dyn vm::object::PageOps,
     /// Nodes no vnode holds.
     nodes: SpinLock<BTreeMap<u64, Box<TmpNode>>>,
     next_ino: SpinLock<u64>,
@@ -114,10 +119,11 @@ impl core::fmt::Debug for TmpFs {
 
 impl TmpFs {
     /// An empty tmpfs whose root has permissions `mode`, owned by `uid`
-    /// and `gid`.
+    /// and `gid`, whose files' pages come from `pages`.
     #[must_use]
-    pub fn new(mode: u16, uid: u32, gid: u32) -> Self {
+    pub fn new(mode: u16, uid: u32, gid: u32, pages: &'static dyn vm::object::PageOps) -> Self {
         let shared = Arc::new(Shared {
+            pages,
             nodes: SpinLock::new(BTreeMap::new()),
             next_ino: SpinLock::new(ROOT_INO + 1),
             usage: SpinLock::new((0, 1)),
@@ -177,7 +183,8 @@ impl Node for TmpNode {
     fn attr(&self) -> Attr {
         let mut a = self.attr;
         a.size = match &self.data {
-            Data::Regular(v) | Data::Symlink(v) => v.len() as u64,
+            Data::Regular(_, size) => *size,
+            Data::Symlink(v) => v.len() as u64,
             // FreeBSD's tmpfs: a fixed size per entry.
             Data::Directory(d) => (d.entries.len() as u64 + 2) * 32,
             Data::Other => 0,
@@ -189,16 +196,15 @@ impl Node for TmpNode {
     fn setattr(&mut self, _s: &Sleepable, a: &SetAttr) -> Result<(), Errno> {
         let t = now();
         if let Some(size) = a.size {
-            let Data::Regular(v) = &mut self.data else {
+            let Data::Regular(object, cur) = &mut self.data else {
                 return Err(Errno::EINVAL);
             };
-            let size = usize::try_from(size).map_err(|_| Errno::EFBIG)?;
-            let old = v.len() as u64;
-            if size > v.len() {
-                v.try_reserve(size - v.len()).map_err(|_| Errno::ENOSPC)?;
+            if i64::try_from(size).is_err() {
+                return Err(Errno::EFBIG);
             }
-            v.resize(size, 0);
-            usage(&self.fs, size as u64, old);
+            pagecache::resize(object, *cur, size);
+            usage(&self.fs, size, *cur);
+            *cur = size;
             self.attr.mtime = t;
         }
         if let Some(m) = a.mode {
@@ -229,7 +235,8 @@ impl Node for TmpNode {
     fn inactive(&mut self, _s: &Sleepable) {
         if self.attr.nlink == 0 && !self.freed {
             let bytes = match &self.data {
-                Data::Regular(v) | Data::Symlink(v) => v.len() as u64,
+                Data::Regular(_, size) => *size,
+                Data::Symlink(v) => v.len() as u64,
                 _ => 0,
             };
             usage(&self.fs, 0, bytes);
@@ -263,43 +270,40 @@ fn usage(fs: &Shared, new: u64, old: u64) {
 
 impl RegularNode for TmpNode {
     fn read(&self, _s: &Sleepable, offset: u64, uio: &mut dyn Uio) -> Result<usize, Errno> {
-        let Data::Regular(v) = &self.data else {
+        let Data::Regular(object, size) = &self.data else {
             return Err(Errno::EINVAL);
         };
-        let start = usize::try_from(offset).unwrap_or(usize::MAX);
-        let Some(src) = v.get(start..) else {
-            return Ok(0);
-        };
-        uio.copy_out(&src[..src.len().min(uio.resid())])
+        pagecache::read(object, *size, offset, uio)
     }
 
     fn write(&mut self, _s: &Sleepable, offset: u64, uio: &mut dyn Uio) -> Result<usize, Errno> {
-        let Data::Regular(v) = &mut self.data else {
+        let Data::Regular(object, size) = &mut self.data else {
             return Err(Errno::EINVAL);
         };
-        let start = usize::try_from(offset).map_err(|_| Errno::EFBIG)?;
-        let end = start.checked_add(uio.resid()).ok_or(Errno::EFBIG)?;
-        let old = v.len();
-        if end > v.len() {
-            v.try_reserve(end - v.len()).map_err(|_| Errno::ENOSPC)?;
-            v.resize(end, 0);
+        let end = offset.checked_add(uio.resid() as u64).ok_or(Errno::EFBIG)?;
+        if i64::try_from(end).is_err() {
+            return Err(Errno::EFBIG);
         }
-        // A short copy (a fault part-way) leaves only what arrived.
-        let n = match uio.copy_in(&mut v[start..end]) {
-            Ok(n) => n,
-            Err(e) => {
-                v.truncate(old);
-                return Err(e);
-            }
-        };
-        if start + n < end {
-            v.truncate(old.max(start + n));
+        // Past the end: what lies between reads as zeros (resize zeroes
+        // the rest of the old last page).
+        if offset > *size {
+            pagecache::resize(object, *size, offset);
         }
-        usage(&self.fs, v.len() as u64, old as u64);
+        let n = pagecache::write(object, offset, uio)?;
+        let new = (*size).max(offset + n as u64);
+        usage(&self.fs, new, *size);
+        *size = new;
         let t = now();
         self.attr.mtime = t;
         self.attr.ctime = t;
         Ok(n)
+    }
+
+    fn object(&self) -> Option<Arc<vm::object::Object>> {
+        match &self.data {
+            Data::Regular(o, _) => Some(Arc::clone(o)),
+            _ => None,
+        }
     }
 }
 
@@ -342,7 +346,11 @@ impl DirectoryNode for TmpNode {
             ino
         };
         let (data, nlink, rdev) = match node {
-            NewNode::Regular => (Data::Regular(Vec::new()), 1, 0),
+            NewNode::Regular => (
+                Data::Regular(vm::object::Object::anonymous(self.fs.pages), 0),
+                1,
+                0,
+            ),
             NewNode::Directory => (Data::Directory(Dir::new(self.ino)), 2, 0),
             NewNode::Symlink(t) => (Data::Symlink(t.clone()), 1, 0),
             NewNode::CharDevice(rdev) => (Data::Other, 1, *rdev),

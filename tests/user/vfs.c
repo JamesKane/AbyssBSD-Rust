@@ -16,6 +16,7 @@
 
 #include <sys/param.h>
 #include <sys/file.h>
+#include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/uio.h>
@@ -494,6 +495,47 @@ locks(void)
 }
 
 static void
+mappings(void)
+{
+	char buf[16];
+	char *p, *q;
+	int fd;
+
+	put("/mnt/map", "");
+	fd = open("/mnt/map", O_RDWR);
+	OK(ftruncate(fd, 8192));
+	p = mmap(NULL, 8192, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	CHECK(p != MAP_FAILED, "mmap: %s", strerror(errno));
+	if (p == MAP_FAILED) {
+		close(fd);
+		return;
+	}
+	/* Through the mapping, seen by read; through write, seen mapped. */
+	memcpy(p + 4096, "mapped", 6);
+	CHECK(pread(fd, buf, 6, 4096) == 6 && memcmp(buf, "mapped", 6) == 0,
+	    "read after a mapped write");
+	CHECK(pwrite(fd, "written", 7, 100) == 7, "pwrite");
+	CHECK(memcmp(p + 100, "written", 7) == 0, "mapping after write");
+	/* A second shared mapping is the same memory. */
+	q = mmap(NULL, 8192, PROT_READ, MAP_SHARED, fd, 0);
+	CHECK(q != MAP_FAILED && memcmp(q + 4096, "mapped", 6) == 0,
+	    "second mapping");
+	/* A private one copies on write. */
+	char *r = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+	CHECK(r != MAP_FAILED, "private mmap: %s", strerror(errno));
+	if (r != MAP_FAILED) {
+		r[100] = 'X';
+		CHECK(p[100] == 'w', "a private write reached the file");
+		munmap(r, 4096);
+	}
+	OK(msync(p, 8192, MS_SYNC));
+	munmap(q, 8192);
+	munmap(p, 8192);
+	close(fd);
+	OK(unlink("/mnt/map"));
+}
+
+static void
 places(void)
 {
 	struct statfs sf;
@@ -536,6 +578,7 @@ main(void)
 	special();
 	listing();
 	locks();
+	mappings();
 	places();
 	if (unmount("/mnt", 0) != 0) {
 		printf("vfs: unmount: %s\n", strerror(errno));

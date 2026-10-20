@@ -11,6 +11,15 @@
 //!
 //! The caller holds the map's lock across the call and the page-table
 //! update that follows, so a concurrent `munmap` cannot slip in between.
+//! A page a pager has not read yet is not read under that lock (reading
+//! may sleep on the file system): [`resolve`] returns [`Outcome::Fill`],
+//! and the caller fills the page with the lock released and resolves
+//! again.
+//!
+//! A shared mapping of an object whose pages go back to a pager maps a
+//! clean page without write rights, so the first write faults, marks it
+//! dirty, and maps it writable (dirty tracking without the hardware's
+//! dirty bits).
 //!
 //! Behavior reference: sys/vm/vm_fault.c, `vm_map_lookup` in
 //! sys/vm/vm_map.c.
@@ -18,7 +27,7 @@
 use alloc::sync::Arc;
 
 use crate::map::{Prot, VmMap};
-use crate::object::{Found, LookupError, Object};
+use crate::object::{Found, LookupError, Object, PageIndex};
 use crate::{PAGE_SIZE, Pfn, VirtAddr};
 
 /// The kind of access that faulted.
@@ -64,8 +73,18 @@ pub struct Resolved {
     pub prot: Prot,
 }
 
+/// What a fault needs.
+#[derive(Debug)]
+pub enum Outcome {
+    /// Map this.
+    Map(Resolved),
+    /// Read page `PageIndex` of this pager object first (no map lock
+    /// held), then resolve again.
+    Fill(Arc<Object>, PageIndex),
+}
+
 /// Resolves a fault at `va` for `access`.
-pub fn resolve(map: &mut VmMap, va: VirtAddr, access: Access) -> Result<Resolved, FaultError> {
+pub fn resolve(map: &mut VmMap, va: VirtAddr, access: Access) -> Result<Outcome, FaultError> {
     let pages = map.pages;
     let page = va.align_down(PAGE_SIZE);
     let entry = map.entry_mut(page).ok_or(FaultError::NotMapped)?;
@@ -91,13 +110,23 @@ pub fn resolve(map: &mut VmMap, va: VirtAddr, access: Access) -> Result<Resolved
     // If our object is ours alone, the lookup folds away what only it
     // still reaches.
     let found = object
-        .lookup(index, !entry.needs_copy)
+        .lookup(index, !entry.needs_copy, false)
         .map_err(|e| match e {
             LookupError::OutOfMemory => FaultError::OutOfMemory,
-            LookupError::PastEnd => FaultError::PastEnd,
+            LookupError::PastEnd | LookupError::Io => FaultError::PastEnd,
         })?;
     let (pfn, prot) = match found {
+        Found::Fill(o, i) => return Ok(Outcome::Fill(o, i)),
         Found::Top(pfn) if entry.needs_copy => (pfn, read_only),
+        // A shared mapping of a written-back object: writable once dirty.
+        Found::Top(pfn) if object.tracks_dirty() => {
+            if write {
+                object.mark_mapped_writable(index);
+                (pfn, entry.prot)
+            } else {
+                (pfn, read_only)
+            }
+        }
         Found::Top(pfn) => (pfn, entry.prot),
         Found::Backing(pfn) if write => (
             object
@@ -121,7 +150,7 @@ pub fn resolve(map: &mut VmMap, va: VirtAddr, access: Access) -> Result<Resolved
             )
         }
     };
-    Ok(Resolved { page, pfn, prot })
+    Ok(Outcome::Map(Resolved { page, pfn, prot }))
 }
 
 /// Pages around a fault worth mapping with it (FreeBSD's

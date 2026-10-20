@@ -91,6 +91,12 @@ impl PageOps for KernelPages {
     fn free(&self, pfn: Pfn) {
         free_pages(pfn.addr(), Order::ZERO);
     }
+
+    fn access(&self, pfn: Pfn, f: &mut dyn FnMut(&mut [u8])) {
+        // SAFETY: a page an object holds, reached through the DMAP; the
+        // object's owner serializes writers (the vnode lock, the map).
+        f(unsafe { core::slice::from_raw_parts_mut(Self::page(pfn), PAGE_BYTES) });
+    }
 }
 
 static PAGES: KernelPages = KernelPages;
@@ -207,6 +213,8 @@ pub(crate) enum SpaceError {
     Map(MapError),
     /// No memory for the page tables.
     OutOfMemory,
+    /// A pager could not write pages back.
+    Io,
 }
 
 impl From<MapError> for SpaceError {
@@ -380,7 +388,12 @@ impl AddressSpace {
         offset: u64,
     ) -> Result<VirtAddr, SpaceError> {
         self.map_entry(s, a, |range| {
-            Entry::private(range, a.prot, a.max_prot, object, offset).with_inherit(a.inherit)
+            if a.inherit == vm::map::Inherit::Share {
+                // `MAP_SHARED`: writes reach the file's pages.
+                Entry::shared(range, a.prot, a.max_prot, object, offset)
+            } else {
+                Entry::private(range, a.prot, a.max_prot, object, offset).with_inherit(a.inherit)
+            }
         })
     }
 
@@ -409,6 +422,23 @@ impl AddressSpace {
         let end = start.checked_add(a.len).ok_or(MapError::OutOfRange)?;
         map.insert(make(start..end))?;
         Ok(start)
+    }
+
+    /// Writes back the dirty pages of the files mapped over `range`
+    /// (`msync`); `NotMapped` if some of it is not mapped.
+    pub(crate) fn msync(
+        &self,
+        s: &Sleepable,
+        range: core::ops::Range<VirtAddr>,
+    ) -> Result<(), SpaceError> {
+        let objects = self.map.lock(s).objects_in(&range)?;
+        // Written with the map unlocked: a pager may sleep.
+        for (object, start, end) in objects {
+            if object.sync(start, end).is_err() {
+                return Err(SpaceError::Io);
+            }
+        }
+        Ok(())
     }
 
     /// Sets what a child inherits of `range` (`minherit`).
@@ -448,8 +478,7 @@ impl AddressSpace {
             let at = va.get() + done as u64;
             let in_page = (at % PAGE_SIZE) as usize;
             let n = (PAGE_BYTES - in_page).min(bytes.len() - done);
-            let mut map = self.map.lock(s);
-            let r = fault::resolve(&mut map, VirtAddr::new(at), Access::Write)?;
+            let (map, r) = self.resolve(s, VirtAddr::new(at), Access::Write)?;
             let replaced = self
                 .tables
                 .lock()
@@ -571,6 +600,33 @@ impl AddressSpace {
         Self::with_map(forked.child)
     }
 
+    /// Resolves a fault at `va`: the map, locked, and what to map. A page
+    /// a pager must read first is read with the map unlocked (it may sleep
+    /// on the file system, whose locks come before the map's), then the
+    /// fault is resolved again.
+    fn resolve(
+        &self,
+        s: &Sleepable,
+        va: VirtAddr,
+        access: Access,
+    ) -> Result<(sched::lock::MutexGuard<'_, VmMap>, fault::Resolved), FaultError> {
+        loop {
+            let mut map = self.map.lock(s);
+            match fault::resolve(&mut map, va, access)? {
+                fault::Outcome::Map(r) => return Ok((map, r)),
+                fault::Outcome::Fill(object, index) => {
+                    drop(map);
+                    object.fill(index).map_err(|e| match e {
+                        vm::object::LookupError::OutOfMemory => FaultError::OutOfMemory,
+                        vm::object::LookupError::PastEnd | vm::object::LookupError::Io => {
+                            FaultError::PastEnd
+                        }
+                    })?;
+                }
+            }
+        }
+    }
+
     /// Resolves a fault at `va` and maps the page.
     pub(crate) fn fault(
         &self,
@@ -578,8 +634,7 @@ impl AddressSpace {
         va: VirtAddr,
         access: Access,
     ) -> Result<(), FaultError> {
-        let mut map = self.map.lock(s);
-        let r = fault::resolve(&mut map, va, access)?;
+        let (map, r) = self.resolve(s, va, access)?;
         // Code reaches instruction fetch only once synced (aarch64; x86
         // keeps the caches coherent).
         #[cfg(target_arch = "aarch64")]

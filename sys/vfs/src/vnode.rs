@@ -297,6 +297,15 @@ impl Vnode {
         }
     }
 
+    /// The VM object holding a regular file's pages, if its file system
+    /// keeps one.
+    pub fn object(&self, s: &Sleepable) -> Option<Arc<vm::object::Object>> {
+        match self.read(s).live().ok()? {
+            NodeOps::Regular(f) => f.object(),
+            _ => None,
+        }
+    }
+
     /// A symbolic link's target.
     pub fn readlink(&self, s: &Sleepable) -> Result<Vec<u8>, Errno> {
         match self.read(s).live()? {

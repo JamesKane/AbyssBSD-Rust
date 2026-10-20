@@ -123,6 +123,30 @@ impl Entry {
         }
     }
 
+    /// A shared mapping of `object` from page `offset` on over `range`
+    /// (`MAP_SHARED` of a file): writes go to the object's pages, which
+    /// every mapping of it shares, and a `fork` shares it too.
+    #[must_use]
+    pub fn shared(
+        range: Range<VirtAddr>,
+        prot: Prot,
+        max_prot: Prot,
+        object: Arc<Object>,
+        offset: PageIndex,
+    ) -> Self {
+        object.set_shared();
+        Self {
+            start: range.start,
+            end: range.end,
+            prot,
+            max_prot,
+            inherit: Inherit::Share,
+            object: Some(object),
+            offset,
+            needs_copy: false,
+        }
+    }
+
     /// A private mapping of `object` from page `offset` on over `range`
     /// (a file's text or data): shared until written, then copied.
     #[must_use]
@@ -416,6 +440,38 @@ impl VmMap {
         self.entries
             .starting_at_mut(range.start.get())
             .take_while(move |e| e.start < end)
+    }
+
+    /// The objects behind `range` and the page ranges of each it covers,
+    /// for writing their dirty pages back (`msync`); `NotMapped` if some
+    /// of `range` is not mapped.
+    pub fn objects_in(
+        &self,
+        range: &Range<VirtAddr>,
+    ) -> Result<Vec<(Arc<Object>, PageIndex, PageIndex)>, MapError> {
+        self.check(range)?;
+        if !self.covered(range) {
+            return Err(MapError::NotMapped);
+        }
+        let mut out = Vec::new();
+        let first = self.entries.at_or_before(range.start.get());
+        for e in first
+            .into_iter()
+            .chain(self.entries.starting_at(range.start.get()))
+        {
+            if e.start >= range.end {
+                break;
+            }
+            if e.end <= range.start {
+                continue;
+            }
+            if let Some(o) = &e.object {
+                let start = e.index_of(e.start.max(range.start));
+                let end = e.index_of(e.end.min(range.end));
+                out.push((Arc::clone(o), start, end));
+            }
+        }
+        Ok(out)
     }
 
     /// Whether every page of `range` is mapped.

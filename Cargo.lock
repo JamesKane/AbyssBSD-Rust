@@ -445,6 +445,7 @@ dependencies = [
  "sched",
  "sync",
  "ustar",
+ "vm",
 ]
 
 [[package]]
