@@ -14,7 +14,7 @@
 use alloc::boxed::Box;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use abi::errno::Errno;
 use abi::stat::Stat;
@@ -70,6 +70,22 @@ pub struct Vnode {
     /// The entry that names this directory: its parent and its name, for
     /// `getcwd` (FreeBSD's `v_cache_dd`).
     named: SpinLock<Named>,
+    /// Advisory locks (`fcntl`, `flock`).
+    lockf: crate::lockf::Lockf,
+    /// When it was last looked up, in [`tick`]s: the reclaimer takes the
+    /// longest unused first.
+    used: AtomicU64,
+}
+
+/// A counter standing in for time, for vnode recency.
+static TICKS: AtomicU64 = AtomicU64::new(0);
+
+/// The next recency tick (a relaxed counter: an approximate order is
+/// enough, and no locked instruction is spent per lookup).
+fn tick() -> u64 {
+    let t = TICKS.load(Ordering::Relaxed) + 1;
+    TICKS.store(t, Ordering::Relaxed);
+    t
 }
 
 impl core::fmt::Debug for Vnode {
@@ -92,7 +108,26 @@ impl Vnode {
             uses: AtomicU32::new(0),
             mounted: SpinLock::new(None),
             named: SpinLock::new(None),
+            lockf: crate::lockf::Lockf::new(),
+            used: AtomicU64::new(tick()),
         }
+    }
+
+    /// Records a use, for the reclaimer's order.
+    pub fn touch(&self) {
+        self.used.store(tick(), Ordering::Relaxed);
+    }
+
+    /// When it was last used.
+    #[must_use]
+    pub fn last_used(&self) -> u64 {
+        self.used.load(Ordering::Relaxed)
+    }
+
+    /// The advisory locks on this file.
+    #[must_use]
+    pub fn lockf(&self) -> &crate::lockf::Lockf {
+        &self.lockf
     }
 
     #[must_use]

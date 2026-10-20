@@ -203,6 +203,8 @@ pub fn remove(
 ) -> Result<(), Errno> {
     match name {
         b"" => return Err(Errno::EISDIR),
+        // `.` and `..` are directories, which `unlink` refuses first.
+        b"." | b".." if !dir_wanted => return Err(Errno::EPERM),
         b"." | b".." => return Err(Errno::EINVAL),
         _ => {}
     }

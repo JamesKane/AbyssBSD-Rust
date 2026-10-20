@@ -51,6 +51,34 @@ pub const F_DUP2FD: u32 = 10;
 pub const F_GETLK: u32 = 11;
 pub const F_SETLK: u32 = 12;
 pub const F_SETLKW: u32 = 13;
+/// `struct flock`: an advisory lock's range and type (`F_GETLK`,
+/// `F_SETLK`, `F_SETLKW`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Flock {
+    pub l_start: i64,
+    /// 0: to the end of the file, however far it grows.
+    pub l_len: i64,
+    pub l_pid: i32,
+    pub l_type: i16,
+    pub l_whence: i16,
+    pub l_sysid: i32,
+    /// The C struct's tail padding, explicit so the whole struct can be
+    /// copied without leaking bytes.
+    pub _pad: [u8; 4],
+}
+
+/// `l_type` values.
+pub const F_RDLCK: i16 = 1;
+pub const F_UNLCK: i16 = 2;
+pub const F_WRLCK: i16 = 3;
+
+/// `flock` operations.
+pub const LOCK_SH: u32 = 0x01;
+pub const LOCK_EX: u32 = 0x02;
+pub const LOCK_NB: u32 = 0x04;
+pub const LOCK_UN: u32 = 0x08;
+
 pub const F_READAHEAD: u32 = 15;
 pub const F_RDAHEAD: u32 = 16;
 pub const F_DUPFD_CLOEXEC: u32 = 17;
@@ -142,6 +170,13 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("F_GETLK", F_GETLK),
     c("F_SETLK", F_SETLK),
     c("F_SETLKW", F_SETLKW),
+    c("F_RDLCK", F_RDLCK as u32),
+    c("F_UNLCK", F_UNLCK as u32),
+    c("F_WRLCK", F_WRLCK as u32),
+    c("LOCK_SH", LOCK_SH),
+    c("LOCK_EX", LOCK_EX),
+    c("LOCK_NB", LOCK_NB),
+    c("LOCK_UN", LOCK_UN),
     c("F_READAHEAD", F_READAHEAD),
     c("F_RDAHEAD", F_RDAHEAD),
     c("F_DUPFD_CLOEXEC", F_DUPFD_CLOEXEC),

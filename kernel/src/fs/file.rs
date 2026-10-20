@@ -43,6 +43,22 @@ impl VnodeFile {
     }
 }
 
+impl VnodeFile {
+    /// This open file as the owner of `flock` locks.
+    pub(crate) fn lock_owner(&self) -> vfs::lockf::Owner {
+        vfs::lockf::Owner::File(core::ptr::from_ref(self).addr())
+    }
+}
+
+impl Drop for VnodeFile {
+    fn drop(&mut self) {
+        // The last descriptor for this open file closed: its `flock` locks
+        // go.
+        let owner = self.lock_owner();
+        self.vnode.lockf().release(owner);
+    }
+}
+
 /// What an open file is.
 pub(crate) enum FileKind {
     Vnode(VnodeFile),

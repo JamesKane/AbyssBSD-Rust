@@ -118,6 +118,43 @@ pub(crate) fn init() {
         Err(e) => kprintln!("fs: no /dev on the root file system ({e:?}); devfs not mounted"),
     }
     let _ = NAMESPACE.set(ns);
+    if sched::Builder::new("vnlru")
+        .priority(sched::Priority::KERNEL)
+        .spawn(vnlru)
+        .is_err()
+    {
+        kprintln!("fs: no vnode reclaimer (out of memory)");
+    }
+}
+
+/// The most vnodes kept in core (`kern.maxvnodes`), sized as FreeBSD sizes
+/// `desiredvnodes`: one per 32 pages of memory, plus room for processes.
+fn max_vnodes() -> usize {
+    let pages = crate::mm::phys_stats().managed;
+    usize::try_from(pages / 32).unwrap_or(usize::MAX).max(4096) + 1024
+}
+
+/// The vnode reclaimer (FreeBSD's `vnlru`): once a second, if more vnodes
+/// are in core than [`max_vnodes`], each mount gives up its longest unused
+/// idle ones, in proportion, down to nine tenths of the limit.
+fn vnlru(s: &Sleepable) {
+    loop {
+        crate::time::sleep_ns(s, 1_000_000_000);
+        let Some(ns) = NAMESPACE.get() else {
+            continue;
+        };
+        let max = max_vnodes();
+        let mounts = ns.mounts();
+        let total: usize = mounts.iter().map(|m| m.vnodes()).sum();
+        if total <= max {
+            continue;
+        }
+        let excess = total - max * 9 / 10;
+        for m in &mounts {
+            let share = (excess * m.vnodes()).div_ceil(total);
+            m.prune(s, share);
+        }
+    }
 }
 
 /// The namespace. [`init`] runs before any process, and processes are
@@ -294,6 +331,17 @@ pub(crate) fn object(s: &Sleepable, v: &Vnode) -> Option<Arc<vm::object::Object>
             Arc::new(ResidentPager { data }),
         )
     })))
+}
+
+/// Descriptors of process `pid` holding `slots` were closed: its POSIX
+/// locks on each file go, as closing any descriptor for a file releases
+/// them (FreeBSD's `closef`).
+pub(crate) fn closed<'a>(pid: i32, slots: impl IntoIterator<Item = &'a fdtable::Slot>) {
+    for slot in slots {
+        if let Some(v) = slot.file.vnode() {
+            v.lockf().release(vfs::lockf::Owner::Process(pid));
+        }
+    }
 }
 
 /// A table with the console open on descriptors 0, 1, and 2, as init

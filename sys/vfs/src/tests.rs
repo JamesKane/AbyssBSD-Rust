@@ -486,6 +486,32 @@ fn the_name_cache_answers_and_is_kept_right() {
 }
 
 #[test]
+fn idle_vnodes_are_reclaimed_and_found_again() {
+    let ns = tmp();
+    let s = s();
+    for i in 0..50 {
+        let f = mk(&ns, std::format!("/f{i}").as_bytes(), NewNode::Regular).unwrap();
+        write_all(&f, 0, std::format!("file {i}").as_bytes());
+    }
+    let m = Arc::clone(ns.root().mount());
+    // The root and fifty files; none in use, so all but the root may go.
+    assert_eq!(m.vnodes(), 51);
+    let keep = lookup(&ns, b"/f7", true).unwrap();
+    // The longest unused go first; one held is never taken.
+    assert_eq!(m.prune(&s, 10), 10);
+    assert_eq!(m.vnodes(), 41);
+    assert_eq!(m.prune(&s, usize::MAX), 39);
+    assert_eq!(m.vnodes(), 2);
+    assert!(!keep.is_doomed(&s));
+    // The name cache does not keep them, and a lookup loads them again.
+    for i in [0, 7, 49] {
+        let v = lookup(&ns, std::format!("/f{i}").as_bytes(), true).unwrap();
+        assert_eq!(read_all(&v), std::format!("file {i}").as_bytes());
+    }
+    assert!(Arc::ptr_eq(&lookup(&ns, b"/f7", true).unwrap(), &keep));
+}
+
+#[test]
 fn rename_rules() {
     let ns = tmp();
     let s = s();

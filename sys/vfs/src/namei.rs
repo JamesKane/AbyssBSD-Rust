@@ -239,7 +239,10 @@ impl Namespace {
     /// name cache.
     pub fn child(s: &Sleepable, dir: &Arc<Vnode>, name: &[u8]) -> Result<Arc<Vnode>, Errno> {
         match cache::lookup(dir, name) {
-            Some(Hit::Positive(v)) => return Ok(v),
+            Some(Hit::Positive(v)) => {
+                v.touch();
+                return Ok(v);
+            }
             Some(Hit::Negative) => return Err(Errno::ENOENT),
             None => {}
         }

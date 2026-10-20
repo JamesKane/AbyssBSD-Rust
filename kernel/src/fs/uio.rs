@@ -15,6 +15,9 @@ use crate::uaccess::{self, Plain, UserPtr};
 
 // SAFETY: two `u64`s, no padding, any bits valid.
 unsafe impl Plain for Iovec {}
+// SAFETY: integers only, the tail padding an explicit field; any bits
+// valid.
+unsafe impl Plain for abi::fcntl::Flock {}
 
 /// User buffers, consumed from the front.
 pub(crate) struct UserIo {

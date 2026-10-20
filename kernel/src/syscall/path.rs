@@ -86,11 +86,17 @@ pub(super) fn openat(s: &Sleepable, fd: u64, path_ptr: u64, flags: u64, mode: u6
                 if flags & (O_CREAT | O_EXCL) == O_CREAT | O_EXCL {
                     return Err(Errno::EEXIST);
                 }
+                // O_CREAT names a file: an existing directory is not one,
+                // even to read.
+                if flags & O_CREAT != 0 && v.is_dir() {
+                    return Err(Errno::EISDIR);
+                }
                 v
             }
             Found::Missing { dir, name } if flags & O_CREAT != 0 => {
+                // A new file cannot end in a slash.
                 if path.last() == Some(&b'/') {
-                    return Err(Errno::EISDIR);
+                    return Err(Errno::ENOENT);
                 }
                 let mask = p.umask.load(core::sync::atomic::Ordering::Relaxed);
                 let cmode = (u16::try_from(mode & 0o7777).unwrap_or(0) & !mask)

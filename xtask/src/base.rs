@@ -298,8 +298,9 @@ pub(crate) fn md_image(arch: Arch, extra: &[(&str, &Path)]) -> Result<Option<Vec
         .collect::<std::io::Result<_>>()?;
     sources.retain(|p| p.extension().is_some_and(|x| x == "c"));
     sources.sort();
-    // devfs's mount point.
+    // devfs's mount point, and an empty one for tests to mount on.
     append(&mut md, "dev/", b'5', 0o555, &[])?;
+    append(&mut md, "mnt/", b'5', 0o755, &[])?;
     let mut dir = String::new();
     for part in TESTS_DIR.split('/') {
         dir = if dir.is_empty() {

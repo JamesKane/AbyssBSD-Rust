@@ -5,17 +5,18 @@
 //!
 //! Only the generic layer adds and removes entries, under the directory's
 //! exclusive lock for changes; file systems never see the cache. A
-//! positive entry holds its vnode, which the vnode's mount also holds, so
-//! dropping an entry never frees a live vnode (a bucket lock is a spinlock
-//! and a vnode's reclaim may sleep). Each bucket keeps its entries oldest
-//! first; past the total limit an insert evicts its bucket's oldest, and
-//! negative entries are held to a fifth of the cache (FreeBSD's
-//! `ncnegfactor`).
+//! positive entry refers to its vnode weakly: it does not keep the vnode
+//! in core (its mount's table does, until the reclaimer takes it), so the
+//! cache never decides what memory vnodes use. Entries are purged when
+//! their vnode is reclaimed, and one whose vnode is gone counts as a miss.
+//! Each bucket keeps its entries oldest first; past the total limit an
+//! insert evicts its bucket's oldest, and negative entries are held to a
+//! fifth of the cache (FreeBSD's `ncnegfactor`).
 //!
 //! Behavior reference: sys/kern/vfs_cache.c.
 
 use alloc::boxed::Box;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -38,7 +39,7 @@ struct Entry {
     dir: NodeId,
     name: Box<[u8]>,
     /// `None` for a negative entry.
-    target: Option<Arc<Vnode>>,
+    target: Option<Weak<Vnode>>,
 }
 
 static TABLE: [SpinLock<Vec<Entry>>; BUCKETS] = [const { SpinLock::new(Vec::new()) }; BUCKETS];
@@ -81,10 +82,11 @@ pub fn lookup(dir: &Vnode, name: &[u8]) -> Option<Hit> {
     let id = dir.id();
     let b = bucket(id, name).lock();
     let e = b.iter().find(|e| e.dir == id && *e.name == *name)?;
-    Some(match &e.target {
-        Some(v) => Hit::Positive(Arc::clone(v)),
-        None => Hit::Negative,
-    })
+    match &e.target {
+        // Gone (reclaimed meanwhile): a miss.
+        Some(v) => v.upgrade().map(Hit::Positive),
+        None => Some(Hit::Negative),
+    }
 }
 
 /// Records that `dir` holds `target` as `name` (`None`: that it holds
@@ -125,15 +127,13 @@ pub fn enter(dir: &Arc<Vnode>, name: &[u8], target: Option<&Arc<Vnode>>) {
         b.push(Entry {
             dir: id,
             name: name.into(),
-            target: target.cloned(),
+            target: target.map(Arc::downgrade),
         });
         TOTAL.fetch_add(1, Ordering::Relaxed);
         if target.is_none() {
             NEGATIVE.fetch_add(1, Ordering::Relaxed);
         }
     }
-    // Dropped outside the bucket lock (none is a live vnode's last
-    // reference, but a doomed one's may be).
     drop(evicted);
 }
 
@@ -156,14 +156,24 @@ pub fn remove(dir: &Vnode, name: &[u8]) {
 /// reclaimed).
 pub fn purge(v: &Vnode) {
     let id = v.id();
-    purge_where(|e| e.dir == id || e.target.as_ref().is_some_and(|t| t.id() == id));
+    purge_where(|e| {
+        e.dir == id
+            || e.target
+                .as_ref()
+                .is_some_and(|t| t.upgrade().is_none_or(|t| t.id() == id))
+    });
     v.clear_named();
 }
 
 /// Forgets every entry of the file system with id `fs` (it is being
 /// unmounted).
 pub fn purge_fs(fs: u64) {
-    purge_where(|e| e.dir.fs == fs || e.target.as_ref().is_some_and(|t| t.mount().id == fs));
+    purge_where(|e| {
+        e.dir.fs == fs
+            || e.target
+                .as_ref()
+                .is_some_and(|t| t.upgrade().is_none_or(|t| t.mount().id == fs))
+    });
 }
 
 fn purge_where(doomed: impl Fn(&Entry) -> bool) {

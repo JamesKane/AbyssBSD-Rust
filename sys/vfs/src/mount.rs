@@ -233,6 +233,7 @@ impl Mount {
     /// system loads.
     pub fn vget(self: &Arc<Self>, s: &Sleepable, ino: u64) -> Result<Arc<Vnode>, Errno> {
         if let Some(v) = self.table.lock().get(&ino) {
+            v.touch();
             return Ok(Arc::clone(v));
         }
         let _loading = self.loading.lock(s);
@@ -266,18 +267,18 @@ impl Mount {
         }
     }
 
-    /// Reclaims the vnodes nothing but the table refers to (FreeBSD's
-    /// `vnlru`), up to `max` of them; returns how many went. The name cache
-    /// should be trimmed first, since its entries hold vnodes.
+    /// Reclaims up to `max` of the vnodes nothing but the table refers to,
+    /// longest unused first (FreeBSD's `vnlru`); returns how many went.
     pub fn prune(&self, s: &Sleepable, max: usize) -> usize {
-        let idle: Vec<Arc<Vnode>> = self
+        let mut idle: Vec<Arc<Vnode>> = self
             .table
             .lock()
             .values()
             .filter(|v| Arc::strong_count(v) == 1 && v.uses() == 0 && !v.is_mount_root())
-            .take(max)
             .cloned()
             .collect();
+        idle.sort_by_key(|v| v.last_used());
+        idle.truncate(max);
         let mut n = 0;
         for v in idle {
             // Two references now: the table's and ours. Anyone else who

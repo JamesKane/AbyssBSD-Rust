@@ -176,7 +176,9 @@ pub(super) fn lseek(s: &Sleepable, fd: u64, offset: u64, whence: u64) -> SysResu
 
 /// `close(fd)`.
 pub(super) fn close(s: &Sleepable, fd: u64) -> SysResult {
-    let closed = process()?.files.lock(s).close(int(fd))?;
+    let p = process()?;
+    let closed = p.files.lock(s).close(int(fd))?;
+    crate::fs::closed(p.pid(), [&closed]);
     drop(closed);
     Ok(0)
 }
@@ -193,12 +195,14 @@ pub(super) fn close_range(s: &Sleepable, lo: u64, hi: u64, flags: u64) -> SysRes
         return Err(Errno::EINVAL);
     }
     let to = |v: u64| usize::try_from(v).unwrap_or(usize::MAX);
-    let closed = process()?.files.lock(s).close_range(
+    let p = process()?;
+    let closed = p.files.lock(s).close_range(
         to(lo),
         to(hi),
         flags & CLOSE_RANGE_CLOEXEC != 0,
         flags & CLOSE_RANGE_CLOFORK != 0,
     );
+    crate::fs::closed(p.pid(), &closed);
     drop(closed);
     Ok(0)
 }
@@ -245,6 +249,7 @@ fn dup_fd(s: &Sleepable, mode: Dup, flags: FdFlags, old: i32, new: i32) -> SysRe
         Dup::Fixed => {
             let replaced = t.install(new, file, flags, limit)?;
             drop(t);
+            crate::fs::closed(p.pid(), replaced.iter());
             drop(replaced);
             new
         }
@@ -337,11 +342,7 @@ pub(super) fn fcntl(s: &Sleepable, fd: u64, cmd: u64, arg: u64) -> SysResult {
                 None => Err(Errno::EBADF),
             }
         }
-        F_GETLK | F_SETLK | F_SETLKW => {
-            let _ = current_file(s, u64::from(fd.cast_unsigned()))?;
-            // Advisory locks come with Phase 5.
-            Err(Errno::EOPNOTSUPP)
-        }
+        F_GETLK | F_SETLK | F_SETLKW => record_lock(s, fd, cmd, arg),
         c if c & ((1 << F_DUP3FD_SHIFT) - 1) == F_DUP3FD => {
             let flags = c >> F_DUP3FD_SHIFT;
             if flags & !(FD_CLOEXEC | FD_CLOFORK) != 0 {
@@ -355,6 +356,135 @@ pub(super) fn fcntl(s: &Sleepable, fd: u64, cmd: u64, arg: u64) -> SysResult {
         }
         _ => Err(Errno::EINVAL),
     }
+}
+
+/// The byte range a `struct flock` names, `[start, end]` with `end`
+/// inclusive (`u64::MAX`: to the end of the file, however far it grows).
+fn lock_range(s: &Sleepable, f: &File, fl: &Flock) -> Result<(u64, u64), Errno> {
+    let v = f.vnode().ok_or(Errno::EBADF)?;
+    let base: i64 = match u32::try_from(fl.l_whence).map_err(|_| Errno::EINVAL)? {
+        SEEK_SET => 0,
+        SEEK_CUR => i64::try_from(*f.offset(s)).map_err(|_| Errno::EOVERFLOW)?,
+        SEEK_END => i64::try_from(v.size(s)?).map_err(|_| Errno::EOVERFLOW)?,
+        _ => return Err(Errno::EINVAL),
+    };
+    let start = base.checked_add(fl.l_start).ok_or(Errno::EOVERFLOW)?;
+    let (start, end) = match fl.l_len {
+        0 => (start, u64::MAX),
+        len if len > 0 => {
+            let end = start.checked_add(len - 1).ok_or(Errno::EOVERFLOW)?;
+            (start, end.cast_unsigned())
+        }
+        // A negative length runs back from the start.
+        len => {
+            let first = start.checked_add(len).ok_or(Errno::EINVAL)?;
+            (first, (start - 1).cast_unsigned())
+        }
+    };
+    let start = u64::try_from(start).map_err(|_| Errno::EINVAL)?;
+    Ok((start, end))
+}
+
+/// `fcntl`'s `F_GETLK`, `F_SETLK`, and `F_SETLKW`: the calling process's
+/// POSIX locks (FreeBSD's `kern_fcntl` and `lf_advlock`).
+fn record_lock(s: &Sleepable, fd: i32, cmd: u32, arg: u64) -> SysResult {
+    use vfs::lockf::{Lock, LockType, Owner};
+    let p = process()?;
+    let f = file(s, &p, u64::from(fd.cast_unsigned()))?;
+    let v = f.vnode().ok_or(Errno::EBADF)?.clone();
+    let ptr = UserPtr::<Flock>::new(arg);
+    let mut fl = ptr.read().map_err(|_| Errno::EFAULT)?;
+    let (start, end) = lock_range(s, &f, &fl)?;
+    let owner = Owner::Process(p.pid());
+    let ty = match fl.l_type {
+        F_RDLCK => Some(LockType::Shared),
+        F_WRLCK => Some(LockType::Exclusive),
+        F_UNLCK => None,
+        _ => return Err(Errno::EINVAL),
+    };
+    if cmd == F_GETLK {
+        let Some(ty) = ty else {
+            return Err(Errno::EINVAL);
+        };
+        match v.lockf().conflict(owner, ty, start, end) {
+            None => fl.l_type = F_UNLCK,
+            Some(c) => {
+                fl.l_type = match c.ty {
+                    LockType::Shared => F_RDLCK,
+                    LockType::Exclusive => F_WRLCK,
+                };
+                fl.l_whence = 0;
+                fl.l_start = c.start.cast_signed();
+                fl.l_len = if c.end == u64::MAX {
+                    0
+                } else {
+                    (c.end - c.start + 1).cast_signed()
+                };
+                fl.l_pid = match c.owner {
+                    Owner::Process(pid) => pid,
+                    Owner::File(_) => -1,
+                };
+                fl.l_sysid = 0;
+            }
+        }
+        ptr.write(&fl).map_err(|_| Errno::EFAULT)?;
+        return Ok(0);
+    }
+    match ty {
+        None => v.lockf().unlock(owner, start, end),
+        Some(ty) => {
+            // A lock needs the matching access to the file.
+            let need = match ty {
+                LockType::Shared => FREAD,
+                LockType::Exclusive => FWRITE,
+            };
+            if f.flags() & need == 0 {
+                return Err(Errno::EBADF);
+            }
+            let req = Lock {
+                owner,
+                pid: p.pid(),
+                ty,
+                start,
+                end,
+            };
+            v.lockf().lock(s, req, cmd == F_SETLKW)?;
+        }
+    }
+    Ok(0)
+}
+
+/// `flock(fd, how)`: a lock on the whole file, owned by the open file.
+pub(super) fn flock(s: &Sleepable, fd: u64, how: u64) -> SysResult {
+    use vfs::lockf::{Lock, LockType};
+    let how = u32::try_from(how).map_err(|_| Errno::EINVAL)?;
+    let f = current_file(s, fd)?;
+    let FileKind::Vnode(vf) = f.kind() else {
+        return Err(Errno::EOPNOTSUPP);
+    };
+    let owner = vf.lock_owner();
+    let lockf = vf.vnode.lockf();
+    if how & LOCK_UN != 0 {
+        lockf.unlock(owner, 0, u64::MAX);
+        return Ok(0);
+    }
+    let ty = match how & (LOCK_SH | LOCK_EX) {
+        LOCK_SH => LockType::Shared,
+        LOCK_EX => LockType::Exclusive,
+        _ => return Err(Errno::EINVAL),
+    };
+    // Changing a held lock's type is a release and a new request, as on
+    // FreeBSD (not atomic).
+    lockf.unlock(owner, 0, u64::MAX);
+    let req = Lock {
+        owner,
+        pid: 0,
+        ty,
+        start: 0,
+        end: u64::MAX,
+    };
+    lockf.lock(s, req, how & LOCK_NB == 0)?;
+    Ok(0)
 }
 
 /// `ioctl(fd, com, data)`.

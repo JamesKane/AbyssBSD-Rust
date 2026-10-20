@@ -25,6 +25,7 @@
 extern crate alloc;
 
 pub mod cache;
+pub mod lockf;
 pub mod mount;
 pub mod namei;
 pub mod node;

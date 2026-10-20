@@ -31,12 +31,16 @@ FreeBSD's behavior wins unless this table says otherwise ([COMPATIBILITY.md](COM
 | arm64 signal frames | No SVE context is written: a handler sees the V registers, and `sigreturn` restores them and clears the rest of the Z registers. A user-built SVE context is skipped | The SVE context list is not implemented | Before P6 (the Orange Pi 6 Plus has SVE2) |
 | amd64 extended context | `getcontextx`'s `sysarch(AMD64_GET_XFPUSTATE)` is not implemented; signal frames do carry the full XSAVE state | Not reached by `/rescue` | When a program needs it |
 | Stack | The stack is mapped whole at 8 MiB, and `RLIMIT_STACK` is 8 MiB. FreeBSD reserves `MAXSSIZ` (512 MiB on amd64, 1 GiB on arm64) and grows the stack on demand | No grow-down mappings yet | P5 |
-| Writable files | The root file system (the memory disk, as tarfs) is read-only and is the only one holding files: creating, writing, or truncating a file fails with `EROFS`, as on a read-only mount. `MAP_SHARED` file mappings are private copies, which no one can tell apart while nothing is writable | No writable file system yet | P5 (tmpfs, UFS2) |
+| Writable files | The root file system (the memory disk, as tarfs) is read-only; tmpfs, mounted with `nmount`, is the only writable file system. Its files cannot be mapped (`ENODEV`) or executed (`ENOEXEC`), and `MAP_SHARED` mappings of memory-disk files are private copies, which no one can tell apart while those files cannot change | No page cache yet | P5.3 (page cache), P5.5 (UFS2) |
+| `nmount` | Only `tmpfs` (options `mode`, `uid`, `gid`, `ro`); other types fail with `ENODEV`, as an unknown one does on FreeBSD | Each type arrives with its milestone | P5.4 (UFS2), P5.6 (msdosfs) |
+| `fsync`, `fdatasync`, `sync` | Succeed having nothing to write | Every writable file system is in memory | P5.3 |
+| `mknod(S_IFBLK)` | Fails with `EINVAL`; FreeBSD makes the (useless) node | No block-device node kind; FreeBSD serves disks as character devices anyway | Permanent |
+| `rmdir("a/b/..")` | Always `EINVAL`; FreeBSD answers `EINVAL` or `ENOTEMPTY`, apparently by which lookup path ran | `vfs_lookup`'s rule for `..` as the last component of a removal | Permanent |
 | devfs | Only `console`, `tty`, `ttyu0`, `null`, `zero`, `random`, and `urandom`; no `/dev/fd`, `/dev/stdin` and the like, no `cuau0` or `ttyu0.init`, and no disk nodes | The shell needs no more | P5 (devfs complete) |
-| Advisory locks | `fcntl`'s `F_GETLK`, `F_SETLK`, and `F_SETLKW` fail with `EOPNOTSUPP`; `O_SHLOCK` and `O_EXLOCK` are ignored; `flock` returns `ENOSYS` | Locking comes with the full VFS | P5 |
+| Advisory locks | `O_SHLOCK` and `O_EXLOCK` are ignored at open (`flock` and `fcntl` locks work) | Not reached by the base system's shell path | When a program needs it |
 | `SIGIO` | `F_GETOWN` and `F_SETOWN` fail with `EINVAL`; `O_ASYNC` is recorded but sends nothing | Nothing in the base system's shell path uses it | When a program needs it |
 | `fcntl(F_KINFO)` | Fails with `EINVAL` | No `kinfo_file` yet | With `kern.proc.filedesc` (`procstat`) |
-| `statfs` | `f_blocks`, `f_bfree`, `f_files`, and the I/O counters are 0 | Not tracked for the memory disk and devfs | P5 |
+| `statfs` | The I/O counters (`f_syncwrites` and the like) are 0; tarfs reports its size as used blocks and nothing free | Not tracked | P5.3 (block I/O) |
 | Pipes | Buffers do not shrink when pipe memory runs short, and large writes are copied rather than mapped (no direct-write path); the `kern.ipc` pipe counters are absent | What a program sees is the same | P4.7 measures whether direct writes matter |
 | Process descriptors | `fstat`'s times are 0 (FreeBSD reports when the process started) | Start times are not recorded yet | With `kern.proc` (P4.7, `ps`) |
 | Terminals | Only the console's UART is a terminal: other UARTs attach but are not `ttyuN`. There are no pseudo-terminals (`posix_openpt` returns `ENOSYS`) | The shell on the console needs no more | ptys with sshd (P6) |

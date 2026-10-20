@@ -849,7 +849,7 @@ P5.0 ─► P5.1 ─┬─► P5.2 ───────────────
 - fsx and pjdfstest built on the server from the FreeBSD tree, and their runs recorded on FreeBSD.
 - The aarch64 TCG numbers left from P4.0, recorded.
 
-**P5.1 VFS core.**
+**P5.1 VFS core.** Done 2026-10-19.
 - Vnodes as VFS.md §4 describes: the per-mount inode table, `VnodeUse`, `inactive` and `reclaim`,
   `Live`/`Doomed` states, the vnode LRU and `vnlru`, and per-vnode `SxLock`s with the §5 order.
 - The name cache with negative entries and directory back-references (§6). `namei` rebased on it,
@@ -862,6 +862,30 @@ P5.0 ─► P5.1 ─┬─► P5.2 ───────────────
   busy counts. The memory disk and devfs move onto the new interfaces.
 - Host tests against an in-memory test file system, including random operation sequences checked
   against a model.
+- Done 2026-10-19:
+  - `sys/vfs` rebuilt on VFS.md. A vnode holds its file system's node behind an `SxLock`, `Live`
+    or `Doomed`. Each mount's table holds its vnodes, so one goes only on purpose: the `vnlru`
+    thread reclaims the longest unused idle ones past `kern.maxvnodes` (one per 32 pages, as
+    FreeBSD sizes it), or unmount does. `VnodeUse` is the use reference, and its last drop frees an
+    unlinked file.
+  - The name cache holds positive and negative entries, refers to vnodes weakly (it never decides
+    what stays in core), and records directories' names for `getcwd`.
+  - The generic layer has FreeBSD's rules for create, unlink and rmdir, link, rename (one vnode
+    lock taken and the rest tried, with a per-mount lock across directories), setattr (`vaccess`,
+    ownership, set-id and sticky bits, `chflags` flags), and `getdirentries` packing.
+  - Advisory locks: `fcntl` record locks owned by the process (released when it closes any
+    descriptor for the file) and `flock` locks owned by the open file, in one list per vnode, as
+    on FreeBSD, with deadlock detection.
+  - tmpfs, and the fixed trees of the memory disk and the boot devfs, moved onto the new traits.
+  - System calls: `open` with `O_CREAT`/`O_EXCL`/`O_TRUNC` and permission checks, writable
+    files, `copy_file_range`, `mkdir`, `unlink`, `rmdir`, `rename`, `link`, `symlink`, `mknod`,
+    `mkfifo`, the attribute calls, `truncate`, `fsync`, `sync`, `flock`, and `nmount` (tmpfs) and
+    `unmount`, with their `*at` and descriptor forms.
+  - 25 host tests (5000 random operations against a model among them), and `tests/user/vfs.c`,
+    which passes natively on FreeBSD 15.1 too. It settled several `errno`s against FreeBSD:
+    `unlink` of `.` gives `EPERM`, `O_CREAT` on a directory `EISDIR`, and a new name with a
+    trailing slash `ENOENT`.
+  - `sched` locks now work in host tests, and the witness lets vnode locks nest (`dup_ok`).
 
 **P5.2 tmpfs and devfs.**
 - tmpfs (§10.2) mounted on `/tmp`. The first writable file system: every P5.1 syscall works on it,

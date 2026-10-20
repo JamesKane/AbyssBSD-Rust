@@ -177,6 +177,14 @@ pub static LAYOUTS: &[StructLayout] = &[
         st_filerev => "st_filerev",
         st_spare => "st_spare",
     }),
+    layout!(crate::fcntl::Flock, "struct flock", ["fcntl.h"], All, {
+        l_start => "l_start",
+        l_len => "l_len",
+        l_pid => "l_pid",
+        l_type => "l_type",
+        l_whence => "l_whence",
+        l_sysid => "l_sysid",
+    }),
     layout!(crate::dirent::Dirent, "struct dirent", ["sys/types.h", "dirent.h"], All, {
         d_fileno => "d_fileno",
         d_off => "d_off",

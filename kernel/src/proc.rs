@@ -731,6 +731,7 @@ impl Process {
         drop(old);
         self.signals.lock().exec();
         let closed = self.files.lock(s).exec();
+        crate::fs::closed(self.pid, &closed);
         drop(closed);
         let cwd = Arc::clone(self.cwd.lock().vnode());
         *self.image.lock() = Image::new(s, &cwd, path, argv);
@@ -775,6 +776,7 @@ impl Process {
         // Descriptors close before the parent hears: a pipe's reader sees
         // the end first.
         let closed = self.files.lock(s).take_all();
+        crate::fs::closed(self.pid, &closed);
         drop(closed);
         if self.pid == self.sid() {
             crate::tty::session_ended(self.pid);
