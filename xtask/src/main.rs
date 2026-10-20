@@ -9,6 +9,7 @@ mod base;
 mod build;
 mod cli;
 mod expect;
+mod fs;
 mod image;
 mod perf;
 mod policy;
@@ -38,6 +39,9 @@ commands:
   fetch-base  [--arch <a|all>]                           FreeBSD base.txz: /rescue image, sysroot (server only)
   acpidump    --arch <a> [--vmm qemu|bhyve] [--machine M] --out DIR   capture a VM's ACPI tables
   freebsd-record [--out DIR]                             record FreeBSD's device tree in bhyve (server only)
+  fs-image    --fs ufs2|msdos --out IMG [--from DIR] [--size S] [--softdep]
+                                                         make a file-system image with FreeBSD's tools (server only)
+  fs-check    --fs ufs2|msdos IMG                        fsck an image read-only; fails unless clean (server only)
   check                                                  fmt, clippy (host and targets), policy
   policy                                                 dependency and license-header rules
   syscallgen  [--src DIR] [--check]                      regenerate lib/abi syscall tables
@@ -78,6 +82,8 @@ fn run() -> Result<()> {
         "perf" => perf::cmd(args),
         "ubench" => perf::cmd_ubench(args),
         "freebsd-record" => perf::cmd_record(args),
+        "fs-image" => fs::cmd_image(args),
+        "fs-check" => fs::cmd_check(args),
         "fetch-base" => base::cmd(args),
         "freebsd-shell" => expect::cmd_freebsd_shell(args),
         "acpidump" => acpidump::cmd(args),
