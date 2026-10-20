@@ -31,9 +31,9 @@
 //! Behavior reference: sys/vm/vm_object.c (shadow chains and collapse).
 
 use alloc::collections::{BTreeMap, BTreeSet};
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use sync::SpinLock;
 
@@ -66,6 +66,20 @@ pub trait Pager: Send + Sync {
     /// Writes page `index`'s contents into `page` (a whole page, zero
     /// past the end of the data). May sleep.
     fn fill(&self, index: PageIndex, page: &mut [u8]) -> Result<(), PagerError>;
+    /// The most pages one fill may read (a cluster: FreeBSD's
+    /// `MAXPHYS` worth); 1 reads page by page.
+    fn max_run(&self) -> PageIndex {
+        1
+    }
+    /// Fills the pages from `index` on into `buf`, whole pages, as many
+    /// as it holds (at most [`Self::max_run`], none past the end): one
+    /// transfer where the data is contiguous. May sleep.
+    fn fill_run(&self, index: PageIndex, buf: &mut [u8]) -> Result<(), PagerError> {
+        for (i, page) in (index..).zip(buf.as_chunks_mut::<PAGE_BYTES>().0) {
+            self.fill(i, page)?;
+        }
+        Ok(())
+    }
     /// Whether pages written through mappings or the page cache go back
     /// to the pager (then the object tracks which are dirty).
     fn writes_back(&self) -> bool {
@@ -91,6 +105,43 @@ pub enum LookupError {
 /// A page index within an object.
 pub type PageIndex = u64;
 
+const PAGE_BYTES: usize = 4096;
+
+/// Pages dirty in every object, for throttling writers.
+static DIRTY: AtomicUsize = AtomicUsize::new(0);
+
+/// Every pager object, for reclaiming clean pages (dead ones are pruned
+/// as reclaiming passes).
+static PAGED: SpinLock<Vec<Weak<Object>>> = SpinLock::new(Vec::new());
+
+/// Pages dirty in all objects together.
+#[must_use]
+pub fn dirty_total() -> usize {
+    DIRTY.load(Ordering::Relaxed)
+}
+
+/// Frees up to `want` clean pages of pager objects nothing maps (only
+/// their file system holds them) and nobody is reading or writing
+/// through, oldest objects first; returns how many it freed. Never waits
+/// for a lock: a caller may hold one.
+pub fn reclaim_clean(want: usize) -> usize {
+    let objects: Vec<Arc<Object>> = {
+        let Some(mut list) = PAGED.try_lock() else {
+            return 0;
+        };
+        list.retain(|w| w.strong_count() > 0);
+        list.iter().filter_map(Weak::upgrade).collect()
+    };
+    let mut freed = 0;
+    for o in &objects {
+        if freed >= want {
+            break;
+        }
+        freed += o.drop_clean(want - freed);
+    }
+    freed
+}
+
 /// A memory object.
 pub struct Object {
     inner: SpinLock<Inner>,
@@ -100,6 +151,24 @@ pub struct Object {
     /// (`OBJ_ONEMAPPING`). Cleared for good once shared.
     one_mapping: AtomicBool,
     pager: Option<Arc<dyn Pager>>,
+    /// Page-cache transfers and write-backs under way, which hold page
+    /// frames outside the lock: reclaiming leaves the object alone.
+    io: AtomicUsize,
+    /// Read-ahead: the page a sequential fill would ask next, and how many
+    /// pages the next fill reads.
+    ra_next: AtomicU64,
+    ra_window: AtomicU64,
+}
+
+/// A transfer through an object's pages: its frames stay put until the
+/// guard goes.
+#[derive(Debug)]
+pub struct IoGuard<'a>(&'a Object);
+
+impl Drop for IoGuard<'_> {
+    fn drop(&mut self) {
+        self.0.io.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 struct Inner {
@@ -144,6 +213,9 @@ impl Object {
             pages_ops: ops,
             one_mapping: AtomicBool::new(true),
             pager: None,
+            io: AtomicUsize::new(0),
+            ra_next: AtomicU64::new(0),
+            ra_window: AtomicU64::new(1),
         })
     }
 
@@ -161,14 +233,20 @@ impl Object {
             pages_ops: ops,
             one_mapping: AtomicBool::new(true),
             pager: None,
+            io: AtomicUsize::new(0),
+            ra_next: AtomicU64::new(0),
+            ra_window: AtomicU64::new(1),
         })
     }
 
     /// An object whose pages `pager` supplies. It counts as shared from
     /// the start: unmapping never frees its pages, which stay cached.
+    ///
+    /// Its file system must hold it for as long as the file lives: that
+    /// reference is how [`reclaim_clean`] tells an object nothing maps.
     #[must_use]
     pub fn with_pager(ops: &'static dyn PageOps, pager: Arc<dyn Pager>) -> Arc<Self> {
-        Arc::new(Self {
+        let o = Arc::new(Self {
             inner: SpinLock::new(Inner {
                 pages: BTreeMap::new(),
                 dirty: BTreeSet::new(),
@@ -178,7 +256,48 @@ impl Object {
             pages_ops: ops,
             one_mapping: AtomicBool::new(false),
             pager: Some(pager),
-        })
+            io: AtomicUsize::new(0),
+            ra_next: AtomicU64::new(0),
+            ra_window: AtomicU64::new(1),
+        });
+        PAGED.lock().push(Arc::downgrade(&o));
+        o
+    }
+
+    /// Holds this object's page frames in place for a transfer through
+    /// them (see [`reclaim_clean`]): take it before looking pages up.
+    pub fn io(&self) -> IoGuard<'_> {
+        self.io.fetch_add(1, Ordering::SeqCst);
+        IoGuard(self)
+    }
+
+    /// Frees up to `want` of this object's clean pages, if nothing maps it
+    /// and no transfer is under way. `self` is a reference of the caller's
+    /// own, beside the file system's (see [`Self::with_pager`]).
+    pub fn drop_clean(self: &Arc<Self>, want: usize) -> usize {
+        let Some(mut inner) = self.inner.try_lock() else {
+            return 0;
+        };
+        // Ours and the file system's: no map entry or shadow reaches it,
+        // and a new one finds the pages gone when it looks (under this
+        // lock). A transfer takes its guard before it looks.
+        if Arc::strong_count(self) > 2 || self.io.load(Ordering::SeqCst) != 0 {
+            return 0;
+        }
+        let Inner { pages, dirty, .. } = &mut *inner;
+        let doomed: Vec<PageIndex> = pages
+            .keys()
+            .filter(|i| !dirty.contains(i))
+            .take(want)
+            .copied()
+            .collect();
+        let freed: Vec<Pfn> = doomed.iter().filter_map(|i| pages.remove(i)).collect();
+        drop(inner);
+        let n = freed.len();
+        for pfn in freed {
+            self.pages_ops.free(pfn);
+        }
+        n
     }
 
     /// Whether only one mapping reaches this object.
@@ -277,24 +396,82 @@ impl Object {
         if !fill {
             return Ok(None);
         }
-        // Fill outside the lock; a racing fill of the same page loses.
-        let mut failed = false;
-        let new = self
-            .pages_ops
-            .alloc_filled(&mut |page| failed = pager.fill(index, page).is_err())
-            .ok_or(LookupError::OutOfMemory)?;
-        if failed {
-            self.pages_ops.free(new);
-            return Err(LookupError::Io);
+        let run = self.run_at(pager.as_ref(), index);
+        if run == 1 {
+            // Fill outside the lock; a racing fill of the same page loses.
+            let mut failed = false;
+            let new = self
+                .pages_ops
+                .alloc_filled(&mut |page| failed = pager.fill(index, page).is_err())
+                .ok_or(LookupError::OutOfMemory)?;
+            if failed {
+                self.pages_ops.free(new);
+                return Err(LookupError::Io);
+            }
+            return Ok(Some(self.insert_filled(index, new)));
         }
+        // A cluster: one transfer into a buffer, copied into pages (a
+        // copy costs far less than the transfer saved).
+        let mut buf = alloc::vec![0u8; usize::try_from(run).unwrap_or(1) * PAGE_BYTES];
+        pager
+            .fill_run(index, &mut buf)
+            .map_err(|_| LookupError::Io)?;
+        let mut first = None;
+        for (i, chunk) in (index..).zip(buf.as_chunks::<PAGE_BYTES>().0) {
+            let Some(new) = self
+                .pages_ops
+                .alloc_filled(&mut |page| page.copy_from_slice(chunk))
+            else {
+                // The page asked for is in; read-ahead may stop short.
+                if first.is_none() {
+                    return Err(LookupError::OutOfMemory);
+                }
+                break;
+            };
+            let pfn = self.insert_filled(i, new);
+            first.get_or_insert(pfn);
+        }
+        first.map(Some).ok_or(LookupError::OutOfMemory)
+    }
+
+    /// Inserts a page just filled at `index`, unless a racing fill got
+    /// there first (then that page wins and this one is freed).
+    fn insert_filled(&self, index: PageIndex, new: Pfn) -> Pfn {
         let mut inner = self.inner.lock();
         if let Some(&pfn) = inner.pages.get(&index) {
             drop(inner);
             self.pages_ops.free(new);
-            return Ok(Some(pfn));
+            return pfn;
         }
         inner.pages.insert(index, new);
-        Ok(Some(new))
+        new
+    }
+
+    /// How many pages to fill from `index` on: the read-ahead window when
+    /// fills come in order (doubling each time, up to the pager's run),
+    /// one page otherwise; never past the end or over a page held.
+    fn run_at(&self, pager: &dyn Pager, index: PageIndex) -> PageIndex {
+        let max = pager.max_run().max(1);
+        let window = if self.ra_next.load(Ordering::Relaxed) == index {
+            self.ra_window
+                .load(Ordering::Relaxed)
+                .saturating_mul(2)
+                .min(max)
+        } else {
+            1
+        };
+        let end = index.saturating_add(window).min(pager.size());
+        let inner = self.inner.lock();
+        let end = inner
+            .pages
+            .range(index + 1..end)
+            .next()
+            .map_or(end, |(&i, _)| i);
+        drop(inner);
+        let run = end.saturating_sub(index).max(1);
+        self.ra_window.store(run, Ordering::Relaxed);
+        self.ra_next.store(index + run, Ordering::Relaxed);
+        run
     }
 
     /// The page at `index` of this object (not the chain), creating it if
@@ -387,8 +564,8 @@ impl Object {
 
     /// Records that page `index` was written.
     pub fn mark_dirty(&self, index: PageIndex) {
-        if self.tracks_dirty() {
-            self.inner.lock().dirty.insert(index);
+        if self.tracks_dirty() && self.inner.lock().dirty.insert(index) {
+            DIRTY.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -397,7 +574,9 @@ impl Object {
     pub fn mark_mapped_writable(&self, index: PageIndex) {
         if self.tracks_dirty() {
             let mut inner = self.inner.lock();
-            inner.dirty.insert(index);
+            if inner.dirty.insert(index) {
+                DIRTY.fetch_add(1, Ordering::Relaxed);
+            }
             inner.mapped_writable.insert(index);
         }
     }
@@ -420,6 +599,8 @@ impl Object {
         let Some(pager) = &self.pager else {
             return Ok(());
         };
+        // The pages are written outside the lock: hold them in place.
+        let _io = self.io();
         let todo: Vec<(PageIndex, Pfn)> = {
             let mut inner = self.inner.lock();
             let indexes: Vec<PageIndex> = inner.dirty.range(start..end).copied().collect();
@@ -427,6 +608,7 @@ impl Object {
             for i in indexes {
                 if !inner.mapped_writable.contains(&i) {
                     inner.dirty.remove(&i);
+                    DIRTY.fetch_sub(1, Ordering::Relaxed);
                 }
                 if let Some(&pfn) = inner.pages.get(&i) {
                     out.push((i, pfn));
@@ -440,7 +622,9 @@ impl Object {
             self.pages_ops
                 .access(pfn, &mut |page| r = pager.write_back(i, page));
             if r.is_err() {
-                self.inner.lock().dirty.insert(i);
+                if self.inner.lock().dirty.insert(i) {
+                    DIRTY.fetch_add(1, Ordering::Relaxed);
+                }
                 result = r;
             }
         }
@@ -454,7 +638,8 @@ impl Object {
     /// page table is searched for them here.
     pub fn truncate(self: &Arc<Self>, pages: PageIndex) {
         let mut inner = self.inner.lock();
-        let _ = inner.dirty.split_off(&pages);
+        let cut = inner.dirty.split_off(&pages);
+        DIRTY.fetch_sub(cut.len(), Ordering::Relaxed);
         let _ = inner.mapped_writable.split_off(&pages);
         if Arc::strong_count(self) > 1 {
             return;
@@ -541,6 +726,7 @@ impl Object {
 impl Drop for Object {
     fn drop(&mut self) {
         let inner = self.inner.get_mut();
+        DIRTY.fetch_sub(inner.dirty.len(), Ordering::Relaxed);
         for pfn in core::mem::take(&mut inner.pages).into_values() {
             self.pages_ops.free(pfn);
         }

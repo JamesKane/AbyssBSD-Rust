@@ -59,9 +59,20 @@ impl KernelPages {
     }
 }
 
+/// A page for an object: from the free lists, or, when they are empty,
+/// after reclaiming clean file pages nothing maps.
+fn user_page() -> Option<vm::PhysAddr> {
+    alloc_pages(Order::ZERO).or_else(|| {
+        // A batch, so the next allocations find pages too.
+        (vm::object::reclaim_clean(256) > 0)
+            .then(|| alloc_pages(Order::ZERO))
+            .flatten()
+    })
+}
+
 impl PageOps for KernelPages {
     fn alloc_zeroed(&self) -> Option<Pfn> {
-        let pa = alloc_pages(Order::ZERO)?;
+        let pa = user_page()?;
         let pfn = Pfn::containing(pa);
         // SAFETY: a fresh page, reached through the DMAP, used by no one.
         unsafe { core::ptr::write_bytes(Self::page(pfn), 0, PAGE_BYTES) };
@@ -69,7 +80,7 @@ impl PageOps for KernelPages {
     }
 
     fn alloc_copy(&self, from: Pfn) -> Option<Pfn> {
-        let pa = alloc_pages(Order::ZERO)?;
+        let pa = user_page()?;
         let pfn = Pfn::containing(pa);
         // SAFETY: `from` is a live page of some object (only read while
         // its object reaches it, and no one writes it through the kernel);
@@ -81,7 +92,7 @@ impl PageOps for KernelPages {
     }
 
     fn alloc_filled(&self, fill: &mut dyn FnMut(&mut [u8])) -> Option<Pfn> {
-        let pa = alloc_pages(Order::ZERO)?;
+        let pa = user_page()?;
         let pfn = Pfn::containing(pa);
         // SAFETY: a fresh page, reached through the DMAP, used by no one.
         fill(unsafe { core::slice::from_raw_parts_mut(Self::page(pfn), PAGE_BYTES) });

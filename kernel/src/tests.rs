@@ -2144,6 +2144,41 @@ ktest! {
 }
 
 ktest! {
+    /// The buffer cache over the scratch disk: delayed writes reach the
+    /// disk only when synced, reads come from the cache, and a whole-block
+    /// overwrite reads nothing first.
+    fn buffer_cache_over_a_disk() {
+        use bufcache::{Fill, Limits, WriteMode};
+        let s = cx();
+        let disk = storage::find("vtbd1").expect("the scratch disk, vtbd1");
+        let cache = crate::fs::block::cache(alloc::sync::Arc::clone(&disk), Limits::default());
+        let base = 8 << 20;
+        cache
+            .write(&s, base, 16384, Fill::Overwrite, WriteMode::Delayed, |b| b.fill(0x5a))
+            .unwrap();
+        cache
+            .write(&s, base + 16384, 4096, Fill::Read, WriteMode::Delayed, |b| b[7] = 7)
+            .unwrap();
+        assert_ne!(disk.read(&s, base, 512).unwrap()[0], 0x5a, "not written yet");
+        assert_eq!(cache.read(&s, base, 16384, |b| b[16383]), Ok(0x5a));
+        let before = crate::time::now_ns();
+        // Not old enough for the syncer, then old enough.
+        cache.write_aged(&s, 0).unwrap();
+        assert_eq!(cache.usage().1, 20480);
+        cache.write_aged(&s, before).unwrap();
+        assert_eq!(cache.usage().1, 0);
+        assert!(disk.read(&s, base, 16384).unwrap().iter().all(|&b| b == 0x5a));
+        assert_eq!(disk.read(&s, base + 16384, 512).unwrap()[7], 7);
+        cache
+            .write(&s, base, 512, Fill::Read, WriteMode::Now, |b| b[0] = 1)
+            .unwrap();
+        assert_eq!(disk.read(&s, base, 512).unwrap()[0], 1);
+        cache.sync(&s).unwrap();
+        cache.invalidate();
+    }
+}
+
+ktest! {
     fn nvme_writes_and_reads_back() {
         let s = cx();
         let m = bus::manager();

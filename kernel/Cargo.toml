@@ -16,6 +16,7 @@ bench = false
 ktest = []
 
 [dependencies]
+bufcache = { path = "../sys/bufcache" }
 abi = { path = "../lib/abi" }
 acpi-tables = { path = "../lib/acpi-tables" }
 addr = { path = "../lib/addr" }

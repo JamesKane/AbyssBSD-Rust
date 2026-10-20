@@ -911,7 +911,7 @@ P5.0 ─► P5.1 ─┬─► P5.2 ───────────────
     root until Phase 6, so it needs a minimal credential model (`setuid`, `setgid`, `setgroups`,
     per-process `Cred`) first.
 
-**P5.3 Page cache, buffer cache, write-back.**
+**P5.3 Page cache, buffer cache, write-back.** — done 2026-10-19
 - The vnode pager with fill and write-back (§8.1), dirty tracking by write fault for shared
   mappings, `msync`, and reclaiming clean pages under pressure.
 - `sys/bufcache` (§8.2) over `sys/storage`, with synchronous wrappers that sleep on `Bio`
@@ -919,6 +919,33 @@ P5.0 ─► P5.1 ─┬─► P5.2 ───────────────
 - The syncer (§9.1), `fsync`/`fdatasync`/`sync`, and dirty throttling (§9.3).
 - Clustering and read-ahead (§8.3).
 - Proven first on a raw disk node, and by tmpfs moving its file data to the same paths.
+- As delivered:
+  - VM objects track dirty pages for pagers that write back. Pagers are fallible, and a fault
+    never fills under the map lock: it returns the page to fill, the kernel fills with the map
+    unlocked, then resolves again. `MAP_SHARED` file mappings map the file's object itself. A
+    clean page maps read-only so its first write marks it dirty; a page mapped writable stays
+    dirty, since there are no reverse maps to take the right back after writing it.
+  - Pagers read clusters (`max_run`, `fill_run`). An object grows its read-ahead window by
+    doubling while fills come in order and drops back to one page otherwise.
+  - When the free lists run dry, clean pages of file objects nothing maps are reclaimed. Page-cache
+    transfers and write-back hold an object's I/O guard, so no frame in use is freed.
+  - `sys/vfs` `pagecache` reads, writes, and resizes through an object's pages. A writer that finds
+    more than a tenth of memory dirty writes its own file back first.
+  - tmpfs keeps file data in anonymous VM objects, so its files map, share, and execute. `exec`
+    reads only the ELF head (`Elf::parse_head`).
+  - `msync` with FreeBSD's checks. `fsync` writes the file's pages, then a per-node hook for
+    metadata. The syncer thread asks every writable mount, once a second, to write what has been
+    dirty for 30 seconds.
+  - `sys/bufcache` caches metadata blocks by disk offset. A closure runs on each held buffer.
+    Writes are synchronous or delayed, and delayed ones are stamped on the monotonic clock for the
+    syncer. Dirty data is throttled between high and low watermarks, and idle clean buffers are
+    evicted LRU first. The kernel puts it over `sys/storage` disks, whose transfers sleep on bio
+    completion. A boot test drives it on the scratch disk.
+  - fsx on tmpfs now passes with mapped reads and writes. `vfs.c` checks shared and private
+    mappings against `read` and `write`, and passes on FreeBSD 15.1 too.
+  - **Left to its users:** the vnode pager over a file system's block map comes with UFS (P5.4),
+    which is its first pager that writes back. Write clustering of adjacent dirty buffers comes
+    with UFS writes (P5.5).
 
 **P5.4 UFS2 read.**
 - `lib/ufs` read side (§10.3 stage 1), host-tested on images `makefs` and `newfs` made from

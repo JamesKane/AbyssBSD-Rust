@@ -504,11 +504,11 @@ pub(super) fn ftruncate(s: &Sleepable, fd: u64, len: u64) -> SysResult {
     Ok(0)
 }
 
-/// `fsync(fd)` and `fdatasync(fd)`: the file system writes what is dirty
-/// (nothing yet: every writable file system is in memory).
+/// `fsync(fd)` and `fdatasync(fd)`: the file's dirty pages and its
+/// metadata go to the disk.
 pub(super) fn fsync(s: &Sleepable, fd: u64) -> SysResult {
     let v = fd_vnode(s, fd)?;
-    v.mount().fs().sync(s, true)?;
+    v.fsync(s)?;
     Ok(0)
 }
 

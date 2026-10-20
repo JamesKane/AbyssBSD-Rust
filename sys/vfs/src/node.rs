@@ -156,6 +156,12 @@ pub trait Node: Send + Sync + Any {
     /// change is for a regular file.
     fn setattr(&mut self, s: &Sleepable, a: &SetAttr) -> Result<(), Errno>;
 
+    /// Writes the node's own metadata (its inode) and whatever else the
+    /// file system keeps dirty for it; the file's pages went first.
+    fn fsync(&mut self, _s: &Sleepable) -> Result<(), Errno> {
+        Ok(())
+    }
+
     /// The last use of the vnode went: free the node's storage if it is
     /// unlinked (it is reclaimed next).
     fn inactive(&mut self, _s: &Sleepable) {}

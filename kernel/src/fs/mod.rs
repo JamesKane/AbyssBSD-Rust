@@ -9,6 +9,7 @@
 //! Behavior reference: sys/kern/vfs_mount.c (`vfs_getnewfsid`),
 //! sys/kern/vfs_mountroot.c.
 
+pub(crate) mod block;
 pub(crate) mod devfs;
 pub(crate) mod fdtable;
 pub(crate) mod file;
@@ -145,6 +146,40 @@ pub(crate) fn init() {
         .is_err()
     {
         kprintln!("fs: no vnode reclaimer (out of memory)");
+    }
+    // Dirty file pages past which writers write their own back: a tenth
+    // of memory (FreeBSD's `hidirtybuffers` is a share of buffer space).
+    vfs::pagecache::set_dirty_limit(
+        usize::try_from(crate::mm::phys_stats().managed / 10).unwrap_or(usize::MAX),
+    );
+    if sched::Builder::new("syncer")
+        .priority(sched::Priority::KERNEL)
+        .spawn(syncer)
+        .is_err()
+    {
+        kprintln!("fs: no syncer (out of memory)");
+    }
+}
+
+/// How long dirty data waits before the syncer writes it (FreeBSD's
+/// `kern.metadelay` to `kern.filedelay`: 28 to 30 seconds; one delay for
+/// all here).
+const SYNC_DELAY_NS: u64 = 30_000_000_000;
+
+/// The syncer (FreeBSD's `sched_sync`): once a second, each mount writes
+/// what has been dirty longer than [`SYNC_DELAY_NS`].
+fn syncer(s: &Sleepable) {
+    loop {
+        crate::time::sleep_ns(s, 1_000_000_000);
+        let Some(ns) = NAMESPACE.get() else {
+            continue;
+        };
+        let before = crate::time::now_ns().saturating_sub(SYNC_DELAY_NS);
+        for m in ns.mounts() {
+            if !m.read_only() {
+                m.fs().sync_aged(s, before);
+            }
+        }
     }
 }
 

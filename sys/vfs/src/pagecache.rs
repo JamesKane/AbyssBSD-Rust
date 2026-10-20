@@ -8,8 +8,15 @@
 //! with no pager (tmpfs), a page never written reads as zeros without
 //! being made. Written pages are marked dirty when the object's pages go
 //! back to a pager.
+//!
+//! Each transfer holds the object's I/O guard, so reclaiming never frees a
+//! frame being copied. A writer that finds more than [`dirty_limit`] pages
+//! dirty in all files writes its own file's back before returning
+//! (FreeBSD's dirty-buffer throttling, by file rather than by buffer), so
+//! a burst of writes cannot fill memory faster than the disk drains it.
 
 use alloc::sync::Arc;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use abi::errno::Errno;
 use vm::object::{LookupError, Object};
@@ -32,12 +39,27 @@ fn errno(e: LookupError) -> Errno {
     }
 }
 
+/// Dirty pages in all files past which writers write back their own.
+static DIRTY_LIMIT: AtomicUsize = AtomicUsize::new(8192);
+
+/// The dirty-page limit for writers.
+#[must_use]
+pub fn dirty_limit() -> usize {
+    DIRTY_LIMIT.load(Ordering::Relaxed)
+}
+
+/// Sets the dirty-page limit (the kernel sizes it from memory).
+pub fn set_dirty_limit(pages: usize) {
+    DIRTY_LIMIT.store(pages.max(1), Ordering::Relaxed);
+}
+
 /// Zeros for holes.
 static ZEROS: [u8; PAGE_BYTES] = [0; PAGE_BYTES];
 
 /// Reads from `offset` into `uio`, up to the file's `size`; returns the
 /// bytes read (0 at or past the end).
 pub fn read(object: &Object, size: u64, offset: u64, uio: &mut dyn Uio) -> Result<usize, Errno> {
+    let _io = object.io();
     let mut done = 0;
     let mut at = offset;
     while at < size && uio.resid() > 0 {
@@ -72,6 +94,7 @@ pub fn read(object: &Object, size: u64, offset: u64, uio: &mut dyn Uio) -> Resul
 /// Writes `uio` at `offset` into the pages; returns the bytes written. The
 /// file system has made room (and will set the size from the result).
 pub fn write(object: &Object, offset: u64, uio: &mut dyn Uio) -> Result<usize, Errno> {
+    let io = object.io();
     let mut done = 0;
     let mut at = offset;
     while uio.resid() > 0 {
@@ -89,6 +112,12 @@ pub fn write(object: &Object, offset: u64, uio: &mut dyn Uio) -> Result<usize, E
             break;
         }
     }
+    drop(io);
+    if vm::object::dirty_total() > dirty_limit() {
+        // A failure leaves the pages dirty, for fsync or the syncer to
+        // report.
+        let _ = object.sync(0, u64::MAX);
+    }
     Ok(done)
 }
 
@@ -96,6 +125,7 @@ pub fn write(object: &Object, offset: u64, uio: &mut dyn Uio) -> Result<usize, E
 /// the end go (if no mapping still holds the object), and the part of the
 /// last page past the end is zeroed, so growing again reads zeros.
 pub fn resize(object: &Arc<Object>, old: u64, new: u64) {
+    let _io = object.io();
     if new < old {
         object.truncate(new.div_ceil(PAGE));
     }

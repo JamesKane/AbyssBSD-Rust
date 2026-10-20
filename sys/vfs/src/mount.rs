@@ -89,6 +89,11 @@ pub trait FileSystem: Send + Sync + Any {
         Ok(())
     }
 
+    /// The syncer's call, once a second: write what was dirtied at or
+    /// before `before`, on the kernel's monotonic clock (nanoseconds since
+    /// boot), which a file system's buffer cache is given.
+    fn sync_aged(&self, _s: &Sleepable, _before: u64) {}
+
     /// The last step of an unmount, every vnode reclaimed.
     fn unmount(&self, _s: &Sleepable) -> Result<(), Errno> {
         Ok(())

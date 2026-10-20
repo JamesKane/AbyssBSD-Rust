@@ -306,6 +306,19 @@ impl Vnode {
         }
     }
 
+    /// Writes a file's dirty pages, then its metadata (`fsync`).
+    pub fn fsync(&self, s: &Sleepable) -> Result<(), Errno> {
+        // The pages go with the vnode unlocked: a pager may lock it.
+        if let Some(o) = self.object(s) {
+            o.sync(0, u64::MAX).map_err(|_| Errno::EIO)?;
+        }
+        if self.mount().read_only() {
+            return Ok(());
+        }
+        let mut st = self.write(s);
+        st.live_mut()?.node_mut().fsync(s)
+    }
+
     /// A symbolic link's target.
     pub fn readlink(&self, s: &Sleepable) -> Result<Vec<u8>, Errno> {
         match self.read(s).live()? {

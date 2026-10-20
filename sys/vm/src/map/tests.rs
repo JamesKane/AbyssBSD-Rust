@@ -669,3 +669,106 @@ fn fork_of_a_file_mapping_copies_on_write() {
     }
     assert_eq!(p.read(1), Ok(1001));
 }
+
+/// A file read in clusters of up to 8 pages, recording each run's length.
+struct ClusterFile {
+    pages: u64,
+    runs: std::sync::Mutex<Vec<(u64, usize)>>,
+}
+
+impl crate::object::Pager for ClusterFile {
+    fn size(&self) -> u64 {
+        self.pages
+    }
+
+    fn max_run(&self) -> u64 {
+        8
+    }
+
+    fn fill(&self, index: u64, page: &mut [u8]) -> Result<(), crate::object::PagerError> {
+        self.fill_run(index, page)
+    }
+
+    fn fill_run(&self, index: u64, buf: &mut [u8]) -> Result<(), crate::object::PagerError> {
+        self.runs.lock().unwrap().push((index, buf.len() / 4096));
+        for (i, page) in (index..).zip(buf.as_chunks_mut::<4096>().0) {
+            page.fill(0);
+            page[..8].copy_from_slice(&(1000 + i).to_le_bytes());
+        }
+        Ok(())
+    }
+
+    fn writes_back(&self) -> bool {
+        true
+    }
+}
+
+#[test]
+fn sequential_fills_read_ahead_and_random_ones_do_not() {
+    let pages = Pages::new();
+    let file = Arc::new(ClusterFile {
+        pages: 20,
+        runs: std::sync::Mutex::new(Vec::new()),
+    });
+    let object = crate::object::Object::with_pager(
+        pages,
+        Arc::clone(&file) as Arc<dyn crate::object::Pager>,
+    );
+    let mut a = Proc::new(pages);
+    a.map_file(0, 20, &object, 0, Prot::READ);
+    for i in 0..20 {
+        assert_eq!(a.read(i), Ok(1000 + i));
+    }
+    // A read from the start counts as in order; the window doubles to the
+    // pager's run, and stops at the end.
+    assert_eq!(
+        *file.runs.lock().unwrap(),
+        [(0, 2), (2, 4), (6, 8), (14, 6)]
+    );
+    // Out of order: a page at a time.
+    let other = crate::object::Object::with_pager(
+        pages,
+        Arc::clone(&file) as Arc<dyn crate::object::Pager>,
+    );
+    file.runs.lock().unwrap().clear();
+    let mut b = Proc::new(pages);
+    b.map_file(0, 20, &other, 0, Prot::READ);
+    for i in [10, 3, 17] {
+        assert_eq!(b.read(i), Ok(1000 + i));
+    }
+    assert_eq!(*file.runs.lock().unwrap(), [(10, 1), (3, 1), (17, 1)]);
+}
+
+#[test]
+fn clean_pages_nothing_maps_are_reclaimed() {
+    let pages = Pages::new();
+    let file = Arc::new(ClusterFile {
+        pages: 4,
+        runs: std::sync::Mutex::new(Vec::new()),
+    });
+    let object = crate::object::Object::with_pager(
+        pages,
+        Arc::clone(&file) as Arc<dyn crate::object::Pager>,
+    );
+    for i in 0..4 {
+        object.fill(i).unwrap();
+    }
+    object.mark_dirty(2);
+    // Mapped: kept.
+    let mut a = Proc::new(pages);
+    a.map_file(0, 4, &object, 0, Prot::READ);
+    assert_eq!(Arc::clone(&object).drop_clean(usize::MAX), 0);
+    drop(a);
+    // A transfer under way: kept.
+    let io = object.io();
+    assert_eq!(Arc::clone(&object).drop_clean(usize::MAX), 0);
+    drop(io);
+    // Otherwise the clean ones go; the dirty one stays.
+    assert_eq!(Arc::clone(&object).drop_clean(usize::MAX), 3);
+    assert_eq!(object.resident(), 1);
+    assert!(object.is_dirty(2));
+    // And come back from the pager.
+    file.runs.lock().unwrap().clear();
+    object.fill(0).unwrap();
+    assert_eq!(file.runs.lock().unwrap().len(), 1);
+}

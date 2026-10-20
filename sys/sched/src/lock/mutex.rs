@@ -311,6 +311,20 @@ impl<T> Mutex<T> {
         unsafe { &*self.value.get() }
     }
 
+    /// Locks if nobody holds the lock now, without waiting.
+    pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
+        let me = ptr::from_ref(crate::current()).expose_provenance();
+        self.core
+            .owner
+            .compare_exchange(0, me, Ordering::Acquire, Ordering::Relaxed)
+            .ok()?;
+        witness::acquire(self.core.class, ptr::from_ref(&self.core).addr());
+        Some(MutexGuard {
+            mutex: self,
+            _not_send: PhantomData,
+        })
+    }
+
     /// Locks, sleeping if needed. Thread context only.
     pub fn lock(&self, s: &Sleepable) -> MutexGuard<'_, T> {
         self.core.lock(s);
