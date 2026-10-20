@@ -318,6 +318,20 @@ impl VmMap {
             .is_some_and(|e| e.end > range.start)
     }
 
+    /// Whether any entry overlapping `range` has an object: only then can
+    /// a page of it be in the page tables (a fault makes the object
+    /// before it maps anything), so `munmap` of memory never touched need
+    /// not look.
+    #[must_use]
+    pub fn populated(&self, range: &Range<VirtAddr>) -> bool {
+        self.entries
+            .at_or_before(range.start.get())
+            .into_iter()
+            .chain(self.entries.starting_at(range.start.get()))
+            .take_while(|e| e.start < range.end)
+            .any(|e| e.end > range.start && e.object.is_some())
+    }
+
     /// Whether nothing is mapped in `range`.
     #[must_use]
     pub fn is_free(&self, range: &Range<VirtAddr>) -> bool {

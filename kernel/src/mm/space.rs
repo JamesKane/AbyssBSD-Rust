@@ -482,12 +482,14 @@ impl AddressSpace {
             return Err(MapError::Misaligned.into());
         }
         let len = range.end.get() - range.start.get();
-        let mut cleared = false;
-        self.tables
-            .lock()
-            .clear(&mut Frames, range.start, len, |_, _| cleared = true);
-        if cleared {
-            self.flush(range.start, len);
+        if map.populated(&range) {
+            let mut cleared = false;
+            self.tables
+                .lock()
+                .clear(&mut Frames, range.start, len, |_, _| cleared = true);
+            if cleared {
+                self.flush(range.start, len);
+            }
         }
         map.remove(range)?;
         Ok(())

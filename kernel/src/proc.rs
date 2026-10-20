@@ -49,6 +49,40 @@ pub(crate) const PID_MAX: i32 = 99_999;
 /// init's pid, which inherits orphans.
 const INIT: i32 = 1;
 
+/// A process's [`Layout`], without a lock: only the process's own thread
+/// writes it (at exec) or reads it (`mmap`, signal delivery), and `mmap`
+/// reads it on every call.
+#[derive(Debug)]
+struct SharedLayout {
+    anon_loc: AtomicU64,
+    stack_top: AtomicU64,
+    shared_page: AtomicU64,
+}
+
+impl SharedLayout {
+    fn new(l: Layout) -> Self {
+        Self {
+            anon_loc: AtomicU64::new(l.anon_loc),
+            stack_top: AtomicU64::new(l.stack_top),
+            shared_page: AtomicU64::new(l.shared_page),
+        }
+    }
+
+    fn get(&self) -> Layout {
+        Layout {
+            anon_loc: self.anon_loc.load(Ordering::Relaxed),
+            stack_top: self.stack_top.load(Ordering::Relaxed),
+            shared_page: self.shared_page.load(Ordering::Relaxed),
+        }
+    }
+
+    fn set(&self, l: Layout) {
+        self.anon_loc.store(l.anon_loc, Ordering::Relaxed);
+        self.stack_top.store(l.stack_top, Ordering::Relaxed);
+        self.shared_page.store(l.shared_page, Ordering::Relaxed);
+    }
+}
+
 static FILEDESC_LOCK: LockClass = LockClass::new("filedesc", 200);
 
 /// Whether process group `pgid` is orphaned: no member has a parent in
@@ -186,7 +220,7 @@ pub(crate) struct Process {
     /// execs or exits; the parent sleeps meanwhile.
     vforked: AtomicBool,
     /// Where exec put the randomized parts of the image.
-    layout: SpinLock<Layout>,
+    layout: SharedLayout,
     pub(crate) signals: SpinLock<Signals>,
     pub(crate) limits: SpinLock<[Rlimit; rlimit::NLIMITS]>,
     /// The `exterrctl` buffer, 0 for none.
@@ -309,7 +343,7 @@ impl Process {
                 pid,
                 space: SpinLock::new(space),
                 vforked: AtomicBool::new(false),
-                layout: SpinLock::new(parent.map_or(layout, |p| *p.layout.lock())),
+                layout: SharedLayout::new(parent.map_or(layout, |p| p.layout())),
                 signals: SpinLock::new(signals),
                 limits: SpinLock::new(limits),
                 exterr: AtomicU64::new(parent.map_or(0, |p| p.exterr.load(Ordering::Relaxed))),
@@ -423,7 +457,7 @@ impl Process {
 
     /// Where `mmap` without an address starts looking.
     pub(crate) fn mmap_base(&self) -> u64 {
-        self.layout.lock().anon_loc
+        self.layout.anon_loc.load(Ordering::Relaxed)
     }
 
     /// The TLS base `sysarch(AMD64_SET_TLSBASE)` recorded.
@@ -704,7 +738,7 @@ impl Process {
         // SAFETY: this thread runs in the new image; the kernel does not
         // use the thread pointer.
         unsafe { hal::user::set_tls(0) };
-        *self.layout.lock() = image.layout;
+        self.layout.set(image.layout);
         *frame = arch::user::user_frame(image.entry, image.sp, image.arg);
         Ok(())
     }
@@ -862,7 +896,7 @@ impl Process {
 
     /// Where exec put the randomized parts of the image.
     pub(crate) fn layout(&self) -> Layout {
-        *self.layout.lock()
+        self.layout.get()
     }
 
     /// Ends a stop (for `SIGCONT`, reported to `wait4(WCONTINUED)` if

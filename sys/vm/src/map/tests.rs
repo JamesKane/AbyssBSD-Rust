@@ -353,6 +353,19 @@ fn munmap_frees_what_only_it_mapped() {
 }
 
 #[test]
+fn only_touched_memory_is_populated() {
+    let pages = Pages::new();
+    let mut p = Proc::new(pages);
+    p.mmap(0, 4);
+    p.mmap(10, 4);
+    assert!(!p.map.populated(&range(0, 14)));
+    p.read(12).unwrap();
+    assert!(p.map.populated(&range(0, 14)));
+    assert!(p.map.populated(&range(13, 1)));
+    assert!(!p.map.populated(&range(0, 10)));
+}
+
+#[test]
 fn protect_checks_coverage_and_maximum() {
     let pages = Pages::new();
     let mut p = Proc::new(pages);
