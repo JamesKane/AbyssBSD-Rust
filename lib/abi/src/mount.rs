@@ -80,11 +80,21 @@ impl Default for Statfs {
 }
 
 pub const MNT_RDONLY: u64 = 0x0000_0001;
+pub const MNT_SYNCHRONOUS: u64 = 0x0000_0002;
 pub const MNT_NOEXEC: u64 = 0x0000_0004;
 pub const MNT_NOSUID: u64 = 0x0000_0008;
 pub const MNT_LOCAL: u64 = 0x0000_1000;
 pub const MNT_ROOTFS: u64 = 0x0000_4000;
 pub const MNT_IGNORE: u64 = 0x0080_0000;
+pub const MNT_ASYNC: u64 = 0x0000_0040;
+pub const MNT_SUIDDIR: u64 = 0x0010_0000;
+pub const MNT_SOFTDEP: u64 = 0x0020_0000;
+pub const MNT_NOATIME: u64 = 0x1000_0000;
+pub const MNT_NOCLUSTERR: u64 = 0x4000_0000;
+pub const MNT_NOCLUSTERW: u64 = 0x8000_0000;
+/// `nmount`/`unmount` command flags.
+pub const MNT_UPDATE: u64 = 0x0001_0000;
+pub const MNT_FORCE: u64 = 0x0008_0000;
 
 /// `getfsstat` modes.
 pub const MNT_WAIT: u32 = 1;
@@ -100,6 +110,15 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("MNT_LOCAL", MNT_LOCAL as i64),
     c("MNT_ROOTFS", MNT_ROOTFS as i64),
     c("MNT_IGNORE", MNT_IGNORE as i64),
+    c("MNT_SYNCHRONOUS", MNT_SYNCHRONOUS as i64),
+    c("MNT_ASYNC", MNT_ASYNC as i64),
+    c("MNT_SUIDDIR", MNT_SUIDDIR as i64),
+    c("MNT_SOFTDEP", MNT_SOFTDEP as i64),
+    c("MNT_NOATIME", MNT_NOATIME as i64),
+    c("MNT_NOCLUSTERR", MNT_NOCLUSTERR as i64),
+    c("MNT_NOCLUSTERW", MNT_NOCLUSTERW as i64),
+    c("MNT_UPDATE", MNT_UPDATE as i64),
+    c("MNT_FORCE", MNT_FORCE as i64),
     c("MNT_WAIT", MNT_WAIT as i64),
     c("MNT_NOWAIT", MNT_NOWAIT as i64),
 ];

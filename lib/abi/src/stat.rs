@@ -63,6 +63,32 @@ pub const S_IFLNK: u16 = 0o120_000;
 pub const S_IFSOCK: u16 = 0o140_000;
 /// The permission bits, set-id and sticky bits included (`ALLPERMS`).
 pub const ALLPERMS: u16 = 0o7777;
+pub const S_ISUID: u16 = 0o4000;
+pub const S_ISGID: u16 = 0o2000;
+/// On a directory: only an entry's owner (or the directory's) may remove
+/// or rename it.
+pub const S_ISVTX: u16 = 0o1000;
+
+/// `chflags` flags: the owner may set these.
+pub const UF_SETTABLE: u32 = 0x0000_ffff;
+pub const UF_NODUMP: u32 = 0x0000_0001;
+pub const UF_IMMUTABLE: u32 = 0x0000_0002;
+pub const UF_APPEND: u32 = 0x0000_0004;
+pub const UF_OPAQUE: u32 = 0x0000_0008;
+pub const UF_NOUNLINK: u32 = 0x0000_0010;
+/// Only the superuser may set these.
+pub const SF_SETTABLE: u32 = 0xffff_0000;
+pub const SF_ARCHIVED: u32 = 0x0001_0000;
+pub const SF_IMMUTABLE: u32 = 0x0002_0000;
+pub const SF_APPEND: u32 = 0x0004_0000;
+pub const SF_NOUNLINK: u32 = 0x0010_0000;
+pub const SF_SNAPSHOT: u32 = 0x0020_0000;
+/// Flags that forbid changing a file.
+pub const IMMUTABLE: u32 = UF_IMMUTABLE | SF_IMMUTABLE;
+/// Flags that allow only appending.
+pub const APPEND: u32 = UF_APPEND | SF_APPEND;
+/// Flags that forbid removing or renaming a file.
+pub const NOUNLINK: u32 = UF_NOUNLINK | SF_NOUNLINK;
 
 pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("S_IFMT", S_IFMT),
@@ -74,7 +100,31 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("S_IFLNK", S_IFLNK),
     c("S_IFSOCK", S_IFSOCK),
     c("ALLPERMS", ALLPERMS),
+    c("S_ISUID", S_ISUID),
+    c("S_ISGID", S_ISGID),
+    c("S_ISVTX", S_ISVTX),
+    f("UF_SETTABLE", UF_SETTABLE),
+    f("UF_NODUMP", UF_NODUMP),
+    f("UF_IMMUTABLE", UF_IMMUTABLE),
+    f("UF_APPEND", UF_APPEND),
+    f("UF_OPAQUE", UF_OPAQUE),
+    f("UF_NOUNLINK", UF_NOUNLINK),
+    f("SF_SETTABLE", SF_SETTABLE),
+    f("SF_ARCHIVED", SF_ARCHIVED),
+    f("SF_IMMUTABLE", SF_IMMUTABLE),
+    f("SF_APPEND", SF_APPEND),
+    f("SF_NOUNLINK", SF_NOUNLINK),
+    f("SF_SNAPSHOT", SF_SNAPSHOT),
 ];
+
+const fn f(c_name: &'static str, value: u32) -> ConstValue {
+    ConstValue {
+        c_name,
+        header: "sys/stat.h",
+        value: value as i64,
+        arches: Arches::All,
+    }
+}
 
 const fn c(c_name: &'static str, value: u16) -> ConstValue {
     ConstValue {

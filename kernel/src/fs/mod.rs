@@ -15,33 +15,24 @@ pub(crate) mod file;
 pub(crate) mod pipe;
 pub(crate) mod uio;
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicU64, Ordering};
 
 use abi::errno::Errno;
 use abi::fcntl::{AT_FDCWD, FREAD, FWRITE};
+use abi::mount::{MNT_LOCAL, MNT_RDONLY, MNT_ROOTFS};
 use abi::time::Timespec;
 use sched::Sleepable;
 use sync::{Once, SpinLock};
-use vfs::namei::{Found, Lookup, Namespace};
+use vfs::namei::{Found, Lookup, Namespace, Parent};
 use vfs::tree::Builder;
-use vfs::{FileSystem, Meta, NodeId, Vnode};
+use vfs::{Cred, Meta, Mount, MountInfo, NodeId, Vnode};
 
 use self::fdtable::{FdFlags, FdTable};
-use self::file::{File, FileKind};
+use self::file::{File, FileKind, VnodeFile};
 
 static NAMESPACE: Once<Namespace> = Once::new();
-
-/// Mounts so far, for file system ids.
-static MOUNTS: AtomicU64 = AtomicU64::new(0);
-
-/// A new file system id for type `type_num`, as FreeBSD's
-/// `vfs_getnewfsid` makes them: `makedev(255, type << 24 | mount)`.
-fn new_fsid(type_num: u32) -> u64 {
-    let n = MOUNTS.fetch_add(1, Ordering::Relaxed);
-    u64::from(type_num & 0xff) << 24 | (n & 0xff00) << 8 | 0xff00 | (n & 0xff)
-}
 
 /// The time now, for file times.
 pub(crate) fn now() -> Timespec {
@@ -52,60 +43,78 @@ pub(crate) fn now() -> Timespec {
     }
 }
 
-/// An empty, read-only root holding only `/dev`.
-fn empty_root() -> Arc<Vnode> {
-    let fs = Arc::new(FileSystem {
-        id: new_fsid(vfs::type_num("tarfs")),
+/// The credential file operations run with: every process is the
+/// superuser until Phase 6 brings credentials.
+pub(crate) fn cred() -> &'static Cred {
+    static ROOT: Cred = Cred::root();
+    &ROOT
+}
+
+fn root_info(from: &[u8]) -> MountInfo {
+    MountInfo {
         type_name: "tarfs",
-        type_num: vfs::type_num("tarfs"),
-        flags: abi::mount::MNT_RDONLY | abi::mount::MNT_LOCAL | abi::mount::MNT_ROOTFS,
-        from: b"none".to_vec(),
+        flags: MNT_RDONLY | MNT_LOCAL | MNT_ROOTFS,
+        from: from.to_vec(),
         io_size: 4096,
-    });
+    }
+}
+
+/// An empty, read-only root holding only `/dev`.
+fn empty_root() -> Arc<Mount> {
     let meta = Meta::root(0o755, now());
-    let mut b = Builder::new(fs, meta);
+    let mut b = Builder::new(meta);
     let _ = b.dir(b"dev", meta);
-    b.finish()
+    Mount::new(root_info(b"none"), Box::new(b.finish()))
 }
 
 /// Mounts the root file system and devfs. Runs once, after the memory
 /// disk is found and before any process starts.
 pub(crate) fn init() {
-    let tarfs = vfs::type_num("tarfs");
+    vfs::set_clock(now);
+    // SAFETY: boot runs in the first kernel thread, which may sleep.
+    let s = unsafe { Sleepable::assume() };
     let root = match crate::md::archive() {
-        Some(a) => {
-            let fs = Arc::new(FileSystem {
-                id: new_fsid(tarfs),
-                type_name: "tarfs",
-                type_num: tarfs,
-                flags: abi::mount::MNT_RDONLY | abi::mount::MNT_LOCAL | abi::mount::MNT_ROOTFS,
-                from: b"/dev/md0".to_vec(),
-                io_size: 4096,
-            });
-            match vfs::tarfs::mount(a, fs) {
-                Ok(r) => r,
-                Err(e) => {
-                    kprintln!("fs: memory disk not mountable ({e:?}); empty root");
-                    empty_root()
-                }
+        Some(a) => match vfs::tarfs::mount(a) {
+            Ok(t) => Mount::new(root_info(b"/dev/md0"), Box::new(t)),
+            Err(e) => {
+                kprintln!("fs: memory disk not mountable ({e:?}); empty root");
+                empty_root()
             }
-        }
+        },
         None => empty_root(),
     };
-    let mut ns = Namespace::new(Arc::clone(&root));
-    let dev = devfs::build(new_fsid(vfs::type_num("devfs")));
-    let at = vfs::namei::Lookup {
+    let ns = match Namespace::new(&s, root) {
+        Ok(ns) => ns,
+        Err(e) => {
+            kprintln!("fs: root not mountable ({e:?}); empty root");
+            match Namespace::new(&s, empty_root()) {
+                Ok(ns) => ns,
+                Err(_) => return,
+            }
+        }
+    };
+    let dev = Mount::new(
+        MountInfo {
+            type_name: "devfs",
+            flags: MNT_LOCAL,
+            from: b"devfs".to_vec(),
+            io_size: 4096,
+        },
+        Box::new(devfs::build()),
+    );
+    let root = Arc::clone(ns.root());
+    let at = Lookup {
         start: &root,
         root: &root,
         follow: true,
         beneath: false,
+        cred: cred(),
     };
-    match ns.lookup(&at, b"/dev") {
-        Ok(d) => {
-            if let Err(e) = ns.mount(d, dev, b"/dev") {
-                kprintln!("fs: devfs not mounted on /dev ({e:?})");
-            }
-        }
+    match ns.lookup(&s, &at, b"/dev") {
+        Ok(d) => match ns.mount(&s, d, Arc::clone(&dev), b"/dev") {
+            Ok(()) => devfs::mounted(&s, &dev),
+            Err(e) => kprintln!("fs: devfs not mounted on /dev ({e:?})"),
+        },
         Err(e) => kprintln!("fs: no /dev on the root file system ({e:?}); devfs not mounted"),
     }
     let _ = NAMESPACE.set(ns);
@@ -164,6 +173,28 @@ impl Walk {
     };
 }
 
+/// Where `p`'s walk of `path` starts.
+fn start_of(
+    s: &Sleepable,
+    p: &crate::proc::Process,
+    at: At,
+    path: &[u8],
+) -> Result<Arc<Vnode>, Errno> {
+    if path.first() == Some(&b'/') {
+        return Ok(root());
+    }
+    match at {
+        At::Cwd => Ok(Arc::clone(p.cwd.lock().vnode())),
+        At::Fd(fd) => {
+            let f = p.files.lock(s).get(fd)?;
+            match f.vnode() {
+                Some(v) if v.is_dir() => Ok(Arc::clone(v)),
+                _ => Err(Errno::ENOTDIR),
+            }
+        }
+    }
+}
+
 /// Looks `path` up for process `p`; a missing last component is not an
 /// error.
 pub(crate) fn resolve(
@@ -174,26 +205,15 @@ pub(crate) fn resolve(
     walk: Walk,
 ) -> Result<Found, Errno> {
     let root = root();
-    let start = if path.first() == Some(&b'/') {
-        Arc::clone(&root)
-    } else {
-        match at {
-            At::Cwd => Arc::clone(&p.cwd.lock()),
-            At::Fd(fd) => {
-                let f = p.files.lock(s).get(fd)?;
-                match f.vnode() {
-                    Some(v) if v.is_dir() => Arc::clone(v),
-                    _ => return Err(Errno::ENOTDIR),
-                }
-            }
-        }
-    };
+    let start = start_of(s, p, at, path)?;
     namespace().resolve(
+        s,
         &Lookup {
             start: &start,
             root: &root,
             follow: walk.follow,
             beneath: walk.beneath,
+            cred: cred(),
         },
         path,
     )
@@ -211,6 +231,30 @@ pub(crate) fn lookup(
         Found::Vnode(v) => Ok(v),
         Found::Missing { .. } => Err(Errno::ENOENT),
     }
+}
+
+/// The directory `path`'s last component is in, and that component, for
+/// the calls that create or remove it.
+pub(crate) fn parent_of(
+    s: &Sleepable,
+    p: &crate::proc::Process,
+    at: At,
+    path: &[u8],
+    beneath: bool,
+) -> Result<Parent, Errno> {
+    let root = root();
+    let start = start_of(s, p, at, path)?;
+    namespace().parent_of(
+        s,
+        &Lookup {
+            start: &start,
+            root: &root,
+            follow: false,
+            beneath,
+            cred: cred(),
+        },
+        path,
+    )
 }
 
 /// A file whose pages come from memory the kernel keeps (the memory
@@ -239,12 +283,10 @@ impl vm::object::Pager for ResidentPager {
 static OBJECTS: SpinLock<BTreeMap<NodeId, Arc<vm::object::Object>>> =
     SpinLock::new(BTreeMap::new());
 
-/// `v`'s memory object, if it is a regular file that can be mapped.
-pub(crate) fn object(v: &Vnode) -> Option<Arc<vm::object::Object>> {
-    let vfs::VnodeKind::Regular(f) = v.kind() else {
-        return None;
-    };
-    let data = f.resident()?;
+/// `v`'s memory object, if it is a regular file that can be mapped (so
+/// far, the memory disk's files; the page cache brings the rest in P5.3).
+pub(crate) fn object(s: &Sleepable, v: &Vnode) -> Option<Arc<vm::object::Object>> {
+    let data = v.resident(s)?;
     let mut objects = OBJECTS.lock();
     Some(Arc::clone(objects.entry(v.id()).or_insert_with(|| {
         vm::object::Object::with_pager(
@@ -258,8 +300,12 @@ pub(crate) fn object(v: &Vnode) -> Option<Arc<vm::object::Object>> {
 /// gets it; empty if there is no console device.
 pub(crate) fn console_table() -> FdTable {
     let mut t = FdTable::new();
-    if let Some(c) = devfs::console() {
-        let f = File::new(FileKind::Vnode(c), FREAD | FWRITE);
+    // SAFETY: tables are made in thread context (process creation).
+    let s = unsafe { Sleepable::assume() };
+    if let Some(c) = devfs::console()
+        && let Ok(vf) = VnodeFile::open(&s, &c)
+    {
+        let f = File::new(FileKind::Vnode(vf), FREAD | FWRITE);
         for _ in 0..3 {
             let _ = t.alloc(Arc::clone(&f), FdFlags::default(), 0, 3);
         }

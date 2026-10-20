@@ -76,11 +76,19 @@ fn file_object(
     use crate::fs::file::FileKind;
     use abi::fcntl::{FREAD, FWRITE};
     let f = super::io::current_file(s, fd)?;
-    let FileKind::Vnode(v) = f.kind() else {
+    let FileKind::Vnode(vf) = f.kind() else {
         return Err(Errno::ENODEV);
     };
+    if let Some(d) = &vf.device {
+        return if d.ops.maps_as_zeros() {
+            Ok((Backing::Zeros, Prot::ALL))
+        } else {
+            Err(Errno::ENODEV)
+        };
+    }
+    let v = vf.vnode.vnode();
     match v.kind() {
-        vfs::VnodeKind::Regular(_) => {
+        vfs::Kind::Regular => {
             let mut max = Prot::EXEC;
             if f.flags() & FREAD != 0 {
                 max = max.union(Prot::READ);
@@ -98,11 +106,10 @@ fn file_object(
             if pos > i64::MAX.cast_unsigned() - size {
                 return Err(Errno::EINVAL);
             }
-            let object = crate::fs::object(v).ok_or(Errno::ENODEV)?;
+            let object = crate::fs::object(s, v).ok_or(Errno::ENODEV)?;
             Ok((Backing::Object(object, pos / PAGE_SIZE), max))
         }
-        vfs::VnodeKind::CharDevice(d) if d.ops.maps_as_zeros() => Ok((Backing::Zeros, Prot::ALL)),
-        vfs::VnodeKind::CharDevice(_) => Err(Errno::ENODEV),
+        vfs::Kind::CharDevice => Err(Errno::ENODEV),
         _ => Err(Errno::EINVAL),
     }
 }

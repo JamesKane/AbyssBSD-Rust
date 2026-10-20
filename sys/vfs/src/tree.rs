@@ -1,21 +1,29 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! File systems built once and then fixed: a [`Builder`] collects
 //! directories, files, links, and devices by path, and [`Builder::finish`]
-//! turns them into vnodes. tarfs and devfs are both built this way.
+//! turns them into a read-only [`TreeFs`]. tarfs and the boot devfs are
+//! both built this way.
 //!
 //! Inode numbers follow insertion order from 2 (the root), as UFS numbers
 //! its root. A directory's link count is 2 plus its subdirectories; a
-//! file's is the number of names it has.
+//! file's is the number of names it has. Directory entries come in name
+//! order, after `.` and `..`.
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
-use alloc::sync::{Arc, Weak};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::any::Any;
 
 use abi::errno::Errno;
-use sync::Once;
+use sched::Sleepable;
 
-use crate::{DirEntry, Directory, FileSystem, Meta, Vnode, VnodeKind};
+use crate::mount::{FileSystem, FsStats, Rename};
+use crate::node::{
+    Attr, Create, Device, DeviceNode, DirEntry, DirectoryNode, Kind, NewNode, Node, NodeOps,
+    RegularNode, SetAttr, SymlinkNode,
+};
+use crate::{Meta, Uio};
 
 /// The root's inode number.
 pub const ROOT_INO: u64 = 2;
@@ -23,9 +31,20 @@ pub const ROOT_INO: u64 = 2;
 /// What a leaf of the tree holds.
 #[derive(Clone)]
 pub enum Leaf {
-    Regular(Arc<dyn crate::RegularFile>),
+    /// A file whose contents sit in memory for the kernel's lifetime.
+    Regular(&'static [u8]),
     Symlink(Arc<[u8]>),
-    Device(crate::Device),
+    Device(Device),
+}
+
+impl core::fmt::Debug for Leaf {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Regular(r) => write!(f, "Regular({} bytes)", r.len()),
+            Self::Symlink(t) => write!(f, "Symlink({t:?})"),
+            Self::Device(d) => write!(f, "Device({:#x})", d.rdev),
+        }
+    }
 }
 
 enum Proto {
@@ -42,23 +61,12 @@ enum Proto {
 
 /// Collects a tree; node 0 is the root.
 pub struct Builder {
-    fs: Arc<FileSystem>,
     nodes: Vec<Proto>,
 }
 
 impl core::fmt::Debug for Builder {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "Builder({} nodes)", self.nodes.len())
-    }
-}
-
-impl core::fmt::Debug for Leaf {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Regular(r) => write!(f, "Regular({} bytes)", r.size()),
-            Self::Symlink(t) => write!(f, "Symlink({t:?})"),
-            Self::Device(d) => write!(f, "Device({:#x})", d.rdev),
-        }
     }
 }
 
@@ -80,9 +88,8 @@ fn components(path: &[u8]) -> impl Iterator<Item = Result<&[u8], Errno>> {
 impl Builder {
     /// An empty tree whose root has `root`'s ownership and permissions.
     #[must_use]
-    pub fn new(fs: Arc<FileSystem>, root: Meta) -> Self {
+    pub fn new(root: Meta) -> Self {
         Self {
-            fs,
             nodes: alloc::vec![Proto::Dir {
                 meta: root,
                 children: BTreeMap::new(),
@@ -93,7 +100,7 @@ impl Builder {
     /// The inode number the next node added will have.
     #[must_use]
     pub fn next_ino(&self) -> u64 {
-        Self::ino(self.nodes.len())
+        ino(self.nodes.len())
     }
 
     /// The node at `path`, if there is one.
@@ -214,91 +221,325 @@ impl Builder {
         Ok(())
     }
 
-    fn ino(index: usize) -> u64 {
-        ROOT_INO + index as u64
-    }
-
-    /// The tree's root vnode.
+    /// The finished file system.
     #[must_use]
-    pub fn finish(self) -> Arc<Vnode> {
-        // A child is always added after its directory, so building from
-        // the last node back makes every child before its parent.
-        let mut done: Vec<Option<Arc<Vnode>>> = alloc::vec![None; self.nodes.len()];
-        let mut dirs: Vec<Option<Arc<StaticDir>>> = alloc::vec![None; self.nodes.len()];
-        for (i, node) in self.nodes.iter().enumerate().rev() {
-            let v = match node {
-                Proto::Leaf { meta, leaf, links } => {
-                    let kind = match leaf {
-                        Leaf::Regular(f) => VnodeKind::Regular(Arc::clone(f)),
-                        Leaf::Symlink(t) => VnodeKind::Symlink(Arc::clone(t)),
-                        Leaf::Device(d) => VnodeKind::CharDevice(d.clone()),
-                    };
-                    Arc::new(Vnode::new(
-                        Arc::clone(&self.fs),
-                        Self::ino(i),
-                        *meta,
-                        *links,
-                        kind,
-                    ))
-                }
-                Proto::Dir { meta, children } => {
-                    let entries: Vec<(Box<[u8]>, Arc<Vnode>)> = children
-                        .iter()
-                        .filter_map(|(n, &c)| Some((n.clone(), Arc::clone(done[c].as_ref()?))))
-                        .collect();
-                    let subdirs = entries.iter().filter(|(_, v)| v.is_dir()).count() as u64;
-                    let dir = Arc::new(StaticDir {
-                        parent: Once::new(),
-                        entries,
-                    });
-                    dirs[i] = Some(Arc::clone(&dir));
-                    let v = Arc::new(Vnode::new(
-                        Arc::clone(&self.fs),
-                        Self::ino(i),
-                        *meta,
-                        2 + subdirs,
-                        VnodeKind::Directory(dir),
-                    ));
-                    for &c in children.values() {
-                        if let Some(d) = &dirs[c] {
-                            let _ = d.parent.set(Arc::downgrade(&v));
-                        }
+    pub fn finish(self) -> TreeFs {
+        let mut parent = alloc::vec![0usize; self.nodes.len()];
+        for (i, n) in self.nodes.iter().enumerate() {
+            if let Proto::Dir { children, .. } = n {
+                for &c in children.values() {
+                    if matches!(self.nodes[c], Proto::Dir { .. }) {
+                        parent[c] = i;
                     }
-                    v
                 }
-            };
-            done[i] = Some(v);
+            }
         }
-        // Node 0 is the root, and was built last.
-        done.swap_remove(0)
-            .unwrap_or_else(|| unreachable!("the root is built"))
+        let nodes = self
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| match n {
+                Proto::Dir { meta, children } => {
+                    let entries: Vec<(Box<[u8]>, u64, Kind)> = children
+                        .iter()
+                        .map(|(name, &c)| (name.clone(), ino(c), kind_of(&self.nodes[c])))
+                        .collect();
+                    let subdirs = entries.iter().filter(|e| e.2 == Kind::Directory).count();
+                    Fixed {
+                        attr: attr(meta, 2 + subdirs as u64, 512, 0),
+                        data: FixedData::Dir {
+                            parent: ino(parent[i]),
+                            entries,
+                        },
+                    }
+                }
+                Proto::Leaf { meta, leaf, links } => {
+                    let (size, rdev) = match leaf {
+                        Leaf::Regular(d) => (d.len() as u64, 0),
+                        Leaf::Symlink(t) => (t.len() as u64, 0),
+                        Leaf::Device(d) => (0, d.rdev),
+                    };
+                    Fixed {
+                        attr: attr(meta, *links, size, rdev),
+                        data: FixedData::Leaf(leaf.clone()),
+                    }
+                }
+            })
+            .collect();
+        TreeFs {
+            nodes: Arc::new(nodes),
+        }
     }
 }
 
-/// A fixed directory: its entries sorted by name.
-struct StaticDir {
-    parent: Once<Weak<Vnode>>,
-    entries: Vec<(Box<[u8]>, Arc<Vnode>)>,
+fn ino(index: usize) -> u64 {
+    ROOT_INO + index as u64
 }
 
-impl Directory for StaticDir {
-    fn lookup(&self, name: &[u8]) -> Result<Arc<Vnode>, Errno> {
-        self.entries
-            .binary_search_by(|(n, _)| (**n).cmp(name))
-            .map(|i| Arc::clone(&self.entries[i].1))
+fn kind_of(p: &Proto) -> Kind {
+    match p {
+        Proto::Dir { .. } => Kind::Directory,
+        Proto::Leaf { leaf, .. } => match leaf {
+            Leaf::Regular(_) => Kind::Regular,
+            Leaf::Symlink(_) => Kind::Symlink,
+            Leaf::Device(_) => Kind::CharDevice,
+        },
+    }
+}
+
+fn attr(m: &Meta, nlink: u64, size: u64, rdev: u64) -> Attr {
+    Attr {
+        mode: m.perm & 0o7777,
+        uid: m.uid,
+        gid: m.gid,
+        nlink,
+        size,
+        bytes: size.next_multiple_of(512),
+        atime: m.mtime,
+        mtime: m.mtime,
+        ctime: m.mtime,
+        birthtime: m.mtime,
+        rdev,
+        ..Attr::default()
+    }
+}
+
+struct Fixed {
+    attr: Attr,
+    data: FixedData,
+}
+
+enum FixedData {
+    Dir {
+        parent: u64,
+        /// By name.
+        entries: Vec<(Box<[u8]>, u64, Kind)>,
+    },
+    Leaf(Leaf),
+}
+
+/// A read-only file system built by a [`Builder`].
+pub struct TreeFs {
+    nodes: Arc<Vec<Fixed>>,
+}
+
+impl core::fmt::Debug for TreeFs {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "TreeFs({} nodes)", self.nodes.len())
+    }
+}
+
+/// One node of a [`TreeFs`], as its vnode holds it.
+struct View {
+    nodes: Arc<Vec<Fixed>>,
+    index: usize,
+}
+
+impl View {
+    fn fixed(&self) -> &Fixed {
+        &self.nodes[self.index]
+    }
+}
+
+impl Node for View {
+    fn attr(&self) -> Attr {
+        self.fixed().attr
+    }
+
+    fn setattr(&mut self, _s: &Sleepable, _a: &SetAttr) -> Result<(), Errno> {
+        Err(Errno::EROFS)
+    }
+
+    fn reclaim(self: Box<Self>, _s: &Sleepable) {}
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+impl RegularNode for View {
+    fn read(&self, _s: &Sleepable, offset: u64, uio: &mut dyn Uio) -> Result<usize, Errno> {
+        let Some(data) = self.resident() else {
+            return Err(Errno::EINVAL);
+        };
+        let start = usize::try_from(offset).unwrap_or(usize::MAX);
+        let Some(rest) = data.get(start..) else {
+            return Ok(0);
+        };
+        uio.copy_out(&rest[..rest.len().min(uio.resid())])
+    }
+
+    fn write(&mut self, _s: &Sleepable, _offset: u64, _uio: &mut dyn Uio) -> Result<usize, Errno> {
+        Err(Errno::EROFS)
+    }
+
+    fn resident(&self) -> Option<&'static [u8]> {
+        match &self.fixed().data {
+            FixedData::Leaf(Leaf::Regular(d)) => Some(d),
+            _ => None,
+        }
+    }
+}
+
+impl SymlinkNode for View {
+    fn target(&self, _s: &Sleepable) -> Result<Vec<u8>, Errno> {
+        match &self.fixed().data {
+            FixedData::Leaf(Leaf::Symlink(t)) => Ok(t.to_vec()),
+            _ => Err(Errno::EINVAL),
+        }
+    }
+}
+
+impl DeviceNode for View {
+    fn device(&self) -> Device {
+        match &self.fixed().data {
+            FixedData::Leaf(Leaf::Device(d)) => d.clone(),
+            _ => unreachable!("only device views are device nodes"),
+        }
+    }
+}
+
+impl DirectoryNode for View {
+    fn lookup(&self, _s: &Sleepable, name: &[u8]) -> Result<u64, Errno> {
+        let FixedData::Dir { entries, .. } = &self.fixed().data else {
+            return Err(Errno::ENOTDIR);
+        };
+        entries
+            .binary_search_by(|(n, _, _)| (**n).cmp(name))
+            .map(|i| entries[i].1)
             .map_err(|_| Errno::ENOENT)
     }
 
-    fn parent(&self) -> Option<Arc<Vnode>> {
-        self.parent.get()?.upgrade()
+    fn parent(&self) -> u64 {
+        match &self.fixed().data {
+            FixedData::Dir { parent, .. } => *parent,
+            FixedData::Leaf(_) => ino(self.index),
+        }
     }
 
-    fn entries(&self, from: u64, f: &mut dyn FnMut(DirEntry<'_>) -> bool) {
-        let from = usize::try_from(from).unwrap_or(usize::MAX);
-        for (name, vnode) in self.entries.iter().skip(from) {
-            if !f(DirEntry { name, vnode }) {
+    fn create(
+        &mut self,
+        _s: &Sleepable,
+        _name: &[u8],
+        _node: &NewNode,
+        _c: &Create,
+    ) -> Result<u64, Errno> {
+        Err(Errno::EROFS)
+    }
+
+    fn link(
+        &mut self,
+        _s: &Sleepable,
+        _name: &[u8],
+        _ino: u64,
+        _target: &mut dyn Node,
+    ) -> Result<(), Errno> {
+        Err(Errno::EROFS)
+    }
+
+    fn remove(&mut self, _s: &Sleepable, _name: &[u8], _child: &mut dyn Node) -> Result<(), Errno> {
+        Err(Errno::EROFS)
+    }
+
+    fn rmdir(
+        &mut self,
+        _s: &Sleepable,
+        _name: &[u8],
+        _child: &mut dyn DirectoryNode,
+    ) -> Result<(), Errno> {
+        Err(Errno::EROFS)
+    }
+
+    fn readdir(
+        &self,
+        _s: &Sleepable,
+        from: u64,
+        f: &mut dyn FnMut(DirEntry<'_>) -> bool,
+    ) -> Result<(), Errno> {
+        let FixedData::Dir { parent, entries } = &self.fixed().data else {
+            return Err(Errno::ENOTDIR);
+        };
+        let me = ino(self.index);
+        if from == 0
+            && !f(DirEntry {
+                name: b".",
+                ino: me,
+                kind: Kind::Directory,
+                next: 1,
+            })
+        {
+            return Ok(());
+        }
+        if from <= 1
+            && !f(DirEntry {
+                name: b"..",
+                ino: *parent,
+                kind: Kind::Directory,
+                next: 2,
+            })
+        {
+            return Ok(());
+        }
+        let skip = usize::try_from(from.max(2) - 2).unwrap_or(usize::MAX);
+        for (i, (name, ino, kind)) in entries.iter().enumerate().skip(skip) {
+            if !f(DirEntry {
+                name,
+                ino: *ino,
+                kind: *kind,
+                next: i as u64 + 3,
+            }) {
                 break;
             }
         }
+        Ok(())
+    }
+}
+
+impl FileSystem for TreeFs {
+    fn root(&self) -> u64 {
+        ROOT_INO
+    }
+
+    fn load(&self, _s: &Sleepable, ino: u64) -> Result<NodeOps, Errno> {
+        let index = ino
+            .checked_sub(ROOT_INO)
+            .and_then(|i| usize::try_from(i).ok())
+            .filter(|&i| i < self.nodes.len())
+            .ok_or(Errno::ENOENT)?;
+        let view = Box::new(View {
+            nodes: Arc::clone(&self.nodes),
+            index,
+        });
+        Ok(match &self.nodes[index].data {
+            FixedData::Dir { .. } => NodeOps::Directory(view),
+            FixedData::Leaf(Leaf::Regular(_)) => NodeOps::Regular(view),
+            FixedData::Leaf(Leaf::Symlink(_)) => NodeOps::Symlink(view),
+            FixedData::Leaf(Leaf::Device(_)) => NodeOps::Device(view),
+        })
+    }
+
+    fn statfs(&self, _s: &Sleepable) -> Result<FsStats, Errno> {
+        let bytes: u64 = self.nodes.iter().map(|n| n.attr.bytes).sum();
+        Ok(FsStats {
+            bsize: 512,
+            iosize: 4096,
+            blocks: bytes / 512,
+            bfree: 0,
+            bavail: 0,
+            files: self.nodes.len() as u64,
+            ffree: 0,
+        })
+    }
+
+    fn rename(&self, _s: &Sleepable, _r: Rename<'_>) -> Result<(), Errno> {
+        Err(Errno::EROFS)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }

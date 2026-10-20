@@ -17,10 +17,10 @@ use crate::cli::Args;
 use crate::util::{self, Result};
 
 const MIB: usize = 1 << 20;
-const DISK_BYTES: usize = 128 * MIB;
+const DISK_BYTES: usize = 192 * MIB;
 /// The ESP starts 1 MiB in, the usual alignment.
 const ESP_FIRST_LBA: u64 = 2048;
-const ESP_BYTES: usize = 64 * MIB;
+const ESP_BYTES: usize = 128 * MIB;
 
 pub(crate) fn cmd(mut args: Args) -> Result<()> {
     let arch = Arch::one_from_args(&mut args)?;

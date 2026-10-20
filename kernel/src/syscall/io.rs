@@ -10,7 +10,6 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use abi::dirent::{self, NAME_OFFSET};
 use abi::errno::Errno;
 use abi::fcntl::*;
 use abi::ioctl::{
@@ -450,7 +449,7 @@ pub(super) fn pipe2(s: &Sleepable, fildes: u64, flags: u64) -> SysResult {
 pub(super) fn fstat(s: &Sleepable, fd: u64, sb: u64) -> SysResult {
     let f = current_file(s, fd)?;
     UserPtr::<Stat>::new(sb)
-        .write(&f.stat(s))
+        .write(&f.stat(s)?)
         .map_err(|_| Errno::EFAULT)?;
     Ok(0)
 }
@@ -459,15 +458,16 @@ pub(super) fn fstat(s: &Sleepable, fd: u64, sb: u64) -> SysResult {
 pub(super) fn fstatfs(s: &Sleepable, fd: u64, buf: u64) -> SysResult {
     let f = current_file(s, fd)?;
     let v = f.vnode().ok_or(Errno::EINVAL)?;
-    let st = super::path::statfs_of(v)?;
+    let st = super::path::statfs_of(s, v)?;
     UserPtr::<Statfs>::new(buf)
         .write(&st)
         .map_err(|_| Errno::EFAULT)?;
     Ok(0)
 }
 
-/// `getdirentries(fd, buf, nbytes, basep)`: the directory's entries from
-/// the file's offset, which counts entries (`.` is 0, `..` is 1).
+/// `getdirentries(fd, buf, nbytes, basep)`: FreeBSD's `dirent` records
+/// from the directory's offset (a cookie the file system gave), which
+/// advances; `*basep` gets where this read started.
 pub(super) fn getdirentries(
     s: &Sleepable,
     fd: u64,
@@ -481,69 +481,15 @@ pub(super) fn getdirentries(
         return Err(Errno::EBADF);
     }
     let v = f.vnode().ok_or(Errno::EINVAL)?;
-    let dir = v.as_dir().ok_or(Errno::EINVAL)?;
+    if !v.is_dir() {
+        return Err(Errno::EINVAL);
+    }
     let room = usize::try_from(nbytes).unwrap_or(usize::MAX).min(64 * 1024);
     let mut out: Vec<u8> = Vec::new();
     out.try_reserve(room).map_err(|_| Errno::ENOMEM)?;
     let mut off = f.offset(s);
     let base = *off;
-    let mut next = base;
-    // One record, if it fits.
-    let put = |out: &mut Vec<u8>, ino: u64, dtype: u8, name: &[u8], after: u64| -> bool {
-        let len = dirent::reclen(name.len());
-        if out.len() + len > room {
-            return false;
-        }
-        let at = out.len();
-        out.resize(at + len, 0);
-        let r = &mut out[at..];
-        r[0..8].copy_from_slice(&ino.to_ne_bytes());
-        r[8..16].copy_from_slice(&after.to_ne_bytes());
-        r[16..18].copy_from_slice(&u16::try_from(len).unwrap_or(u16::MAX).to_ne_bytes());
-        r[18] = dtype;
-        r[20..22].copy_from_slice(&u16::try_from(name.len()).unwrap_or(0).to_ne_bytes());
-        r[NAME_OFFSET..NAME_OFFSET + name.len()].copy_from_slice(name);
-        true
-    };
-    let ns = crate::fs::namespace();
-    if next == 0 && put(&mut out, v.ino(), dirent::DT_DIR, b".", 1) {
-        next = 1;
-    }
-    if next == 1 {
-        let parent = ns
-            .resolve(
-                &vfs::namei::Lookup {
-                    start: v,
-                    root: &crate::fs::root(),
-                    follow: false,
-                    beneath: false,
-                },
-                b"..",
-            )
-            .ok()
-            .and_then(|f| match f {
-                vfs::namei::Found::Vnode(p) => Some(p.ino()),
-                vfs::namei::Found::Missing { .. } => None,
-            })
-            .unwrap_or(v.ino());
-        if put(&mut out, parent, dirent::DT_DIR, b"..", 2) {
-            next = 2;
-        }
-    }
-    if next >= 2 {
-        dir.entries(next - 2, &mut |e| {
-            if put(&mut out, e.vnode.ino(), e.vnode.dtype(), e.name, next + 1) {
-                next += 1;
-                true
-            } else {
-                false
-            }
-        });
-    }
-    if out.is_empty() && next == base && more_entries(dir.as_ref(), base) {
-        // Not even one record fits.
-        return Err(Errno::EINVAL);
-    }
+    let next = vfs::ops::getdirentries(s, v, base, room, &mut out)?;
     uaccess::copy_out(buf, &out).map_err(|_| Errno::EFAULT)?;
     *off = next;
     drop(off);
@@ -555,23 +501,9 @@ pub(super) fn getdirentries(
     Ok(out.len() as u64)
 }
 
-/// Whether the directory has an entry at or after offset `at`.
-fn more_entries(dir: &dyn vfs::Directory, at: u64) -> bool {
-    if at < 2 {
-        return true;
-    }
-    let mut any = false;
-    dir.entries(at - 2, &mut |_| {
-        any = true;
-        false
-    });
-    any
-}
-
 /// `copy_file_range(infd, inoffp, outfd, outoffp, len, flags)`: FreeBSD's
-/// checks, in its order. Programs fall back to `read` and `write` on
-/// `EINVAL`, `EBADF`, or `EISDIR` (`cat` does), which is every case here:
-/// no regular file can be open for writing until Phase 5.
+/// checks, in its order, then the copy. Programs fall back to `read` and
+/// `write` on `EINVAL`, `EBADF`, or `EISDIR` (`cat` does, for devices).
 pub(super) fn copy_file_range(
     s: &Sleepable,
     infd: u64,
@@ -619,8 +551,60 @@ pub(super) fn copy_file_range(
     if invp.is_dir() || outvp.is_dir() {
         return Err(Errno::EISDIR);
     }
-    match (invp.kind(), outvp.kind()) {
-        (vfs::VnodeKind::Regular(_), vfs::VnodeKind::Regular(_)) => Err(Errno::EROFS),
-        _ => Err(Errno::EINVAL),
+    if invp.kind() != vfs::Kind::Regular || outvp.kind() != vfs::Kind::Regular {
+        return Err(Errno::EINVAL);
     }
+    // The generic copy (FreeBSD's `vn_generic_copy_file_range`): through a
+    // kernel buffer, a chunk at a time, from and to the offsets given or
+    // the files' own, which then advance.
+    let read_off = |ptr: u64, f: &File| -> Result<u64, Errno> {
+        if ptr == 0 {
+            Ok(*f.offset(s))
+        } else {
+            UserPtr::<i64>::new(ptr)
+                .read()
+                .map(i64::cast_unsigned)
+                .map_err(|_| Errno::EFAULT)
+        }
+    };
+    let mut inoff = read_off(inoffp, &input)?;
+    let mut outoff = read_off(outoffp, &output)?;
+    if Arc::ptr_eq(invp, outvp)
+        && inoff < outoff.saturating_add(len)
+        && outoff < inoff.saturating_add(len)
+    {
+        return Err(Errno::EINVAL);
+    }
+    let mut buf = alloc::vec![0u8; 64 * 1024];
+    let mut done: u64 = 0;
+    while done < len {
+        let want = usize::try_from(len - done)
+            .unwrap_or(usize::MAX)
+            .min(buf.len());
+        let mut r = vfs::ReadBuf::new(&mut buf[..want]);
+        let n = invp.read_at(s, inoff, &mut r)?;
+        if n == 0 {
+            break;
+        }
+        let w = outvp.write_at(s, outoff, &mut vfs::WriteBuf::new(&buf[..n]))?;
+        inoff += w as u64;
+        outoff += w as u64;
+        done += w as u64;
+        if w < n {
+            break;
+        }
+    }
+    let write_off = |ptr: u64, f: &File, v: u64| -> Result<(), Errno> {
+        if ptr == 0 {
+            *f.offset(s) = v;
+            Ok(())
+        } else {
+            UserPtr::<i64>::new(ptr)
+                .write(&v.cast_signed())
+                .map_err(|_| Errno::EFAULT)
+        }
+    };
+    write_off(inoffp, &input, inoff)?;
+    write_off(outoffp, &output, outoff)?;
+    Ok(done)
 }

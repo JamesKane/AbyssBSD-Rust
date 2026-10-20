@@ -2640,11 +2640,13 @@ mod user_memory {
             let root = crate::fs::root();
             let echo = crate::fs::namespace()
                 .lookup(
+                    &s,
                     &vfs::namei::Lookup {
                         start: &root,
                         root: &root,
                         follow: true,
                         beneath: false,
+                        cred: crate::fs::cred(),
                     },
                     b"/rescue/echo",
                 )

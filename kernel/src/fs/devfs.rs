@@ -16,8 +16,8 @@ use alloc::sync::Arc;
 use abi::errno::Errno;
 use sched::Sleepable;
 use sync::Once;
-use vfs::tree::{Builder, Leaf};
-use vfs::{CharDevice, Device, FileSystem, Meta, Uio, Vnode};
+use vfs::tree::{Builder, Leaf, TreeFs};
+use vfs::{CharDevice, Device, Meta, Mount, Uio, Vnode};
 
 /// `/dev/null`: reads end at once, writes vanish.
 struct Null;
@@ -98,18 +98,10 @@ impl CharDevice for Console {
 
 static CONSOLE: Once<Arc<Vnode>> = Once::new();
 
-/// A new devfs instance, with id `fsid`.
-pub(crate) fn build(fsid: u64) -> Arc<Vnode> {
-    let fs = Arc::new(FileSystem {
-        id: fsid,
-        type_name: "devfs",
-        type_num: vfs::type_num("devfs"),
-        flags: abi::mount::MNT_LOCAL,
-        from: b"devfs".to_vec(),
-        io_size: 4096,
-    });
+/// The boot devfs's tree.
+pub(crate) fn build() -> TreeFs {
     let now = super::now();
-    let mut b = Builder::new(fs, Meta::root(0o555, now));
+    let mut b = Builder::new(Meta::root(0o555, now));
     let add = |b: &mut Builder, name: &[u8], perm, ops: Arc<dyn CharDevice>| {
         let rdev = b.next_ino();
         let leaf = Leaf::Device(Device { rdev, ops });
@@ -130,8 +122,7 @@ pub(crate) fn build(fsid: u64) -> Arc<Vnode> {
         Meta::root(0o555, now),
     );
     add(&mut b, b"tty", 0o666, Arc::new(crate::tty::ControllingTty));
-    let ttys = crate::tty::all();
-    for t in &ttys {
+    for t in &crate::tty::all() {
         add(
             &mut b,
             t.name().as_bytes(),
@@ -140,20 +131,23 @@ pub(crate) fn build(fsid: u64) -> Arc<Vnode> {
         );
     }
     add(&mut b, b"zero", 0o666, Arc::new(Zero));
-    let root = b.finish();
-    if let Some(dir) = root.as_dir() {
-        for t in &ttys {
-            if let Ok(v) = dir.lookup(t.name().as_bytes()) {
-                t.set_vnode(&v);
-            }
+    b.finish()
+}
+
+/// Records the vnodes of devfs mount `m`'s terminals and console, which
+/// opening `/dev/tty` and the boot processes' descriptors need.
+pub(crate) fn mounted(s: &Sleepable, m: &Arc<Mount>) {
+    let Ok(root) = m.root(s) else {
+        return;
+    };
+    for t in &crate::tty::all() {
+        if let Ok(v) = vfs::namei::Namespace::child(s, &root, t.name().as_bytes()) {
+            t.set_vnode(&v);
         }
     }
-    if let Some(dir) = root.as_dir()
-        && let Ok(c) = dir.lookup(b"console")
-    {
+    if let Ok(c) = vfs::namei::Namespace::child(s, &root, b"console") {
         let _ = CONSOLE.set(c);
     }
-    root
 }
 
 /// The console's vnode.

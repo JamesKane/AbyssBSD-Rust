@@ -16,15 +16,36 @@ use abi::ioctl::FIONREAD;
 use abi::stat::Stat;
 use sched::Sleepable;
 use sched::lock::{LockClass, Mutex};
-use vfs::{Uio, Vnode, VnodeKind};
+use vfs::{Device, Kind, Uio, Vnode, VnodeUse};
 
 use super::pipe;
 
 static OFFSET_LOCK: LockClass = LockClass::new("file offset", 300);
 
+/// An open file system object: the vnode in use, and for a device, the
+/// device it reached when opened (its I/O does not go through the vnode).
+pub(crate) struct VnodeFile {
+    pub(crate) vnode: VnodeUse,
+    pub(crate) device: Option<Device>,
+}
+
+impl VnodeFile {
+    /// `v` opened: a devfs node's device is looked up once, here.
+    pub(crate) fn open(s: &Sleepable, v: &Arc<Vnode>) -> Result<Self, Errno> {
+        let device = match v.kind() {
+            Kind::CharDevice => Some(v.device(s)?),
+            _ => None,
+        };
+        Ok(Self {
+            vnode: v.use_ref(),
+            device,
+        })
+    }
+}
+
 /// What an open file is.
 pub(crate) enum FileKind {
-    Vnode(Arc<Vnode>),
+    Vnode(VnodeFile),
     Pipe(pipe::End),
     /// A process descriptor (`pdfork`).
     Process(crate::proc::ProcDesc),
@@ -55,9 +76,9 @@ impl File {
     }
 
     /// The vnode, if this is a file system object.
-    pub(crate) const fn vnode(&self) -> Option<&Arc<Vnode>> {
+    pub(crate) fn vnode(&self) -> Option<&Arc<Vnode>> {
         match &self.kind {
-            FileKind::Vnode(v) => Some(v),
+            FileKind::Vnode(f) => Some(f.vnode.vnode()),
             FileKind::Pipe(_) | FileKind::Process(_) => None,
         }
     }
@@ -86,17 +107,15 @@ impl File {
             return Err(Errno::EBADF);
         }
         match &self.kind {
-            FileKind::Vnode(v) => match v.kind() {
-                VnodeKind::Regular(f) => {
-                    let mut off = self.offset.lock(s);
-                    let n = f.read(*off, uio)?;
-                    *off += n as u64;
-                    Ok(n)
+            FileKind::Vnode(f) => {
+                if let Some(d) = &f.device {
+                    return d.ops.read(s, uio, self.nonblock());
                 }
-                VnodeKind::Directory(_) => Err(Errno::EISDIR),
-                VnodeKind::Symlink(_) => Err(Errno::EINVAL),
-                VnodeKind::CharDevice(d) => d.ops.read(s, uio, self.nonblock()),
-            },
+                let mut off = self.offset.lock(s);
+                let n = f.vnode.read_at(s, *off, uio)?;
+                *off += n as u64;
+                Ok(n)
+            }
             FileKind::Pipe(p) => p.read(s, uio, self.nonblock()),
             FileKind::Process(_) => Err(Errno::EOPNOTSUPP),
         }
@@ -113,31 +132,35 @@ impl File {
             return Err(Errno::EBADF);
         }
         match &self.kind {
-            FileKind::Vnode(v) => {
-                let offset = u64::try_from(offset).map_err(|_| Errno::EINVAL)?;
-                match v.kind() {
-                    VnodeKind::Regular(f) => f.read(offset, uio),
-                    VnodeKind::Directory(_) => Err(Errno::EISDIR),
-                    VnodeKind::Symlink(_) => Err(Errno::EINVAL),
-                    VnodeKind::CharDevice(d) => d.ops.read(s, uio, self.nonblock()),
+            FileKind::Vnode(f) => {
+                if let Some(d) = &f.device {
+                    return d.ops.read(s, uio, self.nonblock());
                 }
+                let offset = u64::try_from(offset).map_err(|_| Errno::EINVAL)?;
+                f.vnode.read_at(s, offset, uio)
             }
             FileKind::Pipe(_) | FileKind::Process(_) => Err(Errno::ESPIPE),
         }
     }
 
-    /// `write`. Regular files are read-only until Phase 5's writable file
-    /// systems, so they cannot be open for writing.
+    /// `write`: at the offset (the end with `O_APPEND`), which advances.
     pub(crate) fn write(&self, s: &Sleepable, uio: &mut dyn Uio) -> Result<usize, Errno> {
         if self.flags() & FWRITE == 0 {
             return Err(Errno::EBADF);
         }
         match &self.kind {
-            FileKind::Vnode(v) => match v.kind() {
-                VnodeKind::CharDevice(d) => d.ops.write(s, uio, self.nonblock()),
-                VnodeKind::Directory(_) => Err(Errno::EISDIR),
-                VnodeKind::Regular(_) | VnodeKind::Symlink(_) => Err(Errno::EROFS),
-            },
+            FileKind::Vnode(f) => {
+                if let Some(d) = &f.device {
+                    return d.ops.write(s, uio, self.nonblock());
+                }
+                let mut off = self.offset.lock(s);
+                if self.flags() & O_APPEND != 0 {
+                    *off = f.vnode.size(s)?;
+                }
+                let n = f.vnode.write_at(s, *off, uio)?;
+                *off += n as u64;
+                Ok(n)
+            }
             FileKind::Pipe(p) => p.write(s, uio, self.nonblock()),
             FileKind::Process(_) => Err(Errno::EOPNOTSUPP),
         }
@@ -150,28 +173,40 @@ impl File {
         uio: &mut dyn Uio,
         offset: i64,
     ) -> Result<usize, Errno> {
+        if self.flags() & FWRITE == 0 {
+            return Err(Errno::EBADF);
+        }
         match &self.kind {
             FileKind::Pipe(_) | FileKind::Process(_) => Err(Errno::ESPIPE),
-            FileKind::Vnode(_) if offset < 0 && self.flags() & O_APPEND == 0 => Err(Errno::EINVAL),
-            FileKind::Vnode(_) => self.write(s, uio),
+            FileKind::Vnode(f) => {
+                if let Some(d) = &f.device {
+                    return d.ops.write(s, uio, self.nonblock());
+                }
+                let at = if self.flags() & O_APPEND != 0 {
+                    f.vnode.size(s)?
+                } else {
+                    u64::try_from(offset).map_err(|_| Errno::EINVAL)?
+                };
+                f.vnode.write_at(s, at, uio)
+            }
         }
     }
 
     /// `lseek`: the new offset.
     pub(crate) fn seek(&self, s: &Sleepable, offset: i64, whence: u32) -> Result<i64, Errno> {
-        let FileKind::Vnode(v) = &self.kind else {
+        let FileKind::Vnode(f) = &self.kind else {
             return Err(Errno::ESPIPE);
         };
         let mut off = self.offset.lock(s);
         let base = match whence {
             SEEK_SET => 0,
             SEEK_CUR => i64::try_from(*off).map_err(|_| Errno::EOVERFLOW)?,
-            SEEK_END => i64::try_from(v.size()).map_err(|_| Errno::EOVERFLOW)?,
+            SEEK_END => i64::try_from(f.vnode.size(s)?).map_err(|_| Errno::EOVERFLOW)?,
             _ => return Err(Errno::EINVAL),
         };
         let new = base.checked_add(offset).ok_or(Errno::EOVERFLOW)?;
         // Devices take any offset; files and directories none before 0.
-        if new < 0 && !matches!(v.kind(), VnodeKind::CharDevice(_)) {
+        if new < 0 && f.device.is_none() {
             return Err(Errno::EINVAL);
         }
         *off = new.cast_unsigned();
@@ -183,11 +218,11 @@ impl File {
         self.offset.lock(s)
     }
 
-    pub(crate) fn stat(&self, s: &Sleepable) -> Stat {
+    pub(crate) fn stat(&self, s: &Sleepable) -> Result<Stat, Errno> {
         match &self.kind {
-            FileKind::Vnode(v) => v.stat(),
-            FileKind::Pipe(p) => p.stat(s),
-            FileKind::Process(pd) => pd.stat(),
+            FileKind::Vnode(f) => f.vnode.stat(s),
+            FileKind::Pipe(p) => Ok(p.stat(s)),
+            FileKind::Process(pd) => Ok(pd.stat()),
         }
     }
 
@@ -207,13 +242,14 @@ impl File {
                 }
                 _ => Err(Errno::ENOTTY),
             },
-            FileKind::Vnode(v) => match v.kind() {
-                VnodeKind::CharDevice(d) => d.ops.ioctl(s, req, arg),
-                VnodeKind::Regular(f) if req == FIONREAD => {
+            FileKind::Vnode(f) => match (&f.device, f.vnode.kind()) {
+                (Some(d), _) => d.ops.ioctl(s, req, arg),
+                (None, Kind::Regular) if req == FIONREAD => {
                     let off = *self.offset.lock(s);
+                    let size = f.vnode.size(s)?;
                     put(
                         arg,
-                        usize::try_from(f.size().saturating_sub(off)).unwrap_or(usize::MAX),
+                        usize::try_from(size.saturating_sub(off)).unwrap_or(usize::MAX),
                     );
                     Ok(())
                 }

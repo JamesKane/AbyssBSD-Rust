@@ -388,6 +388,10 @@ pub fn current() -> &'static Thread {
     // The HAL's read cannot be split by a preemption (which could move the
     // thread and return another CPU's).
     let p = hal::current_thread().cast::<Thread>();
+    #[cfg(not(target_os = "none"))]
+    if p.is_null() {
+        return host::current();
+    }
     assert!(!p.is_null(), "scheduler not running on this CPU");
     // SAFETY: `current` always holds a live reference while the thread
     // runs, and the running thread cannot be freed under itself.
@@ -1277,9 +1281,55 @@ pub fn snapshot() -> impl Iterator<Item = CpuSnapshot> {
     })
 }
 
+/// Host builds (other crates' unit tests): each OS thread is a thread of
+/// its own, made at first use, so locks, their owners, and the witness work
+/// as in the kernel. Nothing schedules: a test that contends a lock across
+/// OS threads would block forever, so tests keep their objects to one.
+#[cfg(not(target_os = "none"))]
+mod host {
+    extern crate std;
+
+    use alloc::boxed::Box;
+
+    use super::{Priority, Thread};
+
+    std::thread_local! {
+        static ME: &'static Thread = Box::leak(Box::new(Thread::new(
+            "host",
+            Priority::KERNEL,
+            hal::CpuId(0),
+            None,
+            None,
+            false,
+        )));
+    }
+
+    pub(super) fn current() -> &'static Thread {
+        ME.with(|t| *t)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::better_cpu;
+
+    #[test]
+    fn sleepable_locks_work_on_the_host() {
+        use crate::lock::{LockClass, Mutex, SxLock};
+        static M: LockClass = LockClass::new("test mutex", 100);
+        static S: LockClass = LockClass::new("test sx", 200);
+        // SAFETY: a host test thread may sleep.
+        let s = unsafe { crate::Sleepable::assume() };
+        let m = Mutex::new(&M, 1);
+        let x = SxLock::new(&S, 2);
+        {
+            let a = x.read(&s);
+            let b = x.read(&s);
+            *m.lock(&s) += *a + *b;
+        }
+        *x.write(&s) += 1;
+        assert_eq!((*m.lock(&s), *x.read(&s)), (5, 3));
+    }
 
     #[test]
     fn placement_prefers_idle_then_fast() {

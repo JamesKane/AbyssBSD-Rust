@@ -396,6 +396,22 @@ macro_rules! shared_exclusive {
                     _not_send: PhantomData,
                 }
             }
+
+            /// Exclusive access if nobody holds the lock now, without
+            /// waiting (for taking several locks against their usual order
+            /// and backing off).
+            pub fn try_write(&self) -> Option<WriteGuard<'_, T>> {
+                let me = ptr::from_ref(crate::current()).expose_provenance();
+                if !self.core.try_write(me) {
+                    return None;
+                }
+                witness::acquire(self.core.class, ptr::from_ref(&self.core).addr());
+                Some(WriteGuard {
+                    core: &self.core,
+                    value: &self.value,
+                    _not_send: PhantomData,
+                })
+            }
         }
     };
 }

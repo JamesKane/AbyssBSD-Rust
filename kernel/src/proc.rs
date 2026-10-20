@@ -255,7 +255,7 @@ pub(crate) struct Process {
     /// several), so behind a sleepable lock (FreeBSD's `fd_sx`).
     pub(crate) files: Mutex<FdTable>,
     /// The working directory.
-    pub(crate) cwd: SpinLock<Arc<Vnode>>,
+    pub(crate) cwd: SpinLock<vfs::VnodeUse>,
     /// The file creation mask.
     pub(crate) umask: AtomicU16,
     /// What `ps` shows of the program it runs.
@@ -282,7 +282,7 @@ pub(crate) struct Image {
 impl Image {
     /// For the program at `path` (as given, from directory `cwd`) run with
     /// `argv`.
-    fn new(cwd: &Arc<Vnode>, path: &[u8], argv: &[&[u8]]) -> Self {
+    fn new(s: &Sleepable, cwd: &Arc<Vnode>, path: &[u8], argv: &[&[u8]]) -> Self {
         let name = path.rsplit(|&b| b == b'/').next().unwrap_or(path);
         let comm = name[..name.len().min(abi::kinfo::MAXCOMLEN)].to_vec();
         let mut args = Vec::new();
@@ -294,7 +294,7 @@ impl Image {
             path.to_vec()
         } else {
             let mut dir = crate::fs::namespace()
-                .path_of(cwd, &crate::fs::root())
+                .path_of(s, cwd, &crate::fs::root())
                 .unwrap_or_else(|_| b"/".to_vec());
             if dir.last() != Some(&b'/') {
                 dir.push(b'/');
@@ -332,7 +332,7 @@ impl Process {
             Some(p) => (p.signals.lock().forked(), *p.limits.lock()),
             None => (Signals::new(), default_limits()),
         };
-        let cwd = parent.map_or_else(crate::fs::root, |p| Arc::clone(&p.cwd.lock()));
+        let cwd = parent.map_or_else(|| crate::fs::root().use_ref(), |p| p.cwd.lock().clone());
         let umask = parent.map_or(0o022, |p| p.umask.load(Ordering::Relaxed));
         let image = parent.map(|p| p.image.lock().clone()).unwrap_or_default();
         let execed = parent.is_some_and(|p| p.execed.load(Ordering::Relaxed));
@@ -518,11 +518,13 @@ impl Process {
     ) -> Result<Arc<Self>, Errno> {
         let root = crate::fs::root();
         let file = crate::fs::namespace().lookup(
+            s,
             &vfs::namei::Lookup {
                 start: &root,
                 root: &root,
                 follow: true,
                 beneath: false,
+                cred: crate::fs::cred(),
             },
             path,
         )?;
@@ -530,7 +532,7 @@ impl Process {
         let data_max = default_limits()[rlimit::DATA as usize].rlim_max;
         let image = crate::exec::load(s, &space, &file, path, argv, envp, data_max)?;
         let p = Self::create(space, image.layout, None, crate::fs::console_table());
-        *p.image.lock() = Image::new(&root, path, argv);
+        *p.image.lock() = Image::new(s, &root, path, argv);
         if let Some(t) = ctty {
             crate::tty::make_controlling(t, &p);
         }
@@ -730,8 +732,8 @@ impl Process {
         self.signals.lock().exec();
         let closed = self.files.lock(s).exec();
         drop(closed);
-        let cwd = Arc::clone(&self.cwd.lock());
-        *self.image.lock() = Image::new(&cwd, path, argv);
+        let cwd = Arc::clone(self.cwd.lock().vnode());
+        *self.image.lock() = Image::new(s, &cwd, path, argv);
         self.execed.store(true, Ordering::Relaxed);
         self.exterr.store(0, Ordering::Relaxed);
         self.set_tls_base(None);

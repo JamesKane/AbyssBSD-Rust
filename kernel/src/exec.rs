@@ -175,15 +175,19 @@ pub(crate) fn load(
     envp: &[&[u8]],
     data_max: u64,
 ) -> Result<Image, Errno> {
-    // A regular file with an execute bit (root needs one too).
-    let vfs::VnodeKind::Regular(contents) = file.kind() else {
-        return Err(Errno::EACCES);
-    };
-    if file.meta().perm & 0o111 == 0 {
+    // A regular file the caller may execute (root needs an execute bit
+    // too).
+    if file.kind() != vfs::Kind::Regular {
         return Err(Errno::EACCES);
     }
-    // Only files held in memory can be mapped until Phase 5's page cache.
-    let (Some(data), Some(object)) = (contents.resident(), crate::fs::object(file)) else {
+    vfs::ops::access(
+        &file.attr(s)?,
+        file.kind(),
+        crate::fs::cred(),
+        vfs::ops::VEXEC,
+    )?;
+    // Only files held in memory can be mapped until the page cache (P5.3).
+    let (Some(data), Some(object)) = (file.resident(s), crate::fs::object(s, file)) else {
         return Err(Errno::ENOEXEC);
     };
     let elf = Elf::parse(data).map_err(|_| Errno::ENOEXEC)?;

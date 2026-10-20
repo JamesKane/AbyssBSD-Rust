@@ -129,7 +129,8 @@ pub(crate) fn of_session(sid: i32) -> Option<(u64, i32)> {
         .vnode
         .get()
         .and_then(Weak::upgrade)
-        .map_or(abi::kinfo::NODEV, |v| v.stat().st_rdev);
+        // devfs numbers each device by its inode.
+        .map_or(abi::kinfo::NODEV, |v| v.ino());
     Some((rdev, pgrp))
 }
 

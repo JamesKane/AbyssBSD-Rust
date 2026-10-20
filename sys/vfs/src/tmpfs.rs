@@ -1,0 +1,562 @@
+// SPDX-License-Identifier: BSD-2-Clause
+//! tmpfs (docs/VFS.md §10.2): a file system in memory.
+//!
+//! Every node lives in the file system's table while no vnode holds it,
+//! and inside its vnode while one does (handed over by `load`, back by
+//! `reclaim`). Directories map names to inodes; each entry gets a cookie
+//! when it is made, so `getdirentries` resumes where it left off however
+//! the directory changes meanwhile (0 is `.`, 1 is `..`, as FreeBSD's
+//! tmpfs numbers them). File data is a byte vector for now; it moves to
+//! a VM object with the page cache (P5.3).
+//!
+//! Behavior reference: sys/fs/tmpfs.
+
+use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::any::Any;
+
+use abi::errno::Errno;
+use sched::Sleepable;
+use sync::SpinLock;
+
+use crate::mount::{FileSystem, FsStats, Rename};
+use crate::node::{
+    Attr, Create, DirEntry, DirectoryNode, Kind, NewNode, Node, NodeOps, RegularNode, SetAttr,
+    SymlinkNode,
+};
+use crate::{Uio, now};
+
+/// The root directory's inode, as FreeBSD's tmpfs numbers it.
+pub const ROOT_INO: u64 = 2;
+
+/// The most links a node may have (FreeBSD's tmpfs: `TMPFS_LINK_MAX`).
+const LINK_MAX: u64 = i16::MAX as u64;
+
+/// What a node holds.
+enum Data {
+    Regular(Vec<u8>),
+    Directory(Dir),
+    Symlink(Vec<u8>),
+    /// A FIFO, a socket, or a device node.
+    Other,
+}
+
+struct Dir {
+    parent: u64,
+    /// Name to its entry's cookie.
+    names: BTreeMap<Box<[u8]>, u64>,
+    /// Cookie to the entry, in creation order.
+    entries: BTreeMap<u64, (Box<[u8]>, u64, Kind)>,
+    next_cookie: u64,
+}
+
+impl Dir {
+    fn new(parent: u64) -> Self {
+        Self {
+            parent,
+            names: BTreeMap::new(),
+            entries: BTreeMap::new(),
+            next_cookie: 2,
+        }
+    }
+
+    fn get(&self, name: &[u8]) -> Option<(u64, Kind)> {
+        let c = self.names.get(name)?;
+        self.entries.get(c).map(|(_, ino, k)| (*ino, *k))
+    }
+
+    fn insert(&mut self, name: &[u8], ino: u64, kind: Kind) {
+        let c = self.next_cookie;
+        self.next_cookie += 1;
+        self.names.insert(name.into(), c);
+        self.entries.insert(c, (name.into(), ino, kind));
+    }
+
+    fn remove(&mut self, name: &[u8]) -> Option<u64> {
+        let c = self.names.remove(name)?;
+        self.entries.remove(&c).map(|(_, ino, _)| ino)
+    }
+}
+
+/// One file.
+struct TmpNode {
+    ino: u64,
+    kind: Kind,
+    attr: Attr,
+    data: Data,
+    fs: Arc<Shared>,
+    /// Freed by `inactive` (unlinked): `reclaim` drops it.
+    freed: bool,
+}
+
+/// The state every node of one mount shares.
+struct Shared {
+    /// Nodes no vnode holds.
+    nodes: SpinLock<BTreeMap<u64, Box<TmpNode>>>,
+    next_ino: SpinLock<u64>,
+    /// Bytes and nodes in use, for `statfs`.
+    usage: SpinLock<(u64, u64)>,
+}
+
+/// A mounted tmpfs.
+pub struct TmpFs {
+    shared: Arc<Shared>,
+}
+
+impl core::fmt::Debug for TmpFs {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let (bytes, nodes) = *self.shared.usage.lock();
+        write!(f, "TmpFs({nodes} nodes, {bytes} bytes)")
+    }
+}
+
+impl TmpFs {
+    /// An empty tmpfs whose root has permissions `mode`, owned by `uid`
+    /// and `gid`.
+    #[must_use]
+    pub fn new(mode: u16, uid: u32, gid: u32) -> Self {
+        let shared = Arc::new(Shared {
+            nodes: SpinLock::new(BTreeMap::new()),
+            next_ino: SpinLock::new(ROOT_INO + 1),
+            usage: SpinLock::new((0, 1)),
+        });
+        let t = now();
+        let root = Box::new(TmpNode {
+            ino: ROOT_INO,
+            kind: Kind::Directory,
+            attr: Attr {
+                mode,
+                uid,
+                gid,
+                nlink: 2,
+                atime: t,
+                mtime: t,
+                ctime: t,
+                birthtime: t,
+                ..Attr::default()
+            },
+            data: Data::Directory(Dir::new(ROOT_INO)),
+            fs: Arc::clone(&shared),
+            freed: false,
+        });
+        shared.nodes.lock().insert(ROOT_INO, root);
+        Self { shared }
+    }
+}
+
+fn downcast(n: &mut dyn Node) -> Result<&mut TmpNode, Errno> {
+    n.as_any_mut().downcast_mut::<TmpNode>().ok_or(Errno::EXDEV)
+}
+
+fn dir_mut(n: &mut TmpNode) -> Result<&mut Dir, Errno> {
+    match &mut n.data {
+        Data::Directory(d) => Ok(d),
+        _ => Err(Errno::ENOTDIR),
+    }
+}
+
+impl TmpNode {
+    fn dir(&self) -> Result<&Dir, Errno> {
+        match &self.data {
+            Data::Directory(d) => Ok(d),
+            _ => Err(Errno::ENOTDIR),
+        }
+    }
+
+    /// The directory's contents changed.
+    fn touch_dir(&mut self) {
+        let t = now();
+        self.attr.mtime = t;
+        self.attr.ctime = t;
+    }
+}
+
+impl Node for TmpNode {
+    fn attr(&self) -> Attr {
+        let mut a = self.attr;
+        a.size = match &self.data {
+            Data::Regular(v) | Data::Symlink(v) => v.len() as u64,
+            // FreeBSD's tmpfs: a fixed size per entry.
+            Data::Directory(d) => (d.entries.len() as u64 + 2) * 32,
+            Data::Other => 0,
+        };
+        a.bytes = a.size.next_multiple_of(4096);
+        a
+    }
+
+    fn setattr(&mut self, _s: &Sleepable, a: &SetAttr) -> Result<(), Errno> {
+        let t = now();
+        if let Some(size) = a.size {
+            let Data::Regular(v) = &mut self.data else {
+                return Err(Errno::EINVAL);
+            };
+            let size = usize::try_from(size).map_err(|_| Errno::EFBIG)?;
+            let old = v.len() as u64;
+            if size > v.len() {
+                v.try_reserve(size - v.len()).map_err(|_| Errno::ENOSPC)?;
+            }
+            v.resize(size, 0);
+            usage(&self.fs, size as u64, old);
+            self.attr.mtime = t;
+        }
+        if let Some(m) = a.mode {
+            self.attr.mode = m & 0o7777;
+        }
+        if let Some(u) = a.uid {
+            self.attr.uid = u;
+        }
+        if let Some(g) = a.gid {
+            self.attr.gid = g;
+        }
+        if let Some(x) = a.atime {
+            self.attr.atime = x;
+        }
+        if let Some(x) = a.mtime {
+            self.attr.mtime = x;
+        }
+        if let Some(x) = a.birthtime {
+            self.attr.birthtime = x;
+        }
+        if let Some(f) = a.flags {
+            self.attr.flags = f;
+        }
+        self.attr.ctime = t;
+        Ok(())
+    }
+
+    fn inactive(&mut self, _s: &Sleepable) {
+        if self.attr.nlink == 0 && !self.freed {
+            let bytes = match &self.data {
+                Data::Regular(v) | Data::Symlink(v) => v.len() as u64,
+                _ => 0,
+            };
+            usage(&self.fs, 0, bytes);
+            self.fs.usage.lock().1 -= 1;
+            self.data = Data::Other;
+            self.freed = true;
+        }
+    }
+
+    fn reclaim(self: Box<Self>, _s: &Sleepable) {
+        if !self.freed {
+            let fs = Arc::clone(&self.fs);
+            fs.nodes.lock().insert(self.ino, self);
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+/// Moves the usage count from `old` bytes to `new`.
+fn usage(fs: &Shared, new: u64, old: u64) {
+    let mut u = fs.usage.lock();
+    u.0 = u.0.saturating_sub(old) + new;
+}
+
+impl RegularNode for TmpNode {
+    fn read(&self, _s: &Sleepable, offset: u64, uio: &mut dyn Uio) -> Result<usize, Errno> {
+        let Data::Regular(v) = &self.data else {
+            return Err(Errno::EINVAL);
+        };
+        let start = usize::try_from(offset).unwrap_or(usize::MAX);
+        let Some(src) = v.get(start..) else {
+            return Ok(0);
+        };
+        uio.copy_out(&src[..src.len().min(uio.resid())])
+    }
+
+    fn write(&mut self, _s: &Sleepable, offset: u64, uio: &mut dyn Uio) -> Result<usize, Errno> {
+        let Data::Regular(v) = &mut self.data else {
+            return Err(Errno::EINVAL);
+        };
+        let start = usize::try_from(offset).map_err(|_| Errno::EFBIG)?;
+        let end = start.checked_add(uio.resid()).ok_or(Errno::EFBIG)?;
+        let old = v.len();
+        if end > v.len() {
+            v.try_reserve(end - v.len()).map_err(|_| Errno::ENOSPC)?;
+            v.resize(end, 0);
+        }
+        // A short copy (a fault part-way) leaves only what arrived.
+        let n = match uio.copy_in(&mut v[start..end]) {
+            Ok(n) => n,
+            Err(e) => {
+                v.truncate(old);
+                return Err(e);
+            }
+        };
+        if start + n < end {
+            v.truncate(old.max(start + n));
+        }
+        usage(&self.fs, v.len() as u64, old as u64);
+        let t = now();
+        self.attr.mtime = t;
+        self.attr.ctime = t;
+        Ok(n)
+    }
+}
+
+impl SymlinkNode for TmpNode {
+    fn target(&self, _s: &Sleepable) -> Result<Vec<u8>, Errno> {
+        match &self.data {
+            Data::Symlink(t) => Ok(t.clone()),
+            _ => Err(Errno::EINVAL),
+        }
+    }
+}
+
+impl DirectoryNode for TmpNode {
+    fn lookup(&self, _s: &Sleepable, name: &[u8]) -> Result<u64, Errno> {
+        self.dir()?
+            .get(name)
+            .map(|(ino, _)| ino)
+            .ok_or(Errno::ENOENT)
+    }
+
+    fn parent(&self) -> u64 {
+        self.dir().map_or(self.ino, |d| d.parent)
+    }
+
+    fn create(
+        &mut self,
+        _s: &Sleepable,
+        name: &[u8],
+        node: &NewNode,
+        c: &Create,
+    ) -> Result<u64, Errno> {
+        let kind = node.kind();
+        if kind == Kind::Directory && self.attr.nlink >= LINK_MAX {
+            return Err(Errno::EMLINK);
+        }
+        let ino = {
+            let mut n = self.fs.next_ino.lock();
+            let ino = *n;
+            *n += 1;
+            ino
+        };
+        let (data, nlink, rdev) = match node {
+            NewNode::Regular => (Data::Regular(Vec::new()), 1, 0),
+            NewNode::Directory => (Data::Directory(Dir::new(self.ino)), 2, 0),
+            NewNode::Symlink(t) => (Data::Symlink(t.clone()), 1, 0),
+            NewNode::CharDevice(rdev) => (Data::Other, 1, *rdev),
+            NewNode::Fifo | NewNode::Socket => (Data::Other, 1, 0),
+        };
+        let bytes = match &data {
+            Data::Symlink(t) => t.len() as u64,
+            _ => 0,
+        };
+        let new = Box::new(TmpNode {
+            ino,
+            kind,
+            attr: Attr {
+                mode: c.mode & 0o7777,
+                uid: c.uid,
+                gid: c.gid,
+                nlink,
+                atime: c.time,
+                mtime: c.time,
+                ctime: c.time,
+                birthtime: c.time,
+                generation: 1,
+                rdev,
+                ..Attr::default()
+            },
+            data,
+            fs: Arc::clone(&self.fs),
+            freed: false,
+        });
+        self.fs.nodes.lock().insert(ino, new);
+        {
+            let mut u = self.fs.usage.lock();
+            u.0 += bytes;
+            u.1 += 1;
+        }
+        dir_mut(self)?.insert(name, ino, kind);
+        if kind == Kind::Directory {
+            self.attr.nlink += 1;
+        }
+        self.touch_dir();
+        Ok(ino)
+    }
+
+    fn link(
+        &mut self,
+        _s: &Sleepable,
+        name: &[u8],
+        ino: u64,
+        target: &mut dyn Node,
+    ) -> Result<(), Errno> {
+        let t = downcast(target)?;
+        if t.attr.nlink >= LINK_MAX {
+            return Err(Errno::EMLINK);
+        }
+        t.attr.nlink += 1;
+        t.attr.ctime = now();
+        let kind = t.kind;
+        dir_mut(self)?.insert(name, ino, kind);
+        self.touch_dir();
+        Ok(())
+    }
+
+    fn remove(&mut self, _s: &Sleepable, name: &[u8], child: &mut dyn Node) -> Result<(), Errno> {
+        let c = downcast(child)?;
+        dir_mut(self)?.remove(name).ok_or(Errno::ENOENT)?;
+        c.attr.nlink -= 1;
+        c.attr.ctime = now();
+        self.touch_dir();
+        Ok(())
+    }
+
+    fn rmdir(
+        &mut self,
+        _s: &Sleepable,
+        name: &[u8],
+        child: &mut dyn DirectoryNode,
+    ) -> Result<(), Errno> {
+        let c = downcast(child)?;
+        if !c.dir()?.entries.is_empty() {
+            return Err(Errno::ENOTEMPTY);
+        }
+        dir_mut(self)?.remove(name).ok_or(Errno::ENOENT)?;
+        c.attr.nlink = 0;
+        self.attr.nlink -= 1;
+        self.touch_dir();
+        Ok(())
+    }
+
+    fn readdir(
+        &self,
+        _s: &Sleepable,
+        from: u64,
+        f: &mut dyn FnMut(DirEntry<'_>) -> bool,
+    ) -> Result<(), Errno> {
+        let d = self.dir()?;
+        if from == 0
+            && !f(DirEntry {
+                name: b".",
+                ino: self.ino,
+                kind: Kind::Directory,
+                next: 1,
+            })
+        {
+            return Ok(());
+        }
+        if from <= 1
+            && !f(DirEntry {
+                name: b"..",
+                ino: d.parent,
+                kind: Kind::Directory,
+                next: 2,
+            })
+        {
+            return Ok(());
+        }
+        for (&c, (name, ino, kind)) in d.entries.range(from.max(2)..) {
+            if !f(DirEntry {
+                name,
+                ino: *ino,
+                kind: *kind,
+                next: c + 1,
+            }) {
+                break;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl FileSystem for TmpFs {
+    fn root(&self) -> u64 {
+        ROOT_INO
+    }
+
+    fn load(&self, _s: &Sleepable, ino: u64) -> Result<NodeOps, Errno> {
+        let n = self.shared.nodes.lock().remove(&ino).ok_or(Errno::ENOENT)?;
+        Ok(match n.kind {
+            Kind::Regular => NodeOps::Regular(n),
+            Kind::Directory => NodeOps::Directory(n),
+            Kind::Symlink => NodeOps::Symlink(n),
+            k => NodeOps::Other(k, n),
+        })
+    }
+
+    fn statfs(&self, _s: &Sleepable) -> Result<FsStats, Errno> {
+        let (bytes, nodes) = *self.shared.usage.lock();
+        // No limit is set: report what is used and plenty free, as
+        // FreeBSD's tmpfs does with no `size` (counted in pages).
+        let used = bytes.div_ceil(4096);
+        let total = used + (1 << 20);
+        Ok(FsStats {
+            bsize: 4096,
+            iosize: 4096,
+            blocks: total,
+            bfree: total - used,
+            bavail: i64::try_from(total - used).unwrap_or(i64::MAX),
+            files: nodes + (1 << 20),
+            ffree: 1 << 20,
+        })
+    }
+
+    fn rename(&self, _s: &Sleepable, mut r: Rename<'_>) -> Result<(), Errno> {
+        let t = now();
+        let from_kind = r.from.kind();
+        let from = downcast(r.from.node_mut())?;
+        let from_dir = downcast(r.from_dir)?;
+        let to_dir_ino;
+        // The target's old entry goes first.
+        if let Some((_, old)) = r.to {
+            let old = downcast(old.node_mut())?;
+            let td: &mut TmpNode = match r.to_dir.as_deref_mut() {
+                Some(d) => downcast(d)?,
+                None => &mut *from_dir,
+            };
+            dir_mut(td)?.remove(r.to_name).ok_or(Errno::ENOENT)?;
+            if old.kind == Kind::Directory {
+                if !old.dir()?.entries.is_empty() {
+                    return Err(Errno::ENOTEMPTY);
+                }
+                old.attr.nlink = 0;
+                td.attr.nlink -= 1;
+            } else {
+                old.attr.nlink -= 1;
+            }
+            old.attr.ctime = t;
+        }
+        dir_mut(from_dir)?
+            .remove(r.from_name)
+            .ok_or(Errno::ENOENT)?;
+        from_dir.touch_dir();
+        match r.to_dir {
+            Some(d) => {
+                let td = downcast(d)?;
+                dir_mut(td)?.insert(r.to_name, r.from_ino, from_kind);
+                td.touch_dir();
+                to_dir_ino = td.ino;
+                if from_kind == Kind::Directory {
+                    td.attr.nlink += 1;
+                    from_dir.attr.nlink -= 1;
+                }
+            }
+            None => {
+                dir_mut(from_dir)?.insert(r.to_name, r.from_ino, from_kind);
+                to_dir_ino = from_dir.ino;
+            }
+        }
+        if let Data::Directory(d) = &mut from.data {
+            d.parent = to_dir_ino;
+        }
+        from.attr.ctime = t;
+        Ok(())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}

@@ -30,6 +30,11 @@ pub struct LockClass {
     pub level: u16,
     /// Whether holders may sleep (mutexes and sx locks: yes; rw: no).
     pub sleepable: bool,
+    /// Whether a thread may hold several locks of this class at once
+    /// (FreeBSD's `LO_DUPOK`): the class's users order them by a rule of
+    /// their own, which the witness cannot see (vnodes: parent before
+    /// child).
+    pub dup_ok: bool,
 }
 
 impl LockClass {
@@ -40,6 +45,17 @@ impl LockClass {
             name,
             level,
             sleepable: true,
+            dup_ok: false,
+        }
+    }
+
+    /// A sleepable class whose locks may be held several at once, in an
+    /// order its users keep.
+    #[must_use]
+    pub const fn new_dup_ok(name: &'static str, level: u16) -> Self {
+        Self {
+            dup_ok: true,
+            ..Self::new(name, level)
         }
     }
 
@@ -50,6 +66,7 @@ impl LockClass {
             name,
             level,
             sleepable: false,
+            dup_ok: false,
         }
     }
 }
@@ -120,7 +137,7 @@ pub(crate) fn acquire(class: &'static LockClass, lock: usize) {
     for e in &h.entries[..h.len] {
         // SAFETY: classes are statics.
         let c = unsafe { &*e.class };
-        if c.level >= class.level {
+        if c.level >= class.level && !(class.dup_ok && ptr::eq(c, class)) {
             violation(format_args!(
                 "witness: acquiring {} (level {}) while holding {} (level {})",
                 class.name, class.level, c.name, c.level

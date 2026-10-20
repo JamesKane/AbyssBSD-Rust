@@ -8,38 +8,14 @@
 //!
 //! Behavior reference: sys/fs/tarfs/tarfs_vfsops.c.
 
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use abi::errno::Errno;
 use abi::time::Timespec;
 use ustar::{Archive, Kind};
 
-use crate::tree::{Builder, Leaf};
-use crate::{FileSystem, Meta, RegularFile, Uio, Vnode};
-
-/// A file's contents in the archive.
-struct MemFile {
-    data: &'static [u8],
-}
-
-impl RegularFile for MemFile {
-    fn size(&self) -> u64 {
-        self.data.len() as u64
-    }
-
-    fn read(&self, offset: u64, uio: &mut dyn Uio) -> Result<usize, Errno> {
-        let start = usize::try_from(offset).unwrap_or(usize::MAX);
-        let Some(rest) = self.data.get(start..) else {
-            return Ok(0);
-        };
-        uio.copy_out(rest)
-    }
-
-    fn resident(&self) -> Option<&'static [u8]> {
-        Some(self.data)
-    }
-}
+use crate::Meta;
+use crate::tree::{Builder, Leaf, TreeFs};
 
 /// Why an archive could not be mounted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,10 +27,10 @@ pub enum MountError {
     Path(Errno),
 }
 
-/// The tree in `archive`, as file system `fs`.
-pub fn mount(archive: Archive<'static>, fs: Arc<FileSystem>) -> Result<Arc<Vnode>, MountError> {
+/// The tree in `archive`.
+pub fn mount(archive: Archive<'static>) -> Result<TreeFs, MountError> {
     let zero = Timespec::default();
-    let mut b = Builder::new(fs, Meta::root(0o755, zero));
+    let mut b = Builder::new(Meta::root(0o755, zero));
     let mut path = Vec::new();
     for e in archive.entries() {
         let e = e.map_err(MountError::Archive)?;
@@ -74,12 +50,7 @@ pub fn mount(archive: Archive<'static>, fs: Arc<FileSystem>) -> Result<Arc<Vnode
         let r = match e.kind {
             Kind::Directory => b.dir(&path, meta).map(drop),
             Kind::File => b
-                .leaf(
-                    &path,
-                    meta,
-                    Leaf::Regular(Arc::new(MemFile { data: e.data })),
-                    implied,
-                )
+                .leaf(&path, meta, Leaf::Regular(e.data), implied)
                 .map(drop),
             Kind::Symlink(target) => b
                 .leaf(&path, meta, Leaf::Symlink(target.into()), implied)
