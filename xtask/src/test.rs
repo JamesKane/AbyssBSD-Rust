@@ -384,18 +384,36 @@ fn boot(case: &BootCase, release: bool, verbose: bool) -> Result<std::result::Re
             d
         }
     };
+    // The same disk on NVMe (nda1) and AHCI (ada1) too. QEMU's IDE
+    // disks cannot be read-only: a snapshot drops any write instead.
     if let Some(img) = &ufs {
+        let img = img.display();
         match case.vmm {
-            Vmm::Bhyve => devices.push(format!("7,virtio-blk,{},ro", img.display())),
-            Vmm::Qemu => devices.extend([
-                "-drive".into(),
-                format!(
-                    "if=none,id=ufs0,format=raw,readonly=on,file={}",
-                    img.display()
-                ),
-                "-device".into(),
-                "virtio-blk-pci,drive=ufs0".into(),
+            Vmm::Bhyve => devices.extend([
+                format!("7,virtio-blk,{img},ro"),
+                format!("8,nvme,{img},ro"),
+                format!("9,ahci-hd,{img},ro"),
             ]),
+            Vmm::Qemu => {
+                let ahci_port = match case.arch {
+                    Arch::X86_64 => "ide.1",
+                    Arch::Aarch64 => "ahci0.1",
+                };
+                devices.extend([
+                    "-drive".into(),
+                    format!("if=none,id=ufs0,format=raw,readonly=on,file={img}"),
+                    "-device".into(),
+                    "virtio-blk-pci,drive=ufs0".into(),
+                    "-drive".into(),
+                    format!("if=none,id=ufs1,format=raw,readonly=on,file={img}"),
+                    "-device".into(),
+                    "nvme,serial=abyss1,drive=ufs1".into(),
+                    "-drive".into(),
+                    format!("if=none,id=ufs2,format=raw,snapshot=on,file={img}"),
+                    "-device".into(),
+                    format!("ide-hd,drive=ufs2,bus={ahci_port}"),
+                ]);
+            }
         }
     }
     let vm = Vm {

@@ -2874,11 +2874,12 @@ mod user_memory {
     }
 
     ktest! {
-        /// The UFS2 test disk (vtbd2) mounts read-only with `/rescue`'s
-        /// `mount`, and `ls -lRnT` and `md5 -r` over it print exactly what
-        /// FreeBSD's printed over the same image. Skipped when the disk or
-        /// FreeBSD's listings are not there (no `fetch-base` from the
-        /// server).
+        /// The UFS2 test disk mounts read-only with `/rescue`'s `mount`,
+        /// and `ls -lRnT` and `md5 -r` over it print exactly what FreeBSD's
+        /// printed over the same image: from virtio-blk (vtbd2), every
+        /// file's digest; from NVMe (nda1) and AHCI (ada1), the listing
+        /// and the largest file's. Skipped when the disk or FreeBSD's
+        /// listings are not there (no `fetch-base` from the server).
         fn ufs_reads_as_freebsd_reads_it() {
             use crate::proc::Process;
             let s = cx();
@@ -2889,35 +2890,53 @@ mod user_memory {
                 kprintln!("ufs: no test disk listings; skipped");
                 return;
             };
-            if storage::find("vtbd2").is_none() {
-                kprintln!("ufs: no test disk; skipped");
-                return;
-            }
-            let script: &[u8] = b"mount -t ufs -o ro /dev/vtbd2 /mnt || exit 1; \
-                cd /mnt && TZ=UTC ls -lRnT . > /tmp/ufs.ls || exit 2; \
-                md5 -r $(cat /usr/tests/ufs/ufs-test.files) > /tmp/ufs.md5 || exit 3; \
-                touch /mnt/x 2>/dev/null && exit 4; \
-                cd / && umount /mnt || exit 5; exit 7";
-            let p = Process::spawn(
-                &s,
-                b"/rescue/sh",
-                &[b"sh", b"-c", script],
-                &[b"PATH=/rescue", b"HOME=/"],
-                Some(hal::cpu_id()),
-            )
-            .unwrap();
-            let exit = p.wait(&s);
-            let got_ls = read_whole(&s, b"/tmp/ufs.ls").unwrap_or_default();
-            let got_md5 = read_whole(&s, b"/tmp/ufs.md5").unwrap_or_default();
-            first_difference("ufs: ls -lRnT", &got_ls, &want_ls);
-            first_difference("ufs: md5 -r", &got_md5, &want_md5);
-            assert_eq!(exit, crate::proc::Exit::Code(7));
-            assert!(got_ls == want_ls && got_md5 == want_md5);
-            let lines = want_md5.iter().filter(|&&c| c == b'\n').count();
-            kprintln!("ufs: {lines} files and their listing match FreeBSD's");
-            for f in [&b"/tmp/ufs.ls"[..], b"/tmp/ufs.md5"] {
-                let _ = crate::fs::parent_of(&s, &p, crate::fs::At::Cwd, f, false)
-                    .and_then(|d| vfs::ops::remove(&s, &d.dir, &d.name, crate::fs::cred(), false));
+            let rescue_md5: alloc::vec::Vec<u8> = want_md5
+                .split(|&c| c == b'\n')
+                .find(|l| l.ends_with(b" ./rescue/rescue"))
+                .map(|l| [l, b"\n"].concat())
+                .unwrap_or_default();
+            for (disk, all) in [("vtbd2", true), ("nda1", false), ("ada1", false)] {
+                if storage::find(disk).is_none() {
+                    kprintln!("ufs: no {disk}; skipped");
+                    continue;
+                }
+                let files: &[u8] = if all {
+                    b"$(cat /usr/tests/ufs/ufs-test.files)"
+                } else {
+                    b"./rescue/rescue"
+                };
+                let script = [
+                    &b"mount -t ufs -o ro /dev/"[..],
+                    disk.as_bytes(),
+                    b" /mnt || exit 1; cd /mnt && TZ=UTC ls -lRnT . > /tmp/ufs.ls || exit 2; md5 -r ",
+                    files,
+                    b" > /tmp/ufs.md5 || exit 3; touch /mnt/x 2>/dev/null && exit 4; \
+                      cd / && umount /mnt || exit 5; exit 7",
+                ]
+                .concat();
+                let p = Process::spawn(
+                    &s,
+                    b"/rescue/sh",
+                    &[b"sh", b"-c", &script],
+                    &[b"PATH=/rescue", b"HOME=/"],
+                    Some(hal::cpu_id()),
+                )
+                .unwrap();
+                let exit = p.wait(&s);
+                let got_ls = read_whole(&s, b"/tmp/ufs.ls").unwrap_or_default();
+                let got_md5 = read_whole(&s, b"/tmp/ufs.md5").unwrap_or_default();
+                let want_md5 = if all { &want_md5 } else { &rescue_md5 };
+                first_difference(&alloc::format!("ufs: {disk}: ls -lRnT"), &got_ls, &want_ls);
+                first_difference(&alloc::format!("ufs: {disk}: md5 -r"), &got_md5, want_md5);
+                assert_eq!(exit, crate::proc::Exit::Code(7), "{disk}");
+                assert!(got_ls == want_ls && got_md5 == *want_md5, "{disk}");
+                let lines = want_md5.iter().filter(|&&c| c == b'\n').count();
+                kprintln!("ufs: {disk}: the listing and {lines} digests match FreeBSD's");
+                for f in [&b"/tmp/ufs.ls"[..], b"/tmp/ufs.md5"] {
+                    let _ = crate::fs::parent_of(&s, &p, crate::fs::At::Cwd, f, false).and_then(
+                        |d| vfs::ops::remove(&s, &d.dir, &d.name, crate::fs::cred(), false),
+                    );
+                }
             }
         }
     }
