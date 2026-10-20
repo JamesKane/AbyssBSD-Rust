@@ -200,6 +200,17 @@ impl Session {
         Ok(())
     }
 
+    /// Stops the VM at once, as pulling the plug would (what is written
+    /// stays on its disks; the rest is lost).
+    pub(crate) fn kill(mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        while let Ok(bytes) = self.rx.recv_timeout(Duration::from_millis(100)) {
+            let _ = self.log.write_all(&bytes);
+        }
+        self.vm.cleanup();
+    }
+
     /// Waits up to `timeout` for the VM to exit by itself (the rest of its
     /// output is logged), then stops it.
     pub(crate) fn finish(mut self, timeout: Duration) -> Result<bool> {

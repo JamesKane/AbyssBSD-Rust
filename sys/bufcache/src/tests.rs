@@ -203,17 +203,75 @@ fn a_failed_write_stays_dirty() {
 }
 
 #[test]
-fn a_new_size_rewrites_the_old_buffer() {
+fn a_new_size_keeps_the_bytes() {
     let disk = Disk::new(1 << 20);
+    disk.bytes.lock().unwrap()[20000] = 5;
     let c = cache(&disk, Limits::default());
     let s = s();
     c.write(&s, 0, 4096, Fill::Overwrite, WriteMode::Delayed, |d| {
         d[4000] = 8
     })
     .unwrap();
-    // A block-sized read of the same spot sees the data written back.
-    assert_eq!(c.read(&s, 0, 32768, |d| d[4000]), Ok(8));
+    // A fragment grown in place: what it held stays, still dirty, and
+    // the new tail comes from the disk.
+    assert_eq!(c.read(&s, 0, 32768, |d| (d[4000], d[20000])), Ok((8, 5)));
+    assert_eq!(disk.at(4000), 0);
+    assert_eq!(c.usage(), (32768, 32768));
+    c.sync(&s).unwrap();
     assert_eq!(disk.at(4000), 8);
+}
+
+/// A hook that rolls back byte 0 of the buffer at 0 while `hold` is set.
+struct Holder {
+    hold: core::sync::atomic::AtomicBool,
+    done: AtomicUsize,
+}
+
+impl WriteHook for Holder {
+    fn start(&self, _s: &Sleepable, offset: u64, bytes: &[u8]) -> Option<Vec<u8>> {
+        if offset != 0 || !self.hold.load(Ordering::Relaxed) {
+            return None;
+        }
+        let mut copy = bytes.to_vec();
+        copy[0] = 0;
+        Some(copy)
+    }
+
+    fn done(&self, _s: &Sleepable, _offset: u64, ok: bool) {
+        assert!(ok);
+        self.done.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[test]
+fn rolled_back_writes_stay_dirty() {
+    let disk = Disk::new(1 << 20);
+    let c = cache(&disk, Limits::default());
+    let hook = Arc::new(Holder {
+        hold: core::sync::atomic::AtomicBool::new(true),
+        done: AtomicUsize::new(0),
+    });
+    c.set_hook(hook.clone());
+    let s = s();
+    c.write(&s, 0, 4096, Fill::Overwrite, WriteMode::Delayed, |d| {
+        d[0] = 1;
+        d[1] = 2;
+    })
+    .unwrap();
+    c.sync(&s).unwrap();
+    // The rest went; the rolled-back byte did not, and the buffer is
+    // still dirty for it (and nobody sees the rollback).
+    assert_eq!((disk.at(0), disk.at(1)), (0, 2));
+    assert!(c.any_dirty());
+    assert_eq!(c.read(&s, 0, 4096, |d| d[0]), Ok(1));
+    hook.hold.store(false, Ordering::Relaxed);
+    assert_eq!(c.write_buffer(&s, 0), Ok(true));
+    assert_eq!(disk.at(0), 1);
+    assert!(!c.any_dirty());
+    assert_eq!(hook.done.load(Ordering::Relaxed), 2);
+    // A clean buffer is not written again.
+    assert_eq!(c.write_buffer(&s, 0), Ok(true));
+    assert_eq!(hook.done.load(Ordering::Relaxed), 2);
 }
 
 #[test]

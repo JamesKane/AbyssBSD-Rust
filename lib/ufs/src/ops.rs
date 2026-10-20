@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! File operations over the engine: making, linking, unlinking, and
 //! renaming, with the link counts and the write order FreeBSD's UFS keeps
-//! without soft updates (sys/ufs/ufs/ufs_vnops.c: `ufs_makeinode`,
-//! `ufs_mkdir`, `ufs_link`, `ufs_remove`, `ufs_rmdir`, `ufs_rename`).
+//! (sys/ufs/ufs/ufs_vnops.c: `ufs_makeinode`, `ufs_mkdir`, `ufs_link`,
+//! `ufs_remove`, `ufs_rmdir`, `ufs_rename`).
 //!
-//! An inode is written (now) before a directory entry names it, and a
-//! directory entry is removed before the link count drops, so a crash
-//! leaves at worst a count too high or an inode no entry names, which
-//! fsck repairs. The caller holds the vnode locks and has checked
+//! An inode is written before a directory entry names it, and a directory
+//! entry is removed before the link count drops, so a crash leaves at
+//! worst a count too high or an inode no entry names, which fsck repairs.
+//! Without soft updates the first writes go now; with them everything is
+//! delayed, the entry waiting for the inode, and the count on the disk
+//! dropping as deferred work once the removal is out ([`Inode::effnlink`]
+//! drops at once). The caller holds the vnode locks and has checked
 //! permissions and names; each operation takes the inodes it changes by
 //! `&mut` and leaves them written.
 
@@ -15,10 +18,29 @@ use alloc::vec::Vec;
 
 use crate::dir::{DIRBLKSIZ, dtype_of};
 use crate::inode::{Inode, Kind, Timestamp};
+use crate::softdep::{Deps, Gone, Id, Removal, Work};
 use crate::{BlockIo, Error, Mode, Reserve, Summary, Ufs, idx64, len64};
 
 /// FreeBSD's `UFS_LINK_MAX`.
 pub const LINK_MAX: u16 = 32767;
+
+/// How deferred work reaches in-core inodes and the summary, which the
+/// caller keeps behind its locks.
+pub trait WorkEnv<B: BlockIo> {
+    /// Calls `f` with inode `ino` (the in-core one if any, which stays
+    /// current), whether something still uses it, and the summary.
+    fn with_inode(
+        &mut self,
+        ino: u32,
+        f: &mut dyn FnMut(&mut Inode, bool, &mut Summary) -> Result<(), Error>,
+    ) -> Result<(), Error>;
+
+    /// Calls `f` with the summary.
+    fn with_summary(
+        &mut self,
+        f: &mut dyn FnMut(&mut Summary) -> Result<(), Error>,
+    ) -> Result<(), Error>;
+}
 
 /// What a new file is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,15 +101,19 @@ impl<B: BlockIo> Ufs<B> {
         }
         let mode = kind.ifmt() | (who.perm & 0o7777);
         let ino = self.valloc(cx, sum, dir_ino, dir, mode, who.random)?;
-        let made = self.make_inode(cx, sum, ino, dir_ino, dir, mode, kind, who);
+        // With soft updates the entry waits for the inode (and for a
+        // directory, its first block and its parent's link).
+        let entry = self.soft(cx, |d| d.new_entry(ino));
+        let made = self.make_inode(cx, sum, ino, dir_ino, dir, mode, kind, who, entry);
         let ip = match made {
             Ok(ip) => ip,
             Err(e) => {
-                let _ = self.freefile(cx, sum, ino, mode);
+                self.cancel_entry(cx, entry);
+                let _ = self.release_new(cx, sum, ino, mode, who.reserve);
                 return Err(e);
             }
         };
-        if let Err(e) = self.dir_enter(
+        let entered = self.dir_enter(
             cx,
             sum,
             dir_ino,
@@ -96,14 +122,19 @@ impl<B: BlockIo> Ufs<B> {
             ino,
             dtype_of(mode),
             who.reserve,
-        ) {
+            entry,
+        );
+        if let Err(e) = entered {
             // Undo: the new inode goes, and so does the parent's link.
+            self.cancel_entry(cx, entry);
             let mut ip = ip;
             if is_dir {
                 dir.nlink -= 1;
-                let _ = self.write_inode(cx, dir_ino, dir, Mode::Sync);
+                dir.effnlink -= 1;
+                let _ = self.write_inode(cx, dir_ino, dir, self.ordered());
             }
             ip.nlink = 0;
+            ip.effnlink = 0;
             let _ = self.free_inode(cx, sum, ino, &mut ip, who.reserve);
             return Err(e);
         }
@@ -113,8 +144,35 @@ impl<B: BlockIo> Ufs<B> {
         Ok((ino, ip))
     }
 
+    /// Forgets an entry never made.
+    fn cancel_entry(&self, cx: &B::Cx, entry: Option<Id>) {
+        if let Some(id) = entry {
+            self.soft(cx, |d| d.cancel(id));
+        }
+    }
+
+    /// Gives back new inode `ino` (of `mode`) after a failed make.
+    fn release_new(
+        &self,
+        cx: &B::Cx,
+        sum: &mut Summary,
+        ino: u32,
+        mode: u16,
+        reserve: Reserve,
+    ) -> Result<(), Error> {
+        if !self.soft {
+            return self.freefile(cx, sum, ino, mode);
+        }
+        let mut ip = self.inode(cx, ino)?;
+        ip.mode = mode;
+        ip.nlink = 0;
+        ip.effnlink = 0;
+        self.free_inode(cx, sum, ino, &mut ip, reserve)
+    }
+
     /// Fills in, and writes, the new inode `ino` (and for a directory its
-    /// first block and its parent's link).
+    /// first block and its parent's link). With soft updates, `entry` (the
+    /// name to come) waits for each.
     #[allow(clippy::too_many_arguments)]
     fn make_inode(
         &self,
@@ -126,6 +184,7 @@ impl<B: BlockIo> Ufs<B> {
         mode: u16,
         kind: NewKind<'_>,
         who: &Maker,
+        entry: Option<Id>,
     ) -> Result<Inode, Error> {
         let mut ip = self.inode(cx, ino)?;
         if ip.mode != 0 {
@@ -140,6 +199,7 @@ impl<B: BlockIo> Ufs<B> {
         ip = Inode {
             mode,
             nlink: 1,
+            effnlink: 1,
             uid: who.uid,
             gid: who.gid,
             blksize: 0,
@@ -162,19 +222,35 @@ impl<B: BlockIo> Ufs<B> {
         ip.raw[84..88].fill(0);
         ip.raw[96..112].fill(0);
         ip.raw[232..240].fill(0);
+        let wait_copy = |of: u32| {
+            if let Some(id) = entry {
+                self.soft(cx, |d| d.wait_copy(id, of));
+            }
+        };
+        wait_copy(ino);
         match kind {
             NewKind::Directory => {
                 ip.nlink = 2;
+                ip.effnlink = 2;
                 ip.dirdepth = dir.dirdepth + 1;
                 // The parent's link first, then the new directory's block.
-                self.write_inode(cx, ino, &ip, Mode::Sync)?;
-                dir.nlink += 1;
-                self.write_inode(cx, dir_ino, dir, Mode::Sync)?;
-                if let Err(e) = self.dir_init(cx, sum, ino, &mut ip, dir_ino, who.reserve) {
-                    dir.nlink -= 1;
-                    let _ = self.write_inode(cx, dir_ino, dir, Mode::Sync);
-                    let _ = self.truncate(cx, sum, ino, &mut ip, 0, who.reserve, true);
-                    return Err(e);
+                self.write_inode(cx, ino, &ip, self.ordered())?;
+                dir.link_up();
+                wait_copy(dir_ino);
+                self.write_inode(cx, dir_ino, dir, self.ordered())?;
+                match self.dir_init(cx, sum, ino, &mut ip, dir_ino, who.reserve) {
+                    Ok(addr) => {
+                        if let Some(id) = entry {
+                            self.soft(cx, |d| d.wait_block(id, addr));
+                        }
+                    }
+                    Err(e) => {
+                        dir.nlink -= 1;
+                        dir.effnlink -= 1;
+                        let _ = self.write_inode(cx, dir_ino, dir, self.ordered());
+                        let _ = self.truncate(cx, sum, ino, &mut ip, 0, who.reserve, true);
+                        return Err(e);
+                    }
                 }
             }
             NewKind::Symlink(target) => {
@@ -190,7 +266,7 @@ impl<B: BlockIo> Ufs<B> {
             NewKind::Device(rdev) => ip.db[0] = rdev,
             NewKind::Regular | NewKind::Fifo | NewKind::Socket => {}
         }
-        self.write_inode(cx, ino, &ip, Mode::Sync)?;
+        self.write_inode(cx, ino, &ip, self.ordered())?;
         Ok(ip)
     }
 
@@ -251,13 +327,22 @@ impl<B: BlockIo> Ufs<B> {
         if ip.nlink >= LINK_MAX {
             return Err(Error::TooManyLinks);
         }
-        ip.nlink += 1;
+        ip.link_up();
         ip.ctime = now;
-        self.write_inode(cx, ino, ip, Mode::Sync)?;
-        if let Err(e) = self.dir_enter(cx, sum, dir_ino, dir, name, ino, dtype_of(ip.mode), reserve)
-        {
+        let entry = self.new_entry_after_copy(cx, ino);
+        let undo = |ip: &mut Inode| {
+            self.cancel_entry(cx, entry);
             ip.nlink -= 1;
-            let _ = self.write_inode(cx, ino, ip, Mode::Sync);
+            ip.effnlink -= 1;
+            let _ = self.write_inode(cx, ino, ip, self.ordered());
+        };
+        if let Err(e) = self.write_inode(cx, ino, ip, self.ordered()) {
+            undo(ip);
+            return Err(e);
+        }
+        let kind = dtype_of(ip.mode);
+        if let Err(e) = self.dir_enter(cx, sum, dir_ino, dir, name, ino, kind, reserve, entry) {
+            undo(ip);
             return Err(e);
         }
         dir.mtime = now;
@@ -265,10 +350,31 @@ impl<B: BlockIo> Ufs<B> {
         self.write_inode(cx, dir_ino, dir, Mode::Delayed)
     }
 
+    /// With soft updates, `entry` (naming a directory) waits for the next
+    /// copy of its new parent `dir`, whose link for it must be on the disk
+    /// first (fsck counts it against the directory naming it).
+    fn wait_parent_link(&self, cx: &B::Cx, entry: Option<Id>, dir: u32) {
+        if let Some(id) = entry {
+            self.soft(cx, |d| d.wait_copy(id, dir));
+        }
+    }
+
+    /// With soft updates, a new entry naming `ino` that waits for its next
+    /// copy (the caller writes it next).
+    fn new_entry_after_copy(&self, cx: &B::Cx, ino: u32) -> Option<Id> {
+        self.soft(cx, |d| {
+            let id = d.new_entry(ino);
+            d.wait_copy(id, ino);
+            id
+        })
+    }
+
     /// Removes entry `name` (for non-directory `ino`) from directory
     /// `dir_ino` (FreeBSD's `ufs_remove`): the entry goes first, then the
-    /// count drops. At no links, the caller frees the inode once nothing
-    /// uses it ([`Self::free_inode`]).
+    /// count drops (with soft updates, the count on the disk drops once
+    /// the removal is there, and [`Inode::effnlink`] now). At no links,
+    /// the caller frees the inode once nothing uses it
+    /// ([`Self::free_inode`]).
     #[allow(clippy::too_many_arguments)]
     pub fn unlink(
         &self,
@@ -280,19 +386,24 @@ impl<B: BlockIo> Ufs<B> {
         ip: &mut Inode,
         now: Timestamp,
     ) -> Result<(), Error> {
-        self.dir_remove(cx, dir, name)?;
+        self.dir_remove(cx, dir_ino, dir, name, false)?;
         dir.mtime = now;
         dir.ctime = now;
         self.write_inode(cx, dir_ino, dir, Mode::Delayed)?;
-        ip.nlink = ip.nlink.saturating_sub(1);
         ip.ctime = now;
+        ip.effnlink = ip.effnlink.saturating_sub(1);
+        if self.soft {
+            return self.write_inode(cx, ino, ip, Mode::Delayed);
+        }
+        ip.nlink = ip.nlink.saturating_sub(1);
         self.write_inode(cx, ino, ip, Mode::Sync)
     }
 
     /// Removes empty directory `ino`, named `name` in `dir_ino` (FreeBSD's
     /// `ufs_rmdir`): the entry goes, the parent loses the child's `..`,
-    /// and the directory's blocks are freed now; the caller frees the
-    /// inode once nothing uses it.
+    /// and the directory's blocks are freed now (with soft updates, the
+    /// counts on the disk drop, and the blocks go, once the removal is
+    /// there); the caller frees the inode once nothing uses it.
     #[allow(clippy::too_many_arguments)]
     pub fn rmdir(
         &self,
@@ -308,20 +419,27 @@ impl<B: BlockIo> Ufs<B> {
         if !self.dir_empty(cx, ip)? {
             return Err(Error::NotEmpty);
         }
-        self.dir_remove(cx, dir, name)?;
-        dir.nlink = dir.nlink.saturating_sub(1);
+        self.dir_remove(cx, dir_ino, dir, name, true)?;
+        dir.effnlink = dir.effnlink.saturating_sub(1);
         dir.mtime = now;
         dir.ctime = now;
-        self.write_inode(cx, dir_ino, dir, Mode::Sync)?;
-        ip.nlink = 0;
+        ip.effnlink = 0;
         ip.ctime = now;
         ip.dirhash = None;
+        if self.soft {
+            self.write_inode(cx, dir_ino, dir, Mode::Delayed)?;
+            return self.write_inode(cx, ino, ip, Mode::Delayed);
+        }
+        dir.nlink = dir.nlink.saturating_sub(1);
+        self.write_inode(cx, dir_ino, dir, Mode::Sync)?;
+        ip.nlink = 0;
         self.truncate(cx, sum, ino, ip, 0, Reserve::Allowed, true)?;
         self.write_inode(cx, ino, ip, Mode::Sync)
     }
 
     /// Frees inode `ino`, which no entry names and nothing uses: its
-    /// blocks, then the inode itself (FreeBSD's `ufs_inactive`).
+    /// blocks, then the inode itself (FreeBSD's `ufs_inactive`). With soft
+    /// updates both wait for the inode to be on the disk without them.
     pub fn free_inode(
         &self,
         cx: &B::Cx,
@@ -343,6 +461,15 @@ impl<B: BlockIo> Ufs<B> {
         ip.dirhash = None;
         ip.db = [0; 12];
         ip.ib = [0; crate::NIADDR];
+        if let Some(id) = self.soft(cx, |d| {
+            let id = d.defer(Work::FreeFile { ino, mode });
+            d.wait_copy(id, ino);
+            id
+        }) {
+            let r = self.write_inode(cx, ino, ip, Mode::Delayed);
+            self.soft(cx, |d| d.arm(id));
+            return r;
+        }
         self.write_inode(cx, ino, ip, Mode::Sync)?;
         self.freefile(cx, sum, ino, mode)
     }
@@ -354,7 +481,8 @@ impl<B: BlockIo> Ufs<B> {
     /// the new entry is made; the old entry goes; a moved directory's `..`
     /// points at its new parent. `to_dir` is `None` for a rename within
     /// `from_dir`. A replaced target's count drops; the caller frees it at
-    /// no links once nothing uses it.
+    /// no links once nothing uses it. With soft updates the counts on the
+    /// disk drop once the entries that held the links are gone there.
     #[allow(clippy::too_many_arguments)]
     pub fn rename(
         &self,
@@ -375,17 +503,33 @@ impl<B: BlockIo> Ufs<B> {
         if ip.nlink >= LINK_MAX {
             return Err(Error::TooManyLinks);
         }
+        let ordered = self.ordered();
         // Linked twice for a while.
-        ip.nlink += 1;
+        ip.link_up();
         ip.ctime = now;
-        self.write_inode(cx, ino, ip, Mode::Sync)?;
-        let kind = dtype_of(ip.mode);
+        let entry = self.new_entry_after_copy(cx, ino);
+        // A directory's new name, like its first, waits for its first block
+        // to be on the disk (fsck refuses a named empty directory).
+        if is_dir && let Some(id) = entry {
+            let first = ip.db[0];
+            self.soft(cx, |d| d.wait_block(id, first));
+        }
         let undo = |this: &Self, ip: &mut Inode| {
+            this.cancel_entry(cx, entry);
             ip.nlink -= 1;
-            let _ = this.write_inode(cx, ino, ip, Mode::Sync);
+            ip.effnlink -= 1;
+            let _ = this.write_inode(cx, ino, ip, ordered);
         };
+        if let Err(e) = self.write_inode(cx, ino, ip, ordered) {
+            undo(self, ip);
+            return Err(e);
+        }
+        let kind = dtype_of(ip.mode);
         // The target directory: the other one, or this one.
         let moved = to_dir.is_some();
+        // A directory moved in gets `..` naming its new parent: with soft
+        // updates that change waits for the parent's new link.
+        let mut dotdot = None;
         {
             let (tdir_ino, tdir): (u32, &mut Inode) = match &mut to_dir {
                 Some((i, d)) => (*i, &mut **d),
@@ -393,22 +537,64 @@ impl<B: BlockIo> Ufs<B> {
             };
             match target {
                 Some((tino, tip)) => {
-                    if let Err(e) = self.dir_rewrite(cx, tdir, to_name, ino, kind) {
+                    let tdir_target = tip.kind() == Kind::Directory;
+                    // A directory replaced loses its links, and so does
+                    // the target directory the one its `..` held. A
+                    // directory moved in takes that link over: without
+                    // soft updates in place, as FreeBSD does; with them,
+                    // as a link of its own first, so the disk never shows
+                    // more `..` entries than links.
+                    let gone = if tdir_target {
+                        Gone::Dir(tdir_ino)
+                    } else {
+                        Gone::Link
+                    };
+                    if is_dir && moved && self.soft {
+                        tdir.link_up();
+                        dotdot = self.new_entry_after_copy(cx, tdir_ino);
+                        self.wait_parent_link(cx, entry, tdir_ino);
+                        self.write_inode(cx, tdir_ino, tdir, ordered)?;
+                    }
+                    let rewritten = self.dir_rewrite(
+                        cx,
+                        tdir_ino,
+                        tdir,
+                        to_name,
+                        ino,
+                        kind,
+                        entry,
+                        gone,
+                        &Removal::default(),
+                    );
+                    if let Err(e) = rewritten {
                         undo(self, ip);
                         return Err(e);
                     }
                     tip.ctime = now;
-                    if tip.kind() == Kind::Directory {
-                        // The replaced directory's `..` no longer counts in
-                        // its parent; it is emptied now.
-                        tip.nlink = 0;
+                    if tdir_target {
+                        tip.effnlink = 0;
                         tip.dirhash = None;
-                        tdir.nlink = tdir.nlink.saturating_sub(1);
-                        self.truncate(cx, sum, tino, tip, 0, reserve, true)?;
+                        if !moved || self.soft {
+                            tdir.effnlink = tdir.effnlink.saturating_sub(1);
+                        }
                     } else {
-                        tip.nlink = tip.nlink.saturating_sub(1);
+                        tip.effnlink = tip.effnlink.saturating_sub(1);
                     }
-                    self.write_inode(cx, tino, tip, Mode::Sync)?;
+                    if self.soft {
+                        self.write_inode(cx, tino, tip, Mode::Delayed)?;
+                    } else {
+                        if tdir_target {
+                            // Emptied now.
+                            tip.nlink = 0;
+                            if !moved {
+                                tdir.nlink = tdir.nlink.saturating_sub(1);
+                            }
+                            self.truncate(cx, sum, tino, tip, 0, reserve, true)?;
+                        } else {
+                            tip.nlink = tip.nlink.saturating_sub(1);
+                        }
+                        self.write_inode(cx, tino, tip, Mode::Sync)?;
+                    }
                 }
                 None => {
                     if is_dir && moved {
@@ -416,15 +602,19 @@ impl<B: BlockIo> Ufs<B> {
                             undo(self, ip);
                             return Err(Error::TooManyLinks);
                         }
-                        tdir.nlink += 1;
-                        self.write_inode(cx, tdir_ino, tdir, Mode::Sync)?;
+                        tdir.link_up();
+                        dotdot = self.new_entry_after_copy(cx, tdir_ino);
+                        self.wait_parent_link(cx, entry, tdir_ino);
+                        self.write_inode(cx, tdir_ino, tdir, ordered)?;
                     }
                     if let Err(e) =
-                        self.dir_enter(cx, sum, tdir_ino, tdir, to_name, ino, kind, reserve)
+                        self.dir_enter(cx, sum, tdir_ino, tdir, to_name, ino, kind, reserve, entry)
                     {
                         if is_dir && moved {
+                            self.cancel_entry(cx, dotdot);
                             tdir.nlink -= 1;
-                            let _ = self.write_inode(cx, tdir_ino, tdir, Mode::Sync);
+                            tdir.effnlink -= 1;
+                            let _ = self.write_inode(cx, tdir_ino, tdir, ordered);
                         }
                         undo(self, ip);
                         return Err(e);
@@ -433,22 +623,111 @@ impl<B: BlockIo> Ufs<B> {
             }
             tdir.mtime = now;
             tdir.ctime = now;
-            self.write_inode(cx, tdir_ino, tdir, Mode::Sync)?;
+            self.write_inode(cx, tdir_ino, tdir, ordered)?;
         }
         // The old name goes (in the target directory if it is the same,
         // whose inode is `from_dir`, already written).
-        self.dir_remove(cx, from_dir, from_name)?;
-        ip.nlink -= 1;
-        if is_dir && moved {
-            if let Some((tdir_ino, _)) = &to_dir {
-                self.dir_rewrite(cx, ip, b"..", *tdir_ino, 4)?;
-            }
-            from_dir.nlink = from_dir.nlink.saturating_sub(1);
+        let (_, removal) = self.dir_remove(cx, from_dir_ino, from_dir, from_name, false)?;
+        ip.effnlink -= 1;
+        if !self.soft {
+            ip.nlink -= 1;
         }
-        self.write_inode(cx, ino, ip, Mode::Sync)?;
+        if is_dir && moved {
+            if let Some((tdir_ino, tdir)) = &to_dir {
+                ip.dirdepth = tdir.dirdepth + 1;
+                // The old parent loses the link `..` held, once neither
+                // that nor the old entry is on the disk (fsck would give
+                // the directory back to it).
+                let parent = *tdir_ino;
+                self.dir_rewrite(cx, ino, ip, b"..", parent, 4, dotdot, Gone::Link, &removal)?;
+            }
+            from_dir.effnlink = from_dir.effnlink.saturating_sub(1);
+            if !self.soft {
+                from_dir.nlink = from_dir.nlink.saturating_sub(1);
+            }
+        }
+        self.write_inode(cx, ino, ip, ordered)?;
         from_dir.mtime = now;
         from_dir.ctime = now;
-        self.write_inode(cx, from_dir_ino, from_dir, Mode::Sync)
+        self.write_inode(cx, from_dir_ino, from_dir, ordered)
+    }
+
+    // ---- Soft updates' deferred work ----
+
+    /// The work whose waits are over (with soft updates).
+    pub fn take_work(&self, cx: &B::Cx) -> Vec<Work> {
+        self.soft(cx, Deps::take_work).unwrap_or_default()
+    }
+
+    /// Frees fragments whose pointers are gone from the disk.
+    pub fn apply_free(
+        &self,
+        cx: &B::Cx,
+        sum: &mut Summary,
+        list: &[(u64, u64)],
+    ) -> Result<(), Error> {
+        for &(bno, size) in list {
+            self.blkfree(cx, sum, bno, size)?;
+        }
+        Ok(())
+    }
+
+    /// Links of inode `ino` (`ip`) whose entry is gone from the disk drop
+    /// (FreeBSD's `handle_workitem_remove`). A directory removed is
+    /// emptied, and its parent's link drops once that is on the disk. At
+    /// no links, with nothing using it (`in_use` false), it is freed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_unlink(
+        &self,
+        cx: &B::Cx,
+        sum: &mut Summary,
+        ino: u32,
+        ip: &mut Inode,
+        gone: Gone,
+        in_use: bool,
+    ) -> Result<(), Error> {
+        let n = gone.links();
+        ip.nlink = ip.nlink.saturating_sub(n);
+        self.soft(cx, |d| d.nlink_applied(ino, u32::from(n)));
+        if ip.effnlink > ip.nlink {
+            ip.effnlink = ip.nlink;
+        }
+        if let Gone::Dir(parent) = gone {
+            ip.dirhash = None;
+            if ip.mode != 0 {
+                self.truncate(cx, sum, ino, ip, 0, Reserve::Allowed, true)?;
+            }
+            let id = self.soft(cx, |d| {
+                let id = d.defer(Work::Unlink {
+                    ino: parent,
+                    gone: Gone::Link,
+                });
+                d.wait_copy(id, ino);
+                id
+            });
+            let r = self.write_inode(cx, ino, ip, Mode::Delayed);
+            if let Some(id) = id {
+                self.soft(cx, |d| d.arm(id));
+            }
+            r?;
+        }
+        if ip.nlink == 0 && ip.mode != 0 && !in_use {
+            return self.free_inode(cx, sum, ino, ip, Reserve::Allowed);
+        }
+        self.write_inode(cx, ino, ip, Mode::Delayed)
+    }
+
+    /// Does `work` with the inodes and the summary found through `env`.
+    pub fn apply(&self, cx: &B::Cx, work: Work, env: &mut dyn WorkEnv<B>) -> Result<(), Error> {
+        match work {
+            Work::Free(list) => env.with_summary(&mut |sum| self.apply_free(cx, sum, &list)),
+            Work::FreeFile { ino, mode } => {
+                env.with_summary(&mut |sum| self.freefile(cx, sum, ino, mode))
+            }
+            Work::Unlink { ino, gone } => env.with_inode(ino, &mut |ip, in_use, sum| {
+                self.apply_unlink(cx, sum, ino, ip, gone, in_use)
+            }),
+        }
     }
 
     /// The names in directory `dir`, `.` and `..` left out (for tools).

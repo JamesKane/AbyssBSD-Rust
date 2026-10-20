@@ -19,6 +19,7 @@ use alloc::vec::Vec;
 use crate::cg::{self, Cg, Csum};
 use crate::inode::Inode;
 use crate::sb::Totals;
+use crate::softdep::{Deps, Work};
 use crate::{BlockIo, Error, Fill, Kind, Mode, NDADDR, NDIRECT, Ufs, idx, idx64, int32};
 
 /// `FS_OPTSPACE`.
@@ -73,6 +74,45 @@ impl<B: BlockIo> Ufs<B> {
             optim: sb.optim,
             modified: false,
         })
+    }
+
+    /// The summary counted again from each group's header (FreeBSD's
+    /// `softdep_mount`): with soft updates the totals written may lag
+    /// behind the groups after a crash, but a group's counts are written
+    /// with its maps.
+    pub fn summary_from_groups(&self, cx: &B::Cx) -> Result<Summary, Error> {
+        let mut sum = self.load_summary(cx)?;
+        let mut totals = Totals::default();
+        for c in 0..self.sb.ncg {
+            let cs = self.with_group(cx, c, |g| g.cs())?;
+            totals.ndir += i64::from(cs.ndir);
+            totals.nbfree += i64::from(cs.nbfree);
+            totals.nifree += i64::from(cs.nifree);
+            totals.nffree += i64::from(cs.nffree);
+            sum.cs[idx(c)] = cs;
+        }
+        sum.modified = sum.totals != totals;
+        sum.totals = totals;
+        Ok(sum)
+    }
+
+    /// Reads group `cg`'s header, checked, and calls `f` with it.
+    fn with_group<R>(&self, cx: &B::Cx, cg: u32, f: impl FnOnce(&Cg<'_>) -> R) -> Result<R, Error> {
+        let sb = &self.sb;
+        let mut f = Some(f);
+        let mut out = Err(Error::Io);
+        self.io.read(
+            cx,
+            sb.cgtod(cg) * u64::from(sb.fsize),
+            idx(sb.cgsize),
+            &mut |b| {
+                out = cg::verify(sb, b, cg).map(|()| {
+                    let mut copy = b.to_vec();
+                    (f.take().expect("called once"))(&Cg::new(sb, &mut copy))
+                });
+            },
+        )?;
+        out
     }
 
     /// Writes the summary area and the superblock, now, with the clean
@@ -303,12 +343,15 @@ impl<B: BlockIo> Ufs<B> {
         Some(sb.cgbase(cg) + u64::from(bno))
     }
 
-    /// Allocates `size` bytes (a block, or fragments) in group `cg`
-    /// (FreeBSD's `ffs_alloccg`); `rsize` is what the caller keeps.
+    /// Allocates `size` bytes (a block, or fragments) in group `cg` for
+    /// file `owner` (FreeBSD's `ffs_alloccg`); `rsize` is what the caller
+    /// keeps. With soft updates, pointers to it wait for the group.
+    #[allow(clippy::too_many_arguments)]
     fn alloccg(
         &self,
         cx: &B::Cx,
         sum: &mut Summary,
+        owner: u32,
         cg: u32,
         bpref: u64,
         size: u64,
@@ -319,47 +362,112 @@ impl<B: BlockIo> Ufs<B> {
         if sum.cs[idx(cg)].nbfree == 0 && size == bsize {
             return Ok(None);
         }
+        let cg_at = sb.cgtod(cg) * u64::from(sb.fsize);
         self.with_cg(cx, cg, |g| {
-            if g.cs().nbfree == 0 && size == bsize {
-                return None;
+            let got = self.alloccg_in(sum, g, cg, bpref, size, rsize);
+            if let Some(bno) = got {
+                self.soft(cx, |d| d.new_block(bno, 0, rsize, cg_at, owner));
             }
-            if size == bsize {
-                return self.alloccgblk(sum, g, cg, bpref, rsize);
-            }
-            let frags = sb.numfrags(size);
-            let allocsiz = (frags..sb.frag)
-                .find(|&a| g.frsum(a) != 0)
-                .unwrap_or(sb.frag);
-            if allocsiz == sb.frag {
-                if g.cs().nbfree == 0 {
-                    return None;
-                }
-                return self.alloccgblk(sum, g, cg, bpref, rsize);
-            }
-            let start = if bpref != 0 {
-                sb.dtogd(bpref)
-            } else {
-                g.frotor()
-            };
-            let bno = g.mapsearch(start, allocsiz, sb.fpg)?;
-            for i in 0..frags {
-                g.set_frag_free(bno + i, false);
-            }
-            g.add_nffree(-int32(frags));
-            g.add_frsum(allocsiz, -1);
-            if frags != allocsiz {
-                g.add_frsum(allocsiz - frags, 1);
-            }
-            sum.totals.nffree -= i64::from(frags);
-            sum.cs[idx(cg)].nffree -= int32(frags);
-            sum.modified = true;
-            Some(sb.cgbase(cg) + u64::from(bno))
+            got
         })
     }
 
+    /// [`Self::alloccg`] with the group's header held.
+    fn alloccg_in(
+        &self,
+        sum: &mut Summary,
+        g: &mut Cg<'_>,
+        cg: u32,
+        bpref: u64,
+        size: u64,
+        rsize: u64,
+    ) -> Option<u64> {
+        let sb = &self.sb;
+        let bsize = u64::from(sb.bsize);
+        if g.cs().nbfree == 0 && size == bsize {
+            return None;
+        }
+        if size == bsize {
+            return self.alloccgblk(sum, g, cg, bpref, rsize);
+        }
+        let frags = sb.numfrags(size);
+        let allocsiz = (frags..sb.frag)
+            .find(|&a| g.frsum(a) != 0)
+            .unwrap_or(sb.frag);
+        if allocsiz == sb.frag {
+            if g.cs().nbfree == 0 {
+                return None;
+            }
+            return self.alloccgblk(sum, g, cg, bpref, rsize);
+        }
+        let start = if bpref != 0 {
+            sb.dtogd(bpref)
+        } else {
+            g.frotor()
+        };
+        let bno = g.mapsearch(start, allocsiz, sb.fpg)?;
+        for i in 0..frags {
+            g.set_frag_free(bno + i, false);
+        }
+        g.add_nffree(-int32(frags));
+        g.add_frsum(allocsiz, -1);
+        if frags != allocsiz {
+            g.add_frsum(allocsiz - frags, 1);
+        }
+        sum.totals.nffree -= i64::from(frags);
+        sum.cs[idx(cg)].nffree -= int32(frags);
+        sum.modified = true;
+        Some(sb.cgbase(cg) + u64::from(bno))
+    }
+
+    /// With soft updates, out of space: writes what is dirty, so frees
+    /// waiting for it come due, and does them (FreeBSD's
+    /// `softdep_request_cleanup`). Returns whether any were waiting.
+    pub(crate) fn reclaim(&self, cx: &B::Cx, sum: &mut Summary) -> bool {
+        let Some(pending) = self.soft(cx, |d| d.pending_free() != 0 || !d.is_idle()) else {
+            return false;
+        };
+        if !pending {
+            return false;
+        }
+        let _ = self.io.flush(cx);
+        loop {
+            let frees = self.soft(cx, Deps::take_frees).unwrap_or_default();
+            if frees.is_empty() {
+                return true;
+            }
+            for w in frees {
+                let _ = match w {
+                    Work::Free(list) => self.apply_free(cx, sum, &list),
+                    Work::FreeFile { ino, mode } => self.freefile(cx, sum, ino, mode),
+                    Work::Unlink { .. } => Ok(()),
+                };
+            }
+        }
+    }
+
     /// Allocates `size` bytes near `bpref` for file `ino` (FreeBSD's
-    /// `ffs_alloc`); the caller adds them to the inode's block count.
+    /// `ffs_alloc`); the caller adds them to the inode's block count. Out
+    /// of space with soft updates, frees due are done first and it tries
+    /// again.
     pub fn alloc(
+        &self,
+        cx: &B::Cx,
+        sum: &mut Summary,
+        ino: u32,
+        bpref: u64,
+        size: u64,
+        reserve: Reserve,
+    ) -> Result<u64, Error> {
+        match self.alloc_once(cx, sum, ino, bpref, size, reserve) {
+            Err(Error::NoSpace) if self.reclaim(cx, sum) => {
+                self.alloc_once(cx, sum, ino, bpref, size, reserve)
+            }
+            r => r,
+        }
+    }
+
+    fn alloc_once(
         &self,
         cx: &B::Cx,
         sum: &mut Summary,
@@ -384,7 +492,7 @@ impl<B: BlockIo> Ufs<B> {
             sb.dtog(bpref)
         };
         self.hashalloc(cg, bpref, |cg, pref| {
-            self.alloccg(cx, sum, cg, pref, size, size)
+            self.alloccg(cx, sum, ino, cg, pref, size, size)
         })?
         .ok_or(Error::NoSpace)
     }
@@ -392,10 +500,12 @@ impl<B: BlockIo> Ufs<B> {
     /// Extends the fragments at `bprev` from `osize` to `nsize` bytes in
     /// place, if the fragments after them are free (FreeBSD's
     /// `ffs_fragextend`).
+    #[allow(clippy::too_many_arguments)]
     fn fragextend(
         &self,
         cx: &B::Cx,
         sum: &mut Summary,
+        owner: u32,
         cg: u32,
         bprev: u64,
         osize: u64,
@@ -413,6 +523,7 @@ impl<B: BlockIo> Ufs<B> {
             return Ok(false);
         }
         let ofrags = sb.numfrags(osize);
+        let cg_at = sb.cgtod(cg) * u64::from(sb.fsize);
         self.with_cg(cx, cg, |g| {
             let bno = sb.dtogd(bprev);
             if (ofrags..frags).any(|i| !g.frag_free(bno + i)) {
@@ -433,6 +544,7 @@ impl<B: BlockIo> Ufs<B> {
             sum.totals.nffree -= i64::from(n);
             sum.cs[idx(cg)].nffree -= int32(n);
             sum.modified = true;
+            self.soft(cx, |d| d.new_block(bprev, osize, nsize, cg_at, owner));
             true
         })
     }
@@ -441,8 +553,10 @@ impl<B: BlockIo> Ufs<B> {
     /// `nsize` bytes (FreeBSD's `ffs_realloccg`): in place if possible,
     /// else somewhere new, where the old contents are copied (through the
     /// metadata cache for `metadata`, else straight on the disk) and the
-    /// old fragments freed. Returns where they are now; the caller adds
-    /// `nsize - osize` to the inode's block count.
+    /// old fragments freed. Returns where they are now, and old fragments
+    /// to free once the new pointer is on the disk (with soft updates;
+    /// without, they are freed now); the caller adds `nsize - osize` to
+    /// the inode's block count.
     #[allow(clippy::too_many_arguments)]
     pub fn realloccg(
         &self,
@@ -455,7 +569,29 @@ impl<B: BlockIo> Ufs<B> {
         nsize: u64,
         reserve: Reserve,
         metadata: bool,
-    ) -> Result<u64, Error> {
+    ) -> Result<(u64, Option<(u64, u64)>), Error> {
+        let r = self.realloccg_once(cx, sum, ino, bprev, bpref, osize, nsize, reserve, metadata);
+        match r {
+            Err(Error::NoSpace) if self.reclaim(cx, sum) => {
+                self.realloccg_once(cx, sum, ino, bprev, bpref, osize, nsize, reserve, metadata)
+            }
+            r => r,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn realloccg_once(
+        &self,
+        cx: &B::Cx,
+        sum: &mut Summary,
+        ino: u32,
+        bprev: u64,
+        bpref: u64,
+        osize: u64,
+        nsize: u64,
+        reserve: Reserve,
+        metadata: bool,
+    ) -> Result<(u64, Option<(u64, u64)>), Error> {
         let sb = &self.sb;
         if reserve == Reserve::Denied
             && sb.freespace(&sum.totals) - i64::from(sb.numfrags(nsize - osize)) < 0
@@ -463,7 +599,7 @@ impl<B: BlockIo> Ufs<B> {
             return Err(Error::NoSpace);
         }
         let cg = sb.dtog(bprev);
-        if self.fragextend(cx, sum, cg, bprev, osize, nsize)? {
+        if self.fragextend(cx, sum, ino, cg, bprev, osize, nsize)? {
             // The fragments taken read as zeros (FreeBSD zeroes them in
             // the buffer). A directory rewrites its block itself.
             if !metadata {
@@ -471,7 +607,7 @@ impl<B: BlockIo> Ufs<B> {
                 self.io
                     .write_data(cx, bprev * u64::from(sb.fsize) + osize, &zeros)?;
             }
-            return Ok(bprev);
+            return Ok((bprev, None));
         }
         let bpref = if bpref >= sb.size { 0 } else { bpref };
         let dsize = i64::try_from(sb.dsize).unwrap_or(i64::MAX);
@@ -489,7 +625,7 @@ impl<B: BlockIo> Ufs<B> {
         };
         let bno = self
             .hashalloc(cg, bpref, |cg, pref| {
-                self.alloccg(cx, sum, cg, pref, request, nsize)
+                self.alloccg(cx, sum, ino, cg, pref, request, nsize)
             })?
             .ok_or(Error::NoSpace)?;
         // Move the old contents; the new part reads as zeros.
@@ -504,9 +640,10 @@ impl<B: BlockIo> Ufs<B> {
                 bno * fsize,
                 idx64(nsize),
                 Fill::Zero,
-                Mode::Sync,
+                self.ordered(),
                 &mut |b| {
                     b.copy_from_slice(&data);
+                    self.soft(cx, |d| d.contents(bno, bno * fsize));
                 },
             )?;
         } else {
@@ -514,9 +651,16 @@ impl<B: BlockIo> Ufs<B> {
                 .read_data(cx, bprev * fsize, &mut data[..idx64(osize)])?;
             self.io.write_data(cx, bno * fsize, &data)?;
         }
+        if self.soft {
+            // The old fragments stay until the new pointer is on the disk;
+            // their cached copy is never written again.
+            if metadata {
+                self.io.forget(cx, bprev * fsize, idx64(osize));
+            }
+            return Ok((bno, Some((bprev, osize))));
+        }
         self.blkfree(cx, sum, bprev, osize)?;
-        let _ = ino;
-        Ok(bno)
+        Ok((bno, None))
     }
 
     /// Frees `size` bytes at fragment `bno` (FreeBSD's `ffs_blkfree_cg`),
@@ -656,6 +800,23 @@ impl<B: BlockIo> Ufs<B> {
         mode: u16,
         random: u32,
     ) -> Result<u32, Error> {
+        match self.valloc_once(cx, sum, parent_ino, parent, mode, random) {
+            Err(Error::NoSpace) if self.reclaim(cx, sum) => {
+                self.valloc_once(cx, sum, parent_ino, parent, mode, random)
+            }
+            r => r,
+        }
+    }
+
+    fn valloc_once(
+        &self,
+        cx: &B::Cx,
+        sum: &mut Summary,
+        parent_ino: u32,
+        parent: &Inode,
+        mode: u16,
+        random: u32,
+    ) -> Result<u32, Error> {
         let sb = &self.sb;
         if sum.totals.nifree == 0 {
             return Err(Error::NoSpace);
@@ -746,6 +907,7 @@ impl<B: BlockIo> Ufs<B> {
                 })?;
                 continue;
             }
+            let cg_at = sb.cgtod(cg) * u64::from(sb.fsize);
             self.with_cg(cx, cg, |g| {
                 g.set_irotor(local);
                 g.set_inode_used(local, true);
@@ -753,6 +915,7 @@ impl<B: BlockIo> Ufs<B> {
                 if is_dir {
                     g.add_ndir(1);
                 }
+                self.soft(cx, |d| d.new_inode(cg * sb.ipg + local, cg_at));
             })?;
             sum.totals.nifree -= 1;
             sum.cs[idx(cg)].nifree -= 1;

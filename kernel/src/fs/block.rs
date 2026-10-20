@@ -3,9 +3,42 @@
 //! sleep on the request's completion (docs/VFS.md §8.2).
 
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 
-use bufcache::{BlockDev, BufCache, IoError, Limits};
+use bufcache::{BlockDev, BufCache, IoError, Limits, WriteHook};
 use sched::Sleepable;
+use sched::lock::{LockClass, Mutex};
+use sync::SpinLock;
+use ufs::softdep::Deps;
+
+/// A UFS mount's soft-updates tracker: taken with buffers held, after
+/// them.
+static SOFTDEP: LockClass = LockClass::new("softdep", 390);
+
+/// The soft-updates tracker of a mount, which its buffer cache asks before
+/// and after each write.
+pub(crate) struct SoftDeps(Mutex<Deps>);
+
+impl SoftDeps {
+    pub(crate) fn new(sb: &ufs::Superblock) -> Arc<Self> {
+        Arc::new(Self(Mutex::new(&SOFTDEP, Deps::new(sb))))
+    }
+
+    /// Runs `f` with the tracker locked.
+    pub(crate) fn with<R>(&self, s: &Sleepable, f: impl FnOnce(&mut Deps) -> R) -> R {
+        f(&mut self.0.lock(s))
+    }
+}
+
+impl WriteHook for SoftDeps {
+    fn start(&self, s: &Sleepable, offset: u64, bytes: &[u8]) -> Option<Vec<u8>> {
+        self.0.lock(s).write_start(offset, bytes)
+    }
+
+    fn done(&self, s: &Sleepable, offset: u64, ok: bool) {
+        self.0.lock(s).write_done(offset, ok);
+    }
+}
 
 /// A disk under a buffer cache.
 pub(crate) struct DiskBlocks(pub(crate) Arc<storage::Disk>);
@@ -44,6 +77,8 @@ pub(crate) fn cache(disk: Arc<storage::Disk>, limits: Limits) -> BufCache {
 pub(crate) struct DiskIo {
     pub(crate) cache: BufCache,
     pub(crate) disk: Arc<storage::Disk>,
+    /// With soft updates (UFS), the tracker its writes report to.
+    deps: SpinLock<Option<Arc<SoftDeps>>>,
 }
 
 impl DiskIo {
@@ -51,7 +86,20 @@ impl DiskIo {
         Self {
             cache: cache(Arc::clone(&disk), Limits::default()),
             disk,
+            deps: SpinLock::new(None),
         }
+    }
+
+    /// Writes from now on go through `deps` (soft updates).
+    pub(crate) fn use_deps(&self, deps: &Arc<SoftDeps>) {
+        *self.deps.lock() = Some(Arc::clone(deps));
+        let hook: Arc<dyn WriteHook> = Arc::clone(deps) as Arc<dyn WriteHook>;
+        self.cache.set_hook(hook);
+    }
+
+    /// The soft-updates tracker, if writes go through one.
+    pub(crate) fn deps(&self) -> Option<Arc<SoftDeps>> {
+        self.deps.lock().clone()
     }
 
     /// The sector-aligned span covering `[offset, offset + len)`.
@@ -102,16 +150,29 @@ impl DiskIo {
         Ok(())
     }
 
-    fn write_data(&self, s: &Sleepable, offset: u64, data: &[u8]) -> Result<(), IoError> {
+    /// Writes file data straight to the disk; with soft updates, pointers
+    /// to new blocks it fills may go out then.
+    pub(crate) fn write_data(
+        &self,
+        s: &Sleepable,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<(), IoError> {
         let (start, len) = self.span(offset, data.len());
         if start == offset && len == data.len() {
-            return self.disk.write(s, offset, data).map_err(|_| IoError);
+            self.disk.write(s, offset, data).map_err(|_| IoError)?;
+        } else {
+            // Partial sectors: read, change, write.
+            let mut buf = self.disk.read(s, start, len).map_err(|_| IoError)?;
+            let from = usize::try_from(offset - start).unwrap_or(0);
+            buf[from..from + data.len()].copy_from_slice(data);
+            self.disk.write(s, start, &buf).map_err(|_| IoError)?;
         }
-        // Partial sectors: read, change, write.
-        let mut buf = self.disk.read(s, start, len).map_err(|_| IoError)?;
-        let from = usize::try_from(offset - start).unwrap_or(0);
-        buf[from..from + data.len()].copy_from_slice(data);
-        self.disk.write(s, start, &buf).map_err(|_| IoError)
+        if let Some(d) = self.deps() {
+            let len = u64::try_from(data.len()).unwrap_or(u64::MAX);
+            d.with(s, |d| d.data_written(offset, len));
+        }
+        Ok(())
     }
 }
 
@@ -163,6 +224,16 @@ impl ufs::BlockIo for DiskIo {
 
     fn flush(&self, s: &Sleepable) -> Result<(), ufs::Error> {
         self.cache.sync(s).map_err(|_| ufs::Error::Io)
+    }
+
+    fn deps(&self, s: &Sleepable, f: &mut dyn FnMut(&mut Deps)) -> bool {
+        match DiskIo::deps(self) {
+            Some(d) => {
+                d.with(s, |d| f(d));
+                true
+            }
+            None => false,
+        }
     }
 }
 

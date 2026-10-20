@@ -614,10 +614,16 @@ pub(super) fn nmount(s: &Sleepable, iov: u64, iovcnt: u64, flags: u64) -> SysRes
             let read_only = flags & abi::mount::MNT_RDONLY != 0;
             let force = flags & abi::mount::MNT_FORCE != 0 || get(b"force").is_some();
             let fs = crate::fs::ufs::UfsFs::mount(s, disk, read_only, force)?;
+            // Soft updates follow the file system's flag, as on FreeBSD.
+            let softdep = if fs.soft_updates() {
+                abi::mount::MNT_SOFTDEP
+            } else {
+                0
+            };
             vfs::Mount::new(
                 vfs::MountInfo {
                     type_name: "ufs",
-                    flags: abi::mount::MNT_LOCAL | flags,
+                    flags: abi::mount::MNT_LOCAL | (flags & !abi::mount::MNT_SOFTDEP) | softdep,
                     from: from.strip_suffix(b"\0").unwrap_or(from).to_vec(),
                     io_size: fs.block_size(),
                 },

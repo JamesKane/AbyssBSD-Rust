@@ -63,7 +63,12 @@ pub struct Timestamp {
 pub struct Inode {
     /// Type and permission bits; 0 if unallocated.
     pub mode: u16,
+    /// The link count written to the disk.
     pub nlink: u16,
+    /// The link count everyone sees (FreeBSD's `i_effnlink`): with soft
+    /// updates, a removed name's link goes from [`Self::nlink`] only once
+    /// the removal is on the disk.
+    pub effnlink: u16,
     pub uid: u32,
     pub gid: u32,
     pub blksize: u32,
@@ -143,6 +148,7 @@ impl Inode {
             dirhash: None,
             mode,
             nlink: u16_at(b, off::NLINK),
+            effnlink: u16_at(b, off::NLINK),
             uid: u32_at(b, off::UID),
             gid: u32_at(b, off::GID),
             blksize: u32_at(b, off::BLKSIZE),
@@ -223,6 +229,12 @@ impl Inode {
         b
     }
 
+    /// Takes a new link (both counts).
+    pub fn link_up(&mut self) {
+        self.nlink += 1;
+        self.effnlink += 1;
+    }
+
     /// Sets a short symbolic link's target into the address fields.
     pub fn set_shortlink(&mut self, target: &[u8]) {
         let mut bytes = [0u8; 120];
@@ -276,5 +288,68 @@ impl Inode {
     #[must_use]
     pub fn rdev(&self) -> u64 {
         self.db[0]
+    }
+}
+
+/// Editing an encoded inode in place, for soft updates' rollbacks.
+pub(crate) mod raw {
+    use super::{SIZE, off, u64_at};
+    use crc::crc32c;
+
+    /// Zeroes inode bytes `b` but the generation number: an allocated
+    /// inode whose group is not on the disk yet.
+    pub(crate) fn zero_but_generation(b: &mut [u8]) {
+        let mut generation = [0; 4];
+        generation.copy_from_slice(&b[off::GEN..off::GEN + 4]);
+        b[..SIZE].fill(0);
+        b[off::GEN..off::GEN + 4].copy_from_slice(&generation);
+    }
+
+    /// Block pointer `index`: a direct block (0 to 11) or an indirect
+    /// root (12 to 14).
+    pub(crate) fn pointer(b: &[u8], index: usize) -> u64 {
+        u64_at(b, pointer_at(index))
+    }
+
+    pub(crate) fn set_pointer(b: &mut [u8], index: usize, v: u64) {
+        let at = pointer_at(index);
+        b[at..at + 8].copy_from_slice(&v.to_le_bytes());
+    }
+
+    fn pointer_at(index: usize) -> usize {
+        if index < crate::NDIRECT {
+            off::DB + index * 8
+        } else {
+            off::IB + (index - crate::NDIRECT) * 8
+        }
+    }
+
+    /// Whether inode bytes `b` hold block pointers (a regular file, a
+    /// directory, or a symbolic link too long for the inode).
+    pub(crate) fn has_blocks(b: &[u8], maxsymlinklen: u32) -> bool {
+        let mode = u16::from_le_bytes([b[off::MODE], b[off::MODE + 1]]);
+        match mode & 0o170_000 {
+            0o100_000 | 0o040_000 => true,
+            0o120_000 => size(b) >= u64::from(maxsymlinklen),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn size(b: &[u8]) -> u64 {
+        u64_at(b, off::SIZE)
+    }
+
+    pub(crate) fn set_size(b: &mut [u8], v: u64) {
+        b[off::SIZE..off::SIZE + 8].copy_from_slice(&v.to_le_bytes());
+    }
+
+    /// Recomputes the check-hash of allocated inode bytes `b`, if kept.
+    pub(crate) fn rehash(b: &mut [u8], keep: bool) {
+        b[off::CKHASH..off::CKHASH + 4].fill(0);
+        let mode = u16::from_le_bytes([b[off::MODE], b[off::MODE + 1]]);
+        if keep && mode != 0 {
+            let crc = crc32c(!0, &b[..SIZE]);
+            b[off::CKHASH..off::CKHASH + 4].copy_from_slice(&crc.to_le_bytes());
+        }
     }
 }

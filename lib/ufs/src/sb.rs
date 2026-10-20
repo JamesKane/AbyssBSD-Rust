@@ -22,7 +22,7 @@ const MAXSYMLINKLEN: u32 = 120;
 /// `sizeof(struct fs)`.
 const FS_SIZE: u32 = 1376;
 const MINBSIZE: u32 = 4096;
-const MAXBSIZE: u32 = 65536;
+pub(crate) const MAXBSIZE: u32 = 65536;
 const MAXFRAG: u32 = 8;
 const FS_MAXCONTIG: u32 = 16;
 
@@ -438,6 +438,7 @@ impl Superblock {
         b[off::OPTIM..off::OPTIM + 4].copy_from_slice(&optim.to_le_bytes());
         b[off::CLEAN] = u8::from(clean);
         b[off::FMOD] = 0;
+        b[off::FLAGS..off::FLAGS + 4].copy_from_slice(&self.flags.to_le_bytes());
         if self.metackhash & CK_SUPERBLOCK != 0 {
             b[off::CKHASH..off::CKHASH + 4].fill(0);
             let crc = crc32c(!0, &b[..crate::idx(self.sbsize)]);

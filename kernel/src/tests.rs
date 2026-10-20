@@ -2974,18 +2974,47 @@ mod user_memory {
         /// FreeBSD's `fsck_ffs -f -n` finds nothing wrong; mounted again,
         /// it holds what was written.
         fn ufs_read_write_survives_fsck() {
-            use crate::proc::Process;
-            let s = cx();
-            // Its own 32 MiB virtio disk, whatever its unit now.
-            let Some(scratch) = find_disk(&s, "vtbd", |_, d| d.bytes() == 32 << 20) else {
-                kprintln!("ufs: no read-write test disk; skipped");
-                return;
-            };
-            let dev = alloc::format!("/dev/{}", scratch.name());
-            kprintln!("ufs: read-write on {dev}");
-            let fsx = read_whole(&s, b"/usr/tests/fsx/fsx").is_some();
-            let script_text = alloc::string::String::from("newfs DEV > /dev/null || exit 1; \
-                mount -t ufs DEV /mnt || exit 2; cd /mnt || exit 2; \
+            ufs_read_write(false);
+        }
+    }
+
+    ktest! {
+        /// The same with soft updates (`newfs -U`): the mount says
+        /// "soft-updates", space freed comes back, and `fsck_ffs -f -n`
+        /// finds nothing wrong after unmounting.
+        fn ufs_soft_updates_survive_fsck() {
+            ufs_read_write(true);
+        }
+    }
+
+    /// The read-write workload on the 32 MiB test disk, made by FreeBSD's
+    /// `newfs` (with soft updates if `soft`).
+    fn ufs_read_write(soft: bool) {
+        use crate::proc::Process;
+        let s = cx();
+        // Its own 32 MiB virtio disk, whatever its unit now.
+        let Some(scratch) = find_disk(&s, "vtbd", |_, d| d.bytes() == 32 << 20) else {
+            kprintln!("ufs: no read-write test disk; skipped");
+            return;
+        };
+        let dev = alloc::format!("/dev/{}", scratch.name());
+        let what = if soft { " with soft updates" } else { "" };
+        kprintln!("ufs: read-write on {dev}{what}");
+        let fsx = read_whole(&s, b"/usr/tests/fsx/fsx").is_some();
+        // With soft updates: the flag shows, and a tree removed gives
+        // its space back (once the syncer has done the frees).
+        let soft_checks = if soft {
+            "[ -n \"$(mount | sed -n '/soft-updates/p')\" ] || exit 15; \
+                 set -- $(df -k /mnt | tail -1); before=$4; \
+                 mkdir sp && dd if=/rescue/rescue of=sp/a bs=64k count=60 2>/dev/null && cp sp/a sp/b && \
+                 rm -r sp && sync && sleep 3 && \
+                 set -- $(df -k /mnt | tail -1); after=$4; \
+                 [ $((before - after)) -lt 512 ] || exit 16; "
+        } else {
+            ""
+        };
+        let script_text = alloc::string::String::from("newfs NEWFS DEV > /dev/null || exit 1; \
+                mount -t ufs DEV /mnt || exit 2; cd /mnt || exit 2; SOFT \
                 mkdir -p a/b c && echo hello > a/b/f && dd if=/rescue/rescue of=big bs=64k count=80 2>/dev/null && \
                 ln a/b/f hard && ln -s a/b/f soft && mv big c/big && \
                 [ \"$(cat soft)\" = hello ] && [ \"$(cat hard)\" = hello ] || exit 3; \
@@ -3000,36 +3029,48 @@ mod user_memory {
                 mount -t ufs -o ro DEV /mnt || exit 12; \
                 [ \"$(cat /mnt/hard)\" = hello ] && \
                 [ \"$(md5 -q /mnt/c/big)\" = \"$(dd if=/rescue/rescue bs=64k count=80 2>/dev/null | md5 -q)\" ] || exit 13; \
-                umount /mnt || exit 14; exit 7").replace("DEV", &dev);
-            let p = Process::spawn(
-                &s,
-                b"/rescue/sh",
-                &[b"sh", b"-c", script_text.as_bytes()],
-                &[b"PATH=/rescue", b"HOME=/"],
-                Some(hal::cpu_id()),
-            )
-            .unwrap();
-            let exit = p.wait(&s);
-            if exit != crate::proc::Exit::Code(7) {
-                for f in [&b"/tmp/fsck.out"[..], b"/tmp/fsx.out"] {
-                    if let Some(out) = read_whole(&s, f) {
-                        kprintln!("{}:\n{}", core::str::from_utf8(f).unwrap_or("?"), alloc::string::String::from_utf8_lossy(&out));
-                    }
+                umount /mnt || exit 14; exit 7")
+                .replace("SOFT", soft_checks)
+                .replace("NEWFS", if soft { "-U" } else { "-u" })
+                .replace("DEV", &dev);
+        let p = Process::spawn(
+            &s,
+            b"/rescue/sh",
+            &[b"sh", b"-c", script_text.as_bytes()],
+            &[b"PATH=/rescue", b"HOME=/"],
+            Some(hal::cpu_id()),
+        )
+        .unwrap();
+        let exit = p.wait(&s);
+        if exit != crate::proc::Exit::Code(7) {
+            for f in [&b"/tmp/fsck.out"[..], b"/tmp/fsx.out"] {
+                if let Some(out) = read_whole(&s, f) {
+                    kprintln!(
+                        "{}:\n{}",
+                        core::str::from_utf8(f).unwrap_or("?"),
+                        alloc::string::String::from_utf8_lossy(&out)
+                    );
                 }
             }
-            assert_eq!(exit, crate::proc::Exit::Code(7));
-            let fsck = read_whole(&s, b"/tmp/fsck.out").unwrap_or_default();
-            let text = alloc::string::String::from_utf8_lossy(&fsck);
-            let questions: alloc::vec::Vec<&str> = text
-                .lines()
-                .filter(|l| l.contains('?') && !l.contains("CONTINUE?"))
-                .collect();
-            assert!(questions.is_empty(), "fsck_ffs asked: {questions:?}\n{text}");
-            kprintln!("ufs: read-write on {dev} is fsck clean{}", if fsx { ", fsx included" } else { "" });
-            for f in [&b"/tmp/fsck.out"[..], b"/tmp/fsx.out"] {
-                let _ = crate::fs::parent_of(&s, &p, crate::fs::At::Cwd, f, false)
-                    .and_then(|d| vfs::ops::remove(&s, &d.dir, &d.name, crate::fs::cred(), false));
-            }
+        }
+        assert_eq!(exit, crate::proc::Exit::Code(7));
+        let fsck = read_whole(&s, b"/tmp/fsck.out").unwrap_or_default();
+        let text = alloc::string::String::from_utf8_lossy(&fsck);
+        let questions: alloc::vec::Vec<&str> = text
+            .lines()
+            .filter(|l| l.contains('?') && !l.contains("CONTINUE?"))
+            .collect();
+        assert!(
+            questions.is_empty(),
+            "fsck_ffs asked: {questions:?}\n{text}"
+        );
+        kprintln!(
+            "ufs: read-write on {dev}{what} is fsck clean{}",
+            if fsx { ", fsx included" } else { "" }
+        );
+        for f in [&b"/tmp/fsck.out"[..], b"/tmp/fsx.out"] {
+            let _ = crate::fs::parent_of(&s, &p, crate::fs::At::Cwd, f, false)
+                .and_then(|d| vfs::ops::remove(&s, &d.dir, &d.name, crate::fs::cred(), false));
         }
     }
 

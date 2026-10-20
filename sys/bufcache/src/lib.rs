@@ -19,8 +19,14 @@
 //! buffers nobody holds are evicted, least recently used first, past the
 //! cache's size limit.
 //!
+//! A file system that orders its metadata writes (UFS with soft updates)
+//! gives the cache a [`WriteHook`]: every write of a buffer asks it first,
+//! and it may hand back a copy with changes that must not reach the disk
+//! yet rolled back (FreeBSD's `initiate_write` dependency hooks). Such a
+//! buffer stays dirty after the write, for the rolled-back changes.
+//!
 //! A buffer's lock is sleepable and taken under vnode locks, before any
-//! of the disk's own.
+//! of the disk's own (and before a hook's).
 //!
 //! Behavior reference: sys/kern/vfs_bio.c (the interface and the
 //! watermarks, not its implementation).
@@ -54,6 +60,17 @@ pub trait BlockDev: Send + Sync {
     fn write(&self, s: &Sleepable, offset: u64, buf: &[u8]) -> Result<(), IoError>;
     /// Makes earlier writes durable.
     fn flush(&self, s: &Sleepable) -> Result<(), IoError>;
+}
+
+/// What a file system ordering its writes learns of each buffer write,
+/// with the buffer's lock held throughout.
+pub trait WriteHook: Send + Sync {
+    /// A write of the buffer at `offset` holding `bytes` begins: the bytes
+    /// to write instead, if some changes in them may not reach the disk
+    /// yet.
+    fn start(&self, s: &Sleepable, offset: u64, bytes: &[u8]) -> Option<Vec<u8>>;
+    /// That write ended; `ok` if the device took it.
+    fn done(&self, s: &Sleepable, offset: u64, ok: bool);
 }
 
 /// The largest buffer (`MAXBSIZE`).
@@ -112,6 +129,7 @@ pub struct BufCache {
     ticks: AtomicU64,
     /// Nanoseconds since some start, for dirtying times.
     clock: fn() -> u64,
+    hook: SpinLock<Option<Arc<dyn WriteHook>>>,
 }
 
 impl core::fmt::Debug for BufCache {
@@ -155,7 +173,38 @@ impl BufCache {
             dirty: AtomicUsize::new(0),
             ticks: AtomicU64::new(0),
             clock,
+            hook: SpinLock::new(None),
         }
+    }
+
+    /// Has every write from now on go through `hook`.
+    pub fn set_hook(&self, hook: Arc<dyn WriteHook>) {
+        *self.hook.lock() = Some(hook);
+    }
+
+    /// Writes held buffer `d` at `offset` (dirty or not), through the
+    /// hook: clean afterwards, unless the hook rolled something back or
+    /// the device failed.
+    fn write_out(&self, s: &Sleepable, offset: u64, d: &mut Data) -> Result<(), IoError> {
+        let hook = self.hook.lock().clone();
+        let rolled = hook.as_ref().and_then(|h| h.start(s, offset, &d.bytes));
+        let r = self
+            .dev
+            .write(s, offset, rolled.as_deref().unwrap_or(&d.bytes));
+        if let Some(h) = &hook {
+            h.done(s, offset, r.is_ok());
+        }
+        if r.is_ok() && rolled.is_none() {
+            if d.dirty.take().is_some() {
+                self.dirty.fetch_sub(d.bytes.len(), Ordering::Relaxed);
+            }
+        } else if d.dirty.is_none() {
+            // What did not reach the disk keeps it dirty; a failed write
+            // is retried later.
+            d.dirty = Some((self.clock)());
+            self.dirty.fetch_add(d.bytes.len(), Ordering::Relaxed);
+        }
+        r
     }
 
     #[must_use]
@@ -193,8 +242,8 @@ impl BufCache {
     }
 
     /// The buffer at `offset` of `size` bytes, held while `f` runs: found,
-    /// or made (its bytes not read). A held buffer of another size is
-    /// written back if dirty and made again at this size.
+    /// or made (its bytes not read). A cached buffer of another size takes
+    /// the new size, keeping its bytes.
     fn with<R>(
         &self,
         s: &Sleepable,
@@ -238,15 +287,23 @@ impl BufCache {
                 continue;
             }
             if data.bytes.len() != size {
-                if data.dirty.is_some() {
-                    self.dev.write(s, offset, &data.bytes)?;
-                    self.dirty.fetch_sub(data.bytes.len(), Ordering::Relaxed);
-                    data.dirty = None;
+                // A fragment grown or shrunk in place: what it holds stays
+                // (dirty or not, rolled-back changes included), and a
+                // grown tail comes from the device.
+                let old = data.bytes.len();
+                if data.valid && size > old {
+                    let mut tail = alloc::vec![0; size - old];
+                    self.dev.read(s, offset + old as u64, &mut tail)?;
+                    data.bytes.extend_from_slice(&tail);
+                } else {
+                    data.bytes.resize(size, 0);
                 }
-                self.bytes.fetch_sub(data.bytes.len(), Ordering::Relaxed);
+                self.bytes.fetch_sub(old, Ordering::Relaxed);
                 self.bytes.fetch_add(size, Ordering::Relaxed);
-                data.bytes = alloc::vec![0; size];
-                data.valid = false;
+                if data.dirty.is_some() {
+                    self.dirty.fetch_sub(old, Ordering::Relaxed);
+                    self.dirty.fetch_add(size, Ordering::Relaxed);
+                }
             }
             buf.used.store(self.tick(), Ordering::Relaxed);
             let r = f(&mut data);
@@ -291,12 +348,7 @@ impl BufCache {
             }
             let r = f(&mut d.bytes);
             match mode {
-                WriteMode::Now => {
-                    self.dev.write(s, offset, &d.bytes)?;
-                    if d.dirty.take().is_some() {
-                        self.dirty.fetch_sub(d.bytes.len(), Ordering::Relaxed);
-                    }
-                }
+                WriteMode::Now => self.write_out(s, offset, d)?,
                 WriteMode::Delayed => {
                     if d.dirty.is_none() {
                         d.dirty = Some((self.clock)());
@@ -347,11 +399,29 @@ impl BufCache {
     fn write_one(&self, s: &Sleepable, b: &Buffer) -> Result<(), IoError> {
         let mut data = b.data.lock(s);
         if data.dirty.is_some() {
-            self.dev.write(s, b.offset, &data.bytes)?;
-            self.dirty.fetch_sub(data.bytes.len(), Ordering::Relaxed);
-            data.dirty = None;
+            self.write_out(s, b.offset, &mut data)?;
         }
         Ok(())
+    }
+
+    /// Writes the buffer at `offset` now if it is cached and dirty
+    /// (`bwrite` of a block `fsync` needs). Returns whether it is clean
+    /// afterwards.
+    pub fn write_buffer(&self, s: &Sleepable, offset: u64) -> Result<bool, IoError> {
+        let Some(b) = self.buffers.lock().get(&offset).cloned() else {
+            return Ok(true);
+        };
+        let mut data = b.data.lock(s);
+        if data.dirty.is_some() {
+            self.write_out(s, offset, &mut data)?;
+        }
+        Ok(data.dirty.is_none())
+    }
+
+    /// Whether any buffer is dirty.
+    #[must_use]
+    pub fn any_dirty(&self) -> bool {
+        self.dirty.load(Ordering::Relaxed) != 0
     }
 
     /// Writes the buffers dirtied at or before `before` on the cache's

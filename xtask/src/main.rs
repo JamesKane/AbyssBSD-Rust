@@ -8,6 +8,7 @@ mod arch;
 mod base;
 mod build;
 mod cli;
+mod crash;
 mod expect;
 mod fattest;
 mod fs;
@@ -44,6 +45,7 @@ commands:
   fs-image    --fs ufs2|msdos --out IMG [--from DIR] [--size S] [--softdep]
                                                          make a file-system image with FreeBSD's tools (server only)
   fs-check    --fs ufs2|msdos IMG                        fsck an image read-only; fails unless clean (server only)
+  crash-test  [--rounds N] [--arch A] [--seed S] [--debug]  kill QEMU mid-workload on a soft-updates disk; fsck_ffs -p must repair
   ufs-verify  [--keep]                                   lib/ufs against makefs and newfs images of base.txz (server only)
   check                                                  fmt, clippy (host and targets), policy
   policy                                                 dependency and license-header rules
@@ -87,6 +89,7 @@ fn run() -> Result<()> {
         "freebsd-record" => perf::cmd_record(args),
         "fs-image" => fs::cmd_image(args),
         "fs-check" => fs::cmd_check(args),
+        "crash-test" => crash::cmd(args),
         "ufs-verify" => ufsverify::cmd(args),
         "fetch-base" => base::cmd(args),
         "freebsd-shell" => expect::cmd_freebsd_shell(args),

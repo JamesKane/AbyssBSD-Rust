@@ -3,13 +3,20 @@
 //! (FreeBSD's `ffs_balloc_ufs2` and `ffs_truncate`, without soft
 //! updates), and writing inodes.
 //!
-//! Write ordering follows FreeBSD's without soft updates: a new indirect
-//! block is zeroed on the disk before anything points to it, and a
-//! truncated inode is written before its blocks are freed, so a crash
-//! leaves at worst leaked blocks for fsck to reclaim.
+//! Without soft updates, write ordering follows FreeBSD's UFS without
+//! them: a new indirect block is zeroed on the disk before anything points
+//! to it, and a truncated inode is written before its blocks are freed, so
+//! a crash leaves at worst leaked blocks for fsck to reclaim.
+//!
+//! With them, every new pointer is placed with the tracker (waiting for
+//! the block's group and contents), and a truncation's frees wait for the
+//! inode (and any indirect block kept) to go out with the pointers gone.
+
+use alloc::vec::Vec;
 
 use crate::allocate::{Reserve, Summary};
 use crate::inode::Inode;
+use crate::softdep::{Slot, Work};
 use crate::{
     BlockIo, Error, Fill, Mode, NDADDR, NDIRECT, NIADDR, Ufs, count32, idx, idx64, int64, ix64,
     len64,
@@ -19,7 +26,9 @@ use crate::{
 const DEV_BSIZE: u64 = 512;
 
 impl<B: BlockIo> Ufs<B> {
-    /// Writes inode `ino` (FreeBSD's `ffs_update`).
+    /// Writes inode `ino` (FreeBSD's `ffs_update`): copies it into its
+    /// block, which goes out as `mode` says. With soft updates the copy is
+    /// what its waits wait for.
     pub fn write_inode(&self, cx: &B::Cx, ino: u32, ip: &Inode, mode: Mode) -> Result<(), Error> {
         let sb = &self.sb;
         let (block, within) = sb.inode_location(ino);
@@ -27,6 +36,7 @@ impl<B: BlockIo> Ufs<B> {
         self.io
             .modify(cx, block, idx(sb.bsize), Fill::Read, mode, &mut |b| {
                 b[within..within + crate::inode::SIZE].copy_from_slice(&bytes);
+                self.soft(cx, |d| d.inode_copied(ino));
             })
     }
 
@@ -68,23 +78,39 @@ impl<B: BlockIo> Ufs<B> {
         Ok(v)
     }
 
-    /// Sets entry `i` of the indirect block at fragment `blk`.
-    fn ind_set(&self, cx: &B::Cx, blk: u64, i: usize, v: u64, mode: Mode) -> Result<(), Error> {
+    /// Points entry `i` of the indirect block at fragment `blk` at new
+    /// block `v` (a delayed write; with soft updates, the pointer waits).
+    fn ind_set(&self, cx: &B::Cx, blk: u64, i: usize, v: u64) -> Result<(), Error> {
         let sb = &self.sb;
-        self.io.modify(
-            cx,
-            blk * u64::from(sb.fsize),
-            idx(sb.bsize),
-            Fill::Read,
-            mode,
-            &mut |b| {
+        let at = blk * u64::from(sb.fsize);
+        self.io
+            .modify(cx, at, idx(sb.bsize), Fill::Read, Mode::Delayed, &mut |b| {
                 b[i * 8..i * 8 + 8].copy_from_slice(&v.to_le_bytes());
-            },
-        )
+                self.soft(cx, |d| {
+                    d.indirect(at);
+                    d.place(v, Slot::Indirect { at, index: i }, 0, 0, None);
+                });
+            })
     }
 
-    /// A new indirect block, zeroed on the disk now, before anything
-    /// points to it.
+    /// Places new block `new` at inode `ino`'s slot `index`, with the
+    /// tracker.
+    fn place_direct(
+        &self,
+        cx: &B::Cx,
+        ino: u32,
+        index: usize,
+        new: u64,
+        old: (u64, u64),
+        free_old: Option<(u64, u64)>,
+    ) {
+        self.soft(cx, |d| {
+            d.place(new, Slot::Inode { ino, index }, old.0, old.1, free_old);
+        });
+    }
+
+    /// A new indirect block, zeroed (on the disk now, before anything
+    /// points to it; with soft updates, the pointers to it wait).
     fn new_indirect(
         &self,
         cx: &B::Cx,
@@ -98,13 +124,19 @@ impl<B: BlockIo> Ufs<B> {
         let bsize = u64::from(sb.bsize);
         let nb = self.alloc(cx, sum, ino, pref, bsize, reserve)?;
         ip.blocks += bsize / DEV_BSIZE;
+        let at = nb * u64::from(sb.fsize);
         self.io.modify(
             cx,
-            nb * u64::from(sb.fsize),
+            at,
             idx(sb.bsize),
             Fill::Zero,
-            Mode::Sync,
-            &mut |_| {},
+            self.ordered(),
+            &mut |_| {
+                self.soft(cx, |d| {
+                    d.indirect(at);
+                    d.contents(nb, at);
+                });
+            },
         )?;
         Ok(nb)
     }
@@ -157,20 +189,16 @@ impl<B: BlockIo> Ufs<B> {
             let osize = u64::from(sb.block_size(ip.size, nb));
             if osize < bsize && osize > 0 && ip.db[idx64(nb)] != 0 {
                 let pref = self.blkpref(sum, ino, ip, nb, int64(nb), prev_db(ip, nb));
-                let new = self.realloccg(
-                    cx,
-                    sum,
-                    ino,
-                    ip.db[idx64(nb)],
-                    pref,
-                    osize,
-                    bsize,
-                    reserve,
-                    metadata,
-                )?;
+                let old = ip.db[idx64(nb)];
+                let (new, free_old) =
+                    self.realloccg(cx, sum, ino, old, pref, osize, bsize, reserve, metadata)?;
                 ip.blocks += (bsize - osize) / DEV_BSIZE;
                 ip.db[idx64(nb)] = new;
                 ip.size = (nb + 1) * bsize;
+                self.place_direct(cx, ino, idx64(nb), new, (old, osize), free_old);
+                if metadata {
+                    self.soft(cx, |d| d.dir_block(ino, nb, new));
+                }
             }
         }
         if lbn < NDADDR {
@@ -186,10 +214,14 @@ impl<B: BlockIo> Ufs<B> {
                     return Ok(nb);
                 }
                 let pref = self.blkpref(sum, ino, ip, lbn, int64(lbn), prev_db(ip, lbn));
-                let new =
+                let (new, free_old) =
                     self.realloccg(cx, sum, ino, nb, pref, osize, nsize, reserve, metadata)?;
                 ip.blocks += (nsize - osize) / DEV_BSIZE;
                 ip.db[i] = new;
+                self.place_direct(cx, ino, i, new, (nb, osize), free_old);
+                if metadata {
+                    self.soft(cx, |d| d.dir_block(ino, lbn, new));
+                }
                 return Ok(new);
             }
             let nsize = if ip.size < (lbn + 1) * bsize {
@@ -201,12 +233,44 @@ impl<B: BlockIo> Ufs<B> {
             let new = self.alloc(cx, sum, ino, pref, nsize, reserve)?;
             ip.blocks += nsize / DEV_BSIZE;
             ip.db[i] = new;
+            self.place_direct(cx, ino, i, new, (0, 0), None);
+            if metadata {
+                self.soft(cx, |d| d.dir_block(ino, lbn, new));
+            }
             if clear && !metadata {
                 self.zero_data(cx, new * fsize, nsize)?;
             }
             return Ok(new);
         }
-        // Through the indirect blocks, making missing ones on the way.
+        // Through the indirect blocks, making missing ones on the way; if
+        // the data block cannot be had, those go again (FreeBSD's `fail:`).
+        let mut fresh = Vec::new();
+        let r = self.balloc_indirect(cx, sum, ino, ip, lbn, reserve, clear, metadata, &mut fresh);
+        if r.is_err() && !fresh.is_empty() {
+            self.unwind_indirects(cx, sum, ino, ip, &fresh);
+        }
+        r
+    }
+
+    /// The indirect part of [`Self::balloc`]: new indirect blocks go into
+    /// `fresh`, with where they are pointed to from (an indirect block and
+    /// entry, or the inode's root of that level).
+    #[allow(clippy::too_many_arguments)]
+    fn balloc_indirect(
+        &self,
+        cx: &B::Cx,
+        sum: &mut Summary,
+        ino: u32,
+        ip: &mut Inode,
+        lbn: u64,
+        reserve: Reserve,
+        clear: bool,
+        metadata: bool,
+        fresh: &mut Vec<(u64, Pointer)>,
+    ) -> Result<u64, Error> {
+        let sb = &self.sb;
+        let bsize = u64::from(sb.bsize);
+        let fsize = u64::from(sb.fsize);
         let (level, idx) = self.indir_path(lbn)?;
         let mut pref = 0;
         let mut blk = ip.ib[level];
@@ -215,6 +279,8 @@ impl<B: BlockIo> Ufs<B> {
             blk = self.new_indirect(cx, sum, ino, ip, p, reserve)?;
             pref = blk + u64::from(sb.frag);
             ip.ib[level] = blk;
+            self.place_direct(cx, ino, NDIRECT + level, blk, (0, 0), None);
+            fresh.push((blk, Pointer::Root(level)));
         }
         for (depth, &at) in idx.iter().enumerate().take(level) {
             let next = self.ind_get(cx, blk, at)?;
@@ -227,7 +293,8 @@ impl<B: BlockIo> Ufs<B> {
             }
             let nb = self.new_indirect(cx, sum, ino, ip, pref, reserve)?;
             pref = nb + u64::from(sb.frag);
-            self.ind_set(cx, blk, idx[depth], nb, Mode::Delayed)?;
+            self.ind_set(cx, blk, idx[depth], nb)?;
+            fresh.push((nb, Pointer::Entry(blk, idx[depth])));
             blk = nb;
         }
         let slot = idx[level];
@@ -248,8 +315,76 @@ impl<B: BlockIo> Ufs<B> {
         if clear && !metadata {
             self.zero_data(cx, new * fsize, bsize)?;
         }
-        self.ind_set(cx, blk, slot, new, Mode::Delayed)?;
+        self.ind_set(cx, blk, slot, new)?;
+        if metadata {
+            self.soft(cx, |d| d.dir_block(ino, lbn, new));
+        }
         Ok(new)
+    }
+
+    /// Takes back the indirect blocks a failed [`Self::balloc`] made, the
+    /// pointers to them first: without soft updates the indirect block
+    /// that pointed to one is written at once and the block freed; with
+    /// them, the frees wait for those pointers (and the inode) to go out.
+    fn unwind_indirects(
+        &self,
+        cx: &B::Cx,
+        sum: &mut Summary,
+        ino: u32,
+        ip: &mut Inode,
+        fresh: &[(u64, Pointer)],
+    ) {
+        let sb = &self.sb;
+        let bsize = u64::from(sb.bsize);
+        let fsize = u64::from(sb.fsize);
+        let list: Vec<(u64, u64)> = fresh.iter().map(|&(nb, _)| (nb, bsize)).collect();
+        let id = self.soft(cx, |d| d.defer(Work::Free(list)));
+        for &(nb, from) in fresh.iter().rev() {
+            match from {
+                Pointer::Root(level) => {
+                    ip.ib[level] = 0;
+                    let slot = Slot::Inode {
+                        ino,
+                        index: NDIRECT + level,
+                    };
+                    self.soft(cx, |d| {
+                        d.cancel_slot(slot);
+                        if let Some(id) = id {
+                            d.wait_copy(id, ino);
+                        }
+                    });
+                }
+                Pointer::Entry(parent, index) => {
+                    let at = parent * fsize;
+                    let _ = self.io.modify(
+                        cx,
+                        at,
+                        idx(sb.bsize),
+                        Fill::Read,
+                        self.ordered(),
+                        &mut |b| {
+                            b[index * 8..index * 8 + 8].fill(0);
+                            self.soft(cx, |d| {
+                                d.cancel_slot(Slot::Indirect { at, index });
+                                if let Some(id) = id {
+                                    d.wait_buffer(id, at);
+                                }
+                            });
+                        },
+                    );
+                }
+            }
+            ip.blocks = ip.blocks.saturating_sub(bsize / DEV_BSIZE);
+            self.soft(cx, |d| d.forget_buffer(nb * fsize, ino));
+            if id.is_none() {
+                let _ = self.blkfree(cx, sum, nb, bsize);
+            } else {
+                self.io.forget(cx, nb * fsize, idx(sb.bsize));
+            }
+        }
+        if let Some(id) = id {
+            self.soft(cx, |d| d.arm(id));
+        }
     }
 
     /// Sets file `ino`'s size to `length` (FreeBSD's `ffs_truncate`,
@@ -312,6 +447,9 @@ impl<B: BlockIo> Ufs<B> {
                 if lbn < NDADDR {
                     let newspace = u64::from(sb.block_size(length, lbn));
                     if newspace < oldspace {
+                        // A pointer waiting for the block's data waits for
+                        // what stays of it.
+                        self.soft(cx, |d| d.shrink_block(addr, newspace));
                         tail_free =
                             Some((addr + u64::from(sb.numfrags(newspace)), oldspace - newspace));
                     }
@@ -328,6 +466,17 @@ impl<B: BlockIo> Ufs<B> {
         lastiblock[0] = lastblock - ix64(NDIRECT);
         lastiblock[1] = lastiblock[0] - nindir;
         lastiblock[2] = lastiblock[1] - nindir * nindir;
+        if self.soft {
+            return self.truncate_soft(
+                cx,
+                ino,
+                ip,
+                length,
+                (lastblock, lastiblock),
+                tail_free,
+                metadata,
+            );
+        }
         for i in 0..NDIRECT {
             if ix64(i) > lastblock {
                 ip.db[i] = 0;
@@ -369,6 +518,185 @@ impl<B: BlockIo> Ufs<B> {
             released += len / DEV_BSIZE;
         }
         ip.blocks = ip.blocks.saturating_sub(released);
+        Ok(())
+    }
+
+    /// The shrinking part of [`Self::truncate`] with soft updates: the
+    /// pointers past the end go now, and everything they reached is freed
+    /// once the inode, and each indirect block kept, is on the disk without
+    /// them (FreeBSD's `softdep_setup_freeblocks`).
+    #[allow(clippy::too_many_arguments)]
+    fn truncate_soft(
+        &self,
+        cx: &B::Cx,
+        ino: u32,
+        ip: &mut Inode,
+        length: u64,
+        (lastblock, lastiblock): (i64, [i64; NIADDR]),
+        tail_free: Option<(u64, u64)>,
+        metadata: bool,
+    ) -> Result<(), Error> {
+        let sb = &self.sb;
+        let bsize = u64::from(sb.bsize);
+        let fsize = u64::from(sb.fsize);
+        // What the file held, and fragments moved away from that the disk
+        // may still show (not in its block count).
+        let mut frees = Vec::new();
+        let mut moved = Vec::new();
+        let mut kept = Vec::new();
+        for level in (0..NIADDR).rev() {
+            let bn = ip.ib[level];
+            if bn == 0 {
+                continue;
+            }
+            let last = lastiblock[level];
+            self.collect_indir(
+                cx, ino, bn, level, last, metadata, &mut frees, &mut moved, &mut kept,
+            )?;
+            if lastiblock[level] < 0 {
+                frees.push((bn, bsize));
+                let slot = Slot::Inode {
+                    ino,
+                    index: NDIRECT + level,
+                };
+                self.soft(cx, |d| {
+                    moved.extend(d.cancel_slot(slot));
+                    moved.extend(d.forget_buffer(bn * fsize, ino));
+                });
+                self.io.forget(cx, bn * fsize, idx(sb.bsize));
+                ip.ib[level] = 0;
+            }
+        }
+        for i in (0..NDIRECT).rev() {
+            if ix64(i) <= lastblock {
+                break;
+            }
+            let bn = ip.db[i];
+            if bn == 0 {
+                continue;
+            }
+            let space = u64::from(sb.block_size(ip.size, len64(i)));
+            frees.push((bn, space));
+            self.soft(cx, |d| {
+                moved.extend(d.cancel_slot(Slot::Inode { ino, index: i }));
+                if metadata {
+                    moved.extend(d.forget_buffer(bn * fsize, ino));
+                }
+            });
+            if metadata {
+                self.io.forget(cx, bn * fsize, idx64(space));
+            }
+            ip.db[i] = 0;
+        }
+        if let Some(tail) = tail_free {
+            frees.push(tail);
+        }
+        let released: u64 = frees.iter().map(|(_, n)| n / DEV_BSIZE).sum();
+        frees.extend(moved);
+        let Some(id) = self.soft(cx, |d| d.defer(Work::Free(frees))) else {
+            return Err(Error::ReadOnly);
+        };
+        ip.size = length;
+        ip.blocks = ip.blocks.saturating_sub(released);
+        self.soft(cx, |d| d.wait_copy(id, ino));
+        // Indirect blocks kept lose their tails, which fsck must never see
+        // under either size: the inode goes out first, now, with the roots
+        // over them cleared (on the disk the file then ends in a hole of
+        // its indirect blocks, which fsck shortens), then the tails, now.
+        // Each root comes back once its indirect block holds a pointer on
+        // the disk.
+        if !kept.is_empty() {
+            let mut cut = ip.clone();
+            for (level, last) in lastiblock.iter().enumerate() {
+                if *last >= 0 {
+                    cut.ib[level] = 0;
+                }
+            }
+            self.write_inode(cx, ino, &cut, Mode::Sync)?;
+        }
+        // Deepest first: an indirect block left empty on the disk is known
+        // as such before the one above it goes out.
+        for (bn, keep) in kept.into_iter().rev() {
+            let at = bn * fsize;
+            self.io
+                .modify(cx, at, idx(sb.bsize), Fill::Read, Mode::Sync, &mut |b| {
+                    b[keep * 8..].fill(0);
+                    self.soft(cx, |d| {
+                        d.indirect(at);
+                        d.wait_buffer(id, at);
+                    });
+                })?;
+        }
+        let r = self.write_inode(cx, ino, ip, Mode::Delayed);
+        self.soft(cx, |d| d.arm(id));
+        r
+    }
+
+    /// With soft updates: collects into `frees` what the indirect block at
+    /// `bn` (of `level`) maps past file block `lastbn` of its range (-1:
+    /// all of it), forgetting the pointers and the freed indirect blocks
+    /// (fragments moved away from by those pointers go into `moved`), and
+    /// into `kept` the indirect blocks that keep some (with the first
+    /// entry they lose).
+    #[allow(clippy::too_many_arguments)]
+    fn collect_indir(
+        &self,
+        cx: &B::Cx,
+        ino: u32,
+        bn: u64,
+        level: usize,
+        lastbn: i64,
+        metadata: bool,
+        frees: &mut Vec<(u64, u64)>,
+        moved: &mut Vec<(u64, u64)>,
+        kept: &mut Vec<(u64, usize)>,
+    ) -> Result<(), Error> {
+        let sb = &self.sb;
+        let bsize = u64::from(sb.bsize);
+        let fsize = u64::from(sb.fsize);
+        let nindir = idx(sb.nindir);
+        let factor = i64::from(sb.nindir).pow(count32(level));
+        let last = if lastbn < 0 { -1 } else { lastbn / factor };
+        let mut entries = alloc::vec![0u64; nindir];
+        self.io.read(cx, bn * fsize, idx(sb.bsize), &mut |b| {
+            for (e, c) in entries.iter_mut().zip(b.as_chunks::<8>().0) {
+                *e = u64::from_le_bytes(*c);
+            }
+        })?;
+        // `last` is -1 or more.
+        let first_free = usize::try_from(last + 1).unwrap_or(0);
+        if last >= 0 {
+            kept.push((bn, first_free));
+        }
+        for (i, &nb) in entries.iter().enumerate().skip(first_free) {
+            if nb == 0 {
+                continue;
+            }
+            if nb >= sb.size {
+                return Err(Error::Corrupt("block address"));
+            }
+            if level > 0 {
+                self.collect_indir(cx, ino, nb, level - 1, -1, metadata, frees, moved, kept)?;
+            }
+            frees.push((nb, bsize));
+            let at = bn * fsize;
+            self.soft(cx, |d| {
+                moved.extend(d.cancel_slot(Slot::Indirect { at, index: i }));
+                if level > 0 || metadata {
+                    moved.extend(d.forget_buffer(nb * fsize, ino));
+                }
+            });
+            if level > 0 || metadata {
+                self.io.forget(cx, nb * fsize, idx(sb.bsize));
+            }
+        }
+        if level > 0 && last >= 0 {
+            let nb = entries[usize::try_from(last).unwrap_or(0)];
+            if nb != 0 {
+                let last = lastbn % factor;
+                self.collect_indir(cx, ino, nb, level - 1, last, metadata, frees, moved, kept)?;
+            }
+        }
         Ok(())
     }
 
@@ -436,6 +764,15 @@ impl<B: BlockIo> Ufs<B> {
         }
         Ok(released)
     }
+}
+
+/// Where a new indirect block is pointed to from.
+#[derive(Clone, Copy, Debug)]
+enum Pointer {
+    /// The inode's root of that level.
+    Root(usize),
+    /// An entry of the indirect block at that fragment.
+    Entry(u64, usize),
 }
 
 /// The direct pointer before `lbn` (for `blkpref`), 0 for the first.

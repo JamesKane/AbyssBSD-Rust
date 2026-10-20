@@ -2,7 +2,8 @@
 //! Directory blocks (`struct direct`): entries packed in 512-byte chunks
 //! that none crosses, each with its inode, record length, type, and name.
 
-use crate::Error;
+use crate::softdep::{Gone, Id, Removal};
+use crate::{Error, count32};
 
 /// A directory chunk (`DIRBLKSIZ`).
 pub const DIRBLKSIZ: usize = 512;
@@ -290,7 +291,8 @@ impl<B: crate::BlockIo> crate::Ufs<B> {
     /// Adds entry `name` for inode `ino` of type `kind` to directory
     /// `dir_ino` (FreeBSD's `ufs_direnter`): in a free slot or the slack
     /// of an entry if one is big enough, else in a new chunk at the end.
-    /// The block is written now; the caller writes the directory's inode
+    /// The block is written now (with soft updates, delayed, the entry
+    /// waiting as `entry` says); the caller writes the directory's inode
     /// (its size may grow) and the new inode first.
     #[allow(clippy::too_many_arguments)]
     pub fn dir_enter(
@@ -303,6 +305,7 @@ impl<B: crate::BlockIo> crate::Ufs<B> {
         ino: u32,
         kind: u8,
         reserve: crate::Reserve,
+        entry: Option<Id>,
     ) -> Result<(), Error> {
         check_name(name)?;
         let need = dirsiz(name.len());
@@ -340,23 +343,36 @@ impl<B: crate::BlockIo> crate::Ufs<B> {
         }
         let sb = &self.sb;
         let fsize = u64::from(sb.fsize);
+        let bsize = u64::from(sb.bsize);
         if let Some(s) = slot {
-            self.io.modify(
-                cx,
-                s.addr * fsize,
-                s.bsz,
-                crate::Fill::Read,
-                crate::Mode::Sync,
-                &mut |b| {
-                    if s.ino == 0 {
+            let at = s.addr * fsize;
+            let lbn = s.offset / bsize;
+            self.io
+                .modify(cx, at, s.bsz, crate::Fill::Read, self.ordered(), &mut |b| {
+                    let off = if s.ino == 0 {
                         put_entry(b, s.at, ino, s.reclen, kind, name);
+                        s.at
                     } else {
                         let used = dirsiz(s.namlen);
                         b[s.at + 4..s.at + 6].copy_from_slice(&reclen16(used).to_le_bytes());
                         put_entry(b, s.at + used, ino, s.reclen - used, kind, name);
+                        s.at + used
+                    };
+                    if let Some(id) = entry {
+                        self.soft(cx, |d| {
+                            d.place_entry(
+                                id,
+                                dir_ino,
+                                lbn,
+                                at,
+                                count32(off),
+                                (0, 0),
+                                Gone::Link,
+                                &Removal::default(),
+                            );
+                        });
                     }
-                },
-            )?;
+                })?;
             if dir.dirhash.is_some() {
                 let offset = if s.ino == 0 {
                     s.offset
@@ -388,21 +404,31 @@ impl<B: crate::BlockIo> crate::Ufs<B> {
             true,
         )?;
         dir.size = offset + crate::len64(DIRBLKSIZ);
-        let bsize = u64::from(sb.bsize);
         let lbn = offset / bsize;
         let bsz = crate::idx(sb.block_size(dir.size, lbn));
-        let at = crate::idx64(offset % bsize);
-        self.io.modify(
-            cx,
-            addr * fsize,
-            bsz,
-            crate::Fill::Read,
-            crate::Mode::Sync,
-            &mut |b| {
-                b[at..at + DIRBLKSIZ].fill(0);
-                put_entry(b, at, ino, DIRBLKSIZ, kind, name);
-            },
-        )?;
+        let within = crate::idx64(offset % bsize);
+        let at = addr * fsize;
+        self.io
+            .modify(cx, at, bsz, crate::Fill::Read, self.ordered(), &mut |b| {
+                b[within..within + DIRBLKSIZ].fill(0);
+                put_entry(b, within, ino, DIRBLKSIZ, kind, name);
+                self.soft(cx, |d| {
+                    // The block's new space is its contents.
+                    d.contents(addr, at);
+                    if let Some(id) = entry {
+                        d.place_entry(
+                            id,
+                            dir_ino,
+                            lbn,
+                            at,
+                            count32(within),
+                            (0, 0),
+                            Gone::Link,
+                            &Removal::default(),
+                        );
+                    }
+                });
+            })?;
         if let Some(h) = dir.dirhash.as_mut() {
             h.names.insert(name.into(), (ino, offset));
             h.free.push(reclen16(DIRBLKSIZ - need));
@@ -410,32 +436,43 @@ impl<B: crate::BlockIo> crate::Ufs<B> {
         Ok(())
     }
 
-    /// Removes entry `name` from directory `dir` (FreeBSD's
+    /// Removes entry `name` from directory `dir_ino` (FreeBSD's
     /// `ufs_dirremove`): the first entry of a chunk is marked free, any
-    /// other joins the one before it. The block is written now. Returns the
-    /// inode the entry named.
+    /// other joins the one before it. The block is written now; with soft
+    /// updates, delayed, the links the entry held (`rmdir`: of a directory
+    /// removed from this one) dropping once it is out. Returns the inode
+    /// the entry named, and with soft updates what the removal waits for.
     pub fn dir_remove(
         &self,
         cx: &B::Cx,
+        dir_ino: u32,
         dir: &mut crate::Inode,
         name: &[u8],
-    ) -> Result<u32, Error> {
+        rmdir: bool,
+    ) -> Result<(u32, Removal), Error> {
         let s = self.find_entry(cx, dir, name)?.ok_or(Error::NotFound)?;
         let fsize = u64::from(self.sb.fsize);
-        self.io.modify(
-            cx,
-            s.addr * fsize,
-            s.bsz,
-            crate::Fill::Read,
-            crate::Mode::Sync,
-            &mut |b| match s.prev {
-                None => b[s.at..s.at + 4].fill(0),
-                Some(p) => {
-                    let len = usize::from(u16::from_le_bytes([b[p + 4], b[p + 5]])) + s.reclen;
-                    b[p + 4..p + 6].copy_from_slice(&reclen16(len).to_le_bytes());
+        let at = s.addr * fsize;
+        let lbn = s.offset / u64::from(self.sb.bsize);
+        let mut removal = Removal::default();
+        self.io
+            .modify(cx, at, s.bsz, crate::Fill::Read, self.ordered(), &mut |b| {
+                match s.prev {
+                    None => b[s.at..s.at + 4].fill(0),
+                    Some(p) => {
+                        let len = usize::from(u16::from_le_bytes([b[p + 4], b[p + 5]])) + s.reclen;
+                        b[p + 4..p + 6].copy_from_slice(&reclen16(len).to_le_bytes());
+                    }
                 }
-            },
-        )?;
+                self.soft(cx, |d| {
+                    let gone = if rmdir {
+                        Gone::Dir(dir_ino)
+                    } else {
+                        Gone::Link
+                    };
+                    removal = d.remove_entry(dir_ino, lbn, at, count32(s.at), s.ino, gone);
+                });
+            })?;
         if dir.dirhash.is_some() {
             let c = s.offset / crate::len64(DIRBLKSIZ);
             let free = self.chunk_free(cx, dir, c)?;
@@ -446,34 +483,44 @@ impl<B: crate::BlockIo> crate::Ufs<B> {
                 }
             }
         }
-        Ok(s.ino)
+        Ok((s.ino, removal))
     }
 
-    /// Points entry `name` of directory `dir` at inode `ino` of type
+    /// Points entry `name` of directory `dir_ino` at inode `ino` of type
     /// `kind` (FreeBSD's `ufs_dirrewrite`: a rename over an existing name,
-    /// or a moved directory's `..`). The block is written now. Returns the
-    /// inode it named before.
+    /// or a moved directory's `..`). The block is written now; with soft
+    /// updates, delayed, the change waiting as `entry` says, and what the
+    /// entry held (`gone`) dropping once the change is out and `also` is.
+    /// Returns the inode it named before.
+    #[allow(clippy::too_many_arguments)]
     pub fn dir_rewrite(
         &self,
         cx: &B::Cx,
+        dir_ino: u32,
         dir: &mut crate::Inode,
         name: &[u8],
         ino: u32,
         kind: u8,
+        entry: Option<Id>,
+        gone: Gone,
+        also: &Removal,
     ) -> Result<u32, Error> {
         let s = self.find_entry(cx, dir, name)?.ok_or(Error::NotFound)?;
         let fsize = u64::from(self.sb.fsize);
-        self.io.modify(
-            cx,
-            s.addr * fsize,
-            s.bsz,
-            crate::Fill::Read,
-            crate::Mode::Sync,
-            &mut |b| {
+        let at = s.addr * fsize;
+        let lbn = s.offset / u64::from(self.sb.bsize);
+        self.io
+            .modify(cx, at, s.bsz, crate::Fill::Read, self.ordered(), &mut |b| {
+                let old_type = b[s.at + 6];
                 b[s.at..s.at + 4].copy_from_slice(&ino.to_le_bytes());
                 b[s.at + 6] = kind;
-            },
-        )?;
+                if let Some(id) = entry {
+                    self.soft(cx, |d| {
+                        let old = (s.ino, old_type);
+                        d.place_entry(id, dir_ino, lbn, at, count32(s.at), old, gone, also);
+                    });
+                }
+            })?;
         if let Some(h) = dir.dirhash.as_mut() {
             h.names.insert(name.into(), (ino, s.offset));
         }
@@ -481,8 +528,9 @@ impl<B: crate::BlockIo> crate::Ufs<B> {
     }
 
     /// Gives new directory `ino` its first chunk, with `.` and `..`
-    /// (`parent`) (FreeBSD's `ufs_mkdir`). The block is written now; the
-    /// caller writes the inode.
+    /// (`parent`) (FreeBSD's `ufs_mkdir`), returning its address. The
+    /// block is written now (delayed with soft updates); the caller writes
+    /// the inode.
     pub fn dir_init(
         &self,
         cx: &B::Cx,
@@ -491,7 +539,7 @@ impl<B: crate::BlockIo> crate::Ufs<B> {
         ip: &mut crate::Inode,
         parent: u32,
         reserve: crate::Reserve,
-    ) -> Result<(), Error> {
+    ) -> Result<u64, Error> {
         let addr = self.balloc(
             cx,
             sum,
@@ -505,18 +553,14 @@ impl<B: crate::BlockIo> crate::Ufs<B> {
         )?;
         ip.size = crate::len64(DIRBLKSIZ);
         let bsz = crate::idx(self.sb.block_size(ip.size, 0));
-        let fsize = u64::from(self.sb.fsize);
-        self.io.modify(
-            cx,
-            addr * fsize,
-            bsz,
-            crate::Fill::Zero,
-            crate::Mode::Sync,
-            &mut |b| {
+        let at = addr * u64::from(self.sb.fsize);
+        self.io
+            .modify(cx, at, bsz, crate::Fill::Zero, self.ordered(), &mut |b| {
                 put_entry(b, 0, ino, dirsiz(1), 4, b".");
                 put_entry(b, dirsiz(1), parent, DIRBLKSIZ - dirsiz(1), 4, b"..");
-            },
-        )
+                self.soft(cx, |d| d.contents(addr, at));
+            })?;
+        Ok(addr)
     }
 
     /// Whether directory `dir` holds nothing but `.` and `..` (FreeBSD's

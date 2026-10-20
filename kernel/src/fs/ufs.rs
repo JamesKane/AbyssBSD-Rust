@@ -16,10 +16,17 @@
 //! page cache with it released.
 //!
 //! A read-write mount clears the clean flag (refusing an unclean file
-//! system unless forced, as FreeBSD does) and sets it again at unmount.
-//! Changed inodes are written lazily: by `fsync`, `sync`, the syncer, or
-//! when the vnode goes. Without soft updates (P5.7), ordered metadata is
-//! written synchronously, as FreeBSD's UFS does without them.
+//! system unless forced, or unless it has soft updates, as FreeBSD does)
+//! and sets it again at unmount. Changed inodes are written lazily: by
+//! `fsync`, `sync`, the syncer, or when the vnode goes.
+//!
+//! A file system with soft updates on (`FS_DOSOFTDEP`, as `newfs -U` and
+//! `tunefs -n enable` set) writes all metadata delayed, its order kept by
+//! `lib/ufs`'s tracker (docs/VFS.md §10.3): the buffer cache asks it before
+//! each write. What waits for the disk (frees, link counts dropping) is
+//! done by the syncer once a second, through in-core inodes shared with
+//! the vnodes'. Without soft updates, ordered metadata is written
+//! synchronously, as FreeBSD's UFS does without them.
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -36,13 +43,15 @@ use sync::SpinLock;
 use ufs::ops::{Maker, NewKind};
 use ufs::{Mode, Reserve, Timestamp};
 
-use crate::fs::block::DiskIo;
+use crate::fs::block::{DiskIo, SoftDeps};
 use vfs::{
     Attr, Create, DirEntry, DirectoryNode, FileSystem, FsStats, Kind, NewNode, Node, NodeOps,
     Rename, SetAttr, SymlinkNode, Uio,
 };
 use vm::object::{Object, PageIndex, Pager, PagerError};
 
+/// Finding or making an in-core inode: under vnode locks, before inodes.
+static LOADING: LockClass = LockClass::new("ufs load", 345);
 /// In-core inodes: under vnode locks, before the summary and buffers.
 static INODE: LockClass = LockClass::new_dup_ok("ufs inode", 350);
 /// The allocation summary (FreeBSD's `UFS_LOCK`).
@@ -67,6 +76,8 @@ struct InodeState {
     ip: ufs::Inode,
     /// Changed since last written.
     dirty: bool,
+    /// Nodes (vnodes) using it; deferred work can hold it with none.
+    nodes: u32,
 }
 
 /// An in-core inode, and its object if it is a regular file.
@@ -81,6 +92,11 @@ struct Shared {
     inodes: SpinLock<BTreeMap<u32, InCore>>,
     /// When the syncer last wrote every file's dirty pages.
     data_synced: AtomicU64,
+    /// Held while finding or making an in-core inode (`load`, deferred
+    /// work), so one inode is never in core twice.
+    loading: Mutex<()>,
+    /// With soft updates, the tracker.
+    deps: Option<Arc<SoftDeps>>,
 }
 
 /// A mounted UFS2 file system.
@@ -151,18 +167,45 @@ impl UfsFs {
     ) -> Result<Self, Errno> {
         let sector = disk.sector_size();
         let io = DiskIo::new(disk);
-        let ufs = ufs::Ufs::open(s, io, sector).map_err(errno)?;
+        let mut ufs = ufs::Ufs::open(s, io, sector).map_err(errno)?;
+        let mut deps = None;
         let sum = if read_only {
             None
         } else {
-            if !ufs.superblock().clean && !force {
-                kprintln!(
-                    "ufs: {} was not properly dismounted: read-write mount denied",
-                    ufs.io().disk.name()
-                );
-                return Err(Errno::EPERM);
+            let sb = ufs.superblock();
+            let name = ufs.io().disk.name();
+            let soft = sb.flags & ufs::sb::FS_DOSOFTDEP != 0;
+            let journal = sb.flags & ufs::sb::FS_SUJ != 0;
+            // With soft updates an unclean file system holds nothing but
+            // leaks: it mounts, and fsck runs in the background (FreeBSD's
+            // rule), unless a journal or fsck is owed first.
+            let unclean_ok = soft && sb.flags & (ufs::sb::FS_SUJ | ufs::sb::FS_NEEDSFSCK) == 0;
+            if !sb.clean {
+                if !force && !unclean_ok {
+                    kprintln!("ufs: {name} was not properly dismounted: read-write mount denied");
+                    return Err(Errno::EPERM);
+                }
+                kprintln!("ufs: WARNING: {name} was not properly dismounted");
             }
-            let mut sum = ufs.load_summary(s).map_err(errno)?;
+            if journal {
+                // No journal here: soft updates alone, and the journal
+                // flag off so nothing replays a journal this mount left
+                // stale.
+                kprintln!("ufs: {name}: journaled soft updates not supported; journal disabled");
+                let flags = sb.flags & !ufs::sb::FS_SUJ;
+                ufs.set_flags(flags);
+            }
+            if soft {
+                let d = SoftDeps::new(ufs.superblock());
+                ufs.io().use_deps(&d);
+                ufs.use_soft_updates(s);
+                deps = Some(d);
+            }
+            let mut sum = if soft {
+                ufs.summary_from_groups(s).map_err(errno)?
+            } else {
+                ufs.load_summary(s).map_err(errno)?
+            };
             // Dirty until unmounted cleanly.
             ufs.write_summary(s, &mut sum, false, wall_seconds())
                 .map_err(errno)?;
@@ -174,8 +217,15 @@ impl UfsFs {
                 sum,
                 inodes: SpinLock::new(BTreeMap::new()),
                 data_synced: AtomicU64::new(0),
+                loading: Mutex::new(&LOADING, ()),
+                deps,
             }),
         })
+    }
+
+    /// Whether writes go with soft updates (`MNT_SOFTDEP`).
+    pub(crate) fn soft_updates(&self) -> bool {
+        self.shared.deps.is_some()
     }
 
     /// The block size, for the mount's I/O size.
@@ -222,14 +272,31 @@ impl Shared {
     }
 
     /// Writes everything: pages, inodes, buffers, and the summary (still
-    /// marked dirty, unless `clean`).
+    /// marked dirty, unless `clean`). With soft updates, again and again,
+    /// doing the work each round leaves, until nothing is waiting.
     fn sync_all(&self, s: &Sleepable, clean: bool) -> Result<(), Errno> {
         let Some(sum) = &self.sum else {
             return Ok(());
         };
-        self.sync_pages();
-        self.write_inodes(s, Mode::Delayed)?;
-        self.ufs.io().cache.sync(s).map_err(|_| Errno::EIO)?;
+        let io = self.ufs.io();
+        for _ in 0..64 {
+            self.sync_pages();
+            self.write_inodes(s, Mode::Delayed)?;
+            io.cache.sync(s).map_err(|_| Errno::EIO)?;
+            let Some(deps) = &self.deps else {
+                break;
+            };
+            self.process_work(s);
+            if deps.with(s, |d| d.is_idle()) && !io.cache.any_dirty() {
+                break;
+            }
+        }
+        if let Some(deps) = &self.deps {
+            let left = deps.with(s, |d| d.len());
+            if left != 0 {
+                kprintln!("ufs: {}: {left} soft dependencies left", io.disk.name());
+            }
+        }
         let mut sum = sum.lock(s);
         if sum.modified || clean {
             self.ufs
@@ -237,6 +304,118 @@ impl Shared {
                 .map_err(errno)?;
         }
         Ok(())
+    }
+
+    /// Inode `ino` in core: the one a node or the work holds, or read now
+    /// (and found by `load` meanwhile).
+    fn cell(&self, s: &Sleepable, ino: u32) -> Result<Arc<InodeCell>, Errno> {
+        let _loading = self.loading.lock(s);
+        if let Some(c) = self.inodes.lock().get(&ino).and_then(|(c, _)| c.upgrade()) {
+            return Ok(c);
+        }
+        let ip = self.ufs.inode(s, ino).map_err(errno)?;
+        let size = ip.size;
+        let cell = Arc::new(InodeCell {
+            ino,
+            state: Mutex::new(
+                &INODE,
+                InodeState {
+                    ip,
+                    dirty: false,
+                    nodes: 0,
+                },
+            ),
+            size: AtomicU64::new(size),
+        });
+        self.inodes
+            .lock()
+            .insert(ino, (Arc::downgrade(&cell), None));
+        Ok(cell)
+    }
+
+    /// Does the soft-updates work that is due: frees, and link counts
+    /// dropping (FreeBSD's `softdep_process_worklist`).
+    fn process_work(&self, s: &Sleepable) {
+        let Some(sum) = &self.sum else {
+            return;
+        };
+        loop {
+            let work = self.ufs.take_work(s);
+            if work.is_empty() {
+                return;
+            }
+            for w in work {
+                let mut env = WorkEnv { fs: self, s, sum };
+                if let Err(e) = self.ufs.apply(s, w, &mut env) {
+                    kprintln!(
+                        "ufs: {}: soft updates work: {e:?}",
+                        self.ufs.io().disk.name()
+                    );
+                }
+            }
+        }
+    }
+
+    /// Out of space with soft updates: writes and does the work until what
+    /// waited to be freed is (FreeBSD's `softdep_request_cleanup` from the
+    /// top). Returns whether anything was waiting. The caller holds no
+    /// inode lock.
+    fn flush_frees(&self, s: &Sleepable) -> bool {
+        let Some(deps) = &self.deps else {
+            return false;
+        };
+        if deps.with(s, |d| d.is_idle()) {
+            return false;
+        }
+        for _ in 0..8 {
+            let _ = self.write_inodes(s, Mode::Delayed);
+            let _ = self.ufs.io().cache.sync(s);
+            self.process_work(s);
+            if deps.with(s, |d| d.pending_free() == 0 && d.is_idle()) {
+                break;
+            }
+        }
+        true
+    }
+
+    /// Bytes freed but not yet back in their groups (FreeBSD's
+    /// `fs_pendingblocks`), which `statfs` counts free.
+    fn pending_free(&self, s: &Sleepable) -> u64 {
+        self.deps
+            .as_ref()
+            .map_or(0, |d| d.with(s, |d| d.pending_free()))
+    }
+}
+
+/// The work's way to in-core inodes and the summary.
+struct WorkEnv<'a> {
+    fs: &'a Shared,
+    s: &'a Sleepable,
+    sum: &'a Mutex<ufs::Summary>,
+}
+
+impl ufs::ops::WorkEnv<DiskIo> for WorkEnv<'_> {
+    fn with_inode(
+        &mut self,
+        ino: u32,
+        f: &mut dyn FnMut(&mut ufs::Inode, bool, &mut ufs::Summary) -> Result<(), ufs::Error>,
+    ) -> Result<(), ufs::Error> {
+        let cell = self.fs.cell(self.s, ino).map_err(|_| ufs::Error::Io)?;
+        let mut st = cell.state.lock(self.s);
+        let mut sum = self.sum.lock(self.s);
+        let in_use = st.nodes > 0;
+        let r = f(&mut st.ip, in_use, &mut sum);
+        // The work writes the inode it changes.
+        st.dirty = false;
+        cell.publish(&st);
+        r
+    }
+
+    fn with_summary(
+        &mut self,
+        f: &mut dyn FnMut(&mut ufs::Summary) -> Result<(), ufs::Error>,
+    ) -> Result<(), ufs::Error> {
+        f(&mut self.sum.lock(self.s))
     }
 }
 
@@ -248,26 +427,26 @@ impl FileSystem for UfsFs {
     fn load(&self, s: &Sleepable, ino: u64) -> Result<NodeOps, Errno> {
         let ino32 = u32::try_from(ino).map_err(|_| Errno::ENOENT)?;
         let shared = &self.shared;
-        let ip = shared.ufs.inode(s, ino32).map_err(errno)?;
-        if ip.mode == 0 {
-            kprintln!("ufs: {}: inode {ino} is free", shared.ufs.io().disk.name());
-            return Err(Errno::EIO);
-        }
-        let kind = ip.kind();
-        let mut parent = u64::from(ino32);
-        if kind == ufs::Kind::Directory && ino32 != ufs::ROOT_INO {
-            parent = shared
-                .ufs
-                .lookup(s, &ip, b"..")
-                .map_err(errno)?
-                .map_or(parent, u64::from);
-        }
-        let size = ip.size;
-        let cell = Arc::new(InodeCell {
-            ino: ino32,
-            state: Mutex::new(&INODE, InodeState { ip, dirty: false }),
-            size: AtomicU64::new(size),
-        });
+        let cell = shared.cell(s, ino32)?;
+        let (kind, parent) = {
+            let mut st = cell.state.lock(s);
+            let ip = &st.ip;
+            if ip.mode == 0 {
+                kprintln!("ufs: {}: inode {ino} is free", shared.ufs.io().disk.name());
+                return Err(Errno::EIO);
+            }
+            let kind = ip.kind();
+            let mut parent = u64::from(ino32);
+            if kind == ufs::Kind::Directory && ino32 != ufs::ROOT_INO {
+                parent = shared
+                    .ufs
+                    .lookup(s, ip, b"..")
+                    .map_err(errno)?
+                    .map_or(parent, u64::from);
+            }
+            st.nodes += 1;
+            (kind, parent)
+        };
         let object = (kind == ufs::Kind::Regular).then(|| {
             let pager = Arc::new(FilePager {
                 fs: Arc::clone(shared),
@@ -315,12 +494,15 @@ impl FileSystem for UfsFs {
             }
             None => ufs.stats(),
         };
+        // What soft updates will free soon counts free already, as on
+        // FreeBSD.
+        let pending = self.shared.pending_free(s) / u64::from(ufs.superblock().fsize);
         Ok(FsStats {
             bsize: st.fsize,
             iosize: st.iosize,
             blocks: st.blocks,
-            bfree: st.bfree,
-            bavail: st.bavail,
+            bfree: st.bfree + pending,
+            bavail: st.bavail.saturating_add_unsigned(pending),
             files: st.files,
             ffree: st.ffree,
         })
@@ -394,6 +576,7 @@ impl FileSystem for UfsFs {
             let _ = shared.write_inodes(s, Mode::Delayed);
         }
         let _ = shared.ufs.io().cache.write_aged(s, before);
+        shared.process_work(s);
         let mut sum = sum.lock(s);
         if sum.modified {
             let _ = shared.ufs.write_summary(s, &mut sum, false, wall_seconds());
@@ -474,7 +657,7 @@ impl Node for UfsNode {
             mode: ip.perm(),
             uid: ip.uid,
             gid: ip.gid,
-            nlink: u64::from(ip.nlink),
+            nlink: u64::from(ip.effnlink),
             size: ip.size,
             bytes: ip.blocks * 512,
             atime: time(ip.atime),
@@ -556,16 +739,56 @@ impl Node for UfsNode {
         if shared.sum.is_none() {
             return Ok(());
         }
+        let Some(deps) = &shared.deps else {
+            {
+                let mut st = self.cell.state.lock(s);
+                shared
+                    .ufs
+                    .write_inode(s, self.cell.ino, &st.ip, Mode::Sync)
+                    .map_err(errno)?;
+                st.dirty = false;
+            }
+            // Without per-file buffer lists, all dirty metadata goes.
+            return shared.ufs.io().cache.sync(s).map_err(|_| Errno::EIO);
+        };
+        // With soft updates, only what this file needs (FreeBSD's
+        // `softdep_sync`): its pointers' groups and blocks, its indirect
+        // blocks, its inode, and the entries naming it, until nothing of
+        // it waits. A directory's own blocks go too.
+        let io = shared.ufs.io();
+        let ino = self.cell.ino;
+        let mut dir_blocks = Vec::new();
         {
             let mut st = self.cell.state.lock(s);
             shared
                 .ufs
-                .write_inode(s, self.cell.ino, &st.ip, Mode::Sync)
+                .write_inode(s, ino, &st.ip, Mode::Delayed)
                 .map_err(errno)?;
             st.dirty = false;
+            if st.ip.kind() == ufs::Kind::Directory {
+                let bsize = u64::from(shared.ufs.superblock().bsize);
+                let fsize = u64::from(shared.ufs.superblock().fsize);
+                for lbn in 0..st.ip.size.div_ceil(bsize) {
+                    let addr = shared.ufs.bmap(s, &st.ip, lbn).map_err(errno)?;
+                    if addr != 0 {
+                        dir_blocks.push(addr * fsize);
+                    }
+                }
+            }
         }
-        // Without per-file buffer lists, all dirty metadata goes.
-        shared.ufs.io().cache.sync(s).map_err(|_| Errno::EIO)
+        for at in dir_blocks {
+            io.cache.write_buffer(s, at).map_err(|_| Errno::EIO)?;
+        }
+        for _ in 0..16 {
+            let need = deps.with(s, |d| d.needs(ino));
+            if need.is_empty() {
+                break;
+            }
+            for at in need {
+                io.cache.write_buffer(s, at).map_err(|_| Errno::EIO)?;
+            }
+        }
+        io.disk.flush(s).map_err(|_| Errno::EIO)
     }
 
     fn inactive(&mut self, s: &Sleepable) {
@@ -602,13 +825,31 @@ impl Node for UfsNode {
         }
         {
             let mut st = self.cell.state.lock(s);
-            if st.dirty && shared.sum.is_some() {
-                let _ = shared
-                    .ufs
-                    .write_inode(s, self.cell.ino, &st.ip, Mode::Delayed);
-                st.dirty = false;
+            st.nodes = st.nodes.saturating_sub(1);
+            if let Ok(sum) = shared.sum() {
+                // Soft updates' work may have dropped the last link since
+                // `inactive` looked.
+                if st.nodes == 0 && st.ip.nlink == 0 && st.ip.mode != 0 {
+                    let mut sum = sum.lock(s);
+                    let ino = self.cell.ino;
+                    if let Err(e) =
+                        shared
+                            .ufs
+                            .free_inode(s, &mut sum, ino, &mut st.ip, Reserve::Allowed)
+                    {
+                        kprintln!("ufs: freeing inode {ino}: {e:?}");
+                    }
+                    st.dirty = false;
+                }
+                if st.dirty {
+                    let _ = shared
+                        .ufs
+                        .write_inode(s, self.cell.ino, &st.ip, Mode::Delayed);
+                    st.dirty = false;
+                }
             }
         }
+        let _loading = shared.loading.lock(s);
         let mut t = shared.inodes.lock();
         if t.get(&self.cell.ino)
             .is_some_and(|(w, _)| w.as_ptr() == Arc::as_ptr(&self.cell))
@@ -647,14 +888,16 @@ impl vfs::RegularNode for UfsNode {
         }
         let bsize = u64::from(shared.ufs.superblock().bsize);
         let ino = self.cell.ino;
-        let old_size;
+        let mut old_size = 0;
         // Give the range blocks, the size growing as FreeBSD's `ffs_write`
-        // does, block by block.
-        {
+        // does, block by block. Out of space at once with soft updates
+        // waiting to free some, it waits for that and tries again.
+        for attempt in 0..2 {
             let mut st = self.cell.state.lock(s);
             old_size = st.ip.size;
             let mut sum = sum.lock(s);
             let mut at = offset;
+            let mut full = false;
             while at < end {
                 let within = at % bsize;
                 let n = (bsize - within).min(end - at);
@@ -674,6 +917,10 @@ impl vfs::RegularNode for UfsNode {
                 st.dirty = true;
                 if let Err(e) = r {
                     if at == offset {
+                        if e == ufs::Error::NoSpace && attempt == 0 {
+                            full = true;
+                            break;
+                        }
                         return Err(errno(e));
                     }
                     break;
@@ -684,6 +931,14 @@ impl vfs::RegularNode for UfsNode {
                 at += n;
             }
             self.cell.publish(&st);
+            if !full {
+                break;
+            }
+            drop(sum);
+            drop(st);
+            if !shared.flush_frees(s) {
+                return Err(Errno::ENOSPC);
+            }
         }
         // Past the old end, what lies between reads as zeros.
         if offset > old_size {
@@ -778,14 +1033,26 @@ impl DirectoryNode for UfsNode {
             random: random(),
             reserve: reserve_for(c.uid),
         };
-        let mut st = self.cell.state.lock(s);
-        self.index(s, &mut st);
-        let mut sum = sum.lock(s);
-        let (ino, _) = shared
-            .ufs
-            .create(s, &mut sum, self.cell.ino, &mut st.ip, name, kind, &who)
-            .map_err(errno)?;
-        Ok(u64::from(ino))
+        for attempt in 0..2 {
+            let mut st = self.cell.state.lock(s);
+            self.index(s, &mut st);
+            let mut sum = sum.lock(s);
+            match shared
+                .ufs
+                .create(s, &mut sum, self.cell.ino, &mut st.ip, name, kind, &who)
+            {
+                Ok((ino, _)) => return Ok(u64::from(ino)),
+                Err(ufs::Error::NoSpace) if attempt == 0 => {}
+                Err(e) => return Err(errno(e)),
+            }
+            drop(sum);
+            drop(st);
+            // Out of space: soft updates may have some on the way back.
+            if !shared.flush_frees(s) {
+                break;
+            }
+        }
+        Err(Errno::ENOSPC)
     }
 
     fn link(
@@ -1033,8 +1300,7 @@ impl Pager for FilePager {
         }
         let len = usize::try_from(n).map_err(|_| PagerError)?;
         ufs.io()
-            .disk
-            .write(&s, addr * fsize + within, &page[..len])
+            .write_data(&s, addr * fsize + within, &page[..len])
             .map_err(|_| PagerError)
     }
 }

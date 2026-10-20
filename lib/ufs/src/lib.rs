@@ -29,7 +29,10 @@ pub mod dirhash;
 mod inode;
 pub mod ops;
 pub mod sb;
+pub mod softdep;
 
+#[cfg(test)]
+mod soft_tests;
 #[cfg(test)]
 mod tests;
 
@@ -135,6 +138,12 @@ pub trait BlockIo {
     fn flush(&self, _cx: &Self::Cx) -> Result<(), Error> {
         Ok(())
     }
+
+    /// Runs `f` with the device's soft-updates tracker locked, if it keeps
+    /// one (returning false if not). `f` never calls the device.
+    fn deps(&self, _cx: &Self::Cx, _f: &mut dyn FnMut(&mut softdep::Deps)) -> bool {
+        false
+    }
 }
 
 impl<T: BlockIo + ?Sized> BlockIo for &T {
@@ -176,6 +185,10 @@ impl<T: BlockIo + ?Sized> BlockIo for &T {
 
     fn flush(&self, cx: &T::Cx) -> Result<(), Error> {
         (**self).flush(cx)
+    }
+
+    fn deps(&self, cx: &T::Cx, f: &mut dyn FnMut(&mut softdep::Deps)) -> bool {
+        (**self).deps(cx, f)
     }
 }
 
@@ -245,6 +258,8 @@ pub const NIADDR: usize = 3;
 pub struct Ufs<B> {
     io: B,
     sb: Superblock,
+    /// Writing with soft updates, through the device's tracker.
+    soft: bool,
 }
 
 impl<B: BlockIo> Ufs<B> {
@@ -252,7 +267,50 @@ impl<B: BlockIo> Ufs<B> {
     /// has `sector`-byte sectors.
     pub fn open(cx: &B::Cx, io: B, sector: u32) -> Result<Self, Error> {
         let sb = Superblock::find(cx, &io, sector)?;
-        Ok(Self { io, sb })
+        Ok(Self {
+            io,
+            sb,
+            soft: false,
+        })
+    }
+
+    /// Writes with soft updates from now on, if the device keeps a tracker
+    /// (which must start empty); returns whether it does.
+    pub fn use_soft_updates(&mut self, cx: &B::Cx) -> bool {
+        self.soft = self.io.deps(cx, &mut |_| {});
+        self.soft
+    }
+
+    /// Changes the superblock's `fs_flags` (written with the summary).
+    pub fn set_flags(&mut self, flags: u32) {
+        self.sb.flags = flags;
+    }
+
+    /// Whether writes go with soft updates.
+    #[must_use]
+    pub fn soft_updates(&self) -> bool {
+        self.soft
+    }
+
+    /// Runs `f` with the tracker, with soft updates on.
+    pub(crate) fn soft<R>(&self, cx: &B::Cx, f: impl FnOnce(&mut softdep::Deps) -> R) -> Option<R> {
+        if !self.soft {
+            return None;
+        }
+        let mut f = Some(f);
+        let mut out = None;
+        self.io.deps(cx, &mut |d| {
+            if let Some(f) = f.take() {
+                out = Some(f(d));
+            }
+        });
+        out
+    }
+
+    /// How a write whose order matters goes: now without soft updates,
+    /// delayed (with dependencies) with them.
+    pub(crate) fn ordered(&self) -> Mode {
+        if self.soft { Mode::Delayed } else { Mode::Sync }
     }
 
     #[must_use]
@@ -272,6 +330,8 @@ impl<B: BlockIo> Ufs<B> {
     }
 
     /// Inode `ino`, checked (an unallocated one has [`Inode::mode`] 0).
+    /// With soft updates, its links dropped but not yet on the disk are
+    /// gone from [`Inode::effnlink`].
     pub fn inode(&self, cx: &B::Cx, ino: u32) -> Result<Inode, Error> {
         let sb = &self.sb;
         if ino >= sb.ncg.saturating_mul(sb.ipg) {
@@ -282,7 +342,12 @@ impl<B: BlockIo> Ufs<B> {
         self.io.read(cx, block, idx(sb.bsize), &mut |b| {
             out = Inode::parse(&b[within..within + inode::SIZE], sb);
         })?;
-        out
+        let mut ip = out?;
+        if let Some(delta) = self.soft(cx, |d| d.nlink_delta(ino)) {
+            let delta = u16::try_from(delta).unwrap_or(u16::MAX);
+            ip.effnlink = ip.nlink.saturating_sub(delta);
+        }
+        Ok(ip)
     }
 
     /// The fragment address of file block `lbn` (0 for a hole), through

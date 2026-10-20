@@ -6,6 +6,7 @@
 
 extern crate std;
 
+use alloc::string::String;
 use alloc::vec::Vec;
 use std::path::Path;
 use std::process::Command;
@@ -93,12 +94,12 @@ fn a_block_that_is_not_a_superblock_is_not_ufs2() {
 
 // ---- Against makefs ----
 
-fn have_makefs() -> bool {
+pub(crate) fn have_makefs() -> bool {
     Command::new("makefs").arg("-h").output().is_ok()
 }
 
 /// A scratch directory under the target directory, emptied.
-fn scratch(name: &str) -> std::path::PathBuf {
+pub(crate) fn scratch(name: &str) -> std::path::PathBuf {
     let d = std::env::temp_dir().join(std::format!("abyss-ufs-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
@@ -291,31 +292,31 @@ impl BlockIo for Mem {
 }
 
 /// A small PRNG (xorshift).
-struct Rng(u64);
+pub(crate) struct Rng(pub(crate) u64);
 
 impl Rng {
-    fn next(&mut self) -> u64 {
+    pub(crate) fn next(&mut self) -> u64 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;
         self.0
     }
 
-    fn below(&mut self, n: u64) -> u64 {
+    pub(crate) fn below(&mut self, n: u64) -> u64 {
         if n == 0 { 0 } else { self.next() % n }
     }
 }
 
 /// The model of what the file system should hold.
 #[derive(Clone, Debug)]
-enum MNode {
+pub(crate) enum MNode {
     File(Vec<u8>),
     Dir(std::collections::BTreeMap<Vec<u8>, u32>),
     Link(Vec<u8>),
 }
 
-struct Model {
-    nodes: std::collections::BTreeMap<u32, MNode>,
+pub(crate) struct Model {
+    pub(crate) nodes: std::collections::BTreeMap<u32, MNode>,
     /// Each directory's parent.
     parent: std::collections::BTreeMap<u32, u32>,
 }
@@ -396,8 +397,19 @@ fn maker(rng: &mut Rng, reserve: Reserve) -> ops::Maker {
 }
 
 /// Runs `n` random operations on the file system in `img`, mirrored in a
-/// model; returns the model. Out of space is fine.
-fn workload(fs: &Ufs<Mem>, sum: &mut Summary, seed: u64, n: usize) -> Model {
+/// model, calling `after` after each; returns the model. Out of space is
+/// fine. An inode unlinked for good is freed now without soft updates;
+/// with them, the engine's deferred work frees it.
+pub(crate) fn workload<B: BlockIo<Cx = ()>>(
+    fs: &Ufs<B>,
+    sum: &mut Summary,
+    seed: u64,
+    n: usize,
+    after: &mut dyn FnMut(&Ufs<B>, &mut Summary),
+) -> Model {
+    let soft = fs.soft_updates();
+    // `UFS_LOG` lists the operations.
+    let log = std::env::var("UFS_LOG").is_ok();
     let mut rng = Rng(seed);
     let mut m = Model {
         nodes: std::collections::BTreeMap::new(),
@@ -441,6 +453,7 @@ fn workload(fs: &Ufs<Mem>, sum: &mut Summary, seed: u64, n: usize) -> Model {
             .into_iter()
             .find(|(n, _)| *n == name)
             .map(|(_, i)| i);
+        let mut detail = String::new();
         let res: Result<(), Error> = (|| {
             match op {
                 // Make something.
@@ -485,6 +498,7 @@ fn workload(fs: &Ufs<Mem>, sum: &mut Summary, seed: u64, n: usize) -> Model {
                     };
                     let off = rng.below(span);
                     let len = 1 + rng.below(bsize * 3);
+                    detail = std::format!("write {off}+{len} over {}", ip.size);
                     let data: Vec<u8> = (0..len).map(|_| rng.next() as u8).collect();
                     let res = fs.write_data_range(&(), sum, ino, &mut ip, off, &data, r);
                     fs.write_inode(&(), ino, &ip, Mode::Sync)?;
@@ -505,6 +519,7 @@ fn workload(fs: &Ufs<Mem>, sum: &mut Summary, seed: u64, n: usize) -> Model {
                     };
                     let mut ip = fs.inode(&(), ino).unwrap();
                     let new = rng.below((ip.size * 2).max(bsize * 20));
+                    detail = std::format!("truncate {} to {new}", ip.size);
                     fs.truncate(&(), sum, ino, &mut ip, new, r, false)?;
                     fs.write_inode(&(), ino, &ip, Mode::Sync)?;
                     if let MNode::File(f) = m.nodes.get_mut(&ino).unwrap() {
@@ -540,13 +555,17 @@ fn workload(fs: &Ufs<Mem>, sum: &mut Summary, seed: u64, n: usize) -> Model {
                             return Ok(());
                         }
                         fs.rmdir(&(), sum, d, &mut dip, &name, ino, &mut ip, now)?;
-                        fs.free_inode(&(), sum, ino, &mut ip, r)?;
+                        if !soft {
+                            fs.free_inode(&(), sum, ino, &mut ip, r)?;
+                        }
                         m.nodes.remove(&ino);
                         m.parent.remove(&ino);
                     } else {
                         fs.unlink(&(), d, &mut dip, &name, ino, &mut ip, now)?;
-                        if ip.nlink == 0 {
-                            fs.free_inode(&(), sum, ino, &mut ip, r)?;
+                        if ip.effnlink == 0 {
+                            if !soft {
+                                fs.free_inode(&(), sum, ino, &mut ip, r)?;
+                            }
                             m.nodes.remove(&ino);
                         }
                     }
@@ -594,9 +613,11 @@ fn workload(fs: &Ufs<Mem>, sum: &mut Summary, seed: u64, n: usize) -> Model {
                         r,
                     )?;
                     if let (Some(t), Some(tip)) = (target, tip.as_mut())
-                        && tip.nlink == 0
+                        && tip.effnlink == 0
                     {
-                        fs.free_inode(&(), sum, t, tip, r)?;
+                        if !soft {
+                            fs.free_inode(&(), sum, t, tip, r)?;
+                        }
                         m.nodes.remove(&t);
                         m.parent.remove(&t);
                     }
@@ -614,6 +635,14 @@ fn workload(fs: &Ufs<Mem>, sum: &mut Summary, seed: u64, n: usize) -> Model {
             Ok(()) | Err(Error::NoSpace) => {}
             Err(e) => panic!("step {step} (op {op}): {e:?}"),
         }
+        if log {
+            std::eprintln!(
+                "step {}: op {op} in {d} {:?} ({existing:?}) {detail} -> {res:?}",
+                step + 1,
+                String::from_utf8_lossy(&name)
+            );
+        }
+        after(fs, sum);
         // The index the operations kept matches one built afresh.
         if hashed && m.nodes.contains_key(&d) {
             let mut fresh = fs.inode(&(), d).unwrap();
@@ -631,7 +660,7 @@ fn workload(fs: &Ufs<Mem>, sum: &mut Summary, seed: u64, n: usize) -> Model {
 }
 
 /// The image holds what the model says, link counts included.
-fn check_model(fs: &Ufs<&[u8]>, m: &Model, ino: u32) {
+pub(crate) fn check_model(fs: &Ufs<&[u8]>, m: &Model, ino: u32) {
     let ip = fs.inode(&(), ino).unwrap();
     assert_eq!(ip.nlink, m.links(ino), "links of {ino}");
     match &m.nodes[&ino] {
@@ -660,7 +689,7 @@ fn check_model(fs: &Ufs<&[u8]>, m: &Model, ino: u32) {
 
 /// `fsck_ffs -f -n` finds nothing wrong with the image at `path` (but the
 /// questions FreeBSD asks of any makefs image).
-fn fsck_clean(path: &Path) {
+pub(crate) fn fsck_clean(path: &Path) {
     let out = Command::new("fsck_ffs")
         .args(["-f", "-n"])
         .arg(path)
@@ -733,7 +762,7 @@ fn random_workloads_leave_fsck_clean_images() {
         )
         .unwrap();
         let mut sum = fs.load_summary(&()).unwrap();
-        let model = workload(&fs, &mut sum, seed, 3000);
+        let model = workload(&fs, &mut sum, seed, 3000, &mut |_, _| {});
         fs.write_summary(&(), &mut sum, true, 1_760_000_100)
             .unwrap();
         let bytes = fs.io().0.borrow().clone();
