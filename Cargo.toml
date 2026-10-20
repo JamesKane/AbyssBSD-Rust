@@ -5,6 +5,7 @@ members = [
     "arch/aarch64",
     "arch/hal",
     "arch/x86_64",
+    "arch/x86_64/mem",
     "boot/bootproto",
     "boot/efi",
     "boot/loader-efi",
@@ -64,6 +65,7 @@ members = [
 default-members = [
     "xtask",
     "arch/hal",
+    "arch/x86_64/mem",
     "boot/bootproto",
     "boot/efi",
     "drivers/ahci",

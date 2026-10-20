@@ -71,9 +71,14 @@ name = "arch-x86_64"
 version = "0.0.0"
 dependencies = [
  "addr",
+ "arch-x86_64-mem",
  "hal",
  "pt",
 ]
+
+[[package]]
+name = "arch-x86_64-mem"
+version = "0.0.0"
 
 [[package]]
 name = "atrtc"

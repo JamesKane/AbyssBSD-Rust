@@ -17,8 +17,9 @@ use sched::Sleepable;
 use vm::PAGE_SIZE;
 use vm::map::{Inherit, MapError, Prot};
 
-use super::{SysResult, int, process};
-use crate::mm::space::{Anon, SpaceError, USER_END, USER_START};
+use super::{SysResult, int};
+use crate::mm::space::{AddressSpace, Anon, SpaceError, USER_END, USER_START};
+use crate::proc::Process;
 
 fn map_error(e: SpaceError) -> Errno {
     match e {
@@ -106,6 +107,13 @@ fn file_object(
     }
 }
 
+/// Runs `f` on the current address space, borrowed.
+fn in_space<R>(f: impl FnOnce(&AddressSpace) -> Result<R, SpaceError>) -> Result<R, Errno> {
+    AddressSpace::with_current(f)
+        .ok_or(Errno::EINVAL)?
+        .map_err(map_error)
+}
+
 /// `mmap(addr, len, prot, flags, fd, pos)`.
 pub(super) fn mmap(
     s: &Sleepable,
@@ -116,7 +124,6 @@ pub(super) fn mmap(
     fd: u64,
     pos: u64,
 ) -> SysResult {
-    let p = process()?;
     let flags = u32::try_from(flags).map_err(|_| Errno::EINVAL)?;
     let (prot, max_prot) = prots(prot)?;
     let known = MAP_SHARED
@@ -197,7 +204,7 @@ pub(super) fn mmap(
         exclusive: flags & MAP_EXCL != 0,
         // Like FreeBSD, an address without MAP_FIXED is only a hint.
         hint: if fixed || addr == 0 {
-            VirtAddr::new(p.mmap_base())
+            VirtAddr::new(Process::with_current(Process::mmap_base).ok_or(Errno::EINVAL)?)
         } else {
             start
         },
@@ -214,11 +221,10 @@ pub(super) fn mmap(
     if a.exclusive && !fixed {
         return Err(Errno::EINVAL);
     }
-    let at = match object {
-        Backing::Object(object, page) => p.space().map_object(s, &a, object, page),
-        Backing::Zeros => p.space().map_anon(s, &a),
-    }
-    .map_err(map_error)?;
+    let at = in_space(|space| match object {
+        Backing::Object(object, page) => space.map_object(s, &a, object, page),
+        Backing::Zeros => space.map_anon(s, &a),
+    })?;
     Ok(at.get() + pageoff)
 }
 
@@ -228,7 +234,7 @@ pub(super) fn munmap(s: &Sleepable, addr: u64, len: u64) -> SysResult {
         return Err(Errno::EINVAL);
     }
     let (start, end) = pages(addr, len)?;
-    process()?.space().unmap(s, start..end).map_err(map_error)?;
+    in_space(|space| space.unmap(s, start..end))?;
     Ok(0)
 }
 
@@ -239,10 +245,7 @@ pub(super) fn mprotect(s: &Sleepable, addr: u64, len: u64, prot: u64) -> SysResu
         return Ok(0);
     }
     let (start, end) = pages(addr, len)?;
-    process()?
-        .space()
-        .protect(s, start..end, prot)
-        .map_err(map_error)?;
+    in_space(|space| space.protect(s, start..end, prot))?;
     Ok(0)
 }
 
@@ -259,10 +262,7 @@ pub(super) fn minherit(s: &Sleepable, addr: u64, len: u64, inherit: u64) -> SysR
         return Ok(0);
     }
     let (start, end) = pages(addr, len)?;
-    process()?
-        .space()
-        .set_inherit(s, start..end, inherit)
-        .map_err(map_error)?;
+    in_space(|space| space.set_inherit(s, start..end, inherit))?;
     Ok(0)
 }
 

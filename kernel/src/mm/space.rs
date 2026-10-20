@@ -226,6 +226,12 @@ pub(crate) struct AddressSpace {
 }
 
 impl AddressSpace {
+    /// Runs `f` on the current thread's address space, borrowed (no
+    /// reference taken): `None` if it runs in none.
+    pub(crate) fn with_current<R>(f: impl FnOnce(&Self) -> R) -> Option<R> {
+        sched::with_address_space(|a| a?.as_any().downcast_ref::<Self>().map(f))
+    }
+
     /// An empty address space.
     pub(crate) fn new() -> Result<Arc<Self>, SpaceError> {
         Self::with_map(VmMap::new(
@@ -715,25 +721,22 @@ pub(crate) fn page_fault(f: &arch::PageFault) -> bool {
     if !f.interrupts_enabled || hal::interrupt::active() || hal::critical::depth() != 0 {
         return false;
     }
-    let Some(space) = sched::address_space() else {
-        return false;
-    };
-    let Some(space) = space.as_any().downcast_ref::<AddressSpace>() else {
-        return false;
-    };
     let access = match f.access {
         arch::FaultAccess::Read => Access::Read,
         arch::FaultAccess::Write => Access::Write,
         arch::FaultAccess::Execute => Access::Execute,
     };
-    hal::irq::enable();
-    // SAFETY: the fault came from a thread (interrupts were enabled,
-    // outside interrupt handlers and critical sections), which may sleep
-    // as the code it interrupted could have.
-    let s = unsafe { Sleepable::assume() };
-    let ok = space.fault(&s, VirtAddr::new(f.address), access).is_ok();
-    // Masked again for the trap's return path; it restores the
-    // interrupted state from the frame.
-    let _ = hal::irq::disable();
-    ok
+    AddressSpace::with_current(|space| {
+        hal::irq::enable();
+        // SAFETY: the fault came from a thread (interrupts were enabled,
+        // outside interrupt handlers and critical sections), which may
+        // sleep as the code it interrupted could have.
+        let s = unsafe { Sleepable::assume() };
+        let ok = space.fault(&s, VirtAddr::new(f.address), access).is_ok();
+        // Masked again for the trap's return path; it restores the
+        // interrupted state from the frame.
+        let _ = hal::irq::disable();
+        ok
+    })
+    .unwrap_or(false)
 }

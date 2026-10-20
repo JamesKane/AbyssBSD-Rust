@@ -1087,6 +1087,14 @@ pub fn with_owner<R>(f: impl FnOnce(Option<&(dyn core::any::Any + Send + Sync)>)
     f(unsafe { (*current().owner.get()).as_deref() })
 }
 
+/// Runs `f` on the current thread's user address space, borrowed (no
+/// reference count changes). `f` must not call [`set_address_space`].
+pub fn with_address_space<R>(f: impl FnOnce(Option<&dyn AddressSpace>) -> R) -> R {
+    // SAFETY: only the current thread writes it, and `f` does not, so the
+    // value outlives the borrow; a switch only reads it.
+    f(unsafe { (*current().space.get()).as_deref() })
+}
+
 /// The current thread's user address space.
 #[must_use]
 pub fn address_space() -> Option<Arc<dyn AddressSpace>> {

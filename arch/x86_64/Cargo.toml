@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 addr = { path = "../../lib/addr" }
 hal = { path = "../hal" }
+mem = { package = "arch-x86_64-mem", path = "mem" }
 pt = { path = "../../lib/pt" }
 
 [lints]

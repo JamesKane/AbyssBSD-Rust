@@ -26,6 +26,9 @@ pub mod smp;
 pub mod trap;
 pub mod user;
 
+// The kernel's `memcpy`, `memmove`, and `memset`: linked for its symbols.
+use mem as _;
+
 pub use addr::{PhysAddr, VirtAddr};
 pub use gdt::{CpuBlock, cpu_id};
 pub use hal::{FaultAccess, PageFault};
