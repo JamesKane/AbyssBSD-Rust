@@ -639,7 +639,7 @@ const RECORDINGS: &[(&str, &str)] = &[
 
 /// `cargo xtask --remote freebsd-record [--out DIR]`: boots FreeBSD 15.1 in
 /// bhyve with the P3 reference devices (virtio-blk, NVMe, AHCI, virtio-rng)
-/// and records how it names and describes them, for `lib/devtree`'s
+/// and the boot tests' (another of each disk) and records how it names and describes them, for `lib/devtree`'s
 /// differential tests. Writes into `DIR` (default
 /// `tests/corpus/freebsd/bhyve`) on the server.
 pub(crate) fn cmd_record(mut args: Args) -> Result<()> {
@@ -675,6 +675,10 @@ pub(crate) fn cmd_record(mut args: Args) -> Result<()> {
     )?;
     let ahci = work.join("ahci.img");
     fs::File::create(&ahci)?.set_len(64 << 20)?;
+    // The boot tests' read-only UFS2 disk, on virtio-blk, NVMe, and AHCI
+    // (slots 7 to 9), as they attach it.
+    let ufs = work.join("ufs.img");
+    fs::File::create(&ufs)?.set_len(16 << 20)?;
     let vm = Vm {
         smp: 4,
         mem: "2G".into(),
@@ -682,6 +686,9 @@ pub(crate) fn cmd_record(mut args: Args) -> Result<()> {
         devices: vec![
             "5,nvme,ram=64".into(),
             format!("6,ahci-hd,{}", ahci.display()),
+            format!("7,virtio-blk,{},ro", ufs.display()),
+            format!("8,nvme,{},ro", ufs.display()),
+            format!("9,ahci-hd,{},ro", ufs.display()),
         ],
         ..Vm::new(Vmm::Bhyve, Arch::X86_64, freebsd)
     };

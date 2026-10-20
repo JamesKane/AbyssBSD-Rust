@@ -162,11 +162,10 @@ impl FileSystem for UfsFs {
         Err(Errno::EROFS)
     }
 
-    fn unmount(&self, s: &Sleepable) -> Result<(), Errno> {
-        // Read-only: nothing is dirty, but let the buffers go.
-        let cache = &self.shared.ufs.io().0;
-        cache.sync(s).map_err(|_| Errno::EIO)?;
-        cache.invalidate();
+    fn unmount(&self, _s: &Sleepable) -> Result<(), Errno> {
+        // Read-only: nothing is dirty, and a read-only disk may refuse a
+        // flush (bhyve's does), so only let the buffers go.
+        self.shared.ufs.io().0.invalidate();
         Ok(())
     }
 
