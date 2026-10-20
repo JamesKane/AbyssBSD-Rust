@@ -200,6 +200,33 @@ fn run(s: &Sleepable, frame: &mut TrapFrame, call: Call) -> Result<Option<u64>, 
         Sysno::Statfs => path::statfs(s, a0, a1),
         Sysno::Getfsstat => path::getfsstat(s, a0, a1, a2),
         Sysno::Umask => path::umask(a0),
+        Sysno::Pathconf => path::pathconf(s, a0, a1, false),
+        Sysno::AclGetFd
+        | Sysno::AclSetFd
+        | Sysno::AclDeleteFd
+        | Sysno::AclAclcheckFd
+        | Sysno::ExtattrGetFd
+        | Sysno::ExtattrSetFd
+        | Sysno::ExtattrDeleteFd
+        | Sysno::ExtattrListFd => fsops::no_acls(s, true, a0, false),
+        Sysno::AclGetFile
+        | Sysno::AclSetFile
+        | Sysno::AclDeleteFile
+        | Sysno::AclAclcheckFile
+        | Sysno::ExtattrGetFile
+        | Sysno::ExtattrSetFile
+        | Sysno::ExtattrDeleteFile
+        | Sysno::ExtattrListFile => fsops::no_acls(s, false, a0, false),
+        Sysno::AclGetLink
+        | Sysno::AclSetLink
+        | Sysno::AclDeleteLink
+        | Sysno::AclAclcheckLink
+        | Sysno::ExtattrGetLink
+        | Sysno::ExtattrSetLink
+        | Sysno::ExtattrDeleteLink
+        | Sysno::ExtattrListLink => fsops::no_acls(s, false, a0, true),
+        Sysno::Lpathconf => path::pathconf(s, a0, a1, true),
+        Sysno::Fpathconf => path::fpathconf(s, a0, a1),
         Sysno::Mkdir => fsops::mkdir(s, a0, a1),
         Sysno::Mkdirat => fsops::mkdirat(s, a0, a1, a2),
         Sysno::Mkfifo => fsops::mkfifo(s, a0, a1),

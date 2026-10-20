@@ -117,6 +117,21 @@ pub(crate) fn init() {
         },
         Err(e) => kprintln!("fs: no /dev on the root file system ({e:?}); devfs not mounted"),
     }
+    // A tmpfs on /tmp, as a FreeBSD install with `tmpmfs` has.
+    if let Ok(t) = ns.lookup(&s, &at, b"/tmp") {
+        let tmp = Mount::new(
+            MountInfo {
+                type_name: "tmpfs",
+                flags: MNT_LOCAL,
+                from: b"tmpfs".to_vec(),
+                io_size: 4096,
+            },
+            Box::new(vfs::tmpfs::TmpFs::new(0o1777, 0, 0)),
+        );
+        if let Err(e) = ns.mount(&s, t, tmp, b"/tmp") {
+            kprintln!("fs: tmpfs not mounted on /tmp ({e:?})");
+        }
+    }
     let _ = NAMESPACE.set(ns);
     if sched::Builder::new("vnlru")
         .priority(sched::Priority::KERNEL)
@@ -155,6 +170,59 @@ fn vnlru(s: &Sleepable) {
             m.prune(s, share);
         }
     }
+}
+
+/// The file system types the kernel has, with FreeBSD's `VFS_SET` flags.
+const TYPES: &[(&str, i32)] = &[
+    ("devfs", abi::mount::VFCF_SYNTHETIC | abi::mount::VFCF_JAIL),
+    ("tmpfs", abi::mount::VFCF_JAIL),
+    ("tarfs", abi::mount::VFCF_JAIL | abi::mount::VFCF_READONLY),
+];
+
+/// Adds `vfs.conflist` (what `getvfsbyname` and `lsvfs` read) to the
+/// sysctl tree.
+pub(crate) fn sysctl_init(s: &Sleepable) {
+    crate::sysctl::with(s, |t| {
+        let root = t.root();
+        let vfs = match t.child(root, "vfs") {
+            Some(v) => v,
+            None => t
+                .add_node(
+                    root,
+                    sysctl::Number::Fixed(abi::sysctl::ctl::VFS),
+                    "vfs",
+                    "File system",
+                )
+                .expect("vfs node"),
+        };
+        t.add_handler(
+            vfs,
+            sysctl::Number::Auto,
+            "conflist",
+            "List of all configured filesystems",
+            Arc::new(|rest: &[i32], out: &mut alloc::vec::Vec<u8>| {
+                if !rest.is_empty() {
+                    return Err(sysctl::ReadError::Invalid);
+                }
+                let mounts = NAMESPACE.get().map(Namespace::mounts).unwrap_or_default();
+                for &(name, flags) in TYPES {
+                    let mut x = abi::mount::Xvfsconf {
+                        vfc_typenum: i32::try_from(vfs::type_num(name)).unwrap_or(0),
+                        vfc_refcount: i32::try_from(
+                            mounts.iter().filter(|m| m.type_name() == name).count(),
+                        )
+                        .unwrap_or(i32::MAX),
+                        vfc_flags: flags,
+                        ..abi::mount::Xvfsconf::default()
+                    };
+                    x.vfc_name[..name.len()].copy_from_slice(name.as_bytes());
+                    out.extend_from_slice(crate::uaccess::bytes_of(&x));
+                }
+                Ok(())
+            }),
+        )
+        .expect("vfs.conflist");
+    });
 }
 
 /// The namespace. [`init`] runs before any process, and processes are

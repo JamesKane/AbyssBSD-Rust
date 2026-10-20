@@ -124,7 +124,7 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     // The userland suite runs the same ubench on AbyssBSD, from the memory
     // disk (no UFS yet to read the bench disk).
     let extra: &[(&str, &Path)] = if suite == "p4" {
-        &[("tmp/ubench", ubench.as_path())]
+        &[("usr/bench/ubench", ubench.as_path())]
     } else {
         &[]
     };
@@ -558,7 +558,7 @@ pub(crate) fn cmd_ubench(mut args: Args) -> Result<()> {
             arch,
             opts,
             "abyss.bench=p4 abyss.qemu_exit=1",
-            &[("tmp/ubench", bin.as_path())],
+            &[("usr/bench/ubench", bin.as_path())],
         )?;
         let mut all: BTreeMap<String, Vec<f64>> = BTreeMap::new();
         let mut units = BTreeMap::new();

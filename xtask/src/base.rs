@@ -298,9 +298,10 @@ pub(crate) fn md_image(arch: Arch, extra: &[(&str, &Path)]) -> Result<Option<Vec
         .collect::<std::io::Result<_>>()?;
     sources.retain(|p| p.extension().is_some_and(|x| x == "c"));
     sources.sort();
-    // devfs's mount point, and an empty one for tests to mount on.
+    // Mount points: devfs's, tmpfs's, and an empty one for tests.
     append(&mut md, "dev/", b'5', 0o555, &[])?;
     append(&mut md, "mnt/", b'5', 0o755, &[])?;
+    append(&mut md, "tmp/", b'5', 0o1777, &[])?;
     let mut dir = String::new();
     for part in TESTS_DIR.split('/') {
         dir = if dir.is_empty() {
@@ -334,6 +335,24 @@ pub(crate) fn md_image(arch: Arch, extra: &[(&str, &Path)]) -> Result<Option<Vec
         }
         let data = fs::read(&bin)?;
         append(&mut md, &format!("{TESTS_DIR}/{name}"), b'0', 0o555, &data)?;
+    }
+    // FreeBSD's fsx, built from the FreeBSD tree beside this one (it is
+    // under the APSL and is not kept here), for the kernel tests.
+    let fsx_src = util::root().join("../freebsd-src/tools/regression/fsx/fsx.c");
+    if fsx_src.exists() {
+        let bin = out_dir.join("fsx");
+        let stale = match (
+            fs::metadata(&fsx_src)?.modified(),
+            fs::metadata(&bin).and_then(|m| m.modified()),
+        ) {
+            (Ok(s), Ok(b)) => s > b || built_by.is_none_or(|x| x > b),
+            _ => true,
+        };
+        if stale {
+            cc_static_foreign(arch, &fsx_src, &bin)?;
+        }
+        append(&mut md, "usr/tests/fsx/", b'5', 0o755, &[])?;
+        append(&mut md, "usr/tests/fsx/fsx", b'0', 0o555, &fs::read(&bin)?)?;
     }
     for (path, file) in extra {
         if let Some((dir, _)) = path.rsplit_once('/') {

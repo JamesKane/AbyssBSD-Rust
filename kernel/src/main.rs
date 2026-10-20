@@ -118,6 +118,7 @@ fn kmain(boot_info: PhysAddr) -> ! {
     random::start_harvester();
     // After the clock is set, as FreeBSD mounts root once devices attach.
     fs::init();
+    fs::sysctl_init(&s);
     kinfo::init(&s);
 
     #[cfg(feature = "ktest")]

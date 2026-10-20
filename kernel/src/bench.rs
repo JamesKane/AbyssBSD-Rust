@@ -32,14 +32,14 @@ const RUN_NS: u64 = time::NANOS;
 const ROUNDS: usize = 3;
 
 /// The userland suite: FreeBSD's static `ubench`, the same binary FreeBSD
-/// runs, from the memory disk as `/tmp/ubench p4` (it prints the `kbench`
+/// runs, from the memory disk as `/usr/bench/ubench p4` (it prints the `kbench`
 /// lines itself).
 fn run_ubench(s: &Sleepable) -> bool {
-    const PATH: &[u8] = b"/tmp/ubench";
+    const PATH: &[u8] = b"/usr/bench/ubench";
     match crate::proc::Process::spawn(s, PATH, &[PATH, b"p4"], &[], None) {
         Ok(p) => p.wait(s) == crate::proc::Exit::Code(0),
         Err(e) => {
-            kprintln!("bench: cannot run /tmp/ubench: {e:?}");
+            kprintln!("bench: cannot run /usr/bench/ubench: {e:?}");
             false
         }
     }

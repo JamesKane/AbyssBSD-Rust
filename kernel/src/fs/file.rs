@@ -11,7 +11,9 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use abi::errno::Errno;
-use abi::fcntl::{FREAD, FWRITE, O_APPEND, O_NONBLOCK, SEEK_CUR, SEEK_END, SEEK_SET};
+use abi::fcntl::{
+    FREAD, FWRITE, O_APPEND, O_NONBLOCK, SEEK_CUR, SEEK_DATA, SEEK_END, SEEK_HOLE, SEEK_SET,
+};
 use abi::ioctl::FIONREAD;
 use abi::stat::Stat;
 use sched::Sleepable;
@@ -214,6 +216,21 @@ impl File {
             return Err(Errno::ESPIPE);
         };
         let mut off = self.offset.lock(s);
+        if whence == SEEK_DATA || whence == SEEK_HOLE {
+            // No file system reports holes yet: a file is all data, and its
+            // end is its only hole (FreeBSD's answer without hole support).
+            if f.vnode.kind() != Kind::Regular {
+                return Err(Errno::EINVAL);
+            }
+            let size = f.vnode.size(s)?;
+            let at = u64::try_from(offset).map_err(|_| Errno::ENXIO)?;
+            if at >= size {
+                return Err(Errno::ENXIO);
+            }
+            let to = if whence == SEEK_DATA { at } else { size };
+            *off = to;
+            return i64::try_from(to).map_err(|_| Errno::EOVERFLOW);
+        }
         let base = match whence {
             SEEK_SET => 0,
             SEEK_CUR => i64::try_from(*off).map_err(|_| Errno::EOVERFLOW)?,

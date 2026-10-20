@@ -73,6 +73,36 @@ pub const F_RDLCK: i16 = 1;
 pub const F_UNLCK: i16 = 2;
 pub const F_WRLCK: i16 = 3;
 
+/// `pathconf` names (`unistd.h`).
+pub const _PC_LINK_MAX: u32 = 1;
+pub const _PC_MAX_CANON: u32 = 2;
+pub const _PC_MAX_INPUT: u32 = 3;
+pub const _PC_NAME_MAX: u32 = 4;
+pub const _PC_PATH_MAX: u32 = 5;
+pub const _PC_PIPE_BUF: u32 = 6;
+pub const _PC_CHOWN_RESTRICTED: u32 = 7;
+pub const _PC_NO_TRUNC: u32 = 8;
+pub const _PC_VDISABLE: u32 = 9;
+pub const _PC_ALLOC_SIZE_MIN: u32 = 10;
+pub const _PC_FILESIZEBITS: u32 = 12;
+pub const _PC_SYMLINK_MAX: u32 = 18;
+pub const _PC_MIN_HOLE_SIZE: u32 = 21;
+pub const _PC_ASYNC_IO: u32 = 53;
+pub const _PC_SYNC_IO: u32 = 55;
+pub const _PC_ACL_EXTENDED: u32 = 59;
+pub const _PC_CAP_PRESENT: u32 = 61;
+pub const _PC_INF_PRESENT: u32 = 62;
+pub const _PC_MAC_PRESENT: u32 = 63;
+pub const _PC_ACL_NFS4: u32 = 64;
+pub const _PC_DEALLOC_PRESENT: u32 = 65;
+pub const _PC_NAMEDATTR_ENABLED: u32 = 66;
+pub const _PC_HAS_NAMEDATTR: u32 = 67;
+pub const _PC_HAS_HIDDENSYSTEM: u32 = 68;
+pub const _PC_CLONE_BLKSIZE: u32 = 69;
+pub const _PC_CASE_INSENSITIVE: u32 = 70;
+/// `_POSIX_ASYNCHRONOUS_IO`.
+pub const POSIX_ASYNCHRONOUS_IO: i64 = 200_112;
+
 /// `flock` operations.
 pub const LOCK_SH: u32 = 0x01;
 pub const LOCK_EX: u32 = 0x02;
@@ -177,6 +207,32 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("LOCK_EX", LOCK_EX),
     c("LOCK_NB", LOCK_NB),
     c("LOCK_UN", LOCK_UN),
+    u("_PC_LINK_MAX", _PC_LINK_MAX),
+    u("_PC_MAX_CANON", _PC_MAX_CANON),
+    u("_PC_MAX_INPUT", _PC_MAX_INPUT),
+    u("_PC_NAME_MAX", _PC_NAME_MAX),
+    u("_PC_PATH_MAX", _PC_PATH_MAX),
+    u("_PC_PIPE_BUF", _PC_PIPE_BUF),
+    u("_PC_CHOWN_RESTRICTED", _PC_CHOWN_RESTRICTED),
+    u("_PC_NO_TRUNC", _PC_NO_TRUNC),
+    u("_PC_VDISABLE", _PC_VDISABLE),
+    u("_PC_ALLOC_SIZE_MIN", _PC_ALLOC_SIZE_MIN),
+    u("_PC_FILESIZEBITS", _PC_FILESIZEBITS),
+    u("_PC_SYMLINK_MAX", _PC_SYMLINK_MAX),
+    u("_PC_MIN_HOLE_SIZE", _PC_MIN_HOLE_SIZE),
+    u("_PC_ASYNC_IO", _PC_ASYNC_IO),
+    u("_PC_SYNC_IO", _PC_SYNC_IO),
+    u("_PC_ACL_EXTENDED", _PC_ACL_EXTENDED),
+    u("_PC_CAP_PRESENT", _PC_CAP_PRESENT),
+    u("_PC_INF_PRESENT", _PC_INF_PRESENT),
+    u("_PC_MAC_PRESENT", _PC_MAC_PRESENT),
+    u("_PC_ACL_NFS4", _PC_ACL_NFS4),
+    u("_PC_DEALLOC_PRESENT", _PC_DEALLOC_PRESENT),
+    u("_PC_NAMEDATTR_ENABLED", _PC_NAMEDATTR_ENABLED),
+    u("_PC_HAS_NAMEDATTR", _PC_HAS_NAMEDATTR),
+    u("_PC_HAS_HIDDENSYSTEM", _PC_HAS_HIDDENSYSTEM),
+    u("_PC_CLONE_BLKSIZE", _PC_CLONE_BLKSIZE),
+    u("_PC_CASE_INSENSITIVE", _PC_CASE_INSENSITIVE),
     c("F_READAHEAD", F_READAHEAD),
     c("F_RDAHEAD", F_RDAHEAD),
     c("F_DUPFD_CLOEXEC", F_DUPFD_CLOEXEC),

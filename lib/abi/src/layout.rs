@@ -195,6 +195,14 @@ pub static LAYOUTS: &[StructLayout] = &[
         d_pad1 => "d_pad1",
         d_name => "d_name",
     }),
+    layout!(crate::mount::Xvfsconf, "struct xvfsconf", ["sys/param.h", "sys/mount.h"], All, {
+        vfc_vfsops => "vfc_vfsops",
+        vfc_name => "vfc_name",
+        vfc_typenum => "vfc_typenum",
+        vfc_refcount => "vfc_refcount",
+        vfc_flags => "vfc_flags",
+        vfc_next => "vfc_next",
+    }),
     layout!(crate::mount::Statfs, "struct statfs", ["sys/param.h", "sys/mount.h"], All, {
         f_version => "f_version",
         f_type => "f_type",

@@ -522,6 +522,19 @@ impl FileSystem for TreeFs {
         })
     }
 
+    fn pathconf(&self, kind: Kind, name: u32) -> Result<i64, Errno> {
+        use abi::fcntl::*;
+        match name {
+            // `LINK_MAX`, as FreeBSD's devfs and tarfs report.
+            _PC_LINK_MAX => Ok(32767),
+            _PC_SYMLINK_MAX => Ok(PATH_MAX as i64),
+            _PC_NAME_MAX => Ok(NAME_MAX as i64),
+            _PC_PIPE_BUF if matches!(kind, Kind::Directory | Kind::Fifo) => Ok(512),
+            _PC_CHOWN_RESTRICTED | _PC_NO_TRUNC => Ok(1),
+            _ => crate::mount::std_pathconf(name),
+        }
+    }
+
     fn statfs(&self, _s: &Sleepable) -> Result<FsStats, Errno> {
         let bytes: u64 = self.nodes.iter().map(|n| n.attr.bytes).sum();
         Ok(FsStats {

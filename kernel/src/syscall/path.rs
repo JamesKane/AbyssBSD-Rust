@@ -409,6 +409,36 @@ pub(super) fn getfsstat(s: &Sleepable, buf: u64, bufsize: u64, mode: u64) -> Sys
     Ok(n as u64)
 }
 
+/// `pathconf(path, name)`, `lpathconf` (`nofollow`).
+pub(super) fn pathconf(s: &Sleepable, path_ptr: u64, name: u64, nofollow: bool) -> SysResult {
+    let p = process()?;
+    let path = path(path_ptr)?;
+    let walk = if nofollow {
+        Walk::NOFOLLOW
+    } else {
+        Walk::FOLLOW
+    };
+    let v = crate::fs::lookup(s, &p, At::Cwd, &path, walk)?;
+    pathconf_of(&v, name)
+}
+
+/// `fpathconf(fd, name)`.
+pub(super) fn fpathconf(s: &Sleepable, fd: u64, name: u64) -> SysResult {
+    let f = super::io::current_file(s, fd)?;
+    match f.vnode() {
+        Some(v) => pathconf_of(v, name),
+        // A pipe: only its buffer size means anything.
+        None if u32::try_from(name) == Ok(_PC_PIPE_BUF) => Ok(512),
+        None => Err(Errno::EINVAL),
+    }
+}
+
+fn pathconf_of(v: &Vnode, name: u64) -> SysResult {
+    let name = u32::try_from(name).map_err(|_| Errno::EINVAL)?;
+    let r = v.mount().fs().pathconf(v.kind(), name)?;
+    Ok(r.cast_unsigned())
+}
+
 /// `umask(newmask)`: returns the old mask.
 pub(super) fn umask(newmask: u64) -> SysResult {
     let p = process()?;

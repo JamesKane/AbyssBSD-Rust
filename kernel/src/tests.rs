@@ -2734,6 +2734,67 @@ mod user_memory {
     }
 
     ktest! {
+        /// `/rescue`'s tools build, copy, archive, remove, and restore a
+        /// tree on the tmpfs at `/tmp`.
+        fn rescue_tools_work_on_tmpfs() {
+            use crate::proc::Process;
+            let s = cx();
+            let script: &[u8] = b"cd /tmp && mkdir -p x/y && echo hello > x/y/f && \
+                cp x/y/f x/g && ln -s y/f x/l && [ \"$(cat x/l)\" = hello ] && \
+                mv x/g x/h && chmod 600 x/h && set -- $(ls x) && [ $# = 3 ] && \
+                case \"$(ls -l x/h)\" in -rw-------*) ;; *) exit 3;; esac && \
+                tar -cf t.tar x && rm -r x && [ ! -e x ] && tar -xf t.tar && \
+                [ \"$(cat x/y/f)\" = hello ] && case \"$(ls -l x/l)\" in *' -> y/f') ;; *) exit 4;; esac && \
+                rm -rf x t.tar && [ ! -e x ] && [ ! -e t.tar ] && exit 7";
+            let p = Process::spawn(
+                &s,
+                b"/rescue/sh",
+                &[b"sh", b"-c", script],
+                &[b"PATH=/rescue", b"HOME=/"],
+                Some(hal::cpu_id()),
+            )
+            .unwrap();
+            assert_eq!(p.wait(&s), crate::proc::Exit::Code(7));
+        }
+    }
+
+    ktest! {
+        /// FreeBSD's fsx on the tmpfs at `/tmp`, without mapped reads and
+        /// writes until the page cache (P5.3). Skipped when the memory disk
+        /// has no fsx (no FreeBSD tree beside this one to build it from).
+        fn fsx_passes_on_tmpfs() {
+            use crate::proc::Process;
+            let s = cx();
+            const FSX: &[u8] = b"/usr/tests/fsx/fsx";
+            let root = crate::fs::root();
+            let l = vfs::namei::Lookup {
+                start: &root,
+                root: &root,
+                follow: true,
+                beneath: false,
+                cred: crate::fs::cred(),
+            };
+            if crate::fs::namespace().lookup(&s, &l, FSX).is_err() {
+                kprintln!("fsx: not on the memory disk; skipped");
+                return;
+            }
+            let p = Process::spawn(
+                &s,
+                FSX,
+                &[b"fsx", b"-q", b"-R", b"-W", b"-N", b"20000", b"-S", b"7", b"/tmp/fsx.data"],
+                &[],
+                Some(hal::cpu_id()),
+            )
+            .unwrap();
+            assert_eq!(p.wait(&s), crate::proc::Exit::Code(0));
+            for f in [&b"/tmp/fsx.data"[..], b"/tmp/fsx.data.fsxgood", b"/tmp/fsx.data.fsxlog"] {
+                let _ = crate::fs::parent_of(&s, &p, crate::fs::At::Cwd, f, false)
+                    .and_then(|d| vfs::ops::remove(&s, &d.dir, &d.name, crate::fs::cred(), false));
+            }
+        }
+    }
+
+    ktest! {
         fn fuzzing_leaves_nothing_behind() {
             // The fuzzer twice with the same seed: the first run warms
             // whatever the kernel caches; the second must leave free

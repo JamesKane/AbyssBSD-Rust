@@ -628,3 +628,17 @@ pub(super) fn unmount(s: &Sleepable, path_ptr: u64, flags: u64) -> SysResult {
     crate::fs::namespace().unmount(s, &m, force)?;
     Ok(0)
 }
+
+/// The ACL and extended-attribute calls (`__acl_*`, `extattr_*`): the
+/// file must exist, then, as on a FreeBSD file system mounted without
+/// them, `EOPNOTSUPP`.
+pub(super) fn no_acls(s: &Sleepable, by_fd: bool, arg: u64, nofollow: bool) -> SysResult {
+    let p = process()?;
+    if by_fd {
+        let _ = fd_vnode(s, arg)?;
+    } else {
+        let flag = if nofollow { AT_SYMLINK_NOFOLLOW } else { 0 };
+        let _ = target(s, &p, cwd(), arg, flag)?;
+    }
+    Err(Errno::EOPNOTSUPP)
+}

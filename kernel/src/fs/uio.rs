@@ -18,6 +18,9 @@ unsafe impl Plain for Iovec {}
 // SAFETY: integers only, the tail padding an explicit field; any bits
 // valid.
 unsafe impl Plain for abi::fcntl::Flock {}
+// SAFETY: integers and byte arrays, the padding an explicit field; any
+// bits valid.
+unsafe impl Plain for abi::mount::Xvfsconf {}
 
 /// User buffers, consumed from the front.
 pub(crate) struct UserIo {

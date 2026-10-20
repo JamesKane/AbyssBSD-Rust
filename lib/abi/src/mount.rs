@@ -79,6 +79,31 @@ impl Default for Statfs {
     }
 }
 
+/// `struct xvfsconf`: one configured file system type, as `vfs.conflist`
+/// (and so `getvfsbyname` and `lsvfs`) reports it. The pointers are
+/// exported as null.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Xvfsconf {
+    pub vfc_vfsops: u64,
+    pub vfc_name: [u8; MFSNAMELEN],
+    pub vfc_typenum: i32,
+    /// How many of this type are mounted.
+    pub vfc_refcount: i32,
+    pub vfc_flags: i32,
+    pub _pad: [u8; 4],
+    pub vfc_next: u64,
+}
+
+/// `vfc_flags` values.
+pub const VFCF_STATIC: i32 = 0x0001_0000;
+pub const VFCF_NETWORK: i32 = 0x0002_0000;
+pub const VFCF_READONLY: i32 = 0x0004_0000;
+pub const VFCF_SYNTHETIC: i32 = 0x0008_0000;
+pub const VFCF_LOOPBACK: i32 = 0x0010_0000;
+pub const VFCF_JAIL: i32 = 0x0040_0000;
+pub const VFCF_FILEREVINC: i32 = 0x0400_0000;
+
 pub const MNT_RDONLY: u64 = 0x0000_0001;
 pub const MNT_SYNCHRONOUS: u64 = 0x0000_0002;
 pub const MNT_NOEXEC: u64 = 0x0000_0004;
@@ -119,6 +144,13 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("MNT_NOCLUSTERW", MNT_NOCLUSTERW as i64),
     c("MNT_UPDATE", MNT_UPDATE as i64),
     c("MNT_FORCE", MNT_FORCE as i64),
+    c("VFCF_STATIC", VFCF_STATIC as i64),
+    c("VFCF_NETWORK", VFCF_NETWORK as i64),
+    c("VFCF_READONLY", VFCF_READONLY as i64),
+    c("VFCF_SYNTHETIC", VFCF_SYNTHETIC as i64),
+    c("VFCF_LOOPBACK", VFCF_LOOPBACK as i64),
+    c("VFCF_JAIL", VFCF_JAIL as i64),
+    c("VFCF_FILEREVINC", VFCF_FILEREVINC as i64),
     c("MNT_WAIT", MNT_WAIT as i64),
     c("MNT_NOWAIT", MNT_NOWAIT as i64),
 ];

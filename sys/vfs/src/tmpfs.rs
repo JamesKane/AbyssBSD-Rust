@@ -32,7 +32,7 @@ use crate::{Uio, now};
 pub const ROOT_INO: u64 = 2;
 
 /// The most links a node may have (FreeBSD's tmpfs: `TMPFS_LINK_MAX`).
-const LINK_MAX: u64 = i16::MAX as u64;
+const LINK_MAX: u64 = i32::MAX as u64;
 
 /// What a node holds.
 enum Data {
@@ -485,6 +485,21 @@ impl FileSystem for TmpFs {
             Kind::Symlink => NodeOps::Symlink(n),
             k => NodeOps::Other(k, n),
         })
+    }
+
+    fn pathconf(&self, kind: Kind, name: u32) -> Result<i64, Errno> {
+        use abi::fcntl::*;
+        match name {
+            _PC_LINK_MAX => Ok(LINK_MAX as i64),
+            _PC_SYMLINK_MAX | _PC_PATH_MAX => Ok(PATH_MAX as i64),
+            _PC_NAME_MAX => Ok(NAME_MAX as i64),
+            _PC_PIPE_BUF if matches!(kind, Kind::Directory | Kind::Fifo) => Ok(512),
+            _PC_PIPE_BUF => Err(Errno::EINVAL),
+            _PC_CHOWN_RESTRICTED | _PC_NO_TRUNC | _PC_SYNC_IO | _PC_HAS_HIDDENSYSTEM => Ok(1),
+            _PC_FILESIZEBITS => Ok(64),
+            _PC_MIN_HOLE_SIZE => Ok(4096),
+            _ => crate::mount::std_pathconf(name),
+        }
     }
 
     fn statfs(&self, _s: &Sleepable) -> Result<FsStats, Errno> {

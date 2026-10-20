@@ -78,6 +78,12 @@ pub trait FileSystem: Send + Sync + Any {
     /// Moves `r.from` from one name to another.
     fn rename(&self, s: &Sleepable, r: Rename<'_>) -> Result<(), Errno>;
 
+    /// `pathconf`'s answer for `name` about a node of `kind` (FreeBSD's
+    /// `VOP_PATHCONF`); by default, `vop_stdpathconf`'s.
+    fn pathconf(&self, _kind: crate::Kind, name: u32) -> Result<i64, Errno> {
+        std_pathconf(name)
+    }
+
     /// Writes what is dirty; with `wait`, until it is on the disk.
     fn sync(&self, _s: &Sleepable, _wait: bool) -> Result<(), Errno> {
         Ok(())
@@ -89,6 +95,28 @@ pub trait FileSystem: Send + Sync + Any {
     }
 
     fn as_any(&self) -> &dyn Any;
+}
+
+/// `pathconf` answers every file system shares (FreeBSD's
+/// `vop_stdpathconf`): `EINVAL` for what a file system must answer itself.
+pub fn std_pathconf(name: u32) -> Result<i64, Errno> {
+    use abi::fcntl::*;
+    match name {
+        _PC_ASYNC_IO => Ok(POSIX_ASYNCHRONOUS_IO),
+        _PC_PATH_MAX => Ok(PATH_MAX as i64),
+        _PC_ACL_EXTENDED
+        | _PC_ACL_NFS4
+        | _PC_CAP_PRESENT
+        | _PC_DEALLOC_PRESENT
+        | _PC_INF_PRESENT
+        | _PC_MAC_PRESENT
+        | _PC_NAMEDATTR_ENABLED
+        | _PC_HAS_NAMEDATTR
+        | _PC_HAS_HIDDENSYSTEM
+        | _PC_CLONE_BLKSIZE
+        | _PC_CASE_INSENSITIVE => Ok(0),
+        _ => Err(Errno::EINVAL),
+    }
 }
 
 /// What a mount is called and how (`struct statfs`'s strings and flags).
