@@ -360,6 +360,8 @@ The AML interpreter is one of the highest-risk components, so it gets its own fu
 
 ## 8. Storage and file systems
 
+The VFS and the file systems are specified in [VFS.md](VFS.md) ([ADR-0013](adr/0013-vfs.md)).
+
 - `sys/storage`: a small GEOM replacement. A `BlockDevice` trait provides async `Bio` requests,
   GPT partition providers, and `/dev` nodes named FreeBSD-style (`nda0p2`, `ada0p1`, `vtbd0p3`) so
   stock `fstab` conventions and tools work.

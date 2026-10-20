@@ -19,6 +19,7 @@ Status values: **Proposed** (awaiting owner confirmation) · **Accepted** · **S
 | [0010](0010-qemu-first-development.md) | QEMU-first development; physical machines gate from P6 | Accepted |
 | [0011](0011-performance-parity.md) | Performance parity with FreeBSD is an exit criterion | Accepted |
 | [0012](0012-driver-model.md) | Driver model: FreeBSD's userland view, framework-owned lifecycle, dependency graph, typed grants | Accepted |
+| [0013](0013-vfs.md) | VFS and file systems: typed references, generic-layer protocol, one page cache, engines in `lib/` | Accepted |
 
 Template:
 

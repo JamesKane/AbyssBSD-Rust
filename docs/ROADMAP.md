@@ -449,7 +449,7 @@ Carried into P4.0: the aarch64 P2 and P3 numbers (recorded under TCG, not gating
 recorded, and the two known issues of P3.9 stay open.
 
 
-## Phase 4: First userspace: `/rescue/sh` (L)
+## Phase 4: First userspace: `/rescue/sh` (L) — done 2026-10-19
 
 **Goal:** an unmodified, statically linked FreeBSD binary runs.
 
@@ -822,6 +822,99 @@ within 2% of FreeBSD.
 stress workload (fsx-style, run unmodified from FreeBSD's tests) completes, and the image passes
 `fsck_ffs` afterwards. The loader can read the kernel from UFS2. The P5 performance suite (namecache,
 directory, UFS2 and tmpfs I/O, `fsync`, `base.txz` extraction) is within 2% of FreeBSD.
+
+**Design.** [VFS.md](VFS.md) ([ADR-0013](adr/0013-vfs.md)): typed memory and use references to
+vnodes, the protocol in the generic layer, one page cache for file data, a buffer cache for
+metadata, and the on-disk engines in host-tested `lib/` crates.
+
+**Reference configuration.** The P4 machines (QEMU `q35` and `virt`, bhyve), each with an NVMe disk
+holding a GPT with a FAT ESP and a UFS2 partition made on the build server with `makefs`/`newfs`.
+The FreeBSD 15.1 guests use the same disks for the baselines.
+
+### Milestones
+
+Each milestone ends green on both architectures, with CI passing.
+
+```
+P5.0 ─► P5.1 ─┬─► P5.2 ──────────────────────────┐
+              └─► P5.3 ─► P5.4 ─► P5.5 ─┬─► P5.7 ─┼─► P5.8 ─► P5.9
+                          P5.6 (from P5.3) ─────────┘
+```
+
+**P5.0 File-system harness, and closing Phase 4.**
+- The P5 suite in `ubench` (or a sibling program), with FreeBSD's baseline on bhyve, on a UFS2
+  bench disk and on tmpfs.
+- `cargo xtask fs-image` builds the reference GPT disks (ESP plus UFS2) on the server, and `cargo
+  xtask fs-check` runs `fsck_ffs -f -n` / `fsck_msdosfs -n` on an image and reports.
+- fsx and pjdfstest built on the server from the FreeBSD tree, and their runs recorded on FreeBSD.
+- The aarch64 TCG numbers left from P4.0, recorded.
+
+**P5.1 VFS core.**
+- Vnodes as VFS.md §4 describes: the per-mount inode table, `VnodeUse`, `inactive` and `reclaim`,
+  `Live`/`Doomed` states, the vnode LRU and `vnlru`, and per-vnode `SxLock`s with the §5 order.
+- The name cache with negative entries and directory back-references (§6). `namei` rebased on it,
+  with typed lookup modes.
+- The operation traits (§7) and generic implementations: `open` with `O_CREAT`/`O_EXCL`/`O_TRUNC`,
+  `link`, `unlink`, `rename`, `mkdir`, `rmdir`, `symlink`, `mknod`/`mkfifo`, `chmod`, `chown`,
+  `utimensat`, `truncate`, `chflags`, `getdirentries` with cookies, `access` checks (§13), and
+  advisory locks (§12).
+- Mounts: `nmount`, `mount`, `unmount` (with `MNT_FORCE`), `statfs`/`fstatfs`/`getfsstat`, and
+  busy counts. The memory disk and devfs move onto the new interfaces.
+- Host tests against an in-memory test file system, including random operation sequences checked
+  against a model.
+
+**P5.2 tmpfs and devfs.**
+- tmpfs (§10.2) mounted on `/tmp`. The first writable file system: every P5.1 syscall works on it,
+  and pjdfstest passes on it as FreeBSD's tmpfs does.
+- devfs made dynamic (§10.1): disk and partition nodes with raw block access, and names, modes, and
+  `stat` matching FreeBSD.
+- `fsx` on tmpfs.
+
+**P5.3 Page cache, buffer cache, write-back.**
+- The vnode pager with fill and write-back (§8.1), dirty tracking by write fault for shared
+  mappings, `msync`, and reclaiming clean pages under pressure.
+- `sys/bufcache` (§8.2) over `sys/storage`, with synchronous wrappers that sleep on `Bio`
+  completion and `BIO_FLUSH`.
+- The syncer (§9.1), `fsync`/`fdatasync`/`sync`, and dirty throttling (§9.3).
+- Clustering and read-ahead (§8.3).
+- Proven first on a raw disk node, and by tmpfs moving its file data to the same paths.
+
+**P5.4 UFS2 read.**
+- `lib/ufs` read side (§10.3 stage 1), host-tested on images `makefs` and `newfs` made from
+  `base.txz`, comparing every file's contents and `stat` with the source tree.
+- The kernel mounts UFS2 read-only from NVMe, AHCI, and virtio-blk. `find`, `ls -lR`, and
+  `cat` over the whole tree match FreeBSD's output on the same image.
+- The loader reads the kernel and its modules from UFS2.
+
+**P5.5 UFS2 write.**
+- Stage 2 of §10.3: allocation with FreeBSD's policies, `balloc`, truncation, directory
+  operations, inode allocation, check-hashes, write ordering, and the clean flag.
+- Host random workloads on images, each checked by `fsck_ffs -f -n` on the server with no errors.
+- In the kernel: a read-write UFS2 mount, pjdfstest and fsx on it, then `fsck_ffs -f` clean on the
+  server. Large-directory lookups use a directory hash (FreeBSD's `dirhash`).
+
+**P5.6 msdosfs.**
+- `lib/fat` (§10.4) read and write, host-tested against `newfs_msdos` images and `fsck_msdosfs`.
+- The ESP mounted on `/boot/efi`. fsx on it, and `fsck_msdosfs -n` clean afterwards.
+
+**P5.7 Soft updates.**
+- Stage 3 of §10.3: dependency tracking and rollback, `fsync` that writes only what the file needs,
+  and mounting with `-o softdep` / honoring `FS_DOSOFTDEP` as `tunefs -n enable` sets it.
+- Crash tests: the VM killed at random points during workloads, then `fsck_ffs -p` and `-f -n` on
+  the server, with nothing but leaked blocks and inodes.
+
+**P5.8 Root on UFS2.**
+- The kernel mounts the root from `vfs.root.mountfrom`, devfs on `/dev`, tmpfs on `/tmp`, and the
+  ESP on `/boot/efi`. Both architectures (and bhyve) boot from an NVMe disk to `/rescue/sh` on UFS2,
+  with the boot-to-shell expect test in CI moved onto it.
+- The full `base.txz` userland on the root, and its tests that only need P5 features run: `ls`,
+  `find`, `tar`, `cp -R`, `mtree`.
+
+**P5.9 Verification and performance.**
+- fsx (unmodified) on UFS2 with soft updates completes, and the image passes `fsck_ffs -f`.
+- pjdfstest on tmpfs and UFS2 with the same results as FreeBSD.
+- The P5 performance suite within 2% of FreeBSD on bhyve, including the lockless name-cache path
+  (VFS.md §6.2) if measurement asks for it.
 
 ## Track: USB and input (parallel, starts after P3) (M)
 
