@@ -57,6 +57,12 @@ static INODE: LockClass = LockClass::new_dup_ok("ufs inode", 350);
 /// The allocation summary (FreeBSD's `UFS_LOCK`).
 static SUMMARY: LockClass = LockClass::new("ufs summary", 370);
 
+/// Soft-updates items past which the syncer writes everything each second
+/// (FreeBSD's `softdep_speedup`), and past which a writer waits for them
+/// (its `max_softdeps`, `softdep_slowdown`): memory they hold.
+const SOFTDEP_SPEEDUP: usize = 20_000;
+const SOFTDEP_LIMIT: usize = 80_000;
+
 /// An in-core inode, shared by its node and its file's pager.
 struct InodeCell {
     ino: u32,
@@ -378,6 +384,28 @@ impl Shared {
         true
     }
 
+    /// Soft-updates items held.
+    fn deps_held(&self, s: &Sleepable) -> usize {
+        self.deps.as_ref().map_or(0, |d| d.with(s, |d| d.len()))
+    }
+
+    /// A writer past [`SOFTDEP_LIMIT`] items waits for them to go below
+    /// [`SOFTDEP_SPEEDUP`], writing (FreeBSD's `softdep_slowdown`). The
+    /// caller holds no inode lock.
+    fn throttle(&self, s: &Sleepable) {
+        if self.deps_held(s) <= SOFTDEP_LIMIT {
+            return;
+        }
+        for _ in 0..8 {
+            let _ = self.write_inodes(s, Mode::Delayed);
+            let _ = self.ufs.io().cache.sync(s);
+            self.process_work(s);
+            if self.deps_held(s) <= SOFTDEP_SPEEDUP {
+                break;
+            }
+        }
+    }
+
     /// Bytes freed but not yet back in their groups (FreeBSD's
     /// `fs_pendingblocks`), which `statfs` counts free.
     fn pending_free(&self, s: &Sleepable) -> u64 {
@@ -556,6 +584,7 @@ impl FileSystem for UfsFs {
         if is_dir && let Some(ino) = to_dir_ino {
             from.parent = u64::from(ino);
         }
+        shared.throttle(s);
         Ok(())
     }
 
@@ -568,18 +597,27 @@ impl FileSystem for UfsFs {
         let Some(sum) = &shared.sum else {
             return;
         };
-        // File pages and inodes every 30 seconds; metadata as it ages.
+        // File pages, inodes, and the summary every 30 seconds; metadata
+        // as it ages, or all of it while soft updates hold too much
+        // (FreeBSD's `softdep_speedup`).
         let now = crate::time::now_ns();
-        if now.saturating_sub(shared.data_synced.load(Ordering::Relaxed)) >= 30_000_000_000 {
-            shared.data_synced.store(now, Ordering::Relaxed);
+        let speedup = shared.deps_held(s) > SOFTDEP_SPEEDUP;
+        let due = now.saturating_sub(shared.data_synced.load(Ordering::Relaxed)) >= 30_000_000_000;
+        if due || speedup {
+            if due {
+                shared.data_synced.store(now, Ordering::Relaxed);
+            }
             shared.sync_pages();
             let _ = shared.write_inodes(s, Mode::Delayed);
         }
+        let before = if speedup { u64::MAX } else { before };
         let _ = shared.ufs.io().cache.write_aged(s, before);
         shared.process_work(s);
-        let mut sum = sum.lock(s);
-        if sum.modified {
-            let _ = shared.ufs.write_summary(s, &mut sum, false, wall_seconds());
+        if due {
+            let mut sum = sum.lock(s);
+            if sum.modified {
+                let _ = shared.ufs.write_summary(s, &mut sum, false, wall_seconds());
+            }
         }
     }
 
@@ -964,6 +1002,8 @@ impl vfs::RegularNode for UfsNode {
         st.ip.mode &= !0o6000;
         st.dirty = true;
         self.cell.publish(&st);
+        drop(st);
+        shared.throttle(s);
         written
     }
 
@@ -1041,7 +1081,12 @@ impl DirectoryNode for UfsNode {
                 .ufs
                 .create(s, &mut sum, self.cell.ino, &mut st.ip, name, kind, &who)
             {
-                Ok((ino, _)) => return Ok(u64::from(ino)),
+                Ok((ino, _)) => {
+                    drop(sum);
+                    drop(st);
+                    shared.throttle(s);
+                    return Ok(u64::from(ino));
+                }
                 Err(ufs::Error::NoSpace) if attempt == 0 => {}
                 Err(e) => return Err(errno(e)),
             }
@@ -1068,12 +1113,11 @@ impl DirectoryNode for UfsNode {
         if u64::from(target.cell.ino) != ino {
             return Err(Errno::EINVAL);
         }
-        let mut st = self.cell.state.lock(s);
-        let mut tt = target.cell.state.lock(s);
-        let mut sum = sum.lock(s);
-        shared
-            .ufs
-            .link(
+        let r = {
+            let mut st = self.cell.state.lock(s);
+            let mut tt = target.cell.state.lock(s);
+            let mut sum = sum.lock(s);
+            shared.ufs.link(
                 s,
                 &mut sum,
                 self.cell.ino,
@@ -1084,18 +1128,19 @@ impl DirectoryNode for UfsNode {
                 now(),
                 Reserve::Allowed,
             )
-            .map_err(errno)
+        };
+        shared.throttle(s);
+        r.map_err(errno)
     }
 
     fn remove(&mut self, s: &Sleepable, name: &[u8], child: &mut dyn Node) -> Result<(), Errno> {
         let shared = Arc::clone(&self.fs);
         shared.sum()?;
         let child = ufs_node(child.as_any_mut())?;
-        let mut st = self.cell.state.lock(s);
-        let mut ct = child.cell.state.lock(s);
-        shared
-            .ufs
-            .unlink(
+        let r = {
+            let mut st = self.cell.state.lock(s);
+            let mut ct = child.cell.state.lock(s);
+            shared.ufs.unlink(
                 s,
                 self.cell.ino,
                 &mut st.ip,
@@ -1104,7 +1149,9 @@ impl DirectoryNode for UfsNode {
                 &mut ct.ip,
                 now(),
             )
-            .map_err(errno)
+        };
+        shared.throttle(s);
+        r.map_err(errno)
     }
 
     fn rmdir(
@@ -1116,12 +1163,11 @@ impl DirectoryNode for UfsNode {
         let shared = Arc::clone(&self.fs);
         let sum = shared.sum()?;
         let child = ufs_node(child.as_any_mut())?;
-        let mut st = self.cell.state.lock(s);
-        let mut ct = child.cell.state.lock(s);
-        let mut sum = sum.lock(s);
-        shared
-            .ufs
-            .rmdir(
+        let r = {
+            let mut st = self.cell.state.lock(s);
+            let mut ct = child.cell.state.lock(s);
+            let mut sum = sum.lock(s);
+            shared.ufs.rmdir(
                 s,
                 &mut sum,
                 self.cell.ino,
@@ -1131,7 +1177,9 @@ impl DirectoryNode for UfsNode {
                 &mut ct.ip,
                 now(),
             )
-            .map_err(errno)
+        };
+        shared.throttle(s);
+        r.map_err(errno)
     }
 
     fn readdir(

@@ -301,10 +301,38 @@ stages, each validated on the build server.
    - Metadata ordering as FreeBSD's UFS does without soft updates: synchronous writes where order
      matters, everything else delayed. `fs_clean` is cleared on mounting read-write and set on a
      clean unmount.
-3. **Soft updates**: FreeBSD's dependency rules (allocation before pointer, inode before directory
-   entry, directory entry removal before inode free, and so on), tracked on buffers and pages and
-   rolled back when a buffer is written before what it depends on. The on-disk result must satisfy
-   `fsck_ffs -p` after a crash at any point. It is tested by killing the VM mid-workload.
+3. **Soft updates** (P5.7), in `lib/ufs/src/softdep.rs`, for a file system with `FS_DOSOFTDEP`
+   (`newfs -U`, FreeBSD 15's `newfs` default). All metadata is written delayed. Each change is
+   an item with the waits FreeBSD's rules give it:
+   - A block pointer waits for the block's group map and its contents (file data written, or
+     the metadata buffer). An allocated inode waits for its group.
+   - A directory entry waits for the inode it names, written with its new link count. A new
+     directory's entry also waits for its first block and its parent's link; a directory's entry
+     in a new parent waits for that parent's link.
+   - A free waits for the inode (and any indirect block kept) to be written without the
+     pointers. A link count on the disk drops only once the entry holding the link is gone there.
+
+   Waits are ordered by stamps taken with the buffer held, and an inode's waits attach when it
+   is copied into its block. Before each write the buffer cache asks the tracker (a write hook):
+   - What may not go out yet is rolled back in a copy of the buffer, which then stays dirty.
+     Inode pointers and size roll back as FreeBSD's `initiate_write_inodeblock_ufs2` does.
+     Indirect block pointers roll back too, and so do directory entries (the inode number and
+     type). An inode whose group is not written goes out zeroed.
+   - Frees and link drops become deferred work, which the syncer does once a second through
+     in-core inodes it shares with the vnodes. `Inode::effnlink` is the link count everyone sees
+     meanwhile.
+
+   `fsync` writes only the buffers the file needs (its pointers' groups and blocks, its indirect
+   blocks, its inode, then the entries naming it). `sync` and unmount repeat until nothing
+   waits. Out of space, frees that are due are done and the allocation is tried again.
+
+   Three rules go beyond FreeBSD's, so that a second `fsck` finds nothing either: a pointer to an
+   indirect block that is empty on the disk never goes out; partial truncation disconnects the
+   kept tree before cutting it; and a failed `balloc` gives back the indirect blocks it made.
+
+   It is tested on the host: random workloads run over a cache that writes buffers back in
+   random order and file data late, and crash at random points; FreeBSD's `fsck_ffs -p` must
+   preen every crash image. In QEMU, `cargo xtask crash-test` kills the VM mid-workload.
 
 The engine is synchronous over `BlockIo`. In the kernel, `BlockIo` is the buffer cache. On the
 host it is an image file. File data goes through the page cache, and the engine only maps file

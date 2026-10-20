@@ -126,8 +126,8 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
                     .arg(local.join(name)),
             )?;
         }
-        // And the FAT one.
-        for name in crate::fattest::FAT_TEST {
+        // And the FAT one, and the empty soft-updates one.
+        for name in crate::fattest::FAT_TEST.iter().chain([&SOFT_TEST]) {
             let remote = format!(
                 "{}:abyss/dist/{RELEASE}/{}/{name}",
                 crate::remote::host(),
@@ -148,6 +148,7 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     }
     ufs_test(&dir(Arch::X86_64), &root(Arch::X86_64)?)?;
     crate::fattest::build(&dir(Arch::X86_64))?;
+    soft_test(&dir(Arch::X86_64))?;
     for arch in arches {
         let root = root(arch)?;
         let tar = rescue_image(arch)?;
@@ -263,6 +264,28 @@ pub(crate) const UFS_TEST: [&str; 4] = [
     "ufs-test.files",
     "ufs-test.md5",
 ];
+
+/// An empty 32 MiB UFS2 file system with soft updates (`newfs -U`), for
+/// `lib/ufs`'s soft-updates tests where FreeBSD's tools are not.
+pub(crate) const SOFT_TEST: &str = "soft-test.img";
+
+/// Makes [`SOFT_TEST`] in `dir`, unless it is there.
+fn soft_test(dir: &Path) -> Result<()> {
+    let img = dir.join(SOFT_TEST);
+    if img.exists() {
+        return Ok(());
+    }
+    let tmp = dir.join("soft-test.img.tmp");
+    fs::File::create(&tmp)?.set_len(32 << 20)?;
+    util::run(
+        Command::new("newfs")
+            .arg("-U")
+            .arg(&tmp)
+            .stdout(std::process::Stdio::null()),
+    )?;
+    fs::rename(&tmp, &img)?;
+    Ok(())
+}
 
 /// A UFS2 test file, if it has been made (on the server) or copied.
 pub(crate) fn ufs_test_file(name: &str) -> Option<PathBuf> {

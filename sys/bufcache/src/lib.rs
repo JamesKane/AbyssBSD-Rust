@@ -293,7 +293,8 @@ impl BufCache {
                 let old = data.bytes.len();
                 if data.valid && size > old {
                     let mut tail = alloc::vec![0; size - old];
-                    self.dev.read(s, offset + old as u64, &mut tail)?;
+                    let at = offset + u64::try_from(old).map_err(|_| IoError)?;
+                    self.dev.read(s, at, &mut tail)?;
                     data.bytes.extend_from_slice(&tail);
                 } else {
                     data.bytes.resize(size, 0);

@@ -16,7 +16,7 @@ use core::cell::RefCell;
 use std::process::Command;
 
 use super::softdep::Deps;
-use super::tests::{Rng, check_model, fsck_clean, have_makefs, scratch, workload};
+use super::tests::{MNode, Rng, check_model, fsck_clean, have_makefs, scratch, workload};
 use super::*;
 
 /// Debugging: logs what touches byte `UFS_TRACE` of the disk.
@@ -667,7 +667,7 @@ fn crashes_at_random_points_leave_what_fsck_preens() {
         let mut rng = Rng(seed * 7919);
         let crash_img = work.join("crash.img");
         let mut step = 0;
-        let model = workload(&fs, &mut sum, seed, n, &mut |fs, sum| {
+        let model = workload(&fs, &mut sum, seed, n, &mut |fs, sum, _| {
             step += 1;
             let io = fs.io();
             if rng.below(2) == 0 {
@@ -768,7 +768,7 @@ fn crashes_pass_the_local_checks() {
             let mut rng = Rng(seed * 104_729);
             let mut step = 0;
             let mut crashes = 0;
-            let model = workload(&fs, &mut sum, seed, 2000, &mut |fs, sum| {
+            let model = workload(&fs, &mut sum, seed, 2000, &mut |fs, sum, _| {
                 step += 1;
                 let io = fs.io();
                 if rng.below(2) == 0 {
@@ -803,6 +803,107 @@ fn crashes_pass_the_local_checks() {
                 "{} seed {seed}: {} nodes, {crashes} crash images checked",
                 src.display(),
                 model.nodes.len()
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&work);
+}
+
+/// `fsync` as the kernel does it: file data out (here all of it), then the
+/// buffers the tracker says the file needs, until none.
+fn fsync(fs: &Ufs<Sim>, ino: u32) {
+    let io = fs.io();
+    io.write_data_out(usize::MAX);
+    for _ in 0..32 {
+        let need = io.deps.borrow().needs(ino);
+        if need.is_empty() {
+            return;
+        }
+        for at in need {
+            io.write_buf(at);
+        }
+    }
+    panic!(
+        "fsync of {ino} never finished:\n{}",
+        io.deps.borrow().describe()
+    );
+}
+
+/// After `fsync`, a crash keeps the file: its name in its directory and
+/// its contents, whatever else is lost.
+#[test]
+fn fsync_makes_a_file_durable() {
+    let images = local_images();
+    if images.is_empty() {
+        std::eprintln!("no soft-test.img (run fetch-base): skipped");
+        return;
+    }
+    let work = scratch("soft-fsync");
+    for (k, src) in images.iter().enumerate() {
+        for seed in [11u64, 13, 17, 19] {
+            let img = work.join(std::format!("f-{k}-{seed}.img"));
+            std::fs::copy(src, &img).unwrap();
+            let (fs, mut sum) = soft_fs(&img);
+            let mut rng = Rng(seed * 31_337);
+            let mut checked = 0;
+            let mut step = 0;
+            workload(&fs, &mut sum, seed, 1500, &mut |fs, sum, model| {
+                step += 1;
+                if rng.below(2) == 0 {
+                    fs.io().write_some(&mut rng);
+                }
+                if rng.below(3) == 0 {
+                    do_work(fs, sum);
+                }
+                if rng.below(25) != 0 {
+                    return;
+                }
+                let files: Vec<(u32, Vec<u8>, u32)> = model
+                    .nodes
+                    .iter()
+                    .filter_map(|(d, n)| match n {
+                        MNode::Dir(m) => Some(m.iter().map(|(name, i)| (*d, name.clone(), *i))),
+                        _ => None,
+                    })
+                    .flatten()
+                    .filter(|(_, _, i)| matches!(model.nodes.get(i), Some(MNode::File(_))))
+                    .collect();
+                if files.is_empty() {
+                    return;
+                }
+                let (dir, name, ino) = files[rng.below(files.len() as u64) as usize].clone();
+                fsync(fs, ino);
+                let image = fs.io().disk.borrow().clone();
+                let back = Ufs::open(&(), &image[..], 512).unwrap();
+                let dip = back.inode(&(), dir).unwrap();
+                assert_eq!(
+                    back.lookup(&(), &dip, &name).unwrap(),
+                    Some(ino),
+                    "seed {seed} step {step}: {:?} in {dir} after fsync",
+                    String::from_utf8_lossy(&name)
+                );
+                let ip = back.inode(&(), ino).unwrap();
+                let Some(MNode::File(want)) = model.nodes.get(&ino) else {
+                    unreachable!();
+                };
+                assert_eq!(
+                    ip.size,
+                    want.len() as u64,
+                    "seed {seed} step {step}: size of {ino}"
+                );
+                let mut got = alloc::vec![0u8; want.len()];
+                back.read(&(), &ip, 0, &mut got).unwrap();
+                assert!(
+                    got == *want,
+                    "seed {seed} step {step}: contents of {ino} after fsync"
+                );
+                checked += 1;
+            });
+            settle(&fs, &mut sum);
+            let _ = std::fs::remove_file(&img);
+            std::eprintln!(
+                "{} seed {seed}: {checked} files durable after fsync",
+                src.display()
             );
         }
     }

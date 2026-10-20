@@ -3008,6 +3008,8 @@ mod user_memory {
                  set -- $(df -k /mnt | tail -1); before=$4; \
                  mkdir sp && dd if=/rescue/rescue of=sp/a bs=64k count=60 2>/dev/null && cp sp/a sp/b && \
                  rm -r sp && sync && sleep 3 && \
+                 mkdir many && i=0 && while [ $i -lt 4000 ]; do : > many/f$i; i=$((i+1)); done && \
+                 set -- $(ls many) && [ $# -eq 4000 ] && rm -r many || exit 17; \
                  set -- $(df -k /mnt | tail -1); after=$4; \
                  [ $((before - after)) -lt 512 ] || exit 16; "
         } else {

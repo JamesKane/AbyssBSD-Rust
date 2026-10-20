@@ -130,6 +130,8 @@ struct Alloc {
     free_old: Option<(u64, u64)>,
     /// In a copy of its container (inode slots attach at the next copy).
     attached: bool,
+    /// The directory block it holds, whose entries wait for it.
+    dir_block: Option<(u32, u64)>,
 }
 
 /// A directory entry made or changed (FreeBSD's `diradd`).
@@ -415,6 +417,7 @@ impl Deps {
                 owner,
                 free_old: None,
                 attached: false,
+                dir_block: None,
             }),
             &[Wait::Buffer { at: cg_at, stamp }, Wait::Data(bno)],
         );
@@ -545,6 +548,13 @@ impl Deps {
                 alloc: Some(id),
             },
         );
+        if let Some(Item {
+            kind: Kind::Alloc(a),
+            ..
+        }) = self.items.get_mut(&id)
+        {
+            a.dir_block = Some((dir, lbn));
+        }
         if let Some(old) = old_at
             && old != at
         {
@@ -660,10 +670,11 @@ impl Deps {
                 self.owned.remove(&a.owner);
             }
         }
-        for b in self.dir_blocks.values_mut() {
-            if b.alloc == Some(id) {
-                b.alloc = None;
-            }
+        if let Some(key) = a.dir_block
+            && let Some(b) = self.dir_blocks.get_mut(&key)
+            && b.alloc == Some(id)
+        {
+            b.alloc = None;
         }
         self.retarget_followers(id, &[Wait::Copy(a.owner)]);
         a.free_old
@@ -700,13 +711,12 @@ impl Deps {
             self.work.push_back(Work::Free(alloc::vec![(bno, size)]));
         }
         // A directory block now on the disk: its entries written are.
-        let blocks: Vec<(u32, u64)> = self
-            .dir_blocks
-            .iter()
-            .filter(|(_, b)| b.alloc == Some(id))
-            .map(|(k, _)| *k)
-            .collect();
-        for key in blocks {
+        let blocks = a.dir_block.filter(|key| {
+            self.dir_blocks
+                .get(key)
+                .is_some_and(|b| b.alloc == Some(id))
+        });
+        if let Some(key) = blocks {
             let at = self.dir_blocks.get(&key).map_or(0, |b| b.at);
             self.dir_blocks.remove(&key);
             self.dir_at.remove(&at);

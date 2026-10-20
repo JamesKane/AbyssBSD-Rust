@@ -1047,11 +1047,55 @@ P5.0 ─► P5.1 ─┬─► P5.2 ───────────────
   - `stat` can report a number other than the vnode's (`Attr::fileid`), which FreeBSD's FAT32 root
     needs: it shares its number with the first entry in it.
 
-**P5.7 Soft updates.**
+**P5.7 Soft updates.** Done 2026-10-20.
 - Stage 3 of §10.3: dependency tracking and rollback, `fsync` that writes only what the file needs,
   and mounting with `-o softdep` / honoring `FS_DOSOFTDEP` as `tunefs -n enable` sets it.
 - Crash tests: the VM killed at random points during workloads, then `fsck_ffs -p` and `-f -n` on
   the server, with nothing but leaked blocks and inodes.
+- Done 2026-10-20:
+  - `lib/ufs`'s tracker (`softdep.rs`, VFS.md §10.3) with FreeBSD's rules. Pointers, directory
+    entries (number and type), and new inodes are rolled back in the copy of a buffer written too
+    early. Frees and link counts dropping wait as deferred work. `Inode::effnlink` is the count
+    users see meanwhile.
+  - Three rules go beyond FreeBSD's, so a second fsck finds nothing either:
+    - no pointer to an indirect block that is empty on the disk goes out;
+    - partial truncation disconnects the kept tree before cutting it;
+    - a failed `balloc` gives back the indirect blocks it made.
+  - Two other changes:
+    - The buffer cache gained a write hook, and keeps a buffer's bytes when its size changes.
+    - Without soft updates, a directory moved over another no longer loses its new parent a link.
+  - Turning soft updates on, as FreeBSD does:
+    - FreeBSD has no `softdep` mount option; the kernel follows `FS_DOSOFTDEP` (`newfs -U`,
+      FreeBSD 15's `newfs` default) and reports `MNT_SOFTDEP`;
+    - an unclean file system with soft updates mounts read-write, its summary counted again from
+      the groups;
+    - a journal flag is cleared (compat-deviations.md).
+  - The kernel side:
+    - the syncer does the work each second, through in-core inodes the vnodes share;
+    - `fsync` writes the buffers the file needs, and `sync` and unmount repeat until nothing
+      waits;
+    - `statfs` counts frees on the way, and out of space, frees are done and the write or create
+      tried again;
+    - past 20,000 items the syncer writes everything, and past 80,000 writers wait.
+  - Host crash tests: random workloads over a cache that writes buffers in random order and file
+    data late, crashing at random points.
+    - On the server, FreeBSD's `fsck_ffs -p` preened 8,054 crash images from 60 workloads (rerun
+      until `-f -n` is clean). Each settled image matches its model and is clean.
+    - Locally, 180 workloads pass the same checks done without fsck.
+    - 760 `fsync`s, each followed straight away by a crash, kept the file's name and data.
+  - `cargo xtask crash-test` kills QEMU mid-workload on a `newfs -U` disk, and every other round
+    boots on the crashed image as it is.
+    - 30 rounds on x86_64 and 3 on aarch64: `fsck_ffs -p` repaired every image.
+    - It repaired leaked inodes (unreferenced, and empty new directories), leaked blocks (maps and
+      summaries), link counts too high, block counts, and file sizes past the last indirect block.
+    - Directories caught mid-rename had their `..` fixed or an extra name removed. FreeBSD's
+      non-journaled soft updates leaves these same kinds.
+  - The kernel's read-write UFS test runs with `newfs -u` and with `newfs -U`. With soft updates it
+    also checks:
+    - the "soft-updates" mount flag;
+    - space coming back after a removal;
+    - 4,000 files made and removed;
+    - fsx, then `fsck_ffs -f -n` clean.
 
 **P5.8 Root on UFS2.**
 - The kernel mounts the root from `vfs.root.mountfrom`, devfs on `/dev`, tmpfs on `/tmp`, and the

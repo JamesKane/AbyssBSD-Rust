@@ -405,7 +405,7 @@ pub(crate) fn workload<B: BlockIo<Cx = ()>>(
     sum: &mut Summary,
     seed: u64,
     n: usize,
-    after: &mut dyn FnMut(&Ufs<B>, &mut Summary),
+    after: &mut dyn FnMut(&Ufs<B>, &mut Summary, &Model),
 ) -> Model {
     let soft = fs.soft_updates();
     // `UFS_LOG` lists the operations.
@@ -642,7 +642,7 @@ pub(crate) fn workload<B: BlockIo<Cx = ()>>(
                 String::from_utf8_lossy(&name)
             );
         }
-        after(fs, sum);
+        after(fs, sum, &m);
         // The index the operations kept matches one built afresh.
         if hashed && m.nodes.contains_key(&d) {
             let mut fresh = fs.inode(&(), d).unwrap();
@@ -762,7 +762,7 @@ fn random_workloads_leave_fsck_clean_images() {
         )
         .unwrap();
         let mut sum = fs.load_summary(&()).unwrap();
-        let model = workload(&fs, &mut sum, seed, 3000, &mut |_, _| {});
+        let model = workload(&fs, &mut sum, seed, 3000, &mut |_, _, _| {});
         fs.write_summary(&(), &mut sum, true, 1_760_000_100)
             .unwrap();
         let bytes = fs.io().0.borrow().clone();

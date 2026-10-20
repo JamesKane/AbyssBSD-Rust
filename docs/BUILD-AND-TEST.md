@@ -109,7 +109,21 @@ File systems (on the build server; VFS.md §14):
 cargo xtask --remote fs-image --fs ufs2|msdos --out IMG [--from DIR] [--size S] [--softdep]
 cargo xtask --remote fs-check --fs ufs2|msdos IMG   # fsck read-only; fails unless clean
 cargo xtask --remote ufs-verify [--keep]            # lib/ufs against FreeBSD's images of base.txz
+cargo xtask crash-test [--rounds N] [--arch A] [--seed S]   # soft updates against killed VMs
 ```
+
+`crash-test` boots the shell image in QEMU with a UFS2 disk `newfs -U` made, starts a workload
+of creates, writes, links, renames, `fsync`s, and removals on it from `/rescue`, and kills QEMU
+at a random moment. FreeBSD's `fsck_ffs -p` (on the server, through an `md` device) must then
+repair the image alone, run again until `fsck_ffs -f -n` finds nothing; the rounds list what it
+repaired. Every other round boots on the crashed image as it is, so the kernel mounts an unclean
+file system with soft updates, as FreeBSD does.
+
+`lib/ufs`'s soft-updates tests replay random workloads through a cache that writes buffers back
+in random order, and crash at random points. On FreeBSD (`cargo xtask --remote test --tier
+unit`), `fsck_ffs -p` preens every crash image; `UFS_SOFT_SEEDS` (workloads per case) and
+`UFS_SOFT_CRASHES` (one crash in that many steps, 100) run more. Elsewhere, they check each image
+themselves, on `soft-test.img` from `fetch-base` (or the images `UFS_SOFT_IMG` lists).
 
 `ufs-verify` unpacks all of `base.txz`, images it with `makefs` and (through FreeBSD's UFS, on an
 `md` device) with `newfs -U` plus a sparse file. It then walks both images with `lib/ufs` and
