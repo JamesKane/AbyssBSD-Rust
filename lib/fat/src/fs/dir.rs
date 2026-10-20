@@ -215,7 +215,7 @@ impl<B: BlockIo> Fat<B> {
             let mut stop = false;
             let base = index * cl;
             self.io
-                .read(cx, g.cluster_offset(cn), g.cluster as usize, &mut |b| {
+                .read(cx, g.cluster_offset(cn), super::idx(g.cluster), &mut |b| {
                     let mut off = from.saturating_sub(base);
                     while off < cl && !stop {
                         let at = usize::try_from(off).unwrap_or(0);
@@ -367,13 +367,13 @@ impl<B: BlockIo> Fat<B> {
             (
                 g.root_start,
                 usize::try_from(g.root_bytes).unwrap_or(0),
-                loc.diroffset as usize,
+                super::idx(loc.diroffset),
             )
         } else {
             (
                 g.cluster_offset(loc.dirclust),
-                g.cluster as usize,
-                loc.diroffset as usize,
+                super::idx(g.cluster),
+                super::idx(loc.diroffset),
             )
         }
     }
@@ -628,7 +628,7 @@ impl<B: BlockIo> Fat<B> {
         self.io.modify(
             cx,
             g.cluster_offset(cluster),
-            g.cluster as usize,
+            super::idx(g.cluster),
             Fill::Zero,
             Mode::Sync,
             &mut |b| {

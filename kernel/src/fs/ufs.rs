@@ -30,12 +30,13 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use abi::errno::Errno;
 use abi::time::Timespec;
-use bufcache::BufCache;
 use sched::Sleepable;
 use sched::lock::{LockClass, Mutex};
 use sync::SpinLock;
 use ufs::ops::{Maker, NewKind};
-use ufs::{Fill, Mode, Reserve, Timestamp};
+use ufs::{Mode, Reserve, Timestamp};
+
+use crate::fs::block::DiskIo;
 use vfs::{
     Attr, Create, DirEntry, DirectoryNode, FileSystem, FsStats, Kind, NewNode, Node, NodeOps,
     Rename, SetAttr, SymlinkNode, Uio,
@@ -46,88 +47,6 @@ use vm::object::{Object, PageIndex, Pager, PagerError};
 static INODE: LockClass = LockClass::new_dup_ok("ufs inode", 350);
 /// The allocation summary (FreeBSD's `UFS_LOCK`).
 static SUMMARY: LockClass = LockClass::new("ufs summary", 370);
-
-/// The disk: metadata through the buffer cache, data straight to it.
-struct DiskIo {
-    cache: BufCache,
-    disk: Arc<storage::Disk>,
-}
-
-impl DiskIo {
-    /// The sector-aligned span covering `[offset, offset + len)`.
-    fn span(&self, offset: u64, len: usize) -> (u64, usize) {
-        let ss = u64::from(self.disk.sector_size());
-        let start = offset - offset % ss;
-        let end = (offset + len as u64).next_multiple_of(ss);
-        (start, usize::try_from(end - start).unwrap_or(usize::MAX))
-    }
-}
-
-impl ufs::BlockIo for DiskIo {
-    type Cx = Sleepable;
-
-    fn read(
-        &self,
-        s: &Sleepable,
-        offset: u64,
-        len: usize,
-        f: &mut dyn FnMut(&[u8]),
-    ) -> Result<(), ufs::Error> {
-        self.cache
-            .read(s, offset, len, |b| f(b))
-            .map_err(|_| ufs::Error::Io)
-    }
-
-    fn modify(
-        &self,
-        s: &Sleepable,
-        offset: u64,
-        len: usize,
-        fill: Fill,
-        mode: Mode,
-        f: &mut dyn FnMut(&mut [u8]),
-    ) -> Result<(), ufs::Error> {
-        let fill = match fill {
-            Fill::Read => bufcache::Fill::Read,
-            Fill::Zero => bufcache::Fill::Overwrite,
-        };
-        let mode = match mode {
-            Mode::Sync => bufcache::WriteMode::Now,
-            Mode::Delayed => bufcache::WriteMode::Delayed,
-        };
-        self.cache
-            .write(s, offset, len, fill, mode, |b| f(b))
-            .map_err(|_| ufs::Error::Io)
-    }
-
-    fn read_data(&self, s: &Sleepable, offset: u64, buf: &mut [u8]) -> Result<(), ufs::Error> {
-        let (start, len) = self.span(offset, buf.len());
-        let data = self.disk.read(s, start, len).map_err(|_| ufs::Error::Io)?;
-        let from = usize::try_from(offset - start).unwrap_or(0);
-        buf.copy_from_slice(&data[from..from + buf.len()]);
-        Ok(())
-    }
-
-    fn write_data(&self, s: &Sleepable, offset: u64, data: &[u8]) -> Result<(), ufs::Error> {
-        let (start, len) = self.span(offset, data.len());
-        if start == offset && len == data.len() {
-            return self.disk.write(s, offset, data).map_err(|_| ufs::Error::Io);
-        }
-        // Partial sectors: read, change, write.
-        let mut buf = self.disk.read(s, start, len).map_err(|_| ufs::Error::Io)?;
-        let from = usize::try_from(offset - start).unwrap_or(0);
-        buf[from..from + data.len()].copy_from_slice(data);
-        self.disk.write(s, start, &buf).map_err(|_| ufs::Error::Io)
-    }
-
-    fn forget(&self, s: &Sleepable, offset: u64, len: usize) {
-        self.cache.discard(s, offset, len);
-    }
-
-    fn flush(&self, s: &Sleepable) -> Result<(), ufs::Error> {
-        self.cache.sync(s).map_err(|_| ufs::Error::Io)
-    }
-}
 
 /// An in-core inode, shared by its node and its file's pager.
 struct InodeCell {
@@ -231,8 +150,7 @@ impl UfsFs {
         force: bool,
     ) -> Result<Self, Errno> {
         let sector = disk.sector_size();
-        let cache = crate::fs::block::cache(Arc::clone(&disk), bufcache::Limits::default());
-        let io = DiskIo { cache, disk };
+        let io = DiskIo::new(disk);
         let ufs = ufs::Ufs::open(s, io, sector).map_err(errno)?;
         let sum = if read_only {
             None
@@ -570,6 +488,7 @@ impl Node for UfsNode {
                 _ => 0,
             },
             blksize: self.fs.ufs.superblock().bsize,
+            fileid: 0,
         }
     }
 

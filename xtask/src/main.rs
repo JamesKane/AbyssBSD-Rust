@@ -9,6 +9,7 @@ mod base;
 mod build;
 mod cli;
 mod expect;
+mod fattest;
 mod fs;
 mod image;
 mod perf;

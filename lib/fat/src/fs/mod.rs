@@ -25,6 +25,17 @@ mod tests;
 pub use dir::{Entry, Kind, Loc, Name};
 pub use table::Alloc;
 
+/// A 32-bit count or offset as an index: lossless on every target built
+/// (pointers are at least 32 bits wide).
+pub(crate) fn idx(x: u32) -> usize {
+    usize::try_from(x).unwrap_or(usize::MAX)
+}
+
+/// A length as a 64-bit count (lossless: `usize` is at most 64 bits).
+pub(crate) fn len64(x: usize) -> u64 {
+    u64::try_from(x).unwrap_or(u64::MAX)
+}
+
 /// What went wrong.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {

@@ -177,13 +177,13 @@ impl<B: BlockIo> Fat<B> {
         off: u64,
         data: &[u8],
     ) -> Result<(), Error> {
-        let end = off + data.len() as u64;
+        let end = off + super::len64(data.len());
         if end > u64::from(e.size) {
             self.resize(cx, a, e, end, true)?;
         }
         let mut done = 0usize;
         while done < data.len() {
-            let at = off + done as u64;
+            let at = off + super::len64(done);
             let (disk, run) = self
                 .bmap(cx, e.start, at)?
                 .ok_or(Error::Corrupt("cluster chain"))?;

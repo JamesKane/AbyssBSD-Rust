@@ -126,10 +126,28 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
                     .arg(local.join(name)),
             )?;
         }
-        println!("fetch-base: the UFS2 test disk in {}", local.display());
+        // And the FAT one.
+        for name in crate::fattest::FAT_TEST {
+            let remote = format!(
+                "{}:abyss/dist/{RELEASE}/{}/{name}",
+                crate::remote::host(),
+                Arch::X86_64.freebsd_name()
+            );
+            util::run(
+                Command::new("scp")
+                    .arg("-q")
+                    .arg(&remote)
+                    .arg(local.join(name)),
+            )?;
+        }
+        println!(
+            "fetch-base: the UFS2 and FAT test disks in {}",
+            local.display()
+        );
         return Ok(());
     }
     ufs_test(&dir(Arch::X86_64), &root(Arch::X86_64)?)?;
+    crate::fattest::build(&dir(Arch::X86_64))?;
     for arch in arches {
         let root = root(arch)?;
         let tar = rescue_image(arch)?;
@@ -383,6 +401,8 @@ pub(crate) fn md_image(arch: Arch, extra: &[(&str, &Path)]) -> Result<Option<Vec
     sources.retain(|p| p.extension().is_some_and(|x| x == "c"));
     sources.sort();
     // Mount points: devfs's, tmpfs's, and an empty one for tests.
+    append(&mut md, "boot/", b'5', 0o755, &[])?;
+    append(&mut md, "boot/efi/", b'5', 0o755, &[])?;
     append(&mut md, "dev/", b'5', 0o555, &[])?;
     append(&mut md, "mnt/", b'5', 0o755, &[])?;
     append(&mut md, "tmp/", b'5', 0o1777, &[])?;
@@ -437,6 +457,21 @@ pub(crate) fn md_image(arch: Arch, extra: &[(&str, &Path)]) -> Result<Option<Vec
         }
         append(&mut md, "usr/tests/fsx/", b'5', 0o755, &[])?;
         append(&mut md, "usr/tests/fsx/fsx", b'0', 0o555, &fs::read(&bin)?)?;
+    }
+    // FreeBSD's view of the FAT test disk, likewise.
+    if crate::fattest::file(crate::fattest::FAT_TEST[1]).is_some() {
+        append(&mut md, "usr/tests/fat/", b'5', 0o755, &[])?;
+    }
+    for name in &crate::fattest::FAT_TEST[1..] {
+        if let Some(file) = crate::fattest::file(name) {
+            append(
+                &mut md,
+                &format!("usr/tests/fat/{name}"),
+                b'0',
+                0o444,
+                &fs::read(file)?,
+            )?;
+        }
     }
     // FreeBSD's view of the UFS2 test disk, for the kernel test (not
     // beside the test programs, which are all run).

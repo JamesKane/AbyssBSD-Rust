@@ -313,7 +313,9 @@ offsets to disk blocks and allocates them.
 ### 10.4 msdosfs
 
 `lib/fat` holds FAT12/16/32, VFAT long names (with FreeBSD's short-name generation), and FSInfo,
-in the same structure. The kernel mounts the ESP at `/boot/efi` read-write. Names, time zones
+in the same structure. A file is named by where its directory entry lies, and its number is FreeBSD's
+file id for that place (a directory's from its first cluster). A rename moves an entry; an in-use
+file's vnode keeps its number, recorded so lookups keep finding it. The kernel mounts the ESP at `/boot/efi` read-write. Names, time zones
 (local time, as FreeBSD's msdosfs with no `-L`), and `stat` results match FreeBSD's msdosfs.
 
 ## 11. Mounting

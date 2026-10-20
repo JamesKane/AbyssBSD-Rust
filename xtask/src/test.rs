@@ -454,6 +454,20 @@ fn boot(case: &BootCase, release: bool, verbose: bool) -> Result<std::result::Re
             }
         }
     }
+    // The FAT test disk, read-only (FreeBSD's listings of it are on the
+    // memory disk).
+    if let Some(img) = crate::fattest::file("fat-test.img") {
+        let img = img.display();
+        match case.vmm {
+            Vmm::Bhyve => devices.push(format!("11,virtio-blk,{img},ro")),
+            Vmm::Qemu => devices.extend([
+                "-drive".into(),
+                format!("if=none,id=fat0,format=raw,readonly=on,file={img}"),
+                "-device".into(),
+                "virtio-blk-pci,drive=fat0".into(),
+            ]),
+        }
+    }
     let vm = Vm {
         el2: case.el2,
         test_devices: true,

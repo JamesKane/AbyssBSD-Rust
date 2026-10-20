@@ -624,6 +624,44 @@ pub(super) fn nmount(s: &Sleepable, iov: u64, iovcnt: u64, flags: u64) -> SysRes
                 Box::new(fs),
             )
         }
+        b"msdosfs" => {
+            let from = get(b"from").ok_or(Errno::EINVAL)?;
+            let disk = disk_at(s, &p, from)?;
+            let read_only = flags & abi::mount::MNT_RDONLY != 0;
+            // mount_msdosfs passes these in decimal (FreeBSD's
+            // `vfs_scanopt("%d")`).
+            let dec = |name: &[u8], default: u32| -> Result<u32, Errno> {
+                get(name).map_or(Ok(default), |v| {
+                    let v = v.strip_suffix(b"\0").unwrap_or(v);
+                    core::str::from_utf8(v)
+                        .ok()
+                        .and_then(|t| t.parse::<i64>().ok())
+                        .and_then(|n| u32::try_from(n).ok())
+                        .ok_or(Errno::EINVAL)
+                })
+            };
+            let d = crate::fs::msdosfs::Opts::default();
+            let perm = |v: u32| u16::try_from(v & 0o7777).unwrap_or(0);
+            let opts = crate::fs::msdosfs::Opts {
+                uid: dec(b"uid", d.uid)?,
+                gid: dec(b"gid", d.gid)?,
+                mask: perm(dec(b"mask", u32::from(d.mask))?),
+                dirmask: perm(dec(b"dirmask", u32::from(d.dirmask))?),
+                shortname: [&b"shortname"[..], b"shortnames", b"nowin95"]
+                    .iter()
+                    .any(|o| get(o).is_some()),
+            };
+            let fs = crate::fs::msdosfs::MsdosFs::mount(s, disk, read_only, opts)?;
+            vfs::Mount::new(
+                vfs::MountInfo {
+                    type_name: "msdosfs",
+                    flags: abi::mount::MNT_LOCAL | flags,
+                    from: from.strip_suffix(b"\0").unwrap_or(from).to_vec(),
+                    io_size: fs.cluster_size(),
+                },
+                Box::new(fs),
+            )
+        }
         _ => return Err(Errno::ENODEV),
     };
     let on = crate::fs::namespace().path_of(s, &covered, &crate::fs::root())?;

@@ -54,14 +54,14 @@ pub fn to_fat(sec: i64, nsec: u32) -> FatTime {
     let t = sec;
     let hundredths = u8::try_from((sec & 1) * 100 + i64::from(nsec / 10_000_000)).unwrap_or(0);
     let tod = t.rem_euclid(DAY);
-    let time =
-        u16::try_from((tod % 60) / 2 | ((tod / 60) % 60) << 5 | (tod / 3600) << 11).unwrap_or(0);
+    let time = u16::try_from(((tod % 60) / 2) | (((tod / 60) % 60) << 5) | ((tod / 3600) << 11))
+        .unwrap_or(0);
     let days = t.div_euclid(DAY);
     let date = if days < T1980 {
         0x0021
     } else {
         let (y, m, d) = civil_from_days(days);
-        u16::try_from(((y - 1980) & 0x7f) << 9 | m << 5 | d).unwrap_or(0x21)
+        u16::try_from((((y - 1980) & 0x7f) << 9) | (m << 5) | d).unwrap_or(0x21)
     };
     FatTime {
         date,
@@ -98,8 +98,8 @@ mod tests {
     fn times_round_trip_in_two_second_steps() {
         // 2026-10-19 12:34:57.250 UTC.
         let t = to_fat(1_792_413_297, 250_000_000);
-        assert_eq!(t.date, ((2026 - 1980) << 9 | 10 << 5 | 19) as u16);
-        assert_eq!(t.time, (12 << 11 | 34 << 5 | 28) as u16);
+        assert_eq!(t.date, ((2026 - 1980) << 9) | (10 << 5) | 19);
+        assert_eq!(t.time, (12 << 11) | (34 << 5) | 28);
         assert_eq!(t.hundredths, 125);
         assert_eq!(from_fat(t), (1_792_413_297, 250_000_000));
         // Without hundredths, the odd second is lost.
@@ -111,7 +111,7 @@ mod tests {
         assert_eq!(early.time, 1 << 11);
         // A leap day, and 2100 (not a leap year).
         let leap = to_fat(days_from_civil(2024, 2, 29) * DAY, 0);
-        assert_eq!(leap.date, ((2024 - 1980) << 9 | 2 << 5 | 29) as u16);
+        assert_eq!(leap.date, ((2024 - 1980) << 9) | (2 << 5) | 29);
         let day = days_from_civil(2100, 3, 1) * DAY;
         assert_eq!(from_fat(to_fat(day, 0)).0, day);
     }

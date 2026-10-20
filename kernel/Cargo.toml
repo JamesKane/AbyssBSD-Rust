@@ -17,6 +17,8 @@ ktest = []
 
 [dependencies]
 bufcache = { path = "../sys/bufcache" }
+fat = { path = "../lib/fat" }
+gpt = { path = "../lib/gpt" }
 abi = { path = "../lib/abi" }
 acpi-tables = { path = "../lib/acpi-tables" }
 addr = { path = "../lib/addr" }

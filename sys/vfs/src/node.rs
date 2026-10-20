@@ -84,6 +84,10 @@ pub struct Attr {
     pub rdev: u64,
     /// The preferred I/O size; 0 for the mount's.
     pub blksize: u32,
+    /// The number `stat` reports, when it is not the vnode's (0): a file
+    /// system whose numbers can repeat, as msdosfs's FAT32 root shares
+    /// FreeBSD's number with the first entry in it.
+    pub fileid: u64,
 }
 
 /// Changes to a node's attributes, each optional (FreeBSD's `VOP_SETATTR`

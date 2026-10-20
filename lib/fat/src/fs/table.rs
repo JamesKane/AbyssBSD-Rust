@@ -29,11 +29,11 @@ pub struct Alloc {
 
 impl Alloc {
     fn used(&self, cn: u32) -> bool {
-        self.inuse[(cn / 32) as usize] & (1 << (cn % 32)) != 0
+        self.inuse[super::idx(cn / 32)] & (1 << (cn % 32)) != 0
     }
 
     fn mark(&mut self, cn: u32, used: bool) {
-        let w = &mut self.inuse[(cn / 32) as usize];
+        let w = &mut self.inuse[super::idx(cn / 32)];
         let bit = 1 << (cn % 32);
         if used {
             *w |= bit;
@@ -136,7 +136,7 @@ impl<B: BlockIo> Fat<B> {
     /// `fillinusemap`).
     pub fn load_alloc(&self, cx: &B::Cx) -> Result<Alloc, Error> {
         let g = &self.geo;
-        let words = (g.max_cluster as usize + 1).div_ceil(32) + 1;
+        let words = (super::idx(g.max_cluster) + 1).div_ceil(32) + 1;
         let mut a = Alloc {
             inuse: alloc::vec![u32::MAX; words],
             free: 0,
@@ -252,7 +252,8 @@ impl<B: BlockIo> Fat<B> {
         while cn >= CLUST_FIRST && cn <= g.max_cluster {
             let next = self.fat_get(cx, cn)?;
             self.fat_set(cx, cn, 0)?;
-            self.io.forget(cx, g.cluster_offset(cn), g.cluster as usize);
+            self.io
+                .forget(cx, g.cluster_offset(cn), super::idx(g.cluster));
             if a.used(cn) {
                 a.mark(cn, false);
                 a.free += 1;
@@ -295,7 +296,7 @@ impl<B: BlockIo> Fat<B> {
             }
             if clear {
                 for c in cn..cn + got {
-                    let len = g.cluster as usize;
+                    let len = super::idx(g.cluster);
                     self.io.modify(
                         cx,
                         g.cluster_offset(c),
@@ -374,7 +375,7 @@ impl<B: BlockIo> Fat<B> {
         if !a.fsinfo_dirty {
             return Ok(());
         }
-        let len = self.geo.bytes_per_sec as usize;
+        let len = super::idx(self.geo.bytes_per_sec);
         let (free, next) = (a.free, a.next_free);
         self.io
             .modify(cx, at, len, Fill::Read, Mode::Sync, &mut |b| {

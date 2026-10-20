@@ -244,7 +244,7 @@ impl Vnode {
         };
         Stat {
             st_dev: self.mount.id,
-            st_ino: self.ino,
+            st_ino: if a.fileid != 0 { a.fileid } else { self.ino },
             st_nlink: a.nlink,
             st_mode: self.kind.ifmt() | (a.mode & 0o7777),
             st_uid: a.uid,

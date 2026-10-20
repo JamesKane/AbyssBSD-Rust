@@ -4,7 +4,7 @@
 //! FreeBSD's; its short names come from an older conversion than the
 //! kernel's, so they are left to `cargo xtask fat-verify`.
 
-#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 
 extern crate std;
 
@@ -422,11 +422,11 @@ fn workload(fat: &Fat<Mem>, a: &mut Alloc, seed: u64, n: usize) -> MNode {
                     }
                     match fat.rename(&(), a, start, &e, tstart, &to, target.as_ref()) {
                         Ok(_) => {
-                            if let Some(t) = &target {
-                                if t.entry.kind() == Kind::File {
-                                    let mut ent = t.entry.clone();
-                                    fat.resize(&(), a, &mut ent, 0, false)?;
-                                }
+                            if let Some(t) = &target
+                                && t.entry.kind() == Kind::File
+                            {
+                                let mut ent = t.entry.clone();
+                                fat.resize(&(), a, &mut ent, 0, false)?;
                             }
                             let (td, _) = walk_to(&mut m, fat, &to_path);
                             td.remove(&to);

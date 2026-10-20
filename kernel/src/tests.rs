@@ -3034,6 +3034,156 @@ mod user_memory {
     }
 
     ktest! {
+        /// The ESP on /boot/efi (msdosfs, read-write): the loader's files
+        /// are there; long and mixed-case names, copies, renames across
+        /// directories, removal, and fsx work over it; FreeBSD's
+        /// `fsck_msdosfs -n` finds it clean after unmounting; and mounted
+        /// again with `/rescue`'s `mount_msdosfs`, it holds what was
+        /// written.
+        fn msdosfs_esp_read_write_survives_fsck() {
+            use crate::proc::Process;
+            let s = cx();
+            let Some(esp) = storage::disk::all()
+                .into_iter()
+                .find(|d| d.partition().is_some_and(|(_, p)| p.type_guid == gpt::types::EFI_SYSTEM))
+            else {
+                kprintln!("msdosfs: no ESP; skipped");
+                return;
+            };
+            let dev = alloc::format!("/dev/{}", esp.name());
+            let script = alloc::string::String::from(
+                "cd /boot/efi || exit 1; [ -d EFI/ABYSS ] && [ -f EFI/ABYSS/KERNEL ] || exit 2; \
+                 mkdir -p 'Test Dir/Sub' || exit 3; echo hello > 'Test Dir/A Long File Name.txt' || exit 3; \
+                 echo upper > SHORT.TXT && [ \"$(cat short.txt)\" = upper ] || exit 4; \
+                 dd if=/rescue/rescue of='Test Dir/big.bin' bs=64k count=40 2>/dev/null || exit 5; \
+                 [ \"$(md5 -q 'Test Dir/big.bin')\" = \"$(dd if=/rescue/rescue bs=64k count=40 2>/dev/null | md5 -q)\" ] || exit 6; \
+                 mv 'Test Dir/A Long File Name.txt' 'Test Dir/Sub/renamed file.TXT' || exit 7; \
+                 [ \"$(cat 'test dir/sub/RENAMED FILE.txt')\" = hello ] || exit 8; \
+                 mv 'Test Dir/Sub' Moved && [ -d Moved ] && [ ! -e 'Test Dir/Sub' ] || exit 9; \
+                 for i in 1 2 3 4 5 6 7 8 9 10 11 12; do echo $i > \"many entries number $i\"; done; \
+                 rm many* SHORT.TXT || exit 10; \
+                 echo old > reuse.txt; exec 3< reuse.txt; rm reuse.txt; echo new > reuse.txt; \
+                 [ \"$(cat <&3)\" = old ] && [ \"$(cat reuse.txt)\" = new ] || exit 17; exec 3<&-; rm reuse.txt || exit 18; \
+                 if [ -x /usr/tests/fsx/fsx ]; then /usr/tests/fsx/fsx -q -N 2000 -S 9 /boot/efi/fsx.data > /tmp/fsx.out 2>&1 || exit 11; rm -f /boot/efi/fsx.data*; fi; \
+                 cd / && umount /boot/efi || exit 12; \
+                 fsck_msdosfs -n DEV > /tmp/fsck.out 2>&1 || exit 13; \
+                 mount -t msdosfs DEV /boot/efi || exit 14; \
+                 [ \"$(cat /boot/efi/Moved/'renamed file.TXT')\" = hello ] || exit 15; \
+                 [ -f /boot/efi/EFI/ABYSS/KERNEL ] || exit 16; exit 7",
+            )
+            .replace("DEV", &dev);
+            let p = Process::spawn(
+                &s,
+                b"/rescue/sh",
+                &[b"sh", b"-c", script.as_bytes()],
+                &[b"PATH=/rescue", b"HOME=/"],
+                Some(hal::cpu_id()),
+            )
+            .unwrap();
+            let exit = p.wait(&s);
+            if exit != crate::proc::Exit::Code(7) {
+                for f in [&b"/tmp/fsck.out"[..], b"/tmp/fsx.out"] {
+                    if let Some(out) = read_whole(&s, f) {
+                        kprintln!("{}:\n{}", core::str::from_utf8(f).unwrap_or("?"), alloc::string::String::from_utf8_lossy(&out));
+                    }
+                }
+            }
+            assert_eq!(exit, crate::proc::Exit::Code(7));
+            let fsck = read_whole(&s, b"/tmp/fsck.out").unwrap_or_default();
+            let text = alloc::string::String::from_utf8_lossy(&fsck);
+            let problems: alloc::vec::Vec<&str> = text
+                .lines()
+                .filter(|l| l.contains('?') || l.contains("not correct") || l.contains("DIRTY"))
+                .collect();
+            assert!(problems.is_empty(), "fsck_msdosfs: {problems:?}\n{text}");
+            kprintln!("msdosfs: read-write on {dev} is fsck clean");
+            for f in [&b"/tmp/fsck.out"[..], b"/tmp/fsx.out"] {
+                let _ = crate::fs::parent_of(&s, &p, crate::fs::At::Cwd, f, false)
+                    .and_then(|d| vfs::ops::remove(&s, &d.dir, &d.name, crate::fs::cred(), false));
+            }
+        }
+    }
+
+    ktest! {
+        /// The FAT test disk mounts read-only with `/rescue`'s
+        /// `mount_msdosfs`, and `ls -aliRnT` (file numbers included) and
+        /// `md5 -r` over it print what FreeBSD's msdosfs printed over the
+        /// same volume. Skipped when the disk or the listings are not there
+        /// (no `fetch-base` from the server).
+        fn msdosfs_reads_as_freebsd_reads_it() {
+            use crate::proc::Process;
+            let s = cx();
+            let (Some(want_ls), Some(want_md5)) = (
+                read_whole(&s, b"/usr/tests/fat/fat-test.ls"),
+                read_whole(&s, b"/usr/tests/fat/fat-test.md5"),
+            ) else {
+                kprintln!("msdosfs: no test disk listings; skipped");
+                return;
+            };
+            // The 40 MiB virtio disk with a FAT boot sector.
+            let Some(d) = find_disk(&s, "vtbd", |s, d| {
+                d.bytes() == 40 << 20 && d.read(s, 0, 512).is_ok_and(|b| b[510] == 0x55 && b[511] == 0xaa)
+            }) else {
+                kprintln!("msdosfs: no FAT test disk; skipped");
+                return;
+            };
+            let script = alloc::format!(
+                "mount -t msdosfs -o ro /dev/{} /mnt || exit 1; cd /mnt && TZ=UTC ls -aliRnT . > /tmp/fat.ls || exit 2; \
+                 while IFS= read -r f; do md5 -r \"$f\"; done < /usr/tests/fat/fat-test.files > /tmp/fat.md5 || exit 3; cd / && umount /mnt || exit 4; exit 7",
+                d.name()
+            );
+            let p = Process::spawn(
+                &s,
+                b"/rescue/sh",
+                &[b"sh", b"-c", script.as_bytes()],
+                &[b"PATH=/rescue", b"HOME=/"],
+                Some(hal::cpu_id()),
+            )
+            .unwrap();
+            let exit = p.wait(&s);
+            // The root's `..` is the mount point's parent, and the root's
+            // total counts it: neither is the volume's. Spacing aside, the
+            // rest must match.
+            let unrooted = |l: &[u8]| -> alloc::vec::Vec<u8> {
+                let mut out = alloc::vec::Vec::new();
+                let mut first = true;
+                for line in l.split(|&c| c == b'\n') {
+                    if line.is_empty() {
+                        first = false;
+                    }
+                    if first && (line.starts_with(b"total ") || line.ends_with(b" ..")) {
+                        continue;
+                    }
+                    // Column widths follow the widest field, which the
+                    // dropped line may have been.
+                    let words: alloc::vec::Vec<&[u8]> =
+                        line.split(|&c| c == b' ').filter(|w| !w.is_empty()).collect();
+                    out.extend_from_slice(&words.join(&b' '));
+                    out.push(b'\n');
+                }
+                out
+            };
+            let want_ls = unrooted(&want_ls);
+            let got_ls = unrooted(&read_whole(&s, b"/tmp/fat.ls").unwrap_or_default());
+            let got_md5 = read_whole(&s, b"/tmp/fat.md5").unwrap_or_default();
+            first_difference("msdosfs: ls -aliRnT", &got_ls, &want_ls);
+            if got_ls != want_ls {
+                kprintln!("msdosfs: got:\n{}", alloc::string::String::from_utf8_lossy(&got_ls));
+                kprintln!("msdosfs: want:\n{}", alloc::string::String::from_utf8_lossy(&want_ls));
+            }
+            first_difference("msdosfs: md5 -r", &got_md5, &want_md5);
+            assert_eq!(exit, crate::proc::Exit::Code(7));
+            assert!(got_ls == want_ls && got_md5 == want_md5);
+            let lines = want_md5.iter().filter(|&&c| c == b'\n').count();
+            kprintln!("msdosfs: the listing and {lines} digests match FreeBSD's");
+            for f in [&b"/tmp/fat.ls"[..], b"/tmp/fat.md5"] {
+                let _ = crate::fs::parent_of(&s, &p, crate::fs::At::Cwd, f, false)
+                    .and_then(|d| vfs::ops::remove(&s, &d.dir, &d.name, crate::fs::cred(), false));
+            }
+        }
+    }
+
+    ktest! {
         fn fuzzing_leaves_nothing_behind() {
             // The fuzzer twice with the same seed: the first run warms
             // whatever the kernel caches; the second must leave free

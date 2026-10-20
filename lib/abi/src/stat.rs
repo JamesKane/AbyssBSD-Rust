@@ -76,6 +76,11 @@ pub const UF_IMMUTABLE: u32 = 0x0000_0002;
 pub const UF_APPEND: u32 = 0x0000_0004;
 pub const UF_OPAQUE: u32 = 0x0000_0008;
 pub const UF_NOUNLINK: u32 = 0x0000_0010;
+/// The DOS and Windows attributes (msdosfs keeps them).
+pub const UF_SYSTEM: u32 = 0x0000_0080;
+pub const UF_ARCHIVE: u32 = 0x0000_0800;
+pub const UF_READONLY: u32 = 0x0000_1000;
+pub const UF_HIDDEN: u32 = 0x0000_8000;
 /// Only the superuser may set these.
 pub const SF_SETTABLE: u32 = 0xffff_0000;
 pub const SF_ARCHIVED: u32 = 0x0001_0000;
@@ -109,6 +114,10 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     f("UF_APPEND", UF_APPEND),
     f("UF_OPAQUE", UF_OPAQUE),
     f("UF_NOUNLINK", UF_NOUNLINK),
+    f("UF_SYSTEM", UF_SYSTEM),
+    f("UF_ARCHIVE", UF_ARCHIVE),
+    f("UF_READONLY", UF_READONLY),
+    f("UF_HIDDEN", UF_HIDDEN),
     f("SF_SETTABLE", SF_SETTABLE),
     f("SF_ARCHIVED", SF_ARCHIVED),
     f("SF_IMMUTABLE", SF_IMMUTABLE),

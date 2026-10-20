@@ -1016,9 +1016,36 @@ P5.0 ─► P5.1 ─┬─► P5.2 ───────────────
     - integer casts in `lib/ufs` go through explicit helpers.
   - **Moved to P5.9:** pjdfstest needs a minimal credential model first (see P5.2).
 
-**P5.6 msdosfs.**
+**P5.6 msdosfs.** — done 2026-10-20
 - `lib/fat` (§10.4) read and write, host-tested against `newfs_msdos` images and `fsck_msdosfs`.
 - The ESP mounted on `/boot/efi`. fsx on it, and `fsck_msdosfs -n` clean afterwards.
+- As delivered:
+  - `lib/fat`'s engine (`fat::fs`, beside the image builder) follows FreeBSD's msdosfs:
+    - geometry with `mountmsdosfs`'s checks;
+    - FAT12/16/32 entries, the in-use map, `clusteralloc1`'s allocation, chains, the clean bit,
+      and FSInfo;
+    - long-name directories with lookup as `msdosfs_lookup_ino` matches;
+    - unique short names, slot placement, `.` and `..`, rename, and FAT times;
+    - name conversion as `msdosfs_conv.c` does without kiconv.
+  - Host tests read `makefs` FAT12/16/32 images of a tree of awkward names: long names, lookups
+    ignoring case, contents, and times. A 2,000-operation workload, with renames across
+    directories, reads back as its model on `newfs_msdos` FAT12/16/32 volumes, one filling up, and
+    `fsck_msdosfs -n` finds each clean.
+  - `fetch-base` makes a FAT32 test disk with names written through FreeBSD's own msdosfs. All 27
+    short names FreeBSD chose, generation numbers included, are what `lib/fat` predicts. The boot
+    tests mount it read-only, and AbyssBSD's `ls -aliRnT` (file numbers included) and `md5 -r`
+    match FreeBSD's. FreeBSD's bhyve device recording was redone with the disk.
+  - The kernel's msdosfs:
+    - numbers files with FreeBSD's file ids; a renamed or removed in-use file keeps its vnode's
+      number, so a new file gets another;
+    - takes modes, owners, and masks from the mount options, as `mount_msdosfs` passes them;
+    - maps chflags to DOS attributes, and refuses links and symbolic links as FreeBSD does;
+    - keeps file data in the page cache over a cluster-mapping pager.
+  - Boot mounts the first ESP read-write on `/boot/efi`. A boot test runs `/rescue`'s tools, a
+    file removed while open, and fsx over it. FreeBSD's `fsck_msdosfs -n`, running on AbyssBSD,
+    then finds it clean, and it remounts with the data intact.
+  - `stat` can report a number other than the vnode's (`Attr::fileid`), which FreeBSD's FAT32 root
+    needs: it shares its number with the first entry in it.
 
 **P5.7 Soft updates.**
 - Stage 3 of §10.3: dependency tracking and rollback, `fsync` that writes only what the file needs,

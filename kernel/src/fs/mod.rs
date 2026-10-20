@@ -13,6 +13,7 @@ pub(crate) mod block;
 pub(crate) mod devfs;
 pub(crate) mod fdtable;
 pub(crate) mod file;
+pub(crate) mod msdosfs;
 pub(crate) mod pipe;
 pub(crate) mod ufs;
 pub(crate) mod uio;
@@ -140,6 +141,37 @@ pub(crate) fn init() {
             kprintln!("fs: tmpfs not mounted on /tmp ({e:?})");
         }
     }
+    // The EFI System Partition on /boot/efi, read-write, as FreeBSD's
+    // installer mounts it: the first disk's (the boot disk's in the test
+    // machines; the loader will name it on hardware, P6).
+    if let Ok(dir) = ns.lookup(&s, &at, b"/boot/efi") {
+        let esp = storage::disk::all().into_iter().find(|d| {
+            d.partition()
+                .is_some_and(|(_, p)| p.type_guid == gpt::types::EFI_SYSTEM)
+        });
+        if let Some(esp) = esp {
+            let name = alloc::format!("/dev/{}", esp.name());
+            match msdosfs::MsdosFs::mount(&s, esp, false, msdosfs::Opts::default()) {
+                Ok(fs) => {
+                    let io_size = fs.cluster_size();
+                    let m = Mount::new(
+                        MountInfo {
+                            type_name: "msdosfs",
+                            flags: MNT_LOCAL,
+                            from: name.clone().into_bytes(),
+                            io_size,
+                        },
+                        Box::new(fs),
+                    );
+                    match ns.mount(&s, dir, m, b"/boot/efi") {
+                        Ok(()) => kprintln!("fs: {name} on /boot/efi"),
+                        Err(e) => kprintln!("fs: {name} not mounted on /boot/efi ({e:?})"),
+                    }
+                }
+                Err(e) => kprintln!("fs: {name}: not mountable as msdosfs ({e:?})"),
+            }
+        }
+    }
     let _ = NAMESPACE.set(ns);
     if sched::Builder::new("vnlru")
         .priority(sched::Priority::KERNEL)
@@ -219,6 +251,8 @@ const TYPES: &[(&str, i32)] = &[
     ("devfs", abi::mount::VFCF_SYNTHETIC | abi::mount::VFCF_JAIL),
     ("tmpfs", abi::mount::VFCF_JAIL),
     ("tarfs", abi::mount::VFCF_JAIL | abi::mount::VFCF_READONLY),
+    ("ufs", abi::mount::VFCF_FILEREVINC),
+    ("msdosfs", 0),
 ];
 
 /// Adds `vfs.conflist` (what `getvfsbyname` and `lsvfs` read) to the
