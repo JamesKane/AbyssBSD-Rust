@@ -81,6 +81,8 @@ pub(crate) fn entries(
 /// A slot found while scanning a directory: where its block is, where
 /// the entry is in the block, and its fields.
 struct Slot {
+    /// The entry's byte offset in the directory.
+    offset: u64,
     addr: u64,
     bsz: usize,
     at: usize,
@@ -141,25 +143,53 @@ impl<B: crate::BlockIo> crate::Ufs<B> {
         &self,
         cx: &B::Cx,
         dir: &crate::Inode,
+        f: impl FnMut(&Slot, &[u8]) -> bool,
+    ) -> Result<Option<Slot>, Error> {
+        self.scan_range(cx, dir, 0, dir.size, f)
+    }
+
+    /// [`Self::scan`] over chunk `c` alone.
+    fn scan_chunk(
+        &self,
+        cx: &B::Cx,
+        dir: &crate::Inode,
+        c: u64,
+        f: impl FnMut(&Slot, &[u8]) -> bool,
+    ) -> Result<Option<Slot>, Error> {
+        let chunk = crate::len64(DIRBLKSIZ);
+        self.scan_range(cx, dir, c * chunk, (c + 1) * chunk, f)
+    }
+
+    /// [`Self::scan`] over the chunks in bytes `[from, to)` of `dir`
+    /// (chunk boundaries).
+    fn scan_range(
+        &self,
+        cx: &B::Cx,
+        dir: &crate::Inode,
+        from: u64,
+        to: u64,
         mut f: impl FnMut(&Slot, &[u8]) -> bool,
     ) -> Result<Option<Slot>, Error> {
         let sb = &self.sb;
         let bsize = u64::from(sb.bsize);
-        let mut lbn = 0;
-        while lbn * bsize < dir.size {
+        let to = to.min(dir.size);
+        let mut lbn = from / bsize;
+        while lbn * bsize < to {
             let bsz = crate::idx(sb.block_size(dir.size, lbn));
             let addr = self.bmap(cx, dir, lbn)?;
             if addr == 0 {
                 return Err(Error::Corrupt("hole in a directory"));
             }
-            let limit = crate::idx64(dir.size - lbn * bsize).min(bsz);
+            let base = lbn * bsize;
+            let limit = crate::idx64(to - base).min(bsz);
+            let start = crate::idx64(from.saturating_sub(base));
             let mut found = Ok(None);
             self.io
                 .read(cx, addr * u64::from(sb.fsize), bsz, &mut |b| {
-                    let mut at = 0;
+                    let mut at = start;
                     let mut prev = None;
                     while at < limit {
-                        if at % DIRBLKSIZ == 0 {
+                        if at.is_multiple_of(DIRBLKSIZ) {
                             prev = None;
                         }
                         let room = DIRBLKSIZ - at % DIRBLKSIZ;
@@ -169,6 +199,7 @@ impl<B: crate::BlockIo> crate::Ufs<B> {
                             return;
                         }
                         let slot = Slot {
+                            offset: base + crate::len64(at),
                             addr,
                             bsz,
                             at,
@@ -194,14 +225,66 @@ impl<B: crate::BlockIo> crate::Ufs<B> {
         Ok(None)
     }
 
-    /// The live entry `name` of directory `dir`.
+    /// The live entry `name` of directory `dir`: in its chunk alone if
+    /// the directory has an index.
     fn find_entry(
         &self,
         cx: &B::Cx,
         dir: &crate::Inode,
         name: &[u8],
     ) -> Result<Option<Slot>, Error> {
+        if let Some(h) = &dir.dirhash {
+            let Some(&(_, offset)) = h.names.get(name) else {
+                return Ok(None);
+            };
+            let c = offset / crate::len64(DIRBLKSIZ);
+            return self.scan_chunk(cx, dir, c, |s, n| s.ino != 0 && n == name);
+        }
         self.scan(cx, dir, |s, n| s.ino != 0 && n == name)
+    }
+
+    /// The largest free slot of chunk `c` of `dir`.
+    fn chunk_free(&self, cx: &B::Cx, dir: &crate::Inode, c: u64) -> Result<u16, Error> {
+        let mut most = 0;
+        self.scan_chunk(cx, dir, c, |s, _| {
+            let free = if s.ino == 0 {
+                s.reclen
+            } else {
+                s.reclen - dirsiz(s.namlen)
+            };
+            most = most.max(free);
+            false
+        })?;
+        Ok(reclen16(most))
+    }
+
+    /// Indexes directory `dir` (FreeBSD's `ufsdirhash_build`) if it has
+    /// no index yet and holds at least `min` bytes (the kernel passes
+    /// [`crate::dirhash::MIN_SIZE`]).
+    pub fn dirhash_build(&self, cx: &B::Cx, dir: &mut crate::Inode, min: u64) -> Result<(), Error> {
+        if dir.dirhash.is_some() || dir.size < min {
+            return Ok(());
+        }
+        let mut h = crate::dirhash::DirHash::default();
+        let chunks = dir.size.div_ceil(crate::len64(DIRBLKSIZ));
+        h.free = alloc::vec![0; crate::idx64(chunks)];
+        self.scan(cx, dir, |s, n| {
+            let c = crate::idx64(s.offset / crate::len64(DIRBLKSIZ));
+            let free = if s.ino == 0 {
+                s.reclen
+            } else {
+                s.reclen - dirsiz(s.namlen)
+            };
+            if let Some(f) = h.free.get_mut(c) {
+                *f = (*f).max(reclen16(free));
+            }
+            if s.ino != 0 {
+                h.names.insert(n.into(), (s.ino, s.offset));
+            }
+            false
+        })?;
+        dir.dirhash = Some(alloc::boxed::Box::new(h));
+        Ok(())
     }
 
     /// Adds entry `name` for inode `ino` of type `kind` to directory
@@ -224,25 +307,41 @@ impl<B: crate::BlockIo> crate::Ufs<B> {
         check_name(name)?;
         let need = dirsiz(name.len());
         let mut exists = false;
-        let slot = self.scan(cx, dir, |s, n| {
-            if s.ino != 0 && n == name {
-                exists = true;
-                return true;
-            }
+        let fits = |s: &Slot| {
             let free = if s.ino == 0 {
                 s.reclen
             } else {
                 s.reclen - dirsiz(s.namlen)
             };
             free >= need
-        })?;
+        };
+        let slot = match &dir.dirhash {
+            // Indexed: the name is known not to be there, and the free map
+            // names a chunk with room.
+            Some(h) => {
+                if h.names.contains_key(name) {
+                    return Err(Error::Exists);
+                }
+                match h.chunk_with(need) {
+                    Some(c) => self.scan_chunk(cx, dir, c, |s, _| fits(s))?,
+                    None => None,
+                }
+            }
+            None => self.scan(cx, dir, |s, n| {
+                if s.ino != 0 && n == name {
+                    exists = true;
+                    return true;
+                }
+                fits(s)
+            })?,
+        };
         if exists {
             return Err(Error::Exists);
         }
         let sb = &self.sb;
         let fsize = u64::from(sb.fsize);
         if let Some(s) = slot {
-            return self.io.modify(
+            self.io.modify(
                 cx,
                 s.addr * fsize,
                 s.bsz,
@@ -257,7 +356,23 @@ impl<B: crate::BlockIo> crate::Ufs<B> {
                         put_entry(b, s.at + used, ino, s.reclen - used, kind, name);
                     }
                 },
-            );
+            )?;
+            if dir.dirhash.is_some() {
+                let offset = if s.ino == 0 {
+                    s.offset
+                } else {
+                    s.offset + crate::len64(dirsiz(s.namlen))
+                };
+                let c = s.offset / crate::len64(DIRBLKSIZ);
+                let free = self.chunk_free(cx, dir, c)?;
+                if let Some(h) = dir.dirhash.as_mut() {
+                    h.names.insert(name.into(), (ino, offset));
+                    if let Some(f) = h.free.get_mut(crate::idx64(c)) {
+                        *f = free;
+                    }
+                }
+            }
+            return Ok(());
         }
         // A new chunk at the end.
         let offset = dir.size;
@@ -287,14 +402,24 @@ impl<B: crate::BlockIo> crate::Ufs<B> {
                 b[at..at + DIRBLKSIZ].fill(0);
                 put_entry(b, at, ino, DIRBLKSIZ, kind, name);
             },
-        )
+        )?;
+        if let Some(h) = dir.dirhash.as_mut() {
+            h.names.insert(name.into(), (ino, offset));
+            h.free.push(reclen16(DIRBLKSIZ - need));
+        }
+        Ok(())
     }
 
     /// Removes entry `name` from directory `dir` (FreeBSD's
     /// `ufs_dirremove`): the first entry of a chunk is marked free, any
     /// other joins the one before it. The block is written now. Returns the
     /// inode the entry named.
-    pub fn dir_remove(&self, cx: &B::Cx, dir: &crate::Inode, name: &[u8]) -> Result<u32, Error> {
+    pub fn dir_remove(
+        &self,
+        cx: &B::Cx,
+        dir: &mut crate::Inode,
+        name: &[u8],
+    ) -> Result<u32, Error> {
         let s = self.find_entry(cx, dir, name)?.ok_or(Error::NotFound)?;
         let fsize = u64::from(self.sb.fsize);
         self.io.modify(
@@ -311,6 +436,16 @@ impl<B: crate::BlockIo> crate::Ufs<B> {
                 }
             },
         )?;
+        if dir.dirhash.is_some() {
+            let c = s.offset / crate::len64(DIRBLKSIZ);
+            let free = self.chunk_free(cx, dir, c)?;
+            if let Some(h) = dir.dirhash.as_mut() {
+                h.names.remove(name);
+                if let Some(f) = h.free.get_mut(crate::idx64(c)) {
+                    *f = free;
+                }
+            }
+        }
         Ok(s.ino)
     }
 
@@ -321,7 +456,7 @@ impl<B: crate::BlockIo> crate::Ufs<B> {
     pub fn dir_rewrite(
         &self,
         cx: &B::Cx,
-        dir: &crate::Inode,
+        dir: &mut crate::Inode,
         name: &[u8],
         ino: u32,
         kind: u8,
@@ -339,6 +474,9 @@ impl<B: crate::BlockIo> crate::Ufs<B> {
                 b[s.at + 6] = kind;
             },
         )?;
+        if let Some(h) = dir.dirhash.as_mut() {
+            h.names.insert(name.into(), (ino, s.offset));
+        }
         Ok(s.ino)
     }
 

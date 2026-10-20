@@ -431,6 +431,11 @@ fn workload(fs: &Ufs<Mem>, sum: &mut Summary, seed: u64, n: usize) -> Model {
         let name = std::format!("n{}", rng.below(40)).into_bytes();
         let op = rng.below(100);
         let mut dip = fs.inode(&(), d).unwrap();
+        // Half the time through the directory index.
+        let hashed = rng.below(2) == 0;
+        if hashed {
+            fs.dirhash_build(&(), &mut dip, 0).unwrap();
+        }
         let existing = m
             .entries(d)
             .into_iter()
@@ -517,9 +522,11 @@ fn workload(fs: &Ufs<Mem>, sum: &mut Summary, seed: u64, n: usize) -> Model {
                     if m.entries(to).iter().any(|(n, _)| *n == to_name) {
                         return Ok(());
                     }
+                    // One in-core inode per directory, as in the kernel.
                     let mut tip = fs.inode(&(), to).unwrap();
+                    let tdir = if to == d { &mut dip } else { &mut tip };
                     let mut ip = fs.inode(&(), ino).unwrap();
-                    fs.link(&(), sum, to, &mut tip, &to_name, ino, &mut ip, now, r)?;
+                    fs.link(&(), sum, to, tdir, &to_name, ino, &mut ip, now, r)?;
                     m.dir_mut(to).insert(to_name, ino);
                 }
                 // Remove something.
@@ -606,6 +613,18 @@ fn workload(fs: &Ufs<Mem>, sum: &mut Summary, seed: u64, n: usize) -> Model {
         match res {
             Ok(()) | Err(Error::NoSpace) => {}
             Err(e) => panic!("step {step} (op {op}): {e:?}"),
+        }
+        // The index the operations kept matches one built afresh.
+        if hashed && m.nodes.contains_key(&d) {
+            let mut fresh = fs.inode(&(), d).unwrap();
+            fresh.dirhash = None;
+            fs.dirhash_build(&(), &mut fresh, 0).unwrap();
+            if dip.size == fresh.size {
+                assert_eq!(
+                    dip.dirhash, fresh.dirhash,
+                    "step {step} (op {op}): index of {d}"
+                );
+            }
         }
     }
     m
@@ -728,5 +747,118 @@ fn random_workloads_leave_fsck_clean_images() {
             model.nodes.len()
         );
     }
+    let _ = std::fs::remove_dir_all(&work);
+}
+
+#[test]
+fn large_directories_through_the_index() {
+    if !have_makefs() {
+        std::eprintln!("no makefs (not FreeBSD): skipped");
+        return;
+    }
+    let work = scratch("dirhash");
+    let empty = work.join("empty");
+    std::fs::create_dir(&empty).unwrap();
+    let img = work.join("big.img");
+    let ok = Command::new("makefs")
+        .args([
+            "-t",
+            "ffs",
+            "-o",
+            "version=2",
+            "-s",
+            "32m",
+            "-o",
+            "bsize=4096,fsize=512",
+        ])
+        .arg(&img)
+        .arg(&empty)
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "makefs");
+    let fs = Ufs::open(
+        &(),
+        Mem(core::cell::RefCell::new(std::fs::read(&img).unwrap())),
+        512,
+    )
+    .unwrap();
+    let mut sum = fs.load_summary(&()).unwrap();
+    let mut rng = Rng(5);
+    let mut root = fs.inode(&(), ROOT_INO).unwrap();
+    let name = |i: usize| std::format!("a-rather-long-file-name-number-{i:05}").into_bytes();
+    let mut inos = std::collections::BTreeMap::new();
+    for i in 0..3000 {
+        if i == 200 {
+            fs.dirhash_build(&(), &mut root, dirhash::MIN_SIZE).unwrap();
+            assert!(root.dirhash.is_some(), "a large directory gets an index");
+        }
+        let (ino, _) = fs
+            .create(
+                &(),
+                &mut sum,
+                ROOT_INO,
+                &mut root,
+                &name(i),
+                ops::NewKind::Regular,
+                &maker(&mut rng, Reserve::Allowed),
+            )
+            .unwrap();
+        inos.insert(i, ino);
+    }
+    let full = root.size;
+    // Every other name goes, then half of those come back.
+    let now = Timestamp {
+        sec: 1_760_000_000,
+        nsec: 0,
+    };
+    for i in (0..3000).step_by(2) {
+        let ino = inos.remove(&i).unwrap();
+        let mut ip = fs.inode(&(), ino).unwrap();
+        fs.unlink(&(), ROOT_INO, &mut root, &name(i), ino, &mut ip, now)
+            .unwrap();
+        fs.free_inode(&(), &mut sum, ino, &mut ip, Reserve::Allowed)
+            .unwrap();
+    }
+    for i in (0..3000).step_by(4) {
+        let (ino, _) = fs
+            .create(
+                &(),
+                &mut sum,
+                ROOT_INO,
+                &mut root,
+                &name(i),
+                ops::NewKind::Regular,
+                &maker(&mut rng, Reserve::Allowed),
+            )
+            .unwrap();
+        inos.insert(i, ino);
+    }
+    // Lookups through the index and by scanning agree.
+    let mut plain = fs.inode(&(), ROOT_INO).unwrap();
+    plain.dirhash = None;
+    for i in 0..3000 {
+        let want = inos.get(&i).copied();
+        assert_eq!(
+            fs.lookup(&(), &root, &name(i)).unwrap(),
+            want,
+            "indexed {i}"
+        );
+        assert_eq!(
+            fs.lookup(&(), &plain, &name(i)).unwrap(),
+            want,
+            "scanned {i}"
+        );
+    }
+    let mut fresh = plain.clone();
+    fs.dirhash_build(&(), &mut fresh, 0).unwrap();
+    assert_eq!(root.dirhash, fresh.dirhash);
+    // Freed slots were reused: the directory did not grow for the
+    // second round.
+    assert_eq!(root.size, full, "directory size");
+    fs.write_summary(&(), &mut sum, true, 1_760_000_100)
+        .unwrap();
+    std::fs::write(&img, &*fs.io().0.borrow()).unwrap();
+    fsck_clean(&img);
     let _ = std::fs::remove_dir_all(&work);
 }

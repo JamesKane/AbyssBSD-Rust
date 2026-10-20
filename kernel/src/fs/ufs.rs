@@ -805,9 +805,23 @@ impl SymlinkNode for UfsNode {
     }
 }
 
+impl UfsNode {
+    /// Indexes this directory if it is large (FreeBSD's dirhash): its
+    /// lookups and inserts then touch one chunk.
+    fn index(&self, s: &Sleepable, st: &mut InodeState) {
+        if st.ip.dirhash.is_none() && st.ip.size >= ufs::dirhash::MIN_SIZE {
+            let _ = self
+                .fs
+                .ufs
+                .dirhash_build(s, &mut st.ip, ufs::dirhash::MIN_SIZE);
+        }
+    }
+}
+
 impl DirectoryNode for UfsNode {
     fn lookup(&self, s: &Sleepable, name: &[u8]) -> Result<u64, Errno> {
-        let st = self.cell.state.lock(s);
+        let mut st = self.cell.state.lock(s);
+        self.index(s, &mut st);
         self.fs
             .ufs
             .lookup(s, &st.ip, name)
@@ -846,6 +860,7 @@ impl DirectoryNode for UfsNode {
             reserve: reserve_for(c.uid),
         };
         let mut st = self.cell.state.lock(s);
+        self.index(s, &mut st);
         let mut sum = sum.lock(s);
         let (ino, _) = shared
             .ufs

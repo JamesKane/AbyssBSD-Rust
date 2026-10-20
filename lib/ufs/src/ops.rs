@@ -156,6 +156,7 @@ impl<B: BlockIo> Ufs<B> {
             ib: [0; crate::NIADDR],
             dirdepth: 0,
             raw,
+            dirhash: None,
         };
         // What the raw bytes held past the decoded fields goes too.
         ip.raw[84..88].fill(0);
@@ -314,6 +315,7 @@ impl<B: BlockIo> Ufs<B> {
         self.write_inode(cx, dir_ino, dir, Mode::Sync)?;
         ip.nlink = 0;
         ip.ctime = now;
+        ip.dirhash = None;
         self.truncate(cx, sum, ino, ip, 0, Reserve::Allowed, true)?;
         self.write_inode(cx, ino, ip, Mode::Sync)
     }
@@ -338,6 +340,7 @@ impl<B: BlockIo> Ufs<B> {
         ip.mode = 0;
         ip.size = 0;
         ip.blocks = 0;
+        ip.dirhash = None;
         ip.db = [0; 12];
         ip.ib = [0; crate::NIADDR];
         self.write_inode(cx, ino, ip, Mode::Sync)?;
@@ -399,6 +402,7 @@ impl<B: BlockIo> Ufs<B> {
                         // The replaced directory's `..` no longer counts in
                         // its parent; it is emptied now.
                         tip.nlink = 0;
+                        tip.dirhash = None;
                         tdir.nlink = tdir.nlink.saturating_sub(1);
                         self.truncate(cx, sum, tino, tip, 0, reserve, true)?;
                     } else {

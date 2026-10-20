@@ -25,6 +25,7 @@ mod allocate;
 mod balloc;
 pub mod cg;
 pub mod dir;
+pub mod dirhash;
 mod inode;
 pub mod ops;
 pub mod sb;
@@ -454,6 +455,9 @@ impl<B: BlockIo> Ufs<B> {
 
     /// The inode `name` names in directory `dir` (FreeBSD's `ufs_lookup`).
     pub fn lookup(&self, cx: &B::Cx, dir: &Inode, name: &[u8]) -> Result<Option<u32>, Error> {
+        if let Some(h) = &dir.dirhash {
+            return Ok(h.names.get(name).map(|&(ino, _)| ino));
+        }
         let mut found = None;
         self.read_dir(cx, dir, 0, &mut |e| {
             if e.name == name {

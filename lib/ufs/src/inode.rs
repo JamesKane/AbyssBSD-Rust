@@ -86,6 +86,8 @@ pub struct Inode {
     pub dirdepth: u32,
     /// The inode as read, so writing it back keeps what is not decoded.
     pub raw: [u8; SIZE],
+    /// A large directory's index (in memory only).
+    pub dirhash: Option<alloc::boxed::Box<crate::dirhash::DirHash>>,
 }
 
 fn u16_at(b: &[u8], at: usize) -> u16 {
@@ -138,6 +140,7 @@ impl Inode {
         let ip = Self {
             dirdepth: u32_at(b, off::DIRDEPTH),
             raw,
+            dirhash: None,
             mode,
             nlink: u16_at(b, off::NLINK),
             uid: u32_at(b, off::UID),

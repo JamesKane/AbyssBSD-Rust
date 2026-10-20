@@ -975,12 +975,46 @@ P5.0 ─► P5.1 ─┬─► P5.2 ───────────────
     ESP. `<arch>-ufs-shell` boots that way to `/rescue/sh` on both architectures, on the server.
     The loader has no modules apart from the memory disk yet.
 
-**P5.5 UFS2 write.**
+**P5.5 UFS2 write.** — done 2026-10-20
 - Stage 2 of §10.3: allocation with FreeBSD's policies, `balloc`, truncation, directory
   operations, inode allocation, check-hashes, write ordering, and the clean flag.
 - Host random workloads on images, each checked by `fsck_ffs -f -n` on the server with no errors.
 - In the kernel: a read-write UFS2 mount, pjdfstest and fsx on it, then `fsck_ffs -f` clean on the
   server. Large-directory lookups use a directory hash (FreeBSD's `dirhash`).
+- As delivered:
+  - `lib/ufs` follows FreeBSD's `ffs_alloc.c`, `ffs_balloc.c`, `ffs_inode.c`, and `ufs_vnops.c`
+    without soft updates:
+    - cylinder groups with exact accounting (fragment summaries, cluster maps, rotors, lazy
+      inode-block initialization) and check-hashes;
+    - allocation with FreeBSD's policies;
+    - `balloc` and `truncate`: no file ends in a hole, and new space reads as zeros;
+    - directory operations, and create, link, unlink, `rmdir`, and rename with link counts and
+      FreeBSD's write order. Inodes, directory blocks, and new indirect blocks are written
+      synchronously, and a truncated inode before its blocks are freed.
+  - The directory hash hangs off a large directory's in-core inode (2,560 bytes or more, FreeBSD's
+    `dirhash_minsize`). It indexes names and each chunk's free space, and every directory operation
+    keeps it exact.
+  - The host test runs a 3,000-operation random workload against a model on `makefs` images
+    (three geometries, one filling up) and on `newfs` images, which carry the superblock, group,
+    and inode check-hashes. Half the operations go through the directory index, which is checked
+    against one rebuilt from the disk. A 3,000-entry directory test covers lookups, removals, and
+    slot reuse through the index. Every image reads back as the model says, and FreeBSD's
+    `fsck_ffs -f -n` finds it clean.
+  - The kernel mounts UFS2 read-write:
+    - in-core inodes are shared by node and pager under a sleepable lock;
+    - `write` allocates block by block before copying through the page cache;
+    - the pager writes pages back, allocating holes that mappings wrote;
+    - inodes are written lazily;
+    - the clean flag is cleared on mount and set on unmount, and an unclean file system is refused
+      read-write unless forced.
+  - A boot test on its own disk runs FreeBSD's `newfs`, `/rescue`'s tools, and fsx read-write. Then
+    FreeBSD's `fsck_ffs`, running on AbyssBSD, finds the file system clean, and on the server the
+    host's `fsck_ffs` checks the disk image again.
+  - On the way:
+    - VM truncation zeroes the pages it must keep, so cut-off data never reads back;
+    - `bufcache` gains `discard`;
+    - integer casts in `lib/ufs` go through explicit helpers.
+  - **Moved to P5.9:** pjdfstest needs a minimal credential model first (see P5.2).
 
 **P5.6 msdosfs.**
 - `lib/fat` (§10.4) read and write, host-tested against `newfs_msdos` images and `fsck_msdosfs`.
