@@ -153,10 +153,31 @@ impl Object {
     }
 
     /// Finds page `index` along the chain, filling it from a pager object
-    /// that should have it.
-    pub fn lookup(&self, index: PageIndex) -> Result<Found, LookupError> {
-        if let Some(pfn) = self.page_or_fill(index)? {
-            return Ok(Found::Top(pfn));
+    /// that should have it. With `fold` (the caller's mapping alone
+    /// reaches this object), first folds away what only this object still
+    /// reaches, as [`Self::collapse`] does, if the look at this object
+    /// shows there is some: a fault in a shared chain then pays nothing
+    /// for it.
+    pub fn lookup(&self, index: PageIndex, fold: bool) -> Result<Found, LookupError> {
+        if self.pager.is_some() {
+            if let Some(pfn) = self.page_or_fill(index)? {
+                return Ok(Found::Top(pfn));
+            }
+        } else {
+            let inner = self.inner.lock();
+            if let Some(&pfn) = inner.pages.get(&index) {
+                return Ok(Found::Top(pfn));
+            }
+            let foldable = fold
+                && inner
+                    .backing
+                    .as_ref()
+                    .is_some_and(|(b, _)| Arc::strong_count(b) == 1 && b.pager.is_none());
+            drop(inner);
+            if foldable {
+                self.collapse();
+                return self.lookup(index, false);
+            }
         }
         let mut next = self.backing();
         let mut index = index;
@@ -227,6 +248,12 @@ impl Object {
             return Some(pfn);
         }
         // Allocate (and zero or copy) outside the lock.
+        self.insert_new(index, below)
+    }
+
+    /// [`Self::get_or_insert`] for a page the caller just found missing
+    /// here: no first look.
+    pub fn insert_new(&self, index: PageIndex, below: Option<Pfn>) -> Option<Pfn> {
         let new = match below {
             Some(from) => self.pages_ops.alloc_copy(from)?,
             None => self.pages_ops.alloc_zeroed()?,

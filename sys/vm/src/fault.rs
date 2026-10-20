@@ -81,30 +81,34 @@ pub fn resolve(map: &mut VmMap, va: VirtAddr, access: Access) -> Result<Resolved
         entry.offset = 0;
         entry.needs_copy = false;
     }
-    let object = Arc::clone(object);
-    if !entry.needs_copy {
-        // Our object is ours alone; fold away what only it still reaches.
-        object.collapse();
-    }
+    let entry = &*entry;
+    // Made above.
+    let Some(object) = &entry.object else {
+        return Err(FaultError::NotMapped);
+    };
     let index = entry.index_of(page);
     let read_only = entry.prot.without(Prot::WRITE);
-    let found = object.lookup(index).map_err(|e| match e {
-        LookupError::OutOfMemory => FaultError::OutOfMemory,
-        LookupError::PastEnd => FaultError::PastEnd,
-    })?;
+    // If our object is ours alone, the lookup folds away what only it
+    // still reaches.
+    let found = object
+        .lookup(index, !entry.needs_copy)
+        .map_err(|e| match e {
+            LookupError::OutOfMemory => FaultError::OutOfMemory,
+            LookupError::PastEnd => FaultError::PastEnd,
+        })?;
     let (pfn, prot) = match found {
         Found::Top(pfn) if entry.needs_copy => (pfn, read_only),
         Found::Top(pfn) => (pfn, entry.prot),
         Found::Backing(pfn) if write => (
             object
-                .get_or_insert(index, Some(pfn))
+                .insert_new(index, Some(pfn))
                 .ok_or(FaultError::OutOfMemory)?,
             entry.prot,
         ),
         Found::Backing(pfn) => (pfn, read_only),
         Found::Absent => {
             let pfn = object
-                .get_or_insert(index, None)
+                .insert_new(index, None)
                 .ok_or(FaultError::OutOfMemory)?;
             // A zero page in a still-shared object is shared too.
             (
