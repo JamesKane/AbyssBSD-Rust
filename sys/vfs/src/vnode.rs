@@ -79,6 +79,9 @@ pub struct Vnode {
     /// a weak reference upgraded meanwhile (the name cache's) must let it
     /// go, as FreeBSD's `vget` fails on a vnode being doomed.
     dying: core::sync::atomic::AtomicBool,
+    /// Open files writing it (positive) or programs running it
+    /// (negative), never both (FreeBSD's `v_writecount`).
+    writecount: core::sync::atomic::AtomicI64,
 }
 
 /// A counter standing in for time, for vnode recency.
@@ -115,12 +118,50 @@ impl Vnode {
             lockf: crate::lockf::Lockf::new(),
             used: AtomicU64::new(tick()),
             dying: core::sync::atomic::AtomicBool::new(false),
+            writecount: core::sync::atomic::AtomicI64::new(0),
         }
     }
 
     /// Whether the reclaimer is taking it (see `dying`).
     pub(crate) fn is_dying(&self) -> bool {
         self.dying.load(Ordering::SeqCst)
+    }
+
+    /// Counts an open file writing it: `ETXTBSY` while a program runs it.
+    pub fn add_writer(&self) -> Result<(), Errno> {
+        self.writecount
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n >= 0).then_some(n + 1)
+            })
+            .map(drop)
+            .map_err(|_| Errno::ETXTBSY)
+    }
+
+    /// An open file writing it closed.
+    pub fn drop_writer(&self) {
+        self.writecount.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    /// Counts a program running it: `ETXTBSY` while a file writes it
+    /// (FreeBSD's `VOP_SET_TEXT`).
+    pub fn add_text(&self) -> Result<(), Errno> {
+        self.writecount
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n <= 0).then_some(n - 1)
+            })
+            .map(drop)
+            .map_err(|_| Errno::ETXTBSY)
+    }
+
+    /// A program running it ended or replaced itself.
+    pub fn drop_text(&self) {
+        self.writecount.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Whether a program runs it (FreeBSD's `VV_TEXT`).
+    #[must_use]
+    pub fn is_text(&self) -> bool {
+        self.writecount.load(Ordering::Acquire) < 0
     }
 
     pub(crate) fn set_dying(&self, dying: bool) {
@@ -347,7 +388,7 @@ impl Vnode {
         match self.read(s).live()? {
             NodeOps::Device(d) => Ok(d.device()),
             // A device node outside devfs (FreeBSD: `ENXIO`).
-            NodeOps::Other(Kind::CharDevice, _) => Err(Errno::ENXIO),
+            NodeOps::Other(Kind::CharDevice | Kind::BlockDevice, _) => Err(Errno::ENXIO),
             _ => Err(Errno::ENODEV),
         }
     }

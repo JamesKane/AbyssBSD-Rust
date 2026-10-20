@@ -20,7 +20,7 @@ use abi::fcntl::{
     AT_EMPTY_PATH, AT_FDCWD, AT_REMOVEDIR, AT_RESOLVE_BENEATH, AT_SYMLINK_FOLLOW,
     AT_SYMLINK_NOFOLLOW, FWRITE,
 };
-use abi::stat::{ALLPERMS, S_IFCHR, S_IFIFO, S_IFMT};
+use abi::stat::{ALLPERMS, S_IFBLK, S_IFCHR, S_IFIFO, S_IFMT};
 use abi::time::Timespec;
 use sched::Sleepable;
 use vfs::{Create, NewNode, SetAttr, Vnode};
@@ -32,7 +32,6 @@ use crate::proc::Process;
 use crate::uaccess::UserPtr;
 
 const ACCESSPERMS: u16 = 0o777;
-const S_IFBLK: u16 = 0o060_000;
 const S_IFWHT: u16 = 0o160_000;
 
 fn cwd() -> u64 {
@@ -44,7 +43,7 @@ fn umask(p: &Process) -> u16 {
     p.umask.load(Ordering::Relaxed)
 }
 
-fn create_as(mode: u16) -> Create {
+pub(super) fn create_as(mode: u16) -> Create {
     let c = crate::fs::cred();
     Create {
         mode,
@@ -68,7 +67,7 @@ fn make(s: &Sleepable, fd: u64, path_ptr: u64, node: &NewNode, mode: u16) -> Sys
         &parent.name,
         node,
         &create_as(mode),
-        crate::fs::cred(),
+        &crate::fs::cred(),
         true,
     )?;
     Ok(0)
@@ -104,11 +103,22 @@ pub(super) fn mknodat(s: &Sleepable, fd: u64, path: u64, mode: u64, dev: u64) ->
     let p = process()?;
     let m = u16::try_from(mode & 0o177_777).unwrap_or(0);
     let perm = (m & ALLPERMS) & !umask(&p);
+    // Device nodes are the superuser's to make (FreeBSD's
+    // `PRIV_VFS_MKNOD_DEV`), with a number (`VNOVAL` is none).
+    let device = |node: NewNode| {
+        if !p.cred().is_root() {
+            Err(Errno::EPERM)
+        } else if dev == u64::MAX {
+            Err(Errno::EINVAL)
+        } else {
+            make(s, fd, path, &node, perm)
+        }
+    };
     match m & S_IFMT {
-        S_IFCHR => make(s, fd, path, &NewNode::CharDevice(dev), perm),
+        S_IFCHR => device(NewNode::CharDevice(dev)),
+        S_IFBLK => device(NewNode::BlockDevice(dev)),
         S_IFIFO => make(s, fd, path, &NewNode::Fifo, perm),
-        // No block devices, and no union mounts to need whiteouts.
-        S_IFBLK => Err(Errno::EINVAL),
+        // No union mounts to need whiteouts.
         S_IFWHT => Err(Errno::EOPNOTSUPP),
         _ => Err(Errno::EINVAL),
     }
@@ -155,7 +165,7 @@ pub(super) fn funlinkat(s: &Sleepable, dfd: u64, path_ptr: u64, fd: u64, flag: u
         s,
         &parent.dir,
         &parent.name,
-        crate::fs::cred(),
+        &crate::fs::cred(),
         flag & AT_REMOVEDIR != 0,
     )?;
     Ok(0)
@@ -189,7 +199,7 @@ pub(super) fn renameat(
     let to = path(to_ptr)?;
     let f = crate::fs::parent_of(s, &p, At::new(int(fromfd)), &from, false)?;
     let t = crate::fs::parent_of(s, &p, At::new(int(tofd)), &to, false)?;
-    vfs::ops::rename(s, &f.dir, &f.name, &t.dir, &t.name, crate::fs::cred())?;
+    vfs::ops::rename(s, &f.dir, &f.name, &t.dir, &t.name, &crate::fs::cred())?;
     Ok(0)
 }
 
@@ -220,7 +230,7 @@ pub(super) fn linkat(
     let target = super::path::at_vnode(s, &p, fd1, &from, walk, flag & AT_EMPTY_PATH != 0)?;
     let to = path(path2)?;
     let t = crate::fs::parent_of(s, &p, At::new(int(fd2)), &to, false)?;
-    vfs::ops::link(s, &target, &t.dir, &t.name, crate::fs::cred())?;
+    vfs::ops::link(s, &target, &t.dir, &t.name, &crate::fs::cred())?;
     Ok(0)
 }
 
@@ -262,7 +272,7 @@ fn fd_vnode(s: &Sleepable, fd: u64) -> Result<Arc<Vnode>, Errno> {
 }
 
 fn setattr(s: &Sleepable, v: &Vnode, a: &SetAttr) -> SysResult {
-    vfs::ops::setattr(s, v, a, crate::fs::cred(), false)?;
+    vfs::ops::setattr(s, v, a, &crate::fs::cred(), false)?;
     Ok(0)
 }
 
@@ -377,7 +387,7 @@ fn set_times(s: &Sleepable, v: &Vnode, times: u64) -> SysResult {
     if a.atime.is_none() && a.mtime.is_none() {
         return Ok(0);
     }
-    vfs::ops::setattr(s, v, &a, crate::fs::cred(), now)?;
+    vfs::ops::setattr(s, v, &a, &crate::fs::cred(), now)?;
     Ok(0)
 }
 
@@ -426,7 +436,7 @@ pub(super) fn utimes(s: &Sleepable, path: u64, tv: u64, nofollow: bool) -> SysRe
     let flag = if nofollow { AT_SYMLINK_NOFOLLOW } else { 0 };
     let v = target(s, &p, cwd(), path, flag)?;
     let (a, now) = timevals(tv)?;
-    vfs::ops::setattr(s, &v, &a, crate::fs::cred(), now)?;
+    vfs::ops::setattr(s, &v, &a, &crate::fs::cred(), now)?;
     Ok(0)
 }
 
@@ -434,7 +444,7 @@ pub(super) fn utimes(s: &Sleepable, path: u64, tv: u64, nofollow: bool) -> SysRe
 pub(super) fn futimes(s: &Sleepable, fd: u64, tv: u64) -> SysResult {
     let v = fd_vnode(s, fd)?;
     let (a, now) = timevals(tv)?;
-    vfs::ops::setattr(s, &v, &a, crate::fs::cred(), now)?;
+    vfs::ops::setattr(s, &v, &a, &crate::fs::cred(), now)?;
     Ok(0)
 }
 
@@ -443,7 +453,7 @@ pub(super) fn futimesat(s: &Sleepable, fd: u64, path: u64, tv: u64) -> SysResult
     let p = process()?;
     let v = target(s, &p, fd, path, 0)?;
     let (a, now) = timevals(tv)?;
-    vfs::ops::setattr(s, &v, &a, crate::fs::cred(), now)?;
+    vfs::ops::setattr(s, &v, &a, &crate::fs::cred(), now)?;
     Ok(0)
 }
 

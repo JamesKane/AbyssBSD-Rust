@@ -508,6 +508,29 @@ impl ufs::ops::WorkEnv<DiskIo> for WorkEnv<'_> {
 }
 
 impl FileSystem for UfsFs {
+    /// FreeBSD's `ufs_pathconf` (no ACLs or MAC labels).
+    fn pathconf(&self, kind: Kind, name: u32) -> Result<i64, Errno> {
+        use abi::fcntl::*;
+        let sb = self.shared.ufs.superblock();
+        let (bsize, fsize) = (i64::from(sb.bsize), i64::from(sb.fsize));
+        match name {
+            _PC_LINK_MAX => Ok(i64::from(ufs::ops::LINK_MAX)),
+            _PC_NAME_MAX => Ok(255),
+            _PC_PIPE_BUF if matches!(kind, Kind::Directory | Kind::Fifo) => Ok(512),
+            _PC_PIPE_BUF => Err(Errno::EINVAL),
+            _PC_CHOWN_RESTRICTED | _PC_NO_TRUNC | _PC_HAS_HIDDENSYSTEM => Ok(1),
+            _PC_ACL_EXTENDED | _PC_ACL_NFS4 | _PC_PRIO_IO | _PC_SYNC_IO => Ok(0),
+            _PC_ACL_PATH_MAX => Ok(3),
+            _PC_MIN_HOLE_SIZE | _PC_REC_INCR_XFER_SIZE | _PC_REC_MIN_XFER_SIZE => Ok(bsize),
+            _PC_ALLOC_SIZE_MIN => Ok(fsize),
+            _PC_FILESIZEBITS => Ok(64),
+            _PC_REC_MAX_XFER_SIZE => Ok(-1),
+            _PC_REC_XFER_ALIGN => Ok(4096),
+            _PC_SYMLINK_MAX => Ok(1024),
+            _ => vfs::mount::std_pathconf(name),
+        }
+    }
+
     fn root(&self) -> u64 {
         u64::from(ufs::ROOT_INO)
     }
@@ -556,9 +579,8 @@ impl FileSystem for UfsFs {
             ufs::Kind::Regular => NodeOps::Regular(node),
             ufs::Kind::Directory => NodeOps::Directory(node),
             ufs::Kind::Symlink => NodeOps::Symlink(node),
-            ufs::Kind::CharDevice | ufs::Kind::BlockDevice => {
-                NodeOps::Other(Kind::CharDevice, node)
-            }
+            ufs::Kind::CharDevice => NodeOps::Other(Kind::CharDevice, node),
+            ufs::Kind::BlockDevice => NodeOps::Other(Kind::BlockDevice, node),
             ufs::Kind::Fifo => NodeOps::Other(Kind::Fifo, node),
             ufs::Kind::Socket => NodeOps::Other(Kind::Socket, node),
             ufs::Kind::Whiteout | ufs::Kind::None => {
@@ -731,7 +753,8 @@ fn kind_of(dtype: u8) -> Option<Kind> {
         DT_REG => Kind::Regular,
         DT_DIR => Kind::Directory,
         DT_LNK => Kind::Symlink,
-        DT_CHR | DT_BLK => Kind::CharDevice,
+        DT_CHR => Kind::CharDevice,
+        DT_BLK => Kind::BlockDevice,
         DT_FIFO => Kind::Fifo,
         DT_SOCK => Kind::Socket,
         _ => return None,
@@ -1143,6 +1166,7 @@ impl DirectoryNode for UfsNode {
             NewNode::Directory => NewKind::Directory,
             NewNode::Symlink(t) => NewKind::Symlink(t),
             NewNode::CharDevice(rdev) => NewKind::Device(*rdev),
+            NewNode::BlockDevice(rdev) => NewKind::BlockDevice(*rdev),
             NewNode::Fifo => NewKind::Fifo,
             NewNode::Socket => NewKind::Socket,
         };
@@ -1292,7 +1316,8 @@ impl DirectoryNode for UfsNode {
                     Ok(ip) => match ip.kind() {
                         ufs::Kind::Directory => Kind::Directory,
                         ufs::Kind::Symlink => Kind::Symlink,
-                        ufs::Kind::CharDevice | ufs::Kind::BlockDevice => Kind::CharDevice,
+                        ufs::Kind::CharDevice => Kind::CharDevice,
+                        ufs::Kind::BlockDevice => Kind::BlockDevice,
                         ufs::Kind::Fifo => Kind::Fifo,
                         ufs::Kind::Socket => Kind::Socket,
                         _ => Kind::Regular,

@@ -48,8 +48,10 @@ pub enum NewKind<'a> {
     Regular,
     Directory,
     Symlink(&'a [u8]),
-    /// A character (or block) device node, with its number.
+    /// A character device node, with its number.
     Device(u64),
+    /// A block device node, with its number.
+    BlockDevice(u64),
     Fifo,
     Socket,
 }
@@ -61,6 +63,7 @@ impl NewKind<'_> {
             Self::Directory => 0o040_000,
             Self::Symlink(_) => 0o120_000,
             Self::Device(_) => 0o020_000,
+            Self::BlockDevice(_) => 0o060_000,
             Self::Fifo => 0o010_000,
             Self::Socket => 0o140_000,
         }
@@ -263,7 +266,7 @@ impl<B: BlockIo> Ufs<B> {
                     self.write_data_range(cx, sum, ino, &mut ip, 0, target, who.reserve)?;
                 }
             }
-            NewKind::Device(rdev) => ip.db[0] = rdev,
+            NewKind::Device(rdev) | NewKind::BlockDevice(rdev) => ip.db[0] = rdev,
             NewKind::Regular | NewKind::Fifo | NewKind::Socket => {}
         }
         self.write_inode(cx, ino, &ip, self.ordered())?;

@@ -26,6 +26,7 @@ mod acpi_bus;
 #[cfg(not(feature = "ktest"))]
 mod bench;
 mod boot;
+mod cred;
 mod devices;
 mod efirtc;
 mod errata;
@@ -37,6 +38,7 @@ mod intc;
 mod its;
 mod kinfo;
 mod md;
+mod mdisk;
 mod mm;
 mod panic;
 mod pci;

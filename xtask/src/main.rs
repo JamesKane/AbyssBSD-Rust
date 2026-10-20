@@ -14,6 +14,7 @@ mod fattest;
 mod fs;
 mod image;
 mod perf;
+mod pjdfstest;
 mod policy;
 mod qemu;
 mod remote;
@@ -90,6 +91,7 @@ fn run() -> Result<()> {
         "fs-image" => fs::cmd_image(args),
         "fs-check" => fs::cmd_check(args),
         "crash-test" => crash::cmd(args),
+        "pjdfstest" => pjdfstest::cmd(args),
         "ufs-verify" => ufsverify::cmd(args),
         "fetch-base" => base::cmd(args),
         "freebsd-shell" => expect::cmd_freebsd_shell(args),

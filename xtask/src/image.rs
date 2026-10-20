@@ -94,16 +94,26 @@ const FSTAB: &str = "# Device\t\tMountpoint\tFStype\tOptions\tDump\tPass#\n\
                      /dev/gpt/rootfs0\t/\t\tufs\trw\t1\t1\n\
                      /dev/gpt/efiboot0\t/boot/efi\tmsdosfs\trw\t2\t2\n";
 
-/// Where the root image keeps the static `find` and `mtree`.
+/// Where the root image keeps the static tools.
 pub(crate) const STATIC_TOOLS: &str = "usr/tests/static";
+
+/// Where the root image keeps pjdfstest.
+pub(crate) const PJDFSTEST: &str = "usr/tests/pjdfstest";
+
+/// Stands in for `openssl md5`, which pjdfstest's scripts use to make
+/// names, until base's own `openssl` can run (P6).
+const OPENSSL_MD5: &str = "#!/bin/sh\n\
+                           [ \"$*\" = md5 ] || { echo \"openssl: only md5 here\" >&2; exit 1; }\n\
+                           exec md5\n";
 
 /// As [`build`], with the root on a UFS2 partition that `makefs` makes
 /// (FreeBSD only), with soft updates: all of `base.txz` (owners and flags
 /// from its specification), the kernel at `/boot/kernel/kernel`, an
-/// `/etc/fstab`, the memory disk's `/usr/tests`, and in [`STATIC_TOOLS`]
-/// static `find` and `mtree` with the base's specifications
-/// (`base.mtree` for owners, modes, and flags; `base-data.mtree` for
-/// sizes and digests). The loader finds the kernel there and
+/// `/etc/fstab`, the memory disk's `/usr/tests`, in [`STATIC_TOOLS`]
+/// static `find`, `mtree`, and what pjdfstest's scripts need, with the
+/// base's specifications (`base.mtree` for owners, modes, and flags;
+/// `base-data.mtree` for sizes and digests), and pjdfstest in
+/// [`PJDFSTEST`]. The loader finds the kernel there and
 /// hands the kernel the fstab's root; there is no memory disk.
 pub(crate) fn build_ufs_root(arch: Arch, opts: build::Options, cmdline: &str) -> Result<PathBuf> {
     let images = build::all(arch, opts)?;
@@ -134,6 +144,18 @@ pub(crate) fn build_ufs_root(arch: Arch, opts: build::Options, cmdline: &str) ->
     for (name, bin) in crate::base::static_tools(arch)? {
         fs::copy(&bin, stage.join(STATIC_TOOLS).join(name))?;
     }
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let shim = stage.join(STATIC_TOOLS).join("openssl");
+        fs::write(&shim, OPENSSL_MD5)?;
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o555))?;
+    }
+    util::run(
+        std::process::Command::new("cp")
+            .arg("-R")
+            .arg(crate::base::pjdfstest_suite(arch)?)
+            .arg(stage.join(PJDFSTEST)),
+    )?;
     // What the root should hold, for its `mtree` to check.
     let tools = stage.join(STATIC_TOOLS);
     fs::copy(crate::base::spec(arch)?, tools.join("base.mtree"))?;

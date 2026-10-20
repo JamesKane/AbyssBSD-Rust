@@ -256,6 +256,46 @@ impl Session {
         }
     }
 
+    /// Waits up to `timeout` for any of `patterns`; consumes the output
+    /// through the earliest match and returns which pattern it was (the
+    /// first listed, if several match there).
+    pub(crate) fn expect_any(&mut self, patterns: &[&str], timeout: Duration) -> Result<usize> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let found = patterns
+                .iter()
+                .enumerate()
+                .filter_map(|(i, p)| {
+                    let n = p.as_bytes();
+                    self.pending
+                        .windows(n.len())
+                        .position(|w| w == n)
+                        .map(|at| (at, i, n.len()))
+                })
+                .min_by_key(|&(at, i, _)| (at, i));
+            if let Some((at, i, len)) = found {
+                self.pending.drain(..at + len);
+                return Ok(i);
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.rx.recv_timeout(left) {
+                Ok(bytes) => {
+                    self.log.write_all(&bytes)?;
+                    self.pending.extend_from_slice(&bytes);
+                }
+                Err(_) => {
+                    let tail = &self.pending[self.pending.len().saturating_sub(300)..];
+                    return Err(format!(
+                        "nothing new for {} s waiting for {patterns:?}; last output: {:?}",
+                        timeout.as_secs(),
+                        String::from_utf8_lossy(tail)
+                    )
+                    .into());
+                }
+            }
+        }
+    }
+
     /// Runs `steps`, each within `timeout`.
     pub(crate) fn script(&mut self, steps: &[Step], timeout: Duration) -> Result<()> {
         for (i, s) in steps.iter().enumerate() {

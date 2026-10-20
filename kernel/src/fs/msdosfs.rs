@@ -907,7 +907,9 @@ impl DirectoryNode for MsdosNode {
             // FreeBSD's msdosfs makes no symbolic links (`EOPNOTSUPP`), and
             // `mknod` of anything else fails (`EINVAL`).
             NewNode::Symlink(_) => return Err(Errno::EOPNOTSUPP),
-            NewNode::CharDevice(_) | NewNode::Fifo | NewNode::Socket => return Err(Errno::EINVAL),
+            NewNode::CharDevice(_) | NewNode::BlockDevice(_) | NewNode::Fifo | NewNode::Socket => {
+                return Err(Errno::EINVAL);
+            }
         };
         let start = self.start(s);
         let _st = self.cell.state.lock(s);

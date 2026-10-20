@@ -85,6 +85,13 @@ pub(crate) fn init() {
         Value::int(identity::OSRELDATE),
     );
     add(
+        k,
+        Number::Fixed(kern::NGROUPS),
+        "ngroups",
+        "Maximum number of supplemental groups a user can belong to",
+        Value::int(i32::try_from(crate::cred::NGROUPS_MAX).unwrap_or(i32::MAX)),
+    );
+    add(
         h,
         Number::Fixed(hw::NCPU),
         "ncpu",

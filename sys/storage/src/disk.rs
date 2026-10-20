@@ -163,6 +163,18 @@ pub fn alloc_unit(name: &'static str) -> u32 {
     unit
 }
 
+/// Takes unit `unit` for disks named `name`, if it is free (a unit the
+/// user chose, as `mdconfig -u` does). Freed when the disk is withdrawn.
+#[must_use]
+pub fn reserve_unit(name: &'static str, unit: u32) -> bool {
+    let mut units = UNITS.lock();
+    if units.iter().any(|&(n, v)| n == name && v == unit) {
+        return false;
+    }
+    units.push((name, unit));
+    true
+}
+
 impl Disk {
     /// Its name (`vtbd0`, `vtbd0p1`).
     #[must_use]

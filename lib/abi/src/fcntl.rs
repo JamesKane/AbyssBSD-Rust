@@ -89,6 +89,12 @@ pub const _PC_SYMLINK_MAX: u32 = 18;
 pub const _PC_MIN_HOLE_SIZE: u32 = 21;
 pub const _PC_ASYNC_IO: u32 = 53;
 pub const _PC_SYNC_IO: u32 = 55;
+pub const _PC_PRIO_IO: u32 = 54;
+pub const _PC_REC_INCR_XFER_SIZE: u32 = 14;
+pub const _PC_REC_MAX_XFER_SIZE: u32 = 15;
+pub const _PC_REC_MIN_XFER_SIZE: u32 = 16;
+pub const _PC_REC_XFER_ALIGN: u32 = 17;
+pub const _PC_ACL_PATH_MAX: u32 = 60;
 pub const _PC_ACL_EXTENDED: u32 = 59;
 pub const _PC_CAP_PRESENT: u32 = 61;
 pub const _PC_INF_PRESENT: u32 = 62;
@@ -222,6 +228,12 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     u("_PC_MIN_HOLE_SIZE", _PC_MIN_HOLE_SIZE),
     u("_PC_ASYNC_IO", _PC_ASYNC_IO),
     u("_PC_SYNC_IO", _PC_SYNC_IO),
+    u("_PC_PRIO_IO", _PC_PRIO_IO),
+    u("_PC_REC_INCR_XFER_SIZE", _PC_REC_INCR_XFER_SIZE),
+    u("_PC_REC_MAX_XFER_SIZE", _PC_REC_MAX_XFER_SIZE),
+    u("_PC_REC_MIN_XFER_SIZE", _PC_REC_MIN_XFER_SIZE),
+    u("_PC_REC_XFER_ALIGN", _PC_REC_XFER_ALIGN),
+    u("_PC_ACL_PATH_MAX", _PC_ACL_PATH_MAX),
     u("_PC_ACL_EXTENDED", _PC_ACL_EXTENDED),
     u("_PC_CAP_PRESENT", _PC_CAP_PRESENT),
     u("_PC_INF_PRESENT", _PC_INF_PRESENT),

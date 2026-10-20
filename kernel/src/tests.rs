@@ -2683,7 +2683,7 @@ mod user_memory {
                         root: &root,
                         follow: true,
                         beneath: false,
-                        cred: crate::fs::cred(),
+                        cred: &crate::fs::cred(),
                     },
                     b"/rescue/echo",
                 )
@@ -2811,7 +2811,7 @@ mod user_memory {
                 root: &root,
                 follow: true,
                 beneath: false,
-                cred: crate::fs::cred(),
+                cred: &crate::fs::cred(),
             };
             if crate::fs::namespace().lookup(&s, &l, FSX).is_err() {
                 kprintln!("fsx: not on the memory disk; skipped");
@@ -2828,7 +2828,7 @@ mod user_memory {
             assert_eq!(p.wait(&s), crate::proc::Exit::Code(0));
             for f in [&b"/tmp/fsx.data"[..], b"/tmp/fsx.data.fsxgood", b"/tmp/fsx.data.fsxlog"] {
                 let _ = crate::fs::parent_of(&s, &p, crate::fs::At::Cwd, f, false)
-                    .and_then(|d| vfs::ops::remove(&s, &d.dir, &d.name, crate::fs::cred(), false));
+                    .and_then(|d| vfs::ops::remove(&s, &d.dir, &d.name, &crate::fs::cred(), false));
             }
         }
     }
@@ -2841,7 +2841,7 @@ mod user_memory {
             root: &root,
             follow: true,
             beneath: false,
-            cred: crate::fs::cred(),
+            cred: &crate::fs::cred(),
         };
         let v = crate::fs::namespace().lookup(s, &l, path).ok()?;
         let size = usize::try_from(v.size(s).ok()?).ok()?;
@@ -2961,7 +2961,7 @@ mod user_memory {
                 kprintln!("ufs: {disk}: the listing and {lines} digests match FreeBSD's");
                 for f in [&b"/tmp/ufs.ls"[..], b"/tmp/ufs.md5"] {
                     let _ = crate::fs::parent_of(&s, &p, crate::fs::At::Cwd, f, false).and_then(
-                        |d| vfs::ops::remove(&s, &d.dir, &d.name, crate::fs::cred(), false),
+                        |d| vfs::ops::remove(&s, &d.dir, &d.name, &crate::fs::cred(), false),
                     );
                 }
             }
@@ -3074,7 +3074,7 @@ mod user_memory {
         );
         for f in [&b"/tmp/fsck.out"[..], b"/tmp/fsx.out"] {
             let _ = crate::fs::parent_of(&s, &p, crate::fs::At::Cwd, f, false)
-                .and_then(|d| vfs::ops::remove(&s, &d.dir, &d.name, crate::fs::cred(), false));
+                .and_then(|d| vfs::ops::remove(&s, &d.dir, &d.name, &crate::fs::cred(), false));
         }
     }
 
@@ -3144,7 +3144,7 @@ mod user_memory {
             kprintln!("msdosfs: read-write on {dev} is fsck clean");
             for f in [&b"/tmp/fsck.out"[..], b"/tmp/fsx.out"] {
                 let _ = crate::fs::parent_of(&s, &p, crate::fs::At::Cwd, f, false)
-                    .and_then(|d| vfs::ops::remove(&s, &d.dir, &d.name, crate::fs::cred(), false));
+                    .and_then(|d| vfs::ops::remove(&s, &d.dir, &d.name, &crate::fs::cred(), false));
             }
         }
     }
@@ -3223,7 +3223,7 @@ mod user_memory {
             kprintln!("msdosfs: the listing and {lines} digests match FreeBSD's");
             for f in [&b"/tmp/fat.ls"[..], b"/tmp/fat.md5"] {
                 let _ = crate::fs::parent_of(&s, &p, crate::fs::At::Cwd, f, false)
-                    .and_then(|d| vfs::ops::remove(&s, &d.dir, &d.name, crate::fs::cred(), false));
+                    .and_then(|d| vfs::ops::remove(&s, &d.dir, &d.name, &crate::fs::cred(), false));
             }
         }
     }
@@ -3423,5 +3423,55 @@ mod user_memory {
             assert_eq!(read_u64(a + PAGE), Err(Fault));
             leave();
         }
+    }
+}
+
+ktest! {
+    fn set_id_calls_follow_freebsd() {
+        use abi::errno::Errno;
+
+        use crate::cred::{Ids, Ucred};
+        let root = Ucred::root();
+        // The superuser's setuid sets all three uids.
+        let u = root.setuid(1000).unwrap();
+        assert_eq!((u.ruid, u.euid(), u.svuid), (1000, 1000, 1000));
+        assert_eq!(u.setuid(0), Err(Errno::EPERM));
+        assert_eq!(u.setgroups(&[5]), Err(Errno::EPERM));
+        // seteuid keeps the real and saved uids, so it can come back.
+        let e = root.seteuid(65534).unwrap();
+        assert_eq!((e.ruid, e.euid(), e.svuid), (0, 65534, 0));
+        assert!(!e.is_root());
+        let back = e.seteuid(0).unwrap();
+        assert!(back.is_root());
+        // Not the superuser: only the real or saved uid.
+        assert_eq!(e.seteuid(7), Err(Errno::EPERM));
+        // setuid to the saved uid, not as the superuser, moves only the
+        // effective uid (the saved one stays for coming back).
+        let s = e.setuid(0).unwrap();
+        assert_eq!((s.ruid, s.euid(), s.svuid), (0, 0, 0));
+        // Groups: sorted without repeats, without the effective gid.
+        let g = root.setgroups(&[65533, 5, 65533]).unwrap().setegid(65534).unwrap();
+        assert_eq!(g.groups(), &[5, 65533]);
+        assert_eq!((g.rgid, g.egid()), (0, 65534));
+        assert!(g.in_group(65534) && g.in_group(5) && !g.in_group(0));
+        assert_eq!(root.setgroups(&[0; 1024]), Err(Errno::EINVAL));
+        // setresuid: unprivileged, any of the three current uids.
+        let r = root
+            .setresuid(Ids { real: Some(1), effective: Some(2), saved: Some(3) })
+            .unwrap();
+        let swapped = r
+            .setresuid(Ids { real: Some(3), effective: Some(1), saved: None })
+            .unwrap();
+        assert_eq!((swapped.ruid, swapped.euid(), swapped.svuid), (3, 1, 3));
+        assert_eq!(
+            r.setresuid(Ids { real: None, effective: Some(9), saved: None }),
+            Err(Errno::EPERM)
+        );
+        // setreuid: setting the real uid sets the saved one to the
+        // effective.
+        let re = r.setreuid(Some(3), Some(1)).unwrap();
+        assert_eq!((re.ruid, re.euid(), re.svuid), (3, 1, 1));
+        // access checks with the real ids.
+        assert!(e.as_real().is_root());
     }
 }

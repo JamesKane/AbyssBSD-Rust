@@ -184,7 +184,7 @@ pub(crate) fn load(
     vfs::ops::access(
         &file.attr(s)?,
         file.kind(),
-        crate::fs::cred(),
+        &crate::fs::cred(),
         vfs::ops::VEXEC,
     )?;
     let object = crate::fs::object(s, file).ok_or(Errno::ENOEXEC)?;

@@ -68,6 +68,15 @@ impl SerialSink {
         }
     }
 
+    fn set_rx_interrupt(&self, on: bool) {
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            Self::Port(u) => u.set_rx_interrupt(on),
+            Self::Mmio16550(u) => u.set_rx_interrupt(on),
+            Self::Pl011(u) => u.set_rx_interrupt(on),
+        }
+    }
+
     #[cfg(feature = "ktest")]
     fn set_loopback(&self, on: bool) {
         match self {
@@ -296,11 +305,17 @@ pub(crate) fn loop_back(b: u8) {
 struct Received {
     buf: [u8; 256],
     len: usize,
+    /// The buffer filled with bytes still in the FIFO: the receive
+    /// interrupt is masked until the thread has taken the buffer, so
+    /// nothing is lost (an emulated port sends as fast as its FIFO
+    /// empties).
+    held: bool,
 }
 
 static RECEIVED: SpinLock<Received> = SpinLock::new(Received {
     buf: [0; 256],
     len: 0,
+    held: false,
 });
 
 /// The console's serial port, for the `uart` driver.
@@ -340,26 +355,36 @@ impl uart::ConsolePort for Port {
         // raises the interrupt again (cleared after, its receive timeout
         // would be lost and the byte left in the FIFO).
         serial.ack_rx();
-        while let Some(b) = serial.get() {
+        while r.len < r.buf.len() {
+            let Some(b) = serial.get() else {
+                return got;
+            };
             got = true;
-            // A full buffer drops what the thread has not taken yet.
-            if r.len < r.buf.len() {
-                let at = r.len;
-                r.buf[at] = b;
-                r.len += 1;
-            }
+            let at = r.len;
+            r.buf[at] = b;
+            r.len += 1;
         }
-        got
+        // Full: the rest waits in the FIFO until the thread catches up.
+        serial.set_rx_interrupt(false);
+        r.held = true;
+        true
     }
 
     fn deliver(&self, s: &Sleepable) {
         loop {
             let mut buf = [0u8; 256];
             let n = {
+                let c = CONSOLE.lock();
                 let mut r = RECEIVED.lock();
                 let n = r.len;
                 buf[..n].copy_from_slice(&r.buf[..n]);
                 r.len = 0;
+                if r.held {
+                    r.held = false;
+                    if let Some(serial) = &c.serial {
+                        serial.set_rx_interrupt(true);
+                    }
+                }
                 n
             };
             if n == 0 {

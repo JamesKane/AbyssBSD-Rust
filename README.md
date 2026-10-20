@@ -28,13 +28,26 @@ userland.
 
 ## Status
 
-Phases 1 and 2 are complete (2026-10-18). The Phase 2 benchmarks run within the 2% bound of
-FreeBSD 15.1 in bhyve, and faster on most. Our loader boots our kernel on x86_64 and aarch64 in
-QEMU and on bhyve. The kernel manages physical and virtual memory with a buddy allocator,
-slab heap, and guard-paged stacks, and runs preemptive SMP kernel threads. It has sleepable
-locks with priority propagation and a lock witness, tickless timers, and FP/SIMD state
-switching (including SVE and AVX-512). Phase 3 (device framework, PCIe, ACPI AML, storage)
-is under way. See [docs/ROADMAP.md](docs/ROADMAP.md).
+Phases 0 through 4 are complete, and Phase 5 (VFS and file systems) is at its last step, P5.9
+(verification and performance). See [docs/ROADMAP.md](docs/ROADMAP.md) for the detail.
+
+- **Boot:** our UEFI loader boots our kernel on x86_64 and aarch64, in QEMU and bhyve. It finds
+  the kernel on UFS2 and passes the root named in `/etc/fstab`.
+- **Core kernel (Phases 1–2):** physical and virtual memory, preemptive SMP threads, sleepable
+  locks with priority propagation and a lock witness, tickless timers, and FP/SIMD state
+  (including SVE and AVX-512). The Phase 2 benchmarks are within 2% of FreeBSD 15.1 in bhyve,
+  and faster on most.
+- **Devices (Phase 3):** a FreeBSD-style device framework, PCIe, our own ACPI AML interpreter,
+  and NVMe, AHCI, and virtio storage drivers.
+- **Userland (Phase 4):** unmodified FreeBSD 15.1 `/rescue/sh` runs interactively, with
+  processes, signals, pipes, and a terminal. FreeBSD's own programs are the tests.
+- **File systems (Phase 5):** a VFS with a name cache, page cache, and write-back. tmpfs, devfs,
+  msdosfs (the ESP on `/boot/efi`), and UFS2 read-write with soft updates. Both architectures
+  boot with the root on UFS2 on NVMe, holding all of FreeBSD 15.1's `base.txz`, and `mtree`
+  checks every file. fsx runs clean, crashes leave images `fsck_ffs` repairs, and the root is
+  left clean at power-off. pjdfstest runs on tmpfs and UFS2 against FreeBSD's results.
+
+Next is Phase 6: FreeBSD multi-user (dynamic linking, threads, and `init` to a `login:` prompt).
 
 ## License
 

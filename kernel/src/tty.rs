@@ -475,6 +475,10 @@ fn winsize_to(w: &Winsize, arg: &mut [u8]) {
 pub(crate) struct TtyDevice(pub(crate) Arc<Tty>);
 
 impl CharDevice for TtyDevice {
+    fn dtype(&self) -> u32 {
+        vfs::D_TTY
+    }
+
     fn read(
         &self,
         s: &Sleepable,

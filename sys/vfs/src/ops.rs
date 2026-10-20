@@ -18,7 +18,10 @@ use alloc::vec::Vec;
 
 use abi::dirent::{self, NAME_OFFSET};
 use abi::errno::Errno;
-use abi::stat::{APPEND, IMMUTABLE, NOUNLINK, S_ISGID, S_ISUID, S_ISVTX, SF_SETTABLE};
+use abi::stat::{
+    APPEND, IMMUTABLE, NOUNLINK, S_ISGID, S_ISUID, S_ISVTX, SF_APPEND, SF_IMMUTABLE, SF_NOUNLINK,
+    SF_SETTABLE, SF_SNAPSHOT,
+};
 use sched::Sleepable;
 use sched::lock::WriteGuard;
 
@@ -64,9 +67,14 @@ pub const VWRITE: u32 = 0o200;
 pub const VREAD: u32 = 0o400;
 
 /// Whether `cred` may access a node with attributes `a` as `want` says
-/// (FreeBSD's `vaccess`): `EACCES` if not. The superuser may do anything
-/// but execute a file with no execute bit at all.
+/// (FreeBSD's `vaccess`): `EACCES` if not, `EPERM` to write an immutable
+/// node. The superuser may do anything else but execute a file with no
+/// execute bit at all.
 pub fn access(a: &Attr, kind: Kind, cred: &Cred, want: u32) -> Result<(), Errno> {
+    // Nobody writes an immutable node (FreeBSD's `ufs_access`).
+    if want & VWRITE != 0 && a.flags & (IMMUTABLE | SF_SNAPSHOT) != 0 {
+        return Err(Errno::EPERM);
+    }
     if cred.is_root() {
         if want & VEXEC != 0 && kind != Kind::Directory && a.mode & 0o111 == 0 {
             return Err(Errno::EACCES);
@@ -184,10 +192,18 @@ pub fn create(
     if da.flags & IMMUTABLE != 0 {
         return Err(Errno::EPERM);
     }
+    // A new node takes its directory's group (BSD semantics); a creator
+    // outside that group cannot make it setgid (FreeBSD's
+    // `ufs_makeinode`).
+    let mut c = *c;
+    c.gid = da.gid;
+    if !cred.is_root() && !cred.in_group(da.gid) {
+        c.mode &= !S_ISGID;
+    }
     let NodeOps::Directory(d) = st.live_mut()? else {
         return Err(Errno::ENOTDIR);
     };
-    let ino = d.create(s, name, node, c)?;
+    let ino = d.create(s, name, node, &c)?;
     let v = dir.mount().vget(s, ino)?;
     cache::enter(dir, name, Some(&v));
     Ok((v, true))
@@ -375,10 +391,13 @@ pub fn rename(
             _ => {}
         }
     }
+    // A read-only side is EROFS before the mounts are compared, as
+    // FreeBSD's lookups for a rename report it.
+    read_only(fdir)?;
+    read_only(tdir)?;
     if fdir.mount().id != tdir.mount().id {
         return Err(Errno::EXDEV);
     }
-    read_only(fdir)?;
     let same_dir = Arc::ptr_eq(fdir, tdir);
     let _serial = (!same_dir).then(|| fdir.mount().rename_lock().lock(s));
     // Find both ends with the directories locked shared.
@@ -527,6 +546,11 @@ pub fn setattr(
     cred: &Cred,
     times_now: bool,
 ) -> Result<(), Errno> {
+    // Nothing to change (`chown` to -1 and -1): nothing is checked, and
+    // the change time stays (FreeBSD's `ufs_setattr`).
+    if *a == SetAttr::default() {
+        return Ok(());
+    }
     if v.mount().read_only() {
         return Err(Errno::EROFS);
     }
@@ -535,26 +559,46 @@ pub fn setattr(
     let mut a = *a;
     if let Some(flags) = a.flags {
         owner(&cur, cred)?;
-        // Only the superuser sets or clears system flags.
-        if !cred.is_root() && (flags ^ cur.flags) & SF_SETTABLE != 0 {
+        if cred.is_root() {
+            // Not even the superuser toggles the snapshot flag.
+            if (flags ^ cur.flags) & SF_SNAPSHOT != 0 {
+                return Err(Errno::EPERM);
+            }
+        } else if cur.flags & (SF_NOUNLINK | SF_IMMUTABLE | SF_APPEND) != 0
+            || (flags ^ cur.flags) & SF_SETTABLE != 0
+        {
+            // Only the superuser sets or clears system flags, or changes
+            // flags while one is set.
             return Err(Errno::EPERM);
         }
-    } else if cur.flags & IMMUTABLE != 0 {
+    }
+    // An immutable or append-only file keeps its other attributes
+    // (FreeBSD's `ufs_setattr`, `tmpfs_chmod` and the rest).
+    // A program running it keeps its size (FreeBSD's `vn_truncate`).
+    if a.size.is_some() && v.is_text() {
+        return Err(Errno::ETXTBSY);
+    }
+    let others = a.mode.is_some()
+        || a.uid.is_some()
+        || a.gid.is_some()
+        || a.size.is_some()
+        || a.atime.is_some()
+        || a.mtime.is_some()
+        || a.birthtime.is_some();
+    if others && a.flags.unwrap_or(cur.flags) & (IMMUTABLE | APPEND) != 0 {
         return Err(Errno::EPERM);
     }
     if let Some(mode) = a.mode {
         owner(&cur, cred)?;
-        // Without the superuser, the sticky bit goes on files, and setgid
-        // needs the group.
+        // Without the superuser, the sticky bit is for directories only,
+        // and setgid needs the group (FreeBSD's `ufs_chmod`).
         if !cred.is_root() {
-            let mut m = mode;
-            if v.kind() != Kind::Directory {
-                m &= !S_ISVTX;
+            if v.kind() != Kind::Directory && mode & S_ISVTX != 0 {
+                return Err(Errno::EFTYPE);
             }
-            if !cred.in_group(cur.gid) {
-                m &= !S_ISGID;
+            if mode & S_ISGID != 0 && !cred.in_group(cur.gid) {
+                return Err(Errno::EPERM);
             }
-            a.mode = Some(m);
         }
     }
     if a.uid.is_some() || a.gid.is_some() {
@@ -581,10 +625,25 @@ pub fn setattr(
         }
         access(&cur, v.kind(), cred, VWRITE)?;
     }
-    if (a.atime.is_some() || a.mtime.is_some() || a.birthtime.is_some())
-        && !(times_now && access(&cur, v.kind(), cred, VWRITE).is_ok())
-    {
-        owner(&cur, cred)?;
+    if a.atime.is_some() || a.mtime.is_some() || a.birthtime.is_some() {
+        // The owner sets times; to the current time, so does a writer, and
+        // a caller who is neither hears why it may not write (FreeBSD's
+        // `vn_utimes_perm`).
+        if owner(&cur, cred).is_err() {
+            if times_now {
+                access(&cur, v.kind(), cred, VWRITE)?;
+            } else {
+                return Err(Errno::EPERM);
+            }
+        }
+        // A file is not born after it was last modified (FreeBSD's
+        // `setutimes`).
+        if let Some(m) = a.mtime
+            && a.birthtime.is_none()
+            && (m.tv_sec, m.tv_nsec) < (cur.birthtime.tv_sec, cur.birthtime.tv_nsec)
+        {
+            a.birthtime = Some(m);
+        }
     }
     st.live_mut()?.node_mut().setattr(s, &a)
 }

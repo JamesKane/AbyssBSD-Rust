@@ -68,6 +68,13 @@ impl Uart {
         self.regs.write32(IMSC, RX_INTERRUPTS);
     }
 
+    /// Masks the receive interrupts (`false`) while what was read waits
+    /// to be taken, leaving new bytes in the FIFO; unmasked, bytes
+    /// waiting there raise them again.
+    pub fn set_rx_interrupt(&self, on: bool) {
+        self.regs.write32(IMSC, if on { RX_INTERRUPTS } else { 0 });
+    }
+
     /// Clears the receive interrupts. Done before reading the FIFO empty,
     /// so a byte that arrives meanwhile raises them again.
     pub fn ack_rx(&self) {

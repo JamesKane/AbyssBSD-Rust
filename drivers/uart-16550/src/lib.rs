@@ -77,6 +77,13 @@ impl<R: RegisterIo> Uart<R> {
         self.regs.write(MCR, mcr | MCR_OUT2);
         self.regs.write(IER, IER_RXRDY);
     }
+
+    /// Masks the receive interrupt (`false`) while what was read waits to
+    /// be taken, leaving new bytes in the FIFO; unmasked, bytes waiting
+    /// there raise it again.
+    pub fn set_rx_interrupt(&self, on: bool) {
+        self.regs.write(IER, if on { IER_RXRDY } else { 0 });
+    }
 }
 
 impl<R: RegisterIo> core::fmt::Write for Uart<R> {

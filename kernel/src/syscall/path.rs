@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 use abi::errno::Errno;
 use abi::fcntl::*;
 use abi::mount::{MNT_NOWAIT, MNT_WAIT, Statfs};
-use abi::stat::Stat;
+use abi::stat::{APPEND, Stat};
 use sched::Sleepable;
 use vfs::namei::Found;
 use vfs::ops::{VEXEC, VREAD, VWRITE};
@@ -64,6 +64,13 @@ pub(super) fn at_vnode(
     crate::fs::lookup(s, p, at, path, walk)
 }
 
+/// Whether writing a node of this kind writes its file system, which a
+/// read-only mount refuses; devices, FIFOs, and sockets are written
+/// elsewhere (FreeBSD's `ufs_access`).
+fn stored_here(kind: Kind) -> bool {
+    matches!(kind, Kind::Regular | Kind::Directory | Kind::Symlink)
+}
+
 /// `openat(fd, path, flags, mode)` (FreeBSD's `vn_open_cred`).
 pub(super) fn openat(s: &Sleepable, fd: u64, path_ptr: u64, flags: u64, mode: u64) -> SysResult {
     let p = process()?;
@@ -72,11 +79,14 @@ pub(super) fn openat(s: &Sleepable, fd: u64, path_ptr: u64, flags: u64, mode: u6
     if flags & O_ACCMODE == O_ACCMODE || (flags & O_EXEC != 0 && flags & O_ACCMODE != 0) {
         return Err(Errno::EINVAL);
     }
+    // O_CREAT with O_EXCL does not follow a final symbolic link: the link
+    // itself exists.
+    let exclusive = flags & (O_CREAT | O_EXCL) == O_CREAT | O_EXCL;
     let walk = Walk {
-        follow: flags & O_NOFOLLOW == 0,
+        follow: flags & O_NOFOLLOW == 0 && !exclusive,
         beneath: flags & O_RESOLVE_BENEATH != 0,
     };
-    let cred = crate::fs::cred();
+    let cred = &*crate::fs::cred();
     let mut created = false;
     let v = if path.is_empty() && flags & O_EMPTY_PATH != 0 {
         at_vnode(s, &p, fd, &path, walk, true)?
@@ -135,6 +145,10 @@ pub(super) fn openat(s: &Sleepable, fd: u64, path_ptr: u64, flags: u64, mode: u6
         // Only reached with `O_NOFOLLOW`.
         return Err(Errno::EMLINK);
     }
+    // A socket is reached through `connect`, not `open`.
+    if v.kind() == Kind::Socket && flags & O_PATH == 0 {
+        return Err(Errno::EOPNOTSUPP);
+    }
     if flags & O_DIRECTORY != 0 && !v.is_dir() {
         return Err(Errno::ENOTDIR);
     }
@@ -143,7 +157,7 @@ pub(super) fn openat(s: &Sleepable, fd: u64, path_ptr: u64, flags: u64, mode: u6
         if v.is_dir() && writes {
             return Err(Errno::EISDIR);
         }
-        if writes && v.kind() != Kind::CharDevice && v.mount().read_only() {
+        if writes && stored_here(v.kind()) && v.mount().read_only() {
             return Err(Errno::EROFS);
         }
         // A file just made needs no check: its creator may open it.
@@ -160,6 +174,11 @@ pub(super) fn openat(s: &Sleepable, fd: u64, path_ptr: u64, flags: u64, mode: u6
             }
             vfs::ops::access(&v.attr(s)?, v.kind(), cred, want)?;
         }
+        // An append-only file is written only at its end (FreeBSD's
+        // `ufs_open`).
+        if fflags & FWRITE != 0 && flags & O_APPEND == 0 && v.attr(s)?.flags & APPEND != 0 {
+            return Err(Errno::EPERM);
+        }
         if flags & O_TRUNC != 0 && v.kind() == Kind::Regular && !created {
             let zero = SetAttr {
                 size: Some(0),
@@ -174,15 +193,46 @@ pub(super) fn openat(s: &Sleepable, fd: u64, path_ptr: u64, flags: u64, mode: u6
         _ => v,
     };
     let keep = FREAD | FWRITE | O_EXEC | FCNTLFLAGS;
+    if v.kind() == Kind::Fifo && flags & O_PATH == 0 {
+        let f = crate::fs::fifo::FifoFile::open(
+            s,
+            &v,
+            fflags & FREAD != 0,
+            fflags & FWRITE != 0,
+            flags & O_NONBLOCK != 0,
+        )?;
+        let file = File::new(FileKind::Fifo(f), fflags & keep);
+        let fdf = FdFlags {
+            cloexec: flags & O_CLOEXEC != 0,
+            clofork: flags & O_CLOFORK != 0,
+        };
+        return install(s, &p, file, fdf);
+    }
     let vf = if flags & O_PATH != 0 {
-        VnodeFile {
-            vnode: v.use_ref(),
-            device: None,
-        }
+        VnodeFile::path_only(&v)
     } else {
-        VnodeFile::open(s, &v)?
+        VnodeFile::open(s, &v, fflags & FWRITE != 0)?
     };
     let file = File::new(FileKind::Vnode(vf), fflags & keep);
+    // O_SHLOCK and O_EXLOCK take an `flock` lock as the file opens.
+    if flags & (O_SHLOCK | O_EXLOCK) != 0
+        && flags & O_PATH == 0
+        && let FileKind::Vnode(vf) = file.kind()
+    {
+        let ty = if flags & O_EXLOCK != 0 {
+            vfs::lockf::LockType::Exclusive
+        } else {
+            vfs::lockf::LockType::Shared
+        };
+        let req = vfs::lockf::Lock {
+            owner: vf.lock_owner(),
+            pid: 0,
+            ty,
+            start: 0,
+            end: u64::MAX,
+        };
+        vf.vnode.lockf().lock(s, req, flags & O_NONBLOCK == 0)?;
+    }
     let fdf = FdFlags {
         cloexec: flags & O_CLOEXEC != 0,
         clofork: flags & O_CLOFORK != 0,
@@ -227,7 +277,7 @@ pub(super) fn chdir(s: &Sleepable, path_ptr: u64) -> SysResult {
     if !v.is_dir() {
         return Err(Errno::ENOTDIR);
     }
-    vfs::ops::access(&v.attr(s)?, v.kind(), crate::fs::cred(), VEXEC)?;
+    vfs::ops::access(&v.attr(s)?, v.kind(), &crate::fs::cred(), VEXEC)?;
     let old = core::mem::replace(&mut *p.cwd.lock(), v.use_ref());
     drop(old);
     Ok(0)
@@ -241,7 +291,7 @@ pub(super) fn fchdir(s: &Sleepable, fd: u64) -> SysResult {
     if !v.is_dir() {
         return Err(Errno::ENOTDIR);
     }
-    vfs::ops::access(&v.attr(s)?, v.kind(), crate::fs::cred(), VEXEC)?;
+    vfs::ops::access(&v.attr(s)?, v.kind(), &crate::fs::cred(), VEXEC)?;
     let old = core::mem::replace(&mut *p.cwd.lock(), v.use_ref());
     drop(old);
     Ok(0)
@@ -264,6 +314,33 @@ pub(super) fn getcwd(s: &Sleepable, buf: u64, buflen: u64) -> SysResult {
     Ok(0)
 }
 
+/// `__realpathat(fd, path, buf, size, flags)`: the absolute path `path`
+/// names, symbolic links followed (FreeBSD's `kern___realpathat`, which
+/// names a file by the name it was found under).
+pub(super) fn realpathat(
+    s: &Sleepable,
+    fd: u64,
+    path_ptr: u64,
+    buf: u64,
+    size: u64,
+    flags: u64,
+) -> SysResult {
+    if flags != 0 {
+        return Err(Errno::EINVAL);
+    }
+    let p = process()?;
+    let path = path(path_ptr)?;
+    let v = crate::fs::lookup(s, &p, At::new(int(fd)), &path, Walk::FOLLOW)?;
+    let mut full = crate::fs::namespace().path_of(s, &v, &crate::fs::root())?;
+    // FreeBSD's `vn_fullpath_hardlink` says a short buffer is ENOMEM.
+    if full.len() + 1 > usize::try_from(size).unwrap_or(usize::MAX) {
+        return Err(Errno::ENOMEM);
+    }
+    full.push(0);
+    uaccess::copy_out(buf, &full).map_err(|_| Errno::EFAULT)?;
+    Ok(0)
+}
+
 /// `faccessat(fd, path, amode, flag)`.
 pub(super) fn faccessat(s: &Sleepable, fd: u64, path_ptr: u64, amode: u64, flag: u64) -> SysResult {
     let flag = u32::try_from(flag).map_err(|_| Errno::EINVAL)?;
@@ -280,8 +357,22 @@ pub(super) fn faccessat(s: &Sleepable, fd: u64, path_ptr: u64, amode: u64, flag:
         follow: flag & AT_SYMLINK_NOFOLLOW == 0,
         beneath: flag & AT_RESOLVE_BENEATH != 0,
     };
-    let v = at_vnode(s, &p, fd, &path, walk, flag & AT_EMPTY_PATH != 0)?;
-    if amode & W_OK != 0 && v.kind() != Kind::CharDevice && v.mount().read_only() {
+    // Without AT_EACCESS, the lookup and the check both use the real ids
+    // (FreeBSD's `kern_accessat`).
+    let cred = if flag & AT_EACCESS != 0 {
+        p.cred()
+    } else {
+        Arc::new(p.cred().as_real())
+    };
+    let v = if path.is_empty() && flag & AT_EMPTY_PATH != 0 {
+        at_vnode(s, &p, fd, &path, walk, true)?
+    } else {
+        match crate::fs::resolve_as(s, &p, &cred, At::new(int(fd)), &path, walk)? {
+            Found::Vnode(v) => v,
+            Found::Missing { .. } => return Err(Errno::ENOENT),
+        }
+    };
+    if amode & W_OK != 0 && stored_here(v.kind()) && v.mount().read_only() {
         return Err(Errno::EROFS);
     }
     let mut want = 0;
@@ -294,7 +385,7 @@ pub(super) fn faccessat(s: &Sleepable, fd: u64, path_ptr: u64, amode: u64, flag:
     if amode & X_OK != 0 {
         want |= VEXEC;
     }
-    vfs::ops::access(&v.attr(s)?, v.kind(), crate::fs::cred(), want)?;
+    vfs::ops::access(&v.attr(s)?, v.kind(), &cred, want)?;
     Ok(0)
 }
 

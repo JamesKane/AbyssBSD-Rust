@@ -14,9 +14,9 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
 
-use abi::dirent::{DT_CHR, DT_DIR, DT_FIFO, DT_LNK, DT_REG, DT_SOCK};
+use abi::dirent::{DT_BLK, DT_CHR, DT_DIR, DT_FIFO, DT_LNK, DT_REG, DT_SOCK};
 use abi::errno::Errno;
-use abi::stat::{S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFREG, S_IFSOCK};
+use abi::stat::{S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFREG, S_IFSOCK};
 use abi::time::Timespec;
 use sched::Sleepable;
 
@@ -29,6 +29,9 @@ pub enum Kind {
     Directory,
     Symlink,
     CharDevice,
+    /// A block device node: FreeBSD's file systems keep them, though no
+    /// device is opened through one.
+    BlockDevice,
     Fifo,
     Socket,
 }
@@ -42,6 +45,7 @@ impl Kind {
             Self::Directory => S_IFDIR,
             Self::Symlink => S_IFLNK,
             Self::CharDevice => S_IFCHR,
+            Self::BlockDevice => S_IFBLK,
             Self::Fifo => S_IFIFO,
             Self::Socket => S_IFSOCK,
         }
@@ -55,6 +59,7 @@ impl Kind {
             Self::Directory => DT_DIR,
             Self::Symlink => DT_LNK,
             Self::CharDevice => DT_CHR,
+            Self::BlockDevice => DT_BLK,
             Self::Fifo => DT_FIFO,
             Self::Socket => DT_SOCK,
         }
@@ -114,6 +119,8 @@ pub enum NewNode {
     /// `mknod` of a character device: the number only (devfs serves the
     /// devices themselves).
     CharDevice(u64),
+    /// `mknod` of a block device: the number only.
+    BlockDevice(u64),
     Fifo,
     Socket,
 }
@@ -126,6 +133,7 @@ impl NewNode {
             Self::Directory => Kind::Directory,
             Self::Symlink(_) => Kind::Symlink,
             Self::CharDevice(_) => Kind::CharDevice,
+            Self::BlockDevice(_) => Kind::BlockDevice,
             Self::Fifo => Kind::Fifo,
             Self::Socket => Kind::Socket,
         }
@@ -257,6 +265,10 @@ pub trait SymlinkNode: Node {
     fn target(&self, s: &Sleepable) -> Result<Vec<u8>, Errno>;
 }
 
+/// `FIODTYPE`'s device kinds (FreeBSD's `D_DISK`, `D_TTY`).
+pub const D_DISK: u32 = 0x0002;
+pub const D_TTY: u32 = 0x0004;
+
 /// A character device's operations, as devfs serves them.
 pub trait CharDevice: Send + Sync {
     /// Called when the device is opened: `Some` opens that vnode instead
@@ -286,6 +298,11 @@ pub trait CharDevice: Send + Sync {
     /// `/dev/zero` does; other devices cannot be mapped yet.
     fn maps_as_zeros(&self) -> bool {
         false
+    }
+    /// Its kind, as `FIODTYPE` reports it (FreeBSD's `d_flags &
+    /// D_TYPEMASK`): [`D_DISK`], [`D_TTY`], or 0.
+    fn dtype(&self) -> u32 {
+        0
     }
     /// Device-specific control: `arg` is the request's argument, already
     /// copied in and copied back out afterwards.

@@ -16,9 +16,11 @@
 pub(crate) mod block;
 pub(crate) mod devfs;
 pub(crate) mod fdtable;
+pub(crate) mod fifo;
 pub(crate) mod file;
 pub(crate) mod msdosfs;
 pub(crate) mod pipe;
+pub(crate) mod socket;
 pub(crate) mod ufs;
 pub(crate) mod uio;
 
@@ -39,6 +41,7 @@ use vfs::{Cred, Meta, Mount, MountInfo, NodeId, Vnode};
 
 use self::fdtable::{FdFlags, FdTable};
 use self::file::{File, FileKind, VnodeFile};
+use crate::cred::Ucred;
 
 static NAMESPACE: Once<Namespace> = Once::new();
 
@@ -55,11 +58,10 @@ pub(crate) fn now() -> Timespec {
     }
 }
 
-/// The credential file operations run with: every process is the
-/// superuser until Phase 6 brings credentials.
-pub(crate) fn cred() -> &'static Cred {
-    static ROOT: Cred = Cred::root();
-    &ROOT
+/// The credential file operations run with: the current process's, or
+/// the superuser's for kernel threads.
+pub(crate) fn cred() -> Arc<Ucred> {
+    crate::proc::Process::current().map_or_else(Ucred::root_shared, |p| p.cred())
 }
 
 fn root_info(from: &[u8]) -> MountInfo {
@@ -157,6 +159,7 @@ pub(crate) fn init() {
         }
     };
     devfs::init();
+    crate::mdisk::init();
     let dev = Mount::new(
         MountInfo {
             type_name: "devfs",
@@ -172,7 +175,7 @@ pub(crate) fn init() {
         root: &root,
         follow: true,
         beneath: false,
-        cred: cred(),
+        cred: &Cred::root(),
     };
     match ns.lookup(&s, &at, b"/dev") {
         Ok(d) => match ns.mount(&s, d, Arc::clone(&dev), b"/dev") {
@@ -476,6 +479,19 @@ pub(crate) fn resolve(
     path: &[u8],
     walk: Walk,
 ) -> Result<Found, Errno> {
+    resolve_as(s, p, &p.cred(), at, path, walk)
+}
+
+/// [`resolve`] with credential `cred` (`access` checks with the real
+/// ids).
+pub(crate) fn resolve_as(
+    s: &Sleepable,
+    p: &crate::proc::Process,
+    cred: &Cred,
+    at: At,
+    path: &[u8],
+    walk: Walk,
+) -> Result<Found, Errno> {
     let root = root();
     let start = start_of(s, p, at, path)?;
     namespace().resolve(
@@ -485,7 +501,7 @@ pub(crate) fn resolve(
             root: &root,
             follow: walk.follow,
             beneath: walk.beneath,
-            cred: cred(),
+            cred,
         },
         path,
     )
@@ -523,7 +539,7 @@ pub(crate) fn parent_of(
             root: &root,
             follow: false,
             beneath,
-            cred: cred(),
+            cred: &p.cred(),
         },
         path,
     )
@@ -591,7 +607,7 @@ pub(crate) fn console_table() -> FdTable {
     // SAFETY: tables are made in thread context (process creation).
     let s = unsafe { Sleepable::assume() };
     if let Some(c) = devfs::console()
-        && let Ok(vf) = VnodeFile::open(&s, &c)
+        && let Ok(vf) = VnodeFile::open(&s, &c, true)
     {
         let f = File::new(FileKind::Vnode(vf), FREAD | FWRITE);
         for _ in 0..3 {

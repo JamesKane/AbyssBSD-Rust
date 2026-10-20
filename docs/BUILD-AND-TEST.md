@@ -117,7 +117,20 @@ cargo xtask --remote fs-image --fs ufs2|msdos --out IMG [--from DIR] [--size S] 
 cargo xtask --remote fs-check --fs ufs2|msdos IMG   # fsck read-only; fails unless clean
 cargo xtask --remote ufs-verify [--keep]            # lib/ufs against FreeBSD's images of base.txz
 cargo xtask crash-test [--rounds N] [--arch A] [--seed S]   # soft updates against killed VMs
+cargo xtask --remote pjdfstest [--groups chmod,open] [--debug group/NN.t|command]
+cargo xtask --remote pjdfstest --baseline           # FreeBSD's results, on the server itself
 ```
+
+`pjdfstest` boots the UFS2 root (all of `base.txz`, in bhyve on the server) and runs FreeBSD's
+pjdfstest, built static from the FreeBSD tree, on `/tmp` (tmpfs) and in `/var/tmp` (UFS2 with
+soft updates) at once, through `tests/pjdfstest/run.sh`. Every script's result (its plan, how
+many passed, which failed) must be FreeBSD's, as `tests/pjdfstest/freebsd-<fs>.txt` records it,
+or a difference `tests/pjdfstest/known-differences.txt` lists with its reason; then the root must
+be left clean. `--baseline` reruns FreeBSD's side as root on the server (a new tmpfs and a
+`newfs -U` memory disk) with the same program and scripts. `--debug` runs one script under
+`sh -x` (or a command of its own) on both file systems, its trace in the serial log. The scripts
+need tools `/rescue` lacks; the root image carries static builds of them in `/usr/tests/static`,
+and a stand-in for `openssl md5` (which makes the test names) until base's own run (P6).
 
 `crash-test` boots the shell image in QEMU with a UFS2 disk `newfs -U` made, starts a workload
 of creates, writes, links, renames, `fsync`s, and removals on it from `/rescue`, and kills QEMU

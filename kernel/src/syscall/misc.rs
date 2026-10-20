@@ -19,9 +19,10 @@ pub(super) fn getpid() -> SysResult {
     Process::with_current(|p| u64::from(p.pid().unsigned_abs())).ok_or(Errno::EINVAL)
 }
 
-/// `issetugid()`: no set-id programs yet.
+/// `issetugid()`: whether the process's credential changed since it last
+/// ran `execve` (no set-id programs yet).
 pub(super) fn issetugid() -> SysResult {
-    Ok(0)
+    Process::with_current(|p| u64::from(p.sugid())).ok_or(Errno::EINVAL)
 }
 
 /// `getrandom(buf, buflen, flags)`.
@@ -194,4 +195,30 @@ pub(super) fn sysarch(op: u64, parms: u64) -> SysResult {
 #[cfg(target_arch = "aarch64")]
 pub(super) fn sysarch(_op: u64, _parms: u64) -> SysResult {
     Err(Errno::EINVAL)
+}
+
+/// Modules built into the kernel, by the names `kldload` takes.
+const BUILT_IN: &[&[u8]] = &[b"geom_md"];
+
+/// `kldload(file)`: there are no loadable modules; one built in is
+/// `EEXIST`, as FreeBSD answers for a module compiled into its kernel.
+pub(super) fn kldload(file: u64) -> SysResult {
+    let file = super::path::path(file)?;
+    let p = Process::current().ok_or(Errno::EINVAL)?;
+    if !p.cred().is_root() {
+        return Err(Errno::EPERM);
+    }
+    let name = file.rsplit(|&b| b == b'/').next().unwrap_or(&file);
+    let name = name.strip_suffix(b".ko").unwrap_or(name);
+    if BUILT_IN.contains(&name) {
+        Err(Errno::EEXIST)
+    } else {
+        Err(Errno::ENOENT)
+    }
+}
+
+/// `kldnext(fileid)`: there are no loaded files (the kernel's own modules
+/// are built in), so the list is empty.
+pub(super) fn kldnext(_fileid: u64) -> SysResult {
+    Ok(0)
 }

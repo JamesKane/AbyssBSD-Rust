@@ -39,6 +39,7 @@ use vfs::Vnode;
 
 use crate::arch;
 use crate::arch::trap::TrapFrame;
+use crate::cred::Ucred;
 use crate::exec::Layout;
 use crate::fs::fdtable::FdTable;
 use crate::mm::space::{self, AddressSpace};
@@ -266,6 +267,13 @@ pub(crate) struct Process {
     execed: AtomicBool,
     /// The CPUs it may run on, one bit each (its `cpuset`); inherited.
     cpus: AtomicU64,
+    /// Its credential; inherited.
+    cred: SpinLock<Arc<Ucred>>,
+    /// The program it runs, while it runs it.
+    text: SpinLock<Option<Text>>,
+    /// Its credential changed since it last ran `execve` (FreeBSD's
+    /// `P_SUGID`, which `issetugid` reports); inherited.
+    sugid: AtomicBool,
 }
 
 /// The program a process runs, as `kern.proc` reports it.
@@ -310,6 +318,32 @@ impl Image {
     }
 }
 
+/// A program a process runs, counted on its vnode while it runs, so the
+/// file cannot be opened for writing meanwhile (FreeBSD's `VV_TEXT`).
+pub(crate) struct Text(Arc<Vnode>);
+
+impl Text {
+    /// `ETXTBSY` if a file has it open for writing.
+    fn new(v: &Arc<Vnode>) -> Result<Self, Errno> {
+        v.add_text()?;
+        Ok(Self(Arc::clone(v)))
+    }
+}
+
+impl Clone for Text {
+    fn clone(&self) -> Self {
+        // Running already, it has no writers to refuse it.
+        let _ = self.0.add_text();
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl Drop for Text {
+    fn drop(&mut self) {
+        self.0.drop_text();
+    }
+}
+
 /// How a process's thread enters user mode.
 struct Start {
     process: Arc<Process>,
@@ -337,6 +371,9 @@ impl Process {
         let image = parent.map(|p| p.image.lock().clone()).unwrap_or_default();
         let execed = parent.is_some_and(|p| p.execed.load(Ordering::Relaxed));
         let cpus = parent.map_or(u64::MAX, |p| p.cpus.load(Ordering::Relaxed));
+        let cred = parent.map_or_else(Ucred::root_shared, |p| p.cred());
+        let sugid = parent.is_some_and(|p| p.sugid.load(Ordering::Relaxed));
+        let text = parent.and_then(|p| p.text.lock().clone());
         let p = Arc::new_cyclic(|me| {
             let pid = alloc_pid(me);
             Self {
@@ -369,6 +406,9 @@ impl Process {
                 started: crate::time::now_ns(),
                 execed: AtomicBool::new(execed),
                 cpus: AtomicU64::new(cpus),
+                cred: SpinLock::new(cred),
+                text: SpinLock::new(text),
+                sugid: AtomicBool::new(sugid),
             }
         });
         if let Some(parent) = parent {
@@ -386,6 +426,31 @@ impl Process {
     /// `P_PPWAIT`).
     pub(crate) fn vforked(&self) -> bool {
         self.vforked.load(Ordering::Acquire)
+    }
+
+    /// Its credential.
+    pub(crate) fn cred(&self) -> Arc<Ucred> {
+        Arc::clone(&self.cred.lock())
+    }
+
+    /// Changes its credential as `change` says, from the current one; the
+    /// process is then set-id tainted. Only its own thread changes it.
+    pub(crate) fn change_cred(
+        &self,
+        change: impl FnOnce(&Ucred) -> Result<Ucred, Errno>,
+    ) -> Result<(), Errno> {
+        let old = self.cred();
+        let new = change(&old)?;
+        if new != *old {
+            *self.cred.lock() = Arc::new(new);
+            self.sugid.store(true, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    /// Whether its credential changed since it last ran `execve`.
+    pub(crate) fn sugid(&self) -> bool {
+        self.sugid.load(Ordering::Relaxed)
     }
 
     /// The program it runs.
@@ -524,7 +589,7 @@ impl Process {
                 root: &root,
                 follow: true,
                 beneath: false,
-                cred: crate::fs::cred(),
+                cred: &crate::fs::cred(),
             },
             path,
         )?;
@@ -533,6 +598,7 @@ impl Process {
         let image = crate::exec::load(s, &space, &file, path, argv, envp, data_max)?;
         let p = Self::create(space, image.layout, None, crate::fs::console_table());
         *p.image.lock() = Image::new(s, &root, path, argv);
+        *p.text.lock() = Some(Text::new(&file)?);
         if let Some(t) = ctty {
             crate::tty::make_controlling(t, &p);
         }
@@ -713,6 +779,7 @@ impl Process {
         envp: &[&[u8]],
     ) -> Result<(), Errno> {
         let file = crate::fs::lookup(s, self, crate::fs::At::Cwd, path, crate::fs::Walk::FOLLOW)?;
+        let text = Text::new(&file)?;
         let space = AddressSpace::new().map_err(|_| Errno::ENOMEM)?;
         let data_max = self.limits.lock()[rlimit::DATA as usize].rlim_max;
         let image = crate::exec::load(s, &space, &file, path, argv, envp, data_max)?;
@@ -736,6 +803,18 @@ impl Process {
         let cwd = Arc::clone(self.cwd.lock().vnode());
         *self.image.lock() = Image::new(s, &cwd, path, argv);
         self.execed.store(true, Ordering::Relaxed);
+        *self.text.lock() = Some(text);
+        // The saved ids become the effective ones (no set-id programs
+        // until P6).
+        let mut cred = self.cred.lock();
+        if cred.svuid != cred.euid() || cred.svgid != cred.egid() {
+            let mut c = Ucred::clone(&cred);
+            c.svuid = c.euid();
+            c.svgid = c.egid();
+            *cred = Arc::new(c);
+        }
+        drop(cred);
+        self.sugid.store(false, Ordering::Relaxed);
         self.exterr.store(0, Ordering::Relaxed);
         self.set_tls_base(None);
         // SAFETY: this thread runs in the new image; the kernel does not
@@ -773,6 +852,8 @@ impl Process {
             Err(_) if !vforked => self.space().clear(s),
             Err(_) => {}
         }
+        // The program may be written again.
+        drop(self.text.lock().take());
         // Descriptors close before the parent hears: a pipe's reader sees
         // the end first.
         let closed = self.files.lock(s).take_all();

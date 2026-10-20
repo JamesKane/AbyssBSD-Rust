@@ -416,12 +416,55 @@ pub(crate) const FREEBSD_SOURCES: &[&str] = &[
     "contrib/mtree",
     "contrib/mknod",
     "lib/libnetbsd",
+    "contrib/pjdfstest",
+    "tests/sys/pjdfstest",
+    "contrib/one-true-awk",
+    "usr.bin/grep",
+    "usr.bin/wc",
+    "usr.bin/cut",
+    "usr.bin/dirname",
+    "usr.bin/tr",
+    "usr.bin/mkfifo",
+    "usr.bin/touch",
+    "usr.bin/which",
+    "bin/sleep",
 ];
 
-/// FreeBSD's `find` and `mtree`, built static from the FreeBSD tree
-/// beside this one, for the UFS2 root's tests until dynamic linking (P6)
-/// lets base's own run: (name, program). FreeBSD only (`mtree` links
-/// `libmd` and `libutil` from the full base).
+/// Programs pjdfstest's scripts run that `/rescue` lacks (or has only
+/// crunched), built from
+/// these directories of the FreeBSD tree with these sources and
+/// libraries: (name, directory, sources, libraries).
+const SIMPLE_TOOLS: &[(&str, &str, &[&str], &[&str])] = &[
+    (
+        "grep",
+        "usr.bin/grep",
+        &["file.c", "grep.c", "queue.c", "util.c"],
+        &["-lregex"],
+    ),
+    ("wc", "usr.bin/wc", &["wc.c"], &["-lxo", "-lutil"]),
+    ("cut", "usr.bin/cut", &["cut.c"], &[]),
+    ("dirname", "usr.bin/dirname", &["dirname.c"], &[]),
+    (
+        "tr",
+        "usr.bin/tr",
+        &["cmap.c", "cset.c", "str.c", "tr.c"],
+        &[],
+    ),
+    ("mkfifo", "usr.bin/mkfifo", &["mkfifo.c"], &[]),
+    ("touch", "usr.bin/touch", &["touch.c"], &[]),
+    ("which", "usr.bin/which", &["which.c"], &[]),
+    // A program of its own (`/rescue`'s is one crunched binary, which
+    // runs as nothing else when copied under another name).
+    ("sleep", "bin/sleep", &["sleep.c"], &[]),
+];
+
+/// FreeBSD's `find` and `mtree`, and what pjdfstest's scripts need
+/// beyond `/rescue` (`awk`, `grep`, `wc`, `cut`, `dirname`, `tr`, `mkfifo`,
+/// `touch`, `which`, `sleep`), built
+/// static from the FreeBSD tree beside this one, for the UFS2 root's
+/// tests until dynamic linking (P6) lets base's own run: (name, program).
+/// FreeBSD only (they link `libmd`, `libutil`, `libxo`, and `libregex`
+/// from the full base, and `awk` runs a generated helper).
 pub(crate) fn static_tools(arch: Arch) -> Result<Vec<(&'static str, PathBuf)>> {
     let src = util::root().join("../freebsd-src");
     let out = util::root()
@@ -500,7 +543,114 @@ pub(crate) fn static_tools(arch: Arch) -> Result<Vec<(&'static str, PathBuf)>> {
         ];
         cc_static_program(arch, &refs, &args, &mtree)?;
     }
-    Ok(vec![("find", find), ("mtree", mtree)])
+
+    let mut tools = vec![("find", find), ("mtree", mtree)];
+    for &(name, dir, files, libs) in SIMPLE_TOOLS {
+        let bin = out.join(name);
+        if !fresh(&bin) {
+            let dir = src.join(dir);
+            let sources: Vec<PathBuf> = files.iter().map(|f| dir.join(f)).collect();
+            let refs: Vec<&Path> = sources.iter().map(PathBuf::as_path).collect();
+            let mut args = vec![format!("-I{}", dir.display())];
+            args.extend(libs.iter().map(|l| (*l).to_string()));
+            cc_static_program(arch, &refs, &args, &bin)?;
+        }
+        tools.push((name, bin));
+    }
+
+    // awk's parser comes from yacc, and its table of operators from a
+    // helper built for this host and run over the parser's header.
+    let awk = out.join("awk");
+    if !fresh(&awk) {
+        let dir = src.join("contrib/one-true-awk");
+        let gen_dir = out.join("awk-gen");
+        fs::create_dir_all(&gen_dir)?;
+        let gram = gen_dir.join("awkgram.tab.c");
+        util::run(
+            Command::new("yacc")
+                .arg("-d")
+                .arg("-o")
+                .arg(&gram)
+                .arg(dir.join("awkgram.y")),
+        )?;
+        let maketab = gen_dir.join("maketab");
+        util::run(
+            Command::new("cc")
+                .arg("-o")
+                .arg(&maketab)
+                .arg(format!("-I{}", gen_dir.display()))
+                .arg(dir.join("maketab.c")),
+        )?;
+        let table = Command::new(&maketab)
+            .arg(gen_dir.join("awkgram.tab.h"))
+            .output()?;
+        if !table.status.success() {
+            return Err("awk: maketab failed".into());
+        }
+        let proctab = gen_dir.join("proctab.c");
+        fs::write(&proctab, table.stdout)?;
+        let mut sources: Vec<PathBuf> = [
+            "b.c", "lex.c", "lib.c", "main.c", "parse.c", "run.c", "tran.c",
+        ]
+        .iter()
+        .map(|f| dir.join(f))
+        .collect();
+        sources.push(gram);
+        sources.push(proctab);
+        let refs: Vec<&Path> = sources.iter().map(PathBuf::as_path).collect();
+        let args = [
+            "-DHAS_ISBLANK".to_string(),
+            "-DFOPEN_MAX=64".into(),
+            format!("-I{}", gen_dir.display()),
+            format!("-I{}", dir.display()),
+            "-lm".into(),
+        ];
+        cc_static_program(arch, &refs, &args, &awk)?;
+    }
+    tools.push(("awk", awk));
+    Ok(tools)
+}
+
+/// pjdfstest as FreeBSD installs it (`/usr/tests/sys/pjdfstest`): the
+/// program built static from the FreeBSD tree beside this one, FreeBSD's
+/// `conf`, `misc.sh`, and each group's scripts, plus our runner
+/// (`run.sh`), in a directory of its own. FreeBSD only.
+pub(crate) fn pjdfstest_suite(arch: Arch) -> Result<PathBuf> {
+    let src = util::root().join("../freebsd-src");
+    let out = util::root()
+        .join("build")
+        .join(arch.to_string())
+        .join("pjdfstest");
+    let _ = fs::remove_dir_all(&out);
+    fs::create_dir_all(&out)?;
+    let contrib = src.join("contrib/pjdfstest");
+    cc_static_program(
+        arch,
+        &[&contrib.join("pjdfstest.c")],
+        &[format!("-I{}", src.join("tests/sys/pjdfstest").display())],
+        &out.join("pjdfstest"),
+    )?;
+    fs::copy(src.join("tests/sys/pjdfstest/tests/conf"), out.join("conf"))?;
+    fs::copy(contrib.join("tests/misc.sh"), out.join("misc.sh"))?;
+    fs::copy(
+        util::root().join("tests/pjdfstest/run.sh"),
+        out.join("run.sh"),
+    )?;
+    for group in fs::read_dir(contrib.join("tests"))? {
+        let group = group?.path();
+        if !group.is_dir() {
+            continue;
+        }
+        let name = group.file_name().ok_or("bad pjdfstest group")?;
+        fs::create_dir_all(out.join(name))?;
+        for t in fs::read_dir(&group)? {
+            let t = t?.path();
+            if t.extension().is_some_and(|x| x == "t") {
+                fs::copy(&t, out.join(name).join(t.file_name().ok_or("bad name")?))?;
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// The whole of `arch`'s `base.txz`, unpacked once beside it. Unpacked

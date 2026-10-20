@@ -330,7 +330,7 @@ fn shell(arch: Arch, vmm: Vmm, release: bool) -> Result<std::result::Result<(), 
 /// After a shell session on a UFS2 root and a power-off: the root was
 /// unmounted cleanly (its superblock says so, which `dumpfs` shows) and
 /// `fsck_ffs -f -n` finds nothing.
-fn root_left_clean(disk: &std::path::Path) -> std::result::Result<(), String> {
+pub(crate) fn root_left_clean(disk: &std::path::Path) -> std::result::Result<(), String> {
     let part = image::ufs_partition(disk).map_err(|e| e.to_string())?;
     let root = disk.with_file_name("shell-root.img");
     let copy = || -> Result<()> {

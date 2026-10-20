@@ -6,7 +6,7 @@
 //! (`offset_of!`, `size_of`), so the check compares what the kernel will
 //! actually use against what FreeBSD's C compiler computes.
 
-use crate::{bus, signal, stat, time, ucontext, vdso};
+use crate::{bus, md, signal, socket, stat, time, ucontext, vdso};
 
 /// Architectures a layout applies to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +78,8 @@ pub const CONSTANTS: &[&[ConstValue]] = &[
     crate::dirent::CONSTANTS,
     crate::mount::CONSTANTS,
     crate::ioctl::CONSTANTS,
+    crate::md::CONSTANTS,
+    crate::socket::CONSTANTS,
     crate::procdesc::CONSTANTS,
     crate::stat::CONSTANTS,
     crate::termios::CONSTANTS,
@@ -150,6 +152,25 @@ pub static LAYOUTS: &[StructLayout] = &[
         dv_flags => "dv_flags",
         dv_state => "dv_state",
         dv_fields => "dv_fields",
+    }),
+    layout!(md::MdIoctl, "struct md_ioctl", ["sys/types.h", "sys/mdioctl.h"], All, {
+        md_version => "md_version",
+        md_unit => "md_unit",
+        md_type => "md_type",
+        md_file => "md_file",
+        md_mediasize => "md_mediasize",
+        md_sectorsize => "md_sectorsize",
+        md_options => "md_options",
+        md_base => "md_base",
+        md_fwheads => "md_fwheads",
+        md_fwsectors => "md_fwsectors",
+        md_label => "md_label",
+        md_pad => "md_pad",
+    }),
+    layout!(socket::SockaddrUn, "struct sockaddr_un", ["sys/types.h", "sys/socket.h", "sys/un.h"], All, {
+        sun_len => "sun_len",
+        sun_family => "sun_family",
+        sun_path => "sun_path",
     }),
     layout!(time::Timespec, "struct timespec", ["sys/types.h", "time.h"], All, {
         tv_sec => "tv_sec",

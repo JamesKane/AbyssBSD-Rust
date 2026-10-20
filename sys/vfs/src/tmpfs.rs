@@ -353,7 +353,7 @@ impl DirectoryNode for TmpNode {
             ),
             NewNode::Directory => (Data::Directory(Dir::new(self.ino)), 2, 0),
             NewNode::Symlink(t) => (Data::Symlink(t.clone()), 1, 0),
-            NewNode::CharDevice(rdev) => (Data::Other, 1, *rdev),
+            NewNode::CharDevice(rdev) | NewNode::BlockDevice(rdev) => (Data::Other, 1, *rdev),
             NewNode::Fifo | NewNode::Socket => (Data::Other, 1, 0),
         };
         let bytes = match &data {

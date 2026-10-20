@@ -14,8 +14,8 @@ use abi::errno::Errno;
 use abi::fcntl::{
     FREAD, FWRITE, O_APPEND, O_NONBLOCK, SEEK_CUR, SEEK_DATA, SEEK_END, SEEK_HOLE, SEEK_SET,
 };
-use abi::ioctl::FIONREAD;
-use abi::stat::Stat;
+use abi::ioctl::{FIODTYPE, FIONREAD};
+use abi::stat::{S_ISGID, S_ISUID, Stat};
 use sched::Sleepable;
 use sched::lock::{LockClass, Mutex};
 use vfs::{Device, Kind, Uio, Vnode, VnodeUse};
@@ -29,19 +29,37 @@ static OFFSET_LOCK: LockClass = LockClass::new("file offset", 300);
 pub(crate) struct VnodeFile {
     pub(crate) vnode: VnodeUse,
     pub(crate) device: Option<Device>,
+    /// Opened for writing: counted as a writer while open, so no program
+    /// runs the file meanwhile (FreeBSD's `v_writecount`).
+    writer: bool,
 }
 
 impl VnodeFile {
-    /// `v` opened: a devfs node's device is looked up once, here.
-    pub(crate) fn open(s: &Sleepable, v: &Arc<Vnode>) -> Result<Self, Errno> {
+    /// `v` opened, for writing if `write`: a devfs node's device is looked
+    /// up once, here. `ETXTBSY` to write a file a program runs.
+    pub(crate) fn open(s: &Sleepable, v: &Arc<Vnode>, write: bool) -> Result<Self, Errno> {
         let device = match v.kind() {
             Kind::CharDevice => Some(v.device(s)?),
             _ => None,
         };
+        let writer = write && v.kind() == Kind::Regular;
+        if writer {
+            v.add_writer()?;
+        }
         Ok(Self {
             vnode: v.use_ref(),
             device,
+            writer,
         })
+    }
+
+    /// `v` as `O_PATH` opens it: a name only.
+    pub(crate) fn path_only(v: &Arc<Vnode>) -> Self {
+        Self {
+            vnode: v.use_ref(),
+            device: None,
+            writer: false,
+        }
     }
 }
 
@@ -58,6 +76,9 @@ impl Drop for VnodeFile {
         // go.
         let owner = self.lock_owner();
         self.vnode.lockf().release(owner);
+        if self.writer {
+            self.vnode.drop_writer();
+        }
     }
 }
 
@@ -67,6 +88,10 @@ pub(crate) enum FileKind {
     Pipe(pipe::End),
     /// A process descriptor (`pdfork`).
     Process(crate::proc::ProcDesc),
+    /// A UNIX-domain socket.
+    Socket(super::socket::UnixSocket),
+    /// A named pipe.
+    Fifo(super::fifo::FifoFile),
 }
 
 /// An open file.
@@ -97,7 +122,8 @@ impl File {
     pub(crate) fn vnode(&self) -> Option<&Arc<Vnode>> {
         match &self.kind {
             FileKind::Vnode(f) => Some(f.vnode.vnode()),
-            FileKind::Pipe(_) | FileKind::Process(_) => None,
+            FileKind::Fifo(f) => Some(f.vnode.vnode()),
+            FileKind::Pipe(_) | FileKind::Process(_) | FileKind::Socket(_) => None,
         }
     }
 
@@ -136,6 +162,9 @@ impl File {
             }
             FileKind::Pipe(p) => p.read(s, uio, self.nonblock()),
             FileKind::Process(_) => Err(Errno::EOPNOTSUPP),
+            // Never connected (P6 brings the rest).
+            FileKind::Socket(_) => Err(Errno::ENOTCONN),
+            FileKind::Fifo(f) => f.read(s, uio, self.nonblock()),
         }
     }
 
@@ -157,7 +186,9 @@ impl File {
                     None => f.vnode.read_at(s, offset, uio),
                 }
             }
-            FileKind::Pipe(_) | FileKind::Process(_) => Err(Errno::ESPIPE),
+            FileKind::Pipe(_) | FileKind::Process(_) | FileKind::Socket(_) | FileKind::Fifo(_) => {
+                Err(Errno::ESPIPE)
+            }
         }
     }
 
@@ -175,7 +206,9 @@ impl File {
                         if self.flags() & O_APPEND != 0 {
                             *off = f.vnode.size(s)?;
                         }
-                        f.vnode.write_at(s, *off, uio)?
+                        let n = f.vnode.write_at(s, *off, uio)?;
+                        clear_set_id(s, &f.vnode, n)?;
+                        n
                     }
                 };
                 *off += n as u64;
@@ -183,6 +216,8 @@ impl File {
             }
             FileKind::Pipe(p) => p.write(s, uio, self.nonblock()),
             FileKind::Process(_) => Err(Errno::EOPNOTSUPP),
+            FileKind::Socket(_) => Err(Errno::ENOTCONN),
+            FileKind::Fifo(f) => f.write(s, uio, self.nonblock()),
         }
     }
 
@@ -197,7 +232,9 @@ impl File {
             return Err(Errno::EBADF);
         }
         match &self.kind {
-            FileKind::Pipe(_) | FileKind::Process(_) => Err(Errno::ESPIPE),
+            FileKind::Pipe(_) | FileKind::Process(_) | FileKind::Socket(_) | FileKind::Fifo(_) => {
+                Err(Errno::ESPIPE)
+            }
             FileKind::Vnode(f) => {
                 if let Some(d) = &f.device {
                     let at = u64::try_from(offset).map_err(|_| Errno::EINVAL)?;
@@ -208,7 +245,9 @@ impl File {
                 } else {
                     u64::try_from(offset).map_err(|_| Errno::EINVAL)?
                 };
-                f.vnode.write_at(s, at, uio)
+                let n = f.vnode.write_at(s, at, uio)?;
+                clear_set_id(s, &f.vnode, n)?;
+                Ok(n)
             }
         }
     }
@@ -259,6 +298,8 @@ impl File {
             FileKind::Vnode(f) => f.vnode.stat(s),
             FileKind::Pipe(p) => Ok(p.stat(s)),
             FileKind::Process(pd) => Ok(pd.stat()),
+            FileKind::Socket(so) => Ok(so.stat()),
+            FileKind::Fifo(f) => f.vnode.stat(s),
         }
     }
 
@@ -270,7 +311,14 @@ impl File {
             arg.copy_from_slice(&v.to_ne_bytes());
         };
         match &self.kind {
-            FileKind::Process(_) => Err(Errno::ENOTTY),
+            FileKind::Process(_) | FileKind::Socket(_) => Err(Errno::ENOTTY),
+            FileKind::Fifo(f) => match req {
+                FIONREAD => {
+                    put(arg, f.readable(s));
+                    Ok(())
+                }
+                _ => Err(Errno::ENOTTY),
+            },
             FileKind::Pipe(p) => match req {
                 FIONREAD => {
                     put(arg, p.readable());
@@ -279,6 +327,11 @@ impl File {
                 _ => Err(Errno::ENOTTY),
             },
             FileKind::Vnode(f) => match (&f.device, f.vnode.kind()) {
+                // Every device answers its kind (FreeBSD's devfs does).
+                (Some(d), _) if req == FIODTYPE => {
+                    arg.copy_from_slice(&d.ops.dtype().to_ne_bytes());
+                    Ok(())
+                }
                 (Some(d), _) => d.ops.ioctl(s, req, arg),
                 (None, Kind::Regular) if req == FIONREAD => {
                     let off = *self.offset.lock(s);
@@ -292,5 +345,27 @@ impl File {
                 _ => Err(Errno::ENOTTY),
             },
         }
+    }
+}
+
+/// After `written` bytes went into the file, by anyone but the superuser:
+/// its set-id bits go (FreeBSD's `ffs_write`, `tmpfs_write`).
+fn clear_set_id(s: &Sleepable, v: &Vnode, written: usize) -> Result<(), Errno> {
+    if written == 0 || super::cred().is_root() {
+        return Ok(());
+    }
+    let mode = v.attr(s)?.mode;
+    if mode & (S_ISUID | S_ISGID) == 0 {
+        return Ok(());
+    }
+    let a = vfs::SetAttr {
+        mode: Some(mode & !(S_ISUID | S_ISGID)),
+        ..vfs::SetAttr::default()
+    };
+    // An append-only file refuses `setattr`; FreeBSD clears the bits
+    // anyway, and the write itself has happened either way.
+    match vfs::ops::setattr(s, v, &a, &vfs::Cred::root(), false) {
+        Ok(()) | Err(Errno::EPERM) => Ok(()),
+        Err(e) => Err(e),
     }
 }

@@ -143,6 +143,10 @@ impl DiskDev {
 const CHUNK: usize = 128 * 1024;
 
 impl CharDevice for DiskDev {
+    fn dtype(&self) -> u32 {
+        vfs::D_DISK
+    }
+
     fn read(&self, s: &Sleepable, uio: &mut dyn Uio, offset: u64, _: bool) -> Result<usize, Errno> {
         let (at, len) = self.range(offset, uio.resid())?;
         let mut done = 0;

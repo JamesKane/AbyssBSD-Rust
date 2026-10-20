@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! Processes: `fork`, `vfork`, `pdfork` and its descriptors, `execve`,
-//! `wait4`, process groups and sessions, and credentials (everything runs
-//! as root until P6).
+//! `wait4`, process groups and sessions, and credentials.
 
 use alloc::vec::Vec;
 
@@ -12,6 +11,7 @@ use sched::Sleepable;
 
 use super::{SysResult, int, process};
 use crate::arch::trap::TrapFrame;
+use crate::cred::Ids;
 use crate::uaccess::{self, Plain, UserPtr};
 
 // SAFETY: integers and timevals only, no padding.
@@ -214,42 +214,125 @@ pub(super) fn setpgid(pid: u64, pgid: u64) -> SysResult {
     Ok(0)
 }
 
-/// `getuid` and the rest: root.
-pub(super) fn root() -> SysResult {
-    Ok(0)
+/// Which id a `get*id` call returns.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Id {
+    Uid,
+    Euid,
+    Gid,
+    Egid,
 }
 
-/// `getgroups(gidsetlen, gidset)`: group 0 (wheel).
+/// `getuid()`, `geteuid()`, `getgid()`, `getegid()`.
+pub(super) fn get_id(which: Id) -> SysResult {
+    let c = process()?.cred();
+    Ok(u64::from(match which {
+        Id::Uid => c.ruid,
+        Id::Euid => c.euid(),
+        Id::Gid => c.rgid,
+        Id::Egid => c.egid(),
+    }))
+}
+
+/// `getgroups(gidsetlen, gidset)`: the supplementary groups.
 pub(super) fn getgroups(len: u64, set: u64) -> SysResult {
+    let c = process()?.cred();
+    let groups = c.groups();
+    let n = u64::try_from(groups.len()).map_err(|_| Errno::EINVAL)?;
     match int(len) {
-        0 => Ok(1),
-        n if n < 0 => Err(Errno::EINVAL),
-        _ => {
-            UserPtr::<u32>::new(set)
-                .write(&0)
-                .map_err(|_| Errno::EFAULT)?;
-            Ok(1)
+        0 => Ok(n),
+        l if usize::try_from(l).is_ok_and(|l| l >= groups.len()) => {
+            let bytes: Vec<u8> = groups.iter().flat_map(|g| g.to_ne_bytes()).collect();
+            uaccess::copy_out(set, &bytes).map_err(|_| Errno::EFAULT)?;
+            Ok(n)
         }
+        _ => Err(Errno::EINVAL),
     }
 }
 
-/// `getresuid(ruid, euid, suid)` and `getresgid`: all 0.
-pub(super) fn getres(a: u64, b: u64, c: u64) -> SysResult {
-    for p in [a, b, c] {
-        if p != 0 {
-            UserPtr::<u32>::new(p)
-                .write(&0)
-                .map_err(|_| Errno::EFAULT)?;
-        }
+/// `setgroups(ngroups, gidset)`.
+pub(super) fn setgroups(len: u64, set: u64) -> SysResult {
+    let n = usize::try_from(int(len)).map_err(|_| Errno::EINVAL)?;
+    if n > crate::cred::NGROUPS_MAX {
+        return Err(Errno::EINVAL);
     }
+    let mut raw = alloc::vec![0u8; n * 4];
+    uaccess::copy_in(&mut raw, set).map_err(|_| Errno::EFAULT)?;
+    let groups = crate::cred::groups_from(&raw);
+    process()?.change_cred(|c| c.setgroups(&groups))?;
     Ok(0)
 }
 
-/// `setuid` and friends: root may become root.
-pub(super) fn set_id(id: u64) -> SysResult {
-    if int(id) == 0 {
-        Ok(0)
+/// `getresuid(ruid, euid, suid)`, or `getresgid` with `gids`.
+pub(super) fn getres(a: u64, b: u64, c: u64, gids: bool) -> SysResult {
+    let cr = process()?.cred();
+    let ids = if gids {
+        [cr.rgid, cr.egid(), cr.svgid]
     } else {
-        Err(Errno::EPERM)
+        [cr.ruid, cr.euid(), cr.svuid]
+    };
+    let mut error = Ok(0);
+    for (p, id) in [a, b, c].into_iter().zip(ids) {
+        if p != 0 && UserPtr::<u32>::new(p).write(&id).is_err() {
+            error = Err(Errno::EFAULT);
+        }
     }
+    error
+}
+
+/// Which id a `set*id` call sets.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum SetId {
+    Uid,
+    Euid,
+    Gid,
+    Egid,
+}
+
+/// `setuid(uid)`, `seteuid`, `setgid`, `setegid`.
+pub(super) fn set_id(which: SetId, id: u64) -> SysResult {
+    let id = id_arg(id).ok_or(Errno::EINVAL)?;
+    process()?.change_cred(|c| match which {
+        SetId::Uid => c.setuid(id),
+        SetId::Euid => c.seteuid(id),
+        SetId::Gid => c.setgid(id),
+        SetId::Egid => c.setegid(id),
+    })?;
+    Ok(0)
+}
+
+/// `setreuid(ruid, euid)`, or `setregid` with `gids`.
+pub(super) fn setre(r: u64, e: u64, gids: bool) -> SysResult {
+    let (r, e) = (id_arg(r), id_arg(e));
+    process()?.change_cred(|c| {
+        if gids {
+            c.setregid(r, e)
+        } else {
+            c.setreuid(r, e)
+        }
+    })?;
+    Ok(0)
+}
+
+/// `setresuid(ruid, euid, suid)`, or `setresgid` with `gids`.
+pub(super) fn setres(r: u64, e: u64, sv: u64, gids: bool) -> SysResult {
+    let ids = Ids {
+        real: id_arg(r),
+        effective: id_arg(e),
+        saved: id_arg(sv),
+    };
+    process()?.change_cred(|c| {
+        if gids {
+            c.setresgid(ids)
+        } else {
+            c.setresuid(ids)
+        }
+    })?;
+    Ok(0)
+}
+
+/// A `uid_t` or `gid_t` argument: `None` for -1, "leave it".
+fn id_arg(a: u64) -> Option<u32> {
+    let id = u32::try_from(a & 0xffff_ffff).ok()?;
+    (id != u32::MAX).then_some(id)
 }

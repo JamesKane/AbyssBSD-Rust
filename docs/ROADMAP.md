@@ -1148,6 +1148,36 @@ P5.0 ─► P5.1 ─┬─► P5.2 ───────────────
 - pjdfstest on tmpfs and UFS2 with the same results as FreeBSD.
 - The P5 performance suite within 2% of FreeBSD on bhyve, including the lockless name-cache path
   (VFS.md §6.2) if measurement asks for it.
+- Progress 2026-10-20:
+  - fsx on UFS2 with soft updates, then `fsck_ffs -f -n` clean, has run in the kernel's UFS test
+    since P5.7.
+  - pjdfstest (`cargo xtask --remote pjdfstest`) runs all 230 scripts on tmpfs and on UFS2 with
+    soft updates at once, from the UFS2 root in bhyve. Every script's result is FreeBSD's
+    (recorded with the same static program and scripts on the server: 10,002 tests on tmpfs,
+    12,349 on UFS2, all passing there), except chflags/09's 117 tests that run in jails, which
+    are P6's; `tests/pjdfstest/known-differences.txt` lists them. The scripts take about as long
+    as on FreeBSD (in sum, 185 s against 250 s on tmpfs, and 509 s against 672 s on UFS2).
+  - What it took:
+    - Per-process credentials: real, effective, and saved ids and supplementary groups, with
+      FreeBSD's `setuid`/`seteuid`/`setgid`/`setegid`/`setre*id`/`setres*id`/`setgroups`
+      rules, `issetugid`, `kern.ngroups`, and `access` checking with the real ids.
+    - md(4) (`/dev/mdctl`: malloc and swap memory disks), which the UFS-only scripts make, `newfs`,
+      mount, remount read-only, and detach; `kldload` answers `EEXIST` for `geom_md`.
+    - Named pipes (open waits for the other side, `ENXIO` for a lone non-blocking writer), block
+      device nodes, UNIX-domain `socket`/`bind`/`connect` (socket nodes only), `O_SHLOCK` and
+      `O_EXLOCK`, `ETXTBSY` for a running program, `FIODTYPE`, `__realpathat`, and UFS's
+      `pathconf`.
+    - FreeBSD's rules where ours differed: a new file takes its directory's group; immutable and
+      append-only files keep their attributes and refuse writes; `chmod` refuses the sticky bit
+      on files (`EFTYPE`) and setgid without the group (`EPERM`); a non-root write clears setuid
+      and setgid; flags rules for non-root and `SF_SNAPSHOT`; `O_CREAT|O_EXCL` does not follow
+      a final symbolic link; `chown` to -1 and -1 changes nothing; `rename` reports `EROFS`
+      before `EXDEV`; "now" times without permission are `EACCES`; and an older modification
+      time pulls the birth time back.
+    - The console dropped typed input past 255 bytes when the tty thread fell behind an emulated
+      UART; it now leaves the rest in the FIFO, its interrupt masked, until the thread catches up.
+    - The root image carries static `awk`, `grep`, `wc`, `cut`, `dirname`, `tr`, `mkfifo`,
+      `touch`, `which`, and `sleep` from the FreeBSD tree, and a stand-in for `openssl md5`.
 
 ## Track: USB and input (parallel, starts after P3) (M)
 
