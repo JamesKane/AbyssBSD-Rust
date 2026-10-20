@@ -947,12 +947,33 @@ P5.0 ─► P5.1 ─┬─► P5.2 ───────────────
     which is its first pager that writes back. Write clustering of adjacent dirty buffers comes
     with UFS writes (P5.5).
 
-**P5.4 UFS2 read.**
+**P5.4 UFS2 read.** — done 2026-10-19
 - `lib/ufs` read side (§10.3 stage 1), host-tested on images `makefs` and `newfs` made from
   `base.txz`, comparing every file's contents and `stat` with the source tree.
 - The kernel mounts UFS2 read-only from NVMe, AHCI, and virtio-blk. `find`, `ls -lR`, and
   `cat` over the whole tree match FreeBSD's output on the same image.
 - The loader reads the kernel and its modules from UFS2.
+- As delivered:
+  - `lib/ufs` covers the superblock (FreeBSD's `validate_sblock` checks and the check-hash),
+    inodes (with their check-hash), block maps through triple indirect blocks, `bmap_run`, holes,
+    fragment tails, directories, symbolic links, and `statfs`. It works over a `BlockIo` that takes
+    a context: `Sleepable` in the kernel, `()` elsewhere. CRC-32C moved into `lib/crc`.
+  - A host test reads `makefs` images at two geometries. `cargo xtask --remote ufs-verify` checks
+    the whole of `base.txz` (30,468 entries) twice: imaged by `makefs`, and copied through
+    FreeBSD's UFS onto `newfs -U` with a sparse file added. Every mode, owner, size, mtime,
+    content, and link target matches.
+  - The kernel mounts UFS2 read-only (`nmount` type `ufs`). Metadata goes through a buffer cache
+    over the disk. Each file's pages come from a pager that reads contiguous block runs straight
+    from the disk. `unmount` takes `MNT_BYFSID`, as `umount(8)` uses.
+  - The boot tests attach a UFS2 disk `makefs` made from `/rescue`, `/lib`, and `/usr/include`, on
+    virtio-blk, NVMe, and AHCI. Over each, `/rescue`'s `mount`, `ls -lRnT`, and `md5 -r` print what
+    FreeBSD printed over the same image: all 3,321 files' digests from virtio-blk, and the listing
+    plus `/rescue/rescue`'s digest from the others. FreeBSD's bhyve device recording was redone
+    with those disks.
+  - The loader looks for `/boot/kernel/kernel` (and `/boot/abyss/md`) on `freebsd-ufs`
+    partitions through firmware Block I/O, reading runs straight into place, and falls back to the
+    ESP. `<arch>-ufs-shell` boots that way to `/rescue/sh` on both architectures, on the server.
+    The loader has no modules apart from the memory disk yet.
 
 **P5.5 UFS2 write.**
 - Stage 2 of §10.3: allocation with FreeBSD's policies, `balloc`, truncation, directory

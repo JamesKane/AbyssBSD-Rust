@@ -238,7 +238,13 @@ pub struct BootServices {
     pub close_protocol: Slot,
     pub open_protocol_information: Slot,
     pub protocols_per_handle: Slot,
-    pub locate_handle_buffer: Slot,
+    pub locate_handle_buffer: unsafe extern "efiapi" fn(
+        u32,
+        *const RawGuid,
+        *mut c_void,
+        *mut usize,
+        *mut *mut Handle,
+    ) -> Status,
     pub locate_protocol:
         unsafe extern "efiapi" fn(*const RawGuid, *mut c_void, *mut *mut c_void) -> Status,
     pub install_multiple_protocol_interfaces: Slot,
@@ -307,6 +313,36 @@ pub struct LoadedImage {
     pub image_code_type: u32,
     pub image_data_type: u32,
     pub unload: Slot,
+}
+
+/// `EFI_BLOCK_IO_PROTOCOL` (UEFI 2.10 §13.9).
+#[repr(C)]
+#[derive(Debug)]
+#[allow(missing_docs)]
+pub struct BlockIo {
+    pub revision: u64,
+    pub media: *const BlockIoMedia,
+    pub reset: Slot,
+    pub read_blocks:
+        unsafe extern "efiapi" fn(*mut BlockIo, u32, u64, usize, *mut c_void) -> Status,
+    pub write_blocks: Slot,
+    pub flush_blocks: Slot,
+}
+
+/// `EFI_BLOCK_IO_MEDIA`, the revision 1 fields.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+#[allow(missing_docs)]
+pub struct BlockIoMedia {
+    pub media_id: u32,
+    pub removable_media: u8,
+    pub media_present: u8,
+    pub logical_partition: u8,
+    pub read_only: u8,
+    pub write_caching: u8,
+    pub block_size: u32,
+    pub io_align: u32,
+    pub last_block: u64,
 }
 
 /// `EFI_SIMPLE_FILE_SYSTEM_PROTOCOL`.

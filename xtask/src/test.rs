@@ -72,7 +72,7 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
                     continue;
                 }
                 println!("== boot tests ({name}, {vmm:?})");
-                match shell(arch, vmm, release)? {
+                match shell(arch, vmm, release, false)? {
                     Ok(()) => println!("{name}: PASS"),
                     Err(why) => {
                         println!("{name}: FAIL: {why}");
@@ -81,6 +81,18 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
                         } else {
                             "bhyve-shell"
                         });
+                    }
+                }
+            }
+            // Booting from a UFS2 root needs makefs to make it.
+            if cfg!(target_os = "freebsd") && Vmm::Qemu.available(arch) {
+                let name = format!("{arch}-ufs-shell");
+                println!("== boot tests ({name})");
+                match shell(arch, Vmm::Qemu, release, true)? {
+                    Ok(()) => println!("{name}: PASS"),
+                    Err(why) => {
+                        println!("{name}: FAIL: {why}");
+                        failed.push("ufs-shell");
                     }
                 }
             }
@@ -267,16 +279,29 @@ const WARM_RESET_MARKER: &str = "logring: first boot marker";
 /// The boot-to-shell test (ROADMAP P4.7): a normal boot ends in
 /// `/rescue/sh` on the serial console. The script `freebsd-shell` proves
 /// against FreeBSD runs against it, and `exit` must power the machine off.
-fn shell(arch: Arch, vmm: Vmm, release: bool) -> Result<std::result::Result<(), String>> {
-    let disk = image::build(
-        arch,
-        build::Options {
-            release,
-            ktest: false,
-        },
-        "abyss.verifier=1",
-    )?;
-    let suffix = if vmm == Vmm::Bhyve { "-bhyve" } else { "" };
+///
+/// With `ufs_root`, the loader must find the kernel and the memory disk on
+/// a UFS2 partition (the ESP holds neither).
+fn shell(
+    arch: Arch,
+    vmm: Vmm,
+    release: bool,
+    ufs_root: bool,
+) -> Result<std::result::Result<(), String>> {
+    let opts = build::Options {
+        release,
+        ktest: false,
+    };
+    let disk = if ufs_root {
+        image::build_ufs_root(arch, opts, "abyss.verifier=1")?
+    } else {
+        image::build(arch, opts, "abyss.verifier=1")?
+    };
+    let suffix = match (vmm, ufs_root) {
+        (_, true) => "-ufs",
+        (Vmm::Bhyve, false) => "-bhyve",
+        (Vmm::Qemu, false) => "",
+    };
     let disk = {
         let copy = disk.with_file_name(format!("disk-shell{suffix}.img"));
         std::fs::copy(&disk, &copy)?;
@@ -294,9 +319,13 @@ fn shell(arch: Arch, vmm: Vmm, release: bool) -> Result<std::result::Result<(), 
         session.send("exit\n")
     })();
     let exited = session.finish(Duration::from_secs(60))?;
+    let from_ufs = std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .contains("loader: kernel from UFS2");
     let verdict = match result {
         Err(e) => Err(e.to_string()),
         Ok(()) if !exited => Err("the machine did not power off after `exit`".into()),
+        Ok(()) if ufs_root && !from_ufs => Err("the kernel did not come from UFS2".into()),
         Ok(()) => Ok(()),
     };
     if verdict.is_err() {

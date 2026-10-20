@@ -99,11 +99,30 @@ programs check FreeBSD's behavior, not ours, so each also passes on FreeBSD 15.1
 script against its `/rescue/sh`. The boot tier runs the same script against AbyssBSD: each
 architecture's `<arch>-shell` case (and `x86_64-bhyve-shell` on the server) boots a normal kernel
 to `/rescue/sh` on the serial console, runs it, and checks that `exit` powers the machine off.
+On the server, `<arch>-ufs-shell` does the same from a disk whose ESP holds only the loader: the
+kernel and the memory disk are at `/boot/kernel/kernel` and `/boot/abyss/md` on a `freebsd-ufs`
+partition that `makefs` made, and the loader must say it loaded them from UFS2.
+
+File systems (on the build server; VFS.md §14):
+
+```
+cargo xtask --remote fs-image --fs ufs2|msdos --out IMG [--from DIR] [--size S] [--softdep]
+cargo xtask --remote fs-check --fs ufs2|msdos IMG   # fsck read-only; fails unless clean
+cargo xtask --remote ufs-verify [--keep]            # lib/ufs against FreeBSD's images of base.txz
+```
+
+`ufs-verify` unpacks all of `base.txz`, images it with `makefs` and (through FreeBSD's UFS, on an
+`md` device) with `newfs -U` plus a sparse file. It then walks both images with `lib/ufs` and
+compares every entry's mode, owner, size, modification time, contents, and link target with the
+tree. `fetch-base` also makes the UFS2 test disk: `ufs-test.img` (`makefs` of `/rescue`, `/lib`,
+`/usr/include`) and FreeBSD's `ls -lRnT`, file list, and `md5 -r` of it, mounted read-only. The
+boot tests attach the disk read-only as vtbd2, nda1, and ada1, and the kernel test mounts each
+with `/rescue/mount` and must print the same.
 
 Planned for later phases:
 
 ```
-cargo xtask image   ... [--root base.txz] [--fs ufs2|md]   # UFS2 root (P4/P5)
+cargo xtask image   ... [--root base.txz] [--fs ufs2|md]   # UFS2 root of the base system (P5.8)
 cargo xtask deploy  --board {opi6p|x870e} [--usb <serial> | --media]   # install, set BootNext, collect logs
                     # targets are identified by disk serial number; anything else is refused
 cargo xtask test    [--tier compat|full]

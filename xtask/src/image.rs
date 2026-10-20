@@ -5,6 +5,10 @@
 //! memory disk (FreeBSD's `/rescue` and our test programs as a ustar
 //! archive, once `cargo xtask fetch-base` has run) at `EFI/ABYSS/MD`.
 //!
+//! A UFS2 root variant (on FreeBSD, where `makefs` is) moves the kernel
+//! and the memory disk to `/boot/kernel/kernel` and `/boot/abyss/md` on a
+//! `freebsd-ufs` partition after the ESP, where the loader looks first.
+//!
 //! Images are reproducible: GUIDs and the volume serial derive from stable
 //! names, and FAT timestamps are fixed.
 
@@ -32,13 +36,15 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     Ok(())
 }
 
-/// The files to put on the ESP.
+/// The files to put on the ESP, and a UFS2 image for a root partition.
 #[derive(Debug)]
 struct Contents<'a> {
     loader: &'a [u8],
-    kernel: &'a [u8],
+    /// On the ESP; `None` when the UFS2 root holds it.
+    kernel: Option<&'a [u8]>,
     cmdline: &'a str,
     md: Option<&'a [u8]>,
+    ufs: Option<&'a [u8]>,
 }
 
 /// Builds the loader, the kernel, and the disk image, returning the image's
@@ -63,9 +69,10 @@ pub(crate) fn build_with(
         arch,
         &Contents {
             loader: &loader,
-            kernel: &kernel,
+            kernel: Some(&kernel),
             cmdline,
             md: md.as_deref(),
+            ufs: None,
         },
     )?;
     let dir = util::root().join("build").join(arch.to_string());
@@ -76,6 +83,45 @@ pub(crate) fn build_with(
         "disk.img"
     };
     let path = dir.join(name);
+    fs::write(&path, &disk)?;
+    Ok(path)
+}
+
+/// As [`build`], with the kernel and the memory disk on a UFS2 root
+/// partition that `makefs` makes (FreeBSD only), not on the ESP.
+pub(crate) fn build_ufs_root(arch: Arch, opts: build::Options, cmdline: &str) -> Result<PathBuf> {
+    let images = build::all(arch, opts)?;
+    let read = |p: &PathBuf| fs::read(p).map_err(|e| format!("{}: {e}", p.display()));
+    let loader = read(&images.loader)?;
+    let dir = util::root().join("build").join(arch.to_string());
+    let stage = dir.join("ufsroot");
+    let _ = fs::remove_dir_all(&stage);
+    fs::create_dir_all(stage.join("boot/kernel"))?;
+    fs::create_dir_all(stage.join("boot/abyss"))?;
+    fs::copy(&images.kernel, stage.join("boot/kernel/kernel"))?;
+    if let Some(md) = crate::base::md_image(arch, &[])? {
+        fs::write(stage.join("boot/abyss/md"), md)?;
+    }
+    let img = dir.join("ufsroot.img");
+    let _ = fs::remove_file(&img);
+    util::run(
+        std::process::Command::new("makefs")
+            .args(["-t", "ffs", "-o", "version=2"])
+            .arg(&img)
+            .arg(&stage),
+    )?;
+    let ufs = read(&img)?;
+    let disk = make_disk(
+        arch,
+        &Contents {
+            loader: &loader,
+            kernel: None,
+            cmdline,
+            md: None,
+            ufs: Some(&ufs),
+        },
+    )?;
+    let path = dir.join("disk-ufs.img");
     fs::write(&path, &disk)?;
     Ok(path)
 }
@@ -105,7 +151,6 @@ fn stable_guid(name: &str) -> guid::Guid {
 }
 
 fn make_disk(arch: Arch, contents: &Contents<'_>) -> Result<Vec<u8>> {
-    let mut disk = vec![0u8; DISK_BYTES];
     let esp_sectors = (ESP_BYTES / gpt::SECTOR) as u64;
     let esp = gpt::PartitionSpec {
         type_guid: gpt::types::EFI_SYSTEM,
@@ -115,21 +160,45 @@ fn make_disk(arch: Arch, contents: &Contents<'_>) -> Result<Vec<u8>> {
         attributes: 0,
         name: "efiboot0",
     };
+    // The UFS2 root, 1 MiB-aligned after the ESP; the disk grows to fit
+    // it and the backup table.
+    let ufs_first = gpt::align_up(ESP_FIRST_LBA + esp_sectors, 2048);
+    let ufs_part = contents.ufs.map(|u| gpt::PartitionSpec {
+        type_guid: gpt::types::FREEBSD_UFS,
+        unique_guid: stable_guid(&format!("abyss-{arch}-rootfs")),
+        first_lba: ufs_first,
+        last_lba: ufs_first + (u.len() / gpt::SECTOR) as u64 - 1,
+        attributes: 0,
+        name: "rootfs0",
+    });
+    let bytes = match contents.ufs {
+        Some(u) => (usize::try_from(ufs_first).unwrap_or(0) * gpt::SECTOR + u.len() + MIB)
+            .next_multiple_of(MIB)
+            .max(DISK_BYTES),
+        None => DISK_BYTES,
+    };
+    let mut disk = vec![0u8; bytes];
+    let parts: Vec<gpt::PartitionSpec<'_>> = core::iter::once(esp).chain(ufs_part).collect();
     gpt::write(
         &mut disk,
         stable_guid(&format!("abyss-{arch}-disk")),
-        &[esp],
+        &parts,
     )
     .map_err(|e| format!("GPT: {e:?}"))?;
+    if let Some(u) = contents.ufs {
+        let at = usize::try_from(ufs_first).unwrap_or(0) * gpt::SECTOR;
+        disk[at..at + u.len()].copy_from_slice(u);
+    }
 
     let mut root = fat::Dir::new();
     let md = contents.md.map(|m| ("EFI/ABYSS/MD", m));
+    let kernel = contents.kernel.map(|k| ("EFI/ABYSS/KERNEL", k));
     for (path, data) in [
         (arch.efi_boot_file(), contents.loader),
-        ("EFI/ABYSS/KERNEL", contents.kernel),
         ("EFI/ABYSS/CMDLINE", contents.cmdline.as_bytes()),
     ]
     .into_iter()
+    .chain(kernel)
     .chain(md)
     {
         root.insert_file(path, data)
@@ -147,15 +216,12 @@ fn make_disk(arch: Arch, contents: &Contents<'_>) -> Result<Vec<u8>> {
 
     // Read everything back through the parsers before handing it out.
     let table = gpt::Table::read(&disk).map_err(|e| format!("GPT read-back: {e:?}"))?;
-    if table.partitions().count() != 1 {
+    if table.partitions().count() != 1 + usize::from(contents.ufs.is_some()) {
         return Err("GPT read-back: wrong partition count".into());
     }
     let v = fat::Volume::open(&disk[start..start + ESP_BYTES])
         .map_err(|e| format!("FAT read-back: {e:?}"))?;
-    for (path, data) in [
-        (arch.efi_boot_file(), contents.loader),
-        ("EFI/ABYSS/KERNEL", contents.kernel),
-    ] {
+    for (path, data) in core::iter::once((arch.efi_boot_file(), contents.loader)).chain(kernel) {
         if v.read_file(path)
             .map_err(|e| format!("FAT read-back ({path}): {e:?}"))?
             != data
@@ -174,9 +240,10 @@ mod tests {
     fn images_are_reproducible() {
         let contents = Contents {
             loader: b"MZ fake loader",
-            kernel: b"\x7fELF fake kernel",
+            kernel: Some(b"\x7fELF fake kernel"),
             cmdline: "kaslr=0",
             md: Some(b"ustar"),
+            ufs: None,
         };
         let a = make_disk(Arch::X86_64, &contents).unwrap();
         let b = make_disk(Arch::X86_64, &contents).unwrap();

@@ -281,8 +281,10 @@ default FreeBSD install with `tmpmfs`. Its `statfs` follows FreeBSD's tmpfs.
 
 ### 10.3 UFS2
 
-`lib/ufs` holds the format and an engine over `BlockIo` (read and write a run of blocks, and flush).
-It is built in three stages, each validated on the build server.
+`lib/ufs` holds the format and an engine over `BlockIo`. A `BlockIo` read hands a closure the bytes
+at a sector-aligned offset; write and flush come with stage 2. Each call takes the implementation's
+context type: `Sleepable` in the kernel, `()` on the host and in the loader. It is built in three
+stages, each validated on the build server.
 
 1. **Read**:
    - Superblock and its checks (magic, sizes, `fs_clean`).

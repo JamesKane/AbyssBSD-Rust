@@ -22,10 +22,12 @@ bootproto = { path = "../bootproto" }
 crc = { path = "../../lib/crc" }
 efi = { path = "../efi" }
 elf = { path = "../../lib/elf" }
+gpt = { path = "../../lib/gpt" }
 guid = { path = "../../lib/guid" }
 ktest = { path = "../../lib/ktest" }
 logring = { path = "../../lib/logring" }
 pt = { path = "../../lib/pt" }
+ufs = { path = "../../lib/ufs" }
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 arch-aarch64 = { path = "../../arch/aarch64" }

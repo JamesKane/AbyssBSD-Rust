@@ -196,6 +196,47 @@ impl SystemTable {
         Ok(out.cast())
     }
 
+    /// Every handle with protocol `P` (`LocateHandleBuffer` by protocol).
+    pub fn handles_with<P: Protocol>(&self) -> Result<HandleBuffer<'_>> {
+        let guid = raw::RawGuid::new(P::GUID);
+        let (mut n, mut buf) = (0usize, core::ptr::null_mut());
+        // SAFETY: `ByProtocol` (2) with a valid GUID and out-pointers.
+        unsafe {
+            (self.bs().locate_handle_buffer)(
+                2,
+                &raw const guid,
+                core::ptr::null_mut(),
+                &raw mut n,
+                &raw mut buf,
+            )
+        }
+        .ok()?;
+        Ok(HandleBuffer {
+            st: self,
+            ptr: buf,
+            len: if buf.is_null() { 0 } else { n },
+        })
+    }
+
+    /// Reads `buf.len()` bytes (whole blocks) from block `lba` of the
+    /// device behind `bio`, whose media must still be `media_id`. `buf`
+    /// must meet the media's `io_align`.
+    ///
+    /// # Safety
+    ///
+    /// `bio` is a live Block I/O protocol the firmware returned.
+    pub unsafe fn read_blocks(
+        &self,
+        bio: *mut raw::BlockIo,
+        media_id: u32,
+        lba: u64,
+        buf: &mut [u8],
+    ) -> Result<()> {
+        // SAFETY: the caller vouches for `bio`; `buf` is writable for its
+        // length.
+        unsafe { ((*bio).read_blocks)(bio, media_id, lba, buf.len(), buf.as_mut_ptr().cast()) }.ok()
+    }
+
     /// Opens the root directory of the volume `device` lives on.
     pub fn open_volume(&self, device: Handle) -> Result<File<'_>> {
         let fs = self.handle_protocol::<raw::SimpleFileSystem>(device)?;
@@ -379,6 +420,36 @@ pub enum Allocate {
     At(u64),
 }
 
+/// Handles `LocateHandleBuffer` returned, freed when dropped.
+#[derive(Debug)]
+pub struct HandleBuffer<'a> {
+    st: &'a SystemTable,
+    ptr: *mut Handle,
+    len: usize,
+}
+
+impl HandleBuffer<'_> {
+    /// The handles.
+    #[must_use]
+    pub fn handles(&self) -> &[Handle] {
+        if self.ptr.is_null() {
+            return &[];
+        }
+        // SAFETY: firmware returned `len` handles at `ptr`, which stay
+        // valid until the pool is freed in `drop`.
+        unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl Drop for HandleBuffer<'_> {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            // SAFETY: firmware allocated the buffer from pool for us.
+            let _ = unsafe { self.st.free_pool(self.ptr.cast()) };
+        }
+    }
+}
+
 /// A protocol interface type with its GUID.
 ///
 /// # Safety
@@ -400,6 +471,10 @@ unsafe impl Protocol for raw::SimpleFileSystem {
 // SAFETY: see above.
 unsafe impl Protocol for raw::GraphicsOutput {
     const GUID: Guid = Guid::must_parse("9042A9DE-23DC-4A38-96FB-7ADED080516A");
+}
+// SAFETY: see above (UEFI 2.10 §13.9).
+unsafe impl Protocol for raw::BlockIo {
+    const GUID: Guid = Guid::must_parse("964E5B21-6459-11D2-8E39-00A0C969723B");
 }
 // SAFETY: see above.
 unsafe impl Protocol for raw::Rng {

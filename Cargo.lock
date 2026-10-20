@@ -301,10 +301,12 @@ dependencies = [
  "crc",
  "efi",
  "elf",
+ "gpt",
  "guid",
  "ktest",
  "logring",
  "pt",
+ "ufs",
 ]
 
 [[package]]

@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! The AbyssBSD UEFI loader.
 //!
-//! Reads `\EFI\ABYSS\KERNEL` (and the optional command line in
-//! `\EFI\ABYSS\CMDLINE`) from the volume it was loaded from, places the
+//! Reads the kernel from `/boot/kernel/kernel` on the first UFS2 file
+//! system that has one, as FreeBSD's loader does (with the memory disk from
+//! `/boot/abyss/md` there), or else `\EFI\ABYSS\KERNEL` (and
+//! `\EFI\ABYSS\MD`) from the volume it was loaded from; the optional
+//! command line comes from `\EFI\ABYSS\CMDLINE` there. It places the
 //! kernel at a random 2 MiB-aligned slide, builds the initial page tables,
 //! exits boot services, and jumps to the kernel with a `bootproto::BootInfo`.
 //!
@@ -22,6 +25,7 @@ mod paging;
 mod rng;
 #[cfg(feature = "ktest")]
 mod tests;
+mod ufs;
 
 use alloc::vec::Vec;
 use core::fmt::Write;
@@ -38,6 +42,8 @@ static SYSTEM_TABLE: AtomicPtr<raw::SystemTable> = AtomicPtr::new(core::ptr::nul
 const KERNEL_PATH: &str = "EFI/ABYSS/KERNEL";
 const CMDLINE_PATH: &str = "EFI/ABYSS/CMDLINE";
 const MD_PATH: &str = "EFI/ABYSS/MD";
+const UFS_KERNEL_PATH: &[u8] = b"/boot/kernel/kernel";
+const UFS_MD_PATH: &[u8] = b"/boot/abyss/md";
 
 /// UEFI memory types the loader tags its allocations with, so the final
 /// memory map tells the kernel what each region holds.
@@ -133,11 +139,20 @@ fn boot(image: Handle, st: SystemTable) -> Result<core::convert::Infallible, Err
         Ok(f) => f.bytes().trim_ascii().to_vec(),
         Err(_) => Vec::new(),
     };
-    let file = kernel::read_file(&st, &root, KERNEL_PATH)?;
-    // The memory disk is optional.
-    let md = kernel::read_file(&st, &root, MD_PATH)
-        .ok()
-        .and_then(|f| bootproto::PhysRange::from_len(f.phys, f.len as u64));
+    // The kernel from UFS2 if one has it, else from the ESP; the memory
+    // disk (optional) from the same place.
+    let (file, md) = match ufs::read_file(&st, UFS_KERNEL_PATH) {
+        Some((file, origin)) => {
+            let _ = writeln!(con, "loader: kernel from UFS2 on {origin}");
+            let md = ufs::read_file(&st, UFS_MD_PATH).map(|(f, _)| f);
+            (file, md)
+        }
+        None => (
+            kernel::read_file(&st, &root, KERNEL_PATH)?,
+            kernel::read_file(&st, &root, MD_PATH).ok(),
+        ),
+    };
+    let md = md.and_then(|f| bootproto::PhysRange::from_len(f.phys, f.len as u64));
     if let Some(md) = &md {
         let _ = writeln!(
             con,
