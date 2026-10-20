@@ -566,16 +566,24 @@ pub(super) fn nmount(s: &Sleepable, iov: u64, iovcnt: u64, flags: u64) -> SysRes
     };
     let fstype = get(b"fstype").ok_or(Errno::EINVAL)?;
     let fspath = get(b"fspath").ok_or(Errno::EINVAL)?;
-    let flags = flags
-        | if get(b"ro").is_some() || get(b"rdonly").is_some() {
-            abi::mount::MNT_RDONLY
-        } else {
-            0
-        };
+    // "ro" and "noro" (or "rw") as FreeBSD's `vfs_donmount` reads them;
+    // without either an update goes read-write.
+    let ro = get(b"ro").is_some() || get(b"rdonly").is_some();
+    let flags = if ro {
+        flags | abi::mount::MNT_RDONLY
+    } else if get(b"noro").is_some() || get(b"rw").is_some() {
+        flags & !abi::mount::MNT_RDONLY
+    } else {
+        flags
+    };
     let p = process()?;
     let covered = crate::fs::lookup(s, &p, At::Cwd, fspath, Walk::FOLLOW)?;
     if !covered.is_dir() {
         return Err(Errno::ENOTDIR);
+    }
+    if flags & abi::mount::MNT_UPDATE != 0 || get(b"update").is_some() {
+        let force = flags & abi::mount::MNT_FORCE != 0 || get(b"force").is_some();
+        return update(s, &covered, fstype, flags, force);
     }
     let num = |name: &[u8], default: u32| -> Result<u32, Errno> {
         get(name).map_or(Ok(default), |v| {
@@ -675,6 +683,26 @@ pub(super) fn nmount(s: &Sleepable, iov: u64, iovcnt: u64, flags: u64) -> SysRes
     Ok(0)
 }
 
+/// `nmount` with `MNT_UPDATE`: the mount whose root `v` is goes
+/// read-only or read-write (FreeBSD's `vfs_domount_update`). Soft updates
+/// show (`MNT_SOFTDEP`) only while a UFS mount is read-write.
+fn update(s: &Sleepable, v: &Arc<vfs::Vnode>, fstype: &[u8], flags: u64, force: bool) -> SysResult {
+    use abi::mount::{MNT_RDONLY, MNT_SOFTDEP};
+    if !v.is_mount_root() {
+        return Err(Errno::EINVAL);
+    }
+    let m = v.mount();
+    if fstype.strip_suffix(b"\0").unwrap_or(fstype) != m.type_name().as_bytes() {
+        return Err(Errno::EOPNOTSUPP);
+    }
+    m.update(s, MNT_RDONLY, flags, force)?;
+    if let Some(fs) = m.fs().as_any().downcast_ref::<crate::fs::ufs::UfsFs>() {
+        let softdep = if fs.soft_updates() { MNT_SOFTDEP } else { 0 };
+        m.update(s, MNT_SOFTDEP, softdep, false)?;
+    }
+    Ok(0)
+}
+
 /// The disk device node at `path` (a mount's `from`): its name in devfs
 /// is the disk's.
 fn disk_at(
@@ -687,7 +715,11 @@ fn disk_at(
     if v.kind() != vfs::Kind::CharDevice {
         return Err(Errno::ENOTBLK);
     }
-    let name = path.rsplit(|&c| c == b'/').next().unwrap_or(path);
+    // Its name under /dev: `vtbd0p2`, or an alias such as `gpt/rootfs0`.
+    let name = match path.strip_prefix(b"/dev/") {
+        Some(rest) => rest,
+        None => path.rsplit(|&c| c == b'/').next().unwrap_or(path),
+    };
     let name = core::str::from_utf8(name).map_err(|_| Errno::ENXIO)?;
     storage::find(name).ok_or(Errno::ENXIO)
 }

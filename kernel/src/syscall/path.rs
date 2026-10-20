@@ -353,7 +353,7 @@ fn statfs_mount(s: &Sleepable, m: &vfs::Mount) -> Result<Statfs, Errno> {
     let info = m.info();
     let mut st = Statfs {
         f_type: m.type_num,
-        f_flags: info.flags,
+        f_flags: m.flags(),
         f_bsize: c.bsize,
         f_iosize: c.iosize,
         f_blocks: c.blocks,

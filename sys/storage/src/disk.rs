@@ -82,6 +82,8 @@ pub struct PartitionEntry {
     pub index: u32,
     /// Its type.
     pub type_guid: gpt::Guid,
+    /// Its own GUID.
+    pub unique_guid: gpt::Guid,
     /// Its first sector on the parent.
     pub first_lba: u64,
     /// Its name.
@@ -98,6 +100,28 @@ impl PartitionEntry {
             g if g == gpt::types::FREEBSD_SWAP => "freebsd-swap".into(),
             g => format!("{g}"),
         }
+    }
+
+    /// Its other names, as FreeBSD's `glabel` gives them under `/dev`:
+    /// `gptid/<guid>` (lower case), and `gpt/<label>` when it has a label
+    /// that makes a file name.
+    #[must_use]
+    pub fn aliases(&self) -> Vec<String> {
+        let mut out = alloc::vec![format!(
+            "gptid/{}",
+            format!("{}", self.unique_guid).to_ascii_lowercase()
+        )];
+        let usable = !self.label.is_empty()
+            && self.label != "."
+            && self.label != ".."
+            && !self
+                .label
+                .chars()
+                .any(|c| c == '/' || c == '\0' || c.is_control());
+        if usable {
+            out.push(format!("gpt/{}", self.label));
+        }
+        out
     }
 }
 
@@ -356,6 +380,7 @@ fn taste(s: &Sleepable, disk: &Arc<Disk>) -> Vec<Arc<Disk>> {
                     entry: PartitionEntry {
                         index: p.index,
                         type_guid: p.type_guid,
+                        unique_guid: p.unique_guid,
                         first_lba: p.first_lba,
                         label,
                     },
@@ -480,14 +505,57 @@ pub fn partitions(disk: &Arc<Disk>) -> Vec<Arc<Disk>> {
     out
 }
 
-/// The disk or partition named `name`.
+/// The disk or partition named `name`: its own name (`vtbd0p2`) or one
+/// of its [`PartitionEntry::aliases`] (`gpt/rootfs0`, `gptid/…`).
 #[must_use]
 pub fn find(name: &str) -> Option<Arc<Disk>> {
-    DISKS.lock().iter().find(|d| d.name == name).cloned()
+    let disks = DISKS.lock();
+    let by_name = disks.iter().find(|d| d.name == name);
+    by_name
+        .or_else(|| {
+            let lower = name.to_ascii_lowercase();
+            let name = if name.starts_with("gptid/") {
+                lower.as_str()
+            } else {
+                name
+            };
+            disks.iter().find(|d| {
+                d.partition()
+                    .is_some_and(|(_, e)| e.aliases().iter().any(|a| a == name))
+            })
+        })
+        .cloned()
 }
 
 /// Every published disk and partition, by name.
 #[must_use]
 pub fn disks() -> Vec<String> {
     DISKS.lock().iter().map(|d| d.name.clone()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(label: &str) -> PartitionEntry {
+        PartitionEntry {
+            index: 1,
+            type_guid: gpt::types::FREEBSD_UFS,
+            unique_guid: gpt::Guid::must_parse("8B5D3C2A-11E4-4F0B-9C1D-0123456789AB"),
+            first_lba: 2048,
+            label: label.into(),
+        }
+    }
+
+    #[test]
+    fn partitions_are_also_named_by_guid_and_label() {
+        assert_eq!(
+            entry("rootfs0").aliases(),
+            ["gptid/8b5d3c2a-11e4-4f0b-9c1d-0123456789ab", "gpt/rootfs0"]
+        );
+        // Labels that make no file name give no `gpt/` name.
+        for bad in ["", ".", "..", "a/b", "tab\there"] {
+            assert_eq!(entry(bad).aliases().len(), 1, "{bad:?}");
+        }
+    }
 }

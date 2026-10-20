@@ -8,8 +8,11 @@
 //! block is read again for each block it maps); file data is read run by
 //! run (`bmap_run`) straight into the page-aligned destination.
 
+use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
+use core::fmt::Write;
 
 use efi::{Allocate, SystemTable, raw};
 
@@ -115,13 +118,15 @@ impl ufs::BlockIo for Partition<'_> {
     }
 }
 
-/// Where a file was found, for the log.
+/// Where a file was found, for the log and the root's name.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Origin {
     /// The disk's place in the firmware's order, and the partition's
     /// index in its GPT (1-based, as FreeBSD names `p1`).
     pub(crate) disk: usize,
     pub(crate) partition: u32,
+    /// The partition's unique GUID (its `/dev/gptid/` name).
+    pub(crate) guid: gpt::Guid,
 }
 
 impl core::fmt::Display for Origin {
@@ -155,7 +160,7 @@ fn file_systems(st: &SystemTable) -> Vec<(Origin, ufs::Ufs<Partition<'_>>)> {
             cache: RefCell::new(Vec::new()),
         };
         disk += 1;
-        for (index, first_lba, blocks) in ufs_partitions(&whole) {
+        for (index, first_lba, blocks, guid) in ufs_partitions(&whole) {
             let part = Partition {
                 first_lba,
                 blocks,
@@ -167,6 +172,7 @@ fn file_systems(st: &SystemTable) -> Vec<(Origin, ufs::Ufs<Partition<'_>>)> {
                     Origin {
                         disk,
                         partition: index,
+                        guid,
                     },
                     fs,
                 ));
@@ -176,9 +182,9 @@ fn file_systems(st: &SystemTable) -> Vec<(Origin, ufs::Ufs<Partition<'_>>)> {
     out
 }
 
-/// The `freebsd-ufs` partitions of a disk's GPT: index, first block, and
-/// length in blocks.
-fn ufs_partitions(disk: &Partition<'_>) -> Vec<(u32, u64, u64)> {
+/// The `freebsd-ufs` partitions of a disk's GPT: index, first block,
+/// length in blocks, and unique GUID.
+fn ufs_partitions(disk: &Partition<'_>) -> Vec<(u32, u64, u64, gpt::Guid)> {
     let bs = disk.media.block_size as usize;
     let mut header = Aligned::new(bs, disk.media.io_align as usize);
     if disk.read_into(bs as u64, header.bytes()).is_err() {
@@ -201,7 +207,7 @@ fn ufs_partitions(disk: &Partition<'_>) -> Vec<(u32, u64, u64)> {
     table
         .partitions()
         .filter(|p| p.type_guid == gpt::types::FREEBSD_UFS)
-        .map(|p| (p.index + 1, p.first_lba, p.sectors()))
+        .map(|p| (p.index + 1, p.first_lba, p.sectors(), p.unique_guid))
         .collect()
 }
 
@@ -221,6 +227,46 @@ pub(crate) fn read_file(st: &SystemTable, path: &[u8]) -> Option<(Loaded, Origin
         }
     }
     None
+}
+
+/// The root file system for the kernel (`vfs.root.mountfrom`) when it
+/// came from the UFS2 file system at `origin`: what that file system's
+/// `/etc/fstab` mounts on `/`, as FreeBSD's loader reads it, or else that
+/// file system by its partition's GUID.
+pub(crate) fn root_mount(st: &SystemTable, origin: Origin) -> String {
+    let fallback = || {
+        let mut g = String::new();
+        let _ = write!(g, "{}", origin.guid);
+        format!("ufs:/dev/gptid/{}", g.to_ascii_lowercase())
+    };
+    let Some(fs) = file_systems(st)
+        .into_iter()
+        .find(|(o, _)| o.disk == origin.disk && o.partition == origin.partition)
+        .map(|(_, fs)| fs)
+    else {
+        return fallback();
+    };
+    let Ok(Some((_, ip))) = fs.namei(&(), b"/etc/fstab") else {
+        return fallback();
+    };
+    let mut buf = alloc::vec![0u8; usize::try_from(ip.size).unwrap_or(0).min(64 * 1024)];
+    let Ok(n) = fs.read(&(), &ip, 0, &mut buf) else {
+        return fallback();
+    };
+    let text = core::str::from_utf8(&buf[..n]).unwrap_or("");
+    fstab_root(text).unwrap_or_else(fallback)
+}
+
+/// `type:device` for the `/` line of an fstab (FreeBSD's loader
+/// `getrootmount`): the first whose second field is `/`.
+pub(crate) fn fstab_root(text: &str) -> Option<String> {
+    text.lines()
+        .map(|l| l.split('#').next().unwrap_or(""))
+        .find_map(|l| {
+            let mut f = l.split_ascii_whitespace();
+            let (dev, on, kind) = (f.next()?, f.next()?, f.next()?);
+            (on == "/").then(|| format!("{kind}:{dev}"))
+        })
 }
 
 /// The whole of file `ip`, run by run, into pages allocated for it.

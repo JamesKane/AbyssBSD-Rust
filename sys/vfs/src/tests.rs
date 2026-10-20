@@ -667,6 +667,34 @@ fn renaming_across_mounts_is_exdev() {
 }
 
 #[test]
+fn mounts_update_and_all_unmount_at_shutdown() {
+    use abi::mount::{MNT_NOATIME, MNT_RDONLY};
+    let ns = tmp();
+    let s = s();
+    let d = mk(&ns, b"/m", NewNode::Directory).unwrap();
+    let other = tmpfs_mount(heap_pages());
+    ns.mount(&s, d, Arc::clone(&other), b"/m").unwrap();
+    let d = mk(&ns, b"/m/n", NewNode::Directory).unwrap();
+    let inner = tmpfs_mount(heap_pages());
+    ns.mount(&s, d, Arc::clone(&inner), b"/m/n").unwrap();
+    // A file system that cannot change between read-only and read-write
+    // refuses, and stays as it was; other flags just change.
+    let before = other.flags();
+    assert_eq!(
+        other.update(&s, MNT_RDONLY, MNT_RDONLY, false),
+        Err(Errno::EOPNOTSUPP)
+    );
+    assert_eq!(other.flags(), before);
+    assert!(!other.read_only());
+    other.update(&s, MNT_NOATIME, MNT_NOATIME, false).unwrap();
+    assert_eq!(other.flags(), before | MNT_NOATIME);
+    // Busy or not, everything goes, the innermost first.
+    let _open = mk(&ns, b"/m/n/f", NewNode::Regular).unwrap().use_ref();
+    assert!(ns.unmount_all(&s).is_empty());
+    assert_eq!(ns.mounts().len(), 1);
+}
+
+#[test]
 fn getdirentries_packs_and_resumes_across_changes() {
     let ns = tmp();
     let s = s();

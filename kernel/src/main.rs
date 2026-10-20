@@ -178,9 +178,10 @@ fn run_shell(s: &sched::Sleepable) {
     }
 }
 
-/// An orderly power-off: firmware is told (`\_PTS`), the devices stop,
-/// then the machine powers off.
+/// An orderly power-off: the file systems are unmounted, firmware is told
+/// (`\_PTS`), the devices stop, then the machine powers off.
 pub(crate) fn power_off(s: &sched::Sleepable) -> ! {
+    fs::shutdown(s);
     power::prepare(s);
     devices::shutdown(s);
     power::off()

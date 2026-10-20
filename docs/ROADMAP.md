@@ -1097,12 +1097,51 @@ P5.0 ─► P5.1 ─┬─► P5.2 ───────────────
     - 4,000 files made and removed;
     - fsx, then `fsck_ffs -f -n` clean.
 
-**P5.8 Root on UFS2.**
+**P5.8 Root on UFS2.** Done 2026-10-20.
 - The kernel mounts the root from `vfs.root.mountfrom`, devfs on `/dev`, tmpfs on `/tmp`, and the
   ESP on `/boot/efi`. Both architectures (and bhyve) boot from an NVMe disk to `/rescue/sh` on UFS2,
   with the boot-to-shell expect test in CI moved onto it.
 - The full `base.txz` userland on the root, and its tests that only need P5 features run: `ls`,
   `find`, `tar`, `cp -R`, `mtree`.
+- Done 2026-10-20:
+  - The loader sets `vfs.root.mountfrom`. It uses the `/` line of `/etc/fstab` on the UFS2 file
+    system the kernel came from, as FreeBSD's loader does, or else `ufs:/dev/gptid/<uuid>`.
+  - The kernel mounts that root read-only, as FreeBSD does first. It waits up to 3 seconds for
+    the disk, and falls back to the memory disk. devfs gains FreeBSD's `gpt/<label>` and
+    `gptid/<uuid>` names for partitions.
+  - The ESP mounted on `/boot/efi` is now the root disk's.
+  - `mount -u -o rw /` (`MNT_UPDATE`) moves UFS2 between read-only and read-write. Soft
+    updates are set up at open, so `MNT_SOFTDEP` shows once the root is read-write.
+  - At power-off every file system is unmounted, the root last, and a read-write root is left
+    clean.
+  - The server's shell cases (`<arch>-shell`, `x86_64-bhyve-shell`) boot from NVMe on an image of
+    all of `base.txz` that `makefs` builds, with owners and file flags from the archive's own
+    records. They replace `-ufs-shell`.
+  - After the P4 script, `UFS_ROOT` checks the root:
+    - it starts read-only, and `mount -u` makes it read-write with soft updates;
+    - `ls -lo` shows `su`'s setuid bit and `schg` flag;
+    - `mtree` checks every entry of the base: owner, mode, flags, link, size, and SHA-256;
+    - `tar` and `cp -R` copy a tree that `mtree` then finds the same;
+    - after power-off, `dumpfs` must show the root clean and `fsck_ffs -f -n` must find nothing.
+  - `find` and `mtree` are static builds from the FreeBSD tree until base's own can run (they
+    are dynamically linked; `rtld` is P6). `/rescue` provides `ls`, `tar`, and `cp`.
+  - Fixed along the way:
+    - the `vget` lock now ranks below the file systems' locks it is held over (witness had
+      reported the order);
+    - the vnode reclaimer could doom a vnode a lookup had just found (a `chdir` into it left
+      `mtree` in a dead directory, every open `EBADF`). It now claims a vnode under the table
+      lock, and a name-cache hit on one being claimed is a miss, as FreeBSD's `vget` fails on a
+      doomed vnode;
+    - out of space with soft updates, waiting for pending frees now writes file pages too (a
+      free can wait for the data of the block replacing it), and three more paths wait and try
+      again, as `write` and `create` did: a hole a mapping filled, a truncation that ends inside
+      a hole, and `link`. fsx, now built on the server too, had hit `EIO` and `ENOSPC` there on
+      the 32 MiB test disk;
+    - soft updates' scan of an inode block for roots over empty indirect blocks read a short
+      symlink's target as pointers, and could overflow; it skips inodes without blocks;
+    - the virtio entropy test allows the harvester's own reads to interrupt in between;
+    - emulated aarch64 boot cases have 600 seconds, now that the file-system tests take minutes
+      under TCG.
 
 **P5.9 Verification and performance.**
 - fsx (unmodified) on UFS2 with soft updates completes, and the image passes `fsck_ffs -f`.

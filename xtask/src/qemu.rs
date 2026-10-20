@@ -80,6 +80,8 @@ pub(crate) struct Vm {
     pub(crate) vmm: Vmm,
     pub(crate) arch: Arch,
     pub(crate) disk: PathBuf,
+    /// The boot disk is an NVMe controller's namespace, not virtio-blk.
+    pub(crate) nvme: bool,
     pub(crate) smp: u32,
     pub(crate) mem: String,
     pub(crate) gdb: bool,
@@ -220,6 +222,7 @@ impl Vm {
             vmm,
             arch,
             disk,
+            nvme: false,
             smp: 4,
             mem: "1G".into(),
             gdb: false,
@@ -271,8 +274,9 @@ impl Vm {
         c.args(["-s", "0,hostbridge", "-s", "31,lpc", "-l", "com1,stdio"]);
         c.arg("-l")
             .arg(format!("bootrom,{BHYVE_CODE},{}", vars.display()));
+        let model = if self.nvme { "nvme" } else { "virtio-blk" };
         c.arg("-s")
-            .arg(format!("2,virtio-blk,{}", self.disk.display()));
+            .arg(format!("2,{model},{}", self.disk.display()));
         c.args(["-s", "3,virtio-rnd"]);
         if let Some(d) = &self.extra_disk {
             c.arg("-s").arg(format!("4,virtio-blk,{}", d.display()));
@@ -349,7 +353,11 @@ impl Vm {
             "if=none,id=disk0,format=raw,file={}",
             self.disk.display()
         ));
-        c.args(["-device", "virtio-blk-pci,drive=disk0,bootindex=0"]);
+        if self.nvme {
+            c.args(["-device", "nvme,serial=abyssboot,drive=disk0,bootindex=0"]);
+        } else {
+            c.args(["-device", "virtio-blk-pci,drive=disk0,bootindex=0"]);
+        }
         if let Some(d) = &self.extra_disk {
             c.arg("-drive")
                 .arg(format!("if=none,id=disk1,format=raw,file={}", d.display()));

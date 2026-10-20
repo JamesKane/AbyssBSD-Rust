@@ -75,6 +75,10 @@ pub struct Vnode {
     /// When it was last looked up, in [`tick`]s: the reclaimer takes the
     /// longest unused first.
     used: AtomicU64,
+    /// The reclaimer is taking it ([`Mount::prune`](crate::Mount::prune)):
+    /// a weak reference upgraded meanwhile (the name cache's) must let it
+    /// go, as FreeBSD's `vget` fails on a vnode being doomed.
+    dying: core::sync::atomic::AtomicBool,
 }
 
 /// A counter standing in for time, for vnode recency.
@@ -110,7 +114,17 @@ impl Vnode {
             named: SpinLock::new(None),
             lockf: crate::lockf::Lockf::new(),
             used: AtomicU64::new(tick()),
+            dying: core::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Whether the reclaimer is taking it (see `dying`).
+    pub(crate) fn is_dying(&self) -> bool {
+        self.dying.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn set_dying(&self, dying: bool) {
+        self.dying.store(dying, Ordering::SeqCst);
     }
 
     /// Records a use, for the reclaimer's order.
@@ -214,7 +228,8 @@ impl Vnode {
     pub fn named(&self) -> Option<(Arc<Vnode>, Vec<u8>)> {
         let n = self.named.lock();
         let (p, name) = n.as_ref()?;
-        Some((p.upgrade()?, name.to_vec()))
+        let p = p.upgrade().filter(|p| !p.is_dying())?;
+        Some((p, name.to_vec()))
     }
 
     pub(crate) fn set_named(&self, parent: &Arc<Vnode>, name: &[u8]) {

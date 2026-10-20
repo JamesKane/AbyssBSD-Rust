@@ -141,10 +141,25 @@ fn boot(image: Handle, st: SystemTable) -> Result<core::convert::Infallible, Err
     };
     // The kernel from UFS2 if one has it, else from the ESP; the memory
     // disk (optional) from the same place.
+    let mut cmdline = cmdline;
     let (file, md) = match ufs::read_file(&st, UFS_KERNEL_PATH) {
         Some((file, origin)) => {
             let _ = writeln!(con, "loader: kernel from UFS2 on {origin}");
             let md = ufs::read_file(&st, UFS_MD_PATH).map(|(f, _)| f);
+            // The root is that file system's, unless the command line
+            // names one.
+            let named = cmdline
+                .split(u8::is_ascii_whitespace)
+                .any(|w| w.starts_with(b"vfs.root.mountfrom="));
+            if !named {
+                let root = ufs::root_mount(&st, origin);
+                let _ = writeln!(con, "loader: root {root}");
+                if !cmdline.is_empty() {
+                    cmdline.push(b' ');
+                }
+                cmdline.extend_from_slice(b"vfs.root.mountfrom=");
+                cmdline.extend_from_slice(root.as_bytes());
+            }
             (file, md)
         }
         None => (

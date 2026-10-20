@@ -83,8 +83,8 @@ pub fn lookup(dir: &Vnode, name: &[u8]) -> Option<Hit> {
     let b = bucket(id, name).lock();
     let e = b.iter().find(|e| e.dir == id && *e.name == *name)?;
     match &e.target {
-        // Gone (reclaimed meanwhile): a miss.
-        Some(v) => v.upgrade().map(Hit::Positive),
+        // Gone or going (reclaimed meanwhile): a miss.
+        Some(v) => v.upgrade().filter(|v| !v.is_dying()).map(Hit::Positive),
         None => Some(Hit::Negative),
     }
 }

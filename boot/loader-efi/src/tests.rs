@@ -30,3 +30,17 @@ ktest! {
         assert_eq!(b.len(), 9000);
     }
 }
+
+ktest! {
+    fn fstab_names_the_root() {
+        let fstab = "# Device\tMountpoint\tFStype\tOptions\tDump\tPass#\n\
+                     /dev/gpt/efiboot0\t/boot/efi\tmsdosfs\trw\t2\t2\n\
+                     /dev/gpt/rootfs0\t/\tufs\trw\t1\t1 # the root\n\
+                     /dev/nda0p3\t/\tufs\trw\t1\t1\n";
+        assert_eq!(
+            crate::ufs::fstab_root(fstab).as_deref(),
+            Some("ufs:/dev/gpt/rootfs0")
+        );
+        assert_eq!(crate::ufs::fstab_root("#/dev/x / ufs rw 1 1\n\n"), None);
+    }
+}

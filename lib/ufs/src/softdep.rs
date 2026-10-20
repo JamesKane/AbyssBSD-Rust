@@ -1116,13 +1116,19 @@ impl Deps {
             let keep = self.sb.metackhash & CK_INODE != 0;
             for within in (0..bytes.len()).step_by(inode::SIZE) {
                 let b = &copy.as_deref().unwrap_or(bytes)[within..within + inode::SIZE];
+                // A short symlink keeps its target where pointers would be.
+                if !raw::has_blocks(b, self.sb.maxsymlinklen) {
+                    continue;
+                }
                 let hit: Vec<usize> = (NDIRECT..NDIRECT + NIADDR)
                     .filter(|&i| {
                         let v = raw::pointer(b, i);
-                        v != 0 && self.empty.contains(&(v * fsize))
+                        v != 0
+                            && v.checked_mul(fsize)
+                                .is_some_and(|a| self.empty.contains(&a))
                     })
                     .collect();
-                if hit.is_empty() || !raw::has_blocks(b, self.sb.maxsymlinklen) {
+                if hit.is_empty() {
                     continue;
                 }
                 let c = copy.get_or_insert_with(|| bytes.to_vec());
@@ -1186,7 +1192,9 @@ impl Deps {
                 .enumerate()
                 .filter(|(_, c)| {
                     let v = u64::from_le_bytes(**c);
-                    v != 0 && self.empty.contains(&(v * fsize))
+                    v != 0
+                        && v.checked_mul(fsize)
+                            .is_some_and(|a| self.empty.contains(&a))
                 })
                 .map(|(i, _)| i)
                 .collect();
@@ -1334,13 +1342,18 @@ impl Deps {
         // Roots pointing at indirect blocks empty on the disk stay back.
         let fsize = u64::from(self.sb.fsize);
         let mut emptied = [false; NIADDR];
-        for (level, e) in emptied.iter_mut().enumerate() {
+        // A short symlink keeps its target where pointers would be.
+        let pointers = raw::has_blocks(&bytes[within..within + inode::SIZE], self.sb.maxsymlinklen);
+        for (level, e) in emptied.iter_mut().enumerate().filter(|_| pointers) {
             let index = NDIRECT + level;
             let v = match rolled[index] {
                 Some((old, _)) => old,
                 None => raw::pointer(&bytes[within..within + inode::SIZE], index),
             };
-            if v != 0 && self.empty.contains(&(v * fsize)) {
+            if v != 0
+                && v.checked_mul(fsize)
+                    .is_some_and(|a| self.empty.contains(&a))
+            {
                 *e = true;
                 went[index].clear();
             }

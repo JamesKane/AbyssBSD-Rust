@@ -72,7 +72,7 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
                     continue;
                 }
                 println!("== boot tests ({name}, {vmm:?})");
-                match shell(arch, vmm, release, false)? {
+                match shell(arch, vmm, release)? {
                     Ok(()) => println!("{name}: PASS"),
                     Err(why) => {
                         println!("{name}: FAIL: {why}");
@@ -81,18 +81,6 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
                         } else {
                             "bhyve-shell"
                         });
-                    }
-                }
-            }
-            // Booting from a UFS2 root needs makefs to make it.
-            if cfg!(target_os = "freebsd") && Vmm::Qemu.available(arch) {
-                let name = format!("{arch}-ufs-shell");
-                println!("== boot tests ({name})");
-                match shell(arch, Vmm::Qemu, release, true)? {
-                    Ok(()) => println!("{name}: PASS"),
-                    Err(why) => {
-                        println!("{name}: FAIL: {why}");
-                        failed.push("ufs-shell");
                     }
                 }
             }
@@ -282,25 +270,22 @@ const WARM_RESET_MARKER: &str = "logring: first boot marker";
 ///
 /// With `ufs_root`, the loader must find the kernel and the memory disk on
 /// a UFS2 partition (the ESP holds neither).
-fn shell(
-    arch: Arch,
-    vmm: Vmm,
-    release: bool,
-    ufs_root: bool,
-) -> Result<std::result::Result<(), String>> {
+fn shell(arch: Arch, vmm: Vmm, release: bool) -> Result<std::result::Result<(), String>> {
     let opts = build::Options {
         release,
         ktest: false,
     };
+    // On FreeBSD (which has makefs) the root is UFS2 on an NVMe disk, all
+    // of base.txz; elsewhere the memory disk's /rescue.
+    let ufs_root = cfg!(target_os = "freebsd");
     let disk = if ufs_root {
         image::build_ufs_root(arch, opts, "abyss.verifier=1")?
     } else {
         image::build(arch, opts, "abyss.verifier=1")?
     };
-    let suffix = match (vmm, ufs_root) {
-        (_, true) => "-ufs",
-        (Vmm::Bhyve, false) => "-bhyve",
-        (Vmm::Qemu, false) => "",
+    let suffix = match vmm {
+        Vmm::Bhyve => "-bhyve",
+        Vmm::Qemu => "",
     };
     let disk = {
         let copy = disk.with_file_name(format!("disk-shell{suffix}.img"));
@@ -310,28 +295,70 @@ fn shell(
     let log = disk.with_file_name(format!("shell{suffix}.log"));
     let vm = Vm {
         smp: 4,
-        ..Vm::new(vmm, arch, disk)
+        nvme: ufs_root,
+        ..Vm::new(vmm, arch, disk.clone())
     };
     let mut session = crate::expect::Session::start(vm, &log)?;
     let result = (|| -> Result<()> {
         session.expect("# ", Duration::from_secs(240))?;
         session.script(crate::expect::SHELL, Duration::from_secs(30))?;
+        if ufs_root {
+            session.script(crate::expect::UFS_ROOT, Duration::from_secs(600))?;
+        }
         session.send("exit\n")
     })();
-    let exited = session.finish(Duration::from_secs(60))?;
-    let from_ufs = std::fs::read_to_string(&log)
-        .unwrap_or_default()
-        .contains("loader: kernel from UFS2");
+    let exited = session.finish(Duration::from_secs(120))?;
+    let console = std::fs::read_to_string(&log).unwrap_or_default();
     let verdict = match result {
         Err(e) => Err(e.to_string()),
         Ok(()) if !exited => Err("the machine did not power off after `exit`".into()),
-        Ok(()) if ufs_root && !from_ufs => Err("the kernel did not come from UFS2".into()),
+        Ok(()) if ufs_root && !console.contains("loader: kernel from UFS2") => {
+            Err("the kernel did not come from UFS2".into())
+        }
+        Ok(()) if ufs_root && !console.contains("Trying to mount root from ufs:") => {
+            Err("the root was not UFS2".into())
+        }
+        Ok(()) if ufs_root => root_left_clean(&disk),
         Ok(()) => Ok(()),
     };
     if verdict.is_err() {
         println!("{arch}-shell{suffix}: serial log at {}", log.display());
     }
     Ok(verdict)
+}
+
+/// After a shell session on a UFS2 root and a power-off: the root was
+/// unmounted cleanly (its superblock says so, which `dumpfs` shows) and
+/// `fsck_ffs -f -n` finds nothing.
+fn root_left_clean(disk: &std::path::Path) -> std::result::Result<(), String> {
+    let part = image::ufs_partition(disk).map_err(|e| e.to_string())?;
+    let root = disk.with_file_name("shell-root.img");
+    let copy = || -> Result<()> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut f = std::fs::File::open(disk)?;
+        f.seek(SeekFrom::Start(part.start))?;
+        let mut out = std::fs::File::create(&root)?;
+        std::io::copy(&mut f.take(part.end - part.start), &mut out)?;
+        Ok(())
+    };
+    copy().map_err(|e| e.to_string())?;
+    let dumpfs = std::process::Command::new("dumpfs")
+        .arg("-s")
+        .arg(&root)
+        .output()
+        .map_err(|e| e.to_string())?;
+    let sb = String::from_utf8_lossy(&dumpfs.stdout);
+    let clean = sb
+        .split_ascii_whitespace()
+        .skip_while(|w| *w != "clean")
+        .nth(1)
+        .is_some_and(|v| v == "1");
+    let fsck = crate::fs::check_ufs_if_any(&root);
+    let _ = std::fs::remove_file(&root);
+    if !clean {
+        return Err("the root was not left clean (dumpfs: clean 0)".into());
+    }
+    fsck
 }
 
 /// Lines the kernel's deliberate fatal fault must produce: a decoded page
@@ -476,8 +503,10 @@ fn boot(case: &BootCase, release: bool, verbose: bool) -> Result<std::result::Re
         devices,
         ..Vm::new(case.vmm, case.arch, disk)
     };
-    // Emulated aarch64 firmware is slow to start; leave generous headroom.
-    let run = vm.run_captured(Duration::from_secs(240), &log, verbose)?;
+    // Emulated aarch64 is slow to start and slow through the file-system
+    // tests (soft updates and msdosfs alone take minutes under TCG); leave
+    // generous headroom.
+    let run = vm.run_captured(Duration::from_secs(600), &log, verbose)?;
     let text = std::fs::read_to_string(&log).unwrap_or_default();
     let verdict = match run.outcome {
         Outcome::Passed => check_log(&text, case)

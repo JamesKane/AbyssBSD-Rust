@@ -1936,7 +1936,9 @@ ktest! {
         // Messages for an LPI or vector still pending merge into one (the
         // next request can complete first), so not one per read; but the
         // reads slept on interrupts, and a lost one would have hung them.
-        assert!((1..=READS).contains(&taken), "{taken} interrupts");
+        // The entropy harvester reads the device too, now and then, and
+        // its interrupts may land in between.
+        assert!((1..=READS + 2).contains(&taken), "{taken} interrupts");
         // Every platform here composes messages (amd64's local APIC, the
         // arm64 ITS) unless the boot case turned them off.
         let msix = crate::boot::value("hw.pci.enable_msix") != Some("0");

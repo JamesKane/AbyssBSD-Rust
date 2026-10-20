@@ -47,7 +47,22 @@ pub(crate) fn sync() -> Result<()> {
             ])
             .arg(src)
             .arg(format!("{host}:{REMOTE_DIR}/")),
-    )
+    )?;
+    // The FreeBSD sources third-party programs build from, beside the
+    // mirror as beside this tree (the server has no FreeBSD tree).
+    let freebsd = util::root().join("../freebsd-src");
+    if !freebsd.exists() {
+        return Ok(());
+    }
+    let mut c = Command::new("rsync");
+    c.args(["-az", "--delete", "--relative"]);
+    for part in crate::base::FREEBSD_SOURCES {
+        let mut p = freebsd.clone().into_os_string();
+        p.push("/./");
+        p.push(part);
+        c.arg(p);
+    }
+    util::run(c.arg(format!("{host}:{REMOTE_DIR}/../freebsd-src/")))
 }
 
 pub(crate) fn run(args: &[String]) -> Result<()> {

@@ -425,16 +425,33 @@ pub(crate) fn remove(s: &Sleepable, path: &[u8]) {
 fn disk_event(s: &Sleepable, e: storage::disk::Event<'_>) {
     match e {
         storage::disk::Event::Published(d) => {
-            let _ = add(
-                d.name().as_bytes(),
-                0o640,
-                0,
-                GID_OPERATOR,
-                Arc::new(DiskDev(Arc::clone(d))),
-            );
+            for name in names(d) {
+                let _ = add(
+                    name.as_bytes(),
+                    0o640,
+                    0,
+                    GID_OPERATOR,
+                    Arc::new(DiskDev(Arc::clone(d))),
+                );
+            }
         }
-        storage::disk::Event::Withdrawn(d) => remove(s, d.name().as_bytes()),
+        storage::disk::Event::Withdrawn(d) => {
+            for name in names(d) {
+                remove(s, name.as_bytes());
+            }
+        }
     }
+}
+
+/// A disk's nodes: its name, and a partition's `gpt/` and `gptid/`
+/// aliases (FreeBSD's `glabel`, which also hides the aliases while the
+/// partition is open by its own name; these stay).
+fn names(d: &storage::Disk) -> Vec<alloc::string::String> {
+    let mut out = alloc::vec![d.name().into()];
+    if let Some((_, e)) = d.partition() {
+        out.extend(e.aliases());
+    }
+    out
 }
 
 /// Registers the kernel's own devices and the disks published so far, and
@@ -468,8 +485,15 @@ pub(crate) fn init() {
     add(b"zero", 0o666, 0, 0, Arc::new(Zero));
     storage::disk::set_listener(disk_event);
     for d in storage::disk::all() {
-        let name = d.name().as_bytes().to_vec();
-        let _ = add(&name, 0o640, 0, GID_OPERATOR, Arc::new(DiskDev(d)));
+        for name in names(&d) {
+            let _ = add(
+                name.as_bytes(),
+                0o640,
+                0,
+                GID_OPERATOR,
+                Arc::new(DiskDev(Arc::clone(&d))),
+            );
+        }
     }
 }
 

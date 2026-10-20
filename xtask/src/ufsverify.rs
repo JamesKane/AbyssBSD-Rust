@@ -19,7 +19,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileExt, MetadataExt};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
 
@@ -64,7 +64,7 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
             "ufs-verify needs FreeBSD's tools: run it on the build server (--remote)".into(),
         );
     }
-    let tree = full_tree()?;
+    let tree = base::full(Arch::X86_64)?;
     let work = base::dir(Arch::X86_64).join("ufs-verify");
     let _ = fs::remove_dir_all(&work);
     fs::create_dir_all(&work)?;
@@ -91,30 +91,6 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
         let _ = fs::remove_dir_all(&work);
     }
     Ok(())
-}
-
-/// The whole of `base.txz`, unpacked once beside it.
-fn full_tree() -> Result<PathBuf> {
-    // Fetches and checks base.txz if need be.
-    base::root(Arch::X86_64)?;
-    let dir = base::dir(Arch::X86_64);
-    let full = dir.join("full");
-    if full.join("bin/sh").exists() {
-        return Ok(full);
-    }
-    let tmp = dir.join("full.tmp");
-    let _ = fs::remove_dir_all(&tmp);
-    fs::create_dir_all(&tmp)?;
-    eprintln!("xtask: ufs-verify: unpacking all of base.txz");
-    util::run(
-        Command::new("tar")
-            .arg("-xf")
-            .arg(dir.join("base.txz"))
-            .arg("-C")
-            .arg(&tmp),
-    )?;
-    fs::rename(&tmp, &full)?;
-    Ok(full)
 }
 
 /// A `newfs -U` file system of `size` bytes in `img`, holding a copy of

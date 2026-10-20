@@ -99,6 +99,13 @@ pub trait FileSystem: Send + Sync + Any {
         Ok(())
     }
 
+    /// Goes read-only (written out and marked clean) or read-write, for
+    /// `MNT_UPDATE`; `force` lets an unclean file system go read-write.
+    /// By default the change is refused.
+    fn set_read_only(&self, _s: &Sleepable, _read_only: bool, _force: bool) -> Result<(), Errno> {
+        Err(Errno::EOPNOTSUPP)
+    }
+
     fn as_any(&self) -> &dyn Any;
 }
 
@@ -129,7 +136,7 @@ pub fn std_pathconf(name: u32) -> Result<i64, Errno> {
 pub struct MountInfo {
     /// The type's name (`f_fstypename`).
     pub type_name: &'static str,
-    /// `MNT_*` flags.
+    /// `MNT_*` flags when mounted ([`Mount::flags`] has them now).
     pub flags: u64,
     /// What it was mounted from (`f_mntfromname`).
     pub from: Vec<u8>,
@@ -137,7 +144,9 @@ pub struct MountInfo {
     pub io_size: u32,
 }
 
-static VGET: LockClass = LockClass::new("vget", 360);
+/// Taken under vnode locks (a lookup's directory), and held while the
+/// file system loads an inode, which takes the file system's own locks.
+static VGET: LockClass = LockClass::new("vget", 342);
 static RENAME: LockClass = LockClass::new("rename", 320);
 
 /// A mounted file system.
@@ -147,6 +156,8 @@ pub struct Mount {
     /// The type's number (`f_type`).
     pub type_num: u32,
     info: MountInfo,
+    /// `MNT_*` flags now.
+    flags: AtomicU64,
     /// Where it is mounted (`f_mntonname`).
     on: SpinLock<Vec<u8>>,
     fs: Box<dyn FileSystem>,
@@ -203,6 +214,7 @@ impl Mount {
         Arc::new(Self {
             id: new_fsid(type_num),
             type_num,
+            flags: AtomicU64::new(info.flags),
             info,
             on: SpinLock::new(Vec::new()),
             fs,
@@ -224,8 +236,36 @@ impl Mount {
     }
 
     #[must_use]
-    pub const fn read_only(&self) -> bool {
-        self.info.flags & abi::mount::MNT_RDONLY != 0
+    pub fn read_only(&self) -> bool {
+        self.flags() & abi::mount::MNT_RDONLY != 0
+    }
+
+    /// Its `MNT_*` flags (`f_flags`).
+    #[must_use]
+    pub fn flags(&self) -> u64 {
+        self.flags.load(Ordering::Acquire)
+    }
+
+    /// Changes the flags in `mask` to those in `flags` (`MNT_UPDATE`); a
+    /// change of `MNT_RDONLY` goes through the file system first. A mount
+    /// going read-only stops taking writes before it is written out.
+    pub fn update(&self, s: &Sleepable, mask: u64, flags: u64, force: bool) -> Result<(), Errno> {
+        use abi::mount::MNT_RDONLY;
+        let old = self.flags();
+        let new = (old & !mask) | (flags & mask);
+        if (old ^ new) & MNT_RDONLY != 0 {
+            if new & MNT_RDONLY != 0 {
+                self.flags.fetch_or(MNT_RDONLY, Ordering::AcqRel);
+                if let Err(e) = self.fs.set_read_only(s, true, force) {
+                    self.flags.fetch_and(!MNT_RDONLY, Ordering::AcqRel);
+                    return Err(e);
+                }
+            } else {
+                self.fs.set_read_only(s, false, force)?;
+            }
+        }
+        self.flags.store(new, Ordering::Release);
+        Ok(())
     }
 
     #[must_use]
@@ -314,9 +354,24 @@ impl Mount {
         idle.truncate(max);
         let mut n = 0;
         for v in idle {
-            // Two references now: the table's and ours. Anyone else who
-            // found it since keeps it.
-            if Arc::strong_count(&v) == 2 && v.uses() == 0 {
+            // Claimed under the table lock, so the table hands it out no
+            // more: with two references (the table's and ours) and no use,
+            // nobody else has it. A name-cache hit meanwhile upgrades its
+            // weak reference: marked dying first, the vnode is a miss for
+            // it, or else its reference is counted here.
+            let claimed = {
+                let mut t = self.table.lock();
+                v.set_dying(true);
+                let ours = t.get(&v.ino()).is_some_and(|x| Arc::ptr_eq(x, &v));
+                if ours && Arc::strong_count(&v) == 2 && v.uses() == 0 {
+                    t.remove(&v.ino());
+                    true
+                } else {
+                    v.set_dying(false);
+                    false
+                }
+            };
+            if claimed {
                 v.reclaim(s);
                 n += 1;
             }

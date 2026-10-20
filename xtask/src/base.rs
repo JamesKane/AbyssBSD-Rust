@@ -383,6 +383,12 @@ pub(crate) fn cc_static(arch: Arch, source: &Path, out: &Path) -> Result<()> {
 /// [`cc_static`] for third-party sources (FreeBSD's test programs): their
 /// warnings are not ours to fix.
 pub(crate) fn cc_static_foreign(arch: Arch, source: &Path, out: &Path) -> Result<()> {
+    cc_static_program(arch, &[source], &[], out)
+}
+
+/// A static program from third-party C `sources`, with extra compiler
+/// `args` (include directories, libraries last).
+fn cc_static_program(arch: Arch, sources: &[&Path], args: &[String], out: &Path) -> Result<()> {
     let root = sysroot(arch)?;
     let mut cc = if cfg!(target_os = "freebsd") {
         Command::new("cc")
@@ -396,8 +402,185 @@ pub(crate) fn cc_static_foreign(arch: Arch, source: &Path, out: &Path) -> Result
             .arg(format!("--sysroot={}", root.display()))
             .args(["-static", "-s", "-O2", "-w", "-o"])
             .arg(out)
-            .arg(source),
+            .args(sources)
+            .args(args),
     )
+}
+
+/// The parts of the FreeBSD tree beside this one that third-party
+/// programs built here come from (they are never kept here); the remote
+/// mirror copies them beside its tree.
+pub(crate) const FREEBSD_SOURCES: &[&str] = &[
+    "tools/regression/fsx",
+    "usr.bin/find",
+    "contrib/mtree",
+    "contrib/mknod",
+    "lib/libnetbsd",
+];
+
+/// FreeBSD's `find` and `mtree`, built static from the FreeBSD tree
+/// beside this one, for the UFS2 root's tests until dynamic linking (P6)
+/// lets base's own run: (name, program). FreeBSD only (`mtree` links
+/// `libmd` and `libutil` from the full base).
+pub(crate) fn static_tools(arch: Arch) -> Result<Vec<(&'static str, PathBuf)>> {
+    let src = util::root().join("../freebsd-src");
+    let out = util::root()
+        .join("build")
+        .join(arch.to_string())
+        .join("tools");
+    fs::create_dir_all(&out)?;
+    let built_by = std::env::current_exe()
+        .and_then(fs::metadata)
+        .and_then(|m| m.modified())
+        .ok();
+    let fresh = |bin: &Path| {
+        fs::metadata(bin)
+            .and_then(|m| m.modified())
+            .is_ok_and(|b| built_by.is_some_and(|x| x <= b))
+    };
+
+    let find = out.join("find");
+    if !fresh(&find) {
+        let dir = src.join("usr.bin/find");
+        let getdate = out.join("getdate.c");
+        util::run(
+            Command::new("yacc")
+                .arg("-o")
+                .arg(&getdate)
+                .arg(dir.join("getdate.y")),
+        )?;
+        let mut sources: Vec<PathBuf> = [
+            "find.c",
+            "function.c",
+            "ls.c",
+            "main.c",
+            "misc.c",
+            "operator.c",
+            "option.c",
+            "printf.c",
+        ]
+        .iter()
+        .map(|f| dir.join(f))
+        .collect();
+        sources.push(getdate);
+        let refs: Vec<&Path> = sources.iter().map(PathBuf::as_path).collect();
+        cc_static_program(arch, &refs, &[format!("-I{}", dir.display())], &find)?;
+    }
+
+    let mtree = out.join("mtree");
+    if !fresh(&mtree) {
+        let m = src.join("contrib/mtree");
+        let netbsd = src.join("lib/libnetbsd");
+        let mut sources: Vec<PathBuf> = [
+            "compare.c",
+            "crc.c",
+            "create.c",
+            "excludes.c",
+            "getid.c",
+            "misc.c",
+            "mtree.c",
+            "only.c",
+            "spec.c",
+            "specspec.c",
+            "verify.c",
+        ]
+        .iter()
+        .map(|f| m.join(f))
+        .collect();
+        sources.push(src.join("contrib/mknod/pack_dev.c"));
+        for f in ["efun.c", "sockaddr_snprintf.c", "strsuftoll.c", "util.c"] {
+            sources.push(netbsd.join(f));
+        }
+        let refs: Vec<&Path> = sources.iter().map(PathBuf::as_path).collect();
+        let args = [
+            format!("-I{}", src.join("contrib/mknod").display()),
+            format!("-I{}", netbsd.display()),
+            "-lmd".into(),
+            "-lutil".into(),
+        ];
+        cc_static_program(arch, &refs, &args, &mtree)?;
+    }
+    Ok(vec![("find", find), ("mtree", mtree)])
+}
+
+/// The whole of `arch`'s `base.txz`, unpacked once beside it. Unpacked
+/// unprivileged, it has lost owners and file flags: [`spec`] has them.
+pub(crate) fn full(arch: Arch) -> Result<PathBuf> {
+    // Fetches and checks base.txz if need be.
+    root(arch)?;
+    let dir = dir(arch);
+    let full = dir.join("full");
+    if full.join("bin/sh").exists() {
+        return Ok(full);
+    }
+    let tmp = dir.join("full.tmp");
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp)?;
+    eprintln!("xtask: unpacking all of {arch} base.txz");
+    util::run(
+        Command::new("tar")
+            .arg("-xf")
+            .arg(dir.join("base.txz"))
+            .arg("-C")
+            .arg(&tmp),
+    )?;
+    fs::rename(&tmp, &full)?;
+    Ok(full)
+}
+
+/// An mtree specification of `arch`'s base contents: every entry's type,
+/// size, link target, and SHA-256, as FreeBSD's `mtree -c` finds them in
+/// [`full`] (`base.txz`'s own records give hard links no size).
+pub(crate) fn data_spec(arch: Arch) -> Result<PathBuf> {
+    let tree = full(arch)?;
+    let spec = dir(arch).join("base-data.mtree");
+    if spec.exists() {
+        return Ok(spec);
+    }
+    let out = Command::new("mtree")
+        .args(["-c", "-k", "type,size,link,sha256digest", "-p"])
+        .arg(&tree)
+        .output()?;
+    if !out.status.success() {
+        return Err(format!("mtree -c: {}", String::from_utf8_lossy(&out.stderr)).into());
+    }
+    fs::write(&spec, out.stdout)?;
+    Ok(spec)
+}
+
+/// An mtree specification of `arch`'s `base.txz` (every entry's type,
+/// owner, mode, file flags, and link target), for `makefs -F` to give a
+/// [`full`] unpacking what it lost.
+pub(crate) fn spec(arch: Arch) -> Result<PathBuf> {
+    root(arch)?;
+    let dir = dir(arch);
+    let spec = dir.join("base.mtree");
+    if spec.exists() {
+        return Ok(spec);
+    }
+    let raw = dir.join("base.mtree.tmp");
+    util::run(
+        Command::new("tar")
+            .arg("-cf")
+            .arg(&raw)
+            .args([
+                "--format=mtree",
+                "--options=!all,type,uid,gid,mode,flags,link",
+            ])
+            .arg(format!("@{}", dir.join("base.txz").display())),
+    )?;
+    // bsdtar names the top `/.`, which makefs does not take.
+    let text = fs::read_to_string(&raw)?;
+    let fixed: String = text
+        .lines()
+        .map(|l| match l.strip_prefix("/. ") {
+            Some(rest) => format!(". {rest}\n"),
+            None => format!("{l}\n"),
+        })
+        .collect();
+    fs::write(&spec, fixed)?;
+    fs::remove_file(&raw)?;
+    Ok(spec)
 }
 
 /// The memory-disk image for `arch`, if `fetch-base` has run: `/rescue`,

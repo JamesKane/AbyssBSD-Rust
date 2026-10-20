@@ -98,6 +98,80 @@ pub(crate) const SHELL: &[Step] = &[
     step("jobs; echo done\n", "\ndone\r\n", "no jobs left"),
 ];
 
+/// What follows [`SHELL`] on a UFS2 root holding all of `base.txz`
+/// (ROADMAP P5.8): the root is read-only, as FreeBSD mounts it first, and
+/// `mount -u` makes it read-write with soft updates; `mtree` finds every
+/// entry of the base with its owner, mode, flags, size, and digest; and
+/// `tar` and `cp -R` copy a tree that `mtree` then finds the same. `find`
+/// and `mtree` are static builds (`/usr/tests/static`) until base's own,
+/// dynamically linked, can run (P6).
+pub(crate) const UFS_ROOT: &[Step] = &[
+    step(
+        "PATH=/rescue:/usr/tests/static\n",
+        "\n",
+        "add the static tools",
+    ),
+    step(
+        "mount\n",
+        "/dev/gpt/rootfs0 on / (ufs, local, read-only)",
+        "the root is read-only",
+    ),
+    step(
+        "mount -u -o rw / && echo rw-$?\n",
+        "\nrw-0\r\n",
+        "mount -u makes it read-write",
+    ),
+    step(
+        "mount\n",
+        "/dev/gpt/rootfs0 on / (ufs, local, soft-updates)",
+        "with soft updates",
+    ),
+    step(
+        "ls -lo /usr/bin/su\n",
+        "-r-sr-xr-x  1 root wheel schg",
+        "ls shows owners, modes, and flags",
+    ),
+    step(
+        "find /etc/defaults -name rc.conf\n",
+        "\n/etc/defaults/rc.conf\r\n",
+        "find",
+    ),
+    step(
+        "mtree -e -f /usr/tests/static/base.mtree -p / && echo spec-$?\n",
+        "\nspec-0\r\n",
+        "mtree: owners, modes, flags, and links",
+    ),
+    step(
+        "mtree -e -f /usr/tests/static/base-data.mtree -p / && echo data-$?\n",
+        "\ndata-0\r\n",
+        "mtree: sizes and digests",
+    ),
+    step(
+        "mtree -c -k type,size,mode,link,sha256digest -p /usr/share/misc \
+         > /var/tmp/misc.mtree && echo made-$?\n",
+        "\nmade-0\r\n",
+        "mtree -c",
+    ),
+    step(
+        "tar -cf /var/tmp/misc.tar -C /usr/share misc && mkdir /var/tmp/x && \
+         tar -xpf /var/tmp/misc.tar -C /var/tmp/x && \
+         mtree -f /var/tmp/misc.mtree -p /var/tmp/x/misc && echo tar-$?\n",
+        "\ntar-0\r\n",
+        "tar copies a tree",
+    ),
+    step(
+        "cp -Rp /usr/share/misc /var/tmp/cp && \
+         mtree -f /var/tmp/misc.mtree -p /var/tmp/cp && echo cp-$?\n",
+        "\ncp-0\r\n",
+        "cp -R copies a tree",
+    ),
+    step(
+        "rm -r /var/tmp/x /var/tmp/misc.tar && echo rm-$?\n",
+        "\nrm-0\r\n",
+        "rm -r",
+    ),
+];
+
 /// A VM whose serial console is a pipe pair.
 pub(crate) struct Session {
     child: Child,

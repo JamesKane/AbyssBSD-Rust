@@ -2,9 +2,13 @@
 //! Files: the namespace mounted at boot, open files, descriptor tables,
 //! devfs, and pipes.
 //!
-//! The root file system is the memory disk, mounted as tarfs (read-only);
-//! devfs goes on its `/dev`. Without a memory disk the root is an empty
-//! directory, so devfs and the console still work.
+//! The root file system is what `vfs.root.mountfrom` names (the loader
+//! sets it), mounted read-only as FreeBSD mounts root first: UFS2 on a
+//! disk, which may be named by its GPT label or GUID (`/dev/gpt/rootfs0`,
+//! `/dev/gptid/…`). Without one, the memory disk is the root, mounted as
+//! tarfs (read-only), and without that an empty directory, so devfs and
+//! the console still work. devfs goes on `/dev`, tmpfs on `/tmp`, and the
+//! EFI System Partition on `/boot/efi`.
 //!
 //! Behavior reference: sys/kern/vfs_mount.c (`vfs_getnewfsid`),
 //! sys/kern/vfs_mountroot.c.
@@ -27,6 +31,7 @@ use abi::fcntl::{AT_FDCWD, FREAD, FWRITE};
 use abi::mount::{MNT_LOCAL, MNT_RDONLY, MNT_ROOTFS};
 use abi::time::Timespec;
 use sched::Sleepable;
+use sched::lock::{LockClass, Mutex};
 use sync::{Once, SpinLock};
 use vfs::namei::{Found, Lookup, Namespace, Parent};
 use vfs::tree::Builder;
@@ -36,6 +41,10 @@ use self::fdtable::{FdFlags, FdTable};
 use self::file::{File, FileKind, VnodeFile};
 
 static NAMESPACE: Once<Namespace> = Once::new();
+
+/// Held while [`shutdown`] unmounts, before any file system lock.
+static SHUTDOWN_LOCK: LockClass = LockClass::new("fs shutdown", 50);
+static SHUTDOWN: Mutex<bool> = Mutex::new(&SHUTDOWN_LOCK, false);
 
 /// The time now, for file times.
 pub(crate) fn now() -> Timespec {
@@ -70,12 +79,53 @@ fn empty_root() -> Arc<Mount> {
     Mount::new(root_info(b"none"), Box::new(b.finish()))
 }
 
-/// Mounts the root file system and devfs. Runs once, after the memory
-/// disk is found and before any process starts.
-pub(crate) fn init() {
-    vfs::set_clock(now);
-    // SAFETY: boot runs in the first kernel thread, which may sleep.
-    let s = unsafe { Sleepable::assume() };
+/// How long the root's disk may take to appear (FreeBSD's
+/// `vfs.mountroot.timeout`).
+const ROOT_WAIT_NS: u64 = 3_000_000_000;
+
+/// The root file system `spec` (`ufs:/dev/gpt/rootfs0`) names, read-only,
+/// and its disk; the disk may take [`ROOT_WAIT_NS`] to appear (FreeBSD's
+/// `parse_mount`).
+fn mount_root_from(s: &Sleepable, spec: &str) -> Result<(Arc<Mount>, Arc<storage::Disk>), Errno> {
+    let (fstype, dev) = spec.split_once(':').ok_or(Errno::EINVAL)?;
+    kprintln!("Trying to mount root from {fstype}:{dev} []...");
+    if fstype != "ufs" {
+        return Err(Errno::ENOENT);
+    }
+    let name = dev.strip_prefix("/dev/").unwrap_or(dev);
+    let start = crate::time::now_ns();
+    let disk = loop {
+        if let Some(d) = storage::find(name) {
+            break d;
+        }
+        if crate::time::now_ns().saturating_sub(start) >= ROOT_WAIT_NS {
+            return Err(Errno::ENXIO);
+        }
+        crate::time::sleep_ns(s, 100_000_000);
+    };
+    let fs = ufs::UfsFs::mount(s, Arc::clone(&disk), true, false)?;
+    let io_size = fs.block_size();
+    let m = Mount::new(
+        MountInfo {
+            type_name: "ufs",
+            flags: MNT_RDONLY | MNT_LOCAL | MNT_ROOTFS,
+            from: dev.as_bytes().to_vec(),
+            io_size,
+        },
+        Box::new(fs),
+    );
+    Ok((m, disk))
+}
+
+/// The root file system (see the module comment), and the disk it is on
+/// if one.
+fn mount_root(s: &Sleepable) -> (Arc<Mount>, Option<Arc<storage::Disk>>) {
+    if let Some(spec) = crate::boot::value("vfs.root.mountfrom") {
+        match mount_root_from(s, spec) {
+            Ok((m, disk)) => return (m, Some(disk)),
+            Err(e) => kprintln!("Mounting from {spec} failed with error {}.", e.get()),
+        }
+    }
     let root = match crate::md::archive() {
         Some(a) => match vfs::tarfs::mount(a) {
             Ok(t) => Mount::new(root_info(b"/dev/md0"), Box::new(t)),
@@ -86,6 +136,16 @@ pub(crate) fn init() {
         },
         None => empty_root(),
     };
+    (root, None)
+}
+
+/// Mounts the root file system and devfs. Runs once, after the memory
+/// disk is found and before any process starts.
+pub(crate) fn init() {
+    vfs::set_clock(now);
+    // SAFETY: boot runs in the first kernel thread, which may sleep.
+    let s = unsafe { Sleepable::assume() };
+    let (root, root_disk) = mount_root(&s);
     let ns = match Namespace::new(&s, root) {
         Ok(ns) => ns,
         Err(e) => {
@@ -142,13 +202,24 @@ pub(crate) fn init() {
         }
     }
     // The EFI System Partition on /boot/efi, read-write, as FreeBSD's
-    // installer mounts it: the first disk's (the boot disk's in the test
-    // machines; the loader will name it on hardware, P6).
+    // installer mounts it: the root disk's, or else the first disk's (the
+    // boot disk's in the test machines).
     if let Ok(dir) = ns.lookup(&s, &at, b"/boot/efi") {
-        let esp = storage::disk::all().into_iter().find(|d| {
+        let root_parent = root_disk
+            .as_ref()
+            .and_then(|d| d.partition().map(|(p, _)| Arc::clone(p)));
+        let esps: alloc::vec::Vec<_> = storage::disk::all()
+            .into_iter()
+            .filter(|d| {
+                d.partition()
+                    .is_some_and(|(_, p)| p.type_guid == gpt::types::EFI_SYSTEM)
+            })
+            .collect();
+        let on_root = esps.iter().find(|d| {
             d.partition()
-                .is_some_and(|(_, p)| p.type_guid == gpt::types::EFI_SYSTEM)
+                .is_some_and(|(p, _)| root_parent.as_ref().is_some_and(|r| Arc::ptr_eq(p, r)))
         });
+        let esp = on_root.or(esps.first()).cloned();
         if let Some(esp) = esp {
             let name = alloc::format!("/dev/{}", esp.name());
             match msdosfs::MsdosFs::mount(&s, esp, false, msdosfs::Opts::default()) {
@@ -307,6 +378,26 @@ pub(crate) fn namespace() -> &'static Namespace {
     NAMESPACE
         .get()
         .unwrap_or_else(|| unreachable!("fs::init runs before processes start"))
+}
+
+/// Unmounts every file system, the root last, so each is left clean
+/// (FreeBSD's `vfs_unmountall` at shutdown). Nothing may use files after.
+pub(crate) fn shutdown(s: &Sleepable) {
+    // Once: the power button's thread and the boot thread may both get
+    // here, and the second waits for the first.
+    let mut done = SHUTDOWN.lock(s);
+    if core::mem::replace(&mut *done, true) {
+        return;
+    }
+    let Some(ns) = NAMESPACE.get() else {
+        return;
+    };
+    for (on, e) in ns.unmount_all(s) {
+        kprintln!(
+            "fs: unmounting {} failed ({e:?})",
+            core::str::from_utf8(&on).unwrap_or("?")
+        );
+    }
 }
 
 /// The root directory.

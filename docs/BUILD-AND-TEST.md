@@ -99,9 +99,16 @@ programs check FreeBSD's behavior, not ours, so each also passes on FreeBSD 15.1
 script against its `/rescue/sh`. The boot tier runs the same script against AbyssBSD: each
 architecture's `<arch>-shell` case (and `x86_64-bhyve-shell` on the server) boots a normal kernel
 to `/rescue/sh` on the serial console, runs it, and checks that `exit` powers the machine off.
-On the server, `<arch>-ufs-shell` does the same from a disk whose ESP holds only the loader: the
-kernel and the memory disk are at `/boot/kernel/kernel` and `/boot/abyss/md` on a `freebsd-ufs`
-partition that `makefs` made, and the loader must say it loaded them from UFS2.
+On the server (which has `makefs`) those cases boot from an NVMe disk whose ESP holds only the
+loader, with the root on a `freebsd-ufs` partition (soft updates): all of `base.txz`, with owners
+and file flags from its own records, the kernel at `/boot/kernel/kernel`, an `/etc/fstab` naming
+the partitions by GPT label, the memory disk's `/usr/tests`, and in `/usr/tests/static` static
+`find` and `mtree` (built from `../freebsd-src`, which `--remote` mirrors in part) with the
+base's specifications. The loader must load the kernel from UFS2 and the kernel mount it as
+root. After `SHELL`, the `UFS_ROOT` script remounts the root read-write (`mount -u -o rw /`),
+checks every entry of the base with `mtree` (owners, modes, flags, links, sizes, SHA-256), and
+copies a tree with `tar` and `cp -R`. After `exit` powers the machine off, the root must be clean
+(`dumpfs`) and `fsck_ffs -f -n` must find nothing.
 
 File systems (on the build server; VFS.md §14):
 
@@ -136,7 +143,6 @@ with `/rescue/mount` and must print the same.
 Planned for later phases:
 
 ```
-cargo xtask image   ... [--root base.txz] [--fs ufs2|md]   # UFS2 root of the base system (P5.8)
 cargo xtask deploy  --board {opi6p|x870e} [--usb <serial> | --media]   # install, set BootNext, collect logs
                     # targets are identified by disk serial number; anything else is refused
 cargo xtask test    [--tier compat|full]

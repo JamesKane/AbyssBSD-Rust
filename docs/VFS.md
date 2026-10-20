@@ -353,9 +353,20 @@ file's vnode keeps its number, recorded so lookups keep finding it. The kernel m
   is the old interface, and `unmount(2)` takes `MNT_FORCE`.
 - `statfs`, `fstatfs`, and `getfsstat` report FreeBSD's `struct statfs` (checked by abi-check),
   including `f_fsid`, the flags, and the `mntfromname` and `mntonname` strings.
-- **Root**: the kernel mounts the root named by the loader's `vfs.root.mountfrom` (for example
-  `ufs:/dev/nda0p2`), falling back to the memory disk. It then mounts devfs on `/dev`. With the
-  root on UFS2, init is `/rescue/sh` as before (`init_path`), now from the disk.
+- **Root**: the loader names the root in `vfs.root.mountfrom`: the `/` line of `/etc/fstab` on
+  the UFS2 file system it loaded the kernel from (for example `ufs:/dev/gpt/rootfs0`), or else
+  that partition as `ufs:/dev/gptid/<uuid>`. The kernel mounts it read-only, as FreeBSD mounts
+  root first, waiting up to 3 seconds for the disk (`vfs.mountroot.timeout`), and falls back to
+  the memory disk. A disk is found by its name or by the `gpt/<label>` and `gptid/<uuid>` names
+  that devfs also shows (FreeBSD's `glabel`). devfs goes on `/dev`, tmpfs on `/tmp`, and the root
+  disk's ESP on `/boot/efi`. The shell is `/rescue/sh` as before, now from the disk.
+- `mount -u` (`MNT_UPDATE`) moves a UFS2 mount between read-only and read-write. Going
+  read-write loads the summary (counted from the groups with soft updates) and marks the file
+  system dirty, refusing an unclean one as a read-write mount would. Going read-only writes
+  everything and marks it clean. Soft updates are set up when the file system is opened, so a
+  root made read-write has them (`MNT_SOFTDEP` shows only while read-write).
+- At power-off every file system is unmounted, the root last, forcibly (FreeBSD's
+  `vfs_unmountall`), so a read-write UFS2 root is left clean.
 - A mount is busy while lookups cross it. `unmount` without `MNT_FORCE` fails with `EBUSY` while
   vnodes are in use. With `MNT_FORCE`, it dooms them.
 

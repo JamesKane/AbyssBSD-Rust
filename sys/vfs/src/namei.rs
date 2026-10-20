@@ -190,6 +190,33 @@ impl Namespace {
         Ok(())
     }
 
+    /// Unmounts everything for shutdown (FreeBSD's `vfs_unmountall`):
+    /// the mounts in reverse order, forcibly, then the root file system,
+    /// written out and its vnodes reclaimed. Nothing may use the
+    /// namespace after. Returns the mounts that failed, by where they
+    /// were mounted.
+    pub fn unmount_all(&self, s: &Sleepable) -> Vec<(Vec<u8>, Errno)> {
+        let mut failed = Vec::new();
+        let mounts = self.mounts();
+        for m in mounts.iter().skip(1).rev() {
+            if let Err(e) = self.unmount(s, m, true) {
+                failed.push((m.on(), e));
+            }
+        }
+        let root = &mounts[0];
+        let done = root.fs().sync(s, true).and_then(|()| {
+            cache::purge_fs(root.id);
+            for v in root.all_vnodes() {
+                v.reclaim(s);
+            }
+            root.fs().unmount(s)
+        });
+        if let Err(e) = done {
+            failed.push((root.on(), e));
+        }
+        failed
+    }
+
     /// `v`, or the root of what is mounted on it.
     fn cover(s: &Sleepable, mut v: Arc<Vnode>) -> Result<Arc<Vnode>, Errno> {
         // Mounts stack, finitely.

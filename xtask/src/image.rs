@@ -5,9 +5,10 @@
 //! memory disk (FreeBSD's `/rescue` and our test programs as a ustar
 //! archive, once `cargo xtask fetch-base` has run) at `EFI/ABYSS/MD`.
 //!
-//! A UFS2 root variant (on FreeBSD, where `makefs` is) moves the kernel
-//! and the memory disk to `/boot/kernel/kernel` and `/boot/abyss/md` on a
-//! `freebsd-ufs` partition after the ESP, where the loader looks first.
+//! A UFS2 root variant (on FreeBSD, where `makefs` is) puts all of
+//! `base.txz` and the kernel (`/boot/kernel/kernel`) on a `freebsd-ufs`
+//! partition after the ESP, where the loader looks first; the kernel
+//! mounts it as root, and there is no memory disk.
 //!
 //! Images are reproducible: GUIDs and the volume serial derive from stable
 //! names, and FAT timestamps are fixed.
@@ -87,30 +88,82 @@ pub(crate) fn build_with(
     Ok(path)
 }
 
-/// As [`build`], with the kernel and the memory disk on a UFS2 root
-/// partition that `makefs` makes (FreeBSD only), not on the ESP.
+/// The UFS2 root's `/etc/fstab`: its partitions by GPT label, as
+/// FreeBSD's installer writes it.
+const FSTAB: &str = "# Device\t\tMountpoint\tFStype\tOptions\tDump\tPass#\n\
+                     /dev/gpt/rootfs0\t/\t\tufs\trw\t1\t1\n\
+                     /dev/gpt/efiboot0\t/boot/efi\tmsdosfs\trw\t2\t2\n";
+
+/// Where the root image keeps the static `find` and `mtree`.
+pub(crate) const STATIC_TOOLS: &str = "usr/tests/static";
+
+/// As [`build`], with the root on a UFS2 partition that `makefs` makes
+/// (FreeBSD only), with soft updates: all of `base.txz` (owners and flags
+/// from its specification), the kernel at `/boot/kernel/kernel`, an
+/// `/etc/fstab`, the memory disk's `/usr/tests`, and in [`STATIC_TOOLS`]
+/// static `find` and `mtree` with the base's specifications
+/// (`base.mtree` for owners, modes, and flags; `base-data.mtree` for
+/// sizes and digests). The loader finds the kernel there and
+/// hands the kernel the fstab's root; there is no memory disk.
 pub(crate) fn build_ufs_root(arch: Arch, opts: build::Options, cmdline: &str) -> Result<PathBuf> {
     let images = build::all(arch, opts)?;
     let read = |p: &PathBuf| fs::read(p).map_err(|e| format!("{}: {e}", p.display()));
     let loader = read(&images.loader)?;
     let dir = util::root().join("build").join(arch.to_string());
+    // What goes over the base: made afresh each time.
     let stage = dir.join("ufsroot");
     let _ = fs::remove_dir_all(&stage);
     fs::create_dir_all(stage.join("boot/kernel"))?;
-    fs::create_dir_all(stage.join("boot/abyss"))?;
+    fs::create_dir_all(stage.join("etc"))?;
+    fs::create_dir_all(stage.join(STATIC_TOOLS))?;
     fs::copy(&images.kernel, stage.join("boot/kernel/kernel"))?;
+    fs::write(stage.join("etc/fstab"), FSTAB)?;
     if let Some(md) = crate::base::md_image(arch, &[])? {
-        fs::write(stage.join("boot/abyss/md"), md)?;
+        let tar = dir.join("ufsroot-md.tar");
+        fs::write(&tar, md)?;
+        util::run(
+            std::process::Command::new("tar")
+                .arg("-xf")
+                .arg(&tar)
+                .arg("-C")
+                .arg(&stage)
+                .arg("usr/tests"),
+        )?;
+        fs::remove_file(&tar)?;
     }
+    for (name, bin) in crate::base::static_tools(arch)? {
+        fs::copy(&bin, stage.join(STATIC_TOOLS).join(name))?;
+    }
+    // What the root should hold, for its `mtree` to check.
+    let tools = stage.join(STATIC_TOOLS);
+    fs::copy(crate::base::spec(arch)?, tools.join("base.mtree"))?;
+    fs::copy(crate::base::data_spec(arch)?, tools.join("base-data.mtree"))?;
+    // Owners and modes for what the base's specification lacks.
+    let base_spec = fs::read_to_string(crate::base::spec(arch)?)?;
+    let known: std::collections::HashSet<&str> = base_spec
+        .lines()
+        .filter_map(|l| l.split_ascii_whitespace().next())
+        .collect();
+    let mut spec = base_spec.clone();
+    add_spec(&stage, &stage, &known, &mut spec)?;
+    let spec_path = dir.join("ufsroot.mtree");
+    fs::write(&spec_path, spec)?;
+
     let img = dir.join("ufsroot.img");
     let _ = fs::remove_file(&img);
     util::run(
         std::process::Command::new("makefs")
-            .args(["-t", "ffs", "-o", "version=2"])
+            .args(["-t", "ffs", "-o", "version=2,softupdates=1"])
+            // Room for the tests to write.
+            .args(["-b", "25%", "-f", "25%"])
+            .arg("-F")
+            .arg(&spec_path)
             .arg(&img)
+            .arg(crate::base::full(arch)?)
             .arg(&stage),
     )?;
     let ufs = read(&img)?;
+    fs::remove_file(&img)?;
     let disk = make_disk(
         arch,
         &Contents {
@@ -124,6 +177,58 @@ pub(crate) fn build_ufs_root(arch: Arch, opts: build::Options, cmdline: &str) ->
     let path = dir.join("disk-ufs.img");
     fs::write(&path, &disk)?;
     Ok(path)
+}
+
+/// Appends to `spec` an entry, root's, for everything under `at` (within
+/// `stage`) that `known` lacks.
+fn add_spec(
+    stage: &std::path::Path,
+    at: &std::path::Path,
+    known: &std::collections::HashSet<&str>,
+    spec: &mut String,
+) -> Result<()> {
+    use std::fmt::Write as _;
+    use std::os::unix::fs::PermissionsExt;
+    let mut entries: Vec<_> = fs::read_dir(at)?.collect::<std::io::Result<_>>()?;
+    entries.sort_by_key(fs::DirEntry::file_name);
+    for e in entries {
+        let path = e.path();
+        let rel = path.strip_prefix(stage).map_err(|e| e.to_string())?;
+        let name = format!("./{}", rel.display());
+        let meta = e.metadata()?;
+        let kind = if meta.is_dir() { "dir" } else { "file" };
+        if !known.contains(name.as_str()) {
+            let mode = meta.permissions().mode() & 0o7777;
+            let _ = writeln!(
+                spec,
+                "{name} type={kind} mode={mode:o} uid=0 gid=0 flags=none"
+            );
+        }
+        if meta.is_dir() {
+            add_spec(stage, &path, known, spec)?;
+        }
+    }
+    Ok(())
+}
+
+/// The byte range of the UFS2 partition on a disk image
+/// [`build_ufs_root`] made.
+pub(crate) fn ufs_partition(disk: &std::path::Path) -> Result<std::ops::Range<u64>> {
+    let mut f = fs::File::open(disk)?;
+    let mut head = vec![0u8; 34 * gpt::SECTOR];
+    std::io::Read::read_exact(&mut f, &mut head)?;
+    let h = gpt::PrimaryHeader::read(&head[gpt::SECTOR..2 * gpt::SECTOR])
+        .map_err(|e| format!("GPT: {e:?}"))?;
+    let at = usize::try_from(h.entries_lba).unwrap_or(0) * gpt::SECTOR;
+    let len = h.entries_len;
+    let table = gpt::Table::from_parts(&h, head.get(at..at + len).ok_or("GPT entries")?)
+        .map_err(|e| format!("GPT: {e:?}"))?;
+    let p = table
+        .partitions()
+        .find(|p| p.type_guid == gpt::types::FREEBSD_UFS)
+        .ok_or("no freebsd-ufs partition")?;
+    let sector = gpt::SECTOR as u64;
+    Ok(p.first_lba * sector..(p.last_lba + 1) * sector)
 }
 
 /// Reads a file from the ESP of a disk image `build` made.
