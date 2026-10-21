@@ -24,7 +24,7 @@
 //! Behavior reference: sys/kern/vfs_lookup.c, sys/kern/vfs_cache.c.
 
 use alloc::borrow::Cow;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 
 use abi::errno::Errno;
@@ -36,7 +36,7 @@ use crate::cache::{self, Hit};
 use crate::mount::Mount;
 use crate::node::{Kind, NodeOps};
 use crate::ops::{self, Cred, VEXEC};
-use crate::vnode::Vnode;
+use crate::vnode::{Peek, Vnode};
 
 /// The mounted file systems.
 #[derive(Debug)]
@@ -146,7 +146,8 @@ impl Namespace {
         if !covered.is_dir() {
             return Err(Errno::ENOTDIR);
         }
-        if !m.root(s)?.is_dir() {
+        let root = m.root(s)?;
+        if !root.is_dir() {
             return Err(Errno::ENOTDIR);
         }
         let mut mounts = self.mounts.lock();
@@ -156,6 +157,7 @@ impl Namespace {
         m.set_on(on);
         m.set_covered(Some(Arc::clone(&covered)));
         covered.set_mounted(Some(Arc::clone(&m)));
+        covered.set_mounted_root(Some(&root));
         mounts.push(m);
         Ok(())
     }
@@ -180,6 +182,10 @@ impl Namespace {
             return Err(Errno::EBUSY);
         }
         m.fs().sync(s, true)?;
+        // Lockless lookups no longer cross into it; those that may have
+        // are done before its vnodes go.
+        covered.set_mounted_root(None);
+        cache::synchronize();
         cache::purge_fs(m.id);
         for v in &vnodes {
             v.reclaim(s);
@@ -330,6 +336,9 @@ impl Namespace {
         }
         if path.len() >= PATH_MAX {
             return Err(Errno::ENAMETOOLONG);
+        }
+        if let Some(w) = self.walk_fast(l, path, parent) {
+            return Ok(w);
         }
         // The path as given until a symbolic link rewrites it.
         let mut rest: Cow<'_, [u8]> = Cow::Borrowed(path);
@@ -492,6 +501,164 @@ impl Namespace {
 enum Walked {
     Found(Found),
     Parent(Parent),
+}
+
+/// Where a lockless walk is: a vnode it holds no reference to, whose
+/// allocation stays for the reader's section.
+#[derive(Clone, Copy)]
+enum Here<'a> {
+    /// One the caller holds (where the walk starts).
+    Held(&'a Arc<Vnode>),
+    /// A name-cache entry's target, weakly.
+    Entry(&'a Weak<Vnode>),
+    /// A mounted file system's root, published: its mount's table holds it,
+    /// and unmounting waits for the section to end before it goes.
+    Root(*const Vnode),
+}
+
+#[allow(unsafe_code)]
+impl Here<'_> {
+    fn ptr(self) -> *const Vnode {
+        match self {
+            Self::Held(a) => Arc::as_ptr(a),
+            Self::Entry(w) => w.as_ptr(),
+            Self::Root(p) => p,
+        }
+    }
+
+    fn peek(self) -> Peek {
+        // SAFETY: the allocation stays for the section (see the variants).
+        unsafe { Peek::of(self.ptr()) }
+    }
+
+    /// A reference to it, unless it is gone. Not to be dropped inside the
+    /// section (a last reference's drop may free).
+    fn take(self) -> Option<Arc<Vnode>> {
+        match self {
+            Self::Held(a) => Some(Arc::clone(a)),
+            Self::Entry(w) => w.upgrade(),
+            // SAFETY: published, so its mount's table holds a reference
+            // until unmounting has waited for this section to end.
+            Self::Root(p) => unsafe {
+                Arc::increment_strong_count(p);
+                Some(Arc::from_raw(p))
+            },
+        }
+    }
+}
+
+/// What a lockless walk ended on; names as ranges of the path, made into
+/// vectors once the section is over.
+enum FastEnd {
+    Vnode(Arc<Vnode>),
+    Missing(Arc<Vnode>, core::ops::Range<usize>),
+    Parent(Arc<Vnode>, core::ops::Range<usize>, bool),
+}
+
+impl Namespace {
+    /// The lockless walk (docs/VFS.md §6.2, FreeBSD's `cache_fplookup`):
+    /// the whole path in one epoch section, with no lock and no reference
+    /// taken but on the vnode found. `None` when it cannot answer and the
+    /// locked walk must: a name the cache does not know, `..`, a symbolic
+    /// link to follow, a vnode going away, `O_RESOLVE_BENEATH`, or a caller
+    /// not root (whose search permission on each directory needs its
+    /// attributes; until Phase 6 every process is root).
+    fn walk_fast(&self, l: &Lookup<'_>, path: &[u8], parent: bool) -> Option<Walked> {
+        if l.cred.uid != 0 || l.beneath {
+            return None;
+        }
+        let end = {
+            let reader = cache::Reader::new();
+            Self::walk_in(&reader, l, path, parent)?
+        };
+        // Out of the section: what goes now may allocate or free.
+        let alive = |v: Arc<Vnode>| (!v.is_dying()).then_some(v);
+        Some(match end {
+            FastEnd::Vnode(v) => {
+                let v = alive(v)?;
+                v.touch();
+                Walked::Found(Found::Vnode(v))
+            }
+            FastEnd::Missing(dir, name) => Walked::Found(Found::Missing {
+                dir: alive(dir)?,
+                name: path[name].to_vec(),
+            }),
+            FastEnd::Parent(dir, name, trailing_slash) => Walked::Parent(Parent {
+                dir: alive(dir)?,
+                name: path[name].to_vec(),
+                trailing_slash,
+            }),
+        })
+    }
+
+    fn walk_in(
+        reader: &cache::Reader,
+        l: &Lookup<'_>,
+        path: &[u8],
+        parent: bool,
+    ) -> Option<FastEnd> {
+        let mut cur = Here::Held(if path.first() == Some(&b'/') {
+            l.root
+        } else {
+            l.start
+        });
+        let mut at = 0;
+        loop {
+            let Some(c) = next_component(path, at) else {
+                // Slashes only, or a trailing slash after a directory.
+                return if parent {
+                    None
+                } else {
+                    cur.take().map(FastEnd::Vnode)
+                };
+            };
+            let name = &path[c.start..c.end];
+            let here = cur.peek();
+            if name.len() > NAME_MAX || here.kind != Kind::Directory {
+                return None;
+            }
+            let trailing_slash = c.end < path.len();
+            if parent && !c.more {
+                return Some(FastEnd::Parent(cur.take()?, c.start..c.end, trailing_slash));
+            }
+            match name {
+                b"." => {
+                    at = c.end;
+                    continue;
+                }
+                b".." => return None,
+                _ => {}
+            }
+            let mut next = match reader.find(cur.ptr(), here.id, name)? {
+                cache::Peek::Negative if !c.more => {
+                    return Some(FastEnd::Missing(cur.take()?, c.start..c.end));
+                }
+                cache::Peek::Negative => return None,
+                cache::Peek::Positive(w) if w.strong_count() > 0 => Here::Entry(w),
+                cache::Peek::Positive(_) => return None,
+            };
+            let mut info = next.peek();
+            // Mounts stack, finitely.
+            for _ in 0..64 {
+                if info.mounted_root.is_null() {
+                    break;
+                }
+                next = Here::Root(info.mounted_root);
+                info = next.peek();
+            }
+            if !info.mounted_root.is_null() || info.dying {
+                return None;
+            }
+            if info.kind == Kind::Symlink && (c.more || l.follow || trailing_slash) {
+                return None;
+            }
+            if (c.more || trailing_slash) && info.kind != Kind::Directory {
+                return None;
+            }
+            cur = next;
+            at = c.end;
+        }
+    }
 }
 
 /// The name of inode `ino` in directory `dir`, by reading it (FreeBSD's

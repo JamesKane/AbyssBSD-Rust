@@ -14,7 +14,7 @@
 use alloc::boxed::Box;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use abi::errno::Errno;
 use abi::stat::Stat;
@@ -61,12 +61,20 @@ impl State {
 /// A file system object in core.
 pub struct Vnode {
     mount: Arc<Mount>,
+    /// Its mount's id: with `ino` and `kind`, what a lockless lookup reads
+    /// (plain fields, never changed, so readable without a reference; see
+    /// [`Peek`]).
+    fs: u64,
     ino: u64,
     kind: Kind,
     state: SxLock<State>,
     uses: AtomicU32,
     /// The file system mounted on this directory, if any.
     mounted: SpinLock<Option<Arc<Mount>>>,
+    /// That file system's root vnode, for lockless lookups to cross into
+    /// it: published by mounting, cleared by unmounting before the root can
+    /// go (the unmount waits out lockless readers).
+    mounted_root: AtomicPtr<Vnode>,
     /// The entry that names this directory: its parent and its name, for
     /// `getcwd` (FreeBSD's `v_cache_dd`).
     named: SpinLock<Named>,
@@ -111,11 +119,13 @@ impl Vnode {
     pub(crate) fn new(mount: Arc<Mount>, ino: u64, ops: NodeOps) -> Self {
         Self {
             kind: ops.kind(),
+            fs: mount.id,
             mount,
             ino,
             state: SxLock::new(&VNODE, State::Live(ops)),
             uses: AtomicU32::new(0),
             mounted: SpinLock::new(None),
+            mounted_root: AtomicPtr::new(core::ptr::null_mut()),
             named: SpinLock::new(None),
             cache_links: SpinLock::new(crate::cache::Links::new()),
             lockf: crate::lockf::Lockf::new(),
@@ -211,9 +221,17 @@ impl Vnode {
     #[must_use]
     pub fn id(&self) -> NodeId {
         NodeId {
-            fs: self.mount.id,
+            fs: self.fs,
             ino: self.ino,
         }
+    }
+
+    /// Publishes (or with `None`, withdraws) the root vnode of the file
+    /// system mounted here, for lockless lookups. A withdrawn root may go
+    /// only after [`crate::cache::synchronize`].
+    pub(crate) fn set_mounted_root(&self, root: Option<&Arc<Vnode>>) {
+        let p = root.map_or(core::ptr::null_mut(), |r| Arc::as_ptr(r).cast_mut());
+        self.mounted_root.store(p, Ordering::Release);
     }
 
     /// Whether this is its file system's root.
@@ -445,6 +463,46 @@ impl Vnode {
         // A use taken meanwhile keeps it.
         if unlinked && self.uses() == 0 {
             self.reclaim(s);
+        }
+    }
+}
+
+/// What a lockless lookup reads of a vnode it holds no reference to.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Peek {
+    pub(crate) id: NodeId,
+    pub(crate) kind: Kind,
+    pub(crate) dying: bool,
+    /// The root of what is mounted here.
+    pub(crate) mounted_root: *const Vnode,
+}
+
+impl Peek {
+    /// Reads `v`'s fields that never change, and its atomics.
+    ///
+    /// # Safety
+    ///
+    /// `v`'s allocation must stay for the call: a weak reference (a
+    /// name-cache entry's, within an epoch section) is enough. Its value
+    /// may already be dropped: only plain fields and atomics, which a drop
+    /// leaves as they were, are read, through the pointer.
+    #[allow(unsafe_code)]
+    pub(crate) unsafe fn of(v: *const Vnode) -> Self {
+        // SAFETY: the allocation stays (the caller's contract); the fields
+        // read are `Copy` or atomic, set at creation, and no reference to
+        // the whole (possibly dropped) value is made.
+        unsafe {
+            Self {
+                id: NodeId {
+                    fs: core::ptr::addr_of!((*v).fs).read(),
+                    ino: core::ptr::addr_of!((*v).ino).read(),
+                },
+                kind: core::ptr::addr_of!((*v).kind).read(),
+                dying: (*core::ptr::addr_of!((*v).dying)).load(Ordering::Acquire),
+                mounted_root: (*core::ptr::addr_of!((*v).mounted_root))
+                    .load(Ordering::Acquire)
+                    .cast_const(),
+            }
         }
     }
 }

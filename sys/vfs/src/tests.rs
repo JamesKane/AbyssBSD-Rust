@@ -678,6 +678,30 @@ fn rename_rules() {
 }
 
 #[test]
+fn the_lockless_walk_crosses_mounts_and_lets_them_go() {
+    let ns = tmp();
+    let s = s();
+    let d = mk(&ns, b"/m", NewNode::Directory).unwrap();
+    let other = tmpfs_mount(heap_pages());
+    ns.mount(&s, Arc::clone(&d), Arc::clone(&other), b"/m")
+        .unwrap();
+    let root = other.root(&s).unwrap();
+    let x = mk(&ns, b"/m/x", NewNode::Regular).unwrap();
+    // Twice: the first fills the cache, the second walks it unlocked.
+    for _ in 0..2 {
+        assert!(Arc::ptr_eq(&lookup(&ns, b"/m", true).unwrap(), &root));
+        assert!(Arc::ptr_eq(&lookup(&ns, b"/m/./x", true).unwrap(), &x));
+        assert_eq!(lookup(&ns, b"/m/y", true).unwrap_err(), Errno::ENOENT);
+        assert_eq!(lookup(&ns, b"/m/x/", true).unwrap_err(), Errno::ENOTDIR);
+    }
+    drop((x, root));
+    ns.unmount(&s, &other, false).unwrap();
+    // The covered directory again, empty.
+    assert!(Arc::ptr_eq(&lookup(&ns, b"/m", true).unwrap(), &d));
+    assert_eq!(lookup(&ns, b"/m/x", true).unwrap_err(), Errno::ENOENT);
+}
+
+#[test]
 fn renaming_across_mounts_is_exdev() {
     let ns = tmp();
     let s = s();
