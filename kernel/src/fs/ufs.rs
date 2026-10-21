@@ -190,10 +190,11 @@ impl UfsFs {
             if flags & ufs::sb::FS_SUJ != 0 {
                 ufs.set_flags(flags & !ufs::sb::FS_SUJ);
             }
-            let d = SoftDeps::new(ufs.superblock());
-            ufs.io().use_deps(&d);
+            deps = Some(SoftDeps::new(ufs.superblock()));
+        }
+        ufs.io().use_ufs(ufs.superblock(), deps.as_ref());
+        if deps.is_some() {
             ufs.use_soft_updates(s);
-            deps = Some(d);
         }
         let fs = Self {
             shared: Arc::new(Shared {
@@ -348,7 +349,11 @@ impl Shared {
         if let Some(deps) = &self.deps {
             let left = deps.with(s, |d| d.len());
             if left != 0 {
-                kprintln!("ufs: {}: {left} soft dependencies left", io.disk.name());
+                kprintln!("ufs: {}: {left} soft dependencies left:", io.disk.name());
+                let held = deps.with(s, |d| d.describe());
+                for line in held.lines().take(12) {
+                    kprintln!("ufs:   {line}");
+                }
             }
         }
         let mut sum = sum.lock(s);
@@ -412,11 +417,10 @@ impl Shared {
 
     /// Out of space with soft updates: writes and does the work until what
     /// waited to be freed is (FreeBSD's `softdep_request_cleanup` from the
-    /// top). File pages are written too (a block's free can wait for the
-    /// data of the block replacing it), unless the caller is writing pages
-    /// back itself. Returns whether anything was waiting. The caller holds
-    /// no inode lock.
-    fn flush_frees(&self, s: &Sleepable, pages: bool) -> bool {
+    /// top). File pages are written too: a block's free can wait for the
+    /// data of a new block, which the page cache holds. Returns whether
+    /// anything was waiting. The caller holds no inode lock.
+    fn flush_frees(&self, s: &Sleepable) -> bool {
         let Some(deps) = &self.deps else {
             return false;
         };
@@ -424,9 +428,7 @@ impl Shared {
             return false;
         }
         for _ in 0..8 {
-            if pages {
-                self.sync_pages();
-            }
+            self.sync_pages();
             let _ = self.write_inodes(s, Mode::Delayed);
             let _ = self.ufs.io().cache.sync(s);
             self.process_work(s);
@@ -840,7 +842,7 @@ impl Node for UfsNode {
                 }
                 drop(sum);
                 drop(st);
-                let waited = shared.flush_frees(s, true);
+                let waited = shared.flush_frees(s);
                 st = self.cell.state.lock(s);
                 if !waited {
                     return Err(Errno::ENOSPC);
@@ -930,7 +932,10 @@ impl Node for UfsNode {
                 io.cache.write_buffer(s, at).map_err(|_| Errno::EIO)?;
             }
         }
-        io.disk.flush(s).map_err(|_| Errno::EIO)
+        // The writes are done; as FreeBSD's UFS, no cache flush follows
+        // (it sends `BIO_FLUSH` only for the journal, and only when
+        // `debug.softdep.flushcache` asks).
+        Ok(())
     }
 
     fn inactive(&mut self, s: &Sleepable) {
@@ -1031,6 +1036,9 @@ impl vfs::RegularNode for UfsNode {
         let bsize = u64::from(shared.ufs.superblock().bsize);
         let ino = self.cell.ino;
         let mut old_size = 0;
+        // The file's byte ranges of newly allocated blocks: cleared in the
+        // page cache, not on the disk.
+        let mut new = Vec::new();
         // Give the range blocks, the size growing as FreeBSD's `ffs_write`
         // does, block by block. Out of space at once with soft updates
         // waiting to free some, it waits for that and tries again.
@@ -1043,9 +1051,7 @@ impl vfs::RegularNode for UfsNode {
             while at < end {
                 let within = at % bsize;
                 let n = (bsize - within).min(end - at);
-                // A write covering a whole block needs no zeroing.
-                let clear = !(within == 0 && n == bsize);
-                let r = shared.ufs.balloc(
+                let r = shared.ufs.balloc_new(
                     s,
                     &mut sum,
                     ino,
@@ -1053,8 +1059,7 @@ impl vfs::RegularNode for UfsNode {
                     at,
                     n,
                     Reserve::Allowed,
-                    clear,
-                    false,
+                    &mut new,
                 );
                 st.dirty = true;
                 if let Err(e) = r {
@@ -1072,13 +1077,24 @@ impl vfs::RegularNode for UfsNode {
                 }
                 at += n;
             }
+            // New blocks read as zeros from now on: their pages go in
+            // zeroed and dirty (written whole later, as FreeBSD writes a
+            // cleared buffer) before the inode is unlocked, so no fill or
+            // read-ahead can read the unwritten disk under them first.
+            for &(at, len) in &new {
+                for page in at / PAGE..(at + len).div_ceil(PAGE) {
+                    if object.page_for_overwrite(page).is_ok() {
+                        object.mark_dirty(page);
+                    }
+                }
+            }
             self.cell.publish(&st);
             if !full {
                 break;
             }
             drop(sum);
             drop(st);
-            if !shared.flush_frees(s, true) {
+            if !shared.flush_frees(s) {
                 return Err(Errno::ENOSPC);
             }
         }
@@ -1086,9 +1102,12 @@ impl vfs::RegularNode for UfsNode {
         if offset > old_size {
             vfs::pagecache::resize(&object, old_size, offset);
         }
-        let written = vfs::pagecache::write(&object, offset, uio);
-        let mut st = self.cell.state.lock(s);
+        // Pages past the old end start from zeros (new blocks' pages are
+        // in already); so do pages the write covers whole.
+        let fresh = |page: PageIndex| page * PAGE >= old_size;
+        let written = vfs::pagecache::write_fresh(&object, offset, uio, &fresh);
         let done = written.as_ref().map_or(0, |&n| n as u64);
+        let mut st = self.cell.state.lock(s);
         let want = old_size.max(offset + done);
         if st.ip.size > want {
             // A short copy, or blocks given past what fit: give back what
@@ -1198,7 +1217,7 @@ impl DirectoryNode for UfsNode {
             drop(sum);
             drop(st);
             // Out of space: soft updates may have some on the way back.
-            if !shared.flush_frees(s, true) {
+            if !shared.flush_frees(s) {
                 break;
             }
         }
@@ -1239,7 +1258,7 @@ impl DirectoryNode for UfsNode {
                     Reserve::Allowed,
                 )
             };
-            if r != Err(ufs::Error::NoSpace) || attempt > 0 || !shared.flush_frees(s, true) {
+            if r != Err(ufs::Error::NoSpace) || attempt > 0 || !shared.flush_frees(s) {
                 break;
             }
             attempt += 1;
@@ -1343,6 +1362,7 @@ impl DirectoryNode for UfsNode {
 /// The most pages one fill reads: read-ahead grows to this.
 const MAX_RUN: PageIndex = 64;
 const PAGE: u64 = 4096;
+const PAGE_LEN: usize = 4096;
 
 /// A regular file's pages, read from and written to its blocks.
 struct FilePager {
@@ -1377,6 +1397,9 @@ impl Pager for FilePager {
         let size = ip.size;
         let start = index * PAGE;
         let end = start + buf.len() as u64;
+        // The runs on the disk, read together: where, and where in `buf`.
+        let mut parts: Vec<(u64, usize)> = Vec::new();
+        let mut places: Vec<usize> = Vec::new();
         let mut at = start;
         while at < end {
             let out = usize::try_from(at - start).map_err(|_| PagerError)?;
@@ -1398,14 +1421,20 @@ impl Pager for FilePager {
             if addr == 0 {
                 buf[out..out + len].fill(0);
             } else {
-                let data = ufs
-                    .io()
-                    .disk
-                    .read(&s, addr * fsize + within, len)
-                    .map_err(|_| PagerError)?;
-                buf[out..out + len].copy_from_slice(&data);
+                parts.push((addr * fsize + within, len));
+                places.push(out);
             }
             at += n;
+        }
+        if !parts.is_empty() {
+            let data = ufs
+                .io()
+                .disk
+                .read_parts(&s, &parts)
+                .map_err(|_| PagerError)?;
+            for (bytes, out) in data.iter().zip(places) {
+                buf[out..out + bytes.len()].copy_from_slice(bytes);
+            }
         }
         if let Ok(past) = usize::try_from(size.saturating_sub(start))
             && past < buf.len()
@@ -1428,13 +1457,15 @@ impl Pager for FilePager {
         let fsize = u64::from(sb.fsize);
         let mut st = self.cell.state.lock(&s);
         let at = index * PAGE;
-        // Past the end (truncated meanwhile): nothing to write.
-        if at >= st.ip.size {
-            return Ok(());
-        }
         let lbn = at / bsize;
         let within = at % bsize;
         let mut addr = ufs.bmap(&s, &st.ip, lbn).map_err(|_| PagerError)?;
+        // Past the end: written only into the last block's allocated
+        // space (zeros, so its tail stays zero on the disk), never
+        // allocated.
+        if at >= st.ip.size && addr == 0 {
+            return Ok(());
+        }
         // A mapping wrote into a hole. Out of space, soft updates may have
         // some on the way back: once, with no lock held, it is fetched.
         let mut attempt = 0;
@@ -1462,7 +1493,10 @@ impl Pager for FilePager {
                     attempt += 1;
                     drop(sum);
                     drop(st);
-                    if !shared.flush_frees(&s, false) {
+                    // Pages too: frees can wait for new blocks' data, which
+                    // goes from the page cache (this page is no longer
+                    // marked dirty, so it is not written twice).
+                    if !shared.flush_frees(&s) {
                         return Err(PagerError);
                     }
                     st = self.cell.state.lock(&s);
@@ -1482,6 +1516,63 @@ impl Pager for FilePager {
         let len = usize::try_from(n).map_err(|_| PagerError)?;
         ufs.io()
             .write_data(&s, addr * fsize + within, &page[..len])
+            .map_err(|_| PagerError)
+    }
+
+    fn write_back_run(&self, index: PageIndex, buf: &[u8]) -> Result<(), PagerError> {
+        let s = sleepable();
+        let ufs = &self.fs.ufs;
+        let sb = ufs.superblock();
+        let bsize = u64::from(sb.bsize);
+        let fsize = u64::from(sb.fsize);
+        let pages = buf.as_chunks::<PAGE_LEN>().0;
+        // The inode stays locked while the run goes, as for one page: its
+        // blocks cannot be freed and reused meanwhile.
+        let st = self.cell.state.lock(&s);
+        // Disk extents: where, from which byte of `buf`, and how long.
+        let mut extents: Vec<(u64, usize, usize)> = Vec::new();
+        for (i, k) in (index..).zip(0..pages.len()) {
+            let at = i * PAGE;
+            let lbn = at / bsize;
+            let within = at % bsize;
+            let addr = ufs.bmap(&s, &st.ip, lbn).map_err(|_| PagerError)?;
+            if addr == 0 {
+                if at >= st.ip.size {
+                    continue;
+                }
+                // A hole a mapping wrote into: page by page, allocating.
+                drop(st);
+                for (i, page) in (index..).zip(pages) {
+                    self.write_back(i, page)?;
+                }
+                return Ok(());
+            }
+            let space = u64::from(sb.block_size(st.ip.size, lbn));
+            let n =
+                usize::try_from(PAGE.min(space.saturating_sub(within))).map_err(|_| PagerError)?;
+            if n == 0 {
+                continue;
+            }
+            let disk = addr * fsize + within;
+            let from = k * PAGE_LEN;
+            match extents.last_mut() {
+                // Contiguous on the disk and in `buf`, after a whole page.
+                Some(e)
+                    if e.0 + u64::try_from(e.2).unwrap_or(u64::MAX) == disk
+                        && e.1 + e.2 == from
+                        && e.2 % PAGE_LEN == 0 =>
+                {
+                    e.2 += n;
+                }
+                _ => extents.push((disk, from, n)),
+            }
+        }
+        let parts: Vec<(u64, &[u8])> = extents
+            .into_iter()
+            .map(|(disk, from, len)| (disk, &buf[from..from + len]))
+            .collect();
+        ufs.io()
+            .write_data_parts(&s, &parts)
             .map_err(|_| PagerError)
     }
 }

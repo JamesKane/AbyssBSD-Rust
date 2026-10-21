@@ -35,7 +35,8 @@ const BOUND: f64 = 1.02;
 const MAX_CV: f64 = 0.01;
 const BOOTSTRAP: usize = 2000;
 
-const USAGE: &str = "usage: cargo xtask --remote perf [--suite p2|p3|p4|diag] [--runs N] [--prepare] [--freebsd-only]";
+const USAGE: &str = "usage: cargo xtask --remote perf [--suite p2|p3|p4|p5|diag] [--runs N] [--prepare] \
+                     [--freebsd-only | --abyss-only [--prof]]";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Side {
@@ -62,7 +63,15 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     // FreeBSD's numbers alone: a baseline for a suite AbyssBSD cannot run
     // yet (p4 until its system calls are in).
     let freebsd_only = args.take_flag("--freebsd-only");
+    // AbyssBSD's numbers alone, for investigating; with `--prof`, under
+    // the kernel's sampling profiler (`abyss.prof`), whose reports, one
+    // per benchmark, are printed.
+    let abyss_only = args.take_flag("--abyss-only");
+    let prof = args.take_flag("--prof");
     args.finish()?;
+    if freebsd_only && abyss_only || prof && !abyss_only {
+        return Err(USAGE.into());
+    }
     // `diag` holds AbyssBSD-side diagnostics, some with FreeBSD
     // counterparts; it is for investigation, not gating.
     if !["p2", "p3", "p4", "p5", "diag"].contains(&suite.as_str()) {
@@ -128,7 +137,12 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     } else {
         &[]
     };
-    let abyss = image::build_with(Arch::X86_64, opts, &format!("abyss.bench={suite}"), extra)?;
+    let cmdline = if prof {
+        format!("abyss.bench={suite} abyss.prof")
+    } else {
+        format!("abyss.bench={suite}")
+    };
+    let abyss = image::build_with(Arch::X86_64, opts, &cmdline, extra)?;
 
     let mut samples: BTreeMap<String, BTreeMap<Side, Vec<f64>>> = BTreeMap::new();
     let mut raw = String::from("side\trun\tname\tvalue\tunit\n");
@@ -141,7 +155,7 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
             [Side::Abyss, Side::FreeBsd]
         };
         for side in order {
-            if freebsd_only && side == Side::Abyss {
+            if freebsd_only && side == Side::Abyss || abyss_only && side == Side::FreeBsd {
                 continue;
             }
             let disk = match side {
@@ -161,6 +175,12 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
                     run_one(disk, &bench_disk, &log.with_extension("retry.log"))?
                 }
             };
+            if prof {
+                let text = fs::read_to_string(&log)?;
+                for line in text.lines().filter(|l| l.starts_with("prof ")) {
+                    println!("{line}");
+                }
+            }
             for (name, value, unit) in results {
                 let _ = writeln!(raw, "{}\t{run}\t{name}\t{value}\t{unit}", side.name());
                 units.insert(name.clone(), unit);
@@ -176,6 +196,14 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     fs::write(out.join("samples.tsv"), raw)?;
     fs::write(out.join("environment.txt"), environment(&rev))?;
 
+    if abyss_only {
+        for (name, sides) in &samples {
+            let v = &sides[&Side::Abyss];
+            println!("{name:<24} {:>14.1} {}", median(v), units[name]);
+        }
+        eprintln!("xtask: perf: results in {}", out.display());
+        return Ok(());
+    }
     let report = Report::new(&samples, &units);
     let text = if freebsd_only {
         report.render_baseline(&suite, runs)

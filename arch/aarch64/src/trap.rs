@@ -136,6 +136,9 @@ pub(crate) unsafe fn init_boot_cpu() {
 pub struct Interrupt {
     /// Taken from EL0 rather than EL1.
     pub from_user: bool,
+    /// Where it interrupted, and its frame pointer.
+    pub pc: u64,
+    pub fp: u64,
 }
 
 /// Called from the common path with interrupts masked.
@@ -157,6 +160,8 @@ fn handle(frame: &mut TrapFrame) {
         unsafe {
             crate::abyss_interrupt(Interrupt {
                 from_user: frame.slot >= 8,
+                pc: frame.elr,
+                fp: frame.x[29],
             });
         }
         return;

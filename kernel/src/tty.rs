@@ -512,6 +512,9 @@ impl CharDevice for TtyDevice {
         let mut done = 0;
         while uio.resid() > 0 {
             let n = uio.copy_in(&mut buf)?;
+            if crate::prof::on() {
+                crate::prof::console_output(&buf[..n]);
+            }
             let mut taken = 0;
             loop {
                 {

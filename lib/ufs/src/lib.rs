@@ -144,6 +144,14 @@ pub trait BlockIo {
     fn deps(&self, _cx: &Self::Cx, _f: &mut dyn FnMut(&mut softdep::Deps)) -> bool {
         false
     }
+
+    /// Whether the device keeps cylinder groups' check-hashes itself: it
+    /// checks them ([`cg::verify`]) as it reads groups from the disk and
+    /// sets them ([`cg::update_ckhash`]) as it writes them, as FreeBSD's
+    /// buffer cache does. Otherwise each change of a group recomputes it.
+    fn hashes_groups(&self) -> bool {
+        false
+    }
 }
 
 impl<T: BlockIo + ?Sized> BlockIo for &T {
@@ -189,6 +197,10 @@ impl<T: BlockIo + ?Sized> BlockIo for &T {
 
     fn deps(&self, cx: &T::Cx, f: &mut dyn FnMut(&mut softdep::Deps)) -> bool {
         (**self).deps(cx, f)
+    }
+
+    fn hashes_groups(&self) -> bool {
+        (**self).hashes_groups()
     }
 }
 

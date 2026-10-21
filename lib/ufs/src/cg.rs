@@ -75,7 +75,15 @@ pub(crate) struct Cg<'a> {
 
 /// Checks a group read at `cg`: its magic, its index, and its check-hash
 /// if the file system keeps them (FreeBSD's `ffs_getcg`).
-pub(crate) fn verify(sb: &Superblock, b: &[u8], cg: u32) -> Result<(), Error> {
+pub fn verify(sb: &Superblock, b: &[u8], cg: u32) -> Result<(), Error> {
+    check(sb, b, cg, true)
+}
+
+/// As [`verify`], the check-hash left out when not `hashed` (a device
+/// that checks it as it reads from the disk, [`BlockIo::hashes_groups`]).
+///
+/// [`BlockIo::hashes_groups`]: crate::BlockIo::hashes_groups
+pub(crate) fn check(sb: &Superblock, b: &[u8], cg: u32, hashed: bool) -> Result<(), Error> {
     if b.len() < 168 {
         return Err(Error::Corrupt("cylinder group size"));
     }
@@ -83,7 +91,7 @@ pub(crate) fn verify(sb: &Superblock, b: &[u8], cg: u32) -> Result<(), Error> {
     if u(off::MAGIC) != MAGIC || u(off::CGX) != cg {
         return Err(Error::Corrupt("cylinder group header"));
     }
-    if sb.metackhash & CK_CYLGRP != 0 && ckhash(b) != u(off::CKHASH) {
+    if hashed && sb.metackhash & CK_CYLGRP != 0 && ckhash(b) != u(off::CKHASH) {
         return Err(Error::Integrity("cylinder group check-hash"));
     }
     // The maps must lie inside.
@@ -112,8 +120,9 @@ fn ckhash(b: &[u8]) -> u32 {
     crc32c(crc, &b[off::CKHASH + 4..])
 }
 
-/// Recomputes a changed group's check-hash, if the file system keeps them.
-pub(crate) fn update_ckhash(sb: &Superblock, b: &mut [u8]) {
+/// Recomputes a changed group's check-hash, if the file system keeps them
+/// (FreeBSD sets it as the group goes to the disk).
+pub fn update_ckhash(sb: &Superblock, b: &mut [u8]) {
     if sb.metackhash & CK_CYLGRP != 0 {
         let h = ckhash(b);
         b[off::CKHASH..off::CKHASH + 4].copy_from_slice(&h.to_le_bytes());

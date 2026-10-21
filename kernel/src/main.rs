@@ -44,6 +44,7 @@ mod panic;
 mod pci;
 mod power;
 mod proc;
+mod prof;
 mod qemu;
 mod random;
 mod shared_page;
@@ -105,6 +106,7 @@ fn kmain(boot_info: PhysAddr) -> ! {
     arch::user::init_cpu();
     threads::init();
     time::init_cpu();
+    prof::start_cpu();
     shared_page::init();
     sysctl::init();
     topology::record_this_cpu(hal::CpuId::BOOT);

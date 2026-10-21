@@ -2426,7 +2426,9 @@ mod user_memory {
 
     use super::cx;
     use crate::mm::space::{self, AddressSpace};
-    use crate::uaccess::{Fault, StrError, UserPtr, copy_in, copy_in_str, copy_out};
+    use crate::uaccess::{
+        Fault, StrError, UserPtr, copy_in, copy_in_str, copy_in_str_vec, copy_out,
+    };
 
     const PAGE: u64 = 4096;
     const HINT: VirtAddr = VirtAddr::new(0x1000_0000);
@@ -2491,6 +2493,18 @@ mod user_memory {
             assert_eq!(copy_in_str(end - 2, &mut name), Err(StrError::Fault));
             copy_out(a + 8, b"abcdefgh").unwrap();
             assert_eq!(copy_in_str(a + 8, &mut name[..4]), Err(StrError::TooLong));
+            // The same, into a vector, in pieces: across a page, too.
+            copy_out(end - 2, b"xy").unwrap();
+            assert_eq!(copy_in_str_vec(end - 2, 64), Err(StrError::Fault));
+            copy_out(end - 4, b"abc\0").unwrap();
+            assert_eq!(copy_in_str_vec(end - 4, 64).as_deref(), Ok(&b"abc"[..]));
+            assert_eq!(copy_in_str_vec(a + 8, 4), Err(StrError::TooLong));
+            let long: Vec<u8> = (b'a'..=b'z').cycle().take(300).collect();
+            let at = a + 2 * PAGE - 200;
+            copy_out(at, &long).unwrap();
+            copy_out(at + 300, b"\0").unwrap();
+            assert_eq!(copy_in_str_vec(at, 1024).as_deref(), Ok(&long[..]));
+            assert_eq!(copy_in_str_vec(at, 300), Err(StrError::TooLong));
             // Read-only: writes fault, reads still work.
             space.protect(&s, VirtAddr::new(a)..VirtAddr::new(a + 4 * PAGE), Prot::READ).unwrap();
             assert_eq!(copy_out(a + 3 * PAGE, b"x"), Err(Fault));
@@ -3027,7 +3041,9 @@ mod user_memory {
                 for f in $(ls x/usr/tests/abyss); do \
                     [ \"$(md5 -q x/usr/tests/abyss/$f)\" = \"$(md5 -q /usr/tests/abyss/$f)\" ] || exit 6; done; \
                 rm -r a/b x/usr && [ ! -e a/b ] || exit 8; \
-                if [ -x /usr/tests/fsx/fsx ]; then /usr/tests/fsx/fsx -q -N 3000 -S 5 /mnt/fsx.data > /tmp/fsx.out 2>&1 || exit 9; rm -f /mnt/fsx.data*; fi; \
+                if [ -x /usr/tests/fsx/fsx ]; then for seed in 1 2 3; do \
+                    /usr/tests/fsx/fsx -q -N 10000 -S $seed /mnt/fsx.data > /tmp/fsx.out 2>&1 || exit 9; \
+                    rm -f /mnt/fsx.data*; done; fi; \
                 cd / && umount /mnt || exit 10; \
                 fsck_ffs -f -n DEV > /tmp/fsck.out 2>&1 || exit 11; \
                 mount -t ufs -o ro DEV /mnt || exit 12; \

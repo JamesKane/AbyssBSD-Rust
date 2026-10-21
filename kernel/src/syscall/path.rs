@@ -29,13 +29,10 @@ use crate::uaccess::{self, UserPtr};
 
 /// A path argument.
 pub(super) fn path(addr: u64) -> Result<Vec<u8>, Errno> {
-    let mut buf = alloc::vec![0u8; PATH_MAX];
-    let n = uaccess::copy_in_str(addr, &mut buf).map_err(|e| match e {
+    uaccess::copy_in_str_vec(addr, PATH_MAX).map_err(|e| match e {
         uaccess::StrError::Fault => Errno::EFAULT,
         uaccess::StrError::TooLong => Errno::ENAMETOOLONG,
-    })?;
-    buf.truncate(n);
-    Ok(buf)
+    })
 }
 
 /// The vnode an `*at` call names: `path` from `fd`, or with an empty path

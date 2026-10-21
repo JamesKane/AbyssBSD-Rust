@@ -70,6 +70,8 @@ pub struct Vnode {
     /// The entry that names this directory: its parent and its name, for
     /// `getcwd` (FreeBSD's `v_cache_dd`).
     named: SpinLock<Named>,
+    /// Its name-cache entries, so a purge finds them.
+    pub(crate) cache_links: SpinLock<crate::cache::Links>,
     /// Advisory locks (`fcntl`, `flock`).
     lockf: crate::lockf::Lockf,
     /// When it was last looked up, in [`tick`]s: the reclaimer takes the
@@ -115,6 +117,7 @@ impl Vnode {
             uses: AtomicU32::new(0),
             mounted: SpinLock::new(None),
             named: SpinLock::new(None),
+            cache_links: SpinLock::new(crate::cache::Links::new()),
             lockf: crate::lockf::Lockf::new(),
             used: AtomicU64::new(tick()),
             dying: core::sync::atomic::AtomicBool::new(false),

@@ -587,6 +587,34 @@ fn the_name_cache_answers_and_is_kept_right() {
 }
 
 #[test]
+fn a_purge_takes_only_the_vnodes_own_entries() {
+    let ns = tmp();
+    let root = Arc::clone(ns.root());
+    let d = mk(&ns, b"/d", NewNode::Directory).unwrap();
+    let a = mk(&ns, b"/d/a", NewNode::Regular).unwrap();
+    let b = mk(&ns, b"/d/b", NewNode::Regular).unwrap();
+    assert_eq!(lookup(&ns, b"/d/none", true).unwrap_err(), Errno::ENOENT);
+    let positive = |dir: &Arc<Vnode>, name: &[u8], v: &Arc<Vnode>| matches!(cache::lookup(dir, name), Some(cache::Hit::Positive(x)) if Arc::ptr_eq(&x, v));
+    // A file: the entry naming it goes; its siblings' stay.
+    cache::purge(&a);
+    assert!(cache::lookup(&d, b"a").is_none());
+    assert!(positive(&d, b"b", &b));
+    assert!(matches!(
+        cache::lookup(&d, b"none"),
+        Some(cache::Hit::Negative)
+    ));
+    // A directory: the entries in it and the one naming it.
+    assert!(positive(&root, b"d", &d));
+    cache::purge(&d);
+    assert!(cache::lookup(&d, b"b").is_none());
+    assert!(cache::lookup(&d, b"none").is_none());
+    assert!(cache::lookup(&root, b"d").is_none());
+    // Looked up again, all is entered again.
+    assert!(Arc::ptr_eq(&lookup(&ns, b"/d/b", true).unwrap(), &b));
+    assert!(positive(&d, b"b", &b));
+}
+
+#[test]
 fn idle_vnodes_are_reclaimed_and_found_again() {
     let ns = tmp();
     let s = s();

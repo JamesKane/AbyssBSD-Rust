@@ -4,8 +4,9 @@
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 
-use bufcache::{BlockDev, BufCache, IoError, Limits, WriteHook};
+use bufcache::{BlockDev, BufCache, BufHook, IoError, Limits};
 use sched::Sleepable;
 use sched::lock::{LockClass, Mutex};
 use sync::SpinLock;
@@ -30,13 +31,38 @@ impl SoftDeps {
     }
 }
 
-impl WriteHook for SoftDeps {
-    fn start(&self, s: &Sleepable, offset: u64, bytes: &[u8]) -> Option<Vec<u8>> {
-        self.0.lock(s).write_start(offset, bytes)
+/// A UFS mount's buffer hook: cylinder groups' check-hashes, checked as
+/// groups come from the disk and set as they go to it (FreeBSD's
+/// `BX_CYLGRP` buffers), and with soft updates, the tracker's rollbacks.
+struct UfsHook {
+    sb: ufs::Superblock,
+    deps: Option<Arc<SoftDeps>>,
+}
+
+impl BufHook for UfsHook {
+    fn filled(&self, _s: &Sleepable, offset: u64, bytes: &[u8]) -> Result<(), IoError> {
+        let Some(cg) = self.sb.group_at(offset) else {
+            return Ok(());
+        };
+        ufs::cg::verify(&self.sb, bytes, cg).map_err(|e| {
+            kprintln!("ufs: cylinder group {cg}: {e:?}");
+            IoError
+        })
+    }
+
+    fn start(&self, s: &Sleepable, offset: u64, bytes: &mut [u8]) -> Option<Vec<u8>> {
+        if self.sb.group_at(offset).is_some() {
+            ufs::cg::update_ckhash(&self.sb, bytes);
+        }
+        self.deps
+            .as_ref()
+            .and_then(|d| d.0.lock(s).write_start(offset, bytes))
     }
 
     fn done(&self, s: &Sleepable, offset: u64, ok: bool) {
-        self.0.lock(s).write_done(offset, ok);
+        if let Some(d) = &self.deps {
+            d.0.lock(s).write_done(offset, ok);
+        }
     }
 }
 
@@ -79,6 +105,8 @@ pub(crate) struct DiskIo {
     pub(crate) disk: Arc<storage::Disk>,
     /// With soft updates (UFS), the tracker its writes report to.
     deps: SpinLock<Option<Arc<SoftDeps>>>,
+    /// UFS's cylinder-group check-hashes are kept by the cache's hook.
+    groups_hashed: AtomicBool,
 }
 
 impl DiskIo {
@@ -87,14 +115,20 @@ impl DiskIo {
             cache: cache(Arc::clone(&disk), Limits::default()),
             disk,
             deps: SpinLock::new(None),
+            groups_hashed: AtomicBool::new(false),
         }
     }
 
-    /// Writes from now on go through `deps` (soft updates).
-    pub(crate) fn use_deps(&self, deps: &Arc<SoftDeps>) {
-        *self.deps.lock() = Some(Arc::clone(deps));
-        let hook: Arc<dyn WriteHook> = Arc::clone(deps) as Arc<dyn WriteHook>;
-        self.cache.set_hook(hook);
+    /// Serves the UFS file system with superblock `sb` from now on: its
+    /// groups' check-hashes kept here, and with `deps` (soft updates),
+    /// its writes ordered by that tracker.
+    pub(crate) fn use_ufs(&self, sb: &ufs::Superblock, deps: Option<&Arc<SoftDeps>>) {
+        *self.deps.lock() = deps.cloned();
+        self.cache.set_hook(Arc::new(UfsHook {
+            sb: sb.clone(),
+            deps: deps.cloned(),
+        }));
+        self.groups_hashed.store(true, Ordering::Release);
     }
 
     /// The soft-updates tracker, if writes go through one.
@@ -176,6 +210,36 @@ impl DiskIo {
     }
 }
 
+impl DiskIo {
+    /// As [`Self::write_data`] for several parts, whose writes go out
+    /// together (a clustered write-back).
+    pub(crate) fn write_data_parts(
+        &self,
+        s: &Sleepable,
+        parts: &[(u64, &[u8])],
+    ) -> Result<(), IoError> {
+        let ss = u64::from(self.disk.sector_size());
+        let aligned = |&(at, data): &(u64, &[u8])| {
+            at.is_multiple_of(ss) && u64::try_from(data.len()).is_ok_and(|n| n.is_multiple_of(ss))
+        };
+        if !parts.iter().all(aligned) {
+            for &(at, data) in parts {
+                self.write_data(s, at, data)?;
+            }
+            return Ok(());
+        }
+        self.disk.write_parts(s, parts).map_err(|_| IoError)?;
+        if let Some(d) = self.deps() {
+            d.with(s, |d| {
+                for &(at, data) in parts {
+                    d.data_written(at, u64::try_from(data.len()).unwrap_or(u64::MAX));
+                }
+            });
+        }
+        Ok(())
+    }
+}
+
 impl ufs::BlockIo for DiskIo {
     type Cx = Sleepable;
 
@@ -234,6 +298,10 @@ impl ufs::BlockIo for DiskIo {
             }
             None => false,
         }
+    }
+
+    fn hashes_groups(&self) -> bool {
+        self.groups_hashed.load(Ordering::Acquire)
     }
 }
 

@@ -1178,6 +1178,27 @@ P5.0 ─► P5.1 ─┬─► P5.2 ───────────────
       UART; it now leaves the rest in the FIFO, its interrupt masked, until the thread catches up.
     - The root image carries static `awk`, `grep`, `wc`, `cut`, `dirname`, `tr`, `mkfifo`,
       `touch`, `which`, and `sleep` from the FreeBSD tree, and a stand-in for `openssl md5`.
+  - The P5 suite runs on AbyssBSD (`abyss.bench=p5` copies `ubench`, the tree, and fsx off the
+    bench disk, as FreeBSD's `rc.local` does). First run: geometric mean 2.94 times FreeBSD.
+    After the first round of fixes, 1.27 (fsync, the random and warm reads, readdir, and tmpfs's
+    sequential write and fsx now win):
+    - A tmpfs file's object counted as its program's only mapping, so a program's exit freed the
+      file's pages (a second run read zeros); tmpfs objects now count as shared.
+    - A name-cache purge scanned the whole cache: each vnode now keeps its entries' keys
+      (FreeBSD's `v_cache_src`/`v_cache_dst`). UFS create and unlink went from 380 and 600 µs
+      to 10 and 5.
+    - Cylinder-group check-hashes are checked as groups are read from the disk and set as they
+      are written (a buffer-cache hook), not recomputed on every change.
+    - `fsync` no longer flushes the disk's cache: FreeBSD's UFS never does (it sends
+      `BIO_FLUSH` only for the journal, behind `debug.softdep.flushcache`).
+    - Writes no longer read pages they overwrite or that lie past the old end, and new blocks
+      are cleared in the page cache, written with the data, instead of zeroed on the disk at
+      once (FreeBSD's cleared buffers). Write-back goes in clusters of contiguous blocks, and a
+      fill or write-back sends all its requests before waiting.
+    - `abyss.prof`, a sampling profiler with disk-wait accounting
+      (`cargo xtask --remote perf --abyss-only --prof`), found these.
+    - Left: the lockless lookup (VFS.md §6.2) for `stat`/`open` (2.1 times), create and
+      rename, asynchronous read-ahead for cold reads, and extract.
 
 ## Track: USB and input (parallel, starts after P3) (M)
 

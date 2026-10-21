@@ -227,8 +227,8 @@ struct Holder {
     done: AtomicUsize,
 }
 
-impl WriteHook for Holder {
-    fn start(&self, _s: &Sleepable, offset: u64, bytes: &[u8]) -> Option<Vec<u8>> {
+impl BufHook for Holder {
+    fn start(&self, _s: &Sleepable, offset: u64, bytes: &mut [u8]) -> Option<Vec<u8>> {
         if offset != 0 || !self.hold.load(Ordering::Relaxed) {
             return None;
         }

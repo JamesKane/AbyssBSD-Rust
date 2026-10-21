@@ -19,7 +19,7 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use abi::errno::Errno;
-use vm::object::{LookupError, Object};
+use vm::object::{LookupError, Object, PageIndex};
 
 use crate::Uio;
 
@@ -94,6 +94,20 @@ pub fn read(object: &Object, size: u64, offset: u64, uio: &mut dyn Uio) -> Resul
 /// Writes `uio` at `offset` into the pages; returns the bytes written. The
 /// file system has made room (and will set the size from the result).
 pub fn write(object: &Object, offset: u64, uio: &mut dyn Uio) -> Result<usize, Errno> {
+    write_fresh(object, offset, uio, &|_| false)
+}
+
+/// As [`write`], where `fresh` says which pages hold nothing on the disk
+/// (past the old end, or in space just allocated): those start from zeros
+/// instead of being read, as do pages the write covers whole. A copy that
+/// faults partway leaves the rest of such a page zero, as FreeBSD's
+/// `ffs_write` clears a buffer it did not read.
+pub fn write_fresh(
+    object: &Object,
+    offset: u64,
+    uio: &mut dyn Uio,
+    fresh: &dyn Fn(PageIndex) -> bool,
+) -> Result<usize, Errno> {
     let io = object.io();
     let mut done = 0;
     let mut at = offset;
@@ -101,7 +115,12 @@ pub fn write(object: &Object, offset: u64, uio: &mut dyn Uio) -> Result<usize, E
         let index = at / PAGE;
         let within = offset_in_page(at);
         let n = (PAGE_BYTES - within).min(uio.resid());
-        let pfn = object.page_for_write(index).map_err(errno)?;
+        let pfn = if n == PAGE_BYTES || fresh(index) {
+            object.page_for_overwrite(index)
+        } else {
+            object.page_for_write(index)
+        }
+        .map_err(errno)?;
         let mut r = Ok(0);
         object.access(pfn, &mut |p| r = uio.copy_in(&mut p[within..within + n]));
         let moved = r?;

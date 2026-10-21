@@ -170,6 +170,59 @@ impl<B: BlockIo> Ufs<B> {
         clear: bool,
         metadata: bool,
     ) -> Result<u64, Error> {
+        self.balloc_in(
+            cx, sum, ino, ip, offset, len, reserve, clear, metadata, None,
+        )
+    }
+
+    /// As [`Self::balloc`] for a regular file whose caller clears new
+    /// space in memory, as FreeBSD clears a buffer (`vfs_bio_clrbuf`)
+    /// rather than the disk: a newly allocated block is not zeroed here,
+    /// and its byte range in the file goes into `new`. The caller writes
+    /// all of it, zeros where it has nothing else, before the pointer to
+    /// it may reach the disk (soft updates wait for every byte of new
+    /// space). Fragments grown in place or moved are still zeroed past
+    /// their old end on the disk, by [`Self::realloccg`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn balloc_new(
+        &self,
+        cx: &B::Cx,
+        sum: &mut Summary,
+        ino: u32,
+        ip: &mut Inode,
+        offset: u64,
+        len: u64,
+        reserve: Reserve,
+        new: &mut Vec<(u64, u64)>,
+    ) -> Result<u64, Error> {
+        self.balloc_in(
+            cx,
+            sum,
+            ino,
+            ip,
+            offset,
+            len,
+            reserve,
+            false,
+            false,
+            Some(new),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn balloc_in(
+        &self,
+        cx: &B::Cx,
+        sum: &mut Summary,
+        ino: u32,
+        ip: &mut Inode,
+        offset: u64,
+        len: u64,
+        reserve: Reserve,
+        clear: bool,
+        metadata: bool,
+        mut new_space: Option<&mut Vec<(u64, u64)>>,
+    ) -> Result<u64, Error> {
         let sb = &self.sb;
         let bsize = u64::from(sb.bsize);
         let fsize = u64::from(sb.fsize);
@@ -239,13 +292,17 @@ impl<B: BlockIo> Ufs<B> {
             }
             if clear && !metadata {
                 self.zero_data(cx, new * fsize, nsize)?;
+            } else if let Some(v) = new_space.as_deref_mut() {
+                v.push((lbn * bsize, nsize));
             }
             return Ok(new);
         }
         // Through the indirect blocks, making missing ones on the way; if
         // the data block cannot be had, those go again (FreeBSD's `fail:`).
         let mut fresh = Vec::new();
-        let r = self.balloc_indirect(cx, sum, ino, ip, lbn, reserve, clear, metadata, &mut fresh);
+        let r = self.balloc_indirect(
+            cx, sum, ino, ip, lbn, reserve, clear, metadata, &mut fresh, new_space,
+        );
         if r.is_err() && !fresh.is_empty() {
             self.unwind_indirects(cx, sum, ino, ip, &fresh);
         }
@@ -267,6 +324,7 @@ impl<B: BlockIo> Ufs<B> {
         clear: bool,
         metadata: bool,
         fresh: &mut Vec<(u64, Pointer)>,
+        new_space: Option<&mut Vec<(u64, u64)>>,
     ) -> Result<u64, Error> {
         let sb = &self.sb;
         let bsize = u64::from(sb.bsize);
@@ -314,6 +372,8 @@ impl<B: BlockIo> Ufs<B> {
         ip.blocks += bsize / DEV_BSIZE;
         if clear && !metadata {
             self.zero_data(cx, new * fsize, bsize)?;
+        } else if let Some(v) = new_space {
+            v.push((lbn * bsize, bsize));
         }
         self.ind_set(cx, blk, slot, new)?;
         if metadata {

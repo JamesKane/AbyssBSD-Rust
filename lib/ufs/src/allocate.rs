@@ -99,6 +99,7 @@ impl<B: BlockIo> Ufs<B> {
     /// Reads group `cg`'s header, checked, and calls `f` with it.
     fn with_group<R>(&self, cx: &B::Cx, cg: u32, f: impl FnOnce(&Cg<'_>) -> R) -> Result<R, Error> {
         let sb = &self.sb;
+        let hashed = self.io.hashes_groups();
         let mut f = Some(f);
         let mut out = Err(Error::Io);
         self.io.read(
@@ -106,7 +107,7 @@ impl<B: BlockIo> Ufs<B> {
             sb.cgtod(cg) * u64::from(sb.fsize),
             idx(sb.cgsize),
             &mut |b| {
-                out = cg::verify(sb, b, cg).map(|()| {
+                out = cg::check(sb, b, cg, !hashed).map(|()| {
                     let mut copy = b.to_vec();
                     (f.take().expect("called once"))(&Cg::new(sb, &mut copy))
                 });
@@ -164,6 +165,7 @@ impl<B: BlockIo> Ufs<B> {
         f: impl FnOnce(&mut Cg<'_>) -> R,
     ) -> Result<R, Error> {
         let sb = &self.sb;
+        let hashed = self.io.hashes_groups();
         let mut f = Some(f);
         let mut out = Err(Error::Io);
         self.io.modify(
@@ -173,9 +175,11 @@ impl<B: BlockIo> Ufs<B> {
             Fill::Read,
             Mode::Delayed,
             &mut |b| {
-                out = cg::verify(sb, b, cg).map(|()| {
+                out = cg::check(sb, b, cg, !hashed).map(|()| {
                     let r = (f.take().expect("called once"))(&mut Cg::new(sb, b));
-                    cg::update_ckhash(sb, b);
+                    if !hashed {
+                        cg::update_ckhash(sb, b);
+                    }
                     r
                 });
             },

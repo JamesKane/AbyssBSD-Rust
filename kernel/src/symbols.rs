@@ -43,6 +43,22 @@ pub(crate) fn lookup(addr: u64) -> Option<(&'static [u8], u64)> {
     Some((sym.name, off))
 }
 
+/// Every function symbol: run-time start, size, and name, sorted by start
+/// (for many lookups: [`lookup`] scans the table).
+pub(crate) fn functions() -> alloc::vec::Vec<(u64, u64, &'static [u8])> {
+    let Some(s) = *SYMBOLS.lock() else {
+        return alloc::vec::Vec::new();
+    };
+    let mut v: alloc::vec::Vec<_> = s
+        .table
+        .symbols()
+        .filter(|f| f.is_function && f.size > 0)
+        .map(|f| (f.value.wrapping_add(s.slide), f.size, f.name))
+        .collect();
+    v.sort_unstable_by_key(|&(start, _, _)| start);
+    v
+}
+
 /// Displays an address with its symbol: `0xffff… name+0x1c`.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Symbolized {

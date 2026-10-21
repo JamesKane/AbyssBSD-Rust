@@ -461,6 +461,21 @@ impl Superblock {
         self.cgbase(cg) + u64::from(self.cblkno)
     }
 
+    /// The group whose header block starts at byte `offset`, if one does.
+    #[must_use]
+    pub fn group_at(&self, offset: u64) -> Option<u32> {
+        let fsize = u64::from(self.fsize);
+        if fsize == 0 || !offset.is_multiple_of(fsize) {
+            return None;
+        }
+        let rel = (offset / fsize).checked_sub(u64::from(self.cblkno))?;
+        let fpg = u64::from(self.fpg);
+        if fpg == 0 || !rel.is_multiple_of(fpg) {
+            return None;
+        }
+        u32::try_from(rel / fpg).ok().filter(|&cg| cg < self.ncg)
+    }
+
     /// Group `cg`'s first data fragment (`cgdmin`, also `cgmeta`).
     #[must_use]
     pub fn cgdmin(&self, cg: u32) -> u64 {

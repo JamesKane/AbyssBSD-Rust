@@ -80,13 +80,17 @@ loader prints before symbolizing addresses.
 Performance comparison against FreeBSD (on the build server; PERFORMANCE.md §6):
 
 ```
-cargo xtask --remote perf [--suite p2|p3|p4|p5|diag] [--runs N] [--prepare] [--freebsd-only]
+cargo xtask --remote perf [--suite p2|p3|p4|p5|diag] [--runs N] [--prepare]
+                          [--freebsd-only | --abyss-only [--prof]]
 cargo xtask --remote fetch-base [--arch <a|all>]   # base.txz, SHA-256 pinned: /rescue image, sysroot
 cargo xtask --remote freebsd-shell                 # the boot-to-shell script against FreeBSD
 ```
 
 `--freebsd-only` records FreeBSD's numbers alone, for a suite AbyssBSD cannot run yet (`p4`
-until P4.7). `fetch-base` keeps each architecture's `base.txz` under
+until P4.7). `--abyss-only` runs AbyssBSD alone, for investigating; with `--prof` it boots with
+`abyss.prof`, the kernel's sampling profiler (`kernel/src/prof.rs`), and prints its report for
+each benchmark: the functions sampled most (every CPU every 100 µs), the hottest with their
+callers, and the time spent waiting for the disk, by the waiter's call chain. `fetch-base` keeps each architecture's `base.txz` under
 `~/abyss/dist/15.1-RELEASE/<arch>/`: the archive, `root/` (`/rescue`, `/lib`, `/usr/include`,
 `/usr/lib`; a sysroot for static test binaries), and `rescue.tar`. Run without `--remote` on a
 workstation, it copies `rescue.tar` and a trimmed sysroot (headers, start files, static libraries)

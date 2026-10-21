@@ -11,6 +11,7 @@
 
 #![cfg_attr(not(feature = "ktest"), allow(dead_code))] // the syscalls (P4.2) use it
 
+use alloc::vec::Vec;
 use core::marker::PhantomData;
 use core::mem::{MaybeUninit, size_of};
 
@@ -100,6 +101,32 @@ pub(crate) fn copy_in_str(src: u64, buf: &mut [u8]) -> Result<usize, StrError> {
         if let Some(nul) = buf[done..done + n].iter().position(|&b| b == 0) {
             return Ok(done + nul);
         }
+        done += n;
+    }
+    Err(StrError::TooLong)
+}
+
+/// Copies in the NUL-terminated string at `src`, which with its NUL must
+/// fit in `max` bytes, without the NUL. It goes in small pieces, so a
+/// short string (a path, mostly) costs little whatever `max` is.
+pub(crate) fn copy_in_str_vec(src: u64, max: usize) -> Result<Vec<u8>, StrError> {
+    const PIECE: usize = 128;
+    let page = vm::PAGE_SIZE;
+    let mut piece = [0u8; PIECE];
+    let mut out = Vec::new();
+    let mut done = 0;
+    while done < max {
+        let at = src
+            .checked_add(u64::try_from(done).map_err(|_| StrError::Fault)?)
+            .ok_or(StrError::Fault)?;
+        let to_page = usize::try_from(page - at % page).unwrap_or(usize::MAX);
+        let n = to_page.min(PIECE).min(max - done);
+        copy_in(&mut piece[..n], at).map_err(|_| StrError::Fault)?;
+        if let Some(nul) = piece[..n].iter().position(|&b| b == 0) {
+            out.extend_from_slice(&piece[..nul]);
+            return Ok(out);
+        }
+        out.extend_from_slice(&piece[..n]);
         done += n;
     }
     Err(StrError::TooLong)

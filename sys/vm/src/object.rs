@@ -89,6 +89,15 @@ pub trait Pager: Send + Sync {
     fn write_back(&self, _index: PageIndex, _page: &[u8]) -> Result<(), PagerError> {
         Ok(())
     }
+    /// Writes the pages from `index` on back, from `buf` (whole pages, at
+    /// most [`Self::max_run`]): one transfer where their blocks are
+    /// contiguous (a cluster, as FreeBSD's `cluster_write`). May sleep.
+    fn write_back_run(&self, index: PageIndex, buf: &[u8]) -> Result<(), PagerError> {
+        for (i, page) in (index..).zip(buf.as_chunks::<PAGE_BYTES>().0) {
+            self.write_back(i, page)?;
+        }
+        Ok(())
+    }
 }
 
 /// Why a page lookup found nothing to map.
@@ -559,6 +568,16 @@ impl Object {
         }
     }
 
+    /// Page `index` of this object to overwrite or to start from zeros:
+    /// held, or a new zeroed page, never read from the pager.
+    pub fn page_for_overwrite(&self, index: PageIndex) -> Result<Pfn, LookupError> {
+        if let Some(pfn) = self.page_here(index) {
+            return Ok(pfn);
+        }
+        self.get_or_insert(index, None)
+            .ok_or(LookupError::OutOfMemory)
+    }
+
     /// Calls `f` with page `pfn`'s contents (a page of this object).
     pub fn access(&self, pfn: Pfn, f: &mut dyn FnMut(&mut [u8])) {
         self.pages_ops.access(pfn, f);
@@ -630,14 +649,37 @@ impl Object {
             }
             out
         };
+        // Runs of consecutive pages go back together.
+        let max_run = usize::try_from(pager.max_run().max(1)).unwrap_or(1);
         let mut result = Ok(());
-        for (i, pfn) in todo {
+        let mut rest = todo.as_slice();
+        while let Some(&(first, _)) = rest.first() {
+            let len = rest
+                .iter()
+                .zip(first..)
+                .take(max_run)
+                .take_while(|&(&(i, _), want)| i == want)
+                .count();
+            let (run, after) = rest.split_at(len);
+            rest = after;
             let mut r = Ok(());
-            self.pages_ops
-                .access(pfn, &mut |page| r = pager.write_back(i, page));
+            if let [(i, pfn)] = run {
+                self.pages_ops
+                    .access(*pfn, &mut |page| r = pager.write_back(*i, page));
+            } else {
+                let mut buf = Vec::with_capacity(run.len() * PAGE_BYTES);
+                for &(_, pfn) in run {
+                    self.pages_ops
+                        .access(pfn, &mut |page| buf.extend_from_slice(page));
+                }
+                r = pager.write_back_run(first, &buf);
+            }
             if r.is_err() {
-                if self.inner.lock().dirty.insert(i) {
-                    DIRTY.fetch_add(1, Ordering::Relaxed);
+                let mut inner = self.inner.lock();
+                for &(i, _) in run {
+                    if inner.dirty.insert(i) {
+                        DIRTY.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
                 result = r;
             }

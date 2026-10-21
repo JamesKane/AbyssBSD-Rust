@@ -112,6 +112,7 @@ pub(crate) fn ap_main(_arg: usize) -> ! {
     let cpu = hal::cpu_id();
     crate::intc::init_ap(cpu);
     crate::time::init_cpu();
+    crate::prof::start_cpu();
     crate::threads::init_fpu(false);
     arch::user::init_cpu();
     crate::topology::record_this_cpu(cpu);

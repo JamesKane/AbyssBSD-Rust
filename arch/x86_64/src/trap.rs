@@ -309,6 +309,11 @@ pub(crate) unsafe fn load_idt() {
 pub struct Interrupt {
     /// The IDT vector (32 or above).
     pub vector: u8,
+    /// Where it interrupted, its frame pointer, and whether that was
+    /// user mode.
+    pub pc: u64,
+    pub fp: u64,
+    pub from_user: bool,
 }
 
 /// Called from the common stub with interrupts disabled.
@@ -328,7 +333,14 @@ fn handle(frame: &mut TrapFrame) {
         && vector >= 32
     {
         // SAFETY: defined by the kernel through `kernel_hooks!`.
-        unsafe { crate::abyss_interrupt(Interrupt { vector }) };
+        unsafe {
+            crate::abyss_interrupt(Interrupt {
+                vector,
+                pc: frame.rip,
+                fp: frame.rbp,
+                from_user: frame.cs & 3 != 0,
+            });
+        }
         return;
     }
     let trap = Trap::decode(frame);

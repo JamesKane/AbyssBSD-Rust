@@ -306,40 +306,143 @@ impl Disk {
         offset: u64,
         buf: Vec<u8>,
     ) -> (Vec<u8>, Result<(), BioError>) {
+        let hook = WAIT_HOOK.get();
+        let start = hook.map_or(0, |h| (h.now)());
         let (bio, waiter) = Waiter::bio(op, offset, buf);
         self.strategy(s, bio);
-        waiter.wait(s)
+        let r = waiter.wait(s);
+        if let Some(h) = hook {
+            (h.waited)((h.now)().saturating_sub(start));
+        }
+        r
     }
 
     /// Reads `len` bytes at `offset`, in requests of at most the disk's
-    /// largest transfer.
+    /// largest transfer, all sent before any is waited for.
     pub fn read(&self, s: &Sleepable, offset: u64, len: usize) -> Result<Vec<u8>, BioError> {
-        let mut out = Vec::with_capacity(len);
+        Ok(self
+            .read_parts(s, &[(offset, len)])?
+            .pop()
+            .unwrap_or_default())
+    }
+
+    /// Reads each of `parts` (offset and length), every request sent
+    /// before the first is waited for, so the disk works on them together
+    /// (as FreeBSD's clustered reads are in flight at once). Returns each
+    /// part's bytes.
+    pub fn read_parts(
+        &self,
+        s: &Sleepable,
+        parts: &[(u64, usize)],
+    ) -> Result<Vec<Vec<u8>>, BioError> {
         let chunk = self.max_transfer.max(self.sector_size as usize);
-        while out.len() < len {
-            let n = chunk.min(len - out.len());
-            let (buf, r) = self.sync(s, BioOp::Read, offset + out.len() as u64, alloc::vec![0; n]);
-            r?;
-            out.extend_from_slice(&buf);
+        let waiters = self.start_hooked(|| {
+            let mut waiters = Vec::new();
+            for &(offset, len) in parts {
+                let mut done = 0;
+                while done < len {
+                    let n = chunk.min(len - done);
+                    let at = offset + done as u64;
+                    let (bio, w) = Waiter::bio(BioOp::Read, at, alloc::vec![0; n]);
+                    self.strategy(s, bio);
+                    waiters.push(w);
+                    done += n;
+                }
+            }
+            waiters
+        });
+        let mut out = Vec::with_capacity(parts.len());
+        let mut results = self.wait_all(s, waiters).into_iter();
+        let mut failed = None;
+        for &(_, len) in parts {
+            let mut part = Vec::with_capacity(len);
+            while part.len() < len {
+                let Some((buf, r)) = results.next() else {
+                    break;
+                };
+                if let Err(e) = r {
+                    failed.get_or_insert(e);
+                }
+                if part.is_empty() && buf.len() == len {
+                    part = buf;
+                } else {
+                    part.extend_from_slice(&buf);
+                }
+            }
+            out.push(part);
         }
-        Ok(out)
+        failed.map_or(Ok(out), Err)
     }
 
     /// Writes `data` at `offset`, in requests of at most the disk's largest
-    /// transfer.
+    /// transfer, all sent before any is waited for.
     pub fn write(&self, s: &Sleepable, offset: u64, data: &[u8]) -> Result<(), BioError> {
+        self.write_parts(s, &[(offset, data)])
+    }
+
+    /// Writes each of `parts` (offset and bytes), every request sent
+    /// before the first is waited for.
+    pub fn write_parts(&self, s: &Sleepable, parts: &[(u64, &[u8])]) -> Result<(), BioError> {
         let chunk = self.max_transfer.max(self.sector_size as usize);
-        for (i, piece) in data.chunks(chunk).enumerate() {
-            let at = offset + (i * chunk) as u64;
-            self.sync(s, BioOp::Write, at, piece.to_vec()).1?;
+        let waiters = self.start_hooked(|| {
+            let mut waiters = Vec::new();
+            for &(offset, data) in parts {
+                for (i, piece) in data.chunks(chunk).enumerate() {
+                    let at = offset + (i * chunk) as u64;
+                    let (bio, w) = Waiter::bio(BioOp::Write, at, piece.to_vec());
+                    self.strategy(s, bio);
+                    waiters.push(w);
+                }
+            }
+            waiters
+        });
+        self.wait_all(s, waiters)
+            .into_iter()
+            .find_map(|(_, r)| r.err())
+            .map_or(Ok(()), Err)
+    }
+
+    /// Runs `start`, which sends requests, noting when for the wait hook
+    /// (which [`Self::wait_all`] then tells).
+    fn start_hooked<T>(&self, start: impl FnOnce() -> T) -> (T, u64) {
+        let begun = WAIT_HOOK.get().map_or(0, |h| (h.now)());
+        (start(), begun)
+    }
+
+    /// Waits for every request sent, in order.
+    fn wait_all(
+        &self,
+        s: &Sleepable,
+        (waiters, begun): (Vec<Arc<Waiter>>, u64),
+    ) -> Vec<(Vec<u8>, Result<(), BioError>)> {
+        let out = waiters.iter().map(|w| w.wait(s)).collect();
+        if let Some(h) = WAIT_HOOK.get() {
+            (h.waited)((h.now)().saturating_sub(begun));
         }
-        Ok(())
+        out
     }
 
     /// Makes earlier writes durable.
     pub fn flush(&self, s: &Sleepable) -> Result<(), BioError> {
         self.sync(s, BioOp::Flush, 0, Vec::new()).1
     }
+}
+
+/// Told of each synchronous request's wait, for profiling.
+#[derive(Clone, Copy, Debug)]
+pub struct WaitHook {
+    /// Nanoseconds since some start.
+    pub now: fn() -> u64,
+    /// A synchronous request took this many nanoseconds, its waiter's
+    /// call chain still on the stack.
+    pub waited: fn(u64),
+}
+
+static WAIT_HOOK: sync::Once<WaitHook> = sync::Once::new();
+
+/// Has every synchronous request report its wait to `hook` from now on.
+pub fn set_wait_hook(hook: WaitHook) {
+    let _ = WAIT_HOOK.set(hook);
 }
 
 /// FreeBSD's announcement size: MB under 10 GB, else GB.

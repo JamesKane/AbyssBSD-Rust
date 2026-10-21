@@ -13,7 +13,7 @@
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::any::Any;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -21,7 +21,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use abi::errno::Errno;
 use sched::Sleepable;
 use sched::lock::{LockClass, Mutex};
-use sync::SpinLock;
+use sync::{Once, SpinLock};
 
 use crate::node::{DirectoryNode, NodeOps};
 use crate::vnode::Vnode;
@@ -169,6 +169,9 @@ pub struct Mount {
     rename: Mutex<()>,
     /// The directory this file system is mounted on (`None` for the root).
     covered: SpinLock<Option<Arc<Vnode>>>,
+    /// Its root vnode, once looked up, so crossing into the file system
+    /// costs no table lookup (FreeBSD's `mnt_rootvnode`).
+    root: Once<Weak<Vnode>>,
 }
 
 impl core::fmt::Debug for Mount {
@@ -222,6 +225,7 @@ impl Mount {
             loading: Mutex::new(&VGET, ()),
             rename: Mutex::new(&RENAME, ()),
             covered: SpinLock::new(None),
+            root: Once::new(),
         })
     }
 
@@ -299,7 +303,14 @@ impl Mount {
 
     /// The root directory's vnode.
     pub fn root(self: &Arc<Self>, s: &Sleepable) -> Result<Arc<Vnode>, Errno> {
-        self.vget(s, self.fs.root())
+        if let Some(v) = self.root.get().and_then(Weak::upgrade)
+            && !v.is_dying()
+        {
+            return Ok(v);
+        }
+        let v = self.vget(s, self.fs.root())?;
+        let _ = self.root.set(Arc::downgrade(&v));
+        Ok(v)
     }
 
     /// The vnode for inode `ino`: the one in core, or a new one the file

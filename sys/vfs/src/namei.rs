@@ -23,6 +23,7 @@
 //!
 //! Behavior reference: sys/kern/vfs_lookup.c, sys/kern/vfs_cache.c.
 
+use alloc::borrow::Cow;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
@@ -330,7 +331,8 @@ impl Namespace {
         if path.len() >= PATH_MAX {
             return Err(Errno::ENAMETOOLONG);
         }
-        let mut rest = path.to_vec();
+        // The path as given until a symbolic link rewrites it.
+        let mut rest: Cow<'_, [u8]> = Cow::Borrowed(path);
         let mut at = 0;
         let mut links = 0;
         // How many levels below `start` the lookup is, for `beneath`.
@@ -422,7 +424,7 @@ impl Namespace {
                 if joined.len() >= PATH_MAX {
                     return Err(Errno::ENAMETOOLONG);
                 }
-                rest = joined;
+                rest = Cow::Owned(joined);
                 at = 0;
                 continue;
             }

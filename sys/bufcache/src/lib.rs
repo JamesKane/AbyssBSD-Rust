@@ -19,11 +19,14 @@
 //! buffers nobody holds are evicted, least recently used first, past the
 //! cache's size limit.
 //!
-//! A file system that orders its metadata writes (UFS with soft updates)
-//! gives the cache a [`WriteHook`]: every write of a buffer asks it first,
-//! and it may hand back a copy with changes that must not reach the disk
-//! yet rolled back (FreeBSD's `initiate_write` dependency hooks). Such a
-//! buffer stays dirty after the write, for the rolled-back changes.
+//! A file system may give the cache a [`BufHook`]. It checks each block
+//! read from the device (a check-hash), and every write of a buffer asks
+//! it first: it may finish the bytes (setting a check-hash, as FreeBSD
+//! does for cylinder groups as they go out), and a file system ordering
+//! its metadata writes (UFS with soft updates) may hand back a copy with
+//! changes that must not reach the disk yet rolled back (FreeBSD's
+//! `initiate_write` dependency hooks). Such a buffer stays dirty after the
+//! write, for the rolled-back changes.
 //!
 //! A buffer's lock is sleepable and taken under vnode locks, before any
 //! of the disk's own (and before a hook's).
@@ -62,13 +65,20 @@ pub trait BlockDev: Send + Sync {
     fn flush(&self, s: &Sleepable) -> Result<(), IoError>;
 }
 
-/// What a file system ordering its writes learns of each buffer write,
-/// with the buffer's lock held throughout.
-pub trait WriteHook: Send + Sync {
-    /// A write of the buffer at `offset` holding `bytes` begins: the bytes
-    /// to write instead, if some changes in them may not reach the disk
-    /// yet.
-    fn start(&self, s: &Sleepable, offset: u64, bytes: &[u8]) -> Option<Vec<u8>>;
+/// What a file system learns of its buffers' transfers, with the buffer's
+/// lock held throughout: each read from the device, to check it, and each
+/// write, to finish it or hold changes back.
+pub trait BufHook: Send + Sync {
+    /// The buffer at `offset` was just read from the device: whether its
+    /// bytes are sound (a check-hash). An error fails the read, and the
+    /// buffer is read again next time.
+    fn filled(&self, _s: &Sleepable, _offset: u64, _bytes: &[u8]) -> Result<(), IoError> {
+        Ok(())
+    }
+    /// A write of the buffer at `offset` holding `bytes` begins. The hook
+    /// may finish them in place (a check-hash), and returns the bytes to
+    /// write instead, if some changes in them may not reach the disk yet.
+    fn start(&self, s: &Sleepable, offset: u64, bytes: &mut [u8]) -> Option<Vec<u8>>;
     /// That write ended; `ok` if the device took it.
     fn done(&self, s: &Sleepable, offset: u64, ok: bool);
 }
@@ -129,7 +139,7 @@ pub struct BufCache {
     ticks: AtomicU64,
     /// Nanoseconds since some start, for dirtying times.
     clock: fn() -> u64,
-    hook: SpinLock<Option<Arc<dyn WriteHook>>>,
+    hook: SpinLock<Option<Arc<dyn BufHook>>>,
 }
 
 impl core::fmt::Debug for BufCache {
@@ -178,7 +188,7 @@ impl BufCache {
     }
 
     /// Has every write from now on go through `hook`.
-    pub fn set_hook(&self, hook: Arc<dyn WriteHook>) {
+    pub fn set_hook(&self, hook: Arc<dyn BufHook>) {
         *self.hook.lock() = Some(hook);
     }
 
@@ -187,7 +197,7 @@ impl BufCache {
     /// the device failed.
     fn write_out(&self, s: &Sleepable, offset: u64, d: &mut Data) -> Result<(), IoError> {
         let hook = self.hook.lock().clone();
-        let rolled = hook.as_ref().and_then(|h| h.start(s, offset, &d.bytes));
+        let rolled = hook.as_ref().and_then(|h| h.start(s, offset, &mut d.bytes));
         let r = self
             .dev
             .write(s, offset, rolled.as_deref().unwrap_or(&d.bytes));
@@ -369,6 +379,10 @@ impl BufCache {
     fn validate(&self, s: &Sleepable, offset: u64, d: &mut Data) -> Result<(), IoError> {
         if !d.valid {
             self.dev.read(s, offset, &mut d.bytes)?;
+            let hook = self.hook.lock().clone();
+            if let Some(h) = hook {
+                h.filled(s, offset, &d.bytes)?;
+            }
             d.valid = true;
         }
         Ok(())

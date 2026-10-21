@@ -79,6 +79,7 @@ pub(crate) fn send_resched(cpu: CpuId) {
 /// then switches threads if the handler asked for it.
 pub(crate) fn dispatch(irq: arch::Interrupt) {
     hal::interrupt::enter();
+    crate::prof::interrupted(irq.pc, irq.fp, irq.from_user);
     handle(irq);
     hal::interrupt::exit();
     sched::preempt_point();
@@ -104,7 +105,7 @@ fn handle(irq: arch::Interrupt) {
     }
     #[cfg(target_arch = "aarch64")]
     {
-        let _ = irq.from_user;
+        let _ = irq;
         let Some(id) = arch::gic::ack() else {
             return;
         };
