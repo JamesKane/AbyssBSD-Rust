@@ -346,11 +346,14 @@ impl DirectoryNode for TmpNode {
             ino
         };
         let (data, nlink, rdev) = match node {
-            NewNode::Regular => (
-                Data::Regular(vm::object::Object::anonymous(self.fs.pages), 0),
-                1,
-                0,
-            ),
+            NewNode::Regular => {
+                // The file holds its object, so no mapping is ever its
+                // only one: unmapping must not free the file's pages
+                // (FreeBSD clears `OBJ_ONEMAPPING` on tmpfs objects).
+                let object = vm::object::Object::anonymous(self.fs.pages);
+                object.set_shared();
+                (Data::Regular(object, 0), 1, 0)
+            }
             NewNode::Directory => (Data::Directory(Dir::new(self.ino)), 2, 0),
             NewNode::Symlink(t) => (Data::Symlink(t.clone()), 1, 0),
             NewNode::CharDevice(rdev) | NewNode::BlockDevice(rdev) => (Data::Other, 1, *rdev),

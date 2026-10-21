@@ -36,10 +36,26 @@ const ROUNDS: usize = 3;
 /// lines itself).
 fn run_ubench(s: &Sleepable) -> bool {
     const PATH: &[u8] = b"/usr/bench/ubench";
-    match crate::proc::Process::spawn(s, PATH, &[PATH, b"p4"], &[], None) {
+    run_waiting(s, PATH, &[PATH, b"p4"])
+}
+
+/// The file systems' suite: as FreeBSD's `rc.local` does, copies `ubench`,
+/// `tree.tar`, and `fsx` off the bench disk (`vtbd1`) into `/tmp`, then
+/// runs `/tmp/ubench p5`, which formats and mounts its own file systems.
+fn run_ubench_p5(s: &Sleepable) -> bool {
+    const SH: &[u8] = b"/rescue/sh";
+    const SCRIPT: &[u8] = b"mount -o ro /dev/vtbd1 /mnt && \
+        cp /mnt/ubench /mnt/tree.tar /mnt/fsx /tmp/ && umount /mnt && exec /tmp/ubench p5";
+    run_waiting(s, SH, &[SH, b"-c", SCRIPT])
+}
+
+/// Runs `path` and waits; whether it exited with 0.
+fn run_waiting(s: &Sleepable, path: &[u8], argv: &[&[u8]]) -> bool {
+    const ENV: &[&[u8]] = &[b"PATH=/rescue"];
+    match crate::proc::Process::spawn(s, path, argv, ENV, None) {
         Ok(p) => p.wait(s) == crate::proc::Exit::Code(0),
         Err(e) => {
-            kprintln!("bench: cannot run /usr/bench/ubench: {e:?}");
+            kprintln!("bench: cannot run {}: {e:?}", path.escape_ascii());
             false
         }
     }
@@ -47,8 +63,10 @@ fn run_ubench(s: &Sleepable) -> bool {
 
 /// Runs `suite`; returns whether it was known and ran.
 pub(crate) fn run(s: &Sleepable, suite: &str) -> bool {
-    if suite == "p4" {
-        return run_ubench(s);
+    match suite {
+        "p4" => return run_ubench(s),
+        "p5" => return run_ubench_p5(s),
+        _ => {}
     }
     let body: fn(&Sleepable) = match suite {
         "p2" => suite_p2,

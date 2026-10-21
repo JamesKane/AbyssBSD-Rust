@@ -756,12 +756,15 @@ pub(crate) fn md_image(arch: Arch, extra: &[(&str, &Path)]) -> Result<Option<Vec
         .collect::<std::io::Result<_>>()?;
     sources.retain(|p| p.extension().is_some_and(|x| x == "c"));
     sources.sort();
-    // Mount points: devfs's, tmpfs's, and an empty one for tests.
+    // Mount points: devfs's, tmpfs's, an empty one for tests, and the
+    // benchmarks'.
     append(&mut md, "boot/", b'5', 0o755, &[])?;
     append(&mut md, "boot/efi/", b'5', 0o755, &[])?;
     append(&mut md, "dev/", b'5', 0o555, &[])?;
     append(&mut md, "mnt/", b'5', 0o755, &[])?;
     append(&mut md, "tmp/", b'5', 0o1777, &[])?;
+    append(&mut md, "bench/", b'5', 0o755, &[])?;
+    append(&mut md, "benchtmp/", b'5', 0o755, &[])?;
     let mut dir = String::new();
     for part in TESTS_DIR.split('/') {
         dir = if dir.is_empty() {

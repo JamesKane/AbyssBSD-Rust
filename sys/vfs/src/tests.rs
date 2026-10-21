@@ -499,6 +499,9 @@ fn tmpfs_pages_holes_and_freeing() {
     assert!(all[..50].iter().all(|&b| b == 7) && all[50..].iter().all(|&b| b == 0));
     // A holder of the object (a mapping) keeps the pages past the end.
     let object = f.object(&s).unwrap();
+    // The file holds it too, so unmapping a mapping of it (a program's
+    // text) must not free the file's pages.
+    assert!(!object.one_mapping());
     write_all(&f, 8192, b"x");
     assert_eq!(pages.live(), 2);
     ops::setattr(&s, &f, &size(10), &Cred::root(), false).unwrap();

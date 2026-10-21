@@ -619,10 +619,22 @@ fn make_bench_disk(out: &Path, bench: &Path, suite: &str, extras: &[PathBuf]) ->
     let nvme = if suite == "p5" { 4 << 30 } else { 64 << 20 };
     fs::File::create(out.join("nvme.img"))?.set_len(nvme)?;
     let disk = out.join("bench-disk.img");
-    // Sized to fit, with room for makefs's own overhead.
+    // Sized to fit, with room for makefs's own overhead. UFS2 (makefs
+    // makes UFS1 by default), which AbyssBSD's suites mount too.
     util::run(
         Command::new("makefs")
-            .args(["-t", "ffs", "-M", "16m", "-f", "64", "-b", "10%"])
+            .args([
+                "-t",
+                "ffs",
+                "-o",
+                "version=2",
+                "-M",
+                "16m",
+                "-f",
+                "64",
+                "-b",
+                "10%",
+            ])
             .arg(&disk)
             .arg(&dir),
     )?;
