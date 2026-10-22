@@ -1059,12 +1059,16 @@ impl vfs::RegularNode for UfsNode {
         let bsize = u64::from(shared.ufs.superblock().bsize);
         let ino = self.cell.ino;
         let mut old_size = 0;
+        // How far blocks were given: out of space partway, the write is
+        // short (FreeBSD's `ffs_write` stops at the block that failed).
+        let mut reach = offset;
         // The file's byte ranges of newly allocated blocks: cleared in the
         // page cache, not on the disk.
         let mut new = Vec::new();
         // Give the range blocks, the size growing as FreeBSD's `ffs_write`
-        // does, block by block. Out of space at once with soft updates
-        // waiting to free some, it waits for that and tries again.
+        // does, block by block. Out of space with soft updates waiting to
+        // free some, it waits for that and tries again; still out, the
+        // write is short.
         for attempt in 0..2 {
             let mut st = self.cell.state.lock(s);
             st.data_gen = st.data_gen.wrapping_add(1);
@@ -1087,11 +1091,13 @@ impl vfs::RegularNode for UfsNode {
                 );
                 st.dirty = true;
                 if let Err(e) = r {
+                    // Out of space, the first time: wait for what soft
+                    // updates will free, then go again (blocks given stay).
+                    if e == ufs::Error::NoSpace && attempt == 0 {
+                        full = true;
+                        break;
+                    }
                     if at == offset {
-                        if e == ufs::Error::NoSpace && attempt == 0 {
-                            full = true;
-                            break;
-                        }
                         return Err(errno(e));
                     }
                     break;
@@ -1113,13 +1119,18 @@ impl vfs::RegularNode for UfsNode {
                 }
             }
             self.cell.publish(&st);
+            reach = at;
             if !full {
                 break;
             }
             drop(sum);
             drop(st);
             if !shared.flush_frees(s) {
-                return Err(Errno::ENOSPC);
+                // Nothing to wait for: short, or nothing at all.
+                if reach == offset {
+                    return Err(Errno::ENOSPC);
+                }
+                break;
             }
         }
         // Past the old end, what lies between reads as zeros.
@@ -1129,7 +1140,11 @@ impl vfs::RegularNode for UfsNode {
         // Pages past the old end start from zeros (new blocks' pages are
         // in already); so do pages the write covers whole.
         let fresh = |page: PageIndex| page * PAGE >= old_size;
-        let written = vfs::pagecache::write_fresh(&object, offset, uio, &fresh);
+        let mut capped = Capped {
+            uio,
+            left: usize::try_from(reach - offset).unwrap_or(usize::MAX),
+        };
+        let written = vfs::pagecache::write_fresh(&object, offset, &mut capped, &fresh);
         let done = written.as_ref().map_or(0, |&n| n as u64);
         let mut st = self.cell.state.lock(s);
         st.data_gen = st.data_gen.wrapping_add(1);
@@ -1157,6 +1172,32 @@ impl vfs::RegularNode for UfsNode {
 
     fn object(&self) -> Option<Arc<Object>> {
         self.object.clone()
+    }
+}
+
+/// A write's source, cut to the bytes that have blocks.
+struct Capped<'a> {
+    uio: &'a mut dyn Uio,
+    left: usize,
+}
+
+impl Uio for Capped<'_> {
+    fn resid(&self) -> usize {
+        self.uio.resid().min(self.left)
+    }
+
+    fn copy_out(&mut self, data: &[u8]) -> Result<usize, Errno> {
+        let n = data.len().min(self.left);
+        let done = self.uio.copy_out(&data[..n])?;
+        self.left -= done;
+        Ok(done)
+    }
+
+    fn copy_in(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
+        let n = buf.len().min(self.left);
+        let done = self.uio.copy_in(&mut buf[..n])?;
+        self.left -= done;
+        Ok(done)
     }
 }
 

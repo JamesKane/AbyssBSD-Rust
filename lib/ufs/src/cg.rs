@@ -355,23 +355,71 @@ impl<'a> Cg<'a> {
         let bytes = fpg.div_ceil(8);
         let first = (start / 8).min(bytes.saturating_sub(1));
         let order = (first..bytes).chain(0..=first);
+        let want = RUN_BIT.get(idx(allocsiz)).copied().unwrap_or(0);
+        let mask = 0xff_u32 >> (8 - self.frag);
+        let map = &self.b[self.freeoff()..];
+        let mut found = None;
         for byte in order {
+            let bits = u32::from(map[idx(byte)]);
+            // Most bytes hold no run of the size: one lookup each.
+            if RUNS[idx(bits)] & want == 0 && self.frag == 8 {
+                continue;
+            }
             let base = byte * 8;
             // The blocks this byte covers (one, or several small ones).
             let mut bno = base;
             while bno < base + 8 {
-                if bno + self.frag <= fpg {
-                    let map = self.blkmap(bno);
-                    if let Some(pos) = exact_run(map, self.frag, allocsiz) {
-                        self.set_frotor(base);
-                        return Some(bno + pos);
-                    }
+                let block = (bits >> (bno % 8)) & mask;
+                if bno + self.frag <= fpg
+                    && RUNS[idx(block)] & want != 0
+                    && let Some(pos) = exact_run(block, self.frag, allocsiz)
+                {
+                    found = Some((base, bno + pos));
+                    break;
                 }
                 bno += self.frag;
             }
+            if found.is_some() {
+                break;
+            }
         }
-        None
+        let (base, bno) = found?;
+        self.set_frotor(base);
+        Some(bno)
     }
+}
+
+/// For each byte of a block's free map, the lengths of the runs of free
+/// fragments it holds, bounded by used ones or the edges: bit `n - 1` for
+/// a run of `n` (FreeBSD's `fragtbl`). A block's map has only its `frag`
+/// low bits, so the edges fall where they should.
+static RUNS: [u8; 256] = runs_table();
+
+/// The bit [`RUNS`] has for a run of each length (none for 0 or past 8).
+const RUN_BIT: [u8; 9] = [0, 1, 2, 4, 8, 16, 32, 64, 128];
+
+const fn runs_table() -> [u8; 256] {
+    let mut t = [0u8; 256];
+    let mut v = 0;
+    while v < 256 {
+        let mut runs = 0u8;
+        let mut len = 0;
+        let mut bit = 0;
+        while bit <= 8 {
+            if bit < 8 && v & (1 << bit) != 0 {
+                len += 1;
+            } else {
+                if len > 0 {
+                    runs |= 1 << (len - 1);
+                }
+                len = 0;
+            }
+            bit += 1;
+        }
+        t[v] = runs;
+        v += 1;
+    }
+    t
 }
 
 /// Where a run of exactly `len` set bits, bounded by clear bits or the
@@ -390,4 +438,23 @@ fn exact_run(map: u32, frag: u32, len: u32) -> Option<u32> {
         pos += run;
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RUNS, exact_run};
+
+    #[test]
+    fn runs_table_matches_exact_run() {
+        assert_eq!(RUNS[0], 0);
+        assert_eq!(RUNS[0xff], 1 << 7);
+        // Runs of 3 (bits 1..=3) and 2 (bits 5..=6).
+        assert_eq!(RUNS[0b0110_1110], 0b110);
+        for map in 0..256u32 {
+            for len in 1..=8 {
+                let has = RUNS[map as usize] & (1 << (len - 1)) != 0;
+                assert_eq!(has, exact_run(map, 8, len).is_some(), "{map:#x} {len}");
+            }
+        }
+    }
 }
