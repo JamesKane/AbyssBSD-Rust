@@ -1000,7 +1000,15 @@ impl Node for UfsNode {
     fn reclaim(self: Box<Self>, s: &Sleepable) {
         let shared = &self.fs;
         if let Some(o) = &self.object {
-            if shared.writable() {
+            // Unlinked (soft updates drop the disk's count later) and
+            // mapped by nobody: no one can read the data again, so it is
+            // not written, only let go; freeing the inode later cancels
+            // what waited for it (FreeBSD's dirty buffers of a removed
+            // file go with its truncation).
+            let unreachable = self.cell.state.lock(s).ip.effnlink == 0 && Arc::strong_count(o) == 1;
+            if unreachable {
+                o.truncate(0);
+            } else if shared.writable() {
                 let _ = o.sync(0, u64::MAX);
             }
             // Mappings may outlive the vnode: the object stays theirs.
