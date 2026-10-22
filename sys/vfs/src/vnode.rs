@@ -20,7 +20,7 @@ use abi::errno::Errno;
 use abi::stat::Stat;
 use sched::Sleepable;
 use sched::lock::{LockClass, ReadGuard, SxLock, WriteGuard};
-use sync::SpinLock;
+use sync::PreemptLock;
 
 use crate::mount::Mount;
 use crate::node::{Attr, Device, DirEntry, Kind, NodeOps};
@@ -70,16 +70,16 @@ pub struct Vnode {
     state: SxLock<State>,
     uses: AtomicU32,
     /// The file system mounted on this directory, if any.
-    mounted: SpinLock<Option<Arc<Mount>>>,
+    mounted: PreemptLock<Option<Arc<Mount>>>,
     /// That file system's root vnode, for lockless lookups to cross into
     /// it: published by mounting, cleared by unmounting before the root can
     /// go (the unmount waits out lockless readers).
     mounted_root: AtomicPtr<Vnode>,
     /// The entry that names this directory: its parent and its name, for
     /// `getcwd` (FreeBSD's `v_cache_dd`).
-    named: SpinLock<Named>,
+    named: PreemptLock<Named>,
     /// Its name-cache entries, so a purge finds them.
-    pub(crate) cache_links: SpinLock<crate::cache::Links>,
+    pub(crate) cache_links: PreemptLock<crate::cache::Links>,
     /// Advisory locks (`fcntl`, `flock`).
     lockf: crate::lockf::Lockf,
     /// When it was last looked up, in [`tick`]s: the reclaimer takes the
@@ -124,10 +124,10 @@ impl Vnode {
             ino,
             state: SxLock::new(&VNODE, State::Live(ops)),
             uses: AtomicU32::new(0),
-            mounted: SpinLock::new(None),
+            mounted: PreemptLock::new(None),
             mounted_root: AtomicPtr::new(core::ptr::null_mut()),
-            named: SpinLock::new(None),
-            cache_links: SpinLock::new(crate::cache::Links::new()),
+            named: PreemptLock::new(None),
+            cache_links: PreemptLock::new(crate::cache::Links::new()),
             lockf: crate::lockf::Lockf::new(),
             used: AtomicU64::new(tick()),
             dying: core::sync::atomic::AtomicBool::new(false),

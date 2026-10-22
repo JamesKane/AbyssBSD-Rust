@@ -35,7 +35,7 @@ use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
 use sched::lock::{Epoch, EpochGuard};
-use sync::{SpinGuard, SpinLock};
+use sync::{PreemptLock, PreemptLockGuard};
 
 use crate::NodeId;
 use crate::vnode::Vnode;
@@ -122,14 +122,14 @@ struct Node {
 /// A bucket: a list, newest first, changed under `lock` and read under
 /// it or in an epoch section.
 struct Bucket {
-    lock: SpinLock<()>,
+    lock: PreemptLock<()>,
     head: AtomicPtr<Node>,
 }
 
 impl Bucket {
     const fn new() -> Self {
         Self {
-            lock: SpinLock::new(()),
+            lock: PreemptLock::new(()),
             head: AtomicPtr::new(ptr::null_mut()),
         }
     }
@@ -155,7 +155,7 @@ impl Bucket {
     /// Unlinks the first node `f` picks; the caller holds the lock.
     fn unlink_first(
         &self,
-        _locked: &SpinGuard<'_, ()>,
+        _locked: &PreemptLockGuard<'_, ()>,
         f: impl Fn(&Node) -> bool,
     ) -> Option<Retired> {
         let mut link = &self.head;
@@ -178,7 +178,7 @@ impl Bucket {
     /// holds the lock.
     fn unlink_oldest(
         &self,
-        locked: &SpinGuard<'_, ()>,
+        locked: &PreemptLockGuard<'_, ()>,
         f: impl Fn(&Entry) -> bool,
     ) -> Option<Retired> {
         // SAFETY: under the lock.
@@ -191,7 +191,7 @@ impl Bucket {
 
     /// Puts `entry` at the head, returning its key; the caller holds the
     /// lock.
-    fn push(&self, _locked: &SpinGuard<'_, ()>, entry: Entry) -> Key {
+    fn push(&self, _locked: &PreemptLockGuard<'_, ()>, entry: Entry) -> Key {
         let hash = entry.hash;
         let node = Box::into_raw(Box::new(Node {
             entry,
@@ -228,7 +228,7 @@ impl Retired {
 }
 
 /// Nodes unlinked and waiting for a grace period.
-static RETIRED: SpinLock<Vec<Retired>> = SpinLock::new(Vec::new());
+static RETIRED: PreemptLock<Vec<Retired>> = PreemptLock::new(Vec::new());
 
 /// Frees what [`RETIRED`] holds once no reader can still see it, when a
 /// batch has gathered: each batch after a grace period. Thread context,

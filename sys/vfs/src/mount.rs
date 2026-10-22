@@ -21,7 +21,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use abi::errno::Errno;
 use sched::Sleepable;
 use sched::lock::{LockClass, Mutex};
-use sync::{Once, SpinLock};
+use sync::{Once, PreemptLock};
 
 use crate::node::{DirectoryNode, NodeOps};
 use crate::vnode::Vnode;
@@ -159,16 +159,16 @@ pub struct Mount {
     /// `MNT_*` flags now.
     flags: AtomicU64,
     /// Where it is mounted (`f_mntonname`).
-    on: SpinLock<Vec<u8>>,
+    on: PreemptLock<Vec<u8>>,
     fs: Box<dyn FileSystem>,
     /// The in-core vnodes by inode.
-    table: SpinLock<BTreeMap<u64, Arc<Vnode>>>,
+    table: PreemptLock<BTreeMap<u64, Arc<Vnode>>>,
     /// Serializes loads, so an inode is loaded once (docs/VFS.md §4.1).
     loading: Mutex<()>,
     /// Serializes renames between directories (docs/VFS.md §5).
     rename: Mutex<()>,
     /// The directory this file system is mounted on (`None` for the root).
-    covered: SpinLock<Option<Arc<Vnode>>>,
+    covered: PreemptLock<Option<Arc<Vnode>>>,
     /// Its root vnode, once looked up, so crossing into the file system
     /// costs no table lookup (FreeBSD's `mnt_rootvnode`).
     root: Once<Weak<Vnode>>,
@@ -219,12 +219,12 @@ impl Mount {
             type_num,
             flags: AtomicU64::new(info.flags),
             info,
-            on: SpinLock::new(Vec::new()),
+            on: PreemptLock::new(Vec::new()),
             fs,
-            table: SpinLock::new(BTreeMap::new()),
+            table: PreemptLock::new(BTreeMap::new()),
             loading: Mutex::new(&VGET, ()),
             rename: Mutex::new(&RENAME, ()),
-            covered: SpinLock::new(None),
+            covered: PreemptLock::new(None),
             root: Once::new(),
         })
     }
