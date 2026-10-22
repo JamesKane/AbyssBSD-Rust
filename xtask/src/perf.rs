@@ -36,7 +36,7 @@ const MAX_CV: f64 = 0.01;
 const BOOTSTRAP: usize = 2000;
 
 const USAGE: &str = "usage: cargo xtask --remote perf [--suite p2|p3|p4|p5|diag] [--runs N] [--prepare] \
-                     [--freebsd-only | --abyss-only [--prof]]";
+                     [--freebsd-only | --abyss-only [--prof [--prof-cpu N]]]";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Side {
@@ -68,8 +68,11 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     // per benchmark, are printed.
     let abyss_only = args.take_flag("--abyss-only");
     let prof = args.take_flag("--prof");
+    // With `--prof`: the functions of one CPU's samples only (ubench runs
+    // bound to CPU 1).
+    let prof_cpu = args.take_value("--prof-cpu")?;
     args.finish()?;
-    if freebsd_only && abyss_only || prof && !abyss_only {
+    if freebsd_only && abyss_only || prof && !abyss_only || prof_cpu.is_some() && !prof {
         return Err(USAGE.into());
     }
     // `diag` holds AbyssBSD-side diagnostics, some with FreeBSD
@@ -137,7 +140,9 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     } else {
         &[]
     };
-    let cmdline = if prof {
+    let cmdline = if let Some(cpu) = &prof_cpu {
+        format!("abyss.bench={suite} abyss.prof abyss.prof.cpu={cpu}")
+    } else if prof {
         format!("abyss.bench={suite} abyss.prof")
     } else {
         format!("abyss.bench={suite}")

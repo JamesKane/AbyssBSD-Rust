@@ -15,7 +15,7 @@ use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::pin::Pin;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use hal::MAX_CPUS;
 use sched::IrqCx;
@@ -40,6 +40,11 @@ const CALLERS: usize = 4;
 const USER: u64 = 1;
 
 static ON: AtomicBool = AtomicBool::new(false);
+
+/// The one CPU whose samples the reports' functions cover
+/// (`abyss.prof.cpu=N`; the benchmarks bind to one), or `usize::MAX` for
+/// all. Every CPU's busy count is reported either way.
+static ONLY_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 /// A report is being made: what it costs is no benchmark's.
 static REPORTING: AtomicBool = AtomicBool::new(false);
@@ -90,6 +95,9 @@ pub(crate) fn start_cpu() {
         return;
     }
     if !ON.swap(true, Ordering::Relaxed) {
+        if let Some(cpu) = crate::boot::value("abyss.prof.cpu").and_then(|v| v.parse().ok()) {
+            ONLY_CPU.store(cpu, Ordering::Relaxed);
+        }
         storage::disk::set_wait_hook(storage::disk::WaitHook {
             now: crate::time::now_ns,
             waited: io_waited,
@@ -189,16 +197,6 @@ fn print_report(label: &[u8]) {
     let dropped = DROPPED.swap(0, Ordering::Relaxed);
     // By address first (cheap), each CPU's samples under its lock
     // (sampling there waits meanwhile), then by function.
-    let mut by_pc: BTreeMap<(u64, u64), u64> = BTreeMap::new();
-    let mut total = 0u64;
-    for s in &SAMPLES {
-        let mut v = s.lock();
-        for &sample in v.iter() {
-            total += 1;
-            *by_pc.entry(sample).or_default() += 1;
-        }
-        v.clear();
-    }
     if FUNCTIONS.get().is_none() {
         let _ = FUNCTIONS.set(crate::symbols::functions());
     }
@@ -208,6 +206,29 @@ fn print_report(label: &[u8]) {
         let (start, size, name) = functions[i.checked_sub(1)?];
         (pc - start < size).then_some(name)
     };
+    let only = ONLY_CPU.load(Ordering::Relaxed);
+    let mut by_pc: BTreeMap<(u64, u64), u64> = BTreeMap::new();
+    let mut total = 0u64;
+    // Each CPU's samples not in the idle loop; whether a function is the
+    // idle loop's, worked out once each.
+    let mut busy_on = [0u64; MAX_CPUS];
+    let mut idle_fn: BTreeMap<&'static [u8], bool> = BTreeMap::new();
+    for (cpu, s) in SAMPLES.iter().enumerate() {
+        let mut v = s.lock();
+        for &sample in v.iter() {
+            let idle = sample.0 != USER
+                && function_of(sample.0)
+                    .is_some_and(|f| *idle_fn.entry(f).or_insert_with(|| is_idle(f)));
+            if !idle {
+                busy_on[cpu] += 1;
+            }
+            if only == usize::MAX || only == cpu {
+                total += 1;
+                *by_pc.entry(sample).or_default() += 1;
+            }
+        }
+        v.clear();
+    }
     // Each function's samples, in all and by caller.
     let mut by_fn: BTreeMap<&'static [u8], Counted> = BTreeMap::new();
     let mut unknown = 0u64;
@@ -237,6 +258,15 @@ fn print_report(label: &[u8]) {
     kprintln!(
         "prof {label}: {total} samples, {busy} busy ({user} user, {unknown} unknown), {dropped} dropped"
     );
+    let mut line = alloc::string::String::new();
+    for (cpu, n) in busy_on.iter().enumerate().filter(|(_, n)| **n > 0) {
+        let _ = core::fmt::write(&mut line, format_args!(" {cpu}:{n}"));
+    }
+    if only == usize::MAX {
+        kprintln!("prof {label}: busy by CPU:{line}");
+    } else {
+        kprintln!("prof {label}: busy by CPU:{line} (functions: CPU {only} only)");
+    }
     let share = |n: u64| {
         let tenths = n * 1000 / busy.max(1);
         (tenths / 10, tenths % 10)
