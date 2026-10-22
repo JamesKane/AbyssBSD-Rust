@@ -36,6 +36,12 @@ const TOP: usize = 40;
 const TOP_WITH_CALLERS: usize = 12;
 const CALLERS: usize = 4;
 
+/// Functions listed with their hottest instructions too, and how many
+/// instructions each, as offsets from the function's start (for reading
+/// against a disassembly).
+const TOP_WITH_OFFSETS: usize = 4;
+const OFFSETS: usize = 8;
+
 /// What a user-mode sample records.
 const USER: u64 = 1;
 
@@ -201,11 +207,12 @@ fn print_report(label: &[u8]) {
         let _ = FUNCTIONS.set(crate::symbols::functions());
     }
     let functions: &[(u64, u64, &[u8])] = FUNCTIONS.get().map_or(&[], Vec::as_slice);
-    let function_of = |pc: u64| -> Option<&'static [u8]> {
+    let start_of = |pc: u64| -> Option<(u64, &'static [u8])> {
         let i = functions.partition_point(|&(start, _, _)| start <= pc);
         let (start, size, name) = functions[i.checked_sub(1)?];
-        (pc - start < size).then_some(name)
+        (pc - start < size).then_some((start, name))
     };
+    let function_of = |pc: u64| start_of(pc).map(|(_, name)| name);
     let only = ONLY_CPU.load(Ordering::Relaxed);
     let mut by_pc: BTreeMap<(u64, u64), u64> = BTreeMap::new();
     let mut total = 0u64;
@@ -229,8 +236,9 @@ fn print_report(label: &[u8]) {
         }
         v.clear();
     }
-    // Each function's samples, in all and by caller.
+    // Each function's samples, in all and by caller, and by offset.
     let mut by_fn: BTreeMap<&'static [u8], Counted> = BTreeMap::new();
+    let mut by_offset: BTreeMap<&'static [u8], BTreeMap<u64, u64>> = BTreeMap::new();
     let mut unknown = 0u64;
     let mut user = 0u64;
     for (&(pc, caller), &n) in &by_pc {
@@ -238,10 +246,15 @@ fn print_report(label: &[u8]) {
             user += n;
             continue;
         }
-        let Some(name) = function_of(pc) else {
+        let Some((start, name)) = start_of(pc) else {
             unknown += n;
             continue;
         };
+        *by_offset
+            .entry(name)
+            .or_default()
+            .entry(pc - start)
+            .or_default() += n;
         let f = by_fn.entry(name).or_default();
         f.0 += n;
         // A return address is just past its call.
@@ -291,6 +304,18 @@ fn print_report(label: &[u8]) {
                     "prof {label}:        {whole:3}.{tenth}% from {}",
                     demangle::Demangled(from)
                 );
+            }
+        }
+        if i < TOP_WITH_OFFSETS {
+            let mut offsets: Vec<_> = by_offset
+                .remove(name)
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            offsets.sort_by_key(|&(_, n)| core::cmp::Reverse(n));
+            for (off, n) in offsets.into_iter().take(OFFSETS) {
+                let (whole, tenth) = share(n);
+                kprintln!("prof {label}:        {whole:3}.{tenth}% at +{off:#x}");
             }
         }
     }

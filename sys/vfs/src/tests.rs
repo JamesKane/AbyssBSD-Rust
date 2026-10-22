@@ -408,6 +408,15 @@ fn a_miss_to_create_is_not_cached() {
         crate::cache::lookup(&rescue, b"new"),
         Some(crate::cache::Hit::Negative)
     ));
+    // A lookup for the vnode alone ends at that negative entry.
+    assert_eq!(
+        lookup(&ns, b"/rescue/new", true).unwrap_err(),
+        Errno::ENOENT
+    );
+    assert_eq!(
+        lookup(&ns, b"/rescue/new/", true).unwrap_err(),
+        Errno::ENOENT
+    );
 }
 
 #[test]

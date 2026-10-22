@@ -359,15 +359,15 @@ impl Namespace {
 
     /// The vnode at `path`.
     pub fn lookup(&self, s: &Sleepable, l: &Lookup<'_>, path: &[u8]) -> Result<Arc<Vnode>, Errno> {
-        match self.resolve(s, l, path)? {
-            Found::Vnode(v) => Ok(v),
-            Found::Missing { .. } => Err(Errno::ENOENT),
+        match self.walk(s, l, path, Want::Vnode)? {
+            Walked::Found(Found::Vnode(v)) => Ok(v),
+            _ => unreachable!("a missing vnode is ENOENT"),
         }
     }
 
     /// Looks `path` up; a missing last component is not an error.
     pub fn resolve(&self, s: &Sleepable, l: &Lookup<'_>, path: &[u8]) -> Result<Found, Errno> {
-        self.walk(s, l, path, false).map(|w| match w {
+        self.walk(s, l, path, Want::Found).map(|w| match w {
             Walked::Found(f) => f,
             Walked::Parent(_) => unreachable!("walk stops at the parent only when asked"),
         })
@@ -377,7 +377,7 @@ impl Namespace {
     /// (not followed if it is a symbolic link), for operations that create
     /// or remove it.
     pub fn parent_of(&self, s: &Sleepable, l: &Lookup<'_>, path: &[u8]) -> Result<Parent, Errno> {
-        match self.walk(s, l, path, true)? {
+        match self.walk(s, l, path, Want::Parent)? {
             Walked::Parent(p) => Ok(p),
             Walked::Found(_) => unreachable!("asked for the parent"),
         }
@@ -388,16 +388,17 @@ impl Namespace {
         s: &Sleepable,
         l: &Lookup<'_>,
         path: &[u8],
-        parent: bool,
+        want: Want,
     ) -> Result<Walked, Errno> {
+        let parent = want == Want::Parent;
         if path.is_empty() {
             return Err(Errno::ENOENT);
         }
         if path.len() >= PATH_MAX {
             return Err(Errno::ENAMETOOLONG);
         }
-        let resume = match self.walk_fast(l, path, parent) {
-            Fast::Done(w) => return Ok(w),
+        let resume = match self.walk_fast(l, path, want) {
+            Fast::Done(w) => return w,
             Fast::Resume(dir, at) => Some((dir, at)),
             Fast::No => None,
         };
@@ -461,7 +462,7 @@ impl Namespace {
                         depth += 1;
                         Self::cover(s, v)?
                     }
-                    Err(Errno::ENOENT) if !c.more => {
+                    Err(Errno::ENOENT) if !c.more && want == Want::Found => {
                         return Ok(Walked::Found(Found::Missing {
                             dir: cur,
                             name: LastName::new(name),
@@ -566,6 +567,18 @@ enum Walked {
     Parent(Parent),
 }
 
+/// What a walk is for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Want {
+    /// The vnode: a missing last component is `ENOENT`, with nothing made
+    /// for it.
+    Vnode,
+    /// The vnode, or where it would be ([`Found::Missing`]).
+    Found,
+    /// The directory the last component is in ([`Parent`]).
+    Parent,
+}
+
 /// Where a lockless walk is: a vnode it holds no reference to, whose
 /// allocation stays for the reader's section.
 #[derive(Clone, Copy)]
@@ -615,6 +628,8 @@ impl Here<'_> {
 enum FastEnd {
     Vnode(Arc<Vnode>),
     Missing(Arc<Vnode>, core::ops::Range<usize>),
+    /// The last component is known missing, and nothing more is wanted.
+    Absent,
     Parent(Arc<Vnode>, core::ops::Range<usize>, bool),
     /// The cache does not know the name at this offset in this directory:
     /// the locked walk goes on from there.
@@ -623,7 +638,7 @@ enum FastEnd {
 
 /// How far the lockless walk got.
 enum Fast {
-    Done(Walked),
+    Done(Result<Walked, Errno>),
     /// The locked walk resumes in this directory, at this offset.
     Resume(Arc<Vnode>, usize),
     /// The locked walk starts over.
@@ -639,20 +654,21 @@ impl Namespace {
     /// a vnode going away, `O_RESOLVE_BENEATH`, or a caller not root (whose
     /// search permission on each directory needs its attributes; until
     /// Phase 6 every process is root).
-    fn walk_fast(&self, l: &Lookup<'_>, path: &[u8], parent: bool) -> Fast {
+    fn walk_fast(&self, l: &Lookup<'_>, path: &[u8], want: Want) -> Fast {
         if l.cred.uid != 0 || l.beneath {
             return Fast::No;
         }
         let end = {
             let reader = cache::Reader::new();
-            Self::walk_in(&reader, l, path, parent)
+            Self::walk_in(&reader, l, path, want)
         };
         // Out of the section: what goes now may allocate or free.
         match end {
             None => Fast::No,
             Some(FastEnd::Unknown(dir, at)) if !dir.is_dying() => Fast::Resume(dir, at),
             Some(FastEnd::Unknown(..)) => Fast::No,
-            Some(end) => Self::fast_done(end, path).map_or(Fast::No, Fast::Done),
+            Some(FastEnd::Absent) => Fast::Done(Err(Errno::ENOENT)),
+            Some(end) => Self::fast_done(end, path).map_or(Fast::No, |w| Fast::Done(Ok(w))),
         }
     }
 
@@ -673,16 +689,12 @@ impl Namespace {
                 name: LastName::new(&path[name]),
                 trailing_slash,
             }),
-            FastEnd::Unknown(..) => return None,
+            FastEnd::Unknown(..) | FastEnd::Absent => return None,
         })
     }
 
-    fn walk_in(
-        reader: &cache::Reader,
-        l: &Lookup<'_>,
-        path: &[u8],
-        parent: bool,
-    ) -> Option<FastEnd> {
+    fn walk_in(reader: &cache::Reader, l: &Lookup<'_>, path: &[u8], want: Want) -> Option<FastEnd> {
+        let parent = want == Want::Parent;
         let mut cur = Here::Held(if path.first() == Some(&b'/') {
             l.root
         } else {
@@ -719,6 +731,9 @@ impl Namespace {
                 return Some(FastEnd::Unknown(cur.take()?, c.start));
             };
             let mut next = match found {
+                cache::Peek::Negative if !c.more && want == Want::Vnode => {
+                    return Some(FastEnd::Absent);
+                }
                 cache::Peek::Negative if !c.more => {
                     return Some(FastEnd::Missing(cur.take()?, c.start..c.end));
                 }

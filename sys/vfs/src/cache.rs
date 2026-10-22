@@ -371,9 +371,12 @@ pub(crate) fn hash_name(mut h: u64, name: &[u8]) -> u64 {
         h = mix(h, u64::from_le_bytes(*w));
     }
     if !tail.is_empty() {
-        let mut w = [0u8; 8];
-        w[..tail.len()].copy_from_slice(tail);
-        h = mix(h, u64::from_le_bytes(w));
+        // Built a byte at a time: a copy into a padded word is a call.
+        let w = tail
+            .iter()
+            .rev()
+            .fold(0u64, |w, &b| (w << 8) | u64::from(b));
+        h = mix(h, w);
     }
     h
 }

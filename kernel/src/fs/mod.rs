@@ -442,6 +442,18 @@ pub(crate) struct Walk {
 }
 
 impl Walk {
+    /// The lookup this walk is, from `start`, as `cred`.
+    fn lookup<'a>(self, start: &'a Arc<Vnode>, cred: &'a Cred) -> Lookup<'a> {
+        Lookup {
+            start,
+            root: namespace().root(),
+            follow: self.follow,
+            beneath: self.beneath,
+            create: self.create,
+            cred,
+        }
+    }
+
     pub(crate) const FOLLOW: Self = Self {
         follow: true,
         beneath: false,
@@ -476,20 +488,8 @@ fn start_of(
     }
 }
 
-/// Looks `path` up for process `p`; a missing last component is not an
-/// error.
-pub(crate) fn resolve(
-    s: &Sleepable,
-    p: &crate::proc::Process,
-    at: At,
-    path: &[u8],
-    walk: Walk,
-) -> Result<Found, Errno> {
-    resolve_as(s, p, &p.cred(), at, path, walk)
-}
-
-/// [`resolve`] with credential `cred` (`access` checks with the real
-/// ids).
+/// Looks `path` up for process `p` as `cred` (`access` checks with the
+/// real ids); a missing last component is not an error.
 pub(crate) fn resolve_as(
     s: &Sleepable,
     p: &crate::proc::Process,
@@ -499,18 +499,7 @@ pub(crate) fn resolve_as(
     walk: Walk,
 ) -> Result<Found, Errno> {
     let start = start_of(s, p, at, path)?;
-    namespace().resolve(
-        s,
-        &Lookup {
-            start: &start,
-            root: namespace().root(),
-            follow: walk.follow,
-            beneath: walk.beneath,
-            create: walk.create,
-            cred,
-        },
-        path,
-    )
+    namespace().resolve(s, &walk.lookup(&start, cred), path)
 }
 
 /// The vnode at `path` for process `p`.
@@ -521,10 +510,8 @@ pub(crate) fn lookup(
     path: &[u8],
     walk: Walk,
 ) -> Result<Arc<Vnode>, Errno> {
-    match resolve(s, p, at, path, walk)? {
-        Found::Vnode(v) => Ok(v),
-        Found::Missing { .. } => Err(Errno::ENOENT),
-    }
+    let start = start_of(s, p, at, path)?;
+    namespace().lookup(s, &walk.lookup(&start, &p.cred()), path)
 }
 
 /// The directory `path`'s last component is in, and that component, for
