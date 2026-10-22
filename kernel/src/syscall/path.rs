@@ -27,12 +27,43 @@ use crate::fs::{At, Walk};
 use crate::proc::Process;
 use crate::uaccess::{self, UserPtr};
 
+/// Paths this long or shorter (most of them) are copied in on the stack.
+const SHORT_PATH: usize = 128;
+
+/// A path argument: a short one inline, so most cost no allocation.
+pub(super) enum PathArg {
+    Short { len: u8, bytes: [u8; SHORT_PATH] },
+    Long(Vec<u8>),
+}
+
+impl core::ops::Deref for PathArg {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            Self::Short { len, bytes } => &bytes[..usize::from(*len)],
+            Self::Long(v) => v,
+        }
+    }
+}
+
 /// A path argument.
-pub(super) fn path(addr: u64) -> Result<Vec<u8>, Errno> {
-    uaccess::copy_in_str_vec(addr, PATH_MAX).map_err(|e| match e {
+pub(super) fn path(addr: u64) -> Result<PathArg, Errno> {
+    let errno = |e| match e {
         uaccess::StrError::Fault => Errno::EFAULT,
         uaccess::StrError::TooLong => Errno::ENAMETOOLONG,
-    })
+    };
+    let mut bytes = [0; SHORT_PATH];
+    match uaccess::copy_in_str(addr, &mut bytes) {
+        Ok(n) => Ok(PathArg::Short {
+            len: u8::try_from(n).map_err(|_| Errno::ENAMETOOLONG)?,
+            bytes,
+        }),
+        Err(uaccess::StrError::TooLong) => uaccess::copy_in_str_vec(addr, PATH_MAX)
+            .map(PathArg::Long)
+            .map_err(errno),
+        Err(e) => Err(errno(e)),
+    }
 }
 
 /// The vnode an `*at` call names: `path` from `fd`, or with an empty path

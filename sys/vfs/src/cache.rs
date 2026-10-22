@@ -305,9 +305,16 @@ pub enum Hit {
 /// mixing: rotate, xor, multiply). Names hold no NUL, so padding the last
 /// word with zeros makes no two names alike.
 fn hash(dir: NodeId, name: &[u8]) -> u64 {
+    hash_name(mix(mix(0, dir.fs), dir.ino), name)
+}
+
+fn mix(h: u64, w: u64) -> u64 {
     const K: u64 = 0x517c_c1b7_2722_0a95;
-    let mix = |h: u64, w: u64| (h.rotate_left(5) ^ w).wrapping_mul(K);
-    let mut h = mix(mix(0, dir.fs), dir.ino);
+    (h.rotate_left(5) ^ w).wrapping_mul(K)
+}
+
+/// [`hash`]'s name part, from `h`: also tmpfs's directory index.
+pub(crate) fn hash_name(mut h: u64, name: &[u8]) -> u64 {
     let (words, tail) = name.as_chunks::<8>();
     for w in words {
         h = mix(h, u64::from_le_bytes(*w));

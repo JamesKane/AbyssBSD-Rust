@@ -24,6 +24,7 @@
 //! Behavior reference: sys/kern/vfs_lookup.c, sys/kern/vfs_cache.c.
 
 use alloc::borrow::Cow;
+use alloc::boxed::Box;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 
@@ -70,8 +71,50 @@ pub enum Found {
     /// file of that name would be created.
     Missing {
         dir: Arc<Vnode>,
-        name: Vec<u8>,
+        name: LastName,
     },
+}
+
+/// Last components this long or shorter are held inline.
+const INLINE_LAST: usize = 64;
+
+/// A path's last component: a short one inline, so most lookups allocate
+/// nothing for it.
+#[derive(Clone)]
+pub enum LastName {
+    Inline { len: u8, bytes: [u8; INLINE_LAST] },
+    Heap(Box<[u8]>),
+}
+
+impl LastName {
+    #[must_use]
+    pub fn new(name: &[u8]) -> Self {
+        match u8::try_from(name.len()) {
+            Ok(len) if name.len() <= INLINE_LAST => {
+                let mut bytes = [0; INLINE_LAST];
+                bytes[..name.len()].copy_from_slice(name);
+                Self::Inline { len, bytes }
+            }
+            _ => Self::Heap(name.into()),
+        }
+    }
+}
+
+impl core::ops::Deref for LastName {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            Self::Inline { len, bytes } => &bytes[..usize::from(*len)],
+            Self::Heap(b) => b,
+        }
+    }
+}
+
+impl core::fmt::Debug for LastName {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Debug::fmt(&**self, f)
+    }
 }
 
 /// The directory a path's last component is in, and that component.
@@ -81,7 +124,7 @@ pub struct Parent {
     /// The last component: a name, `.`, or `..`; empty for a path of
     /// slashes only (which operations that change a directory refuse with
     /// `EISDIR`, as FreeBSD's `namei` does).
-    pub name: Vec<u8>,
+    pub name: LastName,
     /// The path ended in a slash: the last component must be a directory.
     pub trailing_slash: bool,
 }
@@ -364,7 +407,7 @@ impl Namespace {
                 return Ok(if parent {
                     Walked::Parent(Parent {
                         dir: cur,
-                        name: Vec::new(),
+                        name: LastName::new(b""),
                         trailing_slash: true,
                     })
                 } else {
@@ -385,7 +428,7 @@ impl Namespace {
             if parent && !c.more {
                 return Ok(Walked::Parent(Parent {
                     dir: cur,
-                    name: name.to_vec(),
+                    name: LastName::new(name),
                     trailing_slash,
                 }));
             }
@@ -405,7 +448,7 @@ impl Namespace {
                     Err(Errno::ENOENT) if !c.more => {
                         return Ok(Walked::Found(Found::Missing {
                             dir: cur,
-                            name: name.to_vec(),
+                            name: LastName::new(name),
                         }));
                     }
                     Err(e) => return Err(e),
@@ -551,8 +594,8 @@ impl Here<'_> {
     }
 }
 
-/// What a lockless walk ended on; names as ranges of the path, made into
-/// vectors once the section is over.
+/// What a lockless walk ended on; names as ranges of the path, copied
+/// out once the section is over.
 enum FastEnd {
     Vnode(Arc<Vnode>),
     Missing(Arc<Vnode>, core::ops::Range<usize>),
@@ -607,11 +650,11 @@ impl Namespace {
             }
             FastEnd::Missing(dir, name) => Walked::Found(Found::Missing {
                 dir: alive(dir)?,
-                name: path[name].to_vec(),
+                name: LastName::new(&path[name]),
             }),
             FastEnd::Parent(dir, name, trailing_slash) => Walked::Parent(Parent {
                 dir: alive(dir)?,
-                name: path[name].to_vec(),
+                name: LastName::new(&path[name]),
                 trailing_slash,
             }),
             FastEnd::Unknown(..) => return None,

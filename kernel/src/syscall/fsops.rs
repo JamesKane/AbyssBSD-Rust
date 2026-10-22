@@ -129,7 +129,7 @@ pub(super) fn symlinkat(s: &Sleepable, target_ptr: u64, fd: u64, path_ptr: u64) 
     let p = process()?;
     let target = path(target_ptr)?;
     let mode = ACCESSPERMS & !umask(&p);
-    make(s, fd, path_ptr, &NewNode::Symlink(target), mode)
+    make(s, fd, path_ptr, &NewNode::Symlink(target.to_vec()), mode)
 }
 
 /// `symlink(target, path)`.

@@ -174,7 +174,7 @@ fn try_parent(ns: &Namespace, path: &[u8]) -> Result<(Arc<Vnode>, Vec<u8>), Errn
         },
         path,
     )?;
-    Ok((p.dir, p.name))
+    Ok((p.dir, p.name.to_vec()))
 }
 
 fn parent(ns: &Namespace, path: &[u8]) -> (Arc<Vnode>, Vec<u8>) {
@@ -369,7 +369,7 @@ fn missing_last_component() {
     match ns.resolve(&s(), &l, b"/rescue/new").unwrap() {
         Found::Missing { dir, name } => {
             assert!(Arc::ptr_eq(&dir, &lookup(&ns, b"/rescue", true).unwrap()));
-            assert_eq!(name, b"new");
+            assert_eq!(&*name, b"new");
         }
         Found::Vnode(_) => panic!("found a file that does not exist"),
     }

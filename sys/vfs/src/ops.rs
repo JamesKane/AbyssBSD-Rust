@@ -294,22 +294,28 @@ pub fn link(
     Ok(())
 }
 
+/// Write locks on up to four vnodes, in address order.
+type Locked<'a> = [Option<(&'a Vnode, WriteGuard<'a, State>)>; 4];
+
 /// Write locks on `vs` (duplicates once), taken one blocking and the rest
 /// tried, retrying from scratch when one is busy.
-fn lock_all<'a>(s: &Sleepable, vs: &[&'a Vnode]) -> Vec<(&'a Vnode, WriteGuard<'a, State>)> {
-    let mut uniq: Vec<&Vnode> = Vec::new();
-    for v in vs {
-        if !uniq.iter().any(|u| core::ptr::eq(*u, *v)) {
-            uniq.push(v);
+fn lock_all<'a>(s: &Sleepable, vs: &[&'a Vnode; 4]) -> Locked<'a> {
+    let mut uniq: [&Vnode; 4] = *vs;
+    uniq.sort_by_key(|v| core::ptr::from_ref(*v).addr());
+    let mut n = 1;
+    for i in 1..uniq.len() {
+        if !core::ptr::eq(uniq[i], uniq[n - 1]) {
+            uniq[n] = uniq[i];
+            n += 1;
         }
     }
-    uniq.sort_by_key(|v| core::ptr::from_ref(*v).addr());
+    let uniq = &uniq[..n];
     loop {
-        let mut held = Vec::with_capacity(uniq.len());
-        held.push((uniq[0], uniq[0].write(s)));
-        let ok = uniq[1..].iter().all(|v| match v.try_write() {
+        let mut held: Locked<'a> = Default::default();
+        held[0] = Some((uniq[0], uniq[0].write(s)));
+        let ok = uniq[1..].iter().zip(&mut held[1..]).all(|(v, slot)| match v.try_write() {
             Some(g) => {
-                held.push((*v, g));
+                *slot = Some((*v, g));
                 true
             }
             None => false,
@@ -322,12 +328,10 @@ fn lock_all<'a>(s: &Sleepable, vs: &[&'a Vnode]) -> Vec<(&'a Vnode, WriteGuard<'
     }
 }
 
-fn guard_of<'g, 'a>(
-    held: &'g mut [(&'a Vnode, WriteGuard<'a, State>)],
-    v: &Vnode,
-) -> &'g mut WriteGuard<'a, State> {
+fn guard_of<'g, 'a>(held: &'g mut Locked<'a>, v: &Vnode) -> &'g mut WriteGuard<'a, State> {
     &mut held
         .iter_mut()
+        .flatten()
         .find(|(x, _)| core::ptr::eq(*x, v))
         .expect("locked above")
         .1
@@ -431,10 +435,8 @@ pub fn rename(
     if from.is_dir() && !same_dir && is_under(s, tdir, &from)? {
         return Err(Errno::EINVAL);
     }
-    let mut want: Vec<&Vnode> = alloc::vec![&**fdir, &**tdir, &*from];
-    if let Some(t) = &to {
-        want.push(t);
-    }
+    // Without a target, `from` stands in for it: locked once.
+    let want = [&**fdir, &**tdir, &*from, to.as_deref().unwrap_or(&from)];
     let mut held = lock_all(s, &want);
     // Things may have moved before the locks: check the names again.
     {
@@ -483,7 +485,7 @@ pub fn rename(
     let mut tdir_g = None;
     let mut from_g = None;
     let mut to_g = None;
-    for (v, g) in held.iter_mut() {
+    for (v, g) in held.iter_mut().flatten() {
         if core::ptr::eq(*v, &**fdir) {
             fdir_g = Some(g);
         } else if core::ptr::eq(*v, &**tdir) {

@@ -338,6 +338,12 @@ impl<T> Mutex<T> {
     pub fn is_locked(&self) -> bool {
         self.core.owner.load(Ordering::Relaxed) != 0
     }
+
+    /// Whether the running thread holds the lock (exact: only this thread
+    /// makes it so or not).
+    pub fn is_mine(&self) -> bool {
+        ptr::eq(self.core.owner_thread(), crate::current())
+    }
 }
 
 /// Proof that a [`Mutex`] is held; unlocks on drop. Not `Send`: the lock

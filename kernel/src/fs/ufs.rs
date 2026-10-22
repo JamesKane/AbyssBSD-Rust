@@ -52,6 +52,9 @@ use vm::object::{Object, PageIndex, Pager, PagerError, PendingFill};
 
 /// Doing soft-updates work: under vnode locks, before inodes.
 static WORK: LockClass = LockClass::new("ufs work", 342);
+/// [`Shared::flush_frees`], one at a time: after the vnode locks, before
+/// the work.
+static FLUSHING: LockClass = LockClass::new("ufs flush", 341);
 /// Finding or making an in-core inode: under vnode locks, before inodes.
 static LOADING: LockClass = LockClass::new("ufs load", 345);
 /// In-core inodes: under vnode locks, before the summary and buffers.
@@ -114,6 +117,10 @@ struct Shared {
     working: Mutex<()>,
     /// Set while work is being done, before it is taken.
     applying: AtomicBool,
+    /// Held by [`Shared::flush_frees`]: its writing can come back to it
+    /// (a page written into a hole, out of space), which must not go round
+    /// again.
+    flushing: Mutex<()>,
     /// With soft updates, the tracker (idle while read-only).
     deps: Option<Arc<SoftDeps>>,
     /// The superblock asked for a journal, which this mount turned off.
@@ -216,6 +223,7 @@ impl UfsFs {
                 data_synced: AtomicU64::new(0),
                 loading: Mutex::new(&LOADING, ()),
                 working: Mutex::new(&WORK, ()),
+                flushing: Mutex::new(&FLUSHING, ()),
                 applying: AtomicBool::new(false),
                 deps,
                 journal_dropped,
@@ -447,6 +455,11 @@ impl Shared {
         if deps.with(s, |d| d.is_idle()) && !self.applying.load(Ordering::Acquire) {
             return false;
         }
+        // Called from the writing below: the outer call goes on.
+        if self.flushing.is_mine() {
+            return false;
+        }
+        let _flushing = self.flushing.lock(s);
         for _ in 0..8 {
             self.sync_pages();
             let _ = self.write_inodes(s, Mode::Delayed);

@@ -15,6 +15,7 @@
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
+use alloc::collections::btree_map::Entry;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
@@ -48,11 +49,28 @@ enum Data {
 
 struct Dir {
     parent: u64,
-    /// Name to its entry's cookie (the name shared with the entry).
-    names: BTreeMap<Arc<[u8]>, u64>,
+    /// A name's hash to the cookies of the entries with that hash (one,
+    /// nearly always): a lookup compares numbers, then one name (FreeBSD's
+    /// tmpfs keys its tree by a name's hash too).
+    names: BTreeMap<u64, Cookies>,
     /// Cookie to the entry, in creation order.
-    entries: BTreeMap<u64, (Arc<[u8]>, u64, Kind)>,
+    entries: BTreeMap<u64, (Box<[u8]>, u64, Kind)>,
     next_cookie: u64,
+}
+
+/// The entries whose names share a hash.
+enum Cookies {
+    One(u64),
+    More(Vec<u64>),
+}
+
+impl Cookies {
+    fn as_slice(&self) -> &[u64] {
+        match self {
+            Self::One(c) => core::slice::from_ref(c),
+            Self::More(v) => v,
+        }
+    }
 }
 
 impl Dir {
@@ -65,23 +83,63 @@ impl Dir {
         }
     }
 
+    /// The cookie of entry `name`.
+    fn cookie(&self, h: u64, name: &[u8]) -> Option<u64> {
+        self.names
+            .get(&h)?
+            .as_slice()
+            .iter()
+            .copied()
+            .find(|c| self.entries.get(c).is_some_and(|(n, ..)| **n == *name))
+    }
+
     fn get(&self, name: &[u8]) -> Option<(u64, Kind)> {
-        let c = self.names.get(name)?;
-        self.entries.get(c).map(|(_, ino, k)| (*ino, *k))
+        let c = self.cookie(hash(name), name)?;
+        self.entries.get(&c).map(|(_, ino, k)| (*ino, *k))
     }
 
     fn insert(&mut self, name: &[u8], ino: u64, kind: Kind) {
         let c = self.next_cookie;
         self.next_cookie += 1;
-        let name: Arc<[u8]> = name.into();
-        self.names.insert(Arc::clone(&name), c);
-        self.entries.insert(c, (name, ino, kind));
+        self.entries.insert(c, (name.into(), ino, kind));
+        match self.names.entry(hash(name)) {
+            Entry::Vacant(e) => {
+                e.insert(Cookies::One(c));
+            }
+            Entry::Occupied(mut e) => {
+                let more = match e.get() {
+                    Cookies::One(o) => alloc::vec![*o, c],
+                    Cookies::More(v) => [v.as_slice(), &[c]].concat(),
+                };
+                e.insert(Cookies::More(more));
+            }
+        }
     }
 
     fn remove(&mut self, name: &[u8]) -> Option<u64> {
-        let c = self.names.remove(name)?;
+        let h = hash(name);
+        let c = self.cookie(h, name)?;
+        if let Entry::Occupied(mut e) = self.names.entry(h) {
+            let rest: Vec<u64> = e.get().as_slice().iter().copied().filter(|x| *x != c).collect();
+            match rest.as_slice() {
+                [] => {
+                    e.remove();
+                }
+                [one] => {
+                    e.insert(Cookies::One(*one));
+                }
+                _ => {
+                    e.insert(Cookies::More(rest));
+                }
+            }
+        }
         self.entries.remove(&c).map(|(_, ino, _)| ino)
     }
+}
+
+/// A name's hash, for [`Dir`].
+fn hash(name: &[u8]) -> u64 {
+    crate::cache::hash_name(0, name)
 }
 
 /// One file.
