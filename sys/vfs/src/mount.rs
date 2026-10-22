@@ -361,7 +361,9 @@ impl Mount {
             .filter(|v| Arc::strong_count(v) == 1 && v.uses() == 0 && !v.is_mount_root())
             .cloned()
             .collect();
-        idle.sort_by_key(|v| v.last_used());
+        // Each read once: lookups move `last_used` while this sorts, and a
+        // key that changes mid-sort breaks the order the sort relies on.
+        idle.sort_by_cached_key(|v| v.last_used());
         idle.truncate(max);
         let mut n = 0;
         for v in idle {

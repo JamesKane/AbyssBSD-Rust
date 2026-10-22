@@ -337,22 +337,26 @@ impl Namespace {
         if path.len() >= PATH_MAX {
             return Err(Errno::ENAMETOOLONG);
         }
-        if let Some(w) = self.walk_fast(l, path, parent) {
-            return Ok(w);
-        }
+        let resume = match self.walk_fast(l, path, parent) {
+            Fast::Done(w) => return Ok(w),
+            Fast::Resume(dir, at) => Some((dir, at)),
+            Fast::No => None,
+        };
         // The path as given until a symbolic link rewrites it.
         let mut rest: Cow<'_, [u8]> = Cow::Borrowed(path);
-        let mut at = 0;
         let mut links = 0;
-        // How many levels below `start` the lookup is, for `beneath`.
+        // How many levels below `start` the lookup is, for `beneath` (which
+        // the lockless walk never serves, so it starts at 0 either way).
         let mut depth = 0usize;
-        let mut cur = if rest[0] == b'/' {
-            if l.beneath {
-                return Err(Errno::ENOTCAPABLE);
+        let (mut cur, mut at) = match resume {
+            Some(r) => r,
+            None if rest[0] == b'/' => {
+                if l.beneath {
+                    return Err(Errno::ENOTCAPABLE);
+                }
+                (Arc::clone(l.root), 0)
             }
-            Arc::clone(l.root)
-        } else {
-            Arc::clone(l.start)
+            None => (Arc::clone(l.start), 0),
         };
         loop {
             let Some(c) = next_component(&rest, at) else {
@@ -553,25 +557,47 @@ enum FastEnd {
     Vnode(Arc<Vnode>),
     Missing(Arc<Vnode>, core::ops::Range<usize>),
     Parent(Arc<Vnode>, core::ops::Range<usize>, bool),
+    /// The cache does not know the name at this offset in this directory:
+    /// the locked walk goes on from there.
+    Unknown(Arc<Vnode>, usize),
+}
+
+/// How far the lockless walk got.
+enum Fast {
+    Done(Walked),
+    /// The locked walk resumes in this directory, at this offset.
+    Resume(Arc<Vnode>, usize),
+    /// The locked walk starts over.
+    No,
 }
 
 impl Namespace {
     /// The lockless walk (docs/VFS.md §6.2, FreeBSD's `cache_fplookup`):
     /// the whole path in one epoch section, with no lock and no reference
-    /// taken but on the vnode found. `None` when it cannot answer and the
-    /// locked walk must: a name the cache does not know, `..`, a symbolic
-    /// link to follow, a vnode going away, `O_RESOLVE_BENEATH`, or a caller
-    /// not root (whose search permission on each directory needs its
-    /// attributes; until Phase 6 every process is root).
-    fn walk_fast(&self, l: &Lookup<'_>, path: &[u8], parent: bool) -> Option<Walked> {
+    /// taken but on the vnode found. A name the cache does not know hands
+    /// the locked walk the directory it is in ([`Fast::Resume`]); the locked
+    /// walk starts over ([`Fast::No`]) for `..`, a symbolic link to follow,
+    /// a vnode going away, `O_RESOLVE_BENEATH`, or a caller not root (whose
+    /// search permission on each directory needs its attributes; until
+    /// Phase 6 every process is root).
+    fn walk_fast(&self, l: &Lookup<'_>, path: &[u8], parent: bool) -> Fast {
         if l.cred.uid != 0 || l.beneath {
-            return None;
+            return Fast::No;
         }
         let end = {
             let reader = cache::Reader::new();
-            Self::walk_in(&reader, l, path, parent)?
+            Self::walk_in(&reader, l, path, parent)
         };
         // Out of the section: what goes now may allocate or free.
+        match end {
+            None => Fast::No,
+            Some(FastEnd::Unknown(dir, at)) if !dir.is_dying() => Fast::Resume(dir, at),
+            Some(FastEnd::Unknown(..)) => Fast::No,
+            Some(end) => Self::fast_done(end, path).map_or(Fast::No, Fast::Done),
+        }
+    }
+
+    fn fast_done(end: FastEnd, path: &[u8]) -> Option<Walked> {
         let alive = |v: Arc<Vnode>| (!v.is_dying()).then_some(v);
         Some(match end {
             FastEnd::Vnode(v) => {
@@ -588,6 +614,7 @@ impl Namespace {
                 name: path[name].to_vec(),
                 trailing_slash,
             }),
+            FastEnd::Unknown(..) => return None,
         })
     }
 
@@ -629,7 +656,10 @@ impl Namespace {
                 b".." => return None,
                 _ => {}
             }
-            let mut next = match reader.find(cur.ptr(), here.id, name)? {
+            let Some(found) = reader.find(cur.ptr(), here.id, name) else {
+                return Some(FastEnd::Unknown(cur.take()?, c.start));
+            };
+            let mut next = match found {
                 cache::Peek::Negative if !c.more => {
                     return Some(FastEnd::Missing(cur.take()?, c.start..c.end));
                 }

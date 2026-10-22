@@ -48,10 +48,10 @@ enum Data {
 
 struct Dir {
     parent: u64,
-    /// Name to its entry's cookie.
-    names: BTreeMap<Box<[u8]>, u64>,
+    /// Name to its entry's cookie (the name shared with the entry).
+    names: BTreeMap<Arc<[u8]>, u64>,
     /// Cookie to the entry, in creation order.
-    entries: BTreeMap<u64, (Box<[u8]>, u64, Kind)>,
+    entries: BTreeMap<u64, (Arc<[u8]>, u64, Kind)>,
     next_cookie: u64,
 }
 
@@ -73,8 +73,9 @@ impl Dir {
     fn insert(&mut self, name: &[u8], ino: u64, kind: Kind) {
         let c = self.next_cookie;
         self.next_cookie += 1;
-        self.names.insert(name.into(), c);
-        self.entries.insert(c, (name.into(), ino, kind));
+        let name: Arc<[u8]> = name.into();
+        self.names.insert(Arc::clone(&name), c);
+        self.entries.insert(c, (name, ino, kind));
     }
 
     fn remove(&mut self, name: &[u8]) -> Option<u64> {

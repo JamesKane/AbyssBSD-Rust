@@ -489,7 +489,8 @@ impl BufCache {
             .filter(|b| Arc::strong_count(b) == 1)
             .cloned()
             .collect();
-        idle.sort_by_key(|b| b.used.load(Ordering::Relaxed));
+        // Each read once: users move `used` while this sorts.
+        idle.sort_by_cached_key(|b| b.used.load(Ordering::Relaxed));
         for b in idle {
             if self.bytes.load(Ordering::Relaxed) <= self.limits.max {
                 break;
