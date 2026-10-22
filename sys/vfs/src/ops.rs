@@ -313,13 +313,16 @@ fn lock_all<'a>(s: &Sleepable, vs: &[&'a Vnode; 4]) -> Locked<'a> {
     loop {
         let mut held: Locked<'a> = Default::default();
         held[0] = Some((uniq[0], uniq[0].write(s)));
-        let ok = uniq[1..].iter().zip(&mut held[1..]).all(|(v, slot)| match v.try_write() {
-            Some(g) => {
-                *slot = Some((*v, g));
-                true
-            }
-            None => false,
-        });
+        let ok = uniq[1..]
+            .iter()
+            .zip(&mut held[1..])
+            .all(|(v, slot)| match v.try_write() {
+                Some(g) => {
+                    *slot = Some((*v, g));
+                    true
+                }
+                None => false,
+            });
         if ok {
             return held;
         }

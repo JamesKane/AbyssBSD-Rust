@@ -120,7 +120,13 @@ impl Dir {
         let h = hash(name);
         let c = self.cookie(h, name)?;
         if let Entry::Occupied(mut e) = self.names.entry(h) {
-            let rest: Vec<u64> = e.get().as_slice().iter().copied().filter(|x| *x != c).collect();
+            let rest: Vec<u64> = e
+                .get()
+                .as_slice()
+                .iter()
+                .copied()
+                .filter(|x| *x != c)
+                .collect();
             match rest.as_slice() {
                 [] => {
                     e.remove();
