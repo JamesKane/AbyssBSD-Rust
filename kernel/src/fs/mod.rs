@@ -176,6 +176,7 @@ pub(crate) fn init() {
         root: &root,
         follow: true,
         beneath: false,
+        create: false,
         cred: &Cred::root(),
     };
     match ns.lookup(&s, &at, b"/dev") {
@@ -436,16 +437,20 @@ pub(crate) struct Walk {
     pub(crate) follow: bool,
     /// Stay beneath the starting directory (`O_RESOLVE_BENEATH`).
     pub(crate) beneath: bool,
+    /// A missing last component is about to be created (`O_CREAT`).
+    pub(crate) create: bool,
 }
 
 impl Walk {
     pub(crate) const FOLLOW: Self = Self {
         follow: true,
         beneath: false,
+        create: false,
     };
     pub(crate) const NOFOLLOW: Self = Self {
         follow: false,
         beneath: false,
+        create: false,
     };
 }
 
@@ -501,6 +506,7 @@ pub(crate) fn resolve_as(
             root: namespace().root(),
             follow: walk.follow,
             beneath: walk.beneath,
+            create: walk.create,
             cred,
         },
         path,
@@ -538,6 +544,7 @@ pub(crate) fn parent_of(
             root: namespace().root(),
             follow: false,
             beneath,
+            create: false,
             cred: &p.cred(),
         },
         path,

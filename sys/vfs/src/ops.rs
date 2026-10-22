@@ -380,6 +380,28 @@ fn is_under(s: &Sleepable, dir: &Arc<Vnode>, ancestor: &Vnode) -> Result<bool, E
     Err(Errno::ELOOP)
 }
 
+/// Checks a rename's ends against each other; `Ok(false)` when they are
+/// one file under two names, which leaves nothing to do.
+fn ends_differ(from: &Arc<Vnode>, to: Option<&Arc<Vnode>>) -> Result<bool, Errno> {
+    if let Some(t) = to {
+        if Arc::ptr_eq(t, from) {
+            return Ok(false);
+        }
+        match (from.is_dir(), t.is_dir()) {
+            (true, false) => return Err(Errno::ENOTDIR),
+            (false, true) => return Err(Errno::EISDIR),
+            _ => {}
+        }
+        if t.mounted().is_some() {
+            return Err(Errno::EBUSY);
+        }
+    }
+    if from.mounted().is_some() {
+        return Err(Errno::EBUSY);
+    }
+    Ok(true)
+}
+
 /// Renames `fname` in `fdir` to `tname` in `tdir` (`rename`), with
 /// FreeBSD's rules: a file over a file, a directory over an empty
 /// directory, never a directory into itself.
@@ -407,49 +429,52 @@ pub fn rename(
     }
     let same_dir = Arc::ptr_eq(fdir, tdir);
     let _serial = (!same_dir).then(|| fdir.mount().rename_lock().lock(s));
-    // Find both ends with the directories locked shared.
-    let (from, to) = {
-        let fst = fdir.read(s);
-        let from = entry(s, fdir, &fst, fname)?.ok_or(Errno::ENOENT)?;
-        drop(fst);
-        let tst = tdir.read(s);
-        let to = entry(s, tdir, &tst, tname)?;
-        (from, to)
-    };
-    if let Some(t) = &to {
-        if Arc::ptr_eq(t, &from) {
-            // Two names for one file: nothing to do.
+    let from: Arc<Vnode>;
+    let to: Option<Arc<Vnode>>;
+    let mut held: Locked<'_> = Default::default();
+    if same_dir {
+        // One directory: locked exclusively, then the files in it (the
+        // order `remove` takes), so what the names are found to be stays.
+        let st = fdir.write(s);
+        from = entry(s, fdir, &st, fname)?.ok_or(Errno::ENOENT)?;
+        to = entry(s, fdir, &st, tname)?;
+        if !ends_differ(&from, to.as_ref())? {
             return Ok(());
         }
-        match (from.is_dir(), t.is_dir()) {
-            (true, false) => return Err(Errno::ENOTDIR),
-            (false, true) => return Err(Errno::EISDIR),
-            _ => {}
+        held[0] = Some((&**fdir, st));
+        let mut files = [&*from, to.as_deref().unwrap_or(&from)];
+        files.sort_by_key(|v| core::ptr::from_ref(*v).addr());
+        held[1] = Some((files[0], files[0].write(s)));
+        if !core::ptr::eq(files[0], files[1]) {
+            held[2] = Some((files[1], files[1].write(s)));
         }
-        if t.mounted().is_some() {
-            return Err(Errno::EBUSY);
+    } else {
+        // Find both ends with the directories locked shared.
+        let fst = fdir.read(s);
+        from = entry(s, fdir, &fst, fname)?.ok_or(Errno::ENOENT)?;
+        drop(fst);
+        let tst = tdir.read(s);
+        to = entry(s, tdir, &tst, tname)?;
+        drop(tst);
+        if !ends_differ(&from, to.as_ref())? {
+            return Ok(());
         }
-    }
-    if from.mounted().is_some() {
-        return Err(Errno::EBUSY);
-    }
-    // A directory may not move under itself (the rename lock keeps the
-    // tree's shape still meanwhile).
-    if from.is_dir() && !same_dir && is_under(s, tdir, &from)? {
-        return Err(Errno::EINVAL);
-    }
-    // Without a target, `from` stands in for it: locked once.
-    let want = [&**fdir, &**tdir, &*from, to.as_deref().unwrap_or(&from)];
-    let mut held = lock_all(s, &want);
-    // Things may have moved before the locks: check the names again.
-    {
-        let fst = guard_of(&mut held, fdir);
-        let again = entry(s, fdir, fst, fname)?;
-        if !again.is_some_and(|v| Arc::ptr_eq(&v, &from)) {
-            return Err(Errno::ENOENT);
+        // A directory may not move under itself (the rename lock keeps the
+        // tree's shape still meanwhile).
+        if from.is_dir() && is_under(s, tdir, &from)? {
+            return Err(Errno::EINVAL);
         }
-    }
-    {
+        // Without a target, `from` stands in for it: locked once.
+        let want = [&**fdir, &**tdir, &*from, to.as_deref().unwrap_or(&from)];
+        held = lock_all(s, &want);
+        // Things may have moved before the locks: check the names again.
+        {
+            let fst = guard_of(&mut held, fdir);
+            let again = entry(s, fdir, fst, fname)?;
+            if !again.is_some_and(|v| Arc::ptr_eq(&v, &from)) {
+                return Err(Errno::ENOENT);
+            }
+        }
         let tst = guard_of(&mut held, tdir);
         let again = entry(s, tdir, tst, tname)?;
         let same = match (&again, &to) {

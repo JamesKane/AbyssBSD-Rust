@@ -50,9 +50,15 @@ fn run_ubench_p5(s: &Sleepable) -> bool {
 }
 
 /// Runs `path` and waits; whether it exited with 0.
+/// Under the profiler, `UB_PROF` has `ubench` sample each storm phase
+/// apart, for longer.
 fn run_waiting(s: &Sleepable, path: &[u8], argv: &[&[u8]]) -> bool {
-    const ENV: &[&[u8]] = &[b"PATH=/rescue"];
-    match crate::proc::Process::spawn(s, path, argv, ENV, None) {
+    let env: &[&[u8]] = if crate::prof::on() {
+        &[b"PATH=/rescue", b"UB_PROF=1"]
+    } else {
+        &[b"PATH=/rescue"]
+    };
+    match crate::proc::Process::spawn(s, path, argv, env, None) {
         Ok(p) => p.wait(s) == crate::proc::Exit::Code(0),
         Err(e) => {
             kprintln!("bench: cannot run {}: {e:?}", path.escape_ascii());

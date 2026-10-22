@@ -113,6 +113,7 @@ pub(super) fn openat(s: &Sleepable, fd: u64, path_ptr: u64, flags: u64, mode: u6
     let walk = Walk {
         follow: flags & O_NOFOLLOW == 0 && !exclusive,
         beneath: flags & O_RESOLVE_BENEATH != 0,
+        create: flags & O_CREAT != 0,
     };
     let ucred = p.cred();
     let cred = &*ucred;
@@ -285,6 +286,7 @@ pub(super) fn fstatat(s: &Sleepable, fd: u64, path_ptr: u64, buf: u64, flag: u64
     let walk = Walk {
         follow: flag & AT_SYMLINK_NOFOLLOW == 0,
         beneath: flag & AT_RESOLVE_BENEATH != 0,
+        create: false,
     };
     let st = if path.is_empty() && flag & AT_EMPTY_PATH != 0 && At::new(int(fd)) != At::Cwd {
         // The descriptor may be a pipe.
@@ -385,6 +387,7 @@ pub(super) fn faccessat(s: &Sleepable, fd: u64, path_ptr: u64, amode: u64, flag:
     let walk = Walk {
         follow: flag & AT_SYMLINK_NOFOLLOW == 0,
         beneath: flag & AT_RESOLVE_BENEATH != 0,
+        create: false,
     };
     // Without AT_EACCESS, the lookup and the check both use the real ids
     // (FreeBSD's `kern_accessat`).

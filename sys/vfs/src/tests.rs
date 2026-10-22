@@ -150,6 +150,7 @@ fn lookup_as(ns: &Namespace, cred: &Cred, path: &[u8], follow: bool) -> Result<A
             root: &root,
             follow,
             beneath: false,
+            create: false,
             cred,
         },
         path,
@@ -170,6 +171,7 @@ fn try_parent(ns: &Namespace, path: &[u8]) -> Result<(Arc<Vnode>, Vec<u8>), Errn
             root: &root,
             follow: false,
             beneath: false,
+            create: false,
             cred: &cred,
         },
         path,
@@ -364,6 +366,7 @@ fn missing_last_component() {
         root: &root,
         follow: true,
         beneath: false,
+        create: false,
         cred: &cred,
     };
     match ns.resolve(&s(), &l, b"/rescue/new").unwrap() {
@@ -377,6 +380,37 @@ fn missing_last_component() {
 }
 
 #[test]
+fn a_miss_to_create_is_not_cached() {
+    let ns = namespace();
+    let root = Arc::clone(ns.root());
+    let cred = Cred::root();
+    let mut l = Lookup {
+        start: &root,
+        root: &root,
+        follow: true,
+        beneath: false,
+        create: true,
+        cred: &cred,
+    };
+    let rescue = lookup(&ns, b"/rescue", true).unwrap();
+    assert!(matches!(
+        ns.resolve(&s(), &l, b"/rescue/new").unwrap(),
+        Found::Missing { .. }
+    ));
+    assert!(crate::cache::lookup(&rescue, b"new").is_none());
+    // Any other lookup's miss is.
+    l.create = false;
+    assert!(matches!(
+        ns.resolve(&s(), &l, b"/rescue/new").unwrap(),
+        Found::Missing { .. }
+    ));
+    assert!(matches!(
+        crate::cache::lookup(&rescue, b"new"),
+        Some(crate::cache::Hit::Negative)
+    ));
+}
+
+#[test]
 fn beneath() {
     let ns = namespace();
     let rescue = lookup(&ns, b"/rescue", true).unwrap();
@@ -387,6 +421,7 @@ fn beneath() {
         root: &root,
         follow: true,
         beneath: true,
+        create: false,
         cred: &cred,
     };
     assert!(ns.lookup(&s(), &l, b"sh").is_ok());

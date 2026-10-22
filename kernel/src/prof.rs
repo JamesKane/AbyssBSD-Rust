@@ -44,6 +44,15 @@ static ON: AtomicBool = AtomicBool::new(false);
 /// A report is being made: what it costs is no benchmark's.
 static REPORTING: AtomicBool = AtomicBool::new(false);
 
+/// The benchmark asked for no samples for now (a `kprof pause` line, until
+/// `kprof resume`): what it runs meanwhile is set-up, not what it reports.
+static PAUSED: AtomicBool = AtomicBool::new(false);
+
+/// Whether what happens now is left out of the profile.
+fn ignored() -> bool {
+    REPORTING.load(Ordering::Relaxed) || PAUSED.load(Ordering::Relaxed)
+}
+
 /// The address the interrupt being handled on each CPU interrupted, and
 /// the return address above it.
 static PC: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
@@ -116,7 +125,7 @@ pub(crate) fn interrupted(pc: u64, fp: u64, from_user: bool) {
 fn sample(cpu: usize, _: &IrqCx) {
     let pc = PC[cpu].load(Ordering::Relaxed);
     let caller = CALLER[cpu].load(Ordering::Relaxed);
-    if !REPORTING.load(Ordering::Relaxed) {
+    if !ignored() {
         let mut v = SAMPLES[cpu].lock();
         if v.len() < v.capacity() {
             v.push((pc, caller));
@@ -131,7 +140,7 @@ fn sample(cpu: usize, _: &IrqCx) {
 
 /// A synchronous disk request waited `ns`: counted by the waiter's chain.
 fn io_waited(ns: u64) {
-    if REPORTING.load(Ordering::Relaxed) {
+    if ignored() {
         return;
     }
     let mut chain = [0u64; CHAIN];
@@ -147,9 +156,16 @@ fn io_waited(ns: u64) {
     e.1 += ns;
 }
 
-/// Console output: a benchmark's result line ends its profile.
+/// Console output: a benchmark's result line ends its profile, and a
+/// `kprof` line pauses or resumes sampling.
 pub(crate) fn console_output(bytes: &[u8]) {
-    if let Some(rest) = bytes.strip_prefix(b"kbench ")
+    if let Some(rest) = bytes.strip_prefix(b"kprof ") {
+        if rest.starts_with(b"pause") {
+            PAUSED.store(true, Ordering::Relaxed);
+        } else if rest.starts_with(b"resume") {
+            PAUSED.store(false, Ordering::Relaxed);
+        }
+    } else if let Some(rest) = bytes.strip_prefix(b"kbench ")
         && !rest.starts_with(b"begin ")
     {
         let end = rest

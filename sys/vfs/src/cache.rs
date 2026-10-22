@@ -266,9 +266,60 @@ pub fn synchronize() {
 /// locks (a bucket lock, then these).
 pub(crate) struct Links {
     /// The entries in this directory.
-    src: BTreeSet<Key>,
+    src: Keys,
     /// The entries naming this vnode.
-    dst: BTreeSet<Key>,
+    dst: Keys,
+}
+
+/// A set of keys: most vnodes have one name or none, and so most sets one
+/// key or none, kept without allocating.
+enum Keys {
+    None,
+    One(Key),
+    More(BTreeSet<Key>),
+}
+
+impl Keys {
+    fn insert(&mut self, k: Key) {
+        match self {
+            Self::None => *self = Self::One(k),
+            Self::One(o) if *o == k => {}
+            Self::One(o) => {
+                let o = *o;
+                *self = Self::More(BTreeSet::from([o, k]));
+            }
+            Self::More(set) => {
+                set.insert(k);
+            }
+        }
+    }
+
+    fn remove(&mut self, k: &Key) {
+        match self {
+            Self::One(o) if o == k => *self = Self::None,
+            Self::More(set) => {
+                set.remove(k);
+            }
+            _ => {}
+        }
+    }
+}
+
+impl IntoIterator for Keys {
+    type Item = Key;
+    type IntoIter = core::iter::Chain<
+        core::option::IntoIter<Key>,
+        core::iter::Flatten<core::option::IntoIter<BTreeSet<Key>>>,
+    >;
+
+    fn into_iter(self) -> Self::IntoIter {
+        let (one, more) = match self {
+            Self::None => (None, None),
+            Self::One(k) => (Some(k), None),
+            Self::More(set) => (None, Some(set)),
+        };
+        one.into_iter().chain(more.into_iter().flatten())
+    }
 }
 
 /// An entry, in its vnodes' [`Links`]: its hash, for its bucket, and its
@@ -283,8 +334,8 @@ struct Key {
 impl Links {
     pub(crate) const fn new() -> Self {
         Self {
-            src: BTreeSet::new(),
-            dst: BTreeSet::new(),
+            src: Keys::None,
+            dst: Keys::None,
         }
     }
 }

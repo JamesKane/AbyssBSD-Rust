@@ -589,6 +589,7 @@ impl Process {
                 root: &root,
                 follow: true,
                 beneath: false,
+                create: false,
                 cred: &crate::fs::cred(),
             },
             path,

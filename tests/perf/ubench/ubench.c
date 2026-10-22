@@ -634,50 +634,87 @@ op_readdir(void *arg)
 	return (entries);
 }
 
-/* Creates, renames, and unlinks UB_STORM files per round, timed apart. */
-static void
-bench_storms(const char *fs, const char *dir)
-{
-	double vc[UB_ROUNDS], vr[UB_ROUNDS], vu[UB_ROUNDS];
-	char a[PATH_MAX], b[PATH_MAX], name[64];
-	uint64_t t0, t1, t2, t3;
+/* Rounds of each storm phase sampled when profiling (UB_PROF set). */
+#define	UB_PROF_ROUNDS	30
 
-	if (mkdir(dir, 0755) != 0 && errno != EEXIST)
-		die("mkdir");
-	for (int r = 0; r < UB_ROUNDS; r++) {
-		t0 = now();
-		for (int i = 0; i < UB_STORM; i++) {
+/*
+ * Tells AbyssBSD's profiler (abyss.prof) to stop or go on sampling, so a
+ * profile of one storm phase leaves the others out. FreeBSD prints it too.
+ */
+static void
+prof_sampling(int on)
+{
+	printf("kprof %s\n", on ? "resume" : "pause");
+	fflush(stdout);
+}
+
+/* One storm phase over UB_STORM files: 0 creates, 1 renames, 2 unlinks. */
+static uint64_t
+storm_phase(const char *dir, int phase)
+{
+	char a[PATH_MAX], b[PATH_MAX];
+	uint64_t t0 = now();
+
+	for (int i = 0; i < UB_STORM; i++) {
+		if (phase < 2)
 			snprintf(a, sizeof(a), "%s/f%d", dir, i);
+		if (phase > 0)
+			snprintf(b, sizeof(b), "%s/g%d", dir, i);
+		if (phase == 0) {
 			int fd = open(a, O_WRONLY | O_CREAT | O_EXCL, 0644);
 
 			if (fd < 0)
 				die("create");
 			close(fd);
-		}
-		t1 = now();
-		for (int i = 0; i < UB_STORM; i++) {
-			snprintf(a, sizeof(a), "%s/f%d", dir, i);
-			snprintf(b, sizeof(b), "%s/g%d", dir, i);
+		} else if (phase == 1) {
 			if (rename(a, b) != 0)
 				die("rename");
-		}
-		t2 = now();
-		for (int i = 0; i < UB_STORM; i++) {
-			snprintf(b, sizeof(b), "%s/g%d", dir, i);
-			if (unlink(b) != 0)
-				die("unlink");
-		}
-		t3 = now();
-		vc[r] = (double)(t1 - t0) / UB_STORM;
-		vr[r] = (double)(t2 - t1) / UB_STORM;
-		vu[r] = (double)(t3 - t2) / UB_STORM;
+		} else if (unlink(b) != 0)
+			die("unlink");
 	}
-	snprintf(name, sizeof(name), "fs.%s.create", fs);
-	report(name, vc);
-	snprintf(name, sizeof(name), "fs.%s.rename", fs);
-	report(name, vr);
-	snprintf(name, sizeof(name), "fs.%s.unlink", fs);
-	report(name, vu);
+	return (now() - t0);
+}
+
+/*
+ * Creates, renames, and unlinks UB_STORM files per round, timed apart. To
+ * profile, each phase runs UB_PROF_ROUNDS rounds with only it sampled.
+ */
+static void
+bench_storms(const char *fs, const char *dir)
+{
+	static const char *const phases[] = { "create", "rename", "unlink" };
+	double v[3][UB_ROUNDS];
+	char name[64];
+	int prof = getenv("UB_PROF") != NULL;
+
+	if (mkdir(dir, 0755) != 0 && errno != EEXIST)
+		die("mkdir");
+	if (!prof) {
+		for (int r = 0; r < UB_ROUNDS; r++)
+			for (int p = 0; p < 3; p++)
+				v[p][r] = (double)storm_phase(dir, p) / UB_STORM;
+		for (int p = 0; p < 3; p++) {
+			snprintf(name, sizeof(name), "fs.%s.%s", fs, phases[p]);
+			report(name, v[p]);
+		}
+		return;
+	}
+	for (int sampled = 0; sampled < 3; sampled++) {
+		prof_sampling(0);
+		for (int r = 0; r < UB_PROF_ROUNDS; r++)
+			for (int p = 0; p < 3; p++) {
+				if (p == sampled)
+					prof_sampling(1);
+				uint64_t ns = storm_phase(dir, p);
+				if (p == sampled) {
+					prof_sampling(0);
+					v[p][r % UB_ROUNDS] = (double)ns / UB_STORM;
+				}
+			}
+		prof_sampling(1);
+		snprintf(name, sizeof(name), "fs.%s.%s", fs, phases[sampled]);
+		report(name, v[sampled]);
+	}
 }
 
 /* Rewrites the whole file sequentially; one op = one UB_IO write. */

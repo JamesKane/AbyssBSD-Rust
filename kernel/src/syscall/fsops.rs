@@ -226,6 +226,7 @@ pub(super) fn linkat(
     let walk = Walk {
         follow: flag & AT_SYMLINK_FOLLOW != 0,
         beneath: flag & AT_RESOLVE_BENEATH != 0,
+        create: false,
     };
     let target = super::path::at_vnode(s, &p, fd1, &from, walk, flag & AT_EMPTY_PATH != 0)?;
     let to = path(path2)?;
@@ -253,6 +254,7 @@ fn target(
     let walk = Walk {
         follow: flag & AT_SYMLINK_NOFOLLOW == 0,
         beneath: flag & AT_RESOLVE_BENEATH != 0,
+        create: false,
     };
     super::path::at_vnode(s, p, fd, &path, walk, flag & AT_EMPTY_PATH != 0)
 }

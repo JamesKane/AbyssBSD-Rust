@@ -2697,6 +2697,7 @@ mod user_memory {
                         root: &root,
                         follow: true,
                         beneath: false,
+                        create: false,
                         cred: &crate::fs::cred(),
                     },
                     b"/rescue/echo",
@@ -2825,6 +2826,7 @@ mod user_memory {
                 root: &root,
                 follow: true,
                 beneath: false,
+                create: false,
                 cred: &crate::fs::cred(),
             };
             if crate::fs::namespace().lookup(&s, &l, FSX).is_err() {
@@ -2855,6 +2857,7 @@ mod user_memory {
             root: &root,
             follow: true,
             beneath: false,
+            create: false,
             cred: &crate::fs::cred(),
         };
         let v = crate::fs::namespace().lookup(s, &l, path).ok()?;

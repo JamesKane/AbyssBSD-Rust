@@ -60,6 +60,10 @@ pub struct Lookup<'a> {
     /// Whether the lookup must stay beneath `start` (`O_RESOLVE_BENEATH`):
     /// absolute paths, and `..` above `start`, fail with `ENOTCAPABLE`.
     pub beneath: bool,
+    /// Whether a missing last component is about to be created: that miss
+    /// is not cached, since the entry made replaces it at once (FreeBSD
+    /// caches no negative entry for `CREATE`).
+    pub create: bool,
     pub cred: &'a Cred,
 }
 
@@ -315,6 +319,16 @@ impl Namespace {
     /// The vnode `dir` holds as `name` (not `.` or `..`), through the
     /// name cache.
     pub fn child(s: &Sleepable, dir: &Arc<Vnode>, name: &[u8]) -> Result<Arc<Vnode>, Errno> {
+        Self::child_in(s, dir, name, true)
+    }
+
+    /// [`Self::child`], caching a miss only if `negative`.
+    fn child_in(
+        s: &Sleepable,
+        dir: &Arc<Vnode>,
+        name: &[u8],
+        negative: bool,
+    ) -> Result<Arc<Vnode>, Errno> {
         match cache::lookup(dir, name) {
             Some(Hit::Positive(v)) => {
                 v.touch();
@@ -334,7 +348,9 @@ impl Namespace {
                 Ok(v)
             }
             Err(Errno::ENOENT) => {
-                cache::enter(dir, name, None);
+                if negative {
+                    cache::enter(dir, name, None);
+                }
                 Err(Errno::ENOENT)
             }
             Err(e) => Err(e),
@@ -440,7 +456,7 @@ impl Namespace {
                     }
                     self.parent(s, &cur, l.root)?
                 }
-                _ => match Self::child(s, &cur, name) {
+                _ => match Self::child_in(s, &cur, name, c.more || !l.create) {
                     Ok(v) => {
                         depth += 1;
                         Self::cover(s, v)?
