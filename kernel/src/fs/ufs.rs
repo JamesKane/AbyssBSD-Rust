@@ -48,7 +48,7 @@ use vfs::{
     Attr, Create, DirEntry, DirectoryNode, FileSystem, FsStats, Kind, NewNode, Node, NodeOps,
     Rename, SetAttr, SymlinkNode, Uio,
 };
-use vm::object::{Object, PageIndex, Pager, PagerError};
+use vm::object::{Object, PageIndex, Pager, PagerError, PendingFill};
 
 /// Doing soft-updates work: under vnode locks, before inodes.
 static WORK: LockClass = LockClass::new("ufs work", 342);
@@ -86,6 +86,10 @@ struct InodeState {
     dirty: bool,
     /// Nodes (vnodes) using it; deferred work can hold it with none.
     nodes: u32,
+    /// Bumped by whatever may change the file's data on the disk or where
+    /// it lies (writes, truncation, write-back), so read-ahead that went
+    /// out before is dropped rather than put in stale.
+    data_gen: u64,
 }
 
 /// An in-core inode, and its object if it is a regular file.
@@ -391,6 +395,7 @@ impl Shared {
                     ip,
                     dirty: false,
                     nodes: 0,
+                    data_gen: 0,
                 },
             ),
             size: AtomicU64::new(size),
@@ -826,6 +831,7 @@ impl Node for UfsNode {
         let sum = shared.sum()?;
         let t = now();
         let mut st = self.cell.state.lock(s);
+        st.data_gen = st.data_gen.wrapping_add(1);
         if let Some(size) = a.size {
             if i64::try_from(size).is_err() {
                 return Err(Errno::EFBIG);
@@ -859,6 +865,7 @@ impl Node for UfsNode {
                 drop(st);
                 let waited = shared.flush_frees(s);
                 st = self.cell.state.lock(s);
+                st.data_gen = st.data_gen.wrapping_add(1);
                 if !waited {
                     return Err(Errno::ENOSPC);
                 }
@@ -959,6 +966,7 @@ impl Node for UfsNode {
             return;
         };
         let mut st = self.cell.state.lock(s);
+        st.data_gen = st.data_gen.wrapping_add(1);
         if st.ip.nlink == 0 && st.ip.mode != 0 {
             if let Some(o) = &self.object {
                 o.truncate(0);
@@ -1059,6 +1067,7 @@ impl vfs::RegularNode for UfsNode {
         // waiting to free some, it waits for that and tries again.
         for attempt in 0..2 {
             let mut st = self.cell.state.lock(s);
+            st.data_gen = st.data_gen.wrapping_add(1);
             old_size = st.ip.size;
             let mut sum = sum.lock(s);
             let mut at = offset;
@@ -1123,6 +1132,7 @@ impl vfs::RegularNode for UfsNode {
         let written = vfs::pagecache::write_fresh(&object, offset, uio, &fresh);
         let done = written.as_ref().map_or(0, |&n| n as u64);
         let mut st = self.cell.state.lock(s);
+        st.data_gen = st.data_gen.wrapping_add(1);
         let want = old_size.max(offset + done);
         if st.ip.size > want {
             // A short copy, or blocks given past what fit: give back what
@@ -1375,7 +1385,7 @@ impl DirectoryNode for UfsNode {
 }
 
 /// The most pages one fill reads: read-ahead grows to this.
-const MAX_RUN: PageIndex = 64;
+const MAX_RUN: PageIndex = 256;
 const PAGE: u64 = 4096;
 const PAGE_LEN: usize = 4096;
 
@@ -1383,6 +1393,115 @@ const PAGE_LEN: usize = 4096;
 struct FilePager {
     fs: Arc<Shared>,
     cell: Arc<InodeCell>,
+}
+
+/// Where a run of a file's pages lies: each part's disk offset and length,
+/// and where in the run it goes. The rest reads as zeros: holes, and what
+/// lies past the end of the file (`eof` on).
+struct Layout {
+    parts: Vec<(u64, usize)>,
+    places: Vec<usize>,
+    eof: usize,
+}
+
+impl Layout {
+    /// Puts each part's bytes (`data`, as read) into `buf`, zeros around.
+    fn place(&self, buf: &mut [u8], data: &[Vec<u8>]) {
+        let mut at = 0;
+        for ((&(_, len), &out), bytes) in self.parts.iter().zip(&self.places).zip(data) {
+            buf[at..out].fill(0);
+            let n = bytes.len().min(len);
+            buf[out..out + n].copy_from_slice(&bytes[..n]);
+            buf[out + n..out + len].fill(0);
+            at = out + len;
+        }
+        let len = buf.len();
+        buf[at.min(len)..].fill(0);
+        buf[self.eof.min(len)..].fill(0);
+    }
+}
+
+impl FilePager {
+    /// Where the `len` bytes of pages from `index` on lie, for inode `ip`
+    /// (locked by the caller).
+    fn layout(
+        &self,
+        s: &Sleepable,
+        ip: &ufs::Inode,
+        index: PageIndex,
+        len: usize,
+    ) -> Result<Layout, PagerError> {
+        let ufs = &self.fs.ufs;
+        let sb = ufs.superblock();
+        let bsize = u64::from(sb.bsize);
+        let fsize = u64::from(sb.fsize);
+        let size = ip.size;
+        let start = index * PAGE;
+        let end = start + u64::try_from(len).map_err(|_| PagerError)?;
+        let mut parts = Vec::new();
+        let mut places = Vec::new();
+        let mut at = start;
+        while at < end && at < size {
+            let out = usize::try_from(at - start).map_err(|_| PagerError)?;
+            let lbn = at / bsize;
+            let within = at % bsize;
+            let blocks = (end - at).div_ceil(bsize).max(1);
+            let (addr, run) = ufs.bmap_run(s, ip, lbn, blocks).map_err(|_| PagerError)?;
+            // The bytes the run holds from `at`: whole blocks, but only
+            // the allocated fragments of the file's last one.
+            let last = lbn + run - 1;
+            let held = (run - 1) * bsize + u64::from(sb.block_size(size, last)) - within;
+            let n = held.min(end - at);
+            if addr != 0 {
+                parts.push((
+                    addr * fsize + within,
+                    usize::try_from(n).map_err(|_| PagerError)?,
+                ));
+                places.push(out);
+            }
+            at += n;
+        }
+        let eof = usize::try_from(size.saturating_sub(start)).map_or(len, |e| e.min(len));
+        Ok(Layout { parts, places, eof })
+    }
+}
+
+/// Read-ahead of a file's pages in flight ([`Pager::start_run`]).
+struct UfsAhead {
+    fs: Arc<Shared>,
+    cell: Arc<InodeCell>,
+    /// The inode's `data_gen` when the reads went out.
+    data_gen: u64,
+    layout: Layout,
+    len: usize,
+    reads: Option<storage::disk::PendingReads>,
+}
+
+impl PendingFill for UfsAhead {
+    fn wait(&mut self) -> Result<Vec<u8>, PagerError> {
+        let s = sleepable();
+        let reads = self.reads.take().ok_or(PagerError)?;
+        let data = self
+            .fs
+            .ufs
+            .io()
+            .disk
+            .finish_reads(&s, reads)
+            .map_err(|_| PagerError)?;
+        let mut buf = alloc::vec![0u8; self.len];
+        self.layout.place(&mut buf, &data);
+        Ok(buf)
+    }
+
+    fn commit(&self, insert: &mut dyn FnMut()) -> bool {
+        let s = sleepable();
+        let st = self.cell.state.lock(&s);
+        if st.data_gen != self.data_gen {
+            return false;
+        }
+        insert();
+        true
+    }
 }
 
 impl Pager for FilePager {
@@ -1402,61 +1521,40 @@ impl Pager for FilePager {
         // The VM calls pagers only where they may sleep (a fault fills with
         // no map lock held; the page cache in thread context).
         let s = sleepable();
-        let ufs = &self.fs.ufs;
-        let sb = ufs.superblock();
-        let bsize = u64::from(sb.bsize);
-        let fsize = u64::from(sb.fsize);
         // The inode stays locked: a writer moving a fragment waits.
         let st = self.cell.state.lock(&s);
-        let ip = &st.ip;
-        let size = ip.size;
-        let start = index * PAGE;
-        let end = start + buf.len() as u64;
-        // The runs on the disk, read together: where, and where in `buf`.
-        let mut parts: Vec<(u64, usize)> = Vec::new();
-        let mut places: Vec<usize> = Vec::new();
-        let mut at = start;
-        while at < end {
-            let out = usize::try_from(at - start).map_err(|_| PagerError)?;
-            // At or past the end: zeros, whatever the disk holds there.
-            if at >= size {
-                buf[out..].fill(0);
-                break;
-            }
-            let lbn = at / bsize;
-            let within = at % bsize;
-            let blocks = (end - at).div_ceil(bsize).max(1);
-            let (addr, run) = ufs.bmap_run(&s, ip, lbn, blocks).map_err(|_| PagerError)?;
-            // The bytes the run holds from `at`: whole blocks, but only
-            // the allocated fragments of the file's last one.
-            let last = lbn + run - 1;
-            let held = (run - 1) * bsize + u64::from(sb.block_size(size, last)) - within;
-            let n = held.min(end - at);
-            let len = usize::try_from(n).map_err(|_| PagerError)?;
-            if addr == 0 {
-                buf[out..out + len].fill(0);
-            } else {
-                parts.push((addr * fsize + within, len));
-                places.push(out);
-            }
-            at += n;
-        }
-        if !parts.is_empty() {
-            let data = ufs
+        let layout = self.layout(&s, &st.ip, index, buf.len())?;
+        let data = if layout.parts.is_empty() {
+            Vec::new()
+        } else {
+            self.fs
+                .ufs
                 .io()
                 .disk
-                .read_parts(&s, &parts)
-                .map_err(|_| PagerError)?;
-            for (bytes, out) in data.iter().zip(places) {
-                buf[out..out + bytes.len()].copy_from_slice(bytes);
-            }
-        }
-        if let Ok(past) = usize::try_from(size.saturating_sub(start))
-            && past < buf.len()
-        {
-            buf[past..].fill(0);
-        }
+                .read_parts(&s, &layout.parts)
+                .map_err(|_| PagerError)?
+        };
+        layout.place(buf, &data);
         Ok(())
+    }
+
+    fn start_run(&self, index: PageIndex, pages: PageIndex) -> Option<Box<dyn PendingFill>> {
+        let s = sleepable();
+        let len = usize::try_from(pages).ok()?.checked_mul(PAGE_LEN)?;
+        // Planned and sent under the inode lock, as a fill is; whatever
+        // changes the blocks after bumps `data_gen`, and the data is
+        // dropped.
+        let st = self.cell.state.lock(&s);
+        let layout = self.layout(&s, &st.ip, index, len).ok()?;
+        let reads = self.fs.ufs.io().disk.start_read_parts(&s, &layout.parts);
+        Some(Box::new(UfsAhead {
+            fs: Arc::clone(&self.fs),
+            cell: Arc::clone(&self.cell),
+            data_gen: st.data_gen,
+            layout,
+            len,
+            reads: Some(reads),
+        }))
     }
 
     fn writes_back(&self) -> bool {
@@ -1471,6 +1569,7 @@ impl Pager for FilePager {
         let bsize = u64::from(sb.bsize);
         let fsize = u64::from(sb.fsize);
         let mut st = self.cell.state.lock(&s);
+        st.data_gen = st.data_gen.wrapping_add(1);
         let at = index * PAGE;
         let lbn = at / bsize;
         let within = at % bsize;
@@ -1515,6 +1614,7 @@ impl Pager for FilePager {
                         return Err(PagerError);
                     }
                     st = self.cell.state.lock(&s);
+                    st.data_gen = st.data_gen.wrapping_add(1);
                     if at >= st.ip.size {
                         return Ok(());
                     }
@@ -1543,7 +1643,8 @@ impl Pager for FilePager {
         let pages = buf.as_chunks::<PAGE_LEN>().0;
         // The inode stays locked while the run goes, as for one page: its
         // blocks cannot be freed and reused meanwhile.
-        let st = self.cell.state.lock(&s);
+        let mut st = self.cell.state.lock(&s);
+        st.data_gen = st.data_gen.wrapping_add(1);
         // Disk extents: where, from which byte of `buf`, and how long.
         let mut extents: Vec<(u64, usize, usize)> = Vec::new();
         for (i, k) in (index..).zip(0..pages.len()) {

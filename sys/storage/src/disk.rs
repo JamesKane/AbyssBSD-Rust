@@ -335,8 +335,15 @@ impl Disk {
         s: &Sleepable,
         parts: &[(u64, usize)],
     ) -> Result<Vec<Vec<u8>>, BioError> {
+        let pending = self.start_read_parts(s, parts);
+        self.finish_reads(s, pending)
+    }
+
+    /// Sends the reads of [`Self::read_parts`] and returns without waiting:
+    /// [`Self::finish_reads`] waits (read-ahead goes on meanwhile).
+    pub fn start_read_parts(&self, s: &Sleepable, parts: &[(u64, usize)]) -> PendingReads {
         let chunk = self.max_transfer.max(self.sector_size as usize);
-        let waiters = self.start_hooked(|| {
+        let started = self.start_hooked(|| {
             let mut waiters = Vec::new();
             for &(offset, len) in parts {
                 let mut done = 0;
@@ -351,10 +358,23 @@ impl Disk {
             }
             waiters
         });
-        let mut out = Vec::with_capacity(parts.len());
-        let mut results = self.wait_all(s, waiters).into_iter();
+        PendingReads {
+            started,
+            lens: parts.iter().map(|&(_, len)| len).collect(),
+        }
+    }
+
+    /// Waits for reads [`Self::start_read_parts`] sent: each part's bytes.
+    pub fn finish_reads(
+        &self,
+        s: &Sleepable,
+        pending: PendingReads,
+    ) -> Result<Vec<Vec<u8>>, BioError> {
+        let PendingReads { started, lens } = pending;
+        let mut out = Vec::with_capacity(lens.len());
+        let mut results = self.wait_all(s, started).into_iter();
         let mut failed = None;
-        for &(_, len) in parts {
+        for len in lens {
             let mut part = Vec::with_capacity(len);
             while part.len() < len {
                 let Some((buf, r)) = results.next() else {
@@ -425,6 +445,19 @@ impl Disk {
     /// Makes earlier writes durable.
     pub fn flush(&self, s: &Sleepable) -> Result<(), BioError> {
         self.sync(s, BioOp::Flush, 0, Vec::new()).1
+    }
+}
+
+/// Reads sent and not yet waited for ([`Disk::start_read_parts`]).
+/// Dropping them is safe: each request keeps its own buffer until done.
+pub struct PendingReads {
+    started: (Vec<Arc<Waiter>>, u64),
+    lens: Vec<usize>,
+}
+
+impl core::fmt::Debug for PendingReads {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "PendingReads({} requests)", self.started.0.len())
     }
 }
 

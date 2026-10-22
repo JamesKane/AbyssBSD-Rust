@@ -93,8 +93,10 @@ const CQE: usize = 16;
 const ADMIN_ENTRIES: u16 = 32;
 /// I/O queue entries wanted (capped by CAP.MQES).
 const IO_ENTRIES: u16 = 256;
-/// The largest transfer per request (capped by MDTS).
-const MAX_TRANSFER: usize = 128 * 1024;
+/// The largest transfer per request (capped by MDTS): FreeBSD's
+/// `MAXPHYS`, so a file system's cluster is one command and one doorbell
+/// (each an exit to the hypervisor in a VM).
+const MAX_TRANSFER: usize = 1024 * 1024;
 /// PRP list bytes per command: enough entries for the largest transfer.
 const PRP_LIST: usize = (MAX_TRANSFER / PAGE + 1) * 8;
 /// Admin commands time out after this long (polled every millisecond).

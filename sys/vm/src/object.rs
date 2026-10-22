@@ -30,6 +30,7 @@
 //!
 //! Behavior reference: sys/vm/vm_object.c (shadow chains and collapse).
 
+use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -98,6 +99,29 @@ pub trait Pager: Send + Sync {
         }
         Ok(())
     }
+    /// Starts filling `pages` pages from `index` on (read-ahead), without
+    /// waiting: `None` if this pager cannot, or not now. May sleep.
+    fn start_run(&self, _index: PageIndex, _pages: PageIndex) -> Option<Box<dyn PendingFill>> {
+        None
+    }
+}
+
+/// A fill [`Pager::start_run`] started.
+pub trait PendingFill: Send {
+    /// Waits for the data: the run's pages, whole. May sleep.
+    fn wait(&mut self) -> Result<Vec<u8>, PagerError>;
+    /// Runs `insert` if the data still stands for what the pager holds
+    /// (nothing written or moved since the fill started), keeping it so
+    /// until `insert` returns; returns whether it ran. `insert` must not
+    /// allocate. May sleep.
+    fn commit(&self, insert: &mut dyn FnMut()) -> bool;
+}
+
+/// A read-ahead in flight.
+struct Ahead {
+    index: PageIndex,
+    pages: PageIndex,
+    fill: Box<dyn PendingFill>,
 }
 
 /// Why a page lookup found nothing to map.
@@ -170,6 +194,8 @@ pub struct Object {
     /// pages the next fill reads.
     ra_next: AtomicU64,
     ra_window: AtomicU64,
+    /// The next window, read ahead while the last is used.
+    ahead: SpinLock<Option<Ahead>>,
 }
 
 /// A transfer through an object's pages: its frames stay put until the
@@ -229,6 +255,7 @@ impl Object {
             io: AtomicUsize::new(0),
             ra_next: AtomicU64::new(0),
             ra_window: AtomicU64::new(1),
+            ahead: SpinLock::new(None),
         })
     }
 
@@ -250,6 +277,7 @@ impl Object {
             io: AtomicUsize::new(0),
             ra_next: AtomicU64::new(0),
             ra_window: AtomicU64::new(1),
+            ahead: SpinLock::new(None),
         })
     }
 
@@ -275,6 +303,7 @@ impl Object {
             io: AtomicUsize::new(0),
             ra_next: AtomicU64::new(0),
             ra_window: AtomicU64::new(1),
+            ahead: SpinLock::new(None),
         });
         PAGED.lock().push(Arc::downgrade(&o));
         o
@@ -419,7 +448,15 @@ impl Object {
         if !fill {
             return Ok(None);
         }
+        if let Some(pfn) = self.take_ahead(pager.as_ref(), index)? {
+            return Ok(Some(pfn));
+        }
         let run = self.run_at(pager.as_ref(), index);
+        if run == pager.max_run() {
+            // A stream: the next window goes out before this one is waited
+            // for, so the disk has it in hand by the time it is asked.
+            self.start_ahead(pager.as_ref(), index + run);
+        }
         if run == 1 {
             // Fill outside the lock; a racing fill of the same page loses.
             let mut failed = false;
@@ -455,6 +492,86 @@ impl Object {
             first.get_or_insert(pfn);
         }
         first.map(Some).ok_or(LookupError::OutOfMemory)
+    }
+
+    /// Starts reading `max_run` pages from `index` on ahead, unless one is
+    /// already going there; never past the end or over a page held.
+    fn start_ahead(&self, pager: &dyn Pager, index: PageIndex) {
+        if self.ahead.lock().as_ref().is_some_and(|a| a.index == index) {
+            return;
+        }
+        let end = index.saturating_add(pager.max_run()).min(pager.size());
+        let end = self
+            .inner
+            .lock()
+            .pages
+            .range(index..end)
+            .next()
+            .map_or(end, |(&i, _)| i);
+        if end <= index {
+            return;
+        }
+        if let Some(fill) = pager.start_run(index, end - index) {
+            // One left unused (the reader went elsewhere) is dropped.
+            let old = self.ahead.lock().replace(Ahead {
+                index,
+                pages: end - index,
+                fill,
+            });
+            drop(old);
+        }
+    }
+
+    /// Page `index` from the read-ahead in flight there, if one is: the
+    /// next window is started, then this one waited for and put in.
+    /// `Ok(None)` when there is none, or its data no longer stands.
+    fn take_ahead(&self, pager: &dyn Pager, index: PageIndex) -> Result<Option<Pfn>, LookupError> {
+        let taken = {
+            let mut ahead = self.ahead.lock();
+            if ahead.as_ref().is_none_or(|a| a.index != index) {
+                return Ok(None);
+            }
+            ahead.take()
+        };
+        let Some(Ahead {
+            pages, mut fill, ..
+        }) = taken
+        else {
+            return Ok(None);
+        };
+        self.start_ahead(pager, index + pages);
+        self.ra_window.store(pages, Ordering::Relaxed);
+        self.ra_next.store(index + pages, Ordering::Relaxed);
+        let Ok(buf) = fill.wait() else {
+            // Read again, synchronously, to report the error.
+            return Ok(None);
+        };
+        // Pages made outside every lock (making one may write others
+        // back); put in only if the data still stands.
+        let mut made = Vec::new();
+        for chunk in buf.as_chunks::<PAGE_BYTES>().0 {
+            match self
+                .pages_ops
+                .alloc_filled(&mut |page| page.copy_from_slice(chunk))
+            {
+                Some(new) => made.push(new),
+                None => break,
+            }
+        }
+        let mut first = None;
+        let committed = fill.commit(&mut || {
+            for (i, &new) in (index..).zip(&made) {
+                let pfn = self.insert_filled(i, new);
+                first.get_or_insert(pfn);
+            }
+        });
+        if !committed {
+            for new in made {
+                self.pages_ops.free(new);
+            }
+            return Ok(None);
+        }
+        Ok(first)
     }
 
     /// Inserts a page just filled at `index`, unless a racing fill got
