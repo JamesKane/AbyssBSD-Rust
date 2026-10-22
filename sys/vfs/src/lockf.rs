@@ -17,7 +17,7 @@
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use abi::errno::Errno;
 use sched::{Sleepable, WaitQueue};
@@ -72,6 +72,9 @@ pub struct Lockf {
     locks: SpinLock<Vec<Lock>>,
     /// Bumped by every change, for waiters.
     changes: AtomicU64,
+    /// Whether a lock was ever taken here, so closing a file never
+    /// locked skips the list.
+    ever_locked: AtomicBool,
     wait: WaitQueue,
 }
 
@@ -87,6 +90,7 @@ impl Lockf {
         Self {
             locks: SpinLock::new(Vec::new()),
             changes: AtomicU64::new(0),
+            ever_locked: AtomicBool::new(false),
             wait: WaitQueue::new(),
         }
     }
@@ -115,6 +119,7 @@ impl Lockf {
                 {
                     Some(b) => b.owner,
                     None => {
+                        self.ever_locked.store(true, Ordering::Release);
                         apply(&mut locks, Some(req), req.owner, req.start, req.end);
                         return Ok(());
                     }
@@ -155,6 +160,10 @@ impl Lockf {
 
     /// Releases every lock `owner` holds here.
     pub fn release(&self, owner: Owner) {
+        // The owner is going, so it takes no lock meanwhile.
+        if !self.ever_locked.load(Ordering::Acquire) {
+            return;
+        }
         let mut locks = self.locks.lock();
         let before = locks.len();
         locks.retain(|l| l.owner != owner);

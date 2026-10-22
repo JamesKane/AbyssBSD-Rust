@@ -24,6 +24,7 @@ pub(crate) mod socket;
 pub(crate) mod ufs;
 pub(crate) mod uio;
 
+use alloc::borrow::Cow;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
@@ -448,22 +449,22 @@ impl Walk {
     };
 }
 
-/// Where `p`'s walk of `path` starts.
+/// Where `p`'s walk of `path` starts: the root is borrowed, not counted.
 fn start_of(
     s: &Sleepable,
     p: &crate::proc::Process,
     at: At,
     path: &[u8],
-) -> Result<Arc<Vnode>, Errno> {
+) -> Result<Cow<'static, Arc<Vnode>>, Errno> {
     if path.first() == Some(&b'/') {
-        return Ok(root());
+        return Ok(Cow::Borrowed(namespace().root()));
     }
     match at {
-        At::Cwd => Ok(Arc::clone(p.cwd.lock().vnode())),
+        At::Cwd => Ok(Cow::Owned(Arc::clone(p.cwd.lock().vnode()))),
         At::Fd(fd) => {
             let f = p.files.lock(s).get(fd)?;
             match f.vnode() {
-                Some(v) if v.is_dir() => Ok(Arc::clone(v)),
+                Some(v) if v.is_dir() => Ok(Cow::Owned(Arc::clone(v))),
                 _ => Err(Errno::ENOTDIR),
             }
         }
@@ -492,13 +493,12 @@ pub(crate) fn resolve_as(
     path: &[u8],
     walk: Walk,
 ) -> Result<Found, Errno> {
-    let root = root();
     let start = start_of(s, p, at, path)?;
     namespace().resolve(
         s,
         &Lookup {
             start: &start,
-            root: &root,
+            root: namespace().root(),
             follow: walk.follow,
             beneath: walk.beneath,
             cred,
@@ -530,13 +530,12 @@ pub(crate) fn parent_of(
     path: &[u8],
     beneath: bool,
 ) -> Result<Parent, Errno> {
-    let root = root();
     let start = start_of(s, p, at, path)?;
     namespace().parent_of(
         s,
         &Lookup {
             start: &start,
-            root: &root,
+            root: namespace().root(),
             follow: false,
             beneath,
             cred: &p.cred(),

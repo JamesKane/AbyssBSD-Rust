@@ -50,6 +50,8 @@ use vfs::{
 };
 use vm::object::{Object, PageIndex, Pager, PagerError};
 
+/// Doing soft-updates work: under vnode locks, before inodes.
+static WORK: LockClass = LockClass::new("ufs work", 342);
 /// Finding or making an in-core inode: under vnode locks, before inodes.
 static LOADING: LockClass = LockClass::new("ufs load", 345);
 /// In-core inodes: under vnode locks, before the summary and buffers.
@@ -103,6 +105,11 @@ struct Shared {
     /// Held while finding or making an in-core inode (`load`, deferred
     /// work), so one inode is never in core twice.
     loading: Mutex<()>,
+    /// Held while doing soft-updates work, so a writer short of space
+    /// waits for frees another thread has taken but not yet done.
+    working: Mutex<()>,
+    /// Set while work is being done, before it is taken.
+    applying: AtomicBool,
     /// With soft updates, the tracker (idle while read-only).
     deps: Option<Arc<SoftDeps>>,
     /// The superblock asked for a journal, which this mount turned off.
@@ -204,6 +211,8 @@ impl UfsFs {
                 inodes: SpinLock::new(BTreeMap::new()),
                 data_synced: AtomicU64::new(0),
                 loading: Mutex::new(&LOADING, ()),
+                working: Mutex::new(&WORK, ()),
+                applying: AtomicBool::new(false),
                 deps,
                 journal_dropped,
             }),
@@ -398,9 +407,13 @@ impl Shared {
         let Ok(sum) = self.sum() else {
             return;
         };
+        let _working = self.working.lock(s);
+        // Before taking: one who finds the work gone sees this (`flush_frees`).
+        self.applying.store(true, Ordering::Release);
         loop {
             let work = self.ufs.take_work(s);
             if work.is_empty() {
+                self.applying.store(false, Ordering::Release);
                 return;
             }
             for w in work {
@@ -424,7 +437,9 @@ impl Shared {
         let Some(deps) = &self.deps else {
             return false;
         };
-        if deps.with(s, |d| d.is_idle()) {
+        // Idle, and nobody doing taken work (which `process_work` below
+        // would wait for): nothing will be freed.
+        if deps.with(s, |d| d.is_idle()) && !self.applying.load(Ordering::Acquire) {
             return false;
         }
         for _ in 0..8 {

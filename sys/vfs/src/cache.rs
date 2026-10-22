@@ -40,7 +40,9 @@ use sync::{SpinGuard, SpinLock};
 use crate::NodeId;
 use crate::vnode::Vnode;
 
-const BUCKET_BITS: u32 = 12;
+/// A bucket per two entries at [`MAX_ENTRIES`] (FreeBSD's `ncsizefactor`),
+/// so a full cache's lists stay short.
+const BUCKET_BITS: u32 = 16;
 const BUCKETS: usize = 1 << BUCKET_BITS;
 
 /// Entries in all, before inserts evict.
@@ -64,7 +66,7 @@ struct Entry {
     /// The directory itself: an entry matches only the vnode it was made
     /// for, never a later one for the same inode.
     dir_vnode: Weak<Vnode>,
-    name: Box<[u8]>,
+    name: Name,
     /// `None` for a negative entry.
     target: Option<Weak<Vnode>>,
 }
@@ -73,12 +75,41 @@ impl Entry {
     fn is(&self, h: u64, dir: *const Vnode, id: NodeId, name: &[u8]) -> bool {
         self.hash == h
             && self.dir == id
-            && *self.name == *name
+            && self.name.get() == name
             && ptr::eq(self.dir_vnode.as_ptr(), dir)
     }
 
     fn names(&self, v: &Vnode) -> bool {
         self.target.as_ref().is_some_and(|t| ptr::eq(t.as_ptr(), v))
+    }
+}
+
+/// Names this long or shorter are kept in the entry itself.
+const INLINE_NAME: usize = 32;
+
+/// An entry's name: a short one inline, so an entry is one allocation.
+enum Name {
+    Inline { len: u8, bytes: [u8; INLINE_NAME] },
+    Heap(Box<[u8]>),
+}
+
+impl Name {
+    fn new(name: &[u8]) -> Self {
+        match u8::try_from(name.len()) {
+            Ok(len) if name.len() <= INLINE_NAME => {
+                let mut bytes = [0; INLINE_NAME];
+                bytes[..name.len()].copy_from_slice(name);
+                Self::Inline { len, bytes }
+            }
+            _ => Self::Heap(name.into()),
+        }
+    }
+
+    fn get(&self) -> &[u8] {
+        match self {
+            Self::Inline { len, bytes } => &bytes[..usize::from(*len)],
+            Self::Heap(b) => b,
+        }
     }
 }
 
@@ -158,14 +189,20 @@ impl Bucket {
         self.unlink_first(locked, |n| ptr::eq(n, last))
     }
 
-    /// Puts `entry` at the head; the caller holds the lock.
-    fn push(&self, _locked: &SpinGuard<'_, ()>, entry: Entry) {
-        let node = Box::new(Node {
+    /// Puts `entry` at the head, returning its key; the caller holds the
+    /// lock.
+    fn push(&self, _locked: &SpinGuard<'_, ()>, entry: Entry) -> Key {
+        let hash = entry.hash;
+        let node = Box::into_raw(Box::new(Node {
             entry,
             next: AtomicPtr::new(self.head.load(Ordering::Relaxed)),
-        });
+        }));
         // Release: a reader that sees the node sees it whole.
-        self.head.store(Box::into_raw(node), Ordering::Release);
+        self.head.store(node, Ordering::Release);
+        Key {
+            hash,
+            node: node.addr(),
+        }
     }
 }
 
@@ -181,20 +218,24 @@ impl Retired {
         // SAFETY: unlinked but not freed: only `free_after_grace` frees it.
         unsafe { &self.0.as_ref().entry }
     }
+
+    fn key(&self) -> Key {
+        Key {
+            hash: self.entry().hash,
+            node: self.0.as_ptr().addr(),
+        }
+    }
 }
 
 /// Nodes unlinked and waiting for a grace period.
 static RETIRED: SpinLock<Vec<Retired>> = SpinLock::new(Vec::new());
 
-/// Frees `nodes` once no reader can still see them: in batches, each after
-/// a grace period. Thread context, holding no spin lock.
-fn retire(nodes: Vec<Retired>) {
-    if nodes.is_empty() {
-        return;
-    }
+/// Frees what [`RETIRED`] holds once no reader can still see it, when a
+/// batch has gathered: each batch after a grace period. Thread context,
+/// holding no spin lock.
+fn retire() {
     let batch = {
         let mut r = RETIRED.lock();
-        r.extend(nodes);
         if r.len() < RETIRE_BATCH {
             return;
         }
@@ -224,10 +265,19 @@ pub fn synchronize() {
 /// so purging it touches only its own. Kept under the entries' bucket
 /// locks (a bucket lock, then these).
 pub(crate) struct Links {
-    /// The names cached in this directory.
-    src: BTreeSet<Box<[u8]>>,
-    /// The entries naming this vnode: directory and name.
-    dst: BTreeSet<(NodeId, Box<[u8]>)>,
+    /// The entries in this directory.
+    src: BTreeSet<Key>,
+    /// The entries naming this vnode.
+    dst: BTreeSet<Key>,
+}
+
+/// An entry, in its vnodes' [`Links`]: its hash, for its bucket, and its
+/// node's address. An address may be reused once the node is freed, so a
+/// purge also checks that the node it finds is the vnode's.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Key {
+    hash: u64,
+    node: usize,
 }
 
 impl Links {
@@ -275,16 +325,29 @@ fn bucket(h: u64) -> &'static Bucket {
     &TABLE[usize::try_from(h >> (u64::BITS - BUCKET_BITS)).unwrap_or(0)]
 }
 
-/// Vnodes and nodes let go once no bucket lock is held.
+/// Vnodes let go, and retired nodes freed, once no bucket lock is held;
+/// the usual one or two vnodes without allocating.
 #[derive(Default)]
 struct Held {
-    vnodes: Vec<Arc<Vnode>>,
-    retired: Vec<Retired>,
+    vnodes: [Option<Arc<Vnode>>; 2],
+    more: Vec<Arc<Vnode>>,
+    retired: bool,
+}
+
+impl Held {
+    fn keep(&mut self, v: Arc<Vnode>) {
+        match self.vnodes.iter_mut().find(|slot| slot.is_none()) {
+            Some(slot) => *slot = Some(v),
+            None => self.more.push(v),
+        }
+    }
 }
 
 impl Drop for Held {
     fn drop(&mut self) {
-        retire(core::mem::take(&mut self.retired));
+        if self.retired {
+            retire();
+        }
     }
 }
 
@@ -293,19 +356,22 @@ impl Drop for Held {
 /// target (with `target`).
 fn forget(r: Retired, dir: bool, target: bool, held: &mut Held) {
     let e = r.entry();
+    let key = r.key();
     TOTAL.fetch_sub(1, Ordering::Relaxed);
     if e.target.is_none() {
         NEGATIVE.fetch_sub(1, Ordering::Relaxed);
     }
     if dir && let Some(d) = e.dir_vnode.upgrade() {
-        d.cache_links.lock().src.remove(&e.name);
-        held.vnodes.push(d);
+        d.cache_links.lock().src.remove(&key);
+        held.keep(d);
     }
     if target && let Some(t) = e.target.as_ref().and_then(Weak::upgrade) {
-        t.cache_links.lock().dst.remove(&(e.dir, e.name.clone()));
-        held.vnodes.push(t);
+        t.cache_links.lock().dst.remove(&key);
+        held.keep(t);
     }
-    held.retired.push(r);
+    // Under the bucket lock (then this one): freed by `held` after.
+    RETIRED.lock().push(r);
+    held.retired = true;
 }
 
 /// A section in which lookups take no lock and what they find stays: for
@@ -370,8 +436,7 @@ pub fn enter(dir: &Arc<Vnode>, name: &[u8], target: Option<&Arc<Vnode>>) {
         let b = bucket(h);
         let locked = b.lock.lock();
         if let Some(old) = b.unlink_first(&locked, |n| n.entry.is(h, dp, id, name)) {
-            // The directory keeps the name.
-            forget(old, false, true, &mut held);
+            forget(old, true, true, &mut held);
         }
         // Over a limit: this bucket's oldest goes (a negative one first if
         // negatives are what is over).
@@ -387,19 +452,19 @@ pub fn enter(dir: &Arc<Vnode>, name: &[u8], target: Option<&Arc<Vnode>>) {
         {
             forget(old, true, true, &mut held);
         }
-        b.push(
+        let key = b.push(
             &locked,
             Entry {
                 hash: h,
                 dir: id,
                 dir_vnode: Arc::downgrade(dir),
-                name: name.into(),
+                name: Name::new(name),
                 target: target.map(Arc::downgrade),
             },
         );
-        dir.cache_links.lock().src.insert(name.into());
+        dir.cache_links.lock().src.insert(key);
         if let Some(t) = target {
-            t.cache_links.lock().dst.insert((id, name.into()));
+            t.cache_links.lock().dst.insert(key);
         }
         TOTAL.fetch_add(1, Ordering::Relaxed);
         if target.is_none() {
@@ -427,25 +492,22 @@ pub fn remove(dir: &Vnode, name: &[u8]) {
 /// Forgets every entry naming `v` or in directory `v` (it is being
 /// reclaimed): only those, found by its links.
 pub fn purge(v: &Vnode) {
-    let id = v.id();
     let Links { src, dst } = core::mem::replace(&mut *v.cache_links.lock(), Links::new());
     let mut held = Held::default();
-    for name in src {
-        let h = hash(id, &name);
-        let b = bucket(h);
+    let at = |n: &Node, k: Key| ptr::from_ref(n).addr() == k.node;
+    for k in src {
+        let b = bucket(k.hash);
         let locked = b.lock.lock();
-        if let Some(old) = b.unlink_first(&locked, |n| n.entry.is(h, v, id, &name)) {
+        if let Some(old) = b.unlink_first(&locked, |n| {
+            at(n, k) && ptr::eq(n.entry.dir_vnode.as_ptr(), v)
+        }) {
             forget(old, false, true, &mut held);
         }
     }
-    for (dir, name) in dst {
-        let h = hash(dir, &name);
-        let b = bucket(h);
+    for k in dst {
+        let b = bucket(k.hash);
         let locked = b.lock.lock();
-        if let Some(old) = b.unlink_first(&locked, |n| {
-            let e = &n.entry;
-            e.hash == h && e.dir == dir && *e.name == *name && e.names(v)
-        }) {
+        if let Some(old) = b.unlink_first(&locked, |n| at(n, k) && n.entry.names(v)) {
             forget(old, true, false, &mut held);
         }
     }

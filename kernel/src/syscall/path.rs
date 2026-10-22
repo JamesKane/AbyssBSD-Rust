@@ -83,12 +83,13 @@ pub(super) fn openat(s: &Sleepable, fd: u64, path_ptr: u64, flags: u64, mode: u6
         follow: flags & O_NOFOLLOW == 0 && !exclusive,
         beneath: flags & O_RESOLVE_BENEATH != 0,
     };
-    let cred = &*crate::fs::cred();
+    let ucred = p.cred();
+    let cred = &*ucred;
     let mut created = false;
     let v = if path.is_empty() && flags & O_EMPTY_PATH != 0 {
         at_vnode(s, &p, fd, &path, walk, true)?
     } else {
-        match crate::fs::resolve(s, &p, At::new(int(fd)), &path, walk)? {
+        match crate::fs::resolve_as(s, &p, cred, At::new(int(fd)), &path, walk)? {
             Found::Vnode(v) => {
                 if flags & (O_CREAT | O_EXCL) == O_CREAT | O_EXCL {
                     return Err(Errno::EEXIST);
