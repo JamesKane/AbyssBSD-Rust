@@ -29,7 +29,7 @@
 //! synchronously, as FreeBSD's UFS does without them.
 
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::any::Any;
@@ -37,8 +37,8 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use abi::errno::Errno;
 use abi::time::Timespec;
-use sched::Sleepable;
 use sched::lock::{LockClass, Mutex};
+use sched::{Sleepable, WaitQueue};
 use sync::{Once, SpinLock};
 use ufs::ops::{Maker, NewKind};
 use ufs::{Mode, Reserve, Timestamp};
@@ -48,7 +48,7 @@ use vfs::{
     Attr, Create, DirEntry, DirectoryNode, FileSystem, FsStats, Kind, NewNode, Node, NodeOps,
     Rename, SetAttr, SymlinkNode, Uio,
 };
-use vm::object::{Object, PageIndex, Pager, PagerError, PendingFill};
+use vm::object::{IoBuf, Object, PageIndex, Pager, PagerError, PendingFill};
 
 /// Doing soft-updates work: under vnode locks, before inodes.
 static WORK: LockClass = LockClass::new("ufs work", 342);
@@ -75,6 +75,73 @@ struct InodeCell {
     /// The size, readable with no lock (the VM asks a pager for it under
     /// the map lock); published whenever a regular file's size changes.
     size: AtomicU64,
+    /// Its data writes under way.
+    writing: Writing,
+}
+
+/// Bytes of file data being written without waiting, on every UFS mount
+/// (FreeBSD's `runningbufspace`), and the most a writer may start more
+/// past (`hirunningspace`): beyond it, it waits for some to finish.
+static RUNNING: AtomicU64 = AtomicU64::new(0);
+static RUNNING_ROOM: WaitQueue = WaitQueue::new();
+const HI_RUNNING: u64 = 16 << 20;
+
+/// Waits while too much is being written (FreeBSD's
+/// `waitrunningbufspace`). The caller holds no lock.
+fn wait_running(s: &Sleepable) {
+    RUNNING_ROOM.wait_until(s, || RUNNING.load(Ordering::Acquire) < HI_RUNNING);
+}
+
+/// A file's block writes started without waiting and not done yet
+/// (FreeBSD's busy buffers under a `bawrite`): a block has one at a time,
+/// a later write of it waits for the earlier to finish, and nothing frees
+/// blocks under one.
+struct Writing {
+    blocks: SpinLock<BTreeSet<u64>>,
+    done: WaitQueue,
+}
+
+impl Writing {
+    const fn new() -> Self {
+        Self {
+            blocks: SpinLock::new(BTreeSet::new()),
+            done: WaitQueue::new(),
+        }
+    }
+
+    /// Claims blocks `lbns` for a write; none if any is already being
+    /// written.
+    fn start(&self, lbns: core::ops::RangeInclusive<u64>) -> bool {
+        let mut b = self.blocks.lock();
+        if b.range(lbns.clone()).next().is_some() {
+            return false;
+        }
+        b.extend(lbns);
+        true
+    }
+
+    /// The write of `lbns` is done. Any context.
+    fn finish(&self, lbns: core::ops::RangeInclusive<u64>) {
+        {
+            let mut b = self.blocks.lock();
+            for lbn in lbns {
+                b.remove(&lbn);
+            }
+        }
+        self.done.wake_all();
+    }
+
+    /// Waits until no write of `lbns` is under way.
+    fn wait(&self, s: &Sleepable, lbns: core::ops::RangeInclusive<u64>) {
+        self.done.wait_until(s, || {
+            self.blocks.lock().range(lbns.clone()).next().is_none()
+        });
+    }
+
+    /// Waits until none of the file's writes is under way.
+    fn wait_all(&self, s: &Sleepable) {
+        self.wait(s, 0..=u64::MAX);
+    }
 }
 
 impl InodeCell {
@@ -93,6 +160,55 @@ struct InodeState {
     /// it lies (writes, truncation, write-back), so read-ahead that went
     /// out before is dropped rather than put in stale.
     data_gen: u64,
+    /// Its writes' cluster, for write-behind.
+    cluster: Cluster,
+}
+
+/// The run of a file's blocks filled one after another and not written
+/// yet, and where its last write ended (FreeBSD's `v_cstart`, `v_clen`,
+/// and `seqcount`): what [`Self::filled`] says goes to the disk now.
+#[derive(Default)]
+struct Cluster {
+    start: u64,
+    len: u64,
+    next: u64,
+}
+
+impl Cluster {
+    /// A write filled block `lbn` (FreeBSD's `cluster_write`): the runs
+    /// to write now, as (first block, blocks), go into `out`. A block
+    /// next in the run joins it, and a run `max` long goes; a block at the
+    /// end of the file goes at once, there being nothing after it to
+    /// cluster with; any other starts a new run, the old one going if the
+    /// writes were sequential (else it waits for a sync, as random
+    /// writes' blocks do).
+    fn filled(
+        &mut self,
+        lbn: u64,
+        at_end: bool,
+        sequential: bool,
+        max: u64,
+        out: &mut Vec<(u64, u64)>,
+    ) {
+        if self.len > 0 && lbn == self.start + self.len {
+            self.len += 1;
+            if self.len >= max {
+                out.push((self.start, self.len));
+                self.len = 0;
+            }
+            return;
+        }
+        if self.len > 0 && sequential {
+            out.push((self.start, self.len));
+        }
+        self.len = 0;
+        if at_end {
+            out.push((lbn, 1));
+        } else {
+            self.start = lbn;
+            self.len = 1;
+        }
+    }
 }
 
 /// An in-core inode, and its object if it is a regular file.
@@ -333,6 +449,13 @@ impl Shared {
         }
     }
 
+    /// Waits for every in-core file's writes under way.
+    fn wait_writes(&self, s: &Sleepable) {
+        for (c, _) in self.cells() {
+            c.writing.wait_all(s);
+        }
+    }
+
     /// Writes every changed in-core inode.
     fn write_inodes(&self, s: &Sleepable, mode: Mode) -> Result<(), Errno> {
         for (c, _) in self.cells() {
@@ -357,6 +480,7 @@ impl Shared {
         let io = self.ufs.io();
         for _ in 0..64 {
             self.sync_pages();
+            self.wait_writes(s);
             self.write_inodes(s, Mode::Delayed)?;
             io.cache.sync(s).map_err(|_| Errno::EIO)?;
             let Some(deps) = &self.deps else {
@@ -404,9 +528,11 @@ impl Shared {
                     dirty: false,
                     nodes: 0,
                     data_gen: 0,
+                    cluster: Cluster::default(),
                 },
             ),
             size: AtomicU64::new(size),
+            writing: Writing::new(),
         });
         self.inodes
             .lock()
@@ -462,6 +588,7 @@ impl Shared {
         let _flushing = self.flushing.lock(s);
         for _ in 0..8 {
             self.sync_pages();
+            self.wait_writes(s);
             let _ = self.write_inodes(s, Mode::Delayed);
             let _ = self.ufs.io().cache.sync(s);
             self.process_work(s);
@@ -855,6 +982,8 @@ impl Node for UfsNode {
                 // `vnode_pager_setsize`), then the blocks.
                 vfs::pagecache::resize(o, old, size);
             }
+            // No block goes under a write.
+            self.cell.writing.wait_all(s);
             // A cut inside a hole needs the new last block: out of space,
             // soft updates may have some on the way back, fetched once
             // with no lock held.
@@ -918,6 +1047,9 @@ impl Node for UfsNode {
         if !shared.writable() {
             return Ok(());
         }
+        // The pages were written before this (by the generic layer); the
+        // writes started earlier finish too.
+        self.cell.writing.wait_all(s);
         let Some(deps) = &shared.deps else {
             {
                 let mut st = self.cell.state.lock(s);
@@ -984,6 +1116,8 @@ impl Node for UfsNode {
             if let Some(o) = &self.object {
                 o.truncate(0);
             }
+            // No block goes under a write.
+            self.cell.writing.wait_all(s);
             let mut sum = sum.lock(s);
             let ino = self.cell.ino;
             if let Err(e) = shared
@@ -999,6 +1133,8 @@ impl Node for UfsNode {
 
     fn reclaim(self: Box<Self>, s: &Sleepable) {
         let shared = &self.fs;
+        // Its writes finish first: its blocks may be freed after.
+        self.cell.writing.wait_all(s);
         if let Some(o) = &self.object {
             // Unlinked (soft updates drop the disk's count later) and
             // mapped by nobody: no one can read the data again, so it is
@@ -1186,7 +1322,24 @@ impl vfs::RegularNode for UfsNode {
         st.ip.mode &= !0o6000;
         st.dirty = true;
         self.cell.publish(&st);
+        // The blocks this write filled go to the disk as FreeBSD's
+        // `ffs_write` sends them (`cluster_write`): soon, without waiting,
+        // in runs as long as the disk takes, so their data is out and
+        // what soft updates hold for it goes too.
+        let max =
+            (u64::try_from(shared.ufs.io().disk.max_transfer()).unwrap_or(u64::MAX) / bsize).max(1);
+        let sequential = offset == st.cluster.next;
+        let mut runs = Vec::new();
+        for lbn in offset / bsize..(offset + done) / bsize {
+            let at_end = (lbn + 1) * bsize >= st.ip.size;
+            st.cluster.filled(lbn, at_end, sequential, max, &mut runs);
+        }
+        st.cluster.next = offset + done;
         drop(st);
+        for (first, blocks) in runs {
+            wait_running(s);
+            object.start_sync(first * bsize / PAGE, (first + blocks) * bsize / PAGE);
+        }
         shared.throttle(s);
         written
     }
@@ -1635,6 +1788,8 @@ impl Pager for FilePager {
         let at = index * PAGE;
         let lbn = at / bsize;
         let within = at % bsize;
+        // After a write of this block still under way.
+        self.cell.writing.wait(&s, lbn..=lbn);
         let mut addr = ufs.bmap(&s, &st.ip, lbn).map_err(|_| PagerError)?;
         // Past the end: written only into the last block's allocated
         // space (zeros, so its tail stays zero on the disk), never
@@ -1699,31 +1854,116 @@ impl Pager for FilePager {
     fn write_back_run(&self, index: PageIndex, buf: &[u8]) -> Result<(), PagerError> {
         let s = sleepable();
         let ufs = &self.fs.ufs;
-        let sb = ufs.superblock();
-        let bsize = u64::from(sb.bsize);
-        let fsize = u64::from(sb.fsize);
         let pages = buf.as_chunks::<PAGE_LEN>().0;
         // The inode stays locked while the run goes, as for one page: its
         // blocks cannot be freed and reused meanwhile.
         let mut st = self.cell.state.lock(&s);
         st.data_gen = st.data_gen.wrapping_add(1);
-        // Disk extents: where, from which byte of `buf`, and how long.
+        let Some((extents, lbns)) = self.extents(&s, &st, index, pages.len())? else {
+            // A hole a mapping wrote into: page by page, allocating.
+            drop(st);
+            for (i, page) in (index..).zip(pages) {
+                self.write_back(i, page)?;
+            }
+            return Ok(());
+        };
+        // After a write of these blocks still under way.
+        self.cell.writing.wait(&s, lbns);
+        let parts: Vec<(u64, &[u8])> = extents
+            .into_iter()
+            .map(|(disk, from, len)| (disk, &buf[from..from + len]))
+            .collect();
+        ufs.io()
+            .write_data_parts(&s, &parts)
+            .map_err(|_| PagerError)
+    }
+
+    fn start_write_back_run(
+        &self,
+        index: PageIndex,
+        buf: IoBuf,
+        object: Weak<Object>,
+    ) -> Result<(), IoBuf> {
+        let s = sleepable();
+        let pages = buf.len() / PAGE_LEN;
+        // Locked until the write is claimed: the blocks stay meanwhile,
+        // and whatever frees them later waits for the claim to go.
+        let mut st = self.cell.state.lock(&s);
+        st.data_gen = st.data_gen.wrapping_add(1);
+        let Ok(Some((extents, lbns))) = self.extents(&s, &st, index, pages) else {
+            return Err(buf);
+        };
+        if extents.is_empty() || !self.cell.writing.start(lbns.clone()) {
+            return Err(buf);
+        }
+        // Each extent's part of the run (lent pages stay lent).
+        let parts: Vec<(u64, IoBuf)> = extents
+            .into_iter()
+            .map(|(disk, from, len)| (disk, buf.slice(from, len)))
+            .collect();
+        let cell = Arc::clone(&self.cell);
+        let end = index + PageIndex::try_from(pages).unwrap_or(0);
+        let bytes: u64 = parts
+            .iter()
+            .map(|(_, d)| u64::try_from(d.len()).unwrap_or(0))
+            .sum();
+        RUNNING.fetch_add(bytes, Ordering::AcqRel);
+        let started = self.fs.ufs.io().start_write_data(&s, parts, {
+            let lbns = lbns.clone();
+            move |ok| {
+                if !ok {
+                    // Written again later, by a sync.
+                    if let Some(o) = object.upgrade() {
+                        o.redirty(index, end);
+                    }
+                }
+                cell.writing.finish(lbns);
+                RUNNING.fetch_sub(bytes, Ordering::AcqRel);
+                RUNNING_ROOM.wake_all();
+            }
+        });
+        if let Err(parts) = started {
+            RUNNING.fetch_sub(bytes, Ordering::AcqRel);
+            self.cell.writing.finish(lbns);
+            // Not started: the pages stay as they are.
+            drop(parts);
+            return Err(buf);
+        }
+        Ok(())
+    }
+}
+
+impl FilePager {
+    /// Where on the disk the run of `pages` pages from `index` goes: each
+    /// extent's disk byte, its start in the run, and its length, with the
+    /// file blocks the run covers; `None` if it covers a hole inside the
+    /// file (which a write must allocate). The caller holds the inode.
+    #[allow(clippy::type_complexity)]
+    fn extents(
+        &self,
+        s: &Sleepable,
+        st: &InodeState,
+        index: PageIndex,
+        pages: usize,
+    ) -> Result<Option<(Vec<(u64, usize, usize)>, core::ops::RangeInclusive<u64>)>, PagerError>
+    {
+        let ufs = &self.fs.ufs;
+        let sb = ufs.superblock();
+        let bsize = u64::from(sb.bsize);
+        let fsize = u64::from(sb.fsize);
+        let last = index + PageIndex::try_from(pages.max(1) - 1).map_err(|_| PagerError)?;
+        let lbns = index * PAGE / bsize..=last * PAGE / bsize;
         let mut extents: Vec<(u64, usize, usize)> = Vec::new();
-        for (i, k) in (index..).zip(0..pages.len()) {
+        for (i, k) in (index..).zip(0..pages) {
             let at = i * PAGE;
             let lbn = at / bsize;
             let within = at % bsize;
-            let addr = ufs.bmap(&s, &st.ip, lbn).map_err(|_| PagerError)?;
+            let addr = ufs.bmap(s, &st.ip, lbn).map_err(|_| PagerError)?;
             if addr == 0 {
                 if at >= st.ip.size {
                     continue;
                 }
-                // A hole a mapping wrote into: page by page, allocating.
-                drop(st);
-                for (i, page) in (index..).zip(pages) {
-                    self.write_back(i, page)?;
-                }
-                return Ok(());
+                return Ok(None);
             }
             let space = u64::from(sb.block_size(st.ip.size, lbn));
             let n =
@@ -1734,7 +1974,7 @@ impl Pager for FilePager {
             let disk = addr * fsize + within;
             let from = k * PAGE_LEN;
             match extents.last_mut() {
-                // Contiguous on the disk and in `buf`, after a whole page.
+                // Contiguous on the disk and in the run, after a whole page.
                 Some(e)
                     if e.0 + u64::try_from(e.2).unwrap_or(u64::MAX) == disk
                         && e.1 + e.2 == from
@@ -1745,12 +1985,6 @@ impl Pager for FilePager {
                 _ => extents.push((disk, from, n)),
             }
         }
-        let parts: Vec<(u64, &[u8])> = extents
-            .into_iter()
-            .map(|(disk, from, len)| (disk, &buf[from..from + len]))
-            .collect();
-        ufs.io()
-            .write_data_parts(&s, &parts)
-            .map_err(|_| PagerError)
+        Ok(Some((extents, lbns)))
     }
 }

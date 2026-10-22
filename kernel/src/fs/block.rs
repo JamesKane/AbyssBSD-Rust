@@ -11,6 +11,7 @@ use sched::Sleepable;
 use sched::lock::{LockClass, Mutex};
 use sync::SpinLock;
 use ufs::softdep::Deps;
+use vm::object::IoBuf;
 
 /// A UFS mount's soft-updates tracker: taken with buffers held, after
 /// them.
@@ -18,16 +19,42 @@ static SOFTDEP: LockClass = LockClass::new("softdep", 390);
 
 /// The soft-updates tracker of a mount, which its buffer cache asks before
 /// and after each write.
-pub(crate) struct SoftDeps(Mutex<Deps>);
+pub(crate) struct SoftDeps {
+    deps: Mutex<Deps>,
+    /// File data writes done but not yet told the tracker (byte offset
+    /// and length): their completions cannot take its lock, so the next
+    /// [`Self::with`] does it for them.
+    written: SpinLock<Vec<(u64, u64)>>,
+    any_written: AtomicBool,
+}
 
 impl SoftDeps {
     pub(crate) fn new(sb: &ufs::Superblock) -> Arc<Self> {
-        Arc::new(Self(Mutex::new(&SOFTDEP, Deps::new(sb))))
+        Arc::new(Self {
+            deps: Mutex::new(&SOFTDEP, Deps::new(sb)),
+            written: SpinLock::new(Vec::new()),
+            any_written: AtomicBool::new(false),
+        })
     }
 
-    /// Runs `f` with the tracker locked.
+    /// Runs `f` with the tracker locked, first telling it of the data
+    /// writes done since.
     pub(crate) fn with<R>(&self, s: &Sleepable, f: impl FnOnce(&mut Deps) -> R) -> R {
-        f(&mut self.0.lock(s))
+        let mut d = self.deps.lock(s);
+        if self.any_written.swap(false, Ordering::Acquire) {
+            let done = core::mem::take(&mut *self.written.lock());
+            for (offset, len) in done {
+                d.data_written(offset, len);
+            }
+        }
+        f(&mut d)
+    }
+
+    /// File data at `offset` is written: told the tracker at its next use.
+    /// Any context (a write's completion).
+    pub(crate) fn note_written(&self, offset: u64, len: u64) {
+        self.written.lock().push((offset, len));
+        self.any_written.store(true, Ordering::Release);
     }
 }
 
@@ -56,12 +83,12 @@ impl BufHook for UfsHook {
         }
         self.deps
             .as_ref()
-            .and_then(|d| d.0.lock(s).write_start(offset, bytes))
+            .and_then(|d| d.with(s, |d| d.write_start(offset, bytes)))
     }
 
     fn done(&self, s: &Sleepable, offset: u64, ok: bool) {
         if let Some(d) = &self.deps {
-            d.0.lock(s).write_done(offset, ok);
+            d.with(s, |d| d.write_done(offset, ok));
         }
     }
 }
@@ -211,6 +238,64 @@ impl DiskIo {
 }
 
 impl DiskIo {
+    /// Starts writing file data `parts` (byte offset and bytes, each
+    /// sector-aligned) without waiting; once all are done, the tracker is
+    /// told (when it went well) and `done` runs with whether it did, in a
+    /// completion's context: it must not sleep. Parts not aligned are
+    /// given back.
+    pub(crate) fn start_write_data(
+        &self,
+        s: &Sleepable,
+        parts: Vec<(u64, IoBuf)>,
+        done: impl FnOnce(bool) + Send + 'static,
+    ) -> Result<(), Vec<(u64, IoBuf)>> {
+        let ss = u64::from(self.disk.sector_size());
+        let aligned = |(at, data): &(u64, IoBuf)| {
+            at.is_multiple_of(ss) && u64::try_from(data.len()).is_ok_and(|n| n.is_multiple_of(ss))
+        };
+        if parts.is_empty() || !parts.iter().all(aligned) {
+            return Err(parts);
+        }
+        let extents: Vec<(u64, u64)> = parts
+            .iter()
+            .map(|(at, data)| (*at, u64::try_from(data.len()).unwrap_or(0)))
+            .collect();
+        let deps = self.deps();
+        // The parts left, whether all went well, and what to run after.
+        type Done = alloc::boxed::Box<dyn FnOnce(bool) + Send>;
+        let left: Arc<SpinLock<(usize, bool, Option<Done>)>> = Arc::new(SpinLock::new((
+            parts.len(),
+            true,
+            Some(alloc::boxed::Box::new(move |ok: bool| {
+                if ok && let Some(d) = &deps {
+                    for &(at, len) in &extents {
+                        d.note_written(at, len);
+                    }
+                }
+                done(ok);
+            })),
+        )));
+        for (at, data) in parts {
+            let left = Arc::clone(&left);
+            self.disk.start_write(s, at, data, move |r| {
+                let finish = {
+                    let mut l = left.lock();
+                    l.0 -= 1;
+                    l.1 &= r.is_ok();
+                    if l.0 == 0 {
+                        l.2.take().map(|f| (f, l.1))
+                    } else {
+                        None
+                    }
+                };
+                if let Some((f, ok)) = finish {
+                    f(ok);
+                }
+            });
+        }
+        Ok(())
+    }
+
     /// As [`Self::write_data`] for several parts, whose writes go out
     /// together (a clustered write-back).
     pub(crate) fn write_data_parts(

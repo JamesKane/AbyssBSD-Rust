@@ -110,6 +110,20 @@ pub trait Pager: Send + Sync {
     fn start_run(&self, _index: PageIndex, _pages: PageIndex) -> Option<Box<dyn PendingFill>> {
         None
     }
+    /// Starts writing back the pages from `index` on, whose contents `buf`
+    /// holds (whole pages: the pages themselves, lent, or a copy), without
+    /// waiting (FreeBSD's `bawrite`). `Err` gives `buf` back when this
+    /// pager cannot, or not now: the caller keeps the pages dirty. A write
+    /// that fails later marks its pages dirty again through `object`. May
+    /// sleep.
+    fn start_write_back_run(
+        &self,
+        _index: PageIndex,
+        buf: IoBuf,
+        _object: Weak<Object>,
+    ) -> Result<(), IoBuf> {
+        Err(buf)
+    }
 }
 
 /// A fill [`Pager::start_run`] started.
@@ -983,6 +997,82 @@ impl Object {
             }
         }
         result
+    }
+
+    /// Starts writing back the dirty pages in `[start, end)` without
+    /// waiting (FreeBSD's `bawrite` of a filled block): each run of them
+    /// is clean from now, lent to the write as it is (or copied where
+    /// pages have no fixed place); a run the pager will not start now
+    /// stays dirty, for a later [`Self::sync`].
+    pub fn start_sync(self: &Arc<Self>, start: PageIndex, end: PageIndex) {
+        let Some(pager) = &self.pager else {
+            return;
+        };
+        let todo: Vec<(PageIndex, Pfn)> = {
+            let mut inner = self.inner.lock();
+            let indexes: Vec<PageIndex> = inner.dirty.range(start..end).copied().collect();
+            let mut out = Vec::with_capacity(indexes.len());
+            for i in indexes {
+                if !inner.mapped_writable.contains(&i) {
+                    inner.dirty.remove(&i);
+                    DIRTY.fetch_sub(1, Ordering::Relaxed);
+                }
+                if let Some(&pfn) = inner.pages.get(&i) {
+                    out.push((i, pfn));
+                }
+            }
+            out
+        };
+        let mut rest = todo.as_slice();
+        while let Some(&(first, _)) = rest.first() {
+            let len = rest
+                .iter()
+                .zip(first..)
+                .take_while(|&(&(i, _), want)| i == want)
+                .count();
+            let (run, after) = rest.split_at(len);
+            rest = after;
+            let buf = self.lend(run).unwrap_or_else(|| {
+                let mut buf = Vec::with_capacity(run.len() * PAGE_BYTES);
+                for &(_, pfn) in run {
+                    self.pages_ops
+                        .access(pfn, &mut |page| buf.extend_from_slice(page));
+                }
+                IoBuf::Owned(buf)
+            });
+            if pager
+                .start_write_back_run(first, buf, Arc::downgrade(self))
+                .is_err()
+            {
+                self.redirty(first, PageIndex::try_from(len).map_or(end, |n| first + n));
+            }
+        }
+    }
+
+    /// Pages `run` of this object lent for a transfer, if pages have fixed
+    /// places (see [`PageRun`]).
+    fn lend(self: &Arc<Self>, run: &[(PageIndex, Pfn)]) -> Option<IoBuf> {
+        let ranges = run
+            .iter()
+            .map(|&(_, pfn)| self.pages_ops.page_ptr(pfn).map(|p| (p, PAGE_BYTES)))
+            .collect::<Option<Vec<_>>>()?;
+        self.io.fetch_add(1, Ordering::SeqCst);
+        Some(IoBuf::Lent(PageRun {
+            ranges,
+            object: Arc::clone(self),
+        }))
+    }
+
+    /// Marks the pages held in `[start, end)` dirty again (a write of them
+    /// failed, or was not started).
+    pub fn redirty(&self, start: PageIndex, end: PageIndex) {
+        let mut inner = self.inner.lock();
+        let held: Vec<PageIndex> = inner.pages.range(start..end).map(|(&i, _)| i).collect();
+        for i in held {
+            if inner.dirty.insert(i) {
+                DIRTY.fetch_add(1, Ordering::Relaxed);
+            }
+        }
     }
 
     /// Cuts the object to `pages` pages: those past it go, if nothing but

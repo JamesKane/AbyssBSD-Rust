@@ -15,6 +15,7 @@
 //!
 //! Behavior reference: sys/geom/geom_disk.c, sys/geom/part/g_part_gpt.c.
 
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -24,6 +25,8 @@ use bus::Gate;
 use sched::Sleepable;
 use sched::lock::{LockClass, Mutex};
 use sync::SpinLock;
+
+use vm::object::IoBuf;
 
 use crate::bio::{Bio, BioError, BioOp, Waiter};
 
@@ -420,6 +423,68 @@ impl Disk {
             .into_iter()
             .find_map(|(_, r)| r.err())
             .map_or(Ok(()), Err)
+    }
+
+    /// Writes `data` (owned, or a file's pages lent) at `offset` without
+    /// waiting (FreeBSD's `bawrite`):
+    /// `done` runs once every request is done, with the first failure if
+    /// any, in whatever context completes the last (a driver's interrupt
+    /// thread, or here if the disk refuses at once). It must not sleep.
+    pub fn start_write(
+        &self,
+        s: &Sleepable,
+        offset: u64,
+        data: IoBuf,
+        done: impl FnOnce(Result<(), BioError>) + Send + 'static,
+    ) {
+        let chunk = self
+            .max_transfer
+            .max(usize::try_from(self.sector_size).unwrap_or(0));
+        if data.len() <= chunk {
+            self.strategy(
+                s,
+                Bio::new(BioOp::Write, offset, data, move |buf, r| {
+                    // The bytes (maybe a file's pages, lent) go first.
+                    drop(buf);
+                    done(r);
+                }),
+            );
+            return;
+        }
+        // Several requests: the last to finish reports.
+        type Done = Box<dyn FnOnce(Result<(), BioError>) + Send>;
+        type Left = (usize, Result<(), BioError>, Option<Done>);
+        let left: Arc<SpinLock<Left>> = Arc::new(SpinLock::new((
+            data.len().div_ceil(chunk),
+            Ok(()),
+            Some(Box::new(done)),
+        )));
+        for i in 0..data.len().div_ceil(chunk) {
+            let from = i * chunk;
+            let at = offset + u64::try_from(from).unwrap_or(u64::MAX);
+            // A lent run's pieces stay lent.
+            let piece = data.slice(from, chunk.min(data.len() - from));
+            let left = Arc::clone(&left);
+            let bio = Bio::new(BioOp::Write, at, piece, move |buf, r| {
+                drop(buf);
+                let finish = {
+                    let mut l = left.lock();
+                    l.0 -= 1;
+                    if let Err(e) = r {
+                        l.1 = l.1.and(Err(e));
+                    }
+                    if l.0 == 0 {
+                        l.2.take().map(|f| (f, l.1))
+                    } else {
+                        None
+                    }
+                };
+                if let Some((f, r)) = finish {
+                    f(r);
+                }
+            });
+            self.strategy(s, bio);
+        }
     }
 
     /// Runs `start`, which sends requests, noting when for the wait hook
