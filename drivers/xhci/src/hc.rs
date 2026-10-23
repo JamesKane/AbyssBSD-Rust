@@ -435,11 +435,14 @@ impl Hc {
         })
     }
 
-    /// The interrupt filter: acknowledges the interrupter.
-    pub(crate) fn filter(&self) -> Filter {
+    /// The interrupt filter: acknowledges the interrupter. `message` is
+    /// whether the interrupt is MSI or MSI-X, whose message the controller
+    /// sends only for this interrupter, clearing `IMAN.IP` itself (xHCI 1.2
+    /// §5.5.2.1); on a shared INTx line, `IP` says whether it is ours.
+    pub(crate) fn filter(&self, message: bool) -> Filter {
         let at = self.regs.interrupter(rt::IMAN);
         let iman = self.regs.mmio.read32(at);
-        if iman == u32::MAX || iman & rt::IMAN_IP == 0 {
+        if iman == u32::MAX || (!message && iman & rt::IMAN_IP == 0) {
             return Filter::Stray;
         }
         self.regs.mmio.write32(at, iman | rt::IMAN_IP);
@@ -447,24 +450,23 @@ impl Hc {
         Filter::Schedule
     }
 
-    /// Drains the event ring and acts on each event.
+    /// Drains the event ring and acts on each event. Whoever drains (the
+    /// interrupt thread, the watchdog, a thread waiting on a command)
+    /// holds the ring until its completions have run, so transfers on an
+    /// endpoint complete in the order the controller finished them.
     pub(crate) fn process_events(&self) {
+        let mut ev = self.events.lock();
         loop {
             let mut batch = Vec::new();
-            {
-                let mut ev = self.events.lock();
-                while batch.len() < EVENT_BATCH {
-                    match ev.pop() {
-                        Some(t) => batch.push(t),
-                        None => break,
-                    }
+            while batch.len() < EVENT_BATCH {
+                match ev.pop() {
+                    Some(t) => batch.push(t),
+                    None => break,
                 }
-                if !batch.is_empty()
-                    || self.regs.mmio.read32(self.regs.interrupter(rt::ERDP)) & 8 != 0
-                {
-                    self.regs
-                        .write64(self.regs.interrupter(rt::ERDP), ev.erdp() | rt::ERDP_EHB);
-                }
+            }
+            let erdp = self.regs.interrupter(rt::ERDP);
+            if !batch.is_empty() || self.regs.mmio.read32(erdp) & 8 != 0 {
+                self.regs.write64(erdp, ev.erdp() | rt::ERDP_EHB);
             }
             if batch.is_empty() {
                 return;

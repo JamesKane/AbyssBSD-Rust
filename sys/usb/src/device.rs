@@ -198,6 +198,29 @@ impl UsbDevice {
         control(&*self.hc, s, slot, setup, out)
     }
 
+    /// Starts a control request without waiting: `t` carries the data
+    /// stage (empty for none) and its completion. For callers that cannot
+    /// sleep (a keyboard's LEDs).
+    ///
+    /// # Errors
+    ///
+    /// The transfer back, if it cannot be queued.
+    pub fn control_async(&self, setup: Setup, t: Transfer) -> Result<(), Rejected> {
+        let Some(slot) = self.slot else {
+            return Err(Rejected {
+                transfer: t,
+                error: UsbError::Invalid,
+            });
+        };
+        if self.is_gone() {
+            return Err(Rejected {
+                transfer: t,
+                error: UsbError::Gone,
+            });
+        }
+        self.hc.submit(slot, 0, Some(setup), t)
+    }
+
     /// Submits a transfer on endpoint `endpoint` (an address).
     ///
     /// # Errors

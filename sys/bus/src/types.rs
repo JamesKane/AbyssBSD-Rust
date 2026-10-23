@@ -7,7 +7,8 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use devtree::ids::{
-    AcpiId, AcpiIdent, PciId, PciIdent, UsbId, UsbIdent, UsbPlace, VirtioId, VirtioIdent,
+    AcpiId, AcpiIdent, HidId, HidIdent, PciId, PciIdent, UsbId, UsbIdent, UsbPlace, VirtioId,
+    VirtioIdent,
 };
 use devtree::matching::{Candidate, Matches, Rank};
 use devtree::strings::PciAddress;
@@ -69,6 +70,9 @@ pub enum Ident {
     Virtio(VirtioIdent),
     /// A USB interface, and where it is.
     Usb(UsbIdent, UsbPlace),
+    /// A HID top-level collection on `hidbus`, and its device's name
+    /// (its description, as FreeBSD sets it).
+    Hid(HidIdent, String),
     /// A child a bus adds for a driver by name, with the description it
     /// knows for it (FreeBSD's identify routines: `ichwd` on `isa0`).
     Child {
@@ -106,6 +110,8 @@ pub enum Ids {
     Virtio(&'static [VirtioId]),
     /// USB devices and interfaces.
     Usb(&'static [UsbId]),
+    /// HID top-level collections.
+    Hid(&'static [HidId]),
     /// Test models.
     Test(&'static [TestId]),
 }
@@ -135,6 +141,7 @@ impl Ids {
             (Self::Pci(t), Ident::Pci(i, _, _)) => best(t, i),
             (Self::Virtio(t), Ident::Virtio(i)) => best(t, i),
             (Self::Usb(t), Ident::Usb(i, _)) => best(t, i),
+            (Self::Hid(t), Ident::Hid(i, _)) => best(t, i),
             (Self::Test(t), Ident::Test(i)) => best(t, i),
             _ => None,
         }
@@ -352,6 +359,7 @@ impl Ident {
             Self::Pci(i, _, _) => strings::pci_pnpinfo(out, i),
             Self::Virtio(i) => strings::virtio_pnpinfo(out, i),
             Self::Usb(i, p) => strings::usb_pnpinfo(out, i, p),
+            Self::Hid(i, _) => strings::hid_pnpinfo(out, i),
             Self::Test(t) => fmt::Write::write_fmt(out, format_args!("model={}", t.model)),
         };
     }
@@ -372,6 +380,7 @@ impl Ident {
                 fmt::Write::write_fmt(out, format_args!("channel={channel}"))
             }
             Self::Usb(i, p) => strings::usb_location(out, i, p),
+            Self::Hid(i, _) => strings::hid_location(out, i),
             Self::Test(_) => Ok(()),
         };
     }

@@ -1,0 +1,19 @@
+[package]
+name = "hidbus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bus = { path = "../bus" }
+devtree = { path = "../../lib/devtree" }
+hid = { path = "../../lib/hid" }
+sched = { path = "../sched" }
+sync = { path = "../sync" }
+usb = { path = "../../lib/usb" }
+usbus = { path = "../usb" }
+vm = { path = "../vm" }
+
+[lints]
+workspace = true

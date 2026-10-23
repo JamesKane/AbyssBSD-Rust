@@ -189,6 +189,8 @@ pub(crate) fn init(s: &Sleepable) {
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
     storage::bio::set_verifier(verifier);
+    // Keyboards type into the console terminal.
+    input::set_consumer(alloc::sync::Arc::new(crate::tty::ConsoleInput));
     let drivers = drivers();
     let root = bus::init(
         s,

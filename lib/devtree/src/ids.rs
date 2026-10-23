@@ -411,3 +411,80 @@ impl Witness<UsbIdent> for UsbId {
         }
     }
 }
+
+/// A HID top-level collection's identity on `hidbus` (FreeBSD's
+/// `hidbus_ivars` and `hid_device_info`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HidIdent {
+    /// The collection's usage: page in the high 16 bits.
+    pub usage: u32,
+    /// The transport (`BUS_USB`, 0x03).
+    pub bus: u16,
+    /// Vendor ID.
+    pub vendor: u16,
+    /// Product ID.
+    pub product: u16,
+    /// Version.
+    pub version: u16,
+    /// The collection's index in the report descriptor.
+    pub index: u8,
+}
+
+/// One HID match-table entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HidId {
+    usage: Option<u32>,
+    vendor: Option<u16>,
+    product: Option<u16>,
+    rank: Rank,
+}
+
+impl HidId {
+    /// Matches a top-level collection's usage (page in the high 16 bits),
+    /// at [`Rank::DEFAULT`].
+    #[must_use]
+    pub const fn usage(usage: u32) -> Self {
+        Self {
+            usage: Some(usage),
+            vendor: None,
+            product: None,
+            rank: Rank::DEFAULT,
+        }
+    }
+
+    /// Also requires a vendor and product, at [`Rank::SPECIFIC`].
+    #[must_use]
+    pub const fn device(mut self, vendor: u16, product: u16) -> Self {
+        self.vendor = Some(vendor);
+        self.product = Some(product);
+        self.rank = Rank::SPECIFIC;
+        self
+    }
+
+    /// With rank `rank` instead of the default.
+    #[must_use]
+    pub const fn rank(mut self, rank: Rank) -> Self {
+        self.rank = rank;
+        self
+    }
+}
+
+impl Matches<HidIdent> for HidId {
+    fn rank_for(&self, i: &HidIdent) -> Option<Rank> {
+        (self.usage.is_none_or(|u| u == i.usage)
+            && self.vendor.is_none_or(|v| v == i.vendor)
+            && self.product.is_none_or(|p| p == i.product))
+        .then_some(self.rank)
+    }
+}
+
+impl Witness<HidIdent> for HidId {
+    fn witness(&self) -> HidIdent {
+        HidIdent {
+            usage: self.usage.unwrap_or(0),
+            vendor: self.vendor.unwrap_or(0),
+            product: self.product.unwrap_or(0),
+            ..HidIdent::default()
+        }
+    }
+}

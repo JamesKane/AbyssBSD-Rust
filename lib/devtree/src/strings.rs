@@ -10,7 +10,7 @@
 
 use core::fmt::{self, Write};
 
-use crate::ids::{AcpiIdent, PciIdent, UsbIdent, UsbPlace, VirtioIdent};
+use crate::ids::{AcpiIdent, HidIdent, PciIdent, UsbIdent, UsbPlace, VirtioIdent};
 
 /// A PCI function's position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -161,6 +161,26 @@ pub fn usb_location(out: &mut impl Write, i: &UsbIdent, p: &UsbPlace) -> fmt::Re
         "bus={} hubaddr={} port={} devaddr={} interface={} ugen={}",
         p.bus, p.hub_addr, p.port, p.dev_addr, i.interface, p.ugen
     )
+}
+
+/// FreeBSD's `hidbus` child pnpinfo: `page=0x0001 usage=0x0006 bus=0x03
+/// vendor=0x0627 product=0x0001 version=0x0000`.
+pub fn hid_pnpinfo(out: &mut impl Write, i: &HidIdent) -> fmt::Result {
+    write!(
+        out,
+        "page=0x{:04x} usage=0x{:04x} bus=0x{:02x} vendor=0x{:04x} product=0x{:04x} version=0x{:04x}",
+        i.usage >> 16,
+        i.usage & 0xffff,
+        i.bus,
+        i.vendor,
+        i.product,
+        i.version
+    )
+}
+
+/// FreeBSD's `hidbus` child location: `index=0`.
+pub fn hid_location(out: &mut impl Write, i: &HidIdent) -> fmt::Result {
+    write!(out, "index={}", i.index)
 }
 
 #[cfg(test)]

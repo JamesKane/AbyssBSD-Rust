@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use std::{format, println};
 
 use bus::{DriverDecl, Ids};
-use devtree::ids::{AcpiIdent, PciIdent, UsbIdent, VirtioIdent};
+use devtree::ids::{AcpiIdent, HidIdent, PciIdent, UsbIdent, VirtioIdent};
 use devtree::matching::{Candidate, Matches, Witness, find_ambiguities};
 
 use crate::DRIVERS;
@@ -136,6 +136,11 @@ fn check(drivers: &[DriverDecl]) -> Vec<String> {
         drivers,
         |i| if let Ids::Usb(t) = i { Some(*t) } else { None },
         Vec::<UsbIdent>::new(),
+    ));
+    out.extend(ties(
+        drivers,
+        |i| if let Ids::Hid(t) = i { Some(*t) } else { None },
+        Vec::<HidIdent>::new(),
     ));
     // Name-matched and bus-kind drivers: one per name or kind.
     let mut nexus: Vec<&str> = Vec::new();

@@ -40,6 +40,17 @@ use crate::signal::Woke;
 /// Above the driver serializer the interrupt thread holds when it types.
 static TTY_LOCK: LockClass = LockClass::new("tty", 450);
 
+/// Keyboards' bytes, into the console terminal.
+pub(crate) struct ConsoleInput;
+
+impl input::Consumer for ConsoleInput {
+    fn input(&self, s: &Sleepable, bytes: &[u8]) {
+        if let Some(t) = console() {
+            t.input(s, bytes);
+        }
+    }
+}
+
 /// `NO_PID`: what `TIOCGPGRP` reports with no foreground group.
 const NO_PID: i32 = 100_000;
 

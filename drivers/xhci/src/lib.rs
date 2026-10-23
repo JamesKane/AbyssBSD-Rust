@@ -145,7 +145,7 @@ impl core::fmt::Debug for XhciPci {
 }
 
 fn pci_filter(d: &XhciPci, _: usize, _: &IrqCx) -> Filter {
-    d.shared.hc.filter()
+    d.shared.hc.filter(d.shared.kind != "INTx")
 }
 
 fn pci_events(d: &XhciPci, _: usize, _: &Sleepable) {
@@ -233,7 +233,7 @@ impl core::fmt::Debug for XhciAcpi {
 }
 
 fn acpi_filter(d: &XhciAcpi, _: usize, _: &IrqCx) -> Filter {
-    d.shared.hc.filter()
+    d.shared.hc.filter(false)
 }
 
 fn acpi_events(d: &XhciAcpi, _: usize, _: &Sleepable) {

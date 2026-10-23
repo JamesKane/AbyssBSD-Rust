@@ -45,6 +45,9 @@ pub static DRIVERS: &[DriverDecl] = &[
     xhci_driver::ACPI,
     usbus::USBUS,
     usbus::UHUB,
+    hidbus::USBHID,
+    hidbus::HIDBUS,
+    hkbd::DRIVER,
 ];
 
 #[cfg(test)]

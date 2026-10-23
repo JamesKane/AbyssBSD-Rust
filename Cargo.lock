@@ -156,6 +156,8 @@ dependencies = [
  "atrtc",
  "bus",
  "devtree",
+ "hidbus",
+ "hkbd",
  "ichwd",
  "isa",
  "nvme",
@@ -217,6 +219,32 @@ name = "hid"
 version = "0.0.0"
 
 [[package]]
+name = "hidbus"
+version = "0.0.0"
+dependencies = [
+ "bus",
+ "devtree",
+ "hid",
+ "sched",
+ "sync",
+ "usb",
+ "usbus",
+ "vm",
+]
+
+[[package]]
+name = "hkbd"
+version = "0.0.0"
+dependencies = [
+ "bus",
+ "devtree",
+ "hid",
+ "hidbus",
+ "input",
+ "sync",
+]
+
+[[package]]
 name = "ichwd"
 version = "0.0.0"
 dependencies = [
@@ -224,6 +252,15 @@ dependencies = [
  "regs",
  "sync",
  "watchdog",
+]
+
+[[package]]
+name = "input"
+version = "0.0.0"
+dependencies = [
+ "bus",
+ "sched",
+ "sync",
 ]
 
 [[package]]
@@ -274,6 +311,7 @@ dependencies = [
  "fb-console",
  "gpt",
  "hal",
+ "input",
  "intmap",
  "irq",
  "ktest",

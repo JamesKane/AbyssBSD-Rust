@@ -13,6 +13,8 @@ ichwd = { path = "../../drivers/ichwd" }
 isa = { path = "../../drivers/isa" }
 acpi = { path = "../../sys/acpi" }
 bus = { path = "../../sys/bus" }
+hidbus = { path = "../../sys/hid" }
+hkbd = { path = "../../drivers/hkbd" }
 nvme = { path = "../../drivers/nvme" }
 pci = { path = "../../sys/pci" }
 sbsa-gwdt = { path = "../../drivers/sbsa-gwdt" }
