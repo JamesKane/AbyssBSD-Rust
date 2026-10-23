@@ -108,6 +108,7 @@ impl RwCore {
 
     #[cold]
     fn read_slow(&self, s: &Sleepable) {
+        let mut note = super::contention::Note::new(self.class);
         let max_backoff = super::max_backoff();
         let mut backoff = 1;
         loop {
@@ -116,6 +117,7 @@ impl RwCore {
             }
             let w = self.word.load(Ordering::Relaxed);
             if w & READ == 0 && Self::writer_running(w) {
+                note.spins += 1;
                 for _ in 0..backoff {
                     core::hint::spin_loop();
                 }
@@ -123,6 +125,7 @@ impl RwCore {
                 continue;
             }
             let mut got = false;
+            note.sleeps += 1;
             self.readers_q.wait_until(s, || {
                 let mut w = self.word.load(Ordering::Relaxed);
                 loop {
@@ -219,6 +222,7 @@ impl RwCore {
 
     #[cold]
     fn write_slow(&self, s: &Sleepable, me: usize) {
+        let mut note = super::contention::Note::new(self.class);
         let max_backoff = super::max_backoff();
         let mut backoff = 1;
         let mut reader_spins = 0;
@@ -234,6 +238,7 @@ impl RwCore {
                 reader_spins < READER_SPINS
             };
             if spin {
+                note.spins += 1;
                 for _ in 0..backoff {
                     core::hint::spin_loop();
                 }
@@ -241,6 +246,7 @@ impl RwCore {
                 continue;
             }
             let mut got = false;
+            note.sleeps += 1;
             self.writers_q.wait_until(s, || {
                 let mut w = self.word.load(Ordering::Relaxed);
                 loop {

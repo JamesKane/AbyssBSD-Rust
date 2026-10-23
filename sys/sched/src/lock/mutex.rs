@@ -79,6 +79,7 @@ impl MutexCore {
 
     #[cold]
     fn lock_slow(&self, _s: &Sleepable, me: &Thread, me_word: usize) {
+        let mut note = super::contention::Note::new(self.class);
         let max_backoff = super::max_backoff();
         let mut backoff = 1;
         loop {
@@ -100,12 +101,14 @@ impl MutexCore {
             // read only steers spinning.
             let running = unsafe { (*owner).on_cpu.load(Ordering::Relaxed) };
             if running {
+                note.spins += 1;
                 for _ in 0..backoff {
                     core::hint::spin_loop();
                 }
                 backoff = (backoff * 2).min(max_backoff);
                 continue;
             }
+            note.sleeps += 1;
             if self.block(me, me_word) {
                 return;
             }

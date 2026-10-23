@@ -280,6 +280,11 @@ fn print_report(label: &[u8]) {
     } else {
         kprintln!("prof {label}: busy by CPU:{line} (functions: CPU {only} only)");
     }
+    // Locks found held since the last report (on any CPU, sampled or
+    // not): which ones, how long spun, how often slept.
+    sched::lock::contention::take(|class, taken, spins, sleeps| {
+        kprintln!("prof {label}: lock {class}: {taken} contended, {spins} spins, {sleeps} sleeps");
+    });
     let share = |n: u64| {
         let tenths = n * 1000 / busy.max(1);
         (tenths / 10, tenths % 10)

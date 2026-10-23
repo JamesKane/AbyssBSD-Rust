@@ -6,6 +6,7 @@
 //! Spin locks live in `sys/sync`; these build on the scheduler because
 //! they block.
 
+pub mod contention;
 mod epoch;
 mod mutex;
 mod rw;
