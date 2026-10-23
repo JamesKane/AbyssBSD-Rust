@@ -74,10 +74,13 @@ fn softdep_speedup() -> usize {
     softdep_limit() / 4
 }
 
-/// An in-core inode, shared by its node and its file's pager.
+/// An in-core inode, shared by its node and its file's pager. In order
+/// (`repr(C)`): the lock and the inode's attributes first, on the lines
+/// a `stat` reads.
+#[repr(C)]
 struct InodeCell {
-    ino: u32,
     state: Mutex<InodeState>,
+    ino: u32,
     /// The size, readable with no lock (the VM asks a pager for it under
     /// the map lock); published whenever a regular file's size changes.
     size: AtomicU64,
@@ -156,6 +159,8 @@ impl InodeCell {
     }
 }
 
+/// The inode first (`repr(C)`), its attributes right after the lock.
+#[repr(C)]
 struct InodeState {
     ip: ufs::Inode,
     /// Changed since last written.

@@ -39,8 +39,10 @@ const CONTESTED: usize = 1;
 /// How far priority lending follows a chain of blocked owners.
 const PROPAGATE_DEPTH: usize = 8;
 
-/// The type-independent part of a mutex.
+/// The type-independent part of a mutex. In order (`repr(C)`): the owner
+/// word first, on the line a value's first fields follow.
 #[derive(Debug)]
+#[repr(C)]
 pub struct MutexCore {
     owner: AtomicUsize,
     waiters: SpinLock<ThreadList>,
@@ -270,7 +272,9 @@ fn unlend(me: &Thread) {
     }
 }
 
-/// A sleepable mutex protecting a `T`.
+/// A sleepable mutex protecting a `T`, which follows its lock word
+/// (`repr(C)`), so taking the lock brings in the value's first fields.
+#[repr(C)]
 pub struct Mutex<T> {
     core: MutexCore,
     value: UnsafeCell<T>,

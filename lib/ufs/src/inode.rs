@@ -57,9 +57,11 @@ pub struct Timestamp {
     pub nsec: u32,
 }
 
-/// A checked UFS2 inode.
+/// A checked UFS2 inode. In order (`repr(C)`): the attributes `stat`
+/// reports first, together, then the block pointers and the raw copy.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[allow(missing_docs)]
+#[repr(C)]
 pub struct Inode {
     /// Type and permission bits; 0 if unallocated.
     pub mode: u16,
