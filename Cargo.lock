@@ -213,6 +213,10 @@ name = "hal"
 version = "0.0.0"
 
 [[package]]
+name = "hid"
+version = "0.0.0"
+
+[[package]]
 name = "ichwd"
 version = "0.0.0"
 dependencies = [
