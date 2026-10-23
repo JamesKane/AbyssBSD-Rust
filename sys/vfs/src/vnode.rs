@@ -317,7 +317,9 @@ impl Vnode {
 
     /// `struct stat` (FreeBSD's `vn_stat`).
     pub fn stat(&self, s: &Sleepable) -> Result<Stat, Errno> {
-        Ok(self.stat_of(&self.attr(s)?))
+        // The node's attributes made in place, not through a result.
+        let a = self.read(s).live()?.node().attr();
+        Ok(self.stat_of(&a))
     }
 
     /// `struct stat` from attributes already read.

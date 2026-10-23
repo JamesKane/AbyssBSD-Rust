@@ -53,12 +53,19 @@ pub(super) fn path(addr: u64) -> Result<PathArg, Errno> {
         uaccess::StrError::Fault => Errno::EFAULT,
         uaccess::StrError::TooLong => Errno::ENAMETOOLONG,
     };
-    let mut bytes = [0; SHORT_PATH];
-    match uaccess::copy_in_str(addr, &mut bytes) {
-        Ok(n) => Ok(PathArg::Short {
-            len: u8::try_from(n).map_err(|_| Errno::ENAMETOOLONG)?,
-            bytes,
-        }),
+    // Copied straight into the argument returned, not moved there.
+    let mut arg = PathArg::Short {
+        len: 0,
+        bytes: [0; SHORT_PATH],
+    };
+    let PathArg::Short { len, bytes } = &mut arg else {
+        unreachable!("just made short");
+    };
+    match uaccess::copy_in_str(addr, bytes) {
+        Ok(n) => {
+            *len = u8::try_from(n).map_err(|_| Errno::ENAMETOOLONG)?;
+            Ok(arg)
+        }
         Err(uaccess::StrError::TooLong) => uaccess::copy_in_str_vec(addr, PATH_MAX)
             .map(PathArg::Long)
             .map_err(errno),
@@ -291,13 +298,18 @@ pub(super) fn fstatat(s: &Sleepable, fd: u64, path_ptr: u64, buf: u64, flag: u64
         };
         let st = if path.is_empty() && flag & AT_EMPTY_PATH != 0 && At::new(int(fd)) != At::Cwd {
             // The descriptor may be a pipe.
-            super::io::file(s, p, fd)?.stat(s)?
+            super::io::file(s, p, fd)?.stat(s)
         } else {
-            at_vnode(s, p, fd, &path, walk, flag & AT_EMPTY_PATH != 0)?.stat(s)?
+            at_vnode(s, p, fd, &path, walk, flag & AT_EMPTY_PATH != 0)?.stat(s)
         };
-        UserPtr::<Stat>::new(buf)
-            .write(&st)
-            .map_err(|_| Errno::EFAULT)?;
+        // Written out from where it was made: not moved out of the result
+        // first.
+        match &st {
+            Ok(st) => UserPtr::<Stat>::new(buf)
+                .write(st)
+                .map_err(|_| Errno::EFAULT)?,
+            Err(e) => return Err(*e),
+        }
         Ok(0)
     })
 }
