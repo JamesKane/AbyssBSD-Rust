@@ -94,15 +94,21 @@ pub struct Vnode {
     writecount: core::sync::atomic::AtomicI64,
 }
 
-/// A counter standing in for time, for vnode recency.
-static TICKS: AtomicU64 = AtomicU64::new(0);
+/// Vnode recency as a generation, advanced by each reclaim pass
+/// ([`next_generation`]): a lookup reads it, and writes its vnode only
+/// when the vnode was last used in an older one. So lookups write no
+/// shared line, and a vnode's line at most once a pass (FreeBSD batches
+/// its LRU requeues per CPU, `vdbatch`, to the same end).
+static GENERATION: AtomicU64 = AtomicU64::new(1);
 
-/// The next recency tick (a relaxed counter: an approximate order is
-/// enough, and no locked instruction is spent per lookup).
-fn tick() -> u64 {
-    let t = TICKS.load(Ordering::Relaxed) + 1;
-    TICKS.store(t, Ordering::Relaxed);
-    t
+fn generation() -> u64 {
+    GENERATION.load(Ordering::Relaxed)
+}
+
+/// A reclaim pass begins: uses from now on count as newer than any
+/// before.
+pub(crate) fn next_generation() {
+    GENERATION.fetch_add(1, Ordering::Relaxed);
 }
 
 impl core::fmt::Debug for Vnode {
@@ -129,7 +135,7 @@ impl Vnode {
             named: PreemptLock::new(None),
             cache_links: PreemptLock::new(crate::cache::Links::new()),
             lockf: crate::lockf::Lockf::new(),
-            used: AtomicU64::new(tick()),
+            used: AtomicU64::new(generation()),
             dying: core::sync::atomic::AtomicBool::new(false),
             writecount: core::sync::atomic::AtomicI64::new(0),
         }
@@ -183,7 +189,10 @@ impl Vnode {
 
     /// Records a use, for the reclaimer's order.
     pub fn touch(&self) {
-        self.used.store(tick(), Ordering::Relaxed);
+        let g = generation();
+        if self.used.load(Ordering::Relaxed) != g {
+            self.used.store(g, Ordering::Relaxed);
+        }
     }
 
     /// When it was last used.

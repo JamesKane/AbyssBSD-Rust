@@ -372,6 +372,8 @@ impl Mount {
     /// Reclaims up to `max` of the vnodes nothing but the table refers to,
     /// longest unused first (FreeBSD's `vnlru`); returns how many went.
     pub fn prune(&self, s: &Sleepable, max: usize) -> usize {
+        // What is used from now on is newer than all this pass may take.
+        crate::vnode::next_generation();
         let mut idle: Vec<Arc<Vnode>> = self
             .table
             .lock()
