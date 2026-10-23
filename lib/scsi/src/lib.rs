@@ -81,6 +81,15 @@ impl Cdb {
         c
     }
 
+    /// INQUIRY for vital product data page `page`, for `len` bytes.
+    #[must_use]
+    pub fn inquiry_vpd(page: u8, len: u8) -> Self {
+        let mut c = Self::inquiry(len);
+        c.bytes[1] = 1;
+        c.bytes[2] = page;
+        c
+    }
+
     /// MODE SENSE(6) of every page, for `len` bytes (the header says
     /// whether the medium is write-protected).
     #[must_use]
@@ -198,6 +207,45 @@ impl Inquiry {
             product: b[16..32].try_into().ok()?,
             revision: b[32..36].try_into().ok()?,
         })
+    }
+}
+
+/// Vital product data pages (SPC-4 §7.8).
+pub mod vpd {
+    /// Supported VPD pages.
+    pub const SUPPORTED_PAGES: u8 = 0x00;
+    /// Unit serial number.
+    pub const UNIT_SERIAL: u8 = 0x80;
+    /// The buffer FreeBSD's CAM reads either page into: a 4-byte header
+    /// and 251 bytes.
+    pub const LEN: u8 = 255;
+
+    /// The page's payload, as long as its header says and the data
+    /// allows.
+    #[must_use]
+    pub fn payload(b: &[u8], page: u8) -> Option<&[u8]> {
+        if *b.get(1)? != page {
+            return None;
+        }
+        let len = usize::from(*b.get(3)?);
+        b.get(4..).map(|p| &p[..len.min(p.len())])
+    }
+
+    /// Whether a supported-pages list names `page`.
+    #[must_use]
+    pub fn supports(b: &[u8], page: u8) -> bool {
+        payload(b, SUPPORTED_PAGES).is_some_and(|l| l.contains(&page))
+    }
+
+    /// The unit serial number, trimmed of the spaces devices pad it
+    /// with; `None` for none or all spaces (SPC-5 says that means no
+    /// serial number), as FreeBSD's CAM reads it.
+    #[must_use]
+    pub fn serial(b: &[u8]) -> Option<&[u8]> {
+        let s = payload(b, UNIT_SERIAL)?;
+        let start = s.iter().position(|&c| c != b' ')?;
+        let end = s.iter().rposition(|&c| c != b' ')? + 1;
+        Some(&s[start..end])
     }
 }
 

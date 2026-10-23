@@ -167,7 +167,7 @@ impl Driver for Hidbus {
     const IDS: Ids = Ids::Nexus(&["hidbus"]);
 
     fn describe(_: &Ident) -> String {
-        String::new()
+        String::from("HID bus")
     }
 
     fn attach(cx: &mut AttachCx<'_>) -> Result<Self, AttachError> {

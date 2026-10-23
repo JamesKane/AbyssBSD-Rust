@@ -7,7 +7,9 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use bus::{AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, StartCx, StopCx, StopReason};
+use bus::{
+    AttachCx, AttachError, DeviceId, Driver, DriverDecl, Ident, Ids, StartCx, StopCx, StopReason,
+};
 use sched::{Sleepable, Thread, WaitQueue};
 use sync::SpinLock;
 use usb::Speed;
@@ -91,8 +93,35 @@ impl Bus {
         }
     }
 
-    fn thread(self: Arc<Self>, s: &Sleepable) {
+    fn thread(self: Arc<Self>, node: DeviceId, s: &Sleepable) {
+        // As FreeBSD's usb_bus_attach, which runs on the USB process once
+        // the boot's device probe is done: the root hub, then exploring.
+        let m = ::bus::manager();
+        m.wait_idle(s);
         let e = Arc::clone(&self.explorer);
+        if e.stop.load(Ordering::Acquire) {
+            return;
+        }
+        let root = Arc::new(self.root_hub());
+        m.log(format_args!(
+            "{}: <{} {}> at usbus{}",
+            root.ugen(),
+            root.manufacturer,
+            root.product,
+            self.unit
+        ));
+        let iface = UsbInterface {
+            desc: root.config.interfaces[0].clone(),
+            device: root,
+        };
+        m.add_child(
+            s,
+            node,
+            Ident::Usb(iface.ident(), iface.place()),
+            Some(Arc::new(iface)),
+            Vec::new(),
+            &[],
+        );
         loop {
             e.queue.wait_until(s, || {
                 e.pending.load(Ordering::Acquire) || e.stop.load(Ordering::Acquire)
@@ -127,6 +156,7 @@ impl Bus {
             slot: None,
             bus: self.unit,
             index: 1,
+            address: 1,
             speed: if usb3 { Speed::Super } else { Speed::High },
             hub_index: 0,
             port: 0,
@@ -182,7 +212,6 @@ impl Driver for Usbus {
     fn attach(cx: &mut AttachCx<'_>) -> Result<Self, AttachError> {
         let data = cx.bus_data_arc::<UsbusData>().ok_or(AttachError::Decline)?;
         let hc = Arc::clone(&data.hc);
-        ::bus::manager().log(format_args!("usbus{}: {}", cx.unit(), hc.bus_speed()));
         Ok(Self {
             bus: Arc::new(Bus {
                 unit: cx.unit(),
@@ -197,28 +226,12 @@ impl Driver for Usbus {
 
     fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
         let bus = &self.bus;
+        ::bus::manager().log(format_args!("usbus{}: {}", bus.unit, bus.hc.bus_speed()));
         bus.hc.set_explorer(Arc::clone(&bus.explorer));
-        let root = Arc::new(bus.root_hub());
-        ::bus::manager().log(format_args!(
-            "{}: <{} {}> at usbus{}",
-            root.ugen(),
-            root.manufacturer,
-            root.product,
-            bus.unit
-        ));
-        let iface = UsbInterface {
-            desc: root.config.interfaces[0].clone(),
-            device: root,
-        };
-        cx.add_child(
-            Ident::Usb(iface.ident(), iface.place()),
-            Some(Arc::new(iface)),
-            Vec::new(),
-        );
-        let b = Arc::clone(bus);
+        let (b, node) = (Arc::clone(bus), cx.node());
         let t = sched::Builder::new("usb")
             .priority(sched::Priority::KERNEL)
-            .spawn(move |s| b.thread(s))
+            .spawn(move |s| b.thread(node, s))
             .map_err(|_| AttachError::NoMemory)?;
         *self.thread.lock() = Some(t);
         bus.explorer.kick();

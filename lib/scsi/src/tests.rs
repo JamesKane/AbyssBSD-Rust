@@ -94,3 +94,30 @@ fn bulk_only_wrappers() {
     assert_eq!(Csw::parse(&csw), None);
     assert_eq!(Csw::parse(&csw[..12]), None);
 }
+
+#[test]
+fn vpd_inquiry_and_pages() {
+    assert_eq!(
+        Cdb::inquiry_vpd(vpd::UNIT_SERIAL, vpd::LEN).as_bytes(),
+        &[op::INQUIRY, 1, 0x80, 0, 255, 0]
+    );
+    let list = [0, 0, 0, 3, 0x00, 0x80, 0x83];
+    assert!(vpd::supports(&list, vpd::UNIT_SERIAL));
+    assert!(!vpd::supports(&list, 0xb0));
+    // A list that claims more than it holds is cut to what is there.
+    assert!(vpd::supports(&[0, 0, 0, 200, 0x80], vpd::UNIT_SERIAL));
+    assert!(!vpd::supports(&[0, 0x80, 0, 1, 0x80], vpd::UNIT_SERIAL));
+}
+
+#[test]
+fn vpd_serial_is_trimmed() {
+    let page = |s: &[u8]| {
+        let mut b = std::vec![0, 0x80, 0, u8::try_from(s.len()).unwrap()];
+        b.extend_from_slice(s);
+        b
+    };
+    assert_eq!(vpd::serial(&page(b"  abyssbbb  ")), Some(&b"abyssbbb"[..]));
+    assert_eq!(vpd::serial(&page(b"    ")), None);
+    assert_eq!(vpd::serial(&page(b"")), None);
+    assert_eq!(vpd::serial(&[0, 0x83, 0, 1, b'x']), None);
+}

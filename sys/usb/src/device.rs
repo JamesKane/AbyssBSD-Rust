@@ -33,8 +33,11 @@ pub struct UsbDevice {
     pub(crate) slot: Option<SlotId>,
     /// The bus unit (`usbusN`).
     pub bus: u32,
-    /// Its index on the bus: `ugenB.I`, and FreeBSD's `addr`.
+    /// Its index on the bus: `ugenB.I`, and the `devaddr` of its
+    /// location.
     pub index: u8,
+    /// Its USB address: the `addr` of its description.
+    pub address: u8,
     /// Its speed.
     pub speed: Speed,
     /// The parent hub's index (0 for the root hub itself).
@@ -79,6 +82,7 @@ pub(crate) struct DeviceInit {
     pub slot: Option<SlotId>,
     pub bus: u32,
     pub index: u8,
+    pub address: u8,
     pub speed: Speed,
     pub hub_index: u8,
     pub port: u8,
@@ -102,6 +106,7 @@ impl UsbDevice {
             slot: i.slot,
             bus: i.bus,
             index: i.index,
+            address: i.address,
             speed: i.speed,
             hub_index: i.hub_index,
             port: i.port,
@@ -160,7 +165,7 @@ impl UsbDevice {
                 u[1],
                 r[0],
                 r[1],
-                self.index
+                self.address
             )
         } else {
             alloc::format!(
@@ -173,9 +178,21 @@ impl UsbDevice {
                 u[1],
                 r[0],
                 r[1],
-                self.index
+                self.address
             )
         }
+    }
+
+    /// Prints `name: <description> on usbusB`, as FreeBSD's
+    /// `device_set_usb_desc` does at the start of a USB driver's attach
+    /// (the framework's own line is the bare `name on uhubN`; see
+    /// [`bus::Announce::Bare`]).
+    pub fn announce(&self, name: &str, unit: u32) {
+        ::bus::manager().log(format_args!(
+            "{name}{unit}: <{}> on usbus{}",
+            self.description(),
+            self.bus
+        ));
     }
 
     /// Runs a control request on the default endpoint and waits for it.

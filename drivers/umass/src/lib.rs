@@ -25,16 +25,18 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use bus::{AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, StartCx, StopCx, StopReason};
+use bus::{
+    Announce, AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, StartCx, StopCx, StopReason,
+};
 use devtree::ids::UsbId;
 use sched::{Sleepable, Thread, WaitQueue};
 use scsi::bbb::{self, Csw, Status};
-use scsi::{Capacity, Cdb, Inquiry, Sense, key};
+use scsi::{Capacity, Cdb, Inquiry, Sense, key, vpd};
 use storage::{Bio, BioError, BioOp, Disk, DiskInfo, DiskQueues};
 use sync::SpinLock;
-use usb::Setup;
 use usb::descriptor::{TransferType, class};
 use usb::request::rt;
+use usb::{Setup, Speed};
 use usbus::transfer::Waiter;
 use usbus::{UsbDevice, UsbError, UsbInterface};
 use vm::object::IoBuf;
@@ -316,8 +318,12 @@ pub struct Umass {
     inner: Arc<Inner>,
     unit: u32,
     inquiry: Inquiry,
+    /// The unit serial number (VPD page 0x80), if it has one.
+    serial: Option<String>,
     capacity: Capacity,
     read_only: bool,
+    /// Its CAM bus number, while started.
+    scbus: SpinLock<Option<u32>>,
     disk: SpinLock<Option<Arc<Disk>>>,
     thread: SpinLock<Option<Arc<Thread>>>,
 }
@@ -335,6 +341,7 @@ impl Driver for Umass {
     const IDS: Ids = Ids::Usb(&[UsbId::interface(class::MASS_STORAGE)
         .subclass(SUBCLASS_SCSI)
         .protocol(PROTO_BBB)]);
+    const ANNOUNCE: Announce = Announce::Bare;
 
     fn describe(ident: &Ident) -> String {
         match ident {
@@ -397,6 +404,26 @@ impl Driver for Umass {
         if inquiry.absent {
             return Err(AttachError::Device("LUN 0 not present"));
         }
+        // As CAM's probe: the serial number, if the supported pages
+        // list it.
+        let serial = inner
+            .read_cmd(
+                s,
+                &Cdb::inquiry_vpd(vpd::SUPPORTED_PAGES, vpd::LEN),
+                vpd::LEN.into(),
+            )
+            .ok()
+            .filter(|l| vpd::supports(l, vpd::UNIT_SERIAL))
+            .and_then(|_| {
+                inner
+                    .read_cmd(
+                        s,
+                        &Cdb::inquiry_vpd(vpd::UNIT_SERIAL, vpd::LEN),
+                        vpd::LEN.into(),
+                    )
+                    .ok()
+            })
+            .and_then(|p| vpd::serial(&p).map(|v| String::from_utf8_lossy(v).into_owned()));
         let mut ready = false;
         for _ in 0..READY_TRIES {
             match inner.command(s, &Cdb::test_unit_ready(), Data::None).1 {
@@ -443,8 +470,10 @@ impl Driver for Umass {
             }),
             unit: cx.unit(),
             inquiry,
+            serial,
             capacity,
             read_only,
+            scbus: SpinLock::new(None),
             disk: SpinLock::new(None),
             thread: SpinLock::new(None),
         })
@@ -457,13 +486,19 @@ impl Driver for Umass {
             .spawn(move |s| inner.thread(s))
             .map_err(|_| AttachError::NoMemory)?;
         *self.thread.lock() = Some(t);
-        let unit = storage::alloc_unit("da");
-        let i = &self.inquiry;
+        let (u, i) = (self.unit, &self.inquiry);
+        self.inner.dev.announce(Self::NAME, u);
         let mgr = bus::manager();
-        mgr.log(format_args!("umass{}:  SCSI over Bulk-Only", self.unit));
+        mgr.log(format_args!("umass{u}:  SCSI over Bulk-Only; quirks = 0x0"));
+        let scbus = storage::alloc_bus();
+        *self.scbus.lock() = Some(scbus);
+        // FreeBSD prints this with USB_DEBUG, which GENERIC has.
         mgr.log(format_args!(
-            "da{unit} at umass-sim{} bus 0 scbus{} target 0 lun 0",
-            self.unit, self.unit
+            "umass{u}:{scbus}:{u}: Attached to scbus{scbus}"
+        ));
+        let unit = storage::alloc_unit("da");
+        mgr.log(format_args!(
+            "da{unit} at umass-sim{u} bus 0 scbus{scbus} target 0 lun 0"
         ));
         let spc = match i.version {
             3 => String::from("SPC"),
@@ -476,6 +511,22 @@ impl Driver for Umass {
             scsi::ident(&i.product),
             scsi::ident(&i.revision),
             if i.removable { "Removable" } else { "Fixed" }
+        ));
+        if let Some(sn) = &self.serial {
+            // CAM prints at most 60 characters.
+            let sn: String = sn.chars().take(60).collect();
+            mgr.log(format_args!("da{unit}: Serial Number {sn}"));
+        }
+        // The SIM's base transfer speed, in KB/s.
+        let kbps: u32 = match self.inner.dev.speed {
+            Speed::Super | Speed::SuperPlus => 400_000,
+            Speed::High => 40_000,
+            Speed::Low | Speed::Full => 1_000,
+        };
+        mgr.log(format_args!(
+            "da{unit}: {}.{:03}MB/s transfers",
+            kbps / 1000,
+            kbps % 1000
         ));
         let info = DiskInfo {
             name: "da",
@@ -491,6 +542,8 @@ impl Driver for Umass {
             Arc::new(Queues(Arc::clone(&self.inner))),
         );
         *self.disk.lock() = Some(disk);
+        // umass's SIM says PIM_NO_6_BYTE, which da keeps as a quirk.
+        mgr.log(format_args!("da{unit}: quirks=0x2<NO_6_BYTE>"));
         Ok(())
     }
 
@@ -505,6 +558,9 @@ impl Driver for Umass {
         let t = self.thread.lock().take();
         if let Some(t) = t {
             t.join(s);
+        }
+        if let Some(b) = self.scbus.lock().take() {
+            storage::free_bus(b);
         }
     }
 }

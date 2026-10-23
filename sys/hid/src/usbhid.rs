@@ -8,7 +8,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use bus::{AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, StartCx, StopCx, StopReason};
+use bus::{
+    Announce, AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, StartCx, StopCx, StopReason,
+};
 use devtree::ids::{HidIdent, UsbId};
 use hid::{BOOT_KEYBOARD, BOOT_MOUSE, Descriptor};
 use sched::Sleepable;
@@ -104,6 +106,8 @@ impl HidTransport for Arc<Transport> {
 /// The `usbhid` driver.
 pub struct Usbhid {
     data: Arc<HidbusData>,
+    dev: Arc<UsbDevice>,
+    unit: u32,
 }
 
 impl core::fmt::Debug for Usbhid {
@@ -117,6 +121,7 @@ impl core::fmt::Debug for Usbhid {
 impl Driver for Usbhid {
     const NAME: &'static str = "usbhid";
     const IDS: Ids = Ids::Usb(&[UsbId::interface(class::HID)]);
+    const ANNOUNCE: Announce = Announce::Bare;
 
     fn describe(ident: &Ident) -> String {
         match ident {
@@ -193,10 +198,13 @@ impl Driver for Usbhid {
                 },
                 name,
             }),
+            dev,
+            unit: cx.unit(),
         })
     }
 
     fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
+        self.dev.announce(Self::NAME, self.unit);
         cx.add_child(
             Ident::Nexus("hidbus"),
             Some(Arc::clone(&self.data) as Arc<dyn core::any::Any + Send + Sync>),

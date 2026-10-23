@@ -29,7 +29,8 @@ use vm::dma::{DmaConstraints, DmaTag};
 
 use crate::manager::Manager;
 use crate::types::{
-    AttachError, Busy, Concurrency, DeviceId, Ident, Ids, Resource, ResourceError, StopReason,
+    Announce, AttachError, Busy, Concurrency, DeviceId, Ident, Ids, Resource, ResourceError,
+    StopReason,
 };
 
 /// A device driver.
@@ -42,6 +43,8 @@ pub trait Driver: Sized + Send + Sync + 'static {
     const YIELDS: &'static [&'static str] = &[];
     /// How the framework enters the driver.
     const CONCURRENCY: Concurrency = Concurrency::Serialized;
+    /// How the device is announced.
+    const ANNOUNCE: Announce = Announce::Description;
 
     /// The device description (`%desc`, `devinfo`'s `<…>`).
     fn describe(ident: &Ident) -> String;
@@ -76,6 +79,7 @@ pub struct DriverDecl {
     pub ids: Ids,
     /// Drivers it yields to on an equal rank.
     pub yields: &'static [&'static str],
+    pub(crate) announce: Announce,
     pub(crate) describe: fn(&Ident) -> String,
     pub(crate) attach: fn(&mut AttachCx<'_>) -> Result<Box<dyn Bound>, AttachError>,
 }
@@ -96,6 +100,7 @@ impl DriverDecl {
             name: D::NAME,
             ids: D::IDS,
             yields: D::YIELDS,
+            announce: D::ANNOUNCE,
             describe: D::describe,
             attach: attach_erased::<D>,
         }

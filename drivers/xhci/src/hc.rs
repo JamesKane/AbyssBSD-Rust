@@ -15,7 +15,7 @@ use sync::SpinLock;
 use usb::descriptor::{Endpoint, TransferType};
 use usb::{Setup, Speed};
 use usbus::bus::Explorer;
-use usbus::hc::{HubInfo, Tt};
+use usbus::hc::{Addressed, HubInfo, Tt};
 use usbus::{HostController, NewDevice, PortState, Rejected, SlotId, Transfer, UsbError};
 use vm::dma::{DmaCoherent, DmaConstraints, DmaTag, Mapped, dir};
 use vm::object::IoBuf;
@@ -188,6 +188,8 @@ pub(crate) struct Hc {
     params: Params,
     csz: ContextSize,
     protocols: Vec<Protocol>,
+    /// The extended capabilities' IDs, in list order.
+    xecp: Vec<u8>,
     /// Contexts and rings.
     tag: DmaTag,
     /// Transfer data: segments that never cross 64 KiB, so one TRB each.
@@ -331,6 +333,7 @@ impl Hc {
         let mut protocols = Vec::new();
         let caps: Vec<(usize, u8)> =
             r::ext_caps(params.xecp, len, |at| regs.mmio.read32(at)).collect();
+        let xecp = caps.iter().map(|&(_, id)| id).collect();
         for (at, id) in caps {
             match id {
                 xcap::LEGACY => handoff(s, &regs, at),
@@ -380,6 +383,7 @@ impl Hc {
             },
             params,
             protocols,
+            xecp,
             regs,
             tag,
             data_tag,
@@ -847,6 +851,7 @@ impl HostController for Hc {
             speed: speed_of(portsc::speed(v)),
             changed: v & portsc::CHANGES != 0,
             connect_changed: v & portsc::CSC != 0,
+            enable_changed: v & portsc::PEC != 0,
             over_current: v & portsc::OCA != 0,
         }
     }
@@ -906,7 +911,7 @@ impl HostController for Hc {
         *self.explorer.lock() = Some(e);
     }
 
-    fn enable_device(&self, s: &Sleepable, d: &NewDevice) -> Result<SlotId, UsbError> {
+    fn enable_device(&self, s: &Sleepable, d: &NewDevice) -> Result<Addressed, UsbError> {
         if self.is_stopping() {
             return Err(UsbError::Gone);
         }
@@ -923,7 +928,10 @@ impl HostController for Hc {
             }
             self.dcbaa.write(usize::from(slot), 0);
         }
-        r.map(|()| SlotId(slot))
+        r.map(|address| Addressed {
+            slot: SlotId(slot),
+            address,
+        })
     }
 
     fn set_max_packet0(
@@ -1206,9 +1214,29 @@ impl HostController for Hc {
 }
 
 impl Hc {
+    /// What FreeBSD's `xhci_init` prints: the context size and DMA width,
+    /// then the extended capabilities.
+    pub(crate) fn announce(&self, unit: u32) {
+        let m = bus::manager();
+        let ctx = if self.params.csz { 64 } else { 32 };
+        let dma = if self.params.ac64 { 64 } else { 32 };
+        m.log(format_args!(
+            "xhci{unit}: {ctx} bytes context size, {dma}-bit DMA"
+        ));
+        if self.xecp.is_empty() {
+            m.log(format_args!("xhci{unit}: xECP: no capabilities found"));
+        } else {
+            m.log(format_args!(
+                "xhci{unit}: xECP capabilities <{}>",
+                r::XecpNames(&self.xecp)
+            ));
+        }
+    }
+
     /// Address Device for a new slot, with its contexts and default
-    /// control endpoint ring.
-    fn address(&self, s: &Sleepable, slot: u8, d: &NewDevice) -> Result<(), UsbError> {
+    /// control endpoint ring. Returns the USB address the controller
+    /// gave the device.
+    fn address(&self, s: &Sleepable, slot: u8, d: &NewDevice) -> Result<u8, UsbError> {
         let out = self
             .tag
             .coherent::<u32>(self.csz.device_bytes() / 4)
@@ -1271,8 +1299,15 @@ impl Hc {
             speed: d.speed,
             eps,
         });
-        self.exec_ok(s, command::address_device(slot, input_addr, false))
-            .map(|_| ())
+        self.exec_ok(s, command::address_device(slot, input_addr, false))?;
+        // FreeBSD's `addr`: the address in the output slot context.
+        let sl = self
+            .slots
+            .get(usize::from(slot))
+            .ok_or(UsbError::Invalid)?
+            .lock();
+        let out = &sl.as_ref().ok_or(UsbError::Invalid)?.out;
+        Ok(SlotContext::decode(&Self::read_ctx(out, self.csz.device_slot())).address)
     }
 }
 

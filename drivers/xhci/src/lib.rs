@@ -92,6 +92,7 @@ impl Shared {
         filter: fn(&D, usize, &IrqCx) -> Filter,
         thread: fn(&D, usize, &Sleepable),
     ) -> Result<(), AttachError> {
+        self.hc.announce(self.unit);
         let lines = core::mem::take(&mut *self.lines.lock());
         for (v, line) in lines.into_iter().enumerate() {
             cx.interrupt(line, Some(filter), Some(thread), v)?;
@@ -111,12 +112,6 @@ impl Shared {
             })
             .map_err(|_| AttachError::NoMemory)?;
         *self.watchdog.lock() = Some(t);
-        bus::manager().log(format_args!(
-            "xhci{}: {} root ports on {}",
-            self.unit,
-            self.hc.root_ports(),
-            self.kind
-        ));
         let hc: Arc<dyn HostController> = self.hc.clone();
         cx.add_child(
             Ident::Nexus("usbus"),

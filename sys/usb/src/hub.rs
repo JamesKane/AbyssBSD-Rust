@@ -9,8 +9,8 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use bus::{
-    AttachCx, AttachError, DetachReason, DeviceId, Driver, DriverDecl, Ident, Ids, StartCx, StopCx,
-    StopReason,
+    Announce, AttachCx, AttachError, DetachReason, DeviceId, Driver, DriverDecl, Ident, Ids,
+    StartCx, StopCx, StopReason,
 };
 use devtree::ids::UsbId;
 use sched::{Sleepable, WaitQueue};
@@ -25,7 +25,7 @@ use vm::object::IoBuf;
 use crate::UsbError;
 use crate::bus::{Bus, Explorer};
 use crate::device::{self, DeviceInit, UsbDevice, UsbInterface};
-use crate::hc::{HostController, HubInfo, NewDevice, PortState, SlotId, Tt};
+use crate::hc::{Addressed, HostController, HubInfo, NewDevice, PortState, SlotId, Tt};
 use crate::transfer::Transfer;
 
 /// A hub's ports, root or external.
@@ -96,6 +96,7 @@ fn port_state(p: &PortStatus) -> PortState {
         }),
         changed: p.change != 0,
         connect_changed: p.change & 1 != 0,
+        enable_changed: p.change & 2 != 0,
         over_current: p.status & (1 << 3) != 0,
     }
 }
@@ -201,6 +202,13 @@ impl Hub {
             if st.changed {
                 self.ports.clear(s, port);
             }
+            // FreeBSD's uhub_explore says so (its debug print at level 0,
+            // which GENERIC's USB_DEBUG shows).
+            if st.enable_changed && !st.connect_changed && st.enabled {
+                ::bus::manager().log(format_args!(
+                    "uhub_explore: illegal enable change, port {port}"
+                ));
+            }
             let (present, failed) = {
                 let p = self.port_state.lock();
                 p.get(usize::from(port - 1))
@@ -304,7 +312,7 @@ impl Hub {
             }),
             _ => parent.tt,
         };
-        let slot = hc.enable_device(
+        let Addressed { slot, address } = hc.enable_device(
             s,
             &NewDevice {
                 speed,
@@ -332,6 +340,7 @@ impl Hub {
             slot: Some(slot),
             bus: bus.unit,
             index,
+            address,
             speed,
             hub_index: parent.index,
             port,
@@ -359,19 +368,28 @@ impl Hub {
         }
         let mut ifaces: Vec<_> = dev.config.defaults().cloned().collect();
         ifaces.sort_by_key(|i| i.number);
-        for desc in ifaces {
-            let i = UsbInterface {
-                device: Arc::clone(&dev),
-                desc,
-            };
-            ::bus::manager().add_child(
-                s,
-                self.node,
-                Ident::Usb(i.ident(), i.place()),
-                Some(Arc::new(i)),
-                Vec::new(),
-                &[],
-            );
+        let m = ::bus::manager();
+        let children: Vec<DeviceId> = ifaces
+            .into_iter()
+            .map(|desc| {
+                let i = UsbInterface {
+                    device: Arc::clone(&dev),
+                    desc,
+                };
+                m.add_child(
+                    s,
+                    self.node,
+                    Ident::Usb(i.ident(), i.place()),
+                    Some(Arc::new(i)),
+                    Vec::new(),
+                    &[],
+                )
+            })
+            .collect();
+        // As FreeBSD: the device's drivers attach before the next port is
+        // looked at, so its lines come together.
+        for c in children {
+            m.wait_settled(c, s);
         }
         Ok(())
     }
@@ -536,6 +554,7 @@ fn arm(dev: Arc<UsbDevice>, ep: u8, len: u16, e: Arc<Explorer>) {
 impl Driver for Uhub {
     const NAME: &'static str = "uhub";
     const IDS: Ids = Ids::Usb(&[UsbId::interface(class::HUB)]);
+    const ANNOUNCE: Announce = Announce::Bare;
 
     fn describe(ident: &Ident) -> String {
         match ident {
@@ -607,6 +626,7 @@ impl Driver for Uhub {
     }
 
     fn start(&self, _: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
+        self.hub.dev.announce(Self::NAME, self.unit);
         let n = self.hub.ports.count();
         ::bus::manager().log(format_args!(
             "uhub{}: {} port{} with {} removable, {} powered",

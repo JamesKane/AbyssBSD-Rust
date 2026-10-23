@@ -715,6 +715,9 @@ impl Driver for Ahci {
 /// An `ahcichN` instance.
 pub struct AhciCh {
     port: Arc<Port>,
+    /// Its CAM bus number, from start: FreeBSD registers a bus for each
+    /// channel, drive or not.
+    scbus: SpinLock<Option<u32>>,
 }
 
 impl core::fmt::Debug for AhciCh {
@@ -738,11 +741,15 @@ impl Driver for AhciCh {
         let port = cx.bus_data_arc::<Port>().ok_or(AttachError::Decline)?;
         let drive = port.init(cx.sleepable())?;
         port.state.lock(cx.sleepable()).drive = drive;
-        Ok(Self { port })
+        Ok(Self {
+            port,
+            scbus: SpinLock::new(None),
+        })
     }
 
     fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
         let s = cx.sleepable();
+        *self.scbus.lock() = Some(storage::alloc_bus());
         let Some(drive) = self.port.state.lock(s).drive.clone() else {
             return Ok(());
         };
@@ -785,6 +792,9 @@ impl Driver for AhciCh {
         };
         for f in held {
             f.finish().complete(Err(BioError::Gone));
+        }
+        if let Some(b) = self.scbus.lock().take() {
+            storage::free_bus(b);
         }
     }
 }

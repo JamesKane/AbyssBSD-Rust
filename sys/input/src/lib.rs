@@ -131,6 +131,28 @@ pub fn set_consumer(c: Arc<dyn Consumer>) {
     *CLASS.consumer.lock() = Some(c);
 }
 
+/// Brings up `kbdmux0` and the class's thread, as FreeBSD's `kbdmux`
+/// registers itself at boot, before any keyboard attaches. Call once the
+/// device manager is up; [`attach`] calls it too.
+///
+/// # Errors
+///
+/// If the class's thread cannot start.
+pub fn start() -> Result<(), sched::SpawnError> {
+    if CLASS.started.swap(true, Ordering::AcqRel) {
+        return Ok(());
+    }
+    let r = sched::Builder::new("kbd")
+        .priority(sched::Priority::KERNEL)
+        .spawn(thread);
+    if let Err(e) = r {
+        CLASS.started.store(false, Ordering::Release);
+        return Err(e);
+    }
+    bus::manager().log(format_args!("kbd0 at kbdmux0"));
+    Ok(())
+}
+
 /// Registers a keyboard: `name` is its driver instance (`hkbd0`), `leds`
 /// what to call when the lock LEDs change. Logs FreeBSD's `kbdN at
 /// hkbd0`.
@@ -142,16 +164,7 @@ pub fn attach(
     name: &str,
     leds: impl Fn(Leds) + Send + Sync + 'static,
 ) -> Result<Arc<Keyboard>, sched::SpawnError> {
-    if !CLASS.started.swap(true, Ordering::AcqRel) {
-        bus::manager().log(format_args!("kbd0 at kbdmux0"));
-        let r = sched::Builder::new("kbd")
-            .priority(sched::Priority::KERNEL)
-            .spawn(thread);
-        if let Err(e) = r {
-            CLASS.started.store(false, Ordering::Release);
-            return Err(e);
-        }
-    }
+    start()?;
     let index = CLASS.next_index.fetch_add(1, Ordering::Relaxed);
     bus::manager().log(format_args!("kbd{index} at {name}"));
     Ok(Arc::new(Keyboard {

@@ -166,6 +166,19 @@ pub fn alloc_unit(name: &'static str) -> u32 {
     unit
 }
 
+/// The lowest free CAM bus number (`scbusN`): CAM numbers each bus as it
+/// registers (an AHCI channel, a USB disk), lowest free first. Held until
+/// [`free_bus`].
+#[must_use]
+pub fn alloc_bus() -> u32 {
+    alloc_unit("scbus")
+}
+
+/// Frees a bus number from [`alloc_bus`].
+pub fn free_bus(bus: u32) {
+    UNITS.lock().retain(|&(n, u)| !(n == "scbus" && u == bus));
+}
+
 /// Takes unit `unit` for disks named `name`, if it is free (a unit the
 /// user chose, as `mdconfig -u` does). Freed when the disk is withdrawn.
 #[must_use]

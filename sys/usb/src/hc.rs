@@ -30,6 +30,8 @@ pub struct PortState {
     pub changed: bool,
     /// The connection changed since the last clear.
     pub connect_changed: bool,
+    /// The port's enable changed since the last clear.
+    pub enable_changed: bool,
     /// Over-current.
     pub over_current: bool,
 }
@@ -57,6 +59,15 @@ pub struct NewDevice {
     pub root_port: u8,
     /// Its transaction translator, if any.
     pub tt: Option<Tt>,
+}
+
+/// A device [`HostController::enable_device`] addressed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Addressed {
+    /// Its slot.
+    pub slot: SlotId,
+    /// The USB address the controller gave it.
+    pub address: u8,
 }
 
 /// A hub's facts, for its slot.
@@ -114,7 +125,7 @@ pub trait HostController: Send + Sync {
     ///
     /// If the controller has no slot, or the device did not take the
     /// address.
-    fn enable_device(&self, s: &Sleepable, d: &NewDevice) -> Result<SlotId, UsbError>;
+    fn enable_device(&self, s: &Sleepable, d: &NewDevice) -> Result<Addressed, UsbError>;
 
     /// Sets the default control endpoint's max packet size, once the
     /// device descriptor said.

@@ -473,3 +473,12 @@ fn ext_caps_walk_and_stop() {
     assert_eq!(regs::ext_caps(4, 64, |at| long[at / 4]).count(), 15);
     assert_eq!(regs::ext_caps(64, 64, read).count(), 0);
 }
+
+#[test]
+fn xecp_names_print_as_freebsd() {
+    let s = |ids: &[u8]| alloc::format!("{}", regs::XecpNames(ids));
+    assert_eq!(s(&[2, 2]), "PROTO,PROTO");
+    assert_eq!(s(&[1, 2, 10, 17]), "LEGACY,PROTO,DEBUG,EXT MSI");
+    assert_eq!(s(&[0xc0, 0x0b, 7, 3]), "VEND(c0),RES(b),,POWER");
+    assert_eq!(s(&[]), "");
+}

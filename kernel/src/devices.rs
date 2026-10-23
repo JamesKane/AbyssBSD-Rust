@@ -205,6 +205,9 @@ pub(crate) fn init(s: &Sleepable) {
     // The platform root, and the devices the kernel set up itself, as
     // FreeBSD's tree shows them.
     let m = bus::manager();
+    if input::start().is_err() {
+        kprintln!("input: no keyboard thread");
+    }
     let nexus = m.adopt(s, root, "nexus", "", bus::Ident::Platform);
     #[cfg(target_arch = "x86_64")]
     m.adopt(s, nexus, "apic", "APIC resources", bus::Ident::Platform);

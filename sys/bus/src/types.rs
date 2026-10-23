@@ -257,6 +257,18 @@ pub enum Concurrency {
     Concurrent,
 }
 
+/// How the framework announces an attaching device, just before its
+/// `start` (FreeBSD's `device_print_child`, before `DEVICE_ATTACH`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Announce {
+    /// `nvme0: <desc> on pci0`, or `usbus0 on xhci0` without a
+    /// description.
+    Description,
+    /// `umass0 on uhub0` whatever the description: the driver prints its
+    /// own, as FreeBSD's USB drivers do (`device_set_usb_desc`).
+    Bare,
+}
+
 /// A hardware resource a bus describes for a child.
 #[derive(Clone, Copy)]
 pub enum Resource {

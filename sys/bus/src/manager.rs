@@ -35,7 +35,7 @@ use crate::driver::{AttachCx, Bound, DriverDecl, Faults, Ledger};
 use crate::platform::Platform;
 use crate::sysctl::DeviceStrings;
 use crate::types::{
-    AttachError, DetachReason, DeviceId, Ident, Need, NodeState, Resource, ResourceError,
+    Announce, AttachError, DetachReason, DeviceId, Ident, Need, NodeState, Resource, ResourceError,
     WaitReason,
 };
 
@@ -157,6 +157,8 @@ pub struct Manager {
     jobs_q: WaitQueue,
     /// Attaches queued or running, for [`Manager::wait_idle`].
     busy: AtomicUsize,
+    /// Bumped as each job ends, for [`Manager::wait_settled`].
+    jobs_done: AtomicU32,
     idle_q: WaitQueue,
     /// Granted memory ranges (base, length).
     claims: SpinLock<Vec<(u64, u64)>>,
@@ -266,6 +268,7 @@ pub fn init(
             jobs: SpinLock::new(VecDeque::new()),
             jobs_q: WaitQueue::new(),
             busy: AtomicUsize::new(0),
+            jobs_done: AtomicU32::new(0),
             idle_q: WaitQueue::new(),
             claims: SpinLock::new(Vec::new()),
             events: SpinLock::new(VecDeque::new()),
@@ -708,9 +711,9 @@ impl Manager {
     }
 
     fn done_one(&self) {
-        if self.busy.fetch_sub(1, Ordering::AcqRel) == 1 {
-            self.idle_q.wake_all();
-        }
+        self.busy.fetch_sub(1, Ordering::AcqRel);
+        self.jobs_done.fetch_add(1, Ordering::AcqRel);
+        self.idle_q.wake_all();
     }
 
     /// A node's position in depth-first creation order: its child index
@@ -857,6 +860,25 @@ impl Manager {
                 crate::sysctl::remove_device(self, s, n);
             }
         };
+        // FreeBSD announces a device before its attach runs, so the lines
+        // the driver prints follow; FreeBSD prints no `<>` for a device
+        // without a description (`usbus0 on xhci0`). Starts run one at a
+        // time, in tree order.
+        let announce = {
+            let t = self.topo.read(s);
+            t.node(id).map(|n| {
+                let parent = t.nameunit(self.drivers, n.parent.unwrap_or(0));
+                match decl.announce {
+                    Announce::Description if !n.desc.is_empty() => {
+                        alloc::format!("{}{unit}: <{}> on {parent}", decl.name, n.desc)
+                    }
+                    _ => alloc::format!("{}{unit} on {parent}", decl.name),
+                }
+            })
+        };
+        if let Some(line) = announce {
+            self.platform.log(format_args!("{line}"));
+        }
         if let Err(e) = binding.start(self, s) {
             let report = binding.detach(DetachReason::StartFailed, s);
             self.check_ledger(decl.name, unit, report.leaked_grants);
@@ -865,18 +887,15 @@ impl Manager {
             return;
         }
         let mut t = self.topo.write(s);
-        let Some(n) = t.node(id) else {
+        if t.node(id).is_none() {
             return;
-        };
-        let parent = t.nameunit(self.drivers, n.parent.unwrap_or(0));
+        }
         let line = self.device_line(&t, '+', &alloc::format!("{}{unit}", decl.name), id.index);
-        let mut desc = None;
         if let Some(n) = t.node_mut(id) {
             n.binding = Some(binding);
             n.sysctl = node;
             n.state = NodeState::Attached;
             n.start = StartPhase::Attach;
-            desc = Some(n.desc.clone());
         }
         // Only this node's consumers can have become ready.
         let consumers: Vec<u32> = t.graph.consumers(id.index).map(|e| e.consumer).collect();
@@ -895,18 +914,6 @@ impl Manager {
         }
         self.release_starts(&mut t);
         drop(t);
-        // After the lock: a serial console takes about a millisecond a line.
-        // FreeBSD prints no `<>` for a device without a description
-        // (`usbus0 on xhci0`).
-        match desc {
-            Some(d) if d.is_empty() => self
-                .platform
-                .log(format_args!("{}{unit} on {parent}", decl.name)),
-            Some(desc) => self
-                .platform
-                .log(format_args!("{}{unit}: <{desc}> on {parent}", decl.name)),
-            None => {}
-        }
         self.event(line);
         self.bump();
     }
@@ -1023,6 +1030,38 @@ impl Manager {
     pub fn wait_idle(&self, s: &Sleepable) {
         self.idle_q
             .wait_until(s, || self.busy.load(Ordering::Acquire) == 0);
+    }
+
+    /// Waits until no node at or below `id` is attaching or starting, as
+    /// FreeBSD's USB explore attaches each new device's drivers (and
+    /// theirs) before it looks at the next port. Nodes waiting for a
+    /// supplier count as settled.
+    pub fn wait_settled(&self, id: DeviceId, s: &Sleepable) {
+        loop {
+            // Read before looking, so a job that ends after the look
+            // still wakes this.
+            let done = self.jobs_done.load(Ordering::Acquire);
+            if !self.attaching_below(id, s) {
+                return;
+            }
+            self.idle_q
+                .wait_until(s, || self.jobs_done.load(Ordering::Acquire) != done);
+        }
+    }
+
+    fn attaching_below(&self, id: DeviceId, s: &Sleepable) -> bool {
+        let t = self.topo.read(s);
+        let mut stack = alloc::vec![id.index];
+        while let Some(i) = stack.pop() {
+            let Some(n) = t.nodes.get(i as usize).and_then(Option::as_ref) else {
+                continue;
+            };
+            if n.state == NodeState::Attaching {
+                return true;
+            }
+            stack.extend(n.children.iter().copied());
+        }
+        false
     }
 
     /// Detaches `id` (and its children first), returning it to

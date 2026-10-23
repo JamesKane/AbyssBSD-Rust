@@ -312,6 +312,38 @@ impl<F: Fn(usize) -> u32> Iterator for ExtCaps<F> {
     }
 }
 
+/// Extended capability IDs as FreeBSD's `xhci_get_xecp` prints them:
+/// `PROTO,LEGACY`, with `RES(b)` for reserved IDs and `VEND(c0)` for
+/// vendor ones. IDs it has no name for (0, 7 to 9) print as nothing
+/// between their commas, as FreeBSD's do.
+#[derive(Clone, Copy, Debug)]
+pub struct XecpNames<'a>(pub &'a [u8]);
+
+impl core::fmt::Display for XecpNames<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        for (i, &id) in self.0.iter().enumerate() {
+            if i > 0 {
+                f.write_str(",")?;
+            }
+            match id {
+                11..=16 | 19..=191 => write!(f, "RES({id:x})")?,
+                192.. => write!(f, "VEND({id:x})")?,
+                1 => f.write_str("LEGACY")?,
+                2 => f.write_str("PROTO")?,
+                3 => f.write_str("POWER")?,
+                4 => f.write_str("VIRT")?,
+                5 => f.write_str("MSG IRQ")?,
+                6 => f.write_str("LOCAL MEM")?,
+                10 => f.write_str("DEBUG")?,
+                17 => f.write_str("EXT MSI")?,
+                18 => f.write_str("TUN")?,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
 /// A supported-protocol capability (xHCI 1.2 §7.2): which root ports
 /// speak which USB major version.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
