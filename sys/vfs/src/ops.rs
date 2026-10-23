@@ -208,7 +208,12 @@ pub fn create(
         Some(ops) => dir.mount().adopt(s, made.ino, ops),
         None => dir.mount().vget(s, made.ino)?,
     };
-    cache::enter(dir, name, Some(&v));
+    if dir.mount().fs().caches_created() || v.is_dir() {
+        cache::enter(dir, name, Some(&v));
+    } else {
+        // A negative entry for the name goes.
+        cache::remove(dir, name);
+    }
     Ok((v, true))
 }
 
@@ -557,7 +562,11 @@ pub fn rename(
     )?;
     cache::remove(fdir, fname);
     cache::remove(tdir, tname);
-    cache::enter(tdir, tname, Some(&from));
+    // The new name is left for a lookup to enter, as FreeBSD does; a
+    // directory's goes in now, for its name (`getcwd`).
+    if from.is_dir() {
+        cache::enter(tdir, tname, Some(&from));
+    }
     drop(held);
     if let Some(t) = to {
         if t.is_dir() {

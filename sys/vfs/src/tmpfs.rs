@@ -658,6 +658,10 @@ impl FileSystem for TmpFs {
         Ok(())
     }
 
+    fn caches_created(&self) -> bool {
+        false
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

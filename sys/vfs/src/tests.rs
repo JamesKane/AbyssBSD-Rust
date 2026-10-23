@@ -617,8 +617,11 @@ fn the_name_cache_answers_and_is_kept_right() {
         cache::lookup(&root, b"x"),
         Some(cache::Hit::Negative)
     ));
-    // A creation replaces the negative entry.
+    // A creation takes the negative entry out (tmpfs leaves the new name
+    // for a lookup to enter, as FreeBSD's does).
     let x = mk(&ns, b"/x", NewNode::Regular).unwrap();
+    assert!(cache::lookup(&root, b"x").is_none());
+    assert!(Arc::ptr_eq(&lookup(&ns, b"/x", true).unwrap(), &x));
     match cache::lookup(&root, b"x") {
         Some(cache::Hit::Positive(v)) => assert!(Arc::ptr_eq(&v, &x)),
         other => panic!("{other:?}"),
@@ -637,6 +640,9 @@ fn a_purge_takes_only_the_vnodes_own_entries() {
     let d = mk(&ns, b"/d", NewNode::Directory).unwrap();
     let a = mk(&ns, b"/d/a", NewNode::Regular).unwrap();
     let b = mk(&ns, b"/d/b", NewNode::Regular).unwrap();
+    for (p, v) in [(&b"/d/a"[..], &a), (b"/d/b", &b)] {
+        assert!(Arc::ptr_eq(&lookup(&ns, p, true).unwrap(), v));
+    }
     assert_eq!(lookup(&ns, b"/d/none", true).unwrap_err(), Errno::ENOENT);
     let positive = |dir: &Arc<Vnode>, name: &[u8], v: &Arc<Vnode>| matches!(cache::lookup(dir, name), Some(cache::Hit::Positive(x)) if Arc::ptr_eq(&x, v));
     // A file: the entry naming it goes; its siblings' stay.

@@ -105,6 +105,13 @@ pub trait FileSystem: Send + Sync + Any {
         Err(Errno::EOPNOTSUPP)
     }
 
+    /// Whether a new file's name goes in the name cache. FreeBSD's tmpfs
+    /// leaves it out (a later lookup finds it in the directory's hash as
+    /// fast); UFS puts it in.
+    fn caches_created(&self) -> bool {
+        true
+    }
+
     fn as_any(&self) -> &dyn Any;
 }
 
