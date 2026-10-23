@@ -229,8 +229,14 @@ ktest! {
         // The first stack in a region also creates intermediate page
         // tables, which stay; measure after one has come and gone.
         drop(KernelStack::new(5).expect("stack"));
+        // Pages the heap holds count as free: other CPUs' allocations
+        // move pages between it and the free lists meanwhile.
+        let free_pages = || {
+            let h = crate::mm::heap_stats();
+            crate::mm::phys_stats().free + h.slab_pages + h.magazine_pages + h.large_pages
+        };
         let kva = crate::mm::kstack::kva_allocated();
-        let free = crate::mm::phys_stats().free;
+        let free = free_pages();
         let stack = KernelStack::new(5).expect("stack");
         assert_eq!(stack.top() - stack.bottom().get(), VirtAddr::new(5 * 4096));
         let t = crate::mm::translate(stack.top() - 8).expect("stack mapped");
@@ -247,7 +253,7 @@ ktest! {
         assert!(crate::mm::translate(bottom).is_none());
         assert_eq!(arch::fixup::probe_read(bottom.get()), Err(arch::fixup::Fault));
         assert_eq!(crate::mm::kstack::kva_allocated(), kva);
-        assert_eq!(crate::mm::phys_stats().free, free);
+        assert_eq!(free_pages(), free);
     }
 }
 

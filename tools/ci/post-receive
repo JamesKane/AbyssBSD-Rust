@@ -6,7 +6,9 @@
 # `cargo xtask test` in a persistent work tree (so target/ is reused) and
 # writes ~/abyss/ci/<time>-<rev>.log ending in PASS or FAIL. The push
 # returns immediately (the job closes every descriptor git passed in);
-# runs are serialised with a lock file.
+# runs are serialised with a lock file. A run that gets the lock after
+# main has moved on ends SUPERSEDED without testing: the newer push's run
+# covers it, so a burst of pushes costs one run.
 
 ci="$HOME/abyss/ci"
 work="$HOME/abyss/ci-work"
@@ -21,6 +23,7 @@ while read -r _old new ref; do
 	echo "ci: testing $new, log $log"
 	nohup sh -c '
 		lockf -k "$1/.lock" sh -c "
+			[ \"\$(git --git-dir=\"$3\" rev-parse refs/heads/main)\" = \"$4\" ] || exit 3
 			set -e
 			[ -d \"$2/.git\" ] || git clone -q \"$3\" \"$2\"
 			cd \"$2\"
@@ -28,7 +31,12 @@ while read -r _old new ref; do
 			git checkout -qf \"$4\"
 			git clean -fdq -e target -e build
 			PATH=\$HOME/.cargo/bin:\$PATH cargo xtask test --tier all
-		" && echo PASS || echo FAIL
+		"
+		case $? in
+		0) echo PASS ;;
+		3) echo SUPERSEDED ;;
+		*) echo FAIL ;;
+		esac
 	' ci "$ci" "$work" "$repo" "$new" >"$log" 2>&1 </dev/null \
 		3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- &
 done

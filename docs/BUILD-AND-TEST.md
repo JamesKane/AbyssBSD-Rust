@@ -239,7 +239,10 @@ required):
 1. A `git push build main` to the server's bare repo (`~/abyss/repo.git`) triggers
    `tools/ci/post-receive`, which runs `cargo xtask test --tier all` (unit tests, then boot tests
    on both arches in QEMU) in a persistent work tree, `~/abyss/ci-work`. Runs are serialized, and
-   each one writes `~/abyss/ci/<time>-<rev>.log` ending in `PASS` or `FAIL`. To set it up locally:
+   each one writes `~/abyss/ci/<time>-<rev>.log` ending in `PASS` or `FAIL`. A queued run whose
+   commit is no longer `main`'s tip when it gets the lock ends `SUPERSEDED` without testing; the
+   newer push's run covers it. Only CI and `perf` take the lock; `freebsd-record` runs beside
+   them. To set it up locally:
    `git remote add build abyss-build:abyss/repo.git`. To reinstall the hook, copy
    `tools/ci/post-receive` to `~/abyss/repo.git/hooks/post-receive`.
 2. A nightly `cron` job runs `cargo xtask test --tier full` plus fuzzing for a fixed time budget,
