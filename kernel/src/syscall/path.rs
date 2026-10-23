@@ -20,7 +20,7 @@ use vfs::ops::{VEXEC, VREAD, VWRITE};
 use vfs::{Kind, NewNode, SetAttr, Vnode};
 
 use super::io::install;
-use super::{SysResult, int, process};
+use super::{SysResult, int, process, with_process};
 use crate::fs::fdtable::FdFlags;
 use crate::fs::file::{File, FileKind, VnodeFile};
 use crate::fs::{At, Walk};
@@ -101,173 +101,174 @@ fn stored_here(kind: Kind) -> bool {
 
 /// `openat(fd, path, flags, mode)` (FreeBSD's `vn_open_cred`).
 pub(super) fn openat(s: &Sleepable, fd: u64, path_ptr: u64, flags: u64, mode: u64) -> SysResult {
-    let p = process()?;
-    let flags = u32::try_from(flags & 0xffff_ffff).unwrap_or(0);
-    let path = path(path_ptr)?;
-    if flags & O_ACCMODE == O_ACCMODE || (flags & O_EXEC != 0 && flags & O_ACCMODE != 0) {
-        return Err(Errno::EINVAL);
-    }
-    // O_CREAT with O_EXCL does not follow a final symbolic link: the link
-    // itself exists.
-    let exclusive = flags & (O_CREAT | O_EXCL) == O_CREAT | O_EXCL;
-    let walk = Walk {
-        follow: flags & O_NOFOLLOW == 0 && !exclusive,
-        beneath: flags & O_RESOLVE_BENEATH != 0,
-        create: flags & O_CREAT != 0,
-    };
-    let ucred = p.cred();
-    let cred = &*ucred;
-    let mut created = false;
-    let v = if path.is_empty() && flags & O_EMPTY_PATH != 0 {
-        at_vnode(s, &p, fd, &path, walk, true)?
-    } else {
-        match crate::fs::resolve_as(s, &p, cred, At::new(int(fd)), &path, walk)? {
-            Found::Vnode(v) => {
-                if flags & (O_CREAT | O_EXCL) == O_CREAT | O_EXCL {
-                    return Err(Errno::EEXIST);
+    with_process(|p| {
+        let flags = u32::try_from(flags & 0xffff_ffff).unwrap_or(0);
+        let path = path(path_ptr)?;
+        if flags & O_ACCMODE == O_ACCMODE || (flags & O_EXEC != 0 && flags & O_ACCMODE != 0) {
+            return Err(Errno::EINVAL);
+        }
+        // O_CREAT with O_EXCL does not follow a final symbolic link: the link
+        // itself exists.
+        let exclusive = flags & (O_CREAT | O_EXCL) == O_CREAT | O_EXCL;
+        let walk = Walk {
+            follow: flags & O_NOFOLLOW == 0 && !exclusive,
+            beneath: flags & O_RESOLVE_BENEATH != 0,
+            create: flags & O_CREAT != 0,
+        };
+        let ucred = p.cred();
+        let cred = &*ucred;
+        let mut created = false;
+        let v = if path.is_empty() && flags & O_EMPTY_PATH != 0 {
+            at_vnode(s, p, fd, &path, walk, true)?
+        } else {
+            match crate::fs::resolve_as(s, p, cred, At::new(int(fd)), &path, walk)? {
+                Found::Vnode(v) => {
+                    if flags & (O_CREAT | O_EXCL) == O_CREAT | O_EXCL {
+                        return Err(Errno::EEXIST);
+                    }
+                    // O_CREAT names a file: an existing directory is not one,
+                    // even to read.
+                    if flags & O_CREAT != 0 && v.is_dir() {
+                        return Err(Errno::EISDIR);
+                    }
+                    v
                 }
-                // O_CREAT names a file: an existing directory is not one,
-                // even to read.
-                if flags & O_CREAT != 0 && v.is_dir() {
-                    return Err(Errno::EISDIR);
+                Found::Missing { dir, name } if flags & O_CREAT != 0 => {
+                    // A new file cannot end in a slash.
+                    if path.last() == Some(&b'/') {
+                        return Err(Errno::ENOENT);
+                    }
+                    let mask = p.umask.load(core::sync::atomic::Ordering::Relaxed);
+                    let cmode = (u16::try_from(mode & 0o7777).unwrap_or(0) & !mask)
+                        & abi::stat::ALLPERMS
+                        & !abi::stat::S_ISVTX;
+                    let c = vfs::Create {
+                        mode: cmode,
+                        uid: cred.uid,
+                        gid: cred.gid,
+                        time: crate::fs::now(),
+                    };
+                    let (v, made) = vfs::ops::create(
+                        s,
+                        &dir,
+                        &name,
+                        &NewNode::Regular,
+                        &c,
+                        cred,
+                        flags & O_EXCL != 0,
+                    )?;
+                    created = made;
+                    v
                 }
-                v
+                Found::Missing { .. } => return Err(Errno::ENOENT),
             }
-            Found::Missing { dir, name } if flags & O_CREAT != 0 => {
-                // A new file cannot end in a slash.
-                if path.last() == Some(&b'/') {
-                    return Err(Errno::ENOENT);
+        };
+        // `O_PATH` opens a handle for `*at`, `fstat`, and `fchdir` only.
+        let fflags = if flags & O_PATH != 0 {
+            0
+        } else if flags & O_EXEC != 0 {
+            flags
+        } else {
+            flags + 1
+        };
+        if v.kind() == Kind::Symlink && flags & O_PATH == 0 {
+            // Only reached with `O_NOFOLLOW`.
+            return Err(Errno::EMLINK);
+        }
+        // A socket is reached through `connect`, not `open`.
+        if v.kind() == Kind::Socket && flags & O_PATH == 0 {
+            return Err(Errno::EOPNOTSUPP);
+        }
+        if flags & O_DIRECTORY != 0 && !v.is_dir() {
+            return Err(Errno::ENOTDIR);
+        }
+        if flags & O_PATH == 0 {
+            let writes = fflags & FWRITE != 0 || flags & O_TRUNC != 0;
+            if v.is_dir() && writes {
+                return Err(Errno::EISDIR);
+            }
+            if writes && stored_here(v.kind()) && v.mount().read_only() {
+                return Err(Errno::EROFS);
+            }
+            // A file just made needs no check: its creator may open it.
+            if !created {
+                let mut want = 0;
+                if fflags & FREAD != 0 {
+                    want |= VREAD;
                 }
-                let mask = p.umask.load(core::sync::atomic::Ordering::Relaxed);
-                let cmode = (u16::try_from(mode & 0o7777).unwrap_or(0) & !mask)
-                    & abi::stat::ALLPERMS
-                    & !abi::stat::S_ISVTX;
-                let c = vfs::Create {
-                    mode: cmode,
-                    uid: cred.uid,
-                    gid: cred.gid,
-                    time: crate::fs::now(),
+                if writes {
+                    want |= VWRITE;
+                }
+                if flags & O_EXEC != 0 {
+                    want |= VEXEC;
+                }
+                vfs::ops::access(&v.attr(s)?, v.kind(), cred, want)?;
+            }
+            // An append-only file is written only at its end (FreeBSD's
+            // `ufs_open`).
+            if fflags & FWRITE != 0 && flags & O_APPEND == 0 && v.attr(s)?.flags & APPEND != 0 {
+                return Err(Errno::EPERM);
+            }
+            if flags & O_TRUNC != 0 && v.kind() == Kind::Regular && !created {
+                let zero = SetAttr {
+                    size: Some(0),
+                    ..SetAttr::default()
                 };
-                let (v, made) = vfs::ops::create(
-                    s,
-                    &dir,
-                    &name,
-                    &NewNode::Regular,
-                    &c,
-                    cred,
-                    flags & O_EXCL != 0,
-                )?;
-                created = made;
-                v
+                vfs::ops::setattr(s, &v, &zero, cred, false)?;
             }
-            Found::Missing { .. } => return Err(Errno::ENOENT),
         }
-    };
-    // `O_PATH` opens a handle for `*at`, `fstat`, and `fchdir` only.
-    let fflags = if flags & O_PATH != 0 {
-        0
-    } else if flags & O_EXEC != 0 {
-        flags
-    } else {
-        flags + 1
-    };
-    if v.kind() == Kind::Symlink && flags & O_PATH == 0 {
-        // Only reached with `O_NOFOLLOW`.
-        return Err(Errno::EMLINK);
-    }
-    // A socket is reached through `connect`, not `open`.
-    if v.kind() == Kind::Socket && flags & O_PATH == 0 {
-        return Err(Errno::EOPNOTSUPP);
-    }
-    if flags & O_DIRECTORY != 0 && !v.is_dir() {
-        return Err(Errno::ENOTDIR);
-    }
-    if flags & O_PATH == 0 {
-        let writes = fflags & FWRITE != 0 || flags & O_TRUNC != 0;
-        if v.is_dir() && writes {
-            return Err(Errno::EISDIR);
-        }
-        if writes && stored_here(v.kind()) && v.mount().read_only() {
-            return Err(Errno::EROFS);
-        }
-        // A file just made needs no check: its creator may open it.
-        if !created {
-            let mut want = 0;
-            if fflags & FREAD != 0 {
-                want |= VREAD;
-            }
-            if writes {
-                want |= VWRITE;
-            }
-            if flags & O_EXEC != 0 {
-                want |= VEXEC;
-            }
-            vfs::ops::access(&v.attr(s)?, v.kind(), cred, want)?;
-        }
-        // An append-only file is written only at its end (FreeBSD's
-        // `ufs_open`).
-        if fflags & FWRITE != 0 && flags & O_APPEND == 0 && v.attr(s)?.flags & APPEND != 0 {
-            return Err(Errno::EPERM);
-        }
-        if flags & O_TRUNC != 0 && v.kind() == Kind::Regular && !created {
-            let zero = SetAttr {
-                size: Some(0),
-                ..SetAttr::default()
+        // A device may open as another (`/dev/tty`).
+        let v = match v.kind() {
+            Kind::CharDevice if flags & O_PATH == 0 => v.device(s)?.ops.open()?.unwrap_or(v),
+            _ => v,
+        };
+        let keep = FREAD | FWRITE | O_EXEC | FCNTLFLAGS;
+        if v.kind() == Kind::Fifo && flags & O_PATH == 0 {
+            let f = crate::fs::fifo::FifoFile::open(
+                s,
+                &v,
+                fflags & FREAD != 0,
+                fflags & FWRITE != 0,
+                flags & O_NONBLOCK != 0,
+            )?;
+            let file = File::new(FileKind::Fifo(f), fflags & keep);
+            let fdf = FdFlags {
+                cloexec: flags & O_CLOEXEC != 0,
+                clofork: flags & O_CLOFORK != 0,
             };
-            vfs::ops::setattr(s, &v, &zero, cred, false)?;
+            return install(s, p, file, fdf);
         }
-    }
-    // A device may open as another (`/dev/tty`).
-    let v = match v.kind() {
-        Kind::CharDevice if flags & O_PATH == 0 => v.device(s)?.ops.open()?.unwrap_or(v),
-        _ => v,
-    };
-    let keep = FREAD | FWRITE | O_EXEC | FCNTLFLAGS;
-    if v.kind() == Kind::Fifo && flags & O_PATH == 0 {
-        let f = crate::fs::fifo::FifoFile::open(
-            s,
-            &v,
-            fflags & FREAD != 0,
-            fflags & FWRITE != 0,
-            flags & O_NONBLOCK != 0,
-        )?;
-        let file = File::new(FileKind::Fifo(f), fflags & keep);
+        let vf = if flags & O_PATH != 0 {
+            VnodeFile::path_only(&v)
+        } else {
+            VnodeFile::open(s, &v, fflags & FWRITE != 0)?
+        };
+        let file = File::new(FileKind::Vnode(vf), fflags & keep);
+        // O_SHLOCK and O_EXLOCK take an `flock` lock as the file opens.
+        if flags & (O_SHLOCK | O_EXLOCK) != 0
+            && flags & O_PATH == 0
+            && let FileKind::Vnode(vf) = file.kind()
+        {
+            let ty = if flags & O_EXLOCK != 0 {
+                vfs::lockf::LockType::Exclusive
+            } else {
+                vfs::lockf::LockType::Shared
+            };
+            let req = vfs::lockf::Lock {
+                owner: vf.lock_owner(),
+                pid: 0,
+                ty,
+                start: 0,
+                end: u64::MAX,
+            };
+            vf.vnode.lockf().lock(s, req, flags & O_NONBLOCK == 0)?;
+        }
         let fdf = FdFlags {
             cloexec: flags & O_CLOEXEC != 0,
             clofork: flags & O_CLOFORK != 0,
         };
-        return install(s, &p, file, fdf);
-    }
-    let vf = if flags & O_PATH != 0 {
-        VnodeFile::path_only(&v)
-    } else {
-        VnodeFile::open(s, &v, fflags & FWRITE != 0)?
-    };
-    let file = File::new(FileKind::Vnode(vf), fflags & keep);
-    // O_SHLOCK and O_EXLOCK take an `flock` lock as the file opens.
-    if flags & (O_SHLOCK | O_EXLOCK) != 0
-        && flags & O_PATH == 0
-        && let FileKind::Vnode(vf) = file.kind()
-    {
-        let ty = if flags & O_EXLOCK != 0 {
-            vfs::lockf::LockType::Exclusive
-        } else {
-            vfs::lockf::LockType::Shared
-        };
-        let req = vfs::lockf::Lock {
-            owner: vf.lock_owner(),
-            pid: 0,
-            ty,
-            start: 0,
-            end: u64::MAX,
-        };
-        vf.vnode.lockf().lock(s, req, flags & O_NONBLOCK == 0)?;
-    }
-    let fdf = FdFlags {
-        cloexec: flags & O_CLOEXEC != 0,
-        clofork: flags & O_CLOFORK != 0,
-    };
-    install(s, &p, file, fdf)
+        install(s, p, file, fdf)
+    })
 }
 
 /// `open(path, flags, mode)`.
@@ -281,23 +282,24 @@ pub(super) fn fstatat(s: &Sleepable, fd: u64, path_ptr: u64, buf: u64, flag: u64
     if flag & !(AT_SYMLINK_NOFOLLOW | AT_RESOLVE_BENEATH | AT_EMPTY_PATH) != 0 {
         return Err(Errno::EINVAL);
     }
-    let p = process()?;
-    let path = path(path_ptr)?;
-    let walk = Walk {
-        follow: flag & AT_SYMLINK_NOFOLLOW == 0,
-        beneath: flag & AT_RESOLVE_BENEATH != 0,
-        create: false,
-    };
-    let st = if path.is_empty() && flag & AT_EMPTY_PATH != 0 && At::new(int(fd)) != At::Cwd {
-        // The descriptor may be a pipe.
-        super::io::file(s, &p, fd)?.stat(s)?
-    } else {
-        at_vnode(s, &p, fd, &path, walk, flag & AT_EMPTY_PATH != 0)?.stat(s)?
-    };
-    UserPtr::<Stat>::new(buf)
-        .write(&st)
-        .map_err(|_| Errno::EFAULT)?;
-    Ok(0)
+    with_process(|p| {
+        let path = path(path_ptr)?;
+        let walk = Walk {
+            follow: flag & AT_SYMLINK_NOFOLLOW == 0,
+            beneath: flag & AT_RESOLVE_BENEATH != 0,
+            create: false,
+        };
+        let st = if path.is_empty() && flag & AT_EMPTY_PATH != 0 && At::new(int(fd)) != At::Cwd {
+            // The descriptor may be a pipe.
+            super::io::file(s, p, fd)?.stat(s)?
+        } else {
+            at_vnode(s, p, fd, &path, walk, flag & AT_EMPTY_PATH != 0)?.stat(s)?
+        };
+        UserPtr::<Stat>::new(buf)
+            .write(&st)
+            .map_err(|_| Errno::EFAULT)?;
+        Ok(0)
+    })
 }
 
 /// `chdir(path)`.

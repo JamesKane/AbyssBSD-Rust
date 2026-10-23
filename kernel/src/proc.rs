@@ -34,7 +34,7 @@ use abi::resource::{WCONTINUED, WUNTRACED};
 use abi::signal::code::{CLD_EXITED, CLD_KILLED};
 use sched::lock::{LockClass, Mutex};
 use sched::{Sleepable, WaitQueue};
-use sync::SpinLock;
+use sync::{PreemptLock, SpinLock};
 use vfs::Vnode;
 
 use crate::arch;
@@ -223,7 +223,7 @@ pub(crate) struct Process {
     /// Where exec put the randomized parts of the image.
     layout: SharedLayout,
     pub(crate) signals: SpinLock<Signals>,
-    pub(crate) limits: SpinLock<[Rlimit; rlimit::NLIMITS]>,
+    pub(crate) limits: PreemptLock<[Rlimit; rlimit::NLIMITS]>,
     /// The `exterrctl` buffer, 0 for none.
     pub(crate) exterr: AtomicU64,
     /// The TLS base `sysarch` recorded (amd64), `u64::MAX` for none. Per
@@ -256,7 +256,7 @@ pub(crate) struct Process {
     /// several), so behind a sleepable lock (FreeBSD's `fd_sx`).
     pub(crate) files: Mutex<FdTable>,
     /// The working directory.
-    pub(crate) cwd: SpinLock<vfs::VnodeUse>,
+    pub(crate) cwd: PreemptLock<vfs::VnodeUse>,
     /// The file creation mask.
     pub(crate) umask: AtomicU16,
     /// What `ps` shows of the program it runs.
@@ -268,7 +268,7 @@ pub(crate) struct Process {
     /// The CPUs it may run on, one bit each (its `cpuset`); inherited.
     cpus: AtomicU64,
     /// Its credential; inherited.
-    cred: SpinLock<Arc<Ucred>>,
+    cred: PreemptLock<Arc<Ucred>>,
     /// The program it runs, while it runs it.
     text: SpinLock<Option<Text>>,
     /// Its credential changed since it last ran `execve` (FreeBSD's
@@ -382,7 +382,7 @@ impl Process {
                 vforked: AtomicBool::new(false),
                 layout: SharedLayout::new(parent.map_or(layout, |p| p.layout())),
                 signals: SpinLock::new(signals),
-                limits: SpinLock::new(limits),
+                limits: PreemptLock::new(limits),
                 exterr: AtomicU64::new(parent.map_or(0, |p| p.exterr.load(Ordering::Relaxed))),
                 tls_base: AtomicU64::new(
                     parent.map_or(u64::MAX, |p| p.tls_base.load(Ordering::Relaxed)),
@@ -400,13 +400,13 @@ impl Process {
                 job: SpinLock::new(Job::default()),
                 stop_wait: WaitQueue::new(),
                 files: Mutex::new(&FILEDESC_LOCK, files),
-                cwd: SpinLock::new(cwd),
+                cwd: PreemptLock::new(cwd),
                 umask: AtomicU16::new(umask),
                 image: SpinLock::new(image),
                 started: crate::time::now_ns(),
                 execed: AtomicBool::new(execed),
                 cpus: AtomicU64::new(cpus),
-                cred: SpinLock::new(cred),
+                cred: PreemptLock::new(cred),
                 text: SpinLock::new(text),
                 sugid: AtomicBool::new(sugid),
             }

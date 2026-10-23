@@ -332,6 +332,12 @@ fn process() -> Result<Arc<Process>, Errno> {
     Process::current().ok_or(Errno::EINVAL)
 }
 
+/// Runs `f` on the current thread's process, borrowed: no reference
+/// count changes, for calls as hot as `stat`, `open` and `close`.
+fn with_process<R>(f: impl FnOnce(&Process) -> Result<R, Errno>) -> Result<R, Errno> {
+    Process::with_current(f).unwrap_or(Err(Errno::EINVAL))
+}
+
 /// An `int` argument: the low 32 bits.
 const fn int(a: u64) -> i32 {
     let [b0, b1, b2, b3, ..] = a.to_le_bytes();

@@ -19,7 +19,7 @@ use abi::mount::Statfs;
 use abi::stat::Stat;
 use sched::Sleepable;
 
-use super::{SysResult, int, process};
+use super::{SysResult, int, process, with_process};
 use crate::fs::fdtable::{FdFlags, Slot};
 use crate::fs::file::{File, FileKind};
 use crate::fs::pipe;
@@ -176,11 +176,12 @@ pub(super) fn lseek(s: &Sleepable, fd: u64, offset: u64, whence: u64) -> SysResu
 
 /// `close(fd)`.
 pub(super) fn close(s: &Sleepable, fd: u64) -> SysResult {
-    let p = process()?;
-    let closed = p.files.lock(s).close(int(fd))?;
-    crate::fs::closed(p.pid(), [&closed]);
-    drop(closed);
-    Ok(0)
+    with_process(|p| {
+        let closed = p.files.lock(s).close(int(fd))?;
+        crate::fs::closed(p.pid(), [&closed]);
+        drop(closed);
+        Ok(0)
+    })
 }
 
 /// `close_range(lowfd, highfd, flags)` (libc's `closefrom` too).
