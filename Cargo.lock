@@ -462,6 +462,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "usb"
+version = "0.0.0"
+
+[[package]]
 name = "ustar"
 version = "0.0.0"
 
