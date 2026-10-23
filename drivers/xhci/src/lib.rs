@@ -3,9 +3,11 @@
 //! (class `0c0330`) and on ACPI (`PNP0D10`, as on the Sky1), each with a
 //! `usbus` child (USB.md §4).
 //!
-//! - Attach takes the controller from firmware, resets it, and sets up
-//!   the device context array, scratchpad buffers, the command ring, and
-//!   one event ring on interrupter 0 (MSI-X, else MSI, else INTx).
+//! - Attach takes the controller from firmware, allocates the device
+//!   context array, scratchpad buffers, the command ring, and one event
+//!   ring, and picks MSI-X, else MSI, else INTx. Start installs the
+//!   handler and only then resets and starts the controller, in FreeBSD's
+//!   order (`xhci_pci_attach`).
 //! - Commands are polled to completion from thread context, so they work
 //!   whether or not interrupts do; transfers complete in the interrupt
 //!   thread. A watchdog thread times transfers out.
@@ -94,6 +96,9 @@ impl Shared {
         for (v, line) in lines.into_iter().enumerate() {
             cx.interrupt(line, Some(filter), Some(thread), v)?;
         }
+        // As FreeBSD's xhci_pci_attach: the handler first, then the reset
+        // and start.
+        self.hc.start_controller(cx.sleepable())?;
         let hc = Arc::clone(&self.hc);
         let t = sched::Builder::new("xhci watchdog")
             .priority(sched::Priority::KERNEL)

@@ -1,0 +1,20 @@
+[package]
+name = "umass"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bus = { path = "../../sys/bus" }
+devtree = { path = "../../lib/devtree" }
+scsi = { path = "../../lib/scsi" }
+sched = { path = "../../sys/sched" }
+storage = { path = "../../sys/storage" }
+sync = { path = "../../sys/sync" }
+usb = { path = "../../lib/usb" }
+usbus = { path = "../../sys/usb" }
+vm = { path = "../../sys/vm" }
+
+[lints]
+workspace = true

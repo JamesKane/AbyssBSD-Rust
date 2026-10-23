@@ -165,6 +165,7 @@ dependencies = [
  "sbsa-gwdt",
  "timers",
  "uart",
+ "umass",
  "usbus",
  "virtio",
  "virtio-blk",
@@ -507,6 +508,21 @@ version = "0.0.0"
 dependencies = [
  "crc",
  "intmap",
+]
+
+[[package]]
+name = "umass"
+version = "0.0.0"
+dependencies = [
+ "bus",
+ "devtree",
+ "sched",
+ "scsi",
+ "storage",
+ "sync",
+ "usb",
+ "usbus",
+ "vm",
 ]
 
 [[package]]

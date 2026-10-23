@@ -20,6 +20,7 @@ pci = { path = "../../sys/pci" }
 sbsa-gwdt = { path = "../../drivers/sbsa-gwdt" }
 timers = { path = "../../drivers/timers" }
 uart = { path = "../../drivers/uart" }
+umass = { path = "../../drivers/umass" }
 usbus = { path = "../../sys/usb" }
 virtio = { path = "../../sys/virtio" }
 virtio-blk = { path = "../../drivers/virtio-blk" }

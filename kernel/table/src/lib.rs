@@ -48,6 +48,7 @@ pub static DRIVERS: &[DriverDecl] = &[
     hidbus::USBHID,
     hidbus::HIDBUS,
     hkbd::DRIVER,
+    umass::DRIVER,
 ];
 
 #[cfg(test)]

@@ -285,8 +285,9 @@ fn poll(s: &Sleepable, ms: u32, mut done: impl FnMut() -> bool) -> bool {
 }
 
 impl Hc {
-    /// Takes the controller from firmware, resets it, and starts it
-    /// (xHCI 1.2 §4.2).
+    /// Takes the controller from firmware and allocates its contexts and
+    /// rings, as FreeBSD's `xhci_init` does; [`Hc::start_controller`]
+    /// resets and starts it.
     pub(crate) fn new(
         s: &Sleepable,
         name: String,
@@ -343,27 +344,8 @@ impl Hc {
             }
         }
 
-        // Halt, then reset.
-        let cmd = regs.op32(op::USBCMD);
-        if cmd & op::cmd::RUN != 0 {
-            regs.set_op32(op::USBCMD, cmd & !op::cmd::RUN);
-        }
-        if !poll(s, 100, || regs.op32(op::USBSTS) & op::sts::HCH != 0) {
-            return Err(AttachError::Device("controller did not halt"));
-        }
-        regs.set_op32(op::USBCMD, op::cmd::HCRST);
-        // Some controllers must not be read for a millisecond after.
-        sleep_ms(s, 1);
-        let reset = poll(s, 1000, || {
-            regs.op32(op::USBCMD) & op::cmd::HCRST == 0 && regs.op32(op::USBSTS) & op::sts::CNR == 0
-        });
-        if !reset {
-            return Err(AttachError::Device("controller reset timed out"));
-        }
-
         let nomem = |_| AttachError::NoMemory;
         let slots = usize::from(params.max_slots);
-        regs.set_op32(op::CONFIG, u32::from(params.max_slots));
         let dcbaa = tag.coherent::<u64>(slots + 1).map_err(nomem)?;
         let scratch = if params.scratchpads > 0 {
             let n = usize::from(params.scratchpads);
@@ -379,37 +361,14 @@ impl Hc {
         } else {
             None
         };
-        regs.write64(regs.op + op::DCBAAP, dcbaa.bus_addr());
-
         let cmd_ring =
             ProducerRing::new(trbs(&tag, COMMAND_TRBS).map_err(|_| AttachError::NoMemory)?);
-        let (deq, cycle) = cmd_ring.dequeue();
-        regs.write64(regs.op + op::CRCR, deq | u64::from(cycle));
-
         let events = EventRing::new(trbs(&tag, RING_TRBS).map_err(|_| AttachError::NoMemory)?);
         let erst = tag.coherent::<u32>(4).map_err(nomem)?;
         let base = events.memory().bus_addr();
         let n = u16::try_from(RING_TRBS).unwrap_or(u16::MAX);
         for (i, w) in erst_entry(base, n).into_iter().enumerate() {
             erst.write(i, w);
-        }
-        regs.mmio.write32(regs.interrupter(rt::ERSTSZ), 1);
-        regs.write64(regs.interrupter(rt::ERDP), events.erdp());
-        regs.write64(regs.interrupter(rt::ERSTBA), erst.bus_addr());
-        regs.mmio.write32(regs.interrupter(rt::IMOD), IMOD);
-        regs.mmio
-            .write32(regs.interrupter(rt::IMAN), rt::IMAN_IP | rt::IMAN_IE);
-
-        regs.set_op32(op::USBCMD, op::cmd::RUN | op::cmd::INTE | op::cmd::HSEE);
-        if !poll(s, 100, || regs.op32(op::USBSTS) & op::sts::HCH == 0) {
-            return Err(AttachError::Device("controller did not start"));
-        }
-        if params.ppc {
-            for p in 1..=params.max_ports {
-                let at = regs.portsc(p);
-                let v = regs.mmio.read32(at);
-                regs.mmio.write32(at, portsc::write(v, portsc::PP));
-            }
         }
         Ok(Self {
             name,
@@ -433,6 +392,54 @@ impl Hc {
             explorer: SpinLock::new(None),
             stopping: AtomicBool::new(false),
         })
+    }
+
+    /// Halts and resets the controller, programs the device context
+    /// array, the command ring, and the event ring, enables interrupter
+    /// 0, and runs it: FreeBSD's `xhci_halt_controller` and
+    /// `xhci_start_controller`, which run once the interrupt handler is
+    /// installed.
+    pub(crate) fn start_controller(&self, s: &Sleepable) -> Result<(), AttachError> {
+        let regs = &self.regs;
+        let cmd = regs.op32(op::USBCMD);
+        if cmd & op::cmd::RUN != 0 {
+            regs.set_op32(op::USBCMD, cmd & !op::cmd::RUN);
+        }
+        if !poll(s, 100, || regs.op32(op::USBSTS) & op::sts::HCH != 0) {
+            return Err(AttachError::Device("controller did not halt"));
+        }
+        regs.set_op32(op::USBCMD, op::cmd::HCRST);
+        // Some controllers must not be read for a millisecond after.
+        sleep_ms(s, 1);
+        let reset = poll(s, 1000, || {
+            regs.op32(op::USBCMD) & op::cmd::HCRST == 0 && regs.op32(op::USBSTS) & op::sts::CNR == 0
+        });
+        if !reset {
+            return Err(AttachError::Device("controller reset timed out"));
+        }
+        regs.set_op32(op::CONFIG, u32::from(self.params.max_slots));
+        regs.write64(regs.op + op::DCBAAP, self.dcbaa.bus_addr());
+        let (deq, cycle) = self.cmd.lock().dequeue();
+        regs.write64(regs.op + op::CRCR, deq | u64::from(cycle));
+        let erdp = self.events.lock().erdp();
+        regs.mmio.write32(regs.interrupter(rt::ERSTSZ), 1);
+        regs.write64(regs.interrupter(rt::ERDP), erdp);
+        regs.write64(regs.interrupter(rt::ERSTBA), self._erst.bus_addr());
+        regs.mmio.write32(regs.interrupter(rt::IMOD), IMOD);
+        regs.mmio
+            .write32(regs.interrupter(rt::IMAN), rt::IMAN_IP | rt::IMAN_IE);
+        regs.set_op32(op::USBCMD, op::cmd::RUN | op::cmd::INTE | op::cmd::HSEE);
+        if !poll(s, 100, || regs.op32(op::USBSTS) & op::sts::HCH == 0) {
+            return Err(AttachError::Device("controller did not start"));
+        }
+        if self.params.ppc {
+            for p in 1..=self.params.max_ports {
+                let at = regs.portsc(p);
+                let v = regs.mmio.read32(at);
+                regs.mmio.write32(at, portsc::write(v, portsc::PP));
+            }
+        }
+        Ok(())
     }
 
     /// The interrupt filter: acknowledges the interrupter. `message` is
