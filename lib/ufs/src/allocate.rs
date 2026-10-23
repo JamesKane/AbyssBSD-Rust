@@ -42,6 +42,19 @@ pub struct Summary {
     pub modified: bool,
 }
 
+/// A way to the summary: held all along (a `Summary`), or taken around
+/// each allocation (a lock), as FreeBSD's `UFS_LOCK` is, so that what
+/// allocates nothing (most of a create) holds no file-system-wide lock.
+pub trait Sums {
+    fn with_sum<R>(&mut self, f: impl FnOnce(&mut Summary) -> R) -> R;
+}
+
+impl Sums for Summary {
+    fn with_sum<R>(&mut self, f: impl FnOnce(&mut Summary) -> R) -> R {
+        f(self)
+    }
+}
+
 /// Whether an allocation may use the space reserved for the superuser.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reserve {

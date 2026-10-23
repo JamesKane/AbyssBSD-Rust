@@ -19,7 +19,7 @@ use alloc::vec::Vec;
 use crate::dir::{DIRBLKSIZ, dtype_of};
 use crate::inode::{Inode, Kind, Timestamp};
 use crate::softdep::{Deps, Gone, Id, Removal, Work};
-use crate::{BlockIo, Error, Mode, Reserve, Summary, Ufs, idx64, len64};
+use crate::{BlockIo, Error, Mode, Reserve, Summary, Sums, Ufs, idx64, len64};
 
 /// FreeBSD's `UFS_LINK_MAX`.
 pub const LINK_MAX: u16 = 32767;
@@ -93,7 +93,7 @@ impl<B: BlockIo> Ufs<B> {
     pub fn create(
         &self,
         cx: &B::Cx,
-        sum: &mut Summary,
+        sum: &mut impl Sums,
         dir_ino: u32,
         dir: &mut Inode,
         name: &[u8],
@@ -106,7 +106,7 @@ impl<B: BlockIo> Ufs<B> {
         }
         let mode = kind.ifmt() | (who.perm & 0o7777);
         let size = dir.size;
-        let ino = self.valloc(cx, sum, dir_ino, dir, mode, who.random)?;
+        let ino = sum.with_sum(|sum| self.valloc(cx, sum, dir_ino, dir, mode, who.random))?;
         // With soft updates the entry waits for the inode (and for a
         // directory, its first block and its parent's link).
         let entry = self.soft(cx, |d| d.new_entry(ino));
@@ -115,7 +115,7 @@ impl<B: BlockIo> Ufs<B> {
             Ok(ip) => ip,
             Err(e) => {
                 self.cancel_entry(cx, entry);
-                let _ = self.release_new(cx, sum, ino, mode, who.reserve);
+                let _ = sum.with_sum(|sum| self.release_new(cx, sum, ino, mode, who.reserve));
                 return Err(e);
             }
         };
@@ -141,7 +141,7 @@ impl<B: BlockIo> Ufs<B> {
             }
             ip.nlink = 0;
             ip.effnlink = 0;
-            let _ = self.free_inode(cx, sum, ino, &mut ip, who.reserve);
+            let _ = sum.with_sum(|sum| self.free_inode(cx, sum, ino, &mut ip, who.reserve));
             return Err(e);
         }
         dir.mtime = who.now;
@@ -185,7 +185,7 @@ impl<B: BlockIo> Ufs<B> {
     fn make_inode(
         &self,
         cx: &B::Cx,
-        sum: &mut Summary,
+        sum: &mut impl Sums,
         ino: u32,
         dir_ino: u32,
         dir: &mut Inode,
@@ -246,7 +246,8 @@ impl<B: BlockIo> Ufs<B> {
                 dir.link_up();
                 wait_copy(dir_ino);
                 self.write_inode(cx, dir_ino, dir, self.ordered())?;
-                match self.dir_init(cx, sum, ino, &mut ip, dir_ino, who.reserve) {
+                match sum.with_sum(|sum| self.dir_init(cx, sum, ino, &mut ip, dir_ino, who.reserve))
+                {
                     Ok(addr) => {
                         if let Some(id) = entry {
                             self.soft(cx, |d| d.wait_block(id, addr));
@@ -256,7 +257,9 @@ impl<B: BlockIo> Ufs<B> {
                         dir.nlink -= 1;
                         dir.effnlink -= 1;
                         let _ = self.write_inode(cx, dir_ino, dir, self.ordered());
-                        let _ = self.truncate(cx, sum, ino, &mut ip, 0, who.reserve, true);
+                        let _ = sum.with_sum(|sum| {
+                            self.truncate(cx, sum, ino, &mut ip, 0, who.reserve, true)
+                        });
                         return Err(e);
                     }
                 }
@@ -268,7 +271,9 @@ impl<B: BlockIo> Ufs<B> {
                 if len64(target.len()) < u64::from(self.sb.maxsymlinklen) {
                     ip.set_shortlink(target);
                 } else {
-                    self.write_data_range(cx, sum, ino, &mut ip, 0, target, who.reserve)?;
+                    sum.with_sum(|sum| {
+                        self.write_data_range(cx, sum, ino, &mut ip, 0, target, who.reserve)
+                    })?;
                 }
             }
             NewKind::Device(rdev) | NewKind::BlockDevice(rdev) => ip.db[0] = rdev,

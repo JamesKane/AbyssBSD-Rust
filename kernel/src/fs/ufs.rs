@@ -680,6 +680,19 @@ impl Shared {
     }
 }
 
+/// The summary, locked around each allocation only (FreeBSD's
+/// `UFS_LOCK`), for an operation that mostly allocates nothing.
+struct SumLock<'a> {
+    sum: &'a Mutex<ufs::Summary>,
+    s: &'a Sleepable,
+}
+
+impl ufs::Sums for SumLock<'_> {
+    fn with_sum<R>(&mut self, f: impl FnOnce(&mut ufs::Summary) -> R) -> R {
+        f(&mut self.sum.lock(self.s))
+    }
+}
+
 /// The work's way to in-core inodes and the summary.
 struct WorkEnv<'a> {
     fs: &'a Shared,
@@ -1556,15 +1569,16 @@ impl DirectoryNode for UfsNode {
         for attempt in 0..2 {
             let mut st = self.cell.state.lock(s);
             self.index(s, &mut st);
-            let mut sum = sum.lock(s);
+            // The summary only around allocations: the soft-updates work
+            // freeing inodes meanwhile need not wait out the whole create.
+            let mut sums = SumLock { sum, s };
             match shared
                 .ufs
-                .create(s, &mut sum, self.cell.ino, &mut st.ip, name, kind, &who)
+                .create(s, &mut sums, self.cell.ino, &mut st.ip, name, kind, &who)
             {
                 Ok((ino, ip)) => {
                     // Its new times go out later (FreeBSD's `IN_CHANGE`).
                     st.dirty = true;
-                    drop(sum);
                     drop(st);
                     let ops = match shared.seed(s, ino, ip) {
                         Some(cell) => {
@@ -1581,7 +1595,6 @@ impl DirectoryNode for UfsNode {
                 Err(ufs::Error::NoSpace) if attempt == 0 => {}
                 Err(e) => return Err(errno(e)),
             }
-            drop(sum);
             drop(st);
             // Out of space: soft updates may have some on the way back.
             if !shared.flush_frees(s) {

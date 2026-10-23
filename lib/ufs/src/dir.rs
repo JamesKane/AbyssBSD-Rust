@@ -305,7 +305,7 @@ impl<B: crate::BlockIo> crate::Ufs<B> {
     pub fn dir_enter(
         &self,
         cx: &B::Cx,
-        sum: &mut crate::Summary,
+        sum: &mut impl crate::Sums,
         dir_ino: u32,
         dir: &mut crate::Inode,
         name: &[u8],
@@ -401,17 +401,19 @@ impl<B: crate::BlockIo> crate::Ufs<B> {
         }
         // A new chunk at the end.
         let offset = dir.size;
-        let addr = self.balloc(
-            cx,
-            sum,
-            dir_ino,
-            dir,
-            offset,
-            crate::len64(DIRBLKSIZ),
-            reserve,
-            false,
-            true,
-        )?;
+        let addr = sum.with_sum(|sum| {
+            self.balloc(
+                cx,
+                sum,
+                dir_ino,
+                dir,
+                offset,
+                crate::len64(DIRBLKSIZ),
+                reserve,
+                false,
+                true,
+            )
+        })?;
         dir.size = offset + crate::len64(DIRBLKSIZ);
         let lbn = offset / bsize;
         let bsz = crate::idx(sb.block_size(dir.size, lbn));

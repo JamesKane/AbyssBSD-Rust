@@ -36,7 +36,7 @@ mod soft_tests;
 #[cfg(test)]
 mod tests;
 
-pub use allocate::{Reserve, Summary};
+pub use allocate::{Reserve, Summary, Sums};
 pub use balloc::{Moved, NewSpace};
 pub use dir::DirEntry;
 pub use inode::{Inode, Kind, Timestamp};
