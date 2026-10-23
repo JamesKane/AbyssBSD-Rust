@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! `memcpy`, `memmove`, and `memset` for the kernel, replacing the
-//! `compiler_builtins` ones (which are weak).
+//! `memcpy`, `memmove`, `memset`, `memcmp` and `bcmp` for the kernel,
+//! replacing the `compiler_builtins` ones (which are weak).
 //!
 //! Those run every copy as three string instructions (`rep movsb`, `rep
 //! movsq`, `rep movsb`), each with a startup cost of tens of cycles, and an
@@ -9,6 +9,9 @@
 //! its copies are small (frames, map entries, structures). Here a small
 //! copy is a few 8-byte moves; only a large forward one uses `rep movsb`,
 //! which CPUs with fast strings run at full speed.
+//!
+//! Its `memcmp` compares a byte at a time, and every name lookup compares
+//! names: here it is eight at a time, the last word overlapping.
 //!
 //! The loops' moves are inline assembly, so the compiler cannot recognize
 //! them as a copy and call back into these functions.
@@ -200,6 +203,69 @@ pub unsafe extern "C" fn memset(dst: *mut c_void, c: c_int, n: usize) -> *mut c_
     dst
 }
 
+#[inline(always)]
+unsafe fn load_byte(p: *const u8) -> u8 {
+    let v: u32;
+    // SAFETY: the caller's contract: `p` is readable.
+    unsafe {
+        asm!("movzx {v:e}, byte ptr [{p}]", p = in(reg) p, v = out(reg) v,
+            options(nostack, readonly, preserves_flags));
+    }
+    v.to_le_bytes()[0]
+}
+
+/// Orders two 8-byte words read from memory as their bytes in order do.
+fn order(x: u64, y: u64) -> c_int {
+    if x.swap_bytes() < y.swap_bytes() {
+        -1
+    } else {
+        1
+    }
+}
+
+/// # Safety
+///
+/// `a..a + n` and `b..b + n` are readable.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn memcmp(a: *const c_void, b: *const c_void, n: usize) -> c_int {
+    let (a, b) = (a.cast::<u8>(), b.cast::<u8>());
+    // SAFETY: the caller's contract; each access lies within the ranges.
+    unsafe {
+        if n < 8 {
+            for i in 0..n {
+                let (x, y) = (load_byte(a.add(i)), load_byte(b.add(i)));
+                if x != y {
+                    return c_int::from(x) - c_int::from(y);
+                }
+            }
+            return 0;
+        }
+        let mut off = 0;
+        while off < n - 8 {
+            let (x, y) = (load(a.add(off)), load(b.add(off)));
+            if x != y {
+                return order(x, y);
+            }
+            off += 8;
+        }
+        // The last word, overlapping what is already known equal.
+        let (x, y) = (load(a.add(n - 8)), load(b.add(n - 8)));
+        if x != y {
+            return order(x, y);
+        }
+    }
+    0
+}
+
+/// # Safety
+///
+/// As [`memcmp`]: zero if the ranges hold the same bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn bcmp(a: *const c_void, b: *const c_void, n: usize) -> c_int {
+    // SAFETY: the caller's contract.
+    unsafe { memcmp(a, b, n) }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -264,6 +330,28 @@ mod tests {
                 // SAFETY: the range is inside the vector.
                 unsafe { memset(buf.as_mut_ptr().add(a + 8).cast(), 0x1a5, n) };
                 assert_eq!(buf, want, "memset n={n} a={a}");
+            }
+        }
+    }
+
+    /// Every length to past a few words, differing at every place or not
+    /// at all, against the slices' own order.
+    #[test]
+    fn compares_match_bytewise() {
+        for n in 0..40 {
+            let a = pattern(n + 3);
+            for at in 0..=n {
+                let mut b = a.clone();
+                if at < n {
+                    b[at + 3] = b[at + 3].wrapping_add(if at % 2 == 0 { 1 } else { 255 });
+                }
+                let want = a[3..3 + n].cmp(&b[3..3 + n]) as i32;
+                // SAFETY: both ranges are inside their vectors.
+                let got = unsafe { memcmp(a.as_ptr().add(3).cast(), b.as_ptr().add(3).cast(), n) };
+                assert_eq!(got.signum(), want, "memcmp n={n} at={at}");
+                // SAFETY: as above.
+                let eq = unsafe { bcmp(a.as_ptr().add(3).cast(), b.as_ptr().add(3).cast(), n) };
+                assert_eq!(eq == 0, want == 0, "bcmp n={n} at={at}");
             }
         }
     }
