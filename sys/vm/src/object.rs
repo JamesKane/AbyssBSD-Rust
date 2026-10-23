@@ -414,6 +414,15 @@ struct Inner {
     backing: Option<(Arc<Object>, PageIndex)>,
 }
 
+/// What [`Object::page_filled`] gave.
+#[derive(Clone, Copy, Debug)]
+pub enum Filled {
+    /// A page the object held: the caller writes into it.
+    Held(Pfn),
+    /// A new page, written by the caller's fill.
+    New(Pfn),
+}
+
 /// Where a page lookup found the page.
 #[derive(Clone, Debug)]
 pub enum Found {
@@ -834,6 +843,38 @@ impl Object {
         }
         inner.pages.insert(index, new);
         Some(new)
+    }
+
+    /// Page `index` for a write that covers it whole: one held already
+    /// ([`Filled::Held`]; the caller writes into it), or a new one `fill`
+    /// writes all of, never zeroed first ([`Filled::New`]). A page put in
+    /// meanwhile by someone else gets what `fill` wrote.
+    pub fn page_filled(
+        &self,
+        index: PageIndex,
+        fill: &mut dyn FnMut(&mut [u8]),
+    ) -> Result<Filled, LookupError> {
+        if let Some(pfn) = self.page_here(index) {
+            return Ok(Filled::Held(pfn));
+        }
+        let new = self
+            .pages_ops
+            .alloc_filled(fill)
+            .ok_or(LookupError::OutOfMemory)?;
+        let mut inner = self.inner.lock();
+        if let Some(&pfn) = inner.pages.get(&index) {
+            drop(inner);
+            // Lost a race (a fill or a fault): the bytes go to the winner.
+            let mut bytes = Vec::new();
+            self.pages_ops
+                .access(new, &mut |p| bytes.extend_from_slice(p));
+            self.pages_ops
+                .access(pfn, &mut |p| p.copy_from_slice(&bytes));
+            self.pages_ops.free(new);
+            return Ok(Filled::New(pfn));
+        }
+        inner.pages.insert(index, new);
+        Ok(Filled::New(new))
     }
 
     /// Frees the pages in `[start, end)`, which no page table maps any

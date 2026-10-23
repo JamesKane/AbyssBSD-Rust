@@ -115,15 +115,31 @@ pub fn write_fresh(
         let index = at / PAGE;
         let within = offset_in_page(at);
         let n = (PAGE_BYTES - within).min(uio.resid());
-        let pfn = if n == PAGE_BYTES || fresh(index) {
-            object.page_for_overwrite(index)
-        } else {
-            object.page_for_write(index)
-        }
-        .map_err(errno)?;
         let mut r = Ok(0);
-        object.access(pfn, &mut |p| r = uio.copy_in(&mut p[within..within + n]));
-        let moved = r?;
+        let moved = if n == PAGE_BYTES {
+            // Covered whole: a new page takes the bytes straight, with no
+            // zeroing first (what a fault leaves uncopied reads as zeros).
+            let filled = object
+                .page_filled(index, &mut |p| {
+                    r = uio.copy_in(p);
+                    let got = *r.as_ref().unwrap_or(&0);
+                    p[got..].fill(0);
+                })
+                .map_err(errno)?;
+            if let vm::object::Filled::Held(pfn) = filled {
+                object.access(pfn, &mut |p| r = uio.copy_in(p));
+            }
+            r?
+        } else {
+            let pfn = if fresh(index) {
+                object.page_for_overwrite(index)
+            } else {
+                object.page_for_write(index)
+            }
+            .map_err(errno)?;
+            object.access(pfn, &mut |p| r = uio.copy_in(&mut p[within..within + n]));
+            r?
+        };
         object.mark_dirty(index);
         done += moved;
         at += moved as u64;
