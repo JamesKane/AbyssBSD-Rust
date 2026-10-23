@@ -4,10 +4,10 @@ The roadmap is a sequence of **phases with hard exit criteria**. A phase is done
 criteria pass in CI on **both AMD64 and ARM64**, not when the code is written. Sizes are relative
 (S < M < L < XL) rather than calendar estimates.
 
-**Performance parity** ([ADR-0011](adr/0011-performance-parity.md)). From P2 on, every exit
-criterion includes the phase's benchmark suite: on each benchmark, AbyssBSD is **no more than 2%
-slower** than stock FreeBSD 15.1 on the same machine and configuration, and the goal is to be
-faster. Suites are cumulative and run nightly after the phase that introduces them. Method,
+**Performance parity** ([ADR-0011](adr/0011-performance-parity.md),
+[ADR-0014](adr/0014-performance-parity-per-component.md)). From P2 on, every exit criterion includes
+the phase's benchmark suite: each component it measures is, overall, **no more than 2% slower**
+than stock FreeBSD 15.1 on the same machine and configuration, and the goal is to be faster. Suites are cumulative and run nightly after the phase that introduces them. Method,
 fairness rules, and the full benchmark list: [PERFORMANCE.md](PERFORMANCE.md). Before P6 the
 gating platform is bhyve (amd64). aarch64 numbers are recorded, but only gate from P6, when real
 ARM64 hardware is in the loop.
@@ -1226,14 +1226,102 @@ P5.0 ─► P5.1 ─┬─► P5.2 ───────────────
   - Tools: `abyss.prof` reports contended locks by class, and `perf --freebsd-only --prof`
     profiles FreeBSD's side with DTrace, to set the two profiles side by side.
 
-## Track: USB and input (parallel, starts after P3) (M)
+## Track: USB and input (parallel, starts after P3) (M) — in progress
+
+**Goal:** the machine can be used from its own screen and keyboard, and boots or mounts from a USB
+disk.
 
 - xHCI (rings, contexts, MSI-X), hub driver, device enumeration, HID boot protocol, then report
   parser (keyboard, mouse), USB mass storage (BBB, then UAS), and virtio-input.
 - Framebuffer virtual terminals (`ttyv*`) with a `vt(4)`-compatible keyboard layer.
 
 **Exit (merges into P6):** a physical machine without a serial port can be driven entirely from the
-GOP console and a USB keyboard.
+GOP console and a USB keyboard. Physical machines stay untouched until FreeBSD userland runs end to
+end in QEMU ([ADR-0010](adr/0010-qemu-first-development.md)), so the track exits in two steps:
+- **In QEMU, now:** on both arches, `/rescue/sh` on `ttyv0` is driven entirely by a USB keyboard
+  (keystrokes injected over QMP, the result read back from the screen), with a USB mouse and a
+  virtio keyboard present and working. A UFS2 file system on a USB disk (`da0`) passes fsx and then
+  `fsck_ffs`, over BBB and over UAS. The amd64 bhyve configuration (`xhci,tablet`) attaches cleanly.
+- **On hardware, at P6 bring-up:** the sentence above, on both reference machines, with the X870E's
+  PCI xHCIs and the Sky1's ACPI (`PNP0D10`) ones.
+
+**Behavior references.** FreeBSD's `sys/dev/usb` (controller/xhci.c, usb_hub.c, input/ukbd.c and
+ums.c, storage/umass.c), `sys/dev/vt` with `sys/teken`, `sys/dev/kbd` and `sys/dev/kbdmux`, and
+`sys/dev/evdev`. FreeBSD has no virtio-input driver and no UAS: there, the specifications (virtio
+1.2 §5.8, T10 UAS-2) are the reference, and the user interface is the same `kbd`/evdev one.
+
+### Milestones
+
+Each milestone ends green on both architectures, with CI passing.
+
+```
+U.0 ─► U.1 ─► U.2 ─┬─► U.3 ─► U.4 ─┬─► U.6
+                   └─► U.5 ────────┘
+```
+
+**U.0 Design and harness.**
+- `docs/USB.md` with an ADR: the xHCI ring model, the USB bus on the driver model (`UsbIdent`,
+  interfaces as children, hubs as buses), transfers as owned requests completed exactly once, and
+  the input and console classes (`KbdSource`, `PointerSource`, kbd, evdev, vt).
+- QEMU machines get `qemu-xhci` with `usb-kbd`, `usb-mouse`/`usb-tablet`, `usb-hub`, `usb-storage`,
+  `usb-uas`, and `virtio-keyboard`/`virtio-tablet`, on both arches. xtask injects keystrokes and
+  reads the screen over QMP (`input-send-event`, `screendump`) for boot tests.
+- FreeBSD 15.1's view of the same QEMU machine recorded as ground truth: `dmesg` names (`uhub0`,
+  `ukbd0`, `ums0`, `umass0`, `da0`), `usbconfig` output, `devctl` events, and `/dev` nodes.
+- The track's performance suite proposed by ADR (see below).
+
+**U.1 xHCI.**
+- The ring and context code in a host-tested `lib/xhci` (TRB encoding, cycle bits, link TRBs,
+  event-ring dequeue, input and device contexts in 32- and 64-byte forms), fuzzed on event TRBs.
+- The controller driver in `drivers/xhci`: attach on PCI (class 0c0330) and on ACPI (`PNP0D10`),
+  BIOS handoff (USB legacy support capability), reset, scratchpad buffers, the command ring, an
+  event ring per interrupter on MSI-X (MSI, then INTx, as fallbacks), and the root hub's ports
+  (status change, reset, speed).
+- Slots: enable, address, configure and evaluate endpoints; control, bulk, and interrupt transfers;
+  stalls and endpoint reset; transfer timeouts and command abort; detach that leaves no DMA
+  outstanding.
+
+**U.2 The USB bus and hubs.**
+- `sys/usb`: descriptors parsed in a host-tested `lib/usb` (device, configuration, interface,
+  endpoint, SuperSpeed companion, BOS, strings), enumeration (address, configure, interfaces as
+  children), and matching on vendor/product, class/subclass/protocol, and interface.
+- The hub driver (USB 2 and USB 3 hubs, transaction translators), connect, disconnect, and hot
+  unplug through the framework's `Gone` path with requests cancelled.
+- FreeBSD's names and strings: `uhub*`, `usbus*`, pnpinfo/location, and `devctl` `USB` events. The
+  `ugen` nodes and `/dev/usb` ioctls that `usbconfig` uses.
+
+**U.3 HID and the input class.**
+- A HID report-descriptor parser in a host-tested, fuzzed `lib/hid`. Keyboards (boot protocol,
+  then report protocol), mice and tablets (relative and absolute), and `virtio-input`.
+- The input class: the kbd layer (scancode and keycode modes, `kbdmux`, the `KDGKBMODE`/`KDSKBMODE`
+  family, keymaps, LEDs, autorepeat) and evdev (`/dev/input/event*`, FreeBSD's evdev ABI, the
+  `kern.evdev` sysctls).
+
+**U.4 Virtual terminals.**
+- `vt`: `ttyv0`–`ttyv7` on the framebuffer console, a terminal emulator that matches `teken`'s
+  behavior as `TERM=xterm`, switching (Alt-F*n*), scrollback, the cursor, and the bell.
+- Kernel messages and `/dev/console` on `ttyv0` as well as the serial port. The ioctls `rc` and the
+  tools use: `kbdcontrol` (keymap, repeat rate), `vidcontrol` (font, colors, history), and
+  `VT_*`/`KD*`.
+- Text rendering that keeps up with output: dirty-rectangle redraw and glyph caching, measured by
+  the suite.
+
+**U.5 USB mass storage.**
+- `umass` over Bulk-Only Transport, and UAS (streams on USB 3, the command and status pipes on
+  USB 2), on a small SCSI layer (`INQUIRY`, `TEST UNIT READY`, `REQUEST SENSE`, `READ CAPACITY`,
+  `READ`/`WRITE` (10 and 16), `SYNCHRONIZE CACHE`) that publishes `da*` disks to the storage class.
+- Error recovery (BBB reset recovery, sense handling, `UNIT ATTENTION` after a reset), and hot
+  unplug of a mounted disk failing its I/O without a panic.
+
+**U.6 Exit.**
+- The QEMU exit above, in the boot tier on both arches and bhyve, and the suite's verdict.
+
+**Performance (proposed; needs the owner's acceptance by ADR).** The track adds a component that
+can be measured fairly before hardware: `vt` text output (a `cat` of a large text file to `ttyv0`,
+and a scrolling workload), against FreeBSD's `vt_efifb` in the same bhyve VM with a framebuffer.
+USB mass-storage throughput (sequential and random, BBB on both sides) cannot be compared fairly in
+an emulator, since FreeBSD's host cannot run QEMU with acceleration and bhyve has no USB disk; it
+joins the suite on the physical machines at P6.
 
 ## Phase 6: FreeBSD multi-user (XL)
 
