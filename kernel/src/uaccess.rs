@@ -87,6 +87,25 @@ pub(crate) enum StrError {
     TooLong,
 }
 
+/// The first NUL in `b`, looked for eight bytes at a time (a word with a
+/// zero byte has a borrow into that byte's top bit; the lowest such bit
+/// is the first zero, as nothing below it borrowed).
+fn find_nul(b: &[u8]) -> Option<usize> {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGHS: u64 = 0x8080_8080_8080_8080;
+    let (words, rest) = b.as_chunks::<8>();
+    let mut at = 0;
+    for w in words {
+        let x = u64::from_le_bytes(*w);
+        let zero = x.wrapping_sub(ONES) & !x & HIGHS;
+        if zero != 0 {
+            return Some(at + usize::try_from(zero.trailing_zeros() / 8).unwrap_or(0));
+        }
+        at += 8;
+    }
+    rest.iter().position(|&c| c == 0).map(|i| at + i)
+}
+
 /// Copies a NUL-terminated string from `src` into `buf`; returns its
 /// length without the NUL. Reads a page at a time, so a string that ends
 /// just before unmapped memory is not a fault.
@@ -98,7 +117,7 @@ pub(crate) fn copy_in_str(src: u64, buf: &mut [u8]) -> Result<usize, StrError> {
         let to_page = usize::try_from(page - at % page).unwrap_or(usize::MAX);
         let n = to_page.min(buf.len() - done);
         copy_in(&mut buf[done..done + n], at).map_err(|_| StrError::Fault)?;
-        if let Some(nul) = buf[done..done + n].iter().position(|&b| b == 0) {
+        if let Some(nul) = find_nul(&buf[done..done + n]) {
             return Ok(done + nul);
         }
         done += n;

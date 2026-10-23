@@ -199,7 +199,10 @@ impl StatCopy {
         [
             pair(ip.uid, ip.gid),
             pair(u32::from(ip.mode), ip.flags),
-            pair(u32::from(ip.effnlink), ip.generation),
+            pair(
+                u32::from(ip.effnlink) | u32::from(ip.nlink) << 16,
+                ip.generation,
+            ),
             ip.size,
             ip.blocks,
             ip.atime.sec.cast_unsigned(),
@@ -1079,7 +1082,7 @@ impl Node for UfsNode {
             mode: u16::try_from(lo(mode_flags) & 0o7777).unwrap_or(0),
             uid: lo(ids),
             gid: hi(ids),
-            nlink: u64::from(lo(links_gen)),
+            nlink: u64::from(lo(links_gen) & 0xffff),
             size,
             bytes: blocks * 512,
             atime: at(asec, lo(am)),
@@ -1233,12 +1236,15 @@ impl Node for UfsNode {
         Ok(())
     }
 
-    fn need_inactive(&self, s: &Sleepable) -> bool {
+    fn need_inactive(&self, _s: &Sleepable) -> bool {
         // Unlinked as the vnode sees it (`attr`'s count): with soft
         // updates the count on the disk drops later, and the vnode is
         // reclaimed now so that drop frees the inode.
-        let st = self.cell.lock(s);
-        st.ip.effnlink == 0 || (st.ip.nlink == 0 && st.ip.mode != 0)
+        // From the stat copy: no lock.
+        let w = self.cell.stat.load();
+        let (links, mode) = (w[2], w[1] & 0xffff);
+        let (effnlink, nlink) = (links & 0xffff, (links >> 16) & 0xffff);
+        effnlink == 0 || (nlink == 0 && mode != 0)
     }
 
     fn inactive(&mut self, s: &Sleepable) {
