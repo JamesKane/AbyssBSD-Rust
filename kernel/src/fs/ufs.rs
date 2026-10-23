@@ -39,7 +39,7 @@ use abi::errno::Errno;
 use abi::time::Timespec;
 use sched::lock::{LockClass, Mutex};
 use sched::{Sleepable, WaitQueue};
-use sync::{Once, SpinLock};
+use sync::{Once, PreemptLock};
 use ufs::ops::{Maker, NewKind};
 use ufs::{Mode, Reserve, Timestamp};
 
@@ -103,14 +103,14 @@ fn wait_running(s: &Sleepable) {
 /// a later write of it waits for the earlier to finish, and nothing frees
 /// blocks under one.
 struct Writing {
-    blocks: SpinLock<BTreeSet<u64>>,
+    blocks: PreemptLock<BTreeSet<u64>>,
     done: WaitQueue,
 }
 
 impl Writing {
     const fn new() -> Self {
         Self {
-            blocks: SpinLock::new(BTreeSet::new()),
+            blocks: PreemptLock::new(BTreeSet::new()),
             done: WaitQueue::new(),
         }
     }
@@ -228,7 +228,7 @@ struct Shared {
     /// Mounted read-write now (`MNT_UPDATE` changes it).
     writable: AtomicBool,
     /// The in-core inodes, and the regular files' objects, for `sync`.
-    inodes: SpinLock<intmap::IntMap<u32, InCore>>,
+    inodes: PreemptLock<intmap::IntMap<u32, InCore>>,
     /// When the syncer last wrote every file's dirty pages.
     data_synced: AtomicU64,
     /// Held while finding or making an in-core inode (`load`, deferred
@@ -341,7 +341,7 @@ impl UfsFs {
                 ufs,
                 sum: Once::new(),
                 writable: AtomicBool::new(false),
-                inodes: SpinLock::new(intmap::IntMap::new()),
+                inodes: PreemptLock::new(intmap::IntMap::new()),
                 data_synced: AtomicU64::new(0),
                 loading: Mutex::new(&LOADING, ()),
                 working: Mutex::new(&WORK, ()),

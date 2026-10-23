@@ -57,7 +57,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8};
 
 use sched::lock::{LockClass, Mutex};
 use sched::{Sleepable, WaitQueue};
-use sync::SpinLock;
+use sync::PreemptLock;
 
 /// A device could not move the bytes (`EIO`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -156,7 +156,7 @@ struct Buffer {
 /// What background writes' completions share with the cache.
 struct Io {
     /// Buffers whose writes are done, not yet finished.
-    done: SpinLock<Vec<Arc<Buffer>>>,
+    done: PreemptLock<Vec<Arc<Buffer>>>,
     any_done: AtomicBool,
     /// Woken by each completion.
     wake: WaitQueue,
@@ -192,7 +192,7 @@ impl Default for Limits {
 /// The buffer cache of one device.
 pub struct BufCache {
     dev: Arc<dyn BlockDev>,
-    buffers: SpinLock<BTreeMap<u64, Arc<Buffer>>>,
+    buffers: PreemptLock<BTreeMap<u64, Arc<Buffer>>>,
     limits: Limits,
     /// Bytes held, and bytes dirty.
     bytes: AtomicUsize,
@@ -200,7 +200,7 @@ pub struct BufCache {
     ticks: AtomicU64,
     /// Nanoseconds since some start, for dirtying times.
     clock: fn() -> u64,
-    hook: SpinLock<Option<Arc<dyn BufHook>>>,
+    hook: PreemptLock<Option<Arc<dyn BufHook>>>,
     io: Arc<Io>,
     /// Dirty bytes whose background writes are not finished.
     started: AtomicUsize,
@@ -241,15 +241,15 @@ impl BufCache {
     pub fn new(dev: Arc<dyn BlockDev>, limits: Limits, clock: fn() -> u64) -> Self {
         Self {
             dev,
-            buffers: SpinLock::new(BTreeMap::new()),
+            buffers: PreemptLock::new(BTreeMap::new()),
             limits,
             bytes: AtomicUsize::new(0),
             dirty: AtomicUsize::new(0),
             ticks: AtomicU64::new(0),
             clock,
-            hook: SpinLock::new(None),
+            hook: PreemptLock::new(None),
             io: Arc::new(Io {
-                done: SpinLock::new(Vec::new()),
+                done: PreemptLock::new(Vec::new()),
                 any_done: AtomicBool::new(false),
                 wake: WaitQueue::new(),
                 running: AtomicUsize::new(0),

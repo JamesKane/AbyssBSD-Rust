@@ -35,7 +35,7 @@ use abi::mount::{MNT_LOCAL, MNT_RDONLY, MNT_ROOTFS};
 use abi::time::Timespec;
 use sched::Sleepable;
 use sched::lock::{LockClass, Mutex};
-use sync::{Once, SpinLock};
+use sync::{Once, PreemptLock};
 use vfs::namei::{Found, Lookup, Namespace, Parent};
 use vfs::tree::Builder;
 use vfs::{Cred, Meta, Mount, MountInfo, NodeId, Vnode};
@@ -564,8 +564,8 @@ impl vm::object::Pager for ResidentPager {
 /// Each mapped file's memory object, so every mapping of a file shares
 /// its cached pages (FreeBSD's `v_object`). The file systems are never
 /// unmounted, so entries stay.
-static OBJECTS: SpinLock<BTreeMap<NodeId, Arc<vm::object::Object>>> =
-    SpinLock::new(BTreeMap::new());
+static OBJECTS: PreemptLock<BTreeMap<NodeId, Arc<vm::object::Object>>> =
+    PreemptLock::new(BTreeMap::new());
 
 /// `v`'s memory object, if it is a regular file that can be mapped: its
 /// file system's (tmpfs's), or for a memory-disk file one over its

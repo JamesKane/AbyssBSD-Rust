@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 use bus::Gate;
 use sched::lock::{LockClass, Mutex};
 use sched::{Sleepable, WaitQueue};
-use sync::SpinLock;
+use sync::{PreemptLock, SpinLock};
 
 use vm::object::IoBuf;
 
@@ -66,7 +66,7 @@ enum Target {
         /// The driver's queues, dropped at withdrawal (once the gate has
         /// drained) so a disk that outlives its driver holds none of the
         /// driver's grants.
-        queues: SpinLock<Option<Arc<dyn DiskQueues>>>,
+        queues: PreemptLock<Option<Arc<dyn DiskQueues>>>,
         gate: alloc::boxed::Box<Gate>,
         deferred: Vec<Mutex<Vec<Bio>>>,
     },
@@ -705,7 +705,7 @@ pub fn all() -> Vec<Arc<Disk>> {
 /// partitions. Call from the driver's `start`, ready for I/O.
 pub fn publish(s: &Sleepable, info: DiskInfo, queues: Arc<dyn DiskQueues>) -> Arc<Disk> {
     let n = queues.queues().max(1);
-    let queues = SpinLock::new(Some(queues));
+    let queues = PreemptLock::new(Some(queues));
     let disk = Arc::new(Disk {
         name: format!("{}{}", info.name, info.unit),
         sector_size: info.sector_size,

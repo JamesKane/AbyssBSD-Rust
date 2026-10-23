@@ -180,6 +180,25 @@ impl<T> PreemptLock<T> {
         PreemptLockGuard { lock: self }
     }
 
+    /// Takes the lock only if nobody holds or waits for it.
+    pub fn try_lock(&self) -> Option<PreemptLockGuard<'_, T>> {
+        hal::critical::enter();
+        let serving = self.serving.load(Ordering::Relaxed);
+        // As in `SpinLock::try_lock`.
+        match self.next.compare_exchange(
+            serving,
+            serving.wrapping_add(1),
+            Ordering::Acquire,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => Some(PreemptLockGuard { lock: self }),
+            Err(_) => {
+                hal::critical::exit();
+                None
+            }
+        }
+    }
+
     /// The value, through exclusive access to the lock (no locking needed).
     pub fn get_mut(&mut self) -> &mut T {
         self.value.get_mut()

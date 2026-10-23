@@ -22,7 +22,7 @@ use core::any::Any;
 use abi::errno::Errno;
 use intmap::IntMap;
 use sched::Sleepable;
-use sync::SpinLock;
+use sync::PreemptLock;
 
 use crate::mount::{FileSystem, FsStats, Rename};
 use crate::node::{
@@ -161,10 +161,10 @@ struct Shared {
     /// Where file pages come from.
     pages: &'static dyn vm::object::PageOps,
     /// Nodes no vnode holds.
-    nodes: SpinLock<BTreeMap<u64, Box<TmpNode>>>,
-    next_ino: SpinLock<u64>,
+    nodes: PreemptLock<BTreeMap<u64, Box<TmpNode>>>,
+    next_ino: PreemptLock<u64>,
     /// Bytes and nodes in use, for `statfs`.
-    usage: SpinLock<(u64, u64)>,
+    usage: PreemptLock<(u64, u64)>,
 }
 
 /// A mounted tmpfs.
@@ -186,9 +186,9 @@ impl TmpFs {
     pub fn new(mode: u16, uid: u32, gid: u32, pages: &'static dyn vm::object::PageOps) -> Self {
         let shared = Arc::new(Shared {
             pages,
-            nodes: SpinLock::new(BTreeMap::new()),
-            next_ino: SpinLock::new(ROOT_INO + 1),
-            usage: SpinLock::new((0, 1)),
+            nodes: PreemptLock::new(BTreeMap::new()),
+            next_ino: PreemptLock::new(ROOT_INO + 1),
+            usage: PreemptLock::new((0, 1)),
         });
         let t = now();
         let root = Box::new(TmpNode {

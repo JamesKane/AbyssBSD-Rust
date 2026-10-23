@@ -36,7 +36,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
-use sync::SpinLock;
+use sync::PreemptLock;
 
 use crate::Pfn;
 
@@ -175,7 +175,7 @@ static DIRTY: AtomicUsize = AtomicUsize::new(0);
 
 /// Every pager object, for reclaiming clean pages (dead ones are pruned
 /// as reclaiming passes).
-static PAGED: SpinLock<Vec<Weak<Object>>> = SpinLock::new(Vec::new());
+static PAGED: PreemptLock<Vec<Weak<Object>>> = PreemptLock::new(Vec::new());
 
 /// Pages dirty in all objects together.
 #[must_use]
@@ -207,7 +207,7 @@ pub fn reclaim_clean(want: usize) -> usize {
 
 /// A memory object.
 pub struct Object {
-    inner: SpinLock<Inner>,
+    inner: PreemptLock<Inner>,
     pages_ops: &'static dyn PageOps,
     /// Only one mapping (possibly clipped into several entries of one map)
     /// reaches this object, so unmapping a range may free its pages
@@ -225,7 +225,7 @@ pub struct Object {
     ra_next: AtomicU64,
     ra_window: AtomicU64,
     /// The next windows, read ahead while the last is used, in order.
-    ahead: SpinLock<VecDeque<Ahead>>,
+    ahead: PreemptLock<VecDeque<Ahead>>,
 }
 
 /// A transfer through an object's pages: its frames stay put until the
@@ -593,7 +593,7 @@ impl Object {
     #[must_use]
     pub fn anonymous(ops: &'static dyn PageOps) -> Arc<Self> {
         Arc::new(Self {
-            inner: SpinLock::new(Inner {
+            inner: PreemptLock::new(Inner {
                 pages: BTreeMap::new(),
                 dirty: BTreeSet::new(),
                 mapped_writable: BTreeSet::new(),
@@ -606,7 +606,7 @@ impl Object {
             io: AtomicUsize::new(0),
             ra_next: AtomicU64::new(0),
             ra_window: AtomicU64::new(1),
-            ahead: SpinLock::new(VecDeque::new()),
+            ahead: PreemptLock::new(VecDeque::new()),
         })
     }
 
@@ -615,7 +615,7 @@ impl Object {
     pub fn shadow(backing: Arc<Self>, offset: PageIndex) -> Arc<Self> {
         let ops = backing.pages_ops;
         Arc::new(Self {
-            inner: SpinLock::new(Inner {
+            inner: PreemptLock::new(Inner {
                 pages: BTreeMap::new(),
                 dirty: BTreeSet::new(),
                 mapped_writable: BTreeSet::new(),
@@ -628,7 +628,7 @@ impl Object {
             io: AtomicUsize::new(0),
             ra_next: AtomicU64::new(0),
             ra_window: AtomicU64::new(1),
-            ahead: SpinLock::new(VecDeque::new()),
+            ahead: PreemptLock::new(VecDeque::new()),
         })
     }
 
@@ -641,7 +641,7 @@ impl Object {
     #[must_use]
     pub fn with_pager(ops: &'static dyn PageOps, pager: Arc<dyn Pager>) -> Arc<Self> {
         let o = Arc::new(Self {
-            inner: SpinLock::new(Inner {
+            inner: PreemptLock::new(Inner {
                 pages: BTreeMap::new(),
                 dirty: BTreeSet::new(),
                 mapped_writable: BTreeSet::new(),
@@ -654,7 +654,7 @@ impl Object {
             io: AtomicUsize::new(0),
             ra_next: AtomicU64::new(0),
             ra_window: AtomicU64::new(1),
-            ahead: SpinLock::new(VecDeque::new()),
+            ahead: PreemptLock::new(VecDeque::new()),
         });
         PAGED.lock().push(Arc::downgrade(&o));
         o

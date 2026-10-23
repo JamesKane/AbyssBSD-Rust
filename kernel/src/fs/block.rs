@@ -9,7 +9,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use bufcache::{BlockDev, BufCache, BufHook, IoError, Limits};
 use sched::Sleepable;
 use sched::lock::{LockClass, Mutex};
-use sync::SpinLock;
+use sync::{PreemptLock, SpinLock};
 use ufs::softdep::Deps;
 use vm::object::IoBuf;
 
@@ -24,7 +24,7 @@ pub(crate) struct SoftDeps {
     /// File data writes done but not yet told the tracker (byte offset
     /// and length): their completions cannot take its lock, so the next
     /// [`Self::with`] does it for them.
-    written: SpinLock<Vec<(u64, u64)>>,
+    written: PreemptLock<Vec<(u64, u64)>>,
     any_written: AtomicBool,
 }
 
@@ -32,7 +32,7 @@ impl SoftDeps {
     pub(crate) fn new(sb: &ufs::Superblock) -> Arc<Self> {
         Arc::new(Self {
             deps: Mutex::new(&SOFTDEP, Deps::new(sb)),
-            written: SpinLock::new(Vec::new()),
+            written: PreemptLock::new(Vec::new()),
             any_written: AtomicBool::new(false),
         })
     }
