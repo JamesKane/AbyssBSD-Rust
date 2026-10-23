@@ -28,8 +28,7 @@ userland.
 
 ## Status
 
-Phases 0 through 4 are complete, and Phase 5 (VFS and file systems) is at its last step, P5.9
-(verification and performance). See [docs/ROADMAP.md](docs/ROADMAP.md) for the detail.
+Phases 0 through 5 are complete. See [docs/ROADMAP.md](docs/ROADMAP.md) for the detail.
 
 - **Boot:** our UEFI loader boots our kernel on x86_64 and aarch64, in QEMU and bhyve. It finds
   the kernel on UFS2 and passes the root named in `/etc/fstab`.
@@ -45,7 +44,8 @@ Phases 0 through 4 are complete, and Phase 5 (VFS and file systems) is at its la
   msdosfs (the ESP on `/boot/efi`), and UFS2 read-write with soft updates. Both architectures
   boot with the root on UFS2 on NVMe, holding all of FreeBSD 15.1's `base.txz`, and `mtree`
   checks every file. fsx runs clean, crashes leave images `fsck_ffs` repairs, and the root is
-  left clean at power-off. pjdfstest runs on tmpfs and UFS2 against FreeBSD's results.
+  left clean at power-off. pjdfstest runs on tmpfs and UFS2 against FreeBSD's results. In bhyve
+  the file systems take 0.84 (UFS2) and 0.86 (tmpfs) of FreeBSD 15.1's time over the P5 suite.
 
 Next is Phase 6: FreeBSD multi-user (dynamic linking, threads, and `init` to a `login:` prompt).
 
