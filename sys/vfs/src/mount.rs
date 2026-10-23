@@ -12,7 +12,6 @@
 //! (`vfs_getnewfsid`, `vget`, `vnlru`).
 
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::any::Any;
@@ -162,7 +161,7 @@ pub struct Mount {
     on: PreemptLock<Vec<u8>>,
     fs: Box<dyn FileSystem>,
     /// The in-core vnodes by inode.
-    table: PreemptLock<BTreeMap<u64, Arc<Vnode>>>,
+    table: PreemptLock<intmap::IntMap<u64, Arc<Vnode>>>,
     /// Serializes loads, so an inode is loaded once (docs/VFS.md §4.1).
     loading: Mutex<()>,
     /// Serializes renames between directories (docs/VFS.md §5).
@@ -221,7 +220,7 @@ impl Mount {
             info,
             on: PreemptLock::new(Vec::new()),
             fs,
-            table: PreemptLock::new(BTreeMap::new()),
+            table: PreemptLock::new(intmap::IntMap::new()),
             loading: Mutex::new(&VGET, ()),
             rename: Mutex::new(&RENAME, ()),
             covered: PreemptLock::new(None),

@@ -29,7 +29,7 @@
 //! synchronously, as FreeBSD's UFS does without them.
 
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::BTreeSet;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::any::Any;
@@ -228,7 +228,7 @@ struct Shared {
     /// Mounted read-write now (`MNT_UPDATE` changes it).
     writable: AtomicBool,
     /// The in-core inodes, and the regular files' objects, for `sync`.
-    inodes: SpinLock<BTreeMap<u32, InCore>>,
+    inodes: SpinLock<intmap::IntMap<u32, InCore>>,
     /// When the syncer last wrote every file's dirty pages.
     data_synced: AtomicU64,
     /// Held while finding or making an in-core inode (`load`, deferred
@@ -341,7 +341,7 @@ impl UfsFs {
                 ufs,
                 sum: Once::new(),
                 writable: AtomicBool::new(false),
-                inodes: SpinLock::new(BTreeMap::new()),
+                inodes: SpinLock::new(intmap::IntMap::new()),
                 data_synced: AtomicU64::new(0),
                 loading: Mutex::new(&LOADING, ()),
                 working: Mutex::new(&WORK, ()),

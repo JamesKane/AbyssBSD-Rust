@@ -14,13 +14,13 @@
 //! Behavior reference: sys/fs/tmpfs.
 
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
-use alloc::collections::btree_map::Entry;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
 
 use abi::errno::Errno;
+use intmap::IntMap;
 use sched::Sleepable;
 use sync::SpinLock;
 
@@ -51,10 +51,13 @@ struct Dir {
     parent: u64,
     /// A name's hash to the cookies of the entries with that hash (one,
     /// nearly always): a lookup compares numbers, then one name (FreeBSD's
-    /// tmpfs keys its tree by a name's hash too).
-    names: BTreeMap<u64, Cookies>,
-    /// Cookie to the entry, in creation order.
-    entries: BTreeMap<u64, (Box<[u8]>, u64, Kind)>,
+    /// tmpfs keys its entries by a name's hash too). Hashed, so a lookup
+    /// probes a slot or two rather than walking a tree.
+    names: IntMap<u64, Cookies>,
+    /// Cookie to the entry.
+    entries: IntMap<u64, (Box<[u8]>, u64, Kind)>,
+    /// The cookies in creation order, for `readdir` to resume from one.
+    order: BTreeSet<u64>,
     next_cookie: u64,
 }
 
@@ -77,8 +80,9 @@ impl Dir {
     fn new(parent: u64) -> Self {
         Self {
             parent,
-            names: BTreeMap::new(),
-            entries: BTreeMap::new(),
+            names: IntMap::new(),
+            entries: IntMap::new(),
+            order: BTreeSet::new(),
             next_cookie: 2,
         }
     }
@@ -102,16 +106,18 @@ impl Dir {
         let c = self.next_cookie;
         self.next_cookie += 1;
         self.entries.insert(c, (name.into(), ino, kind));
-        match self.names.entry(hash(name)) {
-            Entry::Vacant(e) => {
-                e.insert(Cookies::One(c));
+        self.order.insert(c);
+        let h = hash(name);
+        match self.names.get_mut(&h) {
+            None => {
+                self.names.insert(h, Cookies::One(c));
             }
-            Entry::Occupied(mut e) => {
-                let more = match e.get() {
+            Some(e) => {
+                let more = match e {
                     Cookies::One(o) => alloc::vec![*o, c],
                     Cookies::More(v) => [v.as_slice(), &[c]].concat(),
                 };
-                e.insert(Cookies::More(more));
+                *e = Cookies::More(more);
             }
         }
     }
@@ -119,26 +125,17 @@ impl Dir {
     fn remove(&mut self, name: &[u8]) -> Option<u64> {
         let h = hash(name);
         let c = self.cookie(h, name)?;
-        if let Entry::Occupied(mut e) = self.names.entry(h) {
-            let rest: Vec<u64> = e
-                .get()
-                .as_slice()
-                .iter()
-                .copied()
-                .filter(|x| *x != c)
-                .collect();
+        if let Some(e) = self.names.get_mut(&h) {
+            let rest: Vec<u64> = e.as_slice().iter().copied().filter(|x| *x != c).collect();
             match rest.as_slice() {
                 [] => {
-                    e.remove();
+                    self.names.remove(&h);
                 }
-                [one] => {
-                    e.insert(Cookies::One(*one));
-                }
-                _ => {
-                    e.insert(Cookies::More(rest));
-                }
+                [one] => *e = Cookies::One(*one),
+                _ => *e = Cookies::More(rest),
             }
         }
+        self.order.remove(&c);
         self.entries.remove(&c).map(|(_, ino, _)| ino)
     }
 }
@@ -540,7 +537,10 @@ impl DirectoryNode for TmpNode {
         {
             return Ok(());
         }
-        for (&c, (name, ino, kind)) in d.entries.range(from.max(2)..) {
+        for &c in d.order.range(from.max(2)..) {
+            let Some((name, ino, kind)) = d.entries.get(&c) else {
+                continue;
+            };
             if !f(DirEntry {
                 name,
                 ino: *ino,

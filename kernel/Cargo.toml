@@ -22,6 +22,7 @@ gpt = { path = "../lib/gpt" }
 abi = { path = "../lib/abi" }
 acpi-tables = { path = "../lib/acpi-tables" }
 addr = { path = "../lib/addr" }
+intmap = { path = "../lib/intmap" }
 bootproto = { path = "../boot/bootproto" }
 bus = { path = "../sys/bus" }
 clock = { path = "../sys/clock" }
