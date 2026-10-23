@@ -373,7 +373,9 @@ mod tests {
     fn send_key_json() {
         assert_eq!(
             send_key(chord('A').unwrap()),
-            r#"{"execute":"send-key","arguments":{"keys":[{"type":"qcode","data":"shift"},{"type":"qcode","data":"a"}],"hold-time":30}}"#
+            format!(
+                r#"{{"execute":"send-key","arguments":{{"keys":[{{"type":"qcode","data":"shift"}},{{"type":"qcode","data":"a"}}],"hold-time":{HOLD_MS}}}}}"#
+            )
         );
     }
 
