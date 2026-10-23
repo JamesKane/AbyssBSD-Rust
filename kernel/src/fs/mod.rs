@@ -481,10 +481,20 @@ fn start_of(
     match at {
         At::Cwd => Ok(Cow::Owned(Arc::clone(p.cwd.lock().vnode()))),
         At::Fd(fd) => {
-            let f = p.files.lock(s).get(fd)?;
-            match f.vnode() {
+            let dir = |f: &crate::fs::file::File| match f.vnode() {
                 Some(v) if v.is_dir() => Ok(Cow::Owned(Arc::clone(v))),
                 _ => Err(Errno::ENOTDIR),
+            };
+            if p.sole_thread() {
+                // SAFETY: only the process's threads reach its table, this
+                // is the only one, and it does nothing else with the table
+                // while `dir` runs (as `syscall::io::with_file`): no lock,
+                // and no reference to the file (FreeBSD's
+                // `fgetvp_lookup_smr`).
+                let table = unsafe { p.files.get_unlocked() };
+                dir(&table.slot(fd)?.file)
+            } else {
+                dir(&*p.files.lock(s).get(fd)?)
             }
         }
     }
