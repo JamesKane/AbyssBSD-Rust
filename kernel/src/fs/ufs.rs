@@ -37,7 +37,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use abi::errno::Errno;
 use abi::time::Timespec;
-use sched::lock::{LockClass, Mutex};
+use sched::lock::{LockClass, Mutex, MutexGuard};
 use sched::{Sleepable, WaitQueue};
 use sync::{Once, PreemptLock};
 use ufs::ops::{Maker, NewKind};
@@ -75,10 +75,11 @@ fn softdep_speedup() -> usize {
 }
 
 /// An in-core inode, shared by its node and its file's pager. In order
-/// (`repr(C)`): the lock and the inode's attributes first, on the lines
-/// a `stat` reads.
+/// (`repr(C)`): what a `stat` reads first, then the lock and the inode.
 #[repr(C)]
 struct InodeCell {
+    stat: StatCopy,
+    /// Taken through [`Self::lock`], which keeps `stat` up to date.
     state: Mutex<InodeState>,
     ino: u32,
     /// The size, readable with no lock (the VM asks a pager for it under
@@ -156,6 +157,117 @@ impl Writing {
 impl InodeCell {
     fn publish(&self, st: &InodeState) {
         self.size.store(st.ip.size, Ordering::Release);
+    }
+
+    /// The inode, locked; what changes in it reaches [`Self::stat`] as the
+    /// lock is let go.
+    fn lock<'a>(&'a self, s: &Sleepable) -> StateGuard<'a> {
+        StateGuard {
+            cell: self,
+            st: self.state.lock(s),
+            changed: false,
+        }
+    }
+}
+
+/// What `stat` reads of an inode, kept beside it so that reading it takes
+/// no lock (FreeBSD's `ufs_getattr` reads the inode under the vnode lock
+/// alone, which our deferred work does not take): rewritten under the
+/// inode's lock by whoever may have changed it, behind a sequence count
+/// that is odd while it changes, which readers retry on.
+struct StatCopy {
+    seq: AtomicU64,
+    words: [AtomicU64; STAT_WORDS],
+}
+
+const STAT_WORDS: usize = 12;
+
+impl StatCopy {
+    fn new(ip: &ufs::Inode) -> Self {
+        Self {
+            seq: AtomicU64::new(0),
+            words: Self::encode(ip).map(AtomicU64::new),
+        }
+    }
+
+    fn encode(ip: &ufs::Inode) -> [u64; STAT_WORDS] {
+        let rdev = match ip.kind() {
+            ufs::Kind::CharDevice | ufs::Kind::BlockDevice => ip.rdev(),
+            _ => 0,
+        };
+        let pair = |lo: u32, hi: u32| u64::from(lo) | u64::from(hi) << 32;
+        [
+            pair(ip.uid, ip.gid),
+            pair(u32::from(ip.mode), ip.flags),
+            pair(u32::from(ip.effnlink), ip.generation),
+            ip.size,
+            ip.blocks,
+            ip.atime.sec.cast_unsigned(),
+            ip.mtime.sec.cast_unsigned(),
+            ip.ctime.sec.cast_unsigned(),
+            ip.birthtime.sec.cast_unsigned(),
+            pair(ip.atime.nsec, ip.mtime.nsec),
+            pair(ip.ctime.nsec, ip.birthtime.nsec),
+            rdev,
+        ]
+    }
+
+    /// Rewrites it from `ip`; the caller holds the inode's lock, so
+    /// writers take turns.
+    fn store(&self, ip: &ufs::Inode) {
+        let seq = self.seq.load(Ordering::Relaxed);
+        self.seq.store(seq + 1, Ordering::Relaxed);
+        core::sync::atomic::fence(Ordering::Release);
+        for (w, v) in self.words.iter().zip(Self::encode(ip)) {
+            w.store(v, Ordering::Relaxed);
+        }
+        self.seq.store(seq + 2, Ordering::Release);
+    }
+
+    /// A consistent copy of the words.
+    fn load(&self) -> [u64; STAT_WORDS] {
+        loop {
+            let before = self.seq.load(Ordering::Acquire);
+            if before & 1 == 0 {
+                let words = self.words.each_ref().map(|w| w.load(Ordering::Relaxed));
+                core::sync::atomic::fence(Ordering::Acquire);
+                if self.seq.load(Ordering::Relaxed) == before {
+                    return words;
+                }
+            }
+            core::hint::spin_loop();
+        }
+    }
+}
+
+/// An inode locked by [`InodeCell::lock`]: let go after any mutable use,
+/// it rewrites the cell's [`StatCopy`] first, still holding the lock.
+struct StateGuard<'a> {
+    cell: &'a InodeCell,
+    st: MutexGuard<'a, InodeState>,
+    changed: bool,
+}
+
+impl core::ops::Deref for StateGuard<'_> {
+    type Target = InodeState;
+
+    fn deref(&self) -> &InodeState {
+        &self.st
+    }
+}
+
+impl core::ops::DerefMut for StateGuard<'_> {
+    fn deref_mut(&mut self) -> &mut InodeState {
+        self.changed = true;
+        &mut self.st
+    }
+}
+
+impl Drop for StateGuard<'_> {
+    fn drop(&mut self) {
+        if self.changed {
+            self.cell.stat.store(&self.st.ip);
+        }
     }
 }
 
@@ -480,7 +592,7 @@ impl Shared {
     /// Writes every changed in-core inode.
     fn write_inodes(&self, s: &Sleepable, mode: Mode) -> Result<(), Errno> {
         for (c, _) in self.cells() {
-            let mut st = c.state.lock(s);
+            let mut st = c.lock(s);
             if st.dirty {
                 self.ufs
                     .write_inode(s, c.ino, &st.ip, mode)
@@ -563,6 +675,7 @@ impl Shared {
     fn new_cell(&self, ino: u32, ip: ufs::Inode) -> Arc<InodeCell> {
         let size = ip.size;
         let cell = Arc::new(InodeCell {
+            stat: StatCopy::new(&ip),
             ino,
             state: Mutex::new(
                 &INODE,
@@ -707,7 +820,7 @@ impl ufs::ops::WorkEnv<DiskIo> for WorkEnv<'_> {
         f: &mut dyn FnMut(&mut ufs::Inode, bool, &mut ufs::Summary) -> Result<(), ufs::Error>,
     ) -> Result<(), ufs::Error> {
         let cell = self.fs.cell(self.s, ino).map_err(|_| ufs::Error::Io)?;
-        let mut st = cell.state.lock(self.s);
+        let mut st = cell.lock(self.s);
         let mut sum = self.sum.lock(self.s);
         let in_use = st.nodes > 0;
         let r = f(&mut st.ip, in_use, &mut sum);
@@ -805,11 +918,11 @@ impl FileSystem for UfsFs {
         let is_dir;
         {
             // Inode locks: the vnodes are all locked, so any order holds.
-            let mut fd = from_dir.cell.state.lock(s);
-            let mut fi = from.cell.state.lock(s);
+            let mut fd = from_dir.cell.lock(s);
+            let mut fi = from.cell.lock(s);
             is_dir = fi.ip.kind() == ufs::Kind::Directory;
-            let mut td = to_dir.as_ref().map(|d| d.cell.state.lock(s));
-            let mut tt = target.as_ref().map(|n| n.cell.state.lock(s));
+            let mut td = to_dir.as_ref().map(|d| d.cell.lock(s));
+            let mut tt = target.as_ref().map(|n| n.cell.lock(s));
             let mut sum = sum.lock(s);
             shared
                 .ufs
@@ -908,13 +1021,6 @@ struct UfsNode {
     fs: Arc<Shared>,
 }
 
-fn time(t: Timestamp) -> Timespec {
-    Timespec {
-        tv_sec: t.sec,
-        tv_nsec: i64::from(t.nsec),
-    }
-}
-
 /// A directory entry's type as a node kind (`None` for a whiteout).
 fn kind_of(dtype: u8) -> Option<Kind> {
     use abi::dirent::{DT_BLK, DT_CHR, DT_DIR, DT_FIFO, DT_LNK, DT_REG, DT_SOCK};
@@ -947,27 +1053,42 @@ fn sleepable() -> Sleepable {
 }
 
 impl Node for UfsNode {
+    /// From the inode's [`StatCopy`], taking no lock.
     fn attr(&self) -> Attr {
-        let s = sleepable();
-        let st = self.cell.state.lock(&s);
-        let ip = &st.ip;
+        let [
+            ids,
+            mode_flags,
+            links_gen,
+            size,
+            blocks,
+            asec,
+            msec,
+            csec,
+            bsec,
+            am,
+            cb,
+            rdev,
+        ] = self.cell.stat.load();
+        let lo = |w: u64| u32::try_from(w & u64::from(u32::MAX)).unwrap_or(0);
+        let hi = |w: u64| u32::try_from(w >> 32).unwrap_or(0);
+        let at = |sec: u64, nsec: u32| Timespec {
+            tv_sec: sec.cast_signed(),
+            tv_nsec: i64::from(nsec),
+        };
         Attr {
-            mode: ip.perm(),
-            uid: ip.uid,
-            gid: ip.gid,
-            nlink: u64::from(ip.effnlink),
-            size: ip.size,
-            bytes: ip.blocks * 512,
-            atime: time(ip.atime),
-            mtime: time(ip.mtime),
-            ctime: time(ip.ctime),
-            birthtime: time(ip.birthtime),
-            flags: ip.flags,
-            generation: u64::from(ip.generation),
-            rdev: match ip.kind() {
-                ufs::Kind::CharDevice | ufs::Kind::BlockDevice => ip.rdev(),
-                _ => 0,
-            },
+            mode: u16::try_from(lo(mode_flags) & 0o7777).unwrap_or(0),
+            uid: lo(ids),
+            gid: hi(ids),
+            nlink: u64::from(lo(links_gen)),
+            size,
+            bytes: blocks * 512,
+            atime: at(asec, lo(am)),
+            mtime: at(msec, hi(am)),
+            ctime: at(csec, lo(cb)),
+            birthtime: at(bsec, hi(cb)),
+            flags: hi(mode_flags),
+            generation: u64::from(hi(links_gen)),
+            rdev,
             blksize: self.fs.ufs.superblock().bsize,
             fileid: 0,
         }
@@ -977,7 +1098,7 @@ impl Node for UfsNode {
         let shared = Arc::clone(&self.fs);
         let sum = shared.sum()?;
         let t = now();
-        let mut st = self.cell.state.lock(s);
+        let mut st = self.cell.lock(s);
         st.data_gen = st.data_gen.wrapping_add(1);
         if let Some(size) = a.size {
             if i64::try_from(size).is_err() {
@@ -1013,7 +1134,7 @@ impl Node for UfsNode {
                 drop(sum);
                 drop(st);
                 let waited = shared.flush_frees(s);
-                st = self.cell.state.lock(s);
+                st = self.cell.lock(s);
                 st.data_gen = st.data_gen.wrapping_add(1);
                 if !waited {
                     return Err(Errno::ENOSPC);
@@ -1059,7 +1180,7 @@ impl Node for UfsNode {
         self.cell.writing.wait_all(s);
         let Some(deps) = &shared.deps else {
             {
-                let mut st = self.cell.state.lock(s);
+                let mut st = self.cell.lock(s);
                 shared
                     .ufs
                     .write_inode(s, self.cell.ino, &st.ip, Mode::Sync)
@@ -1077,7 +1198,7 @@ impl Node for UfsNode {
         let ino = self.cell.ino;
         let mut dir_blocks = Vec::new();
         {
-            let mut st = self.cell.state.lock(s);
+            let mut st = self.cell.lock(s);
             shared
                 .ufs
                 .write_inode(s, ino, &st.ip, Mode::Delayed)
@@ -1116,7 +1237,7 @@ impl Node for UfsNode {
         // Unlinked as the vnode sees it (`attr`'s count): with soft
         // updates the count on the disk drops later, and the vnode is
         // reclaimed now so that drop frees the inode.
-        let st = self.cell.state.lock(s);
+        let st = self.cell.lock(s);
         st.ip.effnlink == 0 || (st.ip.nlink == 0 && st.ip.mode != 0)
     }
 
@@ -1125,7 +1246,7 @@ impl Node for UfsNode {
         let Ok(sum) = shared.sum() else {
             return;
         };
-        let mut st = self.cell.state.lock(s);
+        let mut st = self.cell.lock(s);
         st.data_gen = st.data_gen.wrapping_add(1);
         if st.ip.nlink == 0 && st.ip.mode != 0 {
             if let Some(o) = &self.object {
@@ -1156,7 +1277,7 @@ impl Node for UfsNode {
             // not written, only let go; freeing the inode later cancels
             // what waited for it (FreeBSD's dirty buffers of a removed
             // file go with its truncation).
-            let unreachable = self.cell.state.lock(s).ip.effnlink == 0 && Arc::strong_count(o) == 1;
+            let unreachable = self.cell.lock(s).ip.effnlink == 0 && Arc::strong_count(o) == 1;
             if unreachable {
                 o.truncate(0);
             } else if shared.writable() {
@@ -1166,7 +1287,7 @@ impl Node for UfsNode {
             o.disown();
         }
         {
-            let mut st = self.cell.state.lock(s);
+            let mut st = self.cell.lock(s);
             st.nodes = st.nodes.saturating_sub(1);
             if let Ok(sum) = shared.sum() {
                 // Soft updates' work may have dropped the last link since
@@ -1254,7 +1375,7 @@ fn carry_moved(
 impl vfs::RegularNode for UfsNode {
     fn read(&self, s: &Sleepable, offset: u64, uio: &mut dyn Uio) -> Result<usize, Errno> {
         let object = self.object.as_ref().ok_or(Errno::EINVAL)?;
-        let size = self.cell.state.lock(s).ip.size;
+        let size = self.cell.lock(s).ip.size;
         vfs::pagecache::read(object, size, offset, uio)
     }
 
@@ -1284,7 +1405,7 @@ impl vfs::RegularNode for UfsNode {
         // free some, it waits for that and tries again; still out, the
         // write is short.
         for attempt in 0..2 {
-            let mut st = self.cell.state.lock(s);
+            let mut st = self.cell.lock(s);
             st.data_gen = st.data_gen.wrapping_add(1);
             old_size = st.ip.size;
             let mut sum = sum.lock(s);
@@ -1368,7 +1489,7 @@ impl vfs::RegularNode for UfsNode {
         };
         let written = vfs::pagecache::write_fresh(&object, offset, &mut capped, &fresh);
         let done = written.as_ref().map_or(0, |&n| n as u64);
-        let mut st = self.cell.state.lock(s);
+        let mut st = self.cell.lock(s);
         st.data_gen = st.data_gen.wrapping_add(1);
         let want = old_size.max(offset + done);
         if st.ip.size > want {
@@ -1442,7 +1563,7 @@ impl Uio for Capped<'_> {
 
 impl SymlinkNode for UfsNode {
     fn target(&self, s: &Sleepable) -> Result<Vec<u8>, Errno> {
-        let st = self.cell.state.lock(s);
+        let st = self.cell.lock(s);
         self.fs.ufs.readlink(s, &st.ip).map_err(errno)
     }
 }
@@ -1470,7 +1591,7 @@ fn node_of(
 ) -> Result<NodeOps, Errno> {
     let ino32 = cell.ino;
     let (kind, parent) = {
-        let mut st = cell.state.lock(s);
+        let mut st = cell.lock(s);
         let ip = &st.ip;
         if ip.mode == 0 {
             kprintln!(
@@ -1526,7 +1647,7 @@ fn node_of(
 
 impl DirectoryNode for UfsNode {
     fn lookup(&self, s: &Sleepable, name: &[u8]) -> Result<u64, Errno> {
-        let mut st = self.cell.state.lock(s);
+        let mut st = self.cell.lock(s);
         self.index(s, &mut st);
         self.fs
             .ufs
@@ -1567,7 +1688,7 @@ impl DirectoryNode for UfsNode {
             reserve: reserve_for(c.uid),
         };
         for attempt in 0..2 {
-            let mut st = self.cell.state.lock(s);
+            let mut st = self.cell.lock(s);
             self.index(s, &mut st);
             // The summary only around allocations: the soft-updates work
             // freeing inodes meanwhile need not wait out the whole create.
@@ -1623,8 +1744,8 @@ impl DirectoryNode for UfsNode {
         let mut attempt = 0;
         loop {
             r = {
-                let mut st = self.cell.state.lock(s);
-                let mut tt = target.cell.state.lock(s);
+                let mut st = self.cell.lock(s);
+                let mut tt = target.cell.lock(s);
                 let mut sum = sum.lock(s);
                 shared.ufs.link(
                     s,
@@ -1652,8 +1773,8 @@ impl DirectoryNode for UfsNode {
         shared.sum()?;
         let child = ufs_node(child.as_any_mut())?;
         let r = {
-            let mut st = self.cell.state.lock(s);
-            let mut ct = child.cell.state.lock(s);
+            let mut st = self.cell.lock(s);
+            let mut ct = child.cell.lock(s);
             let r = shared.ufs.unlink(
                 s,
                 self.cell.ino,
@@ -1681,8 +1802,8 @@ impl DirectoryNode for UfsNode {
         let sum = shared.sum()?;
         let child = ufs_node(child.as_any_mut())?;
         let r = {
-            let mut st = self.cell.state.lock(s);
-            let mut ct = child.cell.state.lock(s);
+            let mut st = self.cell.lock(s);
+            let mut ct = child.cell.lock(s);
             let mut sum = sum.lock(s);
             shared.ufs.rmdir(
                 s,
@@ -1706,7 +1827,7 @@ impl DirectoryNode for UfsNode {
         f: &mut dyn FnMut(DirEntry<'_>) -> bool,
     ) -> Result<(), Errno> {
         let ufs = &self.fs.ufs;
-        let st = self.cell.state.lock(s);
+        let st = self.cell.lock(s);
         let mut failed = None;
         ufs.read_dir(s, &st.ip, from, &mut |e| {
             let kind = match kind_of(e.kind) {
@@ -1862,7 +1983,7 @@ impl PendingFill for UfsAhead {
 
     fn commit(&self, insert: &mut dyn FnMut()) -> bool {
         let s = sleepable();
-        let st = self.cell.state.lock(&s);
+        let st = self.cell.lock(&s);
         if st.data_gen != self.data_gen {
             return false;
         }
@@ -1889,7 +2010,7 @@ impl Pager for FilePager {
         // no map lock held; the page cache in thread context).
         let s = sleepable();
         // The inode stays locked: a writer moving a fragment waits.
-        let st = self.cell.state.lock(&s);
+        let st = self.cell.lock(&s);
         let layout = self.layout(&s, &st.ip, index, buf.len())?;
         let data = if layout.parts.is_empty() {
             Vec::new()
@@ -1910,7 +2031,7 @@ impl Pager for FilePager {
         // Planned and sent under the inode lock, as a fill is; whatever
         // changes the blocks after bumps `data_gen`, and the data is
         // dropped.
-        let st = self.cell.state.lock(&s);
+        let st = self.cell.lock(&s);
         let layout = self.layout(&s, &st.ip, index, pages.len()).ok()?;
         let parts = layout
             .parts
@@ -1939,7 +2060,7 @@ impl Pager for FilePager {
         let sb = ufs.superblock();
         let bsize = u64::from(sb.bsize);
         let fsize = u64::from(sb.fsize);
-        let mut st = self.cell.state.lock(&s);
+        let mut st = self.cell.lock(&s);
         st.data_gen = st.data_gen.wrapping_add(1);
         let at = index * PAGE;
         let lbn = at / bsize;
@@ -1986,7 +2107,7 @@ impl Pager for FilePager {
                     if !shared.flush_frees(&s) {
                         return Err(PagerError);
                     }
-                    st = self.cell.state.lock(&s);
+                    st = self.cell.lock(&s);
                     st.data_gen = st.data_gen.wrapping_add(1);
                     if at >= st.ip.size {
                         return Ok(());
@@ -2013,7 +2134,7 @@ impl Pager for FilePager {
         let pages = buf.as_chunks::<PAGE_LEN>().0;
         // The inode stays locked while the run goes, as for one page: its
         // blocks cannot be freed and reused meanwhile.
-        let mut st = self.cell.state.lock(&s);
+        let mut st = self.cell.lock(&s);
         st.data_gen = st.data_gen.wrapping_add(1);
         let Some((extents, lbns)) = self.extents(&s, &st, index, pages.len())? else {
             // A hole a mapping wrote into: page by page, allocating.
@@ -2044,7 +2165,7 @@ impl Pager for FilePager {
         let pages = buf.len() / PAGE_LEN;
         // Locked until the write is claimed: the blocks stay meanwhile,
         // and whatever frees them later waits for the claim to go.
-        let mut st = self.cell.state.lock(&s);
+        let mut st = self.cell.lock(&s);
         st.data_gen = st.data_gen.wrapping_add(1);
         let Ok(Some((extents, lbns))) = self.extents(&s, &st, index, pages) else {
             return Err(buf);
