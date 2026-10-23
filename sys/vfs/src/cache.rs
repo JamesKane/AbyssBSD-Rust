@@ -59,6 +59,9 @@ const RETIRE_BATCH: usize = 256;
 /// Readers' sections, and the grace periods freeing waits for.
 static EPOCH: Epoch = Epoch::new();
 
+/// In order (`repr(C)`): the hash first, which a list walk compares at
+/// every node it passes.
+#[repr(C)]
 struct Entry {
     /// [`hash`] of the directory and the name.
     hash: u64,
@@ -66,9 +69,10 @@ struct Entry {
     /// The directory itself: an entry matches only the vnode it was made
     /// for, never a later one for the same inode.
     dir_vnode: Weak<Vnode>,
-    name: Name,
     /// `None` for a negative entry.
     target: Option<Weak<Vnode>>,
+    /// Last: the longest, compared only once the rest match.
+    name: Name,
 }
 
 impl Entry {
@@ -113,23 +117,41 @@ impl Name {
     }
 }
 
-/// An entry in a bucket's list.
+/// An entry in a bucket's list. In order (`repr(C)`): the link and then
+/// the entry's hash, so passing a node that is not the one sought reads
+/// one line.
+#[repr(C)]
 struct Node {
-    entry: Entry,
     next: AtomicPtr<Node>,
+    entry: Entry,
 }
 
-/// A bucket: a list, newest first, changed under `lock` and read under
-/// it or in an epoch section.
+/// A bucket: a list, newest first, changed under its lock ([`lock`]) and
+/// read under it or in an epoch section. Only the head, so lockless
+/// readers walk a dense table, eight heads to a line (FreeBSD's
+/// `nchashtbl`, apart from its `bucketlocks`).
 struct Bucket {
-    lock: PreemptLock<()>,
     head: AtomicPtr<Node>,
+}
+
+/// Bucket locks, each on its own line, each for every `LOCKS`th bucket:
+/// taking one dirties no line a reader of other buckets uses.
+const LOCKS: usize = 1024;
+
+#[repr(align(64))]
+struct BucketLock(PreemptLock<()>);
+
+static BUCKET_LOCKS: [BucketLock; LOCKS] = [const { BucketLock(PreemptLock::new(())) }; LOCKS];
+
+/// Bucket `i`'s lock. No one holds two bucket locks, so buckets that share
+/// one cannot deadlock.
+fn lock(i: usize) -> PreemptLockGuard<'static, ()> {
+    BUCKET_LOCKS[i % LOCKS].0.lock()
 }
 
 impl Bucket {
     const fn new() -> Self {
         Self {
-            lock: PreemptLock::new(()),
             head: AtomicPtr::new(ptr::null_mut()),
         }
     }
@@ -382,8 +404,18 @@ pub(crate) fn hash_name(mut h: u64, name: &[u8]) -> u64 {
 }
 
 /// The bucket for hash `h`: its high bits, the well-mixed ones.
+fn bucket_index(h: u64) -> usize {
+    usize::try_from(h >> (u64::BITS - BUCKET_BITS)).unwrap_or(0)
+}
+
 fn bucket(h: u64) -> &'static Bucket {
-    &TABLE[usize::try_from(h >> (u64::BITS - BUCKET_BITS)).unwrap_or(0)]
+    &TABLE[bucket_index(h)]
+}
+
+/// The bucket for hash `h`, locked.
+fn locked(h: u64) -> (&'static Bucket, PreemptLockGuard<'static, ()>) {
+    let i = bucket_index(h);
+    (&TABLE[i], lock(i))
 }
 
 /// Vnodes let go, and retired nodes freed, once no bucket lock is held;
@@ -494,8 +526,7 @@ pub fn enter(dir: &Arc<Vnode>, name: &[u8], target: Option<&Arc<Vnode>>) {
     let dp = Arc::as_ptr(dir);
     let mut held = Held::default();
     {
-        let b = bucket(h);
-        let locked = b.lock.lock();
+        let (b, locked) = locked(h);
         if let Some(old) = b.unlink_first(&locked, |n| n.entry.is(h, dp, id, name)) {
             forget(old, true, true, &mut held);
         }
@@ -541,8 +572,7 @@ pub fn remove(dir: &Vnode, name: &[u8]) {
     let h = hash(id, name);
     let mut held = Held::default();
     {
-        let b = bucket(h);
-        let locked = b.lock.lock();
+        let (b, locked) = locked(h);
         if let Some(old) = b.unlink_first(&locked, |n| n.entry.is(h, dir, id, name)) {
             forget(old, true, true, &mut held);
         }
@@ -557,8 +587,7 @@ pub fn purge(v: &Vnode) {
     let mut held = Held::default();
     let at = |n: &Node, k: Key| ptr::from_ref(n).addr() == k.node;
     for k in src {
-        let b = bucket(k.hash);
-        let locked = b.lock.lock();
+        let (b, locked) = locked(k.hash);
         if let Some(old) = b.unlink_first(&locked, |n| {
             at(n, k) && ptr::eq(n.entry.dir_vnode.as_ptr(), v)
         }) {
@@ -566,8 +595,7 @@ pub fn purge(v: &Vnode) {
         }
     }
     for k in dst {
-        let b = bucket(k.hash);
-        let locked = b.lock.lock();
+        let (b, locked) = locked(k.hash);
         if let Some(old) = b.unlink_first(&locked, |n| at(n, k) && n.entry.names(v)) {
             forget(old, true, false, &mut held);
         }
@@ -586,10 +614,10 @@ pub fn purge_fs(fs: u64) {
                 .as_ref()
                 .is_some_and(|t| t.upgrade().is_none_or(|t| t.mount().id == fs))
     };
-    for b in &TABLE {
+    for (i, b) in TABLE.iter().enumerate() {
         let mut held = Held::default();
         {
-            let locked = b.lock.lock();
+            let locked = lock(i);
             while let Some(old) = b.unlink_first(&locked, doomed) {
                 forget(old, true, true, &mut held);
             }
