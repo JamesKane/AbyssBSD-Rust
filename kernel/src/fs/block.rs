@@ -157,7 +157,7 @@ pub(crate) struct DiskIo {
     pub(crate) cache: BufCache,
     pub(crate) disk: Arc<storage::Disk>,
     /// With soft updates (UFS), the tracker its writes report to.
-    deps: SpinLock<Option<Arc<SoftDeps>>>,
+    deps: sync::Once<Arc<SoftDeps>>,
     /// UFS's cylinder-group check-hashes are kept by the cache's hook.
     groups_hashed: AtomicBool,
 }
@@ -167,7 +167,7 @@ impl DiskIo {
         Self {
             cache: cache(Arc::clone(&disk), limits()),
             disk,
-            deps: SpinLock::new(None),
+            deps: sync::Once::new(),
             groups_hashed: AtomicBool::new(false),
         }
     }
@@ -176,7 +176,10 @@ impl DiskIo {
     /// groups' check-hashes kept here, and with `deps` (soft updates),
     /// its writes ordered by that tracker.
     pub(crate) fn use_ufs(&self, sb: &ufs::Superblock, deps: Option<&Arc<SoftDeps>>) {
-        *self.deps.lock() = deps.cloned();
+        if let Some(d) = deps {
+            // Once, at mount: read on every soft-updates step, unlocked.
+            let _ = self.deps.set(Arc::clone(d));
+        }
         self.cache.set_hook(Arc::new(UfsHook {
             sb: sb.clone(),
             deps: deps.cloned(),
@@ -185,8 +188,8 @@ impl DiskIo {
     }
 
     /// The soft-updates tracker, if writes go through one.
-    pub(crate) fn deps(&self) -> Option<Arc<SoftDeps>> {
-        self.deps.lock().clone()
+    pub(crate) fn deps(&self) -> Option<&Arc<SoftDeps>> {
+        self.deps.get()
     }
 
     /// The sector-aligned span covering `[offset, offset + len)`.
@@ -286,7 +289,7 @@ impl DiskIo {
             .iter()
             .map(|(at, data)| (*at, u64::try_from(data.len()).unwrap_or(0)))
             .collect();
-        let deps = self.deps();
+        let deps = self.deps().cloned();
         // The parts left, whether all went well, and what to run after.
         type Done = alloc::boxed::Box<dyn FnOnce(bool) + Send>;
         let left: Arc<SpinLock<(usize, bool, Option<Done>)>> = Arc::new(SpinLock::new((

@@ -38,6 +38,8 @@
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec::Vec;
 
+use intmap::{IntKey, IntMap};
+
 use crate::inode::{self, raw};
 use crate::sb::{CK_INODE, Superblock};
 use crate::{NDIRECT, NIADDR, idx, len64};
@@ -50,6 +52,12 @@ pub struct Removal(Vec<Wait>);
 /// An item's number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Id(u64);
+
+impl IntKey for Id {
+    fn bits(self) -> u64 {
+        self.0
+    }
+}
 
 /// Items waiting for writes after stamps.
 type Watchers = Vec<(Stamp, Id)>;
@@ -213,22 +221,22 @@ pub struct Deps {
     sb: Superblock,
     seq: u64,
     next: u64,
-    items: BTreeMap<Id, Item>,
-    buf_watch: BTreeMap<u64, Vec<(Stamp, Id)>>,
-    item_watch: BTreeMap<Id, Vec<Id>>,
+    items: IntMap<Id, Item>,
+    buf_watch: IntMap<u64, Vec<(Stamp, Id)>>,
+    item_watch: IntMap<Id, Vec<Id>>,
     covers: BTreeMap<(u64, Id), Cover>,
     /// The latest allocation of each block.
-    by_bno: BTreeMap<u64, Id>,
-    unplaced: BTreeMap<u64, Id>,
+    by_bno: IntMap<u64, Id>,
+    unplaced: IntMap<u64, Id>,
     slots: BTreeMap<Slot, Vec<Id>>,
-    owned: BTreeMap<u32, BTreeSet<Id>>,
-    inodes: BTreeMap<u32, InodeDep>,
-    inode_blocks: BTreeMap<u64, BTreeSet<u32>>,
+    owned: IntMap<u32, BTreeSet<Id>>,
+    inodes: IntMap<u32, InodeDep>,
+    inode_blocks: IntMap<u64, BTreeSet<u32>>,
     dir_blocks: BTreeMap<(u32, u64), DirBlock>,
-    dir_at: BTreeMap<u64, (u32, u64)>,
+    dir_at: IntMap<u64, (u32, u64)>,
     entries: BTreeMap<(u64, u32), Vec<Id>>,
-    named: BTreeMap<u32, BTreeSet<Id>>,
-    inflight: BTreeMap<u64, Inflight>,
+    named: IntMap<u32, BTreeSet<Id>>,
+    inflight: IntMap<u64, Inflight>,
     /// Indirect blocks written since mounting (their buffers), and those
     /// whose last write held no pointers: a pointer to one of those never
     /// goes out (a file's size past its last block on the disk is cut
@@ -248,21 +256,21 @@ impl Deps {
             sb: sb.clone(),
             seq: 0,
             next: 0,
-            items: BTreeMap::new(),
-            buf_watch: BTreeMap::new(),
-            item_watch: BTreeMap::new(),
+            items: IntMap::new(),
+            buf_watch: IntMap::new(),
+            item_watch: IntMap::new(),
             covers: BTreeMap::new(),
-            by_bno: BTreeMap::new(),
-            unplaced: BTreeMap::new(),
+            by_bno: IntMap::new(),
+            unplaced: IntMap::new(),
             slots: BTreeMap::new(),
-            owned: BTreeMap::new(),
-            inodes: BTreeMap::new(),
-            inode_blocks: BTreeMap::new(),
+            owned: IntMap::new(),
+            inodes: IntMap::new(),
+            inode_blocks: IntMap::new(),
             dir_blocks: BTreeMap::new(),
-            dir_at: BTreeMap::new(),
+            dir_at: IntMap::new(),
             entries: BTreeMap::new(),
-            named: BTreeMap::new(),
-            inflight: BTreeMap::new(),
+            named: IntMap::new(),
+            inflight: IntMap::new(),
             indirects: BTreeSet::new(),
             empty: BTreeSet::new(),
             work: VecDeque::new(),

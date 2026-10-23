@@ -38,6 +38,7 @@ members = [
     "lib/font",
     "lib/gpt",
     "lib/guid",
+    "lib/intmap",
     "lib/ktest",
     "lib/logring",
     "lib/pt",
