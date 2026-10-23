@@ -18,8 +18,10 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
+use core::sync::atomic::{AtomicI64, AtomicU8, Ordering};
 
 use abi::errno::Errno;
+use abi::time::Timespec;
 use intmap::IntMap;
 use sched::Sleepable;
 use sync::PreemptLock;
@@ -154,6 +156,57 @@ struct TmpNode {
     fs: Arc<Shared>,
     /// Freed by `inactive` (unlinked): `reclaim` drops it.
     freed: bool,
+    /// A write's times, stamped when first asked for (FreeBSD's
+    /// `TMPFS_NODE_MODIFIED`, settled by `tmpfs_itimes`), so a write
+    /// reads no clock.
+    pending: Pending,
+}
+
+/// A write's modification and change times, not yet in a node's `attr`:
+/// due (no clock read yet), then stamped once, which readers under the
+/// vnode's shared lock then read with no lock. Writers hold the vnode
+/// exclusively, so they change it with plain stores.
+struct Pending {
+    state: AtomicU8,
+    sec: AtomicI64,
+    nsec: AtomicI64,
+    /// Taken only to stamp, so that readers agree on one time.
+    stamping: PreemptLock<()>,
+}
+
+const NONE: u8 = 0;
+const DUE: u8 = 1;
+const STAMPED: u8 = 2;
+
+impl Pending {
+    const fn new() -> Self {
+        Self {
+            state: AtomicU8::new(NONE),
+            sec: AtomicI64::new(0),
+            nsec: AtomicI64::new(0),
+            stamping: PreemptLock::new(()),
+        }
+    }
+
+    /// The pending times, stamping them if due; `None` if there are none.
+    fn get(&self) -> Option<Timespec> {
+        let mut state = self.state.load(Ordering::Acquire);
+        if state == DUE {
+            let _stamping = self.stamping.lock();
+            state = self.state.load(Ordering::Acquire);
+            if state == DUE {
+                let t = now();
+                self.sec.store(t.tv_sec, Ordering::Relaxed);
+                self.nsec.store(t.tv_nsec, Ordering::Relaxed);
+                self.state.store(STAMPED, Ordering::Release);
+                return Some(t);
+            }
+        }
+        (state == STAMPED).then(|| Timespec {
+            tv_sec: self.sec.load(Ordering::Relaxed),
+            tv_nsec: self.nsec.load(Ordering::Relaxed),
+        })
+    }
 }
 
 /// The state every node of one mount shares.
@@ -208,6 +261,7 @@ impl TmpFs {
             data: Data::Directory(Dir::new(ROOT_INO)),
             fs: Arc::clone(&shared),
             freed: false,
+            pending: Pending::new(),
         });
         shared.nodes.lock().insert(ROOT_INO, root);
         Self { shared }
@@ -233,6 +287,16 @@ impl TmpNode {
         }
     }
 
+    /// A write's pending times go into `attr`, before anything else sets
+    /// them.
+    fn settle(&mut self) {
+        if let Some(t) = self.pending.get() {
+            self.attr.mtime = t;
+            self.attr.ctime = t;
+            *self.pending.state.get_mut() = NONE;
+        }
+    }
+
     /// The directory's contents changed.
     fn touch_dir(&mut self) {
         let t = now();
@@ -244,6 +308,10 @@ impl TmpNode {
 impl Node for TmpNode {
     fn attr(&self) -> Attr {
         let mut a = self.attr;
+        if let Some(t) = self.pending.get() {
+            a.mtime = t;
+            a.ctime = t;
+        }
         a.size = match &self.data {
             Data::Regular(_, size) => *size,
             Data::Symlink(v) => v.len() as u64,
@@ -256,6 +324,7 @@ impl Node for TmpNode {
     }
 
     fn setattr(&mut self, _s: &Sleepable, a: &SetAttr) -> Result<(), Errno> {
+        self.settle();
         let t = now();
         if let Some(size) = a.size {
             let Data::Regular(object, cur) = &mut self.data else {
@@ -359,9 +428,8 @@ impl RegularNode for TmpNode {
         let new = (*size).max(offset + n as u64);
         usage(&self.fs, new, *size);
         *size = new;
-        let t = now();
-        self.attr.mtime = t;
-        self.attr.ctime = t;
+        // Under the vnode's exclusive lock: no reader is looking.
+        *self.pending.state.get_mut() = DUE;
         Ok(n)
     }
 
@@ -448,6 +516,7 @@ impl DirectoryNode for TmpNode {
             data,
             fs: Arc::clone(&self.fs),
             freed: false,
+            pending: Pending::new(),
         });
         {
             let mut u = self.fs.usage.lock();
@@ -476,6 +545,7 @@ impl DirectoryNode for TmpNode {
         if t.attr.nlink >= LINK_MAX {
             return Err(Errno::EMLINK);
         }
+        t.settle();
         t.attr.nlink += 1;
         t.attr.ctime = now();
         let kind = t.kind;
@@ -486,6 +556,7 @@ impl DirectoryNode for TmpNode {
 
     fn remove(&mut self, _s: &Sleepable, name: &[u8], child: &mut dyn Node) -> Result<(), Errno> {
         let c = downcast(child)?;
+        c.settle();
         dir_mut(self)?.remove(name).ok_or(Errno::ENOENT)?;
         c.attr.nlink -= 1;
         c.attr.ctime = now();
@@ -629,6 +700,7 @@ impl FileSystem for TmpFs {
             } else {
                 old.attr.nlink -= 1;
             }
+            old.settle();
             old.attr.ctime = t;
         }
         dir_mut(from_dir)?
@@ -654,6 +726,7 @@ impl FileSystem for TmpFs {
         if let Data::Directory(d) = &mut from.data {
             d.parent = to_dir_ino;
         }
+        from.settle();
         from.attr.ctime = t;
         Ok(())
     }

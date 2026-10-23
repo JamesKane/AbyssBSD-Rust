@@ -433,6 +433,11 @@ impl Process {
         Arc::clone(&self.cred.lock())
     }
 
+    /// Whether its credential is the superuser's.
+    pub(crate) fn is_root(&self) -> bool {
+        self.cred.lock().is_root()
+    }
+
     /// Changes its credential as `change` says, from the current one; the
     /// process is then set-id tainted. Only its own thread changes it.
     pub(crate) fn change_cred(

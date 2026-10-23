@@ -59,10 +59,17 @@ pub(crate) fn now() -> Timespec {
     }
 }
 
+/// Whether [`cred`] is the superuser's, taking no reference to it.
+pub(crate) fn cred_is_root() -> bool {
+    crate::proc::Process::with_current(crate::proc::Process::is_root).unwrap_or(true)
+}
+
 /// The credential file operations run with: the current process's, or
 /// the superuser's for kernel threads.
 pub(crate) fn cred() -> Arc<Ucred> {
-    crate::proc::Process::current().map_or_else(Ucred::root_shared, |p| p.cred())
+    // The process borrowed, not referenced: one count taken, not two.
+    crate::proc::Process::with_current(crate::proc::Process::cred)
+        .unwrap_or_else(Ucred::root_shared)
 }
 
 fn root_info(from: &[u8]) -> MountInfo {

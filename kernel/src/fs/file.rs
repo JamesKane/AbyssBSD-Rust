@@ -351,7 +351,7 @@ impl File {
 /// After `written` bytes went into the file, by anyone but the superuser:
 /// its set-id bits go (FreeBSD's `ffs_write`, `tmpfs_write`).
 fn clear_set_id(s: &Sleepable, v: &Vnode, written: usize) -> Result<(), Errno> {
-    if written == 0 || super::cred().is_root() {
+    if written == 0 || super::cred_is_root() {
         return Ok(());
     }
     let mode = v.attr(s)?.mode;
