@@ -71,15 +71,16 @@ impl NewKind<'_> {
 }
 
 /// Who makes a file, and when.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub struct Maker {
     /// Permission bits (already masked).
     pub perm: u16,
     pub uid: u32,
     pub gid: u32,
     pub now: Timestamp,
-    /// For the generation number.
-    pub random: u32,
+    /// A random number, for the generation numbers of inodes that need a
+    /// new one (rarely: a new inode's is its last one plus one).
+    pub random: fn() -> u32,
     pub reserve: Reserve,
 }
 
@@ -200,7 +201,7 @@ impl<B: BlockIo> Ufs<B> {
         // A new generation number, never 0 (FreeBSD's `ffs_valloc`).
         let mut generation = ip.generation.wrapping_add(1);
         if generation == 0 {
-            generation = who.random | 1;
+            generation = (who.random)() | 1;
         }
         let raw = ip.raw;
         ip = Inode {

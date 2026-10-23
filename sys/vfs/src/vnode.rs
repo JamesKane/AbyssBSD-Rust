@@ -451,6 +451,14 @@ impl Vnode {
     /// unlinked file, and an unlinked vnode is reclaimed at once, since no
     /// name can find it again.
     fn inactive(self: &Arc<Self>, s: &Sleepable) {
+        // An unlink racing this sees no use left and comes here itself.
+        if !self
+            .read(s)
+            .live()
+            .is_ok_and(|ops| ops.node().need_inactive(s))
+        {
+            return;
+        }
         let unlinked = {
             let mut st = self.write(s);
             let Ok(ops) = st.live_mut() else {

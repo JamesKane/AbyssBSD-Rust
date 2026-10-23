@@ -174,6 +174,13 @@ pub trait Node: Send + Sync + Any {
         Ok(())
     }
 
+    /// Whether the last use going leaves [`Self::inactive`] work (FreeBSD's
+    /// `VOP_NEED_INACTIVE`): asked with the vnode only shared, so most
+    /// last closes take no exclusive lock.
+    fn need_inactive(&self, _s: &Sleepable) -> bool {
+        true
+    }
+
     /// The last use of the vnode went: free the node's storage if it is
     /// unlinked (it is reclaimed next).
     fn inactive(&mut self, _s: &Sleepable) {}

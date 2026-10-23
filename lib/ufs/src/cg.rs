@@ -354,33 +354,40 @@ impl<'a> Cg<'a> {
     pub(crate) fn mapsearch(&mut self, start: u32, allocsiz: u32, fpg: u32) -> Option<u32> {
         let bytes = fpg.div_ceil(8);
         let first = (start / 8).min(bytes.saturating_sub(1));
-        let order = (first..bytes).chain(0..=first);
         let want = RUN_BIT.get(idx(allocsiz)).copied().unwrap_or(0);
         let mask = 0xff_u32 >> (8 - self.frag);
         let map = &self.b[self.freeoff()..];
         let mut found = None;
-        for byte in order {
-            let bits = u32::from(map[idx(byte)]);
-            // Most bytes hold no run of the size: one lookup each.
-            if RUNS[idx(bits)] & want == 0 && self.frag == 8 {
-                continue;
-            }
-            let base = byte * 8;
-            // The blocks this byte covers (one, or several small ones).
-            let mut bno = base;
-            while bno < base + 8 {
-                let block = (bits >> (bno % 8)) & mask;
-                if bno + self.frag <= fpg
-                    && RUNS[idx(block)] & want != 0
-                    && let Some(pos) = exact_run(block, self.frag, allocsiz)
-                {
-                    found = Some((base, bno + pos));
-                    break;
+        'scan: for (lo, hi) in [(first, bytes), (0, first + 1)] {
+            let mut byte = lo;
+            while byte < hi {
+                // Eight bytes with nothing free at once: a full group's
+                // map is mostly those.
+                if byte % 8 == 0 && byte + 8 <= hi && map[idx(byte)..idx(byte + 8)] == [0; 8] {
+                    byte += 8;
+                    continue;
                 }
-                bno += self.frag;
-            }
-            if found.is_some() {
-                break;
+                let bits = u32::from(map[idx(byte)]);
+                // Most bytes hold no run of the size: one lookup each.
+                if RUNS[idx(bits)] & want == 0 && self.frag == 8 {
+                    byte += 1;
+                    continue;
+                }
+                let base = byte * 8;
+                // The blocks this byte covers (one, or several small ones).
+                let mut bno = base;
+                while bno < base + 8 {
+                    let block = (bits >> (bno % 8)) & mask;
+                    if bno + self.frag <= fpg
+                        && RUNS[idx(block)] & want != 0
+                        && let Some(pos) = exact_run(block, self.frag, allocsiz)
+                    {
+                        found = Some((base, bno + pos));
+                        break 'scan;
+                    }
+                    bno += self.frag;
+                }
+                byte += 1;
             }
         }
         let (base, bno) = found?;

@@ -400,7 +400,7 @@ impl Model {
     }
 }
 
-fn maker(rng: &mut Rng, reserve: Reserve) -> ops::Maker {
+fn maker(_rng: &mut Rng, reserve: Reserve) -> ops::Maker {
     ops::Maker {
         perm: 0o644,
         uid: 1001,
@@ -409,7 +409,7 @@ fn maker(rng: &mut Rng, reserve: Reserve) -> ops::Maker {
             sec: 1_760_000_000,
             nsec: 0,
         },
-        random: rng.next() as u32,
+        random: || 0x5eed_1234,
         reserve,
     }
 }

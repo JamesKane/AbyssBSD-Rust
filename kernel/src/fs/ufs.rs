@@ -1094,6 +1094,14 @@ impl Node for UfsNode {
         Ok(())
     }
 
+    fn need_inactive(&self, s: &Sleepable) -> bool {
+        // Unlinked as the vnode sees it (`attr`'s count): with soft
+        // updates the count on the disk drops later, and the vnode is
+        // reclaimed now so that drop frees the inode.
+        let st = self.cell.state.lock(s);
+        st.ip.effnlink == 0 || (st.ip.nlink == 0 && st.ip.mode != 0)
+    }
+
     fn inactive(&mut self, s: &Sleepable) {
         let shared = Arc::clone(&self.fs);
         let Ok(sum) = shared.sum() else {
@@ -1537,7 +1545,7 @@ impl DirectoryNode for UfsNode {
             uid: c.uid,
             gid: c.gid,
             now: stamp(c.time),
-            random: random(),
+            random,
             reserve: reserve_for(c.uid),
         };
         for attempt in 0..2 {

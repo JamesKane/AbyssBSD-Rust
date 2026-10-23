@@ -799,7 +799,7 @@ impl<B: BlockIo> Ufs<B> {
 
     /// Allocates an inode for a file of `mode` made in directory
     /// `parent_ino` (FreeBSD's `ffs_valloc`), returning its number; the
-    /// caller fills in and writes the inode. `random` seeds the generation
+    /// caller fills in and writes the inode. `random`, called only then, seeds the generation
     /// numbers of inode blocks initialized on the way.
     pub fn valloc(
         &self,
@@ -808,7 +808,7 @@ impl<B: BlockIo> Ufs<B> {
         parent_ino: u32,
         parent: &Inode,
         mode: u16,
-        random: u32,
+        random: fn() -> u32,
     ) -> Result<u32, Error> {
         match self.valloc_once(cx, sum, parent_ino, parent, mode, random) {
             Err(Error::NoSpace) if self.reclaim(cx, sum) => {
@@ -825,7 +825,7 @@ impl<B: BlockIo> Ufs<B> {
         parent_ino: u32,
         parent: &Inode,
         mode: u16,
-        random: u32,
+        random: fn() -> u32,
     ) -> Result<u32, Error> {
         let sb = &self.sb;
         if sum.totals.nifree == 0 {
@@ -867,7 +867,7 @@ impl<B: BlockIo> Ufs<B> {
         cg: u32,
         ipref: u32,
         is_dir: bool,
-        random: u32,
+        random: fn() -> u32,
     ) -> Result<Option<u32>, Error> {
         let sb = &self.sb;
         loop {
@@ -905,7 +905,7 @@ impl<B: BlockIo> Ufs<B> {
                     // Zero the next inode block, with fresh generation
                     // numbers, and write it before the group claims it.
                     let (offset, _) = sb.inode_location(cg * sb.ipg + inited);
-                    let mut seed = random | 1;
+                    let mut seed = random() | 1;
                     self.io.modify(
                         cx,
                         offset,

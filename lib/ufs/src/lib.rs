@@ -222,6 +222,10 @@ impl BlockIo for [u8] {
 // a block), so on the 32- and 64-bit targets built for none of them can
 // truncate; they saturate rather than wrap if one ever did.
 
+/// Bytes of a directory block [`Ufs::read_dir`] copies at a time: a page
+/// of chunks.
+const READ_DIR_WINDOW: usize = 4096;
+
 /// A `u32` as an index.
 pub(crate) fn idx(x: u32) -> usize {
     usize::try_from(x).unwrap_or(usize::MAX)
@@ -538,38 +542,40 @@ impl<B: BlockIo> Ufs<B> {
         }
         let sb = &self.sb;
         let bsize = u64::from(sb.bsize);
+        let chunk = len64(dir::DIRBLKSIZ);
+        // A window of the block at a time, copied out so `f` may use the
+        // disk: a reader that takes a few entries (`getdirentries` fills
+        // a page) copies a few chunks, not the whole block.
+        let mut window = Vec::with_capacity(READ_DIR_WINDOW);
         // From the start of the chunk holding `start`: entries never cross
         // one, so skipping those before `start` resynchronizes.
         let mut lbn = start / bsize;
         while lbn * bsize < dir.size {
             let size = idx(sb.block_size(dir.size, lbn));
             let base = lbn * bsize;
-            let mut block = Vec::new();
-            match self.bmap(cx, dir, lbn)? {
+            let addr = match self.bmap(cx, dir, lbn)? {
                 0 => return Err(Error::Corrupt("hole in a directory")),
-                addr => self
-                    .io
-                    .read(cx, addr * u64::from(sb.fsize), size, &mut |b| {
-                        block = b.to_vec();
-                    })?,
-            }
-            let chunk = len64(dir::DIRBLKSIZ);
-            let skip = start.saturating_sub(base) / chunk * chunk;
+                addr => addr * u64::from(sb.fsize),
+            };
             let limit = usize::try_from((dir.size - base).min(len64(size))).unwrap_or(size);
-            let mut more = true;
-            dir::entries(
-                &block[..limit],
-                base,
-                usize::try_from(skip).unwrap_or(0),
-                &mut |e| {
+            let mut from = usize::try_from(start.saturating_sub(base) / chunk * chunk).unwrap_or(0);
+            while from < limit {
+                let to = (from + READ_DIR_WINDOW).min(limit);
+                window.clear();
+                self.io.read(cx, addr, size, &mut |b| {
+                    window.extend_from_slice(&b[from..to]);
+                })?;
+                let mut more = true;
+                dir::entries(&window, base + len64(from), 0, &mut |e| {
                     if e.offset >= start && more {
                         more = f(e);
                     }
                     more
-                },
-            )?;
-            if !more {
-                return Ok(());
+                })?;
+                if !more {
+                    return Ok(());
+                }
+                from = to;
             }
             lbn += 1;
         }

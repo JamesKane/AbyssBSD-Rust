@@ -297,6 +297,10 @@ impl Node for TmpNode {
         Ok(())
     }
 
+    fn need_inactive(&self, _s: &Sleepable) -> bool {
+        self.attr.nlink == 0 && !self.freed
+    }
+
     fn inactive(&mut self, _s: &Sleepable) {
         if self.attr.nlink == 0 && !self.freed {
             let bytes = match &self.data {
