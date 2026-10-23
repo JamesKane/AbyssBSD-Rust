@@ -47,8 +47,27 @@ pub struct IntMap<K, V> {
 /// One open-addressed table.
 #[derive(Clone)]
 struct Table<K, V> {
+    /// A byte per slot: [`EMPTY`], or [`FULL`] and seven bits of its key's
+    /// hash. Probes scan these, 64 to a cache line, and look at a slot
+    /// only when its seven bits match (SwissTable's control bytes).
+    tags: Vec<u8>,
     slots: Vec<Option<(K, V)>>,
     len: usize,
+}
+
+const EMPTY: u8 = 0;
+const FULL: u8 = 0x80;
+
+/// Hash `h`'s tag: bits that pick neither the shard nor the slot.
+fn tag(h: u64) -> u8 {
+    FULL | u8::try_from((h >> 24) & 0x7f).unwrap_or(0)
+}
+
+/// Where a probe for a key ended.
+enum Probe {
+    Found(usize),
+    /// Not there: the empty slot that ended the probe.
+    Vacant(usize),
 }
 
 impl<K: IntKey, V> Default for IntMap<K, V> {
@@ -78,6 +97,7 @@ fn hash<K: IntKey>(key: K) -> u64 {
 impl<K: IntKey, V> Table<K, V> {
     const fn new() -> Self {
         Self {
+            tags: Vec::new(),
             slots: Vec::new(),
             len: 0,
         }
@@ -90,65 +110,97 @@ impl<K: IntKey, V> Table<K, V> {
         usize::try_from((h << SHARD_BITS) >> (64 - bits)).unwrap_or(0)
     }
 
-    /// The slot holding `key`, if any.
-    fn find(&self, key: K, h: u64) -> Option<usize> {
-        let n = self.slots.len();
+    /// Where `key` is, or the empty slot its probe ended at (`None` for
+    /// a table with no slots).
+    fn probe(&self, key: K, h: u64) -> Option<Probe> {
+        let n = self.tags.len();
         if n == 0 {
             return None;
         }
+        let t = tag(h);
         let mut i = Self::home(h, n);
         loop {
-            match &self.slots[i] {
-                None => return None,
-                Some((k, _)) if *k == key => return Some(i),
-                Some(_) => i = (i + 1) & (n - 1),
+            match self.tags[i] {
+                EMPTY => return Some(Probe::Vacant(i)),
+                x if x == t && matches!(&self.slots[i], Some((k, _)) if *k == key) => {
+                    return Some(Probe::Found(i));
+                }
+                _ => i = (i + 1) & (n - 1),
             }
         }
     }
 
-    /// Room for one more at most three quarters full.
-    fn reserve_one(&mut self) {
-        let n = self.slots.len();
-        if (self.len + 1) * 4 <= n * 3 {
-            return;
+    /// The slot holding `key`, if any.
+    fn find(&self, key: K, h: u64) -> Option<usize> {
+        match self.probe(key, h)? {
+            Probe::Found(i) => Some(i),
+            Probe::Vacant(_) => None,
         }
-        let bigger = (n * 2).max(FIRST);
+    }
+
+    /// Whether one more fits at most three quarters full.
+    fn has_room(&self) -> bool {
+        (self.len + 1) * 4 <= self.tags.len() * 3
+    }
+
+    /// Doubles the table.
+    fn grow(&mut self) {
+        let bigger = (self.tags.len() * 2).max(FIRST);
         let old = core::mem::take(&mut self.slots);
+        self.tags = alloc::vec![EMPTY; bigger];
         self.slots.resize_with(bigger, || None);
         for (k, v) in old.into_iter().flatten() {
-            let i = self.free_slot(hash(k));
-            self.slots[i] = Some((k, v));
+            let h = hash(k);
+            let i = self.free_slot(h);
+            self.fill(i, h, k, v);
         }
     }
 
     /// The first empty slot on hash `h`'s probe path.
     fn free_slot(&self, h: u64) -> usize {
-        let n = self.slots.len();
+        let n = self.tags.len();
         let mut i = Self::home(h, n);
-        while self.slots[i].is_some() {
+        while self.tags[i] != EMPTY {
             i = (i + 1) & (n - 1);
         }
         i
     }
 
-    /// Puts `key` (not there) in, returning its slot.
-    fn put(&mut self, key: K, h: u64, value: V) -> usize {
-        self.reserve_one();
-        let i = self.free_slot(h);
+    fn fill(&mut self, i: usize, h: u64, key: K, value: V) {
+        self.tags[i] = tag(h);
         self.slots[i] = Some((key, value));
+    }
+
+    /// Puts `key` (not there) in, returning its slot: `vacant` if a probe
+    /// just ended there and the table need not grow.
+    fn put(&mut self, key: K, h: u64, value: V, vacant: Option<usize>) -> usize {
+        let i = match vacant {
+            Some(i) if self.has_room() => i,
+            _ => {
+                if !self.has_room() {
+                    self.grow();
+                }
+                self.free_slot(h)
+            }
+        };
+        self.fill(i, h, key, value);
         self.len += 1;
         i
     }
 
     fn remove(&mut self, key: K, h: u64) -> Option<V> {
-        let n = self.slots.len();
+        let n = self.tags.len();
         let mut hole = self.find(key, h)?;
         let (_, value) = self.slots[hole].take()?;
+        self.tags[hole] = EMPTY;
         self.len -= 1;
         // Shift back what follows in the cluster, so no probe path breaks
         // at the hole (no tombstones).
         let mut i = (hole + 1) & (n - 1);
-        while let Some((k, _)) = &self.slots[i] {
+        while self.tags[i] != EMPTY {
+            let Some((k, _)) = &self.slots[i] else {
+                unreachable!("a full tag's slot is filled");
+            };
             let home = Self::home(hash(*k), n);
             // Whether `home` lies cyclically in (hole, i]: then it stays.
             let stays = if hole <= i {
@@ -158,6 +210,8 @@ impl<K: IntKey, V> Table<K, V> {
             };
             if !stays {
                 self.slots[hole] = self.slots[i].take();
+                self.tags[hole] = self.tags[i];
+                self.tags[i] = EMPTY;
                 hole = i;
             }
             i = (i + 1) & (n - 1);
@@ -206,7 +260,7 @@ impl<K: IntKey, V> IntMap<K, V> {
             for (k, v) in t.slots.into_iter().flatten() {
                 let h = hash(k);
                 let s = self.shard(h);
-                self.tables[s].put(k, h, v);
+                self.tables[s].put(k, h, v, None);
             }
         }
     }
@@ -239,33 +293,57 @@ impl<K: IntKey, V> IntMap<K, V> {
         Entry { map: self, key }
     }
 
-    /// Puts `key` (not there) in: its table and slot.
-    fn put(&mut self, key: K, value: V) -> (usize, usize) {
+    /// Where `key` is, or where a probe for it ended: its table, and
+    /// the probe's end (`None` for a table with no slots).
+    fn probe(&self, key: K, h: u64) -> (usize, Option<Probe>) {
+        let s = self.shard(h);
+        (s, self.tables.get(s).and_then(|t| t.probe(key, h)))
+    }
+
+    /// Puts `key` (not there) in: its table and slot. `vacant` is where
+    /// a probe for it in table `s` just ended.
+    fn put(&mut self, key: K, h: u64, value: V, s: usize, vacant: Option<usize>) -> (usize, usize) {
+        let hint = if self.tables.len() == SHARDS || self.len + 1 < SPLIT {
+            vacant
+        } else {
+            None
+        };
         self.maybe_split();
         if self.tables.is_empty() {
             self.tables.push(Table::new());
         }
-        let h = hash(key);
-        let s = self.shard(h);
-        let i = self.tables[s].put(key, h, value);
+        let s = if hint.is_some() { s } else { self.shard(h) };
+        let i = self.tables[s].put(key, h, value, hint);
         self.len += 1;
         (s, i)
     }
 
     /// Puts `value` under `key`, returning the value it replaces.
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
-        if let Some(old) = self.get_mut(&key) {
-            return Some(core::mem::replace(old, value));
+        let h = hash(key);
+        match self.probe(key, h) {
+            (s, Some(Probe::Found(i))) => {
+                let (_, old) = self.tables[s].slots[i].as_mut()?;
+                Some(core::mem::replace(old, value))
+            }
+            (s, Some(Probe::Vacant(i))) => {
+                self.put(key, h, value, s, Some(i));
+                None
+            }
+            (s, None) => {
+                self.put(key, h, value, s, None);
+                None
+            }
         }
-        self.put(key, value);
-        None
     }
 
     /// The value under `key`, put there by `make` if there was none.
     pub fn get_or_insert_with(&mut self, key: K, make: impl FnOnce() -> V) -> &mut V {
-        let (s, i) = match self.find(key) {
-            Some(at) => at,
-            None => self.put(key, make()),
+        let h = hash(key);
+        let (s, i) = match self.probe(key, h) {
+            (s, Some(Probe::Found(i))) => (s, i),
+            (s, Some(Probe::Vacant(i))) => self.put(key, h, make(), s, Some(i)),
+            (s, None) => self.put(key, h, make(), s, None),
         };
         match &mut self.tables[s].slots[i] {
             Some((_, v)) => v,

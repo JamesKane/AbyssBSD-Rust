@@ -41,7 +41,10 @@ impl SoftDeps {
     /// writes done since.
     pub(crate) fn with<R>(&self, s: &Sleepable, f: impl FnOnce(&mut Deps) -> R) -> R {
         let mut d = self.deps.lock(s);
-        if self.any_written.swap(false, Ordering::Acquire) {
+        // Looked at first, so the common case takes no locked operation.
+        if self.any_written.load(Ordering::Relaxed)
+            && self.any_written.swap(false, Ordering::Acquire)
+        {
             let done = core::mem::take(&mut *self.written.lock());
             for (offset, len) in done {
                 d.data_written(offset, len);
