@@ -288,6 +288,11 @@ struct InodeState {
     data_gen: u64,
     /// Its writes' cluster, for write-behind.
     cluster: Cluster,
+    /// File byte ranges of blocks a write just allocated and has not yet
+    /// filled: they read as zeros, never from the disk under them (the
+    /// write's own pages take its bytes straight, unzeroed, as FreeBSD's
+    /// `ffs_write` skips `BA_CLRBUF` for a block it covers).
+    unwritten: Vec<(u64, u64)>,
 }
 
 /// The run of a file's blocks filled one after another and not written
@@ -688,6 +693,7 @@ impl Shared {
                     nodes: 0,
                     data_gen: 0,
                     cluster: Cluster::default(),
+                    unwritten: Vec::new(),
                 },
             ),
             size: AtomicU64::new(size),
@@ -1456,17 +1462,10 @@ impl vfs::RegularNode for UfsNode {
             for m in &new.moved {
                 carry_moved(s, &shared, &object, m)?;
             }
-            // New blocks read as zeros from now on: their pages go in
-            // zeroed and dirty (written whole later, as FreeBSD writes a
-            // cleared buffer) before the inode is unlocked, so no fill or
-            // read-ahead can read the unwritten disk under them first.
-            for &(at, len) in &new.zeroed {
-                for page in at / PAGE..(at + len).div_ceil(PAGE) {
-                    if object.page_for_overwrite(page).is_ok() {
-                        object.mark_dirty(page);
-                    }
-                }
-            }
+            // New blocks read as zeros from now on: until the copy below
+            // is in, fills and read-ahead see them as holes, so none reads
+            // the unwritten disk under them.
+            st.unwritten.clone_from(&new.zeroed);
             self.cell.publish(&st);
             reach = at;
             if !full {
@@ -1496,6 +1495,17 @@ impl vfs::RegularNode for UfsNode {
         let written = vfs::pagecache::write_fresh(&object, offset, &mut capped, &fresh);
         let done = written.as_ref().map_or(0, |&n| n as u64);
         let mut st = self.cell.lock(s);
+        // Every page of the new blocks in and dirty (written whole later,
+        // as FreeBSD writes a cleared buffer): what the copy filled, a
+        // fill's zeros, or zeros now where a short copy stopped. Then the
+        // disk under them may be read again.
+        for (at, len) in core::mem::take(&mut st.unwritten) {
+            for page in at / PAGE..(at + len).div_ceil(PAGE) {
+                if object.page_here(page).is_some() || object.page_for_overwrite(page).is_ok() {
+                    object.mark_dirty(page);
+                }
+            }
+        }
         st.data_gen = st.data_gen.wrapping_add(1);
         let want = old_size.max(offset + done);
         if st.ip.size > want {
@@ -1921,10 +1931,14 @@ impl Layout {
 impl FilePager {
     /// Where the `len` bytes of pages from `index` on lie, for inode `ip`
     /// (locked by the caller).
+    /// Where the bytes of pages from `index` (`len` bytes) are on the
+    /// disk; holes, and the `unwritten` ranges of new blocks, read as
+    /// zeros.
     fn layout(
         &self,
         s: &Sleepable,
         ip: &ufs::Inode,
+        unwritten: &[(u64, u64)],
         index: PageIndex,
         len: usize,
     ) -> Result<Layout, PagerError> {
@@ -1939,7 +1953,6 @@ impl FilePager {
         let mut places = Vec::new();
         let mut at = start;
         while at < end && at < size {
-            let out = usize::try_from(at - start).map_err(|_| PagerError)?;
             let lbn = at / bsize;
             let within = at % bsize;
             let blocks = (end - at).div_ceil(bsize).max(1);
@@ -1950,11 +1963,27 @@ impl FilePager {
             let held = (run - 1) * bsize + u64::from(sb.block_size(size, last)) - within;
             let n = held.min(end - at);
             if addr != 0 {
-                parts.push((
-                    addr * fsize + within,
-                    usize::try_from(n).map_err(|_| PagerError)?,
-                ));
-                places.push(out);
+                // The run's bytes from `at`, less any unwritten range.
+                let disk = addr * fsize + within;
+                let mut from = at;
+                while from < at + n {
+                    let cut = unwritten
+                        .iter()
+                        .filter(|&&(u, l)| u < at + n && u + l > from)
+                        .min_by_key(|&&(u, _)| u);
+                    let (stop, next) = match cut {
+                        Some(&(u, l)) => (u.max(from), u + l),
+                        None => (at + n, at + n),
+                    };
+                    if stop > from {
+                        parts.push((
+                            disk + (from - at),
+                            usize::try_from(stop - from).map_err(|_| PagerError)?,
+                        ));
+                        places.push(usize::try_from(from - start).map_err(|_| PagerError)?);
+                    }
+                    from = next.max(stop);
+                }
             }
             at += n;
         }
@@ -2017,7 +2046,7 @@ impl Pager for FilePager {
         let s = sleepable();
         // The inode stays locked: a writer moving a fragment waits.
         let st = self.cell.lock(&s);
-        let layout = self.layout(&s, &st.ip, index, buf.len())?;
+        let layout = self.layout(&s, &st.ip, &st.unwritten, index, buf.len())?;
         let data = if layout.parts.is_empty() {
             Vec::new()
         } else {
@@ -2038,7 +2067,9 @@ impl Pager for FilePager {
         // changes the blocks after bumps `data_gen`, and the data is
         // dropped.
         let st = self.cell.lock(&s);
-        let layout = self.layout(&s, &st.ip, index, pages.len()).ok()?;
+        let layout = self
+            .layout(&s, &st.ip, &st.unwritten, index, pages.len())
+            .ok()?;
         let parts = layout
             .parts
             .iter()
