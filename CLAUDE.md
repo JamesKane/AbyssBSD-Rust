@@ -15,8 +15,10 @@ that runs unmodified FreeBSD userland. Read `docs/ROADMAP.md` for the current ph
 - Every `unsafe` block has a `// SAFETY:` comment. Inline asm only in `arch/*`.
 - **Don't touch the physical machines** (no ssh, no captures, no boots) until FreeBSD userland
   runs end to end in QEMU (P6, ADR-0010).
-- **Performance parity** (ADR-0011): from P2 on, each phase's benchmarks must be no more than 2%
-  slower than stock FreeBSD 15.1 on the same machine, and ideally faster. See `docs/PERFORMANCE.md`.
+- **Performance parity** (ADR-0011, ADR-0014): from P2 on, each component a phase measures must be,
+  overall (the geometric mean of its benchmarks), no more than 2% slower than stock FreeBSD 15.1 on
+  the same machine, and ideally faster. Single microbenchmarks are diagnostics, not gates. See
+  `docs/PERFORMANCE.md`.
 - FreeBSD source is a behavioral **reference**, not something to transliterate. Never consult GPL
   code.
 

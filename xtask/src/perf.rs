@@ -28,7 +28,8 @@ use crate::util::{self, Result};
 const VM_IMAGE: &str = "FreeBSD-15.1-RELEASE-amd64-ufs.raw.xz";
 /// Bumped whenever [`prepare_image`] changes what it writes.
 const PREP_VERSION: &str = "17";
-/// The bound: AbyssBSD's median over FreeBSD's.
+/// The bound on a component's geometric mean of AbyssBSD's medians over
+/// FreeBSD's (ADR-0014); a single benchmark over it is only reported.
 const BOUND: f64 = 1.02;
 /// FreeBSD-side coefficient of variation above which a benchmark cannot
 /// resolve the bound.
@@ -232,7 +233,7 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
         return Ok(());
     }
     if report.failures() > 0 {
-        return Err(format!("{} benchmark(s) over the bound", report.failures()).into());
+        return Err(format!("{} component(s) over the bound", report.failures()).into());
     }
     Ok(())
 }
@@ -930,7 +931,8 @@ struct Row {
 enum Verdict {
     Pass,
     Win,
-    Fail,
+    /// Over the bound: a diagnostic (components gate, ADR-0014).
+    Slower,
     /// FreeBSD's own noise is too high to resolve the bound.
     Noisy,
     /// Only one side reported it.
@@ -973,7 +975,7 @@ impl Report {
                 let verdict = if cv > MAX_CV {
                     Verdict::Noisy
                 } else if ratio > BOUND {
-                    Verdict::Fail
+                    Verdict::Slower
                 } else if ci.1 < 1.0 {
                     Verdict::Win
                 } else {
@@ -994,10 +996,31 @@ impl Report {
         Self { rows }
     }
 
+    /// Each component's benchmarks and the geometric mean of their ratios,
+    /// and whether any of them is missing (ADR-0014).
+    fn components(&self) -> Vec<(String, usize, f64, bool)> {
+        let mut by: BTreeMap<&str, (usize, f64, bool)> = BTreeMap::new();
+        for r in &self.rows {
+            let e = by.entry(component(&r.name)).or_default();
+            if r.verdict == Verdict::Missing || !(r.ratio.is_finite() && r.ratio > 0.0) {
+                e.2 = true;
+            } else {
+                e.0 += 1;
+                e.1 += r.ratio.ln();
+            }
+        }
+        by.into_iter()
+            .map(|(c, (n, logs, missing))| {
+                (c.to_owned(), n, (logs / n.max(1) as f64).exp(), missing)
+            })
+            .collect()
+    }
+
+    /// Components over the bound or missing a benchmark: what fails a run.
     fn failures(&self) -> usize {
-        self.rows
+        self.components()
             .iter()
-            .filter(|r| matches!(r.verdict, Verdict::Fail | Verdict::Missing))
+            .filter(|(_, _, geo, missing)| *geo > BOUND || *missing)
             .count()
     }
 
@@ -1057,14 +1080,37 @@ impl Report {
         let count = |v: Verdict| self.rows.iter().filter(|r| r.verdict == v).count();
         let _ = writeln!(
             s,
-            "\ngeometric mean ratio {geo:.3}; {} pass, {} win, {} fail, {} noisy, {} missing",
+            "\ngeometric mean ratio {geo:.3}; {} pass, {} win, {} slower, {} noisy, {} missing",
             count(Verdict::Pass),
             count(Verdict::Win),
-            count(Verdict::Fail),
+            count(Verdict::Slower),
             count(Verdict::Noisy),
             count(Verdict::Missing)
         );
+        let _ = writeln!(s, "\ncomponents (gate: geometric mean <= {BOUND:.2}):");
+        for (c, n, geo, missing) in self.components() {
+            let verdict = if missing {
+                "FAIL (missing)"
+            } else if geo > BOUND {
+                "FAIL"
+            } else {
+                "pass"
+            };
+            let _ = writeln!(s, "{c:<22} {n:>3} benchmarks {geo:>7.3}  {verdict}");
+        }
         s
+    }
+}
+
+/// The component a benchmark measures (ADR-0014): its name's first part,
+/// or for file systems its first two (`fs.ufs.create` is `fs.ufs`).
+fn component(name: &str) -> &str {
+    let mut ends = name.match_indices('.').map(|(i, _)| i);
+    let first = ends.next().unwrap_or(name.len());
+    if &name[..first] == "fs" {
+        &name[..ends.next().unwrap_or(name.len())]
+    } else {
+        &name[..first]
     }
 }
 
@@ -1153,6 +1199,32 @@ mod tests {
     }
 
     #[test]
+    fn components_gate() {
+        assert_eq!(component("fs.ufs.seq_read.warm"), "fs.ufs");
+        assert_eq!(component("malloc.hit.t1"), "malloc");
+        assert_eq!(component("solo"), "solo");
+        let mut s = BTreeMap::new();
+        let mut units = BTreeMap::new();
+        let mut add = |name: &str, f: f64, a: f64| {
+            let e: &mut BTreeMap<Side, Vec<f64>> = s.entry(name.to_owned()).or_default();
+            e.insert(Side::FreeBsd, vec![f, f, f]);
+            e.insert(Side::Abyss, vec![a, a, a]);
+            units.insert(name.to_owned(), "ns".to_owned());
+        };
+        // One slow microbenchmark, the component well ahead: a pass.
+        add("fs.x.slow", 100.0, 110.0);
+        add("fs.x.fast", 100.0, 80.0);
+        // Over overall: a failure.
+        add("vm.a", 100.0, 105.0);
+        add("vm.b", 100.0, 101.0);
+        let r = Report::new(&s, &units);
+        assert_eq!(r.failures(), 1);
+        let c = r.components();
+        assert_eq!(c[0].0, "fs.x");
+        assert!(c[0].2 < 1.0 && c[1].2 > BOUND);
+    }
+
+    #[test]
     fn verdicts() {
         let mut s = BTreeMap::new();
         let mut units = BTreeMap::new();
@@ -1178,9 +1250,10 @@ mod tests {
                 ("fast", Verdict::Win),
                 ("noisy", Verdict::Noisy),
                 ("same", Verdict::Pass),
-                ("slow", Verdict::Fail),
+                ("slow", Verdict::Slower),
             ]
         );
+        // One component (each name its own), "slow" over the bound.
         assert_eq!(r.failures(), 1);
     }
 

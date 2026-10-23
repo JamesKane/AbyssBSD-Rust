@@ -1,24 +1,29 @@
 # Performance
 
-The rule ([ADR-0011](adr/0011-performance-parity.md)): on every benchmark in a phase's suite,
-AbyssBSD is **no more than 2% slower** than stock FreeBSD 15.1 on the same machine and
+The rule ([ADR-0011](adr/0011-performance-parity.md), as amended by
+[ADR-0014](adr/0014-performance-parity-per-component.md)): each component a phase's suite measures
+is, overall, **no more than 2% slower** than stock FreeBSD 15.1 on the same machine and
 configuration. The goal is to be faster. This document defines what is measured and how.
 
 ## 1. The bound
 
 For each benchmark, normalize so that larger means slower (elapsed time, latency, or the inverse of
-throughput). Then:
+throughput). Then, for each component (a benchmark name's first part, or for file systems its
+first two: `malloc`, `vm`, `fs.ufs`, `fs.tmpfs`):
 
 ```
-ratio = median(AbyssBSD) / median(FreeBSD)
-pass  ⇔  ratio ≤ 1.02
+ratio(b)        = median(AbyssBSD) / median(FreeBSD)        for each benchmark b
+component ratio = geometric mean of ratio(b) over the component's benchmarks
+pass  ⇔  component ratio ≤ 1.02
 ```
 
-- Latency benchmarks check the bound at both p50 and p99.
-- Each report shows the ratio with a 95% bootstrap confidence interval. A ratio below 1.00 whose
-  interval lies entirely below 1.00 is reported as a win.
-- A suite also reports the geometric mean of its ratios, as a headline number only. Gating is per
-  benchmark.
+- Benchmarks are diagnostics: each report shows every benchmark's ratio with a 95% bootstrap
+  confidence interval and a verdict (a ratio below 1.00 whose interval lies entirely below 1.00 is a
+  win; one above 1.02 is reported as slower), but no single benchmark gates.
+- Latency benchmarks report both p50 and p99.
+- A benchmark that produces no number fails its component.
+- A component's suite includes workload-level benchmarks (an archive extracted, a tree walked, a
+  random I/O mix), not only microbenchmarks.
 
 ## 2. Baseline and fairness
 

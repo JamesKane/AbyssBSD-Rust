@@ -1,6 +1,7 @@
 # ADR-0011: Performance parity with FreeBSD is an exit criterion
 
-- Status: Accepted
+- Status: Accepted; amended by [ADR-0014](0014-performance-parity-per-component.md) (parity is
+  judged per component, not per benchmark)
 - Date: 2026-10-18
 
 ## Context
@@ -20,8 +21,9 @@ same machine, under the stock FreeBSD kernel.
   that phase's suite, AbyssBSD is **no more than 2% slower** than stock FreeBSD 15.1 on the same
   machine and configuration. The **goal** is to be faster. Results at or below parity are reported
   and celebrated, but do not gate.
-- The comparison is per benchmark, not an average: a 10% win in one place does not pay for a 5%
-  loss in another.
+- ~~The comparison is per benchmark, not an average: a 10% win in one place does not pay for a 5%
+  loss in another.~~ Superseded by [ADR-0014](0014-performance-parity-per-component.md): parity is
+  judged on each component's geometric mean; individual benchmarks are diagnostics.
 - Suites are cumulative. A benchmark that gated a phase keeps running nightly, and a regression past
   the 2% bound fails the build like a kyua regression does.
 - The method (baseline configuration, fairness rules, statistics, and the benchmark list per phase)
