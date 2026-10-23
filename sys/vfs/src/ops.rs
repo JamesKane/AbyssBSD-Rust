@@ -203,8 +203,11 @@ pub fn create(
     let NodeOps::Directory(d) = st.live_mut()? else {
         return Err(Errno::ENOTDIR);
     };
-    let ino = d.create(s, name, node, &c)?;
-    let v = dir.mount().vget(s, ino)?;
+    let made = d.create(s, name, node, &c)?;
+    let v = match made.ops {
+        Some(ops) => dir.mount().adopt(s, made.ino, ops),
+        None => dir.mount().vget(s, made.ino)?,
+    };
     cache::enter(dir, name, Some(&v));
     Ok((v, true))
 }

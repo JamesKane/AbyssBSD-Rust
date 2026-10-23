@@ -33,7 +33,7 @@ use sched::Sleepable;
 use sync::{Once, SpinLock};
 use vfs::{
     Attr, CharDevice, Create, Device, DeviceNode, DirEntry, DirectoryNode, FileSystem, FsStats,
-    Kind, Mount, NewNode, Node, NodeOps, Rename, SetAttr, SymlinkNode, Uio, Vnode,
+    Kind, Made, Mount, NewNode, Node, NodeOps, Rename, SetAttr, SymlinkNode, Uio, Vnode,
 };
 
 /// `/dev/null`: reads end at once, writes vanish.
@@ -620,7 +620,7 @@ impl DirectoryNode for View {
         name: &[u8],
         node: &NewNode,
         c: &Create,
-    ) -> Result<u64, Errno> {
+    ) -> Result<Made, Errno> {
         // Only symbolic links may be made, as in FreeBSD's devfs.
         let NewNode::Symlink(target) = node else {
             return Err(Errno::EOPNOTSUPP);
@@ -647,7 +647,7 @@ impl DirectoryNode for View {
                     what: What::Link(target.clone()),
                 },
             );
-            Ok(ino)
+            Ok(ino.into())
         })
     }
 

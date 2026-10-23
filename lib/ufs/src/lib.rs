@@ -260,6 +260,16 @@ pub(crate) fn count32(x: usize) -> u32 {
 /// The inode number of every file system's root.
 pub const ROOT_INO: u32 = 2;
 /// Direct block pointers in an inode.
+/// Where a file block's pointer lies ([`Ufs::bmap`]).
+enum Leaf {
+    /// In the inode: the address.
+    Direct(u64),
+    /// Entry `index` of the indirect block at fragment `block`.
+    Indirect { block: u64, index: usize },
+    /// Under an indirect block not allocated.
+    Hole,
+}
+
 pub const NDADDR: u64 = 12;
 /// [`NDADDR`] as an index.
 pub(crate) const NDIRECT: usize = 12;
@@ -366,8 +376,18 @@ impl<B: BlockIo> Ufs<B> {
     /// The fragment address of file block `lbn` (0 for a hole), through
     /// the indirect blocks (FreeBSD's `ufs_bmaparray`).
     pub fn bmap(&self, cx: &B::Cx, ip: &Inode, lbn: u64) -> Result<u64, Error> {
+        match self.bmap_leaf(cx, ip, lbn)? {
+            Leaf::Direct(addr) => Ok(addr),
+            Leaf::Hole => Ok(0),
+            Leaf::Indirect { block, index } => self.indirect(cx, block, index),
+        }
+    }
+
+    /// Where file block `lbn`'s pointer lies: in the inode, or in which
+    /// indirect block (walked down to it).
+    fn bmap_leaf(&self, cx: &B::Cx, ip: &Inode, lbn: u64) -> Result<Leaf, Error> {
         if let Some(&addr) = usize::try_from(lbn).ok().and_then(|i| ip.db.get(i)) {
-            return Ok(addr);
+            return Ok(Leaf::Direct(addr));
         }
         let nindir = u64::from(self.sb.nindir);
         let mut rest = lbn - NDADDR;
@@ -378,17 +398,19 @@ impl<B: BlockIo> Ufs<B> {
                 let mut addr = ip.ib[level];
                 // Walk down: the index at each level, most significant first.
                 let mut per = span;
-                for _ in 0..=level {
+                for step in 0..=level {
                     if addr == 0 {
-                        return Ok(0);
+                        return Ok(Leaf::Hole);
                     }
                     per /= nindir;
                     let index =
                         usize::try_from(rest / per).map_err(|_| Error::Corrupt("block number"))?;
                     rest %= per;
+                    if step == level {
+                        return Ok(Leaf::Indirect { block: addr, index });
+                    }
                     addr = self.indirect(cx, addr, index)?;
                 }
-                return Ok(addr);
             }
             rest -= span;
         }
@@ -415,7 +437,9 @@ impl<B: BlockIo> Ufs<B> {
 
     /// File block `lbn`'s fragment address and the number of blocks from
     /// it on that lie contiguously on the disk, up to `max` (FreeBSD's
-    /// `VOP_BMAP` with `runp`, for clustering). A hole is `(0, 1)`.
+    /// `VOP_BMAP` with `runp`, for clustering). A hole is `(0, 1)`. As in
+    /// FreeBSD, a run past the inode's pointers ends with the indirect
+    /// block holding them, which is read once.
     pub fn bmap_run(
         &self,
         cx: &B::Cx,
@@ -427,19 +451,40 @@ impl<B: BlockIo> Ufs<B> {
         if first == 0 {
             return Ok((0, 1));
         }
-        let frag = u64::from(self.sb.frag);
-        let last = ip.size.div_ceil(u64::from(self.sb.bsize));
+        let sb = &self.sb;
+        let frag = u64::from(sb.frag);
+        let limit = max.min(ip.size.div_ceil(u64::from(sb.bsize)).saturating_sub(lbn));
+        // Only whole blocks run on; a fragment ends the file.
+        let whole = |n: u64| sb.block_size(ip.size, n) == sb.bsize;
         let mut run = 1;
-        while run < max && lbn + run < last {
-            // Only whole blocks run on; a fragment ends the file.
-            if self.sb.block_size(ip.size, lbn + run - 1) != self.sb.bsize {
-                break;
-            }
-            if self.bmap(cx, ip, lbn + run)? != first + run * frag {
-                break;
+        while run < limit && lbn + run < NDADDR {
+            if !whole(lbn + run - 1) || ip.db[idx64(lbn + run)] != first + run * frag {
+                return Ok((first, run));
             }
             run += 1;
         }
+        if run >= limit || !whole(lbn + run - 1) {
+            return Ok((first, run));
+        }
+        let Leaf::Indirect { block, index } = self.bmap_leaf(cx, ip, lbn + run)? else {
+            return Ok((first, run));
+        };
+        if block >= sb.size {
+            return Err(Error::Corrupt("indirect block address"));
+        }
+        self.io
+            .read(cx, block * u64::from(sb.fsize), idx(sb.bsize), &mut |b| {
+                for at in (index * 8..b.len()).step_by(8) {
+                    if run >= limit || !whole(lbn + run - 1) {
+                        break;
+                    }
+                    let v = u64::from_le_bytes(b[at..at + 8].try_into().unwrap_or([0; 8]));
+                    if v != first + run * frag {
+                        break;
+                    }
+                    run += 1;
+                }
+            })?;
         Ok((first, run))
     }
 

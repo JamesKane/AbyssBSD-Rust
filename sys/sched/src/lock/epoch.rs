@@ -23,8 +23,16 @@ use crate::PreemptGuard;
 #[derive(Debug)]
 pub struct Epoch {
     global: AtomicU64,
-    observed: [AtomicU64; MAX_CPUS],
-    depth: [AtomicU32; MAX_CPUS],
+    cpus: [Slot; MAX_CPUS],
+}
+
+/// One CPU's part, on a cache line of its own: only that CPU writes it.
+#[derive(Debug)]
+#[repr(align(64))]
+struct Slot {
+    /// The global epoch seen on entering, or 0 outside a section.
+    observed: AtomicU64,
+    depth: AtomicU32,
 }
 
 impl Epoch {
@@ -33,8 +41,12 @@ impl Epoch {
     pub const fn new() -> Self {
         Self {
             global: AtomicU64::new(1),
-            observed: [const { AtomicU64::new(0) }; MAX_CPUS],
-            depth: [const { AtomicU32::new(0) }; MAX_CPUS],
+            cpus: [const {
+                Slot {
+                    observed: AtomicU64::new(0),
+                    depth: AtomicU32::new(0),
+                }
+            }; MAX_CPUS],
         }
     }
 
@@ -42,13 +54,20 @@ impl Epoch {
     pub fn enter(&self) -> EpochGuard<'_> {
         let preempt = crate::preempt_disable();
         let cpu = hal::cpu_id().index();
-        // Relaxed: only this CPU writes its slots.
-        if self.depth[cpu].fetch_add(1, Ordering::Relaxed) == 0 {
+        let slot = &self.cpus[cpu];
+        let depth = enter_depth(&slot.depth);
+        if depth == 0 {
             let e = self.global.load(Ordering::Relaxed);
-            self.observed[cpu].store(e, Ordering::Relaxed);
             // The store must be visible before our reads of shared data:
-            // a full fence pairs with the one in `synchronize`.
-            core::sync::atomic::fence(Ordering::SeqCst);
+            // a full fence pairs with the one in `synchronize`. On x86 a
+            // locked exchange is one (FreeBSD's `smr_enter`).
+            #[cfg(target_arch = "x86_64")]
+            slot.observed.swap(e, Ordering::SeqCst);
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                slot.observed.store(e, Ordering::Relaxed);
+                core::sync::atomic::fence(Ordering::SeqCst);
+            }
         }
         EpochGuard {
             epoch: self,
@@ -64,7 +83,7 @@ impl Epoch {
         core::sync::atomic::fence(Ordering::SeqCst);
         for cpu in 0..crate::online_cpus().min(MAX_CPUS) {
             loop {
-                let e = self.observed[cpu].load(Ordering::Acquire);
+                let e = self.cpus[cpu].observed.load(Ordering::Acquire);
                 if e == 0 || e >= target {
                     break;
                 }
@@ -80,6 +99,31 @@ impl Default for Epoch {
     }
 }
 
+/// Raises a slot's depth, returning the old one. In the kernel only this
+/// CPU writes its slot, and an interrupt's section in between ends before
+/// it returns: no atomic increment is needed. Host threads (tests) all
+/// share one CPU number, so they need one.
+fn enter_depth(depth: &AtomicU32) -> u32 {
+    if cfg!(target_os = "none") {
+        let d = depth.load(Ordering::Relaxed);
+        depth.store(d + 1, Ordering::Relaxed);
+        d
+    } else {
+        depth.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
+/// Lowers a slot's depth, returning the old one (as [`enter_depth`]).
+fn leave_depth(depth: &AtomicU32) -> u32 {
+    if cfg!(target_os = "none") {
+        let d = depth.load(Ordering::Relaxed);
+        depth.store(d - 1, Ordering::Relaxed);
+        d
+    } else {
+        depth.fetch_sub(1, Ordering::Relaxed)
+    }
+}
+
 /// A read section; leaves on drop.
 #[derive(Debug)]
 pub struct EpochGuard<'a> {
@@ -90,9 +134,11 @@ pub struct EpochGuard<'a> {
 
 impl Drop for EpochGuard<'_> {
     fn drop(&mut self) {
-        if self.epoch.depth[self.cpu].fetch_sub(1, Ordering::Relaxed) == 1 {
+        let slot = &self.epoch.cpus[self.cpu];
+        let depth = leave_depth(&slot.depth);
+        if depth == 1 {
             // Release: our reads happen before a writer sees us leave.
-            self.epoch.observed[self.cpu].store(0, Ordering::Release);
+            slot.observed.store(0, Ordering::Release);
         }
     }
 }

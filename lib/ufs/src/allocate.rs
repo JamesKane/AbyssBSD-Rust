@@ -874,7 +874,9 @@ impl<B: BlockIo> Ufs<B> {
             if sum.cs[idx(cg)].nifree == 0 {
                 return Ok(None);
             }
-            // Choose, and see whether an inode block must be made first.
+            // Choose and take it in one visit to the group (FreeBSD's
+            // `ffs_nodealloccg`), unless an inode block must be made first.
+            let cg_at = sb.cgtod(cg) * u64::from(sb.fsize);
             let choice = self.with_cg(cx, cg, |g| {
                 if g.cs().nifree == 0 {
                     return None;
@@ -884,41 +886,9 @@ impl<B: BlockIo> Ufs<B> {
                 } else {
                     g.find_free_inode(g.irotor(), sb.ipg)?
                 };
-                let init = local + sb.inopb > g.initediblk() && g.initediblk() < g.niblk();
-                Some((local, init, g.initediblk()))
-            })?;
-            let Some((local, init, inited)) = choice else {
-                return Ok(None);
-            };
-            if init {
-                // Zero the next inode block, with fresh generation numbers,
-                // and write it before the group claims it.
-                let (offset, _) = sb.inode_location(cg * sb.ipg + inited);
-                let mut seed = random | 1;
-                self.io.modify(
-                    cx,
-                    offset,
-                    idx(sb.bsize),
-                    Fill::Zero,
-                    Mode::Sync,
-                    &mut |b| {
-                        for ino in b.as_chunks_mut::<{ crate::inode::SIZE }>().0 {
-                            seed ^= seed << 13;
-                            seed ^= seed >> 17;
-                            seed ^= seed << 5;
-                            ino[80..84].copy_from_slice(&seed.max(1).to_le_bytes());
-                        }
-                    },
-                )?;
-                self.with_cg(cx, cg, |g| {
-                    if g.initediblk() == inited {
-                        g.set_initediblk(inited + sb.inopb);
-                    }
-                })?;
-                continue;
-            }
-            let cg_at = sb.cgtod(cg) * u64::from(sb.fsize);
-            self.with_cg(cx, cg, |g| {
+                if local + sb.inopb > g.initediblk() && g.initediblk() < g.niblk() {
+                    return Some(Err(g.initediblk()));
+                }
                 g.set_irotor(local);
                 g.set_inode_used(local, true);
                 g.add_nifree(-1);
@@ -926,7 +896,39 @@ impl<B: BlockIo> Ufs<B> {
                     g.add_ndir(1);
                 }
                 self.soft(cx, |d| d.new_inode(cg * sb.ipg + local, cg_at));
+                Some(Ok(local))
             })?;
+            let local = match choice {
+                None => return Ok(None),
+                Some(Ok(local)) => local,
+                Some(Err(inited)) => {
+                    // Zero the next inode block, with fresh generation
+                    // numbers, and write it before the group claims it.
+                    let (offset, _) = sb.inode_location(cg * sb.ipg + inited);
+                    let mut seed = random | 1;
+                    self.io.modify(
+                        cx,
+                        offset,
+                        idx(sb.bsize),
+                        Fill::Zero,
+                        Mode::Sync,
+                        &mut |b| {
+                            for ino in b.as_chunks_mut::<{ crate::inode::SIZE }>().0 {
+                                seed ^= seed << 13;
+                                seed ^= seed >> 17;
+                                seed ^= seed << 5;
+                                ino[80..84].copy_from_slice(&seed.max(1).to_le_bytes());
+                            }
+                        },
+                    )?;
+                    self.with_cg(cx, cg, |g| {
+                        if g.initediblk() == inited {
+                            g.set_initediblk(inited + sb.inopb);
+                        }
+                    })?;
+                    continue;
+                }
+            };
             sum.totals.nifree -= 1;
             sum.cs[idx(cg)].nifree -= 1;
             if is_dir {

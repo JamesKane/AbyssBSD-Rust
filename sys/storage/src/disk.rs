@@ -22,8 +22,8 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use bus::Gate;
-use sched::Sleepable;
 use sched::lock::{LockClass, Mutex};
+use sched::{Sleepable, WaitQueue};
 use sync::SpinLock;
 
 use vm::object::IoBuf;
@@ -367,6 +367,55 @@ impl Disk {
         }
     }
 
+    /// Sends reads of each of `parts` (offset, and the buffer it is read
+    /// into: lent pages) and returns without waiting;
+    /// [`Self::finish_reads_into`] waits. Each request lets its part of
+    /// the buffer go as it completes.
+    pub fn start_reads_into(&self, s: &Sleepable, parts: Vec<(u64, IoBuf)>) -> PendingFills {
+        let chunk = self
+            .max_transfer
+            .max(usize::try_from(self.sector_size).unwrap_or(0));
+        let n = parts.iter().map(|(_, b)| b.len().div_ceil(chunk)).sum();
+        let state = Arc::new(Fills {
+            left: SpinLock::new((n, Ok(()))),
+            done: WaitQueue::new(),
+        });
+        let ((), begun) = self.start_hooked(|| {
+            for (offset, buf) in parts {
+                let mut from = 0;
+                while from < buf.len() {
+                    let len = chunk.min(buf.len() - from);
+                    let at = offset + u64::try_from(from).unwrap_or(u64::MAX);
+                    let back = Arc::clone(&state);
+                    let bio = Bio::new(BioOp::Read, at, buf.slice(from, len), move |buf, r| {
+                        drop(buf);
+                        let mut left = back.left.lock();
+                        left.0 -= 1;
+                        if let Err(e) = r {
+                            left.1 = left.1.and(Err(e));
+                        }
+                        drop(left);
+                        back.done.wake_all();
+                    });
+                    self.strategy(s, bio);
+                    from += len;
+                }
+            }
+        });
+        PendingFills { state, begun }
+    }
+
+    /// Waits for reads [`Self::start_reads_into`] sent: the first failure,
+    /// if any.
+    pub fn finish_reads_into(&self, s: &Sleepable, pending: PendingFills) -> Result<(), BioError> {
+        let PendingFills { state, begun } = pending;
+        state.done.wait_until(s, || state.left.lock().0 == 0);
+        if let Some(h) = WAIT_HOOK.get() {
+            (h.waited)((h.now)().saturating_sub(begun));
+        }
+        state.left.lock().1
+    }
+
     /// Waits for reads [`Self::start_read_parts`] sent: each part's bytes.
     pub fn finish_reads(
         &self,
@@ -518,6 +567,27 @@ impl Disk {
 pub struct PendingReads {
     started: (Vec<Arc<Waiter>>, u64),
     lens: Vec<usize>,
+}
+
+/// Reads into lent buffers sent and not yet waited for
+/// ([`Disk::start_reads_into`]). Dropping them is safe: each request
+/// keeps its part of the buffer until done.
+pub struct PendingFills {
+    state: Arc<Fills>,
+    begun: u64,
+}
+
+/// What reads into lent buffers share: requests left, and the first
+/// failure.
+struct Fills {
+    left: SpinLock<(usize, Result<(), BioError>)>,
+    done: WaitQueue,
+}
+
+impl core::fmt::Debug for PendingFills {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "PendingFills({} left)", self.state.left.lock().0)
+    }
 }
 
 impl core::fmt::Debug for PendingReads {

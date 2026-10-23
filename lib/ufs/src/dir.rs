@@ -94,6 +94,28 @@ struct Slot {
     prev: Option<usize>,
 }
 
+/// The largest free slot of the chunk whose bytes are `chunk` (sound: just
+/// changed): the most bytes a new entry there could take.
+fn most_free(chunk: &[u8]) -> usize {
+    let mut most = 0;
+    let mut at = 0;
+    while at + HEADER <= chunk.len() {
+        let ino = u32::from_le_bytes([chunk[at], chunk[at + 1], chunk[at + 2], chunk[at + 3]]);
+        let reclen = usize::from(u16::from_le_bytes([chunk[at + 4], chunk[at + 5]]));
+        if reclen == 0 {
+            break;
+        }
+        let used = if ino == 0 {
+            0
+        } else {
+            dirsiz(usize::from(chunk[at + 7]))
+        };
+        most = most.max(reclen.saturating_sub(used));
+        at += reclen;
+    }
+    most
+}
+
 /// Writes an entry at `at` of block bytes `b`.
 fn put_entry(b: &mut [u8], at: usize, ino: u32, reclen: usize, kind: u8, name: &[u8]) {
     b[at..at + 4].copy_from_slice(&ino.to_le_bytes());
@@ -244,21 +266,6 @@ impl<B: crate::BlockIo> crate::Ufs<B> {
         self.scan(cx, dir, |s, n| s.ino != 0 && n == name)
     }
 
-    /// The largest free slot of chunk `c` of `dir`.
-    fn chunk_free(&self, cx: &B::Cx, dir: &crate::Inode, c: u64) -> Result<u16, Error> {
-        let mut most = 0;
-        self.scan_chunk(cx, dir, c, |s, _| {
-            let free = if s.ino == 0 {
-                s.reclen
-            } else {
-                s.reclen - dirsiz(s.namlen)
-            };
-            most = most.max(free);
-            false
-        })?;
-        Ok(reclen16(most))
-    }
-
     /// Indexes directory `dir` (FreeBSD's `ufsdirhash_build`) if it has
     /// no index yet and holds at least `min` bytes (the kernel passes
     /// [`crate::dirhash::MIN_SIZE`]).
@@ -347,6 +354,7 @@ impl<B: crate::BlockIo> crate::Ufs<B> {
         if let Some(s) = slot {
             let at = s.addr * fsize;
             let lbn = s.offset / bsize;
+            let mut free = 0;
             self.io
                 .modify(cx, at, s.bsz, crate::Fill::Read, self.ordered(), &mut |b| {
                     let off = if s.ino == 0 {
@@ -358,6 +366,8 @@ impl<B: crate::BlockIo> crate::Ufs<B> {
                         put_entry(b, s.at + used, ino, s.reclen - used, kind, name);
                         s.at + used
                     };
+                    let chunk = s.at - s.at % DIRBLKSIZ;
+                    free = most_free(&b[chunk..chunk + DIRBLKSIZ]);
                     if let Some(id) = entry {
                         self.soft(cx, |d| {
                             d.place_entry(
@@ -380,11 +390,10 @@ impl<B: crate::BlockIo> crate::Ufs<B> {
                     s.offset + crate::len64(dirsiz(s.namlen))
                 };
                 let c = s.offset / crate::len64(DIRBLKSIZ);
-                let free = self.chunk_free(cx, dir, c)?;
                 if let Some(h) = dir.dirhash.as_mut() {
                     h.names.insert(name.into(), (ino, offset));
                     if let Some(f) = h.free.get_mut(crate::idx64(c)) {
-                        *f = free;
+                        *f = reclen16(free);
                     }
                 }
             }
@@ -455,13 +464,24 @@ impl<B: crate::BlockIo> crate::Ufs<B> {
         let at = s.addr * fsize;
         let lbn = s.offset / u64::from(self.sb.bsize);
         let mut removal = Removal::default();
+        // The slot it leaves free: the chunk's largest, or another is.
+        let mut freed = 0;
         self.io
             .modify(cx, at, s.bsz, crate::Fill::Read, self.ordered(), &mut |b| {
                 match s.prev {
-                    None => b[s.at..s.at + 4].fill(0),
+                    None => {
+                        b[s.at..s.at + 4].fill(0);
+                        freed = s.reclen;
+                    }
                     Some(p) => {
                         let len = usize::from(u16::from_le_bytes([b[p + 4], b[p + 5]])) + s.reclen;
                         b[p + 4..p + 6].copy_from_slice(&reclen16(len).to_le_bytes());
+                        let used = if b[p..p + 4] == [0; 4] {
+                            0
+                        } else {
+                            dirsiz(usize::from(b[p + 7]))
+                        };
+                        freed = len - used;
                     }
                 }
                 self.soft(cx, |d| {
@@ -473,14 +493,11 @@ impl<B: crate::BlockIo> crate::Ufs<B> {
                     removal = d.remove_entry(dir_ino, lbn, at, count32(s.at), s.ino, gone);
                 });
             })?;
-        if dir.dirhash.is_some() {
+        if let Some(h) = dir.dirhash.as_mut() {
             let c = s.offset / crate::len64(DIRBLKSIZ);
-            let free = self.chunk_free(cx, dir, c)?;
-            if let Some(h) = dir.dirhash.as_mut() {
-                h.names.remove(name);
-                if let Some(f) = h.free.get_mut(crate::idx64(c)) {
-                    *f = free;
-                }
+            h.names.remove(name);
+            if let Some(f) = h.free.get_mut(crate::idx64(c)) {
+                *f = (*f).max(reclen16(freed));
             }
         }
         Ok((s.ino, removal))

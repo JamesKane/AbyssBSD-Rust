@@ -209,6 +209,25 @@ pub trait RegularNode: Node {
     }
 }
 
+/// A node [`DirectoryNode::create`] made.
+pub struct Made {
+    pub ino: u64,
+    /// The node, for its vnode (FreeBSD's `VOP_CREATE` returns the vnode).
+    pub ops: Option<NodeOps>,
+}
+
+impl core::fmt::Debug for Made {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "Made({}, node {})", self.ino, self.ops.is_some())
+    }
+}
+
+impl From<u64> for Made {
+    fn from(ino: u64) -> Self {
+        Self { ino, ops: None }
+    }
+}
+
 /// A directory.
 pub trait DirectoryNode: Node {
     /// The inode named `name` (never `.` or `..`), or `ENOENT`.
@@ -218,14 +237,15 @@ pub trait DirectoryNode: Node {
     fn parent(&self) -> u64;
 
     /// Makes a node and links it as `name`, which does not exist; returns
-    /// its inode.
+    /// its inode, and the node itself if the file system has it at hand
+    /// (then it is not loaded again).
     fn create(
         &mut self,
         s: &Sleepable,
         name: &[u8],
         node: &NewNode,
         c: &Create,
-    ) -> Result<u64, Errno>;
+    ) -> Result<Made, Errno>;
 
     /// Links the existing non-directory `target` (inode `ino`) as `name`,
     /// which does not exist.

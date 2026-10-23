@@ -45,10 +45,10 @@ use ufs::{Mode, Reserve, Timestamp};
 
 use crate::fs::block::{DiskIo, SoftDeps};
 use vfs::{
-    Attr, Create, DirEntry, DirectoryNode, FileSystem, FsStats, Kind, NewNode, Node, NodeOps,
+    Attr, Create, DirEntry, DirectoryNode, FileSystem, FsStats, Kind, Made, NewNode, Node, NodeOps,
     Rename, SetAttr, SymlinkNode, Uio,
 };
-use vm::object::{IoBuf, Object, PageIndex, Pager, PagerError, PendingFill};
+use vm::object::{FreshPages, IoBuf, Object, PageIndex, Pager, PagerError, PendingFill};
 
 /// Doing soft-updates work: under vnode locks, before inodes.
 static WORK: LockClass = LockClass::new("ufs work", 342);
@@ -447,9 +447,19 @@ impl Shared {
     }
 
     /// Writes every in-core file's dirty pages.
-    fn sync_pages(&self) {
-        for (_, o) in self.cells() {
-            if let Some(o) = o {
+    fn sync_pages(&self, s: &Sleepable) {
+        // All under way at once (FreeBSD's `bawrite` of each file's
+        // buffers), then waited for.
+        let objects: Vec<Arc<Object>> = self.cells().into_iter().filter_map(|(_, o)| o).collect();
+        for o in &objects {
+            wait_running(s);
+            o.start_sync(0, u64::MAX);
+        }
+        self.wait_writes(s);
+        // What could not start (a hole to allocate, a block still being
+        // written) goes now.
+        for o in &objects {
+            if o.dirty_pages() != 0 {
                 let _ = o.sync(0, u64::MAX);
             }
         }
@@ -485,7 +495,7 @@ impl Shared {
         };
         let io = self.ufs.io();
         for _ in 0..64 {
-            self.sync_pages();
+            self.sync_pages(s);
             self.wait_writes(s);
             self.write_inodes(s, Mode::Delayed)?;
             io.cache.sync(s).map_err(|_| Errno::EIO)?;
@@ -524,6 +534,28 @@ impl Shared {
             return Ok(c);
         }
         let ip = self.ufs.inode(s, ino).map_err(errno)?;
+        Ok(self.new_cell(ino, ip))
+    }
+
+    /// Puts inode `ino`, just made as `ip`, in core unless it is (FreeBSD's
+    /// `ffs_valloc` hands `ufs_makeinode` the vnode it read): its node's
+    /// load then reads nothing.
+    fn seed(&self, s: &Sleepable, ino: u32, ip: ufs::Inode) -> Option<Arc<InodeCell>> {
+        let _loading = self.loading.lock(s);
+        if self
+            .inodes
+            .lock()
+            .get(&ino)
+            .is_some_and(|(c, _)| c.strong_count() > 0)
+        {
+            return None;
+        }
+        Some(self.new_cell(ino, ip))
+    }
+
+    /// A new in-core inode `ino` holding `ip`, in the table. The caller
+    /// holds `loading` and found none.
+    fn new_cell(&self, ino: u32, ip: ufs::Inode) -> Arc<InodeCell> {
         let size = ip.size;
         let cell = Arc::new(InodeCell {
             ino,
@@ -543,7 +575,7 @@ impl Shared {
         self.inodes
             .lock()
             .insert(ino, (Arc::downgrade(&cell), None));
-        Ok(cell)
+        cell
     }
 
     /// Does the soft-updates work that is due: frees, and link counts
@@ -593,7 +625,7 @@ impl Shared {
         }
         let _flushing = self.flushing.lock(s);
         for _ in 0..8 {
-            self.sync_pages();
+            self.sync_pages(s);
             self.wait_writes(s);
             let _ = self.write_inodes(s, Mode::Delayed);
             let _ = self.ufs.io().cache.sync(s);
@@ -705,57 +737,8 @@ impl FileSystem for UfsFs {
 
     fn load(&self, s: &Sleepable, ino: u64) -> Result<NodeOps, Errno> {
         let ino32 = u32::try_from(ino).map_err(|_| Errno::ENOENT)?;
-        let shared = &self.shared;
-        let cell = shared.cell(s, ino32)?;
-        let (kind, parent) = {
-            let mut st = cell.state.lock(s);
-            let ip = &st.ip;
-            if ip.mode == 0 {
-                kprintln!("ufs: {}: inode {ino} is free", shared.ufs.io().disk.name());
-                return Err(Errno::EIO);
-            }
-            let kind = ip.kind();
-            let mut parent = u64::from(ino32);
-            if kind == ufs::Kind::Directory && ino32 != ufs::ROOT_INO {
-                parent = shared
-                    .ufs
-                    .lookup(s, ip, b"..")
-                    .map_err(errno)?
-                    .map_or(parent, u64::from);
-            }
-            st.nodes += 1;
-            (kind, parent)
-        };
-        let object = (kind == ufs::Kind::Regular).then(|| {
-            let pager = Arc::new(FilePager {
-                fs: Arc::clone(shared),
-                cell: Arc::clone(&cell),
-            });
-            Object::with_pager(crate::mm::space::page_ops(), pager)
-        });
-        shared.inodes.lock().insert(
-            ino32,
-            (Arc::downgrade(&cell), object.as_ref().map(Arc::downgrade)),
-        );
-        let node = Box::new(UfsNode {
-            cell,
-            parent,
-            object,
-            fs: Arc::clone(shared),
-        });
-        Ok(match kind {
-            ufs::Kind::Regular => NodeOps::Regular(node),
-            ufs::Kind::Directory => NodeOps::Directory(node),
-            ufs::Kind::Symlink => NodeOps::Symlink(node),
-            ufs::Kind::CharDevice => NodeOps::Other(Kind::CharDevice, node),
-            ufs::Kind::BlockDevice => NodeOps::Other(Kind::BlockDevice, node),
-            ufs::Kind::Fifo => NodeOps::Other(Kind::Fifo, node),
-            ufs::Kind::Socket => NodeOps::Other(Kind::Socket, node),
-            ufs::Kind::Whiteout | ufs::Kind::None => {
-                kprintln!("ufs: inode {ino} has a bad mode");
-                return Err(Errno::EIO);
-            }
-        })
+        let cell = self.shared.cell(s, ino32)?;
+        node_of(&self.shared, s, cell, None)
     }
 
     fn statfs(&self, s: &Sleepable) -> Result<FsStats, Errno> {
@@ -857,7 +840,7 @@ impl FileSystem for UfsFs {
             if due {
                 shared.data_synced.store(now, Ordering::Relaxed);
             }
-            shared.sync_pages();
+            shared.sync_pages(s);
             let _ = shared.write_inodes(s, Mode::Delayed);
         }
         let before = if speedup { u64::MAX } else { before };
@@ -1451,6 +1434,70 @@ impl UfsNode {
     }
 }
 
+/// The node of in-core inode `cell` (`parent` is its `..`, for a
+/// directory whose maker knows it; else looked up).
+fn node_of(
+    shared: &Arc<Shared>,
+    s: &Sleepable,
+    cell: Arc<InodeCell>,
+    parent: Option<u64>,
+) -> Result<NodeOps, Errno> {
+    let ino32 = cell.ino;
+    let (kind, parent) = {
+        let mut st = cell.state.lock(s);
+        let ip = &st.ip;
+        if ip.mode == 0 {
+            kprintln!(
+                "ufs: {}: inode {ino32} is free",
+                shared.ufs.io().disk.name()
+            );
+            return Err(Errno::EIO);
+        }
+        let kind = ip.kind();
+        let parent = match parent {
+            Some(p) => p,
+            None if kind == ufs::Kind::Directory && ino32 != ufs::ROOT_INO => shared
+                .ufs
+                .lookup(s, ip, b"..")
+                .map_err(errno)?
+                .map_or(u64::from(ino32), u64::from),
+            None => u64::from(ino32),
+        };
+        st.nodes += 1;
+        (kind, parent)
+    };
+    let object = (kind == ufs::Kind::Regular).then(|| {
+        let pager = Arc::new(FilePager {
+            fs: Arc::clone(shared),
+            cell: Arc::clone(&cell),
+        });
+        Object::with_pager(crate::mm::space::page_ops(), pager)
+    });
+    shared.inodes.lock().insert(
+        ino32,
+        (Arc::downgrade(&cell), object.as_ref().map(Arc::downgrade)),
+    );
+    let node = Box::new(UfsNode {
+        cell,
+        parent,
+        object,
+        fs: Arc::clone(shared),
+    });
+    Ok(match kind {
+        ufs::Kind::Regular => NodeOps::Regular(node),
+        ufs::Kind::Directory => NodeOps::Directory(node),
+        ufs::Kind::Symlink => NodeOps::Symlink(node),
+        ufs::Kind::CharDevice => NodeOps::Other(Kind::CharDevice, node),
+        ufs::Kind::BlockDevice => NodeOps::Other(Kind::BlockDevice, node),
+        ufs::Kind::Fifo => NodeOps::Other(Kind::Fifo, node),
+        ufs::Kind::Socket => NodeOps::Other(Kind::Socket, node),
+        ufs::Kind::Whiteout | ufs::Kind::None => {
+            kprintln!("ufs: inode {ino32} has a bad mode");
+            return Err(Errno::EIO);
+        }
+    })
+}
+
 impl DirectoryNode for UfsNode {
     fn lookup(&self, s: &Sleepable, name: &[u8]) -> Result<u64, Errno> {
         let mut st = self.cell.state.lock(s);
@@ -1473,7 +1520,7 @@ impl DirectoryNode for UfsNode {
         name: &[u8],
         node: &NewNode,
         c: &Create,
-    ) -> Result<u64, Errno> {
+    ) -> Result<Made, Errno> {
         let shared = Arc::clone(&self.fs);
         let sum = shared.sum()?;
         let kind = match node {
@@ -1501,11 +1548,22 @@ impl DirectoryNode for UfsNode {
                 .ufs
                 .create(s, &mut sum, self.cell.ino, &mut st.ip, name, kind, &who)
             {
-                Ok((ino, _)) => {
+                Ok((ino, ip)) => {
+                    // Its new times go out later (FreeBSD's `IN_CHANGE`).
+                    st.dirty = true;
                     drop(sum);
                     drop(st);
+                    let ops = match shared.seed(s, ino, ip) {
+                        Some(cell) => {
+                            Some(node_of(&shared, s, cell, Some(u64::from(self.cell.ino)))?)
+                        }
+                        None => None,
+                    };
                     shared.throttle(s);
-                    return Ok(u64::from(ino));
+                    return Ok(Made {
+                        ino: u64::from(ino),
+                        ops,
+                    });
                 }
                 Err(ufs::Error::NoSpace) if attempt == 0 => {}
                 Err(e) => return Err(errno(e)),
@@ -1570,7 +1628,7 @@ impl DirectoryNode for UfsNode {
         let r = {
             let mut st = self.cell.state.lock(s);
             let mut ct = child.cell.state.lock(s);
-            shared.ufs.unlink(
+            let r = shared.ufs.unlink(
                 s,
                 self.cell.ino,
                 &mut st.ip,
@@ -1578,7 +1636,10 @@ impl DirectoryNode for UfsNode {
                 child.cell.ino,
                 &mut ct.ip,
                 now(),
-            )
+            );
+            // The directory's new times go out later.
+            st.dirty = true;
+            r
         };
         shared.throttle(s);
         r.map_err(errno)
@@ -1690,6 +1751,18 @@ impl Layout {
         buf[at.min(len)..].fill(0);
         buf[self.eof.min(len)..].fill(0);
     }
+
+    /// Zeroes what the parts, read into `pages`, leave: as [`Self::place`].
+    fn zero_around(&self, pages: &FreshPages) {
+        let mut at = 0;
+        for (&(_, len), &out) in self.parts.iter().zip(&self.places) {
+            pages.zero(at, out - at);
+            at = out + len;
+        }
+        let len = pages.len();
+        pages.zero(at.min(len), len - at.min(len));
+        pages.zero(self.eof.min(len), len - self.eof.min(len));
+    }
 }
 
 impl FilePager {
@@ -1744,24 +1817,21 @@ struct UfsAhead {
     /// The inode's `data_gen` when the reads went out.
     data_gen: u64,
     layout: Layout,
-    len: usize,
-    reads: Option<storage::disk::PendingReads>,
+    reads: Option<storage::disk::PendingFills>,
 }
 
 impl PendingFill for UfsAhead {
-    fn wait(&mut self) -> Result<Vec<u8>, PagerError> {
+    fn wait(&mut self, pages: &FreshPages) -> Result<(), PagerError> {
         let s = sleepable();
         let reads = self.reads.take().ok_or(PagerError)?;
-        let data = self
-            .fs
+        self.fs
             .ufs
             .io()
             .disk
-            .finish_reads(&s, reads)
+            .finish_reads_into(&s, reads)
             .map_err(|_| PagerError)?;
-        let mut buf = alloc::vec![0u8; self.len];
-        self.layout.place(&mut buf, &data);
-        Ok(buf)
+        self.layout.zero_around(pages);
+        Ok(())
     }
 
     fn commit(&self, insert: &mut dyn FnMut()) -> bool {
@@ -1809,21 +1879,25 @@ impl Pager for FilePager {
         Ok(())
     }
 
-    fn start_run(&self, index: PageIndex, pages: PageIndex) -> Option<Box<dyn PendingFill>> {
+    fn start_run(&self, index: PageIndex, pages: &Arc<FreshPages>) -> Option<Box<dyn PendingFill>> {
         let s = sleepable();
-        let len = usize::try_from(pages).ok()?.checked_mul(PAGE_LEN)?;
         // Planned and sent under the inode lock, as a fill is; whatever
         // changes the blocks after bumps `data_gen`, and the data is
         // dropped.
         let st = self.cell.state.lock(&s);
-        let layout = self.layout(&s, &st.ip, index, len).ok()?;
-        let reads = self.fs.ufs.io().disk.start_read_parts(&s, &layout.parts);
+        let layout = self.layout(&s, &st.ip, index, pages.len()).ok()?;
+        let parts = layout
+            .parts
+            .iter()
+            .zip(&layout.places)
+            .map(|(&(at, len), &out)| (at, pages.slice(out, len)))
+            .collect();
+        let reads = self.fs.ufs.io().disk.start_reads_into(&s, parts);
         Some(Box::new(UfsAhead {
             fs: Arc::clone(&self.fs),
             cell: Arc::clone(&self.cell),
             data_gen: st.data_gen,
             layout,
-            len,
             reads: Some(reads),
         }))
     }
@@ -2010,11 +2084,25 @@ impl FilePager {
         let last = index + PageIndex::try_from(pages.max(1) - 1).map_err(|_| PagerError)?;
         let lbns = index * PAGE / bsize..=last * PAGE / bsize;
         let mut extents: Vec<(u64, usize, usize)> = Vec::new();
+        // The run of blocks last mapped: its first block, address, length.
+        let mut mapped = (0, 0, 0);
         for (i, k) in (index..).zip(0..pages) {
             let at = i * PAGE;
             let lbn = at / bsize;
             let within = at % bsize;
-            let addr = ufs.bmap(s, &st.ip, lbn).map_err(|_| PagerError)?;
+            let (from, _, run) = mapped;
+            if !(from..from + run).contains(&lbn) {
+                let (first, run) = ufs
+                    .bmap_run(s, &st.ip, lbn, lbns.end() - lbn + 1)
+                    .map_err(|_| PagerError)?;
+                mapped = (lbn, first, run);
+            }
+            let (from, first, _) = mapped;
+            let addr = if first == 0 {
+                0
+            } else {
+                first + (lbn - from) * u64::from(sb.frag)
+            };
             if addr == 0 {
                 if at >= st.ip.size {
                     continue;

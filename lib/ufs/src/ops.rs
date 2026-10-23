@@ -86,7 +86,8 @@ pub struct Maker {
 impl<B: BlockIo> Ufs<B> {
     /// Makes a file of `kind` named `name` in directory `dir_ino`
     /// (FreeBSD's `ufs_makeinode` and `ufs_mkdir`), returning its number
-    /// and inode, both written.
+    /// and inode, both written. `dir` is written if it grew; its new times
+    /// are left for the caller to write later (FreeBSD's `IN_CHANGE`).
     #[allow(clippy::too_many_arguments)]
     pub fn create(
         &self,
@@ -103,6 +104,7 @@ impl<B: BlockIo> Ufs<B> {
             return Err(Error::TooManyLinks);
         }
         let mode = kind.ifmt() | (who.perm & 0o7777);
+        let size = dir.size;
         let ino = self.valloc(cx, sum, dir_ino, dir, mode, who.random)?;
         // With soft updates the entry waits for the inode (and for a
         // directory, its first block and its parent's link).
@@ -143,7 +145,9 @@ impl<B: BlockIo> Ufs<B> {
         }
         dir.mtime = who.now;
         dir.ctime = who.now;
-        self.write_inode(cx, dir_ino, dir, Mode::Delayed)?;
+        if dir.size != size {
+            self.write_inode(cx, dir_ino, dir, Mode::Delayed)?;
+        }
         Ok((ino, ip))
     }
 
@@ -390,9 +394,9 @@ impl<B: BlockIo> Ufs<B> {
         now: Timestamp,
     ) -> Result<(), Error> {
         self.dir_remove(cx, dir_ino, dir, name, false)?;
+        // The directory's new times are the caller's to write later.
         dir.mtime = now;
         dir.ctime = now;
-        self.write_inode(cx, dir_ino, dir, Mode::Delayed)?;
         ip.ctime = now;
         ip.effnlink = ip.effnlink.saturating_sub(1);
         if self.soft {

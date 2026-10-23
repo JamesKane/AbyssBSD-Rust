@@ -26,8 +26,8 @@ use sync::SpinLock;
 
 use crate::mount::{FileSystem, FsStats, Rename};
 use crate::node::{
-    Attr, Create, DirEntry, DirectoryNode, Kind, NewNode, Node, NodeOps, RegularNode, SetAttr,
-    SymlinkNode,
+    Attr, Create, DirEntry, DirectoryNode, Kind, Made, NewNode, Node, NodeOps, RegularNode,
+    SetAttr, SymlinkNode,
 };
 use crate::{Uio, now, pagecache};
 
@@ -399,7 +399,7 @@ impl DirectoryNode for TmpNode {
         name: &[u8],
         node: &NewNode,
         c: &Create,
-    ) -> Result<u64, Errno> {
+    ) -> Result<Made, Errno> {
         let kind = node.kind();
         if kind == Kind::Directory && self.attr.nlink >= LINK_MAX {
             return Err(Errno::EMLINK);
@@ -448,7 +448,6 @@ impl DirectoryNode for TmpNode {
             fs: Arc::clone(&self.fs),
             freed: false,
         });
-        self.fs.nodes.lock().insert(ino, new);
         {
             let mut u = self.fs.usage.lock();
             u.0 += bytes;
@@ -459,7 +458,10 @@ impl DirectoryNode for TmpNode {
             self.attr.nlink += 1;
         }
         self.touch_dir();
-        Ok(ino)
+        Ok(Made {
+            ino,
+            ops: Some(ops_of(new)),
+        })
     }
 
     fn link(
@@ -548,6 +550,16 @@ impl DirectoryNode for TmpNode {
     }
 }
 
+/// A node as its kind's operations.
+fn ops_of(n: Box<TmpNode>) -> NodeOps {
+    match n.kind {
+        Kind::Regular => NodeOps::Regular(n),
+        Kind::Directory => NodeOps::Directory(n),
+        Kind::Symlink => NodeOps::Symlink(n),
+        k => NodeOps::Other(k, n),
+    }
+}
+
 impl FileSystem for TmpFs {
     fn root(&self) -> u64 {
         ROOT_INO
@@ -555,12 +567,7 @@ impl FileSystem for TmpFs {
 
     fn load(&self, _s: &Sleepable, ino: u64) -> Result<NodeOps, Errno> {
         let n = self.shared.nodes.lock().remove(&ino).ok_or(Errno::ENOENT)?;
-        Ok(match n.kind {
-            Kind::Regular => NodeOps::Regular(n),
-            Kind::Directory => NodeOps::Directory(n),
-            Kind::Symlink => NodeOps::Symlink(n),
-            k => NodeOps::Other(k, n),
-        })
+        Ok(ops_of(n))
     }
 
     fn pathconf(&self, kind: Kind, name: u32) -> Result<i64, Errno> {

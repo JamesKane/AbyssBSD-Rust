@@ -42,7 +42,7 @@ use abi::time::Timespec;
 pub use mount::{FileSystem, FsStats, Mount, MountInfo, Rename, type_num};
 pub use node::{
     Attr, CharDevice, Create, D_DISK, D_TTY, Device, DeviceNode, DirEntry, DirectoryNode, Kind,
-    NewNode, Node, NodeOps, RegularNode, SetAttr, SymlinkNode,
+    Made, NewNode, Node, NodeOps, RegularNode, SetAttr, SymlinkNode,
 };
 pub use ops::Cred;
 pub use vnode::{State, Vnode, VnodeUse};

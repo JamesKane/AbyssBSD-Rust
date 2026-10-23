@@ -20,7 +20,7 @@ use sched::Sleepable;
 
 use crate::mount::{FileSystem, FsStats, Rename};
 use crate::node::{
-    Attr, Create, Device, DeviceNode, DirEntry, DirectoryNode, Kind, NewNode, Node, NodeOps,
+    Attr, Create, Device, DeviceNode, DirEntry, DirectoryNode, Kind, Made, NewNode, Node, NodeOps,
     RegularNode, SetAttr, SymlinkNode,
 };
 use crate::{Meta, Uio};
@@ -427,7 +427,7 @@ impl DirectoryNode for View {
         _name: &[u8],
         _node: &NewNode,
         _c: &Create,
-    ) -> Result<u64, Errno> {
+    ) -> Result<Made, Errno> {
         Err(Errno::EROFS)
     }
 

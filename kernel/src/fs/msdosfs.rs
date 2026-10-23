@@ -36,7 +36,7 @@ use sched::Sleepable;
 use sched::lock::{LockClass, Mutex};
 use sync::SpinLock;
 use vfs::{
-    Attr, Create, DirEntry, DirectoryNode, FileSystem, FsStats, Kind, NewNode, Node, NodeOps,
+    Attr, Create, DirEntry, DirectoryNode, FileSystem, FsStats, Kind, Made, NewNode, Node, NodeOps,
     Rename, SetAttr, Uio,
 };
 use vm::object::{Object, PageIndex, Pager, PagerError};
@@ -898,7 +898,7 @@ impl DirectoryNode for MsdosNode {
         name: &[u8],
         node: &NewNode,
         _c: &Create,
-    ) -> Result<u64, Errno> {
+    ) -> Result<Made, Errno> {
         let shared = Arc::clone(&self.fs);
         shared.rw()?;
         let kind = match node {
@@ -919,7 +919,7 @@ impl DirectoryNode for MsdosNode {
             .create(s, &mut a, start, name, kind, now())
             .map_err(errno)?;
         drop(a);
-        Ok(shared.id_of(&n))
+        Ok(shared.id_of(&n).into())
     }
 
     fn link(&mut self, _: &Sleepable, _: &[u8], _: u64, _: &mut dyn Node) -> Result<(), Errno> {

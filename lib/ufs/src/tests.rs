@@ -237,6 +237,24 @@ fn makefs_images_read_back_whole() {
         let (_, big) = ufs.namei(&(), b"/double").unwrap().unwrap();
         let (addr, run) = ufs.bmap_run(&(), &big, 0, 8).unwrap();
         assert!(addr != 0 && run >= 1);
+        // Runs agree with block-by-block maps, across the inode's pointers
+        // and the indirect blocks' ends.
+        let blocks = big.size.div_ceil(u64::from(bsize));
+        let nindir = u64::from(ufs.superblock().nindir);
+        let frag = u64::from(ufs.superblock().frag);
+        for lbn in [0, 10, 11, 12, 13, NDADDR + nindir - 3, NDADDR + nindir] {
+            if lbn >= blocks {
+                continue;
+            }
+            let (first, run) = ufs.bmap_run(&(), &big, lbn, 64).unwrap();
+            assert_eq!(first, ufs.bmap(&(), &big, lbn).unwrap());
+            for k in 1..run {
+                assert_eq!(ufs.bmap(&(), &big, lbn + k).unwrap(), first + k * frag);
+            }
+            if lbn >= NDADDR {
+                assert!(lbn + run <= NDADDR + nindir || lbn >= NDADDR + nindir);
+            }
+        }
         let s = ufs.stats();
         assert!(s.bfree < s.blocks && s.ffree > 0);
         // A flipped superblock byte fails its checks or its check-hash.

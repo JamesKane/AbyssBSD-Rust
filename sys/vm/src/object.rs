@@ -31,7 +31,7 @@
 //! Behavior reference: sys/vm/vm_object.c (shadow chains and collapse).
 
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -105,9 +105,14 @@ pub trait Pager: Send + Sync {
         }
         Ok(())
     }
-    /// Starts filling `pages` pages from `index` on (read-ahead), without
-    /// waiting: `None` if this pager cannot, or not now. May sleep.
-    fn start_run(&self, _index: PageIndex, _pages: PageIndex) -> Option<Box<dyn PendingFill>> {
+    /// Starts filling `pages` (fresh, whole pages from `index` on) where
+    /// they lie, without waiting: `None` if this pager cannot, or not now.
+    /// May sleep.
+    fn start_run(
+        &self,
+        _index: PageIndex,
+        _pages: &Arc<FreshPages>,
+    ) -> Option<Box<dyn PendingFill>> {
         None
     }
     /// Starts writing back the pages from `index` on, whose contents `buf`
@@ -128,8 +133,9 @@ pub trait Pager: Send + Sync {
 
 /// A fill [`Pager::start_run`] started.
 pub trait PendingFill: Send {
-    /// Waits for the data: the run's pages, whole. May sleep.
-    fn wait(&mut self) -> Result<Vec<u8>, PagerError>;
+    /// Waits for the data to be in the run's `pages`, whole (holes and
+    /// what lies past the end zeroed). May sleep.
+    fn wait(&mut self, pages: &FreshPages) -> Result<(), PagerError>;
     /// Runs `insert` if the data still stands for what the pager holds
     /// (nothing written or moved since the fill started), keeping it so
     /// until `insert` returns; returns whether it ran. `insert` must not
@@ -140,9 +146,13 @@ pub trait PendingFill: Send {
 /// A read-ahead in flight.
 struct Ahead {
     index: PageIndex,
-    pages: PageIndex,
+    pages: Arc<FreshPages>,
     fill: Box<dyn PendingFill>,
 }
+
+/// Read-ahead windows kept in flight beyond the one being used: two of
+/// [`Pager::max_run`] (FreeBSD's `vfs.read_max`, 64 blocks of 32 KiB).
+const AHEAD: usize = 2;
 
 /// Why a page lookup found nothing to map.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -214,8 +224,8 @@ pub struct Object {
     /// pages the next fill reads.
     ra_next: AtomicU64,
     ra_window: AtomicU64,
-    /// The next window, read ahead while the last is used.
-    ahead: SpinLock<Option<Ahead>>,
+    /// The next windows, read ahead while the last is used, in order.
+    ahead: SpinLock<VecDeque<Ahead>>,
 }
 
 /// A transfer through an object's pages: its frames stay put until the
@@ -262,28 +272,9 @@ impl PageRun {
     /// Bytes `from..from + len` of the run, as a run of their own.
     #[must_use]
     pub fn slice(&self, from: usize, len: usize) -> Self {
-        let mut ranges = Vec::new();
-        let (mut skip, mut want) = (from, len);
-        for &(p, n) in &self.ranges {
-            if want == 0 {
-                break;
-            }
-            if skip >= n {
-                skip -= n;
-                continue;
-            }
-            let take = (n - skip).min(want);
-            // In the same page as `p`, `skip` bytes on.
-            ranges.push((
-                core::ptr::NonNull::new(p.as_ptr().wrapping_add(skip)).unwrap_or(p),
-                take,
-            ));
-            want -= take;
-            skip = 0;
-        }
         self.object.io.fetch_add(1, Ordering::SeqCst);
         Self {
-            ranges,
+            ranges: slice_ranges(&self.ranges, from, len),
             object: Arc::clone(&self.object),
         }
     }
@@ -329,11 +320,159 @@ unsafe impl crate::dma::DmaBuf for PageRun {
     }
 }
 
+/// The part `from..from + len` of `ranges` (each within one page).
+fn slice_ranges(
+    ranges: &[(core::ptr::NonNull<u8>, usize)],
+    from: usize,
+    len: usize,
+) -> Vec<(core::ptr::NonNull<u8>, usize)> {
+    let mut out = Vec::new();
+    let (mut skip, mut want) = (from, len);
+    for &(p, n) in ranges {
+        if want == 0 {
+            break;
+        }
+        if skip >= n {
+            skip -= n;
+            continue;
+        }
+        let take = (n - skip).min(want);
+        // In the same page as `p`, `skip` bytes on.
+        out.push((
+            core::ptr::NonNull::new(p.as_ptr().wrapping_add(skip)).unwrap_or(p),
+            take,
+        ));
+        want -= take;
+        skip = 0;
+    }
+    out
+}
+
+/// Pages allocated for a fill and in no object yet: a device reads into
+/// them where they lie (FreeBSD's read cluster over the object's busy
+/// pages), and the object takes them after. Those not taken are freed
+/// when the last reference goes (a transfer still under way holds one).
+pub struct FreshPages {
+    pfns: Vec<Pfn>,
+    ranges: Vec<(core::ptr::NonNull<u8>, usize)>,
+    ops: &'static dyn PageOps,
+}
+
+// SAFETY: the pages are allocated to this value alone until it frees or
+// gives them up; their bytes are written only by the transfers it lends
+// them to, and by `zero` once those are done.
+unsafe impl Send for FreshPages {}
+// SAFETY: as above; a shared value only lends addresses.
+unsafe impl Sync for FreshPages {}
+
+impl FreshPages {
+    /// `n` pages from `ops` (their contents left as they are), or `None`
+    /// if memory runs out or pages have no fixed place to lend.
+    fn alloc(ops: &'static dyn PageOps, n: usize) -> Option<Self> {
+        let mut out = Self {
+            pfns: Vec::with_capacity(n),
+            ranges: Vec::with_capacity(n),
+            ops,
+        };
+        for _ in 0..n {
+            let pfn = ops.alloc_filled(&mut |_| {})?;
+            out.pfns.push(pfn);
+            out.ranges.push((ops.page_ptr(pfn)?, PAGE_BYTES));
+        }
+        Some(out)
+    }
+
+    /// Bytes in all.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.ranges.len() * PAGE_BYTES
+    }
+
+    /// Whether it holds no pages.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.ranges.is_empty()
+    }
+
+    /// Bytes `from..from + len`, lent for a transfer.
+    #[must_use]
+    pub fn slice(self: &Arc<Self>, from: usize, len: usize) -> IoBuf {
+        IoBuf::Fresh(FreshSlice {
+            ranges: slice_ranges(&self.ranges, from, len),
+            _pages: Arc::clone(self),
+        })
+    }
+
+    /// Zeroes bytes `from..from + len`. No transfer into them may be under
+    /// way.
+    pub fn zero(&self, from: usize, len: usize) {
+        for (p, n) in slice_ranges(&self.ranges, from, len) {
+            // SAFETY: `n` bytes of a page this value holds (see the type),
+            // which no transfer writes now.
+            unsafe { core::ptr::write_bytes(p.as_ptr(), 0, n) };
+        }
+    }
+
+    /// Gives the pages up, in order.
+    fn take(&mut self) -> Vec<Pfn> {
+        self.ranges.clear();
+        core::mem::take(&mut self.pfns)
+    }
+}
+
+impl Drop for FreshPages {
+    fn drop(&mut self) {
+        for pfn in self.take() {
+            self.ops.free(pfn);
+        }
+    }
+}
+
+impl core::fmt::Debug for FreshPages {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "FreshPages({})", self.pfns.len())
+    }
+}
+
+/// Part of [`FreshPages`], lent for a transfer.
+pub struct FreshSlice {
+    ranges: Vec<(core::ptr::NonNull<u8>, usize)>,
+    _pages: Arc<FreshPages>,
+}
+
+// SAFETY: parts of pages the slice's `FreshPages` holds (see there).
+unsafe impl Send for FreshSlice {}
+// SAFETY: as above.
+unsafe impl Sync for FreshSlice {}
+
+impl FreshSlice {
+    fn len(&self) -> usize {
+        self.ranges.iter().map(|&(_, n)| n).sum()
+    }
+
+    fn to_vec(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.len());
+        for &(p, n) in &self.ranges {
+            // SAFETY: `n` bytes of a page the slice holds (see the type).
+            out.extend_from_slice(unsafe { core::slice::from_raw_parts(p.as_ptr(), n) });
+        }
+        out
+    }
+}
+
+impl core::fmt::Debug for FreshSlice {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "FreshSlice({} bytes)", self.len())
+    }
+}
+
 /// Bytes for a transfer: owned, or an object's pages lent ([`PageRun`]).
 #[derive(Debug)]
 pub enum IoBuf {
     Owned(Vec<u8>),
     Lent(PageRun),
+    /// Pages for a fill, not yet in an object.
+    Fresh(FreshSlice),
 }
 
 impl Default for IoBuf {
@@ -355,6 +494,7 @@ impl IoBuf {
         match self {
             Self::Owned(v) => v.len(),
             Self::Lent(r) => r.len(),
+            Self::Fresh(f) => f.len(),
         }
     }
 
@@ -371,6 +511,10 @@ impl IoBuf {
         match self {
             Self::Owned(v) => Self::Owned(v[from..from + len].to_vec()),
             Self::Lent(r) => Self::Lent(r.slice(from, len)),
+            Self::Fresh(f) => Self::Fresh(FreshSlice {
+                ranges: slice_ranges(&f.ranges, from, len),
+                _pages: Arc::clone(&f._pages),
+            }),
         }
     }
 
@@ -380,22 +524,29 @@ impl IoBuf {
         match self {
             Self::Owned(v) => v,
             Self::Lent(r) => r.to_vec(),
+            Self::Fresh(f) => f.to_vec(),
         }
     }
 }
 
-// SAFETY: an owned vector's bytes, or a lent run's (see `PageRun`).
+// SAFETY: an owned vector's bytes, a lent run's (see `PageRun`), or fresh
+// pages' (see `FreshPages`).
 unsafe impl crate::dma::DmaBuf for IoBuf {
     fn ranges(&self) -> usize {
         match self {
             Self::Owned(v) => v.ranges(),
             Self::Lent(r) => r.ranges(),
+            Self::Fresh(f) => f.ranges.len(),
         }
     }
     fn range(&self, i: usize) -> (*mut u8, usize) {
         match self {
             Self::Owned(v) => v.range(i),
             Self::Lent(r) => r.range(i),
+            Self::Fresh(f) => {
+                let (p, n) = f.ranges[i];
+                (p.as_ptr(), n)
+            }
         }
     }
 }
@@ -455,7 +606,7 @@ impl Object {
             io: AtomicUsize::new(0),
             ra_next: AtomicU64::new(0),
             ra_window: AtomicU64::new(1),
-            ahead: SpinLock::new(None),
+            ahead: SpinLock::new(VecDeque::new()),
         })
     }
 
@@ -477,7 +628,7 @@ impl Object {
             io: AtomicUsize::new(0),
             ra_next: AtomicU64::new(0),
             ra_window: AtomicU64::new(1),
-            ahead: SpinLock::new(None),
+            ahead: SpinLock::new(VecDeque::new()),
         })
     }
 
@@ -503,7 +654,7 @@ impl Object {
             io: AtomicUsize::new(0),
             ra_next: AtomicU64::new(0),
             ra_window: AtomicU64::new(1),
-            ahead: SpinLock::new(None),
+            ahead: SpinLock::new(VecDeque::new()),
         });
         PAGED.lock().push(Arc::downgrade(&o));
         o
@@ -670,8 +821,12 @@ impl Object {
             }
             return Ok(Some(self.insert_filled(index, new)));
         }
-        // A cluster: one transfer into a buffer, copied into pages (a
-        // copy costs far less than the transfer saved).
+        // A cluster: one transfer into fresh pages where they lie.
+        if let Some(pfn) = self.fill_fresh(pager.as_ref(), index, run)? {
+            return Ok(Some(pfn));
+        }
+        // Or into a buffer, copied into pages (a copy costs far less than
+        // the transfer saved).
         let mut buf = alloc::vec![0u8; usize::try_from(run).unwrap_or(1) * PAGE_BYTES];
         pager
             .fill_run(index, &mut buf)
@@ -694,84 +849,134 @@ impl Object {
         first.map(Some).ok_or(LookupError::OutOfMemory)
     }
 
-    /// Starts reading `max_run` pages from `index` on ahead, unless one is
-    /// already going there; never past the end or over a page held.
-    fn start_ahead(&self, pager: &dyn Pager, index: PageIndex) {
-        if self.ahead.lock().as_ref().is_some_and(|a| a.index == index) {
-            return;
-        }
-        let end = index.saturating_add(pager.max_run()).min(pager.size());
-        let end = self
-            .inner
-            .lock()
-            .pages
-            .range(index..end)
-            .next()
-            .map_or(end, |(&i, _)| i);
-        if end <= index {
-            return;
-        }
-        if let Some(fill) = pager.start_run(index, end - index) {
-            // One left unused (the reader went elsewhere) is dropped.
-            let old = self.ahead.lock().replace(Ahead {
-                index,
-                pages: end - index,
-                fill,
-            });
-            drop(old);
-        }
+    /// Fills the `run` pages from `index` on with one transfer into fresh
+    /// pages, then puts them in: the first, or `None` if the pager cannot
+    /// (or its data moved meanwhile), for the caller to fill otherwise.
+    fn fill_fresh(
+        &self,
+        pager: &dyn Pager,
+        index: PageIndex,
+        run: PageIndex,
+    ) -> Result<Option<Pfn>, LookupError> {
+        let n = usize::try_from(run).map_err(|_| LookupError::OutOfMemory)?;
+        let Some(pages) = FreshPages::alloc(self.pages_ops, n) else {
+            return Ok(None);
+        };
+        let pages = Arc::new(pages);
+        let Some(fill) = pager.start_run(index, &pages) else {
+            return Ok(None);
+        };
+        self.finish_fill(index, pages, fill)
     }
 
-    /// Page `index` from the read-ahead in flight there, if one is: the
-    /// next window is started, then this one waited for and put in.
-    /// `Ok(None)` when there is none, or its data no longer stands.
-    fn take_ahead(&self, pager: &dyn Pager, index: PageIndex) -> Result<Option<Pfn>, LookupError> {
-        let taken = {
-            let mut ahead = self.ahead.lock();
-            if ahead.as_ref().is_none_or(|a| a.index != index) {
-                return Ok(None);
-            }
-            ahead.take()
-        };
-        let Some(Ahead {
-            pages, mut fill, ..
-        }) = taken
-        else {
+    /// Waits for fill `fill` of `pages` from `index` on, and puts them in
+    /// if the data still stands: the first page.
+    fn finish_fill(
+        &self,
+        index: PageIndex,
+        pages: Arc<FreshPages>,
+        mut fill: Box<dyn PendingFill>,
+    ) -> Result<Option<Pfn>, LookupError> {
+        if fill.wait(&pages).is_err() {
+            // Read again, the usual way, to report the error.
             return Ok(None);
-        };
-        self.start_ahead(pager, index + pages);
-        self.ra_window.store(pages, Ordering::Relaxed);
-        self.ra_next.store(index + pages, Ordering::Relaxed);
-        let Ok(buf) = fill.wait() else {
-            // Read again, synchronously, to report the error.
-            return Ok(None);
-        };
-        // Pages made outside every lock (making one may write others
-        // back); put in only if the data still stands.
-        let mut made = Vec::new();
-        for chunk in buf.as_chunks::<PAGE_BYTES>().0 {
-            match self
-                .pages_ops
-                .alloc_filled(&mut |page| page.copy_from_slice(chunk))
-            {
-                Some(new) => made.push(new),
-                None => break,
-            }
         }
+        // Every transfer is done and has let its part go.
+        let Ok(mut pages) = Arc::try_unwrap(pages) else {
+            return Ok(None);
+        };
+        let pfns = pages.take();
         let mut first = None;
         let committed = fill.commit(&mut || {
-            for (i, &new) in (index..).zip(&made) {
+            for (i, &new) in (index..).zip(&pfns) {
                 let pfn = self.insert_filled(i, new);
                 first.get_or_insert(pfn);
             }
         });
         if !committed {
-            for new in made {
+            for new in pfns {
                 self.pages_ops.free(new);
             }
             return Ok(None);
         }
         Ok(first)
+    }
+
+    /// Keeps [`AHEAD`] windows of `max_run` pages read ahead past `index`
+    /// (where the reader's window ends), unless they already are; never
+    /// past the end or over a page held.
+    fn start_ahead(&self, pager: &dyn Pager, index: PageIndex) {
+        loop {
+            let next = {
+                let ahead = self.ahead.lock();
+                if ahead.len() >= AHEAD {
+                    return;
+                }
+                ahead.back().map_or(index, |a| {
+                    a.index + PageIndex::try_from(a.pages.len() / PAGE_BYTES).unwrap_or(0)
+                })
+            };
+            let end = next.saturating_add(pager.max_run()).min(pager.size());
+            let end = self
+                .inner
+                .lock()
+                .pages
+                .range(next..end)
+                .next()
+                .map_or(end, |(&i, _)| i);
+            if end <= next {
+                return;
+            }
+            let Some(pages) = usize::try_from(end - next)
+                .ok()
+                .and_then(|n| FreshPages::alloc(self.pages_ops, n))
+            else {
+                return;
+            };
+            let pages = Arc::new(pages);
+            let Some(fill) = pager.start_run(next, &pages) else {
+                return;
+            };
+            let mut ahead = self.ahead.lock();
+            if ahead.back().map_or(index, |a| {
+                a.index + PageIndex::try_from(a.pages.len() / PAGE_BYTES).unwrap_or(0)
+            }) != next
+            {
+                // Another reader got there first; this one is dropped.
+                return;
+            }
+            ahead.push_back(Ahead {
+                index: next,
+                pages,
+                fill,
+            });
+        }
+    }
+
+    /// Page `index` from the read-ahead in flight there, if one is: the
+    /// windows past it are kept going, then this one waited for and put
+    /// in. `Ok(None)` when there is none, or its data no longer stands.
+    fn take_ahead(&self, pager: &dyn Pager, index: PageIndex) -> Result<Option<Pfn>, LookupError> {
+        let taken = {
+            let mut ahead = self.ahead.lock();
+            let Some(at) = ahead.iter().position(|a| a.index == index) else {
+                return Ok(None);
+            };
+            // Windows before it were skipped: dropped (unused).
+            let skipped: Vec<Ahead> = ahead.drain(..at).collect();
+            let taken = ahead.pop_front();
+            drop(ahead);
+            drop(skipped);
+            taken
+        };
+        let Some(Ahead { pages, fill, .. }) = taken else {
+            return Ok(None);
+        };
+        let n = PageIndex::try_from(pages.len() / PAGE_BYTES).unwrap_or(0);
+        self.start_ahead(pager, index + n);
+        self.ra_window.store(n, Ordering::Relaxed);
+        self.ra_next.store(index + n, Ordering::Relaxed);
+        self.finish_fill(index, pages, fill)
     }
 
     /// Inserts a page just filled at `index`, unless a racing fill got

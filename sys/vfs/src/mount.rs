@@ -331,6 +331,18 @@ impl Mount {
         Ok(v)
     }
 
+    /// The vnode for `ino`, just made as `ops` (no load). Nothing else can
+    /// reach the new node until its name is let go, so it is in no vnode
+    /// yet.
+    pub fn adopt(self: &Arc<Self>, s: &Sleepable, ino: u64, ops: NodeOps) -> Arc<Vnode> {
+        let _loading = self.loading.lock(s);
+        let v = Arc::new(Vnode::new(Arc::clone(self), ino, ops));
+        let old = self.table.lock().insert(ino, Arc::clone(&v));
+        debug_assert!(old.is_none(), "a new node's inode {ino} has a vnode");
+        drop(old);
+        v
+    }
+
     /// The vnode for `ino` if it is in core.
     #[must_use]
     pub fn cached(&self, ino: u64) -> Option<Arc<Vnode>> {

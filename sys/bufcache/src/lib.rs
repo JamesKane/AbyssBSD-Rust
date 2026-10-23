@@ -149,6 +149,8 @@ struct Buffer {
     used: AtomicU64,
     /// Its background write's outcome.
     result: AtomicU8,
+    /// Out of the table: set with its lock held, before it is let go.
+    evicted: AtomicBool,
 }
 
 /// What background writes' completions share with the cache.
@@ -428,6 +430,7 @@ impl BufCache {
                             ),
                             used: AtomicU64::new(0),
                             result: AtomicU8::new(PENDING),
+                            evicted: AtomicBool::new(false),
                         });
                         t.insert(offset, Arc::clone(&b));
                         self.bytes.fetch_add(size, Ordering::Relaxed);
@@ -437,12 +440,7 @@ impl BufCache {
             };
             let mut data = buf.data.lock(s);
             // It may have been evicted while we waited for it.
-            let current = self
-                .buffers
-                .lock()
-                .get(&offset)
-                .is_some_and(|b| Arc::ptr_eq(b, &buf));
-            if !current {
+            if buf.evicted.load(Ordering::Acquire) {
                 continue;
             }
             self.settle(s, &buf, &mut data, false);
@@ -697,6 +695,7 @@ impl BufCache {
                 continue;
             }
             t.remove(&b.offset);
+            b.evicted.store(true, Ordering::Release);
             self.bytes.fetch_sub(g.bytes.len(), Ordering::Relaxed);
         }
     }
@@ -729,6 +728,7 @@ impl BufCache {
                 continue;
             }
             t.remove(&b.offset);
+            b.evicted.store(true, Ordering::Release);
             drop(t);
             self.bytes.fetch_sub(blen, Ordering::Relaxed);
             if data.dirty.is_some() {
@@ -740,6 +740,9 @@ impl BufCache {
     /// Forgets every buffer (unmount, after `sync`); dirty ones are lost.
     pub fn invalidate(&self) {
         let gone = core::mem::take(&mut *self.buffers.lock());
+        for b in gone.values() {
+            b.evicted.store(true, Ordering::Release);
+        }
         self.bytes.store(0, Ordering::Relaxed);
         self.dirty.store(0, Ordering::Relaxed);
         drop(gone);
