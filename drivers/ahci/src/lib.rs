@@ -46,6 +46,7 @@ use sched::{IrqCx, Sleepable};
 use storage::{Bio, BioError, BioOp, Disk, DiskInfo, DiskQueues};
 use sync::SpinLock;
 use vm::dma::{DmaCoherent, DmaConstraints, DmaTag, Mapped, dir};
+use vm::object::IoBuf;
 
 /// Generic host control registers.
 const CAP: usize = 0x00;
@@ -141,8 +142,8 @@ impl core::fmt::Debug for Ctlr {
 
 enum Data {
     None,
-    Read(Mapped<Vec<u8>, dir::FromDevice>),
-    Write(Mapped<Vec<u8>, dir::ToDevice>),
+    Read(Mapped<IoBuf, dir::FromDevice>),
+    Write(Mapped<IoBuf, dir::ToDevice>),
 }
 
 struct InFlight {

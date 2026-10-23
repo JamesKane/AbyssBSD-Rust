@@ -1036,16 +1036,21 @@ ktest! {
             crate::mm::free_pages(pa, vm::Order::ZERO);
         }
         struct Page(addr::PhysAddr);
-        impl DmaBuf for Page {
+        impl Page {
             fn bytes(&self) -> &[u8] {
-                let va = bootproto::layout::dmap(self.0).unwrap().get() as *const u8;
                 // SAFETY: a page we own, through the direct map.
-                unsafe { core::slice::from_raw_parts(va, 4096) }
+                unsafe { core::slice::from_raw_parts(self.range(0).0, 4096) }
             }
             fn bytes_mut(&mut self) -> &mut [u8] {
-                let va = bootproto::layout::dmap(self.0).unwrap().get() as *mut u8;
                 // SAFETY: as above, exclusively.
-                unsafe { core::slice::from_raw_parts_mut(va, 4096) }
+                unsafe { core::slice::from_raw_parts_mut(self.range(0).0, 4096) }
+            }
+        }
+        // SAFETY: a page we own, through the direct map.
+        unsafe impl DmaBuf for Page {
+            fn range(&self, _: usize) -> (*mut u8, usize) {
+                let va = bootproto::layout::dmap(self.0).unwrap().get() as *mut u8;
+                (va, 4096)
             }
         }
         let mut page = Page(high);

@@ -33,6 +33,7 @@ use storage::{Bio, BioError, BioOp, Disk, DiskInfo, DiskQueues};
 use sync::SpinLock;
 use virtio::{VirtioDevice, Virtqueue, device_type};
 use vm::dma::{DmaCoherent, DmaConstraints, DmaTag, Mapped, dir};
+use vm::object::IoBuf;
 
 /// Feature bits (virtio 1.2 §5.2.3).
 const F_SIZE_MAX: u64 = 1 << 1;
@@ -70,8 +71,8 @@ type Buffers = Vec<(u64, u32)>;
 /// A request's data, mapped for the device.
 enum Data {
     None,
-    Read(Mapped<Vec<u8>, dir::FromDevice>),
-    Write(Mapped<Vec<u8>, dir::ToDevice>),
+    Read(Mapped<IoBuf, dir::FromDevice>),
+    Write(Mapped<IoBuf, dir::ToDevice>),
 }
 
 /// A request on the device.

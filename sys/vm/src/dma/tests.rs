@@ -112,7 +112,7 @@ impl core::fmt::Debug for FakeBuf {
     }
 }
 
-impl DmaBuf for FakeBuf {
+impl FakeBuf {
     fn bytes(&self) -> &[u8] {
         // SAFETY: the test reserved these bytes of the arena.
         unsafe { core::slice::from_raw_parts(self.mem.virt(self.pa).as_ptr(), self.len) }
@@ -120,6 +120,13 @@ impl DmaBuf for FakeBuf {
     fn bytes_mut(&mut self) -> &mut [u8] {
         // SAFETY: as above, exclusively.
         unsafe { core::slice::from_raw_parts_mut(self.mem.virt(self.pa).as_ptr(), self.len) }
+    }
+}
+
+// SAFETY: the arena bytes the test reserved for this buffer.
+unsafe impl DmaBuf for FakeBuf {
+    fn range(&self, _: usize) -> (*mut u8, usize) {
+        (self.mem.virt(self.pa).as_ptr(), self.len)
     }
 }
 
@@ -317,6 +324,70 @@ fn many_segments_spill() {
             len: 2 * 4096
         }]
     );
+}
+
+/// Several fake buffers as one, in order (a gather of pages).
+#[derive(Debug)]
+struct FakeGather(Vec<FakeBuf>);
+
+// SAFETY: its buffers' ranges, in order.
+unsafe impl DmaBuf for FakeGather {
+    fn ranges(&self) -> usize {
+        self.0.len()
+    }
+    fn range(&self, i: usize) -> (*mut u8, usize) {
+        self.0[i].range(0)
+    }
+}
+
+#[test]
+fn gathered_ranges_join_when_adjacent() {
+    let mem = Fake::new(8 * MIB);
+    let tag = DmaTag::new(mem, bits(64), 8 * MIB);
+    mem.take(MIB, 4 * PAGE_SIZE);
+    mem.take(3 * MIB, PAGE_SIZE);
+    // Two pages back to back, then one elsewhere.
+    let g = FakeGather(vec![
+        mem.buf_at(MIB, PAGE_SIZE as usize),
+        mem.buf_at(MIB + PAGE_SIZE, PAGE_SIZE as usize),
+        mem.buf_at(3 * MIB, 512),
+    ]);
+    let m = tag.map::<dir::ToDevice, _>(g).unwrap();
+    assert!(!m.bounced());
+    let segs: Vec<(u64, u64)> = m.segments().iter().map(|s| (s.bus, s.len)).collect();
+    assert_eq!(segs, vec![(MIB, 2 * PAGE_SIZE), (3 * MIB, 512)]);
+    assert_eq!(m.unmap().total(), 2 * PAGE_SIZE as usize + 512);
+}
+
+#[test]
+fn gathered_ranges_bounce_in_order() {
+    let mem = Fake::new(8 * MIB);
+    let tag = DmaTag::new(mem, bits(22), 8 * MIB);
+    // Out of a 22-bit device's reach: bounced, ranges copied in order.
+    mem.take(5 * MIB, PAGE_SIZE);
+    mem.take(6 * MIB, PAGE_SIZE);
+    let mut a = mem.buf_at(5 * MIB, 100);
+    let mut b = mem.buf_at(6 * MIB, 50);
+    a.bytes_mut().fill(1);
+    b.bytes_mut().fill(2);
+    let out = tag.map::<dir::ToDevice, _>(FakeGather(vec![a, b])).unwrap();
+    assert!(out.bounced());
+    let seg = out.segments()[0];
+    // SAFETY: the bounce page the device would read.
+    let seen = unsafe { core::slice::from_raw_parts(mem.virt(seg.bus).as_ptr(), 150) };
+    assert!(seen[..100].iter().all(|&x| x == 1) && seen[100..].iter().all(|&x| x == 2));
+    // And back, range by range.
+    let g = out.unmap();
+    let inn = tag.map::<dir::FromDevice, _>(g).unwrap();
+    let seg = inn.segments()[0];
+    // SAFETY: the device's write into the bounce page.
+    unsafe {
+        let p = mem.virt(seg.bus).as_ptr();
+        p.write_bytes(3, 100);
+        p.add(100).write_bytes(4, 50);
+    }
+    let g = inn.unmap();
+    assert!(g.0[0].bytes().iter().all(|&x| x == 3) && g.0[1].bytes().iter().all(|&x| x == 4));
 }
 
 #[test]

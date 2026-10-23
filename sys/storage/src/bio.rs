@@ -8,6 +8,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use sched::{Sleepable, WaitQueue};
 use sync::SpinLock;
+use vm::object::IoBuf;
 
 /// What a request does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,7 +48,7 @@ impl BioError {
 }
 
 /// What completing a request calls: the buffer back, and the outcome.
-pub type Done = Box<dyn FnOnce(Vec<u8>, Result<(), BioError>) + Send>;
+pub type Done = Box<dyn FnOnce(IoBuf, Result<(), BioError>) + Send>;
 
 /// Requests dropped without being completed (driver bugs).
 static DROPPED: AtomicU64 = AtomicU64::new(0);
@@ -73,8 +74,8 @@ pub struct Bio {
     pub offset: u64,
     /// The data, read into or written from; its length is the transfer's.
     /// A driver may take it for DMA and must put it back before
-    /// completing.
-    pub buf: Vec<u8>,
+    /// completing. A write may lend a file's pages rather than a copy.
+    pub buf: IoBuf,
     done: Option<Done>,
 }
 
@@ -93,8 +94,8 @@ impl Bio {
     pub fn new(
         op: BioOp,
         offset: u64,
-        buf: Vec<u8>,
-        done: impl FnOnce(Vec<u8>, Result<(), BioError>) + Send + 'static,
+        buf: IoBuf,
+        done: impl FnOnce(IoBuf, Result<(), BioError>) + Send + 'static,
     ) -> Self {
         Self {
             op,
@@ -157,8 +158,8 @@ impl Waiter {
             queue: WaitQueue::new(),
         });
         let back = Arc::clone(&w);
-        let bio = Bio::new(op, offset, buf, move |buf, r| {
-            *back.slot.lock() = Some((buf, r));
+        let bio = Bio::new(op, offset, buf.into(), move |buf, r| {
+            *back.slot.lock() = Some((buf.into_vec(), r));
             back.queue.wake_all();
         });
         (bio, w)

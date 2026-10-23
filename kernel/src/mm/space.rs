@@ -108,6 +108,11 @@ impl PageOps for KernelPages {
         // object's owner serializes writers (the vnode lock, the map).
         f(unsafe { core::slice::from_raw_parts_mut(Self::page(pfn), PAGE_BYTES) });
     }
+
+    fn page_ptr(&self, pfn: Pfn) -> Option<core::ptr::NonNull<u8>> {
+        // Its place in the DMAP, fixed while it is allocated.
+        core::ptr::NonNull::new(Self::page(pfn))
+    }
 }
 
 static PAGES: KernelPages = KernelPages;

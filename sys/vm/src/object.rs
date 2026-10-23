@@ -54,6 +54,12 @@ pub trait PageOps: Sync {
     fn free(&self, pfn: Pfn);
     /// Calls `f` with page `pfn`'s contents.
     fn access(&self, pfn: Pfn, f: &mut dyn FnMut(&mut [u8]));
+    /// Where page `pfn`'s bytes lie for as long as it is allocated (a
+    /// direct map), so a device can take them without a copy; `None` if
+    /// pages have no such fixed place.
+    fn page_ptr(&self, _pfn: Pfn) -> Option<core::ptr::NonNull<u8>> {
+        None
+    }
 }
 
 /// A pager could not move a page (an I/O error).
@@ -206,6 +212,177 @@ pub struct IoGuard<'a>(&'a Object);
 impl Drop for IoGuard<'_> {
     fn drop(&mut self) {
         self.0.io.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// An object's pages lent for a transfer without copying them (FreeBSD's
+/// buffer over its pages, `vfs_busy_pages`): while it lasts the object is
+/// held and counted as under I/O, so none of its pages is freed (a page of
+/// an object others hold is kept, zeroed if cut off, until the object
+/// goes). A page written meanwhile goes out as it is when the device reads
+/// it, and is dirty again for a later write.
+pub struct PageRun {
+    ranges: Vec<(core::ptr::NonNull<u8>, usize)>,
+    object: Arc<Object>,
+}
+
+// SAFETY: the ranges are pages of `object`, which the run holds; they are
+// only read through it (and written by a device reading into them).
+unsafe impl Send for PageRun {}
+// SAFETY: as above; a shared run only lends addresses.
+unsafe impl Sync for PageRun {}
+
+impl PageRun {
+    /// Bytes in all.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.ranges.iter().map(|&(_, n)| n).sum()
+    }
+
+    /// Whether it holds no bytes.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Bytes `from..from + len` of the run, as a run of their own.
+    #[must_use]
+    pub fn slice(&self, from: usize, len: usize) -> Self {
+        let mut ranges = Vec::new();
+        let (mut skip, mut want) = (from, len);
+        for &(p, n) in &self.ranges {
+            if want == 0 {
+                break;
+            }
+            if skip >= n {
+                skip -= n;
+                continue;
+            }
+            let take = (n - skip).min(want);
+            // In the same page as `p`, `skip` bytes on.
+            ranges.push((
+                core::ptr::NonNull::new(p.as_ptr().wrapping_add(skip)).unwrap_or(p),
+                take,
+            ));
+            want -= take;
+            skip = 0;
+        }
+        self.object.io.fetch_add(1, Ordering::SeqCst);
+        Self {
+            ranges,
+            object: Arc::clone(&self.object),
+        }
+    }
+
+    /// The bytes, copied.
+    #[must_use]
+    pub fn to_vec(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.len());
+        for &(p, n) in &self.ranges {
+            // SAFETY: `n` bytes of a page the run holds (see the type).
+            out.extend_from_slice(unsafe { core::slice::from_raw_parts(p.as_ptr(), n) });
+        }
+        out
+    }
+}
+
+impl core::fmt::Debug for PageRun {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "PageRun({} bytes in {} ranges)",
+            self.len(),
+            self.ranges.len()
+        )
+    }
+}
+
+impl Drop for PageRun {
+    fn drop(&mut self) {
+        self.object.io.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+// SAFETY: each range is part of a page the run's object holds and keeps
+// while the run lives.
+unsafe impl crate::dma::DmaBuf for PageRun {
+    fn ranges(&self) -> usize {
+        self.ranges.len()
+    }
+    fn range(&self, i: usize) -> (*mut u8, usize) {
+        let (p, n) = self.ranges[i];
+        (p.as_ptr(), n)
+    }
+}
+
+/// Bytes for a transfer: owned, or an object's pages lent ([`PageRun`]).
+#[derive(Debug)]
+pub enum IoBuf {
+    Owned(Vec<u8>),
+    Lent(PageRun),
+}
+
+impl Default for IoBuf {
+    fn default() -> Self {
+        Self::Owned(Vec::new())
+    }
+}
+
+impl From<Vec<u8>> for IoBuf {
+    fn from(v: Vec<u8>) -> Self {
+        Self::Owned(v)
+    }
+}
+
+impl IoBuf {
+    /// Bytes in all.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Owned(v) => v.len(),
+            Self::Lent(r) => r.len(),
+        }
+    }
+
+    /// Whether it holds no bytes.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Bytes `from..from + len`, as a buffer of their own (a lent run's
+    /// pages stay lent; owned bytes are copied).
+    #[must_use]
+    pub fn slice(&self, from: usize, len: usize) -> Self {
+        match self {
+            Self::Owned(v) => Self::Owned(v[from..from + len].to_vec()),
+            Self::Lent(r) => Self::Lent(r.slice(from, len)),
+        }
+    }
+
+    /// The bytes, owned (a lent run's copied).
+    #[must_use]
+    pub fn into_vec(self) -> Vec<u8> {
+        match self {
+            Self::Owned(v) => v,
+            Self::Lent(r) => r.to_vec(),
+        }
+    }
+}
+
+// SAFETY: an owned vector's bytes, or a lent run's (see `PageRun`).
+unsafe impl crate::dma::DmaBuf for IoBuf {
+    fn ranges(&self) -> usize {
+        match self {
+            Self::Owned(v) => v.ranges(),
+            Self::Lent(r) => r.ranges(),
+        }
+    }
+    fn range(&self, i: usize) -> (*mut u8, usize) {
+        match self {
+            Self::Owned(v) => v.range(i),
+            Self::Lent(r) => r.range(i),
+        }
     }
 }
 
@@ -648,6 +825,10 @@ impl Object {
     /// Frees the pages in `[start, end)`, which no page table maps any
     /// more (an unmapped range of an object nothing else shares).
     pub fn free_range(&self, start: PageIndex, end: PageIndex) {
+        // Pages lent to a transfer stay; they go with the object.
+        if self.io.load(Ordering::SeqCst) != 0 {
+            return;
+        }
         let mut inner = self.inner.lock();
         let tail = inner.pages.split_off(&start);
         let mut keep = tail;

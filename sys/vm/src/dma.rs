@@ -531,29 +531,41 @@ impl Direction for dir::Bidirectional {
 }
 
 /// A byte buffer a stream can carry: it lends its bytes, which lie in
-/// kernel memory [`DmaMemory::phys`] can translate.
-pub trait DmaBuf {
-    /// The bytes.
-    fn bytes(&self) -> &[u8];
-    /// The bytes, writable.
-    fn bytes_mut(&mut self) -> &mut [u8];
+/// kernel memory [`DmaMemory::phys`] can translate, as ranges in order
+/// (one for a plain buffer; a gather of pages has one per page run). The
+/// ranges are lent by address, not as references: a gather's pages may
+/// be written by others while the device reads them (the bytes it sends
+/// are then as they were at that moment).
+///
+/// # Safety
+///
+/// Each range is `len` bytes of kernel memory at `ptr`, readable while
+/// the buffer lives, and writable through it while it is lent to the
+/// device for reading into (the mapping holds the buffer meanwhile).
+pub unsafe trait DmaBuf {
+    /// How many ranges the bytes are in.
+    fn ranges(&self) -> usize {
+        1
+    }
+    /// Range `i` of the bytes: where, and how long.
+    fn range(&self, i: usize) -> (*mut u8, usize);
+    /// How many bytes in all.
+    fn total(&self) -> usize {
+        (0..self.ranges()).map(|i| self.range(i).1).sum()
+    }
 }
 
-impl DmaBuf for alloc::boxed::Box<[u8]> {
-    fn bytes(&self) -> &[u8] {
-        self
-    }
-    fn bytes_mut(&mut self) -> &mut [u8] {
-        self
+// SAFETY: the boxed bytes, owned.
+unsafe impl DmaBuf for alloc::boxed::Box<[u8]> {
+    fn range(&self, _: usize) -> (*mut u8, usize) {
+        (self.as_ptr().cast_mut(), self.len())
     }
 }
 
-impl DmaBuf for Vec<u8> {
-    fn bytes(&self) -> &[u8] {
-        self
-    }
-    fn bytes_mut(&mut self) -> &mut [u8] {
-        self
+// SAFETY: the vector's bytes, owned.
+unsafe impl DmaBuf for Vec<u8> {
+    fn range(&self, _: usize) -> (*mut u8, usize) {
+        (self.as_ptr().cast_mut(), self.len())
     }
 }
 
@@ -592,7 +604,7 @@ pub struct Mapped<B: DmaBuf, D: Direction> {
 impl<B: DmaBuf, D: Direction> core::fmt::Debug for Mapped<B, D> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Mapped")
-            .field("len", &self.buf.bytes().len())
+            .field("len", &self.buf.total())
             .field("segments", &self.segments())
             .field("bounced", &self.bounced())
             .finish()
@@ -605,7 +617,7 @@ impl DmaTag {
     /// segments. On error the buffer comes back.
     #[inline]
     pub fn map<D: Direction, B: DmaBuf>(&self, buf: B) -> Result<Mapped<B, D>, (B, DmaError)> {
-        match self.build::<D>(buf.bytes()) {
+        match self.build::<D, B>(&buf) {
             Ok(map) => Ok(Mapped {
                 buf,
                 map,
@@ -615,49 +627,55 @@ impl DmaTag {
         }
     }
 
-    fn build<D: Direction>(&self, bytes: &[u8]) -> Result<Map, DmaError> {
+    fn build<D: Direction, B: DmaBuf>(&self, buf: &B) -> Result<Map, DmaError> {
         let c = &self.constraints;
         let mut segments = Segments::new();
         // Direct when every byte is within reach and the start is aligned
         // (later ranges start on page boundaries, so alignment beyond a
         // page needs a single range). The buffer's physical ranges are
-        // split into segments as they are found, page by page.
+        // split into segments as they are found, page by page, across its
+        // ranges (adjacent ones join).
         let mut direct = true;
         let mut split_err = None;
         let mut range: Option<(u64, u64)> = None;
-        let mut off = 0usize;
-        while off < bytes.len() {
-            let va = bytes[off..].as_ptr();
-            let pa = self.phys(va).ok_or(DmaError::BadBuffer)?;
-            let in_page = to_usize(PAGE_SIZE - (pa % PAGE_SIZE));
-            let n = in_page.min(bytes.len() - off);
-            // A direct tag reaches all RAM (decided once, at creation, as
-            // FreeBSD's BUS_DMA_COULD_BOUNCE is).
-            let reach = self.backend == Backend::Direct || pa + n as u64 <= c.limit();
-            if !reach || (off == 0 && pa & (c.align - 1) != 0) {
-                direct = false;
-                break;
-            }
-            range = match range {
-                Some((p, l)) if p + l == pa => Some((p, l + n as u64)),
-                Some(_) if c.align > PAGE_SIZE => {
+        'ranges: for i in 0..buf.ranges() {
+            let (ptr, len) = buf.range(i);
+            let mut off = 0usize;
+            while off < len {
+                let va = ptr.wrapping_add(off).cast_const();
+                let pa = self.phys(va).ok_or(DmaError::BadBuffer)?;
+                let in_page = to_usize(PAGE_SIZE - (pa % PAGE_SIZE));
+                let n = in_page.min(len - off);
+                let n64 = u64::try_from(n).unwrap_or(u64::MAX);
+                // A direct tag reaches all RAM (decided once, at creation,
+                // as FreeBSD's BUS_DMA_COULD_BOUNCE is).
+                let reach = self.backend == Backend::Direct || pa + n64 <= c.limit();
+                if !reach || (range.is_none() && pa & (c.align - 1) != 0) {
                     direct = false;
-                    break;
+                    break 'ranges;
                 }
-                Some((p, l)) => {
-                    // Keep looking on failure: an unreachable page later
-                    // means bouncing, which may need fewer segments.
-                    if split_err.is_none() {
-                        split_err = self.split(p, l, &mut segments).err();
+                range = match range {
+                    Some((p, l)) if p + l == pa => Some((p, l + n64)),
+                    Some(_) if c.align > PAGE_SIZE => {
+                        direct = false;
+                        break 'ranges;
                     }
-                    Some((pa, n as u64))
-                }
-                None => Some((pa, n as u64)),
-            };
-            off += n;
+                    Some((p, l)) => {
+                        // Keep looking on failure: an unreachable page
+                        // later means bouncing, which may need fewer
+                        // segments.
+                        if split_err.is_none() {
+                            split_err = self.split(p, l, &mut segments).err();
+                        }
+                        Some((pa, n64))
+                    }
+                    None => Some((pa, n64)),
+                };
+                off += n;
+            }
         }
         if !direct {
-            return self.bounce::<D>(bytes);
+            return self.bounce::<D, B>(buf);
         }
         if let Some(e) = split_err {
             return Err(e);
@@ -667,10 +685,13 @@ impl DmaTag {
         }
         let non_coherent = c.coherency == Coherency::NonCoherent;
         if non_coherent {
-            if D::READS {
-                self.mem.clean(bytes.as_ptr(), bytes.len());
-            } else {
-                self.mem.invalidate(bytes.as_ptr(), bytes.len());
+            for i in 0..buf.ranges() {
+                let (ptr, len) = buf.range(i);
+                if D::READS {
+                    self.mem.clean(ptr, len);
+                } else {
+                    self.mem.invalidate(ptr, len);
+                }
             }
         }
         Ok(match segments {
@@ -692,10 +713,11 @@ impl DmaTag {
     /// direct path stays small enough to inline into drivers.
     #[cold]
     #[inline(never)]
-    fn bounce<D: Direction>(&self, bytes: &[u8]) -> Result<Map, DmaError> {
+    fn bounce<D: Direction, B: DmaBuf>(&self, buf: &B) -> Result<Map, DmaError> {
         let mem = self.mem;
         let c = &self.constraints;
-        let len = bytes.len() as u64;
+        let total = buf.total();
+        let len = u64::try_from(total).unwrap_or(u64::MAX);
         let align = c.align.max(PAGE_SIZE);
         let alloc = len.next_multiple_of(align);
         let pa = mem
@@ -703,17 +725,21 @@ impl DmaTag {
             .ok_or(DmaError::NoMemory)?;
         let bva = mem.virt(pa);
         if D::READS {
-            // SAFETY: the bounce pages are ours and at least `len` long.
-            unsafe {
-                bva.as_ptr()
-                    .copy_from_nonoverlapping(bytes.as_ptr(), bytes.len())
-            };
+            let mut at = 0;
+            for i in 0..buf.ranges() {
+                let (ptr, n) = buf.range(i);
+                // SAFETY: the bounce pages are ours and at least `len`
+                // long, which the ranges add up to; the buffer lends `n`
+                // readable bytes at `ptr`.
+                unsafe { bva.as_ptr().add(at).copy_from_nonoverlapping(ptr, n) };
+                at += n;
+            }
         }
         if c.coherency == Coherency::NonCoherent {
             if D::READS {
-                mem.clean(bva.as_ptr(), bytes.len());
+                mem.clean(bva.as_ptr(), total);
             } else {
-                mem.invalidate(bva.as_ptr(), bytes.len());
+                mem.invalidate(bva.as_ptr(), total);
             }
         }
         let mut segments = Segments::new();
@@ -757,24 +783,30 @@ impl<B: DmaBuf, D: Direction> Mapped<B, D> {
     #[cold]
     fn finish(buf: &mut B, s: Spill) {
         let mem = s.mem;
-        let out = buf.bytes_mut();
         if let Some(b) = s.bounce {
             let bva = mem.virt(b.pa);
             if D::WRITES {
                 if s.non_coherent {
-                    mem.invalidate(bva.as_ptr(), out.len());
+                    mem.invalidate(bva.as_ptr(), buf.total());
                 }
-                // SAFETY: the bounce pages hold at least `out.len()` bytes.
-                unsafe {
-                    out.as_mut_ptr()
-                        .copy_from_nonoverlapping(bva.as_ptr(), out.len())
-                };
+                let mut at = 0;
+                for i in 0..buf.ranges() {
+                    let (ptr, n) = buf.range(i);
+                    // SAFETY: the bounce pages hold every range's bytes,
+                    // in order; the buffer lends `n` writable bytes at
+                    // `ptr` while it is mapped for reading into.
+                    unsafe { ptr.copy_from_nonoverlapping(bva.as_ptr().add(at), n) };
+                    at += n;
+                }
             }
             // SAFETY: allocated in `bounce` with these values; the device
             // is done with them.
             unsafe { mem.free(b.pa, b.bytes) };
         } else if D::WRITES && s.non_coherent {
-            mem.invalidate(out.as_ptr(), out.len());
+            for i in 0..buf.ranges() {
+                let (ptr, n) = buf.range(i);
+                mem.invalidate(ptr, n);
+            }
         }
     }
 }

@@ -10,6 +10,7 @@ bus = { path = "../bus" }
 gpt = { path = "../../lib/gpt" }
 sched = { path = "../sched" }
 sync = { path = "../sync" }
+vm = { path = "../vm" }
 
 [lints]
 workspace = true

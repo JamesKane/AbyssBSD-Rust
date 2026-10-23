@@ -387,6 +387,7 @@ dependencies = [
  "gpt",
  "sched",
  "sync",
+ "vm",
 ]
 
 [[package]]

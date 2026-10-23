@@ -468,9 +468,9 @@ fn read_sync(s: &Sleepable, disk: &storage::Disk, buf: Vec<u8>, at: u64) -> Vec<
     let done: Arc<(sync::SpinLock<Option<Vec<u8>>>, WaitQueue)> =
         Arc::new((sync::SpinLock::new(None), WaitQueue::new()));
     let back = Arc::clone(&done);
-    let bio = storage::Bio::new(storage::BioOp::Read, at, buf, move |buf, r| {
+    let bio = storage::Bio::new(storage::BioOp::Read, at, buf.into(), move |buf, r| {
         assert!(r.is_ok(), "bench: read failed: {r:?}");
-        *back.0.lock() = Some(buf);
+        *back.0.lock() = Some(buf.into_vec());
         back.1.wake_all();
     });
     disk.strategy(s, bio);
@@ -501,13 +501,13 @@ fn qd_issue(q: &Arc<Qd>, s: &Sleepable, buf: Vec<u8>) {
     // The completion hands the buffer to the worker, which resubmits: one
     // thread hop, as FreeBSD's `bio_done` runs in `g_up`, not in the
     // driver's interrupt thread (resubmitting there never lets it sleep).
-    let bio = storage::Bio::new(storage::BioOp::Read, at, buf, move |buf, r| {
+    let bio = storage::Bio::new(storage::BioOp::Read, at, buf.into(), move |buf, r| {
         assert!(r.is_ok(), "bench: read failed: {r:?}");
         q2.completed.fetch_add(1, Ordering::Relaxed);
         if q2.run.stopped() {
             q2.inflight.fetch_sub(1, Ordering::AcqRel);
         } else {
-            q2.done.lock().push(buf);
+            q2.done.lock().push(buf.into_vec());
         }
         q2.wake.wake_all();
     });

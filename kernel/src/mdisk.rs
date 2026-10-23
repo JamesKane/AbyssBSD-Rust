@@ -114,11 +114,16 @@ fn worker(s: &Sleepable, q: &Queue) {
             } else {
                 match bio.op {
                     BioOp::Read => {
-                        pages.transfer(bio.offset, &mut bio.buf, false);
+                        let mut buf = core::mem::take(&mut bio.buf).into_vec();
+                        pages.transfer(bio.offset, &mut buf, false);
+                        bio.buf = buf.into();
                         Ok(())
                     }
                     BioOp::Write => {
-                        pages.transfer(bio.offset, &mut bio.buf, true);
+                        // Lent pages are copied: memory to memory either way.
+                        let mut buf = core::mem::take(&mut bio.buf).into_vec();
+                        pages.transfer(bio.offset, &mut buf, true);
+                        bio.buf = buf.into();
                         Ok(())
                     }
                     BioOp::Flush => Ok(()),
