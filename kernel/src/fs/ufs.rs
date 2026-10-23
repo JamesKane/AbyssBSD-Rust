@@ -55,8 +55,6 @@ static WORK: LockClass = LockClass::new("ufs work", 342);
 /// [`Shared::flush_frees`], one at a time: after the vnode locks, before
 /// the work.
 static FLUSHING: LockClass = LockClass::new("ufs flush", 341);
-/// Finding or making an in-core inode: under vnode locks, before inodes.
-static LOADING: LockClass = LockClass::new("ufs load", 345);
 /// In-core inodes: under vnode locks, before the summary and buffers.
 static INODE: LockClass = LockClass::new_dup_ok("ufs inode", 350);
 /// The allocation summary (FreeBSD's `UFS_LOCK`).
@@ -356,9 +354,12 @@ struct Shared {
     inodes: PreemptLock<intmap::IntMap<u32, InCore>>,
     /// When the syncer last wrote every file's dirty pages.
     data_synced: AtomicU64,
-    /// Held while finding or making an in-core inode (`load`, deferred
-    /// work), so one inode is never in core twice.
-    loading: Mutex<()>,
+    /// Bumped with every change to `inodes` (under its lock): one who
+    /// read an inode from the disk with none in core puts it in only if
+    /// nothing changed meanwhile, so one inode is never in core twice and
+    /// never stale (FreeBSD's `vfs_hash_insert` races the insert the
+    /// same way, with no lock held across the read).
+    changes: AtomicU64,
     /// Held while doing soft-updates work, so a writer short of space
     /// waits for frees another thread has taken but not yet done.
     working: Mutex<()>,
@@ -468,7 +469,7 @@ impl UfsFs {
                 writable: AtomicBool::new(false),
                 inodes: PreemptLock::new(intmap::IntMap::new()),
                 data_synced: AtomicU64::new(0),
-                loading: Mutex::new(&LOADING, ()),
+                changes: AtomicU64::new(0),
                 working: Mutex::new(&WORK, ()),
                 flushing: Mutex::new(&FLUSHING, ()),
                 applying: AtomicBool::new(false),
@@ -654,57 +655,67 @@ impl Shared {
     /// Inode `ino` in core: the one a node or the work holds, or read now
     /// (and found by `load` meanwhile).
     fn cell(&self, s: &Sleepable, ino: u32) -> Result<Arc<InodeCell>, Errno> {
-        let _loading = self.loading.lock(s);
-        if let Some(c) = self.inodes.lock().get(&ino).and_then(|(c, _)| c.upgrade()) {
-            return Ok(c);
+        loop {
+            let before = self.changes.load(Ordering::Acquire);
+            if let Some(c) = self.inodes.lock().get(&ino).and_then(|(c, _)| c.upgrade()) {
+                return Ok(c);
+            }
+            let ip = self.ufs.inode(s, ino).map_err(errno)?;
+            let cell = new_cell(ino, ip);
+            let mut t = self.inodes.lock();
+            if let Some(c) = t.get(&ino).and_then(|(c, _)| c.upgrade()) {
+                drop(t);
+                return Ok(c);
+            }
+            // A cell came and went meanwhile: what was read may be older
+            // than what it wrote.
+            if self.changes.load(Ordering::Acquire) != before {
+                continue;
+            }
+            t.insert(ino, (Arc::downgrade(&cell), None));
+            self.changes.fetch_add(1, Ordering::Release);
+            return Ok(cell);
         }
-        let ip = self.ufs.inode(s, ino).map_err(errno)?;
-        Ok(self.new_cell(ino, ip))
     }
 
     /// Puts inode `ino`, just made as `ip`, in core unless it is (FreeBSD's
     /// `ffs_valloc` hands `ufs_makeinode` the vnode it read): its node's
     /// load then reads nothing.
-    fn seed(&self, s: &Sleepable, ino: u32, ip: ufs::Inode) -> Option<Arc<InodeCell>> {
-        let _loading = self.loading.lock(s);
-        if self
-            .inodes
-            .lock()
-            .get(&ino)
-            .is_some_and(|(c, _)| c.strong_count() > 0)
-        {
+    fn seed(&self, ino: u32, ip: ufs::Inode) -> Option<Arc<InodeCell>> {
+        let cell = new_cell(ino, ip);
+        let mut t = self.inodes.lock();
+        if t.get(&ino).is_some_and(|(c, _)| c.strong_count() > 0) {
             return None;
         }
-        Some(self.new_cell(ino, ip))
+        t.insert(ino, (Arc::downgrade(&cell), None));
+        self.changes.fetch_add(1, Ordering::Release);
+        Some(cell)
     }
+}
 
-    /// A new in-core inode `ino` holding `ip`, in the table. The caller
-    /// holds `loading` and found none.
-    fn new_cell(&self, ino: u32, ip: ufs::Inode) -> Arc<InodeCell> {
-        let size = ip.size;
-        let cell = Arc::new(InodeCell {
-            stat: StatCopy::new(&ip),
-            ino,
-            state: Mutex::new(
-                &INODE,
-                InodeState {
-                    ip,
-                    dirty: false,
-                    nodes: 0,
-                    data_gen: 0,
-                    cluster: Cluster::default(),
-                    unwritten: Vec::new(),
-                },
-            ),
-            size: AtomicU64::new(size),
-            writing: Writing::new(),
-        });
-        self.inodes
-            .lock()
-            .insert(ino, (Arc::downgrade(&cell), None));
-        cell
-    }
+/// A new in-core inode `ino` holding `ip`, not yet in the table.
+fn new_cell(ino: u32, ip: ufs::Inode) -> Arc<InodeCell> {
+    let size = ip.size;
+    Arc::new(InodeCell {
+        stat: StatCopy::new(&ip),
+        ino,
+        state: Mutex::new(
+            &INODE,
+            InodeState {
+                ip,
+                dirty: false,
+                nodes: 0,
+                data_gen: 0,
+                cluster: Cluster::default(),
+                unwritten: Vec::new(),
+            },
+        ),
+        size: AtomicU64::new(size),
+        writing: Writing::new(),
+    })
+}
 
+impl Shared {
     /// Does the soft-updates work that is due: frees, and link counts
     /// dropping (FreeBSD's `softdep_process_worklist`).
     fn process_work(&self, s: &Sleepable) {
@@ -1324,12 +1335,12 @@ impl Node for UfsNode {
                 }
             }
         }
-        let _loading = shared.loading.lock(s);
         let mut t = shared.inodes.lock();
         if t.get(&self.cell.ino)
             .is_some_and(|(w, _)| w.as_ptr() == Arc::as_ptr(&self.cell))
         {
             t.remove(&self.cell.ino);
+            shared.changes.fetch_add(1, Ordering::Release);
         }
     }
 
@@ -1640,6 +1651,7 @@ fn node_of(
         ino32,
         (Arc::downgrade(&cell), object.as_ref().map(Arc::downgrade)),
     );
+    shared.changes.fetch_add(1, Ordering::Release);
     let node = Box::new(UfsNode {
         cell,
         parent,
@@ -1717,7 +1729,7 @@ impl DirectoryNode for UfsNode {
                     // Its new times go out later (FreeBSD's `IN_CHANGE`).
                     st.dirty = true;
                     drop(st);
-                    let ops = match shared.seed(s, ino, ip) {
+                    let ops = match shared.seed(ino, ip) {
                         Some(cell) => {
                             Some(node_of(&shared, s, cell, Some(u64::from(self.cell.ino)))?)
                         }
