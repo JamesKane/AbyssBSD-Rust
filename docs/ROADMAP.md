@@ -1245,8 +1245,12 @@ end in QEMU ([ADR-0010](adr/0010-qemu-first-development.md)), so the track exits
 - **On hardware, at P6 bring-up:** the sentence above, on both reference machines, with the X870E's
   PCI xHCIs and the Sky1's ACPI (`PNP0D10`) ones.
 
-**Behavior references.** FreeBSD's `sys/dev/usb` (controller/xhci.c, usb_hub.c, input/ukbd.c and
-ums.c, storage/umass.c), `sys/dev/vt` with `sys/teken`, `sys/dev/kbd` and `sys/dev/kbdmux`, and
+**Design.** [USB.md](USB.md) ([ADR-0015](adr/0015-usb-input-vt.md)): xHCI rings whose types say who
+owns each slot, transfers completed exactly once, interfaces as the children drivers match, HID as
+a bus, one input class under kbd and evdev, and `vt` over a pure terminal emulator.
+
+**Behavior references.** FreeBSD's `sys/dev/usb` (controller/xhci.c, usb_hub.c, input/usbhid.c,
+storage/umass.c), `sys/dev/hid` (hidbus.c, hkbd.c, hms.c), `sys/dev/vt` with `sys/teken`, `sys/dev/kbd` and `sys/dev/kbdmux`, and
 `sys/dev/evdev`. FreeBSD has no virtio-input driver and no UAS: there, the specifications (virtio
 1.2 §5.8, T10 UAS-2) are the reference, and the user interface is the same `kbd`/evdev one.
 
@@ -1267,8 +1271,8 @@ U.0 ─► U.1 ─► U.2 ─┬─► U.3 ─► U.4 ─┬─► U.6
   `usb-uas`, and `virtio-keyboard`/`virtio-tablet`, on both arches. xtask injects keystrokes and
   reads the screen over QMP (`input-send-event`, `screendump`) for boot tests.
 - FreeBSD 15.1's view of the same QEMU machine recorded as ground truth: `dmesg` names (`uhub0`,
-  `ukbd0`, `ums0`, `umass0`, `da0`), `usbconfig` output, `devctl` events, and `/dev` nodes.
-- The track's performance suite proposed by ADR (see below).
+  `usbhid0`, `hkbd0`, `hms0`, `umass0`, `da0`), `usbconfig` output, `devctl` events, and `/dev` nodes.
+- The track's performance suite, by ADR (see below).
 
 **U.1 xHCI.**
 - The ring and context code in a host-tested `lib/xhci` (TRB encoding, cycle bits, link TRBs,
@@ -1316,8 +1320,8 @@ U.0 ─► U.1 ─► U.2 ─┬─► U.3 ─► U.4 ─┬─► U.6
 **U.6 Exit.**
 - The QEMU exit above, in the boot tier on both arches and bhyve, and the suite's verdict.
 
-**Performance (proposed; needs the owner's acceptance by ADR).** The track adds a component that
-can be measured fairly before hardware: `vt` text output (a `cat` of a large text file to `ttyv0`,
+**Performance** ([ADR-0015](adr/0015-usb-input-vt.md)). The track adds a component that can be
+measured fairly before hardware: `vt` text output (a `cat` of a large text file to `ttyv0`,
 and a scrolling workload), against FreeBSD's `vt_efifb` in the same bhyve VM with a framebuffer.
 USB mass-storage throughput (sequential and random, BBB on both sides) cannot be compared fairly in
 an emulator, since FreeBSD's host cannot run QEMU with acceleration and bhyve has no USB disk; it

@@ -21,6 +21,7 @@ Status values: **Proposed** (awaiting owner confirmation) · **Accepted** · **S
 | [0012](0012-driver-model.md) | Driver model: FreeBSD's userland view, framework-owned lifecycle, dependency graph, typed grants | Accepted |
 | [0013](0013-vfs.md) | VFS and file systems: typed references, generic-layer protocol, one page cache, engines in `lib/` | Accepted |
 | [0014](0014-performance-parity-per-component.md) | Performance parity is judged per component; benchmarks are diagnostics | Accepted |
+| [0015](0015-usb-input-vt.md) | USB, input, and virtual terminals: xHCI only, transfers completed once, `hidbus`, one input class, `vt` over a pure emulator, `umass` without CAM | Accepted |
 
 Template:
 
