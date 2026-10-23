@@ -1194,6 +1194,48 @@ impl Node for UfsNode {
     }
 }
 
+/// Puts fragment `m` (grown or moved by `balloc_new`) in `object`'s pages:
+/// each page of it held and dirty, so it is written whole to its new
+/// place. A page in memory has the contents already; one that is not gets
+/// the old fragments' bytes, read from where they were, and zeros past
+/// them. The caller holds the inode and the summary.
+fn carry_moved(
+    s: &Sleepable,
+    shared: &Shared,
+    object: &Object,
+    m: &ufs::Moved,
+) -> Result<(), Errno> {
+    let old_end = m.at + m.old_len;
+    // The old contents, read once if a page needs them.
+    let mut old: Option<Vec<u8>> = None;
+    for page in m.at / PAGE..(m.at + m.len).div_ceil(PAGE) {
+        if object.page_here(page).is_some() {
+            object.mark_dirty(page);
+            continue;
+        }
+        let start = page * PAGE;
+        let pfn = object.page_for_overwrite(page).map_err(|_| Errno::ENOMEM)?;
+        if start < old_end {
+            if old.is_none() {
+                let mut buf = alloc::vec![0u8; usize::try_from(m.old_len).map_err(|_| Errno::EIO)?];
+                ufs::BlockIo::read_data(shared.ufs.io(), s, m.from, &mut buf)
+                    .map_err(|_| Errno::EIO)?;
+                old = Some(buf);
+            }
+            let bytes = old.as_deref().unwrap_or(&[]);
+            // The fragment starts a block, so a page, and the page's part
+            // of the old contents is its start.
+            let from = usize::try_from(start - m.at).map_err(|_| Errno::EIO)?;
+            let to = usize::try_from((start + PAGE).min(old_end) - m.at).map_err(|_| Errno::EIO)?;
+            object.access(pfn, &mut |p| {
+                p[..to - from].copy_from_slice(&bytes[from..to]);
+            });
+        }
+        object.mark_dirty(page);
+    }
+    Ok(())
+}
+
 impl vfs::RegularNode for UfsNode {
     fn read(&self, s: &Sleepable, offset: u64, uio: &mut dyn Uio) -> Result<usize, Errno> {
         let object = self.object.as_ref().ok_or(Errno::EINVAL)?;
@@ -1219,9 +1261,9 @@ impl vfs::RegularNode for UfsNode {
         // How far blocks were given: out of space partway, the write is
         // short (FreeBSD's `ffs_write` stops at the block that failed).
         let mut reach = offset;
-        // The file's byte ranges of newly allocated blocks: cleared in the
-        // page cache, not on the disk.
-        let mut new = Vec::new();
+        // The file's newly allocated blocks, and fragments grown or moved:
+        // cleared and carried over in the page cache, not on the disk.
+        let mut new = ufs::NewSpace::default();
         // Give the range blocks, the size growing as FreeBSD's `ffs_write`
         // does, block by block. Out of space with soft updates waiting to
         // free some, it waits for that and tries again; still out, the
@@ -1264,11 +1306,19 @@ impl vfs::RegularNode for UfsNode {
                 }
                 at += n;
             }
+            // Fragments grown or moved: their pages hold what the old
+            // fragments did, zeros past it, and are written to the new
+            // place later (FreeBSD moves the buffer). Those not in memory
+            // are read from the old place now, which nothing can take
+            // while the summary is held.
+            for m in &new.moved {
+                carry_moved(s, &shared, &object, m)?;
+            }
             // New blocks read as zeros from now on: their pages go in
             // zeroed and dirty (written whole later, as FreeBSD writes a
             // cleared buffer) before the inode is unlocked, so no fill or
             // read-ahead can read the unwritten disk under them first.
-            for &(at, len) in &new {
+            for &(at, len) in &new.zeroed {
                 for page in at / PAGE..(at + len).div_ceil(PAGE) {
                     if object.page_for_overwrite(page).is_ok() {
                         object.mark_dirty(page);

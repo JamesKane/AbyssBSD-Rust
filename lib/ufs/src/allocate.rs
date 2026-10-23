@@ -573,12 +573,15 @@ impl<B: BlockIo> Ufs<B> {
         nsize: u64,
         reserve: Reserve,
         metadata: bool,
+        carried: bool,
     ) -> Result<(u64, Option<(u64, u64)>), Error> {
-        let r = self.realloccg_once(cx, sum, ino, bprev, bpref, osize, nsize, reserve, metadata);
-        match r {
-            Err(Error::NoSpace) if self.reclaim(cx, sum) => {
-                self.realloccg_once(cx, sum, ino, bprev, bpref, osize, nsize, reserve, metadata)
-            }
+        let once = |sum: &mut Summary| {
+            self.realloccg_once(
+                cx, sum, ino, bprev, bpref, osize, nsize, reserve, metadata, carried,
+            )
+        };
+        match once(sum) {
+            Err(Error::NoSpace) if self.reclaim(cx, sum) => once(sum),
             r => r,
         }
     }
@@ -595,6 +598,7 @@ impl<B: BlockIo> Ufs<B> {
         nsize: u64,
         reserve: Reserve,
         metadata: bool,
+        carried: bool,
     ) -> Result<(u64, Option<(u64, u64)>), Error> {
         let sb = &self.sb;
         if reserve == Reserve::Denied
@@ -605,8 +609,9 @@ impl<B: BlockIo> Ufs<B> {
         let cg = sb.dtog(bprev);
         if self.fragextend(cx, sum, ino, cg, bprev, osize, nsize)? {
             // The fragments taken read as zeros (FreeBSD zeroes them in
-            // the buffer). A directory rewrites its block itself.
-            if !metadata {
+            // the buffer). A directory rewrites its block itself, and a
+            // caller that `carried` the data clears them in memory.
+            if !metadata && !carried {
                 let zeros = alloc::vec![0u8; idx64(nsize - osize)];
                 self.io
                     .write_data(cx, bprev * u64::from(sb.fsize) + osize, &zeros)?;
@@ -634,8 +639,8 @@ impl<B: BlockIo> Ufs<B> {
             .ok_or(Error::NoSpace)?;
         // Move the old contents; the new part reads as zeros.
         let fsize = u64::from(sb.fsize);
-        let mut data = alloc::vec![0u8; idx64(nsize)];
         if metadata {
+            let mut data = alloc::vec![0u8; idx64(nsize)];
             self.io.read(cx, bprev * fsize, idx64(osize), &mut |b| {
                 data[..b.len()].copy_from_slice(b)
             })?;
@@ -650,7 +655,8 @@ impl<B: BlockIo> Ufs<B> {
                     self.soft(cx, |d| d.contents(bno, bno * fsize));
                 },
             )?;
-        } else {
+        } else if !carried {
+            let mut data = alloc::vec![0u8; idx64(nsize)];
             self.io
                 .read_data(cx, bprev * fsize, &mut data[..idx64(osize)])?;
             self.io.write_data(cx, bno * fsize, &data)?;

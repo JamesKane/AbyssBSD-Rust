@@ -25,6 +25,28 @@ use crate::{
 /// 512-byte units (`DEV_BSIZE`), which `di_blocks` counts.
 const DEV_BSIZE: u64 = 512;
 
+/// What a caller's page cache takes on in place of the disk when
+/// [`Ufs::balloc_new`] gives a file space.
+#[derive(Debug, Default)]
+pub struct NewSpace {
+    /// File byte ranges of new blocks, which read as zeros.
+    pub zeroed: Vec<(u64, u64)>,
+    /// Fragments grown in place or moved, whose old contents the caller
+    /// carries over.
+    pub moved: Vec<Moved>,
+}
+
+/// A fragment grown or moved: the file's bytes `at..at + len` are now
+/// allocated, the first `old_len` of them as they were at disk byte
+/// `from`, the rest zeros.
+#[derive(Debug, Clone, Copy)]
+pub struct Moved {
+    pub at: u64,
+    pub len: u64,
+    pub from: u64,
+    pub old_len: u64,
+}
+
 impl<B: BlockIo> Ufs<B> {
     /// Writes inode `ino` (FreeBSD's `ffs_update`): copies it into its
     /// block, which goes out as `mode` says. With soft updates the copy is
@@ -181,8 +203,10 @@ impl<B: BlockIo> Ufs<B> {
     /// and its byte range in the file goes into `new`. The caller writes
     /// all of it, zeros where it has nothing else, before the pointer to
     /// it may reach the disk (soft updates wait for every byte of new
-    /// space). Fragments grown in place or moved are still zeroed past
-    /// their old end on the disk, by [`Self::realloccg`].
+    /// space). A fragment grown in place or moved is neither copied nor
+    /// zeroed on the disk either: it goes into `new` too, with where its
+    /// old contents are, for the caller to carry over in memory (FreeBSD
+    /// moves the buffer, `ffs_realloccg`).
     #[allow(clippy::too_many_arguments)]
     pub fn balloc_new(
         &self,
@@ -193,7 +217,7 @@ impl<B: BlockIo> Ufs<B> {
         offset: u64,
         len: u64,
         reserve: Reserve,
-        new: &mut Vec<(u64, u64)>,
+        new: &mut NewSpace,
     ) -> Result<u64, Error> {
         self.balloc_in(
             cx,
@@ -221,9 +245,11 @@ impl<B: BlockIo> Ufs<B> {
         reserve: Reserve,
         clear: bool,
         metadata: bool,
-        mut new_space: Option<&mut Vec<(u64, u64)>>,
+        mut new_space: Option<&mut NewSpace>,
     ) -> Result<u64, Error> {
         let sb = &self.sb;
+        // The caller's memory takes over grown and moved fragments.
+        let carried = new_space.is_some() && !metadata;
         let bsize = u64::from(sb.bsize);
         let fsize = u64::from(sb.fsize);
         let lbn = offset / bsize;
@@ -243,8 +269,17 @@ impl<B: BlockIo> Ufs<B> {
             if osize < bsize && osize > 0 && ip.db[idx64(nb)] != 0 {
                 let pref = self.blkpref(sum, ino, ip, nb, int64(nb), prev_db(ip, nb));
                 let old = ip.db[idx64(nb)];
-                let (new, free_old) =
-                    self.realloccg(cx, sum, ino, old, pref, osize, bsize, reserve, metadata)?;
+                let (new, free_old) = self.realloccg(
+                    cx, sum, ino, old, pref, osize, bsize, reserve, metadata, carried,
+                )?;
+                if let Some(v) = new_space.as_deref_mut().filter(|_| carried) {
+                    v.moved.push(Moved {
+                        at: nb * bsize,
+                        len: bsize,
+                        from: old * fsize,
+                        old_len: osize,
+                    });
+                }
                 ip.blocks += (bsize - osize) / DEV_BSIZE;
                 ip.db[idx64(nb)] = new;
                 ip.size = (nb + 1) * bsize;
@@ -267,8 +302,17 @@ impl<B: BlockIo> Ufs<B> {
                     return Ok(nb);
                 }
                 let pref = self.blkpref(sum, ino, ip, lbn, int64(lbn), prev_db(ip, lbn));
-                let (new, free_old) =
-                    self.realloccg(cx, sum, ino, nb, pref, osize, nsize, reserve, metadata)?;
+                let (new, free_old) = self.realloccg(
+                    cx, sum, ino, nb, pref, osize, nsize, reserve, metadata, carried,
+                )?;
+                if let Some(v) = new_space.as_deref_mut().filter(|_| carried) {
+                    v.moved.push(Moved {
+                        at: lbn * bsize,
+                        len: nsize,
+                        from: nb * fsize,
+                        old_len: osize,
+                    });
+                }
                 ip.blocks += (nsize - osize) / DEV_BSIZE;
                 ip.db[i] = new;
                 self.place_direct(cx, ino, i, new, (nb, osize), free_old);
@@ -293,7 +337,7 @@ impl<B: BlockIo> Ufs<B> {
             if clear && !metadata {
                 self.zero_data(cx, new * fsize, nsize)?;
             } else if let Some(v) = new_space.as_deref_mut() {
-                v.push((lbn * bsize, nsize));
+                v.zeroed.push((lbn * bsize, nsize));
             }
             return Ok(new);
         }
@@ -324,7 +368,7 @@ impl<B: BlockIo> Ufs<B> {
         clear: bool,
         metadata: bool,
         fresh: &mut Vec<(u64, Pointer)>,
-        new_space: Option<&mut Vec<(u64, u64)>>,
+        new_space: Option<&mut NewSpace>,
     ) -> Result<u64, Error> {
         let sb = &self.sb;
         let bsize = u64::from(sb.bsize);
@@ -373,7 +417,7 @@ impl<B: BlockIo> Ufs<B> {
         if clear && !metadata {
             self.zero_data(cx, new * fsize, bsize)?;
         } else if let Some(v) = new_space {
-            v.push((lbn * bsize, bsize));
+            v.zeroed.push((lbn * bsize, bsize));
         }
         self.ind_set(cx, blk, slot, new)?;
         if metadata {

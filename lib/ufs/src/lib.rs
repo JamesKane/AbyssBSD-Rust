@@ -37,6 +37,7 @@ mod soft_tests;
 mod tests;
 
 pub use allocate::{Reserve, Summary};
+pub use balloc::{Moved, NewSpace};
 pub use dir::DirEntry;
 pub use inode::{Inode, Kind, Timestamp};
 pub use sb::{Stats, Superblock};
