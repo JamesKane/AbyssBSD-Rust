@@ -429,6 +429,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "scsi"
+version = "0.0.0"
+
+[[package]]
 name = "storage"
 version = "0.0.0"
 dependencies = [
