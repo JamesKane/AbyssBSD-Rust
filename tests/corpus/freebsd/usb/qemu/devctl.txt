@@ -1,0 +1,81 @@
+!system=DEVFS subsystem=CDEV type=DESTROY cdev=da0
+!system=DEVFS subsystem=CDEV type=DESTROY cdev=diskid/DISK-abyssbbb
+!system=DEVFS subsystem=CDEV type=DESTROY cdev=pass0
+!system=GEOM subsystem=DEV type=DESTROY cdev=da0
+!system=GEOM subsystem=DEV type=DESTROY cdev=diskid/DISK-abyssbbb
+-umass0 at   on uhub0
+!system=DEVFS subsystem=CDEV type=DESTROY cdev=usb/0.2.2
+!system=DEVFS subsystem=CDEV type=DESTROY cdev=usb/0.2.1
+!system=DEVFS subsystem=CDEV type=CREATE cdev=usb/0.2.1
+!system=DEVFS subsystem=CDEV type=CREATE cdev=usb/0.2.2
++umass0 at bus=0 hubaddr=1 port=4 devaddr=2 interface=0 ugen=ugen0.2 vendor=0x46f4 product=0x0001 devclass=0x00 devsubclass=0x00 devproto=0x00 sernum="abyssbbb" release=0x0000 mode=host intclass=0x08 intsubclass=0x06 intprotocol=0x50 on uhub0
+!system=DEVFS subsystem=CDEV type=CREATE cdev=pass0
+!system=DEVFS subsystem=CDEV type=CREATE cdev=da0
+!system=GEOM subsystem=DEV type=CREATE cdev=da0
+!system=DEVFS subsystem=CDEV type=CREATE cdev=diskid/DISK-abyssbbb
+!system=GEOM subsystem=DEV type=CREATE cdev=diskid/DISK-abyssbbb
+!system=DEVFS subsystem=CDEV type=DESTROY cdev=usb/0.3.4
+!system=DEVFS subsystem=CDEV type=DESTROY cdev=usb/0.3.3
+!system=DEVFS subsystem=CDEV type=DESTROY cdev=usb/0.3.2
+!system=DEVFS subsystem=CDEV type=DESTROY cdev=usb/0.3.1
+!system=DEVFS subsystem=CDEV type=CREATE cdev=usb/0.3.1
+!system=DEVFS subsystem=CDEV type=CREATE cdev=usb/0.3.2
+!system=DEVFS subsystem=CDEV type=CREATE cdev=usb/0.3.3
+!system=DEVFS subsystem=CDEV type=CREATE cdev=usb/0.3.4
+? at bus=0 hubaddr=1 port=5 devaddr=3 interface=0 ugen=ugen0.3 vendor=0x46f4 product=0x0003 devclass=0x00 devsubclass=0x00 devproto=0x00 sernum="27842-0000:00:05.0-5" release=0x0000 mode=host intclass=0x08 intsubclass=0x06 intprotocol=0x62 on uhub0
+!system=DEVFS subsystem=CDEV type=DESTROY cdev=kbd2
+!system=DEVFS subsystem=CDEV type=DESTROY cdev=hkbd0
+!system=DEVFS subsystem=CDEV type=DESTROY cdev=input/event4
+-hkbd0 at index=0 page=0x0001 usage=0x0006 bus=0x03 vendor=0x0627 product=0x0001 version=0x0000 on hidbus0
+-hidbus0 at   on usbhid0
+-usbhid0 at   on uhub0
+!system=DEVFS subsystem=CDEV type=DESTROY cdev=usb/0.4.1
+!system=DEVFS subsystem=CDEV type=CREATE cdev=usb/0.4.1
+!system=DEVFS subsystem=CDEV type=CREATE cdev=hkbd0
+!system=DEVFS subsystem=CDEV type=CREATE cdev=kbd2
+!system=DEVFS subsystem=CDEV type=CREATE cdev=input/event4
++hkbd0 at index=0 page=0x0001 usage=0x0006 bus=0x03 vendor=0x0627 product=0x0001 version=0x0000 on hidbus0
++hidbus0 at   on usbhid0
++usbhid0 at bus=0 hubaddr=1 port=9 devaddr=4 interface=0 ugen=ugen0.4 vendor=0x0627 product=0x0001 devclass=0x00 devsubclass=0x00 devproto=0x00 sernum="68284-0000:00:05.0-1" release=0x0000 mode=host intclass=0x03 intsubclass=0x01 intprotocol=0x01 on uhub0
+!system=DEVFS subsystem=CDEV type=DESTROY cdev=input/event5
+-hms0 at index=0 page=0x0001 usage=0x0002 bus=0x03 vendor=0x0627 product=0x0001 version=0x0000 on hidbus1
+-hidbus1 at   on usbhid1
+-usbhid1 at   on uhub0
+!system=DEVFS subsystem=CDEV type=DESTROY cdev=usb/0.5.1
+!system=DEVFS subsystem=CDEV type=CREATE cdev=usb/0.5.1
+!system=DEVFS subsystem=CDEV type=CREATE cdev=input/event5
++hms0 at index=0 page=0x0001 usage=0x0002 bus=0x03 vendor=0x0627 product=0x0001 version=0x0000 on hidbus1
++hidbus1 at   on usbhid1
++usbhid1 at bus=0 hubaddr=1 port=10 devaddr=5 interface=0 ugen=ugen0.5 vendor=0x0627 product=0x0001 devclass=0x00 devsubclass=0x00 devproto=0x00 sernum="28754-0000:00:05.0-2" release=0x0000 mode=host intclass=0x03 intsubclass=0x00 intprotocol=0x00 on uhub0
+!system=USB subsystem=DEVICE type=DETACH ugen=ugen0.7 cdev=ugen0.7 vendor=0x0627 product=0x0001 devclass=0x00 devsubclass=0x00 sernum="89126-0000:00:05.0-3.1" release=0x0000 mode=host port=1 parent=ugen0.6
+!system=USB subsystem=INTERFACE type=DETACH ugen=ugen0.7 cdev=ugen0.7 vendor=0x0627 product=0x0001 devclass=0x00 devsubclass=0x00 sernum="89126-0000:00:05.0-3.1" release=0x0000 mode=host interface=0 endpoints=1 intclass=0x03 intsubclass=0x01 intprotocol=0x02
+!system=DEVFS subsystem=CDEV type=DESTROY cdev=ugen0.7
+!system=DEVFS subsystem=CDEV type=DESTROY cdev=usb/0.7.0
+!system=DEVFS subsystem=CDEV type=DESTROY cdev=input/event6
+-hms1 at index=0 page=0x0001 usage=0x0002 bus=0x03 vendor=0x0627 product=0x0001 version=0x0000 on hidbus2
+-hidbus2 at   on usbhid2
+-usbhid2 at   on uhub1
+!system=DEVFS subsystem=CDEV type=DESTROY cdev=usb/0.7.1
+-uhub1 at   on uhub0
+!system=DEVFS subsystem=CDEV type=DESTROY cdev=usb/0.6.1
+!system=DEVFS subsystem=CDEV type=CREATE cdev=usb/0.6.1
++uhub1 at bus=0 hubaddr=1 port=11 devaddr=6 interface=0 ugen=ugen0.6 vendor=0x0409 product=0x55aa devclass=0x09 devsubclass=0x00 devproto=0x00 sernum="314159-0000:00:05.0-3" release=0x0101 mode=host intclass=0x09 intsubclass=0x00 intprotocol=0x00 on uhub0
+!system=DEVFS subsystem=CDEV type=CREATE cdev=usb/0.7.0
+!system=DEVFS subsystem=CDEV type=CREATE cdev=ugen0.7
+!system=DEVFS subsystem=CDEV type=CREATE cdev=usb/0.7.1
+!system=USB subsystem=DEVICE type=ATTACH ugen=ugen0.7 cdev=ugen0.7 vendor=0x0627 product=0x0001 devclass=0x00 devsubclass=0x00 sernum="89126-0000:00:05.0-3.1" release=0x0000 mode=host port=1 parent=ugen0.6
+!system=USB subsystem=INTERFACE type=ATTACH ugen=ugen0.7 cdev=ugen0.7 vendor=0x0627 product=0x0001 devclass=0x00 devsubclass=0x00 sernum="89126-0000:00:05.0-3.1" release=0x0000 mode=host interface=0 endpoints=1 intclass=0x03 intsubclass=0x01 intprotocol=0x02
+!system=DEVFS subsystem=CDEV type=CREATE cdev=input/event6
++hms1 at index=0 page=0x0001 usage=0x0002 bus=0x03 vendor=0x0627 product=0x0001 version=0x0000 on hidbus2
++hidbus2 at   on usbhid2
++usbhid2 at bus=0 hubaddr=6 port=1 devaddr=7 interface=0 ugen=ugen0.7 vendor=0x0627 product=0x0001 devclass=0x00 devsubclass=0x00 devproto=0x00 sernum="89126-0000:00:05.0-3.1" release=0x0000 mode=host intclass=0x03 intsubclass=0x01 intprotocol=0x02 on uhub1
+!system=DEVFS subsystem=CDEV type=DESTROY cdev=input/event6
+-hms1 at index=0 page=0x0001 usage=0x0002 bus=0x03 vendor=0x0627 product=0x0001 version=0x0000 on hidbus2
+-hidbus2 at   on usbhid2
+-usbhid2 at   on uhub1
+!system=DEVFS subsystem=CDEV type=DESTROY cdev=usb/0.7.1
+!system=DEVFS subsystem=CDEV type=CREATE cdev=usb/0.7.1
+!system=DEVFS subsystem=CDEV type=CREATE cdev=input/event6
++hms1 at index=0 page=0x0001 usage=0x0002 bus=0x03 vendor=0x0627 product=0x0001 version=0x0000 on hidbus2
++hidbus2 at   on usbhid2
++usbhid2 at bus=0 hubaddr=6 port=1 devaddr=7 interface=0 ugen=ugen0.7 vendor=0x0627 product=0x0001 devclass=0x00 devsubclass=0x00 devproto=0x00 sernum="89126-0000:00:05.0-3.1" release=0x0000 mode=host intclass=0x03 intsubclass=0x01 intprotocol=0x02 on uhub1

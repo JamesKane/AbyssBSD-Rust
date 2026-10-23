@@ -1,0 +1,2 @@
+kbd1:
+    kbdmux0, type:AT 101/102 (2)

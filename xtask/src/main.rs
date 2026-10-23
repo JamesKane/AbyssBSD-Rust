@@ -17,6 +17,7 @@ mod perf;
 mod pjdfstest;
 mod policy;
 mod qemu;
+mod qmp;
 mod remote;
 mod syscalls;
 mod test;
@@ -34,15 +35,19 @@ usage: cargo xtask [--remote] <command> [options]
 commands:
   build       --arch <a|all> [--release] [--ktest]       build the loader
   image       --arch <a> [--release] [--ktest]           build a GPT disk image with an ESP
-  run         --arch <a> [--release] [--ktest] [--smp N] [--mem SIZE] [--gdb] [--display]
-  test        [--tier unit|boot|all] [--arch <a|all>]    run tests (default: all tiers)
+  run         --arch <a> [--release] [--ktest] [--smp N] [--mem SIZE] [--gdb] [--display] [--usb]
+              [--qmp SOCK]                               ... with a QMP socket for `qmp`
+  qmp         --sock SOCK [--type TEXT] [--screendump FILE]   type on, or capture the screen of, a running QEMU
+  test        [--tier unit|boot|all] [--arch <a|all>] [--usb]
+                                                         run tests (default: all tiers); --usb adds the USB set
   perf        [--suite p2|p3|p4|p5|diag] [--runs N] [--prepare] [--freebsd-only]
                                                          compare with FreeBSD in bhyve (server only)
   ubench      [--arch <a|all>] [--runs N] [--bhyve]      the P4 suite on AbyssBSD alone (QEMU, or bhyve on the server)
   freebsd-shell                                          run the boot-to-shell script against FreeBSD (server only)
   fetch-base  [--arch <a|all>]                           FreeBSD base.txz: /rescue image, sysroot (server only)
   acpidump    --arch <a> [--vmm qemu|bhyve] [--machine M] --out DIR   capture a VM's ACPI tables
-  freebsd-record [--out DIR]                             record FreeBSD's device tree in bhyve (server only)
+  freebsd-record [--out DIR] [--usb]                     record FreeBSD's device tree in bhyve; --usb: its USB
+                                                         and input devices, in QEMU and bhyve (server only)
   fs-image    --fs ufs2|msdos --out IMG [--from DIR] [--size S] [--softdep]
                                                          make a file-system image with FreeBSD's tools (server only)
   fs-check    --fs ufs2|msdos IMG                        fsck an image read-only; fails unless clean (server only)
@@ -84,6 +89,7 @@ fn run() -> Result<()> {
         "build" => build::cmd(args),
         "image" => image::cmd(args),
         "run" => qemu::cmd_run(args),
+        "qmp" => qmp::cmd(args),
         "test" => test::cmd(args),
         "perf" => perf::cmd(args),
         "ubench" => perf::cmd_ubench(args),

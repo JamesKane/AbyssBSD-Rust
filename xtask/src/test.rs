@@ -34,6 +34,8 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     let arches = Arch::from_args(&mut args)?;
     let release = args.take_flag("--release");
     let verbose = args.take_flag("--verbose");
+    // The USB and input devices on every boot-tier machine (U.0).
+    let usb = args.take_flag("--usb");
     args.finish()?;
 
     if matches!(tier, Tier::Unit | Tier::All) {
@@ -51,7 +53,7 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
                 continue;
             }
             println!("== boot tests ({}, {:?})", case.name, case.vmm);
-            match boot(case, release, verbose)? {
+            match boot(case, release, verbose, usb)? {
                 Ok(()) => println!("{}: PASS", case.name),
                 Err(why) => {
                     println!("{}: FAIL: {why}", case.name);
@@ -72,7 +74,7 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
                     continue;
                 }
                 println!("== boot tests ({name}, {vmm:?})");
-                match shell(arch, vmm, release)? {
+                match shell(arch, vmm, release, usb)? {
                     Ok(()) => println!("{name}: PASS"),
                     Err(why) => {
                         println!("{name}: FAIL: {why}");
@@ -270,7 +272,12 @@ const WARM_RESET_MARKER: &str = "logring: first boot marker";
 ///
 /// With `ufs_root`, the loader must find the kernel and the memory disk on
 /// a UFS2 partition (the ESP holds neither).
-fn shell(arch: Arch, vmm: Vmm, release: bool) -> Result<std::result::Result<(), String>> {
+fn shell(
+    arch: Arch,
+    vmm: Vmm,
+    release: bool,
+    usb: bool,
+) -> Result<std::result::Result<(), String>> {
     let opts = build::Options {
         release,
         ktest: false,
@@ -296,6 +303,7 @@ fn shell(arch: Arch, vmm: Vmm, release: bool) -> Result<std::result::Result<(), 
     let vm = Vm {
         smp: 4,
         nvme: ufs_root,
+        usb,
         ..Vm::new(vmm, arch, disk.clone())
     };
     let mut session = crate::expect::Session::start(vm, &log)?;
@@ -372,7 +380,12 @@ const FAULT_REPORT: &[&str] = &[
     "ktest: deliberate fatal fault reported",
 ];
 
-fn boot(case: &BootCase, release: bool, verbose: bool) -> Result<std::result::Result<(), String>> {
+fn boot(
+    case: &BootCase,
+    release: bool,
+    verbose: bool,
+    usb: bool,
+) -> Result<std::result::Result<(), String>> {
     // bhyve has no exit device: the kernel powers off after a pass.
     // CI runs with the verifier on (DRIVER-MODEL.md §13.1).
     let base = match (case.vmm, case.warm_reset) {
@@ -501,6 +514,7 @@ fn boot(case: &BootCase, release: bool, verbose: bool) -> Result<std::result::Re
         allow_reset: case.warm_reset,
         extra_disk: Some(scratch),
         devices,
+        usb,
         ..Vm::new(case.vmm, case.arch, disk)
     };
     // Emulated aarch64 is slow to start and slow through the file-system

@@ -104,7 +104,16 @@ pub(crate) struct Vm {
     /// Extra devices: bhyve `-s` slot specifications (`5,nvme,ram=64`) or
     /// QEMU `-device`/`-drive` argument pairs, passed through as given.
     pub(crate) devices: Vec<String>,
+    /// The USB and input set ([`USB_SLOT`] on bhyve, [`Vm::usb_args`] on
+    /// QEMU).
+    pub(crate) usb: bool,
 }
+
+/// bhyve's xHCI slot: its only USB device is a tablet.
+pub(crate) const USB_SLOT: &str = "30,xhci,tablet";
+
+/// The size of each USB scratch disk.
+const USB_DISK_SIZE: u64 = 16 << 20;
 
 /// Host CPUs per physical core on the build server (P-cores have SMT).
 pub(crate) const PIN_STRIDE: u32 = 2;
@@ -139,6 +148,8 @@ pub(crate) fn cmd_run(mut args: Args) -> Result<()> {
     let gdb = args.take_flag("--gdb");
     let display = args.take_flag("--display");
     let el2 = args.take_flag("--el2");
+    let usb = args.take_flag("--usb");
+    let qmp = args.take_value("--qmp")?;
     let vmm = Vmm::parse(&args.take_value("--vmm")?.unwrap_or_else(|| "qemu".into()))?;
     if !vmm.available(arch) {
         return Err(format!("{vmm:?} cannot run {arch} guests on this host").into());
@@ -157,12 +168,20 @@ pub(crate) fn cmd_run(mut args: Args) -> Result<()> {
         gdb,
         display,
         el2,
+        usb,
         ..Vm::new(vmm, arch, disk)
     };
 
     let mut cmd = vm.command()?;
     if vmm == Vmm::Qemu {
         cmd.arg("-serial").arg("mon:stdio");
+        if let Some(sock) = &qmp {
+            let _ = fs::remove_file(sock);
+            cmd.arg("-qmp")
+                .arg(format!("unix:{sock},server=on,wait=off"));
+        }
+    } else if qmp.is_some() {
+        return Err("--qmp needs QEMU".into());
     }
     if gdb {
         let kernel = build::kernel_path(arch, opts);
@@ -234,6 +253,7 @@ impl Vm {
             pin: false,
             machine: None,
             devices: Vec::new(),
+            usb: false,
         }
     }
 
@@ -283,6 +303,9 @@ impl Vm {
         }
         for d in &self.devices {
             c.arg("-s").arg(d);
+        }
+        if self.usb {
+            c.arg("-s").arg(USB_SLOT);
         }
         if self.pin {
             for v in 0..self.smp {
@@ -379,6 +402,9 @@ impl Vm {
             c.args(["-device", "ramfb"]);
         }
         c.args(&self.devices);
+        if self.usb {
+            c.args(self.usb_args()?);
+        }
         c.args(["-nic", "none"]);
         if !self.allow_reset {
             c.arg("-no-reboot");
@@ -393,6 +419,52 @@ impl Vm {
             c.arg("-s");
         }
         Ok(c)
+    }
+
+    /// The USB and input devices: an xHCI with a keyboard, a tablet, a hub
+    /// with a mouse behind it, a Bulk-Only disk and a UAS disk (blank
+    /// scratch images beside the boot disk), and virtio keyboard and
+    /// tablet.
+    ///
+    /// Ports are fixed so names and locations stay stable. Each of the
+    /// xHCI's eight ports takes either speed: the keyboard and tablet run
+    /// at high speed, the hub (QEMU's is USB 1.1) and its mouse at full
+    /// speed, and both disks at SuperSpeed.
+    fn usb_args(&self) -> Result<Vec<String>> {
+        let scratch = |what: &str| -> Result<PathBuf> {
+            let p = self.disk.with_extension(format!("usb-{what}.img"));
+            fs::File::create(&p)?.set_len(USB_DISK_SIZE)?;
+            Ok(p)
+        };
+        let bbb = scratch("bbb")?;
+        let uas = scratch("uas")?;
+        let args = [
+            "-device",
+            "qemu-xhci,id=xhci,p2=8,p3=8",
+            "-device",
+            "usb-kbd,bus=xhci.0,port=1",
+            "-device",
+            "usb-tablet,bus=xhci.0,port=2",
+            "-device",
+            "usb-hub,bus=xhci.0,port=3",
+            "-device",
+            "usb-mouse,bus=xhci.0,port=3.1",
+            "-drive",
+            &format!("if=none,id=usbbbb,format=raw,file={}", bbb.display()),
+            "-device",
+            "usb-storage,bus=xhci.0,port=4,drive=usbbbb,serial=abyssbbb",
+            "-device",
+            "usb-uas,id=uas0,bus=xhci.0,port=5",
+            "-drive",
+            &format!("if=none,id=usbuas,format=raw,file={}", uas.display()),
+            "-device",
+            "scsi-hd,bus=uas0.0,scsi-id=0,lun=0,drive=usbuas,serial=abyssuas",
+            "-device",
+            "virtio-keyboard-pci",
+            "-device",
+            "virtio-tablet-pci",
+        ];
+        Ok(args.iter().map(|&a| a.to_owned()).collect())
     }
 
     /// Runs headless with the serial console captured to `log`, until the

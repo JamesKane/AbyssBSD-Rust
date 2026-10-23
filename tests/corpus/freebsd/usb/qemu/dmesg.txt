@@ -1,0 +1,151 @@
+---<<BOOT>>---
+Copyright (c) 1992-2025 The FreeBSD Project.
+Copyright (c) 1979, 1980, 1983, 1986, 1988, 1989, 1991, 1992, 1993, 1994
+	The Regents of the University of California. All rights reserved.
+FreeBSD is a registered trademark of The FreeBSD Foundation.
+FreeBSD 15.1-RELEASE releng/15.1-n283562-96841ea08dcf GENERIC amd64
+FreeBSD clang version 19.1.7 (https://github.com/llvm/llvm-project.git llvmorg-19.1.7-0-gcd708029e0b2)
+VT(efifb): resolution 1280x800
+CPU: QEMU TCG CPU version 2.5+ (3609.77-MHz K8-class CPU)
+  Origin="AuthenticAMD"  Id=0x663  Family=0x6  Model=0x6  Stepping=3
+  Features=0x1fc3fbfd<FPU,DE,PSE,TSC,MSR,PAE,MCE,CX8,APIC,SEP,MTRR,PGE,MCA,CMOV,PAT,PSE36,ACPI,MMX,FXSR,SSE,SSE2,SS,HTT>
+  Features2=0xfef8320b<SSE3,PCLMULQDQ,MON,SSSE3,FMA,CX16,SSE4.1,SSE4.2,x2APIC,MOVBE,POPCNT,AESNI,XSAVE,OSXSAVE,AVX,F16C,RDRAND,HV>
+  AMD Features=0xec500800<SYSCALL,NX,MMX+,Page1GB,RDTSCP,LM,3DNow!+,3DNow!>
+  AMD Features2=0x177<LAHF,CMP,SVM,CR8,ABM,SSE4A,Prefetch>
+  Structured Extended Features=0x219c43a9<FSGSBASE,BMI1,AVX2,SMEP,BMI2,ERMS,MPX,RDSEED,ADX,SMAP,CLFLUSHOPT,CLWB,SHA>
+  Structured Extended Features2=0x8041021c<UMIP,PKU,OSPKE,VAES,LA57,RDPID>
+  Structured Extended Features3=0x10<FSRM>
+  Structured Extended Features4=0x1c80
+  XSAVE Features=0x5<XSAVEOPT,XINUSE>
+  AMD Extended Feature Extensions ID EBX=0x204<XSaveErPtr,WBNOINVD>
+  SVM: NP,NAsids=16
+Hypervisor: Origin = "TCGTCGTCGTCG"
+real memory  = 2147483648 (2048 MB)
+avail memory = 2040324096 (1945 MB)
+Event timer "LAPIC" quality 600
+ACPI APIC Table: <BOCHS  BXPC    >
+FreeBSD/SMP: Multiprocessor System Detected: 2 CPUs
+FreeBSD/SMP: 1 package(s) x 2 core(s)
+random: registering fast source Intel Secure Key Seed
+random: fast provider: "Intel Secure Key Seed"
+random: unblocking device.
+ioapic0 <Version 2.0> irqs 0-23
+Launching APs: 1
+random: entropy device external interface
+kbd1 at kbdmux0
+efirtc0: <EFI Realtime Clock>
+efirtc0: registered as a time-of-day clock, resolution 1.000000s
+smbios0: <System Management BIOS> at iomem 0x7f988000-0x7f98801e
+smbios0: Entry point: v2.1 (32-bit), Version: 2.8, BCD Revision: 2.8
+aesni0: <AES-CBC,AES-CCM,AES-GCM,AES-ICM,AES-XTS,SHA1,SHA256>
+acpi0: <BOCHS BXPC>
+acpi0: Power Button (fixed)
+cpu0: <ACPI CPU> on acpi0
+atrtc0: <AT realtime clock> port 0x70-0x77 irq 8 on acpi0
+atrtc0: registered as a time-of-day clock, resolution 1.000000s
+Event timer "RTC" frequency 32768 Hz quality 0
+hpet0: <High Precision Event Timer> iomem 0xfed00000-0xfed003ff on acpi0
+Timecounter "HPET" frequency 100000000 Hz quality 950
+Timecounter "ACPI-fast" frequency 3579545 Hz quality 900
+acpi_timer0: <24-bit timer at 3.579545MHz> port 0x608-0x60b on acpi0
+pcib0: <ACPI Host-PCI bridge> port 0xcf8-0xcff on acpi0
+pci0: <ACPI PCI bus> on pcib0
+vgapci0: <VGA-compatible display> mem 0x80000000-0x80ffffff,0x81216000-0x81216fff at device 1.0 on pci0
+vgapci0: Boot video device
+virtio_pci0: <VirtIO PCI (legacy) Block adapter> port 0x6080-0x60ff mem 0x81215000-0x81215fff,0xc020000000-0xc020003fff irq 22 at device 2.0 on pci0
+vtblk0: <VirtIO Block Adapter> on virtio_pci0
+vtblk0: 6176MB (12649684 512 byte sectors)
+virtio_pci1: <VirtIO PCI (legacy) Block adapter> port 0x6000-0x607f mem 0x81214000-0x81214fff,0xc020004000-0xc020007fff irq 23 at device 3.0 on pci0
+vtblk1: <VirtIO Block Adapter> on virtio_pci1
+vtblk1: 16MB (32768 512 byte sectors)
+pcib1: <ACPI PCI-PCI bridge> mem 0x81213000-0x81213fff irq 20 at device 4.0 on pci0
+pci1: <ACPI PCI bus> on pcib1
+virtio_pci2: <VirtIO PCI (modern) Entropy adapter> mem 0x81000000-0x81000fff,0xc000000000-0xc000003fff irq 20 at device 0.0 on pci1
+xhci0: <XHCI (generic) USB 3.0 controller> mem 0xc020010000-0xc020013fff irq 21 at device 5.0 on pci0
+xhci0: 32 bytes context size, 64-bit DMA
+xhci0: xECP capabilities <PROTO,PROTO>
+usbus0 on xhci0
+usbus0: 5.0Gbps Super Speed USB v3.0
+virtio_pci3: <VirtIO PCI (modern) Input adapter> mem 0x81212000-0x81212fff,0xc020008000-0xc02000bfff irq 22 at device 6.0 on pci0
+virtio_pci4: <VirtIO PCI (modern) Input adapter> mem 0x81211000-0x81211fff,0xc02000c000-0xc02000ffff irq 23 at device 7.0 on pci0
+isab0: <PCI-ISA bridge> at device 31.0 on pci0
+isa0: <ISA bus> on isab0
+ahci0: <Intel ICH9 AHCI SATA controller> port 0x6140-0x615f mem 0x81210000-0x81210fff irq 16 at device 31.2 on pci0
+ahci0: AHCI v1.00 with 6 1.5Gbps ports, Port Multiplier not supported
+ahcich0: <AHCI channel> at channel 0 on ahci0
+ahcich1: <AHCI channel> at channel 1 on ahci0
+ahcich2: <AHCI channel> at channel 2 on ahci0
+ahcich3: <AHCI channel> at channel 3 on ahci0
+ahcich4: <AHCI channel> at channel 4 on ahci0
+ahcich5: <AHCI channel> at channel 5 on ahci0
+acpi_syscontainer0: <System Container> on acpi0
+acpi_syscontainer1: <System Container> port 0xcd8-0xce3 on acpi0
+acpi_syscontainer2: <System Container> port 0x620-0x62f on acpi0
+acpi_syscontainer3: <System Container> port 0xcc0-0xcd7 on acpi0
+atkbdc0: <Keyboard controller (i8042)> port 0x60,0x64 irq 1 on acpi0
+atkbd0: <AT Keyboard> irq 1 on atkbdc0
+kbd0 at atkbd0
+atkbd0: [GIANT-LOCKED]
+psm0: <PS/2 Mouse> irq 12 on atkbdc0
+psm0: [GIANT-LOCKED]
+WARNING: Device "psm" is Giant locked and may be deleted before FreeBSD 16.0.
+psm0: model IntelliMouse Explorer, device ID 4
+ppc0: <Parallel port> port 0x378-0x37f irq 7 on acpi0
+ppc0: Generic chipset (NIBBLE-only) in COMPATIBLE mode
+ppbus0: <Parallel port bus> on ppc0
+lpt0: <Printer> on ppbus0
+lpt0: Interrupt-driven port
+ppi0: <Parallel I/O> on ppbus0
+uart0: <16550 or compatible> port 0x3f8-0x3ff irq 4 flags 0x10 on acpi0
+uart0: console (115200,n,8,1)
+attimer0: <AT timer> at port 0x40 on isa0
+Timecounter "i8254" frequency 1193182 Hz quality 0
+Event timer "i8254" frequency 1193182 Hz quality 100
+attimer0: non-PNP ISA device will be removed from GENERIC in FreeBSD 16.
+Timecounters tick every 10.000 msec
+ugen0.1: <(0x1b36) XHCI root HUB> at usbus0
+uhub0 on usbus0
+uhub0: <(0x1b36) XHCI root HUB, class 9/0, rev 3.00/1.00, addr 1> on usbus0
+Trying to mount root from ufs:/dev/gpt/rootfs [rw,noatime]...
+Dual Console: Serial Primary, Video Secondary
+uhub0: 16 ports with 16 removable, self powered
+ugen0.2: <QEMU QEMU USB HARDDRIVE> at usbus0
+umass0 on uhub0
+umass0: <QEMU QEMU USB HARDDRIVE, class 0/0, rev 3.00/0.00, addr 1> on usbus0
+umass0:  SCSI over Bulk-Only; quirks = 0x0
+umass0:6:0: Attached to scbus6
+da0 at umass-sim0 bus 0 scbus6 target 0 lun 0
+da0: <QEMU QEMU HARDDISK 2.5+> Fixed Direct Access SPC-3 SCSI device
+da0: Serial Number abyssbbb
+da0: 400.000MB/s transfers
+da0: 16MB (32768 512 byte sectors)
+da0: quirks=0x2<NO_6_BYTE>
+ichsmb0: <Intel 82801I (ICH9) SMBus controller> port 0x6100-0x613f irq 16 at device 31.3 on pci0
+smbus0: <System Management Bus> on ichsmb0
+vtrnd0: <VirtIO Entropy Adapter> on virtio_pci2
+random: registering fast source VirtIO Entropy Adapter
+ugen0.3: <QEMU USB Attached SCSI HBA> at usbus0
+ugen0.4: <QEMU QEMU USB Keyboard> at usbus0
+usbhid0 on uhub0
+usbhid0: <QEMU QEMU USB Keyboard, class 0/0, rev 2.00/0.00, addr 3> on usbus0
+hidbus0: <HID bus> on usbhid0
+hkbd0: <QEMU QEMU USB Keyboard> on hidbus0
+kbd2 at hkbd0
+ugen0.5: <QEMU QEMU USB Tablet> at usbus0
+usbhid1 on uhub0
+usbhid1: <QEMU QEMU USB Tablet, class 0/0, rev 2.00/0.00, addr 4> on usbus0
+hidbus1: <HID bus> on usbhid1
+ugen0.6: <QEMU QEMU USB Hub> at usbus0
+uhub1 on uhub0
+uhub1: <QEMU QEMU USB Hub, class 9/0, rev 1.10/1.01, addr 5> on usbus0
+lo0: link state changed to UP
+uhub1: 8 ports with 8 removable, self powered
+ugen0.7: <QEMU QEMU USB Mouse> at usbus0
+usbhid2 on uhub1
+usbhid2: <QEMU QEMU USB Mouse, class 0/0, rev 2.00/0.00, addr 6> on usbus0
+hidbus2: <HID bus> on usbhid2
+uhub_explore: illegal enable change, port 1
+hms0: <QEMU QEMU USB Tablet> on hidbus1
+hms0: 5 buttons and [XYW] coordinates ID=0
+hms1: <QEMU QEMU USB Mouse> on hidbus2
+hms1: 5 buttons and [XYW] coordinates ID=0

@@ -1,0 +1,34 @@
+ugen0.1: <XHCI root HUB Intel> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+
+  bLength = 0x0012 
+  bDescriptorType = 0x0001 
+  bcdUSB = 0x0300 
+  bDeviceClass = 0x0009  <HUB>
+  bDeviceSubClass = 0x0000 
+  bDeviceProtocol = 0x0003 
+  bMaxPacketSize0 = 0x0009 
+  idVendor = 0x0000 
+  idProduct = 0x0000 
+  bcdDevice = 0x0100 
+  iManufacturer = 0x0001  <Intel>
+  iProduct = 0x0002  <XHCI root HUB>
+  iSerialNumber = 0x0000  <no string>
+  bNumConfigurations = 0x0001 
+
+ugen0.2: <HID Tablet BHYVE> at usbus0, cfg=0 md=HOST spd=HIGH (480Mbps) pwr=ON (0mA)
+
+  bLength = 0x0012 
+  bDescriptorType = 0x0001 
+  bcdUSB = 0x0300 
+  bDeviceClass = 0x0000  <Probed by interface class>
+  bDeviceSubClass = 0x0000 
+  bDeviceProtocol = 0x0000 
+  bMaxPacketSize0 = 0x0009 
+  idVendor = 0xfb5d 
+  idProduct = 0x0001 
+  bcdDevice = 0x0000 
+  iManufacturer = 0x0001  <BHYVE>
+  iProduct = 0x0002  <HID Tablet>
+  iSerialNumber = 0x0003  <01>
+  bNumConfigurations = 0x0001 
+

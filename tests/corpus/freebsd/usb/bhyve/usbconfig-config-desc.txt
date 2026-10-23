@@ -1,0 +1,101 @@
+ugen0.1: <XHCI root HUB Intel> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+
+
+ Configuration index 0
+
+    bLength = 0x0009 
+    bDescriptorType = 0x0002 
+    wTotalLength = 0x001f 
+    bNumInterfaces = 0x0001 
+    bConfigurationValue = 0x0001 
+    iConfiguration = 0x0000  <no string>
+    bmAttributes = 0x0040 
+    bMaxPower = 0x0000 
+
+    Interface 0
+      bLength = 0x0009 
+      bDescriptorType = 0x0004 
+      bInterfaceNumber = 0x0000 
+      bAlternateSetting = 0x0000 
+      bNumEndpoints = 0x0001 
+      bInterfaceClass = 0x0009  <HUB>
+      bInterfaceSubClass = 0x0000 
+      bInterfaceProtocol = 0x0000 
+      iInterface = 0x0000  <no string>
+
+     Endpoint 0
+        bLength = 0x0007 
+        bDescriptorType = 0x0005 
+        bEndpointAddress = 0x0081  <IN>
+        bmAttributes = 0x0003  <INTERRUPT>
+        wMaxPacketSize = 0x0002 
+        bInterval = 0x00ff 
+        bRefresh = 0x0000 
+        bSynchAddress = 0x0000 
+
+      Additional Descriptor
+
+      bLength = 0x06
+      bDescriptorType = 0x30
+      bDescriptorSubType = 0x00
+       RAW dump: 
+       0x00 | 0x06, 0x30, 0x00, 0x00, 0x00, 0x00
+
+
+
+
+ugen0.2: <HID Tablet BHYVE> at usbus0, cfg=0 md=HOST spd=HIGH (480Mbps) pwr=ON (0mA)
+
+
+ Configuration index 0
+
+    bLength = 0x0009 
+    bDescriptorType = 0x0002 
+    wTotalLength = 0x0028 
+    bNumInterfaces = 0x0001 
+    bConfigurationValue = 0x0001 
+    iConfiguration = 0x0004  <HID Tablet Device>
+    bmAttributes = 0x00a0 
+    bMaxPower = 0x0000 
+
+    Interface 0
+      bLength = 0x0009 
+      bDescriptorType = 0x0004 
+      bInterfaceNumber = 0x0000 
+      bAlternateSetting = 0x0000 
+      bNumEndpoints = 0x0001 
+      bInterfaceClass = 0x0003  <HID device>
+      bInterfaceSubClass = 0x0001 
+      bInterfaceProtocol = 0x0002 
+      iInterface = 0x0000  <no string>
+
+      Additional Descriptor
+
+      bLength = 0x09
+      bDescriptorType = 0x21
+      bDescriptorSubType = 0x01
+       RAW dump: 
+       0x00 | 0x09, 0x21, 0x01, 0x10, 0x00, 0x01, 0x22, 0x4a, 
+       0x08 | 0x00
+
+     Endpoint 0
+        bLength = 0x0007 
+        bDescriptorType = 0x0005 
+        bEndpointAddress = 0x0081  <IN>
+        bmAttributes = 0x0003  <INTERRUPT>
+        wMaxPacketSize = 0x0008 
+        bInterval = 0x000a 
+        bRefresh = 0x0000 
+        bSynchAddress = 0x0000 
+
+      Additional Descriptor
+
+      bLength = 0x06
+      bDescriptorType = 0x30
+      bDescriptorSubType = 0x00
+       RAW dump: 
+       0x00 | 0x06, 0x30, 0x00, 0x00, 0x00, 0x00
+
+
+
+

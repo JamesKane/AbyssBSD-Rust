@@ -1,0 +1,10 @@
+!system=DEVFS subsystem=CDEV type=DESTROY cdev=input/event4
+-hms0 at index=0 page=0x0001 usage=0x0002 bus=0x03 vendor=0xfb5d product=0x0001 version=0x0000 on hidbus0
+-hidbus0 at   on usbhid0
+-usbhid0 at   on uhub0
+!system=DEVFS subsystem=CDEV type=DESTROY cdev=usb/0.2.1
+!system=DEVFS subsystem=CDEV type=CREATE cdev=usb/0.2.1
+!system=DEVFS subsystem=CDEV type=CREATE cdev=input/event4
++hms0 at index=0 page=0x0001 usage=0x0002 bus=0x03 vendor=0xfb5d product=0x0001 version=0x0000 on hidbus0
++hidbus0 at   on usbhid0
++usbhid0 at bus=0 hubaddr=1 port=1 devaddr=2 interface=0 ugen=ugen0.2 vendor=0xfb5d product=0x0001 devclass=0x00 devsubclass=0x00 devproto=0x00 sernum="01" release=0x0000 mode=host intclass=0x03 intsubclass=0x01 intprotocol=0x02 on uhub0

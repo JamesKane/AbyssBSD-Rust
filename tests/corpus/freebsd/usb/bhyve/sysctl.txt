@@ -1,0 +1,60 @@
+kern.evdev.input.4.uniq: 01
+kern.evdev.input.4.phys: hms0
+kern.evdev.input.4.id: { bustype = 0x0003, vendor = 0xfb5d, product = 0x0001, version = 0x0000 }
+kern.evdev.input.4.name: BHYVE HID Tablet
+kern.evdev.input.3.uniq: 
+kern.evdev.input.3.phys: psm0
+kern.evdev.input.3.id: { bustype = 0x0011, vendor = 0x0002, product = 0x0001, version = 0x0000 }
+kern.evdev.input.3.name: Generic PS/2 mouse
+kern.evdev.input.2.uniq: 
+kern.evdev.input.2.phys: atkbd0
+kern.evdev.input.2.id: { bustype = 0x0011, vendor = 0x0001, product = 0x0001, version = 0x0000 }
+kern.evdev.input.2.name: AT keyboard
+kern.evdev.input.1.uniq: 
+kern.evdev.input.1.phys: sysmouse
+kern.evdev.input.1.id: { bustype = 0x0006, vendor = 0x0000, product = 0x0000, version = 0x0000 }
+kern.evdev.input.1.name: System mouse
+kern.evdev.input.0.uniq: 
+kern.evdev.input.0.phys: kbdmux0
+kern.evdev.input.0.id: { bustype = 0x0006, vendor = 0x0000, product = 0x0000, version = 0x0000 }
+kern.evdev.input.0.name: System keyboard multiplexer
+kern.evdev.sysmouse_t_axis: 0
+kern.evdev.rcpt_mask: 12
+hw.usb.usbhid.enable: 1
+hw.usb.ukbd.apple_fn_mode: 0
+hw.usb.ukbd.pollrate: 0
+hw.usb.ukbd.no_leds: 0
+hw.usb.full_ddesc: 0
+hw.usb.no_cs_fail: 0
+hw.usb.disable_port_power: 0
+hw.usb.disable_enumeration: 0
+hw.usb.power_timeout: 30
+hw.usb.usb_lang_mask: 255
+hw.usb.usb_lang_id: 9
+hw.usb.template: -1
+hw.usb.timings.enum_nice_time: 16
+hw.usb.timings.extra_power_up_time: 20
+hw.usb.timings.resume_recovery: 50
+hw.usb.timings.resume_wait: 50
+hw.usb.timings.resume_delay: 250
+hw.usb.timings.set_address_settle: 10
+hw.usb.timings.port_resume_delay: 40
+hw.usb.timings.port_powerup_delay: 300
+hw.usb.timings.port_reset_recovery: 20
+hw.usb.timings.port_root_reset_delay: 200
+hw.usb.timings.port_reset_delay: 50
+hw.usb.umass.throttle: 0
+hw.usb.no_shutdown_wait: 0
+hw.usb.no_suspend_wait: 0
+hw.usb.no_boot_wait: 0
+hw.usb.xhci.ctlstep: 0
+hw.usb.xhci.dma32: 0
+hw.usb.xhci.use_polling: 0
+hw.usb.xhci.xhci_port_route: 0
+hw.usb.xhci.dcepquirk: 0
+hw.usb.xhci.ctlquirk: 1
+hw.usb.xhci.streams: 0
+hw.usb.uhci.loop: 0
+hw.usb.ehci.lostintrbug: 0
+hw.usb.ehci.iaadbug: 0
+hw.usb.ehci.no_hs: 0

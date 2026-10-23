@@ -742,16 +742,58 @@ const RECORDINGS: &[(&str, &str)] = &[
     ("devinfo -u", "devinfo-u.txt"),
 ];
 
-/// `cargo xtask --remote freebsd-record [--out DIR]`: boots FreeBSD 15.1 in
-/// bhyve with the P3 reference devices (virtio-blk, NVMe, AHCI, virtio-rng)
-/// and the boot tests' (another of each disk) and records how it names and describes them, for `lib/devtree`'s
+/// The commands `freebsd-record --usb` captures: how FreeBSD names and
+/// describes the USB and input devices (ROADMAP U.0).
+const USB_RECORDINGS: &[(&str, &str)] = &[
+    ("dmesg", "dmesg.txt"),
+    ("devinfo -rv", "devinfo-rv.txt"),
+    ("usbconfig", "usbconfig.txt"),
+    ("usbconfig dump_device_desc", "usbconfig-device-desc.txt"),
+    (
+        "usbconfig dump_curr_config_desc",
+        "usbconfig-config-desc.txt",
+    ),
+    (
+        "ls -l /dev | grep -E ' (ukbd|hkbd|kbd|kbdmux|atkbd|da|ugen|usbctl|uhid|ums|hms|sysmouse|psm|pass|uinput)[0-9.]*( |$)'",
+        "dev.txt",
+    ),
+    ("ls -lR /dev/input /dev/usb", "dev-input-usb.txt"),
+    (
+        "sysctl kern.evdev hw.usb | grep -v '\\.debug'",
+        "sysctl.txt",
+    ),
+    ("kbdcontrol -i < /dev/ttyv0", "kbdcontrol-i.txt"),
+    // devd's events for each device as it goes away and comes back: devd
+    // stopped, /dev/devctl read directly, each device's port powered off
+    // and on.
+    (
+        "service devd onestop >/dev/null; cat /dev/devctl > /tmp/devctl & cat=$!; \
+         for u in $(usbconfig | sed -n 's/^\\(ugen[0-9]*\\.[0-9]*\\):.*/\\1/p' | grep -v '\\.1$'); do \
+         usbconfig -d $u power_off; sleep 2; usbconfig -d $u power_on; sleep 4; done; \
+         kill $cat; cat /tmp/devctl",
+        "devctl.txt",
+    ),
+];
+
+/// `cargo xtask --remote freebsd-record [--out DIR] [--usb]`: boots
+/// FreeBSD 15.1 in bhyve with the P3 reference devices (virtio-blk, NVMe,
+/// AHCI, virtio-rng) and the boot tests' (another of each disk) and
+/// records how it names and describes them, for `lib/devtree`'s
 /// differential tests. Writes into `DIR` (default
 /// `tests/corpus/freebsd/bhyve`) on the server.
+///
+/// With `--usb`, it records the USB and input devices instead, twice: in
+/// QEMU with the boot tier's `--usb` set (`DIR/qemu`), and in bhyve with
+/// its xHCI tablet (`DIR/bhyve`). `DIR` defaults to
+/// `tests/corpus/freebsd/usb`.
 pub(crate) fn cmd_record(mut args: Args) -> Result<()> {
-    let out = PathBuf::from(
-        args.take_value("--out")?
-            .unwrap_or_else(|| "tests/corpus/freebsd/bhyve".into()),
-    );
+    let usb = args.take_flag("--usb");
+    let default = if usb {
+        "tests/corpus/freebsd/usb"
+    } else {
+        "tests/corpus/freebsd/bhyve"
+    };
+    let out = PathBuf::from(args.take_value("--out")?.unwrap_or_else(|| default.into()));
     args.finish()?;
     if !cfg!(target_os = "freebsd") {
         return Err("freebsd-record needs bhyve: run it on the build server".into());
@@ -760,24 +802,39 @@ pub(crate) fn cmd_record(mut args: Args) -> Result<()> {
     fs::create_dir_all(&dirs.perf)?;
     let freebsd = prepare_image(&dirs)?;
     let work = dirs.perf.join("record");
-    let script_dir = work.join("disk");
-    fs::create_dir_all(&script_dir)?;
-    let mut script = String::from("#!/bin/sh\n");
-    for (cmd, _) in RECORDINGS {
-        let _ = writeln!(
-            script,
-            "echo 'record: begin {cmd}'\n{cmd} 2>&1 | sed 's/^/record: | /'\necho 'record: end'"
+    fs::create_dir_all(&work)?;
+    if usb {
+        let script = script_disk(&work, USB_RECORDINGS)?;
+        // QEMU emulates the CPU on a FreeBSD host: slow, but this only
+        // names devices.
+        let qemu = Vm {
+            smp: 2,
+            mem: "2G".into(),
+            extra_disk: Some(script.clone()),
+            usb: true,
+            ..Vm::new(Vmm::Qemu, Arch::X86_64, freebsd.clone())
+        };
+        record(
+            &qemu,
+            USB_RECORDINGS,
+            &work.join("qemu.log"),
+            &out.join("qemu"),
+        )?;
+        let bhyve = Vm {
+            smp: 4,
+            mem: "2G".into(),
+            extra_disk: Some(script),
+            usb: true,
+            ..Vm::new(Vmm::Bhyve, Arch::X86_64, freebsd)
+        };
+        return record(
+            &bhyve,
+            USB_RECORDINGS,
+            &work.join("bhyve.log"),
+            &out.join("bhyve"),
         );
     }
-    script.push_str("echo 'record: done'\n");
-    fs::write(script_dir.join("run.sh"), script)?;
-    let disk = work.join("script.img");
-    util::run(
-        Command::new("makefs")
-            .args(["-t", "ffs", "-s", "16m"])
-            .arg(&disk)
-            .arg(&script_dir),
-    )?;
+    let disk = script_disk(&work, RECORDINGS)?;
     let ahci = work.join("ahci.img");
     fs::File::create(&ahci)?.set_len(64 << 20)?;
     // The boot tests' read-only UFS2 disk, on virtio-blk, NVMe, and AHCI
@@ -800,9 +857,41 @@ pub(crate) fn cmd_record(mut args: Args) -> Result<()> {
         ],
         ..Vm::new(Vmm::Bhyve, Arch::X86_64, freebsd)
     };
-    let log = work.join("console.log");
+    record(&vm, RECORDINGS, &work.join("console.log"), &out)
+}
+
+/// A UFS disk whose `run.sh` runs `commands`, framing each one's output
+/// (by its index, as a command may hold quotes) for [`split_recordings`];
+/// the guest's `rc.local` runs it.
+fn script_disk(work: &Path, commands: &[(&str, &str)]) -> Result<PathBuf> {
+    let script_dir = work.join("disk");
+    let _ = fs::remove_dir_all(&script_dir);
+    fs::create_dir_all(&script_dir)?;
+    let mut script = String::from("#!/bin/sh\n");
+    for (i, (cmd, _)) in commands.iter().enumerate() {
+        let _ = writeln!(
+            script,
+            "echo 'record: begin {i}'\n( {cmd} ) 2>&1 | sed 's/^/record: | /'\necho 'record: end'"
+        );
+    }
+    script.push_str("echo 'record: done'\n");
+    fs::write(script_dir.join("run.sh"), script)?;
+    let disk = work.join("script.img");
+    let _ = fs::remove_file(&disk);
+    util::run(
+        Command::new("makefs")
+            .args(["-t", "ffs", "-s", "16m"])
+            .arg(&disk)
+            .arg(&script_dir),
+    )?;
+    Ok(disk)
+}
+
+/// Boots `vm`, which runs a [`script_disk`], and writes each command's
+/// output into `out`.
+fn record(vm: &Vm, commands: &[(&str, &str)], log: &Path, out: &Path) -> Result<()> {
     let done = |line: &str| line.contains("record: done").then_some(Outcome::Passed);
-    let run = vm.run_until(Duration::from_secs(600), &log, false, &done)?;
+    let run = vm.run_until(Duration::from_secs(1800), log, false, &done)?;
     if run.outcome != Outcome::Passed {
         return Err(format!(
             "recording incomplete ({:?}); see {}",
@@ -811,11 +900,11 @@ pub(crate) fn cmd_record(mut args: Args) -> Result<()> {
         )
         .into());
     }
-    let recorded = split_recordings(&fs::read_to_string(&log)?);
-    fs::create_dir_all(&out)?;
-    for (cmd, file) in RECORDINGS {
+    let recorded = split_recordings(&fs::read_to_string(log)?);
+    fs::create_dir_all(out)?;
+    for (i, (cmd, file)) in commands.iter().enumerate() {
         let text = recorded
-            .get(*cmd)
+            .get(&i.to_string())
             .ok_or_else(|| format!("no output for `{cmd}` in {}", log.display()))?;
         fs::write(out.join(file), text)?;
         eprintln!("xtask: freebsd-record: {}", out.join(file).display());
@@ -823,13 +912,14 @@ pub(crate) fn cmd_record(mut args: Args) -> Result<()> {
     Ok(())
 }
 
-/// The output of each recorded command, from the console log.
+/// The output of each recorded command, by its index, from the console
+/// log.
 fn split_recordings(log: &str) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     let mut cur: Option<(String, String)> = None;
     for line in log.lines() {
-        if let Some(cmd) = line.split("record: begin ").nth(1) {
-            cur = Some((cmd.to_owned(), String::new()));
+        if let Some(index) = line.split("record: begin ").nth(1) {
+            cur = Some((index.to_owned(), String::new()));
         } else if line.ends_with("record: end") {
             if let Some((cmd, text)) = cur.take() {
                 out.insert(cmd, text);

@@ -1,0 +1,119 @@
+ugen0.1: <XHCI root HUB (0x1b36)> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+
+  bLength = 0x0012 
+  bDescriptorType = 0x0001 
+  bcdUSB = 0x0300 
+  bDeviceClass = 0x0009  <HUB>
+  bDeviceSubClass = 0x0000 
+  bDeviceProtocol = 0x0003 
+  bMaxPacketSize0 = 0x0009 
+  idVendor = 0x0000 
+  idProduct = 0x0000 
+  bcdDevice = 0x0100 
+  iManufacturer = 0x0001  <(0x1b36)>
+  iProduct = 0x0002  <XHCI root HUB>
+  iSerialNumber = 0x0000  <no string>
+  bNumConfigurations = 0x0001 
+
+ugen0.2: <QEMU USB HARDDRIVE QEMU> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=ON (0mA)
+
+  bLength = 0x0012 
+  bDescriptorType = 0x0001 
+  bcdUSB = 0x0300 
+  bDeviceClass = 0x0000  <Probed by interface class>
+  bDeviceSubClass = 0x0000 
+  bDeviceProtocol = 0x0000 
+  bMaxPacketSize0 = 0x0009 
+  idVendor = 0x46f4 
+  idProduct = 0x0001 
+  bcdDevice = 0x0000 
+  iManufacturer = 0x0001  <QEMU>
+  iProduct = 0x0002  <QEMU USB HARDDRIVE>
+  iSerialNumber = 0x0003  <abyssbbb>
+  bNumConfigurations = 0x0001 
+
+ugen0.3: <USB Attached SCSI HBA QEMU> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=ON (0mA)
+
+  bLength = 0x0012 
+  bDescriptorType = 0x0001 
+  bcdUSB = 0x0300 
+  bDeviceClass = 0x0000  <Probed by interface class>
+  bDeviceSubClass = 0x0000 
+  bDeviceProtocol = 0x0000 
+  bMaxPacketSize0 = 0x0009 
+  idVendor = 0x46f4 
+  idProduct = 0x0003 
+  bcdDevice = 0x0000 
+  iManufacturer = 0x0001  <QEMU>
+  iProduct = 0x0002  <USB Attached SCSI HBA>
+  iSerialNumber = 0x0003  <27842-0000:00:05.0-5>
+  bNumConfigurations = 0x0001 
+
+ugen0.4: <QEMU Tablet Adomax Technology Co., Ltd> at usbus0, cfg=0 md=HOST spd=HIGH (480Mbps) pwr=ON (100mA)
+
+  bLength = 0x0012 
+  bDescriptorType = 0x0001 
+  bcdUSB = 0x0200 
+  bDeviceClass = 0x0000  <Probed by interface class>
+  bDeviceSubClass = 0x0000 
+  bDeviceProtocol = 0x0000 
+  bMaxPacketSize0 = 0x0040 
+  idVendor = 0x0627 
+  idProduct = 0x0001 
+  bcdDevice = 0x0000 
+  iManufacturer = 0x0001  <QEMU>
+  iProduct = 0x0004  <QEMU USB Keyboard>
+  iSerialNumber = 0x000b  <68284-0000:00:05.0-1>
+  bNumConfigurations = 0x0001 
+
+ugen0.5: <QEMU Tablet Adomax Technology Co., Ltd> at usbus0, cfg=0 md=HOST spd=HIGH (480Mbps) pwr=ON (100mA)
+
+  bLength = 0x0012 
+  bDescriptorType = 0x0001 
+  bcdUSB = 0x0200 
+  bDeviceClass = 0x0000  <Probed by interface class>
+  bDeviceSubClass = 0x0000 
+  bDeviceProtocol = 0x0000 
+  bMaxPacketSize0 = 0x0040 
+  idVendor = 0x0627 
+  idProduct = 0x0001 
+  bcdDevice = 0x0000 
+  iManufacturer = 0x0001  <QEMU>
+  iProduct = 0x0003  <QEMU USB Tablet>
+  iSerialNumber = 0x000a  <28754-0000:00:05.0-2>
+  bNumConfigurations = 0x0001 
+
+ugen0.6: <Hub NEC Corp.> at usbus0, cfg=0 md=HOST spd=FULL (12Mbps) pwr=SAVE (0mA)
+
+  bLength = 0x0012 
+  bDescriptorType = 0x0001 
+  bcdUSB = 0x0110 
+  bDeviceClass = 0x0009  <HUB>
+  bDeviceSubClass = 0x0000 
+  bDeviceProtocol = 0x0000 
+  bMaxPacketSize0 = 0x0008 
+  idVendor = 0x0409 
+  idProduct = 0x55aa 
+  bcdDevice = 0x0101 
+  iManufacturer = 0x0001  <QEMU>
+  iProduct = 0x0002  <QEMU USB Hub>
+  iSerialNumber = 0x0003  <314159-0000:00:05.0-3>
+  bNumConfigurations = 0x0001 
+
+ugen0.7: <QEMU Tablet Adomax Technology Co., Ltd> at usbus0, cfg=0 md=HOST spd=FULL (12Mbps) pwr=ON (100mA)
+
+  bLength = 0x0012 
+  bDescriptorType = 0x0001 
+  bcdUSB = 0x0200 
+  bDeviceClass = 0x0000  <Probed by interface class>
+  bDeviceSubClass = 0x0000 
+  bDeviceProtocol = 0x0000 
+  bMaxPacketSize0 = 0x0008 
+  idVendor = 0x0627 
+  idProduct = 0x0001 
+  bcdDevice = 0x0000 
+  iManufacturer = 0x0001  <QEMU>
+  iProduct = 0x0002  <QEMU USB Mouse>
+  iSerialNumber = 0x0009  <89126-0000:00:05.0-3.1>
+  bNumConfigurations = 0x0001 
+

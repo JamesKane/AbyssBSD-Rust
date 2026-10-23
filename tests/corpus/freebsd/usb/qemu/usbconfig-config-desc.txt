@@ -1,0 +1,425 @@
+ugen0.1: <XHCI root HUB (0x1b36)> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+
+
+ Configuration index 0
+
+    bLength = 0x0009 
+    bDescriptorType = 0x0002 
+    wTotalLength = 0x001f 
+    bNumInterfaces = 0x0001 
+    bConfigurationValue = 0x0001 
+    iConfiguration = 0x0000  <no string>
+    bmAttributes = 0x0040 
+    bMaxPower = 0x0000 
+
+    Interface 0
+      bLength = 0x0009 
+      bDescriptorType = 0x0004 
+      bInterfaceNumber = 0x0000 
+      bAlternateSetting = 0x0000 
+      bNumEndpoints = 0x0001 
+      bInterfaceClass = 0x0009  <HUB>
+      bInterfaceSubClass = 0x0000 
+      bInterfaceProtocol = 0x0000 
+      iInterface = 0x0000  <no string>
+
+     Endpoint 0
+        bLength = 0x0007 
+        bDescriptorType = 0x0005 
+        bEndpointAddress = 0x0081  <IN>
+        bmAttributes = 0x0003  <INTERRUPT>
+        wMaxPacketSize = 0x0002 
+        bInterval = 0x00ff 
+        bRefresh = 0x0000 
+        bSynchAddress = 0x0000 
+
+      Additional Descriptor
+
+      bLength = 0x06
+      bDescriptorType = 0x30
+      bDescriptorSubType = 0x00
+       RAW dump: 
+       0x00 | 0x06, 0x30, 0x00, 0x00, 0x00, 0x00
+
+
+
+
+ugen0.2: <QEMU USB HARDDRIVE QEMU> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=ON (0mA)
+
+
+ Configuration index 0
+
+    bLength = 0x0009 
+    bDescriptorType = 0x0002 
+    wTotalLength = 0x002c 
+    bNumInterfaces = 0x0001 
+    bConfigurationValue = 0x0001 
+    iConfiguration = 0x0006  <Super speed config (usb 3.0)>
+    bmAttributes = 0x00c0 
+    bMaxPower = 0x0000 
+
+    Interface 0
+      bLength = 0x0009 
+      bDescriptorType = 0x0004 
+      bInterfaceNumber = 0x0000 
+      bAlternateSetting = 0x0000 
+      bNumEndpoints = 0x0002 
+      bInterfaceClass = 0x0008  <Mass storage>
+      bInterfaceSubClass = 0x0006 
+      bInterfaceProtocol = 0x0050 
+      iInterface = 0x0000  <no string>
+
+     Endpoint 0
+        bLength = 0x0007 
+        bDescriptorType = 0x0005 
+        bEndpointAddress = 0x0081  <IN>
+        bmAttributes = 0x0002  <BULK>
+        wMaxPacketSize = 0x0400 
+        bInterval = 0x0000 
+        bRefresh = 0x0000 
+        bSynchAddress = 0x0000 
+
+      Additional Descriptor
+
+      bLength = 0x06
+      bDescriptorType = 0x30
+      bDescriptorSubType = 0x0f
+       RAW dump: 
+       0x00 | 0x06, 0x30, 0x0f, 0x00, 0x00, 0x00
+
+
+     Endpoint 1
+        bLength = 0x0007 
+        bDescriptorType = 0x0005 
+        bEndpointAddress = 0x0002  <OUT>
+        bmAttributes = 0x0002  <BULK>
+        wMaxPacketSize = 0x0400 
+        bInterval = 0x0000 
+        bRefresh = 0x0000 
+        bSynchAddress = 0x0000 
+
+      Additional Descriptor
+
+      bLength = 0x06
+      bDescriptorType = 0x30
+      bDescriptorSubType = 0x0f
+       RAW dump: 
+       0x00 | 0x06, 0x30, 0x0f, 0x00, 0x00, 0x00
+
+
+
+
+ugen0.3: <USB Attached SCSI HBA QEMU> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=ON (0mA)
+
+
+ Configuration index 0
+
+    bLength = 0x0009 
+    bDescriptorType = 0x0002 
+    wTotalLength = 0x0056 
+    bNumInterfaces = 0x0001 
+    bConfigurationValue = 0x0001 
+    iConfiguration = 0x0005  <Super speed config (usb 3.0)>
+    bmAttributes = 0x00c0 
+    bMaxPower = 0x0000 
+
+    Interface 0
+      bLength = 0x0009 
+      bDescriptorType = 0x0004 
+      bInterfaceNumber = 0x0000 
+      bAlternateSetting = 0x0000 
+      bNumEndpoints = 0x0004 
+      bInterfaceClass = 0x0008  <Mass storage>
+      bInterfaceSubClass = 0x0006 
+      bInterfaceProtocol = 0x0062 
+      iInterface = 0x0000  <no string>
+
+     Endpoint 0
+        bLength = 0x0007 
+        bDescriptorType = 0x0005 
+        bEndpointAddress = 0x0001  <OUT>
+        bmAttributes = 0x0002  <BULK>
+        wMaxPacketSize = 0x0400 
+        bInterval = 0x0000 
+        bRefresh = 0x0000 
+        bSynchAddress = 0x0000 
+
+      Additional Descriptor
+
+      bLength = 0x06
+      bDescriptorType = 0x30
+      bDescriptorSubType = 0x0f
+       RAW dump: 
+       0x00 | 0x06, 0x30, 0x0f, 0x00, 0x00, 0x00
+
+
+      Additional Descriptor
+
+      bLength = 0x04
+      bDescriptorType = 0x24
+      bDescriptorSubType = 0x01
+       RAW dump: 
+       0x00 | 0x04, 0x24, 0x01, 0x00
+
+
+     Endpoint 1
+        bLength = 0x0007 
+        bDescriptorType = 0x0005 
+        bEndpointAddress = 0x0082  <IN>
+        bmAttributes = 0x0002  <BULK>
+        wMaxPacketSize = 0x0400 
+        bInterval = 0x0000 
+        bRefresh = 0x0000 
+        bSynchAddress = 0x0000 
+
+      Additional Descriptor
+
+      bLength = 0x06
+      bDescriptorType = 0x30
+      bDescriptorSubType = 0x0f
+       RAW dump: 
+       0x00 | 0x06, 0x30, 0x0f, 0x04, 0x00, 0x00
+
+
+      Additional Descriptor
+
+      bLength = 0x04
+      bDescriptorType = 0x24
+      bDescriptorSubType = 0x02
+       RAW dump: 
+       0x00 | 0x04, 0x24, 0x02, 0x00
+
+
+     Endpoint 2
+        bLength = 0x0007 
+        bDescriptorType = 0x0005 
+        bEndpointAddress = 0x0083  <IN>
+        bmAttributes = 0x0002  <BULK>
+        wMaxPacketSize = 0x0400 
+        bInterval = 0x0000 
+        bRefresh = 0x0000 
+        bSynchAddress = 0x0000 
+
+      Additional Descriptor
+
+      bLength = 0x06
+      bDescriptorType = 0x30
+      bDescriptorSubType = 0x0f
+       RAW dump: 
+       0x00 | 0x06, 0x30, 0x0f, 0x04, 0x00, 0x00
+
+
+      Additional Descriptor
+
+      bLength = 0x04
+      bDescriptorType = 0x24
+      bDescriptorSubType = 0x03
+       RAW dump: 
+       0x00 | 0x04, 0x24, 0x03, 0x00
+
+
+     Endpoint 3
+        bLength = 0x0007 
+        bDescriptorType = 0x0005 
+        bEndpointAddress = 0x0004  <OUT>
+        bmAttributes = 0x0002  <BULK>
+        wMaxPacketSize = 0x0400 
+        bInterval = 0x0000 
+        bRefresh = 0x0000 
+        bSynchAddress = 0x0000 
+
+      Additional Descriptor
+
+      bLength = 0x06
+      bDescriptorType = 0x30
+      bDescriptorSubType = 0x0f
+       RAW dump: 
+       0x00 | 0x06, 0x30, 0x0f, 0x04, 0x00, 0x00
+
+
+      Additional Descriptor
+
+      bLength = 0x04
+      bDescriptorType = 0x24
+      bDescriptorSubType = 0x04
+       RAW dump: 
+       0x00 | 0x04, 0x24, 0x04, 0x00
+
+
+
+
+ugen0.4: <QEMU Tablet Adomax Technology Co., Ltd> at usbus0, cfg=0 md=HOST spd=HIGH (480Mbps) pwr=ON (100mA)
+
+
+ Configuration index 0
+
+    bLength = 0x0009 
+    bDescriptorType = 0x0002 
+    wTotalLength = 0x0022 
+    bNumInterfaces = 0x0001 
+    bConfigurationValue = 0x0001 
+    iConfiguration = 0x0008  <HID Keyboard>
+    bmAttributes = 0x00a0 
+    bMaxPower = 0x0032 
+
+    Interface 0
+      bLength = 0x0009 
+      bDescriptorType = 0x0004 
+      bInterfaceNumber = 0x0000 
+      bAlternateSetting = 0x0000 
+      bNumEndpoints = 0x0001 
+      bInterfaceClass = 0x0003  <HID device>
+      bInterfaceSubClass = 0x0001 
+      bInterfaceProtocol = 0x0001 
+      iInterface = 0x0000  <no string>
+
+      Additional Descriptor
+
+      bLength = 0x09
+      bDescriptorType = 0x21
+      bDescriptorSubType = 0x11
+       RAW dump: 
+       0x00 | 0x09, 0x21, 0x11, 0x01, 0x00, 0x01, 0x22, 0x3f, 
+       0x08 | 0x00
+
+     Endpoint 0
+        bLength = 0x0007 
+        bDescriptorType = 0x0005 
+        bEndpointAddress = 0x0081  <IN>
+        bmAttributes = 0x0003  <INTERRUPT>
+        wMaxPacketSize = 0x0008 
+        bInterval = 0x0007 
+        bRefresh = 0x0000 
+        bSynchAddress = 0x0000 
+
+
+
+ugen0.5: <QEMU Tablet Adomax Technology Co., Ltd> at usbus0, cfg=0 md=HOST spd=HIGH (480Mbps) pwr=ON (100mA)
+
+
+ Configuration index 0
+
+    bLength = 0x0009 
+    bDescriptorType = 0x0002 
+    wTotalLength = 0x0022 
+    bNumInterfaces = 0x0001 
+    bConfigurationValue = 0x0001 
+    iConfiguration = 0x0007  <HID Tablet>
+    bmAttributes = 0x00a0 
+    bMaxPower = 0x0032 
+
+    Interface 0
+      bLength = 0x0009 
+      bDescriptorType = 0x0004 
+      bInterfaceNumber = 0x0000 
+      bAlternateSetting = 0x0000 
+      bNumEndpoints = 0x0001 
+      bInterfaceClass = 0x0003  <HID device>
+      bInterfaceSubClass = 0x0000 
+      bInterfaceProtocol = 0x0000 
+      iInterface = 0x0000  <no string>
+
+      Additional Descriptor
+
+      bLength = 0x09
+      bDescriptorType = 0x21
+      bDescriptorSubType = 0x01
+       RAW dump: 
+       0x00 | 0x09, 0x21, 0x01, 0x00, 0x00, 0x01, 0x22, 0x4a, 
+       0x08 | 0x00
+
+     Endpoint 0
+        bLength = 0x0007 
+        bDescriptorType = 0x0005 
+        bEndpointAddress = 0x0081  <IN>
+        bmAttributes = 0x0003  <INTERRUPT>
+        wMaxPacketSize = 0x0008 
+        bInterval = 0x0004 
+        bRefresh = 0x0000 
+        bSynchAddress = 0x0000 
+
+
+
+ugen0.6: <Hub NEC Corp.> at usbus0, cfg=0 md=HOST spd=FULL (12Mbps) pwr=SAVE (0mA)
+
+
+ Configuration index 0
+
+    bLength = 0x0009 
+    bDescriptorType = 0x0002 
+    wTotalLength = 0x0019 
+    bNumInterfaces = 0x0001 
+    bConfigurationValue = 0x0001 
+    iConfiguration = 0x0000  <no string>
+    bmAttributes = 0x00e0 
+    bMaxPower = 0x0000 
+
+    Interface 0
+      bLength = 0x0009 
+      bDescriptorType = 0x0004 
+      bInterfaceNumber = 0x0000 
+      bAlternateSetting = 0x0000 
+      bNumEndpoints = 0x0001 
+      bInterfaceClass = 0x0009  <HUB>
+      bInterfaceSubClass = 0x0000 
+      bInterfaceProtocol = 0x0000 
+      iInterface = 0x0000  <no string>
+
+     Endpoint 0
+        bLength = 0x0007 
+        bDescriptorType = 0x0005 
+        bEndpointAddress = 0x0081  <IN>
+        bmAttributes = 0x0003  <INTERRUPT>
+        wMaxPacketSize = 0x0002 
+        bInterval = 0x00ff 
+        bRefresh = 0x0000 
+        bSynchAddress = 0x0000 
+
+
+
+ugen0.7: <QEMU Tablet Adomax Technology Co., Ltd> at usbus0, cfg=0 md=HOST spd=FULL (12Mbps) pwr=ON (100mA)
+
+
+ Configuration index 0
+
+    bLength = 0x0009 
+    bDescriptorType = 0x0002 
+    wTotalLength = 0x0022 
+    bNumInterfaces = 0x0001 
+    bConfigurationValue = 0x0001 
+    iConfiguration = 0x0006  <HID Mouse>
+    bmAttributes = 0x00a0 
+    bMaxPower = 0x0032 
+
+    Interface 0
+      bLength = 0x0009 
+      bDescriptorType = 0x0004 
+      bInterfaceNumber = 0x0000 
+      bAlternateSetting = 0x0000 
+      bNumEndpoints = 0x0001 
+      bInterfaceClass = 0x0003  <HID device>
+      bInterfaceSubClass = 0x0001 
+      bInterfaceProtocol = 0x0002 
+      iInterface = 0x0000  <no string>
+
+      Additional Descriptor
+
+      bLength = 0x09
+      bDescriptorType = 0x21
+      bDescriptorSubType = 0x01
+       RAW dump: 
+       0x00 | 0x09, 0x21, 0x01, 0x00, 0x00, 0x01, 0x22, 0x34, 
+       0x08 | 0x00
+
+     Endpoint 0
+        bLength = 0x0007 
+        bDescriptorType = 0x0005 
+        bEndpointAddress = 0x0081  <IN>
+        bmAttributes = 0x0003  <INTERRUPT>
+        wMaxPacketSize = 0x0004 
+        bInterval = 0x000a 
+        bRefresh = 0x0000 
+        bSynchAddress = 0x0000 
+
+
+

@@ -1,0 +1,2 @@
+ugen0.1: <XHCI root HUB Intel> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+ugen0.2: <HID Tablet BHYVE> at usbus0, cfg=0 md=HOST spd=HIGH (480Mbps) pwr=ON (0mA)

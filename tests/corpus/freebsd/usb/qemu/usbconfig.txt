@@ -1,0 +1,7 @@
+ugen0.1: <XHCI root HUB (0x1b36)> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+ugen0.2: <QEMU USB HARDDRIVE QEMU> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=ON (0mA)
+ugen0.3: <USB Attached SCSI HBA QEMU> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=ON (0mA)
+ugen0.4: <QEMU Tablet Adomax Technology Co., Ltd> at usbus0, cfg=0 md=HOST spd=HIGH (480Mbps) pwr=ON (100mA)
+ugen0.5: <QEMU Tablet Adomax Technology Co., Ltd> at usbus0, cfg=0 md=HOST spd=HIGH (480Mbps) pwr=ON (100mA)
+ugen0.6: <Hub NEC Corp.> at usbus0, cfg=0 md=HOST spd=FULL (12Mbps) pwr=SAVE (0mA)
+ugen0.7: <QEMU Tablet Adomax Technology Co., Ltd> at usbus0, cfg=0 md=HOST spd=FULL (12Mbps) pwr=ON (100mA)

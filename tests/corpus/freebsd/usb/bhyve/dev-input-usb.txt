@@ -1,0 +1,14 @@
+/dev/input:
+total 0
+crw-------  1 root wheel  0xd Oct 23 23:03 event0
+crw-------  1 root wheel 0x1a Oct 23 23:03 event1
+crw-------  1 root wheel 0x49 Oct 23 23:03 event2
+crw-------  1 root wheel 0x4e Oct 23 23:03 event3
+crw-------  1 root wheel 0x3b Oct 23 23:03 event4
+
+/dev/usb:
+total 0
+crw-------  1 root operator 0x47 Oct 23 23:03 0.1.0
+crw-------  1 root operator 0x85 Oct 23 23:03 0.1.1
+crw-------  1 root operator 0x34 Oct 23 23:03 0.2.0
+crw-------  1 root operator 0x39 Oct 23 23:03 0.2.1
