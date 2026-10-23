@@ -36,7 +36,7 @@ const MAX_CV: f64 = 0.01;
 const BOOTSTRAP: usize = 2000;
 
 const USAGE: &str = "usage: cargo xtask --remote perf [--suite p2|p3|p4|p5|diag] [--runs N] [--prepare] \
-                     [--freebsd-only | --abyss-only [--prof [--prof-cpu N]]]";
+                     [--freebsd-only [--prof] | --abyss-only [--prof [--prof-cpu N]]]";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Side {
@@ -67,12 +67,18 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     // the kernel's sampling profiler (`abyss.prof`), whose reports, one
     // per benchmark, are printed.
     let abyss_only = args.take_flag("--abyss-only");
+    // With `--freebsd-only`: the userland suite under DTrace's profile
+    // provider, each benchmark's busiest kernel functions printed as
+    // `prof fbsd` lines, to set beside AbyssBSD's.
     let prof = args.take_flag("--prof");
     // With `--prof`: the functions of one CPU's samples only (ubench runs
     // bound to CPU 1).
     let prof_cpu = args.take_value("--prof-cpu")?;
     args.finish()?;
-    if freebsd_only && abyss_only || prof && !abyss_only || prof_cpu.is_some() && !prof {
+    if freebsd_only && abyss_only
+        || prof && !(abyss_only || freebsd_only)
+        || prof_cpu.is_some() && !(prof && abyss_only)
+    {
         return Err(USAGE.into());
     }
     // `diag` holds AbyssBSD-side diagnostics, some with FreeBSD
@@ -128,7 +134,11 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     } else {
         Vec::new()
     };
-    let bench_disk = make_bench_disk(&out, bench, &suite, &extras)?;
+    let freebsd_prof = prof && freebsd_only;
+    if freebsd_prof && !userland {
+        return Err("--freebsd-only --prof profiles the userland suites (p4, p5)".into());
+    }
+    let bench_disk = make_bench_disk(&out, bench, &suite, &extras, freebsd_prof)?;
     let opts = build::Options {
         release: true,
         ktest: false,
@@ -639,7 +649,13 @@ pub(crate) fn cmd_ubench(mut args: Args) -> Result<()> {
 /// The second disk: a UFS file system holding the benchmark (`kbench.ko`,
 /// or the `ubench` binary), the suite name, and the suite's `extras`.
 /// Attached to both kernels' VMs, so the configurations match.
-fn make_bench_disk(out: &Path, bench: &Path, suite: &str, extras: &[PathBuf]) -> Result<PathBuf> {
+fn make_bench_disk(
+    out: &Path,
+    bench: &Path,
+    suite: &str,
+    extras: &[PathBuf],
+    freebsd_prof: bool,
+) -> Result<PathBuf> {
     let dir = out.join("bench-disk");
     fs::create_dir_all(&dir)?;
     for file in core::iter::once(bench).chain(extras.iter().map(PathBuf::as_path)) {
@@ -647,6 +663,11 @@ fn make_bench_disk(out: &Path, bench: &Path, suite: &str, extras: &[PathBuf]) ->
         fs::copy(file, dir.join(name))?;
     }
     fs::write(dir.join("suite"), suite)?;
+    if freebsd_prof {
+        // FreeBSD's rc.local runs `run.sh` in place of the suite.
+        fs::write(dir.join("run.sh"), FREEBSD_PROF_RUN)?;
+        fs::write(dir.join("prof.d"), FREEBSD_PROF_D)?;
+    }
     // The NVMe disk: the P3 suite reads it (zeros are fine), the P5 suite
     // formats it. Sparse.
     let nvme = if suite == "p5" { 4 << 30 } else { 64 << 20 };
@@ -673,6 +694,44 @@ fn make_bench_disk(out: &Path, bench: &Path, suite: &str, extras: &[PathBuf]) ->
     )?;
     Ok(disk)
 }
+
+/// `perf --freebsd-only --prof`'s script on the FreeBSD guest: the suite
+/// as usual (interrupts on CPU 0), with DTrace watching it (started apart:
+/// `dtrace -c` fails to take control of it).
+const FREEBSD_PROF_RUN: &str = "#!/bin/sh\n\
+    cp /mnt/ubench /mnt/suite /mnt/tree.tar /mnt/fsx /mnt/prof.d /tmp/ 2>/dev/null\n\
+    for irq in $(vmstat -ai | awk '/virtio_pci|nvme/ { sub(/^irq/, \"\", $1); sub(/:$/, \"\", $1); print $1 }'); do\n\
+    \tcpuset -l 0 -x \"$irq\"\n\
+    done\n\
+    kldload dtraceall\n\
+    dtrace -q -x bufsize=16m -x aggsize=16m -s /tmp/prof.d &\n\
+    sleep 5\n\
+    UB_PROF=1 /tmp/ubench \"$(cat /tmp/suite)\"\n\
+    sleep 2\n\
+    kill -INT $!\n\
+    wait\n";
+
+/// The D script: kernel PCs sampled on CPU 1 (where ubench binds itself)
+/// while the benchmark samples (its `kprof pause` and `kprof resume`
+/// lines, as for `abyss.prof`); at each result line, the busiest
+/// functions since the last, printed and cleared.
+const FREEBSD_PROF_D: &str = "\
+BEGIN { on = 1; }
+profile-4999 /on && cpu == 1/ { @total = count(); }
+profile-4999 /on && cpu == 1 && arg0 != 0/ { @fn[func(arg0)] = count(); }
+syscall::write:entry /execname == \"ubench\"/ { self->s = copyinstr(arg1, arg2 < 120 ? arg2 : 120); }
+syscall::write:entry /execname == \"ubench\" && strstr(self->s, \"kprof pause\") != NULL/ { on = 0; }
+syscall::write:entry /execname == \"ubench\" && strstr(self->s, \"kprof resume\") != NULL/ { on = 1; }
+syscall::write:entry /execname == \"ubench\" && strstr(self->s, \"kbench \") != NULL/ {
+\tprintf(\"prof fbsd %s\", self->s);
+\tprinta(\"prof fbsd %@d samples on CPU 1\\n\", @total);
+\ttrunc(@fn, 40);
+\tprinta(\"prof fbsd %@8d %a\\n\", @fn);
+\ttrunc(@fn);
+\tclear(@total);
+\ton = 1;
+}
+";
 
 /// The commands `freebsd-record` captures, with the file each lands in.
 const RECORDINGS: &[(&str, &str)] = &[
