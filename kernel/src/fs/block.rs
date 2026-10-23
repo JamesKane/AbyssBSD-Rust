@@ -115,8 +115,34 @@ impl BlockDev for DiskBlocks {
         self.0.write(s, offset, buf).map_err(|_| IoError)
     }
 
+    fn start_write(
+        &self,
+        s: &Sleepable,
+        offset: u64,
+        buf: Vec<u8>,
+        done: alloc::boxed::Box<dyn FnOnce(bool) + Send>,
+    ) {
+        self.0
+            .start_write(s, offset, IoBuf::from(buf), move |r| done(r.is_ok()));
+    }
+
     fn flush(&self, s: &Sleepable) -> Result<(), IoError> {
         self.0.flush(s).map_err(|_| IoError)
+    }
+}
+
+/// A mount's buffer cache limits, sized to memory as FreeBSD sizes its
+/// buffer space (`hibufspace`) and dirty buffers (`hidirtybuffers`, a
+/// quarter of them; `lodirtybuffers`, half that).
+fn limits() -> Limits {
+    let memory = crate::mm::phys_stats().managed * addr::PAGE_SIZE;
+    let max = usize::try_from(memory / 16)
+        .unwrap_or(usize::MAX)
+        .max(32 << 20);
+    Limits {
+        max,
+        hi_dirty: max / 4,
+        lo_dirty: max / 8,
     }
 }
 
@@ -139,7 +165,7 @@ pub(crate) struct DiskIo {
 impl DiskIo {
     pub(crate) fn new(disk: Arc<storage::Disk>) -> Self {
         Self {
-            cache: cache(Arc::clone(&disk), Limits::default()),
+            cache: cache(Arc::clone(&disk), limits()),
             disk,
             deps: SpinLock::new(None),
             groups_hashed: AtomicBool::new(false),

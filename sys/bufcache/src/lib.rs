@@ -13,11 +13,18 @@
 //! Dirty buffers remember when they were dirtied, on the clock the cache
 //! is given: the syncer writes those older than its delay
 //! ([`BufCache::write_aged`]), and `sync` writes all.
-//! Past a high watermark of dirty bytes, the writer that crosses it writes
-//! the oldest until the total is under the low one (FreeBSD's
-//! `hidirtybuffers`), so a burst of writes cannot fill memory. Clean
-//! buffers nobody holds are evicted, least recently used first, past the
-//! cache's size limit.
+//! Past a high watermark of dirty bytes, the writer that crosses it starts
+//! writes of the oldest until the total not yet going out is under the
+//! low one (FreeBSD's `hidirtybuffers` and `bawrite`), so a burst of
+//! writes cannot fill memory. Clean buffers nobody holds are evicted,
+//! least recently used first, past the cache's size limit.
+//!
+//! Background writes do not hold the buffer: they go out from a copy, as
+//! FreeBSD's background writes of cylinder groups do, and the buffer stays
+//! dirty until the write is done. Whoever next holds the buffer (or the
+//! next operation on the cache, for those nobody holds) finishes it,
+//! telling the hook; a buffer is not written again until its last write
+//! is finished.
 //!
 //! A file system may give the cache a [`BufHook`]. It checks each block
 //! read from the device (a check-hash), and every write of a buffer asks
@@ -40,13 +47,16 @@
 
 extern crate alloc;
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use sched::Sleepable;
+use core::sync::atomic::{AtomicBool, AtomicU8};
+
 use sched::lock::{LockClass, Mutex};
+use sched::{Sleepable, WaitQueue};
 use sync::SpinLock;
 
 /// A device could not move the bytes (`EIO`).
@@ -61,6 +71,19 @@ pub trait BlockDev: Send + Sync {
     fn size(&self) -> u64;
     fn read(&self, s: &Sleepable, offset: u64, buf: &mut [u8]) -> Result<(), IoError>;
     fn write(&self, s: &Sleepable, offset: u64, buf: &[u8]) -> Result<(), IoError>;
+    /// Starts writing `buf` at `offset` without waiting: `done` runs once
+    /// it is over, with whether the device took it, in any context (an
+    /// interrupt thread); it does not sleep.
+    fn start_write(
+        &self,
+        s: &Sleepable,
+        offset: u64,
+        buf: Vec<u8>,
+        done: Box<dyn FnOnce(bool) + Send>,
+    ) {
+        let ok = self.write(s, offset, &buf).is_ok();
+        done(ok);
+    }
     /// Makes earlier writes durable.
     fn flush(&self, s: &Sleepable) -> Result<(), IoError>;
 }
@@ -97,7 +120,26 @@ struct Data {
     valid: bool,
     /// When it was dirtied (on the cache's clock), if it was.
     dirty: Option<u64>,
+    /// Bumped by each change of the bytes.
+    generation: u64,
+    /// A background write under way or not yet finished.
+    writing: Option<Started>,
 }
+
+/// A background write of a buffer.
+#[derive(Clone, Copy, Debug)]
+struct Started {
+    /// The buffer's generation when it began.
+    generation: u64,
+    /// The hook held some changes back.
+    rolled: bool,
+    len: usize,
+}
+
+/// A background write's outcome, as its completion leaves it.
+const PENDING: u8 = 0;
+const WRITTEN: u8 = 1;
+const FAILED: u8 = 2;
 
 #[derive(Debug)]
 struct Buffer {
@@ -105,7 +147,24 @@ struct Buffer {
     data: Mutex<Data>,
     /// The tick of its last use, for eviction.
     used: AtomicU64,
+    /// Its background write's outcome.
+    result: AtomicU8,
 }
+
+/// What background writes' completions share with the cache.
+struct Io {
+    /// Buffers whose writes are done, not yet finished.
+    done: SpinLock<Vec<Arc<Buffer>>>,
+    any_done: AtomicBool,
+    /// Woken by each completion.
+    wake: WaitQueue,
+    /// Bytes being written.
+    running: AtomicUsize,
+}
+
+/// The most bytes of background writes under way (FreeBSD's
+/// `hirunningspace`): a writer past it waits for half to finish.
+const HI_RUNNING: usize = 16 << 20;
 
 /// Limits, in bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -140,6 +199,9 @@ pub struct BufCache {
     /// Nanoseconds since some start, for dirtying times.
     clock: fn() -> u64,
     hook: SpinLock<Option<Arc<dyn BufHook>>>,
+    io: Arc<Io>,
+    /// Dirty bytes whose background writes are not finished.
+    started: AtomicUsize,
 }
 
 impl core::fmt::Debug for BufCache {
@@ -184,6 +246,13 @@ impl BufCache {
             ticks: AtomicU64::new(0),
             clock,
             hook: SpinLock::new(None),
+            io: Arc::new(Io {
+                done: SpinLock::new(Vec::new()),
+                any_done: AtomicBool::new(false),
+                wake: WaitQueue::new(),
+                running: AtomicUsize::new(0),
+            }),
+            started: AtomicUsize::new(0),
         }
     }
 
@@ -195,7 +264,9 @@ impl BufCache {
     /// Writes held buffer `d` at `offset` (dirty or not), through the
     /// hook: clean afterwards, unless the hook rolled something back or
     /// the device failed.
-    fn write_out(&self, s: &Sleepable, offset: u64, d: &mut Data) -> Result<(), IoError> {
+    fn write_out(&self, s: &Sleepable, b: &Buffer, d: &mut Data) -> Result<(), IoError> {
+        self.settle(s, b, d, true);
+        let offset = b.offset;
         let hook = self.hook.lock().clone();
         let rolled = hook.as_ref().and_then(|h| h.start(s, offset, &mut d.bytes));
         let r = self
@@ -215,6 +286,80 @@ impl BufCache {
             self.dirty.fetch_add(d.bytes.len(), Ordering::Relaxed);
         }
         r
+    }
+
+    /// Starts a background write of held buffer `b` (not being written),
+    /// through the hook (FreeBSD's `bawrite`).
+    fn start_out(&self, s: &Sleepable, b: &Arc<Buffer>, d: &mut Data) {
+        let hook = self.hook.lock().clone();
+        let rolled = hook
+            .as_ref()
+            .and_then(|h| h.start(s, b.offset, &mut d.bytes));
+        let len = d.bytes.len();
+        d.writing = Some(Started {
+            generation: d.generation,
+            rolled: rolled.is_some(),
+            len,
+        });
+        b.result.store(PENDING, Ordering::Relaxed);
+        self.started.fetch_add(len, Ordering::Relaxed);
+        self.io.running.fetch_add(len, Ordering::Relaxed);
+        let bytes = rolled.unwrap_or_else(|| d.bytes.clone());
+        let io = Arc::clone(&self.io);
+        let buf = Arc::clone(b);
+        self.dev.start_write(
+            s,
+            b.offset,
+            bytes,
+            Box::new(move |ok| {
+                buf.result
+                    .store(if ok { WRITTEN } else { FAILED }, Ordering::Release);
+                io.running.fetch_sub(len, Ordering::Relaxed);
+                io.done.lock().push(buf);
+                io.any_done.store(true, Ordering::Release);
+                io.wake.wake_all();
+            }),
+        );
+    }
+
+    /// Finishes held buffer `b`'s background write if it is done (or,
+    /// with `wait`, once it is): the hook is told, and the buffer is clean
+    /// if all of it went out unchanged since. Returns whether the write
+    /// succeeded, if one was finished.
+    fn settle(&self, s: &Sleepable, b: &Buffer, d: &mut Data, wait: bool) -> Option<bool> {
+        let w = d.writing?;
+        if wait {
+            self.io
+                .wake
+                .wait_until(s, || b.result.load(Ordering::Acquire) != PENDING);
+        }
+        let ok = match b.result.load(Ordering::Acquire) {
+            PENDING => return None,
+            r => r == WRITTEN,
+        };
+        d.writing = None;
+        self.started.fetch_sub(w.len, Ordering::Relaxed);
+        let hook = self.hook.lock().clone();
+        if let Some(h) = &hook {
+            h.done(s, b.offset, ok);
+        }
+        if ok && !w.rolled && w.generation == d.generation && d.dirty.take().is_some() {
+            self.dirty.fetch_sub(d.bytes.len(), Ordering::Relaxed);
+        }
+        Some(ok)
+    }
+
+    /// Finishes the background writes that are done. The caller holds no
+    /// buffer.
+    fn reap(&self, s: &Sleepable) {
+        if !self.io.any_done.swap(false, Ordering::Acquire) {
+            return;
+        }
+        let done = core::mem::take(&mut *self.io.done.lock());
+        for b in done {
+            let mut d = b.data.lock(s);
+            self.settle(s, &b, &mut d, false);
+        }
     }
 
     #[must_use]
@@ -259,9 +404,10 @@ impl BufCache {
         s: &Sleepable,
         offset: u64,
         size: usize,
-        f: impl FnOnce(&mut Data) -> Result<R, IoError>,
+        f: impl FnOnce(&Buffer, &mut Data) -> Result<R, IoError>,
     ) -> Result<R, IoError> {
         self.check(offset, size)?;
+        self.reap(s);
         loop {
             let buf = {
                 let mut t = self.buffers.lock();
@@ -276,9 +422,12 @@ impl BufCache {
                                     bytes: alloc::vec![0; size],
                                     valid: false,
                                     dirty: None,
+                                    generation: 0,
+                                    writing: None,
                                 },
                             ),
                             used: AtomicU64::new(0),
+                            result: AtomicU8::new(PENDING),
                         });
                         t.insert(offset, Arc::clone(&b));
                         self.bytes.fetch_add(size, Ordering::Relaxed);
@@ -296,7 +445,9 @@ impl BufCache {
             if !current {
                 continue;
             }
+            self.settle(s, &buf, &mut data, false);
             if data.bytes.len() != size {
+                data.generation += 1;
                 // A fragment grown or shrunk in place: what it holds stays
                 // (dirty or not, rolled-back changes included), and a
                 // grown tail comes from the device.
@@ -317,7 +468,7 @@ impl BufCache {
                 }
             }
             buf.used.store(self.tick(), Ordering::Relaxed);
-            let r = f(&mut data);
+            let r = f(&buf, &mut data);
             drop(data);
             drop(buf);
             self.trim();
@@ -334,7 +485,7 @@ impl BufCache {
         size: usize,
         f: impl FnOnce(&[u8]) -> R,
     ) -> Result<R, IoError> {
-        self.with(s, offset, size, |d| {
+        self.with(s, offset, size, |_, d| {
             self.validate(s, offset, d)?;
             Ok(f(&d.bytes))
         })
@@ -352,14 +503,15 @@ impl BufCache {
         mode: WriteMode,
         f: impl FnOnce(&mut [u8]) -> R,
     ) -> Result<R, IoError> {
-        let r = self.with(s, offset, size, |d| {
+        let r = self.with(s, offset, size, |b, d| {
             match fill {
                 Fill::Read => self.validate(s, offset, d)?,
                 Fill::Overwrite => d.valid = true,
             }
             let r = f(&mut d.bytes);
+            d.generation += 1;
             match mode {
-                WriteMode::Now => self.write_out(s, offset, d)?,
+                WriteMode::Now => self.write_out(s, b, d)?,
                 WriteMode::Delayed => {
                     if d.dirty.is_none() {
                         d.dirty = Some((self.clock)());
@@ -389,8 +541,9 @@ impl BufCache {
     }
 
     /// The dirty buffers, oldest first, each with when it was dirtied.
-    /// A buffer someone holds is a candidate (as the oldest) only if
-    /// `busy`: whoever waits for it then writes it if it is still dirty.
+    /// A buffer someone holds, or one being written, is a candidate (as
+    /// the oldest) only if `busy`: whoever waits for it then writes it if
+    /// it is still dirty.
     fn dirty_buffers(&self, busy: bool) -> Vec<(u64, Arc<Buffer>)> {
         let all: Vec<Arc<Buffer>> = self.buffers.lock().values().cloned().collect();
         let mut out: Vec<(u64, Arc<Buffer>)> = all
@@ -399,6 +552,7 @@ impl BufCache {
                 // A peek only to choose; the write looks again under the
                 // lock.
                 let d = match b.data.try_lock() {
+                    Some(g) if g.writing.is_some() && !busy => return None,
                     Some(g) => g.dirty?,
                     None if busy => 0,
                     None => return None,
@@ -410,13 +564,17 @@ impl BufCache {
         out
     }
 
-    /// Writes buffer `b` if it is still dirty.
-    fn write_one(&self, s: &Sleepable, b: &Buffer) -> Result<(), IoError> {
+    /// Starts a background write of buffer `b` if it is still dirty and
+    /// not being written (waiting for a write under way, with `wait`).
+    /// Returns whether it started one.
+    fn start_one(&self, s: &Sleepable, b: &Arc<Buffer>, wait: bool) -> bool {
         let mut data = b.data.lock(s);
-        if data.dirty.is_some() {
-            self.write_out(s, b.offset, &mut data)?;
+        self.settle(s, b, &mut data, wait);
+        if data.dirty.is_none() || data.writing.is_some() {
+            return false;
         }
-        Ok(())
+        self.start_out(s, b, &mut data);
+        true
     }
 
     /// Writes the buffer at `offset` now if it is cached and dirty
@@ -427,8 +585,9 @@ impl BufCache {
             return Ok(true);
         };
         let mut data = b.data.lock(s);
+        self.settle(s, &b, &mut data, true);
         if data.dirty.is_some() {
-            self.write_out(s, offset, &mut data)?;
+            self.write_out(s, &b, &mut data)?;
         }
         Ok(data.dirty.is_none())
     }
@@ -440,18 +599,44 @@ impl BufCache {
     }
 
     /// Writes the buffers dirtied at or before `before` on the cache's
-    /// clock (the syncer: those older than its delay).
+    /// clock (the syncer: those older than its delay), all under way at
+    /// once, and waits for them.
     pub fn write_aged(&self, s: &Sleepable, before: u64) -> Result<(), IoError> {
-        let mut result = Ok(());
+        self.reap(s);
+        let mut started = Vec::new();
         for (d, b) in self.dirty_buffers(before == u64::MAX) {
             if d > before {
                 break;
             }
-            if let Err(e) = self.write_one(s, &b) {
-                result = Err(e);
+            if self.start_one(s, &b, true) {
+                started.push(b);
+            }
+            self.wait_running(s);
+        }
+        let mut result = Ok(());
+        for b in started {
+            let mut data = b.data.lock(s);
+            if self.settle(s, &b, &mut data, true) == Some(false) {
+                result = Err(IoError);
             }
         }
         result
+    }
+
+    /// Past [`HI_RUNNING`] bytes being written, waits for half of them.
+    fn wait_running(&self, s: &Sleepable) {
+        if self.io.running.load(Ordering::Relaxed) > HI_RUNNING {
+            self.io.wake.wait_until(s, || {
+                self.io.running.load(Ordering::Relaxed) <= HI_RUNNING / 2
+            });
+        }
+    }
+
+    /// Dirty bytes not yet going out.
+    fn unstarted(&self) -> usize {
+        self.dirty
+            .load(Ordering::Relaxed)
+            .saturating_sub(self.started.load(Ordering::Relaxed))
     }
 
     /// Writes every dirty buffer, then flushes the device (`sync`,
@@ -461,19 +646,20 @@ impl BufCache {
         self.dev.flush(s)
     }
 
-    /// Past the high watermark: writes the oldest dirty buffers until the
-    /// total is under the low one.
+    /// Past the high watermark: starts writes of the oldest dirty buffers
+    /// until the total not going out is under the low one.
     fn throttle(&self, s: &Sleepable) {
-        if self.dirty.load(Ordering::Relaxed) <= self.limits.hi_dirty {
-            return;
-        }
-        for (_, b) in self.dirty_buffers(false) {
-            if self.dirty.load(Ordering::Relaxed) <= self.limits.lo_dirty {
-                break;
+        if self.unstarted() > self.limits.hi_dirty {
+            for (_, b) in self.dirty_buffers(false) {
+                if self.unstarted() <= self.limits.lo_dirty {
+                    break;
+                }
+                // A failed write stays dirty, for the syncer to retry.
+                self.start_one(s, &b, false);
+                self.wait_running(s);
             }
-            // A failed write stays dirty, for the syncer to retry.
-            let _ = self.write_one(s, &b);
         }
+        self.reap(s);
     }
 
     /// Evicts clean buffers nobody holds, least recently used first, until
@@ -482,6 +668,8 @@ impl BufCache {
         if self.bytes.load(Ordering::Relaxed) <= self.limits.max {
             return;
         }
+        // Down to seven eighths, so the sort is paid once per eighth.
+        let target = self.limits.max - self.limits.max / 8;
         let mut idle: Vec<Arc<Buffer>> = self
             .buffers
             .lock()
@@ -492,7 +680,7 @@ impl BufCache {
         // Each read once: users move `used` while this sorts.
         idle.sort_by_cached_key(|b| b.used.load(Ordering::Relaxed));
         for b in idle {
-            if self.bytes.load(Ordering::Relaxed) <= self.limits.max {
+            if self.bytes.load(Ordering::Relaxed) <= target {
                 break;
             }
             // Not held, and clean; then (in `with`'s order: buffer, then
@@ -528,7 +716,10 @@ impl BufCache {
             .map(|(_, b)| Arc::clone(b))
             .collect();
         for b in candidates {
-            let data = b.data.lock(s);
+            let mut data = b.data.lock(s);
+            // A write of it under way must land before the blocks are
+            // reused.
+            self.settle(s, &b, &mut data, true);
             let blen = data.bytes.len();
             if b.offset.saturating_add(blen as u64) <= offset {
                 continue;

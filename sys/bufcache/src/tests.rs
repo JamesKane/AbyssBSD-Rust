@@ -293,3 +293,96 @@ fn discarded_buffers_are_never_written() {
     c.sync(&s).unwrap();
     assert_eq!((disk.at(8192), disk.at(32768)), (0, 4));
 }
+
+/// A write started, not yet done.
+type Queued = (u64, Vec<u8>, Box<dyn FnOnce(bool) + Send>);
+
+/// A disk whose writes finish only when the test says.
+struct Slow {
+    disk: Arc<Disk>,
+    queued: StdMutex<Vec<Queued>>,
+}
+
+impl Slow {
+    fn finish(&self) {
+        let queued = core::mem::take(&mut *self.queued.lock().unwrap());
+        for (offset, buf, done) in queued {
+            let o = usize::try_from(offset).unwrap();
+            self.disk.bytes.lock().unwrap()[o..o + buf.len()].copy_from_slice(&buf);
+            done(true);
+        }
+    }
+}
+
+impl BlockDev for Slow {
+    fn sector_size(&self) -> u32 {
+        512
+    }
+
+    fn size(&self) -> u64 {
+        self.disk.size()
+    }
+
+    fn read(&self, s: &Sleepable, offset: u64, buf: &mut [u8]) -> Result<(), IoError> {
+        self.disk.read(s, offset, buf)
+    }
+
+    fn write(&self, s: &Sleepable, offset: u64, buf: &[u8]) -> Result<(), IoError> {
+        self.disk.write(s, offset, buf)
+    }
+
+    fn start_write(
+        &self,
+        _s: &Sleepable,
+        offset: u64,
+        buf: Vec<u8>,
+        done: Box<dyn FnOnce(bool) + Send>,
+    ) {
+        self.queued.lock().unwrap().push((offset, buf, done));
+    }
+
+    fn flush(&self, s: &Sleepable) -> Result<(), IoError> {
+        self.disk.flush(s)
+    }
+}
+
+#[test]
+fn a_buffer_changed_while_written_stays_dirty() {
+    let slow = Arc::new(Slow {
+        disk: Disk::new(1 << 20),
+        queued: StdMutex::new(Vec::new()),
+    });
+    let limits = Limits {
+        max: 1 << 20,
+        hi_dirty: 4096,
+        lo_dirty: 0,
+    };
+    let c = BufCache::new(Arc::clone(&slow) as Arc<dyn BlockDev>, limits, clock);
+    let s = s();
+    let w = |at: u64, v: u8| {
+        c.write(&s, at, 4096, Fill::Overwrite, WriteMode::Delayed, |d| {
+            d[0] = v
+        })
+        .unwrap();
+    };
+    // Past the watermark, both go out in the background, still dirty.
+    w(0, 1);
+    w(4096, 2);
+    assert_eq!(slow.queued.lock().unwrap().len(), 2);
+    assert_eq!(c.usage().1, 8192);
+    // One changes while its write is under way.
+    w(0, 3);
+    slow.finish();
+    assert_eq!((slow.disk.at(0), slow.disk.at(4096)), (1, 2));
+    // The next use finishes both writes: only the changed one is dirty.
+    c.read(&s, 8192, 4096, |_| ()).unwrap();
+    assert_eq!(c.usage().1, 4096);
+    // It goes out again with the next burst.
+    w(0, 4);
+    w(8192, 5);
+    assert_eq!(slow.queued.lock().unwrap().len(), 2);
+    slow.finish();
+    c.read(&s, 8192, 4096, |_| ()).unwrap();
+    assert_eq!((slow.disk.at(0), slow.disk.at(8192)), (4, 5));
+    assert_eq!(c.usage().1, 0);
+}

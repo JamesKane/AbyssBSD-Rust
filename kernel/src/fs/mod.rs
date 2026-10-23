@@ -293,10 +293,12 @@ fn syncer(s: &Sleepable) {
 }
 
 /// The most vnodes kept in core (`kern.maxvnodes`), sized as FreeBSD sizes
-/// `desiredvnodes`: one per 32 pages of memory, plus room for processes.
-fn max_vnodes() -> usize {
-    let pages = crate::mm::phys_stats().managed;
-    usize::try_from(pages / 32).unwrap_or(usize::MAX).max(4096) + 1024
+/// `desiredvnodes`: one per 32 KiB of memory, one more per 32 KiB of the
+/// first 1.5 GiB, plus room for processes.
+pub(crate) fn max_vnodes() -> usize {
+    let kib = crate::mm::phys_stats().managed * (addr::PAGE_SIZE / 1024);
+    let n = kib / 32 + kib.min(98_304 * 16) / 32;
+    usize::try_from(n).unwrap_or(usize::MAX).max(4096) + 1024
 }
 
 /// The vnode reclaimer (FreeBSD's `vnlru`): once a second, if more vnodes

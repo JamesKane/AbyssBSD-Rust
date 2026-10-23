@@ -442,7 +442,7 @@ impl Deps {
         let end = base + size;
         let keys: Vec<(u64, Id)> = self
             .covers
-            .iter()
+            .range(Self::covers_of(base))
             .filter(|(_, c)| c.bno == bno)
             .map(|(k, _)| *k)
             .collect();
@@ -520,7 +520,7 @@ impl Deps {
         let Some(&id) = self.by_bno.get(&bno) else {
             return;
         };
-        self.covers.retain(|_, c| c.id != id);
+        self.forget_cover(bno, id);
         let stamp = self.stamp();
         self.add_wait(id, Wait::Buffer { at, stamp });
         self.satisfy(id, Wait::Data(bno));
@@ -639,6 +639,25 @@ impl Deps {
         out
     }
 
+    /// The keys of covers that may lie in the block at byte `base`: each
+    /// starts within the block.
+    fn covers_of(base: u64) -> core::ops::Range<(u64, Id)> {
+        (base, Id(0))..(base + u64::from(crate::sb::MAXBSIZE), Id(0))
+    }
+
+    /// Forgets allocation `id`'s cover of block `bno`, if it has one.
+    fn forget_cover(&mut self, bno: u64, id: Id) {
+        let base = bno * u64::from(self.sb.fsize);
+        let key = self
+            .covers
+            .range(Self::covers_of(base))
+            .find(|(_, c)| c.id == id)
+            .map(|(k, _)| *k);
+        if let Some(key) = key {
+            self.covers.remove(&key);
+        }
+    }
+
     /// Forgets allocation `id`; what waited on it waits for its file's
     /// next inode write instead.
     fn drop_alloc(&mut self, id: Id) -> Option<(u64, u64)> {
@@ -649,7 +668,7 @@ impl Deps {
         else {
             return None;
         };
-        self.covers.retain(|_, c| c.id != id);
+        self.forget_cover(a.bno, id);
         if self.by_bno.get(&a.bno) == Some(&id) {
             self.by_bno.remove(&a.bno);
         }
