@@ -6,7 +6,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
-use devtree::ids::{AcpiId, AcpiIdent, PciId, PciIdent, VirtioId, VirtioIdent};
+use devtree::ids::{
+    AcpiId, AcpiIdent, PciId, PciIdent, UsbId, UsbIdent, UsbPlace, VirtioId, VirtioIdent,
+};
 use devtree::matching::{Candidate, Matches, Rank};
 use devtree::strings::PciAddress;
 
@@ -65,6 +67,8 @@ pub enum Ident {
     Pci(PciIdent, PciAddress, Option<String>),
     /// A virtio device on a transport.
     Virtio(VirtioIdent),
+    /// A USB interface, and where it is.
+    Usb(UsbIdent, UsbPlace),
     /// A child a bus adds for a driver by name, with the description it
     /// knows for it (FreeBSD's identify routines: `ichwd` on `isa0`).
     Child {
@@ -100,6 +104,8 @@ pub enum Ids {
     Pci(&'static [PciId]),
     /// Virtio device types.
     Virtio(&'static [VirtioId]),
+    /// USB devices and interfaces.
+    Usb(&'static [UsbId]),
     /// Test models.
     Test(&'static [TestId]),
 }
@@ -128,6 +134,7 @@ impl Ids {
             (Self::Acpi(t), Ident::Acpi(i, _)) => best(t, i),
             (Self::Pci(t), Ident::Pci(i, _, _)) => best(t, i),
             (Self::Virtio(t), Ident::Virtio(i)) => best(t, i),
+            (Self::Usb(t), Ident::Usb(i, _)) => best(t, i),
             (Self::Test(t), Ident::Test(i)) => best(t, i),
             _ => None,
         }
@@ -344,6 +351,7 @@ impl Ident {
             Self::Acpi(i, _) => strings::acpi_pnpinfo(out, i),
             Self::Pci(i, _, _) => strings::pci_pnpinfo(out, i),
             Self::Virtio(i) => strings::virtio_pnpinfo(out, i),
+            Self::Usb(i, p) => strings::usb_pnpinfo(out, i, p),
             Self::Test(t) => fmt::Write::write_fmt(out, format_args!("model={}", t.model)),
         };
     }
@@ -363,6 +371,7 @@ impl Ident {
             Self::Channel { channel, .. } => {
                 fmt::Write::write_fmt(out, format_args!("channel={channel}"))
             }
+            Self::Usb(i, p) => strings::usb_location(out, i, p),
             Self::Test(_) => Ok(()),
         };
     }

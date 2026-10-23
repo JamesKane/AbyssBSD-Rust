@@ -18,9 +18,11 @@ pci = { path = "../../sys/pci" }
 sbsa-gwdt = { path = "../../drivers/sbsa-gwdt" }
 timers = { path = "../../drivers/timers" }
 uart = { path = "../../drivers/uart" }
+usbus = { path = "../../sys/usb" }
 virtio = { path = "../../sys/virtio" }
 virtio-blk = { path = "../../drivers/virtio-blk" }
 virtio-random = { path = "../../drivers/virtio-random" }
+xhci-driver = { path = "../../drivers/xhci" }
 
 [dev-dependencies]
 devtree = { path = "../../lib/devtree" }

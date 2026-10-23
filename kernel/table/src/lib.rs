@@ -41,6 +41,10 @@ pub static DRIVERS: &[DriverDecl] = &[
     ahci::AHCI,
     ahci::AHCICH,
     virtio_random::DRIVER,
+    xhci_driver::PCI,
+    xhci_driver::ACPI,
+    usbus::USBUS,
+    usbus::UHUB,
 ];
 
 #[cfg(test)]

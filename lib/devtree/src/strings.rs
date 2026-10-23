@@ -10,7 +10,7 @@
 
 use core::fmt::{self, Write};
 
-use crate::ids::{AcpiIdent, PciIdent, VirtioIdent};
+use crate::ids::{AcpiIdent, PciIdent, UsbIdent, UsbPlace, VirtioIdent};
 
 /// A PCI function's position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,6 +128,39 @@ fn strtoul10(s: &str) -> u64 {
         }
     }
     if neg { v.wrapping_neg() } else { v }
+}
+
+/// FreeBSD's USB interface pnpinfo (`uhub_child_pnpinfo`):
+/// `vendor=0x0627 product=0x0001 devclass=0x00 devsubclass=0x00
+/// devproto=0x00 sernum="42" release=0x0000 mode=host intclass=0x03
+/// intsubclass=0x01 intprotocol=0x01`.
+pub fn usb_pnpinfo(out: &mut impl Write, i: &UsbIdent, p: &UsbPlace) -> fmt::Result {
+    write!(
+        out,
+        "vendor=0x{:04x} product=0x{:04x} devclass=0x{:02x} devsubclass=0x{:02x} \
+         devproto=0x{:02x} sernum=\"{}\" release=0x{:04x} mode=host intclass=0x{:02x} \
+         intsubclass=0x{:02x} intprotocol=0x{:02x}",
+        i.vendor,
+        i.product,
+        i.class,
+        i.subclass,
+        i.protocol,
+        p.serial,
+        i.release,
+        i.if_class,
+        i.if_subclass,
+        i.if_protocol
+    )
+}
+
+/// FreeBSD's USB interface location (`uhub_child_location`):
+/// `bus=0 hubaddr=1 port=1 devaddr=2 interface=0 ugen=ugen0.2`.
+pub fn usb_location(out: &mut impl Write, i: &UsbIdent, p: &UsbPlace) -> fmt::Result {
+    write!(
+        out,
+        "bus={} hubaddr={} port={} devaddr={} interface={} ugen={}",
+        p.bus, p.hub_addr, p.port, p.dev_addr, i.interface, p.ugen
+    )
 }
 
 #[cfg(test)]

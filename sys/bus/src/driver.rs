@@ -335,6 +335,12 @@ impl<'a> AttachCx<'a> {
         self.ident
     }
 
+    /// The node being attached (a bus's children's parent).
+    #[must_use]
+    pub fn node(&self) -> DeviceId {
+        self.node
+    }
+
     /// The unit number chosen for the device.
     #[must_use]
     pub fn unit(&self) -> u32 {

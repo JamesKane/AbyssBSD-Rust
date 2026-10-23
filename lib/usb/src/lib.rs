@@ -44,3 +44,49 @@ pub fn route(parent: u32, depth: u8, port: u8) -> u32 {
     }
     parent | (u32::from(port.min(15)) << (4 * u32::from(depth)))
 }
+
+/// Device speeds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Speed {
+    /// 1.5 Mb/s.
+    Low,
+    /// 12 Mb/s.
+    Full,
+    /// 480 Mb/s.
+    High,
+    /// 5 Gb/s.
+    Super,
+    /// 10 Gb/s and up.
+    SuperPlus,
+}
+
+impl Speed {
+    /// The default control endpoint's max packet size before the device
+    /// descriptor says (USB 2.0 §5.5.3; 3.2 §9.6.1).
+    #[must_use]
+    pub fn default_max_packet(self) -> u16 {
+        match self {
+            Self::Low | Self::Full => 8,
+            Self::High => 64,
+            Self::Super | Self::SuperPlus => 512,
+        }
+    }
+
+    /// Whether this is a SuperSpeed (USB 3) speed.
+    #[must_use]
+    pub fn is_super(self) -> bool {
+        matches!(self, Self::Super | Self::SuperPlus)
+    }
+
+    /// FreeBSD's name for it, as `usbus` and `ugen` report.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Low => "Low Speed",
+            Self::Full => "Full Speed",
+            Self::High => "High Speed",
+            Self::Super => "Super Speed",
+            Self::SuperPlus => "Super Speed Plus",
+        }
+    }
+}

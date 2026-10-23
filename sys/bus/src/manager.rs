@@ -896,9 +896,16 @@ impl Manager {
         self.release_starts(&mut t);
         drop(t);
         // After the lock: a serial console takes about a millisecond a line.
-        if let Some(desc) = desc {
-            self.platform
-                .log(format_args!("{}{unit}: <{desc}> on {parent}", decl.name));
+        // FreeBSD prints no `<>` for a device without a description
+        // (`usbus0 on xhci0`).
+        match desc {
+            Some(d) if d.is_empty() => self
+                .platform
+                .log(format_args!("{}{unit} on {parent}", decl.name)),
+            Some(desc) => self
+                .platform
+                .log(format_args!("{}{unit}: <{desc}> on {parent}", decl.name)),
+            None => {}
         }
         self.event(line);
         self.bump();

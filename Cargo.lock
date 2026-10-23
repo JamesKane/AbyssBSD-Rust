@@ -163,9 +163,11 @@ dependencies = [
  "sbsa-gwdt",
  "timers",
  "uart",
+ "usbus",
  "virtio",
  "virtio-blk",
  "virtio-random",
+ "xhci-driver",
 ]
 
 [[package]]
@@ -466,6 +468,18 @@ name = "usb"
 version = "0.0.0"
 
 [[package]]
+name = "usbus"
+version = "0.0.0"
+dependencies = [
+ "bus",
+ "devtree",
+ "sched",
+ "sync",
+ "usb",
+ "vm",
+]
+
+[[package]]
 name = "ustar"
 version = "0.0.0"
 
@@ -541,6 +555,23 @@ dependencies = [
 [[package]]
 name = "xhci"
 version = "0.0.0"
+
+[[package]]
+name = "xhci-driver"
+version = "0.0.0"
+dependencies = [
+ "bus",
+ "devtree",
+ "irq",
+ "pci",
+ "regs",
+ "sched",
+ "sync",
+ "usb",
+ "usbus",
+ "vm",
+ "xhci",
+]
 
 [[package]]
 name = "xtask"

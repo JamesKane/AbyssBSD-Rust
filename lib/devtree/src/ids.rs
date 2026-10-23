@@ -261,3 +261,153 @@ impl Witness<AcpiIdent> for AcpiId {
         }
     }
 }
+
+/// A USB interface's identity: its device's descriptor fields and its
+/// own (USB.md §5.1). Hub drivers, which want the whole device, match on
+/// the device class; everything else on the interface.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UsbIdent {
+    /// `idVendor`.
+    pub vendor: u16,
+    /// `idProduct`.
+    pub product: u16,
+    /// `bcdDevice`.
+    pub release: u16,
+    /// `bDeviceClass`.
+    pub class: u8,
+    /// `bDeviceSubClass`.
+    pub subclass: u8,
+    /// `bDeviceProtocol`.
+    pub protocol: u8,
+    /// `bInterfaceClass`.
+    pub if_class: u8,
+    /// `bInterfaceSubClass`.
+    pub if_subclass: u8,
+    /// `bInterfaceProtocol`.
+    pub if_protocol: u8,
+    /// The interface's index in the configuration.
+    pub interface: u8,
+}
+
+/// Where a USB interface is, for its location string, and its device's
+/// serial number and description, for its pnpinfo and `%desc`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UsbPlace {
+    /// The bus unit (`usbusN`).
+    pub bus: u32,
+    /// The parent hub's device index (0 for the root hub).
+    pub hub_addr: u8,
+    /// The hub port.
+    pub port: u8,
+    /// The device's index on its bus.
+    pub dev_addr: u8,
+    /// The `ugen` name (`ugen0.2`).
+    pub ugen: String,
+    /// The serial number string, or empty.
+    pub serial: String,
+    /// The device's description, as FreeBSD sets it: `QEMU QEMU USB
+    /// Keyboard, class 0/0, rev 2.00/0.00, addr 2`.
+    pub desc: String,
+}
+
+/// One USB match-table entry: the fields it constrains.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UsbId {
+    vendor: Option<u16>,
+    product: Option<u16>,
+    class: Option<u8>,
+    if_class: Option<u8>,
+    if_subclass: Option<u8>,
+    if_protocol: Option<u8>,
+    rank: Rank,
+}
+
+impl UsbId {
+    const ANY: Self = Self {
+        vendor: None,
+        product: None,
+        class: None,
+        if_class: None,
+        if_subclass: None,
+        if_protocol: None,
+        rank: Rank::DEFAULT,
+    };
+
+    /// Matches a vendor and product, at [`Rank::SPECIFIC`].
+    #[must_use]
+    pub const fn device(vendor: u16, product: u16) -> Self {
+        Self {
+            vendor: Some(vendor),
+            product: Some(product),
+            rank: Rank::SPECIFIC,
+            ..Self::ANY
+        }
+    }
+
+    /// Matches a device class (hubs), at [`Rank::DEFAULT`].
+    #[must_use]
+    pub const fn device_class(class: u8) -> Self {
+        Self {
+            class: Some(class),
+            ..Self::ANY
+        }
+    }
+
+    /// Matches an interface class, at [`Rank::DEFAULT`].
+    #[must_use]
+    pub const fn interface(class: u8) -> Self {
+        Self {
+            if_class: Some(class),
+            ..Self::ANY
+        }
+    }
+
+    /// Also requires the interface subclass.
+    #[must_use]
+    pub const fn subclass(mut self, subclass: u8) -> Self {
+        self.if_subclass = Some(subclass);
+        self
+    }
+
+    /// Also requires the interface protocol.
+    #[must_use]
+    pub const fn protocol(mut self, protocol: u8) -> Self {
+        self.if_protocol = Some(protocol);
+        self
+    }
+
+    /// With rank `rank` instead of the default.
+    #[must_use]
+    pub const fn rank(mut self, rank: Rank) -> Self {
+        self.rank = rank;
+        self
+    }
+}
+
+impl Matches<UsbIdent> for UsbId {
+    fn rank_for(&self, i: &UsbIdent) -> Option<Rank> {
+        let ok = |want: Option<u8>, have: u8| want.is_none_or(|w| w == have);
+        let ok16 = |want: Option<u16>, have: u16| want.is_none_or(|w| w == have);
+        (ok16(self.vendor, i.vendor)
+            && ok16(self.product, i.product)
+            && ok(self.class, i.class)
+            && ok(self.if_class, i.if_class)
+            && ok(self.if_subclass, i.if_subclass)
+            && ok(self.if_protocol, i.if_protocol))
+        .then_some(self.rank)
+    }
+}
+
+impl Witness<UsbIdent> for UsbId {
+    fn witness(&self) -> UsbIdent {
+        UsbIdent {
+            vendor: self.vendor.unwrap_or(0),
+            product: self.product.unwrap_or(0),
+            class: self.class.unwrap_or(0),
+            if_class: self.if_class.unwrap_or(0),
+            if_subclass: self.if_subclass.unwrap_or(0),
+            if_protocol: self.if_protocol.unwrap_or(0),
+            ..UsbIdent::default()
+        }
+    }
+}

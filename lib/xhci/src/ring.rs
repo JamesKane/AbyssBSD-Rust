@@ -223,6 +223,22 @@ impl<M: TrbMemory, T> ProducerRing<M, T> {
         })
     }
 
+    /// The outstanding chain holding the TRB at `addr`, without
+    /// completing it: its tag, the TRB's place in it, and its length. For
+    /// an event that does not end a TD (a control transfer's short data
+    /// stage, before its status stage completes).
+    pub fn find_mut(&mut self, addr: u64) -> Option<(&mut T, usize, usize)> {
+        let (c, trb) = self.locate(addr)?;
+        let ch = &mut self.chains[c];
+        let len = ch.len;
+        ch.tag.as_mut().map(|t| (t, trb, len))
+    }
+
+    /// Mutable access to every outstanding chain's tag, oldest first.
+    pub fn outstanding_mut(&mut self) -> impl Iterator<Item = &mut T> + '_ {
+        self.chains.iter_mut().filter_map(|c| c.tag.as_mut())
+    }
+
     /// Completes the chain holding the TRB at `addr`, named by an event,
     /// and frees the slots of every completed chain at the front. `None`
     /// if no outstanding chain holds it (a second event for a chain

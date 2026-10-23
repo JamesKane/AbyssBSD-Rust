@@ -129,6 +129,19 @@ impl Mmio<Bytes> {
         (self.base + offset) as *mut T
     }
 
+    /// The block's size in bytes: offsets a device reports must be
+    /// checked against it.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether the block is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     /// Reads the 8-bit register at `offset`.
     pub fn read8(&self, offset: usize) -> u8 {
         // SAFETY: in bounds and aligned (checked by `ptr`); mapped per the
