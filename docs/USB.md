@@ -67,7 +67,8 @@ USB 2.0 and 3.2, HID 1.11 and its usage tables, T10 SAM/SPC/SBC and UAS-2, and v
 | `lib/vtterm` | pure, host-tested, fuzzed | The terminal emulator: an ECMA-48 parser with `teken`'s xterm behavior, a screen of cells, scrollback, and a damage set |
 | `sys/usb` | kernel | The USB bus: devices, endpoints and pipes, transfers, the explore thread, enumeration, hubs (root and external), `ugen` and `/dev/usb` |
 | `sys/hid` | kernel | `hidbus`: children by top-level collection, report routing, `hidraw` |
-| `sys/input` | kernel | The input class: kbd and `kbdmux`, keymaps, evdev, `sysmouse` |
+| `sys/input` | kernel | The input class: kbd and `kbdmux`, keymaps, `sysmouse` |
+| `sys/evdev` | kernel | evdev: `/dev/input/eventN`, per-open client queues, the `EVIOC*` ioctls, the `kern.evdev` sysctls |
 | `sys/vt` | kernel | Virtual terminals: windows over `lib/vtterm`, the framebuffer renderer, switching, the console sink |
 | `drivers/xhci` | driver | The controller, on PCI and ACPI |
 | `drivers/usbhid`, `drivers/hkbd`, `drivers/hms` | drivers | The USB transport for `hidbus`; the keyboard and mouse drivers on `hidbus` |
@@ -216,6 +217,12 @@ collection's usage as its identity, as FreeBSD's `hidbus` does. The transport in
 (`HidTransport`: get and set report, set idle, set protocol, the interrupt-in stream, and output
 reports) is what an I2C-HID transport would implement later.
 
+The interrupt-in stream runs only while some child wants it, as `hid_intr_start`/`hid_intr_stop`
+do: a child calls `intr_start` when it has a consumer and `intr_stop` when the last goes away,
+reports go only to started children, and the transport pauses (`HidTransport::pause`, which must
+not sleep) once none is started. `hkbd` starts at attach, since the kbd layer always listens;
+`hms` starts when its evdev node is first opened and stops at the last close.
+
 `lib/hid` parses the report descriptor into typed fields (usage page and range, logical and
 physical limits, report ID, size, count, flags) and extracts values from reports. It never panics
 on a bad descriptor; it returns an error and `usbhid` falls back to the boot protocol where the
@@ -241,8 +248,24 @@ FreeBSD's userland expects:
   keycodes for `K_CODE`, and characters through the active keymap for `K_XLATE` (the default
   US keymap is built in; `kbdcontrol -l` loads others). The `KDGKBMODE`/`KDSKBMODE`, `KDGETLED`/
   `KDSETLED`, `KDSETREPEAT`, `GIO_KEYMAP`/`PIO_KEYMAP`, and `KDGKBINFO` ioctls.
-- **evdev.** `/dev/input/eventN` per device with FreeBSD's evdev ABI (`EVIOCG*`, `struct
-  input_event`, `kern.evdev.rcpt_mask`), which FreeBSD 15's `moused` reads.
+- **evdev** (`sys/evdev`). `/dev/input/eventN` per device with FreeBSD's evdev ABI (`EVIOCG*`,
+  `struct input_event`, `kern.evdev.rcpt_mask`), which FreeBSD 15's `moused` reads. It follows
+  `evdev.c` and `cdev.c`:
+  - A driver builds a device (name, phys, uniq, `input_id`, event bits, absinfo, properties) and
+    registers it at the lowest free unit. Pushed events go through FreeBSD's filters: a key
+    pressed again becomes a repeat where the device has `EV_REP` without soft repeat, absolute
+    values are smoothed by their fuzz, and unchanged key, LED, switch, and absolute states, zero
+    relative motion, and empty reports are dropped.
+  - Each open is a client with its own ring of eight reports' worth of events (the report size
+    estimated as `evdev_estimate_report_size` does). Readers see only whole reports, stamped at
+    `SYN_REPORT` with the realtime or monotonic clock (`EVIOCSCLOCKID`); an overflow empties the
+    ring and leaves `SYN_DROPPED`. `EVIOCGRAB` and `EVIOCREVOKE` as FreeBSD has them.
+  - The driver's `open` and `close` methods run at the first open and last close (`hms` starts
+    and stops its interrupts there); writes inject events through the driver's `event` method.
+  - `kern.evdev.input.N` has `name`, `id`, `phys`, `uniq`, `props`, the per-type bit sets, and
+    `devnum`, in FreeBSD's formats.
+  - Keyboards publish through the kbd layer when `rcpt_mask` has `HW_KBD`, and `kbdmux` has its
+    own device ("System keyboard multiplexer"), as FreeBSD's does.
 - **sysmouse.** `/dev/sysmouse` for programs that use it; `vt` gets pointer events for nothing yet
   (no cut and paste in this track).
 
