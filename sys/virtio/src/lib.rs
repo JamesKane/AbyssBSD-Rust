@@ -53,6 +53,8 @@ pub mod device_type {
     pub const CONSOLE: u32 = 3;
     /// Entropy source.
     pub const ENTROPY: u32 = 4;
+    /// Input device.
+    pub const INPUT: u32 = 18;
 }
 
 /// Device status bits (virtio 1.2 §2.1).

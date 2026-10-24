@@ -235,8 +235,13 @@ interface supports it.
   device's).
 - `hms` turns mouse and tablet reports into relative or absolute pointer events and buttons, wheel
   and horizontal wheel included.
-- `virtio-input` reads the device's name, ID, and event bits from its configuration space and its
-  events, which are already evdev codes, into the same class interfaces.
+- `virtio-input` (`vtinputN`, after FreeBSD's `vtblk` and `vtrnd`) reads the device's name,
+  serial, ID, properties, event bits, and axis ranges from its configuration space into an evdev
+  device as it stands, and keeps the event queue full of buffers. Events are already evdev events.
+  A device with keyboard keys (keys a HID keyboard can name) is also a `kbd`, like `hkbd`: its
+  keys go through the input class, which repeats them itself (the device's repeats are dropped),
+  and the lock LEDs go back on the status queue. Any other device reports straight to evdev, like
+  `hms`.
 
 ### 6.3 The input class
 
@@ -328,7 +333,9 @@ CAM: there is no `pass*` device or `camcontrol` in this track.
 - **Boot tier.** QEMU machines on both arches with `qemu-xhci`, `usb-kbd`, `usb-tablet`,
   `usb-mouse`, a `usb-hub`, `usb-storage`, `usb-uas`, and `virtio-keyboard`/`virtio-tablet`. Tests
   check the device tree and names against FreeBSD's capture, type into `ttyv0` over QMP, and read the
-  screen back with `screendump`. bhyve's `xhci,tablet` on amd64.
+  screen back with `screendump`. bhyve's `xhci,tablet` on amd64. The virtio devices are bound to the
+  display (`video0`), so QMP input goes to the USB devices unless it names the display
+  (`cargo xtask qmp --device video0`).
 - **Storage.** fsx on a UFS2 file system on `da0`, over BBB and over UAS, then `fsck_ffs` on the
   server. Hot unplug (`device_del` over QMP) of a mounted disk during I/O.
 - **Differential.** The same `usbconfig`, `devinfo`, `ls /dev`, and `kbdcontrol`/`vidcontrol` runs on

@@ -372,6 +372,11 @@ impl Vm {
         c.arg("-m").arg(&self.mem);
         c.arg("-drive").arg(pflash(0, &code, true));
         c.arg("-drive").arg(pflash(1, &vars_copy, false));
+        if self.arch == Arch::X86_64 {
+            // The default VGA, in the slot it would take (before the
+            // disks), with an id that input devices can be bound to.
+            c.args(["-vga", "none", "-device", "VGA,id=video0"]);
+        }
         c.arg("-drive").arg(format!(
             "if=none,id=disk0,format=raw,file={}",
             self.disk.display()
@@ -399,7 +404,7 @@ impl Vm {
         if self.arch == Arch::Aarch64 {
             // `virt` has no display; ramfb gives edk2 a linear-framebuffer
             // GOP (virtio-gpu's GOP is blit-only).
-            c.args(["-device", "ramfb"]);
+            c.args(["-device", "ramfb,id=video0"]);
         }
         c.args(&self.devices);
         if self.usb {
@@ -426,6 +431,10 @@ impl Vm {
     /// scratch images beside the boot disk), and virtio keyboard and
     /// tablet.
     ///
+    /// The virtio devices are bound to the display (`video0`), so QEMU
+    /// sends them only input addressed to it (`xtask qmp --device
+    /// video0`), and everything else to the USB ones.
+    ///
     /// Ports are fixed so names and locations stay stable. Each of the
     /// xHCI's eight ports takes either speed: the keyboard and tablet run
     /// at high speed, the hub (QEMU's is USB 1.1) and its mouse at full
@@ -438,6 +447,8 @@ impl Vm {
         };
         let bbb = scratch("bbb")?;
         let uas = scratch("uas")?;
+        let bbb = format!("if=none,id=usbbbb,format=raw,file={}", bbb.display());
+        let uas = format!("if=none,id=usbuas,format=raw,file={}", uas.display());
         let args = [
             "-device",
             "qemu-xhci,id=xhci,p2=8,p3=8",
@@ -450,19 +461,19 @@ impl Vm {
             "-device",
             "usb-mouse,bus=xhci.0,port=3.1",
             "-drive",
-            &format!("if=none,id=usbbbb,format=raw,file={}", bbb.display()),
+            &bbb,
             "-device",
             "usb-storage,bus=xhci.0,port=4,drive=usbbbb,serial=abyssbbb",
             "-device",
             "usb-uas,id=uas0,bus=xhci.0,port=5",
             "-drive",
-            &format!("if=none,id=usbuas,format=raw,file={}", uas.display()),
+            &uas,
             "-device",
             "scsi-hd,bus=uas0.0,scsi-id=0,lun=0,drive=usbuas,serial=abyssuas",
             "-device",
-            "virtio-keyboard-pci",
+            "virtio-keyboard-pci,id=vkbd,display=video0",
             "-device",
-            "virtio-tablet-pci",
+            "virtio-tablet-pci,id=vtablet,display=video0",
         ];
         Ok(args.iter().map(|&a| a.to_owned()).collect())
     }

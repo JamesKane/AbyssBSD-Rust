@@ -35,6 +35,16 @@ pub fn hid2key(usage: u8) -> u16 {
     HID_TO_KEY[usize::from(usage)]
 }
 
+/// The HID keyboard usage evdev code `code` stands for, if it has one.
+/// The lowest usage wins where two share a code (`hid2key` reversed).
+#[must_use]
+pub fn key2hid(code: u16) -> Option<u8> {
+    if code == 0 {
+        return None;
+    }
+    (1..=255).find(|&u| hid2key(u) == code)
+}
+
 /// Every key an AT keyboard can send (`evdev_support_all_known_keys`).
 pub const KNOWN_KEYS: &[u16] = &[
     0x001, 0x002, 0x003, 0x004, 0x005, 0x006, 0x007, 0x008, 0x009, 0x00a, 0x00b, 0x00c, 0x00d,

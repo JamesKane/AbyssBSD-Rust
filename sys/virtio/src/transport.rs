@@ -521,6 +521,16 @@ impl VirtioDevice {
         }
     }
 
+    /// Writes the byte at `off` in the device configuration (ignored
+    /// outside it).
+    pub fn set_config8(&self, off: u16, v: u8) {
+        match self.config_at(off, 1) {
+            Some(ConfigAt::Mmio(g, at)) => g.write8(at, v),
+            Some(ConfigAt::Io(io, at)) => io.write8(at, v),
+            None => {}
+        }
+    }
+
     /// Writes the 32-bit field at `off` in the device configuration
     /// (ignored outside it).
     pub fn set_config32(&self, off: u16, v: u32) {

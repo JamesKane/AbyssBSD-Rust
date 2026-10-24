@@ -1,0 +1,21 @@
+[package]
+name = "virtio-input"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+abi = { path = "../../lib/abi" }
+bus = { path = "../../sys/bus" }
+devtree = { path = "../../lib/devtree" }
+evdev = { path = "../../sys/evdev" }
+input = { path = "../../sys/input" }
+irq = { path = "../../sys/irq" }
+sched = { path = "../../sys/sched" }
+sync = { path = "../../sys/sync" }
+virtio = { path = "../../sys/virtio" }
+vm = { path = "../../sys/vm" }
+
+[lints]
+workspace = true

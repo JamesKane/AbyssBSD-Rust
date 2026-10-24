@@ -170,6 +170,7 @@ dependencies = [
  "usbus",
  "virtio",
  "virtio-blk",
+ "virtio-input",
  "virtio-random",
  "xhci-driver",
 ]
@@ -610,6 +611,22 @@ dependencies = [
  "irq",
  "sched",
  "storage",
+ "sync",
+ "virtio",
+ "vm",
+]
+
+[[package]]
+name = "virtio-input"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "bus",
+ "devtree",
+ "evdev",
+ "input",
+ "irq",
+ "sched",
  "sync",
  "virtio",
  "vm",

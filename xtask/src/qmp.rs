@@ -4,7 +4,10 @@
 //! USB input (ROADMAP U.0).
 //!
 //! `cargo xtask run --qmp SOCK` exposes the socket; `cargo xtask qmp
-//! --sock SOCK --type TEXT` or `--screendump FILE` uses it.
+//! --sock SOCK --type TEXT` or `--screendump FILE` uses it. Input goes
+//! to the devices bound to no display, unless `--device ID` names a
+//! display: then to those bound to it (`run --usb` binds the virtio
+//! keyboard and tablet to `video0`).
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -158,20 +161,39 @@ impl Qmp {
         }
     }
 
-    /// Types `text` on the guest's keyboard, one chord at a time.
-    pub(crate) fn type_text(&mut self, text: &str) -> Result<()> {
+    /// Types `text` on the guest's keyboard (`device`, or QEMU's
+    /// choice), one chord at a time.
+    pub(crate) fn type_text(&mut self, text: &str, device: Option<&str>) -> Result<()> {
         for c in chords(text)? {
-            self.execute(&send_key(c))?;
-            // The release comes `HOLD_MS` after the press; wait it out so
-            // chords never overlap.
-            std::thread::sleep(Duration::from_millis(HOLD_MS + GAP_MS));
+            match device {
+                None => {
+                    self.execute(&send_key(c))?;
+                    // The release comes `HOLD_MS` after the press; wait it
+                    // out so chords never overlap.
+                    std::thread::sleep(Duration::from_millis(HOLD_MS + GAP_MS));
+                }
+                Some(d) => {
+                    self.execute(&chord_events(c, true, d))?;
+                    std::thread::sleep(Duration::from_millis(HOLD_MS));
+                    self.execute(&chord_events(c, false, d))?;
+                    std::thread::sleep(Duration::from_millis(GAP_MS));
+                }
+            }
         }
         Ok(())
     }
 
-    /// Moves the guest's relative pointer (the USB mouse) by `dx`, `dy`.
-    pub(crate) fn move_pointer(&mut self, dx: i32, dy: i32) -> Result<()> {
-        self.execute(&move_rel(dx, dy))?;
+    /// Moves the guest's relative pointer (`device`, or QEMU's choice) by
+    /// `dx`, `dy`.
+    pub(crate) fn move_pointer(&mut self, dx: i32, dy: i32, device: Option<&str>) -> Result<()> {
+        self.execute(&move_rel(dx, dy, device))?;
+        Ok(())
+    }
+
+    /// Puts the guest's absolute pointer (`device`, or QEMU's choice) at
+    /// `x`, `y`, each from 0 to 0x7fff.
+    pub(crate) fn point(&mut self, x: i32, y: i32, device: Option<&str>) -> Result<()> {
+        self.execute(&move_abs(x, y, device))?;
         Ok(())
     }
 
@@ -206,10 +228,61 @@ fn send_key(c: Chord) -> String {
     )
 }
 
-/// The `input-send-event` command for a relative motion.
-fn move_rel(dx: i32, dy: i32) -> String {
+/// The `input-send-event` command for `events`, to `device` if given.
+fn send_events(events: &[String], device: Option<&str>) -> String {
+    let device = device.map_or(String::new(), |d| {
+        format!(r#""device":{},"#, json_string(d))
+    });
     format!(
-        r#"{{"execute":"input-send-event","arguments":{{"events":[{{"type":"rel","data":{{"axis":"x","value":{dx}}}}},{{"type":"rel","data":{{"axis":"y","value":{dy}}}}}]}}}}"#
+        r#"{{"execute":"input-send-event","arguments":{{{device}"events":[{}]}}}}"#,
+        events.join(",")
+    )
+}
+
+/// The `input-send-event` command that presses (modifiers first) or
+/// releases (modifiers last) one chord's keys on `device`.
+fn chord_events(c: Chord, down: bool, device: &str) -> String {
+    let mut keys = Vec::new();
+    if c.ctrl {
+        keys.push("ctrl");
+    }
+    if c.shift {
+        keys.push("shift");
+    }
+    keys.push(c.key);
+    if !down {
+        keys.reverse();
+    }
+    let events: Vec<String> = keys
+        .iter()
+        .map(|k| {
+            format!(
+                r#"{{"type":"key","data":{{"down":{down},"key":{{"type":"qcode","data":"{k}"}}}}}}"#
+            )
+        })
+        .collect();
+    send_events(&events, Some(device))
+}
+
+/// The `input-send-event` command for a relative motion.
+fn move_rel(dx: i32, dy: i32, device: Option<&str>) -> String {
+    send_events(
+        &[
+            format!(r#"{{"type":"rel","data":{{"axis":"x","value":{dx}}}}}"#),
+            format!(r#"{{"type":"rel","data":{{"axis":"y","value":{dy}}}}}"#),
+        ],
+        device,
+    )
+}
+
+/// The `input-send-event` command for an absolute position.
+fn move_abs(x: i32, y: i32, device: Option<&str>) -> String {
+    send_events(
+        &[
+            format!(r#"{{"type":"abs","data":{{"axis":"x","value":{x}}}}}"#),
+            format!(r#"{{"type":"abs","data":{{"axis":"y","value":{y}}}}}"#),
+        ],
+        device,
     )
 }
 
@@ -306,29 +379,39 @@ impl Ppm {
     }
 }
 
-/// `cargo xtask qmp --sock SOCK [--type TEXT] [--move DX,DY]
-/// [--screendump FILE]`.
+/// `cargo xtask qmp --sock SOCK [--device ID] [--type TEXT] [--move DX,DY]
+/// [--abs X,Y] [--screendump FILE]`.
 pub(crate) fn cmd(mut args: Args) -> Result<()> {
     let sock = PathBuf::from(args.take_value("--sock")?.ok_or("qmp needs --sock SOCK")?);
     let text = args.take_value("--type")?;
     let motion = args.take_value("--move")?;
+    let position = args.take_value("--abs")?;
     let dump = args.take_value("--screendump")?;
+    let device = args.take_value("--device")?;
     args.finish()?;
-    if text.is_none() && motion.is_none() && dump.is_none() {
-        return Err("qmp: nothing to do (--type TEXT, --move DX,DY, --screendump FILE)".into());
+    if text.is_none() && motion.is_none() && position.is_none() && dump.is_none() {
+        return Err(
+            "qmp: nothing to do (--type TEXT, --move DX,DY, --abs X,Y, --screendump FILE)".into(),
+        );
     }
+    let pair = |v: &str, what: &str| -> Result<(i32, i32)> {
+        v.split_once(',')
+            .and_then(|(x, y)| Some((x.trim().parse().ok()?, y.trim().parse().ok()?)))
+            .ok_or_else(|| format!("qmp: {what}").into())
+    };
     let mut q = Qmp::connect(&sock)?;
     if let Some(m) = motion {
-        let (dx, dy) = m
-            .split_once(',')
-            .and_then(|(x, y)| Some((x.trim().parse().ok()?, y.trim().parse().ok()?)))
-            .ok_or("qmp: --move takes DX,DY")?;
-        q.move_pointer(dx, dy)?;
+        let (dx, dy) = pair(&m, "--move takes DX,DY")?;
+        q.move_pointer(dx, dy, device.as_deref())?;
+    }
+    if let Some(p) = position {
+        let (x, y) = pair(&p, "--abs takes X,Y")?;
+        q.point(x, y, device.as_deref())?;
     }
     if let Some(text) = text {
         // `\n` in the argument means return, as a shell cannot easily
         // pass a newline.
-        q.type_text(&text.replace("\\n", "\n"))?;
+        q.type_text(&text.replace("\\n", "\n"), device.as_deref())?;
     }
     if let Some(file) = dump {
         let file = PathBuf::from(file);
@@ -404,8 +487,17 @@ mod tests {
     #[test]
     fn move_rel_json() {
         assert_eq!(
-            move_rel(3, -4),
+            move_rel(3, -4, None),
             r#"{"execute":"input-send-event","arguments":{"events":[{"type":"rel","data":{"axis":"x","value":3}},{"type":"rel","data":{"axis":"y","value":-4}}]}}"#
+        );
+    }
+
+    #[test]
+    fn chord_events_json() {
+        let c = Chord::shifted("a");
+        assert_eq!(
+            chord_events(c, false, "vkbd"),
+            r#"{"execute":"input-send-event","arguments":{"device":"vkbd","events":[{"type":"key","data":{"down":false,"key":{"type":"qcode","data":"a"}}},{"type":"key","data":{"down":false,"key":{"type":"qcode","data":"shift"}}}]}}"#
         );
     }
 

@@ -320,6 +320,24 @@ impl Builder {
         self
     }
 
+    /// It reports miscellaneous event `code` (`evdev_support_msc`).
+    pub fn msc(&mut self, code: u16) -> &mut Self {
+        self.caps.msc.put(code, true);
+        self
+    }
+
+    /// It has sound `code` (`evdev_support_snd`).
+    pub fn snd(&mut self, code: u16) -> &mut Self {
+        self.caps.snd.put(code, true);
+        self
+    }
+
+    /// It has switch `code` (`evdev_support_sw`).
+    pub fn sw(&mut self, code: u16) -> &mut Self {
+        self.caps.sw.put(code, true);
+        self
+    }
+
     /// It has LED `code` (`evdev_support_led`).
     pub fn led(&mut self, code: u16) -> &mut Self {
         self.caps.led.put(code, true);
