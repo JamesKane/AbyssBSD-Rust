@@ -416,10 +416,12 @@ against FreeBSD's `vt_efifb` with the same framebuffer (bhyve's `fbuf`), resolut
 
 | Benchmark | Workload |
 |---|---|
-| `vt.cat` | Write a 4 MiB text file (80-column lines) to `/dev/ttyv1` while it is visible |
-| `vt.scroll` | Write 100,000 short lines, so every line scrolls the screen |
-| `vt.color` | Write a stream with SGR color changes every few characters |
+| `vt.cat` | Write 80-column lines to `/dev/ttyv1` while it is visible |
+| `vt.scroll` | Write short lines, so every line scrolls the screen |
+| `vt.color` | Write lines with an SGR color change every four characters |
 | `vt.hidden` | `vt.cat` to a window that is not visible |
+
+`ubench vt` runs them on both kernels; tests/perf/README.md has the exact workloads.
 
 USB mass-storage throughput (`usb.umass`: sequential and random read and write over BBB) joins the
 suite on the physical machines at P6, since no emulator compares it fairly with FreeBSD.

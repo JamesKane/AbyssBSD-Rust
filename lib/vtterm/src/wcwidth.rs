@@ -162,6 +162,10 @@ pub fn width(c: Char) -> i32 {
     if c < 0x20 || (0x7f..0xa0).contains(&c) {
         return -1;
     }
+    // Below the first combining character, all are narrow.
+    if c < COMBINING[0].0 {
+        return 1;
+    }
     if COMBINING
         .binary_search_by(|&(first, last)| {
             if last < c {

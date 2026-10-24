@@ -80,7 +80,7 @@ loader prints before symbolizing addresses.
 Performance comparison against FreeBSD (on the build server; PERFORMANCE.md §6):
 
 ```
-cargo xtask --remote perf [--suite p2|p3|p4|p5|diag] [--runs N] [--prepare]
+cargo xtask --remote perf [--suite p2|p3|p4|p5|vt|diag] [--runs N] [--prepare]
                           [--freebsd-only | --abyss-only [--prof [--prof-cpu N]]]
 cargo xtask --remote fetch-base [--arch <a|all>]   # base.txz, SHA-256 pinned: /rescue image, sysroot
 cargo xtask --remote freebsd-shell                 # the boot-to-shell script against FreeBSD

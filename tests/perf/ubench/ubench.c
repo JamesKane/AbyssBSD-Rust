@@ -9,6 +9,7 @@
  *
  *	./ubench p4
  *	./ubench p5	(as root: makes and mounts its file systems)
+ *	./ubench vt	(as root, with a framebuffer: writes to ttyv1 and ttyv2)
  *
  * p4 uses Tier A system calls (docs/COMPATIBILITY.md §2.1), plus
  * cpuset_setaffinity to bind itself as kbench binds its workers. p5 adds
@@ -16,6 +17,7 @@
  */
 
 #include <sys/param.h>
+#include <sys/consio.h>
 #include <sys/cpuset.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
@@ -941,6 +943,101 @@ suite_fs(const char *fs, const char *root)
 #undef NAME
 }
 
+/*
+ * The vt suite: text written to a virtual terminal. Each operation is a
+ * write(2) of a batch of lines; the unit is one line.
+ */
+#define	UB_VT_LINES	64		/* lines per write */
+static int vt_fd;
+static char vt_cat[UB_VT_LINES * 81];	/* 80 columns and a newline */
+static char vt_scroll[UB_VT_LINES * 11];	/* "line NNNNN\n" */
+static char vt_color[UB_VT_LINES * 181];	/* 20 x (SGR + 4 chars), NL */
+static size_t vt_scroll_len, vt_color_len;
+
+static void
+write_all(int fd, const char *buf, size_t len)
+{
+	ssize_t n;
+
+	while (len > 0) {
+		if ((n = write(fd, buf, len)) < 0)
+			die("write");
+		buf += n;
+		len -= (size_t)n;
+	}
+}
+
+static uint64_t
+op_vt_cat(void *arg __unused)
+{
+	write_all(vt_fd, vt_cat, sizeof(vt_cat));
+	return (UB_VT_LINES);
+}
+
+static uint64_t
+op_vt_scroll(void *arg __unused)
+{
+	write_all(vt_fd, vt_scroll, vt_scroll_len);
+	return (UB_VT_LINES);
+}
+
+static uint64_t
+op_vt_color(void *arg __unused)
+{
+	write_all(vt_fd, vt_color, vt_color_len);
+	return (UB_VT_LINES);
+}
+
+static int
+open_vt(const char *path)
+{
+	int fd;
+
+	if ((fd = open(path, O_RDWR | O_NOCTTY)) < 0)
+		die(path);
+	return (fd);
+}
+
+static void
+suite_vt(void)
+{
+	char *p;
+	int visible, hidden;
+
+	for (int l = 0; l < UB_VT_LINES; l++) {
+		for (int c = 0; c < 80; c++)
+			vt_cat[l * 81 + c] = (char)(' ' + (l + c) % 95);
+		vt_cat[l * 81 + 80] = '\n';
+	}
+	p = vt_scroll;
+	for (int l = 0; l < UB_VT_LINES; l++)
+		p += sprintf(p, "line %05d\n", l);
+	vt_scroll_len = (size_t)(p - vt_scroll);
+	p = vt_color;
+	for (int l = 0; l < UB_VT_LINES; l++) {
+		for (int g = 0; g < 20; g++)
+			p += sprintf(p, "\033[3%dm%c%c%c%c", (l + g) % 8,
+			    'a' + g, 'b' + g, 'c' + g, 'd' + g);
+		*p++ = '\n';
+	}
+	vt_color_len = (size_t)(p - vt_color);
+
+	/* ttyv1 visible; vt switches only to an open window. */
+	visible = open_vt("/dev/ttyv1");
+	hidden = open_vt("/dev/ttyv2");
+	if (ioctl(visible, VT_ACTIVATE, 2) != 0 ||
+	    ioctl(visible, VT_WAITACTIVE, 2) != 0)
+		die("VT_ACTIVATE");
+	vt_fd = visible;
+	throughput("vt.cat", op_vt_cat, NULL);
+	throughput("vt.scroll", op_vt_scroll, NULL);
+	throughput("vt.color", op_vt_color, NULL);
+	vt_fd = hidden;
+	throughput("vt.hidden", op_vt_cat, NULL);
+	close(visible);
+	close(hidden);
+}
+
 static void
 suite_p5(void)
 {
@@ -964,8 +1061,8 @@ main(int argc, char **argv)
 	if (argc == 5 && strcmp(argv[1], "chain") == 0)
 		return (exec_chain(argv));
 	if (argc != 2 || (strcmp(argv[1], "p4") != 0 &&
-	    strcmp(argv[1], "p5") != 0)) {
-		fprintf(stderr, "usage: ubench p4 | p5\n");
+	    strcmp(argv[1], "p5") != 0 && strcmp(argv[1], "vt") != 0)) {
+		fprintf(stderr, "usage: ubench p4 | p5 | vt\n");
 		return (2);
 	}
 	printf("kbench begin %s cpus=%ld\n", argv[1],
@@ -974,8 +1071,10 @@ main(int argc, char **argv)
 	bind_cpu(1);
 	if (strcmp(argv[1], "p4") == 0)
 		suite_p4();
-	else
+	else if (strcmp(argv[1], "p5") == 0)
 		suite_p5();
+	else
+		suite_vt();
 	printf("kbench end %s\n", argv[1]);
 	return (0);
 }

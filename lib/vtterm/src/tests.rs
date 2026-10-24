@@ -616,3 +616,26 @@ fn teken_differential() {
     }
     assert_eq!(rounds, 1000);
 }
+
+/// Host timing of `vt.cat`'s lines through the emulator alone (not a
+/// gate: `cargo test -p vtterm --release -- --ignored --nocapture`).
+#[test]
+#[ignore = "timing"]
+fn time_cat_lines() {
+    extern crate std;
+    let mut lines = Vec::new();
+    for l in 0..64 {
+        for c in 0..80 {
+            lines.push(b' ' + u8::try_from((l + c) % 95).unwrap());
+        }
+        lines.extend_from_slice(b"\r\n");
+    }
+    let mut t = term(48, 128);
+    let start = std::time::Instant::now();
+    let n = 20_000;
+    for _ in 0..n {
+        t.write(&lines);
+    }
+    let ns = start.elapsed().as_nanos() as f64 / f64::from(n * 64);
+    std::println!("vtterm: {ns:.1} ns per 80-column line");
+}

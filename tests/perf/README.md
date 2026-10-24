@@ -166,6 +166,22 @@ others run three rounds and report the median.
 | `find` | One `fts` walk of the extracted tree with `FTS_PHYSICAL`, every entry `stat`'ed. One op = one walk |
 | `fsx` | `fsx -q -N 10000 -S <round>` on a file in the file system. One op = one run |
 
+## Suite `vt`
+
+Text output to the virtual terminals ([USB.md §10](../../docs/USB.md#10-performance)), in the same
+`ubench` binary: `ubench vt`, as root, in the bhyve VM with its 1024×768 framebuffer (`fbuf`), which
+both kernels' `vt` draw on in 8×16 cells (128×48). It opens `/dev/ttyv1` and `/dev/ttyv2` (`vt`
+switches only to an open window), makes window 2 visible with `VT_ACTIVATE` and `VT_WAITACTIVE`,
+and writes with the terminals' default settings (so `ONLCR` adds a CR to each NL). Each operation
+is one `write` of 64 lines; the unit is one line. Throughput rules as `p4`.
+
+| Name | Operation |
+|---|---|
+| `vt.cat` | 64 lines of 80 printable characters to the visible `ttyv1` |
+| `vt.scroll` | 64 lines of 10 characters (`line NNNNN`), each one scrolling the screen once it is full |
+| `vt.color` | 64 lines of 20 groups of an SGR foreground change (`ESC [ 3n m`) and four characters |
+| `vt.hidden` | `vt.cat`'s lines to `ttyv2`, which is not visible |
+
 ## Suite `diag`
 
 For investigation, not gating: `cargo xtask perf --suite diag`. AbyssBSD reports the cost of the

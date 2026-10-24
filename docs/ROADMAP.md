@@ -1309,6 +1309,14 @@ U.0 ─► U.1 ─► U.2 ─┬─► U.3 ─► U.4 ─┬─► U.6
   `VT_*`/`KD*`.
 - Text rendering that keeps up with output: dirty-rectangle redraw and glyph caching, measured by
   the suite.
+- Progress (2026-10-23): `lib/vtterm` (teken and `vt_buf`, checked against FreeBSD's `teken` on
+  1000 streams), `sys/vt` with all twelve windows (`ttyv0`–`ttyvb`, as FreeBSD has), kernel
+  messages on window 0, switching with `vt`'s open and `VT_PROCESS` rules, Scroll Lock scrollback,
+  per-window keyboard modes, and the `VT_*`/`KD*`/`CONS_*` requests (USB.md §7). The `vt` suite
+  (`cargo xtask --remote perf --suite vt`, 10 runs a side in bhyve) gives 0.695 of FreeBSD's time:
+  `vt.cat` 0.642, `vt.color` 0.693, `vt.hidden` 0.668, `vt.scroll` 0.786, all wins. Left: fonts
+  (`PIO_VFONT`, so `vidcontrol -f`), the bell, `CONS_SETKBD`, and `kbdcontrol`/`vidcontrol` runs at
+  P6 (they are dynamically linked).
 
 **U.5 USB mass storage.**
 - `umass` over Bulk-Only Transport, and UAS (streams on USB 3, the command and status pipes on

@@ -107,6 +107,31 @@ impl Buffer {
         ix(ring_row % self.history_size) * ix(self.size.col)
     }
 
+    /// Where screen row `r`'s cells start: the ring row is at most one
+    /// lap past the end, so no division.
+    fn screen_start(&self, r: u32) -> usize {
+        let at = self.curroffset + r;
+        let at = if at >= self.history_size {
+            at - self.history_size
+        } else {
+            at
+        };
+        ix(at) * ix(self.size.col)
+    }
+
+    /// Marks columns `begin..end` of row `row` changed.
+    #[inline]
+    fn dirty_span(&mut self, row: u32, begin: u32, end: u32) {
+        if let Some(d) = self.damage.get_mut(ix(row)) {
+            if d.0 >= d.1 {
+                *d = (begin, end);
+            } else {
+                d.0 = d.0.min(begin);
+                d.1 = d.1.max(end);
+            }
+        }
+    }
+
     /// Row `r` of the screen.
     #[must_use]
     pub fn screen_row(&self, r: u32) -> &[Cell] {
@@ -154,8 +179,8 @@ impl Buffer {
     }
 
     fn dirty_cell(&mut self, p: Pos) {
-        if p.row < self.size.row && p.col < self.size.col {
-            self.dirty(Rect::new(p, Pos::new(p.row + 1, p.col + 1)));
+        if p.col < self.size.col {
+            self.dirty_span(p.row, p.col, p.col + 1);
         }
     }
 
@@ -181,10 +206,10 @@ impl Buffer {
         if p.row >= self.size.row || p.col >= self.size.col {
             return;
         }
-        let cell = &mut self.screen_row_mut(p.row)[ix(p.col)];
-        if *cell != c {
-            *cell = c;
-            self.dirty_cell(p);
+        let i = self.screen_start(p.row) + ix(p.col);
+        if self.cells[i] != c {
+            self.cells[i] = c;
+            self.dirty_span(p.row, p.col, p.col + 1);
         }
     }
 

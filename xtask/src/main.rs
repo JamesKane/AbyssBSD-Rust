@@ -41,7 +41,7 @@ commands:
                                                          type on, move the mouse of, or capture the screen of, a running QEMU
   test        [--tier unit|boot|all] [--arch <a|all>] [--usb]
                                                          run tests (default: all tiers); --usb adds the USB set
-  perf        [--suite p2|p3|p4|p5|diag] [--runs N] [--prepare] [--freebsd-only]
+  perf        [--suite p2|p3|p4|p5|vt|diag] [--runs N] [--prepare] [--freebsd-only]
                                                          compare with FreeBSD in bhyve (server only)
   ubench      [--arch <a|all>] [--runs N] [--bhyve]      the P4 suite on AbyssBSD alone (QEMU, or bhyve on the server)
   freebsd-shell                                          run the boot-to-shell script against FreeBSD (server only)

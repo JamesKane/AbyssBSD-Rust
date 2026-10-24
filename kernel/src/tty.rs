@@ -73,6 +73,10 @@ impl input::Consumer for ConsoleInput {
     }
 }
 
+/// Bytes of output moved at a time, from the writer into the discipline
+/// and from the discipline to the device.
+const CHUNK: usize = 1024;
+
 /// `NO_PID`: what `TIOCGPGRP` reports with no foreground group.
 const NO_PID: i32 = 100_000;
 
@@ -254,7 +258,7 @@ impl Tty {
 
     /// Sends queued output to the device.
     fn drain(&self, d: &mut Discipline) {
-        let mut buf = [0u8; 256];
+        let mut buf = [0u8; CHUNK];
         loop {
             let n = d.take_output(&mut buf);
             if n == 0 {
@@ -627,7 +631,7 @@ impl CharDevice for TtyDevice {
         if tty.disc.lock(s).termios().c_lflag & TOSTOP != 0 {
             tty.background(s, SIGTTOU)?;
         }
-        let mut buf = [0u8; 256];
+        let mut buf = [0u8; CHUNK];
         let mut done = 0;
         while uio.resid() > 0 {
             let n = uio.copy_in(&mut buf)?;

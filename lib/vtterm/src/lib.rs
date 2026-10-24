@@ -358,6 +358,7 @@ impl Terminal {
             mouse_level,
             bell_pitch,
             bell_duration,
+            last: (Attr::default(), pack(0, &Attr::default())),
         };
         emu.input(&mut out, bytes);
     }
@@ -379,6 +380,18 @@ struct Window<'a> {
     mouse_level: &'a mut u32,
     bell_pitch: &'a mut u32,
     bell_duration: &'a mut u32,
+    /// The last rendition packed, and its cell bits: text comes in runs
+    /// of one rendition.
+    last: (Attr, Cell),
+}
+
+impl Window<'_> {
+    fn pack(&mut self, c: Char, a: &Attr) -> Cell {
+        if self.last.0 != *a {
+            self.last = (*a, pack(0, a));
+        }
+        self.last.1 | (c & 0x1f_ffff)
+    }
 }
 
 impl Sink for Window<'_> {
@@ -391,11 +404,13 @@ impl Sink for Window<'_> {
     }
 
     fn putchar(&mut self, p: Pos, c: Char, a: &Attr) {
-        self.buf.putchar(p, pack(c, a));
+        let cell = self.pack(c, a);
+        self.buf.putchar(p, cell);
     }
 
     fn fill(&mut self, r: Rect, c: Char, a: &Attr) {
-        self.buf.fill(r, pack(c, a));
+        let cell = self.pack(c, a);
+        self.buf.fill(r, cell);
     }
 
     fn copy(&mut self, r: Rect, p: Pos) {

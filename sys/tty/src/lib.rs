@@ -290,9 +290,11 @@ impl Discipline {
             return 0;
         }
         let n = self.outq.len().min(buf.len());
-        for (b, c) in buf.iter_mut().zip(self.outq.drain(..n)) {
-            *b = c;
-        }
+        let (a, b) = self.outq.as_slices();
+        let first = a.len().min(n);
+        buf[..first].copy_from_slice(&a[..first]);
+        buf[first..n].copy_from_slice(&b[..n - first]);
+        self.outq.drain(..n);
         n
     }
 
@@ -366,18 +368,29 @@ impl Discipline {
         if self.lflag(FLUSHO) {
             return data.len();
         }
+        let opost = self.oflag(OPOST);
         let mut done = 0;
         while done < data.len() {
-            let c = data[done];
-            if self.oflag(OPOST) && ctl_valid(c) {
-                if !self.oproc(c) {
+            // A run of characters with no output processing goes as one
+            // (`ttydisc_findchar`).
+            let run = data[done..]
+                .iter()
+                .position(|&c| opost && ctl_valid(c))
+                .unwrap_or(data.len() - done);
+            if run > 0 {
+                let n = run.min(OUTPUT_MAX.saturating_sub(self.outq.len()));
+                self.outq.extend(&data[done..done + n]);
+                self.column += u32::try_from(n).unwrap_or(u32::MAX);
+                done += n;
+                self.writepos = self.column;
+                self.reprint = self.inq.len();
+                if n < run {
                     break;
                 }
-            } else {
-                if !self.out(&[c]) {
-                    break;
-                }
-                self.column += 1;
+                continue;
+            }
+            if !self.oproc(data[done]) {
+                break;
             }
             done += 1;
             self.writepos = self.column;

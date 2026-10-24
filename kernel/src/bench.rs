@@ -49,6 +49,12 @@ fn run_ubench_p5(s: &Sleepable) -> bool {
     run_waiting(s, SH, &[SH, b"-c", SCRIPT])
 }
 
+/// The `vt` suite: `ubench vt`, from the memory disk as `p4`'s.
+fn run_ubench_vt(s: &Sleepable) -> bool {
+    const PATH: &[u8] = b"/usr/bench/ubench";
+    run_waiting(s, PATH, &[PATH, b"vt"])
+}
+
 /// Runs `path` and waits; whether it exited with 0.
 /// Under the profiler, `UB_PROF` has `ubench` sample each storm phase
 /// apart, for longer.
@@ -72,6 +78,7 @@ pub(crate) fn run(s: &Sleepable, suite: &str) -> bool {
     match suite {
         "p4" => return run_ubench(s),
         "p5" => return run_ubench_p5(s),
+        "vt" => return run_ubench_vt(s),
         _ => {}
     }
     let body: fn(&Sleepable) = match suite {
