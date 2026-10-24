@@ -28,14 +28,14 @@ pub mod render;
 mod tests;
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use abi::consio::{VT_AUTO, VT_PROCESS, VtMode};
 use abi::errno::Errno;
 use abi::kbio::{K_XLATE, KDSKBMODE, KDSKBSTATE, LOCK_MASK};
 use sched::lock::{LockClass, Mutex};
 use sched::{Sleepable, WaitQueue};
-use sync::{Once, SpinLock};
+use sync::{Once, PreemptLock, SpinLock};
 use vtterm::{Cell, DEFAULT_HISTORY, Terminal};
 
 pub use font::Face;
@@ -160,8 +160,9 @@ struct Vt {
     dirty: AtomicBool,
     /// The next frame draws every cell (`VDF_INVALID`).
     invalid: AtomicBool,
-    /// Drawing is held while nonzero.
-    holds: AtomicU32,
+    /// Drawing is held while nonzero. Each row is drawn under this
+    /// lock, so a hold also waits out the row being drawn.
+    holds: PreemptLock<u32>,
     wake: WaitQueue,
     /// The flush thread's, and the panic path's: drawing sleeps no
     /// one and stays preemptible.
@@ -218,7 +219,7 @@ pub fn start(display: Display, early: &[u8], host: &'static dyn Host) -> Result<
         active: AtomicUsize::new(CONSWINDOW),
         dirty: AtomicBool::new(true),
         invalid: AtomicBool::new(true),
-        holds: AtomicU32::new(0),
+        holds: PreemptLock::new(0),
         wake: WaitQueue::new(),
         renderer: Mutex::new(
             &RENDERER,
@@ -331,17 +332,24 @@ pub fn switch(window: usize) -> Result<(), Errno> {
     vt.proc_window_switch(window)
 }
 
-/// Holds (`true`) or releases (`false`) drawing; calls nest. Output
-/// still goes to the windows, and reaches the screen on release.
+/// Holds (`true`) or releases (`false`) drawing; calls nest. Once a
+/// hold returns, nothing touches the framebuffer until the release
+/// (PCI turns the framebuffer's decoding off meanwhile). Output still
+/// goes to the windows, and reaches the screen on release.
 pub fn hold(on: bool) {
     let Some(vt) = VT.get() else { return };
-    if on {
-        vt.holds.fetch_add(1, Ordering::AcqRel);
-    } else if vt
-        .holds
-        .try_update(Ordering::AcqRel, Ordering::Acquire, |h| h.checked_sub(1))
-        == Ok(1)
-    {
+    let released = {
+        let mut h = vt.holds.lock();
+        if on {
+            *h += 1;
+            false
+        } else {
+            let was = *h;
+            *h = was.saturating_sub(1);
+            was == 1
+        }
+    };
+    if released {
         vt.invalid.store(true, Ordering::Release);
         vt.changed(vt.active.load(Ordering::Acquire));
     }
@@ -592,9 +600,6 @@ impl Vt {
     /// Draws the visible window's changes (`vt_flush`). Without `s`
     /// (at start, and on the panic path), only if the locks are free.
     fn flush(&self, s: Option<&Sleepable>) {
-        if self.holds.load(Ordering::Acquire) != 0 {
-            return;
-        }
         let mut f = match s {
             Some(s) => self.renderer.lock(s),
             None => {
@@ -642,10 +647,33 @@ impl Vt {
             let c = t.buf.cursor();
             cursor = t.buf.is_cursor(c).then_some(c);
         }
+        // Each band blanked and each row drawn while not held; held,
+        // the release redraws everything.
+        let unheld = || {
+            let held = if s.is_some() {
+                Some(self.holds.lock())
+            } else {
+                self.holds.try_lock()
+            };
+            let h = held.filter(|h| **h == 0);
+            if h.is_none() {
+                self.invalid.store(true, Ordering::Release);
+            }
+            h
+        };
         if invalid {
-            renderer.invalidate();
+            for band in 0.. {
+                let Some(_h) = unheld() else { return };
+                if !renderer.blank(band) {
+                    break;
+                }
+            }
         }
-        renderer.draw(view, cursor);
+        let cols = usize::try_from(renderer.size().col).unwrap_or(usize::MAX);
+        for (r, row) in (0u32..).zip(view.chunks(cols)) {
+            let Some(_h) = unheld() else { return };
+            renderer.draw_row(r, row, cursor);
+        }
     }
 }
 

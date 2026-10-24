@@ -22,6 +22,8 @@ use crate::font::Face;
 /// (`PIXEL_WIDTH`, `PIXEL_HEIGHT`): the most cells a window has.
 const MAX_COLS: u32 = 4096 / 8;
 const MAX_ROWS: u32 = 2400 / 16;
+/// Pixel rows blanked at a time.
+const BAND: usize = 64;
 
 /// `color_def`: the 16 colors as percentages of full red, green, blue.
 const PALETTE: [[u32; 3]; 16] = [
@@ -156,16 +158,32 @@ impl Renderer {
     /// Forgets what is on the screen and blanks it, so the next frame
     /// draws every cell (`VDF_INVALID`).
     pub fn invalidate(&mut self) {
+        let mut band = 0;
+        while self.blank(band) {
+            band += 1;
+        }
+    }
+
+    /// Blanks band `band` of [`BAND`] pixel rows, and forgets what was
+    /// drawn with the first; `false` past the display.
+    pub fn blank(&mut self, band: usize) -> bool {
         let black = self.cmap[0];
         let (w, h, stride) = (
             ix(self.display.width),
             ix(self.display.height),
             ix(self.display.stride),
         );
-        for row in self.display.pixels.chunks_mut(stride).take(h) {
+        if band * BAND >= h {
+            return false;
+        }
+        if band == 0 {
+            self.drawn.fill(NOTHING);
+        }
+        let rows = self.display.pixels.chunks_mut(stride).take(h);
+        for row in rows.skip(band * BAND).take(BAND) {
             row[..w].fill(black);
         }
-        self.drawn.fill(NOTHING);
+        true
     }
 
     /// Draws the cells of `view` (rows of `size.col` cells) that differ
@@ -173,23 +191,32 @@ impl Renderer {
     pub fn draw(&mut self, view: &[Cell], cursor: Option<Pos>) {
         let cols = ix(self.size.col);
         for (r, row) in (0u32..).zip(view.chunks(cols).take(ix(self.size.row))) {
-            for (c, &cell) in (0u32..).zip(row) {
-                let at_cursor = cursor == Some(Pos::new(r, c));
-                let (fg, bg) = colors(cell, at_cursor);
-                let right = cell_format(cell) & format::CJK_RIGHT != 0;
-                let bold = cell_format(cell) & format::BOLD != 0;
-                let key = u64::from(cell_char(cell))
-                    | u64::from(right) << 21
-                    | u64::from(bold) << 22
-                    | u64::from(fg) << 24
-                    | u64::from(bg) << 28;
-                let i = ix(r) * cols + ix(c);
-                if self.drawn[i] == key {
-                    continue;
-                }
-                self.drawn[i] = key;
-                self.glyph(r, c, (cell_char(cell), bold, right), fg, bg);
+            self.draw_row(r, row, cursor);
+        }
+    }
+
+    /// Draws row `r` of the view, `row`, as [`Renderer::draw`] does.
+    pub fn draw_row(&mut self, r: u32, row: &[Cell], cursor: Option<Pos>) {
+        if r >= self.size.row {
+            return;
+        }
+        let cols = ix(self.size.col);
+        for (c, &cell) in (0u32..).zip(row.iter().take(cols)) {
+            let at_cursor = cursor == Some(Pos::new(r, c));
+            let (fg, bg) = colors(cell, at_cursor);
+            let right = cell_format(cell) & format::CJK_RIGHT != 0;
+            let bold = cell_format(cell) & format::BOLD != 0;
+            let key = u64::from(cell_char(cell))
+                | u64::from(right) << 21
+                | u64::from(bold) << 22
+                | u64::from(fg) << 24
+                | u64::from(bg) << 28;
+            let i = ix(r) * cols + ix(c);
+            if self.drawn[i] == key {
+                continue;
             }
+            self.drawn[i] = key;
+            self.glyph(r, c, (cell_char(cell), bold, right), fg, bg);
         }
     }
 
