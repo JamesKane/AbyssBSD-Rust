@@ -343,9 +343,25 @@ burst of output costs one redraw. The font is 8×16 (FreeBSD's default `vt` font
 
 ### 7.4 The console
 
-The kernel console is the serial port and `ttyv0`, both receiving kernel messages, as on FreeBSD
-with `boot_multicons`. `/dev/console` writes go to both; input is taken from both. Panics write to
-the framebuffer directly, bypassing locks, as the early console does now.
+Kernel messages go to the serial port and to window 0 (`VT_CONSWINDOW`) in the kernel rendition,
+each NL written as CR NL (`cnputc`), as on FreeBSD with both consoles. What the early console
+showed before `vt` started becomes window 0's first screen. `/dev/console` is the serial port's
+terminal (`ttyu0`) when the loader found one, and `ttyv0` otherwise, as FreeBSD's `comconsole`
+comes before `vidconsole`; its output goes to that terminal alone. The keyboard types into the
+visible window's terminal. Panics write to window 0 and draw at once, if the code that panicked
+holds none of `vt`'s locks.
+
+Implemented (`sys/vt`, `kernel/src/vtcons.rs`):
+
+- The twelve windows (`VT_MAXWINDOWS`), `ttyv0` to `ttyvb`, each sized to the framebuffer in 8×16
+  cells, centered.
+- Drawing in the `vtflush` thread, at most 25 frames a second (`VT_TIMERFREQ`), of the cells that
+  differ from what is on the screen (`vd_drawn`), in `vt`'s palette (`vt_termcolors.c`); output to
+  a hidden window draws nothing.
+- Switching with Alt-F*n* and the next and previous screen keys.
+- Not yet: the `VT_*`, `KD*`, and `CONS_*` requests on the windows, per-window keyboard modes,
+  `VT_PROCESS` switching, refusing to switch to a window nobody has open, and Scroll Lock
+  scrollback.
 
 ## 8. USB mass storage
 

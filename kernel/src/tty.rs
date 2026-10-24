@@ -44,17 +44,32 @@ static TTY_LOCK: LockClass = LockClass::new("tty", 450);
 pub(crate) struct ConsoleInput;
 
 impl input::Consumer for ConsoleInput {
+    /// Into the visible window's terminal, or without `vt` the
+    /// console's.
     fn input(&self, s: &Sleepable, bytes: &[u8]) {
-        if let Some(t) = console() {
+        if let Some(t) = crate::vtcons::active_tty().or_else(console) {
             t.input(s, bytes);
         }
     }
 
-    /// The reboot, halt, and power-off keys signal `init`, as FreeBSD's
-    /// `shutdown_nice` does; the rest wait for `vt`.
+    /// Screen switches go to `vt`; the reboot, halt, and power-off keys
+    /// signal `init`, as FreeBSD's `shutdown_nice` does.
     fn event(&self, _: &Sleepable, e: input::term::Event) {
         use input::term::Event;
+        let n = vt::WINDOWS;
         let sig = match e {
+            Event::Switch(w) => {
+                vt::switch(usize::try_from(w).unwrap_or(n));
+                return;
+            }
+            Event::Next => {
+                vt::switch((vt::active() + 1) % n);
+                return;
+            }
+            Event::Prev => {
+                vt::switch((vt::active() + n - 1) % n);
+                return;
+            }
             Event::Reboot => SIGINT,
             Event::Halt => SIGUSR1,
             Event::PowerOff => SIGUSR2,
@@ -96,21 +111,52 @@ pub(crate) struct Tty {
     input_wait: WaitQueue,
     output_wait: WaitQueue,
     bg_wait: WaitQueue,
-    /// Writes bytes to the device.
-    sink: fn(&[u8]),
+    /// The device under the discipline.
+    driver: Arc<dyn Driver>,
     /// The devfs node `/dev/tty` opens.
     vnode: Once<Weak<Vnode>>,
 }
 
-/// Every terminal (just the console's, so far).
+/// A terminal's device (FreeBSD's `ttydevsw`).
+pub(crate) trait Driver: Send + Sync {
+    /// Writes output (`tsw_outwakeup`).
+    fn output(&self, bytes: &[u8]);
+    /// A request the terminal layer doesn't know (`tsw_ioctl`).
+    fn ioctl(&self, _s: &Sleepable, _req: u32, _arg: &mut [u8]) -> Result<(), Errno> {
+        Err(Errno::ENOTTY)
+    }
+}
+
+/// A device that writes with a function.
+struct Sink(fn(&[u8]));
+
+impl Driver for Sink {
+    fn output(&self, bytes: &[u8]) {
+        (self.0)(bytes);
+    }
+}
+
+/// Every terminal.
 static TTYS: SpinLock<Vec<Arc<Tty>>> = SpinLock::new(Vec::new());
 /// The console's terminal.
 static CONSOLE: Once<Arc<Tty>> = Once::new();
 
 /// Makes the console's terminal `ttyu<unit>`, which writes with `sink`.
 pub(crate) fn create_console(unit: u32, sink: fn(&[u8])) -> Arc<Tty> {
+    let tty = create(&alloc::format!("ttyu{unit}"), Arc::new(Sink(sink)));
+    set_console(&tty);
+    tty
+}
+
+/// Makes `tty` the console's terminal (`/dev/console`), unless one is.
+pub(crate) fn set_console(tty: &Arc<Tty>) {
+    let _ = CONSOLE.set(Arc::clone(tty));
+}
+
+/// Makes a terminal named `name` on `driver`.
+pub(crate) fn create(name: &str, driver: Arc<dyn Driver>) -> Arc<Tty> {
     let tty = Arc::new(Tty {
-        name: alloc::format!("ttyu{unit}"),
+        name: String::from(name),
         disc: Mutex::new(&TTY_LOCK, Discipline::new()),
         readable: AtomicBool::new(false),
         stopped: AtomicBool::new(false),
@@ -121,11 +167,10 @@ pub(crate) fn create_console(unit: u32, sink: fn(&[u8])) -> Arc<Tty> {
         input_wait: WaitQueue::new(),
         output_wait: WaitQueue::new(),
         bg_wait: WaitQueue::new(),
-        sink,
+        driver,
         vnode: Once::new(),
     });
     TTYS.lock().push(Arc::clone(&tty));
-    let _ = CONSOLE.set(Arc::clone(&tty));
     tty
 }
 
@@ -192,6 +237,12 @@ impl Tty {
         &self.name
     }
 
+    /// Sets the window size, as the driver knows it
+    /// (`tty_set_winsize`).
+    pub(crate) fn set_winsize(&self, w: Winsize) {
+        *self.winsize.lock() = w;
+    }
+
     /// Records the devfs node for this terminal.
     pub(crate) fn set_vnode(&self, v: &Arc<Vnode>) {
         let _ = self.vnode.set(Arc::downgrade(v));
@@ -212,7 +263,7 @@ impl Tty {
             if n == 0 {
                 break;
             }
-            (self.sink)(&buf[..n]);
+            self.driver.output(&buf[..n]);
         }
     }
 
@@ -670,7 +721,7 @@ impl CharDevice for TtyDevice {
             // Changes, from the background, wait like the rest.
             TIOCSBRK | TIOCCBRK | TIOCEXCL | TIOCNXCL | TIOCDRAIN => tty.background(s, SIGTTOU)?,
             TIOCMSET | TIOCMBIS | TIOCMBIC | TIOCSDTR | TIOCCDTR => {}
-            _ => return Err(Errno::ENOTTY),
+            _ => return tty.driver.ioctl(s, req, arg),
         }
         Ok(())
     }

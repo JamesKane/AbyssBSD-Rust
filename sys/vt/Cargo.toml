@@ -1,0 +1,17 @@
+[package]
+name = "vt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+abi = { path = "../../lib/abi" }
+fb-console = { path = "../../drivers/fb-console" }
+font = { path = "../../lib/font" }
+sched = { path = "../sched" }
+sync = { path = "../sync" }
+vtterm = { path = "../../lib/vtterm" }
+
+[lints]
+workspace = true

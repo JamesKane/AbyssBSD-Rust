@@ -368,6 +368,7 @@ dependencies = [
  "vfs",
  "virtio-random",
  "vm",
+ "vt",
  "watchdog",
 ]
 
@@ -654,6 +655,18 @@ dependencies = [
  "hal",
  "regs",
  "sync",
+]
+
+[[package]]
+name = "vt"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "fb-console",
+ "font",
+ "sched",
+ "sync",
+ "vtterm",
 ]
 
 [[package]]

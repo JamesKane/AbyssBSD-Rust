@@ -9,6 +9,7 @@
 //! on to the terminal in the interrupt thread. Terminal output is written
 //! as it is (the line discipline already turned NL into CR NL).
 
+use alloc::vec::Vec;
 use core::fmt::{self, Write};
 
 use bootproto::{BootInfo, PixelFormat, Serial};
@@ -104,9 +105,27 @@ enum SerialAt {
 
 static SERIAL_AT: Once<SerialAt> = Once::new();
 
+/// The framebuffer the loader set up, for `vt` to take over.
+#[derive(Clone, Copy)]
+struct Framebuffer {
+    virt: usize,
+    len: usize,
+    width: u32,
+    height: u32,
+    stride: u32,
+    layout: PixelLayout,
+}
+
 struct Sinks {
     serial: Option<SerialSink>,
     fb: Option<fb_console::Console<'static>>,
+    fb_info: Option<Framebuffer>,
+    /// What the early console showed, for `vt`'s console window: the
+    /// last `early_len` bytes. (Before the heap, so not a `Vec`.)
+    early: [u8; EARLY],
+    early_len: usize,
+    /// `vt` has the framebuffer: the screen is its console window.
+    vt: bool,
     ring: Option<logring::Ring<'static>>,
     /// Framebuffer output is held while this is nonzero.
     fb_holds: u32,
@@ -117,6 +136,8 @@ struct Sinks {
 
 /// Bytes of framebuffer output held at most.
 const HELD: usize = 2048;
+/// Bytes of early console output kept for `vt`.
+const EARLY: usize = 32 * 1024;
 
 /// Output goes to the log ring only (FreeBSD's `kern.consmute`).
 static MUTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
@@ -142,7 +163,15 @@ impl Write for Sinks {
             Some(SerialSink::Pl011(u)) => u.write_str(s)?,
             None => {}
         }
-        if let Some(fb) = &mut self.fb {
+        if self.vt {
+            vt::write_kernel(s.as_bytes());
+        } else if let Some(fb) = &mut self.fb {
+            let b = &s.as_bytes()[s.len().saturating_sub(EARLY)..];
+            let over = (self.early_len + b.len()).saturating_sub(EARLY);
+            self.early.copy_within(over..self.early_len, 0);
+            self.early_len -= over;
+            self.early[self.early_len..][..b.len()].copy_from_slice(b);
+            self.early_len += b.len();
             if self.fb_holds == 0 {
                 fb.write_str(s)?;
             } else {
@@ -164,6 +193,7 @@ impl Write for Sinks {
 /// holds it while sizing a function's BARs with its decoding off, since
 /// the framebuffer may be that function's memory.
 pub(crate) fn hold_framebuffer(hold: bool) {
+    vt::hold(hold);
     let mut c = CONSOLE.lock();
     if hold {
         c.fb_holds += 1;
@@ -190,6 +220,10 @@ pub(crate) fn hold_framebuffer(hold: bool) {
 static CONSOLE: SpinLock<Sinks> = SpinLock::new(Sinks {
     serial: None,
     fb: None,
+    fb_info: None,
+    early: [0; EARLY],
+    early_len: 0,
+    vt: false,
     ring: None,
     fb_holds: 0,
     fb_held: [0; HELD],
@@ -224,12 +258,22 @@ pub(crate) fn init(info: &BootInfo) {
         // SAFETY: as above.
         Serial::Pl011(m) => SerialSink::Pl011(uart_pl011::Uart::init(unsafe { mmio(m) })),
     });
+    let fb_info = info.framebuffer.get().and_then(|f| {
+        Some(Framebuffer {
+            virt: usize::try_from(f.virt.get()).ok()?,
+            len: usize::try_from(f.size / 4).ok()?,
+            width: f.width,
+            height: f.height,
+            stride: f.stride,
+            layout: match f.format {
+                PixelFormat::Rgbx => PixelLayout::Rgbx,
+                PixelFormat::Bgrx => PixelLayout::Bgrx,
+                PixelFormat::Masks { red, green, blue } => PixelLayout::Masks { red, green, blue },
+            },
+        })
+    });
     let fb = info.framebuffer.get().and_then(|f| {
-        let layout = match f.format {
-            PixelFormat::Rgbx => PixelLayout::Rgbx,
-            PixelFormat::Bgrx => PixelLayout::Bgrx,
-            PixelFormat::Masks { red, green, blue } => PixelLayout::Masks { red, green, blue },
-        };
+        let layout = fb_info?.layout;
         let len = usize::try_from(f.size / 4).ok()?;
         // SAFETY: the loader mapped the framebuffer write-combining at
         // `virt` for `size` bytes; the console is its only user.
@@ -258,6 +302,7 @@ pub(crate) fn init(info: &BootInfo) {
     });
     let mut c = CONSOLE.lock();
     c.serial = serial;
+    c.fb_info = fb.is_some().then_some(fb_info).flatten();
     c.fb = fb;
     c.ring = ring;
     drop(c);
@@ -267,8 +312,45 @@ pub(crate) fn init(info: &BootInfo) {
     }
 }
 
-/// Writes a terminal's output to the serial port and the screen as it
-/// is.
+/// Whether the loader found a serial console, which is then the
+/// console terminal's (FreeBSD's `comconsole` ahead of `vidconsole`).
+pub(crate) fn has_serial() -> bool {
+    SERIAL_AT.get().is_some()
+}
+
+/// Gives the framebuffer to `vt`, with what the early console showed;
+/// the early console stops drawing.
+pub(crate) fn take_framebuffer() -> Option<(vt::Display, Vec<u8>)> {
+    let mut c = CONSOLE.lock();
+    let f = c.fb_info.take()?;
+    // The early console's slice of the pixels goes first.
+    c.fb = None;
+    let early = c.early[..c.early_len].to_vec();
+    c.early_len = 0;
+    // SAFETY: the loader mapped the framebuffer write-combining at
+    // `virt` for `len` pixels; the early console that used it is gone,
+    // so `vt` is its only user from here on.
+    let pixels = unsafe { core::slice::from_raw_parts_mut(f.virt as *mut u32, f.len) };
+    Some((
+        vt::Display {
+            pixels,
+            width: f.width,
+            height: f.height,
+            stride: f.stride,
+            layout: f.layout,
+        },
+        early,
+    ))
+}
+
+/// Kernel output goes to `vt`'s console window from now on.
+pub(crate) fn vt_started() {
+    CONSOLE.lock().vt = true;
+}
+
+/// Writes a terminal's output to the serial port as it is, and to the
+/// screen while the early console has it (`vt`'s windows have their
+/// own terminals).
 fn write_tty(bytes: &[u8]) {
     let mut c = CONSOLE.lock();
     if let Some(serial) = &c.serial {
@@ -428,16 +510,38 @@ pub(crate) fn write_bytes(bytes: &[u8]) {
 /// Prints on the panic path, breaking the console lock if its holder is
 /// the code that panicked.
 pub(crate) fn print_panic(args: fmt::Arguments<'_>) {
-    match CONSOLE.try_lock() {
+    let c = match CONSOLE.try_lock() {
         Some(mut c) => {
+            let on_vt = core::mem::replace(&mut c.vt, false);
             let _ = c.write_fmt(args);
+            c.vt = on_vt;
+            on_vt
         }
         None => {
             // SAFETY: interrupts are off and there is one CPU in Phase 1, so
             // the holder is the interrupted code on this CPU, which will not
             // run again.
-            let _ = unsafe { CONSOLE.force() }.write_fmt(args);
+            let c = unsafe { CONSOLE.force() };
+            let on_vt = core::mem::replace(&mut c.vt, false);
+            let _ = c.write_fmt(args);
+            c.vt = on_vt;
+            on_vt
         }
+    };
+    // `vt` draws it at once, if its locks are free.
+    if c {
+        let mut w = PanicVt;
+        let _ = w.write_fmt(args);
+    }
+}
+
+/// `vt`'s panic path, as a `fmt::Write`.
+struct PanicVt;
+
+impl Write for PanicVt {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        vt::panic_write(s.as_bytes());
+        Ok(())
     }
 }
 

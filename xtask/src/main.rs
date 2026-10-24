@@ -37,7 +37,7 @@ commands:
   image       --arch <a> [--release] [--ktest]           build a GPT disk image with an ESP
   run         --arch <a> [--release] [--ktest] [--smp N] [--mem SIZE] [--gdb] [--display] [--usb]
               [--qmp SOCK]                               ... with a QMP socket for `qmp`
-  qmp         --sock SOCK [--type TEXT] [--move DX,DY] [--screendump FILE]
+  qmp         --sock SOCK [--type TEXT] [--key KEYS] [--move DX,DY] [--screendump FILE]
                                                          type on, move the mouse of, or capture the screen of, a running QEMU
   test        [--tier unit|boot|all] [--arch <a|all>] [--usb]
                                                          run tests (default: all tiers); --usb adds the USB set

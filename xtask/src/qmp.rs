@@ -183,6 +183,21 @@ impl Qmp {
         Ok(())
     }
 
+    /// Presses `keys` (QEMU key codes, as `alt-f2`) together on the
+    /// guest's keyboard (QEMU's choice).
+    pub(crate) fn send_keys(&mut self, keys: &str) -> Result<()> {
+        let keys: Vec<String> = keys
+            .split('-')
+            .map(|k| format!(r#"{{"type":"qcode","data":{}}}"#, json_string(k)))
+            .collect();
+        self.execute(&format!(
+            r#"{{"execute":"send-key","arguments":{{"keys":[{}],"hold-time":{HOLD_MS}}}}}"#,
+            keys.join(",")
+        ))?;
+        std::thread::sleep(Duration::from_millis(HOLD_MS + GAP_MS));
+        Ok(())
+    }
+
     /// Moves the guest's relative pointer (`device`, or QEMU's choice) by
     /// `dx`, `dy`.
     pub(crate) fn move_pointer(&mut self, dx: i32, dy: i32, device: Option<&str>) -> Result<()> {
@@ -388,10 +403,12 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     let position = args.take_value("--abs")?;
     let dump = args.take_value("--screendump")?;
     let device = args.take_value("--device")?;
+    let keys = args.take_value("--key")?;
     args.finish()?;
-    if text.is_none() && motion.is_none() && position.is_none() && dump.is_none() {
+    if text.is_none() && motion.is_none() && position.is_none() && dump.is_none() && keys.is_none()
+    {
         return Err(
-            "qmp: nothing to do (--type TEXT, --move DX,DY, --abs X,Y, --screendump FILE)".into(),
+            "qmp: nothing to do (--type TEXT, --key KEYS, --move DX,DY, --abs X,Y, --screendump FILE)".into(),
         );
     }
     let pair = |v: &str, what: &str| -> Result<(i32, i32)> {
@@ -412,6 +429,9 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
         // `\n` in the argument means return, as a shell cannot easily
         // pass a newline.
         q.type_text(&text.replace("\\n", "\n"), device.as_deref())?;
+    }
+    if let Some(k) = keys {
+        q.send_keys(&k)?;
     }
     if let Some(file) = dump {
         let file = PathBuf::from(file);

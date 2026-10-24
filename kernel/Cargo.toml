@@ -27,6 +27,7 @@ bootproto = { path = "../boot/bootproto" }
 bus = { path = "../sys/bus" }
 evdev = { path = "../sys/evdev" }
 input = { path = "../sys/input" }
+vt = { path = "../sys/vt" }
 clock = { path = "../sys/clock" }
 devtree = { path = "../lib/devtree" }
 pci = { path = "../sys/pci" }
