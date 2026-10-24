@@ -395,7 +395,7 @@ impl Ppm {
 }
 
 /// `cargo xtask qmp --sock SOCK [--device ID] [--type TEXT] [--move DX,DY]
-/// [--abs X,Y] [--screendump FILE]`.
+/// [--abs X,Y] [--screendump FILE] [--unplug ID]`.
 pub(crate) fn cmd(mut args: Args) -> Result<()> {
     let sock = PathBuf::from(args.take_value("--sock")?.ok_or("qmp needs --sock SOCK")?);
     let text = args.take_value("--type")?;
@@ -404,11 +404,17 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     let dump = args.take_value("--screendump")?;
     let device = args.take_value("--device")?;
     let keys = args.take_value("--key")?;
+    let unplug = args.take_value("--unplug")?;
     args.finish()?;
-    if text.is_none() && motion.is_none() && position.is_none() && dump.is_none() && keys.is_none()
+    if text.is_none()
+        && motion.is_none()
+        && position.is_none()
+        && dump.is_none()
+        && keys.is_none()
+        && unplug.is_none()
     {
         return Err(
-            "qmp: nothing to do (--type TEXT, --key KEYS, --move DX,DY, --abs X,Y, --screendump FILE)".into(),
+            "qmp: nothing to do (--type TEXT, --key KEYS, --move DX,DY, --abs X,Y, --screendump FILE, --unplug ID)".into(),
         );
     }
     let pair = |v: &str, what: &str| -> Result<(i32, i32)> {
@@ -432,6 +438,13 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     }
     if let Some(k) = keys {
         q.send_keys(&k)?;
+    }
+    if let Some(id) = unplug {
+        // A hot unplug, as pulling the device out.
+        q.execute(&format!(
+            "{{\"execute\":\"device_del\",\"arguments\":{{\"id\":{}}}}}",
+            json_string(&id)
+        ))?;
     }
     if let Some(file) = dump {
         let file = PathBuf::from(file);

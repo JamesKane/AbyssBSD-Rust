@@ -54,7 +54,10 @@ USB 2.0 and 3.2, HID 1.11 and its usage tables, T10 SAM/SPC/SBC and UAS-2, and v
    the tty layer. A class never knows the transport.
 5. **One thread explores a bus.** Connects, disconnects, resets, and enumeration on one USB bus
    are serialized by its explore thread, as FreeBSD's `usb_explore`. Transfers do not go through
-   it.
+   it. Until its first exploring is done (the root hub attached, then passes until no new hub
+   appears), each bus holds the root mount back (`root_mount_hold`, as `usbusN`): a root not
+   found yet, such as a USB disk, is waited for, with FreeBSD's `Root mount waiting for:` line
+   each second; a root already there is mounted at once. The ktests wait for the holds too.
 
 ## 3. Crates
 
@@ -131,7 +134,12 @@ owning driver clears it (`CLEAR_FEATURE(ENDPOINT_HALT)` then reset endpoint, whi
 as one call); **babble** and **transaction errors** complete with their status and the endpoint is
 reset. **Timeouts and cancellation** stop the endpoint, complete every transfer the stop left
 pending with `Cancelled` or `TimedOut`, and move the dequeue pointer past them. Bulk streams (for
-UAS) give each stream its own ring under one endpoint.
+UAS) give each stream its own ring under one endpoint: `open_streams` reconfigures configured bulk
+endpoints (dropped and added in one Configure Endpoint) with a linear stream context array of as
+many entries as asked, the controller's `MaxPSASize`, and each companion allow; a transfer names its
+stream, and a stream's transfer event is matched by the ring that holds its TRB. A timeout or an
+`abort_stream` cancels one stream (stop, its TR dequeue moved) and rings the others again, so other
+tags' commands go on.
 
 ### 4.5 Root hub
 
@@ -413,17 +421,32 @@ Implemented (`sys/vt`, `kernel/src/vtcons.rs`):
 (UAS). It publishes one `da*` disk per logical unit to the storage class (`DiskQueues`), without
 CAM: there is no `pass*` device or `camcontrol` in this track.
 
+Worker threads run the requests, one per command the transport takes at once, and retry as
+FreeBSD's `da` does (up to four retries): after `UNIT ATTENTION`, a `NOT READY` that is becoming
+ready, `BUSY`/`TASK SET FULL`, and a broken transport once recovered. LUNs come from Get Max LUN
+(BBB) or `REPORT LUNS` (UAS); LUN 0 must be a disk, other LUNs that are not are skipped.
+
 - **BBB.** One command at a time: CBW, data, CSW, with residue and phase-error handling, and the
-  bulk-only reset recovery (class reset, clear both halts) on errors. `REQUEST SENSE` after a
-  failed command, and retries for `UNIT ATTENTION` and `NOT READY` as FreeBSD's `da` does.
-- **UAS.** Command, status, data-in, and data-out pipes; tagged commands, up to the device's queue
-  depth, on bulk streams over USB 3 and on the command/status pipes alone over USB 2. Task
-  management (abort, LUN reset) for timeouts.
+  bulk-only reset recovery (class reset, clear both halts) on errors. `REQUEST SENSE` right after a
+  failed command, as FreeBSD's `umass` asks it.
+- **UAS.** Command, status, data-in, and data-out pipes, found by their pipe usage descriptors.
+  Over USB 3 the status and data pipes get streams (15, as FreeBSD's xHCI gives), and each command's
+  tag is its stream: its status and data transfers are queued on the tag's stream, then the command
+  IU goes out. Half the streams are command tags (7 workers), the other half their task management
+  tags. Over USB 2, one command at a time: `READ READY`/`WRITE READY` on the status pipe start the
+  data phase, then the sense IU comes. Sense data arrives with the status. A broken command (a
+  timeout, a stall, a tag out of place) gets `ABORT TASK`, then `LOGICAL UNIT RESET` if that fails,
+  then every pipe's halt cleared; only its own streams' transfers are taken back. FreeBSD has no UAS
+  driver, so its attach line is ours: `umassN:  SCSI over UAS; quirks = 0x0`.
 - **Commands.** `INQUIRY`, `TEST UNIT READY`, `READ CAPACITY(10)` then `(16)` past 2 TiB,
-  `READ`/`WRITE(10)` and `(16)`, `SYNCHRONIZE CACHE`, `MODE SENSE` for write protection. Quirks
-  (FreeBSD's `usb_quirk` table for common sticks) as data.
+  `READ`/`WRITE(10)` and `(16)`, `SYNCHRONIZE CACHE`, `MODE SENSE` for write protection, `REPORT
+  LUNS`. Quirks (FreeBSD's `usb_quirk` table for common sticks) as data: not yet, none of QEMU's
+  devices needs one; they come with the hardware at P6.
 - **Unplug.** Pending bios complete with `ENXIO`; the storage class revokes the disk, and a mounted
-  file system sees errors, as on FreeBSD.
+  file system sees errors. As FreeBSD's `ffs_fsfail_cleanup`, the first I/O that fails on the gone
+  disk (or the syncer finding writes it can no longer make) starts a forced unmount from a thread of
+  its own (`UFS: forcibly unmounting /dev/da0 from /mnt`), which ignores the write errors. Unmounts
+  of one mount are serialized: a second one meanwhile gets `EBUSY` (`MNTK_UNMOUNT`).
 
 ## 9. Testing
 
@@ -431,13 +454,17 @@ CAM: there is no `pass*` device or `camcontrol` in this track.
   fuzz targets (bad descriptors, event-ring garbage, hostile report descriptors, random byte
   streams to the emulator against a reference screen model).
 - **Boot tier.** QEMU machines on both arches with `qemu-xhci`, `usb-kbd`, `usb-tablet`,
-  `usb-mouse`, a `usb-hub`, `usb-storage`, `usb-uas`, and `virtio-keyboard`/`virtio-tablet`. Tests
+  `usb-mouse`, a `usb-hub`, `usb-storage`, two `usb-uas` (one at SuperSpeed with two LUNs, one on a
+  USB 2-only port, so without streams), and `virtio-keyboard`/`virtio-tablet`. Tests
   check the device tree and names against FreeBSD's capture, type into `ttyv0` over QMP, and read the
   screen back with `screendump`. bhyve's `xhci,tablet` on amd64. The virtio devices are bound to the
   display (`video0`), so QMP input goes to the USB devices unless it names the display
   (`cargo xtask qmp --device video0`).
-- **Storage.** fsx on a UFS2 file system on `da0`, over BBB and over UAS, then `fsck_ffs` on the
-  server. Hot unplug (`device_del` over QMP) of a mounted disk during I/O.
+- **Storage.** The ktest `ufs_on_usb_disks`: the UFS2 read-write workload with soft updates, fsx
+  included, then FreeBSD's `fsck_ffs -f -n`, on `da0` (BBB), `da1` (UAS on streams), and `da3` (UAS
+  on USB 2). `usb_disk_unplugged_while_mounted` detaches `umass0` under fsx and checks the forced
+  unmount and the disk coming back. Hot unplug over QMP (`cargo xtask qmp --unplug bbb0`, and
+  `uas0`) of mounted disks during fsx is checked by hand the same way.
 - **Differential.** The same `usbconfig`, `devinfo`, `ls /dev`, and `kbdcontrol`/`vidcontrol` runs on
   FreeBSD 15.1 and AbyssBSD in the same QEMU machine, compared.
 

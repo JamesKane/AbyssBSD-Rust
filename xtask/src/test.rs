@@ -519,8 +519,9 @@ fn boot(
     };
     // Emulated aarch64 is slow to start and slow through the file-system
     // tests (soft updates and msdosfs alone take minutes under TCG); leave
-    // generous headroom.
-    let run = vm.run_captured(Duration::from_secs(600), &log, verbose)?;
+    // generous headroom. The USB set's disk tests add a few minutes more.
+    let secs = if usb { 900 } else { 600 };
+    let run = vm.run_captured(Duration::from_secs(secs), &log, verbose)?;
     let text = std::fs::read_to_string(&log).unwrap_or_default();
     let verdict = match run.outcome {
         Outcome::Passed => check_log(&text, case)

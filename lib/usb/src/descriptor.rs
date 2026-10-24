@@ -175,6 +175,9 @@ pub struct Endpoint {
     pub interval: u8,
     /// The SuperSpeed endpoint companion, on USB 3 devices.
     pub companion: Option<Companion>,
+    /// Class descriptors after it (UAS's pipe usage), as `(type, byte
+    /// range in the configuration descriptor)`.
+    pub extra: Vec<(u8, Range<usize>)>,
 }
 
 /// Transfer types.
@@ -308,8 +311,9 @@ pub fn configuration_total(b: &[u8]) -> Result<u16, Error> {
 impl Configuration {
     /// Parses a configuration descriptor and its interfaces, endpoints,
     /// and companions. Descriptors of unknown types are kept in the
-    /// current interface's `extra`; endpoints before any interface, and
-    /// a truncated last descriptor, are dropped.
+    /// current interface's `extra`, or after an endpoint in the
+    /// endpoint's; endpoints before any interface, and a truncated last
+    /// descriptor, are dropped.
     ///
     /// # Errors
     ///
@@ -356,6 +360,7 @@ impl Configuration {
                             max_packet_raw: le16(d, 4).unwrap_or(0),
                             interval: d[6],
                             companion: None,
+                            extra: Vec::new(),
                         });
                     }
                 }
@@ -369,9 +374,14 @@ impl Configuration {
                         });
                     }
                 }
+                // After an endpoint, a class descriptor is the endpoint's
+                // (USB 2.0 §9.5); before any, the interface's.
                 t => {
                     if let Some(i) = c.interfaces.last_mut() {
-                        i.extra.push((t, at..end));
+                        match i.endpoints.last_mut() {
+                            Some(e) => e.extra.push((t, at..end)),
+                            None => i.extra.push((t, at..end)),
+                        }
                     }
                 }
             }

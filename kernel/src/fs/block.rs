@@ -163,6 +163,11 @@ pub(crate) struct DiskIo {
     deps: sync::Once<Arc<SoftDeps>>,
     /// UFS's cylinder-group check-hashes are kept by the cache's hook.
     groups_hashed: AtomicBool,
+    /// What runs when I/O fails because the disk is gone (UFS's forced
+    /// unmount).
+    gone: sync::Once<alloc::boxed::Box<dyn Fn() + Send + Sync>>,
+    /// A write started without waiting failed (the syncer looks).
+    failed_async: Arc<AtomicBool>,
 }
 
 impl DiskIo {
@@ -172,7 +177,33 @@ impl DiskIo {
             disk,
             deps: sync::Once::new(),
             groups_hashed: AtomicBool::new(false),
+            gone: sync::Once::new(),
+            failed_async: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Whether a write started without waiting has failed.
+    pub(crate) fn gone_seen(&self) -> bool {
+        self.failed_async.load(Ordering::Acquire)
+    }
+
+    /// Runs `f` the first time I/O fails with the disk gone (FreeBSD's
+    /// `ffs_fsfail_cleanup` on `ENXIO`); in thread context, so it may
+    /// start things but should not wait on the disk.
+    pub(crate) fn on_gone(&self, f: impl Fn() + Send + Sync + 'static) {
+        let _ = self.gone.set(alloc::boxed::Box::new(f));
+    }
+
+    /// Passes `r` on, telling [`Self::on_gone`]'s hook of an error with
+    /// the disk gone.
+    pub(crate) fn seen<T, E>(&self, r: Result<T, E>) -> Result<T, E> {
+        if r.is_err()
+            && self.disk.is_gone()
+            && let Some(f) = self.gone.get()
+        {
+            f();
+        }
+        r
     }
 
     /// Serves the UFS file system with superblock `sb` from now on: its
@@ -293,12 +324,16 @@ impl DiskIo {
             .map(|(at, data)| (*at, u64::try_from(data.len()).unwrap_or(0)))
             .collect();
         let deps = self.deps().cloned();
+        let failed = Arc::clone(&self.failed_async);
         // The parts left, whether all went well, and what to run after.
         type Done = alloc::boxed::Box<dyn FnOnce(bool) + Send>;
         let left: Arc<SpinLock<(usize, bool, Option<Done>)>> = Arc::new(SpinLock::new((
             parts.len(),
             true,
             Some(alloc::boxed::Box::new(move |ok: bool| {
+                if !ok {
+                    failed.store(true, Ordering::Release);
+                }
                 if ok && let Some(d) = &deps {
                     for &(at, len) in &extents {
                         d.note_written(at, len);
@@ -367,7 +402,7 @@ impl ufs::BlockIo for DiskIo {
         len: usize,
         f: &mut dyn FnMut(&[u8]),
     ) -> Result<(), ufs::Error> {
-        self.read_meta(s, offset, len, f)
+        self.seen(self.read_meta(s, offset, len, f))
             .map_err(|_| ufs::Error::Io)
     }
 
@@ -380,23 +415,25 @@ impl ufs::BlockIo for DiskIo {
         mode: ufs::Mode,
         f: &mut dyn FnMut(&mut [u8]),
     ) -> Result<(), ufs::Error> {
-        self.modify_meta(
+        self.seen(self.modify_meta(
             s,
             offset,
             len,
             fill == ufs::Fill::Zero,
             mode == ufs::Mode::Sync,
             f,
-        )
+        ))
         .map_err(|_| ufs::Error::Io)
     }
 
     fn read_data(&self, s: &Sleepable, offset: u64, buf: &mut [u8]) -> Result<(), ufs::Error> {
-        DiskIo::read_data(self, s, offset, buf).map_err(|_| ufs::Error::Io)
+        self.seen(DiskIo::read_data(self, s, offset, buf))
+            .map_err(|_| ufs::Error::Io)
     }
 
     fn write_data(&self, s: &Sleepable, offset: u64, data: &[u8]) -> Result<(), ufs::Error> {
-        DiskIo::write_data(self, s, offset, data).map_err(|_| ufs::Error::Io)
+        self.seen(DiskIo::write_data(self, s, offset, data))
+            .map_err(|_| ufs::Error::Io)
     }
 
     fn forget(&self, s: &Sleepable, offset: u64, len: usize) {
@@ -404,7 +441,7 @@ impl ufs::BlockIo for DiskIo {
     }
 
     fn flush(&self, s: &Sleepable) -> Result<(), ufs::Error> {
-        self.cache.sync(s).map_err(|_| ufs::Error::Io)
+        self.seen(self.cache.sync(s)).map_err(|_| ufs::Error::Io)
     }
 
     fn deps(&self, s: &Sleepable, f: &mut dyn FnMut(&mut Deps)) -> bool {

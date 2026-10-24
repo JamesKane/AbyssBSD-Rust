@@ -394,6 +394,15 @@ fn contexts_round_trip() {
 }
 
 #[test]
+fn stream_contexts() {
+    assert_eq!(stream_context(0x1_2345_6780, true), [0x2345_6783, 1, 0, 0]);
+    assert_eq!(stream_context(0x1000, false)[0], 0x1002);
+    assert_eq!(max_primary_streams(16), 3);
+    assert_eq!(max_primary_streams(2), 0);
+    assert_eq!(max_primary_streams(256), 7);
+}
+
+#[test]
 fn context_offsets() {
     let ep2in = Dci::from_address(0x82, false).unwrap();
     assert_eq!(ep2in.get(), 5);

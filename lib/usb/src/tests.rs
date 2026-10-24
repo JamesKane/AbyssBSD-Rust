@@ -82,6 +82,27 @@ fn disk_configuration_with_companions() {
 }
 
 #[test]
+fn class_descriptors_after_an_endpoint_are_its() {
+    // A UAS interface's first endpoints: each with a companion and a
+    // pipe usage descriptor.
+    let b = [
+        9, 2, 46, 0, 1, 1, 0, 0x80, 50, //
+        9, 4, 0, 1, 2, 8, 6, 0x62, 0, //
+        7, 5, 0x01, 2, 0, 4, 0, //
+        4, 0x24, 1, 0, //
+        7, 5, 0x82, 2, 0, 4, 0, //
+        6, 0x30, 0, 4, 0, 0, //
+        4, 0x24, 2, 0,
+    ];
+    let c = Configuration::parse(&b).unwrap();
+    let i = c.interface(0, 1).unwrap();
+    assert!(i.extra.is_empty());
+    assert_eq!(i.endpoints[0].extra, vec![(0x24, 25..29)]);
+    assert_eq!(i.endpoints[1].extra, vec![(0x24, 42..46)]);
+    assert_eq!(i.endpoints[1].companion.unwrap().max_streams(), 16);
+}
+
+#[test]
 fn truncated_and_hostile_configurations() {
     // Truncated mid-descriptor: what fits is kept.
     let c = Configuration::parse(&KEYBOARD_CONFIG[..30]).unwrap();

@@ -37,8 +37,8 @@ commands:
   image       --arch <a> [--release] [--ktest]           build a GPT disk image with an ESP
   run         --arch <a> [--release] [--ktest] [--smp N] [--mem SIZE] [--gdb] [--display] [--usb]
               [--qmp SOCK]                               ... with a QMP socket for `qmp`
-  qmp         --sock SOCK [--type TEXT] [--key KEYS] [--move DX,DY] [--screendump FILE]
-                                                         type on, move the mouse of, or capture the screen of, a running QEMU
+  qmp         --sock SOCK [--type TEXT] [--key KEYS] [--move DX,DY] [--screendump FILE] [--unplug ID]
+                                                         type on, move the mouse of, capture the screen of, or unplug from, a running QEMU
   test        [--tier unit|boot|all] [--arch <a|all>] [--usb]
                                                          run tests (default: all tiers); --usb adds the USB set
   perf        [--suite p2|p3|p4|p5|vt|diag] [--runs N] [--prepare] [--freebsd-only]

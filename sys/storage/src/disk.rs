@@ -210,6 +210,16 @@ impl Disk {
         self.sectors
     }
 
+    /// Whether it (or the disk it is a partition of) was withdrawn: its
+    /// I/O fails with [`BioError::Gone`].
+    #[must_use]
+    pub fn is_gone(&self) -> bool {
+        match &self.target {
+            Target::Device { queues, .. } => queues.lock().is_none(),
+            Target::Partition { parent, .. } => parent.is_gone(),
+        }
+    }
+
     /// Size in bytes.
     #[must_use]
     pub fn bytes(&self) -> u64 {

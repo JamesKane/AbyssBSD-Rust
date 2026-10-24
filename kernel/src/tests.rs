@@ -52,6 +52,9 @@ pub(crate) fn run(_s: &sched::Sleepable) -> ! {
             log.recovered
         );
     }
+    // Tests count pages and read events: buses still finding devices
+    // (USB) would be counted with them.
+    bus::root_mount_wait(&cx());
     let clock = || crate::time::now_ns() / 1_000_000;
     let _ = ktest::run_tests_timed(&mut crate::console::Writer, Some(&clock));
     crate::panic::EXPECT_FATAL_TRAP.store(true, Ordering::Relaxed);
@@ -1838,10 +1841,16 @@ ktest! {
         if m.description(acpi0, &s).as_deref() == Some("BHYVE BVFACP ") {
             // Differential: each function's pnpinfo and location as FreeBSD
             // 15.1 recorded them in bhyve (the recording's VM has more
-            // devices than the boot test's).
+            // devices than the boot test's), and with `--usb` the xHCI as
+            // the USB recording has it.
             let recorded: alloc::vec::Vec<&str> =
                 include_str!("../../tests/corpus/freebsd/bhyve/devinfo-rv.txt")
                     .lines()
+                    .chain(
+                        include_str!("../../tests/corpus/freebsd/usb/bhyve/devinfo-rv.txt")
+                            .lines()
+                            .filter(|l| l.contains("class=0x0c0330")),
+                    )
                     .filter(|l| l.starts_with("        ") && !l.starts_with("         "))
                     .filter_map(|l| l.split_once(" pnpinfo ").map(|(_, rest)| rest))
                     .collect();
@@ -1850,10 +1859,12 @@ ktest! {
             }
             assert!(lines.iter().any(|l| l.ends_with("handle=\\_SB_.PC00.ISA_")), "isab's ACPI handle");
             // The virtio transports and the devices on them (vtblk0, vtrnd0,
-            // vtblk1), line for line.
+            // vtblk1), line for line; with `--usb`, the xHCI and what is
+            // under it as the USB recording has them.
             let full: alloc::vec::Vec<&str> =
                 include_str!("../../tests/corpus/freebsd/bhyve/devinfo-rv.txt")
                     .lines()
+                    .chain(include_str!("../../tests/corpus/freebsd/usb/bhyve/devinfo-rv.txt").lines())
                     .map(str::trim_start)
                     .collect();
             // As `devinfo -v` prints a device: empty fields left out.
@@ -2692,7 +2703,13 @@ mod user_memory {
             vt::write(1, b"\x07");
             vt::write(0, b"\x07");
             vt::write(1, b"no bell");
-            let events = m.take_events();
+            // Devices may still be attaching (USB enumerates in its own
+            // thread): only the bells.
+            let events: alloc::vec::Vec<_> = m
+                .take_events()
+                .into_iter()
+                .filter(|e| e.starts_with("!system=VT "))
+                .collect();
             assert_eq!(
                 events,
                 [
@@ -3060,20 +3077,115 @@ mod user_memory {
         }
     }
 
+    ktest! {
+        /// U.5: UFS2 on the USB disks, made by FreeBSD's `newfs` with soft
+        /// updates: the read-write workload, fsx included, and `fsck_ffs -f
+        /// -n` clean, over Bulk-Only (`da0`), UAS on streams (`da1`), and
+        /// UAS on USB 2 without them (`da3`). Skipped without the USB set.
+        fn ufs_on_usb_disks() {
+            let s = cx();
+            let usb: Vec<_> = ["da0", "da1", "da3"]
+                .into_iter()
+                .filter(|d| storage::find(d).is_some())
+                .collect();
+            if usb.is_empty() {
+                kprintln!("ufs: no USB disks; skipped");
+                return;
+            }
+            for d in usb {
+                ufs_workload(&s, &alloc::format!("/dev/{d}"), true, 2000);
+            }
+        }
+    }
+
+    ktest! {
+        /// U.5: a USB disk pulled from under a mounted file system in use:
+        /// `umass0` detached while fsx runs on `da0`. fsx fails, nothing
+        /// panics, UFS unmounts it forcibly (as FreeBSD's
+        /// `ffs_fsfail_cleanup`), and attached again, the disk is back and
+        /// clean. Skipped without the USB set.
+        fn usb_disk_unplugged_while_mounted() {
+            use crate::proc::Process;
+            let s = cx();
+            let m = bus::manager();
+            let Some((_, node)) = super::find_named(m, &s, crate::devices::nexus(), "umass0")
+            else {
+                kprintln!("umass: no umass0; skipped");
+                return;
+            };
+            let script = "newfs -U /dev/da0 > /dev/null || exit 1; mkdir -p /tmp/u && \
+                mount /dev/da0 /tmp/u || exit 2; \
+                /usr/tests/fsx/fsx -q -N 1000000 -S 6 /tmp/u/f > /dev/null 2>&1; exit 7";
+            let p = Process::spawn(
+                &s,
+                b"/rescue/sh",
+                &[b"sh", b"-c", script.as_bytes()],
+                &[b"PATH=/rescue", b"HOME=/"],
+                Some(hal::cpu_id()),
+            )
+            .unwrap();
+            // Until fsx is under way on it.
+            let mounted = || {
+                crate::fs::namespace()
+                    .mounts()
+                    .iter()
+                    .any(|x| x.on() == b"/tmp/u")
+            };
+            for _ in 0..600 {
+                if mounted() {
+                    break;
+                }
+                crate::time::sleep_ns(&s, 50_000_000);
+            }
+            assert!(mounted(), "da0 mounted on /tmp/u");
+            crate::time::sleep_ns(&s, 2_000_000_000);
+            m.detach(node, bus::DetachReason::Requested, &s)
+                .expect("detach");
+            assert!(storage::find("da0").is_none(), "da0 withdrawn");
+            assert_eq!(p.wait(&s), crate::proc::Exit::Code(7));
+            for _ in 0..200 {
+                if !mounted() {
+                    break;
+                }
+                crate::time::sleep_ns(&s, 50_000_000);
+            }
+            assert!(!mounted(), "/tmp/u forcibly unmounted");
+            m.probe_and_attach(node, &s).expect("attach");
+            m.wait_idle(&s);
+            assert!(storage::find("da0").is_some(), "da0 back");
+            let p = Process::spawn(
+                &s,
+                b"/rescue/sh",
+                &[b"sh", b"-c", b"newfs /dev/da0 > /dev/null && fsck_ffs -f -n /dev/da0 > /dev/null"],
+                &[b"PATH=/rescue", b"HOME=/"],
+                Some(hal::cpu_id()),
+            )
+            .unwrap();
+            assert_eq!(p.wait(&s), crate::proc::Exit::Code(0));
+            let _ = m.take_events();
+            kprintln!("umass: da0 pulled out from under fsx; forcibly unmounted, then back");
+        }
+    }
+
     /// The read-write workload on the 32 MiB test disk, made by FreeBSD's
     /// `newfs` (with soft updates if `soft`).
     fn ufs_read_write(soft: bool) {
-        use crate::proc::Process;
         let s = cx();
         // Its own 32 MiB virtio disk, whatever its unit now.
         let Some(scratch) = find_disk(&s, "vtbd", |_, d| d.bytes() == 32 << 20) else {
             kprintln!("ufs: no read-write test disk; skipped");
             return;
         };
-        let dev = alloc::format!("/dev/{}", scratch.name());
+        ufs_workload(&s, &alloc::format!("/dev/{}", scratch.name()), soft, 10_000);
+    }
+
+    /// The read-write workload on disk `dev`, fsx running `ops` operations
+    /// a seed.
+    fn ufs_workload(s: &sched::Sleepable, dev: &str, soft: bool, ops: u32) {
+        use crate::proc::Process;
         let what = if soft { " with soft updates" } else { "" };
         kprintln!("ufs: read-write on {dev}{what}");
-        let fsx = read_whole(&s, b"/usr/tests/fsx/fsx").is_some();
+        let fsx = read_whole(s, b"/usr/tests/fsx/fsx").is_some();
         // With soft updates: the flag shows, and a tree removed gives
         // its space back (once the syncer has done the frees).
         let soft_checks = if soft {
@@ -3099,7 +3211,7 @@ mod user_memory {
                     [ \"$(md5 -q x/usr/tests/abyss/$f)\" = \"$(md5 -q /usr/tests/abyss/$f)\" ] || exit 6; done; \
                 rm -r a/b x/usr && [ ! -e a/b ] || exit 8; \
                 if [ -x /usr/tests/fsx/fsx ]; then for seed in 1 2 3; do \
-                    /usr/tests/fsx/fsx -q -N 10000 -S $seed /mnt/fsx.data > /tmp/fsx.out 2>&1 || exit 9; \
+                    /usr/tests/fsx/fsx -q -N OPS -S $seed /mnt/fsx.data > /tmp/fsx.out 2>&1 || exit 9; \
                     rm -f /mnt/fsx.data*; done; fi; \
                 cd / && umount /mnt || exit 10; \
                 fsck_ffs -f -n DEV > /tmp/fsck.out 2>&1 || exit 11; \
@@ -3109,19 +3221,20 @@ mod user_memory {
                 umount /mnt || exit 14; exit 7")
                 .replace("SOFT", soft_checks)
                 .replace("NEWFS", if soft { "-U" } else { "-u" })
-                .replace("DEV", &dev);
+                .replace("OPS", &alloc::format!("{ops}"))
+                .replace("DEV", dev);
         let p = Process::spawn(
-            &s,
+            s,
             b"/rescue/sh",
             &[b"sh", b"-c", script_text.as_bytes()],
             &[b"PATH=/rescue", b"HOME=/"],
             Some(hal::cpu_id()),
         )
         .unwrap();
-        let exit = p.wait(&s);
+        let exit = p.wait(s);
         if exit != crate::proc::Exit::Code(7) {
             for f in [&b"/tmp/fsck.out"[..], b"/tmp/fsx.out"] {
-                if let Some(out) = read_whole(&s, f) {
+                if let Some(out) = read_whole(s, f) {
                     kprintln!(
                         "{}:\n{}",
                         core::str::from_utf8(f).unwrap_or("?"),
@@ -3131,7 +3244,7 @@ mod user_memory {
             }
         }
         assert_eq!(exit, crate::proc::Exit::Code(7));
-        let fsck = read_whole(&s, b"/tmp/fsck.out").unwrap_or_default();
+        let fsck = read_whole(s, b"/tmp/fsck.out").unwrap_or_default();
         let text = alloc::string::String::from_utf8_lossy(&fsck);
         let questions: alloc::vec::Vec<&str> = text
             .lines()
@@ -3146,8 +3259,8 @@ mod user_memory {
             if fsx { ", fsx included" } else { "" }
         );
         for f in [&b"/tmp/fsck.out"[..], b"/tmp/fsx.out"] {
-            let _ = crate::fs::parent_of(&s, &p, crate::fs::At::Cwd, f, false)
-                .and_then(|d| vfs::ops::remove(&s, &d.dir, &d.name, &crate::fs::cred(), false));
+            let _ = crate::fs::parent_of(s, &p, crate::fs::At::Cwd, f, false)
+                .and_then(|d| vfs::ops::remove(s, &d.dir, &d.name, &crate::fs::cred(), false));
         }
     }
 

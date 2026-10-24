@@ -113,7 +113,7 @@ pub(crate) struct Vm {
 pub(crate) const USB_SLOT: &str = "30,xhci,tablet";
 
 /// The size of each USB scratch disk.
-const USB_DISK_SIZE: u64 = 16 << 20;
+const USB_DISK_SIZE: u64 = 32 << 20;
 
 /// Host CPUs per physical core on the build server (P-cores have SMT).
 pub(crate) const PIN_STRIDE: u32 = 2;
@@ -436,22 +436,32 @@ impl Vm {
     /// video0`), and everything else to the USB ones.
     ///
     /// Ports are fixed so names and locations stay stable. Each of the
-    /// xHCI's eight ports takes either speed: the keyboard and tablet run
-    /// at high speed, the hub (QEMU's is USB 1.1) and its mouse at full
-    /// speed, and both disks at SuperSpeed.
+    /// xHCI's first eight ports takes either speed, the ninth only USB 2:
+    /// the keyboard and tablet run at high speed, the hub (QEMU's is USB
+    /// 1.1) and its mouse at full speed, the Bulk-Only disk and the first
+    /// UAS one (two LUNs, on streams) at SuperSpeed, and the second UAS
+    /// one at high speed (without streams).
     fn usb_args(&self) -> Result<Vec<String>> {
         let scratch = |what: &str| -> Result<PathBuf> {
             let p = self.disk.with_extension(format!("usb-{what}.img"));
             fs::File::create(&p)?.set_len(USB_DISK_SIZE)?;
             Ok(p)
         };
-        let bbb = scratch("bbb")?;
-        let uas = scratch("uas")?;
-        let bbb = format!("if=none,id=usbbbb,format=raw,file={}", bbb.display());
-        let uas = format!("if=none,id=usbuas,format=raw,file={}", uas.display());
+        let drive = |what: &str| -> Result<String> {
+            Ok(format!(
+                "if=none,id=usb{what},format=raw,file={}",
+                scratch(what)?.display()
+            ))
+        };
+        let (bbb, uas, uas_lun1, uas2) = (
+            drive("bbb")?,
+            drive("uas")?,
+            drive("uaslun1")?,
+            drive("uas2")?,
+        );
         let args = [
             "-device",
-            "qemu-xhci,id=xhci,p2=8,p3=8",
+            "qemu-xhci,id=xhci,p2=9,p3=8",
             "-device",
             "usb-kbd,bus=xhci.0,port=1",
             "-device",
@@ -463,13 +473,23 @@ impl Vm {
             "-drive",
             &bbb,
             "-device",
-            "usb-storage,bus=xhci.0,port=4,drive=usbbbb,serial=abyssbbb",
+            "usb-storage,id=bbb0,bus=xhci.0,port=4,drive=usbbbb,serial=abyssbbb",
             "-device",
             "usb-uas,id=uas0,bus=xhci.0,port=5",
             "-drive",
             &uas,
             "-device",
             "scsi-hd,bus=uas0.0,scsi-id=0,lun=0,drive=usbuas,serial=abyssuas",
+            "-drive",
+            &uas_lun1,
+            "-device",
+            "scsi-hd,bus=uas0.0,scsi-id=0,lun=1,drive=usbuaslun1,serial=abyssuaslun1",
+            "-device",
+            "usb-uas,id=uas1,bus=xhci.0,port=9",
+            "-drive",
+            &uas2,
+            "-device",
+            "scsi-hd,bus=uas1.0,scsi-id=0,lun=0,drive=usbuas2,serial=abyssuas2",
             "-device",
             "virtio-keyboard-pci,id=vkbd,display=video0",
             "-device",

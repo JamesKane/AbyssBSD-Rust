@@ -373,6 +373,9 @@ struct Shared {
     deps: Option<Arc<SoftDeps>>,
     /// The superblock asked for a journal, which this mount turned off.
     journal_dropped: bool,
+    /// Its disk went away and a forced unmount is under way (FreeBSD's
+    /// `UM_FSFAIL_CLEANUP`): writing out fails, and that is no error.
+    failing: AtomicBool,
 }
 
 /// A mounted UFS2 file system.
@@ -475,8 +478,15 @@ impl UfsFs {
                 applying: AtomicBool::new(false),
                 deps,
                 journal_dropped,
+                failing: AtomicBool::new(false),
             }),
         };
+        let shared = Arc::downgrade(&fs.shared);
+        fs.shared.ufs.io().on_gone(move || {
+            if let Some(sh) = shared.upgrade() {
+                sh.fsfail();
+            }
+        });
         if !read_only {
             fs.shared.make_writable(s, force)?;
         }
@@ -496,6 +506,42 @@ impl UfsFs {
 }
 
 impl Shared {
+    /// The disk is gone: unmounts the file system forcibly, from a thread
+    /// of its own, once (FreeBSD's `ffs_fsfail_cleanup`).
+    fn fsfail(self: &Arc<Self>) {
+        if self.failing.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let me = Arc::downgrade(self);
+        let spawned = sched::Builder::new("ufsfail")
+            .priority(sched::Priority::KERNEL)
+            .spawn(move |s| {
+                let mount = crate::fs::namespace().mounts().into_iter().find(|m| {
+                    m.fs()
+                        .as_any()
+                        .downcast_ref::<UfsFs>()
+                        .is_some_and(|u| core::ptr::eq(Arc::as_ptr(&u.shared), me.as_ptr()))
+                });
+                let Some(m) = mount else { return };
+                if let Some(sh) = me.upgrade() {
+                    kprintln!(
+                        "UFS: forcibly unmounting /dev/{} from {}",
+                        sh.ufs.io().disk.name(),
+                        alloc::string::String::from_utf8_lossy(&m.on())
+                    );
+                }
+                let _ = crate::fs::namespace().unmount(s, &m, true);
+            });
+        if spawned.is_err() {
+            kprintln!("ufs: no thread for the forced unmount");
+        }
+    }
+
+    /// Whether its disk went away.
+    fn is_failing(&self) -> bool {
+        self.failing.load(Ordering::Acquire)
+    }
+
     fn sum(&self) -> Result<&Mutex<ufs::Summary>, Errno> {
         if !self.writable() {
             return Err(Errno::EROFS);
@@ -624,7 +670,12 @@ impl Shared {
             self.sync_pages(s);
             self.wait_writes(s);
             self.write_inodes(s, Mode::Delayed)?;
-            io.cache.sync(s).map_err(|_| Errno::EIO)?;
+            if io.seen(io.cache.sync(s)).is_err() {
+                if self.is_failing() {
+                    break;
+                }
+                return Err(Errno::EIO);
+            }
             let Some(deps) = &self.deps else {
                 break;
             };
@@ -633,7 +684,9 @@ impl Shared {
                 break;
             }
         }
-        if let Some(deps) = &self.deps {
+        if let Some(deps) = &self.deps
+            && !self.is_failing()
+        {
             let left = deps.with(s, |d| d.len());
             if left != 0 {
                 kprintln!("ufs: {}: {left} soft dependencies left:", io.disk.name());
@@ -645,9 +698,14 @@ impl Shared {
         }
         let mut sum = sum.lock(s);
         if sum.modified || clean {
-            self.ufs
+            let r = self
+                .ufs
                 .write_summary(s, &mut sum, clean, wall_seconds())
-                .map_err(errno)?;
+                .map_err(errno);
+            // With the disk gone, the summary goes with it.
+            if !self.is_failing() {
+                r?;
+            }
         }
         Ok(())
     }
@@ -973,7 +1031,11 @@ impl FileSystem for UfsFs {
     }
 
     fn sync(&self, s: &Sleepable, _wait: bool) -> Result<(), Errno> {
-        self.shared.sync_all(s, false)
+        let r = self.shared.sync_all(s, false);
+        if self.shared.is_failing() {
+            return Ok(());
+        }
+        r
     }
 
     fn sync_aged(&self, s: &Sleepable, before: u64) {
@@ -981,6 +1043,20 @@ impl FileSystem for UfsFs {
         let Ok(sum) = shared.sum() else {
             return;
         };
+        // Its disk went away with writes still to do: they would fail
+        // with ENXIO, which unmounts it (as FreeBSD's syncer meets it).
+        let io = shared.ufs.io();
+        if io.disk.is_gone()
+            && (io.cache.any_dirty()
+                || io.gone_seen()
+                || shared
+                    .deps
+                    .as_ref()
+                    .is_some_and(|d| !d.with(s, |d| d.is_idle())))
+        {
+            shared.fsfail();
+            return;
+        }
         // File pages, inodes, and the summary every 30 seconds; metadata
         // as it ages, or all of it while soft updates hold too much
         // (FreeBSD's `softdep_speedup`).
@@ -995,7 +1071,8 @@ impl FileSystem for UfsFs {
             let _ = shared.write_inodes(s, Mode::Delayed);
         }
         let before = if speedup { u64::MAX } else { before };
-        let _ = shared.ufs.io().cache.write_aged(s, before);
+        let io = shared.ufs.io();
+        let _ = io.seen(io.cache.write_aged(s, before));
         shared.process_work(s);
         if due {
             let mut sum = sum.lock(s);
@@ -1007,7 +1084,10 @@ impl FileSystem for UfsFs {
 
     fn unmount(&self, s: &Sleepable) -> Result<(), Errno> {
         let shared = &self.shared;
-        shared.sync_all(s, true)?;
+        let r = shared.sync_all(s, true);
+        if !shared.is_failing() {
+            r?;
+        }
         // A read-only disk may refuse a flush (bhyve's does): a read-only
         // mount only lets its buffers go.
         shared.ufs.io().cache.invalidate();
@@ -1208,7 +1288,8 @@ impl Node for UfsNode {
                 st.dirty = false;
             }
             // Without per-file buffer lists, all dirty metadata goes.
-            return shared.ufs.io().cache.sync(s).map_err(|_| Errno::EIO);
+            let io = shared.ufs.io();
+            return io.seen(io.cache.sync(s)).map_err(|_| Errno::EIO);
         };
         // With soft updates, only what this file needs (FreeBSD's
         // `softdep_sync`): its pointers' groups and blocks, its indirect

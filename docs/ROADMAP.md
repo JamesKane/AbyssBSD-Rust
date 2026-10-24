@@ -1330,6 +1330,16 @@ U.0 ─► U.1 ─► U.2 ─┬─► U.3 ─► U.4 ─┬─► U.6
   `READ`/`WRITE` (10 and 16), `SYNCHRONIZE CACHE`) that publishes `da*` disks to the storage class.
 - Error recovery (BBB reset recovery, sense handling, `UNIT ATTENTION` after a reset), and hot
   unplug of a mounted disk failing its I/O without a panic.
+- Progress (2026-10-24): `umass` over Bulk-Only and UAS on `lib/scsi` (UAS IUs, `REPORT LUNS`),
+  one `da*` per LUN, with `da`'s retries. xHCI bulk streams (a ring per stream, one stream cancelled
+  at a time): over USB 3 each UAS tag is a stream, seven commands at once; over USB 2 the
+  `READ READY`/`WRITE READY` handshake. A broken UAS command gets `ABORT TASK`, then `LOGICAL UNIT
+  RESET`. In QEMU, on both arches, UFS2 with soft updates passes fsx and `fsck_ffs` on the
+  Bulk-Only disk, the UAS disk on streams, and a UAS disk on USB 2 (ktest `ufs_on_usb_disks`);
+  the UAS disk's second LUN is `da2`. The boot tier passes with `--usb` on both arches and bhyve
+  (with USB buses holding the root mount until first explored, as FreeBSD's). A mounted disk pulled out during fsx (QMP `device_del`, or `umass0`
+  detached in a ktest) fails its I/O without a panic and is unmounted forcibly, as FreeBSD's
+  `ffs_fsfail_cleanup` does.
 
 **U.6 Exit.**
 - The QEMU exit above, in the boot tier on both arches and bhyve, and the suite's verdict.

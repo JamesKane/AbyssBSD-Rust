@@ -210,8 +210,20 @@ impl Namespace {
     }
 
     /// Unmounts `m` (FreeBSD's `dounmount`): `EBUSY` while its files are in
-    /// use or something is mounted on it, unless `force`, which dooms them.
+    /// use, something is mounted on it, or another unmount of it is under
+    /// way, unless `force`, which dooms its files.
     pub fn unmount(&self, s: &Sleepable, m: &Arc<Mount>, force: bool) -> Result<(), Errno> {
+        if !m.begin_unmount() {
+            return Err(Errno::EBUSY);
+        }
+        let r = self.unmount_marked(s, m, force);
+        if r.is_err() {
+            m.end_unmount();
+        }
+        r
+    }
+
+    fn unmount_marked(&self, s: &Sleepable, m: &Arc<Mount>, force: bool) -> Result<(), Errno> {
         let Some(covered) = m.covered() else {
             // The root file system stays.
             return Err(Errno::EINVAL);

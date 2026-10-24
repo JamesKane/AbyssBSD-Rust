@@ -103,6 +103,11 @@ fn mount_root_from(s: &Sleepable, spec: &str) -> Result<(Arc<Mount>, Arc<storage
         return Err(Errno::ENOENT);
     }
     let name = dev.strip_prefix("/dev/").unwrap_or(dev);
+    // Not there yet: what the buses are still finding first
+    // (`vfs_mountroot_wait_if_neccessary`).
+    if storage::find(name).is_none() {
+        bus::root_mount_wait(s);
+    }
     let start = crate::time::now_ns();
     let disk = loop {
         if let Some(d) = storage::find(name) {

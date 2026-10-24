@@ -150,6 +150,24 @@ pub trait HostController: Send + Sync {
         hub: Option<HubInfo>,
     ) -> Result<(), UsbError>;
 
+    /// Gives configured bulk endpoints streams (USB 3.2 §8.12.1.4): up to
+    /// `streams` each, as many as the controller and every endpoint's
+    /// companion allow. Returns the count, stream IDs 1 to it; transfers
+    /// then name one ([`Transfer::stream`]). Nothing may be queued on
+    /// them.
+    ///
+    /// # Errors
+    ///
+    /// If an endpoint or the controller has no streams, or the
+    /// controller refused.
+    fn open_streams(
+        &self,
+        s: &Sleepable,
+        slot: SlotId,
+        endpoints: &[Endpoint],
+        streams: u16,
+    ) -> Result<u16, UsbError>;
+
     /// Frees the device's slot. Every transfer still outstanding on it
     /// completes with [`UsbError::Gone`].
     fn disable_device(&self, s: &Sleepable, slot: SlotId);
@@ -178,4 +196,8 @@ pub trait HostController: Send + Sync {
     /// Cancels every transfer queued on an endpoint; each completes with
     /// [`UsbError::Cancelled`].
     fn abort(&self, s: &Sleepable, slot: SlotId, endpoint: u8);
+
+    /// Cancels what is queued on one stream of an endpoint (each
+    /// completes with [`UsbError::Cancelled`]); the other streams' go on.
+    fn abort_stream(&self, s: &Sleepable, slot: SlotId, endpoint: u8, stream: u16);
 }

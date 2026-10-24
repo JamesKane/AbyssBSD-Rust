@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! The SCSI a USB disk needs (T10 SPC-4, SBC-3), and the Bulk-Only
-//! Transport's wrappers (USB Mass Storage Class BBB 1.0): command blocks
-//! built, and what the device returns parsed. Device data is untrusted:
+//! Transport's wrappers (USB Mass Storage Class BBB 1.0) and USB Attached
+//! SCSI's information units (T10 UAS-2): command blocks built, and what
+//! the device returns parsed. Device data is untrusted:
 //! parsing returns `None`, never panics.
 
 #![no_std]
@@ -34,6 +35,8 @@ pub mod op {
     pub const WRITE_16: u8 = 0x8a;
     /// SERVICE ACTION IN(16), for READ CAPACITY(16).
     pub const SERVICE_ACTION_IN_16: u8 = 0x9e;
+    /// REPORT LUNS.
+    pub const REPORT_LUNS: u8 = 0xa0;
 }
 
 /// A command descriptor block, up to 16 bytes.
@@ -139,6 +142,15 @@ impl Cdb {
                 c
             }
         }
+    }
+
+    /// REPORT LUNS of every logical unit, for `len` bytes.
+    #[must_use]
+    pub fn report_luns(len: u32) -> Self {
+        let mut c = Self::new(12);
+        c.bytes[0] = op::REPORT_LUNS;
+        c.bytes[6..10].copy_from_slice(&len.to_be_bytes());
+        c
     }
 
     /// SYNCHRONIZE CACHE(10) of the whole medium.
@@ -283,6 +295,28 @@ impl Capacity {
     }
 }
 
+/// The LUNs in REPORT LUNS data (SPC-4 §6.33), in SAM's single-level
+/// peripheral and flat forms; entries in other forms are skipped.
+pub fn report_luns(b: &[u8]) -> impl Iterator<Item = u16> + '_ {
+    let len = b
+        .get(..4)
+        .and_then(|l| l.try_into().ok())
+        .map_or(0, u32::from_be_bytes);
+    let len = usize::try_from(len).unwrap_or(usize::MAX);
+    let list = b.get(8..).unwrap_or(&[]);
+    let list = &list[..len.min(list.len())];
+    list.as_chunks::<8>().0.iter().filter_map(|e| {
+        if e[2..] != [0; 6] {
+            return None;
+        }
+        match e[0] >> 6 {
+            0 if e[0] == 0 => Some(u16::from(e[1])),
+            1 => Some(u16::from_be_bytes([e[0] & 0x3f, e[1]])),
+            _ => None,
+        }
+    })
+}
+
 /// Sense keys this driver acts on.
 pub mod key {
     /// No sense.
@@ -413,6 +447,208 @@ pub mod bbb {
                     _ => Status::Phase,
                 },
             })
+        }
+    }
+}
+
+/// SCSI status codes (SAM-5 §5.3).
+pub mod status {
+    /// Good.
+    pub const GOOD: u8 = 0x00;
+    /// Check condition: the sense data says why.
+    pub const CHECK_CONDITION: u8 = 0x02;
+    /// Busy.
+    pub const BUSY: u8 = 0x08;
+    /// Task set full: too many commands queued.
+    pub const TASK_SET_FULL: u8 = 0x28;
+}
+
+/// USB Attached SCSI (T10 UAS-2): its information units and the pipe
+/// usage descriptor that says which endpoint is which.
+pub mod uas {
+    use super::{Cdb, Sense};
+
+    /// The pipe usage descriptor's type, after each endpoint's.
+    pub const PIPE_USAGE: u8 = 0x24;
+
+    /// What an endpoint carries.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Pipe {
+        /// Command and task management IUs, host to device.
+        Command,
+        /// Sense, response, and ready IUs, device to host.
+        Status,
+        /// Data in.
+        DataIn,
+        /// Data out.
+        DataOut,
+    }
+
+    impl Pipe {
+        /// From a pipe usage descriptor's body (after length and type).
+        #[must_use]
+        pub fn parse(body: &[u8]) -> Option<Self> {
+            match body.first()? {
+                1 => Some(Self::Command),
+                2 => Some(Self::Status),
+                3 => Some(Self::DataIn),
+                4 => Some(Self::DataOut),
+                _ => None,
+            }
+        }
+    }
+
+    /// The IU identifiers.
+    const IU_COMMAND: u8 = 0x01;
+    const IU_SENSE: u8 = 0x03;
+    const IU_RESPONSE: u8 = 0x04;
+    const IU_TASK: u8 = 0x05;
+    const IU_READ_READY: u8 = 0x06;
+    const IU_WRITE_READY: u8 = 0x07;
+
+    /// A command IU's size with a CDB of up to 16 bytes.
+    pub const COMMAND_LEN: usize = 32;
+    /// A task management IU's size.
+    pub const TASK_LEN: usize = 16;
+    /// The most a status pipe read needs: a sense IU with 252 bytes of
+    /// sense data.
+    pub const STATUS_LEN: usize = 16 + 252;
+
+    /// A LUN in SAM's single-level form: peripheral addressing below 256,
+    /// flat addressing above.
+    fn lun_bytes(lun: u16) -> [u8; 8] {
+        let mut b = [0u8; 8];
+        let [hi, lo] = lun.to_be_bytes();
+        b[0] = if lun < 256 { 0 } else { 0x40 | (hi & 0x3f) };
+        b[1] = lo;
+        b
+    }
+
+    /// A command IU: `cdb` to `lun` as a simple task, tagged `tag`.
+    #[must_use]
+    pub fn command(tag: u16, lun: u16, cdb: &Cdb) -> [u8; COMMAND_LEN] {
+        let mut u = [0u8; COMMAND_LEN];
+        u[0] = IU_COMMAND;
+        u[2..4].copy_from_slice(&tag.to_be_bytes());
+        // Byte 4: priority 0, task attribute SIMPLE (0); byte 6: no
+        // additional CDB.
+        u[8..16].copy_from_slice(&lun_bytes(lun));
+        let c = cdb.as_bytes();
+        u[16..16 + c.len()].copy_from_slice(c);
+        u
+    }
+
+    /// Task management functions.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Function {
+        /// Abort one task, by tag.
+        AbortTask,
+        /// Abort every task on the LUN from this initiator.
+        AbortTaskSet,
+        /// Reset the logical unit.
+        LogicalUnitReset,
+        /// Ask whether a task is still in the task set.
+        QueryTask,
+    }
+
+    impl Function {
+        fn code(self) -> u8 {
+            match self {
+                Self::AbortTask => 0x01,
+                Self::AbortTaskSet => 0x02,
+                Self::LogicalUnitReset => 0x08,
+                Self::QueryTask => 0x80,
+            }
+        }
+    }
+
+    /// A task management IU, tagged `tag`, about task `managed` (for
+    /// the functions that name one).
+    #[must_use]
+    pub fn task(tag: u16, lun: u16, f: Function, managed: u16) -> [u8; TASK_LEN] {
+        let mut u = [0u8; TASK_LEN];
+        u[0] = IU_TASK;
+        u[2..4].copy_from_slice(&tag.to_be_bytes());
+        u[4] = f.code();
+        u[6..8].copy_from_slice(&managed.to_be_bytes());
+        u[8..16].copy_from_slice(&lun_bytes(lun));
+        u
+    }
+
+    /// A task management function's response code (UAS-2 §6.2.5).
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Response {
+        /// Function complete.
+        Complete,
+        /// Function succeeded (a query found the task).
+        Succeeded,
+        /// Anything else: invalid IU, not supported, failed, bad LUN,
+        /// overlapped tag.
+        Failed(u8),
+    }
+
+    /// What the status pipe returns.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Status {
+        /// The command ended: its SCSI status, and the sense data if the
+        /// device sent any (autosense).
+        Sense {
+            /// The task's tag.
+            tag: u16,
+            /// The SCSI status.
+            status: u8,
+            /// The sense data.
+            sense: Option<Sense>,
+        },
+        /// A task management function ended.
+        Response {
+            /// The function's tag.
+            tag: u16,
+            /// How.
+            code: Response,
+        },
+        /// Without streams: the device is ready to send the data in of
+        /// command `tag`.
+        ReadReady(u16),
+        /// Without streams: the device is ready for command `tag`'s data
+        /// out.
+        WriteReady(u16),
+    }
+
+    impl Status {
+        /// Parses a status pipe IU; `None` if it is not one.
+        #[must_use]
+        pub fn parse(b: &[u8]) -> Option<Self> {
+            let tag = u16::from_be_bytes(b.get(2..4)?.try_into().ok()?);
+            match *b.first()? {
+                IU_SENSE => {
+                    let status = *b.get(6)?;
+                    let len = usize::from(u16::from_be_bytes(b.get(14..16)?.try_into().ok()?));
+                    let data = b.get(16..)?;
+                    let sense = Sense::parse(data.get(..len.min(data.len()))?);
+                    Some(Self::Sense { tag, status, sense })
+                }
+                IU_RESPONSE => {
+                    let code = match *b.get(7)? {
+                        0x00 => Response::Complete,
+                        0x08 => Response::Succeeded,
+                        c => Response::Failed(c),
+                    };
+                    Some(Self::Response { tag, code })
+                }
+                IU_READ_READY => Some(Self::ReadReady(tag)),
+                IU_WRITE_READY => Some(Self::WriteReady(tag)),
+                _ => None,
+            }
+        }
+
+        /// Its tag.
+        #[must_use]
+        pub fn tag(&self) -> u16 {
+            match *self {
+                Self::Sense { tag, .. } | Self::Response { tag, .. } => tag,
+                Self::ReadReady(t) | Self::WriteReady(t) => t,
+            }
         }
     }
 }

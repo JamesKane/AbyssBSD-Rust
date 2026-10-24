@@ -21,6 +21,7 @@ pub mod driver;
 pub mod gate;
 pub mod manager;
 pub mod platform;
+mod roothold;
 mod sysctl;
 pub mod types;
 
@@ -31,6 +32,7 @@ pub use driver::{
 pub use gate::{Gate, GateGuard, Revoked};
 pub use manager::{AttachRequestError, DetachError, Manager, Options, init, manager};
 pub use platform::Platform;
+pub use roothold::{RootHold, root_mount_hold, root_mount_wait};
 pub use types::{
     Announce, AttachError, Busy, Concurrency, DetachReason, DeviceId, Ident, Ids, Need, NodeState,
     Resource, ResourceError, StopReason, TestId, TestIdent, WaitReason,

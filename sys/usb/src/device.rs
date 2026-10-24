@@ -9,7 +9,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use devtree::ids::{UsbIdent, UsbPlace};
 use sched::Sleepable;
-use usb::descriptor::{Configuration, DeviceDescriptor, Interface};
+use usb::descriptor::{Configuration, DeviceDescriptor, Endpoint, Interface};
 use usb::{Setup, Speed};
 use vm::object::IoBuf;
 
@@ -272,10 +272,36 @@ impl UsbDevice {
             .map(|_| ())
     }
 
+    /// Gives bulk endpoints streams: the count, stream IDs 1 to it
+    /// ([`HostController::open_streams`]).
+    ///
+    /// # Errors
+    ///
+    /// If they cannot have streams.
+    pub fn open_streams(
+        &self,
+        s: &Sleepable,
+        endpoints: &[Endpoint],
+        streams: u16,
+    ) -> Result<u16, UsbError> {
+        let slot = self.slot.ok_or(UsbError::Invalid)?;
+        if self.is_gone() {
+            return Err(UsbError::Gone);
+        }
+        self.hc.open_streams(s, slot, endpoints, streams)
+    }
+
     /// Cancels everything queued on an endpoint.
     pub fn abort(&self, s: &Sleepable, endpoint: u8) {
         if let Some(slot) = self.slot {
             self.hc.abort(s, slot, endpoint);
+        }
+    }
+
+    /// Cancels what is queued on one stream of an endpoint.
+    pub fn abort_stream(&self, s: &Sleepable, endpoint: u8, stream: u16) {
+        if let Some(slot) = self.slot {
+            self.hc.abort_stream(s, slot, endpoint, stream);
         }
     }
 }
@@ -321,6 +347,17 @@ impl UsbInterface {
             serial: d.serial.clone(),
             desc: d.description(),
         }
+    }
+
+    /// The class descriptors that followed endpoint `e`'s, as `(type,
+    /// bytes)`.
+    pub fn endpoint_descriptors<'a>(
+        &'a self,
+        e: &'a Endpoint,
+    ) -> impl Iterator<Item = (u8, &'a [u8])> + 'a {
+        e.extra
+            .iter()
+            .filter_map(|(t, r)| Some((*t, self.device.raw_config.get(r.clone())?)))
     }
 
     /// The class descriptors that followed the interface descriptor, as

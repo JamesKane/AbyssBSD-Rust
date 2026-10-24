@@ -15,7 +15,7 @@ use alloc::boxed::Box;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::any::Any;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use abi::errno::Errno;
 use sched::Sleepable;
@@ -178,6 +178,8 @@ pub struct Mount {
     /// Its root vnode, once looked up, so crossing into the file system
     /// costs no table lookup (FreeBSD's `mnt_rootvnode`).
     root: Once<Weak<Vnode>>,
+    /// An unmount is under way (`MNTK_UNMOUNT`).
+    unmounting: AtomicBool,
 }
 
 impl core::fmt::Debug for Mount {
@@ -232,7 +234,18 @@ impl Mount {
             rename: Mutex::new(&RENAME, ()),
             covered: PreemptLock::new(None),
             root: Once::new(),
+            unmounting: AtomicBool::new(false),
         })
+    }
+
+    /// Marks an unmount under way: `false` if one already is.
+    pub(crate) fn begin_unmount(&self) -> bool {
+        !self.unmounting.swap(true, Ordering::AcqRel)
+    }
+
+    /// An unmount failed: another may try.
+    pub(crate) fn end_unmount(&self) {
+        self.unmounting.store(false, Ordering::Release);
     }
 
     #[must_use]

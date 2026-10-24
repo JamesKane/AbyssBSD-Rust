@@ -30,6 +30,10 @@ pub struct Transfer {
     /// [`UsbError::TimedOut`]; 0 for none (an interrupt endpoint polled
     /// until data comes).
     pub timeout_ms: u32,
+    /// The bulk stream it goes on, on an endpoint with streams
+    /// ([`HostController::open_streams`](crate::HostController::open_streams));
+    /// 0 otherwise.
+    pub stream: u16,
     done: Option<Done>,
 }
 
@@ -38,6 +42,7 @@ impl core::fmt::Debug for Transfer {
         f.debug_struct("Transfer")
             .field("len", &self.buf.len())
             .field("timeout_ms", &self.timeout_ms)
+            .field("stream", &self.stream)
             .finish_non_exhaustive()
     }
 }
@@ -52,8 +57,16 @@ impl Transfer {
         Self {
             buf,
             timeout_ms,
+            stream: 0,
             done: Some(Box::new(done)),
         }
+    }
+
+    /// The same, on bulk stream `stream`.
+    #[must_use]
+    pub fn on_stream(mut self, stream: u16) -> Self {
+        self.stream = stream;
+        self
     }
 
     /// Its length.
@@ -123,6 +136,12 @@ impl Waiter {
             me.done.store(true, Ordering::Release);
             me.queue.wake_all();
         })
+    }
+
+    /// Whether the transfer has completed.
+    #[must_use]
+    pub fn is_done(&self) -> bool {
+        self.done.load(Ordering::Acquire)
     }
 
     /// Sleeps until the transfer completes; returns its buffer and

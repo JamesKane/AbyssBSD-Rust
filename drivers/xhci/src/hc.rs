@@ -149,8 +149,44 @@ impl InFlight {
     }
 }
 
+/// An endpoint's transfer rings: one, or one per stream.
+enum Rings {
+    One(ProducerRing<Trbs, InFlight>),
+    /// Stream `i`'s ring at `rings[i - 1]`, and the linear stream context
+    /// array the endpoint context points at.
+    Streams {
+        _array: DmaCoherent<u32>,
+        rings: Vec<ProducerRing<Trbs, InFlight>>,
+    },
+}
+
+impl Rings {
+    /// Stream `stream`'s ring (0 without streams).
+    fn get_mut(&mut self, stream: u16) -> Option<&mut ProducerRing<Trbs, InFlight>> {
+        match (self, stream) {
+            (Self::One(r), 0) => Some(r),
+            (Self::Streams { rings, .. }, n) if n > 0 => rings.get_mut(usize::from(n - 1)),
+            _ => None,
+        }
+    }
+
+    /// Every ring, with its stream ID (0 without streams).
+    fn all_mut(&mut self) -> impl Iterator<Item = (u16, &mut ProducerRing<Trbs, InFlight>)> {
+        let (one, many) = match self {
+            Self::One(r) => (Some(r), None),
+            Self::Streams { rings, .. } => (None, Some(rings)),
+        };
+        one.into_iter().map(|r| (0, r)).chain(
+            many.into_iter()
+                .flat_map(|v| v.iter_mut())
+                .zip(1u16..)
+                .map(|(r, n)| (n, r)),
+        )
+    }
+}
+
 struct Ep {
-    ring: ProducerRing<Trbs, InFlight>,
+    rings: Rings,
     control: bool,
     /// Its max packet size, for TD sizes.
     max_packet: u16,
@@ -530,7 +566,7 @@ impl Hc {
                 };
                 if ep.control && code == CompletionCode::ShortPacket {
                     // A short data stage: the status stage still runs.
-                    if let Some((f, k, len)) = ep.ring.find_mut(pointer)
+                    if let Some((f, k, len)) = ep.rings.get_mut(0).and_then(|r| r.find_mut(pointer))
                         && k + 1 < len
                     {
                         f.short = Some(f.actual_at(k, residue));
@@ -546,7 +582,9 @@ impl Hc {
                     // Whoever stopped the endpoint completes what is left.
                     return;
                 }
-                if let Some(m) = ep.ring.complete(pointer) {
+                // With streams, the event does not say which: the TRB's
+                // ring does.
+                if let Some(m) = ep.rings.all_mut().find_map(|(_, r)| r.complete(pointer)) {
                     let f = m.tag;
                     let r = if code.is_ok() {
                         Ok(f.short.unwrap_or_else(|| f.actual_at(m.trb, residue)))
@@ -638,16 +676,26 @@ impl Hc {
         Dci::from_address(address, false)
     }
 
-    /// Cancels everything on an endpoint: stops it (unless it is halted
-    /// or stopped already), completes what is queued (`TimedOut` for
-    /// what expired, `why` for the rest), and moves its dequeue pointer
-    /// past them.
-    fn cancel(&self, s: &Sleepable, slot: u8, dci: Dci, why: UsbError, stop: bool) {
+    /// Cancels everything on an endpoint, or on one of its streams: stops
+    /// it (unless it is halted or stopped already), completes what is
+    /// queued (`TimedOut` for what expired, `why` for the rest), and moves
+    /// the dequeue pointer past them. Other streams are rung again, so
+    /// what they have queued goes on.
+    fn cancel(
+        &self,
+        s: &Sleepable,
+        slot: u8,
+        dci: Dci,
+        why: UsbError,
+        stop: bool,
+        only: Option<u16>,
+    ) {
         if stop {
             let _ = self.exec(s, command::stop_endpoint(slot, dci.get()));
         }
         let mut dropped = Vec::new();
-        let deq = {
+        let mut others = Vec::new();
+        let deqs: Vec<(u16, (u64, bool))> = {
             let mut g = match self.slots.get(usize::from(slot)) {
                 Some(c) => c.lock(),
                 None => return,
@@ -659,14 +707,30 @@ impl Hc {
             else {
                 return;
             };
-            dropped.extend(ep.ring.drain());
-            ep.ring.dequeue()
+            ep.rings
+                .all_mut()
+                .filter_map(|(n, r)| {
+                    if only.is_some_and(|o| o != n) {
+                        if !r.is_idle() {
+                            others.push(n);
+                        }
+                        return None;
+                    }
+                    dropped.extend(r.drain());
+                    Some((n, r.dequeue()))
+                })
+                .collect()
         };
         for f in dropped {
             let r = if f.expired { UsbError::TimedOut } else { why };
             f.finish(Err(r));
         }
-        let _ = self.exec(s, command::set_tr_dequeue(slot, dci.get(), deq.0, deq.1, 0));
+        for (n, (deq, cycle)) in deqs {
+            let _ = self.exec(s, command::set_tr_dequeue(slot, dci.get(), deq, cycle, n));
+        }
+        for n in others {
+            self.regs.doorbell(slot, r::doorbell(dci.get(), n));
+        }
     }
 
     /// One watchdog tick: times out transfers whose time ran out.
@@ -677,26 +741,29 @@ impl Hc {
             let Some(sl) = g.as_mut() else { continue };
             for (d, ep) in sl.eps.iter_mut().enumerate() {
                 let Some(ep) = ep else { continue };
-                let mut hit = false;
-                for f in ep.ring.outstanding_mut() {
-                    if let Some(left) = f.left_ms.as_mut() {
-                        *left = left.saturating_sub(TICK_MS);
-                        if *left == 0 && !f.expired {
-                            f.expired = true;
-                            hit = true;
+                for (n, r) in ep.rings.all_mut() {
+                    let mut hit = false;
+                    for f in r.outstanding_mut() {
+                        if let Some(left) = f.left_ms.as_mut() {
+                            *left = left.saturating_sub(TICK_MS);
+                            if *left == 0 && !f.expired {
+                                f.expired = true;
+                                hit = true;
+                            }
                         }
                     }
-                }
-                if hit
-                    && let (Ok(slot), Some(dci)) =
-                        (u8::try_from(i), u8::try_from(d).ok().and_then(Dci::new))
-                {
-                    expired.push((slot, dci));
+                    if hit
+                        && let (Ok(slot), Some(dci)) =
+                            (u8::try_from(i), u8::try_from(d).ok().and_then(Dci::new))
+                    {
+                        expired.push((slot, dci, n));
+                    }
                 }
             }
         }
-        for (slot, dci) in expired {
-            self.cancel(s, slot, dci, UsbError::Cancelled, true);
+        // Only the stream that ran out: the others' commands go on.
+        for (slot, dci, n) in expired {
+            self.cancel(s, slot, dci, UsbError::Cancelled, true, Some(n));
         }
     }
 
@@ -719,7 +786,9 @@ impl Hc {
         for cell in &self.slots {
             if let Some(mut sl) = cell.lock().take() {
                 for ep in sl.eps.iter_mut().flatten() {
-                    gone.extend(ep.ring.drain());
+                    for (_, r) in ep.rings.all_mut() {
+                        gone.extend(r.drain());
+                    }
                 }
             }
         }
@@ -1033,13 +1102,98 @@ impl HostController for Hc {
                     .find(|e| Self::dci(e.address) == Some(dci))
                     .map_or(0, Endpoint::max_packet);
                 *e = Some(Ep {
-                    ring,
+                    rings: Rings::One(ring),
                     control: false,
                     max_packet: mp,
                 });
             }
         }
         Ok(())
+    }
+
+    fn open_streams(
+        &self,
+        s: &Sleepable,
+        slot: SlotId,
+        endpoints: &[Endpoint],
+        streams: u16,
+    ) -> Result<u16, UsbError> {
+        // A linear array of a power of two entries, stream 0 reserved:
+        // as many as asked, the controller's MaxPSASize, and each
+        // companion allow (FreeBSD's XHCI_MAX_STREAMS is 16).
+        let ctrl = 1u32 << (u32::from(self.params.max_psa) + 1).min(16);
+        let dev = endpoints
+            .iter()
+            .map(|e| match (e.transfer_type(), e.companion) {
+                (TransferType::Bulk, Some(c)) => c.max_streams(),
+                _ => 0,
+            })
+            .min()
+            .unwrap_or(0);
+        if self.params.max_psa == 0 || dev == 0 || streams == 0 {
+            return Err(UsbError::Invalid);
+        }
+        let want = (u32::from(streams) + 1).next_power_of_two();
+        let entries = want.min(ctrl).min(dev.next_power_of_two()).max(2);
+        let n = usize::try_from(entries).map_err(|_| UsbError::Invalid)?;
+        let mut built = Vec::new();
+        let input_addr = {
+            let g = self
+                .slots
+                .get(usize::from(slot.0))
+                .ok_or(UsbError::Invalid)?
+                .lock();
+            let sl = g.as_ref().ok_or(UsbError::Invalid)?;
+            Self::clear(&sl.input);
+            let mut flags = 0u32;
+            for e in endpoints {
+                let dci = Self::dci(e.address).ok_or(UsbError::Invalid)?;
+                let array = self
+                    .tag
+                    .coherent::<u32>(4 * n)
+                    .map_err(|_| UsbError::NoMemory)?;
+                let mut rings = Vec::new();
+                for i in 1..n {
+                    let ring = ProducerRing::new(trbs(&self.tag, RING_TRBS)?);
+                    let (deq, dcs) = ring.dequeue();
+                    for (k, w) in context::stream_context(deq, dcs).into_iter().enumerate() {
+                        array.write(4 * i + k, w);
+                    }
+                    rings.push(ring);
+                }
+                let mut ctx = self.endpoint_context(sl.speed, e, &rings[0]);
+                ctx.max_primary_streams = context::max_primary_streams(entries);
+                ctx.lsa = true;
+                ctx.dequeue = array.bus_addr();
+                ctx.dcs = false;
+                Self::write_ctx(&sl.input, self.csz.input_endpoint(dci), ctx.encode());
+                flags |= 1 << dci.get();
+                built.push((dci, array, rings));
+            }
+            // Dropped and added in one command: reconfigured.
+            let mut sc = SlotContext::decode(&Self::read_ctx(&sl.out, self.csz.device_slot()));
+            sc.state = 0;
+            sc.address = 0;
+            Self::write_ctx(&sl.input, 0, input_control(flags, flags | 1, 0, 0, 0));
+            Self::write_ctx(&sl.input, self.csz.input_slot(), sc.encode());
+            sl.input.bus_addr()
+        };
+        self.exec_ok(s, command::configure_endpoint(slot.0, input_addr))?;
+        let mut g = self
+            .slots
+            .get(usize::from(slot.0))
+            .ok_or(UsbError::Invalid)?
+            .lock();
+        let sl = g.as_mut().ok_or(UsbError::Invalid)?;
+        for (dci, array, rings) in built {
+            if let Some(Some(ep)) = sl.eps.get_mut(usize::from(dci.get())) {
+                ep.rings = Rings::Streams {
+                    _array: array,
+                    rings,
+                };
+            }
+        }
+        u16::try_from(n - 1).map_err(|_| UsbError::Invalid)
     }
 
     fn disable_device(&self, s: &Sleepable, slot: SlotId) {
@@ -1052,7 +1206,9 @@ impl HostController for Hc {
         if let Some(mut sl) = sl {
             let mut gone = Vec::new();
             for ep in sl.eps.iter_mut().flatten() {
-                gone.extend(ep.ring.drain());
+                for (_, r) in ep.rings.all_mut() {
+                    gone.extend(r.drain());
+                }
             }
             for f in gone {
                 f.finish(Err(UsbError::Gone));
@@ -1121,6 +1277,11 @@ impl HostController for Hc {
             return reject(unmapped(t, data), UsbError::Invalid);
         };
         let mp = ep.max_packet;
+        let stream = t.stream;
+        let Some(ring) = ep.rings.get_mut(stream) else {
+            drop(g);
+            return reject(unmapped(t, data), UsbError::Invalid);
+        };
         let mut chain = Vec::new();
         let mut lens = Vec::new();
         let total: u32 = segs.iter().map(|&(_, l)| l).sum();
@@ -1182,16 +1343,16 @@ impl HostController for Hc {
             let InFlight { t, data, .. } = f;
             return reject(unmapped(t, data), UsbError::Invalid);
         }
-        if ep.ring.free() < chain.len() {
+        if ring.free() < chain.len() {
             drop(g);
             let InFlight { t, data, .. } = f;
             return reject(unmapped(t, data), UsbError::Busy);
         }
         // Checked above: the push cannot fail (and a failure would
         // complete the dropped transfer as cancelled).
-        let _ = ep.ring.push(&chain, f);
+        let _ = ring.push(&chain, f);
         drop(g);
-        self.regs.doorbell(slot.0, r::doorbell(dci.get(), 0));
+        self.regs.doorbell(slot.0, r::doorbell(dci.get(), stream));
         Ok(())
     }
 
@@ -1202,13 +1363,19 @@ impl HostController for Hc {
             (CompletionCode::Success | CompletionCode::ContextState, _) => {}
             (c, _) => return Err(error(c)),
         }
-        self.cancel(s, slot.0, dci, UsbError::Cancelled, false);
+        self.cancel(s, slot.0, dci, UsbError::Cancelled, false, None);
         Ok(())
     }
 
     fn abort(&self, s: &Sleepable, slot: SlotId, endpoint: u8) {
         if let Some(dci) = Self::dci(endpoint) {
-            self.cancel(s, slot.0, dci, UsbError::Cancelled, true);
+            self.cancel(s, slot.0, dci, UsbError::Cancelled, true, None);
+        }
+    }
+
+    fn abort_stream(&self, s: &Sleepable, slot: SlotId, endpoint: u8, stream: u16) {
+        if let Some(dci) = Self::dci(endpoint) {
+            self.cancel(s, slot.0, dci, UsbError::Cancelled, true, Some(stream));
         }
     }
 }
@@ -1285,7 +1452,7 @@ impl Hc {
         let input_addr = input.bus_addr();
         let mut eps: Vec<Option<Ep>> = (0..32).map(|_| None).collect();
         eps[1] = Some(Ep {
-            ring,
+            rings: Rings::One(ring),
             control: true,
             max_packet: d.speed.default_max_packet(),
         });

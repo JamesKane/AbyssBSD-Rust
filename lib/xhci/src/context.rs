@@ -392,6 +392,27 @@ impl EndpointContext {
     }
 }
 
+/// A stream context (xHCI 1.2 §6.2.4.1): stream `i`'s transfer ring, as a
+/// primary ring (SCT 1), its dequeue pointer and cycle state.
+#[must_use]
+pub fn stream_context(dequeue: u64, dcs: bool) -> [u32; 4] {
+    let dq = (dequeue & !0xf) | (1 << 1) | u64::from(dcs);
+    let b = dq.to_le_bytes();
+    [
+        u32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+        u32::from_le_bytes([b[4], b[5], b[6], b[7]]),
+        0,
+        0,
+    ]
+}
+
+/// The MaxPStreams field for a linear stream context array of `entries`
+/// (a power of two, 2 to 2^16): log2 of it minus one.
+#[must_use]
+pub fn max_primary_streams(entries: u32) -> u8 {
+    byte(entries.max(2).ilog2() - 1)
+}
+
 /// The Interval field for a periodic endpoint (xHCI 1.2 §6.2.3.6): the
 /// service period is 2^Interval × 125 µs. `b_interval` is the endpoint
 /// descriptor's `bInterval`. Control and bulk endpoints get 0.

@@ -97,6 +97,9 @@ impl Bus {
         // As FreeBSD's usb_bus_attach, which runs on the USB process once
         // the boot's device probe is done: the root hub, then exploring.
         let m = ::bus::manager();
+        // Root waits for the first exploring (FreeBSD's `bus_roothold`,
+        // taken at `usb_attach`).
+        let hold = ::bus::root_mount_hold(alloc::format!("usbus{}", self.unit));
         m.wait_idle(s);
         let e = Arc::clone(&self.explorer);
         if e.stop.load(Ordering::Acquire) {
@@ -122,6 +125,22 @@ impl Bus {
             Vec::new(),
             &[],
         );
+        // The first pass, whatever has changed yet; then root may mount
+        // (`usb_root_mount_rel` after `usb_bus_explore`).
+        // The root hub's driver first: until it attaches there is nothing
+        // to explore. A hub found in a pass is explored in the next, until
+        // none is new (FreeBSD's `uhub_explore` goes down into them at
+        // once).
+        m.wait_settled(node, s);
+        loop {
+            e.pending.store(false, Ordering::Release);
+            let hubs = self.hubs.lock().len();
+            self.explore(s);
+            if self.hubs.lock().len() == hubs {
+                break;
+            }
+        }
+        drop(hold);
         loop {
             e.queue.wait_until(s, || {
                 e.pending.load(Ordering::Acquire) || e.stop.load(Ordering::Acquire)
