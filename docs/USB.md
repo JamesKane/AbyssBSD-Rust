@@ -387,7 +387,11 @@ Implemented (`sys/vt`, `kernel/src/vtcons.rs`):
 - `KDENABIO` gives the calling thread the I/O ports (root only, `PRIV_IO`; there is no securelevel,
   as FreeBSD's default -1 would have it): on amd64, IOPL 3 in its flags as it returns to user mode,
   kept across `fork` and cleared by `exec`. `KDDISABIO` takes them away. On arm64 both do nothing.
-- Not yet: the `FBIO_*` requests, and the bell (off by default, `kern.vt.enable_bell`).
+- The frame buffer requests (`vt_fb_ioctl`, as `vt_efifb` fills `fb_info`): `FBIOGTYPE`
+  (`FBTYPE_EFIFB`, the depth from the color masks, 16 colors), `FBIO_GETLINEWIDTH`,
+  `FBIO_GETRGBOFFS`, `FBIO_GETWINORG` and `FBIO_GETDISPSTART` (0), and `FBIO_BLANK`, which blacks
+  the display out and leaves the cells as drawn, so they come back as they change.
+- Not yet: mapping the frame buffer through `ttyv*` (`vt_fb_mmap`, for X's `scfb`, at P6), and the bell (off by default, `kern.vt.enable_bell`).
 
 ## 8. USB mass storage
 

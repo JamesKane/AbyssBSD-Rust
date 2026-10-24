@@ -19,6 +19,7 @@ pub mod dirent;
 pub mod errno;
 pub mod evdev;
 pub mod exec;
+pub mod fbio;
 pub mod fcntl;
 pub mod ioctl;
 pub mod kbio;

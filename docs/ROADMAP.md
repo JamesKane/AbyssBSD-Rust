@@ -1316,8 +1316,8 @@ U.0 ─► U.1 ─► U.2 ─┬─► U.3 ─► U.4 ─┬─► U.6
   (`cargo xtask --remote perf --suite vt`, 10 runs a side in bhyve) gives 0.695 of FreeBSD's time:
   `vt.cat` 0.642, `vt.color` 0.693, `vt.hidden` 0.668, `vt.scroll` 0.786, all wins (the same with
   fonts). Since 2026-10-24: fonts per window (`PIO_VFONT`, so `vidcontrol -f`) and
-  `CONS_SETKBD`/`CONS_RELKBD`, and `KDENABIO`. Left: the bell (`devctl`), the `FBIO_*` requests
-  and mapping the framebuffer (X's `scfb`), and `kbdcontrol`/`vidcontrol` runs at P6 (they are
+  `CONS_SETKBD`/`CONS_RELKBD`, `KDENABIO`, and the `FBIO_*` requests. Left: the bell (`devctl`),
+  mapping the framebuffer (X's `scfb`, P6), and `kbdcontrol`/`vidcontrol` runs at P6 (they are
   dynamically linked).
 
 **U.5 USB mass storage.**

@@ -604,6 +604,25 @@ impl Vt {
         }
     }
 
+    /// Fills the display with black (`FBIO_BLANK`, `vt_fb_blank`),
+    /// band by band while not held; the cells stay as drawn, so they
+    /// come back as they change.
+    fn blank_display(&self, s: &Sleepable) {
+        let mut f = self.renderer.lock(s);
+        for band in 0.. {
+            let h = self.holds.lock();
+            if *h != 0 || !f.renderer.blank(band) {
+                break;
+            }
+        }
+    }
+
+    /// The frame buffer's description (`FBIOGTYPE`), scan line, and
+    /// colors' places.
+    fn fb_info(&self, s: &Sleepable) -> (abi::fbio::Fbtype, u32, abi::fbio::FbRgboffs) {
+        self.renderer.lock(s).renderer.fb_info()
+    }
+
     /// Draws the visible window's changes (`vt_flush`). Without `s`
     /// (at start, and on the panic path), only if the locks are free.
     fn flush(&self, s: Option<&Sleepable>) {
@@ -669,6 +688,7 @@ impl Vt {
             h
         };
         if invalid {
+            renderer.forget();
             for band in 0.. {
                 let Some(_h) = unheld() else { return };
                 if !renderer.blank(band) {

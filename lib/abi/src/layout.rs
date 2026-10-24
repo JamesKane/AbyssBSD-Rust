@@ -6,7 +6,9 @@
 //! (`offset_of!`, `size_of`), so the check compares what the kernel will
 //! actually use against what FreeBSD's C compiler computes.
 
-use crate::{bus, consio, evdev, kbio, md, mouse, signal, socket, stat, time, ucontext, vdso};
+use crate::{
+    bus, consio, evdev, fbio, kbio, md, mouse, signal, socket, stat, time, ucontext, vdso,
+};
 
 /// Architectures a layout applies to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,6 +71,7 @@ pub const CONSTANTS: &[&[ConstValue]] = &[
     crate::kbio::CONSTANTS,
     crate::mouse::CONSTANTS,
     crate::consio::CONSTANTS,
+    crate::fbio::CONSTANTS,
     crate::sysarch::CONSTANTS,
     crate::exec::CONSTANTS,
     crate::mman::CONSTANTS,
@@ -239,6 +242,23 @@ pub static LAYOUTS: &[StructLayout] = &[
         glyph_count => "glyph_count",
         width => "width",
         height => "height",
+    }),
+    layout!(fbio::Fbtype, "struct fbtype", ["sys/types.h", "sys/fbio.h"], All, {
+        fb_type => "fb_type",
+        fb_height => "fb_height",
+        fb_width => "fb_width",
+        fb_depth => "fb_depth",
+        fb_cmsize => "fb_cmsize",
+        fb_size => "fb_size",
+    }),
+    layout!(fbio::FbRgboffs, "struct fb_rgboffs", ["sys/types.h", "sys/fbio.h"], All, {
+        red => "red",
+        green => "green",
+        blue => "blue",
+    }),
+    layout!(fbio::VideoDisplayStart, "video_display_start_t", ["sys/types.h", "sys/fbio.h"], All, {
+        x => "x",
+        y => "y",
     }),
     layout!(consio::VtMode, "struct vt_mode", ["sys/types.h", "sys/consio.h"], All, {
         mode => "mode",

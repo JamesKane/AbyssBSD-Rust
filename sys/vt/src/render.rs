@@ -13,6 +13,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use abi::fbio::{FBTYPE_EFIFB, FbRgboffs, Fbtype};
 use fb_console::PixelLayout;
 use vtterm::{Cell, Pos, cell_char, cell_format, colors, format};
 
@@ -123,6 +124,39 @@ impl Renderer {
         (self.display.width, self.display.height)
     }
 
+    /// The frame buffer as `FBIOGTYPE` gives it, with its scan line in
+    /// bytes and its colors' lowest bits (`vt_efifb_init`): 32 bits a
+    /// pixel, 16 colors.
+    #[must_use]
+    pub fn fb_info(&self) -> (Fbtype, u32, FbRgboffs) {
+        let d = &self.display;
+        let (red, green, blue, reserved) = match d.layout {
+            PixelLayout::Rgbx => (0xff, 0xff00, 0xff_0000, 0xff00_0000),
+            PixelLayout::Bgrx => (0xff_0000, 0xff00, 0xff, 0xff00_0000),
+            PixelLayout::Masks { red, green, blue } => (red, green, blue, 0),
+        };
+        let all: u32 = red | green | blue | reserved;
+        let depth = 32 - all.leading_zeros();
+        let stride = d.stride.saturating_mul(4);
+        let int = |v: u32| i32::try_from(v).unwrap_or(i32::MAX);
+        // `ffs(mask) - 1`.
+        let off = |m: u32| if m == 0 { -1 } else { int(m.trailing_zeros()) };
+        let t = Fbtype {
+            fb_type: FBTYPE_EFIFB,
+            fb_height: int(d.height),
+            fb_width: int(d.width),
+            fb_depth: int(depth),
+            fb_cmsize: 16,
+            fb_size: int(d.height.saturating_mul(stride)),
+        };
+        let o = FbRgboffs {
+            red: off(red),
+            green: off(green),
+            blue: off(blue),
+        };
+        (t, stride, o)
+    }
+
     /// Draws in `face` from now on; `true` if that is a change, after
     /// which the screen must be [invalidated](Self::invalidate).
     pub fn set_face(&mut self, face: &Face) -> bool {
@@ -158,14 +192,20 @@ impl Renderer {
     /// Forgets what is on the screen and blanks it, so the next frame
     /// draws every cell (`VDF_INVALID`).
     pub fn invalidate(&mut self) {
+        self.forget();
         let mut band = 0;
         while self.blank(band) {
             band += 1;
         }
     }
 
-    /// Blanks band `band` of [`BAND`] pixel rows, and forgets what was
-    /// drawn with the first; `false` past the display.
+    /// Forgets what was drawn: the next frame draws every cell.
+    pub fn forget(&mut self) {
+        self.drawn.fill(NOTHING);
+    }
+
+    /// Blanks band `band` of [`BAND`] pixel rows (`vt_fb_blank` in
+    /// parts); `false` past the display.
     pub fn blank(&mut self, band: usize) -> bool {
         let black = self.cmap[0];
         let (w, h, stride) = (
@@ -175,9 +215,6 @@ impl Renderer {
         );
         if band * BAND >= h {
             return false;
-        }
-        if band == 0 {
-            self.drawn.fill(NOTHING);
         }
         let rows = self.display.pixels.chunks_mut(stride).take(h);
         for row in rows.skip(band * BAND).take(BAND) {

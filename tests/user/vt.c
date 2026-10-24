@@ -7,7 +7,8 @@
  * switching mode (VT_SETMODE), the history size, the screen map, the
  * mouse cursor, a font of the window's own (PIO_VFONT), which sizes it,
  * releasing the console's keyboard and taking it back (CONS_RELKBD,
- * CONS_SETKBD), I/O port access (KDENABIO, KDDISABIO), and switching (VT_ACTIVATE, VT_WAITACTIVE) to the window and back,
+ * CONS_SETKBD), I/O port access (KDENABIO, KDDISABIO), the frame
+ * buffer's description (FBIO_*), and switching (VT_ACTIVATE, VT_WAITACTIVE) to the window and back,
  * which only an open window allows.
  *
  * Runs on FreeBSD too (as root, under vt, with ttyv2 not in use); the
@@ -131,6 +132,10 @@ main(void)
 	scrmap_t sm;
 	mouse_info_t mi;
 	keyboard_info_t ki;
+	struct fbtype fbt;
+	struct fb_rgboffs rgb;
+	video_display_start_t ds;
+	u_int line;
 	video_info_t mode;
 	int fd, active, v, i, closed;
 
@@ -175,6 +180,28 @@ main(void)
 	CHECK(req(fd, KDSKBSTATE, 0) == 0, "%s", strerror(errno));
 	CHECK(ioctl(fd, KDGKBTYPE, &v) == 0, "%s", strerror(errno));
 	CHECK(ioctl(fd, CONS_MODEINFO, &mode) == 0, "%s", strerror(errno));
+
+	/* The frame buffer, the size TIOCGWINSZ gives in pixels. */
+	CHECK(ioctl(fd, TIOCGWINSZ, &ws) == 0, "%s", strerror(errno));
+	memset(&fbt, 0xff, sizeof(fbt));
+	CHECK(ioctl(fd, FBIOGTYPE, &fbt) == 0 && fbt.fb_width == ws.ws_xpixel &&
+	    fbt.fb_height == ws.ws_ypixel && fbt.fb_depth > 0 &&
+	    fbt.fb_cmsize == 16, "fbtype %d %dx%d depth %d cmsize %d",
+	    fbt.fb_type, fbt.fb_width, fbt.fb_height, fbt.fb_depth,
+	    fbt.fb_cmsize);
+	CHECK(ioctl(fd, FBIO_GETLINEWIDTH, &line) == 0 &&
+	    line >= (u_int)fbt.fb_width * 4 &&
+	    fbt.fb_size == (int)line * fbt.fb_height, "line %u size %d", line,
+	    fbt.fb_size);
+	line = 7;
+	CHECK(ioctl(fd, FBIO_GETWINORG, &line) == 0 && line == 0, "origin %u",
+	    line);
+	ds.x = ds.y = 7;
+	CHECK(ioctl(fd, FBIO_GETDISPSTART, &ds) == 0 && ds.x == 0 && ds.y == 0,
+	    "start %d, %d", ds.x, ds.y);
+	CHECK(ioctl(fd, FBIO_GETRGBOFFS, &rgb) == 0 && rgb.green == 8 &&
+	    rgb.red + rgb.blue == 16, "offsets %d %d %d", rgb.red, rgb.green,
+	    rgb.blue);
 
 	/* I/O port access: root only; on amd64, the ports open and close. */
 	v = in_child(enabio_unprivileged, fd);

@@ -16,6 +16,9 @@ use core::sync::atomic::Ordering;
 
 use abi::consio::*;
 use abi::errno::Errno;
+use abi::fbio::{
+    FBIO_BLANK, FBIO_GETDISPSTART, FBIO_GETLINEWIDTH, FBIO_GETRGBOFFS, FBIO_GETWINORG, FBIOGTYPE,
+};
 use abi::kbio::{
     GETFKEY, GIO_DEADKEYMAP, GIO_KEYMAP, K_CODE, K_RAW, K_XLATE, KBADDKBD, KBRELKBD, KDDISABIO,
     KDENABIO, KDGETLED, KDGETMODE, KDGETREPEAT, KDGKBINFO, KDGKBMODE, KDGKBSTATE, KDGKBTYPE,
@@ -41,6 +44,14 @@ fn put_int(arg: &mut [u8], v: i32) {
     if let Some(b) = arg.get_mut(..4) {
         b.copy_from_slice(&v.to_ne_bytes());
     }
+}
+
+/// Copies `b` out; `EINVAL` if the argument is short.
+fn put(arg: &mut [u8], b: &[u8]) -> Result<(), Errno> {
+    arg.get_mut(..b.len())
+        .ok_or(Errno::EINVAL)?
+        .copy_from_slice(b);
+    Ok(())
 }
 
 fn put_u16(arg: &mut [u8], at: usize, v: u32) {
@@ -182,6 +193,32 @@ impl Vt {
                 }
             }
             CONS_BLANKTIME | CONS_MODEINFO | KDMKTONE | KIOCSOUND => Ok(()),
+            // `vt_fb_ioctl`.
+            FBIOGTYPE => {
+                let (t, _, _) = self.fb_info(s);
+                put(arg, &t.to_bytes())
+            }
+            FBIO_GETWINORG => {
+                put_int(arg, 0);
+                Ok(())
+            }
+            FBIO_GETDISPSTART => put(arg, &[0; 8]),
+            FBIO_GETLINEWIDTH => {
+                let (_, stride, _) = self.fb_info(s);
+                put_int(arg, i32::try_from(stride).unwrap_or(i32::MAX));
+                Ok(())
+            }
+            FBIO_BLANK => {
+                self.blank_display(s);
+                Ok(())
+            }
+            FBIO_GETRGBOFFS => {
+                let (_, _, o) = self.fb_info(s);
+                if o.red == 0 && o.green == 0 && o.blue == 0 {
+                    return Err(Errno::ENOTTY);
+                }
+                put(arg, &o.to_bytes())
+            }
             KDENABIO => self.host.io_access(true),
             KDDISABIO => self.host.io_access(false),
             CONS_SETKBD => {

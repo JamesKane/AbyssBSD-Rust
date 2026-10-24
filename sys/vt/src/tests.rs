@@ -202,3 +202,30 @@ fn a_loaded_font_sizes_and_draws_the_text_area() {
     assert!(r.set_face(&Face::Builtin));
     assert_eq!(r.size(), Pos::new(2, 2));
 }
+
+#[test]
+fn the_frame_buffer_is_described_as_efifb_describes_it() {
+    let mut r = renderer();
+    let (t, stride, o) = r.fb_info();
+    assert_eq!(
+        (t.fb_type, t.fb_height, t.fb_width, t.fb_depth, t.fb_cmsize),
+        (31, 36, 20, 32, 16)
+    );
+    // A scan line of 24 pixels is 96 bytes.
+    assert_eq!((stride, t.fb_size), (96, 36 * 96));
+    assert_eq!((o.red, o.green, o.blue), (0, 8, 16));
+    // Blanking keeps what was drawn: an unchanged cell isn't redrawn.
+    r.invalidate();
+    let mut view = vec![pack(u32::from(b' '), &NORMAL); 4];
+    view[3] = pack(u32::from(b'|'), &NORMAL);
+    r.draw(&view, None);
+    // 36 pixel rows are one band.
+    assert!(r.blank(0));
+    assert!(!r.blank(1));
+    r.draw(&view, None);
+    assert!(
+        r.pixels()[18 * 24..36 * 24]
+            .iter()
+            .all(|&p| p == BLACK || p == 0x1234_5678)
+    );
+}
