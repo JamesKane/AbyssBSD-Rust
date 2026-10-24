@@ -384,7 +384,10 @@ Implemented (`sys/vt`, `kernel/src/vtcons.rs`):
   (`EINVAL` if there is none with that index, `EPERM` if it is busy), keeping the visible window's
   lock state and giving the new one its mode; `CONS_RELKBD` lets it go, as does unplugging it.
   Without one, the keyboard's requests do nothing and succeed, as FreeBSD's do.
-- Not yet: `KDENABIO`, the `FBIO_*` requests, and the bell (off by default, `kern.vt.enable_bell`).
+- `KDENABIO` gives the calling thread the I/O ports (root only, `PRIV_IO`; there is no securelevel,
+  as FreeBSD's default -1 would have it): on amd64, IOPL 3 in its flags as it returns to user mode,
+  kept across `fork` and cleared by `exec`. `KDDISABIO` takes them away. On arm64 both do nothing.
+- Not yet: the `FBIO_*` requests, and the bell (off by default, `kern.vt.enable_bell`).
 
 ## 8. USB mass storage
 

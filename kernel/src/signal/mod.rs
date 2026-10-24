@@ -61,6 +61,9 @@ unsafe impl Plain for StackT {}
 /// (amd64 must then return with `iretq`, which restores every register).
 pub(crate) const AST_SIGNAL: u32 = 1;
 pub(crate) const AST_FULL_RESTORE: u32 = 2;
+/// I/O port access to give (`KDENABIO`) or take away (`KDDISABIO`).
+const AST_IO_ON: u32 = 4;
+const AST_IO_OFF: u32 = 8;
 
 /// Queued signals a process may have beyond one of each (real-time
 /// signals queue; FreeBSD's `max_pending_per_proc`).
@@ -577,12 +580,33 @@ pub(crate) fn user_return(frame: &mut TrapFrame) -> bool {
         if bits & AST_FULL_RESTORE != 0 {
             rewritten = true;
         }
+        if bits & (AST_IO_ON | AST_IO_OFF) != 0 {
+            machdep::set_io_access(frame, bits & AST_IO_ON != 0);
+            rewritten = true;
+        }
         if bits & AST_SIGNAL != 0 {
             rewritten |= deliver(&s, frame);
         }
         let _ = hal::irq::disable();
     }
     rewritten
+}
+
+/// Gives the current thread access to the I/O ports (`KDENABIO`), or
+/// takes it away (`KDDISABIO`), as it returns to user mode: on amd64,
+/// IOPL 3 in its flags (FreeBSD sets `PSL_IOPL` in `td_frame`); aarch64
+/// has no ports.
+///
+/// # Errors
+///
+/// `EPERM` unless root (`PRIV_IO`). There is no securelevel, as
+/// FreeBSD's default -1 would have it.
+pub(crate) fn io_access(on: bool) -> Result<(), Errno> {
+    if on && !Process::current().is_some_and(|p| p.cred().is_root()) {
+        return Err(Errno::EPERM);
+    }
+    sched::current().request_ast(if on { AST_IO_ON } else { AST_IO_OFF });
+    Ok(())
 }
 
 /// Acts on every deliverable signal. Returns whether a handler's frame

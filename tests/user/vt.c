@@ -7,7 +7,7 @@
  * switching mode (VT_SETMODE), the history size, the screen map, the
  * mouse cursor, a font of the window's own (PIO_VFONT), which sizes it,
  * releasing the console's keyboard and taking it back (CONS_RELKBD,
- * CONS_SETKBD), and switching (VT_ACTIVATE, VT_WAITACTIVE) to the window and back,
+ * CONS_SETKBD), I/O port access (KDENABIO, KDDISABIO), and switching (VT_ACTIVATE, VT_WAITACTIVE) to the window and back,
  * which only an open window allows.
  *
  * Runs on FreeBSD too (as root, under vt, with ttyv2 not in use); the
@@ -21,6 +21,7 @@
 #include <sys/fbio.h>
 #include <sys/ioctl.h>
 #include <sys/kbio.h>
+#include <sys/wait.h>
 
 #include <errno.h>
 #include <fcntl.h>
@@ -62,6 +63,56 @@ font8x8(vfnt_t *f)
 		failed = 1;						\
 	}								\
 } while (0)
+
+#ifdef __amd64__
+/* Reads port 0x61 (the speaker and NMI status), which is harmless. */
+static int
+inb61(void)
+{
+	unsigned char v;
+
+	__asm __volatile("inb $0x61, %0" : "=a" (v));
+	return (v);
+}
+#endif
+
+/*
+ * Runs f in a child; its wait status. A plain function pointer keeps
+ * the child to what f does.
+ */
+static int
+in_child(int (*f)(int), int fd)
+{
+	pid_t pid;
+	int status;
+
+	pid = fork();
+	if (pid == 0)
+		_exit(f(fd));
+	if (pid < 0 || waitpid(pid, &status, 0) != pid)
+		return (-1);
+	return (status);
+}
+
+/* Not root, KDENABIO is refused: exits 0 if it is, with EPERM. */
+static int
+enabio_unprivileged(int fd)
+{
+	if (setuid(65534) != 0)
+		return (2);
+	return (ioctl(fd, KDENABIO) == -1 && errno == EPERM ? 0 : 1);
+}
+
+#ifdef __amd64__
+/* After KDDISABIO, a port read faults. */
+static int
+port_read(int fd)
+{
+	(void)fd;
+	inb61();
+	return (0);
+}
+#endif
 
 /* A request with an int argument passed by value (_IOWINT). */
 static int
@@ -124,6 +175,19 @@ main(void)
 	CHECK(req(fd, KDSKBSTATE, 0) == 0, "%s", strerror(errno));
 	CHECK(ioctl(fd, KDGKBTYPE, &v) == 0, "%s", strerror(errno));
 	CHECK(ioctl(fd, CONS_MODEINFO, &mode) == 0, "%s", strerror(errno));
+
+	/* I/O port access: root only; on amd64, the ports open and close. */
+	v = in_child(enabio_unprivileged, fd);
+	CHECK(WIFEXITED(v) && WEXITSTATUS(v) == 0, "status %#x", v);
+	CHECK(ioctl(fd, KDENABIO) == 0, "%s", strerror(errno));
+#ifdef __amd64__
+	inb61();
+#endif
+	CHECK(ioctl(fd, KDDISABIO) == 0, "%s", strerror(errno));
+#ifdef __amd64__
+	v = in_child(port_read, fd);
+	CHECK(WIFSIGNALED(v) && WTERMSIG(v) == SIGBUS, "status %#x", v);
+#endif
 
 	/* The console's keyboard: released, and taken back. */
 	CHECK(ioctl(fd, KDGKBINFO, &ki) == 0, "%s", strerror(errno));

@@ -42,6 +42,9 @@ const SPSR_DAIF: u64 = 0x3c0;
 const FPSR_BITS: u32 = 0xf800_009f;
 const FPCR_BITS: u32 = 0x07ff_9f07;
 
+/// arm64 has no I/O ports: `KDENABIO` and `KDDISABIO` change nothing.
+pub(super) fn set_io_access(_frame: &mut TrapFrame, _on: bool) {}
+
 /// The thread's registers as an `mcontext_t`.
 fn mcontext(f: &TrapFrame, fpu: &FpuImage) -> McontextArm {
     let a = crate::arch::fpu::status_offsets();

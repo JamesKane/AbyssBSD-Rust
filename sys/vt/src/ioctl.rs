@@ -18,9 +18,9 @@ use abi::consio::*;
 use abi::errno::Errno;
 use abi::kbio::{
     GETFKEY, GIO_DEADKEYMAP, GIO_KEYMAP, K_CODE, K_RAW, K_XLATE, KBADDKBD, KBRELKBD, KDDISABIO,
-    KDGETLED, KDGETMODE, KDGETREPEAT, KDGKBINFO, KDGKBMODE, KDGKBSTATE, KDGKBTYPE, KDMKTONE,
-    KDSETLED, KDSETMODE, KDSETRAD, KDSETREPEAT, KDSKBMODE, KDSKBSTATE, KIOCSOUND, LED_MASK,
-    LOCK_MASK, PIO_DEADKEYMAP, PIO_KEYMAP, SETFKEY,
+    KDENABIO, KDGETLED, KDGETMODE, KDGETREPEAT, KDGKBINFO, KDGKBMODE, KDGKBSTATE, KDGKBTYPE,
+    KDMKTONE, KDSETLED, KDSETMODE, KDSETRAD, KDSETREPEAT, KDSKBMODE, KDSKBSTATE, KIOCSOUND,
+    LED_MASK, LOCK_MASK, PIO_DEADKEYMAP, PIO_KEYMAP, SETFKEY,
 };
 use sched::Sleepable;
 use vtterm::Pos;
@@ -181,7 +181,9 @@ impl Vt {
                     Ok(())
                 }
             }
-            CONS_BLANKTIME | CONS_MODEINFO | KDMKTONE | KIOCSOUND | KDDISABIO => Ok(()),
+            CONS_BLANKTIME | CONS_MODEINFO | KDMKTONE | KIOCSOUND => Ok(()),
+            KDENABIO => self.host.io_access(true),
+            KDDISABIO => self.host.io_access(false),
             CONS_SETKBD => {
                 let index = int(arg);
                 if input::console_index().is_some_and(|i| i64::from(i) == i64::from(index)) {

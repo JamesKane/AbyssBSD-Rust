@@ -79,6 +79,13 @@ pub trait Host: Send + Sync {
     /// Window `window` changed size: its terminal's window size becomes
     /// `size` cells of the display's `pixels` (`terminal_sync_ttysize`).
     fn resized(&self, window: usize, size: Pos, pixels: (u32, u32));
+    /// Gives the calling thread access to the I/O ports, or takes it
+    /// away (`KDENABIO`, `KDDISABIO`).
+    ///
+    /// # Errors
+    ///
+    /// `EPERM` to give it to a thread that may not have it.
+    fn io_access(&self, on: bool) -> Result<(), Errno>;
 }
 
 /// A window's state beyond its terminal (`struct vt_window`).

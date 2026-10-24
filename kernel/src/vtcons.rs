@@ -83,6 +83,10 @@ impl vt::Host for Host {
             t.resize(winsize(size, pixels));
         }
     }
+
+    fn io_access(&self, on: bool) -> Result<(), Errno> {
+        crate::signal::io_access(on)
+    }
 }
 
 /// A window's terminal size (`vt_winsize`).

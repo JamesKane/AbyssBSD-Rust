@@ -200,6 +200,18 @@ pub(crate) fn get_context(
     })
 }
 
+/// `PSL_IOPL`: I/O privilege level 3, the ports open to user mode.
+const RFLAGS_IOPL: u64 = 0x3000;
+
+/// Sets or clears IOPL 3 in `frame` (`KDENABIO`, `KDDISABIO`).
+pub(super) fn set_io_access(frame: &mut TrapFrame, on: bool) {
+    if on {
+        frame.rflags |= RFLAGS_IOPL;
+    } else {
+        frame.rflags &= !RFLAGS_IOPL;
+    }
+}
+
 /// Checks `mc` and loads it into `frame` and the FPU (`sigreturn`,
 /// `setcontext`). On an error nothing has changed.
 pub(crate) fn set_context(frame: &mut TrapFrame, mc: &McontextX86) -> Result<(), Errno> {
