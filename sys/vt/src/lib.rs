@@ -9,7 +9,7 @@
 //! open (or the console's), and with the consent of a process that
 //! controls the visible one (`VT_PROCESS`). Each window keeps its own
 //! keyboard mode and lock state, given to `kbdmux0` while it is
-//! visible.
+//! visible, and its own font, whose cell size gives the window's.
 //!
 //! Behavior reference: sys/dev/vt/vt_core.c, sys/kern/subr_terminal.c,
 //! sys/kern/kern_cons.c (`cnputc`).
@@ -19,6 +19,7 @@
 
 extern crate alloc;
 
+pub mod font;
 mod ioctl;
 mod keys;
 pub mod render;
@@ -35,11 +36,13 @@ use abi::kbio::{K_XLATE, KDSKBMODE, KDSKBSTATE, LOCK_MASK};
 use sched::lock::{LockClass, Mutex};
 use sched::{Sleepable, WaitQueue};
 use sync::{Once, SpinLock};
-use vtterm::{Cell, DEFAULT_HISTORY, Pos, Terminal};
+use vtterm::{Cell, DEFAULT_HISTORY, Terminal};
 
+pub use font::Face;
 pub use ioctl::ioctl;
 pub use keys::process_keys;
 pub use render::{Display, Renderer};
+pub use vtterm::Pos;
 
 /// `VT_MAXWINDOWS`.
 pub const WINDOWS: usize = 12;
@@ -67,6 +70,15 @@ pub trait Host: Send + Sync {
     ///
     /// On a signal.
     fn wait(&self, s: &Sleepable, q: &WaitQueue, done: &dyn Fn() -> bool) -> Result<(), Errno>;
+    /// Copies the calling process's memory at `addr` into `dst`.
+    ///
+    /// # Errors
+    ///
+    /// `EFAULT` if it isn't mapped.
+    fn copy_in(&self, dst: &mut [u8], addr: u64) -> Result<(), Errno>;
+    /// Window `window` changed size: its terminal's window size becomes
+    /// `size` cells of the display's `pixels` (`terminal_sync_ttysize`).
+    fn resized(&self, window: usize, size: Pos, pixels: (u32, u32));
 }
 
 /// A window's state beyond its terminal (`struct vt_window`).
@@ -128,6 +140,8 @@ struct State {
     /// A pending release's deadline, and the window it switches to
     /// (`vw_timeout_task_dead`).
     dead: Option<(u64, usize)>,
+    /// The windows' fonts (`vw_font`).
+    fonts: [Face; WINDOWS],
 }
 
 /// A signal to send once the state is unlocked.
@@ -152,7 +166,7 @@ struct Vt {
     /// The flush thread's, and the panic path's: drawing sleeps no
     /// one and stays preemptible.
     renderer: Mutex<Frame>,
-    size: Pos,
+    /// The display's size in pixels.
     pixels: (u32, u32),
     host: &'static dyn Host,
     state: SpinLock<State>,
@@ -195,7 +209,7 @@ pub fn start(display: Display, early: &[u8], host: &'static dyn Host) -> Result<
     }
     let renderer = Renderer::new(display).ok_or(Error::Display)?;
     let size = renderer.size();
-    let pixels = renderer.pixel_size();
+    let pixels = renderer.display_size();
     let windows = (0..WINDOWS)
         .map(|_| SpinLock::new(Terminal::new(size, DEFAULT_HISTORY)))
         .collect();
@@ -213,7 +227,6 @@ pub fn start(display: Display, early: &[u8], host: &'static dyn Host) -> Result<
                 view: Vec::new(),
             },
         ),
-        size,
         pixels,
         host,
         state: SpinLock::new(State {
@@ -222,6 +235,7 @@ pub fn start(display: Display, early: &[u8], host: &'static dyn Host) -> Result<
             mouse_cursor: false,
             quiet_bell: false,
             dead: None,
+            fonts: core::array::from_fn(|_| Face::Builtin),
         }),
         switched: WaitQueue::new(),
     };
@@ -245,10 +259,13 @@ pub fn running() -> bool {
     VT.get().is_some()
 }
 
-/// A window's size in cells and in pixels (`vt_winsize`).
+/// Window `window`'s size in cells, and the display's in pixels
+/// (`vt_winsize`).
 #[must_use]
-pub fn size() -> Option<(Pos, (u32, u32))> {
-    VT.get().map(|vt| (vt.size, vt.pixels))
+pub fn size(window: usize) -> Option<(Pos, (u32, u32))> {
+    let vt = VT.get()?;
+    let size = vt.windows.get(window)?.lock().emu.winsize();
+    Some((size, vt.pixels))
 }
 
 /// The visible window.
@@ -511,6 +528,26 @@ impl Vt {
         Ok(())
     }
 
+    /// Gives window `w` font `face` (`vt_change_font`): its screen and
+    /// history take the size the font gives, keeping what they hold,
+    /// and its terminal's window size follows.
+    fn change_font(&self, w: usize, face: Face) {
+        let size = {
+            let mut t = self.windows[w].lock();
+            let size = render::text_size(self.pixels, &face);
+            let a = *t.emu.curattr();
+            let history = t.buf.history_size();
+            t.buf.grow(size, history, &a);
+            t.emu.set_winsize_noreset(size);
+            let c = t.buf.cursor();
+            t.emu.set_cursor(c);
+            self.state.lock().fonts[w] = face;
+            size
+        };
+        self.host.resized(w, size, self.pixels);
+        self.invalidate(w);
+    }
+
     /// Redraws window `w` in full, if it is visible.
     fn invalidate(&self, w: usize) {
         if w == self.active.load(Ordering::Acquire) {
@@ -562,10 +599,11 @@ impl Vt {
             }
         };
         let Frame { renderer, view } = &mut *f;
-        let invalid = self.invalid.swap(false, Ordering::AcqRel);
+        let mut invalid = self.invalid.swap(false, Ordering::AcqRel);
         let cursor;
         {
-            let w = &self.windows[self.active.load(Ordering::Acquire)];
+            let a = self.active.load(Ordering::Acquire);
+            let w = &self.windows[a];
             let mut t = if s.is_some() {
                 w.lock()
             } else {
@@ -575,12 +613,24 @@ impl Vt {
                 };
                 t
             };
+            // The font and the cells together: a font change resizes
+            // the window under its lock.
+            let face = if s.is_some() {
+                self.state.lock().fonts[a].clone()
+            } else {
+                let Some(st) = self.state.try_lock() else {
+                    self.invalid.fetch_or(invalid, Ordering::AcqRel);
+                    return;
+                };
+                st.fonts[a].clone()
+            };
+            invalid |= renderer.set_face(&face);
             if !invalid && !t.buf.damaged() {
                 return;
             }
             t.buf.take_damage(|_, _, _| {});
             view.clear();
-            for r in 0..self.size.row {
+            for r in 0..t.buf.size().row {
                 view.extend_from_slice(t.buf.view_row(r));
             }
             let c = t.buf.cursor();

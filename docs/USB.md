@@ -353,8 +353,15 @@ holds none of `vt`'s locks.
 
 Implemented (`sys/vt`, `kernel/src/vtcons.rs`):
 
-- The twelve windows (`VT_MAXWINDOWS`), `ttyv0` to `ttyvb`, each sized to the framebuffer in 8×16
-  cells, centered.
+- The twelve windows (`VT_MAXWINDOWS`), `ttyv0` to `ttyvb`, each sized to the framebuffer in its
+  font's cells (at most 512 columns and 150 rows, `vt_termsize`), centered.
+- Fonts per window (`vw_font`): `PIO_VFONT` loads one (`vidcontrol -f`), checked as `vtfont_load`
+  checks it, with the same errors; its glyphs are found through its four maps (normal, bold, and
+  the right halves of double-width characters) as `vtfont_lookup` finds them. Changing a window's
+  font resizes it as `vt_change_font` does: the buffer keeps its contents and history, the cursor
+  stays inside, and the terminal's size changes, with `SIGWINCH` to its foreground group.
+  `PIO_VFONT_DEFAULT` puts back the built-in 8×16 font. `TIOCGWINSZ` gives the whole display's
+  pixels, as `vt_winsize` does.
 - Drawing in the `vtflush` thread, at most 25 frames a second (`VT_TIMERFREQ`), of the cells that
   differ from what is on the screen (`vd_drawn`), in `vt`'s palette (`vt_termcolors.c`); output to
   a hidden window draws nothing.
@@ -370,9 +377,9 @@ Implemented (`sys/vt`, `kernel/src/vtcons.rs`):
 - The requests `vtterm_ioctl` answers: the keyboard's (to `kbdmux0`), `KDGKBMODE`/`KDSKBMODE`,
   `KDGKBSTATE`/`KDSKBSTATE`, `KDGETLED`/`KDSETLED`, `KDGETMODE`/`KDSETMODE`, `CONS_GETINFO`,
   `CONS_GETVERS`, `CONS_GET`, `CONS_HISTORY`, `CONS_CLRHIST`, `CONS_BELLTYPE`, `CONS_BLANKTIME`,
-  `CONS_MOUSECTL` (show and hide), `GIO_SCRNMAP`, `PIO_VFONT_DEFAULT`, and `VT_*`.
+  `CONS_MOUSECTL` (show and hide), `GIO_SCRNMAP`, `PIO_VFONT`, `PIO_VFONT_DEFAULT`, and `VT_*`.
   `tests/user/vt.c` checks them, and passes on FreeBSD 15.1 too.
-- Not yet: fonts (`PIO_VFONT`, so `vidcontrol -f`), `CONS_SETKBD`/`CONS_RELKBD`, `KDENABIO`,
+- Not yet: `CONS_SETKBD`/`CONS_RELKBD`, `KDENABIO`,
   `CONS_MODEINFO`, the `FBIO_*` requests, and the bell (off by default, `kern.vt.enable_bell`).
 
 ## 8. USB mass storage

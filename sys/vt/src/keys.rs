@@ -143,7 +143,8 @@ impl Vt {
             let _ = self.proc_window_switch(usize::try_from(k - F_SCR).unwrap_or(0));
             return;
         }
-        let rows = i32::try_from(self.size.row).unwrap_or(i32::MAX);
+        let rows = self.windows[w].lock().emu.winsize().row;
+        let rows = i32::try_from(rows).unwrap_or(i32::MAX);
         match k {
             SLK => {
                 self.scroll(w, 0, Seek::End);

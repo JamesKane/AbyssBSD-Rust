@@ -17,6 +17,7 @@ use abi::errno::Errno;
 use abi::termios::Winsize;
 use sched::{Sleepable, WaitQueue};
 use sync::Once;
+use vt::Pos;
 
 use crate::proc::Process;
 use crate::tty::{self, Tty};
@@ -72,6 +73,27 @@ impl vt::Host for Host {
     fn wait(&self, s: &Sleepable, q: &WaitQueue, done: &dyn Fn() -> bool) -> Result<(), Errno> {
         crate::signal::sleep(s, q, done, None).map(|_| ())
     }
+
+    fn copy_in(&self, dst: &mut [u8], addr: u64) -> Result<(), Errno> {
+        crate::uaccess::copy_in(dst, addr).map_err(|_| Errno::EFAULT)
+    }
+
+    fn resized(&self, window: usize, size: Pos, pixels: (u32, u32)) {
+        if let Some(t) = TTYS.get().and_then(|t| t.get(window)) {
+            t.resize(winsize(size, pixels));
+        }
+    }
+}
+
+/// A window's terminal size (`vt_winsize`).
+fn winsize(size: Pos, (xpixel, ypixel): (u32, u32)) -> Winsize {
+    let ws = |v: u32| u16::try_from(v).unwrap_or(u16::MAX);
+    Winsize {
+        ws_row: ws(size.row),
+        ws_col: ws(size.col),
+        ws_xpixel: ws(xpixel),
+        ws_ypixel: ws(ypixel),
+    }
 }
 
 /// Values read from the keyboard: `vt` acts on them (`vt_processkey`),
@@ -109,20 +131,12 @@ pub(crate) fn start() {
     }
     crate::console::vt_started();
     kprintln!("VT(efifb): resolution {width}x{height}");
-    let Some((size, (xpixel, ypixel))) = vt::size() else {
-        return;
-    };
-    let ws = |v: u32| u16::try_from(v).unwrap_or(u16::MAX);
-    let winsize = Winsize {
-        ws_row: ws(size.row),
-        ws_col: ws(size.col),
-        ws_xpixel: ws(xpixel),
-        ws_ypixel: ws(ypixel),
-    };
     let ttys: Vec<_> = (0..vt::WINDOWS)
         .map(|i| {
             let t = tty::create(&alloc::format!("ttyv{i:x}"), Arc::new(Window(i)));
-            t.set_winsize(winsize);
+            if let Some((size, pixels)) = vt::size(i) {
+                t.set_winsize(winsize(size, pixels));
+            }
             t
         })
         .collect();

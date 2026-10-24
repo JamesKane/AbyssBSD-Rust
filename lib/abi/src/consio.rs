@@ -108,6 +108,8 @@ pub const CONS_BELLTYPE: u32 = ioc(IOC_IN, b'c', 8, 4);
 pub const CONS_HISTORY: u32 = ioc(IOC_IN, b'c', 9, 4);
 pub const CONS_CLRHIST: u32 = ioc(IOC_VOID, b'c', 10, 0);
 pub const CONS_MOUSECTL: u32 = ioc(IOC_IN | IOC_OUT, b'c', 10, 20);
+pub const PIO_VFONT: u32 = ioc(IOC_IN, b'c', 70, 72);
+pub const GIO_VFONT: u32 = ioc(IOC_OUT, b'c', 71, 72);
 pub const PIO_VFONT_DEFAULT: u32 = ioc(IOC_VOID, b'c', 72, 0);
 pub const CONS_GETINFO: u32 = ioc(IOC_IN | IOC_OUT, b'c', 73, 24);
 pub const CONS_GETVERS: u32 = ioc(IOC_OUT, b'c', 74, 4);
@@ -136,6 +138,40 @@ pub mod vid_info {
     pub const MV_REV: usize = 18;
     pub const MK_KEYLOCK: usize = 23;
 }
+
+/// `vfnt_t` (`PIO_VFONT`): a font's four maps and its glyphs, in the
+/// caller's memory, with their counts and the glyphs' size.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Vfnt {
+    pub map: [u64; 4],
+    pub glyphs: u64,
+    pub map_count: [u32; 4],
+    pub glyph_count: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Vfnt {
+    pub const SIZE: usize = 72;
+
+    /// From its bytes; `None` if `b` is short.
+    #[must_use]
+    pub fn from_bytes(b: &[u8]) -> Option<Self> {
+        let q = |o: usize| Some(u64::from_ne_bytes(b.get(o..o + 8)?.try_into().ok()?));
+        let w = |o: usize| Some(u32::from_ne_bytes(b.get(o..o + 4)?.try_into().ok()?));
+        Some(Self {
+            map: [q(0)?, q(8)?, q(16)?, q(24)?],
+            glyphs: q(32)?,
+            map_count: [w(40)?, w(44)?, w(48)?, w(52)?],
+            glyph_count: w(56)?,
+            width: w(60)?,
+            height: w(64)?,
+        })
+    }
+}
+
+const _: () = assert!(core::mem::size_of::<Vfnt>() == Vfnt::SIZE);
 
 /// `struct vt_mode` (`VT_SETMODE`, `VT_GETMODE`).
 #[repr(C)]
@@ -197,6 +233,8 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("CONS_HISTORY", CONS_HISTORY),
     c("CONS_CLRHIST", CONS_CLRHIST),
     c("CONS_MOUSECTL", CONS_MOUSECTL),
+    c("PIO_VFONT", PIO_VFONT),
+    c("GIO_VFONT", GIO_VFONT),
     c("PIO_VFONT_DEFAULT", PIO_VFONT_DEFAULT),
     c("CONS_GETINFO", CONS_GETINFO),
     c("CONS_GETVERS", CONS_GETVERS),

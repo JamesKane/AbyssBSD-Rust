@@ -244,6 +244,14 @@ impl Tty {
         *self.winsize.lock() = w;
     }
 
+    /// The device changed size (`tty_set_winsize`): the foreground
+    /// process group gets `SIGWINCH` if the size differs.
+    pub(crate) fn resize(&self, w: Winsize) {
+        if core::mem::replace(&mut *self.winsize.lock(), w) != w {
+            self.signal_foreground(SIGWINCH);
+        }
+    }
+
     /// Records the devfs node for this terminal.
     pub(crate) fn set_vnode(&self, v: &Arc<Vnode>) {
         let _ = self.vnode.set(Arc::downgrade(v));

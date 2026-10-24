@@ -232,6 +232,14 @@ pub static LAYOUTS: &[StructLayout] = &[
         operation => "operation",
         u => "u",
     }),
+    layout!(consio::Vfnt, "vfnt_t", ["sys/types.h", "sys/consio.h"], All, {
+        map => "map",
+        glyphs => "glyphs",
+        map_count => "map_count",
+        glyph_count => "glyph_count",
+        width => "width",
+        height => "height",
+    }),
     layout!(consio::VtMode, "struct vt_mode", ["sys/types.h", "sys/consio.h"], All, {
         mode => "mode",
         waitv => "waitv",

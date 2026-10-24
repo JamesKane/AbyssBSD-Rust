@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! Drawing a window's cells into the framebuffer (`vt_fb`): the text
-//! area centered on the screen, each cell its glyph in the colors
+//! area centered on the screen, each cell its glyph in the window's
+//! font in the colors
 //! `vt_determine_colors` gives it, with the cursor as reverse video.
 //! What is on the screen is remembered per cell (`vd_drawn`), so a
 //! frame draws only the cells that differ from it.
@@ -15,10 +16,12 @@ use alloc::vec::Vec;
 use fb_console::PixelLayout;
 use vtterm::{Cell, Pos, cell_char, cell_format, colors, format};
 
-/// The font's cell.
-pub const FONT_WIDTH: u32 = 8;
-pub const FONT_HEIGHT: u32 = 16;
-const _: () = assert!(font::WIDTH == 8 && font::HEIGHT == 16);
+use crate::font::Face;
+
+/// `VT_FB_MAX_WIDTH`, `VT_FB_MAX_HEIGHT` in 8×16 cells
+/// (`PIXEL_WIDTH`, `PIXEL_HEIGHT`): the most cells a window has.
+const MAX_COLS: u32 = 4096 / 8;
+const MAX_ROWS: u32 = 2400 / 16;
 
 /// `color_def`: the 16 colors as percentages of full red, green, blue.
 const PALETTE: [[u32; 3]; 16] = [
@@ -51,8 +54,8 @@ pub struct Display {
     pub layout: PixelLayout,
 }
 
-/// What a cell was drawn as: its character (with the right-half bit)
-/// and its two colors.
+/// What a cell was drawn as: its character (with the right-half and
+/// bold bits) and its two colors.
 type Drawn = u64;
 
 const NOTHING: Drawn = u64::MAX;
@@ -61,6 +64,8 @@ const NOTHING: Drawn = u64::MAX;
 #[derive(Debug)]
 pub struct Renderer {
     display: Display,
+    /// The font drawn in.
+    face: Face,
     /// The text area, in cells.
     size: Pos,
     /// The text area's top left pixel.
@@ -75,14 +80,18 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    /// A renderer for `display`; `None` if not one cell fits or the
-    /// pixels don't cover it.
+    /// A renderer for `display` in the built-in font; `None` if not
+    /// one cell fits or the pixels don't cover it.
     #[must_use]
     pub fn new(display: Display) -> Option<Self> {
-        let cols = display.width / FONT_WIDTH;
-        let rows = display.height / FONT_HEIGHT;
+        let face = Face::Builtin;
+        let (fw, fh) = face.size();
         let need = ix(display.stride).checked_mul(ix(display.height))?;
-        if cols == 0 || rows == 0 || display.stride < display.width || display.pixels.len() < need {
+        if display.width < fw
+            || display.height < fh
+            || display.stride < display.width
+            || display.pixels.len() < need
+        {
             return None;
         }
         let mut cmap = [0; 16];
@@ -91,28 +100,51 @@ impl Renderer {
             let [r, g, b] = rgb.map(|p| (255 * p / 100).to_le_bytes()[0]);
             *c = display.layout.encode([r, g, b]);
         }
-        Some(Self {
-            x0: (display.width - cols * FONT_WIDTH) / 2,
-            y0: (display.height - rows * FONT_HEIGHT) / 2,
-            size: Pos::new(rows, cols),
+        let mut r = Self {
+            face: Face::Builtin,
+            size: Pos::new(0, 0),
+            x0: 0,
+            y0: 0,
             cmap,
-            drawn: vec![NOTHING; ix(rows) * ix(cols)],
+            drawn: Vec::new(),
             lut: [[0; 4]; 16],
             lut_colors: (16, 16),
             display,
-        })
+        };
+        r.layout();
+        Some(r)
+    }
+
+    /// The display's size in pixels.
+    #[must_use]
+    pub fn display_size(&self) -> (u32, u32) {
+        (self.display.width, self.display.height)
+    }
+
+    /// Draws in `face` from now on; `true` if that is a change, after
+    /// which the screen must be [invalidated](Self::invalidate).
+    pub fn set_face(&mut self, face: &Face) -> bool {
+        if self.face.same(face) {
+            return false;
+        }
+        self.face = face.clone();
+        self.layout();
+        true
+    }
+
+    /// The text area for the font (`vt_compute_drawable_area`).
+    fn layout(&mut self) {
+        let (fw, fh) = self.face.size();
+        self.size = text_size(self.display_size(), &self.face);
+        self.x0 = (self.display.width % fw) / 2;
+        self.y0 = (self.display.height % fh) / 2;
+        self.drawn = vec![NOTHING; ix(self.size.row) * ix(self.size.col)];
     }
 
     /// The text area, in cells.
     #[must_use]
     pub fn size(&self) -> Pos {
         self.size
-    }
-
-    /// The text area, in pixels.
-    #[must_use]
-    pub fn pixel_size(&self) -> (u32, u32) {
-        (self.size.col * FONT_WIDTH, self.size.row * FONT_HEIGHT)
     }
 
     /// The framebuffer's pixels.
@@ -145,8 +177,10 @@ impl Renderer {
                 let at_cursor = cursor == Some(Pos::new(r, c));
                 let (fg, bg) = colors(cell, at_cursor);
                 let right = cell_format(cell) & format::CJK_RIGHT != 0;
+                let bold = cell_format(cell) & format::BOLD != 0;
                 let key = u64::from(cell_char(cell))
                     | u64::from(right) << 21
+                    | u64::from(bold) << 22
                     | u64::from(fg) << 24
                     | u64::from(bg) << 28;
                 let i = ix(r) * cols + ix(c);
@@ -154,19 +188,12 @@ impl Renderer {
                     continue;
                 }
                 self.drawn[i] = key;
-                self.glyph(r, c, cell_char(cell), right, fg, bg);
+                self.glyph(r, c, (cell_char(cell), bold, right), fg, bg);
             }
         }
     }
 
-    fn glyph(&mut self, row: u32, col: u32, ch: u32, right: bool, fg: u8, bg: u8) {
-        // The font has no double-width glyphs: a wide character's right
-        // half is blank.
-        let bitmap = if right {
-            &[0u8; font::HEIGHT]
-        } else {
-            char::from_u32(ch).map_or(font::replacement_glyph(), font::glyph)
-        };
+    fn glyph(&mut self, row: u32, col: u32, ch: (u32, bool, bool), fg: u8, bg: u8) {
         if self.lut_colors != (fg, bg) {
             let (fgc, bgc) = (
                 self.cmap[usize::from(fg & 15)],
@@ -179,16 +206,46 @@ impl Renderer {
             }
             self.lut_colors = (fg, bg);
         }
+        let (fw, fh) = self.face.size();
+        let (x, y) = (self.x0 + col * fw, self.y0 + row * fh);
+        // A font wider or taller than the display draws what fits.
+        if x + fw > self.display.width || y + fh > self.display.height {
+            return;
+        }
+        let bitmap = self.face.glyph(ch.0, ch.1, ch.2);
         let stride = ix(self.display.stride);
-        let x = ix(self.x0 + col * FONT_WIDTH);
-        let y = ix(self.y0 + row * FONT_HEIGHT);
-        for (dy, &bits) in bitmap.iter().enumerate() {
+        let (x, y, fw) = (ix(x), ix(y), ix(fw));
+        let lut = &self.lut;
+        if fw == 8 {
+            for (dy, &bits) in bitmap.iter().enumerate() {
+                let at = (y + dy) * stride + x;
+                let line = &mut self.display.pixels[at..at + 8];
+                line[..4].copy_from_slice(&lut[usize::from(bits >> 4)]);
+                line[4..].copy_from_slice(&lut[usize::from(bits & 15)]);
+            }
+            return;
+        }
+        for (dy, bits) in bitmap.chunks(fw.div_ceil(8)).enumerate() {
             let at = (y + dy) * stride + x;
-            let line = &mut self.display.pixels[at..at + font::WIDTH];
-            line[..4].copy_from_slice(&self.lut[usize::from(bits >> 4)]);
-            line[4..].copy_from_slice(&self.lut[usize::from(bits & 15)]);
+            let line = &mut self.display.pixels[at..at + fw];
+            for (i, px) in line.chunks_mut(4).enumerate() {
+                let b = bits[i / 2];
+                let n = if i % 2 == 0 { b >> 4 } else { b & 15 };
+                px.copy_from_slice(&lut[usize::from(n)][..px.len()]);
+            }
         }
     }
+}
+
+/// A window's size in cells on a display of `pixels` in font `face`
+/// (`vt_termsize`).
+#[must_use]
+pub fn text_size(pixels: (u32, u32), face: &Face) -> Pos {
+    let (fw, fh) = face.size();
+    Pos::new(
+        (pixels.1 / fh).clamp(1, MAX_ROWS),
+        (pixels.0 / fw).clamp(1, MAX_COLS),
+    )
 }
 
 fn ix(n: u32) -> usize {

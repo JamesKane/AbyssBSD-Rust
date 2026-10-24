@@ -2,12 +2,16 @@
 //! The requests on a window's terminal that the terminal layer leaves
 //! to `vt` (`termtty_ioctl`, `vtterm_ioctl`): the keyboard's, which go
 //! to `kbdmux0`, with the mode and lock state kept per window; the
-//! display mode; the history; the console's information; and the
-//! virtual terminals' own (`VT_*`), switching among them.
+//! display mode; the history; the console's information; the window's
+//! font; and the virtual terminals' own (`VT_*`), switching among them.
 //!
 //! Behavior reference: sys/dev/vt/vt_core.c (`vtterm_ioctl`),
-//! sys/kern/subr_terminal.c (`termtty_ioctl`).
+//! sys/kern/subr_terminal.c (`termtty_ioctl`), sys/dev/vt/vt_font.c
+//! (`vtfont_load`).
 
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
 
 use abi::consio::*;
@@ -21,6 +25,7 @@ use abi::kbio::{
 use sched::Sleepable;
 use vtterm::Pos;
 
+use crate::font::{self, Face, Font, Header, Map};
 use crate::{VT, Vt, WINDOWS};
 
 /// `_SIG_MAXSIG`.
@@ -162,7 +167,17 @@ impl Vt {
                     Ok(())
                 }
             }
-            CONS_BLANKTIME | KDMKTONE | KIOCSOUND | PIO_VFONT_DEFAULT | KDDISABIO => Ok(()),
+            CONS_BLANKTIME | KDMKTONE | KIOCSOUND | KDDISABIO => Ok(()),
+            PIO_VFONT => {
+                let f = Vfnt::from_bytes(arg).ok_or(Errno::EINVAL)?;
+                let face = self.load_font(&f)?;
+                self.change_font(w, face);
+                Ok(())
+            }
+            PIO_VFONT_DEFAULT => {
+                self.change_font(w, Face::Builtin);
+                Ok(())
+            }
             CONS_HISTORY => {
                 let size = int(arg);
                 let max = u32::MAX / u32::from(u16::MAX) / 4;
@@ -346,6 +361,37 @@ impl Vt {
         let locks = self.state.lock().win[w].kbdstate & LOCK_MASK;
         arg[vid_info::MK_KEYLOCK] = locks.to_le_bytes()[0];
         Ok(())
+    }
+
+    /// The font `f` describes, from the caller's memory
+    /// (`vtfont_load`).
+    fn load_font(&self, f: &Vfnt) -> Result<Face, Errno> {
+        let h = Header {
+            width: f.width,
+            height: f.height,
+            glyph_count: f.glyph_count,
+            map_count: f.map_count,
+        };
+        let size = h.check()?;
+        let mut maps: [Vec<Map>; font::MAPS] = Default::default();
+        for ((map, &n), &addr) in maps.iter_mut().zip(&h.map_count).zip(&f.map) {
+            if n == 0 {
+                continue;
+            }
+            let n = usize::try_from(n).map_err(|_| Errno::E2BIG)?;
+            let mut b = vec![0u8; n * Map::SIZE];
+            self.host.copy_in(&mut b, addr)?;
+            *map = b
+                .as_chunks()
+                .0
+                .iter()
+                .map(|&m| Map::from_bytes(m))
+                .collect();
+            font::validate(map, h.glyph_count)?;
+        }
+        let mut glyphs = vec![0u8; size];
+        self.host.copy_in(&mut glyphs, f.glyphs)?;
+        Ok(Face::Loaded(Arc::new(Font::new(&h, maps, glyphs)?)))
     }
 
     /// `VT_SETMODE`.

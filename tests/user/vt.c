@@ -5,8 +5,9 @@
  * answers: its index, the console's version and information, the
  * display mode, a keyboard mode and lock state kept per window, the
  * switching mode (VT_SETMODE), the history size, the screen map, the
- * mouse cursor, and switching (VT_ACTIVATE, VT_WAITACTIVE) to the
- * window and back, which only an open window allows.
+ * mouse cursor, a font of the window's own (PIO_VFONT), which sizes it,
+ * and switching (VT_ACTIVATE, VT_WAITACTIVE) to the window and back,
+ * which only an open window allows.
  *
  * Runs on FreeBSD too (as root, under vt, with ttyv2 not in use); the
  * screen comes back to the window that was visible. Without vt (no
@@ -14,7 +15,7 @@
  * Exits 0 on success; prints what failed otherwise.
  */
 
-#include <sys/types.h>
+#include <sys/param.h>
 #include <sys/consio.h>
 #include <sys/fbio.h>
 #include <sys/ioctl.h>
@@ -29,6 +30,28 @@
 #include <unistd.h>
 
 static int failed;
+
+/* An 8x8 font: glyph 0 blank, glyph 1 a box for the space. */
+static uint8_t glyphs[2 * 8] = {
+	0, 0, 0, 0, 0, 0, 0, 0,
+	0xff, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0xff,
+};
+static vfnt_map_t maps[2] = {
+	{ .vfm_src = 0x20, .vfm_dst = 1, .vfm_len = 0 },
+	{ .vfm_src = 0x10, .vfm_dst = 0, .vfm_len = 0 },
+};
+
+static void
+font8x8(vfnt_t *f)
+{
+	memset(f, 0, sizeof(*f));
+	f->map[VFNT_MAP_NORMAL] = maps;
+	f->map_count[VFNT_MAP_NORMAL] = 1;
+	f->glyphs = glyphs;
+	f->glyph_count = 2;
+	f->width = 8;
+	f->height = 8;
+}
 
 #define	CHECK(cond, ...) do {						\
 	if (!(cond)) {							\
@@ -50,8 +73,9 @@ int
 main(void)
 {
 	struct vt_mode vm;
-	struct winsize ws;
+	struct winsize ws, ws8;
 	vid_info_t vi;
+	vfnt_t f;
 	scrmap_t sm;
 	mouse_info_t mi;
 	int fd, active, v, i, closed;
@@ -151,6 +175,49 @@ main(void)
 	mi.operation = MOUSE_MOVEABS;
 	CHECK(ioctl(fd, CONS_MOUSECTL, &mi) == -1 && errno == EINVAL, "%s",
 	    strerror(errno));
+
+	/* A font of the window's own; the window takes its size. */
+	font8x8(&f);
+	f.width = 0;
+	CHECK(ioctl(fd, PIO_VFONT, &f) == -1 && errno == EINVAL, "%s",
+	    strerror(errno));
+	f.width = 129;
+	CHECK(ioctl(fd, PIO_VFONT, &f) == -1 && errno == E2BIG, "%s",
+	    strerror(errno));
+	font8x8(&f);
+	f.glyph_count = 0;
+	CHECK(ioctl(fd, PIO_VFONT, &f) == -1 && errno == EINVAL, "%s",
+	    strerror(errno));
+	font8x8(&f);
+	f.map_count[VFNT_MAP_NORMAL] = 2;	/* 0x10 after 0x20 */
+	CHECK(ioctl(fd, PIO_VFONT, &f) == -1 && errno == EINVAL, "%s",
+	    strerror(errno));
+	font8x8(&f);
+	maps[0].vfm_dst = 2;			/* past the glyphs */
+	CHECK(ioctl(fd, PIO_VFONT, &f) == -1 && errno == EINVAL, "%s",
+	    strerror(errno));
+	maps[0].vfm_dst = 1;
+	f.glyphs = (void *)8;
+	CHECK(ioctl(fd, PIO_VFONT, &f) == -1 && errno == EFAULT, "%s",
+	    strerror(errno));
+	font8x8(&f);
+	CHECK(ioctl(fd, PIO_VFONT, &f) == 0, "%s", strerror(errno));
+	memset(&ws8, 0, sizeof(ws8));
+	CHECK(ioctl(fd, TIOCGWINSZ, &ws8) == 0 &&
+	    ws8.ws_xpixel == ws.ws_xpixel && ws8.ws_ypixel == ws.ws_ypixel &&
+	    ws8.ws_row == MIN(ws.ws_ypixel / 8, 150) &&
+	    ws8.ws_col == MIN(ws.ws_xpixel / 8, 512),
+	    "8x8: %d rows %d cols of %dx%d", ws8.ws_row, ws8.ws_col,
+	    ws8.ws_xpixel, ws8.ws_ypixel);
+	memset(&vi, 0, sizeof(vi));
+	vi.size = sizeof(vi);
+	CHECK(ioctl(fd, CONS_GETINFO, &vi) == 0 && vi.mv_rsz == ws8.ws_row &&
+	    vi.mv_csz == ws8.ws_col, "%dx%d", vi.mv_rsz, vi.mv_csz);
+	CHECK(ioctl(fd, PIO_VFONT_DEFAULT) == 0, "%s", strerror(errno));
+	memset(&ws8, 0, sizeof(ws8));
+	CHECK(ioctl(fd, TIOCGWINSZ, &ws8) == 0 && ws8.ws_row == ws.ws_row &&
+	    ws8.ws_col == ws.ws_col, "default: %d rows %d cols", ws8.ws_row,
+	    ws8.ws_col);
 
 	/* Switching: not out of range, not to a window nobody has open. */
 	CHECK(req(fd, VT_ACTIVATE, 0) == -1 && errno == EINVAL, "%s",
