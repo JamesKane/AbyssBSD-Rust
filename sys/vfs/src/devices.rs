@@ -23,6 +23,9 @@ pub trait Registry: Send + Sync {
         gid: u32,
         ops: Arc<dyn CharDevice>,
     ) -> Option<u64>;
+    /// Adds a symbolic link at `path` to `target`; `false` if the name
+    /// is taken.
+    fn alias(&self, path: &[u8], target: &[u8]) -> bool;
     /// Takes the node at `path` away.
     fn destroy(&self, s: &Sleepable, path: &[u8]);
 }
@@ -45,6 +48,13 @@ pub fn make_dev(
     ops: Arc<dyn CharDevice>,
 ) -> Option<u64> {
     REGISTRY.get()?.make(path, mode, uid, gid, ops)
+}
+
+/// Adds a symbolic link at `path` to `target`, as FreeBSD's
+/// `make_dev_alias` (`kbd0 -> kbdmux0`); `false` if the name is taken
+/// or there is no devfs. [`destroy_dev`] takes it away.
+pub fn make_dev_alias(path: &[u8], target: &[u8]) -> bool {
+    REGISTRY.get().is_some_and(|r| r.alias(path, target))
 }
 
 /// Takes the node at `path` away; an open file keeps its device until it

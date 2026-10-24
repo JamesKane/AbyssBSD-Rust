@@ -440,6 +440,11 @@ impl vfs::devices::Registry for Hook {
         add(path, mode, uid, gid, ops)
     }
 
+    fn alias(&self, path: &[u8], target: &[u8]) -> bool {
+        let t = super::now();
+        with(|r| r.insert(path, What::Link(target.to_vec()), attr(0o755, 0, 0, 1, t))).is_some()
+    }
+
     fn destroy(&self, s: &Sleepable, path: &[u8]) {
         remove(s, path);
     }
@@ -481,12 +486,15 @@ fn names(d: &storage::Disk) -> Vec<alloc::string::String> {
 /// Registers the kernel's own devices and the disks published so far, and
 /// listens for the rest. Runs once, before devfs is mounted.
 pub(crate) fn init() {
-    // Nodes drivers made before the clock was set take its time now, as
-    // FreeBSD's show the boot's time.
+    // Nodes drivers made before the clock was set (stamped with the
+    // uptime, before the boot's time of day) take its time now, as
+    // FreeBSD's devfs stamps nodes when it populates.
     let t = super::now();
+    let up = crate::shared_page::to_ns(crate::shared_page::uptime()) / 1_000_000_000;
+    let boot = t.tv_sec - i64::try_from(up).unwrap_or(0);
     with(|r| {
         for n in r.nodes.values_mut() {
-            if n.attr.birthtime == Timespec::default() {
+            if n.attr.birthtime.tv_sec < boot {
                 n.attr.atime = t;
                 n.attr.mtime = t;
                 n.attr.ctime = t;

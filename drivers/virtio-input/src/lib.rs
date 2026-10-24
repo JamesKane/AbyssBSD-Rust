@@ -480,6 +480,13 @@ impl Driver for VtInput {
         let ev = b
             .register(cx.sleepable())
             .map_err(|_| AttachError::Device("no evdev device"))?;
+        // Taken in its own statement: installing may sleep.
+        let line = self.line.lock().take();
+        if let Some(line) = line {
+            cx.interrupt(line, Some(filter), Some(drain), 0)?;
+        }
+        self.dev.ready();
+        // After `DRIVER_OK`: joining `kbdmux0` sets the LEDs.
         let kbd = keyboard.then(|| {
             let status = Arc::clone(&self.status);
             input::attach(
@@ -489,12 +496,6 @@ impl Driver for VtInput {
             )
         });
         *self.sink.lock() = Some(Arc::new(Sink { evdev: ev, kbd }));
-        // Taken in its own statement: installing may sleep.
-        let line = self.line.lock().take();
-        if let Some(line) = line {
-            cx.interrupt(line, Some(filter), Some(drain), 0)?;
-        }
-        self.dev.ready();
         let mut q = self.events.lock(cx.sleepable());
         for i in 0..q.slots.len() {
             q.post(i);
@@ -509,7 +510,7 @@ impl Driver for VtInput {
         let sink = self.sink.lock().take();
         if let Some(sink) = sink {
             if let Some(k) = &sink.kbd {
-                k.detach();
+                k.detach(cx.sleepable());
             }
             sink.evdev.unregister(cx.sleepable());
         }

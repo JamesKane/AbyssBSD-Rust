@@ -26,7 +26,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use abi::errno::Errno;
 use abi::ioctl::*;
-use abi::signal::{SIGCONT, SIGHUP, SIGINFO, SIGTTIN, SIGTTOU, SIGWINCH};
+use abi::signal::{SIGCONT, SIGHUP, SIGINFO, SIGINT, SIGTTIN, SIGTTOU, SIGUSR1, SIGUSR2, SIGWINCH};
 use abi::termios::{TOSTOP, Termios, VMIN, VTIME, Winsize};
 use sched::lock::{LockClass, Mutex};
 use sched::{Sleepable, WaitQueue};
@@ -47,6 +47,22 @@ impl input::Consumer for ConsoleInput {
     fn input(&self, s: &Sleepable, bytes: &[u8]) {
         if let Some(t) = console() {
             t.input(s, bytes);
+        }
+    }
+
+    /// The reboot, halt, and power-off keys signal `init`, as FreeBSD's
+    /// `shutdown_nice` does; the rest wait for `vt`.
+    fn event(&self, _: &Sleepable, e: input::term::Event) {
+        use input::term::Event;
+        let sig = match e {
+            Event::Reboot => SIGINT,
+            Event::Halt => SIGUSR1,
+            Event::PowerOff => SIGUSR2,
+            _ => return,
+        };
+        if let Some(init) = crate::proc::all().into_iter().find(|p| p.pid() == 1) {
+            let info = crate::signal::user_info(sig, 0, abi::signal::code::SI_KERNEL);
+            let _ = crate::signal::post(&init, info);
         }
     }
 }

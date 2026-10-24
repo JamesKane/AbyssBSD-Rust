@@ -248,11 +248,34 @@ interface supports it.
 `KbdSource` and `PointerSource` are the driver traits. Above them `sys/input` provides what
 FreeBSD's userland expects:
 
-- **kbd.** Each keyboard is a `kbd` (`kbd1`, …) under `kbdmux` (`kbd0`), which merges them, as
-  FreeBSD configures by default. HID usages are translated to AT set-1 scancodes for `K_RAW`,
-  keycodes for `K_CODE`, and characters through the active keymap for `K_XLATE` (the default
-  US keymap is built in; `kbdcontrol -l` loads others). The `KDGKBMODE`/`KDSKBMODE`, `KDGETLED`/
-  `KDSETLED`, `KDSETREPEAT`, `GIO_KEYMAP`/`PIO_KEYMAP`, and `KDGKBINFO` ioctls.
+- **kbd.** It follows `kbd.c`, `kbdmux.c`, and `hkbd.c`:
+  - Each keyboard is `kbdN` at the lowest free index, with a node named for its driver
+    (`/dev/hkbd0`, `/dev/vtinput0`) and the link `/dev/kbdN`. `kbdmux0` is `kbd0`: we have no
+    `atkbd`, which is FreeBSD's `kbd0` on q35.
+  - Keyboard drivers report HID usages. The class repeats the last key pressed (`kb_delay1`, then
+    `kb_delay2`) and reads keys in the keyboard's mode, as `hkbd` emulates an AT keyboard:
+    - `K_RAW`: AT set-1 scancodes, with prefixes and PrintScreen's and Pause's fake Shift and Ctrl.
+    - `K_CODE`: keycodes.
+    - `K_XLATE`: actions through the keyboard's own keymap (`genkbd_keyaction`), with dead keys
+      and Alt-keypad compose.
+    - The default keymap, accent map, and function key strings are `kbdtables.h`'s.
+  - Ownership is `kbd_allocate`'s: one owner at a time.
+    - `kbdmux0` takes each keyboard as it registers, in `K_RAW`, and decodes the scancodes itself.
+    - The console owns `kbdmux0`, as `vt` does, and makes its actions terminal input as
+      `vt_processkey` and `teken` do. Ctrl-Alt-Delete signals `init`, as `shutdown_nice` does.
+    - Otherwise, an open node owns its keyboard and reads it as `genkbd` does. Every node is
+      therefore busy (`EBUSY`) on a running system, as on FreeBSD.
+  - Requests: `KDGKBMODE`/`KDSKBMODE`, `KDGETLED`/`KDSETLED`, `KDGKBSTATE`/`KDSKBSTATE`,
+    `KDSETREPEAT`/`KDGETREPEAT`/`KDSETRAD`, `KDGKBINFO`, `KDGKBTYPE`, `KBADDKBD`/`KBRELKBD`,
+    `GIO_`/`PIO_KEYMAP`, `GIO_`/`PIO_KEYMAPENT`, `GIO_`/`PIO_DEADKEYMAP`, `GETFKEY`/`SETFKEY`.
+    `kbdmux0` passes the lock, LED, repeat, and keymap requests on to its keyboards, and lock keys
+    light every keyboard's LEDs through it.
+  - The ioctl path copies the keymap and accent map (too big for an argument) by their pointer.
+  - Not yet: `vt`'s tty requests, which are how `kbdcontrol` reaches the keyboard (U.4).
+    - FreeBSD's `PRIV_KEYBOARD` check on remapping the reboot and debugger keys (the nodes are
+      root's, and `vt` must bring credentials).
+    - `kbdmux`'s evdev key events under `rcpt_mask` `KBDMUX` (`evdev_scancode2key`).
+    - Scroll Lock scrollback and cursor-key application mode, which are `vt`'s.
 - **evdev** (`sys/evdev`). `/dev/input/eventN` per device with FreeBSD's evdev ABI (`EVIOCG*`,
   `struct input_event`, `kern.evdev.rcpt_mask`), which FreeBSD 15's `moused` reads. It follows
   `evdev.c` and `cdev.c`:

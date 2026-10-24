@@ -20,6 +20,7 @@ pub mod evdev;
 pub mod exec;
 pub mod fcntl;
 pub mod ioctl;
+pub mod kbio;
 pub mod kinfo;
 pub mod layout;
 pub mod md;

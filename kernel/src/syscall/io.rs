@@ -493,9 +493,17 @@ pub(super) fn ioctl(s: &Sleepable, fd: u64, com: u64, data: u64) -> SysResult {
     let p = process()?;
     // `u_long`, but only 32 bits are a request.
     let com = u32::try_from(com & 0xffff_ffff).unwrap_or(0);
-    let size = param_len(com);
+    // The keymap requests pass a pointer to a structure too big for the
+    // argument, which the driver copies itself.
+    let indirect = abi::kbio::indirect(com);
+    let size = match indirect {
+        Some(i) => u32::try_from(i.len).unwrap_or(u32::MAX),
+        None => param_len(com),
+    };
     let known_dir = com & (IOC_VOID | IOC_IN | IOC_OUT) != 0;
-    if !known_dir || size > IOCPARM_MAX || (com & IOC_VOID != 0 && size != 0 && size != 4) {
+    if indirect.is_none()
+        && (!known_dir || size > IOCPARM_MAX || (com & IOC_VOID != 0 && size != 0 && size != 4))
+    {
         return Err(Errno::ENOTTY);
     }
     let fdi = int(fd);
@@ -515,9 +523,11 @@ pub(super) fn ioctl(s: &Sleepable, fd: u64, com: u64, data: u64) -> SysResult {
     }
     let len = usize::try_from(size).unwrap_or(0);
     let mut arg = alloc::vec![0u8; len];
-    if com & IOC_IN != 0 && len > 0 {
+    let copy_in = indirect.map_or(com & IOC_IN != 0, |i| i.copy_in);
+    let copy_out = indirect.map_or(com & IOC_OUT != 0, |i| i.copy_out);
+    if copy_in && len > 0 {
         uaccess::copy_in(&mut arg, data).map_err(|_| Errno::EFAULT)?;
-    } else if com & IOC_VOID != 0 && len == 4 {
+    } else if indirect.is_none() && com & IOC_VOID != 0 && len == 4 {
         // An `int` passed by value.
         arg.copy_from_slice(&int(data).to_ne_bytes());
     }
@@ -530,7 +540,7 @@ pub(super) fn ioctl(s: &Sleepable, fd: u64, com: u64, data: u64) -> SysResult {
         }
         _ => f.ioctl(s, com, &mut arg)?,
     };
-    if com & IOC_OUT != 0 && len > 0 {
+    if copy_out && len > 0 {
         uaccess::copy_out(data, &arg).map_err(|_| Errno::EFAULT)?;
     }
     Ok(u64::try_from(ret).unwrap_or(0))

@@ -6,7 +6,7 @@
 //! (`offset_of!`, `size_of`), so the check compares what the kernel will
 //! actually use against what FreeBSD's C compiler computes.
 
-use crate::{bus, evdev, md, signal, socket, stat, time, ucontext, vdso};
+use crate::{bus, evdev, kbio, md, signal, socket, stat, time, ucontext, vdso};
 
 /// Architectures a layout applies to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,6 +66,7 @@ pub const CONSTANTS: &[&[ConstValue]] = &[
     BUS_CONSTANTS,
     crate::errno::CONSTANTS,
     crate::evdev::CONSTANTS,
+    crate::kbio::CONSTANTS,
     crate::sysarch::CONSTANTS,
     crate::exec::CONSTANTS,
     crate::mman::CONSTANTS,
@@ -159,6 +160,43 @@ pub static LAYOUTS: &[StructLayout] = &[
         kind => "type",
         code => "code",
         value => "value",
+    }),
+    layout!(kbio::KeyboardInfo, "struct keyboard_info", ["sys/types.h", "sys/kbio.h"], All, {
+        kb_index => "kb_index",
+        kb_name => "kb_name",
+        kb_unit => "kb_unit",
+        kb_type => "kb_type",
+        kb_config => "kb_config",
+        kb_flags => "kb_flags",
+    }),
+    layout!(kbio::KeyEnt, "struct keyent_t", ["sys/types.h", "sys/kbio.h"], All, {
+        map => "map",
+        spcl => "spcl",
+        flgs => "flgs",
+    }),
+    layout!(kbio::Keymap, "keymap_t", ["sys/types.h", "sys/kbio.h"], All, {
+        n_keys => "n_keys",
+        key => "key",
+    }),
+    layout!(kbio::AccT, "struct acc_t", ["sys/types.h", "sys/kbio.h"], All, {
+        accchar => "accchar",
+        map => "map",
+    }),
+    layout!(kbio::AccentMap, "accentmap_t", ["sys/types.h", "sys/kbio.h"], All, {
+        n_accs => "n_accs",
+        acc => "acc",
+    }),
+    layout!(kbio::KeyArg, "keyarg_t", ["sys/types.h", "sys/kbio.h"], All, {
+        keynum => "keynum",
+        key => "key",
+    }),
+    layout!(kbio::FkeyArg, "fkeyarg_t", ["sys/types.h", "sys/kbio.h"], All, {
+        keynum => "keynum",
+        keydef => "keydef",
+        flen => "flen",
+    }),
+    layout!(kbio::KeyboardRepeat, "keyboard_repeat_t", ["sys/types.h", "sys/kbio.h"], All, {
+        kb_repeat => "kb_repeat",
     }),
     layout!(evdev::InputId, "struct input_id", ["sys/types.h", "dev/evdev/input.h"], All, {
         bustype => "bustype",

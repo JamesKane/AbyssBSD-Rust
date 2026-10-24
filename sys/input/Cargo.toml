@@ -11,6 +11,7 @@ bus = { path = "../bus" }
 evdev = { path = "../evdev" }
 sched = { path = "../sched" }
 sync = { path = "../sync" }
+vfs = { path = "../vfs" }
 
 [lints]
 workspace = true

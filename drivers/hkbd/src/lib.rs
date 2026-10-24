@@ -255,8 +255,9 @@ impl Driver for Hkbd {
     fn stop(&self, cx: &mut StopCx<'_>, _: StopReason) {
         self.child.intr_stop();
         self.child.unlisten();
-        if let Some(k) = self.kbd.lock().take() {
-            k.detach();
+        let kbd = self.kbd.lock().take();
+        if let Some(k) = kbd {
+            k.detach(cx.sleepable());
         }
         let ev = self.evdev.lock().take();
         if let Some(e) = ev {
