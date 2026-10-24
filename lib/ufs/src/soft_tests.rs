@@ -909,3 +909,87 @@ fn fsync_makes_a_file_durable() {
     }
     let _ = std::fs::remove_dir_all(&work);
 }
+
+/// A superblock to track dependencies against: of a new image (on
+/// FreeBSD), or of one `fetch-base` left.
+fn a_superblock() -> Option<Superblock> {
+    let img = if have_makefs() {
+        let work = scratch("soft-sb");
+        let img = work.join("sb.img");
+        let ok = Command::new("truncate")
+            .args(["-s", "16m"])
+            .arg(&img)
+            .status()
+            .is_ok_and(|s| s.success())
+            && Command::new("newfs")
+                .args(["-U"])
+                .arg(&img)
+                .stdout(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success());
+        ok.then_some(img)
+    } else {
+        let dist = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../build/dist");
+        std::fs::read_dir(&dist)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|r| r.path().join("amd64/ufs-test.img"))
+            .find(|p| p.exists())
+    }?;
+    let bytes = std::fs::read(img).ok()?;
+    Superblock::find(&(), &bytes[..], 512).ok()
+}
+
+/// A file's last fragments grown and moved again and again before any of
+/// it reaches the disk, as fsx does through the page cache: the data is
+/// written only where it ends up, and the pointers still settle, freeing
+/// every fragment moved away from (FreeBSD's `allocdirect_merge`).
+#[test]
+fn fragments_moved_before_their_data_is_written_settle() {
+    let Some(sb) = a_superblock() else {
+        std::eprintln!("no image (not FreeBSD, no fetch-base): skipped");
+        return;
+    };
+    let f = u64::from(sb.fsize);
+    let ino = 4;
+    let slot = softdep::Slot::Inode { ino, index: 0 };
+    let cg_at = sb.cgtod(0) * f;
+    let (b1, b2, b3) = (sb.cgdmin(0) + 64, sb.cgdmin(0) + 128, sb.cgdmin(0) + 192);
+    let mut d = Deps::new(&sb);
+    // Two fragments; moved to three; grown in place to four; moved to five.
+    d.new_block(b1, 0, 2 * f, cg_at, ino);
+    d.place(b1, slot, 0, 0, None);
+    d.inode_copied(ino);
+    d.new_block(b2, 0, 3 * f, cg_at, ino);
+    d.place(b2, slot, b1, 2 * f, Some((b1, 2 * f)));
+    d.inode_copied(ino);
+    d.new_block(b2, 3 * f, 4 * f, cg_at, ino);
+    d.place(b2, slot, b2, 3 * f, None);
+    d.inode_copied(ino);
+    d.new_block(b3, 0, 5 * f, cg_at, ino);
+    d.place(b3, slot, b2, 4 * f, Some((b2, 4 * f)));
+    d.inode_copied(ino);
+    d.data_written(b3 * f, 5 * f);
+    let group = alloc::vec![0u8; idx64(u64::from(sb.bsize))];
+    assert!(d.write_start(cg_at, &group).is_none());
+    d.write_done(cg_at, true);
+    let (at, within) = sb.inode_location(ino);
+    let mut block = alloc::vec![0u8; idx64(u64::from(sb.bsize))];
+    inode::raw::set_pointer(&mut block[within..within + inode::SIZE], 0, b3);
+    // Nothing is rolled back: the pointer to the last fragments goes out.
+    assert!(d.write_start(at, &block).is_none(), "{}", d.describe());
+    d.write_done(at, true);
+    assert_eq!(d.pending_free(), 6 * f);
+    let mut freed: Vec<(u64, u64)> = d
+        .take_work()
+        .into_iter()
+        .flat_map(|w| match w {
+            softdep::Work::Free(v) => v,
+            w => panic!("{w:?}"),
+        })
+        .collect();
+    freed.sort_unstable();
+    assert_eq!(freed, [(b1, 2 * f), (b2, 4 * f)]);
+    assert!(d.is_idle(), "{}", d.describe());
+}

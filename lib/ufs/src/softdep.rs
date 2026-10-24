@@ -517,9 +517,85 @@ impl Deps {
         }
         if let Slot::Inode { ino, .. } = slot {
             self.inode_dep(ino);
+            self.merge(id, slot, old);
         }
         self.slots.entry(slot).or_default().push(id);
         self.owned.entry(owner).or_default().insert(id);
+    }
+
+    /// A direct block's pointer set again (a fragment grown in place or
+    /// moved) before the last one reached the disk: the new one takes its
+    /// place, and goes out in place of what the disk still holds
+    /// (FreeBSD's `allocdirect_merge`). Otherwise the last one would wait
+    /// for data written where the fragments no longer are, holding every
+    /// later pointer back.
+    fn merge(&mut self, id: Id, slot: Slot, old: u64) {
+        let Some(&prev) = self.slots.get(&slot).and_then(|v| v.last()) else {
+            return;
+        };
+        // Out with a write under way: it completes when that write does.
+        if self.inflight.values().any(|f| f.out.contains(&prev)) {
+            return;
+        }
+        let Some(p) = self.alloc_of(prev) else {
+            return;
+        };
+        if p.bno != old {
+            return;
+        }
+        let (p_old, p_old_size, p_free, p_bno) = (p.old, p.old_size, p.free_old, p.bno);
+        let Some(Item {
+            kind: Kind::Alloc(a),
+            ..
+        }) = self.items.get_mut(&id)
+        else {
+            return;
+        };
+        let moved = a.bno != p_bno;
+        a.old = p_old;
+        a.old_size = p_old_size;
+        // The fragments the new pointer moved away from were never on the
+        // disk: they are free now, and the new one frees what the last
+        // one would have. Not so for fragments grown in place with nothing
+        // to free: what the disk holds is still the start of the new one.
+        let mut freed = None;
+        if p_free.is_some() || p_old == 0 {
+            freed = core::mem::replace(&mut a.free_old, p_free);
+        }
+        if let Some((bno, size)) = freed {
+            self.pending_free += size;
+            self.work.push_back(Work::Free(alloc::vec![(bno, size)]));
+        }
+        let waits = self
+            .items
+            .get(&prev)
+            .map(|i| i.waits.clone())
+            .unwrap_or_default();
+        // Moved, the data goes where the new pointer points and nothing
+        // of the last one is left to wait for. Grown in place, the old
+        // part's data, and the group, are still to be written for the new
+        // pointer too.
+        if !moved {
+            let base = p_bno * u64::from(self.sb.fsize);
+            let keys: Vec<(u64, Id)> = self
+                .covers
+                .range(Self::covers_of(base))
+                .filter(|(_, c)| c.id == prev)
+                .map(|(k, _)| *k)
+                .collect();
+            for key in keys {
+                if let Some(mut c) = self.covers.remove(&key) {
+                    c.id = id;
+                    self.covers.insert((key.0, id), c);
+                }
+            }
+            for w in waits {
+                self.add_wait(id, w);
+            }
+        }
+        // What waited on the last one waits on the new one.
+        self.retarget_followers(prev, &[Wait::Item(id)]);
+        self.drop_alloc(prev);
     }
 
     /// Block `bno` is metadata whose contents are in the buffer at `at`,
@@ -531,7 +607,13 @@ impl Deps {
         self.forget_cover(bno, id);
         let stamp = self.stamp();
         self.add_wait(id, Wait::Buffer { at, stamp });
-        self.satisfy(id, Wait::Data(bno));
+        // One for each cover (two, for fragments grown in place).
+        let n = self.items.get(&id).map_or(0, |i| {
+            i.waits.iter().filter(|w| **w == Wait::Data(bno)).count()
+        });
+        for _ in 0..n {
+            self.satisfy(id, Wait::Data(bno));
+        }
     }
 
     /// The buffer at `at` (held) is an indirect block.
@@ -653,15 +735,17 @@ impl Deps {
         (base, Id(0))..(base + u64::from(crate::sb::MAXBSIZE), Id(0))
     }
 
-    /// Forgets allocation `id`'s cover of block `bno`, if it has one.
+    /// Forgets allocation `id`'s covers of block `bno` (two, for fragments
+    /// grown in place and merged), if it has any.
     fn forget_cover(&mut self, bno: u64, id: Id) {
         let base = bno * u64::from(self.sb.fsize);
-        let key = self
+        let keys: Vec<(u64, Id)> = self
             .covers
             .range(Self::covers_of(base))
-            .find(|(_, c)| c.id == id)
-            .map(|(k, _)| *k);
-        if let Some(key) = key {
+            .filter(|(_, c)| c.id == id)
+            .map(|(k, _)| *k)
+            .collect();
+        for key in keys {
             self.covers.remove(&key);
         }
     }

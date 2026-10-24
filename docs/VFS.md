@@ -306,6 +306,10 @@ stages, each validated on the build server.
    an item with the waits FreeBSD's rules give it:
    - A block pointer waits for the block's group map and its contents (file data written, or
      the metadata buffer). An allocated inode waits for its group.
+   - A direct block's pointer set again before the last one reached the disk (fragments grown
+     or moved) replaces that one, as FreeBSD's `allocdirect_merge` does. It goes out in place of
+     what the disk holds, and fragments moved away from that the disk never pointed to are
+     freed. File data moved with the fragments is written only where they are now.
    - A directory entry waits for the inode it names, written with its new link count. A new
      directory's entry also waits for its first block and its parent's link; a directory's entry
      in a new parent waits for that parent's link.
