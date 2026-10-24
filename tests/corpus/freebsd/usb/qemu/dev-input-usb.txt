@@ -1,30 +1,35 @@
 /dev/input:
 total 0
-crw-------  1 root wheel  0xd Oct 23 23:02 event0
-crw-------  1 root wheel 0x1a Oct 23 23:02 event1
-crw-------  1 root wheel 0x43 Oct 23 23:02 event2
-crw-------  1 root wheel 0x48 Oct 23 23:02 event3
-crw-------  1 root wheel 0x7b Oct 23 23:02 event4
-crw-------  1 root wheel 0x85 Oct 23 23:02 event5
-crw-------  1 root wheel 0x86 Oct 23 23:02 event6
+crw-------  1 root wheel  0xd Oct 24 19:53 event0
+crw-------  1 root wheel 0x1a Oct 24 19:53 event1
+crw-------  1 root wheel 0x43 Oct 24 19:53 event2
+crw-------  1 root wheel 0x48 Oct 24 19:53 event3
+crw-------  1 root wheel 0x82 Oct 24 19:53 event4
+crw-------  1 root wheel 0x8b Oct 24 19:53 event5
+crw-------  1 root wheel 0x8c Oct 24 19:53 event6
 
 /dev/usb:
 total 0
-crw-------  1 root operator 0x41 Oct 23 23:02 0.1.0
-crw-------  1 root operator 0x66 Oct 23 23:02 0.1.1
-crw-------  1 root operator 0x37 Oct 23 23:02 0.2.0
-crw-------  1 root operator 0x3a Oct 23 23:02 0.2.1
-crw-------  1 root operator 0x3c Oct 23 23:02 0.2.2
-crw-------  1 root operator 0x70 Oct 23 23:02 0.3.0
-crw-------  1 root operator 0x72 Oct 23 23:02 0.3.1
-crw-------  1 root operator 0x73 Oct 23 23:02 0.3.2
-crw-------  1 root operator 0x74 Oct 23 23:02 0.3.3
-crw-------  1 root operator 0x75 Oct 23 23:02 0.3.4
-crw-------  1 root operator 0x76 Oct 23 23:02 0.4.0
-crw-------  1 root operator 0x78 Oct 23 23:02 0.4.1
-crw-------  1 root operator 0x7c Oct 23 23:02 0.5.0
-crw-------  1 root operator 0x7e Oct 23 23:02 0.5.1
-crw-------  1 root operator 0x7f Oct 23 23:02 0.6.0
-crw-------  1 root operator 0x81 Oct 23 23:02 0.6.1
-crw-------  1 root operator 0x82 Oct 23 23:02 0.7.0
-crw-------  1 root operator 0x84 Oct 23 23:02 0.7.1
+crw-------  1 root operator 0x41 Oct 24 19:53 0.1.0
+crw-------  1 root operator 0x66 Oct 24 19:53 0.1.1
+crw-------  1 root operator 0x70 Oct 24 19:53 0.2.0
+crw-------  1 root operator 0x72 Oct 24 19:53 0.2.1
+crw-------  1 root operator 0x73 Oct 24 19:53 0.2.2
+crw-------  1 root operator 0x78 Oct 24 19:53 0.3.0
+crw-------  1 root operator 0x7a Oct 24 19:53 0.3.1
+crw-------  1 root operator 0x7b Oct 24 19:53 0.3.2
+crw-------  1 root operator 0x7c Oct 24 19:53 0.3.3
+crw-------  1 root operator 0x7d Oct 24 19:53 0.3.4
+crw-------  1 root operator 0x7e Oct 24 19:53 0.4.0
+crw-------  1 root operator 0x3a Oct 24 19:53 0.4.1
+crw-------  1 root operator 0x37 Oct 24 19:53 0.5.0
+crw-------  1 root operator 0x3c Oct 24 19:53 0.5.1
+crw-------  1 root operator 0x3d Oct 24 19:53 0.6.0
+crw-------  1 root operator 0x6c Oct 24 19:53 0.6.1
+crw-------  1 root operator 0x6e Oct 24 19:53 0.7.0
+crw-------  1 root operator 0x84 Oct 24 19:53 0.7.1
+crw-------  1 root operator 0x85 Oct 24 19:53 0.8.0
+crw-------  1 root operator 0x87 Oct 24 19:53 0.8.1
+crw-------  1 root operator 0x88 Oct 24 19:53 0.8.2
+crw-------  1 root operator 0x89 Oct 24 19:53 0.8.3
+crw-------  1 root operator 0x8a Oct 24 19:53 0.8.4

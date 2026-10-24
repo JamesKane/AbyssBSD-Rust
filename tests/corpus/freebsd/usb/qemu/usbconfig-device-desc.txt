@@ -117,3 +117,20 @@ ugen0.7: <QEMU Tablet Adomax Technology Co., Ltd> at usbus0, cfg=0 md=HOST spd=F
   iSerialNumber = 0x0009  <89126-0000:00:05.0-3.1>
   bNumConfigurations = 0x0001 
 
+ugen0.8: <USB Attached SCSI HBA QEMU> at usbus0, cfg=0 md=HOST spd=HIGH (480Mbps) pwr=ON (0mA)
+
+  bLength = 0x0012 
+  bDescriptorType = 0x0001 
+  bcdUSB = 0x0200 
+  bDeviceClass = 0x0000  <Probed by interface class>
+  bDeviceSubClass = 0x0000 
+  bDeviceProtocol = 0x0000 
+  bMaxPacketSize0 = 0x0040 
+  idVendor = 0x46f4 
+  idProduct = 0x0003 
+  bcdDevice = 0x0000 
+  iManufacturer = 0x0001  <QEMU>
+  iProduct = 0x0002  <USB Attached SCSI HBA>
+  iSerialNumber = 0x0003  <27842-0000:00:05.0-9>
+  bNumConfigurations = 0x0001 
+

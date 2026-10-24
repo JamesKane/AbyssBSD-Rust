@@ -79,3 +79,12 @@
 +hms1 at index=0 page=0x0001 usage=0x0002 bus=0x03 vendor=0x0627 product=0x0001 version=0x0000 on hidbus2
 +hidbus2 at   on usbhid2
 +usbhid2 at bus=0 hubaddr=6 port=1 devaddr=7 interface=0 ugen=ugen0.7 vendor=0x0627 product=0x0001 devclass=0x00 devsubclass=0x00 devproto=0x00 sernum="89126-0000:00:05.0-3.1" release=0x0000 mode=host intclass=0x03 intsubclass=0x01 intprotocol=0x02 on uhub1
+!system=DEVFS subsystem=CDEV type=DESTROY cdev=usb/0.8.4
+!system=DEVFS subsystem=CDEV type=DESTROY cdev=usb/0.8.3
+!system=DEVFS subsystem=CDEV type=DESTROY cdev=usb/0.8.2
+!system=DEVFS subsystem=CDEV type=DESTROY cdev=usb/0.8.1
+!system=DEVFS subsystem=CDEV type=CREATE cdev=usb/0.8.1
+!system=DEVFS subsystem=CDEV type=CREATE cdev=usb/0.8.2
+!system=DEVFS subsystem=CDEV type=CREATE cdev=usb/0.8.3
+!system=DEVFS subsystem=CDEV type=CREATE cdev=usb/0.8.4
+? at bus=0 hubaddr=1 port=17 devaddr=8 interface=0 ugen=ugen0.8 vendor=0x46f4 product=0x0003 devclass=0x00 devsubclass=0x00 devproto=0x00 sernum="27842-0000:00:05.0-9" release=0x0000 mode=host intclass=0x08 intsubclass=0x06 intprotocol=0x62 on uhub0

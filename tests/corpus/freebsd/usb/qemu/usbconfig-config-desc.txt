@@ -423,3 +423,106 @@ ugen0.7: <QEMU Tablet Adomax Technology Co., Ltd> at usbus0, cfg=0 md=HOST spd=F
 
 
 
+ugen0.8: <USB Attached SCSI HBA QEMU> at usbus0, cfg=0 md=HOST spd=HIGH (480Mbps) pwr=ON (0mA)
+
+
+ Configuration index 0
+
+    bLength = 0x0009 
+    bDescriptorType = 0x0002 
+    wTotalLength = 0x003e 
+    bNumInterfaces = 0x0001 
+    bConfigurationValue = 0x0001 
+    iConfiguration = 0x0004  <High speed config (usb 2.0)>
+    bmAttributes = 0x00c0 
+    bMaxPower = 0x0000 
+
+    Interface 0
+      bLength = 0x0009 
+      bDescriptorType = 0x0004 
+      bInterfaceNumber = 0x0000 
+      bAlternateSetting = 0x0000 
+      bNumEndpoints = 0x0004 
+      bInterfaceClass = 0x0008  <Mass storage>
+      bInterfaceSubClass = 0x0006 
+      bInterfaceProtocol = 0x0062 
+      iInterface = 0x0000  <no string>
+
+     Endpoint 0
+        bLength = 0x0007 
+        bDescriptorType = 0x0005 
+        bEndpointAddress = 0x0001  <OUT>
+        bmAttributes = 0x0002  <BULK>
+        wMaxPacketSize = 0x0200 
+        bInterval = 0x0000 
+        bRefresh = 0x0000 
+        bSynchAddress = 0x0000 
+
+      Additional Descriptor
+
+      bLength = 0x04
+      bDescriptorType = 0x24
+      bDescriptorSubType = 0x01
+       RAW dump: 
+       0x00 | 0x04, 0x24, 0x01, 0x00
+
+
+     Endpoint 1
+        bLength = 0x0007 
+        bDescriptorType = 0x0005 
+        bEndpointAddress = 0x0082  <IN>
+        bmAttributes = 0x0002  <BULK>
+        wMaxPacketSize = 0x0200 
+        bInterval = 0x0000 
+        bRefresh = 0x0000 
+        bSynchAddress = 0x0000 
+
+      Additional Descriptor
+
+      bLength = 0x04
+      bDescriptorType = 0x24
+      bDescriptorSubType = 0x02
+       RAW dump: 
+       0x00 | 0x04, 0x24, 0x02, 0x00
+
+
+     Endpoint 2
+        bLength = 0x0007 
+        bDescriptorType = 0x0005 
+        bEndpointAddress = 0x0083  <IN>
+        bmAttributes = 0x0002  <BULK>
+        wMaxPacketSize = 0x0200 
+        bInterval = 0x0000 
+        bRefresh = 0x0000 
+        bSynchAddress = 0x0000 
+
+      Additional Descriptor
+
+      bLength = 0x04
+      bDescriptorType = 0x24
+      bDescriptorSubType = 0x03
+       RAW dump: 
+       0x00 | 0x04, 0x24, 0x03, 0x00
+
+
+     Endpoint 3
+        bLength = 0x0007 
+        bDescriptorType = 0x0005 
+        bEndpointAddress = 0x0004  <OUT>
+        bmAttributes = 0x0002  <BULK>
+        wMaxPacketSize = 0x0200 
+        bInterval = 0x0000 
+        bRefresh = 0x0000 
+        bSynchAddress = 0x0000 
+
+      Additional Descriptor
+
+      bLength = 0x04
+      bDescriptorType = 0x24
+      bDescriptorSubType = 0x04
+       RAW dump: 
+       0x00 | 0x04, 0x24, 0x04, 0x00
+
+
+
+

@@ -1,19 +1,20 @@
-crw-------  1 root wheel    0x44 Oct 23 23:02 atkbd0
-crw-r-----  1 root operator 0x3e Oct 23 23:02 da0
-crw-------  1 root wheel    0x79 Oct 23 23:02 hkbd0
-lrwxr-xr-x  1 root wheel       6 Oct 23 23:02 kbd0 -> atkbd0
-lrwxr-xr-x  1 root wheel       7 Oct 23 23:02 kbd1 -> kbdmux0
-lrwxr-xr-x  1 root wheel       5 Oct 23 23:02 kbd2 -> hkbd0
-crw-------  1 root wheel     0xe Oct 23 23:02 kbdmux0
-crw-------  1 root operator 0x3d Oct 23 23:02 pass0
-crw-rw-rw-  1 root wheel    0x46 Oct 23 23:02 psm0
-crw-------  1 root wheel    0x19 Oct 23 23:02 sysmouse
-lrwxr-xr-x  1 root wheel       9 Oct 23 23:02 ugen0.1 -> usb/0.1.0
-lrwxr-xr-x  1 root wheel       9 Oct 23 23:02 ugen0.2 -> usb/0.2.0
-lrwxr-xr-x  1 root wheel       9 Oct 23 23:02 ugen0.3 -> usb/0.3.0
-lrwxr-xr-x  1 root wheel       9 Oct 23 23:02 ugen0.4 -> usb/0.4.0
-lrwxr-xr-x  1 root wheel       9 Oct 23 23:02 ugen0.5 -> usb/0.5.0
-lrwxr-xr-x  1 root wheel       9 Oct 23 23:02 ugen0.6 -> usb/0.6.0
-lrwxr-xr-x  1 root wheel       9 Oct 23 23:02 ugen0.7 -> usb/0.7.0
-crw-------  1 root wheel     0xc Oct 23 23:02 uinput
-crw-r--r--  1 root operator 0x57 Oct 23 23:02 usbctl
+crw-------  1 root wheel    0x44 Oct 24 19:53 atkbd0
+crw-r-----  1 root operator 0x75 Oct 24 19:53 da0
+crw-------  1 root wheel    0x80 Oct 24 19:53 hkbd0
+lrwxr-xr-x  1 root wheel       6 Oct 24 19:53 kbd0 -> atkbd0
+lrwxr-xr-x  1 root wheel       7 Oct 24 19:53 kbd1 -> kbdmux0
+lrwxr-xr-x  1 root wheel       5 Oct 24 19:53 kbd2 -> hkbd0
+crw-------  1 root wheel     0xe Oct 24 19:53 kbdmux0
+crw-------  1 root operator 0x74 Oct 24 19:53 pass0
+crw-rw-rw-  1 root wheel    0x46 Oct 24 19:53 psm0
+crw-------  1 root wheel    0x19 Oct 24 19:53 sysmouse
+lrwxr-xr-x  1 root wheel       9 Oct 24 19:53 ugen0.1 -> usb/0.1.0
+lrwxr-xr-x  1 root wheel       9 Oct 24 19:53 ugen0.2 -> usb/0.2.0
+lrwxr-xr-x  1 root wheel       9 Oct 24 19:53 ugen0.3 -> usb/0.3.0
+lrwxr-xr-x  1 root wheel       9 Oct 24 19:53 ugen0.4 -> usb/0.4.0
+lrwxr-xr-x  1 root wheel       9 Oct 24 19:53 ugen0.5 -> usb/0.5.0
+lrwxr-xr-x  1 root wheel       9 Oct 24 19:53 ugen0.6 -> usb/0.6.0
+lrwxr-xr-x  1 root wheel       9 Oct 24 19:53 ugen0.7 -> usb/0.7.0
+lrwxr-xr-x  1 root wheel       9 Oct 24 19:53 ugen0.8 -> usb/0.8.0
+crw-------  1 root wheel     0xc Oct 24 19:53 uinput
+crw-r--r--  1 root operator 0x57 Oct 24 19:53 usbctl

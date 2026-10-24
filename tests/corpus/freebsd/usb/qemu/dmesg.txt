@@ -6,7 +6,7 @@ FreeBSD is a registered trademark of The FreeBSD Foundation.
 FreeBSD 15.1-RELEASE releng/15.1-n283562-96841ea08dcf GENERIC amd64
 FreeBSD clang version 19.1.7 (https://github.com/llvm/llvm-project.git llvmorg-19.1.7-0-gcd708029e0b2)
 VT(efifb): resolution 1280x800
-CPU: QEMU TCG CPU version 2.5+ (3609.77-MHz K8-class CPU)
+CPU: QEMU TCG CPU version 2.5+ (3609.71-MHz K8-class CPU)
   Origin="AuthenticAMD"  Id=0x663  Family=0x6  Model=0x6  Stepping=3
   Features=0x1fc3fbfd<FPU,DE,PSE,TSC,MSR,PAE,MCE,CX8,APIC,SEP,MTRR,PGE,MCA,CMOV,PAT,PSE36,ACPI,MMX,FXSR,SSE,SSE2,SS,HTT>
   Features2=0xfef8320b<SSE3,PCLMULQDQ,MON,SSSE3,FMA,CX16,SSE4.1,SSE4.2,x2APIC,MOVBE,POPCNT,AESNI,XSAVE,OSXSAVE,AVX,F16C,RDRAND,HV>
@@ -108,7 +108,7 @@ uhub0 on usbus0
 uhub0: <(0x1b36) XHCI root HUB, class 9/0, rev 3.00/1.00, addr 1> on usbus0
 Trying to mount root from ufs:/dev/gpt/rootfs [rw,noatime]...
 Dual Console: Serial Primary, Video Secondary
-uhub0: 16 ports with 16 removable, self powered
+uhub0: 17 ports with 17 removable, self powered
 ugen0.2: <QEMU QEMU USB HARDDRIVE> at usbus0
 umass0 on uhub0
 umass0: <QEMU QEMU USB HARDDRIVE, class 0/0, rev 3.00/0.00, addr 1> on usbus0
@@ -118,12 +118,8 @@ da0 at umass-sim0 bus 0 scbus6 target 0 lun 0
 da0: <QEMU QEMU HARDDISK 2.5+> Fixed Direct Access SPC-3 SCSI device
 da0: Serial Number abyssbbb
 da0: 400.000MB/s transfers
-da0: 16MB (32768 512 byte sectors)
+da0: 32MB (65536 512 byte sectors)
 da0: quirks=0x2<NO_6_BYTE>
-ichsmb0: <Intel 82801I (ICH9) SMBus controller> port 0x6100-0x613f irq 16 at device 31.3 on pci0
-smbus0: <System Management Bus> on ichsmb0
-vtrnd0: <VirtIO Entropy Adapter> on virtio_pci2
-random: registering fast source VirtIO Entropy Adapter
 ugen0.3: <QEMU USB Attached SCSI HBA> at usbus0
 ugen0.4: <QEMU QEMU USB Keyboard> at usbus0
 usbhid0 on uhub0
@@ -138,14 +134,19 @@ hidbus1: <HID bus> on usbhid1
 ugen0.6: <QEMU QEMU USB Hub> at usbus0
 uhub1 on uhub0
 uhub1: <QEMU QEMU USB Hub, class 9/0, rev 1.10/1.01, addr 5> on usbus0
-lo0: link state changed to UP
 uhub1: 8 ports with 8 removable, self powered
 ugen0.7: <QEMU QEMU USB Mouse> at usbus0
 usbhid2 on uhub1
 usbhid2: <QEMU QEMU USB Mouse, class 0/0, rev 2.00/0.00, addr 6> on usbus0
 hidbus2: <HID bus> on usbhid2
+ugen0.8: <QEMU USB Attached SCSI HBA> at usbus0
 uhub_explore: illegal enable change, port 1
+ichsmb0: <Intel 82801I (ICH9) SMBus controller> port 0x6100-0x613f irq 16 at device 31.3 on pci0
+smbus0: <System Management Bus> on ichsmb0
 hms0: <QEMU QEMU USB Tablet> on hidbus1
 hms0: 5 buttons and [XYW] coordinates ID=0
 hms1: <QEMU QEMU USB Mouse> on hidbus2
 hms1: 5 buttons and [XYW] coordinates ID=0
+vtrnd0: <VirtIO Entropy Adapter> on virtio_pci2
+random: registering fast source VirtIO Entropy Adapter
+lo0: link state changed to UP

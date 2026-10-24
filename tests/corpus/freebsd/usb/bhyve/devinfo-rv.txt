@@ -70,6 +70,9 @@ nexus0
                 0xc2006000-0xc2006fff
           usbus0
             uhub0 <Intel XHCI root HUB, class 9/0, rev 3.00/1.00, addr 1>
+              usbhid0 <BHYVE HID Tablet, class 0/0, rev 3.00/0.00, addr 1> pnpinfo vendor=0xfb5d product=0x0001 devclass=0x00 devsubclass=0x00 devproto=0x00 sernum="01" release=0x0000 mode=host intclass=0x03 intsubclass=0x01 intprotocol=0x02 at bus=0 hubaddr=1 port=1 devaddr=2 interface=0 ugen=ugen0.2
+                hidbus0 <HID bus>
+                  hms0 <BHYVE HID Tablet> pnpinfo page=0x0001 usage=0x0002 bus=0x03 vendor=0xfb5d product=0x0001 version=0x0000 at index=0
         isab0 <PCI-ISA bridge> pnpinfo vendor=0x8086 device=0x7000 subvendor=0x0000 subdevice=0x0000 class=0x060100 at slot=31 function=0 dbsf=pci0:0:31:0 handle=\_SB_.PC00.ISA_
           isa0 <ISA bus>
             sc0
