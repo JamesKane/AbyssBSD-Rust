@@ -113,6 +113,8 @@ pub const GIO_VFONT: u32 = ioc(IOC_OUT, b'c', 71, 72);
 pub const PIO_VFONT_DEFAULT: u32 = ioc(IOC_VOID, b'c', 72, 0);
 pub const CONS_GETINFO: u32 = ioc(IOC_IN | IOC_OUT, b'c', 73, 24);
 pub const CONS_GETVERS: u32 = ioc(IOC_OUT, b'c', 74, 4);
+/// `_IOWR('c', 102, video_info_t)`: `video_info_t` is 192 bytes.
+pub const CONS_MODEINFO: u32 = ioc(IOC_IN | IOC_OUT, b'c', 102, 192);
 pub const CONS_SETKBD: u32 = ioc(IOC_VOID, b'c', 110, 4);
 pub const CONS_RELKBD: u32 = ioc(IOC_VOID, b'c', 111, 0);
 pub const VT_OPENQRY: u32 = ioc(IOC_OUT, b'v', 1, 4);
@@ -238,6 +240,7 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("PIO_VFONT_DEFAULT", PIO_VFONT_DEFAULT),
     c("CONS_GETINFO", CONS_GETINFO),
     c("CONS_GETVERS", CONS_GETVERS),
+    c("CONS_MODEINFO", CONS_MODEINFO),
     c("CONS_SETKBD", CONS_SETKBD),
     c("CONS_RELKBD", CONS_RELKBD),
     c("VT_OPENQRY", VT_OPENQRY),

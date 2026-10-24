@@ -6,7 +6,8 @@
  * display mode, a keyboard mode and lock state kept per window, the
  * switching mode (VT_SETMODE), the history size, the screen map, the
  * mouse cursor, a font of the window's own (PIO_VFONT), which sizes it,
- * and switching (VT_ACTIVATE, VT_WAITACTIVE) to the window and back,
+ * releasing the console's keyboard and taking it back (CONS_RELKBD,
+ * CONS_SETKBD), and switching (VT_ACTIVATE, VT_WAITACTIVE) to the window and back,
  * which only an open window allows.
  *
  * Runs on FreeBSD too (as root, under vt, with ttyv2 not in use); the
@@ -78,6 +79,8 @@ main(void)
 	vfnt_t f;
 	scrmap_t sm;
 	mouse_info_t mi;
+	keyboard_info_t ki;
+	video_info_t mode;
 	int fd, active, v, i, closed;
 
 	fd = open("/dev/ttyv2", O_RDWR | O_NONBLOCK);
@@ -120,6 +123,30 @@ main(void)
 	    ioctl(fd, KDGKBSTATE, &v) == 0 && v == CLKED, "state %#x", v);
 	CHECK(req(fd, KDSKBSTATE, 0) == 0, "%s", strerror(errno));
 	CHECK(ioctl(fd, KDGKBTYPE, &v) == 0, "%s", strerror(errno));
+	CHECK(ioctl(fd, CONS_MODEINFO, &mode) == 0, "%s", strerror(errno));
+
+	/* The console's keyboard: released, and taken back. */
+	CHECK(ioctl(fd, KDGKBINFO, &ki) == 0, "%s", strerror(errno));
+	CHECK(req(fd, CONS_SETKBD, ki.kb_index) == 0, "%s", strerror(errno));
+	CHECK(req(fd, CONS_SETKBD, 1000) == -1 && errno == EINVAL, "%s",
+	    strerror(errno));
+	CHECK(req(fd, CONS_SETKBD, -1) == -1 && errno == EINVAL, "%s",
+	    strerror(errno));
+	CHECK(ioctl(fd, CONS_RELKBD) == 0, "%s", strerror(errno));
+	/* Without one, the keyboard's requests do nothing. */
+	i = ki.kb_index;
+	memset(&ki, 0xff, sizeof(ki));
+	CHECK(ioctl(fd, KDGKBINFO, &ki) == 0 && ki.kb_index == 0 &&
+	    ki.kb_flags == 0, "index %d", ki.kb_index);
+	v = -1;
+	CHECK(ioctl(fd, KDGKBTYPE, &v) == 0 && v == 0, "type %d", v);
+	CHECK(req(fd, KDSKBSTATE, NLKED) == 0 &&
+	    ioctl(fd, KDGKBSTATE, &v) == 0 && v == NLKED, "state %#x", v);
+	CHECK(req(fd, KDSKBSTATE, 0) == 0, "%s", strerror(errno));
+	CHECK(ioctl(fd, CONS_RELKBD) == 0, "%s", strerror(errno));
+	CHECK(req(fd, CONS_SETKBD, i) == 0, "%s", strerror(errno));
+	CHECK(ioctl(fd, KDGKBINFO, &ki) == 0 && ki.kb_index == i,
+	    "index %d", ki.kb_index);
 
 	/* The switching mode. */
 	memset(&vm, 0xff, sizeof(vm));

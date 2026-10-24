@@ -377,10 +377,14 @@ Implemented (`sys/vt`, `kernel/src/vtcons.rs`):
 - The requests `vtterm_ioctl` answers: the keyboard's (to `kbdmux0`), `KDGKBMODE`/`KDSKBMODE`,
   `KDGKBSTATE`/`KDSKBSTATE`, `KDGETLED`/`KDSETLED`, `KDGETMODE`/`KDSETMODE`, `CONS_GETINFO`,
   `CONS_GETVERS`, `CONS_GET`, `CONS_HISTORY`, `CONS_CLRHIST`, `CONS_BELLTYPE`, `CONS_BLANKTIME`,
-  `CONS_MOUSECTL` (show and hide), `GIO_SCRNMAP`, `PIO_VFONT`, `PIO_VFONT_DEFAULT`, and `VT_*`.
-  `tests/user/vt.c` checks them, and passes on FreeBSD 15.1 too.
-- Not yet: `CONS_SETKBD`/`CONS_RELKBD`, `KDENABIO`,
-  `CONS_MODEINFO`, the `FBIO_*` requests, and the bell (off by default, `kern.vt.enable_bell`).
+  `CONS_MOUSECTL` (show and hide), `CONS_MODEINFO` (nothing, as in FreeBSD), `GIO_SCRNMAP`,
+  `PIO_VFONT`, `PIO_VFONT_DEFAULT`, and `VT_*`. `tests/user/vt.c` checks them, and passes on
+  FreeBSD 15.1 too.
+- The console's keyboard (`vd_keyboard`), `kbdmux0` from the start: `CONS_SETKBD` takes another
+  (`EINVAL` if there is none with that index, `EPERM` if it is busy), keeping the visible window's
+  lock state and giving the new one its mode; `CONS_RELKBD` lets it go, as does unplugging it.
+  Without one, the keyboard's requests do nothing and succeed, as FreeBSD's do.
+- Not yet: `KDENABIO`, the `FBIO_*` requests, and the bell (off by default, `kern.vt.enable_bell`).
 
 ## 8. USB mass storage
 

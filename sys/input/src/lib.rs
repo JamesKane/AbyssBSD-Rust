@@ -91,10 +91,65 @@ pub trait Consumer: Send + Sync {
     }
 }
 
-/// A request to the console's keyboard, `kbdmux0` (`kbdd_ioctl` on
-/// `vd_keyboard`); `None` if no keyboard layer knows it (`ENOIOCTL`).
+/// A request to the console's keyboard, `kbdmux0` unless
+/// [`set_console`] chose another (`kbdd_ioctl` on `vd_keyboard`); `None`
+/// if the console has no keyboard or no keyboard layer knows the
+/// request (`ENOIOCTL`).
 pub fn console_ioctl(req: u32, arg: &mut [u8]) -> Option<Result<(), Errno>> {
-    mux()?.request(req, arg)
+    console_keyboard()?.request(req, arg)
+}
+
+fn console_keyboard() -> Option<Arc<Keyboard>> {
+    CLASS.keyboard.lock().clone()
+}
+
+/// The console's keyboard's index, if it has one.
+#[must_use]
+pub fn console_index() -> Option<u32> {
+    CLASS.keyboard.lock().as_ref().map(|k| k.index)
+}
+
+/// Makes keyboard `index` the console's (`CONS_SETKBD`): it is taken,
+/// `save` runs while the old one is still the console's, and the old
+/// one is let go.
+///
+/// # Errors
+///
+/// `EINVAL` if there is no keyboard `index`; `EPERM` if it is busy.
+pub fn set_console(index: i32, save: &mut dyn FnMut()) -> Result<(), Errno> {
+    // `kbd_get_keyboard`.
+    let k = usize::try_from(index)
+        .ok()
+        .and_then(|i| CLASS.kbds.lock().get(i).cloned().flatten())
+        .filter(|k| !k.gone.load(Ordering::Acquire))
+        .ok_or(Errno::EINVAL)?;
+    if !k.allocate(Owner::Console) {
+        return Err(Errno::EPERM);
+    }
+    if let Some(old) = console_keyboard() {
+        save();
+        let _ = old.release(&Owner::Console);
+    }
+    *CLASS.keyboard.lock() = Some(k);
+    Ok(())
+}
+
+/// Lets the console's keyboard go (`CONS_RELKBD`), after `save`.
+///
+/// # Errors
+///
+/// As `kbd_release` returns them.
+pub fn release_console(save: &mut dyn FnMut()) -> Result<(), Errno> {
+    let Some(k) = console_keyboard() else {
+        return Ok(());
+    };
+    save();
+    k.release(&Owner::Console)?;
+    let mut kbd = CLASS.keyboard.lock();
+    if kbd.as_ref().is_some_and(|c| Arc::ptr_eq(c, &k)) {
+        *kbd = None;
+    }
+    Ok(())
 }
 
 /// The lock LEDs to show.
@@ -301,6 +356,8 @@ struct Class {
     events: SpinLock<VecDeque<(Arc<Keyboard>, u16, bool)>>,
     queue: WaitQueue,
     consumer: SpinLock<Option<Arc<dyn Consumer>>>,
+    /// The keyboard the console reads (`vd_keyboard`).
+    keyboard: SpinLock<Option<Arc<Keyboard>>>,
     console: SpinLock<term::Console>,
     started: AtomicBool,
 }
@@ -310,6 +367,7 @@ static CLASS: Class = Class {
     events: SpinLock::new(VecDeque::new()),
     queue: WaitQueue::new(),
     consumer: SpinLock::new(None),
+    keyboard: SpinLock::new(None),
     console: SpinLock::new(term::Console::new()),
     started: AtomicBool::new(false),
 };
@@ -361,6 +419,7 @@ pub fn start(s: &Sleepable) -> Result<(), sched::SpawnError> {
     let _ = mux.ioctl(KDSETREPEAT, &mut rep);
     // `vt_allocate_keyboard`.
     if mux.allocate(Owner::Console) {
+        *CLASS.keyboard.lock() = Some(Arc::clone(&mux));
         let others: Vec<_> = keyboards().into_iter().filter(|k| k.index != 0).collect();
         for k in others {
             if !k.busy() {
@@ -594,7 +653,14 @@ impl Keyboard {
             Owner::Node(r) => {
                 r.wait.wake_all();
             }
-            Owner::Free | Owner::Console => {}
+            // `vt_kbdevent`'s `KBDIO_UNLOADING`.
+            Owner::Console => {
+                let mut kbd = CLASS.keyboard.lock();
+                if kbd.as_ref().is_some_and(|c| Arc::ptr_eq(c, self)) {
+                    *kbd = None;
+                }
+            }
+            Owner::Free => {}
         }
         {
             let mut kbds = CLASS.kbds.lock();

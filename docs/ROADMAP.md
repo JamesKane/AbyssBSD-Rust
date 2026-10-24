@@ -1314,9 +1314,10 @@ U.0 ─► U.1 ─► U.2 ─┬─► U.3 ─► U.4 ─┬─► U.6
   messages on window 0, switching with `vt`'s open and `VT_PROCESS` rules, Scroll Lock scrollback,
   per-window keyboard modes, and the `VT_*`/`KD*`/`CONS_*` requests (USB.md §7). The `vt` suite
   (`cargo xtask --remote perf --suite vt`, 10 runs a side in bhyve) gives 0.695 of FreeBSD's time:
-  `vt.cat` 0.642, `vt.color` 0.693, `vt.hidden` 0.668, `vt.scroll` 0.786, all wins. Fonts per window
-  (`PIO_VFONT`, so `vidcontrol -f`) since 2026-10-24. Left: the bell, `CONS_SETKBD`, and `kbdcontrol`/`vidcontrol` runs at
-  P6 (they are dynamically linked).
+  `vt.cat` 0.642, `vt.color` 0.693, `vt.hidden` 0.668, `vt.scroll` 0.786, all wins (the same with
+  fonts). Since 2026-10-24: fonts per window (`PIO_VFONT`, so `vidcontrol -f`) and
+  `CONS_SETKBD`/`CONS_RELKBD`. Left: the bell, `KDENABIO`, and `kbdcontrol`/`vidcontrol` runs at P6
+  (they are dynamically linked).
 
 **U.5 USB mass storage.**
 - `umass` over Bulk-Only Transport, and UAS (streams on USB 3, the command and status pipes on

@@ -446,13 +446,19 @@ impl Vt {
         if self.state.lock().win[cur].kbdmode == K_XLATE {
             self.save_kbd_state(cur);
         }
+        self.update_kbd(to);
+        Ok(())
+    }
+
+    /// Gives the console's keyboard window `w`'s mode and lock state
+    /// (`vt_update_kbd_mode`, `vt_update_kbd_state`).
+    pub(crate) fn update_kbd(&self, w: usize) {
         let (mode, locks) = {
             let st = self.state.lock();
-            (st.win[to].kbdmode, st.win[to].kbdstate & LOCK_MASK)
+            (st.win[w].kbdmode, st.win[w].kbdstate & LOCK_MASK)
         };
         let _ = input::console_ioctl(KDSKBMODE, &mut mode.to_ne_bytes());
         let _ = input::console_ioctl(KDSKBSTATE, &mut locks.to_ne_bytes());
-        Ok(())
     }
 
     /// Whether `w`'s controlling process lives (`vt_proc_alive`); if it

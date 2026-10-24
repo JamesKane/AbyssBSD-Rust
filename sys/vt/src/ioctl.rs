@@ -70,9 +70,20 @@ impl Vt {
         self.active.load(Ordering::Acquire) == w
     }
 
-    /// A keyboard request for `kbdmux0` with an `int` argument.
+    /// A keyboard request with an `int` argument for the console's
+    /// keyboard; nothing without one.
     fn kbd_value(req: u32, v: i32) -> Result<(), Errno> {
-        input::console_ioctl(req, &mut v.to_ne_bytes()).unwrap_or(Err(Errno::ENODEV))
+        input::console_ioctl(req, &mut v.to_ne_bytes()).unwrap_or(Ok(()))
+    }
+
+    /// Reads the console keyboard's value for `req` (`vt_save_kbd_*`);
+    /// `None` without a keyboard.
+    fn kbd_get(req: u32) -> Result<Option<i32>, Errno> {
+        let mut v = [0u8; 4];
+        match input::console_ioctl(req, &mut v) {
+            Some(r) => r.map(|()| Some(i32::from_ne_bytes(v))),
+            None => Ok(None),
+        }
     }
 
     #[allow(clippy::too_many_lines)] // one arm per request, as `vtterm_ioctl`
@@ -82,6 +93,10 @@ impl Vt {
             | SETFKEY | KDGKBINFO | KDGKBTYPE | KDGETREPEAT | KDSETREPEAT | KBADDKBD | KBRELKBD => {
                 if req == KDSETRAD && int(arg) & !0x7f != 0 {
                     return Err(Errno::EINVAL);
+                }
+                // Without a keyboard, nothing is done.
+                if input::console_index().is_none() {
+                    return Ok(());
                 }
                 match input::console_ioctl(req, arg) {
                     Some(r) => r,
@@ -116,12 +131,11 @@ impl Vt {
                 }
             }
             KDGETLED => {
-                if self.is_active(w) {
-                    let mut v = [0u8; 4];
-                    input::console_ioctl(KDGETLED, &mut v).unwrap_or(Err(Errno::ENODEV))?;
+                if self.is_active(w)
+                    && let Some(leds) = Self::kbd_get(KDGETLED)?
+                {
                     let mut st = self.state.lock();
-                    st.win[w].kbdstate =
-                        (st.win[w].kbdstate & !LED_MASK) | (i32::from_ne_bytes(v) & LED_MASK);
+                    st.win[w].kbdstate = (st.win[w].kbdstate & !LED_MASK) | (leds & LED_MASK);
                 }
                 put_int(arg, self.state.lock().win[w].kbdstate & LED_MASK);
                 Ok(())
@@ -147,10 +161,10 @@ impl Vt {
                 Ok(())
             }
             KDGKBMODE => {
-                if self.is_active(w) {
-                    let mut v = [0u8; 4];
-                    input::console_ioctl(KDGKBMODE, &mut v).unwrap_or(Err(Errno::ENODEV))?;
-                    self.state.lock().win[w].kbdmode = i32::from_ne_bytes(v);
+                if self.is_active(w)
+                    && let Some(mode) = Self::kbd_get(KDGKBMODE)?
+                {
+                    self.state.lock().win[w].kbdmode = mode;
                 }
                 put_int(arg, self.state.lock().win[w].kbdmode);
                 Ok(())
@@ -167,7 +181,21 @@ impl Vt {
                     Ok(())
                 }
             }
-            CONS_BLANKTIME | KDMKTONE | KIOCSOUND | KDDISABIO => Ok(()),
+            CONS_BLANKTIME | CONS_MODEINFO | KDMKTONE | KIOCSOUND | KDDISABIO => Ok(()),
+            CONS_SETKBD => {
+                let index = int(arg);
+                if input::console_index().is_some_and(|i| i64::from(i) == i64::from(index)) {
+                    return Ok(());
+                }
+                let cur = self.active.load(Ordering::Acquire);
+                input::set_console(index, &mut || self.save_kbd_state(cur))?;
+                self.update_kbd(cur);
+                Ok(())
+            }
+            CONS_RELKBD => {
+                let cur = self.active.load(Ordering::Acquire);
+                input::release_console(&mut || self.save_kbd_state(cur))
+            }
             PIO_VFONT => {
                 let f = Vfnt::from_bytes(arg).ok_or(Errno::EINVAL)?;
                 let face = self.load_font(&f)?;
