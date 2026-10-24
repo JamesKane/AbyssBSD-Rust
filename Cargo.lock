@@ -657,6 +657,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "vtterm"
+version = "0.0.0"
+
+[[package]]
 name = "watchdog"
 version = "0.0.0"
 dependencies = [

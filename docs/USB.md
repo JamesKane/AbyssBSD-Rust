@@ -321,7 +321,16 @@ Lock enters scrollback.
 type `xterm`: ECMA-48 control sequences, the DEC private modes FreeBSD supports, 8 and 256 colors
 with bold and reverse, UTF-8 input, line drawing, tabs, scroll regions, insert and delete, and
 `teken`'s answers to device-status and attribute queries. Its tests compare screens with what
-FreeBSD's `vt` shows for the same byte streams (captured with `vidcontrol`'s screen dumps).
+FreeBSD's own `teken` ends with for the same byte streams: `tests/corpus/vtterm/teken-drive.c`,
+built with `sys/teken` on the server, prints a digest of the screen and cursor after each of 1000
+pseudo-random streams, and `teken_differential` runs the same streams through `lib/vtterm`.
+
+`lib/vtterm` departs from `teken` only where `teken` would leave the cursor outside the window
+(its assertions catch these in debug builds): a resize that grows one dimension and shrinks the
+other, and wrapping in a window no wider than the character. The screen buffer is `vt_buf`'s: a
+ring of 500 history rows in which a whole-screen scroll moves the ring, and `vt`'s 32-bit cells
+(`term_char_t`), with damage kept per row. As in `vt`, answers to queries are dropped
+(`termteken_respond` is a no-op).
 
 ### 7.3 Rendering
 
