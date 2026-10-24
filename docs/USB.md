@@ -294,8 +294,16 @@ FreeBSD's userland expects:
     FreeBSD 15.1's formats (16-CURRENT's `devnum` is left out).
   - Keyboards publish through the kbd layer when `rcpt_mask` has `HW_KBD`, and `kbdmux` has its
     own device ("System keyboard multiplexer"), as FreeBSD's does.
-- **sysmouse.** `/dev/sysmouse` for programs that use it; `vt` gets pointer events for nothing yet
-  (no cut and paste in this track).
+- **sysmouse** (`sys/input/src/sysmouse.rs`). `/dev/sysmouse` and `/dev/consolectl`, as `vt` has
+  them (`vt_sysmouse.c`, `vt_consolectl.c`). `moused` reads the mice through evdev and reports to
+  `CONS_MOUSECTL` on `/dev/consolectl`; `/dev/sysmouse` serves what it reports as MouseSystems
+  packets (level 0, five bytes) or sysmouse's (level 1, eight bytes, with the wheel and buttons 4
+  to 10), with `MOUSE_GETHWINFO`, `GETMODE`/`SETMODE`, `GETLEVEL`/`SETLEVEL`, and `GETSTATUS`.
+  The packet buffer lives from the first open to the last close. The evdev device "System mouse"
+  registers right after `kbdmux`'s (`event1`, as on FreeBSD) and reports under `rcpt_mask`
+  `SYSMOUSE`, with `sysmouse_t_axis` 0. `tests/user/mouse.c` checks it, and passes on FreeBSD 15.1.
+  - Not yet: `poll` on the node and `SIGIO` (devfs has neither for devices), and the `vt` cursor
+    and cut and paste (not in this track). `moused` itself, dynamically linked, runs at P6.
 
 ## 7. Virtual terminals
 

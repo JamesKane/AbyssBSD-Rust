@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! The input class (USB.md §6.3): keyboards, as FreeBSD's kbd layer
-//! presents them.
+//! presents them, and the system mouse ([`sysmouse`]).
 //!
 //! A keyboard driver (`hkbd`, `vtinput`) registers a [`Keyboard`] and
 //! reports key presses and releases by HID usage; it may sleep for
@@ -47,6 +47,7 @@ extern crate alloc;
 
 pub mod keymap;
 pub mod scan;
+pub mod sysmouse;
 pub mod term;
 pub mod xlate;
 
@@ -336,6 +337,8 @@ pub fn start(s: &Sleepable) -> Result<(), sched::SpawnError> {
     b.led(LED_NUML).led(LED_CAPSL).led(LED_SCROLLL);
     let evdev = b.register(s).ok();
     let mux = register("kbdmux", 0, Kind::Mux { evdev }, K_XLATE);
+    // `vt`'s mouse, made at the same stage.
+    sysmouse::init(s);
     // `kbdmux_init`'s LEDs and repeat.
     let _ = mux.ioctl_value(KDSETLED, 0);
     let mut rep = [0u8; 8];

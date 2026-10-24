@@ -6,7 +6,7 @@
 //! (`offset_of!`, `size_of`), so the check compares what the kernel will
 //! actually use against what FreeBSD's C compiler computes.
 
-use crate::{bus, evdev, kbio, md, signal, socket, stat, time, ucontext, vdso};
+use crate::{bus, consio, evdev, kbio, md, mouse, signal, socket, stat, time, ucontext, vdso};
 
 /// Architectures a layout applies to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,6 +67,8 @@ pub const CONSTANTS: &[&[ConstValue]] = &[
     crate::errno::CONSTANTS,
     crate::evdev::CONSTANTS,
     crate::kbio::CONSTANTS,
+    crate::mouse::CONSTANTS,
+    crate::consio::CONSTANTS,
     crate::sysarch::CONSTANTS,
     crate::exec::CONSTANTS,
     crate::mman::CONSTANTS,
@@ -197,6 +199,38 @@ pub static LAYOUTS: &[StructLayout] = &[
     }),
     layout!(kbio::KeyboardRepeat, "keyboard_repeat_t", ["sys/types.h", "sys/kbio.h"], All, {
         kb_repeat => "kb_repeat",
+    }),
+    layout!(mouse::MouseStatus, "mousestatus_t", ["sys/types.h", "sys/mouse.h"], All, {
+        flags => "flags",
+        button => "button",
+        obutton => "obutton",
+        dx => "dx",
+        dy => "dy",
+        dz => "dz",
+    }),
+    layout!(mouse::MouseHw, "mousehw_t", ["sys/types.h", "sys/mouse.h"], All, {
+        buttons => "buttons",
+        iftype => "iftype",
+        r#type => "type",
+        model => "model",
+        hwid => "hwid",
+    }),
+    layout!(mouse::MouseMode, "mousemode_t", ["sys/types.h", "sys/mouse.h"], All, {
+        protocol => "protocol",
+        rate => "rate",
+        resolution => "resolution",
+        accelfactor => "accelfactor",
+        level => "level",
+        packetsize => "packetsize",
+        syncmask => "syncmask",
+    }),
+    layout!(mouse::MouseData, "mousedata_t", ["sys/types.h", "sys/mouse.h"], All, {
+        len => "len",
+        buf => "buf",
+    }),
+    layout!(consio::MouseInfo, "mouse_info_t", ["sys/types.h", "sys/consio.h"], All, {
+        operation => "operation",
+        u => "u",
     }),
     layout!(evdev::InputId, "struct input_id", ["sys/types.h", "dev/evdev/input.h"], All, {
         bustype => "bustype",
