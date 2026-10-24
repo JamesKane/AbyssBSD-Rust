@@ -232,6 +232,13 @@ pub static LAYOUTS: &[StructLayout] = &[
         operation => "operation",
         u => "u",
     }),
+    layout!(consio::VtMode, "struct vt_mode", ["sys/types.h", "sys/consio.h"], All, {
+        mode => "mode",
+        waitv => "waitv",
+        relsig => "relsig",
+        acqsig => "acqsig",
+        frsig => "frsig",
+    }),
     layout!(evdev::InputId, "struct input_id", ["sys/types.h", "dev/evdev/input.h"], All, {
         bustype => "bustype",
         vendor => "vendor",

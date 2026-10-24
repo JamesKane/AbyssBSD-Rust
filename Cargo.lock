@@ -664,6 +664,7 @@ dependencies = [
  "abi",
  "fb-console",
  "font",
+ "input",
  "sched",
  "sync",
  "vtterm",

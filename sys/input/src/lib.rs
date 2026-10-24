@@ -81,6 +81,20 @@ pub trait Consumer: Send + Sync {
     fn event(&self, s: &Sleepable, e: term::Event) {
         let _ = (s, e);
     }
+    /// The values read from `kbdmux0` in `mode`, for a consumer that
+    /// acts on them itself, as `vt_processkey` does; `false` leaves them
+    /// to [`term`], which makes [`Consumer::input`] and
+    /// [`Consumer::event`] of them.
+    fn keys(&self, s: &Sleepable, mode: i32, codes: &[u32]) -> bool {
+        let _ = (s, mode, codes);
+        false
+    }
+}
+
+/// A request to the console's keyboard, `kbdmux0` (`kbdd_ioctl` on
+/// `vd_keyboard`); `None` if no keyboard layer knows it (`ENOIOCTL`).
+pub fn console_ioctl(req: u32, arg: &mut [u8]) -> Option<Result<(), Errno>> {
+    mux()?.request(req, arg)
 }
 
 /// The lock LEDs to show.
@@ -276,8 +290,8 @@ impl core::fmt::Debug for Keyboard {
 
 /// What the thread hands the consumer, in order.
 enum Item {
-    Bytes(Vec<u8>),
-    Event(term::Event),
+    /// Values read in a mode, for the console.
+    Keys(i32, Vec<u32>),
 }
 
 struct Class {
@@ -1153,23 +1167,10 @@ impl Work<'_> {
             Owner::Free => {}
             Owner::Mux => self.scancodes(out),
             Owner::Node(r) => r.event(mode, out),
-            Owner::Console => {
-                let mut con = CLASS.console.lock();
-                for &c in out {
-                    let mut bytes = Vec::new();
-                    let e = con.key(c, mode, &mut bytes);
-                    if !bytes.is_empty() {
-                        if let Some(Item::Bytes(b)) = self.items.last_mut() {
-                            b.extend_from_slice(&bytes);
-                        } else {
-                            self.items.push(Item::Bytes(bytes));
-                        }
-                    }
-                    if let Some(e) = e {
-                        self.items.push(Item::Event(e));
-                    }
-                }
-            }
+            Owner::Console => match self.items.last_mut() {
+                Some(Item::Keys(m, codes)) if *m == mode => codes.extend_from_slice(out),
+                _ => self.items.push(Item::Keys(mode, out.to_vec())),
+            },
         }
     }
 }
@@ -1220,10 +1221,22 @@ fn thread(s: &Sleepable) {
         }
         let consumer = CLASS.consumer.lock().clone();
         if let Some(c) = consumer {
-            for item in items {
-                match item {
-                    Item::Bytes(b) => c.input(s, &b),
-                    Item::Event(e) => c.event(s, e),
+            for Item::Keys(mode, codes) in items {
+                if c.keys(s, mode, &codes) {
+                    continue;
+                }
+                let mut bytes = Vec::new();
+                for &k in &codes {
+                    let e = CLASS.console.lock().key(k, mode, &mut bytes);
+                    if let Some(e) = e {
+                        if !bytes.is_empty() {
+                            c.input(s, &core::mem::take(&mut bytes));
+                        }
+                        c.event(s, e);
+                    }
+                }
+                if !bytes.is_empty() {
+                    c.input(s, &bytes);
                 }
             }
         }

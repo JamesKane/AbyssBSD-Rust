@@ -373,8 +373,14 @@ const fn ioc(dir: u32, group: u8, num: u8, len: u32) -> u32 {
 pub const KDGKBMODE: u32 = ioc(IOC_OUT, b'K', 6, 4);
 pub const KDSKBMODE: u32 = ioc(IOC_VOID, b'K', 7, 4);
 pub const KDMKTONE: u32 = ioc(IOC_VOID, b'K', 8, 4);
+pub const KDGETMODE: u32 = ioc(IOC_OUT, b'K', 9, 4);
+pub const KDSETMODE: u32 = ioc(IOC_VOID, b'K', 10, 4);
+pub const KDSBORDER: u32 = ioc(IOC_VOID, b'K', 13, 4);
 pub const KDGKBSTATE: u32 = ioc(IOC_OUT, b'K', 19, 4);
 pub const KDSKBSTATE: u32 = ioc(IOC_VOID, b'K', 20, 4);
+pub const KDENABIO: u32 = ioc(IOC_VOID, b'K', 60, 0);
+pub const KDDISABIO: u32 = ioc(IOC_VOID, b'K', 61, 0);
+pub const KIOCSOUND: u32 = ioc(IOC_VOID, b'K', 63, 4);
 pub const KDGKBTYPE: u32 = ioc(IOC_OUT, b'K', 64, 4);
 pub const KDGETLED: u32 = ioc(IOC_OUT, b'K', 65, 4);
 pub const KDSETLED: u32 = ioc(IOC_VOID, b'K', 66, 4);
@@ -477,6 +483,12 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("KDSETLED", KDSETLED),
     c("KDSETRAD", KDSETRAD),
     c("KBADDKBD", KBADDKBD),
+    c("KDGETMODE", KDGETMODE),
+    c("KDSETMODE", KDSETMODE),
+    c("KDSBORDER", KDSBORDER),
+    c("KDENABIO", KDENABIO),
+    c("KDDISABIO", KDDISABIO),
+    c("KIOCSOUND", KIOCSOUND),
     c("KBRELKBD", KBRELKBD),
     c("KDGKBINFO", KDGKBINFO),
     c("KDSETREPEAT", KDSETREPEAT),

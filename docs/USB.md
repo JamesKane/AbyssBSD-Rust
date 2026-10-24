@@ -271,7 +271,7 @@ FreeBSD's userland expects:
     `kbdmux0` passes the lock, LED, repeat, and keymap requests on to its keyboards, and lock keys
     light every keyboard's LEDs through it.
   - The ioctl path copies the keymap and accent map (too big for an argument) by their pointer.
-  - Not yet: `vt`'s tty requests, which are how `kbdcontrol` reaches the keyboard (U.4).
+  - `vt`'s tty requests, which are how `kbdcontrol` reaches the keyboard, are in §7.4.
     - FreeBSD's `PRIV_KEYBOARD` check on remapping the reboot and debugger keys (the nodes are
       root's, and `vt` must bring credentials).
     - `kbdmux`'s evdev key events under `rcpt_mask` `KBDMUX` (`evdev_scancode2key`).
@@ -358,10 +358,22 @@ Implemented (`sys/vt`, `kernel/src/vtcons.rs`):
 - Drawing in the `vtflush` thread, at most 25 frames a second (`VT_TIMERFREQ`), of the cells that
   differ from what is on the screen (`vd_drawn`), in `vt`'s palette (`vt_termcolors.c`); output to
   a hidden window draws nothing.
-- Switching with Alt-F*n* and the next and previous screen keys.
-- Not yet: the `VT_*`, `KD*`, and `CONS_*` requests on the windows, per-window keyboard modes,
-  `VT_PROCESS` switching, refusing to switch to a window nobody has open, and Scroll Lock
-  scrollback.
+- The keyboard's values handled as `vt_processkey` does: machine keys, Alt-F*n* and the next and
+  previous screen keys, the special keys' strings from the visible window's emulator (so cursor-key
+  application mode and cons25 mode apply), and Scroll Lock's scroll mode with Home, End, the arrows,
+  and Page Up and Down moving through the history.
+- Switching as `vt_proc_window_switch` does: only to a window whose terminal is open, or the
+  console's; refused while `VT_LOCKSWITCH` holds; and with `VT_PROCESS`, the controlling process
+  is sent its release signal and answers with `VT_RELDISP`, or after 15 seconds
+  (`kern.vt.deadtimer`) the switch goes ahead. Each window keeps its keyboard mode and lock state,
+  given to `kbdmux0` while it is visible.
+- The requests `vtterm_ioctl` answers: the keyboard's (to `kbdmux0`), `KDGKBMODE`/`KDSKBMODE`,
+  `KDGKBSTATE`/`KDSKBSTATE`, `KDGETLED`/`KDSETLED`, `KDGETMODE`/`KDSETMODE`, `CONS_GETINFO`,
+  `CONS_GETVERS`, `CONS_GET`, `CONS_HISTORY`, `CONS_CLRHIST`, `CONS_BELLTYPE`, `CONS_BLANKTIME`,
+  `CONS_MOUSECTL` (show and hide), `GIO_SCRNMAP`, `PIO_VFONT_DEFAULT`, and `VT_*`.
+  `tests/user/vt.c` checks them, and passes on FreeBSD 15.1 too.
+- Not yet: fonts (`PIO_VFONT`, so `vidcontrol -f`), `CONS_SETKBD`/`CONS_RELKBD`, `KDENABIO`,
+  `CONS_MODEINFO`, the `FBIO_*` requests, and the bell (off by default, `kern.vt.enable_bell`).
 
 ## 8. USB mass storage
 

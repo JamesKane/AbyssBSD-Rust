@@ -44,32 +44,23 @@ static TTY_LOCK: LockClass = LockClass::new("tty", 450);
 pub(crate) struct ConsoleInput;
 
 impl input::Consumer for ConsoleInput {
-    /// Into the visible window's terminal, or without `vt` the
-    /// console's.
+    /// Without `vt`, into the console's terminal.
     fn input(&self, s: &Sleepable, bytes: &[u8]) {
-        if let Some(t) = crate::vtcons::active_tty().or_else(console) {
+        if let Some(t) = console() {
             t.input(s, bytes);
         }
     }
 
-    /// Screen switches go to `vt`; the reboot, halt, and power-off keys
-    /// signal `init`, as FreeBSD's `shutdown_nice` does.
+    /// With `vt`, it acts on the keys itself.
+    fn keys(&self, s: &Sleepable, _mode: i32, codes: &[u32]) -> bool {
+        crate::vtcons::keys(s, codes, &mut |e| self.event(s, e))
+    }
+
+    /// The reboot, halt, and power-off keys signal `init`, as FreeBSD's
+    /// `shutdown_nice` does.
     fn event(&self, _: &Sleepable, e: input::term::Event) {
         use input::term::Event;
-        let n = vt::WINDOWS;
         let sig = match e {
-            Event::Switch(w) => {
-                vt::switch(usize::try_from(w).unwrap_or(n));
-                return;
-            }
-            Event::Next => {
-                vt::switch((vt::active() + 1) % n);
-                return;
-            }
-            Event::Prev => {
-                vt::switch((vt::active() + n - 1) % n);
-                return;
-            }
             Event::Reboot => SIGINT,
             Event::Halt => SIGUSR1,
             Event::PowerOff => SIGUSR2,
@@ -115,6 +106,8 @@ pub(crate) struct Tty {
     driver: Arc<dyn Driver>,
     /// The devfs node `/dev/tty` opens.
     vnode: Once<Weak<Vnode>>,
+    /// Open files.
+    opens: AtomicU64,
 }
 
 /// A terminal's device (FreeBSD's `ttydevsw`).
@@ -125,6 +118,9 @@ pub(crate) trait Driver: Send + Sync {
     fn ioctl(&self, _s: &Sleepable, _req: u32, _arg: &mut [u8]) -> Result<(), Errno> {
         Err(Errno::ENOTTY)
     }
+    /// The terminal's first open (`true`) or last close (`tsw_open`,
+    /// `tsw_close`).
+    fn opened(&self, _yes: bool) {}
 }
 
 /// A device that writes with a function.
@@ -169,6 +165,7 @@ pub(crate) fn create(name: &str, driver: Arc<dyn Driver>) -> Arc<Tty> {
         bg_wait: WaitQueue::new(),
         driver,
         vnode: Once::new(),
+        opens: AtomicU64::new(0),
     });
     TTYS.lock().push(Arc::clone(&tty));
     tty
@@ -552,9 +549,53 @@ fn winsize_to(w: &Winsize, arg: &mut [u8]) {
 /// A terminal as a device (`/dev/ttyu0`, `/dev/console`).
 pub(crate) struct TtyDevice(pub(crate) Arc<Tty>);
 
+/// An open file of a terminal: the first open and the last close are
+/// the driver's to know.
+struct TtyOpen(TtyDevice);
+
+impl TtyOpen {
+    fn new(tty: &Arc<Tty>) -> Self {
+        if tty.opens.fetch_add(1, Ordering::AcqRel) == 0 {
+            tty.driver.opened(true);
+        }
+        Self(TtyDevice(Arc::clone(tty)))
+    }
+}
+
+impl Drop for TtyOpen {
+    fn drop(&mut self) {
+        let tty = &self.0.0;
+        if tty.opens.fetch_sub(1, Ordering::AcqRel) == 1 {
+            tty.driver.opened(false);
+        }
+    }
+}
+
+impl CharDevice for TtyOpen {
+    fn dtype(&self) -> u32 {
+        vfs::D_TTY
+    }
+
+    fn read(&self, s: &Sleepable, uio: &mut dyn Uio, off: u64, nb: bool) -> Result<usize, Errno> {
+        self.0.read(s, uio, off, nb)
+    }
+
+    fn write(&self, s: &Sleepable, uio: &mut dyn Uio, off: u64, nb: bool) -> Result<usize, Errno> {
+        self.0.write(s, uio, off, nb)
+    }
+
+    fn ioctl(&self, s: &Sleepable, req: u32, arg: &mut [u8]) -> Result<(), Errno> {
+        self.0.ioctl(s, req, arg)
+    }
+}
+
 impl CharDevice for TtyDevice {
     fn dtype(&self) -> u32 {
         vfs::D_TTY
+    }
+
+    fn instance(&self, _s: &Sleepable) -> Result<Option<Arc<dyn CharDevice>>, Errno> {
+        Ok(Some(Arc::new(TtyOpen::new(&self.0))))
     }
 
     fn read(

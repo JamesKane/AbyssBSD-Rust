@@ -9,6 +9,7 @@ publish.workspace = true
 abi = { path = "../../lib/abi" }
 fb-console = { path = "../../drivers/fb-console" }
 font = { path = "../../lib/font" }
+input = { path = "../input" }
 sched = { path = "../sched" }
 sync = { path = "../sync" }
 vtterm = { path = "../../lib/vtterm" }
