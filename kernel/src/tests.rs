@@ -1653,6 +1653,11 @@ ktest! {
                 let kind = if o == pci::header::COMMAND { 1 } else if (0x10..0x28).contains(&o) { 2 } else { 3 };
                 self.time(kind, || self.0.write32(a, o, v));
             }
+            // Passed on, so the framebuffer is held while a function's
+            // decoding is off, as in `pci::init`.
+            fn decoding_paused(&self, a: pci::PciAddress, paused: bool) {
+                self.0.decoding_paused(a, paused);
+            }
         }
         let counting = Counting(w, core::cell::Cell::new(0), core::cell::Cell::new([0; 4]));
         let t0 = crate::time::counter();
