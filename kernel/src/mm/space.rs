@@ -30,7 +30,7 @@ use sched::lock::{LockClass, Mutex};
 use sync::SpinLock;
 use vm::fault::{self, Access, FaultError};
 use vm::map::{Entry, MapError, Prot, VmMap};
-use vm::object::PageOps;
+use vm::object::{MemAttr, PageOps};
 use vm::{Order, PAGE_SIZE, Pfn};
 
 use super::{Format, Frames, alloc_pages, free_pages};
@@ -123,13 +123,16 @@ pub(crate) fn page_ops() -> &'static dyn PageOps {
 }
 
 /// The page-table attributes for a mapping with rights `prot`.
-const fn attrs(prot: Prot) -> Attrs {
+const fn attrs(prot: Prot, attr: MemAttr) -> Attrs {
     Attrs {
         write: prot.contains(Prot::WRITE),
         exec: prot.contains(Prot::EXEC),
         user: true,
         global: false,
-        cache: Cache::WriteBack,
+        cache: match attr {
+            MemAttr::WriteBack => Cache::WriteBack,
+            MemAttr::WriteCombining => Cache::WriteCombining,
+        },
     }
 }
 
@@ -498,7 +501,7 @@ impl AddressSpace {
             let replaced = self
                 .tables
                 .lock()
-                .set(&mut Frames, r.page, r.pfn.addr(), attrs(r.prot))
+                .set(&mut Frames, r.page, r.pfn.addr(), attrs(r.prot, r.attr))
                 .map_err(|_| FaultError::OutOfMemory)?;
             if replaced.is_some() {
                 self.flush(r.page, PAGE_SIZE);
@@ -560,7 +563,7 @@ impl AddressSpace {
         let mut map = self.map.lock(s);
         map.protect(range.clone(), prot)?;
         let len = range.end.get() - range.start.get();
-        let allowed = attrs(prot);
+        let allowed = attrs(prot, MemAttr::WriteBack);
         let mut changed = false;
         // Only rights go away here; added ones arrive by fault. A page
         // with no rights left is unmapped outright.
@@ -654,14 +657,14 @@ impl AddressSpace {
         // Code reaches instruction fetch only once synced (aarch64; x86
         // keeps the caches coherent).
         #[cfg(target_arch = "aarch64")]
-        if r.prot.contains(Prot::EXEC) {
+        if r.prot.contains(Prot::EXEC) && r.attr == MemAttr::WriteBack {
             let kva = KernelPages::page(r.pfn);
             arch::cache::sync_icache(kva as usize, PAGE_BYTES);
         }
         let replaced = self
             .tables
             .lock()
-            .set(&mut Frames, r.page, r.pfn.addr(), attrs(r.prot))
+            .set(&mut Frames, r.page, r.pfn.addr(), attrs(r.prot, r.attr))
             .map_err(|_| FaultError::OutOfMemory)?;
         if replaced.is_some() {
             self.flush(r.page, PAGE_SIZE);
@@ -692,12 +695,12 @@ impl AddressSpace {
                 continue;
             }
             #[cfg(target_arch = "aarch64")]
-            if r.prot.contains(Prot::EXEC) {
+            if r.prot.contains(Prot::EXEC) && r.attr == MemAttr::WriteBack {
                 let kva = KernelPages::page(r.pfn);
                 arch::cache::sync_icache(kva as usize, PAGE_BYTES);
             }
             // Out of table memory: the page faults in later instead.
-            let _ = tables.set(&mut Frames, r.page, r.pfn.addr(), attrs(r.prot));
+            let _ = tables.set(&mut Frames, r.page, r.pfn.addr(), attrs(r.prot, r.attr));
         }
     }
 

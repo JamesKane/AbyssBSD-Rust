@@ -108,6 +108,7 @@ static SERIAL_AT: Once<SerialAt> = Once::new();
 /// The framebuffer the loader set up, for `vt` to take over.
 #[derive(Clone, Copy)]
 struct Framebuffer {
+    phys: u64,
     virt: usize,
     len: usize,
     width: u32,
@@ -260,6 +261,7 @@ pub(crate) fn init(info: &BootInfo) {
     });
     let fb_info = info.framebuffer.get().and_then(|f| {
         Some(Framebuffer {
+            phys: f.phys.get(),
             virt: usize::try_from(f.virt.get()).ok()?,
             len: usize::try_from(f.size / 4).ok()?,
             width: f.width,
@@ -318,9 +320,9 @@ pub(crate) fn has_serial() -> bool {
     SERIAL_AT.get().is_some()
 }
 
-/// Gives the framebuffer to `vt`, with what the early console showed;
-/// the early console stops drawing.
-pub(crate) fn take_framebuffer() -> Option<(vt::Display, Vec<u8>)> {
+/// Gives the framebuffer to `vt`, with what the early console showed
+/// and its physical base; the early console stops drawing.
+pub(crate) fn take_framebuffer() -> Option<(vt::Display, Vec<u8>, u64)> {
     let mut c = CONSOLE.lock();
     let f = c.fb_info.take()?;
     // The early console's slice of the pixels goes first.
@@ -340,6 +342,7 @@ pub(crate) fn take_framebuffer() -> Option<(vt::Display, Vec<u8>)> {
             layout: f.layout,
         },
         early,
+        f.phys,
     ))
 }
 

@@ -40,7 +40,30 @@ impl tty::Driver for Window {
     fn opened(&self, yes: bool) {
         vt::opened(self.0, yes);
     }
+
+    /// The framebuffer, write-combining (`vtterm_mmap`, `vt_fb_mmap`):
+    /// every page asked must start inside it.
+    fn mmap(&self, page: u64, pages: u64) -> Result<Arc<vm::object::Object>, Errno> {
+        let object = FRAMEBUFFER.get().ok_or(Errno::ENXIO)?;
+        let (_, len) = FB_RANGE.get().copied().ok_or(Errno::ENXIO)?;
+        let last = page
+            .checked_add(pages)
+            .and_then(|end| end.checked_sub(1))
+            .ok_or(Errno::EINVAL)?;
+        if last.checked_mul(PAGE_SIZE).is_none_or(|off| off >= len) {
+            return Err(Errno::EINVAL);
+        }
+        Ok(Arc::clone(object))
+    }
 }
+
+const PAGE_SIZE: u64 = vm::PAGE_SIZE;
+
+/// The framebuffer's physical base and size in bytes (`fb_pbase`,
+/// `fb_size`: its height in scan lines).
+static FB_RANGE: Once<(u64, u64)> = Once::new();
+/// The framebuffer as the device pager's object, for `mmap`.
+static FRAMEBUFFER: Once<Arc<vm::object::Object>> = Once::new();
 
 /// The kernel, as `vt` sees it.
 struct Host;
@@ -145,15 +168,23 @@ pub(crate) fn keys(
 /// Starts `vt` on the loader's framebuffer, if there is one, and makes
 /// the windows' terminals. Before devfs is populated.
 pub(crate) fn start() {
-    let Some((display, early)) = crate::console::take_framebuffer() else {
+    let Some((display, early, phys)) = crate::console::take_framebuffer() else {
         return;
     };
     let (width, height) = (display.width, display.height);
+    let size = u64::from(display.height) * u64::from(display.stride) * 4;
     if let Err(e) = vt::start(display, &early, &Host) {
         kprintln!("VT: cannot start: {e:?}");
         return;
     }
     crate::console::vt_started();
+    let _ = FB_RANGE.set((phys, size));
+    let _ = FRAMEBUFFER.set(vm::object::Object::device(
+        crate::mm::space::page_ops(),
+        vm::Pfn::containing(vm::PhysAddr::new(phys)),
+        size.div_ceil(PAGE_SIZE),
+        vm::object::MemAttr::WriteCombining,
+    ));
     kprintln!("VT(efifb): resolution {width}x{height}");
     let ttys: Vec<_> = (0..vt::WINDOWS)
         .map(|i| {

@@ -401,8 +401,11 @@ Implemented (`sys/vt`, `kernel/src/vtcons.rs`):
   dynamic linking will run base's own), with `kern.vty` reading `vt` as they check:
   `tests/user/vtools.c` runs them for a font, the history size, colors, a keymap, the repeat rate,
   and the keyboard's information, and checks each through the requests.
-- Later: mapping the frame buffer through `ttyv*` (`vt_fb_mmap`, for X's `scfb`), which needs a
-  device pager, at P6 with X.
+- The frame buffer maps through `ttyv*` (`vt_fb_mmap`, for X's `scfb`): shared only (`EINVAL` for
+  a private mapping, as `vm_mmap_cdev`), writable only from a window open for writing, every page
+  inside `fb_size`, write-combining. `sys/vm` has device objects for it (the device pager's): their
+  pages are the device's, never allocated or freed, and a child shares them even when inheriting a
+  copy.
 
 ## 8. USB mass storage
 

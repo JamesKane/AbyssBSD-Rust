@@ -329,9 +329,20 @@ pub trait CharDevice: Send + Sync {
         nonblock: bool,
     ) -> Result<usize, Errno>;
     /// Whether mapping it gives zero-filled anonymous memory, as
-    /// `/dev/zero` does; other devices cannot be mapped yet.
+    /// `/dev/zero` does (`D_MMAP_ANON`).
     fn maps_as_zeros(&self) -> bool {
         false
+    }
+    /// Its memory for a shared mapping of `pages` pages from page `page`
+    /// (`d_mmap`, through the device pager): the object, which the
+    /// mapping reaches from `page` on.
+    ///
+    /// # Errors
+    ///
+    /// `ENODEV` if it cannot be mapped; `EINVAL` for pages it hasn't.
+    fn mmap(&self, page: u64, pages: u64) -> Result<Arc<vm::object::Object>, Errno> {
+        let _ = (page, pages);
+        Err(Errno::ENODEV)
     }
     /// Its kind, as `FIODTYPE` reports it (FreeBSD's `d_flags &
     /// D_TYPEMASK`): [`D_DISK`], [`D_TTY`], or 0.

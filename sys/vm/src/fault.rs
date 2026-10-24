@@ -27,7 +27,7 @@
 use alloc::sync::Arc;
 
 use crate::map::{Prot, VmMap};
-use crate::object::{Found, LookupError, Object, PageIndex};
+use crate::object::{Found, LookupError, MemAttr, Object, PageIndex};
 use crate::{PAGE_SIZE, Pfn, VirtAddr};
 
 /// The kind of access that faulted.
@@ -71,6 +71,8 @@ pub struct Resolved {
     /// The rights to map it with: the entry's, without write if the page
     /// still belongs to an object below the entry's own.
     pub prot: Prot,
+    /// How to map it: a device's memory as the device says.
+    pub attr: MemAttr,
 }
 
 /// What a fault needs.
@@ -150,7 +152,13 @@ pub fn resolve(map: &mut VmMap, va: VirtAddr, access: Access) -> Result<Outcome,
             )
         }
     };
-    Ok(Outcome::Map(Resolved { page, pfn, prot }))
+    let attr = object.memattr();
+    Ok(Outcome::Map(Resolved {
+        page,
+        pfn,
+        prot,
+        attr,
+    }))
 }
 
 /// Pages around a fault worth mapping with it (FreeBSD's
@@ -191,6 +199,7 @@ pub fn prefault(map: &VmMap, va: VirtAddr, around: u64) -> alloc::vec::Vec<Resol
                 page: addr,
                 pfn,
                 prot,
+                attr: object.memattr(),
             }),
             None => break,
         }

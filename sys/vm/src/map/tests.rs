@@ -783,3 +783,46 @@ fn clean_pages_nothing_maps_are_reclaimed() {
     drop(b);
     assert_eq!(held.drop_clean(usize::MAX), 1);
 }
+
+#[test]
+fn a_device_mapping_reaches_the_device_pages_write_combining() {
+    use crate::object::MemAttr;
+    let pages = Pages::new();
+    let mut p = Proc::new(pages);
+    // Pages 1000 to 1003, mapped from the second.
+    let dev = Object::device(pages, Pfn(1000), 4, MemAttr::WriteCombining);
+    assert!(dev.is_device());
+    p.map
+        .insert(Entry::shared(
+            range(0, 4),
+            Prot::RW,
+            Prot::ALL,
+            Arc::clone(&dev),
+            1,
+        ))
+        .unwrap();
+    assert_eq!(p.access(0, Access::Write), Ok(Pfn(1001)));
+    assert_eq!(p.access(2, Access::Read), Ok(Pfn(1003)));
+    // Past the device's pages.
+    assert_eq!(p.access(3, Access::Read), Err(FaultError::PastEnd));
+    match resolve(&mut p.map, va(1), Access::Write) {
+        Ok(crate::fault::Outcome::Map(r)) => {
+            assert_eq!(
+                (r.pfn, r.prot, r.attr),
+                (Pfn(1002), Prot::RW, MemAttr::WriteCombining)
+            );
+        }
+        _ => panic!("no mapping"),
+    }
+    // A child shares it, even inheriting a copy: there is none.
+    let mut child = p.fork();
+    assert_eq!(child.access(0, Access::Write), Ok(Pfn(1001)));
+    p.map.set_inherit(range(0, 4), Inherit::Copy).unwrap();
+    let mut child = p.fork();
+    assert_eq!(child.access(0, Access::Write), Ok(Pfn(1001)));
+    // Nothing was allocated, and unmapping frees nothing.
+    p.munmap(0, 4);
+    drop(child);
+    drop(p);
+    assert_eq!(pages.live(), 0);
+}

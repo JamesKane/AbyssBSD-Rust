@@ -1301,7 +1301,7 @@ U.0 ─► U.1 ─► U.2 ─┬─► U.3 ─► U.4 ─┬─► U.6
   family, keymaps, LEDs, autorepeat) and evdev (`/dev/input/event*`, FreeBSD's evdev ABI, the
   `kern.evdev` sysctls).
 
-**U.4 Virtual terminals.** Done 2026-10-24, apart from two items that belong to P6 (see Left below).
+**U.4 Virtual terminals.** Done 2026-10-24.
 - `vt`: `ttyv0`–`ttyv7` on the framebuffer console, a terminal emulator that matches `teken`'s
   behavior as `TERM=xterm`, switching (Alt-F*n*), scrollback, the cursor, and the bell.
 - Kernel messages and `/dev/console` on `ttyv0` as well as the serial port. The ioctls `rc` and the
@@ -1321,8 +1321,8 @@ U.0 ─► U.1 ─► U.2 ─┬─► U.3 ─► U.4 ─┬─► U.6
 - `kbdcontrol` and `vidcontrol` run: built static from FreeBSD's sources onto the memory disk until
   dynamic linking (P6) lets base's own run, `tests/user/vtools.c` loads a font, the history size,
   colors, a keymap, and the repeat rate with them, and passes on FreeBSD 15.1 with base's.
-- Left, for P6: mapping the framebuffer through `ttyv*` for X's `scfb` (`vt_fb_mmap`, which needs
-  a device pager).
+- The framebuffer maps through `ttyv*` for X's `scfb` (`vt_fb_mmap`): device objects in `sys/vm`
+  (the device pager's, write-combining) and `d_mmap` through the tty layer.
 
 **U.5 USB mass storage.**
 - `umass` over Bulk-Only Transport, and UAS (streams on USB 3, the command and status pipes on

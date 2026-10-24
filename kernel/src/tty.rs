@@ -125,6 +125,10 @@ pub(crate) trait Driver: Send + Sync {
     /// The terminal's first open (`true`) or last close (`tsw_open`,
     /// `tsw_close`).
     fn opened(&self, _yes: bool) {}
+    /// Its memory, for `mmap` (`tsw_mmap`); see [`CharDevice::mmap`].
+    fn mmap(&self, _page: u64, _pages: u64) -> Result<Arc<vm::object::Object>, Errno> {
+        Err(Errno::ENODEV)
+    }
 }
 
 /// A device that writes with a function.
@@ -599,11 +603,20 @@ impl CharDevice for TtyOpen {
     fn ioctl(&self, s: &Sleepable, req: u32, arg: &mut [u8]) -> Result<(), Errno> {
         self.0.ioctl(s, req, arg)
     }
+
+    fn mmap(&self, page: u64, pages: u64) -> Result<Arc<vm::object::Object>, Errno> {
+        self.0.mmap(page, pages)
+    }
 }
 
 impl CharDevice for TtyDevice {
     fn dtype(&self) -> u32 {
         vfs::D_TTY
+    }
+
+    /// `ttydev_mmap`: through the driver.
+    fn mmap(&self, page: u64, pages: u64) -> Result<Arc<vm::object::Object>, Errno> {
+        self.0.driver.mmap(page, pages)
     }
 
     fn instance(&self, _s: &Sleepable) -> Result<Option<Arc<dyn CharDevice>>, Errno> {

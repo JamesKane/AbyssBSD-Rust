@@ -568,6 +568,11 @@ impl VmMap {
                     let shared = e.clone();
                     child.entries.insert(shared);
                 }
+                // A device's memory has no copy (FreeBSD forces its
+                // mappings shared): the child shares it.
+                Inherit::Copy if e.object.as_ref().is_some_and(|o| o.is_device()) => {
+                    child.entries.insert(e.clone());
+                }
                 Inherit::Copy => {
                     if let Some(object) = &e.object {
                         object.set_shared();

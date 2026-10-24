@@ -226,6 +226,28 @@ pub struct Object {
     ra_window: AtomicU64,
     /// The next windows, read ahead while the last is used, in order.
     ahead: PreemptLock<VecDeque<Ahead>>,
+    /// A device's memory (`OBJT_DEVICE`): its pages are the device's,
+    /// never allocated or freed.
+    device: Option<Device>,
+}
+
+/// How memory is mapped (`vm_memattr_t`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MemAttr {
+    /// Normal memory, write-back cacheable.
+    #[default]
+    WriteBack,
+    /// Uncached but write-combining (`VM_MEMATTR_WRITE_COMBINING`):
+    /// frame buffers.
+    WriteCombining,
+}
+
+/// A device object's physical pages.
+#[derive(Clone, Copy, Debug)]
+struct Device {
+    base: Pfn,
+    pages: PageIndex,
+    attr: MemAttr,
 }
 
 /// A transfer through an object's pages: its frames stay put until the
@@ -607,7 +629,46 @@ impl Object {
             ra_next: AtomicU64::new(0),
             ra_window: AtomicU64::new(1),
             ahead: PreemptLock::new(VecDeque::new()),
+            device: None,
         })
+    }
+
+    /// A device's memory, `pages` pages from `base`, mapped as `attr`
+    /// (the device pager's object, `dev_pager_ctor`): shared from the
+    /// start, its pages never allocated or freed.
+    #[must_use]
+    pub fn device(
+        ops: &'static dyn PageOps,
+        base: Pfn,
+        pages: PageIndex,
+        attr: MemAttr,
+    ) -> Arc<Self> {
+        let o = Self::anonymous(ops);
+        o.set_shared();
+        let mut o = Arc::into_inner(o).unwrap_or_else(|| unreachable!("a new object"));
+        o.device = Some(Device { base, pages, attr });
+        Arc::new(o)
+    }
+
+    /// Whether this is a device's memory.
+    #[must_use]
+    pub fn is_device(&self) -> bool {
+        self.device.is_some()
+    }
+
+    /// How its pages are mapped.
+    #[must_use]
+    pub fn memattr(&self) -> MemAttr {
+        self.device.map_or(MemAttr::WriteBack, |d| d.attr)
+    }
+
+    /// A device object's page `index`.
+    fn device_page(d: Device, index: PageIndex) -> Result<Pfn, LookupError> {
+        if index < d.pages {
+            Ok(Pfn(d.base.0 + index))
+        } else {
+            Err(LookupError::PastEnd)
+        }
     }
 
     /// An empty object shadowing `backing` from page `offset` on.
@@ -629,6 +690,7 @@ impl Object {
             ra_next: AtomicU64::new(0),
             ra_window: AtomicU64::new(1),
             ahead: PreemptLock::new(VecDeque::new()),
+            device: None,
         })
     }
 
@@ -655,6 +717,7 @@ impl Object {
             ra_next: AtomicU64::new(0),
             ra_window: AtomicU64::new(1),
             ahead: PreemptLock::new(VecDeque::new()),
+            device: None,
         });
         PAGED.lock().push(Arc::downgrade(&o));
         o
@@ -729,6 +792,9 @@ impl Object {
         fold: bool,
         fill: bool,
     ) -> Result<Found, LookupError> {
+        if let Some(d) = self.device {
+            return Self::device_page(d, index).map(Found::Top);
+        }
         if self.pager.is_some() {
             if let Some(pfn) = self.page_or_fill(index, fill)? {
                 return Ok(Found::Top(pfn));
@@ -769,6 +835,9 @@ impl Object {
     /// filling, no allocating (for prefaulting).
     #[must_use]
     pub fn resident_page(&self, index: PageIndex) -> Option<Pfn> {
+        if let Some(d) = self.device {
+            return Self::device_page(d, index).ok();
+        }
         if let Some(&pfn) = self.inner.lock().pages.get(&index) {
             return Some(pfn);
         }

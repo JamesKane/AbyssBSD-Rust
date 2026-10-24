@@ -8,7 +8,8 @@
  * mouse cursor, a font of the window's own (PIO_VFONT), which sizes it,
  * releasing the console's keyboard and taking it back (CONS_RELKBD,
  * CONS_SETKBD), I/O port access (KDENABIO, KDDISABIO), the frame
- * buffer's description (FBIO_*), the bell (KDMKTONE), and switching (VT_ACTIVATE, VT_WAITACTIVE) to the window and back,
+ * buffer's description (FBIO_*) and the frame buffer mapped through
+ * the window (as X's scfb maps it), the bell (KDMKTONE), and switching (VT_ACTIVATE, VT_WAITACTIVE) to the window and back,
  * which only an open window allows.
  *
  * Runs on FreeBSD too (as root, under vt, with ttyv2 not in use); the
@@ -22,11 +23,13 @@
 #include <sys/fbio.h>
 #include <sys/ioctl.h>
 #include <sys/kbio.h>
+#include <sys/mman.h>
 #include <sys/wait.h>
 
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <termios.h>
@@ -136,6 +139,9 @@ main(void)
 	struct fb_rgboffs rgb;
 	video_display_start_t ds;
 	u_int line;
+	volatile uint32_t *fb;
+	uint32_t px;
+	int rofd;
 	video_info_t mode;
 	int fd, active, v, i, closed;
 
@@ -205,6 +211,29 @@ main(void)
 	CHECK(ioctl(fd, FBIO_GETRGBOFFS, &rgb) == 0 && rgb.green == 8 &&
 	    rgb.red + rgb.blue == 16, "offsets %d %d %d", rgb.red, rgb.green,
 	    rgb.blue);
+
+	/*
+	 * The frame buffer, mapped shared through the window; a pixel is
+	 * read and written back unchanged. No private mapping, none past
+	 * its end, and writing needs the window open for writing.
+	 */
+	fb = mmap(NULL, fbt.fb_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	CHECK(fb != MAP_FAILED, "mmap: %s", strerror(errno));
+	if (fb != MAP_FAILED) {
+		px = fb[fbt.fb_size / 4 - 1];
+		fb[fbt.fb_size / 4 - 1] = px;
+		CHECK(munmap((void *)fb, fbt.fb_size) == 0, "%s", strerror(errno));
+	}
+	CHECK(mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, fd, 0) == MAP_FAILED &&
+	    errno == EINVAL, "private: %s", strerror(errno));
+	CHECK(mmap(NULL, 4096, PROT_READ, MAP_SHARED, fd,
+	    roundup2(fbt.fb_size, 4096)) == MAP_FAILED && errno == EINVAL,
+	    "past the end: %s", strerror(errno));
+	rofd = open("/dev/ttyv2", O_RDONLY | O_NONBLOCK);
+	CHECK(rofd >= 0, "%s", strerror(errno));
+	CHECK(mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, rofd, 0) ==
+	    MAP_FAILED && errno == EACCES, "read-only: %s", strerror(errno));
+	close(rofd);
 
 	/* I/O port access: root only; on amd64, the ports open and close. */
 	v = in_child(enabio_unprivileged, fd);

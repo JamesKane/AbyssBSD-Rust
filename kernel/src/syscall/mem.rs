@@ -102,11 +102,28 @@ fn file_object(
         return Err(Errno::ENODEV);
     };
     if let Some(d) = &vf.device {
-        return if d.ops.maps_as_zeros() {
-            Ok((Backing::Zeros, Prot::ALL))
-        } else {
-            Err(Errno::ENODEV)
-        };
+        if d.ops.maps_as_zeros() {
+            return Ok((Backing::Zeros, Prot::ALL));
+        }
+        // `vn_mmap`'s rights, then `vm_mmap_cdev`: devices have no
+        // private mappings.
+        let mut max = Prot::EXEC;
+        if f.flags() & FREAD != 0 {
+            max = max.union(Prot::READ);
+        } else if prot.contains(Prot::READ) {
+            return Err(Errno::EACCES);
+        }
+        if flags & MAP_SHARED == 0 || f.flags() & FWRITE != 0 {
+            max = max.union(Prot::WRITE);
+        } else if prot.contains(Prot::WRITE) {
+            return Err(Errno::EACCES);
+        }
+        if flags & MAP_PRIVATE != 0 {
+            return Err(Errno::EINVAL);
+        }
+        let page = pos / PAGE_SIZE;
+        let object = d.ops.mmap(page, len.div_ceil(PAGE_SIZE))?;
+        return Ok((Backing::Object(object, page), max));
     }
     let v = vf.vnode.vnode();
     match v.kind() {
