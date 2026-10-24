@@ -77,17 +77,27 @@ fn auto_numbers() {
     let d = t
         .add_node(t.root(), Number::Auto, "dev", "Device tree")
         .unwrap();
-    assert_eq!(t.oid(d), Some(vec![CTL_AUTO_START]));
+    assert_eq!(t.oid(d), Some(vec![i32::MAX]));
+    // One counter for the whole tree, counting down.
+    let x = t.add_node(d, Number::Auto, "x", "").unwrap();
+    assert_eq!(t.oid(x), Some(vec![i32::MAX, i32::MAX - 1]));
     let s = t
         .add_node(t.root(), Number::Auto, "security", "Security")
         .unwrap();
-    assert_eq!(t.oid(s), Some(vec![CTL_AUTO_START + 1]));
+    assert_eq!(t.oid(s), Some(vec![i32::MAX - 2]));
     // A removed auto number is not reused.
     assert!(t.remove(s));
     let c = t
         .add_node(t.root(), Number::Auto, "compat", "Compatibility")
         .unwrap();
-    assert_eq!(t.oid(c), Some(vec![CTL_AUTO_START + 2]));
+    assert_eq!(t.oid(c), Some(vec![i32::MAX - 3]));
+    // Past `CTL_AUTO_START` the counter wraps to the top, and a collision
+    // there restarts at `CTL_AUTO_START`.
+    t.last_auto = CTL_AUTO_START;
+    let w = t.add_node(t.root(), Number::Auto, "wrapped", "").unwrap();
+    assert_eq!(t.oid(w), Some(vec![CTL_AUTO_START]));
+    let v = t.add_node(t.root(), Number::Auto, "next", "").unwrap();
+    assert_eq!(t.oid(v), Some(vec![i32::MAX - 1]));
     // Fixed numbers below the auto range coexist.
     assert_eq!(
         t.add_node(t.root(), Number::Fixed(1), "other", ""),
@@ -235,8 +245,8 @@ fn handler_nodes() {
     let (_, rest) = t.handler(&oid).unwrap();
     assert_eq!(rest, [5, 3]);
     assert!(t.handler(&t.oid(info).unwrap()).is_none());
-    // Listed as a leaf, nothing under it.
-    assert_eq!(t.next(&t.oid(info).unwrap(), true), Some(base.clone()));
+    // Listed as a leaf, nothing under it; the newer `devices` lists first.
+    assert_eq!(t.next(&base, true), t.oid(info));
     assert_eq!(t.format(&base).unwrap().1, "N");
     assert_eq!(
         t.add_node(devices, Number::Auto, "x", ""),

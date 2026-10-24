@@ -5,8 +5,9 @@
 //! OID is the path of numbers from the root, and its full name the path of
 //! names joined by dots (`kern.ostype` is `{1, 1}`). Nodes with a fixed
 //! number in FreeBSD (`lib/abi::sysctl`) keep it, because userland asks for
-//! them by number; the rest are numbered from `CTL_AUTO_START` as they are
-//! registered and found by name, as in FreeBSD.
+//! them by number; the rest get numbers counted down from `0x7fffffff` as
+//! they are registered, so newer nodes list first, and are found by name,
+//! as in FreeBSD.
 //!
 //! Interior nodes group children; leaves have a [`Value`] that is read on
 //! demand. The tree answers the queries the `__sysctl` syscall serves:
@@ -136,7 +137,8 @@ impl fmt::Debug for Value {
 pub enum Number {
     /// A fixed number (ABI for well-known nodes).
     Fixed(i32),
-    /// The parent's next free number from `CTL_AUTO_START`.
+    /// The next number from the tree's counter, which counts down from
+    /// `0x7fffffff` (`OID_AUTO`).
     Auto,
 }
 
@@ -205,8 +207,6 @@ struct Node {
     parent: Option<u32>,
     /// Children's slots, in increasing number.
     children: Vec<u32>,
-    /// The next number for an `OID_AUTO` child.
-    next_auto: i32,
     depth: usize,
 }
 
@@ -215,6 +215,9 @@ pub struct Tree {
     slots: Vec<Option<Node>>,
     /// Generations of freed slots, so reuse gets a new one.
     free: Vec<(u32, u32)>,
+    /// The last `OID_AUTO` number handed out, shared by the whole tree as
+    /// FreeBSD's `newoid` is.
+    last_auto: i32,
 }
 
 impl fmt::Debug for Tree {
@@ -241,6 +244,7 @@ impl Tree {
         let mut t = Self {
             slots: Vec::new(),
             free: Vec::new(),
+            last_auto: 0,
         };
         t.slots.push(Some(Node {
             generation: 0,
@@ -252,7 +256,6 @@ impl Tree {
             handler: None,
             parent: None,
             children: Vec::new(),
-            next_auto: CTL_AUTO_START,
             depth: 0,
         }));
         let top = [
@@ -332,19 +335,34 @@ impl Tree {
         if p.children.iter().any(|&c| self.at(c).name == spec.name) {
             return Err(AddError::NameTaken);
         }
-        let number = match spec.number {
-            Number::Fixed(n) => n,
+        let taken = |n: i32| p.children.iter().any(|&c| self.at(c).number == n);
+        let (number, last_auto) = match spec.number {
+            Number::Fixed(n) if taken(n) => return Err(AddError::NumberTaken),
+            Number::Fixed(n) => (n, self.last_auto),
             Number::Auto => {
-                let mut n = p.next_auto;
-                while p.children.iter().any(|&c| self.at(c).number == n) {
-                    n += 1;
+                // Count down, so a new node usually goes first among its
+                // siblings; on a collision count up from it, and wrap to
+                // `CTL_AUTO_START` at the top (sysctl_register_oid).
+                let next = match self.last_auto.checked_sub(1) {
+                    Some(n) if n >= CTL_AUTO_START => n,
+                    _ => i32::MAX,
+                };
+                let mut n = next;
+                let mut wraps = 2;
+                while taken(n) {
+                    if n == i32::MAX {
+                        if wraps == 0 {
+                            return Err(AddError::NumberTaken);
+                        }
+                        wraps -= 1;
+                        n = CTL_AUTO_START;
+                    } else {
+                        n += 1;
+                    }
                 }
-                n
+                (n, next)
             }
         };
-        if p.children.iter().any(|&c| self.at(c).number == number) {
-            return Err(AddError::NumberTaken);
-        }
         let kind = match &spec.value {
             None => ctltype::NODE | ctlflag::RD,
             Some(v) => v.ctltype() | ctlflag::RD,
@@ -367,7 +385,6 @@ impl Tree {
             handler: None,
             parent: Some(parent.index),
             children: Vec::new(),
-            next_auto: CTL_AUTO_START,
             depth,
         };
         if index as usize == self.slots.len() {
@@ -375,8 +392,7 @@ impl Tree {
         } else {
             self.slots[index as usize] = Some(node);
         }
-        // Keep siblings sorted by number; an auto number moves the
-        // parent's counter past it, as FreeBSD never reuses one.
+        // Keep siblings sorted by number.
         let pos = {
             let p = self.at(parent.index);
             p.children
@@ -384,11 +400,8 @@ impl Tree {
                 .position(|&c| self.at(c).number > number)
                 .unwrap_or(p.children.len())
         };
-        let p = self.at_mut(parent.index);
-        p.children.insert(pos, index);
-        if spec.number == Number::Auto {
-            p.next_auto = number + 1;
-        }
+        self.at_mut(parent.index).children.insert(pos, index);
+        self.last_auto = last_auto;
         Ok(NodeId { index, generation })
     }
 
