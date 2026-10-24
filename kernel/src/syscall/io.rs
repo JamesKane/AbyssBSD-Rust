@@ -521,18 +521,19 @@ pub(super) fn ioctl(s: &Sleepable, fd: u64, com: u64, data: u64) -> SysResult {
         // An `int` passed by value.
         arg.copy_from_slice(&int(data).to_ne_bytes());
     }
-    match com {
+    let ret = match com {
         FIONBIO | FIOASYNC => {
             let on = arg.len() == 4 && i32::from_ne_bytes([arg[0], arg[1], arg[2], arg[3]]) != 0;
             let bit = if com == FIONBIO { O_NONBLOCK } else { O_ASYNC };
             f.set_flags(bit, if on { bit } else { 0 });
+            0
         }
         _ => f.ioctl(s, com, &mut arg)?,
-    }
+    };
     if com & IOC_OUT != 0 && len > 0 {
         uaccess::copy_out(data, &arg).map_err(|_| Errno::EFAULT)?;
     }
-    Ok(0)
+    Ok(u64::try_from(ret).unwrap_or(0))
 }
 
 /// `pipe2(fildes, flags)`.

@@ -189,6 +189,8 @@ pub(crate) fn init(s: &Sleepable) {
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
     storage::bio::set_verifier(verifier);
+    // Drivers' device nodes go to devfs.
+    vfs::devices::set_registry(&crate::fs::devfs::Hook);
     // Keyboards type into the console terminal.
     input::set_consumer(alloc::sync::Arc::new(crate::tty::ConsoleInput));
     let drivers = drivers();
@@ -205,7 +207,14 @@ pub(crate) fn init(s: &Sleepable) {
     // The platform root, and the devices the kernel set up itself, as
     // FreeBSD's tree shows them.
     let m = bus::manager();
-    if input::start().is_err() {
+    evdev::init(
+        s,
+        evdev::Clocks {
+            realtime: || crate::shared_page::to_ns(crate::shared_page::realtime()),
+            uptime: || crate::shared_page::to_ns(crate::shared_page::uptime()),
+        },
+    );
+    if input::start(s).is_err() {
         kprintln!("input: no keyboard thread");
     }
     let nexus = m.adopt(s, root, "nexus", "", bus::Ident::Platform);

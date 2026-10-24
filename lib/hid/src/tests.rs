@@ -133,3 +133,26 @@ fn fuzzed_descriptors_never_panic() {
         }
     }
 }
+
+#[test]
+fn resolution_from_physical_range_and_unit() {
+    // A tablet axis: logical 0..=32767 over 0..=2000 in inches × 10^-2
+    // (unit exponent 0x0e), so 32767 / 20 inches = 64 units per mm.
+    let d = Descriptor::parse(&[
+        0x05, 0x01, 0x09, 0x02, 0xa1, 0x01, // Generic Desktop, Mouse, Application
+        0x09, 0x30, // X
+        0x15, 0x00, 0x26, 0xff, 0x7f, // Logical 0..=32767
+        0x35, 0x00, 0x46, 0xd0, 0x07, // Physical 0..=2000
+        0x65, 0x13, 0x55, 0x0e, // Unit inch, exponent -2
+        0x75, 0x10, 0x95, 0x01, 0x81, 0x02, // 16 bits × 1, Data Var Abs
+        0xc0,
+    ])
+    .unwrap();
+    let f = &d.fields[0];
+    assert_eq!((f.physical_min, f.physical_max), (0, 2000));
+    assert_eq!((f.unit, f.unit_exponent), (0x13, 0x0e));
+    assert_eq!(f.resolution(), 32767 * 10 * 100 / (2000 * 254));
+    // No unit: no resolution.
+    let d = Descriptor::parse(BOOT_MOUSE).unwrap();
+    assert!(d.fields.iter().all(|f| f.resolution() == 0));
+}

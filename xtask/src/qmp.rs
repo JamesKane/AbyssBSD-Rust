@@ -169,6 +169,12 @@ impl Qmp {
         Ok(())
     }
 
+    /// Moves the guest's relative pointer (the USB mouse) by `dx`, `dy`.
+    pub(crate) fn move_pointer(&mut self, dx: i32, dy: i32) -> Result<()> {
+        self.execute(&move_rel(dx, dy))?;
+        Ok(())
+    }
+
     /// Writes the guest's screen to `file` as a PPM image.
     pub(crate) fn screendump(&mut self, file: &Path) -> Result<()> {
         let file = std::path::absolute(file)?;
@@ -197,6 +203,13 @@ fn send_key(c: Chord) -> String {
     format!(
         r#"{{"execute":"send-key","arguments":{{"keys":[{}],"hold-time":{HOLD_MS}}}}}"#,
         keys.join(",")
+    )
+}
+
+/// The `input-send-event` command for a relative motion.
+fn move_rel(dx: i32, dy: i32) -> String {
+    format!(
+        r#"{{"execute":"input-send-event","arguments":{{"events":[{{"type":"rel","data":{{"axis":"x","value":{dx}}}}},{{"type":"rel","data":{{"axis":"y","value":{dy}}}}}]}}}}"#
     )
 }
 
@@ -293,16 +306,25 @@ impl Ppm {
     }
 }
 
-/// `cargo xtask qmp --sock SOCK [--type TEXT] [--screendump FILE]`.
+/// `cargo xtask qmp --sock SOCK [--type TEXT] [--move DX,DY]
+/// [--screendump FILE]`.
 pub(crate) fn cmd(mut args: Args) -> Result<()> {
     let sock = PathBuf::from(args.take_value("--sock")?.ok_or("qmp needs --sock SOCK")?);
     let text = args.take_value("--type")?;
+    let motion = args.take_value("--move")?;
     let dump = args.take_value("--screendump")?;
     args.finish()?;
-    if text.is_none() && dump.is_none() {
-        return Err("qmp: nothing to do (--type TEXT, --screendump FILE)".into());
+    if text.is_none() && motion.is_none() && dump.is_none() {
+        return Err("qmp: nothing to do (--type TEXT, --move DX,DY, --screendump FILE)".into());
     }
     let mut q = Qmp::connect(&sock)?;
+    if let Some(m) = motion {
+        let (dx, dy) = m
+            .split_once(',')
+            .and_then(|(x, y)| Some((x.trim().parse().ok()?, y.trim().parse().ok()?)))
+            .ok_or("qmp: --move takes DX,DY")?;
+        q.move_pointer(dx, dy)?;
+    }
     if let Some(text) = text {
         // `\n` in the argument means return, as a shell cannot easily
         // pass a newline.
@@ -376,6 +398,14 @@ mod tests {
             format!(
                 r#"{{"execute":"send-key","arguments":{{"keys":[{{"type":"qcode","data":"shift"}},{{"type":"qcode","data":"a"}}],"hold-time":{HOLD_MS}}}}}"#
             )
+        );
+    }
+
+    #[test]
+    fn move_rel_json() {
+        assert_eq!(
+            move_rel(3, -4),
+            r#"{"execute":"input-send-event","arguments":{"events":[{"type":"rel","data":{"axis":"x","value":3}},{"type":"rel","data":{"axis":"y","value":-4}}]}}"#
         );
     }
 

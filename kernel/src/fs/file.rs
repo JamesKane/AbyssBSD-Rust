@@ -39,7 +39,13 @@ impl VnodeFile {
     /// up once, here. `ETXTBSY` to write a file a program runs.
     pub(crate) fn open(s: &Sleepable, v: &Arc<Vnode>, write: bool) -> Result<Self, Errno> {
         let device = match v.kind() {
-            Kind::CharDevice => Some(v.device(s)?),
+            Kind::CharDevice => {
+                let mut d = v.device(s)?;
+                if let Some(ops) = d.ops.instance(s)? {
+                    d.ops = ops;
+                }
+                Some(d)
+            }
             _ => None,
         };
         let writer = write && v.kind() == Kind::Regular;
@@ -304,8 +310,9 @@ impl File {
     }
 
     /// An `ioctl` request that is not about the descriptor itself; `arg`
-    /// is its argument, copied in and out by the caller.
-    pub(crate) fn ioctl(&self, s: &Sleepable, req: u32, arg: &mut [u8]) -> Result<(), Errno> {
+    /// is its argument, copied in and out by the caller. Returns the value
+    /// the call returns (0 for most requests).
+    pub(crate) fn ioctl(&self, s: &Sleepable, req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
         let put = |arg: &mut [u8], v: usize| {
             let v = i32::try_from(v).unwrap_or(i32::MAX);
             arg.copy_from_slice(&v.to_ne_bytes());
@@ -315,14 +322,14 @@ impl File {
             FileKind::Fifo(f) => match req {
                 FIONREAD => {
                     put(arg, f.readable(s));
-                    Ok(())
+                    Ok(0)
                 }
                 _ => Err(Errno::ENOTTY),
             },
             FileKind::Pipe(p) => match req {
                 FIONREAD => {
                     put(arg, p.readable());
-                    Ok(())
+                    Ok(0)
                 }
                 _ => Err(Errno::ENOTTY),
             },
@@ -330,9 +337,9 @@ impl File {
                 // Every device answers its kind (FreeBSD's devfs does).
                 (Some(d), _) if req == FIODTYPE => {
                     arg.copy_from_slice(&d.ops.dtype().to_ne_bytes());
-                    Ok(())
+                    Ok(0)
                 }
-                (Some(d), _) => d.ops.ioctl(s, req, arg),
+                (Some(d), _) => d.ops.ioctl_value(s, req, arg),
                 (None, Kind::Regular) if req == FIONREAD => {
                     let off = *self.offset.lock(s);
                     let size = f.vnode.size(s)?;
@@ -340,7 +347,7 @@ impl File {
                         arg,
                         usize::try_from(size.saturating_sub(off)).unwrap_or(usize::MAX),
                     );
-                    Ok(())
+                    Ok(0)
                 }
                 _ => Err(Errno::ENOTTY),
             },

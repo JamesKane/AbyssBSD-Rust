@@ -311,6 +311,12 @@ impl Manager {
         self.platform.log(args);
     }
 
+    /// Runs `f` on the sysctl tree, under its lock: a class's or
+    /// driver's own nodes (`kern.evdev`).
+    pub fn sysctl(&self, s: &Sleepable, f: &mut dyn FnMut(&mut sysctl::Tree)) {
+        self.platform.sysctl(s, f);
+    }
+
     pub(crate) fn platform(&self) -> &'static dyn Platform {
         self.platform
     }
@@ -663,7 +669,10 @@ impl Manager {
         };
         let decl = &self.drivers[d];
         let unit = t.units.alloc(decl.name, None).unwrap_or(0);
-        let desc = (decl.describe)(&t.node(id).map(|n| n.ident.clone()).unwrap_or(Ident::Root));
+        let desc = match t.node(id) {
+            Some(n) => (decl.describe)(&n.ident, n.bus_data.as_deref()),
+            None => (decl.describe)(&Ident::Root, None),
+        };
         let missing = t.graph.missing(id.index, |i| t.attached(i));
         let state = if missing.is_empty() {
             NodeState::Attaching

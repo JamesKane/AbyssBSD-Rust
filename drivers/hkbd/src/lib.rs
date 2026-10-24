@@ -3,6 +3,10 @@
 //! and releases for the input class; the lock LEDs go back as an output
 //! report.
 //!
+//! It registers an evdev device with every key a HID keyboard can name
+//! and its lock LEDs, and starts its reports at once (a keyboard types
+//! at the console whether or not anyone reads its evdev device).
+//!
 //! A report's keys are the set of usages its fields name: the modifier
 //! bits, any bitmap (n-key rollover) fields, and the key array. Each
 //! report is compared with the last; what appeared is pressed (modifiers
@@ -21,8 +25,9 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use abi::evdev::{EV_KEY, EV_LED, EV_REP, InputId, LED_CAPSL, LED_NUML, LED_SCROLLL};
 use bus::{AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, StartCx, StopCx, StopReason};
-use devtree::ids::HidId;
+use devtree::ids::{HidId, HidIdent};
 use hid::usage::{self, KEY_ROLLOVER, KEYBOARD, KEYBOARD_APP, LED};
 use hid::{Field, Kind};
 use hidbus::HidChild;
@@ -103,6 +108,13 @@ impl Layout {
         Some(k)
     }
 
+    /// Whether the LED field has `led`.
+    fn has_led(&self, led: u32) -> bool {
+        self.leds
+            .as_ref()
+            .is_some_and(|f| (0..f.count).any(|i| f.usage(i) == Some(led)))
+    }
+
     /// The output report for `leds`.
     fn led_report(&self, leds: Leds) -> Option<(u8, Vec<u8>)> {
         let f = self.leds.as_ref()?;
@@ -133,7 +145,10 @@ pub struct Hkbd {
     child: Arc<HidChild>,
     layout: Arc<Layout>,
     unit: u32,
+    ident: HidIdent,
+    name: String,
     kbd: SpinLock<Option<Arc<Keyboard>>>,
+    evdev: SpinLock<Option<Arc<evdev::Device>>>,
 }
 
 impl core::fmt::Debug for Hkbd {
@@ -159,22 +174,59 @@ impl Driver for Hkbd {
         if layout.keys.is_empty() {
             return Err(AttachError::Device("no key fields"));
         }
+        let Ident::Hid(ident, name) = cx.ident().clone() else {
+            return Err(AttachError::Decline);
+        };
         Ok(Self {
             child,
             layout: Arc::new(layout),
             unit: cx.unit(),
+            ident,
+            name,
             kbd: SpinLock::new(None),
+            evdev: SpinLock::new(None),
         })
     }
 
-    fn start(&self, _: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
-        let (child, layout) = (Arc::clone(&self.child), Arc::clone(&self.layout));
-        let kbd = input::attach(&alloc::format!("hkbd{}", self.unit), move |leds| {
-            if let Some((id, data)) = layout.led_report(leds) {
-                child.output(id, data);
+    fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
+        let me = alloc::format!("hkbd{}", self.unit);
+        let mut b = evdev::Builder::new(&self.name);
+        b.phys(&me).uniq(self.child.serial()).id(InputId {
+            bustype: self.ident.bus,
+            vendor: self.ident.vendor,
+            product: self.ident.product,
+            version: self.ident.version,
+        });
+        b.event(EV_KEY);
+        let leds = [
+            (usage::LED_NUM_LOCK, LED_NUML),
+            (usage::LED_CAPS_LOCK, LED_CAPSL),
+            (usage::LED_SCROLL_LOCK, LED_SCROLLL),
+        ];
+        if leds.iter().any(|&(u, _)| self.layout.has_led(u)) {
+            b.event(EV_LED);
+        }
+        b.event(EV_REP);
+        for u in 0..=255u8 {
+            b.key(evdev::keys::hid2key(u));
+        }
+        for (u, code) in leds {
+            if self.layout.has_led(u) {
+                b.led(code);
             }
-        })
-        .map_err(|_| AttachError::NoMemory)?;
+        }
+        let ev = b.register(cx.sleepable()).ok();
+        let (child, layout) = (Arc::clone(&self.child), Arc::clone(&self.layout));
+        let kbd = input::attach(
+            &me,
+            move |leds| {
+                if let Some((id, data)) = layout.led_report(leds) {
+                    child.output(id, data);
+                }
+            },
+            ev.clone(),
+        );
+        *self.evdev.lock() = ev;
         let last = Arc::new(SpinLock::new(Keys::default()));
         let (k, layout) = (Arc::clone(&kbd), Arc::clone(&self.layout));
         self.child.listen(move |id, report| {
@@ -193,15 +245,22 @@ impl Driver for Hkbd {
                     k.key(u, true);
                 }
             }
+            k.sync();
         });
         *self.kbd.lock() = Some(kbd);
+        self.child.intr_start();
         Ok(())
     }
 
-    fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {
+    fn stop(&self, cx: &mut StopCx<'_>, _: StopReason) {
+        self.child.intr_stop();
         self.child.unlisten();
         if let Some(k) = self.kbd.lock().take() {
             k.detach();
+        }
+        let ev = self.evdev.lock().take();
+        if let Some(e) = ev {
+            e.unregister(cx.sleepable());
         }
     }
 }

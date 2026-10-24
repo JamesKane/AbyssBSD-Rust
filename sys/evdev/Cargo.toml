@@ -1,0 +1,17 @@
+[package]
+name = "evdev"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+abi = { path = "../../lib/abi" }
+bus = { path = "../bus" }
+sched = { path = "../sched" }
+sync = { path = "../sync" }
+sysctl = { path = "../sysctl" }
+vfs = { path = "../vfs" }
+
+[lints]
+workspace = true

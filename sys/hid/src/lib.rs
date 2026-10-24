@@ -4,8 +4,10 @@
 //! `usbhid`, the USB transport.
 //!
 //! Children (`hkbd`, `hms`) get a [`HidChild`] as bus data: the parsed
-//! descriptor, their collection's index, and [`HidChild::listen`] for
-//! the input reports `hidbus` routes to them by report ID.
+//! descriptor, their collection's index, [`HidChild::listen`] for the
+//! input reports `hidbus` routes to them by report ID, and
+//! [`HidChild::intr_start`] and [`HidChild::intr_stop`]: the transport
+//! runs while any child is active, and only active children get reports.
 //!
 //! Behavior reference: sys/dev/hid/hidbus.c, sys/dev/usb/input/usbhid.c.
 
@@ -34,9 +36,14 @@ pub type Sink = Arc<dyn Fn(&[u8]) + Send + Sync>;
 /// What a transport does for `hidbus`.
 pub trait HidTransport: Send + Sync {
     /// Starts delivering input reports (with their ID byte, if the device
-    /// numbers them) to `sink`, until [`HidTransport::stop`].
+    /// numbers them) to `sink`, until [`HidTransport::pause`] or
+    /// [`HidTransport::stop`]; starting it again is harmless. Must not
+    /// sleep.
     fn start(&self, sink: Sink);
-    /// Stops delivering reports.
+    /// Stops delivering reports without waiting for I/O in flight, whose
+    /// reports are dropped. Must not sleep.
+    fn pause(&self);
+    /// Stops delivering reports and waits for I/O in flight (detach).
     fn stop(&self, s: &sched::Sleepable);
     /// Sends an output report without waiting (`data` starts with the ID
     /// byte if `id` is not 0).
@@ -53,6 +60,8 @@ pub struct HidbusData {
     pub ident: HidIdent,
     /// The device's name, for the children's descriptions.
     pub name: String,
+    /// Its serial number, if it has one.
+    pub serial: String,
 }
 
 impl core::fmt::Debug for HidbusData {
@@ -69,8 +78,11 @@ type Handler = Box<dyn Fn(u8, &[u8]) + Send + Sync>;
 struct Shared {
     transport: Arc<dyn HidTransport>,
     desc: Arc<Descriptor>,
-    /// Per collection index: its handler.
-    handlers: SpinLock<Vec<Option<Arc<Handler>>>>,
+    /// Per collection index: its handler, and whether it is active.
+    handlers: SpinLock<Vec<(Option<Arc<Handler>>, bool)>>,
+    /// Where the transport delivers, once the bus has started.
+    sink: SpinLock<Option<Sink>>,
+    serial: String,
 }
 
 impl Shared {
@@ -95,7 +107,10 @@ impl Shared {
                 .collect();
             t.dedup();
             t.iter()
-                .filter_map(|&c| h.get(c).and_then(Clone::clone))
+                .filter_map(|&c| match h.get(c) {
+                    Some((Some(f), true)) => Some(Arc::clone(f)),
+                    _ => None,
+                })
                 .collect()
         };
         for h in targets {
@@ -132,15 +147,49 @@ impl HidChild {
     pub fn listen(&self, f: impl Fn(u8, &[u8]) + Send + Sync + 'static) {
         let mut h = self.shared.handlers.lock();
         if let Some(slot) = h.get_mut(self.index) {
-            *slot = Some(Arc::new(Box::new(f)));
+            slot.0 = Some(Arc::new(Box::new(f)));
         }
     }
 
     /// Stops listening.
     pub fn unlisten(&self) {
         if let Some(slot) = self.shared.handlers.lock().get_mut(self.index) {
-            *slot = None;
+            slot.0 = None;
         }
+    }
+
+    /// Starts this child's reports, and the transport if it is the first
+    /// active child (`hid_intr_start`). Must not sleep.
+    pub fn intr_start(&self) {
+        let mut h = self.shared.handlers.lock();
+        if let Some(slot) = h.get_mut(self.index) {
+            slot.1 = true;
+        }
+        drop(h);
+        let sink = self.shared.sink.lock().clone();
+        if let Some(sink) = sink {
+            self.shared.transport.start(sink);
+        }
+    }
+
+    /// Stops this child's reports, and the transport if no child is
+    /// active (`hid_intr_stop`). Must not sleep.
+    pub fn intr_stop(&self) {
+        let mut h = self.shared.handlers.lock();
+        if let Some(slot) = h.get_mut(self.index) {
+            slot.1 = false;
+        }
+        let active = h.iter().any(|s| s.1);
+        drop(h);
+        if !active {
+            self.shared.transport.pause();
+        }
+    }
+
+    /// The device's serial number (empty if it has none).
+    #[must_use]
+    pub fn serial(&self) -> &str {
+        &self.shared.serial
     }
 
     /// Sends an output report without waiting.
@@ -179,7 +228,9 @@ impl Driver for Hidbus {
             shared: Arc::new(Shared {
                 transport: Arc::clone(&d.transport),
                 desc: Arc::clone(&d.desc),
-                handlers: SpinLock::new((0..n).map(|_| None).collect()),
+                handlers: SpinLock::new((0..n).map(|_| (None, false)).collect()),
+                sink: SpinLock::new(None),
+                serial: d.serial.clone(),
             }),
             ident: d.ident,
             name: d.name.clone(),
@@ -202,14 +253,19 @@ impl Driver for Hidbus {
                 Vec::new(),
             );
         }
-        let shared = Arc::clone(&self.shared);
-        self.shared
-            .transport
-            .start(Arc::new(move |r: &[u8]| shared.deliver(r)));
+        // Children start the transport as they become active. The sink
+        // holds the bus weakly: the transport outlives no bus.
+        let shared = Arc::downgrade(&self.shared);
+        *self.shared.sink.lock() = Some(Arc::new(move |r: &[u8]| {
+            if let Some(s) = shared.upgrade() {
+                s.deliver(r);
+            }
+        }));
         Ok(())
     }
 
     fn stop(&self, cx: &mut StopCx<'_>, _: StopReason) {
+        *self.shared.sink.lock() = None;
         self.shared.transport.stop(cx.sleepable());
     }
 }

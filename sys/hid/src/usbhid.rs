@@ -6,7 +6,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use bus::{
     Announce, AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, StartCx, StopCx, StopReason,
@@ -52,6 +52,8 @@ struct Transport {
     len: u16,
     sink: SpinLock<Option<Sink>>,
     running: AtomicBool,
+    /// Interrupt transfers queued.
+    pending: AtomicUsize,
 }
 
 impl Transport {
@@ -61,13 +63,15 @@ impl Transport {
             IoBuf::from(vec![0; usize::from(self.len)]),
             0,
             move |buf, r| {
-                if let (Ok(n), IoBuf::Owned(b)) = (r, &buf) {
+                me.pending.fetch_sub(1, Ordering::AcqRel);
+                let running = me.running.load(Ordering::Acquire);
+                if running && let (Ok(n), IoBuf::Owned(b)) = (r, &buf) {
                     let sink = me.sink.lock().clone();
                     if let Some(f) = sink {
                         f(&b[..n.min(b.len())]);
                     }
                 }
-                let again = me.running.load(Ordering::Acquire)
+                let again = running
                     && !me.dev.is_gone()
                     && matches!(r, Ok(_) | Err(usbus::UsbError::Transaction));
                 if again {
@@ -75,18 +79,25 @@ impl Transport {
                 }
             },
         );
-        let _ = self.dev.submit(self.ep, t);
+        self.pending.fetch_add(1, Ordering::AcqRel);
+        if self.dev.submit(self.ep, t).is_err() {
+            self.pending.fetch_sub(1, Ordering::AcqRel);
+        }
     }
 }
 
 impl HidTransport for Arc<Transport> {
     fn start(&self, sink: Sink) {
         *self.sink.lock() = Some(sink);
-        if !self.running.swap(true, Ordering::AcqRel) {
-            for _ in 0..IN_FLIGHT {
-                self.arm();
-            }
+        self.running.store(true, Ordering::Release);
+        // Transfers a pause left queued still count.
+        for _ in self.pending.load(Ordering::Acquire)..IN_FLIGHT {
+            self.arm();
         }
+    }
+
+    fn pause(&self) {
+        self.running.store(false, Ordering::Release);
     }
 
     fn stop(&self, s: &Sleepable) {
@@ -183,6 +194,7 @@ impl Driver for Usbhid {
             len,
             sink: SpinLock::new(None),
             running: AtomicBool::new(false),
+            pending: AtomicUsize::new(0),
         });
         Ok(Self {
             data: Arc::new(HidbusData {
@@ -197,6 +209,7 @@ impl Driver for Usbhid {
                     index: 0,
                 },
                 name,
+                serial: dev.serial.clone(),
             }),
             dev,
             unit: cx.unit(),

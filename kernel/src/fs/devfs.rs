@@ -425,6 +425,26 @@ pub(crate) fn remove(s: &Sleepable, path: &[u8]) {
     }
 }
 
+/// devfs as [`vfs::devices`]' registry, for drivers and classes.
+pub(crate) struct Hook;
+
+impl vfs::devices::Registry for Hook {
+    fn make(
+        &self,
+        path: &[u8],
+        mode: u16,
+        uid: u32,
+        gid: u32,
+        ops: Arc<dyn CharDevice>,
+    ) -> Option<u64> {
+        add(path, mode, uid, gid, ops)
+    }
+
+    fn destroy(&self, s: &Sleepable, path: &[u8]) {
+        remove(s, path);
+    }
+}
+
 /// `sys/storage`'s news: a disk's node appears or goes.
 fn disk_event(s: &Sleepable, e: storage::disk::Event<'_>) {
     match e {
@@ -461,6 +481,19 @@ fn names(d: &storage::Disk) -> Vec<alloc::string::String> {
 /// Registers the kernel's own devices and the disks published so far, and
 /// listens for the rest. Runs once, before devfs is mounted.
 pub(crate) fn init() {
+    // Nodes drivers made before the clock was set take its time now, as
+    // FreeBSD's show the boot's time.
+    let t = super::now();
+    with(|r| {
+        for n in r.nodes.values_mut() {
+            if n.attr.birthtime == Timespec::default() {
+                n.attr.atime = t;
+                n.attr.mtime = t;
+                n.attr.ctime = t;
+                n.attr.birthtime = t;
+            }
+        }
+    });
     let console: Arc<dyn CharDevice> = match crate::tty::console() {
         Some(t) => Arc::new(crate::tty::TtyDevice(t)),
         None => Arc::new(Console),

@@ -98,6 +98,14 @@ pub struct Field {
     pub logical_min: i32,
     /// The logical maximum.
     pub logical_max: i32,
+    /// The physical minimum.
+    pub physical_min: i32,
+    /// The physical maximum.
+    pub physical_max: i32,
+    /// The unit (HID 1.11 §6.2.2.7), as the item gave it.
+    pub unit: u32,
+    /// The unit exponent, as the item gave it.
+    pub unit_exponent: u32,
     /// The usages.
     pub usages: Usages,
     /// Which top-level collection it is in.
@@ -140,6 +148,56 @@ impl Field {
         } else {
             i32::from_ne_bytes(raw.to_ne_bytes())
         })
+    }
+
+    /// Units per millimeter, or per radian, from the field's logical and
+    /// physical ranges (FreeBSD's `hid_item_resolution`); 0 if its unit
+    /// is not a length or angle, or its ranges are unusable.
+    #[must_use]
+    pub fn resolution(&self) -> i32 {
+        // HID Usage Table Review Request 39, table 17: the unit
+        // exponent's scale, as a fraction.
+        const SCALE: [(i64, i64); 16] = [
+            (1, 1),
+            (1, 10),
+            (1, 100),
+            (1, 1000),
+            (1, 10_000),
+            (1, 100_000),
+            (1, 1_000_000),
+            (1, 10_000_000),
+            (100_000_000, 1),
+            (10_000_000, 1),
+            (1_000_000, 1),
+            (100_000, 1),
+            (10_000, 1),
+            (1000, 1),
+            (100, 1),
+            (10, 1),
+        ];
+        let (mul, div) = match self.unit {
+            // Centimeter.
+            0x11 => (1, 10),
+            // Inch, and eGalax's variant.
+            0x13 | 0x33 => (10, 254),
+            // Radian.
+            0x12 => (1, 1),
+            // Degree.
+            0x14 => (573, 10),
+            _ => return 0,
+        };
+        let Some(&(num, den)) = usize::try_from(self.unit_exponent)
+            .ok()
+            .and_then(|e| SCALE.get(e))
+        else {
+            return 0;
+        };
+        if self.logical_max <= self.logical_min || self.physical_max <= self.physical_min {
+            return 0;
+        }
+        let logical = i64::from(self.logical_max) - i64::from(self.logical_min);
+        let physical = i64::from(self.physical_max) - i64::from(self.physical_min);
+        i32::try_from(logical * mul * num / (physical * div * den)).unwrap_or(0)
     }
 
     /// The usage of value `i` of a variable field.
@@ -200,6 +258,10 @@ struct Globals {
     page: u16,
     logical_min: i32,
     logical_max: i32,
+    physical_min: i32,
+    physical_max: i32,
+    unit: u32,
+    unit_exponent: u32,
     size: u8,
     count: u16,
     report_id: u8,
@@ -322,6 +384,10 @@ impl Descriptor {
                                 flags: u32v,
                                 logical_min: g.logical_min,
                                 logical_max: g.logical_max,
+                                physical_min: g.physical_min,
+                                physical_max: g.physical_max,
+                                unit: g.unit,
+                                unit_exponent: g.unit_exponent,
                                 usages,
                                 collection: top,
                             });
@@ -345,6 +411,10 @@ impl Descriptor {
                             s
                         };
                     }
+                    3 => g.physical_min = i32::try_from(signed).unwrap_or(0),
+                    4 => g.physical_max = i32::try_from(signed).unwrap_or(0),
+                    5 => g.unit_exponent = u32v,
+                    6 => g.unit = u32v,
                     7 => g.size = u8::try_from(u.min(32)).unwrap_or(32),
                     8 => {
                         g.report_id = u8::try_from(u & 0xff).unwrap_or(0);

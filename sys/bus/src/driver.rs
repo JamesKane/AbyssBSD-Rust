@@ -49,6 +49,14 @@ pub trait Driver: Sized + Send + Sync + 'static {
     /// The device description (`%desc`, `devinfo`'s `<…>`).
     fn describe(ident: &Ident) -> String;
 
+    /// The description, from the identity and the bus data, for a driver
+    /// that reads the device to describe it (as FreeBSD's `hms_probe`
+    /// does with the report descriptor). By default, [`Driver::describe`].
+    fn describe_with(ident: &Ident, bus_data: Option<&(dyn Any + Send + Sync)>) -> String {
+        let _ = bus_data;
+        Self::describe(ident)
+    }
+
     /// Claims resources, resets and identifies the hardware, and builds
     /// the instance. On error everything claimed is dropped.
     fn attach(cx: &mut AttachCx<'_>) -> Result<Self, AttachError>;
@@ -80,7 +88,7 @@ pub struct DriverDecl {
     /// Drivers it yields to on an equal rank.
     pub yields: &'static [&'static str],
     pub(crate) announce: Announce,
-    pub(crate) describe: fn(&Ident) -> String,
+    pub(crate) describe: fn(&Ident, Option<&(dyn Any + Send + Sync)>) -> String,
     pub(crate) attach: fn(&mut AttachCx<'_>) -> Result<Box<dyn Bound>, AttachError>,
 }
 
@@ -101,7 +109,7 @@ impl DriverDecl {
             ids: D::IDS,
             yields: D::YIELDS,
             announce: D::ANNOUNCE,
-            describe: D::describe,
+            describe: D::describe_with,
             attach: attach_erased::<D>,
         }
     }

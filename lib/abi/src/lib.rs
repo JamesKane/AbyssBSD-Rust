@@ -16,6 +16,7 @@
 pub mod bus;
 pub mod dirent;
 pub mod errno;
+pub mod evdev;
 pub mod exec;
 pub mod fcntl;
 pub mod ioctl;

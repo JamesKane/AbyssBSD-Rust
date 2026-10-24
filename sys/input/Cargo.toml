@@ -6,7 +6,9 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+abi = { path = "../../lib/abi" }
 bus = { path = "../bus" }
+evdev = { path = "../evdev" }
 sched = { path = "../sched" }
 sync = { path = "../sync" }
 

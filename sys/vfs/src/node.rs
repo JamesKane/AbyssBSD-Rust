@@ -303,6 +303,13 @@ pub trait CharDevice: Send + Sync {
     fn open(&self) -> Result<Option<Arc<crate::Vnode>>, Errno> {
         Ok(None)
     }
+    /// Called when the device is opened, after [`CharDevice::open`]:
+    /// `Some` serves this open file's I/O from that per-open device
+    /// instead, which is dropped when the file closes (FreeBSD's
+    /// `devfs_set_cdevpriv`, its destructor `Drop`).
+    fn instance(&self, _s: &Sleepable) -> Result<Option<Arc<dyn CharDevice>>, Errno> {
+        Ok(None)
+    }
     /// Reads into `uio` from `offset` (the file's offset, which disks use
     /// and terminals ignore); `nonblock` asks for `EAGAIN` instead of
     /// waiting.
@@ -335,6 +342,11 @@ pub trait CharDevice: Send + Sync {
     /// copied in and copied back out afterwards.
     fn ioctl(&self, _s: &Sleepable, _req: u32, _arg: &mut [u8]) -> Result<(), Errno> {
         Err(Errno::ENOTTY)
+    }
+    /// [`CharDevice::ioctl`], with the value the call returns (FreeBSD's
+    /// `td_retval[0]`): 0 unless a device's requests say otherwise.
+    fn ioctl_value(&self, s: &Sleepable, req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
+        self.ioctl(s, req, arg).map(|()| 0)
     }
 }
 

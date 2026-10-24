@@ -6,7 +6,7 @@
 //! (`offset_of!`, `size_of`), so the check compares what the kernel will
 //! actually use against what FreeBSD's C compiler computes.
 
-use crate::{bus, md, signal, socket, stat, time, ucontext, vdso};
+use crate::{bus, evdev, md, signal, socket, stat, time, ucontext, vdso};
 
 /// Architectures a layout applies to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,6 +65,7 @@ pub const CONSTANTS: &[&[ConstValue]] = &[
     crate::sysctl::CONSTANTS,
     BUS_CONSTANTS,
     crate::errno::CONSTANTS,
+    crate::evdev::CONSTANTS,
     crate::sysarch::CONSTANTS,
     crate::exec::CONSTANTS,
     crate::mman::CONSTANTS,
@@ -152,6 +153,26 @@ pub static LAYOUTS: &[StructLayout] = &[
         dv_flags => "dv_flags",
         dv_state => "dv_state",
         dv_fields => "dv_fields",
+    }),
+    layout!(evdev::InputEvent, "struct input_event", ["sys/types.h", "dev/evdev/input.h"], All, {
+        time => "time",
+        kind => "type",
+        code => "code",
+        value => "value",
+    }),
+    layout!(evdev::InputId, "struct input_id", ["sys/types.h", "dev/evdev/input.h"], All, {
+        bustype => "bustype",
+        vendor => "vendor",
+        product => "product",
+        version => "version",
+    }),
+    layout!(evdev::InputAbsinfo, "struct input_absinfo", ["sys/types.h", "dev/evdev/input.h"], All, {
+        value => "value",
+        minimum => "minimum",
+        maximum => "maximum",
+        fuzz => "fuzz",
+        flat => "flat",
+        resolution => "resolution",
     }),
     layout!(md::MdIoctl, "struct md_ioctl", ["sys/types.h", "sys/mdioctl.h"], All, {
         md_version => "md_version",

@@ -6,8 +6,10 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+abi = { path = "../../lib/abi" }
 bus = { path = "../../sys/bus" }
 devtree = { path = "../../lib/devtree" }
+evdev = { path = "../../sys/evdev" }
 hid = { path = "../../lib/hid" }
 hidbus = { path = "../../sys/hid" }
 input = { path = "../../sys/input" }

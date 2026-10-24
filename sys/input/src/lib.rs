@@ -11,6 +11,13 @@
 //! and later the active virtual terminal. Every keyboard feeds the one
 //! consumer, as `kbdmux` merges FreeBSD's.
 //!
+//! A keyboard with an evdev device reports there too, as it goes: keys
+//! as they are pressed and released (and repeated, which evdev reports
+//! as such), the end of each report, and lock LED changes. While a
+//! client has grabbed the evdev device, the keyboard's keys go only
+//! there. `kbdmux0` has its evdev device as well, silent under
+//! FreeBSD's default `kern.evdev.rcpt_mask`.
+//!
 //! Behavior reference: sys/dev/kbd/kbd.c, sys/dev/kbdmux/kbdmux.c,
 //! sys/dev/hid/hkbd.c.
 
@@ -28,6 +35,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+use abi::evdev::{BUS_VIRTUAL, EV_KEY, EV_LED, EV_REP, InputId, LED_CAPSL, LED_NUML, LED_SCROLLL};
 use sched::{Sleepable, WaitQueue};
 use sync::SpinLock;
 
@@ -67,6 +75,7 @@ pub struct Keyboard {
     name: String,
     state: SpinLock<State>,
     leds: Box<dyn Fn(Leds) + Send + Sync>,
+    evdev: Option<Arc<evdev::Device>>,
     gone: AtomicBool,
 }
 
@@ -116,6 +125,8 @@ struct Class {
     started: AtomicBool,
     /// `kbd0` is `kbdmux0`.
     next_index: AtomicU32,
+    /// `kbdmux0`'s evdev device.
+    mux_evdev: SpinLock<Option<Arc<evdev::Device>>>,
 }
 
 static CLASS: Class = Class {
@@ -124,6 +135,7 @@ static CLASS: Class = Class {
     consumer: SpinLock::new(None),
     started: AtomicBool::new(false),
     next_index: AtomicU32::new(1),
+    mux_evdev: SpinLock::new(None),
 };
 
 /// Sets where typed bytes go.
@@ -132,13 +144,13 @@ pub fn set_consumer(c: Arc<dyn Consumer>) {
 }
 
 /// Brings up `kbdmux0` and the class's thread, as FreeBSD's `kbdmux`
-/// registers itself at boot, before any keyboard attaches. Call once the
-/// device manager is up; [`attach`] calls it too.
+/// registers itself at boot, before any keyboard attaches. Call once,
+/// once the device manager and evdev are up.
 ///
 /// # Errors
 ///
 /// If the class's thread cannot start.
-pub fn start() -> Result<(), sched::SpawnError> {
+pub fn start(s: &Sleepable) -> Result<(), sched::SpawnError> {
     if CLASS.started.swap(true, Ordering::AcqRel) {
         return Ok(());
     }
@@ -150,24 +162,33 @@ pub fn start() -> Result<(), sched::SpawnError> {
         return Err(e);
     }
     bus::manager().log(format_args!("kbd0 at kbdmux0"));
+    // `kbdmux_init`'s evdev device.
+    let mut b = evdev::Builder::new("System keyboard multiplexer");
+    b.phys("kbdmux0").id(InputId {
+        bustype: BUS_VIRTUAL,
+        ..InputId::default()
+    });
+    b.event(EV_KEY).event(EV_LED).event(EV_REP);
+    for &k in evdev::keys::KNOWN_KEYS {
+        b.key(k);
+    }
+    b.led(LED_NUML).led(LED_CAPSL).led(LED_SCROLLL);
+    *CLASS.mux_evdev.lock() = b.register(s).ok();
     Ok(())
 }
 
 /// Registers a keyboard: `name` is its driver instance (`hkbd0`), `leds`
-/// what to call when the lock LEDs change. Logs FreeBSD's `kbdN at
-/// hkbd0`.
-///
-/// # Errors
-///
-/// If the class's thread cannot start.
+/// what to call when the lock LEDs change, `evdev` its evdev device.
+/// Logs FreeBSD's `kbdN at hkbd0`. Keys typed before [`start`] wait
+/// for it.
 pub fn attach(
     name: &str,
     leds: impl Fn(Leds) + Send + Sync + 'static,
-) -> Result<Arc<Keyboard>, sched::SpawnError> {
-    start()?;
+    evdev: Option<Arc<evdev::Device>>,
+) -> Arc<Keyboard> {
     let index = CLASS.next_index.fetch_add(1, Ordering::Relaxed);
     bus::manager().log(format_args!("kbd{index} at {name}"));
-    Ok(Arc::new(Keyboard {
+    Arc::new(Keyboard {
         index,
         name: String::from(name),
         state: SpinLock::new(State {
@@ -175,19 +196,65 @@ pub fn attach(
             ..State::default()
         }),
         leds: Box::new(leds),
+        evdev,
         gone: AtomicBool::new(false),
-    }))
+    })
 }
+
+/// The receivers bit hardware keyboards report under.
+const RCPT: i32 = evdev::RCPT_HW_KBD;
 
 impl Keyboard {
     /// Reports key `usage` (HID keyboard page) pressed or released.
     /// Callable from completion context: it only queues.
     pub fn key(self: &Arc<Self>, usage: u16, down: bool) {
+        if let Some(e) = &self.evdev {
+            if evdev::receives(RCPT) {
+                let code = u8::try_from(usage).map_or(0, evdev::keys::hid2key);
+                e.push_key(code, down);
+            }
+            if e.is_grabbed() {
+                return;
+            }
+        }
         CLASS
             .events
             .lock()
             .push_back((Arc::clone(self), usage, down));
         CLASS.queue.wake_all();
+    }
+
+    /// A report ended: its keys go to evdev clients as one report.
+    pub fn sync(&self) {
+        if let Some(e) = &self.evdev
+            && evdev::receives(RCPT)
+        {
+            e.sync();
+        }
+    }
+
+    /// A held key repeats: evdev reports it so.
+    fn repeat_evdev(&self, usage: u16) {
+        if let Some(e) = &self.evdev
+            && evdev::receives(RCPT)
+        {
+            let code = u8::try_from(usage).map_or(0, evdev::keys::hid2key);
+            e.push_key(code, true);
+            e.sync();
+        }
+    }
+
+    /// The lock LEDs changed (`evdev_push_leds`, which ends no report).
+    fn leds_evdev(&self, leds: Leds) {
+        if let Some(e) = &self.evdev {
+            for (code, on) in [
+                (LED_NUML, leds.num),
+                (LED_CAPSL, leds.caps),
+                (LED_SCROLLL, leds.scroll),
+            ] {
+                let _ = e.push(EV_LED, code, i32::from(on));
+            }
+        }
     }
 
     /// The keyboard is going away: its held keys stop repeating.
@@ -225,6 +292,7 @@ impl Keyboard {
                     let leds = st.leds();
                     drop(st);
                     (self.leds)(leds);
+                    self.leds_evdev(leds);
                 }
                 (None, None)
             }
@@ -288,6 +356,7 @@ fn thread(s: &Sleepable) {
                 held = None;
             } else if wait_ms == 0 {
                 let _ = k.apply(*usage, true, &mut out);
+                k.repeat_evdev(*usage);
                 wait_ms = RATE_MS;
             }
         }
