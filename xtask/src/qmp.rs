@@ -384,7 +384,6 @@ impl Ppm {
     }
 
     /// The pixel at `(x, y)`.
-    #[cfg(test)]
     pub(crate) fn pixel(&self, x: usize, y: usize) -> Option<[u8; 3]> {
         if x >= self.width || y >= self.height {
             return None;
@@ -392,10 +391,53 @@ impl Ppm {
         let i = (y * self.width + x) * 3;
         Some([self.rgb[i], self.rgb[i + 1], self.rgb[i + 2]])
     }
+
+    /// The text on a `vt` screen in the built-in font, a line a row with
+    /// trailing blanks cut: the text area is centered as `vt` lays it out
+    /// (`vt_compute_drawable_area`), and each cell is matched against the
+    /// font's glyphs, in any colors, reversed too (the cursor). A cell no
+    /// glyph matches reads as `\u{fffd}`.
+    pub(crate) fn text(&self) -> Vec<String> {
+        let (fw, fh) = (font::WIDTH, font::HEIGHT);
+        let mut glyphs = std::collections::HashMap::new();
+        for c in (' '..='~').rev() {
+            glyphs.insert(*font::glyph(c), c);
+        }
+        let (cols, rows) = (self.width / fw, self.height / fh);
+        let (x0, y0) = ((self.width % fw) / 2, (self.height % fh) / 2);
+        (0..rows)
+            .map(|r| {
+                let line: String = (0..cols)
+                    .map(|c| {
+                        let (x, y) = (x0 + c * fw, y0 + r * fh);
+                        // The last column and row of a cell are blank in
+                        // every glyph but box drawing: its background.
+                        let bg = self.pixel(x + fw - 1, y + fh - 1);
+                        let mut ink = [0u8; font::HEIGHT];
+                        for (dy, row) in ink.iter_mut().enumerate() {
+                            for dx in 0..fw {
+                                if self.pixel(x + dx, y + dy) != bg {
+                                    *row |= 0x80 >> dx;
+                                }
+                            }
+                        }
+                        let reversed = ink.map(|b| !b);
+                        glyphs
+                            .get(&ink)
+                            .or_else(|| glyphs.get(&reversed))
+                            .copied()
+                            .unwrap_or('\u{fffd}')
+                    })
+                    .collect();
+                line.trim_end().to_string()
+            })
+            .collect()
+    }
 }
 
 /// `cargo xtask qmp --sock SOCK [--device ID] [--type TEXT] [--move DX,DY]
-/// [--abs X,Y] [--screendump FILE] [--unplug ID]`.
+/// [--abs X,Y] [--screendump FILE] [--unplug ID]`. A screen dumped is
+/// also printed as text.
 pub(crate) fn cmd(mut args: Args) -> Result<()> {
     let sock = PathBuf::from(args.take_value("--sock")?.ok_or("qmp needs --sock SOCK")?);
     let text = args.take_value("--type")?;
@@ -457,6 +499,9 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
             img.height,
             img.lit()
         );
+        for line in img.text() {
+            println!("{line}");
+        }
     }
     Ok(())
 }
@@ -464,6 +509,43 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A screen of `w` by `h` pixels with `lines` drawn as `vt` draws
+    /// them, the cell at `cursor` reversed.
+    fn screen(w: usize, h: usize, lines: &[&str], cursor: (usize, usize)) -> Ppm {
+        let (bg, fg) = ([0, 0, 0xaa], [0xaa, 0xaa, 0xaa]);
+        let mut rgb: Vec<u8> = std::iter::repeat_n(bg, w * h).flatten().collect();
+        let (x0, y0) = ((w % font::WIDTH) / 2, (h % font::HEIGHT) / 2);
+        for (r, line) in lines.iter().enumerate() {
+            for (c, ch) in line.chars().enumerate() {
+                let g = font::glyph(ch);
+                for (dy, bits) in g.iter().enumerate() {
+                    for dx in 0..font::WIDTH {
+                        let on = (bits & (0x80 >> dx) != 0) != ((r, c) == cursor);
+                        let (x, y) = (x0 + c * font::WIDTH + dx, y0 + r * font::HEIGHT + dy);
+                        let i = (y * w + x) * 3;
+                        rgb[i..i + 3].copy_from_slice(if on { &fg } else { &bg });
+                    }
+                }
+            }
+        }
+        Ppm {
+            width: w,
+            height: h,
+            rgb,
+        }
+    }
+
+    #[test]
+    fn screen_text_reads_back() {
+        let img = screen(
+            8 * 20 + 5,
+            16 * 3 + 9,
+            &["# echo USB-$((6*7))", "USB-42", "# "],
+            (2, 2),
+        );
+        assert_eq!(img.text(), ["# echo USB-$((6*7))", "USB-42", "#"]);
+    }
 
     #[test]
     fn letters_digits_and_shift() {

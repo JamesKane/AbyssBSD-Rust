@@ -161,6 +161,9 @@ pub(crate) fn init() {
     // SAFETY: boot runs in the first kernel thread, which may sleep.
     let s = unsafe { Sleepable::assume() };
     let (root, root_disk) = mount_root(&s);
+    if let Some(line) = crate::console::dual_report() {
+        kprintln!("{line}");
+    }
     let ns = match Namespace::new(&s, root) {
         Ok(ns) => ns,
         Err(e) => {

@@ -1324,7 +1324,7 @@ U.0 ─► U.1 ─► U.2 ─┬─► U.3 ─► U.4 ─┬─► U.6
 - The framebuffer maps through `ttyv*` for X's `scfb` (`vt_fb_mmap`): device objects in `sys/vm`
   (the device pager's, write-combining) and `d_mmap` through the tty layer.
 
-**U.5 USB mass storage.**
+**U.5 USB mass storage.** Done 2026-10-24.
 - `umass` over Bulk-Only Transport, and UAS (streams on USB 3, the command and status pipes on
   USB 2), on a small SCSI layer (`INQUIRY`, `TEST UNIT READY`, `REQUEST SENSE`, `READ CAPACITY`,
   `READ`/`WRITE` (10 and 16), `SYNCHRONIZE CACHE`) that publishes `da*` disks to the storage class.
@@ -1341,8 +1341,20 @@ U.0 ─► U.1 ─► U.2 ─┬─► U.3 ─► U.4 ─┬─► U.6
   detached in a ktest) fails its I/O without a panic and is unmounted forcibly, as FreeBSD's
   `ffs_fsfail_cleanup` does.
 
-**U.6 Exit.**
+**U.6 Exit.** QEMU exit met 2026-10-24.
 - The QEMU exit above, in the boot tier on both arches and bhyve, and the suite's verdict.
+- Every boot-tier machine now has the USB and input set (`--no-usb` drops it). The new
+  `<arch>-console` cases boot with `boot_multicons=YES`, so `/rescue/sh` is on `ttyv0`
+  (`/dev/console` follows FreeBSD's `boothowto` rules, USB.md §7.4). Over QMP, the USB keyboard
+  alone types `echo` and then `exit`, which powers the machine off. The virtio keyboard types
+  too, and the USB mouse's evdev node is read while QMP moves it. Each result is read back from a
+  `screendump`, cell by cell against the console font. UFS2 with soft updates passes fsx and
+  `fsck_ffs` on the Bulk-Only disk, on UAS over streams, and on UAS over USB 2 (ktest
+  `ufs_on_usb_disks`). bhyve's `xhci,tablet` tree matches FreeBSD's recording. All twelve
+  boot-tier cases pass on the build server.
+- Suite verdict: `vt` text output takes 0.695 of FreeBSD 15.1's time (U.4), inside the gate. USB
+  mass-storage throughput joins the suite on the physical machines at P6, with the hardware half
+  of this exit.
 
 **Performance** ([ADR-0015](adr/0015-usb-input-vt.md)). The track adds a component that can be
 measured fairly before hardware: `vt` text output (a `cat` of a large text file to `ttyv0`,

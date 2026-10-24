@@ -3,7 +3,8 @@
 //! written together, and mirrored into the persistent log ring that the
 //! loader saves to the ESP on the next boot.
 //!
-//! The serial port is also the console terminal's (`ttyu0`): the `uart`
+//! The serial port is also a terminal (`ttyu0`), the console's unless
+//! `vt`'s first window is (see [`howto`]): the `uart`
 //! driver on the same registers takes its interrupt, and through
 //! [`PORT`] has received bytes moved to a small buffer in the filter and
 //! on to the terminal in the interrupt thread. Terminal output is written
@@ -305,6 +306,9 @@ pub(crate) fn init(info: &BootInfo) {
     let mut c = CONSOLE.lock();
     c.serial = serial;
     c.fb_info = fb.is_some().then_some(fb_info).flatten();
+    if c.fb_info.is_some() {
+        VIDEO.store(true, core::sync::atomic::Ordering::Relaxed);
+    }
     c.fb = fb;
     c.ring = ring;
     drop(c);
@@ -314,10 +318,71 @@ pub(crate) fn init(info: &BootInfo) {
     }
 }
 
-/// Whether the loader found a serial console, which is then the
-/// console terminal's (FreeBSD's `comconsole` ahead of `vidconsole`).
+/// Whether the loader found a serial console.
 pub(crate) fn has_serial() -> bool {
     SERIAL_AT.get().is_some()
+}
+
+/// Whether the loader found a framebuffer, for `vt`.
+static VIDEO: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// The console bits of FreeBSD's `boothowto`: `RB_MULTIPLE` (every
+/// console, not just the best) and `RB_SERIAL` (the serial port is the
+/// best).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Howto {
+    pub(crate) multiple: bool,
+    pub(crate) serial: bool,
+}
+
+/// The console bits: from the loader variables `boot_multicons` and
+/// `boot_serial` if either is given (each set unless "no", as
+/// `boot_env_to_howto` reads them), else what FreeBSD's EFI loader infers
+/// from the consoles it found (`parse_uefi_con_out`): both, serial first;
+/// or the one found.
+pub(crate) fn howto() -> Howto {
+    let var = |k: &str| {
+        crate::boot::cmdline()
+            .split_ascii_whitespace()
+            .find_map(|w| match w.split_once('=') {
+                Some((key, v)) if key == k => Some(!v.eq_ignore_ascii_case("no")),
+                None if w == k => Some(true),
+                _ => None,
+            })
+    };
+    match (var("boot_multicons"), var("boot_serial")) {
+        (None, None) => {
+            let video = VIDEO.load(core::sync::atomic::Ordering::Relaxed);
+            Howto {
+                multiple: video && has_serial(),
+                serial: has_serial(),
+            }
+        }
+        (m, s) => Howto {
+            multiple: m.unwrap_or(false),
+            serial: s.unwrap_or(false),
+        },
+    }
+}
+
+/// Whether the serial port's terminal is the console's (`/dev/console`):
+/// FreeBSD's best console, `uart` at `CN_REMOTE` with `RB_SERIAL`, else
+/// `vt` at `CN_INTERNAL` ahead of `uart` at `CN_NORMAL`, if there is a
+/// framebuffer for it.
+pub(crate) fn serial_primary() -> bool {
+    has_serial() && (howto().serial || !VIDEO.load(core::sync::atomic::Ordering::Relaxed))
+}
+
+/// For dual consoles, which is the console's terminal, as FreeBSD reports
+/// it once the root is mounted.
+pub(crate) fn dual_report() -> Option<&'static str> {
+    howto().multiple.then(|| {
+        if serial_primary() {
+            "Dual Console: Serial Primary, Video Secondary"
+        } else {
+            "Dual Console: Video Primary, Serial Secondary"
+        }
+    })
 }
 
 /// Gives the framebuffer to `vt`, with what the early console showed

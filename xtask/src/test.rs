@@ -34,8 +34,12 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     let arches = Arch::from_args(&mut args)?;
     let release = args.take_flag("--release");
     let verbose = args.take_flag("--verbose");
-    // The USB and input devices on every boot-tier machine (U.0).
-    let usb = args.take_flag("--usb");
+    // The USB and input devices on every boot-tier machine (U.6);
+    // `--no-usb` leaves them out, for a quicker run.
+    let usb = !args.take_flag("--no-usb");
+    // One boot-tier case, by name (`x86_64-console`).
+    let only = args.take_value("--case")?;
+    let wanted = |name: &str| only.as_deref().is_none_or(|o| o == name);
     args.finish()?;
 
     if matches!(tier, Tier::Unit | Tier::All) {
@@ -44,7 +48,10 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     }
     if matches!(tier, Tier::Boot | Tier::All) {
         let mut failed = Vec::new();
-        for case in BOOT_CASES.iter().filter(|c| arches.contains(&c.arch)) {
+        for case in BOOT_CASES
+            .iter()
+            .filter(|c| arches.contains(&c.arch) && wanted(c.name))
+        {
             if !case.vmm.available(case.arch) {
                 println!(
                     "== boot tests ({}): skipped, needs a FreeBSD host",
@@ -67,6 +74,9 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
                     Vmm::Qemu => format!("{arch}-shell"),
                     Vmm::Bhyve => format!("{arch}-bhyve-shell"),
                 };
+                if !wanted(&name) {
+                    continue;
+                }
                 if !vmm.available(arch) {
                     if vmm == Vmm::Bhyve && arch == Arch::X86_64 {
                         println!("== boot tests ({name}): skipped, needs a FreeBSD host");
@@ -84,6 +94,20 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
                             "bhyve-shell"
                         });
                     }
+                }
+            }
+        }
+        for &arch in &arches {
+            let name = format!("{arch}-console");
+            if !wanted(&name) {
+                continue;
+            }
+            println!("== boot tests ({name}, Qemu)");
+            match console(arch, release)? {
+                Ok(()) => println!("{name}: PASS"),
+                Err(why) => {
+                    println!("{name}: FAIL: {why}");
+                    failed.push("console");
                 }
             }
         }
@@ -331,6 +355,122 @@ fn shell(
     };
     if verdict.is_err() {
         println!("{arch}-shell{suffix}: serial log at {}", log.display());
+    }
+    Ok(verdict)
+}
+
+/// The track's QEMU exit (ROADMAP U.6): `/rescue/sh` on `ttyv0` (the
+/// video console primary, `boot_multicons`), driven entirely by the USB
+/// keyboard over QMP and read back from the screen, with the virtio
+/// keyboard and the USB mouse (its evdev node, found by name) working
+/// too; `exit` typed on the USB keyboard powers the machine off.
+fn console(arch: Arch, release: bool) -> Result<std::result::Result<(), String>> {
+    let opts = build::Options {
+        release,
+        ktest: false,
+    };
+    let disk = image::build(arch, opts, "abyss.verifier=1 boot_multicons=YES")?;
+    let disk = {
+        let copy = disk.with_file_name("disk-console.img");
+        std::fs::copy(&disk, &copy)?;
+        copy
+    };
+    let log = disk.with_file_name("console.log");
+    let shot = disk.with_file_name("console.ppm");
+    let sock = disk.with_file_name("console.qmp");
+    let vm = Vm {
+        smp: 2,
+        usb: true,
+        qmp: Some(sock.clone()),
+        ..Vm::new(Vmm::Qemu, arch, disk)
+    };
+    let mut session = crate::expect::Session::start(vm, &log)?;
+    let mut screen = Vec::new();
+    let result = (|| -> Result<()> {
+        session.expect(
+            "Dual Console: Video Primary, Serial Secondary",
+            Duration::from_secs(300),
+        )?;
+        let mut q = crate::qmp::Qmp::connect(&sock)?;
+        // Until a line of the screen is `want` (or starts with it, for a
+        // `prefix`), doing `poke` between looks.
+        let mut until = |q: &mut crate::qmp::Qmp,
+                         want: &str,
+                         prefix: bool,
+                         poke: &mut dyn FnMut(&mut crate::qmp::Qmp) -> Result<()>|
+         -> Result<String> {
+            let deadline = std::time::Instant::now() + Duration::from_secs(90);
+            loop {
+                q.screendump(&shot)?;
+                screen = crate::qmp::Ppm::parse(&std::fs::read(&shot)?)?.text();
+                let hit = screen.iter().find(|l| {
+                    if prefix {
+                        l.starts_with(want) && l.len() > want.len()
+                    } else {
+                        *l == want
+                    }
+                });
+                if let Some(l) = hit {
+                    return Ok(l.clone());
+                }
+                if std::time::Instant::now() > deadline {
+                    return Err(format!("{want:?} never appeared on the screen").into());
+                }
+                poke(q)?;
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        };
+        let mut idle = |_: &mut crate::qmp::Qmp| Ok(());
+        // A prompt, once the shell runs and the keyboard is attached (the
+        // first one scrolls away under the USB devices' messages, as on
+        // FreeBSD with a memory-disk root, which waits for no bus).
+        let mut looks = 0;
+        until(&mut q, "#", false, &mut |q| {
+            looks += 1;
+            if looks % 6 == 0 {
+                q.type_text("\n", None)?;
+            }
+            Ok(())
+        })?;
+        q.type_text("echo USB-$((6*7))\n", None)?;
+        until(&mut q, "USB-42", false, &mut idle)?;
+        q.type_text("echo VIRTIO-$((6*7))\n", Some("video0"))?;
+        until(&mut q, "VIRTIO-42", false, &mut idle)?;
+        q.type_text(
+            "for n in 0 1 2 3 4 5 6 7 8 9; do \
+             [ \"$(/rescue/sysctl -n kern.evdev.input.$n.name 2>/dev/null)\" = \
+             \"QEMU QEMU USB Mouse\" ] && m=$n; done; echo MOUSE=$m\n",
+            None,
+        )?;
+        until(&mut q, "MOUSE=", true, &mut idle)?;
+        q.type_text(
+            "/rescue/dd if=/dev/input/event$m of=/dev/null bs=24 count=4 2>/dev/null \
+             && echo MOUSE-OK\n",
+            None,
+        )?;
+        until(&mut q, "MOUSE-OK", false, &mut |q| {
+            q.move_pointer(5, 5, None)
+        })?;
+        q.type_text("exit\n", None)?;
+        Ok(())
+    })();
+    let exited = session.finish(Duration::from_secs(120))?;
+    let verdict = match result {
+        Err(e) => Err(e.to_string()),
+        Ok(()) if !exited => Err("the machine did not power off after `exit`".into()),
+        Ok(()) => Ok(()),
+    };
+    if verdict.is_err() {
+        let text: Vec<&str> = screen
+            .iter()
+            .map(String::as_str)
+            .filter(|l| !l.is_empty())
+            .collect();
+        println!(
+            "{arch}-console: serial log at {}; the last screen:\n{}",
+            log.display(),
+            text.join("\n")
+        );
     }
     Ok(verdict)
 }

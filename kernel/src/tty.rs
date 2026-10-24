@@ -145,10 +145,13 @@ static TTYS: SpinLock<Vec<Arc<Tty>>> = SpinLock::new(Vec::new());
 /// The console's terminal.
 static CONSOLE: Once<Arc<Tty>> = Once::new();
 
-/// Makes the console's terminal `ttyu<unit>`, which writes with `sink`.
+/// Makes the serial console's terminal `ttyu<unit>`, which writes with
+/// `sink`: the console's terminal too, if the serial port is primary.
 pub(crate) fn create_console(unit: u32, sink: fn(&[u8])) -> Arc<Tty> {
     let tty = create(&alloc::format!("ttyu{unit}"), Arc::new(Sink(sink)));
-    set_console(&tty);
+    if crate::console::serial_primary() {
+        set_console(&tty);
+    }
     tty
 }
 

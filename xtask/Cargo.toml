@@ -9,6 +9,7 @@ publish.workspace = true
 abi = { path = "../lib/abi" }
 crc = { path = "../lib/crc" }
 fat = { path = "../lib/fat" }
+font = { path = "../lib/font" }
 gpt = { path = "../lib/gpt" }
 guid = { path = "../lib/guid" }
 ktest = { path = "../lib/ktest" }

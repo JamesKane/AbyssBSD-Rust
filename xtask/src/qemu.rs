@@ -107,6 +107,9 @@ pub(crate) struct Vm {
     /// The USB and input set ([`USB_SLOT`] on bhyve, [`Vm::usb_args`] on
     /// QEMU).
     pub(crate) usb: bool,
+    /// QEMU: a QMP socket at this path, to type and read the screen
+    /// through ([`crate::qmp`]).
+    pub(crate) qmp: Option<PathBuf>,
 }
 
 /// bhyve's xHCI slot: its only USB device is a tablet.
@@ -169,17 +172,13 @@ pub(crate) fn cmd_run(mut args: Args) -> Result<()> {
         display,
         el2,
         usb,
+        qmp: qmp.as_ref().map(PathBuf::from),
         ..Vm::new(vmm, arch, disk)
     };
 
     let mut cmd = vm.command()?;
     if vmm == Vmm::Qemu {
         cmd.arg("-serial").arg("mon:stdio");
-        if let Some(sock) = &qmp {
-            let _ = fs::remove_file(sock);
-            cmd.arg("-qmp")
-                .arg(format!("unix:{sock},server=on,wait=off"));
-        }
     } else if qmp.is_some() {
         return Err("--qmp needs QEMU".into());
     }
@@ -254,6 +253,7 @@ impl Vm {
             machine: None,
             devices: Vec::new(),
             usb: false,
+            qmp: None,
         }
     }
 
@@ -411,6 +411,11 @@ impl Vm {
             c.args(self.usb_args()?);
         }
         c.args(["-nic", "none"]);
+        if let Some(sock) = &self.qmp {
+            let _ = fs::remove_file(sock);
+            c.arg("-qmp")
+                .arg(format!("unix:{},server=on,wait=off", sock.display()));
+        }
         if !self.allow_reset {
             c.arg("-no-reboot");
         }

@@ -195,7 +195,7 @@ pub(crate) fn start() {
             t
         })
         .collect();
-    if !crate::console::has_serial() {
+    if !crate::console::serial_primary() {
         tty::set_console(&ttys[vt::CONSWINDOW]);
     }
     let _ = TTYS.set(ttys);

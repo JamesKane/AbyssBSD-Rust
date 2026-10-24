@@ -222,6 +222,16 @@ symbolized backtrace, and checks the VMM's exit status:
 | `aarch64-warm-reset`, `x86_64-warm-reset` | QEMU, two boots | the loader saved the first boot's log to `EFI/ABYSS/PREVLOG.TXT` |
 | `x86_64-bhyve` | bhyve + `BHYVE_UEFI` (FreeBSD hosts only; skipped elsewhere) | power-off through UEFI runtime services |
 
+After these come the shell cases (`x86_64-shell`, `aarch64-shell`, `x86_64-bhyve-shell`, above), and
+`x86_64-console` and `aarch64-console`: a normal kernel with `boot_multicons=YES`, so
+`/rescue/sh` is on `ttyv0`, driven over QMP by the USB keyboard alone and read back from the
+screen (`screendump`, each cell matched against the console font). It also types on the virtio
+keyboard, reads a USB mouse's evdev node while QMP moves it, and types `exit`, which must power
+the machine off.
+
+Every machine in the boot tier has the USB and input set ([USB.md](USB.md) §9; bhyve's
+`xhci,tablet`). `--no-usb` leaves it out for a quicker run, and `--case NAME` runs one case.
+
 ### Rules
 
 - Tests are deterministic. Time, randomness, and SMP interleavings are seeded and logged.

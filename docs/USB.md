@@ -353,9 +353,14 @@ burst of output costs one redraw. The font is 8×16 (FreeBSD's default `vt` font
 
 Kernel messages go to the serial port and to window 0 (`VT_CONSWINDOW`) in the kernel rendition,
 each NL written as CR NL (`cnputc`), as on FreeBSD with both consoles. What the early console
-showed before `vt` started becomes window 0's first screen. `/dev/console` is the serial port's
-terminal (`ttyu0`) when the loader found one, and `ttyv0` otherwise, as FreeBSD's `comconsole`
-comes before `vidconsole`; its output goes to that terminal alone. The keyboard types into the
+showed before `vt` started becomes window 0's first screen. `/dev/console` is the best console's
+terminal, as `cninit` picks it from `boothowto`: the serial port's (`ttyu0`) with `RB_SERIAL`, else
+`ttyv0`, if there is a framebuffer. The bits come from the loader variables `boot_serial` and
+`boot_multicons` on the command line (each set unless "no"), or else as FreeBSD's EFI loader
+infers them from the consoles found: both, serial first (`RB_MULTIPLE | RB_SERIAL`, so QEMU and
+bhyve boot with the serial port primary). With `RB_MULTIPLE` the kernel reports `Dual Console:
+Serial Primary, Video Secondary` (or the reverse) once the root is mounted. The console's output
+goes to its terminal alone. The keyboard types into the
 visible window's terminal. Panics write to window 0 and draw at once, if the code that panicked
 holds none of `vt`'s locks.
 
@@ -457,7 +462,11 @@ ready, `BUSY`/`TASK SET FULL`, and a broken transport once recovered. LUNs come 
   `usb-mouse`, a `usb-hub`, `usb-storage`, two `usb-uas` (one at SuperSpeed with two LUNs, one on a
   USB 2-only port, so without streams), and `virtio-keyboard`/`virtio-tablet`. Tests
   check the device tree and names against FreeBSD's capture, type into `ttyv0` over QMP, and read the
-  screen back with `screendump`. bhyve's `xhci,tablet` on amd64. The virtio devices are bound to the
+  screen back with `screendump`. The `<arch>-console` cases boot with `boot_multicons=YES` (the
+  video console primary, so `/rescue/sh` is on `ttyv0`) and drive the shell with the USB keyboard
+  alone, reading each result from the screen, where every cell is matched against the console
+  font: `echo` typed on the USB keyboard, then on the virtio one, then the USB mouse's evdev node
+  (found by its `kern.evdev.input.N.name`) read with `dd` while QMP moves it, then `exit`. bhyve's `xhci,tablet` on amd64. The virtio devices are bound to the
   display (`video0`), so QMP input goes to the USB devices unless it names the display
   (`cargo xtask qmp --device video0`).
 - **Storage.** The ktest `ufs_on_usb_disks`: the UFS2 read-write workload with soft updates, fsx
