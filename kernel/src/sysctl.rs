@@ -121,6 +121,16 @@ pub(crate) fn init() {
         "System architecture",
         Value::text(MACHINE_ARCH),
     );
+    // `kern.vty`: the console's terminal driver, which `kbdcontrol` and
+    // `vidcontrol` check for `vt`.
+    t.add_value(
+        k,
+        Number::Auto,
+        "vty",
+        "Console vty driver",
+        Value::text("vt"),
+    )
+    .expect("kern.vty");
     let vt = t
         .add_node(k, Number::Auto, "vt", "vt(4) parameters")
         .expect("kern.vt node");

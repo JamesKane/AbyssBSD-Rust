@@ -1318,9 +1318,11 @@ U.0 ─► U.1 ─► U.2 ─┬─► U.3 ─► U.4 ─┬─► U.6
   fonts). Since 2026-10-24: fonts per window (`PIO_VFONT`, so `vidcontrol -f`),
   `CONS_SETKBD`/`CONS_RELKBD`, `KDENABIO`, the `FBIO_*` requests, and the bell (devctl
   `VT BELL RING`, `kern.vt.enable_bell`, the PC speaker on amd64).
-- Left, for P6: running `kbdcontrol` and `vidcontrol` themselves (they are dynamically linked;
-  `tests/user/vt.c` makes their requests meanwhile, and passes on FreeBSD 15.1), and mapping the
-  framebuffer through `ttyv*` for X's `scfb` (`vt_fb_mmap`, which needs a device pager).
+- `kbdcontrol` and `vidcontrol` run: built static from FreeBSD's sources onto the memory disk until
+  dynamic linking (P6) lets base's own run, `tests/user/vtools.c` loads a font, the history size,
+  colors, a keymap, and the repeat rate with them, and passes on FreeBSD 15.1 with base's.
+- Left, for P6: mapping the framebuffer through `ttyv*` for X's `scfb` (`vt_fb_mmap`, which needs
+  a device pager).
 
 **U.5 USB mass storage.**
 - `umass` over Bulk-Only Transport, and UAS (streams on USB 3, the command and status pipes on

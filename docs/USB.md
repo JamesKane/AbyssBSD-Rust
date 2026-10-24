@@ -397,6 +397,10 @@ Implemented (`sys/vt`, `kernel/src/vtcons.rs`):
   not quieted (`CONS_BELLTYPE`), and with a pitch: the console window's is 800 Hz for 50 ms, the
   others' none until the cons25 `ESC [ = p ; d B`. On amd64 it sounds on the PC speaker through
   the i8254's counter 2 (`sysbeep`); arm64 has none (`ENODEV`).
+- `kbdcontrol` and `vidcontrol`, built static from FreeBSD's sources onto the memory disk (P6's
+  dynamic linking will run base's own), with `kern.vty` reading `vt` as they check:
+  `tests/user/vtools.c` runs them for a font, the history size, colors, a keymap, the repeat rate,
+  and the keyboard's information, and checks each through the requests.
 - Later: mapping the frame buffer through `ttyv*` (`vt_fb_mmap`, for X's `scfb`), which needs a
   device pager, at P6 with X.
 

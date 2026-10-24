@@ -407,11 +407,62 @@ fn cc_static_program(arch: Arch, sources: &[&Path], args: &[String], out: &Path)
     )
 }
 
+/// `kbdcontrol` (its scanner made by `lex`) and `vidcontrol`, built
+/// static into `out` when stale; none without the FreeBSD tree.
+fn console_tools(
+    arch: Arch,
+    out: &Path,
+    built_by: Option<std::time::SystemTime>,
+) -> Result<Vec<(&'static str, PathBuf)>> {
+    let src = util::root().join("../freebsd-src/usr.sbin");
+    if !src.join("kbdcontrol").exists() {
+        return Ok(Vec::new());
+    }
+    let fresh = |bin: &Path, dir: &Path| -> Result<bool> {
+        let Ok(b) = fs::metadata(bin).and_then(|m| m.modified()) else {
+            return Ok(false);
+        };
+        let mut newest = built_by.unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        for e in fs::read_dir(dir)? {
+            newest = newest.max(e?.metadata()?.modified()?);
+        }
+        Ok(newest <= b)
+    };
+    let kbd = src.join("kbdcontrol");
+    let kbdcontrol = out.join("kbdcontrol");
+    if !fresh(&kbdcontrol, &kbd)? {
+        let lex = out.join("kbdcontrol-lex.c");
+        util::run(
+            Command::new("lex")
+                .arg("-o")
+                .arg(&lex)
+                .arg(kbd.join("lex.l")),
+        )?;
+        let main = kbd.join("kbdcontrol.c");
+        let args = [
+            format!("-I{}", kbd.display()),
+            // As its Makefile builds it.
+            "-DCOMPAT_FREEBSD13".into(),
+        ];
+        cc_static_program(arch, &[&main, &lex], &args, &kbdcontrol)?;
+    }
+    let vid = src.join("vidcontrol");
+    let vidcontrol = out.join("vidcontrol");
+    if !fresh(&vidcontrol, &vid)? {
+        let sources = [vid.join("vidcontrol.c"), vid.join("decode.c")];
+        let refs: Vec<&Path> = sources.iter().map(PathBuf::as_path).collect();
+        cc_static_program(arch, &refs, &[format!("-I{}", vid.display())], &vidcontrol)?;
+    }
+    Ok(vec![("kbdcontrol", kbdcontrol), ("vidcontrol", vidcontrol)])
+}
+
 /// The parts of the FreeBSD tree beside this one that third-party
 /// programs built here come from (they are never kept here); the remote
 /// mirror copies them beside its tree.
 pub(crate) const FREEBSD_SOURCES: &[&str] = &[
     "tools/regression/fsx",
+    "usr.sbin/kbdcontrol",
+    "usr.sbin/vidcontrol",
     "usr.bin/find",
     "contrib/mtree",
     "contrib/mknod",
@@ -816,6 +867,22 @@ pub(crate) fn md_image(arch: Arch, extra: &[(&str, &Path)]) -> Result<Option<Vec
         }
         append(&mut md, "usr/tests/fsx/", b'5', 0o755, &[])?;
         append(&mut md, "usr/tests/fsx/fsx", b'0', 0o555, &fs::read(&bin)?)?;
+    }
+    // FreeBSD's `kbdcontrol` and `vidcontrol`, built static from the
+    // FreeBSD tree beside this one until dynamic linking (P6) lets base's
+    // own run, for `tests/user/vtools.c`.
+    let console_tools = console_tools(arch, &out_dir, built_by)?;
+    if !console_tools.is_empty() {
+        append(&mut md, "usr/sbin/", b'5', 0o755, &[])?;
+    }
+    for (name, bin) in console_tools {
+        append(
+            &mut md,
+            &format!("usr/sbin/{name}"),
+            b'0',
+            0o555,
+            &fs::read(&bin)?,
+        )?;
     }
     // FreeBSD's view of the FAT test disk, likewise.
     if crate::fattest::file(crate::fattest::FAT_TEST[1]).is_some() {
