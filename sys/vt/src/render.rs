@@ -68,6 +68,10 @@ pub struct Renderer {
     y0: u32,
     cmap: [u32; 16],
     drawn: Vec<Drawn>,
+    /// The four pixels of each nibble of a glyph row, for the colors
+    /// last drawn in.
+    lut: [[u32; 4]; 16],
+    lut_colors: (u8, u8),
 }
 
 impl Renderer {
@@ -93,6 +97,8 @@ impl Renderer {
             size: Pos::new(rows, cols),
             cmap,
             drawn: vec![NOTHING; ix(rows) * ix(cols)],
+            lut: [[0; 4]; 16],
+            lut_colors: (16, 16),
             display,
         })
     }
@@ -161,19 +167,26 @@ impl Renderer {
         } else {
             char::from_u32(ch).map_or(font::replacement_glyph(), font::glyph)
         };
-        let (fgc, bgc) = (
-            self.cmap[usize::from(fg & 15)],
-            self.cmap[usize::from(bg & 15)],
-        );
+        if self.lut_colors != (fg, bg) {
+            let (fgc, bgc) = (
+                self.cmap[usize::from(fg & 15)],
+                self.cmap[usize::from(bg & 15)],
+            );
+            for (n, px) in self.lut.iter_mut().enumerate() {
+                for (i, p) in px.iter_mut().enumerate() {
+                    *p = if n & (8 >> i) != 0 { fgc } else { bgc };
+                }
+            }
+            self.lut_colors = (fg, bg);
+        }
         let stride = ix(self.display.stride);
         let x = ix(self.x0 + col * FONT_WIDTH);
         let y = ix(self.y0 + row * FONT_HEIGHT);
         for (dy, &bits) in bitmap.iter().enumerate() {
             let at = (y + dy) * stride + x;
             let line = &mut self.display.pixels[at..at + font::WIDTH];
-            for (dx, px) in line.iter_mut().enumerate() {
-                *px = if bits & (0x80 >> dx) != 0 { fgc } else { bgc };
-            }
+            line[..4].copy_from_slice(&self.lut[usize::from(bits >> 4)]);
+            line[4..].copy_from_slice(&self.lut[usize::from(bits & 15)]);
         }
     }
 }

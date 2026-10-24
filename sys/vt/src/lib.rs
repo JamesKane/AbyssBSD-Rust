@@ -32,8 +32,9 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use abi::consio::{VT_AUTO, VT_PROCESS, VtMode};
 use abi::errno::Errno;
 use abi::kbio::{K_XLATE, KDSKBMODE, KDSKBSTATE, LOCK_MASK};
+use sched::lock::{LockClass, Mutex};
 use sched::{Sleepable, WaitQueue};
-use sync::{Once, PreemptLock, SpinLock};
+use sync::{Once, SpinLock};
 use vtterm::{Cell, DEFAULT_HISTORY, Pos, Terminal};
 
 pub use ioctl::ioctl;
@@ -148,7 +149,9 @@ struct Vt {
     /// Drawing is held while nonzero.
     holds: AtomicU32,
     wake: WaitQueue,
-    renderer: PreemptLock<Frame>,
+    /// The flush thread's, and the panic path's: drawing sleeps no
+    /// one and stays preemptible.
+    renderer: Mutex<Frame>,
     size: Pos,
     pixels: (u32, u32),
     host: &'static dyn Host,
@@ -164,6 +167,9 @@ struct Frame {
 }
 
 static VT: Once<Vt> = Once::new();
+
+/// The renderer's lock: taken with nothing else held.
+static RENDERER: LockClass = LockClass::new("vt renderer", 960);
 
 /// Why [`start`] failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -200,10 +206,13 @@ pub fn start(display: Display, early: &[u8], host: &'static dyn Host) -> Result<
         invalid: AtomicBool::new(true),
         holds: AtomicU32::new(0),
         wake: WaitQueue::new(),
-        renderer: PreemptLock::new(Frame {
-            renderer,
-            view: Vec::new(),
-        }),
+        renderer: Mutex::new(
+            &RENDERER,
+            Frame {
+                renderer,
+                view: Vec::new(),
+            },
+        ),
         size,
         pixels,
         host,
@@ -221,7 +230,7 @@ pub fn start(display: Display, early: &[u8], host: &'static dyn Host) -> Result<
     }
     write_kernel(early);
     if let Some(vt) = VT.get() {
-        vt.flush(true);
+        vt.flush(None);
     }
     sched::Builder::new("vtflush")
         .priority(sched::Priority::KERNEL)
@@ -338,7 +347,7 @@ pub fn panic_write(bytes: &[u8]) {
             }
         }
     }
-    vt.flush(false);
+    vt.flush(None);
 }
 
 impl Vt {
@@ -537,26 +546,27 @@ impl Vt {
         }
     }
 
-    /// Draws the visible window's changes (`vt_flush`); with `wait`
-    /// false (the panic path), only if the locks are free.
-    fn flush(&self, wait: bool) {
+    /// Draws the visible window's changes (`vt_flush`). Without `s`
+    /// (at start, and on the panic path), only if the locks are free.
+    fn flush(&self, s: Option<&Sleepable>) {
         if self.holds.load(Ordering::Acquire) != 0 {
             return;
         }
-        let mut f = if wait {
-            self.renderer.lock()
-        } else {
-            let Some(f) = self.renderer.try_lock() else {
-                return;
-            };
-            f
+        let mut f = match s {
+            Some(s) => self.renderer.lock(s),
+            None => {
+                let Some(f) = self.renderer.try_lock() else {
+                    return;
+                };
+                f
+            }
         };
         let Frame { renderer, view } = &mut *f;
         let invalid = self.invalid.swap(false, Ordering::AcqRel);
         let cursor;
         {
             let w = &self.windows[self.active.load(Ordering::Acquire)];
-            let mut t = if wait {
+            let mut t = if s.is_some() {
                 w.lock()
             } else {
                 let Some(t) = w.try_lock() else {
@@ -592,7 +602,7 @@ fn thread(s: &Sleepable) {
             vt.dirty.load(Ordering::Acquire) || vt.state.lock().dead.is_some()
         });
         vt.dirty.store(false, Ordering::Release);
-        vt.flush(true);
+        vt.flush(Some(s));
         vt.check_dead();
         vt.host.sleep_ns(s, 1_000_000_000 / TIMERFREQ);
     }

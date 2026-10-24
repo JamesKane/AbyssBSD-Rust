@@ -430,8 +430,13 @@ ktest! {
             last = t;
         }
         // The kernel's own clock and the timehands agree to well under a
-        // microsecond plus the read gap.
-        let (a, b) = (to_ns(uptime()), crate::time::now_ns());
+        // microsecond plus the read gap; the closest of a few tries, as an
+        // interrupt (or, under emulation, a slow vCPU) can come between
+        // the two reads.
+        let (a, b) = (0..16)
+            .map(|_| (to_ns(uptime()), crate::time::now_ns()))
+            .min_by_key(|&(a, b)| a.abs_diff(b))
+            .unwrap_or_default();
         assert!(a.abs_diff(b) < 100_000, "timehands {a} ns, clock {b} ns");
         // The time of day moves with the uptime: each sample bounds the
         // boot time between two uptime reads, and the bounds overlap.
