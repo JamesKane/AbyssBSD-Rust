@@ -2,13 +2,14 @@
 # SPDX-License-Identifier: BSD-2-Clause
 #
 # CI hook for the build server's bare repository (docs/BUILD-AND-TEST.md §5).
-# Install as ~/abyss/repo.git/hooks/post-receive. Each push to main runs
-# `cargo xtask test` in a persistent work tree (so target/ is reused) and
-# writes ~/abyss/ci/<time>-<rev>.log ending in PASS or FAIL. The push
-# returns immediately (the job closes every descriptor git passed in);
-# runs are serialised with a lock file. A run that gets the lock after
-# main has moved on ends SUPERSEDED without testing: the newer push's run
-# covers it, so a burst of pushes costs one run.
+# Install as ~/abyss/repo.git/hooks/post-receive. CI runs at milestone
+# exits, not on every push: pushing a tag `exit/<milestone>` (exit/u6,
+# exit/p6) runs `cargo xtask test --tier all` on the tagged commit in a
+# persistent work tree (so target/ is reused) and writes
+# ~/abyss/ci/<time>-<milestone>-<rev>.log ending in PASS or FAIL. Pushes
+# to main only update the repository. The push returns immediately (the
+# job closes every descriptor git passed in); runs are serialised with a
+# lock file.
 
 ci="$HOME/abyss/ci"
 work="$HOME/abyss/ci-work"
@@ -17,13 +18,21 @@ repo="$(cd "${GIT_DIR:-.}" && pwd)"
 unset GIT_DIR
 mkdir -p "$ci"
 
+zero=0000000000000000000000000000000000000000
 while read -r _old new ref; do
-	[ "$ref" = "refs/heads/main" ] || continue
-	log="$ci/$(date +%Y%m%d-%H%M%S)-$(echo "$new" | cut -c1-12).log"
-	echo "ci: testing $new, log $log"
+	case "$ref" in
+	refs/tags/exit/*) ;;
+	*) continue ;;
+	esac
+	# A deleted tag tests nothing.
+	[ "$new" = "$zero" ] && continue
+	name="${ref#refs/tags/exit/}"
+	# An annotated tag names its commit.
+	rev="$(git --git-dir="$repo" rev-parse "$new^{commit}")"
+	log="$ci/$(date +%Y%m%d-%H%M%S)-$(echo "$name" | tr / -)-$(echo "$rev" | cut -c1-12).log"
+	echo "ci: exit $name: testing $rev, log $log"
 	nohup sh -c '
 		lockf -k "$1/.lock" sh -c "
-			[ \"\$(git --git-dir=\"$3\" rev-parse refs/heads/main)\" = \"$4\" ] || exit 3
 			set -e
 			[ -d \"$2/.git\" ] || git clone -q \"$3\" \"$2\"
 			cd \"$2\"
@@ -34,9 +43,8 @@ while read -r _old new ref; do
 		"
 		case $? in
 		0) echo PASS ;;
-		3) echo SUPERSEDED ;;
 		*) echo FAIL ;;
 		esac
-	' ci "$ci" "$work" "$repo" "$new" >"$log" 2>&1 </dev/null \
+	' ci "$ci" "$work" "$repo" "$rev" >"$log" 2>&1 </dev/null \
 		3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- &
 done
