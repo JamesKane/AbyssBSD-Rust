@@ -23,6 +23,7 @@ use arch_x86_64 as arch;
 mod console;
 mod acpi;
 mod acpi_bus;
+mod beep;
 #[cfg(not(feature = "ktest"))]
 mod bench;
 mod boot;
@@ -110,6 +111,7 @@ fn kmain(boot_info: PhysAddr) -> ! {
     prof::start_cpu();
     shared_page::init();
     sysctl::init();
+    beep::init();
     topology::record_this_cpu(hal::CpuId::BOOT);
     hal::irq::enable();
     // SAFETY: kmain is now a thread (`threads::init`) with interrupts

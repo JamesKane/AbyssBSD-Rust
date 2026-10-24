@@ -87,6 +87,26 @@ impl vt::Host for Host {
     fn io_access(&self, on: bool) -> Result<(), Errno> {
         crate::signal::io_access(on)
     }
+
+    fn enable_bell(&self) -> bool {
+        enable_bell()
+    }
+
+    fn notify(&self, system: &str, subsystem: &str, kind: &str, data: &str) {
+        bus::manager().notify(system, subsystem, kind, Some(data));
+    }
+
+    fn beep(&self, hz: u32, ms: u32) {
+        let _ = crate::beep::sysbeep(hz, u64::from(ms) * 1_000_000);
+    }
+}
+
+/// `kern.vt.enable_bell`, 0 unless the command line sets it (a tunable
+/// in FreeBSD).
+pub(crate) fn enable_bell() -> bool {
+    crate::boot::value("kern.vt.enable_bell")
+        .and_then(|v| v.parse::<i32>().ok())
+        .is_some_and(|v| v != 0)
 }
 
 /// A window's terminal size (`vt_winsize`).

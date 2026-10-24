@@ -2666,6 +2666,39 @@ mod user_memory {
     }
 
     ktest! {
+        /// A bell in a window's output goes to devctl as `vtterm_devctl`
+        /// reports it, with the window's pitch: the console window's is
+        /// 800 Hz for 50 ms, the others' none until `ESC [ = B`. Off by
+        /// default (`kern.vt.enable_bell`), it doesn't sound.
+        fn vt_bells_are_reported_to_devctl() {
+            let s = cx();
+            let bell = crate::sysctl::read(&s, |t| {
+                let oid = t.name2oid("kern.vt.enable_bell").expect("kern.vt.enable_bell");
+                let mut v = alloc::vec::Vec::new();
+                t.read(&oid, &mut v).expect("read");
+                v
+            });
+            assert_eq!(bell, 0i32.to_ne_bytes());
+            if vt::size(1).is_none() {
+                return;
+            }
+            let m = bus::manager();
+            let _ = m.take_events();
+            vt::write(1, b"\x07");
+            vt::write(0, b"\x07");
+            vt::write(1, b"no bell");
+            let events = m.take_events();
+            assert_eq!(
+                events,
+                [
+                    "!system=VT subsystem=BELL type=RING enabled=false hushed=false hz=0 duration_ms=0\n",
+                    "!system=VT subsystem=BELL type=RING enabled=false hushed=false hz=800 duration_ms=50\n",
+                ]
+            );
+        }
+    }
+
+    ktest! {
         /// Runs each program `tests/user/*.c` built into the memory disk;
         /// each checks something from user mode and exits 0 when it holds.
         fn user_test_programs_pass() {

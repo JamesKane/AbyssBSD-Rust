@@ -384,6 +384,14 @@ impl Manager {
         e.push_back(line);
     }
 
+    /// Queues a notification (`devctl_notify`): `!system=… subsystem=…
+    /// type=… data`.
+    pub fn notify(&self, system: &str, subsystem: &str, kind: &str, data: Option<&str>) {
+        let mut line = String::new();
+        let _ = devtree::devctl::notify(&mut line, system, subsystem, kind, data);
+        self.event(line);
+    }
+
     /// The devctl events so far (oldest first), consuming them.
     pub fn take_events(&self) -> Vec<String> {
         self.events.lock().drain(..).collect()

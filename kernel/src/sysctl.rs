@@ -121,6 +121,17 @@ pub(crate) fn init() {
         "System architecture",
         Value::text(MACHINE_ARCH),
     );
+    let vt = t
+        .add_node(k, Number::Auto, "vt", "vt(4) parameters")
+        .expect("kern.vt node");
+    t.add_value(
+        vt,
+        Number::Auto,
+        "enable_bell",
+        "Enable bell",
+        Value::int(i32::from(crate::vtcons::enable_bell())),
+    )
+    .expect("kern.vt.enable_bell");
     let abyss = t
         .add_node(k, Number::Auto, "abyss", "AbyssBSD extensions")
         .expect("kern.abyss node");

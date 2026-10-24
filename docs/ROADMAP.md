@@ -1301,7 +1301,7 @@ U.0 ─► U.1 ─► U.2 ─┬─► U.3 ─► U.4 ─┬─► U.6
   family, keymaps, LEDs, autorepeat) and evdev (`/dev/input/event*`, FreeBSD's evdev ABI, the
   `kern.evdev` sysctls).
 
-**U.4 Virtual terminals.**
+**U.4 Virtual terminals.** Done 2026-10-24, apart from two items that belong to P6 (see Left below).
 - `vt`: `ttyv0`–`ttyv7` on the framebuffer console, a terminal emulator that matches `teken`'s
   behavior as `TERM=xterm`, switching (Alt-F*n*), scrollback, the cursor, and the bell.
 - Kernel messages and `/dev/console` on `ttyv0` as well as the serial port. The ioctls `rc` and the
@@ -1315,10 +1315,12 @@ U.0 ─► U.1 ─► U.2 ─┬─► U.3 ─► U.4 ─┬─► U.6
   per-window keyboard modes, and the `VT_*`/`KD*`/`CONS_*` requests (USB.md §7). The `vt` suite
   (`cargo xtask --remote perf --suite vt`, 10 runs a side in bhyve) gives 0.695 of FreeBSD's time:
   `vt.cat` 0.642, `vt.color` 0.693, `vt.hidden` 0.668, `vt.scroll` 0.786, all wins (the same with
-  fonts). Since 2026-10-24: fonts per window (`PIO_VFONT`, so `vidcontrol -f`) and
-  `CONS_SETKBD`/`CONS_RELKBD`, `KDENABIO`, and the `FBIO_*` requests. Left: the bell (`devctl`),
-  mapping the framebuffer (X's `scfb`, P6), and `kbdcontrol`/`vidcontrol` runs at P6 (they are
-  dynamically linked).
+  fonts). Since 2026-10-24: fonts per window (`PIO_VFONT`, so `vidcontrol -f`),
+  `CONS_SETKBD`/`CONS_RELKBD`, `KDENABIO`, the `FBIO_*` requests, and the bell (devctl
+  `VT BELL RING`, `kern.vt.enable_bell`, the PC speaker on amd64).
+- Left, for P6: running `kbdcontrol` and `vidcontrol` themselves (they are dynamically linked;
+  `tests/user/vt.c` makes their requests meanwhile, and passes on FreeBSD 15.1), and mapping the
+  framebuffer through `ttyv*` for X's `scfb` (`vt_fb_mmap`, which needs a device pager).
 
 **U.5 USB mass storage.**
 - `umass` over Bulk-Only Transport, and UAS (streams on USB 3, the command and status pipes on

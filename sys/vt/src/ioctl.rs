@@ -192,7 +192,12 @@ impl Vt {
                     Ok(())
                 }
             }
-            CONS_BLANKTIME | CONS_MODEINFO | KDMKTONE | KIOCSOUND => Ok(()),
+            // `KIOCSOUND` is a TODO in FreeBSD.
+            CONS_BLANKTIME | CONS_MODEINFO | KIOCSOUND => Ok(()),
+            KDMKTONE => {
+                self.mktone(w, int(arg).cast_unsigned());
+                Ok(())
+            }
             // `vt_fb_ioctl`.
             FBIOGTYPE => {
                 let (t, _, _) = self.fb_info(s);

@@ -391,7 +391,14 @@ Implemented (`sys/vt`, `kernel/src/vtcons.rs`):
   (`FBTYPE_EFIFB`, the depth from the color masks, 16 colors), `FBIO_GETLINEWIDTH`,
   `FBIO_GETRGBOFFS`, `FBIO_GETWINORG` and `FBIO_GETDISPSTART` (0), and `FBIO_BLANK`, which blacks
   the display out and leaves the cells as drawn, so they come back as they change.
-- Not yet: mapping the frame buffer through `ttyv*` (`vt_fb_mmap`, for X's `scfb`, at P6), and the bell (off by default, `kern.vt.enable_bell`).
+- The bell (`vtterm_bell`): each one in a window's output, and each `KDMKTONE`, is reported to
+  devctl as `!system=VT subsystem=BELL type=RING enabled=… hushed=… hz=… duration_ms=…`. It sounds
+  only with `kern.vt.enable_bell` set (0 by default; a tunable, here on the kernel command line),
+  not quieted (`CONS_BELLTYPE`), and with a pitch: the console window's is 800 Hz for 50 ms, the
+  others' none until the cons25 `ESC [ = p ; d B`. On amd64 it sounds on the PC speaker through
+  the i8254's counter 2 (`sysbeep`); arm64 has none (`ENODEV`).
+- Later: mapping the frame buffer through `ttyv*` (`vt_fb_mmap`, for X's `scfb`), which needs a
+  device pager, at P6 with X.
 
 ## 8. USB mass storage
 

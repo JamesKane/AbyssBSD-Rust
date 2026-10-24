@@ -8,7 +8,7 @@
  * mouse cursor, a font of the window's own (PIO_VFONT), which sizes it,
  * releasing the console's keyboard and taking it back (CONS_RELKBD,
  * CONS_SETKBD), I/O port access (KDENABIO, KDDISABIO), the frame
- * buffer's description (FBIO_*), and switching (VT_ACTIVATE, VT_WAITACTIVE) to the window and back,
+ * buffer's description (FBIO_*), the bell (KDMKTONE), and switching (VT_ACTIVATE, VT_WAITACTIVE) to the window and back,
  * which only an open window allows.
  *
  * Runs on FreeBSD too (as root, under vt, with ttyv2 not in use); the
@@ -180,6 +180,9 @@ main(void)
 	CHECK(req(fd, KDSKBSTATE, 0) == 0, "%s", strerror(errno));
 	CHECK(ioctl(fd, KDGKBTYPE, &v) == 0, "%s", strerror(errno));
 	CHECK(ioctl(fd, CONS_MODEINFO, &mode) == 0, "%s", strerror(errno));
+	/* The bell, and a tone of 1 kHz for 10 ms: off, they only report. */
+	CHECK(req(fd, KDMKTONE, 0) == 0, "%s", strerror(errno));
+	CHECK(req(fd, KDMKTONE, 10 << 16 | 1193) == 0, "%s", strerror(errno));
 
 	/* The frame buffer, the size TIOCGWINSZ gives in pixels. */
 	CHECK(ioctl(fd, TIOCGWINSZ, &ws) == 0, "%s", strerror(errno));

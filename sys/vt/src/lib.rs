@@ -86,6 +86,13 @@ pub trait Host: Send + Sync {
     ///
     /// `EPERM` to give it to a thread that may not have it.
     fn io_access(&self, on: bool) -> Result<(), Errno>;
+    /// `kern.vt.enable_bell`: whether bells sound.
+    fn enable_bell(&self) -> bool;
+    /// Queues a devctl notification (`devctl_notify`).
+    fn notify(&self, system: &str, subsystem: &str, kind: &str, data: &str);
+    /// Sounds `hz` for `ms` milliseconds, if there is a speaker
+    /// (`sysbeep`).
+    fn beep(&self, hz: u32, ms: u32);
 }
 
 /// A window's state beyond its terminal (`struct vt_window`).
@@ -157,6 +164,12 @@ type Signal = Option<(i32, i32)>;
 pub const CONSWINDOW: usize = 0;
 /// `VT_TIMERFREQ`: frames a second at most.
 const TIMERFREQ: u64 = 25;
+/// `VT_BELLPITCH` and `VT_BELLDURATION` (a twentieth of a second).
+/// Durations are in ticks of `hz`, 1000 as in FreeBSD, so milliseconds.
+const BELL_PITCH: u32 = 800;
+const BELL_MS: u32 = 50;
+/// The i8254's clock, which `KDMKTONE`'s divisor counts.
+const I8254_HZ: u32 = 1_193_182;
 
 /// The virtual terminals (`struct vt_device`).
 struct Vt {
@@ -218,9 +231,16 @@ pub fn start(display: Display, early: &[u8], host: &'static dyn Host) -> Result<
     let renderer = Renderer::new(display).ok_or(Error::Display)?;
     let size = renderer.size();
     let pixels = renderer.display_size();
-    let windows = (0..WINDOWS)
+    let windows: Vec<_> = (0..WINDOWS)
         .map(|_| SpinLock::new(Terminal::new(size, DEFAULT_HISTORY)))
         .collect();
+    // Only the console window has a bell to begin with
+    // (`vt_conswindow`); the others are silent until `ESC [ = B`.
+    {
+        let mut t = windows[CONSWINDOW].lock();
+        t.bell_pitch = BELL_PITCH;
+        t.bell_duration = BELL_MS;
+    }
     let vt = Vt {
         windows,
         active: AtomicUsize::new(CONSWINDOW),
@@ -289,8 +309,16 @@ pub fn write(window: usize, bytes: &[u8]) {
     let Some(w) = vt.windows.get(window) else {
         return;
     };
-    w.lock().write(bytes);
+    let bell = {
+        let mut t = w.lock();
+        t.bell = false;
+        t.write(bytes);
+        t.bell
+    };
     vt.changed(window);
+    if bell {
+        vt.bell(window);
+    }
 }
 
 /// Writes kernel output to the console window in the kernel rendition,
@@ -567,6 +595,47 @@ impl Vt {
         };
         self.host.resized(w, size, self.pixels);
         self.invalidate(w);
+    }
+
+    /// Reports a bell to devctl, as `vtterm_devctl` does.
+    fn bell_devctl(&self, hz: u32, ms: u32) {
+        let hushed = self.state.lock().quiet_bell;
+        let data = alloc::format!(
+            "enabled={} hushed={} hz={hz} duration_ms={ms}",
+            self.host.enable_bell(),
+            hushed
+        );
+        self.host.notify("VT", "BELL", "RING", &data);
+    }
+
+    /// Window `w`'s bell (`vtterm_bell`): reported, then sounded if the
+    /// bell is on, not quiet, and has a pitch and a duration.
+    fn bell(&self, w: usize) {
+        let (hz, ms) = {
+            let t = self.windows[w].lock();
+            (t.bell_pitch, t.bell_duration)
+        };
+        self.bell_devctl(hz, ms);
+        if !self.host.enable_bell() || self.state.lock().quiet_bell || hz == 0 || ms == 0 {
+            return;
+        }
+        self.host.beep(hz, ms);
+    }
+
+    /// `KDMKTONE` (`vtterm_beep`): the i8254 divisor in the low 16 bits,
+    /// the duration in milliseconds in the high; no divisor is the bell.
+    pub(crate) fn mktone(&self, w: usize, param: u32) {
+        let divisor = param & 0xffff;
+        if divisor == 0 {
+            self.bell(w);
+            return;
+        }
+        let ms = param >> 16;
+        let hz = I8254_HZ / divisor;
+        self.bell_devctl(hz, ms);
+        if self.host.enable_bell() {
+            self.host.beep(hz, ms);
+        }
     }
 
     /// Redraws window `w` in full, if it is visible.
