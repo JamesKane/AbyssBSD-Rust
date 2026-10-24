@@ -262,8 +262,8 @@ FreeBSD's userland expects:
     ring and leaves `SYN_DROPPED`. `EVIOCGRAB` and `EVIOCREVOKE` as FreeBSD has them.
   - The driver's `open` and `close` methods run at the first open and last close (`hms` starts
     and stops its interrupts there); writes inject events through the driver's `event` method.
-  - `kern.evdev.input.N` has `name`, `id`, `phys`, `uniq`, `props`, the per-type bit sets, and
-    `devnum`, in FreeBSD's formats.
+  - `kern.evdev.input.N` has `name`, `id`, `phys`, `uniq`, `props`, and the per-type bit sets, in
+    FreeBSD 15.1's formats (16-CURRENT's `devnum` is left out).
   - Keyboards publish through the kbd layer when `rcpt_mask` has `HW_KBD`, and `kbdmux` has its
     own device ("System keyboard multiplexer"), as FreeBSD's does.
 - **sysmouse.** `/dev/sysmouse` for programs that use it; `vt` gets pointer events for nothing yet

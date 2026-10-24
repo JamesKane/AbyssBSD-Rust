@@ -387,12 +387,12 @@ impl Builder {
         };
         let path = format!("input/event{unit}");
         let node = Arc::new(Node(Arc::clone(&dev)));
-        let Some(devnum) = vfs::devices::make_dev(path.as_bytes(), 0o600, 0, 0, node) else {
+        if vfs::devices::make_dev(path.as_bytes(), 0o600, 0, 0, node).is_none() {
             UNITS.lock().remove(&unit);
             return Err(Errno::ENXIO);
-        };
+        }
         *dev.unit.lock() = Some(unit);
-        dev.add_sysctl(s, unit, devnum);
+        dev.add_sysctl(s, unit);
         Ok(dev)
     }
 }
@@ -635,7 +635,7 @@ impl Device {
         }
     }
 
-    fn add_sysctl(self: &Arc<Self>, s: &Sleepable, unit: u32, devnum: u64) {
+    fn add_sysctl(self: &Arc<Self>, s: &Sleepable, unit: u32) {
         let Some(input) = GLOBAL.get().and_then(|g| g.input) else {
             return;
         };
@@ -721,13 +721,6 @@ impl Device {
                     },
                 );
             }
-            let _ = t.add_value(
-                n,
-                Number::Auto,
-                "devnum",
-                "Input device number",
-                Value::U64(Box::new(move || devnum)),
-            );
         });
         *self.sysctl.lock() = id;
     }
