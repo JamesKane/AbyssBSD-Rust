@@ -8,7 +8,7 @@ the workload specification every implementation follows:
 - AbyssBSD: `kernel/src/bench.rs`, run with the boot option `abyss.bench=<suite>`.
 - FreeBSD: `kbench/`, a kernel module (test code; it only ever runs on FreeBSD), run with
   `sysctl debug.kbench.run=<suite>`.
-- Both, from P4: `ubench/`, a static FreeBSD binary.
+- Both, from P4: `ubench/`, a static FreeBSD binary (built again with threads for `p6`).
 
 `cargo xtask perf` boots both in identical bhyve VMs, interleaves the runs, and applies the
 statistics in PERFORMANCE.md. A change to a workload changes both implementations in the same
@@ -165,6 +165,51 @@ others run three rounds and report the median.
 | `extract` | `/rescue/tar -xf tree.tar` into an empty directory (removed with `rm -rf` before each round, untimed). One op = one extraction |
 | `find` | One `fts` walk of the extracted tree with `FTS_PHYSICAL`, every entry `stat`'ed. One op = one walk |
 | `fsx` | `fsx -q -N 10000 -S <round>` on a file in the file system. One op = one run |
+
+## Suite `p6`
+
+Multi-user's components ([MULTIUSER.md §16](../../docs/MULTIUSER.md#16-performance)): `ubench p6`,
+from a second build of the same source with `-DUB_P6` and `libthr`, so the earlier suites' binary
+stays single-threaded and unchanged. It runs as root on the full base (the exec benchmarks run
+base's own dynamic programs). Until AbyssBSD runs base, `cargo xtask --remote perf --suite p6
+--freebsd-only` records FreeBSD's baseline. The component is each name's first field.
+
+- Team benchmarks (`thr.mutex*`, `thr.rwlock`) follow kbench's rules: worker *i* of *T* bound to
+  CPU `(i + 1) mod 8`, the coordinator on CPU 0; the workers start together at a barrier, run until
+  the coordinator's stop after 1 s, and the result is elapsed time over the total operations,
+  median of three rounds.
+- Ping-pong benchmarks pair `ubench` (CPU 1) with a partner thread or process on CPU 2. One op =
+  one round trip.
+- Everything else follows the `p4` rules: `ubench` on CPU 1, three rounds of 1 s, median.
+
+| Name | Operation |
+|---|---|
+| `thr.mutex.t{1,2,4,8}` | Lock a default `pthread_mutex`, increment a shared counter, unlock |
+| `thr.mutex.pi.t{1,2,4,8}` | As above, `PTHREAD_PRIO_INHERIT` |
+| `thr.mutex.pshared.t{1,2,4,8}` | As above, `PTHREAD_PROCESS_SHARED` (libthr keeps the lock in a shared off-page: `UMTX_OP_SHM`, shared umtx keys) |
+| `thr.rwlock.t{1,2,4,8}` | Each worker's every tenth op takes the `pthread_rwlock` for writing and increments; the other nine read. One op = one lock and unlock |
+| `thr.cond.pingpong` | Strict alternation under one mutex, a `pthread_cond` per side |
+| `thr.sem.pingpong` | Strict alternation with two unnamed process-private semaphores (`sem_post`, `sem_wait`) |
+| `thr.create` | `pthread_create` of a thread that returns at once, then `pthread_join` |
+| `event.kevent.pipe1` | One pipe's read end in a kqueue: write a byte, `kevent` returns the event, read the byte |
+| `event.kevent.pipe1000` | As above with 1,000 pipes registered, a byte written to each in turn |
+| `event.poll1000` | The 1,000 read ends in one `poll` set; a byte written to each in turn, `poll`, read. One op = one `poll` |
+| `event.select1000` | As above with `select` (2,000 descriptors open; `FD_SETSIZE` 4096) |
+| `event.user.pingpong` | Two kqueues, an `EV_CLEAR` `EVFILT_USER` event in each: each side triggers the other's (`NOTE_TRIGGER`) and waits for its own |
+| `event.timer` | Register an `EV_ONESHOT` `EVFILT_TIMER` 1 µs out (`NOTE_USECONDS`; FreeBSD arms it with precision 0) and wait for it in the same `kevent` call |
+| `unix.stream.pingpong`, `unix.seqpacket.pingpong` | One byte over a `socketpair` to the partner process and back |
+| `unix.stream.bw4k`, `unix.stream.bw64k` | 4 KiB or 64 KiB `write`s to a partner that reads and discards. One op = one write |
+| `unix.dgram` | Windows of 16 datagrams of 64 bytes over a `SOCK_DGRAM` pair; the partner answers each window with one byte (a full UNIX datagram socket fails the send with `ENOBUFS`, `uipc_sosend_dgram`). One op = one datagram |
+| `unix.rights` | `sendmsg` of one byte with `/dev/null`'s descriptor (`SCM_RIGHTS`); the partner receives and closes it |
+| `unix.connect` | `socket`, `connect` to a listening socket bound in `/tmp`, read the partner's one-byte greeting once it has accepted, `close`. Unpaced, the client overflows the listen queue, and a UNIX connect to a full queue is refused |
+| `pty.raw` | A `posix_openpt` pair, the slave in raw mode (`cfmakeraw`): 4 KiB `write`s to the slave, the partner reads the master. One op = one write |
+| `pty.canon` | Canonical mode without echo: 81-byte lines (80 characters and a newline) written to the master, the partner reads the slave a line at a time. One op = one line |
+| `pty.relay` | `pty.raw` with a relay between, as `script` is: a process on CPU 3 `poll`s the master and its standard input and copies the master to a pipe, which the partner drains |
+| `exec.true` | `vfork`, `execve` of `/usr/bin/true` (rtld, `libc`, `libsys`), `wait4` |
+| `exec.lib10` | As above with `/usr/bin/tar --version`: `libarchive` and ten more libraries |
+| `exec.rcsubr` | As above with `/usr/sbin/service -e`: a shell per `rc.d` script, each loading `rc.subr` and `rc.conf` |
+| `boot.kernel` | Not in `ubench`: the harness's time from the loader's handoff to the first `login:` on the serial console (P6.9) |
+| `boot.rc` | Not in `ubench`: from init's start to that `login:` (P6.9) |
 
 ## Suite `vt`
 

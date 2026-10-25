@@ -37,7 +37,7 @@ const BOUND: f64 = 1.02;
 const MAX_CV: f64 = 0.01;
 const BOOTSTRAP: usize = 2000;
 
-const USAGE: &str = "usage: cargo xtask --remote perf [--suite p2|p3|p4|p5|vt|diag] [--runs N] [--prepare] \
+const USAGE: &str = "usage: cargo xtask --remote perf [--suite p2|p3|p4|p5|p6|vt|diag] [--runs N] [--prepare] \
                      [--freebsd-only [--prof] | --abyss-only [--prof [--prof-cpu N]]]";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -85,8 +85,12 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     }
     // `diag` holds AbyssBSD-side diagnostics, some with FreeBSD
     // counterparts; it is for investigation, not gating.
-    if !["p2", "p3", "p4", "p5", "vt", "diag"].contains(&suite.as_str()) {
-        return Err(format!("unknown suite `{suite}` (p2, p3, p4, p5, vt, diag)").into());
+    if !["p2", "p3", "p4", "p5", "p6", "vt", "diag"].contains(&suite.as_str()) {
+        return Err(format!("unknown suite `{suite}` (p2, p3, p4, p5, p6, vt, diag)").into());
+    }
+    // AbyssBSD runs p6 from the installed root, once base runs (P6.1 on).
+    if suite == "p6" && !freebsd_only {
+        return Err("suite p6 runs on FreeBSD alone for now: add --freebsd-only".into());
     }
     if !cfg!(target_os = "freebsd") {
         return Err(format!("perf needs bhyve: run it on the build server\n{USAGE}").into());
@@ -109,7 +113,11 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     fs::create_dir_all(&dirs.perf)?;
     let freebsd = prepare_image(&dirs)?;
     let kbench = build_kbench(&dirs)?;
-    let ubench = build_ubench(&dirs)?;
+    let ubench = if suite == "p6" {
+        build_ubench_p6(&dirs)?
+    } else {
+        build_ubench(&dirs)?
+    };
     if prepare_only {
         eprintln!(
             "xtask: perf: prepared {}, {} and {}",
@@ -129,7 +137,7 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
 
     // The userland suites run ubench; the earlier ones, kbench. The file
     // systems' suite also needs its tree and fsx beside it.
-    let userland = ["p4", "p5", "vt"].contains(&suite.as_str());
+    let userland = ["p4", "p5", "p6", "vt"].contains(&suite.as_str());
     let bench = if userland { &ubench } else { &kbench };
     let extras = if suite == "p5" {
         vec![build_tree(&dirs)?, build_fsx(&dirs)?]
@@ -365,29 +373,12 @@ pub(crate) fn freebsd_multiuser_image(arch: Arch) -> Result<(PathBuf, PathBuf)> 
         return Err("xz failed".into());
     }
     with_root(&dirs, &tmp, |mnt| {
-        let staging = mnt.with_file_name("staging");
-        fs::create_dir_all(&staging)?;
         let loader = "autoboot_delay=\"0\"\nbeastie_disable=\"YES\"\n\
                       boot_multicons=\"YES\"\nboot_serial=\"YES\"\n\
                       console=\"comconsole,efi\"\n";
         let mut files = crate::multiuser::installed_files(mnt)?;
         files.push(("boot/loader.conf.local", 0o644, loader.as_bytes().to_vec()));
-        for (path, mode, data) in files {
-            let src = staging.join(path.replace('/', "_"));
-            fs::write(&src, data)?;
-            let dst = mnt.join(path);
-            doas(&[
-                "install",
-                "-o",
-                "root",
-                "-g",
-                "wheel",
-                "-m",
-                &format!("{mode:o}"),
-                &src.to_string_lossy(),
-                &dst.to_string_lossy(),
-            ])?;
-        }
+        install_files(mnt, &files)?;
         doas(&["rm", "-f", &mnt.join("firstboot").to_string_lossy()])?;
         Ok(())
     })?;
@@ -396,8 +387,42 @@ pub(crate) fn freebsd_multiuser_image(arch: Arch) -> Result<(PathBuf, PathBuf)> 
     Ok((img, dirs.perf))
 }
 
+/// Installs `files` (path under the root, mode, contents) into the root
+/// mounted at `mnt`, owned by root.
+pub(crate) fn install_files(mnt: &Path, files: &[(&str, u32, Vec<u8>)]) -> Result<()> {
+    let staging = mnt.with_file_name("staging");
+    fs::create_dir_all(&staging)?;
+    for (path, mode, data) in files {
+        let src = staging.join(path.replace('/', "_"));
+        fs::write(&src, data)?;
+        let dst = mnt.join(path);
+        doas(&[
+            "install",
+            "-o",
+            "root",
+            "-g",
+            "wheel",
+            "-m",
+            &format!("{mode:o}"),
+            &src.to_string_lossy(),
+            &dst.to_string_lossy(),
+        ])?;
+    }
+    Ok(())
+}
+
 /// Runs `f` on the root file system of raw disk image `img`, mounted.
 fn with_root(dirs: &Dirs, img: &Path, f: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
+    mounted_root(img, &dirs.perf.join("mnt"), f)
+}
+
+/// Runs `f` on the root file system of raw disk image `img`, mounted on
+/// `mnt` (created if need be).
+pub(crate) fn mounted_root(
+    img: &Path,
+    mnt: &Path,
+    f: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
     let md = doas(&[
         "mdconfig",
         "-a",
@@ -407,12 +432,11 @@ fn with_root(dirs: &Dirs, img: &Path, f: impl FnOnce(&Path) -> Result<()>) -> Re
         &img.to_string_lossy(),
     ])?;
     let md = md.trim().to_owned();
-    let mnt = dirs.perf.join("mnt");
-    fs::create_dir_all(&mnt)?;
+    fs::create_dir_all(mnt)?;
     let result = (|| -> Result<()> {
         let part = rootfs_partition(&md)?;
         doas(&["mount", &format!("/dev/{part}"), &mnt.to_string_lossy()])?;
-        let r = f(&mnt);
+        let r = f(mnt);
         doas(&["umount", &mnt.to_string_lossy()])?;
         r
     })();
@@ -640,6 +664,23 @@ fn build_ubench(dirs: &Dirs) -> Result<PathBuf> {
     base::cc_static(
         Arch::X86_64,
         &util::root().join("tests/perf/ubench/ubench.c"),
+        &out,
+    )?;
+    Ok(out)
+}
+
+/// `ubench` with suite `p6`, which needs threads: built apart, with
+/// libthr (`-lthr`: the trimmed sysroot has no `libpthread.a` link), so
+/// the earlier suites' binary stays as it was. Same name, so
+/// the guests' scripts run it unchanged.
+fn build_ubench_p6(dirs: &Dirs) -> Result<PathBuf> {
+    let dir = dirs.perf.join("ubench-p6");
+    fs::create_dir_all(&dir)?;
+    let out = dir.join("ubench");
+    base::cc_static_with(
+        Arch::X86_64,
+        &util::root().join("tests/perf/ubench/ubench.c"),
+        &["-DUB_P6", "-lthr"],
         &out,
     )?;
     Ok(out)

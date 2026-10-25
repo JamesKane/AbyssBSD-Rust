@@ -363,6 +363,12 @@ pub(crate) fn rescue_image(arch: Arch) -> Result<PathBuf> {
 /// architecture's base as the sysroot (with the base system's `cc` on
 /// FreeBSD, clang and lld elsewhere).
 pub(crate) fn cc_static(arch: Arch, source: &Path, out: &Path) -> Result<()> {
+    cc_static_with(arch, source, &[], out)
+}
+
+/// [`cc_static`] with extra compiler `args` (`-D`, libraries), after the
+/// source.
+pub(crate) fn cc_static_with(arch: Arch, source: &Path, args: &[&str], out: &Path) -> Result<()> {
     let root = sysroot(arch)?;
     let mut cc = if cfg!(target_os = "freebsd") {
         Command::new("cc")
@@ -376,7 +382,8 @@ pub(crate) fn cc_static(arch: Arch, source: &Path, out: &Path) -> Result<()> {
             .arg(format!("--sysroot={}", root.display()))
             .args(["-static", "-s", "-O2", "-Wall", "-Wextra", "-Werror", "-o"])
             .arg(out)
-            .arg(source),
+            .arg(source)
+            .args(args),
     )
 }
 

@@ -172,6 +172,9 @@ pub(crate) const UFS_ROOT: &[Step] = &[
     ),
 ];
 
+/// How much unmatched console output a [`Session`] keeps, for errors.
+const TAIL: usize = 300;
+
 /// A VM whose serial console is a pipe pair.
 pub(crate) struct Session {
     child: Child,
@@ -224,6 +227,16 @@ impl Session {
         Ok(())
     }
 
+    /// Drops searched output that no match of a pattern `longest` bytes
+    /// long can start in, keeping [`TAIL`] bytes for error messages.
+    /// Without this, a console that prints much before the next match
+    /// (a test's kernel messages) is searched again in full per read.
+    fn forget_searched(&mut self, longest: usize) {
+        let keep = TAIL.max(longest.saturating_sub(1));
+        let excess = self.pending.len().saturating_sub(keep);
+        self.pending.drain(..excess);
+    }
+
     /// Waits up to `timeout` for `pattern`; consumes the output through
     /// it. On a timeout, the error shows the output that did arrive.
     pub(crate) fn expect(&mut self, pattern: &str, timeout: Duration) -> Result<()> {
@@ -234,6 +247,7 @@ impl Session {
                 self.pending.drain(..at + needle.len());
                 return Ok(());
             }
+            self.forget_searched(needle.len());
             let left = deadline.saturating_duration_since(Instant::now());
             match self.rx.recv_timeout(left) {
                 Ok(bytes) => {
@@ -241,7 +255,7 @@ impl Session {
                     self.pending.extend_from_slice(&bytes);
                 }
                 Err(e) => {
-                    let tail = &self.pending[self.pending.len().saturating_sub(300)..];
+                    let tail = &self.pending[self.pending.len().saturating_sub(TAIL)..];
                     let why = match e {
                         mpsc::RecvTimeoutError::Timeout => "timed out",
                         mpsc::RecvTimeoutError::Disconnected => "the VM exited",
@@ -277,17 +291,23 @@ impl Session {
                 self.pending.drain(..at + len);
                 return Ok(i);
             }
+            self.forget_searched(patterns.iter().map(|p| p.len()).max().unwrap_or(0));
             let left = deadline.saturating_duration_since(Instant::now());
             match self.rx.recv_timeout(left) {
                 Ok(bytes) => {
                     self.log.write_all(&bytes)?;
                     self.pending.extend_from_slice(&bytes);
                 }
-                Err(_) => {
-                    let tail = &self.pending[self.pending.len().saturating_sub(300)..];
+                Err(e) => {
+                    let tail = &self.pending[self.pending.len().saturating_sub(TAIL)..];
+                    let why = match e {
+                        mpsc::RecvTimeoutError::Timeout => {
+                            format!("nothing new for {} s", timeout.as_secs())
+                        }
+                        mpsc::RecvTimeoutError::Disconnected => "the VM exited".to_owned(),
+                    };
                     return Err(format!(
-                        "nothing new for {} s waiting for {patterns:?}; last output: {:?}",
-                        timeout.as_secs(),
+                        "{why} waiting for {patterns:?}; last output: {:?}",
                         String::from_utf8_lossy(tail)
                     )
                     .into());

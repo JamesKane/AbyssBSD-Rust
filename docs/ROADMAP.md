@@ -1433,7 +1433,18 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
     P6.9), and `cargo xtask --remote freebsd-multiuser`, whose run of the same script passes on
     FreeBSD 15.1 in bhyve, QEMU amd64, and QEMU arm64.
 - kyua built and its FreeBSD 15.1 results recorded per test case on each machine.
+  - Done 2026-10-25 (bhyve): the release image ships `kyua` and `/usr/tests`, so nothing is
+    built; `cargo xtask --remote kyua-baseline` runs the suite in bhyve one directory at a time,
+    surviving panics, and its results are in `tests/kyua/freebsd/`. Of 9,845 cases: 8,442
+    passed, 1,241 skipped, 38 expected failures, 107 broken, 6 failed, and 11 crashed (the guest
+    went down in `usr.sbin/ctladm`); about 42 minutes on 8 vCPUs. Not under QEMU: emulated, the
+    suite would take days, and its timing tests would measure the emulator. The Orange Pi 6 Plus
+    records arm64's at P6.11.
+    AbyssBSD's runs will need `tests.txz` in the installed root (it is not in `base.txz`).
 - The P6 suite in `ubench` (MULTIUSER.md §16) with FreeBSD's baseline in bhyve.
+  - Done 2026-10-24: suite `p6` (`thr`, `event`, `unix`, `pty`, `exec`; tests/perf/README.md), a
+    second `ubench` build with `libthr`; `perf --suite p6 --freebsd-only` records the baseline.
+    `boot` is measured by the harness once AbyssBSD reaches `login:` (P6.9).
 
 **P6.1 Run-time linking.**
 - `ET_DYN` executables and `PT_INTERP` (MULTIUSER.md §6): PIE and the interpreter at random bases,
@@ -1522,8 +1533,9 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
   running, `shutdown -p now`, then `fsck_ffs -f -n` clean. The boot's first-use log holds nothing outside `absent.txt`. FreeBSD userland now runs end to end in QEMU (ADR-0010).
 
 **P6.10 Conformance.**
-- kyua nightly in QEMU (both arches) and bhyve, per test case against FreeBSD's results, with
-  `tests/kyua/known-failures.txt`.
+- kyua nightly in bhyve, per test case against FreeBSD's results, with
+  `tests/kyua/known-failures.txt` (not under QEMU: emulated, the suite takes days; arm64's run is
+  on the Orange Pi 6 Plus from P6.11).
 - `abi-check` over every structure crossing the boundary, for amd64 and arm64 headers
   (MULTIUSER.md §13), failing on unchecked types.
 - Exit: the kyua target met in all four areas on every machine; `abi-check` complete.

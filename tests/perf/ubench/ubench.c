@@ -10,11 +10,21 @@
  *	./ubench p4
  *	./ubench p5	(as root: makes and mounts its file systems)
  *	./ubench vt	(as root, with a framebuffer: writes to ttyv1 and ttyv2)
+ *	./ubench p6	(built with -DUB_P6 -lthr; runs base's programs)
  *
  * p4 uses Tier A system calls (docs/COMPATIBILITY.md §2.1), plus
  * cpuset_setaffinity to bind itself as kbench binds its workers. p5 adds
  * the file-system calls, and runs /rescue's newfs, tar, and rm, and fsx.
+ * p6 adds threads, kqueue, poll and select, UNIX sockets, and ptys, and
+ * execs base's dynamic programs.
  */
+
+#ifdef UB_P6
+#define	UB_HAS_P6	1
+#define	FD_SETSIZE	4096	/* event.select1000's 2000 descriptors */
+#else
+#define	UB_HAS_P6	0
+#endif
 
 #include <sys/param.h>
 #include <sys/consio.h>
@@ -24,6 +34,12 @@
 #include <sys/stat.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
+#ifdef UB_P6
+#include <sys/event.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#endif
 
 #include <dirent.h>
 #include <errno.h>
@@ -36,6 +52,12 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef UB_P6
+#include <poll.h>
+#include <pthread.h>
+#include <semaphore.h>
+#include <termios.h>
+#endif
 
 #define	UB_ROUNDS	3		/* rounds per benchmark; median */
 #define	UB_ROUND_NS	1000000000ULL	/* each round runs for 1 s */
@@ -1052,6 +1074,911 @@ suite_p5(void)
 		die("unmount");
 }
 
+#ifdef UB_P6
+/*
+ * Suite p6: threads, events, UNIX sockets, ptys, and dynamic exec
+ * (docs/MULTIUSER.md §16). Built apart, with -DUB_P6 and libthr, so the
+ * earlier suites' binary stays single-threaded and unchanged.
+ */
+
+#define	UB_P6_PIPES	1000		/* event.*1000 descriptors */
+#define	UB_SOCK		"/tmp/ubench.sock"
+
+static void
+bind_thread(int cpu)
+{
+	cpuset_t set;
+
+	CPU_ZERO(&set);
+	CPU_SET(cpu, &set);
+	if (cpuset_setaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, sizeof(set),
+	    &set) != 0)
+		die("cpuset_setaffinity");
+}
+
+static void
+pcheck(int error, const char *what)
+{
+	if (error != 0) {
+		errno = error;
+		die(what);
+	}
+}
+
+/*
+ * A team benchmark (kbench's rules): T workers, worker i bound to CPU
+ * (i + 1) mod 8, the coordinator on CPU 0. Each round the workers start
+ * together, run until the coordinator's stop after 1 s, and count their
+ * operations; the result is elapsed time over the total, median of three.
+ */
+struct team {
+	void	(*op)(int);		/* one operation by worker i */
+	_Atomic int stop;
+	pthread_barrier_t go;
+	struct {
+		uint64_t ops;
+		char pad[120];
+	} count[8];
+};
+
+static struct team team;
+
+struct worker {
+	int id;
+};
+
+static void *
+team_worker(void *arg)
+{
+	int id = ((struct worker *)arg)->id;
+	uint64_t ops = 0;
+
+	bind_thread((id + 1) % 8);
+	pthread_barrier_wait(&team.go);
+	while (!team.stop) {
+		team.op(id);
+		ops++;
+	}
+	team.count[id].ops = ops;
+	return (NULL);
+}
+
+static void
+run_team(const char *name, int threads, void (*op)(int))
+{
+	double v[UB_ROUNDS];
+	pthread_t tid[8];
+	struct worker w[8];
+	struct timespec second = { 1, 0 };
+	uint64_t start, ops;
+
+	bind_thread(0);
+	team.op = op;
+	for (int r = 0; r < UB_ROUNDS; r++) {
+		team.stop = 0;
+		pcheck(pthread_barrier_init(&team.go, NULL, threads + 1),
+		    "pthread_barrier_init");
+		for (int i = 0; i < threads; i++) {
+			w[i].id = i;
+			pcheck(pthread_create(&tid[i], NULL, team_worker, &w[i]),
+			    "pthread_create");
+		}
+		pthread_barrier_wait(&team.go);
+		start = now();
+		nanosleep(&second, NULL);
+		team.stop = 1;
+		ops = 0;
+		for (int i = 0; i < threads; i++) {
+			pcheck(pthread_join(tid[i], NULL), "pthread_join");
+			ops += team.count[i].ops;
+		}
+		v[r] = (double)(now() - start) / (double)ops;
+		pthread_barrier_destroy(&team.go);
+	}
+	report(name, v);
+	bind_thread(1);
+}
+
+static pthread_mutex_t *mtx;
+static pthread_rwlock_t rwl;
+static volatile uint64_t counter;
+
+static void
+op_mutex(int id __unused)
+{
+	pthread_mutex_lock(mtx);
+	counter++;
+	pthread_mutex_unlock(mtx);
+}
+
+/* Nine reads to a write. */
+static void
+op_rwlock(int id)
+{
+	static _Thread_local unsigned n;
+
+	(void)id;
+	if (++n % 10 == 0) {
+		pthread_rwlock_wrlock(&rwl);
+		counter++;
+	} else {
+		pthread_rwlock_rdlock(&rwl);
+		(void)counter;
+	}
+	pthread_rwlock_unlock(&rwl);
+}
+
+/*
+ * The ping-pong benchmarks pair the coordinator (CPU 1) with a partner
+ * thread (CPU 2): each op function makes 100 round trips, and the partner
+ * leaves when it finds `pp_stop` on waking.
+ */
+static pthread_t pp_tid;
+static _Atomic int pp_stop;
+
+static void
+pp_start(void *(*fn)(void *), void *arg)
+{
+	pp_stop = 0;
+	pcheck(pthread_create(&pp_tid, NULL, fn, arg), "pthread_create");
+}
+
+static pthread_mutex_t cv_mtx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t cv[2] = { PTHREAD_COND_INITIALIZER,
+    PTHREAD_COND_INITIALIZER };
+static int cv_turn;
+
+static void *
+cv_partner(void *arg __unused)
+{
+	bind_thread(2);
+	pthread_mutex_lock(&cv_mtx);
+	for (;;) {
+		while (cv_turn != 1 && !pp_stop)
+			pthread_cond_wait(&cv[1], &cv_mtx);
+		if (pp_stop)
+			break;
+		cv_turn = 0;
+		pthread_cond_signal(&cv[0]);
+	}
+	pthread_mutex_unlock(&cv_mtx);
+	return (NULL);
+}
+
+static uint64_t
+op_cond(void *arg __unused)
+{
+	pthread_mutex_lock(&cv_mtx);
+	for (int i = 0; i < 100; i++) {
+		cv_turn = 1;
+		pthread_cond_signal(&cv[1]);
+		while (cv_turn != 0)
+			pthread_cond_wait(&cv[0], &cv_mtx);
+	}
+	pthread_mutex_unlock(&cv_mtx);
+	return (100);
+}
+
+static void
+cv_stop(void)
+{
+	pthread_mutex_lock(&cv_mtx);
+	pp_stop = 1;
+	pthread_cond_signal(&cv[1]);
+	pthread_mutex_unlock(&cv_mtx);
+	pcheck(pthread_join(pp_tid, NULL), "pthread_join");
+}
+
+static sem_t sem[2];
+
+static void *
+sem_partner(void *arg __unused)
+{
+	bind_thread(2);
+	for (;;) {
+		while (sem_wait(&sem[1]) != 0)
+			if (errno != EINTR)
+				die("sem_wait");
+		if (pp_stop)
+			break;
+		sem_post(&sem[0]);
+	}
+	return (NULL);
+}
+
+static uint64_t
+op_sem(void *arg __unused)
+{
+	for (int i = 0; i < 100; i++) {
+		sem_post(&sem[1]);
+		while (sem_wait(&sem[0]) != 0)
+			if (errno != EINTR)
+				die("sem_wait");
+	}
+	return (100);
+}
+
+static void *
+thread_nop(void *arg)
+{
+	return (arg);
+}
+
+/* thr.create: create a thread that returns at once, and join it. */
+static uint64_t
+op_create(void *arg __unused)
+{
+	pthread_t t;
+
+	pcheck(pthread_create(&t, NULL, thread_nop, NULL), "pthread_create");
+	pcheck(pthread_join(t, NULL), "pthread_join");
+	return (1);
+}
+
+static void
+suite_thr(void)
+{
+	static const char *kinds[] = { "", ".pi", ".pshared" };
+	static const int teams[] = { 1, 2, 4, 8 };
+	char name[64];
+	pthread_mutexattr_t ma;
+	pthread_mutex_t m;
+
+	for (int k = 0; k < 3; k++) {
+		pcheck(pthread_mutexattr_init(&ma), "pthread_mutexattr_init");
+		if (k == 1)
+			pcheck(pthread_mutexattr_setprotocol(&ma,
+			    PTHREAD_PRIO_INHERIT), "setprotocol");
+		if (k == 2)
+			pcheck(pthread_mutexattr_setpshared(&ma,
+			    PTHREAD_PROCESS_SHARED), "setpshared");
+		pcheck(pthread_mutex_init(&m, &ma), "pthread_mutex_init");
+		mtx = &m;
+		for (int t = 0; t < 4; t++) {
+			snprintf(name, sizeof(name), "thr.mutex%s.t%d",
+			    kinds[k], teams[t]);
+			run_team(name, teams[t], op_mutex);
+		}
+		pthread_mutex_destroy(&m);
+		pthread_mutexattr_destroy(&ma);
+	}
+
+	pcheck(pthread_rwlock_init(&rwl, NULL), "pthread_rwlock_init");
+	for (int t = 0; t < 4; t++) {
+		snprintf(name, sizeof(name), "thr.rwlock.t%d", teams[t]);
+		run_team(name, teams[t], op_rwlock);
+	}
+	pthread_rwlock_destroy(&rwl);
+
+	cv_turn = 0;
+	pp_start(cv_partner, NULL);
+	throughput("thr.cond.pingpong", op_cond, NULL);
+	cv_stop();
+
+	if (sem_init(&sem[0], 0, 0) != 0 || sem_init(&sem[1], 0, 0) != 0)
+		die("sem_init");
+	pp_start(sem_partner, NULL);
+	throughput("thr.sem.pingpong", op_sem, NULL);
+	pp_stop = 1;
+	sem_post(&sem[1]);
+	pcheck(pthread_join(pp_tid, NULL), "pthread_join");
+	sem_destroy(&sem[0]);
+	sem_destroy(&sem[1]);
+
+	throughput("thr.create", op_create, NULL);
+}
+
+/* event.*: pipes, descriptors in one kqueue, poll set, and select set. */
+static int ev_rd[UB_P6_PIPES], ev_wr[UB_P6_PIPES];
+static int ev_kq, ev_next;
+
+static void
+ev_cycle_write(int i)
+{
+	char c = 0;
+
+	if (write(ev_wr[i], &c, 1) != 1)
+		die("pipe write");
+}
+
+static void
+ev_cycle_read(int i)
+{
+	char c;
+
+	if (read(ev_rd[i], &c, 1) != 1)
+		die("pipe read");
+}
+
+/* One byte into the next pipe, kevent finds it, the byte read back. */
+static uint64_t
+op_kevent(void *arg)
+{
+	int n = *(int *)arg;
+	struct kevent ev;
+
+	for (int i = 0; i < 100; i++) {
+		int p = ev_next;
+
+		ev_next = (ev_next + 1) % n;
+		ev_cycle_write(p);
+		if (kevent(ev_kq, NULL, 0, &ev, 1, NULL) != 1 ||
+		    (int)ev.ident != ev_rd[p])
+			die("kevent");
+		ev_cycle_read(p);
+	}
+	return (100);
+}
+
+static struct pollfd ev_pfd[UB_P6_PIPES];
+
+static uint64_t
+op_poll(void *arg __unused)
+{
+	for (int i = 0; i < 10; i++) {
+		int p = ev_next;
+
+		ev_next = (ev_next + 1) % UB_P6_PIPES;
+		ev_cycle_write(p);
+		if (poll(ev_pfd, UB_P6_PIPES, -1) != 1 ||
+		    ev_pfd[p].revents != POLLIN)
+			die("poll");
+		ev_cycle_read(p);
+	}
+	return (10);
+}
+
+static fd_set ev_set;
+static int ev_maxfd;
+
+static uint64_t
+op_select(void *arg __unused)
+{
+	fd_set rd;
+
+	for (int i = 0; i < 10; i++) {
+		int p = ev_next;
+
+		ev_next = (ev_next + 1) % UB_P6_PIPES;
+		ev_cycle_write(p);
+		rd = ev_set;
+		if (select(ev_maxfd + 1, &rd, NULL, NULL, NULL) != 1 ||
+		    !FD_ISSET(ev_rd[p], &rd))
+			die("select");
+		ev_cycle_read(p);
+	}
+	return (10);
+}
+
+/* EVFILT_USER: each side triggers the other's event and waits for its own. */
+static int user_kq[2];
+
+static void
+user_trigger(int side)
+{
+	struct kevent ev;
+
+	EV_SET(&ev, 1, EVFILT_USER, 0, NOTE_TRIGGER, 0, NULL);
+	if (kevent(user_kq[side], &ev, 1, NULL, 0, NULL) != 0)
+		die("kevent NOTE_TRIGGER");
+}
+
+static void
+user_wait(int side)
+{
+	struct kevent ev;
+
+	if (kevent(user_kq[side], NULL, 0, &ev, 1, NULL) != 1)
+		die("kevent EVFILT_USER");
+}
+
+static void *
+user_partner(void *arg __unused)
+{
+	bind_thread(2);
+	for (;;) {
+		user_wait(1);
+		if (pp_stop)
+			break;
+		user_trigger(0);
+	}
+	return (NULL);
+}
+
+static uint64_t
+op_user(void *arg __unused)
+{
+	for (int i = 0; i < 100; i++) {
+		user_trigger(1);
+		user_wait(0);
+	}
+	return (100);
+}
+
+/* EVFILT_TIMER: a one-shot timer 1 us ahead, armed and waited for. */
+static uint64_t
+op_timer(void *arg __unused)
+{
+	struct kevent ev;
+
+	for (int i = 0; i < 10; i++) {
+		EV_SET(&ev, 1, EVFILT_TIMER, EV_ADD | EV_ONESHOT, NOTE_USECONDS,
+		    1, NULL);
+		if (kevent(ev_kq, &ev, 1, &ev, 1, NULL) != 1)
+			die("kevent EVFILT_TIMER");
+	}
+	return (10);
+}
+
+static void
+suite_event(void)
+{
+	struct kevent ev;
+	int one = 1, all = UB_P6_PIPES;
+
+	for (int i = 0; i < UB_P6_PIPES; i++) {
+		int p[2];
+
+		if (pipe(p) != 0)
+			die("pipe");
+		ev_rd[i] = p[0];
+		ev_wr[i] = p[1];
+		ev_pfd[i].fd = p[0];
+		ev_pfd[i].events = POLLIN;
+		FD_SET(p[0], &ev_set);
+		if (p[0] > ev_maxfd)
+			ev_maxfd = p[0];
+	}
+
+	if ((ev_kq = kqueue()) < 0)
+		die("kqueue");
+	EV_SET(&ev, ev_rd[0], EVFILT_READ, EV_ADD, 0, 0, NULL);
+	if (kevent(ev_kq, &ev, 1, NULL, 0, NULL) != 0)
+		die("kevent EV_ADD");
+	ev_next = 0;
+	throughput("event.kevent.pipe1", op_kevent, &one);
+	for (int i = 1; i < UB_P6_PIPES; i++) {
+		EV_SET(&ev, ev_rd[i], EVFILT_READ, EV_ADD, 0, 0, NULL);
+		if (kevent(ev_kq, &ev, 1, NULL, 0, NULL) != 0)
+			die("kevent EV_ADD");
+	}
+	ev_next = 0;
+	throughput("event.kevent.pipe1000", op_kevent, &all);
+	close(ev_kq);
+
+	ev_next = 0;
+	throughput("event.poll1000", op_poll, NULL);
+	ev_next = 0;
+	throughput("event.select1000", op_select, NULL);
+	for (int i = 0; i < UB_P6_PIPES; i++) {
+		close(ev_rd[i]);
+		close(ev_wr[i]);
+	}
+
+	for (int s = 0; s < 2; s++) {
+		if ((user_kq[s] = kqueue()) < 0)
+			die("kqueue");
+		EV_SET(&ev, 1, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, NULL);
+		if (kevent(user_kq[s], &ev, 1, NULL, 0, NULL) != 0)
+			die("kevent EVFILT_USER");
+	}
+	pp_start(user_partner, NULL);
+	throughput("event.user.pingpong", op_user, NULL);
+	pp_stop = 1;
+	user_trigger(1);
+	pcheck(pthread_join(pp_tid, NULL), "pthread_join");
+	close(user_kq[0]);
+	close(user_kq[1]);
+
+	if ((ev_kq = kqueue()) < 0)
+		die("kqueue");
+	throughput("event.timer", op_timer, NULL);
+	close(ev_kq);
+}
+
+/*
+ * unix.*: a partner process on CPU 2 at the other end of a socket pair.
+ * It echoes (`echo`), or reads and discards, until end of file; for
+ * unix.dgram it answers each window of datagrams with one byte (a full
+ * datagram socket fails the send with ENOBUFS rather than blocking); for
+ * unix.rights it receives each descriptor and closes it.
+ */
+#define	UB_DGRAM_WINDOW	16
+
+enum partner_mode { P_ECHO, P_SINK, P_DGRAM, P_RIGHTS };
+
+static pid_t
+sock_partner(int fd, int other, size_t chunk, enum partner_mode mode)
+{
+	static char buf[UB_PIPE_BW];
+	pid_t pid = fork();
+	ssize_t n;
+
+	if (pid < 0)
+		die("fork");
+	if (pid != 0) {
+		close(other);
+		return (pid);
+	}
+	close(fd);
+	bind_cpu(2);
+	if (mode == P_RIGHTS) {
+		for (;;) {
+			char c;
+			struct iovec iov = { &c, 1 };
+			union {
+				struct cmsghdr h;
+				char space[CMSG_SPACE(sizeof(int))];
+			} cm;
+			struct msghdr msg = { .msg_iov = &iov, .msg_iovlen = 1,
+			    .msg_control = &cm, .msg_controllen = sizeof(cm) };
+
+			n = recvmsg(other, &msg, 0);
+			if (n <= 0)
+				_exit(n == 0 ? 0 : 1);
+			if (msg.msg_controllen < CMSG_LEN(sizeof(int)) ||
+			    cm.h.cmsg_type != SCM_RIGHTS)
+				_exit(1);
+			close(*(int *)CMSG_DATA(&cm.h));
+		}
+	}
+	if (mode == P_DGRAM) {
+		for (;;) {
+			for (int i = 0; i < UB_DGRAM_WINDOW; i++)
+				if (read(other, buf, chunk) <= 0)
+					_exit(1);
+			if (write(other, buf, 1) != 1)
+				_exit(1);
+		}
+	}
+	while ((n = read(other, buf, chunk)) > 0)
+		if (mode == P_ECHO && write(other, buf, (size_t)n) != n)
+			_exit(1);
+	_exit(n == 0 ? 0 : 1);
+}
+
+static int sock_fd;
+
+static uint64_t
+op_sock_pingpong(void *arg __unused)
+{
+	char c = 0;
+
+	for (int i = 0; i < 100; i++)
+		if (write(sock_fd, &c, 1) != 1 || read(sock_fd, &c, 1) != 1)
+			die("socket ping-pong");
+	return (100);
+}
+
+static uint64_t
+op_sock_write(void *arg)
+{
+	static char buf[UB_PIPE_BW];
+	size_t len = *(size_t *)arg;
+
+	for (int i = 0; i < 16; i++)
+		if (write(sock_fd, buf, len) != (ssize_t)len)
+			die("socket write");
+	return (16);
+}
+
+/* unix.dgram: a window of 64-byte datagrams, then the partner's answer. */
+static uint64_t
+op_dgram(void *arg __unused)
+{
+	char buf[64] = { 0 };
+
+	for (int i = 0; i < UB_DGRAM_WINDOW; i++)
+		if (write(sock_fd, buf, sizeof(buf)) != sizeof(buf))
+			die("datagram write");
+	if (read(sock_fd, buf, sizeof(buf)) != 1)
+		die("datagram answer");
+	return (UB_DGRAM_WINDOW);
+}
+
+static int rights_fd;
+
+static uint64_t
+op_rights(void *arg __unused)
+{
+	char c = 0;
+	struct iovec iov = { &c, 1 };
+	union {
+		struct cmsghdr h;
+		char space[CMSG_SPACE(sizeof(int))];
+	} cm;
+	struct msghdr msg = { .msg_iov = &iov, .msg_iovlen = 1,
+	    .msg_control = &cm, .msg_controllen = sizeof(cm) };
+
+	memset(&cm, 0, sizeof(cm));
+	cm.h.cmsg_len = CMSG_LEN(sizeof(int));
+	cm.h.cmsg_level = SOL_SOCKET;
+	cm.h.cmsg_type = SCM_RIGHTS;
+	memcpy(CMSG_DATA(&cm.h), &rights_fd, sizeof(int));
+	for (int i = 0; i < 100; i++)
+		if (sendmsg(sock_fd, &msg, 0) != 1)
+			die("sendmsg SCM_RIGHTS");
+	return (100);
+}
+
+static struct sockaddr_un sun_addr;
+
+/*
+ * unix.connect: socket, connect, the partner's one-byte greeting once it
+ * has accepted, close. (Unpaced, the client overflows the listen queue,
+ * and a UNIX connect to a full queue is refused.)
+ */
+static uint64_t
+op_connect(void *arg __unused)
+{
+	for (int i = 0; i < 10; i++) {
+		int s = socket(AF_UNIX, SOCK_STREAM, 0);
+		char c;
+
+		if (s < 0)
+			die("socket");
+		if (connect(s, (struct sockaddr *)&sun_addr,
+		    sizeof(sun_addr)) != 0)
+			die("connect");
+		if (read(s, &c, 1) != 1)
+			die("greeting");
+		close(s);
+	}
+	return (10);
+}
+
+static void
+sock_pair(int type, size_t chunk, enum partner_mode mode, pid_t *pid)
+{
+	int sv[2];
+
+	if (socketpair(AF_UNIX, type, 0, sv) != 0)
+		die("socketpair");
+	sock_fd = sv[0];
+	*pid = sock_partner(sv[0], sv[1], chunk, mode);
+}
+
+static void
+sock_done(pid_t pid)
+{
+	close(sock_fd);
+	reap(pid);
+}
+
+static void
+suite_unix(void)
+{
+	size_t small = 4096, big = UB_PIPE_BW;
+	pid_t pid;
+	int l;
+
+	sock_pair(SOCK_STREAM, 1, P_ECHO, &pid);
+	throughput("unix.stream.pingpong", op_sock_pingpong, NULL);
+	sock_done(pid);
+	sock_pair(SOCK_SEQPACKET, 1, P_ECHO, &pid);
+	throughput("unix.seqpacket.pingpong", op_sock_pingpong, NULL);
+	sock_done(pid);
+	sock_pair(SOCK_STREAM, UB_PIPE_BW, P_SINK, &pid);
+	throughput("unix.stream.bw4k", op_sock_write, &small);
+	throughput("unix.stream.bw64k", op_sock_write, &big);
+	sock_done(pid);
+	sock_pair(SOCK_DGRAM, UB_PIPE_BW, P_DGRAM, &pid);
+	throughput("unix.dgram", op_dgram, NULL);
+	/* The partner sees no end of file on a datagram socket. */
+	kill(pid, SIGKILL);
+	close(sock_fd);
+	waitpid(pid, NULL, 0);
+	if ((rights_fd = open("/dev/null", O_RDONLY)) < 0)
+		die("open /dev/null");
+	sock_pair(SOCK_STREAM, 0, P_RIGHTS, &pid);
+	throughput("unix.rights", op_rights, NULL);
+	sock_done(pid);
+	close(rights_fd);
+
+	sun_addr.sun_family = AF_UNIX;
+	strlcpy(sun_addr.sun_path, UB_SOCK, sizeof(sun_addr.sun_path));
+	unlink(UB_SOCK);
+	if ((l = socket(AF_UNIX, SOCK_STREAM, 0)) < 0 ||
+	    bind(l, (struct sockaddr *)&sun_addr, sizeof(sun_addr)) != 0 ||
+	    listen(l, 128) != 0)
+		die("listen");
+	if ((pid = fork()) < 0)
+		die("fork");
+	if (pid == 0) {
+		int s;
+
+		bind_cpu(2);
+		while ((s = accept(l, NULL, NULL)) >= 0) {
+			if (write(s, "", 1) != 1)
+				_exit(1);
+			close(s);
+		}
+		_exit(1);
+	}
+	throughput("unix.connect", op_connect, NULL);
+	kill(pid, SIGKILL);
+	waitpid(pid, NULL, 0);
+	close(l);
+	unlink(UB_SOCK);
+}
+
+/*
+ * pty.*: a pair from posix_openpt. A partner process on CPU 2 reads one
+ * side and discards; this process writes the other. pty.relay adds a relay
+ * process between the pty and a pipe, as script(1) is.
+ */
+static int pty_master, pty_slave;
+
+static void
+pty_open(int raw)
+{
+	struct termios t;
+	const char *name;
+
+	if ((pty_master = posix_openpt(O_RDWR | O_NOCTTY)) < 0 ||
+	    grantpt(pty_master) != 0 || unlockpt(pty_master) != 0 ||
+	    (name = ptsname(pty_master)) == NULL ||
+	    (pty_slave = open(name, O_RDWR | O_NOCTTY)) < 0)
+		die("pty");
+	if (tcgetattr(pty_slave, &t) != 0)
+		die("tcgetattr");
+	if (raw)
+		cfmakeraw(&t);
+	else
+		t.c_lflag &= ~(tcflag_t)(ECHO | ECHOE | ECHOK | ECHONL);
+	if (tcsetattr(pty_slave, TCSANOW, &t) != 0)
+		die("tcsetattr");
+}
+
+static pid_t
+pty_reader(int fd)
+{
+	static char buf[UB_PIPE_BW];
+	pid_t pid = fork();
+	ssize_t n;
+
+	if (pid < 0)
+		die("fork");
+	if (pid != 0)
+		return (pid);
+	bind_cpu(2);
+	while ((n = read(fd, buf, sizeof(buf))) > 0)
+		;
+	_exit(0);
+}
+
+static int pty_out;
+
+static uint64_t
+op_pty_write(void *arg)
+{
+	static char buf[4096];
+	size_t len = *(size_t *)arg;
+
+	if (buf[0] == 0) {
+		memset(buf, 'x', sizeof(buf));
+		buf[80] = '\n';
+	}
+	for (int i = 0; i < 16; i++)
+		if (write(pty_out, buf, len) != (ssize_t)len)
+			die("pty write");
+	return (16);
+}
+
+static void
+pty_close(pid_t pid)
+{
+	kill(pid, SIGKILL);
+	waitpid(pid, NULL, 0);
+	close(pty_master);
+	close(pty_slave);
+}
+
+static void
+suite_pty(void)
+{
+	size_t block = 4096, line = 81;
+	pid_t pid, relay;
+	int p[2];
+
+	/* Output: raw writes to the slave, read from the master. */
+	pty_open(1);
+	pid = pty_reader(pty_master);
+	pty_out = pty_slave;
+	throughput("pty.raw", op_pty_write, &block);
+	pty_close(pid);
+
+	/* Input: lines to the master, read a line at a time on the slave. */
+	pty_open(0);
+	pid = pty_reader(pty_slave);
+	pty_out = pty_master;
+	throughput("pty.canon", op_pty_write, &line);
+	pty_close(pid);
+
+	/*
+	 * Relay: writes to the slave; the relay polls the master and its
+	 * input pipe as script does, and copies the master to a pipe whose
+	 * far end the reader drains.
+	 */
+	pty_open(1);
+	if (pipe(p) != 0)
+		die("pipe");
+	pid = pty_reader(p[0]);
+	if ((relay = fork()) < 0)
+		die("fork");
+	if (relay == 0) {
+		static char buf[UB_PIPE_BW];
+		struct pollfd pfd[2] = { { pty_master, POLLIN, 0 },
+		    { STDIN_FILENO, 0, 0 } };
+		ssize_t n;
+
+		bind_cpu(3);
+		close(p[0]);
+		for (;;) {
+			if (poll(pfd, 2, -1) < 0)
+				_exit(1);
+			if ((n = read(pty_master, buf, sizeof(buf))) <= 0 ||
+			    write(p[1], buf, (size_t)n) != n)
+				_exit(1);
+		}
+	}
+	close(p[0]);
+	close(p[1]);
+	pty_out = pty_slave;
+	throughput("pty.relay", op_pty_write, &block);
+	kill(relay, SIGKILL);
+	waitpid(relay, NULL, 0);
+	pty_close(pid);
+}
+
+/* exec.*: vfork, exec a program of base with output discarded, wait. */
+static uint64_t
+op_spawn(void *arg)
+{
+	char *const *argv = arg;
+	char *envp[] = { (char *)"PATH=/sbin:/bin:/usr/sbin:/usr/bin", NULL };
+	pid_t pid = vfork();
+
+	if (pid < 0)
+		die("vfork");
+	if (pid == 0) {
+		int null = open("/dev/null", O_WRONLY);
+
+		if (null >= 0) {
+			dup2(null, 1);
+			dup2(null, 2);
+		}
+		execve(argv[0], argv, envp);
+		_exit(127);
+	}
+	reap(pid);
+	return (1);
+}
+
+static void
+suite_exec(void)
+{
+	char *truth[] = { (char *)"/usr/bin/true", NULL };
+	char *tar[] = { (char *)"/usr/bin/tar", (char *)"--version", NULL };
+	char *service[] = { (char *)"/usr/sbin/service", (char *)"-e", NULL };
+
+	throughput("exec.true", op_spawn, truth);
+	throughput("exec.lib10", op_spawn, tar);
+	throughput("exec.rcsubr", op_spawn, service);
+}
+
+static void
+suite_p6(void)
+{
+	signal(SIGPIPE, SIG_IGN);
+	suite_thr();
+	suite_event();
+	suite_unix();
+	suite_pty();
+	suite_exec();
+}
+#endif /* UB_P6 */
+
 int
 main(int argc, char **argv)
 {
@@ -1061,8 +1988,10 @@ main(int argc, char **argv)
 	if (argc == 5 && strcmp(argv[1], "chain") == 0)
 		return (exec_chain(argv));
 	if (argc != 2 || (strcmp(argv[1], "p4") != 0 &&
-	    strcmp(argv[1], "p5") != 0 && strcmp(argv[1], "vt") != 0)) {
-		fprintf(stderr, "usage: ubench p4 | p5 | vt\n");
+	    strcmp(argv[1], "p5") != 0 && strcmp(argv[1], "vt") != 0 &&
+	    !(UB_HAS_P6 && strcmp(argv[1], "p6") == 0))) {
+		fprintf(stderr, "usage: ubench p4 | p5 | vt%s\n",
+		    UB_HAS_P6 ? " | p6" : "");
 		return (2);
 	}
 	printf("kbench begin %s cpus=%ld\n", argv[1],
@@ -1073,8 +2002,12 @@ main(int argc, char **argv)
 		suite_p4();
 	else if (strcmp(argv[1], "p5") == 0)
 		suite_p5();
-	else
+	else if (strcmp(argv[1], "vt") == 0)
 		suite_vt();
+#ifdef UB_P6
+	else
+		suite_p6();
+#endif
 	printf("kbench end %s\n", argv[1]);
 	return (0);
 }

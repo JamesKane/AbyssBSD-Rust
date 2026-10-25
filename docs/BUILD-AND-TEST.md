@@ -80,11 +80,12 @@ loader prints before symbolizing addresses.
 Performance comparison against FreeBSD (on the build server; PERFORMANCE.md §6):
 
 ```
-cargo xtask --remote perf [--suite p2|p3|p4|p5|vt|diag] [--runs N] [--prepare]
+cargo xtask --remote perf [--suite p2|p3|p4|p5|p6|vt|diag] [--runs N] [--prepare]
                           [--freebsd-only | --abyss-only [--prof [--prof-cpu N]]]
 cargo xtask --remote fetch-base [--arch <a|all>]   # base.txz, SHA-256 pinned: /rescue image, sysroot
 cargo xtask --remote freebsd-shell                 # the boot-to-shell script against FreeBSD
 cargo xtask --remote freebsd-multiuser             # the multi-user login script against FreeBSD
+cargo xtask --remote kyua-baseline [--resume]      # FreeBSD's kyua results, per test case, in bhyve
 ```
 
 `--freebsd-only` records FreeBSD's numbers alone, for a suite AbyssBSD cannot run yet (`p4`
@@ -204,7 +205,7 @@ inside `tests/`.
 | **Property / fuzz** | ELF, GPT, FAT, UFS2, AML, ACPI tables, packet parsers. In-house harness: deterministic PRNG, coverage-free mutation, minimization | Host | Nightly on the server (20 threads) |
 | **Kernel unit** | `#[ktest]` functions compiled into a test kernel, run on boot, results over serial | QEMU, both arches | Every commit |
 | **Boot** | Loader → kernel → `/rescue/sh` → single-user → multi-user `login:` with expect scripts | QEMU both arches, bhyve | Every commit (fast subset), nightly (full) |
-| **Compat** | FreeBSD `kyua` suite inside AbyssBSD, with pass/fail tracked per test against a baseline | QEMU + bhyve | Nightly |
+| **Compat** | FreeBSD `kyua` suite inside AbyssBSD, with pass/fail tracked per test against a baseline | bhyve (arm64: the Orange Pi 6 Plus, from P6.11) | Nightly |
 | **Differential** | Same program on AbyssBSD vs FreeBSD 15.1 (server). Compare output and `kdump` traces | Server | Nightly |
 | **Performance** | Each phase's benchmark suite on AbyssBSD vs FreeBSD 15.1, same machine and configuration. Fails if any benchmark is more than 2% slower ([PERFORMANCE.md](PERFORMANCE.md)) | bhyve on the server; physical machines from P6 | Nightly, and at each phase exit |
 | **Corpus** | `acpidump` DSDT/SSDT blobs from real machines through the AML interpreter. `fsck_ffs` validation of images AbyssBSD wrote | Host + server | Every commit |
@@ -242,6 +243,16 @@ lines outside `tests/multiuser/absent.txt` fail the case, and are written to
 (`XFAIL`), which does not fail the tier. `cargo xtask --remote freebsd-multiuser` runs the same
 script against FreeBSD 15.1's release image configured the same way, on bhyve and QEMU (amd64)
 and QEMU (arm64).
+
+`cargo xtask --remote kyua-baseline` records FreeBSD 15.1's own kyua results in bhyve, where
+AbyssBSD's are compared (8 CPUs, `parallelism=8`). Not under QEMU: emulated, the suite takes days
+and its timing-sensitive tests measure the emulator; arm64's baseline is taken on the Orange Pi 6
+Plus. The release image ships `kyua` and `/usr/tests`. An `rc.local` in a copy of the
+multi-user image runs the suite one directory at a time (`bin/cat`, `sys/kern`, ...), keeping each
+report on the guest's disk. A panic reboots the guest, the harness boots it again, and the
+directory it was in is recorded as `crashed`. The results, one `<program>:<case>` per line with
+kyua's result and reason, go to `~/abyss/kyua/` on the server and are kept in
+`tests/kyua/freebsd/`. It holds perf's lock, since its eight busy vCPUs would skew a benchmark run.
 
 Every machine in the boot tier has the USB and input set ([USB.md](USB.md) §9; bhyve's
 `xhci,tablet`). `--no-usb` leaves it out for a quicker run, and `--case NAME` runs one case.

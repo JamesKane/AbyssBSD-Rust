@@ -524,9 +524,11 @@ check fails.
   `logger` (found in `/var/log/messages`), and a cron job, and shuts down with
   `shutdown -p now`; the image then passes `fsck_ffs -f -n` with zero errors. The first-use log
   holds nothing outside `absent.txt` (§2). `freebsd-multiuser` runs the same script on FreeBSD.
-- **Compat.** kyua's suite runs nightly in QEMU (both arches) and bhyve, per test case, against
-  FreeBSD 15.1's results on the same machines, with every expected failure listed with a reason in
-  `tests/kyua/known-failures.txt`.
+- **Compat.** kyua's suite runs nightly in bhyve, per test case, against FreeBSD 15.1's results in
+  the same VM, with every expected failure listed with a reason in `tests/kyua/known-failures.txt`.
+  Not under QEMU: emulated, the suite takes days, and its timing-sensitive tests measure the
+  emulator. arm64's results come from the Orange Pi 6 Plus once it runs AbyssBSD (P6.11), against
+  FreeBSD on the same board.
 - **Differential.** Programs and their `ktrace`/`kdump` traces on AbyssBSD and FreeBSD.
 
 ## 15. Hardware bring-up
@@ -565,4 +567,4 @@ FreeBSD on bare metal):
 | `exec` | Dynamic `execve` of `/usr/bin/true` (rtld with `libc` alone) and of a program linking ten libraries; `sh -c` running a shell-heavy script (`rc.subr` functions over the `rc.d` tree, timed) |
 
 kyua's wall time is recorded and reported as a diagnostic, not gated (its tests sleep).
-tests/perf/README.md will hold the exact workloads (P6.0).
+The exact workloads are in [tests/perf/README.md](../tests/perf/README.md#suite-p6) (suite `p6`).
