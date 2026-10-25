@@ -84,6 +84,7 @@ cargo xtask --remote perf [--suite p2|p3|p4|p5|vt|diag] [--runs N] [--prepare]
                           [--freebsd-only | --abyss-only [--prof [--prof-cpu N]]]
 cargo xtask --remote fetch-base [--arch <a|all>]   # base.txz, SHA-256 pinned: /rescue image, sysroot
 cargo xtask --remote freebsd-shell                 # the boot-to-shell script against FreeBSD
+cargo xtask --remote freebsd-multiuser             # the multi-user login script against FreeBSD
 ```
 
 `--freebsd-only` records FreeBSD's numbers alone, for a suite AbyssBSD cannot run yet (`p4`
@@ -228,6 +229,19 @@ After these come the shell cases (`x86_64-shell`, `aarch64-shell`, `x86_64-bhyve
 screen (`screendump`, each cell matched against the console font). It also types on the virtio
 keyboard, reads a USB mouse's evdev node while QMP moves it, and types `exit`, which must power
 the machine off.
+
+Last come the multi-user cases (docs/MULTIUSER.md §14), on FreeBSD hosts only (`makefs`):
+`x86_64-multiuser` and `aarch64-multiuser` in QEMU, and `x86_64-bhyve-multiuser`. Each boots a
+UFS2 root holding all of `base.txz` as FreeBSD's installer leaves it (`rc.conf`, time zone,
+`fstab`; root with base's empty password) with `boot_multicons=YES`, and runs
+`xtask/src/multiuser.rs`'s script: root logs in on `ttyv0` (typed over QMP, in QEMU) and on the
+serial console, checks that `syslogd`, `cron`, and `devd` run, uses a pty, `logger`, and a cron
+job, and shuts down with `shutdown -p now`; the root must be left clean. The console's `first use:`
+lines outside `tests/multiuser/absent.txt` fail the case, and are written to
+`build/<arch>/multiuser*-first-use.txt` either way. Until P6.9 these cases are expected to fail
+(`XFAIL`), which does not fail the tier. `cargo xtask --remote freebsd-multiuser` runs the same
+script against FreeBSD 15.1's release image configured the same way, on bhyve and QEMU (amd64)
+and QEMU (arm64).
 
 Every machine in the boot tier has the USB and input set ([USB.md](USB.md) §9; bhyve's
 `xhci,tablet`). `--no-usb` leaves it out for a quicker run, and `--case NAME` runs one case.

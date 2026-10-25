@@ -1,0 +1,6 @@
+# Interfaces that FreeBSD 15.1 lacks too, which programs on the multi-user boot
+# only probe (docs/MULTIUSER.md §2). The multi-user boot test fails on any
+# `first use:` line not listed here.
+#
+# One entry per line: what follows "first use: " up to " by <program>", then
+# a comment naming the FreeBSD source that shows FreeBSD answers the same way.

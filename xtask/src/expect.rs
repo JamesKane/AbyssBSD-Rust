@@ -31,7 +31,7 @@ pub(crate) struct Step {
     pub(crate) settle: Duration,
 }
 
-const fn step(send: &'static str, expect: &'static str, what: &'static str) -> Step {
+pub(crate) const fn step(send: &'static str, expect: &'static str, what: &'static str) -> Step {
     Step {
         send,
         expect,
@@ -68,7 +68,7 @@ const fn job_then_settle(send: &'static str, expect: &'static str, what: &'stati
 
 /// The prompt the script sets. Its command line is quoted so that the
 /// echoed command never matches it.
-const PROMPT: &str = "@sh> ";
+pub(crate) const PROMPT: &str = "@sh> ";
 
 /// The boot-to-shell script (ROADMAP P4 exit). It starts at the first `#`
 /// prompt of `/rescue/sh`, with `/rescue` holding the commands.

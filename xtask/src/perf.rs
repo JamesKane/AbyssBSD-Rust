@@ -26,6 +26,7 @@ use crate::image;
 use crate::qemu::{Outcome, Vm, Vmm};
 use crate::util::{self, Result};
 const VM_IMAGE: &str = "FreeBSD-15.1-RELEASE-amd64-ufs.raw.xz";
+const VM_IMAGE_ARM64: &str = "FreeBSD-15.1-RELEASE-arm64-aarch64-ufs.raw.xz";
 /// Bumped whenever [`prepare_image`] changes what it writes.
 const PREP_VERSION: &str = "17";
 /// The bound on a component's geometric mean of AbyssBSD's medians over
@@ -322,6 +323,76 @@ pub(crate) fn freebsd_single_user_image() -> Result<(PathBuf, PathBuf)> {
     })?;
     fs::rename(&tmp, &img)?;
     fs::write(&stamp, PREP_VERSION)?;
+    Ok((img, dirs.perf))
+}
+
+/// Bumped whenever [`freebsd_multiuser_image`] changes what it writes.
+const MULTIUSER_PREP_VERSION: &str = "1";
+
+/// FreeBSD 15.1's release VM image for `arch`, configured as its installer
+/// would leave it (docs/MULTIUSER.md §14, [`crate::multiuser`]): the
+/// installer's `rc.conf` and time zone, both consoles (`boot_multicons`,
+/// the serial one primary, so `getty` runs on `ttyu0` and `ttyv0`), and
+/// no first-boot scripts. Returns the image and the directory to work in.
+pub(crate) fn freebsd_multiuser_image(arch: Arch) -> Result<(PathBuf, PathBuf)> {
+    let dirs = Dirs::new();
+    fs::create_dir_all(&dirs.perf)?;
+    let (xz, sums) = match arch {
+        Arch::X86_64 => (dirs.dist.join(VM_IMAGE), dirs.dist.join("CHECKSUM.SHA256")),
+        Arch::Aarch64 => (
+            dirs.dist.join("arm64").join(VM_IMAGE_ARM64),
+            dirs.dist.join("arm64/CHECKSUM.SHA256"),
+        ),
+    };
+    let img = dirs
+        .perf
+        .join(format!("freebsd-{RELEASE}-{arch}-multiuser.img"));
+    let stamp = img.with_extension("img.prepared");
+    if img.exists() && fs::read_to_string(&stamp).is_ok_and(|s| s.trim() == MULTIUSER_PREP_VERSION)
+    {
+        return Ok((img, dirs.perf));
+    }
+    let name = xz.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    eprintln!("xtask: preparing {} from {}", img.display(), xz.display());
+    verify(&xz, name, &sums)?;
+    let tmp = img.with_extension("img.tmp");
+    let status = Command::new("xz")
+        .arg("-dc")
+        .arg(&xz)
+        .stdout(fs::File::create(&tmp)?)
+        .status()?;
+    if !status.success() {
+        return Err("xz failed".into());
+    }
+    with_root(&dirs, &tmp, |mnt| {
+        let staging = mnt.with_file_name("staging");
+        fs::create_dir_all(&staging)?;
+        let loader = "autoboot_delay=\"0\"\nbeastie_disable=\"YES\"\n\
+                      boot_multicons=\"YES\"\nboot_serial=\"YES\"\n\
+                      console=\"comconsole,efi\"\n";
+        let mut files = crate::multiuser::installed_files(mnt)?;
+        files.push(("boot/loader.conf.local", 0o644, loader.as_bytes().to_vec()));
+        for (path, mode, data) in files {
+            let src = staging.join(path.replace('/', "_"));
+            fs::write(&src, data)?;
+            let dst = mnt.join(path);
+            doas(&[
+                "install",
+                "-o",
+                "root",
+                "-g",
+                "wheel",
+                "-m",
+                &format!("{mode:o}"),
+                &src.to_string_lossy(),
+                &dst.to_string_lossy(),
+            ])?;
+        }
+        doas(&["rm", "-f", &mnt.join("firstboot").to_string_lossy()])?;
+        Ok(())
+    })?;
+    fs::rename(&tmp, &img)?;
+    fs::write(&stamp, MULTIUSER_PREP_VERSION)?;
     Ok((img, dirs.perf))
 }
 

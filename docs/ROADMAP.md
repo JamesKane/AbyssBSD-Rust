@@ -1397,7 +1397,7 @@ jail tree, and no networking until P7 (`AF_INET` behaves as on a kernel without 
 
 **Reference configuration.** The P5 machines (QEMU `q35` and `virt`, bhyve) with the USB and input
 set, and an NVMe disk holding a GPT with the ESP and a UFS2 root with all of FreeBSD 15.1's
-`base.txz`, `/etc` as `bsdinstall` leaves it (`rc.conf` with a hostname, `fstab`, a root password).
+`base.txz`, `/etc` as `bsdinstall` leaves it (`rc.conf` with a hostname, the time zone, `fstab`).
 The FreeBSD 15.1 guests boot the same disks for the baselines. From P6.11, the X870E and the
 Orange Pi 6 Plus.
 
@@ -1427,6 +1427,11 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
 - `cargo xtask fs-image --base` builds the reference disk (all of `base.txz`, `bsdinstall`'s `/etc`);
   the `<arch>-multiuser` boot cases exist, expected to fail, with the serial and `ttyv0` login
   scripts.
+  - Done 2026-10-24: the installed root (`image::build_installed_root`: the UFS2 root with
+    `bsdinstall`'s `rc.conf` and time zone; root keeps base's empty password), the
+    `x86_64-multiuser`, `aarch64-multiuser`, and `x86_64-bhyve-multiuser` cases (`XFAIL` until
+    P6.9), and `cargo xtask --remote freebsd-multiuser`, whose run of the same script passes on
+    FreeBSD 15.1 in bhyve, QEMU amd64, and QEMU arm64.
 - kyua built and its FreeBSD 15.1 results recorded per test case on each machine.
 - The P6 suite in `ubench` (MULTIUSER.md §16) with FreeBSD's baseline in bhyve.
 

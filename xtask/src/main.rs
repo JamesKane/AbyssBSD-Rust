@@ -13,6 +13,7 @@ mod expect;
 mod fattest;
 mod fs;
 mod image;
+mod multiuser;
 mod perf;
 mod pjdfstest;
 mod policy;
@@ -46,6 +47,7 @@ commands:
                                                          compare with FreeBSD in bhyve (server only)
   ubench      [--arch <a|all>] [--runs N] [--bhyve]      the P4 suite on AbyssBSD alone (QEMU, or bhyve on the server)
   freebsd-shell                                          run the boot-to-shell script against FreeBSD (server only)
+  freebsd-multiuser [--arch <a|all>] [--vmm qemu|bhyve] run the multi-user login script against FreeBSD (server only)
   fetch-base  [--arch <a|all>]                           FreeBSD base.txz: /rescue image, sysroot (server only)
   acpidump    --arch <a> [--vmm qemu|bhyve] [--machine M] --out DIR   capture a VM's ACPI tables
   freebsd-record [--out DIR] [--usb]                     record FreeBSD's device tree in bhyve; --usb: its USB
@@ -103,6 +105,7 @@ fn run() -> Result<()> {
         "ufs-verify" => ufsverify::cmd(args),
         "fetch-base" => base::cmd(args),
         "freebsd-shell" => expect::cmd_freebsd_shell(args),
+        "freebsd-multiuser" => multiuser::cmd_freebsd_multiuser(args),
         "acpidump" => acpidump::cmd(args),
         "check" => test::cmd_check(args),
         "policy" => policy::cmd(args),

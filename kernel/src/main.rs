@@ -179,6 +179,8 @@ fn run_shell(s: &sched::Sleepable) {
     }
     match proc::Process::spawn_session(s, b"/rescue/sh", &[b"-sh"], ENV, None, console.as_deref()) {
         Ok(p) => {
+            // The multi-user boot test gives up on this line.
+            kprintln!("shell: /rescue/sh started (no init until P6.9)");
             let how = p.wait(s);
             kprintln!("shell: exited ({how:?})");
         }

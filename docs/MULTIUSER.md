@@ -518,10 +518,12 @@ check fails.
 - **User tests.** `tests/user/*.c`, built static and dynamic on the server, each passing on
   FreeBSD 15.1 too, as P4–P5's do.
 - **Boot tier.** New `<arch>-multiuser` cases: the UFS2 image with all of `base.txz` boots to
-  `login:` on the serial console and on `ttyv0` (read back from `screendump`), logs in as root with
-  the password set in the image, runs a short command script (`ps`, `procstat`, `ls -l /dev/pts`,
-  `logger`, a `crontab` entry), checks `/var/log/messages`, and shuts down with `shutdown -p now`;
-  the image then passes `fsck_ffs -f -n` with zero errors. The first-use log holds nothing outside `absent.txt` (§2).
+  `login:` on the serial console and on `ttyv0`, root logs in on both (base's empty password, as
+  in FreeBSD's VM images; on `ttyv0` typed over QMP, the shell proving itself by writing its
+  terminal's name to `/dev/console`), checks that the daemons run, uses a pty, `procstat`,
+  `logger` (found in `/var/log/messages`), and a cron job, and shuts down with
+  `shutdown -p now`; the image then passes `fsck_ffs -f -n` with zero errors. The first-use log
+  holds nothing outside `absent.txt` (§2). `freebsd-multiuser` runs the same script on FreeBSD.
 - **Compat.** kyua's suite runs nightly in QEMU (both arches) and bhyve, per test case, against
   FreeBSD 15.1's results on the same machines, with every expected failure listed with a reason in
   `tests/kyua/known-failures.txt`.

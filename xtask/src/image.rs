@@ -116,20 +116,59 @@ const OPENSSL_MD5: &str = "#!/bin/sh\n\
 /// [`PJDFSTEST`]. The loader finds the kernel there and
 /// hands the kernel the fstab's root; there is no memory disk.
 pub(crate) fn build_ufs_root(arch: Arch, opts: build::Options, cmdline: &str) -> Result<PathBuf> {
+    ufs_root(arch, opts, cmdline, Root::Tests)
+}
+
+/// As [`build_ufs_root`], with what FreeBSD's installer adds to the base
+/// ([`crate::multiuser::installed_files`]): the multi-user boot's root
+/// (docs/MULTIUSER.md §14).
+pub(crate) fn build_installed_root(
+    arch: Arch,
+    opts: build::Options,
+    cmdline: &str,
+) -> Result<PathBuf> {
+    ufs_root(arch, opts, cmdline, Root::Installed)
+}
+
+/// Which UFS2 root to make.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Root {
+    /// The base and the test programs.
+    Tests,
+    /// That, as the installer leaves it.
+    Installed,
+}
+
+fn ufs_root(arch: Arch, opts: build::Options, cmdline: &str, root: Root) -> Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
     let images = build::all(arch, opts)?;
     let read = |p: &PathBuf| fs::read(p).map_err(|e| format!("{}: {e}", p.display()));
     let loader = read(&images.loader)?;
     let dir = util::root().join("build").join(arch.to_string());
+    let name = match root {
+        Root::Tests => "ufsroot",
+        Root::Installed => "installedroot",
+    };
     // What goes over the base: made afresh each time.
-    let stage = dir.join("ufsroot");
+    let stage = dir.join(name);
     let _ = fs::remove_dir_all(&stage);
     fs::create_dir_all(stage.join("boot/kernel"))?;
     fs::create_dir_all(stage.join("etc"))?;
     fs::create_dir_all(stage.join(STATIC_TOOLS))?;
     fs::copy(&images.kernel, stage.join("boot/kernel/kernel"))?;
     fs::write(stage.join("etc/fstab"), FSTAB)?;
+    if root == Root::Installed {
+        for (path, mode, data) in crate::multiuser::installed_files(&crate::base::full(arch)?)? {
+            let dst = stage.join(path);
+            if let Some(parent) = dst.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&dst, data)?;
+            fs::set_permissions(&dst, fs::Permissions::from_mode(mode))?;
+        }
+    }
     if let Some(md) = crate::base::md_image(arch, &[])? {
-        let tar = dir.join("ufsroot-md.tar");
+        let tar = dir.join(format!("{name}-md.tar"));
         fs::write(&tar, md)?;
         util::run(
             std::process::Command::new("tar")
@@ -145,7 +184,6 @@ pub(crate) fn build_ufs_root(arch: Arch, opts: build::Options, cmdline: &str) ->
         fs::copy(&bin, stage.join(STATIC_TOOLS).join(name))?;
     }
     {
-        use std::os::unix::fs::PermissionsExt;
         let shim = stage.join(STATIC_TOOLS).join("openssl");
         fs::write(&shim, OPENSSL_MD5)?;
         fs::set_permissions(&shim, fs::Permissions::from_mode(0o555))?;
@@ -168,10 +206,10 @@ pub(crate) fn build_ufs_root(arch: Arch, opts: build::Options, cmdline: &str) ->
         .collect();
     let mut spec = base_spec.clone();
     add_spec(&stage, &stage, &known, &mut spec)?;
-    let spec_path = dir.join("ufsroot.mtree");
+    let spec_path = dir.join(format!("{name}.mtree"));
     fs::write(&spec_path, spec)?;
 
-    let img = dir.join("ufsroot.img");
+    let img = dir.join(format!("{name}.img"));
     let _ = fs::remove_file(&img);
     util::run(
         std::process::Command::new("makefs")
@@ -196,7 +234,10 @@ pub(crate) fn build_ufs_root(arch: Arch, opts: build::Options, cmdline: &str) ->
             ufs: Some(&ufs),
         },
     )?;
-    let path = dir.join("disk-ufs.img");
+    let path = dir.join(match root {
+        Root::Tests => "disk-ufs.img",
+        Root::Installed => "disk-installed.img",
+    });
     fs::write(&path, &disk)?;
     Ok(path)
 }

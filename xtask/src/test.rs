@@ -111,6 +111,36 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
                 }
             }
         }
+        // The multi-user boot (ROADMAP P6.0), expected to fail until P6.9.
+        for &arch in &arches {
+            for vmm in [Vmm::Qemu, Vmm::Bhyve] {
+                let name = match vmm {
+                    Vmm::Qemu => format!("{arch}-multiuser"),
+                    Vmm::Bhyve => format!("{arch}-bhyve-multiuser"),
+                };
+                if !wanted(&name) || !vmm.available(arch) {
+                    continue;
+                }
+                if !cfg!(target_os = "freebsd") {
+                    println!("== boot tests ({name}): skipped, needs a FreeBSD host (makefs)");
+                    continue;
+                }
+                println!("== boot tests ({name}, {vmm:?})");
+                match (multiuser(arch, vmm, release, usb)?, MULTIUSER_EXPECTED) {
+                    (Ok(()), Expected::Pass) => println!("{name}: PASS"),
+                    (Ok(()), Expected::Fail(_)) => {
+                        println!("{name}: XPASS: passes; expect it to (test.rs)");
+                    }
+                    (Err(why), Expected::Fail(until)) => {
+                        println!("{name}: XFAIL (until {until}): {why}");
+                    }
+                    (Err(why), Expected::Pass) => {
+                        println!("{name}: FAIL: {why}");
+                        failed.push("multiuser");
+                    }
+                }
+            }
+        }
         if !failed.is_empty() {
             return Err(format!("boot tests failed on {failed:?}; logs in build/<arch>/").into());
         }
@@ -286,6 +316,93 @@ const BOOT_CASES: &[BootCase] = &[
         expect_saved: None,
     },
 ];
+
+/// What a case is expected to do.
+#[derive(Clone, Copy, Debug)]
+enum Expected {
+    #[expect(dead_code, reason = "once multi-user boots (P6.9)")]
+    Pass,
+    /// Fail, until the named milestone; a failure does not fail the tier.
+    Fail(&'static str),
+}
+
+/// The multi-user boot needs P6.1–P6.9.
+const MULTIUSER_EXPECTED: Expected = Expected::Fail("P6.9");
+
+/// The multi-user boot (docs/MULTIUSER.md §14): the installed root boots
+/// to `login:`, and [`crate::multiuser::login_script`] logs in on `ttyv0`
+/// (QEMU) and the serial console, checks the daemons, and shuts down;
+/// the root must be left clean, and the console may hold no first use of
+/// an interface outside `tests/multiuser/absent.txt`. The first uses go
+/// to `build/<arch>/multiuser<suffix>-first-use.txt` either way.
+fn multiuser(
+    arch: Arch,
+    vmm: Vmm,
+    release: bool,
+    usb: bool,
+) -> Result<std::result::Result<(), String>> {
+    let opts = build::Options {
+        release,
+        ktest: false,
+    };
+    let disk = image::build_installed_root(arch, opts, "boot_multicons=YES")?;
+    let suffix = match vmm {
+        Vmm::Bhyve => "-bhyve",
+        Vmm::Qemu => "",
+    };
+    let disk = {
+        let copy = disk.with_file_name(format!("disk-multiuser{suffix}.img"));
+        std::fs::copy(&disk, &copy)?;
+        copy
+    };
+    let log = disk.with_file_name(format!("multiuser{suffix}.log"));
+    let sock = disk.with_file_name(format!("multiuser{suffix}.qmp"));
+    let shot = disk.with_file_name(format!("multiuser{suffix}.ppm"));
+    let qemu = vmm == Vmm::Qemu;
+    let vm = Vm {
+        smp: 4,
+        mem: "2G".into(),
+        nvme: true,
+        usb: usb || qemu,
+        qmp: qemu.then(|| sock.clone()),
+        ..Vm::new(vmm, arch, disk.clone())
+    };
+    let session = crate::expect::Session::start(vm, &log)?;
+    let screen = qemu.then_some(crate::multiuser::Screen {
+        qmp: &sock,
+        shot: &shot,
+    });
+    // The kernel says when it starts `/rescue/sh` instead of init.
+    let (result, exited) = crate::multiuser::login_script(
+        session,
+        screen.as_ref(),
+        Duration::from_secs(600),
+        &["panic:", "shell: /rescue/sh started"],
+    );
+    let console = std::fs::read_to_string(&log).unwrap_or_default();
+    let first = crate::multiuser::unexpected_first_uses(&console)?;
+    let list = disk.with_file_name(format!("multiuser{suffix}-first-use.txt"));
+    std::fs::write(&list, first.join("\n") + "\n")?;
+    let verdict = match (result, exited) {
+        (Err(e), _) | (_, Err(e)) => Err(e.to_string()),
+        (Ok(()), Ok(false)) => Err("the machine did not power off".into()),
+        (Ok(()), Ok(true)) if !first.is_empty() => Err(format!(
+            "{} first uses outside absent.txt (in {})",
+            first.len(),
+            list.display()
+        )),
+        (Ok(()), Ok(true)) => root_left_clean(&disk),
+    };
+    if verdict.is_err() {
+        println!(
+            "{arch}{suffix}-multiuser: serial log at {}; {} first uses in {}",
+            log.display(),
+            first.len(),
+            list.display()
+        );
+    }
+    Ok(verdict)
+}
 
 /// The line the first boot of a warm-reset case leaves in the log ring.
 const WARM_RESET_MARKER: &str = "logring: first boot marker";
