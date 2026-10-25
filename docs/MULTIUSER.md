@@ -26,9 +26,10 @@ what userland sees, not the source of the code ([ADR-0007](adr/0007-license-and-
   calls ([COMPATIBILITY.md §2.1](COMPATIBILITY.md#21-system-calls)), the sysctl nodes base and its
   tools read, the ioctls on the devices they open, and every structure that crosses the boundary
   checked by `abi-check` against FreeBSD's headers.
-- **Measured breadth.** What FreeBSD's own boot, `rc`, and test suites call is recorded on FreeBSD
-  (P6.0), so the long tail is a list worked down, not a surprise. The kyua suite runs nightly
-  against a recorded baseline.
+- **Known breadth.** What `init`, `rc`, the daemons, and libc call is read from their source in
+  `../freebsd-src` as each milestone needs it, and the kernel logs the first use of anything it
+  lacks, so the long tail is a list worked down, not a surprise. The kyua suite runs nightly
+  against FreeBSD's results.
 - **The physical machines join.** From this phase the X870E and the Orange Pi 6 Plus gate every
   exit, the USB track's hardware half among them, and every earlier performance suite holds on
   bare metal ([ADR-0010](adr/0010-qemu-first-development.md)).
@@ -50,11 +51,11 @@ what userland sees, not the source of the code ([ADR-0007](adr/0007-license-and-
 
 ## 2. Principles
 
-1. **FreeBSD's boot is the test plan.** P6.0 records, on FreeBSD 15.1 in the same QEMU machines,
-   every system call, sysctl, and ioctl its multi-user boot makes (DTrace's anonymous tracing from
-   the loader on), and the same for the kyua suite. Each milestone names the slice of that record
-   it covers. A first use of anything unimplemented is logged once, with the program's name, and
-   the boot test fails on any that FreeBSD's record has.
+1. **The source answers, the boot checks.** What a program needs from the kernel is read from its
+   FreeBSD source (and libc's), not guessed or traced. At run time, a first use of anything
+   unimplemented (a system call, sysctl node, ioctl, `fcntl`, `procctl`, socket option, or `sysarch`
+   request) is logged once with the program's name, and the multi-user boot test fails on any
+   first-use line.
 2. **A process is its threads.** The P4 process (one thread) splits into a process and its threads,
    with FreeBSD's division of state (§4). Every place that says "per thread once processes have
    several" is visited once, in P6.2, not patched as it is found.
@@ -437,8 +438,8 @@ the fallback when no init can be executed, as FreeBSD's.
 
 ### 11.2 What `rc` needs
 
-P6.0 lists each `rc.d` script FreeBSD 15.1's default boot runs, with what it calls. The kernel
-side, by area:
+The `rc.d` scripts FreeBSD 15.1's default `rc.conf` runs, read from `libexec/rc`, and the kernel
+side of each, by area:
 
 | Area | Scripts | Kernel |
 |---|---|---|
@@ -502,7 +503,7 @@ and `PT_SUSPEND`/`PT_RESUME`; process descriptors' `pdptrace` is outside 15.x. D
 `lib/abi` carries the FreeBSD header and name it mirrors; the tool generates a C program on the
 build server that compares size, alignment, and every field's offset against FreeBSD 15.1's
 headers for both amd64 and arm64 (the arm64 headers from the release's `src.txz`). A type without a
-check, or a FreeBSD structure in the P6.0 record without a type, fails the check.
+check fails.
 
 ## 14. Testing
 
@@ -519,8 +520,7 @@ check, or a FreeBSD structure in the P6.0 record without a type, fails the check
   `login:` on the serial console and on `ttyv0` (read back from `screendump`), logs in as root with
   the password set in the image, runs a short command script (`ps`, `procstat`, `ls -l /dev/pts`,
   `logger`, a `crontab` entry), checks `/var/log/messages`, and shuts down with `shutdown -p now`;
-  the image then passes `fsck_ffs -f -n` with zero errors. The first-use log must hold nothing in
-  FreeBSD's boot record (§2).
+  the image then passes `fsck_ffs -f -n` with zero errors. The first-use log must be empty (§2).
 - **Compat.** kyua's suite runs nightly in QEMU (both arches) and bhyve, per test case, against
   FreeBSD 15.1's results on the same machines, with every expected failure listed with a reason in
   `tests/kyua/known-failures.txt`.

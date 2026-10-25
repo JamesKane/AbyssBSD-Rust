@@ -1418,14 +1418,9 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
 
 **P6.0 Design and harness.**
 - MULTIUSER.md and ADR-0016.
-- FreeBSD 15.1's record (MULTIUSER.md §2): its multi-user boot in the reference QEMU machines and
-  bhyve, traced with DTrace's anonymous tracing from the loader on, and its kyua run, each reduced
-  to the system calls (with flag arguments), sysctl names, ioctls (by device), and structures they
-  use, per program, into `tests/corpus/freebsd/multiuser/`. The same boot with a kernel built
-  without `INET`/`INET6`, as the ground truth for `rc`'s network scripts.
-- First-use telemetry: every unimplemented system call, sysctl node, ioctl, `fcntl`, `procctl`,
-  `sockopt`, and `sysarch` request is logged once with the program's name, and `cargo xtask
-  coverage` compares a boot's log with FreeBSD's record.
+- First-use telemetry (MULTIUSER.md §2): every unimplemented system call, sysctl node, ioctl,
+  `fcntl`, `procctl`, socket option, and `sysarch` request is logged once with the program's name,
+  in one greppable form.
 - `cargo xtask fs-image --base` builds the reference disk (all of `base.txz`, `bsdinstall`'s `/etc`);
   the `<arch>-multiuser` boot cases exist, expected to fail, with the serial and `ttyv0` login
   scripts.
@@ -1510,14 +1505,13 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
 - `init` from `init_path`, `kenv`, single-user (`boot -s`), and the fallback to `/rescue/sh`
   (MULTIUSER.md §11.1).
 - What `rc` needs (§11.2): `fsck -p` of the root, `mount -a`, devfs rules, `/dev/devctl` and
-  `/dev/devctl2`, `/dev/klog`, the sysctl nodes FreeBSD's record lists, `utmpx`, `dumpon`/`savecore`
+  `/dev/devctl2`, `/dev/klog`, the sysctl nodes `rc` and the daemons read, `utmpx`, `dumpon`/`savecore`
   with no dump device; the kernel stops mounting the ESP itself.
 - `devd`, `syslogd`, `cron`, `getty`, `login` with PAM on stock configuration; `reboot`/`shutdown`
   with every file system unmounted clean.
 - Exit: on both arches and bhyve, the `<arch>-multiuser` boot cases pass: `login:` on the serial
   console and on `ttyv0`, login as root, the command script, `syslogd`, `cron`, and `devd`
-  running, `shutdown -p now`, then `fsck_ffs -f -n` clean. The boot's first-use log holds nothing
-  from FreeBSD's record. FreeBSD userland now runs end to end in QEMU (ADR-0010).
+  running, `shutdown -p now`, then `fsck_ffs -f -n` clean. The boot's first-use log is empty. FreeBSD userland now runs end to end in QEMU (ADR-0010).
 
 **P6.10 Conformance.**
 - kyua nightly in QEMU (both arches) and bhyve, per test case against FreeBSD's results, with

@@ -20,9 +20,9 @@ performance suite per phase.
 
 Adopt the design in [MULTIUSER.md](../MULTIUSER.md). Its load-bearing parts:
 
-1. **FreeBSD's boot is the test plan.** P6.0 records every system call, sysctl, and ioctl FreeBSD
-   15.1's multi-user boot and its kyua suite make, in the same QEMU machines. The boot test fails
-   on any first use of an unimplemented interface that the record contains.
+1. **The source answers, the boot checks.** What base needs is read from FreeBSD's source. The
+   kernel logs the first use of any unimplemented interface, and the multi-user boot test fails on
+   any such line.
 2. **Processes and threads split as FreeBSD's do**, with per-thread signal masks, TLS bases, and
    umtx state, and `thread_single`'s modes for exit, exec, and core dumps, done in one milestone.
 3. **umtx in a host-tested `sys/umtx`**: private and shared keys, hashed chains with a busy mark
@@ -36,8 +36,8 @@ Adopt the design in [MULTIUSER.md](../MULTIUSER.md). Its load-bearing parts:
 7. **Typed privilege and rights**: `priv_check` with FreeBSD's `PRIV_*`, Capsicum rights checked at
    descriptor lookup, capability mode from a table generated from `syscalls.master`, and a jail tree
    whose policy feeds `priv_check` and visibility.
-8. **No networking in P6.** `AF_INET`/`AF_INET6` behave as on a FreeBSD kernel without `INET`, and
-   that boot, recorded on FreeBSD, is the ground truth for `rc`'s network scripts. MAC, audit, and
+8. **No networking in P6.** `AF_INET`/`AF_INET6` behave as on a FreeBSD kernel without `INET`
+   (`socket` fails with `EAFNOSUPPORT`), and `rc`'s network scripts see what they would there. MAC, audit, and
    `rctl` answer as on a kernel without them.
 9. **Hardware after QEMU.** The physical machines are touched only once P6.9 runs userland end to
    end in QEMU; the Orange Pi 6 Plus's ground truth is captured before it is reimaged.
