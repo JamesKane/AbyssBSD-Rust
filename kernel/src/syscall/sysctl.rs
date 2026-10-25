@@ -7,6 +7,10 @@
 //! as FreeBSD returns them: without a buffer, the length needed; with one
 //! too small, as much as fits and `ENOMEM`. Nothing is writable yet.
 //!
+//! A name looked up and not found, an OID not found, and a write are
+//! reported as first uses ([`crate::firstuse`]): FreeBSD may have the node.
+//! Walking off the end of the tree (`sysctl.next`) is not.
+//!
 //! Behavior reference: sys/kern/kern_sysctl.c.
 
 use alloc::vec::Vec;
@@ -17,7 +21,43 @@ use sched::Sleepable;
 use sysctl::ReadError;
 
 use super::SysResult;
+use crate::firstuse::{self, Kind};
 use crate::uaccess::{self, UserPtr};
+
+/// Reports a name looked up and not found.
+fn missing_name(name: &str) {
+    firstuse::report(Kind::Sysctl, format_args!("{name}"));
+}
+
+/// An OID as dotted numbers, after the name of the longest part the tree
+/// knows: `kern.proc.12.34` style, as `sysctl -N` would print it.
+struct Oid<'a>(&'a [i32], Option<(alloc::string::String, usize)>);
+
+impl core::fmt::Display for Oid<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let (mut sep, rest) = match &self.1 {
+            Some((name, n)) => {
+                f.write_str(name)?;
+                (".", &self.0[*n..])
+            }
+            None => ("", self.0),
+        };
+        for n in rest {
+            write!(f, "{sep}{n}")?;
+            sep = ".";
+        }
+        Ok(())
+    }
+}
+
+/// `oid`'s known prefix, named.
+fn known_prefix(s: &Sleepable, oid: &[i32]) -> Option<(alloc::string::String, usize)> {
+    crate::sysctl::read(s, |t| {
+        (1..=oid.len())
+            .rev()
+            .find_map(|n| t.name(&oid[..n]).map(|name| (name, n)))
+    })
+}
 
 fn read_error(e: ReadError) -> Errno {
     match e {
@@ -50,7 +90,10 @@ fn serve(s: &Sleepable, oid: &[i32], new: Option<&[u8]>) -> Result<Vec<u8>, Errn
                 let name = new.ok_or(Errno::EINVAL)?;
                 let name = name.strip_suffix(&[0]).unwrap_or(name);
                 let name = core::str::from_utf8(name).map_err(|_| Errno::ENOENT)?;
-                t.name2oid(name).map(|o| ints(&o)).ok_or(Errno::ENOENT)
+                t.name2oid(name).map(|o| ints(&o)).ok_or_else(|| {
+                    missing_name(name);
+                    Errno::ENOENT
+                })
             }
             query::OIDFMT => {
                 let (kind, fmt) = t.format(rest).ok_or(Errno::ENOENT)?;
@@ -63,10 +106,22 @@ fn serve(s: &Sleepable, oid: &[i32], new: Option<&[u8]>) -> Result<Vec<u8>, Errn
         });
     }
     if new.is_some() {
+        firstuse::report(
+            Kind::Sysctl,
+            format_args!("{} (write)", Oid(oid, known_prefix(s, oid))),
+        );
         return Err(Errno::EPERM);
     }
     let mut out = Vec::new();
-    crate::sysctl::read_oid(s, oid, &mut out).map_err(read_error)?;
+    crate::sysctl::read_oid(s, oid, &mut out).map_err(|e| {
+        if matches!(e, ReadError::NotFound) {
+            firstuse::report(
+                Kind::Sysctl,
+                format_args!("{}", Oid(oid, known_prefix(s, oid))),
+            );
+        }
+        read_error(e)
+    })?;
     Ok(out)
 }
 
@@ -145,7 +200,10 @@ pub(super) fn sysctlbyname(
     uaccess::copy_in(&mut buf, name).map_err(|_| Errno::EFAULT)?;
     let name = buf.strip_suffix(&[0]).unwrap_or(&buf);
     let name = core::str::from_utf8(name).map_err(|_| Errno::ENOENT)?;
-    let oid = crate::sysctl::read(s, |t| t.name2oid(name)).ok_or(Errno::ENOENT)?;
+    let oid = crate::sysctl::read(s, |t| t.name2oid(name)).ok_or_else(|| {
+        missing_name(name);
+        Errno::ENOENT
+    })?;
     let new = new_value(newp, newlen)?;
     let value = serve(s, &oid, new.as_deref())?;
     reply(&value, oldp, oldlenp)

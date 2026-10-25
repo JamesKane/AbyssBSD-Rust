@@ -355,6 +355,11 @@ pub(super) fn fcntl(s: &Sleepable, fd: u64, cmd: u64, arg: u64) -> SysResult {
             };
             dup_fd(s, Dup::Fixed, flags, fd, int(arg))
         }
+        // A command FreeBSD has (from `F_DUPFD` to `F_DUPFD_CLOFORK`).
+        c if c <= F_DUPFD_CLOFORK => {
+            crate::firstuse::report(crate::firstuse::Kind::Fcntl, format_args!("{c}"));
+            Err(Errno::EINVAL)
+        }
         _ => Err(Errno::EINVAL),
     }
 }

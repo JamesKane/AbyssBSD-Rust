@@ -13,7 +13,8 @@
 //! [`abi::syscall`] table. A number that is no system call gets `SIGSYS`
 //! and `ENOSYS`, as on FreeBSD. Calls FreeBSD has that are not
 //! implemented yet return `ENOSYS` without the signal (libc probes some),
-//! and the first use of each is logged.
+//! and the first use of each by each program is logged
+//! ([`crate::firstuse`]); a number that is no call is logged once.
 //!
 //! A call a signal interrupted may ask to be re-executed (`ERESTART`):
 //! the program counter goes back to the `syscall`/`svc` instruction, whose
@@ -344,23 +345,25 @@ const fn int(a: u64) -> i32 {
     i32::from_le_bytes([b0, b1, b2, b3])
 }
 
-/// Numbers already reported as unimplemented, one bit each; one more bit
-/// for every number outside the table.
+/// Numbers that are no system call already reported, one bit each; one
+/// more bit for every number outside the table.
 static REPORTED: [AtomicU64; SLOT_COUNT.div_ceil(64) + 1] =
     [const { AtomicU64::new(0) }; SLOT_COUNT.div_ceil(64) + 1];
 
 fn nosys(number: u64) -> SysResult {
-    let slot = usize::try_from(number)
-        .unwrap_or(usize::MAX)
-        .min(SLOT_COUNT);
-    let bit = 1 << (slot % 64);
-    // Relaxed: a duplicate report is harmless.
-    if REPORTED[slot / 64].fetch_or(bit, Ordering::Relaxed) & bit == 0 {
-        match lookup(number) {
-            Some(Slot::Live(n)) => {
-                kprintln!("syscall: {} ({number}) not implemented", n.info().name)
-            }
-            _ => kprintln!("syscall: {number} is not a system call"),
+    if let Some(Slot::Live(n)) = lookup(number) {
+        crate::firstuse::report(
+            crate::firstuse::Kind::Syscall,
+            format_args!("{} ({number})", n.info().name),
+        );
+    } else {
+        let slot = usize::try_from(number)
+            .unwrap_or(usize::MAX)
+            .min(SLOT_COUNT);
+        let bit = 1 << (slot % 64);
+        // Relaxed: a duplicate report is harmless.
+        if REPORTED[slot / 64].fetch_or(bit, Ordering::Relaxed) & bit == 0 {
+            kprintln!("syscall: {number} is not a system call");
         }
     }
     if !matches!(lookup(number), Some(Slot::Live(_)))

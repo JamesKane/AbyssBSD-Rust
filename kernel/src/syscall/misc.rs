@@ -185,7 +185,10 @@ pub(super) fn sysarch(op: u64, parms: u64) -> SysResult {
         }
         amd64::DISABLE_TLSBASE => p.set_tls_base(None),
         // GS bases need switching per thread first.
-        _ => return Err(Errno::EINVAL),
+        _ => {
+            crate::firstuse::report(crate::firstuse::Kind::Sysarch, format_args!("{op}"));
+            return Err(Errno::EINVAL);
+        }
     }
     Ok(0)
 }
@@ -193,7 +196,8 @@ pub(super) fn sysarch(op: u64, parms: u64) -> SysResult {
 /// `sysarch(op, parms)`: arm64 sets its thread pointer from user mode;
 /// its own operations are not in yet.
 #[cfg(target_arch = "aarch64")]
-pub(super) fn sysarch(_op: u64, _parms: u64) -> SysResult {
+pub(super) fn sysarch(op: u64, _parms: u64) -> SysResult {
+    crate::firstuse::report(crate::firstuse::Kind::Sysarch, format_args!("{op}"));
     Err(Errno::EINVAL)
 }
 

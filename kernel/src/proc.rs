@@ -463,6 +463,12 @@ impl Process {
         self.image.lock().clone()
     }
 
+    /// Calls `f` with its command name (`ki_comm`), without copying the
+    /// rest of the image.
+    pub(crate) fn with_comm<R>(&self, f: impl FnOnce(&[u8]) -> R) -> R {
+        f(&self.image.lock().comm)
+    }
+
     /// When it was created, in nanoseconds since boot.
     pub(crate) const fn started(&self) -> u64 {
         self.started

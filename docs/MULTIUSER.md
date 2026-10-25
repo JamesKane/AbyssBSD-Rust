@@ -54,8 +54,9 @@ what userland sees, not the source of the code ([ADR-0007](adr/0007-license-and-
 1. **The source answers, the boot checks.** What a program needs from the kernel is read from its
    FreeBSD source (and libc's), not guessed or traced. At run time, a first use of anything
    unimplemented (a system call, sysctl node, ioctl, `fcntl`, `procctl`, socket option, or `sysarch`
-   request) is logged once with the program's name, and the multi-user boot test fails on any
-   first-use line.
+   request) is logged once per program (`first use: <kind> <what> by <program>`), and the
+   multi-user boot test fails on any such line not in `tests/multiuser/absent.txt`, which lists
+   what FreeBSD lacks too and programs only probe, each with the source that shows it.
 2. **A process is its threads.** The P4 process (one thread) splits into a process and its threads,
    with FreeBSD's division of state (§4). Every place that says "per thread once processes have
    several" is visited once, in P6.2, not patched as it is found.
@@ -520,7 +521,7 @@ check fails.
   `login:` on the serial console and on `ttyv0` (read back from `screendump`), logs in as root with
   the password set in the image, runs a short command script (`ps`, `procstat`, `ls -l /dev/pts`,
   `logger`, a `crontab` entry), checks `/var/log/messages`, and shuts down with `shutdown -p now`;
-  the image then passes `fsck_ffs -f -n` with zero errors. The first-use log must be empty (§2).
+  the image then passes `fsck_ffs -f -n` with zero errors. The first-use log holds nothing outside `absent.txt` (§2).
 - **Compat.** kyua's suite runs nightly in QEMU (both arches) and bhyve, per test case, against
   FreeBSD 15.1's results on the same machines, with every expected failure listed with a reason in
   `tests/kyua/known-failures.txt`.

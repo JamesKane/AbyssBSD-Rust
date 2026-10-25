@@ -313,6 +313,45 @@ impl File {
     /// is its argument, copied in and out by the caller. Returns the value
     /// the call returns (0 for most requests).
     pub(crate) fn ioctl(&self, s: &Sleepable, req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
+        let r = self.ioctl_inner(s, req, arg);
+        if r == Err(Errno::ENOTTY) {
+            self.report_ioctl(req);
+        }
+        r
+    }
+
+    /// Reports a request this file did not know that FreeBSD may answer
+    /// ([`crate::firstuse`]): any on a device but a terminal request
+    /// (`isatty` sends `TIOCGETA` to everything, and FreeBSD's non-terminal
+    /// devices refuse it too), and the generic file requests (`FIO*`) on
+    /// anything else.
+    fn report_ioctl(&self, req: u32) {
+        let group = (req >> 8) & 0xff;
+        let what = match &self.kind {
+            FileKind::Vnode(VnodeFile {
+                device: Some(_),
+                vnode,
+                ..
+            }) if group != u32::from(b't') => vnode.named().map(|(_, n)| n),
+            FileKind::Pipe(_) if group == u32::from(b'f') => Some(b"pipe".to_vec()),
+            FileKind::Fifo(_) if group == u32::from(b'f') => Some(b"fifo".to_vec()),
+            FileKind::Socket(_) if group == u32::from(b'f') => Some(b"socket".to_vec()),
+            FileKind::Vnode(_) if group == u32::from(b'f') => Some(b"vnode".to_vec()),
+            _ => None,
+        };
+        if let Some(what) = what {
+            crate::firstuse::report(
+                crate::firstuse::Kind::Ioctl,
+                format_args!(
+                    "{} on {}",
+                    crate::firstuse::IoctlCmd(req),
+                    core::str::from_utf8(&what).unwrap_or("?")
+                ),
+            );
+        }
+    }
+
+    fn ioctl_inner(&self, s: &Sleepable, req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
         let put = |arg: &mut [u8], v: usize| {
             let v = i32::try_from(v).unwrap_or(i32::MAX);
             arg.copy_from_slice(&v.to_ne_bytes());

@@ -33,6 +33,7 @@ mod efirtc;
 mod errata;
 mod exec;
 mod firmware;
+mod firstuse;
 mod fs;
 mod intc;
 #[cfg(target_arch = "aarch64")]
