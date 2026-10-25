@@ -1363,7 +1363,7 @@ USB mass-storage throughput (sequential and random, BBB on both sides) cannot be
 an emulator, since FreeBSD's host cannot run QEMU with acceleration and bhyve has no USB disk; it
 joins the suite on the physical machines at P6.
 
-## Phase 6: FreeBSD multi-user (XL)
+## Phase 6: FreeBSD multi-user (XL) — in progress
 
 **Goal:** stock FreeBSD `/sbin/init` → `rc` → multi-user `login:`.
 
@@ -1388,6 +1388,160 @@ bhyve, and **both physical reference machines**, which gate from this phase on).
 bin/, and usr.bin/. The P6 performance suite (boot time, `libthr`/umtx, `kqueue`, UNIX sockets, ptys,
 dynamic exec) is within 2% of FreeBSD, and every earlier suite now also holds on both physical
 machines against FreeBSD on bare metal.
+
+**Design.** [MULTIUSER.md](MULTIUSER.md) ([ADR-0016](adr/0016-multi-user.md)): FreeBSD's own boot
+recorded as the test plan, processes split into threads as FreeBSD's are, umtx in a host-tested
+`sys/umtx`, one readiness type under `poll` and kqueue, a protocol-neutral socket layer with UNIX
+domain first, a device trait under the line discipline, typed privilege and Capsicum rights, a
+jail tree, and no networking until P7 (`AF_INET` behaves as on a kernel without `INET`).
+
+**Reference configuration.** The P5 machines (QEMU `q35` and `virt`, bhyve) with the USB and input
+set, and an NVMe disk holding a GPT with the ESP and a UFS2 root with all of FreeBSD 15.1's
+`base.txz`, `/etc` as `bsdinstall` leaves it (`rc.conf` with a hostname, `fstab`, a root password).
+The FreeBSD 15.1 guests boot the same disks for the baselines. From P6.11, the X870E and the
+Orange Pi 6 Plus.
+
+**kyua target** (ADR-0016): for each of `kern/`, `lib/libc/`, `bin/`, and `usr.bin/`, at least 95%
+of the test cases that pass on FreeBSD 15.1 in the same machine, with every other failure listed
+with its reason.
+
+### Milestones
+
+Each milestone ends green on both architectures, with CI passing.
+
+```
+P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ───────────────────┐
+              │         └─► P6.8 ───────────────────┤
+              ├─► P6.4 ─► P6.5 ─► P6.6 ─────────────┼─► P6.9 ─┬─► P6.10 ─┐
+              └─► P6.7 ─────────────────────────────┘         └─► P6.11 ─┴─► P6.12
+```
+
+**P6.0 Design and harness.**
+- MULTIUSER.md and ADR-0016.
+- FreeBSD 15.1's record (MULTIUSER.md §2): its multi-user boot in the reference QEMU machines and
+  bhyve, traced with DTrace's anonymous tracing from the loader on, and its kyua run, each reduced
+  to the system calls (with flag arguments), sysctl names, ioctls (by device), and structures they
+  use, per program, into `tests/corpus/freebsd/multiuser/`. The same boot with a kernel built
+  without `INET`/`INET6`, as the ground truth for `rc`'s network scripts.
+- First-use telemetry: every unimplemented system call, sysctl node, ioctl, `fcntl`, `procctl`,
+  `sockopt`, and `sysarch` request is logged once with the program's name, and `cargo xtask
+  coverage` compares a boot's log with FreeBSD's record.
+- `cargo xtask fs-image --base` builds the reference disk (all of `base.txz`, `bsdinstall`'s `/etc`);
+  the `<arch>-multiuser` boot cases exist, expected to fail, with the serial and `ttyv0` login
+  scripts.
+- kyua built and its FreeBSD 15.1 results recorded per test case on each machine.
+- The P6 suite in `ubench` (MULTIUSER.md §16) with FreeBSD's baseline in bhyve.
+
+**P6.1 Run-time linking.**
+- `ET_DYN` executables and `PT_INTERP` (MULTIUSER.md §6): PIE and the interpreter at random bases,
+  the full auxiliary vector, `ld-elf.so.1` run directly, the feature-control note.
+- The VM rtld relies on: reservations, `MAP_EXCL`, `MAP_ALIGNED_SUPER`, `PROT_MAX`, RELRO, `ETXTBSY`,
+  and a grow-down stack to `RLIMIT_STACK` with the guard page and stack gap.
+- `utrace` (to ktrace later; accepted and dropped until P6.8), the `kern.elf64.*` and `kern.proc.auxv`
+  nodes.
+- Exit: base's own dynamic `/bin/sh` runs as the boot shell from the UFS2 root, `ls`, `ps`, `tar`,
+  `kbdcontrol`, and `vidcontrol` from `/bin` and `/usr/bin` run, rtld's `LD_*` variables and
+  `ldd` work, and the P4–P5 user tests pass built dynamic.
+
+**P6.2 Threads.**
+- The process/thread split (MULTIUSER.md §4): per-thread signal state, TLS bases (FSGSBASE on
+  amd64), user contexts, rusage, names, `cpuset`, and rtprio; FreeBSD's tid allocation.
+- `thr_new`, `thr_create`, `thr_exit`, `thr_kill`, `thr_kill2`, `thr_suspend`, `thr_wake`,
+  `thr_set_name`; single-threading for exit, exec, and core dumps; `fork` of a threaded process.
+- Signals to threads (`sigtd`), per-thread masks and `sigwait`, stops of every thread.
+- The arm64 SVE signal context.
+- Exit: libthr's own tests that need only the P4 umtx operations, a ktest of single-threading under
+  load (threads in sleeps, faults, and system calls while another execs and another exits), and the
+  "Signal state" deviation closed.
+
+**P6.3 umtx and libthr.**
+- `sys/umtx` (MULTIUSER.md §5): keys, chains, every `_umtx_op` operation, priority inheritance and
+  protection, robust lists, `UMTX_OP_SHM`, timeouts on any clock; host tests against a model.
+- POSIX shared memory (`shm_open2`, `memfd_create`, seals, `shm_rename`) and System V IPC.
+- Exit: kyua's `lib/libthr` and `lib/libc/gen` thread tests at the target, process-shared and robust
+  mutexes across processes in a ktest, and the `thr` component measured.
+
+**P6.4 Events.**
+- `Notify` (MULTIUSER.md §7.2) on every object that can wait: pipes, FIFOs, terminals, devices
+  (`evdev`, `devctl`), vnodes, processes, process descriptors.
+- `poll`, `ppoll`, `select`, `pselect`; kqueue with `kqueuex` and every filter of §7.4; the VFS's
+  `EVFILT_VNODE` notes.
+- Timers: `setitimer`, POSIX timers, `timerfd`, `eventfd`, `clock_nanosleep`, clock setting.
+- Exit: kyua's `kern/kqueue_*`, `lib/libc/sys` poll and select tests, and the timer tests at the
+  target, and the `event` component measured.
+
+**P6.5 UNIX-domain sockets.**
+- `sys/socket` (MULTIUSER.md §8): the socket layer, socket buffers, the protocol trait, every
+  socket system call, control messages.
+- UNIX domain: stream, seqpacket, datagram, `socketpair`, `SCM_RIGHTS` with the collector,
+  `SCM_CREDS`/`SCM_CREDS2`, `LOCAL_PEERCRED`; the "UNIX-domain sockets" deviation closed.
+- Exit: kyua's `kern/unix_*` and `lib/libc/sys` socket tests at the target, `libcasper` services
+  work, `logger` reaches a `syslogd` started by hand, and the `unix` component measured.
+
+**P6.6 Terminals.**
+- The tty device trait (MULTIUSER.md §9), ptys (`posix_openpt`, `/dev/pts`, `/dev/ptmx`, packet
+  mode), `revoke` and devfs revocation, the console UART as `ttyu0` and `cuau0`, other UARTs as
+  terminals, `/dev/console` by `boothowto`.
+- Exit: `script`, `expect`-style tests (`tests/user/pty.c`), and kyua's tty tests at the target, the
+  "Terminals", "Session end", and "Consoles without `RB_MULTIPLE`" deviations closed, and the
+  `pty` component measured.
+
+**P6.7 Credentials and security.**
+- `priv_check` (MULTIUSER.md §10.1) replacing every `euid == 0`; set-id exec, `P_SUGID`, `nosuid`,
+  `setlogin`, login classes, `setcred`; every `RLIMIT_*` enforced.
+- Capsicum: descriptor rights, capability mode with the generated table, `TRAPCAP`.
+- Jails (`jail`, `jail_set`, `jail_get`, `jail_attach`, `jail_remove`, `chroot`, `fchroot`), securelevel,
+  every `procctl` command.
+- UFS2 extended attributes and ACLs (VFS.md §1.2's P6 item), checked by `fsck_ffs`.
+- Exit: kyua's `sys/capsicum`, `kern/` jail and procctl tests, `lib/libc` set-id tests, and pjdfstest's
+  permission and ACL tests at the target; `jail -c` runs a shell with its own hostname and root.
+
+**P6.8 Observability.**
+- `kern.proc` complete (threads, sizes, wmesg, CPU), `kinfo_file`, `kinfo_vmentry`, kernel stacks
+  and the other `procstat` nodes, `vm.stats`, `cp_times`, load average, `kern.devname`, the `^T`
+  line (MULTIUSER.md §12.1).
+- ktrace with every record type and a writer thread; `kdump` unmodified. `ptrace` for `truss` and
+  `ptrace_test` (§12.3). Core dumps of threaded processes.
+- Exit: `ps`, `top`, `fstat`, `procstat` (every mode), `w`, `kdump`, and `truss` output matches
+  FreeBSD's in differential tests, kyua's `kern/ptrace_test` and `kern/ktrace_test` at the target, and
+  the `kern.proc` deviation closed.
+
+**P6.9 init and multi-user in QEMU.**
+- `init` from `init_path`, `kenv`, single-user (`boot -s`), and the fallback to `/rescue/sh`
+  (MULTIUSER.md §11.1).
+- What `rc` needs (§11.2): `fsck -p` of the root, `mount -a`, devfs rules, `/dev/devctl` and
+  `/dev/devctl2`, `/dev/klog`, the sysctl nodes FreeBSD's record lists, `utmpx`, `dumpon`/`savecore`
+  with no dump device; the kernel stops mounting the ESP itself.
+- `devd`, `syslogd`, `cron`, `getty`, `login` with PAM on stock configuration; `reboot`/`shutdown`
+  with every file system unmounted clean.
+- Exit: on both arches and bhyve, the `<arch>-multiuser` boot cases pass: `login:` on the serial
+  console and on `ttyv0`, login as root, the command script, `syslogd`, `cron`, and `devd`
+  running, `shutdown -p now`, then `fsck_ffs -f -n` clean. The boot's first-use log holds nothing
+  from FreeBSD's record. FreeBSD userland now runs end to end in QEMU (ADR-0010).
+
+**P6.10 Conformance.**
+- kyua nightly in QEMU (both arches) and bhyve, per test case against FreeBSD's results, with
+  `tests/kyua/known-failures.txt`.
+- `abi-check` over every structure crossing the boundary, for amd64 and arm64 headers
+  (MULTIUSER.md §13), failing on unchecked types.
+- Exit: the kyua target met in all four areas on every machine; `abi-check` complete.
+
+**P6.11 Hardware bring-up.**
+- The Orange Pi 6 Plus's ground truth captured into `tests/corpus/opi6p/` (MULTIUSER.md §15), then
+  AbyssBSD booted from USB, then the NVMe reimaged with AbyssBSD and a FreeBSD baseline.
+- The X870E: `cargo xtask deploy --machine x870e` onto the media NVMe only, by serial number;
+  FreeBSD 15.1 beside it for baselines.
+- Both machines' ACPI tables in the AML corpus; their device trees against FreeBSD's.
+- The USB track's hardware exit on both machines.
+- `cargo xtask perf --platform x870e|opi6p`.
+- Exit: the `<arch>-multiuser` scenario passes on both machines (on the X870E from the framebuffer
+  and a USB keyboard alone), and fsx with `fsck_ffs` passes on their NVMe and on a USB disk.
+
+**P6.12 Performance and exit.**
+- The P6 suite (MULTIUSER.md §16) in bhyve and on both machines, and every earlier suite on both
+  machines against FreeBSD on bare metal (the Orange Pi 6 Plus per core class).
+- Exit: the phase's exit criteria above, in CI on both arches, and every component within the
+  bound on every gating platform.
 
 ## Phase 7: Networking (XL)
 

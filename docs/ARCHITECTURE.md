@@ -345,6 +345,9 @@ The AML interpreter is one of the highest-risk components, so it gets its own fu
 
 ## 7. Process model and syscalls
 
+Phase 6's threads, umtx, events, sockets, terminals, and security model are specified in
+[MULTIUSER.md](MULTIUSER.md) ([ADR-0016](adr/0016-multi-user.md)).
+
 - `syscalls.master` is the source of truth. `tools/syscallgen` generates the syscall number enum,
   argument structs, and a dispatch table. Unimplemented entries return `ENOSYS`, and the first
   use of each is logged.
