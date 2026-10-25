@@ -342,6 +342,40 @@ ktest! {
 }
 
 ktest! {
+    fn wake_all_wakes_only_the_sleepers_it_finds() {
+        use alloc::sync::Arc;
+        use core::sync::atomic::AtomicBool;
+        // Sleepers whose condition stays false sleep again as soon as they
+        // wake, as `umass`'s workers do when another took the request:
+        // each `wake_all` must still end, waking each of them once at most.
+        const SLEEPERS: usize = 6;
+        struct Pool {
+            stop: AtomicBool,
+            q: sched::WaitQueue,
+        }
+        let pool = Arc::new(Pool { stop: AtomicBool::new(false), q: sched::WaitQueue::new() });
+        let threads: alloc::vec::Vec<_> = (0..SLEEPERS)
+            .map(|_| {
+                let pool = Arc::clone(&pool);
+                sched::spawn("sleeper", sched::Priority::KERNEL, move |s| {
+                    pool.q.wait_until(s, || pool.stop.load(Ordering::Acquire));
+                })
+                .expect("spawn")
+            })
+            .collect();
+        for _ in 0..5000 {
+            let n = pool.q.wake_all();
+            assert!(n <= SLEEPERS, "one wake_all woke {n} of {SLEEPERS} sleepers");
+        }
+        pool.stop.store(true, Ordering::Release);
+        pool.q.wake_all();
+        for t in &threads {
+            t.join(&cx());
+        }
+    }
+}
+
+ktest! {
     fn exited_threads_are_reaped() {
         let kva = crate::mm::kstack::kva_allocated();
         let t = sched::spawn("short", sched::Priority::KERNEL, |_| {}).unwrap();

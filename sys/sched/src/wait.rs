@@ -139,10 +139,16 @@ impl WaitQueue {
         }
     }
 
-    /// Wakes every waiter. Returns how many there were.
+    /// Wakes every waiter. Returns how many there were. Only those asleep
+    /// now, as FreeBSD's `wakeup`: taken off together, so threads that wake
+    /// and sleep here again meanwhile wait for the next wakeup (waking one
+    /// at a time until none is left never ends while they keep coming
+    /// back).
     pub fn wake_all(&self) -> usize {
+        let mut asleep = core::mem::replace(&mut *self.waiters.lock(), ThreadList::new());
         let mut n = 0;
-        while self.wake_one() {
+        while let Some(t) = asleep.pop_front() {
+            crate::make_runnable(t);
             n += 1;
         }
         n

@@ -586,10 +586,21 @@ impl Vm {
         if matches!(verdict, Some(Outcome::TimedOut))
             && let Some(sock) = &qmp
         {
+            // Paused, so the registers and the frames agree.
+            let _ = qmp_command(sock, "stop");
             match qmp_command(sock, "info registers -a") {
                 Ok(regs) => {
                     writeln!(logfile, "xtask: timed out; CPU registers:")?;
                     writeln!(logfile, "{regs}")?;
+                    for (cpu, pc, fp) in frames_of(&regs) {
+                        let walk = backtrace(sock, cpu, fp);
+                        let walk: Vec<String> = walk.iter().map(|a| format!("{a:#x}")).collect();
+                        writeln!(
+                            logfile,
+                            "xtask: CPU#{cpu} at {pc:#x}, returns to {}",
+                            walk.join(" ")
+                        )?;
+                    }
                 }
                 Err(e) => writeln!(logfile, "xtask: timed out; no registers ({e})")?,
             }
@@ -629,9 +640,70 @@ impl Vm {
     }
 }
 
+/// Each CPU's number, program counter, and frame pointer, from `info
+/// registers -a` (`RIP` and `RBP` on x86, `PC` and `X29` on Arm).
+fn frames_of(regs: &str) -> Vec<(u32, u64, u64)> {
+    let field = |block: &str, name: &str| {
+        block
+            .split_ascii_whitespace()
+            .find_map(|w| w.strip_prefix(name)?.strip_prefix('='))
+            .and_then(|v| u64::from_str_radix(v, 16).ok())
+    };
+    regs.split("CPU#")
+        .skip(1)
+        .filter_map(|block| {
+            let cpu = block
+                .split(|c: char| !c.is_ascii_digit())
+                .next()?
+                .parse()
+                .ok()?;
+            let pc = field(block, "RIP").or_else(|| field(block, "PC"))?;
+            let fp = field(block, "RBP").or_else(|| field(block, "X29"))?;
+            Some((cpu, pc, fp))
+        })
+        .collect()
+}
+
+/// The return addresses up the kernel frame-pointer chain from `fp` on
+/// `cpu`, read through the monitor: each frame holds the caller's frame
+/// pointer, then the return address.
+fn backtrace(sock: &Path, cpu: u32, mut fp: u64) -> Vec<u64> {
+    const KERNEL: u64 = 0xffff_0000_0000_0000;
+    let mut out = Vec::new();
+    while fp >= KERNEL && fp.is_multiple_of(8) && out.len() < 32 {
+        let Ok(text) = qmp_command_on(sock, &format!("x /2gx {fp:#x}"), Some(cpu)) else {
+            break;
+        };
+        let words: Vec<u64> = text
+            .split_once(':')
+            .map(|(_, rest)| rest)
+            .unwrap_or("")
+            .split_ascii_whitespace()
+            .filter_map(|w| u64::from_str_radix(w.strip_prefix("0x")?, 16).ok())
+            .collect();
+        let [next, ret, ..] = words[..] else {
+            break;
+        };
+        if ret < KERNEL {
+            break;
+        }
+        out.push(ret);
+        if next <= fp {
+            break;
+        }
+        fp = next;
+    }
+    out
+}
+
 /// Runs a human monitor command through the QMP socket; returns its
 /// output.
 fn qmp_command(sock: &Path, command: &str) -> Result<String> {
+    qmp_command_on(sock, command, None)
+}
+
+/// As [`qmp_command`], with CPU `cpu` the monitor's current one.
+fn qmp_command_on(sock: &Path, command: &str, cpu: Option<u32>) -> Result<String> {
     use std::io::Read;
     use std::os::unix::net::UnixStream;
     let mut s = UnixStream::connect(sock)?;
@@ -642,7 +714,8 @@ fn qmp_command(sock: &Path, command: &str) -> Result<String> {
     let _ = s.read(&mut buf)?;
     writeln!(
         s,
-        r#"{{"execute":"human-monitor-command","arguments":{{"command-line":"{command}"}}}}"#
+        r#"{{"execute":"human-monitor-command","arguments":{{"command-line":"{command}"{}}}}}"#,
+        cpu.map_or(String::new(), |c| format!(r#","cpu-index":{c}"#))
     )?;
     let mut out = Vec::new();
     // The reply can span reads; it ends with a newline after the JSON.
@@ -722,6 +795,20 @@ fn strip_ansi(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frames_from_info_registers() {
+        let regs = "{\"return\": \"\nCPU#0\nRAX=0000000000000001 RBX=0000000000000002\n\
+            RSI=0000000000000010 RDI=ffff80003bf7c168 RBP=ffffc000100ffd40 RSP=ffffc000100ffd30\n\
+            RIP=ffffffff86cc86f9 RFL=00000097\nCPU#1\nPC=ffff000040001234 X29=ffff000041000ff0\n";
+        assert_eq!(
+            frames_of(regs),
+            [
+                (0, 0xffff_ffff_86cc_86f9, 0xffff_c000_100f_fd40),
+                (1, 0xffff_0000_4000_1234, 0xffff_0000_4100_0ff0)
+            ]
+        );
+    }
 
     #[test]
     fn strips_escapes() {

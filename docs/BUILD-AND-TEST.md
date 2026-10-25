@@ -274,3 +274,7 @@ pipeline definition stays thin.
 - Panics print a symbolized backtrace. Frame pointers are kept in all kernel builds
   (`-C force-frame-pointers=yes`).
 - Serial logs from all test runs are kept as artifacts.
+- A QEMU boot case that times out is paused and its log ends with every CPU's registers and its
+  frame-pointer chain (`xtask: CPU#n at PC, returns to ...`), read through the monitor. Subtract
+  the `slide` the loader logged and symbolize them with `llvm-addr2line -f -i -e` on the kernel
+  (`target/ktest/<target>/debug/kernel`).
