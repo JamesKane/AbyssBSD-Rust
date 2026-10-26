@@ -108,7 +108,7 @@ programs check FreeBSD's behavior, not ours, so each also passes on FreeBSD 15.1
 `freebsd-shell` boots FreeBSD single-user in bhyve and runs `xtask/src/expect.rs`'s `SHELL`
 script against its `/rescue/sh`. The boot tier runs the same script against AbyssBSD: each
 architecture's `<arch>-shell` case (and `x86_64-bhyve-shell` on the server) boots a normal kernel
-to `/rescue/sh` on the serial console, runs it, and checks that `exit` powers the machine off.
+to its boot shell on the serial console, runs it, and checks that `exit` powers the machine off.
 On the server (which has `makefs`) those cases boot from an NVMe disk whose ESP holds only the
 loader, with the root on a `freebsd-ufs` partition (soft updates): all of `base.txz`, with owners
 and file flags from its own records, the kernel at `/boot/kernel/kernel`, an `/etc/fstab` naming
@@ -117,8 +117,12 @@ the partitions by GPT label, the memory disk's `/usr/tests`, and in `/usr/tests/
 base's specifications. The loader must load the kernel from UFS2 and the kernel mount it as
 root. After `SHELL`, the `UFS_ROOT` script remounts the root read-write (`mount -u -o rw /`),
 checks every entry of the base with `mtree` (owners, modes, flags, links, sizes, SHA-256), and
-copies a tree with `tar` and `cp -R`. After `exit` powers the machine off, the root must be clean
-(`dumpfs`) and `fsck_ffs -f -n` must find nothing.
+copies a tree with `tar` and `cp -R`. The boot shell there is base's own dynamic `/bin/sh` (the
+kernel falls back to `/rescue/sh`), and the `DYNAMIC` script runs base's dynamically linked programs,
+`ldd`, rtld itself, and rtld's `LD_*` variables; `freebsd-shell` runs it too, after `SHELL`. The
+image's entries carry no file flags but those `base.mtree` names, as an installed root (`makefs`
+would otherwise copy the extracted files' own). After `exit` powers the machine off, the root must
+be clean (`dumpfs`) and `fsck_ffs -f -n` must find nothing.
 
 File systems (on the build server; VFS.md §14):
 

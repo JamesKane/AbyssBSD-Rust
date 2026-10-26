@@ -2811,8 +2811,17 @@ mod user_memory {
             let load = || {
                 let space = AddressSpace::new().unwrap();
                 let image =
-                    crate::exec::load(&s, &space, &echo, b"/rescue/echo", &[b"echo"], &[], MAXDSIZ)
-                        .unwrap();
+                    crate::exec::load(
+                        &s,
+                        &space,
+                        &echo,
+                        b"/rescue/echo",
+                        &[b"echo"],
+                        &[],
+                        &crate::proc::default_limits(),
+                        &|_| Err(abi::errno::Errno::ENOENT),
+                    )
+                    .unwrap();
                 // The top page is a guard: mapped, with no access at all.
                 let top = VirtAddr::new(USRSTACK);
                 assert!(space.fault(&s, top, vm::fault::Access::Read).is_err());
@@ -2821,7 +2830,7 @@ mod user_memory {
             };
             let (a, b) = (load(), load());
             assert!(a.anon_loc != b.anon_loc && a.stack_top != b.stack_top, "{a:?} {b:?}");
-            for Layout { anon_loc, stack_top, shared_page } in [a, b] {
+            for Layout { anon_loc, stack_top, shared_page, .. } in [a, b] {
                 // /rescue/echo's data is below 64 MiB; the layout is above
                 // the data limit, anon_loc in the lower half of what is left.
                 assert!((MAXDSIZ..USRSTACK / 2 + (MAXDSIZ + (64 << 20)) / 2).contains(&anon_loc));

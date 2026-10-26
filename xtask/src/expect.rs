@@ -91,7 +91,9 @@ pub(crate) const SHELL: &[Step] = &[
         "\nrunning\r\n",
         "start a job",
     ),
-    step("\x1a", "^Z[1] + Suspended", "^Z stops it"),
+    // Not "^Z[1] …": a console message may come between the echo and the
+    // shell's line.
+    step("\x1a", "[1] + Suspended", "^Z stops it"),
     step("jobs\n", "\n[1] + Suspended", "jobs lists it"),
     job_then_settle("fg\n", "sleep 60", "fg resumes it"),
     step("\x03", "\n", "^C ends it"),
@@ -169,6 +171,58 @@ pub(crate) const UFS_ROOT: &[Step] = &[
         "rm -r /var/tmp/x /var/tmp/misc.tar && echo rm-$?\n",
         "\nrm-0\r\n",
         "rm -r",
+    ),
+];
+
+/// Base's own, dynamically linked, programs (ROADMAP P6.1): they run, the
+/// run-time linker runs as a program itself, `ldd` lists what a program
+/// links, and rtld's `LD_*` variables work. It writes nothing, so it runs
+/// on FreeBSD's read-only single-user root too.
+pub(crate) const DYNAMIC: &[Step] = &[
+    step(
+        "PATH=/usr/bin:/bin:/usr/sbin:/sbin\n",
+        "\n",
+        "base's own programs",
+    ),
+    step("ls -lo /bin/ls\n", "-r-xr-xr-x  1 root wheel -", "ls"),
+    step("ps -o comm= -p $$\n", "\nsh\r\n", "ps"),
+    step(
+        "tar -cf - -C /etc/defaults rc.conf | tar -tvf -\n",
+        " rc.conf\r\n",
+        "tar",
+    ),
+    step(
+        "find /etc/defaults -name rc.conf\n",
+        "\n/etc/defaults/rc.conf\r\n",
+        "find",
+    ),
+    step(
+        "ldd /usr/bin/tar\n",
+        "libarchive.so.7 => /usr/lib/libarchive.so.7",
+        "ldd",
+    ),
+    step(
+        "/libexec/ld-elf.so.1 /bin/echo direct\n",
+        "\ndirect\r\n",
+        "rtld run as a program",
+    ),
+    step("LD_BIND_NOW=1 /bin/echo now\n", "\nnow\r\n", "LD_BIND_NOW"),
+    // rtld finds a preloaded name in LD_LIBRARY_PATH or the hints (which
+    // a fresh root has not until rc runs ldconfig), not the default path.
+    step(
+        "LD_TRACE_LOADED_OBJECTS=1 LD_LIBRARY_PATH=/lib LD_PRELOAD=libm.so.5 /bin/echo\n",
+        "\t/lib/libm.so.5 (0x",
+        "LD_PRELOAD and LD_LIBRARY_PATH",
+    ),
+    step(
+        "kbdcontrol -r fast < /dev/ttyv0 && echo kbd-$?\n",
+        "\nkbd-0\r\n",
+        "kbdcontrol",
+    ),
+    step(
+        "vidcontrol -h 500 < /dev/ttyv0 && echo vid-$?\n",
+        "\nvid-0\r\n",
+        "vidcontrol",
     ),
 ];
 
@@ -373,8 +427,9 @@ impl Session {
     }
 }
 
-/// `cargo xtask freebsd-shell`: runs [`SHELL`] against FreeBSD 15.1's
-/// `/rescue/sh` in bhyve, proving the script and this harness.
+/// `cargo xtask freebsd-shell`: runs [`SHELL`] and [`DYNAMIC`] against
+/// FreeBSD 15.1's `/rescue/sh` in bhyve, proving the scripts and this
+/// harness.
 pub(crate) fn cmd_freebsd_shell(args: Args) -> Result<()> {
     args.finish()?;
     if !cfg!(target_os = "freebsd") {
@@ -397,6 +452,7 @@ pub(crate) fn cmd_freebsd_shell(args: Args) -> Result<()> {
         session.send("/rescue/sh\n")?;
         session.expect("# ", Duration::from_secs(30))?;
         session.script(SHELL, Duration::from_secs(30))?;
+        session.script(DYNAMIC, Duration::from_secs(30))?;
         session.send("exit\n")
     })();
     let exited = session.finish(Duration::from_secs(180))?;
@@ -406,7 +462,7 @@ pub(crate) fn cmd_freebsd_shell(args: Args) -> Result<()> {
     }
     println!(
         "freebsd-shell: {} steps passed against FreeBSD; console in {}",
-        SHELL.len(),
+        SHELL.len() + DYNAMIC.len(),
         log.display()
     );
     Ok(())

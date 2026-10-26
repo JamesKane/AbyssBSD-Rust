@@ -204,7 +204,14 @@ fn ufs_root(arch: Arch, opts: build::Options, cmdline: &str, root: Root) -> Resu
         .lines()
         .filter_map(|l| l.split_ascii_whitespace().next())
         .collect();
-    let mut spec = base_spec.clone();
+    // Entries without flags get none: makefs would otherwise copy the
+    // extracted files' own, and ZFS (the build server's) marks every new
+    // file `uarch`, which an installed root has not.
+    let (signature, entries) = base_spec
+        .split_once('\n')
+        .filter(|(first, _)| first.starts_with("#mtree"))
+        .unwrap_or(("#mtree", &base_spec));
+    let mut spec = format!("{signature}\n/set flags=none\n{entries}");
     add_spec(&stage, &stage, &known, &mut spec)?;
     let spec_path = dir.join(format!("{name}.mtree"));
     fs::write(&spec_path, spec)?;

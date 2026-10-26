@@ -166,25 +166,37 @@ fn kmain(boot_info: PhysAddr) -> ! {
     }
 }
 
-/// The shell a single-user boot gives the console (until init, P6): FreeBSD's
-/// `/rescue/sh`, as a login shell (`-sh`) leading its own session, with the
-/// console as its controlling terminal. Returns when it exits.
+/// The shell a single-user boot gives the console (until init, P6.9): base's
+/// dynamic `/bin/sh` from a full root, else `/rescue/sh` (the memory disk
+/// holds only /rescue), as a login shell (`-sh`) leading its own session,
+/// with the console as its controlling terminal; each is tried in turn, as
+/// FreeBSD's `kern.init_path`. Returns when it exits.
 #[cfg(not(feature = "ktest"))]
 fn run_shell(s: &sched::Sleepable) {
-    // The memory disk holds only /rescue.
-    const ENV: &[&[u8]] = &[b"HOME=/", b"PATH=/rescue"];
+    const SHELLS: &[(&[u8], &[&[u8]])] = &[
+        // FreeBSD's `_PATH_STDPATH`.
+        (
+            b"/bin/sh",
+            &[b"HOME=/", b"PATH=/usr/bin:/bin:/usr/sbin:/sbin"],
+        ),
+        (b"/rescue/sh", &[b"HOME=/", b"PATH=/rescue"]),
+    ];
     let console = tty::console();
     if console.is_none() {
         kprintln!("shell: the console cannot be typed at; starting it anyway");
     }
-    match proc::Process::spawn_session(s, b"/rescue/sh", &[b"-sh"], ENV, None, console.as_deref()) {
-        Ok(p) => {
-            // The multi-user boot test gives up on this line.
-            kprintln!("shell: /rescue/sh started (no init until P6.9)");
-            let how = p.wait(s);
-            kprintln!("shell: exited ({how:?})");
+    for &(path, env) in SHELLS {
+        let name = core::str::from_utf8(path).unwrap_or("?");
+        match proc::Process::spawn_session(s, path, &[b"-sh"], env, None, console.as_deref()) {
+            Ok(p) => {
+                // The multi-user boot test gives up on this line.
+                kprintln!("shell: {name} started (no init until P6.9)");
+                let how = p.wait(s);
+                kprintln!("shell: exited ({how:?})");
+                return;
+            }
+            Err(e) => kprintln!("shell: cannot start {name}: {e:?}"),
         }
-        Err(e) => kprintln!("shell: cannot start /rescue/sh: {e:?}"),
     }
 }
 

@@ -26,7 +26,7 @@
 use alloc::collections::BTreeMap;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicU64, Ordering};
 
 use abi::errno::Errno;
 use abi::resource::{RLIM_INFINITY, Rlimit, WNOHANG, WNOWAIT, exit_status, rlimit};
@@ -58,6 +58,8 @@ struct SharedLayout {
     anon_loc: AtomicU64,
     stack_top: AtomicU64,
     shared_page: AtomicU64,
+    osrel: AtomicI32,
+    fctl0: AtomicU32,
 }
 
 impl SharedLayout {
@@ -66,6 +68,8 @@ impl SharedLayout {
             anon_loc: AtomicU64::new(l.anon_loc),
             stack_top: AtomicU64::new(l.stack_top),
             shared_page: AtomicU64::new(l.shared_page),
+            osrel: AtomicI32::new(l.osrel),
+            fctl0: AtomicU32::new(l.fctl0),
         }
     }
 
@@ -74,6 +78,8 @@ impl SharedLayout {
             anon_loc: self.anon_loc.load(Ordering::Relaxed),
             stack_top: self.stack_top.load(Ordering::Relaxed),
             shared_page: self.shared_page.load(Ordering::Relaxed),
+            osrel: self.osrel.load(Ordering::Relaxed),
+            fctl0: self.fctl0.load(Ordering::Relaxed),
         }
     }
 
@@ -81,6 +87,8 @@ impl SharedLayout {
         self.anon_loc.store(l.anon_loc, Ordering::Relaxed);
         self.stack_top.store(l.stack_top, Ordering::Relaxed);
         self.shared_page.store(l.shared_page, Ordering::Relaxed);
+        self.osrel.store(l.osrel, Ordering::Relaxed);
+        self.fctl0.store(l.fctl0, Ordering::Relaxed);
     }
 }
 
@@ -186,7 +194,7 @@ pub(crate) struct Job {
 
 /// FreeBSD's default limits, as `ulimit -a` shows them on a 15.1 system,
 /// except the stack, which matches what exec maps.
-fn default_limits() -> [Rlimit; rlimit::NLIMITS] {
+pub(crate) fn default_limits() -> [Rlimit; rlimit::NLIMITS] {
     let inf = Rlimit {
         rlim_cur: RLIM_INFINITY,
         rlim_max: RLIM_INFINITY,
@@ -606,8 +614,30 @@ impl Process {
             path,
         )?;
         let space = AddressSpace::new().map_err(|_| Errno::ENOMEM)?;
-        let data_max = default_limits()[rlimit::DATA as usize].rlim_max;
-        let image = crate::exec::load(s, &space, &file, path, argv, envp, data_max)?;
+        let lookup = |p: &[u8]| {
+            crate::fs::namespace().lookup(
+                s,
+                &vfs::namei::Lookup {
+                    start: &root,
+                    root: &root,
+                    follow: true,
+                    beneath: false,
+                    create: false,
+                    cred: &crate::fs::cred(),
+                },
+                p,
+            )
+        };
+        let image = crate::exec::load(
+            s,
+            &space,
+            &file,
+            path,
+            argv,
+            envp,
+            &default_limits(),
+            &lookup,
+        )?;
         let p = Self::create(space, image.layout, None, crate::fs::console_table());
         *p.image.lock() = Image::new(s, &root, path, argv);
         *p.text.lock() = Some(Text::new(&file)?);
@@ -631,7 +661,7 @@ impl Process {
         let layout = Layout {
             anon_loc: 64 << 30,
             stack_top: sp,
-            shared_page: 0,
+            ..Layout::default()
         };
         let p = Self::create(space, layout, None, crate::fs::console_table());
         let frame = arch::user::user_frame(entry, sp, 0);
@@ -793,8 +823,10 @@ impl Process {
         let file = crate::fs::lookup(s, self, crate::fs::At::Cwd, path, crate::fs::Walk::FOLLOW)?;
         let text = Text::new(&file)?;
         let space = AddressSpace::new().map_err(|_| Errno::ENOMEM)?;
-        let data_max = self.limits.lock()[rlimit::DATA as usize].rlim_max;
-        let image = crate::exec::load(s, &space, &file, path, argv, envp, data_max)?;
+        let limits = *self.limits.lock();
+        let lookup =
+            |p: &[u8]| crate::fs::lookup(s, self, crate::fs::At::Cwd, p, crate::fs::Walk::FOLLOW);
+        let image = crate::exec::load(s, &space, &file, path, argv, envp, &limits, &lookup)?;
         // No way back from here.
         let old = core::mem::replace(&mut *self.space.lock(), Arc::clone(&space));
         sched::set_address_space(Some(space as Arc<dyn sched::AddressSpace>));

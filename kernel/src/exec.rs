@@ -15,29 +15,44 @@
 //! pointer (and first argument register) points.
 //!
 //! The layout is randomized as FreeBSD 15's defaults do for 64-bit
-//! programs (`kern.elf64.aslr.*`): the image stays where it was linked,
-//! anonymous mappings start at a random `anon_loc` between the end of the
-//! data segment's largest size and the middle of the user half, and the
-//! stack and the shared page are placed above the data limit with random
-//! gaps; the stack's top also moves within its page. The top page of the
-//! user half is a guard.
+//! programs (`kern.elf64.aslr.*`): a position-independent executable
+//! linked at 0 loads at a random base in the lower half of the space above
+//! the data limit, a fixed one stays where it was linked, anonymous
+//! mappings start at a random `anon_loc` between the end of the data
+//! segment's largest size and the middle of what is left, and the stack
+//! and the shared page are placed above the data limit with random gaps;
+//! the stack's top also moves within its page. The top page of the user
+//! half is then a guard. A binary whose feature-control note disables
+//! ASLR gets FreeBSD's fixed layout: a PIE at `ET_DYN_LOAD_ADDR`, the
+//! shared page in the top page, and the stack below it.
 //!
-//! Dynamic executables (`PT_INTERP`) wait for the run-time linker (P6).
+//! A dynamic executable names its interpreter (`PT_INTERP`, base's
+//! `/libexec/ld-elf.so.1`), which is loaded where an `mmap` would put it,
+//! at a random page above the data limit, and started in the program's
+//! place; the auxiliary vector tells it where the program is (`AT_PHDR`,
+//! `AT_ENTRY`) and where it is itself (`AT_BASE`).
 //!
 //! Behavior reference: sys/kern/imgact_elf.c, sys/kern/kern_exec.c,
 //! sys/amd64/amd64/exec_machdep.c, sys/arm64/arm64/exec_machdep.c.
 
+use alloc::borrow::Cow;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use abi::errno::Errno;
-use abi::exec::{ELFOSABI_FREEBSD, MAXPAGESIZES, NT_FREEBSD_ABI_TAG, PsStrings, at};
+use abi::exec::{
+    ELFOSABI_FREEBSD, MAXPAGESIZES, NT_FREEBSD_ABI_TAG, NT_FREEBSD_FEATURE_CTL, PsStrings, at,
+    bsdf, fctl,
+};
+use abi::resource::{Rlimit, rlimit};
 use addr::VirtAddr;
 use elf::{Elf, FileType, Machine, SegmentKind};
 use sched::Sleepable;
 use vm::PAGE_SIZE;
 use vm::map::Prot;
 
-use crate::mm::space::{AddressSpace, SpaceError, USER_END};
+use crate::mm::space::{AddressSpace, SpaceError, USER_END, USER_START};
 
 /// The top of what a program may map (FreeBSD's `USRSTACK`, which is
 /// where the stack would end without randomization): the page above it is
@@ -78,7 +93,7 @@ pub(crate) struct Image {
     pub(crate) layout: Layout,
 }
 
-/// Where an image's randomized parts went.
+/// Where an image's randomized parts went, and what its notes said.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Layout {
     /// Where `mmap` without an address starts looking (FreeBSD's
@@ -88,6 +103,11 @@ pub(crate) struct Layout {
     pub(crate) stack_top: u64,
     /// The shared page.
     pub(crate) shared_page: u64,
+    /// The ABI tag note's `__FreeBSD_version` (FreeBSD's `p_osrel`; 0
+    /// without one).
+    pub(crate) osrel: i32,
+    /// The feature-control note's word (FreeBSD's `p_fctl0`).
+    pub(crate) fctl0: u32,
 }
 
 fn random_u64() -> u64 {
@@ -152,21 +172,21 @@ const fn prot_of(p: elf::Perms) -> Prot {
     prot
 }
 
-/// Whether `elf` is a FreeBSD binary: by `EI_OSABI`, or by the ABI tag
-/// note FreeBSD's toolchain also writes.
-fn branded(elf: &Elf<'_>) -> bool {
-    elf.os_abi == ELFOSABI_FREEBSD
-        || elf.segments().flatten().any(|s| {
-            s.kind == SegmentKind::Note
-                && elf.notes(&s).is_ok_and(|mut n| {
-                    n.any(|n| n.name == b"FreeBSD" && n.kind == NT_FREEBSD_ABI_TAG)
-                })
-        })
-}
+/// The process limits [`load`] works under.
+pub(crate) type Limits = [Rlimit; rlimit::NLIMITS];
+
+/// Finds the run-time linker a dynamic executable names (the process's
+/// own lookup, from its root and working directory).
+pub(crate) type Lookup<'a> = &'a dyn Fn(&[u8]) -> Result<Arc<vfs::Vnode>, Errno>;
 
 /// Loads `file` (found at `path`) into `space` (which must be empty) with
-/// arguments `argv` and environment `envp`; `data_max` is the process's
-/// hard `RLIMIT_DATA`.
+/// arguments `argv` and environment `envp`, under the process's `limits`;
+/// a dynamic executable's interpreter is found with `lookup` (FreeBSD's
+/// `exec_elf64_imgact`).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "execve's parts, as FreeBSD's image_params"
+)]
 pub(crate) fn load(
     s: &Sleepable,
     space: &AddressSpace,
@@ -174,82 +194,96 @@ pub(crate) fn load(
     path: &[u8],
     argv: &[&[u8]],
     envp: &[&[u8]],
-    data_max: u64,
+    limits: &Limits,
+    lookup: Lookup<'_>,
 ) -> Result<Image, Errno> {
-    // A regular file the caller may execute (root needs an execute bit
-    // too).
-    if file.kind() != vfs::Kind::Regular {
-        return Err(Errno::EACCES);
-    }
-    vfs::ops::access(
-        &file.attr(s)?,
-        file.kind(),
-        &crate::fs::cred(),
-        vfs::ops::VEXEC,
-    )?;
-    let object = crate::fs::object(s, file).ok_or(Errno::ENOEXEC)?;
-    // The headers, program headers, and branding note sit at the start:
-    // read that much (the memory disk's files are there already).
-    let head;
-    let data = match file.resident(s) {
-        Some(d) => d,
-        None => {
-            let size = usize::try_from(file.size(s)?).unwrap_or(usize::MAX);
-            let mut buf = alloc::vec![0u8; size.min(HEAD_MAX)];
-            let mut r = vfs::ReadBuf::new(&mut buf);
-            let n = file.read_at(s, 0, &mut r)?;
-            buf.truncate(n);
-            head = buf;
-            &head[..]
-        }
+    let object = open(s, file)?;
+    let head = read_head(s, file)?;
+    let elf = Elf::parse_head(&head).map_err(|_| Errno::ENOEXEC)?;
+    let pie = match elf.file_type {
+        FileType::Executable => false,
+        FileType::Shared => true,
+        FileType::Other(_) => return Err(Errno::ENOEXEC),
     };
-    let elf = Elf::parse_head(data).map_err(|_| Errno::ENOEXEC)?;
-    if elf.machine != MACHINE || elf.file_type != FileType::Executable || !branded(&elf) {
+    if elf.machine != MACHINE {
         return Err(Errno::ENOEXEC);
     }
-    let (phoff, phnum) = elf.program_headers();
-    let mut phdr = None;
-    let mut stack_prot = Prot::RW;
-    // The data segment's start (FreeBSD's `vm_daddr`): the writable
-    // segment, or else the text.
-    let (mut text, mut data) = (None, None);
-    for seg in elf.segments() {
-        let seg = seg.map_err(|_| Errno::ENOEXEC)?;
-        match seg.kind {
-            SegmentKind::Interp => return Err(Errno::ENOEXEC),
-            SegmentKind::Phdr => phdr = Some(seg.vaddr),
-            SegmentKind::GnuStack if seg.perms.exec => stack_prot = Prot::ALL,
-            SegmentKind::Load => {
-                map_segment(s, space, &object, &seg)?;
-                let slot = if seg.perms.write {
-                    &mut data
-                } else {
-                    &mut text
-                };
-                slot.get_or_insert(seg.vaddr);
-                if phdr.is_none() && seg.offset <= phoff && phoff < seg.offset + seg.file_size {
-                    phdr = Some(seg.vaddr + (phoff - seg.offset));
-                }
-            }
-            _ => {}
+    let headers = Headers::scan(&elf)?;
+    let notes = Notes::of(&elf);
+    if elf.os_abi != ELFOSABI_FREEBSD && notes.is_none() {
+        return Err(Errno::ENOEXEC);
+    }
+    let Notes { osrel, fctl0 } = notes.unwrap_or_default();
+
+    // Randomize the layout: a PIE linked at 0 loads at a random base, and
+    // any image gets a random stack, shared page, and mmap base, unless
+    // its feature-control note opts out.
+    let aslr_off = fctl0 & fctl::ASLR_DISABLE != 0;
+    let mut et_dyn_addr = 0;
+    let mut random_base = false;
+    if pie && headers.baddr == 0 {
+        if aslr_off || !ASLR.pie_enable.load(Ordering::Relaxed) {
+            et_dyn_addr = ET_DYN_LOAD_ADDR;
+        } else {
+            random_base = true;
         }
     }
-    let daddr = data.or(text).ok_or(Errno::ENOEXEC)?;
-    let brk_end = daddr
+    let aslr = !aslr_off && (random_base || !pie && ASLR.enable.load(Ordering::Relaxed));
+    let aslr_stack = aslr && ASLR.stack.load(Ordering::Relaxed);
+    let aslr_shared_page = aslr && ASLR.shared_page.load(Ordering::Relaxed);
+
+    let data_max = limits[rlimit::DATA as usize].rlim_max;
+    let maxv = if aslr_stack {
+        USRSTACK
+    } else {
+        USRSTACK.saturating_sub(limits[rlimit::STACK as usize].rlim_max)
+    };
+    if headers.mapsz >= maxv.saturating_sub(USER_START) {
+        return Err(Errno::ENOEXEC);
+    }
+    if random_base {
+        // The lower half of the space, above the data limit: the upper is
+        // the interpreter's.
+        let min = USER_START
+            .saturating_add(headers.mapsz)
+            .saturating_add(data_max);
+        et_dyn_addr = rnd_base(min, maxv / 2, headers.maxalign)?;
+    }
+    load_sections(s, space, &object, &elf, et_dyn_addr)?;
+    let daddr = enforce_limits(&elf, et_dyn_addr, limits)?;
+
+    // The interpreter loads where `mmap(0, …)` would put it, leaving the
+    // heap room to grow to its limit.
+    let addr = daddr
         .checked_add(data_max)
+        .filter(|&a| a < maxv)
         .ok_or(Errno::ENOEXEC)?
         .next_multiple_of(PAGE_SIZE);
-    let anon_loc = rnd_base(brk_end, USRSTACK / 2 + brk_end / 2, ANON_ALIGN)?;
-    let guard = crate::mm::space::Anon {
-        fixed: Some(VirtAddr::new(USRSTACK)),
-        exclusive: true,
-        len: PAGE_SIZE,
-        prot: Prot::NONE,
-        max_prot: Prot::NONE,
-        ..crate::mm::space::Anon::default()
+    let anon_loc = if aslr {
+        rnd_base(addr, maxv / 2 + addr / 2, ANON_ALIGN)?
+    } else {
+        addr
     };
-    space.map_anon(s, &guard).map_err(space_error)?;
-    let stack_base = place(s, space, brk_end, STACK_SIZE)?;
+    let entry = elf.entry.wrapping_add(et_dyn_addr);
+    let (base, start) = match headers.interp {
+        Some(name) => {
+            let at = if aslr {
+                rnd_base(addr, maxv / 2 + addr / 2, PAGE_SIZE)?
+            } else {
+                addr
+            };
+            let interp = lookup(name)?;
+            load_interp(s, space, &interp, at)?
+        }
+        None => (et_dyn_addr, entry),
+    };
+
+    let stack_prot = headers.stack_prot.unwrap_or(DEFAULT_STACK_PROT);
+    let stack_base = if aslr_stack {
+        place(s, space, addr, STACK_SIZE)?
+    } else {
+        USRSTACK - STACK_SIZE
+    };
     space
         .map_anonymous(
             s,
@@ -259,24 +293,308 @@ pub(crate) fn load(
             stack_prot,
         )
         .map_err(space_error)?;
-    // Randomized within the stack's top page, keeping pointer alignment.
-    let stack_top = stack_base + STACK_SIZE - ((random_u64() % PAGE_SIZE) & !7);
-    let shared_page = place(s, space, brk_end, PAGE_SIZE)?;
+    let mut stack_top = stack_base + STACK_SIZE;
+    if aslr_stack {
+        // Randomized within the stack's top page, keeping pointer
+        // alignment.
+        stack_top -= (random_u64() % PAGE_SIZE) & !7;
+    }
+    // A randomized shared page leaves a guard at the top of the space;
+    // otherwise it is the top page.
+    let shared_page = if aslr_shared_page {
+        let guard = crate::mm::space::Anon {
+            fixed: Some(VirtAddr::new(USRSTACK)),
+            exclusive: true,
+            len: PAGE_SIZE,
+            prot: Prot::NONE,
+            max_prot: Prot::NONE,
+            ..crate::mm::space::Anon::default()
+        };
+        space.map_anon(s, &guard).map_err(space_error)?;
+        place(s, space, addr, PAGE_SIZE)?
+    } else {
+        USRSTACK
+    };
     crate::shared_page::map(s, space, shared_page).map_err(space_error)?;
     let layout = Layout {
         anon_loc,
         stack_top,
         shared_page,
+        osrel,
+        fctl0,
     };
     let aux = Aux {
-        phdr: phdr.unwrap_or(0),
-        phnum: phnum as u64,
-        entry: elf.entry,
+        phdr: headers.proghdr.wrapping_add(et_dyn_addr),
+        phnum: headers.phnum as u64,
+        entry,
+        base,
         flags: elf.flags,
         stack_prot,
+        stack_lim: limits[rlimit::STACK as usize].rlim_cur,
     };
     let stack = build_stack(s, space, path, argv, envp, &aux, &layout)?;
-    Ok(registers(elf.entry, stack, layout))
+    Ok(registers(start, stack, layout))
+}
+
+/// Where a PIE linked at 0 loads when it is not randomized (FreeBSD's
+/// `ET_DYN_LOAD_ADDR`).
+#[cfg(target_arch = "x86_64")]
+const ET_DYN_LOAD_ADDR: u64 = 0x0102_1000;
+#[cfg(target_arch = "aarch64")]
+const ET_DYN_LOAD_ADDR: u64 = 0x10_0000;
+/// The stack's protection when the image has no `PT_GNU_STACK` (the
+/// sysvec's `sv_stackprot`).
+#[cfg(target_arch = "x86_64")]
+const DEFAULT_STACK_PROT: Prot = Prot::ALL;
+#[cfg(target_arch = "aarch64")]
+const DEFAULT_STACK_PROT: Prot = Prot::RW;
+/// A program header's size (`e_phentsize`, which the parser checks).
+const PHENT: u64 = 56;
+/// The most program headers an image may have (`kern.elf64.phnums`).
+const PHNUMS: usize = 128;
+/// The largest `PT_LOAD` alignment accepted: the largest superpage.
+/// Larger ones are corrupt or malicious.
+const MAX_SEGMENT_ALIGN: u64 = 1 << 30;
+/// The longest `PT_INTERP`, with its NUL (`MAXPATHLEN`).
+const MAXPATHLEN: u64 = 1024;
+
+/// `kern.elf64.aslr.*`: which parts of a 64-bit image are randomized.
+pub(crate) struct Aslr {
+    /// `enable`: non-PIE images.
+    pub(crate) enable: AtomicBool,
+    /// `pie_enable`: PIEs, including their base.
+    pub(crate) pie_enable: AtomicBool,
+    /// `stack`.
+    pub(crate) stack: AtomicBool,
+    /// `shared_page`.
+    pub(crate) shared_page: AtomicBool,
+}
+
+/// FreeBSD 15's defaults for 64-bit programs: everything.
+pub(crate) static ASLR: Aslr = Aslr {
+    enable: AtomicBool::new(true),
+    pie_enable: AtomicBool::new(true),
+    stack: AtomicBool::new(true),
+    shared_page: AtomicBool::new(true),
+};
+
+/// Checks that `file` is a regular file the caller may execute (root
+/// needs an execute bit too), and returns its memory object.
+fn open(s: &Sleepable, file: &vfs::Vnode) -> Result<Arc<vm::object::Object>, Errno> {
+    if file.kind() != vfs::Kind::Regular {
+        return Err(Errno::EACCES);
+    }
+    vfs::ops::access(
+        &file.attr(s)?,
+        file.kind(),
+        &crate::fs::cred(),
+        vfs::ops::VEXEC,
+    )?;
+    crate::fs::object(s, file).ok_or(Errno::ENOEXEC)
+}
+
+/// The start of `file`, where the headers, program headers, branding
+/// notes, and interpreter path sit (the memory disk's files are there
+/// already).
+fn read_head(s: &Sleepable, file: &vfs::Vnode) -> Result<Cow<'static, [u8]>, Errno> {
+    if let Some(d) = file.resident(s) {
+        return Ok(Cow::Borrowed(d));
+    }
+    let size = usize::try_from(file.size(s)?).unwrap_or(usize::MAX);
+    let mut buf = alloc::vec![0u8; size.min(HEAD_MAX)];
+    let mut r = vfs::ReadBuf::new(&mut buf);
+    let n = file.read_at(s, 0, &mut r)?;
+    buf.truncate(n);
+    Ok(Cow::Owned(buf))
+}
+
+/// What an image's program headers say, before anything is mapped.
+struct Headers<'a> {
+    phnum: usize,
+    /// The first `PT_LOAD`'s address.
+    baddr: u64,
+    /// The largest `PT_LOAD` alignment.
+    maxalign: u64,
+    /// The `PT_LOAD`s' total size.
+    mapsz: u64,
+    /// The program headers' address, unrelocated (`AT_PHDR`).
+    proghdr: u64,
+    /// The interpreter's path, without its NUL.
+    interp: Option<&'a [u8]>,
+    /// From `PT_GNU_STACK`.
+    stack_prot: Option<Prot>,
+}
+
+impl<'a> Headers<'a> {
+    fn scan(elf: &Elf<'a>) -> Result<Self, Errno> {
+        let (phoff, phnum) = elf.program_headers();
+        if phnum > PHNUMS {
+            return Err(Errno::ENOEXEC);
+        }
+        let phend = phoff + phnum as u64 * PHENT;
+        let mut h = Self {
+            phnum,
+            baddr: 0,
+            maxalign: PAGE_SIZE,
+            mapsz: 0,
+            proghdr: 0,
+            interp: None,
+            stack_prot: None,
+        };
+        let mut loads = 0;
+        for seg in elf.segments() {
+            let seg = seg.map_err(|_| Errno::ENOEXEC)?;
+            match seg.kind {
+                SegmentKind::Load => {
+                    if loads == 0 {
+                        h.baddr = seg.vaddr;
+                    }
+                    loads += 1;
+                    if !seg.align.is_power_of_two() || seg.align > MAX_SEGMENT_ALIGN {
+                        return Err(Errno::ENOEXEC);
+                    }
+                    h.maxalign = h.maxalign.max(seg.align);
+                    h.mapsz = h.mapsz.checked_add(seg.mem_size).ok_or(Errno::ENOEXEC)?;
+                    // The segment holding the program headers gives their
+                    // address (static binaries usually have no PT_PHDR).
+                    if seg.offset == 0 && phend <= seg.file_size {
+                        h.proghdr = seg.vaddr + phoff;
+                    }
+                }
+                SegmentKind::Interp => {
+                    if h.interp.is_some() || !(2..=MAXPATHLEN).contains(&seg.file_size) {
+                        return Err(Errno::ENOEXEC);
+                    }
+                    let path = elf.segment_data(&seg).map_err(|_| Errno::ENOEXEC)?;
+                    let (&nul, path) = path.split_last().ok_or(Errno::ENOEXEC)?;
+                    if nul != 0 {
+                        return Err(Errno::ENOEXEC);
+                    }
+                    // A path ends at its first NUL.
+                    let end = path.iter().position(|&b| b == 0).unwrap_or(path.len());
+                    h.interp = Some(&path[..end]);
+                }
+                SegmentKind::GnuStack => {
+                    let prot = prot_of(seg.perms);
+                    if !prot.contains(Prot::RW) {
+                        return Err(Errno::ENOEXEC);
+                    }
+                    h.stack_prot = Some(prot);
+                }
+                SegmentKind::Phdr => h.proghdr = seg.vaddr,
+                _ => {}
+            }
+        }
+        Ok(h)
+    }
+}
+
+/// What a FreeBSD image's notes say.
+#[derive(Clone, Copy, Debug, Default)]
+struct Notes {
+    /// The ABI tag: the `__FreeBSD_version` it was built for.
+    osrel: i32,
+    /// The feature-control word (`fctl::*`).
+    fctl0: u32,
+}
+
+impl Notes {
+    /// The ABI tag note and, beside it, the feature-control note; `None`
+    /// without the ABI tag (FreeBSD's `check_note`).
+    fn of(elf: &Elf<'_>) -> Option<Self> {
+        let freebsd = |kind: u32| {
+            elf.segments()
+                .flatten()
+                .filter(|s| s.kind == SegmentKind::Note)
+                .filter_map(|s| elf.notes(&s).ok())
+                .flatten()
+                .find(|n| n.name == b"FreeBSD" && n.kind == kind)
+                .and_then(|n| n.desc.first_chunk::<4>().copied())
+        };
+        let osrel = i32::from_le_bytes(freebsd(NT_FREEBSD_ABI_TAG)?);
+        let fctl0 = freebsd(NT_FREEBSD_FEATURE_CTL).map_or(0, u32::from_le_bytes);
+        Some(Self { osrel, fctl0 })
+    }
+}
+
+/// Loads the interpreter `file` at `addr` (if it is position-independent)
+/// and returns its base and entry (FreeBSD's `load_interp_file`).
+fn load_interp(
+    s: &Sleepable,
+    space: &AddressSpace,
+    file: &vfs::Vnode,
+    addr: u64,
+) -> Result<(u64, u64), Errno> {
+    let object = open(s, file)?;
+    let head = read_head(s, file)?;
+    let elf = Elf::parse_head(&head).map_err(|_| Errno::ENOEXEC)?;
+    if elf.machine != MACHINE {
+        return Err(Errno::ENOEXEC);
+    }
+    let rbase = match elf.file_type {
+        FileType::Shared => addr,
+        FileType::Executable => 0,
+        FileType::Other(_) => return Err(Errno::ENOEXEC),
+    };
+    if elf.program_headers().1 > PHNUMS {
+        return Err(Errno::ENOEXEC);
+    }
+    let base = load_sections(s, space, &object, &elf, rbase)?;
+    Ok((base, elf.entry.wrapping_add(rbase)))
+}
+
+/// Maps `elf`'s `PT_LOAD` segments `rbase` above where they were linked;
+/// returns the first one's page (FreeBSD's `load_sections`).
+fn load_sections(
+    s: &Sleepable,
+    space: &AddressSpace,
+    object: &Arc<vm::object::Object>,
+    elf: &Elf<'_>,
+    rbase: u64,
+) -> Result<u64, Errno> {
+    let mut base = None;
+    for seg in elf.segments() {
+        let seg = seg.map_err(|_| Errno::ENOEXEC)?;
+        if seg.kind != SegmentKind::Load || seg.mem_size == 0 {
+            continue;
+        }
+        map_segment(s, space, object, &seg, rbase)?;
+        base.get_or_insert(seg.vaddr.wrapping_add(rbase) & !(PAGE_SIZE - 1));
+    }
+    Ok(base.unwrap_or(0))
+}
+
+/// Checks the image's sizes against the limits and returns the data
+/// segment's start (FreeBSD's `vm_daddr`): the largest executable segment
+/// is the text, and the last other one the data (FreeBSD's
+/// `enforce_limits`).
+fn enforce_limits(elf: &Elf<'_>, rbase: u64, limits: &Limits) -> Result<u64, Errno> {
+    let (mut text_size, mut text_addr) = (0, 0);
+    let (mut data_size, mut data_addr) = (0, 0);
+    let mut total: u64 = 0;
+    for seg in elf.segments().flatten() {
+        if seg.kind != SegmentKind::Load || seg.mem_size == 0 {
+            continue;
+        }
+        let start = seg.vaddr.wrapping_add(rbase);
+        let addr = start & !(PAGE_SIZE - 1);
+        let size = (start - addr + seg.mem_size).next_multiple_of(PAGE_SIZE);
+        if seg.perms.exec && text_size < size {
+            (text_size, text_addr) = (size, addr);
+        } else {
+            (data_size, data_addr) = (size, addr);
+        }
+        total = total.saturating_add(size);
+    }
+    if data_addr == 0 && data_size == 0 {
+        (data_size, data_addr) = (text_size, text_addr);
+    }
+    if data_size > limits[rlimit::DATA as usize].rlim_cur
+        || total > limits[rlimit::VMEM as usize].rlim_cur
+    {
+        return Err(Errno::ENOMEM);
+    }
+    Ok(data_addr)
 }
 
 /// How much of a file `exec` reads to parse its headers (FreeBSD reads a
@@ -284,22 +602,24 @@ pub(crate) fn load(
 /// in the first pages of any executable the base system has.
 const HEAD_MAX: usize = 64 * 1024;
 
-/// Maps one `PT_LOAD` segment.
+/// Maps one `PT_LOAD` segment, `rbase` above where it was linked.
 fn map_segment(
     s: &Sleepable,
     space: &AddressSpace,
-    object: &alloc::sync::Arc<vm::object::Object>,
+    object: &Arc<vm::object::Object>,
     seg: &elf::Segment,
+    rbase: u64,
 ) -> Result<(), Errno> {
     let page = PAGE_SIZE;
-    if seg.offset % page != seg.vaddr % page {
+    let vaddr = seg.vaddr.checked_add(rbase).ok_or(Errno::ENOEXEC)?;
+    if seg.offset % page != vaddr % page {
         return Err(Errno::ENOEXEC);
     }
     let prot = prot_of(seg.perms);
-    let start = seg.vaddr - seg.vaddr % page;
-    let file_end = seg.vaddr + seg.file_size;
-    let mem_end = seg.vaddr + seg.mem_size;
-    if mem_end > USRSTACK || start < crate::mm::space::USER_START {
+    let start = vaddr - vaddr % page;
+    let file_end = vaddr + seg.file_size;
+    let mem_end = vaddr.checked_add(seg.mem_size).ok_or(Errno::ENOEXEC)?;
+    if mem_end > USRSTACK || start < USER_START {
         return Err(Errno::ENOEXEC);
     }
     let up = |v: u64| v.next_multiple_of(page);
@@ -308,7 +628,7 @@ fn map_segment(
             .map_private(
                 s,
                 VirtAddr::new(start)..VirtAddr::new(up(file_end)),
-                alloc::sync::Arc::clone(object),
+                Arc::clone(object),
                 seg.offset / page,
                 prot,
                 Prot::ALL,
@@ -352,8 +672,12 @@ struct Aux {
     phdr: u64,
     phnum: u64,
     entry: u64,
+    /// The interpreter's base (or a static PIE's).
+    base: u64,
     flags: u32,
     stack_prot: Prot,
+    /// `RLIMIT_STACK`'s current value.
+    stack_lim: u64,
 }
 
 /// Builds the initial stack below `layout.stack_top`; returns the address
@@ -420,12 +744,12 @@ fn build_stack(
     let ncpus = sched::online_cpus() as u64;
     let entries = [
         (at::PHDR, aux.phdr),
-        (at::PHENT, 56),
+        (at::PHENT, PHENT),
         (at::PHNUM, aux.phnum),
         (at::PAGESZ, PAGE_SIZE),
         (at::FLAGS, 0),
         (at::ENTRY, aux.entry),
-        (at::BASE, 0),
+        (at::BASE, aux.base),
         (at::EHDRFLAGS, u64::from(aux.flags)),
         (at::EXECPATH, execpath),
         (at::OSRELDATE, abi::sysctl::identity::OSRELDATE as u64),
@@ -435,7 +759,7 @@ fn build_stack(
         (at::PAGESIZES, pagesizes),
         (at::PAGESIZESLEN, (MAXPAGESIZES * 8) as u64),
         (at::STACKPROT, u64::from(aux.stack_prot.bits())),
-        (at::BSDFLAGS, 0),
+        (at::BSDFLAGS, bsdf::SIGFASTBLK),
         (at::ARGC, argv.len() as u64),
         (at::ARGV, argv_at),
         (at::ENVC, envp.len() as u64),
@@ -445,8 +769,10 @@ fn build_stack(
             at::TIMEKEEP,
             crate::shared_page::timekeep_address(layout.shared_page),
         ),
+        // The top itself, `ps_strings` right below it, as FreeBSD 15.1
+        // reports it (tests/user/aslr.c, which passes there).
         (at::USRSTACKBASE, top),
-        (at::USRSTACKLIM, STACK_SIZE),
+        (at::USRSTACKLIM, aux.stack_lim),
         (at::NULL, 0),
     ];
     for (i, (k, v)) in entries.into_iter().enumerate() {

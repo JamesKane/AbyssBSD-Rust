@@ -372,12 +372,12 @@ fn multiuser(
         qmp: &sock,
         shot: &shot,
     });
-    // The kernel says when it starts `/rescue/sh` instead of init.
+    // The kernel says when it starts a shell instead of init.
     let (result, exited) = crate::multiuser::login_script(
         session,
         screen.as_ref(),
         Duration::from_secs(600),
-        &["panic:", "shell: /rescue/sh started"],
+        &["panic:", "(no init until P6.9)"],
     );
     let console = std::fs::read_to_string(&log).unwrap_or_default();
     let first = crate::multiuser::unexpected_first_uses(&console)?;
@@ -453,6 +453,7 @@ fn shell(
         session.script(crate::expect::SHELL, Duration::from_secs(30))?;
         if ufs_root {
             session.script(crate::expect::UFS_ROOT, Duration::from_secs(600))?;
+            session.script(crate::expect::DYNAMIC, Duration::from_secs(60))?;
         }
         session.send("exit\n")
     })();
