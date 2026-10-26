@@ -268,3 +268,176 @@ fn branding_and_notes() {
     };
     assert_eq!(short.count(), 1);
 }
+
+/// A vdso shaped like amd64's: its trampoline's 22 bytes and its CFI.
+fn vdso_image() -> (Vec<u8>, vdso::Written) {
+    let mut cie = vdso::Cfa::new(-8);
+    cie.def_cfa(7, 8).offset(16, -8);
+    let mut fde = vdso::Cfa::new(-8);
+    fde.def_cfa(7, 0);
+    for (reg, off) in [(5, 40), (4, 48), (1, 56), (16, 192), (7, 216)] {
+        fde.offset(reg, off);
+    }
+    fde.advance(10).def_cfa(7, 8);
+    let code = [0x90u8; 22];
+    let v = vdso::Vdso {
+        machine: Machine::X86_64,
+        soname: b"elf-vdso.so.1",
+        version: b"FBSD_1.7",
+        symbol: b"__vdso_sigcode",
+        code: &code,
+        return_column: 16,
+        cie: &cie,
+        fde: &fde,
+    };
+    let mut b = vec![0xffu8; 2048];
+    let w = v.write(&mut b).unwrap();
+    b.truncate(w.len);
+    if let Some(path) = std::env::var_os("VDSO_OUT") {
+        std::fs::write(path, &b).unwrap();
+    }
+    (b, w)
+}
+
+#[test]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "offsets in a 2 KiB image"
+)]
+fn vdso_is_one_loadable_segment_with_dynamic_and_frames_inside() {
+    let (b, w) = vdso_image();
+    assert!(b.len() <= 2048, "FreeBSD's limit for the shared page");
+    let e = Elf::parse(&b).unwrap();
+    assert_eq!(e.file_type, FileType::Shared);
+    assert_eq!(e.os_abi, 9);
+    let segs: Vec<_> = e.segments().map(Result::unwrap).collect();
+    assert_eq!(segs.len(), 3);
+    let load = segs[0];
+    assert_eq!(load.kind, SegmentKind::Load);
+    assert_eq!((load.offset, load.vaddr), (0, 0));
+    assert_eq!(load.file_size, (w.code + 22) as u64);
+    for s in &segs {
+        assert!(s.perms.read && s.perms.exec && !s.perms.write);
+        assert!(s.vaddr + s.mem_size <= load.mem_size);
+        assert_eq!(s.offset, s.vaddr);
+    }
+    assert_eq!(w.code % 16, 0);
+    // No relocations: rtld does not relocate a preloaded object.
+    assert!(e.relocations().unwrap().is_empty());
+}
+
+#[test]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "offsets in a 2 KiB image"
+)]
+fn vdso_sections_name_the_symbol_and_its_version() {
+    let (b, w) = vdso_image();
+    let e = Elf::parse(&b).unwrap();
+    let names: Vec<_> = e
+        .sections()
+        .map(|s| e.section_name(&s.unwrap()).unwrap().to_vec())
+        .collect();
+    let want: [&[u8]; 11] = [
+        b"",
+        b".hash",
+        b".dynsym",
+        b".dynstr",
+        b".gnu.version",
+        b".gnu.version_d",
+        b".eh_frame_hdr",
+        b".eh_frame",
+        b".dynamic",
+        b".text",
+        b".shstrtab",
+    ];
+    assert_eq!(names, want);
+    let dynsym = e.section(2).unwrap();
+    let dynstr = e.section(3).unwrap();
+    let t = SymbolTable::new(
+        e.bytes(dynsym.offset, dynsym.size).unwrap(),
+        e.bytes(dynstr.offset, dynstr.size).unwrap(),
+    )
+    .unwrap();
+    let syms: Vec<_> = t.symbols().collect();
+    assert_eq!(syms.len(), 1);
+    assert_eq!(syms[0].name, b"__vdso_sigcode");
+    assert_eq!((syms[0].value, syms[0].size), (w.code as u64, 22));
+    assert!(syms[0].is_function);
+    // Its version index is 2, FBSD_1.7's definition.
+    let versym = e.section(4).unwrap();
+    assert_eq!(&b[versym.offset as usize..][..4], &[0, 0, 2, 0]);
+    let vd = e.section(5).unwrap().offset as usize;
+    let at = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+    let half = |o: usize| u16::from_le_bytes(b[o..o + 2].try_into().unwrap());
+    assert_eq!((half(vd + 2), half(vd + 4)), (1, 1)); // VER_FLG_BASE
+    assert_eq!(at(vd + 8), vdso::elf_hash(b"elf-vdso.so.1"));
+    let second = vd + at(vd + 16) as usize;
+    assert_eq!((half(second + 2), half(second + 4)), (0, 2));
+    assert_eq!(at(second + 8), vdso::elf_hash(b"FBSD_1.7"));
+    let name = at(second + at(second + 12) as usize) as usize;
+    assert_eq!(&b[dynstr.offset as usize + name..][..9], b"FBSD_1.7\0");
+}
+
+#[test]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "offsets in a 2 KiB image"
+)]
+fn vdso_frame_header_finds_the_fde_for_the_code() {
+    let (b, w) = vdso_image();
+    let e = Elf::parse(&b).unwrap();
+    let hdr = e.section(6).unwrap().offset as usize;
+    let eh = e.section(7).unwrap().offset as usize;
+    let i32_at = |o: usize| i32::from_le_bytes(b[o..o + 4].try_into().unwrap()) as isize;
+    assert_eq!(&b[hdr..hdr + 4], &[1, 0x1b, 0x03, 0x3b]);
+    assert_eq!((hdr as isize + 4 + i32_at(hdr + 4)) as usize, eh);
+    assert_eq!(i32_at(hdr + 8), 1);
+    assert_eq!((hdr as isize + i32_at(hdr + 12)) as usize, w.code);
+    let fde = (hdr as isize + i32_at(hdr + 16)) as usize;
+    // The CIE is a signal frame's, and the FDE points back at it and
+    // covers the code.
+    assert_eq!(&b[eh + 9..eh + 13], b"zRS\0");
+    assert_eq!(fde + 4 - i32_at(fde + 4) as usize, eh);
+    assert_eq!((fde as isize + 8 + i32_at(fde + 8)) as usize, w.code);
+    assert_eq!(i32_at(fde + 12), 22);
+    for at in [eh, fde] {
+        assert_eq!((4 + i32_at(at)) % 8, 0);
+    }
+    // A zero-length terminator ends .eh_frame.
+    let end = fde + 4 + i32_at(fde) as usize;
+    assert_eq!(end + 4, eh + e.section(7).unwrap().size as usize);
+    assert_eq!(i32_at(end), 0);
+}
+
+#[test]
+fn vdso_rejects_a_short_buffer_and_unencodable_frames() {
+    let mut cie = vdso::Cfa::new(-8);
+    cie.offset(16, -4); // not a multiple of the alignment
+    let fde = vdso::Cfa::new(-8);
+    let v = vdso::Vdso {
+        machine: Machine::X86_64,
+        soname: b"a",
+        version: b"b",
+        symbol: b"c",
+        code: &[0],
+        return_column: 16,
+        cie: &cie,
+        fde: &fde,
+    };
+    assert!(matches!(v.write(&mut [0; 2048]), Err(Error::Malformed(_))));
+    let ok = vdso::Cfa::new(-8);
+    let v = vdso::Vdso { cie: &ok, ..v };
+    assert_eq!(v.write(&mut [0; 100]), Err(Error::Truncated));
+    assert!(v.write(&mut [0; 2048]).is_ok());
+}
+
+#[test]
+fn elf_hash_matches_the_gabi_examples() {
+    assert_eq!(vdso::elf_hash(b""), 0);
+    assert_eq!(vdso::elf_hash(b"printf"), 0x077905a6);
+    assert_eq!(vdso::elf_hash(b"exit"), 0x0006cf04);
+}

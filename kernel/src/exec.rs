@@ -422,6 +422,10 @@ pub(crate) static ASLR: Aslr = Aslr {
     shared_page: AtomicBool::new(true),
 };
 
+/// Whether programs are given the vdso (`AT_KPRELOAD`), FreeBSD's
+/// `kern.elf64.vdso`: on amd64; arm64 has no vdso.
+pub(crate) static VDSO: AtomicBool = AtomicBool::new(cfg!(target_arch = "x86_64"));
+
 /// Adds exec's nodes: `kern.elf64.*` (read-only until sysctl writes:
 /// they report what exec does), and the caller's own `kern.ps_strings`,
 /// `kern.usrstack`, and `kern.stackprot`.
@@ -513,6 +517,15 @@ pub(crate) fn sysctl_init(s: &Sleepable) {
             t.add_value(parent, Number::Auto, name, descr, value)
                 .expect("exec sysctl node");
         }
+        #[cfg(target_arch = "x86_64")]
+        t.add_value(
+            elf,
+            Number::Auto,
+            "vdso",
+            "ELF64: enable vdso preloading",
+            on(&VDSO),
+        )
+        .expect("kern.elf64.vdso");
         t.add_value(
             k,
             Number::Fixed(kern::PS_STRINGS),
@@ -936,6 +949,11 @@ fn build_stack(
         (at::ENVC, envp.len() as u64),
         (at::ENVV, envp_at),
         (at::PS_STRINGS, ps_strings),
+    ]);
+    if let Some(vdso) = crate::shared_page::vdso_address(layout.shared_page) {
+        entries.push((at::KPRELOAD, vdso));
+    }
+    entries.extend([
         // The top itself, `ps_strings` right below it, as FreeBSD 15.1
         // reports it (tests/user/aslr.c, which passes there).
         (at::USRSTACKBASE, top),

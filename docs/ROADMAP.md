@@ -1449,14 +1449,17 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
 **P6.1 Run-time linking.**
 - `ET_DYN` executables and `PT_INTERP` (MULTIUSER.md §6): PIE and the interpreter at random bases,
   the full auxiliary vector, `ld-elf.so.1` run directly, the feature-control note.
-  - Done 2026-10-26, but for `AT_KPRELOAD` on amd64: `exec` follows
+  - Done 2026-10-26: `exec` follows
     `imgact_elf.c`'s order (the PIE's base, its sections and limits, `anon_loc`, the interpreter,
     the stack), and the boot shell is base's `/bin/sh` when the root has it. The shell cases'
     `DYNAMIC` script (base's `ls`, `ps`, `tar`, `find`, `ldd`, rtld run directly, `LD_BIND_NOW`,
     `LD_PRELOAD`, `LD_LIBRARY_PATH`, `kbdcontrol`, `vidcontrol`) passes on both arches and against
     FreeBSD. On arm64, `AT_HWCAP`/`AT_HWCAP2` come from FreeBSD's user view of the ID registers
     (host-tested `lib/idregs`: merged over every CPU, unexposed fields hidden), which user mode
-    reads with an emulated `mrs`.
+    reads with an emulated `mrs`. On amd64 the signal trampoline is the code of a vdso shaped as
+    FreeBSD's (`elf-vdso.so.1`, `__vdso_sigcode@@FBSD_1.7`, its call frame information; written by
+    host-tested `lib/elf`'s `vdso`), which rtld preloads as `[vdso]` from `AT_KPRELOAD`; an
+    unwinder in a handler walks through it back to the interrupted code (`tests/user/kpreload.c`).
 - The VM rtld relies on: reservations, `MAP_EXCL`, `MAP_ALIGNED_SUPER`, `PROT_MAX`, RELRO, `ETXTBSY`,
   and a grow-down stack to `RLIMIT_STACK` with the guard page and stack gap.
   - Grow-down stacks done 2026-10-26: exec reserves `MAXSSIZ` and maps `SGROWSIZ` of it, the rest a
@@ -1467,7 +1470,7 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
 - `utrace` (to ktrace later; accepted and dropped until P6.8), the `kern.elf64.*` and `kern.proc.auxv`
   nodes.
   - Done 2026-10-26: `utrace` succeeds and drops the record, as for a process nobody traces;
-    `kern.elf64.*` as 15.1 has them (read-only until sysctl writes; no `vdso` until the vdso),
+    `kern.elf64.*` as 15.1 has them (read-only until sysctl writes),
     `kern.ps_strings`, `kern.usrstack`, `kern.stackprot`, and `kern.proc.auxv`
     (`tests/user/auxv.c`).
 - Exit: base's own dynamic `/bin/sh` runs as the boot shell from the UFS2 root, `ls`, `ps`, `tar`,

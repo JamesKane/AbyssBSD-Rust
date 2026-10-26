@@ -125,11 +125,11 @@ pub const SYS_SIGRETURN: u64 = 417;
 pub const SIGF_HANDLER: u64 = 0;
 pub const SIGF_UC: u64 = 16;
 
-// The signal trampoline, copied into the shared page (FreeBSD's
-// `sigcode`). The kernel enters it with `rsp` at the signal frame and the
-// handler's arguments set; it calls the handler, then `sigreturn` with
-// the frame's context. `sigreturn` does not return; if it fails, `hlt`
-// faults.
+// The signal trampoline, the code of the shared page's vdso (FreeBSD's
+// `__vdso_sigcode`). The kernel enters it with `rsp` at the signal frame
+// and the handler's arguments set; it calls the handler, then `sigreturn`
+// with the frame's context. `sigreturn` does not return; if it fails,
+// `hlt` faults.
 global_asm!(
     ".section .rodata.sigcode, \"a\"",
     ".balign 16",
@@ -139,7 +139,9 @@ global_asm!(
     "lea rdi, [rsp + {uc}]",
     // A fake return address, where a call would have left one.
     "push 0",
-    "mov eax, {sigreturn}",
+    ".global abyss_sigcode_pushed",
+    "abyss_sigcode_pushed:",
+    "mov rax, {sigreturn}",
     "syscall",
     "2: hlt",
     "jmp 2b",
@@ -153,6 +155,7 @@ global_asm!(
 unsafe extern "C" {
     static abyss_sigcode: u8;
     static abyss_sigcode_end: u8;
+    static abyss_sigcode_pushed: u8;
 }
 
 /// The signal trampoline's code.
@@ -163,6 +166,18 @@ pub fn sigcode() -> &'static [u8] {
     // SAFETY: the two symbols bracket the trampoline in read-only data,
     // which lives as long as the kernel.
     unsafe { core::slice::from_raw_parts(start, end.offset_from_unsigned(start)) }
+}
+
+/// How far into the trampoline its fake return address has been pushed,
+/// from where the CFA is 8 bytes further up (the vdso's call frame
+/// information).
+#[must_use]
+pub fn sigcode_pushed() -> usize {
+    let start = &raw const abyss_sigcode;
+    let pushed = &raw const abyss_sigcode_pushed;
+    // SAFETY: both symbols are in the trampoline, the second after the
+    // first.
+    unsafe { pushed.offset_from_unsigned(start) }
 }
 
 /// A frame that enters user mode at `entry` with stack `sp`, interrupts

@@ -4,7 +4,10 @@
 //! shared page). It holds the time keeping, `struct vdso_timekeep`, from
 //! which libc answers `clock_gettime` and `gettimeofday` without a system
 //! call (`AT_TIMEKEEP` points at it), and the signal trampoline, at its
-//! start.
+//! start. On amd64 the trampoline is the code of a vdso, a small shared
+//! object rtld preloads as `[vdso]` (`AT_KPRELOAD` points at it), whose
+//! call frame information lets unwinders step through a signal frame
+//! (FreeBSD's `SV_DSO_SIG`; arm64 has none).
 //!
 //! Time keeping follows FreeBSD's timecounters:
 //! - Readers take the counter's low 32 bits (on amd64 after shifting the
@@ -21,7 +24,8 @@
 //!   value from the system call and one from libc never disagree.
 //!
 //! Behavior reference: sys/kern/kern_sharedpage.c, sys/kern/kern_tc.c
-//! (`tc_windup`), lib/libsys/__vdso_gettimeofday.c.
+//! (`tc_windup`), lib/libsys/__vdso_gettimeofday.c, sys/tools/amd64_vdso.sh,
+//! sys/amd64/amd64/sigtramp.S.
 
 #![allow(
     clippy::cast_possible_truncation,
@@ -46,8 +50,8 @@ use vm::object::Object;
 use crate::mm::space::{AddressSpace, SpaceError};
 use crate::time::{NANOS, Timer};
 
-/// Where the time keeping starts in the page; the signal trampoline is at
-/// the start.
+/// Where the time keeping starts in the page; the signal trampoline (and
+/// on amd64 its vdso, at most this long, as on FreeBSD) is at the start.
 const TIMEKEEP_OFFSET: usize = 2048;
 /// Timehands slots (FreeBSD's `VDSO_TH_NUM`).
 const SLOTS: u32 = 4;
@@ -62,6 +66,8 @@ struct Page {
     object: Arc<Object>,
     /// The page through the DMAP.
     kva: *mut u8,
+    /// Where the signal trampoline is in it.
+    sigcode: usize,
 }
 
 // SAFETY: the page lives forever (the object holds it and is never freed),
@@ -281,11 +287,18 @@ pub(crate) fn init() {
     let kva = bootproto::layout::dmap(pfn.addr())
         .expect("RAM outside the DMAP")
         .get() as *mut u8;
-    let code = crate::arch::user::sigcode();
-    assert!(code.len() <= TIMEKEEP_OFFSET, "signal trampoline too long");
-    // SAFETY: the page is fresh, ours, and a page long.
-    unsafe { core::ptr::copy_nonoverlapping(code.as_ptr(), kva, code.len()) };
-    if PAGE.set(Page { object, kva }).is_err() {
+    // SAFETY: the page is fresh, ours, and a page long; nothing else
+    // refers to it yet.
+    let head = unsafe { core::slice::from_raw_parts_mut(kva, TIMEKEEP_OFFSET) };
+    let sigcode = write_sigcode(head);
+    if PAGE
+        .set(Page {
+            object,
+            kva,
+            sigcode,
+        })
+        .is_err()
+    {
         return;
     }
 
@@ -360,10 +373,91 @@ pub(crate) fn map(s: &Sleepable, space: &AddressSpace, at: u64) -> Result<(), Sp
     )
 }
 
+/// Writes the signal trampoline to the start of the page (`head`), and
+/// returns its offset there. On amd64 it is the code of a vdso.
+#[cfg(target_arch = "x86_64")]
+fn write_sigcode(head: &mut [u8]) -> usize {
+    use abi::ucontext::{McontextX86, Ucontext};
+    use core::mem::offset_of;
+    use elf::vdso::{Cfa, Vdso};
+
+    use crate::arch::user::{SIGF_UC, sigcode_pushed};
+
+    // DWARF register numbers (the amd64 psABI's figure 3.36).
+    const RSP: u8 = 7;
+    const RIP: u8 = 16;
+    let mc = SIGF_UC as usize + offset_of!(Ucontext<McontextX86>, uc_mcontext);
+    // An ordinary function's rules: the return address just below the
+    // CFA, which is `rsp` before the call.
+    let mut cie = Cfa::new(-8);
+    cie.def_cfa(RSP, 8).offset(RIP, -8);
+    // The trampoline starts with `rsp` at the signal frame, which is the
+    // CFA, and the interrupted registers are in the frame's context. The
+    // CFA stays there once the fake return address is pushed. FreeBSD
+    // 15.1's order and set of registers.
+    let mut fde = Cfa::new(-8);
+    fde.def_cfa(RSP, 0);
+    let saved = [
+        (5, offset_of!(McontextX86, mc_rdi)),
+        (4, offset_of!(McontextX86, mc_rsi)),
+        (1, offset_of!(McontextX86, mc_rdx)),
+        (2, offset_of!(McontextX86, mc_rcx)),
+        (8, offset_of!(McontextX86, mc_r8)),
+        (9, offset_of!(McontextX86, mc_r9)),
+        (0, offset_of!(McontextX86, mc_rax)),
+        (3, offset_of!(McontextX86, mc_rbx)),
+        (6, offset_of!(McontextX86, mc_rbp)),
+        (10, offset_of!(McontextX86, mc_r10)),
+        (11, offset_of!(McontextX86, mc_r11)),
+        (12, offset_of!(McontextX86, mc_r12)),
+        (13, offset_of!(McontextX86, mc_r13)),
+        (14, offset_of!(McontextX86, mc_r14)),
+        (15, offset_of!(McontextX86, mc_r15)),
+        (RIP, offset_of!(McontextX86, mc_rip)),
+        (RSP, offset_of!(McontextX86, mc_rsp)),
+    ];
+    for (reg, off) in saved {
+        fde.offset(reg, i64::try_from(mc + off).expect("a small offset"));
+    }
+    let pushed = u8::try_from(sigcode_pushed()).expect("a short trampoline");
+    fde.advance(pushed).def_cfa(RSP, 8);
+    let vdso = Vdso {
+        machine: elf::Machine::X86_64,
+        soname: b"elf-vdso.so.1",
+        version: b"FBSD_1.7",
+        symbol: b"__vdso_sigcode",
+        code: crate::arch::user::sigcode(),
+        return_column: RIP,
+        cie: &cie,
+        fde: &fde,
+    };
+    vdso.write(head)
+        .expect("the vdso fits its part of the page")
+        .code
+}
+
+/// Writes the signal trampoline to the start of the page (`head`), and
+/// returns its offset there.
+#[cfg(target_arch = "aarch64")]
+fn write_sigcode(head: &mut [u8]) -> usize {
+    let code = crate::arch::user::sigcode();
+    head.get_mut(..code.len())
+        .expect("signal trampoline too long")
+        .copy_from_slice(code);
+    0
+}
+
 /// The user address of the signal trampoline in a shared page mapped at
 /// `page`.
 pub(crate) fn sigcode_address(page: u64) -> u64 {
-    page
+    page + PAGE.get().map_or(0, |p| p.sigcode as u64)
+}
+
+/// The user address of the vdso (`AT_KPRELOAD`) in a shared page mapped
+/// at `page`, if there is one: on amd64 while `kern.elf64.vdso` is on.
+pub(crate) fn vdso_address(page: u64) -> Option<u64> {
+    let on = cfg!(target_arch = "x86_64") && crate::exec::VDSO.load(Ordering::Relaxed);
+    (on && PAGE.get().is_some()).then_some(page)
 }
 
 /// The user address of the time keeping (`AT_TIMEKEEP`) in a shared page

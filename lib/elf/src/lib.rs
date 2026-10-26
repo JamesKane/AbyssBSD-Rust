@@ -11,6 +11,7 @@
 #![forbid(unsafe_code)]
 
 mod sym;
+pub mod vdso;
 
 pub use sym::{Symbol, SymbolTable};
 
@@ -44,6 +45,16 @@ impl Machine {
             62 => Self::X86_64,
             183 => Self::Aarch64,
             v => Self::Other(v),
+        }
+    }
+
+    /// The `e_machine` value.
+    #[must_use]
+    pub const fn raw(self) -> u16 {
+        match self {
+            Self::X86_64 => 62,
+            Self::Aarch64 => 183,
+            Self::Other(v) => v,
         }
     }
 }

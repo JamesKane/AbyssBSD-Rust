@@ -101,7 +101,8 @@ libc, rtld, and the base utilities read sysctls heavily. These are required earl
   `AT_CANARY`, `AT_PAGESIZES`, `AT_OSRELDATE`, `AT_NCPUS`, `AT_TIMEKEEP`, `AT_STACKPROT`,
   `AT_EHDRFLAGS`, `AT_HWCAP`/`AT_HWCAP2`, `AT_BSDFLAGS`, `AT_ARGC`/`AT_ARGV`/`AT_ENVC`/`AT_ENVV`,
   `AT_PS_STRINGS`, `AT_FXRNG`, `AT_KPRELOAD`, and `AT_USRSTACKBASE`/`LIM`.
-- **Shared page**: signal trampoline, `vdso_timehands` (see `sys/kern/kern_tc.c`,
+- **Shared page**: signal trampoline (on amd64 inside the vdso rtld preloads as `[vdso]`, see
+  `sys/tools/amd64_vdso.sh`), `vdso_timehands` (see `sys/kern/kern_tc.c`,
   `sys/kern/kern_sharedpage.c`), and the fxrng generation counter.
 - TLS: amd64 `FSBASE` via `sysarch(AMD64_SET_FSBASE)` and `wrfsbase` when enabled. arm64
   `TPIDR_EL0`.
