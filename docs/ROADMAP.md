@@ -1459,6 +1459,11 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
     reads with an emulated `mrs`.
 - The VM rtld relies on: reservations, `MAP_EXCL`, `MAP_ALIGNED_SUPER`, `PROT_MAX`, RELRO, `ETXTBSY`,
   and a grow-down stack to `RLIMIT_STACK` with the guard page and stack gap.
+  - Grow-down stacks done 2026-10-26: exec reserves `MAXSSIZ` and maps `SGROWSIZ` of it, the rest a
+    gap the stack grows into on fault, to `RLIMIT_STACK` (FreeBSD's `DFLSSIZ` by default, applied
+    at once by `setrlimit`) and never into the guard page; `MAP_STACK` makes the same for thread
+    stacks, `MAP_GUARD` a guard `mprotect` passes over (host-tested in `sys/vm`,
+    `tests/user/stack.c`).
 - `utrace` (to ktrace later; accepted and dropped until P6.8), the `kern.elf64.*` and `kern.proc.auxv`
   nodes.
 - Exit: base's own dynamic `/bin/sh` runs as the boot shell from the UFS2 root, `ls`, `ps`, `tar`,

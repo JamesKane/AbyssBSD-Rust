@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! Memory: `mmap` (anonymous memory, guards, files, and `/dev/zero`),
+//! Memory: `mmap` (anonymous memory, guards, stacks that grow down,
+//! files, and `/dev/zero`),
 //! `munmap`, `mprotect`, `minherit`, and `madvise`.
 //!
 //! A file is mapped privately: its pages are shared until written, then
@@ -18,7 +19,7 @@ use vm::PAGE_SIZE;
 use vm::map::{Inherit, MapError, Prot};
 
 use super::{SysResult, int};
-use crate::mm::space::{AddressSpace, Anon, SpaceError, USER_END, USER_START};
+use crate::mm::space::{AddressSpace, Anon, AnonKind, SpaceError, USER_END, USER_START};
 use crate::proc::Process;
 
 fn map_error(e: SpaceError) -> Errno {
@@ -190,6 +191,15 @@ pub(super) fn mmap(
     if flags & (MAP_SHARED | MAP_PRIVATE) == MAP_SHARED | MAP_PRIVATE {
         return Err(Errno::EINVAL);
     }
+    let stack = flags & MAP_STACK != 0;
+    if stack && (int(fd) != -1 || !prot.contains(Prot::RW)) {
+        return Err(Errno::EINVAL);
+    }
+    let (flags, pos) = if stack {
+        (flags | MAP_ANON, 0)
+    } else {
+        (flags, pos)
+    };
     let guard = flags & MAP_GUARD != 0;
     if guard
         && (prot != Prot::NONE
@@ -262,6 +272,16 @@ pub(super) fn mmap(
             Inherit::Share
         } else {
             Inherit::Copy
+        },
+        kind: if guard {
+            AnonKind::Guard
+        } else if stack {
+            AnonKind::Stack {
+                guard: Process::with_current(|p| crate::exec::stack_guard(p.layout().fctl0))
+                    .ok_or(Errno::EINVAL)?,
+            }
+        } else {
+            AnonKind::Memory
         },
     };
     if a.exclusive && !fixed {

@@ -200,10 +200,9 @@ pub(crate) fn default_limits() -> [Rlimit; rlimit::NLIMITS] {
         rlim_max: RLIM_INFINITY,
     };
     let mut l = [inf; rlimit::NLIMITS];
-    let stack = crate::exec::STACK_SIZE;
     l[rlimit::STACK as usize] = Rlimit {
-        rlim_cur: stack,
-        rlim_max: stack,
+        rlim_cur: crate::exec::DFLSSIZ,
+        rlim_max: crate::exec::MAXSSIZ,
     };
     l[rlimit::DATA as usize] = Rlimit {
         rlim_cur: crate::exec::MAXDSIZ,

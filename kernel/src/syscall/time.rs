@@ -139,7 +139,7 @@ pub(super) fn getrlimit(which: u64, rlp: u64) -> SysResult {
 }
 
 /// `setrlimit(which, rlp)`: root may raise as well as lower.
-pub(super) fn setrlimit(which: u64, rlp: u64) -> SysResult {
+pub(super) fn setrlimit(s: &Sleepable, which: u64, rlp: u64) -> SysResult {
     let i = limit_index(which)?;
     let l = UserPtr::<Rlimit>::new(rlp)
         .read()
@@ -147,6 +147,15 @@ pub(super) fn setrlimit(which: u64, rlp: u64) -> SysResult {
     if l.rlim_cur > l.rlim_max {
         return Err(Errno::EINVAL);
     }
-    process()?.limits.lock()[i] = l;
+    let mut l = l;
+    let p = process()?;
+    if i == rlimit::STACK as usize {
+        // No more than exec reserves; the stack's growth follows the new
+        // limit at once.
+        l.rlim_cur = l.rlim_cur.min(crate::exec::MAXSSIZ);
+        l.rlim_max = l.rlim_max.min(crate::exec::MAXSSIZ);
+        p.space().set_stack_limit(s, l.rlim_cur);
+    }
+    p.limits.lock()[i] = l;
     Ok(0)
 }

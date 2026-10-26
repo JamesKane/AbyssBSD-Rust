@@ -2791,7 +2791,7 @@ mod user_memory {
 
     ktest! {
         fn exec_layout_is_randomized_within_bounds() {
-            use crate::exec::{Layout, MAXDSIZ, STACK_SIZE, USRSTACK};
+            use crate::exec::{Layout, MAXDSIZ, MAXSSIZ, USRSTACK};
             let s = cx();
             let root = crate::fs::root();
             let echo = crate::fs::namespace()
@@ -2835,7 +2835,7 @@ mod user_memory {
                 // the data limit, anon_loc in the lower half of what is left.
                 assert!((MAXDSIZ..USRSTACK / 2 + (MAXDSIZ + (64 << 20)) / 2).contains(&anon_loc));
                 assert!(anon_loc.is_multiple_of(2 << 20));
-                assert!((MAXDSIZ + STACK_SIZE..=USRSTACK).contains(&stack_top));
+                assert!((MAXDSIZ + MAXSSIZ..=USRSTACK).contains(&stack_top));
                 assert!(stack_top.is_multiple_of(8));
                 assert!((MAXDSIZ..USRSTACK).contains(&shared_page));
             }

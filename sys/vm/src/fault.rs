@@ -21,12 +21,15 @@
 //! dirty, and maps it writable (dirty tracking without the hardware's
 //! dirty bits).
 //!
+//! An access to the gap below a stack that grows down first grows it
+//! ([`VmMap::grow_stack`]), as `vm_map_lookup` does.
+//!
 //! Behavior reference: sys/vm/vm_fault.c, `vm_map_lookup` in
 //! sys/vm/vm_map.c.
 
 use alloc::sync::Arc;
 
-use crate::map::{Prot, VmMap};
+use crate::map::{Prot, Role, VmMap};
 use crate::object::{Found, LookupError, MemAttr, Object, PageIndex};
 use crate::{PAGE_SIZE, Pfn, VirtAddr};
 
@@ -89,6 +92,13 @@ pub enum Outcome {
 pub fn resolve(map: &mut VmMap, va: VirtAddr, access: Access) -> Result<Outcome, FaultError> {
     let pages = map.pages;
     let page = va.align_down(PAGE_SIZE);
+    // An access to a stack's gap grows the stack down to it, if it may.
+    if map
+        .entry(page)
+        .is_some_and(|e| matches!(e.role, Role::StackGap { .. }))
+    {
+        map.grow_stack(page).map_err(|_| FaultError::Protection)?;
+    }
     let entry = map.entry_mut(page).ok_or(FaultError::NotMapped)?;
     if !entry.prot.contains(access.needs()) {
         return Err(FaultError::Protection);

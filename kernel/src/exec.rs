@@ -50,17 +50,38 @@ use addr::VirtAddr;
 use elf::{Elf, FileType, Machine, SegmentKind};
 use sched::Sleepable;
 use vm::PAGE_SIZE;
-use vm::map::Prot;
+use vm::map::{ProcStack, Prot, SGROWSIZ};
 
-use crate::mm::space::{AddressSpace, SpaceError, USER_END, USER_START};
+use crate::mm::space::{AddressSpace, AnonKind, SpaceError, USER_END, USER_START};
 
 /// The top of what a program may map (FreeBSD's `USRSTACK`, which is
 /// where the stack would end without randomization): the page above it is
 /// a guard.
 pub(crate) const USRSTACK: u64 = USER_END - PAGE_SIZE;
-/// The stack (FreeBSD grows the stack on demand up to `RLIMIT_STACK`; ours
-/// is mapped whole, and faulted in as used).
-pub(crate) const STACK_SIZE: u64 = 8 << 20;
+/// The room exec reserves for the stack, and `RLIMIT_STACK`'s largest
+/// value (FreeBSD's `MAXSSIZ`); the stack grows into it on demand.
+#[cfg(target_arch = "x86_64")]
+pub(crate) const MAXSSIZ: u64 = 512 << 20;
+#[cfg(target_arch = "aarch64")]
+pub(crate) const MAXSSIZ: u64 = 1 << 30;
+/// `RLIMIT_STACK`'s default (`DFLSSIZ`).
+#[cfg(target_arch = "x86_64")]
+pub(crate) const DFLSSIZ: u64 = 8 << 20;
+#[cfg(target_arch = "aarch64")]
+pub(crate) const DFLSSIZ: u64 = 128 << 20;
+/// Pages below every stack it never grows into
+/// (`security.bsd.stack_guard_page`).
+const STACK_GUARD_PAGES: u64 = 1;
+
+/// The guard below a stack a program with feature-control word `fctl0`
+/// maps (none if it opts out with `NT_FREEBSD_FCTL_STKGAP_DISABLE`).
+pub(crate) const fn stack_guard(fctl0: u32) -> u64 {
+    if fctl0 & fctl::STKGAP_DISABLE != 0 {
+        0
+    } else {
+        STACK_GUARD_PAGES * PAGE_SIZE
+    }
+}
 /// The default and largest `RLIMIT_DATA` (FreeBSD's `MAXDSIZ`); the
 /// randomized layout starts above it.
 #[cfg(target_arch = "x86_64")]
@@ -279,21 +300,33 @@ pub(crate) fn load(
     };
 
     let stack_prot = headers.stack_prot.unwrap_or(DEFAULT_STACK_PROT);
+    // The stack reserves MAXSSIZ and grows into it (FreeBSD's
+    // `exec_map_stack`).
     let stack_base = if aslr_stack {
-        place(s, space, addr, STACK_SIZE)?
+        place(s, space, addr, MAXSSIZ)?
     } else {
-        USRSTACK - STACK_SIZE
+        USRSTACK - MAXSSIZ
     };
-    space
-        .map_anonymous(
-            s,
-            Some(VirtAddr::new(stack_base)),
-            VirtAddr::new(stack_base),
-            STACK_SIZE,
-            stack_prot,
-        )
-        .map_err(space_error)?;
-    let mut stack_top = stack_base + STACK_SIZE;
+    let stack = crate::mm::space::Anon {
+        fixed: Some(VirtAddr::new(stack_base)),
+        exclusive: true,
+        len: MAXSSIZ,
+        prot: stack_prot,
+        kind: AnonKind::Stack {
+            guard: stack_guard(fctl0),
+        },
+        ..crate::mm::space::Anon::default()
+    };
+    space.map_anon(s, &stack).map_err(space_error)?;
+    space.set_proc_stack(
+        s,
+        ProcStack {
+            area: VirtAddr::new(stack_base)..VirtAddr::new(stack_base + MAXSSIZ),
+            size: SGROWSIZ,
+        },
+        limits[rlimit::STACK as usize].rlim_cur,
+    );
+    let mut stack_top = stack_base + MAXSSIZ;
     if aslr_stack {
         // Randomized within the stack's top page, keeping pointer
         // alignment.
@@ -308,6 +341,7 @@ pub(crate) fn load(
             len: PAGE_SIZE,
             prot: Prot::NONE,
             max_prot: Prot::NONE,
+            kind: AnonKind::Guard,
             ..crate::mm::space::Anon::default()
         };
         space.map_anon(s, &guard).map_err(space_error)?;

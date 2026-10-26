@@ -209,6 +209,19 @@ pub(crate) struct Anon {
     pub(crate) prot: Prot,
     pub(crate) max_prot: Prot,
     pub(crate) inherit: vm::map::Inherit,
+    pub(crate) kind: AnonKind,
+}
+
+/// What anonymous memory [`AddressSpace::map_anon`] makes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AnonKind {
+    /// Memory.
+    Memory,
+    /// A guard (`MAP_GUARD`).
+    Guard,
+    /// A stack that grows down, never into its bottom `guard` bytes
+    /// (`MAP_STACK`).
+    Stack { guard: u64 },
 }
 
 impl Default for Anon {
@@ -222,6 +235,7 @@ impl Default for Anon {
             prot: Prot::RW,
             max_prot: Prot::ALL,
             inherit: vm::map::Inherit::Copy,
+            kind: AnonKind::Memory,
         }
     }
 }
@@ -392,9 +406,28 @@ impl AddressSpace {
 
     /// Maps anonymous memory as `a` says (`mmap` with `MAP_ANON`).
     pub(crate) fn map_anon(&self, s: &Sleepable, a: &Anon) -> Result<VirtAddr, SpaceError> {
-        self.map_entry(s, a, |range| {
-            Entry::anonymous(range, a.prot, a.max_prot).with_inherit(a.inherit)
-        })
+        match a.kind {
+            AnonKind::Memory => self.map_entry(s, a, |map, range| {
+                map.insert(Entry::anonymous(range, a.prot, a.max_prot).with_inherit(a.inherit))
+            }),
+            AnonKind::Guard => self.map_entry(s, a, |map, range| map.insert(Entry::guard(range))),
+            AnonKind::Stack { guard } => self.map_entry(s, a, |map, range| {
+                map.insert_stack(range, guard, a.prot, a.max_prot)
+            }),
+        }
+    }
+
+    /// Makes `stack` the process's main stack, which `RLIMIT_STACK`'s
+    /// current value, `limit`, bounds.
+    pub(crate) fn set_proc_stack(&self, s: &Sleepable, stack: vm::map::ProcStack, limit: u64) {
+        let mut map = self.map.lock(s);
+        map.set_proc_stack(stack);
+        map.set_stack_limit(limit);
+    }
+
+    /// Sets `RLIMIT_STACK`'s current value (`setrlimit`).
+    pub(crate) fn set_stack_limit(&self, s: &Sleepable, limit: u64) {
+        self.map.lock(s).set_stack_limit(limit);
     }
 
     /// Maps `object` from page `offset` on, placed as `a` says, privately
@@ -406,23 +439,23 @@ impl AddressSpace {
         object: Arc<vm::object::Object>,
         offset: u64,
     ) -> Result<VirtAddr, SpaceError> {
-        self.map_entry(s, a, |range| {
-            if a.inherit == vm::map::Inherit::Share {
+        self.map_entry(s, a, |map, range| {
+            map.insert(if a.inherit == vm::map::Inherit::Share {
                 // `MAP_SHARED`: writes reach the file's pages.
                 Entry::shared(range, a.prot, a.max_prot, object, offset)
             } else {
                 Entry::private(range, a.prot, a.max_prot, object, offset).with_inherit(a.inherit)
-            }
+            })
         })
     }
 
-    /// Places a mapping as `a` says and inserts the entry `make` builds
-    /// for its range.
+    /// Places a mapping as `a` says and has `insert` put its entry in
+    /// the map over the range chosen.
     fn map_entry(
         &self,
         s: &Sleepable,
         a: &Anon,
-        make: impl FnOnce(core::ops::Range<VirtAddr>) -> Entry,
+        insert: impl FnOnce(&mut VmMap, core::ops::Range<VirtAddr>) -> Result<(), MapError>,
     ) -> Result<VirtAddr, SpaceError> {
         let mut map = self.map.lock(s);
         let start = match a.fixed {
@@ -439,7 +472,7 @@ impl AddressSpace {
                 .ok_or(MapError::NoSpace)?,
         };
         let end = start.checked_add(a.len).ok_or(MapError::OutOfRange)?;
-        map.insert(make(start..end))?;
+        insert(&mut map, start..end)?;
         Ok(start)
     }
 

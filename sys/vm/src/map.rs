@@ -90,6 +90,26 @@ pub enum Inherit {
     Zero,
 }
 
+/// What an entry is, beyond the memory it maps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    /// Memory.
+    Normal,
+    /// A reserved range nothing may access (`MAP_GUARD`), which
+    /// `mprotect` passes over.
+    Guard,
+    /// Part of a stack that grows down (`MAP_ENTRY_GROWS_DOWN`).
+    Stack,
+    /// The room below a stack it grows into (`MAP_ENTRY_STACK_GAP`): an
+    /// access there grows the stack down to it, never into the bottom
+    /// `guard` bytes; the new part gets `prot` and `max_prot`.
+    StackGap {
+        guard: u64,
+        prot: Prot,
+        max_prot: Prot,
+    },
+}
+
 /// One mapped range.
 #[derive(Clone)]
 pub struct Entry {
@@ -105,6 +125,7 @@ pub struct Entry {
     /// The object is shared copy-on-write: the first write gives this
     /// entry a shadow of its own.
     pub(crate) needs_copy: bool,
+    pub(crate) role: Role,
 }
 
 impl Entry {
@@ -120,6 +141,16 @@ impl Entry {
             object: None,
             offset: 0,
             needs_copy: false,
+            role: Role::Normal,
+        }
+    }
+
+    /// A guard over `range` (`MAP_GUARD`): no access, ever.
+    #[must_use]
+    pub fn guard(range: Range<VirtAddr>) -> Self {
+        Self {
+            role: Role::Guard,
+            ..Self::anonymous(range, Prot::NONE, Prot::NONE)
         }
     }
 
@@ -144,6 +175,7 @@ impl Entry {
             object: Some(object),
             offset,
             needs_copy: false,
+            role: Role::Normal,
         }
     }
 
@@ -166,6 +198,7 @@ impl Entry {
             object: Some(object),
             offset,
             needs_copy: true,
+            role: Role::Normal,
         }
     }
 
@@ -204,6 +237,11 @@ impl Entry {
     #[must_use]
     pub const fn inherit(&self) -> Inherit {
         self.inherit
+    }
+
+    #[must_use]
+    pub const fn role(&self) -> Role {
+        self.role
     }
 
     #[must_use]
@@ -277,7 +315,24 @@ pub struct VmMap {
     entries: Entries,
     bounds: Range<VirtAddr>,
     pub(crate) pages: &'static dyn PageOps,
+    /// The process's own stack, which `RLIMIT_STACK` bounds.
+    stack: Option<ProcStack>,
+    /// `RLIMIT_STACK`'s current value.
+    stack_limit: u64,
 }
+
+/// The process's main stack (FreeBSD's `vm_maxsaddr`, `vm_stacktop`, and
+/// `vm_ssize`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProcStack {
+    /// The whole area, gap included.
+    pub area: Range<VirtAddr>,
+    /// How much of it is stack.
+    pub size: u64,
+}
+
+/// How much a stack grows at a time (`sgrowsiz`).
+pub const SGROWSIZ: u64 = 128 << 10;
 
 /// What [`VmMap::fork`] produced.
 #[derive(Debug)]
@@ -297,6 +352,8 @@ impl VmMap {
             entries: Entries::default(),
             bounds,
             pages,
+            stack: None,
+            stack_limit: u64::MAX,
         }
     }
 
@@ -487,8 +544,10 @@ impl VmMap {
     }
 
     /// Sets the rights of `range`, which must be mapped throughout and
-    /// allow them (`mprotect`). The caller then removes from the page
-    /// tables whatever rights were dropped; added rights arrive by fault.
+    /// allow them (`mprotect`). Guards are passed over; a stack gap keeps
+    /// the rights for the stack it becomes. The caller then removes from
+    /// the page tables whatever rights were dropped; added rights arrive
+    /// by fault.
     pub fn protect(&mut self, range: Range<VirtAddr>, prot: Prot) -> Result<(), MapError> {
         self.check(&range)?;
         if !self.covered(&range) {
@@ -500,14 +559,137 @@ impl VmMap {
             .into_iter()
             .chain(self.entries.starting_at(range.start.get()))
             .take_while(|e| e.start < range.end)
-            .any(|e| e.end > range.start && !e.max_prot.contains(prot))
+            .filter(|e| e.end > range.start)
+            .any(|e| match e.role {
+                Role::Guard => false,
+                Role::StackGap { max_prot, .. } => !max_prot.contains(prot),
+                Role::Normal | Role::Stack => !e.max_prot.contains(prot),
+            })
         {
             return Err(MapError::Protection);
         }
         self.clip(range.start);
         self.clip(range.end);
         for e in self.range_mut(&range) {
-            e.prot = prot;
+            match &mut e.role {
+                Role::Guard => {}
+                Role::StackGap { prot: gap, .. } => *gap = prot,
+                Role::Normal | Role::Stack => e.prot = prot,
+            }
+        }
+        Ok(())
+    }
+
+    /// Maps a stack over `range` that grows down (`MAP_STACK`, and exec's
+    /// stack): its top `grow` bytes are stack, the rest a gap it grows
+    /// into, whose bottom `guard` bytes it never reaches (FreeBSD's
+    /// `vm_map_stack_locked`).
+    pub fn insert_stack(
+        &mut self,
+        range: Range<VirtAddr>,
+        guard: u64,
+        prot: Prot,
+        max_prot: Prot,
+    ) -> Result<(), MapError> {
+        self.check(&range)?;
+        let len = range.end.get() - range.start.get();
+        if guard >= len || !guard.is_multiple_of(PAGE_SIZE) {
+            return Err(MapError::Misaligned);
+        }
+        if self.overlaps(&range) {
+            return Err(MapError::Overlap);
+        }
+        let bottom = VirtAddr::new(range.end.get() - SGROWSIZ.min(len - guard));
+        self.entries.insert(Entry {
+            role: Role::Stack,
+            ..Entry::anonymous(bottom..range.end, prot, max_prot)
+        });
+        if bottom > range.start {
+            self.entries.insert(Entry {
+                role: Role::StackGap {
+                    guard,
+                    prot,
+                    max_prot,
+                },
+                ..Entry::anonymous(range.start..bottom, Prot::NONE, Prot::NONE)
+            });
+        }
+        Ok(())
+    }
+
+    /// Makes `stack` the process's main stack, `size` bytes of it already
+    /// stack, which `RLIMIT_STACK` then bounds.
+    pub fn set_proc_stack(&mut self, stack: ProcStack) {
+        self.stack = Some(stack);
+    }
+
+    /// The process's main stack.
+    #[must_use]
+    pub const fn proc_stack(&self) -> Option<&ProcStack> {
+        self.stack.as_ref()
+    }
+
+    /// Sets `RLIMIT_STACK` (its current value).
+    pub const fn set_stack_limit(&mut self, limit: u64) {
+        self.stack_limit = limit;
+    }
+
+    /// Grows the stack above the gap holding `va` down to `va`'s page, by
+    /// at least [`SGROWSIZ`], within the gap's guard and, for the main
+    /// stack, `RLIMIT_STACK` (FreeBSD's `vm_map_growstack`). `NoSpace` if
+    /// it cannot reach `va`.
+    pub fn grow_stack(&mut self, va: VirtAddr) -> Result<(), MapError> {
+        let page = va.align_down(PAGE_SIZE);
+        let gap = self.entry(page).ok_or(MapError::NotMapped)?;
+        let Role::StackGap {
+            guard,
+            prot,
+            max_prot,
+        } = gap.role
+        else {
+            return Err(MapError::NotMapped);
+        };
+        let (gap_start, gap_end) = (gap.start, gap.end);
+        if !self
+            .entries
+            .starting_at(gap_end.get())
+            .next()
+            .is_some_and(|s| s.start == gap_end && s.role == Role::Stack)
+        {
+            return Err(MapError::NotMapped);
+        }
+        let mut amount = gap_end.get() - page.get();
+        let max_grow = (gap_end.get() - gap_start.get())
+            .checked_sub(guard)
+            .ok_or(MapError::NoSpace)?;
+        if amount > max_grow {
+            return Err(MapError::NoSpace);
+        }
+        // The main stack's room under RLIMIT_STACK.
+        let room = self
+            .stack
+            .as_ref()
+            .filter(|st| st.area.contains(&page))
+            .map(|st| self.stack_limit.saturating_sub(st.size));
+        if room.is_some_and(|r| amount > r) {
+            return Err(MapError::NoSpace);
+        }
+        amount = amount.next_multiple_of(SGROWSIZ).min(max_grow);
+        if let Some(r) = room {
+            amount = amount.min(r & !(PAGE_SIZE - 1));
+        }
+        let grow_start = VirtAddr::new(gap_end.get() - amount);
+        if grow_start == gap_start {
+            let _ = self.entries.take_exact(gap_start.get(), gap_end.get());
+        } else if let Some(g) = self.entry_mut(gap_start) {
+            g.end = grow_start;
+        }
+        self.entries.insert(Entry {
+            role: Role::Stack,
+            ..Entry::anonymous(grow_start..gap_end, prot, max_prot)
+        });
+        if let (Some(st), Some(_)) = (&mut self.stack, room) {
+            st.size += amount;
         }
         Ok(())
     }
@@ -531,6 +713,8 @@ impl VmMap {
     /// The child's map for `fork`, by each entry's inheritance.
     pub fn fork(&mut self) -> Forked {
         let mut child = Self::new(self.bounds.clone(), self.pages);
+        child.stack.clone_from(&self.stack);
+        child.stack_limit = self.stack_limit;
         let mut write_protect = Vec::new();
         for e in self.entries.iter_mut() {
             // Fold away what only this entry still reaches: the last fork's

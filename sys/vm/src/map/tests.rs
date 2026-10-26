@@ -826,3 +826,113 @@ fn a_device_mapping_reaches_the_device_pages_write_combining() {
     drop(p);
     assert_eq!(pages.live(), 0);
 }
+
+/// Pages in [`SGROWSIZ`].
+const GROW: u64 = SGROWSIZ / P;
+
+/// A 1024-page stack at pages 0-1023 with a one-page guard.
+fn stack(p: &mut Proc) {
+    p.map
+        .insert_stack(range(0, 1024), P, Prot::RW, Prot::ALL)
+        .unwrap();
+}
+
+#[test]
+fn a_stack_starts_with_its_top_mapped() {
+    let pages = Pages::new();
+    let mut p = Proc::new(pages);
+    stack(&mut p);
+    let top = p.map.entry(va(1023)).unwrap();
+    assert_eq!(top.role(), Role::Stack);
+    assert_eq!(top.range(), range(1024 - GROW, GROW));
+    let gap = p.map.entry(va(0)).unwrap();
+    assert!(matches!(gap.role(), Role::StackGap { guard: P, .. }));
+    assert_eq!(gap.range(), range(0, 1024 - GROW));
+}
+
+#[test]
+fn an_access_below_grows_the_stack_to_it() {
+    let pages = Pages::new();
+    let mut p = Proc::new(pages);
+    stack(&mut p);
+    // A few pages below the mapped top: one growth of SGROWSIZ.
+    p.write(1024 - GROW - 3, 7).unwrap();
+    assert_eq!(p.read(1024 - GROW - 3), Ok(7));
+    assert_eq!(
+        p.map.entry(va(0)).unwrap().range(),
+        range(0, 1024 - 2 * GROW)
+    );
+    // Far below: straight there, in whole SGROWSIZ steps.
+    p.write(100, 1).unwrap();
+    let gap_end = p.map.entry(va(0)).unwrap().end();
+    assert!(gap_end <= va(100) && (va(1024).get() - gap_end.get()).is_multiple_of(SGROWSIZ));
+}
+
+#[test]
+fn the_guard_is_never_given() {
+    let pages = Pages::new();
+    let mut p = Proc::new(pages);
+    stack(&mut p);
+    p.write(1, 1).unwrap();
+    // Grown down to the guard, which stays.
+    assert_eq!(p.map.entry(va(0)).unwrap().range(), range(0, 1));
+    assert_eq!(p.read(0), Err(FaultError::Protection));
+}
+
+#[test]
+fn the_main_stack_stops_at_its_limit() {
+    let pages = Pages::new();
+    let mut p = Proc::new(pages);
+    stack(&mut p);
+    p.map.set_proc_stack(ProcStack {
+        area: range(0, 1024),
+        size: SGROWSIZ,
+    });
+    // Two growths' worth.
+    p.map.set_stack_limit(3 * SGROWSIZ);
+    p.write(1024 - 3 * GROW, 1).unwrap();
+    assert_eq!(p.map.proc_stack().unwrap().size, 3 * SGROWSIZ);
+    assert_eq!(p.write(1024 - 3 * GROW - 1, 1), Err(FaultError::Protection));
+    // Raising the limit lets it grow on.
+    p.map.set_stack_limit(4 * SGROWSIZ);
+    p.write(1024 - 3 * GROW - 1, 1).unwrap();
+}
+
+#[test]
+fn a_thread_stack_is_not_bound_by_the_limit() {
+    let pages = Pages::new();
+    let mut p = Proc::new(pages);
+    stack(&mut p);
+    p.map.set_stack_limit(SGROWSIZ);
+    p.write(10, 1).unwrap();
+}
+
+#[test]
+fn mprotect_passes_guards_and_tells_the_gap() {
+    let pages = Pages::new();
+    let mut p = Proc::new(pages);
+    p.map.insert(Entry::guard(range(2000, 4))).unwrap();
+    p.mmap(2004, 4);
+    // Over a guard and memory: the guard is left alone.
+    p.mprotect(2000, 8, Prot::READ).unwrap();
+    assert_eq!(p.map.entry(va(2000)).unwrap().prot(), Prot::NONE);
+    assert_eq!(p.map.entry(va(2004)).unwrap().prot(), Prot::READ);
+    // Over a whole stack: what grows later is executable too.
+    stack(&mut p);
+    p.mprotect(0, 1024, Prot::ALL).unwrap();
+    p.access(500, Access::Execute).unwrap();
+    assert_eq!(p.map.entry(va(500)).unwrap().prot(), Prot::ALL);
+}
+
+#[test]
+fn a_forked_stack_grows_on_its_own() {
+    let pages = Pages::new();
+    let mut p = Proc::new(pages);
+    stack(&mut p);
+    p.write(1023, 5).unwrap();
+    let mut c = p.fork();
+    c.write(900, 6).unwrap();
+    assert_eq!(c.read(1023), Ok(5));
+    // The parent's gap is untouched.
+    assert_eq!(p.map.entry(va(900)).unwrap().prot(), Prot::NONE);
+}
