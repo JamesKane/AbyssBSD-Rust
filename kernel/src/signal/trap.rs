@@ -127,6 +127,22 @@ fn classify(s: &Sleepable, p: &Process, report: &crate::arch::TrapReport) -> Opt
     })
 }
 
+/// Whether the trap was an `mrs` of the ID registers, now emulated
+/// (FreeBSD's `undef_insn` and `undef_sys` handlers).
+#[cfg(target_arch = "aarch64")]
+fn emulated(report: &crate::arch::TrapReport, frame: &mut TrapFrame) -> bool {
+    use crate::arch::trap::Trap;
+    let read = match report.trap {
+        Trap::Undefined => crate::uaccess::UserPtr::<u32>::new(frame.elr)
+            .read()
+            .ok()
+            .and_then(idregs::MrsRead::from_insn),
+        Trap::Other(0x18) => idregs::MrsRead::from_iss(frame.esr & 0x01ff_ffff),
+        _ => None,
+    };
+    crate::idregs::emulate_mrs(frame, read)
+}
+
 #[cfg(target_arch = "aarch64")]
 fn classify(s: &Sleepable, p: &Process, report: &crate::arch::TrapReport) -> Option<Fault> {
     use crate::arch::trap::{FaultStatus, Trap};
@@ -158,7 +174,11 @@ fn classify(s: &Sleepable, p: &Process, report: &crate::arch::TrapReport) -> Opt
         Trap::Breakpoint(_) => Some(Fault::new(SIGTRAP, TRAP_BRKPT, pc, ec)),
         Trap::PcAlignment => Some(Fault::new(SIGBUS, BUS_ADRALN, pc, ec)),
         Trap::SpAlignment => Some(Fault::new(SIGBUS, BUS_ADRALN, f.sp, ec)),
-        Trap::Undefined | Trap::IllegalState => Some(Fault::new(SIGILL, ILL_ILLOPC, pc, ec)),
+        // FreeBSD reports FAR_EL1 for an undefined instruction, and a
+        // trapped system register access as privileged.
+        Trap::Undefined => Some(Fault::new(SIGILL, ILL_ILLTRP, f.far, ec)),
+        Trap::Other(0x18) => Some(Fault::new(SIGILL, ILL_PRVOPC, pc, ec)),
+        Trap::IllegalState => Some(Fault::new(SIGILL, ILL_ILLOPC, pc, ec)),
         Trap::SError => Some(Fault::new(SIGBUS, BUS_OBJERR, pc, ec)),
         // A trapped floating-point exception: the ISS says which.
         Trap::Other(0x2c) => {
@@ -186,6 +206,10 @@ pub(crate) fn trap(s: &Sleepable, report: &crate::arch::TrapReport, frame: &mut 
     let Some(p) = Process::current() else {
         return;
     };
+    #[cfg(target_arch = "aarch64")]
+    if emulated(report, frame) {
+        return;
+    }
     let Some(fault) = classify(s, &p, report) else {
         return;
     };

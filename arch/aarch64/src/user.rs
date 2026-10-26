@@ -76,6 +76,8 @@ pub struct Fault;
 const TCR_EPD0: u64 = 1 << 7;
 /// `SCTLR_EL1.SPAN`: when clear, taking an exception to EL1 sets PAN.
 const SCTLR_SPAN: u64 = 1 << 23;
+/// `SCTLR_EL1.MSCEn`: the FEAT_MOPS instructions are enabled at EL0.
+const SCTLR_MSCEN: u64 = 1 << 33;
 
 /// `CNTKCTL_EL1`: EL0 may read the virtual count (`EL0VCTEN`), and nothing
 /// else of the timers (`EL0PCTEN`, `EL0VTEN`, `EL0PTEN` clear).
@@ -83,10 +85,11 @@ const CNTKCTL_EL0VCTEN: u64 = 1 << 1;
 const CNTKCTL_EL0_BITS: u64 = 0b11 << 8 | 0b11;
 
 /// Prepares this CPU for user mode: lets user code read the virtual count
-/// (libc's `clock_gettime` reads it through the shared page's timehands),
-/// and turns on PAN (no kernel access to user pages except through the
-/// unprivileged loads and stores) where the CPU has it, keeping it on
-/// across exceptions. Call on every CPU.
+/// (libc's `clock_gettime` reads it through the shared page's timehands)
+/// and use FEAT_MOPS where the CPU has it, and turns on PAN (no kernel
+/// access to user pages except through the unprivileged loads and stores)
+/// where the CPU has it, keeping it on across exceptions. Call on every
+/// CPU.
 pub fn init_cpu() {
     // SAFETY: this CPU's timer access controls for EL0; the kernel's own
     // timer use is unaffected.
@@ -102,6 +105,24 @@ pub fn init_cpu() {
             set = in(reg) CNTKCTL_EL0VCTEN,
             options(nostack),
         );
+    }
+    // FEAT_MOPS: user mode may use the memory copy and set instructions,
+    // which libc's string functions pick when `AT_HWCAP2` has them
+    // (FreeBSD's `mops_enable`).
+    if (crate::cpu::id_register(6, 2) >> 16) & 0xf != 0 {
+        // SAFETY: MSCEn only stops the instructions from being UNDEFINED
+        // at EL0.
+        unsafe {
+            asm!(
+                "mrs {s}, sctlr_el1",
+                "orr {s}, {s}, {mscen}",
+                "msr sctlr_el1, {s}",
+                "isb",
+                s = out(reg) _,
+                mscen = in(reg) SCTLR_MSCEN,
+                options(nostack),
+            );
+        }
     }
     let mmfr1: u64;
     // SAFETY: reading an ID register.

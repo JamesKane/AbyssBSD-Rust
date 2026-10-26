@@ -35,6 +35,8 @@ mod exec;
 mod firmware;
 mod firstuse;
 mod fs;
+#[cfg(target_arch = "aarch64")]
+mod idregs;
 mod intc;
 #[cfg(target_arch = "aarch64")]
 mod its;
@@ -120,6 +122,8 @@ fn kmain(boot_info: PhysAddr) -> ! {
     let s = unsafe { sched::Sleepable::assume() };
     random::init();
     smp::start_cpus();
+    #[cfg(target_arch = "aarch64")]
+    idregs::finish();
     topology::summarize();
     pci::init();
     devices::init(&s);

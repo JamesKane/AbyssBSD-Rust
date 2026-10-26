@@ -37,6 +37,8 @@ pub mod at {
     pub const KPRELOAD: u64 = 34;
     pub const USRSTACKBASE: u64 = 35;
     pub const USRSTACKLIM: u64 = 36;
+    pub const HWCAP3: u64 = 38;
+    pub const HWCAP4: u64 = 39;
     /// Entries the kernel reserves room for.
     pub const COUNT: u64 = 40;
 }
@@ -117,6 +119,8 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("AT_KPRELOAD", at::KPRELOAD),
     c("AT_USRSTACKBASE", at::USRSTACKBASE),
     c("AT_USRSTACKLIM", at::USRSTACKLIM),
+    c("AT_HWCAP3", at::HWCAP3),
+    c("AT_HWCAP4", at::HWCAP4),
     c("AT_COUNT", at::COUNT),
     c("ELFOSABI_FREEBSD", ELFOSABI_FREEBSD as u64),
     c("NT_FREEBSD_ABI_TAG", NT_FREEBSD_ABI_TAG as u64),

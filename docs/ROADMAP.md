@@ -1449,12 +1449,14 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
 **P6.1 Run-time linking.**
 - `ET_DYN` executables and `PT_INTERP` (MULTIUSER.md §6): PIE and the interpreter at random bases,
   the full auxiliary vector, `ld-elf.so.1` run directly, the feature-control note.
-  - Done 2026-10-26, but for `AT_HWCAP` on arm64 and `AT_KPRELOAD` on amd64: `exec` follows
+  - Done 2026-10-26, but for `AT_KPRELOAD` on amd64: `exec` follows
     `imgact_elf.c`'s order (the PIE's base, its sections and limits, `anon_loc`, the interpreter,
     the stack), and the boot shell is base's `/bin/sh` when the root has it. The shell cases'
     `DYNAMIC` script (base's `ls`, `ps`, `tar`, `find`, `ldd`, rtld run directly, `LD_BIND_NOW`,
     `LD_PRELOAD`, `LD_LIBRARY_PATH`, `kbdcontrol`, `vidcontrol`) passes on both arches and against
-    FreeBSD.
+    FreeBSD. On arm64, `AT_HWCAP`/`AT_HWCAP2` come from FreeBSD's user view of the ID registers
+    (host-tested `lib/idregs`: merged over every CPU, unexposed fields hidden), which user mode
+    reads with an emulated `mrs`.
 - The VM rtld relies on: reservations, `MAP_EXCL`, `MAP_ALIGNED_SUPER`, `PROT_MAX`, RELRO, `ETXTBSY`,
   and a grow-down stack to `RLIMIT_STACK` with the guard page and stack gap.
 - `utrace` (to ktrace later; accepted and dropped until P6.8), the `kern.elf64.*` and `kern.proc.auxv`

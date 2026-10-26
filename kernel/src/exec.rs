@@ -742,7 +742,7 @@ fn build_stack(
     word(&mut img, pagesizes, PAGE_SIZE);
 
     let ncpus = sched::online_cpus() as u64;
-    let entries = [
+    let mut entries = alloc::vec![
         (at::PHDR, aux.phdr),
         (at::PHENT, PHENT),
         (at::PHNUM, aux.phnum),
@@ -758,23 +758,36 @@ fn build_stack(
         (at::NCPUS, ncpus),
         (at::PAGESIZES, pagesizes),
         (at::PAGESIZESLEN, (MAXPAGESIZES * 8) as u64),
+        (
+            at::TIMEKEEP,
+            crate::shared_page::timekeep_address(layout.shared_page),
+        ),
         (at::STACKPROT, u64::from(aux.stack_prot.bits())),
+    ];
+    // The CPU's features, on arm64 (amd64 programs ask CPUID).
+    #[cfg(target_arch = "aarch64")]
+    {
+        let (hwcap, hwcap2) = crate::idregs::hwcaps();
+        entries.extend([
+            (at::HWCAP, hwcap),
+            (at::HWCAP2, hwcap2),
+            (at::HWCAP3, 0),
+            (at::HWCAP4, 0),
+        ]);
+    }
+    entries.extend([
         (at::BSDFLAGS, bsdf::SIGFASTBLK),
         (at::ARGC, argv.len() as u64),
         (at::ARGV, argv_at),
         (at::ENVC, envp.len() as u64),
         (at::ENVV, envp_at),
         (at::PS_STRINGS, ps_strings),
-        (
-            at::TIMEKEEP,
-            crate::shared_page::timekeep_address(layout.shared_page),
-        ),
         // The top itself, `ps_strings` right below it, as FreeBSD 15.1
         // reports it (tests/user/aslr.c, which passes there).
         (at::USRSTACKBASE, top),
         (at::USRSTACKLIM, aux.stack_lim),
         (at::NULL, 0),
-    ];
+    ]);
     for (i, (k, v)) in entries.into_iter().enumerate() {
         word(&mut img, auxv + i as u64 * 16, k);
         word(&mut img, auxv + i as u64 * 16 + 8, v);

@@ -33,8 +33,20 @@ const TCR: u64 = 16          // T0SZ
 
 /// `SCTLR_EL1` RES1 bits (ARMv8.0: 29, 28, 23, 22, 20, 11), MMU off.
 const SCTLR_RES1: u64 = 0x30d0_0800;
-/// RES1 plus M, C, SA, SA0, I.
-const SCTLR_MMU_ON: u64 = SCTLR_RES1 | 1 | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 12);
+/// RES1 plus M, C, SA, SA0, I, and what FreeBSD lets user mode do
+/// without trapping: `DC ZVA` (DZE), reading `CTR_EL0` (UCT), `WFI` and
+/// `WFE` (nTWI, nTWE), and cache maintenance (UCI).
+const SCTLR_MMU_ON: u64 = SCTLR_RES1
+    | 1
+    | (1 << 2)
+    | (1 << 3)
+    | (1 << 4)
+    | (1 << 12)
+    | (1 << 14)
+    | (1 << 15)
+    | (1 << 16)
+    | (1 << 18)
+    | (1 << 26);
 /// `HCR_EL2`: EL1 is AArch64; don't trap pointer authentication.
 const HCR_EL2: u64 = (1 << 31) | (1 << 41) | (1 << 40);
 
@@ -98,6 +110,18 @@ abyss_ap_start:
     mov x9, #0x1ff
     msr S3_4_C1_C2_0, x9
 6:
+    /*
+     * FEAT_HCX: HCRX_EL2 all clear but MSCEn, so the FEAT_MOPS
+     * instructions are not UNDEFINED at EL1 and EL0 (FreeBSD, running at
+     * EL2 with VHE, gets that from E2H and TGE).
+     */
+    mrs x9, id_aa64mmfr1_el1
+    ubfx x9, x9, #40, #4
+    cbz x9, 7f
+    mov x9, #(1 << 11)
+    msr S3_4_C1_C2_2, x9
+    isb
+7:
     msr hstr_el2, xzr
     msr vttbr_el2, xzr
     mrs x9, midr_el1

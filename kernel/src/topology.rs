@@ -206,6 +206,8 @@ pub(crate) fn record_this_cpu(cpu: CpuId) {
     sched::set_capacity(cpu, info.capacity);
     sched::set_smt(cpu, smt_core(smt_thread));
     crate::errata::apply(cpu, &ident);
+    #[cfg(target_arch = "aarch64")]
+    crate::idregs::record_this_cpu(cpu);
 }
 
 /// (package, cluster, core, is an SMT thread) for this CPU.

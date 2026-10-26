@@ -88,6 +88,59 @@ pub fn mpidr() -> u64 {
     read_sysreg!("mpidr_el1") & 0xff_00ff_ffff
 }
 
+/// `MPIDR_EL1` whole, as user mode reads it.
+pub fn mpidr_el1() -> u64 {
+    read_sysreg!("mpidr_el1")
+}
+
+/// `REVIDR_EL1`, the implementation's revision bits.
+pub fn revidr() -> u64 {
+    read_sysreg!("revidr_el1")
+}
+
+/// The AArch64 ID register at `op0` 3, `op1` 0, `CRn` 0, `CRm` 4–7 and
+/// `op2` (by encoding, so that registers the assembler does not name
+/// read too: unassigned ones read as zero).
+pub fn id_register(crm: u8, op2: u8) -> u64 {
+    macro_rules! regs {
+        ($(($m:literal, $o:literal)),* $(,)?) => {
+            match (crm, op2) {
+                $(($m, $o) => {
+                    let v: u64;
+                    // SAFETY: reading an ID register has no side effects.
+                    unsafe {
+                        asm!(
+                            concat!("mrs {}, s3_0_c0_c", $m, "_", $o),
+                            out(reg) v,
+                            options(nomem, nostack),
+                        );
+                    }
+                    v
+                })*
+                _ => 0,
+            }
+        };
+    }
+    regs!(
+        (4, 0),
+        (4, 1),
+        (4, 2),
+        (4, 4),
+        (5, 0),
+        (5, 1),
+        (5, 4),
+        (5, 5),
+        (6, 0),
+        (6, 1),
+        (6, 2),
+        (7, 0),
+        (7, 1),
+        (7, 2),
+        (7, 3),
+        (7, 4),
+    )
+}
+
 /// Per-CPU data reached through `TPIDR_EL1`.
 #[repr(C)]
 #[derive(Debug)]

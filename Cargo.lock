@@ -285,6 +285,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "idregs"
+version = "0.0.0"
+
+[[package]]
 name = "input"
 version = "0.0.0"
 dependencies = [
@@ -345,6 +349,7 @@ dependencies = [
  "fb-console",
  "gpt",
  "hal",
+ "idregs",
  "input",
  "intmap",
  "irq",
