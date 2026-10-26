@@ -293,6 +293,8 @@ pub(crate) struct Image {
     pub(crate) args: Arc<[u8]>,
     /// The executable's path (`kern.proc.pathname`).
     pub(crate) path: Arc<[u8]>,
+    /// The auxiliary vector exec gave it (`kern.proc.auxv`).
+    pub(crate) auxv: Arc<[u8]>,
 }
 
 impl Image {
@@ -322,6 +324,7 @@ impl Image {
             comm,
             args: args.into(),
             path: full.into(),
+            auxv: Arc::from([]),
         }
     }
 }
@@ -640,7 +643,10 @@ impl Process {
             &lookup,
         )?;
         let p = Self::create(space, image.layout, None, crate::fs::console_table());
-        *p.image.lock() = Image::new(s, &root, path, argv);
+        *p.image.lock() = Image {
+            auxv: image.auxv.into(),
+            ..Image::new(s, &root, path, argv)
+        };
         *p.text.lock() = core::iter::once(Text::new(&file)?)
             .chain(image.interp)
             .collect();
@@ -848,7 +854,10 @@ impl Process {
         crate::fs::closed(self.pid, &closed);
         drop(closed);
         let cwd = Arc::clone(self.cwd.lock().vnode());
-        *self.image.lock() = Image::new(s, &cwd, path, argv);
+        *self.image.lock() = Image {
+            auxv: image.auxv.into(),
+            ..Image::new(s, &cwd, path, argv)
+        };
         self.execed.store(true, Ordering::Relaxed);
         *self.text.lock() = core::iter::once(text).chain(image.interp).collect();
         // The saved ids become the effective ones (no set-id programs

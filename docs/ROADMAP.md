@@ -1466,6 +1466,10 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
     `tests/user/stack.c`).
 - `utrace` (to ktrace later; accepted and dropped until P6.8), the `kern.elf64.*` and `kern.proc.auxv`
   nodes.
+  - Done 2026-10-26: `utrace` succeeds and drops the record, as for a process nobody traces;
+    `kern.elf64.*` as 15.1 has them (read-only until sysctl writes; no `vdso` until the vdso),
+    `kern.ps_strings`, `kern.usrstack`, `kern.stackprot`, and `kern.proc.auxv`
+    (`tests/user/auxv.c`).
 - Exit: base's own dynamic `/bin/sh` runs as the boot shell from the UFS2 root, `ls`, `ps`, `tar`,
   `kbdcontrol`, and `vidcontrol` from `/bin` and `/usr/bin` run, rtld's `LD_*` variables and
   `ldd` work, and the P4–P5 user tests pass built dynamic.

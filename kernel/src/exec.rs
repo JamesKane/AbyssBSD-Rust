@@ -113,6 +113,8 @@ pub(crate) struct Image {
     pub(crate) layout: Layout,
     /// The interpreter, held as text while the program runs.
     pub(crate) interp: Option<crate::proc::Text>,
+    /// The auxiliary vector, through `AT_NULL` (`kern.proc.auxv`).
+    pub(crate) auxv: Vec<u8>,
 }
 
 /// Where an image's randomized parts went, and what its notes said.
@@ -370,8 +372,11 @@ pub(crate) fn load(
         stack_prot,
         stack_lim: limits[rlimit::STACK as usize].rlim_cur,
     };
-    let stack = build_stack(s, space, path, argv, envp, &aux, &layout)?;
-    Ok(registers(start, stack, layout, interp_text))
+    let (stack, auxv) = build_stack(s, space, path, argv, envp, &aux, &layout)?;
+    Ok(Image {
+        auxv,
+        ..registers(start, stack, layout, interp_text)
+    })
 }
 
 /// Where a PIE linked at 0 loads when it is not randomized (FreeBSD's
@@ -388,7 +393,8 @@ const DEFAULT_STACK_PROT: Prot = Prot::ALL;
 const DEFAULT_STACK_PROT: Prot = Prot::RW;
 /// A program header's size (`e_phentsize`, which the parser checks).
 const PHENT: u64 = 56;
-/// The most program headers an image may have (`kern.elf64.phnums`).
+/// The most program headers an image may have (FreeBSD 16's
+/// `kern.elf64.phnums`; 15.1 has no node for it).
 const PHNUMS: usize = 128;
 /// The largest `PT_LOAD` alignment accepted: the largest superpage.
 /// Larger ones are corrupt or malicious.
@@ -415,6 +421,116 @@ pub(crate) static ASLR: Aslr = Aslr {
     stack: AtomicBool::new(true),
     shared_page: AtomicBool::new(true),
 };
+
+/// Adds exec's nodes: `kern.elf64.*` (read-only until sysctl writes:
+/// they report what exec does), and the caller's own `kern.ps_strings`,
+/// `kern.usrstack`, and `kern.stackprot`.
+pub(crate) fn sysctl_init(s: &Sleepable) {
+    use abi::sysctl::kern;
+    use sysctl::{Number, Value};
+    let on = |b: &'static AtomicBool| {
+        Value::Int(alloc::boxed::Box::new(move || {
+            i32::from(b.load(Ordering::Relaxed))
+        }))
+    };
+    let mine = |f: fn(&Layout) -> u64| {
+        Value::Ulong(alloc::boxed::Box::new(move || {
+            crate::proc::Process::with_current(|p| f(&p.layout())).unwrap_or(0)
+        }))
+    };
+    crate::sysctl::with(s, |t| {
+        let root = t.root();
+        let k = t.child(root, "kern").expect("kern node");
+        let elf = t
+            .add_node(k, Number::Auto, "elf64", "")
+            .expect("kern.elf64");
+        let aslr = t
+            .add_node(elf, Number::Auto, "aslr", "")
+            .expect("kern.elf64.aslr");
+        let nodes: [(_, &str, &str, Value); 10] = [
+            (
+                elf,
+                "fallback_brand",
+                "ELF64 brand of last resort",
+                Value::int(-1),
+            ),
+            (
+                elf,
+                "nxstack",
+                "ELF64: support PT_GNU_STACK for non-executable stack control",
+                Value::int(1),
+            ),
+            (
+                elf,
+                "pie_base",
+                "PIE load base without randomization",
+                Value::Ulong(alloc::boxed::Box::new(|| ET_DYN_LOAD_ADDR)),
+            ),
+            (
+                elf,
+                "sigfastblock",
+                "enable sigfastblock for new processes",
+                Value::int(1),
+            ),
+            (
+                aslr,
+                "enable",
+                "ELF64: enable address map randomization",
+                on(&ASLR.enable),
+            ),
+            (
+                aslr,
+                "pie_enable",
+                "ELF64: enable address map randomization for PIE binaries",
+                on(&ASLR.pie_enable),
+            ),
+            (
+                aslr,
+                "honor_sbrk",
+                "ELF64: assume sbrk is used",
+                Value::int(0),
+            ),
+            (
+                aslr,
+                "stack",
+                "ELF64: enable stack address randomization",
+                on(&ASLR.stack),
+            ),
+            (
+                aslr,
+                "shared_page",
+                "ELF64: enable shared page address randomization",
+                on(&ASLR.shared_page),
+            ),
+            (
+                k,
+                "stackprot",
+                "Stack memory permissions",
+                Value::int(DEFAULT_STACK_PROT.bits().cast_signed()),
+            ),
+        ];
+        for (parent, name, descr, value) in nodes {
+            t.add_value(parent, Number::Auto, name, descr, value)
+                .expect("exec sysctl node");
+        }
+        t.add_value(
+            k,
+            Number::Fixed(kern::PS_STRINGS),
+            "ps_strings",
+            "Location of process' ps_strings structure",
+            mine(|l| l.stack_top - size_of::<PsStrings>() as u64),
+        )
+        .expect("kern.ps_strings");
+        t.add_value(
+            k,
+            Number::Fixed(kern::USRSTACK),
+            "usrstack",
+            "Top of process stack",
+            mine(|l| l.stack_top.next_multiple_of(PAGE_SIZE)),
+        )
+        .expect("kern.usrstack");
+    });
+}
 
 /// Checks that `file` is a regular file the caller may execute (root
 /// needs an execute bit too), and returns its memory object.
@@ -719,7 +835,7 @@ struct Aux {
 }
 
 /// Builds the initial stack below `layout.stack_top`; returns the address
-/// of `argc`.
+/// of `argc` and the auxiliary vector's bytes.
 fn build_stack(
     s: &Sleepable,
     space: &AddressSpace,
@@ -728,7 +844,7 @@ fn build_stack(
     envp: &[&[u8]],
     aux: &Aux,
     layout: &Layout,
-) -> Result<u64, Errno> {
+) -> Result<(u64, Vec<u8>), Errno> {
     let top = layout.stack_top;
     let strings: usize = argv.iter().chain(envp).map(|a| a.len() + 1).sum();
     if strings > ARG_MAX {
@@ -826,9 +942,12 @@ fn build_stack(
         (at::USRSTACKLIM, aux.stack_lim),
         (at::NULL, 0),
     ]);
+    let mut vector = Vec::with_capacity(entries.len() * 16);
     for (i, (k, v)) in entries.into_iter().enumerate() {
         word(&mut img, auxv + i as u64 * 16, k);
         word(&mut img, auxv + i as u64 * 16 + 8, v);
+        vector.extend_from_slice(&k.to_ne_bytes());
+        vector.extend_from_slice(&v.to_ne_bytes());
     }
 
     let ps = PsStrings {
@@ -846,7 +965,7 @@ fn build_stack(
     space
         .poke(s, VirtAddr::new(argc_at), &img)
         .map_err(|_| Errno::ENOMEM)?;
-    Ok(argc_at)
+    Ok((argc_at, vector))
 }
 
 /// The entry registers for a stack whose `argc` is at `stack`.
@@ -861,5 +980,6 @@ fn registers(entry: u64, stack: u64, layout: Layout, interp: Option<crate::proc:
         arg: stack,
         layout,
         interp,
+        auxv: Vec::new(),
     }
 }

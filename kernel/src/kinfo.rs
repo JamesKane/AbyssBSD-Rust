@@ -3,7 +3,8 @@
 //! `kern.proc.proc`, and the selections by pid, process group, session,
 //! terminal, and user return `struct kinfo_proc`s (one per process, each
 //! of which has one thread); `kern.proc.args.<pid>` returns the
-//! arguments and `kern.proc.pathname.<pid>` the executable's path.
+//! arguments, `kern.proc.pathname.<pid>` the executable's path, and
+//! `kern.proc.auxv.<pid>` the auxiliary vector exec gave it.
 //!
 //! `kern.pid_max` sizes `ps`'s pid column.
 //!
@@ -273,5 +274,17 @@ pub(crate) fn init(s: &Sleepable) {
             }),
         )
         .expect("kern.proc.pathname");
+        t.add_handler(
+            procs,
+            Number::Fixed(select::AUXV),
+            "auxv",
+            "Process ELF auxiliary vector",
+            Arc::new(|r: &[i32], out: &mut Vec<u8>| {
+                let p = process(arg(r)?)?;
+                out.extend_from_slice(&p.image().auxv);
+                Ok(())
+            }),
+        )
+        .expect("kern.proc.auxv");
     });
 }

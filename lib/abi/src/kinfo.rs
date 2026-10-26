@@ -271,6 +271,7 @@ pub mod select {
     pub const ARGS: i32 = 7;
     pub const PROC: i32 = 8;
     pub const PATHNAME: i32 = 12;
+    pub const AUXV: i32 = 36;
     /// Or'd in: one entry per thread.
     pub const INC_THREAD: i32 = 0x10;
 }
@@ -317,6 +318,7 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
         "sys/sysctl.h",
         select::PATHNAME as i64,
     ),
+    c("KERN_PROC_AUXV", "sys/sysctl.h", select::AUXV as i64),
     c(
         "KERN_PROC_INC_THREAD",
         "sys/sysctl.h",

@@ -19,6 +19,13 @@ pub(super) fn getpid() -> SysResult {
     Process::with_current(|p| u64::from(p.pid().unsigned_abs())).ok_or(Errno::EINVAL)
 }
 
+/// `utrace(addr, len)`: a record for ktrace (rtld's `LD_UTRACE`,
+/// `malloc`'s); a process nobody traces drops it, as FreeBSD does (no
+/// ktrace until P6.8).
+pub(super) fn utrace() -> SysResult {
+    Ok(0)
+}
+
 /// `issetugid()`: whether the process's credential changed since it last
 /// ran `execve` (no set-id programs yet).
 pub(super) fn issetugid() -> SysResult {
