@@ -186,24 +186,40 @@ pub fn dirty_total() -> usize {
 /// Frees up to `want` clean pages of pager objects nothing maps (only
 /// their file system holds them) and nobody is reading or writing
 /// through, oldest objects first; returns how many it freed. Never waits
-/// for a lock: a caller may hold one.
+/// for a lock: a caller may hold one. Allocates nothing: it runs when
+/// memory has run out.
 pub fn reclaim_clean(want: usize) -> usize {
-    let objects: Vec<Arc<Object>> = {
+    {
         let Some(mut list) = PAGED.try_lock() else {
             return 0;
         };
         list.retain(|w| w.strong_count() > 0);
-        list.iter().filter_map(Weak::upgrade).collect()
-    };
+    }
     let mut freed = 0;
-    for o in &objects {
-        if freed >= want {
-            break;
+    // One object at a time, the list's lock let go between them (an
+    // object being registered meanwhile only shifts what comes after).
+    let mut i = 0;
+    while freed < want {
+        let o = {
+            let Some(list) = PAGED.try_lock() else {
+                break;
+            };
+            let Some(w) = list.get(i) else {
+                break;
+            };
+            w.upgrade()
+        };
+        i += 1;
+        if let Some(o) = o {
+            freed += o.drop_clean(want - freed);
         }
-        freed += o.drop_clean(want - freed);
     }
     freed
 }
+
+/// How many pages [`Object::drop_clean`] takes out under the lock at a
+/// time.
+const DROP_BATCH: usize = 64;
 
 /// A memory object.
 pub struct Object {
@@ -740,28 +756,42 @@ impl Object {
     /// and no transfer is under way. `self` is a reference of the caller's
     /// own, beside the file system's if it has not disowned the object.
     pub fn drop_clean(self: &Arc<Self>, want: usize) -> usize {
-        let Some(mut inner) = self.inner.try_lock() else {
-            return 0;
-        };
-        // Ours and the file system's: no map entry or shadow reaches it,
-        // and a new one finds the pages gone when it looks (under this
-        // lock). A transfer takes its guard before it looks.
-        let expected = 1 + usize::from(self.owned.load(Ordering::SeqCst));
-        if Arc::strong_count(self) > expected || self.io.load(Ordering::SeqCst) != 0 {
-            return 0;
-        }
-        let Inner { pages, dirty, .. } = &mut *inner;
-        let doomed: Vec<PageIndex> = pages
-            .keys()
-            .filter(|i| !dirty.contains(i))
-            .take(want)
-            .copied()
-            .collect();
-        let freed: Vec<Pfn> = doomed.iter().filter_map(|i| pages.remove(i)).collect();
-        drop(inner);
-        let n = freed.len();
-        for pfn in freed {
-            self.pages_ops.free(pfn);
+        let mut n = 0;
+        // In batches, without allocating, each freed with the lock let go.
+        while n < want {
+            let mut batch = [Pfn(0); DROP_BATCH];
+            let mut k = 0;
+            {
+                let Some(mut inner) = self.inner.try_lock() else {
+                    break;
+                };
+                // Ours and the file system's: no map entry or shadow
+                // reaches it, and a new one finds the pages gone when it
+                // looks (under this lock). A transfer takes its guard
+                // before it looks.
+                let expected = 1 + usize::from(self.owned.load(Ordering::SeqCst));
+                if Arc::strong_count(self) > expected || self.io.load(Ordering::SeqCst) != 0 {
+                    break;
+                }
+                let Inner { pages, dirty, .. } = &mut *inner;
+                let room = DROP_BATCH.min(want - n);
+                pages.retain(|i, pfn| {
+                    if k < room && !dirty.contains(i) {
+                        batch[k] = *pfn;
+                        k += 1;
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
+            for &pfn in &batch[..k] {
+                self.pages_ops.free(pfn);
+            }
+            n += k;
+            if k < DROP_BATCH {
+                break;
+            }
         }
         n
     }
