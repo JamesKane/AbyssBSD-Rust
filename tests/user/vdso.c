@@ -10,6 +10,8 @@
  * between two system-call readings, and readings never go backwards over
  * a few of the kernel's updates.
  *
+ * Built static only: libc's __vdso_* entry points are not exported.
+ *
  * Exits 0 on success; prints what failed otherwise.
  */
 

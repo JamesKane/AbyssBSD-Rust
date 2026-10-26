@@ -32,6 +32,9 @@
 #define	MAXSSIZ	((rlim_t)512 << 20)
 #endif
 
+/* The stack the checks use: amd64's DFLSSIZ, well inside either's. */
+#define	WORK	((rlim_t)8 << 20)
+
 static int failed;
 
 static void
@@ -87,7 +90,7 @@ in_child(void (*f)(void))
 static void
 overflow(void)
 {
-	struct rlimit rl = { DFLSSIZ, MAXSSIZ };
+	struct rlimit rl = { WORK, MAXSSIZ };
 
 	if (setrlimit(RLIMIT_STACK, &rl) != 0)
 		_exit(2);
@@ -132,8 +135,8 @@ main(void)
 	/* Before this process's stack has grown, which a child inherits. */
 	if (in_child(under_lowered_limit) != SIGSEGV)
 		fail("a lowered limit did not stop the stack");
-	/* Most of the limit, far below what exec mapped at first. */
-	use_stack(DFLSSIZ * 3 / 4);
+	/* Far below what exec mapped at first. */
+	use_stack(WORK * 3 / 4);
 	if (in_child(overflow) != SIGSEGV)
 		fail("recursing forever did not end in SIGSEGV");
 

@@ -454,6 +454,7 @@ fn shell(
         if ufs_root {
             session.script(crate::expect::UFS_ROOT, Duration::from_secs(600))?;
             session.script(crate::expect::DYNAMIC, Duration::from_secs(60))?;
+            session.script(crate::expect::DYNAMIC_TESTS, Duration::from_secs(900))?;
         }
         session.send("exit\n")
     })();

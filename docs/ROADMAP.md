@@ -1473,6 +1473,10 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
 - Exit: base's own dynamic `/bin/sh` runs as the boot shell from the UFS2 root, `ls`, `ps`, `tar`,
   `kbdcontrol`, and `vidcontrol` from `/bin` and `/usr/bin` run, rtld's `LD_*` variables and
   `ldd` work, and the P4–P5 user tests pass built dynamic.
+  - The user tests built dynamic done 2026-10-26: each `tests/user` program (but `vdso`, which
+    reaches into libc) is built again as a PIE into the UFS2 root's `/usr/tests/abyss-dynamic`, and
+    the shell cases run them all in a session of their own (`DYNAMIC_TESTS`); all pass on both
+    arches but `tty`, left out until ptys (it uses the console the shell is on).
 
 **P6.2 Threads.**
 - The process/thread split (MULTIUSER.md §4): per-thread signal state, TLS bases (FSGSBASE on

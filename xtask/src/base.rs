@@ -387,6 +387,61 @@ pub(crate) fn cc_static_with(arch: Arch, source: &Path, args: &[&str], out: &Pat
     )
 }
 
+/// Builds `tests/user/*.c` again as dynamically linked PIEs into `out`
+/// (when stale), against the full base on the server: the user tests,
+/// run through rtld and base's shared libraries (ROADMAP P6.1). A test
+/// whose source says "Built static only" (it reaches into libc's
+/// internals) is left out. Returns each program's name and file.
+pub(crate) fn dynamic_user_tests(arch: Arch, out: &Path) -> Result<Vec<(String, PathBuf)>> {
+    if !cfg!(target_os = "freebsd") {
+        return Err("dynamic test programs need the server's full base".into());
+    }
+    let root = root(arch)?;
+    fs::create_dir_all(out)?;
+    let built_by = std::env::current_exe()
+        .and_then(fs::metadata)
+        .and_then(|m| m.modified())
+        .ok();
+    let mut sources: Vec<PathBuf> = fs::read_dir(util::root().join("tests/user"))?
+        .map(|e| e.map(|e| e.path()))
+        .collect::<std::io::Result<_>>()?;
+    sources.retain(|p| {
+        p.extension().is_some_and(|x| x == "c")
+            && !fs::read_to_string(p).is_ok_and(|s| s.contains("Built static only"))
+    });
+    sources.sort();
+    let mut built = Vec::new();
+    for src in sources {
+        let name = src
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or("bad test name")?
+            .to_string();
+        let bin = out.join(&name);
+        let stale = match (
+            fs::metadata(&src)?.modified(),
+            fs::metadata(&bin).and_then(|m| m.modified()),
+        ) {
+            (Ok(s), Ok(b)) => s > b || built_by.is_none_or(|x| x > b),
+            _ => true,
+        };
+        if stale {
+            util::run(
+                Command::new("cc")
+                    .arg(format!("--target={}", arch.clang_target()))
+                    .arg(format!("--sysroot={}", root.display()))
+                    .args([
+                        "-fPIE", "-pie", "-s", "-O2", "-Wall", "-Wextra", "-Werror", "-o",
+                    ])
+                    .arg(&bin)
+                    .arg(&src),
+            )?;
+        }
+        built.push((name, bin));
+    }
+    Ok(built)
+}
+
 /// [`cc_static`] for third-party sources (FreeBSD's test programs): their
 /// warnings are not ours to fix.
 pub(crate) fn cc_static_foreign(arch: Arch, source: &Path, out: &Path) -> Result<()> {

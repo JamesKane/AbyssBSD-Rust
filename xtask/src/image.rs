@@ -96,6 +96,8 @@ const FSTAB: &str = "# Device\t\tMountpoint\tFStype\tOptions\tDump\tPass#\n\
 
 /// Where the root image keeps the static tools.
 pub(crate) const STATIC_TOOLS: &str = "usr/tests/static";
+/// Where the root keeps `tests/user`'s programs dynamically linked.
+pub(crate) const DYNAMIC_TESTS: &str = "usr/tests/abyss-dynamic";
 
 /// Where the root image keeps pjdfstest.
 pub(crate) const PJDFSTEST: &str = "usr/tests/pjdfstest";
@@ -182,6 +184,12 @@ fn ufs_root(arch: Arch, opts: build::Options, cmdline: &str, root: Root) -> Resu
     }
     for (name, bin) in crate::base::static_tools(arch)? {
         fs::copy(&bin, stage.join(STATIC_TOOLS).join(name))?;
+    }
+    // The user tests again, dynamically linked.
+    let dynamic = stage.join(DYNAMIC_TESTS);
+    fs::create_dir_all(&dynamic)?;
+    for (name, bin) in crate::base::dynamic_user_tests(arch, &dir.join("user-dynamic"))? {
+        fs::copy(&bin, dynamic.join(name))?;
     }
     {
         let shim = stage.join(STATIC_TOOLS).join("openssl");

@@ -119,7 +119,10 @@ root. After `SHELL`, the `UFS_ROOT` script remounts the root read-write (`mount 
 checks every entry of the base with `mtree` (owners, modes, flags, links, sizes, SHA-256), and
 copies a tree with `tar` and `cp -R`. The boot shell there is base's own dynamic `/bin/sh` (the
 kernel falls back to `/rescue/sh`), and the `DYNAMIC` script runs base's dynamically linked programs,
-`ldd`, rtld itself, and rtld's `LD_*` variables; `freebsd-shell` runs it too, after `SHELL`. The
+`ldd`, rtld itself, and rtld's `LD_*` variables; `freebsd-shell` runs it too, after `SHELL`.
+`DYNAMIC_TESTS` then runs every `tests/user` program again, built dynamic (a PIE, against the
+server's full base) into `/usr/tests/abyss-dynamic`, under `daemon -f` so that each runs as the
+kernel tests run them, in a session of its own; a source that says "Built static only" is left out. The
 image's entries carry no file flags but those `base.mtree` names, as an installed root (`makefs`
 would otherwise copy the extracted files' own). After `exit` powers the machine off, the root must
 be clean (`dumpfs`) and `fsck_ffs -f -n` must find nothing.

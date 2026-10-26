@@ -226,6 +226,25 @@ pub(crate) const DYNAMIC: &[Step] = &[
     ),
 ];
 
+/// The user tests again, dynamically linked (ROADMAP P6.1's exit), from
+/// a UFS2 root: each is named on the console as it starts, and each that
+/// fails is named again, with what it printed. They run
+/// as the kernel tests run them, in a session of their own with no
+/// terminal (`daemon -f`): under the boot shell's job control, with the
+/// shell as pid 1 in their session, process groups are never orphaned
+/// and the terminal is theirs to take. `tty` is left out: until ptys
+/// (P6.6) it types at, and sends ^C through, `/dev/console`, the shell's
+/// own terminal.
+pub(crate) const DYNAMIC_TESTS: &[Step] = &[step(
+    "rm -f /var/tmp/dyn.*; daemon -f sh -c 'f=0; for t in /usr/tests/abyss-dynamic/*; do \
+     [ ${t##*/} = tty ] && continue; echo \"dyntest: ${t##*/}\" > /dev/console; \
+     $t > /var/tmp/dyn.out 2>&1 || { echo \"FAIL ${t##*/}\"; cat /var/tmp/dyn.out; f=1; } \
+     >> /var/tmp/dyn.res; done; echo dyntests-$f >> /var/tmp/dyn.res; touch /var/tmp/dyn.done'; \
+     while [ ! -e /var/tmp/dyn.done ]; do sleep 1; done; cat /var/tmp/dyn.res\n",
+    "\ndyntests-0\r\n",
+    "the user tests, dynamically linked",
+)];
+
 /// How much unmatched console output a [`Session`] keeps, for errors.
 const TAIL: usize = 300;
 
