@@ -104,7 +104,6 @@ const MACHINE: Machine = Machine::X86_64;
 const MACHINE: Machine = Machine::Aarch64;
 
 /// Where the new program starts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Image {
     pub(crate) entry: u64,
     /// The initial stack pointer.
@@ -112,6 +111,8 @@ pub(crate) struct Image {
     /// The first argument register: the address of `argc`.
     pub(crate) arg: u64,
     pub(crate) layout: Layout,
+    /// The interpreter, held as text while the program runs.
+    pub(crate) interp: Option<crate::proc::Text>,
 }
 
 /// Where an image's randomized parts went, and what its notes said.
@@ -286,6 +287,7 @@ pub(crate) fn load(
         addr
     };
     let entry = elf.entry.wrapping_add(et_dyn_addr);
+    let mut interp_text = None;
     let (base, start) = match headers.interp {
         Some(name) => {
             let at = if aslr {
@@ -294,6 +296,8 @@ pub(crate) fn load(
                 addr
             };
             let interp = lookup(name)?;
+            // Text from now on, as FreeBSD's text mappings make it.
+            interp_text = Some(crate::proc::Text::new(&interp)?);
             load_interp(s, space, &interp, at)?
         }
         None => (et_dyn_addr, entry),
@@ -367,7 +371,7 @@ pub(crate) fn load(
         stack_lim: limits[rlimit::STACK as usize].rlim_cur,
     };
     let stack = build_stack(s, space, path, argv, envp, &aux, &layout)?;
-    Ok(registers(start, stack, layout))
+    Ok(registers(start, stack, layout, interp_text))
 }
 
 /// Where a PIE linked at 0 loads when it is not randomized (FreeBSD's
@@ -846,7 +850,7 @@ fn build_stack(
 }
 
 /// The entry registers for a stack whose `argc` is at `stack`.
-const fn registers(entry: u64, stack: u64, layout: Layout) -> Image {
+fn registers(entry: u64, stack: u64, layout: Layout, interp: Option<crate::proc::Text>) -> Image {
     #[cfg(target_arch = "x86_64")]
     let sp = ((stack - 8) & !0xf) + 8;
     #[cfg(target_arch = "aarch64")]
@@ -856,5 +860,6 @@ const fn registers(entry: u64, stack: u64, layout: Layout) -> Image {
         sp,
         arg: stack,
         layout,
+        interp,
     }
 }

@@ -277,7 +277,8 @@ pub(crate) struct Process {
     /// Its credential; inherited.
     cred: PreemptLock<Arc<Ucred>>,
     /// The program it runs, while it runs it.
-    text: SpinLock<Option<Text>>,
+    /// The program and its interpreter.
+    text: SpinLock<Vec<Text>>,
     /// Its credential changed since it last ran `execve` (FreeBSD's
     /// `P_SUGID`, which `issetugid` reports); inherited.
     sugid: AtomicBool,
@@ -325,13 +326,14 @@ impl Image {
     }
 }
 
-/// A program a process runs, counted on its vnode while it runs, so the
-/// file cannot be opened for writing meanwhile (FreeBSD's `VV_TEXT`).
+/// A program a process runs, or its interpreter, counted on its vnode
+/// while it runs, so the file cannot be opened for writing meanwhile
+/// (FreeBSD's `VV_TEXT`, which exec's mappings of both set).
 pub(crate) struct Text(Arc<Vnode>);
 
 impl Text {
     /// `ETXTBSY` if a file has it open for writing.
-    fn new(v: &Arc<Vnode>) -> Result<Self, Errno> {
+    pub(crate) fn new(v: &Arc<Vnode>) -> Result<Self, Errno> {
         v.add_text()?;
         Ok(Self(Arc::clone(v)))
     }
@@ -380,7 +382,7 @@ impl Process {
         let cpus = parent.map_or(u64::MAX, |p| p.cpus.load(Ordering::Relaxed));
         let cred = parent.map_or_else(Ucred::root_shared, |p| p.cred());
         let sugid = parent.is_some_and(|p| p.sugid.load(Ordering::Relaxed));
-        let text = parent.and_then(|p| p.text.lock().clone());
+        let text = parent.map(|p| p.text.lock().clone()).unwrap_or_default();
         let p = Arc::new_cyclic(|me| {
             let pid = alloc_pid(me);
             Self {
@@ -639,7 +641,9 @@ impl Process {
         )?;
         let p = Self::create(space, image.layout, None, crate::fs::console_table());
         *p.image.lock() = Image::new(s, &root, path, argv);
-        *p.text.lock() = Some(Text::new(&file)?);
+        *p.text.lock() = core::iter::once(Text::new(&file)?)
+            .chain(image.interp)
+            .collect();
         if let Some(t) = ctty {
             crate::tty::make_controlling(t, &p);
         }
@@ -846,7 +850,7 @@ impl Process {
         let cwd = Arc::clone(self.cwd.lock().vnode());
         *self.image.lock() = Image::new(s, &cwd, path, argv);
         self.execed.store(true, Ordering::Relaxed);
-        *self.text.lock() = Some(text);
+        *self.text.lock() = core::iter::once(text).chain(image.interp).collect();
         // The saved ids become the effective ones (no set-id programs
         // until P6).
         let mut cred = self.cred.lock();
@@ -896,7 +900,7 @@ impl Process {
             Err(_) => {}
         }
         // The program may be written again.
-        drop(self.text.lock().take());
+        drop(core::mem::take(&mut *self.text.lock()));
         // Descriptors close before the parent hears: a pipe's reader sees
         // the end first.
         let closed = self.files.lock(s).take_all();
