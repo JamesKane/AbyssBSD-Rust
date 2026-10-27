@@ -134,7 +134,7 @@ impl<T: Thread> Umtx<T> {
                 env.check_susp(false)?;
                 continue;
             }
-            Self::unbusy(&mut self.lock(&key));
+            self.unbusy_unlocked(&key);
             error = Self::sleep(env, deadline);
             self.lock(&key).remove(&key, Q::Shared, me);
             if error.is_ok() {

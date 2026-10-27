@@ -1554,6 +1554,13 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
     check, the permission check before `#!`, `getdirentries`' `ENOTDIR`, and a vfork parent released
     only once the child is a zombie.
   - The ktest `pshared_across_processes` (two `tests/user/pshared` at once).
+  - The `thr` component measured 2026-10-27 (`perf --suite p6.thr`, its 19 benchmarks against
+    FreeBSD 15.1 in bhyve, 10 runs a side): geometric mean 0.899, within the gate. Mutexes,
+    process-shared mutexes, rwlocks, and both ping-pongs match or beat FreeBSD (ping-pongs about
+    4x). Open diagnostics: `thr.mutex.pi.t4` and `t8` take about 40x FreeBSD's time, the CPUs
+    busy on one chain's lock and busy mark rather than sleeping, where FreeBSD's word is free in
+    user space most of the time (a spin before sleeping on a busy chain, as FreeBSD's
+    `BUSY_SPINS`, helped PI a little and hurt the rest, and was dropped); `thr.create` 1.28x.
 
 **P6.4 Events.**
 - `Notify` (MULTIUSER.md §7.2) on every object that can wait: pipes, FIFOs, terminals, devices

@@ -70,7 +70,7 @@ impl<T: Thread> Umtx<T> {
                 }
             }
         };
-        Self::unbusy(&mut self.lock(&key));
+        self.unbusy_unlocked(&key);
         let mut error = Self::sleep(env, deadline.as_ref());
         let mut g = self.lock(&key);
         if !me.is_queued() {
@@ -153,7 +153,7 @@ impl<T: Thread> Umtx<T> {
                 return seen.map(|_| ()).map_err(Errno::from);
             }
         }
-        Self::unbusy(&mut self.lock(&key));
+        self.unbusy_unlocked(&key);
         let mut error = Self::sleep(env, deadline.as_ref());
         let mut g = self.lock(&key);
         if !me.is_queued() {

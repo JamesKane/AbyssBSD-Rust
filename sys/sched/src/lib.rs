@@ -763,10 +763,13 @@ pub fn set_thread_priority(t: &Thread, p: Priority) {
 /// stays until that mutex is released.
 pub fn lend_user_priority(t: &Thread, p: Option<Priority>) {
     let mut inner = t.inner.lock();
+    if inner.user_lent == p {
+        return;
+    }
     let lent = inner.priority.beats(inner.floor());
     inner.user_lent = p;
     let floor = inner.floor();
-    if !lent || floor.beats(inner.priority) {
+    if floor != inner.priority && (!lent || floor.beats(inner.priority)) {
         set_priority_locked(t, &mut inner, floor);
     }
 }
