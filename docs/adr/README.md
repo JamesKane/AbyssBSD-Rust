@@ -23,6 +23,7 @@ Status values: **Proposed** (awaiting owner confirmation) · **Accepted** · **S
 | [0014](0014-performance-parity-per-component.md) | Performance parity is judged per component; benchmarks are diagnostics | Accepted |
 | [0015](0015-usb-input-vt.md) | USB, input, and virtual terminals: xHCI only, transfers completed once, `hidbus`, one input class, `vt` over a pure emulator, `umass` without CAM | Accepted |
 | [0016](0016-multi-user.md) | FreeBSD multi-user: FreeBSD's boot as the test plan, processes split into threads, host-tested umtx, one readiness type under poll and kqueue, a protocol-neutral socket layer, typed privilege and Capsicum rights, no networking until P8 | Accepted |
+| [0017](0017-rv64-reference-board-bpi-sm10.md) | Banana Pi BPI-SM10 (SpacemiT K3) as the RV64 physical reference board, booted UEFI with ACPI through SpacemiT's edk2 port | Accepted |
 
 Template:
 

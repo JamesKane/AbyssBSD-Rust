@@ -1749,11 +1749,20 @@ met.
   AIA interrupt controllers (IMSIC/APLIC), all from ACPI (RHCT, MADT RINTC/IMSIC/APLIC).
 - `abi` for FreeBSD riscv64 (struct layouts, signal frames, and the syscall convention:
   `ecall`, `t0` number, `a0..a7` arguments).
-- Boot FreeBSD riscv64 `base.txz` multi-user on QEMU virt (`acpi=on`). Real hardware follows as
-  UEFI+ACPI RV64 boards become available.
+- Boot FreeBSD riscv64 `base.txz` multi-user on QEMU virt (`acpi=on`).
+- **Board bring-up** on the Banana Pi BPI-SM10 (SpacemiT K3,
+  [ADR-0017](adr/0017-rv64-reference-board-bpi-sm10.md), [HARDWARE.md §6](HARDWARE.md#6-board-profile-rv64-banana-pi-bpi-sm10-spacemit-k3)),
+  once the QEMU exit holds, in the order P7 used for the other boards:
+  - save the shipped state (SPI NOR dump, U-Boot environment) and Linux's view of the hardware;
+  - get SpacemiT's K3 edk2 port running (UEFI with ACPI), and its tables into the AML corpus;
+  - boot from NVMe in the M.2 2280 slot, console on UART0;
+  - an RPMI provider for the firmware services, and the platform description (DRIVER-MODEL.md §5.5)
+    for whatever the K3 tables get wrong.
+- A PERFORMANCE.md rule for RV64 parity, since FreeBSD does not run on the board (ADR-0017).
 
-**Exit:** the P6 exit criteria for RV64 on QEMU. Every HAL change the port needed is recorded as
-an ADR or follow-up, which tells us how well the seams held.
+**Exit:** the P6 exit criteria for RV64 on QEMU, and on the BPI-SM10 if its UEFI+ACPI firmware
+works (otherwise the board is Tier 2 and the exit is QEMU's alone). Every HAL change the port needed
+is recorded as an ADR or follow-up, which tells us how well the seams held.
 
 ---
 

@@ -49,6 +49,11 @@ that runs unmodified FreeBSD userland. Read `docs/ROADMAP.md` for the current ph
     user data. Never touch those disks, the Fedora ESP, or Fedora's boot entry.
   - There is no serial console. Use the framebuffer, the persistent log the loader saves to the
     ESP, and the watchdog.
+- RV64 reference board: **Banana Pi BPI-SM10** (SpacemiT K3), arriving late 2026. Board facts:
+  `docs/HARDWARE.md` §6, ADR-0017; SoC spec in `~/Projects/OS/chinese-wall/specs/spacemit-k3/`.
+  - Untouched until FreeBSD riscv64 userland runs end to end in QEMU (P10).
+  - Ships with U-Boot and a devicetree only; AbyssBSD needs SpacemiT's edk2 port (UEFI + ACPI).
+    Dump the SPI NOR and save the U-Boot environment before changing anything.
 - Entry point for everything: `cargo xtask …` (see `docs/BUILD-AND-TEST.md`).
 
 ## Common commands

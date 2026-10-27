@@ -17,11 +17,11 @@ out of scope for Day 1.
 
 ## 2. Reference platforms
 
-| Tier | AMD64 | ARM64 |
-|---|---|---|
-| **Tier 1, virtual** (CI gate) | QEMU q35 + OVMF; bhyve UEFI | QEMU virt (gicv3, acpi=on) + edk2 |
-| **Tier 1, physical** (untouched until P6's exit, gating from P7) | **Ryzen 9 7900X on Gigabyte X870E AORUS ELITE WIFI7**, see [§5](#5-board-profile-amd64-ryzen-9-7900x--x870e-aorus-elite-wifi7) and [ADR-0009](adr/0009-amd64-reference-machine-ryzen-x870e.md) | **Orange Pi 6 Plus** (CIX P1 / Sky1), see [§4](#4-board-profile-orange-pi-6-plus-cix-p1--sky1) and [ADR-0008](adr/0008-arm64-reference-board-orange-pi-6-plus.md) |
-| **Tier 2, best effort** | Other UEFI desktops/laptops | Radxa Orion O6 (same SoC), **Radxa Dragon Q8B** (see below), other SystemReady boards, Raspberry Pi 4/5 with community UEFI+ACPI firmware |
+| Tier | AMD64 | ARM64 | RV64 (Day 2, P10) |
+|---|---|---|---|
+| **Tier 1, virtual** (CI gate) | QEMU q35 + OVMF; bhyve UEFI | QEMU virt (gicv3, acpi=on) + edk2 | QEMU virt (aia=aplic-imsic, acpi=on) + edk2 |
+| **Tier 1, physical** (untouched until P6's exit, gating from P7; RV64: untouched until P10's QEMU exit, gating from then) | **Ryzen 9 7900X on Gigabyte X870E AORUS ELITE WIFI7**, see [§5](#5-board-profile-amd64-ryzen-9-7900x--x870e-aorus-elite-wifi7) and [ADR-0009](adr/0009-amd64-reference-machine-ryzen-x870e.md) | **Orange Pi 6 Plus** (CIX P1 / Sky1), see [§4](#4-board-profile-orange-pi-6-plus-cix-p1--sky1) and [ADR-0008](adr/0008-arm64-reference-board-orange-pi-6-plus.md) | **Banana Pi BPI-SM10** (SpacemiT K3), see [§6](#6-board-profile-rv64-banana-pi-bpi-sm10-spacemit-k3) and [ADR-0017](adr/0017-rv64-reference-board-bpi-sm10.md). Tier 1 only once it boots UEFI with ACPI |
+| **Tier 2, best effort** | Other UEFI desktops/laptops | Radxa Orion O6 (same SoC), **Radxa Dragon Q8B** (see below), other SystemReady boards, Raspberry Pi 4/5 with community UEFI+ACPI firmware | Other UEFI+ACPI (RVI BRS) boards |
 
 The **Radxa Dragon Q8B** (Qualcomm SC8280XP) runs FreeBSD under ACPI in the sibling project
 `../AbyssBSD`: stock GENERIC, root on NVMe, Ethernet, USB, power and thermal, GPU and display. Its
@@ -180,3 +180,35 @@ The AMD64 Tier 1 physical machine. Surveyed read-only from its Fedora 44 install
 - AbyssBSD is installed onto the **second NVMe**, with its own ESP and its own UEFI boot entry,
   selected with `BootNext` (`efibootmgr -n`) from Fedora so a failed boot falls back to Fedora on
   reset.
+
+## 6. Board profile: RV64 Banana Pi BPI-SM10 (SpacemiT K3)
+
+The RV64 Tier 1 physical machine ([ADR-0017](adr/0017-rv64-reference-board-bpi-sm10.md)), on
+order as of 2026-10-27. Facts come from the clean-room specification
+(`~/Projects/OS/chinese-wall/specs/spacemit-k3/README.md`), not yet from the board. Nothing here
+has been checked on hardware.
+
+| Item | Fact | What it means for AbyssBSD |
+|---|---|---|
+| Board | SpacemiT **K3-CoM260** module on the "K3-COM260 KIT" carrier (schematic V2.0, March 2026). Module EEPROM `product_name` `k3_com260_ifx` | Record the carrier revision on arrival: V1.0 swapped the console's TX and RX |
+| CPU | Harts 0–7: **X100**, RV64 with V (256-bit vectors), H, and AIA (`smaia`/`ssaia`), two four-core clusters. Harts 8–15: **A100** AI cores, 1024-bit vectors, no H | Use harts 0–7 only. Vector state is sized per hart class if the A100s are ever used |
+| Memory | 8, 16, or 32 GB LPDDR5 depending on the module, at `0x1_0000_0000` | Take the size from the UEFI memory map, never from a constant |
+| Firmware (shipped) | Boot ROM → SPL → OpenSBI (SBI v2.0, RPMI services) → U-Boot with a devicetree, in an 8 MiB SPI NOR. **No UEFI firmware.** A recovery (flashing) pin on the carrier's button header | Not usable as shipped ([ADR-0006](adr/0006-uefi-acpi-only-own-loader-and-acpi.md)). Dump the SPI NOR and save the U-Boot environment before changing anything |
+| Firmware (needed) | SpacemiT's K3 edk2 port (`spacemit-com/edk2-platforms`, branch `k3`): UEFI with ACPI (DSDT, MADT, RHCT, MCFG, PPTT, SPCR) | How it reaches the board (SPI NOR, or a payload from SD) is a P10 decision. Its ACPI tables join the corpus as `tests/corpus/acpi/bpi-sm10/` |
+| Interrupts | Supervisor APLIC (`0xE0804000`, 512 sources) delivering **only in MSI mode** through the S-level IMSIC (`0xE0400000`) | APLIC MSI mode plus IMSIC, from the AIA specification. FreeBSD's APLIC driver supports only direct mode |
+| Timer, IPI, SMP, reset | SBI (timer, IPI, HSM, SRST), ACLINT behind firmware | The standard SBI path, as on QEMU `virt` |
+| Firmware services | RPMI over SBI MPXY: some regulators, the RTC, the power key | On ACPI, firmware owns clocks, resets, pads, and power (ADR-0017). An RPMI provider backs `PowerDomain` and friends (DRIVER-MODEL.md §9.3) |
+| Console | UART0 (`0xD4017000`), ns16550-compatible with a 32-bit register stride, 115200 8N1, 3.3 V on the carrier's 12-pin button header (pin 3 RX, pin 4 TX) | The existing 16550 driver, with SPCR's access width |
+| Storage | 128 GB UFS on the module; SD slot (card detect on GPIO 4); M.2 M-key 2280 (PCIe Gen3 x4) and 2230 (x1) | NVMe in the 2280 slot is the boot disk: no UFS driver needed to start |
+| Network | One GbE port: RTL8211F PHY (RGMII, MDIO address 1) on a Synopsys DW EQoS MAC at `0xCAC82000`. RTL8852BE Wi-Fi in the M.2 E-key slot | A DW EQoS driver with an MDIO child bus (DRIVER-MODEL.md §16, P8). Wi-Fi is out of scope |
+| USB | VL817 USB 3 hub on USB3 port B (shares a lane with PCIe); USB-C dual-role port with an FUSB301 at I2C0 `0x25` | DWC3 in host mode as xHCI. Whether firmware describes the hub's reset and port-power GPIOs in ACPI is to check |
+| PCIe | ECAM in MCFG | The generic ECAM host bridge, if firmware has trained the links |
+| IOMMU | A standard RISC-V IOMMU at `0xC0F00000`, left disabled by the vendor devicetree | Later, from the public specification |
+| Display, GPU, video | DisplayPort 1.2 (DP1), MIPI DSI header; PowerVR **BXM-4-64** (BVNC 36.56.104.183, firmware `powervr/rogue_36.56.104.183_v1.fw`); Linlon video codec (Sky1's family) | M-G and later ([GRAPHICS.md](GRAPHICS.md)). GOP framebuffer console if the edk2 port drives DP |
+| Other | Watchdog (`0xD4014000`, K1/MMP IP), RTC (`0xD4010000`, MMP IP; also via RPMI), carrier EEPROM at I2C1 `0x50`, CAN-FD, a fan header, a power-sequencing MCU | Watchdog early, as on the other machines. The rest is later |
+
+**FreeBSD on this board.** FreeBSD's riscv64 kernel is devicetree-only (`options FDT`) and has no
+APLIC MSI mode, so it does not run here today. There is no FreeBSD ground truth to capture and no
+FreeBSD performance baseline on the board (ADR-0017). Linux on the shipped firmware is the
+reference for what the hardware does, used as observation only.
+
