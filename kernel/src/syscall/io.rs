@@ -65,7 +65,7 @@ fn with_file<R>(
     f: impl FnOnce(&File) -> Result<R, Errno>,
 ) -> Result<R, Errno> {
     Process::with_current(|p| {
-        if p.sole_thread() {
+        if p.sole_user_of_files() {
             // SAFETY: only the process's threads reach its table, this is
             // the only one, and it does nothing else with the table until
             // `f` returns, which the borrow cannot outlive.
@@ -345,6 +345,7 @@ pub(super) fn fcntl(s: &Sleepable, fd: u64, cmd: u64, arg: u64) -> SysResult {
         }
         F_GETLK | F_SETLK | F_SETLKW => record_lock(s, fd, cmd, arg),
         // Only shared memory has seals.
+        abi::fcntl::F_KINFO => kinfo(s, fd, arg),
         F_ADD_SEALS | F_GET_SEALS => {
             let f = current_file(s, u64::from(fd.cast_unsigned()))?;
             let crate::fs::file::FileKind::Shm(m) = f.kind() else {
@@ -768,4 +769,56 @@ pub(super) fn copy_file_range(
     write_off(inoffp, &input, inoff)?;
     write_off(outoffp, &output, outoff)?;
     Ok(done)
+}
+
+/// `fcntl(F_KINFO)`: the descriptor's `struct kinfo_file`, the caller
+/// having set its `kf_structsize`. Only its type, descriptor, flags, and
+/// offset are filled yet; the per-type parts and the path come with
+/// `kern.proc.filedesc` (P6.8).
+fn kinfo(s: &Sleepable, fd: i32, arg: u64) -> SysResult {
+    /// `KINFO_FILE_SIZE`.
+    const SIZE: usize = 1392;
+    let size = UserPtr::<i32>::new(arg).read().map_err(|_| Errno::EFAULT)?;
+    if usize::try_from(size).ok() != Some(SIZE) {
+        return Err(Errno::EINVAL);
+    }
+    let f = current_file(s, u64::from(fd.cast_unsigned()))?;
+    let ty: i32 = match f.kind() {
+        FileKind::Vnode(v) if v.device.is_some() => 12,
+        FileKind::Vnode(_) => 1,
+        FileKind::Socket(_) => 2,
+        FileKind::Pipe(_) => 3,
+        FileKind::Fifo(_) => 4,
+        FileKind::Kqueue(_) => 5,
+        FileKind::Shm(_) => 8,
+        FileKind::Process(_) => 11,
+        FileKind::Eventfd(_) => 13,
+        FileKind::Timerfd(_) => 14,
+    };
+    let fl = f.flags();
+    let mut flags = 0i32;
+    for (have, kf) in [
+        (abi::fcntl::FREAD, 0x01),
+        (abi::fcntl::FWRITE, 0x02),
+        (abi::fcntl::O_APPEND, 0x04),
+        (abi::fcntl::O_NONBLOCK, 0x20),
+    ] {
+        if fl & have != 0 {
+            flags |= kf;
+        }
+    }
+    let mut kf = [0u8; SIZE];
+    let off = i64::try_from(f.offset_hint()).unwrap_or(i64::MAX);
+    kf[0..4].copy_from_slice(&i32::try_from(SIZE).unwrap_or(0).to_ne_bytes());
+    kf[4..8].copy_from_slice(&ty.to_ne_bytes());
+    kf[8..12].copy_from_slice(&fd.to_ne_bytes());
+    kf[12..16].copy_from_slice(
+        &i32::try_from(Arc::strong_count(&f) - 1)
+            .unwrap_or(0)
+            .to_ne_bytes(),
+    );
+    kf[16..20].copy_from_slice(&flags.to_ne_bytes());
+    kf[24..32].copy_from_slice(&off.to_ne_bytes());
+    uaccess::copy_out(arg, &kf).map_err(|_| Errno::EFAULT)?;
+    Ok(0)
 }

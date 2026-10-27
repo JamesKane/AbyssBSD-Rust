@@ -79,6 +79,7 @@ pub const UMTX_OP__32BIT: u32 = 0x8000_0000;
 pub const CVWAIT_CHECK_UNPARKING: u32 = 0x01;
 pub const CVWAIT_ABSTIME: u32 = 0x02;
 pub const CVWAIT_CLOCKID: u32 = 0x04;
+/// FreeBSD 16's, absent from 15's headers (so not checked against them).
 pub const CVWAIT_UMTX_TIME: u32 = 0x08;
 
 /// `_umtx_time._flags`: the timeout is a time on the clock, not a
@@ -241,7 +242,6 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("CVWAIT_CHECK_UNPARKING", CVWAIT_CHECK_UNPARKING),
     c("CVWAIT_ABSTIME", CVWAIT_ABSTIME),
     c("CVWAIT_CLOCKID", CVWAIT_CLOCKID),
-    c("CVWAIT_UMTX_TIME", CVWAIT_UMTX_TIME),
     c("UMTX_ABSTIME", UMTX_ABSTIME),
     c("UMTX_SHM_CREAT", UMTX_SHM_CREAT),
     c("UMTX_SHM_LOOKUP", UMTX_SHM_LOOKUP),

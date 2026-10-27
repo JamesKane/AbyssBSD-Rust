@@ -13,6 +13,7 @@
 //! Behavior reference: sys/kern/vfs_syscalls.c, sys/kern/vfs_subr.c
 //! (`vaccess`), sys/ufs/ufs/ufs_vnops.c (rename rules).
 
+use abi::event::{NOTE_ATTRIB, NOTE_DELETE, NOTE_EXTEND, NOTE_LINK, NOTE_RENAME, NOTE_WRITE};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
@@ -214,6 +215,12 @@ pub fn create(
         // A negative entry for the name goes.
         cache::remove(dir, name);
     }
+    // `vop_create_post`, `vop_mkdir_post` (a new `..`), and the rest.
+    dir.knote(if v.is_dir() {
+        NOTE_WRITE | NOTE_LINK
+    } else {
+        NOTE_WRITE
+    });
     Ok((v, true))
 }
 
@@ -260,6 +267,13 @@ pub fn remove(
         if dir_wanted {
             cache::purge(&child);
         }
+        // `vop_remove_post`, `vop_rmdir_post`.
+        dir.knote(if dir_wanted {
+            NOTE_WRITE | NOTE_LINK
+        } else {
+            NOTE_WRITE
+        });
+        child.knote(NOTE_DELETE);
         child
     };
     child.release_if_unlinked(s);
@@ -299,6 +313,9 @@ pub fn link(
     };
     d.link(s, name, target.ino(), tst.live_mut()?.node_mut())?;
     cache::enter(dir, name, Some(target));
+    // `vop_link_post`.
+    target.knote(NOTE_LINK);
+    dir.knote(NOTE_WRITE);
     Ok(())
 }
 
@@ -568,6 +585,7 @@ pub fn rename(
         cache::enter(tdir, tname, Some(&from));
     }
     drop(held);
+    rename_notes(fdir, tdir, &from, to.as_deref());
     if let Some(t) = to {
         if t.is_dir() {
             cache::purge(&t);
@@ -575,6 +593,32 @@ pub fn rename(
         t.release_if_unlinked(s);
     }
     Ok(())
+}
+
+/// What a rename tells the vnodes' knotes (`vop_rename_post`).
+fn rename_notes(fdir: &Vnode, tdir: &Vnode, from: &Vnode, to: Option<&Vnode>) {
+    let mut hint = NOTE_WRITE;
+    if core::ptr::eq(fdir, tdir) {
+        if to.is_some_and(Vnode::is_dir) {
+            hint |= NOTE_LINK;
+        }
+        fdir.knote(hint);
+        tdir.knote(hint);
+    } else {
+        hint |= NOTE_EXTEND;
+        if from.is_dir() {
+            hint |= NOTE_LINK;
+        }
+        fdir.knote(hint);
+        if from.is_dir() && to.is_some_and(Vnode::is_dir) {
+            hint &= !NOTE_LINK;
+        }
+        tdir.knote(hint);
+    }
+    from.knote(NOTE_RENAME);
+    if let Some(t) = to {
+        t.knote(NOTE_DELETE);
+    }
 }
 
 /// Changes attributes (`chmod`, `chown`, `utimensat`, `truncate`,
@@ -687,7 +731,18 @@ pub fn setattr(
             a.birthtime = Some(m);
         }
     }
-    st.live_mut()?.node_mut().setattr(s, &a)
+    st.live_mut()?.node_mut().setattr(s, &a)?;
+    drop(st);
+    // `vop_setattr_post`; a size change moves what `EVFILT_READ` sees.
+    let mut hint = NOTE_ATTRIB;
+    if let Some(size) = a.size {
+        if size > cur.size {
+            hint |= NOTE_EXTEND;
+        }
+        v.size_changed(size);
+    }
+    v.knote(hint);
+    Ok(())
 }
 
 /// Packs a directory's entries from cookie `from` into `out` as FreeBSD's

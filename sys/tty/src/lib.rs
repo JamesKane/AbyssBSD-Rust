@@ -216,6 +216,17 @@ impl Discipline {
         }
     }
 
+    /// How many bytes a read could take now, 0 if it would wait
+    /// (`ttydisc_read_poll`).
+    #[must_use]
+    pub fn read_poll(&self) -> usize {
+        if self.readable() {
+            self.canon.max(1)
+        } else {
+            0
+        }
+    }
+
     /// Reads a line, or as much of one as fits in `out`; a `VEOF` that
     /// ends it is consumed, not returned.
     pub fn read_line(&mut self, out: &mut [u8]) -> Line {

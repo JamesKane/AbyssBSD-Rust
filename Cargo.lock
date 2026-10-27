@@ -199,6 +199,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "event"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "sync",
+]
+
+[[package]]
 name = "fat"
 version = "0.0.0"
 
@@ -345,6 +353,7 @@ dependencies = [
  "efi",
  "elf",
  "evdev",
+ "event",
  "fat",
  "fb-console",
  "gpt",
@@ -598,6 +607,7 @@ name = "vfs"
 version = "0.0.0"
 dependencies = [
  "abi",
+ "event",
  "intmap",
  "sched",
  "sync",

@@ -62,6 +62,13 @@ pub(crate) fn set_realtime() {
     }
 }
 
+/// Steps the time of day to `unix_ns` (`settimeofday`,
+/// `clock_settime`).
+pub(crate) fn set_time_of_day(unix_ns: u64) {
+    REALTIME_BASE.store(unix_ns.saturating_sub(now_ns()).max(1), Ordering::Release);
+    crate::shared_page::set_realtime(unix_ns);
+}
+
 /// The Unix time in nanoseconds, if a real-time clock has set it.
 #[cfg_attr(not(feature = "ktest"), allow(dead_code))]
 pub(crate) fn realtime_ns() -> Option<u64> {

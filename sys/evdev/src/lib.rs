@@ -630,7 +630,7 @@ impl Device {
             }
             c.push(kind, code, value);
             if report {
-                c.wait.wake_all();
+                c.wakeup();
             }
         }
     }
@@ -754,7 +754,7 @@ impl Device {
         let clients: Vec<Arc<Client>> = core::mem::take(&mut *self.clients.lock());
         for c in &clients {
             c.revoked.store(true, Ordering::Release);
-            c.wait.wake_all();
+            c.wakeup();
         }
         if !clients.is_empty()
             && let Some(m) = &self.methods
@@ -787,6 +787,7 @@ impl Device {
             wait: WaitQueue::new(),
             revoked: AtomicBool::new(false),
             monotonic: AtomicBool::new(false),
+            notify: vfs::event::Notify::new(),
         });
         let mut clients = self.clients.lock();
         if clients.is_empty()
@@ -846,9 +847,16 @@ struct Client {
     /// Stamps from the uptime clock (`EVIOCSCLOCKID`), else the time of
     /// day.
     monotonic: AtomicBool,
+    /// Pollers and knotes (`ec_selp`).
+    notify: vfs::event::Notify,
 }
 
 impl Client {
+    /// A report is in, or the client was revoked (`evdev_notify_event`).
+    fn wakeup(&self) {
+        self.wait.wake_all();
+        self.notify.notify(0);
+    }
     /// `evdev_client_push`: a full ring is dropped for `SYN_DROPPED`.
     fn push(&self, kind: u16, code: u16, value: i32) {
         let mut r = self.ring.lock();
@@ -979,7 +987,68 @@ fn put_str(arg: &mut [u8], s: &str) -> usize {
     put(arg, &b)
 }
 
+/// `evdev_cdev_filterops`: `data` the bytes of whole reports waiting.
+struct ClientFilter(Arc<Client>);
+
+impl vfs::event::Filter for ClientFilter {
+    fn attach(&self, kn: &Arc<vfs::event::Knote>) -> Result<(), Errno> {
+        self.0.notify.add(kn);
+        Ok(())
+    }
+
+    fn detach(&self, kn: &vfs::event::Knote) {
+        self.0.notify.remove(kn);
+    }
+
+    /// `evdev_kqread`.
+    fn event(&self, _kn: &vfs::event::Knote, note: &mut vfs::event::Note, _hint: u64) -> bool {
+        if self.0.revoked.load(Ordering::Acquire) {
+            note.kev.flags |= abi::event::EV_EOF;
+            return true;
+        }
+        let r = self.0.ring.lock();
+        note.kev.data = i64::try_from(r.len() * EVENT_SIZE).unwrap_or(i64::MAX);
+        !r.is_empty()
+    }
+}
+
 impl CharDevice for Open {
+    /// `evdev_poll`.
+    fn poll(&self, events: i16, w: Option<&Arc<dyn vfs::event::Wake>>) -> i16 {
+        use abi::event::{POLLHUP, POLLIN, POLLRDNORM};
+        let c = &self.client;
+        if c.revoked.load(Ordering::Acquire) {
+            return POLLHUP;
+        }
+        if events & (POLLIN | POLLRDNORM) == 0 {
+            return 0;
+        }
+        if let Some(w) = w {
+            c.notify.record(w);
+        }
+        if c.ring.lock().is_empty() {
+            0
+        } else {
+            events & (POLLIN | POLLRDNORM)
+        }
+    }
+
+    /// `evdev_kqfilter`.
+    fn kqfilter(
+        &self,
+        kev: &abi::event::Kevent,
+    ) -> Result<alloc::boxed::Box<dyn vfs::event::Filter>, Errno> {
+        if self.client.revoked.load(Ordering::Acquire) {
+            return Err(Errno::ENODEV);
+        }
+        match kev.filter {
+            abi::event::EVFILT_READ => Ok(alloc::boxed::Box::new(ClientFilter(Arc::clone(
+                &self.client,
+            )))),
+            _ => Err(Errno::EINVAL),
+        }
+    }
+
     fn read(
         &self,
         s: &Sleepable,
@@ -1110,7 +1179,7 @@ impl CharDevice for Open {
                 }
                 dev.dispose(c);
                 c.revoked.store(true, Ordering::Release);
-                c.wait.wake_all();
+                c.wakeup();
                 return Ok(0);
             }
             EVIOCSCLOCKID => {

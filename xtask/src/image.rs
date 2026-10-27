@@ -22,10 +22,10 @@ use crate::cli::Args;
 use crate::util::{self, Result};
 
 const MIB: usize = 1 << 20;
-const DISK_BYTES: usize = 192 * MIB;
+const DISK_BYTES: usize = 256 * MIB;
 /// The ESP starts 1 MiB in, the usual alignment.
 const ESP_FIRST_LBA: u64 = 2048;
-const ESP_BYTES: usize = 128 * MIB;
+const ESP_BYTES: usize = 192 * MIB;
 
 pub(crate) fn cmd(mut args: Args) -> Result<()> {
     let arch = Arch::one_from_args(&mut args)?;
@@ -111,6 +111,18 @@ pub(crate) const FREEBSD_TESTS: &[&str] = &[
     "usr/tests/lib/libc/sys/msgsnd_test",
     "usr/tests/sys/kern/sysv_test",
     "usr/tests/sys/posixshm",
+    "usr/tests/sys/kqueue",
+    "usr/tests/sys/kern/pipe",
+    "usr/tests/sys/kern/timerfd",
+    "usr/tests/lib/libc/sys/clock_gettime_test",
+    "usr/tests/lib/libc/sys/clock_nanosleep_test",
+    "usr/tests/lib/libc/sys/getitimer_test",
+    "usr/tests/lib/libc/sys/kevent_test",
+    "usr/tests/lib/libc/sys/nanosleep_test",
+    "usr/tests/lib/libc/sys/poll_test",
+    "usr/tests/lib/libc/sys/select_test",
+    "usr/tests/lib/libc/sys/sigtimedwait_test",
+    "usr/tests/lib/libc/sys/timer_create_test",
 ];
 
 /// Where the root image keeps pjdfstest.
@@ -122,37 +134,74 @@ const OPENSSL_MD5: &str = "#!/bin/sh\n\
                            [ \"$*\" = md5 ] || { echo \"openssl: only md5 here\" >&2; exit 1; }\n\
                            exec md5\n";
 
-/// Runs FreeBSD's ATF test programs without kyua (which needs interval
-/// timers, P6.4): each case of each program in its own directory, killed
-/// after 60 seconds, with `TMPDIR` its directory and, if it requires an
-/// unprivileged user, run as `tests` (as kyua does with
+/// Runs FreeBSD's test programs as kyua would (docs/MULTIUSER.md §14):
+/// those a directory's Kyuafiles list (ATF and plain programs), or a
+/// program named itself. Each case runs in its own directory, killed after
+/// 60 seconds, with `TMPDIR` its directory and, if it requires an
+/// unprivileged user, as `tests` (as kyua does with
 /// `unprivileged_user=tests`), with a line `atf: <path under
-/// /usr/tests>:<case> <result>` per case, the result as the program wrote
-/// it.
+/// /usr/tests>:<case> <result>` per case: an ATF program's result as it
+/// wrote it, a plain program's (one case, `main`) from its exit as kyua
+/// reports it.
 const RUN_ATF: &str = r#"#!/bin/sh
-for p in $(/usr/tests/static/find @DIRS@ -name '*_test' -type f); do
+progs() {
+	for d in @DIRS@; do
+		if [ -d $d ]; then
+			for k in $(/usr/tests/static/find $d -name Kyuafile); do
+				sed -n "s|^atf_test_program{name=\"\([^\"]*\)\".*|atf:${k%/*}/\1|p" $k
+				sed -n "s|^plain_test_program{name=\"\([^\"]*\)\".*|plain:${k%/*}/\1|p" $k
+			done
+		else
+			echo "atf:$d"
+		fi
+	done
+}
+for e in $(progs); do
+	kind=${e%%:*}
+	p=${e#*:}
 	[ -x "$p" ] || continue
 	echo "atf-prog: ${p#/usr/tests/}"
-	for c in $($p -l | sed -n 's/^ident: //p'); do
+	if [ $kind = plain ]; then
+		cases=main
+	else
+		cases=$($p -l | sed -n 's/^ident: //p')
+	fi
+	for c in $cases; do
 		echo "atf-case: ${p#/usr/tests/}:$c"
 		w=$(mktemp -d /tmp/atf.XXXXXX)
 		# As kyua with `unprivileged_user=tests`: a case that requires
 		# an unprivileged user runs as `tests`.
-		u=$($p -l | sed -n "/^ident: $c\$/,/^\$/s/^require.user: //p")
-		as=
+		u=
+		[ $kind = atf ] && u=$($p -l | sed -n "/^ident: $c\$/,/^\$/s/^require.user: //p")
+		as="/usr/tests/static/asuser -"
 		if [ "$u" = unprivileged ]; then
 			chown tests $w
 			as="/usr/tests/static/asuser tests"
 		fi
-		(cd $w && TMPDIR=$w exec $as $p -r $w.res -s ${p%/*} $c) > $w.out 2>&1 &
+		if [ $kind = plain ]; then
+			(cd $w && TMPDIR=$w exec $as $p) > $w.out 2>&1 &
+		else
+			(cd $w && TMPDIR=$w exec $as $p -r $w.res -s ${p%/*} $c) > $w.out 2>&1 &
+		fi
 		pid=$!
 		(sleep 60; kill -9 $pid 2> /dev/null) &
 		watch=$!
 		wait $pid
+		st=$?
 		kill $watch 2> /dev/null
-		# `read`, not `head`: base's `head` needs Casper (P6.5).
 		r=
-		[ -f $w.res ] && read -r r < $w.res
+		if [ $kind = plain ]; then
+			if [ $st -eq 0 ]; then
+				r=passed
+			elif [ $st -gt 128 ]; then
+				r="broken: Received signal $((st - 128))"
+			else
+				r="failed: Returned non-success exit status $st"
+			fi
+		else
+			# `read`, not `head`: base's `head` needs Casper (P6.5).
+			[ -f $w.res ] && read -r r < $w.res
+		fi
 		echo "atf: ${p#/usr/tests/}:$c ${r:-broken: no result}"
 		# What a case that did not pass said, for the log.
 		case "$r" in

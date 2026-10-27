@@ -321,6 +321,9 @@ pub(crate) fn atf_verdict(console: &str) -> Result<usize> {
     Ok(matched)
 }
 
+/// What the kernel prints when it panics.
+const PANIC: &str = "\npanic: ";
+
 /// How much unmatched console output a [`Session`] keeps, for errors.
 const TAIL: usize = 300;
 
@@ -469,7 +472,19 @@ impl Session {
     pub(crate) fn script(&mut self, steps: &[Step], timeout: Duration) -> Result<()> {
         for (i, s) in steps.iter().enumerate() {
             self.send(s.send)?;
-            self.expect(s.expect, timeout)
+            // A panic ends the step at once, rather than at its timeout.
+            self.expect_any(&[s.expect, PANIC], timeout)
+                .and_then(|which| match which {
+                    0 => Ok(()),
+                    _ => {
+                        let tail = self.pending.len().min(TAIL);
+                        Err(format!(
+                            "the kernel panicked: {:?}",
+                            String::from_utf8_lossy(&self.pending[..tail])
+                        )
+                        .into())
+                    }
+                })
                 .and_then(|()| {
                     if s.prompt {
                         self.expect(PROMPT, timeout)

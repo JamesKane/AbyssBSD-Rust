@@ -207,9 +207,13 @@ pub(super) fn fspacectl(
     let f = super::io::current_file(s, fd)?;
     let shm = match f.kind() {
         FileKind::Shm(m) => m,
-        FileKind::Pipe(_) | FileKind::Fifo(_) | FileKind::Socket(_) | FileKind::Process(_) => {
-            return Err(Errno::ESPIPE);
-        }
+        FileKind::Pipe(_)
+        | FileKind::Fifo(_)
+        | FileKind::Socket(_)
+        | FileKind::Process(_)
+        | FileKind::Kqueue(_)
+        | FileKind::Timerfd(_)
+        | FileKind::Eventfd(_) => return Err(Errno::ESPIPE),
         FileKind::Vnode(_) => return Err(Errno::ENODEV),
     };
     if f.flags() & FWRITE == 0 {

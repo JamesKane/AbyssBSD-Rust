@@ -2,20 +2,12 @@
 # (cargo xtask test's shell cases compare the rest with
 # freebsd/freebsd-15.1-RELEASE-x86_64-bhyve.txt). One per line, with why
 # and until when.
-lib/libthr/sem_test:before_start_no_threads     # setitimer, P6.4
-lib/libthr/sem_test:before_start_one_thread     # setitimer, P6.4
-lib/libthr/sigsuspend_test:sigsuspend           # setitimer, P6.4
-lib/libthr/sleep_test:sleep1                    # setitimer, P6.4
-lib/libthr/sigmask_test:incorrect_mask_bug      # setitimer and select, P6.4
-lib/libc/gen/alarm_test:alarm_basic             # setitimer, P6.4
-lib/libc/gen/alarm_test:alarm_fork              # setitimer, P6.4
-lib/libc/gen/alarm_test:alarm_previous          # setitimer, P6.4
-lib/libc/gen/pause_test:pause_basic             # setitimer, P6.4
-lib/libc/gen/sleep_test:select                  # setitimer, P6.4
-lib/libc/gen/sleep_test:sleep                   # setitimer, P6.4
-lib/libc/gen/sleep_test:kevent                  # kqueue, P6.4
 lib/libc/gen/setdomainname_test:setdomainname_basic # sysctl writes, P6.7
 lib/libc/gen/setdomainname_test:setdomainname_limit # sysctl writes, P6.7
 sys/posixshm/memfd_test:hugetlb                 # no superpage objects (compat-deviations), P6.8
 sys/posixshm/posixshm_test:largepage_config     # no superpage objects (compat-deviations), P6.8
 sys/posixshm/posixshm_test:largepage_reopen     # no superpage objects (compat-deviations), P6.8
+sys/kern/timerfd:timerfd__periodic_timer_performance # passes; FreeBSD's expected failure (PR 294053)
+sys/kern/timerfd:timerfd_root__advance_time_no_cancel # passes; fails on FreeBSD 15.1
+lib/libc/sys/kevent_test:kqueue_desc_passing    # socketpair, P6.5
+sys/kern/timerfd:timerfd__argument_checks       # arm64: its last check passes an uninitialized itimerspec, valid there, so EBADF as FreeBSD's order gives; the baseline is amd64's

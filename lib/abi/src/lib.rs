@@ -18,6 +18,7 @@ pub mod consio;
 pub mod dirent;
 pub mod errno;
 pub mod evdev;
+pub mod event;
 pub mod exec;
 pub mod fbio;
 pub mod fcntl;

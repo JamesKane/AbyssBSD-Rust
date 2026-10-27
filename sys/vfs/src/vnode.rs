@@ -92,6 +92,12 @@ pub struct Vnode {
     /// Open files writing it (positive) or programs running it
     /// (negative), never both (FreeBSD's `v_writecount`).
     writecount: core::sync::atomic::AtomicI64,
+    /// Its pollers and knotes, made on first use (FreeBSD's
+    /// `v_pollinfo`).
+    poll: sync::Once<alloc::boxed::Box<event::Notify>>,
+    /// Its size as the generic layer last saw it, kept while it is
+    /// watched (for `EVFILT_READ`, whose filter cannot sleep).
+    size_hint: AtomicU64,
 }
 
 /// Vnode recency as a generation, advanced by each reclaim pass
@@ -138,6 +144,48 @@ impl Vnode {
             used: AtomicU64::new(generation()),
             dying: core::sync::atomic::AtomicBool::new(false),
             writecount: core::sync::atomic::AtomicI64::new(0),
+            poll: sync::Once::new(),
+            size_hint: AtomicU64::new(0),
+        }
+    }
+
+    /// The size as last seen while watched ([`Vnode::watch_size`]).
+    pub fn cached_size(&self) -> u64 {
+        self.size_hint.load(Ordering::Relaxed)
+    }
+
+    /// Starts keeping [`Vnode::cached_size`]: a knote is attaching.
+    pub fn watch_size(&self, s: &Sleepable) {
+        if let Ok(size) = self.size(s) {
+            self.size_hint.store(size, Ordering::Relaxed);
+        }
+    }
+
+    /// Its size is now `size` (a truncation).
+    pub fn size_changed(&self, size: u64) {
+        self.size_hint.store(size, Ordering::Relaxed);
+    }
+
+    /// Whether anything polls or watches it.
+    pub fn watched(&self) -> bool {
+        self.poll.get().is_some_and(|n| n.is_armed())
+    }
+
+    /// Its pollers and knotes (`v_addpollinfo`).
+    pub fn notify(&self) -> &event::Notify {
+        loop {
+            if let Some(n) = self.poll.get() {
+                return n;
+            }
+            // Another caller may be setting it: then look again.
+            let _ = self.poll.set(alloc::boxed::Box::new(event::Notify::new()));
+        }
+    }
+
+    /// Tells its knotes of `hint`, a `NOTE_*` (`VFS_KNOTE_LOCKED`).
+    pub fn knote(&self, hint: u32) {
+        if let Some(n) = self.poll.get() {
+            n.knote(u64::from(hint));
         }
     }
 
@@ -358,11 +406,14 @@ impl Vnode {
 
     /// Reads a regular file at `offset`.
     pub fn read_at(&self, s: &Sleepable, offset: u64, uio: &mut dyn Uio) -> Result<usize, Errno> {
-        match self.read(s).live()? {
+        let n = match self.read(s).live()? {
             NodeOps::Regular(f) => f.read(s, offset, uio),
             NodeOps::Directory(_) => Err(Errno::EISDIR),
             _ => Err(Errno::EINVAL),
-        }
+        }?;
+        // `vop_read_post`.
+        self.knote(abi::event::NOTE_READ);
+        Ok(n)
     }
 
     /// Writes a regular file at `offset`.
@@ -370,11 +421,31 @@ impl Vnode {
         if self.mount.read_only() {
             return Err(Errno::EROFS);
         }
-        match self.write(s).live_mut()? {
+        let watched = self.watched();
+        let mut st = self.write(s);
+        let before = if watched {
+            st.live()?.node().attr().size
+        } else {
+            0
+        };
+        let n = match st.live_mut()? {
             NodeOps::Regular(f) => f.write(s, offset, uio),
             NodeOps::Directory(_) => Err(Errno::EISDIR),
             _ => Err(Errno::EINVAL),
+        }?;
+        drop(st);
+        // FreeBSD's file systems note a write that moved something
+        // (`ffs_write`'s `VN_KNOTE`).
+        if watched && n > 0 {
+            let end = offset.saturating_add(n as u64);
+            let mut hint = abi::event::NOTE_WRITE;
+            if end > before {
+                hint |= abi::event::NOTE_EXTEND;
+            }
+            self.size_hint.fetch_max(end, Ordering::Relaxed);
+            self.knote(hint);
         }
+        Ok(n)
     }
 
     /// The contents of a memory-resident regular file.

@@ -47,6 +47,7 @@ ustar = { path = "../lib/ustar" }
 fb-console = { path = "../drivers/fb-console" }
 hal = { path = "../arch/hal" }
 irq = { path = "../sys/irq" }
+event = { path = "../sys/event" }
 ktest = { path = "../lib/ktest" }
 logring = { path = "../lib/logring" }
 pt = { path = "../lib/pt" }

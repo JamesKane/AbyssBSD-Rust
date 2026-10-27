@@ -33,6 +33,7 @@
 //! Behavior reference: sys/kern/kern_fork.c, sys/kern/kern_exit.c,
 //! sys/kern/kern_exec.c, sys/kern/sys_procdesc.c.
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -290,6 +291,14 @@ pub(crate) struct Process {
     zombie: AtomicBool,
     /// A process descriptor is open for it (changes with the tree locked).
     procdesc: AtomicBool,
+    /// Knotes watching it: `EVFILT_PROC`, `EVFILT_SIGNAL` (`p_klist`).
+    pub(crate) klist: event::Notify,
+    /// Pollers and knotes of its process descriptor (`pd_selinfo`).
+    pub(crate) pd_sel: event::Notify,
+    /// The pid of the child it forked last (`pd_last_child`).
+    last_child: AtomicI32,
+    /// Its interval and POSIX timers, made on first use (`p_itimers`).
+    timers: sync::Once<Box<crate::timers::Timers>>,
     /// Kernel code waiting for this process to exit (it may have no
     /// parent).
     waiters: WaitQueue,
@@ -316,7 +325,8 @@ pub(crate) struct Process {
     pub(crate) nice: AtomicI32,
     /// Open descriptors. Shared by the process's threads (when there are
     /// several), so behind a sleepable lock (FreeBSD's `fd_sx`).
-    pub(crate) files: Mutex<FdTable>,
+    /// Shared with other processes after `rfork` without `RFFDG`.
+    pub(crate) files: Arc<Mutex<FdTable>>,
     /// The working directory.
     pub(crate) cwd: PreemptLock<vfs::VnodeUse>,
     /// The file creation mask.
@@ -471,7 +481,7 @@ impl Process {
         space: Arc<AddressSpace>,
         layout: Layout,
         parent: Option<&Arc<Self>>,
-        files: FdTable,
+        files: Arc<Mutex<FdTable>>,
     ) -> Arc<Self> {
         let (signals, limits) = match parent {
             Some(p) => (p.signals.lock().forked(), *p.limits.lock()),
@@ -500,6 +510,10 @@ impl Process {
                 exited: AtomicBool::new(false),
                 zombie: AtomicBool::new(false),
                 procdesc: AtomicBool::new(false),
+                klist: event::Notify::new(),
+                pd_sel: event::Notify::new(),
+                last_child: AtomicI32::new(0),
+                timers: sync::Once::new(),
                 waiters: WaitQueue::new(),
                 child_gen: AtomicU64::new(0),
                 child_wait: WaitQueue::new(),
@@ -513,7 +527,7 @@ impl Process {
                 umtx_min_timeout: AtomicU64::new(
                     parent.map_or(0, |p| p.umtx_min_timeout.load(Ordering::Relaxed)),
                 ),
-                files: Mutex::new(&FILEDESC_LOCK, files),
+                files,
                 cwd: PreemptLock::new(cwd),
                 umask: AtomicU16::new(umask),
                 image: SpinLock::new(image),
@@ -616,6 +630,31 @@ impl Process {
         self.zombie.load(Ordering::Acquire)
     }
 
+    /// Whether its exit status is set (`P_WEXIT` past `p_xexit`).
+    pub(crate) fn has_exited(&self) -> bool {
+        self.exited.load(Ordering::Acquire)
+    }
+
+    /// The status `wait` reports, once it has exited (`KW_EXITCODE`).
+    pub(crate) fn wait_status(&self) -> i32 {
+        self.status.load(Ordering::Relaxed)
+    }
+
+    /// The pid of the child it forked last.
+    pub(crate) fn last_child(&self) -> i32 {
+        self.last_child.load(Ordering::Relaxed)
+    }
+
+    /// Its timers (`itimers_alloc` on first use).
+    pub(crate) fn timers(self: &Arc<Self>) -> &crate::timers::Timers {
+        loop {
+            if let Some(t) = self.timers.get() {
+                return t;
+            }
+            let _ = self.timers.set(crate::timers::Timers::new(self));
+        }
+    }
+
     /// The address space the process runs in now.
     pub(crate) fn space(&self) -> Arc<AddressSpace> {
         Arc::clone(&self.space.lock())
@@ -654,6 +693,22 @@ impl Process {
     /// table).
     pub(crate) fn sole_thread(&self) -> bool {
         self.threads.lock().len() <= 1
+    }
+
+    /// Whether its one thread is all that reaches its descriptor table
+    /// (not shared by `rfork`), which may then be read without the lock.
+    pub(crate) fn sole_user_of_files(&self) -> bool {
+        self.sole_thread() && Arc::strong_count(&self.files) == 1
+    }
+
+    /// `rfork(RFPROC)`: a child sharing the descriptor table.
+    pub(crate) fn fork_shared_files(
+        self: &Arc<Self>,
+        s: &Sleepable,
+        frame: &TrapFrame,
+    ) -> Result<i32, Errno> {
+        self.fork_with(s, frame, false, None, false, true)
+            .map(|(pid, _)| pid)
     }
 
     /// Runs `f` on the current process, borrowed (no reference taken):
@@ -770,7 +825,7 @@ impl Process {
             &default_limits(),
             &lookup,
         )?;
-        let p = Self::create(space, image.layout, None, crate::fs::console_table());
+        let p = Self::create(space, image.layout, None, own(crate::fs::console_table()));
         *p.image.lock() = Image {
             auxv: image.auxv.into(),
             ..Image::new(s, &root, path, argv)
@@ -800,7 +855,7 @@ impl Process {
             stack_top: sp,
             ..Layout::default()
         };
-        let p = Self::create(space, layout, None, crate::fs::console_table());
+        let p = Self::create(space, layout, None, own(crate::fs::console_table()));
         let frame = arch::user::user_frame(entry, sp, 0);
         p.start(frame, NewThread::first(cpu))
             .expect("a thread for the test process");
@@ -874,7 +929,7 @@ impl Process {
         frame: &TrapFrame,
         vfork: bool,
     ) -> Result<i32, Errno> {
-        self.fork_with(s, frame, vfork, None, false)
+        self.fork_with(s, frame, vfork, None, false, false)
             .map(|(pid, _)| pid)
     }
 
@@ -885,7 +940,7 @@ impl Process {
         s: &Sleepable,
         frame: &TrapFrame,
     ) -> Result<i32, Errno> {
-        self.fork_with(s, frame, true, None, true)
+        self.fork_with(s, frame, true, None, true, false)
             .map(|(pid, _)| pid)
     }
 
@@ -900,7 +955,14 @@ impl Process {
         cloexec: bool,
         limit: usize,
     ) -> Result<(i32, i32), Errno> {
-        let (pid, fd) = self.fork_with(s, frame, false, Some((daemon, cloexec, limit)), false)?;
+        let (pid, fd) = self.fork_with(
+            s,
+            frame,
+            false,
+            Some((daemon, cloexec, limit)),
+            false,
+            false,
+        )?;
         Ok((pid, fd.unwrap_or(-1)))
     }
 
@@ -911,14 +973,30 @@ impl Process {
         vfork: bool,
         pd: Option<(bool, bool, usize)>,
         drop_caught: bool,
+        share_files: bool,
     ) -> Result<(i32, Option<i32>), Errno> {
         let space = if vfork {
             self.space()
         } else {
             self.space().fork(s).map_err(|_| Errno::ENOMEM)?
         };
-        let files = self.files.lock(s).fork()?;
+        let (files, kqueues) = if share_files {
+            (Arc::clone(&self.files), Vec::new())
+        } else {
+            let (t, k) = self.files.lock(s).fork()?;
+            (own(t), k)
+        };
         let child = Self::create(space, Layout::default(), Some(self), files);
+        // `KQUEUE_CPONFORK` kqueues' knotes, for the descriptors the child
+        // has (`kqueue_fork_copy`).
+        if !kqueues.is_empty() {
+            let table = child.files.lock(s);
+            for (from, to) in &kqueues {
+                from.fork_into(to, &|fd| {
+                    i32::try_from(fd).is_ok_and(|fd| table.get(fd).is_ok())
+                });
+            }
+        }
         child.vforked.store(vfork, Ordering::Relaxed);
         // `rfork(RFSPAWN)`: the child catches nothing (`FR2_DROPSIG_CAUGHT`).
         if drop_caught {
@@ -982,6 +1060,8 @@ impl Process {
             child.detach();
             return Err(Errno::EAGAIN);
         }
+        self.last_child.store(child.pid, Ordering::Relaxed);
+        crate::event::proc_forked(self, child.pid);
         if vfork {
             self.child_wait
                 .wait_until(s, || !child.vforked.load(Ordering::Acquire));
@@ -1082,6 +1162,10 @@ impl Process {
         drop(cred);
         self.sugid.store(false, Ordering::Relaxed);
         self.exterr.store(0, Ordering::Relaxed);
+        crate::event::proc_execed(self);
+        if let Some(t) = self.timers.get() {
+            t.exec();
+        }
         me.set_tls_base(None);
         me.set_name(self.with_comm(Name::new));
         // SAFETY: this thread runs in the new image; the kernel does not
@@ -1315,7 +1399,12 @@ impl Process {
         drop(core::mem::take(&mut *self.text.lock()));
         // Descriptors close before the parent hears: a pipe's reader sees
         // the end first.
-        let closed = self.files.lock(s).take_all();
+        // A table another process shares stays theirs (`fdescfree`).
+        let closed = if Arc::strong_count(&self.files) == 1 {
+            self.files.lock(s).take_all()
+        } else {
+            Vec::new()
+        };
         crate::fs::closed(self.pid, &closed);
         drop(closed);
         if self.pid == self.sid() {
@@ -1344,9 +1433,14 @@ impl Process {
             g
         };
         let groups: Vec<i32> = groups.into_iter().filter(|&g| !pgrp_orphaned(g)).collect();
+        // Its timers go (`itimers_exit`, and the real one's callout).
+        if let Some(t) = self.timers.get() {
+            t.exit();
+        }
         self.status.store(how.status(), Ordering::Relaxed);
         // Release: the status is visible to whoever sees `exited`.
         self.exited.store(true, Ordering::Release);
+        crate::event::proc_exited(self);
         let parent = self.parent();
         let reaps_nothing = parent
             .as_ref()
@@ -1525,11 +1619,15 @@ impl Process {
                     .position(|c| selects(c) && c.exited.load(Ordering::Acquire))
                 {
                     let c = Arc::clone(&kids[i]);
-                    if options & WNOWAIT == 0 {
+                    let reaped = options & WNOWAIT == 0;
+                    if reaped {
                         kids.remove(i);
                         tree.parent.remove(&c.pid);
                     }
                     drop(tree);
+                    if reaped {
+                        crate::event::proc_reaped(&c);
+                    }
                     return Ok(Some((c.pid, c.status.load(Ordering::Relaxed))));
                 }
                 for c in kids.iter().filter(|c| selects(c)) {
@@ -1740,3 +1838,8 @@ fn enter(_s: &Sleepable, arg: usize) -> ! {
 /// half, as FreeBSD's `USRSTACK` is).
 #[cfg_attr(not(feature = "ktest"), allow(dead_code))]
 pub(crate) const STACK_TOP: u64 = space::USER_END - (1 << 21);
+
+/// A descriptor table of its own.
+fn own(t: FdTable) -> Arc<Mutex<FdTable>> {
+    Arc::new(Mutex::new(&FILEDESC_LOCK, t))
+}

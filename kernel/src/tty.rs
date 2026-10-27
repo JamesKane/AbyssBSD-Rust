@@ -93,9 +93,13 @@ pub(crate) struct Tty {
     name: String,
     disc: Mutex<Discipline>,
     /// Mirrors for wait conditions: a read would return; output is
-    /// stopped.
+    /// stopped; and for polls, how much a read could take.
     readable: AtomicBool,
     stopped: AtomicBool,
+    ready: core::sync::atomic::AtomicUsize,
+    /// Pollers and knotes (`t_inpoll`, `t_outpoll`), told of every change
+    /// the mirrors see.
+    notify: event::Notify,
     ctty: SpinLock<Ctty>,
     /// Bumped when the foreground group changes (background sleepers
     /// look again).
@@ -167,6 +171,8 @@ pub(crate) fn create(name: &str, driver: Arc<dyn Driver>) -> Arc<Tty> {
         disc: Mutex::new(&TTY_LOCK, Discipline::new()),
         readable: AtomicBool::new(false),
         stopped: AtomicBool::new(false),
+        ready: core::sync::atomic::AtomicUsize::new(0),
+        notify: event::Notify::new(),
         ctty: SpinLock::new(Ctty::default()),
         fg_gen: AtomicU64::new(0),
         received: AtomicU64::new(0),
@@ -269,6 +275,41 @@ impl Tty {
         // Release: a waiter that sees the flag sees the queue it mirrors.
         self.readable.store(d.readable(), Ordering::Release);
         self.stopped.store(d.stopped(), Ordering::Release);
+        self.ready.store(d.read_poll(), Ordering::Release);
+        self.notify.notify(0);
+    }
+
+    /// `ttydev_poll`: output is written as it comes, so a terminal is
+    /// writable unless stopped.
+    fn poll(&self, events: i16, w: Option<&Arc<dyn event::Wake>>) -> i16 {
+        use abi::event::{POLLIN, POLLOUT, POLLRDNORM, POLLWRNORM};
+        if let Some(w) = w {
+            self.notify.record(w);
+        }
+        let mut revents = 0;
+        if events & (POLLIN | POLLRDNORM) != 0 && self.ready.load(Ordering::Acquire) > 0 {
+            revents |= events & (POLLIN | POLLRDNORM);
+        }
+        if events & (POLLOUT | POLLWRNORM) != 0 && !self.stopped.load(Ordering::Acquire) {
+            revents |= events & (POLLOUT | POLLWRNORM);
+        }
+        revents
+    }
+
+    /// `ttydev_kqfilter`.
+    fn kqfilter(
+        self: &Arc<Self>,
+        kev: &abi::event::Kevent,
+    ) -> Result<alloc::boxed::Box<dyn event::Filter>, Errno> {
+        match kev.filter {
+            abi::event::EVFILT_READ => {
+                Ok(alloc::boxed::Box::new(TtyFilter(Arc::clone(self), false)))
+            }
+            abi::event::EVFILT_WRITE => {
+                Ok(alloc::boxed::Box::new(TtyFilter(Arc::clone(self), true)))
+            }
+            _ => Err(Errno::EINVAL),
+        }
     }
 
     /// Sends queued output to the device.
@@ -568,6 +609,39 @@ fn winsize_to(w: &Winsize, arg: &mut [u8]) {
 /// A terminal as a device (`/dev/ttyu0`, `/dev/console`).
 pub(crate) struct TtyDevice(pub(crate) Arc<Tty>);
 
+/// A terminal's `EVFILT_READ` (`false`: `tty_kqops_read`) and
+/// `EVFILT_WRITE` (`tty_kqops_write`).
+struct TtyFilter(Arc<Tty>, bool);
+
+impl event::Filter for TtyFilter {
+    fn attach(&self, kn: &Arc<event::Knote>) -> Result<(), Errno> {
+        self.0.notify.add(kn);
+        Ok(())
+    }
+
+    fn detach(&self, kn: &event::Knote) {
+        self.0.notify.remove(kn);
+    }
+
+    fn event(&self, _kn: &event::Knote, note: &mut event::Note, _hint: u64) -> bool {
+        if self.1 {
+            let room = if self.0.stopped.load(Ordering::Acquire) {
+                0
+            } else {
+                CHUNK
+            };
+            note.kev.data = i64::try_from(room).unwrap_or(0);
+        } else {
+            note.kev.data = i64::try_from(self.0.ready.load(Ordering::Acquire)).unwrap_or(0);
+        }
+        note.kev.data > 0
+    }
+
+    fn fork(&self, _kn: &event::Knote) -> Option<alloc::boxed::Box<dyn event::Filter>> {
+        Some(alloc::boxed::Box::new(Self(Arc::clone(&self.0), self.1)))
+    }
+}
+
 /// An open file of a terminal: the first open and the last close are
 /// the driver's to know.
 struct TtyOpen(TtyDevice);
@@ -610,6 +684,17 @@ impl CharDevice for TtyOpen {
     fn mmap(&self, page: u64, pages: u64) -> Result<Arc<vm::object::Object>, Errno> {
         self.0.mmap(page, pages)
     }
+
+    fn poll(&self, events: i16, w: Option<&Arc<dyn event::Wake>>) -> i16 {
+        self.0.0.poll(events, w)
+    }
+
+    fn kqfilter(
+        &self,
+        kev: &abi::event::Kevent,
+    ) -> Result<alloc::boxed::Box<dyn event::Filter>, Errno> {
+        self.0.0.kqfilter(kev)
+    }
 }
 
 impl CharDevice for TtyDevice {
@@ -620,6 +705,17 @@ impl CharDevice for TtyDevice {
     /// `ttydev_mmap`: through the driver.
     fn mmap(&self, page: u64, pages: u64) -> Result<Arc<vm::object::Object>, Errno> {
         self.0.driver.mmap(page, pages)
+    }
+
+    fn poll(&self, events: i16, w: Option<&Arc<dyn event::Wake>>) -> i16 {
+        self.0.poll(events, w)
+    }
+
+    fn kqfilter(
+        &self,
+        kev: &abi::event::Kevent,
+    ) -> Result<alloc::boxed::Box<dyn event::Filter>, Errno> {
+        self.0.kqfilter(kev)
     }
 
     fn instance(&self, _s: &Sleepable) -> Result<Option<Arc<dyn CharDevice>>, Errno> {

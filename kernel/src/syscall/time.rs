@@ -19,6 +19,10 @@ unsafe impl Plain for Rlimit {}
 
 const NANOS: u64 = 1_000_000_000;
 
+/// `CPUCLOCK_BIT` and `CPUCLOCK_PROCESS_BIT`.
+const CPUCLOCK_BIT: u32 = 0x8000_0000;
+const CPUCLOCK_PROCESS_BIT: u32 = 0x4000_0000;
+
 fn timespec(ns: u64) -> Timespec {
     Timespec {
         tv_sec: i64::try_from(ns / NANOS).unwrap_or(i64::MAX),
@@ -48,6 +52,19 @@ pub(super) fn read(id: u64) -> Result<u64, Errno> {
             crate::proc::Process::with_current(crate::proc::Process::runtime)
                 .unwrap_or_else(|| sched::current().runtime()),
         ),
+        // `clock_getcpuclockid2`'s: a process's or a thread's CPU time.
+        id if id & CPUCLOCK_BIT != 0 => {
+            let who = (id & !(CPUCLOCK_BIT | CPUCLOCK_PROCESS_BIT)).cast_signed();
+            let ticks = if id & CPUCLOCK_PROCESS_BIT != 0 {
+                crate::proc::find(who).ok_or(Errno::EINVAL)?.runtime()
+            } else {
+                crate::uthread::find(who)
+                    .and_then(|t| t.sched())
+                    .ok_or(Errno::EINVAL)?
+                    .runtime()
+            };
+            crate::time::ticks_to_ns(ticks)
+        }
         _ => return Err(Errno::EINVAL),
     })
 }
@@ -92,36 +109,6 @@ pub(super) fn gettimeofday(tp: u64, tzp: u64) -> SysResult {
             .map_err(|_| Errno::EFAULT)?;
     }
     Ok(0)
-}
-
-/// `nanosleep(rqtp, rmtp)`.
-pub(super) fn nanosleep(s: &Sleepable, rqtp: u64, rmtp: u64) -> SysResult {
-    let t = UserPtr::<Timespec>::new(rqtp)
-        .read()
-        .map_err(|_| Errno::EFAULT)?;
-    if t.tv_sec < 0 || !(0..1_000_000_000).contains(&t.tv_nsec) {
-        return Err(Errno::EINVAL);
-    }
-    let ns = u64::try_from(t.tv_sec)
-        .unwrap_or(0)
-        .saturating_mul(NANOS)
-        .saturating_add(u64::try_from(t.tv_nsec).unwrap_or(0));
-    let start = crate::time::now_ns();
-    let q = sched::WaitQueue::new();
-    match crate::signal::sleep(s, &q, || false, Some(ns)) {
-        Ok(_) => Ok(0),
-        // Interrupted: the time left, and EINTR even for SA_RESTART (a
-        // restart would sleep the whole time again).
-        Err(_) => {
-            if rmtp != 0 {
-                let left = ns.saturating_sub(crate::time::now_ns().saturating_sub(start));
-                UserPtr::<Timespec>::new(rmtp)
-                    .write(&timespec(left))
-                    .map_err(|_| Errno::EFAULT)?;
-            }
-            Err(Errno::EINTR)
-        }
-    }
 }
 
 fn limit_index(which: u64) -> Result<usize, Errno> {

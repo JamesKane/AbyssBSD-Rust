@@ -567,6 +567,7 @@ fn send(p: &Arc<Process>, to: Option<&Arc<UserThread>>, info: Siginfo) -> Result
         return Ok(());
     }
     let sig = info.si_signo.cast_unsigned();
+    crate::event::signal_sent(p, sig);
     let prop = prop(sig);
     // Decided before taking the signal lock (it reads the process tree).
     let orphaned = prop & TTYSTOP != 0 && crate::proc::pgrp_orphaned(p.pgid());
@@ -1131,6 +1132,18 @@ pub(crate) fn restore_mask(t: &UserThread) {
     if let Some(m) = saved {
         set_mask(t, m);
     }
+}
+
+/// Whether a signal from POSIX timer `id` waits for delivery to `p` or
+/// one of its threads (`KSI_ONQ` of the timer's `ksiginfo`).
+pub(crate) fn timer_queued(p: &Process, id: i32) -> bool {
+    let mine = |i: &Siginfo| i.si_code == code::SI_TIMER && i.si_trapno == id;
+    if p.signals.lock().queue.info.iter().any(mine) {
+        return true;
+    }
+    p.threads()
+        .iter()
+        .any(|t| t.sig.lock().queue.info.iter().any(mine))
 }
 
 /// Takes a pending signal in `set` sent to thread `t` or its process (the

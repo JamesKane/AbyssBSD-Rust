@@ -1572,6 +1572,32 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
 - Timers: `setitimer`, POSIX timers, `timerfd`, `eventfd`, `clock_nanosleep`, clock setting.
 - Exit: kyua's `kern/kqueue_*`, `lib/libc/sys` poll and select tests, and the timer tests at the
   target, and the `event` component measured.
+  - `sys/event` done 2026-10-27: `Notify` (pollers and knotes of one object), knotes through
+    FreeBSD's states, and kqueue registration, scans (a scan stops at what was queued after it
+    began, FreeBSD's marker), descriptor close, close, and `KQUEUE_CPONFORK` copies; host tests
+    include notifications racing scans. Pipes, FIFOs (FreeBSD's named-pipe end of file and
+    `f_pipegen`), terminals, evdev clients, vnodes (`EVFILT_VNODE` notes from the generic VFS
+    layer, as the `vop_*_post` hooks raise them), processes and process descriptors (`NOTE_EXIT`,
+    `FORK`, `EXEC`, `TRACK`; FreeBSD 16's `NOTE_REAP` is kept as a hint, not in 15's mask), signals, `EVFILT_TIMER`, `EVFILT_USER`, `EVFILT_FS`, and
+    kqueues in kqueues have filters and poll.
+  - `poll`, `ppoll`, `select`, `pselect`, `kqueue`, `kqueuex`, `kevent`; `setitimer`, POSIX
+    timers, `timerfd`, `eventfd`, `clock_nanosleep`, `clock_settime`, `settimeofday`,
+    `adjtime` (stepping), `clock_getcpuclockid2`, and `wait6` done 2026-10-27; `abi-check` holds
+    (the 16-only `NOTE_PDSIGCHLD`, `NOTE_SIGNAL`, `NOTE_REAP`, and P6.3's `CVWAIT_UMTX_TIME` are
+    left out of it, and `NOTE_PCTRLMASK` is 15's). User timers run on
+    callouts whose handlers run on a softclock thread, as FreeBSD's do.
+  - The shell cases run `sys/kqueue`, `sys/kern/pipe`, `sys/kern/timerfd`, and `lib/libc/sys`'s
+    clock, timer, `kevent`, `poll`, `select`, `nanosleep`, and `sigtimedwait` tests as kyua does
+    (programs from their Kyuafiles, plain programs as kyua reports them, `SIGINT` and `SIGQUIT`
+    at their defaults): 417 cases on amd64 (QEMU and bhyve) end as on FreeBSD, and arm64's too,
+    but those `tests/kyua/abyss-known.txt` lists (`socketpair` for P6.5, two `timerfd` cases that
+    pass where FreeBSD's fail, and one arm64 artifact). The 12 cases P6.2 and P6.3 left for
+    P6.4 pass. Getting there brought `rfork(RFPROC)` (a shared descriptor table), a partial
+    `F_KINFO`, and a larger ESP in the test images (the debug kernel had outgrown it).
+  - The `event` component measured 2026-10-27 (`perf --suite p6.event`, 10 runs a side):
+    geometric mean 0.756, within the gate. `poll` and `select` on 1000 descriptors, the
+    `EVFILT_TIMER` round trip, and the `EVFILT_USER` ping-pong beat FreeBSD (0.70, 0.83, 0.79,
+    0.26). Open diagnostic: `kevent` on pipe readiness, 1.23 (one pipe) and 1.28 (1000).
 
 **P6.5 UNIX-domain sockets.**
 - `sys/socket` (MULTIUSER.md §8): the socket layer, socket buffers, the protocol trait, every

@@ -40,6 +40,7 @@ pub mod vnode;
 use abi::errno::Errno;
 use abi::time::Timespec;
 
+pub use event;
 pub use mount::{FileSystem, FsStats, Mount, MountInfo, Rename, type_num};
 pub use node::{
     Attr, CharDevice, Create, D_DISK, D_TTY, Device, DeviceNode, DirEntry, DirectoryNode, Kind,

@@ -32,6 +32,8 @@ pub(crate) struct VnodeFile {
     /// Opened for writing: counted as a writer while open, so no program
     /// runs the file meanwhile (FreeBSD's `v_writecount`).
     writer: bool,
+    /// Opened with `FWRITE`, for the close's note.
+    write: bool,
 }
 
 impl VnodeFile {
@@ -52,11 +54,20 @@ impl VnodeFile {
         if writer {
             v.add_writer()?;
         }
+        // `vop_open_post`.
+        v.knote(abi::event::NOTE_OPEN);
         Ok(Self {
             vnode: v.use_ref(),
             device,
             writer,
-        })
+            write: true,
+        }
+        .opened_for(write))
+    }
+
+    fn opened_for(mut self, write: bool) -> Self {
+        self.write = write;
+        self
     }
 
     /// `v` as `O_PATH` opens it: a name only.
@@ -65,6 +76,7 @@ impl VnodeFile {
             vnode: v.use_ref(),
             device: None,
             writer: false,
+            write: false,
         }
     }
 }
@@ -85,6 +97,12 @@ impl Drop for VnodeFile {
         if self.writer {
             self.vnode.drop_writer();
         }
+        // `vop_close_post`.
+        self.vnode.knote(if self.write {
+            abi::event::NOTE_CLOSE_WRITE
+        } else {
+            abi::event::NOTE_CLOSE
+        });
     }
 }
 
@@ -100,6 +118,12 @@ pub(crate) enum FileKind {
     Fifo(super::fifo::FifoFile),
     /// POSIX shared memory.
     Shm(Arc<super::shm::Shm>),
+    /// A kqueue.
+    Kqueue(crate::event::KqueueFile),
+    /// A `timerfd`.
+    Timerfd(Arc<crate::timers::Timerfd>),
+    /// An `eventfd`.
+    Eventfd(Arc<super::eventfd::Eventfd>),
 }
 
 /// An open file.
@@ -131,9 +155,13 @@ impl File {
         match &self.kind {
             FileKind::Vnode(f) => Some(f.vnode.vnode()),
             FileKind::Fifo(f) => Some(f.vnode.vnode()),
-            FileKind::Pipe(_) | FileKind::Process(_) | FileKind::Socket(_) | FileKind::Shm(_) => {
-                None
-            }
+            FileKind::Pipe(_)
+            | FileKind::Process(_)
+            | FileKind::Socket(_)
+            | FileKind::Shm(_)
+            | FileKind::Kqueue(_)
+            | FileKind::Timerfd(_)
+            | FileKind::Eventfd(_) => None,
         }
     }
 
@@ -181,6 +209,9 @@ impl File {
                 *off += n as u64;
                 Ok(n)
             }
+            FileKind::Kqueue(_) => Err(Errno::EOPNOTSUPP),
+            FileKind::Timerfd(t) => t.read(s, uio, self.nonblock()),
+            FileKind::Eventfd(e) => e.read(s, uio, self.nonblock()),
         }
     }
 
@@ -203,9 +234,13 @@ impl File {
                 }
             }
             FileKind::Shm(m) => m.read(s, u64::try_from(offset).map_err(|_| Errno::EINVAL)?, uio),
-            FileKind::Pipe(_) | FileKind::Process(_) | FileKind::Socket(_) | FileKind::Fifo(_) => {
-                Err(Errno::ESPIPE)
-            }
+            FileKind::Pipe(_)
+            | FileKind::Process(_)
+            | FileKind::Socket(_)
+            | FileKind::Fifo(_)
+            | FileKind::Kqueue(_)
+            | FileKind::Timerfd(_)
+            | FileKind::Eventfd(_) => Err(Errno::ESPIPE),
         }
     }
 
@@ -242,6 +277,8 @@ impl File {
                 *off = from + n as u64;
                 Ok(n)
             }
+            FileKind::Kqueue(_) | FileKind::Timerfd(_) => Err(Errno::EOPNOTSUPP),
+            FileKind::Eventfd(e) => e.write(s, uio, self.nonblock()),
         }
     }
 
@@ -256,9 +293,13 @@ impl File {
             return Err(Errno::EBADF);
         }
         match &self.kind {
-            FileKind::Pipe(_) | FileKind::Process(_) | FileKind::Socket(_) | FileKind::Fifo(_) => {
-                Err(Errno::ESPIPE)
-            }
+            FileKind::Pipe(_)
+            | FileKind::Process(_)
+            | FileKind::Socket(_)
+            | FileKind::Fifo(_)
+            | FileKind::Kqueue(_)
+            | FileKind::Timerfd(_)
+            | FileKind::Eventfd(_) => Err(Errno::ESPIPE),
             FileKind::Shm(m) => {
                 let at = u64::try_from(offset).map_err(|_| Errno::EINVAL)?;
                 let at = (self.flags() & O_APPEND == 0).then_some(at);
@@ -336,7 +377,90 @@ impl File {
             FileKind::Socket(so) => Ok(so.stat()),
             FileKind::Fifo(f) => f.vnode.stat(s),
             FileKind::Shm(m) => Ok(m.stat(s)),
+            // `kqueue_stat`: a FIFO, otherwise empty.
+            FileKind::Kqueue(_) => Ok(Stat {
+                st_mode: abi::stat::S_IFIFO,
+                ..Stat::default()
+            }),
+            FileKind::Timerfd(t) => Ok(t.stat()),
+            FileKind::Eventfd(_) => Ok(super::eventfd::Eventfd::stat()),
         }
+    }
+
+    /// The `poll` events of `events` that hold now (`fo_poll`). With a
+    /// poller, it is registered first with what it would wait on, so a
+    /// change after the look wakes it.
+    pub(crate) fn poll(&self, s: &Sleepable, events: i16, w: Option<&Arc<dyn event::Wake>>) -> i16 {
+        use abi::event::{POLLHUP, POLLIN, POLLOUT, POLLRDNORM, POLLSTANDARD, POLLWRNORM};
+        match &self.kind {
+            FileKind::Vnode(f) => match &f.device {
+                Some(d) => d.ops.poll(events, w),
+                // `vop_stdpoll`: a file is always ready; anything beyond
+                // the standard events waits for a note.
+                None => {
+                    if events & !POLLSTANDARD != 0 {
+                        if let Some(w) = w {
+                            f.vnode.notify().record(w);
+                        }
+                        0
+                    } else {
+                        events & (POLLIN | POLLOUT | POLLRDNORM | POLLWRNORM)
+                    }
+                }
+            },
+            FileKind::Pipe(p) => p.poll(self.flags(), events, w),
+            FileKind::Fifo(f) => f.poll(s, self.flags(), events, w),
+            // `procdesc_poll`: hung up once the process exits.
+            FileKind::Process(pd) => {
+                let p = pd.process();
+                if let Some(w) = w {
+                    p.pd_sel.record(w);
+                }
+                if p.has_exited() { POLLHUP } else { 0 }
+            }
+            // Never connected (P6.5).
+            FileKind::Socket(_) => 0,
+            FileKind::Shm(_) => vfs::node::poll_no_poll(events),
+            FileKind::Kqueue(k) => k.poll(events, w),
+            FileKind::Timerfd(t) => t.poll(events, w),
+            FileKind::Eventfd(e) => e.poll(events, w),
+        }
+    }
+
+    /// The filter for a knote on this file (`fo_kqfilter`).
+    pub(crate) fn kqfilter(
+        this: &Arc<Self>,
+        s: &Sleepable,
+        kev: &abi::event::Kevent,
+    ) -> Result<alloc::boxed::Box<dyn event::Filter>, Errno> {
+        use abi::event::EVFILT_PROCDESC;
+        match &this.kind {
+            FileKind::Vnode(f) => match &f.device {
+                Some(d) => d.ops.kqfilter(kev),
+                None => crate::event::vnode_filter(this, s, kev),
+            },
+            FileKind::Pipe(p) => p.kqfilter(this.flags(), kev),
+            FileKind::Fifo(f) => match f.kqfilter(this.flags(), kev) {
+                Some(r) => r,
+                None => crate::event::vnode_filter(this, s, kev),
+            },
+            FileKind::Process(_) if kev.filter == EVFILT_PROCDESC => Ok(alloc::boxed::Box::new(
+                crate::event::ProcdescFilter(Arc::clone(this)),
+            )),
+            FileKind::Process(_) | FileKind::Socket(_) | FileKind::Shm(_) => Err(Errno::EINVAL),
+            FileKind::Kqueue(k) if kev.filter == abi::event::EVFILT_READ => Ok(
+                alloc::boxed::Box::new(event::KqueueFilter(Arc::clone(&k.kq))),
+            ),
+            FileKind::Kqueue(_) => Err(Errno::EINVAL),
+            FileKind::Timerfd(t) => t.kqfilter(kev),
+            FileKind::Eventfd(e) => e.kqfilter(kev),
+        }
+    }
+
+    /// The offset as it stands, without waiting for a transfer under way
+    /// (a kqueue filter's racy read of `f_offset`).
+    pub(crate) fn offset_hint(&self) -> u64 {
+        self.offset.try_lock().map_or(0, |o| *o)
     }
 
     /// An `ioctl` request that is not about the descriptor itself; `arg`
@@ -388,6 +512,12 @@ impl File {
         };
         match &self.kind {
             FileKind::Process(_) | FileKind::Socket(_) => Err(Errno::ENOTTY),
+            // `kqueue_ioctl`, `timerfd_ioctl`, and `eventfd_ioctl`: the
+            // generic layer already set the flag.
+            FileKind::Kqueue(_) | FileKind::Timerfd(_) | FileKind::Eventfd(_) => match req {
+                FIONBIO | FIOASYNC => Ok(0),
+                _ => Err(Errno::ENOTTY),
+            },
             // Non-blocking and asynchronous mean nothing to memory, but
             // `fcntl(F_SETFL)` must work (`shm_ioctl`).
             FileKind::Shm(_) => match req {

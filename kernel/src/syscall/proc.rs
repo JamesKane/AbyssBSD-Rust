@@ -35,7 +35,8 @@ pub(super) fn fork(s: &Sleepable, frame: &mut TrapFrame, vfork: bool) -> SysResu
 
 /// `rfork(flags)`, in the forms base uses: `RFSPAWN` (`posix_spawn`),
 /// `RFPROC | RFFDG` (`fork`), and `RFPROC | RFFDG | RFMEM | RFPPWAIT`
-/// (`vfork`); the rest are `EINVAL` for now.
+/// (`vfork`), and `RFPROC` (the descriptor table shared); the rest are
+/// `EINVAL` for now.
 pub(super) fn rfork(s: &Sleepable, frame: &mut TrapFrame, flags: u64) -> SysResult {
     const RFFDG: u32 = 1 << 2;
     const RFPROC: u32 = 1 << 4;
@@ -56,6 +57,8 @@ pub(super) fn rfork(s: &Sleepable, frame: &mut TrapFrame, flags: u64) -> SysResu
         p.fork(s, frame, false)?
     } else if flags == RFPROC | RFFDG | RFMEM | RFPPWAIT {
         p.fork(s, frame, true)?
+    } else if flags == RFPROC {
+        p.fork_shared_files(s, frame)?
     } else {
         // Shared descriptor tables, shared memory without waiting, and
         // changes to the caller alone are not here yet.
@@ -220,6 +223,79 @@ pub(super) fn wait4(s: &Sleepable, pid: u64, status: u64, options: u64, rusage: 
         // that used nothing measurable.
         UserPtr::<Rusage>::new(rusage)
             .write(&Rusage::default())
+            .map_err(|_| Errno::EFAULT)?;
+    }
+    Ok(u64::from(child.unsigned_abs()))
+}
+
+/// `wait6(idtype, id, status, options, wrusage, info)`: `wait4` named by
+/// `idtype_t` (`P_PID`, `P_PGID`, `P_ALL`), with the child's `siginfo`.
+pub(super) fn wait6(
+    s: &Sleepable,
+    idtype: u64,
+    id: u64,
+    status: u64,
+    options: u64,
+    wrusage: u64,
+    info: u64,
+) -> SysResult {
+    /// `idtype_t`.
+    const P_PID: i32 = 0;
+    const P_PGID: i32 = 2;
+    const P_ALL: i32 = 7;
+    use abi::signal::code::{CLD_CONTINUED, CLD_DUMPED, CLD_EXITED, CLD_KILLED, CLD_STOPPED};
+    let options = u32::try_from(options).map_err(|_| Errno::EINVAL)?;
+    if options & !(WNOHANG | WUNTRACED | WCONTINUED | WNOWAIT | WEXITED | WTRAPPED) != 0 {
+        return Err(Errno::EINVAL);
+    }
+    let id = i32::try_from(id.cast_signed()).map_err(|_| Errno::EINVAL)?;
+    let pid = match int(idtype) {
+        P_PID => id,
+        P_PGID if id == 0 => 0,
+        P_PGID => -id,
+        P_ALL => -1,
+        _ => return Err(Errno::EINVAL),
+    };
+    let Some((child, st)) = process()?.wait_child(s, pid, options)? else {
+        if info != 0 {
+            UserPtr::<abi::signal::Siginfo>::new(info)
+                .write(&abi::signal::Siginfo::default())
+                .map_err(|_| Errno::EFAULT)?;
+        }
+        return Ok(0);
+    };
+    if status != 0 {
+        UserPtr::<i32>::new(status)
+            .write(&st)
+            .map_err(|_| Errno::EFAULT)?;
+    }
+    if wrusage != 0 {
+        // `struct __wrusage`: the child's and its children's, both zero.
+        UserPtr::<[Rusage; 2]>::new(wrusage)
+            .write(&[Rusage::default(); 2])
+            .map_err(|_| Errno::EFAULT)?;
+    }
+    if info != 0 {
+        let (code, value) = if st & 0x7f == 0 {
+            (CLD_EXITED, (st >> 8) & 0xff)
+        } else if st & 0xff == 0o177 {
+            (CLD_STOPPED, (st >> 8) & 0xff)
+        } else if st == abi::signal::SIGCONT.cast_signed() {
+            (CLD_CONTINUED, st)
+        } else if st & 0x80 != 0 {
+            (CLD_DUMPED, st & 0x7f)
+        } else {
+            (CLD_KILLED, st & 0x7f)
+        };
+        let si = abi::signal::Siginfo {
+            si_signo: abi::signal::SIGCHLD.cast_signed(),
+            si_code: code,
+            si_pid: child,
+            si_status: value,
+            ..abi::signal::Siginfo::default()
+        };
+        UserPtr::<abi::signal::Siginfo>::new(info)
+            .write(&si)
             .map_err(|_| Errno::EFAULT)?;
     }
     Ok(u64::from(child.unsigned_abs()))

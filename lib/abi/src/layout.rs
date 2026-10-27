@@ -77,6 +77,7 @@ pub const CONSTANTS: &[&[ConstValue]] = &[
     crate::mman::CONSTANTS,
     crate::thr::CONSTANTS,
     crate::umtx::CONSTANTS,
+    crate::event::CONSTANTS,
     crate::ipc::CONSTANTS,
     crate::signal::CONSTANTS,
     crate::time::CONSTANTS,
@@ -513,6 +514,38 @@ pub static LAYOUTS: &[StructLayout] = &[
         flags => "flags",
         rtp => "rtp",
         spare => "spare",
+    }),
+    layout!(crate::event::Kevent, "struct kevent", ["sys/types.h", "sys/event.h"], All, {
+        ident => "ident",
+        filter => "filter",
+        flags => "flags",
+        fflags => "fflags",
+        data => "data",
+        udata => "udata",
+        ext => "ext",
+    }),
+    layout!(crate::event::Pollfd, "struct pollfd", ["sys/types.h", "poll.h"], All, {
+        fd => "fd",
+        events => "events",
+        revents => "revents",
+    }),
+    layout!(crate::event::Itimerval, "struct itimerval", ["sys/types.h", "sys/time.h"], All, {
+        it_interval => "it_interval",
+        it_value => "it_value",
+    }),
+    layout!(crate::event::Itimerspec, "struct itimerspec", ["sys/types.h", "time.h"], All, {
+        it_interval => "it_interval",
+        it_value => "it_value",
+    }),
+    layout!(crate::event::Sigevent, "struct sigevent", ["sys/types.h", "signal.h"], All, {
+        sigev_notify => "sigev_notify",
+        sigev_signo => "sigev_signo",
+        sigev_value => "sigev_value",
+        sigev_un => "_sigev_un",
+    }),
+    layout!(crate::event::SpecialfdEventfd, "struct specialfd_eventfd", ["sys/types.h", "sys/specialfd.h"], All, {
+        initval => "initval",
+        flags => "flags",
     }),
     layout!(crate::umtx::UmtxTime, "struct _umtx_time", ["sys/types.h", "sys/umtx.h"], All, {
         timeout => "_timeout",

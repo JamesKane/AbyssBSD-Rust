@@ -5,12 +5,16 @@
 //!
 //! Closing takes a file out of the table; the caller drops it after
 //! letting go of the table's lock, since the last close of a pipe wakes
-//! sleepers and that of a process descriptor may kill.
+//! sleepers and that of a process descriptor may kill. The knotes the
+//! table's kqueues have on a descriptor go as it closes (FreeBSD's
+//! `knote_fdclose`).
 //!
 //! Behavior reference: sys/kern/kern_descrip.c.
 
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
+
+use event::Kqueue;
 
 use abi::errno::Errno;
 
@@ -30,10 +34,16 @@ pub(crate) struct Slot {
     pub(crate) flags: FdFlags,
 }
 
+/// A `KQUEUE_CPONFORK` kqueue and its copy in a forked child's table.
+pub(crate) type KqueueCopy = (Arc<Kqueue>, Arc<Kqueue>);
+
 /// The table.
 #[derive(Clone, Default)]
 pub(crate) struct FdTable {
     slots: Vec<Option<Slot>>,
+    /// The kqueues made here, whose knotes name these descriptors
+    /// (`fd_kqlist`).
+    kqueues: Vec<Weak<Kqueue>>,
 }
 
 fn index(fd: i32) -> Result<usize, Errno> {
@@ -42,7 +52,35 @@ fn index(fd: i32) -> Result<usize, Errno> {
 
 impl FdTable {
     pub(crate) const fn new() -> Self {
-        Self { slots: Vec::new() }
+        Self {
+            slots: Vec::new(),
+            kqueues: Vec::new(),
+        }
+    }
+
+    /// Records a kqueue made by this table's process.
+    pub(crate) fn add_kqueue(&mut self, kq: &Arc<Kqueue>) {
+        self.kqueues.retain(|k| k.strong_count() > 0);
+        self.kqueues.push(Arc::downgrade(kq));
+    }
+
+    /// Descriptor `fd` is closing: the knotes on it go.
+    fn closing(&mut self, fd: usize) {
+        if self.kqueues.is_empty() {
+            return;
+        }
+        self.kqueues.retain(|k| k.strong_count() > 0);
+        for kq in &self.kqueues {
+            if let Some(kq) = kq.upgrade() {
+                kq.fd_closed(fd);
+            }
+        }
+    }
+
+    /// One past the highest open descriptor (`fd_nfiles`, which
+    /// `select` bounds its sets by).
+    pub(crate) fn len(&self) -> usize {
+        self.slots.len()
     }
 
     pub(crate) fn slot(&self, fd: i32) -> Result<&Slot, Errno> {
@@ -86,6 +124,9 @@ impl FdTable {
                 .map_err(|_| Errno::ENOMEM)?;
             self.slots.resize(fd + 1, None);
         }
+        if self.slots[fd].is_some() {
+            self.closing(fd);
+        }
         Ok(self.slots[fd].replace(slot))
     }
 
@@ -126,6 +167,7 @@ impl FdTable {
             .get_mut(i)
             .and_then(Option::take)
             .ok_or(Errno::EBADF)?;
+        self.closing(i);
         self.trim();
         Ok(slot)
     }
@@ -149,6 +191,7 @@ impl FdTable {
                 }
             } else if let Some(s) = self.slots[i].take() {
                 out.push(s);
+                self.closing(i);
             }
         }
         self.trim();
@@ -162,30 +205,63 @@ impl FdTable {
         }
     }
 
-    /// The child's table after `fork`: everything but close-on-fork.
-    pub(crate) fn fork(&self) -> Result<Self, Errno> {
+    /// The child's table after `fork`: everything but close-on-fork and
+    /// kqueues, except that a `KQUEUE_CPONFORK` kqueue becomes a new one
+    /// (`kqueue_fork_alloc`); with each such pair, for the caller to copy
+    /// the knotes into once the child's table is in place.
+    pub(crate) fn fork(&self) -> Result<(Self, Vec<KqueueCopy>), Errno> {
+        use super::file::{File, FileKind};
         let mut slots = Vec::new();
         slots
             .try_reserve_exact(self.slots.len())
             .map_err(|_| Errno::ENOMEM)?;
-        slots.extend(
-            self.slots
-                .iter()
-                .map(|s| s.as_ref().filter(|s| !s.flags.clofork).cloned()),
-        );
-        let mut t = Self { slots };
+        // Each kqueue file copied once, however many descriptors it has.
+        let mut copies: Vec<(*const File, Arc<File>)> = Vec::new();
+        let mut pairs = Vec::new();
+        let mut kqueues = Vec::new();
+        for s in &self.slots {
+            let s = s.as_ref().filter(|s| !s.flags.clofork);
+            let s = match s.map(|s| (s, s.file.kind())) {
+                Some((s, FileKind::Kqueue(k))) => {
+                    if !k.cponfork {
+                        None
+                    } else {
+                        let key = Arc::as_ptr(&s.file);
+                        let file = match copies.iter().find(|(p, _)| *p == key) {
+                            Some((_, f)) => Arc::clone(f),
+                            None => {
+                                let new = crate::event::KqueueFile::new(true);
+                                kqueues.push(Arc::downgrade(&new.kq));
+                                pairs.push((Arc::clone(&k.kq), Arc::clone(&new.kq)));
+                                let f = File::new(FileKind::Kqueue(new), s.file.flags());
+                                copies.push((key, Arc::clone(&f)));
+                                f
+                            }
+                        };
+                        Some(Slot {
+                            file,
+                            flags: s.flags,
+                        })
+                    }
+                }
+                _ => s.cloned(),
+            };
+            slots.push(s);
+        }
+        let mut t = Self { slots, kqueues };
         t.trim();
-        Ok(t)
+        Ok((t, pairs))
     }
 
     /// Takes out the close-on-exec descriptors (`execve`).
     pub(crate) fn exec(&mut self) -> Vec<Slot> {
         let mut out = Vec::new();
-        for s in &mut self.slots {
-            if s.as_ref().is_some_and(|s| s.flags.cloexec)
-                && let Some(s) = s.take()
+        for i in 0..self.slots.len() {
+            if self.slots[i].as_ref().is_some_and(|s| s.flags.cloexec)
+                && let Some(s) = self.slots[i].take()
             {
                 out.push(s);
+                self.closing(i);
             }
         }
         self.trim();
@@ -194,6 +270,11 @@ impl FdTable {
 
     /// Takes out everything (exit).
     pub(crate) fn take_all(&mut self) -> Vec<Slot> {
+        for i in 0..self.slots.len() {
+            if self.slots[i].is_some() {
+                self.closing(i);
+            }
+        }
         core::mem::take(&mut self.slots)
             .into_iter()
             .flatten()

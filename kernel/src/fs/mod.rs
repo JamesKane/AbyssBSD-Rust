@@ -15,6 +15,7 @@
 
 pub(crate) mod block;
 pub(crate) mod devfs;
+pub(crate) mod eventfd;
 pub(crate) mod fdtable;
 pub(crate) mod fifo;
 pub(crate) mod file;
@@ -501,7 +502,7 @@ fn start_of(
                 Some(v) if v.is_dir() => Ok(Cow::Owned(Arc::clone(v))),
                 _ => Err(Errno::ENOTDIR),
             };
-            if p.sole_thread() {
+            if p.sole_user_of_files() {
                 // SAFETY: only the process's threads reach its table, this
                 // is the only one, and it does nothing else with the table
                 // while `dir` runs (as `syscall::io::with_file`): no lock,

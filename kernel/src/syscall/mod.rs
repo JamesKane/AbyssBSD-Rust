@@ -23,6 +23,7 @@
 //! Behavior reference: sys/kern/subr_syscall.c, sys/amd64/amd64/trap.c,
 //! sys/arm64/arm64/trap.c.
 
+mod event;
 mod fsops;
 mod io;
 mod ipc;
@@ -36,6 +37,7 @@ mod socket;
 mod sysctl;
 mod thr;
 mod time;
+mod timers;
 mod umtx;
 
 use alloc::sync::Arc;
@@ -154,6 +156,7 @@ fn run(s: &Sleepable, frame: &mut TrapFrame, call: Call) -> Result<Option<u64>, 
         Sysno::Pdgetpid => proc::pdgetpid(s, a0, a1),
         Sysno::Pdkill => proc::pdkill(s, a0, a1),
         Sysno::Wait4 => proc::wait4(s, a0, a1, a2, a3),
+        Sysno::Wait6 => proc::wait6(s, a0, a1, a2, a3, a4, a5),
         Sysno::Getppid => proc::getppid(),
         Sysno::Getpgrp => proc::getpgrp(),
         Sysno::Getpgid => proc::getpgid(a0, false),
@@ -179,7 +182,30 @@ fn run(s: &Sleepable, frame: &mut TrapFrame, call: Call) -> Result<Option<u64>, 
         Sysno::ClockGettime => time::clock_gettime(a0, a1),
         Sysno::ClockGetres => time::clock_getres(a0, a1),
         Sysno::Gettimeofday => time::gettimeofday(a0, a1),
-        Sysno::Nanosleep => time::nanosleep(s, a0, a1),
+        Sysno::Nanosleep => timers::nanosleep(s, a0, a1),
+        Sysno::ClockNanosleep => timers::clock_nanosleep(s, a0, a1, a2, a3),
+        Sysno::ClockSettime => timers::clock_settime(a0, a1),
+        Sysno::Settimeofday => timers::settimeofday(a0, a1),
+        Sysno::Adjtime => timers::adjtime(a0, a1),
+        Sysno::ClockGetcpuclockid2 => timers::clock_getcpuclockid2(a0, a1, a2),
+        Sysno::Setitimer => timers::setitimer(a0, a1, a2),
+        Sysno::Getitimer => timers::getitimer(a0, a1),
+        Sysno::KtimerCreate => timers::ktimer_create(a0, a1, a2),
+        Sysno::KtimerDelete => timers::ktimer_delete(a0),
+        Sysno::KtimerSettime => timers::ktimer_settime(a0, a1, a2, a3),
+        Sysno::KtimerGettime => timers::ktimer_gettime(a0, a1),
+        Sysno::KtimerGetoverrun => timers::ktimer_getoverrun(a0),
+        Sysno::TimerfdCreate => timers::timerfd_create(s, a0, a1),
+        Sysno::TimerfdGettime => timers::timerfd_gettime(s, a0, a1),
+        Sysno::TimerfdSettime => timers::timerfd_settime(s, a0, a1, a2, a3),
+        Sysno::Specialfd => timers::specialfd(s, a0, a1, a2),
+        Sysno::Poll => event::poll(s, a0, a1, a2),
+        Sysno::Ppoll => event::ppoll(s, a0, a1, a2, a3),
+        Sysno::Select => event::select(s, a0, [a1, a2, a3], a4),
+        Sysno::Pselect => event::pselect(s, a0, [a1, a2, a3], a4, a5),
+        Sysno::Kqueue => event::kqueue(s),
+        Sysno::Kqueuex => event::kqueuex(s, a0),
+        Sysno::Kevent => event::kevent(s, a0, a1, a2, a3, a4, a5),
         Sysno::Getrlimit => time::getrlimit(a0, a1),
         Sysno::Setrlimit => time::setrlimit(s, a0, a1),
         Sysno::Sysctl => sysctl::sysctl(s, a0, a1, a2, a3, a4, a5),

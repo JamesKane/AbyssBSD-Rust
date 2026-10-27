@@ -17,19 +17,28 @@
 //! is mirrored in atomics, since a wait condition runs under the wait
 //! queue's spin lock.
 //!
+//! Each direction has a [`Notify`] its readers and writers poll and
+//! watch (`pipe_sel`); every read, write, and close notifies it.
+//!
 //! FreeBSD's direct-write path (mapping a writer's pages for the reader)
 //! is not implemented.
 //!
 //! Behavior reference: sys/kern/sys_pipe.c.
 
+use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use abi::errno::Errno;
-use abi::fcntl::PIPE_BUF;
+use abi::event::{
+    EV_EOF, EVFILT_READ, EVFILT_WRITE, Kevent, POLLHUP, POLLIN, POLLINIGNEOF, POLLOUT, POLLRDNORM,
+    POLLWRNORM,
+};
+use abi::fcntl::{FREAD, FWRITE, PIPE_BUF};
 use abi::stat::{S_IFIFO, Stat};
 use abi::time::Timespec;
+use event::{Filter, Knote, Note, Notify, Wake};
 use sched::lock::{LockClass, Mutex};
 use sched::{Sleepable, WaitQueue};
 use vfs::Uio;
@@ -136,10 +145,12 @@ struct Channel {
     /// Readers waiting for bytes, writers waiting for room.
     readable: WaitQueue,
     writable: WaitQueue,
+    /// Its pollers and knotes; a FIFO's pipes share the FIFO's.
+    notify: Arc<Notify>,
 }
 
 impl Channel {
-    const fn new(initial: usize) -> Self {
+    fn new(initial: usize, notify: Arc<Notify>) -> Self {
         Self {
             ring: Mutex::new(&PIPE_LOCK, Ring::new()),
             initial,
@@ -149,6 +160,7 @@ impl Channel {
             writer_gone: AtomicBool::new(false),
             readable: WaitQueue::new(),
             writable: WaitQueue::new(),
+            notify,
         }
     }
 
@@ -166,6 +178,8 @@ pub(crate) struct Pipe {
     channels: [Channel; 2],
     ino: [u64; 2],
     ctime: Timespec,
+    /// A FIFO's (`PIPE_TYPE_NAMED`): its `Notify` outlives the pipe.
+    named: bool,
 }
 
 /// One end of a pipe; dropping it closes it.
@@ -176,11 +190,25 @@ pub(crate) struct End {
 
 /// A new pipe's two ends.
 pub(crate) fn pair() -> (End, End) {
+    pair_with(None)
+}
+
+/// A FIFO's pipe, notifying the FIFO's `notify`.
+pub(crate) fn named(notify: &Arc<Notify>) -> (End, End) {
+    pair_with(Some(notify))
+}
+
+fn pair_with(notify: Option<&Arc<Notify>>) -> (End, End) {
     let ino = NEXT_INO.fetch_add(2, Ordering::Relaxed);
+    let n = || notify.map_or_else(|| Arc::new(Notify::new()), Arc::clone);
     let pipe = Arc::new(Pipe {
-        channels: [Channel::new(PIPE_SIZE), Channel::new(SMALL_PIPE_SIZE)],
+        channels: [
+            Channel::new(PIPE_SIZE, n()),
+            Channel::new(SMALL_PIPE_SIZE, n()),
+        ],
         ino: [ino, ino + 1],
         ctime: super::now(),
+        named: notify.is_some(),
     });
     (
         End {
@@ -224,6 +252,7 @@ impl End {
                     ch.len.store(r.len, Ordering::Release);
                     drop(r);
                     ch.writable.wake_all();
+                    ch.notify.notify(0);
                     return Ok(n);
                 }
             }
@@ -283,6 +312,7 @@ impl End {
                     drop(r);
                     done += n;
                     ch.readable.wake_all();
+                    ch.notify.notify(0);
                 }
             }
             if uio.resid() == 0 {
@@ -333,13 +363,192 @@ impl End {
     }
 }
 
+impl Pipe {
+    /// Bytes waiting in channel `side`.
+    pub(crate) fn len(&self, side: usize) -> usize {
+        self.channels[side].len.load(Ordering::Acquire)
+    }
+
+    /// Room in channel `side`.
+    pub(crate) fn room(&self, side: usize) -> usize {
+        self.channels[side].room()
+    }
+}
+
+impl End {
+    /// Its pipe, which a FIFO's filters read.
+    pub(crate) fn pipe(&self) -> &Arc<Pipe> {
+        &self.pipe
+    }
+
+    /// `pipe_poll` for a file open with `fflags`.
+    pub(crate) fn poll(&self, fflags: u32, events: i16, w: Option<&Arc<dyn Wake>>) -> i16 {
+        let (rx, tx) = (self.rx(), self.tx());
+        // Registered whatever is asked: `POLLHUP` comes unasked.
+        if let Some(w) = w {
+            if fflags & FREAD != 0 {
+                rx.notify.record(w);
+            }
+            if fflags & FWRITE != 0 && !tx.reader_gone.load(Ordering::Acquire) {
+                tx.notify.record(w);
+            }
+        }
+        let mut revents = 0;
+        if fflags & FREAD != 0
+            && events & (POLLIN | POLLRDNORM) != 0
+            && rx.len.load(Ordering::Acquire) > 0
+        {
+            revents |= events & (POLLIN | POLLRDNORM);
+        }
+        let peer_gone = tx.reader_gone.load(Ordering::Acquire);
+        if fflags & FWRITE != 0
+            && events & (POLLOUT | POLLWRNORM) != 0
+            && (peer_gone || tx.room() >= PIPE_BUF)
+        {
+            revents |= events & (POLLOUT | POLLWRNORM);
+        }
+        if events & POLLINIGNEOF == 0 && rx.writer_gone.load(Ordering::Acquire) {
+            if fflags & FREAD != 0 {
+                revents |= events & (POLLIN | POLLRDNORM);
+            }
+            if peer_gone {
+                revents |= POLLHUP;
+            }
+        }
+        revents
+    }
+
+    /// `pipe_kqfilter`: a filter the end is not open for never fires.
+    pub(crate) fn kqfilter(&self, fflags: u32, kev: &Kevent) -> Result<Box<dyn Filter>, Errno> {
+        match kev.filter {
+            EVFILT_READ if fflags & FREAD == 0 => Ok(Box::new(crate::event::Never)),
+            EVFILT_WRITE if fflags & FWRITE == 0 => Ok(Box::new(crate::event::Never)),
+            EVFILT_READ => Ok(Box::new(PipeRead {
+                pipe: Arc::clone(&self.pipe),
+                side: self.side,
+            })),
+            EVFILT_WRITE => {
+                if self.tx().reader_gone.load(Ordering::Acquire) {
+                    return Err(Errno::EPIPE);
+                }
+                Ok(Box::new(PipeWrite {
+                    pipe: Arc::clone(&self.pipe),
+                    side: 1 - self.side,
+                }))
+            }
+            _ => Err(Errno::EINVAL),
+        }
+    }
+}
+
+/// `pipe_rfiltops`: `data` the bytes waiting; `EV_EOF` once the writer
+/// has gone.
+pub(crate) struct PipeRead {
+    pub(crate) pipe: Arc<Pipe>,
+    /// The channel read.
+    pub(crate) side: usize,
+}
+
+impl PipeRead {
+    fn ch(&self) -> &Channel {
+        &self.pipe.channels[self.side]
+    }
+
+    /// `filt_piperead`; `eof_counts` is false for a FIFO reader no writer
+    /// has come to since it opened.
+    pub(crate) fn check(&self, note: &mut Note, eof_counts: bool) -> bool {
+        let ch = self.ch();
+        note.kev.data = i64::try_from(ch.len.load(Ordering::Acquire)).unwrap_or(i64::MAX);
+        if ch.writer_gone.load(Ordering::Acquire) && eof_counts {
+            note.kev.flags |= EV_EOF;
+            return true;
+        }
+        note.kev.flags &= !EV_EOF;
+        note.kev.data > 0
+    }
+}
+
+impl Filter for PipeRead {
+    fn attach(&self, kn: &Arc<Knote>) -> Result<(), Errno> {
+        self.ch().notify.add(kn);
+        Ok(())
+    }
+
+    fn detach(&self, kn: &Knote) {
+        self.ch().notify.remove(kn);
+    }
+
+    fn event(&self, _kn: &Knote, note: &mut Note, _hint: u64) -> bool {
+        self.check(note, true)
+    }
+
+    fn fork(&self, _kn: &Knote) -> Option<Box<dyn Filter>> {
+        Some(Box::new(Self {
+            pipe: Arc::clone(&self.pipe),
+            side: self.side,
+        }))
+    }
+}
+
+/// `pipe_wfiltops`: `data` the room left; `EV_EOF` once the reader has
+/// gone.
+pub(crate) struct PipeWrite {
+    pub(crate) pipe: Arc<Pipe>,
+    /// The channel written.
+    pub(crate) side: usize,
+}
+
+impl Filter for PipeWrite {
+    fn attach(&self, kn: &Arc<Knote>) -> Result<(), Errno> {
+        self.pipe.channels[self.side].notify.add(kn);
+        Ok(())
+    }
+
+    fn detach(&self, kn: &Knote) {
+        self.pipe.channels[self.side].notify.remove(kn);
+    }
+
+    /// `filt_pipewrite`.
+    fn event(&self, _kn: &Knote, note: &mut Note, _hint: u64) -> bool {
+        let ch = &self.pipe.channels[self.side];
+        let gone = ch.reader_gone.load(Ordering::Acquire);
+        if !gone || self.pipe.named {
+            note.kev.data = i64::try_from(ch.room()).unwrap_or(i64::MAX);
+        }
+        if gone {
+            note.kev.flags |= EV_EOF;
+            return true;
+        }
+        note.kev.flags &= !EV_EOF;
+        note.kev.data >= i64::try_from(PIPE_BUF).unwrap_or(i64::MAX)
+    }
+
+    fn fork(&self, _kn: &Knote) -> Option<Box<dyn Filter>> {
+        Some(Box::new(Self {
+            pipe: Arc::clone(&self.pipe),
+            side: self.side,
+        }))
+    }
+}
+
 impl Drop for End {
     fn drop(&mut self) {
         let (rx, tx) = (self.rx(), self.tx());
+        // `pipeclose`: this end's watchers look once more while it is still
+        // there (a writer's knote keeps the room it last saw).
+        rx.notify.notify(0);
         rx.reader_gone.store(true, Ordering::Release);
         tx.writer_gone.store(true, Ordering::Release);
         // Writers into this end get `EPIPE`; readers of the other, the end.
         rx.writable.wake_all();
         tx.readable.wake_all();
+        // Those of this end's are done with it (a FIFO's watchers stay,
+        // for the FIFO's next pipe); the other end's see the end.
+        if self.pipe.named {
+            rx.notify.notify(0);
+        } else {
+            rx.notify.clear();
+        }
+        tx.notify.notify(0);
     }
 }

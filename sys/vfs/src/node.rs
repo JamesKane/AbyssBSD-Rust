@@ -359,6 +359,38 @@ pub trait CharDevice: Send + Sync {
     fn ioctl_value(&self, s: &Sleepable, req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
         self.ioctl(s, req, arg).map(|()| 0)
     }
+    /// The `poll` events of `events` that hold now (`d_poll`); with a
+    /// poller, registered on the device's [`event::Notify`] first when
+    /// none does. A device without one is always readable and writable
+    /// (`no_poll`).
+    fn poll(&self, events: i16, w: Option<&Arc<dyn event::Wake>>) -> i16 {
+        let _ = w;
+        poll_no_poll(events)
+    }
+    /// The filter for a knote on the device (`d_kqfilter`): `ENODEV`
+    /// unless it has one (`no_kqfilter`).
+    ///
+    /// # Errors
+    ///
+    /// What `kevent` reports for the change.
+    fn kqfilter(
+        &self,
+        kev: &abi::event::Kevent,
+    ) -> Result<alloc::boxed::Box<dyn event::Filter>, Errno> {
+        let _ = kev;
+        Err(Errno::ENODEV)
+    }
+}
+
+/// `poll` on an object that cannot wait (`poll_no_poll`): readable and
+/// writable, and `POLLNVAL` for anything beyond the standard events.
+#[must_use]
+pub fn poll_no_poll(events: i16) -> i16 {
+    use abi::event::{POLLIN, POLLNVAL, POLLOUT, POLLRDNORM, POLLSTANDARD, POLLWRNORM};
+    if events & !POLLSTANDARD != 0 {
+        return POLLNVAL;
+    }
+    events & (POLLIN | POLLOUT | POLLRDNORM | POLLWRNORM)
 }
 
 /// A device: its number and the driver behind it.
