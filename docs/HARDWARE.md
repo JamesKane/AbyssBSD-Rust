@@ -20,7 +20,7 @@ out of scope for Day 1.
 | Tier | AMD64 | ARM64 |
 |---|---|---|
 | **Tier 1, virtual** (CI gate) | QEMU q35 + OVMF; bhyve UEFI | QEMU virt (gicv3, acpi=on) + edk2 |
-| **Tier 1, physical** (untouched until P6, gating from P6) | **Ryzen 9 7900X on Gigabyte X870E AORUS ELITE WIFI7**, see [§5](#5-board-profile-amd64-ryzen-9-7900x--x870e-aorus-elite-wifi7) and [ADR-0009](adr/0009-amd64-reference-machine-ryzen-x870e.md) | **Orange Pi 6 Plus** (CIX P1 / Sky1), see [§4](#4-board-profile-orange-pi-6-plus-cix-p1--sky1) and [ADR-0008](adr/0008-arm64-reference-board-orange-pi-6-plus.md) |
+| **Tier 1, physical** (untouched until P6's exit, gating from P7) | **Ryzen 9 7900X on Gigabyte X870E AORUS ELITE WIFI7**, see [§5](#5-board-profile-amd64-ryzen-9-7900x--x870e-aorus-elite-wifi7) and [ADR-0009](adr/0009-amd64-reference-machine-ryzen-x870e.md) | **Orange Pi 6 Plus** (CIX P1 / Sky1), see [§4](#4-board-profile-orange-pi-6-plus-cix-p1--sky1) and [ADR-0008](adr/0008-arm64-reference-board-orange-pi-6-plus.md) |
 | **Tier 2, best effort** | Other UEFI desktops/laptops | Radxa Orion O6 (same SoC), **Radxa Dragon Q8B** (see below), other SystemReady boards, Raspberry Pi 4/5 with community UEFI+ACPI firmware |
 
 The **Radxa Dragon Q8B** (Qualcomm SC8280XP) runs FreeBSD under ACPI in the sibling project
@@ -47,8 +47,8 @@ Legend: **P#** = roadmap phase in which the driver is first expected to work.
 | Early console | 16550 UART (SPCR / COM1), GOP framebuffer text | PL011 / SBSA generic UART (SPCR, else **DBG2**), GOP framebuffer text | P1 |
 | Watchdog | AMD FCH watchdog (WDRT table); Intel TCO later | SBSA generic watchdog (GTDT), with the Sky1 `WOR`-refresh quirk | P3 |
 | Persistent boot log | Reserved RAM ring that survives warm reset; the loader saves it to `\EFI\ABYSS\log\` on the next boot | same | P1 |
-| Broadcast / wake timer | HPET / LAPIC always-running | Platform timer when the generic timer stops in deep idle (Sky1: CIX GPT `CIXH1007`) | P8 (with deep idle) |
-| Firmware mailbox | — | PCC (PCCT type 2/3) + SCMI (clocks, power domains, performance) | P3 (PCC for AML) / P8 (SCMI clients) |
+| Broadcast / wake timer | HPET / LAPIC always-running | Platform timer when the generic timer stops in deep idle (Sky1: CIX GPT `CIXH1007`) | P9 (with deep idle) |
+| Firmware mailbox | — | PCC (PCCT type 2/3) + SCMI (clocks, power domains, performance) | P3 (PCC for AML) / P9 (SCMI clients) |
 | Interrupt controller | x2APIC/xAPIC, IOAPIC | GICv3 distributor/redistributor | P2 |
 | MSI/MSI-X | LAPIC message routing | GICv3 ITS | P3 |
 | Timers | TSC (invariant) + TSC-deadline, LAPIC timer, HPET (calibration) | Arm generic timer (virtual/physical) | P2 |
@@ -57,8 +57,8 @@ Legend: **P#** = roadmap phase in which the driver is first expected to work.
 | Entropy | RDRAND/RDSEED | RNDR (FEAT_RNG), virtio-rng, SMCCC TRNG | P3 |
 | Power | ACPI S5 (AML `_S5`), FADT reset register, power button (SCI/GPE) | PSCI off/reset, GED power button | P3 |
 | UEFI runtime | `GetTime`, `GetVariable`/`SetVariable` (for `efivar`), `ResetSystem` | same | P3 |
-| IOMMU | VT-d (DMAR), AMD-Vi (IVRS) | SMMUv3 (IORT) | P8 |
-| CPU frequency / idle | ACPI `_CST`/`_PSS`/CPPC, MWAIT, HWP | PSCI idle, CPPC | P8 |
+| IOMMU | VT-d (DMAR), AMD-Vi (IVRS) | SMMUv3 (IORT) | P9 |
+| CPU frequency / idle | ACPI `_CST`/`_PSS`/CPPC, MWAIT, HWP | PSCI idle, CPPC | P9 |
 
 ### Buses
 
@@ -85,10 +85,10 @@ Legend: **P#** = roadmap phase in which the driver is first expected to work.
 | Driver | Phase |
 |---|---|
 | Loopback | P6 |
-| virtio-net | P7 |
-| Intel e1000e (I219/82574) | P7 |
-| Intel igc (I225/I226) | P7 |
-| **Realtek RTL8125/RTL8126** (`rge` family: the X870E's 2.5 GbE and the Orange Pi 6 Plus's 5 GbE, the only wired NIC on either reference machine) | P7 (polled transmit-only log path optional from P3) |
+| virtio-net | P8 |
+| Intel e1000e (I219/82574) | P8 |
+| Intel igc (I225/I226) | P8 |
+| **Realtek RTL8125/RTL8126** (`rge` family: the X870E's 2.5 GbE and the Orange Pi 6 Plus's 5 GbE, the only wired NIC on either reference machine) | P8 (polled transmit-only log path optional from P3) |
 | Additional (ixgbe/ice, Realtek, Mellanox) | Depending on reference hardware |
 
 ### Human interface and display
@@ -115,12 +115,12 @@ for this hardware, and its Q8B `lessons.md` has the general bring-up hazards.
 | FP/SIMD | **SVE** implemented | `FpuState` must save SVE state, `AT_HWCAP`/`AT_HWCAP2` must advertise it correctly, and the SVE vector length must be restored after core power-down |
 | Interrupts | GICv3 + ITS (GICv4.1), 512 SPIs. Arm erratum 2941627 applies (Linux works around it) | Errata framework in `arch/aarch64` from P2. Investigate 2941627 before relying on ITS under load |
 | Timers | Generic timer at 1 GHz. GTDT has **no memory-mapped timer**. Core timers **stop in `_LPI` power-down states** | Deep idle needs a broadcast event timer: CIX GPT (`CIXH1007`, 25 MHz). Until then, idle uses WFI only |
-| Idle / DVFS | `_LPI` (WFI, core off, cluster off) via PSCI. `_CPC` with SystemMemory desired-perf (SCMI fastchannel) and FFixedHW AMU counters | Generic ACPI `_LPI` and CPPC drivers (P8). The firmware leaves `_LPI`'s context-lost flag clear, so use the PSCI state-type bit |
+| Idle / DVFS | `_LPI` (WFI, core off, cluster off) via PSCI. `_CPC` with SystemMemory desired-perf (SCMI fastchannel) and FFixedHW AMU counters | Generic ACPI `_LPI` and CPPC drivers (P9). The firmware leaves `_LPI`'s context-lost flag clear, so use the PSCI state-type bit |
 | Clocks / power | Power domains as ACPI power resources (`_PR0`/`_PR3`). Clocks are **AML methods that call SCMI over PCC** | The AML interpreter must support **PCC operation regions** and power resources (P3) |
 | AML quirks | DSDT references nonexistent `I2C0.UXC0`–`UXC3`. "Could not update all GPEs" | Unresolved references must be a logged, non-fatal error, never a panic |
 | PCIe | ECAM (MCFG), 3 `PNP0A08` root ports | Generic ECAM host. No quirks known |
-| Storage | NVMe (Micron 2550), behind SMMUv3. Relaxed ordering off | Works without the SMMU (firmware leaves bypass). SMMUv3 + IORT RMRs come in P8 |
-| Network | 2× **RTL8126 5 GbE** on PCIe | The only wired NIC, so P7 needs an `rge`-class driver for the board's exit |
+| Storage | NVMe (Micron 2550), behind SMMUv3. Relaxed ordering off | Works without the SMMU (firmware leaves bypass). SMMUv3 + IORT RMRs come in P9 |
+| Network | 2× **RTL8126 5 GbE** on PCIe | The only wired NIC, so P8 needs an `rge`-class driver for the board's exit |
 | USB | 10 xHCI hosts described in ACPI as `PNP0D10` (not PCI) | xHCI must attach via ACPI as well as PCI |
 | Watchdog | SBSA generic watchdog (GTDT). Writes to the refresh frame **do not refresh** it; refresh through `WOR` | Bring this up early (P3): it turns hangs into resets instead of power cycles |
 | Console | 10-pin 3.3 V debug header: UART2 pin 1 TX, pin 3 RX, pin 5 GND. GOP framebuffer 1920×1080 | A USB-TTL adapter is the primary bring-up console. The framebuffer console works from P1 |
@@ -130,7 +130,7 @@ for this hardware, and its Q8B `lessons.md` has the general bring-up hazards.
 **Access and workflow**
 
 - Today the board runs Ubuntu (CIX kernel) and FreeBSD 16-CURRENT from its NVMe. Nothing touches
-  it before P6. When the board's gating phase arrives (P6), **it is reimaged for AbyssBSD**. Before that, capture the ground truth (`acpidump` tables, `devinfo`,
+  it before P6's exit. When the board's gating phase arrives (P7), **it is reimaged for AbyssBSD**. Before that, capture the ground truth (`acpidump` tables, `devinfo`,
   `pciconf`, Linux register dumps) into `tests/corpus/opi6p/`, because the reference OSes will be
   gone afterwards.
 - Network: Ubuntu at `192.168.0.27` (user `jkane`, key login; root steps go through a script the
@@ -148,14 +148,14 @@ The AMD64 Tier 1 physical machine. Surveyed read-only from its Fedora 44 install
 | CPU | AMD Ryzen 9 7900X (Zen 4): 12 cores / 24 threads, 2 CCDs. AVX-512, FSGSBASE, INVPCID, SMEP, SMAP, UMIP, PKU, RDSEED, SHA, VAES, CPPC. **No LA57.** **No TSC-deadline** | 4-level paging. XSAVE state includes AVX-512. The LAPIC timer runs in one-shot mode, calibrated against HPET/TSC. Two CCDs with separate L3 caches, so topology (CPUID leaf `0x8000001E`/`0x80000026`, PPTT absent) matters for scheduling |
 | Memory | 96 GB DDR5 | — |
 | Firmware | AMI UEFI F2 (2024-08-14), 64-bit. **Secure Boot disabled, setup mode**. Boot entry `Boot0001` Fedora only | Our unsigned loader boots. AbyssBSD adds its own boot entry and never edits Fedora's |
-| ACPI | APIC (MADT), FACP, FACS, DSDT, **15 SSDTs**, HPET, MCFG, IVRS, BGRT, TPM2, VFCT, WDRT, WSMT, FPDT, FIDT. **No SPCR** | A large AML corpus from AMD and AMI firmware. WDRT gives the watchdog. IVRS describes AMD-Vi for P8 |
+| ACPI | APIC (MADT), FACP, FACS, DSDT, **15 SSDTs**, HPET, MCFG, IVRS, BGRT, TPM2, VFCT, WDRT, WSMT, FPDT, FIDT. **No SPCR** | A large AML corpus from AMD and AMI firmware. WDRT gives the watchdog. IVRS describes AMD-Vi for P9 |
 | Interrupts | Firmware leaves the APIC in **xAPIC** mode (CPUID shows no x2APIC). IOAPIC. MSI/MSI-X | The APIC driver must support xAPIC MMIO as well as x2APIC MSRs |
 | Timers | Invariant TSC (`constant_tsc`, `nonstop_tsc`), HPET, LAPIC | TSC is the timecounter. HPET is used for calibration |
-| CPU frequency | `amd-pstate-epp` under Linux (ACPI CPPC) | Generic CPPC driver (P8), shared with the Orange Pi 6 Plus |
+| CPU frequency | `amd-pstate-epp` under Linux (ACPI CPPC) | Generic CPPC driver (P9), shared with the Orange Pi 6 Plus |
 | Display | Boot VGA (UEFI GOP) is the **NVIDIA RTX 4070** (`10de:2786`). The iGPU (Radeon 610M) is also present | The GOP framebuffer console is the primary bring-up console. Native GPU drivers belong to M-G |
 | Storage | NVMe 0: Samsung 980 PRO 2 TB, **Fedora system disk**. **Second NVMe: AbyssBSD media** (to be installed). AMD 600-series AHCI ×2 | AbyssBSD owns only the second NVMe. AHCI is exercised by the P3 driver |
-| Data disks | **2× WD 8 TB (Linux RAID 0, `md0`) and 1× HGST 6 TB (`md1` member), user data** | Never written. The storage stack attaches them read-only until P8, and `xtask deploy` refuses any target other than the designated media NVMe |
-| Network | **Realtek RTL8125 2.5 GbE** (`10ec:8125`), MediaTek MT7925 Wi-Fi 7 | `rge`-family driver (P7), shared with the RTL8126 on the Orange Pi 6 Plus. Wi-Fi is out of scope for Day 1 |
+| Data disks | **2× WD 8 TB (Linux RAID 0, `md0`) and 1× HGST 6 TB (`md1` member), user data** | Never written. The storage stack attaches them read-only until P9, and `xtask deploy` refuses any target other than the designated media NVMe |
+| Network | **Realtek RTL8125 2.5 GbE** (`10ec:8125`), MediaTek MT7925 Wi-Fi 7 | `rge`-family driver (P8), shared with the RTL8126 on the Orange Pi 6 Plus. Wi-Fi is out of scope for Day 1 |
 | USB | AMD 800-series chipset xHCI ×2, CPU xHCI ×3, ASMedia ASM4242 USB4 host router + xHCI | xHCI on PCI. USB4/Thunderbolt tunneling is out of scope for Day 1 |
 | Serial | No SPCR. ACPI lists FCH UARTs (`AMDI0020` ×5) and Super I/O ports (`PNP0500` ×4), but no rear-panel COM port is known | **No serial console.** See the console strategy below |
 | Other | TPM 2.0, AMD PSP/CCP, HD Audio ×3, I²C (`AMDI0010`), GPIO (`AMDI0030`) | Not Day 1 |
@@ -167,7 +167,7 @@ The AMD64 Tier 1 physical machine. Surveyed read-only from its Fedora 44 install
    boot the loader saves the previous boot's log to `\EFI\ABYSS\log\` on the media NVMe's ESP, where
    Linux (or `xtask`) can read it.
 3. **AMD FCH watchdog** (from WDRT) in P3, so hangs become warm resets and the log survives.
-4. Optional: a polled transmit-only UDP log over the RTL8125 (shared code with the P7 driver), or
+4. Optional: a polled transmit-only UDP log over the RTL8125 (shared code with the P8 driver), or
    a PCIe 16550 serial card that the loader finds through UEFI PCI I/O and passes to the kernel.
    The serial card is a cheap hardware addition worth considering.
 5. USB keyboard input arrives with the USB track (needed for interactive login by P6).

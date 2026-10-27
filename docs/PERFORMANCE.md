@@ -57,8 +57,8 @@ The comparison must be like for like. Otherwise the number means nothing.
 
 | Phases | amd64 | aarch64 |
 |---|---|---|
-| P2–P5 | **Gating:** bhyve on the build server (i7-12700KF, P-cores only) | Recorded, not gating: QEMU TCG on x86 says nothing reliable about real performance |
-| P6 on | **Gating:** bhyve, and bare metal on the Ryzen 9 7900X / X870E | **Gating:** bare metal on the Orange Pi 6 Plus |
+| P2–P6 | **Gating:** bhyve on the build server (i7-12700KF, P-cores only) | Recorded, not gating: QEMU TCG on x86 says nothing reliable about real performance |
+| P7 on | **Gating:** bhyve, and bare metal on the Ryzen 9 7900X / X870E | **Gating:** bare metal on the Orange Pi 6 Plus |
 
 On bare metal, the baseline is FreeBSD 15.1-RELEASE on the same machine. If 15.1 cannot run on a
 reference machine, the closest FreeBSD release that does is used, and the report names it. On the
@@ -84,8 +84,8 @@ same format. It is test code that runs only on FreeBSD.
 | **P5** VFS and file systems | `stat`/`open`/`close` (namecache hit and negative-entry hit), `getdirentries` on large directories, create/unlink/rename storms, sequential and random read/write on UFS2 (cold and warm cache), `fsync` latency, extracting a tree onto UFS2 and onto tmpfs (`base.txz`'s `/usr/share` and `/usr/include` as an uncompressed tar, so xz does not dominate), `find` over it, the fsx workload's runtime |
 | **USB track** (before P6) | `vt` text output in bhyve against FreeBSD's `vt_efifb` with the same framebuffer and font: a large text file written to a visible window, a scrolling stream of short lines, a stream with frequent color changes, and output to a hidden window ([USB.md §10](USB.md#10-performance), [ADR-0015](adr/0015-usb-input-vt.md)). USB mass-storage throughput (BBB, sequential and random) is added on the physical machines at P6 |
 | **P6** Multi-user | Six components ([MULTIUSER.md §16](MULTIUSER.md#16-performance), [ADR-0016](adr/0016-multi-user.md)): `boot` (kernel time from loader handoff to multi-user `login:`, and `rc` alone), `thr` (`_umtx_op` mutex and condvar contention through `libthr`, normal, PI, and process-shared; rwlocks; semaphores; thread create/join), `event` (`kqueue` and `poll`/`select` throughput), `unix` (UNIX-socket ping-pong, bandwidth, datagrams, `SCM_RIGHTS`, connect rate), `pty` (pty throughput), `exec` (dynamic `execve` with rtld startup, and a shell-heavy `rc.subr` workload). kyua suite wall time is recorded as a diagnostic. All earlier suites now also run on both physical machines |
-| **P7** Networking | `iperf3` TCP and UDP throughput, single and multiple streams, over loopback, virtio-net, and the physical NICs. TCP request/response latency (p50/p99). TCP connection-establishment rate. `sendfile` throughput. CPU cost per gigabit at a fixed rate |
-| **P8** Self-hosting | Building AbyssBSD on AbyssBSD vs on FreeBSD on the same machine (`cargo xtask build --release --arch all`, clean and incremental). `make buildkernel` of FreeBSD. UFS2 SU+J metadata-heavy workloads. Swap-in/swap-out throughput under memory pressure. Idle power draw and wake latency on the physical machines, where measurable. The full cumulative suite on all gating platforms |
+| **P8** Networking | `iperf3` TCP and UDP throughput, single and multiple streams, over loopback, virtio-net, and the physical NICs. TCP request/response latency (p50/p99). TCP connection-establishment rate. `sendfile` throughput. CPU cost per gigabit at a fixed rate |
+| **P9** Self-hosting | Building AbyssBSD on AbyssBSD vs on FreeBSD on the same machine (`cargo xtask build --release --arch all`, clean and incremental). `make buildkernel` of FreeBSD. UFS2 SU+J metadata-heavy workloads. Swap-in/swap-out throughput under memory pressure. Idle power draw and wake latency on the physical machines, where measurable. The full cumulative suite on all gating platforms |
 
 ## 6. Tooling
 
@@ -107,5 +107,5 @@ rule in the other direction. The guest prints `vm.pmap.pti`, `hw.ibrs_active`, a
 `hw.mds_disable_state` into its console log before each run. PTI is the only mitigation whose
 default the missing register changes.
 
-Still planned: `--platform x870e|opi6p` (P6), and `--compare <rev>`, which compares two AbyssBSD
+Still planned: `--platform x870e|opi6p` (P7), and `--compare <rev>`, which compares two AbyssBSD
 revisions with the same statistics to check a change before it lands.

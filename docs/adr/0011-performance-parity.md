@@ -7,7 +7,7 @@
 ## Context
 
 The roadmap's exit criteria covered correctness and compatibility but not speed. Performance was
-left to a P8 "performance pass" and a P7 throughput target "set in planning". A rewrite that is
+left to a P9 "performance pass" and a P8 throughput target "set in planning". A rewrite that is
 correct but slower than the code it replaces is not a credible replacement, and performance lost
 in early layers (allocator, locks, scheduler, VM) is expensive to win back once everything is built
 on top of them.
@@ -28,9 +28,9 @@ same machine, under the stock FreeBSD kernel.
   the 2% bound fails the build like a kyua regression does.
 - The method (baseline configuration, fairness rules, statistics, and the benchmark list per phase)
   is in [PERFORMANCE.md](../PERFORMANCE.md).
-- Before P6, the gating platform is **bhyve on the build server** for amd64. aarch64 runs under QEMU
-  TCG on x86 hosts until P6, which says nothing reliable about real performance, so aarch64 results
-  are recorded but do not gate before P6. From P6 on, both physical reference machines gate, with
+- Before P7, the gating platform is **bhyve on the build server** for amd64. aarch64 runs under QEMU
+  TCG on x86 hosts until P7, which says nothing reliable about real performance, so aarch64 results
+  are recorded but do not gate before P7. From P7 on, both physical reference machines gate, with
   FreeBSD 15.1 on bare metal as the baseline
   ([ADR-0010](0010-qemu-first-development.md)).
 - There are no per-phase waivers. A benchmark can be excluded or given a different bound only by a
@@ -49,6 +49,6 @@ same machine, under the stock FreeBSD kernel.
 - Benchmarks must be quiet enough to resolve 2% (see the noise rule in PERFORMANCE.md). That forces
   pinned vCPUs, an otherwise idle build server during runs, and enough repetitions, which costs
   nightly CI time.
-- arm64 performance problems can surface late, at P6. Hot paths with arch-specific code (context
+- arm64 performance problems can surface late, at P7. Hot paths with arch-specific code (context
   switch, TLB maintenance, atomics, user copy) should be designed with ARM64 costs in mind from the
   start.

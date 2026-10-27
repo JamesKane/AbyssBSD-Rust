@@ -1,7 +1,10 @@
 # Driver Model
 
 - Status: **Accepted** ([ADR-0012](adr/0012-driver-model.md))
-- Date: 2026-10-18
+- Date: 2026-10-18. Amended 2026-10-27 after a review of the clean-room specifications
+  (`~/Projects/OS/chinese-wall/specs/`): firmware images (§8.6), platform description and overlays
+  (§5.5), dependency edge kinds and sources (§6.1), concrete platform providers (§8.5, §9.3), and
+  in-driver recovery (§13.3)
 - Scope: the device framework in `sys/bus` and its neighbors (P3 onward)
 - Evidence: [DRIVER-MODEL-SURVEY.md](DRIVER-MODEL-SURVEY.md)
 
@@ -107,7 +110,7 @@ Each principle comes from a failure that a surveyed system documented.
 | `sys/irq` (new, split out of the arch crates) | `IrqDomain` hierarchy, filter and ithread dispatch, MSI/MSI-X allocation, affinity | small (dispatch tables) |
 | `sys/vm::dma` | `DmaTag`, backends (direct, bounce, IOMMU), `DmaCoherent`, `Mapped`, pools | yes (it is the DMA layer) |
 | `sys/acpi`, `sys/pci`, `sys/virtio`, `sys/usb` | Bus drivers: enumeration, per-bus device views, child resources | `sys/pci`: config-space MMIO only |
-| `sys/iommu` (P8) | VT-d, AMD-Vi, SMMUv3 backends for `vm::dma` and interrupt remapping | yes |
+| `sys/iommu` (P9) | VT-d, AMD-Vi, SMMUv3 backends for `vm::dma` and interrupt remapping | yes |
 | `lib/regs` | Typed MMIO register blocks (extended with field-level definitions) | yes (already) |
 | `drivers/*` | Leaf drivers | **forbidden** |
 | `kernel` / platform config | The driver table for each build (§7.1) | — |
@@ -268,6 +271,11 @@ ACPI devices expose `_HID`/`_CID`/`_UID`, `_ADR`, `_DSD` properties as typed val
 (`DeviceProperty`, mirroring FreeBSD's `device_get_property()` kinds), `_DSM` evaluation, and the
 AML handle for notify registration. These views replace FreeBSD's `BUS_READ_IVAR` (S§2.3.5).
 
+A PCI function that firmware also describes in the namespace has an **ACPI companion**, as in
+FreeBSD's `acpi_pci`: `PciFunction::acpi_companion() -> Option<AcpiDevice<'_>>`. Through it a PCI
+driver reads `_DSD` (USB4 `IMR_VALID` and `WAKE_SUPPORTED`), evaluates `_DSM` (retimers), and the
+framework finds `_PRW` and `_S0W`. The companion's dependency edges (§6.1) apply to the PCI node.
+
 ### 5.3 Multi-function devices
 
 - **Transport buses.** virtio-pci is a bus: it attaches to the PCI function and enumerates a virtio
@@ -279,6 +287,15 @@ AML handle for notify registration. These views replace FreeBSD's `BUS_READ_IVAR
 - **Aggregates.** A device that needs several others (a display pipeline, an ACPI device that needs
   an I2C controller, a GPIO controller, and a power resource) is not a special mechanism. It is a
   node with several suppliers in the dependency graph (§6). It attaches when all of them have.
+  Some aggregates have no firmware node of their own (a display card built from a DPU, an
+  encoder, a PHY, and a panel). The platform description (§5.5) creates a synthetic node for them,
+  whose suppliers are the members. The members publish narrow hardware traits to it through
+  gates, and the aggregate owns the class publication. The design of those traits is M-G work.
+- **Several PCI functions, one chip.** When one function's BAR holds registers its siblings need
+  (the TC956x's chip-wide clock and reset block is decoded only by function 0), function 0
+  publishes a provider (§9.3) wrapping those registers, and the sibling depends on it with
+  `Need::Device`. The functions form a **reset group**: a reset of one detaches every function
+  in the group first (§13.3).
 
 ### 5.4 The platform root and early devices
 
@@ -300,6 +317,36 @@ the order [ARCHITECTURE.md §4](ARCHITECTURE.md#4-boot-flow) gives.
 This replaces FreeBSD's ROOT, CPU, RESOURCE, INTERRUPT, TIMER, and SCHEDULER bus passes: everything
 those passes order is either initialized before the tree, or ordered by the graph.
 
+### 5.5 Platform description and overlays
+
+ACPI tables on arm64 SoCs are often incomplete or wrong, and some vendors describe clocks, resets,
+and power outside the standard objects. Rather than spreading fixes through drivers, each
+supported platform may have a **platform description**: `const` data in `lib/devtree`, selected by
+the firmware's identity (FADT/MCFG OEM ID, a namespace object such as Qualcomm's `\_SB.SOID` or
+CIX's `CIXA1019`), host-tested against the captured tables. It is FreeBSD's `acpi_quirks`, made
+data and widened. It may:
+
+| Entry | Example |
+|---|---|
+| **Fix a resource**: add, correct, split, or suppress a `_CRS` entry, keyed by `_HID`/`_UID` | Q8B: GMU interrupts missing from `\_SB.GPU0`; `GPU0` resource 3 encloses resource 6; SPCR's wrong GSI |
+| **Override an attribute** | Sky1: `_CCA = 1` on the GPU (`CIXH5000`), which must be treated as non-coherent |
+| **Split a node into function children** (§5.3) | Q8B: `\_SB.GPU0` covers the GPU, the display subsystem, and the video codec, after Windows' single-miniport model |
+| **Create a synthetic node** for a block with no namespace object | Q8B clock controllers (GPUCC, DISPCC, VIDEOCC), cmd-db, SMEM; aggregates (§5.3) |
+| **Add dependency edges** (§6.1) and provider bindings (§9.3) | Q8B: which power domain, clocks, and interconnect paths each `PEP0` consumer needs |
+| **Describe reserved memory** (§8.4) | Carveouts, firmware shared memory |
+
+An extractor for vendor tables that live in AML (CIX's `CLKT`, `RSTL`, `RSNL`, `DLKL`, `RSVL`)
+also belongs here: it evaluates them at graph build and produces the same typed entries.
+
+Rules:
+
+- The description changes what firmware *says*, never driver behavior. Driver quirks stay on match
+  entries (§7.2).
+- Every entry names the firmware defect or omission it addresses, and the board corpus test
+  fails if an entry no longer applies.
+- This is not a board configuration knob. A platform description is selected by firmware identity,
+  needs no user action, and is part of the kernel ("nothing special").
+
 ## 6. Dependencies and ordering
 
 ### 6.1 The dependency graph
@@ -314,14 +361,37 @@ firmware, before any driver runs:
 | ACPI `_CRS` resource sources | GPIO controller (`GpioIo`/`GpioInt`), I2C/SPI/UART controller (`*SerialBus`), interrupt combiner (extended IRQ with a source) → device |
 | ACPI power resources (`_PR0`, `_PR3`) | power resource provider → device |
 | PCCT / PCC operation regions | PCC mailbox → device whose AML uses that channel |
-| IORT (P8) | SMMU → each device it translates. ITS group → each device whose MSIs it receives |
-| DMAR / IVRS (P8) | IOMMU unit → each device in its scope |
+| IORT (P9) | SMMU → each device it translates. ITS group → each device whose MSIs it receives |
+| DMAR / IVRS (P9) | IOMMU unit → each device in its scope |
 | MADT / GSI routing | interrupt controller → each device using its GSIs (mostly satisfied by adoption) |
 | `_PRT` link devices | PCI interrupt link → device |
+| `_CRS` `FixedDMA` | DMA engine → device (with `_DSD` `dma-names` for the channel's role) |
+| `_CRS` `PinFunction`, `PinConfig`, `PinGroup*` | Pin controller → device |
+| `GenericSerialBus` and `GeneralPurposeIo` operation regions | I2C/SPI controller or GPIO controller → device whose AML uses the region (a `_PS0` that talks to a PMIC) |
+| `_DSD` reference properties, from a table of known names (`mboxes`, `shmem`, `power-domains`, `phys`, `dp_phy`, `usb4-host-interface`, `phy-handle`, `backlight`, …) | Referenced object → device, with the kind the table gives |
+| `_DSD` graph ports and endpoints | Upstream → downstream in a media pipeline (a DPU → its DP transmitter) |
+| Platform description (§5.5) | Whatever it declares: vendor clock and reset tables, Qualcomm `PEP0` consumers, synthetic nodes |
 | Driver-declared (rare) | `cx.require(Need::…)` during attach, naming a firmware reference |
 
-Edges carry a kind: **required** (the consumer cannot attach without the supplier) or **optional**
-(the consumer attaches without it, and is told when it appears). An unresolved reference (a
+Edges carry a kind:
+
+| Kind | Attach | Shutdown, suspend, resume, runtime PM | Example |
+|---|---|---|---|
+| **Required** | The consumer waits for the supplier | Ordered | `_DEP`, `GpioInt` |
+| **Optional** | The consumer attaches without it, and is told when it appears | Ordered once present | An I2S port the audio card can do without |
+| **Order** | Not gated | Ordered: the supplier suspends after and resumes before the consumer | A USB4 port's `usb4-host-interface` reference to its NHI |
+| **Power** | The consumer waits | Ordered, and the supplier stays powered while the consumer is | A DP transmitter in the display controller's power domain |
+
+Keeping **Order** and **Power** apart from **Required** matters for cycles: a DP transmitter needs
+the DPU's power domain while the DPU uses the transmitter as its encoder. Those are a Power edge one
+way and a pipeline edge the other, and only the second is a candidate to break (§6.2).
+
+A supplier is not always a device. An ACPI object with `_STA = 0` that exists only to be
+referenced (the SCMI protocol nodes on Sky1), or a data-only child (a PHY's per-port `UDPP`
+child), resolves to a **sub-handle** of the provider that owns it, `ProviderRef { node, sub }`,
+rather than to a node that would never get a driver and would emit a `?` event.
+
+An unresolved reference (a
 `_DEP` naming an object no node provides) is recorded as `WaitReason::Unresolved`. For a
 required edge, that is a diagnosable state, never a hang: the Sky1 DSDT's reference to a
 nonexistent `I2C0.UXC0` becomes a logged, typed error ([HARDWARE.md §4](HARDWARE.md)).
@@ -338,15 +408,18 @@ report) lives in `lib/devtree` and is tested on the host against the ACPI corpus
    (S§5.4.2).
 4. A driver that finds during attach that it needs something not described by firmware returns
    `AttachError::Wait(Need)`. `Need` names the reference, so the same targeted wakeup applies. A
-   `Wait` without a resolvable name is not representable.
+   `Wait` without a resolvable name is not representable:
+   - `Need::AcpiPath(path)`: the node with that ACPI path, woken when it attaches;
+   - `Need::Device(id)`: a node the driver already knows, such as a PCI sibling (§5.3);
+   - `Need::Image(name)`: a firmware image not yet available, woken when root is mounted (§8.6).
 5. At the end of boot (the point where FreeBSD runs `config_intrhook` and mounts root), the manager
    logs every node still in `Waiting`, with its chain of missing suppliers, and exports it under
    `kern.abyss.bus.waiting` ([COMPATIBILITY.md](COMPATIBILITY.md) puts extensions under
    `kern.abyss.*`).
 
 **Cycles.** Firmware cycles are reported at graph build time. They are broken by dropping
-optional edges first, then non-tree edges whose consumer is the cycle's ancestor in the tree.
-Tree edges are never dropped. A cycle that cannot be broken leaves its nodes in `Failed`, with
+optional and order edges first, then non-tree edges whose consumer is the cycle's ancestor in the
+tree. Tree edges and power edges are never dropped. A cycle that cannot be broken leaves its nodes in `Failed`, with
 the cycle in the log.
 
 ### 6.3 Shutdown, suspend, and resume order
@@ -357,7 +430,7 @@ The same graph orders every system transition:
   Each binding's `quiesce` stops DMA and masks the device's interrupts before firmware takes over
   (ACPI S5 or PSCI `SYSTEM_OFF`). This matters for warm reset, where devices left running can DMA
   into the next boot's memory.
-- **Suspend** (stretch, P8): reverse topological order. **Resume**: topological order.
+- **Suspend** (stretch, P9): reverse topological order. **Resume**: topological order.
 - Independent subtrees run their transitions in parallel, as attach does.
 
 Ordering by the graph rather than by sibling order (S§2.3.4) means an IOMMU, a power resource, or
@@ -610,7 +683,7 @@ Each bus that hands out ranges keeps a **resource space** (the `rman` equivalent
 | `IoPort` | Legacy PCI I/O BARs, 16550 at `0x3f8` | **x86_64 only**, gated by `cfg`. The `RegisterIo` trait in `lib/regs` lets one driver serve both forms |
 | `BusNumber` | PCI bus ranges | Validated, not reassigned on Day 1 (firmware assignment is kept) |
 | `Irq` | GSIs, SPIs, MSI vectors (§8.3) | Through IRQ domains |
-| `DmaWindow` | IOMMU address space (P8) | Through DMA tags (§8.4) |
+| `DmaWindow` | IOMMU address space (P9) | Through DMA tags (§8.4) |
 
 - **Grants are vetted.** A driver can only claim resources in its own node's resource list. The
   broker additionally refuses **sensitive ranges** to leaf drivers: interrupt controller, IOMMU, and
@@ -618,6 +691,21 @@ Each bus that hands out ranges keeps a **resource space** (the `rman` equivalent
   `ResourceError`, logged with the driver's name.
 - **Firmware-reserved ranges** (`PNP0C01`/`PNP0C02` system resources, the UEFI memory map's MMIO
   entries) are claimed at boot by the platform root, as FreeBSD's `sysres` does.
+- **Ranges AML also touches.** The ACPI core records every `SystemMemory` and `SystemIO`
+  operation region in the resource spaces as *firmware-shared*. A grant that overlaps one
+  succeeds as `Grant::Shared { with: Aml }`, and the driver must treat its accesses as racing with
+  firmware: it declines, or restricts itself to reads, unless the platform description (§5.5)
+  says otherwise. A Super I/O whose environment-controller ports a `SystemIO` region covers is
+  the common case.
+- **Ranges two nodes share.** Firmware sometimes gives two devices overlapping ranges on purpose
+  (Sky1's SCMI shared memory inside its mailbox's 64 KiB window). Overlaps are refused unless the
+  platform description declares them, and then each side gets a `Grant::Shared { with: node }`.
+  A register block several drivers program (a "syscon": Sky1's audio CRU, the reset
+  controller's PHY orientation bits) is never granted to them directly. Its owner publishes a
+  `RegisterRegion` provider (§9.3) that leases field subsets and does the read-modify-write under
+  its own lock.
+- **Splitting a claim.** `Mmio<R>::split` turns one granted window into typed sub-blocks, for a
+  window that holds several register blocks (a GPU window that also holds its management unit).
 - The resource spaces are exported as `hw.bus.rman` for `devinfo -r` and `-u` (§11.1).
 
 ### 8.2 Typed register blocks
@@ -638,7 +726,7 @@ Interrupts form a hierarchy of **IRQ domains**, as in FreeBSD's INTRNG and Linux
 (S§2.1, S§5.1). The same model serves both ISAs:
 
 ```
- amd64:  device MSI-X entry → PCI MSI domain → (remapping, P8) → LAPIC vector domain → CPU
+ amd64:  device MSI-X entry → PCI MSI domain → (remapping, P9) → LAPIC vector domain → CPU
          ACPI GSI           → I/O APIC domain                    → LAPIC vector domain → CPU
  arm64:  device MSI-X entry → PCI MSI domain → ITS domain (DeviceID/EventID → LPI) → GIC redist → CPU
          ACPI GSI (SPI)     → GIC distributor domain                                 → CPU
@@ -664,6 +752,14 @@ Interrupts form a hierarchy of **IRQ domains**, as in FreeBSD's INTRNG and Linux
   `cpuset -x` (`cpuset_setaffinity` on `CPU_WHICH_IRQ`) is supported from P6.
 - **Storm detection**: a line that fires faster than a threshold with `Stray` results is masked and
   logged, as FreeBSD's `hw.intr_storm_threshold` does.
+- **Driver-published domains.** A leaf driver whose device aggregates interrupts for its function
+  children (a display subsystem's interrupt status register, a MAC's MSI generator carrying a
+  PHY's interrupt, Qualcomm's IPCC) publishes a child domain with `StartCx::irq_domain(...)`. It
+  supplies safe mask, unmask, and status callbacks, and its children allocate from it as from any
+  domain. The domain is part of the binding and is torn down after its children have detached.
+- **Wake.** An interrupt firmware marks as a wake source (`GpioInt` with `…AndWake`, `_PRW`)
+  carries that flag on its `IrqLine`. `IrqLine::set_wake(bool)` arms it for suspend, through the
+  owning domain (on Sky1, a firmware call; §8.7). This is used from P9.
 
 ### 8.4 DMA
 
@@ -673,11 +769,12 @@ ownership made explicit in the types.
 ```rust
 pub struct DmaConstraints {
     pub addr_bits: u8,          // 32, 48, 64 …
+    pub window: Option<DmaWindow>, // bus address = CPU address - cpu_base + bus_base, within len
     pub align: Align,
     pub boundary: Option<Boundary>,
     pub max_segment: ByteCount,
     pub max_segments: u16,
-    pub coherent: Coherency,    // from _CCA / IORT, or the arch default
+    pub coherent: Coherency,    // from _CCA / IORT, the platform description (§5.5), or the arch default
 }
 
 impl AttachCx<'_, B> {
@@ -692,7 +789,7 @@ impl AttachCx<'_, B> {
 |---|---|---|
 | `Direct` | No IOMMU and the device reaches all memory | Address arithmetic only |
 | `Bounce` | The device cannot reach some memory (`addr_bits` below the top of RAM) | Copy, for out-of-range pages only |
-| `Iommu` (P8) | VT-d, AMD-Vi, SMMUv3. One DMA domain per device, or per isolation group | Page-table updates. IOTLB invalidation is batched and deferred |
+| `Iommu` (P9) | VT-d, AMD-Vi, SMMUv3. One DMA domain per device, or per isolation group | Page-table updates. IOTLB invalidation is batched and deferred |
 
 **Types.**
 
@@ -730,7 +827,28 @@ impl AttachCx<'_, B> {
 3. Unmapping completes before the CPU reuses a buffer, including the IOTLB invalidation. Deferred
    invalidation batches across buffers, but never lets the CPU reuse a page the device can still
    reach.
-4. Interrupt remapping is enabled together with DMA remapping (P8).
+4. Interrupt remapping is enabled together with DMA remapping (P9).
+
+**Windows and offsets.** Some masters see memory at an offset, or only through a window: Sky1's
+audio DMA sees DRAM at the CPU address minus `0x9000_0000` inside 2 GiB, and the TC956x adds
+`0x10_0000_0000` to every bus address. `DmaConstraints::window` describes this, from `_DMA`,
+`_DSD`, or the platform description, so drivers never do the arithmetic themselves.
+
+**Reserved memory.** Memory that firmware sets aside for a device (UEFI-reserved carveouts listed by
+the platform description, CIX's `RSVL`, Qualcomm's remote-processor regions, cmd-db and SMEM) is a
+`ReservedRegion` grant with its memory attributes (Normal-NC, WC, or none). A DMA tag can be built
+over it with `DmaTag::from_reserved(region)`, which allocates within it and still hides its physical
+address. A region handed to a secure monitor for authentication moves to a state in which the CPU
+mapping is revoked, because touching it afterwards faults (§8.7).
+
+**Device-walked page tables and per-context address spaces** (GPUs, video codecs, NPUs, and
+SMMUv2 context banks) are outside what `DmaCoherent` and `Mapped` express: the driver must write
+bus addresses into memory the device walks. The plan is an opaque `BusAddr`, obtainable only from a
+mapping and writable only into a page-table format type or an address-typed register field, and
+an `IoPageTable<F: PteFormat>` whose table pages and cache maintenance the DMA layer owns. Buffers
+mapped by the CPU and several devices at once (dma-buf, GEM objects) and fences belong with it.
+These are designed with the IOMMU backends (P9) and the graphics milestone, in a separate
+document, and are listed in §17.
 
 **Untrusted device data.** Anything read from a `DmaCoherent` or a register is untrusted input:
 completion queue entries, descriptor indices, lengths, and status words. Drivers bounds-check
@@ -740,13 +858,76 @@ case of this.
 
 ### 8.5 Power resources and clocks
 
-- **The framework guarantees power while a driver runs.** Before `attach`, the bus turns on the
-  device's power resources (`_PR0` via the ACPI power-resource provider, or the SCMI power domain on
-  Sky1) and sets D0 (`_PS0`). They stay on while the binding exists, unless the driver is suspended
-  through the framework. No driver code runs against an unpowered device. On the Q8B, a read of a
-  clock controller whose power domain was off reset the SoC (S§13.2 class 7).
-- Clocks, resets, and power domains that firmware exposes outside AML (SCMI over PCC, P8) are
-  platform providers (§9.3), reached through the dependency graph.
+- **The framework guarantees power while a driver runs.** Before `attach`, the framework brings up
+  every power supplier the device has: its ACPI power resources (`_PR0`, through the ACPI
+  power-resource provider), and any `PowerDomain` the platform description or a `_DSD` reference
+  names (§6.1). Then it sets D0 (`_PS0`). They stay on while the binding exists, unless the
+  device is suspended through the framework. No driver code runs against an unpowered device. On
+  the Q8B, a read of a clock controller whose power domain was off reset the SoC (S§13.2 class 7).
+- **Clocks and resets the driver sequences itself.** Many SoC blocks need a sequence the
+  framework cannot know (power on, clocks on, hold reset 10–20 µs, release, then a vendor
+  register), repeated on every resume. The driver gets handles in `attach`, resolved through its
+  supplier edges:
+
+  ```rust
+  let core = cx.clock("core")?;            // Option-returning variants exist for optional ones
+  let rst  = cx.reset("gpu")?;
+  core.set_rate(Hz(800_000_000))?;          // sleeps: ThreadCx and attach/start/stop only
+  core.enable()?;
+  rst.pulse(Micros(20))?;
+  ```
+
+  Names come from firmware (`_DSD` `clock-names`, CIX's `CLKT`/`RSTL`) or the platform
+  description. Handles are counted: a reset line shared by four GPIO controllers is asserted only
+  when every holder asks, and `pulse` on a shared line is refused unless the provider declares the
+  group safe to reset.
+- **Firmware owns what it can.** Where firmware provides the control (ACPI power resources and
+  `_PSx`, SCMI, RPMI on RISC-V), drivers use it, and no OS driver programs a clock tree firmware
+  owns. Where firmware does not (Qualcomm's GDSCs, RPMh votes, and branch clocks behind `PEP0`),
+  an OS provider implements the same traits, driven by the platform description.
+- **Runtime power management** is needed from the first GPU, video codec, and NPU drivers, not only
+  later: they idle in tens of milliseconds, and suspend is a firmware handshake the driver performs.
+  A driver holds a `PowerRef` guard while the device must stay up (a class may hold one too), and
+  supplies `runtime_suspend` and `runtime_resume`. The framework calls them when the last guard
+  drops and turns the domain off only after `runtime_suspend` returns. Until a driver opts in, its
+  device stays powered while bound (§14).
+
+### 8.6 Firmware images
+
+Devices that need an image (GPU microcontroller firmware, DSP and modem images, video codec
+firmware, PHY patches) get it from a **firmware store**, FreeBSD's `firmware(9)` with the same
+image names, which follow Linux's `linux-firmware` layout so the files can be shared:
+
+```rust
+let fw = cx.firmware(&format_args!("arm/mali/arch{}.{}/mali_csffw.bin", id.arch_major, id.arch_minor))?;
+```
+
+- **Sources**, in order: images built into the kernel (small patches, as FreeBSD's `rge` embeds
+  its microcode), images the loader preloads from the ESP (`/boot/firmware/…`, FreeBSD's
+  preloaded `firmware(9)` images), then the root file system once it is mounted.
+- An image not yet available returns `AttachError::Wait(Need::Image(name))`. The manager wakes the
+  node at mountroot and again whenever the store gains images, and logs the name of an image still
+  missing at the end of boot (§6.2 step 5). `ThreadCx::firmware` serves lazy loads (a video codec
+  loads one image per codec when a session opens).
+- An `FwImage` is an immutable, counted byte slice. The driver may keep it for reloads after a
+  hang reset. Its contents are untrusted input: parsers are host-tested and fuzzed.
+- Names that depend on the board (Qualcomm's `qcom/sc8280xp/<vendor>/<model>/…`) are resolved
+  from firmware (`_SUB`, `PSUB`) or the platform description, never from configuration.
+- Signed images are not checked by the kernel. The device or the secure monitor authenticates them
+  (§8.7).
+
+### 8.7 Firmware calls
+
+Some operations go to platform firmware through an SMC or HVC: SCMI over SMC (Sky1's power domains),
+vendor SiP calls (Sky1's GPIO wake mask and display handover flag), and the Qualcomm secure
+monitor (peripheral authentication, `INIT_IMAGE`, `AUTH_AND_RESET`). Drivers cannot issue them
+directly (no `unsafe`, no inline assembly). The broker provides:
+
+- **`FirmwareCall` grants**, each covering one function ID with a typed argument shape. They are
+  listed on the driver's match entry or in the platform description, and logged.
+- A **secure-monitor provider** in the arch crate for calls that take memory. Physical addresses
+  travel only as opaque `ReservedRegion` or `TzBuffer` tokens the provider resolves. It handles the
+  protocol's retry and wait-for-interrupt returns, so drivers see one call that may sleep.
 
 ## 9. Classes and publications
 
@@ -759,7 +940,7 @@ disk and iflib (S§13.3).
 | Class (crate) | Driver trait | Published as | User-visible names |
 |---|---|---|---|
 | storage (`sys/storage`) | `DiskQueues`: submit a batch of bios to a hardware queue, completion via the class's callback | GEOM-lite disk provider | `nda*`, `ada*`, `vtbd*`, plus partitions |
-| net (`sys/net`, P7) | `EtherQueues`: tx/rx queue pairs, offload capabilities, link state, filter programming (iflib-shaped) | `ifnet` | `vtnet*`, `re*`, `igc*`, … |
+| net (`sys/net`, P8) | `EtherQueues`: tx/rx queue pairs, offload capabilities, link state, filter programming (iflib-shaped) | `ifnet` | `vtnet*`, `re*`, `igc*`, … |
 | tty (`sys/tty`) | `UartHw`: line settings, tx/rx FIFOs, modem lines | tty | `ttyu*`, `cuau*` |
 | console | `ConsoleOut`, `ConsoleIn` | Kernel console | `/dev/console`, `ttyv*` (with fb) |
 | input (USB track) | `KbdSource`, `PointerSource` | kbd / evdev (FreeBSD's evdev ABI) | `/dev/kbd*`, `/dev/input/event*` |
@@ -824,6 +1005,25 @@ node), and consumers reach them through the dependency graph rather than by glob
 // In a consumer's attach, for a GpioInt in its _CRS:
 let irq = cx.gpio_interrupt(GpioRef::from_crs(0))?;    // resolves the supplier edge from §6.1
 ```
+
+The provider traits, all in `sys/bus` so consumers depend on no particular provider crate:
+
+| Trait | Operations | Providers |
+|---|---|---|
+| `Clock` | enable, disable, `round_rate`, `set_rate`, `rate` | SCMI clock protocol; Qualcomm GCC/GPUCC/DISPCC/VIDEOCC; AML methods |
+| `Reset` | assert, deassert, `pulse` (counted; group-aware) | SCMI reset; CIX S5 reset controller; Qualcomm block resets |
+| `PowerDomain` | vote a level (`PerfLevel`, with on/off as the two-level case); votes from all consumers are combined by maximum | ACPI power resources; SCMI power; Qualcomm GDSCs and RPMh ARC levels; RPMI |
+| `PerfDomain` | `levels()`, `request(level)`; the provider rate-limits and deduplicates, because firmware channels are shared | SCMI performance (Sky1 GPU, VPU, NPU); Qualcomm GMU and EPSS |
+| `Interconnect` | vote average and peak bandwidth on a path | Qualcomm BCM through RPMh |
+| `Phy` | counted `power_on`/`off`; `configure(mode)` leases lanes, and a reconfiguration first tells each lessee its lanes are revoked | USB/DP combo PHYs on Sky1 and SC8280XP |
+| `RegisterRegion` | leases a field subset of a shared register block (§8.1) | Sky1 audio CRU; S5 reset controller's PHY bits; TC956x function 0 |
+| `DmaEngine` | slave and cyclic channels by request line | Sky1 DMA-350 |
+| `Mailbox` | typed channels (doorbell, FIFO, shared memory) | CIX mailbox; PCC; Qualcomm IPCC |
+| `Gpio`, `I2c`, `Spi`, `Pinctrl` | as their FreeBSD counterparts (`gpiobus`, `iicbus`, `spibus`) | SoC controllers |
+
+Providers are reached through supplier edges (§6.1), and a handle names a sub-handle where the
+supplier is a `_STA = 0` stub or data-only child. Operations that talk to firmware sleep, so they
+take a `ThreadCx` or an attach, start, or stop context, never `IrqCx`.
 
 Provider handles held by a consumer go through the same `Gate` mechanism. A supplier cannot detach
 while it has attached consumers, because the graph detaches consumers first (§10.1). The gate makes
@@ -906,6 +1106,11 @@ removal as all-ones reads, failed transfers, or timeouts. Drivers must treat the
 (§8.4), and the class fails outstanding requests. The node stays in the tree, in state `Gone`,
 until the last `DeviceRef` is dropped.
 
+All-ones reads are what x86 and most arm64 root complexes return. Some do not: on the SC8280XP a
+completer abort or unsupported request is a fatal SError. The PCI bus records, per root complex,
+whether such errors are contained, and hotplug, USB4 tunnels, and `DEV_RESET` are refused below a
+complex where they are not, until RAS containment exists for it.
+
 ### 10.4 Attach failure
 
 An attach that returns an error drops everything it claimed (ownership), and the node moves to:
@@ -958,9 +1163,9 @@ formats, because `devd.conf` rules and `devmatch` match on them:
   full, and quoting follows `devctl_safe_quote_sb()`.
 - Notifications that devd's stock rules expect come from their owning subsystems: `ACPI` (power
   button, lid, AC adapter, thermal, and `notify=0x..` for ACPI `Notify`), `kernel power resume`,
-  `IFNET` link state (P7), `GEOM` (`DEV` create and destroy), `USB`, and `DEVFS` (`CDEV` create and
+  `IFNET` link state (P8), `GEOM` (`DEV` create and destroy), `USB`, and `DEVFS` (`CDEV` create and
   destroy).
-- devctl events also feed the netlink `nlsysevent` hook when netlink lands (P7), as in FreeBSD.
+- devctl events also feed the netlink `nlsysevent` hook when netlink lands (P8), as in FreeBSD.
 
 ### 11.4 `/dev/devctl2`
 
@@ -971,7 +1176,7 @@ The `devreq` ioctls map onto manager operations:
 | `DEV_ATTACH` | Match and attach a `NotPresent` or `Failed` node |
 | `DEV_DETACH` | Detach (`Requested`, or `Forced` with `DEVF_FORCE_DETACH`) |
 | `DEV_ENABLE`, `DEV_DISABLE` | Clear or set `DF_ENABLED`; disable detaches |
-| `DEV_SUSPEND`, `DEV_RESUME` | Per-device suspend and resume (P8; `EOPNOTSUPP` before) |
+| `DEV_SUSPEND`, `DEV_RESUME` | Per-device suspend and resume (P9; `EOPNOTSUPP` before) |
 | `DEV_SET_DRIVER`, `DEV_CLEAR_DRIVER` | Driver pin (§7.2) |
 | `DEV_RESCAN` | `Bus::enumerate` again on a bus node |
 | `DEV_DELETE` | Detach and delete a node, if its bus allows it |
@@ -1003,7 +1208,7 @@ The design keeps the framework off every hot path:
 | I/O submission | GEOM → `d_strategy` pointer → driver | Class → gate enter (per-CPU) → `&dyn DiskQueues` call | Gate enter is comparable to `si_threadcount`. Batching amortizes it |
 | Completion | Filter or ithread → `biodone` | Filter or ithread → class completion, batched | None |
 | DMA map (no IOMMU) | `_bus_dmamap_load_*` with callbacks | `DmaTag::map`: address arithmetic, inline no-op syncs when coherent | Expected faster (no callback, no deferred-load machinery) |
-| DMA map (IOMMU, P8) | DMAR or SMMU page-table updates, deferred invalidation | Pools for steady-state buffers, batched invalidation for the rest | Same or better, and measured |
+| DMA map (IOMMU, P9) | DMAR or SMMU page-table updates, deferred invalidation | Pools for steady-state buffers, batched invalidation for the rest | Same or better, and measured |
 | Serialized driver | Driver's own mutex | Framework mutex around the entry point | None. Same lock, taken in a different place |
 
 Rules for hot paths:
@@ -1013,7 +1218,7 @@ Rules for hot paths:
 - Generic code is monomorphized only where it pays off (the per-driver handler shims). Bus and
   manager code uses `&dyn` ([ENGINEERING.md §6](ENGINEERING.md#6-style-and-lints)).
 - MSI-X vectors per CPU or per cluster, so completions run where submissions did.
-- Polling mode (busy-poll and interrupt moderation) is a class feature for net (P7), not a driver
+- Polling mode (busy-poll and interrupt moderation) is a class feature for net (P8), not a driver
   rewrite.
 
 The P3 suite already measures interrupt latency and block IOPS and latency through virtio-blk and
@@ -1078,17 +1283,28 @@ Most driver recovery is a device reset, not a driver restart (S§7.1, TDR):
   identity (the same namespace on the same controller). Queued requests are retried, if the class
   allows it, instead of failing. Open files survive.
 - `DEV_RESET` from devctl triggers the same path.
+- `ResetKind` includes `DriverDefined` for devices whose reset is not a bus operation: a remote
+  processor is stopped (with its stop handshake) and its image re-authenticated and restarted.
+- **Recovery inside the driver is allowed** when the device can recover without losing state that
+  userland holds. A GPU hang is reset by reloading its firmware while VMs, buffers, and open files
+  persist, and that is frequent enough that a rebind would be wrong. The framework reset above is
+  for the case the driver cannot recover from, and a device that cannot be brought back at all is
+  moved to `Gone`.
 
 ## 14. Future seams
 
 These are not Day-1 work. The design keeps room for them so they do not need a new model:
 
-- **Runtime power management (P8).** Per-device idle with usage counts held by classes, and
-  power-managed class queues that resume the device before submission (WDF, S§7.1). The
-  dependency graph already gives the order.
+- **Runtime power management (P9).** The driver interface is in §8.5. What remains is
+  power-managed class queues that resume the device before submission (WDF, S§7.1), and idle
+  policy for storage and network. The dependency graph already gives the order.
 - **Hotplug (USB track, then PCIe).** Gone handling (§10.3) is part of the base design, and USB
-  exercises it first.
-- **IOMMU groups (P8).** The DMA domain is per group, and the broker reports the group as
+  exercises it first. PCIe hotplug (and USB4 PCIe tunnels behind it) needs a port-service
+  driver on bridges, `_OSC` control requests per feature as FreeBSD's
+  `acpi_pcib_request_feature` makes them, and bus numbers and windows sub-allocated from the
+  parent bridge, including firmware's hotplug padding. Devices behind an `ExternalFacingPort`
+  get an IOMMU or bounce DMA tag, never `Direct`, so tunnels stay off until P9.
+- **IOMMU groups (P9).** The DMA domain is per group, and the broker reports the group as
   `%iommu`. bhyve passthrough (`ppt`) would attach to a group, not to a function.
 - **Low-rate drivers outside the kernel** (after v1.0, if ever). Because drivers see hardware only
   through grants (MMIO, IRQ, DMA) and classes only through traits, a grant proxy could host a
@@ -1123,9 +1339,10 @@ These are not Day-1 work. The design keeps room for them so they do not need a n
 | **P5** | The storage class grows GEOM-lite partition providers and FreeBSD disk naming |
 | **USB track** | USB bus, hubs, surprise removal, threaded-only GPIO interrupt domains on arm64 (GED's arrives in P3), input class |
 | **P6** | `/dev/devctl2`, `/dev/pci`, devd running on stock rules, `devinfo`/`devctl`/`pciconf` differential tests. Device reset and rebind. IRQ affinity through `cpuset` |
-| **P7** | Net class (queue pairs, offloads), virtio-net, e1000e, igc, rge |
-| **P8** | IOMMU backends and interrupt remapping. IORT, DMAR, and IVRS dependency edges. Suspend and resume (stretch). Runtime PM. SCMI providers |
-| **M-G** | Display and GPU classes. Function children and aggregates in anger |
+| **P7** | Board bring-up: the platform description (§5.5) with the Sky1 entries (the Q8B's are Tier 2, best effort), the Order and Power edge kinds and the new edge sources (§6.1), the `Clock`, `Reset`, and `PowerDomain` provider traits with their first providers (§8.5, §9.3), `PciFunction::acpi_companion`, firmware-shared and declared-shared ranges (§8.1), and the firmware store (§8.6) if a P7 driver needs an image |
+| **P8** | Net class (queue pairs, offloads), virtio-net, e1000e, igc, rge. `miibus` and PHY drivers as a child bus of the MAC. Driver-published IRQ domains (§8.3) |
+| **P9** | IOMMU backends (VT-d, AMD-Vi, SMMUv3, and SMMUv2 for the SC8280XP) and interrupt remapping. IORT, DMAR, and IVRS dependency edges. Suspend and resume (stretch), wake interrupts. Runtime PM (§8.5). `PerfDomain` and `Interconnect` providers. Firmware calls and the secure-monitor provider (§8.7). PCIe hotplug |
+| **M-G** | Display and GPU classes. Function children and aggregates in anger: synthetic aggregate nodes, `Phy` lane leasing, Type-C events. Device-walked page tables, shared buffers, and fences (§8.4, §17) |
 
 ## 17. Open questions
 
@@ -1148,3 +1365,18 @@ These are not Day-1 work. The design keeps room for them so they do not need a n
    padding. Either require explicit padding fields and check `size_of` against the sum of the
    field sizes in a `const` assertion, or write an in-workspace `proc-macro` crate (allowed by
    ADR-0002, since it is not external). The first option is simpler.
+6. **Graphics memory.** Device-walked page tables (`BusAddr`, `IoPageTable<F>`), buffers mapped by
+   the CPU and several devices at once (a VM object with a device pager, FreeBSD's
+   `d_mmap_single`; a dma-buf equivalent; user-page pinning), user-mapped register pages, and fences
+   whose signalling context cannot block on allocation. The panthor, Adreno, Linlon, Iris, and
+   Zhouyi specifications all need them. They get their own design document at the start of M-G,
+   together with the graphics ABI decision (ROADMAP open decision 6), which these drivers' DRM
+   userspace argues should be DRM-compatible.
+7. **Sky1 firmware transport.** [HARDWARE.md §4](HARDWARE.md) records Sky1 clocks as AML methods
+   that call SCMI over PCC. The clean-room `sky1-soc` specification describes an SCMI agent over
+   the CIX mailbox (`_DSD` `mboxes`) and a separate SCMI-over-SMC agent for power domains. Both may
+   be true at once. The Orange Pi 6 Plus DSDT, once captured into `tests/corpus/`, settles which
+   providers §9.3 needs first.
+8. **Platform description format.** §5.5 tables are `const` Rust data. Whether CIX's in-AML tables
+   are extracted at boot or transcribed at build time from the corpus is open. Extraction follows
+   firmware updates, and transcription is simpler to review.

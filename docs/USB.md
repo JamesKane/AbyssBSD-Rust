@@ -35,7 +35,7 @@ USB 2.0 and 3.2, HID 1.11 and its usage tables, T10 SAM/SPC/SBC and UAS-2, and v
   emulator here has xHCI. USB4 tunneling, isochronous transfers (audio, video), and the device side.
 - HID devices beyond keyboards, mice, and tablets (touchpads with gestures, game controllers,
   consumer and system controls arrive as later drivers on the same `hidbus`).
-- USB serial, network, and Wi-Fi drivers (with P7 and later). `usbdump`/`usb_pf`.
+- USB serial, network, and Wi-Fi drivers (with P8 and later). `usbdump`/`usb_pf`.
 - Graphics beyond the GOP framebuffer (M-G). `vt` draws into the boot framebuffer only.
 - Mouse cut and paste in `vt`, and splash screens.
 
@@ -88,7 +88,7 @@ starts, and the early console's contents become `ttyv0`'s first screen.
 - **PCI** (class `0c0330`) and **ACPI** (`PNP0D10`, `_CRS` memory and interrupt) attach the same
   core; the two front ends differ only in how they get registers and interrupts. QEMU's `virt`
   exposes xHCI on PCI only, so the ACPI front end is host-tested with fake resources and first runs
-  on the Sky1 at P6.
+  on the Sky1 at P7.
 - **Handoff.** The USB legacy support extended capability is claimed from firmware (OS-owned
   semaphore, wait for the BIOS-owned bit to clear, SMI enables off) before reset.
 - **Reset and setup.** Halt, reset, wait for `CNR`; program `MaxSlotsEn`, the DCBAA, scratchpad
@@ -446,7 +446,7 @@ ready, `BUSY`/`TASK SET FULL`, and a broken transport once recovered. LUNs come 
 - **Commands.** `INQUIRY`, `TEST UNIT READY`, `READ CAPACITY(10)` then `(16)` past 2 TiB,
   `READ`/`WRITE(10)` and `(16)`, `SYNCHRONIZE CACHE`, `MODE SENSE` for write protection, `REPORT
   LUNS`. Quirks (FreeBSD's `usb_quirk` table for common sticks) as data: not yet, none of QEMU's
-  devices needs one; they come with the hardware at P6.
+  devices needs one; they come with the hardware at P7.
 - **Unplug.** Pending bios complete with `ENXIO`; the storage class revokes the disk, and a mounted
   file system sees errors. As FreeBSD's `ffs_fsfail_cleanup`, the first I/O that fails on the gone
   disk (or the syncer finding writes it can no longer make) starts a forced unmount from a thread of
@@ -492,4 +492,4 @@ against FreeBSD's `vt_efifb` with the same framebuffer (bhyve's `fbuf`), resolut
 `ubench vt` runs them on both kernels; tests/perf/README.md has the exact workloads.
 
 USB mass-storage throughput (`usb.umass`: sequential and random read and write over BBB) joins the
-suite on the physical machines at P6, since no emulator compares it fairly with FreeBSD.
+suite on the physical machines at P7, since no emulator compares it fairly with FreeBSD.

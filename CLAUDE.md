@@ -38,7 +38,7 @@ that runs unmodified FreeBSD userland. Read `docs/ROADMAP.md` for the current ph
   facts: `docs/HARDWARE.md` §4. Prior bring-up notes are in the sibling project
   `../AbyssBSD/docs/boards/orangepi-6-plus/`, plus `../AbyssBSD/docs/boards/radxa-dragon-q8b/lessons.md`.
   - **Read before experimenting on the board.** Hangs cost power cycles.
-  - Until it is reimaged for AbyssBSD (planned at P6), don't write to its NVMe; boot from USB.
+  - Until it is reimaged for AbyssBSD (planned at P7, board bring-up), don't write to its NVMe; boot from USB.
     Capture its ground truth into `tests/corpus/opi6p/` before reimaging.
   - "Nothing special": no board-specific config knobs. A board setting means a driver bug.
 - AMD64 reference machine: **Ryzen 9 7900X / Gigabyte X870E AORUS ELITE WIFI7**, Fedora 44 at

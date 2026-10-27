@@ -6,7 +6,7 @@
 |---|---|---|
 | Primary dev | Linux workstation (Fedora) | Rust 1.99 via rustup, `qemu-system-{x86_64,aarch64}`, edk2 firmware (`/usr/share/edk2/{ovmf,aarch64,riscv}`) |
 | Build/test server | FreeBSD 15.1-RELEASE amd64, ssh alias `abyss-build` (currently 192.168.0.2; i7-12700KF, 20 threads, 128 GiB) | SSH key auth, `doas`. Provides `makefs`, `mkimg`, `newfs`, `fsck_ffs`, `kyua`, `bhyve`, real FreeBSD headers, and differential-testing reference |
-| ARM64 reference board | Orange Pi 6 Plus (CIX P1), Ubuntu at `192.168.0.27`; FreeBSD 16-CURRENT on the same NVMe | Untouched until P6, when it is reimaged for AbyssBSD. Serial console on the 3.3 V debug header (UART2). Linux and FreeBSD there are the ground truth ([HARDWARE.md §4](HARDWARE.md#4-board-profile-orange-pi-6-plus-cix-p1--sky1)) |
+| ARM64 reference board | Orange Pi 6 Plus (CIX P1), Ubuntu at `192.168.0.27`; FreeBSD 16-CURRENT on the same NVMe | Untouched until P6's exit; reimaged in P7 for AbyssBSD. Serial console on the 3.3 V debug header (UART2). Linux and FreeBSD there are the ground truth ([HARDWARE.md §4](HARDWARE.md#4-board-profile-orange-pi-6-plus-cix-p1--sky1)) |
 | AMD64 reference machine | Ryzen 9 7900X / X870E AORUS ELITE WIFI7, Fedora 44 at `192.168.0.30` | AbyssBSD lives only on the **second NVMe** (own ESP, own boot entry, booted once via `efibootmgr -n`). No serial port, so logs come from the framebuffer and the persistent log the loader saves to the ESP ([HARDWARE.md §5](HARDWARE.md#5-board-profile-amd64-ryzen-9-7900x--x870e-aorus-elite-wifi7)) |
 
 ### Build server setup (one time)
@@ -217,9 +217,9 @@ inside `tests/`.
 | **Property / fuzz** | ELF, GPT, FAT, UFS2, AML, ACPI tables, packet parsers. In-house harness: deterministic PRNG, coverage-free mutation, minimization | Host | Nightly on the server (20 threads) |
 | **Kernel unit** | `#[ktest]` functions compiled into a test kernel, run on boot, results over serial | QEMU, both arches | Every commit |
 | **Boot** | Loader → kernel → `/rescue/sh` → single-user → multi-user `login:` with expect scripts | QEMU both arches, bhyve | Every commit (fast subset), nightly (full) |
-| **Compat** | FreeBSD `kyua` suite inside AbyssBSD, with pass/fail tracked per test against a baseline | bhyve (arm64: the Orange Pi 6 Plus, from P6.11) | Nightly |
+| **Compat** | FreeBSD `kyua` suite inside AbyssBSD, with pass/fail tracked per test against a baseline | bhyve (arm64: the Orange Pi 6 Plus, from P7) | Nightly |
 | **Differential** | Same program on AbyssBSD vs FreeBSD 15.1 (server). Compare output and `kdump` traces | Server | Nightly |
-| **Performance** | Each phase's benchmark suite on AbyssBSD vs FreeBSD 15.1, same machine and configuration. Fails if any benchmark is more than 2% slower ([PERFORMANCE.md](PERFORMANCE.md)) | bhyve on the server; physical machines from P6 | Nightly, and at each phase exit |
+| **Performance** | Each phase's benchmark suite on AbyssBSD vs FreeBSD 15.1, same machine and configuration. Fails if any benchmark is more than 2% slower ([PERFORMANCE.md](PERFORMANCE.md)) | bhyve on the server; physical machines from P7 | Nightly, and at each phase exit |
 | **Corpus** | `acpidump` DSDT/SSDT blobs from real machines through the AML interpreter. `fsck_ffs` validation of images AbyssBSD wrote | Host + server | Every commit |
 | **Hardware** | Boot matrix on physical machines | Lab | Per milestone |
 

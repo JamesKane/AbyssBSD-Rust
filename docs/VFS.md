@@ -35,7 +35,7 @@ sees, not the source of the code ([ADR-0007](adr/0007-license-and-clean-implemen
 
 ### 1.2 Non-goals for Phase 5
 
-- SU+J (Phase 8), quotas, ACLs and extended attributes (Phase 6, with credentials), snapshots, UFS1
+- SU+J (Phase 9), quotas, ACLs and extended attributes (Phase 6, with credentials), snapshots, UFS1
   writing, ZFS, NFS, FUSE, nullfs/unionfs.
 - Swap and a full pageout daemon (Phase 6+). P5 reclaims clean cached pages under pressure and
   throttles writers. It does not page anonymous memory out.

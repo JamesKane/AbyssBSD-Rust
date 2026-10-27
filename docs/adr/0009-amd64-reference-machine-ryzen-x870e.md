@@ -12,7 +12,7 @@ current-generation AMD desktop platform with modern AMI UEFI firmware, a large A
 
 ## Decision
 
-This machine is the AMD64 Tier 1 physical machine: untouched until FreeBSD runs end to end in QEMU, and gating from P6
+This machine is the AMD64 Tier 1 physical machine: untouched until FreeBSD runs end to end in QEMU, and gating from P7
 ([ADR-0010](0010-qemu-first-development.md)). AbyssBSD
 is installed only on the second NVMe, with its own ESP and boot entry. Board facts live in
 [HARDWARE.md §5](../HARDWARE.md#5-board-profile-amd64-ryzen-9-7900x--x870e-aorus-elite-wifi7).
@@ -25,7 +25,7 @@ is installed only on the second NVMe, with its own ESP and boot entry. Board fac
 - Firmware leaves the APIC in xAPIC mode, and Zen 4 has no TSC-deadline timer or LA57. The APIC
   driver must support xAPIC, the LAPIC timer must be calibrated, and 4-level paging is used.
 - The NIC is an RTL8125, the same family as the Orange Pi 6 Plus's RTL8126, so one `rge`-class
-  driver covers both reference machines in P7.
+  driver covers both reference machines in P8.
 - The machine also holds user data (Fedora's NVMe and a RAID array). The storage stack attaches
   non-designated disks read-only, and `xtask deploy` writes only to the designated media NVMe, which
   it identifies by serial number, never by device name.

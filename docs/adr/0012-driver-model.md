@@ -2,6 +2,9 @@
 
 - Status: Accepted
 - Date: 2026-10-18
+- Amended: 2026-10-27. A review of the clean-room specifications added firmware images,
+  platform descriptions, order and power edge kinds, concrete provider traits, and in-driver
+  recovery to DRIVER-MODEL.md, within this decision
 
 ## Context
 

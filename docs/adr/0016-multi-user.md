@@ -13,7 +13,7 @@ binding a UNIX name, ptys, privilege framework, Capsicum, or jails. Base reaches
 way to `login:`: every program is a dynamic PIE, `syslogd` and dozens of tools enter capability
 mode, `devd` and `syslogd` listen on UNIX sockets, `login` loads PAM modules.
 
-The breadth of the FreeBSD ABI is the roadmap's named P6/P7 risk. ADR-0011 and ADR-0014 require a
+The breadth of the FreeBSD ABI is the roadmap's named P6/P8 risk. ADR-0011 and ADR-0014 require a
 performance suite per phase.
 
 ## Decision
@@ -31,7 +31,7 @@ Adopt the design in [MULTIUSER.md](../MULTIUSER.md). Its load-bearing parts:
 4. **One readiness type (`Notify`) per object**, under both `poll`/`select` and kqueue; knote filters
    run under the object's lock and only read state.
 5. **A protocol-neutral socket layer** with UNIX domain as its first protocol and a mark-and-sweep
-   collector for descriptors in flight; P7's protocols use the same trait.
+   collector for descriptors in flight; P8's protocols use the same trait.
 6. **A device trait under the line discipline**, with ptys, `vt` windows, and UARTs as devices.
 7. **Typed privilege and rights**: `priv_check` with FreeBSD's `PRIV_*`, Capsicum rights checked at
    descriptor lookup, capability mode from a table generated from `syscalls.master`, and a jail tree
@@ -40,10 +40,11 @@ Adopt the design in [MULTIUSER.md](../MULTIUSER.md). Its load-bearing parts:
    (`socket` fails with `EAFNOSUPPORT`), and `rc`'s network scripts see what they would there. MAC, audit, and
    `rctl` answer as on a kernel without them.
 9. **Hardware after QEMU.** The physical machines are touched only once P6.9 runs userland end to
-   end in QEMU; the Orange Pi 6 Plus's ground truth is captured before it is reimaged.
-10. **Performance.** P6 adds six components, each gated on its geometric mean in bhyve and on both
-    physical machines: `boot`, `thr`, `event`, `unix`, `pty`, `exec` (MULTIUSER.md §16). kyua's wall
-    time is a diagnostic. Every earlier suite also gates on bare metal from P6's exit.
+   end in QEMU, and are brought up in P7, the phase after this one; the Orange Pi 6 Plus's ground
+   truth is captured before it is reimaged.
+10. **Performance.** P6 adds six components, each gated on its geometric mean in bhyve, and on both
+    physical machines from P7: `boot`, `thr`, `event`, `unix`, `pty`, `exec` (MULTIUSER.md §16). kyua's wall
+    time is a diagnostic. Every earlier suite also gates on bare metal from P7.
 11. **kyua target.** For each of `kern/`, `lib/libc/`, `bin/`, and `usr.bin/`, at least 95% of the
     test cases that pass on FreeBSD 15.1 in the same machine pass on AbyssBSD, and every other
     failure is listed with its reason in `tests/kyua/known-failures.txt`.
@@ -53,7 +54,7 @@ Adopt the design in [MULTIUSER.md](../MULTIUSER.md). Its load-bearing parts:
 - Phase 6 is the largest phase. Its milestones are ordered so base's dynamic programs run first
   (P6.1), which turns the whole of `/bin`, `/sbin`, and `/usr/bin` into test material for the rest.
 - Without networking, `rc` prints the lines a FreeBSD kernel without `INET` would (netif, sendmail).
-  They are recorded in compat-deviations.md until P7.
+  They are recorded in compat-deviations.md until P8.
 - The P4 one-thread shortcuts (process-wide signal mask, the `tls_base` on the process, the umtx
   generation queues) are replaced, not extended.
 - ptrace arrives with ktrace (for `truss` and kyua's `ptrace_test`), beyond the roadmap's original
