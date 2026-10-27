@@ -66,6 +66,7 @@ mod time;
 mod topology;
 mod tty;
 mod uaccess;
+mod uthread;
 mod vtcons;
 
 use addr::PhysAddr;

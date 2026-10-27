@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! `kern.proc`: processes as `ps` reads them. `kern.proc.all`,
 //! `kern.proc.proc`, and the selections by pid, process group, session,
-//! terminal, and user return `struct kinfo_proc`s (one per process, each
-//! of which has one thread); `kern.proc.args.<pid>` returns the
+//! terminal, and user return `struct kinfo_proc`s: one per process,
+//! describing its first thread, or with `KERN_PROC_INC_THREAD` (the
+//! `_td` names) one per thread; `kern.proc.args.<pid>` returns the
 //! arguments, `kern.proc.pathname.<pid>` the executable's path, and
 //! `kern.proc.auxv.<pid>` the auxiliary vector exec gave it.
 //!
@@ -34,8 +35,11 @@ fn text(dst: &mut [u8], src: &[u8]) {
     dst[..n].copy_from_slice(&src[..n]);
 }
 
-/// `p` as `struct kinfo_proc`.
-fn fill(p: &Process) -> KinfoProc {
+/// `p` as `struct kinfo_proc`, with thread `t`'s part (FreeBSD's
+/// `fill_kinfo_proc` and `fill_kinfo_thread`): for one entry per thread
+/// (`per_thread`), the signals pending for `t` and its run time, else the
+/// process's.
+fn fill(p: &Process, t: Option<&crate::uthread::UserThread>, per_thread: bool) -> KinfoProc {
     let mut k = KinfoProc {
         ki_pid: p.pid(),
         ki_ppid: p.ppid(),
@@ -44,7 +48,7 @@ fn fill(p: &Process) -> KinfoProc {
         ki_tdev: NODEV,
         ki_tdev_freebsd11: u32::MAX,
         ki_ngroups: 1,
-        ki_numthreads: 1,
+        ki_numthreads: i32::try_from(p.thread_count()).unwrap_or(i32::MAX),
         ki_reaper: 1,
         ki_reapsubtree: 1,
         ..KinfoProc::default()
@@ -55,6 +59,9 @@ fn fill(p: &Process) -> KinfoProc {
     }
     if p.vforked() {
         k.ki_flag |= P_PPWAIT;
+    }
+    if p.had_threads() {
+        k.ki_flag |= P_HADTHREADS;
     }
     if p.pid() == p.sid() {
         k.ki_kiflag |= KI_SLEADER;
@@ -71,13 +78,24 @@ fn fill(p: &Process) -> KinfoProc {
         let st = p.signals.lock();
         let (ignored, caught) = st.dispositions();
         k.ki_siglist = st.pending();
-        k.ki_sigmask = st.mask;
         k.ki_sigignore = ignored;
         k.ki_sigcatch = caught;
     }
+    if let Some(t) = t {
+        let ts = t.sig.lock();
+        k.ki_sigmask = ts.mask;
+        if per_thread {
+            k.ki_siglist = ts.queue.pending();
+        }
+    }
     let image = p.image();
     text(&mut k.ki_comm, &image.comm);
-    text(&mut k.ki_tdname, &image.comm);
+    // A name past `TDNAMLEN` goes on in `ki_moretdname`.
+    let name = t.map(|t| t.name());
+    let name = name.as_ref().map_or(&image.comm[..], |n| n.as_bytes());
+    let (head, more) = name.split_at(name.len().min(TDNAMLEN));
+    text(&mut k.ki_tdname, head);
+    text(&mut k.ki_moretdname, more);
     text(&mut k.ki_emul, b"FreeBSD ELF64");
     text(&mut k.ki_login, b"root");
     text(&mut k.ki_loginclass, b"default");
@@ -92,20 +110,23 @@ fn fill(p: &Process) -> KinfoProc {
     } else if stopped {
         SSTOP
     } else {
-        match p.thread().map(|t| t.state()) {
+        match t.and_then(|t| t.sched()).map(|t| t.state()) {
             Some(sched::State::New) => SIDL,
             Some(sched::State::Sleeping) => SSLEEP,
             _ => SRUN,
         }
     };
-    if let Some(t) = p.thread() {
-        let us = crate::time::ticks_to_ns(t.runtime()) / 1000;
+    if let Some(ut) = t
+        && let Some(t) = ut.sched()
+    {
+        let ticks = if per_thread { t.runtime() } else { p.runtime() };
+        let us = crate::time::ticks_to_ns(ticks) / 1000;
         k.ki_runtime = us;
         k.ki_rusage.ru_utime = Timeval {
             tv_sec: i64::try_from(us / 1_000_000).unwrap_or(i64::MAX),
             tv_usec: i64::try_from(us % 1_000_000).unwrap_or(0),
         };
-        k.ki_tid = i32::try_from(t.tid().0).unwrap_or(i32::MAX);
+        k.ki_tid = ut.tid();
         let cpu = i32::try_from(t.last_cpu().0).unwrap_or(0);
         k.ki_lastcpu = cpu;
         k.ki_lastcpu_old = u8::try_from(cpu).unwrap_or(u8::MAX);
@@ -129,18 +150,34 @@ fn fill(p: &Process) -> KinfoProc {
     k
 }
 
-/// The bytes of `kinfo_proc`s for the processes `keep` selects.
-fn select(out: &mut Vec<u8>, keep: impl Fn(&Process) -> bool) {
-    let mut procs = crate::proc::all();
-    procs.sort_unstable_by_key(|p| p.pid());
-    for p in procs.iter().filter(|p| keep(p)) {
-        let k = fill(p);
-        out.extend_from_slice(crate::uaccess::bytes_of(&k));
+/// The bytes of `p`'s `kinfo_proc`: one, or one per thread (a zombie has
+/// none, and gets one).
+fn entries(out: &mut Vec<u8>, p: &Process, per_thread: bool) {
+    let threads = if per_thread {
+        p.threads()
+    } else {
+        p.first_thread().into_iter().collect()
+    };
+    if threads.is_empty() {
+        out.extend_from_slice(crate::uaccess::bytes_of(&fill(p, None, per_thread)));
+    }
+    for t in &threads {
+        out.extend_from_slice(crate::uaccess::bytes_of(&fill(p, Some(t), per_thread)));
     }
 }
 
-/// A selection's handler: the name components after it, and the reply.
-type Selection = fn(&[i32], &mut Vec<u8>) -> Result<(), ReadError>;
+/// The bytes of `kinfo_proc`s for the processes `keep` selects.
+fn select(out: &mut Vec<u8>, per_thread: bool, keep: impl Fn(&Process) -> bool) {
+    let mut procs = crate::proc::all();
+    procs.sort_unstable_by_key(|p| p.pid());
+    for p in procs.iter().filter(|p| keep(p)) {
+        entries(out, p, per_thread);
+    }
+}
+
+/// A selection's handler: the name components after it, whether it wants
+/// an entry per thread, and the reply.
+type Selection = fn(&[i32], bool, &mut Vec<u8>) -> Result<(), ReadError>;
 
 /// The one argument a selection takes.
 fn arg(rest: &[i32]) -> Result<i32, ReadError> {
@@ -173,6 +210,36 @@ pub(crate) fn init(s: &Sleepable) {
             sysctl::Value::int(crate::proc::PID_MAX),
         )
         .expect("kern.pid_max");
+        t.add_value(
+            kern,
+            Number::Auto,
+            "maxthread",
+            "Maximum number of threads",
+            sysctl::Value::int(crate::uthread::MAX_THREAD),
+        )
+        .expect("kern.maxthread");
+        let threads = t
+            .add_node(kern, Number::Auto, "threads", "thread allocation")
+            .expect("kern.threads");
+        t.add_value(
+            threads,
+            Number::Auto,
+            "max_threads_per_proc",
+            "Limit on threads per proc",
+            sysctl::Value::int(i32::try_from(crate::uthread::MAX_PER_PROC).unwrap_or(i32::MAX)),
+        )
+        .expect("kern.threads.max_threads_per_proc");
+        t.add_value(
+            threads,
+            Number::Auto,
+            "max_threads_hits",
+            "kern.threads.max_threads_per_proc hit count",
+            sysctl::Value::Int(alloc::boxed::Box::new(|| {
+                i32::try_from(crate::uthread::MAX_HITS.load(core::sync::atomic::Ordering::Relaxed))
+                    .unwrap_or(i32::MAX)
+            })),
+        )
+        .expect("kern.threads.max_threads_hits");
         let procs = t
             .add_node(
                 kern,
@@ -182,69 +249,74 @@ pub(crate) fn init(s: &Sleepable) {
             )
             .expect("kern.proc");
         let selections: [(i32, &str, Selection); 8] = [
-            (select::ALL, "all", |r, out| {
+            (select::ALL, "all", |r, td, out| {
                 if !r.is_empty() {
                     return Err(ReadError::Invalid);
                 }
-                select(out, |_| true);
+                select(out, td, |_| true);
                 Ok(())
             }),
-            (select::PROC, "proc", |r, out| {
+            (select::PROC, "proc", |r, td, out| {
                 if !r.is_empty() {
                     return Err(ReadError::Invalid);
                 }
-                select(out, |_| true);
+                select(out, td, |_| true);
                 Ok(())
             }),
-            (select::PID, "pid", |r, out| {
+            (select::PID, "pid", |r, td, out| {
                 let p = process(arg(r)?)?;
-                out.extend_from_slice(crate::uaccess::bytes_of(&fill(&p)));
+                entries(out, &p, td);
                 Ok(())
             }),
-            (select::PGRP, "pgrp", |r, out| {
+            (select::PGRP, "pgrp", |r, td, out| {
                 let g = arg(r)?;
-                select(out, |p| p.pgid() == g);
+                select(out, td, |p| p.pgid() == g);
                 Ok(())
             }),
-            (select::SESSION, "session", |r, out| {
+            (select::SESSION, "session", |r, td, out| {
                 let sid = arg(r)?;
-                select(out, |p| p.sid() == sid);
+                select(out, td, |p| p.sid() == sid);
                 Ok(())
             }),
-            (select::TTY, "tty", |r, out| {
+            (select::TTY, "tty", |r, td, out| {
                 let dev = i64::from(arg(r)?);
-                select(out, |p| {
+                select(out, td, |p| {
                     crate::tty::of_session(p.sid())
                         .is_some_and(|(rdev, _)| i64::try_from(rdev).is_ok_and(|d| d == dev))
                 });
                 Ok(())
             }),
-            (select::UID, "uid", |r, out| {
+            (select::UID, "uid", |r, td, out| {
                 // Everyone is root.
                 let uid = arg(r)?;
-                select(out, |_| uid == 0);
+                select(out, td, |_| uid == 0);
                 Ok(())
             }),
-            (select::RUID, "ruid", |r, out| {
+            (select::RUID, "ruid", |r, td, out| {
                 let uid = arg(r)?;
-                select(out, |_| uid == 0);
+                select(out, td, |_| uid == 0);
                 Ok(())
             }),
         ];
         for (number, name, handler) in selections {
-            // Each but `all` has a twin with one entry per thread
-            // (`pid_td`), the same while processes have one thread.
-            let mut names = alloc::vec![(number, String::from(name))];
+            // Each but `all` (which has an entry per thread already, as
+            // FreeBSD's does) has a twin with one entry per thread
+            // (`pid_td`).
+            let mut names = alloc::vec![(number, String::from(name), number == select::ALL)];
             if number != select::ALL {
-                names.push((number | select::INC_THREAD, alloc::format!("{name}_td")));
+                names.push((
+                    number | select::INC_THREAD,
+                    alloc::format!("{name}_td"),
+                    true,
+                ));
             }
-            for (n, name) in names {
+            for (n, name, td) in names {
                 t.add_handler(
                     procs,
                     Number::Fixed(n),
                     &name,
                     "Process table",
-                    Arc::new(handler),
+                    Arc::new(move |r: &[i32], out: &mut Vec<u8>| handler(r, td, out)),
                 )
                 .expect("kern.proc selection");
             }

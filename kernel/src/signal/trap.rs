@@ -17,7 +17,7 @@ use vm::fault::{Access, FaultError};
 
 #[cfg(target_arch = "x86_64")]
 use super::FpuImage;
-use super::{handle, post};
+use super::{handle, post_thread};
 use crate::arch::trap::TrapFrame;
 use crate::proc::Process;
 
@@ -203,9 +203,10 @@ fn classify(s: &Sleepable, p: &Process, report: &crate::arch::TrapReport) -> Opt
 /// to its default action so the process cannot fault forever, and is
 /// posted.
 pub(crate) fn trap(s: &Sleepable, report: &crate::arch::TrapReport, frame: &mut TrapFrame) {
-    let Some(p) = Process::current() else {
+    let Some(t) = crate::uthread::UserThread::current() else {
         return;
     };
+    let p = alloc::sync::Arc::clone(t.process());
     #[cfg(target_arch = "aarch64")]
     if emulated(report, frame) {
         return;
@@ -220,28 +221,19 @@ pub(crate) fn trap(s: &Sleepable, report: &crate::arch::TrapReport, frame: &mut 
         si_trapno: fault.trapno,
         ..Siginfo::default()
     };
-    let action = {
-        let mut st = p.signals.lock();
-        let action = st.action(fault.sig);
-        let blocked = st.mask.has(fault.sig);
-        if action.sa_handler > SIG_IGN && !blocked {
-            Some(action)
-        } else {
-            if blocked || action.sa_handler == SIG_IGN {
-                st.mask.remove(fault.sig);
-                st.set_action(fault.sig, Sigaction::default());
-            }
-            None
+    let action = p.signals.lock().action(fault.sig);
+    let blocked = t.sig.lock().mask.has(fault.sig);
+    if action.sa_handler > SIG_IGN && !blocked {
+        if !handle(s, &t, frame, fault.sig, &info, &action) {
+            drop(t);
+            drop(p);
+            super::kill_self(s, SIGILL);
         }
-    };
-    match action {
-        Some(action) => {
-            if !handle(s, &p, frame, fault.sig, &info, &action) {
-                super::kill_self(s, p, SIGILL);
-            }
-        }
-        None => {
-            let _ = post(&p, info);
-        }
+        return;
     }
+    if blocked || action.sa_handler == SIG_IGN {
+        t.sig.lock().mask.remove(fault.sig);
+        super::set_action(&p, fault.sig, Sigaction::default());
+    }
+    let _ = post_thread(&t, info);
 }

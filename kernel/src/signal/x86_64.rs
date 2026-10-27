@@ -24,7 +24,7 @@ use abi::errno::Errno;
 use abi::signal::{SA_SIGINFO, StackT};
 use abi::ucontext::*;
 
-use super::{Delivery, FpuImage};
+use super::{Delivery, FpuImage, Prepared};
 use crate::arch::trap::TrapFrame;
 use crate::uaccess::{Plain, UserPtr, copy_in, copy_out};
 
@@ -118,6 +118,7 @@ fn mcontext(f: &TrapFrame, fpu: &FpuImage) -> McontextX86 {
         mc_ownedfp: MC_FPOWNED_FPU,
         mc_fpstate: fpstate,
         mc_fsbase: hal::user::tls(),
+        mc_gsbase: hal::user::tls2(),
         ..McontextX86::default()
     }
 }
@@ -212,9 +213,10 @@ pub(super) fn set_io_access(frame: &mut TrapFrame, on: bool) {
     }
 }
 
-/// Checks `mc` and loads it into `frame` and the FPU (`sigreturn`,
-/// `setcontext`). On an error nothing has changed.
-pub(crate) fn set_context(frame: &mut TrapFrame, mc: &McontextX86) -> Result<(), Errno> {
+/// Checks `mc` and puts its registers in `frame`; the FP state and FS
+/// base it carries are for the thread to load (`sigreturn`, `setcontext`,
+/// `thr_create`). On an error nothing has changed.
+pub(crate) fn prepare_context(frame: &mut TrapFrame, mc: &McontextX86) -> Result<Prepared, Errno> {
     if mc.mc_len != size_of::<McontextX86>() as i64 || mc.mc_flags & !MC_FLAG_MASK != 0 {
         return Err(Errno::EINVAL);
     }
@@ -228,17 +230,13 @@ pub(crate) fn set_context(frame: &mut TrapFrame, mc: &McontextX86) -> Result<(),
         kprintln!("pid {}: sigreturn cs = {:#x}", pid(), mc.mc_cs);
         return Err(Errno::EINVAL);
     }
-    if mc.mc_flags & MC_HASBASES != 0 && !canonical(mc.mc_fsbase) {
+    if mc.mc_flags & MC_HASBASES != 0 && !(canonical(mc.mc_fsbase) && canonical(mc.mc_gsbase)) {
         return Err(Errno::EINVAL);
     }
     let fpu = fpu_image(mc).inspect_err(|e| {
         kprintln!("pid {}: sigreturn set_fpcontext err {}", pid(), e.get());
     })?;
     // Checked: from here on nothing fails.
-    if let Some(fpu) = fpu {
-        // SAFETY: `fpu_image` checked everything XRSTOR checks.
-        unsafe { fpu.load() };
-    }
     frame.rdi = mc.mc_rdi;
     frame.rsi = mc.mc_rsi;
     frame.rdx = mc.mc_rdx;
@@ -257,12 +255,13 @@ pub(crate) fn set_context(frame: &mut TrapFrame, mc: &McontextX86) -> Result<(),
     frame.rip = mc.mc_rip;
     frame.rsp = mc.mc_rsp;
     frame.rflags = mc.mc_rflags;
-    if mc.mc_flags & MC_HASBASES != 0 {
-        // SAFETY: a canonical user address; the kernel does not use the
-        // thread pointer.
-        unsafe { hal::user::set_tls(mc.mc_fsbase) };
-    }
-    Ok(())
+    // `fpu_image` checked everything XRSTOR checks; the base is canonical.
+    let bases = mc.mc_flags & MC_HASBASES != 0;
+    Ok(Prepared {
+        fpu,
+        tls: bases.then_some(mc.mc_fsbase),
+        tls2: bases.then_some(mc.mc_gsbase),
+    })
 }
 
 fn canonical(a: u64) -> bool {

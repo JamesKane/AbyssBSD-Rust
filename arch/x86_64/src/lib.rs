@@ -172,6 +172,8 @@ mod hal_hooks {
     const _: hal::SetU64Fn = abyss_hal_set_kernel_stack;
     const _: hal::GetU64Fn = abyss_hal_user_tls;
     const _: hal::SetU64Fn = abyss_hal_set_user_tls;
+    const _: hal::GetU64Fn = abyss_hal_user_tls2;
+    const _: hal::SetU64Fn = abyss_hal_set_user_tls2;
 
     #[unsafe(no_mangle)]
     fn abyss_hal_irq_disable() -> bool {
@@ -305,5 +307,18 @@ mod hal_hooks {
     unsafe fn abyss_hal_set_user_tls(v: u64) {
         // SAFETY: the hal's contract is the arch function's.
         unsafe { crate::user::set_tls(v) }
+    }
+    #[unsafe(no_mangle)]
+    fn abyss_hal_user_tls2() -> u64 {
+        crate::user::tls2()
+    }
+
+    /// # Safety
+    ///
+    /// See `hal::user::set_tls2`.
+    #[unsafe(no_mangle)]
+    unsafe fn abyss_hal_set_user_tls2(v: u64) {
+        // SAFETY: the hal's contract is the arch function's.
+        unsafe { crate::user::set_tls2(v) }
     }
 }

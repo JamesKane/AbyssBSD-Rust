@@ -292,9 +292,9 @@ pub struct Thread {
     /// The top of the kernel stack, where traps from user mode land (0 for
     /// threads on a borrowed stack, which never enter user mode).
     pub(crate) kstack_top: u64,
-    /// The user thread pointer while the thread is off CPU (same rules as
-    /// `space`).
-    pub(crate) tls: UnsafeCell<u64>,
+    /// The user thread registers (`hal::user::tls` and `tls2`) while the
+    /// thread is off CPU (same rules as `space`).
+    pub(crate) tls: UnsafeCell<[u64; 2]>,
     /// What the kernel runs the thread for (its process), opaque here.
     /// Written only by the thread itself.
     pub(crate) owner: UnsafeCell<Option<alloc::sync::Arc<dyn core::any::Any + Send + Sync>>>,
@@ -381,7 +381,7 @@ impl Thread {
             fpu,
             space: UnsafeCell::new(None),
             kstack_top,
-            tls: UnsafeCell::new(0),
+            tls: UnsafeCell::new([0; 2]),
             owner: UnsafeCell::new(None),
             ast: AtomicU32::new(0),
             interrupted: AtomicBool::new(false),

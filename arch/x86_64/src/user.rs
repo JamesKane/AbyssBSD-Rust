@@ -114,6 +114,48 @@ pub unsafe fn set_tls(v: u64) {
     }
 }
 
+/// The user GS base, which the kernel's `swapgs` keeps in
+/// `IA32_KERNEL_GS_BASE` while it runs.
+pub fn tls2() -> u64 {
+    if FSGSBASE.load(Ordering::Relaxed) {
+        let irq = crate::cpu::save_disable_interrupts();
+        let v: u64;
+        // SAFETY: interrupts are masked, so nothing runs on the user GS in
+        // between (an NMI finds out which GS is live by its value).
+        unsafe {
+            asm!("swapgs", "rdgsbase {}", "swapgs", out(reg) v, options(nomem, nostack));
+        }
+        if irq {
+            crate::cpu::enable_interrupts();
+        }
+        v
+    } else {
+        // SAFETY: reading the swapped GS base MSR.
+        unsafe { crate::cpu::rdmsr(crate::cpu::MSR_KERNEL_GS_BASE) }
+    }
+}
+
+/// Sets the user GS base (see [`tls2`]).
+///
+/// # Safety
+///
+/// `v` must be canonical; the kernel does not use the user's GS.
+pub unsafe fn set_tls2(v: u64) {
+    if FSGSBASE.load(Ordering::Relaxed) {
+        let irq = crate::cpu::save_disable_interrupts();
+        // SAFETY: as in `tls2`.
+        unsafe {
+            asm!("swapgs", "wrgsbase {}", "swapgs", in(reg) v, options(nomem, nostack));
+        }
+        if irq {
+            crate::cpu::enable_interrupts();
+        }
+    } else {
+        // SAFETY: per the caller; the swapped GS base is the user's.
+        unsafe { crate::cpu::wrmsr(crate::cpu::MSR_KERNEL_GS_BASE, v) };
+    }
+}
+
 /// The user code and data (stack) selectors.
 pub const USER_CS: u16 = crate::gdt::USER_CS;
 pub const USER_DS: u16 = crate::gdt::USER_DS;

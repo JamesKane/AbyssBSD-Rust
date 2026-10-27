@@ -319,8 +319,14 @@ fn run(s: &Sleepable, frame: &mut TrapFrame, call: Call) -> Result<Option<u64>, 
         Sysno::Sigwaitinfo => sig::sigwaitinfo(s, a0, a1),
         Sysno::Sigwait => sig::sigwait(s, a0, a1),
         Sysno::Sigfastblock => sig::sigfastblock(a0, a1),
+        Sysno::SchedYield => thr::sched_yield(),
         Sysno::ThrSelf => thr::thr_self(a0),
         Sysno::ThrWake => thr::thr_wake(a0),
+        Sysno::ThrNew => thr::thr_new(frame, a0, a1),
+        Sysno::ThrCreate => thr::thr_create(frame, a0, a1, a2),
+        Sysno::ThrExit => thr::thr_exit(a0),
+        Sysno::ThrSuspend => thr::thr_suspend(s, a0),
+        Sysno::ThrSetName => thr::thr_set_name(a0, a1),
         Sysno::RtprioThread => thr::rtprio_thread(a0, a1, a2),
         Sysno::UmtxOp => thr::umtx_op(s, a0, a1, a2, a3, a4),
         _ => nosys(call.number),
@@ -332,6 +338,11 @@ fn run(s: &Sleepable, frame: &mut TrapFrame, call: Call) -> Result<Option<u64>, 
 /// has one).
 fn process() -> Result<Arc<Process>, Errno> {
     Process::current().ok_or(Errno::EINVAL)
+}
+
+/// The current user thread.
+fn thread() -> Result<Arc<crate::uthread::UserThread>, Errno> {
+    crate::uthread::UserThread::current().ok_or(Errno::EINVAL)
 }
 
 /// Runs `f` on the current thread's process, borrowed: no reference
@@ -368,10 +379,10 @@ fn nosys(number: u64) -> SysResult {
         }
     }
     if !matches!(lookup(number), Some(Slot::Live(_)))
-        && let Some(p) = Process::current()
+        && let Some(t) = crate::uthread::UserThread::current()
     {
-        let _ = crate::signal::post(
-            &p,
+        let _ = crate::signal::post_thread(
+            &t,
             crate::signal::user_info(abi::signal::SIGSYS, 0, abi::signal::code::SI_KERNEL),
         );
     }
@@ -380,10 +391,7 @@ fn nosys(number: u64) -> SysResult {
 
 /// `_exit(rval)`: ends the process.
 fn exit(s: &Sleepable, rval: u64) -> ! {
-    if let Some(p) = Process::current() {
-        p.exit(s, crate::proc::Exit::Code(int(rval)));
-    }
-    sched::exit()
+    Process::exit_current(s, crate::proc::Exit::Code(int(rval)))
 }
 
 /// The `kernel_hooks!` hook for a trap from user mode the VM did not

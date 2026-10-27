@@ -9,6 +9,17 @@ pub mod amd64 {
     pub const SET_FSBASE: u64 = 129;
     pub const GET_GSBASE: u64 = 130;
     pub const SET_GSBASE: u64 = 131;
+    /// Copies out the XSAVE area past its legacy part.
+    pub const GET_XFPUSTATE: u64 = 132;
+
+    /// `struct amd64_get_xfpustate`.
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct GetXfpustate {
+        pub addr: u64,
+        pub len: i32,
+        pub _pad: u32,
+    }
     /// The base libc's start-up sets: the FS base, also remembered as the
     /// thread's TLS base (restored for signal handlers).
     pub const GET_TLSBASE: u64 = 135;
@@ -21,6 +32,7 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("AMD64_SET_FSBASE", amd64::SET_FSBASE),
     c("AMD64_GET_GSBASE", amd64::GET_GSBASE),
     c("AMD64_SET_GSBASE", amd64::SET_GSBASE),
+    c("AMD64_GET_XFPUSTATE", amd64::GET_XFPUSTATE),
     c("AMD64_GET_TLSBASE", amd64::GET_TLSBASE),
     c("AMD64_SET_TLSBASE", amd64::SET_TLSBASE),
     c("AMD64_DISABLE_TLSBASE", amd64::DISABLE_TLSBASE),

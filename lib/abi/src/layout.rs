@@ -495,6 +495,23 @@ pub static LAYOUTS: &[StructLayout] = &[
         type_ => "type",
         prio => "prio",
     }),
+    layout!(crate::sysarch::amd64::GetXfpustate, "struct amd64_get_xfpustate", ["sys/types.h", "machine/sysarch.h"], Amd64, {
+        addr => "addr",
+        len => "len",
+    }),
+    layout!(crate::thr::ThrParam, "struct thr_param", ["sys/types.h", "sys/thr.h"], All, {
+        start_func => "start_func",
+        arg => "arg",
+        stack_base => "stack_base",
+        stack_size => "stack_size",
+        tls_base => "tls_base",
+        tls_size => "tls_size",
+        child_tid => "child_tid",
+        parent_tid => "parent_tid",
+        flags => "flags",
+        rtp => "rtp",
+        spare => "spare",
+    }),
     layout!(crate::thr::UmtxTime, "struct _umtx_time", ["sys/types.h", "sys/umtx.h"], All, {
         timeout => "_timeout",
         flags => "_flags",

@@ -248,6 +248,7 @@ pub const SLOCK: u8 = 7;
 /// `ki_flag` (`P_*`).
 pub const P_CONTROLT: i64 = 0x0000_0002;
 pub const P_PPWAIT: i64 = 0x0000_0010;
+pub const P_HADTHREADS: i64 = 0x0000_0080;
 pub const P_WEXIT: i64 = 0x0000_2000;
 pub const P_EXEC: i64 = 0x0000_4000;
 pub const P_INMEM: i64 = 0x1000_0000;
@@ -299,6 +300,7 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("SLOCK", "sys/proc.h", SLOCK as i64),
     c("P_CONTROLT", "sys/proc.h", P_CONTROLT),
     c("P_PPWAIT", "sys/proc.h", P_PPWAIT),
+    c("P_HADTHREADS", "sys/proc.h", P_HADTHREADS),
     c("P_WEXIT", "sys/proc.h", P_WEXIT),
     c("P_EXEC", "sys/proc.h", P_EXEC),
     c("P_INMEM", "sys/proc.h", P_INMEM),

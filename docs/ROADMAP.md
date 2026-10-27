@@ -1490,13 +1490,38 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
 **P6.2 Threads.**
 - The process/thread split (MULTIUSER.md §4): per-thread signal state, TLS bases (FSGSBASE on
   amd64), user contexts, rusage, names, `cpuset`, and rtprio; FreeBSD's tid allocation.
+  - Done 2026-10-26: `kernel/src/uthread.rs`'s `UserThread` (the scheduler thread's owner) has
+    the mask, the thread-directed pending signals, the alternate stack, the `sigfastblock` word,
+    its name, class and priority (`rtprio_thread`, any thread by tid), its CPUs (`cpuset` per
+    thread; a process's is their union), and amd64's TLS base; tids come from FreeBSD's
+    `tid_alloc` order from 100000, with `kern.maxthread` and `kern.threads.*`. The scheduler
+    keeps both user thread registers per thread (amd64's FS and GS bases, written only when they
+    differ from what the CPU holds); `AMD64_GET/SET_GSBASE` and `AMD64_GET_XFPUSTATE` are in.
+    `kern.proc` has an entry per thread for `_td` selections and `all`; the process CPU clock sums
+    its threads, those gone included. `getrusage` waits for §4.6.
 - `thr_new`, `thr_create`, `thr_exit`, `thr_kill`, `thr_kill2`, `thr_suspend`, `thr_wake`,
   `thr_set_name`; single-threading for exit, exec, and core dumps; `fork` of a threaded process.
+  - Done 2026-10-26, as `kern_thr.c` and `thread_single` have them: a new thread copies its
+    creator's registers, mask, and class (amd64 its FP state too; arm64 starts it afresh), the
+    last thread's `thr_exit` returns for libthr's `exit`, exit single-threads the others out and
+    exec parks them at the boundary until its image is in (`ERESTART` from their sleeps), and
+    `fork` copies the calling thread. There are no core dumps to single-thread for yet.
 - Signals to threads (`sigtd`), per-thread masks and `sigwait`, stops of every thread.
+  - Done 2026-10-26: a process-directed signal goes to `sigtd`'s pick and moves to another thread
+    if that one blocks it first or leaves (`reschedule_signals`); faults, `SIGPIPE`, `SIGSYS`, and
+    `thr_kill` are thread-directed; a stop parks every thread (in place in a sleep) and the parent
+    hears once all have. `tests/user/threads.c` passes on FreeBSD 15.1 on both arches.
 - The arm64 SVE signal context.
+  - Done 2026-10-26: the frame carries a `struct sve_context` at the vector length, as
+    `sendsig_ctx_sve` writes it, and `sigreturn` loads one back with `mc_fpregs` setting the low
+    128 bits (`tests/user/sve.c`, on FreeBSD 15.1 arm64 through `freebsd-usertests`). FreeBSD
+    writes the state it last saved there, ours is the interrupted one; the test checks only
+    what both do.
 - Exit: libthr's own tests that need only the P4 umtx operations, a ktest of single-threading under
   load (threads in sleeps, faults, and system calls while another execs and another exits), and the
   "Signal state" deviation closed.
+  - The ktest done 2026-10-26 (`single_threading_under_load`: four `threads stress` at once), and
+    the deviation closed. libthr's tests wait for `tests.txz` in the root.
 
 **P6.3 umtx and libthr.**
 - `sys/umtx` (MULTIUSER.md §5): keys, chains, every `_umtx_op` operation, priority inheritance and

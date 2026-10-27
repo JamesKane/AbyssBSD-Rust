@@ -297,6 +297,32 @@ pub mod user {
         #[cfg(not(target_os = "none"))]
         let _ = v;
     }
+
+    /// This CPU's second user thread register: amd64's GS base; arm64 has
+    /// none (0).
+    #[must_use]
+    pub fn tls2() -> u64 {
+        #[cfg(target_os = "none")]
+        // SAFETY: defined by the linked arch crate with this signature.
+        return unsafe { super::abyss_hal_user_tls2() };
+        #[cfg(not(target_os = "none"))]
+        0
+    }
+
+    /// Sets this CPU's second user thread register.
+    ///
+    /// # Safety
+    ///
+    /// As for [`set_tls`].
+    pub unsafe fn set_tls2(v: u64) {
+        #[cfg(target_os = "none")]
+        // SAFETY: per the contract.
+        unsafe {
+            super::abyss_hal_set_user_tls2(v);
+        }
+        #[cfg(not(target_os = "none"))]
+        let _ = v;
+    }
 }
 
 /// Signature of `abyss_hal_set_kernel_stack`, `abyss_hal_set_user_tls`.
@@ -370,6 +396,8 @@ unsafe extern "Rust" {
     fn abyss_hal_set_kernel_stack(top: u64);
     fn abyss_hal_user_tls() -> u64;
     fn abyss_hal_set_user_tls(v: u64);
+    fn abyss_hal_user_tls2() -> u64;
+    fn abyss_hal_set_user_tls2(v: u64);
 }
 
 #[cfg(target_os = "none")]

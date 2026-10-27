@@ -23,8 +23,11 @@
 //!   `SIGSTOP` while it is nonzero; a signal held back by it sets the
 //!   word's pending bit, and libthr's `SIGFASTBLOCK_UNBLOCK` brings it in.
 //!
-//! The mask, pending set, and alternate stack are the process's while it
-//! has one thread.
+//! Each thread has its mask, alternate stack, `sigfastblock` word, and
+//! the signals sent to it (faults, `thr_kill`); the process has the
+//! dispositions and the signals sent to it as a whole, which go to the
+//! first thread that does not block them (`sigtd`), or to another if it
+//! blocks them before they are delivered. Stops stop every thread.
 //!
 //! Behavior reference: sys/kern/kern_sig.c, sys/kern/subr_sleepqueue.c.
 
@@ -36,7 +39,7 @@ mod machdep;
 mod machdep;
 mod trap;
 
-pub(crate) use machdep::{get_context, set_context};
+pub(crate) use machdep::{get_context, prepare_context};
 pub(crate) use trap::trap;
 
 use alloc::collections::VecDeque;
@@ -47,10 +50,13 @@ use abi::signal::*;
 use abi::thr::{SIGFASTBLOCK_FLAGS, SIGFASTBLOCK_PEND};
 use sched::{Sleepable, WaitQueue};
 
+use core::ptr;
+
 use crate::arch::trap::TrapFrame;
-use crate::proc::{Exit, Process};
+use crate::proc::{Exit, Mode, Process, Suspension};
 use crate::time::Wait;
 use crate::uaccess::{Plain, UserPtr};
+use crate::uthread::UserThread;
 
 // SAFETY: integers only, padding explicit (`abi-check` holds the C layout).
 unsafe impl Plain for Siginfo {}
@@ -64,6 +70,10 @@ pub(crate) const AST_FULL_RESTORE: u32 = 2;
 /// I/O port access to give (`KDENABIO`) or take away (`KDDISABIO`).
 const AST_IO_ON: u32 = 4;
 const AST_IO_OFF: u32 = 8;
+/// A stop or single-threading wants the thread at the boundary.
+pub(crate) const AST_SUSPEND: u32 = 16;
+/// Another thread changed this one's CPUs: it moves.
+pub(crate) const AST_AFFINITY: u32 = 32;
 
 /// Queued signals a process may have beyond one of each (real-time
 /// signals queue; FreeBSD's `max_pending_per_proc`).
@@ -126,24 +136,71 @@ fn fastblock_mask() -> Sigset {
     s
 }
 
-/// A process's signal state.
+/// Signals waiting for delivery, and each one's information (FreeBSD's
+/// `sigqueue_t`): a process has one for signals sent to it, and each
+/// thread one for signals sent to that thread.
+#[derive(Clone, Default)]
+pub(crate) struct Queue {
+    pending: Sigset,
+    /// Oldest first: one entry per pending standard signal, any number
+    /// per real-time one.
+    info: VecDeque<Siginfo>,
+}
+
+impl Queue {
+    pub(crate) fn pending(&self) -> Sigset {
+        self.pending
+    }
+
+    fn add(&mut self, info: Siginfo) -> Result<(), Errno> {
+        let sig = info.si_signo.cast_unsigned();
+        if self.pending.has(sig) && !realtime(sig) {
+            // Standard signals do not queue: the first one's information
+            // stands.
+            return Ok(());
+        }
+        if self.info.len() >= MAX_QUEUED + 32 && realtime(sig) {
+            return Err(Errno::EAGAIN);
+        }
+        self.info.push_back(info);
+        self.pending.add(sig);
+        Ok(())
+    }
+
+    /// Takes one pending `sig` (its oldest information), if there is one.
+    fn take(&mut self, sig: u32) -> Option<Siginfo> {
+        if !self.pending.has(sig) {
+            return None;
+        }
+        let signo = sig.cast_signed();
+        let info = match self.info.iter().position(|i| i.si_signo == signo) {
+            Some(i) => self.info.remove(i).unwrap_or_default(),
+            None => Siginfo {
+                si_signo: signo,
+                ..Siginfo::default()
+            },
+        };
+        if !self.info.iter().any(|i| i.si_signo == signo) {
+            self.pending.remove(sig);
+        }
+        Some(info)
+    }
+
+    /// Drops every pending `sig`.
+    fn discard(&mut self, sig: u32) {
+        let signo = sig.cast_signed();
+        self.info.retain(|i| i.si_signo != signo);
+        self.pending.remove(sig);
+    }
+}
+
+/// A process's signal state: the dispositions (FreeBSD's `sigacts`) and
+/// the signals sent to the process as a whole.
 #[derive(Clone)]
 pub(crate) struct Signals {
     /// Indexed by signal number minus one.
     actions: [Sigaction; SIG_MAXSIG as usize],
-    /// Blocked signals.
-    pub(crate) mask: Sigset,
-    /// The `sigfastblock` word's address, 0 for none.
-    pub(crate) fastblock: u64,
-    pending: Sigset,
-    /// The pending signals' information, oldest first: one entry per
-    /// pending standard signal, any number per real-time one.
-    queue: VecDeque<Siginfo>,
-    /// The alternate signal stack (`ss_flags` `SS_DISABLE` when none).
-    pub(crate) altstack: StackT,
-    /// The mask to restore once a handler's frame is built (FreeBSD's
-    /// `td_oldsigmask`, set by `sigsuspend` and `sigtimedwait`).
-    saved_mask: Option<Sigset>,
+    pub(crate) queue: Queue,
 }
 
 impl Signals {
@@ -151,58 +208,37 @@ impl Signals {
     pub(crate) fn new() -> Self {
         Self {
             actions: [Sigaction::default(); SIG_MAXSIG as usize],
-            mask: Sigset::default(),
-            fastblock: 0,
-            pending: Sigset::default(),
-            queue: VecDeque::new(),
-            altstack: StackT {
-                ss_flags: SS_DISABLE,
-                ..StackT::default()
-            },
-            saved_mask: None,
+            queue: Queue::default(),
         }
     }
 
-    /// A forked child's: the dispositions, mask, and alternate stack;
-    /// nothing pending.
+    /// A forked child's: the dispositions; nothing pending.
     pub(crate) fn forked(&self) -> Self {
         Self {
             actions: self.actions,
-            mask: self.mask,
-            fastblock: self.fastblock,
-            altstack: self.altstack,
-            ..Self::new()
+            queue: Queue::default(),
         }
     }
 
-    /// After exec: caught signals go back to their defaults, and the
-    /// alternate stack and the `sigfastblock` word are forgotten; the mask
-    /// and pending signals stay.
+    /// After exec: caught signals go back to their defaults; pending
+    /// signals stay.
     pub(crate) fn exec(&mut self) {
         for a in &mut self.actions {
             if a.sa_handler != SIG_IGN {
                 *a = Sigaction::default();
             }
         }
-        self.fastblock = 0;
-        self.altstack = StackT {
-            ss_flags: SS_DISABLE,
-            ..StackT::default()
-        };
     }
 
     pub(crate) fn action(&self, sig: u32) -> Sigaction {
         self.actions[(sig - 1) as usize]
     }
 
-    /// Sets `sig`'s action (`sigaction`); pending signals it now ignores
-    /// are dropped.
-    pub(crate) fn set_action(&mut self, sig: u32, mut a: Sigaction) {
+    /// Sets `sig`'s action (`sigaction`). The caller drops pending signals
+    /// it now ignores ([`discard_ignored`]).
+    fn set_action(&mut self, sig: u32, mut a: Sigaction) {
         a.sa_mask = a.sa_mask.minus(cant_mask());
         self.actions[(sig - 1) as usize] = a;
-        if self.ignored(sig) {
-            self.discard(sig);
-        }
     }
 
     /// Whether posting `sig` drops it (FreeBSD's `ps_sigignore`).
@@ -231,51 +267,77 @@ impl Signals {
     }
 
     pub(crate) fn pending(&self) -> Sigset {
-        self.pending
+        self.queue.pending
     }
+}
 
-    fn queue(&mut self, info: Siginfo) -> Result<(), Errno> {
-        let sig = info.si_signo.cast_unsigned();
-        if self.pending.has(sig) && !realtime(sig) {
-            // Standard signals do not queue: the first one's information
-            // stands.
-            return Ok(());
-        }
-        if self.queue.len() >= MAX_QUEUED + 32 && realtime(sig) {
-            return Err(Errno::EAGAIN);
-        }
-        self.queue.push_back(info);
-        self.pending.add(sig);
-        Ok(())
-    }
+/// A thread's signal state, under its own lock, taken after the
+/// process's [`Signals`] lock when both are held.
+#[derive(Clone)]
+pub(crate) struct ThreadSignals {
+    /// Blocked signals.
+    pub(crate) mask: Sigset,
+    /// The `sigfastblock` word's address, 0 for none.
+    pub(crate) fastblock: u64,
+    /// Signals sent to this thread.
+    pub(crate) queue: Queue,
+    /// The alternate signal stack (`ss_flags` `SS_DISABLE` when none).
+    pub(crate) altstack: StackT,
+    /// The mask to restore once a handler's frame is built (FreeBSD's
+    /// `td_oldsigmask`, set by `sigsuspend` and `sigtimedwait`).
+    saved_mask: Option<Sigset>,
+}
 
-    /// Takes one pending `sig` (its oldest information).
-    fn take(&mut self, sig: u32) -> Siginfo {
-        let signo = sig.cast_signed();
-        let info = match self.queue.iter().position(|i| i.si_signo == signo) {
-            Some(i) => self.queue.remove(i).unwrap_or_default(),
-            None => Siginfo {
-                si_signo: signo,
-                ..Siginfo::default()
+impl ThreadSignals {
+    /// A thread with nothing blocked and no alternate stack.
+    pub(crate) fn new() -> Self {
+        Self {
+            mask: Sigset::default(),
+            fastblock: 0,
+            queue: Queue::default(),
+            altstack: StackT {
+                ss_flags: SS_DISABLE,
+                ..StackT::default()
             },
-        };
-        if !self.queue.iter().any(|i| i.si_signo == signo) {
-            self.pending.remove(sig);
+            saved_mask: None,
         }
-        info
     }
 
-    /// Drops every pending `sig`.
-    fn discard(&mut self, sig: u32) {
-        let signo = sig.cast_signed();
-        self.queue.retain(|i| i.si_signo != signo);
-        self.pending.remove(sig);
+    /// A forked child's thread: the mask, the alternate stack, and the
+    /// `sigfastblock` word; nothing pending.
+    pub(crate) fn forked(&self) -> Self {
+        Self {
+            mask: self.mask,
+            fastblock: self.fastblock,
+            altstack: self.altstack,
+            ..Self::new()
+        }
+    }
+
+    /// A thread `thr_new` creates: the creator's mask (FreeBSD's
+    /// `td_startcopy`); no alternate stack and no `sigfastblock` word
+    /// (`TDP_SIGFASTBLOCK` is not copied; libthr sets the new thread's).
+    pub(crate) fn created(&self) -> Self {
+        Self {
+            mask: self.mask,
+            ..Self::new()
+        }
+    }
+
+    /// After exec: the alternate stack and the `sigfastblock` word are
+    /// forgotten; the mask and pending signals stay.
+    pub(crate) fn exec(&mut self) {
+        self.fastblock = 0;
+        self.altstack = StackT {
+            ss_flags: SS_DISABLE,
+            ..StackT::default()
+        };
     }
 }
 
 /// A copy of this thread's FP/SIMD registers (the kernel never uses
 /// them, so the live ones are the user's), in the save-area format.
-pub(super) struct FpuImage {
+pub(crate) struct FpuImage {
     ptr: core::ptr::NonNull<u8>,
     len: usize,
 }
@@ -287,7 +349,7 @@ impl FpuImage {
     }
 
     /// The registers as they are now, or `None` without memory.
-    pub(super) fn saved() -> Option<Self> {
+    pub(crate) fn saved() -> Option<Self> {
         let len = hal::fpu::area_size();
         // Zeroed: XSAVE leaves most of its header alone (XCOMP_BV and the
         // reserved bytes must read as zero to be loaded again).
@@ -314,7 +376,7 @@ impl FpuImage {
         unsafe { hal::fpu::init(self.ptr.as_ptr()) };
     }
 
-    pub(super) fn bytes(&self) -> &[u8] {
+    pub(crate) fn bytes(&self) -> &[u8] {
         // SAFETY: `len` initialized bytes, ours.
         unsafe { core::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
     }
@@ -341,6 +403,57 @@ impl Drop for FpuImage {
         // SAFETY: allocated in `saved` with this layout.
         unsafe { alloc::alloc::dealloc(self.ptr.as_ptr(), Self::layout(self.len)) };
     }
+}
+
+/// A context checked and put in a frame (`prepare_context`), with what
+/// else it sets for the thread that loads it: its FP state, and on amd64
+/// its FS base.
+pub(crate) struct Prepared {
+    /// Checked to load without faulting.
+    fpu: Option<FpuImage>,
+    tls: Option<u64>,
+    /// The second thread register (amd64's GS base).
+    tls2: Option<u64>,
+}
+
+impl Prepared {
+    /// The user thread pointer it sets, if any.
+    pub(crate) const fn tls(&self) -> Option<u64> {
+        self.tls
+    }
+
+    /// The second user thread register it sets, if any.
+    pub(crate) const fn tls2(&self) -> Option<u64> {
+        self.tls2
+    }
+
+    /// Loads it into the current thread.
+    pub(crate) fn load(self) {
+        if let Some(f) = &self.fpu {
+            // SAFETY: `prepare_context` checked the image as the CPU will.
+            unsafe { f.load() };
+        }
+        // SAFETY: canonical user addresses; the kernel does not use the
+        // thread registers.
+        unsafe {
+            if let Some(t) = self.tls {
+                hal::user::set_tls(t);
+            }
+            if let Some(t) = self.tls2 {
+                hal::user::set_tls2(t);
+            }
+        }
+    }
+}
+
+/// Checks `mc` and loads it into `frame` and the current thread (`sigreturn`,
+/// `setcontext`). On an error nothing has changed.
+pub(crate) fn set_context(
+    frame: &mut TrapFrame,
+    mc: &abi::ucontext::Mcontext,
+) -> Result<(), Errno> {
+    prepare_context(frame, mc)?.load();
+    Ok(())
 }
 
 /// What `sendsig` needs to build a handler's frame.
@@ -390,9 +503,69 @@ pub(crate) fn user_info(sig: u32, from: i32, code: i32) -> Siginfo {
     }
 }
 
-/// Sends `info.si_signo` to `p` (FreeBSD's `tdsendsignal`). Fails only
-/// when a real-time signal's queue is full.
+/// The thread to take `sig`, sent to `p` (FreeBSD's `sigtd`): the
+/// current thread if it is `p`'s and does not block it, else the first
+/// that does not, else the first. `None` for a process with no threads.
+fn sigtd(p: &Process, sig: u32) -> Option<Arc<UserThread>> {
+    let mine = UserThread::current()
+        .filter(|t| ptr::eq(t.process().as_ref(), p) && !t.sig.lock().mask.has(sig));
+    if mine.is_some() {
+        return mine;
+    }
+    let mut pick = None;
+    p.each_thread(|t| {
+        if t.sig.lock().mask.has(sig) {
+            return true;
+        }
+        pick = Some(Arc::clone(t));
+        false
+    });
+    pick.or_else(|| p.first_thread())
+}
+
+/// Drops every pending `sig` sent to `p` or to any of its threads
+/// (FreeBSD's `sigqueue_delete_proc`); `st` is `p`'s, locked.
+fn discard_everywhere(p: &Process, st: &mut Signals, sig: u32) {
+    st.queue.discard(sig);
+    p.each_thread(|t| {
+        t.sig.lock().queue.discard(sig);
+        true
+    });
+}
+
+/// Sets `sig`'s action in `p` (`sigaction`); pending signals it now
+/// ignores are dropped, the process's and its threads'.
+pub(crate) fn set_action(p: &Process, sig: u32, a: Sigaction) -> Sigaction {
+    let mut st = p.signals.lock();
+    let old = st.action(sig);
+    st.set_action(sig, a);
+    if st.ignored(sig) {
+        discard_everywhere(p, &mut st, sig);
+    }
+    old
+}
+
+/// Sends `info.si_signo` to `p` (FreeBSD's `tdsendsignal` without a
+/// thread): it is queued for the process, and [`sigtd`]'s pick is
+/// interrupted. Fails only when a real-time signal's queue is full.
 pub(crate) fn post(p: &Arc<Process>, info: Siginfo) -> Result<(), Errno> {
+    send(p, None, info)
+}
+
+/// Sends `info.si_signo` to thread `t` (`tdsendsignal` with a thread:
+/// `thr_kill`, faults, `SIGPIPE`): it is queued for that thread.
+pub(crate) fn post_thread(t: &Arc<UserThread>, info: Siginfo) -> Result<(), Errno> {
+    send(t.process(), Some(t), info)
+}
+
+/// Sends a signal (see [`post`]) and does at once what cannot wait:
+/// `SIGCONT` continues a stopped process and cancels pending stops; a stop
+/// cancels a pending `SIGCONT`; `SIGKILL` ends a stop. A signal the
+/// process ignores is dropped, and one to a zombie succeeds doing nothing.
+fn send(p: &Arc<Process>, to: Option<&Arc<UserThread>>, info: Siginfo) -> Result<(), Errno> {
+    if p.is_zombie() {
+        return Ok(());
+    }
     let sig = info.si_signo.cast_unsigned();
     let prop = prop(sig);
     // Decided before taking the signal lock (it reads the process tree).
@@ -401,31 +574,60 @@ pub(crate) fn post(p: &Arc<Process>, info: Siginfo) -> Result<(), Errno> {
         let mut st = p.signals.lock();
         if prop & CONT != 0 {
             for s in [SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU] {
-                st.discard(s);
+                discard_everywhere(p, &mut st, s);
             }
         }
         if prop & STOP != 0 {
-            st.discard(SIGCONT);
+            discard_everywhere(p, &mut st, SIGCONT);
         }
         // SIGCONT continues even when caught, blocked, or ignored; SIGKILL
         // ends a stop to end the process.
         let continued = (sig == SIGCONT || sig == SIGKILL) && p.resume(sig == SIGCONT);
         if (st.ignored(sig) && sig != SIGKILL) || (orphaned && st.action(sig).sa_handler == SIG_DFL)
         {
-            (continued, false)
+            (continued, None)
         } else {
-            st.queue(info)?;
+            let target = match to {
+                Some(t) => {
+                    t.sig.lock().queue.add(info)?;
+                    Some(Arc::clone(t))
+                }
+                None => {
+                    st.queue.add(info)?;
+                    sigtd(p, sig)
+                }
+            };
             let stopped = p.job.lock().stopped != 0;
-            (continued, !st.mask.has(sig) && (!stopped || sig == SIGKILL))
+            let interrupt =
+                target.filter(|t| !t.sig.lock().mask.has(sig) && (!stopped || sig == SIGKILL));
+            (continued, interrupt)
         }
     };
     if continued {
         notify_parent(p, code::CLD_CONTINUED, SIGCONT.cast_signed());
     }
-    if interrupt && let Some(t) = p.thread() {
+    if let Some(t) = interrupt {
         t.interrupt(AST_SIGNAL);
     }
     Ok(())
+}
+
+/// Process-directed signals in `blocked`, which a thread no longer takes
+/// (it blocked them or left), go to another thread that can (FreeBSD's
+/// `reschedule_signals`).
+fn reschedule(p: &Process, blocked: Sigset) {
+    let pending = p.signals.lock().pending().intersect(blocked);
+    if pending.is_empty() {
+        return;
+    }
+    for sig in 1..=SIG_MAXSIG {
+        if pending.has(sig)
+            && let Some(t) = sigtd(p, sig)
+            && !t.sig.lock().mask.has(sig)
+        {
+            t.interrupt(AST_SIGNAL);
+        }
+    }
 }
 
 /// Tells `child`'s parent of a stop, a continue, or an exit: its waiters
@@ -462,11 +664,11 @@ pub(crate) fn post_group(pgid: i32, sig: u32) {
     }
 }
 
-/// Whether `p` ignores or blocks `sig` (a terminal then does not send
-/// it, FreeBSD's `tty_wait_background`).
+/// Whether `p` ignores `sig` or the current thread blocks it (a terminal
+/// then does not send it, FreeBSD's `tty_wait_background`).
 pub(crate) fn ignores_or_blocks(p: &Process, sig: u32) -> bool {
-    let st = p.signals.lock();
-    st.action(sig).sa_handler == SIG_IGN || st.mask.has(sig)
+    p.signals.lock().action(sig).sa_handler == SIG_IGN
+        || UserThread::with_current(|t| t.sig.lock().mask.has(sig)).unwrap_or(false)
 }
 
 /// Whether `p`'s parent asked not to keep zombies (`SIGCHLD` ignored, or
@@ -476,9 +678,9 @@ pub(crate) fn parent_reaps_nothing(parent: &Process) -> bool {
     a.sa_handler == SIG_IGN || a.sa_flags & SA_NOCLDWAIT != 0
 }
 
-/// What the `sigfastblock` word blocks now (empty without one).
-fn fastblocked(p: &Process) -> Sigset {
-    let ptr = p.signals.lock().fastblock;
+/// What thread `t`'s `sigfastblock` word blocks now (empty without one).
+fn fastblocked(t: &UserThread) -> Sigset {
+    let ptr = t.sig.lock().fastblock;
     if ptr == 0 {
         return Sigset::default();
     }
@@ -488,9 +690,9 @@ fn fastblocked(p: &Process) -> Sigset {
     }
 }
 
-/// Marks the `sigfastblock` word: a signal waits for libthr's unblock.
-fn set_fastblock_pending(p: &Process) {
-    let ptr = p.signals.lock().fastblock;
+/// Marks `t`'s `sigfastblock` word: a signal waits for libthr's unblock.
+fn set_fastblock_pending(t: &UserThread) {
+    let ptr = t.sig.lock().fastblock;
     let w = UserPtr::<u32>::new(ptr);
     if let Ok(v) = w.read() {
         let _ = w.write(&(v | SIGFASTBLOCK_PEND));
@@ -507,22 +709,30 @@ enum Next {
     Stop(u32),
 }
 
-/// Takes the next signal that needs action, dropping ignored ones on the
-/// way. `None` when nothing is deliverable.
-fn next(p: &Process) -> Option<Next> {
-    let fast = fastblocked(p);
+/// Takes the next signal that needs action from those sent to thread `t`
+/// or its process (the thread's first), dropping ignored ones on the way.
+/// `None` when nothing is deliverable.
+fn next(t: &UserThread) -> Option<Next> {
+    let p = t.process();
+    let fast = fastblocked(t);
     let orphaned = crate::proc::pgrp_orphaned(p.pgid());
     let mut st = p.signals.lock();
+    let mut ts = t.sig.lock();
     loop {
-        let ready = st.pending.minus(st.mask);
+        let ready = st.pending().union(ts.queue.pending()).minus(ts.mask);
         let Some(sig) = ready.minus(fast).first() else {
             if !ready.is_empty() {
+                drop(ts);
                 drop(st);
-                set_fastblock_pending(p);
+                set_fastblock_pending(t);
             }
             return None;
         };
-        let info = st.take(sig);
+        let info = ts
+            .queue
+            .take(sig)
+            .or_else(|| st.queue.take(sig))
+            .unwrap_or_default();
         let action = st.action(sig);
         if action.sa_handler == SIG_IGN {
             continue;
@@ -544,26 +754,64 @@ fn next(p: &Process) -> Option<Next> {
     }
 }
 
-/// Stops `p` for `sig` until it is continued (or killed).
-fn stop(s: &Sleepable, p: &Arc<Process>, sig: u32) {
-    {
-        let mut job = p.job.lock();
-        job.stopped = sig;
-        job.stop_report = true;
-        job.cont_report = false;
-    }
-    notify_parent(p, code::CLD_STOPPED, sig.cast_signed());
-    let t = sched::current();
+/// Stops the current thread `t`'s process for `sig`: every thread parks
+/// until it is continued (or killed); the parent hears once all have.
+fn stop(s: &Sleepable, t: &UserThread, sig: u32) {
+    let p = t.process();
+    p.begin_stop(t, sig);
+    p.park(s, t);
+}
+
+/// The current thread at the user boundary: it parks while the process
+/// is stopped or another thread single-threads for exec, and leaves if
+/// another single-threads to exit (FreeBSD's `thread_suspend_check(0)`).
+/// The caller holds no references (see [`leave`]).
+pub(crate) fn suspend_check(s: &Sleepable) {
     loop {
-        let r = p
-            .stop_wait
-            .wait_until_interruptible(s, || p.job.lock().stopped == 0);
-        if r.is_ok() {
-            return;
+        let leave_now = UserThread::with_current(|t| {
+            let p = t.process();
+            match p.suspension(t) {
+                Suspension::None => Some(false),
+                Suspension::Single(Mode::Exit) => Some(true),
+                Suspension::Stop | Suspension::Single(Mode::Boundary) => {
+                    p.park(s, t);
+                    None
+                }
+            }
+        });
+        match leave_now {
+            Some(None) => {}
+            Some(Some(true)) => leave(),
+            _ => return,
         }
-        // Other signals wait for the continue.
-        t.clear_interrupted();
     }
+}
+
+/// Ends the current thread, which another's single-threading sent away.
+/// Nothing on the caller's stack may hold a reference: it never unwinds.
+fn leave() -> ! {
+    if let Some(t) = UserThread::current() {
+        t.process().remove_thread(&t, false);
+        Process::thread_exit(t);
+    }
+    sched::exit()
+}
+
+/// After thread `t` left its process: the signals sent to it go, and
+/// those sent to the process that it did not block go to another thread
+/// (FreeBSD's `tdsigcleanup`).
+pub(crate) fn thread_gone(t: &UserThread) {
+    let all = Sigset {
+        bits: [u32::MAX; SIG_WORDS],
+    };
+    let unblocked = {
+        let mut ts = t.sig.lock();
+        ts.queue = Queue::default();
+        let u = all.minus(ts.mask);
+        ts.mask = all;
+        u
+    };
+    reschedule(t.process(), unblocked);
 }
 
 /// The kernel's last word before a thread returns to user mode (the
@@ -580,11 +828,14 @@ pub(crate) fn user_return(frame: &mut TrapFrame) -> bool {
         if bits & AST_FULL_RESTORE != 0 {
             rewritten = true;
         }
+        if bits & AST_AFFINITY != 0 {
+            sched::move_to(UserThread::with_current(UserThread::bound_cpu).flatten());
+        }
         if bits & (AST_IO_ON | AST_IO_OFF) != 0 {
             machdep::set_io_access(frame, bits & AST_IO_ON != 0);
             rewritten = true;
         }
-        if bits & AST_SIGNAL != 0 {
+        if bits & (AST_SIGNAL | AST_SUSPEND) != 0 {
             rewritten |= deliver(&s, frame);
         }
         let _ = hal::irq::disable();
@@ -609,64 +860,70 @@ pub(crate) fn io_access(on: bool) -> Result<(), Errno> {
     Ok(())
 }
 
-/// Acts on every deliverable signal. Returns whether a handler's frame
-/// was built.
+/// Acts on every deliverable signal, after any suspension. Returns
+/// whether a handler's frame was built.
 fn deliver(s: &Sleepable, frame: &mut TrapFrame) -> bool {
-    let Some(p) = Process::current() else {
-        return false;
-    };
-    let t = sched::current();
+    let me = sched::current();
     let mut built = false;
     loop {
         // Cleared before looking, so a signal posted after the look
         // interrupts the next sleep.
-        t.clear_interrupted();
-        match next(&p) {
-            None => break,
-            // The process goes with its last reference from this stack.
-            Some(Next::Kill(sig)) => kill_self(s, p, sig),
-            Some(Next::Stop(sig)) => stop(s, &p, sig),
+        me.clear_interrupted();
+        suspend_check(s);
+        let Some(t) = UserThread::current() else {
+            return false;
+        };
+        match next(&t) {
+            None => {
+                // A `sigsuspend` whose signal reached no handler gets its
+                // mask back.
+                let mut ts = t.sig.lock();
+                if let Some(m) = ts.saved_mask.take() {
+                    ts.mask = m;
+                }
+                return built;
+            }
+            // Nothing on this stack may keep a reference.
+            Some(Next::Kill(sig)) => {
+                drop(t);
+                kill_self(s, sig)
+            }
+            Some(Next::Stop(sig)) => stop(s, &t, sig),
             Some(Next::Handle(sig, info, action)) => {
-                if !handle(s, &p, frame, sig, &info, &action) {
-                    kill_self(s, p, SIGILL);
+                if !handle(s, &t, frame, sig, &info, &action) {
+                    drop(t);
+                    kill_self(s, SIGILL);
                 }
                 built = true;
             }
         }
     }
-    // A `sigsuspend` whose signal reached no handler gets its mask back.
-    let mut st = p.signals.lock();
-    if let Some(m) = st.saved_mask.take() {
-        st.mask = m;
-    }
-    built
 }
 
 /// Ends the current process by `sig` (FreeBSD's `sigexit`; there are no
-/// core dumps). Takes the caller's reference: nothing on a stack that
-/// never unwinds may keep the process.
-pub(super) fn kill_self(s: &Sleepable, p: Arc<Process>, sig: u32) -> ! {
-    p.exit(s, Exit::Signal(sig));
-    drop(p);
-    sched::exit()
+/// core dumps). The caller holds no references: nothing on a stack that
+/// never unwinds may keep them.
+pub(super) fn kill_self(s: &Sleepable, sig: u32) -> ! {
+    Process::exit_current(s, Exit::Signal(sig))
 }
 
-/// Builds `sig`'s handler frame on the user stack and updates the mask
-/// (FreeBSD's `postsig`). Returns `false` if the frame cannot be written:
-/// the caller ends the process with `SIGILL` (with the reference it
-/// holds, see [`kill_self`]).
+/// Builds `sig`'s handler frame on the user stack and updates thread
+/// `t`'s mask (FreeBSD's `postsig`). Returns `false` if the frame cannot
+/// be written: the caller ends the process with `SIGILL` (dropping its
+/// references first, see [`kill_self`]).
 #[must_use]
 fn handle(
     _s: &Sleepable,
-    p: &Arc<Process>,
+    t: &UserThread,
     frame: &mut TrapFrame,
     sig: u32,
     info: &Siginfo,
     action: &Sigaction,
 ) -> bool {
+    let p = t.process();
     let (mask, altstack) = {
-        let mut st = p.signals.lock();
-        (st.saved_mask.take().unwrap_or(st.mask), st.altstack)
+        let mut ts = t.sig.lock();
+        (ts.saved_mask.take().unwrap_or(ts.mask), ts.altstack)
     };
     let d = Delivery {
         sig,
@@ -683,36 +940,63 @@ fn handle(
         );
         return false;
     }
-    let mut st = p.signals.lock();
-    st.mask = st.mask.union(action.sa_mask);
-    if action.sa_flags & SA_NODEFER == 0 {
-        st.mask.add(sig);
-    }
-    st.mask = st.mask.minus(cant_mask());
-    if action.sa_flags & SA_RESETHAND != 0 && sig != SIGILL && sig != SIGTRAP {
-        st.actions[(sig - 1) as usize] = Sigaction::default();
-    }
+    let blocked = {
+        let mut st = p.signals.lock();
+        let mut ts = t.sig.lock();
+        let old = ts.mask;
+        let mut m = old.union(action.sa_mask);
+        if action.sa_flags & SA_NODEFER == 0 {
+            m.add(sig);
+        }
+        ts.mask = m.minus(cant_mask());
+        if action.sa_flags & SA_RESETHAND != 0 && sig != SIGILL && sig != SIGTRAP {
+            st.actions[(sig - 1) as usize] = Sigaction::default();
+        }
+        ts.mask.minus(old)
+    };
+    reschedule(p, blocked);
     true
 }
 
-/// After the current thread unblocked signals or changed its pending set:
-/// a deliverable one is looked at before user mode, and ends the next
+/// After the current thread `t` unblocked signals or changed its pending
+/// set: a deliverable one is looked at before user mode, and ends the next
 /// interruptible sleep (a signal posted while blocked interrupted
 /// nothing).
-pub(crate) fn recheck(p: &Process) {
+pub(crate) fn recheck(t: &UserThread) {
     let deliverable = {
-        let st = p.signals.lock();
-        !st.pending.minus(st.mask).is_empty()
+        let st = t.process().signals.lock();
+        let ts = t.sig.lock();
+        !st.pending()
+            .union(ts.queue.pending())
+            .minus(ts.mask)
+            .is_empty()
     };
     if deliverable {
         sched::current_thread().interrupt(AST_SIGNAL);
     }
 }
 
+/// Sets the current thread `t`'s mask to `mask` (less what cannot be
+/// blocked), as `sigprocmask` and contexts do; returns the old one.
+/// Process-directed signals it now blocks go to another thread.
+pub(crate) fn set_mask(t: &UserThread, mask: Sigset) -> Sigset {
+    let (old, new) = {
+        let mut ts = t.sig.lock();
+        let old = ts.mask;
+        ts.mask = mask.minus(cant_mask());
+        (old, ts.mask)
+    };
+    reschedule(t.process(), new.minus(old));
+    recheck(t);
+    old
+}
+
 /// Why an interrupted sleep ended, if a signal must be handled
 /// (FreeBSD's `sleepq_catch_signals`): `EINTR`, or `ERESTART` for a
-/// handler with `SA_RESTART`. `None` means sleep on: what interrupted it
-/// was blocked, ignored, or a stop (done here, in place).
+/// handler with `SA_RESTART`; also `EINTR` when another thread
+/// single-threads to exit, and `ERESTART` to exec, so this one gets to
+/// the boundary. `None` means sleep on: what interrupted it was blocked,
+/// ignored, or a stop (done here, in place).
 pub(crate) fn interruption(s: &Sleepable) -> Option<Errno> {
     interrupted_by(s).0
 }
@@ -720,35 +1004,52 @@ pub(crate) fn interruption(s: &Sleepable) -> Option<Errno> {
 /// [`interruption`], and whether the process stopped (and has been
 /// continued) meanwhile.
 fn interrupted_by(s: &Sleepable) -> (Option<Errno>, bool) {
-    let Some(p) = Process::current() else {
+    let Some(t) = UserThread::current() else {
         return (None, false);
     };
-    let t = sched::current();
+    let p = t.process();
+    let me = sched::current();
     let mut stopped = false;
     loop {
-        t.clear_interrupted();
-        let fast = fastblocked(&p);
+        me.clear_interrupted();
+        match p.suspension(&t) {
+            Suspension::None => {}
+            Suspension::Single(Mode::Exit) => return (Some(Errno::EINTR), stopped),
+            Suspension::Single(Mode::Boundary) => return (Some(Errno::ERESTART), stopped),
+            Suspension::Stop => {
+                p.park(s, &t);
+                stopped = true;
+                continue;
+            }
+        }
+        let fast = fastblocked(&t);
         let orphaned = crate::proc::pgrp_orphaned(p.pgid());
         let mut st = p.signals.lock();
-        let Some(sig) = st.pending.minus(st.mask).minus(fast).first() else {
+        let mut ts = t.sig.lock();
+        let ready = st.pending().union(ts.queue.pending()).minus(ts.mask);
+        let Some(sig) = ready.minus(fast).first() else {
             return (None, stopped);
         };
         let action = st.action(sig);
         if st.ignored(sig) {
-            st.discard(sig);
+            ts.queue.discard(sig);
+            st.queue.discard(sig);
             continue;
         }
         if action.sa_handler == SIG_DFL && prop(sig) & STOP != 0 {
-            st.take(sig);
+            if ts.queue.take(sig).is_none() {
+                st.queue.take(sig);
+            }
+            drop(ts);
             drop(st);
             if !(prop(sig) & TTYSTOP != 0 && orphaned) {
-                stop(s, &p, sig);
+                stop(s, &t, sig);
                 stopped = true;
             }
             continue;
         }
         // Delivery happens on the way out; the thread looks again there.
-        t.request_ast(AST_SIGNAL);
+        me.request_ast(AST_SIGNAL);
         let e = if st.caught(sig) && action.sa_flags & SA_RESTART != 0 {
             Errno::ERESTART
         } else {
@@ -815,26 +1116,31 @@ pub(crate) fn sleep_after_stop_signal(
 /// `sigsuspend`'s and `sigtimedwait`'s temporary mask: `mask` now, the
 /// current one back once a handler's frame is built (or delivery finds
 /// nothing to handle).
-pub(crate) fn swap_mask(p: &Process, mask: Sigset) {
+pub(crate) fn swap_mask(t: &UserThread, mask: Sigset) {
     {
-        let mut st = p.signals.lock();
-        st.saved_mask = Some(st.mask);
-        st.mask = mask.minus(cant_mask());
+        let mut ts = t.sig.lock();
+        ts.saved_mask = Some(ts.mask);
     }
-    recheck(p);
+    set_mask(t, mask);
 }
 
 /// Undoes [`swap_mask`] when the call returns without a handler to run.
-pub(crate) fn restore_mask(p: &Process) {
-    let mut st = p.signals.lock();
-    if let Some(m) = st.saved_mask.take() {
-        st.mask = m;
+pub(crate) fn restore_mask(t: &UserThread) {
+    let saved = t.sig.lock().saved_mask.take();
+    if let Some(m) = saved {
+        set_mask(t, m);
     }
 }
 
-/// Takes a pending signal in `set`, if any (`sigtimedwait`).
-pub(crate) fn take_from(p: &Process, set: Sigset) -> Option<Siginfo> {
-    let mut st = p.signals.lock();
-    let sig = st.pending.intersect(set).first()?;
-    Some(st.take(sig))
+/// Takes a pending signal in `set` sent to thread `t` or its process (the
+/// thread's first), if any (`sigtimedwait`).
+pub(crate) fn take_from(t: &UserThread, set: Sigset) -> Option<Siginfo> {
+    let mut st = t.process().signals.lock();
+    let mut ts = t.sig.lock();
+    let sig = st
+        .pending()
+        .union(ts.queue.pending())
+        .intersect(set)
+        .first()?;
+    ts.queue.take(sig).or_else(|| st.queue.take(sig))
 }

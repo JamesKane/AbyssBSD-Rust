@@ -111,8 +111,8 @@ last given, bounded by `kern.maxthread`, so a tid is never a pid. The process ho
   where to store its tid (in both the parent's and the child's view, as `child_tid` and
   `parent_tid`); `thr_create` is the old form.
 - `thr_exit(state)` stores 1 at `state` and wakes it with `UMTX_OP_WAKE` (libthr joins on it), walks
-  the robust lists (§5.4), and leaves. The last thread out ends the process with status 0, as
-  FreeBSD's `exit1` from the final `thr_exit`.
+  the robust lists (§5.4), and leaves. The last thread's `thr_exit` returns instead, as FreeBSD's
+  `kern_thr_exit` does, and libthr then calls `exit(0)`.
 - `thr_kill`, `thr_kill2`, `thr_suspend`, `thr_wake`, `thr_set_name`, `thr_self`.
 - `kern.threads.max_threads_per_proc` (1500) and `kern.maxthread` limit creation, as FreeBSD's.
 

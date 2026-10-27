@@ -2,10 +2,20 @@
 //! Processes: an address space and the threads that run in it, in a tree
 //! of parents and children (FreeBSD's `struct proc`).
 //!
-//! A process has one thread so far. It has a pid from the process table,
-//! a process group and session, its signal state, resource limits, a
-//! randomized base for `mmap` placement, its descriptor table, and its
-//! working directory.
+//! A process has a pid from the process table, a process group and
+//! session, its signal dispositions and the signals sent to it, resource
+//! limits, a randomized base for `mmap` placement, its descriptor table,
+//! its working directory, and its threads ([`UserThread`]), which keep
+//! what is each one's own.
+//!
+//! Suspension stops threads at the user boundary, or in place in an
+//! interruptible sleep (FreeBSD's `thread_suspend_check`): for a stop
+//! signal (every thread parks until the process continues; the parent
+//! hears once the last one has), and for single-threading
+//! (`thread_single`), which exit and exec use to have the calling thread
+//! alone. To exit, the other threads leave at the boundary, and sleeps
+//! end with `EINTR`; for exec they park at the boundary (sleeps end with
+//! `ERESTART`), and leave once the new image is in, or go on if it fails.
 //!
 //! A child made by `pdfork` has a process descriptor (a [`ProcDesc`] file)
 //! while one is open: its exit sends its parent no `SIGCHLD`, and only a
@@ -43,7 +53,8 @@ use crate::cred::Ucred;
 use crate::exec::Layout;
 use crate::fs::fdtable::FdTable;
 use crate::mm::space::{self, AddressSpace};
-use crate::signal::Signals;
+use crate::signal::{Signals, ThreadSignals};
+use crate::uthread::{Name, UserThread};
 
 /// The highest pid (`PID_MAX`); allocation wraps to 2 past it.
 pub(crate) const PID_MAX: i32 = 99_999;
@@ -179,17 +190,53 @@ impl Exit {
     }
 }
 
-/// Job control: whether the process is stopped, and what its parent's
-/// `wait4` has yet to hear.
+/// Job control and suspension: whether the process is stopped, what its
+/// parent's `wait4` has yet to hear, and which threads are parked.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Job {
-    /// The signal that stopped the process, 0 while it runs.
+    /// The signal that stopped the process, 0 while it runs (FreeBSD's
+    /// `P_STOPPED_SIG` and `p_xsig`).
     pub(crate) stopped: u32,
     /// A stop `wait4(WUNTRACED)` has not reported (FreeBSD's `P_WAITED`
     /// clear).
     pub(crate) stop_report: bool,
     /// A continue `wait4(WCONTINUED)` has not reported (`P_CONTINUED`).
     pub(crate) cont_report: bool,
+    /// The parent has heard of the stop in progress: every thread parked.
+    stop_told: bool,
+    /// Single-threading in progress (`P_STOPPED_SINGLE`).
+    single: Option<Single>,
+    /// Threads parked at the boundary or in a sleep (`p_suspcount`).
+    parked: usize,
+}
+
+/// Single-threading (FreeBSD's `thread_single` modes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Mode {
+    /// The other threads leave (`SINGLE_EXIT`).
+    Exit,
+    /// The other threads park at the user boundary (`SINGLE_BOUNDARY`).
+    Boundary,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Single {
+    /// The thread that wants to be alone.
+    by: i32,
+    mode: Mode,
+}
+
+/// What holds a thread back at the boundary or in a sleep.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Suspension {
+    /// Nothing.
+    None,
+    /// The process is stopped: park, in place in a sleep.
+    Stop,
+    /// Another thread is single-threading: at the boundary, leave (`Exit`)
+    /// or park (`Boundary`); a sleep ends with `EINTR` or `ERESTART` to get
+    /// there.
+    Single(Mode),
 }
 
 /// FreeBSD's default limits, as `ulimit -a` shows them on a 15.1 system,
@@ -233,9 +280,6 @@ pub(crate) struct Process {
     pub(crate) limits: PreemptLock<[Rlimit; rlimit::NLIMITS]>,
     /// The `exterrctl` buffer, 0 for none.
     pub(crate) exterr: AtomicU64,
-    /// The TLS base `sysarch` recorded (amd64), `u64::MAX` for none. Per
-    /// thread once processes have several (P6).
-    tls_base: AtomicU64,
     pgid: AtomicI32,
     sid: AtomicI32,
     /// The exit status, as `wait` reports it, valid once `exited` is set.
@@ -253,12 +297,18 @@ pub(crate) struct Process {
     /// the address space; `wait4` and `vfork` sleep on it.
     child_gen: AtomicU64,
     child_wait: WaitQueue,
-    /// The process's thread, for signals to interrupt; set by the thread
-    /// itself, and cleared when it exits.
-    thread: SpinLock<Option<Arc<sched::Thread>>>,
+    /// Its threads, in creation order (FreeBSD's `p_threads`). A thread
+    /// joins before it runs and leaves as it exits.
+    threads: SpinLock<Vec<Arc<UserThread>>>,
     pub(crate) job: SpinLock<Job>,
-    /// Where the thread waits while the process is stopped.
+    /// Where parked threads wait.
     pub(crate) stop_wait: WaitQueue,
+    /// Where a single-threading thread waits for the others.
+    single_wait: WaitQueue,
+    /// It has had more than one thread (FreeBSD's `P_HADTHREADS`).
+    had_threads: AtomicBool,
+    /// CPU time of its threads that have left, in platform time units.
+    dead_runtime: AtomicU64,
     /// Open descriptors. Shared by the process's threads (when there are
     /// several), so behind a sleepable lock (FreeBSD's `fd_sx`).
     pub(crate) files: Mutex<FdTable>,
@@ -272,8 +322,6 @@ pub(crate) struct Process {
     started: u64,
     /// It has called `execve` (FreeBSD's `P_EXEC`).
     execed: AtomicBool,
-    /// The CPUs it may run on, one bit each (its `cpuset`); inherited.
-    cpus: AtomicU64,
     /// Its credential; inherited.
     cred: PreemptLock<Arc<Ucred>>,
     /// The program it runs, while it runs it.
@@ -356,11 +404,46 @@ impl Drop for Text {
     }
 }
 
-/// How a process's thread enters user mode.
+/// How a user thread enters user mode.
 struct Start {
-    process: Arc<Process>,
+    thread: Arc<UserThread>,
     frame: TrapFrame,
-    tls: u64,
+    tls: [u64; 2],
+    context: Option<crate::signal::Prepared>,
+}
+
+/// A new thread's state, besides its registers.
+pub(crate) struct NewThread {
+    /// Its user thread registers (`hal::user::tls`, `tls2`).
+    pub(crate) tls: [u64; 2],
+    /// The TLS base `sysarch` records (amd64).
+    pub(crate) tls_base: Option<u64>,
+    pub(crate) sig: ThreadSignals,
+    /// A copy of the caller's FP state (`fork`), rather than the initial
+    /// one.
+    pub(crate) fork_fpu: bool,
+    /// The CPUs it may run on (its `cpuset`); bound if that is one.
+    pub(crate) cpus: u64,
+    /// Its class and priority.
+    pub(crate) rtprio: abi::thr::Rtprio,
+    /// A context it loads first (`thr_create`): FP state, a thread pointer.
+    pub(crate) context: Option<crate::signal::Prepared>,
+}
+
+impl NewThread {
+    /// A process's first thread, made by the kernel: on `cpu` alone, if
+    /// given.
+    fn first(cpu: Option<hal::CpuId>) -> Self {
+        Self {
+            tls: [0; 2],
+            tls_base: None,
+            sig: ThreadSignals::new(),
+            fork_fpu: false,
+            cpus: cpu.map_or(u64::MAX, |c| 1 << c.0),
+            rtprio: crate::uthread::NORMAL,
+            context: None,
+        }
+    }
 }
 
 impl Process {
@@ -382,7 +465,6 @@ impl Process {
         let umask = parent.map_or(0o022, |p| p.umask.load(Ordering::Relaxed));
         let image = parent.map(|p| p.image.lock().clone()).unwrap_or_default();
         let execed = parent.is_some_and(|p| p.execed.load(Ordering::Relaxed));
-        let cpus = parent.map_or(u64::MAX, |p| p.cpus.load(Ordering::Relaxed));
         let cred = parent.map_or_else(Ucred::root_shared, |p| p.cred());
         let sugid = parent.is_some_and(|p| p.sugid.load(Ordering::Relaxed));
         let text = parent.map(|p| p.text.lock().clone()).unwrap_or_default();
@@ -396,9 +478,6 @@ impl Process {
                 signals: SpinLock::new(signals),
                 limits: PreemptLock::new(limits),
                 exterr: AtomicU64::new(parent.map_or(0, |p| p.exterr.load(Ordering::Relaxed))),
-                tls_base: AtomicU64::new(
-                    parent.map_or(u64::MAX, |p| p.tls_base.load(Ordering::Relaxed)),
-                ),
                 pgid: AtomicI32::new(parent.map_or(pid, |p| p.pgid())),
                 sid: AtomicI32::new(parent.map_or(pid, |p| p.sid())),
                 status: AtomicI32::new(0),
@@ -408,16 +487,18 @@ impl Process {
                 waiters: WaitQueue::new(),
                 child_gen: AtomicU64::new(0),
                 child_wait: WaitQueue::new(),
-                thread: SpinLock::new(None),
+                threads: SpinLock::new(Vec::new()),
                 job: SpinLock::new(Job::default()),
                 stop_wait: WaitQueue::new(),
+                single_wait: WaitQueue::new(),
+                had_threads: AtomicBool::new(false),
+                dead_runtime: AtomicU64::new(0),
                 files: Mutex::new(&FILEDESC_LOCK, files),
                 cwd: PreemptLock::new(cwd),
                 umask: AtomicU16::new(umask),
                 image: SpinLock::new(image),
                 started: crate::time::now_ns(),
                 execed: AtomicBool::new(execed),
-                cpus: AtomicU64::new(cpus),
                 cred: PreemptLock::new(cred),
                 text: SpinLock::new(text),
                 sugid: AtomicBool::new(sugid),
@@ -491,28 +572,23 @@ impl Process {
         self.execed.load(Ordering::Relaxed)
     }
 
-    /// The CPUs it may run on, one bit each.
+    /// The CPUs its threads may run on, one bit each: the union of theirs
+    /// (FreeBSD's `CPU_WHICH_PID` answer).
     pub(crate) fn cpus(&self) -> u64 {
-        self.cpus.load(Ordering::Relaxed)
+        let mut mask = 0;
+        self.each_thread(|t| {
+            mask |= t.cpus();
+            true
+        });
+        mask
     }
 
-    /// Restricts it to the CPUs in `mask` (`cpuset_setaffinity`). Its
-    /// thread is bound when that is one CPU; otherwise it runs anywhere
-    /// (the scheduler binds to one CPU or none). The caller's own thread
-    /// moves at once.
+    /// Restricts every thread to the CPUs in `mask` (`cpuset_setaffinity`
+    /// for a process).
     pub(crate) fn set_cpus(&self, mask: u64) {
-        self.cpus.store(mask, Ordering::Relaxed);
-        let one = (mask.count_ones() == 1).then(|| hal::CpuId(mask.trailing_zeros()));
-        let mine = Process::current().is_some_and(|p| p.pid == self.pid);
-        if mine {
-            sched::move_to(one);
+        for t in self.threads() {
+            t.set_cpus(mask);
         }
-    }
-
-    /// The CPU its threads are bound to, if its set is one CPU.
-    fn bound_cpu(&self) -> Option<hal::CpuId> {
-        let mask = self.cpus();
-        (mask.count_ones() == 1).then(|| hal::CpuId(mask.trailing_zeros()))
     }
 
     /// Whether it has exited (a zombie, until reaped).
@@ -548,36 +624,68 @@ impl Process {
         self.layout.anon_loc.load(Ordering::Relaxed)
     }
 
-    /// The TLS base `sysarch(AMD64_SET_TLSBASE)` recorded.
-    #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
-    pub(crate) fn tls_base(&self) -> Option<u64> {
-        let v = self.tls_base.load(Ordering::Relaxed);
-        (v != u64::MAX).then_some(v)
-    }
-
-    #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
-    pub(crate) fn set_tls_base(&self, v: Option<u64>) {
-        self.tls_base
-            .store(v.unwrap_or(u64::MAX), Ordering::Relaxed);
-    }
-
     /// The process the current thread runs for.
     pub(crate) fn current() -> Option<Arc<Self>> {
-        sched::owner()?.downcast::<Self>().ok()
+        UserThread::with_current(|t| Arc::clone(t.process()))
     }
 
     /// Whether the calling thread is the process's only one, so that only
     /// it can change what the process's threads share (its descriptor
-    /// table). Every process has one thread until P6 brings more; this
-    /// must count them then.
+    /// table).
     pub(crate) fn sole_thread(&self) -> bool {
-        true
+        self.threads.lock().len() <= 1
     }
 
     /// Runs `f` on the current process, borrowed (no reference taken):
     /// `None` on a kernel thread.
     pub(crate) fn with_current<R>(f: impl FnOnce(&Self) -> R) -> Option<R> {
-        sched::with_owner(|o| o?.downcast_ref::<Self>().map(f))
+        UserThread::with_current(|t| f(t.process()))
+    }
+
+    /// Its threads, in creation order.
+    pub(crate) fn threads(&self) -> Vec<Arc<UserThread>> {
+        self.threads.lock().clone()
+    }
+
+    /// Calls `f` on each thread, in creation order, with the list locked:
+    /// `f` must not take the process's own locks but a thread's.
+    pub(crate) fn each_thread(&self, mut f: impl FnMut(&Arc<UserThread>) -> bool) {
+        for t in self.threads.lock().iter() {
+            if !f(t) {
+                break;
+            }
+        }
+    }
+
+    /// Its first thread (FreeBSD's `FIRST_THREAD_IN_PROC`).
+    pub(crate) fn first_thread(&self) -> Option<Arc<UserThread>> {
+        self.threads.lock().first().cloned()
+    }
+
+    /// How many threads it has.
+    pub(crate) fn thread_count(&self) -> usize {
+        self.threads.lock().len()
+    }
+
+    /// Whether it has had more than one thread.
+    pub(crate) fn had_threads(&self) -> bool {
+        self.had_threads.load(Ordering::Relaxed)
+    }
+
+    /// The CPU time its threads used, those gone included, in platform
+    /// time units.
+    pub(crate) fn runtime(&self) -> u64 {
+        let mut ticks = self.dead_runtime.load(Ordering::Relaxed);
+        self.each_thread(|t| {
+            ticks += t.sched().map_or(0, |s| s.runtime());
+            true
+        });
+        ticks
+    }
+
+    /// Its thread `tid`.
+    pub(crate) fn find_thread(&self, tid: i32) -> Option<Arc<UserThread>> {
+        crate::uthread::find(tid).filter(|t| core::ptr::eq(t.process().as_ref(), self))
     }
 
     /// A new process running the program at `path` (from the root), with
@@ -654,7 +762,7 @@ impl Process {
             crate::tty::make_controlling(t, &p);
         }
         let frame = arch::user::user_frame(image.entry, image.sp, image.arg);
-        p.start(frame, 0, false, cpu).map_err(|_| Errno::EAGAIN)?;
+        p.start(frame, NewThread::first(cpu))?;
         Ok(p)
     }
 
@@ -674,36 +782,66 @@ impl Process {
         };
         let p = Self::create(space, layout, None, crate::fs::console_table());
         let frame = arch::user::user_frame(entry, sp, 0);
-        p.start(frame, 0, false, cpu)
+        p.start(frame, NewThread::first(cpu))
             .expect("a thread for the test process");
         p
     }
 
-    /// Starts the process's thread with `frame`'s registers and user
-    /// thread pointer `tls`; `fork` gives it a copy of the caller's FP
-    /// state.
-    fn start(
+    /// Starts a thread of the process with `frame`'s registers and the
+    /// rest as `new` says; it is named after the program. `EAGAIN` when
+    /// no tid or kernel thread is to be had.
+    pub(crate) fn start(
         self: &Arc<Self>,
         frame: TrapFrame,
-        tls: u64,
-        fork: bool,
-        cpu: Option<hal::CpuId>,
-    ) -> Result<(), sched::SpawnError> {
-        let start = Arc::new(Start {
-            process: Arc::clone(self),
+        new: NewThread,
+    ) -> Result<Arc<UserThread>, Errno> {
+        self.start_with(frame, new, |_, _| Ok(()))
+    }
+
+    /// [`Process::start`], with `init` given the thread (its tid known)
+    /// and its registers first: an error from it is the call's, and the
+    /// thread never runs (FreeBSD's `thread_create` initializer).
+    pub(crate) fn start_with(
+        self: &Arc<Self>,
+        mut frame: TrapFrame,
+        new: NewThread,
+        init: impl FnOnce(&UserThread, &mut TrapFrame) -> Result<(), Errno>,
+    ) -> Result<Arc<UserThread>, Errno> {
+        let name = self.with_comm(Name::new);
+        let t = UserThread::new(self, new.sig, name, new.tls_base, new.rtprio, new.cpus)?;
+        init(&t, &mut frame)?;
+        {
+            let mut threads = self.threads.lock();
+            threads.push(Arc::clone(&t));
+            if threads.len() > 1 {
+                self.had_threads.store(true, Ordering::Relaxed);
+            }
+        }
+        let start = alloc::boxed::Box::new(Start {
+            thread: Arc::clone(&t),
             frame,
-            tls,
+            tls: new.tls,
+            context: new.context,
         });
-        let arg = Arc::into_raw(start) as usize;
-        let mut b = sched::Builder::new("user").priority(sched::Priority::TIMESHARE);
-        b = if fork { b.fpu_inherit() } else { b.fpu() };
-        if let Some(cpu) = cpu {
+        let arg = alloc::boxed::Box::into_raw(start) as usize;
+        let mut b = sched::Builder::new("user").priority(crate::uthread::priority(new.rtprio));
+        b = if new.fork_fpu {
+            b.fpu_inherit()
+        } else {
+            b.fpu()
+        };
+        if let Some(cpu) = crate::uthread::bound(new.cpus) {
             b = b.bind(cpu);
         }
-        b.spawn_raw(enter, arg).map(drop).inspect_err(|_| {
-            // SAFETY: the thread never started, so `arg` is still ours.
-            drop(unsafe { Arc::from_raw(arg as *const Start) });
-        })
+        match b.spawn_raw(enter, arg) {
+            Ok(_) => Ok(t),
+            Err(_) => {
+                // SAFETY: the thread never started, so `arg` is still ours.
+                drop(unsafe { alloc::boxed::Box::from_raw(arg as *mut Start) });
+                self.threads.lock().retain(|o| !Arc::ptr_eq(o, &t));
+                Err(Errno::EAGAIN)
+            }
+        }
     }
 
     /// `fork` (or `vfork`, sharing the address space until the child execs
@@ -779,10 +917,20 @@ impl Process {
         };
         let mut cf = *frame;
         arch_fork_return(&mut cf);
-        if child
-            .start(cf, hal::user::tls(), true, child.bound_cpu())
-            .is_err()
-        {
+        let (sig, tls_base, rtprio, cpus) = UserThread::with_current(|t| {
+            (t.sig.lock().forked(), t.tls_base(), t.rtprio(), t.cpus())
+        })
+        .unwrap_or((ThreadSignals::new(), None, crate::uthread::NORMAL, u64::MAX));
+        let new = NewThread {
+            tls: [hal::user::tls(), hal::user::tls2()],
+            tls_base,
+            sig,
+            fork_fpu: true,
+            cpus,
+            rtprio,
+            context: None,
+        };
+        if child.start(cf, new).is_err() {
             if let Some(fd) = fd {
                 let closed = self.files.lock(s).close(fd);
                 drop(closed);
@@ -829,13 +977,19 @@ impl Process {
         argv: &[&[u8]],
         envp: &[&[u8]],
     ) -> Result<(), Errno> {
-        let file = crate::fs::lookup(s, self, crate::fs::At::Cwd, path, crate::fs::Walk::FOLLOW)?;
-        let text = Text::new(&file)?;
-        let space = AddressSpace::new().map_err(|_| Errno::ENOMEM)?;
-        let limits = *self.limits.lock();
-        let lookup =
-            |p: &[u8]| crate::fs::lookup(s, self, crate::fs::At::Cwd, p, crate::fs::Walk::FOLLOW);
-        let image = crate::exec::load(s, &space, &file, path, argv, envp, &limits, &lookup)?;
+        let me = UserThread::current().ok_or(Errno::EINVAL)?;
+        // The other threads wait at the boundary meanwhile (FreeBSD's
+        // `pre_execve`); they leave once the new image is in.
+        self.single(s, &me, Mode::Boundary)?;
+        let image = self.load_image(s, path, argv, envp);
+        let (text, file, space, image) = match image {
+            Ok(i) => i,
+            Err(e) => {
+                self.end_single(&me);
+                return Err(e);
+            }
+        };
+        let _ = self.single(s, &me, Mode::Exit);
         // No way back from here.
         let old = core::mem::replace(&mut *self.space.lock(), Arc::clone(&space));
         sched::set_address_space(Some(space as Arc<dyn sched::AddressSpace>));
@@ -850,6 +1004,7 @@ impl Process {
         // Dropping the last reference frees the tables and the pages.
         drop(old);
         self.signals.lock().exec();
+        me.sig.lock().exec();
         let closed = self.files.lock(s).exec();
         crate::fs::closed(self.pid, &closed);
         drop(closed);
@@ -872,13 +1027,181 @@ impl Process {
         drop(cred);
         self.sugid.store(false, Ordering::Relaxed);
         self.exterr.store(0, Ordering::Relaxed);
-        self.set_tls_base(None);
+        me.set_tls_base(None);
+        me.set_name(self.with_comm(Name::new));
         // SAFETY: this thread runs in the new image; the kernel does not
-        // use the thread pointer.
-        unsafe { hal::user::set_tls(0) };
+        // use the thread registers.
+        unsafe {
+            hal::user::set_tls(0);
+            hal::user::set_tls2(0);
+        }
         self.layout.set(image.layout);
         *frame = arch::user::user_frame(image.entry, image.sp, image.arg);
+        drop(file);
         Ok(())
+    }
+
+    /// The program at `path`, loaded into a new address space for `exec`.
+    fn load_image(
+        &self,
+        s: &Sleepable,
+        path: &[u8],
+        argv: &[&[u8]],
+        envp: &[&[u8]],
+    ) -> Result<(Text, Arc<Vnode>, Arc<AddressSpace>, crate::exec::Image), Errno> {
+        let file = crate::fs::lookup(s, self, crate::fs::At::Cwd, path, crate::fs::Walk::FOLLOW)?;
+        let text = Text::new(&file)?;
+        let space = AddressSpace::new().map_err(|_| Errno::ENOMEM)?;
+        let limits = *self.limits.lock();
+        let lookup =
+            |p: &[u8]| crate::fs::lookup(s, self, crate::fs::At::Cwd, p, crate::fs::Walk::FOLLOW);
+        let image = crate::exec::load(s, &space, &file, path, argv, envp, &limits, &lookup)?;
+        Ok((text, file, space, image))
+    }
+
+    /// What thread `t` must do about suspension now.
+    pub(crate) fn suspension(&self, t: &UserThread) -> Suspension {
+        let job = self.job.lock();
+        match job.single {
+            Some(x) if x.by != t.tid() => Suspension::Single(x.mode),
+            _ if job.stopped != 0 => Suspension::Stop,
+            _ => Suspension::None,
+        }
+    }
+
+    /// Parks the current thread `t` until the stop or single-threading
+    /// that asked for it is over, or turns into one it must leave for.
+    pub(crate) fn park(&self, s: &Sleepable, t: &UserThread) {
+        self.job.lock().parked += 1;
+        self.suspension_changed();
+        self.stop_wait.wait_until(s, || {
+            matches!(
+                self.suspension(t),
+                Suspension::None | Suspension::Single(Mode::Exit)
+            )
+        });
+        self.job.lock().parked -= 1;
+    }
+
+    /// After a thread parked or left: a stop every thread has reached is
+    /// reported to the parent (once; FreeBSD's `thread_stopped`), and a
+    /// single-threading thread looks again.
+    fn suspension_changed(&self) {
+        let (told, single) = {
+            let mut job = self.job.lock();
+            let n = self.threads.lock().len();
+            let tell = job.stopped != 0 && !job.stop_told && job.parked >= n;
+            if tell {
+                job.stop_told = true;
+            }
+            (tell.then_some(job.stopped), job.single.is_some())
+        };
+        if let Some(sig) = told {
+            crate::signal::notify_parent(self, abi::signal::code::CLD_STOPPED, sig.cast_signed());
+        }
+        if single {
+            self.single_wait.wake_all();
+        }
+    }
+
+    /// Starts a stop for `sig` (the caller then parks): every other thread
+    /// is told to park too.
+    pub(crate) fn begin_stop(&self, t: &UserThread, sig: u32) {
+        {
+            let mut job = self.job.lock();
+            job.stopped = sig;
+            job.stop_report = true;
+            job.cont_report = false;
+            job.stop_told = false;
+        }
+        self.each_thread(|o| {
+            if o.tid() != t.tid() {
+                o.interrupt(crate::signal::AST_SUSPEND);
+            }
+            true
+        });
+    }
+
+    /// Makes the current thread `t` the process's only running one
+    /// (FreeBSD's `thread_single`): the others leave (`Exit`), or park at
+    /// the boundary (`Boundary`) until [`Process::end_single`]. A thread
+    /// already alone in `Boundary` may move to `Exit`. `ERESTART` if
+    /// another thread is single-threading: the caller goes back to the
+    /// boundary, where it parks or leaves.
+    pub(crate) fn single(&self, s: &Sleepable, t: &UserThread, mode: Mode) -> Result<(), Errno> {
+        {
+            let mut job = self.job.lock();
+            if self.threads.lock().len() == 1 && job.single.is_none() {
+                return Ok(());
+            }
+            match &mut job.single {
+                Some(x) if x.by != t.tid() => return Err(Errno::ERESTART),
+                Some(x) => x.mode = mode,
+                None => job.single = Some(Single { by: t.tid(), mode }),
+            }
+        }
+        // Parked threads look again (to leave, for `Exit`); the others
+        // come to the boundary.
+        self.stop_wait.wake_all();
+        self.each_thread(|o| {
+            if o.tid() != t.tid() {
+                o.interrupt(crate::signal::AST_SUSPEND);
+            }
+            true
+        });
+        self.single_wait.wait_until(s, || {
+            let parked = self.job.lock().parked;
+            let n = self.threads.lock().len();
+            match mode {
+                Mode::Exit => n == 1,
+                Mode::Boundary => parked + 1 >= n,
+            }
+        });
+        if mode == Mode::Exit {
+            // Alone for good: nothing is left to hold back.
+            self.job.lock().single = None;
+        }
+        Ok(())
+    }
+
+    /// Ends `t`'s single-threading: parked threads go on.
+    pub(crate) fn end_single(&self, t: &UserThread) {
+        {
+            let mut job = self.job.lock();
+            if job.single.is_some_and(|x| x.by == t.tid()) {
+                job.single = None;
+            }
+        }
+        self.stop_wait.wake_all();
+    }
+
+    /// Takes thread `t` out of the process unless it is the last one
+    /// (`thr_exit`'s test, made with the list locked so two threads
+    /// leaving at once cannot both pass it). Returns whether it was taken.
+    pub(crate) fn remove_thread(&self, t: &UserThread, unless_last: bool) -> bool {
+        let mut threads = self.threads.lock();
+        if unless_last && threads.len() <= 1 {
+            return false;
+        }
+        threads.retain(|o| o.tid() != t.tid());
+        true
+    }
+
+    /// Ends the current thread `t`, already out of the process's list
+    /// ([`Process::remove_thread`]): its signals go, and whoever waits on
+    /// the thread count looks again. Takes the caller's references:
+    /// nothing on a stack that never unwinds may keep them.
+    pub(crate) fn thread_exit(t: Arc<UserThread>) -> ! {
+        let p = Arc::clone(t.process());
+        p.dead_runtime
+            .fetch_add(sched::current().runtime(), Ordering::Relaxed);
+        crate::signal::thread_gone(&t);
+        t.set_sched(None);
+        drop(t);
+        p.suspension_changed();
+        drop(p);
+        drop(sched::set_owner(None));
+        sched::exit()
     }
 
     /// Ends the process as `how` says (the caller's thread then exits):
@@ -918,8 +1241,14 @@ impl Process {
         if self.pid == self.sid() {
             crate::tty::session_ended(self.pid);
         }
-        // The thread holds the process (its owner); this breaks the cycle.
-        *self.thread.lock() = None;
+        // Its last thread holds the process (through its owner) and the
+        // process holds it; this breaks the cycle.
+        if let Some(t) = UserThread::current().filter(|t| core::ptr::eq(t.process().as_ref(), self))
+        {
+            t.set_sched(None);
+        }
+        let gone = core::mem::take(&mut *self.threads.lock());
+        drop(gone);
         // The groups this exit may orphan (its own, its children's):
         // those not orphaned yet.
         let groups: Vec<i32> = {
@@ -1011,6 +1340,25 @@ impl Process {
         self.waiters.wake_all();
     }
 
+    /// Ends the current thread's process as `how` says, and the thread with
+    /// it; first every other thread leaves (FreeBSD's `exit1`). Callers
+    /// hold no references: nothing on a stack that never unwinds may keep
+    /// them.
+    pub(crate) fn exit_current(s: &Sleepable, how: Exit) -> ! {
+        loop {
+            let alone = UserThread::with_current(|t| t.process().single(s, t, Mode::Exit));
+            match alone {
+                Some(Err(_)) => crate::signal::suspend_check(s),
+                _ => break,
+            }
+        }
+        if let Some(p) = Self::current() {
+            p.exit(s, how);
+        }
+        drop(sched::set_owner(None));
+        sched::exit()
+    }
+
     /// Waits for the process to exit (kernel code); returns how it ended.
     pub(crate) fn wait(&self, s: &Sleepable) -> Exit {
         self.waiters
@@ -1028,11 +1376,6 @@ impl Process {
     pub(crate) fn child_changed(&self) {
         self.child_gen.fetch_add(1, Ordering::AcqRel);
         self.child_wait.wake_all();
-    }
-
-    /// The thread, if it has started.
-    pub(crate) fn thread(&self) -> Option<Arc<sched::Thread>> {
-        self.thread.lock().clone()
     }
 
     /// Where exec put the randomized parts of the image.
@@ -1264,23 +1607,34 @@ impl Drop for ProcDesc {
 /// A new user thread's first code: joins its process and leaves for user
 /// mode. Nothing on this stack outlives the jump.
 fn enter(_s: &Sleepable, arg: usize) -> ! {
-    // SAFETY: `start` made `arg` with `Arc::into_raw` and handed it over.
-    let start = unsafe { Arc::from_raw(arg as *const Start) };
-    let process = Arc::clone(&start.process);
-    let frame = start.frame;
-    let tls = start.tls;
-    drop(start);
-    sched::set_address_space(Some(process.space() as Arc<dyn sched::AddressSpace>));
-    // Signals posted from here on interrupt the thread; ones posted before
-    // are looked at below.
-    *process.thread.lock() = Some(sched::current_thread());
-    crate::signal::recheck(&process);
-    sched::set_owner(Some(process));
+    // SAFETY: `start` made `arg` with `Box::into_raw` and handed it over.
+    let start = unsafe { alloc::boxed::Box::from_raw(arg as *mut Start) };
+    let Start {
+        thread,
+        frame,
+        tls,
+        context,
+    } = *start;
+    sched::set_address_space(Some(
+        thread.process().space() as Arc<dyn sched::AddressSpace>
+    ));
+    // Signals posted from here on interrupt the thread; ones posted before,
+    // and a stop or single-threading under way, are looked at below.
+    thread.set_sched(Some(sched::current_thread()));
+    sched::set_owner(Some(thread));
+    sched::current().request_ast(crate::signal::AST_SUSPEND);
+    UserThread::with_current(crate::signal::recheck);
     let mut frame = frame;
     let _ = hal::irq::disable();
     // SAFETY: this thread runs in its process's space; the kernel does not
-    // use the thread pointer.
-    unsafe { hal::user::set_tls(tls) };
+    // use the thread registers.
+    unsafe {
+        hal::user::set_tls(tls[0]);
+        hal::user::set_tls2(tls[1]);
+    }
+    if let Some(c) = context {
+        c.load();
+    }
     crate::signal::user_return(&mut frame);
     // SAFETY: the thread now runs in the process's space, its kernel stack
     // is set (`set_address_space` loads it), interrupts are masked, and

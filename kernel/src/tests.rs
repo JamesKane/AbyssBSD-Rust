@@ -2791,6 +2791,30 @@ mod user_memory {
     }
 
     ktest! {
+        /// Single-threading under load (ROADMAP P6.2): four copies of
+        /// `threads stress` at once, on any CPU, each forking children
+        /// whose threads sleep, fault in pages, make system calls, and
+        /// block in `read` while another of their threads execs or exits.
+        fn single_threading_under_load() {
+            use alloc::vec::Vec;
+            let s = cx();
+            if crate::md::archive().is_none() {
+                return;
+            }
+            let path: &[u8] = b"/usr/tests/abyss/threads";
+            let procs: Vec<_> = (0..4)
+                .map(|_| {
+                    crate::proc::Process::spawn(&s, path, &[b"threads", b"stress", b"25"], &[], None)
+                        .unwrap()
+                })
+                .collect();
+            for p in procs {
+                assert_eq!(p.wait(&s), crate::proc::Exit::Code(0));
+            }
+        }
+    }
+
+    ktest! {
         fn exec_layout_is_randomized_within_bounds() {
             use crate::exec::{Layout, MAXDSIZ, MAXSSIZ, USRSTACK};
             let s = cx();

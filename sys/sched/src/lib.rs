@@ -209,6 +209,9 @@ pub struct PerCpu {
     /// leave it loaded, as FreeBSD's do, so switching between a process
     /// and kernel threads reloads nothing.
     space: Cell<Option<Arc<dyn AddressSpace>>>,
+    /// The user thread registers as last saved or loaded here, so a switch
+    /// writes only those that differ (kernel threads leave them be).
+    user_tls: Cell<[u64; 2]>,
 }
 
 // SAFETY: the `Cell`s are only touched by the owning CPU with interrupts
@@ -300,6 +303,7 @@ fn new_percpu(id: CpuId) -> &'static mut PerCpu {
         switches: Cell::new((0, 0)),
         window_end: Cell::new(0),
         space: Cell::new(None),
+        user_tls: Cell::new([0; 2]),
     }))
 }
 
@@ -732,6 +736,25 @@ pub fn set_base_priority(p: Priority) {
     }
 }
 
+/// Sets `t`'s base priority to `p` (`rtprio`): in the time-sharing range
+/// it moves with the thread's CPU use from there, outside it (real-time
+/// and idle classes) it stays put.
+pub fn set_thread_priority(t: &Thread, p: Priority) {
+    let mut inner = t.inner.lock();
+    let timeshare = p >= Priority::TIMESHARE && p < Priority::IDLE;
+    inner.ts = if timeshare {
+        let nice = p.get() - Priority::TIMESHARE.get();
+        Some(inner.ts.unwrap_or_else(|| ts::Usage::new(nice, 0)))
+    } else {
+        None
+    };
+    let lent = inner.priority.beats(inner.base);
+    inner.base = p;
+    if !lent || p.beats(inner.priority) {
+        set_priority_locked(t, &mut inner, p);
+    }
+}
+
 /// Gives up the CPU to an equal or better runnable thread, if there is
 /// one.
 pub fn yield_now() {
@@ -916,10 +939,12 @@ pub(crate) fn switch_away() {
         if let Some(f) = &(*cur_ptr).fpu {
             hal::fpu::save(f.as_ptr());
         }
-        // A user thread's thread pointer may have changed (`sysarch`, or
-        // user mode itself): keep it for its return.
+        // A user thread's thread registers may have changed (`sysarch`,
+        // or user mode itself): keep them for its return.
         if (*(*cur_ptr).space.get()).is_some() {
-            *(*cur_ptr).tls.get() = hal::user::tls();
+            let regs = [hal::user::tls(), hal::user::tls2()];
+            *(*cur_ptr).tls.get() = regs;
+            c.user_tls.set(regs);
         }
         hal::switch((*cur_ptr).context.get(), (*next_ptr).context.get());
     }
@@ -1014,12 +1039,19 @@ fn load_space(c: &PerCpu) {
         return;
     };
     // A user thread: traps from user mode land on its stack, and its
-    // thread pointer is back.
+    // thread registers are back (those that differ from what is loaded).
+    let loaded = c.user_tls.get();
     // SAFETY: interrupts are masked and `t` is about to run here.
     unsafe {
         hal::user::set_kernel_stack(t.kstack_top);
-        hal::user::set_tls(tls);
+        if loaded[0] != tls[0] {
+            hal::user::set_tls(tls[0]);
+        }
+        if loaded[1] != tls[1] {
+            hal::user::set_tls2(tls[1]);
+        }
     }
+    c.user_tls.set(tls);
     let loaded = c.space.take();
     if loaded.as_ref().is_some_and(|l| Arc::ptr_eq(l, want)) {
         c.space.set(loaded);
@@ -1040,10 +1072,21 @@ fn load_space(c: &PerCpu) {
 /// runs on whatever is loaded, like a kernel thread. Returns the old one.
 pub fn set_address_space(space: Option<Arc<dyn AddressSpace>>) -> Option<Arc<dyn AddressSpace>> {
     let irq = hal::irq::disable();
-    // SAFETY: the current thread writes its own `space`, with interrupts
-    // masked so no switch reads it meanwhile.
-    let old = unsafe { core::mem::replace(&mut *current().space.get(), space) };
-    load_space(this_cpu());
+    let c = this_cpu();
+    // SAFETY: the current thread writes its own `space` (and `tls`), with
+    // interrupts masked so no switch reads them meanwhile.
+    let old = unsafe {
+        let t = current();
+        if (*t.space.get()).is_some() {
+            // What it runs with now, which may not be what was loaded: kept,
+            // so the load below (and later switches) compare against it.
+            let regs = [hal::user::tls(), hal::user::tls2()];
+            *t.tls.get() = regs;
+            c.user_tls.set(regs);
+        }
+        core::mem::replace(&mut *t.space.get(), space)
+    };
+    load_space(c);
     hal::irq::restore(irq);
     old
 }

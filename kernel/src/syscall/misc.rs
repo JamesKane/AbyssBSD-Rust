@@ -10,9 +10,12 @@ use abi::thr::{
     CPU_WHICH_TIDPID, CPUSET_BYTES, EXTERRCTL_DISABLE, EXTERRCTL_ENABLE,
 };
 
-use super::{SysResult, int, process};
+use alloc::sync::Arc;
+
+use super::{SysResult, process};
 use crate::proc::Process;
 use crate::uaccess;
+use crate::uthread::UserThread;
 
 /// `getpid()`.
 pub(super) fn getpid() -> SysResult {
@@ -69,8 +72,53 @@ pub(super) fn exterrctl(op: u64, _flags: u64, ptr: u64) -> SysResult {
     Ok(0)
 }
 
-/// `cpuset_getaffinity(level, which, id, setsize, mask)`: every process
-/// may run on every CPU.
+/// What a `cpuset` call names (FreeBSD's `cpuset_which`): a thread, or a
+/// process (all its threads).
+enum Target {
+    Thread(Arc<UserThread>),
+    Process(Arc<Process>),
+}
+
+impl Target {
+    /// `which` and `id`: -1 is the caller's thread or process; a
+    /// `CPU_WHICH_TIDPID` id above `PID_MAX` is a tid. A tid may be any
+    /// process's.
+    fn find(which: u64, id: u64) -> Result<Self, Errno> {
+        let id = id.cast_signed();
+        let tid = |id: i64| {
+            i32::try_from(id)
+                .ok()
+                .and_then(crate::uthread::find)
+                .ok_or(Errno::ESRCH)
+        };
+        let pid = |id: i64| {
+            i32::try_from(id)
+                .ok()
+                .and_then(crate::proc::find)
+                .ok_or(Errno::ESRCH)
+        };
+        Ok(match u32::try_from(which).map_err(|_| Errno::EINVAL)? {
+            CPU_WHICH_PID if id == -1 => Self::Process(process()?),
+            CPU_WHICH_PID => Self::Process(pid(id)?),
+            CPU_WHICH_TID | CPU_WHICH_TIDPID if id == -1 => Self::Thread(super::thread()?),
+            CPU_WHICH_TID => Self::Thread(tid(id)?),
+            CPU_WHICH_TIDPID if id > i64::from(crate::proc::PID_MAX) => Self::Thread(tid(id)?),
+            CPU_WHICH_TIDPID => Self::Process(pid(id)?),
+            _ => return Err(Errno::EINVAL),
+        })
+    }
+
+    fn cpus(&self) -> u64 {
+        match self {
+            Self::Thread(t) => t.cpus(),
+            Self::Process(p) => p.cpus(),
+        }
+    }
+}
+
+/// `cpuset_getaffinity(level, which, id, setsize, mask)`: the CPUs a
+/// thread may run on, or a process's threads (the union); at the root and
+/// cpuset levels, every CPU (there is one set).
 pub(super) fn cpuset_getaffinity(
     level: u64,
     which: u64,
@@ -78,7 +126,6 @@ pub(super) fn cpuset_getaffinity(
     setsize: u64,
     mask: u64,
 ) -> SysResult {
-    let p = process()?;
     let size = usize::try_from(setsize).map_err(|_| Errno::ERANGE)?;
     if !(size_of::<u64>()..=CPUSET_BYTES).contains(&size) {
         return Err(Errno::ERANGE);
@@ -87,23 +134,13 @@ pub(super) fn cpuset_getaffinity(
     if ![CPU_LEVEL_ROOT, CPU_LEVEL_CPUSET, CPU_LEVEL_WHICH].contains(&level) {
         return Err(Errno::EINVAL);
     }
-    let me = int(id) == -1
-        || match u32::try_from(which).map_err(|_| Errno::EINVAL)? {
-            CPU_WHICH_PID => int(id) == p.pid(),
-            CPU_WHICH_TID => id == sched::current().tid().0,
-            CPU_WHICH_TIDPID => int(id) == p.pid() || id == sched::current().tid().0,
-            _ => return Err(Errno::EINVAL),
-        };
-    if !me {
-        return Err(Errno::ESRCH);
-    }
-    let mut set = [0u8; CPUSET_BYTES];
-    // The root and the process's set are every CPU; its own, its mask.
+    let target = Target::find(which, id)?;
     let allowed = if level == CPU_LEVEL_WHICH {
-        p.cpus()
+        target.cpus()
     } else {
         u64::MAX
     };
+    let mut set = [0u8; CPUSET_BYTES];
     for cpu in 0..sched::online_cpus().min(64) {
         if allowed & (1 << cpu) != 0 {
             set[cpu / 8] |= 1 << (cpu % 8);
@@ -114,7 +151,7 @@ pub(super) fn cpuset_getaffinity(
 }
 
 /// `cpuset_setaffinity(level, which, id, setsize, mask)`: the CPUs a
-/// process (this one, or another by pid) may run on.
+/// thread may run on, or every thread of a process.
 pub(super) fn cpuset_setaffinity(
     level: u64,
     which: u64,
@@ -122,7 +159,6 @@ pub(super) fn cpuset_setaffinity(
     setsize: u64,
     mask: u64,
 ) -> SysResult {
-    let me = process()?;
     let size = usize::try_from(setsize).map_err(|_| Errno::ERANGE)?;
     if size < size_of::<u64>() || size > 4096 {
         return Err(Errno::ERANGE);
@@ -130,13 +166,7 @@ pub(super) fn cpuset_setaffinity(
     if u32::try_from(level).map_err(|_| Errno::EINVAL)? != CPU_LEVEL_WHICH {
         return Err(Errno::EINVAL);
     }
-    let target = match u32::try_from(which).map_err(|_| Errno::EINVAL)? {
-        _ if int(id) == -1 => me,
-        CPU_WHICH_PID | CPU_WHICH_TIDPID => crate::proc::find(int(id)).ok_or(Errno::ESRCH)?,
-        CPU_WHICH_TID if id == sched::current().tid().0 => me,
-        CPU_WHICH_TID => return Err(Errno::ESRCH),
-        _ => return Err(Errno::EINVAL),
-    };
+    let target = Target::find(which, id)?;
     let mut set = alloc::vec![0u8; size];
     uaccess::copy_in(&mut set, mask).map_err(|_| Errno::EFAULT)?;
     let online = sched::online_cpus();
@@ -161,16 +191,23 @@ pub(super) fn cpuset_setaffinity(
     if bits == 0 {
         return Err(Errno::EDEADLK);
     }
-    target.set_cpus(bits);
+    match target {
+        Target::Thread(t) => t.set_cpus(bits),
+        Target::Process(p) => p.set_cpus(bits),
+    }
     Ok(0)
 }
+
+// SAFETY: integers only, padding explicit (`abi-check` holds the C layout).
+#[cfg(target_arch = "x86_64")]
+unsafe impl uaccess::Plain for abi::sysarch::amd64::GetXfpustate {}
 
 /// `sysarch(op, parms)`: amd64's thread pointer (the FS base, which
 /// libc's start-up sets as the TLS base).
 #[cfg(target_arch = "x86_64")]
 pub(super) fn sysarch(op: u64, parms: u64) -> SysResult {
     use abi::sysarch::amd64;
-    let p = process()?;
+    let t = super::thread()?;
     let base = uaccess::UserPtr::<u64>::new(parms);
     match op {
         amd64::GET_FSBASE => base.write(&hal::user::tls()).map_err(|_| Errno::EFAULT)?,
@@ -183,15 +220,38 @@ pub(super) fn sysarch(op: u64, parms: u64) -> SysResult {
             // not use FS.
             unsafe { hal::user::set_tls(v) };
             if op == amd64::SET_TLSBASE {
-                p.set_tls_base(Some(v));
+                t.set_tls_base(Some(v));
             }
         }
+        amd64::GET_GSBASE => base.write(&hal::user::tls2()).map_err(|_| Errno::EFAULT)?,
+        amd64::SET_GSBASE => {
+            let v = base.read().map_err(|_| Errno::EFAULT)?;
+            if v >= crate::mm::space::USER_END {
+                return Err(Errno::EINVAL);
+            }
+            // SAFETY: a canonical user address; the kernel does not use
+            // the user's GS.
+            unsafe { hal::user::set_tls2(v) };
+        }
         amd64::GET_TLSBASE => {
-            let v = p.tls_base().ok_or(Errno::ESRCH)?;
+            let v = t.tls_base().ok_or(Errno::ESRCH)?;
             base.write(&v).map_err(|_| Errno::EFAULT)?;
         }
-        amd64::DISABLE_TLSBASE => p.set_tls_base(None),
-        // GS bases need switching per thread first.
+        amd64::DISABLE_TLSBASE => t.set_tls_base(None),
+        amd64::GET_XFPUSTATE => {
+            let req = uaccess::UserPtr::<amd64::GetXfpustate>::new(parms)
+                .read()
+                .map_err(|_| Errno::EFAULT)?;
+            // What follows the 512-byte legacy region: the XSAVE header and
+            // the extended state.
+            let fpu = crate::signal::FpuImage::saved().ok_or(Errno::ENOMEM)?;
+            let ext = fpu.bytes().get(512..).unwrap_or(&[]);
+            let len = usize::try_from(req.len).map_err(|_| Errno::EINVAL)?;
+            if len > ext.len() {
+                return Err(Errno::EINVAL);
+            }
+            uaccess::copy_out(req.addr, &ext[..len]).map_err(|_| Errno::EFAULT)?;
+        }
         _ => {
             crate::firstuse::report(crate::firstuse::Kind::Sysarch, format_args!("{op}"));
             return Err(Errno::EINVAL);

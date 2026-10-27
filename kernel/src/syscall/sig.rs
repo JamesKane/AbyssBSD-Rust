@@ -18,12 +18,13 @@ use abi::time::Timespec;
 use abi::ucontext::{Mcontext, UCF_SWAPPED, Ucontext};
 use sched::{Sleepable, WaitQueue};
 
-use super::{SysResult, int, process};
+use super::{SysResult, int, process, thread};
 use crate::arch::trap::TrapFrame;
 use crate::proc::Process;
-use crate::signal::{self as signal, AST_FULL_RESTORE, AST_SIGNAL, cant_mask, post, user_info};
+use crate::signal::{self as signal, AST_FULL_RESTORE, AST_SIGNAL, post, user_info};
 use crate::time::Wait;
 use crate::uaccess::{Plain, UserPtr};
+use crate::uthread::UserThread;
 
 // SAFETY: integers only, no padding (`abi-check` holds the C layout).
 unsafe impl Plain for Sigset {}
@@ -62,14 +63,12 @@ pub(super) fn sigaction(sig: u64, act: u64, oact: u64) -> SysResult {
         return Err(Errno::EINVAL);
     }
     let p = process()?;
-    let old = {
-        let mut st = p.signals.lock();
-        let old = st.action(sig);
-        if let Some(mut n) = new {
+    let old = match new {
+        Some(mut n) => {
             n._pad = 0;
-            st.set_action(sig, n);
+            signal::set_action(&p, sig, n)
         }
-        old
+        None => p.signals.lock().action(sig),
     };
     if oact != 0 {
         UserPtr::<Sigaction>::new(oact)
@@ -82,22 +81,17 @@ pub(super) fn sigaction(sig: u64, act: u64, oact: u64) -> SysResult {
 /// `sigprocmask(how, set, oset)`.
 pub(super) fn sigprocmask(how: u64, set: u64, oset: u64) -> SysResult {
     let new = if set == 0 { None } else { Some(read_set(set)?) };
-    let p = process()?;
-    let old = {
-        let mut st = p.signals.lock();
-        let old = st.mask;
-        if let Some(n) = new {
-            st.mask = match u32::try_from(how).map_err(|_| Errno::EINVAL)? {
-                SIG_BLOCK => old.union(n),
-                SIG_UNBLOCK => old.minus(n),
-                SIG_SETMASK => n,
-                _ => return Err(Errno::EINVAL),
-            }
-            .minus(cant_mask());
-        }
-        old
-    };
-    signal::recheck(&p);
+    let t = thread()?;
+    let old = t.sig.lock().mask;
+    if let Some(n) = new {
+        let mask = match u32::try_from(how).map_err(|_| Errno::EINVAL)? {
+            SIG_BLOCK => old.union(n),
+            SIG_UNBLOCK => old.minus(n),
+            SIG_SETMASK => n,
+            _ => return Err(Errno::EINVAL),
+        };
+        signal::set_mask(&t, mask);
+    }
     if oset != 0 {
         UserPtr::<Sigset>::new(oset)
             .write(&old)
@@ -106,9 +100,14 @@ pub(super) fn sigprocmask(how: u64, set: u64, oset: u64) -> SysResult {
     Ok(0)
 }
 
-/// `sigpending(set)`: everything pending, blocked or not.
+/// `sigpending(set)`: everything pending for the process or the
+/// thread, blocked or not.
 pub(super) fn sigpending(set: u64) -> SysResult {
-    let pending = process()?.signals.lock().pending();
+    let t = thread()?;
+    let pending = {
+        let st = t.process().signals.lock();
+        st.pending().union(t.sig.lock().queue.pending())
+    };
     UserPtr::<Sigset>::new(set)
         .write(&pending)
         .map_err(|_| Errno::EFAULT)?;
@@ -120,8 +119,8 @@ pub(super) fn sigpending(set: u64) -> SysResult {
 /// own), and `sigreturn` brings back the mask from before.
 pub(super) fn sigsuspend(s: &Sleepable, sigmask: u64) -> SysResult {
     let mask = read_set(sigmask)?;
-    let p = process()?;
-    signal::swap_mask(&p, mask);
+    let t = thread()?;
+    signal::swap_mask(&t, mask);
     let q = WaitQueue::new();
     loop {
         if signal::sleep(s, &q, || false, None).is_err() {
@@ -143,27 +142,25 @@ pub(super) fn sigreturn(frame: &mut TrapFrame, ucp: u64) -> SysResult {
 /// Loads `uc` into the thread: registers, FPU, and mask.
 fn set_context(frame: &mut TrapFrame, uc: &Ucontext<Mcontext>) -> Result<(), Errno> {
     signal::set_context(frame, &uc.uc_mcontext)?;
-    let p = process()?;
-    p.signals.lock().mask = uc.uc_sigmask.minus(cant_mask());
-    let t = sched::current();
-    t.request_ast(AST_FULL_RESTORE);
-    signal::recheck(&p);
+    let t = thread()?;
+    sched::current().request_ast(AST_FULL_RESTORE);
+    signal::set_mask(&t, uc.uc_sigmask);
     Ok(())
 }
 
 /// The current context, as `getcontext` saves it.
-fn get_context(frame: &TrapFrame, p: &Process) -> Result<Ucontext<Mcontext>, Errno> {
+fn get_context(frame: &TrapFrame, t: &UserThread) -> Result<Ucontext<Mcontext>, Errno> {
     let (mask, stack) = {
-        let st = p.signals.lock();
-        (st.mask, stack_state(&st, sp(frame)))
+        let ts = t.sig.lock();
+        (ts.mask, stack_state(&ts, sp(frame)))
     };
     signal::get_context(frame, mask, stack)
 }
 
 /// `getcontext(ucp)`.
 pub(super) fn getcontext(frame: &TrapFrame, ucp: u64) -> SysResult {
-    let p = process()?;
-    let uc = get_context(frame, &p)?;
+    let t = thread()?;
+    let uc = get_context(frame, &t)?;
     UserPtr::<Ucontext<Mcontext>>::new(ucp)
         .write(&uc)
         .map_err(|_| Errno::EFAULT)?;
@@ -184,8 +181,8 @@ pub(super) fn swapcontext(frame: &mut TrapFrame, oucp: u64, ucp: u64) -> SysResu
     if oucp == 0 || ucp == 0 {
         return Err(Errno::EINVAL);
     }
-    let p = process()?;
-    let mut old = get_context(frame, &p)?;
+    let t = thread()?;
+    let mut old = get_context(frame, &t)?;
     old.uc_flags |= UCF_SWAPPED;
     UserPtr::<Ucontext<Mcontext>>::new(oucp)
         .write(&old)
@@ -207,7 +204,7 @@ const fn sp(frame: &TrapFrame) -> u64 {
 
 /// The alternate stack as `sigaltstack` and contexts report it: its
 /// flags say whether it is enabled and in use.
-fn stack_state(st: &signal::Signals, sp: u64) -> StackT {
+fn stack_state(st: &signal::ThreadSignals, sp: u64) -> StackT {
     let a = st.altstack;
     let flags = if a.ss_flags & SS_DISABLE != 0 {
         SS_DISABLE
@@ -233,9 +230,9 @@ pub(super) fn sigaltstack(frame: &TrapFrame, ss: u64, oss: u64) -> SysResult {
                 .map_err(|_| Errno::EFAULT)?,
         )
     };
-    let p = process()?;
+    let t = thread()?;
     let old = {
-        let mut st = p.signals.lock();
+        let mut st = t.sig.lock();
         let old = stack_state(&st, sp(frame));
         if let Some(n) = new {
             if old.ss_flags == SS_ONSTACK {
@@ -307,29 +304,61 @@ pub(super) fn kill(pid: u64, signum: u64) -> SysResult {
     Ok(0)
 }
 
-/// `thr_kill(id, sig)`: the process has one thread.
+/// `thr_kill(id, sig)`: to thread `id` of this process, or with `id` -1
+/// to every other one.
 pub(super) fn thr_kill(id: u64, sig: u64) -> SysResult {
     let p = process()?;
     thread_kill(&p, id, sig)
 }
 
-/// `thr_kill2(pid, id, sig)`.
+/// `thr_kill2(pid, id, sig)`: to thread `id` (in process `pid`), or with
+/// `id` -1 to every thread of `pid` but the caller.
 pub(super) fn thr_kill2(pid: u64, id: u64, sig: u64) -> SysResult {
-    let p = crate::proc::find(int(pid)).ok_or(Errno::ESRCH)?;
+    if id.cast_signed() == -1 {
+        let p = crate::proc::find(int(pid)).ok_or(Errno::ESRCH)?;
+        return thread_kill(&p, id, sig);
+    }
+    // The thread names its process; `pid` must agree (FreeBSD's `tdfind`).
+    let tid = i32::try_from(id.cast_signed()).map_err(|_| Errno::ESRCH)?;
+    let t = crate::uthread::find(tid).ok_or(Errno::ESRCH)?;
+    let pid = int(pid);
+    if pid != -1 && t.process().pid() != pid {
+        return Err(Errno::ESRCH);
+    }
+    let p = alloc::sync::Arc::clone(t.process());
     thread_kill(&p, id, sig)
 }
 
+/// FreeBSD's order: the thread is found first (`ESRCH`), then the
+/// signal checked (`EINVAL`); signal 0 only checks.
 fn thread_kill(p: &alloc::sync::Arc<Process>, id: u64, sig: u64) -> SysResult {
-    let sig = u32::try_from(int(sig)).map_err(|_| Errno::EINVAL)?;
-    if sig != 0 && !signal::valid(sig) {
+    let sig = int(sig);
+    let me = thread()?;
+    let info = user_info(sig.cast_unsigned(), me.process().pid(), SI_LWP);
+    let valid = |sig: i32| u32::try_from(sig).is_ok_and(signal::valid);
+    if id.cast_signed() == -1 {
+        if sig != 0 && !valid(sig) {
+            return Err(Errno::EINVAL);
+        }
+        let mut found = false;
+        for t in p.threads().iter().filter(|t| t.tid() != me.tid()) {
+            found = true;
+            if sig == 0 {
+                break;
+            }
+            let _ = signal::post_thread(t, info);
+        }
+        return if found { Ok(0) } else { Err(Errno::ESRCH) };
+    }
+    let tid = i32::try_from(id.cast_signed()).map_err(|_| Errno::ESRCH)?;
+    let t = p.find_thread(tid).ok_or(Errno::ESRCH)?;
+    if sig == 0 {
+        return Ok(0);
+    }
+    if !valid(sig) {
         return Err(Errno::EINVAL);
     }
-    let t = p.thread().ok_or(Errno::ESRCH)?;
-    if t.tid().0 != id {
-        return Err(Errno::ESRCH);
-    }
-    let me = process()?;
-    send(p, sig, user_info(sig, me.pid(), SI_LWP))?;
+    signal::post_thread(&t, info)?;
     Ok(0)
 }
 
@@ -356,15 +385,15 @@ pub(super) fn sigqueue(pid: u64, signum: u64, value: u64) -> SysResult {
 /// delivered; another signal that must be handled ends the wait with
 /// `EINTR`. `EAGAIN` once `timeout` (nanoseconds) passes.
 fn wait_for(s: &Sleepable, set: Sigset, timeout: Option<u64>) -> Result<Siginfo, Errno> {
-    let set = set.minus(cant_mask());
-    let p = process()?;
+    let set = set.minus(signal::cant_mask());
+    let td = thread()?;
     let t = sched::current();
-    let before = p.signals.lock().mask;
-    signal::swap_mask(&p, before.minus(set));
+    let before = td.sig.lock().mask;
+    signal::swap_mask(&td, before.minus(set));
     let q = WaitQueue::new();
     let deadline = timeout.map(|ns| crate::time::now_ns().saturating_add(ns));
     let r = loop {
-        if let Some(info) = signal::take_from(&p, set) {
+        if let Some(info) = signal::take_from(&td, set) {
             break Ok(info);
         }
         let left = deadline.map(|d| d.saturating_sub(crate::time::now_ns()));
@@ -376,7 +405,7 @@ fn wait_for(s: &Sleepable, set: Sigset, timeout: Option<u64>) -> Result<Siginfo,
             Wait::Done => {}
             Wait::Interrupted => {
                 t.clear_interrupted();
-                if let Some(info) = signal::take_from(&p, set) {
+                if let Some(info) = signal::take_from(&td, set) {
                     break Ok(info);
                 }
                 if signal::interruption(s).is_some() {
@@ -385,7 +414,7 @@ fn wait_for(s: &Sleepable, set: Sigset, timeout: Option<u64>) -> Result<Siginfo,
             }
         }
     };
-    signal::restore_mask(&p);
+    signal::restore_mask(&td);
     r
 }
 
@@ -447,10 +476,10 @@ pub(super) fn sigwait(s: &Sleepable, set: u64, sig: u64) -> SysResult {
 /// `sigfastblock(cmd, ptr)`: the word libthr uses to block signals
 /// without a system call.
 pub(super) fn sigfastblock(cmd: u64, ptr: u64) -> SysResult {
-    let p = process()?;
+    let t = thread()?;
     match u32::try_from(cmd).map_err(|_| Errno::EINVAL)? {
         SIGFASTBLOCK_SETPTR => {
-            let mut st = p.signals.lock();
+            let mut st = t.sig.lock();
             if st.fastblock != 0 {
                 return Err(Errno::EBUSY);
             }
@@ -460,7 +489,7 @@ pub(super) fn sigfastblock(cmd: u64, ptr: u64) -> SysResult {
             st.fastblock = ptr;
         }
         SIGFASTBLOCK_UNBLOCK => {
-            let at = p.signals.lock().fastblock;
+            let at = t.sig.lock().fastblock;
             if at == 0 {
                 return Err(Errno::EINVAL);
             }
@@ -473,13 +502,13 @@ pub(super) fn sigfastblock(cmd: u64, ptr: u64) -> SysResult {
             sched::current().request_ast(AST_SIGNAL);
         }
         SIGFASTBLOCK_UNSETPTR => {
-            let mut st = p.signals.lock();
+            let mut st = t.sig.lock();
             if st.fastblock == 0 {
                 return Err(Errno::EINVAL);
             }
             st.fastblock = 0;
             drop(st);
-            signal::recheck(&p);
+            signal::recheck(&t);
         }
         _ => return Err(Errno::EINVAL),
     }

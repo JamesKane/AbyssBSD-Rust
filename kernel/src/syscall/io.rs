@@ -92,8 +92,8 @@ fn wrote(r: Result<usize, Errno>) -> SysResult {
     match r {
         Ok(n) => Ok(n as u64),
         Err(Errno::EPIPE) => {
-            let _ = crate::signal::post(
-                &process()?,
+            let _ = crate::signal::post_thread(
+                &super::thread()?,
                 crate::signal::user_info(abi::signal::SIGPIPE, 0, abi::signal::code::SI_KERNEL),
             );
             Err(Errno::EPIPE)

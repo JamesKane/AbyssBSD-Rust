@@ -156,6 +156,19 @@ pub fn tls() -> u64 {
     v
 }
 
+/// arm64 has one user thread register: the second is always 0.
+#[must_use]
+pub fn tls2() -> u64 {
+    0
+}
+
+/// Nothing to set (see [`tls2`]).
+///
+/// # Safety
+///
+/// None needed; `unsafe` for the HAL's signature.
+pub unsafe fn set_tls2(_v: u64) {}
+
 /// Sets the user thread pointer.
 ///
 /// # Safety
