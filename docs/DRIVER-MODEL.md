@@ -1369,9 +1369,8 @@ These are not Day-1 work. The design keeps room for them so they do not need a n
    the CPU and several devices at once (a VM object with a device pager, FreeBSD's
    `d_mmap_single`; a dma-buf equivalent; user-page pinning), user-mapped register pages, and fences
    whose signalling context cannot block on allocation. The panthor, Adreno, Linlon, Iris, and
-   Zhouyi specifications all need them. They get their own design document at the start of M-G,
-   together with the graphics ABI decision (ROADMAP open decision 6), which these drivers' DRM
-   userspace argues should be DRM-compatible.
+   Zhouyi specifications all need them. The forward design is [GRAPHICS.md](GRAPHICS.md) (draft),
+   finalized with the graphics ABI decision (ROADMAP open decision 6) at the start of M-G.
 7. **Sky1 firmware transport.** [HARDWARE.md §4](HARDWARE.md) records Sky1 clocks as AML methods
    that call SCMI over PCC. The clean-room `sky1-soc` specification describes an SCMI agent over
    the CIX mailbox (`_DSD` `mboxes`) and a separate SCMI-over-SMC agent for power domains. Both may

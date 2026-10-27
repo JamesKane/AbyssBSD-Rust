@@ -1769,6 +1769,9 @@ an ADR or follow-up, which tells us how well the seams held.
 
 ### M-G: Graphics
 
+Forward design: [GRAPHICS.md](GRAPHICS.md) (draft; it proposes the DRM user interface as FreeBSD's
+ports see it, implemented natively, and a step order for this milestone).
+
 - Kernel modesetting interface (KMS-equivalent: CRTCs, planes, connectors, atomic commits, dma-buf
   style buffer sharing, sync files). Decide between FreeBSD/Linux DRM ioctl compatibility and a
   new interface. The decision drives which userland GPU stacks can be reused.
