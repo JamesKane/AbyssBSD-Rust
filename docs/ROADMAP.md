@@ -1738,7 +1738,8 @@ NICs.
 - Performance pass: lock contention profiling and scheduler tuning on hybrid cores, aimed at
   beating FreeBSD rather than matching it. The P9 suite adds self-hosted build time, SU+J
   metadata workloads, and swap throughput.
-- Documentation: installation guide, supported-hardware list, compat-deviations list.
+- Documentation: installation guide, supported-hardware list, compat-deviations list. Forward
+  design for the installed manuals: [MANUALS.md](MANUALS.md) (draft).
 
 **Exit (v1.0):** the success criteria in [VISION.md](VISION.md#success-criteria-for-day-1-v10) are
 met.
