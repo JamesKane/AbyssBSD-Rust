@@ -358,5 +358,35 @@ pub(crate) fn init(s: &Sleepable) {
             }),
         )
         .expect("kern.proc.auxv");
+        t.add_handler(
+            procs,
+            Number::Fixed(43),
+            "nfds",
+            "Number of open file descriptors",
+            Arc::new(|r: &[i32], out: &mut Vec<u8>| {
+                // `KERN_PROC_NFDS`: only of the caller, named 0.
+                if r != [0] {
+                    return Err(ReadError::Invalid);
+                }
+                let p = crate::proc::Process::current().ok_or(ReadError::Invalid)?;
+                // SAFETY: sysctl handlers run in the calling thread, which
+                // may sleep.
+                let s = unsafe { sched::Sleepable::assume() };
+                let n = i32::try_from(p.files.lock(&s).count()).unwrap_or(i32::MAX);
+                out.extend_from_slice(&n.to_ne_bytes());
+                Ok(())
+            }),
+        )
+        .expect("kern.proc.nfds");
+        t.add_value(
+            kern,
+            Number::Auto,
+            "openfiles",
+            "System-wide number of open files",
+            sysctl::Value::Int(alloc::boxed::Box::new(|| {
+                crate::fs::file::OPEN_FILES.load(core::sync::atomic::Ordering::Relaxed)
+            })),
+        )
+        .expect("kern.openfiles");
     });
 }

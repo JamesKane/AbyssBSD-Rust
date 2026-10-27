@@ -306,6 +306,11 @@ pub(super) fn fchmod(s: &Sleepable, fd: u64, mode: u64) -> SysResult {
         m.chmod(s, &crate::fs::cred(), mode as u16)?;
         return Ok(0);
     }
+    // A socket's mode is what `bind` gives its node (`uipc_chmod`).
+    if let crate::fs::file::FileKind::Socket(so) = f.kind() {
+        so.so.chmod(int(mode).cast_unsigned())?;
+        return Ok(0);
+    }
     setattr(s, &*fd_vnode(s, fd)?, &mode_of(mode))
 }
 

@@ -1991,9 +1991,10 @@ main(int argc, char **argv)
 	    strcmp(argv[1], "p5") != 0 && strcmp(argv[1], "vt") != 0 &&
 	    !(UB_HAS_P6 && (strcmp(argv[1], "p6") == 0 ||
 	    strcmp(argv[1], "p6.thr") == 0 ||
-	    strcmp(argv[1], "p6.event") == 0)))) {
+	    strcmp(argv[1], "p6.event") == 0 ||
+	    strcmp(argv[1], "p6.unix") == 0)))) {
 		fprintf(stderr, "usage: ubench p4 | p5 | vt%s\n",
-		    UB_HAS_P6 ? " | p6 | p6.thr | p6.event" : "");
+		    UB_HAS_P6 ? " | p6 | p6.thr | p6.event | p6.unix" : "");
 		return (2);
 	}
 	printf("kbench begin %s cpus=%ld\n", argv[1],
@@ -2012,6 +2013,9 @@ main(int argc, char **argv)
 	else if (strcmp(argv[1], "p6.event") == 0) {
 		signal(SIGPIPE, SIG_IGN);
 		suite_event();
+	} else if (strcmp(argv[1], "p6.unix") == 0) {
+		signal(SIGPIPE, SIG_IGN);
+		suite_unix();
 	} else
 		suite_p6();
 #endif

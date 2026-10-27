@@ -1606,6 +1606,26 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
   `SCM_CREDS`/`SCM_CREDS2`, `LOCAL_PEERCRED`; the "UNIX-domain sockets" deviation closed.
 - Exit: kyua's `kern/unix_*` and `lib/libc/sys` socket tests at the target, `libcasper` services
   work, `logger` reaches a `syslogd` started by hand, and the `unix` component measured.
+  - `sys/socket` done 2026-10-27: FreeBSD 15.1's UNIX-domain protocol on its own socket buffers
+    (mbufs carved and charged as `mc_get` does, so buffers fill where FreeBSD's do): stream and
+    seqpacket sends straight into the peer's receive buffer, datagram queues per connected
+    sender, listen queues, `socketpair`, shutdown, `SO_*` and `LOCAL_*` options, `SCM_RIGHTS`
+    with the collector, `SCM_CREDS`/`SCM_CREDS2` (`LOCAL_CREDS`, `LOCAL_CREDS_PERSISTENT`),
+    the timestamps, `LOCAL_PEERCRED`, poll and kqueue filters; host tests. Every socket system
+    call, `net.local.*`, `kern.ipc.maxsockbuf` and kin, `kern.openfiles`, `kern.proc.nfds`, and
+    `fchmod` on sockets; the "UNIX-domain sockets" deviation narrowed to what is left.
+  - The shell cases run `sys/kern/unix_*`, `socket_msg_*`, `shutdown_dgram`, `listener_wakeup`,
+    and `lib/libc/sys`'s socket tests as kyua does: 531 cases on amd64 (QEMU, bhyve) and 527
+    on arm64 end as on FreeBSD but those `tests/kyua/abyss-known.txt` lists (`AF_INET`, P8;
+    jails, P6.7; ktrace, P6.8; AIO). The shell case also runs base's `head` through Casper
+    and `logger` to a `syslogd` started by hand. Getting there brought process descriptors'
+    `FREAD | FWRITE`, kyua's 300-second case timeout (with a watchdog that takes its `sleep`
+    along), and a 2 GiB shell VM (FreeBSD's own; `random_eor_and_waitall` takes 100 MiB).
+  - The `unix` component measured 2026-10-27 (`perf --suite p6.unix`, 10 runs a side):
+    geometric mean 0.846, within the gate. Connect (0.31), stream and seqpacket ping-pong
+    (0.29), and datagrams (0.70) beat FreeBSD. Open diagnostics: stream bandwidth (4 KiB
+    writes 4.1x, 64 KiB 2.7x: an allocation per mbuf and a poller per wait) and
+    `SCM_RIGHTS` passing (1.53x).
 
 **P6.6 Terminals.**
 - The tty device trait (MULTIUSER.md §9), ptys (`posix_openpt`, `/dev/pts`, `/dev/ptmx`, packet

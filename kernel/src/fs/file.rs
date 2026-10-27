@@ -113,7 +113,7 @@ pub(crate) enum FileKind {
     /// A process descriptor (`pdfork`).
     Process(crate::proc::ProcDesc),
     /// A UNIX-domain socket.
-    Socket(super::socket::UnixSocket),
+    Socket(super::socket::SocketFile),
     /// A named pipe.
     Fifo(super::fifo::FifoFile),
     /// POSIX shared memory.
@@ -137,8 +137,18 @@ pub(crate) struct File {
     offset: Mutex<u64>,
 }
 
+/// Open files system-wide (`openfiles`, `kern.openfiles`).
+pub(crate) static OPEN_FILES: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
+
+impl Drop for File {
+    fn drop(&mut self) {
+        OPEN_FILES.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 impl File {
     pub(crate) fn new(kind: FileKind, flags: u32) -> Arc<Self> {
+        OPEN_FILES.fetch_add(1, Ordering::Relaxed);
         Arc::new(Self {
             kind,
             flags: AtomicU32::new(flags),
@@ -200,8 +210,7 @@ impl File {
             }
             FileKind::Pipe(p) => p.read(s, uio, self.nonblock()),
             FileKind::Process(_) => Err(Errno::EOPNOTSUPP),
-            // Never connected (P6 brings the rest).
-            FileKind::Socket(_) => Err(Errno::ENOTCONN),
+            FileKind::Socket(so) => so.read(s, uio, self.nonblock()),
             FileKind::Fifo(f) => f.read(s, uio, self.nonblock()),
             FileKind::Shm(m) => {
                 let mut off = self.offset.lock(s);
@@ -268,7 +277,7 @@ impl File {
             }
             FileKind::Pipe(p) => p.write(s, uio, self.nonblock()),
             FileKind::Process(_) => Err(Errno::EOPNOTSUPP),
-            FileKind::Socket(_) => Err(Errno::ENOTCONN),
+            FileKind::Socket(so) => so.write(s, uio, self.nonblock()),
             FileKind::Fifo(f) => f.write(s, uio, self.nonblock()),
             FileKind::Shm(m) => {
                 let mut off = self.offset.lock(s);
@@ -418,8 +427,7 @@ impl File {
                 }
                 if p.has_exited() { POLLHUP } else { 0 }
             }
-            // Never connected (P6.5).
-            FileKind::Socket(_) => 0,
+            FileKind::Socket(so) => so.so.poll(events, w),
             FileKind::Shm(_) => vfs::node::poll_no_poll(events),
             FileKind::Kqueue(k) => k.poll(events, w),
             FileKind::Timerfd(t) => t.poll(events, w),
@@ -447,7 +455,8 @@ impl File {
             FileKind::Process(_) if kev.filter == EVFILT_PROCDESC => Ok(alloc::boxed::Box::new(
                 crate::event::ProcdescFilter(Arc::clone(this)),
             )),
-            FileKind::Process(_) | FileKind::Socket(_) | FileKind::Shm(_) => Err(Errno::EINVAL),
+            FileKind::Socket(so) => socket::filter(&so.so, kev),
+            FileKind::Process(_) | FileKind::Shm(_) => Err(Errno::EINVAL),
             FileKind::Kqueue(k) if kev.filter == abi::event::EVFILT_READ => Ok(
                 alloc::boxed::Box::new(event::KqueueFilter(Arc::clone(&k.kq))),
             ),
@@ -511,7 +520,24 @@ impl File {
             arg.copy_from_slice(&v.to_ne_bytes());
         };
         match &self.kind {
-            FileKind::Process(_) | FileKind::Socket(_) => Err(Errno::ENOTTY),
+            FileKind::Process(_) => Err(Errno::ENOTTY),
+            // `soo_ioctl`.
+            FileKind::Socket(so) => match req {
+                FIONBIO | FIOASYNC => Ok(0),
+                FIONREAD => {
+                    put(arg, so.so.nread());
+                    Ok(0)
+                }
+                abi::ioctl::FIONWRITE => {
+                    put(arg, 0);
+                    Ok(0)
+                }
+                abi::ioctl::FIONSPACE => {
+                    put(arg, so.so.send_space());
+                    Ok(0)
+                }
+                _ => Err(Errno::ENOTTY),
+            },
             // `kqueue_ioctl`, `timerfd_ioctl`, and `eventfd_ioctl`: the
             // generic layer already set the flag.
             FileKind::Kqueue(_) | FileKind::Timerfd(_) | FileKind::Eventfd(_) => match req {
@@ -579,5 +605,25 @@ fn clear_set_id(s: &Sleepable, v: &Vnode, written: usize) -> Result<(), Errno> {
     match vfs::ops::setattr(s, v, &a, &vfs::Cred::root(), false) {
         Ok(()) | Err(Errno::EPERM) => Ok(()),
         Err(e) => Err(e),
+    }
+}
+
+impl socket::Passable for File {
+    fn unix(&self) -> Option<&Arc<socket::Socket>> {
+        match &self.kind {
+            FileKind::Socket(so) => Some(&so.so),
+            _ => None,
+        }
+    }
+
+    fn into_any(self: Arc<Self>) -> Arc<dyn core::any::Any + Send + Sync> {
+        self
+    }
+}
+
+impl File {
+    /// A file back from a message in flight.
+    pub(crate) fn from_passable(f: Arc<dyn socket::Passable>) -> Option<Arc<Self>> {
+        f.into_any().downcast::<Self>().ok()
     }
 }

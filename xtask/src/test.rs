@@ -443,6 +443,9 @@ fn shell(
     let log = disk.with_file_name(format!("shell{suffix}.log"));
     let vm = Vm {
         smp: 4,
+        // As FreeBSD's shell VM (`freebsd-shell`): tests such as
+        // `unix_seqpacket_test`'s `random_eor_and_waitall` take 100 MiB.
+        mem: "2G".into(),
         nvme: ufs_root,
         usb,
         ..Vm::new(vmm, arch, disk.clone())

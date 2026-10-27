@@ -275,10 +275,11 @@ fn fd_bits(f: FdFlags) -> u32 {
 
 /// `O_*` flags from a file's flags (`OFLAGS`).
 fn oflags(fflags: u32) -> u32 {
+    // FreeBSD's unsigned `x - 1`.
     if fflags & O_EXEC != 0 {
         fflags
     } else {
-        fflags - 1
+        fflags.wrapping_sub(1)
     }
 }
 

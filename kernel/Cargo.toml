@@ -53,6 +53,7 @@ logring = { path = "../lib/logring" }
 pt = { path = "../lib/pt" }
 regs = { path = "../lib/regs" }
 sched = { path = "../sys/sched" }
+socket = { path = "../sys/socket" }
 sync = { path = "../sys/sync" }
 sysctl = { path = "../sys/sysctl" }
 tty = { path = "../sys/tty" }

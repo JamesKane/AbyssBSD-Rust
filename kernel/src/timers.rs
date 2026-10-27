@@ -99,6 +99,9 @@ fn timer_ns(data: i64, fflags: u32) -> Option<u64> {
 struct KqTimerState {
     /// Armed: `next` is when it fires.
     armed: bool,
+    /// Bumped by each start, so an expiry of an earlier arming is not
+    /// counted.
+    arming: u64,
     next: u64,
     /// The period, 0 for an absolute timer.
     to: u64,
@@ -126,6 +129,7 @@ impl KqTimer {
             kn: AtomicPtr::new(core::ptr::null_mut()),
             st: SpinLock::new(KqTimerState {
                 armed: false,
+                arming: 0,
                 next: 0,
                 to: 0,
             }),
@@ -163,6 +167,7 @@ impl KqTimer {
             st.to = to;
         }
         st.armed = true;
+        st.arming += 1;
         self.arm(st.next);
     }
 
@@ -183,7 +188,7 @@ impl KqTimer {
         // before the knote's other fields go.
         let kn = unsafe { &*kn };
         let oneshot = kn.note().kev.flags & EV_ONESHOT != 0;
-        let delta = {
+        let (delta, arming) = {
             let mut st = me.st.lock();
             if !st.armed {
                 return;
@@ -196,7 +201,7 @@ impl KqTimer {
             }
             if oneshot || st.to == 0 {
                 st.armed = false;
-                1
+                (1, st.arming)
             } else {
                 let delta = ((t - st.next) / st.to).max(1);
                 st.next = st.next.saturating_add(delta.saturating_mul(st.to));
@@ -204,10 +209,15 @@ impl KqTimer {
                     st.next = t + st.to;
                 }
                 me.arm(st.next);
-                delta
+                (delta, st.arming)
             }
         };
+        // Under the note's lock (as a re-add holds it), the arming is
+        // still this one.
         kn.trigger(|n| {
+            if me.st.lock().arming != arming {
+                return false;
+            }
             n.kev.data = n
                 .kev
                 .data

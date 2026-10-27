@@ -83,6 +83,11 @@ impl FdTable {
         self.slots.len()
     }
 
+    /// How many descriptors are open (`filedesc_nfiles`).
+    pub(crate) fn count(&self) -> usize {
+        self.slots.iter().filter(|s| s.is_some()).count()
+    }
+
     pub(crate) fn slot(&self, fd: i32) -> Result<&Slot, Errno> {
         self.slots
             .get(index(fd)?)

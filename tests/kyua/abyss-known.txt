@@ -11,3 +11,15 @@ sys/kern/timerfd:timerfd__periodic_timer_performance # passes; FreeBSD's expecte
 sys/kern/timerfd:timerfd_root__advance_time_no_cancel # passes; fails on FreeBSD 15.1
 lib/libc/sys/kevent_test:kqueue_desc_passing    # socketpair, P6.5
 sys/kern/timerfd:timerfd__argument_checks       # arm64: its last check passes an uninitialized itimerspec, valid there, so EBADF as FreeBSD's order gives; the baseline is amd64's
+sys/kern/unix_dgram:event                       # aio_read on a socket: POSIX AIO, P8
+sys/kern/unix_passfd_dgram:cross_jail_dirfd     # jails, P6.7
+sys/kern/unix_passfd_stream:cross_jail_dirfd    # jails, P6.7
+sys/kern/socket_msg_trunc:recv_trunc_afinet_udp # AF_INET, P8
+sys/kern/socket_msg_trunc:recv_trunc_afinet6_udp # AF_INET6, P8
+sys/kern/socket_msg_trunc:recvmsg_trunc_ktrace_uio # ktrace, P6.8
+sys/kern/socket_msg_waitall:close_tcp           # AF_INET, P8
+sys/kern/shutdown_dgram:unblock                 # AF_INET, P8
+sys/kern/listener_wakeup:all                    # AF_INET, P8
+lib/libc/sys/connect_test:connect_low_port      # AF_INET, P8
+lib/libc/sys/socketpair_test:inet               # AF_INET (EOPNOTSUPP from TCP), P8
+sys/kqueue/libkqueue/kqueue_test:main          # passes; FreeBSD 15.1 aborts it (signal 6)

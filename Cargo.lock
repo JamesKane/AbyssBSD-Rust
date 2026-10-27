@@ -370,6 +370,7 @@ dependencies = [
  "regs",
  "sbsa-gwdt",
  "sched",
+ "socket",
  "storage",
  "sync",
  "sysctl",
@@ -481,6 +482,15 @@ dependencies = [
 [[package]]
 name = "scsi"
 version = "0.0.0"
+
+[[package]]
+name = "socket"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "event",
+ "sync",
+]
 
 [[package]]
 name = "storage"

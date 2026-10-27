@@ -224,6 +224,23 @@ pub(crate) const DYNAMIC: &[Step] = &[
         "\nvid-0\r\n",
         "vidcontrol",
     ),
+    // `head` opens its files through Casper's `system.fileargs`, a
+    // service process at the other end of a UNIX-domain socket pair.
+    step(
+        "head -n 1 /etc/defaults/rc.conf\n",
+        "\n#!/bin/sh\r\n",
+        "head, through libcasper",
+    ),
+    // `logger` to a `syslogd` started by hand, over `/var/run/log`
+    // (`syslogd` writes only to files that exist, as `newsyslog` leaves
+    // them).
+    step(
+        "touch /var/log/messages && syslogd -ss && logger -t abysslog hello-syslog && sleep 1 && \
+         grep -c 'abysslog.*hello-syslog' /var/log/messages; \
+         kill $(cat /var/run/syslog.pid)\n",
+        "\n1\r\n",
+        "logger to syslogd",
+    ),
 ];
 
 /// The user tests again, dynamically linked (ROADMAP P6.1's exit), from

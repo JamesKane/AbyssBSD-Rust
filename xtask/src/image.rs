@@ -123,6 +123,19 @@ pub(crate) const FREEBSD_TESTS: &[&str] = &[
     "usr/tests/lib/libc/sys/select_test",
     "usr/tests/lib/libc/sys/sigtimedwait_test",
     "usr/tests/lib/libc/sys/timer_create_test",
+    "usr/tests/sys/kern/unix_dgram",
+    "usr/tests/sys/kern/unix_passfd_dgram",
+    "usr/tests/sys/kern/unix_passfd_stream",
+    "usr/tests/sys/kern/unix_seqpacket_test",
+    "usr/tests/sys/kern/unix_stream",
+    "usr/tests/sys/kern/socket_msg_trunc",
+    "usr/tests/sys/kern/socket_msg_waitall",
+    "usr/tests/sys/kern/shutdown_dgram",
+    "usr/tests/sys/kern/listener_wakeup",
+    "usr/tests/lib/libc/sys/bind_test",
+    "usr/tests/lib/libc/sys/connect_test",
+    "usr/tests/lib/libc/sys/getsockname_test",
+    "usr/tests/lib/libc/sys/socketpair_test",
 ];
 
 /// Where the root image keeps pjdfstest.
@@ -137,7 +150,7 @@ const OPENSSL_MD5: &str = "#!/bin/sh\n\
 /// Runs FreeBSD's test programs as kyua would (docs/MULTIUSER.md §14):
 /// those a directory's Kyuafiles list (ATF and plain programs), or a
 /// program named itself. Each case runs in its own directory, killed after
-/// 60 seconds, with `TMPDIR` its directory and, if it requires an
+/// 300 seconds (kyua's default timeout), with `TMPDIR` its directory and, if it requires an
 /// unprivileged user, as `tests` (as kyua does with
 /// `unprivileged_user=tests`), with a line `atf: <path under
 /// /usr/tests>:<case> <result>` per case: an ATF program's result as it
@@ -160,7 +173,7 @@ for e in $(progs); do
 	kind=${e%%:*}
 	p=${e#*:}
 	[ -x "$p" ] || continue
-	echo "atf-prog: ${p#/usr/tests/}"
+	echo "atf-prog: ${p#/usr/tests/} free=$(/sbin/sysctl -n vm.stats.vm.v_free_count 2> /dev/null)"
 	if [ $kind = plain ]; then
 		cases=main
 	else
@@ -184,7 +197,8 @@ for e in $(progs); do
 			(cd $w && TMPDIR=$w exec $as $p -r $w.res -s ${p%/*} $c) > $w.out 2>&1 &
 		fi
 		pid=$!
-		(sleep 60; kill -9 $pid 2> /dev/null) &
+		# The watchdog takes its `sleep` with it when told to go.
+		(trap 'kill $sp 2> /dev/null; exit 0' TERM; sleep 300 & sp=$!; wait $sp && kill -9 $pid 2> /dev/null) &
 		watch=$!
 		wait $pid
 		st=$?

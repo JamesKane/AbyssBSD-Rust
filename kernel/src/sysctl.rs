@@ -105,6 +105,16 @@ pub(crate) fn init() {
         t.add_value(
             svm,
             Number::Auto,
+            "v_free_count",
+            "Free pages",
+            Value::Uint(alloc::boxed::Box::new(|| {
+                u32::try_from(crate::mm::free_frames()).unwrap_or(u32::MAX)
+            })),
+        )
+        .expect("vm.stats.vm.v_free_count");
+        t.add_value(
+            svm,
+            Number::Auto,
             "v_user_wire_count",
             "User-wired virtual memory",
             Value::Ulong(alloc::boxed::Box::new(|| 0)),
@@ -294,6 +304,113 @@ pub(crate) fn init() {
             t.add_value(ipc, Number::Auto, name, descr, Value::int(v))
                 .expect("kern.ipc.sem*, msg*");
         }
+    }
+    // UNIX-domain sockets' sizes (`net.local`, read-only here) and the
+    // socket layer's limits.
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        use socket::space;
+        let ipc = t.child(k, "ipc").expect("kern.ipc");
+        let ulong = |v: u64| Value::Ulong(alloc::boxed::Box::new(move || v));
+        t.add_value(
+            ipc,
+            Number::Auto,
+            "maxsockbuf",
+            "Maximum socket buffer size",
+            ulong(8 << 20),
+        )
+        .expect("kern.ipc.maxsockbuf");
+        t.add_value(
+            ipc,
+            Number::Auto,
+            "sockbuf_waste_factor",
+            "Socket buffer size waste factor",
+            ulong(8),
+        )
+        .expect("kern.ipc.sockbuf_waste_factor");
+        for name in ["somaxconn", "soacceptqueue"] {
+            t.add_value(
+                ipc,
+                Number::Auto,
+                name,
+                "Maximum listen socket pending connection accept queue size",
+                Value::int(128),
+            )
+            .expect("kern.ipc.somaxconn");
+        }
+        let net = t.child(root, "net").expect("net node");
+        let local = t
+            .add_node(net, Number::Fixed(1), "local", "Local domain")
+            .expect("net.local");
+        let nodes = [
+            (abi::socket::SOCK_STREAM, "stream", "SOCK_STREAM"),
+            (abi::socket::SOCK_DGRAM, "dgram", "SOCK_DGRAM"),
+            (abi::socket::SOCK_SEQPACKET, "seqpacket", "SOCK_SEQPACKET"),
+        ];
+        let read = |a: &'static core::sync::atomic::AtomicU64| {
+            Value::Ulong(alloc::boxed::Box::new(move || a.load(Relaxed)))
+        };
+        for (num, name, descr) in nodes {
+            let n = t
+                .add_node(local, Number::Fixed(num.cast_signed()), name, descr)
+                .expect("net.local.*");
+            let vals: &[(&str, &str, &'static core::sync::atomic::AtomicU64)] = match name {
+                "stream" => &[
+                    (
+                        "sendspace",
+                        "Default stream send space.",
+                        &space::STREAM_SEND,
+                    ),
+                    (
+                        "recvspace",
+                        "Default stream receive space.",
+                        &space::STREAM_RECV,
+                    ),
+                ],
+                "dgram" => &[
+                    ("maxdgram", "Maximum datagram size.", &space::DGRAM_MAX),
+                    (
+                        "recvspace",
+                        "Default datagram receive space.",
+                        &space::DGRAM_RECV,
+                    ),
+                ],
+                _ => &[
+                    (
+                        "maxseqpacket",
+                        "Default seqpacket send space.",
+                        &space::SEQPACKET_SEND,
+                    ),
+                    (
+                        "recvspace",
+                        "Default seqpacket receive space.",
+                        &space::SEQPACKET_RECV,
+                    ),
+                ],
+            };
+            for &(v, d, a) in vals {
+                t.add_value(n, Number::Auto, v, d, read(a))
+                    .expect("net.local.*.*");
+            }
+        }
+        t.add_value(
+            local,
+            Number::Auto,
+            "inflight",
+            "File descriptors in flight.",
+            Value::Int(alloc::boxed::Box::new(|| {
+                i32::try_from(socket::inflight()).unwrap_or(i32::MAX)
+            })),
+        )
+        .expect("net.local.inflight");
+        t.add_value(
+            local,
+            Number::Auto,
+            "deferred",
+            "File descriptors deferred to taskqueue for close.",
+            Value::int(0),
+        )
+        .expect("net.local.deferred");
     }
     let sched_node = t
         .add_node(k, Number::Auto, "sched", "Scheduler")

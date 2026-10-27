@@ -1012,7 +1012,8 @@ impl Process {
                         process: Arc::clone(&child),
                         daemon,
                     }),
-                    0,
+                    // `procdesc_finit`.
+                    abi::fcntl::FREAD | abi::fcntl::FWRITE,
                 );
                 let flags = crate::fs::fdtable::FdFlags {
                     cloexec,
