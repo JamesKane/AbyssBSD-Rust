@@ -1521,7 +1521,15 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
   load (threads in sleeps, faults, and system calls while another execs and another exits), and the
   "Signal state" deviation closed.
   - The ktest done 2026-10-26 (`single_threading_under_load`: four `threads stress` at once), and
-    the deviation closed. libthr's tests wait for `tests.txz` in the root.
+    the deviation closed.
+  - libthr's tests done 2026-10-27: the UFS2 root carries `tests.txz`'s `lib/libthr`, and the shell
+    cases run each case with `run-atf` (no kyua until interval timers) and hold it to FreeBSD
+    15.1's recorded result: 60 cases on amd64 and 59 on arm64 end as FreeBSD's, and the 10 that
+    need P6.3's kernel condition variables, rwlocks, and timed mutexes or P6.4's `setitimer` are
+    listed in `tests/kyua/abyss-known.txt`. Getting there brought `UMTX_OP_NWAKE_PRIVATE`, `#!`
+    scripts (`exec_shell_imgact`), `sigqueue` to a thread, `sched_get_priority_{min,max}`,
+    `kern.sched.cpusetsize{,min}`, `kern.vm_guest`, `kern.hostname`, FreeBSD's `cpuset` sizes,
+    and `getcontext` without the bases.
 
 **P6.3 umtx and libthr.**
 - `sys/umtx` (MULTIUSER.md §5): keys, chains, every `_umtx_op` operation, priority inheritance and

@@ -127,9 +127,6 @@ pub(super) fn cpuset_getaffinity(
     mask: u64,
 ) -> SysResult {
     let size = usize::try_from(setsize).map_err(|_| Errno::ERANGE)?;
-    if !(size_of::<u64>()..=CPUSET_BYTES).contains(&size) {
-        return Err(Errno::ERANGE);
-    }
     let level = u32::try_from(level).map_err(|_| Errno::EINVAL)?;
     if ![CPU_LEVEL_ROOT, CPU_LEVEL_CPUSET, CPU_LEVEL_WHICH].contains(&level) {
         return Err(Errno::EINVAL);
@@ -141,12 +138,27 @@ pub(super) fn cpuset_getaffinity(
         u64::MAX
     };
     let mut set = [0u8; CPUSET_BYTES];
+    let mut highest = 0;
     for cpu in 0..sched::online_cpus().min(64) {
         if allowed & (1 << cpu) != 0 {
             set[cpu / 8] |= 1 << (cpu % 8);
+            highest = cpu + 1;
         }
     }
-    uaccess::copy_out(mask, &set[..size]).map_err(|_| Errno::EFAULT)?;
+    // Any size the mask fits in (FreeBSD's `user_cpuset_getaffinity`):
+    // the kernel's set, then zeros.
+    if size < highest.div_ceil(8) {
+        return Err(Errno::ERANGE);
+    }
+    let n = size.min(CPUSET_BYTES);
+    uaccess::copy_out(mask, &set[..n]).map_err(|_| Errno::EFAULT)?;
+    let zeros = [0u8; CPUSET_BYTES];
+    let mut at = n;
+    while at < size {
+        let k = (size - at).min(zeros.len());
+        uaccess::copy_out(mask.wrapping_add(at as u64), &zeros[..k]).map_err(|_| Errno::EFAULT)?;
+        at += k;
+    }
     Ok(0)
 }
 
@@ -160,15 +172,26 @@ pub(super) fn cpuset_setaffinity(
     mask: u64,
 ) -> SysResult {
     let size = usize::try_from(setsize).map_err(|_| Errno::ERANGE)?;
-    if size < size_of::<u64>() || size > 4096 {
-        return Err(Errno::ERANGE);
+    // The kernel's set from the front; anything past it must be clear
+    // (FreeBSD's `user_cpuset_setaffinity`).
+    let mut set = [0u8; CPUSET_BYTES];
+    let n = size.min(CPUSET_BYTES);
+    uaccess::copy_in(&mut set[..n], mask).map_err(|_| Errno::EFAULT)?;
+    let mut at = n;
+    while at < size {
+        let mut chunk = [0u8; CPUSET_BYTES];
+        let k = (size - at).min(chunk.len());
+        uaccess::copy_in(&mut chunk[..k], mask.wrapping_add(at as u64))
+            .map_err(|_| Errno::EFAULT)?;
+        if chunk[..k].iter().any(|&b| b != 0) {
+            return Err(Errno::EINVAL);
+        }
+        at += k;
     }
     if u32::try_from(level).map_err(|_| Errno::EINVAL)? != CPU_LEVEL_WHICH {
         return Err(Errno::EINVAL);
     }
     let target = Target::find(which, id)?;
-    let mut set = alloc::vec![0u8; size];
-    uaccess::copy_in(&mut set, mask).map_err(|_| Errno::EFAULT)?;
     let online = sched::online_cpus();
     let mut bits = 0u64;
     for (i, &b) in set.iter().enumerate() {
@@ -177,11 +200,7 @@ pub(super) fn cpuset_setaffinity(
                 continue;
             }
             let cpu = i * 8 + bit;
-            // A CPU that does not exist (FreeBSD: beyond the kernel's set
-            // size, EINVAL; an absent one is simply never used).
-            if cpu >= CPUSET_BYTES * 8 {
-                return Err(Errno::EINVAL);
-            }
+            // An absent CPU is simply never used.
             if cpu < online.min(64) {
                 bits |= 1 << cpu;
             }

@@ -30,6 +30,51 @@ const MACHINE_ARCH: &str = if cfg!(target_arch = "x86_64") {
     "aarch64"
 };
 
+/// `kern.vm_guest`: the hypervisor FreeBSD's `identcpu` would find, by
+/// the CPUID hypervisor bit and the vendor signature at 0x40000000 (and
+/// the leaves past it, where one may stand in for another); "generic"
+/// for one it does not know, "none" on bare metal. arm64 says "none", as
+/// FreeBSD's does.
+fn vm_guest() -> &'static str {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use core::arch::x86_64::__cpuid;
+        const KNOWN: &[(&[u8; 12], &str)] = &[
+            (b"XenVMMXenVMM", "xen"),
+            (b"Microsoft Hv", "hv"),
+            (b"VMwareVMware", "vmware"),
+            (b"KVMKVMKVM\0\0\0", "kvm"),
+            (b"bhyve bhyve ", "bhyve"),
+            (b"VBoxVBoxVBox", "vbox"),
+            (b"___ NVMM ___", "nvmm"),
+        ];
+        if __cpuid(1).ecx & (1 << 31) == 0 {
+            return "none";
+        }
+        let mut guest = "generic";
+        for leaf in (0x4000_0000u32..0x4001_0000).step_by(0x100) {
+            let r = __cpuid(leaf);
+            if r.eax < leaf {
+                continue;
+            }
+            let mut sig = [0u8; 12];
+            sig[..4].copy_from_slice(&r.ebx.to_le_bytes());
+            sig[4..8].copy_from_slice(&r.ecx.to_le_bytes());
+            sig[8..].copy_from_slice(&r.edx.to_le_bytes());
+            if let Some((_, name)) = KNOWN.iter().find(|(s, _)| **s == sig) {
+                guest = name;
+                // Xen and others may show Hyper-V's signature first.
+                if *name != "hv" {
+                    break;
+                }
+            }
+        }
+        guest
+    }
+    #[cfg(target_arch = "aarch64")]
+    "none"
+}
+
 /// Builds the tree. Call once at boot, with the heap up.
 pub(crate) fn init() {
     let mut t = Tree::new();
@@ -121,6 +166,43 @@ pub(crate) fn init() {
         "System architecture",
         Value::text(MACHINE_ARCH),
     );
+    add(
+        k,
+        Number::Fixed(kern::HOSTNAME),
+        "hostname",
+        "Hostname",
+        // Unset until something sets it, as at FreeBSD's boot.
+        Value::text(""),
+    );
+    add(
+        k,
+        Number::Auto,
+        "vm_guest",
+        "Virtual machine guest detected?",
+        Value::text(vm_guest()),
+    );
+    let sched_node = t
+        .add_node(k, Number::Auto, "sched", "Scheduler")
+        .expect("kern.sched");
+    t.add_value(
+        sched_node,
+        Number::Auto,
+        "cpusetsize",
+        "sizeof(cpuset_t)",
+        Value::int(i32::try_from(abi::thr::CPUSET_BYTES).unwrap_or(i32::MAX)),
+    )
+    .expect("kern.sched.cpusetsize");
+    t.add_value(
+        sched_node,
+        Number::Auto,
+        "cpusetsizemin",
+        "The minimum size of cpuset_t allowed by the kernel",
+        // `howmany(mp_maxid + 1, NBBY)`.
+        Value::Uint(alloc::boxed::Box::new(|| {
+            u32::try_from(sched::online_cpus().div_ceil(8)).unwrap_or(u32::MAX)
+        })),
+    )
+    .expect("kern.sched.cpusetsizemin");
     // `kern.vty`: the console's terminal driver, which `kbdcontrol` and
     // `vidcontrol` check for `vt`.
     t.add_value(

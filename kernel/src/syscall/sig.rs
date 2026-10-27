@@ -362,20 +362,30 @@ fn thread_kill(p: &alloc::sync::Arc<Process>, id: u64, sig: u64) -> SysResult {
     Ok(0)
 }
 
-/// `sigqueue(pid, signum, value)`.
+/// `sigqueue(pid, signum, value)`; with `__SIGQUEUE_TID` in `signum`,
+/// `pid` is a thread of this process (libthr's `pthread_sigqueue`).
 pub(super) fn sigqueue(pid: u64, signum: u64, value: u64) -> SysResult {
+    const SIGQUEUE_TID: u32 = 0x8000_0000;
+    let flags = int(signum).cast_unsigned();
+    let sig = flags & !SIGQUEUE_TID;
+    if sig > SIG_MAXSIG {
+        return Err(Errno::EINVAL);
+    }
     let pid = int(pid);
     if pid <= 0 {
         return Err(Errno::EINVAL);
     }
-    let sig = u32::try_from(int(signum)).map_err(|_| Errno::EINVAL)?;
-    if sig != 0 && !signal::valid(sig) {
-        return Err(Errno::EINVAL);
-    }
-    let p = crate::proc::find(pid).ok_or(Errno::ESRCH)?;
     let me = process()?;
     let mut info = user_info(sig, me.pid(), SI_QUEUE);
     info.si_value = value;
+    if flags & SIGQUEUE_TID != 0 {
+        let t = me.find_thread(pid).ok_or(Errno::ESRCH)?;
+        if sig != 0 {
+            signal::post_thread(&t, info)?;
+        }
+        return Ok(0);
+    }
+    let p = crate::proc::find(pid).ok_or(Errno::ESRCH)?;
     send(&p, sig, info)?;
     Ok(0)
 }

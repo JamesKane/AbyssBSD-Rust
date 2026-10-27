@@ -455,6 +455,7 @@ fn shell(
             session.script(crate::expect::UFS_ROOT, Duration::from_secs(600))?;
             session.script(crate::expect::DYNAMIC, Duration::from_secs(60))?;
             session.script(crate::expect::DYNAMIC_TESTS, Duration::from_secs(900))?;
+            session.script(crate::expect::FREEBSD_TESTS, Duration::from_secs(3600))?;
         }
         session.send("exit\n")
     })();
@@ -469,7 +470,10 @@ fn shell(
         Ok(()) if ufs_root && !console.contains("Trying to mount root from ufs:") => {
             Err("the root was not UFS2".into())
         }
-        Ok(()) if ufs_root => root_left_clean(&disk),
+        Ok(()) if ufs_root => crate::expect::atf_verdict(&console)
+            .map(|n| println!("{arch}-shell{suffix}: {n} of FreeBSD's test cases as on FreeBSD"))
+            .map_err(|e| e.to_string())
+            .and_then(|()| root_left_clean(&disk)),
         Ok(()) => Ok(()),
     };
     if verdict.is_err() {

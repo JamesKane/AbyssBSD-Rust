@@ -192,7 +192,9 @@ pub(crate) fn get_context(
     mc.mc_rax = 0;
     mc.mc_rdx = 0;
     mc.mc_rflags &= !RFLAGS_CF;
-    mc.mc_flags |= MC_HASBASES;
+    // No `_MC_HASBASES`, as FreeBSD's `get_mcontext` (the trap frame's
+    // flags): a context taken in one thread and loaded in another leaves
+    // that thread's TLS alone.
     Ok(Ucontext {
         uc_sigmask: mask,
         uc_mcontext: mc,

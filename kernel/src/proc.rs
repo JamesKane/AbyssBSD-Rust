@@ -412,6 +412,17 @@ struct Start {
     context: Option<crate::signal::Prepared>,
 }
 
+/// An image `exec` loaded, and the program and arguments it runs with
+/// (a script's interpreter's).
+struct Loaded {
+    text: Text,
+    file: Arc<Vnode>,
+    space: Arc<AddressSpace>,
+    image: crate::exec::Image,
+    path: Vec<u8>,
+    argv: Vec<Vec<u8>>,
+}
+
 /// A new thread's state, besides its registers.
 pub(crate) struct NewThread {
     /// Its user thread registers (`hal::user::tls`, `tls2`).
@@ -982,13 +993,22 @@ impl Process {
         // `pre_execve`); they leave once the new image is in.
         self.single(s, &me, Mode::Boundary)?;
         let image = self.load_image(s, path, argv, envp);
-        let (text, file, space, image) = match image {
+        let Loaded {
+            text,
+            file,
+            space,
+            image,
+            path,
+            argv,
+        } = match image {
             Ok(i) => i,
             Err(e) => {
                 self.end_single(&me);
                 return Err(e);
             }
         };
+        let argv: Vec<&[u8]> = argv.iter().map(Vec::as_slice).collect();
+        let (path, argv) = (&path[..], &argv[..]);
         let _ = self.single(s, &me, Mode::Exit);
         // No way back from here.
         let old = core::mem::replace(&mut *self.space.lock(), Arc::clone(&space));
@@ -1042,21 +1062,45 @@ impl Process {
     }
 
     /// The program at `path`, loaded into a new address space for `exec`.
+    /// A script runs its `#!` interpreter instead (FreeBSD's
+    /// `exec_shell_imgact`), with arguments the interpreter, the line's
+    /// argument if any, `path`, and `argv` past its first; the
+    /// interpreter is then the program (its text, its name), and it may
+    /// not be a script itself.
     fn load_image(
         &self,
         s: &Sleepable,
         path: &[u8],
         argv: &[&[u8]],
         envp: &[&[u8]],
-    ) -> Result<(Text, Arc<Vnode>, Arc<AddressSpace>, crate::exec::Image), Errno> {
-        let file = crate::fs::lookup(s, self, crate::fs::At::Cwd, path, crate::fs::Walk::FOLLOW)?;
+    ) -> Result<Loaded, Errno> {
+        let lookup =
+            |p: &[u8]| crate::fs::lookup(s, self, crate::fs::At::Cwd, p, crate::fs::Walk::FOLLOW);
+        let mut file = lookup(path)?;
+        let mut path = path.to_vec();
+        let mut argv: Vec<Vec<u8>> = argv.iter().map(|a| a.to_vec()).collect();
+        if let Some(sc) = crate::exec::script(s, &file)? {
+            let mut new = alloc::vec![sc.interp.clone()];
+            new.extend(sc.arg);
+            new.push(path);
+            new.extend(argv.into_iter().skip(1));
+            argv = new;
+            file = lookup(&sc.interp)?;
+            path = sc.interp;
+        }
         let text = Text::new(&file)?;
         let space = AddressSpace::new().map_err(|_| Errno::ENOMEM)?;
         let limits = *self.limits.lock();
-        let lookup =
-            |p: &[u8]| crate::fs::lookup(s, self, crate::fs::At::Cwd, p, crate::fs::Walk::FOLLOW);
-        let image = crate::exec::load(s, &space, &file, path, argv, envp, &limits, &lookup)?;
-        Ok((text, file, space, image))
+        let args: Vec<&[u8]> = argv.iter().map(Vec::as_slice).collect();
+        let image = crate::exec::load(s, &space, &file, &path, &args, envp, &limits, &lookup)?;
+        Ok(Loaded {
+            text,
+            file,
+            space,
+            image,
+            path,
+            argv,
+        })
     }
 
     /// What thread `t` must do about suspension now.

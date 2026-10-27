@@ -807,6 +807,53 @@ pub(crate) fn full(arch: Arch) -> Result<PathBuf> {
     Ok(full)
 }
 
+/// `tests.txz`'s SHA-256, from each architecture's release `MANIFEST`.
+const fn tests_sha256(arch: Arch) -> &'static str {
+    match arch {
+        Arch::X86_64 => "4ea87202ffe0847cb53feaedac824278b5696d907ed4485678a9a86fb41a5531",
+        Arch::Aarch64 => "ddd62669f98aeefcfeb38296edbbc6bcb0b6a71edef1c1819f6e0611a3839a0c",
+    }
+}
+
+/// `arch`'s `tests.txz` (FreeBSD's test suite, `/usr/tests`), fetched,
+/// checked, and unpacked once beside the base. Returns the unpacked tree.
+pub(crate) fn tests(arch: Arch) -> Result<PathBuf> {
+    if !cfg!(target_os = "freebsd") {
+        return Err("tests.txz is kept on the build server (use --remote)".into());
+    }
+    let dir = dir(arch);
+    let tree = dir.join("tests");
+    if tree.join("usr/tests/Kyuafile").exists() {
+        return Ok(tree);
+    }
+    fs::create_dir_all(&dir)?;
+    let txz = dir.join("tests.txz");
+    if !txz.exists() {
+        let tmp = dir.join("tests.txz.tmp");
+        eprintln!("xtask: downloading {arch} tests.txz");
+        util::run(
+            Command::new("fetch")
+                .arg("-q")
+                .arg("-o")
+                .arg(&tmp)
+                .arg(format!("{}/tests.txz", url(arch))),
+        )?;
+        fs::rename(&tmp, &txz)?;
+    }
+    let got = util::output(Command::new("sha256").arg("-q").arg(&txz))?;
+    if got.trim() != tests_sha256(arch) {
+        fs::remove_file(&txz)?;
+        return Err(format!("{}: SHA-256 mismatch (removed)", txz.display()).into());
+    }
+    let tmp = dir.join("tests.tmp");
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp)?;
+    eprintln!("xtask: unpacking {arch} tests.txz");
+    util::run(Command::new("tar").arg("-xf").arg(&txz).arg("-C").arg(&tmp))?;
+    fs::rename(&tmp, &tree)?;
+    Ok(tree)
+}
+
 /// An mtree specification of `arch`'s base contents: every entry's type,
 /// size, link target, and SHA-256, as FreeBSD's `mtree -c` finds them in
 /// [`full`] (`base.txz`'s own records give hard links no size).

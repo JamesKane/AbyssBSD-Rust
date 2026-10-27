@@ -98,6 +98,8 @@ const FSTAB: &str = "# Device\t\tMountpoint\tFStype\tOptions\tDump\tPass#\n\
 pub(crate) const STATIC_TOOLS: &str = "usr/tests/static";
 /// Where the root keeps `tests/user`'s programs dynamically linked.
 pub(crate) const DYNAMIC_TESTS: &str = "usr/tests/abyss-dynamic";
+/// The parts of FreeBSD's `/usr/tests` (from `tests.txz`) the root holds.
+const FREEBSD_TESTS: &[&str] = &["usr/tests/lib/libthr"];
 
 /// Where the root image keeps pjdfstest.
 pub(crate) const PJDFSTEST: &str = "usr/tests/pjdfstest";
@@ -107,6 +109,32 @@ pub(crate) const PJDFSTEST: &str = "usr/tests/pjdfstest";
 const OPENSSL_MD5: &str = "#!/bin/sh\n\
                            [ \"$*\" = md5 ] || { echo \"openssl: only md5 here\" >&2; exit 1; }\n\
                            exec md5\n";
+
+/// Runs FreeBSD's ATF test programs without kyua (which needs interval
+/// timers, P6.4): each case of each program in its own directory, killed
+/// after 60 seconds, with a line `atf: <path under /usr/tests>:<case>
+/// <result>` per case, the result as the program wrote it.
+const RUN_ATF: &str = r#"#!/bin/sh
+for p in /usr/tests/lib/libthr/*_test /usr/tests/lib/libthr/dlopen/*_test; do
+	[ -x "$p" ] || continue
+	echo "atf-prog: ${p#/usr/tests/}"
+	for c in $($p -l | sed -n 's/^ident: //p'); do
+		w=$(mktemp -d /tmp/atf.XXXXXX)
+		(cd $w && exec $p -r $w/result -s ${p%/*} $c) > $w/out 2>&1 &
+		pid=$!
+		(sleep 60; kill -9 $pid 2> /dev/null) &
+		watch=$!
+		wait $pid
+		kill $watch 2> /dev/null
+		# `read`, not `head`: base's `head` needs Casper (P6.5).
+		r=
+		[ -f $w/result ] && read -r r < $w/result
+		echo "atf: ${p#/usr/tests/}:$c ${r:-broken: no result}"
+		rm -rf $w
+	done
+done
+echo atf-done-$((6*7))
+"#;
 
 /// As [`build`], with the root on a UFS2 partition that `makefs` makes
 /// (FreeBSD only), with soft updates: all of `base.txz` (owners and flags
@@ -185,6 +213,19 @@ fn ufs_root(arch: Arch, opts: build::Options, cmdline: &str, root: Root) -> Resu
     for (name, bin) in crate::base::static_tools(arch)? {
         fs::copy(&bin, stage.join(STATIC_TOOLS).join(name))?;
     }
+    // FreeBSD's own tests of what has landed, from `tests.txz`.
+    for dir in FREEBSD_TESTS {
+        let dst = stage.join(dir);
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        util::run(
+            std::process::Command::new("cp")
+                .arg("-R")
+                .arg(crate::base::tests(arch)?.join(dir))
+                .arg(&dst),
+        )?;
+    }
     // The user tests again, dynamically linked.
     let dynamic = stage.join(DYNAMIC_TESTS);
     fs::create_dir_all(&dynamic)?;
@@ -195,6 +236,9 @@ fn ufs_root(arch: Arch, opts: build::Options, cmdline: &str, root: Root) -> Resu
         let shim = stage.join(STATIC_TOOLS).join("openssl");
         fs::write(&shim, OPENSSL_MD5)?;
         fs::set_permissions(&shim, fs::Permissions::from_mode(0o555))?;
+        let atf = stage.join(STATIC_TOOLS).join("run-atf");
+        fs::write(&atf, RUN_ATF)?;
+        fs::set_permissions(&atf, fs::Permissions::from_mode(0o555))?;
     }
     util::run(
         std::process::Command::new("cp")

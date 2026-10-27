@@ -560,6 +560,68 @@ fn open(s: &Sleepable, file: &vfs::Vnode) -> Result<Arc<vm::object::Object>, Err
     crate::fs::object(s, file).ok_or(Errno::ENOEXEC)
 }
 
+/// A script's `#!` line (FreeBSD's `exec_shell_imgact`): the interpreter
+/// and its one optional argument (the rest of the line, trimmed).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Script {
+    pub(crate) interp: alloc::vec::Vec<u8>,
+    pub(crate) arg: Option<alloc::vec::Vec<u8>>,
+}
+
+/// The longest `#!` line read (`MAXSHELLCMDLEN`, a page).
+const MAXSHELLCMDLEN: usize = 4096;
+/// The longest interpreter path (`MAXINTERP`, `PATH_MAX`).
+const MAXINTERP: usize = 1024;
+
+/// Parses `head`, a file's first bytes: `None` unless it starts `#!`.
+/// `ENOEXEC` for no interpreter or a line not ended within
+/// `MAXSHELLCMDLEN`, `ENAMETOOLONG` for an interpreter path too long.
+pub(crate) fn parse_script(head: &[u8]) -> Result<Option<Script>, Errno> {
+    if !head.starts_with(b"#!") {
+        return Ok(None);
+    }
+    let line = &head[..head.len().min(MAXSHELLCMDLEN)];
+    let blank = |c: &u8| *c == b' ' || *c == b'\t';
+    let mut i = 2;
+    while i < line.len() && blank(&line[i]) {
+        i += 1;
+    }
+    let start = i;
+    while i < line.len() && !matches!(line[i], b' ' | b'\t' | b'\n' | 0) {
+        i += 1;
+    }
+    let interp = &line[start..i];
+    if interp.is_empty() {
+        return Err(Errno::ENOEXEC);
+    }
+    if interp.len() >= MAXINTERP {
+        return Err(Errno::ENAMETOOLONG);
+    }
+    while i < line.len() && blank(&line[i]) {
+        i += 1;
+    }
+    let opt = i;
+    while i < line.len() && !matches!(line[i], b'\n' | 0) {
+        i += 1;
+    }
+    if i == line.len() {
+        return Err(Errno::ENOEXEC);
+    }
+    let mut end = i;
+    while end > opt && blank(&line[end - 1]) {
+        end -= 1;
+    }
+    Ok(Some(Script {
+        interp: interp.to_vec(),
+        arg: (end > opt).then(|| line[opt..end].to_vec()),
+    }))
+}
+
+/// [`parse_script`] on `file`'s first bytes.
+pub(crate) fn script(s: &Sleepable, file: &vfs::Vnode) -> Result<Option<Script>, Errno> {
+    parse_script(&read_head(s, file)?)
+}
+
 /// The start of `file`, where the headers, program headers, branding
 /// notes, and interpreter path sit (the memory disk's files are there
 /// already).

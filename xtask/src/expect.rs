@@ -245,6 +245,84 @@ pub(crate) const DYNAMIC_TESTS: &[Step] = &[step(
     "the user tests, dynamically linked",
 )];
 
+/// FreeBSD's own tests the root holds (`tests.txz`'s libthr), run case by
+/// case by `run-atf`; [`atf_verdict`] compares the results with FreeBSD's.
+pub(crate) const FREEBSD_TESTS: &[Step] = &[step(
+    "/usr/tests/static/run-atf\n",
+    "\natf-done-42\r\n",
+    "FreeBSD's libthr tests",
+)];
+
+/// Where FreeBSD 15.1's own results are (`kyua-baseline`), and the cases
+/// whose results may differ here yet, with why.
+const KYUA_BASELINE: &str = "tests/kyua/freebsd/freebsd-15.1-RELEASE-x86_64-bhyve.txt";
+const KYUA_KNOWN: &str = "tests/kyua/abyss-known.txt";
+
+/// The directories of FreeBSD's tests that `run-atf` runs.
+const ATF_DIRS: &[&str] = &["lib/libthr/"];
+
+/// The `atf:` lines in `console` against FreeBSD's results: every case
+/// FreeBSD has in [`ATF_DIRS`], of the programs this architecture has
+/// (`atf-prog:` lines), must run and end as it does there (its result's
+/// first word), but those `KYUA_KNOWN` lists. Returns how many matched.
+pub(crate) fn atf_verdict(console: &str) -> Result<usize> {
+    let root = crate::util::root();
+    let baseline = fs::read_to_string(root.join(KYUA_BASELINE))?;
+    let freebsd: std::collections::HashMap<&str, &str> = baseline
+        .lines()
+        .filter_map(|l| {
+            let mut f = l.split('\t');
+            Some((f.next()?, f.next()?))
+        })
+        .collect();
+    let known = fs::read_to_string(root.join(KYUA_KNOWN))?;
+    let known: Vec<&str> = known
+        .lines()
+        .map(|l| l.split('#').next().unwrap_or("").trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+    let mut matched = 0;
+    let mut wrong = Vec::new();
+    let mut ran = std::collections::HashSet::new();
+    for line in console
+        .lines()
+        .filter_map(|l| l.trim_end().strip_prefix("atf: "))
+    {
+        let Some((case, result)) = line.split_once(' ') else {
+            continue;
+        };
+        ran.insert(case);
+        let status = result.split(':').next().unwrap_or(result).trim();
+        match freebsd.get(case) {
+            Some(&want) if want == status => matched += 1,
+            _ if known.contains(&case) => {}
+            Some(want) => wrong.push(format!("{case}: {result} (FreeBSD: {want})")),
+            None => wrong.push(format!("{case}: {result} (FreeBSD has no such case)")),
+        }
+    }
+    let mut missing: Vec<&str> = freebsd
+        .keys()
+        .copied()
+        .filter(|c| ATF_DIRS.iter().any(|d| c.starts_with(d)))
+        .filter(|c| {
+            let prog = c.split_once(':').map_or(*c, |(p, _)| p);
+            console
+                .lines()
+                .any(|l| l.trim_end().strip_prefix("atf-prog: ") == Some(prog))
+        })
+        .filter(|c| !ran.contains(c) && !known.contains(c))
+        .collect();
+    missing.sort_unstable();
+    wrong.extend(missing.iter().map(|c| format!("{c}: did not run")));
+    if !wrong.is_empty() {
+        return Err(format!("FreeBSD's tests ended otherwise:\n  {}", wrong.join("\n  ")).into());
+    }
+    if matched == 0 {
+        return Err("FreeBSD's tests: no case ran".into());
+    }
+    Ok(matched)
+}
+
 /// How much unmatched console output a [`Session`] keeps, for errors.
 const TAIL: usize = 300;
 

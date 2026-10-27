@@ -59,6 +59,22 @@ pub(super) fn sched_yield() -> SysResult {
     Ok(0)
 }
 
+/// `sched_get_priority_max(policy)` and `sched_get_priority_min`: the
+/// POSIX range for `SCHED_FIFO` and `SCHED_RR` (FreeBSD's real-time
+/// priorities, 0 to 31 inverted), and for `SCHED_OTHER` 0 up to 15.1's
+/// time-sharing span.
+pub(super) fn sched_priority_bound(policy: u64, max: bool) -> SysResult {
+    const SCHED_FIFO: i32 = 1;
+    const SCHED_OTHER: i32 = 2;
+    const SCHED_RR: i32 = 3;
+    match (int(policy), max) {
+        (SCHED_FIFO | SCHED_RR, true) => Ok(u64::from(RTP_PRIO_MAX)),
+        (SCHED_FIFO | SCHED_RR, false) | (SCHED_OTHER, false) => Ok(0),
+        (SCHED_OTHER, true) => Ok(u64::from(RTP_PRIO_NORMAL_MAX)),
+        _ => Err(Errno::EINVAL),
+    }
+}
+
 /// `thr_self(id)`.
 pub(super) fn thr_self(id: u64) -> SysResult {
     store_tid(id, thread()?.tid())?;
