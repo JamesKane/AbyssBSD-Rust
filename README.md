@@ -24,6 +24,7 @@ desktop.
 | [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) | The FreeBSD userland ABI contract and how we verify it |
 | [docs/compat-deviations.md](docs/compat-deviations.md) | Documented deviations from FreeBSD behavior and why they exist |
 | [docs/DRIVER-MODEL.md](docs/DRIVER-MODEL.md) | Device framework, buses, bindings, grants, DMA, and interrupts |
+| [docs/DRIVER-ONBOARDING.md](docs/DRIVER-ONBOARDING.md) | Onboarding guide for writing and porting drivers, plus clean-room reverse engineering |
 | [docs/VFS.md](docs/VFS.md) | VFS, vnodes, name cache, page and buffer caches, write-back, and file systems |
 | [docs/USB.md](docs/USB.md) | xHCI, USB bus and hubs, HID and input (`kbd`, `evdev`), `vt` terminals, and `umass` |
 | [docs/MULTIUSER.md](docs/MULTIUSER.md) | Phase 6 design: dynamic linking, threads, umtx, kqueue, sockets, ptys, security, and `init` |
