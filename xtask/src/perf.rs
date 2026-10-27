@@ -268,7 +268,7 @@ impl Dirs {
 }
 
 /// `doas <cmd> <args>`, failing on a non-zero exit.
-fn doas(args: &[&str]) -> Result<String> {
+pub(crate) fn doas(args: &[&str]) -> Result<String> {
     util::output(Command::new("doas").args(args))
 }
 

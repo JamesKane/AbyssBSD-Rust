@@ -85,6 +85,7 @@ cargo xtask --remote perf [--suite p2|p3|p4|p5|p6|vt|diag] [--runs N] [--prepare
 cargo xtask --remote fetch-base [--arch <a|all>]   # base.txz, SHA-256 pinned: /rescue image, sysroot
 cargo xtask --remote freebsd-shell                 # the boot-to-shell script against FreeBSD
 cargo xtask --remote freebsd-multiuser             # the multi-user login script against FreeBSD
+cargo xtask --remote freebsd-usertests             # tests/user on FreeBSD 15.1 itself, either arch
 cargo xtask --remote kyua-baseline [--resume]      # FreeBSD's kyua results, per test case, in bhyve
 ```
 
@@ -104,7 +105,11 @@ into `build/dist/`, so clang and lld build the same programs locally. Each image
 `rescue.tar`, an empty `/dev` for devfs, and every `tests/user/*.c`, built static and appended as
 `/usr/tests/abyss/<name>` (rebuilt when its source or xtask changes); the boot tests run them. The
 programs check FreeBSD's behavior, not ours, so each also passes on FreeBSD 15.1 itself
-(`cc -static` on the server): a check that fails there is wrong.
+(`cc -static` on the server): a check that fails there is wrong. A source that needs a library
+says so on a line `Links with: -lthr` in its header comment, and both builds pass it on.
+`cargo xtask --remote freebsd-usertests [--arch A] [--test NAME,...]` runs the programs, static and
+dynamic, on FreeBSD 15.1's release image itself (arm64 in QEMU with the `max` CPU, so with SVE), so
+arm64's checks are held to FreeBSD too.
 `freebsd-shell` boots FreeBSD single-user in bhyve and runs `xtask/src/expect.rs`'s `SHELL`
 script against its `/rescue/sh`. The boot tier runs the same script against AbyssBSD: each
 architecture's `<arch>-shell` case (and `x86_64-bhyve-shell` on the server) boots a normal kernel

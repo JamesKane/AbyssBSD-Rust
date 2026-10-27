@@ -24,6 +24,7 @@ mod remote;
 mod syscalls;
 mod test;
 mod ufsverify;
+mod usertests;
 mod util;
 
 use std::process::ExitCode;
@@ -49,6 +50,7 @@ commands:
   ubench      [--arch <a|all>] [--runs N] [--bhyve]      the P4 suite on AbyssBSD alone (QEMU, or bhyve on the server)
   freebsd-shell                                          run the boot-to-shell script against FreeBSD (server only)
   freebsd-multiuser [--arch <a|all>] [--vmm qemu|bhyve] run the multi-user login script against FreeBSD (server only)
+  freebsd-usertests [--arch <a|all>] [--test N,...]   run tests/user on FreeBSD 15.1 itself (server only)
   kyua-baseline [--resume]                               record FreeBSD's kyua results per test case in bhyve (server only)
   fetch-base  [--arch <a|all>]                           FreeBSD base.txz: /rescue image, sysroot (server only)
   acpidump    --arch <a> [--vmm qemu|bhyve] [--machine M] --out DIR   capture a VM's ACPI tables
@@ -108,6 +110,7 @@ fn run() -> Result<()> {
         "fetch-base" => base::cmd(args),
         "freebsd-shell" => expect::cmd_freebsd_shell(args),
         "freebsd-multiuser" => multiuser::cmd_freebsd_multiuser(args),
+        "freebsd-usertests" => usertests::cmd(args),
         "kyua-baseline" => kyua::cmd_kyua_baseline(args),
         "acpidump" => acpidump::cmd(args),
         "check" => test::cmd_check(args),

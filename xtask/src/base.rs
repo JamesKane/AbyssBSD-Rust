@@ -387,6 +387,21 @@ pub(crate) fn cc_static_with(arch: Arch, source: &Path, args: &[&str], out: &Pat
     )
 }
 
+/// The libraries a test program's source asks for, on a line
+/// "Links with: -lpthread ..." in its header comment.
+pub(crate) fn link_args(source: &Path) -> Vec<String> {
+    fs::read_to_string(source)
+        .ok()
+        .and_then(|s| {
+            s.lines().find_map(|l| {
+                l.split_once("Links with:")
+                    .map(|(_, rest)| rest.to_string())
+            })
+        })
+        .map(|rest| rest.split_whitespace().map(String::from).collect())
+        .unwrap_or_default()
+}
+
 /// Builds `tests/user/*.c` again as dynamically linked PIEs into `out`
 /// (when stale), against the full base on the server: the user tests,
 /// run through rtld and base's shared libraries (ROADMAP P6.1). A test
@@ -434,7 +449,8 @@ pub(crate) fn dynamic_user_tests(arch: Arch, out: &Path) -> Result<Vec<(String, 
                         "-fPIE", "-pie", "-s", "-O2", "-Wall", "-Wextra", "-Werror", "-o",
                     ])
                     .arg(&bin)
-                    .arg(&src),
+                    .arg(&src)
+                    .args(link_args(&src)),
             )?;
         }
         built.push((name, bin));
@@ -907,7 +923,9 @@ pub(crate) fn md_image(arch: Arch, extra: &[(&str, &Path)]) -> Result<Option<Vec
             _ => true,
         };
         if stale {
-            cc_static(arch, &src, &bin)?;
+            let libs = link_args(&src);
+            let libs: Vec<&str> = libs.iter().map(String::as_str).collect();
+            cc_static_with(arch, &src, &libs, &bin)?;
         }
         let data = fs::read(&bin)?;
         append(&mut md, &format!("{TESTS_DIR}/{name}"), b'0', 0o555, &data)?;

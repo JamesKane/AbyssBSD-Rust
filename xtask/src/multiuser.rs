@@ -52,7 +52,7 @@ pub(crate) fn installed_files(full: &Path) -> Result<Vec<(&'static str, u32, Vec
 }
 
 /// Root's prompt from base's `/root/.shrc` (`\u@\h:\w \$ `).
-const ROOT_PROMPT: &str = "root@abyss:~ # ";
+pub(crate) const ROOT_PROMPT: &str = "root@abyss:~ # ";
 
 /// What the script checks once logged in on the serial console, after
 /// setting [`PROMPT`].
@@ -260,7 +260,7 @@ const fn vmm_name(vmm: Vmm) -> &'static str {
 }
 
 /// Copies a raw image, keeping it sparse (`cp` on FreeBSD does).
-fn copy_sparse(from: &Path, to: &PathBuf) -> Result<()> {
+pub(crate) fn copy_sparse(from: &Path, to: &PathBuf) -> Result<()> {
     let _ = fs::remove_file(to);
     crate::util::run(std::process::Command::new("cp").arg(from).arg(to))
 }
