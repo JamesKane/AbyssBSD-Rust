@@ -34,6 +34,9 @@ pub const UMTX_OP_WAKE: u32 = 3;
 pub const UMTX_OP_WAIT_UINT: u32 = 11;
 pub const UMTX_OP_WAIT_UINT_PRIVATE: u32 = 15;
 pub const UMTX_OP_WAKE_PRIVATE: u32 = 16;
+/// Wakes the waiters on each of an array of addresses (libthr's
+/// deferred condition-variable wakeups).
+pub const UMTX_OP_NWAKE_PRIVATE: u32 = 21;
 /// `_umtx_time._flags`: the timeout is a time on the clock, not a
 /// duration.
 pub const UMTX_ABSTIME: u32 = 1;
@@ -105,6 +108,7 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
         "sys/umtx.h",
     ),
     c("UMTX_OP_WAKE_PRIVATE", UMTX_OP_WAKE_PRIVATE, "sys/umtx.h"),
+    c("UMTX_OP_NWAKE_PRIVATE", UMTX_OP_NWAKE_PRIVATE, "sys/umtx.h"),
     c("UMTX_ABSTIME", UMTX_ABSTIME, "sys/umtx.h"),
     c("RTP_LOOKUP", RTP_LOOKUP, "sys/rtprio.h"),
     c("RTP_SET", RTP_SET, "sys/rtprio.h"),

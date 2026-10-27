@@ -445,6 +445,28 @@ pub(super) fn umtx_op(
             wake(obj);
             Ok(0)
         }
+        UMTX_OP_NWAKE_PRIVATE => {
+            // `obj` is an array of `val` addresses, read in FreeBSD's
+            // batches; a fault ends it there.
+            const BATCH: usize = 128;
+            let mut left = usize::try_from(int(val)).unwrap_or(0);
+            let mut at = obj;
+            while left > 0 {
+                let n = left.min(BATCH);
+                let mut addrs = [0u64; BATCH];
+                for (i, a) in addrs[..n].iter_mut().enumerate() {
+                    *a = UserPtr::<u64>::new(at.wrapping_add(8 * i as u64))
+                        .read()
+                        .map_err(|_| Errno::EFAULT)?;
+                }
+                for &a in &addrs[..n] {
+                    wake(a);
+                }
+                left -= n;
+                at = at.wrapping_add(8 * n as u64);
+            }
+            Ok(0)
+        }
         op @ (UMTX_OP_WAIT | UMTX_OP_WAIT_UINT | UMTX_OP_WAIT_UINT_PRIVATE) => {
             let limit = wait_limit(uaddr, uaddr2)?;
             let b = bucket(obj);

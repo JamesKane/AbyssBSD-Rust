@@ -4,7 +4,8 @@
  * threads: checks threads from user mode, through libthr: creation and
  * join, thread IDs and names, TLS, signals sent to a thread and to the
  * process, per-thread masks, alternate stacks, and sigwait,
- * thr_suspend/thr_wake, amd64's GS base (each thread's own, a new thread
+ * thr_suspend/thr_wake, a condition variable signalled while its waiter
+ * sleeps (libthr's deferred wakeup, UMTX_OP_NWAKE_PRIVATE), amd64's GS base (each thread's own, a new thread
  * starting with its creator's), and what a threaded process does as a whole: one
  * thread's exit ends all of them, exec leaves one thread, fork copies
  * only the caller, a stop stops every thread, and the process lives on
@@ -14,8 +15,8 @@
  * instead: a child whose threads sleep, fault in fresh pages, make system
  * calls, and block in read, while another of its threads execs or exits.
  *
- * Nothing here contends a pthread mutex: libthr's contended mutexes need
- * the umtx operations of ROADMAP P6.3.
+ * Nothing here contends a pthread mutex for long: libthr's contended
+ * mutexes need the umtx operations of ROADMAP P6.3, and spin until then.
  *
  * Links with: -lthr
  *
@@ -414,6 +415,58 @@ check_gsbase(void)
 	amd64_set_gsbase(NULL);
 }
 #endif
+
+/*
+ * A condition variable signalled with its mutex held, while the waiter
+ * sleeps in the kernel: libthr defers the wakeup to the unlock.
+ */
+#define	CV_ROUNDS 200
+
+static pthread_mutex_t cv_mtx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t cv = PTHREAD_COND_INITIALIZER;
+static int cv_posted, cv_seen;
+
+static void *
+cv_waiter_main(void *arg)
+{
+	(void)arg;
+	pthread_mutex_lock(&cv_mtx);
+	while (cv_seen < CV_ROUNDS) {
+		while (cv_posted == cv_seen)
+			pthread_cond_wait(&cv, &cv_mtx);
+		cv_seen = cv_posted;
+	}
+	pthread_mutex_unlock(&cv_mtx);
+	return (NULL);
+}
+
+static void
+check_condvar(void)
+{
+	struct timespec nap = { 0, 200000 };
+	pthread_t t;
+
+	pthread_create(&t, NULL, cv_waiter_main, NULL);
+	for (int i = 1; i <= CV_ROUNDS; i++) {
+		/* Long enough for the waiter to be asleep in the kernel. */
+		nanosleep(&nap, NULL);
+		pthread_mutex_lock(&cv_mtx);
+		cv_posted = i;
+		pthread_cond_signal(&cv);
+		pthread_mutex_unlock(&cv_mtx);
+		for (;;) {
+			pthread_mutex_lock(&cv_mtx);
+			int seen = cv_seen;
+			pthread_mutex_unlock(&cv_mtx);
+			if (seen == i)
+				break;
+			sched_yield();
+		}
+	}
+	pthread_join(t, NULL);
+	CHECK(cv_seen == CV_ROUNDS, "the waiter saw %d of %d signals", cv_seen,
+	    CV_ROUNDS);
+}
 
 /* Names, as kern.proc shows them per thread. */
 
@@ -830,6 +883,7 @@ main(int argc, char **argv)
 	check_sigwait();
 	check_altstack();
 	check_suspend();
+	check_condvar();
 #ifdef __amd64__
 	check_gsbase();
 #endif
