@@ -737,6 +737,17 @@ pub(crate) fn static_tools(arch: Arch) -> Result<Vec<(&'static str, PathBuf)>> {
         cc_static_program(arch, &refs, &args, &awk)?;
     }
     tools.push(("awk", awk));
+    // run-atf's helper for cases that need an unprivileged user.
+    let asuser = out.join("asuser");
+    if !fresh(&asuser) {
+        cc_static_program(
+            arch,
+            &[&util::root().join("tests/kyua/asuser.c")],
+            &[],
+            &asuser,
+        )?;
+    }
+    tools.push(("asuser", asuser));
     Ok(tools)
 }
 

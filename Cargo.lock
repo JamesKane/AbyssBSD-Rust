@@ -369,6 +369,7 @@ dependencies = [
  "uart-16550",
  "uart-pl011",
  "ufs",
+ "umtx",
  "ustar",
  "vfs",
  "virtio-random",
@@ -562,6 +563,14 @@ dependencies = [
  "usb",
  "usbus",
  "vm",
+]
+
+[[package]]
+name = "umtx"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "sync",
 ]
 
 [[package]]

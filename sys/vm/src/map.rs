@@ -126,6 +126,8 @@ pub struct Entry {
     /// entry a shadow of its own.
     pub(crate) needs_copy: bool,
     pub(crate) role: Role,
+    /// Counted in its object's write mappings (`MAP_ENTRY_WRITECNT`).
+    writecnt: bool,
 }
 
 impl Entry {
@@ -142,6 +144,7 @@ impl Entry {
             offset: 0,
             needs_copy: false,
             role: Role::Normal,
+            writecnt: false,
         }
     }
 
@@ -176,6 +179,7 @@ impl Entry {
             offset,
             needs_copy: false,
             role: Role::Normal,
+            writecnt: false,
         }
     }
 
@@ -199,7 +203,16 @@ impl Entry {
             offset,
             needs_copy: true,
             role: Role::Normal,
+            writecnt: false,
         }
+    }
+
+    /// `self`, counted in its object's write mappings while mapped (a
+    /// shared mapping that is or may become writable).
+    #[must_use]
+    pub const fn counting_writes(mut self) -> Self {
+        self.writecnt = true;
+        self
     }
 
     /// `self`, inherited by a child as `inherit` says.
@@ -270,6 +283,11 @@ impl Entry {
 
     /// Releases the pages of a removed entry that nothing else can reach.
     fn release(self) {
+        if self.writecnt
+            && let Some(object) = &self.object
+        {
+            object.sub_writemappings(self.pages() * PAGE_SIZE);
+        }
         if let Some(object) = &self.object
             && object.one_mapping()
         {
@@ -425,6 +443,11 @@ impl VmMap {
         self.check(&range)?;
         if self.overlaps(&range) {
             return Err(MapError::Overlap);
+        }
+        if entry.writecnt
+            && let Some(object) = &entry.object
+        {
+            object.add_writemappings(entry.pages() * PAGE_SIZE);
         }
         self.entries.insert(entry);
         Ok(())
@@ -776,6 +799,7 @@ impl VmMap {
                         object: None,
                         offset: 0,
                         needs_copy: false,
+                        writecnt: false,
                         ..e.clone()
                     };
                     child.entries.insert(fresh);
@@ -793,12 +817,18 @@ impl VmMap {
                     }
                     object.set_shared();
                     let shared = e.clone();
+                    if let (true, Some(object)) = (shared.writecnt, &shared.object) {
+                        object.add_writemappings(shared.pages() * PAGE_SIZE);
+                    }
                     child.entries.insert(shared);
                 }
                 // A device's memory has no copy (FreeBSD forces its
                 // mappings shared): the child shares it.
                 Inherit::Copy if e.object.as_ref().is_some_and(|o| o.is_device()) => {
-                    child.entries.insert(e.clone());
+                    child.entries.insert(Entry {
+                        writecnt: false,
+                        ..e.clone()
+                    });
                 }
                 Inherit::Copy => {
                     if let Some(object) = &e.object {
@@ -808,7 +838,11 @@ impl VmMap {
                             write_protect.push(e.range());
                         }
                     }
-                    let copy = e.clone();
+                    // A private copy writes nobody's object.
+                    let copy = Entry {
+                        writecnt: false,
+                        ..e.clone()
+                    };
                     child.entries.insert(copy);
                 }
             }

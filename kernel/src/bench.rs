@@ -49,6 +49,15 @@ fn run_ubench_p5(s: &Sleepable) -> bool {
     run_waiting(s, SH, &[SH, b"-c", SCRIPT])
 }
 
+/// The threads component of the `p6` suite: as `p5`, `ubench p6.thr` (the
+/// threaded build) from the bench disk.
+fn run_ubench_p6_thr(s: &Sleepable) -> bool {
+    const SH: &[u8] = b"/rescue/sh";
+    const SCRIPT: &[u8] = b"mount -o ro /dev/vtbd1 /mnt && \
+        cp /mnt/ubench /tmp/ && umount /mnt && exec /tmp/ubench p6.thr";
+    run_waiting(s, SH, &[SH, b"-c", SCRIPT])
+}
+
 /// The `vt` suite: `ubench vt`, from the memory disk as `p4`'s.
 fn run_ubench_vt(s: &Sleepable) -> bool {
     const PATH: &[u8] = b"/usr/bench/ubench";
@@ -78,6 +87,7 @@ pub(crate) fn run(s: &Sleepable, suite: &str) -> bool {
     match suite {
         "p4" => return run_ubench(s),
         "p5" => return run_ubench_p5(s),
+        "p6.thr" => return run_ubench_p6_thr(s),
         "vt" => return run_ubench_vt(s),
         _ => {}
     }

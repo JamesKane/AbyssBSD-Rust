@@ -1537,6 +1537,23 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
 - POSIX shared memory (`shm_open2`, `memfd_create`, seals, `shm_rename`) and System V IPC.
 - Exit: kyua's `lib/libthr` and `lib/libc/gen` thread tests at the target, process-shared and robust
   mutexes across processes in a ktest, and the `thr` component measured.
+  - `sys/umtx` done 2026-10-27: FreeBSD's protocols operation by operation behind an `Env` the
+    kernel implements (user words by atomic single accesses and compare-and-swap, keys by address
+    space or by memory object, sleeping, the clocks), with priority lending through the scheduler's
+    new user-lent priority; host tests run libthr's user-space halves against it with random
+    interleavings. Thread exit, process exit, and exec release robust mutexes; a fork keeps the
+    caller's robust lists, as FreeBSD's.
+  - POSIX shared memory, `UMTX_OP_SHM`, `fspacectl` on it, write mappings counted per object (write
+    seals), sized objects (`SIGBUS` past the end), and System V shared memory, semaphores, and
+    message queues done 2026-10-27.
+  - The shell cases run `tests.txz`'s `lib/libthr`, `lib/libc/gen`, `sys/posixshm`, and the System V
+    tests (`sys/kern/sysv_test`, `lib/libc/sys/msg*_test`) as kyua would (each case's own `TMPDIR`,
+    `require.user=unprivileged` cases as `tests`): every case ends as on FreeBSD but those listed in
+    `tests/kyua/abyss-known.txt` for P6.4, P6.7, and P6.8. Getting there brought `rfork`
+    (`RFSPAWN`), `getpriority`/`setpriority`, the `sched_*` policy calls, `execve`'s empty-`argv`
+    check, the permission check before `#!`, `getdirentries`' `ENOTDIR`, and a vfork parent released
+    only once the child is a zombie.
+  - The ktest `pshared_across_processes` (two `tests/user/pshared` at once).
 
 **P6.4 Events.**
 - `Notify` (MULTIUSER.md §7.2) on every object that can wait: pipes, FIFOs, terminals, devices

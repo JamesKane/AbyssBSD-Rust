@@ -55,7 +55,22 @@ pub const MS_SYNC: u32 = 0x0000;
 pub const MS_ASYNC: u32 = 0x0001;
 pub const MS_INVALIDATE: u32 = 0x0002;
 
+/// `shm_open2`'s path for an anonymous object (`SHM_ANON`).
+pub const SHM_ANON: u64 = 1;
+/// `shm_open2`'s flags.
+pub const SHM_ALLOW_SEALING: u32 = 0x1;
+pub const SHM_GROW_ON_WRITE: u32 = 0x2;
+pub const SHM_LARGEPAGE: u32 = 0x4;
+/// `shm_rename` flags.
+pub const SHM_RENAME_NOREPLACE: u32 = 1 << 0;
+pub const SHM_RENAME_EXCHANGE: u32 = 1 << 1;
+
 pub(crate) const CONSTANTS: &[ConstValue] = &[
+    c("SHM_ALLOW_SEALING", SHM_ALLOW_SEALING),
+    c("SHM_GROW_ON_WRITE", SHM_GROW_ON_WRITE),
+    c("SHM_LARGEPAGE", SHM_LARGEPAGE),
+    c("SHM_RENAME_NOREPLACE", SHM_RENAME_NOREPLACE),
+    c("SHM_RENAME_EXCHANGE", SHM_RENAME_EXCHANGE),
     c("MAP_SHARED", MAP_SHARED),
     c("MAP_PRIVATE", MAP_PRIVATE),
     c("MAP_FIXED", MAP_FIXED),

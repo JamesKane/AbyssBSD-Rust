@@ -20,7 +20,11 @@ that runs unmodified FreeBSD userland. Read `docs/ROADMAP.md` for the current ph
   the same machine, and ideally faster. Single microbenchmarks are diagnostics, not gates. See
   `docs/PERFORMANCE.md`.
 - FreeBSD source is a behavioral **reference**, not something to transliterate. Never consult GPL
-  code.
+  code. MIT-licensed sources may be used as BSD-licensed ones are; files derived from them carry
+  `SPDX-License-Identifier: MIT` instead of BSD-2-Clause, and keep the original copyright notice
+  for attribution, with the AbyssBSD Project's listed after the originator's.
+- Drivers with no FreeBSD counterpart are written from the clean-room specifications in
+  `~/Projects/OS/chinese-wall/specs/` (`panthor`, `linlon-dpu`, `sky1-soc`, `sky1-dp-tx`, ...).
 
 ## Environment
 

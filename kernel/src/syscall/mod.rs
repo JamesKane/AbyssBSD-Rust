@@ -25,15 +25,18 @@
 
 mod fsops;
 mod io;
+mod ipc;
 mod mem;
 mod misc;
 mod path;
 mod proc;
+mod shm;
 mod sig;
 mod socket;
 mod sysctl;
 mod thr;
 mod time;
+mod umtx;
 
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -144,6 +147,9 @@ fn run(s: &Sleepable, frame: &mut TrapFrame, call: Call) -> Result<Option<u64>, 
         Sysno::Execve => return proc::execve(s, frame, a0, a1, a2),
         Sysno::Fork => proc::fork(s, frame, false),
         Sysno::Vfork => proc::fork(s, frame, true),
+        Sysno::Rfork => proc::rfork(s, frame, a0),
+        Sysno::Getpriority => proc::getpriority(a0, a1),
+        Sysno::Setpriority => proc::setpriority(a0, a1, a2),
         Sysno::Pdfork => proc::pdfork(s, frame, a0, a1),
         Sysno::Pdgetpid => proc::pdgetpid(s, a0, a1),
         Sysno::Pdkill => proc::pdkill(s, a0, a1),
@@ -321,16 +327,36 @@ fn run(s: &Sleepable, frame: &mut TrapFrame, call: Call) -> Result<Option<u64>, 
         Sysno::Sigfastblock => sig::sigfastblock(a0, a1),
         Sysno::SchedYield => thr::sched_yield(),
         Sysno::SchedGetPriorityMax => thr::sched_priority_bound(a0, true),
+        Sysno::SchedGetscheduler => thr::sched_getscheduler(a0),
+        Sysno::SchedGetparam => thr::sched_getparam(a0, a1),
+        Sysno::SchedSetscheduler => thr::sched_setscheduler(a0, a1, a2),
+        Sysno::SchedSetparam => thr::sched_setparam(a0, a1),
         Sysno::SchedGetPriorityMin => thr::sched_priority_bound(a0, false),
         Sysno::ThrSelf => thr::thr_self(a0),
         Sysno::ThrWake => thr::thr_wake(a0),
         Sysno::ThrNew => thr::thr_new(frame, a0, a1),
         Sysno::ThrCreate => thr::thr_create(frame, a0, a1, a2),
-        Sysno::ThrExit => thr::thr_exit(a0),
+        Sysno::ThrExit => thr::thr_exit(s, a0),
         Sysno::ThrSuspend => thr::thr_suspend(s, a0),
         Sysno::ThrSetName => thr::thr_set_name(a0, a1),
         Sysno::RtprioThread => thr::rtprio_thread(a0, a1, a2),
-        Sysno::UmtxOp => thr::umtx_op(s, a0, a1, a2, a3, a4),
+        Sysno::UmtxOp => umtx::umtx_op(s, a0, a1, a2, a3, a4),
+        Sysno::ShmOpen2 => shm::shm_open2(s, a0, a1, a2, a3, a4),
+        Sysno::Shmget => ipc::shmget(a0, a1, a2),
+        Sysno::Shmat => ipc::shmat(s, a0, a1, a2),
+        Sysno::Shmdt => ipc::shmdt(s, a0),
+        Sysno::Shmctl => ipc::shmctl(a0, a1, a2),
+        Sysno::Semget => ipc::semget(a0, a1, a2),
+        Sysno::Semop => ipc::semop(s, a0, a1, a2),
+        Sysno::Semctl => ipc::semctl(a0, a1, a2, a3),
+        Sysno::Msgget => ipc::msgget(a0, a1),
+        Sysno::Msgsnd => ipc::msgsnd(s, a0, a1, a2, a3),
+        Sysno::Msgrcv => ipc::msgrcv(s, a0, a1, a2, a3, a4),
+        Sysno::Msgctl => ipc::msgctl(a0, a1, a2),
+        Sysno::ShmUnlink => shm::shm_unlink(s, a0),
+        Sysno::ShmRename => shm::shm_rename(s, a0, a1, a2),
+        Sysno::PosixFallocate => shm::posix_fallocate(s, a0, a1, a2),
+        Sysno::Fspacectl => shm::fspacectl(s, a0, a1, a2, a3, a4),
         _ => nosys(call.number),
     };
     r.map(Some)
@@ -340,6 +366,11 @@ fn run(s: &Sleepable, frame: &mut TrapFrame, call: Call) -> Result<Option<u64>, 
 /// has one).
 fn process() -> Result<Arc<Process>, Errno> {
     Process::current().ok_or(Errno::EINVAL)
+}
+
+/// The time on clock `clock`, in nanoseconds (`clock_gettime`'s).
+pub(crate) fn clock_ns(clock: u32) -> Result<u64, Errno> {
+    time::read(u64::from(clock))
 }
 
 /// The current user thread.

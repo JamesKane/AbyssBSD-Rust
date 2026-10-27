@@ -20,6 +20,7 @@ pub(crate) mod fifo;
 pub(crate) mod file;
 pub(crate) mod msdosfs;
 pub(crate) mod pipe;
+pub(crate) mod shm;
 pub(crate) mod socket;
 pub(crate) mod ufs;
 pub(crate) mod uio;

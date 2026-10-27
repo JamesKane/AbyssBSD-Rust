@@ -1989,9 +1989,10 @@ main(int argc, char **argv)
 		return (exec_chain(argv));
 	if (argc != 2 || (strcmp(argv[1], "p4") != 0 &&
 	    strcmp(argv[1], "p5") != 0 && strcmp(argv[1], "vt") != 0 &&
-	    !(UB_HAS_P6 && strcmp(argv[1], "p6") == 0))) {
+	    !(UB_HAS_P6 && (strcmp(argv[1], "p6") == 0 ||
+	    strcmp(argv[1], "p6.thr") == 0)))) {
 		fprintf(stderr, "usage: ubench p4 | p5 | vt%s\n",
-		    UB_HAS_P6 ? " | p6" : "");
+		    UB_HAS_P6 ? " | p6 | p6.thr" : "");
 		return (2);
 	}
 	printf("kbench begin %s cpus=%ld\n", argv[1],
@@ -2005,6 +2006,8 @@ main(int argc, char **argv)
 	else if (strcmp(argv[1], "vt") == 0)
 		suite_vt();
 #ifdef UB_P6
+	else if (strcmp(argv[1], "p6.thr") == 0)
+		suite_thr();	/* the one component that runs everywhere yet */
 	else
 		suite_p6();
 #endif

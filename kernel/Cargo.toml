@@ -55,6 +55,7 @@ sched = { path = "../sys/sched" }
 sync = { path = "../sys/sync" }
 sysctl = { path = "../sys/sysctl" }
 tty = { path = "../sys/tty" }
+umtx = { path = "../sys/umtx" }
 uart = { path = "../drivers/uart" }
 uart-16550 = { path = "../drivers/uart-16550" }
 uart-pl011 = { path = "../drivers/uart-pl011" }

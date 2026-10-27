@@ -33,6 +33,41 @@ pub(super) fn fork(s: &Sleepable, frame: &mut TrapFrame, vfork: bool) -> SysResu
     Ok(u64::from(pid.unsigned_abs()))
 }
 
+/// `rfork(flags)`, in the forms base uses: `RFSPAWN` (`posix_spawn`),
+/// `RFPROC | RFFDG` (`fork`), and `RFPROC | RFFDG | RFMEM | RFPPWAIT`
+/// (`vfork`); the rest are `EINVAL` for now.
+pub(super) fn rfork(s: &Sleepable, frame: &mut TrapFrame, flags: u64) -> SysResult {
+    const RFFDG: u32 = 1 << 2;
+    const RFPROC: u32 = 1 << 4;
+    const RFMEM: u32 = 1 << 5;
+    const RFSTOPPED: u32 = 1 << 17;
+    const RFHIGHPID: u32 = 1 << 18;
+    const RFPROCDESC: u32 = 1 << 28;
+    const RFPPWAIT: u32 = 1 << 31;
+    const RFSPAWN: u32 = 1 << 31;
+    let flags = int(flags).cast_unsigned();
+    if flags & (RFSTOPPED | RFHIGHPID | RFPROCDESC) != 0 {
+        return Err(Errno::EINVAL);
+    }
+    let p = process()?;
+    let pid = if flags == RFSPAWN {
+        p.spawn_fork(s, frame)?
+    } else if flags == RFPROC | RFFDG {
+        p.fork(s, frame, false)?
+    } else if flags == RFPROC | RFFDG | RFMEM | RFPPWAIT {
+        p.fork(s, frame, true)?
+    } else {
+        // Shared descriptor tables, shared memory without waiting, and
+        // changes to the caller alone are not here yet.
+        return Err(Errno::EINVAL);
+    };
+    #[cfg(target_arch = "x86_64")]
+    {
+        frame.rdx = 0;
+    }
+    Ok(u64::from(pid.unsigned_abs()))
+}
+
 /// `pdfork(fdp, flags)`: the child's pid, its descriptor written to `fdp`.
 pub(super) fn pdfork(s: &Sleepable, frame: &mut TrapFrame, fdp: u64, flags: u64) -> SysResult {
     let flags = u32::try_from(flags).map_err(|_| Errno::EINVAL)?;
@@ -156,6 +191,10 @@ pub(super) fn execve(
     let mut budget = ARG_MAX;
     let argv = strings(argv, &mut budget)?;
     let envv = strings(envv, &mut budget)?;
+    // At least one argument (FreeBSD's `kern_execve`).
+    if argv.is_empty() {
+        return Err(Errno::EINVAL);
+    }
     let argv: Vec<&[u8]> = argv.iter().map(Vec::as_slice).collect();
     let envv: Vec<&[u8]> = envv.iter().map(Vec::as_slice).collect();
     process()?.exec(s, frame, &path, &argv, &envv)?;
@@ -335,4 +374,78 @@ pub(super) fn setres(r: u64, e: u64, sv: u64, gids: bool) -> SysResult {
 fn id_arg(a: u64) -> Option<u32> {
     let id = u32::try_from(a & 0xffff_ffff).ok()?;
     (id != u32::MAX).then_some(id)
+}
+
+/// The processes `getpriority`'s and `setpriority`'s `which` and `who`
+/// name: one process, a process group, or a user's (0: the caller's).
+fn prio_targets(
+    which: u64,
+    who: u64,
+) -> Result<Vec<alloc::sync::Arc<crate::proc::Process>>, Errno> {
+    const PRIO_PROCESS: i32 = 0;
+    const PRIO_PGRP: i32 = 1;
+    const PRIO_USER: i32 = 2;
+    let me = process()?;
+    let who = int(who);
+    Ok(match int(which) {
+        PRIO_PROCESS => {
+            let pid = if who == 0 { me.pid() } else { who };
+            crate::proc::find(pid).into_iter().collect()
+        }
+        PRIO_PGRP => {
+            let pgid = if who == 0 { me.pgid() } else { who };
+            crate::proc::all()
+                .into_iter()
+                .filter(|p| p.pgid() == pgid)
+                .collect()
+        }
+        PRIO_USER => {
+            let uid = if who == 0 {
+                me.cred().uid
+            } else {
+                who.cast_unsigned()
+            };
+            crate::proc::all()
+                .into_iter()
+                .filter(|p| p.cred().uid == uid)
+                .collect()
+        }
+        _ => return Err(Errno::EINVAL),
+    })
+}
+
+/// `getpriority(which, who)`: the lowest nice value among them.
+pub(super) fn getpriority(which: u64, who: u64) -> SysResult {
+    let low = prio_targets(which, who)?
+        .iter()
+        .map(|p| p.nice.load(core::sync::atomic::Ordering::Relaxed))
+        .min()
+        .ok_or(Errno::ESRCH)?;
+    Ok(i64::from(low).cast_unsigned())
+}
+
+/// `setpriority(which, who, prio)` (`donice`): the nice value, clamped
+/// to -20 to 20; only the superuser lowers it or touches another user's
+/// processes.
+pub(super) fn setpriority(which: u64, who: u64, prio: u64) -> SysResult {
+    let me = process()?;
+    let cred = me.cred();
+    let n = int(prio).clamp(-20, 20);
+    let targets = prio_targets(which, who)?;
+    if targets.is_empty() {
+        return Err(Errno::ESRCH);
+    }
+    let mut r = Ok(0);
+    for p in targets {
+        if !cred.is_root() && p.cred().uid != cred.uid {
+            r = Err(Errno::EPERM);
+            continue;
+        }
+        if n < p.nice.load(core::sync::atomic::Ordering::Relaxed) && !cred.is_root() {
+            r = Err(Errno::EACCES);
+            continue;
+        }
+        p.nice.store(n, core::sync::atomic::Ordering::Relaxed);
+    }
+    r
 }

@@ -81,6 +81,36 @@ pub(crate) fn init() {
     let root = t.root();
     let k = t.child(root, "kern").expect("kern node");
     let h = t.child(root, "hw").expect("hw node");
+    // `vm.max_user_wired`: four fifths of the memory free once the system
+    // is up (`vm_pageout_init`).
+    {
+        let v = t.child(root, "vm").expect("vm node");
+        let wired = crate::mm::free_frames() * 4 / 5;
+        t.add_value(
+            v,
+            Number::Auto,
+            "max_user_wired",
+            "system-wide limit to user-wired page count",
+            Value::Ulong(alloc::boxed::Box::new(move || wired)),
+        )
+        .expect("vm.max_user_wired");
+        // Nothing is wired for user processes yet (`mlock` keeps nothing
+        // resident beyond what it already is).
+        let stats = t
+            .add_node(v, Number::Auto, "stats", "VM meter stats")
+            .expect("vm.stats");
+        let svm = t
+            .add_node(stats, Number::Auto, "vm", "VM meter vm stats")
+            .expect("vm.stats.vm");
+        t.add_value(
+            svm,
+            Number::Auto,
+            "v_user_wire_count",
+            "User-wired virtual memory",
+            Value::Ulong(alloc::boxed::Box::new(|| 0)),
+        )
+        .expect("vm.stats.vm.v_user_wire_count");
+    }
     let mut add = |parent, number, name, descr, value| {
         t.add_value(parent, number, name, descr, value)
             .expect("boot sysctl node");
@@ -181,6 +211,90 @@ pub(crate) fn init() {
         "Virtual machine guest detected?",
         Value::text(vm_guest()),
     );
+    // System V IPC's limits (`kern.ipc`).
+    {
+        use crate::sysv::limits as l;
+        let ipc = t.add_node(k, Number::Auto, "ipc", "IPC").expect("kern.ipc");
+        let ulongs: [(&str, &str, u64); 5] = [
+            ("shmmax", "Maximum shared memory segment size", l::SHMMAX),
+            ("shmmin", "Minimum shared memory segment size", l::SHMMIN),
+            (
+                "shmmni",
+                "Number of shared memory identifiers",
+                l::SHMMNI as u64,
+            ),
+            ("shmseg", "Number of segments per process", l::SHMSEG as u64),
+            (
+                "shmall",
+                "Maximum number of pages available for shared memory",
+                l::SHMALL,
+            ),
+        ];
+        for (name, descr, v) in ulongs {
+            t.add_value(
+                ipc,
+                Number::Auto,
+                name,
+                descr,
+                Value::Ulong(alloc::boxed::Box::new(move || v)),
+            )
+            .expect("kern.ipc.shm*");
+        }
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_possible_wrap,
+            reason = "small limits"
+        )]
+        let ints: [(&str, &str, i32); 15] = [
+            (
+                "semmni",
+                "Number of semaphore identifiers",
+                l::SEMMNI as i32,
+            ),
+            (
+                "semmns",
+                "Maximum number of semaphores in the system",
+                l::SEMMNS as i32,
+            ),
+            (
+                "semmnu",
+                "Maximum number of undo structures in the system",
+                l::SEMMNU as i32,
+            ),
+            ("semmsl", "Max semaphores per id", l::SEMMSL as i32),
+            ("semopm", "Max operations per semop call", l::SEMOPM as i32),
+            ("semume", "Max undo entries per process", l::SEMUME as i32),
+            ("semvmx", "Semaphore maximum value", l::SEMVMX),
+            ("semaem", "Adjust on exit max value", l::SEMAEM),
+            ("msgmax", "Maximum message size", l::MSGMAX as i32),
+            (
+                "msgmni",
+                "Number of message queue identifiers",
+                l::MSGMNI as i32,
+            ),
+            (
+                "msgmnb",
+                "Maximum number of bytes in a queue",
+                l::MSGMNB as i32,
+            ),
+            (
+                "msgtql",
+                "Maximum number of messages in the system",
+                l::MSGTQL as i32,
+            ),
+            ("msgssz", "Size of a message segment", l::MSGSSZ as i32),
+            ("msgseg", "Number of message segments", l::MSGSEG as i32),
+            (
+                "shm_allow_removed",
+                "Enable/Disable attachment to attached segments marked for removal",
+                1,
+            ),
+        ];
+        for (name, descr, v) in ints {
+            t.add_value(ipc, Number::Auto, name, descr, Value::int(v))
+                .expect("kern.ipc.sem*, msg*");
+        }
+    }
     let sched_node = t
         .add_node(k, Number::Auto, "sched", "Scheduler")
         .expect("kern.sched");

@@ -2815,6 +2815,27 @@ mod user_memory {
     }
 
     ktest! {
+        /// Process-shared and robust mutexes across processes: two
+        /// `pshared` runs at once, each a parent and children sharing
+        /// mutexes, condition variables, rwlocks, and semaphores, whose
+        /// robust mutexes' owners die holding them.
+        fn pshared_across_processes() {
+            use alloc::vec::Vec;
+            let s = cx();
+            if crate::md::archive().is_none() {
+                return;
+            }
+            let path: &[u8] = b"/usr/tests/abyss/pshared";
+            let procs: Vec<_> = (0..2)
+                .map(|_| crate::proc::Process::spawn(&s, path, &[b"pshared"], &[], None).unwrap())
+                .collect();
+            for p in procs {
+                assert_eq!(p.wait(&s), crate::proc::Exit::Code(0));
+            }
+        }
+    }
+
+    ktest! {
         fn exec_layout_is_randomized_within_bounds() {
             use crate::exec::{Layout, MAXDSIZ, MAXSSIZ, USRSTACK};
             let s = cx();

@@ -546,8 +546,9 @@ pub(crate) fn sysctl_init(s: &Sleepable) {
 }
 
 /// Checks that `file` is a regular file the caller may execute (root
-/// needs an execute bit too), and returns its memory object.
-fn open(s: &Sleepable, file: &vfs::Vnode) -> Result<Arc<vm::object::Object>, Errno> {
+/// needs an execute bit too), as FreeBSD's `exec_check_permissions` does
+/// before any image activator looks at it (a script's too).
+pub(crate) fn check_exec(s: &Sleepable, file: &vfs::Vnode) -> Result<(), Errno> {
     if file.kind() != vfs::Kind::Regular {
         return Err(Errno::EACCES);
     }
@@ -556,7 +557,12 @@ fn open(s: &Sleepable, file: &vfs::Vnode) -> Result<Arc<vm::object::Object>, Err
         file.kind(),
         &crate::fs::cred(),
         vfs::ops::VEXEC,
-    )?;
+    )
+}
+
+/// [`check_exec`], then `file`'s memory object.
+fn open(s: &Sleepable, file: &vfs::Vnode) -> Result<Arc<vm::object::Object>, Errno> {
+    check_exec(s, file)?;
     crate::fs::object(s, file).ok_or(Errno::ENOEXEC)
 }
 

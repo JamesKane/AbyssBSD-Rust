@@ -258,7 +258,7 @@ unsafe fn propagate(owner: *const Thread, prio: Priority) {
 fn unlend(me: &Thread) {
     let (base, (held, n)) = {
         let inner = me.inner.lock();
-        (inner.base, inner.contested.snapshot())
+        (inner.floor(), inner.contested.snapshot())
     };
     let mut want = base;
     for &m in &held[..n] {

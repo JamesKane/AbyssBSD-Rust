@@ -781,7 +781,7 @@ pub(crate) fn suspend_check(s: &Sleepable) {
         });
         match leave_now {
             Some(None) => {}
-            Some(Some(true)) => leave(),
+            Some(Some(true)) => leave(s),
             _ => return,
         }
     }
@@ -789,8 +789,9 @@ pub(crate) fn suspend_check(s: &Sleepable) {
 
 /// Ends the current thread, which another's single-threading sent away.
 /// Nothing on the caller's stack may hold a reference: it never unwinds.
-fn leave() -> ! {
+fn leave(s: &Sleepable) -> ! {
     if let Some(t) = UserThread::current() {
+        crate::umtx::thread_exit(s, &t);
         t.process().remove_thread(&t, false);
         Process::thread_exit(t);
     }

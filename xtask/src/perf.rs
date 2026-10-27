@@ -37,7 +37,7 @@ const BOUND: f64 = 1.02;
 const MAX_CV: f64 = 0.01;
 const BOOTSTRAP: usize = 2000;
 
-const USAGE: &str = "usage: cargo xtask --remote perf [--suite p2|p3|p4|p5|p6|vt|diag] [--runs N] [--prepare] \
+const USAGE: &str = "usage: cargo xtask --remote perf [--suite p2|p3|p4|p5|p6|p6.thr|vt|diag] [--runs N] [--prepare] \
                      [--freebsd-only [--prof] | --abyss-only [--prof [--prof-cpu N]]]";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -85,12 +85,17 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     }
     // `diag` holds AbyssBSD-side diagnostics, some with FreeBSD
     // counterparts; it is for investigation, not gating.
-    if !["p2", "p3", "p4", "p5", "p6", "vt", "diag"].contains(&suite.as_str()) {
-        return Err(format!("unknown suite `{suite}` (p2, p3, p4, p5, p6, vt, diag)").into());
+    if !["p2", "p3", "p4", "p5", "p6", "p6.thr", "vt", "diag"].contains(&suite.as_str()) {
+        return Err(
+            format!("unknown suite `{suite}` (p2, p3, p4, p5, p6, p6.thr, vt, diag)").into(),
+        );
     }
-    // AbyssBSD runs p6 from the installed root, once base runs (P6.1 on).
+    // AbyssBSD runs all of p6 from the installed root once base runs;
+    // `p6.thr`, its threads component, needs only the static ubench.
     if suite == "p6" && !freebsd_only {
-        return Err("suite p6 runs on FreeBSD alone for now: add --freebsd-only".into());
+        return Err(
+            "suite p6 runs on FreeBSD alone for now: add --freebsd-only, or run p6.thr".into(),
+        );
     }
     if !cfg!(target_os = "freebsd") {
         return Err(format!("perf needs bhyve: run it on the build server\n{USAGE}").into());
@@ -113,7 +118,7 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     fs::create_dir_all(&dirs.perf)?;
     let freebsd = prepare_image(&dirs)?;
     let kbench = build_kbench(&dirs)?;
-    let ubench = if suite == "p6" {
+    let ubench = if suite.starts_with("p6") {
         build_ubench_p6(&dirs)?
     } else {
         build_ubench(&dirs)?
@@ -137,7 +142,7 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
 
     // The userland suites run ubench; the earlier ones, kbench. The file
     // systems' suite also needs its tree and fsx beside it.
-    let userland = ["p4", "p5", "p6", "vt"].contains(&suite.as_str());
+    let userland = ["p4", "p5", "p6", "p6.thr", "vt"].contains(&suite.as_str());
     let bench = if userland { &ubench } else { &kbench };
     let extras = if suite == "p5" {
         vec![build_tree(&dirs)?, build_fsx(&dirs)?]

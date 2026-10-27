@@ -99,7 +99,19 @@ pub(crate) const STATIC_TOOLS: &str = "usr/tests/static";
 /// Where the root keeps `tests/user`'s programs dynamically linked.
 pub(crate) const DYNAMIC_TESTS: &str = "usr/tests/abyss-dynamic";
 /// The parts of FreeBSD's `/usr/tests` (from `tests.txz`) the root holds.
-const FREEBSD_TESTS: &[&str] = &["usr/tests/lib/libthr"];
+/// FreeBSD's test directories the root image carries and `run-atf` runs
+/// (`atf_verdict` holds their results to FreeBSD's).
+/// A directory or a single program.
+pub(crate) const FREEBSD_TESTS: &[&str] = &[
+    "usr/tests/lib/libthr",
+    "usr/tests/lib/libc/gen",
+    "usr/tests/lib/libc/sys/msgctl_test",
+    "usr/tests/lib/libc/sys/msgget_test",
+    "usr/tests/lib/libc/sys/msgrcv_test",
+    "usr/tests/lib/libc/sys/msgsnd_test",
+    "usr/tests/sys/kern/sysv_test",
+    "usr/tests/sys/posixshm",
+];
 
 /// Where the root image keeps pjdfstest.
 pub(crate) const PJDFSTEST: &str = "usr/tests/pjdfstest";
@@ -112,15 +124,27 @@ const OPENSSL_MD5: &str = "#!/bin/sh\n\
 
 /// Runs FreeBSD's ATF test programs without kyua (which needs interval
 /// timers, P6.4): each case of each program in its own directory, killed
-/// after 60 seconds, with a line `atf: <path under /usr/tests>:<case>
-/// <result>` per case, the result as the program wrote it.
+/// after 60 seconds, with `TMPDIR` its directory and, if it requires an
+/// unprivileged user, run as `tests` (as kyua does with
+/// `unprivileged_user=tests`), with a line `atf: <path under
+/// /usr/tests>:<case> <result>` per case, the result as the program wrote
+/// it.
 const RUN_ATF: &str = r#"#!/bin/sh
-for p in /usr/tests/lib/libthr/*_test /usr/tests/lib/libthr/dlopen/*_test; do
+for p in $(/usr/tests/static/find @DIRS@ -name '*_test' -type f); do
 	[ -x "$p" ] || continue
 	echo "atf-prog: ${p#/usr/tests/}"
 	for c in $($p -l | sed -n 's/^ident: //p'); do
+		echo "atf-case: ${p#/usr/tests/}:$c"
 		w=$(mktemp -d /tmp/atf.XXXXXX)
-		(cd $w && exec $p -r $w/result -s ${p%/*} $c) > $w/out 2>&1 &
+		# As kyua with `unprivileged_user=tests`: a case that requires
+		# an unprivileged user runs as `tests`.
+		u=$($p -l | sed -n "/^ident: $c\$/,/^\$/s/^require.user: //p")
+		as=
+		if [ "$u" = unprivileged ]; then
+			chown tests $w
+			as="/usr/tests/static/asuser tests"
+		fi
+		(cd $w && TMPDIR=$w exec $as $p -r $w.res -s ${p%/*} $c) > $w.out 2>&1 &
 		pid=$!
 		(sleep 60; kill -9 $pid 2> /dev/null) &
 		watch=$!
@@ -128,9 +152,14 @@ for p in /usr/tests/lib/libthr/*_test /usr/tests/lib/libthr/dlopen/*_test; do
 		kill $watch 2> /dev/null
 		# `read`, not `head`: base's `head` needs Casper (P6.5).
 		r=
-		[ -f $w/result ] && read -r r < $w/result
+		[ -f $w.res ] && read -r r < $w.res
 		echo "atf: ${p#/usr/tests/}:$c ${r:-broken: no result}"
-		rm -rf $w
+		# What a case that did not pass said, for the log.
+		case "$r" in
+		passed*|skipped*|expected_failure*) ;;
+		*) while read -r l; do echo "atf-out: $l"; done < $w.out ;;
+		esac
+		rm -rf $w $w.res $w.out
 	done
 done
 echo atf-done-$((6*7))
@@ -237,7 +266,8 @@ fn ufs_root(arch: Arch, opts: build::Options, cmdline: &str, root: Root) -> Resu
         fs::write(&shim, OPENSSL_MD5)?;
         fs::set_permissions(&shim, fs::Permissions::from_mode(0o555))?;
         let atf = stage.join(STATIC_TOOLS).join("run-atf");
-        fs::write(&atf, RUN_ATF)?;
+        let dirs: Vec<String> = FREEBSD_TESTS.iter().map(|d| format!("/{d}")).collect();
+        fs::write(&atf, RUN_ATF.replace("@DIRS@", &dirs.join(" ")))?;
         fs::set_permissions(&atf, fs::Permissions::from_mode(0o555))?;
     }
     util::run(

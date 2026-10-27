@@ -258,12 +258,9 @@ pub(crate) const FREEBSD_TESTS: &[Step] = &[step(
 const KYUA_BASELINE: &str = "tests/kyua/freebsd/freebsd-15.1-RELEASE-x86_64-bhyve.txt";
 const KYUA_KNOWN: &str = "tests/kyua/abyss-known.txt";
 
-/// The directories of FreeBSD's tests that `run-atf` runs.
-const ATF_DIRS: &[&str] = &["lib/libthr/"];
-
 /// The `atf:` lines in `console` against FreeBSD's results: every case
-/// FreeBSD has in [`ATF_DIRS`], of the programs this architecture has
-/// (`atf-prog:` lines), must run and end as it does there (its result's
+/// FreeBSD has in [`crate::image::FREEBSD_TESTS`], that this architecture's programs list
+/// (`atf-case:` lines), must run and end as it does there (its result's
 /// first word), but those `KYUA_KNOWN` lists. Returns how many matched.
 pub(crate) fn atf_verdict(console: &str) -> Result<usize> {
     let root = crate::util::root();
@@ -300,16 +297,17 @@ pub(crate) fn atf_verdict(console: &str) -> Result<usize> {
             None => wrong.push(format!("{case}: {result} (FreeBSD has no such case)")),
         }
     }
+    // The cases this architecture's programs have (`atf-case:` lines):
+    // one FreeBSD has that a program here lacks is not missing (arm64's
+    // builds leave out amd64-only cases).
+    let listed: std::collections::HashSet<&str> = console
+        .lines()
+        .filter_map(|l| l.trim_end().strip_prefix("atf-case: "))
+        .collect();
     let mut missing: Vec<&str> = freebsd
         .keys()
         .copied()
-        .filter(|c| ATF_DIRS.iter().any(|d| c.starts_with(d)))
-        .filter(|c| {
-            let prog = c.split_once(':').map_or(*c, |(p, _)| p);
-            console
-                .lines()
-                .any(|l| l.trim_end().strip_prefix("atf-prog: ") == Some(prog))
-        })
+        .filter(|c| listed.contains(c))
         .filter(|c| !ran.contains(c) && !known.contains(c))
         .collect();
     missing.sort_unstable();

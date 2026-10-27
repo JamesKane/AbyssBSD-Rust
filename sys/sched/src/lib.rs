@@ -729,10 +729,11 @@ pub(crate) fn set_priority_locked(t: &Thread, inner: &mut thread::Inner, p: Prio
 pub fn set_base_priority(p: Priority) {
     let me = current();
     let mut inner = me.inner.lock();
-    let lent = inner.priority.beats(inner.base);
+    let lent = inner.priority.beats(inner.floor());
     inner.base = p;
-    if !lent || p.beats(inner.priority) {
-        set_priority_locked(me, &mut inner, p);
+    let floor = inner.floor();
+    if !lent || floor.beats(inner.priority) {
+        set_priority_locked(me, &mut inner, floor);
     }
 }
 
@@ -748,11 +749,39 @@ pub fn set_thread_priority(t: &Thread, p: Priority) {
     } else {
         None
     };
-    let lent = inner.priority.beats(inner.base);
+    let lent = inner.priority.beats(inner.floor());
     inner.base = p;
-    if !lent || p.beats(inner.priority) {
-        set_priority_locked(t, &mut inner, p);
+    let floor = inner.floor();
+    if !lent || floor.beats(inner.priority) {
+        set_priority_locked(t, &mut inner, floor);
     }
+}
+
+/// Lends `t` priority `p` while it holds user mutexes better threads
+/// wait for, or ends the lending (`None`): FreeBSD's
+/// `sched_lend_user_prio`. A better priority a kernel mutex's waiter lent
+/// stays until that mutex is released.
+pub fn lend_user_priority(t: &Thread, p: Option<Priority>) {
+    let mut inner = t.inner.lock();
+    let lent = inner.priority.beats(inner.floor());
+    inner.user_lent = p;
+    let floor = inner.floor();
+    if !lent || floor.beats(inner.priority) {
+        set_priority_locked(t, &mut inner, floor);
+    }
+}
+
+/// `t`'s priority in user mode: its base, or a better one user threads
+/// lent it (FreeBSD's `td_user_pri`).
+#[must_use]
+pub fn user_priority(t: &Thread) -> Priority {
+    t.inner.lock().floor()
+}
+
+/// The priority `t` asked for (FreeBSD's `td_base_user_pri`).
+#[must_use]
+pub fn base_priority(t: &Thread) -> Priority {
+    t.inner.lock().base
 }
 
 /// Gives up the CPU to an equal or better runnable thread, if there is

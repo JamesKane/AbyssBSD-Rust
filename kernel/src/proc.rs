@@ -309,6 +309,11 @@ pub(crate) struct Process {
     had_threads: AtomicBool,
     /// CPU time of its threads that have left, in platform time units.
     dead_runtime: AtomicU64,
+    /// The shortest timeout a umtx wait takes, in nanoseconds
+    /// (`UMTX_OP_SET_MIN_TIMEOUT`, FreeBSD's `p_umtx_min_timeout`).
+    pub(crate) umtx_min_timeout: AtomicU64,
+    /// Its nice value, -20 to 20 (`p_nice`), which `setpriority` sets.
+    pub(crate) nice: AtomicI32,
     /// Open descriptors. Shared by the process's threads (when there are
     /// several), so behind a sleepable lock (FreeBSD's `fd_sx`).
     pub(crate) files: Mutex<FdTable>,
@@ -504,6 +509,10 @@ impl Process {
                 single_wait: WaitQueue::new(),
                 had_threads: AtomicBool::new(false),
                 dead_runtime: AtomicU64::new(0),
+                nice: AtomicI32::new(parent.map_or(0, |p| p.nice.load(Ordering::Relaxed))),
+                umtx_min_timeout: AtomicU64::new(
+                    parent.map_or(0, |p| p.umtx_min_timeout.load(Ordering::Relaxed)),
+                ),
                 files: Mutex::new(&FILEDESC_LOCK, files),
                 cwd: PreemptLock::new(cwd),
                 umask: AtomicU16::new(umask),
@@ -865,7 +874,19 @@ impl Process {
         frame: &TrapFrame,
         vfork: bool,
     ) -> Result<i32, Errno> {
-        self.fork_with(s, frame, vfork, None).map(|(pid, _)| pid)
+        self.fork_with(s, frame, vfork, None, false)
+            .map(|(pid, _)| pid)
+    }
+
+    /// `rfork(RFSPAWN)`, which `posix_spawn` uses: `vfork`, with the
+    /// child's caught signals back to their defaults.
+    pub(crate) fn spawn_fork(
+        self: &Arc<Self>,
+        s: &Sleepable,
+        frame: &TrapFrame,
+    ) -> Result<i32, Errno> {
+        self.fork_with(s, frame, true, None, true)
+            .map(|(pid, _)| pid)
     }
 
     /// `pdfork`: `fork`, with a process descriptor for the child installed
@@ -879,7 +900,7 @@ impl Process {
         cloexec: bool,
         limit: usize,
     ) -> Result<(i32, i32), Errno> {
-        let (pid, fd) = self.fork_with(s, frame, false, Some((daemon, cloexec, limit)))?;
+        let (pid, fd) = self.fork_with(s, frame, false, Some((daemon, cloexec, limit)), false)?;
         Ok((pid, fd.unwrap_or(-1)))
     }
 
@@ -889,6 +910,7 @@ impl Process {
         frame: &TrapFrame,
         vfork: bool,
         pd: Option<(bool, bool, usize)>,
+        drop_caught: bool,
     ) -> Result<(i32, Option<i32>), Errno> {
         let space = if vfork {
             self.space()
@@ -898,6 +920,10 @@ impl Process {
         let files = self.files.lock(s).fork()?;
         let child = Self::create(space, Layout::default(), Some(self), files);
         child.vforked.store(vfork, Ordering::Relaxed);
+        // `rfork(RFSPAWN)`: the child catches nothing (`FR2_DROPSIG_CAUGHT`).
+        if drop_caught {
+            child.signals.lock().exec();
+        }
         // The descriptor exists before the child runs, so its exit is a
         // descriptor's from the start.
         let fd = match pd {
@@ -941,7 +967,14 @@ impl Process {
             rtprio,
             context: None,
         };
-        if child.start(cf, new).is_err() {
+        // The child's thread keeps the caller's robust-mutex lists (they
+        // are in the copied part of FreeBSD's `struct thread`).
+        let robust = UserThread::with_current(|t| *t.umtx().robust.lock()).unwrap_or_default();
+        let started = child.start_with(cf, new, |t, _| {
+            *t.umtx().robust.lock() = robust;
+            Ok(())
+        });
+        if started.is_err() {
             if let Some(fd) = fd {
                 let closed = self.files.lock(s).close(fd);
                 drop(closed);
@@ -1010,6 +1043,8 @@ impl Process {
         let argv: Vec<&[u8]> = argv.iter().map(Vec::as_slice).collect();
         let (path, argv) = (&path[..], &argv[..]);
         let _ = self.single(s, &me, Mode::Exit);
+        // The old image's robust mutexes go before its memory does.
+        crate::umtx::exec(s, &me);
         // No way back from here.
         let old = core::mem::replace(&mut *self.space.lock(), Arc::clone(&space));
         sched::set_address_space(Some(space as Arc<dyn sched::AddressSpace>));
@@ -1079,6 +1114,7 @@ impl Process {
         let mut file = lookup(path)?;
         let mut path = path.to_vec();
         let mut argv: Vec<Vec<u8>> = argv.iter().map(|a| a.to_vec()).collect();
+        crate::exec::check_exec(s, &file)?;
         if let Some(sc) = crate::exec::script(s, &file)? {
             let mut new = alloc::vec![sc.interp.clone()];
             new.extend(sc.arg);
@@ -1252,10 +1288,10 @@ impl Process {
     /// the memory goes now, the children go to init, and the parent gets
     /// `SIGCHLD` (or, if it keeps no zombies, init gets the zombie).
     pub(crate) fn exit(&self, s: &Sleepable, how: Exit) {
+        // Its semaphore adjustments are undone (`semexit`).
+        crate::sysv::sem_exited(self.pid);
+        // A vfork parent waits on until this is a zombie (below).
         let vforked = self.vforked.load(Ordering::Acquire);
-        if vforked {
-            self.release_parent();
-        }
         // This CPU lets go of the space too (others it ran on hold it
         // until they load another).
         sched::set_address_space(None);
@@ -1355,6 +1391,17 @@ impl Process {
             }
             described
         };
+        // The vfork parent goes on once this is a zombie, as FreeBSD's
+        // wakes it under its lock with the state set: a `waitpid` with
+        // `WNOHANG` right after finds it (`posix_spawn` reaps a child that
+        // failed so).
+        if vforked
+            && self.vforked.swap(false, Ordering::AcqRel)
+            && let Some(p) = &parent
+        {
+            p.child_gen.fetch_add(1, Ordering::AcqRel);
+            p.child_wait.wake_all();
+        }
         if let Some(init) = find(INIT) {
             init.child_changed();
         }
@@ -1396,6 +1443,9 @@ impl Process {
                 _ => break,
             }
         }
+        // Alone now: its robust mutexes go as at any thread's exit
+        // (`exit_onexit`).
+        UserThread::with_current(|t| crate::umtx::thread_exit(s, t));
         if let Some(p) = Self::current() {
             p.exit(s, how);
         }

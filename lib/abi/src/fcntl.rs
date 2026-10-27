@@ -122,6 +122,14 @@ pub const F_DUP2FD_CLOEXEC: u32 = 18;
 pub const F_ADD_SEALS: u32 = 19;
 pub const F_GET_SEALS: u32 = 20;
 pub const F_ISUNIONSTACK: u32 = 21;
+/// `fspacectl`'s command: zero a range, giving back its storage.
+pub const SPACECTL_DEALLOC: u32 = 1;
+
+/// Seals (`F_ADD_SEALS`, `F_GET_SEALS`).
+pub const F_SEAL_SEAL: u32 = 0x0001;
+pub const F_SEAL_SHRINK: u32 = 0x0002;
+pub const F_SEAL_GROW: u32 = 0x0004;
+pub const F_SEAL_WRITE: u32 = 0x0008;
 pub const F_KINFO: u32 = 22;
 pub const F_DUPFD_CLOFORK: u32 = 23;
 pub const F_DUP3FD: u32 = 24;
@@ -251,6 +259,11 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("F_DUP2FD_CLOEXEC", F_DUP2FD_CLOEXEC),
     c("F_ADD_SEALS", F_ADD_SEALS),
     c("F_GET_SEALS", F_GET_SEALS),
+    c("SPACECTL_DEALLOC", SPACECTL_DEALLOC),
+    c("F_SEAL_SEAL", F_SEAL_SEAL),
+    c("F_SEAL_SHRINK", F_SEAL_SHRINK),
+    c("F_SEAL_GROW", F_SEAL_GROW),
+    c("F_SEAL_WRITE", F_SEAL_WRITE),
     c("F_ISUNIONSTACK", F_ISUNIONSTACK),
     c("F_KINFO", F_KINFO),
     c("F_DUPFD_CLOFORK", F_DUPFD_CLOFORK),

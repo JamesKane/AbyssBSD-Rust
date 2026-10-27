@@ -153,6 +153,8 @@ pub(crate) struct UserThread {
     pub(crate) woken: AtomicBool,
     /// Where `thr_suspend` sleeps.
     pub(crate) suspend_wait: WaitQueue,
+    /// Its umtx queue entry (FreeBSD's `td_umtxq`).
+    umtx: Arc<crate::umtx::Entry>,
 }
 
 impl UserThread {
@@ -169,8 +171,9 @@ impl UserThread {
         let mut tid = Err(Errno::EAGAIN);
         let t = Arc::new_cyclic(|me| {
             tid = alloc_tid(me);
+            let id = *tid.as_ref().unwrap_or(&0);
             Self {
-                tid: *tid.as_ref().unwrap_or(&0),
+                tid: id,
                 process: Arc::clone(process),
                 sched: SpinLock::new(None),
                 sig: SpinLock::new(sig),
@@ -180,6 +183,10 @@ impl UserThread {
                 tls_base: AtomicU64::new(tls_base.unwrap_or(u64::MAX)),
                 woken: AtomicBool::new(false),
                 suspend_wait: WaitQueue::new(),
+                umtx: Arc::new(crate::umtx::Entry::new(
+                    crate::umtx::Parker::new(Weak::clone(me)),
+                    id.cast_unsigned(),
+                )),
             }
         });
         tid.map(|_| t)
@@ -191,6 +198,10 @@ impl UserThread {
 
     pub(crate) fn process(&self) -> &Arc<Process> {
         &self.process
+    }
+
+    pub(crate) fn umtx(&self) -> &Arc<crate::umtx::Entry> {
+        &self.umtx
     }
 
     /// The scheduler's thread, while it runs.

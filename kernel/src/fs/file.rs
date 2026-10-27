@@ -14,7 +14,7 @@ use abi::errno::Errno;
 use abi::fcntl::{
     FREAD, FWRITE, O_APPEND, O_NONBLOCK, SEEK_CUR, SEEK_DATA, SEEK_END, SEEK_HOLE, SEEK_SET,
 };
-use abi::ioctl::{FIODTYPE, FIONREAD};
+use abi::ioctl::{FIOASYNC, FIODTYPE, FIONBIO, FIONREAD};
 use abi::stat::{S_ISGID, S_ISUID, Stat};
 use sched::Sleepable;
 use sched::lock::{LockClass, Mutex};
@@ -98,6 +98,8 @@ pub(crate) enum FileKind {
     Socket(super::socket::UnixSocket),
     /// A named pipe.
     Fifo(super::fifo::FifoFile),
+    /// POSIX shared memory.
+    Shm(Arc<super::shm::Shm>),
 }
 
 /// An open file.
@@ -129,7 +131,9 @@ impl File {
         match &self.kind {
             FileKind::Vnode(f) => Some(f.vnode.vnode()),
             FileKind::Fifo(f) => Some(f.vnode.vnode()),
-            FileKind::Pipe(_) | FileKind::Process(_) | FileKind::Socket(_) => None,
+            FileKind::Pipe(_) | FileKind::Process(_) | FileKind::Socket(_) | FileKind::Shm(_) => {
+                None
+            }
         }
     }
 
@@ -171,6 +175,12 @@ impl File {
             // Never connected (P6 brings the rest).
             FileKind::Socket(_) => Err(Errno::ENOTCONN),
             FileKind::Fifo(f) => f.read(s, uio, self.nonblock()),
+            FileKind::Shm(m) => {
+                let mut off = self.offset.lock(s);
+                let n = m.read(s, *off, uio)?;
+                *off += n as u64;
+                Ok(n)
+            }
         }
     }
 
@@ -192,6 +202,7 @@ impl File {
                     None => f.vnode.read_at(s, offset, uio),
                 }
             }
+            FileKind::Shm(m) => m.read(s, u64::try_from(offset).map_err(|_| Errno::EINVAL)?, uio),
             FileKind::Pipe(_) | FileKind::Process(_) | FileKind::Socket(_) | FileKind::Fifo(_) => {
                 Err(Errno::ESPIPE)
             }
@@ -224,6 +235,13 @@ impl File {
             FileKind::Process(_) => Err(Errno::EOPNOTSUPP),
             FileKind::Socket(_) => Err(Errno::ENOTCONN),
             FileKind::Fifo(f) => f.write(s, uio, self.nonblock()),
+            FileKind::Shm(m) => {
+                let mut off = self.offset.lock(s);
+                let at = (self.flags() & O_APPEND == 0).then_some(*off);
+                let (n, from) = m.write(s, at, uio)?;
+                *off = from + n as u64;
+                Ok(n)
+            }
         }
     }
 
@@ -240,6 +258,11 @@ impl File {
         match &self.kind {
             FileKind::Pipe(_) | FileKind::Process(_) | FileKind::Socket(_) | FileKind::Fifo(_) => {
                 Err(Errno::ESPIPE)
+            }
+            FileKind::Shm(m) => {
+                let at = u64::try_from(offset).map_err(|_| Errno::EINVAL)?;
+                let at = (self.flags() & O_APPEND == 0).then_some(at);
+                Ok(m.write(s, at, uio)?.0)
             }
             FileKind::Vnode(f) => {
                 if let Some(d) = &f.device {
@@ -260,6 +283,12 @@ impl File {
 
     /// `lseek`: the new offset.
     pub(crate) fn seek(&self, s: &Sleepable, offset: i64, whence: u32) -> Result<i64, Errno> {
+        if let FileKind::Shm(m) = &self.kind {
+            let mut off = self.offset.lock(s);
+            let new = m.seek(s, *off, offset, whence)?;
+            *off = new;
+            return i64::try_from(new).map_err(|_| Errno::EOVERFLOW);
+        }
         let FileKind::Vnode(f) = &self.kind else {
             return Err(Errno::ESPIPE);
         };
@@ -306,6 +335,7 @@ impl File {
             FileKind::Process(pd) => Ok(pd.stat()),
             FileKind::Socket(so) => Ok(so.stat()),
             FileKind::Fifo(f) => f.vnode.stat(s),
+            FileKind::Shm(m) => Ok(m.stat(s)),
         }
     }
 
@@ -358,6 +388,12 @@ impl File {
         };
         match &self.kind {
             FileKind::Process(_) | FileKind::Socket(_) => Err(Errno::ENOTTY),
+            // Non-blocking and asynchronous mean nothing to memory, but
+            // `fcntl(F_SETFL)` must work (`shm_ioctl`).
+            FileKind::Shm(_) => match req {
+                FIONBIO | FIOASYNC => Ok(0),
+                _ => Err(Errno::ENOTTY),
+            },
             FileKind::Fifo(f) => match req {
                 FIONREAD => {
                     put(arg, f.readable(s));

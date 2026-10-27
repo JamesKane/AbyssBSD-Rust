@@ -202,3 +202,56 @@ impl<T: Plain> UserPtr<T> {
         copy_out(self.addr, bytes)
     }
 }
+
+/// Whether a word of `size` bytes at `addr` may be accessed as one: in the
+/// user half, and on arm64 aligned (its exclusive accesses fault
+/// otherwise, which FreeBSD reports as `EFAULT`; amd64 takes any).
+fn word_ok(addr: u64, size: usize) -> bool {
+    in_user(addr, size) && (cfg!(target_arch = "x86_64") || addr.is_multiple_of(size as u64))
+}
+
+/// Reads the 32-bit word at `addr` in one access (FreeBSD's `fueword32`).
+pub(crate) fn load_u32(addr: u64) -> Result<u32, Fault> {
+    if !word_ok(addr, 4) {
+        return Err(Fault);
+    }
+    // SAFETY: the range was checked above.
+    unsafe { arch::user::load_u32(addr) }.map_err(|_| Fault)
+}
+
+/// Reads the 64-bit word at `addr` in one access (`fueword`).
+pub(crate) fn load_u64(addr: u64) -> Result<u64, Fault> {
+    if !word_ok(addr, 8) {
+        return Err(Fault);
+    }
+    // SAFETY: the range was checked above.
+    unsafe { arch::user::load_u64(addr) }.map_err(|_| Fault)
+}
+
+/// Writes the 32-bit word at `addr` in one access (`suword32`).
+pub(crate) fn store_u32(addr: u64, v: u32) -> Result<(), Fault> {
+    if !word_ok(addr, 4) {
+        return Err(Fault);
+    }
+    // SAFETY: the range was checked above.
+    unsafe { arch::user::store_u32(addr, v) }.map_err(|_| Fault)
+}
+
+/// Compare-and-swap on the 32-bit word at `addr` (`casueword32`): returns
+/// what it held, `old` exactly when it now holds `new`.
+pub(crate) fn cas_u32(addr: u64, old: u32, new: u32) -> Result<u32, Fault> {
+    if !word_ok(addr, 4) {
+        return Err(Fault);
+    }
+    // SAFETY: the range was checked above.
+    unsafe { arch::user::cas_u32(addr, old, new) }.map_err(|_| Fault)
+}
+
+/// [`cas_u32`] on a 64-bit word (`casueword`).
+pub(crate) fn cas_u64(addr: u64, old: u64, new: u64) -> Result<u64, Fault> {
+    if !word_ok(addr, 8) {
+        return Err(Fault);
+    }
+    // SAFETY: the range was checked above.
+    unsafe { arch::user::cas_u64(addr, old, new) }.map_err(|_| Fault)
+}

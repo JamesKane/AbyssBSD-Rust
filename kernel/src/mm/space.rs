@@ -267,6 +267,9 @@ pub(crate) struct AddressSpace {
     loaded_on: AtomicU64,
     #[cfg(target_arch = "aarch64")]
     asid: u16,
+    /// The System V shared memory segments attached (FreeBSD's
+    /// `vm_shm`).
+    pub(crate) sysv_shm: sync::PreemptLock<crate::sysv::Attached>,
 }
 
 impl AddressSpace {
@@ -301,6 +304,7 @@ impl AddressSpace {
             loaded_on: AtomicU64::new(0),
             #[cfg(target_arch = "aarch64")]
             asid: alloc_asid(),
+            sysv_shm: sync::PreemptLock::new(alloc::vec::Vec::new()),
         }))
     }
 
@@ -433,19 +437,22 @@ impl AddressSpace {
         self.map.lock(s).set_stack_limit(limit);
     }
 
-    /// Maps `object` from page `offset` on, placed as `a` says, privately
-    /// (`mmap` of a file: shared until written, then copied).
+    /// Maps `object` from page `offset` on, placed as `a` says: shared
+    /// (counted among its write mappings if `writecnt`), or privately
+    /// (shared until written, then copied).
     pub(crate) fn map_object(
         &self,
         s: &Sleepable,
         a: &Anon,
         object: Arc<vm::object::Object>,
         offset: u64,
+        writecnt: bool,
     ) -> Result<VirtAddr, SpaceError> {
         self.map_entry(s, a, |map, range| {
             map.insert(if a.inherit == vm::map::Inherit::Share {
                 // `MAP_SHARED`: writes reach the file's pages.
-                Entry::shared(range, a.prot, a.max_prot, object, offset)
+                let e = Entry::shared(range, a.prot, a.max_prot, object, offset);
+                if writecnt { e.counting_writes() } else { e }
             } else {
                 Entry::private(range, a.prot, a.max_prot, object, offset).with_inherit(a.inherit)
             })
@@ -657,7 +664,12 @@ impl AddressSpace {
             None => self.flush(VirtAddr::new(USER_START), USER_END - USER_START),
         }
         drop(map);
-        Self::with_map(forked.child)
+        let child = Self::with_map(forked.child)?;
+        // The child shares the segments attached (`shmfork`).
+        let attached = self.sysv_shm.lock().clone();
+        crate::sysv::shm_forked(&attached);
+        *child.sysv_shm.lock() = attached;
+        Ok(child)
     }
 
     /// Resolves a fault at `va`: the map, locked, and what to map. A page
@@ -685,6 +697,41 @@ impl AddressSpace {
                 }
             }
         }
+    }
+
+    /// The memory object behind `va` and the byte offset of `va` in it,
+    /// as a umtx key for a word other processes may map names it
+    /// (FreeBSD's `vm_map_lookup` for `VM_PROT_WRITE` in `umtx_key_get`):
+    /// for any mapping if `any`, else only for one children inherit
+    /// shared (`None` otherwise). The write lookup gives a copy-on-write
+    /// mapping its own copy first, and fails as a write would.
+    pub(crate) fn object_at(
+        &self,
+        s: &Sleepable,
+        va: VirtAddr,
+        any: bool,
+    ) -> Result<Option<(Arc<vm::object::Object>, u64)>, FaultError> {
+        self.object_for(s, va, Access::Write, any)
+    }
+
+    /// [`object_at`](Self::object_at) for an `access` lookup.
+    pub(crate) fn object_for(
+        &self,
+        s: &Sleepable,
+        va: VirtAddr,
+        access: Access,
+        any: bool,
+    ) -> Result<Option<(Arc<vm::object::Object>, u64)>, FaultError> {
+        let (map, _) = self.resolve(s, va, access)?;
+        let e = map.entry(va).ok_or(FaultError::NotMapped)?;
+        if !any && e.inherit() != vm::map::Inherit::Share {
+            return Ok(None);
+        }
+        let object = e.object().cloned().ok_or(FaultError::NotMapped)?;
+        Ok(Some((
+            object,
+            e.index_of(va) * PAGE_SIZE + va.get() % PAGE_SIZE,
+        )))
     }
 
     /// Resolves a fault at `va` and maps the page.
@@ -803,6 +850,8 @@ impl Drop for AddressSpace {
         pt::Memory::free_frame(&mut frames, table.root());
         #[cfg(target_arch = "aarch64")]
         free_asid(self.asid);
+        // Its System V segments are detached (`shmexit`).
+        crate::sysv::shm_exited(core::mem::take(self.sysv_shm.get_mut()));
         // The map drops after this, freeing the pages no table maps now.
     }
 }

@@ -245,6 +245,12 @@ pub struct Object {
     /// A device's memory (`OBJT_DEVICE`): its pages are the device's,
     /// never allocated or freed.
     device: Option<Device>,
+    /// Bytes of shared mappings that may be made writable
+    /// (`writemappings`), which a write seal must wait out.
+    writemappings: AtomicU64,
+    /// Pages a mapping may reach (`object->size` of a sized anonymous
+    /// object, as POSIX shared memory's); past them a fault is `SIGBUS`.
+    limit: AtomicU64,
 }
 
 /// How memory is mapped (`vm_memattr_t`).
@@ -639,6 +645,8 @@ impl Object {
             }),
             pages_ops: ops,
             one_mapping: AtomicBool::new(true),
+            writemappings: AtomicU64::new(0),
+            limit: AtomicU64::new(u64::MAX),
             pager: None,
             owned: AtomicBool::new(false),
             io: AtomicUsize::new(0),
@@ -700,6 +708,8 @@ impl Object {
             }),
             pages_ops: ops,
             one_mapping: AtomicBool::new(true),
+            writemappings: AtomicU64::new(0),
+            limit: AtomicU64::new(u64::MAX),
             pager: None,
             owned: AtomicBool::new(false),
             io: AtomicUsize::new(0),
@@ -727,6 +737,8 @@ impl Object {
             }),
             pages_ops: ops,
             one_mapping: AtomicBool::new(false),
+            writemappings: AtomicU64::new(0),
+            limit: AtomicU64::new(u64::MAX),
             pager: Some(pager),
             owned: AtomicBool::new(true),
             io: AtomicUsize::new(0),
@@ -794,6 +806,31 @@ impl Object {
             }
         }
         n
+    }
+
+    /// Bytes of shared mappings that are or may become writable.
+    #[must_use]
+    pub fn writemappings(&self) -> u64 {
+        self.writemappings.load(Ordering::Acquire)
+    }
+
+    /// Pages a mapping may reach.
+    #[must_use]
+    pub fn limit(&self) -> PageIndex {
+        self.limit.load(Ordering::Acquire)
+    }
+
+    /// Limits mappings to the first `pages` pages.
+    pub fn set_limit(&self, pages: PageIndex) {
+        self.limit.store(pages, Ordering::Release);
+    }
+
+    pub(crate) fn add_writemappings(&self, bytes: u64) {
+        self.writemappings.fetch_add(bytes, Ordering::AcqRel);
+    }
+
+    pub(crate) fn sub_writemappings(&self, bytes: u64) {
+        self.writemappings.fetch_sub(bytes, Ordering::AcqRel);
     }
 
     /// Whether only one mapping reaches this object.
@@ -1445,6 +1482,27 @@ impl Object {
         drop(inner);
         for pfn in doomed.into_values() {
             self.pages_ops.free(pfn);
+        }
+    }
+
+    /// Gives up pages `[start, end)` (`vm_object_page_remove`): freed if
+    /// nothing but its owner holds the object, else zeroed in place, as
+    /// [`truncate`](Self::truncate) does, for the mappings that may still
+    /// reach them.
+    pub fn deallocate(self: &Arc<Self>, start: PageIndex, end: PageIndex) {
+        if Arc::strong_count(self) == 1 {
+            self.free_range(start, end);
+            return;
+        }
+        let kept: Vec<Pfn> = self
+            .inner
+            .lock()
+            .pages
+            .range(start..end)
+            .map(|(_, &p)| p)
+            .collect();
+        for pfn in kept {
+            self.pages_ops.access(pfn, &mut |p| p.fill(0));
         }
     }
 

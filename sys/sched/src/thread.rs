@@ -78,6 +78,10 @@ pub(crate) struct Inner {
     pub(crate) priority: Priority,
     /// The priority the thread asked for.
     pub(crate) base: Priority,
+    /// A better priority lent to the thread by user threads it keeps
+    /// waiting (priority-inheritance and -protection mutexes; FreeBSD's
+    /// `td_lend_user_pri`).
+    pub(crate) user_lent: Option<Priority>,
     /// The mutex the thread is blocked on, for priority propagation.
     pub(crate) blocked_on: *const crate::lock::MutexCore,
     /// Mutexes this thread owns that have waiters, for priority
@@ -147,6 +151,15 @@ pub(crate) enum Event {
 }
 
 impl Inner {
+    /// The priority the thread runs at unless a kernel mutex's waiter
+    /// lends it a better one: its base, or what user threads lent it.
+    pub(crate) fn floor(&self) -> Priority {
+        match self.user_lent {
+            Some(l) if l.beats(self.base) => l,
+            _ => self.base,
+        }
+    }
+
     /// Updates time-sharing state for `ev` at `now` and recomputes the base
     /// priority; the effective priority follows unless a mutex waiter lent
     /// a better one. Returns the effective priority.
@@ -170,10 +183,11 @@ impl Inner {
                 Event::Waiting => u.update(now, false, window),
             }
             let base = u.priority(now, step);
-            let lent = self.priority.beats(self.base);
+            let lent = self.priority.beats(self.floor());
             self.base = base;
-            if !lent || base.beats(self.priority) {
-                self.priority = base;
+            let floor = self.floor();
+            if !lent || floor.beats(self.priority) {
+                self.priority = floor;
             }
         }
         self.priority
@@ -359,6 +373,7 @@ impl Thread {
                 state: State::New,
                 priority,
                 base: priority,
+                user_lent: None,
                 blocked_on: core::ptr::null(),
                 contested: Contested::new(),
                 cpu,

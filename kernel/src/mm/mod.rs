@@ -436,6 +436,11 @@ fn init_phys(map: &[MemoryRegion]) {
     *PHYS.lock() = Some(alloc);
 }
 
+/// Free page frames now.
+pub(crate) fn free_frames() -> u64 {
+    PHYS.lock().as_ref().map_or(0, |a| a.stats().free)
+}
+
 /// Maps `[va, va + len)` to fresh frames in the kernel table, zeroed. On
 /// failure nothing stays mapped.
 pub(crate) fn map_fresh(va: VirtAddr, len: u64, attrs: Attrs) -> Result<(), pt::MapError> {

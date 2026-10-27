@@ -364,6 +364,247 @@ pub unsafe fn copy_to_user(dst: u64, src: *const u8, len: usize) -> Result<(), F
     unsafe { copy(dst as *mut u8, src, len) }
 }
 
+// Single-word user accesses for `_umtx_op`: each one instruction, so
+// atomic, unlike the copy routines' `rep movsb`. Each returns the value
+// (or the word's previous value) in rax and 1 in rdx on a fault. The
+// `_smap` forms open user access for their one instruction.
+macro_rules! user_words {
+    ($suffix:literal, $open:literal, $close:literal) => {
+        global_asm!(concat!(
+            r#"
+    .section .text.abyss_user, "ax"
+
+    /* rdi = addr */
+    .global abyss_user_load32"#,
+            $suffix,
+            r#"
+abyss_user_load32"#,
+            $suffix,
+            r#":
+    "#,
+            $open,
+            r#"
+1:  mov eax, [rdi]
+    "#,
+            $close,
+            r#"
+    xor edx, edx
+    ret
+
+    .global abyss_user_load64"#,
+            $suffix,
+            r#"
+abyss_user_load64"#,
+            $suffix,
+            r#":
+    "#,
+            $open,
+            r#"
+2:  mov rax, [rdi]
+    "#,
+            $close,
+            r#"
+    xor edx, edx
+    ret
+
+    /* rdi = addr, rsi = value */
+    .global abyss_user_store32"#,
+            $suffix,
+            r#"
+abyss_user_store32"#,
+            $suffix,
+            r#":
+    "#,
+            $open,
+            r#"
+3:  mov [rdi], esi
+    "#,
+            $close,
+            r#"
+    xor eax, eax
+    xor edx, edx
+    ret
+
+    /* rdi = addr, rsi = expected, rdx = new */
+    .global abyss_user_cas32"#,
+            $suffix,
+            r#"
+abyss_user_cas32"#,
+            $suffix,
+            r#":
+    mov eax, esi
+    "#,
+            $open,
+            r#"
+4:  lock cmpxchg [rdi], edx
+    "#,
+            $close,
+            r#"
+    xor edx, edx
+    ret
+
+    .global abyss_user_cas64"#,
+            $suffix,
+            r#"
+abyss_user_cas64"#,
+            $suffix,
+            r#":
+    mov rax, rsi
+    "#,
+            $open,
+            r#"
+5:  lock cmpxchg [rdi], rdx
+    "#,
+            $close,
+            r#"
+    xor edx, edx
+    ret
+
+6:  "#,
+            $close,
+            r#"
+    xor eax, eax
+    mov edx, 1
+    ret
+
+    .pushsection abyss_extable, "aw"
+    .balign 8
+    .quad 1b, 6b
+    .quad 2b, 6b
+    .quad 3b, 6b
+    .quad 4b, 6b
+    .quad 5b, 6b
+    .popsection
+    "#
+        ));
+    };
+}
+user_words!("", "", "");
+user_words!("_smap", "stac", "clac");
+
+/// What a single-word access returns: the value, and whether it faulted.
+#[repr(C)]
+struct Word {
+    value: u64,
+    faulted: u64,
+}
+
+unsafe extern "sysv64" {
+    fn abyss_user_load32(addr: u64) -> Word;
+    fn abyss_user_load64(addr: u64) -> Word;
+    fn abyss_user_store32(addr: u64, v: u64) -> Word;
+    fn abyss_user_cas32(addr: u64, old: u64, new: u64) -> Word;
+    fn abyss_user_cas64(addr: u64, old: u64, new: u64) -> Word;
+    fn abyss_user_load32_smap(addr: u64) -> Word;
+    fn abyss_user_load64_smap(addr: u64) -> Word;
+    fn abyss_user_store32_smap(addr: u64, v: u64) -> Word;
+    fn abyss_user_cas32_smap(addr: u64, old: u64, new: u64) -> Word;
+    fn abyss_user_cas64_smap(addr: u64, old: u64, new: u64) -> Word;
+}
+
+fn word(w: Word) -> Result<u64, Fault> {
+    if w.faulted == 0 {
+        Ok(w.value)
+    } else {
+        Err(Fault)
+    }
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "a 32-bit access leaves the upper half clear"
+)]
+fn word32(w: Word) -> Result<u32, Fault> {
+    word(w).map(|v| v as u32)
+}
+
+/// Reads the aligned 32-bit word at user address `addr` atomically.
+///
+/// # Safety
+///
+/// `[addr, addr + 4)` must lie below [`USER_END`].
+pub unsafe fn load_u32(addr: u64) -> Result<u32, Fault> {
+    // SAFETY: the one user access has a fixup.
+    let w = unsafe {
+        if SMAP.load(Ordering::Relaxed) {
+            abyss_user_load32_smap(addr)
+        } else {
+            abyss_user_load32(addr)
+        }
+    };
+    word32(w)
+}
+
+/// Reads the aligned 64-bit word at user address `addr` atomically.
+///
+/// # Safety
+///
+/// `[addr, addr + 8)` must lie below [`USER_END`].
+pub unsafe fn load_u64(addr: u64) -> Result<u64, Fault> {
+    // SAFETY: the one user access has a fixup.
+    let w = unsafe {
+        if SMAP.load(Ordering::Relaxed) {
+            abyss_user_load64_smap(addr)
+        } else {
+            abyss_user_load64(addr)
+        }
+    };
+    word(w)
+}
+
+/// Writes the aligned 32-bit word at user address `addr` atomically.
+///
+/// # Safety
+///
+/// `[addr, addr + 4)` must lie below [`USER_END`].
+pub unsafe fn store_u32(addr: u64, v: u32) -> Result<(), Fault> {
+    // SAFETY: the one user access has a fixup.
+    let w = unsafe {
+        if SMAP.load(Ordering::Relaxed) {
+            abyss_user_store32_smap(addr, u64::from(v))
+        } else {
+            abyss_user_store32(addr, u64::from(v))
+        }
+    };
+    word(w).map(|_| ())
+}
+
+/// Replaces the aligned 32-bit word at user address `addr` with `new` if
+/// it holds `old`, atomically (a full barrier). Returns what it held:
+/// `old` exactly when the swap happened.
+///
+/// # Safety
+///
+/// `[addr, addr + 4)` must lie below [`USER_END`].
+pub unsafe fn cas_u32(addr: u64, old: u32, new: u32) -> Result<u32, Fault> {
+    // SAFETY: the one user access has a fixup.
+    let w = unsafe {
+        if SMAP.load(Ordering::Relaxed) {
+            abyss_user_cas32_smap(addr, u64::from(old), u64::from(new))
+        } else {
+            abyss_user_cas32(addr, u64::from(old), u64::from(new))
+        }
+    };
+    word32(w)
+}
+
+/// [`cas_u32`] for a 64-bit word.
+///
+/// # Safety
+///
+/// `[addr, addr + 8)` must lie below [`USER_END`].
+pub unsafe fn cas_u64(addr: u64, old: u64, new: u64) -> Result<u64, Fault> {
+    // SAFETY: the one user access has a fixup.
+    let w = unsafe {
+        if SMAP.load(Ordering::Relaxed) {
+            abyss_user_cas64_smap(addr, old, new)
+        } else {
+            abyss_user_cas64(addr, old, new)
+        }
+    };
+    word(w)
+}
+
 // A user program for the kernel's tests (no libc): `write(1, "hello\n", 6)`,
 // then `kill(0, 1000)` (no such signal), then `exit(w * 1000 + e + c)`
 // where `w` is what `write` returned, `e` the failed call's error number,

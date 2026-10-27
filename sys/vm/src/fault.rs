@@ -118,6 +118,10 @@ pub fn resolve(map: &mut VmMap, va: VirtAddr, access: Access) -> Result<Outcome,
         return Err(FaultError::NotMapped);
     };
     let index = entry.index_of(page);
+    // Past the end of a sized object it maps.
+    if !entry.needs_copy && index >= object.limit() {
+        return Err(FaultError::PastEnd);
+    }
     let read_only = entry.prot.without(Prot::WRITE);
     // If our object is ours alone, the lookup folds away what only it
     // still reaches.

@@ -300,6 +300,12 @@ pub(super) fn chmod(s: &Sleepable, path: u64, mode: u64, nofollow: bool) -> SysR
 
 /// `fchmod(fd, mode)`.
 pub(super) fn fchmod(s: &Sleepable, fd: u64, mode: u64) -> SysResult {
+    let f = super::io::current_file(s, fd)?;
+    if let crate::fs::file::FileKind::Shm(m) = f.kind() {
+        #[allow(clippy::cast_possible_truncation, reason = "a mode_t")]
+        m.chmod(s, &crate::fs::cred(), mode as u16)?;
+        return Ok(0);
+    }
     setattr(s, &*fd_vnode(s, fd)?, &mode_of(mode))
 }
 
@@ -339,6 +345,11 @@ pub(super) fn chown(s: &Sleepable, path: u64, uid: u64, gid: u64, nofollow: bool
 
 /// `fchown(fd, uid, gid)`.
 pub(super) fn fchown(s: &Sleepable, fd: u64, uid: u64, gid: u64) -> SysResult {
+    let f = super::io::current_file(s, fd)?;
+    if let crate::fs::file::FileKind::Shm(m) = f.kind() {
+        m.chown(s, &crate::fs::cred(), id(uid), id(gid))?;
+        return Ok(0);
+    }
     setattr(s, &*fd_vnode(s, fd)?, &owner_of(uid, gid))
 }
 
@@ -504,6 +515,14 @@ pub(super) fn truncate(s: &Sleepable, path: u64, len: u64) -> SysResult {
 /// `ftruncate(fd, length)`: the file must be open for writing.
 pub(super) fn ftruncate(s: &Sleepable, fd: u64, len: u64) -> SysResult {
     let f = super::io::current_file(s, fd)?;
+    if let crate::fs::file::FileKind::Shm(m) = f.kind() {
+        if f.flags() & FWRITE == 0 {
+            return Err(Errno::EINVAL);
+        }
+        let len = u64::try_from(len.cast_signed()).map_err(|_| Errno::EINVAL)?;
+        m.truncate(s, len)?;
+        return Ok(0);
+    }
     let v = f.vnode().ok_or(Errno::EINVAL)?;
     if f.flags() & FWRITE == 0 {
         return Err(Errno::EINVAL);

@@ -4,14 +4,17 @@
 //! tagged with an ASID), flushing their TLB entries, keeping the kernel
 //! out of them (PAN), and copying across the boundary.
 //!
-//! The copy routines are the only kernel code that touches user memory.
-//! They use the unprivileged `ldtr`/`sttr` forms, which access memory with
-//! EL0's permissions, so PAN needs no lifting around them. Each such
+//! The copy routines and the single-word accesses are the only kernel
+//! code that touches user memory. They use the unprivileged `ldtr`/`sttr`
+//! forms, which access memory with EL0's permissions, so PAN needs no
+//! lifting around them; compare-and-swap, which has no unprivileged form,
+//! lifts it for its loop. Each such
 //! instruction has a fixup entry: the trap handler first offers the fault
 //! to the VM (a page not yet faulted in), and only if that fails resumes
 //! at the fixup, which reports [`Fault`].
 
 use core::arch::{asm, global_asm};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use addr::PhysAddr;
 
@@ -130,8 +133,10 @@ pub fn init_cpu() {
     if (mmfr1 >> 20) & 0xf == 0 {
         return;
     }
+    PAN.store(true, Ordering::Relaxed);
     // SAFETY: PAN only restricts privileged access to EL0-accessible
-    // pages, which the kernel makes only through `ldtr`/`sttr`. The
+    // pages, which the kernel makes only through `ldtr`/`sttr` (and
+    // compare-and-swap, which lifts it). The
     // instruction is `msr pan, #1`, encoded by hand for assemblers that
     // target ARMv8.0.
     unsafe {
@@ -354,6 +359,228 @@ pub unsafe fn copy_to_user(dst: u64, src: *const u8, len: usize) -> Result<(), F
     // SAFETY: per the caller's contract; user accesses have fixups.
     let faulted = unsafe { abyss_copy_to_user(dst, src, len) };
     if faulted == 0 { Ok(()) } else { Err(Fault) }
+}
+
+// Single-word user accesses for `_umtx_op`: one load or store each, so
+// atomic, unlike the copy routines' byte loops. Each returns the value
+// (or the word's previous value) in x0 and 1 in x1 on a fault. There is
+// no unprivileged exclusive access, so compare-and-swap lifts PAN for its
+// loop (FreeBSD's `casueword32` does the same); the `_pan` forms do that,
+// for CPUs that have it. An exception taken in the loop sets PAN on entry
+// and puts it back as it was on return.
+macro_rules! user_words {
+    ($suffix:literal, $open:literal, $close:literal) => {
+        global_asm!(concat!(
+            r#"
+    .section .text.abyss_user, "ax"
+
+    /* x0 = addr */
+    .global abyss_user_load32"#,
+            $suffix,
+            r#"
+abyss_user_load32"#,
+            $suffix,
+            r#":
+1:  ldtr w0, [x0]
+    mov x1, #0
+    ret
+
+    .global abyss_user_load64"#,
+            $suffix,
+            r#"
+abyss_user_load64"#,
+            $suffix,
+            r#":
+2:  ldtr x0, [x0]
+    mov x1, #0
+    ret
+
+    /* x0 = addr, x1 = value */
+    .global abyss_user_store32"#,
+            $suffix,
+            r#"
+abyss_user_store32"#,
+            $suffix,
+            r#":
+3:  sttr w1, [x0]
+    mov x0, #0
+    mov x1, #0
+    ret
+
+    /* x0 = addr, x1 = expected, x2 = new */
+    .global abyss_user_cas32"#,
+            $suffix,
+            r#"
+abyss_user_cas32"#,
+            $suffix,
+            r#":
+    "#,
+            $open,
+            r#"
+4:  ldaxr w3, [x0]
+    cmp w3, w1
+    b.ne 6f
+5:  stlxr w4, w2, [x0]
+    cbnz w4, 4b
+    b 7f
+6:  clrex
+7:  "#,
+            $close,
+            r#"
+    mov x0, x3
+    mov x1, #0
+    ret
+
+    .global abyss_user_cas64"#,
+            $suffix,
+            r#"
+abyss_user_cas64"#,
+            $suffix,
+            r#":
+    "#,
+            $open,
+            r#"
+8:  ldaxr x3, [x0]
+    cmp x3, x1
+    b.ne 10f
+9:  stlxr w4, x2, [x0]
+    cbnz w4, 8b
+    b 11f
+10: clrex
+11: "#,
+            $close,
+            r#"
+    mov x0, x3
+    mov x1, #0
+    ret
+
+12: "#,
+            $close,
+            r#"
+    mov x0, #0
+    mov x1, #1
+    ret
+
+    .pushsection abyss_extable, "aw"
+    .balign 8
+    .quad 1b, 12b
+    .quad 2b, 12b
+    .quad 3b, 12b
+    .quad 4b, 12b
+    .quad 5b, 12b
+    .quad 8b, 12b
+    .quad 9b, 12b
+    .popsection
+    "#
+        ));
+    };
+}
+// `msr pan, #0` and `msr pan, #1`, encoded by hand for assemblers that
+// target ARMv8.0.
+user_words!("", "", "");
+user_words!("_pan", ".inst 0xd500409f", ".inst 0xd500419f");
+
+/// Whether PAN is on (so compare-and-swap must lift it).
+static PAN: AtomicBool = AtomicBool::new(false);
+
+/// What a single-word access returns: the value, and whether it faulted.
+#[repr(C)]
+struct Word {
+    value: u64,
+    faulted: u64,
+}
+
+unsafe extern "C" {
+    fn abyss_user_load32(addr: u64) -> Word;
+    fn abyss_user_load64(addr: u64) -> Word;
+    fn abyss_user_store32(addr: u64, v: u64) -> Word;
+    fn abyss_user_cas32(addr: u64, old: u64, new: u64) -> Word;
+    fn abyss_user_cas64(addr: u64, old: u64, new: u64) -> Word;
+    fn abyss_user_cas32_pan(addr: u64, old: u64, new: u64) -> Word;
+    fn abyss_user_cas64_pan(addr: u64, old: u64, new: u64) -> Word;
+}
+
+fn word(w: Word) -> Result<u64, Fault> {
+    if w.faulted == 0 {
+        Ok(w.value)
+    } else {
+        Err(Fault)
+    }
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "a 32-bit access leaves the upper half clear"
+)]
+fn word32(w: Word) -> Result<u32, Fault> {
+    word(w).map(|v| v as u32)
+}
+
+/// Reads the aligned 32-bit word at user address `addr` atomically.
+///
+/// # Safety
+///
+/// `[addr, addr + 4)` must lie below [`USER_END`].
+pub unsafe fn load_u32(addr: u64) -> Result<u32, Fault> {
+    // SAFETY: the one user access has a fixup.
+    word32(unsafe { abyss_user_load32(addr) })
+}
+
+/// Reads the aligned 64-bit word at user address `addr` atomically.
+///
+/// # Safety
+///
+/// `[addr, addr + 8)` must lie below [`USER_END`].
+pub unsafe fn load_u64(addr: u64) -> Result<u64, Fault> {
+    // SAFETY: the one user access has a fixup.
+    word(unsafe { abyss_user_load64(addr) })
+}
+
+/// Writes the aligned 32-bit word at user address `addr` atomically.
+///
+/// # Safety
+///
+/// `[addr, addr + 4)` must lie below [`USER_END`].
+pub unsafe fn store_u32(addr: u64, v: u32) -> Result<(), Fault> {
+    // SAFETY: the one user access has a fixup.
+    word(unsafe { abyss_user_store32(addr, u64::from(v)) }).map(|_| ())
+}
+
+/// Replaces the aligned 32-bit word at user address `addr` with `new` if
+/// it holds `old`, atomically (acquire and release). Returns what it
+/// held: `old` exactly when the swap happened.
+///
+/// # Safety
+///
+/// `[addr, addr + 4)` must lie below [`USER_END`].
+pub unsafe fn cas_u32(addr: u64, old: u32, new: u32) -> Result<u32, Fault> {
+    // SAFETY: the loop's user accesses have fixups, and PAN is restored
+    // on every way out.
+    let w = unsafe {
+        if PAN.load(Ordering::Relaxed) {
+            abyss_user_cas32_pan(addr, u64::from(old), u64::from(new))
+        } else {
+            abyss_user_cas32(addr, u64::from(old), u64::from(new))
+        }
+    };
+    word32(w)
+}
+
+/// [`cas_u32`] for a 64-bit word.
+///
+/// # Safety
+///
+/// `[addr, addr + 8)` must lie below [`USER_END`].
+pub unsafe fn cas_u64(addr: u64, old: u64, new: u64) -> Result<u64, Fault> {
+    // SAFETY: as for `cas_u32`.
+    let w = unsafe {
+        if PAN.load(Ordering::Relaxed) {
+            abyss_user_cas64_pan(addr, old, new)
+        } else {
+            abyss_user_cas64(addr, old, new)
+        }
+    };
+    word(w)
 }
 
 // A user program for the kernel's tests (no libc): `write(1, "hello\n", 6)`,

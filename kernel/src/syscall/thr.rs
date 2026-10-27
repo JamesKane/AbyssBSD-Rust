@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! Threads: `thr_new` and `thr_create`, `thr_exit`, `thr_self`,
-//! `thr_suspend` and `thr_wake`, `thr_set_name`, `rtprio_thread`, and
-//! `_umtx_op`'s waits and wakes.
+//! `thr_suspend` and `thr_wake`, `thr_set_name`, and `rtprio_thread`.
 //!
 //! A new thread starts as a copy of its creator's registers at the system
 //! call (FreeBSD's `cpu_copy_thread`), with the entry, argument, and stack
@@ -11,26 +10,18 @@
 //! `vfp_new_thread` does). The last thread's `thr_exit` returns: libthr
 //! then calls `exit`.
 //!
-//! `_umtx_op` waiters sleep on one of 64 queues hashed by address, each
-//! with a generation count a wake bumps. A waiter reads the generation,
-//! then the user word, then sleeps until the generation moves: a wake
-//! between the read and the sleep is not lost, and a spurious wake-up is
-//! allowed (the caller rechecks), as with FreeBSD's. A wait may carry a
-//! timeout, a duration or a time on any clock, and then fails with
-//! `ETIMEDOUT` when it passes.
-//!
 //! Behavior reference: sys/kern/kern_thr.c, sys/kern/kern_thread.c,
-//! sys/kern/kern_resource.c, sys/kern/kern_umtx.c,
+//! sys/kern/kern_resource.c,
 //! sys/amd64/amd64/vm_machdep.c, sys/arm64/arm64/vm_machdep.c.
 
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::Ordering;
 
 use abi::errno::Errno;
 use abi::thr::*;
-use abi::time::{Timespec, clock};
+use abi::time::Timespec;
 use abi::ucontext::{Mcontext, Ucontext};
-use sched::{Sleepable, WaitQueue};
+use sched::Sleepable;
 
 use super::{SysResult, int, process, thread};
 use crate::arch::trap::TrapFrame;
@@ -40,8 +31,6 @@ use crate::uthread::{MAX_PER_PROC, Name, UserThread};
 
 // SAFETY: two `u16`s, no padding.
 unsafe impl Plain for Rtprio {}
-// SAFETY: integers only, no padding.
-unsafe impl Plain for UmtxTime {}
 // SAFETY: integers only, padding explicit (`abi-check` holds the C layout).
 unsafe impl Plain for ThrParam {}
 
@@ -73,6 +62,93 @@ pub(super) fn sched_priority_bound(policy: u64, max: bool) -> SysResult {
         (SCHED_OTHER, true) => Ok(u64::from(RTP_PRIO_NORMAL_MAX)),
         _ => Err(Errno::EINVAL),
     }
+}
+
+/// The thread a `sched_*` call with `pid` acts on: the caller for 0, else
+/// the process's first (`FIRST_THREAD_IN_PROC`).
+fn sched_target(pid: u64) -> Result<Arc<UserThread>, Errno> {
+    match int(pid) {
+        0 => thread(),
+        pid => crate::proc::find(pid)
+            .and_then(|p| p.first_thread())
+            .ok_or(Errno::ESRCH),
+    }
+}
+
+/// POSIX's policy for a class (`getscheduler`).
+fn policy_of(r: Rtprio) -> i32 {
+    match r.type_ {
+        RTP_PRIO_FIFO => 1,
+        RTP_PRIO_REALTIME => 3,
+        _ => 2,
+    }
+}
+
+/// `sched_getscheduler(pid)`.
+pub(super) fn sched_getscheduler(pid: u64) -> SysResult {
+    Ok(u64::from(
+        policy_of(sched_target(pid)?.rtprio()).cast_unsigned(),
+    ))
+}
+
+/// `sched_getparam(pid, param)`: real-time priorities inverted, a
+/// time-sharing one as the span above it (`ksched_getparam`).
+pub(super) fn sched_getparam(pid: u64, param: u64) -> SysResult {
+    let r = sched_target(pid)?.rtprio();
+    let prio = if matches!(r.type_, RTP_PRIO_FIFO | RTP_PRIO_REALTIME) {
+        RTP_PRIO_MAX.saturating_sub(r.prio)
+    } else {
+        RTP_PRIO_NORMAL_MAX.saturating_sub(r.prio)
+    };
+    UserPtr::<i32>::new(param)
+        .write(&i32::from(prio))
+        .map_err(|_| Errno::EFAULT)?;
+    Ok(0)
+}
+
+/// `ksched_setscheduler`: `policy` with POSIX priority `prio`.
+fn set_policy(t: &UserThread, policy: i32, prio: i32) -> Result<(), Errno> {
+    let r = match policy {
+        1 | 3 if (0..=i32::from(RTP_PRIO_MAX)).contains(&prio) => Rtprio {
+            type_: if policy == 1 {
+                RTP_PRIO_FIFO
+            } else {
+                RTP_PRIO_REALTIME
+            },
+            prio: RTP_PRIO_MAX - u16::try_from(prio).unwrap_or(0),
+        },
+        2 if (0..=i32::from(RTP_PRIO_NORMAL_MAX)).contains(&prio) => Rtprio {
+            type_: RTP_PRIO_NORMAL,
+            prio: RTP_PRIO_NORMAL_MAX - u16::try_from(prio).unwrap_or(0),
+        },
+        _ => return Err(Errno::EINVAL),
+    };
+    t.set_rtprio(r);
+    Ok(())
+}
+
+/// `sched_setscheduler(pid, policy, param)`: only the superuser picks a
+/// policy (`PRIV_SCHED_SETPOLICY`).
+pub(super) fn sched_setscheduler(pid: u64, policy: u64, param: u64) -> SysResult {
+    let prio = UserPtr::<i32>::new(param)
+        .read()
+        .map_err(|_| Errno::EFAULT)?;
+    let t = sched_target(pid)?;
+    if !process()?.is_root() {
+        return Err(Errno::EPERM);
+    }
+    set_policy(&t, int(policy), prio)?;
+    Ok(0)
+}
+
+/// `sched_setparam(pid, param)`: the priority, in the current policy.
+pub(super) fn sched_setparam(pid: u64, param: u64) -> SysResult {
+    let prio = UserPtr::<i32>::new(param)
+        .read()
+        .map_err(|_| Errno::EFAULT)?;
+    let t = sched_target(pid)?;
+    set_policy(&t, policy_of(t.rtprio()), prio)?;
+    Ok(0)
 }
 
 /// `thr_self(id)`.
@@ -248,10 +324,14 @@ pub(super) fn thr_create(frame: &TrapFrame, ctx: u64, id: u64, _flags: u64) -> S
 /// `thr_exit(state)`: stores 1 at `state` and wakes its waiters (libthr's
 /// join), then the thread leaves; the process's last thread returns
 /// instead, and libthr exits.
-pub(super) fn thr_exit(state: u64) -> SysResult {
+pub(super) fn thr_exit(s: &Sleepable, state: u64) -> SysResult {
+    UserThread::with_current(|t| crate::umtx::thread_exit(s, t));
+    // Tell user code it may free the stack.
     if state != 0 {
         let _ = UserPtr::<i64>::new(state).write(&1);
-        wake(state);
+        let _ = UserThread::with_current(|t| {
+            crate::umtx::UMTX.wake(&crate::umtx::Ctx { s, t }, state, usize::MAX, false)
+        });
     }
     let left = UserThread::with_current(|t| t.process().remove_thread(t, true));
     if left != Some(true) {
@@ -387,129 +467,3 @@ pub(super) fn rtprio_thread(function: u64, lwpid: u64, rtp: u64) -> SysResult {
 /// The highest time-sharing priority `rtprio` takes: 15.1's
 /// `PRI_MAX_TIMESHARE - PRI_MIN_TIMESHARE`.
 const RTP_PRIO_NORMAL_MAX: u16 = 103;
-
-struct Bucket {
-    generation: AtomicU64,
-    waiters: WaitQueue,
-}
-
-static BUCKETS: [Bucket; 64] = [const {
-    Bucket {
-        generation: AtomicU64::new(0),
-        waiters: WaitQueue::new(),
-    }
-}; 64];
-
-fn bucket(addr: u64) -> &'static Bucket {
-    &BUCKETS[((addr >> 2) % 64) as usize]
-}
-
-/// Wakes every waiter on `addr`.
-fn wake(addr: u64) {
-    let b = bucket(addr);
-    b.generation.fetch_add(1, Ordering::AcqRel);
-    b.waiters.wake_all();
-}
-
-/// How long a wait may last, in nanoseconds (`None`: no limit), from
-/// `_umtx_op`'s `uaddr` (the size of what `uaddr2` points at) and `uaddr2`:
-/// a `struct timespec` duration, or a `struct _umtx_time`.
-fn wait_limit(size: u64, at: u64) -> Result<Option<u64>, Errno> {
-    if at == 0 {
-        return Ok(None);
-    }
-    let t = if size <= size_of::<Timespec>() as u64 {
-        UmtxTime {
-            timeout: UserPtr::<Timespec>::new(at)
-                .read()
-                .map_err(|_| Errno::EFAULT)?,
-            flags: 0,
-            clockid: clock::REALTIME,
-        }
-    } else {
-        UserPtr::<UmtxTime>::new(at)
-            .read()
-            .map_err(|_| Errno::EFAULT)?
-    };
-    let Timespec { tv_sec, tv_nsec } = t.timeout;
-    let (Ok(sec), Ok(nsec)) = (u64::try_from(tv_sec), u64::try_from(tv_nsec)) else {
-        return Err(Errno::EINVAL);
-    };
-    if nsec >= 1_000_000_000 {
-        return Err(Errno::EINVAL);
-    }
-    let ns = sec.saturating_mul(1_000_000_000).saturating_add(nsec);
-    let now = super::time::read(u64::from(t.clockid))?;
-    Ok(Some(if t.flags & UMTX_ABSTIME != 0 {
-        ns.saturating_sub(now)
-    } else {
-        ns
-    }))
-}
-
-/// `_umtx_op(obj, op, val, uaddr, uaddr2)`: waits and wakes.
-pub(super) fn umtx_op(
-    s: &Sleepable,
-    obj: u64,
-    op: u64,
-    val: u64,
-    uaddr: u64,
-    uaddr2: u64,
-) -> SysResult {
-    match u32::try_from(op).map_err(|_| Errno::EINVAL)? {
-        UMTX_OP_WAKE | UMTX_OP_WAKE_PRIVATE => {
-            wake(obj);
-            Ok(0)
-        }
-        UMTX_OP_NWAKE_PRIVATE => {
-            // `obj` is an array of `val` addresses, read in FreeBSD's
-            // batches; a fault ends it there.
-            const BATCH: usize = 128;
-            let mut left = usize::try_from(int(val)).unwrap_or(0);
-            let mut at = obj;
-            while left > 0 {
-                let n = left.min(BATCH);
-                let mut addrs = [0u64; BATCH];
-                for (i, a) in addrs[..n].iter_mut().enumerate() {
-                    *a = UserPtr::<u64>::new(at.wrapping_add(8 * i as u64))
-                        .read()
-                        .map_err(|_| Errno::EFAULT)?;
-                }
-                for &a in &addrs[..n] {
-                    wake(a);
-                }
-                left -= n;
-                at = at.wrapping_add(8 * n as u64);
-            }
-            Ok(0)
-        }
-        op @ (UMTX_OP_WAIT | UMTX_OP_WAIT_UINT | UMTX_OP_WAIT_UINT_PRIVATE) => {
-            let limit = wait_limit(uaddr, uaddr2)?;
-            let b = bucket(obj);
-            let generation = b.generation.load(Ordering::Acquire);
-            let current = if op == UMTX_OP_WAIT {
-                UserPtr::<u64>::new(obj).read()
-            } else {
-                UserPtr::<u32>::new(obj).read().map(u64::from)
-            }
-            .map_err(|_| Errno::EFAULT)?;
-            let want = if op == UMTX_OP_WAIT {
-                val
-            } else {
-                val & 0xffff_ffff
-            };
-            if current != want {
-                return Ok(0);
-            }
-            let woken = || b.generation.load(Ordering::Acquire) != generation;
-            // A signal ends the wait with EINTR, never a restart (as
-            // FreeBSD's `do_wait`); libthr retries.
-            match crate::signal::sleep(s, &b.waiters, woken, limit) {
-                Ok(crate::signal::Woke::Done) => Ok(0),
-                Ok(crate::signal::Woke::TimedOut) => Err(Errno::ETIMEDOUT),
-                Err(_) => Err(Errno::EINTR),
-            }
-        }
-        _ => Err(Errno::EINVAL),
-    }
-}

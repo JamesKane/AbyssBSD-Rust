@@ -344,6 +344,18 @@ pub(super) fn fcntl(s: &Sleepable, fd: u64, cmd: u64, arg: u64) -> SysResult {
             }
         }
         F_GETLK | F_SETLK | F_SETLKW => record_lock(s, fd, cmd, arg),
+        // Only shared memory has seals.
+        F_ADD_SEALS | F_GET_SEALS => {
+            let f = current_file(s, u64::from(fd.cast_unsigned()))?;
+            let crate::fs::file::FileKind::Shm(m) = f.kind() else {
+                return Err(Errno::EINVAL);
+            };
+            if cmd == F_GET_SEALS {
+                return Ok(u64::from(m.seals(s)));
+            }
+            m.add_seals(s, int(arg).cast_unsigned())?;
+            Ok(0)
+        }
         c if c & ((1 << F_DUP3FD_SHIFT) - 1) == F_DUP3FD => {
             let flags = c >> F_DUP3FD_SHIFT;
             if flags & !(FD_CLOEXEC | FD_CLOFORK) != 0 {
@@ -624,12 +636,14 @@ pub(super) fn getdirentries(
 ) -> SysResult {
     check_len(nbytes)?;
     let f = current_file(s, fd)?;
+    // Not a file system object (`getvnode`), then not readable, then not
+    // a directory (`kern_getdirentries`).
+    let v = f.vnode().ok_or(Errno::EINVAL)?;
     if f.flags() & FREAD == 0 {
         return Err(Errno::EBADF);
     }
-    let v = f.vnode().ok_or(Errno::EINVAL)?;
     if !v.is_dir() {
-        return Err(Errno::EINVAL);
+        return Err(Errno::ENOTDIR);
     }
     let room = usize::try_from(nbytes).unwrap_or(usize::MAX).min(64 * 1024);
     let mut out: Vec<u8> = Vec::new();

@@ -59,6 +59,7 @@ mod stress;
 mod symbols;
 mod syscall;
 mod sysctl;
+mod sysv;
 #[cfg(feature = "ktest")]
 mod tests;
 mod threads;
@@ -66,6 +67,7 @@ mod time;
 mod topology;
 mod tty;
 mod uaccess;
+mod umtx;
 mod uthread;
 mod vtcons;
 

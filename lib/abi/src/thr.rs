@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! Threads and their scheduling: `thr_new`'s parameters (`sys/thr.h`),
-//! `_umtx_op` operations (`sys/umtx.h`), `rtprio` (`sys/rtprio.h`), cpu sets (`sys/cpuset.h`), `sigfastblock`
+//! `rtprio` (`sys/rtprio.h`), cpu sets (`sys/cpuset.h`), `sigfastblock`
 //! (`sys/signalvar.h`), and `exterrctl` (`sys/exterrvar.h`).
 
 use crate::layout::{Arches, ConstValue};
@@ -28,28 +28,6 @@ pub struct ThrParam {
 pub const THR_SUSPENDED: i32 = 0x1;
 pub const THR_SYSTEM_SCOPE: i32 = 0x2;
 pub const THR_C_RUNTIME: i32 = 0x4;
-
-pub const UMTX_OP_WAIT: u32 = 2;
-pub const UMTX_OP_WAKE: u32 = 3;
-pub const UMTX_OP_WAIT_UINT: u32 = 11;
-pub const UMTX_OP_WAIT_UINT_PRIVATE: u32 = 15;
-pub const UMTX_OP_WAKE_PRIVATE: u32 = 16;
-/// Wakes the waiters on each of an array of addresses (libthr's
-/// deferred condition-variable wakeups).
-pub const UMTX_OP_NWAKE_PRIVATE: u32 = 21;
-/// `_umtx_time._flags`: the timeout is a time on the clock, not a
-/// duration.
-pub const UMTX_ABSTIME: u32 = 1;
-
-/// `struct _umtx_time`: a wait's timeout, when the size `_umtx_op` is
-/// given exceeds a `struct timespec`'s.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct UmtxTime {
-    pub timeout: crate::time::Timespec,
-    pub flags: u32,
-    pub clockid: u32,
-}
 
 pub const RTP_LOOKUP: u32 = 0;
 pub const RTP_SET: u32 = 1;
@@ -99,17 +77,6 @@ pub const EXTERRCTL_ENABLE: u32 = 1;
 pub const EXTERRCTL_DISABLE: u32 = 2;
 
 pub(crate) const CONSTANTS: &[ConstValue] = &[
-    c("UMTX_OP_WAIT", UMTX_OP_WAIT, "sys/umtx.h"),
-    c("UMTX_OP_WAKE", UMTX_OP_WAKE, "sys/umtx.h"),
-    c("UMTX_OP_WAIT_UINT", UMTX_OP_WAIT_UINT, "sys/umtx.h"),
-    c(
-        "UMTX_OP_WAIT_UINT_PRIVATE",
-        UMTX_OP_WAIT_UINT_PRIVATE,
-        "sys/umtx.h",
-    ),
-    c("UMTX_OP_WAKE_PRIVATE", UMTX_OP_WAKE_PRIVATE, "sys/umtx.h"),
-    c("UMTX_OP_NWAKE_PRIVATE", UMTX_OP_NWAKE_PRIVATE, "sys/umtx.h"),
-    c("UMTX_ABSTIME", UMTX_ABSTIME, "sys/umtx.h"),
     c("RTP_LOOKUP", RTP_LOOKUP, "sys/rtprio.h"),
     c("RTP_SET", RTP_SET, "sys/rtprio.h"),
     c(
