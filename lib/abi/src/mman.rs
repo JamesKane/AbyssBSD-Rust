@@ -8,6 +8,9 @@ use crate::layout::{Arches, ConstValue};
 pub const MAP_SHARED: u32 = 0x0001;
 pub const MAP_PRIVATE: u32 = 0x0002;
 pub const MAP_FIXED: u32 = 0x0010;
+/// Once `MAP_RENAME` and `MAP_NORESERVE`, never implemented; ignored.
+pub const MAP_RESERVED0020: u32 = 0x0020;
+pub const MAP_RESERVED0040: u32 = 0x0040;
 pub const MAP_HASSEMAPHORE: u32 = 0x0200;
 pub const MAP_STACK: u32 = 0x0400;
 pub const MAP_NOSYNC: u32 = 0x0800;
@@ -17,6 +20,9 @@ pub const MAP_EXCL: u32 = 0x4000;
 pub const MAP_NOCORE: u32 = 0x0002_0000;
 pub const MAP_PREFAULT_READ: u32 = 0x0004_0000;
 pub const MAP_32BIT: u32 = 0x0008_0000;
+/// Where a `MAP_32BIT` mapping must end by (the kernel's
+/// `MAP_32BIT_MAX_ADDR`, not in user headers).
+pub const MAP_32BIT_MAX_ADDR: u64 = 1 << 31;
 /// `MAP_ALIGNED(n)` is `n << MAP_ALIGNMENT_SHIFT`: align to `2^n` bytes.
 pub const MAP_ALIGNMENT_SHIFT: u32 = 24;
 /// (C's is a negative `int`, so it is not compared.)
@@ -53,6 +59,8 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("MAP_SHARED", MAP_SHARED),
     c("MAP_PRIVATE", MAP_PRIVATE),
     c("MAP_FIXED", MAP_FIXED),
+    c("MAP_RESERVED0020", MAP_RESERVED0020),
+    c("MAP_RESERVED0040", MAP_RESERVED0040),
     c("MAP_HASSEMAPHORE", MAP_HASSEMAPHORE),
     c("MAP_STACK", MAP_STACK),
     c("MAP_NOSYNC", MAP_NOSYNC),

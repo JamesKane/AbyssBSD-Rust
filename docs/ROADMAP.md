@@ -1467,6 +1467,12 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
     at once by `setrlimit`) and never into the guard page; `MAP_STACK` makes the same for thread
     stacks, `MAP_GUARD` a guard `mprotect` passes over (host-tested in `sys/vm`,
     `tests/user/stack.c`).
+  - The rest done 2026-10-26, as `kern_mmap` and `vm_map_protect` have them: `PROT_MAX` on
+    `mprotect` too (it only lowers a maximum), `MAP_FIXED | MAP_EXCL`, `MAP_ALIGNED(n)` and
+    `MAP_ALIGNED_SUPER` (a fixed address need only be a page's), `MAP_32BIT`, the two reserved
+    flags ignored, and rtld's loading of an object (a `PROT_NONE` reservation, segments mapped
+    fixed into it, RELRO, bss) in `tests/user/mapflags.c`, which passes on FreeBSD 15.1 too.
+    `ETXTBSY` came with the interpreter held as text.
 - `utrace` (to ktrace later; accepted and dropped until P6.8), the `kern.elf64.*` and `kern.proc.auxv`
   nodes.
   - Done 2026-10-26: `utrace` succeeds and drops the record, as for a process nobody traces;

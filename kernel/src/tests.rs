@@ -2572,7 +2572,7 @@ mod user_memory {
             assert_eq!(copy_in_str_vec(at, 1024).as_deref(), Ok(&long[..]));
             assert_eq!(copy_in_str_vec(at, 300), Err(StrError::TooLong));
             // Read-only: writes fault, reads still work.
-            space.protect(&s, VirtAddr::new(a)..VirtAddr::new(a + 4 * PAGE), Prot::READ).unwrap();
+            space.protect(&s, VirtAddr::new(a)..VirtAddr::new(a + 4 * PAGE), Prot::READ, None).unwrap();
             assert_eq!(copy_out(a + 3 * PAGE, b"x"), Err(Fault));
             assert_eq!(read_u64(a + 3 * PAGE), Ok(0x1234_5678));
             // Unmapped: gone from the tables too.
@@ -2672,6 +2672,7 @@ mod user_memory {
                 &s,
                 VirtAddr::new(text)..VirtAddr::new(text + PAGE),
                 Prot::READ.union(Prot::EXEC),
+                None,
             )
             .unwrap();
         space
@@ -2710,7 +2711,7 @@ mod user_memory {
             assert!(copy_out(tk, &[0]).is_err(), "user writes are refused");
             leave();
             let range = VirtAddr::new(page)..VirtAddr::new(page + PAGE);
-            assert!(space.protect(&s, range, Prot::RW).is_err(), "write is beyond max_prot");
+            assert!(space.protect(&s, range, Prot::RW, None).is_err(), "write is beyond max_prot");
             space.clear(&s);
         }
     }

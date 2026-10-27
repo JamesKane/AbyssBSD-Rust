@@ -435,13 +435,27 @@ impl VmMap {
     /// `MAP_FIXED` places a mapping.
     #[must_use]
     pub fn find_space(&self, len: u64, align: u64, hint: VirtAddr) -> Option<VirtAddr> {
+        self.find_space_below(len, align, hint, self.bounds.end)
+    }
+
+    /// [`find_space`](Self::find_space) for a range that ends at or below
+    /// `limit` (`MAP_32BIT`).
+    #[must_use]
+    pub fn find_space_below(
+        &self,
+        len: u64,
+        align: u64,
+        hint: VirtAddr,
+        limit: VirtAddr,
+    ) -> Option<VirtAddr> {
         let align = align.max(PAGE_SIZE);
         if len == 0 || !len.is_multiple_of(PAGE_SIZE) || !align.is_power_of_two() {
             return None;
         }
+        let limit = limit.min(self.bounds.end);
         let hint = hint.max(self.bounds.start);
-        self.first_fit(len, align, hint, self.bounds.end)
-            .or_else(|| self.first_fit(len, align, self.bounds.start, self.bounds.end))
+        self.first_fit(len, align, hint, limit)
+            .or_else(|| self.first_fit(len, align, self.bounds.start, limit))
     }
 
     fn first_fit(&self, len: u64, align: u64, from: VirtAddr, limit: VirtAddr) -> Option<VirtAddr> {
@@ -455,7 +469,11 @@ impl VmMap {
         }
         for e in self.entries.starting_at(from.get()) {
             let start = cursor.align_up(align)?;
-            if start.get().checked_add(len)? <= e.start.get() {
+            let end = start.get().checked_add(len)?;
+            if end > limit.get() {
+                return None;
+            }
+            if end <= e.start.get() {
                 return Some(start);
             }
             cursor = cursor.max(e.end);
@@ -544,15 +562,26 @@ impl VmMap {
     }
 
     /// Sets the rights of `range`, which must be mapped throughout and
-    /// allow them (`mprotect`). Guards are passed over; a stack gap keeps
-    /// the rights for the stack it becomes. The caller then removes from
-    /// the page tables whatever rights were dropped; added rights arrive
-    /// by fault.
-    pub fn protect(&mut self, range: Range<VirtAddr>, prot: Prot) -> Result<(), MapError> {
+    /// allow them (`mprotect`), and with `max` its most rights too, which
+    /// `prot` must be within and which can only shrink (`PROT_MAX`;
+    /// FreeBSD's `vm_map_protect`). Guards are passed over; a stack gap
+    /// keeps the rights for the stack it becomes. The caller then removes
+    /// from the page tables whatever rights were dropped; added rights
+    /// arrive by fault.
+    pub fn protect(
+        &mut self,
+        range: Range<VirtAddr>,
+        prot: Prot,
+        max: Option<Prot>,
+    ) -> Result<(), MapError> {
         self.check(&range)?;
+        if max.is_some_and(|m| !m.contains(prot)) {
+            return Err(MapError::Protection);
+        }
         if !self.covered(&range) {
             return Err(MapError::NotMapped);
         }
+        let wanted = prot.union(max.unwrap_or(Prot::NONE));
         if self
             .entries
             .at_or_before(range.start.get())
@@ -562,8 +591,8 @@ impl VmMap {
             .filter(|e| e.end > range.start)
             .any(|e| match e.role {
                 Role::Guard => false,
-                Role::StackGap { max_prot, .. } => !max_prot.contains(prot),
-                Role::Normal | Role::Stack => !e.max_prot.contains(prot),
+                Role::StackGap { max_prot, .. } => !max_prot.contains(wanted),
+                Role::Normal | Role::Stack => !e.max_prot.contains(wanted),
             })
         {
             return Err(MapError::Protection);
@@ -573,8 +602,22 @@ impl VmMap {
         for e in self.range_mut(&range) {
             match &mut e.role {
                 Role::Guard => {}
-                Role::StackGap { prot: gap, .. } => *gap = prot,
-                Role::Normal | Role::Stack => e.prot = prot,
+                Role::StackGap {
+                    prot: gap,
+                    max_prot,
+                    ..
+                } => {
+                    *gap = prot;
+                    if let Some(m) = max {
+                        *max_prot = m;
+                    }
+                }
+                Role::Normal | Role::Stack => {
+                    e.prot = prot;
+                    if let Some(m) = max {
+                        e.max_prot = m;
+                    }
+                }
             }
         }
         Ok(())

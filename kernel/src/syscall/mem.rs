@@ -53,16 +53,19 @@ pub(super) fn msync(s: &Sleepable, addr: u64, len: u64, flags: u64) -> SysResult
     Ok(0)
 }
 
-/// `PROT_*` bits (and a `PROT_MAX`) as rights; anything else is invalid.
-fn prots(bits: u64) -> Result<(Prot, Prot), Errno> {
+/// `PROT_*` bits as rights, and the `PROT_MAX` if there is one, which
+/// must allow them; anything else is invalid.
+fn prots(bits: u64) -> Result<(Prot, Option<Prot>), Errno> {
     let bits = u32::try_from(bits).map_err(|_| Errno::EINVAL)?;
     let prot = Prot::from_bits(bits & 0xffff).ok_or(Errno::EINVAL)?;
     let max = Prot::from_bits(bits >> PROT_MAX_SHIFT).ok_or(Errno::EINVAL)?;
-    let max = if max == Prot::NONE { Prot::ALL } else { max };
+    if max == Prot::NONE {
+        return Ok((prot, None));
+    }
     if !max.contains(prot) {
         return Err(Errno::ENOTSUP);
     }
-    Ok((prot, max))
+    Ok((prot, Some(max)))
 }
 
 /// `[addr, addr + len)` widened to pages, if it is a user range.
@@ -171,8 +174,11 @@ pub(super) fn mmap(
     fd: u64,
     pos: u64,
 ) -> SysResult {
-    let flags = u32::try_from(flags).map_err(|_| Errno::EINVAL)?;
+    // The two reserved flags are dropped, as FreeBSD does.
+    let flags =
+        u32::try_from(flags).map_err(|_| Errno::EINVAL)? & !(MAP_RESERVED0020 | MAP_RESERVED0040);
     let (prot, max_prot) = prots(prot)?;
+    let max_prot = max_prot.unwrap_or(Prot::ALL);
     let known = MAP_SHARED
         | MAP_PRIVATE
         | MAP_FIXED
@@ -184,6 +190,7 @@ pub(super) fn mmap(
         | MAP_EXCL
         | MAP_NOCORE
         | MAP_PREFAULT_READ
+        | MAP_32BIT
         | MAP_ALIGNMENT_MASK;
     if flags & !known != 0 || len == 0 {
         return Err(Errno::EINVAL);
@@ -203,7 +210,7 @@ pub(super) fn mmap(
     let guard = flags & MAP_GUARD != 0;
     if guard
         && (prot != Prot::NONE
-            || flags & !(MAP_GUARD | MAP_FIXED | MAP_EXCL | MAP_ALIGNMENT_MASK) != 0
+            || flags & !(MAP_GUARD | MAP_FIXED | MAP_EXCL | MAP_32BIT | MAP_ALIGNMENT_MASK) != 0
             || int(fd) != -1)
     {
         return Err(Errno::EINVAL);
@@ -243,7 +250,9 @@ pub(super) fn mmap(
         _ => return Err(Errno::EINVAL),
     };
     let fixed = flags & MAP_FIXED != 0;
-    if fixed && !addr.is_multiple_of(align.max(PAGE_SIZE)) {
+    // A fixed address need only be a page's (FreeBSD's `kern_mmap`; the
+    // alignment is for choosing one).
+    if fixed && !addr.is_multiple_of(PAGE_SIZE) {
         return Err(Errno::EINVAL);
     }
     let (start, end) = pages(
@@ -255,15 +264,24 @@ pub(super) fn mmap(
         len,
     )?;
     let len = end.get() - start.get();
+    // In the low 2 GiB: a fixed range must be there, and a hint that is
+    // not is replaced by the bottom.
+    let low = flags & MAP_32BIT != 0;
+    if low && fixed && end.get() > MAP_32BIT_MAX_ADDR {
+        return Err(Errno::EINVAL);
+    }
     let a = Anon {
         fixed: fixed.then_some(start),
         exclusive: flags & MAP_EXCL != 0,
         // Like FreeBSD, an address without MAP_FIXED is only a hint.
-        hint: if fixed || addr == 0 {
+        hint: if low && (addr == 0 || end.get() > MAP_32BIT_MAX_ADDR) {
+            VirtAddr::new(USER_START)
+        } else if fixed || addr == 0 {
             VirtAddr::new(Process::with_current(Process::mmap_base).ok_or(Errno::EINVAL)?)
         } else {
             start
         },
+        below: low.then_some(VirtAddr::new(MAP_32BIT_MAX_ADDR)),
         len,
         align,
         prot,
@@ -306,12 +324,12 @@ pub(super) fn munmap(s: &Sleepable, addr: u64, len: u64) -> SysResult {
 
 /// `mprotect(addr, len, prot)`.
 pub(super) fn mprotect(s: &Sleepable, addr: u64, len: u64, prot: u64) -> SysResult {
-    let (prot, _) = prots(prot)?;
+    let (prot, max) = prots(prot)?;
     if len == 0 {
         return Ok(0);
     }
     let (start, end) = pages(addr, len)?;
-    in_space(|space| space.protect(s, start..end, prot))?;
+    in_space(|space| space.protect(s, start..end, prot, max))?;
     Ok(0)
 }
 

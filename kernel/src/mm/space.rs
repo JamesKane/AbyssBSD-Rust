@@ -203,6 +203,8 @@ pub(crate) struct Anon {
     pub(crate) exclusive: bool,
     /// Otherwise, the lowest free range at or above this.
     pub(crate) hint: VirtAddr,
+    /// And ending at or below this (`MAP_32BIT`).
+    pub(crate) below: Option<VirtAddr>,
     pub(crate) len: u64,
     /// A power of two of at least a page.
     pub(crate) align: u64,
@@ -230,6 +232,7 @@ impl Default for Anon {
             fixed: None,
             exclusive: false,
             hint: VirtAddr::new(USER_START),
+            below: None,
             len: 0,
             align: PAGE_SIZE,
             prot: Prot::RW,
@@ -461,15 +464,19 @@ impl AddressSpace {
         let start = match a.fixed {
             Some(at) => {
                 let end = at.checked_add(a.len).ok_or(MapError::OutOfRange)?;
+                // Taken: no space there (FreeBSD's `KERN_NO_SPACE`, so
+                // `mmap` fails with `ENOMEM`).
                 if a.exclusive && !map.is_free(&(at..end)) {
-                    return Err(MapError::Overlap.into());
+                    return Err(MapError::NoSpace.into());
                 }
                 self.unmap_locked(&mut map, at..end)?;
                 at
             }
-            None => map
-                .find_space(a.len, a.align.max(PAGE_SIZE), a.hint)
-                .ok_or(MapError::NoSpace)?,
+            None => match a.below {
+                Some(limit) => map.find_space_below(a.len, a.align, a.hint, limit),
+                None => map.find_space(a.len, a.align, a.hint),
+            }
+            .ok_or(MapError::NoSpace)?,
         };
         let end = start.checked_add(a.len).ok_or(MapError::OutOfRange)?;
         insert(&mut map, start..end)?;
@@ -592,9 +599,10 @@ impl AddressSpace {
         s: &Sleepable,
         range: core::ops::Range<VirtAddr>,
         prot: Prot,
+        max: Option<Prot>,
     ) -> Result<(), SpaceError> {
         let mut map = self.map.lock(s);
-        map.protect(range.clone(), prot)?;
+        map.protect(range.clone(), prot, max)?;
         let len = range.end.get() - range.start.get();
         let allowed = attrs(prot, MemAttr::WriteBack);
         let mut changed = false;

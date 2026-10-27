@@ -184,7 +184,7 @@ impl Proc {
     }
 
     fn mprotect(&mut self, first: u64, n: u64, prot: Prot) -> Result<(), MapError> {
-        self.map.protect(range(first, n), prot)?;
+        self.map.protect(range(first, n), prot, None)?;
         for (_, (_, p)) in self.ptes.range_mut(first..first + n) {
             *p = Prot(p.0 & prot.0);
         }
@@ -397,6 +397,37 @@ fn protect_checks_coverage_and_maximum() {
 }
 
 #[test]
+fn protect_with_a_maximum_only_lowers_it() {
+    let pages = Pages::new();
+    let mut p = Proc::new(pages);
+    p.mmap(0, 4);
+    let max = |p: &Proc, page| p.map.entry(va(page)).unwrap().max_prot;
+    // PROT_MAX(READ) on the middle: the rest keeps its maximum.
+    p.map
+        .protect(range(1, 2), Prot::READ, Some(Prot::READ))
+        .unwrap();
+    assert_eq!(
+        (max(&p, 0), max(&p, 1), max(&p, 3)),
+        (Prot::ALL, Prot::READ, Prot::ALL)
+    );
+    assert_eq!(p.mprotect(1, 1, Prot::RW), Err(MapError::Protection));
+    // A maximum is never raised again, nor may it leave out the rights.
+    assert_eq!(
+        p.map.protect(range(1, 1), Prot::READ, Some(Prot::RW)),
+        Err(MapError::Protection)
+    );
+    assert_eq!(
+        p.map.protect(range(0, 1), Prot::RW, Some(Prot::READ)),
+        Err(MapError::Protection)
+    );
+    p.map
+        .protect(range(1, 1), Prot::NONE, Some(Prot::NONE))
+        .unwrap();
+    assert_eq!(max(&p, 1), Prot::NONE);
+    assert_eq!(max(&p, 2), Prot::READ);
+}
+
+#[test]
 fn insert_rejects_bad_ranges() {
     let pages = Pages::new();
     let mut p = Proc::new(pages);
@@ -445,6 +476,11 @@ fn find_space_is_first_fit_above_the_hint() {
         Some(va(2))
     );
     assert_eq!(p.map.find_space(1 << 31, P, va(0)), None);
+    // Below a limit: only what ends at or under it, wrapping to the
+    // bottom.
+    assert_eq!(p.map.find_space_below(P, P, va(3), va(5)), Some(va(4)));
+    assert_eq!(p.map.find_space_below(2 * P, P, va(0), va(5)), None);
+    assert_eq!(p.map.find_space_below(P, P, va(10), va(5)), Some(va(2)));
     assert_eq!(p.map.find_space(0, P, va(0)), None);
 }
 
