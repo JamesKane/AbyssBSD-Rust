@@ -290,6 +290,7 @@ buffers, pending commits, shm bytes) bound what one client can make the composit
 | Timing | `wp_presentation`, `wp_fifo_v1`, `wp_commit_timing_v1`, `wp_tearing_control_v1` |
 | Scale and color | `wp_viewporter`, `wp_fractional_scale_v1`, `wp_color_management_v1`, `wp_color_representation_v1` |
 | Input | `wl_seat`, `zwp_relative_pointer_v1`, `zwp_pointer_constraints_v1`, `wp_pointer_gestures`, `zwp_text_input_v3`, `zwp_input_method_v2`, `wp_cursor_shape_v1`, `zwp_tablet_v2`, `zwp_keyboard_shortcuts_inhibit_v1` |
+| Clipboard and drag and drop | `wl_data_device_manager` v3, `zwp_primary_selection_device_manager_v1` ([CLIPBOARD.md](CLIPBOARD.md)) |
 | Capture | `ext_image_capture_source_v1`, `ext_image_copy_capture_v1` (compatibility front door, §5.6) |
 | Grant-gated (§6.6) | `ext_session_lock_v1`, `zwlr_layer_shell_v1` (compatibility), `ext_foreign_toplevel_list_v1`, `ext_data_control_v1`, `wp_security_context_v1` |
 | Idle | `ext_idle_notify_v1`, `zwp_idle_inhibit_v1` |
@@ -870,7 +871,8 @@ through exactly one socket, `$XDG_RUNTIME_DIR/sable/control` (directory mode 070
 | `wp_security_context_v1` | `sabled`'s jail launcher attaches app and instance IDs | Baseline, possibly reduced by the jail profile |
 
 A baseline client reads the clipboard **only while it has keyboard focus**. Background access needs
-`data-control`, which clipboard-manager Facets are granted.
+`data-control`, which clipboard-manager Facets are granted. [CLIPBOARD.md](CLIPBOARD.md) has the
+full rules, including the ones for writing.
 
 ### 6.7 Application jails
 

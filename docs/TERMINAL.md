@@ -418,8 +418,8 @@ applications are tested against.
   it is sent. `term.paste.confirm` turns that off.
 - **IME**: `zwp_text_input_v3`, with the preedit drawn at the cursor through the chrome layer and
   the cursor rectangle reported back so candidate windows sit next to it.
-- **Selection** is the clipboard (`wl_data_device`) on copy. Middle-click paste needs the primary
-  selection protocol, which DESKTOP.md §4.2.1 does not list yet (§12 question 2).
+- **Selection** is the clipboard (`wl_data_device`) on copy. Selecting text sets the primary
+  selection, and middle click pastes it (CLIPBOARD.md §2.2, §4.4).
 
 ## 7. Processes and the sandbox
 
@@ -634,7 +634,7 @@ Workloads are written in-house or taken from vtebench (Apache-2.0) where it has 
    they have run for a while. foot offers both, and its users mostly run the server.
 2. **Primary selection.** `zwp_primary_selection_device_manager_v1` is not in DESKTOP.md §4.2.1.
    Developers expect middle-click paste. Proposed: add it to the compositor's baseline, focus-gated
-   like the clipboard.
+   like the clipboard. **Settled** by CLIPBOARD.md §2.2, which does so.
 3. **A `sable` terminfo entry.** Exact capabilities locally (undercurl, synchronized output, the
    `Tc`/`RGB` flags) at the price of `TERM` failures on hosts without the entry. Proposed: stay on
    `xterm-256color` and answer XTGETTCAP, as several modern terminals do.
