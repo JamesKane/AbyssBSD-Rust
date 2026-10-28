@@ -345,11 +345,12 @@ interrupt-driven).
 
 ### 9.2 Pseudo-terminals
 
-`posix_openpt` returns a master file and creates `/dev/pts/N`; `/dev/ptmx` opens one too, for
-programs that still use it. libc's `grantpt`, `unlockpt`, and `ptsname` are ioctls on the master
-(`TIOCPTMASTER`, `FIODGNAME`), which set the slave's owner and the `tty` group. The master reads
-what the slave's discipline output and writes its input; packet mode (`TIOCPKT`), window size and
-`SIGWINCH`, and `EIO`/`POLLHUP` on the master when the last slave closes, follow FreeBSD.
+`posix_openpt` returns a master file and creates `/dev/pts/N`, owned by the caller's real user,
+group `tty`, mode 0620. There is no `/dev/ptmx`, as on FreeBSD 15.1's GENERIC, where it comes
+with the `pty` module. libc's `grantpt`, `unlockpt`, and `ptsname` are ioctls on the master
+(`TIOCPTMASTER`, `FIODGNAME`). The master reads what the slave's discipline output and writes its
+input; packet mode (`TIOCPKT`), window size and `SIGWINCH`, and end of file and `POLLHUP` on the
+master when the last slave closes, follow FreeBSD.
 
 ### 9.3 Revocation and the console
 

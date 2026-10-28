@@ -2756,6 +2756,53 @@ mod user_memory {
     }
 
     ktest! {
+        /// A UART other than the console's is a terminal (ROADMAP P6.6):
+        /// with the port looping what it sends back, what is written to
+        /// `cuau1` (raw, at 115200) is read back from it, by interrupt
+        /// both ways. x86 QEMU's COM2; elsewhere there is none.
+        fn a_second_uart_is_a_terminal() {
+            use abi::termios::{CLOCAL, CREAD, CS8, Termios, VMIN, VTIME};
+            let s = cx();
+            // x86's QEMU and bhyve machines have a COM2; arm64's none.
+            let port = crate::tty::serial::port(1);
+            #[cfg(target_arch = "x86_64")]
+            let port = Some(port.expect("no uart1 terminal"));
+            let Some(port) = port else {
+                return;
+            };
+            let v = crate::fs::devfs::vnode_of(&s, b"cuau1").expect("cuau1");
+            let dev = v.device(&s).unwrap().ops.instance(&s).unwrap().unwrap();
+            let mut t = Termios::defaults();
+            t.c_iflag = 0;
+            t.c_oflag = 0;
+            t.c_lflag = 0;
+            t.c_cflag = CREAD | CS8 | CLOCAL;
+            t.c_ispeed = 115_200;
+            t.c_ospeed = 115_200;
+            t.c_cc[VMIN] = 1;
+            t.c_cc[VTIME] = 0;
+            let mut arg = [0u8; 44];
+            crate::tty::termios_to(&t, &mut arg);
+            dev.ioctl(&s, abi::ioctl::TIOCSETA, &mut arg).unwrap();
+            port.set_loopback(true);
+            // More than the transmit FIFO and the receive buffer hold.
+            let sent: alloc::vec::Vec<u8> = (0..600u32).map(|i| b'a' + (i % 26) as u8).collect();
+            let n = dev.write(&s, &mut vfs::WriteBuf::new(&sent), 0, false).unwrap();
+            assert_eq!(n, sent.len());
+            let mut got = alloc::vec![0u8; sent.len()];
+            let mut have = 0;
+            while have < got.len() {
+                let mut r = vfs::ReadBuf::new(&mut got[have..]);
+                let n = dev.read(&s, &mut r, 0, false).unwrap();
+                assert!(n > 0, "end of file after {have}");
+                have += n;
+            }
+            port.set_loopback(false);
+            assert_eq!(got, sent);
+        }
+    }
+
+    ktest! {
         /// Runs each program `tests/user/*.c` built into the memory disk;
         /// each checks something from user mode and exits 0 when it holds.
         fn user_test_programs_pass() {

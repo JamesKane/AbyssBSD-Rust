@@ -16,10 +16,20 @@
 //! driver drains the output queue with [`Discipline::take_output`], which
 //! gives nothing while output is stopped.
 //!
+//! Both queues are sized as FreeBSD's `tty_watermarks` sizes them: two
+//! seconds of data at the terminal's speed, in whole blocks, at most
+//! 64 KiB, with no input queue without `CREAD`. Space is counted as the
+//! block queues count it: what a read consumed of the first block stays
+//! taken until the block is done. A full input queue drops a byte (and
+//! rings, with `IMAXBEL`) unless lines are waiting to be read, when it
+//! refuses it ([`Input::Full`]) so a writer can wait for room.
+//!
 //! The discipline does no locking and no waiting; the kernel's terminal
 //! does both, and sends the signals.
 //!
-//! Behavior reference: sys/kern/tty_ttydisc.c, sys/kern/tty_inq.c.
+//! Behavior reference: sys/kern/tty_ttydisc.c, sys/kern/tty_inq.c,
+//! sys/kern/tty_outq.c, sys/kern/tty.c (`tty_watermarks`, the high
+//! watermarks).
 
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
@@ -32,10 +42,14 @@ use alloc::collections::VecDeque;
 use abi::signal::{SIGINFO, SIGINT, SIGQUIT, SIGTSTP};
 use abi::termios::*;
 
-/// The most bytes the input queue holds (typed, not yet read).
-pub const INPUT_MAX: usize = 4096;
-/// The most bytes the output queue holds before a writer waits.
-pub const OUTPUT_MAX: usize = 4096;
+/// The input queue's block (`TTYINQ_DATASIZE`).
+pub const INQ_BLOCK: usize = 128;
+/// The output queue's block (`TTYOUTQ_DATASIZE`: 256 bytes less a link).
+pub const OUTQ_BLOCK: usize = 248;
+/// The most either queue is sized for (`TTYBUF_MAX`).
+pub const BUF_MAX: usize = 65536;
+/// Chunks the discipline handles output in (`TTY_STACKBUF`).
+pub const STACKBUF: usize = 256;
 
 const TAB: u8 = b'\t';
 const NL: u8 = b'\n';
@@ -85,6 +99,20 @@ pub struct Discipline {
     /// program last wrote (FreeBSD's reprint position).
     reprint: usize,
     outq: VecDeque<u8>,
+    /// What reads took of each queue's first block (`ti_begin`,
+    /// `to_begin`): still taken until the block is done.
+    in_skip: usize,
+    out_skip: usize,
+    /// The queues' sizes, in whole blocks (0 while closed), and their low
+    /// watermarks (`t_inlow`, `t_outlow`).
+    in_size: usize,
+    out_size: usize,
+    in_low: usize,
+    out_low: usize,
+    /// Input was refused, or output filled (`TF_HIWAT_IN`,
+    /// `TF_HIWAT_OUT`).
+    hiwat_in: bool,
+    hiwat_out: bool,
     /// The output column, and where the program's own output left it.
     column: u32,
     writepos: u32,
@@ -105,25 +133,202 @@ impl Default for Discipline {
 pub enum Line {
     /// No complete line yet.
     NotYet,
-    /// This many bytes (0 for an end of file typed at the line's start).
+    /// This many bytes, the line's end among them (0 for an end of file
+    /// typed at the line's start).
     Read(usize),
+    /// This many bytes of a line that goes on past them.
+    Part(usize),
+}
+
+/// What became of a typed byte.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Input {
+    /// Taken (or dropped, as the discipline says).
+    Taken,
+    /// Taken, asking for this signal to the foreground process group.
+    Signal(u32),
+    /// Refused: the input queue is full and lines wait to be read
+    /// (`ttydisc_rint`'s -1). The byte may be offered again.
+    Full,
 }
 
 impl Discipline {
-    /// A terminal in its default state ([`Termios::defaults`]).
+    /// A terminal in its default state ([`Termios::defaults`]), open.
     #[must_use]
     pub fn new() -> Self {
-        Self {
+        let mut d = Self {
             t: Termios::defaults(),
             inq: VecDeque::new(),
             canon: 0,
             reprint: 0,
             outq: VecDeque::new(),
+            in_skip: 0,
+            out_skip: 0,
+            in_size: 0,
+            out_size: 0,
+            in_low: 0,
+            out_low: 0,
+            hiwat_in: false,
+            hiwat_out: false,
             column: 0,
             writepos: 0,
             literal: false,
             stopped: false,
+        };
+        d.set_watermarks();
+        d
+    }
+
+    /// Sizes the queues for two seconds of data at the terminal's speeds,
+    /// with low watermarks at 90% free (`tty_watermarks`), on opening and
+    /// when the speeds change. A queue holding more keeps it until read.
+    pub fn set_watermarks(&mut self) {
+        let size = |speed: u32, block: usize| {
+            let bytes = usize::try_from(speed / 5).unwrap_or(BUF_MAX).min(BUF_MAX);
+            bytes.div_ceil(block) * block
+        };
+        self.in_size = if self.t.c_cflag & CREAD != 0 {
+            size(self.t.c_ispeed, INQ_BLOCK)
+        } else {
+            0
+        };
+        self.in_low = self.in_size * 9 / 10;
+        self.out_size = size(self.t.c_ospeed, OUTQ_BLOCK);
+        self.out_low = self.out_size * 9 / 10;
+    }
+
+    /// The last close (`ttydisc_close`, then the queues freed): output
+    /// starts again, `FLUSHO` goes, and both queues are emptied and freed.
+    pub fn close(&mut self) {
+        self.stopped = false;
+        self.hiwat_in = false;
+        self.hiwat_out = false;
+        self.t.c_lflag &= !FLUSHO;
+        self.flush(true, true);
+        self.in_size = 0;
+        self.out_size = 0;
+        self.in_low = 0;
+        self.out_low = 0;
+    }
+
+    /// Room left in the input queue (`ttyinq_bytesleft`).
+    fn in_left(&self) -> usize {
+        self.in_size.saturating_sub(self.in_skip + self.inq.len())
+    }
+
+    /// Room left in the output queue (`ttyoutq_bytesleft`): what a
+    /// writer could queue now (`ttydisc_write_poll`).
+    #[must_use]
+    pub fn output_room(&self) -> usize {
+        self.out_size
+            .saturating_sub(self.out_skip + self.outq.len())
+    }
+
+    /// The input queue's size, as allocated.
+    #[must_use]
+    pub const fn input_size(&self) -> usize {
+        self.in_size
+    }
+
+    /// `n` bytes left a queue's front: they free their block once it is
+    /// all read, or once the queue is empty.
+    fn consumed(skip: &mut usize, n: usize, empty: bool, block: usize) {
+        *skip = if empty { 0 } else { (*skip + n) % block };
+    }
+
+    /// How much a device could type now (`ttydisc_rint_poll`): 1 for a
+    /// full queue that has not refused input, which drops it.
+    #[must_use]
+    pub fn input_room(&self) -> usize {
+        match self.in_left() {
+            0 if !self.hiwat_in => 1,
+            l => l,
         }
+    }
+
+    /// Input was refused (`tty_hiwat_in_block`): with `IXOFF`, only once
+    /// `VSTOP` is queued to tell the other end.
+    fn hiwat_in_block(&mut self) {
+        let stop = self.t.c_cc[VSTOP];
+        if !self.hiwat_in && self.iflag(IXOFF) && stop != POSIX_VDISABLE {
+            if self.out(&[stop]) {
+                self.hiwat_in = true;
+            }
+        } else {
+            self.hiwat_in = true;
+        }
+    }
+
+    /// Room again (`tty_hiwat_in_unblock`): with `IXOFF`, only once
+    /// `VSTART` is queued.
+    fn hiwat_in_unblock(&mut self) {
+        let start = self.t.c_cc[VSTART];
+        if self.hiwat_in && self.iflag(IXOFF) && start != POSIX_VDISABLE {
+            if self.out(&[start]) {
+                self.hiwat_in = false;
+            }
+        } else {
+            self.hiwat_in = false;
+        }
+    }
+
+    /// After a read (the end of `ttydisc_read`): `true` when the input
+    /// queue has room enough, or nothing readable, and the device should
+    /// hear of it (`ttydevsw_inwakeup`).
+    pub fn read_done(&mut self) -> bool {
+        if self.in_left() >= self.in_low || self.canon == 0 {
+            self.hiwat_in_unblock();
+            return true;
+        }
+        false
+    }
+
+    /// Output filled and the writer will wait (`TF_HIWAT_OUT`).
+    pub fn set_hiwat_out(&mut self) {
+        self.hiwat_out = true;
+    }
+
+    /// Whether a writer still waits for room: the device's draining
+    /// clears it.
+    #[must_use]
+    pub const fn hiwat_out(&self) -> bool {
+        self.hiwat_out
+    }
+
+    /// Whether input needs no processing at all (`ttydisc_optimize`'s
+    /// `TF_BYPASS`).
+    #[must_use]
+    pub const fn can_bypass(&self) -> bool {
+        let i = self.t.c_iflag;
+        i & (ICRNL | IGNCR | IMAXBEL | INLCR | ISTRIP | IXON) == 0
+            && (i & BRKINT == 0 || i & IGNBRK != 0)
+            && (i & PARMRK == 0 || i & (IGNPAR | IGNBRK) == IGNPAR | IGNBRK)
+            && self.t.c_lflag & (ECHO | ICANON | IEXTEN | ISIG | PENDIN) == 0
+    }
+
+    /// Types `data` (`ttydisc_rint_simple`): all at once when no byte
+    /// needs processing, else one at a time, `signal` told of each
+    /// signal asked for. Returns how much was taken; less when the queue
+    /// is full.
+    pub fn input_bulk(&mut self, data: &[u8], signal: &mut dyn FnMut(u32)) -> usize {
+        if self.can_bypass() {
+            let n = data.len().min(self.in_left());
+            self.inq
+                .extend(data[..n].iter().map(|&c| Cell { c, quote: false }));
+            self.canon = self.inq.len();
+            if n < data.len() {
+                self.hiwat_in_block();
+            }
+            return n;
+        }
+        for (i, &c) in data.iter().enumerate() {
+            match self.input(c) {
+                Input::Taken => {}
+                Input::Signal(sig) => signal(sig),
+                Input::Full => return i,
+            }
+        }
+        data.len()
     }
 
     #[must_use]
@@ -148,15 +353,17 @@ impl Discipline {
         self.lflag(ICANON)
     }
 
-    /// Sets the terminal's state (`TIOCSETA`). Turning `ICANON` on or off
-    /// re-decides what is readable.
+    /// Sets the terminal's state (`TIOCSETA`). Turning `ICANON` on or off,
+    /// or changing `VEOF` or `VEOL`, re-decides what is readable.
     pub fn set_termios(&mut self, mut t: Termios) {
         if t.c_cflag & CIGNORE != 0 {
             t.c_cflag = self.t.c_cflag;
         }
-        let was = self.canonical();
+        let again = (t.c_lflag ^ self.t.c_lflag) & ICANON != 0
+            || t.c_cc[VEOF] != self.t.c_cc[VEOF]
+            || t.c_cc[VEOL] != self.t.c_cc[VEOL];
         self.t = t;
-        if was != self.canonical() {
+        if again {
             self.canonicalize();
         }
     }
@@ -216,15 +423,18 @@ impl Discipline {
         }
     }
 
-    /// How many bytes a read could take now, 0 if it would wait
-    /// (`ttydisc_read_poll`).
+    /// The bytes ready to read (`ttydisc_read_poll`: those canonicalized,
+    /// whether or not a line ends among them).
     #[must_use]
-    pub fn read_poll(&self) -> usize {
-        if self.readable() {
-            self.canon.max(1)
-        } else {
-            0
-        }
+    pub const fn read_poll(&self) -> usize {
+        self.canon
+    }
+
+    /// Takes `n` bytes off the input queue's front.
+    fn take_input(&mut self, n: usize) {
+        self.canon -= n;
+        self.reprint = self.reprint.saturating_sub(n);
+        Self::consumed(&mut self.in_skip, n, self.inq.is_empty(), INQ_BLOCK);
     }
 
     /// Reads a line, or as much of one as fits in `out`; a `VEOF` that
@@ -250,9 +460,12 @@ impl Discipline {
             self.inq.pop_front();
             taken += 1;
         }
-        self.canon -= taken;
-        self.reprint -= taken;
-        Line::Read(n)
+        self.take_input(taken);
+        if n < len {
+            Line::Part(n)
+        } else {
+            Line::Read(n)
+        }
     }
 
     /// Reads up to `out.len()` readable bytes (non-canonical mode).
@@ -261,22 +474,33 @@ impl Discipline {
         for (o, cell) in out.iter_mut().zip(self.inq.drain(..n)) {
             *o = cell.c;
         }
-        self.canon -= n;
-        self.reprint -= n;
+        self.take_input(n);
         n
     }
 
-    /// Discards queued input, output, or both (`TIOCFLUSH`, signals).
+    /// Discards queued input, output, or both (`tty_flush`; the kernel's
+    /// terminal wakes and tells the device).
     pub fn flush(&mut self, input: bool, output: bool) {
+        if output {
+            self.hiwat_out = false;
+            self.outq.clear();
+            self.out_skip = 0;
+        }
         if input {
+            self.hiwat_in_unblock();
             self.inq.clear();
+            self.in_skip = 0;
             self.canon = 0;
             self.reprint = 0;
             self.literal = false;
         }
-        if output {
-            self.outq.clear();
-        }
+    }
+
+    /// A signal went to the foreground group (`tty_signal_pgrp`): output
+    /// starts again and is no longer discarded.
+    pub fn signaled(&mut self) {
+        self.stopped = false;
+        self.t.c_lflag &= !FLUSHO;
     }
 
     pub const fn stopped(&self) -> bool {
@@ -297,8 +521,16 @@ impl Discipline {
     /// Moves queued output into `buf` for the device; nothing while
     /// output is stopped.
     pub fn take_output(&mut self, buf: &mut [u8]) -> usize {
+        self.getc(buf).0
+    }
+
+    /// Moves queued output into `buf` for the device (`ttydisc_getc`);
+    /// nothing while output is stopped. Also says whether writers should
+    /// be woken: the queue is below its low watermark after filling, or
+    /// has room (`ttydisc_wakeup_watermark`).
+    pub fn getc(&mut self, buf: &mut [u8]) -> (usize, bool) {
         if self.stopped {
-            return 0;
+            return (0, false);
         }
         let n = self.outq.len().min(buf.len());
         let (a, b) = self.outq.as_slices();
@@ -306,11 +538,24 @@ impl Discipline {
         buf[..first].copy_from_slice(&a[..first]);
         buf[first..n].copy_from_slice(&b[..n - first]);
         self.outq.drain(..n);
-        n
+        Self::consumed(&mut self.out_skip, n, self.outq.is_empty(), OUTQ_BLOCK);
+        let room = self.output_room();
+        let wake = if self.hiwat_out {
+            if room < self.out_low {
+                false
+            } else {
+                self.hiwat_out = false;
+                true
+            }
+        } else {
+            room != 0
+        };
+        (n, wake)
     }
 
+    /// Queues `bytes` whole or not at all (`ttyoutq_write_nofrag`).
     fn out(&mut self, bytes: &[u8]) -> bool {
-        if self.outq.len() + bytes.len() > OUTPUT_MAX {
+        if self.output_room() < bytes.len() {
             return false;
         }
         self.outq.extend(bytes);
@@ -389,7 +634,7 @@ impl Discipline {
                 .position(|&c| opost && ctl_valid(c))
                 .unwrap_or(data.len() - done);
             if run > 0 {
-                let n = run.min(OUTPUT_MAX.saturating_sub(self.outq.len()));
+                let n = run.min(self.output_room());
                 self.outq.extend(&data[done..done + n]);
                 self.column += u32::try_from(n).unwrap_or(u32::MAX);
                 done += n;
@@ -563,10 +808,14 @@ impl Discipline {
         }
     }
 
-    /// Processes one typed byte (FreeBSD's `ttydisc_rint`). Returns the
-    /// signal to send to the foreground process group, if it asks for one
-    /// (queues were already flushed as `NOFLSH` says).
-    pub fn input(&mut self, c: u8) -> Option<u32> {
+    /// Processes one typed byte (FreeBSD's `ttydisc_rint`): whether it
+    /// was taken, and the signal to send to the foreground process group
+    /// if it asks for one (queues were already flushed as `NOFLSH` says,
+    /// and output started again).
+    pub fn input(&mut self, c: u8) -> Input {
+        if self.can_bypass() {
+            return self.store(c, false);
+        }
         let mut c = c;
         if self.iflag(IXANY) {
             self.stopped = false;
@@ -590,7 +839,7 @@ impl Discipline {
                         }
                     }
                     self.literal = true;
-                    return None;
+                    return Input::Taken;
                 }
                 if self.t.is(VDISCARD, c) {
                     if self.lflag(FLUSHO) {
@@ -607,7 +856,8 @@ impl Discipline {
             }
             if self.lflag(ISIG) {
                 if self.t.c_lflag & (ICANON | IEXTEN) == ICANON | IEXTEN && self.t.is(VSTATUS, c) {
-                    return Some(SIGINFO);
+                    self.signaled();
+                    return Input::Signal(SIGINFO);
                 }
                 let sig = if self.t.is(VINTR, c) {
                     Some(SIGINT)
@@ -618,32 +868,33 @@ impl Discipline {
                 } else {
                     None
                 };
-                if sig.is_some() {
+                if let Some(sig) = sig {
                     if !self.lflag(NOFLSH) {
                         self.flush(true, true);
                     }
                     self.echo(c, false);
-                    return sig;
+                    self.signaled();
+                    return Input::Signal(sig);
                 }
             }
             if self.iflag(IXON) {
                 if self.t.is(VSTOP, c) {
                     if !self.stopped {
                         self.stopped = true;
-                        return None;
+                        return Input::Taken;
                     }
                     // `VSTART` == `VSTOP` toggles.
                     if !self.t.is(VSTART, c) {
-                        return None;
+                        return Input::Taken;
                     }
                 }
                 if self.t.is(VSTART, c) {
                     self.stopped = false;
-                    return None;
+                    return Input::Taken;
                 }
             }
             match c {
-                CR if self.iflag(IGNCR) => return None,
+                CR if self.iflag(IGNCR) => return Input::Taken,
                 CR if self.iflag(ICRNL) => c = NL,
                 NL if self.iflag(INLCR) => c = CR,
                 _ => {}
@@ -651,35 +902,46 @@ impl Discipline {
             if self.canonical() {
                 if self.t.is(VERASE, c) || self.t.is(VERASE2, c) {
                     self.rubchar();
-                    return None;
+                    return Input::Taken;
                 }
                 if self.t.is(VKILL, c) {
                     while self.rubchar() {}
-                    return None;
+                    return Input::Taken;
                 }
                 if self.lflag(IEXTEN) {
                     if self.t.is(VWERASE, c) {
                         self.rubword();
-                        return None;
+                        return Input::Taken;
                     }
                     if self.t.is(VREPRINT, c) {
                         self.reprint_line();
-                        return None;
+                        return Input::Taken;
                     }
                 }
             }
         }
+        self.store(c, quote)
+    }
+
+    /// Queues a typed byte (from `ttydisc_rint`'s `processed`): a full
+    /// queue rings with `IMAXBEL`, then drops the byte if nothing is
+    /// readable, or refuses it.
+    fn store(&mut self, c: u8, quote: bool) -> Input {
         // `PARMRK` doubles a 0xff so it cannot be taken for a mark.
         let (count, quote) = if self.iflag(PARMRK) && c == 0xff {
             (2, true)
         } else {
             (1, quote)
         };
-        if self.inq.len() + count > INPUT_MAX {
+        if self.in_left() < count {
             if self.iflag(IMAXBEL) {
                 self.out(b"\x07");
             }
-            return None;
+            if self.canon == 0 {
+                return Input::Taken;
+            }
+            self.hiwat_in_block();
+            return Input::Full;
         }
         let cell = Cell { c, quote };
         for _ in 0..count {
@@ -689,7 +951,7 @@ impl Discipline {
             self.end_line();
         }
         self.echo(c, quote);
-        None
+        Input::Taken
     }
 }
 

@@ -565,6 +565,30 @@ pub(super) fn ioctl(s: &Sleepable, fd: u64, com: u64, data: u64) -> SysResult {
     Ok(u64::try_from(ret).unwrap_or(0))
 }
 
+/// `posix_openpt(flags)` (`sys_posix_openpt`): a new pseudo-terminal's
+/// master, read and write.
+pub(super) fn posix_openpt(s: &Sleepable, flags: u64) -> SysResult {
+    use abi::fcntl::{O_ACCMODE, O_CLOEXEC, O_NOCTTY, O_RDWR};
+    let p = process()?;
+    let flags = u32::try_from(flags).map_err(|_| Errno::EINVAL)?;
+    // POSIX leaves other flags unspecified; FreeBSD refuses them.
+    if flags & !(O_RDWR | O_NOCTTY | O_CLOEXEC) != 0 {
+        return Err(Errno::EINVAL);
+    }
+    let master = Arc::new(crate::tty::pts::alloc());
+    let fflags = (flags & O_ACCMODE) + 1;
+    let file = File::new(FileKind::Pts(master), fflags & (FREAD | FWRITE));
+    install(
+        s,
+        &p,
+        file,
+        FdFlags {
+            cloexec: flags & O_CLOEXEC != 0,
+            clofork: false,
+        },
+    )
+}
+
 /// `pipe2(fildes, flags)`.
 pub(super) fn pipe2(s: &Sleepable, fildes: u64, flags: u64) -> SysResult {
     let flags = u32::try_from(flags).map_err(|_| Errno::EINVAL)?;
@@ -795,6 +819,7 @@ fn kinfo(s: &Sleepable, fd: i32, arg: u64) -> SysResult {
         FileKind::Process(_) => 11,
         FileKind::Eventfd(_) => 13,
         FileKind::Timerfd(_) => 14,
+        FileKind::Pts(_) => 10,
     };
     let fl = f.flags();
     let mut flags = 0i32;

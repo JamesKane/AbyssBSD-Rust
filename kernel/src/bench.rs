@@ -74,6 +74,14 @@ fn run_ubench_p6_unix(s: &Sleepable) -> bool {
     run_waiting(s, SH, &[SH, b"-c", SCRIPT])
 }
 
+/// The pseudo-terminals component of the `p6` suite, as `p6.thr`.
+fn run_ubench_p6_pty(s: &Sleepable) -> bool {
+    const SH: &[u8] = b"/rescue/sh";
+    const SCRIPT: &[u8] = b"mount -o ro /dev/vtbd1 /mnt && \
+        cp /mnt/ubench /tmp/ && umount /mnt && exec /tmp/ubench p6.pty";
+    run_waiting(s, SH, &[SH, b"-c", SCRIPT])
+}
+
 /// The `vt` suite: `ubench vt`, from the memory disk as `p4`'s.
 fn run_ubench_vt(s: &Sleepable) -> bool {
     const PATH: &[u8] = b"/usr/bench/ubench";
@@ -106,6 +114,7 @@ pub(crate) fn run(s: &Sleepable, suite: &str) -> bool {
         "p6.thr" => return run_ubench_p6_thr(s),
         "p6.event" => return run_ubench_p6_event(s),
         "p6.unix" => return run_ubench_p6_unix(s),
+        "p6.pty" => return run_ubench_p6_pty(s),
         "vt" => return run_ubench_vt(s),
         _ => {}
     }

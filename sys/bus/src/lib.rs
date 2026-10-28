@@ -26,7 +26,7 @@ mod sysctl;
 pub mod types;
 
 pub use driver::{
-    AttachCx, DetachReport, Driver, DriverDecl, IoGrant, IrqLine, Ledger, MmioGrant, StartCx,
+    AttachCx, DetachReport, Driver, DriverDecl, Hint, IoGrant, IrqLine, Ledger, MmioGrant, StartCx,
     StopCx,
 };
 pub use gate::{Gate, GateGuard, Revoked};

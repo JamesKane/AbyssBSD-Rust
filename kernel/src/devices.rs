@@ -191,6 +191,7 @@ pub(crate) fn init(s: &Sleepable) {
     storage::bio::set_verifier(verifier);
     // Drivers' device nodes go to devfs.
     vfs::devices::set_registry(&crate::fs::devfs::Hook);
+    let _ = uart::TERMINALS.set(&crate::tty::serial::HOST);
     // `vt` takes the framebuffer; keyboards type into its windows.
     crate::vtcons::start();
     input::set_consumer(alloc::sync::Arc::new(crate::tty::ConsoleInput));

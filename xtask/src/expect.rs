@@ -241,6 +241,18 @@ pub(crate) const DYNAMIC: &[Step] = &[
         "\n1\r\n",
         "logger to syslogd",
     ),
+    // `script` runs a shell on a pseudo-terminal of its own, relaying
+    // between it and this terminal, which it puts in raw mode meanwhile.
+    step(
+        "script -q /dev/null sh -c 'echo in-$(tty | cut -c1-9)'\n",
+        "\nin-/dev/pts/\r\n",
+        "script",
+    ),
+    step(
+        "stty -a | grep -c ' icanon'\n",
+        "\n1\r\n",
+        "script restores the terminal",
+    ),
 ];
 
 /// The user tests again, dynamically linked (ROADMAP P6.1's exit), from
@@ -249,12 +261,10 @@ pub(crate) const DYNAMIC: &[Step] = &[
 /// as the kernel tests run them, in a session of their own with no
 /// terminal (`daemon -f`): under the boot shell's job control, with the
 /// shell as pid 1 in their session, process groups are never orphaned
-/// and the terminal is theirs to take. `tty` is left out: until ptys
-/// (P6.6) it types at, and sends ^C through, `/dev/console`, the shell's
-/// own terminal.
+/// and the terminal is theirs to take.
 pub(crate) const DYNAMIC_TESTS: &[Step] = &[step(
     "rm -f /var/tmp/dyn.*; daemon -f sh -c 'f=0; for t in /usr/tests/abyss-dynamic/*; do \
-     [ ${t##*/} = tty ] && continue; echo \"dyntest: ${t##*/}\" > /dev/console; \
+     echo \"dyntest: ${t##*/}\" > /dev/console; \
      $t > /var/tmp/dyn.out 2>&1 || { echo \"FAIL ${t##*/}\"; cat /var/tmp/dyn.out; f=1; } \
      >> /var/tmp/dyn.res; done; echo dyntests-$f >> /var/tmp/dyn.res; touch /var/tmp/dyn.done'; \
      while [ ! -e /var/tmp/dyn.done ]; do sleep 1; done; cat /var/tmp/dyn.res\n",
@@ -361,7 +371,8 @@ impl Session {
     pub(crate) fn start(vm: Vm, log: &Path) -> Result<Self> {
         let mut cmd = vm.command()?;
         if vm.vmm == Vmm::Qemu {
-            cmd.args(["-serial", "stdio", "-monitor", "none"]);
+            vm.serial(&mut cmd, "stdio");
+            cmd.args(["-monitor", "none"]);
         }
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())

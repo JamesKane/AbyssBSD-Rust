@@ -178,7 +178,7 @@ pub(crate) fn cmd_run(mut args: Args) -> Result<()> {
 
     let mut cmd = vm.command()?;
     if vmm == Vmm::Qemu {
-        cmd.arg("-serial").arg("mon:stdio");
+        vm.serial(&mut cmd, "mon:stdio");
     } else if qmp.is_some() {
         return Err("--qmp needs QEMU".into());
     }
@@ -254,6 +254,21 @@ impl Vm {
             devices: Vec::new(),
             usb: false,
             qmp: None,
+        }
+    }
+
+    /// QEMU's serial ports: the console on `backend`, then on x86 a second
+    /// COM port connected to nothing, a terminal of its own (`ttyu1`).
+    /// Made after the console's, so the machine lists it second.
+    pub(crate) fn serial(&self, cmd: &mut Command, backend: &str) {
+        cmd.args(["-serial", backend]);
+        if self.arch == Arch::X86_64 {
+            cmd.args([
+                "-chardev",
+                "null,id=com2",
+                "-device",
+                "isa-serial,chardev=com2,index=1",
+            ]);
         }
     }
 
@@ -530,7 +545,8 @@ impl Vm {
             sock
         });
         if self.vmm == Vmm::Qemu {
-            cmd.args(["-serial", "stdio", "-monitor", "none"]);
+            self.serial(&mut cmd, "stdio");
+            cmd.args(["-monitor", "none"]);
         }
         if let Some(sock) = &qmp {
             cmd.arg("-qmp")

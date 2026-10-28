@@ -9,8 +9,10 @@ publish.workspace = true
 bus = { path = "../../sys/bus" }
 devtree = { path = "../../lib/devtree" }
 irq = { path = "../../sys/irq" }
+regs = { path = "../../lib/regs" }
 sched = { path = "../../sys/sched" }
 sync = { path = "../../sys/sync" }
+uart-16550 = { path = "../uart-16550" }
 
 [lints]
 workspace = true

@@ -101,6 +101,8 @@ pub const CRTSCTS: u32 = CCTS_OFLOW | CRTS_IFLOW;
 pub const CDTR_IFLOW: u32 = 0x0004_0000;
 pub const CDSR_OFLOW: u32 = 0x0008_0000;
 pub const CCAR_OFLOW: u32 = 0x0010_0000;
+/// Do not raise RTS and DTR on opening.
+pub const CNO_RTSDTR: u32 = 0x0020_0000;
 
 /// `c_lflag`.
 pub const ECHOKE: u32 = 0x0000_0001;
@@ -125,6 +127,52 @@ pub const NOFLSH: u32 = 0x8000_0000;
 pub const TCSANOW: u32 = 0;
 pub const TCSADRAIN: u32 = 1;
 pub const TCSAFLUSH: u32 = 2;
+
+/// The flags a terminal keeps (`TTYSUP_*`); the rest are dropped.
+pub const TTYSUP_IFLAG: u32 = IGNBRK
+    | BRKINT
+    | IGNPAR
+    | PARMRK
+    | INPCK
+    | ISTRIP
+    | INLCR
+    | IGNCR
+    | ICRNL
+    | IXON
+    | IXOFF
+    | IXANY
+    | IMAXBEL
+    | IUTF8;
+pub const TTYSUP_OFLAG: u32 = OPOST | ONLCR | TAB3 | ONOEOT | OCRNL | ONOCR | ONLRET;
+pub const TTYSUP_LFLAG: u32 = ECHOKE
+    | ECHOE
+    | ECHOK
+    | ECHO
+    | ECHONL
+    | ECHOPRT
+    | ECHOCTL
+    | ISIG
+    | ICANON
+    | ALTWERASE
+    | IEXTEN
+    | TOSTOP
+    | FLUSHO
+    | NOKERNINFO
+    | NOFLSH;
+pub const TTYSUP_CFLAG: u32 = CIGNORE
+    | CSIZE
+    | CSTOPB
+    | CREAD
+    | PARENB
+    | PARODD
+    | HUPCL
+    | CLOCAL
+    | CCTS_OFLOW
+    | CRTS_IFLOW
+    | CDTR_IFLOW
+    | CDSR_OFLOW
+    | CCAR_OFLOW
+    | CNO_RTSDTR;
 
 /// A terminal's starting state (`TTYDEF_*`).
 pub const TTYDEF_IFLAG: u32 = BRKINT | ICRNL | IMAXBEL | IXON | IXANY | IUTF8;
@@ -267,6 +315,7 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("CDTR_IFLOW", CDTR_IFLOW as i64),
     c("CDSR_OFLOW", CDSR_OFLOW as i64),
     c("CCAR_OFLOW", CCAR_OFLOW as i64),
+    c("CNO_RTSDTR", CNO_RTSDTR as i64),
     c("ECHOKE", ECHOKE as i64),
     c("ECHOE", ECHOE as i64),
     c("ECHOK", ECHOK as i64),

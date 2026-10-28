@@ -136,6 +136,10 @@ pub(crate) const FREEBSD_TESTS: &[&str] = &[
     "usr/tests/lib/libc/sys/connect_test",
     "usr/tests/lib/libc/sys/getsockname_test",
     "usr/tests/lib/libc/sys/socketpair_test",
+    "usr/tests/sys/kern/tty",
+    "usr/tests/sys/kern/tty_pts",
+    "usr/tests/lib/libc/ttyio",
+    "usr/tests/lib/libutil/forkpty_test",
 ];
 
 /// Where the root image keeps pjdfstest.
@@ -162,7 +166,8 @@ progs() {
 		if [ -d $d ]; then
 			for k in $(/usr/tests/static/find $d -name Kyuafile); do
 				sed -n "s|^atf_test_program{name=\"\([^\"]*\)\".*|atf:${k%/*}/\1|p" $k
-				sed -n "s|^plain_test_program{name=\"\([^\"]*\)\".*|plain:${k%/*}/\1|p" $k
+				sed -n "/required_programs/!s|^plain_test_program{name=\"\([^\"]*\)\".*|plain:${k%/*}/\1|p" $k
+				sed -n "s|^plain_test_program{name=\"\([^\"]*\)\", required_programs=\"\([^\"]*\)\".*|plain=\2:${k%/*}/\1|p" $k
 			done
 		else
 			echo "atf:$d"
@@ -174,6 +179,17 @@ for e in $(progs); do
 	p=${e#*:}
 	[ -x "$p" ] || continue
 	echo "atf-prog: ${p#/usr/tests/} free=$(/sbin/sysctl -n vm.stats.vm.v_free_count 2> /dev/null)"
+	# A plain program's required programs, as kyua checks them.
+	case $kind in
+	plain=*)
+		need=${kind#plain=}
+		kind=plain
+		if ! command -v $need > /dev/null 2>&1; then
+			echo "atf: ${p#/usr/tests/}:main skipped: Required program '$need' not found in PATH"
+			continue
+		fi
+		;;
+	esac
 	if [ $kind = plain ]; then
 		cases=main
 	else

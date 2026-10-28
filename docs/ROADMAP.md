@@ -1634,6 +1634,28 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
 - Exit: `script`, `expect`-style tests (`tests/user/pty.c`), and kyua's tty tests at the target, the
   "Terminals", "Session end", and "Consoles without `RB_MULTIPLE`" deviations closed, and the
   `pty` component measured.
+  - Terminals done 2026-10-28: output is queued and the device drains it (`Driver::outwakeup`,
+    FreeBSD's `ttydevsw`), with FreeBSD's block queues sized from the speed, its watermarks, and
+    refused input when lines wait (`sys/tty`, host-tested); a terminal's first open takes its init
+    state, its last close drains for up to a second and empties it; `cuauN`, the `.init` and
+    `.lock` nodes, `TIOCEXCL`, the carrier wait, `TIOCDRAIN` and the drain wait. Pseudo-terminals
+    (`posix_openpt`, `/dev/pts/N` owned by the caller with group `tty`, packet mode, `TIOCSIG`,
+    `FIODGNAME`; no `/dev/ptmx`, as GENERIC has none). `revoke(2)` and devfs revocation (a revoked
+    node's files are dead as on FreeBSD: end of file for a terminal's read, `ENXIO` to write,
+    `ENOTTY` to `ioctl`); a session leader's exit revokes the node it took its terminal through.
+    Every 16550 but the console's is an interrupt-driven `ttyuN` (units wired as GENERIC's hints
+    wire them; x86 QEMU gains a COM2, tested by loopback); kernel messages go to the best console
+    alone without `RB_MULTIPLE`. `RLIMIT_NPROC` came with `forkpty_test`. The "Terminals",
+    "Session end", and "Consoles without `RB_MULTIPLE`" deviations are closed; what is left is in
+    "Second PL011s" and "Terminal requests".
+  - `tests/user/pty.c` (naming, echo, signals, `SIGWINCH`, packet mode, a megabyte each way, the
+    ends from both sides, revocation) passes on FreeBSD 15.1 and on both arches; the shell cases
+    run `script` and kyua's `sys/kern/tty`, `tty_pts`, `lib/libc/ttyio`, and
+    `lib/libutil/forkpty_test` (porch's scripts skipped as on FreeBSD, `run-atf` now honoring
+    `required_programs`): 543 cases on amd64 (QEMU, bhyve) and 539 on arm64 end as on FreeBSD.
+  - The `pty` component measured 2026-10-28 (`perf --suite p6.pty`, 10 runs a side): geometric
+    mean 0.436, within the gate; raw writes (0.25), the `script`-style relay (0.38), and canonical
+    lines (0.88) all beat FreeBSD.
 
 **P6.7 Credentials and security.**
 - `priv_check` (MULTIUSER.md §10.1) replacing every `euid == 0`; set-id exec, `P_SUGID`, `nosuid`,

@@ -45,6 +45,10 @@ pub trait Driver: Sized + Send + Sync + 'static {
     const CONCURRENCY: Concurrency = Concurrency::Serialized;
     /// How the device is announced.
     const ANNOUNCE: Announce = Announce::Description;
+    /// The units FreeBSD's `device.hints` wire for this driver: a device
+    /// at a hint's I/O port takes its unit, and the others skip the
+    /// hinted units (`acpi_hint_device_unit`, `devclass_alloc_unit`).
+    const HINTS: &'static [Hint] = &[];
 
     /// The device description (`%desc`, `devinfo`'s `<…>`).
     fn describe(ident: &Ident) -> String;
@@ -87,9 +91,18 @@ pub struct DriverDecl {
     pub ids: Ids,
     /// Drivers it yields to on an equal rank.
     pub yields: &'static [&'static str],
+    /// Its hinted units ([`Driver::HINTS`]).
+    pub hints: &'static [Hint],
     pub(crate) announce: Announce,
     pub(crate) describe: fn(&Ident, Option<&(dyn Any + Send + Sync)>) -> String,
     pub(crate) attach: fn(&mut AttachCx<'_>) -> Result<Box<dyn Bound>, AttachError>,
+}
+
+/// A unit wired by `device.hints` (`hint.<driver>.<unit>.port`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Hint {
+    pub unit: u32,
+    pub port: u16,
 }
 
 impl core::fmt::Debug for DriverDecl {
@@ -108,6 +121,7 @@ impl DriverDecl {
             name: D::NAME,
             ids: D::IDS,
             yields: D::YIELDS,
+            hints: D::HINTS,
             announce: D::ANNOUNCE,
             describe: D::describe_with,
             attach: attach_erased::<D>,

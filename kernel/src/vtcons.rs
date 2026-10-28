@@ -29,16 +29,29 @@ static TTYS: Once<Vec<Arc<Tty>>> = Once::new();
 struct Window(usize);
 
 impl tty::Driver for Window {
-    fn output(&self, bytes: &[u8]) {
-        vt::write(self.0, bytes);
+    /// `termtty_outwakeup`: written to the window at once.
+    fn outwakeup(&self, out: &mut tty::Output<'_>) {
+        let mut buf = [0u8; 1024];
+        loop {
+            let n = out.getc(&mut buf);
+            if n == 0 {
+                break;
+            }
+            vt::write(self.0, &buf[..n]);
+        }
     }
 
     fn ioctl(&self, s: &Sleepable, req: u32, arg: &mut [u8]) -> Result<(), Errno> {
         vt::ioctl(self.0, s, req, arg)
     }
 
-    fn opened(&self, yes: bool) {
-        vt::opened(self.0, yes);
+    fn open(&self) -> Result<(), Errno> {
+        vt::opened(self.0, true);
+        Ok(())
+    }
+
+    fn close(&self) {
+        vt::opened(self.0, false);
     }
 
     /// The framebuffer, write-combining (`vtterm_mmap`, `vt_fb_mmap`):
@@ -188,7 +201,11 @@ pub(crate) fn start() {
     kprintln!("VT(efifb): resolution {width}x{height}");
     let ttys: Vec<_> = (0..vt::WINDOWS)
         .map(|i| {
-            let t = tty::create(&alloc::format!("ttyv{i:x}"), Arc::new(Window(i)));
+            let t = tty::create(
+                &alloc::format!("ttyv{i:x}"),
+                Arc::new(Window(i)),
+                tty::Make::default(),
+            );
             if let Some((size, pixels)) = vt::size(i) {
                 t.set_winsize(winsize(size, pixels));
             }

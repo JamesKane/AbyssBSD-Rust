@@ -629,7 +629,7 @@ pub(crate) fn console_table() -> FdTable {
     // SAFETY: tables are made in thread context (process creation).
     let s = unsafe { Sleepable::assume() };
     if let Some(c) = devfs::console()
-        && let Ok(vf) = VnodeFile::open(&s, &c, true)
+        && let Ok(vf) = VnodeFile::open(&s, &c, true, false)
     {
         let f = File::new(FileKind::Vnode(vf), FREAD | FWRITE);
         for _ in 0..3 {

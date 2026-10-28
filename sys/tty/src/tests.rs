@@ -10,7 +10,12 @@ use super::*;
 
 /// Types `keys`; returns the signals asked for.
 fn typed(d: &mut Discipline, keys: &[u8]) -> Vec<u32> {
-    keys.iter().filter_map(|&k| d.input(k)).collect()
+    keys.iter()
+        .filter_map(|&k| match d.input(k) {
+            Input::Signal(sig) => Some(sig),
+            _ => None,
+        })
+        .collect()
 }
 
 fn echoed(d: &mut Discipline) -> Vec<u8> {
@@ -24,7 +29,7 @@ fn line(d: &mut Discipline) -> Option<Vec<u8>> {
     let mut buf = [0u8; 256];
     match d.read_line(&mut buf) {
         Line::NotYet => None,
-        Line::Read(n) => Some(buf[..n].to_vec()),
+        Line::Read(n) | Line::Part(n) => Some(buf[..n].to_vec()),
     }
 }
 
@@ -152,7 +157,7 @@ fn long_lines_are_read_in_pieces() {
     let mut d = Discipline::new();
     typed(&mut d, b"abcdef\n");
     let mut buf = [0u8; 4];
-    assert_eq!(d.read_line(&mut buf), Line::Read(4));
+    assert_eq!(d.read_line(&mut buf), Line::Part(4));
     assert_eq!(&buf, b"abcd");
     assert_eq!(d.read_line(&mut buf), Line::Read(3));
     assert_eq!(&buf[..3], b"ef\n");
@@ -205,12 +210,96 @@ fn no_echo() {
 #[test]
 fn a_full_queue_rings() {
     let mut d = Discipline::new();
-    for _ in 0..INPUT_MAX {
+    for _ in 0..d.input_size() {
         d.input(b'a');
     }
     echoed(&mut d);
-    d.input(b'a');
+    // Nothing is readable (one long line): the byte is dropped.
+    assert_eq!(d.input(b'a'), Input::Taken);
     assert_eq!(echoed(&mut d), b"\x07");
+}
+
+#[test]
+fn queues_hold_two_seconds_in_whole_blocks() {
+    let mut d = Discipline::new();
+    // 9600 bits a second: 1920 bytes, 15 input blocks and 8 output ones.
+    assert_eq!(d.input_size(), 1920);
+    assert_eq!(d.output_room(), 1984);
+    let mut t = *d.termios();
+    t.c_ispeed = 115_200;
+    t.c_ospeed = 115_200;
+    d.set_termios(t);
+    d.set_watermarks();
+    assert_eq!(d.input_size(), 23_040);
+    assert_eq!(d.output_room(), 23_064);
+    // No input queue without `CREAD`.
+    t.c_cflag &= !CREAD;
+    d.set_termios(t);
+    d.set_watermarks();
+    assert_eq!(d.input_size(), 0);
+    d.close();
+    assert_eq!(d.output_room(), 0);
+}
+
+#[test]
+fn a_full_queue_with_lines_refuses_input() {
+    let mut d = Discipline::new();
+    let text = [b'x'; 63];
+    for _ in 0..30 {
+        typed(&mut d, &text);
+        typed(&mut d, b"\n");
+    }
+    // 1920 bytes typed: the queue is full and lines wait. Until a byte
+    // is refused, a device may offer one.
+    assert_eq!(d.input_room(), 1);
+    assert_eq!(d.input(b'y'), Input::Full);
+    assert_eq!(d.input_room(), 0);
+    // Reading one line frees nothing (its block is still in use), the
+    // second its first block.
+    assert_eq!(line(&mut d).unwrap().len(), 64);
+    assert_eq!(d.input_room(), 0);
+    assert!(!d.read_done());
+    assert_eq!(line(&mut d).unwrap().len(), 64);
+    assert_eq!(d.input_room(), 128);
+    assert_eq!(d.input(b'y'), Input::Taken);
+}
+
+#[test]
+fn raw_input_bypasses_processing() {
+    let mut d = Discipline::new();
+    let mut t = *d.termios();
+    t.c_iflag = 0;
+    t.c_lflag = 0;
+    d.set_termios(t);
+    assert!(d.can_bypass());
+    let data = [b'\r'; 2000];
+    let mut signals = 0;
+    assert_eq!(d.input_bulk(&data, &mut |_| signals += 1), 1920);
+    assert_eq!(signals, 0);
+    assert_eq!(d.read_poll(), 1920);
+    assert_eq!(d.input_room(), 0);
+    let mut buf = [0u8; 2000];
+    assert_eq!(d.read_raw(&mut buf), 1920);
+    assert!(buf[..1920].iter().all(|&c| c == b'\r'));
+    assert!(d.read_done());
+    assert_eq!(d.input_room(), 1920);
+}
+
+#[test]
+fn writers_wake_below_the_low_watermark() {
+    let mut d = Discipline::new();
+    let mut t = *d.termios();
+    t.c_oflag = 0;
+    d.set_termios(t);
+    let data = [b'a'; 4096];
+    assert_eq!(d.write(&data), 1984);
+    d.set_hiwat_out();
+    let mut buf = [0u8; 1000];
+    // 1000 bytes out leaves 1000 free of 1984: under 90%.
+    assert_eq!(d.getc(&mut buf), (1000, false));
+    assert!(d.hiwat_out());
+    assert_eq!(d.getc(&mut buf), (984, true));
+    assert!(!d.hiwat_out());
 }
 
 #[test]

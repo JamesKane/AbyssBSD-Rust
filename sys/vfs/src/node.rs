@@ -310,6 +310,16 @@ pub trait CharDevice: Send + Sync {
     fn instance(&self, _s: &Sleepable) -> Result<Option<Arc<dyn CharDevice>>, Errno> {
         Ok(None)
     }
+    /// [`CharDevice::instance`] for an open with `O_NONBLOCK` set or not
+    /// (`d_open`'s `oflags`): a terminal waits for its carrier without.
+    fn instance_nonblock(
+        &self,
+        s: &Sleepable,
+        nonblock: bool,
+    ) -> Result<Option<Arc<dyn CharDevice>>, Errno> {
+        let _ = nonblock;
+        self.instance(s)
+    }
     /// Reads into `uio` from `offset` (the file's offset, which disks use
     /// and terminals ignore); `nonblock` asks for `EAGAIN` instead of
     /// waiting.
@@ -358,6 +368,25 @@ pub trait CharDevice: Send + Sync {
     /// `td_retval[0]`): 0 unless a device's requests say otherwise.
     fn ioctl_value(&self, s: &Sleepable, req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
         self.ioctl(s, req, arg).map(|()| 0)
+    }
+    /// [`CharDevice::ioctl_value`] for an open file with flags `fflag`
+    /// (`FREAD`, `FWRITE`, ...: `d_ioctl`'s `fflag`), which some requests
+    /// check.
+    fn ioctl_file(
+        &self,
+        s: &Sleepable,
+        req: u32,
+        arg: &mut [u8],
+        fflag: u32,
+    ) -> Result<usize, Errno> {
+        let _ = fflag;
+        self.ioctl_value(s, req, arg)
+    }
+    /// The node is being revoked (`revoke(2)`, a session's end): every
+    /// open of it is over, as if each had closed, though their files stay
+    /// open, dead. Devices that count their opens forget them here.
+    fn revoke(&self, s: &Sleepable) {
+        let _ = s;
     }
     /// The `poll` events of `events` that hold now (`d_poll`); with a
     /// poller, registered on the device's [`event::Notify`] first when

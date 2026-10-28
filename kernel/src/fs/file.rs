@@ -37,13 +37,19 @@ pub(crate) struct VnodeFile {
 }
 
 impl VnodeFile {
-    /// `v` opened, for writing if `write`: a devfs node's device is looked
-    /// up once, here. `ETXTBSY` to write a file a program runs.
-    pub(crate) fn open(s: &Sleepable, v: &Arc<Vnode>, write: bool) -> Result<Self, Errno> {
+    /// `v` opened, for writing if `write`, without waiting if `nonblock`:
+    /// a devfs node's device is looked up once, here. `ETXTBSY` to write a
+    /// file a program runs.
+    pub(crate) fn open(
+        s: &Sleepable,
+        v: &Arc<Vnode>,
+        write: bool,
+        nonblock: bool,
+    ) -> Result<Self, Errno> {
         let device = match v.kind() {
             Kind::CharDevice => {
                 let mut d = v.device(s)?;
-                if let Some(ops) = d.ops.instance(s)? {
+                if let Some(ops) = d.ops.instance_nonblock(s, nonblock)? {
                     d.ops = ops;
                 }
                 Some(d)
@@ -81,7 +87,23 @@ impl VnodeFile {
     }
 }
 
+/// A revoked node's read (`dead_read`): end of file for a terminal,
+/// `ENXIO` otherwise.
+fn dead_read(d: &Device) -> Result<usize, Errno> {
+    if d.ops.dtype() == vfs::D_TTY {
+        Ok(0)
+    } else {
+        Err(Errno::ENXIO)
+    }
+}
+
 impl VnodeFile {
+    /// A device file whose node was revoked, or went (`devfs_fp_check`
+    /// failing): its calls go to the dead vnode's operations.
+    fn dead(&self) -> bool {
+        self.vnode.gone()
+    }
+
     /// This open file as the owner of `flock` locks.
     pub(crate) fn lock_owner(&self) -> vfs::lockf::Owner {
         vfs::lockf::Owner::File(core::ptr::from_ref(self).addr())
@@ -124,6 +146,8 @@ pub(crate) enum FileKind {
     Timerfd(Arc<crate::timers::Timerfd>),
     /// An `eventfd`.
     Eventfd(Arc<super::eventfd::Eventfd>),
+    /// A pseudo-terminal's master.
+    Pts(Arc<crate::tty::pts::Master>),
 }
 
 /// An open file.
@@ -171,7 +195,8 @@ impl File {
             | FileKind::Shm(_)
             | FileKind::Kqueue(_)
             | FileKind::Timerfd(_)
-            | FileKind::Eventfd(_) => None,
+            | FileKind::Eventfd(_)
+            | FileKind::Pts(_) => None,
         }
     }
 
@@ -202,12 +227,14 @@ impl File {
             FileKind::Vnode(f) => {
                 let mut off = self.offset.lock(s);
                 let n = match &f.device {
+                    Some(d) if f.dead() => return dead_read(d),
                     Some(d) => d.ops.read(s, uio, *off, self.nonblock())?,
                     None => f.vnode.read_at(s, *off, uio)?,
                 };
                 *off += n as u64;
                 Ok(n)
             }
+            FileKind::Pts(m) => m.read(s, uio, self.nonblock()),
             FileKind::Pipe(p) => p.read(s, uio, self.nonblock()),
             FileKind::Process(_) => Err(Errno::EOPNOTSUPP),
             FileKind::Socket(so) => so.read(s, uio, self.nonblock()),
@@ -238,6 +265,7 @@ impl File {
             FileKind::Vnode(f) => {
                 let offset = u64::try_from(offset).map_err(|_| Errno::EINVAL)?;
                 match &f.device {
+                    Some(d) if f.dead() => dead_read(d),
                     Some(d) => d.ops.read(s, uio, offset, self.nonblock()),
                     None => f.vnode.read_at(s, offset, uio),
                 }
@@ -249,7 +277,8 @@ impl File {
             | FileKind::Fifo(_)
             | FileKind::Kqueue(_)
             | FileKind::Timerfd(_)
-            | FileKind::Eventfd(_) => Err(Errno::ESPIPE),
+            | FileKind::Eventfd(_)
+            | FileKind::Pts(_) => Err(Errno::ESPIPE),
         }
     }
 
@@ -262,6 +291,7 @@ impl File {
             FileKind::Vnode(f) => {
                 let mut off = self.offset.lock(s);
                 let n = match &f.device {
+                    Some(_) if f.dead() => return Err(Errno::ENXIO),
                     Some(d) => d.ops.write(s, uio, *off, self.nonblock())?,
                     None => {
                         if self.flags() & O_APPEND != 0 {
@@ -275,6 +305,7 @@ impl File {
                 *off += n as u64;
                 Ok(n)
             }
+            FileKind::Pts(m) => m.write(s, uio, self.nonblock()),
             FileKind::Pipe(p) => p.write(s, uio, self.nonblock()),
             FileKind::Process(_) => Err(Errno::EOPNOTSUPP),
             FileKind::Socket(so) => so.write(s, uio, self.nonblock()),
@@ -308,7 +339,8 @@ impl File {
             | FileKind::Fifo(_)
             | FileKind::Kqueue(_)
             | FileKind::Timerfd(_)
-            | FileKind::Eventfd(_) => Err(Errno::ESPIPE),
+            | FileKind::Eventfd(_)
+            | FileKind::Pts(_) => Err(Errno::ESPIPE),
             FileKind::Shm(m) => {
                 let at = u64::try_from(offset).map_err(|_| Errno::EINVAL)?;
                 let at = (self.flags() & O_APPEND == 0).then_some(at);
@@ -316,6 +348,9 @@ impl File {
             }
             FileKind::Vnode(f) => {
                 if let Some(d) = &f.device {
+                    if f.dead() {
+                        return Err(Errno::ENXIO);
+                    }
                     let at = u64::try_from(offset).map_err(|_| Errno::EINVAL)?;
                     return d.ops.write(s, uio, at, self.nonblock());
                 }
@@ -393,6 +428,7 @@ impl File {
             }),
             FileKind::Timerfd(t) => Ok(t.stat()),
             FileKind::Eventfd(_) => Ok(super::eventfd::Eventfd::stat()),
+            FileKind::Pts(m) => Ok(m.stat()),
         }
     }
 
@@ -403,6 +439,14 @@ impl File {
         use abi::event::{POLLHUP, POLLIN, POLLOUT, POLLRDNORM, POLLSTANDARD, POLLWRNORM};
         match &self.kind {
             FileKind::Vnode(f) => match &f.device {
+                // `dead_poll`: the descriptor is gone.
+                Some(_) if f.dead() => {
+                    if events & !POLLSTANDARD != 0 {
+                        abi::event::POLLNVAL
+                    } else {
+                        POLLHUP | (events & (POLLIN | POLLRDNORM))
+                    }
+                }
                 Some(d) => d.ops.poll(events, w),
                 // `vop_stdpoll`: a file is always ready; anything beyond
                 // the standard events waits for a note.
@@ -432,6 +476,7 @@ impl File {
             FileKind::Kqueue(k) => k.poll(events, w),
             FileKind::Timerfd(t) => t.poll(events, w),
             FileKind::Eventfd(e) => e.poll(events, w),
+            FileKind::Pts(m) => m.poll(events, w),
         }
     }
 
@@ -444,6 +489,7 @@ impl File {
         use abi::event::EVFILT_PROCDESC;
         match &this.kind {
             FileKind::Vnode(f) => match &f.device {
+                Some(_) if f.dead() => Err(Errno::ENXIO),
                 Some(d) => d.ops.kqfilter(kev),
                 None => crate::event::vnode_filter(this, s, kev),
             },
@@ -463,6 +509,7 @@ impl File {
             FileKind::Kqueue(_) => Err(Errno::EINVAL),
             FileKind::Timerfd(t) => t.kqfilter(kev),
             FileKind::Eventfd(e) => e.kqfilter(kev),
+            FileKind::Pts(m) => m.kqfilter(kev),
         }
     }
 
@@ -564,13 +611,22 @@ impl File {
                 }
                 _ => Err(Errno::ENOTTY),
             },
+            FileKind::Pts(m) => m.ioctl(s, req, arg, self.flags()),
             FileKind::Vnode(f) => match (&f.device, f.vnode.kind()) {
-                // Every device answers its kind (FreeBSD's devfs does).
+                // A revoked node's (`vn_ioctl` on a dead vnode).
+                (Some(_), _) if f.dead() => Err(Errno::ENOTTY),
+                // Every device answers its kind and its name (FreeBSD's
+                // devfs does).
                 (Some(d), _) if req == FIODTYPE => {
                     arg.copy_from_slice(&d.ops.dtype().to_ne_bytes());
                     Ok(0)
                 }
-                (Some(d), _) => d.ops.ioctl_value(s, req, arg),
+                (Some(_), _) if req == abi::ioctl::FIODGNAME => {
+                    let name = super::devfs::name_of(f.vnode.vnode()).ok_or(Errno::EINVAL)?;
+                    crate::tty::pts::fiodgname(arg, &name)?;
+                    Ok(0)
+                }
+                (Some(d), _) => d.ops.ioctl_file(s, req, arg, self.flags()),
                 (None, Kind::Regular) if req == FIONREAD => {
                     let off = *self.offset.lock(s);
                     let size = f.vnode.size(s)?;

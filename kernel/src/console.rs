@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! The early console: the serial port and the framebuffer the loader found,
-//! written together, and mirrored into the persistent log ring that the
-//! loader saves to the ESP on the next boot.
+//! written together with `RB_MULTIPLE`, else the best of them alone (see
+//! [`howto`]), and mirrored into the persistent log ring that the loader
+//! saves to the ESP on the next boot.
 //!
 //! The serial port is also a terminal (`ttyu0`), the console's unless
 //! `vt`'s first window is (see [`howto`]): the `uart`
@@ -158,14 +159,17 @@ impl Write for Sinks {
             }
             return Ok(());
         }
+        let (to_serial, to_video) = consoles();
         match &mut self.serial {
             #[cfg(target_arch = "x86_64")]
-            Some(SerialSink::Port(u)) => u.write_str(s)?,
-            Some(SerialSink::Mmio16550(u)) => u.write_str(s)?,
-            Some(SerialSink::Pl011(u)) => u.write_str(s)?,
-            None => {}
+            Some(SerialSink::Port(u)) if to_serial => u.write_str(s)?,
+            Some(SerialSink::Mmio16550(u)) if to_serial => u.write_str(s)?,
+            Some(SerialSink::Pl011(u)) if to_serial => u.write_str(s)?,
+            _ => {}
         }
-        if self.vt {
+        if !to_video {
+            // The screen keeps nothing; the log ring below does.
+        } else if self.vt {
             vt::write_kernel(s.as_bytes());
         } else if let Some(fb) = &mut self.fb {
             let b = &s.as_bytes()[s.len().saturating_sub(EARLY)..];
@@ -316,6 +320,7 @@ pub(crate) fn init(info: &BootInfo) {
         let _ = SERIAL_AT.set(at);
         let _ = uart::CONSOLE.set(&PORT);
     }
+    CONSOLES_KNOWN.store(true, core::sync::atomic::Ordering::Release);
 }
 
 /// Whether the loader found a serial console.
@@ -364,6 +369,33 @@ pub(crate) fn howto() -> Howto {
         },
     }
 }
+
+/// The consoles kernel messages go to, serial and video: every one with
+/// `RB_MULTIPLE`, else the best alone (FreeBSD's `cninit` registers only
+/// it). Both until the console is set up.
+fn consoles() -> (bool, bool) {
+    static CHOSEN: Once<(bool, bool)> = Once::new();
+    if let Some(&c) = CHOSEN.get() {
+        return c;
+    }
+    if !CONSOLES_KNOWN.load(core::sync::atomic::Ordering::Acquire) {
+        return (true, true);
+    }
+    let h = howto();
+    let c = if h.multiple {
+        (true, true)
+    } else if serial_primary() {
+        (true, false)
+    } else {
+        (false, true)
+    };
+    let _ = CHOSEN.set(c);
+    c
+}
+
+/// The loader's consoles are known (`init` ran), and with them
+/// [`howto`]'s answer.
+static CONSOLES_KNOWN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Whether the serial port's terminal is the console's (`/dev/console`):
 /// FreeBSD's best console, `uart` at `CN_REMOTE` with `RB_SERIAL`, else

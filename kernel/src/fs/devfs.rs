@@ -373,6 +373,41 @@ impl Registry {
         Some(ino)
     }
 
+    /// The inode at `path`.
+    fn lookup(&self, path: &[u8]) -> Option<u64> {
+        let mut at = ROOT_INO;
+        for part in path.split(|&b| b == b'/').filter(|p| !p.is_empty()) {
+            let What::Dir(m) = &self.nodes.get(&at)?.what else {
+                return None;
+            };
+            at = *m.get(part)?;
+        }
+        Some(at)
+    }
+
+    /// The path of inode `ino` under `/dev` (`devtoname`).
+    fn path(&self, ino: u64) -> Option<Vec<u8>> {
+        let mut parts = Vec::new();
+        let mut at = ino;
+        while at != ROOT_INO {
+            let node = self.nodes.get(&at)?;
+            let What::Dir(m) = &self.nodes.get(&node.parent)?.what else {
+                return None;
+            };
+            let (name, _) = m.iter().find(|&(_, &i)| i == at)?;
+            parts.push(name.clone());
+            at = node.parent;
+        }
+        let mut out = Vec::new();
+        for (i, p) in parts.iter().rev().enumerate() {
+            if i > 0 {
+                out.push(b'/');
+            }
+            out.extend_from_slice(p);
+        }
+        Some(out)
+    }
+
     /// Takes `path` out; returns its inode.
     fn remove(&mut self, path: &[u8]) -> Option<u64> {
         let mut at = ROOT_INO;
@@ -403,13 +438,37 @@ pub(crate) fn add(
     ops: Arc<dyn CharDevice>,
 ) -> Option<u64> {
     let t = super::now();
-    with(|r| {
+    let ino = with(|r| {
         r.insert(
             path,
             What::Dev(Device { rdev: 0, ops }),
             attr(mode, uid, gid, 1, t),
         )
-    })
+    })?;
+    forget_names(path);
+    Some(ino)
+}
+
+/// Drops the name cache's entries along `path`, a node just made: a
+/// lookup that failed before must not hide it (FreeBSD's devfs purges
+/// negative entries as it populates).
+fn forget_names(path: &[u8]) {
+    let Some(m) = MOUNT.get() else {
+        return;
+    };
+    let mut at = ROOT_INO;
+    for part in path.split(|&b| b == b'/').filter(|p| !p.is_empty()) {
+        if let Some(dir) = m.cached(at) {
+            vfs::cache::remove(&dir, part);
+        }
+        match with(|r| match &r.nodes.get(&at)?.what {
+            What::Dir(d) => d.get(part).copied(),
+            _ => None,
+        }) {
+            Some(next) => at = next,
+            None => return,
+        }
+    }
 }
 
 /// Takes the node at `path` away; its vnode, if in core, is doomed.
@@ -423,6 +482,79 @@ pub(crate) fn remove(s: &Sleepable, path: &[u8]) {
         vfs::cache::purge(&v);
         v.reclaim(s);
     }
+}
+
+/// The device number of the node at `path`.
+pub(crate) fn rdev_of(path: &[u8]) -> Option<u64> {
+    with(|r| r.lookup(path))
+}
+
+/// The attributes of the node at `path` (`si_mode`, `si_uid`, ...).
+pub(crate) fn attr_of(path: &[u8]) -> Option<Attr> {
+    with(|r| {
+        let ino = r.lookup(path)?;
+        r.nodes.get(&ino).map(|n| n.attr)
+    })
+}
+
+/// The node `v` is, if it is devfs's.
+fn ino_of(v: &Vnode) -> Option<u64> {
+    let m = MOUNT.get()?;
+    Arc::ptr_eq(v.mount(), m).then(|| v.id().ino)
+}
+
+/// The name under `/dev` of the device node `v` is (`devtoname`, for
+/// `FIODGNAME`).
+pub(crate) fn name_of(v: &Vnode) -> Option<Vec<u8>> {
+    let ino = ino_of(v)?;
+    with(|r| r.path(ino))
+}
+
+/// The vnode of the node at `path`, looked up afresh (a revoked node's
+/// old vnode is dead).
+pub(crate) fn vnode_of(s: &Sleepable, path: &[u8]) -> Option<Arc<Vnode>> {
+    let mut at = MOUNT.get()?.root(s).ok()?;
+    for part in path.split(|&b| b == b'/').filter(|p| !p.is_empty()) {
+        at = vfs::namei::Namespace::child(s, &at, part).ok()?;
+    }
+    Some(at)
+}
+
+/// Revokes the node `ino` (`devfs_revoke`): its device forgets every open
+/// of it, and its vnode is doomed, so files open on it are dead; a later
+/// open gets a new vnode.
+fn revoke_ino(s: &Sleepable, ino: u64) {
+    let ops = with(|r| match r.nodes.get(&ino).map(|n| &n.what) {
+        Some(What::Dev(d)) => Some(Arc::clone(&d.ops)),
+        _ => None,
+    });
+    let Some(ops) = ops else {
+        return;
+    };
+    if let Some(m) = MOUNT.get()
+        && let Some(v) = m.cached(ino)
+    {
+        vfs::cache::purge(&v);
+        v.reclaim(s);
+    }
+    ops.revoke(s);
+}
+
+/// Revokes the node at `path`.
+pub(crate) fn revoke_path(s: &Sleepable, path: &[u8]) {
+    if let Some(ino) = rdev_of(path) {
+        revoke_ino(s, ino);
+    }
+}
+
+/// `revoke(2)` of `v` (`VOP_REVOKE`): only a device node.
+pub(crate) fn revoke(s: &Sleepable, v: &Vnode) -> Result<(), Errno> {
+    let ino = ino_of(v).ok_or(Errno::EINVAL)?;
+    if v.kind() != Kind::CharDevice {
+        return Err(Errno::EINVAL);
+    }
+    revoke_ino(s, ino);
+    Ok(())
 }
 
 /// devfs as [`vfs::devices`]' registry, for drivers and classes.
@@ -442,7 +574,12 @@ impl vfs::devices::Registry for Hook {
 
     fn alias(&self, path: &[u8], target: &[u8]) -> bool {
         let t = super::now();
-        with(|r| r.insert(path, What::Link(target.to_vec()), attr(0o755, 0, 0, 1, t))).is_some()
+        let made = with(|r| r.insert(path, What::Link(target.to_vec()), attr(0o755, 0, 0, 1, t)))
+            .is_some();
+        if made {
+            forget_names(path);
+        }
+        made
     }
 
     fn destroy(&self, s: &Sleepable, path: &[u8]) {
@@ -503,7 +640,7 @@ pub(crate) fn init() {
         }
     });
     let console: Arc<dyn CharDevice> = match crate::tty::console() {
-        Some(t) => Arc::new(crate::tty::TtyDevice(t)),
+        Some(t) => Arc::new(crate::tty::TtyDevice::new(&t, crate::tty::Unit::Console)),
         None => Arc::new(Console),
     };
     add(b"console", 0o600, 0, 0, console);
@@ -518,15 +655,6 @@ pub(crate) fn init() {
         )
     });
     add(b"tty", 0o666, 0, 0, Arc::new(crate::tty::ControllingTty));
-    for tty in &crate::tty::all() {
-        add(
-            tty.name().as_bytes(),
-            0o600,
-            0,
-            0,
-            Arc::new(crate::tty::TtyDevice(Arc::clone(tty))),
-        );
-    }
     add(b"zero", 0o666, 0, 0, Arc::new(Zero));
     storage::disk::set_listener(disk_event);
     for d in storage::disk::all() {
@@ -832,18 +960,13 @@ impl FileSystem for DevFs {
     }
 }
 
-/// Records devfs mount `m`, and the vnodes of its terminals and console,
-/// which opening `/dev/tty` and the boot processes' descriptors need.
+/// Records devfs mount `m`, and the console's vnode, which the boot
+/// processes' descriptors need.
 pub(crate) fn mounted(s: &Sleepable, m: &Arc<Mount>) {
     let _ = MOUNT.set(Arc::clone(m));
     let Ok(root) = m.root(s) else {
         return;
     };
-    for t in &crate::tty::all() {
-        if let Ok(v) = vfs::namei::Namespace::child(s, &root, t.name().as_bytes()) {
-            t.set_vnode(&v);
-        }
-    }
     if let Ok(c) = vfs::namei::Namespace::child(s, &root, b"console") {
         let _ = CONSOLE.set(c);
     }

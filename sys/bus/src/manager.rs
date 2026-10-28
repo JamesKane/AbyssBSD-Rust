@@ -676,7 +676,20 @@ impl Manager {
             return;
         };
         let decl = &self.drivers[d];
-        let unit = t.units.alloc(decl.name, None).unwrap_or(0);
+        let wired = t.node(id).and_then(|n| {
+            decl.hints
+                .iter()
+                .find(|h| {
+                    n.resources
+                        .iter()
+                        .any(|r| matches!(r, Resource::IoPort { base, .. } if *base == h.port))
+                })
+                .map(|h| h.unit)
+        });
+        let hinted: Vec<u32> = decl.hints.iter().map(|h| h.unit).collect();
+        let unit = wired
+            .and_then(|u| t.units.alloc(decl.name, Some(u)).ok())
+            .unwrap_or_else(|| t.units.alloc_skipping(decl.name, &hinted));
         let desc = match t.node(id) {
             Some(n) => (decl.describe)(&n.ident, n.bus_data.as_deref()),
             None => (decl.describe)(&Ident::Root, None),

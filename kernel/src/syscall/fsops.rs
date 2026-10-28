@@ -495,6 +495,23 @@ pub(super) fn chflags(s: &Sleepable, path: u64, flags: u64, nofollow: bool) -> S
     chflagsat(s, cwd(), path, flags, u64::from(flag))
 }
 
+/// `revoke(path)` (`sys_revoke`): every file open on the device node at
+/// `path` is dead, and its device forgets them. The node's owner or the
+/// superuser only.
+pub(super) fn revoke(s: &Sleepable, path: u64) -> SysResult {
+    let p = process()?;
+    let v = target(s, &p, cwd(), path, 0)?;
+    if v.kind() != vfs::Kind::CharDevice {
+        return Err(Errno::EINVAL);
+    }
+    let a = v.attr(s)?;
+    if crate::fs::cred().uid != a.uid && !crate::fs::cred_is_root() {
+        return Err(Errno::EPERM);
+    }
+    crate::fs::devfs::revoke(s, &v)?;
+    Ok(0)
+}
+
 /// `fchflags(fd, flags)`.
 pub(super) fn fchflags(s: &Sleepable, fd: u64, flags: u64) -> SysResult {
     setattr(s, &*fd_vnode(s, fd)?, &flags_of(flags)?)

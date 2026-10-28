@@ -38,6 +38,9 @@ pub const FIOGETOWN: u32 = ioc(IOC_OUT, b'f', 123, 4);
 pub const FIODTYPE: u32 = ioc(IOC_OUT, b'f', 122, 4);
 pub const FIONWRITE: u32 = ioc(IOC_OUT, b'f', 119, 4);
 pub const FIONSPACE: u32 = ioc(IOC_OUT, b'f', 118, 4);
+/// The device's name (`struct fiodgname_arg`: an `int` length, then a
+/// buffer pointer, which the request copies out to).
+pub const FIODGNAME: u32 = ioc(IOC_IN, b'f', 120, 16);
 
 /// Disk requests (`sys/disk.h`), which raw disk nodes answer.
 pub const DIOCGSECTORSIZE: u32 = ioc(IOC_OUT, b'd', 128, 4);
@@ -86,6 +89,27 @@ pub const TIOCCDTR: u32 = ioc(IOC_VOID, b't', 120, 0);
 pub const TIOCSDTR: u32 = ioc(IOC_VOID, b't', 121, 0);
 pub const TIOCCBRK: u32 = ioc(IOC_VOID, b't', 122, 0);
 pub const TIOCSBRK: u32 = ioc(IOC_VOID, b't', 123, 0);
+/// Pseudo-terminal masters: `grantpt` and `unlockpt` ask (`TIOCPTMASTER`),
+/// a signal to the foreground group (`TIOCSIG`, the number passed by
+/// value), packet mode (`TIOCPKT`).
+pub const TIOCPTMASTER: u32 = ioc(IOC_VOID, b't', 28, 0);
+pub const TIOCSIG: u32 = ioc(IOC_VOID, b't', 95, 4);
+pub const TIOCPKT: u32 = ioc(IOC_IN, b't', 112, 4);
+/// `tcdrain`'s timeout, in seconds (0: none).
+pub const TIOCGDRAINWAIT: u32 = ioc(IOC_OUT, b't', 86, 4);
+pub const TIOCSDRAINWAIT: u32 = ioc(IOC_IN, b't', 87, 4);
+/// Kernel messages to this terminal (`TIOCCONS`).
+pub const TIOCCONS: u32 = ioc(IOC_IN, b't', 98, 4);
+
+/// What a packet-mode master read's first byte says.
+pub const TIOCPKT_DATA: u8 = 0x00;
+pub const TIOCPKT_FLUSHREAD: u8 = 0x01;
+pub const TIOCPKT_FLUSHWRITE: u8 = 0x02;
+pub const TIOCPKT_STOP: u8 = 0x04;
+pub const TIOCPKT_START: u8 = 0x08;
+pub const TIOCPKT_NOSTOP: u8 = 0x10;
+pub const TIOCPKT_DOSTOP: u8 = 0x20;
+pub const TIOCPKT_IOCTL: u8 = 0x40;
 
 /// Modem lines (`TIOCM_*`).
 pub const TIOCM_LE: u32 = 0o001;
@@ -160,6 +184,25 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("TIOCM_DCD", "sys/ioctl.h", TIOCM_DCD),
     c("TIOCM_DSR", "sys/ioctl.h", TIOCM_DSR),
     c("TTYDISC", "sys/ioctl.h", TTYDISC),
+    c("FIODGNAME", "sys/filio.h", FIODGNAME),
+    c("TIOCPTMASTER", "sys/ioctl.h", TIOCPTMASTER),
+    c("TIOCSIG", "sys/ioctl.h", TIOCSIG),
+    c("TIOCPKT", "sys/ioctl.h", TIOCPKT),
+    c("TIOCGDRAINWAIT", "sys/ioctl.h", TIOCGDRAINWAIT),
+    c("TIOCSDRAINWAIT", "sys/ioctl.h", TIOCSDRAINWAIT),
+    c("TIOCCONS", "sys/ioctl.h", TIOCCONS),
+    c("TIOCPKT_DATA", "sys/ioctl.h", TIOCPKT_DATA as u32),
+    c("TIOCPKT_FLUSHREAD", "sys/ioctl.h", TIOCPKT_FLUSHREAD as u32),
+    c(
+        "TIOCPKT_FLUSHWRITE",
+        "sys/ioctl.h",
+        TIOCPKT_FLUSHWRITE as u32,
+    ),
+    c("TIOCPKT_STOP", "sys/ioctl.h", TIOCPKT_STOP as u32),
+    c("TIOCPKT_START", "sys/ioctl.h", TIOCPKT_START as u32),
+    c("TIOCPKT_NOSTOP", "sys/ioctl.h", TIOCPKT_NOSTOP as u32),
+    c("TIOCPKT_DOSTOP", "sys/ioctl.h", TIOCPKT_DOSTOP as u32),
+    c("TIOCPKT_IOCTL", "sys/ioctl.h", TIOCPKT_IOCTL as u32),
 ];
 
 const fn c(c_name: &'static str, header: &'static str, value: u32) -> ConstValue {

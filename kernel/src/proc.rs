@@ -975,6 +975,17 @@ impl Process {
         drop_caught: bool,
         share_files: bool,
     ) -> Result<(i32, Option<i32>), Errno> {
+        // A user's processes, zombies too, are held to `RLIMIT_NPROC`,
+        // counted by real user, the superuser's included (`fork1`'s
+        // `chgproccnt`).
+        let max = self.limits.lock()[rlimit::NPROC as usize].rlim_cur;
+        if max != RLIM_INFINITY {
+            let ruid = self.cred().ruid;
+            let n = all().iter().filter(|p| p.cred().ruid == ruid).count();
+            if n as u64 >= max {
+                return Err(Errno::EAGAIN);
+            }
+        }
         let space = if vfork {
             self.space()
         } else {
@@ -1409,7 +1420,7 @@ impl Process {
         crate::fs::closed(self.pid, &closed);
         drop(closed);
         if self.pid == self.sid() {
-            crate::tty::session_ended(self.pid);
+            crate::tty::session_ended(s, self.pid);
         }
         // Its last thread holds the process (through its owner) and the
         // process holds it; this breaks the cycle.

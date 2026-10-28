@@ -89,6 +89,9 @@ pub struct Vnode {
     /// a weak reference upgraded meanwhile (the name cache's) must let it
     /// go, as FreeBSD's `vget` fails on a vnode being doomed.
     dying: core::sync::atomic::AtomicBool,
+    /// Reclaimed: [`State::Doomed`], readable without the lock (files of
+    /// a revoked device look at it on every call).
+    doomed: core::sync::atomic::AtomicBool,
     /// Open files writing it (positive) or programs running it
     /// (negative), never both (FreeBSD's `v_writecount`).
     writecount: core::sync::atomic::AtomicI64,
@@ -143,6 +146,7 @@ impl Vnode {
             lockf: crate::lockf::Lockf::new(),
             used: AtomicU64::new(generation()),
             dying: core::sync::atomic::AtomicBool::new(false),
+            doomed: core::sync::atomic::AtomicBool::new(false),
             writecount: core::sync::atomic::AtomicI64::new(0),
             poll: sync::Once::new(),
             size_hint: AtomicU64::new(0),
@@ -516,6 +520,7 @@ impl Vnode {
         crate::cache::purge(self);
         let ops = {
             let mut st = self.write(s);
+            self.doomed.store(true, Ordering::Release);
             core::mem::replace(&mut *st, State::Doomed)
         };
         if let State::Live(ops) = ops {
@@ -527,6 +532,13 @@ impl Vnode {
     /// Whether it was doomed.
     pub fn is_doomed(&self, s: &Sleepable) -> bool {
         matches!(*self.read(s), State::Doomed)
+    }
+
+    /// Whether it was doomed, without taking its lock: a device's open
+    /// files ask before each call, and a revoked one's fail
+    /// (`devfs_fp_check`).
+    pub fn gone(&self) -> bool {
+        self.doomed.load(Ordering::Acquire)
     }
 
     /// The last use went (FreeBSD's `vinactive`): the file system frees an

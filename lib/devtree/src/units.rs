@@ -49,6 +49,17 @@ impl Units {
         Ok(unit)
     }
 
+    /// The lowest free unit of `class` not in `skip` (units hints wire to
+    /// other devices).
+    pub fn alloc_skipping(&mut self, class: &str, skip: &[u32]) -> u32 {
+        let used = self.classes.entry(String::from(class)).or_default();
+        let unit = (0..)
+            .find(|u| !used.contains(u) && !skip.contains(u))
+            .expect("a free unit");
+        used.insert(unit);
+        unit
+    }
+
     /// Gives a unit back.
     pub fn release(&mut self, class: &str, unit: u32) {
         if let Some(used) = self.classes.get_mut(class) {
@@ -91,5 +102,16 @@ mod tests {
         assert_eq!(u.max_unit("nvme"), 8);
         assert!(u.in_use("nvme", 7));
         assert_eq!(u.max_unit("vtblk"), 0);
+    }
+
+    #[test]
+    fn hinted_units_are_kept_for_their_devices() {
+        // COM2 found first takes its hinted unit; an unhinted port skips
+        // both hinted ones; COM1 then takes 0.
+        let mut u = Units::new();
+        assert_eq!(u.alloc("uart", Some(1)), Ok(1));
+        assert_eq!(u.alloc_skipping("uart", &[0, 1]), 2);
+        assert_eq!(u.alloc("uart", Some(0)), Ok(0));
+        assert_eq!(u.alloc_skipping("uart", &[0, 1]), 3);
     }
 }

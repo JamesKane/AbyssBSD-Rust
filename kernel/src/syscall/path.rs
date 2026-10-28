@@ -248,7 +248,7 @@ pub(super) fn openat(s: &Sleepable, fd: u64, path_ptr: u64, flags: u64, mode: u6
         let vf = if flags & O_PATH != 0 {
             VnodeFile::path_only(&v)
         } else {
-            VnodeFile::open(s, &v, fflags & FWRITE != 0)?
+            VnodeFile::open(s, &v, fflags & FWRITE != 0, flags & O_NONBLOCK != 0)?
         };
         let file = File::new(FileKind::Vnode(vf), fflags & keep);
         // O_SHLOCK and O_EXLOCK take an `flock` lock as the file opens.

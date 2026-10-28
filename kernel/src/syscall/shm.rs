@@ -213,7 +213,8 @@ pub(super) fn fspacectl(
         | FileKind::Process(_)
         | FileKind::Kqueue(_)
         | FileKind::Timerfd(_)
-        | FileKind::Eventfd(_) => return Err(Errno::ESPIPE),
+        | FileKind::Eventfd(_)
+        | FileKind::Pts(_) => return Err(Errno::ESPIPE),
         FileKind::Vnode(_) => return Err(Errno::ENODEV),
     };
     if f.flags() & FWRITE == 0 {

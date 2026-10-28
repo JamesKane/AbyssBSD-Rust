@@ -543,8 +543,10 @@ dependencies = [
  "bus",
  "devtree",
  "irq",
+ "regs",
  "sched",
  "sync",
+ "uart-16550",
 ]
 
 [[package]]
