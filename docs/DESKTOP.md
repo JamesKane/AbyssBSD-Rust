@@ -22,8 +22,10 @@ that a session broker hands out, with no bus, no names, and no listening sockets
 except the session root runs in Capsicum capability mode. All configuration is one typed KDL tree
 with a strict cascade, and every setting has exactly one path. Shell UI is a retained scene graph
 that sandboxed component processes submit and the compositor renders, so themes, effects, and
-animations apply everywhere at once. Everything is Rust in this workspace with no external crates.
-The only foreign code is Mesa's Vulkan drivers and FreeBSD's base libraries.
+animations apply everywhere at once. Everything the desktop designs is Rust in this workspace. The
+foreign code is Mesa's Vulkan drivers, FreeBSD's base libraries, and a short inventory of
+shallow-dependency libraries for standards there is no reason to reimplement: media codecs and
+containers, font shaping, image formats, and keymaps (§2.1).
 
 ## 1. Executive overview
 
@@ -36,7 +38,7 @@ desktop's design. It has four aims:
 1. **The lowest input-to-photon latency** we can reach, with first-class high-polling-rate mice,
    game controllers, and specialized peripherals.
 2. **Zero-copy capture and encoding** of outputs, windows, and per-application audio for streaming
-   and recording, without third-party plumbing.
+   and recording, without a separate media server in the path.
 3. **Deep visual customization ("ricing")**: composable, GPU-rendered components, themes, and user
    shaders, all driven from one configuration tree.
 4. **A capability security model** built on AbyssBSD's FreeBSD primitives (Capsicum, process
@@ -68,44 +70,88 @@ desktop's design. It has four aims:
 
 ### 2.1 Dependencies
 
-The desktop lives in this workspace and follows ADR-0002: **no external crates**. Every Cargo
-dependency is a `path =` inside the workspace. That decides most of the build-versus-reuse
-questions an ordinary Rust desktop answers with crates.io:
+ADR-0002's **no external crates** rule exists for the kernel, where every line runs privileged and
+has to be fully understood. The desktop is userland, and much of what it needs implements standards
+that mature libraries already implement well: media codecs, container formats, font shaping, image
+formats. Rewriting those adds no design value, costs years, and yields code that is less tested and
+less fuzzed than what it replaces. The desktop therefore takes its own rule, which the M-D ADR
+(M-D.0) records as an amendment to ADR-0002 that applies to `desk/` only.
+
+**The line is the dependency tree, not where the code comes from.** A foreign library may be used
+when all of these hold:
+
+1. **Shallow closure.** The library and everything it pulls in can be listed by name in the
+   inventory: generally a handful of libraries, each of which meets these rules itself. A library
+   that brings a framework with it (GLib, Boost, an async runtime, a proc-macro stack) does not
+   qualify, however good it is.
+2. **It implements a standard, not this design.** Codecs, containers, font tables, image formats,
+   and protocols defined elsewhere qualify. What this document exists to design stays in-house: the
+   compositor and its Wayland protocol layer, frame scheduling and the input path (aim 1), the
+   scene graph, rendering, and configuration (aim 3), and Conduit and the security model (aim 4).
+3. **License.** Permissive (BSD, MIT, ISC, zlib, Apache-2.0), file-level copyleft (MPL-2.0), or
+   LGPL when linked dynamically from a package. GPL code is never linked, and, as everywhere in the
+   project, never consulted.
+4. **Maintained and fuzzed.** An active upstream and continuous fuzzing (OSS-Fuzz or equivalent),
+   since every library here parses untrusted input.
+5. **Contained.** Foreign code that parses untrusted data runs only in capability-mode components
+   (§6), never in `sabled` or `sable-sysd`.
+
+How each kind arrives:
+
+- **C and C++ libraries** come from packages (`pkg`) or `base.txz` and are linked dynamically. Each
+  is reached through one FFI module with `// SAFETY:` comments. Bindings are written or generated
+  in-house and checked in: no `bindgen`, no `-sys` crate trees.
+- **Rust crates** are vendored and pinned under `desk/third_party/<crate>/` with their licenses and
+  used by `path =`, so the build stays offline and `Cargo.lock` never names a registry. The rule
+  exists to keep out crates.io's deep trees: `tokio`, `wgpu`, `smithay`, `image`, `resvg`, `naga`,
+  and anything built on `syn`.
+- **The inventory**, `desk/third_party/inventory.kdl`, lists every foreign library with its version,
+  license, complete closure, the components that load it, and why it qualifies. `cargo xtask check`
+  fails on any link or `path =` outside it, and adding an entry is a reviewed change.
+
+The kernel, the loader, and every `lib/` crate stay under ADR-0002 unchanged. `lib/` holds pure
+`no_std` code and does not take foreign dependencies. A crate that wraps a foreign library lives in
+`desk/`.
+
+Applied to the questions an ordinary Rust desktop answers with crates.io:
 
 | Need | Ordinary choice | Here |
 |---|---|---|
-| Wayland wire protocol | `wayland-rs` | `lib/wayland-wire` (pure `no_std` message codec and fd accounting) + code generated from the protocol XML by `tools/waylandgen` and checked in, as `syscallgen` does (`cargo xtask waylandgen --check`). The XML is MIT. |
-| Vulkan bindings | `ash` | `lib/vk`, generated from `vk.xml` (Apache-2.0 OR MIT) by `tools/vkgen` and checked in. The loader (`libvulkan.so.1`) is opened with `dlopen` at run time. |
-| DRM/KMS | `drm-rs`, libdrm | `lib/drm-uapi`: DRM ioctl structures and FreeBSD request numbers (GRAPHICS.md §2), shared with `sys/drm`'s tests. No libdrm, no GBM: buffers are allocated with Vulkan and exported as dma-bufs. |
-| Seats | seatd/libseat, logind | The `seat` provider in `sable-sysd` (§6.8) |
-| Input devices | libinput | `sable-input` reads evdev directly. Touchpad gestures, palm rejection, and tablet tools are implemented in `lib/gesture` (§5.2) |
-| Keymaps | xkbcommon | `lib/xkb`: keymap compilation from xkeyboard-config data (MIT data from packages, not code), key state, and the XKB v1 text that Wayland clients expect |
-| Text | HarfBuzz, FreeType, swash, cosmic-text | `lib/otf` (sfnt parsing, `cmap`, `glyf`, CFF, `GSUB`/`GPOS`), `lib/shape`, `lib/raster` (area-coverage glyph and path rasterizer), `lib/textlayout` (line breaking, bidi) |
-| Images and icons | image, resvg | `lib/inflate`, `lib/png`, `lib/jpeg`, `lib/svg` (the icon subset: paths, gradients, transforms, no text or filters) |
-| Layout | taffy | `lib/flexgrid` (flexbox and a grid subset) |
-| Shaders | naga, glslang | `lib/shade`: a compiler for **Sable Shading Language**, a WGSL subset, to SPIR-V (§4.7.4). It compiles the compositor's own shaders at build time and user shaders at run time. |
-| Config syntax | kdl, serde | `lib/kdl` (format-preserving KDL v2) and the `Schema` derive in `lib/schema-derive` |
-| Async runtime | tokio, mio | `sable-rt`, directly on kqueue (§6.3) |
-| Audio resampling, mixing | rubato, cpal | `lib/dsp` |
-| Video encode | x264, SVT-AV1 | Vulkan Video only in the canonical path. The fallback is an open question (§12 question 4). |
-| Containers, muxing | ffmpeg | `lib/mux` (fragmented MP4, Matroska), `lib/rtmp`. SRT and WHIP come later (§5.7.2). |
+| Wayland wire protocol | libwayland, `wayland-rs` | **Built**: `lib/wayland-wire` (pure `no_std` message codec and fd accounting) + code generated from the protocol XML by `tools/waylandgen` and checked in, as `syscallgen` does (`cargo xtask waylandgen --check`). The XML is MIT. The protocol layer is the compositor's core and its fault boundary. |
+| Vulkan bindings | `ash` | **Built**: `lib/vk`, generated from `vk.xml` (Apache-2.0 OR MIT) by `tools/vkgen` and checked in. The generator is small. The loader (`libvulkan.so.1`) is opened with `dlopen` at run time. |
+| DRM/KMS | `drm-rs`, libdrm | **Built**: `lib/drm-uapi`: DRM ioctl structures and FreeBSD request numbers (GRAPHICS.md §2), shared with `sys/drm`'s tests. No libdrm, no GBM: buffers are allocated with Vulkan and exported as dma-bufs. |
+| Seats | seatd/libseat, logind | **Built**: the `seat` provider in `sable-sysd` (§6.8) |
+| Input devices | libinput | **Built**: `sable-input` reads evdev directly. Touchpad gestures, palm rejection, and tablet tools are implemented in `lib/gesture` (§5.2). The input path is aim 1, and libinput's closure (libevdev, mtdev, libudev-devd, libwacom with GLib) is not shallow. |
+| Keymaps | xkbcommon | **xkbcommon** (MIT, built without its optional libxml2 registry), the library every Wayland client already links, with xkeyboard-config data |
+| Text shaping | HarfBuzz | **HarfBuzz** (MIT, no required dependencies): shaping for every script, font tables, and glyph outlines and color glyphs through `hb-draw` and `hb-paint` |
+| Text rendering, layout | FreeType, swash, cosmic-text | **Built**: `lib/raster` (area-coverage rasterizer for HarfBuzz's outlines, into the compositor's atlas, §4.7.3), `lib/textlayout` (line breaking and bidi, UAX #14 and #9; ICU is the only complete alternative, and it is not shallow) |
+| Images and icons | image, resvg | **libpng** (with zlib from base) and **libjpeg-turbo**. **Built**: `lib/svg` (the icon subset: paths, gradients, transforms, no text or filters), since resvg's tree is deep |
+| Layout | taffy | **Built**: `lib/flexgrid` (flexbox and a grid subset), part of the scene graph |
+| Shaders | naga, glslang | **Built**: `lib/shade`: a compiler for **Sable Shading Language**, a WGSL subset, to SPIR-V (§4.7.4). It compiles the compositor's own shaders at build time and user shaders at run time. |
+| Config syntax | kdl, serde | **Built**: `lib/kdl` (format-preserving KDL v2) and the `Schema` derive in `lib/schema-derive` |
+| Async runtime | tokio, mio | **Built**: `sable-rt`, directly on kqueue (§6.3) |
+| Audio resampling, mixing | rubato, cpal | **Built**: `lib/dsp`, inside the real-time graph (§5.5) |
+| Video encode | x264, SVT-AV1 | Vulkan Video in the canonical path. The software fallback is **libavcodec** with **SVT-AV1** and **OpenH264** (both BSD), §5.7.1. x264 and x265 are GPL and excluded. |
+| Audio encode | libopus, fdk-aac | **libopus** (BSD) and libavcodec's native AAC encoder |
+| Containers, streaming | ffmpeg | **libavformat** from ffmpeg's LGPL configuration: fragmented MP4, Matroska, RTMP and RTMPS (TLS from base's `libssl`). SRT (**libsrt**, MPL-2.0) and WHIP come later (§5.7.2). |
 
-**Foreign code at run time** is limited to two kinds, and both are reached through one FFI module
-per library with `// SAFETY:` comments:
+**Foreign code at run time** is therefore of three kinds:
 
 1. **The Vulkan loader and Mesa's drivers from packages** (`vulkan-loader`, `mesa-libs`,
    `mesa-dri`). GRAPHICS.md G1 already settles that Vulkan drivers are Mesa's: panvk, RADV, Venus,
    and lavapipe.
 2. **FreeBSD base libraries** from `base.txz`: `libc` (through `std`), `libpam` for authentication,
-   and `libssl`/`libcrypto` for TLS (RTMPS, the remote-control Facet). M-U may later replace them.
-   The desktop uses them the way every base program does.
+   `libssl`/`libcrypto` for TLS (RTMPS, the remote-control Facet), and `libz`. M-U may later replace
+   them. The desktop uses them the way every base program does.
+3. **The inventory**: xkbcommon, HarfBuzz, libpng, libjpeg-turbo, ffmpeg's libavcodec,
+   libavformat, and libavutil, SVT-AV1, OpenH264, libopus, and later libsrt.
 
 Programs from packages that the desktop *runs* as ordinary clients (Xwayland, Wine, a private
 `dbus-daemon` for §8.8) are applications, not dependencies.
 
-The cost is scope. The text, shader, and image libraries are each real projects. They are kept to
-what the desktop needs (ROADMAP risk "no external crates"): Latin, Greek, and Cyrillic shaping
-first, complex scripts as their own step (§12 question 3), PNG/JPEG/SVG-icon only.
+What remains in-house is still real work. `lib/raster`, `lib/textlayout`, `lib/svg`, and
+`lib/shade` are kept to what the desktop needs (ROADMAP risk "no external crates"), and the
+inventory is kept short: a new entry has to show why the in-house alternative adds nothing.
 
 ### 2.2 Toolchain and layout
 
@@ -115,7 +161,7 @@ first, complex scripts as their own step (§12 question 3), PNG/JPEG/SVG-icon on
   ADR-0003 rules out `-Zbuild-std`. The aarch64 desktop therefore builds natively, with FreeBSD's
   `rust` package on FreeBSD or AbyssBSD arm64, which is the self-hosting path VISION already names.
   §12 question 2.
-- Pure libraries (`lib/wayland-wire`, `lib/kdl`, `lib/otf`, `lib/shade`, `lib/png`, `lib/xkb`, …)
+- Pure libraries (`lib/wayland-wire`, `lib/kdl`, `lib/raster`, `lib/shade`, `lib/svg`, …)
   are `no_std` + `alloc`, host-tested, and live in `lib/` with the kernel's pure libraries.
   Process crates live under a new top-level `desk/`:
 
@@ -351,12 +397,13 @@ from it:
 
 #### 4.7.3 Text and vectors
 
-Facet UI is rendered by the compositor (§8.2), so text is too. `lib/shape` shapes with `lib/otf`'s
-`GSUB`/`GPOS`. `lib/textlayout` breaks lines and resolves bidi. `lib/raster` rasterizes glyphs into
-a GPU atlas per size and subpixel offset, and coverage is blended in linear space. Rectangles,
+Facet UI is rendered by the compositor (§8.2), so text is too. HarfBuzz shapes runs and supplies
+glyph outlines (`hb-draw`) and color glyph paint lists (`hb-paint`). `lib/textlayout` breaks lines
+and resolves bidi. `lib/raster` rasterizes glyphs into a GPU atlas per size and subpixel offset,
+and coverage is blended in linear space. Rectangles,
 rounded rectangles, circles, and lines are analytic SDFs in the fragment shader. Other paths are
-tessellated by `lib/raster` and cached by hash. Images are decoded off-thread (`lib/png`,
-`lib/jpeg`, `lib/svg`), and SVG icons are re-rasterized when the scale changes.
+tessellated by `lib/raster` and cached by hash. Images are decoded off-thread (libpng,
+libjpeg-turbo, `lib/svg`), and SVG icons are re-rasterized when the scale changes.
 
 #### 4.7.4 Shaders
 
@@ -440,7 +487,7 @@ compositor, and so that controllers can be routed:
  /dev/input/event*, /dev/hidraw*  (fds from the seat provider; hotplug from devd)
             │
             ▼
- sable-input ── classify ─┬─ keyboards ─ lib/xkb state, shortcuts ─────┐
+ sable-input ── classify ─┬─ keyboards ─ xkbcommon state, shortcuts ───┐
                           ├─ pointers ── raw path (gaming) / lib/gesture ┼─▶ shm ring ─▶ sable-comp
                           ├─ tablets, touch ── lib/gesture ─────────────┘
                           ├─ controllers ─ router ─▶ /dev/uinput virtual pads ─▶ games
@@ -461,7 +508,7 @@ used. Each device's clock is set to `CLOCK_MONOTONIC` with `EVIOCSCLOCKID`.
 
 #### 5.2.2 Keyboards, touchpads, tablets
 
-Keymaps are compiled by `lib/xkb` from xkeyboard-config's data according to the `input.keyboard`
+Keymaps are compiled by xkbcommon from xkeyboard-config's data according to the `input.keyboard`
 config, and they are sent to clients as sealed memfds (`memfd_create`, `F_ADD_SEALS`). Repeat comes
 from config per keyboard and is announced with `wl_keyboard.repeat_info`. `lib/gesture` handles
 touchpad motion, tap, scroll, palm rejection, and swipe and pinch gestures, with tablet tools
@@ -655,15 +702,17 @@ The canonical encoder is **Vulkan Video** (`VK_KHR_video_encode_queue` with H.26
 using the sink's dma-bufs directly, with rate control in config. On the reference machines this
 needs the GPU's video engine in the kernel driver: VCN under the RDNA2 driver (M-G.6), and the
 Sky1's Mali-V codec, which GRAPHICS.md §13 question 3 assigns to a separate media design. Machines
-without hardware encode raise §12 question 4. There is one `Encoder` trait and one config key,
-`cast.encoder`.
+without hardware encode fall back to software encoders through libavcodec: SVT-AV1 for AV1 and
+OpenH264 for H.264 (§2.1), fed from the sink's buffers by a GPU-to-host copy. There is one
+`Encoder` trait and one config key, `cast.encoder`.
 
 #### 5.7.2 Outputs
 
 - **Recording**: fragmented MP4 (so a crash loses no more than the last fragment) or Matroska,
-  through `lib/mux`.
-- **Streaming**: RTMP and RTMPS (`lib/rtmp`, with TLS from base's `libssl`) first. SRT and WHIP
-  (WebRTC ingest: ICE, DTLS-SRTP) are later steps, each a sizeable library.
+  through libavformat.
+- **Streaming**: RTMP and RTMPS (libavformat, with TLS from base's `libssl`) first. SRT (libsrt)
+  and WHIP (WebRTC ingest: ICE, DTLS-SRTP) are later steps, each through libavformat where its
+  support suffices.
 - **Replay buffer**: a ring of encoded packets in memory, saved by an action ("save the last
   60 s").
 
@@ -1301,9 +1350,10 @@ plan:
 
 QEMU first (ADR-0010), as everywhere else:
 
-- **Host**: every `lib/` crate (`wayland-wire`, `kdl`, `otf`, `shape`, `raster`, `png`, `jpeg`,
-  `svg`, `xkb`, `shade`, `flexgrid`, `dsp`, `mux`) is host-tested and fuzzed, and Conduit decoders
-  are fuzzed through their generated targets. `lib/shade`'s output is checked with `spirv-val`.
+- **Host**: every `lib/` crate (`wayland-wire`, `kdl`, `raster`, `textlayout`, `svg`, `shade`,
+  `flexgrid`, `dsp`) is host-tested and fuzzed, and Conduit decoders are fuzzed through their
+  generated targets. Inventory libraries (§2.1) rely on their upstream fuzzing, and the FFI module
+  in front of each is fuzzed here. `lib/shade`'s output is checked with `spirv-val`.
 - **Headless**: the compositor's headless backend on lavapipe renders scripted sessions (test
   clients driving xdg-shell, dmabuf, syncobj, presentation) and compares pixels with stored images.
 - **QEMU**: the compositor on `gop-kms` with lavapipe, then `virtio-gpu` with Venus, booted by
@@ -1352,11 +1402,12 @@ until GRAPHICS.md §13 question 7 is decided.
 2. **The aarch64 userland target.** `aarch64-unknown-freebsd` has no prebuilt `std`, and ADR-0003
    rules out `-Zbuild-std`. Build natively with FreeBSD's `rust` package (proposed), or ask M-U to
    settle an AbyssBSD userland target first.
-3. **Text scope.** Complex scripts (Arabic, Indic, and others with heavy `GSUB`/`GPOS` use) and
-   color emoji (`COLR`, `CBDT`) are real work in `lib/shape` and `lib/raster`. When do they come?
-4. **Software video encode.** On machines without a driven video engine: write an encoder in-house
-   (H.264 at modest quality is tractable; AV1 isn't soon), or run a packaged encoder as a sandboxed
-   child fed through shared memory, labelled compatibility.
+3. **Color glyphs.** HarfBuzz shapes every script, but color emoji still need `lib/raster` to
+   draw `COLRv1` paint lists and place `CBDT`/`sbix` bitmaps. Do they come with M-D.3 or later?
+4. **ffmpeg's configuration.** The desktop needs ffmpeg's LGPL configuration with only the
+   inventory's externals enabled. A packaged ffmpeg built with GPL options (x264, x265) is GPL as a
+   whole. Should AbyssBSD ship its own LGPL ffmpeg build in `desktop.txz`'s dependencies, require a
+   package flavor, or link SVT-AV1, OpenH264, and libopus directly and keep only libavformat?
 5. **Base libraries.** Linking `libpam` and `libssl` from `base.txz` is proposed (§2.1). The M-D ADR
    should record that rule, and whether M-U's Rust replacements will take their place.
 6. **Install prefix.** `desktop.txz` installs base-style (`/usr`, `/etc/sable`), while its package
@@ -1373,10 +1424,10 @@ The foundations need only P6 and can start before M-G finishes. The compositor s
 
 | Step | Work | Needs | Exit |
 |---|---|---|---|
-| **M-D.0** | This document finalized, and the M-D ADR (dependencies and base libraries, §12 questions 2, 5, 6) | — | ADR accepted |
+| **M-D.0** | This document finalized, and the M-D ADR (dependencies and base libraries, §12 questions 2, 4, 5, 6) | — | ADR accepted |
 | **M-D.1** | `sable-rt`, Conduit (with fuzzing), `sabled` (supervisor, broker, config authority), `lib/kdl` and `Schema`, `sable-sysd` with `seat` and `auth` | P6.7 | Two sandboxed processes exchange typed messages over brokered channels in QEMU, and config reloads with typed diffs and ACK/NACK |
-| **M-D.2** | `sable-comp` on `gop-kms` with lavapipe: xdg-shell, shm, `wp_presentation`, tiling and workspaces, `lib/xkb`, keyboards and pointers, headless and nested backends | M-G.1 | A tiled session of Wayland clients from packages in QEMU and on both reference machines' firmware framebuffers |
-| **M-D.3** | dmabuf, syncobj, the render graph with blur, `lib/otf`/`shape`/`raster`, `lib/shade`, the Facet SDK, slots, the panel, launcher, workspaces and clock widgets, the generated settings GUI, `sable-greet`, `sable-lock` | M-G.2, M-G.3 | A complete graphical session in QEMU on Venus, with no terminal needed for any configuration task |
+| **M-D.2** | `sable-comp` on `gop-kms` with lavapipe: xdg-shell, shm, `wp_presentation`, tiling and workspaces, xkbcommon keymaps, keyboards and pointers, headless and nested backends | M-G.1 | A tiled session of Wayland clients from packages in QEMU and on both reference machines' firmware framebuffers |
+| **M-D.3** | dmabuf, syncobj, the render graph with blur, text (HarfBuzz, `lib/raster`, `lib/textlayout`), `lib/shade`, the Facet SDK, slots, the panel, launcher, workspaces and clock widgets, the generated settings GUI, `sable-greet`, `sable-lock` | M-G.2, M-G.3 | A complete graphical session in QEMU on Venus, with no terminal needed for any configuration task |
 | **M-D.4** | Direct scanout, VRR, tearing, the raw pointer path, the controller router, Game Mode, `sable-xwm` | M-G.4–M-G.6, uinput, HID controllers | `desk.frame`, `desk.latency`, and `desk.flip` at parity with sway, and full-rate pointer delivery to a locked-pointer client |
 | **M-D.5** | `sable-audiod`, capture sinks and masks, `sable-cast` (Vulkan Video, replay buffer, RTMP) | Audio, CUSE, video engines | A 1080p60 stream with stream-only overlays and per-application audio, with `desk.capture` at parity |
 | **M-D.6** | Jail profiles, the remaining providers, rice manager, `sable-compat-freedesktop`, `sable-term`, `desktop.txz` in the installer | P8, P9 | The desktop installs from AbyssBSD media and passes its suites on both reference machines |
