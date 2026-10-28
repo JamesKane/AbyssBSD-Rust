@@ -2,8 +2,6 @@
 # (cargo xtask test's shell cases compare the rest with
 # freebsd/freebsd-15.1-RELEASE-x86_64-bhyve.txt). One per line, with why
 # and until when.
-lib/libc/gen/setdomainname_test:setdomainname_basic # sysctl writes, P6.7
-lib/libc/gen/setdomainname_test:setdomainname_limit # sysctl writes, P6.7
 sys/posixshm/memfd_test:hugetlb                 # no superpage objects (compat-deviations), P6.8
 sys/posixshm/posixshm_test:largepage_config     # no superpage objects (compat-deviations), P6.8
 sys/posixshm/posixshm_test:largepage_reopen     # no superpage objects (compat-deviations), P6.8
@@ -12,8 +10,6 @@ sys/kern/timerfd:timerfd_root__advance_time_no_cancel # passes; fails on FreeBSD
 lib/libc/sys/kevent_test:kqueue_desc_passing    # socketpair, P6.5
 sys/kern/timerfd:timerfd__argument_checks       # arm64: its last check passes an uninitialized itimerspec, valid there, so EBADF as FreeBSD's order gives; the baseline is amd64's
 sys/kern/unix_dgram:event                       # aio_read on a socket: POSIX AIO, P8
-sys/kern/unix_passfd_dgram:cross_jail_dirfd     # jails, P6.7
-sys/kern/unix_passfd_stream:cross_jail_dirfd    # jails, P6.7
 sys/kern/socket_msg_trunc:recv_trunc_afinet_udp # AF_INET, P8
 sys/kern/socket_msg_trunc:recv_trunc_afinet6_udp # AF_INET6, P8
 sys/kern/socket_msg_trunc:recvmsg_trunc_ktrace_uio # ktrace, P6.8
@@ -23,3 +19,14 @@ sys/kern/listener_wakeup:all                    # AF_INET, P8
 lib/libc/sys/connect_test:connect_low_port      # AF_INET, P8
 lib/libc/sys/socketpair_test:inet               # AF_INET (EOPNOTSUPP from TCP), P8
 sys/kqueue/libkqueue/kqueue_test:main          # passes; FreeBSD 15.1 aborts it (signal 6)
+sys/kern/pdeathsig:signal_delivered_ptrace      # ptrace, P6.8
+sys/kern/jail_lookup_root:jail_root             # nullfs, not yet planned (VFS.md §1.2)
+sys/capsicum/bindat_connectat:bindat_connectat_1 # AF_INET, P8
+sys/capsicum/bindat_connectat:bindat_connectat_2 # AF_INET, P8
+sys/capsicum/bindat_connectat:bindat_connectat_3 # AF_INET, P8
+sys/capsicum/ioctls_test:cap_ioctls__listen_copy # AF_INET, P8
+usr.sbin/jail/jail_basic_test:basic             # ip4.addr: AF_INET, P8
+usr.sbin/jail/jail_basic_test:list              # ifconfig epair (netlink), P8
+usr.sbin/jail/jail_basic_test:nested            # ip4.addr: AF_INET, P8
+usr.sbin/jail/jail_basic_test:param_consistency # ifconfig (netlink), P8
+usr.sbin/jail/jail_basic_test:setaudit          # setaudit_addr: no security event auditing (compat-deviations)

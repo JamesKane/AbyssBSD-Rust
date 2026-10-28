@@ -61,9 +61,10 @@ pub(crate) fn now() -> Timespec {
     }
 }
 
-/// Whether [`cred`] is the superuser's, taking no reference to it.
-pub(crate) fn cred_is_root() -> bool {
-    crate::proc::Process::with_current(crate::proc::Process::is_root).unwrap_or(true)
+/// Whether [`cred`] holds privilege `p` (`priv_check`, `EPERM` if not),
+/// taking no reference to it; kernel threads hold every privilege.
+pub(crate) fn priv_check(p: crate::cred::Priv) -> Result<(), Errno> {
+    crate::proc::Process::with_current(|me| me.priv_check(p)).unwrap_or(Ok(()))
 }
 
 /// The credential file operations run with: the current process's, or
@@ -71,7 +72,7 @@ pub(crate) fn cred_is_root() -> bool {
 pub(crate) fn cred() -> Arc<Ucred> {
     // The process borrowed, not referenced: one count taken, not two.
     crate::proc::Process::with_current(crate::proc::Process::cred)
-        .unwrap_or_else(Ucred::root_shared)
+        .unwrap_or_else(crate::cred::root_shared)
 }
 
 fn root_info(from: &[u8]) -> MountInfo {
@@ -429,24 +430,51 @@ pub(crate) fn root() -> Arc<Vnode> {
     Arc::clone(namespace().root())
 }
 
+/// `p`'s root directory (`pwd_rdir`): the system's unless it called
+/// `chroot` or is in a jail; the system's is borrowed, not counted.
+pub(crate) fn root_of(p: &crate::proc::Process) -> Cow<'static, Arc<Vnode>> {
+    p.root
+        .lock()
+        .as_ref()
+        .map_or(Cow::Borrowed(namespace().root()), |r| {
+            Cow::Owned(Arc::clone(r.vnode()))
+        })
+}
+
 /// Where a relative path starts: the working directory, or the directory
-/// open on a descriptor (the `*at` calls' `fd`).
+/// open on a descriptor (the `*at` calls' `fd`), which must hold the
+/// rights the operation needs besides `CAP_LOOKUP`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum At {
     Cwd,
-    Fd(i32),
+    Fd(i32, abi::capsicum::CapRights),
 }
 
 impl At {
     /// From an `*at` call's `fd` argument (`AT_FDCWD` for the working
-    /// directory).
-    pub(crate) const fn new(fd: i32) -> Self {
+    /// directory), for an operation needing `need` of it.
+    pub(crate) const fn new(fd: i32, need: abi::capsicum::CapRights) -> Self {
         if fd == AT_FDCWD {
             Self::Cwd
         } else {
-            Self::Fd(fd)
+            Self::Fd(fd, need)
         }
     }
+}
+
+/// Where a walk starts, and what it inherits.
+struct Start {
+    dir: Cow<'static, Arc<Vnode>>,
+    /// Where absolute paths start, and `..` stops: the process's root.
+    root: Cow<'static, Arc<Vnode>>,
+    /// The walk must stay beneath the start (`NI_LCF_STRICTREL`): in
+    /// capability mode, or from a descriptor with limits.
+    strict: bool,
+    /// It starts at a descriptor with `UF_RESOLVE_BENEATH`, which what it
+    /// opens takes too (`NIRES_BENEATH`).
+    beneath: bool,
+    /// The starting descriptor's limits, for what a strict walk opens.
+    caps: Option<fdtable::FileCaps>,
 }
 
 /// How a path is walked.
@@ -461,11 +489,11 @@ pub(crate) struct Walk {
 }
 
 impl Walk {
-    /// The lookup this walk is, from `start`, as `cred`.
-    fn lookup<'a>(self, start: &'a Arc<Vnode>, cred: &'a Cred) -> Lookup<'a> {
+    /// The lookup this walk is, from `start` under `root`, as `cred`.
+    fn lookup<'a>(self, start: &'a Start, cred: &'a Cred) -> Lookup<'a> {
         Lookup {
-            start,
-            root: namespace().root(),
+            start: &start.dir,
+            root: &start.root,
             follow: self.follow,
             beneath: self.beneath,
             create: self.create,
@@ -485,33 +513,62 @@ impl Walk {
     };
 }
 
-/// Where `p`'s walk of `path` starts: the root is borrowed, not counted.
-fn start_of(
-    s: &Sleepable,
-    p: &crate::proc::Process,
-    at: At,
-    path: &[u8],
-) -> Result<Cow<'static, Arc<Vnode>>, Errno> {
-    if path.first() == Some(&b'/') {
-        return Ok(Cow::Borrowed(namespace().root()));
+/// Where `p`'s walk of `path` starts (`namei_setup`): the root is
+/// borrowed, not counted. In capability mode the walk must start at a
+/// descriptor (`ECAPMODE` otherwise) and stay beneath it; so must one from
+/// a descriptor with Capsicum limits, which must also hold `CAP_LOOKUP`
+/// and the operation's rights.
+fn start_of(s: &Sleepable, p: &crate::proc::Process, at: At, path: &[u8]) -> Result<Start, Errno> {
+    let capmode = p.in_capability_mode();
+    if capmode && at == At::Cwd {
+        return Err(Errno::ECAPMODE);
+    }
+    let root = root_of(p);
+    if path.first() == Some(&b'/') && !capmode {
+        return Ok(Start {
+            dir: root.clone(),
+            root,
+            strict: false,
+            beneath: false,
+            caps: None,
+        });
     }
     match at {
-        At::Cwd => Ok(Cow::Owned(Arc::clone(p.cwd.lock().vnode()))),
-        At::Fd(fd) => {
-            let dir = |f: &crate::fs::file::File| match f.vnode() {
-                Some(v) if v.is_dir() => Ok(Cow::Owned(Arc::clone(v))),
-                _ => Err(Errno::ENOTDIR),
+        At::Cwd => Ok(Start {
+            dir: Cow::Owned(Arc::clone(p.cwd.lock().vnode())),
+            root,
+            strict: false,
+            beneath: false,
+            caps: None,
+        }),
+        At::Fd(fd, need) => {
+            let need = need.with(abi::capsicum::CAP_LOOKUP);
+            let start = |slot: &fdtable::Slot| -> Result<Start, Errno> {
+                slot.check(&need)?;
+                let dir = match slot.file.vnode() {
+                    Some(v) if v.is_dir() => Cow::Owned(Arc::clone(v)),
+                    _ => return Err(Errno::ENOTDIR),
+                };
+                let limited = slot.caps.is_some();
+                let beneath = slot.flags.resolve_beneath;
+                Ok(Start {
+                    dir,
+                    root: root.clone(),
+                    strict: capmode || limited || beneath,
+                    beneath,
+                    caps: (capmode || limited).then(|| slot.caps()),
+                })
             };
             if p.sole_user_of_files() {
                 // SAFETY: only the process's threads reach its table, this
                 // is the only one, and it does nothing else with the table
-                // while `dir` runs (as `syscall::io::with_file`): no lock,
-                // and no reference to the file (FreeBSD's
+                // while `start` runs (as `syscall::io::with_file`): no
+                // lock, and no reference to the file (FreeBSD's
                 // `fgetvp_lookup_smr`).
                 let table = unsafe { p.files.get_unlocked() };
-                dir(&table.slot(fd)?.file)
+                start(table.slot(fd)?)
             } else {
-                dir(&*p.files.lock(s).get(fd)?)
+                start(p.files.lock(s).slot(fd)?)
             }
         }
     }
@@ -527,8 +584,27 @@ pub(crate) fn resolve_as(
     path: &[u8],
     walk: Walk,
 ) -> Result<Found, Errno> {
+    resolve_caps(s, p, cred, at, path, walk).map(|(f, ..)| f)
+}
+
+/// [`resolve_as`], with the limits a file opened by a strict walk
+/// inherits from its starting descriptor (`ni_filecaps`), and whether
+/// it started at one with `UF_RESOLVE_BENEATH`.
+pub(crate) fn resolve_caps(
+    s: &Sleepable,
+    p: &crate::proc::Process,
+    cred: &Cred,
+    at: At,
+    path: &[u8],
+    walk: Walk,
+) -> Result<(Found, Option<fdtable::FileCaps>, bool), Errno> {
     let start = start_of(s, p, at, path)?;
-    namespace().resolve(s, &walk.lookup(&start, cred), path)
+    let walk = Walk {
+        beneath: walk.beneath || start.strict,
+        ..walk
+    };
+    let found = namespace().resolve(s, &walk.lookup(&start, cred), path)?;
+    Ok((found, start.caps, start.beneath))
 }
 
 /// The vnode at `path` for process `p`.
@@ -540,6 +616,10 @@ pub(crate) fn lookup(
     walk: Walk,
 ) -> Result<Arc<Vnode>, Errno> {
     let start = start_of(s, p, at, path)?;
+    let walk = Walk {
+        beneath: walk.beneath || start.strict,
+        ..walk
+    };
     namespace().lookup(s, &walk.lookup(&start, &p.cred()), path)
 }
 
@@ -556,10 +636,10 @@ pub(crate) fn parent_of(
     namespace().parent_of(
         s,
         &Lookup {
-            start: &start,
-            root: namespace().root(),
+            start: &start.dir,
+            root: &start.root,
             follow: false,
-            beneath,
+            beneath: beneath || start.strict,
             create: false,
             cred: &p.cred(),
         },
@@ -637,4 +717,39 @@ pub(crate) fn console_table() -> FdTable {
         }
     }
     t
+}
+
+/// Opens `/dev/null` on whichever of descriptors 0 to 2 `p` has closed,
+/// the same open file on each (FreeBSD's `fdcheckstd`, for set-id
+/// programs).
+pub(crate) fn check_std(s: &Sleepable, p: &crate::proc::Process) -> Result<(), Errno> {
+    let missing: alloc::vec::Vec<i32> = {
+        let t = p.files.lock(s);
+        (0..3).filter(|&fd| t.slot(fd).is_err()).collect()
+    };
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let v = namespace().lookup(
+        s,
+        &Lookup {
+            start: namespace().root(),
+            root: namespace().root(),
+            follow: true,
+            beneath: false,
+            create: false,
+            cred: &cred(),
+        },
+        b"/dev/null",
+    )?;
+    let v = v.device(s)?.ops.open()?.unwrap_or(v);
+    let vf = VnodeFile::open(s, &v, true, false)?;
+    let file = File::new(FileKind::Vnode(vf), FREAD | FWRITE);
+    let mut t = p.files.lock(s);
+    for fd in missing {
+        // Only the process's own thread is in `exec`; nothing else fills
+        // these meanwhile but its other threads, which are parked.
+        drop(t.install(fd, Arc::clone(&file), FdFlags::default(), usize::MAX)?);
+    }
+    Ok(())
 }

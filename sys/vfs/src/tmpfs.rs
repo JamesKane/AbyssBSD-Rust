@@ -160,6 +160,9 @@ struct TmpNode {
     /// `TMPFS_NODE_MODIFIED`, settled by `tmpfs_itimes`), so a write
     /// reads no clock.
     pending: Pending,
+    /// Extended attributes, newest first (`tn_extattrs`): namespace, name,
+    /// value.
+    extattrs: Vec<(u8, Vec<u8>, Vec<u8>)>,
 }
 
 /// A write's modification and change times, not yet in a node's `attr`:
@@ -245,6 +248,7 @@ impl TmpFs {
         });
         let t = now();
         let root = Box::new(TmpNode {
+            extattrs: Vec::new(),
             ino: ROOT_INO,
             kind: Kind::Directory,
             attr: Attr {
@@ -306,6 +310,44 @@ impl TmpNode {
 }
 
 impl Node for TmpNode {
+    fn get_extattr(&self, _s: &Sleepable, ns: u8, name: &[u8]) -> Result<Vec<u8>, Errno> {
+        self.extattrs
+            .iter()
+            .find(|(n, k, _)| *n == ns && k == name)
+            .map(|(_, _, v)| v.clone())
+            .ok_or(Errno::ENOATTR)
+    }
+
+    fn set_extattr(
+        &mut self,
+        _s: &Sleepable,
+        ns: u8,
+        name: &[u8],
+        value: &[u8],
+    ) -> Result<(), Errno> {
+        self.extattrs.retain(|(n, k, _)| !(*n == ns && k == name));
+        self.extattrs.insert(0, (ns, name.to_vec(), value.to_vec()));
+        Ok(())
+    }
+
+    fn delete_extattr(&mut self, _s: &Sleepable, ns: u8, name: &[u8]) -> Result<(), Errno> {
+        let before = self.extattrs.len();
+        self.extattrs.retain(|(n, k, _)| !(*n == ns && k == name));
+        if self.extattrs.len() == before {
+            return Err(Errno::ENOATTR);
+        }
+        Ok(())
+    }
+
+    fn list_extattr(&self, _s: &Sleepable, ns: u8) -> Result<Vec<Vec<u8>>, Errno> {
+        Ok(self
+            .extattrs
+            .iter()
+            .filter(|(n, _, _)| *n == ns)
+            .map(|(_, k, _)| k.clone())
+            .collect())
+    }
+
     fn attr(&self) -> Attr {
         let mut a = self.attr;
         if let Some(t) = self.pending.get() {
@@ -498,6 +540,7 @@ impl DirectoryNode for TmpNode {
             _ => 0,
         };
         let new = Box::new(TmpNode {
+            extattrs: Vec::new(),
             ino,
             kind,
             attr: Attr {

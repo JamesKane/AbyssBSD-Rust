@@ -3,7 +3,8 @@
  *
  * asuser: runs a program as another user, as kyua runs a test case that
  * requires an unprivileged one (its `unprivileged_user`): "asuser user
- * program args...", or "asuser - program args..." to stay who it is.
+ * program args...", or "asuser - program args..." to stay who it is,
+ * with the groups a login session would give it (kyua runs from one).
  * Either way the program starts with SIGINT and SIGQUIT at their defaults,
  * as kyua's do (sh ignores them in the background jobs that run-atf's
  * cases are). run-atf's helper, built static.
@@ -31,7 +32,9 @@ main(int argc, char **argv)
 		if (setgroups(1, &pw->pw_gid) != 0 ||
 		    setgid(pw->pw_gid) != 0 || setuid(pw->pw_uid) != 0)
 			err(1, "becoming %s", argv[1]);
-	}
+	} else if ((pw = getpwuid(getuid())) != NULL &&
+	    initgroups(pw->pw_name, pw->pw_gid) != 0)
+		err(1, "initgroups %s", pw->pw_name);
 	signal(SIGINT, SIG_DFL);
 	signal(SIGQUIT, SIG_DFL);
 	execv(argv[2], argv + 2);

@@ -97,6 +97,8 @@ pub mod code {
     pub const FPE_FLTIDO: i32 = 9;
     pub const TRAP_BRKPT: i32 = 1;
     pub const TRAP_TRACE: i32 = 2;
+    /// A capability error in capability mode (`PROC_TRAPCAP_CTL`).
+    pub const TRAP_CAP: i32 = 4;
     pub const CLD_EXITED: i32 = 1;
     pub const CLD_KILLED: i32 = 2;
     pub const CLD_DUMPED: i32 = 3;
@@ -208,6 +210,7 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("FPE_FLTIDO", code::FPE_FLTIDO as i64),
     c("TRAP_BRKPT", code::TRAP_BRKPT as i64),
     c("TRAP_TRACE", code::TRAP_TRACE as i64),
+    c("TRAP_CAP", code::TRAP_CAP as i64),
     c("CLD_EXITED", code::CLD_EXITED as i64),
     c("CLD_KILLED", code::CLD_KILLED as i64),
     c("CLD_DUMPED", code::CLD_DUMPED as i64),

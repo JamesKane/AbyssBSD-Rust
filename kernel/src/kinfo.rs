@@ -47,13 +47,36 @@ fn fill(p: &Process, t: Option<&crate::uthread::UserThread>, per_thread: bool) -
         ki_sid: p.sid(),
         ki_tdev: NODEV,
         ki_tdev_freebsd11: u32::MAX,
-        ki_ngroups: 1,
         ki_numthreads: i32::try_from(p.thread_count()).unwrap_or(i32::MAX),
-        ki_reaper: 1,
-        ki_reapsubtree: 1,
         ..KinfoProc::default()
     };
+    (k.ki_reaper, k.ki_reapsubtree) = crate::proc::reaper_of(p.pid());
     k.ki_flag = P_INMEM;
+    {
+        let c = p.cred();
+        k.ki_uid = c.uid;
+        k.ki_ruid = c.ruid;
+        k.ki_svuid = c.svuid;
+        k.ki_rgid = c.rgid;
+        k.ki_svgid = c.svgid;
+        // The effective gid first, then as many supplementary groups as
+        // fit (`fill_kinfo_proc`'s `cru2x` order).
+        k.ki_groups[0] = c.gid;
+        let more = c.groups().len().min(KI_NGROUPS - 1);
+        k.ki_groups[1..=more].copy_from_slice(&c.groups()[..more]);
+        k.ki_ngroups = i16::try_from(more + 1).unwrap_or(i16::MAX);
+        if c.groups().len() > more {
+            k.ki_cr_flags |= KI_CRF_GRP_OVERFLOW;
+        }
+        if c.in_capability_mode() {
+            k.ki_cr_flags |= KI_CRF_CAPABILITY_MODE;
+        }
+        k.ki_jid = c.jail_id();
+        text(&mut k.ki_loginclass, c.loginclass.name());
+    }
+    if p.sugid() {
+        k.ki_flag |= P_SUGID;
+    }
     if p.execed() {
         k.ki_flag |= P_EXEC;
     }
@@ -97,8 +120,7 @@ fn fill(p: &Process, t: Option<&crate::uthread::UserThread>, per_thread: bool) -
     text(&mut k.ki_tdname, head);
     text(&mut k.ki_moretdname, more);
     text(&mut k.ki_emul, b"FreeBSD ELF64");
-    text(&mut k.ki_login, b"root");
-    text(&mut k.ki_loginclass, b"default");
+    text(&mut k.ki_login, &p.login());
     let start_ns = crate::time::realtime_base_ns() + p.started();
     k.ki_start = Timeval {
         tv_sec: i64::try_from(start_ns / 1_000_000_000).unwrap_or(i64::MAX),
@@ -170,7 +192,10 @@ fn entries(out: &mut Vec<u8>, p: &Process, per_thread: bool) {
 fn select(out: &mut Vec<u8>, per_thread: bool, keep: impl Fn(&Process) -> bool) {
     let mut procs = crate::proc::all();
     procs.sort_unstable_by_key(|p| p.pid());
-    for p in procs.iter().filter(|p| keep(p)) {
+    // Only what the caller may see (`p_cansee`).
+    let me = Process::current();
+    let visible = |p: &Process| me.as_ref().is_none_or(|me| me.can_see(p).is_ok());
+    for p in procs.iter().filter(|p| keep(p) && visible(p)) {
         entries(out, p, per_thread);
     }
 }
@@ -194,7 +219,11 @@ fn process(pid: i32) -> Result<Arc<Process>, ReadError> {
     } else {
         crate::proc::find(pid)
     };
-    p.ok_or(ReadError::Failed(Errno::ESRCH))
+    let p = p.ok_or(ReadError::Failed(Errno::ESRCH))?;
+    if let Some(me) = Process::current() {
+        me.can_see(&p).map_err(ReadError::Failed)?;
+    }
+    Ok(p)
 }
 
 /// Adds `kern.proc` to the tree.
@@ -248,7 +277,7 @@ pub(crate) fn init(s: &Sleepable) {
                 "Process table",
             )
             .expect("kern.proc");
-        let selections: [(i32, &str, Selection); 8] = [
+        let selections: [(i32, &str, Selection); 10] = [
             (select::ALL, "all", |r, td, out| {
                 if !r.is_empty() {
                     return Err(ReadError::Invalid);
@@ -287,14 +316,23 @@ pub(crate) fn init(s: &Sleepable) {
                 Ok(())
             }),
             (select::UID, "uid", |r, td, out| {
-                // Everyone is root.
-                let uid = arg(r)?;
-                select(out, td, |_| uid == 0);
+                let uid = arg(r)?.cast_unsigned();
+                select(out, td, |p| p.cred().uid == uid);
                 Ok(())
             }),
             (select::RUID, "ruid", |r, td, out| {
-                let uid = arg(r)?;
-                select(out, td, |_| uid == 0);
+                let uid = arg(r)?.cast_unsigned();
+                select(out, td, |p| p.cred().ruid == uid);
+                Ok(())
+            }),
+            (select::RGID, "rgid", |r, td, out| {
+                let gid = arg(r)?.cast_unsigned();
+                select(out, td, |p| p.cred().rgid == gid);
+                Ok(())
+            }),
+            (select::GID, "gid", |r, td, out| {
+                let gid = arg(r)?.cast_unsigned();
+                select(out, td, |p| p.cred().gid == gid);
                 Ok(())
             }),
         ];
@@ -353,6 +391,11 @@ pub(crate) fn init(s: &Sleepable) {
             "Process ELF auxiliary vector",
             Arc::new(|r: &[i32], out: &mut Vec<u8>| {
                 let p = process(arg(r)?)?;
+                // Another's auxiliary vector is for its debuggers
+                // (`PGET_CANDEBUG`).
+                if let Some(me) = Process::current() {
+                    me.can_debug(&p).map_err(ReadError::Failed)?;
+                }
                 out.extend_from_slice(&p.image().auxv);
                 Ok(())
             }),

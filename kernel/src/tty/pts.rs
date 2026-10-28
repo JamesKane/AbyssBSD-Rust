@@ -125,11 +125,15 @@ impl Driver for PtsDriver {
 pub(crate) struct Master {
     tty: Arc<Tty>,
     sc: Arc<Softc>,
+    /// Its count against its maker's `RLIMIT_NPTS`.
+    _charge: crate::uidinfo::Charge,
 }
 
 /// `posix_openpt` (`pts_alloc`): a new terminal, owned by the caller's
-/// real user, and its master.
-pub(crate) fn alloc() -> Master {
+/// real user, and its master; `EAGAIN` past the caller's `RLIMIT_NPTS`.
+pub(crate) fn alloc() -> Result<Master, abi::errno::Errno> {
+    let charge =
+        crate::uidinfo::Charge::take(crate::uidinfo::Kind::Ptys, abi::errno::Errno::EAGAIN)?;
     let unit = alloc_unit();
     let sc = Arc::new(Softc {
         unit,
@@ -149,7 +153,11 @@ pub(crate) fn alloc() -> Master {
             ..Make::default()
         },
     );
-    Master { tty, sc }
+    Ok(Master {
+        tty,
+        sc,
+        _charge: charge,
+    })
 }
 
 impl Drop for Master {

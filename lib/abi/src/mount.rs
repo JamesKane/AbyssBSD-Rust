@@ -108,6 +108,26 @@ pub const MNT_RDONLY: u64 = 0x0000_0001;
 pub const MNT_SYNCHRONOUS: u64 = 0x0000_0002;
 pub const MNT_NOEXEC: u64 = 0x0000_0004;
 pub const MNT_NOSUID: u64 = 0x0000_0008;
+pub const MNT_NFS4ACLS: u64 = 0x0000_0010;
+pub const MNT_UNION: u64 = 0x0000_0020;
+pub const MNT_NOSYMFOLLOW: u64 = 0x0040_0000;
+pub const MNT_MULTILABEL: u64 = 0x0400_0000;
+pub const MNT_ACLS: u64 = 0x0800_0000;
+/// What `MNT_UPDATE` may change (`MNT_UPDATEMASK`, less what AbyssBSD
+/// lacks: `MNT_USER`, `MNT_AUTOMOUNTED`, `MNT_UNTRUSTED`).
+pub const MNT_UPDATEMASK: u64 = MNT_NOSUID
+    | MNT_NOEXEC
+    | MNT_SYNCHRONOUS
+    | MNT_UNION
+    | MNT_ASYNC
+    | MNT_NOATIME
+    | MNT_NOSYMFOLLOW
+    | MNT_IGNORE
+    | MNT_NOCLUSTERR
+    | MNT_NOCLUSTERW
+    | MNT_SUIDDIR
+    | MNT_ACLS
+    | MNT_NFS4ACLS;
 pub const MNT_LOCAL: u64 = 0x0000_1000;
 pub const MNT_ROOTFS: u64 = 0x0000_4000;
 pub const MNT_IGNORE: u64 = 0x0080_0000;
@@ -133,6 +153,11 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("STATFS_VERSION", STATFS_VERSION as i64),
     c("MNT_RDONLY", MNT_RDONLY as i64),
     c("MNT_NOEXEC", MNT_NOEXEC as i64),
+    c("MNT_NFS4ACLS", MNT_NFS4ACLS as i64),
+    c("MNT_UNION", MNT_UNION as i64),
+    c("MNT_NOSYMFOLLOW", MNT_NOSYMFOLLOW as i64),
+    c("MNT_MULTILABEL", MNT_MULTILABEL as i64),
+    c("MNT_ACLS", MNT_ACLS as i64),
     c("MNT_NOSUID", MNT_NOSUID as i64),
     c("MNT_LOCAL", MNT_LOCAL as i64),
     c("MNT_ROOTFS", MNT_ROOTFS as i64),

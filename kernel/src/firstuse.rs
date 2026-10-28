@@ -32,7 +32,6 @@ pub(crate) enum Kind {
     Ioctl,
     Fcntl,
     Sysarch,
-    #[expect(dead_code, reason = "reported once procctl lands (P6.7)")]
     Procctl,
     #[expect(dead_code, reason = "reported once socket options land (P6.5)")]
     Sockopt,

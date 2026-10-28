@@ -19,7 +19,6 @@ use vfs::namei::Found;
 use vfs::ops::{VEXEC, VREAD, VWRITE};
 use vfs::{Kind, NewNode, SetAttr, Vnode};
 
-use super::io::install;
 use super::{SysResult, int, process, with_process};
 use crate::fs::fdtable::FdFlags;
 use crate::fs::file::{File, FileKind, VnodeFile};
@@ -82,15 +81,16 @@ pub(super) fn at_vnode(
     path: &[u8],
     walk: Walk,
     empty_ok: bool,
+    need: &abi::capsicum::CapRights,
 ) -> Result<Arc<Vnode>, Errno> {
-    let at = At::new(int(fd));
+    let at = At::new(int(fd), *need);
     if path.is_empty() && empty_ok {
         return match at {
             At::Cwd => Ok(Arc::clone(p.cwd.lock().vnode())),
-            At::Fd(fd) => p
+            At::Fd(fd, need) => p
                 .files
                 .lock(s)
-                .get(fd)?
+                .get_checked(fd, &need.with(abi::capsicum::CAP_LOOKUP))?
                 .vnode()
                 .cloned()
                 .ok_or(Errno::EBADF),
@@ -125,10 +125,24 @@ pub(super) fn openat(s: &Sleepable, fd: u64, path_ptr: u64, flags: u64, mode: u6
         let ucred = p.cred();
         let cred = &*ucred;
         let mut created = false;
+        // What the directory must allow (`flags_to_rights`); through a
+        // strict walk the file inherits its limits (`ni_filecaps`).
+        let need = crate::capsicum::rights::of_open(flags);
+        let mut inherited = None;
+        // Opened from a descriptor with `UF_RESOLVE_BENEATH`: so is this.
+        let beneath;
         let v = if path.is_empty() && flags & O_EMPTY_PATH != 0 {
-            at_vnode(s, p, fd, &path, walk, true)?
+            // The descriptor itself, reopened: its `UF_RESOLVE_BENEATH`
+            // carries over as a lookup from it would.
+            let v = at_vnode(s, p, fd, &path, walk, true, &need)?;
+            beneath = int(fd) != AT_FDCWD && p.files.lock(s).slot(int(fd))?.flags.resolve_beneath;
+            v
         } else {
-            match crate::fs::resolve_as(s, p, cred, At::new(int(fd)), &path, walk)? {
+            let (found, caps, b) =
+                crate::fs::resolve_caps(s, p, cred, At::new(int(fd), need), &path, walk)?;
+            inherited = caps;
+            beneath = b;
+            match found {
                 Found::Vnode(v) => {
                     if flags & (O_CREAT | O_EXCL) == O_CREAT | O_EXCL {
                         return Err(Errno::EEXIST);
@@ -209,7 +223,7 @@ pub(super) fn openat(s: &Sleepable, fd: u64, path_ptr: u64, flags: u64, mode: u6
                 if flags & O_EXEC != 0 {
                     want |= VEXEC;
                 }
-                vfs::ops::access(&v.attr(s)?, v.kind(), cred, want)?;
+                vfs::acl::access(s, &v, cred, want)?;
             }
             // An append-only file is written only at its end (FreeBSD's
             // `ufs_open`).
@@ -242,8 +256,9 @@ pub(super) fn openat(s: &Sleepable, fd: u64, path_ptr: u64, flags: u64, mode: u6
             let fdf = FdFlags {
                 cloexec: flags & O_CLOEXEC != 0,
                 clofork: flags & O_CLOFORK != 0,
+                resolve_beneath: beneath,
             };
-            return install(s, p, file, fdf);
+            return super::io::install_caps(s, p, file, fdf, inherited);
         }
         let vf = if flags & O_PATH != 0 {
             VnodeFile::path_only(&v)
@@ -273,8 +288,9 @@ pub(super) fn openat(s: &Sleepable, fd: u64, path_ptr: u64, flags: u64, mode: u6
         let fdf = FdFlags {
             cloexec: flags & O_CLOEXEC != 0,
             clofork: flags & O_CLOFORK != 0,
+            resolve_beneath: beneath,
         };
-        install(s, p, file, fdf)
+        super::io::install_caps(s, p, file, fdf, inherited)
     })
 }
 
@@ -296,11 +312,20 @@ pub(super) fn fstatat(s: &Sleepable, fd: u64, path_ptr: u64, buf: u64, flag: u64
             beneath: flag & AT_RESOLVE_BENEATH != 0,
             create: false,
         };
-        let st = if path.is_empty() && flag & AT_EMPTY_PATH != 0 && At::new(int(fd)) != At::Cwd {
+        let st = if path.is_empty() && flag & AT_EMPTY_PATH != 0 && int(fd) != AT_FDCWD {
             // The descriptor may be a pipe.
-            super::io::file(s, p, fd)?.stat(s)
+            super::io::file(s, p, fd, &crate::capsicum::rights::FSTAT)?.stat(s)
         } else {
-            at_vnode(s, p, fd, &path, walk, flag & AT_EMPTY_PATH != 0)?.stat(s)
+            at_vnode(
+                s,
+                p,
+                fd,
+                &path,
+                walk,
+                flag & AT_EMPTY_PATH != 0,
+                &crate::capsicum::rights::FSTAT,
+            )?
+            .stat(s)
         };
         // Written out from where it was made: not moved out of the result
         // first.
@@ -322,21 +347,72 @@ pub(super) fn chdir(s: &Sleepable, path_ptr: u64) -> SysResult {
     if !v.is_dir() {
         return Err(Errno::ENOTDIR);
     }
-    vfs::ops::access(&v.attr(s)?, v.kind(), &crate::fs::cred(), VEXEC)?;
+    vfs::acl::access(s, &v, &crate::fs::cred(), VEXEC)?;
     let old = core::mem::replace(&mut *p.cwd.lock(), v.use_ref());
     drop(old);
     Ok(0)
 }
 
+/// Makes `v` the process's root (`change_dir`, `pwd_chroot`): a
+/// directory it may search. A process already in a changed root may not
+/// change it again while it has a directory open
+/// (`kern.chroot_allow_open_directories` is 1). The working directory
+/// stays.
+fn change_root(s: &Sleepable, p: &Process, v: &Arc<Vnode>) -> SysResult {
+    if !v.is_dir() {
+        return Err(Errno::ENOTDIR);
+    }
+    vfs::acl::access(s, v, &crate::fs::cred(), VEXEC)?;
+    if p.root.lock().is_some() {
+        let t = p.files.lock(s);
+        let open_dir = (0..t.len())
+            .filter_map(|fd| i32::try_from(fd).ok())
+            .any(|fd| {
+                t.get(fd)
+                    .is_ok_and(|f| f.vnode().is_some_and(|v| v.is_dir()))
+            });
+        if open_dir {
+            return Err(Errno::EPERM);
+        }
+    }
+    // The system's root is no changed root (`pwd_rdir == rootvnode`).
+    let new = (!Arc::ptr_eq(v, &crate::fs::root())).then(|| v.use_ref());
+    let old = core::mem::replace(&mut *p.root.lock(), new);
+    drop(old);
+    Ok(0)
+}
+
+/// `chroot(path)`: with `PRIV_VFS_CHROOT`.
+pub(super) fn chroot(s: &Sleepable, path_ptr: u64) -> SysResult {
+    let p = process()?;
+    p.priv_check(crate::cred::Priv::VfsChroot)?;
+    let path = path(path_ptr)?;
+    let v = crate::fs::lookup(s, &p, At::Cwd, &path, Walk::FOLLOW)?;
+    change_root(s, &p, &v)
+}
+
+/// `fchroot(fd)`: with `PRIV_VFS_FCHROOT` and `CAP_FCHROOT`.
+pub(super) fn fchroot(s: &Sleepable, fd: u64) -> SysResult {
+    let p = process()?;
+    p.priv_check(crate::cred::Priv::VfsFchroot)?;
+    let f = super::io::file(s, &p, fd, &crate::capsicum::rights::FCHROOT)?;
+    let v = f.vnode().ok_or(Errno::ENOTDIR)?;
+    change_root(s, &p, v)
+}
+
 /// `fchdir(fd)`.
 pub(super) fn fchdir(s: &Sleepable, fd: u64) -> SysResult {
     let p = process()?;
-    let f = super::io::file(s, &p, fd)?;
+    // A directory that must be looked beneath is no working directory.
+    if p.files.lock(s).slot(int(fd))?.flags.resolve_beneath {
+        return Err(Errno::ENOTCAPABLE);
+    }
+    let f = super::io::file(s, &p, fd, &crate::capsicum::rights::FCHDIR)?;
     let v = f.vnode().ok_or(Errno::ENOTDIR)?;
     if !v.is_dir() {
         return Err(Errno::ENOTDIR);
     }
-    vfs::ops::access(&v.attr(s)?, v.kind(), &crate::fs::cred(), VEXEC)?;
+    vfs::acl::access(s, v, &crate::fs::cred(), VEXEC)?;
     let old = core::mem::replace(&mut *p.cwd.lock(), v.use_ref());
     drop(old);
     Ok(0)
@@ -350,7 +426,7 @@ pub(super) fn getcwd(s: &Sleepable, buf: u64, buflen: u64) -> SysResult {
         return Err(Errno::EINVAL);
     }
     let cwd = Arc::clone(p.cwd.lock().vnode());
-    let mut path = crate::fs::namespace().path_of(s, &cwd, &crate::fs::root())?;
+    let mut path = crate::fs::namespace().path_of(s, &cwd, &crate::fs::root_of(&p))?;
     if path.len() + 1 > len {
         return Err(Errno::ERANGE);
     }
@@ -375,8 +451,14 @@ pub(super) fn realpathat(
     }
     let p = process()?;
     let path = path(path_ptr)?;
-    let v = crate::fs::lookup(s, &p, At::new(int(fd)), &path, Walk::FOLLOW)?;
-    let mut full = crate::fs::namespace().path_of(s, &v, &crate::fs::root())?;
+    let v = crate::fs::lookup(
+        s,
+        &p,
+        At::new(int(fd), crate::capsicum::rights::NO),
+        &path,
+        Walk::FOLLOW,
+    )?;
+    let mut full = crate::fs::namespace().path_of(s, &v, &crate::fs::root_of(&p))?;
     // FreeBSD's `vn_fullpath_hardlink` says a short buffer is ENOMEM.
     if full.len() + 1 > usize::try_from(size).unwrap_or(usize::MAX) {
         return Err(Errno::ENOMEM);
@@ -411,9 +493,18 @@ pub(super) fn faccessat(s: &Sleepable, fd: u64, path_ptr: u64, amode: u64, flag:
         Arc::new(p.cred().as_real())
     };
     let v = if path.is_empty() && flag & AT_EMPTY_PATH != 0 {
-        at_vnode(s, &p, fd, &path, walk, true)?
+        at_vnode(
+            s,
+            &p,
+            fd,
+            &path,
+            walk,
+            true,
+            &crate::capsicum::rights::FSTAT,
+        )?
     } else {
-        match crate::fs::resolve_as(s, &p, &cred, At::new(int(fd)), &path, walk)? {
+        let at = At::new(int(fd), crate::capsicum::rights::FSTAT);
+        match crate::fs::resolve_as(s, &p, &cred, at, &path, walk)? {
             Found::Vnode(v) => v,
             Found::Missing { .. } => return Err(Errno::ENOENT),
         }
@@ -431,7 +522,7 @@ pub(super) fn faccessat(s: &Sleepable, fd: u64, path_ptr: u64, amode: u64, flag:
     if amode & X_OK != 0 {
         want |= VEXEC;
     }
-    vfs::ops::access(&v.attr(s)?, v.kind(), &cred, want)?;
+    vfs::acl::access(s, &v, &cred, want)?;
     Ok(0)
 }
 
@@ -460,7 +551,15 @@ pub(super) fn readlinkat(
     }
     let p = process()?;
     let path = path(path_ptr)?;
-    let v = at_vnode(s, &p, fd, &path, Walk::NOFOLLOW, false)?;
+    let v = at_vnode(
+        s,
+        &p,
+        fd,
+        &path,
+        Walk::NOFOLLOW,
+        false,
+        &crate::capsicum::rights::NO,
+    )?;
     let target = v.readlink(s)?;
     let n = target
         .len()
@@ -482,7 +581,68 @@ fn name_field(dst: &mut [u8], src: &[u8]) {
 
 /// `struct statfs` for the file system holding `v`.
 pub(super) fn statfs_of(s: &Sleepable, v: &Vnode) -> Result<Statfs, Errno> {
-    statfs_mount(s, v.mount())
+    let mut st = statfs_mount(s, v.mount())?;
+    enforce_statfs(v.mount(), &mut st);
+    Ok(st)
+}
+
+/// Whether the caller's jail may see mount `m` (`prison_canseemount`): with
+/// `enforce_statfs` 0 every one, with 1 those under its root, with 2 only
+/// its root's own.
+fn can_see_mount(m: &vfs::Mount) -> bool {
+    let pr = crate::prison::current();
+    let st = pr.settings();
+    if pr.is_prison0() || st.enforce_statfs == 0 {
+        return true;
+    }
+    if core::ptr::eq(&**pr.root().mount(), m) {
+        return true;
+    }
+    if st.enforce_statfs == 2 {
+        return false;
+    }
+    let path = pr.path_from(crate::prison::prison0());
+    if path == b"/" {
+        return true;
+    }
+    let on = m.on();
+    on.starts_with(&path) && matches!(on.get(path.len()), None | Some(&b'/'))
+}
+
+/// A jail's view of mount `m`'s statistics (`prison_enforce_statfs`):
+/// another's mount is `[restricted]`, the fsid hidden past
+/// `enforce_statfs` 1, and the mount point named from the jail's root.
+fn enforce_statfs(m: &vfs::Mount, sp: &mut Statfs) {
+    let pr = crate::prison::current();
+    let st = pr.settings();
+    if pr.is_prison0() || st.enforce_statfs == 0 {
+        return;
+    }
+    if !can_see_mount(m) {
+        sp.f_fsid = abi::mount::Fsid::default();
+        sp.f_mntonname = [0; abi::mount::MNAMELEN];
+        name_field(&mut sp.f_mntonname, b"[restricted]");
+        return;
+    }
+    if st.enforce_statfs > 1 {
+        sp.f_fsid = abi::mount::Fsid::default();
+    }
+    if core::ptr::eq(&**pr.root().mount(), m) {
+        sp.f_mntonname = [0; abi::mount::MNAMELEN];
+        sp.f_mntonname[0] = b'/';
+        return;
+    }
+    let path = pr.path_from(crate::prison::prison0());
+    if path == b"/" {
+        return;
+    }
+    let on = m.on();
+    let rest = on.get(path.len()..).unwrap_or(&[]).to_vec();
+    sp.f_mntonname = [0; abi::mount::MNAMELEN];
+    name_field(
+        &mut sp.f_mntonname,
+        if rest.is_empty() { b"/" } else { &rest },
+    );
 }
 
 fn statfs_mount(s: &Sleepable, m: &vfs::Mount) -> Result<Statfs, Errno> {
@@ -527,15 +687,22 @@ pub(super) fn getfsstat(s: &Sleepable, buf: u64, bufsize: u64, mode: u64) -> Sys
     if mode != MNT_WAIT && mode != MNT_NOWAIT {
         return Err(Errno::EINVAL);
     }
-    let mounts = crate::fs::namespace().mounts();
+    // Only the mounts the caller's jail may see.
+    let mounts: alloc::vec::Vec<_> = crate::fs::namespace()
+        .mounts()
+        .into_iter()
+        .filter(|m| can_see_mount(m))
+        .collect();
     if buf == 0 {
         return Ok(mounts.len() as u64);
     }
     let room = usize::try_from(bufsize).unwrap_or(usize::MAX) / size_of::<Statfs>();
     let n = mounts.len().min(room);
     for (i, m) in mounts.iter().take(n).enumerate() {
+        let mut st = statfs_mount(s, m)?;
+        enforce_statfs(m, &mut st);
         UserPtr::<Statfs>::new(buf + (i * size_of::<Statfs>()) as u64)
-            .write(&statfs_mount(s, m)?)
+            .write(&st)
             .map_err(|_| Errno::EFAULT)?;
     }
     Ok(n as u64)
@@ -556,7 +723,7 @@ pub(super) fn pathconf(s: &Sleepable, path_ptr: u64, name: u64, nofollow: bool) 
 
 /// `fpathconf(fd, name)`.
 pub(super) fn fpathconf(s: &Sleepable, fd: u64, name: u64) -> SysResult {
-    let f = super::io::current_file(s, fd)?;
+    let f = super::io::current_file(s, fd, &crate::capsicum::rights::FPATHCONF)?;
     match f.vnode() {
         Some(v) => pathconf_of(v, name),
         // A pipe: only its buffer size means anything.
@@ -567,6 +734,15 @@ pub(super) fn fpathconf(s: &Sleepable, fd: u64, name: u64) -> SysResult {
 
 fn pathconf_of(v: &Vnode, name: u64) -> SysResult {
     let name = u32::try_from(name).map_err(|_| Errno::EINVAL)?;
+    // On a mount that keeps POSIX.1e ACLs, they are there, at full size
+    // (`ufs_pathconf`).
+    if vfs::acl::enabled(v) {
+        match name {
+            abi::fcntl::_PC_ACL_EXTENDED => return Ok(1),
+            abi::fcntl::_PC_ACL_PATH_MAX => return Ok(u64::from(abi::acl::ACL_MAX_COUNT)),
+            _ => {}
+        }
+    }
     let r = v.mount().fs().pathconf(v.kind(), name)?;
     Ok(r.cast_unsigned())
 }

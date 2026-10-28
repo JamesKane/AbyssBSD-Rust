@@ -53,11 +53,19 @@ pub(super) fn create_as(mode: u16) -> Create {
     }
 }
 
-/// Makes `node` at `path` from `fd` (the `mk*at` calls).
+/// Makes `node` at `path` from `fd` (the `mk*at` calls), which needs the
+/// right that kind of node takes (`CAP_MKDIRAT` and the rest).
 fn make(s: &Sleepable, fd: u64, path_ptr: u64, node: &NewNode, mode: u16) -> SysResult {
+    use crate::capsicum::rights as R;
     let p = process()?;
     let path = path(path_ptr)?;
-    let parent = crate::fs::parent_of(s, &p, At::new(int(fd)), &path, false)?;
+    let need = match node {
+        NewNode::Directory => R::MKDIRAT,
+        NewNode::Fifo => R::MKFIFOAT,
+        NewNode::Symlink(_) => R::SYMLINKAT,
+        _ => R::MKNODAT,
+    };
+    let parent = crate::fs::parent_of(s, &p, At::new(int(fd), need), &path, false)?;
     if parent.trailing_slash && *node != NewNode::Directory {
         return Err(Errno::ENOENT);
     }
@@ -106,8 +114,8 @@ pub(super) fn mknodat(s: &Sleepable, fd: u64, path: u64, mode: u64, dev: u64) ->
     // Device nodes are the superuser's to make (FreeBSD's
     // `PRIV_VFS_MKNOD_DEV`), with a number (`VNOVAL` is none).
     let device = |node: NewNode| {
-        if !p.cred().is_root() {
-            Err(Errno::EPERM)
+        if let Err(e) = p.priv_check(crate::cred::Priv::VfsMknodDev) {
+            Err(e)
         } else if dev == u64::MAX {
             Err(Errno::EINVAL)
         } else {
@@ -149,13 +157,13 @@ pub(super) fn funlinkat(s: &Sleepable, dfd: u64, path_ptr: u64, fd: u64, flag: u
     let parent = crate::fs::parent_of(
         s,
         &p,
-        At::new(int(dfd)),
+        At::new(int(dfd), crate::capsicum::rights::UNLINKAT),
         &path,
         flag & AT_RESOLVE_BENEATH != 0,
     )?;
     // With a descriptor, it must still be the file the name names.
     if int(fd) != -1 {
-        let f = super::io::file(s, &p, fd)?;
+        let f = super::io::file(s, &p, fd, &crate::capsicum::rights::NO)?;
         let named = vfs::namei::Namespace::child(s, &parent.dir, &parent.name)?;
         if !f.vnode().is_some_and(|v| Arc::ptr_eq(v, &named)) {
             return Err(Errno::EDEADLK);
@@ -197,8 +205,20 @@ pub(super) fn renameat(
     let p = process()?;
     let from = path(from_ptr)?;
     let to = path(to_ptr)?;
-    let f = crate::fs::parent_of(s, &p, At::new(int(fromfd)), &from, false)?;
-    let t = crate::fs::parent_of(s, &p, At::new(int(tofd)), &to, false)?;
+    let f = crate::fs::parent_of(
+        s,
+        &p,
+        At::new(int(fromfd), crate::capsicum::rights::RENAMEAT_SOURCE),
+        &from,
+        false,
+    )?;
+    let t = crate::fs::parent_of(
+        s,
+        &p,
+        At::new(int(tofd), crate::capsicum::rights::RENAMEAT_TARGET),
+        &to,
+        false,
+    )?;
     vfs::ops::rename(s, &f.dir, &f.name, &t.dir, &t.name, &crate::fs::cred())?;
     Ok(0)
 }
@@ -228,9 +248,23 @@ pub(super) fn linkat(
         beneath: flag & AT_RESOLVE_BENEATH != 0,
         create: false,
     };
-    let target = super::path::at_vnode(s, &p, fd1, &from, walk, flag & AT_EMPTY_PATH != 0)?;
+    let target = super::path::at_vnode(
+        s,
+        &p,
+        fd1,
+        &from,
+        walk,
+        flag & AT_EMPTY_PATH != 0,
+        &crate::capsicum::rights::LINKAT_SOURCE,
+    )?;
     let to = path(path2)?;
-    let t = crate::fs::parent_of(s, &p, At::new(int(fd2)), &to, false)?;
+    let t = crate::fs::parent_of(
+        s,
+        &p,
+        At::new(int(fd2), crate::capsicum::rights::LINKAT_TARGET),
+        &to,
+        false,
+    )?;
     vfs::ops::link(s, &target, &t.dir, &t.name, &crate::fs::cred())?;
     Ok(0)
 }
@@ -249,6 +283,7 @@ fn target(
     fd: u64,
     path_ptr: u64,
     flag: u32,
+    need: &abi::capsicum::CapRights,
 ) -> Result<Arc<Vnode>, Errno> {
     let path = path(path_ptr)?;
     let walk = Walk {
@@ -256,7 +291,7 @@ fn target(
         beneath: flag & AT_RESOLVE_BENEATH != 0,
         create: false,
     };
-    super::path::at_vnode(s, p, fd, &path, walk, flag & AT_EMPTY_PATH != 0)
+    super::path::at_vnode(s, p, fd, &path, walk, flag & AT_EMPTY_PATH != 0, need)
 }
 
 fn check_flags(flag: u64) -> Result<u32, Errno> {
@@ -267,9 +302,9 @@ fn check_flags(flag: u64) -> Result<u32, Errno> {
     Ok(flag)
 }
 
-/// The vnode open on `fd`.
-fn fd_vnode(s: &Sleepable, fd: u64) -> Result<Arc<Vnode>, Errno> {
-    let f = super::io::current_file(s, fd)?;
+/// The vnode open on `fd`, with the rights in `need`.
+fn fd_vnode(s: &Sleepable, fd: u64, need: &abi::capsicum::CapRights) -> Result<Arc<Vnode>, Errno> {
+    let f = super::io::current_file(s, fd, need)?;
     f.vnode().cloned().ok_or(Errno::EINVAL)
 }
 
@@ -289,7 +324,11 @@ fn mode_of(mode: u64) -> SetAttr {
 pub(super) fn fchmodat(s: &Sleepable, fd: u64, path: u64, mode: u64, flag: u64) -> SysResult {
     let flag = check_flags(flag)?;
     let p = process()?;
-    setattr(s, &*target(s, &p, fd, path, flag)?, &mode_of(mode))
+    setattr(
+        s,
+        &*target(s, &p, fd, path, flag, &crate::capsicum::rights::FCHMODAT)?,
+        &mode_of(mode),
+    )
 }
 
 /// `chmod(path, mode)`, and `lchmod` (`nofollow`).
@@ -300,7 +339,7 @@ pub(super) fn chmod(s: &Sleepable, path: u64, mode: u64, nofollow: bool) -> SysR
 
 /// `fchmod(fd, mode)`.
 pub(super) fn fchmod(s: &Sleepable, fd: u64, mode: u64) -> SysResult {
-    let f = super::io::current_file(s, fd)?;
+    let f = super::io::current_file(s, fd, &crate::capsicum::rights::FCHMOD)?;
     if let crate::fs::file::FileKind::Shm(m) = f.kind() {
         #[allow(clippy::cast_possible_truncation, reason = "a mode_t")]
         m.chmod(s, &crate::fs::cred(), mode as u16)?;
@@ -311,7 +350,11 @@ pub(super) fn fchmod(s: &Sleepable, fd: u64, mode: u64) -> SysResult {
         so.so.chmod(int(mode).cast_unsigned())?;
         return Ok(0);
     }
-    setattr(s, &*fd_vnode(s, fd)?, &mode_of(mode))
+    setattr(
+        s,
+        &*fd_vnode(s, fd, &crate::capsicum::rights::FCHMOD)?,
+        &mode_of(mode),
+    )
 }
 
 /// A `uid_t`/`gid_t` argument: -1 leaves it.
@@ -339,7 +382,11 @@ pub(super) fn fchownat(
 ) -> SysResult {
     let flag = check_flags(flag)?;
     let p = process()?;
-    setattr(s, &*target(s, &p, fd, path, flag)?, &owner_of(uid, gid))
+    setattr(
+        s,
+        &*target(s, &p, fd, path, flag, &crate::capsicum::rights::FCHOWNAT)?,
+        &owner_of(uid, gid),
+    )
 }
 
 /// `chown(path, uid, gid)`, and `lchown` (`nofollow`).
@@ -350,12 +397,16 @@ pub(super) fn chown(s: &Sleepable, path: u64, uid: u64, gid: u64, nofollow: bool
 
 /// `fchown(fd, uid, gid)`.
 pub(super) fn fchown(s: &Sleepable, fd: u64, uid: u64, gid: u64) -> SysResult {
-    let f = super::io::current_file(s, fd)?;
+    let f = super::io::current_file(s, fd, &crate::capsicum::rights::FCHOWN)?;
     if let crate::fs::file::FileKind::Shm(m) = f.kind() {
         m.chown(s, &crate::fs::cred(), id(uid), id(gid))?;
         return Ok(0);
     }
-    setattr(s, &*fd_vnode(s, fd)?, &owner_of(uid, gid))
+    setattr(
+        s,
+        &*fd_vnode(s, fd, &crate::capsicum::rights::FCHOWN)?,
+        &owner_of(uid, gid),
+    )
 }
 
 /// `UTIME_NOW` and `UTIME_OMIT` (`tv_nsec` values).
@@ -413,12 +464,20 @@ fn set_times(s: &Sleepable, v: &Vnode, times: u64) -> SysResult {
 pub(super) fn utimensat(s: &Sleepable, fd: u64, path: u64, times: u64, flag: u64) -> SysResult {
     let flag = check_flags(flag)?;
     let p = process()?;
-    set_times(s, &*target(s, &p, fd, path, flag)?, times)
+    set_times(
+        s,
+        &*target(s, &p, fd, path, flag, &crate::capsicum::rights::FUTIMESAT)?,
+        times,
+    )
 }
 
 /// `futimens(fd, times)`.
 pub(super) fn futimens(s: &Sleepable, fd: u64, times: u64) -> SysResult {
-    set_times(s, &*fd_vnode(s, fd)?, times)
+    set_times(
+        s,
+        &*fd_vnode(s, fd, &crate::capsicum::rights::FUTIMES)?,
+        times,
+    )
 }
 
 /// The `struct timeval[2]` of `utimes` and friends, as a `utimensat`
@@ -452,7 +511,7 @@ fn timevals(ptr: u64) -> Result<(SetAttr, bool), Errno> {
 pub(super) fn utimes(s: &Sleepable, path: u64, tv: u64, nofollow: bool) -> SysResult {
     let p = process()?;
     let flag = if nofollow { AT_SYMLINK_NOFOLLOW } else { 0 };
-    let v = target(s, &p, cwd(), path, flag)?;
+    let v = target(s, &p, cwd(), path, flag, &crate::capsicum::rights::NO)?;
     let (a, now) = timevals(tv)?;
     vfs::ops::setattr(s, &v, &a, &crate::fs::cred(), now)?;
     Ok(0)
@@ -460,7 +519,7 @@ pub(super) fn utimes(s: &Sleepable, path: u64, tv: u64, nofollow: bool) -> SysRe
 
 /// `futimes(fd, tv)`.
 pub(super) fn futimes(s: &Sleepable, fd: u64, tv: u64) -> SysResult {
-    let v = fd_vnode(s, fd)?;
+    let v = fd_vnode(s, fd, &crate::capsicum::rights::FUTIMES)?;
     let (a, now) = timevals(tv)?;
     vfs::ops::setattr(s, &v, &a, &crate::fs::cred(), now)?;
     Ok(0)
@@ -469,7 +528,7 @@ pub(super) fn futimes(s: &Sleepable, fd: u64, tv: u64) -> SysResult {
 /// `futimesat(fd, path, tv)`.
 pub(super) fn futimesat(s: &Sleepable, fd: u64, path: u64, tv: u64) -> SysResult {
     let p = process()?;
-    let v = target(s, &p, fd, path, 0)?;
+    let v = target(s, &p, fd, path, 0, &crate::capsicum::rights::FUTIMESAT)?;
     let (a, now) = timevals(tv)?;
     vfs::ops::setattr(s, &v, &a, &crate::fs::cred(), now)?;
     Ok(0)
@@ -486,7 +545,11 @@ fn flags_of(flags: u64) -> Result<SetAttr, Errno> {
 pub(super) fn chflagsat(s: &Sleepable, fd: u64, path: u64, flags: u64, atflag: u64) -> SysResult {
     let atflag = check_flags(atflag)?;
     let p = process()?;
-    setattr(s, &*target(s, &p, fd, path, atflag)?, &flags_of(flags)?)
+    setattr(
+        s,
+        &*target(s, &p, fd, path, atflag, &crate::capsicum::rights::CHFLAGSAT)?,
+        &flags_of(flags)?,
+    )
 }
 
 /// `chflags(path, flags)`, and `lchflags` (`nofollow`).
@@ -500,13 +563,13 @@ pub(super) fn chflags(s: &Sleepable, path: u64, flags: u64, nofollow: bool) -> S
 /// superuser only.
 pub(super) fn revoke(s: &Sleepable, path: u64) -> SysResult {
     let p = process()?;
-    let v = target(s, &p, cwd(), path, 0)?;
+    let v = target(s, &p, cwd(), path, 0, &crate::capsicum::rights::NO)?;
     if v.kind() != vfs::Kind::CharDevice {
         return Err(Errno::EINVAL);
     }
     let a = v.attr(s)?;
-    if crate::fs::cred().uid != a.uid && !crate::fs::cred_is_root() {
-        return Err(Errno::EPERM);
+    if crate::fs::cred().uid != a.uid {
+        crate::fs::priv_check(crate::cred::Priv::VfsAdmin)?;
     }
     crate::fs::devfs::revoke(s, &v)?;
     Ok(0)
@@ -514,7 +577,11 @@ pub(super) fn revoke(s: &Sleepable, path: u64) -> SysResult {
 
 /// `fchflags(fd, flags)`.
 pub(super) fn fchflags(s: &Sleepable, fd: u64, flags: u64) -> SysResult {
-    setattr(s, &*fd_vnode(s, fd)?, &flags_of(flags)?)
+    setattr(
+        s,
+        &*fd_vnode(s, fd, &crate::capsicum::rights::FCHFLAGS)?,
+        &flags_of(flags)?,
+    )
 }
 
 fn size_of_len(len: u64) -> Result<SetAttr, Errno> {
@@ -530,13 +597,13 @@ fn size_of_len(len: u64) -> Result<SetAttr, Errno> {
 /// `truncate(path, length)`.
 pub(super) fn truncate(s: &Sleepable, path: u64, len: u64) -> SysResult {
     let p = process()?;
-    let v = target(s, &p, cwd(), path, 0)?;
+    let v = target(s, &p, cwd(), path, 0, &crate::capsicum::rights::NO)?;
     setattr(s, &v, &size_of_len(len)?)
 }
 
 /// `ftruncate(fd, length)`: the file must be open for writing.
 pub(super) fn ftruncate(s: &Sleepable, fd: u64, len: u64) -> SysResult {
-    let f = super::io::current_file(s, fd)?;
+    let f = super::io::current_file(s, fd, &crate::capsicum::rights::FTRUNCATE)?;
     if let crate::fs::file::FileKind::Shm(m) = f.kind() {
         if f.flags() & FWRITE == 0 {
             return Err(Errno::EINVAL);
@@ -560,7 +627,7 @@ pub(super) fn ftruncate(s: &Sleepable, fd: u64, len: u64) -> SysResult {
 /// `fsync(fd)` and `fdatasync(fd)`: the file's dirty pages and its
 /// metadata go to the disk.
 pub(super) fn fsync(s: &Sleepable, fd: u64) -> SysResult {
-    let v = fd_vnode(s, fd)?;
+    let v = fd_vnode(s, fd, &crate::capsicum::rights::FSYNC)?;
     v.fsync(s)?;
     Ok(0)
 }
@@ -608,8 +675,44 @@ fn options(iov: u64, iovcnt: u64) -> Result<Vec<MountOption>, Errno> {
     Ok(out)
 }
 
-/// `nmount(iov, iovcnt, flags)`: so far, `tmpfs` with `mode`, `uid`, and
-/// `gid`; `ro`/`rdonly` is honored.
+/// The `MNT_*` flags the generic options among `opts` set or clear, in
+/// order, on top of `flags` (FreeBSD's `vfs_donmount`).
+fn option_flags(opts: &[MountOption], mut flags: u64) -> u64 {
+    use abi::mount::*;
+    for (name, _) in opts {
+        let (set, clear) = match name.as_slice() {
+            b"update" => (MNT_UPDATE, 0),
+            b"async" => (MNT_ASYNC, 0),
+            b"noasync" => (0, MNT_ASYNC),
+            b"force" => (MNT_FORCE, 0),
+            b"multilabel" => (MNT_MULTILABEL, 0),
+            b"noatime" => (MNT_NOATIME, 0),
+            b"atime" => (0, MNT_NOATIME),
+            b"noclusterr" => (MNT_NOCLUSTERR, 0),
+            b"clusterr" => (0, MNT_NOCLUSTERR),
+            b"noclusterw" => (MNT_NOCLUSTERW, 0),
+            b"clusterw" => (0, MNT_NOCLUSTERW),
+            b"noexec" => (MNT_NOEXEC, 0),
+            b"exec" => (0, MNT_NOEXEC),
+            b"nosuid" => (MNT_NOSUID, 0),
+            b"suid" => (0, MNT_NOSUID),
+            b"nosymfollow" => (MNT_NOSYMFOLLOW, 0),
+            b"symfollow" => (0, MNT_NOSYMFOLLOW),
+            b"noro" | b"rw" => (0, MNT_RDONLY),
+            b"ro" | b"rdonly" => (MNT_RDONLY, 0),
+            b"suiddir" => (MNT_SUIDDIR, 0),
+            b"sync" => (MNT_SYNCHRONOUS, 0),
+            b"union" => (MNT_UNION, 0),
+            _ => (0, 0),
+        };
+        flags = (flags | set) & !clear;
+    }
+    flags
+}
+
+/// `nmount(iov, iovcnt, flags)`: tmpfs (with `mode`, `uid`, and `gid`),
+/// UFS (with `acls` or `nfsv4acls`), and msdosfs, with the generic flag
+/// options. Mounting takes `PRIV_VFS_MOUNT` (`vfs.usermount` is 0).
 pub(super) fn nmount(s: &Sleepable, iov: u64, iovcnt: u64, flags: u64) -> SysResult {
     let opts = options(iov, iovcnt)?;
     let get = |name: &[u8]| {
@@ -619,22 +722,28 @@ pub(super) fn nmount(s: &Sleepable, iov: u64, iovcnt: u64, flags: u64) -> SysRes
     };
     let fstype = get(b"fstype").ok_or(Errno::EINVAL)?;
     let fspath = get(b"fspath").ok_or(Errno::EINVAL)?;
-    // "ro" and "noro" (or "rw") as FreeBSD's `vfs_donmount` reads them;
-    // without either an update goes read-write.
-    let ro = get(b"ro").is_some() || get(b"rdonly").is_some();
-    let flags = if ro {
-        flags | abi::mount::MNT_RDONLY
-    } else if get(b"noro").is_some() || get(b"rw").is_some() {
-        flags & !abi::mount::MNT_RDONLY
-    } else {
-        flags
-    };
+    let flags = option_flags(&opts, flags);
     let p = process()?;
+    p.priv_check(crate::cred::Priv::VfsMount)?;
+    // In a jail, only a file system marked for jails, with its
+    // `allow.mount.<fs>` (`vfs_domount_first`'s `VFCF_JAIL` and
+    // `vfc_prison_flag`).
+    if p.cred().jailed() && flags & abi::mount::MNT_UPDATE == 0 {
+        let name = fstype.strip_suffix(b"\0").unwrap_or(fstype);
+        let flag = crate::prison::MOUNT_NAMES
+            .iter()
+            .find(|(n, _)| n.as_bytes() == name)
+            .map(|&(_, f)| f);
+        match flag {
+            Some(f) if p.cred().allows(f) => {}
+            _ => return Err(Errno::EPERM),
+        }
+    }
     let covered = crate::fs::lookup(s, &p, At::Cwd, fspath, Walk::FOLLOW)?;
     if !covered.is_dir() {
         return Err(Errno::ENOTDIR);
     }
-    if flags & abi::mount::MNT_UPDATE != 0 || get(b"update").is_some() {
+    if flags & abi::mount::MNT_UPDATE != 0 {
         let force = flags & abi::mount::MNT_FORCE != 0 || get(b"force").is_some();
         return update(s, &covered, fstype, flags, force);
     }
@@ -675,6 +784,21 @@ pub(super) fn nmount(s: &Sleepable, iov: u64, iovcnt: u64, flags: u64) -> SysRes
             let read_only = flags & abi::mount::MNT_RDONLY != 0;
             let force = flags & abi::mount::MNT_FORCE != 0 || get(b"force").is_some();
             let fs = crate::fs::ufs::UfsFs::mount(s, disk, read_only, force)?;
+            // `acls` and `nfsv4acls` are UFS's own options (`ffs_mount`),
+            // and exclusive; the superblock's `FS_ACLS` (`tunefs -a`) turns
+            // POSIX.1e ACLs on too (`ffs_mountfs`). NFSv4 ACLs are not
+            // kept (docs/compat-deviations.md), so a file system that asks
+            // for them is not mounted rather than mounted without them.
+            let sb = fs.sb_flags();
+            let nfs4 = get(b"nfsv4acls").is_some() || sb & ufs::sb::FS_NFS4ACLS != 0;
+            let posix = get(b"acls").is_some() || sb & ufs::sb::FS_ACLS != 0;
+            if nfs4 && posix {
+                return Err(Errno::EINVAL);
+            }
+            if nfs4 {
+                return Err(Errno::EOPNOTSUPP);
+            }
+            let acls = if posix { abi::mount::MNT_ACLS } else { 0 };
             // Soft updates follow the file system's flag, as on FreeBSD.
             let softdep = if fs.soft_updates() {
                 abi::mount::MNT_SOFTDEP
@@ -684,7 +808,10 @@ pub(super) fn nmount(s: &Sleepable, iov: u64, iovcnt: u64, flags: u64) -> SysRes
             vfs::Mount::new(
                 vfs::MountInfo {
                     type_name: "ufs",
-                    flags: abi::mount::MNT_LOCAL | (flags & !abi::mount::MNT_SOFTDEP) | softdep,
+                    flags: abi::mount::MNT_LOCAL
+                        | (flags & !(abi::mount::MNT_SOFTDEP | abi::mount::MNT_ACLS))
+                        | softdep
+                        | acls,
                     from: from.strip_suffix(b"\0").unwrap_or(from).to_vec(),
                     io_size: fs.block_size(),
                 },
@@ -748,7 +875,7 @@ fn update(s: &Sleepable, v: &Arc<vfs::Vnode>, fstype: &[u8], flags: u64, force: 
     if fstype.strip_suffix(b"\0").unwrap_or(fstype) != m.type_name().as_bytes() {
         return Err(Errno::EOPNOTSUPP);
     }
-    m.update(s, MNT_RDONLY, flags, force)?;
+    m.update(s, MNT_RDONLY | abi::mount::MNT_UPDATEMASK, flags, force)?;
     if let Some(fs) = m.fs().as_any().downcast_ref::<crate::fs::ufs::UfsFs>() {
         let softdep = if fs.soft_updates() { MNT_SOFTDEP } else { 0 };
         m.update(s, MNT_SOFTDEP, softdep, false)?;
@@ -782,6 +909,10 @@ fn disk_at(
 /// `f_fsid` (what `umount(8)` passes).
 pub(super) fn unmount(s: &Sleepable, path_ptr: u64, flags: u64) -> SysResult {
     let p = process()?;
+    if !p.cred().allows(security::allow::MOUNT) {
+        return Err(Errno::EPERM);
+    }
+    p.priv_check(crate::cred::Priv::VfsUnmount)?;
     let path = path(path_ptr)?;
     let force = flags & abi::mount::MNT_FORCE != 0;
     let m = if flags & abi::mount::MNT_BYFSID != 0 {
@@ -807,18 +938,4 @@ fn parse_fsid(path: &[u8]) -> Option<[i32; 2]> {
     let rest = core::str::from_utf8(path.strip_prefix(b"FSID:")?).ok()?;
     let (a, b) = rest.split_once(':')?;
     Some([a.parse().ok()?, b.parse().ok()?])
-}
-
-/// The ACL and extended-attribute calls (`__acl_*`, `extattr_*`): the
-/// file must exist, then, as on a FreeBSD file system mounted without
-/// them, `EOPNOTSUPP`.
-pub(super) fn no_acls(s: &Sleepable, by_fd: bool, arg: u64, nofollow: bool) -> SysResult {
-    let p = process()?;
-    if by_fd {
-        let _ = fd_vnode(s, arg)?;
-    } else {
-        let flag = if nofollow { AT_SYMLINK_NOFOLLOW } else { 0 };
-        let _ = target(s, &p, cwd(), arg, flag)?;
-    }
-    Err(Errno::EOPNOTSUPP)
 }

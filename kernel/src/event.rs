@@ -79,6 +79,8 @@ pub(crate) struct KqueueFile {
     pub(crate) wait: Arc<WaitQueue>,
     /// `KQUEUE_CPONFORK`: a forked child gets a copy.
     pub(crate) cponfork: bool,
+    /// Its count against its maker's `RLIMIT_KQUEUES`.
+    _charge: Option<crate::uidinfo::Charge>,
 }
 
 impl KqueueFile {
@@ -88,7 +90,18 @@ impl KqueueFile {
             kq: Kqueue::new(Box::new(Scanners(Arc::clone(&wait)))),
             wait,
             cponfork,
+            _charge: None,
         }
+    }
+
+    /// A new kqueue counted against the caller's `RLIMIT_KQUEUES`
+    /// (`kern_kqueue`'s `chgkqcnt`): `ENOMEM` past it.
+    pub(crate) fn charged(cponfork: bool) -> Result<Self, abi::errno::Errno> {
+        let charge =
+            crate::uidinfo::Charge::take(crate::uidinfo::Kind::Kqueues, abi::errno::Errno::ENOMEM)?;
+        let mut k = Self::new(cponfork);
+        k._charge = Some(charge);
+        Ok(k)
     }
 
     /// `kqueue_poll`.
@@ -124,9 +137,13 @@ pub(crate) struct Changes<'a> {
 }
 
 impl Changes<'_> {
+    /// The file a descriptor filter watches, which must have `CAP_EVENT`.
     fn file(&self, kev: &Kevent) -> Result<Arc<File>, Errno> {
         let fd = i32::try_from(kev.ident).map_err(|_| Errno::EBADF)?;
-        self.p.files.lock(self.s).get(fd)
+        self.p
+            .files
+            .lock(self.s)
+            .get_checked(fd, &crate::capsicum::rights::EVENT)
     }
 }
 

@@ -23,14 +23,18 @@
 //! Behavior reference: sys/kern/subr_syscall.c, sys/amd64/amd64/trap.c,
 //! sys/arm64/arm64/trap.c.
 
+mod acl;
 mod event;
+mod extattr;
 mod fsops;
 mod io;
 mod ipc;
+mod jail;
 mod mem;
 mod misc;
 mod path;
 mod proc;
+mod procctl;
 mod shm;
 mod sig;
 mod socket;
@@ -135,7 +139,10 @@ pub(crate) fn entry(frame: &mut TrapFrame) {
     match run(&s, frame, call) {
         Ok(Some(v)) => encode(frame, Ok(v)),
         Ok(None) => {}
-        Err(e) => encode(frame, Err(e)),
+        Err(e) => {
+            crate::capsicum::syscall_failed(call.number, e);
+            encode(frame, Err(e));
+        }
     }
     let _ = hal::irq::disable();
 }
@@ -145,8 +152,13 @@ fn run(s: &Sleepable, frame: &mut TrapFrame, call: Call) -> Result<Option<u64>, 
     let Some(Slot::Live(n)) = lookup(call.number) else {
         return nosys(call.number).map(Some);
     };
+    // Capability mode allows only the calls marked for it.
+    if !n.info().cap_enabled && crate::capsicum::in_capability_mode() {
+        return Err(Errno::ECAPMODE);
+    }
     let r = match n {
         Sysno::Execve => return proc::execve(s, frame, a0, a1, a2),
+        Sysno::Fexecve => return proc::fexecve(s, frame, a0, a1, a2),
         Sysno::Fork => proc::fork(s, frame, false),
         Sysno::Vfork => proc::fork(s, frame, true),
         Sysno::Rfork => proc::rfork(s, frame, a0),
@@ -157,6 +169,7 @@ fn run(s: &Sleepable, frame: &mut TrapFrame, call: Call) -> Result<Option<u64>, 
         Sysno::Pdkill => proc::pdkill(s, a0, a1),
         Sysno::Wait4 => proc::wait4(s, a0, a1, a2, a3),
         Sysno::Wait6 => proc::wait6(s, a0, a1, a2, a3, a4, a5),
+        Sysno::Pdwait => proc::pdwait(s, a0, a1, a2, a3, a4),
         Sysno::Getppid => proc::getppid(),
         Sysno::Getpgrp => proc::getpgrp(),
         Sysno::Getpgid => proc::getpgid(a0, false),
@@ -179,6 +192,27 @@ fn run(s: &Sleepable, frame: &mut TrapFrame, call: Call) -> Result<Option<u64>, 
         Sysno::Setregid => proc::setre(a0, a1, true),
         Sysno::Setresuid => proc::setres(a0, a1, a2, false),
         Sysno::Setresgid => proc::setres(a0, a1, a2, true),
+        Sysno::Setcred => proc::setcred(a0, a1, a2),
+        Sysno::Procctl => procctl::procctl(a0, a1, a2, a3),
+        Sysno::Jail => jail::jail(s, a0),
+        Sysno::JailSet => jail::jail_set(s, a0, a1, a2),
+        Sysno::JailGet => jail::jail_get(s, a0, a1, a2),
+        Sysno::JailAttach => jail::jail_attach(s, a0),
+        Sysno::JailRemove => jail::jail_remove(a0),
+        Sysno::JailAttachJd => jail::jail_attach_jd(s, a0),
+        Sysno::JailRemoveJd => jail::jail_remove_jd(s, a0),
+        Sysno::CapEnter => crate::capsicum::cap_enter(),
+        Sysno::CapGetmode => crate::capsicum::cap_getmode(a0),
+        Sysno::CapRightsLimit => crate::capsicum::cap_rights_limit(s, a0, a1),
+        Sysno::CapRightsGet => crate::capsicum::cap_rights_get(s, a0, a1, a2),
+        Sysno::CapIoctlsLimit => crate::capsicum::cap_ioctls_limit(s, a0, a1, a2),
+        Sysno::CapIoctlsGet => crate::capsicum::cap_ioctls_get(s, a0, a1, a2),
+        Sysno::CapFcntlsLimit => crate::capsicum::cap_fcntls_limit(s, a0, a1),
+        Sysno::CapFcntlsGet => crate::capsicum::cap_fcntls_get(s, a0, a1),
+        Sysno::Getlogin => proc::getlogin(a0, a1),
+        Sysno::Setlogin => proc::setlogin(a0),
+        Sysno::Getloginclass => proc::getloginclass(a0, a1),
+        Sysno::Setloginclass => proc::setloginclass(a0),
         Sysno::ClockGettime => time::clock_gettime(a0, a1),
         Sysno::ClockGetres => time::clock_getres(a0, a1),
         Sysno::Gettimeofday => time::gettimeofday(a0, a1),
@@ -237,6 +271,8 @@ fn run(s: &Sleepable, frame: &mut TrapFrame, call: Call) -> Result<Option<u64>, 
         Sysno::Fstatat => path::fstatat(s, a0, a1, a2, a3),
         Sysno::Chdir => path::chdir(s, a0),
         Sysno::Fchdir => path::fchdir(s, a0),
+        Sysno::Chroot => path::chroot(s, a0),
+        Sysno::Fchroot => path::fchroot(s, a0),
         Sysno::Getcwd => path::getcwd(s, a0, a1),
         Sysno::Realpathat => path::realpathat(s, a0, a1, a2, a3, a4),
         Sysno::Access => path::access(s, a0, a1, false),
@@ -248,30 +284,30 @@ fn run(s: &Sleepable, frame: &mut TrapFrame, call: Call) -> Result<Option<u64>, 
         Sysno::Getfsstat => path::getfsstat(s, a0, a1, a2),
         Sysno::Umask => path::umask(a0),
         Sysno::Pathconf => path::pathconf(s, a0, a1, false),
-        Sysno::AclGetFd
-        | Sysno::AclSetFd
-        | Sysno::AclDeleteFd
-        | Sysno::AclAclcheckFd
-        | Sysno::ExtattrGetFd
-        | Sysno::ExtattrSetFd
-        | Sysno::ExtattrDeleteFd
-        | Sysno::ExtattrListFd => fsops::no_acls(s, true, a0, false),
-        Sysno::AclGetFile
-        | Sysno::AclSetFile
-        | Sysno::AclDeleteFile
-        | Sysno::AclAclcheckFile
-        | Sysno::ExtattrGetFile
-        | Sysno::ExtattrSetFile
-        | Sysno::ExtattrDeleteFile
-        | Sysno::ExtattrListFile => fsops::no_acls(s, false, a0, false),
-        Sysno::AclGetLink
-        | Sysno::AclSetLink
-        | Sysno::AclDeleteLink
-        | Sysno::AclAclcheckLink
-        | Sysno::ExtattrGetLink
-        | Sysno::ExtattrSetLink
-        | Sysno::ExtattrDeleteLink
-        | Sysno::ExtattrListLink => fsops::no_acls(s, false, a0, true),
+        Sysno::AclGetFile => acl::get(s, extattr::By::File, a0, a1, a2),
+        Sysno::AclSetFile => acl::set(s, extattr::By::File, a0, a1, a2),
+        Sysno::AclDeleteFile => acl::delete(s, extattr::By::File, a0, a1),
+        Sysno::AclAclcheckFile => acl::check(s, extattr::By::File, a0, a1, a2),
+        Sysno::AclGetLink => acl::get(s, extattr::By::Link, a0, a1, a2),
+        Sysno::AclSetLink => acl::set(s, extattr::By::Link, a0, a1, a2),
+        Sysno::AclDeleteLink => acl::delete(s, extattr::By::Link, a0, a1),
+        Sysno::AclAclcheckLink => acl::check(s, extattr::By::Link, a0, a1, a2),
+        Sysno::AclGetFd => acl::get(s, extattr::By::Fd, a0, a1, a2),
+        Sysno::AclSetFd => acl::set(s, extattr::By::Fd, a0, a1, a2),
+        Sysno::AclDeleteFd => acl::delete(s, extattr::By::Fd, a0, a1),
+        Sysno::AclAclcheckFd => acl::check(s, extattr::By::Fd, a0, a1, a2),
+        Sysno::ExtattrSetFile => extattr::set(s, extattr::By::File, a0, a1, a2, a3, a4),
+        Sysno::ExtattrSetLink => extattr::set(s, extattr::By::Link, a0, a1, a2, a3, a4),
+        Sysno::ExtattrSetFd => extattr::set(s, extattr::By::Fd, a0, a1, a2, a3, a4),
+        Sysno::ExtattrGetFile => extattr::get(s, extattr::By::File, a0, a1, a2, a3, a4),
+        Sysno::ExtattrGetLink => extattr::get(s, extattr::By::Link, a0, a1, a2, a3, a4),
+        Sysno::ExtattrGetFd => extattr::get(s, extattr::By::Fd, a0, a1, a2, a3, a4),
+        Sysno::ExtattrDeleteFile => extattr::delete(s, extattr::By::File, a0, a1, a2),
+        Sysno::ExtattrDeleteLink => extattr::delete(s, extattr::By::Link, a0, a1, a2),
+        Sysno::ExtattrDeleteFd => extattr::delete(s, extattr::By::Fd, a0, a1, a2),
+        Sysno::ExtattrListFile => extattr::list(s, extattr::By::File, a0, a1, a2, a3),
+        Sysno::ExtattrListLink => extattr::list(s, extattr::By::Link, a0, a1, a2, a3),
+        Sysno::ExtattrListFd => extattr::list(s, extattr::By::Fd, a0, a1, a2, a3),
         Sysno::Lpathconf => path::pathconf(s, a0, a1, true),
         Sysno::Fpathconf => path::fpathconf(s, a0, a1),
         Sysno::Mkdir => fsops::mkdir(s, a0, a1),
@@ -345,6 +381,10 @@ fn run(s: &Sleepable, frame: &mut TrapFrame, call: Call) -> Result<Option<u64>, 
         Sysno::Sysarch => misc::sysarch(a0, a1),
         Sysno::Mmap => mem::mmap(s, a0, a1, a2, a3, a4, a5),
         Sysno::Munmap => mem::munmap(s, a0, a1),
+        Sysno::Mlock => mem::mlock(s, a0, a1),
+        Sysno::Munlock => mem::munlock(a0, a1),
+        Sysno::Mlockall => mem::mlockall(s, a0),
+        Sysno::Munlockall => mem::munlockall(),
         Sysno::Mprotect => mem::mprotect(s, a0, a1, a2),
         Sysno::Minherit => mem::minherit(s, a0, a1, a2),
         Sysno::Madvise => mem::madvise(a0, a1, a2),

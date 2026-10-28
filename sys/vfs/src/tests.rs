@@ -842,11 +842,7 @@ fn getdirentries_packs_and_resumes_across_changes() {
 fn permissions_for_others() {
     let ns = tmp();
     let s = s();
-    let user = Cred {
-        uid: 1001,
-        gid: 1001,
-        groups: Vec::new(),
-    };
+    let user = Cred::user(1001, 1001, &[]);
     let d = mk(&ns, b"/d", NewNode::Directory).unwrap();
     // Root's 0755 directory: others may search it but not create in it.
     assert_eq!(
@@ -1136,4 +1132,170 @@ fn random_operations_match_a_model() {
             );
         }
     }
+}
+
+/// A tmpfs that keeps POSIX.1e ACLs, as a UFS mount with `acls` does.
+fn acl_tmp() -> Namespace {
+    let m = Mount::new(
+        info("tmpfs", abi::mount::MNT_ACLS),
+        alloc::boxed::Box::new(tmpfs::TmpFs::new(0o755, 0, 0, heap_pages())),
+    );
+    Namespace::new(&s(), m).unwrap()
+}
+
+fn ae(tag: u32, id: u32, perm: u32) -> abi::acl::AclEntry {
+    abi::acl::AclEntry {
+        ae_tag: tag,
+        ae_id: id,
+        ae_perm: perm,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn posix1e_acls_are_checked_and_stored_as_oldacl() {
+    use abi::acl::*;
+    let none = ACL_UNDEFINED_ID;
+    let base = |extra: &[abi::acl::AclEntry]| {
+        let mut v = alloc::vec![ae(ACL_USER_OBJ, none, 6), ae(ACL_GROUP_OBJ, none, 4)];
+        v.extend_from_slice(extra);
+        v.push(ae(ACL_OTHER, none, 0));
+        acl::Acl(v)
+    };
+    assert_eq!(base(&[]).check(), Ok(()));
+    // A named user needs a mask; ids belong on named entries only.
+    assert_eq!(base(&[ae(ACL_USER, 1001, 6)]).check(), Err(Errno::EINVAL));
+    let mut named = base(&[ae(ACL_USER, 1001, 6), ae(ACL_MASK, none, 7)]);
+    assert_eq!(named.check(), Ok(()));
+    assert_eq!(
+        base(&[ae(ACL_USER, none, 6), ae(ACL_MASK, none, 7)]).check(),
+        Err(Errno::EINVAL)
+    );
+    // An id on an entry that takes none is dropped (libc leaves 0 there).
+    let mut zeros = acl::Acl(alloc::vec![
+        ae(ACL_USER_OBJ, 0, 7),
+        ae(ACL_GROUP_OBJ, 0, 5),
+        ae(ACL_MASK, 5, 7),
+        ae(ACL_OTHER, 0, 0),
+    ]);
+    assert_eq!(zeros.check(), Ok(()));
+    assert!(zeros.0.iter().all(|e| e.ae_id == none));
+    assert_eq!(base(&[ae(ACL_MASK, none, 8)]).check(), Err(Errno::EINVAL));
+    // The mask, not the owning group, is the mode's group class.
+    assert_eq!(named.to_mode(), Some(0o670));
+    assert_eq!(acl::new_file_mode(0o4666, &named), 0o4660);
+    let b = named.encode().unwrap();
+    assert_eq!(b.len(), core::mem::size_of::<OldAcl>());
+    assert_eq!(acl::Acl::decode(&b), Ok(named));
+    assert_eq!(acl::Acl::decode(&b[1..]), Err(Errno::EPERM));
+}
+
+#[test]
+fn acls_grant_named_users_and_groups() {
+    use abi::acl::*;
+    let ns = acl_tmp();
+    let s = s();
+    let f = mk(&ns, b"/f", NewNode::Regular).unwrap();
+    let none = ACL_UNDEFINED_ID;
+    let a = acl::Acl(alloc::vec![
+        ae(ACL_USER_OBJ, none, 6),
+        ae(ACL_USER, 1001, 6),
+        ae(ACL_GROUP_OBJ, none, 4),
+        ae(ACL_MASK, none, 6),
+        ae(ACL_OTHER, none, 0),
+    ]);
+    let alice = Cred::user(1001, 1001, &[]);
+    let bob = Cred::user(1002, 1002, &[]);
+    let wheel = Cred::user(1003, 1003, &[0]);
+    // Only the owner sets it.
+    assert_eq!(
+        acl::set(&s, &f, &alice, acl::Type::Access, Some(&a)),
+        Err(Errno::EPERM)
+    );
+    acl::set(&s, &f, &Cred::root(), acl::Type::Access, Some(&a)).unwrap();
+    assert_eq!(f.attr(&s).unwrap().mode, 0o660);
+    assert_eq!(acl::get(&s, &f, acl::Type::Access), Ok(a.clone()));
+    assert_eq!(
+        acl::access(&s, &f, &alice, ops::VREAD | ops::VWRITE),
+        Ok(())
+    );
+    assert_eq!(acl::access(&s, &f, &bob, ops::VREAD), Err(Errno::EACCES));
+    assert_eq!(acl::access(&s, &f, &wheel, ops::VREAD), Ok(()));
+    assert_eq!(acl::access(&s, &f, &wheel, ops::VWRITE), Err(Errno::EACCES));
+    // chmod moves the mask, and with it what alice may do.
+    let chmod = SetAttr {
+        mode: Some(0o640),
+        ..SetAttr::default()
+    };
+    ops::setattr(&s, &f, &chmod, &Cred::root(), false).unwrap();
+    let got = acl::get(&s, &f, acl::Type::Access).unwrap();
+    assert!(got.0.contains(&ae(ACL_MASK, none, 4)));
+    assert!(got.0.contains(&ae(ACL_USER, 1001, 6)));
+    assert_eq!(acl::access(&s, &f, &alice, ops::VWRITE), Err(Errno::EACCES));
+    // Without a stored ACL, the mode's three entries.
+    let g = mk(&ns, b"/g", NewNode::Regular).unwrap();
+    assert_eq!(
+        acl::get(&s, &g, acl::Type::Access),
+        Ok(acl::Acl::of_mode(0o644))
+    );
+    assert_eq!(acl::get(&s, &g, acl::Type::Default), Err(Errno::EINVAL));
+    assert_eq!(acl::get(&s, &g, acl::Type::Nfs4), Err(Errno::EINVAL));
+}
+
+#[test]
+fn default_acls_are_inherited() {
+    use abi::acl::*;
+    let ns = acl_tmp();
+    let s = s();
+    let d = mk(&ns, b"/d", NewNode::Directory).unwrap();
+    let none = ACL_UNDEFINED_ID;
+    let dacl = acl::Acl(alloc::vec![
+        ae(ACL_USER_OBJ, none, 7),
+        ae(ACL_USER, 1001, 7),
+        ae(ACL_GROUP_OBJ, none, 5),
+        ae(ACL_MASK, none, 7),
+        ae(ACL_OTHER, none, 0),
+    ]);
+    assert_eq!(
+        acl::get(&s, &d, acl::Type::Default),
+        Ok(acl::Acl::default())
+    );
+    acl::set(&s, &d, &Cred::root(), acl::Type::Default, Some(&dacl)).unwrap();
+    // A file takes no permission the default ACL withholds, and its
+    // access ACL is the default one in line with its mode.
+    let f = mk(&ns, b"/d/f", NewNode::Regular).unwrap();
+    assert_eq!(f.attr(&s).unwrap().mode, 0o640);
+    let got = acl::get(&s, &f, acl::Type::Access).unwrap();
+    assert!(got.0.contains(&ae(ACL_USER, 1001, 7)));
+    assert!(got.0.contains(&ae(ACL_MASK, none, 4)));
+    assert!(got.0.contains(&ae(ACL_OTHER, none, 0)));
+    // A directory inherits the default ACL itself, too.
+    let e = mk(&ns, b"/d/e", NewNode::Directory).unwrap();
+    assert_eq!(e.attr(&s).unwrap().mode, 0o750);
+    assert_eq!(acl::get(&s, &e, acl::Type::Default), Ok(dacl));
+    // Deleting it: only a default ACL goes.
+    assert_eq!(
+        acl::set(&s, &f, &Cred::root(), acl::Type::Access, None),
+        Err(Errno::EINVAL)
+    );
+    acl::set(&s, &d, &Cred::root(), acl::Type::Default, None).unwrap();
+    assert_eq!(
+        acl::get(&s, &d, acl::Type::Default),
+        Ok(acl::Acl::default())
+    );
+    let g = mk(&ns, b"/d/g", NewNode::Regular).unwrap();
+    assert_eq!(g.attr(&s).unwrap().mode, 0o644);
+}
+
+#[test]
+fn acls_need_a_mount_that_keeps_them() {
+    let ns = tmp();
+    let s = s();
+    let f = mk(&ns, b"/f", NewNode::Regular).unwrap();
+    assert_eq!(acl::get(&s, &f, acl::Type::Access), Err(Errno::EOPNOTSUPP));
+    let a = acl::Acl::of_mode(0o600);
+    assert_eq!(
+        acl::set(&s, &f, &Cred::root(), acl::Type::Access, Some(&a)),
+        Err(Errno::EOPNOTSUPP)
+    );
 }

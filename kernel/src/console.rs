@@ -142,6 +142,20 @@ const HELD: usize = 2048;
 /// Bytes of early console output kept for `vt`.
 const EARLY: usize = 32 * 1024;
 
+/// The kernel's messages this boot, oldest first (`kern.msgbuf`): the
+/// log ring's contents.
+pub(crate) fn msgbuf() -> Vec<u8> {
+    let c = CONSOLE.lock();
+    let Some(ring) = &c.ring else {
+        return Vec::new();
+    };
+    let (a, b) = ring.contents();
+    let mut out = Vec::with_capacity(a.len() + b.len());
+    out.extend_from_slice(a);
+    out.extend_from_slice(b);
+    out
+}
+
 /// Output goes to the log ring only (FreeBSD's `kern.consmute`).
 static MUTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 

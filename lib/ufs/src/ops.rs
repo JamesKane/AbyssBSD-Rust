@@ -220,6 +220,7 @@ impl<B: BlockIo> Ufs<B> {
             generation,
             flags: 0,
             extsize: 0,
+            extb: [0; crate::NXADDR],
             db: [0; 12],
             ib: [0; crate::NIADDR],
             dirdepth: 0,
@@ -228,7 +229,6 @@ impl<B: BlockIo> Ufs<B> {
         };
         // What the raw bytes held past the decoded fields goes too.
         ip.raw[84..88].fill(0);
-        ip.raw[96..112].fill(0);
         ip.raw[232..240].fill(0);
         let wait_copy = |of: u32| {
             if let Some(id) = entry {
@@ -451,8 +451,10 @@ impl<B: BlockIo> Ufs<B> {
     }
 
     /// Frees inode `ino`, which no entry names and nothing uses: its
-    /// blocks, then the inode itself (FreeBSD's `ufs_inactive`). With soft
-    /// updates both wait for the inode to be on the disk without them.
+    /// blocks and its extended attribute area, then the inode itself
+    /// (FreeBSD's `ufs_inactive`, truncating with `IO_EXT | IO_NORMAL`).
+    /// With soft updates all wait for the inode to be on the disk without
+    /// them.
     pub fn free_inode(
         &self,
         cx: &B::Cx,
@@ -468,6 +470,7 @@ impl<B: BlockIo> Ufs<B> {
         {
             self.truncate(cx, sum, ino, ip, 0, reserve, dir)?;
         }
+        self.ext_truncate(cx, sum, ino, ip)?;
         ip.mode = 0;
         ip.size = 0;
         ip.blocks = 0;

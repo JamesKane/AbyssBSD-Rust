@@ -31,7 +31,7 @@ use sync::PreemptLock;
 use vm::PAGE_SIZE;
 use vm::object::Object;
 
-use crate::cred::Ucred;
+use crate::cred::{Priv, Ucred};
 
 /// FreeBSD's default limits (`kern.ipc.*`).
 pub(crate) mod limits {
@@ -63,8 +63,8 @@ fn now() -> i64 {
 }
 
 /// `ipcperm`: the owner or creator has the mode's owner bits (and may
-/// administer, `IPC_M`), the group the group bits, others the rest; the
-/// superuser anything.
+/// administer, `IPC_M`), the group the group bits, others the rest; what
+/// they lack, `PRIV_IPC_ADMIN`, `PRIV_IPC_READ`, and `PRIV_IPC_WRITE` grant.
 fn ipcperm(p: &IpcPerm, cred: &Ucred, want: u16) -> Result<(), Errno> {
     let (bits, mut granted) = if cred.uid == p.cuid || cred.uid == p.uid {
         (p.mode, IPC_M)
@@ -74,7 +74,9 @@ fn ipcperm(p: &IpcPerm, cred: &Ucred, want: u16) -> Result<(), Errno> {
         (p.mode << 6, 0)
     };
     granted |= bits & (IPC_R | IPC_W);
-    if granted & want == want || cred.is_root() {
+    let missing = want & !granted;
+    let held = |bit: u16, p| missing & bit == 0 || cred.priv_check(p).is_ok();
+    if held(IPC_M, Priv::IpcAdmin) && held(IPC_R, Priv::IpcRead) && held(IPC_W, Priv::IpcWrite) {
         Ok(())
     } else if want & IPC_M != 0 {
         Err(Errno::EPERM)
@@ -1028,8 +1030,8 @@ pub(crate) fn msgctl(
             let new = set.ok_or(Errno::EINVAL)?;
             // Raising the limit takes privilege; past the system's, it
             // stops there.
-            if new.msg_qbytes > q.ds.msg_qbytes && !cred.is_root() {
-                return Err(Errno::EPERM);
+            if new.msg_qbytes > q.ds.msg_qbytes {
+                cred.priv_check(Priv::IpcMsgsize)?;
             }
             let qbytes = new.msg_qbytes.min(MSGMNB);
             if qbytes == 0 {

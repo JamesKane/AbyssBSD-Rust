@@ -25,6 +25,7 @@ use sched::Sleepable;
 
 use super::{SysResult, int, process, thread};
 use crate::arch::trap::TrapFrame;
+use crate::cred::Priv;
 use crate::proc::{NewThread, Process};
 use crate::uaccess::{Plain, UserPtr};
 use crate::uthread::{MAX_PER_PROC, Name, UserThread};
@@ -134,9 +135,7 @@ pub(super) fn sched_setscheduler(pid: u64, policy: u64, param: u64) -> SysResult
         .read()
         .map_err(|_| Errno::EFAULT)?;
     let t = sched_target(pid)?;
-    if !process()?.is_root() {
-        return Err(Errno::EPERM);
-    }
+    process()?.priv_check(Priv::SchedSetpolicy)?;
     set_policy(&t, int(policy), prio)?;
     Ok(0)
 }
@@ -163,7 +162,7 @@ pub(super) fn thr_self(id: u64) -> SysResult {
 fn new_class(rtp: Rtprio, creator: &UserThread) -> Result<Rtprio, Errno> {
     match rtp.type_ {
         RTP_PRIO_REALTIME | RTP_PRIO_FIFO => {
-            if !creator.process().is_root() {
+            if creator.process().priv_check(Priv::SchedSetpolicy).is_err() {
                 return Err(Errno::EPERM);
             }
             if rtp.prio > RTP_PRIO_MAX {
@@ -445,10 +444,12 @@ pub(super) fn rtprio_thread(function: u64, lwpid: u64, rtp: u64) -> SysResult {
                 .unwrap_or(Err(crate::uaccess::Fault))
                 .map_err(|_| Errno::EFAULT)?;
             let base = r.type_ & !RTP_PRIO_FIFO_BIT;
-            // Real-time and idle classes need privilege (everyone is root
-            // until P6.7 brings credentials that are not).
-            if (base == RTP_PRIO_REALTIME || base == RTP_PRIO_IDLE) && !t.process().is_root() {
-                return Err(Errno::EPERM);
+            // Real-time and idle classes need privilege.
+            if base == RTP_PRIO_REALTIME {
+                t.process().priv_check(Priv::SchedRtprio)?;
+            }
+            if base == RTP_PRIO_IDLE {
+                t.process().priv_check(Priv::SchedIdprio)?;
             }
             match base {
                 RTP_PRIO_REALTIME | RTP_PRIO_IDLE if r.prio > RTP_PRIO_MAX => Err(Errno::EINVAL),

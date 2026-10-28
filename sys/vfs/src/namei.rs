@@ -36,7 +36,7 @@ use sync::SpinLock;
 use crate::cache::{self, Hit};
 use crate::mount::Mount;
 use crate::node::{Kind, NodeOps};
-use crate::ops::{self, Cred, VEXEC};
+use crate::ops::{Cred, VEXEC};
 use crate::vnode::{Peek, Vnode};
 
 /// The mounted file systems.
@@ -450,8 +450,8 @@ impl Namespace {
             if !cur.is_dir() {
                 return Err(Errno::ENOTDIR);
             }
-            if l.cred.uid != 0 {
-                ops::access(&cur.attr(s)?, cur.kind(), l.cred, VEXEC)?;
+            if !l.cred.is_root() {
+                crate::acl::access(s, &cur, l.cred, VEXEC)?;
             }
             let trailing_slash = c.end < rest.len();
             if parent && !c.more {
@@ -663,11 +663,11 @@ impl Namespace {
     /// taken but on the vnode found. A name the cache does not know hands
     /// the locked walk the directory it is in ([`Fast::Resume`]); the locked
     /// walk starts over ([`Fast::No`]) for `..`, a symbolic link to follow,
-    /// a vnode going away, `O_RESOLVE_BENEATH`, or a caller not root (whose
-    /// search permission on each directory needs its attributes; until
-    /// Phase 6 every process is root).
+    /// a vnode going away, `O_RESOLVE_BENEATH`, or a caller not the
+    /// superuser (whose search permission on each directory needs its
+    /// attributes).
     fn walk_fast(&self, l: &Lookup<'_>, path: &[u8], want: Want) -> Fast {
-        if l.cred.uid != 0 || l.beneath {
+        if !l.cred.is_root() || l.beneath {
             return Fast::No;
         }
         let end = {

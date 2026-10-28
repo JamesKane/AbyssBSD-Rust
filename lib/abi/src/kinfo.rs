@@ -248,6 +248,7 @@ pub const SLOCK: u8 = 7;
 /// `ki_flag` (`P_*`).
 pub const P_CONTROLT: i64 = 0x0000_0002;
 pub const P_PPWAIT: i64 = 0x0000_0010;
+pub const P_SUGID: i64 = 0x0000_0100;
 pub const P_HADTHREADS: i64 = 0x0000_0080;
 pub const P_WEXIT: i64 = 0x0000_2000;
 pub const P_EXEC: i64 = 0x0000_4000;
@@ -256,6 +257,10 @@ pub const P_INMEM: i64 = 0x1000_0000;
 /// `ki_kiflag`.
 pub const KI_CTTY: i64 = 0x1;
 pub const KI_SLEADER: i64 = 0x2;
+
+/// `ki_cr_flags`.
+pub const KI_CRF_CAPABILITY_MODE: u32 = 0x0000_0001;
+pub const KI_CRF_GRP_OVERFLOW: u32 = 0x8000_0000;
 
 /// `NODEV`: no device (`ki_tdev` without a terminal).
 pub const NODEV: u64 = u64::MAX;
@@ -271,6 +276,8 @@ pub mod select {
     pub const RUID: i32 = 6;
     pub const ARGS: i32 = 7;
     pub const PROC: i32 = 8;
+    pub const RGID: i32 = 10;
+    pub const GID: i32 = 11;
     pub const PATHNAME: i32 = 12;
     pub const AUXV: i32 = 36;
     /// Or'd in: one entry per thread.
@@ -300,6 +307,17 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("SLOCK", "sys/proc.h", SLOCK as i64),
     c("P_CONTROLT", "sys/proc.h", P_CONTROLT),
     c("P_PPWAIT", "sys/proc.h", P_PPWAIT),
+    c("P_SUGID", "sys/proc.h", P_SUGID),
+    c(
+        "KI_CRF_CAPABILITY_MODE",
+        "sys/user.h",
+        KI_CRF_CAPABILITY_MODE as i64,
+    ),
+    c(
+        "KI_CRF_GRP_OVERFLOW",
+        "sys/user.h",
+        KI_CRF_GRP_OVERFLOW as i64,
+    ),
     c("P_HADTHREADS", "sys/proc.h", P_HADTHREADS),
     c("P_WEXIT", "sys/proc.h", P_WEXIT),
     c("P_EXEC", "sys/proc.h", P_EXEC),
@@ -314,6 +332,8 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("KERN_PROC_UID", "sys/sysctl.h", select::UID as i64),
     c("KERN_PROC_RUID", "sys/sysctl.h", select::RUID as i64),
     c("KERN_PROC_ARGS", "sys/sysctl.h", select::ARGS as i64),
+    c("KERN_PROC_RGID", "sys/sysctl.h", select::RGID as i64),
+    c("KERN_PROC_GID", "sys/sysctl.h", select::GID as i64),
     c("KERN_PROC_PROC", "sys/sysctl.h", select::PROC as i64),
     c(
         "KERN_PROC_PATHNAME",

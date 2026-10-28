@@ -40,6 +40,7 @@ const SYSROOT_MEMBERS: &[&str] = &[
     "usr/lib/libgcc.a",
     "usr/lib/libgcc_eh.a",
     "usr/lib/libthr.a",
+    "usr/lib/libjail.a",
     "usr/lib/libm.a",
 ];
 

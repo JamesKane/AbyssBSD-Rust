@@ -16,7 +16,7 @@
 use alloc::vec::Vec;
 
 use abi::errno::Errno;
-use abi::sysctl::{CTL_MAXNAME, ctl, query};
+use abi::sysctl::{CTL_MAXNAME, ctl, ctlflag, query};
 use sched::Sleepable;
 use sysctl::ReadError;
 
@@ -78,8 +78,15 @@ fn cstr(s: &str) -> Vec<u8> {
     v
 }
 
-/// The value of `oid`, given `new` (the bytes to write, if any).
-fn serve(s: &Sleepable, oid: &[i32], new: Option<&[u8]>) -> Result<Vec<u8>, Errno> {
+/// The value of `oid`, given `new` (the bytes to write, if any), and the
+/// writer to give them to once the old value is out; `reading` if the
+/// caller asked for the value (`oldp`).
+fn serve(
+    s: &Sleepable,
+    oid: &[i32],
+    new: Option<&[u8]>,
+    reading: bool,
+) -> Result<(Vec<u8>, Option<sysctl::WriteFn>), Errno> {
     if oid.first() == Some(&ctl::SYSCTL) {
         let (what, rest) = (oid.get(1).copied().ok_or(Errno::ENOENT)?, &oid[2..]);
         return crate::sysctl::read(s, |t| match what {
@@ -103,14 +110,41 @@ fn serve(s: &Sleepable, oid: &[i32], new: Option<&[u8]>) -> Result<Vec<u8>, Errn
             }
             query::OIDDESCR => t.description(rest).map(cstr).ok_or(Errno::ENOENT),
             _ => Err(Errno::ENOENT),
-        });
+        })
+        .map(|v| (v, None));
     }
-    if new.is_some() {
+    // `sysctl_root`'s checks.
+    let (kind, writer) = crate::sysctl::read(s, |t| t.access(oid)).unzip();
+    let kind = kind.unwrap_or(0);
+    let writer = writer.flatten();
+    let cred = crate::fs::cred();
+    if new.is_some() && (kind & ctlflag::WR == 0 || writer.is_none()) {
         firstuse::report(
             Kind::Sysctl,
             format_args!("{} (write)", Oid(oid, known_prefix(s, oid))),
         );
         return Err(Errno::EPERM);
+    }
+    // In capability mode only what is marked for it: `EPERM` in 15.1 (16
+    // says `ECAPMODE`).
+    if cred.in_capability_mode()
+        && ((reading && kind & ctlflag::CAPRD == 0)
+            || (new.is_some() && kind & ctlflag::CAPWR == 0))
+    {
+        return Err(Errno::EPERM);
+    }
+    if new.is_some() {
+        if kind & ctlflag::SECURE != 0 {
+            let lvl = (kind & ctlflag::MASK_SECURE) >> ctlflag::SHIFT_SECURE;
+            cred.securelevel_gt(lvl.cast_signed())?;
+        }
+        if kind & ctlflag::ANYBODY == 0 {
+            cred.priv_check(if kind & ctlflag::PRISON != 0 {
+                crate::cred::Priv::SysctlWritejail
+            } else {
+                crate::cred::Priv::SysctlWrite
+            })?;
+        }
     }
     let mut out = Vec::new();
     crate::sysctl::read_oid(s, oid, &mut out).map_err(|e| {
@@ -122,7 +156,7 @@ fn serve(s: &Sleepable, oid: &[i32], new: Option<&[u8]>) -> Result<Vec<u8>, Errn
         }
         read_error(e)
     })?;
-    Ok(out)
+    Ok((out, new.and(writer)))
 }
 
 /// Hands `value` back through `oldp`/`oldlenp`, FreeBSD's way.
@@ -178,8 +212,14 @@ pub(super) fn sysctl(
         .collect::<Result<Vec<i32>, _>>()
         .map_err(|_| Errno::EFAULT)?;
     let new = new_value(newp, newlen)?;
-    let value = serve(s, &oid, new.as_deref())?;
-    reply(&value, oldp, oldlenp)
+    let (value, writer) = serve(s, &oid, new.as_deref(), oldp != 0)?;
+    reply(&value, oldp, oldlenp)?;
+    // The old value is out; now the new one goes in (a handler's
+    // `SYSCTL_OUT` before its `SYSCTL_IN`).
+    if let (Some(w), Some(new)) = (writer, new) {
+        w(&new)?;
+    }
+    Ok(0)
 }
 
 /// `__sysctlbyname(name, namelen, old, oldlenp, new, newlen)`.
@@ -205,6 +245,12 @@ pub(super) fn sysctlbyname(
         Errno::ENOENT
     })?;
     let new = new_value(newp, newlen)?;
-    let value = serve(s, &oid, new.as_deref())?;
-    reply(&value, oldp, oldlenp)
+    let (value, writer) = serve(s, &oid, new.as_deref(), oldp != 0)?;
+    reply(&value, oldp, oldlenp)?;
+    // The old value is out; now the new one goes in (a handler's
+    // `SYSCTL_OUT` before its `SYSCTL_IN`).
+    if let (Some(w), Some(new)) = (writer, new) {
+        w(&new)?;
+    }
+    Ok(0)
 }

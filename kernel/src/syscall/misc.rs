@@ -272,6 +272,8 @@ pub(super) fn sysarch(op: u64, parms: u64) -> SysResult {
             uaccess::copy_out(req.addr, &ext[..len]).map_err(|_| Errno::EFAULT)?;
         }
         _ => {
+            // Only the thread-state requests in capability mode.
+            crate::capsicum::check_capmode()?;
             crate::firstuse::report(crate::firstuse::Kind::Sysarch, format_args!("{op}"));
             return Err(Errno::EINVAL);
         }
@@ -295,9 +297,10 @@ const BUILT_IN: &[&[u8]] = &[b"geom_md"];
 pub(super) fn kldload(file: u64) -> SysResult {
     let file = super::path::path(file)?;
     let p = Process::current().ok_or(Errno::EINVAL)?;
-    if !p.cred().is_root() {
-        return Err(Errno::EPERM);
-    }
+    // Nothing loads above securelevel 0 (FreeBSD's `kern_kldload`).
+    let cred = p.cred();
+    cred.securelevel_gt(0)?;
+    cred.priv_check(crate::cred::Priv::KldLoad)?;
     let name = file.rsplit(|&b| b == b'/').next().unwrap_or(&file);
     let name = name.strip_suffix(b".ko").unwrap_or(name);
     if BUILT_IN.contains(&name) {

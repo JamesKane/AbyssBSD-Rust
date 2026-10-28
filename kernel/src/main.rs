@@ -27,6 +27,7 @@ mod beep;
 #[cfg(not(feature = "ktest"))]
 mod bench;
 mod boot;
+mod capsicum;
 mod cred;
 mod devices;
 mod efirtc;
@@ -48,6 +49,7 @@ mod mm;
 mod panic;
 mod pci;
 mod power;
+mod prison;
 mod proc;
 mod prof;
 mod qemu;
@@ -70,6 +72,7 @@ mod timers;
 mod topology;
 mod tty;
 mod uaccess;
+mod uidinfo;
 mod umtx;
 mod uthread;
 mod vtcons;
@@ -139,6 +142,9 @@ fn kmain(boot_info: PhysAddr) -> ! {
     fs::sysctl_init(&s);
     exec::sysctl_init(&s);
     kinfo::init(&s);
+    prison::sysctl_init(&s);
+    sysctl::features_init(&s);
+    sysctl::mark_capability_readable(&s);
 
     #[cfg(feature = "ktest")]
     tests::run(&s);

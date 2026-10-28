@@ -140,6 +140,26 @@ pub(crate) const FREEBSD_TESTS: &[&str] = &[
     "usr/tests/sys/kern/tty_pts",
     "usr/tests/lib/libc/ttyio",
     "usr/tests/lib/libutil/forkpty_test",
+    "usr/tests/lib/libc/sys/setuid_test",
+    "usr/tests/lib/libc/sys/issetugid_test",
+    "usr/tests/lib/libc/sys/getlogin_test",
+    "usr/tests/lib/libc/sys/setrlimit_test",
+    "usr/tests/lib/libc/sys/kill_test",
+    "usr/tests/lib/libc/sys/getgroups_test",
+    "usr/tests/lib/libc/sys/chroot_test",
+    "usr/tests/lib/libc/sys/mlock_test",
+    "usr/tests/sys/kern/reaper",
+    "usr/tests/sys/kern/pdeathsig",
+    // What `exec_inherit` runs (from `srcdir`), not a test itself.
+    "usr/tests/sys/kern/pdeathsig_helper",
+    "usr/tests/sys/kern/logsigexit_test",
+    "usr/tests/sys/kern/procdesc",
+    "usr/tests/sys/kern/sysctl_security_jail_children",
+    "usr/tests/sys/kern/jailmeta",
+    "usr/tests/sys/kern/jaildesc",
+    "usr/tests/sys/kern/jail_lookup_root",
+    "usr/tests/sys/capsicum",
+    "usr/tests/usr.sbin/jail",
 ];
 
 /// Where the root image keeps pjdfstest.
@@ -165,7 +185,8 @@ progs() {
 	for d in @DIRS@; do
 		if [ -d $d ]; then
 			for k in $(/usr/tests/static/find $d -name Kyuafile); do
-				sed -n "s|^atf_test_program{name=\"\([^\"]*\)\".*|atf:${k%/*}/\1|p" $k
+				sed -n "/required_kmods/!s|^atf_test_program{name=\"\([^\"]*\)\".*|atf:${k%/*}/\1|p" $k
+				sed -n "s|^atf_test_program{name=\"\([^\"]*\)\".*required_kmods=\"\([^\"]*\)\".*|atf=\2:${k%/*}/\1|p" $k
 				sed -n "/required_programs/!s|^plain_test_program{name=\"\([^\"]*\)\".*|plain:${k%/*}/\1|p" $k
 				sed -n "s|^plain_test_program{name=\"\([^\"]*\)\", required_programs=\"\([^\"]*\)\".*|plain=\2:${k%/*}/\1|p" $k
 			done
@@ -179,8 +200,14 @@ for e in $(progs); do
 	p=${e#*:}
 	[ -x "$p" ] || continue
 	echo "atf-prog: ${p#/usr/tests/} free=$(/sbin/sysctl -n vm.stats.vm.v_free_count 2> /dev/null)"
-	# A plain program's required programs, as kyua checks them.
+	# A plain program's required programs, as kyua checks them; an ATF
+	# program's required modules (none load here), for each of its cases.
+	pkmods=
 	case $kind in
+	atf=*)
+		pkmods=${kind#atf=}
+		kind=atf
+		;;
 	plain=*)
 		need=${kind#plain=}
 		kind=plain
@@ -202,6 +229,24 @@ for e in $(progs); do
 		# an unprivileged user runs as `tests`.
 		u=
 		[ $kind = atf ] && u=$($p -l | sed -n "/^ident: $c\$/,/^\$/s/^require.user: //p")
+		# kyua defines no configuration properties here, and loads no
+		# modules: such cases are skipped, as kyua reports them.
+		if [ $kind = atf ]; then
+			cfg=$($p -l | sed -n "/^ident: $c\$/,/^\$/s/^require.config: //p")
+			if [ -n "$cfg" ]; then
+				set -- $cfg
+				echo "atf: ${p#/usr/tests/}:$c skipped: Required configuration property '$1' not defined"
+				rmdir $w
+				continue
+			fi
+			kmods=$($p -l | sed -n "/^ident: $c\$/,/^\$/s/^require.kmods: //p")
+			kmods=${kmods:-$pkmods}
+			if [ -n "$kmods" ]; then
+				echo "atf: ${p#/usr/tests/}:$c skipped: Required kmods are not loaded: $kmods."
+				rmdir $w
+				continue
+			fi
+		fi
 		as="/usr/tests/static/asuser -"
 		if [ "$u" = unprivileged ]; then
 			chown tests $w
@@ -219,6 +264,11 @@ for e in $(progs); do
 		wait $pid
 		st=$?
 		kill $watch 2> /dev/null
+		# A case with a cleanup routine has it run after its body, in
+		# the same directory and as the same user, as kyua does.
+		if [ $kind = atf ] && [ -n "$($p -l | sed -n "/^ident: $c\$/,/^\$/s/^has.cleanup: true$/y/p")" ]; then
+			(cd $w && TMPDIR=$w exec $as $p -s ${p%/*} $c:cleanup) >> $w.out 2>&1
+		fi
 		r=
 		if [ $kind = plain ]; then
 			if [ $st -eq 0 ]; then

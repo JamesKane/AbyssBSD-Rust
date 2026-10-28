@@ -253,6 +253,22 @@ pub(crate) const DYNAMIC: &[Step] = &[
         "\n1\r\n",
         "script restores the terminal",
     ),
+    // `jail -c` runs a shell with its own hostname and root: a directory
+    // holding only `/rescue`'s binary, as `sh` and `hostname`.
+    step(
+        "mkdir -p /tmp/j/bin && cp /rescue/sh /tmp/j/bin/sh && ln -f /tmp/j/bin/sh \
+         /tmp/j/bin/hostname && jail -c path=/tmp/j host.hostname=inside.jail \
+         command=/bin/sh -c 'echo in-$(/bin/hostname) /*'\n",
+        "\nin-inside.jail /bin\r\n",
+        "a jail",
+    ),
+    step(
+        // A first `jls` takes the kernel's first-use notes for the
+        // `kern.features` it asks about out of the way.
+        "jls > /dev/null; hostname | grep -c inside; jls | wc -l\n",
+        "\n0\r\n       1\r\n",
+        "the jail is gone, and the host's name is its own",
+    ),
 ];
 
 /// The user tests again, dynamically linked (ROADMAP P6.1's exit), from

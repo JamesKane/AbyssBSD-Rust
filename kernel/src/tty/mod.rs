@@ -61,6 +61,7 @@ use sync::{Once, SpinLock};
 use tty::{Discipline, Input, Line};
 use vfs::{CharDevice, Uio, Vnode};
 
+use crate::cred::Priv;
 use crate::proc::Process;
 use crate::signal::Woke;
 
@@ -822,7 +823,7 @@ impl Tty {
             Unit::Out => st.opens[Unit::In.index()] + st.opens[Unit::Console.index()] > 0,
             _ => st.opens[Unit::Out.index()] > 0,
         };
-        if busy || (st.exclude && !crate::fs::cred_is_root()) {
+        if busy || (st.exclude && crate::fs::priv_check(Priv::TtyExclusive).is_err()) {
             return Err(Errno::EBUSY);
         }
         if !st.opened() {
@@ -1502,9 +1503,7 @@ impl Tty {
             TIOCDRAIN => self.drain(s, false)?,
             TIOCGDRAINWAIT => put_int(arg, self.st.lock(s).drainwait.cast_signed()),
             TIOCSDRAINWAIT => {
-                if !crate::fs::cred_is_root() {
-                    return Err(Errno::EPERM);
-                }
+                crate::fs::priv_check(Priv::TtyDrainwait)?;
                 self.st.lock(s).drainwait = get_int(arg).cast_unsigned();
             }
             TIOCGWINSZ => winsize_to(&self.winsize.lock(), arg),
@@ -1550,10 +1549,11 @@ impl Tty {
         Ok(())
     }
 
-    /// `tty_sti_check`: the superuser may type into any terminal; others
-    /// only into their controlling terminal, opened for reading.
+    /// `tty_sti_check`: with `PRIV_TTY_STI` one may type into any
+    /// terminal; without it only into one's controlling terminal, opened
+    /// for reading.
     fn sti_check(&self, fflag: u32) -> Result<(), Errno> {
-        if crate::fs::cred_is_root() {
+        if crate::fs::priv_check(Priv::TtySti).is_ok() {
             return Ok(());
         }
         if fflag & FREAD == 0 {
@@ -1917,9 +1917,7 @@ impl CharDevice for InitLock {
         match req {
             TIOCGETA => termios_to(state, arg),
             TIOCSETA => {
-                if !crate::fs::cred_is_root() {
-                    return Err(Errno::EPERM);
-                }
+                crate::fs::priv_check(Priv::TtySeta)?;
                 *state = termios_from(arg);
             }
             TIOCGETD => put_int(arg, TTYDISC.cast_signed()),

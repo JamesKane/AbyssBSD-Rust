@@ -12,9 +12,10 @@
 //! Interior nodes group children; leaves have a [`Value`] that is read on
 //! demand. The tree answers the queries the `__sysctl` syscall serves:
 //! read by OID, name to OID and back, the next OID in listing order, a
-//! node's kind and format, and its description. Writes and tunables come
-//! with the syscall (P4). The tree does no locking; the kernel keeps it
-//! behind a lock.
+//! node's kind and format, and its description. A writable leaf has a
+//! writer ([`WriteFn`]) the kernel calls once it has checked the node's
+//! access flags against the caller. The tree does no locking; the kernel
+//! keeps it behind a lock.
 //!
 //! Behavior reference: sys/kern/kern_sysctl.c.
 
@@ -42,6 +43,40 @@ pub type BytesFn = Box<dyn Fn(&mut Vec<u8>) + Send + Sync>;
 /// [`Tree::handler`]), as FreeBSD runs handlers.
 pub type NodeFn = Arc<dyn Fn(&[i32], &mut Vec<u8>) -> Result<(), ReadError> + Send + Sync>;
 
+/// Takes a written value (the bytes the caller passed); the kernel calls
+/// it after dropping the tree's lock.
+pub type WriteFn = Arc<dyn Fn(&[u8]) -> Result<(), abi::errno::Errno> + Send + Sync>;
+
+/// A writer for an `int` node (`sysctl_handle_int`): `EINVAL` if fewer
+/// than four bytes come; `set` decides whether the value is allowed.
+pub fn int_writer(
+    set: impl Fn(i32) -> Result<(), abi::errno::Errno> + Send + Sync + 'static,
+) -> WriteFn {
+    Arc::new(move |b: &[u8]| {
+        let v = b
+            .first_chunk::<4>()
+            .map(|c| i32::from_ne_bytes(*c))
+            .ok_or(abi::errno::Errno::EINVAL)?;
+        set(v)
+    })
+}
+
+/// A writer for a string node of at most `max - 1` bytes
+/// (`sysctl_handle_string`): `max` bytes or more written is `EINVAL`, NUL
+/// or not; the value stops at its first NUL.
+pub fn str_writer(
+    max: usize,
+    set: impl Fn(&[u8]) -> Result<(), abi::errno::Errno> + Send + Sync + 'static,
+) -> WriteFn {
+    Arc::new(move |b: &[u8]| {
+        if b.len() >= max {
+            return Err(abi::errno::Errno::EINVAL);
+        }
+        let b = b.iter().position(|&c| c == 0).map_or(b, |n| &b[..n]);
+        set(b)
+    })
+}
+
 /// What a leaf holds, read on demand. Integers are in native byte order,
 /// strings NUL-terminated, as FreeBSD returns them.
 pub enum Value {
@@ -59,6 +94,9 @@ pub enum Value {
     U64(Box<dyn Fn() -> u64 + Send + Sync>),
     /// A string.
     Str(StrFn),
+    /// A string of bytes, which need not be UTF-8 (a host or domain
+    /// name may hold any byte but NUL).
+    ByteStr(BytesFn),
     /// A structure, described by `format` (for example `S,timeval`).
     Opaque {
         /// FreeBSD's format string for the structure.
@@ -89,7 +127,7 @@ impl Value {
             Self::Ulong(_) => ctltype::ULONG,
             Self::S64(_) => ctltype::S64,
             Self::U64(_) => ctltype::U64,
-            Self::Str(_) => ctltype::STRING,
+            Self::Str(_) | Self::ByteStr(_) => ctltype::STRING,
             Self::Opaque { .. } => ctltype::OPAQUE,
         }
     }
@@ -103,7 +141,7 @@ impl Value {
             Self::Ulong(_) => "LU",
             Self::S64(_) => "Q",
             Self::U64(_) => "QU",
-            Self::Str(_) => "A",
+            Self::Str(_) | Self::ByteStr(_) => "A",
             Self::Opaque { format, .. } => format,
         }
     }
@@ -118,6 +156,10 @@ impl Value {
                 let mut s = String::new();
                 f(&mut s);
                 out.extend_from_slice(s.as_bytes());
+                out.push(0);
+            }
+            Self::ByteStr(f) => {
+                f(out);
                 out.push(0);
             }
             Self::Opaque { read, .. } => read(out),
@@ -204,6 +246,10 @@ struct Node {
     value: Option<Value>,
     /// For a node read through a handler.
     handler: Option<NodeFn>,
+    /// For a writable leaf.
+    writer: Option<WriteFn>,
+    /// A format other than its value's (`B` for a boolean `int`).
+    format: Option<&'static str>,
     parent: Option<u32>,
     /// Children's slots, in increasing number.
     children: Vec<u32>,
@@ -254,6 +300,8 @@ impl Tree {
             kind: ctltype::NODE | ctlflag::RD,
             value: None,
             handler: None,
+            writer: None,
+            format: None,
             parent: None,
             children: Vec::new(),
             depth: 0,
@@ -383,6 +431,8 @@ impl Tree {
             kind,
             value: spec.value,
             handler: None,
+            writer: None,
+            format: None,
             parent: Some(parent.index),
             children: Vec::new(),
             depth,
@@ -444,6 +494,97 @@ impl Tree {
                 value: Some(value),
             },
         )
+    }
+
+    /// Adds a leaf whose type and format are given, not its value's
+    /// (FreeBSD's jail parameters: an `int` formatted `B` for a boolean,
+    /// `E,jailsys` for a jailsys one). Its name may be empty, as a jailsys
+    /// parameter's own (`host.`) is.
+    #[allow(clippy::too_many_arguments, reason = "SYSCTL_JAIL_PARAM's")]
+    pub fn add_formatted(
+        &mut self,
+        parent: NodeId,
+        number: Number,
+        name: &str,
+        description: &str,
+        kind: u32,
+        format: &'static str,
+        value: Value,
+    ) -> Result<NodeId, AddError> {
+        // An empty name is allowed here alone: give it a placeholder to
+        // pass `add`, then clear it.
+        let placeholder = name.is_empty();
+        let id = self.add(
+            parent,
+            Spec {
+                number,
+                name: if placeholder { "\u{0}" } else { name },
+                description,
+                flags: 0,
+                value: Some(value),
+            },
+        )?;
+        let n = self.at_mut(id.index);
+        n.kind = (n.kind & !ctltype::MASK) | (kind & ctltype::MASK);
+        n.format = Some(format);
+        if placeholder {
+            n.name = String::new();
+        }
+        Ok(id)
+    }
+
+    /// Adds a writable leaf: `flags` are its `CTLFLAG_*` access bits
+    /// besides `CTLFLAG_RW` (`ANYBODY`, `PRISON`, `SECURE`, `CAPWR`...).
+    #[allow(clippy::too_many_arguments)] // `SYSCTL_PROC`'s, and a writer
+    pub fn add_writable(
+        &mut self,
+        parent: NodeId,
+        number: Number,
+        name: &str,
+        description: &str,
+        flags: u32,
+        value: Value,
+        writer: WriteFn,
+    ) -> Result<NodeId, AddError> {
+        let id = self.add(
+            parent,
+            Spec {
+                number,
+                name,
+                description,
+                flags: flags | ctlflag::WR,
+                value: Some(value),
+            },
+        )?;
+        self.at_mut(id.index).writer = Some(writer);
+        Ok(id)
+    }
+
+    /// The `CTLTYPE_*` and `CTLFLAG_*` bits of the node at `oid` (or of
+    /// the handler node it is under), and its writer if it has one.
+    #[must_use]
+    pub fn access(&self, oid: &[i32]) -> Option<(u32, Option<WriteFn>)> {
+        let mut cur = ROOT;
+        for &n in oid {
+            cur = *self
+                .at(cur)
+                .children
+                .iter()
+                .find(|&&c| self.at(c).number == n)?;
+            if self.at(cur).handler.is_some() {
+                break;
+            }
+        }
+        let n = self.at(cur);
+        Some((n.kind, n.writer.clone()))
+    }
+
+    /// Sets `CTLFLAG_*` bits on the node `id` (`CTLFLAG_CAPRD` on nodes a
+    /// sandboxed program may read).
+    pub fn set_flags(&mut self, id: NodeId, flags: u32) {
+        if self.node(id).is_some() {
+            self.at_mut(id.index).kind |= flags;
+        }
     }
 
     /// Adds a node read through `handler`, which gets the OID components
@@ -608,7 +749,10 @@ impl Tree {
     #[must_use]
     pub fn format(&self, oid: &[i32]) -> Option<(u32, &str)> {
         let n = self.node(self.lookup(oid)?)?;
-        Some((n.kind, n.value.as_ref().map_or("N", Value::format)))
+        let fmt = n
+            .format
+            .unwrap_or_else(|| n.value.as_ref().map_or("N", Value::format));
+        Some((n.kind, fmt))
     }
 
     /// An OID's description; FreeBSD's `sysctl.oiddescr`.

@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! A process's descriptor table (FreeBSD's `filedesc`): numbered slots,
-//! each an open file and its descriptor flags (close-on-exec,
-//! close-on-fork). A new descriptor takes the lowest free number.
+//! each an open file, its descriptor flags (close-on-exec,
+//! close-on-fork), and its Capsicum limits, if any (`filecaps`). A new
+//! descriptor takes the lowest free number.
+//!
+//! A descriptor is found with the rights the operation needs
+//! ([`FdTable::checked`]): one without them is `ENOTCAPABLE`. Limits only
+//! narrow, and travel with `dup`, `fork`, and `SCM_RIGHTS`.
 //!
 //! Closing takes a file out of the table; the caller drops it after
 //! letting go of the table's lock, since the last close of a pipe wakes
@@ -16,15 +21,74 @@ use alloc::vec::Vec;
 
 use event::Kqueue;
 
+use abi::capsicum::{CAP_FCNTL, CAP_FCNTL_ALL, CAP_IOCTL, CapRights};
 use abi::errno::Errno;
+use alloc::boxed::Box;
 
 use super::file::File;
+
+/// A descriptor's Capsicum limits (FreeBSD's `struct filecaps`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FileCaps {
+    pub(crate) rights: CapRights,
+    /// The `ioctl`s allowed; `None` for every one (`fc_nioctls == -1`).
+    pub(crate) ioctls: Option<Vec<u64>>,
+    /// The `fcntl` commands allowed (`CAP_FCNTL_*`).
+    pub(crate) fcntls: u32,
+}
+
+impl FileCaps {
+    /// No limit at all.
+    pub(crate) const fn all() -> Self {
+        Self {
+            rights: CapRights::ALL,
+            ioctls: None,
+            fcntls: CAP_FCNTL_ALL,
+        }
+    }
+
+    /// Whether these limit nothing.
+    pub(crate) fn is_all(&self) -> bool {
+        self.rights == CapRights::ALL && self.ioctls.is_none() && self.fcntls == CAP_FCNTL_ALL
+    }
+
+    /// `ENOTCAPABLE` unless every right in `need` is held.
+    pub(crate) const fn check(&self, need: &CapRights) -> Result<(), Errno> {
+        if self.rights.contains(need) {
+            Ok(())
+        } else {
+            Err(Errno::ENOTCAPABLE)
+        }
+    }
+
+    /// Narrows the rights to `rights` (`kern_cap_rights_limit`): without
+    /// `CAP_IOCTL` no ioctl stays allowed, without `CAP_FCNTL` no `fcntl`.
+    fn limit(&mut self, rights: CapRights) -> Result<(), Errno> {
+        self.check(&rights)?;
+        self.rights = rights;
+        if !rights.has(CAP_IOCTL) {
+            self.ioctls = Some(Vec::new());
+        }
+        if !rights.has(CAP_FCNTL) {
+            self.fcntls = 0;
+        }
+        Ok(())
+    }
+}
+
+/// Limits as a slot keeps them: none for no limit, the common case.
+fn boxed(c: FileCaps) -> Option<Box<FileCaps>> {
+    (!c.is_all()).then(|| Box::new(c))
+}
 
 /// A descriptor's flags.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct FdFlags {
     pub(crate) cloexec: bool,
     pub(crate) clofork: bool,
+    /// Every lookup from it stays beneath it, and it is no working
+    /// directory (`UF_RESOLVE_BENEATH`); once set, it stays.
+    pub(crate) resolve_beneath: bool,
 }
 
 /// One open descriptor.
@@ -32,6 +96,20 @@ pub(crate) struct FdFlags {
 pub(crate) struct Slot {
     pub(crate) file: Arc<File>,
     pub(crate) flags: FdFlags,
+    /// Its Capsicum limits; `None` for none.
+    pub(crate) caps: Option<Box<FileCaps>>,
+}
+
+impl Slot {
+    /// `ENOTCAPABLE` unless it holds every right in `need`.
+    pub(crate) fn check(&self, need: &CapRights) -> Result<(), Errno> {
+        self.caps.as_ref().map_or(Ok(()), |c| c.check(need))
+    }
+
+    /// Its limits, spelled out.
+    pub(crate) fn caps(&self) -> FileCaps {
+        self.caps.as_deref().cloned().unwrap_or_else(FileCaps::all)
+    }
 }
 
 /// A `KQUEUE_CPONFORK` kqueue and its copy in a forked child's table.
@@ -99,6 +177,62 @@ impl FdTable {
         self.slot(fd).map(|s| Arc::clone(&s.file))
     }
 
+    /// Descriptor `fd`, if it holds the rights in `need` (`fget`'s
+    /// `cap_check`): `EBADF` if it is not open, `ENOTCAPABLE` if it lacks
+    /// one.
+    pub(crate) fn checked(&self, fd: i32, need: &CapRights) -> Result<&Slot, Errno> {
+        let s = self.slot(fd)?;
+        s.check(need)?;
+        Ok(s)
+    }
+
+    /// [`FdTable::checked`], the file referenced.
+    pub(crate) fn get_checked(&self, fd: i32, need: &CapRights) -> Result<Arc<File>, Errno> {
+        self.checked(fd, need).map(|s| Arc::clone(&s.file))
+    }
+
+    fn slot_mut(&mut self, fd: i32) -> Result<&mut Slot, Errno> {
+        self.slots
+            .get_mut(index(fd)?)
+            .and_then(Option::as_mut)
+            .ok_or(Errno::EBADF)
+    }
+
+    /// `cap_rights_limit`: `ENOTCAPABLE` to widen them.
+    pub(crate) fn limit_rights(&mut self, fd: i32, rights: CapRights) -> Result<(), Errno> {
+        let s = self.slot_mut(fd)?;
+        let mut c = s.caps();
+        c.limit(rights)?;
+        s.caps = boxed(c);
+        Ok(())
+    }
+
+    /// `cap_ioctls_limit`: to `cmds`, each of which must be allowed now.
+    pub(crate) fn limit_ioctls(&mut self, fd: i32, cmds: Vec<u64>) -> Result<(), Errno> {
+        let s = self.slot_mut(fd)?;
+        let mut c = s.caps();
+        if let Some(old) = &c.ioctls
+            && (old.len() < cmds.len() || cmds.iter().any(|x| !old.contains(x)))
+        {
+            return Err(Errno::ENOTCAPABLE);
+        }
+        c.ioctls = Some(cmds);
+        s.caps = boxed(c);
+        Ok(())
+    }
+
+    /// `cap_fcntls_limit`: to `mask`, which must be allowed now.
+    pub(crate) fn limit_fcntls(&mut self, fd: i32, mask: u32) -> Result<(), Errno> {
+        let s = self.slot_mut(fd)?;
+        let mut c = s.caps();
+        if mask & !c.fcntls != 0 {
+            return Err(Errno::ENOTCAPABLE);
+        }
+        c.fcntls = mask;
+        s.caps = boxed(c);
+        Ok(())
+    }
+
     pub(crate) fn set_flags(&mut self, fd: i32, flags: FdFlags) -> Result<(), Errno> {
         let slot = self
             .slots
@@ -143,8 +277,22 @@ impl FdTable {
         min: usize,
         limit: usize,
     ) -> Result<i32, Errno> {
+        self.alloc_with(file, flags, None, min, limit)
+    }
+
+    /// [`FdTable::alloc`] with Capsicum limits (a `dup`'s, a passed
+    /// descriptor's, or what a lookup through a limited directory gives).
+    pub(crate) fn alloc_with(
+        &mut self,
+        file: Arc<File>,
+        flags: FdFlags,
+        caps: Option<FileCaps>,
+        min: usize,
+        limit: usize,
+    ) -> Result<i32, Errno> {
         let fd = self.free(min, limit)?;
-        self.put(fd, Slot { file, flags })?;
+        let caps = caps.and_then(boxed);
+        self.put(fd, Slot { file, flags, caps })?;
         i32::try_from(fd).map_err(|_| Errno::EMFILE)
     }
 
@@ -157,11 +305,24 @@ impl FdTable {
         flags: FdFlags,
         limit: usize,
     ) -> Result<Option<Slot>, Errno> {
+        self.install_with(fd, file, flags, None, limit)
+    }
+
+    /// [`FdTable::install`] with Capsicum limits (`dup2`'s).
+    pub(crate) fn install_with(
+        &mut self,
+        fd: i32,
+        file: Arc<File>,
+        flags: FdFlags,
+        caps: Option<FileCaps>,
+        limit: usize,
+    ) -> Result<Option<Slot>, Errno> {
         let i = index(fd)?;
         if i >= limit {
             return Err(Errno::EBADF);
         }
-        self.put(i, Slot { file, flags })
+        let caps = caps.and_then(boxed);
+        self.put(i, Slot { file, flags, caps })
     }
 
     /// Takes `fd` out of the table.
@@ -246,6 +407,7 @@ impl FdTable {
                         Some(Slot {
                             file,
                             flags: s.flags,
+                            caps: s.caps.clone(),
                         })
                     }
                 }

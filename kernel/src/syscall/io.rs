@@ -10,6 +10,7 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use abi::capsicum::CapRights;
 use abi::errno::Errno;
 use abi::fcntl::*;
 use abi::ioctl::{
@@ -20,6 +21,7 @@ use abi::stat::Stat;
 use sched::Sleepable;
 
 use super::{SysResult, int, process, with_process};
+use crate::capsicum::rights as R;
 use crate::fs::fdtable::{FdFlags, Slot};
 use crate::fs::file::{File, FileKind};
 use crate::fs::pipe;
@@ -41,15 +43,21 @@ pub(super) fn max_files(p: &Process) -> usize {
     usize::try_from(lim).unwrap_or(usize::MAX)
 }
 
-/// The file open on `fd`.
-pub(super) fn file(s: &Sleepable, p: &Process, fd: u64) -> Result<Arc<File>, Errno> {
-    p.files.lock(s).get(int(fd))
+/// The file open on `fd`, if the descriptor holds the rights in `need`
+/// (`ENOTCAPABLE` if not).
+pub(super) fn file(
+    s: &Sleepable,
+    p: &Process,
+    fd: u64,
+    need: &CapRights,
+) -> Result<Arc<File>, Errno> {
+    p.files.lock(s).get_checked(int(fd), need)
 }
 
 /// The file open on `fd` in the current process (borrowed, so no
-/// reference to the process is taken).
-pub(super) fn current_file(s: &Sleepable, fd: u64) -> Result<Arc<File>, Errno> {
-    Process::with_current(|p| file(s, p, fd)).unwrap_or(Err(Errno::EINVAL))
+/// reference to the process is taken), with the rights in `need`.
+pub(super) fn current_file(s: &Sleepable, fd: u64, need: &CapRights) -> Result<Arc<File>, Errno> {
+    Process::with_current(|p| file(s, p, fd, need)).unwrap_or(Err(Errno::EINVAL))
 }
 
 /// Runs `f` on the file open on `fd` in the current process. A process
@@ -62,6 +70,7 @@ pub(super) fn current_file(s: &Sleepable, fd: u64) -> Result<Arc<File>, Errno> {
 fn with_file<R>(
     s: &Sleepable,
     fd: u64,
+    need: &CapRights,
     f: impl FnOnce(&File) -> Result<R, Errno>,
 ) -> Result<R, Errno> {
     Process::with_current(|p| {
@@ -70,9 +79,9 @@ fn with_file<R>(
             // the only one, and it does nothing else with the table until
             // `f` returns, which the borrow cannot outlive.
             let table = unsafe { p.files.get_unlocked() };
-            f(&table.slot(int(fd))?.file)
+            f(&table.checked(int(fd), need)?.file)
         } else {
-            let file = file(s, p, fd)?;
+            let file = file(s, p, fd, need)?;
             f(&file)
         }
     })
@@ -81,8 +90,19 @@ fn with_file<R>(
 
 /// Installs `file` at the lowest free descriptor.
 pub(super) fn install(s: &Sleepable, p: &Process, file: Arc<File>, flags: FdFlags) -> SysResult {
+    install_caps(s, p, file, flags, None)
+}
+
+/// [`install`] with Capsicum limits.
+pub(super) fn install_caps(
+    s: &Sleepable,
+    p: &Process,
+    file: Arc<File>,
+    flags: FdFlags,
+    caps: Option<crate::fs::fdtable::FileCaps>,
+) -> SysResult {
     let limit = max_files(p);
-    let fd = p.files.lock(s).alloc(file, flags, 0, limit)?;
+    let fd = p.files.lock(s).alloc_with(file, flags, caps, 0, limit)?;
     Ok(u64::from(fd.unsigned_abs()))
 }
 
@@ -114,46 +134,52 @@ fn check_len(n: u64) -> Result<(), Errno> {
 pub(super) fn read(s: &Sleepable, fd: u64, buf: u64, nbyte: u64) -> SysResult {
     check_len(nbyte)?;
     let mut uio = UserIo::one(buf, nbyte)?;
-    with_file(s, fd, |f| f.read(s, &mut uio)).map(|n| n as u64)
+    with_file(s, fd, &R::READ, |f| f.read(s, &mut uio)).map(|n| n as u64)
 }
 
 /// `readv(fd, iovp, iovcnt)`.
 pub(super) fn readv(s: &Sleepable, fd: u64, iov: u64, iovcnt: u64) -> SysResult {
     let mut uio = UserIo::vector(iov, iovcnt)?;
-    with_file(s, fd, |f| f.read(s, &mut uio)).map(|n| n as u64)
+    with_file(s, fd, &R::READ, |f| f.read(s, &mut uio)).map(|n| n as u64)
 }
 
 /// `pread(fd, buf, nbyte, offset)`.
 pub(super) fn pread(s: &Sleepable, fd: u64, buf: u64, nbyte: u64, offset: u64) -> SysResult {
     check_len(nbyte)?;
     let mut uio = UserIo::one(buf, nbyte)?;
-    with_file(s, fd, |f| f.pread(s, &mut uio, offset.cast_signed())).map(|n| n as u64)
+    with_file(s, fd, &R::PREAD, |f| {
+        f.pread(s, &mut uio, offset.cast_signed())
+    })
+    .map(|n| n as u64)
 }
 
 /// `preadv(fd, iovp, iovcnt, offset)`.
 pub(super) fn preadv(s: &Sleepable, fd: u64, iov: u64, iovcnt: u64, offset: u64) -> SysResult {
     let mut uio = UserIo::vector(iov, iovcnt)?;
-    with_file(s, fd, |f| f.pread(s, &mut uio, offset.cast_signed())).map(|n| n as u64)
+    with_file(s, fd, &R::PREAD, |f| {
+        f.pread(s, &mut uio, offset.cast_signed())
+    })
+    .map(|n| n as u64)
 }
 
 /// `write(fd, buf, nbyte)`.
 pub(super) fn write(s: &Sleepable, fd: u64, buf: u64, nbyte: u64) -> SysResult {
     check_len(nbyte)?;
     let mut uio = UserIo::one(buf, nbyte)?;
-    wrote(with_file(s, fd, |f| f.write(s, &mut uio)))
+    wrote(with_file(s, fd, &R::WRITE, |f| f.write(s, &mut uio)))
 }
 
 /// `writev(fd, iovp, iovcnt)`.
 pub(super) fn writev(s: &Sleepable, fd: u64, iov: u64, iovcnt: u64) -> SysResult {
     let mut uio = UserIo::vector(iov, iovcnt)?;
-    wrote(with_file(s, fd, |f| f.write(s, &mut uio)))
+    wrote(with_file(s, fd, &R::WRITE, |f| f.write(s, &mut uio)))
 }
 
 /// `pwrite(fd, buf, nbyte, offset)`.
 pub(super) fn pwrite(s: &Sleepable, fd: u64, buf: u64, nbyte: u64, offset: u64) -> SysResult {
     check_len(nbyte)?;
     let mut uio = UserIo::one(buf, nbyte)?;
-    wrote(with_file(s, fd, |f| {
+    wrote(with_file(s, fd, &R::PWRITE, |f| {
         f.pwrite(s, &mut uio, offset.cast_signed())
     }))
 }
@@ -161,14 +187,14 @@ pub(super) fn pwrite(s: &Sleepable, fd: u64, buf: u64, nbyte: u64, offset: u64) 
 /// `pwritev(fd, iovp, iovcnt, offset)`.
 pub(super) fn pwritev(s: &Sleepable, fd: u64, iov: u64, iovcnt: u64, offset: u64) -> SysResult {
     let mut uio = UserIo::vector(iov, iovcnt)?;
-    wrote(with_file(s, fd, |f| {
+    wrote(with_file(s, fd, &R::PWRITE, |f| {
         f.pwrite(s, &mut uio, offset.cast_signed())
     }))
 }
 
 /// `lseek(fd, offset, whence)`.
 pub(super) fn lseek(s: &Sleepable, fd: u64, offset: u64, whence: u64) -> SysResult {
-    let f = current_file(s, fd)?;
+    let f = current_file(s, fd, &R::SEEK)?;
     let whence = u32::try_from(whence).map_err(|_| Errno::EINVAL)?;
     f.seek(s, offset.cast_signed(), whence)
         .map(i64::cast_unsigned)
@@ -235,10 +261,22 @@ fn dup_fd(s: &Sleepable, mode: Dup, flags: FdFlags, old: i32, new: i32) -> SysRe
         }
     }
     let mut t = p.files.lock(s);
-    let file = t.get(old)?;
+    // The copy keeps the original's Capsicum limits (`fdcopy`'s
+    // `filecaps_copy`).
+    // The copy keeps `UF_RESOLVE_BENEATH` too (`kern_dup`).
+    let (file, caps, flags) = {
+        let slot = t.slot(old)?;
+        let flags = FdFlags {
+            resolve_beneath: slot.flags.resolve_beneath,
+            ..flags
+        };
+        (Arc::clone(&slot.file), slot.caps.as_deref().cloned(), flags)
+    };
     let fd = match mode {
-        Dup::Lowest => t.alloc(file, flags, 0, limit)?,
-        Dup::AtLeast => t.alloc(file, flags, usize::try_from(new).unwrap_or(0), limit)?,
+        Dup::Lowest => t.alloc_with(file, flags, caps, 0, limit)?,
+        Dup::AtLeast => {
+            t.alloc_with(file, flags, caps, usize::try_from(new).unwrap_or(0), limit)?
+        }
         Dup::Fixed if old == new => {
             if flags.cloexec {
                 let mut f = t.slot(old)?.flags;
@@ -248,7 +286,7 @@ fn dup_fd(s: &Sleepable, mode: Dup, flags: FdFlags, old: i32, new: i32) -> SysRe
             new
         }
         Dup::Fixed => {
-            let replaced = t.install(new, file, flags, limit)?;
+            let replaced = t.install_with(new, file, flags, caps, limit)?;
             drop(t);
             crate::fs::closed(p.pid(), replaced.iter());
             drop(replaced);
@@ -270,7 +308,13 @@ pub(super) fn dup2(s: &Sleepable, from: u64, to: u64) -> SysResult {
 
 /// `F_GETFD`'s bits.
 fn fd_bits(f: FdFlags) -> u32 {
-    (if f.cloexec { FD_CLOEXEC } else { 0 }) | if f.clofork { FD_CLOFORK } else { 0 }
+    (if f.cloexec { FD_CLOEXEC } else { 0 })
+        | (if f.clofork { FD_CLOFORK } else { 0 })
+        | if f.resolve_beneath {
+            FD_RESOLVE_BENEATH
+        } else {
+            0
+        }
 }
 
 /// `O_*` flags from a file's flags (`OFLAGS`).
@@ -283,6 +327,23 @@ fn oflags(fflags: u32) -> u32 {
     }
 }
 
+/// The file open on `fd` for `fcntl` command `cmd` (`fget_fcntl`):
+/// `CAP_FCNTL` and the command in the descriptor's `fcntl` limits.
+fn fcntl_file(s: &Sleepable, fd: i32, cmd: u32) -> Result<Arc<File>, Errno> {
+    with_process(|p| {
+        let t = p.files.lock(s);
+        let slot = t.checked(fd, &R::FCNTL)?;
+        if slot
+            .caps
+            .as_ref()
+            .is_some_and(|c| c.fcntls & (1 << cmd) == 0)
+        {
+            return Err(Errno::ENOTCAPABLE);
+        }
+        Ok(Arc::clone(&slot.file))
+    })
+}
+
 /// `fcntl(fd, cmd, arg)`.
 pub(super) fn fcntl(s: &Sleepable, fd: u64, cmd: u64, arg: u64) -> SysResult {
     let fd = int(fd);
@@ -290,10 +351,12 @@ pub(super) fn fcntl(s: &Sleepable, fd: u64, cmd: u64, arg: u64) -> SysResult {
     let cloexec = FdFlags {
         cloexec: true,
         clofork: false,
+        resolve_beneath: false,
     };
     let clofork = FdFlags {
         cloexec: false,
         clofork: true,
+        resolve_beneath: false,
     };
     match cmd {
         F_DUPFD => dup_fd(s, Dup::AtLeast, FdFlags::default(), fd, int(arg)),
@@ -309,21 +372,25 @@ pub(super) fn fcntl(s: &Sleepable, fd: u64, cmd: u64, arg: u64) -> SysResult {
         F_SETFD => {
             let p = process()?;
             let bits = u32::try_from(arg & 0xffff_ffff).unwrap_or(0);
-            p.files.lock(s).set_flags(
+            let mut t = p.files.lock(s);
+            // `UF_RESOLVE_BENEATH` may be set, never cleared.
+            let had = t.slot(fd)?.flags.resolve_beneath;
+            t.set_flags(
                 fd,
                 FdFlags {
                     cloexec: bits & FD_CLOEXEC != 0,
                     clofork: bits & FD_CLOFORK != 0,
+                    resolve_beneath: had || bits & FD_RESOLVE_BENEATH != 0,
                 },
             )?;
             Ok(0)
         }
         F_GETFL => {
-            let f = current_file(s, u64::from(fd.cast_unsigned()))?;
+            let f = fcntl_file(s, fd, F_GETFL)?;
             Ok(u64::from(oflags(f.flags())))
         }
         F_SETFL => {
-            let f = current_file(s, u64::from(fd.cast_unsigned()))?;
+            let f = fcntl_file(s, fd, F_SETFL)?;
             let bits = u32::try_from(arg & 0xffff_ffff).unwrap_or(0) & !O_ACCMODE;
             // Non-blocking and async are the file's own business on
             // FreeBSD (`FIONBIO`, `FIOASYNC`); the files here only read
@@ -332,12 +399,12 @@ pub(super) fn fcntl(s: &Sleepable, fd: u64, cmd: u64, arg: u64) -> SysResult {
             Ok(0)
         }
         F_ISUNIONSTACK => {
-            let f = current_file(s, u64::from(fd.cast_unsigned()))?;
+            let f = current_file(s, u64::from(fd.cast_unsigned()), &R::NO)?;
             // No union mounts.
             f.vnode().map(|_| 0).ok_or(Errno::EBADF)
         }
         F_READAHEAD | F_RDAHEAD => {
-            let f = current_file(s, u64::from(fd.cast_unsigned()))?;
+            let f = current_file(s, u64::from(fd.cast_unsigned()), &R::NO)?;
             // A hint, for regular files.
             match f.vnode() {
                 Some(_) => Ok(0),
@@ -346,9 +413,12 @@ pub(super) fn fcntl(s: &Sleepable, fd: u64, cmd: u64, arg: u64) -> SysResult {
         }
         F_GETLK | F_SETLK | F_SETLKW => record_lock(s, fd, cmd, arg),
         // Only shared memory has seals.
-        abi::fcntl::F_KINFO => kinfo(s, fd, arg),
+        abi::fcntl::F_KINFO => {
+            crate::capsicum::check_capmode()?;
+            kinfo(s, fd, arg)
+        }
         F_ADD_SEALS | F_GET_SEALS => {
-            let f = current_file(s, u64::from(fd.cast_unsigned()))?;
+            let f = current_file(s, u64::from(fd.cast_unsigned()), &R::NO)?;
             let crate::fs::file::FileKind::Shm(m) = f.kind() else {
                 return Err(Errno::EINVAL);
             };
@@ -366,6 +436,7 @@ pub(super) fn fcntl(s: &Sleepable, fd: u64, cmd: u64, arg: u64) -> SysResult {
             let flags = FdFlags {
                 cloexec: flags & FD_CLOEXEC != 0,
                 clofork: flags & FD_CLOFORK != 0,
+                resolve_beneath: false,
             };
             dup_fd(s, Dup::Fixed, flags, fd, int(arg))
         }
@@ -410,7 +481,7 @@ fn lock_range(s: &Sleepable, f: &File, fl: &Flock) -> Result<(u64, u64), Errno> 
 fn record_lock(s: &Sleepable, fd: i32, cmd: u32, arg: u64) -> SysResult {
     use vfs::lockf::{Lock, LockType, Owner};
     let p = process()?;
-    let f = file(s, &p, u64::from(fd.cast_unsigned()))?;
+    let f = file(s, &p, u64::from(fd.cast_unsigned()), &R::FLOCK)?;
     let v = f.vnode().ok_or(Errno::EBADF)?.clone();
     let ptr = UserPtr::<Flock>::new(arg);
     let mut fl = ptr.read().map_err(|_| Errno::EFAULT)?;
@@ -478,7 +549,7 @@ fn record_lock(s: &Sleepable, fd: i32, cmd: u32, arg: u64) -> SysResult {
 pub(super) fn flock(s: &Sleepable, fd: u64, how: u64) -> SysResult {
     use vfs::lockf::{Lock, LockType};
     let how = u32::try_from(how).map_err(|_| Errno::EINVAL)?;
-    let f = current_file(s, fd)?;
+    let f = current_file(s, fd, &R::FLOCK)?;
     let FileKind::Vnode(vf) = f.kind() else {
         return Err(Errno::EOPNOTSUPP);
     };
@@ -526,6 +597,18 @@ pub(super) fn ioctl(s: &Sleepable, fd: u64, com: u64, data: u64) -> SysResult {
         return Err(Errno::ENOTTY);
     }
     let fdi = int(fd);
+    // Only the requests the descriptor is limited to (`cap_ioctl_check`;
+    // without `CAP_IOCTL` the list is empty).
+    let f = {
+        let t = p.files.lock(s);
+        let slot = t.checked(fdi, &crate::capsicum::rights::IOCTL)?;
+        if let Some(l) = slot.caps.as_ref().and_then(|c| c.ioctls.as_ref())
+            && !l.iter().any(|&x| x & 0xffff_ffff == u64::from(com))
+        {
+            return Err(Errno::ENOTCAPABLE);
+        }
+        Arc::clone(&slot.file)
+    };
     match com {
         FIOCLEX | FIONCLEX => {
             let mut t = p.files.lock(s);
@@ -536,7 +619,6 @@ pub(super) fn ioctl(s: &Sleepable, fd: u64, com: u64, data: u64) -> SysResult {
         }
         _ => {}
     }
-    let f = file(s, &p, fd)?;
     if f.flags() & (FREAD | FWRITE) == 0 {
         return Err(Errno::EBADF);
     }
@@ -575,7 +657,7 @@ pub(super) fn posix_openpt(s: &Sleepable, flags: u64) -> SysResult {
     if flags & !(O_RDWR | O_NOCTTY | O_CLOEXEC) != 0 {
         return Err(Errno::EINVAL);
     }
-    let master = Arc::new(crate::tty::pts::alloc());
+    let master = Arc::new(crate::tty::pts::alloc()?);
     let fflags = (flags & O_ACCMODE) + 1;
     let file = File::new(FileKind::Pts(master), fflags & (FREAD | FWRITE));
     install(
@@ -585,6 +667,7 @@ pub(super) fn posix_openpt(s: &Sleepable, flags: u64) -> SysResult {
         FdFlags {
             cloexec: flags & O_CLOEXEC != 0,
             clofork: false,
+            resolve_beneath: false,
         },
     )
 }
@@ -601,6 +684,7 @@ pub(super) fn pipe2(s: &Sleepable, fildes: u64, flags: u64) -> SysResult {
     let fdf = FdFlags {
         cloexec: flags & O_CLOEXEC != 0,
         clofork: flags & O_CLOFORK != 0,
+        resolve_beneath: false,
     };
     let limit = max_files(&p);
     let fds = {
@@ -632,7 +716,7 @@ pub(super) fn pipe2(s: &Sleepable, fildes: u64, flags: u64) -> SysResult {
 
 /// `fstat(fd, sb)`.
 pub(super) fn fstat(s: &Sleepable, fd: u64, sb: u64) -> SysResult {
-    let f = current_file(s, fd)?;
+    let f = current_file(s, fd, &R::FSTAT)?;
     UserPtr::<Stat>::new(sb)
         .write(&f.stat(s)?)
         .map_err(|_| Errno::EFAULT)?;
@@ -641,7 +725,7 @@ pub(super) fn fstat(s: &Sleepable, fd: u64, sb: u64) -> SysResult {
 
 /// `fstatfs(fd, buf)`.
 pub(super) fn fstatfs(s: &Sleepable, fd: u64, buf: u64) -> SysResult {
-    let f = current_file(s, fd)?;
+    let f = current_file(s, fd, &R::FSTATFS)?;
     let v = f.vnode().ok_or(Errno::EINVAL)?;
     let st = super::path::statfs_of(s, v)?;
     UserPtr::<Statfs>::new(buf)
@@ -661,7 +745,7 @@ pub(super) fn getdirentries(
     basep: u64,
 ) -> SysResult {
     check_len(nbytes)?;
-    let f = current_file(s, fd)?;
+    let f = current_file(s, fd, &R::READ)?;
     // Not a file system object (`getvnode`), then not readable, then not
     // a directory (`kern_getdirentries`).
     let v = f.vnode().ok_or(Errno::EINVAL)?;
@@ -705,12 +789,12 @@ pub(super) fn copy_file_range(
         return Err(Errno::EINVAL);
     }
     let p = process()?;
-    let input = file(s, &p, infd)?;
+    let input = file(s, &p, infd, &R::READ)?;
     if input.flags() & FREAD == 0 {
         return Err(Errno::EBADF);
     }
     let invp = input.vnode().ok_or(Errno::EINVAL)?;
-    let output = file(s, &p, outfd)?;
+    let output = file(s, &p, outfd, &R::WRITE)?;
     if output.flags() & FWRITE == 0 {
         return Err(Errno::EBADF);
     }
@@ -807,7 +891,7 @@ fn kinfo(s: &Sleepable, fd: i32, arg: u64) -> SysResult {
     if usize::try_from(size).ok() != Some(SIZE) {
         return Err(Errno::EINVAL);
     }
-    let f = current_file(s, u64::from(fd.cast_unsigned()))?;
+    let f = current_file(s, u64::from(fd.cast_unsigned()), &R::NO)?;
     let ty: i32 = match f.kind() {
         FileKind::Vnode(v) if v.device.is_some() => 12,
         FileKind::Vnode(_) => 1,
@@ -817,6 +901,7 @@ fn kinfo(s: &Sleepable, fd: i32, arg: u64) -> SysResult {
         FileKind::Kqueue(_) => 5,
         FileKind::Shm(_) => 8,
         FileKind::Process(_) => 11,
+        FileKind::Jail(_) => 16,
         FileKind::Eventfd(_) => 13,
         FileKind::Timerfd(_) => 14,
         FileKind::Pts(_) => 10,

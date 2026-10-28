@@ -26,11 +26,14 @@ mod balloc;
 pub mod cg;
 pub mod dir;
 pub mod dirhash;
+pub mod extattr;
 mod inode;
 pub mod ops;
 pub mod sb;
 pub mod softdep;
 
+#[cfg(test)]
+mod ea_tests;
 #[cfg(test)]
 mod soft_tests;
 #[cfg(test)]
@@ -71,6 +74,8 @@ pub enum Error {
     NameTooLong,
     /// A link count would pass `LINK_MAX` (`EMLINK`).
     TooManyLinks,
+    /// An argument the format cannot hold (`EINVAL`).
+    Invalid,
 }
 
 /// How a changed block goes to the disk.
@@ -279,6 +284,11 @@ pub const NDADDR: u64 = 12;
 pub(crate) const NDIRECT: usize = 12;
 /// Indirect block pointers in an inode (single, double, triple).
 pub const NIADDR: usize = 3;
+/// Extended attribute block pointers in an inode (`UFS_NXADDR`).
+pub const NXADDR: usize = 2;
+/// The soft-updates slot of the first extended attribute block: the
+/// inode's pointers are numbered direct, indirect, then these.
+pub(crate) const EXT_SLOT: usize = NDIRECT + NIADDR;
 
 /// A mounted UFS2 file system: its superblock and the device under it.
 #[derive(Debug)]

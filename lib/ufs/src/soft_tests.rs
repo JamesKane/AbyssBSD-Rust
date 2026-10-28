@@ -35,8 +35,8 @@ fn trace(what: &str, offset: u64, len: u64) {
 
 /// A disk behind a cache of buffers that go out only when told, through
 /// the tracker's hooks, with file data queued behind it.
-struct Sim {
-    disk: RefCell<Vec<u8>>,
+pub(crate) struct Sim {
+    pub(crate) disk: RefCell<Vec<u8>>,
     bufs: RefCell<BTreeMap<u64, Vec<u8>>>,
     dirty: RefCell<BTreeSet<u64>>,
     /// File data not on the disk yet, in order.
@@ -45,7 +45,7 @@ struct Sim {
 }
 
 impl Sim {
-    fn new(image: Vec<u8>) -> Self {
+    pub(crate) fn new(image: Vec<u8>) -> Self {
         let sb = Superblock::find(&(), &image[..], 512).unwrap();
         Self {
             disk: RefCell::new(image),
@@ -115,7 +115,7 @@ impl Sim {
     }
 
     /// Writes a random part of what is dirty, in a random order.
-    fn write_some(&self, rng: &mut Rng) {
+    pub(crate) fn write_some(&self, rng: &mut Rng) {
         let n = self.data.borrow().len();
         self.write_data_out(rng.below(n as u64 + 1) as usize);
         let mut dirty: Vec<u64> = self.dirty.borrow().iter().copied().collect();
@@ -254,7 +254,7 @@ impl ops::WorkEnv<Sim> for Env<'_> {
 }
 
 /// Does the work that is due.
-fn do_work(fs: &Ufs<Sim>, sum: &mut Summary) {
+pub(crate) fn do_work(fs: &Ufs<Sim>, sum: &mut Summary) {
     loop {
         let work = fs.take_work(&());
         if work.is_empty() {
@@ -269,7 +269,7 @@ fn do_work(fs: &Ufs<Sim>, sum: &mut Summary) {
 }
 
 /// Writes everything and does all the work, until nothing is left.
-fn settle(fs: &Ufs<Sim>, sum: &mut Summary) {
+pub(crate) fn settle(fs: &Ufs<Sim>, sum: &mut Summary) {
     let io = fs.io();
     for _ in 0..200 {
         io.write_data_out(usize::MAX);
@@ -295,7 +295,7 @@ fn settle(fs: &Ufs<Sim>, sum: &mut Summary) {
 /// soft updates, checked here without it: no entry names a free inode; no
 /// fragment is claimed twice or is free in its group; no directory has a
 /// hole or claims fragments it has not; no link count is below the names.
-fn check_crash(image: &[u8]) -> Result<(), String> {
+pub(crate) fn check_crash(image: &[u8]) -> Result<(), String> {
     let fs = Ufs::open(&(), image, 512).map_err(|e| std::format!("{e:?}"))?;
     let sb = fs.superblock().clone();
     let fsize = u64::from(sb.fsize);
@@ -333,6 +333,36 @@ fn check_crash(image: &[u8]) -> Result<(), String> {
             problems.push(std::format!("inode {ino} allocated but free in its group"));
         }
         inodes.insert(ino, ip);
+    }
+    // Extended attribute blocks, of any kind of file, as fsck counts them:
+    // those within `di_extsize`, the last one its fragments.
+    for (&ino, ip) in &inodes {
+        let size = u64::from(ip.extsize);
+        for (i, &p) in ip.extb.iter().enumerate() {
+            let i = i as u64;
+            if p == 0 {
+                continue;
+            }
+            if i * bsize >= size {
+                problems.push(std::format!(
+                    "inode {ino}: ext block {i} past its size {size}"
+                ));
+                continue;
+            }
+            let n = u64::from(sb.block_size(size, i)) / fsize;
+            for x in p..p + n {
+                if x >= sb.size {
+                    problems.push(std::format!("inode {ino}: ext block {x} past the end"));
+                    break;
+                }
+                if let Some(other) = claimed.insert(x, ino) {
+                    problems.push(std::format!("fragment {x}: inodes {other} and {ino} (ext)"));
+                }
+                if !frag_used(x, &mut cgs) {
+                    problems.push(std::format!("inode {ino}: ext block {x} free in its group"));
+                }
+            }
+        }
     }
     for (&ino, ip) in &inodes {
         let has_blocks = match ip.kind() {
@@ -523,7 +553,7 @@ fn check_crash(image: &[u8]) -> Result<(), String> {
 /// soft updates fails on anything soft updates should not leave), again
 /// until `-f -n` finds nothing (a directory cleared leaves what was in it
 /// for the next run); returns what preening repaired, each kind once.
-fn fsck_preens(path: &std::path::Path) -> Result<BTreeSet<String>, String> {
+pub(crate) fn fsck_preens(path: &std::path::Path) -> Result<BTreeSet<String>, String> {
     let mut kinds = BTreeSet::new();
     let mut log = String::new();
     for _ in 0..4 {

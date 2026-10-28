@@ -20,6 +20,7 @@ use sched::Sleepable;
 
 use super::io::max_files;
 use super::{SysResult, int, process};
+use crate::cred::Priv;
 use crate::fs::fdtable::FdFlags;
 use crate::fs::file::{File, FileKind};
 use crate::timers::{NANOS, Sigev, Timerfd, ns_ts, ts_ns};
@@ -192,6 +193,7 @@ fn install(s: &Sleepable, kind: FileKind, status: u32, cloexec: bool) -> SysResu
         FdFlags {
             cloexec,
             clofork: false,
+            resolve_beneath: false,
         },
         0,
         limit,
@@ -218,8 +220,12 @@ pub(super) fn timerfd_create(s: &Sleepable, clockid: u64, flags: u64) -> SysResu
     )
 }
 
-fn timerfd_of(s: &Sleepable, fd: u64) -> Result<(Arc<File>, Arc<Timerfd>), Errno> {
-    let f = super::io::current_file(s, fd)?;
+fn timerfd_of(
+    s: &Sleepable,
+    fd: u64,
+    need: &abi::capsicum::CapRights,
+) -> Result<(Arc<File>, Arc<Timerfd>), Errno> {
+    let f = super::io::current_file(s, fd, need)?;
     let FileKind::Timerfd(t) = f.kind() else {
         return Err(Errno::EINVAL);
     };
@@ -229,7 +235,7 @@ fn timerfd_of(s: &Sleepable, fd: u64) -> Result<(Arc<File>, Arc<Timerfd>), Errno
 
 /// `timerfd_gettime(fd, curr_value)`.
 pub(super) fn timerfd_gettime(s: &Sleepable, fd: u64, curr: u64) -> SysResult {
-    let (_f, t) = timerfd_of(s, fd)?;
+    let (_f, t) = timerfd_of(s, fd, &crate::capsicum::rights::READ)?;
     UserPtr::<Itimerspec>::new(curr)
         .write(&t.gettime())
         .map_err(|_| Errno::EFAULT)?;
@@ -248,7 +254,7 @@ pub(super) fn timerfd_settime(s: &Sleepable, fd: u64, flags: u64, new: u64, old:
     }
     ts_ns(&new.it_value)?;
     ts_ns(&new.it_interval)?;
-    let (_f, t) = timerfd_of(s, fd)?;
+    let (_f, t) = timerfd_of(s, fd, &crate::capsicum::rights::WRITE)?;
     let prev = t.settime(flags, &new)?;
     if old != 0 {
         UserPtr::<Itimerspec>::new(old)
@@ -418,16 +424,14 @@ pub(super) fn clock_settime(id: u64, tp: u64) -> SysResult {
     let ts = UserPtr::<Timespec>::new(tp)
         .read()
         .map_err(|_| Errno::EFAULT)?;
-    if !process()?.is_root() {
-        return Err(Errno::EPERM);
-    }
+    process()?.priv_check(Priv::ClockSettime)?;
     if int(id).cast_unsigned() != clock::REALTIME {
         return Err(Errno::EINVAL);
     }
     if ts.tv_nsec < 0 || ts.tv_nsec >= 1_000_000_000 || ts.tv_sec < 0 {
         return Err(Errno::EINVAL);
     }
-    set_time(ts_ns(&ts)?);
+    set_time(ts_ns(&ts)?)?;
     Ok(0)
 }
 
@@ -447,23 +451,50 @@ pub(super) fn settimeofday(tv: u64, tzp: u64) -> SysResult {
             .read()
             .map_err(|_| Errno::EFAULT)?;
     }
-    if !process()?.is_root() {
-        return Err(Errno::EPERM);
-    }
+    process()?.priv_check(Priv::Settimeofday)?;
     if let Some(t) = t {
         if t.tv_usec < 0 || t.tv_usec >= 1_000_000 || t.tv_sec < 0 {
             return Err(Errno::EINVAL);
         }
-        set_time(tv_ns(&t));
+        set_time(tv_ns(&t))?;
     }
     Ok(0)
 }
 
+/// The latest time of day seen, and the second of the last step forward,
+/// for securelevel 2 (`settime`'s `maxtime` and `laststep`).
+static SECURE_TIME: sync::SpinLock<(u64, u64)> = sync::SpinLock::new((0, u64::MAX));
+
 /// Steps the time of day to `unix_ns` (`settime`): the absolute real-time
-/// timers see the jump.
-fn set_time(unix_ns: u64) {
-    crate::time::set_time_of_day(unix_ns);
+/// timers see the jump. Above securelevel 1 the clock goes back no more
+/// than a second past the latest time seen, and forward no more than a
+/// second at a time, once a second (`EPERM` for a second step).
+fn set_time(unix_ns: u64) -> Result<(), Errno> {
+    let mut to = unix_ns;
+    if crate::fs::cred().securelevel_gt(1).is_err() {
+        const SEC: u64 = 1_000_000_000;
+        let now = super::clock_ns(clock::REALTIME)?;
+        let mut st = SECURE_TIME.lock();
+        if to < now {
+            st.0 = st.0.max(now);
+            if to / SEC + 1 < st.0 / SEC {
+                to = (st.0 / SEC - 1) * SEC + to % SEC;
+                kprintln!("Time adjustment clamped to -1 second");
+            }
+        } else {
+            if now / SEC == st.1 {
+                return Err(Errno::EPERM);
+            }
+            if (to - now) / SEC > 1 {
+                to = (now / SEC + 1) * SEC + to % SEC;
+                kprintln!("Time adjustment clamped to +1 second");
+            }
+            st.1 = now / SEC;
+        }
+    }
+    crate::time::set_time_of_day(to);
     crate::timers::clock_jumped();
+    Ok(())
 }
 
 /// `adjtime(delta, olddelta)`: the clock is stepped, not slewed (no
@@ -479,12 +510,10 @@ pub(super) fn adjtime(delta: u64, olddelta: u64) -> SysResult {
         )
     };
     if let Some(d) = d {
-        if !process()?.is_root() {
-            return Err(Errno::EPERM);
-        }
+        process()?.priv_check(Priv::Adjtime)?;
         let now = i128::from(super::clock_ns(clock::REALTIME)?);
         let step = i128::from(d.tv_sec) * i128::from(NANOS) + i128::from(d.tv_usec) * 1000;
-        set_time(u64::try_from((now + step).max(0)).unwrap_or(0));
+        set_time(u64::try_from((now + step).max(0)).unwrap_or(0))?;
     }
     if olddelta != 0 {
         UserPtr::<Timeval>::new(olddelta)

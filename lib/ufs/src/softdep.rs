@@ -42,7 +42,11 @@ use intmap::{IntKey, IntMap};
 
 use crate::inode::{self, raw};
 use crate::sb::{CK_INODE, Superblock};
-use crate::{NDIRECT, NIADDR, idx, len64};
+use crate::{EXT_SLOT, NDIRECT, NIADDR, NXADDR, idx, len64};
+
+/// Block pointers in an inode: direct, indirect roots, then extended
+/// attribute blocks ([`Slot::Inode`]'s `index`).
+const INODE_SLOTS: usize = EXT_SLOT + NXADDR;
 
 /// What a removal waits for to be on the disk (from
 /// [`Deps::remove_entry`]), for something else to wait on too.
@@ -69,8 +73,9 @@ struct Stamp(u64);
 /// Where a block pointer lives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Slot {
-    /// In inode `ino`: direct block `index` (0 to 11), or the indirect
-    /// root of level `index - 12`.
+    /// In inode `ino`: direct block `index` (0 to 11), the indirect root
+    /// of level `index - 12`, or extended attribute block `index - 15`
+    /// (`di_extb`).
     Inode { ino: u32, index: usize },
     /// Entry `index` of the indirect block whose buffer is at byte `at`.
     Indirect { at: u64, index: usize },
@@ -314,7 +319,12 @@ impl Deps {
         };
         let slots = self
             .slots
-            .range(Slot::Inode { ino, index: 0 }..=Slot::Inode { ino, index: 14 })
+            .range(
+                Slot::Inode { ino, index: 0 }..=Slot::Inode {
+                    ino,
+                    index: INODE_SLOTS - 1,
+                },
+            )
             .next()
             .is_some();
         if d.born.is_none()
@@ -685,7 +695,12 @@ impl Deps {
         let stamp = self.stamp();
         let ids: Vec<Id> = self
             .slots
-            .range(Slot::Inode { ino, index: 0 }..=Slot::Inode { ino, index: 14 })
+            .range(
+                Slot::Inode { ino, index: 0 }..=Slot::Inode {
+                    ino,
+                    index: INODE_SLOTS - 1,
+                },
+            )
             .flat_map(|(_, v)| v.iter().copied())
             .collect();
         for id in ids {
@@ -1406,7 +1421,8 @@ impl Deps {
     /// the block, as FreeBSD's `initiate_write_inodeblock_ufs2` does: a
     /// pointer goes back to what it was, and the size with it so the
     /// inode never claims fragments not yet its own (or ends in a hole of
-    /// its direct blocks). Pointers that went out are added to `out`.
+    /// its direct blocks); the extended attribute blocks and their size
+    /// (`di_extsize`) alike. Pointers that went out are added to `out`.
     fn rollback_inode(
         &self,
         ino: u32,
@@ -1415,7 +1431,7 @@ impl Deps {
         within: usize,
         out: &mut Vec<Id>,
     ) {
-        const SLOTS: usize = NDIRECT + NIADDR;
+        const SLOTS: usize = INODE_SLOTS;
         let bsize = u64::from(self.sb.bsize);
         let mut rolled: [Option<(u64, u64)>; SLOTS] = [None; SLOTS];
         let mut went: [Vec<Id>; SLOTS] = Default::default();
@@ -1487,9 +1503,10 @@ impl Deps {
                 _ => None,
             });
             if let Some((i, osz)) = cut {
-                // A fragment rolled back ends the file there.
+                // A fragment rolled back ends the file there (its data;
+                // the extended attribute area is apart).
                 raw::set_size(b, len64(i) * bsize + osz);
-                for (j, w) in went.iter_mut().enumerate().skip(i + 1) {
+                for (j, w) in went.iter_mut().enumerate().take(EXT_SLOT).skip(i + 1) {
                     raw::set_pointer(b, j, 0);
                     w.clear();
                 }
@@ -1501,10 +1518,35 @@ impl Deps {
                 let end = (0..=last).rev().find(|&i| raw::pointer(b, i) != 0);
                 raw::set_size(b, end.map_or(0, |i| (len64(i) + 1) * bsize));
             }
+            Self::rollback_ext(b, &rolled[EXT_SLOT..], &mut went[EXT_SLOT..], bsize);
             raw::rehash(b, self.sb.metackhash & CK_INODE != 0);
         }
         for w in went {
             out.extend(w);
+        }
+    }
+
+    /// The extended attribute part of [`Self::rollback_inode`], on inode
+    /// bytes `b` whose pointers are rolled back already: as with the
+    /// direct blocks, a fragment rolled back ends the area there, and a
+    /// last block rolled back to none ends it with the last block left.
+    fn rollback_ext(b: &mut [u8], rolled: &[Option<(u64, u64)>], went: &mut [Vec<Id>], bsize: u64) {
+        let slot = |i: usize| EXT_SLOT + i;
+        let cut = (0..NXADDR).find_map(|i| match rolled[i] {
+            Some((_, osz)) if osz != 0 && osz < bsize => Some((i, osz)),
+            _ => None,
+        });
+        if let Some((i, osz)) = cut {
+            raw::set_extsize(b, len64(i) * bsize + osz);
+            for (j, w) in went.iter_mut().enumerate().skip(i + 1) {
+                raw::set_pointer(b, slot(j), 0);
+                w.clear();
+            }
+        } else if let Some(last) = (0..NXADDR).rev().find(|&i| rolled[i].is_some())
+            && raw::extsize(b) <= (len64(last) + 1) * bsize
+        {
+            let end = (0..=last).rev().find(|&i| raw::pointer(b, slot(i)) != 0);
+            raw::set_extsize(b, end.map_or(0, |i| (len64(i) + 1) * bsize));
         }
     }
 

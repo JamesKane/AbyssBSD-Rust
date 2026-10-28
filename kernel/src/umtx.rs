@@ -211,8 +211,10 @@ impl umtx::Env for Ctx<'_> {
     }
 
     fn may_rtprio(&self) -> bool {
-        // Everyone is root until P6.7 brings credentials that are not.
-        self.t.process().is_root()
+        self.t
+            .process()
+            .priv_check(crate::cred::Priv::SchedRtprio)
+            .is_ok()
     }
 }
 

@@ -13,7 +13,9 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+pub mod acl;
 pub mod bus;
+pub mod capsicum;
 pub mod consio;
 pub mod dirent;
 pub mod errno;
@@ -31,6 +33,7 @@ pub mod md;
 pub mod mman;
 pub mod mount;
 pub mod mouse;
+pub mod procctl;
 pub mod procdesc;
 pub mod resource;
 pub mod signal;

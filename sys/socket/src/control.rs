@@ -36,6 +36,8 @@ pub struct InFlight {
     file: Option<Arc<dyn Passable>>,
     /// Its descriptor flags as sent (`fde_flags`).
     pub flags: u32,
+    /// Its Capsicum limits as sent (`fde_caps`), the kernel's own type.
+    pub caps: Option<alloc::boxed::Box<dyn core::any::Any + Send + Sync>>,
 }
 
 impl core::fmt::Debug for InFlight {
@@ -57,6 +59,7 @@ impl InFlight {
         Self {
             file: Some(file),
             flags,
+            caps: None,
         }
     }
 

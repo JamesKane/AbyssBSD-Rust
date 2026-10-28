@@ -103,17 +103,23 @@ fn wait_loop(
     }
 }
 
-/// Every open file of `fds` (`None` for one that is not), looked up
-/// together.
+/// Every open file of `fds` that has `CAP_EVENT` (`None` for one that is
+/// not open, or lacks it), looked up together, and why each missing one
+/// is (`EBADF` or `ENOTCAPABLE`).
 fn files<I: IntoIterator<Item = i32>>(
     s: &Sleepable,
     fds: I,
-) -> Result<Vec<Option<Arc<File>>>, Errno> {
+) -> Result<Vec<Result<Arc<File>, Errno>>, Errno> {
     let p = process()?;
     let t = p.files.lock(s);
     Ok(fds
         .into_iter()
-        .map(|fd| (fd >= 0).then(|| t.get(fd).ok()).flatten())
+        .map(|fd| {
+            if fd < 0 {
+                return Err(Errno::EBADF);
+            }
+            t.get_checked(fd, &crate::capsicum::rights::EVENT)
+        })
         .collect())
 }
 
@@ -192,7 +198,7 @@ fn kern_poll(
                 pfd.revents = 0;
                 continue;
             }
-            let Some(f) = f else {
+            let Ok(f) = f else {
                 pfd.revents = POLLNVAL;
                 n += 1;
                 continue;
@@ -348,7 +354,7 @@ fn kern_select(
         let fs = files(s, asked.iter().map(|a| a.0))?;
         let mut n = 0;
         for (&(fd, flags), f) in asked.iter().zip(fs) {
-            let f = f.ok_or(Errno::EBADF)?;
+            let f = f?;
             let ev = f.poll(s, flags, w);
             let (wd, bit) = (fd.cast_unsigned() as usize / 64, 1u64 << (fd % 64));
             for k in 0..3 {
@@ -387,11 +393,12 @@ pub(super) fn kqueuex(s: &Sleepable, flags: u64) -> SysResult {
         return Err(Errno::EINVAL);
     }
     let p = process()?;
-    let k = KqueueFile::new(flags & KQUEUE_CPONFORK != 0);
+    let k = KqueueFile::charged(flags & KQUEUE_CPONFORK != 0)?;
     let kq = Arc::clone(&k.kq);
     let fdf = FdFlags {
         cloexec: flags & KQUEUE_CLOEXEC != 0,
         clofork: false,
+        resolve_beneath: false,
     };
     let limit = max_files(&p);
     let mut t = p.files.lock(s);
@@ -425,7 +432,16 @@ pub(super) fn kevent(
         )
     };
     let p = process()?;
-    let f = super::io::file(s, &p, fd)?;
+    // Changes need `CAP_KQUEUE_CHANGE`, events `CAP_KQUEUE_EVENT`
+    // (`kern_kevent`).
+    let mut need = crate::capsicum::rights::NO;
+    if int(nchanges) > 0 {
+        need = need.union(&crate::capsicum::rights::KQUEUE_CHANGE);
+    }
+    if int(nevents) > 0 {
+        need = need.union(&crate::capsicum::rights::KQUEUE_EVENT);
+    }
+    let f = super::io::file(s, &p, fd, &need)?;
     let FileKind::Kqueue(k) = f.kind() else {
         return Err(Errno::EINVAL);
     };

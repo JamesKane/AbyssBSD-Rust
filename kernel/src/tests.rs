@@ -2785,17 +2785,34 @@ mod user_memory {
             crate::tty::termios_to(&t, &mut arg);
             dev.ioctl(&s, abi::ioctl::TIOCSETA, &mut arg).unwrap();
             port.set_loopback(true);
-            // More than the transmit FIFO and the receive buffer hold.
+            // More than the transmit FIFO and the receive buffer hold, in
+            // chunks the receive FIFO takes whole: with no flow control, a
+            // guest slow to take its interrupts (TCG) would otherwise lose
+            // bytes to overruns, as real hardware would. A lost byte fails
+            // the test rather than hanging it.
             let sent: alloc::vec::Vec<u8> = (0..600u32).map(|i| b'a' + (i % 26) as u8).collect();
-            let n = dev.write(&s, &mut vfs::WriteBuf::new(&sent), 0, false).unwrap();
-            assert_eq!(n, sent.len());
             let mut got = alloc::vec![0u8; sent.len()];
-            let mut have = 0;
-            while have < got.len() {
-                let mut r = vfs::ReadBuf::new(&mut got[have..]);
-                let n = dev.read(&s, &mut r, 0, false).unwrap();
-                assert!(n > 0, "end of file after {have}");
-                have += n;
+            for (i, chunk) in sent.chunks(8).enumerate() {
+                let n = dev.write(&s, &mut vfs::WriteBuf::new(chunk), 0, false).unwrap();
+                assert_eq!(n, chunk.len());
+                let at = i * 8;
+                let mut have = 0;
+                let deadline = crate::time::now_ns() + 5_000_000_000;
+                while have < chunk.len() {
+                    let mut r = vfs::ReadBuf::new(&mut got[at + have..at + chunk.len()]);
+                    match dev.read(&s, &mut r, 0, true) {
+                        Ok(n) => have += n,
+                        Err(abi::errno::Errno::EAGAIN) => {
+                            assert!(
+                                crate::time::now_ns() < deadline,
+                                "byte {} never came back",
+                                at + have
+                            );
+                            crate::time::sleep_ns(&s, 1_000_000);
+                        }
+                        Err(e) => panic!("read: {e:?}"),
+                    }
+                }
             }
             port.set_loopback(false);
             assert_eq!(got, sent);
@@ -2912,6 +2929,7 @@ mod user_memory {
                         &[b"echo"],
                         &[],
                         &crate::proc::default_limits(),
+                        0,
                         &|_| Err(abi::errno::Errno::ENOENT),
                     )
                     .unwrap();
@@ -3194,9 +3212,10 @@ mod user_memory {
 
     ktest! {
         /// UFS2 read-write on its own disk (32 MiB, virtio): FreeBSD's `newfs`
-        /// makes it, `/rescue`'s tools work over it mounted read-write
-        /// (directories, copies, links, renames, an archive, removal, and
-        /// fsx when the memory disk has it), and after unmounting,
+        /// makes it, `/rescue`'s tools work over it mounted read-write with
+        /// `acls` (directories, copies, links, renames, an archive, removal,
+        /// access and default ACLs, and fsx when the memory disk has it),
+        /// and after unmounting,
         /// FreeBSD's `fsck_ffs -f -n` finds nothing wrong; mounted again,
         /// it holds what was written.
         fn ufs_read_write_survives_fsck() {
@@ -3337,7 +3356,7 @@ mod user_memory {
             ""
         };
         let script_text = alloc::string::String::from("newfs NEWFS DEV > /dev/null || exit 1; \
-                mount -t ufs DEV /mnt || exit 2; cd /mnt || exit 2; SOFT \
+                mount -t ufs -o acls DEV /mnt || exit 2; cd /mnt || exit 2; SOFT \
                 mkdir -p a/b c && echo hello > a/b/f && dd if=/rescue/rescue of=big bs=64k count=80 2>/dev/null && \
                 ln a/b/f hard && ln -s a/b/f soft && mv big c/big && \
                 [ \"$(cat soft)\" = hello ] && [ \"$(cat hard)\" = hello ] || exit 3; \
@@ -3346,13 +3365,24 @@ mod user_memory {
                 for f in $(ls x/usr/tests/abyss); do \
                     [ \"$(md5 -q x/usr/tests/abyss/$f)\" = \"$(md5 -q /usr/tests/abyss/$f)\" ] || exit 6; done; \
                 rm -r a/b x/usr && [ ! -e a/b ] || exit 8; \
+                has() { case \"$1\" in *\"$2\"*) return 0;; esac; return 1; }; \
+                umask 022; : > acl.f && chmod 640 acl.f && setfacl -m u:1001:rw acl.f && \
+                has \"$(getfacl -qn acl.f)\" 'user:1001:rw-' && \
+                set -- $(ls -l acl.f) && [ \"$1\" = '-rw-rw----+' ] || \
+                { (ls -l acl.f; getfacl -n acl.f) > /tmp/fsck.out 2>&1; exit 18; }; \
+                mkdir acld && setfacl -d -m u::rwx,g::rx,o::,u:1001:rwx,m::rwx acld && \
+                : > acld/f && mkdir acld/d && set -- $(ls -l acld/f) && [ \"$1\" = '-rw-r-----+' ] && \
+                has \"$(getfacl -qn acld/f)\" 'user:1001:rwx' && \
+                has \"$(getfacl -qn -d acld/d)\" 'user:1001:rwx' || \
+                { (ls -l acld; getfacl -n acld/f; getfacl -n -d acld/d) > /tmp/fsck.out 2>&1; exit 19; }; \
                 if [ -x /usr/tests/fsx/fsx ]; then for seed in 1 2 3; do \
                     /usr/tests/fsx/fsx -q -N OPS -S $seed /mnt/fsx.data > /tmp/fsx.out 2>&1 || exit 9; \
                     rm -f /mnt/fsx.data*; done; fi; \
                 cd / && umount /mnt || exit 10; \
                 fsck_ffs -f -n DEV > /tmp/fsck.out 2>&1 || exit 11; \
-                mount -t ufs -o ro DEV /mnt || exit 12; \
+                mount -t ufs -o ro,acls DEV /mnt || exit 12; \
                 [ \"$(cat /mnt/hard)\" = hello ] && \
+                has \"$(getfacl -qn /mnt/acl.f)\" 'user:1001:rw-' && \
                 [ \"$(md5 -q /mnt/c/big)\" = \"$(dd if=/rescue/rescue bs=64k count=80 2>/dev/null | md5 -q)\" ] || exit 13; \
                 umount /mnt || exit 14; exit 7")
                 .replace("SOFT", soft_checks)

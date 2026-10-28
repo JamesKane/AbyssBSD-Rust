@@ -52,6 +52,7 @@ fn install(s: &Sleepable, shm: Arc<Shm>, fflags: u32, cloexec: bool) -> SysResul
         FdFlags {
             cloexec,
             clofork: false,
+            resolve_beneath: false,
         },
         0,
         limit,
@@ -87,6 +88,8 @@ pub(super) fn shm_open2(
     let path = if upath == SHM_ANON {
         None
     } else {
+        // Only anonymous objects in capability mode.
+        crate::capsicum::check_capmode()?;
         Some(path(upath)?)
     };
     let p = process()?;
@@ -139,7 +142,7 @@ pub(super) fn posix_fallocate(s: &Sleepable, fd: u64, offset: u64, len: u64) -> 
         if offset > i64::MAX - len {
             return Err(Errno::EFBIG);
         }
-        let f = super::io::current_file(s, fd)?;
+        let f = super::io::current_file(s, fd, &crate::capsicum::rights::PWRITE)?;
         if f.flags() & FWRITE == 0 {
             return Err(Errno::EBADF);
         }
@@ -204,13 +207,14 @@ pub(super) fn fspacectl(
     {
         return Err(Errno::EINVAL);
     }
-    let f = super::io::current_file(s, fd)?;
+    let f = super::io::current_file(s, fd, &crate::capsicum::rights::PWRITE)?;
     let shm = match f.kind() {
         FileKind::Shm(m) => m,
         FileKind::Pipe(_)
         | FileKind::Fifo(_)
         | FileKind::Socket(_)
         | FileKind::Process(_)
+        | FileKind::Jail(_)
         | FileKind::Kqueue(_)
         | FileKind::Timerfd(_)
         | FileKind::Eventfd(_)

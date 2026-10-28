@@ -2,7 +2,7 @@
 //! Inodes (`struct ufs2_dinode`).
 
 use crate::sb::{CK_INODE, Superblock};
-use crate::{Error, NIADDR};
+use crate::{Error, NIADDR, NXADDR};
 use crc::crc32c;
 
 /// `sizeof(struct ufs2_dinode)`.
@@ -29,6 +29,7 @@ mod off {
     pub(super) const GEN: usize = 80;
     pub(super) const FLAGS: usize = 88;
     pub(super) const EXTSIZE: usize = 92;
+    pub(super) const EXTB: usize = 96;
     pub(super) const DB: usize = 112;
     pub(super) const IB: usize = 208;
     pub(super) const DIRDEPTH: usize = 240;
@@ -84,7 +85,11 @@ pub struct Inode {
     pub generation: u32,
     /// `chflags` flags.
     pub flags: u32,
+    /// Bytes in the extended attribute area (`di_extsize`).
     pub extsize: u32,
+    /// Fragment addresses of the extended attribute area's blocks
+    /// (`di_extb`); 0 is none.
+    pub extb: [u64; NXADDR],
     /// Fragment addresses of the direct blocks, and of the single,
     /// double, and triple indirect blocks; 0 is a hole.
     pub db: [u64; 12],
@@ -142,6 +147,10 @@ impl Inode {
         for (i, d) in ib.iter_mut().enumerate() {
             *d = u64_at(b, off::IB + i * 8);
         }
+        let mut extb = [0; NXADDR];
+        for (i, d) in extb.iter_mut().enumerate() {
+            *d = u64_at(b, off::EXTB + i * 8);
+        }
         let mut raw = [0u8; SIZE];
         raw.copy_from_slice(b);
         let ip = Self {
@@ -163,6 +172,7 @@ impl Inode {
             generation: u32_at(b, off::GEN),
             flags: u32_at(b, off::FLAGS),
             extsize: u32_at(b, off::EXTSIZE),
+            extb,
             db,
             ib,
         };
@@ -181,6 +191,11 @@ impl Inode {
         };
         if has_blocks && ip.db.iter().chain(&ip.ib).any(|&a| a >= sb.size) {
             return Err(Error::Corrupt("inode block address"));
+        }
+        // Any kind of file may have an extended attribute area; its
+        // pointers count only with a size, as fsck reads them.
+        if ip.extsize != 0 && ip.extb.iter().any(|&a| a >= sb.size) {
+            return Err(Error::Corrupt("inode extended attribute address"));
         }
         Ok(ip)
     }
@@ -216,6 +231,9 @@ impl Inode {
         p32(&mut b, off::GEN, self.generation);
         p32(&mut b, off::FLAGS, self.flags);
         p32(&mut b, off::EXTSIZE, self.extsize);
+        for (i, a) in self.extb.iter().enumerate() {
+            p64(&mut b, off::EXTB + i * 8, *a);
+        }
         for (i, a) in self.db.iter().enumerate() {
             p64(&mut b, off::DB + i * 8, *a);
         }
@@ -307,8 +325,8 @@ pub(crate) mod raw {
         b[off::GEN..off::GEN + 4].copy_from_slice(&generation);
     }
 
-    /// Block pointer `index`: a direct block (0 to 11) or an indirect
-    /// root (12 to 14).
+    /// Block pointer `index`: a direct block (0 to 11), an indirect root
+    /// (12 to 14), or an extended attribute block (15 and 16).
     pub(crate) fn pointer(b: &[u8], index: usize) -> u64 {
         u64_at(b, pointer_at(index))
     }
@@ -321,8 +339,10 @@ pub(crate) mod raw {
     fn pointer_at(index: usize) -> usize {
         if index < crate::NDIRECT {
             off::DB + index * 8
-        } else {
+        } else if index < crate::EXT_SLOT {
             off::IB + (index - crate::NDIRECT) * 8
+        } else {
+            off::EXTB + (index - crate::EXT_SLOT) * 8
         }
     }
 
@@ -343,6 +363,20 @@ pub(crate) mod raw {
 
     pub(crate) fn set_size(b: &mut [u8], v: u64) {
         b[off::SIZE..off::SIZE + 8].copy_from_slice(&v.to_le_bytes());
+    }
+
+    pub(crate) fn extsize(b: &[u8]) -> u64 {
+        u64::from(u32::from_le_bytes([
+            b[off::EXTSIZE],
+            b[off::EXTSIZE + 1],
+            b[off::EXTSIZE + 2],
+            b[off::EXTSIZE + 3],
+        ]))
+    }
+
+    pub(crate) fn set_extsize(b: &mut [u8], v: u64) {
+        let v = u32::try_from(v).unwrap_or(u32::MAX);
+        b[off::EXTSIZE..off::EXTSIZE + 4].copy_from_slice(&v.to_le_bytes());
     }
 
     /// Recomputes the check-hash of allocated inode bytes `b`, if kept.

@@ -30,7 +30,7 @@ use vm::PAGE_SIZE;
 use vm::map::Prot;
 use vm::object::Object;
 
-use crate::cred::Ucred;
+use crate::cred::{Priv, Ucred};
 
 static NAMES_LOCK: LockClass = LockClass::new("shm names", 330);
 static SHM_LOCK: LockClass = LockClass::new("shm", 340);
@@ -287,19 +287,20 @@ impl Shm {
         Ok((Arc::clone(&self.object), max, writecnt))
     }
 
-    /// `fchmod`: the owner (or the superuser) sets the permission bits.
+    /// `fchmod`: the owner (or with `PRIV_VFS_ADMIN`) sets the permission
+    /// bits.
     pub(crate) fn chmod(&self, s: &Sleepable, cred: &Ucred, mode: u16) -> Result<(), Errno> {
         let mut st = self.st.lock(s);
-        if !cred.is_root() && cred.uid != st.uid {
-            return Err(Errno::EPERM);
+        if cred.uid != st.uid {
+            cred.priv_check(Priv::VfsAdmin)?;
         }
         st.mode = mode & 0o777;
         st.ctime = super::now();
         Ok(())
     }
 
-    /// `fchown` (`shm_chown`): the superuser gives it away; the owner
-    /// may change its group to one of its own.
+    /// `fchown` (`shm_chown`): giving it away, or to a group one is not
+    /// in, needs `PRIV_VFS_CHOWN`.
     pub(crate) fn chown(
         &self,
         s: &Sleepable,
@@ -310,10 +311,8 @@ impl Shm {
         let mut st = self.st.lock(s);
         let uid = uid.unwrap_or(st.uid);
         let gid = gid.unwrap_or(st.gid);
-        if !cred.is_root()
-            && (cred.uid != st.uid || uid != st.uid || (gid != st.gid && !cred.in_group(gid)))
-        {
-            return Err(Errno::EPERM);
+        if (uid != st.uid && uid != cred.uid) || (gid != st.gid && !cred.in_group(gid)) {
+            cred.priv_check(Priv::VfsChown)?;
         }
         st.uid = uid;
         st.gid = gid;

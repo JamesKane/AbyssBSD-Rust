@@ -49,6 +49,11 @@ impl VnodeFile {
         let device = match v.kind() {
             Kind::CharDevice => {
                 let mut d = v.device(s)?;
+                // At securelevel 2, no disk opens for writing
+                // (`g_dev_open`).
+                if write && d.ops.dtype() == vfs::D_DISK {
+                    super::cred().securelevel_ge(2)?;
+                }
                 if let Some(ops) = d.ops.instance_nonblock(s, nonblock)? {
                     d.ops = ops;
                 }
@@ -134,6 +139,8 @@ pub(crate) enum FileKind {
     Pipe(pipe::End),
     /// A process descriptor (`pdfork`).
     Process(crate::proc::ProcDesc),
+    /// A jail descriptor (`JAIL_GET_DESC`, `JAIL_OWN_DESC`).
+    Jail(crate::prison::JailDesc),
     /// A UNIX-domain socket.
     Socket(super::socket::SocketFile),
     /// A named pipe.
@@ -159,6 +166,9 @@ pub(crate) struct File {
     /// The offset, held across a transfer so concurrent ones each see
     /// and advance it whole (FreeBSD's `foffset_lock`).
     offset: Mutex<u64>,
+    /// The jail of whoever opened it (`f_cred->cr_prison`); `None` for
+    /// the host.
+    jail: Option<Arc<dyn security::Jail>>,
 }
 
 /// Open files system-wide (`openfiles`, `kern.openfiles`).
@@ -173,11 +183,33 @@ impl Drop for File {
 impl File {
     pub(crate) fn new(kind: FileKind, flags: u32) -> Arc<Self> {
         OPEN_FILES.fetch_add(1, Ordering::Relaxed);
+        // As `falloc` takes the opener's credential.
+        let jail = crate::proc::Process::with_current(crate::proc::Process::jail).flatten();
         Arc::new(Self {
             kind,
             flags: AtomicU32::new(flags),
             offset: Mutex::new(&OFFSET_LOCK, 0),
+            jail,
         })
+    }
+
+    /// Whether a descriptor for it received by `to` must stay beneath it
+    /// (`restrict_rights`): it was opened in another jail with another
+    /// root, and `to` is jailed.
+    pub(crate) fn restricted_for(&self, to: &crate::cred::Ucred) -> bool {
+        use crate::prison::{self, Prison};
+        let Some(mine) = to.jail.as_ref() else {
+            return false;
+        };
+        let theirs = self.jail.as_ref();
+        if theirs.is_some_and(|t| t.id() == mine.id()) {
+            return false;
+        }
+        let root = |j: Option<&Arc<dyn security::Jail>>| {
+            j.and_then(|j| j.as_any().downcast_ref::<Prison>())
+                .map_or_else(|| prison::prison0().root(), Prison::root)
+        };
+        !Arc::ptr_eq(&root(theirs), &root(Some(mine)))
     }
 
     pub(crate) const fn kind(&self) -> &FileKind {
@@ -191,6 +223,7 @@ impl File {
             FileKind::Fifo(f) => Some(f.vnode.vnode()),
             FileKind::Pipe(_)
             | FileKind::Process(_)
+            | FileKind::Jail(_)
             | FileKind::Socket(_)
             | FileKind::Shm(_)
             | FileKind::Kqueue(_)
@@ -236,7 +269,7 @@ impl File {
             }
             FileKind::Pts(m) => m.read(s, uio, self.nonblock()),
             FileKind::Pipe(p) => p.read(s, uio, self.nonblock()),
-            FileKind::Process(_) => Err(Errno::EOPNOTSUPP),
+            FileKind::Process(_) | FileKind::Jail(_) => Err(Errno::EOPNOTSUPP),
             FileKind::Socket(so) => so.read(s, uio, self.nonblock()),
             FileKind::Fifo(f) => f.read(s, uio, self.nonblock()),
             FileKind::Shm(m) => {
@@ -273,6 +306,7 @@ impl File {
             FileKind::Shm(m) => m.read(s, u64::try_from(offset).map_err(|_| Errno::EINVAL)?, uio),
             FileKind::Pipe(_)
             | FileKind::Process(_)
+            | FileKind::Jail(_)
             | FileKind::Socket(_)
             | FileKind::Fifo(_)
             | FileKind::Kqueue(_)
@@ -297,9 +331,7 @@ impl File {
                         if self.flags() & O_APPEND != 0 {
                             *off = f.vnode.size(s)?;
                         }
-                        let n = f.vnode.write_at(s, *off, uio)?;
-                        clear_set_id(s, &f.vnode, n)?;
-                        n
+                        write_regular(s, &f.vnode, *off, uio)?
                     }
                 };
                 *off += n as u64;
@@ -307,7 +339,7 @@ impl File {
             }
             FileKind::Pts(m) => m.write(s, uio, self.nonblock()),
             FileKind::Pipe(p) => p.write(s, uio, self.nonblock()),
-            FileKind::Process(_) => Err(Errno::EOPNOTSUPP),
+            FileKind::Process(_) | FileKind::Jail(_) => Err(Errno::EOPNOTSUPP),
             FileKind::Socket(so) => so.write(s, uio, self.nonblock()),
             FileKind::Fifo(f) => f.write(s, uio, self.nonblock()),
             FileKind::Shm(m) => {
@@ -335,6 +367,7 @@ impl File {
         match &self.kind {
             FileKind::Pipe(_)
             | FileKind::Process(_)
+            | FileKind::Jail(_)
             | FileKind::Socket(_)
             | FileKind::Fifo(_)
             | FileKind::Kqueue(_)
@@ -359,9 +392,7 @@ impl File {
                 } else {
                     u64::try_from(offset).map_err(|_| Errno::EINVAL)?
                 };
-                let n = f.vnode.write_at(s, at, uio)?;
-                clear_set_id(s, &f.vnode, n)?;
-                Ok(n)
+                write_regular(s, &f.vnode, at, uio)
             }
         }
     }
@@ -418,6 +449,7 @@ impl File {
             FileKind::Vnode(f) => f.vnode.stat(s),
             FileKind::Pipe(p) => Ok(p.stat(s)),
             FileKind::Process(pd) => Ok(pd.stat()),
+            FileKind::Jail(j) => Ok(j.stat()),
             FileKind::Socket(so) => Ok(so.stat()),
             FileKind::Fifo(f) => f.vnode.stat(s),
             FileKind::Shm(m) => Ok(m.stat(s)),
@@ -471,6 +503,7 @@ impl File {
                 }
                 if p.has_exited() { POLLHUP } else { 0 }
             }
+            FileKind::Jail(j) => j.poll(w),
             FileKind::Socket(so) => so.so.poll(events, w),
             FileKind::Shm(_) => vfs::node::poll_no_poll(events),
             FileKind::Kqueue(k) => k.poll(events, w),
@@ -502,7 +535,8 @@ impl File {
                 crate::event::ProcdescFilter(Arc::clone(this)),
             )),
             FileKind::Socket(so) => socket::filter(&so.so, kev),
-            FileKind::Process(_) | FileKind::Shm(_) => Err(Errno::EINVAL),
+            // No `EVFILT_JAILDESC` yet (docs/compat-deviations.md).
+            FileKind::Process(_) | FileKind::Jail(_) | FileKind::Shm(_) => Err(Errno::EINVAL),
             FileKind::Kqueue(k) if kev.filter == abi::event::EVFILT_READ => Ok(
                 alloc::boxed::Box::new(event::KqueueFilter(Arc::clone(&k.kq))),
             ),
@@ -567,7 +601,7 @@ impl File {
             arg.copy_from_slice(&v.to_ne_bytes());
         };
         match &self.kind {
-            FileKind::Process(_) => Err(Errno::ENOTTY),
+            FileKind::Process(_) | FileKind::Jail(_) => Err(Errno::ENOTTY),
             // `soo_ioctl`.
             FileKind::Socket(so) => match req {
                 FIONBIO | FIOASYNC => Ok(0),
@@ -642,10 +676,64 @@ impl File {
     }
 }
 
-/// After `written` bytes went into the file, by anyone but the superuser:
-/// its set-id bits go (FreeBSD's `ffs_write`, `tmpfs_write`).
+/// A transfer cut to its first `left` bytes.
+struct Limited<'a> {
+    uio: &'a mut dyn Uio,
+    left: usize,
+}
+
+impl Uio for Limited<'_> {
+    fn resid(&self) -> usize {
+        self.uio.resid().min(self.left)
+    }
+
+    fn copy_out(&mut self, data: &[u8]) -> Result<usize, Errno> {
+        let n = data.len().min(self.left);
+        let n = self.uio.copy_out(&data[..n])?;
+        self.left -= n;
+        Ok(n)
+    }
+
+    fn copy_in(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
+        let n = buf.len().min(self.left);
+        let n = self.uio.copy_in(&mut buf[..n])?;
+        self.left -= n;
+        Ok(n)
+    }
+}
+
+/// Writes `uio` into file `v` at `at`, held to `RLIMIT_FSIZE`: a write
+/// past the limit stops there, and one starting at or past it is `EFBIG`
+/// with `SIGXFSZ` to the process (FreeBSD's `vn_rlimit_fsizex`).
+fn write_regular(s: &Sleepable, v: &Vnode, at: u64, uio: &mut dyn Uio) -> Result<usize, Errno> {
+    let lim = crate::proc::Process::with_current(|p| {
+        p.limits.lock()[abi::resource::rlimit::FSIZE as usize].rlim_cur
+    })
+    .unwrap_or(abi::resource::RLIM_INFINITY);
+    let n = if v.kind() == vfs::Kind::Regular && at.saturating_add(uio.resid() as u64) > lim {
+        if at >= lim {
+            if let Some(p) = crate::proc::Process::current() {
+                let _ = crate::signal::post(
+                    &p,
+                    crate::signal::user_info(abi::signal::SIGXFSZ, 0, abi::signal::code::SI_KERNEL),
+                );
+            }
+            return Err(Errno::EFBIG);
+        }
+        let left = usize::try_from(lim - at).unwrap_or(usize::MAX);
+        v.write_at(s, at, &mut Limited { uio, left })?
+    } else {
+        v.write_at(s, at, uio)?
+    };
+    clear_set_id(s, v, n)?;
+    Ok(n)
+}
+
+/// After `written` bytes went into the file, by anyone without
+/// `PRIV_VFS_RETAINSUGID`: its set-id bits go (FreeBSD's `ffs_write`,
+/// `tmpfs_write`).
 fn clear_set_id(s: &Sleepable, v: &Vnode, written: usize) -> Result<(), Errno> {
-    if written == 0 || super::cred_is_root() {
+    if written == 0 || super::priv_check(crate::cred::Priv::VfsRetainsugid).is_ok() {
         return Ok(());
     }
     let mode = v.attr(s)?.mode;

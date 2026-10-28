@@ -91,6 +91,9 @@ pub const CONSTANTS: &[&[ConstValue]] = &[
     crate::md::CONSTANTS,
     crate::socket::CONSTANTS,
     crate::procdesc::CONSTANTS,
+    crate::procctl::CONSTANTS,
+    crate::acl::CONSTANTS,
+    crate::capsicum::CONSTANTS,
     crate::stat::CONSTANTS,
     crate::termios::CONSTANTS,
     crate::kinfo::CONSTANTS,
@@ -597,6 +600,58 @@ pub static LAYOUTS: &[StructLayout] = &[
     layout!(crate::event::SpecialfdEventfd, "struct specialfd_eventfd", ["sys/types.h", "sys/specialfd.h"], All, {
         initval => "initval",
         flags => "flags",
+    }),
+    layout!(crate::acl::AclEntry, "struct acl_entry", ["sys/types.h", "sys/acl.h"], All, {
+        ae_tag => "ae_tag",
+        ae_id => "ae_id",
+        ae_perm => "ae_perm",
+        ae_entry_type => "ae_entry_type",
+        ae_flags => "ae_flags",
+    }),
+    layout!(crate::acl::Acl, "struct acl", ["sys/types.h", "sys/acl.h"], All, {
+        acl_maxcnt => "acl_maxcnt",
+        acl_cnt => "acl_cnt",
+        acl_spare => "acl_spare",
+        acl_entry => "acl_entry",
+    }),
+    layout!(crate::acl::OldAclEntry, "struct oldacl_entry", ["sys/types.h", "sys/acl.h"], All, {
+        ae_tag => "ae_tag",
+        ae_id => "ae_id",
+        ae_perm => "ae_perm",
+    }),
+    layout!(crate::acl::OldAcl, "struct oldacl", ["sys/types.h", "sys/acl.h"], All, {
+        acl_cnt => "acl_cnt",
+        acl_entry => "acl_entry",
+    }),
+    layout!(crate::capsicum::CapRights, "cap_rights_t", ["sys/types.h", "sys/capsicum.h"], All, {
+        cr_rights => "cr_rights",
+    }),
+    layout!(crate::procctl::ReaperStatus, "struct procctl_reaper_status", ["sys/types.h", "sys/procctl.h"], All, {
+        rs_flags => "rs_flags",
+        rs_children => "rs_children",
+        rs_descendants => "rs_descendants",
+        rs_reaper => "rs_reaper",
+        rs_pid => "rs_pid",
+        rs_pad0 => "rs_pad0",
+    }),
+    layout!(crate::procctl::ReaperPidinfo, "struct procctl_reaper_pidinfo", ["sys/types.h", "sys/procctl.h"], All, {
+        pi_pid => "pi_pid",
+        pi_subtree => "pi_subtree",
+        pi_flags => "pi_flags",
+        pi_pad0 => "pi_pad0",
+    }),
+    layout!(crate::procctl::ReaperPids, "struct procctl_reaper_pids", ["sys/types.h", "sys/procctl.h"], All, {
+        rp_count => "rp_count",
+        rp_pad0 => "rp_pad0",
+        rp_pids => "rp_pids",
+    }),
+    layout!(crate::procctl::ReaperKill, "struct procctl_reaper_kill", ["sys/types.h", "sys/procctl.h"], All, {
+        rk_sig => "rk_sig",
+        rk_flags => "rk_flags",
+        rk_subtree => "rk_subtree",
+        rk_killed => "rk_killed",
+        rk_fpid => "rk_fpid",
+        rk_pad0 => "rk_pad0",
     }),
     layout!(crate::umtx::UmtxTime, "struct _umtx_time", ["sys/types.h", "sys/umtx.h"], All, {
         timeout => "_timeout",

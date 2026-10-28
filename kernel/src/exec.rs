@@ -75,8 +75,10 @@ const STACK_GUARD_PAGES: u64 = 1;
 
 /// The guard below a stack a program with feature-control word `fctl0`
 /// maps (none if it opts out with `NT_FREEBSD_FCTL_STKGAP_DISABLE`).
-pub(crate) const fn stack_guard(fctl0: u32) -> u64 {
-    if fctl0 & fctl::STKGAP_DISABLE != 0 {
+/// (none if it opts out with `NT_FREEBSD_FCTL_STKGAP_DISABLE`, or the
+/// process with `PROC_STACKGAP_CTL`).
+pub(crate) const fn stack_guard(fctl0: u32, flag2: u32) -> u64 {
+    if fctl0 & fctl::STKGAP_DISABLE != 0 || flag2 & crate::proc::p2::STKGAP_DISABLE != 0 {
         0
     } else {
         STACK_GUARD_PAGES * PAGE_SIZE
@@ -132,6 +134,15 @@ pub(crate) struct Layout {
     pub(crate) osrel: i32,
     /// The feature-control note's word (FreeBSD's `p_fctl0`).
     pub(crate) fctl0: u32,
+    /// The map is randomized (`MAP_ASLR`).
+    pub(crate) aslr: bool,
+}
+
+impl Layout {
+    /// Whether the map is randomized (`PROC_ASLR_ACTIVE`).
+    pub(crate) const fn randomized(&self) -> bool {
+        self.aslr
+    }
 }
 
 fn random_u64() -> u64 {
@@ -219,6 +230,7 @@ pub(crate) fn load(
     argv: &[&[u8]],
     envp: &[&[u8]],
     limits: &Limits,
+    flag2: u32,
     lookup: Lookup<'_>,
 ) -> Result<Image, Errno> {
     let object = open(s, file)?;
@@ -241,8 +253,10 @@ pub(crate) fn load(
 
     // Randomize the layout: a PIE linked at 0 loads at a random base, and
     // any image gets a random stack, shared page, and mmap base, unless
-    // its feature-control note opts out.
-    let aslr_off = fctl0 & fctl::ASLR_DISABLE != 0;
+    // its feature-control note or `PROC_ASLR_CTL` opts out (or the latter
+    // opts in).
+    use crate::proc::p2;
+    let aslr_off = fctl0 & fctl::ASLR_DISABLE != 0 || flag2 & p2::ASLR_DISABLE != 0;
     let mut et_dyn_addr = 0;
     let mut random_base = false;
     if pie && headers.baddr == 0 {
@@ -252,7 +266,10 @@ pub(crate) fn load(
             random_base = true;
         }
     }
-    let aslr = !aslr_off && (random_base || !pie && ASLR.enable.load(Ordering::Relaxed));
+    let aslr = !aslr_off
+        && (random_base
+            || flag2 & p2::ASLR_ENABLE != 0
+            || !pie && ASLR.enable.load(Ordering::Relaxed));
     let aslr_stack = aslr && ASLR.stack.load(Ordering::Relaxed);
     let aslr_shared_page = aslr && ASLR.shared_page.load(Ordering::Relaxed);
 
@@ -319,7 +336,7 @@ pub(crate) fn load(
         len: MAXSSIZ,
         prot: stack_prot,
         kind: AnonKind::Stack {
-            guard: stack_guard(fctl0),
+            guard: stack_guard(fctl0, flag2),
         },
         ..crate::mm::space::Anon::default()
     };
@@ -362,7 +379,10 @@ pub(crate) fn load(
         shared_page,
         osrel,
         fctl0,
+        aslr,
     };
+    // W^X: only when asked (`kern.elf64.allow_wx` is 1).
+    space.set_wxorx(flag2 & p2::WXORX_ENABLE_EXEC != 0);
     let aux = Aux {
         phdr: headers.proghdr.wrapping_add(et_dyn_addr),
         phnum: headers.phnum as u64,
@@ -545,19 +565,19 @@ pub(crate) fn sysctl_init(s: &Sleepable) {
     });
 }
 
-/// Checks that `file` is a regular file the caller may execute (root
-/// needs an execute bit too), as FreeBSD's `exec_check_permissions` does
-/// before any image activator looks at it (a script's too).
+/// Checks that `file` is a regular file with an execute bit, not on a
+/// `noexec` mount, that the caller may execute, as FreeBSD's
+/// `exec_check_permissions` does before any image activator looks at it
+/// (a script's too).
 pub(crate) fn check_exec(s: &Sleepable, file: &vfs::Vnode) -> Result<(), Errno> {
-    if file.kind() != vfs::Kind::Regular {
+    let a = file.attr(s)?;
+    if file.kind() != vfs::Kind::Regular
+        || file.mount().flags() & abi::mount::MNT_NOEXEC != 0
+        || a.mode & 0o111 == 0
+    {
         return Err(Errno::EACCES);
     }
-    vfs::ops::access(
-        &file.attr(s)?,
-        file.kind(),
-        &crate::fs::cred(),
-        vfs::ops::VEXEC,
-    )
+    vfs::acl::access(s, file, &crate::fs::cred(), vfs::ops::VEXEC)
 }
 
 /// [`check_exec`], then `file`'s memory object.

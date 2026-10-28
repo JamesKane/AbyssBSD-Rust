@@ -50,7 +50,7 @@ use vfs::Vnode;
 
 use crate::arch;
 use crate::arch::trap::TrapFrame;
-use crate::cred::Ucred;
+use crate::cred::{Priv, Ucred};
 use crate::exec::Layout;
 use crate::fs::fdtable::FdTable;
 use crate::mm::space::{self, AddressSpace};
@@ -72,6 +72,7 @@ struct SharedLayout {
     shared_page: AtomicU64,
     osrel: AtomicI32,
     fctl0: AtomicU32,
+    aslr: AtomicBool,
 }
 
 impl SharedLayout {
@@ -82,6 +83,7 @@ impl SharedLayout {
             shared_page: AtomicU64::new(l.shared_page),
             osrel: AtomicI32::new(l.osrel),
             fctl0: AtomicU32::new(l.fctl0),
+            aslr: AtomicBool::new(l.aslr),
         }
     }
 
@@ -92,6 +94,7 @@ impl SharedLayout {
             shared_page: self.shared_page.load(Ordering::Relaxed),
             osrel: self.osrel.load(Ordering::Relaxed),
             fctl0: self.fctl0.load(Ordering::Relaxed),
+            aslr: self.aslr.load(Ordering::Relaxed),
         }
     }
 
@@ -101,6 +104,7 @@ impl SharedLayout {
         self.shared_page.store(l.shared_page, Ordering::Relaxed);
         self.osrel.store(l.osrel, Ordering::Relaxed);
         self.fctl0.store(l.fctl0, Ordering::Relaxed);
+        self.aslr.store(l.aslr, Ordering::Relaxed);
     }
 }
 
@@ -131,16 +135,185 @@ static PROCS: SpinLock<BTreeMap<i32, Weak<Process>>> = SpinLock::new(BTreeMap::n
 /// The pid handed out last.
 static LAST_PID: AtomicI32 = AtomicI32::new(0);
 
-/// Parents and children.
+/// Parents and children, and reapers (`procctl(PROC_REAP_*)`): each
+/// process has a reaper, init unless a process above it acquired the
+/// role, which inherits it when its parent goes.
 struct Tree {
     parent: BTreeMap<i32, i32>,
     children: BTreeMap<i32, Vec<Arc<Process>>>,
+    /// Each process's reaper, besides init's (`p_reaper`); init when
+    /// absent.
+    reaper: BTreeMap<i32, i32>,
+    /// The pid of the reaper's direct child each process descends from
+    /// (`p_reapsubtree`); 1 when absent.
+    subtree: BTreeMap<i32, i32>,
+    /// Each reaper's descendants, newest first (`p_reaplist`).
+    reaplist: BTreeMap<i32, Vec<i32>>,
+    /// The reapers besides init (`P_TREE_REAPER`).
+    reapers: alloc::collections::BTreeSet<i32>,
 }
 
 static TREE: SpinLock<Tree> = SpinLock::new(Tree {
     parent: BTreeMap::new(),
     children: BTreeMap::new(),
+    reaper: BTreeMap::new(),
+    subtree: BTreeMap::new(),
+    reaplist: BTreeMap::new(),
+    reapers: alloc::collections::BTreeSet::new(),
 });
+
+impl Tree {
+    fn is_reaper(&self, pid: i32) -> bool {
+        pid == INIT || self.reapers.contains(&pid)
+    }
+
+    fn reaper_of(&self, pid: i32) -> i32 {
+        self.reaper.get(&pid).copied().unwrap_or(INIT)
+    }
+
+    fn subtree_of(&self, pid: i32) -> i32 {
+        self.subtree.get(&pid).copied().unwrap_or(1)
+    }
+
+    /// Records `child`, just forked by `parent` (`fork1`): its reaper is
+    /// the parent if that is one, else the parent's.
+    fn forked(&mut self, parent: i32, child: i32) {
+        let r = if self.is_reaper(parent) {
+            parent
+        } else {
+            self.reaper_of(parent)
+        };
+        self.reaper.insert(child, r);
+        let sub = if r == parent && parent != INIT {
+            child
+        } else {
+            self.subtree_of(parent)
+        };
+        self.subtree.insert(child, sub);
+        self.reaplist.entry(r).or_default().insert(0, child);
+    }
+
+    /// Moves `child` to be `parent`'s child (`proc_reparent`).
+    fn reparent(&mut self, child: &Arc<Process>, parent: i32) {
+        if let Some(old) = self.parent.insert(child.pid, parent)
+            && let Some(kids) = self.children.get_mut(&old)
+        {
+            kids.retain(|c| c.pid != child.pid);
+        }
+        self.children
+            .entry(parent)
+            .or_default()
+            .push(Arc::clone(child));
+    }
+
+    /// `reaper_abandon_children`: reaper `p`'s descendants go to its own
+    /// reaper, its direct children too if it is `exiting` (reaped).
+    fn abandon(&mut self, p: i32, exiting: bool) {
+        if !self.reapers.remove(&p) {
+            return;
+        }
+        let r1 = self.reaper_of(p);
+        let sub = self.subtree_of(p);
+        for d in self.reaplist.remove(&p).unwrap_or_default() {
+            self.reaper.insert(d, r1);
+            self.subtree.insert(d, sub);
+            self.reaplist.entry(r1).or_default().insert(0, d);
+            if exiting
+                && self.parent.get(&d) == Some(&p)
+                && let Some(c) = find(d)
+            {
+                self.reparent(&c, r1);
+            }
+        }
+    }
+
+    /// A zombie is reaped (`proc_reap`): it leaves its reaper's list, and
+    /// what it reaped for goes to its own reaper.
+    fn reaped(&mut self, p: i32) {
+        self.abandon(p, true);
+        let r = self.reaper_of(p);
+        if let Some(l) = self.reaplist.get_mut(&r) {
+            l.retain(|&d| d != p);
+        }
+        self.reaper.remove(&p);
+        self.subtree.remove(&p);
+    }
+}
+
+/// `procctl(PROC_REAP_ACQUIRE)`: `p` becomes a reaper (`EBUSY` if it is
+/// one).
+pub(crate) fn reap_acquire(p: &Process) -> Result<(), Errno> {
+    let mut tree = TREE.lock();
+    if tree.is_reaper(p.pid) {
+        return Err(Errno::EBUSY);
+    }
+    tree.reapers.insert(p.pid);
+    Ok(())
+}
+
+/// `procctl(PROC_REAP_RELEASE)`: `p` stops being a reaper; init cannot.
+pub(crate) fn reap_release(p: &Process) -> Result<(), Errno> {
+    let mut tree = TREE.lock();
+    if p.pid == INIT || !tree.reapers.contains(&p.pid) {
+        return Err(Errno::EINVAL);
+    }
+    tree.abandon(p.pid, false);
+    Ok(())
+}
+
+/// One of a reaper's descendants, as `PROC_REAP_GETPIDS` and
+/// `PROC_REAP_KILL` see them.
+#[derive(Clone)]
+pub(crate) struct Descendant {
+    pub(crate) process: Arc<Process>,
+    pub(crate) subtree: i32,
+    /// Its parent is the reaper.
+    pub(crate) child: bool,
+    /// It is a reaper itself.
+    pub(crate) reaper: bool,
+}
+
+/// The reaper `p` answers to (itself if it is one), whether it is one,
+/// and its descendants, newest first.
+pub(crate) fn reaper_view(p: &Process) -> (i32, bool, Vec<Descendant>) {
+    let tree = TREE.lock();
+    let owned = tree.is_reaper(p.pid);
+    let r = if owned { p.pid } else { tree.reaper_of(p.pid) };
+    let list = tree
+        .reaplist
+        .get(&r)
+        .map(|l| {
+            l.iter()
+                .filter_map(|&d| {
+                    let process = PROCS.lock().get(&d).and_then(Weak::upgrade)?;
+                    Some(Descendant {
+                        process,
+                        subtree: tree.subtree_of(d),
+                        child: tree.parent.get(&d) == Some(&r),
+                        reaper: tree.is_reaper(d),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    (r, owned, list)
+}
+
+/// `pid`'s first child, newest first as FreeBSD lists `p_children`.
+pub(crate) fn first_child(pid: i32) -> Option<i32> {
+    TREE.lock()
+        .children
+        .get(&pid)
+        .and_then(|k| k.last())
+        .map(|c| c.pid)
+}
+
+/// The reaper `pid` answers to, and its subtree (`ki_reaper`,
+/// `ki_reapsubtree`).
+pub(crate) fn reaper_of(pid: i32) -> (i32, i32) {
+    let tree = TREE.lock();
+    (tree.reaper_of(pid), tree.subtree_of(pid))
+}
 
 /// The next free pid after the last one, recorded for `p`.
 fn alloc_pid(p: &Weak<Process>) -> i32 {
@@ -240,6 +413,75 @@ pub(crate) enum Suspension {
     Single(Mode),
 }
 
+/// `kern.maxfilesperproc`: the most `RLIMIT_NOFILE` may be.
+pub(crate) const MAXFILESPERPROC: u64 = 116_964;
+/// `kern.maxprocperuid`: the most `RLIMIT_NPROC` may be.
+pub(crate) const MAXPROCPERUID: u64 = 6_000;
+
+/// The CPU time a process may use before the next `SIGXCPU`, in seconds
+/// (`p_cpulimit`), checked once a second while one is finite.
+static CPU_WATCH: sync::Once<core::pin::Pin<Box<crate::softclock::Callout>>> = sync::Once::new();
+
+/// `RLIMIT_CPU`'s soft limit of `p` became `secs` (`p_cpulimit`): the
+/// once-a-second check starts if it was not running.
+pub(crate) fn cpu_limit_set(p: &Process, secs: u64) {
+    p.cpulimit.store(secs, Ordering::Relaxed);
+    if secs != RLIM_INFINITY {
+        if CPU_WATCH.get().is_none() {
+            let _ = CPU_WATCH.set(crate::softclock::Callout::new());
+        }
+        if !CPU_ARMED.swap(true, Ordering::AcqRel)
+            && let Some(c) = CPU_WATCH.get()
+        {
+            c.as_ref().reset(1_000_000_000, cpu_watch, 0);
+        }
+    }
+}
+
+static CPU_ARMED: AtomicBool = AtomicBool::new(false);
+
+/// `lim_cb` for every process with a finite CPU limit: past its hard
+/// limit it is killed; past `p_cpulimit` it gets `SIGXCPU`, and five more
+/// seconds before the next.
+fn cpu_watch(_: &Sleepable, _: usize) {
+    let mut any = false;
+    for p in all() {
+        let lim = p.cpulimit.load(Ordering::Relaxed);
+        if lim == RLIM_INFINITY || p.exited.load(Ordering::Relaxed) {
+            continue;
+        }
+        any = true;
+        let used = crate::time::ticks_to_ns(p.runtime()) / 1_000_000_000;
+        if used <= lim {
+            continue;
+        }
+        let max = p.limits.lock()[rlimit::CPU as usize].rlim_max;
+        let sig = if used >= max {
+            kprintln!(
+                "pid {} ({}), jid {}, uid {}: exceeded maximum CPU limit",
+                p.pid,
+                p.with_comm(|c| alloc::string::String::from_utf8_lossy(c).into_owned()),
+                p.cred().jail_id(),
+                p.cred().uid
+            );
+            abi::signal::SIGKILL
+        } else {
+            if lim < max {
+                p.cpulimit.store(lim + 5, Ordering::Relaxed);
+            }
+            abi::signal::SIGXCPU
+        };
+        let _ = crate::signal::post(
+            &p,
+            crate::signal::user_info(sig, 0, abi::signal::code::SI_KERNEL),
+        );
+    }
+    CPU_ARMED.store(any, Ordering::Release);
+    if any && let Some(c) = CPU_WATCH.get() {
+        c.as_ref().reset(1_000_000_000, cpu_watch, 0);
+    }
+}
+
 /// FreeBSD's default limits, as `ulimit -a` shows them on a 15.1 system,
 /// except the stack, which matches what exec maps.
 pub(crate) fn default_limits() -> [Rlimit; rlimit::NLIMITS] {
@@ -258,12 +500,12 @@ pub(crate) fn default_limits() -> [Rlimit; rlimit::NLIMITS] {
     };
     l[rlimit::CORE as usize] = inf;
     l[rlimit::NOFILE as usize] = Rlimit {
-        rlim_cur: 116_964,
-        rlim_max: 116_964,
+        rlim_cur: MAXFILESPERPROC,
+        rlim_max: MAXFILESPERPROC,
     };
     l[rlimit::NPROC as usize] = Rlimit {
-        rlim_cur: 6_000,
-        rlim_max: 6_000,
+        rlim_cur: MAXPROCPERUID,
+        rlim_max: MAXPROCPERUID,
     };
     l
 }
@@ -283,6 +525,8 @@ pub(crate) struct Process {
     pub(crate) exterr: AtomicU64,
     pgid: AtomicI32,
     sid: AtomicI32,
+    /// Its session's shared state (`p_session`).
+    session: SpinLock<Arc<Session>>,
     /// The exit status, as `wait` reports it, valid once `exited` is set.
     status: AtomicI32,
     exited: AtomicBool,
@@ -329,6 +573,8 @@ pub(crate) struct Process {
     pub(crate) files: Arc<Mutex<FdTable>>,
     /// The working directory.
     pub(crate) cwd: PreemptLock<vfs::VnodeUse>,
+    /// The root directory, if not the system's (`chroot`, a jail's).
+    pub(crate) root: PreemptLock<Option<vfs::VnodeUse>>,
     /// The file creation mask.
     pub(crate) umask: AtomicU16,
     /// What `ps` shows of the program it runs.
@@ -345,7 +591,72 @@ pub(crate) struct Process {
     /// Its credential changed since it last ran `execve` (FreeBSD's
     /// `P_SUGID`, which `issetugid` reports); inherited.
     sugid: AtomicBool,
+    /// `P2_*` flags (`p_flag2`), most of which `procctl` sets.
+    pub(crate) flag2: AtomicU32,
+    /// The signal it gets when its parent exits (`p_pdeathsig`), 0 for
+    /// none.
+    pub(crate) pdeathsig: AtomicU32,
+    /// The CPU seconds after which it next gets `SIGXCPU` (`p_cpulimit`).
+    cpulimit: AtomicU64,
+    /// Its credential is in capability mode: a copy of the credential's
+    /// flag, read without its lock on every system call not allowed
+    /// there. It never clears.
+    capmode: AtomicBool,
 }
+
+/// `p_flag2` bits (sys/sys/proc.h).
+pub(crate) mod p2 {
+    pub(crate) const NOTRACE: u32 = 0x0000_0002;
+    pub(crate) const NOTRACE_EXEC: u32 = 0x0000_0004;
+    pub(crate) const TRAPCAP: u32 = 0x0000_0020;
+    pub(crate) const ASLR_ENABLE: u32 = 0x0000_0040;
+    pub(crate) const ASLR_DISABLE: u32 = 0x0000_0080;
+    pub(crate) const ASLR_IGNSTART: u32 = 0x0000_0100;
+    pub(crate) const PROTMAX_ENABLE: u32 = 0x0000_0200;
+    pub(crate) const PROTMAX_DISABLE: u32 = 0x0000_0400;
+    pub(crate) const STKGAP_DISABLE: u32 = 0x0000_0800;
+    pub(crate) const STKGAP_DISABLE_EXEC: u32 = 0x0000_1000;
+    pub(crate) const NO_NEW_PRIVS: u32 = 0x0000_8000;
+    pub(crate) const WXORX_DISABLE: u32 = 0x0001_0000;
+    pub(crate) const WXORX_ENABLE_EXEC: u32 = 0x0002_0000;
+    pub(crate) const LOGSIGEXIT_ENABLE: u32 = 0x0080_0000;
+    pub(crate) const LOGSIGEXIT_CTL: u32 = 0x0100_0000;
+    /// What a child inherits (`fork1`).
+    pub(crate) const INHERITED: u32 = ASLR_DISABLE
+        | ASLR_ENABLE
+        | ASLR_IGNSTART
+        | NOTRACE
+        | NOTRACE_EXEC
+        | PROTMAX_ENABLE
+        | PROTMAX_DISABLE
+        | TRAPCAP
+        | STKGAP_DISABLE
+        | STKGAP_DISABLE_EXEC
+        | NO_NEW_PRIVS
+        | WXORX_DISABLE
+        | WXORX_ENABLE_EXEC
+        | LOGSIGEXIT_CTL
+        | LOGSIGEXIT_ENABLE;
+}
+
+/// What a session's processes share (FreeBSD's `struct session`, besides
+/// its leader and terminal).
+#[derive(Debug)]
+pub(crate) struct Session {
+    /// The login name `setlogin` set (`s_login`), without its NUL.
+    login: SpinLock<Vec<u8>>,
+}
+
+impl Default for Session {
+    fn default() -> Self {
+        Self {
+            login: SpinLock::new(Vec::new()),
+        }
+    }
+}
+
+/// `MAXLOGNAME`: a login name's room, with its NUL.
+pub(crate) const MAXLOGNAME: usize = 33;
 
 /// The program a process runs, as `kern.proc` reports it.
 #[derive(Clone, Debug, Default)]
@@ -427,9 +738,20 @@ struct Start {
     context: Option<crate::signal::Prepared>,
 }
 
+/// What `exec` runs: the program at a path (`execve`), or the file open
+/// as a descriptor (`fexecve`).
+pub(crate) enum Program<'a> {
+    Path(&'a [u8]),
+    File(Arc<Vnode>, i32),
+}
+
 /// An image `exec` loaded, and the program and arguments it runs with
 /// (a script's interpreter's).
 struct Loaded {
+    /// The credential it runs with, if not the caller's.
+    cred: Option<Ucred>,
+    /// It runs set-id (`credential_setid`).
+    setid: bool,
     text: Text,
     file: Arc<Vnode>,
     space: Arc<AddressSpace>,
@@ -491,7 +813,7 @@ impl Process {
         let umask = parent.map_or(0o022, |p| p.umask.load(Ordering::Relaxed));
         let image = parent.map(|p| p.image.lock().clone()).unwrap_or_default();
         let execed = parent.is_some_and(|p| p.execed.load(Ordering::Relaxed));
-        let cred = parent.map_or_else(Ucred::root_shared, |p| p.cred());
+        let cred = parent.map_or_else(crate::cred::root_shared, |p| p.cred());
         let sugid = parent.is_some_and(|p| p.sugid.load(Ordering::Relaxed));
         let text = parent.map(|p| p.text.lock().clone()).unwrap_or_default();
         let p = Arc::new_cyclic(|me| {
@@ -506,6 +828,16 @@ impl Process {
                 exterr: AtomicU64::new(parent.map_or(0, |p| p.exterr.load(Ordering::Relaxed))),
                 pgid: AtomicI32::new(parent.map_or(pid, |p| p.pgid())),
                 sid: AtomicI32::new(parent.map_or(pid, |p| p.sid())),
+                // A session the kernel starts is logged in as root, as
+                // init's own is (it calls `setlogin("root")`).
+                session: SpinLock::new(parent.map_or_else(
+                    || {
+                        Arc::new(Session {
+                            login: SpinLock::new(b"root".to_vec()),
+                        })
+                    },
+                    |p| p.session(),
+                )),
                 status: AtomicI32::new(0),
                 exited: AtomicBool::new(false),
                 zombie: AtomicBool::new(false),
@@ -529,6 +861,7 @@ impl Process {
                 ),
                 files,
                 cwd: PreemptLock::new(cwd),
+                root: PreemptLock::new(parent.and_then(|p| p.root.lock().clone())),
                 umask: AtomicU16::new(umask),
                 image: SpinLock::new(image),
                 started: crate::time::now_ns(),
@@ -536,8 +869,17 @@ impl Process {
                 cred: PreemptLock::new(cred),
                 text: SpinLock::new(text),
                 sugid: AtomicBool::new(sugid),
+                flag2: AtomicU32::new(
+                    parent.map_or(0, |p| p.flag2.load(Ordering::Relaxed) & p2::INHERITED),
+                ),
+                pdeathsig: AtomicU32::new(0),
+                cpulimit: AtomicU64::new(
+                    parent.map_or(RLIM_INFINITY, |p| p.cpulimit.load(Ordering::Relaxed)),
+                ),
+                capmode: AtomicBool::new(parent.is_some_and(|p| p.in_capability_mode())),
             }
         });
+        crate::prison::proc_joined(&p.cred());
         if let Some(parent) = parent {
             let mut tree = TREE.lock();
             tree.parent.insert(p.pid, parent.pid);
@@ -545,6 +887,7 @@ impl Process {
                 .entry(parent.pid)
                 .or_default()
                 .push(Arc::clone(&p));
+            tree.forked(parent.pid, p.pid);
         }
         p
     }
@@ -560,9 +903,69 @@ impl Process {
         Arc::clone(&self.cred.lock())
     }
 
-    /// Whether its credential is the superuser's.
-    pub(crate) fn is_root(&self) -> bool {
-        self.cred.lock().is_root()
+    /// Its credential's jail (`None` on the host), without taking the
+    /// whole credential.
+    pub(crate) fn jail(&self) -> Option<Arc<dyn security::Jail>> {
+        self.cred.lock().jail.clone()
+    }
+
+    fn session(&self) -> Arc<Session> {
+        Arc::clone(&self.session.lock())
+    }
+
+    /// Its session's login name (`getlogin`).
+    pub(crate) fn login(&self) -> Vec<u8> {
+        self.session().login.lock().clone()
+    }
+
+    /// Sets its session's login name (`setlogin`).
+    pub(crate) fn set_login(&self, name: &[u8]) {
+        *self.session().login.lock() = name.to_vec();
+    }
+
+    /// Whether its credential holds privilege `p` (`priv_check`): `EPERM`
+    /// if not.
+    pub(crate) fn priv_check(&self, p: Priv) -> Result<(), Errno> {
+        self.cred.lock().priv_check(p)
+    }
+
+    /// `p_cansee`: whether it may see `p` (`ESRCH` if not).
+    pub(crate) fn can_see(&self, p: &Self) -> Result<(), Errno> {
+        if core::ptr::eq(self, p) {
+            return Ok(());
+        }
+        self.cred().can_see(&p.cred())
+    }
+
+    /// `p_cansignal`: whether it may send `sig` to `p`. Any process may
+    /// continue one in its session.
+    pub(crate) fn can_signal(&self, p: &Self, sig: u32) -> Result<(), Errno> {
+        if core::ptr::eq(self, p) || (sig == abi::signal::SIGCONT && self.sid() == p.sid()) {
+            return Ok(());
+        }
+        self.cred().can_signal(&p.cred(), p.sugid(), sig)
+    }
+
+    /// `p_cansched`: whether it may change `p`'s scheduling.
+    pub(crate) fn can_sched(&self, p: &Self) -> Result<(), Errno> {
+        if core::ptr::eq(self, p) {
+            return Ok(());
+        }
+        self.cred().can_sched(&p.cred())
+    }
+
+    /// `p_candebug`: whether it may debug `p`. init is out of reach above
+    /// securelevel 0.
+    pub(crate) fn can_debug(&self, p: &Self) -> Result<(), Errno> {
+        if core::ptr::eq(self, p) {
+            return Ok(());
+        }
+        let cred = self.cred();
+        cred.can_debug(&p.cred(), p.sugid())?;
+        if p.pid == 1 {
+            cred.securelevel_gt(0)?;
+        }
+        Ok(())
     }
 
     /// Changes its credential as `change` says, from the current one; the
@@ -578,6 +981,42 @@ impl Process {
             self.sugid.store(true, Ordering::Relaxed);
         }
         Ok(())
+    }
+
+    /// Replaces its credential with `change`'s, leaving it untainted (what
+    /// FreeBSD's `proc_set_cred` alone does: `setloginclass`, `cap_enter`,
+    /// `jail_attach`). Only its own thread changes it.
+    pub(crate) fn replace_cred(
+        &self,
+        change: impl FnOnce(&Ucred) -> Result<Ucred, Errno>,
+    ) -> Result<(), Errno> {
+        let new = change(&self.cred())?;
+        *self.cred.lock() = Arc::new(new);
+        Ok(())
+    }
+
+    /// Whether it is in capability mode.
+    pub(crate) fn in_capability_mode(&self) -> bool {
+        self.capmode.load(Ordering::Relaxed)
+    }
+
+    /// `cap_enter`: its credential enters capability mode, for good.
+    pub(crate) fn enter_capability_mode(&self) {
+        if self.in_capability_mode() {
+            return;
+        }
+        let _ = self.replace_cred(|c| {
+            let mut c = c.clone();
+            c.flags |= security::CRED_FLAG_CAPMODE;
+            Ok(c)
+        });
+        self.capmode.store(true, Ordering::Relaxed);
+    }
+
+    /// How many processes, zombies too, have real uid `ruid` (FreeBSD's
+    /// `ui_proccnt`).
+    pub(crate) fn count_of(ruid: u32) -> usize {
+        all().iter().filter(|p| p.cred().ruid == ruid).count()
     }
 
     /// Whether its credential changed since it last ran `execve`.
@@ -823,6 +1262,7 @@ impl Process {
             argv,
             envp,
             &default_limits(),
+            0,
             &lookup,
         )?;
         let p = Self::create(space, image.layout, None, own(crate::fs::console_table()));
@@ -979,12 +1419,8 @@ impl Process {
         // counted by real user, the superuser's included (`fork1`'s
         // `chgproccnt`).
         let max = self.limits.lock()[rlimit::NPROC as usize].rlim_cur;
-        if max != RLIM_INFINITY {
-            let ruid = self.cred().ruid;
-            let n = all().iter().filter(|p| p.cred().ruid == ruid).count();
-            if n as u64 >= max {
-                return Err(Errno::EAGAIN);
-            }
+        if max != RLIM_INFINITY && Self::count_of(self.cred().ruid) as u64 >= max {
+            return Err(Errno::EAGAIN);
         }
         let space = if vfork {
             self.space()
@@ -1029,6 +1465,7 @@ impl Process {
                 let flags = crate::fs::fdtable::FdFlags {
                     cloexec,
                     clofork: false,
+                    resolve_beneath: false,
                 };
                 let installed = self.files.lock(s).alloc(file, flags, 0, limit);
                 match installed {
@@ -1089,6 +1526,7 @@ impl Process {
         {
             kids.retain(|c| c.pid != self.pid);
         }
+        tree.reaped(self.pid);
     }
 
     /// Ends a `vfork` borrow: the parent may run again.
@@ -1101,7 +1539,7 @@ impl Process {
         }
     }
 
-    /// Replaces the image with the program at `path` (the current thread
+    /// Replaces the image with `program` (the current thread
     /// is this process's): a new address space, caught signals reset,
     /// close-on-exec descriptors closed, and `frame` set to start the new
     /// program.
@@ -1109,7 +1547,7 @@ impl Process {
         &self,
         s: &Sleepable,
         frame: &mut TrapFrame,
-        path: &[u8],
+        program: Program<'_>,
         argv: &[&[u8]],
         envp: &[&[u8]],
     ) -> Result<(), Errno> {
@@ -1117,8 +1555,17 @@ impl Process {
         // The other threads wait at the boundary meanwhile (FreeBSD's
         // `pre_execve`); they leave once the new image is in.
         self.single(s, &me, Mode::Boundary)?;
-        let image = self.load_image(s, path, argv, envp);
+        let image = self.load_image(s, program, argv, envp).and_then(|l| {
+            // A set-id program starts with descriptors 0 to 2 open
+            // (`fdcheckstd`).
+            if l.setid {
+                crate::fs::check_std(s, self)?;
+            }
+            Ok(l)
+        });
         let Loaded {
+            cred: new_cred,
+            setid,
             text,
             file,
             space,
@@ -1162,17 +1609,28 @@ impl Process {
         };
         self.execed.store(true, Ordering::Relaxed);
         *self.text.lock() = core::iter::once(text).chain(image.interp).collect();
-        // The saved ids become the effective ones (no set-id programs
-        // until P6).
-        let mut cred = self.cred.lock();
-        if cred.svuid != cred.euid() || cred.svgid != cred.egid() {
-            let mut c = Ucred::clone(&cred);
-            c.svuid = c.euid();
-            c.svgid = c.egid();
-            *cred = Arc::new(c);
+        // A set-id program taints the process; otherwise the taint goes
+        // once the effective ids are the real ones again.
+        if setid {
+            self.sugid.store(true, Ordering::Relaxed);
+        } else {
+            let c = self.cred();
+            if c.uid == c.ruid && c.gid == c.rgid {
+                self.sugid.store(false, Ordering::Relaxed);
+            }
         }
-        drop(cred);
-        self.sugid.store(false, Ordering::Relaxed);
+        if let Some(c) = new_cred {
+            *self.cred.lock() = Arc::new(c);
+        }
+        let f2 = self.flag2.load(Ordering::Relaxed);
+        let mut clear = 0;
+        if f2 & p2::NOTRACE_EXEC == 0 {
+            clear |= p2::NOTRACE;
+        }
+        if f2 & p2::STKGAP_DISABLE_EXEC == 0 {
+            clear |= p2::STKGAP_DISABLE;
+        }
+        self.flag2.fetch_and(!clear, Ordering::Relaxed);
         self.exterr.store(0, Ordering::Relaxed);
         crate::event::proc_execed(self);
         if let Some(t) = self.timers.get() {
@@ -1201,31 +1659,59 @@ impl Process {
     fn load_image(
         &self,
         s: &Sleepable,
-        path: &[u8],
+        program: Program<'_>,
         argv: &[&[u8]],
         envp: &[&[u8]],
     ) -> Result<Loaded, Errno> {
         let lookup =
             |p: &[u8]| crate::fs::lookup(s, self, crate::fs::At::Cwd, p, crate::fs::Walk::FOLLOW);
-        let mut file = lookup(path)?;
-        let mut path = path.to_vec();
+        // A program run from a descriptor goes by its path if it has one
+        // to find, and a script's interpreter is handed `/dev/fd/N`
+        // (`imgact_shell`).
+        let (mut file, mut path, script_name) = match program {
+            Program::Path(p) => (lookup(p)?, p.to_vec(), p.to_vec()),
+            Program::File(v, fd) => {
+                let dev_fd = alloc::format!("/dev/fd/{fd}").into_bytes();
+                let path = crate::fs::namespace()
+                    .path_of(s, &v, &crate::fs::root_of(self))
+                    .unwrap_or_else(|_| dev_fd.clone());
+                (v, path, dev_fd)
+            }
+        };
         let mut argv: Vec<Vec<u8>> = argv.iter().map(|a| a.to_vec()).collect();
         crate::exec::check_exec(s, &file)?;
         if let Some(sc) = crate::exec::script(s, &file)? {
+            // No interpreter in capability mode (`kern_execve`).
+            if self.in_capability_mode() {
+                return Err(Errno::ECAPMODE);
+            }
             let mut new = alloc::vec![sc.interp.clone()];
             new.extend(sc.arg);
-            new.push(path);
+            new.push(script_name);
             new.extend(argv.into_iter().skip(1));
             argv = new;
             file = lookup(&sc.interp)?;
             path = sc.interp;
         }
+        let (cred, setid) = self.exec_cred(s, &file)?;
         let text = Text::new(&file)?;
         let space = AddressSpace::new().map_err(|_| Errno::ENOMEM)?;
         let limits = *self.limits.lock();
         let args: Vec<&[u8]> = argv.iter().map(Vec::as_slice).collect();
-        let image = crate::exec::load(s, &space, &file, &path, &args, envp, &limits, &lookup)?;
+        // A set-id program takes no preferences its caller set (`imgact`).
+        if setid {
+            self.flag2.fetch_and(
+                !(p2::ASLR_ENABLE | p2::ASLR_DISABLE | p2::WXORX_DISABLE | p2::WXORX_ENABLE_EXEC),
+                Ordering::Relaxed,
+            );
+        }
+        let flag2 = self.flag2.load(Ordering::Relaxed);
+        let image = crate::exec::load(
+            s, &space, &file, &path, &args, envp, &limits, flag2, &lookup,
+        )?;
         Ok(Loaded {
+            cred,
+            setid,
             text,
             file,
             space,
@@ -1233,6 +1719,42 @@ impl Process {
             path,
             argv,
         })
+    }
+
+    /// The credential the program `file` runs with (`do_execve`): its
+    /// set-uid and set-gid bits make the effective ids its owner's, unless
+    /// its mount is `nosuid`, the caller is in capability mode, or it set
+    /// `PROC_NO_NEW_PRIVS`; the saved ids become the effective ones
+    /// either way. `None` if that changes nothing; the flag is whether the
+    /// program runs set-id.
+    fn exec_cred(&self, s: &Sleepable, file: &Vnode) -> Result<(Option<Ucred>, bool), Errno> {
+        use abi::stat::{S_ISGID, S_ISUID};
+        let a = file.attr(s)?;
+        let old = self.cred();
+        let suid = a.mode & S_ISUID != 0;
+        let sgid = a.mode & S_ISGID != 0;
+        let changing = (suid && old.uid != a.uid) || (sgid && old.gid != a.gid);
+        if changing {
+            self.pdeathsig.store(0, Ordering::Relaxed);
+        }
+        let setid = changing
+            && !old.in_capability_mode()
+            && file.mount().flags() & abi::mount::MNT_NOSUID == 0
+            && self.flag2.load(Ordering::Relaxed) & p2::NO_NEW_PRIVS == 0;
+        let mut c = Ucred::clone(&old);
+        if setid {
+            if suid {
+                c.uid = a.uid;
+            }
+            if sgid {
+                c.gid = a.gid;
+            }
+        } else if old.svuid == old.uid && old.svgid == old.gid {
+            return Ok((None, false));
+        }
+        c.svuid = c.uid;
+        c.svgid = c.gid;
+        Ok((Some(c), setid))
     }
 
     /// What thread `t` must do about suspension now.
@@ -1452,11 +1974,17 @@ impl Process {
         self.status.store(how.status(), Ordering::Relaxed);
         // Release: the status is visible to whoever sees `exited`.
         self.exited.store(true, Ordering::Release);
+        // Its jail may end with it (`prison_proc_free`).
+        crate::prison::proc_left(&self.cred());
         crate::event::proc_exited(self);
         let parent = self.parent();
         let reaps_nothing = parent
             .as_ref()
             .is_some_and(|p| crate::signal::parent_reaps_nothing(p));
+        // Reapers told of zombies they inherit, and children told their
+        // parent died (`p_pdeathsig`), once the tree is unlocked.
+        let mut reaper_told: Vec<(Arc<Self>, Arc<Self>)> = Vec::new();
+        let mut death_signals: Vec<(Arc<Self>, u32)> = Vec::new();
         let described = {
             let mut tree = TREE.lock();
             self.zombie.store(true, Ordering::Release);
@@ -1465,16 +1993,29 @@ impl Process {
             let described = self.procdesc.load(Ordering::Acquire);
             let reaps_nothing = reaps_nothing && !described;
             let init = (self.pid != INIT).then(|| find(INIT)).flatten();
+            // Each child goes to its reaper (init unless one took the
+            // role); those this process reaps for stay until it is
+            // reaped itself.
             if let Some(orphans) = tree.children.remove(&self.pid) {
                 for o in orphans {
-                    match &init {
-                        Some(init) => {
-                            tree.parent.insert(o.pid, init.pid);
-                            tree.children.entry(init.pid).or_default().push(o);
+                    let r = tree.reaper_of(o.pid);
+                    let pdeathsig = o.pdeathsig.load(Ordering::Relaxed);
+                    let zombie = o.zombie.load(Ordering::Acquire);
+                    if r == self.pid {
+                        tree.children
+                            .entry(self.pid)
+                            .or_default()
+                            .push(Arc::clone(&o));
+                    } else if let Some(rp) = find(r).filter(|_| r != INIT || init.is_some()) {
+                        tree.reparent(&o, rp.pid);
+                        if zombie {
+                            reaper_told.push((rp, Arc::clone(&o)));
                         }
-                        None => {
-                            tree.parent.remove(&o.pid);
-                        }
+                    } else {
+                        tree.parent.remove(&o.pid);
+                    }
+                    if !zombie && pdeathsig != 0 {
+                        death_signals.push((o, pdeathsig));
                     }
                 }
             }
@@ -1510,6 +2051,33 @@ impl Process {
         }
         if let Some(init) = find(INIT) {
             init.child_changed();
+        }
+        // Each with the zombie's own exit, as its parent would have been
+        // (`childproc_exited` as `proc_reparent` hands it over).
+        for (r, z) in reaper_told {
+            let st = z.status.load(Ordering::Relaxed);
+            let (code, status) = if st & 0x7f == 0 {
+                (CLD_EXITED, (st >> 8) & 0xff)
+            } else {
+                (CLD_KILLED, st & 0x7f)
+            };
+            let _ = crate::signal::post(
+                &r,
+                abi::signal::Siginfo {
+                    si_signo: abi::signal::SIGCHLD.cast_signed(),
+                    si_code: code,
+                    si_pid: z.pid,
+                    si_status: status,
+                    ..abi::signal::Siginfo::default()
+                },
+            );
+            r.child_changed();
+        }
+        for (c, sig) in death_signals {
+            let _ = crate::signal::post(
+                &c,
+                crate::signal::user_info(sig, 0, abi::signal::code::SI_KERNEL),
+            );
         }
         // A group this exit orphaned, with stopped members, is told to
         // hang up and continue: nothing could ever continue it otherwise
@@ -1635,6 +2203,7 @@ impl Process {
                     if reaped {
                         kids.remove(i);
                         tree.parent.remove(&c.pid);
+                        tree.reaped(c.pid);
                     }
                     drop(tree);
                     if reaped {
@@ -1681,6 +2250,12 @@ impl Process {
         }
         self.pgid.store(self.pid, Ordering::Relaxed);
         self.sid.store(self.pid, Ordering::Relaxed);
+        // A new session starts with its leader's login name (FreeBSD's
+        // `enterpgrp` copies `s_login`).
+        let login = self.login();
+        *self.session.lock() = Arc::new(Session {
+            login: SpinLock::new(login),
+        });
         Ok(self.pid)
     }
 
@@ -1781,20 +2356,18 @@ impl Drop for ProcDesc {
                 {
                     kids.retain(|c| c.pid != p.pid);
                 }
+                tree.reaped(p.pid);
                 false
             } else {
-                // To init, which reaps it when it goes.
-                if let Some(ppid) = tree.parent.get(&p.pid).copied()
-                    && ppid != INIT
-                    && let Some(init) = find(INIT)
+                // To its reaper (init unless one took the role), which
+                // reaps it when it goes (`procdesc_close`).
+                let r = tree.reaper_of(p.pid);
+                if tree.parent.get(&p.pid) != Some(&r)
+                    && let Some(rp) = find(r)
                 {
-                    if let Some(kids) = tree.children.get_mut(&ppid) {
-                        kids.retain(|c| c.pid != p.pid);
-                    }
-                    tree.parent.insert(p.pid, INIT);
-                    tree.children.entry(INIT).or_default().push(Arc::clone(p));
+                    tree.reparent(p, r);
                     drop(tree);
-                    init.child_changed();
+                    rp.child_changed();
                 }
                 !self.daemon
             }
@@ -1805,6 +2378,9 @@ impl Drop for ProcDesc {
                 crate::signal::user_info(abi::signal::SIGKILL, 0, abi::signal::code::SI_KERNEL),
             );
         }
+        // Whoever polls the descriptor finds it closed (`procdesc_close`'s
+        // `seldrain`).
+        p.pd_sel.drain();
     }
 }
 

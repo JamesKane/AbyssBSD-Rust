@@ -31,36 +31,8 @@ use crate::mount::Rename;
 use crate::node::{Attr, Create, Kind, NewNode, NodeOps, SetAttr};
 use crate::vnode::{State, Vnode};
 
-/// Who is asking (FreeBSD's `struct ucred`, the parts the VFS uses).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Cred {
-    pub uid: u32,
-    pub gid: u32,
-    /// Supplementary groups.
-    pub groups: Vec<u32>,
-}
-
-impl Cred {
-    /// The superuser.
-    #[must_use]
-    pub const fn root() -> Self {
-        Self {
-            uid: 0,
-            gid: 0,
-            groups: Vec::new(),
-        }
-    }
-
-    #[must_use]
-    pub fn is_root(&self) -> bool {
-        self.uid == 0
-    }
-
-    #[must_use]
-    pub fn in_group(&self, gid: u32) -> bool {
-        self.gid == gid || self.groups.contains(&gid)
-    }
-}
+pub use security::Cred;
+use security::Priv;
 
 /// Access modes (FreeBSD's `VEXEC`, `VWRITE`, `VREAD`).
 pub const VEXEC: u32 = 0o100;
@@ -69,18 +41,13 @@ pub const VREAD: u32 = 0o400;
 
 /// Whether `cred` may access a node with attributes `a` as `want` says
 /// (FreeBSD's `vaccess`): `EACCES` if not, `EPERM` to write an immutable
-/// node. The superuser may do anything else but execute a file with no
-/// execute bit at all.
+/// node. What the mode does not grant, a privilege may: `PRIV_VFS_LOOKUP`
+/// searching a directory, `PRIV_VFS_EXEC` executing a file with some
+/// execute bit, `PRIV_VFS_READ` and `PRIV_VFS_WRITE`.
 pub fn access(a: &Attr, kind: Kind, cred: &Cred, want: u32) -> Result<(), Errno> {
     // Nobody writes an immutable node (FreeBSD's `ufs_access`).
     if want & VWRITE != 0 && a.flags & (IMMUTABLE | SF_SNAPSHOT) != 0 {
         return Err(Errno::EPERM);
-    }
-    if cred.is_root() {
-        if want & VEXEC != 0 && kind != Kind::Directory && a.mode & 0o111 == 0 {
-            return Err(Errno::EACCES);
-        }
-        return Ok(());
     }
     let shift = if cred.uid == a.uid {
         0
@@ -90,26 +57,47 @@ pub fn access(a: &Attr, kind: Kind, cred: &Cred, want: u32) -> Result<(), Errno>
         6
     };
     let granted = u32::from(a.mode << shift) & 0o700;
-    if want & !granted & 0o700 == 0 {
+    let missing = want & !granted & 0o700;
+    if missing == 0 {
+        return Ok(());
+    }
+    let held = |p| cred.priv_check(p).is_ok();
+    let exec_ok = missing & VEXEC == 0
+        || if kind == Kind::Directory {
+            held(Priv::VfsLookup)
+        } else {
+            a.mode & 0o111 != 0 && held(Priv::VfsExec)
+        };
+    if exec_ok
+        && (missing & VREAD == 0 || held(Priv::VfsRead))
+        && (missing & VWRITE == 0 || held(Priv::VfsWrite))
+    {
         Ok(())
     } else {
         Err(Errno::EACCES)
     }
 }
 
-/// Whether `cred` owns the node or is the superuser (changing its mode,
-/// times, flags): `EPERM` if not.
+/// Whether `cred` may administer the node, changing its mode, times, or
+/// flags (`VADMIN`): its owner, or with `PRIV_VFS_ADMIN`; `EPERM` if not.
 fn owner(a: &Attr, cred: &Cred) -> Result<(), Errno> {
-    if cred.is_root() || cred.uid == a.uid {
+    if cred.uid == a.uid {
         Ok(())
     } else {
-        Err(Errno::EPERM)
+        cred.priv_check(Priv::VfsAdmin)
     }
 }
 
 /// The node's attributes, locked.
 fn attr_of(st: &State) -> Result<Attr, Errno> {
     Ok(st.live()?.node().attr())
+}
+
+/// `access` for `v`, locked as `st`, by its ACL where its mount keeps them
+/// (`VOP_ACCESS`).
+fn access_st(s: &Sleepable, v: &Vnode, st: &State, cred: &Cred, want: u32) -> Result<(), Errno> {
+    let node = st.live()?.node();
+    crate::acl::access_locked(s, v, node, &node.attr(), cred, want)
 }
 
 fn read_only(dir: &Vnode) -> Result<(), Errno> {
@@ -143,11 +131,11 @@ fn entry(
     }
 }
 
-/// `cred` may remove or rename `child` out of directory `dir` (write and
-/// search permission, the sticky bit, and the no-unlink flags).
+/// `cred`, with write and search permission on directory `dir`, may
+/// remove or rename `child` out of it (the sticky bit, and the no-unlink
+/// flags).
 fn may_unlink(dir: &Attr, child: &Attr, cred: &Cred) -> Result<(), Errno> {
-    access(dir, Kind::Directory, cred, VWRITE | VEXEC)?;
-    if dir.mode & S_ISVTX != 0 && !cred.is_root() && cred.uid != dir.uid && cred.uid != child.uid {
+    if dir.mode & S_ISVTX != 0 && owner(dir, cred).is_err() && owner(child, cred).is_err() {
         return Err(Errno::EPERM);
     }
     if child.flags & (IMMUTABLE | APPEND | NOUNLINK) != 0 || dir.flags & APPEND != 0 {
@@ -189,7 +177,7 @@ pub fn create(
     }
     read_only(dir)?;
     let da = attr_of(&st)?;
-    access(&da, Kind::Directory, cred, VWRITE | VEXEC)?;
+    access_st(s, dir, &st, cred, VWRITE | VEXEC)?;
     if da.flags & IMMUTABLE != 0 {
         return Err(Errno::EPERM);
     }
@@ -198,8 +186,15 @@ pub fn create(
     // `ufs_makeinode`).
     let mut c = *c;
     c.gid = da.gid;
-    if !cred.is_root() && !cred.in_group(da.gid) {
+    if c.mode & S_ISGID != 0 && !cred.in_group(da.gid) && cred.priv_check(Priv::VfsSetgid).is_err()
+    {
         c.mode &= !S_ISGID;
+    }
+    // Under a default ACL, the new node takes no permission it withholds,
+    // and inherits it (FreeBSD's `ufs_do_posix1e_acl_inheritance_*`).
+    let dacl = crate::acl::inherited(s, dir, st.live()?.node())?;
+    if let Some(d) = &dacl {
+        c.mode = crate::acl::new_file_mode(c.mode, d);
     }
     let NodeOps::Directory(d) = st.live_mut()? else {
         return Err(Errno::ENOTDIR);
@@ -209,6 +204,9 @@ pub fn create(
         Some(ops) => dir.mount().adopt(s, made.ino, ops),
         None => dir.mount().vget(s, made.ino)?,
     };
+    if let Some(d) = &dacl {
+        crate::acl::inherit(s, &v, c.mode, d)?;
+    }
     if dir.mount().fs().caches_created() || v.is_dir() {
         cache::enter(dir, name, Some(&v));
     } else {
@@ -252,6 +250,7 @@ pub fn remove(
         }
         read_only(dir)?;
         let da = attr_of(&st)?;
+        access_st(s, dir, &st, cred, VWRITE | VEXEC)?;
         let mut cst = child.write(s);
         may_unlink(&da, &attr_of(&cst)?, cred)?;
         let NodeOps::Directory(d) = st.live_mut()? else {
@@ -303,7 +302,7 @@ pub fn link(
         return Err(Errno::EEXIST);
     }
     read_only(dir)?;
-    access(&attr_of(&st)?, Kind::Directory, cred, VWRITE | VEXEC)?;
+    access_st(s, dir, &st, cred, VWRITE | VEXEC)?;
     let mut tst = target.write(s);
     if attr_of(&tst)?.flags & (IMMUTABLE | APPEND) != 0 {
         return Err(Errno::EPERM);
@@ -517,8 +516,9 @@ pub fn rename(
     let fda = attr_of(guard_of(&mut held, fdir))?;
     let tda = attr_of(guard_of(&mut held, tdir))?;
     let fa = attr_of(guard_of(&mut held, &from))?;
+    access_st(s, fdir, guard_of(&mut held, fdir), cred, VWRITE | VEXEC)?;
     may_unlink(&fda, &fa, cred)?;
-    access(&tda, Kind::Directory, cred, VWRITE | VEXEC)?;
+    access_st(s, tdir, guard_of(&mut held, tdir), cred, VWRITE | VEXEC)?;
     if tda.flags & IMMUTABLE != 0 {
         return Err(Errno::EPERM);
     }
@@ -531,7 +531,7 @@ pub fn rename(
     }
     // Moving a directory to another parent rewrites its `..`.
     if from.is_dir() && !same_dir {
-        access(&fa, Kind::Directory, cred, VWRITE)?;
+        access_st(s, &from, guard_of(&mut held, &from), cred, VWRITE)?;
     }
     // Take the guards apart for the file system.
     let mut fdir_g = None;
@@ -645,7 +645,14 @@ pub fn setattr(
     let mut a = *a;
     if let Some(flags) = a.flags {
         owner(&cur, cred)?;
-        if cred.is_root() {
+        // With `PRIV_VFS_SYSFLAGS` (root, or root in a jail with
+        // `allow.chflags`), system flags change, but once one is set only
+        // at securelevel 0 or below; without it, no system flag changes,
+        // nor any flag while one is set (FreeBSD's `ufs_setattr`).
+        if cred.priv_check(Priv::VfsSysflags).is_ok() {
+            if cur.flags & (SF_NOUNLINK | SF_IMMUTABLE | SF_APPEND) != 0 {
+                cred.securelevel_gt(0)?;
+            }
             // Not even the superuser toggles the snapshot flag.
             if (flags ^ cur.flags) & SF_SNAPSHOT != 0 {
                 return Err(Errno::EPERM);
@@ -653,8 +660,6 @@ pub fn setattr(
         } else if cur.flags & (SF_NOUNLINK | SF_IMMUTABLE | SF_APPEND) != 0
             || (flags ^ cur.flags) & SF_SETTABLE != 0
         {
-            // Only the superuser sets or clears system flags, or changes
-            // flags while one is set.
             return Err(Errno::EPERM);
         }
     }
@@ -676,27 +681,33 @@ pub fn setattr(
     }
     if let Some(mode) = a.mode {
         owner(&cur, cred)?;
-        // Without the superuser, the sticky bit is for directories only,
-        // and setgid needs the group (FreeBSD's `ufs_chmod`).
-        if !cred.is_root() {
-            if v.kind() != Kind::Directory && mode & S_ISVTX != 0 {
-                return Err(Errno::EFTYPE);
-            }
-            if mode & S_ISGID != 0 && !cred.in_group(cur.gid) {
-                return Err(Errno::EPERM);
-            }
+        // The sticky bit on a file needs `PRIV_VFS_STICKYFILE`, setgid
+        // outside the file's group `PRIV_VFS_SETGID`, and setuid on
+        // another's file `PRIV_VFS_ADMIN` (FreeBSD's `ufs_chmod`).
+        if v.kind() != Kind::Directory
+            && mode & S_ISVTX != 0
+            && cred.priv_check(Priv::VfsStickyfile).is_err()
+        {
+            return Err(Errno::EFTYPE);
+        }
+        if mode & S_ISGID != 0 && !cred.in_group(cur.gid) {
+            cred.priv_check(Priv::VfsSetgid)?;
+        }
+        if mode & S_ISUID != 0 && cur.uid != cred.uid {
+            cred.priv_check(Priv::VfsAdmin)?;
         }
     }
     if a.uid.is_some() || a.gid.is_some() {
+        owner(&cur, cred)?;
         let uid = a.uid.unwrap_or(cur.uid);
         let gid = a.gid.unwrap_or(cur.gid);
-        // Only the superuser gives a file away; the owner may change its
-        // group to one of their own.
-        if !cred.is_root() && (uid != cur.uid || cred.uid != cur.uid || !cred.in_group(gid)) {
-            return Err(Errno::EPERM);
+        // Giving a file away, or to a group one is not in, needs
+        // `PRIV_VFS_CHOWN` (FreeBSD's `ufs_chown`).
+        if (uid != cur.uid && uid != cred.uid) || (gid != cur.gid && !cred.in_group(gid)) {
+            cred.priv_check(Priv::VfsChown)?;
         }
-        // A non-superuser's change clears the set-id bits (FreeBSD's UFS).
-        if !cred.is_root() && cur.mode & (S_ISUID | S_ISGID) != 0 {
+        // The set-id bits go, unless `PRIV_VFS_RETAINSUGID` keeps them.
+        if cur.mode & (S_ISUID | S_ISGID) != 0 && cred.priv_check(Priv::VfsRetainsugid).is_err() {
             a.mode = Some(a.mode.unwrap_or(cur.mode) & !(S_ISUID | S_ISGID));
         }
     }
@@ -709,7 +720,7 @@ pub fn setattr(
         if cur.flags & APPEND != 0 {
             return Err(Errno::EPERM);
         }
-        access(&cur, v.kind(), cred, VWRITE)?;
+        access_st(s, v, &st, cred, VWRITE)?;
     }
     if a.atime.is_some() || a.mtime.is_some() || a.birthtime.is_some() {
         // The owner sets times; to the current time, so does a writer, and
@@ -717,7 +728,7 @@ pub fn setattr(
         // `vn_utimes_perm`).
         if owner(&cur, cred).is_err() {
             if times_now {
-                access(&cur, v.kind(), cred, VWRITE)?;
+                access_st(s, v, &st, cred, VWRITE)?;
             } else {
                 return Err(Errno::EPERM);
             }
@@ -779,4 +790,97 @@ pub fn getdirentries(
         return Err(Errno::EINVAL);
     }
     Ok(next)
+}
+
+/// Extended attribute namespaces (`EXTATTR_NAMESPACE_*`).
+pub mod extattr {
+    pub const USER: u8 = 1;
+    pub const SYSTEM: u8 = 2;
+    /// The longest name (`EXTATTR_MAXNAMELEN`).
+    pub const MAXNAMELEN: usize = 255;
+}
+
+/// Whether `cred` may reach `v`'s extended attributes in `ns`, wanting
+/// `want` (`VREAD` or `VWRITE`) (`extattr_check_cred`): the system
+/// namespace takes `PRIV_VFS_EXTATTR_SYSTEM`, the user one the file's
+/// own permission; any other is `EPERM`. Devices have none
+/// (`EOPNOTSUPP`), and a name must be neither empty nor too long.
+fn extattr_check(
+    s: &Sleepable,
+    v: &Vnode,
+    cred: &Cred,
+    ns: u8,
+    name: Option<&[u8]>,
+    want: u32,
+) -> Result<(), Errno> {
+    if matches!(v.kind(), Kind::CharDevice | Kind::BlockDevice) {
+        return Err(Errno::EOPNOTSUPP);
+    }
+    match ns {
+        extattr::SYSTEM => cred.priv_check(Priv::VfsExtattrSystem)?,
+        extattr::USER => crate::acl::access(s, v, cred, want)?,
+        _ => return Err(Errno::EPERM),
+    }
+    if let Some(n) = name
+        && (n.is_empty() || n.len() > extattr::MAXNAMELEN)
+    {
+        return Err(Errno::EINVAL);
+    }
+    Ok(())
+}
+
+/// `extattr_get_*`: the value of attribute `name`.
+pub fn get_extattr(
+    s: &Sleepable,
+    v: &Vnode,
+    cred: &Cred,
+    ns: u8,
+    name: &[u8],
+) -> Result<Vec<u8>, Errno> {
+    extattr_check(s, v, cred, ns, Some(name), VREAD)?;
+    let st = v.read(s);
+    st.live()?.node().get_extattr(s, ns, name)
+}
+
+/// `extattr_set_*`: attribute `name` becomes `value`.
+pub fn set_extattr(
+    s: &Sleepable,
+    v: &Vnode,
+    cred: &Cred,
+    ns: u8,
+    name: &[u8],
+    value: &[u8],
+) -> Result<(), Errno> {
+    extattr_check(s, v, cred, ns, Some(name), VWRITE)?;
+    let mut st = v.write(s);
+    st.live_mut()?.node_mut().set_extattr(s, ns, name, value)
+}
+
+/// `extattr_delete_*`.
+pub fn delete_extattr(
+    s: &Sleepable,
+    v: &Vnode,
+    cred: &Cred,
+    ns: u8,
+    name: &[u8],
+) -> Result<(), Errno> {
+    extattr_check(s, v, cred, ns, Some(name), VWRITE)?;
+    let mut st = v.write(s);
+    st.live_mut()?.node_mut().delete_extattr(s, ns, name)
+}
+
+/// `extattr_list_*`: each name in `ns`, as the list `extattr_list_*`
+/// returns: a length byte, then the name, no NUL.
+pub fn list_extattr(s: &Sleepable, v: &Vnode, cred: &Cred, ns: u8) -> Result<Vec<u8>, Errno> {
+    extattr_check(s, v, cred, ns, None, VREAD)?;
+    let names = {
+        let st = v.read(s);
+        st.live()?.node().list_extattr(s, ns)?
+    };
+    let mut out = Vec::new();
+    for n in names {
+        out.push(u8::try_from(n.len()).unwrap_or(u8::MAX));
+        out.extend_from_slice(&n);
+    }
+    Ok(out)
 }

@@ -86,8 +86,16 @@ pub mod kern {
     pub const MAXFILES: i32 = 7;
     /// `kern.argmax` (int).
     pub const ARGMAX: i32 = 8;
+    /// `kern.securelevel` (int).
+    pub const SECURELVL: i32 = 9;
     /// `kern.hostname` (string).
     pub const HOSTNAME: i32 = 10;
+    /// `kern.hostid` (unsigned long).
+    pub const HOSTID: i32 = 11;
+    /// `kern.domainname` (string).
+    pub const NISDOMAINNAME: i32 = 22;
+    /// `kern.hostuuid` (string).
+    pub const HOSTUUID: i32 = 36;
     /// `kern.proc` (node).
     pub const PROC: i32 = 14;
     /// `kern.ngroups` (int).
@@ -188,6 +196,12 @@ pub mod ctlflag {
     pub const MPSAFE: u32 = 0x0004_0000;
     /// Readable in capability mode.
     pub const CAPRD: u32 = 0x0000_8000;
+    /// Writable in capability mode.
+    pub const CAPWR: u32 = 0x0000_4000;
+    /// The securelevel above which a `SECURE` node is not writable, less
+    /// one (`CTLMASK_SECURE`, shifted by `CTLSHIFT_SECURE`).
+    pub const MASK_SECURE: u32 = 0x00f0_0000;
+    pub const SHIFT_SECURE: u32 = 20;
     /// A statistic, not a tunable.
     pub const STATS: u32 = 0x0000_2000;
 }
@@ -221,6 +235,10 @@ pub const CONSTANTS: &[ConstValue] = &[
     c("KERN_MAXFILES", kern::MAXFILES as i64),
     c("KERN_ARGMAX", kern::ARGMAX as i64),
     c("KERN_HOSTNAME", kern::HOSTNAME as i64),
+    c("KERN_SECURELVL", kern::SECURELVL as i64),
+    c("KERN_HOSTID", kern::HOSTID as i64),
+    c("KERN_NISDOMAINNAME", kern::NISDOMAINNAME as i64),
+    c("KERN_HOSTUUID", kern::HOSTUUID as i64),
     c("KERN_PROC", kern::PROC as i64),
     c("KERN_NGROUPS", kern::NGROUPS as i64),
     c("KERN_BOOTTIME", kern::BOOTTIME as i64),
@@ -264,6 +282,9 @@ pub const CONSTANTS: &[ConstValue] = &[
     c("CTLFLAG_TUN", ctlflag::TUN as i64),
     c("CTLFLAG_MPSAFE", ctlflag::MPSAFE as i64),
     c("CTLFLAG_CAPRD", ctlflag::CAPRD as i64),
+    c("CTLFLAG_CAPWR", ctlflag::CAPWR as i64),
+    c("CTLMASK_SECURE", ctlflag::MASK_SECURE as i64),
+    c("CTLSHIFT_SECURE", ctlflag::SHIFT_SECURE as i64),
     c("CTLFLAG_STATS", ctlflag::STATS as i64),
 ];
 

@@ -1666,6 +1666,39 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
 - UFS2 extended attributes and ACLs (VFS.md §1.2's P6 item), checked by `fsck_ffs`.
 - Exit: kyua's `sys/capsicum`, `kern/` jail and procctl tests, `lib/libc` set-id tests, and pjdfstest's
   permission and ACL tests at the target; `jail -c` runs a shell with its own hostname and root.
+- Progress 2026-10-28:
+  - Credentials are `sys/security`'s `Cred` (FreeBSD's `ucred`): `priv_check` with FreeBSD's
+    privilege numbers and `prison_priv_check`, securelevel, and `cr_cansee`, `cansignal`,
+    `cansched`, and `candebug`, used everywhere a uid was compared with 0. Set-id exec (not on a
+    `nosuid` mount, in capability mode, or after `PROC_NO_NEW_PRIVS`) sets `P_SUGID` and checks
+    descriptors 0 to 2; `setlogin`/`getlogin` per session, login classes, and `setcred`. Every
+    `RLIMIT_*` is enforced (`CPU` by a watch, `FSIZE` with `SIGXFSZ`, `MEMLOCK` and `VMEM`,
+    `NPROC`, `NOFILE`, `KQUEUES`, `NPTS`).
+  - Capsicum: `cap_enter`, descriptor rights on every descriptor call, the `ioctl` and `fcntl`
+    limits, capability mode from the generated table (`ECAPMODE`), lookups beneath a directory
+    descriptor, and `PROC_TRAPCAP`.
+  - Jails: the prison tree with libjail's `security.jail.param` sysctls, `jail_set`/`jail_get`
+    (with `meta` and `env` and their keys, and a writable `meta_maxbufsize`), jail descriptors
+    (`JAIL_USE_DESC` and the rest, `jail_attach_jd`, `jail_remove_jd`), `jail_attach`,
+    `jail_remove`, the old `jail`, `chroot`/`fchroot`, per-jail hostname and securelevel, and
+    `enforce_statfs`. A directory passed into another jail's tree takes `UF_RESOLVE_BENEATH`. The
+    shell case runs `jail -c path=… host.hostname=inside.jail command=/bin/sh`. Every `procctl`
+    command, with reapers (`PROC_REAP_*` as `reap_kill` answers; inherited zombies announced as
+    their parent would have been) and `PROC_PDEATHSIG_CTL`. `fexecve` and `pdwait` came along.
+  - UFS2 extended attributes in the inode's area, as FreeBSD lays them out, with soft-updates
+    ordering; POSIX.1e ACLs in them on an `acls` mount (`vfs::acl`: access checks, default ACL
+    inheritance, the mask kept with the mode, the `__acl_*` calls). The UFS read-write test sets
+    access and default ACLs with `setfacl` and reads them back before and after `fsck_ffs -f -n`,
+    on both arches. NFSv4 ACLs are not kept (the "Extended attributes and ACLs" deviation).
+  - `tests/user/capsicum.c` and `tests/user/jail.c` pass on FreeBSD 15.1 and on both arches.
+  - kyua (the shell cases): `sys/capsicum`, `sys/kern`'s reaper, pdeathsig, procdesc,
+    logsigexit, jail, jaildesc, and jailmeta programs, `usr.sbin/jail`, and libc's set-id,
+    `getlogin`, `setrlimit`, `kill`, `getgroups`, `chroot`, and `mlock` tests join the run: 628
+    cases on amd64 and 624 on arm64 end as on FreeBSD, but those `tests/kyua/abyss-known.txt` lists (`AF_INET` and
+    `ifconfig`, P8; `ptrace`, P6.8; nullfs; audit). `run-atf` now runs cleanup routines and
+    honors a program's `required_kmods`, as kyua does.
+  - pjdfstest: every script as on FreeBSD on tmpfs and UFS2 but `chflags/09`'s 117 `jexpect` tests,
+    whose `jail -s` gives the jail an IPv4 address (P8).
 
 **P6.8 Observability.**
 - `kern.proc` complete (threads, sizes, wmesg, CPU), `kinfo_file`, `kinfo_vmentry`, kernel stacks

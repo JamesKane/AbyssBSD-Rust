@@ -121,6 +121,22 @@ impl Notify {
         self.deliver(hint, true);
     }
 
+    /// The descriptor is closing (`seldrain`): its pollers wake to find it
+    /// gone (`POLLNVAL`); the knotes hear nothing.
+    pub fn drain(&self) {
+        fence(Ordering::SeqCst);
+        if !self.armed.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut i = self.inner.lock();
+        for p in i.pollers.drain(..) {
+            if let Some(p) = p.upgrade() {
+                p.wake();
+            }
+        }
+        Self::rearm(&self.armed, &i);
+    }
+
     /// Only the knotes see `hint`, the pollers stay asleep (`KNOTE`
     /// without `selwakeup`: the VFS's notes, process events).
     pub fn knote(&self, hint: u64) {

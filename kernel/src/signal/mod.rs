@@ -499,6 +499,8 @@ pub(crate) fn user_info(sig: u32, from: i32, code: i32) -> Siginfo {
         si_signo: sig.cast_signed(),
         si_code: code,
         si_pid: from,
+        // The sender's real uid (`ksi_uid`).
+        si_uid: Process::with_current(|p| p.cred().ruid).unwrap_or(0),
         ..Siginfo::default()
     }
 }
@@ -852,11 +854,12 @@ pub(crate) fn user_return(frame: &mut TrapFrame) -> bool {
 ///
 /// # Errors
 ///
-/// `EPERM` unless root (`PRIV_IO`). There is no securelevel, as
-/// FreeBSD's default -1 would have it.
+/// `EPERM` without `PRIV_IO`, or above securelevel 0.
 pub(crate) fn io_access(on: bool) -> Result<(), Errno> {
-    if on && !Process::current().is_some_and(|p| p.cred().is_root()) {
-        return Err(Errno::EPERM);
+    if on {
+        let cred = crate::fs::cred();
+        cred.priv_check(crate::cred::Priv::Io)?;
+        cred.securelevel_gt(0)?;
     }
     sched::current().request_ast(if on { AST_IO_ON } else { AST_IO_OFF });
     Ok(())
@@ -902,10 +905,39 @@ fn deliver(s: &Sleepable, frame: &mut TrapFrame) -> bool {
     }
 }
 
+/// `kern.logsigexit`: whether a process a core-dumping signal ends is
+/// logged, unless it says otherwise (`PROC_LOGSIGEXIT_CTL`).
+pub(crate) static LOGSIGEXIT: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(true);
+
 /// Ends the current process by `sig` (FreeBSD's `sigexit`; there are no
-/// core dumps). The caller holds no references: nothing on a stack that
-/// never unwinds may keep them.
+/// core dumps). A signal that would dump core is logged, as
+/// `kern.logsigexit` or the process's `PROC_LOGSIGEXIT_CTL` says. The
+/// caller holds no references: nothing on a stack that never unwinds may
+/// keep them.
 pub(super) fn kill_self(s: &Sleepable, sig: u32) -> ! {
+    if prop(sig) & CORE != 0 {
+        let log = Process::with_current(|p| {
+            use crate::proc::p2;
+            let f2 = p.flag2.load(core::sync::atomic::Ordering::Relaxed);
+            let on = if f2 & p2::LOGSIGEXIT_CTL == 0 {
+                LOGSIGEXIT.load(core::sync::atomic::Ordering::Relaxed)
+            } else {
+                f2 & p2::LOGSIGEXIT_ENABLE != 0
+            };
+            on.then(|| {
+                let c = p.cred();
+                let comm = p.with_comm(|n| alloc::string::String::from_utf8_lossy(n).into_owned());
+                (p.pid(), comm, c.jail_id(), c.uid)
+            })
+        })
+        .flatten();
+        if let Some((pid, comm, jid, uid)) = log {
+            kprintln!(
+                "pid {pid} ({comm}), jid {jid}, uid {uid}: exited on signal {sig} (no core dump - other error)"
+            );
+        }
+    }
     Process::exit_current(s, Exit::Signal(sig))
 }
 

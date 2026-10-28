@@ -409,6 +409,7 @@ fn errno(e: ufs::Error) -> Errno {
         ufs::Error::NotEmpty => Errno::ENOTEMPTY,
         ufs::Error::NameTooLong => Errno::ENAMETOOLONG,
         ufs::Error::TooManyLinks => Errno::EMLINK,
+        ufs::Error::Invalid => Errno::EINVAL,
     }
 }
 
@@ -497,6 +498,11 @@ impl UfsFs {
     /// read-write mount of a file system that has them.
     pub(crate) fn soft_updates(&self) -> bool {
         self.shared.deps.is_some() && self.shared.writable()
+    }
+
+    /// The superblock's `fs_flags`.
+    pub(crate) fn sb_flags(&self) -> u32 {
+        self.shared.ufs.superblock().flags
     }
 
     /// The block size, for the mount's I/O size.
@@ -1423,6 +1429,70 @@ impl Node for UfsNode {
             t.remove(&self.cell.ino);
             shared.changes.fetch_add(1, Ordering::Release);
         }
+    }
+
+    fn get_extattr(&self, s: &Sleepable, ns: u8, name: &[u8]) -> Result<Vec<u8>, Errno> {
+        let st = self.cell.lock(s);
+        self.fs
+            .ufs
+            .get_extattr(s, &st.ip, ns, name)
+            .map_err(errno)?
+            .ok_or(Errno::ENOATTR)
+    }
+
+    /// FreeBSD's `ffs_setextattr`. The caller's credentials do not reach
+    /// here: the superuser's reserve is open to the system namespace
+    /// (which takes privilege) and closed to the user one, and the set-id
+    /// bits `ffs_extwrite` clears for an unprivileged writer stay.
+    fn set_extattr(
+        &mut self,
+        s: &Sleepable,
+        ns: u8,
+        name: &[u8],
+        value: &[u8],
+    ) -> Result<(), Errno> {
+        let shared = Arc::clone(&self.fs);
+        let sum = shared.sum()?;
+        let reserve = if ns == ufs::extattr::NAMESPACE_SYSTEM {
+            Reserve::Allowed
+        } else {
+            Reserve::Denied
+        };
+        let t = now();
+        let mut st = self.cell.lock(s);
+        let mut sum = sum.lock(s);
+        shared
+            .ufs
+            .set_extattr(
+                s,
+                &mut sum,
+                self.cell.ino,
+                &mut st.ip,
+                ns,
+                name,
+                value,
+                reserve,
+                t,
+            )
+            .map_err(errno)
+    }
+
+    fn delete_extattr(&mut self, s: &Sleepable, ns: u8, name: &[u8]) -> Result<(), Errno> {
+        let shared = Arc::clone(&self.fs);
+        let sum = shared.sum()?;
+        let t = now();
+        let mut st = self.cell.lock(s);
+        let mut sum = sum.lock(s);
+        let found = shared
+            .ufs
+            .delete_extattr(s, &mut sum, self.cell.ino, &mut st.ip, ns, name, t)
+            .map_err(errno)?;
+        if found { Ok(()) } else { Err(Errno::ENOATTR) }
+    }
+
+    fn list_extattr(&self, s: &Sleepable, ns: u8) -> Result<Vec<Vec<u8>>, Errno> {
+        let st = self.cell.lock(s);
+        self.fs.ufs.list_extattr(s, &st.ip, ns).map_err(errno)
     }
 
     fn as_any(&self) -> &dyn Any {

@@ -189,6 +189,35 @@ pub trait Node: Send + Sync + Any {
     /// if inactive freed it).
     fn reclaim(self: Box<Self>, s: &Sleepable);
 
+    /// Extended attribute `name` in namespace `ns` (`VOP_GETEXTATTR`):
+    /// `ENOATTR` if there is none, `EOPNOTSUPP` on a file system without
+    /// them. The generic layer checked the caller and the name.
+    fn get_extattr(&self, _s: &Sleepable, _ns: u8, _name: &[u8]) -> Result<Vec<u8>, Errno> {
+        Err(Errno::EOPNOTSUPP)
+    }
+
+    /// Sets extended attribute `name` to `value` (`VOP_SETEXTATTR`).
+    fn set_extattr(
+        &mut self,
+        _s: &Sleepable,
+        _ns: u8,
+        _name: &[u8],
+        _value: &[u8],
+    ) -> Result<(), Errno> {
+        Err(Errno::EOPNOTSUPP)
+    }
+
+    /// Removes extended attribute `name` (`VOP_DELETEEXTATTR`).
+    fn delete_extattr(&mut self, _s: &Sleepable, _ns: u8, _name: &[u8]) -> Result<(), Errno> {
+        Err(Errno::EOPNOTSUPP)
+    }
+
+    /// The names of the extended attributes in namespace `ns`
+    /// (`VOP_LISTEXTATTR`), in the file system's order.
+    fn list_extattr(&self, _s: &Sleepable, _ns: u8) -> Result<Vec<Vec<u8>>, Errno> {
+        Err(Errno::EOPNOTSUPP)
+    }
+
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }

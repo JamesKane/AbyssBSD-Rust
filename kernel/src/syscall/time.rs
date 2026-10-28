@@ -127,24 +127,50 @@ pub(super) fn getrlimit(which: u64, rlp: u64) -> SysResult {
     Ok(0)
 }
 
-/// `setrlimit(which, rlp)`: root may raise as well as lower.
+/// `setrlimit(which, rlp)` (`kern_proc_setrlimit`): raising either limit
+/// past the hard one takes `PRIV_PROC_SETRLIMIT`; a soft limit above the
+/// hard one comes down to it, and some limits stop at the system's
+/// (`maxdsiz`, `maxssiz`, `maxfilesperproc`, `maxprocperuid`). A negative
+/// limit is infinite.
 pub(super) fn setrlimit(s: &Sleepable, which: u64, rlp: u64) -> SysResult {
     let i = limit_index(which)?;
-    let l = UserPtr::<Rlimit>::new(rlp)
+    // In range: `limit_index` took it.
+    let which = u32::try_from(which).unwrap_or(u32::MAX);
+    let mut l = UserPtr::<Rlimit>::new(rlp)
         .read()
         .map_err(|_| Errno::EFAULT)?;
-    if l.rlim_cur > l.rlim_max {
-        return Err(Errno::EINVAL);
+    for v in [&mut l.rlim_cur, &mut l.rlim_max] {
+        if v.cast_signed() < 0 {
+            *v = abi::resource::RLIM_INFINITY;
+        }
     }
-    let mut l = l;
     let p = process()?;
-    if i == rlimit::STACK as usize {
-        // No more than exec reserves; the stack's growth follows the new
-        // limit at once.
-        l.rlim_cur = l.rlim_cur.min(crate::exec::MAXSSIZ);
-        l.rlim_max = l.rlim_max.min(crate::exec::MAXSSIZ);
-        p.space().set_stack_limit(s, l.rlim_cur);
+    let old = p.limits.lock()[i];
+    if l.rlim_cur > old.rlim_max || l.rlim_max > old.rlim_max {
+        p.priv_check(crate::cred::Priv::ProcSetrlimit)?;
+    }
+    l.rlim_cur = l.rlim_cur.min(l.rlim_max);
+    let clamp = |l: &mut Rlimit, max: u64| {
+        l.rlim_cur = l.rlim_cur.min(max);
+        l.rlim_max = l.rlim_max.min(max);
+    };
+    match which {
+        rlimit::DATA => clamp(&mut l, crate::exec::MAXDSIZ),
+        rlimit::STACK => clamp(&mut l, crate::exec::MAXSSIZ),
+        rlimit::NOFILE => clamp(&mut l, crate::proc::MAXFILESPERPROC),
+        rlimit::NPROC => {
+            clamp(&mut l, crate::proc::MAXPROCPERUID);
+            l.rlim_cur = l.rlim_cur.max(1);
+            l.rlim_max = l.rlim_max.max(1);
+        }
+        _ => {}
     }
     p.limits.lock()[i] = l;
+    match which {
+        // The stack's growth follows the new limit at once.
+        rlimit::STACK => p.space().set_stack_limit(s, l.rlim_cur),
+        rlimit::CPU => crate::proc::cpu_limit_set(&p, l.rlim_cur),
+        _ => {}
+    }
     Ok(0)
 }

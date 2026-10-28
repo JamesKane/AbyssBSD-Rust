@@ -94,8 +94,6 @@ pub(crate) fn init() {
             Value::Ulong(alloc::boxed::Box::new(move || wired)),
         )
         .expect("vm.max_user_wired");
-        // Nothing is wired for user processes yet (`mlock` keeps nothing
-        // resident beyond what it already is).
         let stats = t
             .add_node(v, Number::Auto, "stats", "VM meter stats")
             .expect("vm.stats");
@@ -117,7 +115,9 @@ pub(crate) fn init() {
             Number::Auto,
             "v_user_wire_count",
             "User-wired virtual memory",
-            Value::Ulong(alloc::boxed::Box::new(|| 0)),
+            Value::Ulong(alloc::boxed::Box::new(|| {
+                crate::mm::space::USER_WIRED.load(core::sync::atomic::Ordering::Relaxed)
+            })),
         )
         .expect("vm.stats.vm.v_user_wire_count");
     }
@@ -205,14 +205,6 @@ pub(crate) fn init() {
         "machine_arch",
         "System architecture",
         Value::text(MACHINE_ARCH),
-    );
-    add(
-        k,
-        Number::Fixed(kern::HOSTNAME),
-        "hostname",
-        "Hostname",
-        // Unset until something sets it, as at FreeBSD's boot.
-        Value::text(""),
     );
     add(
         k,
@@ -505,4 +497,107 @@ pub(crate) fn read<R>(s: &Sleepable, f: impl FnOnce(&Tree) -> R) -> R {
 
 fn tree() -> &'static SxLock<Tree> {
     TREE.get().expect("sysctl tree used before init")
+}
+
+/// The `kern.features` AbyssBSD has, of those FreeBSD 15.1's GENERIC
+/// lists (`FEATURE()`), which `feature_present(3)` asks about.
+const FEATURES: &[(&str, &str)] = &[
+    ("security_capabilities", "Capsicum Capabilities"),
+    ("security_capability_mode", "Capsicum Capability Mode"),
+    ("process_descriptors", "Process Descriptors"),
+    ("posix_shm", "POSIX shared memory"),
+    ("sysv_shm", "System V shared memory segments support"),
+    ("sysv_sem", "System V semaphores support"),
+    ("sysv_msg", "System V message queues support"),
+    (
+        "kposix_priority_scheduling",
+        "POSIX P1003.1B realtime extensions",
+    ),
+    ("softupdates", "FFS soft-updates support"),
+    ("evdev", "Input event devices support"),
+    ("evdev_support", "evdev support in legacy drivers"),
+];
+
+/// Adds `kern.features`.
+pub(crate) fn features_init(s: &Sleepable) {
+    with(s, |t| {
+        let root = t.root();
+        let k = t.child(root, "kern").expect("kern node");
+        let f = t
+            .add_node(k, Number::Auto, "features", "Kernel Features")
+            .expect("kern.features");
+        for (name, descr) in FEATURES {
+            t.add_value(f, Number::Auto, name, descr, Value::int(1))
+                .expect("a feature");
+        }
+    });
+}
+
+/// What a program in capability mode may read (FreeBSD's `CTLFLAG_CAPRD`
+/// nodes): the system's identity and shape, which libc and the run-time
+/// linker ask for.
+const CAPABILITY_READABLE: &[&str] = &[
+    "kern.ostype",
+    "kern.osrelease",
+    "kern.osrevision",
+    "kern.version",
+    "kern.argmax",
+    "kern.posix1version",
+    "kern.ngroups",
+    "kern.job_control",
+    "kern.saved_ids",
+    "kern.osreldate",
+    "kern.arandom",
+    "kern.ps_strings",
+    "kern.usrstack",
+    "kern.maxphys",
+    "kern.supported_archs",
+    "kern.boot_id",
+    "kern.build_id",
+    "kern.iov_max",
+    "kern.proc.nfds",
+    "kern.sched.cpusetsize",
+    "kern.smp.maxid",
+    "kern.smp.maxcpus",
+    "kern.smp.disabled",
+    "kern.smp.cpus",
+    "kern.smp.threads_per_core",
+    "kern.smp.cores",
+    "hw.machine",
+    "hw.model",
+    "hw.ncpu",
+    "hw.byteorder",
+    "hw.pagesize",
+    "hw.pagesizes",
+    "hw.machine_arch",
+    "hw.floatingpoint",
+    "vfs.aio.max_aio_queue_per_proc",
+];
+
+/// Marks [`CAPABILITY_READABLE`] and every `kern.features` and `p1003_1b`
+/// node readable in capability mode, once the tree is built.
+pub(crate) fn mark_capability_readable(s: &Sleepable) {
+    with(s, |t| {
+        let mut ids: alloc::vec::Vec<_> = CAPABILITY_READABLE
+            .iter()
+            .filter_map(|n| t.name2oid(n))
+            .filter_map(|o| t.lookup(&o))
+            .collect();
+        for parent in ["kern.features", "p1003_1b", "kern.p1003_1b"] {
+            let Some(o) = t.name2oid(parent) else {
+                continue;
+            };
+            let mut next = t.next(&o, false);
+            while let Some(n) = next {
+                if !n.starts_with(&o) {
+                    break;
+                }
+                ids.extend(t.lookup(&n));
+                next = t.next(&n, false);
+            }
+        }
+        for id in ids {
+            t.set_flags(id, abi::sysctl::ctlflag::CAPRD);
+        }
+    });
 }

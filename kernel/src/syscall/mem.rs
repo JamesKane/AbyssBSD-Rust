@@ -102,7 +102,19 @@ fn file_object(
 ) -> Result<(Backing, Prot), Errno> {
     use crate::fs::file::FileKind;
     use abi::fcntl::{FREAD, FWRITE};
-    let f = super::io::current_file(s, fd)?;
+    // `kern_mmap`'s rights: `CAP_MMAP`, with `CAP_MMAP_R` to read,
+    // `CAP_MMAP_W` to write a shared mapping, `CAP_MMAP_X` to execute.
+    let mut need = crate::capsicum::rights::MMAP;
+    if prot.contains(Prot::READ) {
+        need = need.with(abi::capsicum::CAP_MMAP_R);
+    }
+    if flags & abi::mman::MAP_SHARED != 0 && prot.contains(Prot::WRITE) {
+        need = need.with(abi::capsicum::CAP_MMAP_W);
+    }
+    if prot.contains(Prot::EXEC) {
+        need = need.with(abi::capsicum::CAP_MMAP_X);
+    }
+    let f = super::io::current_file(s, fd, &need)?;
     if let FileKind::Shm(m) = f.kind() {
         let (object, max, writecnt) = m.mmap(s, f.flags(), flags, prot)?;
         // Offsets are `off_t`s (`shm_mmap`).
@@ -188,7 +200,7 @@ pub(super) fn mmap(
     let flags =
         u32::try_from(flags).map_err(|_| Errno::EINVAL)? & !(MAP_RESERVED0020 | MAP_RESERVED0040);
     let (prot, max_prot) = prots(prot)?;
-    let max_prot = max_prot.unwrap_or(Prot::ALL);
+    let max_prot = max_prot.unwrap_or_else(|| implied_max(prot));
     let known = MAP_SHARED
         | MAP_PRIVATE
         | MAP_FIXED
@@ -274,6 +286,21 @@ pub(super) fn mmap(
         len,
     )?;
     let len = end.get() - start.get();
+    if let Some(r) = AddressSpace::with_current(|a| wx_check(a, prot)) {
+        r?;
+    }
+    // The whole map is held to `RLIMIT_VMEM` (`vm_mmap_object`).
+    let vmem =
+        Process::with_current(|p| p.limits.lock()[abi::resource::rlimit::VMEM as usize].rlim_cur)
+            .unwrap_or(abi::resource::RLIM_INFINITY);
+    if vmem != abi::resource::RLIM_INFINITY
+        && AddressSpace::with_current(|a| a.size(s))
+            .unwrap_or(0)
+            .saturating_add(len)
+            > vmem
+    {
+        return Err(Errno::ENOMEM);
+    }
     // In the low 2 GiB: a fixed range must be there, and a hint that is
     // not is replaced by the bottom.
     let low = flags & MAP_32BIT != 0;
@@ -305,8 +332,13 @@ pub(super) fn mmap(
             AnonKind::Guard
         } else if stack {
             AnonKind::Stack {
-                guard: Process::with_current(|p| crate::exec::stack_guard(p.layout().fctl0))
-                    .ok_or(Errno::EINVAL)?,
+                guard: Process::with_current(|p| {
+                    crate::exec::stack_guard(
+                        p.layout().fctl0,
+                        p.flag2.load(core::sync::atomic::Ordering::Relaxed),
+                    )
+                })
+                .ok_or(Errno::EINVAL)?,
             }
         } else {
             AnonKind::Memory
@@ -315,10 +347,29 @@ pub(super) fn mmap(
     if a.exclusive && !fixed {
         return Err(Errno::EINVAL);
     }
+    // After `mlockall(MCL_FUTURE)`, new memory comes wired, within
+    // `RLIMIT_MEMLOCK` (`vm_mmap_object`'s `MAP_WIREFUTURE`).
+    let future = AddressSpace::with_current(|sp| {
+        let w = sp.wired();
+        w.future.then_some(w.count)
+    })
+    .flatten();
+    if let Some(have) = future {
+        let limit = Process::with_current(|p| {
+            p.limits.lock()[abi::resource::rlimit::MEMLOCK as usize].rlim_cur
+        })
+        .unwrap_or(abi::resource::RLIM_INFINITY);
+        if have.saturating_mul(PAGE_SIZE).saturating_add(len) > limit {
+            return Err(Errno::ENOMEM);
+        }
+    }
     let at = in_space(|space| match object {
         Backing::Object(object, page, writecnt) => space.map_object(s, &a, object, page, writecnt),
         Backing::Zeros => space.map_anon(s, &a),
     })?;
+    if future.is_some() {
+        let _ = AddressSpace::with_current(|sp| sp.wire(s, at..VirtAddr::new(at.get() + len)));
+    }
     Ok(at.get() + pageoff)
 }
 
@@ -339,8 +390,19 @@ pub(super) fn mprotect(s: &Sleepable, addr: u64, len: u64, prot: u64) -> SysResu
         return Ok(0);
     }
     let (start, end) = pages(addr, len)?;
+    AddressSpace::with_current(|space| wx_check(space, prot)).ok_or(Errno::EINVAL)??;
     in_space(|space| space.protect(s, start..end, prot, max))?;
     Ok(0)
+}
+
+/// Under W^X (`PROC_WXMAP_CTL`), memory both writable and executable is
+/// refused (`vm_map_insert`'s and `vm_map_protect`'s
+/// `KERN_PROTECTION_FAILURE`, `EACCES`).
+fn wx_check(space: &AddressSpace, prot: Prot) -> Result<(), Errno> {
+    if space.wxorx() && prot.contains(Prot::WRITE) && prot.contains(Prot::EXEC) {
+        return Err(Errno::EACCES);
+    }
+    Ok(())
 }
 
 /// `minherit(addr, len, inherit)`.
@@ -369,4 +431,112 @@ pub(super) fn madvise(addr: u64, len: u64, behav: u64) -> SysResult {
         pages(addr, len)?;
     }
     Ok(0)
+}
+
+/// The most a mapping without `PROT_MAX` may become (`kern_mmap_maxprot`):
+/// everything, unless the process forced implied maxima on
+/// (`PROC_PROTMAX_CTL`; `vm.imply_prot_max` is 0), when it is what was
+/// asked for. A binary's or the process's opt-out wins.
+fn implied_max(prot: Prot) -> Prot {
+    use crate::proc::p2;
+    let (f2, fctl0) = Process::with_current(|p| {
+        (
+            p.flag2.load(core::sync::atomic::Ordering::Relaxed),
+            p.layout().fctl0,
+        )
+    })
+    .unwrap_or((0, 0));
+    if f2 & p2::PROTMAX_DISABLE != 0 || fctl0 & abi::exec::fctl::PROTMAX_DISABLE != 0 {
+        return Prot::ALL;
+    }
+    if f2 & p2::PROTMAX_ENABLE != 0 && prot != Prot::NONE {
+        return prot;
+    }
+    Prot::ALL
+}
+
+/// `mlock(addr, len)` (`kern_mlock`): with `PRIV_VM_MLOCK` (anyone, by
+/// default), within `RLIMIT_MEMLOCK` (`ENOMEM`) and `vm.max_user_wired`
+/// (`EAGAIN`), over memory mapped throughout (`ENOMEM`). Every page here
+/// is resident, so wiring only counts.
+pub(super) fn mlock(s: &Sleepable, addr: u64, len: u64) -> SysResult {
+    let p = Process::current().ok_or(Errno::EINVAL)?;
+    p.priv_check(crate::cred::Priv::VmMlock)?;
+    let last = addr.checked_add(len).ok_or(Errno::EINVAL)?;
+    let start = addr & !(PAGE_SIZE - 1);
+    let end = last
+        .checked_next_multiple_of(PAGE_SIZE)
+        .ok_or(Errno::EINVAL)?;
+    let npages = (end - start) / PAGE_SIZE;
+    if npages > max_user_wired() {
+        return Err(Errno::ENOMEM);
+    }
+    let limit = p.limits.lock()[abi::resource::rlimit::MEMLOCK as usize].rlim_cur;
+    let space = p.space();
+    let have = space.wired().count;
+    if (npages + have).saturating_mul(PAGE_SIZE) > limit {
+        return Err(Errno::ENOMEM);
+    }
+    if crate::mm::space::USER_WIRED.load(core::sync::atomic::Ordering::Relaxed) + npages
+        > max_user_wired()
+    {
+        return Err(Errno::EAGAIN);
+    }
+    space
+        .wire(s, VirtAddr::new(start)..VirtAddr::new(end))
+        .ok_or(Errno::ENOMEM)?;
+    Ok(0)
+}
+
+/// `munlock(addr, len)`: with `PRIV_VM_MUNLOCK`.
+pub(super) fn munlock(addr: u64, len: u64) -> SysResult {
+    let p = Process::current().ok_or(Errno::EINVAL)?;
+    p.priv_check(crate::cred::Priv::VmMunlock)?;
+    let last = addr.checked_add(len).ok_or(Errno::EINVAL)?;
+    let start = addr & !(PAGE_SIZE - 1);
+    let end = last
+        .checked_next_multiple_of(PAGE_SIZE)
+        .ok_or(Errno::EINVAL)?;
+    p.space().unwire(VirtAddr::new(start)..VirtAddr::new(end));
+    Ok(0)
+}
+
+/// `mlockall(how)`: `MCL_CURRENT` wires what is mapped (all of it within
+/// `RLIMIT_MEMLOCK`), `MCL_FUTURE` what will be.
+pub(super) fn mlockall(s: &Sleepable, how: u64) -> SysResult {
+    const MCL_CURRENT: u64 = 1;
+    const MCL_FUTURE: u64 = 2;
+    if how == 0 || how & !(MCL_CURRENT | MCL_FUTURE) != 0 {
+        return Err(Errno::EINVAL);
+    }
+    let p = Process::current().ok_or(Errno::EINVAL)?;
+    p.priv_check(crate::cred::Priv::VmMlock)?;
+    let space = p.space();
+    let limit = p.limits.lock()[abi::resource::rlimit::MEMLOCK as usize].rlim_cur;
+    if how & MCL_CURRENT != 0 && space.size(s) > limit {
+        return Err(Errno::ENOMEM);
+    }
+    if how & MCL_FUTURE != 0 {
+        space.wired().future = true;
+    }
+    if how & MCL_CURRENT != 0 {
+        let ranges = space.mapped_ranges(s);
+        for r in ranges {
+            let _ = space.wire(s, r);
+        }
+    }
+    Ok(0)
+}
+
+/// `munlockall()`.
+pub(super) fn munlockall() -> SysResult {
+    let p = Process::current().ok_or(Errno::EINVAL)?;
+    p.priv_check(crate::cred::Priv::VmMunlock)?;
+    p.space().unwire_all();
+    Ok(0)
+}
+
+/// `vm.max_user_wired`, in pages.
+fn max_user_wired() -> u64 {
+    crate::mm::free_frames() * 4 / 5
 }

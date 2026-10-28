@@ -270,6 +270,88 @@ pub(crate) struct AddressSpace {
     /// The System V shared memory segments attached (FreeBSD's
     /// `vm_shm`).
     pub(crate) sysv_shm: sync::PreemptLock<crate::sysv::Attached>,
+    /// Writable and executable mappings are refused (`MAP_WXORX`).
+    wxorx: core::sync::atomic::AtomicBool,
+    /// The pages `mlock` wired (`MAP_ENTRY_USER_WIRED`).
+    wired: SpinLock<Wired>,
+}
+
+/// User-wired pages, as ranges of page numbers (`[start, end)`), merged.
+/// Every page here is resident already, so wiring is accounting: it holds
+/// `RLIMIT_MEMLOCK` and `vm.max_user_wired`.
+#[derive(Debug, Default)]
+pub(crate) struct Wired {
+    ranges: alloc::collections::BTreeMap<u64, u64>,
+    /// How many pages (`pmap_wired_count`).
+    pub(crate) count: u64,
+    /// `mlockall(MCL_FUTURE)`: new mappings come wired
+    /// (`MAP_WIREFUTURE`).
+    pub(crate) future: bool,
+}
+
+/// Pages user processes have wired, system-wide
+/// (`vm.stats.vm.v_user_wire_count`).
+pub(crate) static USER_WIRED: AtomicU64 = AtomicU64::new(0);
+
+impl Wired {
+    /// Wires `[start, end)`: the pages newly wired.
+    fn wire(&mut self, start: u64, end: u64) -> u64 {
+        let before = self.count;
+        self.unwire(start, end);
+        // Merge with neighbors that touch.
+        let (mut s, mut e) = (start, end);
+        if let Some((&ps, &pe)) = self.ranges.range(..=s).next_back()
+            && pe >= s
+        {
+            self.ranges.remove(&ps);
+            self.count -= pe - ps;
+            s = ps;
+            e = e.max(pe);
+        }
+        if let Some((&ns, &ne)) = self.ranges.range(s..).next()
+            && ns <= e
+        {
+            self.ranges.remove(&ns);
+            self.count -= ne - ns;
+            e = e.max(ne);
+        }
+        self.ranges.insert(s, e);
+        self.count += e - s;
+        let added = self.count - before;
+        USER_WIRED.fetch_add(added, Ordering::Relaxed);
+        added
+    }
+
+    /// Unwires whatever of `[start, end)` is wired.
+    fn unwire(&mut self, start: u64, end: u64) {
+        let hit: alloc::vec::Vec<(u64, u64)> = self
+            .ranges
+            .range(..end)
+            .filter(|&(_, &e)| e > start)
+            .map(|(&s, &e)| (s, e))
+            .collect();
+        for (s, e) in hit {
+            self.ranges.remove(&s);
+            self.count -= e - s;
+            USER_WIRED.fetch_sub(e - s, Ordering::Relaxed);
+            if s < start {
+                self.ranges.insert(s, start);
+                self.count += start - s;
+                USER_WIRED.fetch_add(start - s, Ordering::Relaxed);
+            }
+            if e > end {
+                self.ranges.insert(end, e);
+                self.count += e - end;
+                USER_WIRED.fetch_add(e - end, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+impl Drop for Wired {
+    fn drop(&mut self) {
+        USER_WIRED.fetch_sub(self.count, Ordering::Relaxed);
+    }
 }
 
 impl AddressSpace {
@@ -277,6 +359,66 @@ impl AddressSpace {
     /// reference taken): `None` if it runs in none.
     pub(crate) fn with_current<R>(f: impl FnOnce(&Self) -> R) -> Option<R> {
         sched::with_address_space(|a| a?.as_any().downcast_ref::<Self>().map(f))
+    }
+
+    /// Whether mappings both writable and executable are refused
+    /// (`MAP_WXORX`).
+    pub(crate) fn wxorx(&self) -> bool {
+        self.wxorx.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_wxorx(&self, on: bool) {
+        self.wxorx.store(on, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Its user-wired pages.
+    pub(crate) fn wired(&self) -> sync::SpinGuard<'_, Wired> {
+        self.wired.lock()
+    }
+
+    /// Wires `range` (`vm_map_wire` with `VM_MAP_WIRE_USER |
+    /// VM_MAP_WIRE_NOHOLES`): `None` if part of it is not mapped, else the
+    /// pages newly wired.
+    pub(crate) fn wire(&self, s: &Sleepable, range: core::ops::Range<VirtAddr>) -> Option<u64> {
+        let map = self.map.lock(s);
+        let mut at = range.start;
+        while at < range.end {
+            let e = map.entry(at)?;
+            at = e.range().end;
+        }
+        drop(map);
+        let (a, b) = (range.start.get() / PAGE_SIZE, range.end.get() / PAGE_SIZE);
+        Some(self.wired.lock().wire(a, b))
+    }
+
+    /// Each entry's range, in order.
+    pub(crate) fn mapped_ranges(
+        &self,
+        s: &Sleepable,
+    ) -> alloc::vec::Vec<core::ops::Range<VirtAddr>> {
+        self.map.lock(s).entries().map(Entry::range).collect()
+    }
+
+    /// Unwires `range` (`vm_map_unwire`).
+    pub(crate) fn unwire(&self, range: core::ops::Range<VirtAddr>) {
+        let (a, b) = (range.start.get() / PAGE_SIZE, range.end.get() / PAGE_SIZE);
+        self.wired.lock().unwire(a, b);
+    }
+
+    /// Unwires everything (`munlockall`, and `MCL_FUTURE` goes).
+    pub(crate) fn unwire_all(&self) {
+        let mut w = self.wired.lock();
+        w.unwire(0, u64::MAX);
+        w.future = false;
+    }
+
+    /// How much it maps, in bytes (`vm_map`'s `size`).
+    pub(crate) fn size(&self, s: &Sleepable) -> u64 {
+        self.map
+            .lock(s)
+            .entries()
+            .map(|e| e.range().end.get() - e.range().start.get())
+            .sum()
     }
 
     /// An empty address space.
@@ -305,6 +447,8 @@ impl AddressSpace {
             #[cfg(target_arch = "aarch64")]
             asid: alloc_asid(),
             sysv_shm: sync::PreemptLock::new(alloc::vec::Vec::new()),
+            wxorx: core::sync::atomic::AtomicBool::new(false),
+            wired: SpinLock::new(Wired::default()),
         }))
     }
 
@@ -576,6 +720,10 @@ impl AddressSpace {
         if range.start >= range.end {
             return Err(MapError::Misaligned.into());
         }
+        // Unmapped pages are no longer wired.
+        if self.wired.lock().count > 0 {
+            self.unwire(range.clone());
+        }
         let len = range.end.get() - range.start.get();
         if map.populated(&range) {
             let mut cleared = false;
@@ -665,6 +813,7 @@ impl AddressSpace {
         }
         drop(map);
         let child = Self::with_map(forked.child)?;
+        child.set_wxorx(self.wxorx());
         // The child shares the segments attached (`shmfork`).
         let attached = self.sysv_shm.lock().clone();
         crate::sysv::shm_forked(&attached);

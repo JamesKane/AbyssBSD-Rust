@@ -268,7 +268,7 @@ fn makefs_images_read_back_whole() {
 // ---- Writing, against a model and fsck_ffs ----
 
 /// An image in memory that the engine may write.
-struct Mem(core::cell::RefCell<Vec<u8>>);
+pub(crate) struct Mem(pub(crate) core::cell::RefCell<Vec<u8>>);
 
 impl BlockIo for Mem {
     type Cx = ();

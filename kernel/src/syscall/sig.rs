@@ -265,7 +265,15 @@ pub(super) fn sigaltstack(frame: &TrapFrame, ss: u64, oss: u64) -> SysResult {
 }
 
 /// Sends `sig` (0: only checks) to `target`.
-fn send(target: &alloc::sync::Arc<Process>, sig: u32, info: Siginfo) -> Result<(), Errno> {
+/// Sends `sig` from `me` to `target` if `me` may (`p_cansignal`); 0 only
+/// checks.
+fn send(
+    me: &Process,
+    target: &alloc::sync::Arc<Process>,
+    sig: u32,
+    info: Siginfo,
+) -> Result<(), Errno> {
+    me.can_signal(target, sig)?;
     if sig == 0 {
         return Ok(());
     }
@@ -273,35 +281,59 @@ fn send(target: &alloc::sync::Arc<Process>, sig: u32, info: Siginfo) -> Result<(
 }
 
 /// `kill(pid, signum)`: a process, this group (0), every process but
-/// init and the caller (-1), or group `-pid`. Everyone runs as root.
+/// init and the caller (-1), or group `-pid`. In capability mode, only
+/// the caller itself. A group or broadcast with no process to send to is
+/// `ESRCH`, or `EPERM` if every one found refused (`killpg1`).
 pub(super) fn kill(pid: u64, signum: u64) -> SysResult {
+    let me = process()?;
+    let pid = int(pid);
+    if pid != me.pid() {
+        crate::capsicum::check_capmode()?;
+    }
     let sig = u32::try_from(int(signum)).map_err(|_| Errno::EINVAL)?;
     if sig != 0 && !signal::valid(sig) {
         return Err(Errno::EINVAL);
     }
-    let me = process()?;
     let info = user_info(sig, me.pid(), SI_USER);
-    let pid = int(pid);
     if pid > 0 {
         let p = crate::proc::find(pid).ok_or(Errno::ESRCH)?;
-        send(&p, sig, info)?;
+        send(&me, &p, sig, info)?;
         return Ok(0);
     }
+    let cred = me.cred();
     let targets: alloc::vec::Vec<_> = crate::proc::all()
         .into_iter()
         .filter(|p| match pid {
-            -1 => p.pid() > 1 && p.pid() != me.pid(),
+            // Only those in the caller's jail or below.
+            -1 => p.pid() > 1 && p.pid() != me.pid() && cred.prison_check(&p.cred()).is_ok(),
             0 => p.pgid() == me.pgid(),
             g => p.pgid() == -g,
         })
         .collect();
-    if targets.is_empty() {
+    if pid != -1 && targets.is_empty() {
         return Err(Errno::ESRCH);
     }
+    let (mut found, mut sent, mut ret) = (false, false, Ok(0));
     for p in &targets {
-        let _ = send(p, sig, info);
+        if p.pid() <= 1 {
+            continue;
+        }
+        match send(&me, p, sig, info) {
+            Ok(()) => (found, sent) = (true, true),
+            Err(Errno::ESRCH) => {}
+            Err(Errno::EPERM) => found = true,
+            Err(e) => {
+                found = true;
+                if ret.is_ok() {
+                    ret = Err(e);
+                }
+            }
+        }
     }
-    Ok(0)
+    if ret.is_ok() && !sent {
+        return Err(if found { Errno::EPERM } else { Errno::ESRCH });
+    }
+    ret
 }
 
 /// `thr_kill(id, sig)`: to thread `id` of this process, or with `id` -1
@@ -334,6 +366,9 @@ pub(super) fn thr_kill2(pid: u64, id: u64, sig: u64) -> SysResult {
 fn thread_kill(p: &alloc::sync::Arc<Process>, id: u64, sig: u64) -> SysResult {
     let sig = int(sig);
     let me = thread()?;
+    if !alloc::sync::Arc::ptr_eq(me.process(), p) {
+        me.process().can_signal(p, sig.cast_unsigned())?;
+    }
     let info = user_info(sig.cast_unsigned(), me.process().pid(), SI_LWP);
     let valid = |sig: i32| u32::try_from(sig).is_ok_and(signal::valid);
     if id.cast_signed() == -1 {
@@ -372,10 +407,14 @@ pub(super) fn sigqueue(pid: u64, signum: u64, value: u64) -> SysResult {
         return Err(Errno::EINVAL);
     }
     let pid = int(pid);
+    let me = process()?;
+    // In capability mode, only to itself (`kern_sigqueue`).
+    if pid != me.pid() && flags & SIGQUEUE_TID == 0 {
+        crate::capsicum::check_capmode()?;
+    }
     if pid <= 0 {
         return Err(Errno::EINVAL);
     }
-    let me = process()?;
     let mut info = user_info(sig, me.pid(), SI_QUEUE);
     info.si_value = value;
     if flags & SIGQUEUE_TID != 0 {
@@ -386,7 +425,7 @@ pub(super) fn sigqueue(pid: u64, signum: u64, value: u64) -> SysResult {
         return Ok(0);
     }
     let p = crate::proc::find(pid).ok_or(Errno::ESRCH)?;
-    send(&p, sig, info)?;
+    send(&me, &p, sig, info)?;
     Ok(0)
 }
 

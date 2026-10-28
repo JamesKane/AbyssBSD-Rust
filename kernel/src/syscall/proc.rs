@@ -11,7 +11,7 @@ use sched::Sleepable;
 
 use super::{SysResult, int, process};
 use crate::arch::trap::TrapFrame;
-use crate::cred::Ids;
+use crate::cred::{Ids, Priv};
 use crate::uaccess::{self, Plain, UserPtr};
 
 // SAFETY: integers and timevals only, no padding.
@@ -99,8 +99,12 @@ pub(super) fn pdfork(s: &Sleepable, frame: &mut TrapFrame, fdp: u64, flags: u64)
 
 /// The process behind descriptor `fd` (`EBADF` if it is not a process
 /// descriptor).
-fn described(s: &Sleepable, fd: u64) -> Result<alloc::sync::Arc<crate::proc::Process>, Errno> {
-    let f = super::io::current_file(s, fd)?;
+fn described(
+    s: &Sleepable,
+    fd: u64,
+    need: &abi::capsicum::CapRights,
+) -> Result<alloc::sync::Arc<crate::proc::Process>, Errno> {
+    let f = super::io::current_file(s, fd, need)?;
     match f.kind() {
         crate::fs::file::FileKind::Process(pd) => Ok(alloc::sync::Arc::clone(pd.process())),
         _ => Err(Errno::EBADF),
@@ -109,7 +113,7 @@ fn described(s: &Sleepable, fd: u64) -> Result<alloc::sync::Arc<crate::proc::Pro
 
 /// `pdgetpid(fd, pidp)`.
 pub(super) fn pdgetpid(s: &Sleepable, fd: u64, pidp: u64) -> SysResult {
-    let pid = described(s, fd)?.pid();
+    let pid = described(s, fd, &crate::capsicum::rights::PDGETPID)?.pid();
     UserPtr::<i32>::new(pidp)
         .write(&pid)
         .map_err(|_| Errno::EFAULT)?;
@@ -122,11 +126,12 @@ pub(super) fn pdkill(s: &Sleepable, fd: u64, signum: u64) -> SysResult {
     if sig == 0 || sig > abi::signal::SIG_MAXSIG {
         return Err(Errno::EINVAL);
     }
-    let target = described(s, fd)?;
-    let from = process()?.pid();
+    let target = described(s, fd, &crate::capsicum::rights::PDKILL)?;
+    let me = process()?;
+    me.can_signal(&target, sig)?;
     let _ = crate::signal::post(
         &target,
-        crate::signal::user_info(sig, from, abi::signal::code::SI_USER),
+        crate::signal::user_info(sig, me.pid(), abi::signal::code::SI_USER),
     );
     Ok(0)
 }
@@ -200,7 +205,45 @@ pub(super) fn execve(
     }
     let argv: Vec<&[u8]> = argv.iter().map(Vec::as_slice).collect();
     let envv: Vec<&[u8]> = envv.iter().map(Vec::as_slice).collect();
-    process()?.exec(s, frame, &path, &argv, &envv)?;
+    process()?.exec(s, frame, crate::proc::Program::Path(&path), &argv, &envv)?;
+    Ok(None)
+}
+
+/// `fexecve(fd, argv, envv)`: `execve` of the file open as `fd`, which
+/// needs `CAP_FEXECVE` and must be open for reading or execution and not
+/// for writing, or be an `O_PATH` handle (`fgetvp_exec`).
+pub(super) fn fexecve(
+    s: &Sleepable,
+    frame: &mut TrapFrame,
+    fd: u64,
+    argv: u64,
+    envv: u64,
+) -> Result<Option<u64>, Errno> {
+    use abi::fcntl::{FREAD, FWRITE, O_EXEC};
+    let mut budget = ARG_MAX;
+    let argv = strings(argv, &mut budget)?;
+    let envv = strings(envv, &mut budget)?;
+    if argv.is_empty() {
+        return Err(Errno::EINVAL);
+    }
+    let p = process()?;
+    let f = super::io::file(s, &p, fd, &crate::capsicum::rights::FEXECVE)?;
+    let fl = f.flags();
+    let path_only = fl & (FREAD | FWRITE | O_EXEC) == 0;
+    if !path_only && (fl & (FREAD | O_EXEC) == 0 || fl & FWRITE != 0) {
+        return Err(Errno::EBADF);
+    }
+    let v = alloc::sync::Arc::clone(f.vnode().ok_or(Errno::EINVAL)?);
+    drop(f);
+    let argv: Vec<&[u8]> = argv.iter().map(Vec::as_slice).collect();
+    let envv: Vec<&[u8]> = envv.iter().map(Vec::as_slice).collect();
+    p.exec(
+        s,
+        frame,
+        crate::proc::Program::File(v, int(fd)),
+        &argv,
+        &envv,
+    )?;
     Ok(None)
 }
 
@@ -243,7 +286,6 @@ pub(super) fn wait6(
     const P_PID: i32 = 0;
     const P_PGID: i32 = 2;
     const P_ALL: i32 = 7;
-    use abi::signal::code::{CLD_CONTINUED, CLD_DUMPED, CLD_EXITED, CLD_KILLED, CLD_STOPPED};
     let options = u32::try_from(options).map_err(|_| Errno::EINVAL)?;
     if options & !(WNOHANG | WUNTRACED | WCONTINUED | WNOWAIT | WEXITED | WTRAPPED) != 0 {
         return Err(Errno::EINVAL);
@@ -264,6 +306,54 @@ pub(super) fn wait6(
         }
         return Ok(0);
     };
+    report(child, st, status, wrusage, info)?;
+    Ok(u64::from(child.unsigned_abs()))
+}
+
+/// `pdwait(fd, status, options, wrusage, info)`: `wait6` for the process
+/// that descriptor `fd` (`CAP_PDWAIT`) names, by whoever holds it
+/// (`kern_pdwait`): `ESRCH` once it is reaped (or, without `WEXITED`,
+/// once it exits), `EWOULDBLOCK` with `WNOHANG` and nothing to report.
+pub(super) fn pdwait(
+    s: &Sleepable,
+    fd: u64,
+    status: u64,
+    options: u64,
+    wrusage: u64,
+    info: u64,
+) -> SysResult {
+    let options = u32::try_from(options).map_err(|_| Errno::EINVAL)?;
+    if options & !(WNOHANG | WUNTRACED | WCONTINUED | WNOWAIT | WEXITED | WTRAPPED) != 0
+        || options & (WEXITED | WUNTRACED | WCONTINUED | WTRAPPED) == 0
+    {
+        return Err(Errno::EINVAL);
+    }
+    let me = process()?;
+    let f = super::io::file(s, &me, fd, &crate::capsicum::rights::PDWAIT)?;
+    let crate::fs::file::FileKind::Process(pd) = f.kind() else {
+        return Err(Errno::EINVAL);
+    };
+    let target = alloc::sync::Arc::clone(pd.process());
+    drop(f);
+    let parent = target.parent().ok_or(Errno::ESRCH)?;
+    me.cred().prison_check(&target.cred())?;
+    if options & WEXITED == 0 && target.is_zombie() {
+        return Err(Errno::ESRCH);
+    }
+    let (child, st) = match parent.wait_child(s, target.pid(), options) {
+        Ok(Some(r)) => r,
+        Ok(None) => return Err(Errno::EAGAIN),
+        Err(Errno::ECHILD) => return Err(Errno::ESRCH),
+        Err(e) => return Err(e),
+    };
+    report(child, st, status, wrusage, info)?;
+    Ok(0)
+}
+
+/// Copies out what a wait found: the status, zero resource use, and the
+/// child's `siginfo`.
+fn report(child: i32, st: i32, status: u64, wrusage: u64, info: u64) -> Result<(), Errno> {
+    use abi::signal::code::{CLD_CONTINUED, CLD_DUMPED, CLD_EXITED, CLD_KILLED, CLD_STOPPED};
     if status != 0 {
         UserPtr::<i32>::new(status)
             .write(&st)
@@ -298,7 +388,7 @@ pub(super) fn wait6(
             .write(&si)
             .map_err(|_| Errno::EFAULT)?;
     }
-    Ok(u64::from(child.unsigned_abs()))
+    Ok(())
 }
 
 pub(super) fn getppid() -> SysResult {
@@ -463,7 +553,13 @@ fn prio_targets(
     const PRIO_USER: i32 = 2;
     let me = process()?;
     let who = int(who);
-    Ok(match int(which) {
+    // In capability mode, only the caller itself.
+    if crate::capsicum::in_capability_mode()
+        && (int(which) != PRIO_PROCESS || (who != 0 && who != me.pid()))
+    {
+        return Err(Errno::ECAPMODE);
+    }
+    let mut targets: Vec<_> = match int(which) {
         PRIO_PROCESS => {
             let pid = if who == 0 { me.pid() } else { who };
             crate::proc::find(pid).into_iter().collect()
@@ -487,7 +583,10 @@ fn prio_targets(
                 .collect()
         }
         _ => return Err(Errno::EINVAL),
-    })
+    };
+    // Only those the caller may see (`p_cansee`).
+    targets.retain(|p| me.can_see(p).is_ok());
+    Ok(targets)
 }
 
 /// `getpriority(which, who)`: the lowest nice value among them.
@@ -501,11 +600,10 @@ pub(super) fn getpriority(which: u64, who: u64) -> SysResult {
 }
 
 /// `setpriority(which, who, prio)` (`donice`): the nice value, clamped
-/// to -20 to 20; only the superuser lowers it or touches another user's
-/// processes.
+/// to -20 to 20, on the processes the caller may reschedule
+/// (`p_cansched`); lowering it needs `PRIV_SCHED_SETPRIORITY`.
 pub(super) fn setpriority(which: u64, who: u64, prio: u64) -> SysResult {
     let me = process()?;
-    let cred = me.cred();
     let n = int(prio).clamp(-20, 20);
     let targets = prio_targets(which, who)?;
     if targets.is_empty() {
@@ -513,15 +611,173 @@ pub(super) fn setpriority(which: u64, who: u64, prio: u64) -> SysResult {
     }
     let mut r = Ok(0);
     for p in targets {
-        if !cred.is_root() && p.cred().uid != cred.uid {
-            r = Err(Errno::EPERM);
+        if let Err(e) = me.can_sched(&p) {
+            r = Err(e);
             continue;
         }
-        if n < p.nice.load(core::sync::atomic::Ordering::Relaxed) && !cred.is_root() {
+        if n < p.nice.load(core::sync::atomic::Ordering::Relaxed)
+            && me.priv_check(Priv::SchedSetpriority).is_err()
+        {
             r = Err(Errno::EACCES);
             continue;
         }
         p.nice.store(n, core::sync::atomic::Ordering::Relaxed);
     }
     r
+}
+
+/// `getlogin(namebuf, namelen)`: the session's login name; `ERANGE` if it
+/// and its NUL do not fit.
+pub(super) fn getlogin(buf: u64, len: u64) -> SysResult {
+    let len = usize::try_from(len & 0xffff_ffff)
+        .unwrap_or(usize::MAX)
+        .min(crate::proc::MAXLOGNAME);
+    let mut name = process()?.login();
+    if name.len() + 1 > len {
+        return Err(Errno::ERANGE);
+    }
+    name.push(0);
+    uaccess::copy_out(buf, &name).map_err(|_| Errno::EFAULT)?;
+    Ok(0)
+}
+
+/// A name of at most `MAXLOGNAME` bytes with its NUL from user memory.
+fn login_name(addr: u64) -> Result<Vec<u8>, uaccess::StrError> {
+    let mut buf = [0u8; crate::proc::MAXLOGNAME];
+    let n = uaccess::copy_in_str(addr, &mut buf)?;
+    Ok(buf[..n].to_vec())
+}
+
+/// `setlogin(namebuf)`: names the session's login, with
+/// `PRIV_PROC_SETLOGIN`; a name too long is `EINVAL`.
+pub(super) fn setlogin(name: u64) -> SysResult {
+    let p = process()?;
+    p.priv_check(Priv::ProcSetlogin)?;
+    let name = login_name(name).map_err(|e| match e {
+        uaccess::StrError::Fault => Errno::EFAULT,
+        uaccess::StrError::TooLong => Errno::EINVAL,
+    })?;
+    p.set_login(&name);
+    Ok(0)
+}
+
+/// `getloginclass(namebuf, namelen)`: the credential's login class.
+pub(super) fn getloginclass(buf: u64, len: u64) -> SysResult {
+    let c = process()?.cred();
+    let mut name = c.loginclass.name().to_vec();
+    name.push(0);
+    if usize::try_from(len).is_ok_and(|l| name.len() > l) {
+        return Err(Errno::ERANGE);
+    }
+    uaccess::copy_out(buf, &name).map_err(|_| Errno::EFAULT)?;
+    Ok(0)
+}
+
+/// `setloginclass(namebuf)`: with `PRIV_PROC_SETLOGINCLASS`; an empty
+/// name is `EINVAL`. Not a set-id change.
+pub(super) fn setloginclass(name: u64) -> SysResult {
+    let p = process()?;
+    p.priv_check(Priv::ProcSetloginclass)?;
+    let name = login_name(name).map_err(|e| match e {
+        uaccess::StrError::Fault => Errno::EFAULT,
+        uaccess::StrError::TooLong => Errno::ENAMETOOLONG,
+    })?;
+    if name.is_empty() {
+        return Err(Errno::EINVAL);
+    }
+    p.replace_cred(|c| {
+        let mut c = c.clone();
+        c.loginclass = security::LoginClass::new(&name);
+        Ok(c)
+    })?;
+    Ok(0)
+}
+
+/// `struct setcred`.
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(C)]
+struct SetcredArg {
+    uid: u32,
+    ruid: u32,
+    svuid: u32,
+    gid: u32,
+    rgid: u32,
+    svgid: u32,
+    pad: u32,
+    supp_groups_nb: u32,
+    supp_groups: u64,
+    label: u64,
+}
+
+// SAFETY: integers and addresses, no padding.
+unsafe impl Plain for SetcredArg {}
+
+/// `SETCREDF_*`.
+mod setcredf {
+    pub(super) const UID: u32 = 1 << 0;
+    pub(super) const RUID: u32 = 1 << 1;
+    pub(super) const SVUID: u32 = 1 << 2;
+    pub(super) const GID: u32 = 1 << 3;
+    pub(super) const RGID: u32 = 1 << 4;
+    pub(super) const SVGID: u32 = 1 << 5;
+    pub(super) const SUPP_GROUPS: u32 = 1 << 6;
+    pub(super) const MAC_LABEL: u32 = 1 << 7;
+    pub(super) const MASK: u32 = 0xff;
+}
+
+/// `setcred(flags, wcred, size)` (`user_setcred`, `kern_setcred`): sets
+/// every id and the groups at once, with `PRIV_CRED_SETCRED`. A new real
+/// uid already at its `RLIMIT_NPROC` is `EAGAIN` without
+/// `PRIV_PROC_LIMIT`. There are no MAC labels to set.
+pub(super) fn setcred(flags: u64, wcred: u64, size: u64) -> SysResult {
+    use setcredf as f;
+    let flags = u32::try_from(flags & 0xffff_ffff).unwrap_or(u32::MAX);
+    if size != size_of::<SetcredArg>() as u64 {
+        return Err(Errno::EINVAL);
+    }
+    let w = UserPtr::<SetcredArg>::new(wcred)
+        .read()
+        .map_err(|_| Errno::EFAULT)?;
+    if flags & !f::MASK != 0 {
+        return Err(Errno::EINVAL);
+    }
+    let groups = if flags & f::SUPP_GROUPS != 0 {
+        let n = w.supp_groups_nb as usize;
+        if n > crate::cred::NGROUPS_MAX {
+            return Err(Errno::EINVAL);
+        }
+        let mut raw = alloc::vec![0u8; n * 4];
+        uaccess::copy_in(&mut raw, w.supp_groups).map_err(|_| Errno::EFAULT)?;
+        Some(crate::cred::groups_from(&raw))
+    } else {
+        None
+    };
+    if flags & f::MAC_LABEL != 0 {
+        return Err(Errno::EOPNOTSUPP);
+    }
+    let pick = |bit: u32, v: u32| (flags & bit != 0).then_some(v);
+    let set = crate::cred::SetCred {
+        uid: pick(f::UID, w.uid),
+        ruid: pick(f::RUID, w.ruid),
+        svuid: pick(f::SVUID, w.svuid),
+        gid: pick(f::GID, w.gid),
+        rgid: pick(f::RGID, w.rgid),
+        svgid: pick(f::SVGID, w.svgid),
+        groups,
+    };
+    let p = process()?;
+    p.change_cred(|c| {
+        let new = c.setcred(&set)?;
+        if new.ruid != c.ruid {
+            let max = p.limits.lock()[abi::resource::rlimit::NPROC as usize].rlim_cur;
+            if max != abi::resource::RLIM_INFINITY
+                && crate::proc::Process::count_of(new.ruid) as u64 >= max
+                && c.priv_check(Priv::ProcLimit).is_err()
+            {
+                return Err(Errno::EAGAIN);
+            }
+        }
+        Ok(new)
+    })?;
+    Ok(0)
 }
