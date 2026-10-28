@@ -65,6 +65,8 @@ desktop's design. It has four aims:
 - A Linuxulator. VISION lists it as a non-goal. Linux-only games (Steam's runtime) are therefore
   out of reach until a Linuxulator exists as its own ABI personality. Gaming targets native
   FreeBSD games and FreeBSD's Wine (§5.3.6).
+- Web-app wrappers or embedded webviews. A browser from packages is an ordinary client for reading
+  web pages, not an application runtime ([STYLE.md](STYLE.md) S2).
 
 ## 2. Constraints from AbyssBSD
 
@@ -1148,6 +1150,7 @@ settings are all **Facets**. A Facet is:
 | `Canvas` | A Facet-rendered dma-buf |
 | `Effect` | An SSL `fill` or `backdrop` shader over its subtree |
 | `Input` | A text field run by the compositor, so input methods, selection, and clipboard behave the same everywhere |
+| `List` | A virtualized list or grid that materializes only the rows in its viewport plus a margin ([TOOLKIT.md](TOOLKIT.md) §4.2, [FILEMANAGER.md](FILEMANAGER.md) §4.1) |
 
 **Styles** are defined only in `theme`:
 
@@ -1317,9 +1320,10 @@ host: **`lib/scene-render`** is the compositor's scene renderer as a library. An
 the same `Node` trees and renders them client-side into its own Vulkan surface as an ordinary
 `xdg_toplevel`. Applications and the shell therefore share one UI model, one style system, and one
 theme. The first applications on it are `sable-term`, `sable-settings` as a window, and a file
-picker. Their designs are separate documents: `sable-term` is [TERMINAL.md](TERMINAL.md) (draft),
-and `sable-files`, the file manager that also serves `fs.Picker` (§8.4), is
-[FILEMANAGER.md](FILEMANAGER.md) (draft).
+picker. Their designs are separate documents: the toolkit is [TOOLKIT.md](TOOLKIT.md) (draft), the
+visual and interaction rules are [STYLE.md](STYLE.md) (draft), `sable-term` is
+[TERMINAL.md](TERMINAL.md) (draft), and `sable-files`, the file manager that also serves
+`fs.Picker` (§8.4), is [FILEMANAGER.md](FILEMANAGER.md) (draft).
 
 ## 9. Kernel and platform requirements
 

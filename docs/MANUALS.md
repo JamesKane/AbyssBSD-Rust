@@ -48,7 +48,7 @@ document only where AbyssBSD adds, differs, or has not caught up.
 | 3 | **Interface Reference** | Everyone; looked up, not read | *Includes & Autodocs* | Generated entries (§5): every system call with its AbyssBSD status, every ioctl, every sysctl, every ABI structure with its layout per architecture, errno values, loader variables and kernel environment, devfs names | D1, generated |
 | 4 | **Platforms and Hardware** | Hardware people, porters | *Hardware Reference Manual* | Boot (loader, UEFI services used, handover), ACPI as the kernel consumes it, each architecture's traps and memory model as seen from outside, each reference machine and board, the supported-hardware list | P7 onward |
 | 5 | **Kernel and Driver Guide** | People who change the kernel | (none; Amiga drivers were outside the ROM) | The architecture, the driver model and onboarding, the VFS, unsafe policy, performance rules, and generated reference for kernel-internal crates (§5.3). Internal: no stability promise | D2 |
-| 6 | **Desktop Style Guide** | Writers of desktop applications | *User Interface Style Guide* | Interaction and keyboard conventions, the compositor's IPC, the toolkit, the help protocol (§7.3) | M-D |
+| 6 | **Desktop Style Guide** | Writers of desktop applications | *User Interface Style Guide* | Interaction and keyboard conventions, the compositor's IPC, the toolkit ([TOOLKIT.md](TOOLKIT.md)), the help protocol (§7.3). Forward design: [STYLE.md](STYLE.md) | M-D |
 | A | **Design Record** | The curious | none | The ADRs and design documents from `docs/`, included verbatim as an appendix volume, so an installed system carries its own rationale | D1 |
 
 Each volume has a stable short name used in links and paths: `user`, `sysprog`, `devices`, `ref`,

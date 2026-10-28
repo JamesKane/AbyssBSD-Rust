@@ -704,7 +704,8 @@ opening large directories and never slower at moving data than `cp`.
 ## 13. Open questions
 
 1. **A `List` node in the scene model** (§4.1). Proposed: add it to DESKTOP.md §8.3, with fixed and
-   measured row heights and a grid mode, for this, the launcher, and settings.
+   measured row heights and a grid mode, for this, the launcher, and settings. **Settled** by
+   [TOOLKIT.md](TOOLKIT.md) §4.2 and DESKTOP.md §8.3, which do so.
 2. **The picker in M-D.3.** DESKTOP.md's M-D.3 has the settings GUI and Facets that may need files
    (wallpapers, rice archives). Proposed: `fs.Browse` and `sable-picker` (F.3) move ahead of the
    rest of `sable-files`, into M-D.3.
