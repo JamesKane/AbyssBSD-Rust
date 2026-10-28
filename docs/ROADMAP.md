@@ -1837,6 +1837,10 @@ ports see it, implemented natively, and a step order for this milestone).
 
 ### M-D: Desktop
 
+Forward design: [DESKTOP.md](DESKTOP.md) (draft; a Vulkan-only Wayland desktop on M-G's
+interfaces, capability IPC in place of D-Bus, one cascading configuration tree, and a step order
+for this milestone).
+
 - An original Wayland compositor with dynamic tiling, workspaces, animations, IPC, and declarative
   configuration (in the spirit of Hyprland, with new code and design).
 - Wayland protocol library, renderer (software → Vulkan), panel/launcher/notifications,
