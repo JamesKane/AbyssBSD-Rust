@@ -1315,7 +1315,7 @@ host: **`lib/scene-render`** is the compositor's scene renderer as a library. An
 the same `Node` trees and renders them client-side into its own Vulkan surface as an ordinary
 `xdg_toplevel`. Applications and the shell therefore share one UI model, one style system, and one
 theme. The first applications on it are `sable-term`, `sable-settings` as a window, and a file
-picker. Their designs are separate documents.
+picker. Their designs are separate documents: `sable-term` is [TERMINAL.md](TERMINAL.md) (draft).
 
 ## 9. Kernel and platform requirements
 
