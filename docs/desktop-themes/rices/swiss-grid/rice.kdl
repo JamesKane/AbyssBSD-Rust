@@ -1,0 +1,57 @@
+// docs/desktop-themes/rices/swiss-grid/rice.kdl
+// Candidate 08: International Typographic Grid (Brutalist / Neo-Plan 9)
+// Compliant with DESKTOP.md §7.3 & §4.2.1 (server-side xdg-decoration + 0px collapsed grid)
+
+theme {
+    token "base"         (color)"oklch(0.92 0.015 85)"
+    token "surface"      (color)"oklch(0.96 0.01 85)"
+    token "surface.elev" (color)"oklch(0.88 0.02 85)"
+    token "text"         (color)"oklch(0.15 0.0 0)"
+    token "muted"        (color)"oklch(0.45 0.01 85)"
+    token "accent"       (color)"oklch(0.58 0.23 28)"
+    token "warn"         (color)"oklch(0.68 0.18 70)"
+    token "radius"       (px)0
+    token "font.ui"      "Inter"
+    token "font.mono"    "JetBrains Mono"
+
+    style "grid-rail" {
+        background "@surface"
+        radius (px)0
+        border (px)1 "@text" alpha=1.0
+    }
+
+    style "workspace-button" {
+        padding (px)6 (px)10
+        radius (px)0
+        text-color "@text"
+        border (px)1 "@text" alpha=0.25
+        state "active" { background "@accent" ; text-color "@surface" }
+        state "hover"  { background "@surface.elev" ; text-color "@text" }
+    }
+}
+
+shader {
+    transition "grid_shutter" file="shaders/grid_shutter.ssl" budget=(us)150
+}
+
+animation {
+    window-open      curve="ease-out"     duration=(ms)80
+    window-close     curve="ease-in"      duration=(ms)60
+    workspace-switch shader="grid_shutter" duration=(ms)100
+}
+
+layout {
+    default "columns"
+    gap outer=(px)0 inner=(px)0
+    border width=(px)1 active="@accent" inactive="oklch(0.15 0.0 0)"
+    corner-radius (px)0
+}
+
+panel "left" {
+    anchor "left"
+    width (px)180
+    style "grid-rail"
+    slot "start"  { facet "sable-workspaces" ; facet "sable-window-title" }
+    slot "center" { facet "sable-sysmon" ; facet "sable-network" }
+    slot "end"    { facet "sable-audio" ; facet "sable-battery" ; facet "sable-clock" format="%Y.%m.%d %H:%M" }
+}

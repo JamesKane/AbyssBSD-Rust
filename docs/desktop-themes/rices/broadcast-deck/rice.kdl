@@ -1,0 +1,79 @@
+// docs/desktop-themes/rices/broadcast-deck/rice.kdl
+// Candidate 05: Studio Control Room (Streamer & Broadcaster)
+// Compliant with DESKTOP.md §7.3, §5.6.4 (sink visibility masks), and §5.7 (sable-cast)
+
+theme {
+    token "base"         (color)"oklch(0.16 0.02 285)"
+    token "surface"      (color)"oklch(0.22 0.025 285 / 0.88)"
+    token "surface.elev" (color)"oklch(0.27 0.03 285 / 0.94)"
+    token "text"         (color)"oklch(0.94 0.01 285)"
+    token "muted"        (color)"oklch(0.65 0.03 285)"
+    token "accent"       (color)"oklch(0.70 0.18 300)"
+    token "live"         (color)"oklch(0.65 0.24 25)"
+    token "preview"      (color)"oklch(0.80 0.17 80)"
+    token "radius"       (px)6
+    token "font.ui"      "Inter"
+    token "font.mono"    "JetBrains Mono"
+
+    style "deck-panel" {
+        background "@surface"
+        backdrop blur=(px)18 saturation=1.15
+        radius "@radius"
+        border (px)1 "@accent" alpha=0.32
+        shadow elevation=(px)14 color="oklch(0.06 0.02 285 / 0.65)"
+    }
+
+    style "tally-live" {
+        fill shader="shaders/tally_glow.ssl"
+        text-color "@text"
+        radius (px)4
+        padding (px)3 (px)8
+    }
+
+    style "workspace-button" {
+        padding (px)4 (px)10
+        radius (px)4
+        text-color "@muted"
+        state "active" { background "@accent" ; text-color "@base" }
+        state "hover"  { background "@accent" alpha=0.25 ; text-color "@text" }
+        transition "background" (ms)100 curve="ease-out"
+    }
+}
+
+shader {
+    fill "tally_glow" file="shaders/tally_glow.ssl" budget=(us)120
+    transition "studio_wipe" file="shaders/studio_wipe.ssl" budget=(us)220
+}
+
+animation {
+    window-open      curve="ease-out"    duration=(ms)140
+    window-close     curve="ease-in"     duration=(ms)100
+    workspace-switch shader="studio_wipe" duration=(ms)150
+}
+
+layout {
+    default "tile"
+    gap outer=(px)8 inner=(px)6
+    border width=(px)2 active="@accent" inactive="oklch(0.32 0.02 285 / 0.60)"
+    corner-radius "@radius"
+}
+
+panel "top" {
+    anchor "top"
+    margin top=(px)6 left=(px)8 right=(px)8
+    height (px)32
+    style "deck-panel"
+    slot "start"  { facet "sable-workspaces" ; facet "sable-window-title" }
+    slot "center" { facet "sable-clock" format="%H:%M:%S" }
+    slot "end"    { facet "sable-notify" ; facet "sable-network" ; facet "sable-battery" }
+}
+
+panel "production" {
+    anchor "bottom"
+    margin bottom=(px)6 left=(px)8 right=(px)8
+    height (px)36
+    style "deck-panel"
+    slot "start"  { facet "sable-cast-ui" }
+    slot "center" { facet "sable-patchbay" ; facet "sable-audio" }
+    slot "end"    { facet "sable-sysmon" ; facet "sable-tray" }
+}

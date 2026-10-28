@@ -1,0 +1,59 @@
+// docs/desktop-themes/rices/daemon-bsd/rice.kdl
+// Candidate 03: Beastie Carbon (FreeBSD Heritage Workstation)
+// Compliant with DESKTOP.md §7.3 (theme, panel, dock, layout, animation, shader only)
+
+theme {
+    token "base"         (color)"oklch(0.15 0.01 30)"
+    token "surface"      (color)"oklch(0.20 0.015 30 / 0.96)"
+    token "surface.elev" (color)"oklch(0.24 0.02 30)"
+    token "text"         (color)"oklch(0.92 0.01 60)"
+    token "muted"        (color)"oklch(0.64 0.02 45)"
+    token "accent"       (color)"oklch(0.63 0.22 27)"
+    token "warn"         (color)"oklch(0.78 0.16 75)"
+    token "radius"       (px)3
+    token "font.ui"      "JetBrains Mono"
+    token "font.mono"    "JetBrains Mono"
+
+    style "carbon-bar" {
+        background "@surface"
+        radius (px)0
+        border (px)1 "@accent" alpha=0.45
+    }
+
+    style "workspace-button" {
+        padding (px)2 (px)8
+        radius (px)2
+        text-color "@muted"
+        state "active" { background "@accent" ; text-color "@text" }
+        state "warn"   { fill shader="shaders/ember_pulse.ssl" ; text-color "@base" }
+        state "hover"  { background "@surface.elev" ; text-color "@text" }
+        transition "background" (ms)75 curve="linear"
+    }
+}
+
+shader {
+    fill "ember_pulse" file="shaders/ember_pulse.ssl" budget=(us)100
+}
+
+animation {
+    window-open      curve="ease-out" duration=(ms)90
+    window-close     curve="ease-in"  duration=(ms)70
+    window-move      curve="ease-out" duration=(ms)90
+    workspace-switch curve="ease-out" duration=(ms)90
+}
+
+layout {
+    default "stack"
+    gap outer=(px)4 inner=(px)4
+    border width=(px)2 active="@accent" inactive="oklch(0.32 0.015 30)"
+    corner-radius "@radius"
+}
+
+panel "bottom" {
+    anchor "bottom"
+    height (px)26
+    style "carbon-bar"
+    slot "start"  { facet "sable-workspaces" ; facet "sable-window-title" }
+    slot "center" { facet "sable-sysmon" }
+    slot "end"    { facet "sable-network" ; facet "sable-audio" ; facet "sable-battery" ; facet "sable-clock" format="%Y-%m-%d %H:%M:%S" }
+}

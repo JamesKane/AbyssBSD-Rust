@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>03 · daemon-bsd — Beastie Carbon (Sable Desktop Mockup)</title>
+<style>
+  :root {
+    --base: #110e0e;
+    --surface: #1b1616;
+    --text: #ede8e6;
+    --muted: #9c8f8b;
+    --accent: #e03131;
+    --warn: #f59e0b;
+    --mono: "JetBrains Mono", monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    height: 100vh;
+    background: repeating-linear-gradient(45deg, #120f0f 0px, #120f0f 6px, #161212 6px, #161212 12px);
+    color: var(--text);
+    font-family: var(--mono);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .stack-grid {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1.4fr 1fr;
+    grid-template-rows: 1fr 1fr;
+    gap: 4px;
+    padding: 4px;
+  }
+  .window {
+    background: #151212;
+    border: 2px solid #2b2323;
+    border-radius: 3px;
+    display: flex;
+    flex-direction: column;
+  }
+  .window.master {
+    grid-row: 1 / span 2;
+    border-color: var(--accent);
+  }
+  .titlebar {
+    height: 24px;
+    padding: 0 8px;
+    background: #1d1818;
+    border-bottom: 1px solid #2b2323;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .window.master .titlebar { background: #2c1616; color: var(--text); }
+  .content { flex: 1; padding: 10px; font-size: 12px; line-height: 1.55; }
+  .panel-bottom {
+    height: 26px;
+    background: var(--surface);
+    border-top: 1px solid rgba(224, 49, 49, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 8px;
+    font-size: 11px;
+  }
+  .ws { padding: 2px 7px; color: var(--muted); }
+  .ws.active { background: var(--accent); color: #fff; font-weight: 700; }
+  .ws.warn { background: var(--warn); color: #110e0e; font-weight: 700; }
+  .back-link {
+    position: fixed;
+    bottom: 34px;
+    right: 12px;
+    background: var(--accent);
+    color: #fff;
+    padding: 5px 10px;
+    border-radius: 3px;
+    font-size: 11px;
+    text-decoration: none;
+  }
+</style>
+</head>
+<body>
+  <main class="stack-grid">
+    <section class="window master">
+      <div class="titlebar"><span>[master] sable-term · /usr/src/sys/kern</span><span>stack:1/3</span></div>
+      <div class="content">
+        <div style="color:var(--accent)">root@abyssbsd:/usr/src # sysctl kern.ostype kern.osrelease</div>
+        <div>kern.ostype: AbyssBSD</div>
+        <div>kern.osrelease: 15.1-ABYSS</div>
+        <br/>
+        <div style="color:var(--warn)">// Candidate 03: daemon-bsd (Beastie Carbon)</div>
+        <div style="color:var(--muted)">// Zero blur pyramid — fast path direct into output format (DESKTOP.md §4.7.2)</div>
+        <div>layout.default = "stack"</div>
+        <div>gap outer=(px)4 inner=(px)4</div>
+        <div>border width=(px)2 active="#e03131"</div>
+      </div>
+    </section>
+
+    <section class="window">
+      <div class="titlebar"><span>[stack 1] sable-sysd providers</span><span>Capsicum + Casper</span></div>
+      <div class="content">
+        <div>seat      · DRM master + evdev/hidraw/uinput</div>
+        <div>auth      · libpam isolated helper</div>
+        <div>power     · hw.acpi.* + dev.hwpstate*</div>
+        <div>backlight · /dev/backlight/backlight0</div>
+      </div>
+    </section>
+
+    <section class="window">
+      <div class="titlebar"><span>[stack 2] devd.seqpacket.pipe</span><span>EVFILT_READ</span></div>
+      <div class="content">
+        <div style="color:var(--muted)">!system=DRM subsystem=CONNECTOR type=HOTPLUG card=0</div>
+        <div style="color:#4ade80">→ atomic commit test passed (1 test, 0.19 ms)</div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="panel-bottom">
+    <div>
+      <span class="ws active">1:src</span>
+      <span class="ws">2:vm</span>
+      <span class="ws warn">3:build!</span>
+      <span class="ws">4:net</span>
+      <span style="margin-left:8px; color:var(--muted);">[stack] sable-term</span>
+    </div>
+    <div style="color:var(--muted);">CPU 12% · ARC/UMA 3.1G · NVMe 0.2ms</div>
+    <div>igc0: UP · OSS 48kHz · 2026-10-27 20:26:12</div>
+  </footer>
+
+  <a class="back-link" href="../index.html">← All 10 Candidates</a>
+</body>
+</html>

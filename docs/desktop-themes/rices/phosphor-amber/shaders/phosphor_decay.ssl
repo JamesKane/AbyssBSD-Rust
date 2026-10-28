@@ -1,0 +1,9 @@
+// Sable Shading Language (SSL) — DESKTOP.md §4.7.4
+// Kind: transition (inputs: from_tex, to_tex, uv, progress)
+
+fn shade_transition(uv: vec2<f32>, progress: f32) -> vec4<f32> {
+    let decay = exp(-progress * 3.8);
+    let persistence = sample_from(uv) * vec4<f32>(1.0, 0.78, 0.25, 1.0) * decay;
+    let incoming = sample_to(uv) * smoothstep(0.15, 1.0, progress);
+    return max(persistence, incoming);
+}

@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>09 · solaris-cde — Neo-Workstation Bevel (Sable Desktop Mockup)</title>
+<style>
+  :root {
+    --base: #2f4858;
+    --surface: #b8b2a6;
+    --surface-hi: #dcd6ca;
+    --text: #17191c;
+    --accent: #4a5596;
+    --active-title: #b86b35;
+    --mono: "JetBrains Mono", monospace;
+    --ui: "Inter", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    height: 100vh;
+    background: radial-gradient(circle at 50% 40%, #3a576b 0%, #253946 100%);
+    color: var(--text);
+    font-family: var(--ui);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .workspace {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1.3fr 1fr;
+    gap: 12px;
+    padding: 14px;
+  }
+  .win {
+    background: #c2bcb0;
+    border: 3px outset var(--surface-hi);
+    box-shadow: 6px 6px 0 rgba(0,0,0,0.38);
+    display: flex;
+    flex-direction: column;
+  }
+  .hdr {
+    height: 26px;
+    padding: 0 8px;
+    background: #9e988c;
+    border-bottom: 2px groove var(--surface-hi);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .win.active .hdr { background: var(--active-title); color: #fff; }
+  .body {
+    flex: 1;
+    margin: 6px;
+    padding: 12px;
+    background: #14171a;
+    color: #e6e1d6;
+    border: 2px inset var(--surface-hi);
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.55;
+  }
+  .cde-panel {
+    margin: 0 auto 8px auto;
+    height: 48px;
+    background: var(--surface);
+    border: 3px outset var(--surface-hi);
+    box-shadow: 5px 5px 0 rgba(0,0,0,0.42);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 12px;
+    font-family: var(--mono);
+    font-size: 11px;
+  }
+  .pager {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 3px;
+    padding: 3px;
+    border: 2px inset var(--surface-hi);
+    background: #9e988c;
+  }
+  .pager span {
+    padding: 2px 8px;
+    border: 1px outset var(--surface-hi);
+    background: var(--surface);
+    font-size: 10px;
+  }
+  .pager span.active { background: var(--active-title); color: #fff; }
+  .back-link {
+    position: fixed;
+    bottom: 14px;
+    right: 14px;
+    background: var(--surface);
+    color: var(--text);
+    border: 2px outset var(--surface-hi);
+    padding: 5px 10px;
+    font-family: var(--mono);
+    font-size: 11px;
+    text-decoration: none;
+  }
+</style>
+</head>
+<body>
+  <main class="workspace">
+    <section class="win active">
+      <div class="hdr"><span>▪ sable-term — Console (Analytic SDF Bevels)</span><span>[□]</span></div>
+      <div class="body">
+        <div style="color:#f59e38">AbyssBSD 15.1-ABYSS (GENERIC-RUST) #0: Tue Oct 27 2026</div>
+        <div>cpu0: AMD Ryzen / ARM64 SystemReady UEFI</div>
+        <br/>
+        <div style="color:#7dd3fc">// shaders/sdf_chisel.ssl (DESKTOP.md §4.7.3)</div>
+        <div>// Draws top-left highlight and bottom-right shadow bevels</div>
+        <div>// analytically from node UV &amp; size — zero 9-slice bitmaps.</div>
+      </div>
+    </section>
+
+    <section class="win">
+      <div class="hdr"><span>▪ sable-settings — Workstation Controls</span><span>[□]</span></div>
+      <div class="body" style="background:#dad4c8; color:#17191c;">
+        <div><strong>Theme:</strong> rices/solaris-cde/rice.kdl</div>
+        <div><strong>Active Title Token:</strong> oklch(0.62 0.14 45)</div>
+        <div><strong>Fill Shader:</strong> shaders/sdf_chisel.ssl (110 µs)</div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="cde-panel">
+    <span>CLOCK 20:28</span>
+    <div class="pager">
+      <span class="active">1:One</span>
+      <span>2:Two</span>
+      <span>3:Three</span>
+      <span>4:Four</span>
+    </div>
+    <span>sable-term</span>
+    <span>sable-settings</span>
+    <span>sable-patchbay</span>
+  </footer>
+
+  <a class="back-link" href="../index.html">← All 10 Candidates</a>
+</body>
+</html>

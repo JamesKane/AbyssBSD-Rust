@@ -1,0 +1,10 @@
+// Sable Shading Language (SSL) — DESKTOP.md §4.7.4
+// Kind: post (inputs: linear_color, uv, size, time, frame)
+
+fn shade_post(linear_color: vec4<f32>, uv: vec2<f32>, size: vec2<f32>, _time: f32, _frame: u32) -> vec4<f32> {
+    let luma = dot(linear_color.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let px = floor(uv * size);
+    let bayer = (fract(px.x * 0.5 + fract(px.y * 0.5) * 0.75) - 0.375) * 0.012;
+    let warm = vec3<f32>(1.02, 0.99, 0.91) * clamp(luma + bayer, 0.0, 1.0);
+    return vec4<f32>(mix(linear_color.rgb, warm, 0.85), linear_color.a);
+}

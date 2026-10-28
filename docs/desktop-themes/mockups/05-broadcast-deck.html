@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>05 · broadcast-deck — Studio Control Room (Sable Desktop Mockup)</title>
+<style>
+  :root {
+    --base: #110f1a;
+    --surface: rgba(29, 25, 43, 0.90);
+    --text: #f2effa;
+    --muted: #9289ad;
+    --accent: #b56bff;
+    --live: #f43f5e;
+    --preview: #fbbf24;
+    --mono: "JetBrains Mono", monospace;
+    --ui: "Inter", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    height: 100vh;
+    background: radial-gradient(circle at 80% 15%, rgba(244, 63, 94, 0.14), transparent 40%), #110f1a;
+    color: var(--text);
+    font-family: var(--ui);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .bar {
+    margin: 6px 8px;
+    height: 34px;
+    background: var(--surface);
+    border: 1px solid rgba(181, 107, 255, 0.35);
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 10px;
+    font-size: 11.5px;
+    font-family: var(--mono);
+  }
+  .tally {
+    background: var(--live);
+    color: #fff;
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-weight: 700;
+    font-size: 10.5px;
+  }
+  .grid {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1.45fr 1fr;
+    grid-template-rows: 1fr 1fr;
+    gap: 6px;
+    padding: 2px 8px;
+  }
+  .win {
+    background: rgba(21, 18, 32, 0.92);
+    border: 2px solid var(--accent);
+    border-radius: 6px;
+    display: flex;
+    flex-direction: column;
+  }
+  .win.master { grid-row: 1 / span 2; }
+  .win.excluded {
+    border-style: dashed;
+    border-color: var(--preview);
+  }
+  .titlebar {
+    height: 26px;
+    padding: 0 10px;
+    background: rgba(46, 35, 72, 0.85);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-family: var(--mono);
+    font-size: 11px;
+  }
+  .content { padding: 12px; font-family: var(--mono); font-size: 11.5px; line-height: 1.55; }
+  .back-link {
+    position: fixed;
+    bottom: 52px;
+    right: 16px;
+    background: var(--accent);
+    color: #110f1a;
+    font-weight: 700;
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-family: var(--mono);
+    font-size: 11px;
+    text-decoration: none;
+  }
+</style>
+</head>
+<body>
+  <header class="bar">
+    <div>[1:LIVE] [2:EDIT] [3:BRB] · Studio Control Room</div>
+    <div>capture.Session · 1080p60 + 4K60 dual sinks (1 render graph)</div>
+    <div>20:26:40</div>
+  </header>
+
+  <main class="grid">
+    <section class="win master">
+      <div class="titlebar">
+        <span>Sink #1: Gameplay + Stream Overlays (Captured)</span>
+        <span class="tally">ON AIR · VK_KHR_video_encode_av1</span>
+      </div>
+      <div class="content">
+        <div style="color:var(--accent)">sable-cast · Zero-Copy Vulkan Video Pipeline (§5.6–5.7)</div>
+        <br/>
+        <div>1. Pool allocated in NV12 encoder modifier, dma-buf fds sent once.</div>
+        <div>2. RGB→YUV compute shader signals DRM syncobj point T=#48210.</div>
+        <div>3. Hardware VCN/Mali-V encodes straight from dma-buf (0 CPU copies).</div>
+        <div>4. A/V drift corrected via lib/dsp ±0.1% audio resampling.</div>
+      </div>
+    </section>
+
+    <section class="win excluded">
+      <div class="titlebar">
+        <span>Mumble / Matrix Chat (Dashed = Excluded from Capture Sink)</span>
+        <span style="color:var(--preview)">sink-mask: screen-only</span>
+      </div>
+      <div class="content">
+        <div style="color:var(--preview)">Per-Node Sink Visibility Mask (§4.3 &amp; §5.6.4):</div>
+        <div>Visible on DP-1 monitor, omitted from RTMP stream &amp; MP4 recording.</div>
+      </div>
+    </section>
+
+    <section class="win">
+      <div class="titlebar">
+        <span>sable-patchbay · CUSE Virtual OSS Graph</span>
+        <span>audio.routing</span>
+      </div>
+      <div class="content">
+        <div>/dev/dsp.game ──▶ [Stream Mix: 0.0 dB] + [Headphones: -3.0 dB]</div>
+        <div>/dev/dsp.mic  ──▶ [CLAP RNNoise Sandboxed Host] ──▶ [Stream Mix]</div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="bar">
+    <div><span class="tally">RTMPS 6000 kbps</span> · Replay Buffer: 60s in RAM (Super+Shift+R)</div>
+    <div>Scenes: [1: FullCam] [2: Game+Cam] [3: Intermission]</div>
+  </footer>
+
+  <a class="back-link" href="../index.html">← All 10 Candidates</a>
+</body>
+</html>

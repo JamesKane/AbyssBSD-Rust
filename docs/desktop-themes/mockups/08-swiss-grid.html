@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>08 · swiss-grid — International Typographic Grid (Sable Desktop Mockup)</title>
+<style>
+  :root {
+    --base: #e8e4dc;
+    --surface: #f4f1ea;
+    --text: #111111;
+    --muted: #5c5953;
+    --accent: #e03c1f;
+    --mono: "JetBrains Mono", monospace;
+    --ui: "Inter", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    height: 100vh;
+    background: var(--base);
+    color: var(--text);
+    font-family: var(--ui);
+    display: flex;
+    overflow: hidden;
+  }
+  .rail {
+    width: 190px;
+    background: var(--surface);
+    border-right: 1px solid var(--text);
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+  }
+  .rail-block {
+    border-bottom: 1px solid var(--text);
+    padding: 10px 12px;
+  }
+  .ws-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 5px 8px;
+    font-family: var(--mono);
+    font-size: 11px;
+    border: 1px solid var(--text);
+    margin-bottom: 4px;
+  }
+  .ws-row.active { background: var(--accent); color: #fff; font-weight: 700; }
+  .grid {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1.2fr 1fr;
+    grid-template-rows: 1fr 1fr;
+  }
+  .cell {
+    background: var(--surface);
+    border-right: 1px solid var(--text);
+    border-bottom: 1px solid var(--text);
+    display: flex;
+    flex-direction: column;
+  }
+  .cell.primary { grid-row: 1 / span 2; }
+  .hdr {
+    height: 24px;
+    padding: 0 10px;
+    background: var(--base);
+    border-bottom: 1px solid var(--text);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-family: var(--mono);
+    font-size: 11px;
+  }
+  .cell.primary .hdr { background: var(--accent); color: #fff; font-weight: 600; }
+  .body { padding: 14px; font-family: var(--mono); font-size: 12px; line-height: 1.6; }
+  .back-link {
+    position: fixed;
+    bottom: 12px;
+    right: 12px;
+    background: var(--text);
+    color: var(--surface);
+    padding: 6px 12px;
+    font-family: var(--mono);
+    font-size: 11px;
+    text-decoration: none;
+  }
+</style>
+</head>
+<body>
+  <aside class="rail">
+    <div>
+      <div class="rail-block">
+        <div style="font-weight:800; font-size:14px; letter-spacing:-0.02em;">SABLE / GRID 08</div>
+        <div style="font-family:var(--mono); font-size:10px; color:var(--muted);">NEO-PLAN 9 · 0PX RADIUS</div>
+      </div>
+      <div class="rail-block">
+        <div class="ws-row active"><span>01</span><span>KERNEL</span></div>
+        <div class="ws-row"><span>02</span><span>DESKTOP</span></div>
+        <div class="ws-row"><span>03</span><span>MANUALS</span></div>
+      </div>
+    </div>
+    <div class="rail-block" style="border-bottom:none; font-family:var(--mono); font-size:11px;">
+      <div>AUD 48kHz</div>
+      <div>NET igc0 UP</div>
+      <div>2026.10.27 20:27</div>
+    </div>
+  </aside>
+
+  <main class="grid">
+    <section class="cell primary">
+      <div class="hdr"><span>sable-term · /usr/src/docs/DESKTOP.md</span><span>xdg-decoration: server</span></div>
+      <div class="body">
+        <div style="font-weight:700;">§7.6 One canonical way</div>
+        <br/>
+        <div>- One IPC: Conduit (SOCK_SEQPACKET capability channels)</div>
+        <div>- One component model: Facet (#![forbid(unsafe_code)])</div>
+        <div>- One config syntax: KDL v2 with strict path uniqueness</div>
+        <div>- One shader language: SSL compiled to validated SPIR-V</div>
+      </div>
+    </section>
+
+    <section class="cell">
+      <div class="hdr"><span>sable-settings · Cascade</span><span>strict</span></div>
+      <div class="body">
+        <div>Defaults ──▶ System ──▶ Rice ──▶ User ──▶ Profiles ──▶ Runtime</div>
+        <div style="color:var(--muted); margin-top:6px;">0px outer gap, 0px inner gap, collapsed 1px hairlines.</div>
+      </div>
+    </section>
+
+    <section class="cell">
+      <div class="hdr"><span>shaders/grid_shutter.ssl</span><span>100ms step wipe</span></div>
+      <div class="body">
+        <div>let cell = fract(uv.x * 8.0);</div>
+        <div>let mask = step(cell, progress);</div>
+      </div>
+    </section>
+  </main>
+
+  <a class="back-link" href="../index.html">← All 10 Candidates</a>
+</body>
+</html>

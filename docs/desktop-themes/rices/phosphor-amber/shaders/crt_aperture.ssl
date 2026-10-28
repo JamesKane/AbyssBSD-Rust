@@ -1,0 +1,10 @@
+// Sable Shading Language (SSL) — DESKTOP.md §4.7.4
+// Kind: post (inputs: linear_color, uv, size, time, frame)
+
+fn shade_post(linear_color: vec4<f32>, uv: vec2<f32>, size: vec2<f32>, _time: f32, _frame: u32) -> vec4<f32> {
+    let scanline = 0.92 + 0.08 * sin(uv.y * size.y * 3.14159);
+    let vignette_uv = uv * (vec2<f32>(1.0, 1.0) - uv.yx);
+    let vignette = clamp(pow(vignette_uv.x * vignette_uv.y * 16.0, 0.18), 0.0, 1.0);
+    let phosphor = linear_color.rgb * scanline * vignette;
+    return vec4<f32>(phosphor, linear_color.a);
+}
