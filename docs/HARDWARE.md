@@ -36,70 +36,124 @@ The build server (Alder Lake i7-12700KF, hybrid P/E cores) is a good
 *occasional* amd64 boot target from USB, which exercises the hybrid-core scheduler, but it is not
 a CI target.
 
-## 3. Driver matrix by phase
+## 3. Driver matrix
 
-Legend: **P#** = roadmap phase in which the driver is first expected to work.
+Legend:
 
-### Platform / core
+- **Status:**
+  - **Supported:** Implemented in the tree and passing CI on the virtual Tier 1 platforms (QEMU `q35`, QEMU `virt`, bhyve).
+  - **Experimental:** Implemented in the tree (and unit-tested or exercised in QEMU where emulated), awaiting physical-board bring-up and bare-metal verification in **P7** ([ADR-0010](adr/0010-qemu-first-development.md)).
+  - **Planned:** Scheduled for a later phase or covered by a clean-room hardware specification in `~/Projects/OS/chinese-wall/specs/`.
+- **Phase:** Roadmap phase in which the driver or subsystem is first expected to work.
 
-| Function | AMD64 | ARM64 | Phase |
-|---|---|---|---|
-| Early console | 16550 UART (SPCR / COM1), GOP framebuffer text | PL011 / SBSA generic UART (SPCR, else **DBG2**), GOP framebuffer text | P1 |
-| Watchdog | AMD FCH watchdog (WDRT table); Intel TCO later | SBSA generic watchdog (GTDT), with the Sky1 `WOR`-refresh quirk | P3 |
-| Persistent boot log | Reserved RAM ring that survives warm reset; the loader saves it to `\EFI\ABYSS\log\` on the next boot | same | P1 |
-| Broadcast / wake timer | HPET / LAPIC always-running | Platform timer when the generic timer stops in deep idle (Sky1: CIX GPT `CIXH1007`) | P9 (with deep idle) |
-| Firmware mailbox | — | PCC (PCCT type 2/3) + SCMI (clocks, power domains, performance) | P3 (PCC for AML) / P9 (SCMI clients) |
-| Interrupt controller | x2APIC/xAPIC, IOAPIC | GICv3 distributor/redistributor | P2 |
-| MSI/MSI-X | LAPIC message routing | GICv3 ITS | P3 |
-| Timers | TSC (invariant) + TSC-deadline, LAPIC timer, HPET (calibration) | Arm generic timer (virtual/physical) | P2 |
-| SMP | INIT-SIPI | PSCI (HVC/SMC per FADT) | P2 |
-| RTC | CMOS RTC (FADT century), UEFI `GetTime` | PL031 (if described), UEFI `GetTime` | P3 |
-| Entropy | RDRAND/RDSEED | RNDR (FEAT_RNG), virtio-rng, SMCCC TRNG | P3 |
-| Power | ACPI S5 (AML `_S5`), FADT reset register, power button (SCI/GPE) | PSCI off/reset, GED power button | P3 |
-| UEFI runtime | `GetTime`, `GetVariable`/`SetVariable` (for `efivar`), `ResetSystem` | same | P3 |
-| IOMMU | VT-d (DMAR), AMD-Vi (IVRS) | SMMUv3 (IORT) | P9 |
-| CPU frequency / idle | ACPI `_CST`/`_PSS`/CPPC, MWAIT, HWP | PSCI idle, CPPC | P9 |
+### Platform and core
 
-### Buses
+| Function / Subsystem | AMD64 | ARM64 | RV64 (Day 2) | Crate / Spec | Status | Phase |
+|---|---|---|---|---|---|---|
+| Early console & serial terminals | 16550 UART (`uart`, `ttyu*`/`cuau*`, SPCR / COM1) | PL011 / SBSA generic UART (`uart`, SPCR, else **DBG2**) | 16550 UART (32-bit stride, SPCR) | `drivers/uart-16550`, `drivers/uart-pl011`, `drivers/uart` | **Supported** (AMD64/ARM64); **Planned** (RV64) | P1 / P6 / P10 |
+| Framebuffer console (`vt`) | GOP framebuffer text (`fb-console`, P1) and virtual terminals (`ttyv0`–`ttyvb`, Track U) | same | same | `drivers/fb-console`, `sys/vt` | **Supported** (AMD64/ARM64); **Planned** (RV64) | P1 / P6 / P10 |
+| Persistent boot log | Reserved RAM ring that survives warm reset; loader saves it to `\EFI\ABYSS\log\` on next boot | same | same | `lib/logring`, `boot/loader-efi` | **Supported** | P1 |
+| Interrupt controller | x2APIC / xAPIC, I/O APIC | GICv3 distributor & redistributor | AIA (APLIC MSI mode + S-level IMSIC) | `arch/x86_64`, `arch/aarch64`, `sys/irq` | **Supported** (AMD64/ARM64); **Planned** (RV64) | P2 / P10 |
+| MSI / MSI-X | LAPIC message routing | GICv3 ITS | AIA IMSIC | `sys/irq`, `sys/pci`, `arch/aarch64` | **Supported** (AMD64/ARM64); **Planned** (RV64) | P3 / P10 |
+| Core timers | TSC (invariant) calibrated against ACPI PM timer (`acpi_timer`), LAPIC timer, 8254 (`attimer`), HPET (`hpet`) | Arm generic timer (virtual/physical) | SBI timer (ACLINT behind firmware, `Sstc`) | `arch/x86_64`, `arch/aarch64`, `drivers/timers` | **Supported** (AMD64/ARM64); **Planned** (RV64) | P2 / P3 / P10 |
+| Broadcast / wake timer | HPET / LAPIC always-running | Platform timer when generic timer stops in deep idle (Sky1: CIX GPT `CIXH1007`) | — | `specs/sky1-soc` (`03-gpt-timer.md`) | **Planned** | P9 |
+| SMP bring-up | INIT-SIPI | PSCI (HVC/SMC per FADT) | SBI HSM | `arch/x86_64`, `arch/aarch64` | **Supported** (AMD64/ARM64); **Planned** (RV64) | P2 / P10 |
+| Real-time clock (RTC) | CMOS RTC (`atrtc`, `PNP0B00`, FADT century), UEFI `GetTime` | UEFI `GetTime`; PL031 / I²C RTC (RX8900) later | UEFI `GetTime`; SpacemiT MMP RTC / RPMI | `drivers/atrtc`, `sys/clock` | **Supported** (`atrtc`, UEFI `GetTime`); **Planned** (SoC/I²C RTCs) | P3 / P10 |
+| Watchdog | Intel ICH TCO (`ichwd`); AMD FCH watchdog (`amdsbwd`) | SBSA generic watchdog (`sbsa_gwdt`, GTDT, with Sky1 `WOR`-refresh quirk) | SpacemiT K3/MMP watchdog (`0xD4014000`) | `drivers/ichwd` (**Supported**); `drivers/amdsbwd`, `drivers/sbsa-gwdt` (**Experimental**); `specs/spacemit-k3` (**Planned**) | **Supported** (`ichwd`) / **Experimental** (`amdsbwd`, `sbsa_gwdt`) / **Planned** (RV64) | P3 / P7 / P10 |
+| Hardware entropy | `RDRAND` / `RDSEED`, `virtio-random` (`vtrnd`) | `RNDR` (`FEAT_RNG`), `virtio-random` (`vtrnd`); SMCCC TRNG later | `Zkr` (`seed`) / `virtio-random` | `drivers/virtio-random`, `sys/random` | **Supported** | P3 |
+| System power & events | ACPI S5 (AML `_S5`), FADT reset register, power button (`acpi_button`, SCI/GPE) | PSCI off/reset, ACPI GED (`acpi_ged`) & power button | SBI SRST, ACPI / RPMI power key | `sys/acpi` | **Supported** (AMD64/ARM64); **Planned** (RV64) | P3 / P10 |
+| UEFI runtime services | `GetTime`, `GetVariable`/`SetVariable`, `ResetSystem` | same | same | `boot/efi`, `sys/clock` | **Supported** (`GetTime`, `ResetSystem`); **Planned** (`efivar` userland wiring) | P3 |
+| Firmware mailbox & transport | — | PCC (PCCT type 2/3 in AML) + SCMI (clocks, resets, power domains, perf) | RPMI over SBI MPXY | `lib/aml` (PCC region: **Experimental**); `specs/sky1-soc`, `specs/spacemit-k3` (SCMI/RPMI providers: **Planned**) | **Experimental** (AML PCC) / **Planned** (SCMI & RPMI providers) | P3 / P7 / P9 / P10 |
+| IOMMU | Intel VT-d (DMAR), AMD-Vi (IVRS) | Arm SMMUv3 (IORT), Arm SMMUv2 (SC8280XP) | RISC-V IOMMU (`0xC0F00000`) | `specs/adreno-a690`, `specs/qcom-sc8280xp` | **Planned** | P9 / Later |
+| CPU frequency & idle | ACPI `_CST`/`_PSS`/CPPC (`_CPC`), `MWAIT`, HWP | PSCI `_LPI` idle, ACPI CPPC (`_CPC` with SCMI fastchannel & AMU), Qualcomm EPSS (`QCOM0617`) | ACPI / SBI HSM idle & CPPC | `sys/acpi/src/cpc.rs` (table parsing: **Experimental**); `specs/qcom-sc8280xp` (drivers: **Planned**) | **Planned** | P9 |
 
-| Bus | Phase |
-|---|---|
-| ACPI namespace (AML) | P3 |
-| PCIe ECAM, bridges, capabilities, MSI/MSI-X | P3 |
-| virtio-pci (modern, VIRTIO 1.x only) | P3 |
-| USB xHCI + hubs, attached on **PCI and on ACPI** (`PNP0D10`, as on Sky1) | USB track (after P3, merges into P6) |
+### Buses and interconnects
+
+| Bus / Controller | Description / Attachment | Crate / Spec | Status | Phase |
+|---|---|---|---|---|
+| ACPI namespace (`acpi`) | AML interpreter (`lib/aml`), namespace enumeration, `_STA`/`_CRS`/`_PRT`/`_DEP`, host-PCI bridges (`pcib`), power resources | `sys/acpi`, `lib/aml` | **Supported** (QEMU/bhyve & Q8B DSDT corpus); **Experimental** (physical board AML) | P3 / P7 |
+| PCIe (`pci`, `pcib`) | ECAM (MCFG), PCI-PCI bridges, capability parsing, BAR allocation, MSI/MSI-X | `sys/pci`, `sys/acpi` | **Supported** | P3 |
+| ISA / LPC bridge (`isab`, `isa`) | PCI-ISA (LPC) bridge and ISA child bus for chipset peripherals (`ichwd`, `amdsbwd`) | `drivers/isa` | **Supported** | P3 |
+| VirtIO PCI (`virtio_pci`) | Modern (`VIRTIO 1.x`) and transitional PCI transport, virtqueues, MSI-X / INTx | `sys/virtio` | **Supported** | P3 |
+| USB xHCI (`xhci`) & USB bus (`usbus`, `uhub`) | xHCI 1.2 host controller on PCI (class `0c0330`) and ACPI (`PNP0D10`, Sky1), MSI-X, bulk streams, USB 2.0/3.0 root and external hubs | `drivers/xhci`, `sys/usb`, `lib/xhci`, `lib/usb` | **Supported** (PCI in QEMU); **Experimental** (ACPI `PNP0D10` & physical controllers) | Track U (P6) / P7 |
+| HID bus (`usbhid`, `hidbus`) | USB HID transport and generic HID report descriptor parser | `sys/hid`, `lib/hid` | **Supported** | Track U (P6) |
+| USB4 / Thunderbolt 3 Connection Manager | Software Connection Manager for ASMedia ASM4242 (`174c:2428`, PCI class `0c0340`) on X870E: NHI rings, router enumeration, TMU, CLx, PCIe/USB3/DP tunneling | `specs/usb4-cm` | **Planned** | Later |
+| Synopsys DWC3 & USB PHYs (SoC glue) | SpacemiT K3 USB2 PHY, USB3/PCIe combo PHY, and DWC3 host/dual-role integration; Qualcomm SC8280XP DWC3 RX threshold quirk | `specs/spacemit-k3` (`07`, `08`), `specs/qcom-sc8280xp` (`01`) | **Planned** | P7 / P10 / Later |
+| SpacemiT K3 PCIe (`k3-pcie`) | DesignWare PCIe Gen3 controller and combo PHY (if not fully initialized by UEFI/ECAM) | `specs/spacemit-k3` (`13-pcie.md`) | **Planned** | P10 |
+
+### SoC infrastructure, low-speed peripherals, and hardware monitoring
+
+Drivers planned from the clean-room specifications in `~/Projects/OS/chinese-wall/specs/` for the Tier 1 and Tier 2 boards:
+
+| Device / Subsystem | Target Platform | Description | Spec / Crate | Status | Phase |
+|---|---|---|---|---|---|
+| CIX Sky1 SoC infrastructure | Orange Pi 6 Plus / Radxa Orion O6 (Sky1) | CIX mailbox, SCMI clock (`CLKT`) & power-domain providers, S5 reset controllers (`RSTL`/`RSNL`/`DLKL`), subsystem RCSUs, and CIX GPT (`CIXH1007`) | `specs/sky1-soc` | **Planned** | P7 / P9 |
+| CIX Sky1 GPIO, I²C, SPI/XSPI & pinctrl | Orange Pi 6 Plus / Radxa Orion O6 (Sky1) | Cadence GPIO r1p02 (`CIXH1002`, `CIXH1003`), Cadence I²C r1p14, Cadence SPI r1p6 & XSPI flash, and pad/pin controllers (`CIXH1001`) | `specs/sky1-peripherals` (`01`–`03`, `05`) | **Planned** | P7 |
+| Realtek RTS5453H USB-C PD controller | Orange Pi 6 Plus / Radxa Orion O6 (Sky1) | I²C USB Type-C Power Delivery controller: port status, data/power role, and DisplayPort Alt-Mode HPD/pin-assignment reporting to the combo PHY and DP-TX | `specs/sky1-peripherals` (`04-usb-pd-rts5453.md`) | **Planned** | M-G / Later |
+| ITE IT8689E / IT87952E Super I/O & Gigabyte WMI | Ryzen 9 7900X / Gigabyte X870E AORUS ELITE WIFI7 | LPC Super I/O Environment Controller (`0x8689` / `0x8695` / `0x8696`): 16-bit fan tachometers, 6-channel PWM fan control, voltages, PECI/AMD-TSI temperatures, SMBus interlock, and Gigabyte WMI temperature sensor interface | `specs/ite-it87-superio` | **Planned** | Later |
+| SpacemiT K3 clocks, resets, pinctrl, GPIO, I²C, SPI, PWM, PDMA, PMIC & thermal | Banana Pi BPI-SM10 (SpacemiT K3) | APBS/MPMU/APBC/APMU/DCIU clocks & resets, pinctrl/GPIO, TWSI I²C, QSPI, PWM, peripheral DMA, P1 PMIC, power domains, and thermal sensors (fallback where not owned by UEFI/ACPI + RPMI) | `specs/spacemit-k3` (`01`, `02`, `04`, `05`, `09`–`11`, `14`, `15`) | **Planned** | P10 / Later |
+| Qualcomm SC8280XP core SoC & PEP replacements | Radxa Dragon Q8B (SC8280XP, Tier 2) | QUPv3 GENI UART & I²C, TLMM ACPI GPIO, TrustZone SCM & PAS loader, Command DB, RPMh RSC DRV2 power/clock voting, EPSS CPU DVFS, and TSENS v2 thermal sensors (replacing Windows `PEP0` / `QCOM0617`) | `specs/qcom-sc8280xp` (`01`–`03`) | **Planned** | Tier 2 (P7+) |
+| Qualcomm SC8280XP GLINK fabric & PMIC USB-C | Radxa Dragon Q8B (SC8280XP, Tier 2) | TCSR hardware mutex, SMEM v12, IPCC, GLINK native protocol, QRTR, and PMIC GLINK Type-C / DisplayPort Alt-Mode notifications | `specs/qcom-sc8280xp` (`04-smem-ipcc-glink-usbc.md`) | **Planned** | Tier 2 (M-G / Later) |
 
 ### Storage
 
-| Driver | Phase |
-|---|---|
-| virtio-blk | P3 |
-| NVMe | P3 |
-| AHCI (SATA) | P3 |
-| Memory disk (`md`, preloaded image) | P4 |
-| USB mass storage (BBB/UAS) | USB track (P6) |
-| virtio-scsi | Later |
+| Driver | Hardware / Interface | Crate / Spec | Status | Phase |
+|---|---|---|---|---|
+| `vtblk` (`vtbd*`) | VirtIO block device (modern and transitional) | `drivers/virtio-blk` | **Supported** | P3 |
+| `nvme` (`nda*`) | PCIe NVM Express 2.0 controllers (admin & per-CPU I/O queues, MSI-X, PRPs) | `drivers/nvme` | **Supported** (QEMU/bhyve); **Experimental** (bare-metal NVMe on X870E & Orange Pi 6 Plus) | P3 / P7 |
+| `ahci` / `ahcich` (`ada*`) | SATA AHCI 1.3.1 controllers (NCQ, DMA, MSI-X/MSI/INTx) | `drivers/ahci` | **Supported** (QEMU/bhyve); **Experimental** (AMD 600-series AHCI on X870E) | P3 / P7 |
+| `md` (`md*`) | Memory disks (malloc and swap-backed) | `kernel` (`sys/storage`) | **Supported** | P4 / P5 |
+| `umass` (`da*`) | USB mass storage over Bulk-Only Transport (BBB) and USB Attached SCSI (UAS) | `drivers/umass`, `lib/scsi` | **Supported** (QEMU); **Experimental** (physical USB media in P7) | Track U (P6) / P7 |
+| `sdhci_msm` / `k3-sdhci` | Qualcomm SC8280XP SDHCI-MSM v5 and SpacemiT K3 SD/MMC host controller | `specs/qcom-sc8280xp` (`01`), `specs/spacemit-k3` (`03-sdhci.md`) | **Planned** | P10 / Later |
+| `k3-ufs` | SpacemiT K3 UFS host controller (128 GB onboard UFS module) | `specs/spacemit-k3` (`17-ufs.md`) | **Planned** | Later |
+| `virtio-scsi` | VirtIO SCSI host controller | — | **Planned** | Later |
 
 ### Network
 
-| Driver | Phase |
-|---|---|
-| Loopback | P6 |
-| virtio-net | P8 |
-| Intel e1000e (I219/82574) | P8 |
-| Intel igc (I225/I226) | P8 |
-| **Realtek RTL8125/RTL8126** (`rge` family: the X870E's 2.5 GbE and the Orange Pi 6 Plus's 5 GbE, the only wired NIC on either reference machine) | P8 (polled transmit-only log path optional from P3) |
-| Additional (ixgbe/ice, Realtek, Mellanox) | Depending on reference hardware |
+| Driver | Hardware / Interface | Crate / Spec | Status | Phase |
+|---|---|---|---|---|
+| `lo` | Loopback network interface | `sys/socket` / net stack | **Planned** | P6 / P8 |
+| `vtnet` | VirtIO network device (multi-queue, checksum & TSO offloads) | — | **Planned** | P8 |
+| `em` (`e1000e`) | Intel I219 / 82574 1 GbE PCIe controllers | — | **Planned** | P8 |
+| `igc` | Intel I225 / I226 2.5 GbE PCIe controllers | — | **Planned** | P8 |
+| `rge` | **Realtek RTL8125 (2.5 GbE) & RTL8126 (5 GbE)** PCIe controllers (onboard NICs on the X870E and Orange Pi 6 Plus: multi-queue RSS, MSI-X, TSO, EEE, PHY microcode patching) | `specs/realtek-rtl8125-delta` | **Planned** | P8 |
+| `dwc_eqos` (`dwmac`) | Synopsys DesignWare EQoS 1 GbE MAC (`0xCAC82000`) with MDIO child bus and Realtek RTL8211F RGMII PHY (onboard NIC on the Banana Pi BPI-SM10) | `specs/spacemit-k3` (`06-dwmac.md`) | **Planned** | P8 / P10 |
+| `tc956x` | **Toshiba TC9563** PCIe Gen3 switch + dual Synopsys DesignWare XGMAC2 v3.01a 2.5 GbE MACs, XPCS, SerDes PMA, and QCA8081 PHYs (onboard NICs on the Radxa Dragon Q8B) | `specs/tc956x` | **Planned** | Tier 2 (P8+) |
 
-### Human interface and display
+### Human interface (input)
 
-| Driver | Phase |
-|---|---|
-| GOP framebuffer console (`vt` compatible) | P1 (text) / P6 (ttyv*) |
-| USB HID keyboard/mouse | USB track (P6) |
-| virtio-input | USB track (P6) |
-| virtio-gpu (2D) | Graphics milestone |
-| Native GPU (Intel Xe, AMD RDNA) | Graphics milestone |
+| Driver | Hardware / Interface | Crate / Spec | Status | Phase |
+|---|---|---|---|---|
+| `hkbd` | USB HID keyboards (`kbd` under `kbdmux`, LED control, key repeat, `evdev`) | `drivers/hkbd`, `sys/input`, `sys/evdev` | **Supported** | Track U (P6) |
+| `hms` | USB HID mice and absolute pointing devices / tablets (`evdev` `/dev/input/event*` and `/dev/sysmouse`) | `drivers/hms`, `sys/evdev` | **Supported** | Track U (P6) |
+| `vtinput` | VirtIO input devices: keyboards, mice, and tablets (`virtio 1.2 §5.8`, `kbdmux` and `evdev`) | `drivers/virtio-input`, `sys/evdev` | **Supported** | Track U (P6) |
+
+### Graphics and display (M-G)
+
+See [docs/GRAPHICS.md](GRAPHICS.md) for the DRM/KMS architecture and step order.
+
+| Driver | Hardware / Target | Description | Spec / Crate | Status | Phase |
+|---|---|---|---|---|---|
+| `gop-kms` | All UEFI platforms (QEMU, bhyve, X870E, Orange Pi 6 Plus, BPI-SM10) | Simple atomic KMS driver over the UEFI GOP boot framebuffer (`/dev/dri/card0`) with seamless handover to native display drivers | [GRAPHICS.md §7.5](GRAPHICS.md#75-firmware-handover) | **Planned** | M-G.1 |
+| `virtio-gpu` | QEMU (`x86_64`, `aarch64`, `riscv64`) | VirtIO GPU 2D KMS and 3D (Venus / virglrenderer) with host-visible blob memory, fences, and `dma-buf` | [GRAPHICS.md §9](GRAPHICS.md#9-drivers-and-order) | **Planned** | M-G.2 / M-G.3 |
+| `linlondp` + `sky1-dp-tx` | Orange Pi 6 Plus / Radxa Orion O6 (CIX Sky1) | Arm China **Linlon-D6** (Mali-D71 / Komeda family) DPU (`CIXH5010`) + 5× **Trilinear DPTX** DisplayPort 1.4 transmitters (`CIXH502F`), USB-C/DP combo PHY, eDP panel (`CIXH5040`), and backlight (`CIXH5041`) | `specs/linlon-dpu`, `specs/sky1-dp-tx` | **Planned** | M-G.4 |
+| `panthor` | Orange Pi 6 Plus / Radxa Orion O6 (CIX Sky1) & RK3588 | Arm **Immortalis-G720** (and Mali-G610) CSF GPU (`CIXH5000`): MCU firmware loader, Command Stream Frontend (CSF) scheduler, GPU MMU (`IoAddressSpace`), tiler heap, and DRM render node for Mesa `panvk` | `specs/panthor` | **Planned** | M-G.5 |
+| `amdgpu` / native AMD64 GPU | Ryzen 9 7900X / X870E | AMD Radeon 610M (RDNA2 iGPU) or NVIDIA RTX 4070 (Ada, boot GOP GPU) native DRM/KMS and render driver | [GRAPHICS.md §9](GRAPHICS.md#9-drivers-and-order) | **Planned** | M-G.6 |
+| `msm` (MDSS DPU1 + DP) | Radxa Dragon Q8B (Qualcomm SC8280XP, Tier 2) | Dual-MDSS v8.1 / DPU1 display processor (`0x0ae00000`), 4× DP/eDP controllers, `DISP_CC_0`, and QMP V5 5nm USB4/USB3/DP combo PHYs | `specs/qcom-mdss-dpu` | **Planned** | Tier 2 (M-G) |
+| `msm` (Adreno 690) | Radxa Dragon Q8B (Qualcomm SC8280XP, Tier 2) | Qualcomm **Adreno 690** 3D/compute GPU (`QCOM0636` / `0x03d00000`), Cortex-M3 GMU (`a660_gmu.bin`), HFI DVFS, GPUCC, per-process SMMUv2 (`0x03da0000`), and TrustZone PAS 13 Zap shader for Mesa Turnip | `specs/adreno-a690` | **Planned** | Tier 2 (M-G) |
+| `k3-display` & PowerVR `pvr` | Banana Pi BPI-SM10 (SpacemiT K3) | SpacemiT K3 DPU (DisplayPort 1.2 / MIPI DSI) and Imagination **PowerVR BXM-4-64** Rogue GPU (`rogue_36.56.104.183_v1.fw`) | `specs/spacemit-k3` (`16-display.md`) | **Planned** | Later |
+
+### Video codecs, NPUs, and audio (Post-Day 1)
+
+| Driver | Hardware / Target | Description | Spec / Crate | Status | Phase |
+|---|---|---|---|---|---|
+| `linlon-vpu` | Orange Pi 6 Plus / Radxa Orion O6 (CIX Sky1) & SpacemiT K3 | Arm China **Linlon v52_v76** (Mali-V lineage, `CIXH3010`) multi-core stateful video decoder/encoder: session MMU, firmware RPC queues, and V4L2 M2M ABI | `specs/linlon-vpu`, `specs/spacemit-k3` (`18-vpu.md`) | **Planned** | Later |
+| `zhouyi-npu` | Orange Pi 6 Plus / Radxa Orion O6 (CIX Sky1) | Arm China **Zhouyi X2 (v3)** NPU (`CIXH4000` at `0x14260000`): TSM, command pools, TCB chains, and `/dev/aipu` ABI | `specs/zhouyi-npu` | **Planned** | Later |
+| `sky1-audio` | Orange Pi 6 Plus / Radxa Orion O6 (CIX Sky1) | Audio clock/reset unit (`CIXHA018`), IPbloq HD-Audio controller (`CIXH6020`, ALC269VC codec), 5× DP multi-channel I²S controllers, Arm DMA-350, and HiFi5 DSP | `specs/sky1-audio` | **Planned** | M-D / Later |
+| `qcom-iris-vpu` | Radxa Dragon Q8B (Qualcomm SC8280XP, Tier 2) | Qualcomm **Iris / Venus VPU 2.0** (`0x0aa00000`): PAS 9 firmware boot, `videocc` Lucid 5LPE PLL & GDSCs, HFI Gen2 queues, and V4L2 M2M stateful H.264/HEVC/VP9 codec | `specs/qcom-iris-vpu` | **Planned** | Tier 2 (Later) |
+| `qcom-fastrpc` | Radxa Dragon Q8B (Qualcomm SC8280XP, Tier 2) | Qualcomm **Hexagon CDSP / NSP0** (v68 HVX + HMX): PAS 18 boot, GLINK RPC transport, 14 Apps SMMU context banks, and `/dev/fastrpc-cdsp*` ABI | `specs/qcom-fastrpc` | **Planned** | Tier 2 (Later) |
+| `qcom-audioreach` | Radxa Dragon Q8B (Qualcomm SC8280XP, Tier 2) | Qualcomm LPASS AudioReach (GPR, APM/PRM over ADSP GLINK), SoundWire controllers, and WCD9385 codec | `specs/qcom-sc8280xp` (`05-audioreach-soundwire-wcd9385.md`) | **Planned** | Tier 2 (Later) |
+| `spacemit-i2s` | Banana Pi BPI-SM10 (SpacemiT K3) | SpacemiT K3 I²S audio controller | `specs/spacemit-k3` (`12-i2s.md`) | **Planned** | Later |
 
 ## 4. Board profile: Orange Pi 6 Plus (CIX P1 / Sky1)
 

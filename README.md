@@ -31,7 +31,7 @@ desktop.
 | [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | The 2% performance parity gate, methodology, fairness rules, and benchmark suites |
 | [docs/ENGINEERING.md](docs/ENGINEERING.md) | Rust conventions: algebraic types, `unsafe` policy, errors, style |
 | [docs/BUILD-AND-TEST.md](docs/BUILD-AND-TEST.md) | Toolchain, `xtask`, QEMU/bhyve, the build server, the test pyramid |
-| [docs/HARDWARE.md](docs/HARDWARE.md) | Platform requirements and the driver matrix by phase |
+| [docs/HARDWARE.md](docs/HARDWARE.md) | Platform requirements, supported hardware, and the driver matrix |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Phased roadmap with deliverables and exit criteria |
 | [docs/adr/](docs/adr/) | Architecture Decision Records |
 
