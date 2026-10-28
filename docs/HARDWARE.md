@@ -20,8 +20,14 @@ out of scope for Day 1.
 | Tier | AMD64 | ARM64 | RV64 (Day 2, P10) |
 |---|---|---|---|
 | **Tier 1, virtual** (CI gate) | QEMU q35 + OVMF; bhyve UEFI | QEMU virt (gicv3, acpi=on) + edk2 | QEMU virt (aia=aplic-imsic, acpi=on) + edk2 |
-| **Tier 1, physical** (untouched until P6's exit, gating from P7; RV64: untouched until P10's QEMU exit, gating from then) | **Ryzen 9 7900X on Gigabyte X870E AORUS ELITE WIFI7**, see [§5](#5-board-profile-amd64-ryzen-9-7900x--x870e-aorus-elite-wifi7) and [ADR-0009](adr/0009-amd64-reference-machine-ryzen-x870e.md) | **Orange Pi 6 Plus** (CIX P1 / Sky1), see [§4](#4-board-profile-orange-pi-6-plus-cix-p1--sky1) and [ADR-0008](adr/0008-arm64-reference-board-orange-pi-6-plus.md) | **Banana Pi BPI-SM10** (SpacemiT K3), see [§6](#6-board-profile-rv64-banana-pi-bpi-sm10-spacemit-k3) and [ADR-0017](adr/0017-rv64-reference-board-bpi-sm10.md). Tier 1 only once it boots UEFI with ACPI |
+| **Tier 1, physical** (untouched until P6's exit, gating from P7; RV64: untouched until P10's QEMU exit, gating from then) | **Ryzen 9 7900X on Gigabyte X870E AORUS ELITE WIFI7** (dedicated test machine, [§5](#5-board-profile-amd64-ryzen-9-7900x--x870e-aorus-elite-wifi7), [ADR-0009](adr/0009-amd64-reference-machine-ryzen-x870e.md)); **Ryzen 7 9700X on ASRock B650E Taichi Lite** (dev workstation, [§6](#6-board-profile-amd64-ryzen-7-9700x--asrock-b650e-taichi-lite)); **Core i7-12700KF on MSI PRO Z690-A DDR4** (build/test server, [§7](#7-board-profile-amd64-intel-core-i7-12700kf--msi-pro-z690-a-ddr4)) | **Orange Pi 6 Plus** (CIX P1 / Sky1), see [§4](#4-board-profile-orange-pi-6-plus-cix-p1--sky1) and [ADR-0008](adr/0008-arm64-reference-board-orange-pi-6-plus.md) | **Banana Pi BPI-SM10** (SpacemiT K3), see [§8](#8-board-profile-rv64-banana-pi-bpi-sm10-spacemit-k3) and [ADR-0017](adr/0017-rv64-reference-board-bpi-sm10.md). Tier 1 only once it boots UEFI with ACPI |
 | **Tier 2, best effort** | Other UEFI desktops/laptops | Radxa Orion O6 (same SoC), **Radxa Dragon Q8B** (see below), other SystemReady boards, Raspberry Pi 4/5 with community UEFI+ACPI firmware | Other UEFI+ACPI (RVI BRS) boards |
+
+The three AMD64 reference machines cover both major x86 vendors and microarchitectural families:
+
+- **Ryzen 9 7900X / Gigabyte X870E AORUS ELITE WIFI7** ([§5](#5-board-profile-amd64-ryzen-9-7900x--x870e-aorus-elite-wifi7)): the dedicated AMD64 bare-metal test machine (Zen 4, dual-CCD, dedicated second NVMe for AbyssBSD, Realtek RTL8125 2.5 GbE, ASMedia ASM4242 USB4, RTX 4070 + Radeon 610M).
+- **Ryzen 7 9700X / ASRock B650E Taichi Lite** ([§6](#6-board-profile-amd64-ryzen-7-9700x--asrock-b650e-taichi-lite)): the primary development workstation (Zen 5 Granite Ridge, single-CCD, Killer E3000 / RTL8125 2.5 GbE, ASMedia ASM1062 SATA, Intel Maple Ridge Thunderbolt 4, RTX 5070 Ti + Radeon 610M). Boots AbyssBSD from removable USB media.
+- **Intel Core i7-12700KF / MSI PRO Z690-A DDR4** ([§7](#7-board-profile-amd64-intel-core-i7-12700kf--msi-pro-z690-a-ddr4)): the FreeBSD 15.1 build/test and `bhyve` benchmark server (`abyss-build`). As a bare-metal USB boot target it exercises Intel-specific paths that the two Ryzen machines lack: hybrid Golden Cove P-cores + Gracemont E-cores, firmware-enabled x2APIC + TSC-deadline LAPIC timer, Intel Speed Shift (HWP), Intel VT-d (DMAR), Intel I225-V (`igc`), and discrete RDNA2 graphics (Radeon RX 6700 XT).
 
 The **Radxa Dragon Q8B** (Qualcomm SC8280XP) runs FreeBSD under ACPI in the sibling project
 `../AbyssBSD`: stock GENERIC, root on NVMe, Ethernet, USB, power and thermal, GPU and display. Its
@@ -31,10 +37,6 @@ at EL1 under Qualcomm's hypervisor, which polices SMMU programming, and ACPI rou
 power through Windows' PEP, so those need native drivers keyed on the SoC. Its GPU, NPU and video
 drivers there go through LinuxKPI; here they are rebuilt in Rust ([ROADMAP](ROADMAP.md) open
 decision 7).
-
-The build server (Alder Lake i7-12700KF, hybrid P/E cores) is a good
-*occasional* amd64 boot target from USB, which exercises the hybrid-core scheduler, but it is not
-a CI target.
 
 ## 3. Driver matrix
 
@@ -77,7 +79,7 @@ Legend:
 | VirtIO PCI (`virtio_pci`) | Modern (`VIRTIO 1.x`) and transitional PCI transport, virtqueues, MSI-X / INTx | `sys/virtio` | **Supported** | P3 |
 | USB xHCI (`xhci`) & USB bus (`usbus`, `uhub`) | xHCI 1.2 host controller on PCI (class `0c0330`) and ACPI (`PNP0D10`, Sky1), MSI-X, bulk streams, USB 2.0/3.0 root and external hubs | `drivers/xhci`, `sys/usb`, `lib/xhci`, `lib/usb` | **Supported** (PCI in QEMU); **Experimental** (ACPI `PNP0D10` & physical controllers) | Track U (P6) / P7 |
 | HID bus (`usbhid`, `hidbus`) | USB HID transport and generic HID report descriptor parser | `sys/hid`, `lib/hid` | **Supported** | Track U (P6) |
-| USB4 / Thunderbolt 3 Connection Manager | Software Connection Manager for ASMedia ASM4242 (`174c:2428`, PCI class `0c0340`) on X870E: NHI rings, router enumeration, TMU, CLx, PCIe/USB3/DP tunneling | `specs/usb4-cm` | **Planned** | Later |
+| USB4 / Thunderbolt 3/4 Connection Manager | Software Connection Manager for ASMedia ASM4242 (`174c:2428`, PCI class `0c0340`) on X870E and Intel Maple Ridge Thunderbolt 4 (`8086:1134`) on B650E Taichi Lite: NHI rings, router enumeration, TMU, CLx, PCIe/USB3/DP tunneling | `specs/usb4-cm` | **Planned** | Later |
 | Synopsys DWC3 & USB PHYs (SoC glue) | SpacemiT K3 USB2 PHY, USB3/PCIe combo PHY, and DWC3 host/dual-role integration; Qualcomm SC8280XP DWC3 RX threshold quirk | `specs/spacemit-k3` (`07`, `08`), `specs/qcom-sc8280xp` (`01`) | **Planned** | P7 / P10 / Later |
 | SpacemiT K3 PCIe (`k3-pcie`) | DesignWare PCIe Gen3 controller and combo PHY (if not fully initialized by UEFI/ECAM) | `specs/spacemit-k3` (`13-pcie.md`) | **Planned** | P10 |
 
@@ -100,8 +102,8 @@ Drivers planned from the clean-room specifications in `~/Projects/OS/chinese-wal
 | Driver | Hardware / Interface | Crate / Spec | Status | Phase |
 |---|---|---|---|---|
 | `vtblk` (`vtbd*`) | VirtIO block device (modern and transitional) | `drivers/virtio-blk` | **Supported** | P3 |
-| `nvme` (`nda*`) | PCIe NVM Express 2.0 controllers (admin & per-CPU I/O queues, MSI-X, PRPs) | `drivers/nvme` | **Supported** (QEMU/bhyve); **Experimental** (bare-metal NVMe on X870E & Orange Pi 6 Plus) | P3 / P7 |
-| `ahci` / `ahcich` (`ada*`) | SATA AHCI 1.3.1 controllers (NCQ, DMA, MSI-X/MSI/INTx) | `drivers/ahci` | **Supported** (QEMU/bhyve); **Experimental** (AMD 600-series AHCI on X870E) | P3 / P7 |
+| `nvme` (`nda*`) | PCIe NVM Express 1.4/2.0 controllers (admin & per-CPU I/O queues, MSI-X, PRPs) | `drivers/nvme` | **Supported** (QEMU/bhyve); **Experimental** (bare-metal NVMe on X870E, B650E, Z690-A & Orange Pi 6 Plus) | P3 / P7 |
+| `ahci` / `ahcich` (`ada*`) | SATA AHCI 1.3.1 controllers (NCQ, DMA, MSI-X/MSI/INTx) | `drivers/ahci` | **Supported** (QEMU/bhyve); **Experimental** (AMD 600-series AHCI on X870E/B650E, ASMedia ASM1062 on B650E, Intel 600-series AHCI on Z690-A) | P3 / P7 |
 | `md` (`md*`) | Memory disks (malloc and swap-backed) | `kernel` (`sys/storage`) | **Supported** | P4 / P5 |
 | `umass` (`da*`) | USB mass storage over Bulk-Only Transport (BBB) and USB Attached SCSI (UAS) | `drivers/umass`, `lib/scsi` | **Supported** (QEMU); **Experimental** (physical USB media in P7) | Track U (P6) / P7 |
 | `sdhci_msm` / `k3-sdhci` | Qualcomm SC8280XP SDHCI-MSM v5 and SpacemiT K3 SD/MMC host controller | `specs/qcom-sc8280xp` (`01`), `specs/spacemit-k3` (`03-sdhci.md`) | **Planned** | P10 / Later |
@@ -115,8 +117,8 @@ Drivers planned from the clean-room specifications in `~/Projects/OS/chinese-wal
 | `lo` | Loopback network interface | `sys/socket` / net stack | **Planned** | P6 / P8 |
 | `vtnet` | VirtIO network device (multi-queue, checksum & TSO offloads) | — | **Planned** | P8 |
 | `em` (`e1000e`) | Intel I219 / 82574 1 GbE PCIe controllers | — | **Planned** | P8 |
-| `igc` | Intel I225 / I226 2.5 GbE PCIe controllers | — | **Planned** | P8 |
-| `rge` | **Realtek RTL8125 (2.5 GbE) & RTL8126 (5 GbE)** PCIe controllers (onboard NICs on the X870E and Orange Pi 6 Plus: multi-queue RSS, MSI-X, TSO, EEE, PHY microcode patching) | `specs/realtek-rtl8125-delta` | **Planned** | P8 |
+| `igc` | **Intel I225 / I226 2.5 GbE** PCIe controllers (onboard **I225-V** `8086:15f3` on the MSI PRO Z690-A build server) | — | **Planned** | P8 |
+| `rge` | **Realtek RTL8125 / Killer E3000 (2.5 GbE) & RTL8126 (5 GbE)** PCIe controllers (onboard NICs on the X870E `10ec:8125`, B650E Taichi Lite `10ec:3000`, and Orange Pi 6 Plus: multi-queue RSS, MSI-X, TSO, EEE, PHY microcode patching) | `specs/realtek-rtl8125-delta` | **Planned** | P8 |
 | `dwc_eqos` (`dwmac`) | Synopsys DesignWare EQoS 1 GbE MAC (`0xCAC82000`) with MDIO child bus and Realtek RTL8211F RGMII PHY (onboard NIC on the Banana Pi BPI-SM10) | `specs/spacemit-k3` (`06-dwmac.md`) | **Planned** | P8 / P10 |
 | `tc956x` | **Toshiba TC9563** PCIe Gen3 switch + dual Synopsys DesignWare XGMAC2 v3.01a 2.5 GbE MACs, XPCS, SerDes PMA, and QCA8081 PHYs (onboard NICs on the Radxa Dragon Q8B) | `specs/tc956x` | **Planned** | Tier 2 (P8+) |
 
@@ -134,11 +136,11 @@ See [docs/GRAPHICS.md](GRAPHICS.md) for the DRM/KMS architecture and step order.
 
 | Driver | Hardware / Target | Description | Spec / Crate | Status | Phase |
 |---|---|---|---|---|---|
-| `gop-kms` | All UEFI platforms (QEMU, bhyve, X870E, Orange Pi 6 Plus, BPI-SM10) | Simple atomic KMS driver over the UEFI GOP boot framebuffer (`/dev/dri/card0`) with seamless handover to native display drivers | [GRAPHICS.md §7.5](GRAPHICS.md#75-firmware-handover) | **Planned** | M-G.1 |
+| `gop-kms` | All UEFI platforms (QEMU, bhyve, X870E, B650E, Z690-A, Orange Pi 6 Plus, BPI-SM10) | Simple atomic KMS driver over the UEFI GOP boot framebuffer (`/dev/dri/card0`) with seamless handover to native display drivers | [GRAPHICS.md §7.5](GRAPHICS.md#75-firmware-handover) | **Planned** | M-G.1 |
 | `virtio-gpu` | QEMU (`x86_64`, `aarch64`, `riscv64`) | VirtIO GPU 2D KMS and 3D (Venus / virglrenderer) with host-visible blob memory, fences, and `dma-buf` | [GRAPHICS.md §9](GRAPHICS.md#9-drivers-and-order) | **Planned** | M-G.2 / M-G.3 |
 | `linlondp` + `sky1-dp-tx` | Orange Pi 6 Plus / Radxa Orion O6 (CIX Sky1) | Arm China **Linlon-D6** (Mali-D71 / Komeda family) DPU (`CIXH5010`) + 5× **Trilinear DPTX** DisplayPort 1.4 transmitters (`CIXH502F`), USB-C/DP combo PHY, eDP panel (`CIXH5040`), and backlight (`CIXH5041`) | `specs/linlon-dpu`, `specs/sky1-dp-tx` | **Planned** | M-G.4 |
 | `panthor` | Orange Pi 6 Plus / Radxa Orion O6 (CIX Sky1) & RK3588 | Arm **Immortalis-G720** (and Mali-G610) CSF GPU (`CIXH5000`): MCU firmware loader, Command Stream Frontend (CSF) scheduler, GPU MMU (`IoAddressSpace`), tiler heap, and DRM render node for Mesa `panvk` | `specs/panthor` | **Planned** | M-G.5 |
-| `amdgpu` / native AMD64 GPU | Ryzen 9 7900X / X870E | AMD Radeon 610M (RDNA2 iGPU) or NVIDIA RTX 4070 (Ada, boot GOP GPU) native DRM/KMS and render driver | [GRAPHICS.md §9](GRAPHICS.md#9-drivers-and-order) | **Planned** | M-G.6 |
+| `amdgpu` / native AMD64 GPU | X870E, B650E Taichi Lite, Z690-A | AMD Radeon 610M (RDNA2 iGPU on 7900X & 9700X), AMD Radeon RX 6700 XT (RDNA2 Navi 22 `1002:73df` on Z690-A), NVIDIA RTX 4070 (Ada `10de:2786` on X870E), or NVIDIA RTX 5070 Ti (Blackwell `10de:2c05` on B650E) native DRM/KMS and render driver | [GRAPHICS.md §9](GRAPHICS.md#9-drivers-and-order) | **Planned** | M-G.6 |
 | `msm` (MDSS DPU1 + DP) | Radxa Dragon Q8B (Qualcomm SC8280XP, Tier 2) | Dual-MDSS v8.1 / DPU1 display processor (`0x0ae00000`), 4× DP/eDP controllers, `DISP_CC_0`, and QMP V5 5nm USB4/USB3/DP combo PHYs | `specs/qcom-mdss-dpu` | **Planned** | Tier 2 (M-G) |
 | `msm` (Adreno 690) | Radxa Dragon Q8B (Qualcomm SC8280XP, Tier 2) | Qualcomm **Adreno 690** 3D/compute GPU (`QCOM0636` / `0x03d00000`), Cortex-M3 GMU (`a660_gmu.bin`), HFI DVFS, GPUCC, per-process SMMUv2 (`0x03da0000`), and TrustZone PAS 13 Zap shader for Mesa Turnip | `specs/adreno-a690` | **Planned** | Tier 2 (M-G) |
 | `k3-display` & PowerVR `pvr` | Banana Pi BPI-SM10 (SpacemiT K3) | SpacemiT K3 DPU (DisplayPort 1.2 / MIPI DSI) and Imagination **PowerVR BXM-4-64** Rogue GPU (`rogue_36.56.104.183_v1.fw`) | `specs/spacemit-k3` (`16-display.md`) | **Planned** | Later |
@@ -235,7 +237,59 @@ The AMD64 Tier 1 physical machine. Surveyed read-only from its Fedora 44 install
   selected with `BootNext` (`efibootmgr -n`) from Fedora so a failed boot falls back to Fedora on
   reset.
 
-## 6. Board profile: RV64 Banana Pi BPI-SM10 (SpacemiT K3)
+## 6. Board profile: AMD64 Ryzen 7 9700X / ASRock B650E Taichi Lite
+
+The primary AMD64 development workstation (`192.168.0.15`, Fedora Linux 44). Surveyed read-only on
+2026-10-28.
+
+| Item | Fact | What it means for AbyssBSD |
+|---|---|---|
+| CPU | AMD Ryzen 7 9700X (Zen 5, Granite Ridge, Family `0x1a` Model `0x44` Stepping 0): 8 cores / 16 threads, single CCD (32 MiB L3). Full-width AVX-512 (`avx512f`/`dq`/`ifma`/`cd`/`bw`/`vl`/`bf16`/`vbmi`/`vbmi2`/`vnni`/`bitalg`/`vpopcntdq`/`vp2intersect`), FSGSBASE, INVPCID, SMEP, SMAP, UMIP, PKU, RDSEED, SHA, VAES, GFNI, MOVDIRI/MOVDIR64B, CPPC, AVIC/x2AVIC. **No LA57** (48-bit physical/virtual). **No TSC-deadline** | 4-level paging. XSAVE state includes AVX-512. Single CCD means uniform L3 topology across all 16 threads (contrasting with the dual-CCD 7900X). LAPIC timer runs in one-shot mode calibrated against HPET/TSC |
+| Memory | 48 GB DDR5 (~46 GiB usable after Radeon 610M UMA carveout) | — |
+| Firmware | AMI UEFI 3.20 (2025-02-21), 64-bit. **Secure Boot disabled, setup mode** | Our unsigned UEFI loader boots directly from removable USB media |
+| ACPI | APIC (MADT), BGRT, DSDT (~471 KB), FACP, FACS, FIDT, FPDT, HPET, IVRS, MCFG, **14 SSDTs**, TPM2, VFCT, WSMT. **No SPCR, no WDRT** | Second large AMD/AMI AML corpus (`ASRock` / Granite Ridge). Unlike the X870E, firmware omits `WDRT`, so `amdsbwd` must also support probing via the FCH LPC/PMIO registers or ACPI resources |
+| Interrupts | Firmware leaves the APIC in **xAPIC** mode (`extd_apicid`, no `x2apic` advertised in CPUID). IOAPIC, MSI/MSI-X | Exercises the same xAPIC MMIO path as the X870E |
+| Timers | Invariant TSC (`constant_tsc`, `nonstop_tsc`), HPET, ACPI PM timer, LAPIC | TSC is the timecounter; HPET/ACPI PM timer calibrate TSC and LAPIC |
+| CPU frequency | `amd-pstate-epp` under Linux (ACPI CPPC) | Generic ACPI CPPC driver (P9) |
+| Display | Boot VGA (UEFI GOP) is the **NVIDIA GeForce RTX 5070 Ti** (Blackwell GB203, `10de:2c05`). The Granite Ridge iGPU (**Radeon 610M**, `1002:13c0`) is also active | GOP framebuffer console on the RTX 5070 Ti for early bring-up; Radeon 610M and Blackwell GPU drivers belong to M-G |
+| Storage | NVMe 0: WD Blue SN570 1 TB (`15b7:501a`, `nvme0n1`, **Fedora 44 system disk**). NVMe 1: Samsung 990 PRO 4 TB (`144d:a80c`, `nvme1n1`, **NTFS data**). SATA: AMD 600-series AHCI (`1022:43f6`) + 2× **ASMedia ASM1061/ASM1062** AHCI (`1b21:0612`), with Samsung 840 EVO 250 GB (`sda`, NTFS) | **All internal NVMe and SATA drives hold host OS or user data and are never written.** AbyssBSD boots from removable USB media (`umass` / `da*`) and attaches internal disks read-only |
+| Network | **Realtek Killer E3000 2.5 GbE** (`10ec:3000` rev 06, RTL8125B family), Intel Wi-Fi 6E AX210 (`8086:2725`) | Covered by the `rge` driver (P8) once PCI ID `10ec:3000` is included alongside `10ec:8125` and `10ec:8126`. Wi-Fi is out of scope for Day 1 |
+| USB & Thunderbolt | AMD 600-series chipset xHCI (`1022:43f7`), Granite Ridge CPU xHCI ×3 (`1022:15b6`, `15b7`, `15b8`), **Intel Maple Ridge Thunderbolt 4** bridge (`8086:1133`), NHI (`8086:1134`), and xHCI (`8086:1135`), plus 2× external ASMedia ASM1074 USB 3.0 hubs (`174c:2074`/`3074`) | Exercises multi-controller PCI xHCI, external hub trees, and provides a discrete Intel Thunderbolt 4 host router alongside the X870E's ASMedia ASM4242 USB4 router |
+| Serial | No SPCR. ACPI lists FCH UART (`AMDI0020`) and `PNP0500`. Host carries an FTDI FT232 USB-UART adapter (`0403:6001`) used to drive serial consoles on target boards | Bring-up uses the GOP framebuffer console and persistent RAM log ring on the USB ESP |
+| Other | TPM 2.0 (`MSFT0101`), AMD Family 19h PSP/CCP (`1022:1649`), HD Audio ×3 (`10de:22e9`, `1002:1640`, `1022:15e3`), FCH SMBus (`1022:790b`) with DDR5 SPD5118 sensors, I²C (`AMDI0010`), GPIO (`AMDI0030`) | Not Day 1 |
+
+## 7. Board profile: AMD64 Intel Core i7-12700KF / MSI PRO Z690-A DDR4
+
+The FreeBSD 15.1-RELEASE build, test, and `bhyve` benchmark server (`abyss-build` at
+`192.168.0.2`), and the Intel hybrid-core bare-metal reference platform. Surveyed read-only on
+2026-10-28.
+
+| Item | Fact | What it means for AbyssBSD |
+|---|---|---|
+| Board | Micro-Star International **PRO Z690-A DDR4 (MS-7D25)** v1.0 | Standard Intel 600-series desktop ATX platform |
+| CPU | 12th Gen Intel Core i7-12700KF (Alder Lake, Family `0x6` Model `0x97` Stepping 2): **12 cores / 20 threads** — **8 Golden Cove P-cores** (CPU 0–15, 2-way SMT) + **4 Gracemont E-cores** (CPU 16–19, no SMT), 25 MiB shared L3. AVX2, FSGSBASE, INVPCID, SMEP, SMAP, UMIP, PKU, WAITPKG, GFNI, VAES, VPCLMULQDQ, RDPID, MOVDIRI/MOVDIR64B, RDSEED, SHA, IBT, `IA32_ARCH_CAPS` (`RDCL_NO`, `IBRS_ALL`, `MDS_NO`, `TAA_NO`), VT-x (EPT, UG, VPID, Posted Interrupts). **No AVX-512** | Primary x86 testbed for **hybrid P/E core topology** (CPUID leaf `0x1A` native model ID + leaf `0x1F` V2 extended topology) and asymmetric capacity scheduling. `RDCL_NO` allows skipping Meltdown PTI on bare metal ([PERFORMANCE.md](PERFORMANCE.md)) |
+| Memory | 128 GiB DDR4 (`137,434,759,168` bytes physical) | Large physical memory map (>64 GiB) |
+| Firmware | AMI UEFI 1.00 (2021-09-14, SMBIOS 3.4), 64-bit UEFI boot (`VT(efifb)` 1024×768) | Boots unsigned UEFI loaders from removable USB media |
+| ACPI | XSDT, FACP (rev 6), DSDT (~508 KB), **10 SSDTs** (`CpuRef`/`CpuSsdt`, `SaSsdt`, `IgfxSsdt`, `Ther_Rvp`, `PtidDevc`, `TbtTypeC`, `xh_adls3`, `SocGpe`, `SocCmn`, `ADebTabl`), FIDT, HPET, APIC (MADT rev 5), MCFG, UEFI, NHLT, LPIT, DBGP, DBG2, **DMAR** (Intel VT-d), VFCT, TPM2, BGRT, PHAT, WSMT, FPDT. **No SPCR** | Exercises Intel client AML (`\_SB_.PC00`, Alder Lake power management `INT33A1` PEPD, `LPIT` low-power idle table) and **DMAR** for Intel VT-d IOMMU support in P9 |
+| Interrupts | Firmware enables **x2APIC** and **TSC-deadline (`TSCDLT`)**. IOAPIC (`ioapic0`, IRQs 0–119), MSI/MSI-X | Exercises the hardware x2APIC MSR + TSC-deadline LAPIC timer path on real silicon (unlike the two Ryzen boards, which boot in xAPIC mode without TSC-deadline) |
+| Timers | Invariant TSC (`TSC-low`, ~1.80 GHz ×2), TSC-deadline LAPIC timer, **19.2 MHz HPET** (8 comparators), 3.58 MHz ACPI-fast timer, i8254 (`attimer0`), CMOS RTC (`atrtc`, `PNP0B00`) + UEFI `efirtc0` | Note the 19.2 MHz Intel crystal HPET frequency (vs 14.318 MHz on AMD) |
+| CPU frequency | **Intel Speed Shift (`hwpstate_intel` / HWP)** + `acpi_perf` | Exercises native Intel HWP MSRs (`IA32_PM_ENABLE`, `IA32_HWP_CAPABILITIES`, `IA32_HWP_REQUEST`) in P9 |
+| Watchdog | Intel 600-series TCO / WDT (`INTC1099` `CWDT` on `LPCB`, SMBus `8086:7aa3`) | Exercises `drivers/ichwd` on physical Intel 600-series silicon |
+| Display | Discrete **AMD Radeon RX 6700 XT** (RDNA2 Navi 22, `1002:73df`, behind PCIe switch `1002:1478`/`1479`). The `-KF` CPU has no integrated GPU | UEFI GOP framebuffer (`1024×768`) for early console; discrete RDNA2 target for `amdgpu` in M-G.6 |
+| Storage | `nvme0` (`nda0`): WD Black SN850X 1 TB (`15b7:5030`, NVMe 1.4, Windows). `nvme1` (`nda1`): Samsung 990 PRO 1 TB (`144d:a80c`, NVMe 2.0, **FreeBSD 15.1-RELEASE `zroot` ZFS pool**). `ahci0`: Intel Z690 AHCI (`8086:7ae2`, 8 ports, AHCI 1.31) with Intel 240 GB SATA SSD (`ada0`, NTFS) and optical drive (`cd0`) | **Internal drives host the CI/build server and are never written.** Bare-metal AbyssBSD runs boot strictly from a dedicated USB flash drive (`umass` / `da*`) with internal disks attached read-only |
+| Network | **Intel Ethernet Controller I225-V 2.5 GbE** (`8086:15f3` rev 03, `igc0`, 4 TX/RX queues, 5 MSI-X vectors) | Primary physical target for the `igc` 2.5 GbE driver in P8 |
+| USB | Intel 600-series USB 3.2 Gen 2x2 (20 Gbps) xHCI (`8086:7ae0`, 32-byte context, 64-bit DMA), USB HID keyboard (`hkbd0`) and mouse (`hms0`) | Exercises Intel PCH xHCI and USB boot media |
+| Other | Intel Z690 eSPI (`isab0`, `8086:7a84`), SMBus (`ichsmb0`, `8086:7aa3`), SPI flash (`8086:7aa4`), Intel HDA (`8086:7ad0`, Realtek ALC897 codec) + Navi 21/23 HDMI/DP HDA (`1002:ab28`), Gaussian & Neural Accelerator (`8086:464f`), Intel PMT (`8086:467d`), CSME HECI (`8086:7ae8`) | Not Day 1 |
+
+**Access and workflow.**
+
+- Runs FreeBSD 15.1-RELEASE at `192.168.0.2` (ssh alias `abyss-build`, user `jkane`, `doas`).
+- Hosts the self-hosted CI pipeline, `bhyve` virtual Tier 1 gate, P2–P6 performance gate (pinned to
+  P-cores), and FreeBSD differential/filesystem reference tooling ([BUILD-AND-TEST.md](BUILD-AND-TEST.md)).
+- Bare-metal testing on this machine is occasional (manual USB boot outside CI windows) to validate
+  Intel-specific kernel paths without disturbing the FreeBSD ZFS pool on `nda1`.
+
+## 8. Board profile: RV64 Banana Pi BPI-SM10 (SpacemiT K3)
 
 The RV64 Tier 1 physical machine ([ADR-0017](adr/0017-rv64-reference-board-bpi-sm10.md)), on
 order as of 2026-10-27. Facts come from the clean-room specification
