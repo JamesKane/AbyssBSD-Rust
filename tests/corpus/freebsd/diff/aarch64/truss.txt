@@ -1,0 +1,29 @@
+(exit 0)
+$ truss -f (the traced process, between the markers)
+<traced>: access("diff-begin",F_OK) ERR#2 'No such file or directory'
+<traced>: openat(AT_FDCWD,"data",O_RDWR|O_CREAT|O_TRUNC,0644) = 3 (0x3)
+<traced>: write(3,"hello, world\n",13) = 13 (0xd)
+<traced>: lseek(3,0x0,SEEK_SET) = 0 (0x0)
+<traced>: read(3,"hello, world\n",32) = 13 (0xd)
+<traced>: fstat(3,{ mode=-rw-r--r-- ,inode=*,size=13,blksize=* }) = 0 (0x0)
+<traced>: close(3) = 0 (0x0)
+<traced>: unlink("data") = 0 (0x0)
+<traced>: __sysctl("kern.ostype",2,<addr>,<addr>,0x0,0) = 0 (0x0)
+<traced>: utrace({ 4: 64 69 66 66 }) = 0 (0x0)
+<traced>: sigprocmask(SIG_SETMASK,{ SIGHUP|SIGINT|SIGQUIT|SIGILL|SIGTRAP|SIGABRT|SIGEMT|SIGFPE|SIGKILL|SIGBUS|SIGSEGV|SIGSYS|SIGPIPE|SIGALRM|SIGTERM|SIGURG|SIGSTOP|SIGTSTP|SIGCONT|SIGCHLD|SIGTTIN|SIGTTOU|SIGIO|SIGXCPU|SIGXFSZ|SIGVTALRM|SIGPROF|SIGWINCH|SIGINFO|SIGUSR1|SIGUSR2 },{ }) = 0 (0x0)
+<traced>: sigaction(SIGUSR1,{ <addr> SA_SIGINFO ss_t },{ SIG_DFL 0x0 ss_t }) = 0 (0x0)
+<traced>: sigprocmask(SIG_SETMASK,{ },0x0) = 0 (0x0)
+<traced>: getpid() = <traced> (<hex>)
+<traced>: kill(<traced>,SIGUSR1) = 0 (0x0)
+<traced>: SIGNAL 30 (SIGUSR1) code=SI_USER pid=<traced> uid=0
+<traced>: sigprocmask(SIG_SETMASK,{ SIGUSR1 },0x0) = 0 (0x0)
+<traced>: sigreturn(<addr>) EJUSTRETURN
+<traced>: nanosleep({ 0.010000000 }) = 0 (0x0)
+<traced>: fork() = <child> (<hex>)
+<traced>: wait4(<child>,{ EXITED,val=3 },0x0,0x0) = <child> (<hex>)
+<traced>: access("diff-end",F_OK) ERR#2 'No such file or directory'
+$ truss -f (the child)
+<child>: <new process>
+<child>: thr_self(<addr>) = 0 (0x0)
+<child>: _exit(0x3)
+<child>: process exit, rval = 3

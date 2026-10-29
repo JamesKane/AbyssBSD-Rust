@@ -122,6 +122,7 @@ pub(super) fn sigsuspend(s: &Sleepable, sigmask: u64) -> SysResult {
     let t = thread()?;
     signal::swap_mask(&t, mask);
     let q = WaitQueue::new();
+    let _w = sched::wait_message("sigsusp");
     loop {
         if signal::sleep(s, &q, || false, None).is_err() {
             return Err(Errno::EINTR);
@@ -135,6 +136,13 @@ pub(super) fn sigreturn(frame: &mut TrapFrame, ucp: u64) -> SysResult {
     let uc = UserPtr::<Ucontext<Mcontext>>::new(ucp)
         .read()
         .map_err(|_| Errno::EFAULT)?;
+    // arm64's `sys_sigreturn` leaves the thread in no system call
+    // (`td_sa.code = -1`), which its return then reports.
+    if cfg!(target_arch = "aarch64")
+        && let Ok(t) = thread()
+    {
+        t.set_syscall_code(u32::MAX);
+    }
     set_context(frame, &uc)?;
     Err(Errno::EJUSTRETURN)
 }
@@ -288,7 +296,7 @@ pub(super) fn kill(pid: u64, signum: u64) -> SysResult {
     let me = process()?;
     let pid = int(pid);
     if pid != me.pid() {
-        crate::capsicum::check_capmode()?;
+        crate::capsicum::refuse(crate::ktrace::CapFail::Signal(int(signum)))?;
     }
     let sig = u32::try_from(int(signum)).map_err(|_| Errno::EINVAL)?;
     if sig != 0 && !signal::valid(sig) {
@@ -410,7 +418,7 @@ pub(super) fn sigqueue(pid: u64, signum: u64, value: u64) -> SysResult {
     let me = process()?;
     // In capability mode, only to itself (`kern_sigqueue`).
     if pid != me.pid() && flags & SIGQUEUE_TID == 0 {
-        crate::capsicum::check_capmode()?;
+        crate::capsicum::refuse(crate::ktrace::CapFail::Signal(sig.cast_signed()))?;
     }
     if pid <= 0 {
         return Err(Errno::EINVAL);
@@ -449,6 +457,7 @@ fn wait_for(s: &Sleepable, set: Sigset, timeout: Option<u64>) -> Result<Siginfo,
         if left == Some(0) {
             break Err(Errno::EAGAIN);
         }
+        let _w = sched::wait_message("sigwait");
         match crate::time::wait_interruptible(s, &q, || false, left) {
             Wait::TimedOut => {}
             Wait::Done => {}

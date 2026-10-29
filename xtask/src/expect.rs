@@ -288,6 +288,22 @@ pub(crate) const DYNAMIC_TESTS: &[Step] = &[step(
     "the user tests, dynamically linked",
 )];
 
+/// What FreeBSD's tests need of the UFS2 root when `ABYSS_ATF` runs them
+/// alone ([`crate::image::atf_only`]): it read-write, and base's
+/// programs first in the path.
+pub(crate) const ATF_SETUP: &[Step] = &[
+    step(
+        "mount -u -o rw / && echo rw-$?\n",
+        "\nrw-0\r\n",
+        "mount -u makes it read-write",
+    ),
+    step(
+        "PATH=/usr/bin:/bin:/usr/sbin:/sbin:/usr/tests/static\n",
+        "\n",
+        "base's own programs",
+    ),
+];
+
 /// FreeBSD's own tests the root holds (`tests.txz`'s libthr), run case by
 /// case by `run-atf`; [`atf_verdict`] compares the results with FreeBSD's.
 pub(crate) const FREEBSD_TESTS: &[Step] = &[step(

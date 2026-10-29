@@ -113,6 +113,7 @@ pub(crate) fn ap_main(_arg: usize) -> ! {
     crate::intc::init_ap(cpu);
     crate::time::init_cpu();
     crate::prof::start_cpu();
+    crate::statclock::start_cpu();
     crate::threads::init_fpu(false);
     arch::user::init_cpu();
     crate::topology::record_this_cpu(cpu);

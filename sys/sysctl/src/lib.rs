@@ -43,6 +43,14 @@ pub type BytesFn = Box<dyn Fn(&mut Vec<u8>) + Send + Sync>;
 /// [`Tree::handler`]), as FreeBSD runs handlers.
 pub type NodeFn = Arc<dyn Fn(&[i32], &mut Vec<u8>) -> Result<(), ReadError> + Send + Sync>;
 
+/// A node whose value depends on what the caller passes in (FreeBSD's
+/// handlers that `SYSCTL_IN` a key before they `SYSCTL_OUT`, as
+/// `kern.devname` takes a device number): the bytes written, if any, give
+/// the bytes read. It is shared and called after dropping the tree's lock,
+/// as [`NodeFn`]s are.
+pub type QueryFn =
+    Arc<dyn Fn(Option<&[u8]>, &mut Vec<u8>) -> Result<(), abi::errno::Errno> + Send + Sync>;
+
 /// Takes a written value (the bytes the caller passed); the kernel calls
 /// it after dropping the tree's lock.
 pub type WriteFn = Arc<dyn Fn(&[u8]) -> Result<(), abi::errno::Errno> + Send + Sync>;
@@ -248,6 +256,8 @@ struct Node {
     handler: Option<NodeFn>,
     /// For a writable leaf.
     writer: Option<WriteFn>,
+    /// For a node read with what is written ([`QueryFn`]).
+    query: Option<QueryFn>,
     /// A format other than its value's (`B` for a boolean `int`).
     format: Option<&'static str>,
     parent: Option<u32>,
@@ -301,6 +311,7 @@ impl Tree {
             value: None,
             handler: None,
             writer: None,
+            query: None,
             format: None,
             parent: None,
             children: Vec::new(),
@@ -432,6 +443,7 @@ impl Tree {
             value: spec.value,
             handler: None,
             writer: None,
+            query: None,
             format: None,
             parent: Some(parent.index),
             children: Vec::new(),
@@ -600,6 +612,36 @@ impl Tree {
         let id = self.add_node(parent, number, name, description)?;
         self.at_mut(id.index).handler = Some(handler);
         Ok(id)
+    }
+
+    /// Adds a leaf of `kind` (`CTLTYPE_*`, `CTLFLAG_*`) and `format` read
+    /// through `query`, with what the caller writes (see [`QueryFn`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_query(
+        &mut self,
+        parent: NodeId,
+        number: Number,
+        name: &str,
+        description: &str,
+        kind: u32,
+        format: &'static str,
+        query: QueryFn,
+    ) -> Result<NodeId, AddError> {
+        let id = self.add_node(parent, number, name, description)?;
+        let n = self.at_mut(id.index);
+        n.kind = kind;
+        n.format = Some(format);
+        n.query = Some(query);
+        Ok(id)
+    }
+
+    /// The query serving `oid`, if it names a node added with
+    /// [`Tree::add_query`]: the kernel clones it under the lock and calls
+    /// it after releasing the lock.
+    #[must_use]
+    pub fn query(&self, oid: &[i32]) -> Option<QueryFn> {
+        let n = self.node(self.lookup(oid)?)?;
+        n.query.clone()
     }
 
     /// The handler serving `oid` and the components it is passed, if a

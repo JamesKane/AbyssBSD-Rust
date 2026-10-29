@@ -95,6 +95,21 @@ pub(crate) struct Inner {
     pub(crate) since: u64,
     /// Time-sharing state, for threads in the time-sharing range.
     pub(crate) ts: Option<crate::ts::Usage>,
+    /// The recent CPU share (ULE's `ts_ticks` window), in `pctcpu::HZ`
+    /// ticks.
+    pub(crate) pct: crate::pctcpu::PctCpu,
+    /// What the sleep in progress waits for (`td_wmesg`; empty when the
+    /// thread is not asleep), and what its next sleeps are called (set
+    /// by [`crate::wait_message`]).
+    pub(crate) wmesg: &'static str,
+    pub(crate) next_wmesg: &'static str,
+    /// The queue of the sleep in progress (`td_wchan`), 0 when awake.
+    pub(crate) wchan: usize,
+    /// The sleep in progress may be interrupted (`TDF_SINTR`).
+    pub(crate) sintr: bool,
+    /// When the thread last went to sleep, in platform time
+    /// (`td_slptick`); 0 while it has not slept since it woke.
+    pub(crate) slept_at: u64,
 }
 
 /// A small set of mutexes (see [`Inner::contested`]).
@@ -192,6 +207,32 @@ impl Inner {
         }
         self.priority
     }
+}
+
+/// What [`Thread::report`] tells.
+#[derive(Clone, Copy, Debug)]
+pub struct Report {
+    pub state: State,
+    /// The wait message and channel of the sleep in progress (`""` and 0
+    /// when the thread is not asleep).
+    pub wmesg: &'static str,
+    pub wchan: usize,
+    /// The sleep may be interrupted by a signal (`TDF_SINTR`).
+    pub interruptible: bool,
+    /// When the thread went to sleep, in platform time; 0 if it is not
+    /// asleep.
+    pub slept_at: u64,
+    /// The effective, base, and user-mode priorities (`td_priority`,
+    /// `td_base_pri`, `td_user_pri`).
+    pub priority: Priority,
+    pub base: Priority,
+    pub user: Priority,
+    /// Recent CPU share, a fraction of [`crate::pctcpu::FSCALE`].
+    pub pctcpu: u32,
+    /// The CPU it runs on or last ran on.
+    pub cpu: CpuId,
+    /// A per-CPU idle thread.
+    pub idle: bool,
 }
 
 /// A fixed-size thread name.
@@ -292,6 +333,14 @@ pub struct Thread {
     /// CPU time consumed, in platform time units.
     pub(crate) runtime: AtomicU64,
     pub(crate) switches: AtomicU64,
+    /// Switches away because the thread slept (`ru_nvcsw`) and because it
+    /// was preempted (`ru_nivcsw`).
+    pub(crate) voluntary: AtomicU64,
+    pub(crate) involuntary: AtomicU64,
+    /// Statistics-clock ticks that found the thread in user mode, in the
+    /// kernel, and in an interrupt thread (`td_uticks`, `td_sticks`,
+    /// `td_iticks`): how its run time divides (`calcru`).
+    pub(crate) stat_ticks: [AtomicU64; 3],
     /// Locks held, for the witness and priority un-lending. Only the
     /// thread itself touches it.
     pub(crate) held: UnsafeCell<crate::lock::witness::Held>,
@@ -381,6 +430,12 @@ impl Thread {
                 since: 0,
                 ts: (priority >= Priority::TIMESHARE && priority < Priority::IDLE)
                     .then(|| crate::ts::Usage::new(priority.get() - Priority::TIMESHARE.get(), 0)),
+                pct: crate::pctcpu::PctCpu::new(crate::hz_now()),
+                wmesg: "",
+                next_wmesg: "",
+                wchan: 0,
+                sintr: false,
+                slept_at: 0,
             }),
             link: UnsafeCell::new(Link::new()),
             context: UnsafeCell::new(context),
@@ -392,6 +447,9 @@ impl Thread {
             joiners: WaitQueue::new(),
             runtime: AtomicU64::new(0),
             switches: AtomicU64::new(0),
+            voluntary: AtomicU64::new(0),
+            involuntary: AtomicU64::new(0),
+            stat_ticks: [const { AtomicU64::new(0) }; 3],
             held: UnsafeCell::new(crate::lock::witness::Held::new()),
             fpu,
             space: UnsafeCell::new(None),
@@ -435,6 +493,28 @@ impl Thread {
         self.inner.lock().cpu
     }
 
+    /// The frame pointer the thread was switched out with, where a walk
+    /// of its kernel stack starts; `None` while a CPU runs it (its stack
+    /// changes as one looks: FreeBSD's `KKST_STATE_RUNNING`).
+    #[must_use]
+    pub fn saved_frame_pointer(&self) -> Option<u64> {
+        if self.on_cpu.load(Ordering::Acquire) {
+            return None;
+        }
+        // SAFETY: read-only and racy by design (a diagnostic, as
+        // `stack_save_td`): the thread is off every CPU, so the words are
+        // the last switch's; a switch starting meanwhile only makes the
+        // walk stop early, as every frame read is checked.
+        let fp = unsafe { (*self.context.get()).frame_pointer() };
+        Some(fp)
+    }
+
+    /// Whether this is a per-CPU idle thread.
+    #[must_use]
+    pub fn is_idle(&self) -> bool {
+        self.idle
+    }
+
     /// Whether the thread has exited.
     #[must_use]
     pub fn has_exited(&self) -> bool {
@@ -460,9 +540,72 @@ impl Thread {
         self.switches.load(Ordering::Relaxed)
     }
 
+    /// Switches away because the thread slept and because it was
+    /// preempted (`ru_nvcsw`, `ru_nivcsw`).
+    #[must_use]
+    pub fn context_switches(&self) -> (u64, u64) {
+        (
+            self.voluntary.load(Ordering::Relaxed),
+            self.involuntary.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Statistics-clock ticks charged to the thread: in user mode, in the
+    /// kernel, and as an interrupt thread (see [`crate::stat_tick`]).
+    #[must_use]
+    pub fn stat_ticks(&self) -> [u64; 3] {
+        [0, 1, 2].map(|i| self.stat_ticks[i].load(Ordering::Relaxed))
+    }
+
+    /// What the thread is doing, for process listings: its state, the
+    /// sleep it is in, its priorities, and its recent CPU share.
+    #[must_use]
+    pub fn report(&self) -> Report {
+        let now = crate::hz_now();
+        let mut inner = self.inner.lock();
+        let running = inner.state == State::Running;
+        inner.pct.update(now, running);
+        Report {
+            state: inner.state,
+            wmesg: inner.wmesg,
+            wchan: inner.wchan,
+            interruptible: inner.sintr,
+            slept_at: inner.slept_at,
+            priority: inner.priority,
+            base: inner.base,
+            user: inner.floor(),
+            pctcpu: inner.pct.fraction(),
+            cpu: inner.cpu,
+            idle: self.idle,
+        }
+    }
+
     /// Asks for `bits` of work before the thread next returns to user mode
     /// (the kernel's return path checks [`Thread::ast_pending`]). Another
     /// CPU running the thread is not told; [`Thread::interrupt`] is.
+    /// Where the thread's saved FPU state is (`hal::fpu`'s layout) and
+    /// its size, if it has one: for a debugger to read or change while the
+    /// thread is stopped. The state is there only while the thread is off
+    /// CPU (switched out); it loads it from there as it next runs.
+    #[must_use]
+    pub fn fpu_area(&self) -> Option<(*mut u8, usize)> {
+        let f = self.fpu.as_ref()?;
+        Some((f.as_ptr(), f.layout.size()))
+    }
+
+    /// The thread's user thread registers (`hal::user::tls`, `tls2`) as
+    /// it left the CPU.
+    ///
+    /// # Safety
+    ///
+    /// The thread must be off CPU, and stay off while this reads.
+    #[must_use]
+    pub unsafe fn user_tls(&self) -> [u64; 2] {
+        // SAFETY: written only as the thread switches out; the caller
+        // guarantees it is off CPU.
+        unsafe { *self.tls.get() }
+    }
+
     pub fn request_ast(&self, bits: u32) {
         self.ast.fetch_or(bits, Ordering::SeqCst);
     }

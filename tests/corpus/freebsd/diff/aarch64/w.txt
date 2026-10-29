@@ -1,0 +1,13 @@
+$ uptime
+<clock> up <uptime>, N users, load averages: <l>, <l>, <l>
+(exit 0)
+$ w
+<clock> up <uptime>, N users, load averages: <l>, <l>, <l>
+USER TTY FROM LOGIN@ IDLE WHAT
+(exit 0)
+$ w -h
+(exit 0)
+$ w -n
+<clock> up <uptime>, N users, load averages: <l>, <l>, <l>
+USER TTY FROM LOGIN@ IDLE WHAT
+(exit 0)

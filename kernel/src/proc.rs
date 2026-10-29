@@ -41,7 +41,7 @@ use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicU64,
 
 use abi::errno::Errno;
 use abi::resource::{RLIM_INFINITY, Rlimit, WNOHANG, WNOWAIT, exit_status, rlimit};
-use abi::resource::{WCONTINUED, WUNTRACED};
+use abi::resource::{WCONTINUED, WTRAPPED, WUNTRACED};
 use abi::signal::code::{CLD_EXITED, CLD_KILLED};
 use sched::lock::{LockClass, Mutex};
 use sched::{Sleepable, WaitQueue};
@@ -60,7 +60,7 @@ use crate::uthread::{Name, UserThread};
 /// The highest pid (`PID_MAX`); allocation wraps to 2 past it.
 pub(crate) const PID_MAX: i32 = 99_999;
 /// init's pid, which inherits orphans.
-const INIT: i32 = 1;
+pub(crate) const INIT: i32 = 1;
 
 /// A process's [`Layout`], without a lock: only the process's own thread
 /// writes it (at exec) or reads it (`mmap`, signal delivery), and `mmap`
@@ -151,6 +151,9 @@ struct Tree {
     reaplist: BTreeMap<i32, Vec<i32>>,
     /// The reapers besides init (`P_TREE_REAPER`).
     reapers: alloc::collections::BTreeSet<i32>,
+    /// Each parent's children a debugger took (`p_orphans`): its `wait`
+    /// waits for them.
+    orphans: BTreeMap<i32, Vec<i32>>,
 }
 
 static TREE: SpinLock<Tree> = SpinLock::new(Tree {
@@ -160,6 +163,7 @@ static TREE: SpinLock<Tree> = SpinLock::new(Tree {
     subtree: BTreeMap::new(),
     reaplist: BTreeMap::new(),
     reapers: alloc::collections::BTreeSet::new(),
+    orphans: BTreeMap::new(),
 });
 
 impl Tree {
@@ -193,8 +197,23 @@ impl Tree {
         self.reaplist.entry(r).or_default().insert(0, child);
     }
 
-    /// Moves `child` to be `parent`'s child (`proc_reparent`).
+    /// Takes `pid` off its real parent's orphans (`proc_clear_orphan`).
+    fn clear_orphan(&mut self, pid: i32) {
+        for list in self.orphans.values_mut() {
+            list.retain(|&o| o != pid);
+        }
+        self.orphans.retain(|_, l| !l.is_empty());
+    }
+
+    /// Moves `child` to be `parent`'s child (`proc_reparent`); a traced
+    /// one stays its old parent's orphan.
     fn reparent(&mut self, child: &Arc<Process>, parent: i32) {
+        self.clear_orphan(child.pid);
+        if child.is_traced()
+            && let Some(&old) = self.parent.get(&child.pid)
+        {
+            self.orphans.entry(old).or_default().push(child.pid);
+        }
         if let Some(old) = self.parent.insert(child.pid, parent)
             && let Some(kids) = self.children.get_mut(&old)
         {
@@ -308,11 +327,76 @@ pub(crate) fn first_child(pid: i32) -> Option<i32> {
         .map(|c| c.pid)
 }
 
+/// `pid`'s descendants, each before its own (the walk of
+/// `ktrsetchildren`); `pid` itself is not among them. Collected with the
+/// tree locked, dropped after.
+pub(crate) fn descendants(pid: i32) -> Vec<Arc<Process>> {
+    let tree = TREE.lock();
+    let mut out = Vec::new();
+    let mut stack = alloc::vec![pid];
+    while let Some(p) = stack.pop() {
+        if let Some(kids) = tree.children.get(&p) {
+            for c in kids.iter().rev() {
+                out.push(Arc::clone(c));
+                stack.push(c.pid);
+            }
+        }
+    }
+    drop(tree);
+    out
+}
+
+/// The current thread's `vfork` child, if it left one to wait for
+/// (`TDP_RFPPWAIT`): it waits until the child execs or exits.
+pub(crate) fn vfork_wait(s: &Sleepable) {
+    let Some(t) = UserThread::current() else {
+        return;
+    };
+    let Some(child) = t.vfork_child.lock().take() else {
+        return;
+    };
+    t.process()
+        .child_wait
+        .wait_until(s, || !child.vforked.load(Ordering::Acquire));
+}
+
+/// Traced `child` becomes debugger `debugger`'s child, its real parent's
+/// orphan (`proc_reparent` for `PT_ATTACH` and a followed fork).
+pub(crate) fn reparent_traced(child: &Arc<Process>, debugger: i32) {
+    TREE.lock().reparent(child, debugger);
+}
+
+/// `proc_realparent`: the real parent of traced `child` if it is still
+/// there, else its reaper.
+fn real_parent(tree: &Tree, child: &Process) -> i32 {
+    let oppid = child.trace.lock().oppid;
+    let alive = find(oppid).is_some_and(|p| !p.is_zombie());
+    if alive {
+        oppid
+    } else {
+        tree.reaper_of(child.pid)
+    }
+}
+
+/// `child`, no longer traced, goes back to its real parent (or its
+/// reaper) (`PT_DETACH`).
+pub(crate) fn reparent_back(child: &Arc<Process>) {
+    let mut tree = TREE.lock();
+    let to = real_parent(&tree, child);
+    child.trace.lock().oppid = 0;
+    tree.reparent(child, to);
+}
+
 /// The reaper `pid` answers to, and its subtree (`ki_reaper`,
 /// `ki_reapsubtree`).
 pub(crate) fn reaper_of(pid: i32) -> (i32, i32) {
     let tree = TREE.lock();
     (tree.reaper_of(pid), tree.subtree_of(pid))
+}
+
+/// The pid given last (`kern.lastpid`).
+pub(crate) fn last_pid() -> i32 {
+    LAST_PID.load(Ordering::Relaxed)
 }
 
 /// The next free pid after the last one, recorded for `p`.
@@ -335,6 +419,25 @@ pub(crate) fn find(pid: i32) -> Option<Arc<Process>> {
     PROCS.lock().get(&pid)?.upgrade()
 }
 
+/// What `wait` found: a child's pid and its status, and whether that is
+/// a stop for this debugger (`CLD_TRAPPED`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Waited {
+    pub(crate) pid: i32,
+    pub(crate) status: i32,
+    pub(crate) trapped: bool,
+}
+
+impl Waited {
+    const fn new(pid: i32, status: i32) -> Self {
+        Self {
+            pid,
+            status,
+            trapped: false,
+        }
+    }
+}
+
 /// How a process ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Exit {
@@ -342,6 +445,8 @@ pub(crate) enum Exit {
     Code(i32),
     /// Killed by a signal.
     Signal(u32),
+    /// Killed by a signal, having dumped core (`WCOREFLAG`).
+    Dumped(u32),
 }
 
 impl Exit {
@@ -350,6 +455,7 @@ impl Exit {
         match self {
             Self::Code(c) => exit_status(c),
             Self::Signal(sig) => (sig & 0x7f).cast_signed(),
+            Self::Dumped(sig) => (sig & 0x7f).cast_signed() | 0x80,
         }
     }
 
@@ -358,6 +464,8 @@ impl Exit {
             // The whole code, as `_exit` gave it (`WEXITSTATUS` would keep
             // 8 bits).
             Self::Code(st >> 8)
+        } else if st & 0x80 != 0 {
+            Self::Dumped((st & 0x7f).cast_unsigned())
         } else {
             Self::Signal((st & 0x7f).cast_unsigned())
         }
@@ -378,6 +486,8 @@ pub(crate) struct Job {
     pub(crate) cont_report: bool,
     /// The parent has heard of the stop in progress: every thread parked.
     stop_told: bool,
+    /// The stop is for the debugger (`P_STOPPED_TRACE`).
+    pub(crate) trace: bool,
     /// Single-threading in progress (`P_STOPPED_SINGLE`).
     single: Option<Single>,
     /// Threads parked at the boundary or in a sleep (`p_suspcount`).
@@ -602,6 +712,20 @@ pub(crate) struct Process {
     /// flag, read without its lock on every system call not allowed
     /// there. It never clears.
     capmode: AtomicBool,
+    /// Its ktrace state (`p_traceflag`, `p_ktrioparms`, `p_ktr`).
+    pub(crate) ktrace: crate::ktrace::Trace,
+    /// The numbered CPU set it is in (`cpuset(2)`); inherited.
+    cpuset: AtomicI32,
+    /// Traced by a debugger (`P_TRACED`): a copy of what `trace` says,
+    /// read without its lock on every system call.
+    traced: AtomicBool,
+    /// Its tracing (`p_oppid`, `p_ptevents`, `p_xthread`, ...).
+    pub(crate) trace: SpinLock<crate::ptrace::Tracing>,
+    /// Where `ptrace` requests wait for one another and for a stopped
+    /// thread to serve one.
+    trace_wait: WaitQueue,
+    /// What its reaped children used, theirs included (`p_cru`).
+    pub(crate) child_usage: SpinLock<crate::kinfo::Usage>,
 }
 
 /// `p_flag2` bits (sys/sys/proc.h).
@@ -877,6 +1001,14 @@ impl Process {
                     parent.map_or(RLIM_INFINITY, |p| p.cpulimit.load(Ordering::Relaxed)),
                 ),
                 capmode: AtomicBool::new(parent.is_some_and(|p| p.in_capability_mode())),
+                ktrace: crate::ktrace::Trace::default(),
+                cpuset: AtomicI32::new(
+                    parent.map_or(crate::cpuset::DEFAULT, |p| p.cpuset.load(Ordering::Relaxed)),
+                ),
+                traced: AtomicBool::new(false),
+                trace: SpinLock::new(crate::ptrace::Tracing::default()),
+                trace_wait: WaitQueue::new(),
+                child_usage: SpinLock::new(crate::kinfo::Usage::default()),
             }
         });
         crate::prison::proc_joined(&p.cred());
@@ -965,6 +1097,10 @@ impl Process {
         if p.pid == 1 {
             cred.securelevel_gt(0)?;
         }
+        // Refused by `PROC_TRACE_CTL`, but to `PRIV_DEBUG_DENIED`.
+        if p.flag2.load(Ordering::Relaxed) & p2::NOTRACE != 0 {
+            cred.priv_check(Priv::DebugDenied)?;
+        }
         Ok(())
     }
 
@@ -1040,6 +1176,11 @@ impl Process {
         self.started
     }
 
+    /// The program it runs (`p_textvp`).
+    pub(crate) fn text_vnode(&self) -> Option<Arc<Vnode>> {
+        self.text.lock().first().map(|t| Arc::clone(&t.0))
+    }
+
     /// Whether it has called `execve`.
     pub(crate) fn execed(&self) -> bool {
         self.execed.load(Ordering::Relaxed)
@@ -1111,10 +1252,76 @@ impl Process {
         self.sid.load(Ordering::Relaxed)
     }
 
-    /// The parent's pid (1 for an orphan, 0 for a process the kernel
-    /// started).
+    /// The parent's pid as the process sees it (`p_oppid`): while it is
+    /// traced, its real parent's, not its debugger's.
     pub(crate) fn ppid(&self) -> i32 {
+        if self.is_traced() {
+            return self.trace.lock().oppid;
+        }
+        self.ppid_tree()
+    }
+
+    /// The parent's pid in the tree (`p_pptr`: the debugger while
+    /// traced; 1 for an orphan, 0 for a process the kernel started).
+    pub(crate) fn ppid_tree(&self) -> i32 {
         TREE.lock().parent.get(&self.pid).copied().unwrap_or(0)
+    }
+
+    /// The numbered CPU set it is in.
+    pub(crate) fn cpuset(&self) -> i32 {
+        self.cpuset.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_cpuset(&self, id: i32) {
+        self.cpuset.store(id, Ordering::Relaxed);
+    }
+
+    /// Whether a debugger traces it (`P_TRACED`).
+    pub(crate) fn is_traced(&self) -> bool {
+        self.traced.load(Ordering::Acquire)
+    }
+
+    /// Starts its tracing (`proc_set_traced`): `oppid` its real parent,
+    /// the default events, and with `first_stop` the attach's stop to
+    /// come.
+    pub(crate) fn set_traced(&self, oppid: i32, first_stop: bool) {
+        {
+            let mut tr = self.trace.lock();
+            tr.oppid = oppid;
+            tr.events = abi::ptrace::PTRACE_DEFAULT;
+            tr.first_stop = first_stop;
+            tr.killed = false;
+        }
+        self.traced.store(true, Ordering::Release);
+    }
+
+    /// Ends its tracing (`P_TRACED` cleared); the reporting thread
+    /// stays for the resuming request to hand its signal.
+    pub(crate) fn clear_traced(&self) {
+        self.traced.store(false, Ordering::Release);
+        self.trace.lock().pptrace = false;
+    }
+
+    /// Where `ptrace` requests on it wait.
+    pub(crate) fn trace_wait(&self) -> &WaitQueue {
+        &self.trace_wait
+    }
+
+    /// Its thread `tid`.
+    pub(crate) fn thread_by_tid(&self, tid: i32) -> Option<Arc<UserThread>> {
+        self.threads.lock().iter().find(|t| t.tid() == tid).cloned()
+    }
+
+    /// Single-threading to exit is under way (`P_SINGLE_EXIT`).
+    pub(crate) fn exiting_single(&self) -> bool {
+        self.job.lock().single.is_some_and(|x| x.mode == Mode::Exit)
+    }
+
+    /// It is stopped for its debugger, every thread, and the debugger
+    /// has waited for the stop (`proc_can_ptrace`'s test).
+    pub(crate) fn trace_stopped_and_waited(&self) -> bool {
+        let job = self.job.lock();
+        job.trace && job.stopped != 0 && job.stop_told && !job.stop_report
     }
 
     /// Where `mmap` without an address starts looking.
@@ -1324,6 +1531,12 @@ impl Process {
     ) -> Result<Arc<UserThread>, Errno> {
         let name = self.with_comm(Name::new);
         let t = UserThread::new(self, new.sig, name, new.tls_base, new.rtprio, new.cpus)?;
+        // The call that made it returns in it too (`fork_return`), as a
+        // copy of the creating thread's `td_sa`.
+        UserThread::with_current(|me| {
+            t.set_syscall_code(me.syscall_code());
+            t.dbg.inherit_call(&me.dbg);
+        });
         init(&t, &mut frame)?;
         {
             let mut threads = self.threads.lock();
@@ -1481,13 +1694,15 @@ impl Process {
         };
         let mut cf = *frame;
         arch_fork_return(&mut cf);
-        let (sig, tls_base, rtprio, cpus) = UserThread::with_current(|t| {
-            (t.sig.lock().forked(), t.tls_base(), t.rtprio(), t.cpus())
-        })
-        .unwrap_or((ThreadSignals::new(), None, crate::uthread::NORMAL, u64::MAX));
+        let (sig, rtprio, cpus) =
+            UserThread::with_current(|t| (t.sig.lock().forked(), t.rtprio(), t.cpus()))
+                .unwrap_or((ThreadSignals::new(), crate::uthread::NORMAL, u64::MAX));
         let new = NewThread {
             tls: [hal::user::tls(), hal::user::tls2()],
-            tls_base,
+            // The child's FS base is the parent's, but no TLS base is
+            // recorded for `AMD64_GET_TLSBASE` (`cpu_fork` clears
+            // `PCB_TLSBASE`).
+            tls_base: None,
             sig,
             fork_fpu: true,
             cpus,
@@ -1497,8 +1712,12 @@ impl Process {
         // The child's thread keeps the caller's robust-mutex lists (they
         // are in the copied part of FreeBSD's `struct thread`).
         let robust = UserThread::with_current(|t| *t.umtx().robust.lock()).unwrap_or_default();
+        crate::ktrace::fork(self, &child);
+        let parent = Arc::clone(self);
         let started = child.start_with(cf, new, |t, _| {
             *t.umtx().robust.lock() = robust;
+            crate::ktrace::proc_ctor_of(t);
+            crate::ptrace::forked(&parent, &child, t, vfork);
             Ok(())
         });
         if started.is_err() {
@@ -1512,8 +1731,14 @@ impl Process {
         self.last_child.store(child.pid, Ordering::Relaxed);
         crate::event::proc_forked(self, child.pid);
         if vfork {
-            self.child_wait
-                .wait_until(s, || !child.vforked.load(Ordering::Acquire));
+            // A traced parent waits after its debugger has seen the fork
+            // ([`vfork_wait`]).
+            match UserThread::current().filter(|_| self.is_traced()) {
+                Some(t) => *t.vfork_child.lock() = Some(Arc::clone(&child)),
+                None => self
+                    .child_wait
+                    .wait_until(s, || !child.vforked.load(Ordering::Acquire)),
+            }
         }
         Ok((child.pid, fd))
     }
@@ -1552,6 +1777,9 @@ impl Process {
         envp: &[&[u8]],
     ) -> Result<(), Errno> {
         let me = UserThread::current().ok_or(Errno::EINVAL)?;
+        if self.ktrace.flags() != 0 {
+            crate::ktrace::exec_args(s, argv, envp);
+        }
         // The other threads wait at the boundary meanwhile (FreeBSD's
         // `pre_execve`); they leave once the new image is in.
         self.single(s, &me, Mode::Boundary)?;
@@ -1588,7 +1816,10 @@ impl Process {
         let old = core::mem::replace(&mut *self.space.lock(), Arc::clone(&space));
         sched::set_address_space(Some(space as Arc<dyn sched::AddressSpace>));
         if self.vforked.load(Ordering::Acquire) {
-            // The old space is the parent's.
+            // The old space is the parent's. A child that asked to be
+            // traced takes its signals to the debugger from now on
+            // (`P_PPTRACE` goes with `P_PPWAIT`).
+            self.trace.lock().pptrace = false;
             self.release_parent();
         } else if Arc::strong_count(&old) > 1 {
             // Another CPU still has it loaded: empty it now, so its memory
@@ -1609,10 +1840,12 @@ impl Process {
         };
         self.execed.store(true, Ordering::Relaxed);
         *self.text.lock() = core::iter::once(text).chain(image.interp).collect();
-        // A set-id program taints the process; otherwise the taint goes
-        // once the effective ids are the real ones again.
+        // A set-id program taints the process, and is not traced unless
+        // its tracer may (`ktrprocexec`); otherwise the taint goes once
+        // the effective ids are the real ones again.
         if setid {
             self.sugid.store(true, Ordering::Relaxed);
+            crate::ktrace::exec_set_id(self);
         } else {
             let c = self.cred();
             if c.uid == c.ruid && c.gid == c.rgid {
@@ -1647,6 +1880,10 @@ impl Process {
         self.layout.set(image.layout);
         *frame = arch::user::user_frame(image.entry, image.sp, image.arg);
         drop(file);
+        if self.ktrace.flags() & abi::ktrace::KTRFAC_MASK != 0 {
+            crate::ktrace::proc_ctor_of(&me);
+        }
+        crate::ptrace::exec_done(self, &me);
         Ok(())
     }
 
@@ -1669,7 +1906,12 @@ impl Process {
         // to find, and a script's interpreter is handed `/dev/fd/N`
         // (`imgact_shell`).
         let (mut file, mut path, script_name) = match program {
-            Program::Path(p) => (lookup(p)?, p.to_vec(), p.to_vec()),
+            Program::Path(p) => {
+                if crate::ktrace::cap_tracing() {
+                    crate::ktrace::capfail(crate::ktrace::CapFail::Namei(p));
+                }
+                (lookup(p)?, p.to_vec(), p.to_vec())
+            }
             Program::File(v, fd) => {
                 let dev_fd = alloc::format!("/dev/fd/{fd}").into_bytes();
                 let path = crate::fs::namespace()
@@ -1690,6 +1932,9 @@ impl Process {
             new.push(script_name);
             new.extend(argv.into_iter().skip(1));
             argv = new;
+            if crate::ktrace::cap_tracing() {
+                crate::ktrace::capfail(crate::ktrace::CapFail::Namei(&sc.interp));
+            }
             file = lookup(&sc.interp)?;
             path = sc.interp;
         }
@@ -1761,8 +2006,21 @@ impl Process {
     pub(crate) fn suspension(&self, t: &UserThread) -> Suspension {
         let job = self.job.lock();
         match job.single {
+            // A thread reporting its exit to its debugger waits for it
+            // (`TDB_EXIT` stops even then).
+            Some(x)
+                if x.by != t.tid()
+                    && x.mode == Mode::Exit
+                    && job.trace
+                    && job.stopped != 0
+                    && t.dbg.has(crate::ptrace::tdb::EXIT) =>
+            {
+                Suspension::Stop
+            }
             Some(x) if x.by != t.tid() => Suspension::Single(x.mode),
             _ if job.stopped != 0 => Suspension::Stop,
+            // Held by its debugger (`PT_SUSPEND`).
+            _ if self.is_traced() && t.dbg.has(crate::ptrace::tdb::SUSPEND) => Suspension::Stop,
             _ => Suspension::None,
         }
     }
@@ -1770,13 +2028,20 @@ impl Process {
     /// Parks the current thread `t` until the stop or single-threading
     /// that asked for it is over, or turns into one it must leave for.
     pub(crate) fn park(&self, s: &Sleepable, t: &UserThread) {
+        self.park_until(s, t, || false);
+    }
+
+    /// [`park`](Self::park), or until `early` holds (a stopped thread's
+    /// debugger has a request for it).
+    pub(crate) fn park_until(&self, s: &Sleepable, t: &UserThread, early: impl Fn() -> bool) {
         self.job.lock().parked += 1;
         self.suspension_changed();
         self.stop_wait.wait_until(s, || {
-            matches!(
-                self.suspension(t),
-                Suspension::None | Suspension::Single(Mode::Exit)
-            )
+            early()
+                || matches!(
+                    self.suspension(t),
+                    Suspension::None | Suspension::Single(Mode::Exit)
+                )
         });
         self.job.lock().parked -= 1;
     }
@@ -1792,14 +2057,79 @@ impl Process {
             if tell {
                 job.stop_told = true;
             }
-            (tell.then_some(job.stopped), job.single.is_some())
+            (
+                tell.then_some((job.stopped, job.trace)),
+                job.single.is_some(),
+            )
         };
-        if let Some(sig) = told {
-            crate::signal::notify_parent(self, abi::signal::code::CLD_STOPPED, sig.cast_signed());
+        if let Some((sig, trace)) = told {
+            // A traced process's stops are its debugger's (`CLD_TRAPPED`).
+            let code = if trace || self.is_traced() {
+                abi::signal::code::CLD_TRAPPED
+            } else {
+                abi::signal::code::CLD_STOPPED
+            };
+            crate::signal::notify_parent(self, code, sig.cast_signed());
         }
         if single {
             self.single_wait.wake_all();
         }
+    }
+
+    /// Starts a stop for the debugger with `sig` (`P_STOPPED_TRACE`):
+    /// every thread but `t` (the reporting one, which parks itself) is
+    /// told to park. With no thread reporting (a transparent attach),
+    /// every thread parks; asleep, in place.
+    pub(crate) fn begin_trace_stop(&self, t: Option<&UserThread>, sig: u32) {
+        {
+            let mut job = self.job.lock();
+            job.stopped = sig;
+            job.trace = true;
+            job.stop_report = true;
+            job.cont_report = false;
+            job.stop_told = false;
+        }
+        self.each_thread(|o| {
+            if t.is_none_or(|t| o.tid() != t.tid()) {
+                o.interrupt(crate::signal::AST_SUSPEND);
+            }
+            true
+        });
+        // Every thread may be parked already (asleep, then stopped).
+        self.suspension_changed();
+    }
+
+    /// A stopped thread ran for its debugger and stops again: the stop is
+    /// reported again once every thread is stopped (`thread_stopped`).
+    pub(crate) fn rearm_stop(&self) {
+        let mut job = self.job.lock();
+        if job.stopped != 0 {
+            job.stop_told = false;
+            job.stop_report = true;
+        }
+    }
+
+    /// Tells the parent the process goes on (`childproc_continued`).
+    pub(crate) fn report_continued(&self) {
+        self.job.lock().cont_report = true;
+        crate::signal::notify_parent(
+            self,
+            abi::signal::code::CLD_CONTINUED,
+            abi::signal::SIGCONT.cast_signed(),
+        );
+    }
+
+    /// Ends any stop (`ptrace_unsuspend`): every thread goes on, those
+    /// its debugger holds excepted.
+    pub(crate) fn end_stop(&self) {
+        {
+            let mut job = self.job.lock();
+            job.stopped = 0;
+            job.trace = false;
+            job.stop_report = false;
+            job.stop_told = false;
+        }
+        self.stop_wait.wake_all();
     }
 
     /// Starts a stop for `sig` (the caller then parks): every other thread
@@ -1847,14 +2177,19 @@ impl Process {
             }
             true
         });
+        // Waiting, it counts as stopped, as FreeBSD's suspends itself in
+        // `thread_single`: a debugger's stop of the others is complete.
+        self.job.lock().parked += 1;
+        self.suspension_changed();
         self.single_wait.wait_until(s, || {
             let parked = self.job.lock().parked;
             let n = self.threads.lock().len();
             match mode {
                 Mode::Exit => n == 1,
-                Mode::Boundary => parked + 1 >= n,
+                Mode::Boundary => parked >= n,
             }
         });
+        self.job.lock().parked -= 1;
         if mode == Mode::Exit {
             // Alone for good: nothing is left to hold back.
             self.job.lock().single = None;
@@ -1906,6 +2241,11 @@ impl Process {
     /// the memory goes now, the children go to init, and the parent gets
     /// `SIGCHLD` (or, if it keeps no zombies, init gets the zombie).
     pub(crate) fn exit(&self, s: &Sleepable, how: Exit) {
+        // No debugger stops it any more (`P_TRACED` cleared); one that
+        // took it still reaps it first (`p_oppid` stays).
+        if self.is_traced() {
+            self.traced.store(false, Ordering::Release);
+        }
         // Its semaphore adjustments are undone (`semexit`).
         crate::sysv::sem_exited(self.pid);
         // A vfork parent waits on until this is a zombie (below).
@@ -1941,6 +2281,7 @@ impl Process {
         };
         crate::fs::closed(self.pid, &closed);
         drop(closed);
+        crate::ktrace::exit(s);
         if self.pid == self.sid() {
             crate::tty::session_ended(s, self.pid);
         }
@@ -1985,6 +2326,8 @@ impl Process {
         // parent died (`p_pdeathsig`), once the tree is unlocked.
         let mut reaper_told: Vec<(Arc<Self>, Arc<Self>)> = Vec::new();
         let mut death_signals: Vec<(Arc<Self>, u32)> = Vec::new();
+        // Processes this one traced, to let go once the tree is unlocked.
+        let mut untraced: Vec<Arc<Self>> = Vec::new();
         let described = {
             let mut tree = TREE.lock();
             self.zombie.store(true, Ordering::Release);
@@ -1996,8 +2339,40 @@ impl Process {
             // Each child goes to its reaper (init unless one took the
             // role); those this process reaps for stay until it is
             // reaped itself.
+            // Children this process traced go back to their real parents
+            // (or their reapers), untraced; those a debugger took from it
+            // now answer to their reapers (`exit1`).
+            if let Some(taken) = tree.orphans.remove(&self.pid) {
+                for pid in taken {
+                    if let Some(q) = find(pid) {
+                        q.trace.lock().oppid = tree.reaper_of(pid);
+                        let pdeathsig = q.pdeathsig.load(Ordering::Relaxed);
+                        if pdeathsig != 0 {
+                            death_signals.push((q, pdeathsig));
+                        }
+                    }
+                }
+            }
             if let Some(orphans) = tree.children.remove(&self.pid) {
                 for o in orphans {
+                    if o.is_traced() {
+                        let to = real_parent(&tree, &o);
+                        let to = if to == self.pid {
+                            tree.reaper_of(o.pid)
+                        } else {
+                            to
+                        };
+                        o.clear_traced();
+                        {
+                            let mut tr = o.trace.lock();
+                            tr.oppid = 0;
+                            tr.events = 0;
+                            tr.first_stop = false;
+                        }
+                        tree.reparent(&o, to);
+                        untraced.push(o);
+                        continue;
+                    }
                     let r = tree.reaper_of(o.pid);
                     let pdeathsig = o.pdeathsig.load(Ordering::Relaxed);
                     let zombie = o.zombie.load(Ordering::Acquire);
@@ -2052,6 +2427,22 @@ impl Process {
         if let Some(init) = find(INIT) {
             init.child_changed();
         }
+        // A process it traced forgets its debugger, and is killed
+        // (`kern.kill_on_debugger_exit`), or else goes on if stopped,
+        // the stop's `SIGTRAP` gone.
+        for q in untraced {
+            crate::ptrace::forget(&q);
+            if crate::ptrace::KILL_ON_DEBUGGER_EXIT.load(Ordering::Relaxed) {
+                q.job.lock().trace = false;
+                let _ = crate::signal::post(
+                    &q,
+                    crate::signal::user_info(abi::signal::SIGKILL, 0, abi::signal::code::SI_KERNEL),
+                );
+            } else if q.job.lock().stopped != 0 {
+                crate::signal::discard_process(&q, abi::signal::SIGTRAP);
+                q.end_stop();
+            }
+        }
         // Each with the zombie's own exit, as its parent would have been
         // (`childproc_exited` as `proc_reparent` hands it over).
         for (r, z) in reaper_told {
@@ -2098,6 +2489,7 @@ impl Process {
                 let (code, status) = match how {
                     Exit::Code(c) => (CLD_EXITED, c),
                     Exit::Signal(sig) => (CLD_KILLED, sig.cast_signed()),
+                    Exit::Dumped(sig) => (abi::signal::code::CLD_DUMPED, sig.cast_signed()),
                 };
                 crate::signal::notify_parent(self, code, status);
             }
@@ -2171,17 +2563,18 @@ impl Process {
     /// stopped or continued), among those `pid` selects (a pid, -1 for
     /// any, 0 for this group, below -1 for that group), with its status.
     /// `Ok(None)` with `WNOHANG` when none has. Interrupted by a signal:
-    /// `EINTR` or `ERESTART`.
+    /// `EINTR` or `ERESTART`. With `WTRAPPED`, a traced child's stop for
+    /// this debugger too ([`Waited::trapped`]).
     pub(crate) fn wait_child(
         &self,
         s: &Sleepable,
         pid: i32,
         options: u32,
-    ) -> Result<Option<(i32, i32)>, Errno> {
+    ) -> Result<Option<Waited>, Errno> {
         let selects = |c: &Process| match pid {
             // Children with a process descriptor answer only to their pid
-            // or group.
-            -1 => !c.procdesc.load(Ordering::Acquire),
+            // or group, but to a debugger tracing them (`proc_to_reap`).
+            -1 => !c.procdesc.load(Ordering::Acquire) || c.is_traced(),
             0 => c.pgid() == self.pgid(),
             p if p > 0 => c.pid == p,
             p => c.pgid() == -p,
@@ -2192,46 +2585,87 @@ impl Process {
                 let mut tree = TREE.lock();
                 let kids = tree.children.entry(self.pid).or_default();
                 if !kids.iter().any(|c| selects(c)) {
-                    return Err(Errno::ECHILD);
-                }
-                if let Some(i) = kids
+                    // Its children a debugger took are still waited for
+                    // (`p_orphans`).
+                    let orphaned = tree.orphans.get(&self.pid).is_some_and(|o| {
+                        o.iter().any(|&pid| find(pid).is_some_and(|c| selects(&c)))
+                    });
+                    if !orphaned {
+                        return Err(Errno::ECHILD);
+                    }
+                } else if let Some(i) = kids
                     .iter()
                     .position(|c| selects(c) && c.exited.load(Ordering::Acquire))
                 {
                     let c = Arc::clone(&kids[i]);
-                    let reaped = options & WNOWAIT == 0;
-                    if reaped {
+                    let status = c.status.load(Ordering::Relaxed);
+                    if options & WNOWAIT == 0 {
+                        // A child the debugger took goes back to its real
+                        // parent, which waits for it in turn (`proc_reap`).
+                        let oppid = c.trace.lock().oppid;
+                        if oppid != 0 && oppid != self.pid {
+                            let to = real_parent(&tree, &c);
+                            c.trace.lock().oppid = 0;
+                            tree.reparent(&c, to);
+                            drop(tree);
+                            if let Some(rp) = find(to) {
+                                crate::signal::notify_exit(&rp, &c);
+                            }
+                            return Ok(Some(Waited::new(c.pid, status)));
+                        }
                         kids.remove(i);
                         tree.parent.remove(&c.pid);
+                        tree.clear_orphan(c.pid);
                         tree.reaped(c.pid);
-                    }
-                    drop(tree);
-                    if reaped {
+                        drop(tree);
+                        crate::kinfo::reaped(self, &c);
                         crate::event::proc_reaped(&c);
                     }
-                    return Ok(Some((c.pid, c.status.load(Ordering::Relaxed))));
+                    return Ok(Some(Waited::new(c.pid, status)));
                 }
+                let kids = tree.children.entry(self.pid).or_default();
                 for c in kids.iter().filter(|c| selects(c)) {
                     let mut job = c.job.lock();
+                    // A traced child's stop, once every thread is stopped
+                    // (`wait6_check_alive`'s `WTRAPPED`).
+                    if options & WTRAPPED != 0
+                        && c.is_traced()
+                        && job.stopped != 0
+                        && job.stop_told
+                        && job.stop_report
+                    {
+                        if options & WNOWAIT == 0 {
+                            job.stop_report = false;
+                        }
+                        return Ok(Some(Waited {
+                            pid: c.pid,
+                            status: (job.stopped.cast_signed() << 8) | 0o177,
+                            trapped: true,
+                        }));
+                    }
                     if options & WUNTRACED != 0 && job.stopped != 0 && job.stop_report {
                         if options & WNOWAIT == 0 {
                             job.stop_report = false;
                         }
                         // WIFSTOPPED: the signal, then 0177.
-                        return Ok(Some((c.pid, (job.stopped.cast_signed() << 8) | 0o177)));
+                        return Ok(Some(Waited::new(
+                            c.pid,
+                            (job.stopped.cast_signed() << 8) | 0o177,
+                        )));
                     }
                     if options & WCONTINUED != 0 && job.cont_report {
                         if options & WNOWAIT == 0 {
                             job.cont_report = false;
                         }
                         // WIFCONTINUED: SIGCONT's number.
-                        return Ok(Some((c.pid, abi::signal::SIGCONT.cast_signed())));
+                        return Ok(Some(Waited::new(c.pid, abi::signal::SIGCONT.cast_signed())));
                     }
                 }
             }
             if options & WNOHANG != 0 {
                 return Ok(None);
             }
+            let _w = sched::wait_message("wait");
             crate::signal::sleep(
                 s,
                 &self.child_wait,
@@ -2358,6 +2792,14 @@ impl Drop for ProcDesc {
                 }
                 tree.reaped(p.pid);
                 false
+            } else if p.is_traced() {
+                // Its debugger keeps it; its reaper is its real parent from
+                // now on, the one it goes back to (`procdesc_close`).
+                let r = tree.reaper_of(p.pid);
+                tree.clear_orphan(p.pid);
+                p.trace.lock().oppid = r;
+                tree.orphans.entry(r).or_default().push(p.pid);
+                !self.daemon
             } else {
                 // To its reaper (init unless one took the role), which
                 // reaps it when it goes (`procdesc_close`).
@@ -2386,7 +2828,7 @@ impl Drop for ProcDesc {
 
 /// A new user thread's first code: joins its process and leaves for user
 /// mode. Nothing on this stack outlives the jump.
-fn enter(_s: &Sleepable, arg: usize) -> ! {
+fn enter(s: &Sleepable, arg: usize) -> ! {
     // SAFETY: `start` made `arg` with `Box::into_raw` and handed it over.
     let start = unsafe { alloc::boxed::Box::from_raw(arg as *mut Start) };
     let Start {
@@ -2405,13 +2847,23 @@ fn enter(_s: &Sleepable, arg: usize) -> ! {
     sched::current().request_ast(crate::signal::AST_SUSPEND);
     UserThread::with_current(crate::signal::recheck);
     let mut frame = frame;
-    let _ = hal::irq::disable();
     // SAFETY: this thread runs in its process's space; the kernel does not
     // use the thread registers.
     unsafe {
         hal::user::set_tls(tls[0]);
         hal::user::set_tls2(tls[1]);
     }
+    // A new thread's first return to user mode is a debugger's event
+    // (`fork_return`), its registers where the debugger finds them.
+    UserThread::with_current(|t| t.dbg.entered(&mut frame));
+    crate::ptrace::thread_start(s);
+    // A new thread's creating call returns in it too (`fork_return`).
+    if crate::ktrace::point(abi::ktrace::KTR_SYSRET) {
+        let code = UserThread::with_current(UserThread::syscall_code).unwrap_or(0);
+        crate::ktrace::sysret(s, code, 0, 0);
+    }
+    crate::ktrace::user_return(s);
+    let _ = hal::irq::disable();
     if let Some(c) = context {
         c.load();
     }

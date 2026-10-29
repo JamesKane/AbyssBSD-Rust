@@ -89,8 +89,9 @@ pub(super) fn shm_open2(
         None
     } else {
         // Only anonymous objects in capability mode.
-        crate::capsicum::check_capmode()?;
-        Some(path(upath)?)
+        let path = path(upath)?;
+        crate::capsicum::refuse(crate::ktrace::CapFail::Namei(&path))?;
+        Some(path)
     };
     let p = process()?;
     // Only the permission bits matter, so the truncation is harmless.

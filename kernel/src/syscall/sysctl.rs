@@ -59,6 +59,42 @@ fn known_prefix(s: &Sleepable, oid: &[i32]) -> Option<(alloc::string::String, us
     })
 }
 
+/// `ktrsysctl`: a traced process's `sysctl` of `oid` records its name as
+/// `sysctl.name` gives it, numbers standing for what has no name.
+fn trace(s: &Sleepable, oid: &[i32]) {
+    use core::fmt::Write;
+    if !crate::ktrace::point(abi::ktrace::KTR_SYSCTL) {
+        return;
+    }
+    let (mut name, used) = if oid.first() == Some(&ctl::SYSCTL) {
+        // The `sysctl` node's own queries.
+        let q = match oid.get(1).copied() {
+            Some(query::DEBUG) => Some("debug"),
+            Some(query::NAME) => Some("name"),
+            Some(query::NEXT) => Some("next"),
+            Some(query::NAME2OID) => Some("name2oid"),
+            Some(query::OIDFMT) => Some("oidfmt"),
+            Some(query::OIDDESCR) => Some("oiddescr"),
+            Some(query::OIDLABEL) => Some("oidlabel"),
+            Some(query::NEXTNOSKIP) => Some("nextnoskip"),
+            _ => None,
+        };
+        match q {
+            Some(q) => (alloc::format!("sysctl.{q}"), 2),
+            None => (alloc::string::String::from("sysctl"), 1),
+        }
+    } else {
+        known_prefix(s, oid).unwrap_or_default()
+    };
+    for n in &oid[used..] {
+        if !name.is_empty() {
+            name.push('.');
+        }
+        let _ = write!(name, "{n}");
+    }
+    crate::ktrace::sysctl(s, name.as_bytes());
+}
+
 fn read_error(e: ReadError) -> Errno {
     match e {
         ReadError::NotFound => Errno::ENOENT,
@@ -112,6 +148,12 @@ fn serve(
             _ => Err(Errno::ENOENT),
         })
         .map(|v| (v, None));
+    }
+    // A node answering what is written (`kern.devname`): no write at all.
+    if let Some(q) = crate::sysctl::read(s, |t| t.query(oid)) {
+        let mut out = Vec::new();
+        q(new, &mut out)?;
+        return Ok((out, None));
     }
     // `sysctl_root`'s checks.
     let (kind, writer) = crate::sysctl::read(s, |t| t.access(oid)).unzip();
@@ -211,6 +253,7 @@ pub(super) fn sysctl(
         .map(|i| UserPtr::<i32>::new(name + 4 * i as u64).read())
         .collect::<Result<Vec<i32>, _>>()
         .map_err(|_| Errno::EFAULT)?;
+    trace(s, &oid);
     let new = new_value(newp, newlen)?;
     let (value, writer) = serve(s, &oid, new.as_deref(), oldp != 0)?;
     reply(&value, oldp, oldlenp)?;
@@ -244,6 +287,7 @@ pub(super) fn sysctlbyname(
         missing_name(name);
         Errno::ENOENT
     })?;
+    trace(s, &oid);
     let new = new_value(newp, newlen)?;
     let (value, writer) = serve(s, &oid, new.as_deref(), oldp != 0)?;
     reply(&value, oldp, oldlenp)?;

@@ -486,9 +486,11 @@ Ctrl-Alt-Del work.
 
 `ktrace(2)` attaches a trace file and facility mask to processes (with `KTRFAC_INHERIT` and
 descendants), and records `KTR_SYSCALL`, `SYSRET`, `NAMEI`, `GENIO`, `PSIG`, `CSW`, `USER`, `STRUCT`,
-`STRUCT_ARRAY`, `SYSCTL`, `PROCCTOR`/`PROCDTOR`, `CAPFAIL`, `FAULT`, and `FAULTEND`, encoded by
-`lib/ktrace`. Records are queued per thread and written by a writer thread, so a traced call never
-does file I/O in its own path, as FreeBSD's `ktr_writerequest`. Unmodified `kdump` reads them;
+`STRUCT_ARRAY`, `SYSCTL`, `PROCCTOR`/`PROCDTOR`, `CAPFAIL`, `FAULT`, and `FAULTEND`, laid out by
+`lib/abi`'s `ktrace` module. As FreeBSD's `ktr_submitrequest`, a record made where the thread may
+sleep is written at once, in the traced thread, after what it queued before; one made where it may
+not (signals, context switches, capability failures, faults) is queued on the process and written
+on the way back to user mode (`ktr_enqueuerequest`, `ktruserret`). Unmodified `kdump` reads them;
 differential tests compare AbyssBSD's trace of a program with FreeBSD's.
 
 ### 12.3 ptrace

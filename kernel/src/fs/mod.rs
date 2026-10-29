@@ -513,12 +513,33 @@ impl Walk {
     };
 }
 
+/// A traced lookup's records (`namei`, `namei_setup`,
+/// `namei_handle_root`): its path (`KTR_NAMEI`), and what capability mode
+/// would refuse, a walk from the working directory or of an absolute path
+/// (`CAPFAIL_NAMEI`, once per lookup).
+fn trace_lookup(s: &Sleepable, at: At, path: &[u8]) {
+    use crate::ktrace::{self, CapFail};
+    if ktrace::point(abi::ktrace::KTR_NAMEI) {
+        ktrace::namei(s, path);
+    }
+    if ktrace::cap_tracing() {
+        if at == At::Cwd {
+            ktrace::capfail(CapFail::Namei(b"AT_FDCWD"));
+        } else if path.first() == Some(&b'/') {
+            ktrace::capfail(CapFail::Namei(path));
+        }
+    }
+}
+
 /// Where `p`'s walk of `path` starts (`namei_setup`): the root is
 /// borrowed, not counted. In capability mode the walk must start at a
 /// descriptor (`ECAPMODE` otherwise) and stay beneath it; so must one from
 /// a descriptor with Capsicum limits, which must also hold `CAP_LOOKUP`
 /// and the operation's rights.
 fn start_of(s: &Sleepable, p: &crate::proc::Process, at: At, path: &[u8]) -> Result<Start, Errno> {
+    if p.ktrace.flags() != 0 {
+        trace_lookup(s, at, path);
+    }
     let capmode = p.in_capability_mode();
     if capmode && at == At::Cwd {
         return Err(Errno::ECAPMODE);
@@ -647,6 +668,54 @@ pub(crate) fn parent_of(
     )
 }
 
+/// A directory, and a name in it.
+type DirName = (Arc<Vnode>, alloc::vec::Vec<u8>);
+
+/// The directory and name under which `path` (its last component's
+/// symbolic links followed) finds a file that is not a directory, for
+/// naming it as it was found when it has several links (FreeBSD's
+/// `namei` with `WANTPARENT`, for `vn_fullpath_hardlink`). `None` if the
+/// last component is a directory, `.`, or `..`.
+pub(crate) fn found_under(
+    s: &Sleepable,
+    p: &crate::proc::Process,
+    at: At,
+    path: &[u8],
+) -> Result<Option<DirName>, Errno> {
+    let start = start_of(s, p, at, path)?;
+    let cred = p.cred();
+    let mut dir = Arc::clone(&start.dir);
+    let mut path = path.to_vec();
+    for _ in 0..=abi::fcntl::MAXSYMLINKS {
+        let parent = namespace().parent_of(
+            s,
+            &Lookup {
+                start: &dir,
+                root: &start.root,
+                follow: false,
+                beneath: start.strict,
+                create: false,
+                cred: &cred,
+            },
+            &path,
+        )?;
+        let name: &[u8] = &parent.name;
+        if name.is_empty() || name == b"." || name == b".." {
+            return Ok(None);
+        }
+        let v = Namespace::child(s, &parent.dir, name)?;
+        match v.kind() {
+            vfs::Kind::Directory => return Ok(None),
+            vfs::Kind::Symlink => {
+                path = v.readlink(s)?;
+                dir = parent.dir;
+            }
+            _ => return Ok(Some((parent.dir, name.to_vec()))),
+        }
+    }
+    Err(Errno::ELOOP)
+}
+
 /// A file whose pages come from memory the kernel keeps (the memory
 /// disk's files).
 struct ResidentPager {
@@ -678,17 +747,22 @@ static OBJECTS: PreemptLock<BTreeMap<NodeId, Arc<vm::object::Object>>> =
 /// file system's (tmpfs's), or for a memory-disk file one over its
 /// resident contents, made at the first mapping and kept.
 pub(crate) fn object(s: &Sleepable, v: &Vnode) -> Option<Arc<vm::object::Object>> {
-    if let Some(o) = v.object(s) {
-        return Some(o);
-    }
-    let data = v.resident(s)?;
-    let mut objects = OBJECTS.lock();
-    Some(Arc::clone(objects.entry(v.id()).or_insert_with(|| {
-        vm::object::Object::with_pager(
-            crate::mm::space::page_ops(),
-            Arc::new(ResidentPager { data }),
-        )
-    })))
+    let o = match v.object(s) {
+        Some(o) => o,
+        None => {
+            let data = v.resident(s)?;
+            let mut objects = OBJECTS.lock();
+            Arc::clone(objects.entry(v.id()).or_insert_with(|| {
+                vm::object::Object::with_pager(
+                    crate::mm::space::page_ops(),
+                    Arc::new(ResidentPager { data }),
+                )
+            }))
+        }
+    };
+    // Its mappings name the file (`kern.proc.vmmap`).
+    crate::kinfo::vm::note_file(&o, v);
+    Some(o)
 }
 
 /// Descriptors of process `pid` holding `slots` were closed: its POSIX

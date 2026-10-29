@@ -1,0 +1,33 @@
+$ top -b -d 1 -p <sleeper>
+last pid: <p>; load averages: <l>, <l>, <l> up <time> <time>
+<n> processes: <states>
+CPU: <p>% user, <p>% nice, <p>% system, <p>% interrupt, <p>% idle
+Mem: <memory>
+
+PID USERNAME THR PRI NICE SIZE RES STATE C TIME WCPU COMMAND
+<sleeper> root 1 * 0 * * nanslp * * * sleep
+
+(exit 0)
+$ top -b -d 1 -H -p <threads>
+last pid: <p>; load averages: <l>, <l>, <l> up <time> <time>
+<n> threads: <states>
+CPU: <p>% user, <p>% nice, <p>% system, <p>% interrupt, <p>% idle
+Mem: <memory>
+
+PID USERNAME PRI NICE SIZE RES STATE C TIME WCPU COMMAND
+<threads> root * 0 * * sigsus * * * diffproc{diffproc}
+<threads> root * 0 * * uwait * * * diffproc{worker-cond}
+<threads> root * 0 * * nanslp * * * diffproc{worker-nap}
+<threads> root * 0 * * sigwai * * * diffproc{worker-sigwait}
+
+(exit 0)
+$ top -b -d 1 -o pid -p <piperd>
+last pid: <p>; load averages: <l>, <l>, <l> up <time> <time>
+<n> processes: <states>
+CPU: <p>% user, <p>% nice, <p>% system, <p>% interrupt, <p>% idle
+Mem: <memory>
+
+PID USERNAME THR PRI NICE SIZE RES STATE C TIME WCPU COMMAND
+<piperd> root 1 * 0 * * piperd * * * diffproc
+
+(exit 0)

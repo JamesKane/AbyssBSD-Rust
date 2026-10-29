@@ -267,6 +267,7 @@ fn send_stream(
         let r = if nonblock {
             so.send_stream(&mut chain, control, cred)
         } else {
+            let _w = sched::wait_message("sbwait");
             wait_until(s, &so.wr, timeo, || {
                 so.send_stream(&mut chain, control, cred)
             })
@@ -331,6 +332,7 @@ pub(crate) fn receive(
         let r = if nonblock {
             once()
         } else {
+            let _w = sched::wait_message("sbwait");
             wait_until(s, &so.rd, timeo, once)
         }?;
         if let Some(ext) = ext.as_mut()
@@ -353,6 +355,7 @@ pub(crate) fn receive(
         let r = if nonblock {
             first()
         } else {
+            let _w = sched::wait_message("sbwait");
             wait_until(s, &so.rd, timeo, first)
         };
         let mut r = match r {

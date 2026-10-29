@@ -510,6 +510,16 @@ pub(crate) fn name_of(v: &Vnode) -> Option<Vec<u8>> {
     with(|r| r.path(ino))
 }
 
+/// The name under `/dev` of the device whose number is `rdev`
+/// (`kern.devname`, FreeBSD's `devtoname` of a `dev_t`).
+pub(crate) fn name_of_rdev(rdev: u64) -> Option<Vec<u8>> {
+    with(|r| {
+        matches!(r.nodes.get(&rdev)?.what, What::Dev(_))
+            .then(|| r.path(rdev))
+            .flatten()
+    })
+}
+
 /// The vnode of the node at `path`, looked up afresh (a revoked node's
 /// old vnode is dead).
 pub(crate) fn vnode_of(s: &Sleepable, path: &[u8]) -> Option<Arc<Vnode>> {

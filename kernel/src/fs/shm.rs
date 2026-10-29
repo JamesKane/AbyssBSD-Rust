@@ -122,7 +122,7 @@ impl Shm {
         let now = super::now();
         let object = Object::anonymous(crate::mm::space::page_ops());
         object.set_limit(0);
-        Arc::new(Self {
+        let shm = Arc::new(Self {
             object,
             ino: NEXT_INO.fetch_add(1, Ordering::Relaxed),
             st: Mutex::new(
@@ -141,7 +141,10 @@ impl Shm {
                     path: None,
                 },
             ),
-        })
+        });
+        // Its mappings name it (`kern.proc.vmmap`).
+        crate::kinfo::vm::note_shm(&shm.object, &shm);
+        shm
     }
 
     /// Reads at `offset`, up to the end.
@@ -229,6 +232,13 @@ impl Shm {
                 .map_err(|e| if e == Errno::ENOMEM { Errno::ENOSPC } else { e })?;
         }
         Ok(())
+    }
+
+    /// Its mode, size, and name if it has one, for process information
+    /// (`shm_fill_kinfo`).
+    pub(crate) fn kinfo(&self, s: &Sleepable) -> (u16, u64, Option<Vec<u8>>) {
+        let st = self.st.lock(s);
+        (st.mode, st.size, st.path.clone())
     }
 
     /// `fstat` (`shm_stat`).
@@ -489,6 +499,11 @@ fn remove(
         st.path = None;
     }
     names.remove(path).ok_or(Errno::ENOENT)
+}
+
+/// Every named object, by name (`kern.ipc.posix_shm_list`).
+pub(crate) fn named(s: &Sleepable) -> Vec<Arc<Shm>> {
+    NAMES.lock(s).values().cloned().collect()
 }
 
 fn insert(s: &Sleepable, names: &mut BTreeMap<Vec<u8>, Arc<Shm>>, path: Vec<u8>, shm: Arc<Shm>) {

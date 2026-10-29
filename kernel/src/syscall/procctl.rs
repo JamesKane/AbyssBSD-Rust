@@ -267,6 +267,8 @@ fn single(me: &Arc<Process>, p: &Arc<Process>, com: u32, arg: Arg) -> (Result<()
             }
             _ => done(Err(Errno::EINVAL)),
         },
+        // Not while a debugger or ktrace traces it.
+        PROC_TRACE_CTL if p.is_traced() || p.ktrace.flags() != 0 => done(Err(Errno::EBUSY)),
         PROC_TRACE_CTL => done(match state {
             PROC_TRACE_CTL_ENABLE if !mine => Err(Errno::EPERM),
             PROC_TRACE_CTL_ENABLE => {
@@ -291,8 +293,12 @@ fn single(me: &Arc<Process>, p: &Arc<Process>, com: u32, arg: Arg) -> (Result<()
             }
             _ => Err(Errno::EINVAL),
         }),
-        // Nothing traces yet (ptrace is P6.8).
-        PROC_TRACE_STATUS => status(if f2 & p2::NOTRACE != 0 { -1 } else { 0 }),
+        // Its debugger's pid, -1 if it may not be traced.
+        PROC_TRACE_STATUS => status(if f2 & p2::NOTRACE != 0 {
+            -1
+        } else {
+            crate::ptrace::tracer(p)
+        }),
         PROC_TRAPCAP_CTL => done(match state {
             PROC_TRAPCAP_CTL_ENABLE => {
                 flags(p, p2::TRAPCAP, 0);
@@ -548,7 +554,7 @@ fn reap_getpids(p: &Process, rp: &ReaperPids) -> Result<(), Errno> {
 /// first failure after a success, and a later success clears it. `ESRCH`
 /// failures are never reported, so this is no oracle for visibility.
 fn reap_kill(me: &Arc<Process>, p: &Process, rk: &mut ReaperKill) -> Result<(), Errno> {
-    crate::capsicum::check_capmode()?;
+    crate::capsicum::refuse(crate::ktrace::CapFail::Signal(rk.rk_sig))?;
     let both = REAPER_KILL_CHILDREN | REAPER_KILL_SUBTREE;
     if rk.rk_sig <= 0
         || rk.rk_sig > abi::signal::SIG_MAXSIG.cast_signed()

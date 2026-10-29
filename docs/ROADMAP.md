@@ -1704,8 +1704,110 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
 - `kern.proc` complete (threads, sizes, wmesg, CPU), `kinfo_file`, `kinfo_vmentry`, kernel stacks
   and the other `procstat` nodes, `vm.stats`, `cp_times`, load average, `kern.devname`, the `^T`
   line (MULTIUSER.md §12.1).
+  - Done 2026-10-28: the scheduler keeps each sleep's wait message and channel (sleep sites
+    named as FreeBSD's: `nanslp`, `wait`, `piperd`, `select`, `kqread`, `sigsusp`, `uwait`,
+    `ttyin`, ...), whether it is interruptible, when it began, voluntary and involuntary
+    switches, and ULE's `%CPU` window (`sched_pctcpu_update`, host-tested); a statistics
+    clock at FreeBSD's 127 Hz, stopped while its CPU idles, charges each tick to
+    `kern.cp_time`/`cp_times`' user, nice, system, interrupt, or idle and to the running
+    thread, whose run time it divides into user and system time (`calcru`); the load average
+    is `loadav`'s. `kern.proc` (`kernel/src/kinfo/`) fills sizes and resident pages (counted
+    in the page tables), text, data, and stack sizes, wait channels, states, priorities in
+    FreeBSD 15's ranges, rusage and the children's times, the flags, and jails; `kern.devname`
+    (a sysctl answering what is written), `kern.proc.filedesc` and `kern.proc.cwd` (every
+    descriptor type, paths from the name cache, Capsicum rights; `F_KINFO` shares it),
+    `kern.ipc.posix_shm_list`, `vmmap` (object types, files' attributes and paths, the shared
+    page as physical memory), `kstack` (symbolized from switched-out threads' frame
+    pointers), `env` (read from the process's memory), `rlimit`, `rlimit_usage`, `umask`,
+    `osrel`, `sigtramp`, `ps_strings`, `groups`, `sigfastblk`, `vm_layout`, `sv_name`, `kq`,
+    and `kern.lockf`; `vm.stats.*`, `vm.vmtotal`, `vm.loadavg`, `vm.swap_info` (no swap),
+    `hw.physmem` and kin, `kern.boottime`, `lastpid`, `fscale`, `ccpu`, `clockrate`,
+    `argmax`, `bootfile`, `kern.smp.*`, and `machdep.consdev`. `^T` and `TIOCSTAT` print
+    `tty_info`'s line. `cpuset_getid` came along; a file takes its name in the cache at its
+    first lookup, not at its creation, as FreeBSD's (its `kf_path` is empty until then).
+    `abi-check` covers the new structures. What is left is in compat-deviations.md's
+    "Process information" row.
+  - The differential harness (BUILD-AND-TEST.md §4, `xtask/src/diff.rs`, `tests/diff/`):
+    scenario scripts, one normalizer run in each guest, FreeBSD 15.1's outputs recorded by
+    `cargo xtask --remote freebsd-diff` into `tests/corpus/freebsd/diff/`, and the shell cases
+    comparing AbyssBSD's line for line. Scenarios `ps` (several `-o` formats, `-l`, `-j`,
+    `-u`, `-v`, `-auxww`, `-O`, `-c`), `psthreads` (`-H`), `top` (`-b`, `-H`), `fstat`,
+    `procstat` (default, `-a`, `-b`, `-c`, `-e`, `-f`, `-fC`, `-i`, `-j`, `-k`, `-kk`, `-l`,
+    `-r`, `-s`, `-S`, `-t`, `-x`, `kqueue`, `advlock`, `pwdx`, `pargs`, `penv`,
+    `sigfastblock`, `rlimitusage`, `binary`), `vmmap` (`-v`), `status` (`^T`, `TIOCSTAT`),
+    and `w` (`w`, `uptime`). kyua's `usr.bin/procstat` joins the shell cases' run. On both
+    arches, every scenario but `vmmap` prints what FreeBSD's does (vmmap's differences, in
+    `known-differences.txt`: AbyssBSD maps an executable's partial last data page from the
+    file, and places `mmap`s by its own policy); the five `procstat_test` cases pass.
+    `Signals`' dispositions moved to the heap: the 4 KiB array, copied twice in `fork`'s frame,
+    overflowed arm64's kernel stack, and `statfs` keeps its `struct statfs` on the heap (a
+    7 KiB frame left a timer interrupt too little stack).
 - ktrace with every record type and a writer thread; `kdump` unmodified. `ptrace` for `truss` and
   `ptrace_test` (§12.3). Core dumps of threaded processes.
+  - ktrace done 2026-10-28 (`kernel/src/ktrace.rs`, layouts in `lib/abi`'s `ktrace` module):
+    `ktrace(2)` with `KTROP_SET`, `CLEAR`, `CLEARFILE`, `KTRFLAG_DESCEND`, process groups, and
+    `KTRFAC_INHERIT`, `KTRFAC_ROOT` and `ktrcanset`; the file opened as `vn_open` does and written
+    with the tracer's `RLIMIT_FSIZE`; tracing stops at a set-id exec unless the tracer may debug
+    any credential. Records as FreeBSD's: written in the traced thread after what it queued
+    (`ktr_submitrequest`), or queued on the process where it may not sleep and written on the way
+    back to user mode (`ktr_enqueuerequest`, `ktruserret`); a request pool
+    (`kern.ktrace.request_pool`, `KTR_DROP`), `kern.ktrace.genio_size`,
+    `kern.ktrace.filesize_limit_signal`. Every record type: `SYSCALL` (all `sy_narg` arguments, the
+    stack's past the sixth on amd64, which also fixes indirect `syscall(2)`'s sixth), `SYSRET`
+    (`EJUSTRETURN` for `execve`, and the child's of `fork` and `thr_new`), `NAMEI`, `GENIO` (the
+    read and write family, `sendmsg`/`recvmsg`), `PSIG`, `USER` (`utrace`), `STRUCT` (`stat`,
+    `sockaddr`, `caprights`, `itimerval`, `cpuset_t`, `thrparam`), `STRUCT_ARRAY` (`kevent`,
+    `pollfd`), `SYSCTL` (`sysctl.name`'s form), `PROCCTOR`/`PROCDTOR`, `ARGS`/`ENVS`, `FAULT`/
+    `FAULTEND`, `CSW` (each named sleep, from the scheduler's wait messages), and `CAPFAIL` with FreeBSD's tracing of what capability mode would refuse
+    (system calls, `F_KINFO`, `sysarch`, signals to others, `AT_FDCWD` and absolute lookups,
+    `bindat`/`connectat`, `sendto` addresses, `shm_open` paths, rights and their widening, other
+    processes' CPU sets, exec paths). `kern/ktrace_test` passes but its two `AF_INET` cases (P8).
+  - ptrace done 2026-10-28 (`kernel/src/ptrace.rs`, layouts in `lib/abi`'s `ptrace` module): every
+    request (`PT_COREDUMP` too: served by the stopped thread, `PC_ALL`, `PC_COMPRESS` as
+    `kern.compress_user_cores` says); trace stops as stops of every thread, reported to the
+    debugger's `wait` (`CLD_TRAPPED`, `WTRAPPED`); `PT_ATTACH` reparents and stops the process at
+    once, sleepers sleeping on (`kern.ptrace_attach_transparent`); the real parent's `wait` sees
+    its traced children (`p_orphans`), which go back to it once the debugger has seen them exit or
+    detaches; `kern.kill_on_debugger_exit`. Stops at signals (as `sigprocess`, debugger-chosen
+    signals marked `KSI_PTRACE`), system call entry and exit (`PT_TO_SCE`, `PT_TO_SCX`,
+    `PT_SYSCALL`, `PT_GET_SC_ARGS`, `PT_GET_SC_RET`, `PT_SC_REMOTE` at the boundary), exec, followed
+    forks and vforks (`PT_FOLLOW_FORK`, `PTRACE_VFORK`), and thread birth and exit
+    (`PT_LWP_EVENTS`, exits on single-threading too); `PT_SUSPEND`/`PT_RESUME`; registers through
+    each thread's entry frame and saved FPU state (`PT_GETREGS`, `PT_GETFPREGS`, `PT_GETREGSET`
+    with `NT_PRSTATUS`, `NT_FPREGSET`, arm64's `NT_ARM_TLS` and `NT_ARM_ADDR_MASK`; amd64's FS, GS,
+    and TLS bases); memory (`PT_IO`, `PT_READ_*`, `PT_WRITE_*`, writes giving a private mapping its
+    own copy as `VM_PROT_COPY`); `PT_STEP` (amd64's TF; arm64's software step, `MDSCR_EL1.SS` kept
+    to the returning thread's `SPSR.SS`, the OS lock opened at boot); `int3` from user mode.
+    Signals now queue as FreeBSD's do (every one sent with information, up to
+    `kern.sigqueue.max_pending_per_proc`, a child's `SIGCHLD` once). Numbered CPU sets
+    (`cpuset(2)`, `cpuset_getid`, `cpuset_setid`, `CPU_LEVEL_CPUSET`) came with the tests that pin
+    threads. `kern/ptrace_test` matches FreeBSD 15.1 on amd64 (`PT_ATTACH_no_EINTR` passes where
+    FreeBSD's run timed out); arm64 too but `PT_KILL_competing_stop`.
+  - Core dumps done 2026-10-28 (`kernel/src/coredump.rs`): a core-dumping signal stops every
+    thread at the boundary and writes `kern.corefile` (`%N.core`, `%P`, `%U`, `%H`, `%S`, `%I`),
+    mode 0600, as `coredump_vnode` checks it, within `RLIMIT_CORE`, unless `kern.coredump`,
+    `kern.sugid_coredump`, or `PROC_TRACE_CTL` say otherwise; ELF64 `ET_CORE` with `PT_LOAD` for
+    each mapping with memory and FreeBSD's notes (`NT_PRPSINFO`; per thread, the dumping one first,
+    `NT_PRSTATUS`, `NT_FPREGSET`, `NT_THRMISC`, `NT_PTLWPINFO`, amd64's `NT_X86_SEGBASES` and
+    `NT_X86_XSTATE`, arm64's `NT_ARM_TLS` and `NT_ARM_ADDR_MASK`; the `NT_PROCSTAT_*` notes
+    `procstat` reads from cores). The wait status carries `WCOREFLAG` (`CLD_DUMPED`), and
+    `kern.logsigexit` says "core dumped" or why not. `kinfo_proc` reports tracing (`P_TRACED`,
+    `P_STOPPED_TRACE`, `ki_tracer`, `ki_traceflag`), and `PT_VM_ENTRY` mapped files' paths.
+  - The differential scenarios `kdump` (ktrace and kdump on a fixed run of system calls, its
+    forked child's records, the sleep's context switches) and `truss` (`truss -f` on the same).
+    `__realpathat` names a file with several links by the directory and name it was found under
+    (`vn_fullpath_hardlink`): with files named in the cache at lookup, `realpath /rescue/sh` had
+    come back as whichever of `/rescue`'s links was looked up last. truss found that a `vfork`
+    child's `PT_TRACE_ME` kept its signals from the debugger past exec (`P_PPTRACE` now goes
+    there), and kdump that a forked child kept `AMD64_GET_TLSBASE`'s base (`cpu_fork` clears it)
+    and that arm64's `sigreturn` returns as call -1.
+  - Results: on both arches all nine scenarios but `vmmap` print what FreeBSD 15.1's do; the
+    amd64 shell cases (QEMU and bhyve) have 702 of FreeBSD's test cases as on FreeBSD (697
+    before); arm64's `ptrace_test`, `ktrace_test`, and `procstat_test` as on FreeBSD, but
+    `PT_KILL_competing_stop`, which hangs in some runs.
+    The `user_memory` ktests' page counts now wait for every CPU to let go of the test's space
+    (`settled_free_pages`): one emulated arm64 run had counted 12 pages "leaked" while another CPU
+    the thread had left still held it.
 - Exit: `ps`, `top`, `fstat`, `procstat` (every mode), `w`, `kdump`, and `truss` output matches
   FreeBSD's in differential tests, kyua's `kern/ptrace_test` and `kern/ktrace_test` at the target, and
   the `kern.proc` deviation closed.
@@ -1839,8 +1941,8 @@ NICs.
 - Performance pass: lock contention profiling and scheduler tuning on hybrid cores, aimed at
   beating FreeBSD rather than matching it. The P9 suite adds self-hosted build time, SU+J
   metadata workloads, and swap throughput.
-- Documentation: installation guide, supported-hardware list, compat-deviations list. Forward
-  design for the installed manuals: [MANUALS.md](MANUALS.md) (draft).
+- Documentation: installation guide ([INSTALLER.md](INSTALLER.md) (draft)), supported-hardware list,
+  compat-deviations list. Forward design for the installed manuals: [MANUALS.md](MANUALS.md) (draft).
 
 **Exit (v1.0):** the success criteria in [VISION.md](VISION.md#success-criteria-for-day-1-v10) are
 met.
@@ -1853,7 +1955,7 @@ met.
   `ecall`, `t0` number, `a0..a7` arguments).
 - Boot FreeBSD riscv64 `base.txz` multi-user on QEMU virt (`acpi=on`).
 - **Board bring-up** on the Banana Pi BPI-SM10 (SpacemiT K3,
-  [ADR-0017](adr/0017-rv64-reference-board-bpi-sm10.md), [HARDWARE.md §6](HARDWARE.md#6-board-profile-rv64-banana-pi-bpi-sm10-spacemit-k3)),
+  [ADR-0017](adr/0017-rv64-reference-board-bpi-sm10.md), [HARDWARE.md §8](HARDWARE.md#8-board-profile-rv64-banana-pi-bpi-sm10-spacemit-k3)),
   once the QEMU exit holds, in the order P7 used for the other boards:
   - save the shipped state (SPI NOR dump, U-Boot environment) and Linux's view of the hardware;
   - get SpacemiT's K3 edk2 port running (UEFI with ACPI), and its tables into the AML corpus;

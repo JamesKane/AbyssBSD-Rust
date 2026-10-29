@@ -2502,13 +2502,45 @@ mod user_memory {
     /// Pages that are free or held by the heap (whose caches keep pages
     /// for the map's nodes) or by cached kernel stacks: a page leaked by
     /// the VM drops this.
-    fn free_pages() -> u64 {
+    fn free_pages() -> Pages {
         let h = crate::mm::heap_stats();
-        crate::mm::phys_stats().free
-            + h.slab_pages
-            + h.magazine_pages
-            + h.large_pages
-            + crate::mm::kstack::cached_pages()
+        Pages {
+            free: crate::mm::phys_stats().free,
+            slab: h.slab_pages,
+            magazine: h.magazine_pages,
+            large: h.large_pages,
+            stacks: crate::mm::kstack::cached_pages(),
+            kva: crate::mm::kstack::kva_allocated() / 4096,
+            objects: crate::mm::space::OBJECT_PAGES.sum(core::sync::atomic::Ordering::Relaxed),
+        }
+    }
+
+    /// Where pages are, for naming what a leak took: the first five sum
+    /// to the pages not in use; `kva` (kernel virtual memory in use, in
+    /// pages) and `objects` (pages `vm` objects hold) say where the rest
+    /// went.
+    #[derive(Clone, Copy, Debug)]
+    #[allow(dead_code, reason = "`kva` and `objects` are for the failure message")]
+    struct Pages {
+        free: u64,
+        slab: u64,
+        magazine: u64,
+        large: u64,
+        stacks: u64,
+        kva: u64,
+        objects: i64,
+    }
+
+    impl Pages {
+        fn unused(&self) -> u64 {
+            self.free + self.slab + self.magazine + self.large + self.stacks
+        }
+    }
+
+    impl PartialEq for Pages {
+        fn eq(&self, other: &Self) -> bool {
+            self.unused() == other.unused()
+        }
     }
 
     fn enter(space: &Arc<AddressSpace>) {
@@ -2527,7 +2559,7 @@ mod user_memory {
     ktest! {
         fn user_memory_faults_in_through_copies() {
             let s = cx();
-            let before = free_pages();
+            let before = settled_free_pages(&s);
             let space = AddressSpace::new().unwrap();
             enter(&space);
             let a = space.map_anonymous(&s, None, HINT, 16 * PAGE, Prot::RW).unwrap().get();
@@ -2581,14 +2613,17 @@ mod user_memory {
             assert!(space.translate(VirtAddr::new(a + 3 * PAGE)).is_none());
             leave();
             drop(space);
-            assert_eq!(free_pages(), before, "pages leaked");
+            // Another CPU the thread ran on may hold the space until it
+            // loads another: counted once every CPU has let it go.
+            let after = settled_free_pages(&s);
+            assert_eq!(after, before, "pages leaked: {before:?} then {after:?}");
         }
     }
 
     ktest! {
         fn fork_copies_on_write_between_spaces() {
             let s = cx();
-            let before = free_pages();
+            let before = settled_free_pages(&s);
             let parent = AddressSpace::new().unwrap();
             enter(&parent);
             let a = parent.map_anonymous(&s, None, HINT, 4 * PAGE, Prot::RW).unwrap().get();
@@ -2619,16 +2654,14 @@ mod user_memory {
             assert_eq!(read_u64(a + PAGE), Ok(300));
             leave();
             drop(parent);
-            assert_eq!(free_pages(), before, "pages leaked");
+            let after = settled_free_pages(&s);
+            assert_eq!(after, before, "pages leaked: {before:?} then {after:?}");
         }
     }
 
-    /// Runs `code` as a process: its own read+execute page, a stack, and
-    /// one thread bound to this CPU. Returns the exit status once every
-    /// page is back.
     /// [`free_pages`] once it has stopped changing: the reaper frees
     /// earlier tests' threads in its own time.
-    fn settled_free_pages(s: &sched::Sleepable) -> u64 {
+    fn settled_free_pages(s: &sched::Sleepable) -> Pages {
         // A CPU keeps the last address space it ran until it loads
         // another; earlier tests' spaces would otherwise go mid-count.
         let ncpu = u32::try_from(sched::online_cpus()).unwrap();
@@ -2654,6 +2687,9 @@ mod user_memory {
         }
     }
 
+    /// Runs `code` as a process: its own read+execute page, a stack, and
+    /// one thread bound to this CPU. Returns the exit status once every
+    /// page is back.
     fn run_program(code: &[u8]) -> i32 {
         use crate::proc::{Process, STACK_TOP};
         let s = cx();
@@ -2689,7 +2725,9 @@ mod user_memory {
         let p = Process::spawn_code(space, text, STACK_TOP, Some(hal::cpu_id()));
         let status = match p.wait(&s) {
             crate::proc::Exit::Code(c) => c,
-            crate::proc::Exit::Signal(sig) => panic!("killed by signal {sig}"),
+            crate::proc::Exit::Signal(sig) | crate::proc::Exit::Dumped(sig) => {
+                panic!("killed by signal {sig}")
+            }
         };
         drop(p);
         let after = settled_free_pages(&s);

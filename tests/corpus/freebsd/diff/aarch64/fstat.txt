@@ -1,0 +1,92 @@
+$ fstat -p <files>
+USER CMD PID FD MOUNT INUM MODE SZ|DV R/W
+root diffproc <files> text / * -rwxr-xr-x 803776 r
+root diffproc <files> ctty /dev * crw--w---- pts/<n> rw
+root diffproc <files> wd / * drwxr-xr-x 512 r
+root diffproc <files> root / * drwxr-xr-x 512 r
+root diffproc <files> 0 /dev * crw-rw-rw- null r
+root diffproc <files> 1 /dev * crw--w---- pts/<n> rw
+root diffproc <files> 2 /dev * crw--w---- pts/<n> rw
+root diffproc <files> 3 - * -rw-r--r-- 13 rw
+root diffproc <files> 4 - * -rw------- 0 r
+root diffproc <files> 5 / * drwxr-xr-x 512 r
+root diffproc <files> 6 /dev * crw-rw-rw- null w
+root diffproc <files> 7* pipe * <-> <addr> 0 rw
+root diffproc <files> 8* pipe * <-> <addr> 0 rw
+root diffproc <files> 9 / * prw------- 0 rw
+root diffproc <files> 10* local * <addr> <-> <addr>
+root diffproc <files> 11* local * <addr> <-> <addr>
+root diffproc <files> 12* local * <addr>
+root diffproc <files> 13* local * <addr>
+root diffproc <files> 14 [kqueue]
+root diffproc <files> 15* pseudo-terminal * pts/<n> rw
+root diffproc <files> 16 /dev * crw--w---- pts/<n> rw
+root diffproc <files> 17 - * 8192 rw
+root diffproc <files> 18 /diff.shm * 4096 rw
+root diffproc <files> 19 [eventfd]
+root diffproc <files> 20
+root diffproc <files> 21 [procdesc]
+(exit 0)
+$ fstat -n -p <files>
+USER CMD PID FD DEV INUM MODE SZ|DV R/W
+root diffproc <files> text * * 100755 803776 r
+root diffproc <files> ctty * * 20620 <dev> rw
+root diffproc <files> wd * * 40755 512 r
+root diffproc <files> root * * 40755 512 r
+root diffproc <files> 0 * * 20666 <dev> r
+root diffproc <files> 1 * * 20620 <dev> rw
+root diffproc <files> 2 * * 20620 <dev> rw
+root diffproc <files> 3 * * 100644 13 rw
+root diffproc <files> 4 * * 100600 0 r
+root diffproc <files> 5 * * 40755 512 r
+root diffproc <files> 6 * * 20666 <dev> w
+root diffproc <files> 7* * * <-> <addr> 0 rw
+root diffproc <files> 8* * * <-> <addr> 0 rw
+root diffproc <files> 9 * * 10600 0 rw
+root diffproc <files> 10* * * <addr> <-> <addr>
+root diffproc <files> 11* * * <addr> <-> <addr>
+root diffproc <files> 12* * * <addr>
+root diffproc <files> 13* * * <addr>
+root diffproc <files> 14 *
+root diffproc <files> 15* * * <hex> rw
+root diffproc <files> 16 * * 20620 <dev> rw
+root diffproc <files> 17 * * rw
+root diffproc <files> 18 * * rw
+root diffproc <files> 19 *
+root diffproc <files> 20
+root diffproc <files> 21 *
+(exit 0)
+$ fstat diff.file
+USER CMD PID FD MOUNT INUM MODE SZ|DV R/W NAME
+root diffproc <files> 3 / * -rw-r--r-- 13 rw diff.file
+root diffproc <p1> 3 / * -rw-r--r-- 13 rw diff.file
+(exit 0)
+$ fstat -s -p <files>
+USER CMD PID FD MOUNT INUM MODE SZ|DV R/W
+root diffproc <files> text / * -rwxr-xr-x 803776 r
+root diffproc <files> ctty /dev * crw--w---- pts/<n> rw
+root diffproc <files> wd / * drwxr-xr-x 512 r
+root diffproc <files> root / * drwxr-xr-x 512 r
+root diffproc <files> 0 /dev * crw-rw-rw- null r
+root diffproc <files> 1 /dev * crw--w---- pts/<n> rw
+root diffproc <files> 2 /dev * crw--w---- pts/<n> rw
+root diffproc <files> 3 / * -rw-r--r-- 13 rw
+root diffproc <files> 4 - * -rw------- 0 r
+root diffproc <files> 5 / * drwxr-xr-x 512 r
+root diffproc <files> 6 /dev * crw-rw-rw- null w
+root diffproc <files> 7* pipe * <-> <addr> 0 rw
+root diffproc <files> 8* pipe * <-> <addr> 0 rw
+root diffproc <files> 9 / * prw------- 0 rw
+root diffproc <files> 10* local * <addr> <-> <addr> -
+root diffproc <files> 11* local * <addr> <-> <addr> -
+root diffproc <files> 12* local * <addr> diff.sock
+root diffproc <files> 13* local * <addr> -
+root diffproc <files> 14 [kqueue]
+root diffproc <files> 15* pseudo-terminal * pts/<n> rw
+root diffproc <files> 16 /dev * crw--w---- pts/<n> rw
+root diffproc <files> 17 - * 8192 rw
+root diffproc <files> 18 /diff.shm * 4096 rw
+root diffproc <files> 19 [eventfd]
+root diffproc <files> 20
+root diffproc <files> 21 [procdesc]
+(exit 0)

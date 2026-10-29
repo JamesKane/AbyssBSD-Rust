@@ -618,6 +618,26 @@ impl Discipline {
         }
     }
 
+    /// Whether the kernel's status line is shown on `VSTATUS` and
+    /// `TIOCSTAT` (`NOKERNINFO` unset), and whether output is at the start
+    /// of a line (`t_column == 0`), as `tty_info` asks.
+    #[must_use]
+    pub const fn status_wanted(&self) -> (bool, bool) {
+        (!self.lflag(abi::termios::NOKERNINFO), self.column == 0)
+    }
+
+    /// Queues the kernel's status line, through output processing and
+    /// past `FLUSHO` (`tty_info`'s `sbuf_tty_drain`, `tty_putstrn`);
+    /// what does not fit is dropped.
+    pub fn status(&mut self, text: &[u8]) {
+        let flusho = self.lflag(FLUSHO);
+        self.t.c_lflag &= !FLUSHO;
+        self.write(text);
+        if flusho {
+            self.t.c_lflag |= FLUSHO;
+        }
+    }
+
     /// Queues program output (`write`); returns how much of `data` was
     /// taken, short when the queue fills.
     pub fn write(&mut self, data: &[u8]) -> usize {

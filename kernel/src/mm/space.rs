@@ -70,9 +70,14 @@ fn user_page() -> Option<vm::PhysAddr> {
     })
 }
 
+/// Pages `vm` objects hold (anonymous memory and file pages): what
+/// `vm.stats.vm.v_active_count` reports.
+pub(crate) static OBJECT_PAGES: sync::PerCpuCounter = sync::PerCpuCounter::new();
+
 impl PageOps for KernelPages {
     fn alloc_zeroed(&self) -> Option<Pfn> {
         let pa = user_page()?;
+        OBJECT_PAGES.add(1, core::sync::atomic::Ordering::Relaxed);
         let pfn = Pfn::containing(pa);
         // SAFETY: a fresh page, reached through the DMAP, used by no one.
         unsafe { core::ptr::write_bytes(Self::page(pfn), 0, PAGE_BYTES) };
@@ -81,6 +86,7 @@ impl PageOps for KernelPages {
 
     fn alloc_copy(&self, from: Pfn) -> Option<Pfn> {
         let pa = user_page()?;
+        OBJECT_PAGES.add(1, core::sync::atomic::Ordering::Relaxed);
         let pfn = Pfn::containing(pa);
         // SAFETY: `from` is a live page of some object (only read while
         // its object reaches it, and no one writes it through the kernel);
@@ -93,6 +99,7 @@ impl PageOps for KernelPages {
 
     fn alloc_filled(&self, fill: &mut dyn FnMut(&mut [u8])) -> Option<Pfn> {
         let pa = user_page()?;
+        OBJECT_PAGES.add(1, core::sync::atomic::Ordering::Relaxed);
         let pfn = Pfn::containing(pa);
         // SAFETY: a fresh page, reached through the DMAP, used by no one.
         fill(unsafe { core::slice::from_raw_parts_mut(Self::page(pfn), PAGE_BYTES) });
@@ -100,6 +107,7 @@ impl PageOps for KernelPages {
     }
 
     fn free(&self, pfn: Pfn) {
+        OBJECT_PAGES.add(-1, core::sync::atomic::Ordering::Relaxed);
         free_pages(pfn.addr(), Order::ZERO);
     }
 
@@ -294,6 +302,14 @@ pub(crate) struct Wired {
 pub(crate) static USER_WIRED: AtomicU64 = AtomicU64::new(0);
 
 impl Wired {
+    /// Whether all of pages `[start, end)` are wired.
+    pub(crate) fn covers(&self, start: u64, end: u64) -> bool {
+        self.ranges
+            .range(..=start)
+            .next_back()
+            .is_some_and(|(_, &e)| e >= end)
+    }
+
     /// Wires `[start, end)`: the pages newly wired.
     fn wire(&mut self, start: u64, end: u64) -> u64 {
         let before = self.count;
@@ -419,6 +435,58 @@ impl AddressSpace {
             .entries()
             .map(|e| e.range().end.get() - e.range().start.get())
             .sum()
+    }
+
+    /// A copy of every entry, in order (for process information:
+    /// `kern.proc.vmmap`, `ki_size`).
+    pub(crate) fn entries(&self, s: &Sleepable) -> alloc::vec::Vec<Entry> {
+        self.map.lock(s).entries().cloned().collect()
+    }
+
+    /// The process's main stack (`vm_maxsaddr` and `vm_ssize`).
+    pub(crate) fn proc_stack(&self, s: &Sleepable) -> Option<vm::map::ProcStack> {
+        self.map.lock(s).proc_stack().cloned()
+    }
+
+    /// Pages of `range` the page tables map (`pmap_resident_count` over
+    /// it): what is resident for this space.
+    pub(crate) fn resident(&self, range: core::ops::Range<VirtAddr>) -> u64 {
+        let len = range.end.get().saturating_sub(range.start.get());
+        self.tables.lock().resident(&mut Frames, range.start, len)
+    }
+
+    /// Reads `buf.len()` bytes at `va` through the kernel, faulting the
+    /// pages in for reading as user mode would, whether or not this space
+    /// is loaded anywhere (FreeBSD's `proc_readmem`, for another process's
+    /// environment).
+    pub(crate) fn peek(
+        &self,
+        s: &Sleepable,
+        va: VirtAddr,
+        buf: &mut [u8],
+    ) -> Result<(), FaultError> {
+        let mut done = 0;
+        while done < buf.len() {
+            let at = va
+                .get()
+                .checked_add(done as u64)
+                .ok_or(FaultError::Protection)?;
+            let in_page = (at % PAGE_SIZE) as usize;
+            let n = (PAGE_BYTES - in_page).min(buf.len() - done);
+            let (map, r) = self.resolve(s, VirtAddr::new(at), Access::Read)?;
+            // SAFETY: the page is this space's (just resolved for reading,
+            // under the map lock), reached through the DMAP.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    KernelPages::page(r.pfn).add(in_page),
+                    buf[done..].as_mut_ptr(),
+                    n,
+                );
+            }
+            drop(map);
+            done += n;
+        }
+        Ok(())
     }
 
     /// An empty address space.
@@ -948,6 +1016,85 @@ impl AddressSpace {
         let _ = self.unmap_locked(&mut map, VirtAddr::new(USER_START)..VirtAddr::new(USER_END));
     }
 
+    /// How many times the map has changed (`PT_VM_TIMESTAMP`).
+    pub(crate) fn timestamp(&self) -> u32 {
+        // SAFETY: a sysctl or ptrace request reads it with no lock held,
+        // which may sleep.
+        let s = unsafe { Sleepable::assume() };
+        self.map.lock(&s).timestamp()
+    }
+
+    /// The `index`th mapping (in address order), as `PT_VM_ENTRY` and
+    /// core dumps describe it.
+    pub(crate) fn entry_info(&self, s: &Sleepable, index: usize) -> Option<EntryInfo> {
+        let map = self.map.lock(s);
+        let e = map.entries().nth(index)?;
+        let prot = e.prot();
+        let bits = u32::from(prot.contains(Prot::READ))
+            | u32::from(prot.contains(Prot::WRITE)) << 1
+            | u32::from(prot.contains(Prot::EXEC)) << 2;
+        Some(EntryInfo {
+            start: e.start().get(),
+            end: e.end().get(),
+            prot: bits,
+            dumpable: e.object().is_some_and(|o| !o.is_device()),
+        })
+    }
+
+    /// `proc_rwmem` for a debugger: reads `buf.len()` bytes at `va` into
+    /// `buf`, or writes them there, page by page, through the kernel,
+    /// whether or not the space is loaded anywhere. A write gives a
+    /// private mapping its own copy first (`VM_PROT_COPY`), and keeps the
+    /// instruction cache coherent with what it wrote. Returns how many
+    /// bytes moved before a page that could not be had.
+    pub(crate) fn debug_rw(&self, s: &Sleepable, va: u64, buf: &mut [u8], write: bool) -> usize {
+        let access = if write { Access::Copy } else { Access::Read };
+        let mut done = 0;
+        while done < buf.len() {
+            let Some(at) = va.checked_add(done as u64).filter(|&a| a < USER_END) else {
+                break;
+            };
+            let in_page = (at % PAGE_SIZE) as usize;
+            let n = (PAGE_BYTES - in_page).min(buf.len() - done);
+            let Ok((map, r)) = self.resolve(s, VirtAddr::new(at), access) else {
+                break;
+            };
+            // SAFETY: the page belongs to this space's map (resolved under
+            // its lock, for writing a private copy if `write`), reached
+            // through the DMAP while the lock is held.
+            unsafe {
+                let page = KernelPages::page(r.pfn).add(in_page);
+                if write {
+                    core::ptr::copy_nonoverlapping(buf[done..].as_ptr(), page, n);
+                } else {
+                    core::ptr::copy_nonoverlapping(page, buf[done..].as_mut_ptr(), n);
+                }
+            }
+            if write {
+                // The page may have been replaced by its copy: what is
+                // mapped there now must be it.
+                let replaced = self.tables.lock().set(
+                    &mut Frames,
+                    r.page,
+                    r.pfn.addr(),
+                    attrs(r.prot, r.attr),
+                );
+                if let Ok(Some(_)) = replaced {
+                    self.flush(r.page, PAGE_SIZE);
+                }
+                #[cfg(target_arch = "aarch64")]
+                {
+                    // SAFETY: as above.
+                    let kva = unsafe { KernelPages::page(r.pfn).add(in_page) };
+                    arch::cache::sync_icache(kva as usize, n);
+                }
+            }
+            drop(map);
+            done += n;
+        }
+        done
+    }
+
     /// The physical page `va` is mapped to, if it is (for tests).
     #[cfg_attr(not(feature = "ktest"), allow(dead_code))]
     pub(crate) fn translate(&self, va: VirtAddr) -> Option<PhysAddr> {
@@ -1005,6 +1152,17 @@ impl Drop for AddressSpace {
     }
 }
 
+/// A mapping as a debugger sees it ([`AddressSpace::entry_info`]).
+pub(crate) struct EntryInfo {
+    pub(crate) start: u64,
+    pub(crate) end: u64,
+    /// `VM_PROT_*`.
+    pub(crate) prot: u32,
+    /// It has memory a core dump holds: an object (touched), not a
+    /// device's (`each_dumpable_segment`).
+    pub(crate) dumpable: bool,
+}
+
 /// Stops this CPU using the user space it has loaded, if the current
 /// thread runs in none, so the space can be freed.
 pub(crate) fn unload() {
@@ -1047,7 +1205,29 @@ pub(crate) fn page_fault(f: &arch::PageFault) -> bool {
         // outside interrupt handlers and critical sections), which may
         // sleep as the code it interrupted could have.
         let s = unsafe { Sleepable::assume() };
-        let ok = space.fault(&s, VirtAddr::new(f.address), access).is_ok();
+        // A traced process's faults are recorded (`trap_pfault`): the
+        // access as `VM_PROT_*`, the result as `KERN_*`.
+        let traced = crate::ktrace::point(abi::ktrace::KTR_FAULT)
+            || crate::ktrace::point(abi::ktrace::KTR_FAULTEND);
+        if traced {
+            let prot = match access {
+                Access::Read | Access::Copy => 1,
+                Access::Write => 2,
+                Access::Execute => 4,
+            };
+            crate::ktrace::fault(f.address, prot);
+        }
+        let r = space.fault(&s, VirtAddr::new(f.address), access);
+        if traced {
+            crate::ktrace::fault_end(match r {
+                Ok(()) => 0,
+                Err(vm::fault::FaultError::NotMapped) => 1,
+                Err(vm::fault::FaultError::Protection) => 2,
+                Err(vm::fault::FaultError::OutOfMemory) => 6,
+                Err(vm::fault::FaultError::PastEnd) => 9,
+            });
+        }
+        let ok = r.is_ok();
         // Masked again for the trap's return path; it restores the
         // interrupted state from the frame.
         let _ = hal::irq::disable();

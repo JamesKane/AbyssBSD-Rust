@@ -53,11 +53,12 @@ impl WaitQueue {
             }
             crate::lock::witness::check_sleep(hal::irq::were_enabled(&irq));
             let me = crate::current_arc();
-            me.inner.lock().state = State::Sleeping;
+            let (wmesg, since) = self.mark_asleep(&me, false);
             q.push_back(me);
             drop(q);
             crate::switch_away();
             hal::irq::restore(irq);
+            crate::slept(wmesg, since);
         }
     }
 
@@ -95,7 +96,7 @@ impl WaitQueue {
             }
             crate::lock::witness::check_sleep(hal::irq::were_enabled(&irq));
             let arc = crate::current_arc();
-            arc.inner.lock().state = State::Sleeping;
+            let (wmesg, since) = self.mark_asleep(&arc, true);
             q.push_back(arc);
             me.wchan
                 .store(core::ptr::from_ref(self).cast_mut(), Ordering::SeqCst);
@@ -104,7 +105,7 @@ impl WaitQueue {
             let raced = me.is_interrupted();
             if raced {
                 let unqueued = q.remove(me);
-                me.inner.lock().state = State::Running;
+                crate::mark_awake(&mut me.inner.lock(), State::Running);
                 drop(q);
                 drop(unqueued);
             } else {
@@ -119,7 +120,23 @@ impl WaitQueue {
                 me.wchan.store(core::ptr::null_mut(), Ordering::SeqCst);
             }
             hal::irq::restore(irq);
+            if !raced {
+                crate::slept(wmesg, since);
+            }
         }
+    }
+
+    /// Puts `t` (the current thread) to sleep here, with its wait message
+    /// and this queue as its wait channel, interruptible or not. Returns
+    /// the message and when the sleep began.
+    fn mark_asleep(&self, t: &Thread, interruptible: bool) -> (&'static str, u64) {
+        let mut inner = t.inner.lock();
+        inner.state = State::Sleeping;
+        inner.wmesg = inner.next_wmesg;
+        inner.wchan = core::ptr::from_ref(self).addr();
+        inner.sintr = interruptible;
+        inner.slept_at = crate::platform_now();
+        (inner.wmesg, inner.slept_at)
     }
 
     /// Unqueues `t` if it sleeps here (an interrupted sleeper).

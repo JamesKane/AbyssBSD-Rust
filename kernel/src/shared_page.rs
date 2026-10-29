@@ -447,6 +447,12 @@ fn write_sigcode(head: &mut [u8]) -> usize {
     0
 }
 
+/// The shared page's memory object, by address (its mappings show as
+/// physical memory, `OBJT_PHYS`).
+pub(crate) fn object_ptr() -> Option<usize> {
+    PAGE.get().map(|p| Arc::as_ptr(&p.object).addr())
+}
+
 /// The user address of the signal trampoline in a shared page mapped at
 /// `page`.
 pub(crate) fn sigcode_address(page: u64) -> u64 {

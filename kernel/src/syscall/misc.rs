@@ -6,8 +6,8 @@ use core::sync::atomic::Ordering;
 
 use abi::errno::Errno;
 use abi::thr::{
-    CPU_LEVEL_CPUSET, CPU_LEVEL_ROOT, CPU_LEVEL_WHICH, CPU_WHICH_PID, CPU_WHICH_TID,
-    CPU_WHICH_TIDPID, CPUSET_BYTES, EXTERRCTL_DISABLE, EXTERRCTL_ENABLE,
+    CPU_LEVEL_CPUSET, CPU_LEVEL_ROOT, CPU_LEVEL_WHICH, CPU_WHICH_CPUSET, CPU_WHICH_PID,
+    CPU_WHICH_TID, CPU_WHICH_TIDPID, CPUSET_BYTES, EXTERRCTL_DISABLE, EXTERRCTL_ENABLE,
 };
 
 use alloc::sync::Arc;
@@ -22,11 +22,11 @@ pub(super) fn getpid() -> SysResult {
     Process::with_current(|p| u64::from(p.pid().unsigned_abs())).ok_or(Errno::EINVAL)
 }
 
-/// `utrace(addr, len)`: a record for ktrace (rtld's `LD_UTRACE`,
-/// `malloc`'s); a process nobody traces drops it, as FreeBSD does (no
-/// ktrace until P6.8).
-pub(super) fn utrace() -> SysResult {
-    Ok(0)
+/// `utrace(addr, len)`: a `KTR_USER` record (rtld's `LD_UTRACE`,
+/// `malloc`'s); a process nobody traces drops it.
+pub(super) fn utrace(s: &sched::Sleepable, addr: u64, len: u64) -> SysResult {
+    let len = usize::try_from(len).map_err(|_| Errno::EINVAL)?;
+    crate::ktrace::user(s, addr, len).map(|()| 0)
 }
 
 /// `issetugid()`: whether the process's credential changed since it last
@@ -114,12 +114,105 @@ impl Target {
             Self::Process(p) => p.cpus(),
         }
     }
+
+    /// The numbered set its process is in (`cpuset_refbase`).
+    fn set(&self) -> i32 {
+        match self {
+            Self::Thread(t) => t.process().cpuset(),
+            Self::Process(p) => p.cpuset(),
+        }
+    }
+}
+
+/// The numbered set `which` and `id` name: a set's id itself, or the set
+/// of the thread's or process's.
+fn set_of(which: u64, id: u64) -> Result<i32, Errno> {
+    if which == u64::from(CPU_WHICH_CPUSET) {
+        let id = i32::try_from(id.cast_signed()).map_err(|_| Errno::ESRCH)?;
+        crate::cpuset::mask(id)?;
+        return Ok(id);
+    }
+    Ok(Target::find(which, id)?.set())
+}
+
+/// The set at `level` above set `set`: itself, or its root.
+fn at_level(level: u32, set: i32) -> i32 {
+    if level == CPU_LEVEL_ROOT {
+        crate::cpuset::root_of(set)
+    } else {
+        set
+    }
+}
+
+/// `cpuset(setid)`: a new numbered set the caller's process joins.
+pub(super) fn cpuset(setid: u64) -> SysResult {
+    let p = process()?;
+    let id = crate::cpuset::create(&p)?;
+    uaccess::UserPtr::<i32>::new(setid)
+        .write(&id)
+        .map_err(|_| Errno::EFAULT)?;
+    Ok(0)
+}
+
+/// `cpuset_setid(which, id, setid)`: process `id` joins set `setid`
+/// (only processes, as FreeBSD).
+pub(super) fn cpuset_setid(which: u64, id: u64, setid: u64) -> SysResult {
+    if which != u64::from(CPU_WHICH_PID) {
+        return Err(Errno::EINVAL);
+    }
+    let Target::Process(p) = Target::find(which, id)? else {
+        return Err(Errno::EINVAL);
+    };
+    let setid = i32::try_from(setid.cast_signed()).map_err(|_| Errno::ESRCH)?;
+    crate::cpuset::join(&p, setid)?;
+    Ok(0)
+}
+
+/// `cpuset_getid(level, which, id, setid)`.
+pub(super) fn cpuset_getid(level: u64, which: u64, id: u64, setid: u64) -> SysResult {
+    let level = u32::try_from(level).map_err(|_| Errno::EINVAL)?;
+    if ![CPU_LEVEL_ROOT, CPU_LEVEL_CPUSET, CPU_LEVEL_WHICH].contains(&level)
+        || (level == CPU_LEVEL_WHICH && which != u64::from(CPU_WHICH_CPUSET))
+    {
+        return Err(Errno::EINVAL);
+    }
+    let set = at_level(level, set_of(which, id)?);
+    uaccess::UserPtr::<i32>::new(setid)
+        .write(&set)
+        .map_err(|_| Errno::EFAULT)?;
+    Ok(0)
+}
+
+/// Capability mode allows only the caller's own thread or process at the
+/// `CPU_LEVEL_WHICH` level (`cpuset_check_capabilities`,
+/// `cpuset_capmode_allowed`); anything else is `ECAPMODE` there, and
+/// recorded if traced.
+fn check_capabilities(level: u32, which: u64, id: u64) -> Result<(), Errno> {
+    if !crate::capsicum::in_capability_mode() && !crate::ktrace::cap_tracing() {
+        return Ok(());
+    }
+    let id = id.cast_signed();
+    let (tid, pid) =
+        UserThread::with_current(|t| (i64::from(t.tid()), i64::from(t.process().pid())))
+            .unwrap_or((-1, -1));
+    let which = u32::try_from(which).unwrap_or(u32::MAX);
+    let allowed = level == CPU_LEVEL_WHICH
+        && [CPU_WHICH_TID, CPU_WHICH_PID, CPU_WHICH_TIDPID].contains(&which)
+        && (id == -1
+            || (which == CPU_WHICH_TID && id == tid)
+            || (which == CPU_WHICH_PID && id == pid)
+            || (which == CPU_WHICH_TIDPID && (id == tid || id == pid)));
+    if allowed {
+        return Ok(());
+    }
+    crate::capsicum::refuse(crate::ktrace::CapFail::Cpuset)
 }
 
 /// `cpuset_getaffinity(level, which, id, setsize, mask)`: the CPUs a
 /// thread may run on, or a process's threads (the union); at the root and
 /// cpuset levels, every CPU (there is one set).
 pub(super) fn cpuset_getaffinity(
+    s: &sched::Sleepable,
     level: u64,
     which: u64,
     id: u64,
@@ -131,11 +224,11 @@ pub(super) fn cpuset_getaffinity(
     if ![CPU_LEVEL_ROOT, CPU_LEVEL_CPUSET, CPU_LEVEL_WHICH].contains(&level) {
         return Err(Errno::EINVAL);
     }
-    let target = Target::find(which, id)?;
-    let allowed = if level == CPU_LEVEL_WHICH {
-        target.cpus()
+    check_capabilities(level, which, id)?;
+    let allowed = if level == CPU_LEVEL_WHICH && which != u64::from(CPU_WHICH_CPUSET) {
+        Target::find(which, id)?.cpus()
     } else {
-        u64::MAX
+        crate::cpuset::mask(at_level(level, set_of(which, id)?))?
     };
     let mut set = [0u8; CPUSET_BYTES];
     let mut highest = 0;
@@ -151,6 +244,9 @@ pub(super) fn cpuset_getaffinity(
         return Err(Errno::ERANGE);
     }
     let n = size.min(CPUSET_BYTES);
+    if crate::ktrace::point(abi::ktrace::KTR_STRUCT) {
+        crate::ktrace::structure(s, "cpuset_t", &set[..n]);
+    }
     uaccess::copy_out(mask, &set[..n]).map_err(|_| Errno::EFAULT)?;
     let zeros = [0u8; CPUSET_BYTES];
     let mut at = n;
@@ -165,6 +261,7 @@ pub(super) fn cpuset_getaffinity(
 /// `cpuset_setaffinity(level, which, id, setsize, mask)`: the CPUs a
 /// thread may run on, or every thread of a process.
 pub(super) fn cpuset_setaffinity(
+    s: &sched::Sleepable,
     level: u64,
     which: u64,
     id: u64,
@@ -188,10 +285,14 @@ pub(super) fn cpuset_setaffinity(
         }
         at += k;
     }
-    if u32::try_from(level).map_err(|_| Errno::EINVAL)? != CPU_LEVEL_WHICH {
+    let level = u32::try_from(level).map_err(|_| Errno::EINVAL)?;
+    check_capabilities(level, which, id)?;
+    if ![CPU_LEVEL_ROOT, CPU_LEVEL_CPUSET, CPU_LEVEL_WHICH].contains(&level) {
         return Err(Errno::EINVAL);
     }
-    let target = Target::find(which, id)?;
+    if crate::ktrace::point(abi::ktrace::KTR_STRUCT) {
+        crate::ktrace::structure(s, "cpuset_t", &set);
+    }
     let online = sched::online_cpus();
     let mut bits = 0u64;
     for (i, &b) in set.iter().enumerate() {
@@ -210,6 +311,19 @@ pub(super) fn cpuset_setaffinity(
     if bits == 0 {
         return Err(Errno::EDEADLK);
     }
+    // A numbered set (`cpuset_modify`), or a thread's or process's own
+    // CPUs within its set.
+    if level != CPU_LEVEL_WHICH || which == u64::from(CPU_WHICH_CPUSET) {
+        let set = at_level(level, set_of(which, id)?);
+        crate::cpuset::modify(&*process()?, set, bits)?;
+        return Ok(0);
+    }
+    let target = Target::find(which, id)?;
+    let within = crate::cpuset::mask(target.set())?;
+    if bits & within == 0 {
+        return Err(Errno::EDEADLK);
+    }
+    let bits = bits & within;
     match target {
         Target::Thread(t) => t.set_cpus(bits),
         Target::Process(p) => p.set_cpus(bits),
@@ -273,7 +387,7 @@ pub(super) fn sysarch(op: u64, parms: u64) -> SysResult {
         }
         _ => {
             // Only the thread-state requests in capability mode.
-            crate::capsicum::check_capmode()?;
+            crate::capsicum::refuse(crate::ktrace::CapFail::Syscall(Some(super::int(op))))?;
             crate::firstuse::report(crate::firstuse::Kind::Sysarch, format_args!("{op}"));
             return Err(Errno::EINVAL);
         }

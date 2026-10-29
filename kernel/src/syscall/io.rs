@@ -134,62 +134,84 @@ fn check_len(n: u64) -> Result<(), Errno> {
 pub(super) fn read(s: &Sleepable, fd: u64, buf: u64, nbyte: u64) -> SysResult {
     check_len(nbyte)?;
     let mut uio = UserIo::one(buf, nbyte)?;
-    with_file(s, fd, &R::READ, |f| f.read(s, &mut uio)).map(|n| n as u64)
+    let ktr = crate::ktrace::genio_start(&uio);
+    let r = with_file(s, fd, &R::READ, |f| f.read(s, &mut uio));
+    crate::ktrace::genio(s, fd, false, ktr, &r);
+    r.map(|n| n as u64)
 }
 
 /// `readv(fd, iovp, iovcnt)`.
 pub(super) fn readv(s: &Sleepable, fd: u64, iov: u64, iovcnt: u64) -> SysResult {
     let mut uio = UserIo::vector(iov, iovcnt)?;
-    with_file(s, fd, &R::READ, |f| f.read(s, &mut uio)).map(|n| n as u64)
+    let ktr = crate::ktrace::genio_start(&uio);
+    let r = with_file(s, fd, &R::READ, |f| f.read(s, &mut uio));
+    crate::ktrace::genio(s, fd, false, ktr, &r);
+    r.map(|n| n as u64)
 }
 
 /// `pread(fd, buf, nbyte, offset)`.
 pub(super) fn pread(s: &Sleepable, fd: u64, buf: u64, nbyte: u64, offset: u64) -> SysResult {
     check_len(nbyte)?;
     let mut uio = UserIo::one(buf, nbyte)?;
-    with_file(s, fd, &R::PREAD, |f| {
+    let ktr = crate::ktrace::genio_start(&uio);
+    let r = with_file(s, fd, &R::PREAD, |f| {
         f.pread(s, &mut uio, offset.cast_signed())
-    })
-    .map(|n| n as u64)
+    });
+    crate::ktrace::genio(s, fd, false, ktr, &r);
+    r.map(|n| n as u64)
 }
 
 /// `preadv(fd, iovp, iovcnt, offset)`.
 pub(super) fn preadv(s: &Sleepable, fd: u64, iov: u64, iovcnt: u64, offset: u64) -> SysResult {
     let mut uio = UserIo::vector(iov, iovcnt)?;
-    with_file(s, fd, &R::PREAD, |f| {
+    let ktr = crate::ktrace::genio_start(&uio);
+    let r = with_file(s, fd, &R::PREAD, |f| {
         f.pread(s, &mut uio, offset.cast_signed())
-    })
-    .map(|n| n as u64)
+    });
+    crate::ktrace::genio(s, fd, false, ktr, &r);
+    r.map(|n| n as u64)
 }
 
 /// `write(fd, buf, nbyte)`.
 pub(super) fn write(s: &Sleepable, fd: u64, buf: u64, nbyte: u64) -> SysResult {
     check_len(nbyte)?;
     let mut uio = UserIo::one(buf, nbyte)?;
-    wrote(with_file(s, fd, &R::WRITE, |f| f.write(s, &mut uio)))
+    let ktr = crate::ktrace::genio_start(&uio);
+    let r = with_file(s, fd, &R::WRITE, |f| f.write(s, &mut uio));
+    crate::ktrace::genio(s, fd, true, ktr, &r);
+    wrote(r)
 }
 
 /// `writev(fd, iovp, iovcnt)`.
 pub(super) fn writev(s: &Sleepable, fd: u64, iov: u64, iovcnt: u64) -> SysResult {
     let mut uio = UserIo::vector(iov, iovcnt)?;
-    wrote(with_file(s, fd, &R::WRITE, |f| f.write(s, &mut uio)))
+    let ktr = crate::ktrace::genio_start(&uio);
+    let r = with_file(s, fd, &R::WRITE, |f| f.write(s, &mut uio));
+    crate::ktrace::genio(s, fd, true, ktr, &r);
+    wrote(r)
 }
 
 /// `pwrite(fd, buf, nbyte, offset)`.
 pub(super) fn pwrite(s: &Sleepable, fd: u64, buf: u64, nbyte: u64, offset: u64) -> SysResult {
     check_len(nbyte)?;
     let mut uio = UserIo::one(buf, nbyte)?;
-    wrote(with_file(s, fd, &R::PWRITE, |f| {
+    let ktr = crate::ktrace::genio_start(&uio);
+    let r = with_file(s, fd, &R::PWRITE, |f| {
         f.pwrite(s, &mut uio, offset.cast_signed())
-    }))
+    });
+    crate::ktrace::genio(s, fd, true, ktr, &r);
+    wrote(r)
 }
 
 /// `pwritev(fd, iovp, iovcnt, offset)`.
 pub(super) fn pwritev(s: &Sleepable, fd: u64, iov: u64, iovcnt: u64, offset: u64) -> SysResult {
     let mut uio = UserIo::vector(iov, iovcnt)?;
-    wrote(with_file(s, fd, &R::PWRITE, |f| {
+    let ktr = crate::ktrace::genio_start(&uio);
+    let r = with_file(s, fd, &R::PWRITE, |f| {
         f.pwrite(s, &mut uio, offset.cast_signed())
-    }))
+    });
+    crate::ktrace::genio(s, fd, true, ktr, &r);
+    wrote(r)
 }
 
 /// `lseek(fd, offset, whence)`.
@@ -414,7 +436,9 @@ pub(super) fn fcntl(s: &Sleepable, fd: u64, cmd: u64, arg: u64) -> SysResult {
         F_GETLK | F_SETLK | F_SETLKW => record_lock(s, fd, cmd, arg),
         // Only shared memory has seals.
         abi::fcntl::F_KINFO => {
-            crate::capsicum::check_capmode()?;
+            crate::capsicum::refuse(crate::ktrace::CapFail::Syscall(Some(
+                abi::fcntl::F_KINFO.cast_signed(),
+            )))?;
             kinfo(s, fd, arg)
         }
         F_ADD_SEALS | F_GET_SEALS => {
@@ -717,8 +741,10 @@ pub(super) fn pipe2(s: &Sleepable, fildes: u64, flags: u64) -> SysResult {
 /// `fstat(fd, sb)`.
 pub(super) fn fstat(s: &Sleepable, fd: u64, sb: u64) -> SysResult {
     let f = current_file(s, fd, &R::FSTAT)?;
+    let st = f.stat(s)?;
+    crate::ktrace::structure_of(s, "stat", &st);
     UserPtr::<Stat>::new(sb)
-        .write(&f.stat(s)?)
+        .write(&st)
         .map_err(|_| Errno::EFAULT)?;
     Ok(0)
 }
@@ -880,56 +906,17 @@ pub(super) fn copy_file_range(
     Ok(done)
 }
 
-/// `fcntl(F_KINFO)`: the descriptor's `struct kinfo_file`, the caller
-/// having set its `kf_structsize`. Only its type, descriptor, flags, and
-/// offset are filled yet; the per-type parts and the path come with
-/// `kern.proc.filedesc` (P6.8).
+/// `fcntl(F_KINFO)`: the descriptor's `struct kinfo_file`, whole, the
+/// caller having set its `kf_structsize` (`kern.proc.filedesc`'s record,
+/// without rights, as FreeBSD's).
 fn kinfo(s: &Sleepable, fd: i32, arg: u64) -> SysResult {
-    /// `KINFO_FILE_SIZE`.
-    const SIZE: usize = 1392;
     let size = UserPtr::<i32>::new(arg).read().map_err(|_| Errno::EFAULT)?;
-    if usize::try_from(size).ok() != Some(SIZE) {
+    if usize::try_from(size).ok() != Some(abi::kinfo::KINFO_FILE_SIZE) {
         return Err(Errno::EINVAL);
     }
     let f = current_file(s, u64::from(fd.cast_unsigned()), &R::NO)?;
-    let ty: i32 = match f.kind() {
-        FileKind::Vnode(v) if v.device.is_some() => 12,
-        FileKind::Vnode(_) => 1,
-        FileKind::Socket(_) => 2,
-        FileKind::Pipe(_) => 3,
-        FileKind::Fifo(_) => 4,
-        FileKind::Kqueue(_) => 5,
-        FileKind::Shm(_) => 8,
-        FileKind::Process(_) => 11,
-        FileKind::Jail(_) => 16,
-        FileKind::Eventfd(_) => 13,
-        FileKind::Timerfd(_) => 14,
-        FileKind::Pts(_) => 10,
-    };
-    let fl = f.flags();
-    let mut flags = 0i32;
-    for (have, kf) in [
-        (abi::fcntl::FREAD, 0x01),
-        (abi::fcntl::FWRITE, 0x02),
-        (abi::fcntl::O_APPEND, 0x04),
-        (abi::fcntl::O_NONBLOCK, 0x20),
-    ] {
-        if fl & have != 0 {
-            flags |= kf;
-        }
-    }
-    let mut kf = [0u8; SIZE];
-    let off = i64::try_from(f.offset_hint()).unwrap_or(i64::MAX);
-    kf[0..4].copy_from_slice(&i32::try_from(SIZE).unwrap_or(0).to_ne_bytes());
-    kf[4..8].copy_from_slice(&ty.to_ne_bytes());
-    kf[8..12].copy_from_slice(&fd.to_ne_bytes());
-    kf[12..16].copy_from_slice(
-        &i32::try_from(Arc::strong_count(&f) - 1)
-            .unwrap_or(0)
-            .to_ne_bytes(),
-    );
-    kf[16..20].copy_from_slice(&flags.to_ne_bytes());
-    kf[24..32].copy_from_slice(&off.to_ne_bytes());
+    let p = Process::current().ok_or(Errno::EINVAL)?;
+    let kf = crate::kinfo::file::f_kinfo(s, &p, fd, &f)?;
     uaccess::copy_out(arg, &kf).map_err(|_| Errno::EFAULT)?;
     Ok(0)
 }

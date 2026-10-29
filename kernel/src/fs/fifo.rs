@@ -186,6 +186,7 @@ impl FifoFile {
             };
             if !has_writer {
                 let f = &file.fifo;
+                let _w = sched::wait_message("fifoor");
                 crate::signal::sleep(s, &f.opened, || f.gens.lock().1 != wgen, None)?;
             }
         }
@@ -196,6 +197,7 @@ impl FifoFile {
             };
             if !has_reader {
                 let f = &file.fifo;
+                let _w = sched::wait_message("fifoow");
                 crate::signal::sleep(s, &f.opened, || f.gens.lock().0 != rgen, None)?;
             }
         }

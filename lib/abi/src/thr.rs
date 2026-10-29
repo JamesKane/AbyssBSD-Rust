@@ -58,6 +58,7 @@ pub const CPU_LEVEL_CPUSET: u32 = 2;
 pub const CPU_LEVEL_WHICH: u32 = 3;
 pub const CPU_WHICH_TID: u32 = 1;
 pub const CPU_WHICH_PID: u32 = 2;
+pub const CPU_WHICH_CPUSET: u32 = 3;
 pub const CPU_WHICH_TIDPID: u32 = 9;
 /// Bits in a `cpuset_t` (`CPU_SETSIZE`).
 pub const CPU_SETSIZE: u32 = 1024;
@@ -101,6 +102,7 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("CPU_LEVEL_WHICH", CPU_LEVEL_WHICH, "sys/cpuset.h"),
     c("CPU_WHICH_TID", CPU_WHICH_TID, "sys/cpuset.h"),
     c("CPU_WHICH_PID", CPU_WHICH_PID, "sys/cpuset.h"),
+    c("CPU_WHICH_CPUSET", CPU_WHICH_CPUSET, "sys/cpuset.h"),
     c("CPU_WHICH_TIDPID", CPU_WHICH_TIDPID, "sys/cpuset.h"),
     c("CPU_SETSIZE", CPU_SETSIZE, "sys/cpuset.h"),
     c(

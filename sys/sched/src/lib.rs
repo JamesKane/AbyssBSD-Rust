@@ -36,6 +36,7 @@ extern crate alloc;
 mod context;
 mod list;
 pub mod lock;
+pub mod pctcpu;
 mod runq;
 mod thread;
 mod ts;
@@ -56,7 +57,7 @@ use sync::{Once, SpinLock};
 pub use crate::context::{IrqCx, Sleepable};
 use crate::list::ThreadList;
 use crate::runq::RunQueue;
-pub use crate::thread::{Name, Priority, State, Thread, Tid};
+pub use crate::thread::{Name, Priority, Report, State, Thread, Tid};
 pub use crate::wait::{Interrupted, WaitQueue};
 
 /// A kernel stack, owned by the platform's allocator.
@@ -111,6 +112,136 @@ static PLATFORM: Once<&'static dyn Platform> = Once::new();
 
 fn platform() -> &'static dyn Platform {
     *PLATFORM.get().expect("scheduler used before init")
+}
+
+/// The platform clock, or 0 before [`init`] (and on the host).
+fn platform_now() -> u64 {
+    PLATFORM.get().map_or(0, |p| p.now())
+}
+
+/// The platform clock in FreeBSD's `hz` ticks ([`pctcpu::HZ`]), or 0
+/// before [`init`].
+fn hz_now() -> u64 {
+    PLATFORM.get().map_or(0, |p| {
+        let f = u128::from(p.frequency().max(1));
+        u64::try_from(u128::from(p.now()) * u128::from(pctcpu::HZ) / f).unwrap_or(u64::MAX)
+    })
+}
+
+/// The platform clock (see [`Platform::now`]); 0 before [`init`].
+#[must_use]
+pub fn now() -> u64 {
+    platform_now()
+}
+
+/// A thread leaves its sleep (woken, interrupted, or never gone): its wait
+/// message and channel are cleared, as `sleepq_resume_thread` does, and
+/// its CPU-share window passes over the time asleep.
+pub(crate) fn mark_awake(inner: &mut thread::Inner, state: State) {
+    inner.state = state;
+    inner.wmesg = "";
+    inner.wchan = 0;
+    inner.sintr = false;
+    inner.slept_at = 0;
+    inner.pct.update(hz_now(), false);
+}
+
+/// Names the current thread's sleeps `msg` (FreeBSD's wait message, as
+/// `piperd` or `nanslp`) until the guard drops, which brings back the
+/// previous one.
+pub fn wait_message(msg: &'static str) -> WaitMessage {
+    let me = current();
+    let previous = core::mem::replace(&mut me.inner.lock().next_wmesg, msg);
+    WaitMessage { previous }
+}
+
+/// What the kernel learns of each named sleep, once the thread is awake
+/// again with interrupts back as they were: its wait message and when it
+/// began, in platform time (for ktrace's `KTR_CSW`).
+pub type SleepHook = fn(&'static str, u64);
+
+static SLEEP_HOOK: core::sync::atomic::AtomicPtr<()> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
+/// Sets the [`SleepHook`].
+pub fn set_sleep_hook(hook: SleepHook) {
+    SLEEP_HOOK.store(hook as *mut (), Ordering::Release);
+}
+
+/// Tells the [`SleepHook`] of a sleep on `wmesg` that began at `since`.
+pub(crate) fn slept(wmesg: &'static str, since: u64) {
+    let h = SLEEP_HOOK.load(Ordering::Acquire);
+    if h.is_null() || wmesg.is_empty() {
+        return;
+    }
+    // SAFETY: only `set_sleep_hook` stores here, a `SleepHook`.
+    let hook: SleepHook = unsafe { core::mem::transmute::<*mut (), SleepHook>(h) };
+    hook(wmesg, since);
+}
+
+/// Restores the previous wait message when dropped (see
+/// [`wait_message`]).
+#[must_use = "the wait message lasts as long as the guard"]
+pub struct WaitMessage {
+    previous: &'static str,
+}
+
+impl Drop for WaitMessage {
+    fn drop(&mut self) {
+        current().inner.lock().next_wmesg = self.previous;
+    }
+}
+
+impl fmt::Debug for WaitMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WaitMessage").finish_non_exhaustive()
+    }
+}
+
+/// Where a statistics-clock tick found its CPU: FreeBSD's `CP_*` states
+/// but `CP_NICE`, which the kernel tells from the process's nice value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TickState {
+    /// A thread in user mode.
+    User,
+    /// A thread in the kernel.
+    System,
+    /// An interrupt thread.
+    Interrupt,
+    /// The idle thread.
+    Idle,
+}
+
+/// A statistics-clock tick on this CPU (FreeBSD's `statclock`), which
+/// interrupted user mode if `user`: charged to the running thread (its
+/// user, system, or interrupt ticks) and to its CPU-share window
+/// (`sched_clock`). Returns where it found the CPU. Interrupt context.
+pub fn stat_tick(user: bool) -> TickState {
+    let t = current();
+    if t.idle {
+        return TickState::Idle;
+    }
+    let Some(mut inner) = t.inner.try_lock() else {
+        // Being changed by this CPU itself: a tick in the kernel.
+        t.stat_ticks[1].fetch_add(1, Ordering::Relaxed);
+        return TickState::System;
+    };
+    let state = if user {
+        TickState::User
+    } else if inner.base.beats(Priority::REALTIME) {
+        TickState::Interrupt
+    } else {
+        TickState::System
+    };
+    inner.pct.update(hz_now(), true);
+    drop(inner);
+    let i = match state {
+        TickState::User => 0,
+        TickState::System => 1,
+        TickState::Interrupt | TickState::Idle => 2,
+    };
+    t.stat_ticks[i].fetch_add(1, Ordering::Relaxed);
+    state
 }
 
 /// Time-sharing accounting for `ev` (see [`thread::Event`]).
@@ -647,7 +778,7 @@ pub(crate) fn make_runnable(t: Arc<Thread>) {
     if !matches!(inner.state, State::Sleeping | State::New) {
         return;
     }
-    inner.state = State::Runnable;
+    mark_awake(&mut inner, State::Runnable);
     // Time asleep lowers usage, raising a time-sharing thread's priority.
     let prio = account(&mut inner, thread::Event::Woken, platform().now());
     let target = choose_cpu(inner.cpu, inner.bound);
@@ -881,6 +1012,14 @@ pub(crate) fn switch_away() {
     let mut inner = cur.inner.lock();
     let state = inner.state;
     let elapsed = now.saturating_sub(inner.since);
+    if !cur.idle {
+        // `sched_switch`: the time since the last update was spent running.
+        inner.pct.update(hz_now(), true);
+        match state {
+            State::Running => cur.involuntary.fetch_add(1, Ordering::Relaxed),
+            _ => cur.voluntary.fetch_add(1, Ordering::Relaxed),
+        };
+    }
     let prio = account(
         &mut inner,
         thread::Event::Descheduled {
@@ -941,6 +1080,8 @@ pub(crate) fn switch_away() {
     {
         let mut inner = next.inner.lock();
         inner.state = State::Running;
+        // The incoming thread's window: it did not run meanwhile.
+        inner.pct.update(hz_now(), false);
         inner.cpu = c.id;
         inner.since = now;
         c.slice_start.set(now);
@@ -1334,6 +1475,20 @@ fn idle_loop() {
         }
         hal::irq::restore(irq);
     }
+}
+
+/// Threads running or waiting to run, but the idle threads (FreeBSD's
+/// `sched_load`, the load average's sample).
+#[must_use]
+pub fn load() -> usize {
+    (0..online_cpus())
+        .filter_map(|i| cpu(CpuId(u32::try_from(i).ok()?)))
+        .map(|c| {
+            let running =
+                usize::from(c.current_prio.load(Ordering::Relaxed) != Priority::IDLE_THREAD.get());
+            c.runq.len_hint() + running
+        })
+        .sum()
 }
 
 /// A snapshot of one CPU, for diagnostics.

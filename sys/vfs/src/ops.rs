@@ -208,7 +208,7 @@ pub fn create(
         crate::acl::inherit(s, &v, c.mode, d)?;
     }
     if dir.mount().fs().caches_created() || v.is_dir() {
-        cache::enter(dir, name, Some(&v));
+        cache::enter_made(dir, name, &v);
     } else {
         // A negative entry for the name goes.
         cache::remove(dir, name);
@@ -311,7 +311,7 @@ pub fn link(
         return Err(Errno::ENOTDIR);
     };
     d.link(s, name, target.ino(), tst.live_mut()?.node_mut())?;
-    cache::enter(dir, name, Some(target));
+    cache::enter_made(dir, name, target);
     // `vop_link_post`.
     target.knote(NOTE_LINK);
     dir.knote(NOTE_WRITE);
@@ -582,7 +582,7 @@ pub fn rename(
     // The new name is left for a lookup to enter, as FreeBSD does; a
     // directory's goes in now, for its name (`getcwd`).
     if from.is_dir() {
-        cache::enter(tdir, tname, Some(&from));
+        cache::enter_made(tdir, tname, &from);
     }
     drop(held);
     rename_notes(fdir, tdir, &from, to.as_deref());

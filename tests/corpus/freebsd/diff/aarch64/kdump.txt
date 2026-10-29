@@ -1,0 +1,63 @@
+(exit 0)
+$ kdump -f k.out -p <traced> (between the markers)
+<traced> diffproc NAMI "diff-begin"
+<traced> diffproc RET access -1 errno 2 No such file or directory
+<traced> diffproc CALL openat(AT_FDCWD,<addr>,<hex><O_RDWR|O_CREAT|O_TRUNC>,0644<S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH>)
+<traced> diffproc NAMI "data"
+<traced> diffproc RET openat 3
+<traced> diffproc CALL write(0x3,<addr>,0xd)
+<traced> diffproc GIO fd 3 wrote 13 bytes
+"hello, world
+"
+<traced> diffproc RET write 13/0xd
+<traced> diffproc CALL lseek(0x3,0,SEEK_SET)
+<traced> diffproc RET lseek 0
+<traced> diffproc CALL read(0x3,<addr>,<hex>)
+<traced> diffproc GIO fd 3 read 13 bytes
+"hello, world
+"
+<traced> diffproc RET read 13/0xd
+<traced> diffproc CALL fstat(0x3,<addr>)
+<traced> diffproc STRU struct stat {dev=*, ino=*, mode=0100644, nlink=1, uid=0, gid=0, rdev=*, atime=*, mtime=*, ctime=*, birthtime=*, size=13, blksize=*, blocks=*, flags=0x0 }
+<traced> diffproc RET fstat 0
+<traced> diffproc CALL close(0x3)
+<traced> diffproc RET close 0
+<traced> diffproc CALL unlink(<addr>)
+<traced> diffproc NAMI "data"
+<traced> diffproc RET unlink 0
+<traced> diffproc CALL __sysctl(<addr>,0x2,<addr>,<addr>,0,0)
+<traced> diffproc SCTL "kern.ostype"
+<traced> diffproc RET __sysctl 0
+<traced> diffproc CALL utrace(<addr>,0x4)
+<traced> diffproc USER 4 64 69 66 66
+<traced> diffproc RET utrace 0
+<traced> diffproc CALL sigprocmask(SIG_SETMASK,<addr>,<addr>)
+<traced> diffproc RET sigprocmask 0
+<traced> diffproc CALL sigaction(SIGUSR1,<addr>,<addr>)
+<traced> diffproc RET sigaction 0
+<traced> diffproc CALL sigprocmask(SIG_SETMASK,<addr>,0)
+<traced> diffproc RET sigprocmask 0
+<traced> diffproc CALL getpid
+<traced> diffproc RET getpid <traced>/<hex>
+<traced> diffproc CALL kill(<traced>,SIGUSR1)
+<traced> diffproc RET kill 0
+<traced> diffproc PSIG SIGUSR1 caught handler=<addr> mask=0x0 code=SI_USER
+<traced> diffproc CALL sigprocmask(SIG_SETMASK,<addr>,0)
+<traced> diffproc RET sigprocmask 0
+<traced> diffproc CALL sigreturn(<addr>)
+<traced> diffproc RET [-1] JUSTRETURN
+<traced> diffproc CALL nanosleep(<addr>,0)
+<traced> diffproc RET nanosleep 0
+<traced> diffproc CALL fork
+<traced> diffproc RET fork <child>/<hex>
+<traced> diffproc CALL wait4(<child>,<addr>,0,0)
+<traced> diffproc RET wait4 <child>/<hex>
+<traced> diffproc CALL access(<addr>,0<F_OK>)
+<traced> diffproc NAMI "diff-end"
+$ kdump -f k.out -p <child>
+<child> diffproc RET fork 0
+<child> diffproc CALL thr_self(<addr>)
+<child> diffproc RET thr_self 0
+<child> diffproc CALL _exit(0x3)
+$ kdump -t w | grep nanslp
+2

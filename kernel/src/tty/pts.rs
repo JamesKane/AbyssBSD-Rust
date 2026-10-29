@@ -170,6 +170,11 @@ impl Drop for Master {
 }
 
 impl Master {
+    /// Its terminal (`ptsdev_fill_kinfo`).
+    pub(crate) fn tty(&self) -> &Arc<Tty> {
+        &self.tty
+    }
+
     /// What the master could read now (`ttydisc_getc_poll`).
     fn readable(&self) -> usize {
         self.tty.out_used.load(Ordering::Acquire)
@@ -225,6 +230,7 @@ impl Master {
                     return Err(Errno::EAGAIN);
                 }
             }
+            let _w = sched::wait_message("ptsout");
             crate::signal::sleep(
                 s,
                 &self.sc.outwait,
@@ -282,6 +288,7 @@ impl Master {
                 if nonblock {
                     break 'chunks Err(Errno::EAGAIN);
                 }
+                let _w = sched::wait_message("ptsin");
                 if let Err(e) = crate::signal::sleep(
                     s,
                     &self.sc.inwait,

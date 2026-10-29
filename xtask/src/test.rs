@@ -37,6 +37,9 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     // The USB and input devices on every boot-tier machine (U.6);
     // `--no-usb` leaves them out, for a quicker run.
     let usb = !args.take_flag("--no-usb");
+    // The shell cases without the user tests and FreeBSD's (the rest,
+    // the differential scenarios included, still runs).
+    let quick = args.take_flag("--quick");
     // One boot-tier case, by name (`x86_64-console`).
     let only = args.take_value("--case")?;
     let wanted = |name: &str| only.as_deref().is_none_or(|o| o == name);
@@ -84,7 +87,7 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
                     continue;
                 }
                 println!("== boot tests ({name}, {vmm:?})");
-                match shell(arch, vmm, release, usb)? {
+                match shell(arch, vmm, release, usb, quick)? {
                     Ok(()) => println!("{name}: PASS"),
                     Err(why) => {
                         println!("{name}: FAIL: {why}");
@@ -418,6 +421,7 @@ fn shell(
     vmm: Vmm,
     release: bool,
     usb: bool,
+    quick: bool,
 ) -> Result<std::result::Result<(), String>> {
     let opts = build::Options {
         release,
@@ -455,10 +459,25 @@ fn shell(
         session.expect("# ", Duration::from_secs(240))?;
         session.script(crate::expect::SHELL, Duration::from_secs(30))?;
         if ufs_root {
-            session.script(crate::expect::UFS_ROOT, Duration::from_secs(600))?;
-            session.script(crate::expect::DYNAMIC, Duration::from_secs(60))?;
-            session.script(crate::expect::DYNAMIC_TESTS, Duration::from_secs(900))?;
-            session.script(crate::expect::FREEBSD_TESTS, Duration::from_secs(3600))?;
+            if let Some(dirs) = image::atf_only() {
+                println!("{arch}-shell{suffix}: ABYSS_ATF: only {}", dirs.join(" "));
+                session.script(crate::expect::ATF_SETUP, Duration::from_secs(60))?;
+                session.script(crate::expect::FREEBSD_TESTS, Duration::from_secs(3600))?;
+            } else {
+                // Quick: the root made writable, without `mtree`'s checks.
+                let ufs = if quick {
+                    &crate::expect::UFS_ROOT[..4]
+                } else {
+                    crate::expect::UFS_ROOT
+                };
+                session.script(ufs, Duration::from_secs(600))?;
+                session.script(crate::expect::DYNAMIC, Duration::from_secs(60))?;
+                session.script(crate::diff::DIFF, Duration::from_secs(900))?;
+                if !quick {
+                    session.script(crate::expect::DYNAMIC_TESTS, Duration::from_secs(900))?;
+                    session.script(crate::expect::FREEBSD_TESTS, Duration::from_secs(3600))?;
+                }
+            }
         }
         session.send("exit\n")
     })();
@@ -473,8 +492,19 @@ fn shell(
         Ok(()) if ufs_root && !console.contains("Trying to mount root from ufs:") => {
             Err("the root was not UFS2".into())
         }
-        Ok(()) if ufs_root => crate::expect::atf_verdict(&console)
+        Ok(()) if ufs_root && image::atf_only().is_some() => crate::expect::atf_verdict(&console)
             .map(|n| println!("{arch}-shell{suffix}: {n} of FreeBSD's test cases as on FreeBSD"))
+            .map_err(|e| e.to_string()),
+        Ok(()) if ufs_root => crate::diff::verdict(arch, &console)
+            .map(|n| println!("{arch}-shell{suffix}: {n} differential scenarios as on FreeBSD"))
+            .and_then(|()| {
+                if quick {
+                    return Ok(());
+                }
+                crate::expect::atf_verdict(&console).map(|n| {
+                    println!("{arch}-shell{suffix}: {n} of FreeBSD's test cases as on FreeBSD");
+                })
+            })
             .map_err(|e| e.to_string())
             .and_then(|()| root_left_clean(&disk)),
         Ok(()) => Ok(()),

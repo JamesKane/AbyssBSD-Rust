@@ -80,6 +80,7 @@ pub(crate) fn send_resched(cpu: CpuId) {
 pub(crate) fn dispatch(irq: arch::Interrupt) {
     hal::interrupt::enter();
     crate::prof::interrupted(irq.pc, irq.fp, irq.from_user);
+    crate::statclock::interrupted(irq.from_user);
     handle(irq);
     hal::interrupt::exit();
     sched::preempt_point();

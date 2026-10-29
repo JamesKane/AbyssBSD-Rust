@@ -1,0 +1,3 @@
+# Differential scenarios whose output may differ from FreeBSD 15.1's yet
+# (docs/BUILD-AND-TEST.md): NAME or ARCH:NAME, then why.
+vmmap   # exec maps a data segment's partial first page from the file (FreeBSD copies it into anonymous memory), and mmap places mappings by another policy than FreeBSD's anon_loc: the map's entries differ in number and order

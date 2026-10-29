@@ -24,7 +24,7 @@
 
 use alloc::collections::BTreeMap;
 use alloc::sync::{Arc, Weak};
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 use abi::errno::Errno;
 use abi::kinfo::MAXCOMLEN;
@@ -155,6 +155,16 @@ pub(crate) struct UserThread {
     pub(crate) suspend_wait: WaitQueue,
     /// Its umtx queue entry (FreeBSD's `td_umtxq`).
     umtx: Arc<crate::umtx::Entry>,
+    /// It is making a ktrace record, and traces nothing meanwhile
+    /// (`TDP_INKTRACE`).
+    pub(crate) in_ktrace: AtomicBool,
+    /// The system call it is in, or made last (`td_sa.code`).
+    code: AtomicU32,
+    /// Its debugging state (`td_dbgflags`, `td_xsig`, `td_frame`, ...).
+    pub(crate) dbg: crate::ptrace::ThreadDebug,
+    /// The child of a traced `vfork` it still waits for
+    /// (`td_rfppwait_p`).
+    pub(crate) vfork_child: SpinLock<Option<Arc<Process>>>,
 }
 
 impl UserThread {
@@ -187,6 +197,10 @@ impl UserThread {
                     crate::umtx::Parker::new(Weak::clone(me)),
                     id.cast_unsigned(),
                 )),
+                in_ktrace: AtomicBool::new(false),
+                code: AtomicU32::new(0),
+                dbg: crate::ptrace::ThreadDebug::default(),
+                vfork_child: SpinLock::new(None),
             }
         });
         tid.map(|_| t)
@@ -194,6 +208,15 @@ impl UserThread {
 
     pub(crate) const fn tid(&self) -> i32 {
         self.tid
+    }
+
+    /// The system call it is in, or made last (`td_sa.code`).
+    pub(crate) fn syscall_code(&self) -> u32 {
+        self.code.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_syscall_code(&self, code: u32) {
+        self.code.store(code, Ordering::Relaxed);
     }
 
     pub(crate) fn process(&self) -> &Arc<Process> {

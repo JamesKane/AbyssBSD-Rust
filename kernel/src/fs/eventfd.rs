@@ -41,6 +41,12 @@ impl Eventfd {
         *self.count.lock()
     }
 
+    /// Its counter and flags, for process information
+    /// (`eventfd_fill_kinfo`).
+    pub(crate) fn kinfo(&self) -> (u64, u32) {
+        (self.count(), self.flags)
+    }
+
     /// The counter changed (`eventfd_wakeup`).
     fn wakeup(&self) {
         self.notify.notify(0);
@@ -72,6 +78,7 @@ impl Eventfd {
             if nonblock {
                 return Err(Errno::EAGAIN);
             }
+            let _w = sched::wait_message("efdrd");
             crate::signal::sleep(s, &self.wait, || *self.count.lock() > 0, None)?;
         };
         self.wakeup();
@@ -108,6 +115,7 @@ impl Eventfd {
                 // Not counted as written.
                 return Err(Errno::EAGAIN);
             }
+            let _w = sched::wait_message("efdwr");
             crate::signal::sleep(s, &self.wait, || u64::MAX - *self.count.lock() > add, None)?;
         }
         self.wakeup();

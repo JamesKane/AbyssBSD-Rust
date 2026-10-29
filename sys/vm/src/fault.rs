@@ -39,12 +39,16 @@ pub enum Access {
     Read,
     Write,
     Execute,
+    /// A debugger's write (`VM_PROT_COPY | VM_PROT_READ`): readable is
+    /// enough, and a private mapping gets its own copy of the page first
+    /// even if it may not be written, as a write would.
+    Copy,
 }
 
 impl Access {
     const fn needs(self) -> Prot {
         match self {
-            Self::Read => Prot::READ,
+            Self::Read | Self::Copy => Prot::READ,
             Self::Write => Prot::WRITE,
             Self::Execute => Prot::EXEC,
         }
@@ -103,7 +107,12 @@ pub fn resolve(map: &mut VmMap, va: VirtAddr, access: Access) -> Result<Outcome,
     if !entry.prot.contains(access.needs()) {
         return Err(FaultError::Protection);
     }
-    let write = access == Access::Write;
+    // A debugger writes only where a write could ever go, or into a
+    // copy-on-write mapping (`vm_map_lookup`'s `VM_PROT_COPY` test).
+    if access == Access::Copy && !entry.max_prot().contains(Prot::WRITE) && !entry.needs_copy {
+        return Err(FaultError::Protection);
+    }
+    let write = matches!(access, Access::Write | Access::Copy);
     let object = entry.object.get_or_insert_with(|| Object::anonymous(pages));
     if write && entry.needs_copy {
         // The entry's own copy: a shadow over the shared object, from

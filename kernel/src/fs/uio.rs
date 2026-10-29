@@ -23,6 +23,7 @@ unsafe impl Plain for abi::fcntl::Flock {}
 unsafe impl Plain for abi::mount::Xvfsconf {}
 
 /// User buffers, consumed from the front.
+#[derive(Clone)]
 pub(crate) struct UserIo {
     iov: Buffers,
     /// The first buffer not yet used up.
@@ -32,6 +33,7 @@ pub(crate) struct UserIo {
 
 /// The buffers: one (`read`, `write`) kept inline, so the common calls
 /// allocate nothing, or a vector's.
+#[derive(Clone)]
 enum Buffers {
     One(Iovec),
     Many(Vec<Iovec>),
@@ -89,6 +91,21 @@ impl UserIo {
             at: 0,
             resid,
         })
+    }
+
+    /// The first `n` bytes of these buffers, at most `max`, read back
+    /// from user memory: what a copy made before a transfer of `n` bytes
+    /// saw (`ktrgenio`'s). It stops at a fault.
+    pub(crate) fn first_bytes(mut self, n: usize, max: usize) -> Vec<u8> {
+        let n = n.min(max);
+        let mut out = alloc::vec![0; n];
+        let got = self.each(n, |user, from, k| {
+            uaccess::copy_in(&mut out[from..from + k], user).map_err(|_| Errno::EFAULT)
+        });
+        if got.is_err() {
+            out.clear();
+        }
+        out
     }
 
     /// Calls `f` with each user range in turn, up to `len` bytes, and

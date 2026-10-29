@@ -78,6 +78,19 @@ impl Context {
     pub fn words_mut(&mut self) -> &mut [u64; 16] {
         &mut self.regs
     }
+
+    /// The frame pointer saved at the switch (`rbp`, `x29`): where a walk
+    /// of a switched-out thread's kernel stack starts. Word layouts are
+    /// the arch crates' (x86_64: `rbx, rbp, ...`; aarch64: `x19..x28,
+    /// x29, ...`).
+    #[must_use]
+    pub const fn frame_pointer(&self) -> u64 {
+        #[cfg(target_arch = "aarch64")]
+        let fp = self.regs[10];
+        #[cfg(not(target_arch = "aarch64"))]
+        let fp = self.regs[1];
+        fp
+    }
 }
 
 /// A new thread's first function: called with the argument given to

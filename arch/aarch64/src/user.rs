@@ -94,6 +94,12 @@ const CNTKCTL_EL0_BITS: u64 = 0b11 << 8 | 0b11;
 /// where the CPU has it, keeping it on across exceptions. Call on every
 /// CPU.
 pub fn init_cpu() {
+    // The OS lock comes up locked, holding off debug exceptions; it
+    // opens so that a debugger's software steps trap (FreeBSD's
+    // `dbg_init`). Nothing else of the debug state changes.
+    // SAFETY: OSLAR_EL1 only gates debug exceptions, none of which the
+    // kernel arms for itself.
+    unsafe { asm!("msr oslar_el1, xzr", "isb", options(nostack)) };
     // SAFETY: this CPU's timer access controls for EL0; the kernel's own
     // timer use is unaffected.
     unsafe {
@@ -638,4 +644,50 @@ pub fn test_program() -> &'static [u8] {
     // SAFETY: the two labels bracket the program's bytes in read-only
     // data, which lives as long as the kernel.
     unsafe { core::slice::from_raw_parts(start, end as usize - start as usize) }
+}
+
+/// `MDSCR_EL1.SS`: software step.
+const MDSCR_SS: u64 = 1;
+/// `SPSR_EL1.SS`: the step's state for the instruction returned to.
+const PSR_SS: u64 = 1 << 21;
+
+/// The CPUs that have `MDSCR_EL1.SS` set, one bit each.
+static STEPPING: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Before returning to user mode with `spsr`: software step is on for
+/// this CPU exactly when the thread steps (FreeBSD's `PCB_SINGLE_STEP`,
+/// set per thread as it runs). Software step from EL0 traps after one
+/// instruction when both `MDSCR_EL1.SS` and `SPSR.SS` are set, and at
+/// once when only `MDSCR_EL1.SS` is, so it must not stay on for the next
+/// thread. Called with interrupts masked.
+pub fn sync_step(spsr: u64) {
+    let want = spsr & PSR_SS != 0;
+    if !want && STEPPING.load(core::sync::atomic::Ordering::Relaxed) == 0 {
+        return;
+    }
+    let bit = 1u64 << (crate::cpu::cpu_id() % 64);
+    let have = STEPPING.load(core::sync::atomic::Ordering::Relaxed) & bit != 0;
+    if want == have {
+        return;
+    }
+    // SAFETY: MDSCR_EL1.SS affects only EL0's execution after the next
+    // return there (KDE is clear, so EL1 takes no debug exceptions).
+    unsafe {
+        asm!(
+            "mrs {v}, mdscr_el1",
+            "bic {v}, {v}, {ss}",
+            "orr {v}, {v}, {on}",
+            "msr mdscr_el1, {v}",
+            "isb",
+            v = out(reg) _,
+            ss = in(reg) MDSCR_SS,
+            on = in(reg) if want { MDSCR_SS } else { 0 },
+            options(nostack),
+        );
+    }
+    if want {
+        STEPPING.fetch_or(bit, core::sync::atomic::Ordering::Relaxed);
+    } else {
+        STEPPING.fetch_and(!bit, core::sync::atomic::Ordering::Relaxed);
+    }
 }

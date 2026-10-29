@@ -1,0 +1,94 @@
+$ ps -o pid,ppid,pgid,sid,tsid,tpgid,jobc,tt,stat,state,wchan,mwchan,nlwp,comm,ucomm,args -p <sleeper>,<stopped>,<waiter>,<zombie>,<piperd>,<selector>
+PID PPID PGID SID TSID TPGID JOBC TT STAT STAT WCHAN MWCHAN NLWP COMMAND UCOMM COMMAND
+<sleeper> <p1> <p1> <p1> <p1> <p1> 0 <n> SC+ SC+ nanslp nanslp 1 sleep sleep sleep 77777
+<stopped> <p1> <p1> <p1> <p1> <p1> 0 <n> TC+ TC+ nanslp nanslp 1 sleep sleep sleep 77778
+<waiter> <p1> <p1> <p1> <p1> <p1> 0 <n> S+ S+ wait wait 1 diffproc diffproc diffproc wait waiter.ready
+<zombie> <p1> <p1> <p1> <p1> <p1> 0 <n> S+ S+ sigsusp sigsusp 1 diffproc diffproc diffproc zombie zombie.ready
+<piperd> <p1> <p1> <p1> <p1> <p1> 0 <n> S+ S+ piperd piperd 1 diffproc diffproc diffproc piperd piperd.ready
+<selector> <p1> <p1> <p1> <p1> <p1> 0 <n> S+ S+ select select 1 diffproc diffproc diffproc select selector.ready
+(exit 0)
+$ ps -o pid,uid,ruid,svuid,gid,rgid,svgid,user,ruser,group,rgroup,login,jid,class,rtprio,nice,f,f2,emul,xstat -p <sleeper>,<stopped>,<waiter>,<zombie>,<piperd>,<selector>
+PID UID RUID SVUID GID RGID SVGID USER RUSER GROUP RGROUP LOGIN JID CLASS RTPRIO NI F F2 EMUL XSTAT
+<sleeper> 0 0 0 0 0 0 root root wheel wheel root 0 * * 0 10004002 00000000 FreeBSD ELF64 0
+<stopped> 0 0 0 0 0 0 root root wheel wheel root 0 * * 0 10024002 00000000 FreeBSD ELF64 11
+<waiter> 0 0 0 0 0 0 root root wheel wheel root 0 * * 0 10004002 00000000 FreeBSD ELF64 0
+<zombie> 0 0 0 0 0 0 root root wheel wheel root 0 * * 0 10004002 00000000 FreeBSD ELF64 0
+<piperd> 0 0 0 0 0 0 root root wheel wheel root 0 * * 0 10004002 00000000 FreeBSD ELF64 0
+<selector> 0 0 0 0 0 0 root root wheel wheel root 0 * * 0 10004002 00000000 FreeBSD ELF64 0
+(exit 0)
+$ ps -o pid,pending,blocked,ignored,caught,nsigs,inblk,oublk,majflt,nswap,cow,tracer,ktrace,lockname -p <sleeper>,<stopped>,<waiter>,<zombie>,<piperd>,<selector>
+PID PENDING BLOCKED IGNORED CAUGHT NSIGS INBLK OUBLK MAJFLT NSWAP COW TRACER KTRACE LOCK
+<sleeper> 0 0 87a8007 10000000 0 0 0 0 0 * 0 0 -
+<stopped> 0 0 87a8007 10000000 0 0 0 0 0 * 0 0 -
+<waiter> 0 0 187a8007 80000000 0 0 0 0 0 * 0 0 -
+<zombie> 0 0 187a8007 80000000 0 0 0 0 0 * 0 0 -
+<piperd> 0 0 187a8007 80000000 0 0 0 0 0 * 0 0 -
+<selector> 0 0 187a8007 80000000 0 0 0 0 0 * 0 0 -
+(exit 0)
+$ ps -l -p <sleeper>,<stopped>,<waiter>,<zombie>,<piperd>,<selector>
+UID PID PPID C PRI NI VSZ RSS MWCHAN STAT TT TIME COMMAND
+0 <sleeper> <p1> * * 0 * * nanslp SC+ <n> * sleep 77777
+0 <stopped> <p1> * * 0 * * nanslp TC+ <n> * sleep 77778
+0 <waiter> <p1> * * 0 * * wait S+ <n> * diffproc wait waiter.ready
+0 <zombie> <p1> * * 0 * * sigsusp S+ <n> * diffproc zombie zombie.ready
+0 <piperd> <p1> * * 0 * * piperd S+ <n> * diffproc piperd piperd.ready
+0 <selector> <p1> * * 0 * * select S+ <n> * diffproc select selector.ready
+(exit 0)
+$ ps -j -p <sleeper>,<stopped>,<waiter>,<zombie>,<piperd>,<selector>
+USER PID PPID PGID SID JOBC STAT TT TIME COMMAND
+root <sleeper> <p1> <p1> <p1> 0 SC+ <n> * sleep 77777
+root <stopped> <p1> <p1> <p1> 0 TC+ <n> * sleep 77778
+root <waiter> <p1> <p1> <p1> 0 S+ <n> * diffproc wait waiter.ready
+root <zombie> <p1> <p1> <p1> 0 S+ <n> * diffproc zombie zombie.ready
+root <piperd> <p1> <p1> <p1> 0 S+ <n> * diffproc piperd piperd.ready
+root <selector> <p1> <p1> <p1> 0 S+ <n> * diffproc select selector.ready
+(exit 0)
+$ ps -u -p <sleeper>,<stopped>,<waiter>,<zombie>,<piperd>,<selector>
+USER PID %CPU %MEM VSZ RSS TT STAT STARTED TIME COMMAND
+root <sleeper> * * * * <n> SC+ * * sleep 77777
+root <stopped> * * * * <n> TC+ * * sleep 77778
+root <waiter> * * * * <n> S+ * * diffproc wait waiter.ready
+root <zombie> * * * * <n> S+ * * diffproc zombie zombie.ready
+root <piperd> * * * * <n> S+ * * diffproc piperd piperd.ready
+root <selector> * * * * <n> S+ * * diffproc select selector.ready
+(exit 0)
+$ ps -v -p <sleeper>,<stopped>,<waiter>,<zombie>,<piperd>,<selector>
+PID STAT TIME SL RE PAGEIN VSZ RSS LIM TSIZ %CPU %MEM COMMAND
+<sleeper> SC+ * * * * * * - * * * sleep 77777
+<stopped> TC+ * * * * * * - * * * sleep 77778
+<waiter> S+ * * * * * * - * * * diffproc wait waiter.ready
+<zombie> S+ * * * * * * - * * * diffproc zombie zombie.ready
+<piperd> S+ * * * * * * - * * * diffproc piperd piperd.ready
+<selector> S+ * * * * * * - * * * diffproc select selector.ready
+(exit 0)
+$ cat auxww.out
+USER PID %CPU %MEM VSZ RSS TT STAT STARTED TIME COMMAND
+root <sleeper> * * * * <n> SC+ * * sleep 77777
+root <stopped> * * * * <n> TC+ * * sleep 77778
+root <waiter> * * * * <n> S+ * * diffproc wait waiter.ready
+root <p2> * * * * <n> S+ * * diffproc wait waiter.ready
+root <zombie> * * * * <n> S+ * * diffproc zombie zombie.ready
+root <piperd> * * * * <n> S+ * * diffproc piperd piperd.ready
+root <selector> * * * * <n> S+ * * diffproc select selector.ready
+(exit 0)
+$ ps -O wchan,nlwp -p <sleeper>,<stopped>,<waiter>,<zombie>,<piperd>,<selector>
+PID WCHAN NLWP TT STAT TIME COMMAND
+<sleeper> nanslp 1 <n> SC+ * sleep 77777
+<stopped> nanslp 1 <n> TC+ * sleep 77778
+<waiter> wait 1 <n> S+ * diffproc wait waiter.ready
+<zombie> sigsusp 1 <n> S+ * diffproc zombie zombie.ready
+<piperd> piperd 1 <n> S+ * diffproc piperd piperd.ready
+<selector> select 1 <n> S+ * diffproc select selector.ready
+(exit 0)
+$ ps -c -p <sleeper>,<stopped>,<waiter>,<zombie>,<piperd>,<selector>
+PID TT STAT TIME COMMAND
+<sleeper> <n> SC+ * sleep
+<stopped> <n> TC+ * sleep
+<waiter> <n> S+ * diffproc
+<zombie> <n> S+ * diffproc
+<piperd> <n> S+ * diffproc
+<selector> <n> S+ * diffproc
+(exit 0)
+$ ps -p <sleeper> -o command=
+sleep 77777
+(exit 0)

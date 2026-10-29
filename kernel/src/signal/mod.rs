@@ -74,10 +74,65 @@ const AST_IO_OFF: u32 = 8;
 pub(crate) const AST_SUSPEND: u32 = 16;
 /// Another thread changed this one's CPUs: it moves.
 pub(crate) const AST_AFFINITY: u32 = 32;
+/// ktrace records are queued for the way out (`TDA_KTRACE`).
+pub(crate) const AST_KTRACE: u32 = 64;
 
 /// Queued signals a process may have beyond one of each (real-time
-/// signals queue; FreeBSD's `max_pending_per_proc`).
-const MAX_QUEUED: usize = 128;
+/// signals queue): `kern.sigqueue.max_pending_per_proc`.
+static MAX_QUEUED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(128);
+/// `kern.sigqueue.signal_overflow`: signals the limit turned away.
+static OVERFLOWS: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
+
+/// Adds `kern.sigqueue`.
+pub(crate) fn sysctl_init(s: &Sleepable) {
+    use core::sync::atomic::Ordering::Relaxed;
+    use sysctl::{Number, Value};
+    crate::sysctl::with(s, |t| {
+        let kern = t.child(t.root(), "kern").expect("kern node");
+        let q = t
+            .add_node(kern, Number::Auto, "sigqueue", "POSIX real time signal")
+            .expect("kern.sigqueue");
+        t.add_writable(
+            q,
+            Number::Auto,
+            "max_pending_per_proc",
+            "Max pending signals per proc",
+            0,
+            Value::Int(alloc::boxed::Box::new(|| {
+                i32::try_from(MAX_QUEUED.load(Relaxed)).unwrap_or(i32::MAX)
+            })),
+            sysctl::int_writer(|v| {
+                MAX_QUEUED.store(usize::try_from(v).unwrap_or(0), Relaxed);
+                Ok(())
+            }),
+        )
+        .expect("kern.sigqueue.max_pending_per_proc");
+        t.add_value(
+            q,
+            Number::Auto,
+            "preallocate",
+            "Preallocated signal memory size",
+            Value::int(1024),
+        )
+        .expect("kern.sigqueue.preallocate");
+        t.add_value(
+            q,
+            Number::Auto,
+            "overflow",
+            "Number of signals overflew",
+            Value::Int(alloc::boxed::Box::new(|| OVERFLOWS.load(Relaxed))),
+        )
+        .expect("kern.sigqueue.overflow");
+        t.add_value(
+            q,
+            Number::Auto,
+            "alloc_fail",
+            "signals failed to be allocated",
+            Value::int(0),
+        )
+        .expect("kern.sigqueue.alloc_fail");
+    });
+}
 
 /// Default-action properties (FreeBSD's `sigprop`).
 const KILL: u8 = 1;
@@ -108,11 +163,6 @@ pub(crate) const fn valid(sig: u32) -> bool {
     sig >= 1 && sig <= SIG_MAXSIG
 }
 
-/// Real-time signals queue every instance.
-const fn realtime(sig: u32) -> bool {
-    sig >= SIGRTMIN && sig <= SIGRTMAX
-}
-
 fn set_of(sigs: &[u32]) -> Sigset {
     let mut s = Sigset::default();
     for &sig in sigs {
@@ -139,12 +189,30 @@ fn fastblock_mask() -> Sigset {
 /// Signals waiting for delivery, and each one's information (FreeBSD's
 /// `sigqueue_t`): a process has one for signals sent to it, and each
 /// thread one for signals sent to that thread.
+///
+/// As FreeBSD's, every signal sent with information queues, standard
+/// ones too, up to `kern.sigqueue.max_pending_per_proc`; past that, and
+/// for `SIGKILL` and `SIGSTOP`, a signal is pending without information
+/// (`sq_kill`), and one a debugger handed on (`KSI_PTRACE`) is still
+/// marked so (`sq_ptrace`). A child's `SIGCHLD` waits once, its
+/// information brought up to date (the child's own `p_ksi`).
 #[derive(Clone, Default)]
 pub(crate) struct Queue {
     pending: Sigset,
-    /// Oldest first: one entry per pending standard signal, any number
-    /// per real-time one.
-    info: VecDeque<Siginfo>,
+    /// Oldest first.
+    info: VecDeque<Queued>,
+    /// Pending without information (`sq_kill`).
+    bare: Sigset,
+    /// Handed on by a debugger, without information (`sq_ptrace`).
+    ptrace: Sigset,
+}
+
+/// One queued signal's information, and whether a debugger handed it on
+/// (`KSI_PTRACE`): it goes to its action without stopping again.
+#[derive(Clone, Copy)]
+struct Queued {
+    info: Siginfo,
+    ptrace: bool,
 }
 
 impl Queue {
@@ -153,44 +221,145 @@ impl Queue {
     }
 
     fn add(&mut self, info: Siginfo) -> Result<(), Errno> {
+        self.add_as(info, false)
+    }
+
+    /// Queues `info`, handed on by a debugger if `ptrace` (FreeBSD's
+    /// `sigqueue_add`).
+    fn add_as(&mut self, info: Siginfo, ptrace: bool) -> Result<(), Errno> {
         let sig = info.si_signo.cast_unsigned();
-        if self.pending.has(sig) && !realtime(sig) {
-            // Standard signals do not queue: the first one's information
-            // stands.
+        if sig == SIGKILL || sig == SIGSTOP {
+            self.bare.add(sig);
+            if ptrace {
+                self.ptrace.add(sig);
+            }
+            self.pending.add(sig);
             return Ok(());
         }
-        if self.info.len() >= MAX_QUEUED + 32 && realtime(sig) {
-            return Err(Errno::EAGAIN);
+        // A child's state change: its one `SIGCHLD`, brought up to date.
+        if sig == SIGCHLD
+            && (code::CLD_EXITED..=code::CLD_CONTINUED).contains(&info.si_code)
+            && let Some(q) = self.info.iter_mut().find(|q| {
+                q.info.si_signo == info.si_signo
+                    && q.info.si_pid == info.si_pid
+                    && (code::CLD_EXITED..=code::CLD_CONTINUED).contains(&q.info.si_code)
+            })
+        {
+            q.info = info;
+            return Ok(());
         }
-        self.info.push_back(info);
+        if self.info.len() >= MAX_QUEUED.load(core::sync::atomic::Ordering::Relaxed) {
+            OVERFLOWS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            // Only `sigqueue` hears of it; the rest wait without
+            // information.
+            if info.si_code == code::SI_QUEUE && !ptrace {
+                return Err(Errno::EAGAIN);
+            }
+            if ptrace {
+                self.ptrace.add(sig);
+            } else {
+                self.bare.add(sig);
+            }
+            self.pending.add(sig);
+            return Ok(());
+        }
+        self.info.push_back(Queued { info, ptrace });
         self.pending.add(sig);
         Ok(())
     }
 
-    /// Takes one pending `sig` (its oldest information), if there is one.
+    /// Takes one pending `sig` (FreeBSD's `sigqueue_get`): one handed on
+    /// without information first, then one without, then the oldest
+    /// information. It stays pending while more wait.
     fn take(&mut self, sig: u32) -> Option<Siginfo> {
+        self.take_marked(sig).map(|(i, _)| i)
+    }
+
+    /// [`take`](Self::take), and whether a debugger handed it on.
+    fn take_marked(&mut self, sig: u32) -> Option<(Siginfo, bool)> {
         if !self.pending.has(sig) {
             return None;
         }
         let signo = sig.cast_signed();
-        let info = match self.info.iter().position(|i| i.si_signo == signo) {
-            Some(i) => self.info.remove(i).unwrap_or_default(),
-            None => Siginfo {
-                si_signo: signo,
-                ..Siginfo::default()
-            },
+        let bare = Siginfo {
+            si_signo: signo,
+            ..Siginfo::default()
         };
-        if !self.info.iter().any(|i| i.si_signo == signo) {
+        let mut count = 0;
+        let mut got = None;
+        if self.ptrace.has(sig) {
+            count += 1;
+            self.ptrace.remove(sig);
+            got = Some((bare, true));
+        }
+        if self.bare.has(sig) {
+            count += 1;
+            if count == 1 {
+                self.bare.remove(sig);
+                got = Some((bare, false));
+            }
+        }
+        let mut i = 0;
+        while i < self.info.len() {
+            if self.info[i].info.si_signo == signo {
+                if count == 0 {
+                    let q = self.info.remove(i).unwrap_or(Queued {
+                        info: bare,
+                        ptrace: false,
+                    });
+                    got = Some((q.info, q.ptrace));
+                    count += 1;
+                    continue;
+                }
+                count += 1;
+                if count > 1 {
+                    break;
+                }
+            }
+            i += 1;
+        }
+        if count <= 1 {
             self.pending.remove(sig);
         }
-        Some(info)
+        Some(got.unwrap_or((bare, false)))
+    }
+
+    /// Whether the `sig` [`take`](Self::take) would give next is one a
+    /// debugger handed on.
+    fn next_handed_on(&self, sig: u32) -> bool {
+        if self.ptrace.has(sig) {
+            return true;
+        }
+        if self.bare.has(sig) {
+            return false;
+        }
+        let signo = sig.cast_signed();
+        self.info
+            .iter()
+            .find(|q| q.info.si_signo == signo)
+            .is_some_and(|q| q.ptrace)
+    }
+
+    /// Puts a signal taken off back at the head, marked handed on
+    /// (`KSI_HEAD`, `KSI_PTRACE`).
+    fn put_back(&mut self, info: Siginfo) {
+        let sig = info.si_signo.cast_unsigned();
+        if sig == SIGKILL || sig == SIGSTOP {
+            self.bare.add(sig);
+            self.ptrace.add(sig);
+        } else {
+            self.info.push_front(Queued { info, ptrace: true });
+        }
+        self.pending.add(sig);
     }
 
     /// Drops every pending `sig`.
     fn discard(&mut self, sig: u32) {
         let signo = sig.cast_signed();
-        self.info.retain(|i| i.si_signo != signo);
+        self.info.retain(|q| q.info.si_signo != signo);
         self.pending.remove(sig);
+        self.bare.remove(sig);
+        self.ptrace.remove(sig);
     }
 }
 
@@ -198,8 +367,10 @@ impl Queue {
 /// the signals sent to the process as a whole.
 #[derive(Clone)]
 pub(crate) struct Signals {
-    /// Indexed by signal number minus one.
-    actions: [Sigaction; SIG_MAXSIG as usize],
+    /// Indexed by signal number minus one. On the heap: 4 KiB that would
+    /// otherwise make every `Process` built on a kernel stack that much
+    /// bigger.
+    actions: alloc::boxed::Box<[Sigaction]>,
     pub(crate) queue: Queue,
 }
 
@@ -207,7 +378,7 @@ impl Signals {
     /// The state of a process with nothing set.
     pub(crate) fn new() -> Self {
         Self {
-            actions: [Sigaction::default(); SIG_MAXSIG as usize],
+            actions: alloc::vec![Sigaction::default(); SIG_MAXSIG as usize].into_boxed_slice(),
             queue: Queue::default(),
         }
     }
@@ -215,7 +386,7 @@ impl Signals {
     /// A forked child's: the dispositions; nothing pending.
     pub(crate) fn forked(&self) -> Self {
         Self {
-            actions: self.actions,
+            actions: self.actions.clone(),
             queue: Queue::default(),
         }
     }
@@ -257,7 +428,10 @@ impl Signals {
     pub(crate) fn dispositions(&self) -> (Sigset, Sigset) {
         let (mut ignored, mut caught) = (Sigset::default(), Sigset::default());
         for sig in 1..=SIG_MAXSIG {
-            if self.ignored(sig) {
+            // `SIGCONT` at its default counts as ignored only when set so
+            // (`sigdflt`'s `ps_sigignore`, which leaves it out).
+            let dfl_cont = sig == abi::signal::SIGCONT && self.action(sig).sa_handler == SIG_DFL;
+            if self.ignored(sig) && !dfl_cont {
                 ignored.add(sig);
             } else if self.caught(sig) {
                 caught.add(sig);
@@ -535,6 +709,75 @@ fn discard_everywhere(p: &Process, st: &mut Signals, sig: u32) {
     });
 }
 
+/// Drops every pending `sig` sent to thread `t` itself.
+pub(crate) fn discard_thread(t: &UserThread, sig: u32) {
+    t.sig.lock().queue.discard(sig);
+}
+
+/// Drops every pending `sig` sent to process `p` as a whole.
+pub(crate) fn discard_process(p: &Process, sig: u32) {
+    p.signals.lock().queue.discard(sig);
+}
+
+/// Puts a signal taken off the queues back: on thread `t`'s, or with
+/// none the process's (`sigqueue_add` with `KSI_HEAD`), and has it looked
+/// at.
+pub(crate) fn requeue(p: &Process, t: Option<&UserThread>, info: Siginfo, handed_on: bool) {
+    let put = |q: &mut Queue| {
+        if handed_on {
+            q.put_back(info);
+        } else {
+            let _ = q.add(info);
+        }
+    };
+    match t {
+        Some(t) => {
+            put(&mut t.sig.lock().queue);
+            t.interrupt(AST_SIGNAL);
+        }
+        None => {
+            put(&mut p.signals.lock().queue);
+            if let Some(t) = sigtd(p, info.si_signo.cast_unsigned()) {
+                t.interrupt(AST_SIGNAL);
+            }
+        }
+    }
+}
+
+/// Sends `sig`, which the debugger chose, to the thread of `p` that takes
+/// it (`sigtd`, `tdsendsignal` with `KSI_PTRACE`): it goes to its action
+/// without stopping again. Returns that thread.
+pub(crate) fn post_from_debugger(p: &Arc<Process>, sig: u32) -> Option<Arc<UserThread>> {
+    let td2 = sigtd(p, sig)?;
+    let _ = send_as(p, Some(&td2), user_info(sig, 0, code::SI_USER), true);
+    Some(td2)
+}
+
+/// Tells `parent` that zombie `z`, now its child, exited
+/// (`childproc_exited`): `SIGCHLD` with the zombie's own status, and its
+/// `wait` looks again.
+pub(crate) fn notify_exit(parent: &Arc<Process>, z: &Process) {
+    let st = z.wait_status();
+    let (c, status) = if st & 0x7f == 0 {
+        (code::CLD_EXITED, (st >> 8) & 0xff)
+    } else if st & 0x80 != 0 {
+        (code::CLD_DUMPED, st & 0x7f)
+    } else {
+        (code::CLD_KILLED, st & 0x7f)
+    };
+    let _ = post(
+        parent,
+        Siginfo {
+            si_signo: SIGCHLD.cast_signed(),
+            si_code: c,
+            si_pid: z.pid(),
+            si_status: status,
+            ..Siginfo::default()
+        },
+    );
+    parent.child_changed();
+}
+
 /// Sets `sig`'s action in `p` (`sigaction`); pending signals it now
 /// ignores are dropped, the process's and its threads'.
 pub(crate) fn set_action(p: &Process, sig: u32, a: Sigaction) -> Sigaction {
@@ -565,12 +808,28 @@ pub(crate) fn post_thread(t: &Arc<UserThread>, info: Siginfo) -> Result<(), Errn
 /// cancels a pending `SIGCONT`; `SIGKILL` ends a stop. A signal the
 /// process ignores is dropped, and one to a zombie succeeds doing nothing.
 fn send(p: &Arc<Process>, to: Option<&Arc<UserThread>>, info: Siginfo) -> Result<(), Errno> {
+    send_as(p, to, info, false)
+}
+
+/// [`send`], for a signal a debugger handed on if `ptrace`.
+fn send_as(
+    p: &Arc<Process>,
+    to: Option<&Arc<UserThread>>,
+    info: Siginfo,
+    ptrace: bool,
+) -> Result<(), Errno> {
     if p.is_zombie() {
         return Ok(());
     }
     let sig = info.si_signo.cast_unsigned();
     crate::event::signal_sent(p, sig);
     let prop = prop(sig);
+    // A traced process: `SIGKILL` marks it killed, and the attach's
+    // `SIGSTOP` stops it at once (`tdsendsignal`).
+    let traced = p.is_traced();
+    if traced && !ptrace && crate::ptrace::signal_sent(p, sig, prop & STOP != 0) {
+        return Ok(());
+    }
     // Decided before taking the signal lock (it reads the process tree).
     let orphaned = prop & TTYSTOP != 0 && crate::proc::pgrp_orphaned(p.pgid());
     let (continued, interrupt) = {
@@ -585,24 +844,27 @@ fn send(p: &Arc<Process>, to: Option<&Arc<UserThread>>, info: Siginfo) -> Result
         }
         // SIGCONT continues even when caught, blocked, or ignored; SIGKILL
         // ends a stop to end the process.
-        let continued = (sig == SIGCONT || sig == SIGKILL) && p.resume(sig == SIGCONT);
+        // A traced process stays stopped for its debugger.
+        let held = traced && p.job.lock().stopped != 0;
+        let continued = (sig == SIGCONT || sig == SIGKILL) && !held && p.resume(sig == SIGCONT);
         if (st.ignored(sig) && sig != SIGKILL) || (orphaned && st.action(sig).sa_handler == SIG_DFL)
         {
             (continued, None)
         } else {
             let target = match to {
                 Some(t) => {
-                    t.sig.lock().queue.add(info)?;
+                    t.sig.lock().queue.add_as(info, ptrace)?;
                     Some(Arc::clone(t))
                 }
                 None => {
-                    st.queue.add(info)?;
+                    st.queue.add_as(info, ptrace)?;
                     sigtd(p, sig)
                 }
             };
             let stopped = p.job.lock().stopped != 0;
-            let interrupt =
-                target.filter(|t| !t.sig.lock().mask.has(sig) && (!stopped || sig == SIGKILL));
+            let interrupt = target.filter(|t| {
+                !t.sig.lock().mask.has(sig) && (!stopped || (sig == SIGKILL && !traced))
+            });
             (continued, interrupt)
         }
     };
@@ -641,7 +903,9 @@ pub(crate) fn notify_parent(child: &Process, code: i32, status: i32) {
         return;
     };
     let nocldstop = parent.signals.lock().action(SIGCHLD).sa_flags & SA_NOCLDSTOP != 0;
-    if nocldstop && (code == code::CLD_STOPPED || code == code::CLD_CONTINUED) {
+    if nocldstop
+        && (code == code::CLD_STOPPED || code == code::CLD_TRAPPED || code == code::CLD_CONTINUED)
+    {
         parent.child_changed();
         return;
     }
@@ -706,10 +970,12 @@ fn set_fastblock_pending(t: &UserThread) {
 enum Next {
     /// Run its handler.
     Handle(u32, Siginfo, Sigaction),
-    /// End the process.
-    Kill(u32),
+    /// End the process (with the signal's `si_code`).
+    Kill(u32, i32),
     /// Stop the process (done in place, after which delivery goes on).
     Stop(u32),
+    /// Stop for the debugger to see it first (a traced process).
+    Trace(u32, Siginfo),
 }
 
 /// Takes the next signal that needs action from those sent to thread `t`
@@ -731,11 +997,16 @@ fn next(t: &UserThread) -> Option<Next> {
             }
             return None;
         };
-        let info = ts
+        let (info, handed_on) = ts
             .queue
-            .take(sig)
-            .or_else(|| st.queue.take(sig))
+            .take_marked(sig)
+            .or_else(|| st.queue.take_marked(sig))
             .unwrap_or_default();
+        // Traced: every signal goes by the debugger first (`sigprocess`),
+        // but one it handed on.
+        if !handed_on && crate::ptrace::wants_signal(p) {
+            return Some(Next::Trace(sig, info));
+        }
         let action = st.action(sig);
         if action.sa_handler == SIG_IGN {
             continue;
@@ -745,7 +1016,8 @@ fn next(t: &UserThread) -> Option<Next> {
         }
         let prop = prop(sig);
         if prop & STOP != 0 {
-            if prop & TTYSTOP != 0 && orphaned {
+            // A traced process's stops are its debugger's to make.
+            if (prop & TTYSTOP != 0 && orphaned) || p.is_traced() {
                 continue;
             }
             return Some(Next::Stop(sig));
@@ -753,7 +1025,7 @@ fn next(t: &UserThread) -> Option<Next> {
         if prop & IGNORE != 0 {
             continue;
         }
-        return Some(Next::Kill(sig));
+        return Some(Next::Kill(sig, info.si_code));
     }
 }
 
@@ -794,6 +1066,8 @@ pub(crate) fn suspend_check(s: &Sleepable) {
 /// Nothing on the caller's stack may hold a reference: it never unwinds.
 fn leave(s: &Sleepable) -> ! {
     if let Some(t) = UserThread::current() {
+        // Its exit is a debugger's event (`kern_thr_exit`).
+        crate::ptrace::thread_exit(s, &t);
         crate::umtx::thread_exit(s, &t);
         t.process().remove_thread(&t, false);
         Process::thread_exit(t);
@@ -824,6 +1098,12 @@ pub(crate) fn thread_gone(t: &UserThread) {
 pub(crate) fn user_return(frame: &mut TrapFrame) -> bool {
     let t = sched::current();
     let mut rewritten = false;
+    // Where a debugger finds this thread's registers if it stops on the
+    // way out.
+    let had_ast = t.ast_pending();
+    if had_ast {
+        UserThread::with_current(|u| u.dbg.entered(frame));
+    }
     while t.ast_pending() {
         let bits = t.take_ast();
         hal::irq::enable();
@@ -840,10 +1120,32 @@ pub(crate) fn user_return(frame: &mut TrapFrame) -> bool {
             rewritten = true;
         }
         if bits & (AST_SIGNAL | AST_SUSPEND) != 0 {
+            // At the boundary while signals are acted on (`ast_sig`): a
+            // debugger may make calls in the thread (`PT_SC_REMOTE`).
+            let boundary = UserThread::with_current(|u| {
+                let was = u.dbg.has(crate::ptrace::tdb::BOUNDARY);
+                u.dbg.set(crate::ptrace::tdb::BOUNDARY);
+                was
+            });
             rewritten |= deliver(&s, frame);
+            if boundary == Some(false) {
+                UserThread::with_current(|u| u.dbg.clear(crate::ptrace::tdb::BOUNDARY));
+            }
+        }
+        if bits & AST_KTRACE != 0 {
+            crate::ktrace::user_return(&s);
         }
         let _ = hal::irq::disable();
     }
+    // The call's arguments are gone for a debugger from here on
+    // (`ast_sig` clears `td_sa.code`).
+    if had_ast {
+        UserThread::with_current(|u| u.set_syscall_code(0));
+    }
+    // A debugger's single step, for the thread going out (arm64 arms it
+    // per CPU).
+    #[cfg(target_arch = "aarch64")]
+    crate::arch::user::sync_step(frame.spsr);
     rewritten
 }
 
@@ -889,11 +1191,19 @@ fn deliver(s: &Sleepable, frame: &mut TrapFrame) -> bool {
                 return built;
             }
             // Nothing on this stack may keep a reference.
-            Some(Next::Kill(sig)) => {
+            Some(Next::Kill(sig, code)) => {
+                if crate::ktrace::point(abi::ktrace::KTR_PSIG) {
+                    let mask = {
+                        let ts = t.sig.lock();
+                        ts.saved_mask.unwrap_or(ts.mask)
+                    };
+                    crate::ktrace::psig(sig, SIG_DFL, &mask, code);
+                }
                 drop(t);
                 kill_self(s, sig)
             }
             Some(Next::Stop(sig)) => stop(s, &t, sig),
+            Some(Next::Trace(sig, info)) => crate::ptrace::signal_stop(s, &t, sig, info),
             Some(Next::Handle(sig, info, action)) => {
                 if !handle(s, &t, frame, sig, &info, &action) {
                     drop(t);
@@ -910,35 +1220,49 @@ fn deliver(s: &Sleepable, frame: &mut TrapFrame) -> bool {
 pub(crate) static LOGSIGEXIT: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(true);
 
-/// Ends the current process by `sig` (FreeBSD's `sigexit`; there are no
-/// core dumps). A signal that would dump core is logged, as
+/// Ends the current process by `sig` (FreeBSD's `sigexit`). A signal
+/// that dumps core does so with the other threads stopped at the
+/// boundary (`thread_single(SINGLE_NO_EXIT)`; if another thread is
+/// single-threading, there is no dump), and is logged as
 /// `kern.logsigexit` or the process's `PROC_LOGSIGEXIT_CTL` says. The
 /// caller holds no references: nothing on a stack that never unwinds may
 /// keep them.
 pub(super) fn kill_self(s: &Sleepable, sig: u32) -> ! {
+    let mut how = Exit::Signal(sig);
     if prop(sig) & CORE != 0 {
-        let log = Process::with_current(|p| {
+        let outcome = UserThread::with_current(|t| {
+            let p = t.process();
+            p.single(s, t, crate::proc::Mode::Boundary).ok()?;
+            let dumped = crate::coredump::dump(s, t, sig);
             use crate::proc::p2;
             let f2 = p.flag2.load(core::sync::atomic::Ordering::Relaxed);
-            let on = if f2 & p2::LOGSIGEXIT_CTL == 0 {
+            let log = if f2 & p2::LOGSIGEXIT_CTL == 0 {
                 LOGSIGEXIT.load(core::sync::atomic::Ordering::Relaxed)
             } else {
                 f2 & p2::LOGSIGEXIT_ENABLE != 0
             };
-            on.then(|| {
+            if log {
                 let c = p.cred();
                 let comm = p.with_comm(|n| alloc::string::String::from_utf8_lossy(n).into_owned());
-                (p.pid(), comm, c.jail_id(), c.uid)
-            })
+                let (pid, jid, uid) = (p.pid(), c.jail_id(), c.uid);
+                match &dumped {
+                    Ok(()) => kprintln!(
+                        "pid {pid} ({comm}), jid {jid}, uid {uid}: exited on signal {sig} (core dumped)"
+                    ),
+                    Err(e) => kprintln!(
+                        "pid {pid} ({comm}), jid {jid}, uid {uid}: exited on signal {sig} (no core dump - {})",
+                        e.reason()
+                    ),
+                }
+            }
+            Some(dumped.is_ok())
         })
         .flatten();
-        if let Some((pid, comm, jid, uid)) = log {
-            kprintln!(
-                "pid {pid} ({comm}), jid {jid}, uid {uid}: exited on signal {sig} (no core dump - other error)"
-            );
+        if outcome == Some(true) {
+            how = Exit::Dumped(sig);
         }
     }
-    Process::exit_current(s, Exit::Signal(sig))
+    Process::exit_current(s, how)
 }
 
 /// Builds `sig`'s handler frame on the user stack and updates thread
@@ -959,6 +1283,9 @@ fn handle(
         let mut ts = t.sig.lock();
         (ts.saved_mask.take().unwrap_or(ts.mask), ts.altstack)
     };
+    if crate::ktrace::point(abi::ktrace::KTR_PSIG) {
+        crate::ktrace::psig(sig, action.sa_handler, &mask, info.si_code);
+    }
     let d = Delivery {
         sig,
         info,
@@ -1064,6 +1391,23 @@ fn interrupted_by(s: &Sleepable) -> (Option<Errno>, bool) {
         let Some(sig) = ready.minus(fast).first() else {
             return (None, stopped);
         };
+        // Traced: the debugger sees it here, in the sleep (`cursig`).
+        let handed_on = if ts.queue.pending().has(sig) {
+            ts.queue.next_handed_on(sig)
+        } else {
+            st.queue.next_handed_on(sig)
+        };
+        if !handed_on && crate::ptrace::wants_signal(p) {
+            let info = ts
+                .queue
+                .take(sig)
+                .or_else(|| st.queue.take(sig))
+                .unwrap_or_default();
+            drop(ts);
+            drop(st);
+            crate::ptrace::signal_stop(s, &t, sig, info);
+            continue;
+        }
         let action = st.action(sig);
         if st.ignored(sig) {
             ts.queue.discard(sig);
@@ -1076,7 +1420,7 @@ fn interrupted_by(s: &Sleepable) -> (Option<Errno>, bool) {
             }
             drop(ts);
             drop(st);
-            if !(prop(sig) & TTYSTOP != 0 && orphaned) {
+            if !(prop(sig) & TTYSTOP != 0 && orphaned) && !p.is_traced() {
                 stop(s, &t, sig);
                 stopped = true;
             }
@@ -1169,7 +1513,7 @@ pub(crate) fn restore_mask(t: &UserThread) {
 /// Whether a signal from POSIX timer `id` waits for delivery to `p` or
 /// one of its threads (`KSI_ONQ` of the timer's `ksiginfo`).
 pub(crate) fn timer_queued(p: &Process, id: i32) -> bool {
-    let mine = |i: &Siginfo| i.si_code == code::SI_TIMER && i.si_trapno == id;
+    let mine = |q: &Queued| q.info.si_code == code::SI_TIMER && q.info.si_trapno == id;
     if p.signals.lock().queue.info.iter().any(mine) {
         return true;
     }

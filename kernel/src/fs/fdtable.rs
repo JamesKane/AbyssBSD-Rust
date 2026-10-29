@@ -52,19 +52,28 @@ impl FileCaps {
         self.rights == CapRights::ALL && self.ioctls.is_none() && self.fcntls == CAP_FCNTL_ALL
     }
 
-    /// `ENOTCAPABLE` unless every right in `need` is held.
-    pub(crate) const fn check(&self, need: &CapRights) -> Result<(), Errno> {
+    /// `ENOTCAPABLE` unless every right in `need` is held (`cap_check`);
+    /// a traced process records the failure (`CAPFAIL_NOTCAPABLE`).
+    pub(crate) fn check(&self, need: &CapRights) -> Result<(), Errno> {
         if self.rights.contains(need) {
-            Ok(())
-        } else {
-            Err(Errno::ENOTCAPABLE)
+            return Ok(());
         }
+        if crate::ktrace::cap_tracing() {
+            crate::ktrace::capfail(crate::ktrace::CapFail::NotCapable(*need, self.rights));
+        }
+        Err(Errno::ENOTCAPABLE)
     }
 
     /// Narrows the rights to `rights` (`kern_cap_rights_limit`): without
     /// `CAP_IOCTL` no ioctl stays allowed, without `CAP_FCNTL` no `fcntl`.
+    /// Widening them is `ENOTCAPABLE` (`CAPFAIL_INCREASE`).
     fn limit(&mut self, rights: CapRights) -> Result<(), Errno> {
-        self.check(&rights)?;
+        if !self.rights.contains(&rights) {
+            if crate::ktrace::cap_tracing() {
+                crate::ktrace::capfail(crate::ktrace::CapFail::Increase(rights, self.rights));
+            }
+            return Err(Errno::ENOTCAPABLE);
+        }
         self.rights = rights;
         if !rights.has(CAP_IOCTL) {
             self.ioctls = Some(Vec::new());

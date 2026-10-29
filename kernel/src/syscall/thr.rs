@@ -211,7 +211,12 @@ fn create(
     };
     let mut f = *frame;
     clear_trace(&mut f);
-    p.start_with(f, new, init)?;
+    let traced = Arc::clone(&p);
+    p.start_with(f, new, move |t, f| {
+        // Its birth is a debugger's event with `PTRACE_LWP`.
+        crate::ptrace::thread_made(&traced, t);
+        init(t, f)
+    })?;
     Ok(0)
 }
 
@@ -253,7 +258,7 @@ fn upcall(f: &mut TrapFrame, entry: u64, arg: u64, base: u64, size: u64) -> Resu
 }
 
 /// `thr_new(param, param_size)`: a new thread as `struct thr_param` says.
-pub(super) fn thr_new(frame: &TrapFrame, param: u64, size: u64) -> SysResult {
+pub(super) fn thr_new(s: &sched::Sleepable, frame: &TrapFrame, param: u64, size: u64) -> SysResult {
     let size = usize::try_from(int(size)).map_err(|_| Errno::EINVAL)?;
     if size > size_of::<ThrParam>() {
         return Err(Errno::EINVAL);
@@ -279,6 +284,7 @@ pub(super) fn thr_new(frame: &TrapFrame, param: u64, size: u64) -> SysResult {
                 .map_err(|_| Errno::EFAULT)?,
         )
     };
+    crate::ktrace::structure_of(s, "thrparam", &tp);
     if tp.tls_base >= crate::mm::space::USER_END {
         return Err(Errno::EINVAL);
     }
@@ -332,6 +338,13 @@ pub(super) fn thr_exit(s: &Sleepable, state: u64) -> SysResult {
             crate::umtx::UMTX.wake(&crate::umtx::Ctx { s, t }, state, usize::MAX, false)
         });
     }
+    // Not the last thread: its exit is a debugger's event with
+    // `PTRACE_LWP` (`kern_thr_exit`).
+    if let Some(t) = UserThread::current()
+        && t.process().thread_count() > 1
+    {
+        crate::ptrace::thread_exit(s, &t);
+    }
     let left = UserThread::with_current(|t| t.process().remove_thread(t, true));
     if left != Some(true) {
         return Ok(0);
@@ -369,6 +382,7 @@ pub(super) fn thr_suspend(s: &Sleepable, timeout: u64) -> SysResult {
     let r = if limit == Some(0) {
         Ok(crate::signal::Woke::TimedOut)
     } else {
+        let _w = sched::wait_message("lthr");
         crate::signal::sleep(
             s,
             &t.suspend_wait,

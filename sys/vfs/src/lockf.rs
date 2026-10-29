@@ -174,6 +174,12 @@ impl Lockf {
         }
     }
 
+    /// Every lock held here, in order (`kern.lockf`'s report).
+    #[must_use]
+    pub fn held(&self) -> Vec<Lock> {
+        self.locks.lock().clone()
+    }
+
     /// Whether anyone holds a lock here.
     #[must_use]
     pub fn is_empty(&self) -> bool {

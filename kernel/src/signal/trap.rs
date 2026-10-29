@@ -172,6 +172,8 @@ fn classify(s: &Sleepable, p: &Process, report: &crate::arch::TrapReport) -> Opt
             address, status, ..
         } => abort(address, Access::Execute, status),
         Trap::Breakpoint(_) => Some(Fault::new(SIGTRAP, TRAP_BRKPT, pc, ec)),
+        // A software step from EL0 (`EXCP_SOFTSTP_EL0`).
+        Trap::Other(0x32) => Some(Fault::new(SIGTRAP, TRAP_TRACE, pc, ec)),
         Trap::PcAlignment => Some(Fault::new(SIGBUS, BUS_ADRALN, pc, ec)),
         Trap::SpAlignment => Some(Fault::new(SIGBUS, BUS_ADRALN, f.sp, ec)),
         // FreeBSD reports FAR_EL1 for an undefined instruction, and a
@@ -214,6 +216,10 @@ pub(crate) fn trap(s: &Sleepable, report: &crate::arch::TrapReport, frame: &mut 
     let Some(fault) = classify(s, &p, report) else {
         return;
     };
+    // A debugger's step is over (`T_TRCTRAP`, `EXCP_SOFTSTP_EL0`).
+    if fault.sig == SIGTRAP && fault.code == TRAP_TRACE {
+        crate::ptrace::step_done(&t, frame);
+    }
     let info = Siginfo {
         si_signo: fault.sig.cast_signed(),
         si_code: fault.code,
@@ -223,7 +229,8 @@ pub(crate) fn trap(s: &Sleepable, report: &crate::arch::TrapReport, frame: &mut 
     };
     let action = p.signals.lock().action(fault.sig);
     let blocked = t.sig.lock().mask.has(fault.sig);
-    if action.sa_handler > SIG_IGN && !blocked {
+    // A traced process's go by the debugger (`trapsignal`).
+    if action.sa_handler > SIG_IGN && !blocked && !p.is_traced() {
         if !handle(s, &t, frame, fault.sig, &info, &action) {
             drop(t);
             drop(p);

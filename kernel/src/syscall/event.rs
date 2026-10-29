@@ -86,6 +86,8 @@ fn wait_loop(
     let poller = Poller::new();
     let w: Arc<dyn Wake> = Arc::clone(&poller) as Arc<dyn Wake>;
     let deadline = ns.map(|n| crate::time::now_ns().saturating_add(n));
+    // `seltdwait`'s condition variable.
+    let _w = sched::wait_message("select");
     loop {
         poller.arm();
         let n = scan(Some(&w))?;
@@ -224,6 +226,9 @@ fn kern_poll(
         }
         Ok(n)
     });
+    if r.is_ok() {
+        crate::ktrace::structure_array_user(s, "pollfd", size_of::<Pollfd>(), ufds, nfds);
+    }
     finish(r, mask.is_some())
 }
 
@@ -431,6 +436,34 @@ pub(super) fn kevent(
                 .map_err(|_| Errno::EFAULT)?,
         )
     };
+    // The changes as given and the events as returned
+    // (`kern_kevent_generic`).
+    let size = size_of::<Kevent>();
+    let changes = usize::try_from(int(nchanges)).unwrap_or(0);
+    crate::ktrace::structure_array_user(s, "kevent", size, changelist, changes);
+    let r = kern_kevent(s, fd, changelist, nchanges, eventlist, nevents, timeout);
+    if let Ok(n) = r {
+        crate::ktrace::structure_array_user(
+            s,
+            "kevent",
+            size,
+            eventlist,
+            usize::try_from(n).unwrap_or(0),
+        );
+    }
+    r
+}
+
+/// `kern_kevent`.
+fn kern_kevent(
+    s: &Sleepable,
+    fd: u64,
+    changelist: u64,
+    nchanges: u64,
+    eventlist: u64,
+    nevents: u64,
+    timeout: Option<Timespec>,
+) -> SysResult {
     let p = process()?;
     // Changes need `CAP_KQUEUE_CHANGE`, events `CAP_KQUEUE_EVENT`
     // (`kern_kevent`).
@@ -520,6 +553,7 @@ fn scan(
                 return Ok(0);
             }
             let kq = &k.kq;
+            let _w = sched::wait_message("kqread");
             match crate::signal::sleep(s, &k.wait, || kq.pending() > 0, left) {
                 Ok(Woke::Done) => continue,
                 Ok(Woke::TimedOut) => return Ok(0),

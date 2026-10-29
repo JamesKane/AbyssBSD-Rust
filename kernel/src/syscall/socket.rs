@@ -193,9 +193,14 @@ fn sun_path(sa: &[u8]) -> Result<&[u8], Errno> {
 /// `bindat(fd, s, addr, addrlen)`: makes the socket's node at the path,
 /// from directory `fd` (`EADDRINUSE` if the name exists).
 pub(super) fn bindat(s: &Sleepable, fd: u64, sock_fd: u64, addr: u64, len: u64) -> SysResult {
+    // Not from the working directory in capability mode (`kern_bindat`).
+    if int(fd) == AT_FDCWD {
+        crate::capsicum::refuse(crate::ktrace::CapFail::Namei(b"AT_FDCWD"))?;
+    }
     let f = sock(s, sock_fd, &crate::capsicum::rights::BIND)?;
     let sf = so_of(&f);
     let sa = sockaddr(addr, len)?;
+    crate::ktrace::sockaddr(s, &sa);
     let path = sun_path(&sa)?;
     if path.is_empty() {
         return Err(Errno::EINVAL);
@@ -265,9 +270,15 @@ fn peer_by_name(s: &Sleepable, fd: i32, path: &[u8]) -> Result<Arc<Socket>, Errn
 
 /// `connectat(fd, s, addr, addrlen)`.
 pub(super) fn connectat(s: &Sleepable, fd: u64, sock_fd: u64, addr: u64, len: u64) -> SysResult {
+    // Not from the working directory in capability mode
+    // (`kern_connectat`).
+    if int(fd) == AT_FDCWD {
+        crate::capsicum::refuse(crate::ktrace::CapFail::Namei(b"AT_FDCWD"))?;
+    }
     let f = sock(s, sock_fd, &crate::capsicum::rights::CONNECT)?;
     let so = &so_of(&f).so;
     let sa = sockaddr(addr, len)?;
+    crate::ktrace::sockaddr(s, &sa);
     let path = sun_path(&sa)?.to_vec();
     if path.is_empty() && int(fd) == AT_FDCWD {
         return Err(Errno::EINVAL);
@@ -346,6 +357,7 @@ pub(super) fn accept4(
     let new = if nonblock(&f) {
         so.accept()?
     } else {
+        let _w = sched::wait_message("accept");
         crate::fs::socket::wait_until(s, &so.rd, 0, || so.accept())?
     };
     so.rd.knote(0);
@@ -365,6 +377,9 @@ pub(super) fn accept4(
     if let Err(e) = put_name(&peer, name, lenp, true) {
         close_fd(s, fd);
         return Err(e);
+    }
+    if name != 0 {
+        crate::ktrace::sockaddr(s, &peer);
     }
     Ok(u64::from(fd.cast_unsigned()))
 }
@@ -400,6 +415,7 @@ pub(super) fn getname(s: &Sleepable, sock_fd: u64, name: u64, lenp: u64, peer: b
     let so = &so_of(&f).so;
     let sa = if peer { so.peername()? } else { so.sockname() };
     put_name(&sa, name, lenp, false)?;
+    crate::ktrace::sockaddr(s, &sa);
     Ok(0)
 }
 
@@ -557,8 +573,9 @@ fn sendit(
     flags: i32,
 ) -> SysResult {
     // An address names something outside the sandbox (`kern_sendit`).
-    if to.is_some() {
-        crate::capsicum::check_capmode()?;
+    if let Some(to) = &to {
+        crate::capsicum::refuse(crate::ktrace::CapFail::Sockaddr(to))?;
+        crate::ktrace::sockaddr(s, to);
     }
     let f = sock(
         s,
@@ -585,7 +602,10 @@ fn sendit(
         // A stream's destination is its peer, whatever is named.
         _ => None,
     };
-    crate::fs::socket::send(s, so, uio, control, to, flags, nonblock(&f)).map(|n| n as u64)
+    let ktr = crate::ktrace::genio_start(uio);
+    let r = crate::fs::socket::send(s, so, uio, control, to, flags, nonblock(&f));
+    crate::ktrace::genio(s, sock_fd, true, ktr, &r);
+    r.map(|n| n as u64)
 }
 
 /// `sendto(s, buf, len, flags, to, tolen)`.
@@ -757,7 +777,16 @@ fn recvit(
     } else {
         None
     };
-    let r = crate::fs::socket::receive(s, so, uio, flags, nonblock(&f), ext)?;
+    let ktr = crate::ktrace::genio_start(uio);
+    let r = crate::fs::socket::receive(s, so, uio, flags, nonblock(&f), ext);
+    crate::ktrace::genio(
+        s,
+        sock_fd,
+        false,
+        ktr,
+        &r.as_ref().map(|r| r.count).map_err(|e| *e),
+    );
+    let r = r?;
     let n = r.count;
     // `msg_flags` comes back with the flags asked with (`kern_recvit`).
     let mut outflags = flags | r.flags;
@@ -775,6 +804,7 @@ fn recvit(
         let k = (len as usize).min(from.len());
         uaccess::copy_out(addr, &from[..k]).map_err(|_| Errno::EFAULT)?;
         namelen = u32::try_from(k).unwrap_or(0);
+        crate::ktrace::sockaddr(s, from);
     }
     let mut ctllen = 0;
     if let Some((addr, len)) = control {

@@ -460,6 +460,15 @@ fn forget(r: Retired, dir: bool, target: bool, held: &mut Held) {
     }
     if target && let Some(t) = e.target.as_ref().and_then(Weak::upgrade) {
         t.cache_links.lock().dst.remove(&key);
+        // A file's name goes with its entry (a directory keeps its own,
+        // which `..` keeps right).
+        if !t.is_dir()
+            && t.named().is_some_and(|(p, n)| {
+                ptr::eq(Arc::as_ptr(&p), e.dir_vnode.as_ptr()) && n == e.name.get()
+            })
+        {
+            t.clear_named();
+        }
         held.keep(t);
     }
     // Under the bucket lock (then this one): freed by `held` after.
@@ -513,14 +522,33 @@ pub fn lookup(dir: &Vnode, name: &[u8]) -> Option<Hit> {
 }
 
 /// Records that `dir` holds `target` as `name` (`None`: that it holds
-/// nothing by that name), replacing what was known. A directory target
-/// also records its name, for `getcwd`.
+/// nothing by that name), replacing what was known. The target also
+/// records the name, by which a directory's path is found for `getcwd`
+/// and a file's for the process information that names open and mapped
+/// files (FreeBSD's `vn_fullpath`, through the name cache).
 pub fn enter(dir: &Arc<Vnode>, name: &[u8], target: Option<&Arc<Vnode>>) {
-    if let Some(t) = target
-        && t.is_dir()
-    {
+    if let Some(t) = target {
         t.set_named(dir, name);
     }
+    insert(dir, name, target);
+}
+
+/// [`enter`] for a name just made (a create, a link, a rename's
+/// target). A directory is entered, and takes the name, for `getcwd`; a
+/// file is not, as FreeBSD's file systems enter none for it (no
+/// `MAKEENTRY`): its first lookup does, and names it, so `vn_fullpath`
+/// finds it from then on.
+pub fn enter_made(dir: &Arc<Vnode>, name: &[u8], target: &Arc<Vnode>) {
+    if target.is_dir() {
+        target.set_named(dir, name);
+        insert(dir, name, Some(target));
+    } else {
+        // A negative entry for the name goes.
+        remove(dir, name);
+    }
+}
+
+fn insert(dir: &Arc<Vnode>, name: &[u8], target: Option<&Arc<Vnode>>) {
     let id = dir.id();
     let h = hash(id, name);
     let dp = Arc::as_ptr(dir);

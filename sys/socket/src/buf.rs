@@ -119,6 +119,10 @@ pub(crate) enum Item {
     Data(Mbuf),
 }
 
+/// `sb_state` bits (`SBS_*`).
+pub(crate) const SBS_CANTSENDMORE: u16 = 0x0010;
+pub(crate) const SBS_CANTRCVMORE: u16 = 0x0020;
+
 /// A socket buffer's limits and counts (FreeBSD's `struct sockbuf`
 /// fields).
 #[derive(Debug)]

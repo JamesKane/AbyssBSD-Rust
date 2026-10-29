@@ -294,6 +294,89 @@ pub(super) fn openat(s: &Sleepable, fd: u64, path_ptr: u64, flags: u64, mode: u6
     })
 }
 
+/// The file `ktrace` traces into: `path` opened to read and write
+/// without following a last symbolic link (`vn_open(FREAD | FWRITE |
+/// O_NOFOLLOW)`), which must be a regular file (`EACCES` if not).
+pub(crate) fn open_trace_file(
+    s: &Sleepable,
+    p: &Process,
+    path_ptr: u64,
+) -> Result<Arc<File>, Errno> {
+    let path = path(path_ptr)?;
+    let walk = Walk {
+        follow: false,
+        beneath: false,
+        create: false,
+    };
+    let cred = p.cred();
+    let Found::Vnode(v) = crate::fs::resolve_as(s, p, &cred, At::Cwd, &path, walk)? else {
+        return Err(Errno::ENOENT);
+    };
+    match v.kind() {
+        Kind::Directory => return Err(Errno::EISDIR),
+        Kind::Symlink => return Err(Errno::EMLINK),
+        _ => {}
+    }
+    if stored_here(v.kind()) && v.mount().read_only() {
+        return Err(Errno::EROFS);
+    }
+    vfs::acl::access(s, &v, &cred, VREAD | VWRITE)?;
+    if v.kind() != Kind::Regular {
+        return Err(Errno::EACCES);
+    }
+    let vf = VnodeFile::open(s, &v, true, false)?;
+    Ok(File::new(FileKind::Vnode(vf), FREAD | FWRITE))
+}
+
+/// A core file (`corefile_open`): `name` opened to write, without
+/// following a last symbolic link, made mode 0600 for the effective ids if
+/// missing (and `EEXIST` if not, with `excl`). In capability mode the
+/// lookup from the working directory fails unless `nocapcheck`
+/// (`kern.capmode_coredump`).
+pub(crate) fn open_core_file(
+    s: &Sleepable,
+    p: &Process,
+    name: &[u8],
+    excl: bool,
+    nocapcheck: bool,
+) -> Result<Arc<File>, Errno> {
+    if p.in_capability_mode() && !nocapcheck {
+        return Err(Errno::ECAPMODE);
+    }
+    let walk = Walk {
+        follow: false,
+        beneath: false,
+        create: true,
+    };
+    let cred = p.cred();
+    let v = match crate::fs::resolve_as(s, p, &cred, At::Cwd, name, walk)? {
+        Found::Vnode(_) if excl => return Err(Errno::EEXIST),
+        Found::Vnode(v) => {
+            match v.kind() {
+                Kind::Directory => return Err(Errno::EISDIR),
+                Kind::Symlink => return Err(Errno::EMLINK),
+                _ => {}
+            }
+            if stored_here(v.kind()) && v.mount().read_only() {
+                return Err(Errno::EROFS);
+            }
+            vfs::acl::access(s, &v, &cred, VWRITE)?;
+            v
+        }
+        Found::Missing { dir, name } => {
+            let c = vfs::Create {
+                mode: 0o600,
+                uid: cred.uid,
+                gid: cred.gid,
+                time: crate::fs::now(),
+            };
+            vfs::ops::create(s, &dir, &name, &NewNode::Regular, &c, &cred, excl)?.0
+        }
+    };
+    let vf = VnodeFile::open(s, &v, true, false)?;
+    Ok(File::new(FileKind::Vnode(vf), FWRITE))
+}
+
 /// `open(path, flags, mode)`.
 pub(super) fn open(s: &Sleepable, path: u64, flags: u64, mode: u64) -> SysResult {
     openat(s, u64::from(AT_FDCWD.cast_unsigned()), path, flags, mode)
@@ -330,9 +413,12 @@ pub(super) fn fstatat(s: &Sleepable, fd: u64, path_ptr: u64, buf: u64, flag: u64
         // Written out from where it was made: not moved out of the result
         // first.
         match &st {
-            Ok(st) => UserPtr::<Stat>::new(buf)
-                .write(st)
-                .map_err(|_| Errno::EFAULT)?,
+            Ok(st) => {
+                crate::ktrace::structure_of(s, "stat", st);
+                UserPtr::<Stat>::new(buf)
+                    .write(st)
+                    .map_err(|_| Errno::EFAULT)?;
+            }
             Err(e) => return Err(*e),
         }
         Ok(0)
@@ -458,7 +544,25 @@ pub(super) fn realpathat(
         &path,
         Walk::FOLLOW,
     )?;
-    let mut full = crate::fs::namespace().path_of(s, &v, &crate::fs::root_of(&p))?;
+    let root = crate::fs::root_of(&p);
+    // A file by the directory and name it was found under, which of its
+    // links that is (`vn_fullpath_hardlink`).
+    let under = if v.is_dir() {
+        None
+    } else {
+        crate::fs::found_under(s, &p, At::new(int(fd), crate::capsicum::rights::NO), &path)?
+    };
+    let mut full = match under {
+        Some((dir, name)) => {
+            let mut d = crate::fs::namespace().path_of(s, &dir, &root)?;
+            if d.last() != Some(&b'/') {
+                d.push(b'/');
+            }
+            d.extend_from_slice(&name);
+            d
+        }
+        None => crate::fs::namespace().path_of(s, &v, &root)?,
+    };
     // FreeBSD's `vn_fullpath_hardlink` says a short buffer is ENOMEM.
     if full.len() + 1 > usize::try_from(size).unwrap_or(usize::MAX) {
         return Err(Errno::ENOMEM);
@@ -579,8 +683,10 @@ fn name_field(dst: &mut [u8], src: &[u8]) {
     dst[..n].copy_from_slice(&src[..n]);
 }
 
-/// `struct statfs` for the file system holding `v`.
-pub(super) fn statfs_of(s: &Sleepable, v: &Vnode) -> Result<Statfs, Errno> {
+/// `struct statfs` for the file system holding `v`, on the heap: at 2 KiB
+/// and more, a few copies in a frame leave too little kernel stack for an
+/// interrupt.
+pub(super) fn statfs_of(s: &Sleepable, v: &Vnode) -> Result<alloc::boxed::Box<Statfs>, Errno> {
     let mut st = statfs_mount(s, v.mount())?;
     enforce_statfs(v.mount(), &mut st);
     Ok(st)
@@ -645,23 +751,21 @@ fn enforce_statfs(m: &vfs::Mount, sp: &mut Statfs) {
     );
 }
 
-fn statfs_mount(s: &Sleepable, m: &vfs::Mount) -> Result<Statfs, Errno> {
+fn statfs_mount(s: &Sleepable, m: &vfs::Mount) -> Result<alloc::boxed::Box<Statfs>, Errno> {
     let c = m.statfs(s)?;
     let info = m.info();
-    let mut st = Statfs {
-        f_type: m.type_num,
-        f_flags: m.flags(),
-        f_bsize: c.bsize,
-        f_iosize: c.iosize,
-        f_blocks: c.blocks,
-        f_bfree: c.bfree,
-        f_bavail: c.bavail,
-        f_files: c.files,
-        f_ffree: c.ffree,
-        f_namemax: u32::try_from(NAME_MAX).unwrap_or(u32::MAX),
-        f_fsid: abi::mount::Fsid { val: fsid(m) },
-        ..Statfs::default()
-    };
+    let mut st = alloc::boxed::Box::<Statfs>::default();
+    st.f_type = m.type_num;
+    st.f_flags = m.flags();
+    st.f_bsize = c.bsize;
+    st.f_iosize = c.iosize;
+    st.f_blocks = c.blocks;
+    st.f_bfree = c.bfree;
+    st.f_bavail = c.bavail;
+    st.f_files = c.files;
+    st.f_ffree = c.ffree;
+    st.f_namemax = u32::try_from(NAME_MAX).unwrap_or(u32::MAX);
+    st.f_fsid = abi::mount::Fsid { val: fsid(m) };
     name_field(&mut st.f_fstypename, info.type_name.as_bytes());
     name_field(&mut st.f_mntfromname, &info.from);
     name_field(&mut st.f_mntonname, &m.on());

@@ -158,9 +158,21 @@ pub(crate) const FREEBSD_TESTS: &[&str] = &[
     "usr/tests/sys/kern/jailmeta",
     "usr/tests/sys/kern/jaildesc",
     "usr/tests/sys/kern/jail_lookup_root",
+    "usr/tests/sys/kern/ktrace_test",
+    "usr/tests/sys/kern/ptrace_test",
     "usr/tests/sys/capsicum",
     "usr/tests/usr.sbin/jail",
+    "usr/tests/usr.bin/procstat",
 ];
+
+/// `ABYSS_ATF`: while working on a feature, the test directories (of
+/// [`FREEBSD_TESTS`], space-separated) `run-atf` runs instead of all of
+/// them; the shell case then runs only those (see docs/BUILD-AND-TEST.md).
+pub(crate) fn atf_only() -> Option<Vec<String>> {
+    let v = std::env::var("ABYSS_ATF").ok()?;
+    let dirs: Vec<String> = v.split_ascii_whitespace().map(str::to_owned).collect();
+    (!dirs.is_empty()).then_some(dirs)
+}
 
 /// Where the root image keeps pjdfstest.
 pub(crate) const PJDFSTEST: &str = "usr/tests/pjdfstest";
@@ -259,7 +271,7 @@ for e in $(progs); do
 		fi
 		pid=$!
 		# The watchdog takes its `sleep` with it when told to go.
-		(trap 'kill $sp 2> /dev/null; exit 0' TERM; sleep 300 & sp=$!; wait $sp && kill -9 $pid 2> /dev/null) &
+		(trap 'kill $sp 2> /dev/null; exit 0' TERM; sleep @TIMEOUT@ & sp=$!; wait $sp && kill -9 $pid 2> /dev/null) &
 		watch=$!
 		wait $pid
 		st=$?
@@ -384,6 +396,8 @@ fn ufs_root(arch: Arch, opts: build::Options, cmdline: &str, root: Root) -> Resu
                 .arg(&dst),
         )?;
     }
+    // The differential scenarios and their helpers.
+    crate::diff::stage(arch, &stage)?;
     // The user tests again, dynamically linked.
     let dynamic = stage.join(DYNAMIC_TESTS);
     fs::create_dir_all(&dynamic)?;
@@ -395,8 +409,23 @@ fn ufs_root(arch: Arch, opts: build::Options, cmdline: &str, root: Root) -> Resu
         fs::write(&shim, OPENSSL_MD5)?;
         fs::set_permissions(&shim, fs::Permissions::from_mode(0o555))?;
         let atf = stage.join(STATIC_TOOLS).join("run-atf");
-        let dirs: Vec<String> = FREEBSD_TESTS.iter().map(|d| format!("/{d}")).collect();
-        fs::write(&atf, RUN_ATF.replace("@DIRS@", &dirs.join(" ")))?;
+        let dirs: Vec<String> = atf_only()
+            .unwrap_or_else(|| FREEBSD_TESTS.iter().map(|d| (*d).to_owned()).collect())
+            .iter()
+            .map(|d| format!("/{d}"))
+            .collect();
+        // kyua's 300 seconds, unless `ABYSS_ATF_TIMEOUT` (while working
+        // on a feature) says otherwise.
+        let timeout = std::env::var("ABYSS_ATF_TIMEOUT")
+            .ok()
+            .filter(|t| t.parse::<u32>().is_ok())
+            .unwrap_or_else(|| "300".into());
+        fs::write(
+            &atf,
+            RUN_ATF
+                .replace("@DIRS@", &dirs.join(" "))
+                .replace("@TIMEOUT@", &timeout),
+        )?;
         fs::set_permissions(&atf, fs::Permissions::from_mode(0o555))?;
     }
     util::run(

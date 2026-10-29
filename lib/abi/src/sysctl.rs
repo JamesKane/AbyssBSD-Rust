@@ -112,6 +112,24 @@ pub mod kern {
     pub const IOV_MAX: i32 = 35;
     /// `kern.arandom` (bytes).
     pub const ARND: i32 = 37;
+    /// `kern.clockrate` (struct clockinfo).
+    pub const CLOCKRATE: i32 = 12;
+    /// `kern.bootfile` (string).
+    pub const BOOTFILE: i32 = 26;
+}
+
+/// `CTL_VM` children (`VM_*`, `vm/vm_param.h`).
+pub mod vm {
+    /// `vm.vmtotal` (struct vmtotal).
+    pub const TOTAL: i32 = 1;
+    /// `vm.loadavg` (struct loadavg).
+    pub const LOADAVG: i32 = 2;
+    /// `vm.v_free_min` and its kin (u_int).
+    pub const V_FREE_MIN: i32 = 3;
+    pub const V_FREE_TARGET: i32 = 4;
+    pub const V_FREE_RESERVED: i32 = 5;
+    pub const V_INACTIVE_TARGET: i32 = 6;
+    pub const V_PAGEOUT_FREE_MIN: i32 = 9;
 }
 
 /// `hw.*` fixed numbers.
@@ -134,6 +152,8 @@ pub mod hw {
     pub const MACHINE_ARCH: i32 = 11;
     /// `hw.realmem` (unsigned long).
     pub const REALMEM: i32 = 12;
+    /// `hw.usermem` (unsigned long).
+    pub const USERMEM: i32 = 6;
 }
 
 /// Node types: the low four bits of a node's kind.
@@ -247,6 +267,15 @@ pub const CONSTANTS: &[ConstValue] = &[
     c("KERN_USRSTACK", kern::USRSTACK as i64),
     c("KERN_IOV_MAX", kern::IOV_MAX as i64),
     c("KERN_ARND", kern::ARND as i64),
+    c("KERN_CLOCKRATE", kern::CLOCKRATE as i64),
+    c("KERN_BOOTFILE", kern::BOOTFILE as i64),
+    v("VM_TOTAL", vm::TOTAL),
+    v("VM_LOADAVG", vm::LOADAVG),
+    v("VM_V_FREE_MIN", vm::V_FREE_MIN),
+    v("VM_V_FREE_TARGET", vm::V_FREE_TARGET),
+    v("VM_V_FREE_RESERVED", vm::V_FREE_RESERVED),
+    v("VM_V_INACTIVE_TARGET", vm::V_INACTIVE_TARGET),
+    v("VM_V_PAGEOUT_FREE_MIN", vm::V_PAGEOUT_FREE_MIN),
     c("HW_MACHINE", hw::MACHINE as i64),
     c("HW_MODEL", hw::MODEL as i64),
     c("HW_NCPU", hw::NCPU as i64),
@@ -256,6 +285,7 @@ pub const CONSTANTS: &[ConstValue] = &[
     c("HW_FLOATINGPT", hw::FLOATINGPT as i64),
     c("HW_MACHINE_ARCH", hw::MACHINE_ARCH as i64),
     c("HW_REALMEM", hw::REALMEM as i64),
+    c("HW_USERMEM", hw::USERMEM as i64),
     c("CTLTYPE", ctltype::MASK as i64),
     c("CTLTYPE_NODE", ctltype::NODE as i64),
     c("CTLTYPE_INT", ctltype::INT as i64),
@@ -287,6 +317,16 @@ pub const CONSTANTS: &[ConstValue] = &[
     c("CTLSHIFT_SECURE", ctlflag::SHIFT_SECURE as i64),
     c("CTLFLAG_STATS", ctlflag::STATS as i64),
 ];
+
+/// A `vm/vm_param.h` constant.
+const fn v(c_name: &'static str, value: i32) -> ConstValue {
+    ConstValue {
+        c_name,
+        header: "vm/vm_param.h",
+        value: value as i64,
+        arches: crate::layout::Arches::All,
+    }
+}
 
 const fn c(c_name: &'static str, value: i64) -> ConstValue {
     ConstValue {

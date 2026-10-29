@@ -359,6 +359,11 @@ static TIMERFDS: SpinLock<Vec<Weak<Timerfd>>> = SpinLock::new(Vec::new());
 static TFD_INO: AtomicU64 = AtomicU64::new(1);
 
 impl Timerfd {
+    /// Its clock, for process information (`timerfd_fill_kinfo`).
+    pub(crate) fn clock(&self) -> u32 {
+        self.clock
+    }
+
     /// `kern_timerfd_create`'s object.
     pub(crate) fn new(id: u32, uid: u32, gid: u32) -> Result<Arc<Self>, Errno> {
         if !matches!(id, clock::REALTIME | clock::MONOTONIC | clock::UPTIME) {
@@ -524,6 +529,7 @@ impl Timerfd {
             if nonblock {
                 return Err(Errno::EAGAIN);
             }
+            let _w = sched::wait_message("tfdrd");
             crate::signal::sleep(
                 s,
                 &self.wait,

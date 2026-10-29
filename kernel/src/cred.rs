@@ -14,7 +14,11 @@ pub(crate) use security::{Cred as Ucred, Ids, NGROUPS_MAX, Priv, SetCred};
 
 /// The superuser in prison0, shared.
 pub(crate) fn root_shared() -> Arc<Ucred> {
-    Arc::new(Ucred::root())
+    // proc0's: one supplementary group, 0 (`proc0_init`'s
+    // `cr_ngroups = 1`), which init and what the kernel starts inherit.
+    let mut c = Ucred::root();
+    c.groups = alloc::vec![0];
+    Arc::new(c)
 }
 
 /// Supplementary groups from user memory, for `setgroups`.

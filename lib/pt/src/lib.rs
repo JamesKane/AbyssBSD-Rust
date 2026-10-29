@@ -84,6 +84,12 @@ impl Level {
         self.0
     }
 
+    /// The bytes one entry at this level covers.
+    #[must_use]
+    pub const fn span(self) -> u64 {
+        1 << (12 + 9 * (self.0 as u32 - 1))
+    }
+
     /// The table index `va` selects at this level.
     #[must_use]
     pub const fn index(self, va: VirtAddr) -> usize {
@@ -602,6 +608,55 @@ impl<F: Format> PageTable<F> {
         }
     }
 
+    /// How many 4 KiB pages of `[va, va + len)` are mapped (a larger leaf
+    /// counts the pages of it inside the range): FreeBSD's
+    /// `pmap_resident_count` over a range. Walks only the tables that
+    /// exist.
+    pub fn resident(&self, mem: &mut impl Memory, va: VirtAddr, len: u64) -> u64 {
+        let end = va.get().saturating_add(len);
+        Self::resident_below(mem, self.root, Level::ROOT, 0, va.get(), end)
+    }
+
+    /// The pages mapped in `[start, end)` under `table`, a level-`level`
+    /// table covering addresses from `base`.
+    fn resident_below(
+        mem: &mut impl Memory,
+        table: PhysAddr,
+        level: Level,
+        base: u64,
+        start: u64,
+        end: u64,
+    ) -> u64 {
+        let span = level.span();
+        // Only the entries the range reaches, read one at a time: a copy
+        // of the table per level would not fit a kernel stack.
+        let first = start.saturating_sub(base) / span;
+        let last = (end.saturating_sub(base).div_ceil(span)).min(512);
+        let mut n = 0;
+        for i in first..last {
+            let Ok(ix) = usize::try_from(i) else { break };
+            let e = mem.frame(table)[ix];
+            let lo = base + span * i;
+            let hi = lo.saturating_add(span);
+            if hi <= start || lo >= end || !F::is_valid(e) {
+                continue;
+            }
+            if level.0 > 1 && F::is_table(e, level) {
+                n += Self::resident_below(
+                    mem,
+                    F::address(e, level),
+                    Level(level.0 - 1),
+                    lo,
+                    start,
+                    end,
+                );
+            } else {
+                n += (hi.min(end) - lo.max(start)).div_ceil(4096);
+            }
+        }
+        n
+    }
+
     /// Counts the frames the hierarchy uses, root included.
     pub fn frames_used(&self, mem: &mut impl Memory) -> usize {
         Self::count(mem, self.root, Level::ROOT)
@@ -709,6 +764,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!((old.pa, old.attrs), (PhysAddr::new(0x10_0000), user));
+        // Five pages mapped, three of them in the middle range.
+        assert_eq!(pt.resident(&mut mem, VirtAddr::ZERO, 1 << 47), 5);
+        assert_eq!(pt.resident(&mut mem, va + 0x1000, 0x3000), 3);
+        assert_eq!(pt.resident(&mut mem, VirtAddr::new(0x2000), 0x1000), 0);
         let t = pt.translate(&mut mem, va).unwrap();
         assert_eq!(
             (t.pa, t.attrs.write, t.attrs.user),

@@ -9,6 +9,7 @@ mod base;
 mod build;
 mod cli;
 mod crash;
+mod diff;
 mod expect;
 mod fattest;
 mod fs;
@@ -42,15 +43,17 @@ commands:
               [--qmp SOCK]                               ... with a QMP socket for `qmp`
   qmp         --sock SOCK [--type TEXT] [--key KEYS] [--move DX,DY] [--screendump FILE] [--unplug ID]
                                                          type on, move the mouse of, capture the screen of, or unplug from, a running QEMU
-  test        [--tier unit|boot|all] [--arch <a|all>] [--case NAME] [--no-usb]
+  test        [--tier unit|boot|all] [--arch <a|all>] [--case NAME] [--no-usb] [--quick]
                                                          run tests (default: all tiers); --case runs one boot
-                                                         case (x86_64-console), --no-usb drops the USB set
+                                                         case (x86_64-console), --no-usb drops the USB set,
+                                                         --quick leaves the shell cases' test programs out
   perf        [--suite p2|p3|p4|p5|vt|diag] [--runs N] [--prepare] [--freebsd-only]
                                                          compare with FreeBSD in bhyve (server only)
   ubench      [--arch <a|all>] [--runs N] [--bhyve]      the P4 suite on AbyssBSD alone (QEMU, or bhyve on the server)
   freebsd-shell                                          run the boot-to-shell script against FreeBSD (server only)
   freebsd-multiuser [--arch <a|all>] [--vmm qemu|bhyve] run the multi-user login script against FreeBSD (server only)
   freebsd-usertests [--arch <a|all>] [--test N,...]   run tests/user on FreeBSD 15.1 itself (server only)
+  freebsd-diff [--arch <a|all>] [--scenario N,...]    record FreeBSD's output of tests/diff's scenarios (server only)
   kyua-baseline [--resume]                               record FreeBSD's kyua results per test case in bhyve (server only)
   fetch-base  [--arch <a|all>]                           FreeBSD base.txz: /rescue image, sysroot (server only)
   acpidump    --arch <a> [--vmm qemu|bhyve] [--machine M] --out DIR   capture a VM's ACPI tables
@@ -111,6 +114,7 @@ fn run() -> Result<()> {
         "freebsd-shell" => expect::cmd_freebsd_shell(args),
         "freebsd-multiuser" => multiuser::cmd_freebsd_multiuser(args),
         "freebsd-usertests" => usertests::cmd(args),
+        "freebsd-diff" => diff::cmd_freebsd_diff(args),
         "kyua-baseline" => kyua::cmd_kyua_baseline(args),
         "acpidump" => acpidump::cmd(args),
         "check" => test::cmd_check(args),

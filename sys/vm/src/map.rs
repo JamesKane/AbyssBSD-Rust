@@ -128,6 +128,10 @@ pub struct Entry {
     pub(crate) role: Role,
     /// Counted in its object's write mappings (`MAP_ENTRY_WRITECNT`).
     writecnt: bool,
+    /// A private view of an object it copies from when written
+    /// (`MAP_ENTRY_COW`): a private file mapping, or an entry `fork`
+    /// copied.
+    cow: bool,
 }
 
 impl Entry {
@@ -145,6 +149,7 @@ impl Entry {
             needs_copy: false,
             role: Role::Normal,
             writecnt: false,
+            cow: false,
         }
     }
 
@@ -180,6 +185,7 @@ impl Entry {
             needs_copy: false,
             role: Role::Normal,
             writecnt: false,
+            cow: false,
         }
     }
 
@@ -204,6 +210,7 @@ impl Entry {
             needs_copy: true,
             role: Role::Normal,
             writecnt: false,
+            cow: true,
         }
     }
 
@@ -255,6 +262,25 @@ impl Entry {
     #[must_use]
     pub const fn role(&self) -> Role {
         self.role
+    }
+
+    /// A private view that copies on write (`MAP_ENTRY_COW`).
+    #[must_use]
+    pub const fn is_cow(&self) -> bool {
+        self.cow
+    }
+
+    /// Its object is still shared: the first write copies
+    /// (`MAP_ENTRY_NEEDS_COPY`).
+    #[must_use]
+    pub const fn needs_copy(&self) -> bool {
+        self.needs_copy
+    }
+
+    /// The object page its start maps.
+    #[must_use]
+    pub const fn offset(&self) -> PageIndex {
+        self.offset
     }
 
     #[must_use]
@@ -337,6 +363,8 @@ pub struct VmMap {
     stack: Option<ProcStack>,
     /// `RLIMIT_STACK`'s current value.
     stack_limit: u64,
+    /// Bumped by each change to the entries (`vm_map`'s `timestamp`).
+    stamp: u32,
 }
 
 /// The process's main stack (FreeBSD's `vm_maxsaddr`, `vm_stacktop`, and
@@ -372,7 +400,15 @@ impl VmMap {
             pages,
             stack: None,
             stack_limit: u64::MAX,
+            stamp: 0,
         }
+    }
+
+    /// How many times the entries have changed (`vm_map`'s `timestamp`,
+    /// which `PT_VM_TIMESTAMP` and `PT_VM_ENTRY` use).
+    #[must_use]
+    pub const fn timestamp(&self) -> u32 {
+        self.stamp
     }
 
     #[must_use]
@@ -439,6 +475,7 @@ impl VmMap {
 
     /// Adds `entry`, which must not overlap any other.
     pub fn insert(&mut self, entry: Entry) -> Result<(), MapError> {
+        self.stamp = self.stamp.wrapping_add(1);
         let range = entry.range();
         self.check(&range)?;
         if self.overlaps(&range) {
@@ -519,6 +556,7 @@ impl VmMap {
     /// inside the range are fine (`munmap` semantics). The caller removes
     /// the range from the page tables first.
     pub fn remove(&mut self, range: Range<VirtAddr>) -> Result<(), MapError> {
+        self.stamp = self.stamp.wrapping_add(1);
         self.check(&range)?;
         if let Some(e) = self.entries.take_exact(range.start.get(), range.end.get()) {
             e.release();
@@ -597,6 +635,7 @@ impl VmMap {
         prot: Prot,
         max: Option<Prot>,
     ) -> Result<(), MapError> {
+        self.stamp = self.stamp.wrapping_add(1);
         self.check(&range)?;
         if max.is_some_and(|m| !m.contains(prot)) {
             return Err(MapError::Protection);
@@ -705,6 +744,7 @@ impl VmMap {
     /// stack, `RLIMIT_STACK` (FreeBSD's `vm_map_growstack`). `NoSpace` if
     /// it cannot reach `va`.
     pub fn grow_stack(&mut self, va: VirtAddr) -> Result<(), MapError> {
+        self.stamp = self.stamp.wrapping_add(1);
         let page = va.align_down(PAGE_SIZE);
         let gap = self.entry(page).ok_or(MapError::NotMapped)?;
         let Role::StackGap {
@@ -834,6 +874,7 @@ impl VmMap {
                     if let Some(object) = &e.object {
                         object.set_shared();
                         e.needs_copy = true;
+                        e.cow = true;
                         if e.prot.contains(Prot::WRITE) {
                             write_protect.push(e.range());
                         }

@@ -72,6 +72,8 @@ fn sve_state(fpu: &FpuImage, vl: usize) -> alloc::vec::Vec<u8> {
 const SPSR_M: u64 = 0xf;
 const SPSR_AARCH32: u64 = 0x10;
 const SPSR_DAIF: u64 = 0x3c0;
+/// The software step bit (`PSR_SS`).
+const SPSR_SS: u64 = 1 << 21;
 /// The FPSR and FPCR bits that exist (the rest are reserved).
 const FPSR_BITS: u32 = 0xf800_009f;
 const FPCR_BITS: u32 = 0x07ff_9f07;
@@ -155,6 +157,9 @@ pub(super) fn sendsig(frame: &mut TrapFrame, d: &Delivery<'_>) -> Result<(), ()>
     frame.x[8] = d.action.sa_handler;
     frame.sp = fp;
     frame.elr = d.trampoline;
+    // A debugger's step waits out the handler (`PCB_SINGLE_STEP` cleared);
+    // `sigreturn` brings it back from the saved state.
+    frame.spsr &= !SPSR_SS;
     Ok(())
 }
 

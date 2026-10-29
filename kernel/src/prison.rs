@@ -389,6 +389,11 @@ pub(crate) struct JailDesc {
 }
 
 impl JailDesc {
+    /// Its jail's id, 0 once the jail is gone (`jaildesc_fill_kinfo`).
+    pub(crate) fn jid(&self) -> i32 {
+        self.st.prison.lock().as_ref().map_or(0, |p| p.id())
+    }
+
     /// `jaildesc_alloc`: an owning one takes `PRIV_JAIL_REMOVE`. Its file
     /// is writable with `PRIV_JAIL_SET`.
     pub(crate) fn new(cred: Arc<Ucred>, owning: bool) -> Result<(Self, u32), Errno> {

@@ -266,8 +266,69 @@ directory it was in is recorded as `crashed`. The results, one `<program>:<case>
 kyua's result and reason, go to `~/abyss/kyua/` on the server and are kept in
 `tests/kyua/freebsd/`. It holds perf's lock, since its eight busy vCPUs would skew a benchmark run.
 
+### Differential tests of command output
+
+The same programs on AbyssBSD and on FreeBSD 15.1 must print the same thing, once what
+legitimately differs between two machines is masked (`xtask/src/diff.rs`, `tests/diff/`):
+
+- **Scenarios**: `tests/diff/scenarios/NAME.sh`, shell scripts that set up a known situation
+  and print the output of the programs under test. They source `tests/diff/lib.sh`: `spawn
+  NAME CMD...` starts a process in the background and names it (its pid is shown as
+  `<NAME>`), `helper NAME MODE` starts `diffproc` (`tests/diff/helpers/diffproc.c`, built
+  static, the same binary on both systems) in a known state (threads in known sleeps, a
+  descriptor of each kind, mappings, a kqueue, a zombie, a reader on an empty pipe, the
+  terminal status line, ...) and waits until it is set up, `waitfor PID WCHAN` waits for a
+  sleep, and `show CMD...` runs a command and prints it, its output, and its exit status.
+  `sorted FIELD HEADER_RE CMD...` does the same but sorts the lines after the header by a
+  field (0: the last). Use it where the program sorts by a key the scenario leaves tied (`ps
+  -u` by `%CPU`, `top` by `WCPU`): FreeBSD keeps ties in the order it found them, and that
+  order changes from run to run, and between amd64 and arm64.
+- **The runner**, `tests/diff/run.sh`, runs each scenario in an empty directory under
+  `/var/tmp`, under `script(1)` (so it leads a session on a pseudo-terminal of its own), with a
+  fixed environment, host name, umask, and login class `daemon`'s limits, and prints its
+  output twice between markers: through the normalizer (`diff: | `) and as printed
+  (`diff-raw: | `, for reading a mismatch).
+- **The normalizer**, `tests/diff/normalize.awk`, one place for every rule, run in each guest
+  with FreeBSD's own `awk`. It masks pids (a scenario's processes by name, the others by
+  first appearance), thread ids, addresses, times, load averages, CPU percentages, sizes the
+  kernel decides (VSZ, RSS, ...), inode numbers, CPU numbers, priorities, kernel stacks,
+  reference counts, pseudo-terminal numbers, idle against asleep (`MAXSLP`), `top`'s summary
+  of the other processes and memory, and the login class; it keeps structure, columns,
+  flags, names, states, and wait channels. Tables are recognized by their header lines, so a
+  column is masked by name.
+- **FreeBSD's outputs**: `cargo xtask --remote freebsd-diff [--arch A] [--scenario N,...]`
+  boots FreeBSD 15.1's release image as the installer leaves it (bhyve on amd64, QEMU on
+  arm64) with the scenarios in its root and an `rc.local` that runs them, and writes each
+  scenario's normalized output to `tests/corpus/freebsd/diff/ARCH/NAME.txt` in the server's
+  mirror; copy them back (`scp 'abyss-build:abyss/src/tests/corpus/freebsd/diff/ARCH/*.txt'
+  tests/corpus/freebsd/diff/ARCH/`) and commit them.
+- **AbyssBSD's**: the shell cases on the server run every scenario from the boot shell after
+  `DYNAMIC` (`diff::DIFF`) and compare each with FreeBSD's recording line for line; a
+  scenario whose output differs fails the case, showing the differing lines, unless
+  `tests/diff/known-differences.txt` lists it (`NAME` or `ARCH:NAME`, `#` and why). A
+  scenario with no recording for the architecture is reported and skipped.
+
+Adding a scenario is dropping its script into `tests/diff/scenarios/` and recording FreeBSD's
+output with `freebsd-diff --scenario NAME`. A change to the normalizer needs FreeBSD's
+outputs recorded again, as both sides normalize in the guest. `cargo xtask test --tier boot
+--case x86_64-bhyve-shell --quick` runs the scenarios without the shell cases' test programs
+and `mtree` checks, for a quicker look.
+
 Every machine in the boot tier has the USB and input set ([USB.md](USB.md) §9; bhyve's
 `xhci,tablet`). `--no-usb` leaves it out for a quicker run, and `--case NAME` runs one case.
+
+While working on a feature, three environment variables shorten the loop (and pass through
+`--remote`):
+
+- `ABYSS_ATF="usr/tests/sys/kern/ptrace_test ..."`: the shell case's `run-atf` runs only those of
+  FreeBSD's test directories or programs (from `image::FREEBSD_TESTS`), after making the root
+  read-write, and skips the rest of the UFS2 steps. Its verdict covers only what ran.
+- `ABYSS_ATF_TIMEOUT=30`: each case's limit instead of kyua's 300 seconds, so that a hang costs
+  little.
+- `ABYSS_REMOTE_DIR=abyss/src-other`: the server mirror to use instead of `abyss/src`, for a second
+  worktree whose remote runs would otherwise overwrite the first's.
+
+None of them is for a milestone's runs.
 
 ### Rules
 

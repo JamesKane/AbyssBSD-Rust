@@ -128,7 +128,7 @@ impl Proc {
     /// The page an access reaches, faulting as the MMU would.
     fn access(&mut self, page: u64, access: Access) -> Result<Pfn, FaultError> {
         let need = match access {
-            Access::Read => Prot::READ,
+            Access::Read | Access::Copy => Prot::READ,
             Access::Write => Prot::WRITE,
             Access::Execute => Prot::EXEC,
         };

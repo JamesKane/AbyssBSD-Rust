@@ -35,6 +35,11 @@ impl Kind {
 
 static COUNTS: SpinLock<BTreeMap<u32, [u64; 2]>> = SpinLock::new(BTreeMap::new());
 
+/// How many `kind` real user `ruid` holds (`ui_kqcnt`, `ui_ptscnt`).
+pub(crate) fn count(ruid: u32, kind: Kind) -> u64 {
+    COUNTS.lock().get(&ruid).map_or(0, |n| n[kind.index()])
+}
+
 /// One `kind` counted against real user `ruid`.
 #[derive(Debug)]
 pub(crate) struct Charge {

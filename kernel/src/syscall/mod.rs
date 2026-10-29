@@ -44,6 +44,8 @@ mod time;
 mod timers;
 mod umtx;
 
+pub(crate) use path::{open_core_file, open_trace_file};
+
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -58,27 +60,84 @@ use crate::proc::Process;
 /// What a system call returns.
 pub(crate) type SysResult = Result<u64, Errno>;
 
-/// A decoded call.
+/// A decoded call: its number and up to `sy_narg` arguments (the most
+/// any call takes is 8).
 #[derive(Clone, Copy, Debug)]
 struct Call {
     number: u64,
-    args: [u64; 6],
+    args: [u64; 8],
+    /// How many of `args` the call takes (`sy_narg`).
+    narg: usize,
 }
 
-#[cfg(target_arch = "x86_64")]
-fn decode(f: &TrapFrame) -> Call {
-    Call {
-        number: f.rax,
-        args: [f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9],
+/// [`narg`] for a debugger (`sy_narg`).
+pub(crate) fn narg_of(code: u32) -> usize {
+    narg(u64::from(code))
+}
+
+/// The arguments of the call `f` holds, as `syscallenter` read them.
+pub(crate) fn args_of(f: &TrapFrame) -> [u64; 8] {
+    decode(f).0.args
+}
+
+/// How many arguments the call numbered `number` takes; none for one
+/// that is no call (`nosys_sysent`).
+fn narg(number: u64) -> usize {
+    match lookup(number) {
+        Some(Slot::Live(n)) => n.info().args.len(),
+        _ => 0,
     }
+}
+
+/// The call in `f` (`cpu_fetch_syscall_args`): `syscall(2)` and
+/// `__syscall(2)` take the real number as their first argument. Past the
+/// six argument registers the rest are on the user stack, after the
+/// return address; `EFAULT` if they cannot be read.
+#[cfg(target_arch = "x86_64")]
+fn decode(f: &TrapFrame) -> (Call, Result<(), Errno>) {
+    let regs = [f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9];
+    let indirect = f.rax == Sysno::Syscall as u64 || f.rax == Sysno::SyscallQuad as u64;
+    let (number, regs) = if indirect {
+        (f.rdi, &regs[1..])
+    } else {
+        (f.rax, &regs[..])
+    };
+    let mut call = Call {
+        number,
+        args: [0; 8],
+        narg: narg(number),
+    };
+    call.args[..regs.len()].copy_from_slice(regs);
+    let mut fetched = Ok(());
+    for (i, arg) in call.args[regs.len()..call.narg.max(regs.len())]
+        .iter_mut()
+        .enumerate()
+    {
+        match crate::uaccess::UserPtr::<u64>::new(f.rsp + 8 + 8 * i as u64).read() {
+            Ok(v) => *arg = v,
+            Err(_) => fetched = Err(Errno::EFAULT),
+        }
+    }
+    (call, fetched)
 }
 
 #[cfg(target_arch = "aarch64")]
-fn decode(f: &TrapFrame) -> Call {
-    Call {
-        number: f.x[8],
-        args: [f.x[0], f.x[1], f.x[2], f.x[3], f.x[4], f.x[5]],
-    }
+fn decode(f: &TrapFrame) -> (Call, Result<(), Errno>) {
+    let indirect = f.x[8] == Sysno::Syscall as u64 || f.x[8] == Sysno::SyscallQuad as u64;
+    let mut args = [0; 8];
+    let number = if indirect {
+        args.copy_from_slice(&f.x[1..9]);
+        f.x[0]
+    } else {
+        args.copy_from_slice(&f.x[..8]);
+        f.x[8]
+    };
+    let call = Call {
+        number,
+        args,
+        narg: narg(number),
+    };
+    (call, Ok(()))
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -121,40 +180,103 @@ fn encode(f: &mut TrapFrame, r: SysResult) {
     }
 }
 
-/// The `kernel_hooks!` system-call hook. Entered with interrupts masked;
-/// returns with them masked.
+/// The `kernel_hooks!` system-call hook (`syscallenter`, `syscallret`).
+/// Entered with interrupts masked; returns with them masked.
 pub(crate) fn entry(frame: &mut TrapFrame) {
     hal::irq::enable();
     // SAFETY: a system call runs in its thread, which may sleep; it holds
     // nothing (it came from user mode).
     let s = unsafe { Sleepable::assume() };
-    let mut call = decode(frame);
-    // `syscall(2)`, `__syscall(2)`: the number is the first argument.
-    if call.number == Sysno::Syscall as u64 || call.number == Sysno::SyscallQuad as u64 {
-        call.number = call.args[0];
-        call.args.copy_within(1.., 0);
-        call.args[5] = 0;
+    let (mut call, mut fetched) = decode(frame);
+    let code = u32::try_from(call.number).unwrap_or(u32::MAX);
+    // Where a debugger finds the registers while the thread is in here;
+    // and whether ktrace or a debugger traces the process, looked up once
+    // for the untraced common case.
+    let (ktraced, debugged) = crate::uthread::UserThread::with_current(|t| {
+        t.dbg.entered(frame);
+        t.set_syscall_code(code);
+        let p = t.process();
+        (p.ktrace.flags() != 0, p.is_traced())
+    })
+    .unwrap_or((false, false));
+    if ktraced && crate::ktrace::point(abi::ktrace::KTR_SYSCALL) {
+        crate::ktrace::syscall(&s, code, &call.args[..call.narg]);
     }
-    // `None`: the handler set the frame itself (`execve`).
-    match run(&s, frame, call) {
-        Ok(Some(v)) => encode(frame, Ok(v)),
-        Ok(None) => {}
+    // A debugger sees the call first, and may change it (`syscallenter`).
+    if debugged
+        && fetched.is_ok()
+        && crate::ptrace::syscall_enter(&s, code, &call.args[..call.narg])
+    {
+        (call, fetched) = decode(frame);
+        if ktraced && crate::ktrace::point(abi::ktrace::KTR_SYSCALL) {
+            crate::ktrace::syscall(&s, code, &call.args[..call.narg]);
+        }
+    }
+    // `None`: the handler set the frame itself (`execve`), which returns
+    // as `EJUSTRETURN`.
+    let r = fetched.and_then(|()| run(&s, frame, call));
+    let ret = match r {
+        Ok(Some(v)) => {
+            encode(frame, Ok(v));
+            Ok(v)
+        }
+        Ok(None) => Err(Errno::EJUSTRETURN),
         Err(e) => {
             crate::capsicum::syscall_failed(call.number, e);
             encode(frame, Err(e));
+            Err(e)
         }
+    };
+    let (error, retval) = match ret {
+        Ok(v) => (0, v),
+        Err(e) => (e.get(), 0),
+    };
+    if ktraced && crate::ktrace::point(abi::ktrace::KTR_SYSRET) {
+        // The thread's code now (`td_sa.code`), which arm64's
+        // `sigreturn` changes.
+        let now =
+            crate::uthread::UserThread::with_current(crate::uthread::UserThread::syscall_code)
+                .unwrap_or(code);
+        crate::ktrace::sysret(&s, now, error, retval);
+    }
+    // The debugger sees the call return (`syscallret`): a process traced
+    // now, or one whose call made the tracing (`PT_TRACE_ME`).
+    if debugged || (code == Sysno::Ptrace as u32 && crate::ptrace::current_traced()) {
+        crate::ptrace::syscall_exit(&s, error, [retval, second_result(frame)]);
+        // A traced `vfork` parent waits for its child here, after its
+        // debugger has seen the fork (`ast_vfork`).
+        crate::proc::vfork_wait(&s);
+        crate::ptrace::vfork_done(&s);
     }
     let _ = hal::irq::disable();
 }
 
+/// The second result register as the call left it (`td_retval[1]`).
+fn second_result(f: &TrapFrame) -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        f.rdx
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        f.x[1]
+    }
+}
+
 fn run(s: &Sleepable, frame: &mut TrapFrame, call: Call) -> Result<Option<u64>, Errno> {
-    let [a0, a1, a2, a3, a4, a5] = call.args;
+    let [a0, a1, a2, a3, a4, a5, ..] = call.args;
     let Some(Slot::Live(n)) = lookup(call.number) else {
         return nosys(call.number).map(Some);
     };
-    // Capability mode allows only the calls marked for it.
-    if !n.info().cap_enabled && crate::capsicum::in_capability_mode() {
-        return Err(Errno::ECAPMODE);
+    // Capability mode allows only the calls marked for it; a traced
+    // process's others are recorded as if it were in it.
+    if !n.info().cap_enabled {
+        if crate::ktrace::cap_tracing() {
+            crate::ktrace::capfail(crate::ktrace::CapFail::Syscall(None));
+        }
+        if crate::capsicum::in_capability_mode() {
+            return Err(Errno::ECAPMODE);
+        }
     }
     let r = match n {
         Sysno::Execve => return proc::execve(s, frame, a0, a1, a2),
@@ -222,8 +344,8 @@ fn run(s: &Sleepable, frame: &mut TrapFrame, call: Call) -> Result<Option<u64>, 
         Sysno::Settimeofday => timers::settimeofday(a0, a1),
         Sysno::Adjtime => timers::adjtime(a0, a1),
         Sysno::ClockGetcpuclockid2 => timers::clock_getcpuclockid2(a0, a1, a2),
-        Sysno::Setitimer => timers::setitimer(a0, a1, a2),
-        Sysno::Getitimer => timers::getitimer(a0, a1),
+        Sysno::Setitimer => timers::setitimer(s, a0, a1, a2),
+        Sysno::Getitimer => timers::getitimer(s, a0, a1),
         Sysno::KtimerCreate => timers::ktimer_create(a0, a1, a2),
         Sysno::KtimerDelete => timers::ktimer_delete(a0),
         Sysno::KtimerSettime => timers::ktimer_settime(a0, a1, a2, a3),
@@ -353,7 +475,9 @@ fn run(s: &Sleepable, frame: &mut TrapFrame, call: Call) -> Result<Option<u64>, 
         Sysno::Unmount => fsops::unmount(s, a0, a1),
         Sysno::Getpid => misc::getpid(),
         Sysno::Issetugid => misc::issetugid(),
-        Sysno::Utrace => misc::utrace(),
+        Sysno::Utrace => misc::utrace(s, a0, a1),
+        Sysno::Ktrace => crate::ktrace::ktrace(s, a0, a1, a2, a3),
+        Sysno::Ptrace => crate::ptrace::ptrace(s, a0, a1, a2, a3),
         Sysno::Kldload => misc::kldload(a0),
         Sysno::Kldnext => misc::kldnext(a0),
         Sysno::Socket => socket::socket(s, a0, a1, a2),
@@ -376,8 +500,11 @@ fn run(s: &Sleepable, frame: &mut TrapFrame, call: Call) -> Result<Option<u64>, 
         Sysno::Recvmsg => socket::recvmsg(s, a0, a1, a2),
         Sysno::Getrandom => misc::getrandom(a0, a1, a2),
         Sysno::Exterrctl => misc::exterrctl(a0, a1, a2),
-        Sysno::CpusetGetaffinity => misc::cpuset_getaffinity(a0, a1, a2, a3, a4),
-        Sysno::CpusetSetaffinity => misc::cpuset_setaffinity(a0, a1, a2, a3, a4),
+        Sysno::CpusetGetaffinity => misc::cpuset_getaffinity(s, a0, a1, a2, a3, a4),
+        Sysno::Cpuset => misc::cpuset(a0),
+        Sysno::CpusetSetid => misc::cpuset_setid(a0, a1, a2),
+        Sysno::CpusetGetid => misc::cpuset_getid(a0, a1, a2, a3),
+        Sysno::CpusetSetaffinity => misc::cpuset_setaffinity(s, a0, a1, a2, a3, a4),
         Sysno::Sysarch => misc::sysarch(a0, a1),
         Sysno::Mmap => mem::mmap(s, a0, a1, a2, a3, a4, a5),
         Sysno::Munmap => mem::munmap(s, a0, a1),
@@ -415,7 +542,7 @@ fn run(s: &Sleepable, frame: &mut TrapFrame, call: Call) -> Result<Option<u64>, 
         Sysno::SchedGetPriorityMin => thr::sched_priority_bound(a0, false),
         Sysno::ThrSelf => thr::thr_self(a0),
         Sysno::ThrWake => thr::thr_wake(a0),
-        Sysno::ThrNew => thr::thr_new(frame, a0, a1),
+        Sysno::ThrNew => thr::thr_new(s, frame, a0, a1),
         Sysno::ThrCreate => thr::thr_create(frame, a0, a1, a2),
         Sysno::ThrExit => thr::thr_exit(s, a0),
         Sysno::ThrSuspend => thr::thr_suspend(s, a0),
@@ -443,6 +570,60 @@ fn run(s: &Sleepable, frame: &mut TrapFrame, call: Call) -> Result<Option<u64>, 
     r.map(Some)
 }
 
+/// The file open on `fd` in process `p`, with the rights in `need`
+/// (`fget`), for the kernel's own users.
+pub(crate) fn file_of(
+    s: &Sleepable,
+    p: &Process,
+    fd: i32,
+    need: &abi::capsicum::CapRights,
+) -> Result<Arc<crate::fs::file::File>, Errno> {
+    p.files.lock(s).get_checked(fd, need)
+}
+
+/// `PT_SC_REMOTE`: system call `code` with `args`, made by the current
+/// thread (stopped for its debugger) on the debugger's behalf
+/// (`ptrace_syscallreq`); its registers are left as they were.
+pub(crate) fn remote(s: &Sleepable, code: u32, args: &[u64]) -> abi::ptrace::PtraceScRet {
+    let mut ret = abi::ptrace::PtraceScRet::default();
+    let (mut number, mut args) = (u64::from(code), args.to_vec());
+    if number == Sysno::Syscall as u64 || number == Sysno::SyscallQuad as u64 {
+        if args.is_empty() {
+            ret.sr_error = Errno::EINVAL.get();
+            return ret;
+        }
+        number = args.remove(0);
+    }
+    let Some(Slot::Live(_)) = lookup(number) else {
+        ret.sr_error = Errno::ENOSYS.get();
+        return ret;
+    };
+    let mut call = Call {
+        number,
+        args: [0; 8],
+        narg: narg(number),
+    };
+    let n = args.len().min(8);
+    call.args[..n].copy_from_slice(&args[..n]);
+    let saved = crate::uthread::UserThread::with_current(|t| {
+        t.dbg.frame.load(core::sync::atomic::Ordering::Acquire)
+    });
+    let mut frame = match saved {
+        // SAFETY: the current thread's own entry frame, on its stack.
+        Some(f) if !f.is_null() => unsafe { *f },
+        _ => TrapFrame::default(),
+    };
+    match run(s, &mut frame, call) {
+        Ok(Some(v)) => {
+            ret.sr_retval[0] = v;
+            ret.sr_retval[1] = second_result(&frame);
+        }
+        Ok(None) => {}
+        Err(e) => ret.sr_error = e.get(),
+    }
+    ret
+}
+
 /// The current thread's process (every thread that makes system calls
 /// has one).
 fn process() -> Result<Arc<Process>, Errno> {
@@ -466,7 +647,7 @@ fn with_process<R>(f: impl FnOnce(&Process) -> Result<R, Errno>) -> Result<R, Er
 }
 
 /// An `int` argument: the low 32 bits.
-const fn int(a: u64) -> i32 {
+pub(crate) const fn int(a: u64) -> i32 {
     let [b0, b1, b2, b3, ..] = a.to_le_bytes();
     i32::from_le_bytes([b0, b1, b2, b3])
 }
@@ -514,6 +695,7 @@ pub(crate) fn user_trap(report: &arch::TrapReport, frame: &mut TrapFrame) {
     hal::irq::enable();
     // SAFETY: as for a system call: the thread came from user mode.
     let s = unsafe { Sleepable::assume() };
+    crate::uthread::UserThread::with_current(|t| t.dbg.entered(frame));
     crate::signal::trap(&s, report, frame);
     let _ = hal::irq::disable();
 }

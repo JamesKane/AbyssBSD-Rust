@@ -64,7 +64,7 @@ fn itimerfix(tv: &Timeval) -> Result<u64, Errno> {
 }
 
 /// `getitimer(which, itv)`.
-pub(super) fn getitimer(which: u64, itv: u64) -> SysResult {
+pub(super) fn getitimer(s: &Sleepable, which: u64, itv: u64) -> SysResult {
     let which = u32::try_from(which).map_err(|_| Errno::EINVAL)?;
     if which > ITIMER_PROF {
         return Err(Errno::EINVAL);
@@ -75,6 +75,7 @@ pub(super) fn getitimer(which: u64, itv: u64) -> SysResult {
         it_interval: ns_tv(interval),
         it_value: ns_tv(value),
     };
+    crate::ktrace::structure_of(s, "itimerval", &it);
     UserPtr::<Itimerval>::new(itv)
         .write(&it)
         .map_err(|_| Errno::EFAULT)?;
@@ -82,9 +83,9 @@ pub(super) fn getitimer(which: u64, itv: u64) -> SysResult {
 }
 
 /// `setitimer(which, itv, oitv)`: with no new value, `getitimer`.
-pub(super) fn setitimer(which: u64, itv: u64, oitv: u64) -> SysResult {
+pub(super) fn setitimer(s: &Sleepable, which: u64, itv: u64, oitv: u64) -> SysResult {
     if itv == 0 {
-        return getitimer(which, oitv);
+        return getitimer(s, which, oitv);
     }
     let it = UserPtr::<Itimerval>::new(itv)
         .read()
@@ -93,6 +94,7 @@ pub(super) fn setitimer(which: u64, itv: u64, oitv: u64) -> SysResult {
     if which > ITIMER_PROF {
         return Err(Errno::EINVAL);
     }
+    crate::ktrace::structure_of(s, "itimerval", &it);
     let value = itimerfix(&it.it_value)?;
     if it.it_value.tv_sec > i64::from(i32::MAX / 2) {
         return Err(Errno::EINVAL);
@@ -107,11 +109,12 @@ pub(super) fn setitimer(which: u64, itv: u64, oitv: u64) -> SysResult {
     };
     let p = process()?;
     let (ov, oi) = p.timers().setitimer(which as usize, value, interval);
+    let old = Itimerval {
+        it_interval: ns_tv(oi),
+        it_value: ns_tv(ov),
+    };
+    crate::ktrace::structure_of(s, "itimerval", &old);
     if oitv != 0 {
-        let old = Itimerval {
-            it_interval: ns_tv(oi),
-            it_value: ns_tv(ov),
-        };
         UserPtr::<Itimerval>::new(oitv)
             .write(&old)
             .map_err(|_| Errno::EFAULT)?;
@@ -397,6 +400,7 @@ fn kern_clock_nanosleep(
             return Ok(());
         }
         let start = crate::time::now_ns();
+        let _w = sched::wait_message("nanslp");
         match crate::signal::sleep(s, &q, || false, Some(ns)) {
             // An absolute real-time sleep looks again: the clock may
             // have been set meanwhile.

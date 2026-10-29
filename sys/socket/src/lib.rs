@@ -193,6 +193,21 @@ fn lock2<'a>(
     }
 }
 
+/// A socket as process information shows it ([`Socket::info`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Info {
+    /// It has a peer (`unp_conn`).
+    pub connected: bool,
+    /// Bytes in its send and receive buffers (`sbused`).
+    pub sendq: u32,
+    pub recvq: u32,
+    /// `sb_state` of each (`SBS_CANTSENDMORE`, `SBS_CANTRCVMORE`).
+    pub snd_state: u16,
+    pub rcv_state: u16,
+    /// Its peer's identity (an address, as FreeBSD's `unp_conn`).
+    pub peer: Option<usize>,
+}
+
 /// What a receive got.
 #[derive(Debug, Default)]
 pub struct Received {
@@ -344,6 +359,31 @@ impl Socket {
         }
         i.mode = u16::try_from(mode).unwrap_or(0o777);
         Ok(())
+    }
+
+    /// What process information shows of it (`soo_fill_kinfo` for a
+    /// UNIX-domain socket): its buffers' use and state while connected,
+    /// and its peer, if it has one.
+    #[must_use]
+    pub fn info(&self) -> Info {
+        let i = self.inner.lock();
+        let connected = i.peer.is_some();
+        let state = |b: &buf::Sockbuf| if b.cant { buf::SBS_CANTRCVMORE } else { 0 };
+        Info {
+            connected,
+            sendq: if connected { i.snd.cc } else { 0 },
+            recvq: if connected { i.rcv.cc } else { 0 },
+            snd_state: if connected && i.snd.cant {
+                buf::SBS_CANTSENDMORE
+            } else {
+                0
+            },
+            rcv_state: if connected { state(&i.rcv) } else { 0 },
+            peer: i
+                .peer
+                .as_ref()
+                .map(|p| core::ptr::from_ref(p.as_ref()).addr()),
+        }
     }
 
     /// Its name (`uipc_sockaddr`).

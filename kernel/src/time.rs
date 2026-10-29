@@ -441,6 +441,7 @@ pub(crate) fn on_timer(cx: &IrqCx) {
 /// Re-arms this CPU's timer after a context switch or wakeup changed what
 /// it should wait for. Interrupts must be masked.
 pub(crate) fn rearm() {
+    crate::statclock::resume();
     reprogram();
 }
 

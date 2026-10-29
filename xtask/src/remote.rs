@@ -11,8 +11,14 @@ use crate::util::{self, Result};
 /// An ssh alias (`Host abyss-build` in ~/.ssh/config), so an address change is
 /// a one-line edit outside the repository.
 const DEFAULT_HOST: &str = "abyss-build";
-/// Mirror location, relative to the remote home directory.
-pub(crate) const REMOTE_DIR: &str = "abyss/src";
+/// Mirror location, relative to the remote home directory, unless
+/// `ABYSS_REMOTE_DIR` names another (a second worktree's runs, which would
+/// otherwise mirror over this one's).
+const REMOTE_DIR: &str = "abyss/src";
+
+fn remote_dir() -> String {
+    std::env::var("ABYSS_REMOTE_DIR").unwrap_or_else(|_| REMOTE_DIR.into())
+}
 
 pub(crate) fn host() -> String {
     std::env::var("ABYSS_BUILD_HOST").unwrap_or_else(|_| DEFAULT_HOST.into())
@@ -33,7 +39,8 @@ pub(crate) fn ssh(script: &str) -> Command {
 /// Mirrors the working tree to the build server.
 pub(crate) fn sync() -> Result<()> {
     let host = host();
-    util::run(&mut ssh(&format!("mkdir -p {REMOTE_DIR}")))?;
+    let dir = remote_dir();
+    util::run(&mut ssh(&format!("mkdir -p {dir}")))?;
     let mut src = util::root().into_os_string();
     src.push("/");
     util::run(
@@ -46,7 +53,7 @@ pub(crate) fn sync() -> Result<()> {
                 "--exclude=/.git/",
             ])
             .arg(src)
-            .arg(format!("{host}:{REMOTE_DIR}/")),
+            .arg(format!("{host}:{dir}/")),
     )?;
     // The FreeBSD sources third-party programs build from, beside the
     // mirror as beside this tree (the server has no FreeBSD tree).
@@ -62,7 +69,7 @@ pub(crate) fn sync() -> Result<()> {
         p.push(part);
         c.arg(p);
     }
-    util::run(c.arg(format!("{host}:{REMOTE_DIR}/../freebsd-src/")))
+    util::run(c.arg(format!("{host}:{dir}/../freebsd-src/")))
 }
 
 pub(crate) fn run(args: &[String]) -> Result<()> {
@@ -72,8 +79,14 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
     let rev =
         util::output(Command::new("git").args(["describe", "--always", "--dirty", "--abbrev=12"]))
             .map_or_else(|_| "unknown".into(), |r| r.trim().to_owned());
+    // `ABYSS_ATF` (a feature's tests only) goes along.
+    let atf: String = ["ABYSS_ATF", "ABYSS_ATF_TIMEOUT"]
+        .iter()
+        .filter_map(|k| std::env::var(k).ok().map(|v| format!("{k}={} ", quote(&v))))
+        .collect();
     let script = format!(
-        "cd {REMOTE_DIR} && ABYSS_REV={} PATH=$HOME/.cargo/bin:$PATH cargo xtask {}",
+        "cd {} && {atf}ABYSS_REV={} PATH=$HOME/.cargo/bin:$PATH cargo xtask {}",
+        remote_dir(),
         quote(&rev),
         quoted.join(" ")
     );

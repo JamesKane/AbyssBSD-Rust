@@ -253,9 +253,11 @@ pub(super) fn wait4(s: &Sleepable, pid: u64, status: u64, options: u64, rusage: 
     if options & !(WNOHANG | WUNTRACED | WCONTINUED | WNOWAIT | WEXITED | WTRAPPED) != 0 {
         return Err(Errno::EINVAL);
     }
-    let Some((child, st)) = process()?.wait_child(s, int(pid), options)? else {
+    // `kern_wait`: exits and a debugger's stops always.
+    let Some(w) = process()?.wait_child(s, int(pid), options | WEXITED | WTRAPPED)? else {
         return Ok(0);
     };
+    let (child, st) = (w.pid, w.status);
     if status != 0 {
         UserPtr::<i32>::new(status)
             .write(&st)
@@ -298,7 +300,7 @@ pub(super) fn wait6(
         P_ALL => -1,
         _ => return Err(Errno::EINVAL),
     };
-    let Some((child, st)) = process()?.wait_child(s, pid, options)? else {
+    let Some(w) = process()?.wait_child(s, pid, options)? else {
         if info != 0 {
             UserPtr::<abi::signal::Siginfo>::new(info)
                 .write(&abi::signal::Siginfo::default())
@@ -306,8 +308,8 @@ pub(super) fn wait6(
         }
         return Ok(0);
     };
-    report(child, st, status, wrusage, info)?;
-    Ok(u64::from(child.unsigned_abs()))
+    report(w, status, wrusage, info)?;
+    Ok(u64::from(w.pid.unsigned_abs()))
 }
 
 /// `pdwait(fd, status, options, wrusage, info)`: `wait6` for the process
@@ -340,20 +342,23 @@ pub(super) fn pdwait(
     if options & WEXITED == 0 && target.is_zombie() {
         return Err(Errno::ESRCH);
     }
-    let (child, st) = match parent.wait_child(s, target.pid(), options) {
+    let w = match parent.wait_child(s, target.pid(), options) {
         Ok(Some(r)) => r,
         Ok(None) => return Err(Errno::EAGAIN),
         Err(Errno::ECHILD) => return Err(Errno::ESRCH),
         Err(e) => return Err(e),
     };
-    report(child, st, status, wrusage, info)?;
+    report(w, status, wrusage, info)?;
     Ok(0)
 }
 
 /// Copies out what a wait found: the status, zero resource use, and the
 /// child's `siginfo`.
-fn report(child: i32, st: i32, status: u64, wrusage: u64, info: u64) -> Result<(), Errno> {
-    use abi::signal::code::{CLD_CONTINUED, CLD_DUMPED, CLD_EXITED, CLD_KILLED, CLD_STOPPED};
+fn report(w: crate::proc::Waited, status: u64, wrusage: u64, info: u64) -> Result<(), Errno> {
+    use abi::signal::code::{
+        CLD_CONTINUED, CLD_DUMPED, CLD_EXITED, CLD_KILLED, CLD_STOPPED, CLD_TRAPPED,
+    };
+    let (child, st) = (w.pid, w.status);
     if status != 0 {
         UserPtr::<i32>::new(status)
             .write(&st)
@@ -368,6 +373,8 @@ fn report(child: i32, st: i32, status: u64, wrusage: u64, info: u64) -> Result<(
     if info != 0 {
         let (code, value) = if st & 0x7f == 0 {
             (CLD_EXITED, (st >> 8) & 0xff)
+        } else if st & 0xff == 0o177 && w.trapped {
+            (CLD_TRAPPED, (st >> 8) & 0xff)
         } else if st & 0xff == 0o177 {
             (CLD_STOPPED, (st >> 8) & 0xff)
         } else if st == abi::signal::SIGCONT.cast_signed() {

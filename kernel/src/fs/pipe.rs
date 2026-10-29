@@ -228,6 +228,11 @@ impl End {
         &self.pipe.channels[1 - self.side]
     }
 
+    /// Which of the pipe's two ends it is.
+    pub(crate) fn side(&self) -> usize {
+        self.side
+    }
+
     /// Bytes waiting to be read (`FIONREAD`).
     pub(crate) fn readable(&self) -> usize {
         self.rx().len.load(Ordering::Acquire)
@@ -262,6 +267,7 @@ impl End {
             if nonblock {
                 return Err(Errno::EAGAIN);
             }
+            let _w = sched::wait_message("piperd");
             crate::signal::sleep(
                 s,
                 &ch.readable,
@@ -325,6 +331,7 @@ impl End {
                     Err(Errno::EAGAIN)
                 };
             }
+            let _w = sched::wait_message("pipewr");
             let woke = crate::signal::sleep(
                 s,
                 &ch.writable,

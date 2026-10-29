@@ -1,0 +1,901 @@
+$ procstat <files> <threads> <sleeper>
+PID PPID PGID SID TSID THR LOGIN WCHAN EMUL COMM
+<files> <p1> <p1> <p1> <p1> 1 root sigsusp FreeBSD ELF64 diffproc
+<threads> <p1> <p1> <p1> <p1> 4 root sigsusp FreeBSD ELF64 diffproc
+<sleeper> <p1> <p1> <p1> <p1> 1 root nanslp FreeBSD ELF64 sleep
+(exit 0)
+$ procstat -b <files> <threads> <sleeper>
+PID COMM OSREL PATH
+<files> diffproc 1501000 /usr/tests/diff/bin/diffproc
+<threads> diffproc 1501000 /usr/tests/diff/bin/diffproc
+<sleeper> sleep 1501000 /bin/sleep
+(exit 0)
+$ procstat -c <files> <threads> <sleeper>
+PID COMM ARGS
+<files> diffproc diffproc files files.ready
+<threads> diffproc diffproc threads threads.ready
+<sleeper> sleep sleep 77777
+(exit 0)
+$ procstat -e <files> <threads> <sleeper>
+PID COMM ENVIRONMENT
+<files> diffproc LOGNAME=root SCRIPT=/dev/null PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/tests/diff/bin PWD=/var/tmp/diff.procstat TERM=xterm HOME=/root USER=root BLOCKSIZE=K
+<threads> diffproc LOGNAME=root SCRIPT=/dev/null PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/tests/diff/bin PWD=/var/tmp/diff.procstat TERM=xterm HOME=/root USER=root BLOCKSIZE=K
+<sleeper> sleep LOGNAME=root SCRIPT=/dev/null PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/tests/diff/bin PWD=/var/tmp/diff.procstat TERM=xterm HOME=/root USER=root BLOCKSIZE=K
+(exit 0)
+$ procstat -f <files>
+PID COMM FD T V FLAGS REF OFFSET PRO NAME
+<files> diffproc text v r r------- - - - /usr/tests/diff/bin/diffproc
+<files> diffproc ctty v c rw------ - - - /dev/pts/<n>
+<files> diffproc cwd v d r------- - - - /var/tmp/diff.procstat
+<files> diffproc root v d r------- - - - /
+<files> diffproc 0 v c r------- * * - /dev/null
+<files> diffproc 1 v c rw------ * * - /dev/pts/<n>
+<files> diffproc 2 v c rw------ * * - /dev/pts/<n>
+<files> diffproc 3 v r rw------ * * - -
+<files> diffproc 4 v r r------l * * - -
+<files> diffproc 5 v d r------- * * - /var/tmp/diff.procstat
+<files> diffproc 6 v c -wa----- * * - /dev/null
+<files> diffproc 7 p - rw------ * * - -
+<files> diffproc 8 p - rw------ * * - -
+<files> diffproc 9 f - rw---n-- * * - /var/tmp/diff.procstat/diff.fifo
+<files> diffproc 10 s - rw------ * * UDS 0 0 -
+<files> diffproc 11 s - rw------ * * UDS 0 3 -
+<files> diffproc 12 s - rw------ * * UDS 0 0 diff.sock
+<files> diffproc 13 s - rw------ * * UDD -
+<files> diffproc 14 k - rw------ * * - -
+<files> diffproc 15 t - rw------ * * - pts/<n>
+<files> diffproc 16 v c rw------ * * - /dev/pts/<n>
+<files> diffproc 17 h - rw------ * * - -
+<files> diffproc 18 h - rw------ * * - /diff.shm
+<files> diffproc 19 E - rw---n-- * * - -
+<files> diffproc 20 ? - r------- * * - -
+<files> diffproc 21 P - rw------ * * - -
+(exit 0)
+$ procstat -fC <files>
+PID COMM FD T FLAGS CAPABILITIES PRO NAME
+<files> diffproc text v r------- - - /usr/tests/diff/bin/diffproc
+<files> diffproc ctty v rw------ - - /dev/pts/<n>
+<files> diffproc cwd v r------- - - /var/tmp/diff.procstat
+<files> diffproc root v r------- - - /
+<files> diffproc 0 v r------- rd,wr,se,mm,cr,fe,fy,ft,cd,cf,cm,cn,ct,fc,fl,fp,fk,fs,sf,fu,ls,lt,md,mf,mn,rs,rt,sl,un,lo,eg,es,ed,el,ag,as,ad,ac,at,bd,co,pn,sn,gs,ln,pf,ss,sh,mg,ms,sg,sp,sw,ev,ke,kc,io,ty,pg,pw,pk,ba,ca,ina,inr,prd,pwr,mmr,mmw,mmx,mrw,mrx,mwx,mma,re,sd,scl,ssr - /dev/null
+<files> diffproc 1 v rw------ rd,wr,se,mm,cr,fe,fy,ft,cd,cf,cm,cn,ct,fc,fl,fp,fk,fs,sf,fu,ls,lt,md,mf,mn,rs,rt,sl,un,lo,eg,es,ed,el,ag,as,ad,ac,at,bd,co,pn,sn,gs,ln,pf,ss,sh,mg,ms,sg,sp,sw,ev,ke,kc,io,ty,pg,pw,pk,ba,ca,ina,inr,prd,pwr,mmr,mmw,mmx,mrw,mrx,mwx,mma,re,sd,scl,ssr - /dev/pts/<n>
+<files> diffproc 2 v rw------ rd,wr,se,mm,cr,fe,fy,ft,cd,cf,cm,cn,ct,fc,fl,fp,fk,fs,sf,fu,ls,lt,md,mf,mn,rs,rt,sl,un,lo,eg,es,ed,el,ag,as,ad,ac,at,bd,co,pn,sn,gs,ln,pf,ss,sh,mg,ms,sg,sp,sw,ev,ke,kc,io,ty,pg,pw,pk,ba,ca,ina,inr,prd,pwr,mmr,mmw,mmx,mrw,mrx,mwx,mma,re,sd,scl,ssr - /dev/pts/<n>
+<files> diffproc 3 v rw------ rd,wr,se,mm,cr,fe,fy,ft,cd,cf,cm,cn,ct,fc,fl,fp,fk,fs,sf,fu,ls,lt,md,mf,mn,rs,rt,sl,un,lo,eg,es,ed,el,ag,as,ad,ac,at,bd,co,pn,sn,gs,ln,pf,ss,sh,mg,ms,sg,sp,sw,ev,ke,kc,io,ty,pg,pw,pk,ba,ca,ina,inr,prd,pwr,mmr,mmw,mmx,mrw,mrx,mwx,mma,re,sd,scl,ssr - -
+<files> diffproc 4 v r------l rd,wr,se,mm,cr,fe,fy,ft,cd,cf,cm,cn,ct,fc,fl,fp,fk,fs,sf,fu,ls,lt,md,mf,mn,rs,rt,sl,un,lo,eg,es,ed,el,ag,as,ad,ac,at,bd,co,pn,sn,gs,ln,pf,ss,sh,mg,ms,sg,sp,sw,ev,ke,kc,io,ty,pg,pw,pk,ba,ca,ina,inr,prd,pwr,mmr,mmw,mmx,mrw,mrx,mwx,mma,re,sd,scl,ssr - -
+<files> diffproc 5 v r------- rd,wr,se,mm,cr,fe,fy,ft,cd,cf,cm,cn,ct,fc,fl,fp,fk,fs,sf,fu,ls,lt,md,mf,mn,rs,rt,sl,un,lo,eg,es,ed,el,ag,as,ad,ac,at,bd,co,pn,sn,gs,ln,pf,ss,sh,mg,ms,sg,sp,sw,ev,ke,kc,io,ty,pg,pw,pk,ba,ca,ina,inr,prd,pwr,mmr,mmw,mmx,mrw,mrx,mwx,mma,re,sd,scl,ssr - /var/tmp/diff.procstat
+<files> diffproc 6 v -wa----- rd,wr,se,mm,cr,fe,fy,ft,cd,cf,cm,cn,ct,fc,fl,fp,fk,fs,sf,fu,ls,lt,md,mf,mn,rs,rt,sl,un,lo,eg,es,ed,el,ag,as,ad,ac,at,bd,co,pn,sn,gs,ln,pf,ss,sh,mg,ms,sg,sp,sw,ev,ke,kc,io,ty,pg,pw,pk,ba,ca,ina,inr,prd,pwr,mmr,mmw,mmx,mrw,mrx,mwx,mma,re,sd,scl,ssr - /dev/null
+<files> diffproc 7 p rw------ rd,wr,se,mm,cr,fe,fy,ft,cd,cf,cm,cn,ct,fc,fl,fp,fk,fs,sf,fu,ls,lt,md,mf,mn,rs,rt,sl,un,lo,eg,es,ed,el,ag,as,ad,ac,at,bd,co,pn,sn,gs,ln,pf,ss,sh,mg,ms,sg,sp,sw,ev,ke,kc,io,ty,pg,pw,pk,ba,ca,ina,inr,prd,pwr,mmr,mmw,mmx,mrw,mrx,mwx,mma,re,sd,scl,ssr - -
+<files> diffproc 8 p rw------ rd,wr,se,mm,cr,fe,fy,ft,cd,cf,cm,cn,ct,fc,fl,fp,fk,fs,sf,fu,ls,lt,md,mf,mn,rs,rt,sl,un,lo,eg,es,ed,el,ag,as,ad,ac,at,bd,co,pn,sn,gs,ln,pf,ss,sh,mg,ms,sg,sp,sw,ev,ke,kc,io,ty,pg,pw,pk,ba,ca,ina,inr,prd,pwr,mmr,mmw,mmx,mrw,mrx,mwx,mma,re,sd,scl,ssr - -
+<files> diffproc 9 f rw---n-- rd,wr,se,mm,cr,fe,fy,ft,cd,cf,cm,cn,ct,fc,fl,fp,fk,fs,sf,fu,ls,lt,md,mf,mn,rs,rt,sl,un,lo,eg,es,ed,el,ag,as,ad,ac,at,bd,co,pn,sn,gs,ln,pf,ss,sh,mg,ms,sg,sp,sw,ev,ke,kc,io,ty,pg,pw,pk,ba,ca,ina,inr,prd,pwr,mmr,mmw,mmx,mrw,mrx,mwx,mma,re,sd,scl,ssr - /var/tmp/diff.procstat/diff.fifo
+<files> diffproc 10 s rw------ rd,wr,se,mm,cr,fe,fy,ft,cd,cf,cm,cn,ct,fc,fl,fp,fk,fs,sf,fu,ls,lt,md,mf,mn,rs,rt,sl,un,lo,eg,es,ed,el,ag,as,ad,ac,at,bd,co,pn,sn,gs,ln,pf,ss,sh,mg,ms,sg,sp,sw,ev,ke,kc,io,ty,pg,pw,pk,ba,ca,ina,inr,prd,pwr,mmr,mmw,mmx,mrw,mrx,mwx,mma,re,sd,scl,ssr UDS 0 0 -
+<files> diffproc 11 s rw------ rd,wr,se,mm,cr,fe,fy,ft,cd,cf,cm,cn,ct,fc,fl,fp,fk,fs,sf,fu,ls,lt,md,mf,mn,rs,rt,sl,un,lo,eg,es,ed,el,ag,as,ad,ac,at,bd,co,pn,sn,gs,ln,pf,ss,sh,mg,ms,sg,sp,sw,ev,ke,kc,io,ty,pg,pw,pk,ba,ca,ina,inr,prd,pwr,mmr,mmw,mmx,mrw,mrx,mwx,mma,re,sd,scl,ssr UDS 0 3 -
+<files> diffproc 12 s rw------ rd,wr,se,mm,cr,fe,fy,ft,cd,cf,cm,cn,ct,fc,fl,fp,fk,fs,sf,fu,ls,lt,md,mf,mn,rs,rt,sl,un,lo,eg,es,ed,el,ag,as,ad,ac,at,bd,co,pn,sn,gs,ln,pf,ss,sh,mg,ms,sg,sp,sw,ev,ke,kc,io,ty,pg,pw,pk,ba,ca,ina,inr,prd,pwr,mmr,mmw,mmx,mrw,mrx,mwx,mma,re,sd,scl,ssr UDS 0 0 diff.sock
+<files> diffproc 13 s rw------ rd,wr,se,mm,cr,fe,fy,ft,cd,cf,cm,cn,ct,fc,fl,fp,fk,fs,sf,fu,ls,lt,md,mf,mn,rs,rt,sl,un,lo,eg,es,ed,el,ag,as,ad,ac,at,bd,co,pn,sn,gs,ln,pf,ss,sh,mg,ms,sg,sp,sw,ev,ke,kc,io,ty,pg,pw,pk,ba,ca,ina,inr,prd,pwr,mmr,mmw,mmx,mrw,mrx,mwx,mma,re,sd,scl,ssr UDD -
+<files> diffproc 14 k rw------ rd,wr,se,mm,cr,fe,fy,ft,cd,cf,cm,cn,ct,fc,fl,fp,fk,fs,sf,fu,ls,lt,md,mf,mn,rs,rt,sl,un,lo,eg,es,ed,el,ag,as,ad,ac,at,bd,co,pn,sn,gs,ln,pf,ss,sh,mg,ms,sg,sp,sw,ev,ke,kc,io,ty,pg,pw,pk,ba,ca,ina,inr,prd,pwr,mmr,mmw,mmx,mrw,mrx,mwx,mma,re,sd,scl,ssr - -
+<files> diffproc 15 t rw------ rd,wr,se,mm,cr,fe,fy,ft,cd,cf,cm,cn,ct,fc,fl,fp,fk,fs,sf,fu,ls,lt,md,mf,mn,rs,rt,sl,un,lo,eg,es,ed,el,ag,as,ad,ac,at,bd,co,pn,sn,gs,ln,pf,ss,sh,mg,ms,sg,sp,sw,ev,ke,kc,io,ty,pg,pw,pk,ba,ca,ina,inr,prd,pwr,mmr,mmw,mmx,mrw,mrx,mwx,mma,re,sd,scl,ssr - pts/<n>
+<files> diffproc 16 v rw------ rd,wr,se,mm,cr,fe,fy,ft,cd,cf,cm,cn,ct,fc,fl,fp,fk,fs,sf,fu,ls,lt,md,mf,mn,rs,rt,sl,un,lo,eg,es,ed,el,ag,as,ad,ac,at,bd,co,pn,sn,gs,ln,pf,ss,sh,mg,ms,sg,sp,sw,ev,ke,kc,io,ty,pg,pw,pk,ba,ca,ina,inr,prd,pwr,mmr,mmw,mmx,mrw,mrx,mwx,mma,re,sd,scl,ssr - /dev/pts/<n>
+<files> diffproc 17 h rw------ rd,wr,se,mm,cr,fe,fy,ft,cd,cf,cm,cn,ct,fc,fl,fp,fk,fs,sf,fu,ls,lt,md,mf,mn,rs,rt,sl,un,lo,eg,es,ed,el,ag,as,ad,ac,at,bd,co,pn,sn,gs,ln,pf,ss,sh,mg,ms,sg,sp,sw,ev,ke,kc,io,ty,pg,pw,pk,ba,ca,ina,inr,prd,pwr,mmr,mmw,mmx,mrw,mrx,mwx,mma,re,sd,scl,ssr - -
+<files> diffproc 18 h rw------ rd,wr,se,mm,cr,fe,fy,ft,cd,cf,cm,cn,ct,fc,fl,fp,fk,fs,sf,fu,ls,lt,md,mf,mn,rs,rt,sl,un,lo,eg,es,ed,el,ag,as,ad,ac,at,bd,co,pn,sn,gs,ln,pf,ss,sh,mg,ms,sg,sp,sw,ev,ke,kc,io,ty,pg,pw,pk,ba,ca,ina,inr,prd,pwr,mmr,mmw,mmx,mrw,mrx,mwx,mma,re,sd,scl,ssr - /diff.shm
+<files> diffproc 19 E rw---n-- rd,wr,se,mm,cr,fe,fy,ft,cd,cf,cm,cn,ct,fc,fl,fp,fk,fs,sf,fu,ls,lt,md,mf,mn,rs,rt,sl,un,lo,eg,es,ed,el,ag,as,ad,ac,at,bd,co,pn,sn,gs,ln,pf,ss,sh,mg,ms,sg,sp,sw,ev,ke,kc,io,ty,pg,pw,pk,ba,ca,ina,inr,prd,pwr,mmr,mmw,mmx,mrw,mrx,mwx,mma,re,sd,scl,ssr - -
+<files> diffproc 20 ? r------- rd,wr,se,mm,cr,fe,fy,ft,cd,cf,cm,cn,ct,fc,fl,fp,fk,fs,sf,fu,ls,lt,md,mf,mn,rs,rt,sl,un,lo,eg,es,ed,el,ag,as,ad,ac,at,bd,co,pn,sn,gs,ln,pf,ss,sh,mg,ms,sg,sp,sw,ev,ke,kc,io,ty,pg,pw,pk,ba,ca,ina,inr,prd,pwr,mmr,mmw,mmx,mrw,mrx,mwx,mma,re,sd,scl,ssr - -
+<files> diffproc 21 P rw------ rd,wr,se,mm,cr,fe,fy,ft,cd,cf,cm,cn,ct,fc,fl,fp,fk,fs,sf,fu,ls,lt,md,mf,mn,rs,rt,sl,un,lo,eg,es,ed,el,ag,as,ad,ac,at,bd,co,pn,sn,gs,ln,pf,ss,sh,mg,ms,sg,sp,sw,ev,ke,kc,io,ty,pg,pw,pk,ba,ca,ina,inr,prd,pwr,mmr,mmw,mmx,mrw,mrx,mwx,mma,re,sd,scl,ssr - -
+(exit 0)
+$ procstat -i <sleeper>
+PID COMM SIG FLAGS
+<sleeper> sleep HUP -I-
+<sleeper> sleep INT -I-
+<sleeper> sleep QUIT -I-
+<sleeper> sleep ILL ---
+<sleeper> sleep TRAP ---
+<sleeper> sleep ABRT ---
+<sleeper> sleep EMT ---
+<sleeper> sleep FPE ---
+<sleeper> sleep KILL ---
+<sleeper> sleep BUS ---
+<sleeper> sleep SEGV ---
+<sleeper> sleep SYS ---
+<sleeper> sleep PIPE ---
+<sleeper> sleep ALRM ---
+<sleeper> sleep TERM ---
+<sleeper> sleep URG -I-
+<sleeper> sleep STOP ---
+<sleeper> sleep TSTP -I-
+<sleeper> sleep CONT ---
+<sleeper> sleep CHLD -I-
+<sleeper> sleep TTIN -I-
+<sleeper> sleep TTOU -I-
+<sleeper> sleep IO -I-
+<sleeper> sleep XCPU ---
+<sleeper> sleep XFSZ ---
+<sleeper> sleep VTALRM ---
+<sleeper> sleep PROF ---
+<sleeper> sleep WINCH -I-
+<sleeper> sleep INFO --C
+<sleeper> sleep USR1 ---
+<sleeper> sleep USR2 ---
+<sleeper> sleep 32 ---
+<sleeper> sleep 33 ---
+<sleeper> sleep 34 ---
+<sleeper> sleep 35 ---
+<sleeper> sleep 36 ---
+<sleeper> sleep 37 ---
+<sleeper> sleep 38 ---
+<sleeper> sleep 39 ---
+<sleeper> sleep 40 ---
+<sleeper> sleep 41 ---
+<sleeper> sleep 42 ---
+<sleeper> sleep 43 ---
+<sleeper> sleep 44 ---
+<sleeper> sleep 45 ---
+<sleeper> sleep 46 ---
+<sleeper> sleep 47 ---
+<sleeper> sleep 48 ---
+<sleeper> sleep 49 ---
+<sleeper> sleep 50 ---
+<sleeper> sleep 51 ---
+<sleeper> sleep 52 ---
+<sleeper> sleep 53 ---
+<sleeper> sleep 54 ---
+<sleeper> sleep 55 ---
+<sleeper> sleep 56 ---
+<sleeper> sleep 57 ---
+<sleeper> sleep 58 ---
+<sleeper> sleep 59 ---
+<sleeper> sleep 60 ---
+<sleeper> sleep 61 ---
+<sleeper> sleep 62 ---
+<sleeper> sleep 63 ---
+<sleeper> sleep 64 ---
+<sleeper> sleep 65 ---
+<sleeper> sleep 66 ---
+<sleeper> sleep 67 ---
+<sleeper> sleep 68 ---
+<sleeper> sleep 69 ---
+<sleeper> sleep 70 ---
+<sleeper> sleep 71 ---
+<sleeper> sleep 72 ---
+<sleeper> sleep 73 ---
+<sleeper> sleep 74 ---
+<sleeper> sleep 75 ---
+<sleeper> sleep 76 ---
+<sleeper> sleep 77 ---
+<sleeper> sleep 78 ---
+<sleeper> sleep 79 ---
+<sleeper> sleep 80 ---
+<sleeper> sleep 81 ---
+<sleeper> sleep 82 ---
+<sleeper> sleep 83 ---
+<sleeper> sleep 84 ---
+<sleeper> sleep 85 ---
+<sleeper> sleep 86 ---
+<sleeper> sleep 87 ---
+<sleeper> sleep 88 ---
+<sleeper> sleep 89 ---
+<sleeper> sleep 90 ---
+<sleeper> sleep 91 ---
+<sleeper> sleep 92 ---
+<sleeper> sleep 93 ---
+<sleeper> sleep 94 ---
+<sleeper> sleep 95 ---
+<sleeper> sleep 96 ---
+<sleeper> sleep 97 ---
+<sleeper> sleep 98 ---
+<sleeper> sleep 99 ---
+<sleeper> sleep 100 ---
+<sleeper> sleep 101 ---
+<sleeper> sleep 102 ---
+<sleeper> sleep 103 ---
+<sleeper> sleep 104 ---
+<sleeper> sleep 105 ---
+<sleeper> sleep 106 ---
+<sleeper> sleep 107 ---
+<sleeper> sleep 108 ---
+<sleeper> sleep 109 ---
+<sleeper> sleep 110 ---
+<sleeper> sleep 111 ---
+<sleeper> sleep 112 ---
+<sleeper> sleep 113 ---
+<sleeper> sleep 114 ---
+<sleeper> sleep 115 ---
+<sleeper> sleep 116 ---
+<sleeper> sleep 117 ---
+<sleeper> sleep 118 ---
+<sleeper> sleep 119 ---
+<sleeper> sleep 120 ---
+<sleeper> sleep 121 ---
+<sleeper> sleep 122 ---
+<sleeper> sleep 123 ---
+<sleeper> sleep 124 ---
+<sleeper> sleep 125 ---
+<sleeper> sleep 126 ---
+<sleeper> sleep 127 ---
+<sleeper> sleep 128 ---
+(exit 0)
+$ procstat -j <threads>
+PID TID COMM SIG FLAGS
+<threads> <t1> diffproc HUP --
+<threads> <t1> diffproc INT --
+<threads> <t1> diffproc QUIT --
+<threads> <t1> diffproc ILL --
+<threads> <t1> diffproc TRAP --
+<threads> <t1> diffproc ABRT --
+<threads> <t1> diffproc EMT --
+<threads> <t1> diffproc FPE --
+<threads> <t1> diffproc KILL --
+<threads> <t1> diffproc BUS --
+<threads> <t1> diffproc SEGV --
+<threads> <t1> diffproc SYS --
+<threads> <t1> diffproc PIPE --
+<threads> <t1> diffproc ALRM --
+<threads> <t1> diffproc TERM --
+<threads> <t1> diffproc URG --
+<threads> <t1> diffproc STOP --
+<threads> <t1> diffproc TSTP --
+<threads> <t1> diffproc CONT --
+<threads> <t1> diffproc CHLD --
+<threads> <t1> diffproc TTIN --
+<threads> <t1> diffproc TTOU --
+<threads> <t1> diffproc IO --
+<threads> <t1> diffproc XCPU --
+<threads> <t1> diffproc XFSZ --
+<threads> <t1> diffproc VTALRM --
+<threads> <t1> diffproc PROF --
+<threads> <t1> diffproc WINCH --
+<threads> <t1> diffproc INFO --
+<threads> <t1> diffproc USR1 --
+<threads> <t1> diffproc USR2 --
+<threads> <t1> diffproc 32 --
+<threads> <t1> diffproc 33 --
+<threads> <t1> diffproc 34 --
+<threads> <t1> diffproc 35 --
+<threads> <t1> diffproc 36 --
+<threads> <t1> diffproc 37 --
+<threads> <t1> diffproc 38 --
+<threads> <t1> diffproc 39 --
+<threads> <t1> diffproc 40 --
+<threads> <t1> diffproc 41 --
+<threads> <t1> diffproc 42 --
+<threads> <t1> diffproc 43 --
+<threads> <t1> diffproc 44 --
+<threads> <t1> diffproc 45 --
+<threads> <t1> diffproc 46 --
+<threads> <t1> diffproc 47 --
+<threads> <t1> diffproc 48 --
+<threads> <t1> diffproc 49 --
+<threads> <t1> diffproc 50 --
+<threads> <t1> diffproc 51 --
+<threads> <t1> diffproc 52 --
+<threads> <t1> diffproc 53 --
+<threads> <t1> diffproc 54 --
+<threads> <t1> diffproc 55 --
+<threads> <t1> diffproc 56 --
+<threads> <t1> diffproc 57 --
+<threads> <t1> diffproc 58 --
+<threads> <t1> diffproc 59 --
+<threads> <t1> diffproc 60 --
+<threads> <t1> diffproc 61 --
+<threads> <t1> diffproc 62 --
+<threads> <t1> diffproc 63 --
+<threads> <t1> diffproc 64 --
+<threads> <t1> diffproc 65 --
+<threads> <t1> diffproc 66 --
+<threads> <t1> diffproc 67 --
+<threads> <t1> diffproc 68 --
+<threads> <t1> diffproc 69 --
+<threads> <t1> diffproc 70 --
+<threads> <t1> diffproc 71 --
+<threads> <t1> diffproc 72 --
+<threads> <t1> diffproc 73 --
+<threads> <t1> diffproc 74 --
+<threads> <t1> diffproc 75 --
+<threads> <t1> diffproc 76 --
+<threads> <t1> diffproc 77 --
+<threads> <t1> diffproc 78 --
+<threads> <t1> diffproc 79 --
+<threads> <t1> diffproc 80 --
+<threads> <t1> diffproc 81 --
+<threads> <t1> diffproc 82 --
+<threads> <t1> diffproc 83 --
+<threads> <t1> diffproc 84 --
+<threads> <t1> diffproc 85 --
+<threads> <t1> diffproc 86 --
+<threads> <t1> diffproc 87 --
+<threads> <t1> diffproc 88 --
+<threads> <t1> diffproc 89 --
+<threads> <t1> diffproc 90 --
+<threads> <t1> diffproc 91 --
+<threads> <t1> diffproc 92 --
+<threads> <t1> diffproc 93 --
+<threads> <t1> diffproc 94 --
+<threads> <t1> diffproc 95 --
+<threads> <t1> diffproc 96 --
+<threads> <t1> diffproc 97 --
+<threads> <t1> diffproc 98 --
+<threads> <t1> diffproc 99 --
+<threads> <t1> diffproc 100 --
+<threads> <t1> diffproc 101 --
+<threads> <t1> diffproc 102 --
+<threads> <t1> diffproc 103 --
+<threads> <t1> diffproc 104 --
+<threads> <t1> diffproc 105 --
+<threads> <t1> diffproc 106 --
+<threads> <t1> diffproc 107 --
+<threads> <t1> diffproc 108 --
+<threads> <t1> diffproc 109 --
+<threads> <t1> diffproc 110 --
+<threads> <t1> diffproc 111 --
+<threads> <t1> diffproc 112 --
+<threads> <t1> diffproc 113 --
+<threads> <t1> diffproc 114 --
+<threads> <t1> diffproc 115 --
+<threads> <t1> diffproc 116 --
+<threads> <t1> diffproc 117 --
+<threads> <t1> diffproc 118 --
+<threads> <t1> diffproc 119 --
+<threads> <t1> diffproc 120 --
+<threads> <t1> diffproc 121 --
+<threads> <t1> diffproc 122 --
+<threads> <t1> diffproc 123 --
+<threads> <t1> diffproc 124 --
+<threads> <t1> diffproc 125 --
+<threads> <t1> diffproc 126 --
+<threads> <t1> diffproc 127 --
+<threads> <t1> diffproc 128 --
+<threads> <t2> diffproc HUP --
+<threads> <t2> diffproc INT --
+<threads> <t2> diffproc QUIT --
+<threads> <t2> diffproc ILL --
+<threads> <t2> diffproc TRAP --
+<threads> <t2> diffproc ABRT --
+<threads> <t2> diffproc EMT --
+<threads> <t2> diffproc FPE --
+<threads> <t2> diffproc KILL --
+<threads> <t2> diffproc BUS --
+<threads> <t2> diffproc SEGV --
+<threads> <t2> diffproc SYS --
+<threads> <t2> diffproc PIPE --
+<threads> <t2> diffproc ALRM --
+<threads> <t2> diffproc TERM --
+<threads> <t2> diffproc URG --
+<threads> <t2> diffproc STOP --
+<threads> <t2> diffproc TSTP --
+<threads> <t2> diffproc CONT --
+<threads> <t2> diffproc CHLD --
+<threads> <t2> diffproc TTIN --
+<threads> <t2> diffproc TTOU --
+<threads> <t2> diffproc IO --
+<threads> <t2> diffproc XCPU --
+<threads> <t2> diffproc XFSZ --
+<threads> <t2> diffproc VTALRM --
+<threads> <t2> diffproc PROF --
+<threads> <t2> diffproc WINCH --
+<threads> <t2> diffproc INFO --
+<threads> <t2> diffproc USR1 --
+<threads> <t2> diffproc USR2 -B
+<threads> <t2> diffproc 32 --
+<threads> <t2> diffproc 33 --
+<threads> <t2> diffproc 34 --
+<threads> <t2> diffproc 35 --
+<threads> <t2> diffproc 36 --
+<threads> <t2> diffproc 37 --
+<threads> <t2> diffproc 38 --
+<threads> <t2> diffproc 39 --
+<threads> <t2> diffproc 40 --
+<threads> <t2> diffproc 41 --
+<threads> <t2> diffproc 42 --
+<threads> <t2> diffproc 43 --
+<threads> <t2> diffproc 44 --
+<threads> <t2> diffproc 45 --
+<threads> <t2> diffproc 46 --
+<threads> <t2> diffproc 47 --
+<threads> <t2> diffproc 48 --
+<threads> <t2> diffproc 49 --
+<threads> <t2> diffproc 50 --
+<threads> <t2> diffproc 51 --
+<threads> <t2> diffproc 52 --
+<threads> <t2> diffproc 53 --
+<threads> <t2> diffproc 54 --
+<threads> <t2> diffproc 55 --
+<threads> <t2> diffproc 56 --
+<threads> <t2> diffproc 57 --
+<threads> <t2> diffproc 58 --
+<threads> <t2> diffproc 59 --
+<threads> <t2> diffproc 60 --
+<threads> <t2> diffproc 61 --
+<threads> <t2> diffproc 62 --
+<threads> <t2> diffproc 63 --
+<threads> <t2> diffproc 64 --
+<threads> <t2> diffproc 65 --
+<threads> <t2> diffproc 66 --
+<threads> <t2> diffproc 67 --
+<threads> <t2> diffproc 68 --
+<threads> <t2> diffproc 69 --
+<threads> <t2> diffproc 70 --
+<threads> <t2> diffproc 71 --
+<threads> <t2> diffproc 72 --
+<threads> <t2> diffproc 73 --
+<threads> <t2> diffproc 74 --
+<threads> <t2> diffproc 75 --
+<threads> <t2> diffproc 76 --
+<threads> <t2> diffproc 77 --
+<threads> <t2> diffproc 78 --
+<threads> <t2> diffproc 79 --
+<threads> <t2> diffproc 80 --
+<threads> <t2> diffproc 81 --
+<threads> <t2> diffproc 82 --
+<threads> <t2> diffproc 83 --
+<threads> <t2> diffproc 84 --
+<threads> <t2> diffproc 85 --
+<threads> <t2> diffproc 86 --
+<threads> <t2> diffproc 87 --
+<threads> <t2> diffproc 88 --
+<threads> <t2> diffproc 89 --
+<threads> <t2> diffproc 90 --
+<threads> <t2> diffproc 91 --
+<threads> <t2> diffproc 92 --
+<threads> <t2> diffproc 93 --
+<threads> <t2> diffproc 94 --
+<threads> <t2> diffproc 95 --
+<threads> <t2> diffproc 96 --
+<threads> <t2> diffproc 97 --
+<threads> <t2> diffproc 98 --
+<threads> <t2> diffproc 99 --
+<threads> <t2> diffproc 100 --
+<threads> <t2> diffproc 101 --
+<threads> <t2> diffproc 102 --
+<threads> <t2> diffproc 103 --
+<threads> <t2> diffproc 104 --
+<threads> <t2> diffproc 105 --
+<threads> <t2> diffproc 106 --
+<threads> <t2> diffproc 107 --
+<threads> <t2> diffproc 108 --
+<threads> <t2> diffproc 109 --
+<threads> <t2> diffproc 110 --
+<threads> <t2> diffproc 111 --
+<threads> <t2> diffproc 112 --
+<threads> <t2> diffproc 113 --
+<threads> <t2> diffproc 114 --
+<threads> <t2> diffproc 115 --
+<threads> <t2> diffproc 116 --
+<threads> <t2> diffproc 117 --
+<threads> <t2> diffproc 118 --
+<threads> <t2> diffproc 119 --
+<threads> <t2> diffproc 120 --
+<threads> <t2> diffproc 121 --
+<threads> <t2> diffproc 122 --
+<threads> <t2> diffproc 123 --
+<threads> <t2> diffproc 124 --
+<threads> <t2> diffproc 125 --
+<threads> <t2> diffproc 126 --
+<threads> <t2> diffproc 127 --
+<threads> <t2> diffproc 128 --
+<threads> <t3> diffproc HUP --
+<threads> <t3> diffproc INT --
+<threads> <t3> diffproc QUIT --
+<threads> <t3> diffproc ILL --
+<threads> <t3> diffproc TRAP --
+<threads> <t3> diffproc ABRT --
+<threads> <t3> diffproc EMT --
+<threads> <t3> diffproc FPE --
+<threads> <t3> diffproc KILL --
+<threads> <t3> diffproc BUS --
+<threads> <t3> diffproc SEGV --
+<threads> <t3> diffproc SYS --
+<threads> <t3> diffproc PIPE --
+<threads> <t3> diffproc ALRM --
+<threads> <t3> diffproc TERM --
+<threads> <t3> diffproc URG --
+<threads> <t3> diffproc STOP --
+<threads> <t3> diffproc TSTP --
+<threads> <t3> diffproc CONT --
+<threads> <t3> diffproc CHLD --
+<threads> <t3> diffproc TTIN --
+<threads> <t3> diffproc TTOU --
+<threads> <t3> diffproc IO --
+<threads> <t3> diffproc XCPU --
+<threads> <t3> diffproc XFSZ --
+<threads> <t3> diffproc VTALRM --
+<threads> <t3> diffproc PROF --
+<threads> <t3> diffproc WINCH --
+<threads> <t3> diffproc INFO --
+<threads> <t3> diffproc USR1 --
+<threads> <t3> diffproc USR2 -B
+<threads> <t3> diffproc 32 --
+<threads> <t3> diffproc 33 --
+<threads> <t3> diffproc 34 --
+<threads> <t3> diffproc 35 --
+<threads> <t3> diffproc 36 --
+<threads> <t3> diffproc 37 --
+<threads> <t3> diffproc 38 --
+<threads> <t3> diffproc 39 --
+<threads> <t3> diffproc 40 --
+<threads> <t3> diffproc 41 --
+<threads> <t3> diffproc 42 --
+<threads> <t3> diffproc 43 --
+<threads> <t3> diffproc 44 --
+<threads> <t3> diffproc 45 --
+<threads> <t3> diffproc 46 --
+<threads> <t3> diffproc 47 --
+<threads> <t3> diffproc 48 --
+<threads> <t3> diffproc 49 --
+<threads> <t3> diffproc 50 --
+<threads> <t3> diffproc 51 --
+<threads> <t3> diffproc 52 --
+<threads> <t3> diffproc 53 --
+<threads> <t3> diffproc 54 --
+<threads> <t3> diffproc 55 --
+<threads> <t3> diffproc 56 --
+<threads> <t3> diffproc 57 --
+<threads> <t3> diffproc 58 --
+<threads> <t3> diffproc 59 --
+<threads> <t3> diffproc 60 --
+<threads> <t3> diffproc 61 --
+<threads> <t3> diffproc 62 --
+<threads> <t3> diffproc 63 --
+<threads> <t3> diffproc 64 --
+<threads> <t3> diffproc 65 --
+<threads> <t3> diffproc 66 --
+<threads> <t3> diffproc 67 --
+<threads> <t3> diffproc 68 --
+<threads> <t3> diffproc 69 --
+<threads> <t3> diffproc 70 --
+<threads> <t3> diffproc 71 --
+<threads> <t3> diffproc 72 --
+<threads> <t3> diffproc 73 --
+<threads> <t3> diffproc 74 --
+<threads> <t3> diffproc 75 --
+<threads> <t3> diffproc 76 --
+<threads> <t3> diffproc 77 --
+<threads> <t3> diffproc 78 --
+<threads> <t3> diffproc 79 --
+<threads> <t3> diffproc 80 --
+<threads> <t3> diffproc 81 --
+<threads> <t3> diffproc 82 --
+<threads> <t3> diffproc 83 --
+<threads> <t3> diffproc 84 --
+<threads> <t3> diffproc 85 --
+<threads> <t3> diffproc 86 --
+<threads> <t3> diffproc 87 --
+<threads> <t3> diffproc 88 --
+<threads> <t3> diffproc 89 --
+<threads> <t3> diffproc 90 --
+<threads> <t3> diffproc 91 --
+<threads> <t3> diffproc 92 --
+<threads> <t3> diffproc 93 --
+<threads> <t3> diffproc 94 --
+<threads> <t3> diffproc 95 --
+<threads> <t3> diffproc 96 --
+<threads> <t3> diffproc 97 --
+<threads> <t3> diffproc 98 --
+<threads> <t3> diffproc 99 --
+<threads> <t3> diffproc 100 --
+<threads> <t3> diffproc 101 --
+<threads> <t3> diffproc 102 --
+<threads> <t3> diffproc 103 --
+<threads> <t3> diffproc 104 --
+<threads> <t3> diffproc 105 --
+<threads> <t3> diffproc 106 --
+<threads> <t3> diffproc 107 --
+<threads> <t3> diffproc 108 --
+<threads> <t3> diffproc 109 --
+<threads> <t3> diffproc 110 --
+<threads> <t3> diffproc 111 --
+<threads> <t3> diffproc 112 --
+<threads> <t3> diffproc 113 --
+<threads> <t3> diffproc 114 --
+<threads> <t3> diffproc 115 --
+<threads> <t3> diffproc 116 --
+<threads> <t3> diffproc 117 --
+<threads> <t3> diffproc 118 --
+<threads> <t3> diffproc 119 --
+<threads> <t3> diffproc 120 --
+<threads> <t3> diffproc 121 --
+<threads> <t3> diffproc 122 --
+<threads> <t3> diffproc 123 --
+<threads> <t3> diffproc 124 --
+<threads> <t3> diffproc 125 --
+<threads> <t3> diffproc 126 --
+<threads> <t3> diffproc 127 --
+<threads> <t3> diffproc 128 --
+<threads> <t4> diffproc HUP --
+<threads> <t4> diffproc INT --
+<threads> <t4> diffproc QUIT --
+<threads> <t4> diffproc ILL --
+<threads> <t4> diffproc TRAP --
+<threads> <t4> diffproc ABRT --
+<threads> <t4> diffproc EMT --
+<threads> <t4> diffproc FPE --
+<threads> <t4> diffproc KILL --
+<threads> <t4> diffproc BUS --
+<threads> <t4> diffproc SEGV --
+<threads> <t4> diffproc SYS --
+<threads> <t4> diffproc PIPE --
+<threads> <t4> diffproc ALRM --
+<threads> <t4> diffproc TERM --
+<threads> <t4> diffproc URG --
+<threads> <t4> diffproc STOP --
+<threads> <t4> diffproc TSTP --
+<threads> <t4> diffproc CONT --
+<threads> <t4> diffproc CHLD --
+<threads> <t4> diffproc TTIN --
+<threads> <t4> diffproc TTOU --
+<threads> <t4> diffproc IO --
+<threads> <t4> diffproc XCPU --
+<threads> <t4> diffproc XFSZ --
+<threads> <t4> diffproc VTALRM --
+<threads> <t4> diffproc PROF --
+<threads> <t4> diffproc WINCH --
+<threads> <t4> diffproc INFO --
+<threads> <t4> diffproc USR1 --
+<threads> <t4> diffproc USR2 --
+<threads> <t4> diffproc 32 --
+<threads> <t4> diffproc 33 --
+<threads> <t4> diffproc 34 --
+<threads> <t4> diffproc 35 --
+<threads> <t4> diffproc 36 --
+<threads> <t4> diffproc 37 --
+<threads> <t4> diffproc 38 --
+<threads> <t4> diffproc 39 --
+<threads> <t4> diffproc 40 --
+<threads> <t4> diffproc 41 --
+<threads> <t4> diffproc 42 --
+<threads> <t4> diffproc 43 --
+<threads> <t4> diffproc 44 --
+<threads> <t4> diffproc 45 --
+<threads> <t4> diffproc 46 --
+<threads> <t4> diffproc 47 --
+<threads> <t4> diffproc 48 --
+<threads> <t4> diffproc 49 --
+<threads> <t4> diffproc 50 --
+<threads> <t4> diffproc 51 --
+<threads> <t4> diffproc 52 --
+<threads> <t4> diffproc 53 --
+<threads> <t4> diffproc 54 --
+<threads> <t4> diffproc 55 --
+<threads> <t4> diffproc 56 --
+<threads> <t4> diffproc 57 --
+<threads> <t4> diffproc 58 --
+<threads> <t4> diffproc 59 --
+<threads> <t4> diffproc 60 --
+<threads> <t4> diffproc 61 --
+<threads> <t4> diffproc 62 --
+<threads> <t4> diffproc 63 --
+<threads> <t4> diffproc 64 --
+<threads> <t4> diffproc 65 --
+<threads> <t4> diffproc 66 --
+<threads> <t4> diffproc 67 --
+<threads> <t4> diffproc 68 --
+<threads> <t4> diffproc 69 --
+<threads> <t4> diffproc 70 --
+<threads> <t4> diffproc 71 --
+<threads> <t4> diffproc 72 --
+<threads> <t4> diffproc 73 --
+<threads> <t4> diffproc 74 --
+<threads> <t4> diffproc 75 --
+<threads> <t4> diffproc 76 --
+<threads> <t4> diffproc 77 --
+<threads> <t4> diffproc 78 --
+<threads> <t4> diffproc 79 --
+<threads> <t4> diffproc 80 --
+<threads> <t4> diffproc 81 --
+<threads> <t4> diffproc 82 --
+<threads> <t4> diffproc 83 --
+<threads> <t4> diffproc 84 --
+<threads> <t4> diffproc 85 --
+<threads> <t4> diffproc 86 --
+<threads> <t4> diffproc 87 --
+<threads> <t4> diffproc 88 --
+<threads> <t4> diffproc 89 --
+<threads> <t4> diffproc 90 --
+<threads> <t4> diffproc 91 --
+<threads> <t4> diffproc 92 --
+<threads> <t4> diffproc 93 --
+<threads> <t4> diffproc 94 --
+<threads> <t4> diffproc 95 --
+<threads> <t4> diffproc 96 --
+<threads> <t4> diffproc 97 --
+<threads> <t4> diffproc 98 --
+<threads> <t4> diffproc 99 --
+<threads> <t4> diffproc 100 --
+<threads> <t4> diffproc 101 --
+<threads> <t4> diffproc 102 --
+<threads> <t4> diffproc 103 --
+<threads> <t4> diffproc 104 --
+<threads> <t4> diffproc 105 --
+<threads> <t4> diffproc 106 --
+<threads> <t4> diffproc 107 --
+<threads> <t4> diffproc 108 --
+<threads> <t4> diffproc 109 --
+<threads> <t4> diffproc 110 --
+<threads> <t4> diffproc 111 --
+<threads> <t4> diffproc 112 --
+<threads> <t4> diffproc 113 --
+<threads> <t4> diffproc 114 --
+<threads> <t4> diffproc 115 --
+<threads> <t4> diffproc 116 --
+<threads> <t4> diffproc 117 --
+<threads> <t4> diffproc 118 --
+<threads> <t4> diffproc 119 --
+<threads> <t4> diffproc 120 --
+<threads> <t4> diffproc 121 --
+<threads> <t4> diffproc 122 --
+<threads> <t4> diffproc 123 --
+<threads> <t4> diffproc 124 --
+<threads> <t4> diffproc 125 --
+<threads> <t4> diffproc 126 --
+<threads> <t4> diffproc 127 --
+<threads> <t4> diffproc 128 --
+(exit 0)
+$ procstat -k <sleeper> <threads>
+PID TID COMM TDNAME KSTACK
+<sleeper> <t5> sleep - *
+<threads> <t1> diffproc - *
+<threads> <t2> diffproc worker-cond *
+<threads> <t3> diffproc worker-nap *
+<threads> <t4> diffproc worker-sigwait *
+(exit 0)
+$ procstat -kk <sleeper>
+PID TID COMM TDNAME KSTACK
+<sleeper> <t5> sleep - *
+(exit 0)
+$ procstat -l <sleeper>
+PID COMM RLIMIT SOFT HARD
+<sleeper> sleep cputime infinity infinity
+<sleeper> sleep filesize infinity infinity
+<sleeper> sleep datasize 1048576 KB 1048576 KB
+<sleeper> sleep stacksize 1048576 KB 1048576 KB
+<sleeper> sleep coredumpsize infinity infinity
+<sleeper> sleep memoryuse infinity infinity
+<sleeper> sleep memorylocked 131072 KB 131072 KB
+* sleep maxprocesses * *
+* sleep openfiles * *
+<sleeper> sleep sbsize infinity infinity
+<sleeper> sleep vmemoryuse infinity infinity
+<sleeper> sleep pseudo-terminals infinity infinity
+<sleeper> sleep swapuse infinity infinity
+<sleeper> sleep kqueues infinity infinity
+<sleeper> sleep umtxp infinity infinity
+<sleeper> sleep pipebuf infinity infinity
+(exit 0)
+$ procstat -r <sleeper>
+PID COMM RESOURCE VALUE
+<sleeper> sleep user time *
+<sleeper> sleep system time *
+<sleeper> sleep maximum RSS * KB
+<sleeper> sleep integral shared memory * KB
+<sleeper> sleep integral unshared data * KB
+<sleeper> sleep integral unshared stack * KB
+<sleeper> sleep page reclaims *
+<sleeper> sleep page faults *
+<sleeper> sleep swaps *
+<sleeper> sleep block reads *
+<sleeper> sleep block writes *
+<sleeper> sleep messages sent *
+<sleeper> sleep messages received *
+<sleeper> sleep signals received *
+<sleeper> sleep voluntary context switches *
+<sleeper> sleep involuntary context switches *
+(exit 0)
+$ procstat -s <files> <threads> <sleeper>
+PID COMM EUID RUID SVUID EGID RGID SVGID UMASK FLAGS GROUPS
+<files> diffproc 0 0 0 0 0 0 022 - 0,0
+<threads> diffproc 0 0 0 0 0 0 022 - 0,0
+<sleeper> sleep 0 0 0 0 0 0 022 C 0,0
+(exit 0)
+$ procstat -S <threads>
+PID TID COMM TDNAME CPU CSID CPU MASK
+<threads> <t1> diffproc - -1 * 0-3
+<threads> <t2> diffproc worker-cond -1 * 0-3
+<threads> <t3> diffproc worker-nap -1 * 0-3
+<threads> <t4> diffproc worker-sigwait -1 * 0-3
+(exit 0)
+$ procstat -t <threads>
+PID TID COMM TDNAME CPU PRI STATE WCHAN
+<threads> <t1> diffproc - -1 * sleep sigsusp
+<threads> <t2> diffproc worker-cond -1 * sleep uwait
+<threads> <t3> diffproc worker-nap -1 * sleep nanslp
+<threads> <t4> diffproc worker-sigwait -1 * sleep sigwait
+(exit 0)
+$ procstat -x <sleeper>
+PID COMM AUXV VALUE
+<sleeper> sleep AT_PHDR <addr>
+<sleeper> sleep AT_PHENT 56
+<sleeper> sleep AT_PHNUM 11
+<sleeper> sleep AT_PAGESZ 4096
+<sleeper> sleep AT_FLAGS 0
+<sleeper> sleep AT_ENTRY <addr>
+<sleeper> sleep AT_BASE <addr>
+<sleeper> sleep AT_EHDRFLAGS 0
+<sleeper> sleep AT_EXECPATH <addr>
+<sleeper> sleep AT_OSRELDATE 1501000
+<sleeper> sleep AT_CANARY <addr>
+<sleeper> sleep AT_CANARYLEN 64
+<sleeper> sleep AT_NCPUS 4
+<sleeper> sleep AT_PAGESIZES <addr>
+<sleeper> sleep AT_PAGESIZESLEN 32
+<sleeper> sleep AT_TIMEKEEP <addr>
+<sleeper> sleep AT_STACKPROT NONEXECUTABLE
+<sleeper> sleep AT_HWCAP <addr>
+<sleeper> sleep AT_HWCAP2 <addr>
+<sleeper> sleep 38 0
+<sleeper> sleep 39 0
+<sleeper> sleep AT_BSDFLAGS 0x1
+<sleeper> sleep AT_ARGC 2
+<sleeper> sleep AT_ARGV <addr>
+<sleeper> sleep AT_ENVC 8
+<sleeper> sleep AT_ENVV <addr>
+<sleeper> sleep AT_PS_STRINGS <addr>
+<sleeper> sleep AT_USRSTACKBASE <addr>
+<sleeper> sleep AT_USRSTACKLIM <addr>
+(exit 0)
+$ procstat kqueue <kq>
+PID KQFD FILTER IDENT FLAGS FFLAGS DATA UDATA STATUS
+<kq> 3 READ 4 - - 0 0x0 -
+<kq> 3 WRITE 5 - - 0 0x0 D
+<kq> 3 VNODE 6 C - 0 0x0 -
+<kq> 3 TIMER 7 C - 0 0x0 -
+<kq> 3 USER 9 C - 0 0x0 d
+<kq> 3 SIGNAL 30 C - 0 0x0 -
+(exit 0)
+$ cat advlock.out
+RW TYPE PID SYSID FSID RDEV INO START LEN PATH
+RO FLOCK -1 0 * * * * 0
+RW FCNTL <files> 0 * * * * 5
+(exit 0)
+$ procstat pwdx <files>
+<files>: /var/tmp/diff.procstat
+(exit 0)
+$ procstat pargs <sleeper>
+<sleeper>: sleep
+argv[0]: sleep
+argv[1]: 77777
+(exit 0)
+$ procstat penv <sleeper>
+<sleeper>: sleep
+envp[0]: LOGNAME=root
+envp[1]: SCRIPT=/dev/null
+envp[2]: PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/tests/diff/bin
+envp[3]: PWD=/var/tmp/diff.procstat
+envp[4]: TERM=xterm
+envp[5]: HOME=/root
+envp[6]: USER=root
+envp[7]: BLOCKSIZE=K
+(exit 0)
+$ procstat sigfastblock <threads>
+PID TID COMM SIGFBLK
+<threads> <t1> diffproc <addr>
+<threads> <t2> diffproc <addr>
+<threads> <t3> diffproc <addr>
+<threads> <t4> diffproc <addr>
+(exit 0)
+$ procstat rlimitusage <sleeper>
+PID RESOURCE ID USAGE
+<sleeper> cpu * *
+<sleeper> fsize * *
+<sleeper> data * *
+<sleeper> stack * *
+<sleeper> core * *
+<sleeper> rss * *
+<sleeper> memlock * *
+<sleeper> nproc * *
+<sleeper> nofile * *
+<sleeper> sbsize * *
+<sleeper> vmem * *
+<sleeper> npts * *
+<sleeper> swap * *
+<sleeper> kqueues * *
+<sleeper> umtx * *
+<sleeper> pipebuf * *
+(exit 0)
+$ procstat binary <sleeper>
+PID COMM OSREL PATH
+<sleeper> sleep 1501000 /bin/sleep
+(exit 0)
+$ cat ab.out
+PID COMM OSREL PATH
+<files> diffproc 1501000 /usr/tests/diff/bin/diffproc
+<p2> diffproc 1501000 /usr/tests/diff/bin/diffproc
+<threads> diffproc 1501000 /usr/tests/diff/bin/diffproc
+<kq> diffproc 1501000 /usr/tests/diff/bin/diffproc
+<sleeper> sleep 1501000 /bin/sleep
+(exit 0)

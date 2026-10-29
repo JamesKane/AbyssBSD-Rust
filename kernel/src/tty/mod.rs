@@ -38,6 +38,7 @@
 //! Behavior reference: sys/kern/tty.c, sys/kern/tty_tty.c,
 //! sys/kern/kern_proc.c (`killjobc`).
 
+mod info;
 pub(crate) mod pts;
 pub(crate) mod serial;
 
@@ -505,6 +506,14 @@ pub(crate) fn of_session(sid: i32) -> Option<(u64, i32)> {
     Some((rdev, pgrp))
 }
 
+/// The node session `sid` took its controlling terminal through, under
+/// `/dev` (`s_ttyvp`'s name: `pts/0`, `ttyu0`, `console`).
+pub(crate) fn controlling_node(sid: i32) -> Option<String> {
+    let t = controlling(sid)?;
+    let unit = t.ctty.lock().unit;
+    Some(unit.map_or_else(|| t.name.clone(), |u| t.node_name(u)))
+}
+
 /// A session's leader exited (`killjobc`): its terminal's foreground group
 /// gets `SIGHUP`, the node the leader took it through is revoked, and the
 /// terminal is free for another session.
@@ -757,6 +766,7 @@ impl Tty {
             }
             crate::signal::post_group(p.pgid(), sig);
             let revokes = self.revokes.load(Ordering::Acquire);
+            let _w = sched::wait_message("ttybg");
             crate::signal::sleep_after_stop_signal(s, &self.bg_wait, || {
                 self.fg_gen.load(Ordering::Acquire) != generation
                     || self.revokes.load(Ordering::Acquire) != revokes
@@ -786,6 +796,19 @@ impl Tty {
         ns: Option<u64>,
     ) -> Result<Woke, Errno> {
         let revokes = self.revokes.load(Ordering::Acquire);
+        // `t_inwait`, `t_outwait`, and the rest are named.
+        let name = if core::ptr::eq(q, &self.input_wait) {
+            "ttyin"
+        } else if core::ptr::eq(q, &self.output_wait) {
+            "ttyout"
+        } else if core::ptr::eq(q, &self.serial_wait) {
+            "ttyosr"
+        } else if core::ptr::eq(q, &self.dcd_wait) {
+            "ttydcd"
+        } else {
+            "ttybg"
+        };
+        let _w = sched::wait_message(name);
         let woke = crate::signal::sleep(
             s,
             q,
@@ -1370,10 +1393,28 @@ impl Tty {
 
     /// Signals the foreground process group (`tty_signal_pgrp`).
     fn signal_foreground(&self, sig: u32) {
+        if sig == abi::signal::SIGINFO {
+            self.info();
+        }
         let fg = self.ctty.lock().pgrp;
         if fg != 0 {
             crate::signal::post_group(fg, sig);
         }
+    }
+
+    /// Prints the status line (`tty_info`), unless `NOKERNINFO` is set.
+    fn info(&self) {
+        let s = crate::kinfo::sleepable();
+        let (wanted, column0) = self.st.lock(&s).d.status_wanted();
+        if !wanted {
+            return;
+        }
+        let c = *self.ctty.lock();
+        let sid = (c.sid != 0).then_some(c.sid);
+        let line = info::status_line(sid, c.pgrp, column0);
+        let mut st = self.st.lock(&s);
+        st.d.status(&line);
+        self.outwakeup(&mut st);
     }
 
     /// The proctree requests, on either side.
@@ -1525,8 +1566,8 @@ impl Tty {
                 drop(st);
                 self.wakeup(false, true);
             }
-            // `tty_info`'s line comes with the `^T` line (P6.8).
-            TIOCSTAT => {}
+            // The status line alone (`tty_info`), no signal.
+            TIOCSTAT => self.info(),
             TIOCSTI => {
                 self.sti_check(fflag)?;
                 let c = arg.first().copied().unwrap_or(0);

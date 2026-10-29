@@ -1,0 +1,25 @@
+$ ps -H -o pid,lwp,nlwp,tdname,stat,wchan,comm -p <threads>
+PID LWP NLWP TDNAME STAT WCHAN COMMAND
+<threads> <t1> 4 diffproc S+ sigsusp diffproc/diffproc
+<threads> <t2> 4 worker-cond S+ uwait diffproc/worker-cond
+<threads> <t3> 4 worker-nap S+ nanslp diffproc/worker-nap
+<threads> <t4> 4 worker-sigwait S+ sigwait diffproc/worker-sigwait
+(exit 0)
+$ ps -H -o pid,tid,tdnam,state,mwchan,command -p <threads>
+PID LWP TDNAME STAT MWCHAN COMMAND
+<threads> <t1> diffproc S+ sigsusp diffproc threads threads.ready
+<threads> <t2> worker-cond S+ uwait diffproc threads threads.ready
+<threads> <t3> worker-nap S+ nanslp diffproc threads threads.ready
+<threads> <t4> worker-sigwait S+ sigwait diffproc threads threads.ready
+(exit 0)
+$ ps -o pid,nlwp,stat,wchan,comm -p <threads>
+PID NLWP STAT WCHAN COMMAND
+<threads> 4 S+ sigsusp diffproc
+(exit 0)
+$ ps -Hl -p <threads>
+UID PID PPID C PRI NI VSZ RSS MWCHAN STAT TT TIME COMMAND
+0 <threads> <p1> * * 0 * * sigsusp S+ <n> * diffproc threads threads.ready
+0 <threads> <p1> * * 0 * * uwait S+ <n> * diffproc threads threads.ready
+0 <threads> <p1> * * 0 * * nanslp S+ <n> * diffproc threads threads.ready
+0 <threads> <p1> * * 0 * * sigwait S+ <n> * diffproc threads threads.ready
+(exit 0)

@@ -274,8 +274,10 @@ pub(crate) unsafe fn init_boot_cpu() {
                 offset_low: u16::from_le_bytes([b0, b1]),
                 selector: KERNEL_CS,
                 ist,
-                // Present, DPL 0, 64-bit interrupt gate (interrupts off).
-                attributes: 0x8e,
+                // Present, 64-bit interrupt gate (interrupts off), DPL 0;
+                // `int3` and `into` may come from user mode (DPL 3,
+                // FreeBSD's `SEL_UPL` for `IDT_BP` and `IDT_OF`).
+                attributes: if matches!(v, 3 | 4) { 0xee } else { 0x8e },
                 offset_mid: u16::from_le_bytes([b2, b3]),
                 offset_high: u32::from_le_bytes([b4, b5, b6, b7]),
                 reserved: 0,

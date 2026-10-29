@@ -50,6 +50,13 @@ pub(crate) fn bytes_of<T: Plain>(v: &T) -> &[u8] {
     unsafe { core::slice::from_raw_parts(core::ptr::from_ref(v).cast::<u8>(), size_of::<T>()) }
 }
 
+/// The bytes of a [`Plain`] value, to fill in place.
+pub(crate) fn bytes_of_mut<T: Plain>(v: &mut T) -> &mut [u8] {
+    // SAFETY: as for `bytes_of`; any bytes written are a valid `T` (it is
+    // `Plain`), and the slice borrows `v` mutably for its lifetime.
+    unsafe { core::slice::from_raw_parts_mut(core::ptr::from_mut(v).cast::<u8>(), size_of::<T>()) }
+}
+
 /// Whether `[addr, addr + len)` lies in the user half.
 fn in_user(addr: u64, len: usize) -> bool {
     u64::try_from(len)

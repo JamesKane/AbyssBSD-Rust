@@ -174,6 +174,17 @@ pub(super) fn umtx_op(
     let t = UserThread::current().ok_or(Errno::EINVAL)?;
     let cx = Ctx { s, t: &t };
     let u = &UMTX;
+    // What a sleep in each operation is called (kern_umtx.c's
+    // `umtxq_sleep` messages; a mutex's is that of the normal protocol).
+    let _w = sched::wait_message(match op {
+        UMTX_OP_LOCK => "umtx",
+        UMTX_OP_MUTEX_LOCK | UMTX_OP_MUTEX_WAIT => "umtxn",
+        UMTX_OP_CV_WAIT => "ucond",
+        UMTX_OP_RW_RDLOCK => "urdlck",
+        UMTX_OP_RW_WRLOCK => "uwrlck",
+        UMTX_OP_SEM_WAIT | UMTX_OP_SEM2_WAIT => "usem",
+        _ => "uwait",
+    });
     match op {
         UMTX_OP_LOCK => {
             let to = if uaddr2 == 0 {

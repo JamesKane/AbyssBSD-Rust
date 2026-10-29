@@ -19,6 +19,16 @@ pub(crate) fn check_capmode() -> Result<(), Errno> {
     Ok(())
 }
 
+/// What capability mode refuses (FreeBSD's `CAP_TRACING` and
+/// `IN_CAPABILITY_MODE` pair): violation `v` is recorded if the caller
+/// traces capability failures, and is `ECAPMODE` in capability mode.
+pub(crate) fn refuse(v: crate::ktrace::CapFail<'_>) -> Result<(), Errno> {
+    if crate::ktrace::cap_tracing() {
+        crate::ktrace::capfail(v);
+    }
+    check_capmode()
+}
+
 /// Whether the calling process is in capability mode.
 pub(crate) fn in_capability_mode() -> bool {
     Process::with_current(Process::in_capability_mode).unwrap_or(false)
@@ -198,7 +208,11 @@ pub(crate) fn cap_rights_limit(s: &Sleepable, fd: u64, rightsp: u64) -> Result<u
     let rights = UserPtr::<CapRights>::new(rightsp)
         .read()
         .map_err(|_| Errno::EFAULT)?;
-    if rights.version() != CAP_RIGHTS_VERSION || !rights.is_valid() {
+    if rights.version() != CAP_RIGHTS_VERSION {
+        return Err(Errno::EINVAL);
+    }
+    crate::ktrace::structure_of(s, "caprights", &rights);
+    if !rights.is_valid() {
         return Err(Errno::EINVAL);
     }
     let fd = i32::try_from(fd as i64).map_err(|_| Errno::EBADF)?;
@@ -221,6 +235,7 @@ pub(crate) fn cap_rights_get(
     UserPtr::<CapRights>::new(rightsp)
         .write(&rights)
         .map_err(|_| Errno::EFAULT)?;
+    crate::ktrace::structure_of(s, "caprights", &rights);
     Ok(0)
 }
 

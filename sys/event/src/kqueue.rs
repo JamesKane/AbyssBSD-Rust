@@ -724,6 +724,33 @@ impl Kqueue {
         }
     }
 
+    /// Each registered knote's event and status, descriptors' first in
+    /// descriptor order, then the others' (`kern_proc_kqueue_report`'s
+    /// `kn_kevent` and `kn_status`, as `KNOTE_STATUS_*` bits).
+    pub fn report(&self) -> Vec<(Kevent, u32)> {
+        let st = self.st.lock();
+        let all = st.fds.iter().flatten().chain(st.other.values().flatten());
+        all.map(|kn| {
+            let s = kn.status.load(Ordering::Relaxed);
+            let mut bits = 0;
+            for (have, report) in [
+                (status::ACTIVE, 0x01),
+                (status::QUEUED, 0x02),
+                (status::DISABLED, 0x04),
+                (status::DETACHED, 0x08),
+            ] {
+                if s & have != 0 {
+                    bits |= report;
+                }
+            }
+            let mut kev = kn.note.lock().kev;
+            kev.ident = kn.ident;
+            kev.filter = kn.filter;
+            (kev, bits)
+        })
+        .collect()
+    }
+
     /// Registered knotes, for diagnostics and tests.
     pub fn knotes(&self) -> usize {
         let st = self.st.lock();

@@ -1,0 +1,8 @@
+^T:
+load: <l> cmd: sleep <pid> [nanslp] <t> <t> <t> <p>% <k>k
+sleep: about <n> second(s) left out of the original 77779
+
+TIOCSTAT:
+load: <l> cmd: sleep <pid> [nanslp] <t> <t> <t> <p>% <k>k
+
+(exit 0)

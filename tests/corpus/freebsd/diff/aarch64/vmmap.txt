@@ -1,0 +1,19 @@
+$ procstat -v <mapper>
+PID START END PRT RES PRES REF SHD FLAG TP PATH
+<mapper> * * r-- * * * * CN--- vn /usr/tests/diff/bin/diffproc
+<mapper> * * r-x * * * * CN--- vn /usr/tests/diff/bin/diffproc
+<mapper> * * rw- * * * * ----- sw
+<mapper> * * rw- * * * * C---- vn /usr/tests/diff/bin/diffproc
+<mapper> * * rw- * * * * ----- sw
+<mapper> * * --- * * * * ----- gd
+<mapper> * * rw- * * * * ---D- sw
+<mapper> * * r-x * * * * ----- ph
+<mapper> * * --- * * * * ----- --
+<mapper> * * rw- * * * * ----- sw
+<mapper> * * r-- * * * * ----- vn
+<mapper> * * rw- * * * * C---- vn
+<mapper> * * --- * * * * CN--- gd
+<mapper> * * rw- * * * * ----- sw
+<mapper> * * r-- * * * * ----- sw
+<mapper> * * --- * * * * ----- gd
+(exit 0)
