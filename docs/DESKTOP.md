@@ -109,8 +109,14 @@ carry into M-G:
   libdrm reads, not only stock libdrm.
 - **Syncobj timelines** are required, not optional: `undertow` implements explicit sync.
 - **Renderer.** wlroots renders with pixman, GLES2 (EGL), or Vulkan. Headless and `gop-kms` use
-  pixman. For virtio-gpu, Venus gives Vulkan only, so either `undertow` runs wlroots' Vulkan
-  renderer or virtio-gpu also needs virgl for GLES2 (§9 question 3).
+  pixman. On virtio-gpu, `undertow` uses **wlroots' Vulkan renderer on Venus** (decided
+  2026-10-29), so virgl is not needed. `undertow` creates its renderer with
+  `wlr_renderer_autocreate` and lets `WLR_RENDERER` override it (`de/undertow/Backend.swift`), so
+  this is a session setting (`WLR_RENDERER=vulkan`), not a compositor change. The Vulkan renderer
+  needs Venus to import and export dma-bufs with DRM format modifiers
+  (`VK_EXT_image_drm_format_modifier`, `VK_EXT_external_memory_dma_buf`), which M-G.3's exit
+  includes. GL clients such as Firefox's WebRender use Mesa's Zink over Venus, or render in
+  software.
 - **Master and seat.** libseat drives `DRM_IOCTL_SET_MASTER`/`DROP_MASTER` and passes device
   descriptors over `SCM_RIGHTS`; seatd's socket is group `video`.
 
@@ -192,6 +198,8 @@ Changes to the desktop are made in the monorepo (ADR-0018 rule 4). This plan nee
    `--full` scenarios as steps an outer driver can run (§5.3).
 5. **arm64 packages**: the port's `ONLY_FOR_ARCHS` widened, and the Q8B's hand-built Swift made
    a package.
+6. **The Vulkan renderer on virtio-gpu**: the session sets `WLR_RENDERER=vulkan` when the GPU is
+   virtio-gpu (§3.3), and `undertow`'s lanes pass with the Vulkan renderer as they do with GLES2.
 
 ## 9. Open questions
 
@@ -199,7 +207,7 @@ Changes to the desktop are made in the monorepo (ADR-0018 rule 4). This plan nee
    desktop and its fork already use, comes after the desktop is stable here.
 2. ~~Is the desktop's 12700KF the build server?~~ Yes (decided 2026-10-29). It is tested from USB,
    and from a spare NVMe once that is free (§7).
-3. **virtio-gpu renderer.** wlroots' Vulkan renderer on Venus, or virgl for GLES2 (§3.3).
+3. ~~virtio-gpu renderer~~: decided 2026-10-29. wlroots' Vulkan renderer on Venus (§3.3).
 4. **Audio.** No audio design exists in this repository. The desktop needs OSS `sound(4)` first and
    HDA soon after. It needs its own document, like USB.md.
 5. **What AbyssBSD releases.** The desktop's Phase 17 builds a release from its fork's world. An
@@ -214,7 +222,7 @@ Changes to the desktop are made in the monorepo (ADR-0018 rule 4). This plan nee
 | **M-D.0** | The desktop's 15.1 packages (§8 ask 1); `xtask` image with the packages and test tree (§5.2); FreeBSD 15.1's results for every lane recorded | P6 | The FreeBSD 15.1 baseline is recorded in `tests/desktop/` |
 | **M-D.1** | Headless: nullfs, `snd_dummy` and the `sound(4)` core, whatever the lanes find | P6 exit | Every `--live` lane passes as on FreeBSD 15.1, or is listed; `desk` (headless) within 2% in bhyve |
 | **M-D.2** | First light: `undertow` on `gop-kms`, seatd, MAC with `mac_priority`, libinput on evdev, the login window | M-G.1, P7 | The desktop is used with a real keyboard and mouse in QEMU and on the X870E and Orange Pi 6 Plus framebuffers (the latter on arm64 packages, §8 ask 5) |
-| **M-D.3** | Accelerated in QEMU: dma-buf, syncobj, GPU rendering; Firefox; network lanes | M-G.2, M-G.3, P8 | Firefox renders a page with GPU acceleration under `undertow` in QEMU; the network lanes pass |
+| **M-D.3** | Accelerated in QEMU: dma-buf, syncobj, `undertow` on wlroots' Vulkan renderer over Venus (§8 ask 6); Firefox; network lanes | M-G.2, M-G.3, P8 | `undertow` composites on Venus in QEMU with explicit sync; Firefox renders a page under it (WebRender on Zink, or software, recorded); the network lanes pass |
 | **M-D.4** | Metal: native RDNA2, HDA audio, S3 and lid | M-G.6, audio, P9 | `desk` (metal) within 2% of FreeBSD with `drm-kmod` on the same machine (the X870E, and the Z690-A from USB); the desktop's C1 holds |
 | **M-D.5** | Installed: the desktop's medium boots this kernel, `abyss-install` installs it (UFS before M-Z, ZFS with boot environments after) | INSTALLER.md I.1–I.3; M-Z for ZFS | The `--full` scenarios pass as QEMU boots (§5.3), and an install to the X870E's second NVMe, and to the Z690-A's spare NVMe once fitted, boots to the desktop |
 | **M-D.6** | arm64: the Orange Pi 6 Plus with accelerated graphics | M-G.4, M-G.5 | The headless lanes on arm64 in QEMU, and the desktop on the board with `panthor` |

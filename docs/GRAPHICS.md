@@ -433,7 +433,7 @@ those results are recorded and do not gate.
 | **M-G.0** | This document finalized, the ADR for open decisions 6 and 7, and FreeBSD `drm-kmod` behavior recorded (§13 question 2) |
 | **M-G.1** | `sys/drm` core (files, GEM, KMS atomic core, events), `gop-kms`, `vt` handover. Exit: a compositor from ports runs on `gop-kms` in QEMU and on both reference machines, with software rendering, and the desktop's `undertow` does too (DESKTOP.md M-D.2) |
 | **M-G.2** | `sys/fence`, syncobj, sync files, dma-buf, `BufferObject` and its pager, `virtio-gpu` 2D. Exit: igt's core tests pass in QEMU |
-| **M-G.3** | `virtio-gpu` 3D (Venus). Exit: `vkcube` and Vulkan CTS subsets in QEMU |
+| **M-G.3** | `virtio-gpu` 3D (Venus), with dma-buf import and export through DRM format modifiers. Exit: `vkcube` and Vulkan CTS subsets in QEMU, and a wlroots compositor on its Vulkan renderer (the desktop's `undertow`, DESKTOP.md §3.3) |
 | **M-G.4** | Sky1 display aggregate. Exit: native modesetting on the Orange Pi 6 Plus, hotplug, backlight |
 | **M-G.5** | `panthor`. Exit: panvk runs `vkcube` and the CTS subset on the Orange Pi 6 Plus |
 | **M-G.6** | amd64 native GPU (RDNA2). Exit: parity with FreeBSD `drm-kmod` on the X870E and the Z690-A, with the desktop running accelerated (DESKTOP.md M-D.4) |
