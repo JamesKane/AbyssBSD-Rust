@@ -66,12 +66,13 @@ pub(crate) fn build_with(
     let read = |p: &PathBuf| fs::read(p).map_err(|e| format!("{}: {e}", p.display()));
     let (loader, kernel) = (read(&images.loader)?, read(&images.kernel)?);
     let md = crate::base::md_image(arch, extra)?;
+    let cmdline = with_shell(cmdline);
     let disk = make_disk(
         arch,
         &Contents {
             loader: &loader,
             kernel: Some(&kernel),
-            cmdline,
+            cmdline: &cmdline,
             md: md.as_deref(),
             ufs: None,
         },
@@ -86,6 +87,17 @@ pub(crate) fn build_with(
     let path = dir.join(name);
     fs::write(&path, &disk)?;
     Ok(path)
+}
+
+/// `cmdline` with `abyss.shell=1` unless it says otherwise: the memory
+/// disk's and the test root's cases are typed at the boot shell, not
+/// init's logins (the installed root's are).
+fn with_shell(cmdline: &str) -> String {
+    if cmdline.contains("abyss.shell") {
+        cmdline.to_owned()
+    } else {
+        format!("abyss.shell=1 {cmdline}").trim_end().to_owned()
+    }
 }
 
 /// The UFS2 root's `/etc/fstab`: its partitions by GPT label, as
@@ -471,12 +483,16 @@ fn ufs_root(arch: Arch, opts: build::Options, cmdline: &str, root: Root) -> Resu
     )?;
     let ufs = read(&img)?;
     fs::remove_file(&img)?;
+    let cmdline = match root {
+        Root::Tests => with_shell(cmdline),
+        Root::Installed => cmdline.to_owned(),
+    };
     let disk = make_disk(
         arch,
         &Contents {
             loader: &loader,
             kernel: None,
-            cmdline,
+            cmdline: &cmdline,
             md: None,
             ufs: Some(&ufs),
         },

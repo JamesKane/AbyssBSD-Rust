@@ -26,6 +26,7 @@ extern crate alloc;
 
 pub mod acl;
 pub mod cache;
+pub mod devfsrule;
 pub mod devices;
 pub mod lockf;
 pub mod mount;

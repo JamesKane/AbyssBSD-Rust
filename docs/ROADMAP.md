@@ -1820,6 +1820,37 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
   with no dump device; the kernel stops mounting the ESP itself.
 - `devd`, `syslogd`, `cron`, `getty`, `login` with PAM on stock configuration; `reboot`/`shutdown`
   with every file system unmounted clean.
+  - init done 2026-10-29 (`kernel/src/init.rs`, `kenv.rs`, `shutdown.rs`): `kern.init_path`
+    (the kernel environment's `init_path` first), each path tried as `start_init` does, `-s` for
+    `boot_single`; "Going nowhere without my init!" when it exits. `kenv(2)` (get, set, unset,
+    dump) over the boot command line's `name=value` words. `reboot(2)` as `kern_reboot` (sync and
+    unmount unless `RB_NOSYNC`, `Uptime:`, then halt, ACPI power-off, or reset; `RB_REROOT` is
+    `EOPNOTSUPP`), and `shutdown_nice` (the power button and console keys signal init). Without
+    an init, the kernel's `/rescue/sh` stays the fallback, and the boot tier's shell cases ask for
+    it with `abyss.shell=1`; with init, `rc` mounts `/tmp` and the ESP from `fstab`.
+  - What `rc` needs: `/dev/devctl` (FreeBSD's event lines from the driver model, `SIGIO` and
+    `FIOASYNC`), `/dev/devctl2`, `/dev/klog` with the message buffer's priorities; GEOM's
+    `kern.geom.confxml`/`conftxt`/`confdot` and `kern.disks` (`lib/geom`, for `gpart` and
+    `fsck`'s lookups); devfs rules (`DEVFSIO_*`, per mount, `nmount` of devfs); the module
+    syscalls answering as a kernel with every module built in (`kldstat` shows FreeBSD's names);
+    `kern.console`, `kern.random.harvest.*`, `kern.module_path`, `user.localbase`,
+    `kern.boottrace.*`, `kern.proc.args` writes (`setproctitle`), and the other nodes `rc` and
+    the daemons read.
+  - Loopback `INET`/`INET6` from P8 (`sys/inet`, MULTIUSER.md §8.4), since `syslogd -s` exits
+    without them: UDP and TCP to local addresses, `lo0` configured at boot as `rc.d/netif`
+    leaves it, netlink's `NETLINK_ROUTE` and `net.routetable` for `ifconfig`, `route`, and
+    `getifaddrs`, the `pcblist` sysctls for `netstat`, and the jail parameters `jls` asks for
+    once `kern.features.inet` is there (`ip4`, `ip6`, their `addr` and `saddrsel`).
+    `/rescue/ifconfig lo0` prints what FreeBSD's does.
+  - Bugs found on the way: `rc.shutdown` hung writing to the console behind the login shell's
+    read on the same terminal (device I/O now skips the offset lock, as FreeBSD's `FOF_NOLOCK`);
+    `TIOCSCTTY` refused a terminal whose session's node had been revoked, so `rc.shutdown`'s
+    output went to `init.log`; two spin locks taken together could unmask interrupts while one
+    was still held (`sync::IrqOff`, for UNIX and internet sockets); getty flushes input typed
+    before its prompt (the harness retypes the `ttyv0` login).
+  - Results: `x86_64-multiuser`, `aarch64-multiuser`, and `x86_64-bhyve-multiuser` pass the
+    whole script (serial and `ttyv0` logins, syslogd, cron, devd, `logger`, a pty, `procstat`,
+    a cron job, `shutdown -p now`, a clean root) with empty first-use logs.
 - Exit: on both arches and bhyve, the `<arch>-multiuser` boot cases pass: `login:` on the serial
   console and on `ttyv0`, login as root, the command script, `syslogd`, `cron`, and `devd`
   running, `shutdown -p now`, then `fsck_ffs -f -n` clean. The boot's first-use log holds nothing outside `absent.txt`. FreeBSD userland now runs end to end in QEMU (ADR-0010).

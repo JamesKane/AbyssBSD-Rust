@@ -21,7 +21,8 @@
 //! and [`verdict`] compares: a scenario whose output differs fails the
 //! case with the differing lines, unless `tests/diff/known-differences.txt`
 //! lists it, with why. Adding a scenario is adding its script and
-//! recording FreeBSD's output.
+//! recording FreeBSD's output. `ABYSS_DIFF` (names, blank- or
+//! comma-separated) runs and checks only those scenarios.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -41,15 +42,39 @@ const CORPUS: &str = "tests/corpus/freebsd/diff";
 /// Scenarios whose outputs may differ yet, with why.
 const KNOWN: &str = "tests/diff/known-differences.txt";
 
-/// The shell cases' step: every scenario, from the boot shell.
-pub(crate) const DIFF: &[Step] = &[step(
-    "/bin/sh /usr/tests/diff/run.sh\n",
-    "\ndiff: done\r\n",
-    "the differential scenarios",
-)];
+/// The shell cases' step: every scenario (or `ABYSS_DIFF`'s), from the
+/// boot shell.
+pub(crate) fn steps() -> Vec<Step> {
+    let send = match only() {
+        Some(names) => format!("/bin/sh /usr/tests/diff/run.sh {}\n", names.join(" ")),
+        None => "/bin/sh /usr/tests/diff/run.sh\n".into(),
+    };
+    // A step's text lives as long as the run.
+    let send: &'static str = Box::leak(send.into_boxed_str());
+    vec![step(send, "\ndiff: done\r\n", "the differential scenarios")]
+}
 
-/// The scenarios' names, sorted.
+/// The scenarios `ABYSS_DIFF` names, if it names any.
+pub(crate) fn only() -> Option<Vec<String>> {
+    let v = std::env::var("ABYSS_DIFF").ok()?;
+    let names: Vec<String> = v
+        .split(|c: char| c == ',' || c.is_ascii_whitespace())
+        .filter(|n| !n.is_empty())
+        .map(str::to_owned)
+        .collect();
+    (!names.is_empty()).then_some(names)
+}
+
+/// The scenarios' names, sorted (only `ABYSS_DIFF`'s, if it names any).
 fn scenarios() -> Result<Vec<String>> {
+    if let Some(names) = only() {
+        return Ok(names);
+    }
+    all_scenarios()
+}
+
+/// Every scenario's name, sorted.
+fn all_scenarios() -> Result<Vec<String>> {
     let mut names: Vec<String> = fs::read_dir(util::root().join(SOURCE).join("scenarios"))?
         .filter_map(|e| e.ok())
         .filter_map(|e| {
@@ -75,7 +100,7 @@ pub(crate) fn stage(arch: Arch, stage: &Path) -> Result<()> {
         fs::copy(src.join(f), dst.join(f))?;
     }
     fs::set_permissions(dst.join("run.sh"), fs::Permissions::from_mode(0o555))?;
-    for name in scenarios()? {
+    for name in all_scenarios()? {
         let f = format!("{name}.sh");
         fs::copy(
             src.join("scenarios").join(&f),

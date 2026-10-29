@@ -43,6 +43,10 @@ pub type BytesFn = Box<dyn Fn(&mut Vec<u8>) + Send + Sync>;
 /// [`Tree::handler`]), as FreeBSD runs handlers.
 pub type NodeFn = Arc<dyn Fn(&[i32], &mut Vec<u8>) -> Result<(), ReadError> + Send + Sync>;
 
+/// A node handler's writer: takes what is written to the value named by
+/// the OID components after the node (`kern.proc.args.<pid>`).
+pub type NodeWriteFn = Arc<dyn Fn(&[i32], &[u8]) -> Result<(), abi::errno::Errno> + Send + Sync>;
+
 /// A node whose value depends on what the caller passes in (FreeBSD's
 /// handlers that `SYSCTL_IN` a key before they `SYSCTL_OUT`, as
 /// `kern.devname` takes a device number): the bytes written, if any, give
@@ -69,6 +73,14 @@ pub fn int_writer(
     })
 }
 
+/// A writer for a `uint8_t` node (`sysctl_handle_8`): `EINVAL` if
+/// nothing comes. A `SYSCTL_BOOL` stores any nonzero value as 1.
+pub fn u8_writer(
+    set: impl Fn(u8) -> Result<(), abi::errno::Errno> + Send + Sync + 'static,
+) -> WriteFn {
+    Arc::new(move |b: &[u8]| set(*b.first().ok_or(abi::errno::Errno::EINVAL)?))
+}
+
 /// A writer for a string node of at most `max - 1` bytes
 /// (`sysctl_handle_string`): `max` bytes or more written is `EINVAL`, NUL
 /// or not; the value stops at its first NUL.
@@ -92,6 +104,8 @@ pub enum Value {
     Int(Box<dyn Fn() -> i32 + Send + Sync>),
     /// `u_int`.
     Uint(Box<dyn Fn() -> u32 + Send + Sync>),
+    /// `uint8_t` (`SYSCTL_U8`, and `SYSCTL_BOOL`'s `bool`).
+    U8(Box<dyn Fn() -> u8 + Send + Sync>),
     /// `long` (64 bits on every supported architecture).
     Long(Box<dyn Fn() -> i64 + Send + Sync>),
     /// `u_long`.
@@ -131,6 +145,7 @@ impl Value {
         match self {
             Self::Int(_) => ctltype::INT,
             Self::Uint(_) => ctltype::UINT,
+            Self::U8(_) => ctltype::U8,
             Self::Long(_) => ctltype::LONG,
             Self::Ulong(_) => ctltype::ULONG,
             Self::S64(_) => ctltype::S64,
@@ -145,6 +160,7 @@ impl Value {
         match self {
             Self::Int(_) => "I",
             Self::Uint(_) => "IU",
+            Self::U8(_) => "CU",
             Self::Long(_) => "L",
             Self::Ulong(_) => "LU",
             Self::S64(_) => "Q",
@@ -158,6 +174,7 @@ impl Value {
         match self {
             Self::Int(f) => out.extend_from_slice(&f().to_ne_bytes()),
             Self::Uint(f) => out.extend_from_slice(&f().to_ne_bytes()),
+            Self::U8(f) => out.push(f()),
             Self::Long(f) | Self::S64(f) => out.extend_from_slice(&f().to_ne_bytes()),
             Self::Ulong(f) | Self::U64(f) => out.extend_from_slice(&f().to_ne_bytes()),
             Self::Str(f) => {
@@ -254,6 +271,8 @@ struct Node {
     value: Option<Value>,
     /// For a node read through a handler.
     handler: Option<NodeFn>,
+    /// For a handler node that takes writes.
+    handler_writer: Option<NodeWriteFn>,
     /// For a writable leaf.
     writer: Option<WriteFn>,
     /// For a node read with what is written ([`QueryFn`]).
@@ -310,6 +329,7 @@ impl Tree {
             kind: ctltype::NODE | ctlflag::RD,
             value: None,
             handler: None,
+            handler_writer: None,
             writer: None,
             query: None,
             format: None,
@@ -442,6 +462,7 @@ impl Tree {
             kind,
             value: spec.value,
             handler: None,
+            handler_writer: None,
             writer: None,
             query: None,
             format: None,
@@ -588,7 +609,25 @@ impl Tree {
             }
         }
         let n = self.at(cur);
+        if let Some(w) = &n.handler_writer {
+            let depth = n.depth;
+            let rest = oid.get(depth..).unwrap_or(&[]).to_vec();
+            let w = Arc::clone(w);
+            let writer: WriteFn = Arc::new(move |bytes| w(&rest, bytes));
+            return Some((n.kind, Some(writer)));
+        }
         Some((n.kind, n.writer.clone()))
+    }
+
+    /// Lets the handler node `id` take writes through `writer`, with the
+    /// `CTLFLAG_*` bits `flags` (`CTLFLAG_RW | CTLFLAG_ANYBODY` for
+    /// `kern.proc.args`).
+    pub fn set_handler_writer(&mut self, id: NodeId, flags: u32, writer: NodeWriteFn) {
+        if self.node(id).is_some_and(|n| n.handler.is_some()) {
+            let n = self.at_mut(id.index);
+            n.kind |= flags;
+            n.handler_writer = Some(writer);
+        }
     }
 
     /// Sets `CTLFLAG_*` bits on the node `id` (`CTLFLAG_CAPRD` on nodes a

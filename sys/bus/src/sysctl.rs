@@ -12,6 +12,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use abi::bus::{BUS_USER_VERSION, UBusinfo};
+use abi::sysctl::ctlflag;
 use sched::Sleepable;
 use sysctl::{NodeId, Number, ReadError, Tree, Value};
 
@@ -96,6 +97,31 @@ pub(crate) fn register(mgr: &'static Manager, s: &Sleepable, workers: usize) {
             Ok(())
         });
         let _ = t.add_handler(bus, Number::Auto, "devices", "system device tree", devices);
+        // kern_devctl.c's knobs (`CTLFLAG_RWTUN`: the kernel environment
+        // sets them at boot, through `Options`).
+        let _ = t.add_writable(
+            bus,
+            Number::Auto,
+            "devctl_queue",
+            "devctl queue length",
+            ctlflag::TUN | ctlflag::MPSAFE,
+            Value::Int(Box::new(move || {
+                i32::try_from(mgr.devctl_queue()).unwrap_or(i32::MAX)
+            })),
+            sysctl::int_writer(move |q| mgr.set_devctl_queue(q)),
+        );
+        let _ = t.add_writable(
+            bus,
+            Number::Auto,
+            "devctl_nomatch_enabled",
+            "enable nomatch events",
+            ctlflag::TUN,
+            Value::U8(Box::new(move || u8::from(mgr.devctl_nomatch()))),
+            sysctl::u8_writer(move |v| {
+                mgr.set_devctl_nomatch(v != 0);
+                Ok(())
+            }),
+        );
     });
 }
 

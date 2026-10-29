@@ -12,14 +12,20 @@
 //!
 //! On publication the disk is tasted for a GPT; each partition becomes a
 //! disk of its own (`vtbd0p1`), forwarding to its parent at its offset.
+//! As GEOM does, a disk's partitions go when it is first opened for
+//! writing ([`spoil`]), and it is tasted again when the last writer
+//! closes it ([`retaste`]): what was written there is the table now.
 //!
-//! Behavior reference: sys/geom/geom_disk.c, sys/geom/part/g_part_gpt.c.
+//! Behavior reference: sys/geom/geom_disk.c, sys/geom/part/g_part_gpt.c
+//! (`g_part_gpt_read`), sys/geom/geom_subr.c (`g_access`'s spoiling and
+//! retasting).
 
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use bus::Gate;
 use sched::lock::{LockClass, Mutex};
@@ -89,53 +95,130 @@ pub struct PartitionEntry {
     pub unique_guid: gpt::Guid,
     /// Its first sector on the parent.
     pub first_lba: u64,
+    /// Its last sector on the parent.
+    pub last_lba: u64,
+    /// Its attribute bits (`bootme`, ...).
+    pub attributes: u64,
+    /// Its name as stored: UTF-16 code units, NUL-padded.
+    pub name: [u16; gpt::NAME_UNITS],
     /// Its name.
     pub label: String,
 }
 
 impl PartitionEntry {
-    /// The type's `gpart` name (`efi`, `freebsd-ufs`, …), or its GUID.
+    /// The type's `gpart` name (`efi`, `freebsd-ufs`, …), or `!` and its
+    /// GUID.
     #[must_use]
     pub fn type_name(&self) -> String {
-        match self.type_guid {
-            g if g == gpt::types::EFI_SYSTEM => "efi".into(),
-            g if g == gpt::types::FREEBSD_UFS => "freebsd-ufs".into(),
-            g if g == gpt::types::FREEBSD_SWAP => "freebsd-swap".into(),
-            g => format!("{g}"),
-        }
+        geom::part::gpt_type(&self.raw_type())
     }
 
-    /// Its other names, as FreeBSD's `glabel` gives them under `/dev`:
+    /// The type's GUID, in lower case (`rawtype`).
+    #[must_use]
+    pub fn raw_type(&self) -> String {
+        format!("{}", self.type_guid).to_ascii_lowercase()
+    }
+
+    /// Its own GUID, in lower case (`rawuuid`).
+    #[must_use]
+    pub fn raw_uuid(&self) -> String {
+        format!("{}", self.unique_guid).to_ascii_lowercase()
+    }
+
+    /// The LABEL class's names for it, in the order it makes them: `gpt/`
+    /// and its name (mangled to a file name, `data%20disk`) when it has a
+    /// usable one, and `gptid/` and its GUID.
+    #[must_use]
+    pub fn label_names(&self) -> Vec<String> {
+        geom::label::gpt(&self.name)
+            .into_iter()
+            .chain(geom::label::gptid(&self.raw_uuid()))
+            .collect()
+    }
+
+    /// Its other names under `/dev`, as FreeBSD's `glabel` gives them:
     /// `gptid/<guid>` (lower case), and `gpt/<label>` when it has a label
     /// that makes a file name.
     #[must_use]
     pub fn aliases(&self) -> Vec<String> {
-        let mut out = alloc::vec![format!(
-            "gptid/{}",
-            format!("{}", self.unique_guid).to_ascii_lowercase()
-        )];
-        let usable = !self.label.is_empty()
-            && self.label != "."
-            && self.label != ".."
-            && !self
-                .label
-                .chars()
-                .any(|c| c == '/' || c == '\0' || c.is_control());
-        if usable {
-            out.push(format!("gpt/{}", self.label));
-        }
+        let mut out = self.label_names();
+        out.reverse();
         out
     }
+}
+
+/// A disk's partition table, as GEOM's PART class read it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Table {
+    /// Entries in the table (`entries`).
+    pub entries: u32,
+    /// The first sector partitions may use.
+    pub first: u64,
+    /// The last sector partitions may use.
+    pub last: u64,
+    /// The backup table is missing, damaged, or elsewhere than the last
+    /// sector (`state: CORRUPT`).
+    pub corrupt: bool,
+    /// Found by a taste after the disk was published (the disk was
+    /// written), not when it was.
+    pub retasted: bool,
+}
+
+/// How fast a disk spins (`d_rotation_rate`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Rotation {
+    /// The disk does not say.
+    #[default]
+    Unknown,
+    /// It does not spin.
+    NonRotating,
+    /// This many revolutions per minute.
+    Rpm(u16),
+}
+
+/// What a driver knows of its disk beyond its size: what GEOM's DISK
+/// class shows (`d_descr`, `d_ident`, ...).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Description {
+    /// The model (`descr`).
+    pub descr: String,
+    /// The serial number (`ident`).
+    pub ident: String,
+    /// A world-wide name, if it has one (`lunid`).
+    pub lunid: Option<String>,
+    /// How fast it spins.
+    pub rotation: Rotation,
+    /// Firmware geometry: heads (0 for none).
+    pub fwheads: u32,
+    /// Firmware geometry: sectors per track (0 for none).
+    pub fwsectors: u32,
+    /// The physical sector, when larger than the logical one.
+    pub stripesize: u64,
+    /// Where the first physical sector starts.
+    pub stripeoffset: u64,
 }
 
 /// A published disk or partition.
 pub struct Disk {
     name: String,
+    /// Which disk this is, of all published since boot.
+    serial: u64,
     sector_size: u32,
     sectors: u64,
     max_transfer: usize,
     read_only: bool,
+    /// A disk's partition table, while its partitions are published.
+    table: SpinLock<Option<Table>>,
+    description: SpinLock<Description>,
     target: Target,
+}
+
+/// The serial number of the next disk or partition made.
+static SERIAL: AtomicU64 = AtomicU64::new(1);
+
+fn next_serial() -> u64 {
+    // Only uniqueness matters.
+    SERIAL.fetch_add(1, Ordering::Relaxed)
 }
 
 impl core::fmt::Debug for Disk {
@@ -230,6 +313,34 @@ impl Disk {
     #[must_use]
     pub fn max_transfer(&self) -> usize {
         self.max_transfer
+    }
+
+    /// Which disk or partition this is, of all published since boot (a
+    /// new one, if the same disk comes back).
+    #[must_use]
+    pub fn serial(&self) -> u64 {
+        self.serial
+    }
+
+    /// A disk's partition table, while its partitions are published.
+    #[must_use]
+    pub fn table(&self) -> Option<Table> {
+        *self.table.lock()
+    }
+
+    /// What its driver says of it ([`Self::describe`]); a partition's
+    /// disk's.
+    #[must_use]
+    pub fn description(&self) -> Description {
+        match &self.target {
+            Target::Partition { parent, .. } => parent.description(),
+            Target::Device { .. } => self.description.lock().clone(),
+        }
+    }
+
+    /// Records what its driver knows of it.
+    pub fn describe(&self, d: Description) {
+        *self.description.lock() = d;
     }
 
     /// For a partition: its parent and GPT entry.
@@ -646,29 +757,64 @@ fn size_text(bytes: u64) -> String {
     }
 }
 
-/// The GPT partitions of `disk`, as disks of their own.
-fn taste(s: &Sleepable, disk: &Arc<Disk>) -> Vec<Arc<Disk>> {
-    if disk.sector_size as usize != gpt::SECTOR {
-        return Vec::new();
+/// The header at sector `lba` of `disk` and its entries, if both are
+/// valid and the header says it is there.
+fn read_table(s: &Sleepable, disk: &Disk, lba: u64) -> Option<(gpt::PrimaryHeader, Vec<u8>)> {
+    let ss = u64::from(disk.sector_size);
+    let sector = disk.read(s, lba.checked_mul(ss)?, gpt::SECTOR).ok()?;
+    let h = gpt::PrimaryHeader::read(&sector).ok()?;
+    if h.my_lba != lba {
+        return None;
+    }
+    let len = h.entries_len.next_multiple_of(gpt::SECTOR);
+    let entries = disk.read(s, h.entries_lba.checked_mul(ss)?, len).ok()?;
+    gpt::Table::from_parts(&h, &entries).ok()?;
+    Some((h, entries))
+}
+
+/// The GPT of `disk` (from its primary header, the backup only checked,
+/// as `g_part_gpt_read` checks it), and its partitions, as disks of their
+/// own.
+fn taste(s: &Sleepable, disk: &Arc<Disk>, retasted: bool) -> Option<(Table, Vec<Arc<Disk>>)> {
+    if disk.sector_size as usize != gpt::SECTOR || disk.sectors < 3 {
+        return None;
     }
     let ss = u64::from(disk.sector_size);
-    let Ok(sector) = disk.read(s, ss, gpt::SECTOR) else {
-        return Vec::new();
+    let (h, entries) = read_table(s, disk, 1)?;
+    let table = gpt::Table::from_parts(&h, &entries).ok()?;
+    // The backup is where the primary says.
+    let last = disk.sectors - 1;
+    let backup = (h.alternate_lba <= last)
+        .then(|| read_table(s, disk, h.alternate_lba))
+        .flatten()
+        .filter(|(b, _)| h.matches(b));
+    let corrupt = if backup.is_none() {
+        bus::manager().log(format_args!(
+            "GEOM: {}: the secondary GPT table is corrupt or invalid.",
+            disk.name
+        ));
+        bus::manager().log(format_args!(
+            "GEOM: {}: using the primary only -- recovery suggested.",
+            disk.name
+        ));
+        true
+    } else if h.alternate_lba != last {
+        bus::manager().log(format_args!(
+            "GEOM: {}: the secondary GPT header is not in the last LBA.",
+            disk.name
+        ));
+        true
+    } else {
+        false
     };
-    let Ok(h) = gpt::PrimaryHeader::read(&sector) else {
-        return Vec::new();
+    let info = Table {
+        entries: h.entries,
+        first: h.first_usable,
+        last: h.last_usable,
+        corrupt,
+        retasted,
     };
-    let len = h.entries_len.next_multiple_of(gpt::SECTOR);
-    let Some(at) = h.entries_lba.checked_mul(ss) else {
-        return Vec::new();
-    };
-    let Ok(entries) = disk.read(s, at, len) else {
-        return Vec::new();
-    };
-    let Ok(table) = gpt::Table::from_parts(&h, &entries) else {
-        return Vec::new();
-    };
-    table
+    let parts = table
         .partitions()
         .filter(|p| p.first_lba <= p.last_lba && p.last_lba < disk.sectors)
         .map(|p| {
@@ -676,10 +822,13 @@ fn taste(s: &Sleepable, disk: &Arc<Disk>) -> Vec<Arc<Disk>> {
             let _ = p.write_name(&mut label);
             Arc::new(Disk {
                 name: format!("{}p{}", disk.name, p.index + 1),
+                serial: next_serial(),
                 sector_size: disk.sector_size,
                 sectors: p.sectors(),
                 max_transfer: disk.max_transfer,
                 read_only: disk.read_only,
+                table: SpinLock::new(None),
+                description: SpinLock::new(Description::default()),
                 target: Target::Partition {
                     parent: Arc::clone(disk),
                     first: p.first_lba * ss,
@@ -688,12 +837,60 @@ fn taste(s: &Sleepable, disk: &Arc<Disk>) -> Vec<Arc<Disk>> {
                         type_guid: p.type_guid,
                         unique_guid: p.unique_guid,
                         first_lba: p.first_lba,
+                        last_lba: p.last_lba,
+                        attributes: p.attributes,
+                        name: p.name,
                         label,
                     },
                 },
             })
         })
-        .collect()
+        .collect();
+    Some((info, parts))
+}
+
+/// Publishes the partitions a taste of `disk` finds, if it has a table.
+fn publish_table(s: &Sleepable, disk: &Arc<Disk>, retasted: bool) {
+    let Some((table, parts)) = taste(s, disk, retasted) else {
+        return;
+    };
+    *disk.table.lock() = Some(table);
+    DISKS.lock().extend(parts.iter().cloned());
+    for p in &parts {
+        tell(s, Event::Published(p));
+    }
+}
+
+/// Withdraws `disk`'s partitions, as GEOM withers its partition table
+/// when another opens the disk for writing (`g_part_spoiled`): the table
+/// may be rewritten. The caller sees that none of them is open.
+pub fn spoil(s: &Sleepable, disk: &Arc<Disk>) {
+    let mut gone = Vec::new();
+    DISKS.lock().retain(|d| {
+        let mine =
+            matches!(&d.target, Target::Partition { parent, .. } if Arc::ptr_eq(parent, disk));
+        if mine {
+            gone.push(Arc::clone(d));
+        }
+        !mine
+    });
+    *disk.table.lock() = None;
+    for d in &gone {
+        tell(s, Event::Withdrawn(d));
+    }
+}
+
+/// Tastes `disk` again once its last writer has closed it (GEOM's retaste
+/// on the last write close): a table written there is published. Nothing
+/// happens while its partitions are still there, or once it is withdrawn.
+pub fn retaste(s: &Sleepable, disk: &Arc<Disk>) {
+    if disk.partition().is_some() || disk.is_gone() || disk.table().is_some() {
+        return;
+    }
+    if !DISKS.lock().iter().any(|d| Arc::ptr_eq(d, disk)) {
+        return;
+    }
+    publish_table(s, disk, true);
 }
 
 /// What happened to a disk or partition, for whoever names them in `/dev`.
@@ -731,10 +928,13 @@ pub fn publish(s: &Sleepable, info: DiskInfo, queues: Arc<dyn DiskQueues>) -> Ar
     let queues = PreemptLock::new(Some(queues));
     let disk = Arc::new(Disk {
         name: format!("{}{}", info.name, info.unit),
+        serial: next_serial(),
         sector_size: info.sector_size,
         sectors: info.sectors,
         max_transfer: info.max_transfer,
         read_only: info.read_only,
+        table: SpinLock::new(None),
+        description: SpinLock::new(Description::default()),
         target: Target::Device {
             queues,
             gate: alloc::boxed::Box::new(Gate::new()),
@@ -750,11 +950,7 @@ pub fn publish(s: &Sleepable, info: DiskInfo, queues: Arc<dyn DiskQueues>) -> Ar
     ));
     DISKS.lock().push(Arc::clone(&disk));
     tell(s, Event::Published(&disk));
-    let parts = taste(s, &disk);
-    DISKS.lock().extend(parts.iter().cloned());
-    for p in &parts {
-        tell(s, Event::Published(p));
-    }
+    publish_table(s, &disk, false);
     disk
 }
 
@@ -844,11 +1040,18 @@ mod tests {
     use super::*;
 
     fn entry(label: &str) -> PartitionEntry {
+        let mut name = [0u16; gpt::NAME_UNITS];
+        for (n, u) in name.iter_mut().zip(label.encode_utf16()) {
+            *n = u;
+        }
         PartitionEntry {
             index: 1,
             type_guid: gpt::types::FREEBSD_UFS,
             unique_guid: gpt::Guid::must_parse("8B5D3C2A-11E4-4F0B-9C1D-0123456789AB"),
             first_lba: 2048,
+            last_lba: 4095,
+            attributes: 0,
+            name,
             label: label.into(),
         }
     }
@@ -859,8 +1062,12 @@ mod tests {
             entry("rootfs0").aliases(),
             ["gptid/8b5d3c2a-11e4-4f0b-9c1d-0123456789ab", "gpt/rootfs0"]
         );
+        assert_eq!(entry("rootfs0").type_name(), "freebsd-ufs");
+        // As glabel mangles them.
+        assert_eq!(entry("data disk").aliases()[1], "gpt/data%20disk");
+        assert_eq!(entry("tab\there").aliases()[1], "gpt/tab%09here");
         // Labels that make no file name give no `gpt/` name.
-        for bad in ["", ".", "..", "a/b", "tab\there"] {
+        for bad in ["", "  ", "../x", "a/.."] {
             assert_eq!(entry(bad).aliases().len(), 1, "{bad:?}");
         }
     }

@@ -31,6 +31,7 @@ mod capsicum;
 mod coredump;
 mod cpuset;
 mod cred;
+mod devctl;
 mod devices;
 mod efirtc;
 mod errata;
@@ -39,16 +40,22 @@ mod exec;
 mod firmware;
 mod firstuse;
 mod fs;
+mod geom_kern;
 #[cfg(target_arch = "aarch64")]
 mod idregs;
+mod init;
 mod intc;
 #[cfg(target_arch = "aarch64")]
 mod its;
+mod kenv;
 mod kinfo;
+mod klog;
 mod ktrace;
 mod md;
 mod mdisk;
+mod mib;
 mod mm;
+mod net;
 mod panic;
 mod pci;
 mod power;
@@ -59,6 +66,7 @@ mod ptrace;
 mod qemu;
 mod random;
 mod shared_page;
+mod shutdown;
 mod signal;
 mod smp;
 mod softclock;
@@ -146,6 +154,7 @@ fn kmain(boot_info: PhysAddr) -> ! {
     random::start_harvester();
     // After the clock is set, as FreeBSD mounts root once devices attach.
     fs::init();
+    kenv::init();
     fs::sysctl_init(&s);
     exec::sysctl_init(&s);
     kinfo::init(&s);
@@ -153,10 +162,17 @@ fn kmain(boot_info: PhysAddr) -> ! {
     signal::sysctl_init(&s);
     ptrace::sysctl_init(&s);
     coredump::sysctl_init(&s);
+    geom_kern::init(&s);
+    init::sysctl_init(&s);
+    console::sysctl_init(&s);
+    mib::sysctl_init(&s);
+    random::sysctl_init(&s);
+    shutdown::sysctl_init(&s);
     vmmeter::init(&s);
     statclock::start_loadav();
     prison::sysctl_init(&s);
     sysctl::features_init(&s);
+    net::init(&s);
     sysctl::mark_capability_readable(&s);
 
     #[cfg(feature = "ktest")]
@@ -191,12 +207,20 @@ fn kmain(boot_info: PhysAddr) -> ! {
             kprintln!("Phase 1 kernel: nothing more to do yet. Halted (abyss.halt).");
             arch::cpu::halt_forever();
         }
+        if !boot::flag("abyss.shell")
+            && let Some(init) = init::start(&s)
+        {
+            // `exit1`: init may not exit.
+            let how = init.wait(&s);
+            panic!("Going nowhere without my init! ({how:?})");
+        }
         run_shell(&s);
         power_off(&s)
     }
 }
 
-/// The shell a single-user boot gives the console (until init, P6.9): base's
+/// The shell the boot tier's shell cases get (`abyss.shell`), and the
+/// fallback when no init executes: base's
 /// dynamic `/bin/sh` from a full root, else `/rescue/sh` (the memory disk
 /// holds only /rescue), as a login shell (`-sh`) leading its own session,
 /// with the console as its controlling terminal; each is tried in turn, as
@@ -220,7 +244,7 @@ fn run_shell(s: &sched::Sleepable) {
         match proc::Process::spawn_session(s, path, &[b"-sh"], env, None, console.as_deref()) {
             Ok(p) => {
                 // The multi-user boot test gives up on this line.
-                kprintln!("shell: {name} started (no init until P6.9)");
+                kprintln!("shell: {name} started (no init)");
                 let how = p.wait(s);
                 kprintln!("shell: exited ({how:?})");
                 return;

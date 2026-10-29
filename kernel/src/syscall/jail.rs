@@ -606,6 +606,16 @@ fn set(
     if pr_allow & !ps.allow & !differences != 0 {
         return fail(plain(Errno::EPERM));
     }
+    // Source address selection: always on, with no addresses to choose
+    // between.
+    for name in [
+        "ip4.saddrsel",
+        "ip4.nosaddrsel",
+        "ip6.saddrsel",
+        "ip6.nosaddrsel",
+    ] {
+        let _ = opts.flag(name);
+    }
     if let Some(u) = opts.unknown() {
         return fail(said(
             Errno::EINVAL,
@@ -1125,9 +1135,16 @@ fn get(
     for (name, v) in [("env", &st.env), ("meta", &st.meta)] {
         meta_get(opts, name, v).map_err(plain)?;
     }
-    // jls asks for the addresses; there are none.
+    // jls asks for the addresses; there are none. Source address
+    // selection is on, as for every new prison (`_PR_IP_SADDRSEL`).
     opts.set("ip4.addr", &[]).map_err(e)?;
     opts.set("ip6.addr", &[]).map_err(e)?;
+    for family in ["ip4", "ip6"] {
+        opts.set_int(&alloc::format!("{family}.saddrsel"), 1)
+            .map_err(e)?;
+        opts.set_int(&alloc::format!("{family}.nosaddrsel"), 0)
+            .map_err(e)?;
+    }
     if let Some(u) = opts.unknown() {
         return Err(said(
             Errno::EINVAL,

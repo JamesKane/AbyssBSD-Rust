@@ -27,11 +27,13 @@ mod acl;
 mod event;
 mod extattr;
 mod fsops;
+mod inet;
 mod io;
 mod ipc;
 mod jail;
 mod mem;
 mod misc;
+mod netlink;
 mod path;
 mod proc;
 mod procctl;
@@ -480,6 +482,15 @@ fn run(s: &Sleepable, frame: &mut TrapFrame, call: Call) -> Result<Option<u64>, 
         Sysno::Ptrace => crate::ptrace::ptrace(s, a0, a1, a2, a3),
         Sysno::Kldload => misc::kldload(a0),
         Sysno::Kldnext => misc::kldnext(a0),
+        Sysno::Kldfind => misc::kldfind(a0),
+        Sysno::Kldstat => misc::kldstat(a0, a1),
+        Sysno::Kldfirstmod => misc::kldfirstmod(a0),
+        Sysno::Modnext => misc::modnext(a0),
+        Sysno::Modfnext => misc::modfnext(a0),
+        Sysno::Modstat => misc::modstat(a0, a1),
+        Sysno::Modfind => misc::modfind(a0),
+        Sysno::Kenv => crate::kenv::kenv(a0, a1, a2, a3),
+        Sysno::Reboot => crate::shutdown::reboot(s, a0),
         Sysno::Socket => socket::socket(s, a0, a1, a2),
         Sysno::Socketpair => socket::socketpair(s, a0, a1, a2, a3),
         Sysno::Bind => socket::bind(s, a0, a1, a2),

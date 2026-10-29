@@ -1,0 +1,736 @@
+$ gpart show md9
+=> 34 131005 md9 GPT (64M)
+34 2048 1 efi (1.0M)
+2082 8192 2 freebsd-swap (4.0M)
+10274 32768 3 freebsd-ufs (16M)
+43042 16384 4 freebsd-ufs (8.0M)
+59426 71613 - free - (35M)
+
+(exit 0)
+$ gpart show -l md9
+=> 34 131005 md9 GPT (64M)
+34 2048 1 efi9 (1.0M)
+2082 8192 2 swap9 (4.0M)
+10274 32768 3 data disk (16M)
+43042 16384 4 (null) (8.0M)
+59426 71613 - free - (35M)
+
+(exit 0)
+$ gpart show -r md9
+=> 34 131005 md9 GPT (64M)
+34 2048 1 c12a7328-f81f-11d2-ba4b-<addr> (1.0M)
+2082 8192 2 516e7cb5-6ecf-11d6-8ff8-<addr> (4.0M)
+10274 32768 3 516e7cb6-6ecf-11d6-8ff8-<addr> (16M)
+43042 16384 4 516e7cb6-6ecf-11d6-8ff8-<addr> (8.0M)
+59426 71613 - free - (35M)
+
+(exit 0)
+$ gpart show -p md9
+=> 34 131005 md9 GPT (64M)
+34 2048 md9p1 efi (1.0M)
+2082 8192 md9p2 freebsd-swap (4.0M)
+10274 32768 md9p3 freebsd-ufs (16M)
+43042 16384 md9p4 freebsd-ufs (8.0M)
+59426 71613 - free - (35M)
+
+(exit 0)
+$ gpart list md9
+Geom name: md9
+modified: false
+state: OK
+fwheads: 255
+fwsectors: 1
+last: 131038
+first: 34
+entries: 128
+scheme: GPT
+Providers:
+1. Name: md9p1
+Mediasize: 1048576 (1.0M)
+Sectorsize: 512
+Stripesize: 0
+Stripeoffset: 17408
+Mode: r0w0e0
+efimedia: HD(1,GPT,01010101-0101-0101-0101-<addr>,<hex>,<hex>)
+rawuuid: 01010101-0101-0101-0101-<addr>
+rawtype: c12a7328-f81f-11d2-ba4b-<addr>
+label: efi9
+length: 1048576
+offset: 17408
+type: efi
+index: 1
+end: 2081
+start: 34
+2. Name: md9p2
+Mediasize: 4194304 (4.0M)
+Sectorsize: 512
+Stripesize: 0
+Stripeoffset: 1065984
+Mode: r0w0e0
+efimedia: HD(2,GPT,02020202-0202-0202-0202-<addr>,<hex>,<hex>)
+rawuuid: 02020202-0202-0202-0202-<addr>
+rawtype: 516e7cb5-6ecf-11d6-8ff8-<addr>
+label: swap9
+length: 4194304
+offset: 1065984
+type: freebsd-swap
+index: 2
+end: 10273
+start: 2082
+3. Name: md9p3
+Mediasize: 16777216 (16M)
+Sectorsize: 512
+Stripesize: 0
+Stripeoffset: 5260288
+Mode: r0w0e0
+efimedia: HD(3,GPT,03030303-0303-0303-0303-<addr>,<hex>,<hex>)
+rawuuid: 03030303-0303-0303-0303-<addr>
+rawtype: 516e7cb6-6ecf-11d6-8ff8-<addr>
+label: data disk
+length: 16777216
+offset: 5260288
+type: freebsd-ufs
+index: 3
+end: 43041
+start: 10274
+4. Name: md9p4
+Mediasize: 8388608 (8.0M)
+Sectorsize: 512
+Stripesize: 0
+Stripeoffset: 22037504
+Mode: r0w0e0
+efimedia: HD(4,GPT,04040404-0404-0404-0404-<addr>,<hex>,<hex>)
+rawuuid: 04040404-0404-0404-0404-<addr>
+rawtype: 516e7cb6-6ecf-11d6-8ff8-<addr>
+label:
+length: 8388608
+offset: 22037504
+type: freebsd-ufs
+index: 4
+end: 59425
+start: 43042
+Consumers:
+1. Name: md9
+Mediasize: 67108864 (64M)
+Sectorsize: 512
+Mode: r0w0e0
+
+(exit 0)
+$ geom part list md9
+Geom name: md9
+modified: false
+state: OK
+fwheads: 255
+fwsectors: 1
+last: 131038
+first: 34
+entries: 128
+scheme: GPT
+Providers:
+1. Name: md9p1
+Mediasize: 1048576 (1.0M)
+Sectorsize: 512
+Stripesize: 0
+Stripeoffset: 17408
+Mode: r0w0e0
+efimedia: HD(1,GPT,01010101-0101-0101-0101-<addr>,<hex>,<hex>)
+rawuuid: 01010101-0101-0101-0101-<addr>
+rawtype: c12a7328-f81f-11d2-ba4b-<addr>
+label: efi9
+length: 1048576
+offset: 17408
+type: efi
+index: 1
+end: 2081
+start: 34
+2. Name: md9p2
+Mediasize: 4194304 (4.0M)
+Sectorsize: 512
+Stripesize: 0
+Stripeoffset: 1065984
+Mode: r0w0e0
+efimedia: HD(2,GPT,02020202-0202-0202-0202-<addr>,<hex>,<hex>)
+rawuuid: 02020202-0202-0202-0202-<addr>
+rawtype: 516e7cb5-6ecf-11d6-8ff8-<addr>
+label: swap9
+length: 4194304
+offset: 1065984
+type: freebsd-swap
+index: 2
+end: 10273
+start: 2082
+3. Name: md9p3
+Mediasize: 16777216 (16M)
+Sectorsize: 512
+Stripesize: 0
+Stripeoffset: 5260288
+Mode: r0w0e0
+efimedia: HD(3,GPT,03030303-0303-0303-0303-<addr>,<hex>,<hex>)
+rawuuid: 03030303-0303-0303-0303-<addr>
+rawtype: 516e7cb6-6ecf-11d6-8ff8-<addr>
+label: data disk
+length: 16777216
+offset: 5260288
+type: freebsd-ufs
+index: 3
+end: 43041
+start: 10274
+4. Name: md9p4
+Mediasize: 8388608 (8.0M)
+Sectorsize: 512
+Stripesize: 0
+Stripeoffset: 22037504
+Mode: r0w0e0
+efimedia: HD(4,GPT,04040404-0404-0404-0404-<addr>,<hex>,<hex>)
+rawuuid: 04040404-0404-0404-0404-<addr>
+rawtype: 516e7cb6-6ecf-11d6-8ff8-<addr>
+label:
+length: 8388608
+offset: 22037504
+type: freebsd-ufs
+index: 4
+end: 59425
+start: 43042
+Consumers:
+1. Name: md9
+Mediasize: 67108864 (64M)
+Sectorsize: 512
+Mode: r0w0e0
+
+(exit 0)
+$ geom md list md9
+Geom name: md9
+Providers:
+1. Name: md9
+Mediasize: 67108864 (64M)
+Sectorsize: 512
+Mode: r0w0e0
+label:
+type: malloc
+access: read-write
+compression: on
+length: 67108864
+fwsectors: 0
+fwheads: 0
+unit: 9
+
+(exit 0)
+$ sh -c glabel status | grep -e Name -e md9
+Name Status Components
+gpt/efi9 N/A md9p1
+gptid/01010101-0101-0101-0101-<addr> N/A md9p1
+gpt/swap9 N/A md9p2
+gptid/02020202-0202-0202-0202-<addr> N/A md9p2
+gpt/data%20disk N/A md9p3
+gptid/03030303-0303-0303-0303-<addr> N/A md9p3
+gptid/04040404-0404-0404-0404-<addr> N/A md9p4
+(exit 0)
+$ glabel list md9p3
+Geom name: md9p3
+Providers:
+1. Name: gpt/data%20disk
+Mediasize: 16777216 (16M)
+Sectorsize: 512
+Stripesize: 0
+Stripeoffset: 5260288
+Mode: r0w0e0
+secoffset: 0
+offset: 0
+seclength: 32768
+length: 16777216
+index: 0
+Consumers:
+1. Name: md9p3
+Mediasize: 16777216 (16M)
+Sectorsize: 512
+Stripesize: 0
+Stripeoffset: 5260288
+Mode: r0w0e0
+
+(exit 0)
+$ sh -c geom -t | grep -e Geom -e md9
+Geom Class Provider
+md9 MD md9
+md9 DEV
+md9 PART md9p1
+md9p1 DEV
+md9p1 LABEL gpt/efi9
+md9p1 LABEL gptid/01010101-0101-0101-0101-<addr>
+md9 PART md9p2
+md9p2 DEV
+md9p2 LABEL gpt/swap9
+md9p2 LABEL gptid/02020202-0202-0202-0202-<addr>
+md9 PART md9p3
+md9p3 DEV
+md9p3 LABEL gpt/data%20disk
+md9p3 LABEL gptid/03030303-0303-0303-0303-<addr>
+md9 PART md9p4
+md9p4 DEV
+md9p4 LABEL gptid/04040404-0404-0404-0404-<addr>
+(exit 0)
+$ sh -c ls /dev | grep md9
+md9
+md9p1
+md9p2
+md9p3
+md9p4
+(exit 0)
+$ ls /dev/gpt/efi9 /dev/gpt/swap9 /dev/gpt/data%20disk
+/dev/gpt/data%20disk /dev/gpt/efi9 /dev/gpt/swap9
+(exit 0)
+$ md9txt
+0 MD md9 67108864 512 u 9 s 512 f 0 fs 0 l 67108864 t malloc label
+1 PART md9p4 8388608 512 i 4 o 22037504 ty freebsd-ufs xs GPT xt 516e7cb6-6ecf-11d6-8ff8-<addr>
+2 LABEL gptid/04040404-0404-0404-0404-<addr> 8388608 512 i 0 o 0
+1 PART md9p3 16777216 512 i 3 o 5260288 ty freebsd-ufs xs GPT xt 516e7cb6-6ecf-11d6-8ff8-<addr>
+2 LABEL gptid/03030303-0303-0303-0303-<addr> 16777216 512 i 0 o 0
+2 LABEL gpt/data%20disk 16777216 512 i 0 o 0
+1 PART md9p2 4194304 512 i 2 o 1065984 ty freebsd-swap xs GPT xt 516e7cb5-6ecf-11d6-8ff8-<addr>
+2 LABEL gptid/02020202-0202-0202-0202-<addr> 4194304 512 i 0 o 0
+2 LABEL gpt/swap9 4194304 512 i 0 o 0
+1 PART md9p1 1048576 512 i 1 o 17408 ty efi xs GPT xt c12a7328-f81f-11d2-ba4b-<addr>
+2 LABEL gptid/01010101-0101-0101-0101-<addr> 1048576 512 i 0 o 0
+2 LABEL gpt/efi9 1048576 512 i 0 o 0
+
+(exit 0)
+$ md9xml
+<geom id="<addr>">
+<class ref="<addr>"/>
+<name>md9</name>
+<rank>2</rank>
+<config>
+<scheme>GPT</scheme>
+<entries>128</entries>
+<first>34</first>
+<last>131038</last>
+<fwsectors>1</fwsectors>
+<fwheads>255</fwheads>
+<state>OK</state>
+<modified>false</modified>
+</config>
+<consumer id="<addr>">
+<geom ref="<addr>"/>
+<provider ref="<addr>"/>
+<mode>r0w0e0</mode>
+<config>
+</config>
+</consumer>
+<provider id="<addr>">
+<geom ref="<addr>"/>
+<mode>r0w0e0</mode>
+<name>md9p4</name>
+<mediasize>8388608</mediasize>
+<sectorsize>512</sectorsize>
+<stripesize>0</stripesize>
+<stripeoffset>22037504</stripeoffset>
+<config>
+<start>43042</start>
+<end>59425</end>
+<index>4</index>
+<type>freebsd-ufs</type>
+<offset>22037504</offset>
+<length>8388608</length>
+<label></label>
+<rawtype>516e7cb6-6ecf-11d6-8ff8-<addr></rawtype>
+<rawuuid>04040404-0404-0404-0404-<addr></rawuuid>
+<efimedia>HD(4,GPT,04040404-0404-0404-0404-<addr>,<hex>,<hex>)</efimedia>
+</config>
+</provider>
+<provider id="<addr>">
+<geom ref="<addr>"/>
+<mode>r0w0e0</mode>
+<name>md9p3</name>
+<mediasize>16777216</mediasize>
+<sectorsize>512</sectorsize>
+<stripesize>0</stripesize>
+<stripeoffset>5260288</stripeoffset>
+<config>
+<start>10274</start>
+<end>43041</end>
+<index>3</index>
+<type>freebsd-ufs</type>
+<offset>5260288</offset>
+<length>16777216</length>
+<label>data disk</label>
+<rawtype>516e7cb6-6ecf-11d6-8ff8-<addr></rawtype>
+<rawuuid>03030303-0303-0303-0303-<addr></rawuuid>
+<efimedia>HD(3,GPT,03030303-0303-0303-0303-<addr>,<hex>,<hex>)</efimedia>
+</config>
+</provider>
+<provider id="<addr>">
+<geom ref="<addr>"/>
+<mode>r0w0e0</mode>
+<name>md9p2</name>
+<mediasize>4194304</mediasize>
+<sectorsize>512</sectorsize>
+<stripesize>0</stripesize>
+<stripeoffset>1065984</stripeoffset>
+<config>
+<start>2082</start>
+<end>10273</end>
+<index>2</index>
+<type>freebsd-swap</type>
+<offset>1065984</offset>
+<length>4194304</length>
+<label>swap9</label>
+<rawtype>516e7cb5-6ecf-11d6-8ff8-<addr></rawtype>
+<rawuuid>02020202-0202-0202-0202-<addr></rawuuid>
+<efimedia>HD(2,GPT,02020202-0202-0202-0202-<addr>,<hex>,<hex>)</efimedia>
+</config>
+</provider>
+<provider id="<addr>">
+<geom ref="<addr>"/>
+<mode>r0w0e0</mode>
+<name>md9p1</name>
+<mediasize>1048576</mediasize>
+<sectorsize>512</sectorsize>
+<stripesize>0</stripesize>
+<stripeoffset>17408</stripeoffset>
+<config>
+<start>34</start>
+<end>2081</end>
+<index>1</index>
+<type>efi</type>
+<offset>17408</offset>
+<length>1048576</length>
+<label>efi9</label>
+<rawtype>c12a7328-f81f-11d2-ba4b-<addr></rawtype>
+<rawuuid>01010101-0101-0101-0101-<addr></rawuuid>
+<efimedia>HD(1,GPT,01010101-0101-0101-0101-<addr>,<hex>,<hex>)</efimedia>
+</config>
+</provider>
+</geom>
+<geom id="<addr>">
+<class ref="<addr>"/>
+<name>md9p4</name>
+<rank>3</rank>
+<config>
+</config>
+<consumer id="<addr>">
+<geom ref="<addr>"/>
+<provider ref="<addr>"/>
+<mode>r0w0e0</mode>
+<config>
+</config>
+</consumer>
+<provider id="<addr>">
+<geom ref="<addr>"/>
+<mode>r0w0e0</mode>
+<name>gptid/04040404-0404-0404-0404-<addr></name>
+<mediasize>8388608</mediasize>
+<sectorsize>512</sectorsize>
+<stripesize>0</stripesize>
+<stripeoffset>22037504</stripeoffset>
+<config>
+<index>0</index>
+<length>8388608</length>
+<seclength>16384</seclength>
+<offset>0</offset>
+<secoffset>0</secoffset>
+</config>
+</provider>
+</geom>
+<geom id="<addr>">
+<class ref="<addr>"/>
+<name>md9p3</name>
+<rank>3</rank>
+<config>
+</config>
+<consumer id="<addr>">
+<geom ref="<addr>"/>
+<provider ref="<addr>"/>
+<mode>r0w0e0</mode>
+<config>
+</config>
+</consumer>
+<provider id="<addr>">
+<geom ref="<addr>"/>
+<mode>r0w0e0</mode>
+<name>gptid/03030303-0303-0303-0303-<addr></name>
+<mediasize>16777216</mediasize>
+<sectorsize>512</sectorsize>
+<stripesize>0</stripesize>
+<stripeoffset>5260288</stripeoffset>
+<config>
+<index>0</index>
+<length>16777216</length>
+<seclength>32768</seclength>
+<offset>0</offset>
+<secoffset>0</secoffset>
+</config>
+</provider>
+</geom>
+<geom id="<addr>">
+<class ref="<addr>"/>
+<name>md9p3</name>
+<rank>3</rank>
+<config>
+</config>
+<consumer id="<addr>">
+<geom ref="<addr>"/>
+<provider ref="<addr>"/>
+<mode>r0w0e0</mode>
+<config>
+</config>
+</consumer>
+<provider id="<addr>">
+<geom ref="<addr>"/>
+<mode>r0w0e0</mode>
+<name>gpt/data%20disk</name>
+<mediasize>16777216</mediasize>
+<sectorsize>512</sectorsize>
+<stripesize>0</stripesize>
+<stripeoffset>5260288</stripeoffset>
+<config>
+<index>0</index>
+<length>16777216</length>
+<seclength>32768</seclength>
+<offset>0</offset>
+<secoffset>0</secoffset>
+</config>
+</provider>
+</geom>
+<geom id="<addr>">
+<class ref="<addr>"/>
+<name>md9p2</name>
+<rank>3</rank>
+<config>
+</config>
+<consumer id="<addr>">
+<geom ref="<addr>"/>
+<provider ref="<addr>"/>
+<mode>r0w0e0</mode>
+<config>
+</config>
+</consumer>
+<provider id="<addr>">
+<geom ref="<addr>"/>
+<mode>r0w0e0</mode>
+<name>gptid/02020202-0202-0202-0202-<addr></name>
+<mediasize>4194304</mediasize>
+<sectorsize>512</sectorsize>
+<stripesize>0</stripesize>
+<stripeoffset>1065984</stripeoffset>
+<config>
+<index>0</index>
+<length>4194304</length>
+<seclength>8192</seclength>
+<offset>0</offset>
+<secoffset>0</secoffset>
+</config>
+</provider>
+</geom>
+<geom id="<addr>">
+<class ref="<addr>"/>
+<name>md9p2</name>
+<rank>3</rank>
+<config>
+</config>
+<consumer id="<addr>">
+<geom ref="<addr>"/>
+<provider ref="<addr>"/>
+<mode>r0w0e0</mode>
+<config>
+</config>
+</consumer>
+<provider id="<addr>">
+<geom ref="<addr>"/>
+<mode>r0w0e0</mode>
+<name>gpt/swap9</name>
+<mediasize>4194304</mediasize>
+<sectorsize>512</sectorsize>
+<stripesize>0</stripesize>
+<stripeoffset>1065984</stripeoffset>
+<config>
+<index>0</index>
+<length>4194304</length>
+<seclength>8192</seclength>
+<offset>0</offset>
+<secoffset>0</secoffset>
+</config>
+</provider>
+</geom>
+<geom id="<addr>">
+<class ref="<addr>"/>
+<name>md9p1</name>
+<rank>3</rank>
+<config>
+</config>
+<consumer id="<addr>">
+<geom ref="<addr>"/>
+<provider ref="<addr>"/>
+<mode>r0w0e0</mode>
+<config>
+</config>
+</consumer>
+<provider id="<addr>">
+<geom ref="<addr>"/>
+<mode>r0w0e0</mode>
+<name>gptid/01010101-0101-0101-0101-<addr></name>
+<mediasize>1048576</mediasize>
+<sectorsize>512</sectorsize>
+<stripesize>0</stripesize>
+<stripeoffset>17408</stripeoffset>
+<config>
+<index>0</index>
+<length>1048576</length>
+<seclength>2048</seclength>
+<offset>0</offset>
+<secoffset>0</secoffset>
+</config>
+</provider>
+</geom>
+<geom id="<addr>">
+<class ref="<addr>"/>
+<name>md9p1</name>
+<rank>3</rank>
+<config>
+</config>
+<consumer id="<addr>">
+<geom ref="<addr>"/>
+<provider ref="<addr>"/>
+<mode>r0w0e0</mode>
+<config>
+</config>
+</consumer>
+<provider id="<addr>">
+<geom ref="<addr>"/>
+<mode>r0w0e0</mode>
+<name>gpt/efi9</name>
+<mediasize>1048576</mediasize>
+<sectorsize>512</sectorsize>
+<stripesize>0</stripesize>
+<stripeoffset>17408</stripeoffset>
+<config>
+<index>0</index>
+<length>1048576</length>
+<seclength>2048</seclength>
+<offset>0</offset>
+<secoffset>0</secoffset>
+</config>
+</provider>
+</geom>
+<geom id="<addr>">
+<class ref="<addr>"/>
+<name>md9p4</name>
+<rank>3</rank>
+<consumer id="<addr>">
+<geom ref="<addr>"/>
+<provider ref="<addr>"/>
+<mode>r0w0e0</mode>
+</consumer>
+</geom>
+<geom id="<addr>">
+<class ref="<addr>"/>
+<name>md9p3</name>
+<rank>3</rank>
+<consumer id="<addr>">
+<geom ref="<addr>"/>
+<provider ref="<addr>"/>
+<mode>r0w0e0</mode>
+</consumer>
+</geom>
+<geom id="<addr>">
+<class ref="<addr>"/>
+<name>md9p2</name>
+<rank>3</rank>
+<consumer id="<addr>">
+<geom ref="<addr>"/>
+<provider ref="<addr>"/>
+<mode>r0w0e0</mode>
+</consumer>
+</geom>
+<geom id="<addr>">
+<class ref="<addr>"/>
+<name>md9p1</name>
+<rank>3</rank>
+<consumer id="<addr>">
+<geom ref="<addr>"/>
+<provider ref="<addr>"/>
+<mode>r0w0e0</mode>
+</consumer>
+</geom>
+<geom id="<addr>">
+<class ref="<addr>"/>
+<name>md9</name>
+<rank>2</rank>
+<consumer id="<addr>">
+<geom ref="<addr>"/>
+<provider ref="<addr>"/>
+<mode>r0w0e0</mode>
+</consumer>
+</geom>
+<geom id="<addr>">
+<class ref="<addr>"/>
+<name>md9</name>
+<rank>1</rank>
+<config>
+</config>
+<provider id="<addr>">
+<geom ref="<addr>"/>
+<mode>r0w0e0</mode>
+<name>md9</name>
+<mediasize>67108864</mediasize>
+<sectorsize>512</sectorsize>
+<stripesize>0</stripesize>
+<stripeoffset>0</stripeoffset>
+<config>
+<unit>9</unit>
+<sectorsize>512</sectorsize>
+<fwheads>0</fwheads>
+<fwsectors>0</fwsectors>
+<length>67108864</length>
+<compression>on</compression>
+<access>read-write</access>
+<type>malloc</type>
+<label></label>
+</config>
+</provider>
+</geom>
+(exit 0)
+$ classes
+FD
+RAID
+SWAP
+PART
+LABEL
+VFS
+Flashmap
+DISK
+DEV
+MD
+(exit 0)
+$ sh -c sysctl -n kern.geom.confdot | head -1
+digraph geom {
+(exit 0)
+$ sh -c gpart list md9 | grep -e Name -e Mode
+1. Name: md9p1
+Mode: r0w0e0
+2. Name: md9p2
+Mode: r1w0e1
+3. Name: md9p3
+Mode: r1w1e0
+4. Name: md9p4
+Mode: r0w0e0
+1. Name: md9
+Mode: r2w1e2
+(exit 0)
+$ sh -c glabel status | grep -e Name -e md9
+Name Status Components
+gpt/efi9 N/A md9p1
+gptid/01010101-0101-0101-0101-<addr> N/A md9p1
+gpt/swap9 N/A md9p2
+gptid/02020202-0202-0202-0202-<addr> N/A md9p2
+gptid/04040404-0404-0404-0404-<addr> N/A md9p4
+(exit 0)
+$ sh -c glabel list md9p2 | grep -e Name -e Mode
+1. Name: gpt/swap9
+Mode: r1w0e0
+1. Name: md9p2
+Mode: r1w0e1
+(exit 0)
+$ gpart show md9
+gpart: No such geom: md9.
+(exit 1)
+$ sh -c ls /dev | grep md9
+(exit 1)

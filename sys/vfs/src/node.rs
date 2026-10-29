@@ -349,6 +349,18 @@ pub trait CharDevice: Send + Sync {
         let _ = nonblock;
         self.instance(s)
     }
+    /// [`CharDevice::instance_nonblock`] for an open for writing or not
+    /// (`d_open`'s `FWRITE`): a disk counts its readers and writers, as
+    /// GEOM's DEV class does.
+    fn instance_open(
+        &self,
+        s: &Sleepable,
+        nonblock: bool,
+        write: bool,
+    ) -> Result<Option<Arc<dyn CharDevice>>, Errno> {
+        let _ = write;
+        self.instance_nonblock(s, nonblock)
+    }
     /// Reads into `uio` from `offset` (the file's offset, which disks use
     /// and terminals ignore); `nonblock` asks for `EAGAIN` instead of
     /// waiting.
@@ -410,6 +422,12 @@ pub trait CharDevice: Send + Sync {
     ) -> Result<usize, Errno> {
         let _ = fflag;
         self.ioctl_value(s, req, arg)
+    }
+    /// The open file's `O_ASYNC` was set or cleared (`FIOASYNC`,
+    /// `fcntl(F_SETFL)`): FreeBSD's `FIOASYNC` reaching `d_ioctl`, for a
+    /// device that sends `SIGIO`.
+    fn set_async(&self, on: bool) {
+        let _ = on;
     }
     /// The node is being revoked (`revoke(2)`, a session's end): every
     /// open of it is over, as if each had closed, though their files stay

@@ -296,6 +296,11 @@ fn lockf(s: &Sleepable) -> Vec<u8> {
     out
 }
 
+/// `kern.ps_arg_cache_limit`'s default (`PAGE_SIZE / 16`).
+const PS_ARG_CACHE_LIMIT: usize = 0x100;
+/// `sizeof(struct pargs)` (two `u_int`s and a one-byte array, padded).
+const PARGS_HEADER: usize = 12;
+
 /// A node `kern.proc.NAME.<pid>` read by `f`.
 fn node(
     t: &mut Tree,
@@ -323,6 +328,35 @@ pub(crate) fn add_nodes(t: &mut Tree, kern: sysctl::NodeId, procs: sysctl::NodeI
             Ok(())
         },
     );
+    // `setproctitle`: a process may set its own, within
+    // `kern.ps_arg_cache_limit` less `struct pargs`'s header.
+    if let Some(args) = t.child(procs, "args") {
+        t.set_handler_writer(
+            args,
+            abi::sysctl::ctlflag::WR | abi::sysctl::ctlflag::ANYBODY,
+            Arc::new(|r, new| {
+                let p =
+                    process(arg(r).map_err(|_| Errno::EINVAL)?, Access::See).map_err(
+                        |e| match e {
+                            ReadError::Failed(e) => e,
+                            _ => Errno::EINVAL,
+                        },
+                    )?;
+                if Process::current().is_none_or(|me| !Arc::ptr_eq(&me, &p)) {
+                    return Err(Errno::EPERM);
+                }
+                if new.len() > PS_ARG_CACHE_LIMIT - PARGS_HEADER {
+                    return Err(Errno::ENOMEM);
+                }
+                // An empty write has FreeBSD read the arguments from the
+                // process's memory again; they are what exec left here.
+                if !new.is_empty() {
+                    p.set_args(new);
+                }
+                Ok(())
+            }),
+        );
+    }
     node(
         t,
         procs,

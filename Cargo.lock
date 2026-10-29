@@ -222,6 +222,10 @@ name = "font"
 version = "0.0.0"
 
 [[package]]
+name = "geom"
+version = "0.0.0"
+
+[[package]]
 name = "gpt"
 version = "0.0.0"
 dependencies = [
@@ -297,6 +301,16 @@ name = "idregs"
 version = "0.0.0"
 
 [[package]]
+name = "inet"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "event",
+ "hal",
+ "sync",
+]
+
+[[package]]
 name = "input"
 version = "0.0.0"
 dependencies = [
@@ -356,9 +370,11 @@ dependencies = [
  "event",
  "fat",
  "fb-console",
+ "geom",
  "gpt",
  "hal",
  "idregs",
+ "inet",
  "input",
  "intmap",
  "irq",
@@ -505,6 +521,7 @@ name = "storage"
 version = "0.0.0"
 dependencies = [
  "bus",
+ "geom",
  "gpt",
  "sched",
  "sync",

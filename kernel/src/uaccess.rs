@@ -42,6 +42,10 @@ plain!(u8, u16, u32, u64, usize, i8, i16, i32, i64, isize);
 
 // SAFETY: an array of plain elements has no padding between them.
 unsafe impl<T: Plain, const N: usize> Plain for [T; N] {}
+// SAFETY: integers and byte arrays; the alignment pads are fields.
+unsafe impl Plain for abi::linker::KldFileStat {}
+// SAFETY: as above.
+unsafe impl Plain for abi::linker::ModuleStat {}
 
 /// The bytes of a [`Plain`] value (for replies built in the kernel).
 pub(crate) fn bytes_of<T: Plain>(v: &T) -> &[u8] {

@@ -11,7 +11,7 @@
 //! completions never run under the disk class's locks.
 //!
 //! Behavior reference: sys/dev/md/md.c (`kern_mdattach_locked`,
-//! `kern_mddetach_locked`, `kern_mdquery_locked`).
+//! `kern_mddetach_locked`, `kern_mdquery_locked`, `g_md_dumpconf`).
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -21,8 +21,8 @@ use core::mem::offset_of;
 
 use abi::errno::Errno;
 use abi::md::{
-    MD_AUTOUNIT, MD_FORCE, MD_MALLOC, MD_READONLY, MD_SWAP, MDIOCATTACH, MDIOCDETACH, MDIOCQUERY,
-    MDIOVERSION, MdIoctl,
+    MD_AUTOUNIT, MD_COMPRESS, MD_FORCE, MD_MALLOC, MD_READONLY, MD_SWAP, MDIOCATTACH, MDIOCDETACH,
+    MDIOCQUERY, MDIOVERSION, MdIoctl,
 };
 use sched::{Sleepable, WaitQueue};
 use storage::{Bio, BioError, BioOp, Disk, DiskInfo, DiskQueues};
@@ -143,6 +143,9 @@ struct Unit {
     queue: Arc<Queue>,
     kind: u32,
     options: u32,
+    /// Firmware geometry `mdconfig -x` and `-y` gave (0 for none).
+    fwsectors: u32,
+    fwheads: u32,
     /// References to the disk with nothing using it (the disk lists' and
     /// devfs's); more means a mount holds it.
     idle_refs: usize,
@@ -210,6 +213,13 @@ fn attach(s: &Sleepable, arg: &mut [u8]) -> Result<(), Errno> {
         max_transfer: MAX_TRANSFER,
         read_only: options & MD_READONLY != 0,
     };
+    // `int`s: a negative one is none.
+    let geometry =
+        |at| u32::try_from(i32::from_ne_bytes(get_u32(arg, at).to_ne_bytes())).unwrap_or(0);
+    let (fwsectors, fwheads) = (
+        geometry(offset_of!(MdIoctl, md_fwsectors)),
+        geometry(offset_of!(MdIoctl, md_fwheads)),
+    );
     let disk = storage::publish(s, info, Arc::clone(&queue) as Arc<dyn DiskQueues>);
     // One more for the table's own.
     let idle_refs = Arc::strong_count(&disk);
@@ -220,6 +230,8 @@ fn attach(s: &Sleepable, arg: &mut [u8]) -> Result<(), Errno> {
             queue,
             kind,
             options: options & !MD_AUTOUNIT,
+            fwsectors,
+            fwheads,
             idle_refs,
         },
     );
@@ -227,18 +239,51 @@ fn attach(s: &Sleepable, arg: &mut [u8]) -> Result<(), Errno> {
     Ok(())
 }
 
+/// What GEOM's MD class shows of a memory disk (`g_md_dumpconf`).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Info {
+    pub(crate) unit: u32,
+    /// `malloc` or `swap`.
+    pub(crate) kind: &'static str,
+    pub(crate) compress: bool,
+    pub(crate) read_only: bool,
+    pub(crate) fwsectors: u32,
+    pub(crate) fwheads: u32,
+}
+
+/// The memory disk `disk` is, if it is one.
+pub(crate) fn info(disk: &Arc<Disk>) -> Option<Info> {
+    let units = UNITS.lock();
+    let (&unit, u) = units.iter().find(|(_, u)| Arc::ptr_eq(&u.disk, disk))?;
+    Some(Info {
+        unit,
+        kind: if u.kind == MD_SWAP { "swap" } else { "malloc" },
+        compress: u.options & MD_COMPRESS != 0,
+        read_only: u.options & MD_READONLY != 0,
+        fwsectors: u.fwsectors,
+        fwheads: u.fwheads,
+    })
+}
+
 /// `MDIOCDETACH`: `EBUSY` while mounted, unless forced.
 fn detach(s: &Sleepable, arg: &[u8]) -> Result<(), Errno> {
     let unit = get_u32(arg, offset_of!(MdIoctl, md_unit));
     let options = get_u32(arg, offset_of!(MdIoctl, md_options));
-    let u = {
-        let mut units = UNITS.lock();
+    let (disk, idle_refs) = {
+        let units = UNITS.lock();
         let u = units.get(&unit).ok_or(Errno::ENOENT)?;
-        if Arc::strong_count(&u.disk) > u.idle_refs && options & MD_FORCE == 0 {
-            return Err(Errno::EBUSY);
-        }
-        units.remove(&unit).ok_or(Errno::ENOENT)?
+        (Arc::clone(&u.disk), u.idle_refs)
     };
+    // Open (`opencount`): references beyond the idle ones (this one, and
+    // each partition's of its disk, among them), or an open or mount of
+    // it or a partition.
+    let parts = storage::partitions(&disk).len();
+    let busy = Arc::strong_count(&disk) > idle_refs + 1 + parts || crate::geom_kern::in_use(&disk);
+    drop(disk);
+    if busy && options & MD_FORCE == 0 {
+        return Err(Errno::EBUSY);
+    }
+    let u = UNITS.lock().remove(&unit).ok_or(Errno::ENOENT)?;
     storage::withdraw(s, &u.disk);
     u.queue.bios.lock().1 = true;
     u.queue.wake.wake_one();

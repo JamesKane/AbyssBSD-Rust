@@ -134,6 +134,25 @@ impl<'a> Ring<'a> {
         put(self.buf, OFF_HEAD, head.saturating_add(bytes.len() as u64));
     }
 
+    /// Copies into `buf` what was written from byte `seq` on (as
+    /// [`Ring::written`] counts), stopping at the end of the ring's
+    /// storage, as FreeBSD's `msgbuf_getbytes` does; a `seq` the ring
+    /// has overwritten reads from its oldest byte. Returns where the read
+    /// started and how much it copied.
+    #[must_use]
+    pub fn read_from(&self, seq: u64, buf: &mut [u8]) -> (u64, usize) {
+        let cap = self.capacity();
+        let head = self.written();
+        let seq = seq.clamp(head.saturating_sub(cap as u64), head);
+        let pos = usize::try_from(seq % cap as u64).unwrap_or(0);
+        let len = usize::try_from(head - seq)
+            .unwrap_or(usize::MAX)
+            .min(cap - pos)
+            .min(buf.len());
+        buf[..len].copy_from_slice(&self.buf[HEADER + pos..][..len]);
+        (seq, len)
+    }
+
     /// The log, oldest first, as up to two slices.
     #[must_use]
     pub fn contents(&self) -> (&[u8], &[u8]) {
@@ -177,6 +196,27 @@ mod tests {
         let r = Ring::open(&mut buf).unwrap();
         assert_eq!(r.boots(), 7);
         assert_eq!(text(&r), b"cdefghij");
+    }
+
+    #[test]
+    fn reads_from_a_sequence_number() {
+        let mut buf = vec![0u8; HEADER + 8];
+        let mut r = Ring::format(&mut buf, 0).unwrap();
+        let mut out = [0u8; 16];
+        assert_eq!(r.read_from(0, &mut out), (0, 0));
+        r.write(b"abcde");
+        assert_eq!(r.read_from(0, &mut out[..2]), (0, 2));
+        assert_eq!(&out[..2], b"ab");
+        assert_eq!(r.read_from(2, &mut out), (2, 3));
+        assert_eq!(&out[..3], b"cde");
+        assert_eq!(r.read_from(5, &mut out), (5, 0));
+        // Wrapped: a reader left behind starts at the oldest byte, and a
+        // read stops at the end of the storage.
+        r.write(b"fghijk");
+        assert_eq!(r.read_from(0, &mut out), (3, 5));
+        assert_eq!(&out[..5], b"defgh");
+        assert_eq!(r.read_from(8, &mut out), (8, 3));
+        assert_eq!(&out[..3], b"ijk");
     }
 
     #[test]

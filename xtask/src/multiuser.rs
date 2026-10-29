@@ -143,12 +143,16 @@ pub(crate) fn login_script(
 /// Logs in as root on `ttyv0` with the USB keyboard, and proves the shell
 /// runs there: it writes its terminal's name to `/dev/console`, which the
 /// serial port shows (both are consoles). Typing is repeated until that
-/// line arrives, since the keyboard may attach after the prompt.
+/// line arrives, since the keyboard may attach after the prompt and getty
+/// may flush what came before its own.
 fn vt_login(session: &mut Session, screen: &Screen<'_>) -> Result<()> {
     let mut q = Qmp::connect(screen.qmp)?;
     let deadline = Instant::now() + Duration::from_secs(180);
-    q.type_text("root\n", None)?;
     let found = loop {
+        // getty on ttyv0 may still be flushing its input (`setttymode`)
+        // when the serial prompt shows, so the login is typed each time;
+        // in a shell it is just a command that is not found.
+        q.type_text("root\n", None)?;
         std::thread::sleep(Duration::from_secs(5));
         q.type_text("echo vt-$((6*7)) $(tty) > /dev/console\n", None)?;
         if session

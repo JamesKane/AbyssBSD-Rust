@@ -51,6 +51,8 @@ pub(crate) fn sync() -> Result<()> {
                 "--exclude=/target/",
                 "--exclude=/build/",
                 "--exclude=/.git/",
+                // Agents' worktrees, with their own build trees.
+                "--exclude=/.claude/",
             ])
             .arg(src)
             .arg(format!("{host}:{dir}/")),
@@ -79,8 +81,8 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
     let rev =
         util::output(Command::new("git").args(["describe", "--always", "--dirty", "--abbrev=12"]))
             .map_or_else(|_| "unknown".into(), |r| r.trim().to_owned());
-    // `ABYSS_ATF` (a feature's tests only) goes along.
-    let atf: String = ["ABYSS_ATF", "ABYSS_ATF_TIMEOUT"]
+    // `ABYSS_ATF` and `ABYSS_DIFF` (a feature's tests only) go along.
+    let atf: String = ["ABYSS_ATF", "ABYSS_ATF_TIMEOUT", "ABYSS_DIFF"]
         .iter()
         .filter_map(|k| std::env::var(k).ok().map(|v| format!("{k}={} ", quote(&v))))
         .collect();

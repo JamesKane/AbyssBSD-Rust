@@ -30,7 +30,9 @@ pub use driver::{
     StopCx,
 };
 pub use gate::{Gate, GateGuard, Revoked};
-pub use manager::{AttachRequestError, DetachError, Manager, Options, init, manager};
+pub use manager::{
+    AttachRequestError, DEVCTL_DEFAULT_QUEUE, DetachError, Manager, Options, init, manager,
+};
 pub use platform::Platform;
 pub use roothold::{RootHold, root_mount_hold, root_mount_wait};
 pub use types::{

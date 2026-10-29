@@ -4,3 +4,17 @@
 #
 # One entry per line: what follows "first use: " up to " by <program>", then
 # a comment naming the FreeBSD source that shows FreeBSD answers the same way.
+#
+# A kernel built without an option GENERIC has lacks what the option adds.
+# AbyssBSD has no NFS client, MAC framework, audit, sound, or 32-bit
+# compatibility (docs/compat-deviations.md):
+
+sysctl vfs.nfs.diskless_valid           # options NFSCL: sys/fs/nfsclient/nfs_clvfsops.c
+sysctl security.mac                     # options MAC: sys/security/mac/mac_framework.c
+syscall auditon (446)                   # options AUDIT: the !AUDIT stubs in sys/security/audit/audit_syscalls.c return ENOSYS
+sysctl hw.snd.default_unit              # device sound: sys/dev/sound/pcm/sound.c
+sysctl kern.features.compat_freebsd32   # options COMPAT_FREEBSD32: sys/compat/freebsd32/freebsd32_misc.c
+
+# Left out on purpose, as docs/compat-deviations.md says:
+
+sysctl vfs.ffs.adjrefcnt                # no background fsck: fsck_ffs -F exits 6 ("lacks kernel support", sbin/fsck_ffs/main.c) and rc checks in the foreground

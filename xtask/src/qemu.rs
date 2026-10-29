@@ -540,7 +540,17 @@ impl Vm {
         let mut cmd = self.command()?;
         // A QMP socket, for tests that press the power button.
         let qmp = (self.vmm == Vmm::Qemu && self.test_devices).then(|| {
-            let sock = log.with_extension("qmp");
+            let mut sock = log.with_extension("qmp");
+            // A UNIX socket's path must fit `sun_path` (104 bytes); a
+            // deep checkout (a worktree) puts it in the temporary
+            // directory instead.
+            if sock.as_os_str().len() >= 100 {
+                let name = log
+                    .file_stem()
+                    .map_or_else(|| "qemu".into(), |s| s.to_string_lossy().into_owned());
+                sock =
+                    std::env::temp_dir().join(format!("abyss-{}-{name}.qmp", std::process::id()));
+            }
             let _ = fs::remove_file(&sock);
             sock
         });

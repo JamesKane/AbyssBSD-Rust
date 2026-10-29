@@ -276,6 +276,42 @@ pub(crate) fn file_record(
             k.kf_status |= KF_ATTR_VALID;
             out!(k)
         }
+        FileKind::Netlink(nf) => {
+            let mut k: Box<KinfoFile<KfSock>> = record(fd, fflags);
+            k.kf_type = KF_TYPE_SOCKET;
+            k.kf_un.kf_sock_domain0 = i32::from(abi::inet::AF_NETLINK);
+            k.kf_un.kf_sock_type0 = nf.nl.ty.cast_signed();
+            k.kf_un.kf_sock_protocol0 = nf.nl.proto;
+            k.kf_un.kf_sock_pcb = identity(nf.nl.as_ref());
+            let local = nf.nl.name(false);
+            k.kf_un.kf_sa_local[..local.len()].copy_from_slice(&local);
+            let peer = nf.nl.name(true);
+            k.kf_un.kf_sa_peer[..peer.len()].copy_from_slice(&peer);
+            k.kf_status |= KF_ATTR_VALID;
+            out!(k)
+        }
+        FileKind::Inet(sf) => {
+            // `soo_fill_kinfo` for an internet socket: its PCB, queues,
+            // and names.
+            let mut k: Box<KinfoFile<KfSock>> = record(fd, fflags);
+            k.kf_type = KF_TYPE_SOCKET;
+            let so = &sf.so;
+            k.kf_un.kf_sock_domain0 = i32::from(so.family.af());
+            k.kf_un.kf_sock_type0 = so.sock_type().cast_signed();
+            k.kf_un.kf_sock_protocol0 = so.proto.number();
+            k.kf_un.kf_sock_pcb = inet::export::pcb_addr(so);
+            k.kf_un.kf_sock_inpcb = inet::export::pcb_addr(so);
+            let (sendq, recvq) = so.queues();
+            k.kf_un.kf_sock_sendq = sendq;
+            k.kf_un.kf_sock_recvq = recvq;
+            let (local, peer) = inet::names(so);
+            let n = local.len().min(128);
+            k.kf_un.kf_sa_local[..n].copy_from_slice(&local[..n]);
+            let n = peer.len().min(128);
+            k.kf_un.kf_sa_peer[..n].copy_from_slice(&peer[..n]);
+            k.kf_status |= KF_ATTR_VALID;
+            out!(k)
+        }
         FileKind::Pipe(end) => {
             let mut k: Box<KinfoFile<KfPipe>> = record(fd, fflags);
             k.kf_type = KF_TYPE_PIPE;

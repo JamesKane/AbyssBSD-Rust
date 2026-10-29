@@ -323,14 +323,14 @@ const BOOT_CASES: &[BootCase] = &[
 /// What a case is expected to do.
 #[derive(Clone, Copy, Debug)]
 enum Expected {
-    #[expect(dead_code, reason = "once multi-user boots (P6.9)")]
     Pass,
     /// Fail, until the named milestone; a failure does not fail the tier.
+    #[expect(dead_code, reason = "no case is expected to fail now")]
     Fail(&'static str),
 }
 
-/// The multi-user boot needs P6.1–P6.9.
-const MULTIUSER_EXPECTED: Expected = Expected::Fail("P6.9");
+/// The multi-user boot passes from P6.9 on.
+const MULTIUSER_EXPECTED: Expected = Expected::Pass;
 
 /// The multi-user boot (docs/MULTIUSER.md §14): the installed root boots
 /// to `login:`, and [`crate::multiuser::login_script`] logs in on `ttyv0`
@@ -348,7 +348,7 @@ fn multiuser(
         release,
         ktest: false,
     };
-    let disk = image::build_installed_root(arch, opts, "boot_multicons=YES")?;
+    let disk = image::build_installed_root(arch, opts, "boot_multicons=YES boot_serial=YES")?;
     let suffix = match vmm {
         Vmm::Bhyve => "-bhyve",
         Vmm::Qemu => "",
@@ -380,7 +380,7 @@ fn multiuser(
         session,
         screen.as_ref(),
         Duration::from_secs(600),
-        &["panic:", "(no init until P6.9)"],
+        &["panic:", "(no init)"],
     );
     let console = std::fs::read_to_string(&log).unwrap_or_default();
     let first = crate::multiuser::unexpected_first_uses(&console)?;
@@ -472,7 +472,7 @@ fn shell(
                 };
                 session.script(ufs, Duration::from_secs(600))?;
                 session.script(crate::expect::DYNAMIC, Duration::from_secs(60))?;
-                session.script(crate::diff::DIFF, Duration::from_secs(900))?;
+                session.script(&crate::diff::steps(), Duration::from_secs(900))?;
                 if !quick {
                     session.script(crate::expect::DYNAMIC_TESTS, Duration::from_secs(900))?;
                     session.script(crate::expect::FREEBSD_TESTS, Duration::from_secs(3600))?;

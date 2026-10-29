@@ -51,7 +51,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use abi::errno::Errno;
 use abi::fcntl::{FREAD, FWRITE};
 use abi::ioctl::*;
-use abi::signal::{SIGHUP, SIGINT, SIGTTIN, SIGTTOU, SIGUSR1, SIGUSR2, SIGWINCH};
+use abi::signal::{SIGHUP, SIGTTIN, SIGTTOU, SIGWINCH};
 use abi::termios::{
     CLOCAL, CNO_RTSDTR, ICANON, IXANY, IXOFF, IXON, NCCS, TOSTOP, Termios, VMIN, VSTART, VSTOP,
     VTIME, Winsize,
@@ -85,19 +85,16 @@ impl input::Consumer for ConsoleInput {
         crate::vtcons::keys(s, codes, &mut |e| self.event(s, e))
     }
 
-    /// The reboot, halt, and power-off keys signal `init`, as FreeBSD's
-    /// `shutdown_nice` does.
-    fn event(&self, _: &Sleepable, e: input::term::Event) {
+    /// The reboot, halt, and power-off keys, as FreeBSD's `shutdown_nice`
+    /// (which signals init).
+    fn event(&self, s: &Sleepable, e: input::term::Event) {
+        use crate::shutdown::{RB_HALT, RB_POWEROFF, shutdown_nice};
         use input::term::Event;
-        let sig = match e {
-            Event::Reboot => SIGINT,
-            Event::Halt => SIGUSR1,
-            Event::PowerOff => SIGUSR2,
-            _ => return,
-        };
-        if let Some(init) = crate::proc::all().into_iter().find(|p| p.pid() == 1) {
-            let info = crate::signal::user_info(sig, 0, abi::signal::code::SI_KERNEL);
-            let _ = crate::signal::post(&init, info);
+        match e {
+            Event::Reboot => shutdown_nice(s, 0),
+            Event::Halt => shutdown_nice(s, RB_HALT),
+            Event::PowerOff => shutdown_nice(s, RB_HALT | RB_POWEROFF),
+            _ => {}
         }
     }
 }
@@ -240,6 +237,9 @@ struct Ctty {
     /// The node the leader took it through (`s_ttyvp`), revoked when the
     /// leader exits; `None` when the kernel gave it.
     unit: Option<Unit>,
+    /// That node's revocation count then: once it is revoked, another
+    /// session may take the terminal (`s_ttyvp` is `VBAD`).
+    epoch: u64,
 }
 
 /// What the terminal's lock guards: the discipline and FreeBSD's `t_flags`.
@@ -545,6 +545,7 @@ pub(crate) fn make_controlling(t: &Tty, p: &Process) {
         sid: p.sid(),
         pgrp: p.pgid(),
         unit: None,
+        epoch: 0,
     };
     t.fg_gen.fetch_add(1, Ordering::Release);
 }
@@ -1331,9 +1332,10 @@ impl Tty {
 
     /// `TIOCSCTTY` through `unit` (`None`: the master): only a session
     /// leader, for a session without one, on a terminal no other session
-    /// holds.
+    /// holds, or whose holder's node was revoked since it took it (init's
+    /// `revoke` before it gives the console to `rc.shutdown`).
     fn set_ctty(&self, s: &Sleepable, unit: Option<Unit>) -> Result<(), Errno> {
-        drop(self.enter(s)?);
+        let epochs = self.enter(s)?.epoch;
         self.background(s, SIGTTOU)?;
         let p = Process::current().ok_or(Errno::EPERM)?;
         if p.pid() != p.sid() {
@@ -1344,13 +1346,15 @@ impl Tty {
         }
         let others = TTYS.lock().iter().any(|t| t.ctty.lock().sid == p.sid());
         let mut c = self.ctty.lock();
-        if others || c.sid != 0 {
+        let revoked = c.unit.is_some_and(|u| epochs[u.index()] != c.epoch);
+        if others || (c.sid != 0 && !revoked) {
             return Err(Errno::EPERM);
         }
         *c = Ctty {
             sid: p.sid(),
             pgrp: p.pgid(),
             unit,
+            epoch: unit.map_or(0, |u| epochs[u.index()]),
         };
         drop(c);
         self.fg_gen.fetch_add(1, Ordering::Release);
@@ -1835,8 +1839,16 @@ impl CharDevice for TtyOpen {
         }
     }
 
+    /// `/dev/console`'s output goes to the message buffer too
+    /// (`ttyconsdev_write`'s `log_console`).
     fn write(&self, s: &Sleepable, uio: &mut dyn Uio, _: u64, nb: bool) -> Result<usize, Errno> {
-        self.tty.write(s, uio, nb)
+        if self.unit != Unit::Console {
+            return self.tty.write(s, uio, nb);
+        }
+        let mut tee = crate::klog::Tee::new(uio);
+        let r = self.tty.write(s, &mut tee, nb);
+        crate::klog::log_console(tee.seen());
+        r
     }
 
     fn ioctl(&self, s: &Sleepable, req: u32, arg: &mut [u8]) -> Result<(), Errno> {

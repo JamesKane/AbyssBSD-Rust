@@ -39,6 +39,10 @@ use crate::types::{
     WaitReason,
 };
 
+mod devctl;
+
+pub use devctl::DEFAULT_QUEUE as DEVCTL_DEFAULT_QUEUE;
+
 static TOPOLOGY: LockClass = LockClass::new("bus topology", 300);
 
 struct Node {
@@ -64,6 +68,11 @@ struct Node {
     start: StartPhase,
     /// Disabled (FreeBSD's `device_disable`): named, never attached.
     disabled: Option<&'static str>,
+    /// The one driver it may have (`devctl set driver`: FreeBSD's
+    /// `DF_FIXEDCLASS` devclass).
+    fixed: Option<usize>,
+    /// Its nomatch event went out (FreeBSD's `DF_DONENOMATCH`).
+    nomatch_sent: bool,
 }
 
 /// Starts run in tree order (DRIVER-MODEL.md §4.3): a bus adds children
@@ -162,8 +171,10 @@ pub struct Manager {
     idle_q: WaitQueue,
     /// Granted memory ranges (base, length).
     claims: SpinLock<Vec<(u64, u64)>>,
-    /// devctl event lines, for /dev/devctl (P4), bounded.
-    events: SpinLock<VecDeque<String>>,
+    /// devctl event lines, for /dev/devctl, bounded.
+    events: SpinLock<devctl::Events>,
+    /// Called after a line is queued: /dev/devctl's wakeup.
+    on_event: Once<fn()>,
     /// `hw.bus.info`'s generation: bumped on every visible change.
     generation: AtomicU32,
     /// Verifier mode: fault injection and ledger enforcement.
@@ -199,10 +210,6 @@ pub(crate) fn try_sleep_ms(s: &Sleepable, ms: u64) -> u64 {
     }
 }
 
-/// Events kept for /dev/devctl before the oldest are dropped
-/// (`hw.bus.devctl_queue`'s default).
-const EVENT_QUEUE: usize = 1000;
-
 /// Marks a claim as I/O ports rather than memory: the spaces overlap
 /// numerically but never in fact.
 pub(crate) const IO_SPACE: u64 = 1 << 63;
@@ -217,6 +224,13 @@ pub struct Options {
     pub fault_one_in: u64,
     /// The fault generator's seed.
     pub fault_seed: u64,
+    /// devctl events kept before the oldest are dropped, 0 for none
+    /// (the `hw.bus.devctl_queue` tunable; FreeBSD's default is
+    /// [`DEVCTL_DEFAULT_QUEUE`]).
+    pub devctl_queue: usize,
+    /// Nomatch events are queued (the `hw.bus.devctl_nomatch_enabled`
+    /// tunable; on by default).
+    pub devctl_nomatch: bool,
 }
 
 /// Sets up the manager with the build's driver table and starts its
@@ -254,6 +268,8 @@ pub fn init(
         sysctl: None,
         start: StartPhase::Attach,
         disabled: None,
+        fixed: None,
+        nomatch_sent: false,
     }));
     topo.graph.add_node(0);
     let faults = (o.fault_one_in > 0).then_some(Faults {
@@ -271,7 +287,8 @@ pub fn init(
             jobs_done: AtomicU32::new(0),
             idle_q: WaitQueue::new(),
             claims: SpinLock::new(Vec::new()),
-            events: SpinLock::new(VecDeque::new()),
+            events: SpinLock::new(devctl::Events::new(o.devctl_queue, o.devctl_nomatch)),
+            on_event: Once::new(),
             generation: AtomicU32::new(1),
             faults: SpinLock::new(faults),
         })
@@ -376,27 +393,6 @@ impl Manager {
         line
     }
 
-    fn event(&self, line: String) {
-        let mut e = self.events.lock();
-        if e.len() == EVENT_QUEUE {
-            e.pop_front();
-        }
-        e.push_back(line);
-    }
-
-    /// Queues a notification (`devctl_notify`): `!system=… subsystem=…
-    /// type=… data`.
-    pub fn notify(&self, system: &str, subsystem: &str, kind: &str, data: Option<&str>) {
-        let mut line = String::new();
-        let _ = devtree::devctl::notify(&mut line, system, subsystem, kind, data);
-        self.event(line);
-    }
-
-    /// The devctl events so far (oldest first), consuming them.
-    pub fn take_events(&self) -> Vec<String> {
-        self.events.lock().drain(..).collect()
-    }
-
     /// Adds a device the kernel drives itself (the platform root, the
     /// interrupt controllers it set up at boot) as an attached node of
     /// class `class`, so the tree shows it as FreeBSD's does. It has no
@@ -433,6 +429,8 @@ impl Manager {
                 sysctl: None,
                 start: StartPhase::Attach,
                 disabled: None,
+                fixed: None,
+                nomatch_sent: false,
             };
             if index as usize == t.nodes.len() {
                 t.nodes.push(Some(node));
@@ -497,6 +495,8 @@ impl Manager {
             sysctl: None,
             start: StartPhase::Attach,
             disabled: None,
+            fixed: None,
+            nomatch_sent: false,
         };
         let (index, generation) = match t.free.pop() {
             Some((i, g)) => (i, g),
@@ -628,6 +628,8 @@ impl Manager {
             sysctl: None,
             start: StartPhase::Attach,
             disabled: Some(class),
+            fixed: None,
+            nomatch_sent: false,
         };
         let (index, generation) = match t.free.pop() {
             Some((i, g)) => (i, g),
@@ -655,7 +657,7 @@ impl Manager {
         };
         let mut best: Option<(usize, Rank)> = None;
         for (i, d) in self.drivers.iter().enumerate() {
-            if n.declined.contains(&i) {
+            if n.declined.contains(&i) || n.fixed.is_some_and(|f| f != i) {
                 continue;
             }
             let Some(r) = d.ids.rank_for(&n.ident) else {
@@ -670,9 +672,8 @@ impl Manager {
             }
         }
         let Some((d, _)) = best else {
-            // No match: FreeBSD's nomatch event.
-            let line = self.device_line(t, '?', "", id.index);
-            self.event(line);
+            // No match: FreeBSD's nomatch event, once per node.
+            self.nomatch(t, id);
             return;
         };
         let decl = &self.drivers[d];

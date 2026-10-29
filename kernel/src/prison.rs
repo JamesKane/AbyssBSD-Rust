@@ -801,6 +801,31 @@ fn param_tree(t: &mut sysctl::Tree, jail: sysctl::NodeId) {
             .expect("sysv");
         leaf(t, n, "", int_kind, "E,jailsys", int());
     }
+    // `options INET` and `INET6`: the address lists are structures, whose
+    // value is their element's size.
+    for (family, size, format) in [("ip4", 4usize, "S,in_addr,a"), ("ip6", 16, "S,in6_addr,a")] {
+        let n = t
+            .add_node(param, Number::Auto, family, "Jail address virtualization")
+            .expect("ip4/ip6");
+        let sys = t
+            .add_formatted(
+                n,
+                Number::Auto,
+                "",
+                "Jail parameter",
+                int_kind,
+                "E,jailsys",
+                int(),
+            )
+            .expect("a jail parameter");
+        t.set_flags(sys, ctlflag::RD | ctlflag::TUN);
+        let addr = Value::Opaque {
+            format,
+            read: alloc::boxed::Box::new(move |out| out.extend_from_slice(&size.to_ne_bytes())),
+        };
+        leaf(t, n, "addr", ctltype::OPAQUE, format, addr);
+        leaf(t, n, "saddrsel", int_kind, "B", int());
+    }
     let allow = t
         .add_node(param, Number::Auto, "allow", "Jail permission flags")
         .expect("allow");

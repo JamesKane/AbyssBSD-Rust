@@ -37,9 +37,12 @@ what userland sees, not the source of the code ([ADR-0007](adr/0007-license-and-
 
 ### 1.2 Non-goals for Phase 6
 
-- Networking beyond UNIX-domain sockets. `AF_INET` and `AF_INET6` fail with `EAFNOSUPPORT`, as on a
-  FreeBSD kernel built without `INET`/`INET6`, and `rc`'s network scripts behave as they do there.
-  P8 brings `ifnet`, loopback, and the protocols onto the socket layer designed here (§8).
+- Networking beyond loopback. `AF_INET` and `AF_INET6` UDP and TCP sockets work between local
+  addresses over `lo0` (§8.4), brought forward from P8 because stock `rc.conf` runs `syslogd -s`,
+  whose `getaddrinfo(NULL, "syslog", AI_PASSIVE)` fails without them and makes it exit. Interfaces
+  other than `lo0`, packets on a wire (Ethernet, ARP, ND, ICMP, IP forwarding), raw sockets, the
+  TCP of RFC 9293 (segments, retransmission, congestion control), multicast, firewalls, routing
+  sockets, and generic netlink families stay P8.
 - The MAC framework, `audit`, and `rctl`/`racct`: their system calls answer as on a kernel without
   those options (`ENOSYS`, or `kern.racct.enable=0`), which base copes with.
 - VNET jails, jail descriptors (`jail_attach_jd`), and hierarchical jail resource limits.
@@ -84,6 +87,7 @@ what userland sees, not the source of the code ([ADR-0007](adr/0007-license-and-
 | `sys/umtx` | kernel, host-tested | umtx keys, hashed wait chains, the mutex, condvar, rwlock, and semaphore protocols, priority-inheritance and -protection chains, robust lists (§5) |
 | `sys/event` | kernel, host-tested | `Notify`, knotes and the kqueue state machine, filter registration, `poll`/`select` collection (§7) |
 | `sys/socket` | kernel, host-tested | Sockets, socket buffers, the protocol trait, control messages, UNIX domain, the in-flight rights collector (§8) |
+| `sys/inet` | kernel, host-tested | Loopback `AF_INET`/`AF_INET6`: PCB tables with FreeBSD's bind and connect rules, UDP, TCP's states between local sockets, IP options, `lo0` with its addresses and routes, the `pcblist` and `net.routetable` records, `NETLINK_ROUTE` messages (§8.4) |
 | `sys/tty` | kernel | Already the line discipline; gains the device trait and the pseudo-terminal driver (§9) |
 | `sys/prison` | kernel, host-tested | The jail tree, parameters, and visibility rules (§10.4) |
 
@@ -332,6 +336,56 @@ mark-and-sweep collector over in-flight UNIX sockets, run when such a socket clo
 `unp_gc`; host tests build the cycles. `kern.ipc.maxfdsinflight`-style limits apply, and receiving
 past `RLIMIT_NOFILE` truncates with `MSG_CTRUNC`, as FreeBSD does.
 
+### 8.4 Internet sockets over loopback
+
+A slice of P8, brought forward for `rc`'s daemons (§1.2), in `sys/inet` with the kernel's glue in
+`kernel/src/fs/inet.rs`, `kernel/src/syscall/inet.rs`, and `kernel/src/net/`.
+
+- **Sockets.** `AF_INET` and `AF_INET6`, `SOCK_DGRAM` (UDP) and `SOCK_STREAM` (TCP), each with a
+  PCB in its protocol's table. Bind and connect follow `in_pcbbind_avail`, `in_pcb_lport_dest`,
+  and `in_pcbconnect` and their IPv6 twins: the wildcard and local addresses (`EADDRNOTAVAIL`
+  otherwise), ephemeral ports from `net.inet.ip.portrange.*` (randomized, `IP_PORTRANGE`),
+  reserved ports needing `PRIV_NETINET_RESERVEDPORT`, `EADDRINUSE` with `SO_REUSEADDR` and
+  `SO_REUSEPORT` deciding as FreeBSD's, another user's port refused, and `IPV6_V6ONLY`
+  (`net.inet6.ip6.v6only`, 1) deciding whether an `AF_INET6` socket takes IPv4 as mapped
+  addresses. The routing table decides what is reachable and the source address.
+- **UDP.** A datagram goes straight to the PCB its destination's lookup finds (exact, then the
+  bound address, then the wildcard, an IPv4 PCB before a mapped one), with the control messages
+  the receiver asked for (`IP_RECVDSTADDR`, `IP_RECVTTL`, `IP_RECVTOS`, `IP_RECVIF`,
+  `IP_ORIGDSTADDR`, `IPV6_RECVPKTINFO`, `IPV6_RECVHOPLIMIT`, `IPV6_RECVTCLASS`, `SO_TIMESTAMP`,
+  `SO_BINTIME`); none bound means an ICMP port unreachable, which a connected sender sees as
+  `ECONNREFUSED`.
+- **TCP.** Two sockets, each the other's peer: a send lands in the peer's receive buffer as far
+  as it has room, the rest in the sender's send buffer until the receiver reads, and a FIN follows
+  the last of it. The states are FreeBSD's, each segment's effect (and acknowledgement) taken at
+  once: a listener's queue with `sonewconn`'s limit (a connect past it waits, as a retransmitted
+  SYN would, until `accept` or `TCP_KEEPINIT`), `ECONNREFUSED` to a closed port, half-close,
+  `SO_LINGER` 0 resetting, data after the peer closed drawing a reset (then `EPIPE`), `TIME_WAIT`
+  holding the active closer's port for `2 * net.inet.tcp.msl_local`, and urgent data with
+  `SIOCATMARK`. A non-blocking connect returns `EINPROGRESS`, as FreeBSD's does before its
+  handshake ends.
+- **Readiness and options.** `poll` and kqueue are the socket layer's generic ones
+  (`sopoll_generic`, `filt_soread`, `filt_sowrite`); the socket level's options, `IPPROTO_IP` on
+  `AF_INET`, `IPPROTO_IPV6` on `AF_INET6` (the other level `EINVAL`, as each `*_ctloutput`), and
+  `IPPROTO_TCP`; `FIONREAD`, `FIONWRITE`, `FIONSPACE`.
+- **`lo0`.** Attached at boot as `if_loop` attaches it and configured as `rc.d/netif` leaves it
+  (`127.0.0.1/8`; bringing it up adds `::1/128` and `fe80::1%lo0/64`, `in6_ifattach`), so
+  programs and tests that run before `rc` find it; `rc`'s own `ifconfig lo0 inet 127.0.0.1/8`
+  changes the address in place. Its routes are those addresses' (a host route to `127.0.0.1`, as
+  `in_addprefix` makes on a loopback interface) and whatever `route(8)` adds (`rc.d/routing`'s
+  reject routes).
+- **Interfaces as programs read them.** The interface ioctls on any socket (`SIOCGIFFLAGS`,
+  `SIOCGIFMTU`, `SIOCGIFINDEX`, `SIOCGIFCONF`, `SIOCGIFGROUP`, the capabilities, description,
+  metric), the `AF_INET` and `AF_INET6` address ones (`SIOCAIFADDR`, `SIOCGIFADDR`,
+  `SIOCGIFAFLAG_IN6`, `SIOCGIFINFO_IN6`, ...), `net.routetable` (`NET_RT_IFLIST`,
+  `NET_RT_IFLISTL` for `getifaddrs(3)`, `NET_RT_DUMP`), `net.inet.tcp.pcblist` and
+  `net.inet.udp.pcblist` (`xinpgen`, `xinpcb`, `xtcpcb`), the `net.inet`, `net.inet6`, and
+  `net.link` nodes `rc` sets, and `kern.features.inet` and `inet6`.
+- **Netlink.** `PF_NETLINK` sockets with `NETLINK_ROUTE`'s `RTM_GETLINK`, `RTM_GETADDR`,
+  `RTM_NEWADDR`, `RTM_DELADDR`, `RTM_GETROUTE`, `RTM_NEWROUTE`, and `RTM_DELROUTE` (what 15.x
+  `ifconfig`, `route`, and `netstat -r` send), acknowledged as `nlmsg_ack` does, with extended
+  acknowledgements; a request is answered when it is written.
+
 ## 9. Terminals
 
 ### 9.1 The device trait
@@ -436,7 +490,9 @@ The kernel executes `init` from `init_path` (`/sbin/init:/sbin/oinit:/sbin/init.
 as pid 1 with `/dev/console` on descriptors 0–2. `boot -s` (`RB_SINGLE`) makes init ask for a
 shell. The loader's environment is the kernel environment (`kenv(2)`), from which `init_path`,
 `vfs.root.mountfrom`, and the tunables come. The P4 path that starts `/rescue/sh` directly becomes
-the fallback when no init can be executed, as FreeBSD's.
+the fallback when no init can be executed, where FreeBSD panics; the boot tier's shell cases ask for
+it with `abyss.shell=1` (docs/compat-deviations.md, Boot). With init, the kernel mounts only the
+root: `rc` mounts `/tmp`, `/boot/efi`, and the rest from `fstab`.
 
 ### 11.2 What `rc` needs
 
@@ -448,7 +504,8 @@ side of each, by area:
 | File systems | `fsck`, `root`, `mountcritlocal`, `tmp`, `var`, `cleanvar` | `fsck -p` on the read-only root (raw reads of a mounted disk), `mount -u -o rw /`, `mount -a` from `fstab`, `mount -t tmpfs`, `fstab`'s ESP on `/boot/efi` (the kernel stops mounting it itself) |
 | Devices | `devfs`, `devd`, `devmatch`, `kldxref`, `moused` | devfs rules (`DEVFSIO_*` ioctls, `devfs.rules`), `/dev/devctl` events and `/dev/devctl2`, `kldstat`/`kldnext` and `kern.module_path` answering as a kernel with every module built in |
 | System state | `hostid`, `random`, `adjkerntz`, `sysctl`, `hostname`, `dumpon`, `savecore`, `ldconfig`, `motd`, `osrelease`, `dmesg`, `utx` | `kern.hostuuid`/`hostid`, writes to `/dev/random` and `kern.random.*`, `machdep.adjkerntz`/`wall_cmos_clock`, the `sysctl.conf` nodes, `kern.msgbuf`, `dumpon`'s `DIOCSKERNELDUMP` failing as without a dump device |
-| Services | `syslogd`, `newsyslog`, `cron`, `virecover`, `sendmail` | UNIX sockets (§8.2), `/dev/klog`, `kqueue`, capability mode and `libcasper` (§10.3), `setlogin`, and the absent-network behavior of a kernel without `INET` |
+| Services | `syslogd`, `newsyslog`, `cron`, `virecover`, `sendmail` | UNIX sockets (§8.2), `/dev/klog`, `kqueue`, capability mode and `libcasper` (§10.3), `setlogin`, and loopback `INET`/`INET6` sockets (§8.4: `syslogd`'s wildcard UDP sockets, `sendmail`'s local relay) |
+| Network | `netif`, `routing`, `netoptions`, `defaultroute` (with stock `rc.conf`: `lo0` only) | `lo0`, `ifconfig`'s netlink requests and interface ioctls, `route`'s netlink requests, the `net.inet`/`net.inet6`/`net.link` sysctls they set, `kern.features.inet`/`inet6` (§8.4) |
 | Logins | `init` with `/etc/ttys` | `getty` on `ttyu0` and `ttyv0`–`ttyv7`, `login` with PAM (`dlopen`), `setusercontext` (class, limits, priority, umask, `cpuset`), `utmpx` |
 
 ### 11.3 devd and devctl
@@ -466,7 +523,10 @@ rules.
 (`reboot -r`), from init's sequence (`rc.shutdown`, `SIGTERM` then `SIGKILL` to all, sync): the
 kernel syncs, unmounts every file system (UFS2 clean, so the next boot's `fsck -p` has nothing to
 do), and powers off or resets through ACPI or PSCI. `shutdown -p now`, `halt`, `reboot`, and
-Ctrl-Alt-Del work.
+Ctrl-Alt-Del work. `RB_REROOT` is `EOPNOTSUPP` until a phase needs it (docs/compat-deviations.md).
+Device I/O does not hold its descriptor's offset lock (FreeBSD's `FOF_NOLOCK`), so a write to the
+console is not held behind a read sleeping on the same terminal's descriptor, as `rc.shutdown`'s
+would be behind the login shell's.
 
 ## 12. Observability
 

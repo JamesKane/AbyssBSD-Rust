@@ -1165,6 +1165,12 @@ impl Process {
         self.image.lock().clone()
     }
 
+    /// Replaces its arguments as `kern.proc.args` shows them
+    /// (`setproctitle`).
+    pub(crate) fn set_args(&self, args: &[u8]) {
+        self.image.lock().args = args.into();
+    }
+
     /// Calls `f` with its command name (`ki_comm`), without copying the
     /// rest of the image.
     pub(crate) fn with_comm<R>(&self, f: impl FnOnce(&[u8]) -> R) -> R {

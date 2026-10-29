@@ -3865,3 +3865,267 @@ ktest! {
         assert!(e.as_real().is_root());
     }
 }
+
+ktest! {
+    /// GEOM's userland view (`kern.disks`, `kern.geom.conftxt`, `confxml`):
+    /// the boot disk and its table; then a table written to the scratch
+    /// disk, which appears once its writer closes it, has its labels
+    /// withered while a partition is open for writing, and goes once the
+    /// disk is opened for writing again and overwritten.
+    fn geom_shows_disks_and_retastes_written_tables() {
+        use alloc::string::String;
+        use alloc::sync::Arc;
+        use alloc::vec::Vec;
+
+        /// A device that does nothing, standing in for a disk node's.
+        struct Nothing;
+        impl vfs::CharDevice for Nothing {
+            fn read(
+                &self,
+                _: &sched::Sleepable,
+                _: &mut dyn vfs::Uio,
+                _: u64,
+                _: bool,
+            ) -> Result<usize, abi::errno::Errno> {
+                Ok(0)
+            }
+            fn write(
+                &self,
+                _: &sched::Sleepable,
+                _: &mut dyn vfs::Uio,
+                _: u64,
+                _: bool,
+            ) -> Result<usize, abi::errno::Errno> {
+                Ok(0)
+            }
+        }
+
+        let s = cx();
+        let read = |name: &str| -> String {
+            let oid = crate::sysctl::read(&s, |t| t.name2oid(name))
+                .unwrap_or_else(|| panic!("{name}"));
+            let q = crate::sysctl::read(&s, |t| t.query(&oid)).expect("a query node");
+            let mut out = Vec::new();
+            q(None, &mut out).expect(name);
+            assert_eq!(out.pop(), Some(0), "{name} ends in a NUL");
+            String::from_utf8(out).expect("text")
+        };
+        let disks = read("kern.disks");
+        assert!(disks.split(' ').any(|d| d == "vtbd0"), "kern.disks: {disks}");
+        let txt = read("kern.geom.conftxt");
+        assert!(txt.lines().any(|l| l.starts_with("0 DISK vtbd0 ")), "{txt}");
+        assert!(
+            txt.lines().any(|l| l.starts_with("1 PART vtbd0p1 ")
+                && l.ends_with(" ty efi xs GPT xt c12a7328-f81f-11d2-ba4b-00a0c93ec93b")),
+            "{txt}"
+        );
+        let xml = read("kern.geom.confxml");
+        assert!(xml.starts_with("<mesh>\n  <class id=\"0x") && xml.ends_with("</mesh>\n"));
+        assert!(xml.contains("\t<scheme>GPT</scheme>\n"), "{xml}");
+        assert!(read("kern.geom.confdot").starts_with("digraph geom {\n"));
+
+        let nothing = || Arc::new(Nothing) as Arc<dyn vfs::CharDevice>;
+        let scratch = storage::find("vtbd1").expect("the scratch disk, vtbd1");
+        let size = usize::try_from(scratch.bytes()).unwrap();
+        let mut image = alloc::vec![0u8; size];
+        gpt::write(
+            &mut image,
+            gpt::Guid::must_parse("11111111-2222-3333-4444-555555555555"),
+            &[gpt::PartitionSpec {
+                type_guid: gpt::types::FREEBSD_UFS,
+                unique_guid: gpt::Guid::must_parse("0A0B0C0D-0E0F-1011-1213-141516171819"),
+                first_lba: 2048,
+                last_lba: 4095,
+                attributes: 1 << 59,
+                name: "geom test",
+            }],
+        )
+        .unwrap();
+        let tail = size - 33 * 512;
+        let writer = crate::geom_kern::open(&s, nothing(), &scratch, "vtbd1", true);
+        scratch.write(&s, 0, &image[..34 * 512]).unwrap();
+        scratch.write(&s, tail as u64, &image[tail..]).unwrap();
+        assert!(storage::find("vtbd1p1").is_none(), "not tasted while open");
+        drop(writer);
+        let xml = read("kern.geom.confxml");
+        assert!(storage::find("vtbd1p1").is_some(), "tasted at the last close");
+        for line in [
+            "\t  <name>vtbd1p1</name>\n",
+            "\t    <label>geom test</label>\n\t    <attrib>bootme</attrib>\n",
+            "\t    <rawuuid>0a0b0c0d-0e0f-1011-1213-141516171819</rawuuid>\n",
+            "\t    <efimedia>HD(1,GPT,0a0b0c0d-0e0f-1011-1213-141516171819,0x800,0x800)</efimedia>\n",
+            "\t  <name>gpt/geom%20test</name>\n",
+            "\t  <name>gptid/0a0b0c0d-0e0f-1011-1213-141516171819</name>\n",
+            "\t<state>OK</state>\n",
+        ] {
+            assert!(xml.contains(line), "{line:?} in {xml}");
+        }
+        // A writer of the partition: counted, and its labels wither.
+        let part = storage::find("vtbd1p1").unwrap();
+        let writer = crate::geom_kern::open(&s, nothing(), &part, "vtbd1p1", true);
+        let xml = read("kern.geom.confxml");
+        assert!(!xml.contains("gpt/geom%20test"), "labels wither while written");
+        assert!(xml.contains("\t  <mode>r1w1e0</mode>\n\t  <name>vtbd1p1</name>\n"), "{xml}");
+        assert!(xml.contains("\t  <mode>r1w1e1</mode>\n\t  <name>vtbd1</name>\n"), "{xml}");
+        drop(writer);
+        drop(part);
+        assert!(read("kern.geom.confxml").contains("gpt/geom%20test"));
+        // Opened for writing, the table goes; overwritten, it stays gone.
+        let writer = crate::geom_kern::open(&s, nothing(), &scratch, "vtbd1", true);
+        assert!(storage::find("vtbd1p1").is_none(), "spoiled");
+        scratch.write(&s, 0, &alloc::vec![0u8; 34 * 512]).unwrap();
+        scratch.write(&s, tail as u64, &alloc::vec![0u8; 33 * 512]).unwrap();
+        drop(writer);
+        assert!(!read("kern.geom.conftxt").contains("vtbd1p1"));
+        assert!(storage::find("vtbd1p1").is_none());
+    }
+}
+
+ktest! {
+    /// Loopback UDP and TCP between kernel-held sockets, with the waits
+    /// and wakeups the system calls use: a datagram to 127.0.0.1 and ::1,
+    /// a connection whose transfer outruns both buffers while the reader
+    /// sleeps in another thread, the PCB list netstat reads, `lo0` in the
+    /// routing sysctl, and a netlink `RTM_GETLINK` dump.
+    fn inet_loopback_udp_tcp_sysctl_netlink() {
+        use alloc::sync::Arc;
+        use inet::addr::{LOOPBACK6, sockaddr_in, sockaddr_in6};
+        use inet::{Cred, Family, Proto, Socket};
+        let s = cx();
+        let root = Cred::root();
+        const LO: [u8; 4] = [127, 0, 0, 1];
+
+        // UDP over both families.
+        for (family, to) in [
+            (Family::Inet, sockaddr_in(LO, 0)),
+            (Family::Inet6, sockaddr_in6(&LOOPBACK6, 0, 0)),
+        ] {
+            let rx = Socket::new(family, Proto::Udp, &root);
+            let tx = Socket::new(family, Proto::Udp, &root);
+            rx.bind(&to, &root).unwrap();
+            let port = rx.sockname().port;
+            let mut dst = to.clone();
+            dst[2..4].copy_from_slice(&port.to_be_bytes());
+            assert_eq!(tx.send_dgram(b"dgram", Some(&dst), &root), Ok(5));
+            let r = rx.recv_dgram(64, false).unwrap();
+            assert_eq!(r.data, b"dgram");
+            assert_eq!(r.from.unwrap().port, tx.sockname().port);
+            rx.close();
+            tx.close();
+        }
+
+        // TCP: a writer thread fills both buffers; this thread reads.
+        let l = Socket::new(Family::Inet, Proto::Tcp, &root);
+        l.bind(&sockaddr_in(LO, 0), &root).unwrap();
+        l.listen(1, &root).unwrap();
+        let mut dst = sockaddr_in(LO, 0);
+        dst[2..4].copy_from_slice(&l.sockname().port.to_be_bytes());
+        let c = Socket::new(Family::Inet, Proto::Tcp, &root);
+        c.connect(&dst, &root, false).unwrap();
+        let a = l.accept().unwrap();
+        const TOTAL: usize = 512 * 1024;
+        let writer = {
+            let c = Arc::clone(&c);
+            sched::spawn("inet-writer", sched::Priority::KERNEL, move |s| {
+                let chunk = alloc::vec![0x5au8; 16 * 1024];
+                let mut sent = 0;
+                while sent < TOTAL {
+                    let n = (TOTAL - sent).min(chunk.len());
+                    let r = crate::fs::socket::wait_until(s, &c.wr, 0, || {
+                        c.send_stream(&chunk[..n], false)
+                    });
+                    sent += r.expect("send");
+                }
+                c.shutdown(abi::socket::SHUT_WR).unwrap();
+            })
+            .expect("spawn")
+        };
+        let mut got = 0;
+        loop {
+            let r = crate::fs::socket::wait_until(&s, &a.rd, 0, || {
+                a.recv_stream(32 * 1024, false, false)
+            })
+            .unwrap();
+            if r.data.is_empty() {
+                break;
+            }
+            assert!(r.data.iter().all(|&b| b == 0x5a));
+            got += r.data.len();
+        }
+        assert_eq!(got, TOTAL);
+        writer.join(&s);
+
+        // netstat's view: the listener and both ends of the connection.
+        let mut out = alloc::vec::Vec::new();
+        let oid = crate::sysctl::read(&s, |t| t.name2oid("net.inet.tcp.pcblist")).unwrap();
+        crate::sysctl::read_oid(&s, &oid, &mut out).unwrap();
+        let gen_ = size_of::<abi::inet::Xinpgen>();
+        let rec = size_of::<abi::inet::Xtcpcb>();
+        assert!(out.len() >= 2 * gen_ + 3 * rec);
+        // `getifaddrs`'s list: lo0 first, with its addresses.
+        out.clear();
+        let mut oid = crate::sysctl::read(&s, |t| t.name2oid("net.routetable")).unwrap();
+        oid.extend_from_slice(&[0, 0, abi::net::net_rt::IFLISTL, 0]);
+        crate::sysctl::read_oid(&s, &oid, &mut out).unwrap();
+        assert_eq!(out[3], abi::net::rtm::IFINFO);
+        assert!(out.windows(3).any(|w| w == b"lo0"));
+        // ifconfig's first request.
+        let mut req = alloc::vec![0u8; 32];
+        req[0..4].copy_from_slice(&32u32.to_ne_bytes());
+        req[4..6].copy_from_slice(&abi::netlink::RTM_GETLINK.to_ne_bytes());
+        let fl = abi::netlink::NLM_F_REQUEST | abi::netlink::NLM_F_DUMP;
+        req[6..8].copy_from_slice(&fl.to_ne_bytes());
+        let ctx = inet::netlink::Ctx {
+            port: 1,
+            ..inet::netlink::Ctx::default()
+        };
+        let reply = inet::netlink::handle(&ctx, &req, 0);
+        assert_eq!(
+            u16::from_ne_bytes([reply[4], reply[5]]),
+            abi::netlink::RTM_NEWLINK
+        );
+        assert!(reply.windows(4).any(|w| w == b"lo0\0"));
+        for x in [c, a, l] {
+            x.close();
+        }
+    }
+}
+
+ktest! {
+    /// FreeBSD's own `ifconfig` and `route` (from `/rescue`) over netlink
+    /// and the interface ioctls: `lo0` as FreeBSD prints it once
+    /// `rc.d/netif` has run, the commands `rc` runs on it, and a route
+    /// lookup, add, and delete.
+    fn rescue_ifconfig_and_route_on_lo0() {
+        use crate::proc::Process;
+        let s = cx();
+        if crate::md::archive().is_none() {
+            return;
+        }
+        let script: &[u8] = b"out=$(ifconfig lo0) || exit 1; \
+            case \"$out\" in *'lo0: flags=1008049<UP,LOOPBACK,RUNNING,MULTICAST,LOWER_UP> metric 0 mtu 16384'*) ;; *) echo \"$out\"; exit 2;; esac; \
+            case \"$out\" in *'options=680003<RXCSUM,TXCSUM,LINKSTATE,RXCSUM_IPV6,TXCSUM_IPV6>'*) ;; *) echo \"$out\"; exit 3;; esac; \
+            case \"$out\" in *'inet 127.0.0.1 netmask 0xff000000'*) ;; *) echo \"$out\"; exit 4;; esac; \
+            case \"$out\" in *'inet6 ::1 prefixlen 128'*) ;; *) echo \"$out\"; exit 5;; esac; \
+            case \"$out\" in *'inet6 fe80::1%lo0 prefixlen 64 scopeid 0x1'*) ;; *) echo \"$out\"; exit 6;; esac; \
+            case \"$out\" in *'groups: lo'*) ;; *) echo \"$out\"; exit 7;; esac; \
+            case \"$out\" in *'nd6 options=21<PERFORMNUD,AUTO_LINKLOCAL>'*) ;; *) echo \"$out\"; exit 8;; esac; \
+            ifconfig lo0 inet 127.0.0.1/8 alias || exit 9; \
+            ifconfig lo0 up || exit 10; \
+            [ \"$(ifconfig -l)\" = lo0 ] || exit 11; \
+            case \"$(route -n get 127.0.0.1)\" in *'interface: lo0'*) ;; *) exit 12;; esac; \
+            route -n add -inet6 fe80:: -prefixlen 10 ::1 -reject > /dev/null || exit 13; \
+            case \"$(route -n add -inet 127.0.0.1 -iface lo0 2>&1)\" in *'File exists'*) ;; *) exit 14;; esac; \
+            route -n delete -inet6 fe80:: -prefixlen 10 > /dev/null || exit 15; \
+            exit 42";
+        let p = Process::spawn(
+            &s,
+            b"/rescue/sh",
+            &[b"sh", b"-c", script],
+            &[b"PATH=/rescue", b"HOME=/"],
+            Some(hal::cpu_id()),
+        )
+        .unwrap();
+        assert_eq!(p.wait(&s), crate::proc::Exit::Code(42));
+    }
+}

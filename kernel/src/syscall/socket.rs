@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! Socket system calls, for UNIX-domain sockets (docs/MULTIUSER.md §8):
+//! Socket system calls, for UNIX-domain sockets (docs/MULTIUSER.md §8;
+//! an internet socket's are `inet.rs`'s, a netlink one's `netlink.rs`'s):
 //! `socket`, `socketpair`, `bind(at)`, `listen`, `accept(4)`,
 //! `connect(at)`, `sendto`, `sendmsg`, `recvfrom`, `recvmsg`, `shutdown`,
 //! `setsockopt`, `getsockopt`, `getsockname`, and `getpeername`, with
@@ -88,9 +89,19 @@ fn install_caps(
     p.files.lock(s).alloc_with(file, fdf, caps, 0, limit)
 }
 
-/// `socket(domain, type, protocol)`: UNIX-domain only.
+/// `socket(domain, type, protocol)`: UNIX-domain here, the internet and
+/// netlink domains in their modules.
 pub(super) fn socket(s: &Sleepable, domain: u64, ty: u64, protocol: u64) -> SysResult {
-    if int(domain) != i32::from(AF_UNIX) {
+    let d = int(domain);
+    let raw = int(ty).cast_unsigned();
+    let tflags = raw & (SOCK_CLOEXEC | SOCK_NONBLOCK | SOCK_CLOFORK);
+    if let Some(family) = u8::try_from(d).ok().and_then(inet::Family::from_af) {
+        return super::inet::socket(s, family, raw & !tflags, tflags, int(protocol));
+    }
+    if d == i32::from(abi::inet::AF_NETLINK) {
+        return super::netlink::socket(s, raw & !tflags, tflags, int(protocol));
+    }
+    if d != i32::from(AF_UNIX) {
         return Err(Errno::EAFNOSUPPORT);
     }
     let (t, flags) = kind(ty)?;
@@ -109,6 +120,14 @@ pub(super) fn socketpair(
     protocol: u64,
     rsv: u64,
 ) -> SysResult {
+    // An internet protocol has no `pr_connect2`.
+    if u8::try_from(int(domain))
+        .ok()
+        .and_then(inet::Family::from_af)
+        .is_some()
+    {
+        return Err(Errno::EOPNOTSUPP);
+    }
     if int(domain) != i32::from(AF_UNIX) {
         return Err(Errno::EAFNOSUPPORT);
     }
@@ -148,7 +167,8 @@ fn close_fd(s: &Sleepable, fd: i32) {
 fn sock(s: &Sleepable, fd: u64, need: &abi::capsicum::CapRights) -> Result<Arc<File>, Errno> {
     let f = super::io::file(s, &*process()?, fd, need)?;
     match f.kind() {
-        FileKind::Socket(_) => Ok(f),
+        FileKind::Socket(_) | FileKind::Inet(_) => Ok(f),
+        FileKind::Netlink(_) => Ok(f),
         _ => Err(Errno::ENOTSOCK),
     }
 }
@@ -198,6 +218,19 @@ pub(super) fn bindat(s: &Sleepable, fd: u64, sock_fd: u64, addr: u64, len: u64) 
         crate::capsicum::refuse(crate::ktrace::CapFail::Namei(b"AT_FDCWD"))?;
     }
     let f = sock(s, sock_fd, &crate::capsicum::rights::BIND)?;
+    if let Some(so) = super::inet::so_of(&f) {
+        // `pr_bindat` is the local domain's alone.
+        if int(fd) != AT_FDCWD {
+            return Err(Errno::EOPNOTSUPP);
+        }
+        let sa = sockaddr(addr, len)?;
+        crate::ktrace::sockaddr(s, &sa);
+        return super::inet::bind(so, &sa);
+    }
+    if super::netlink::is_netlink(&f) {
+        let sa = sockaddr(addr, len)?;
+        return super::netlink::bind(&f, &sa);
+    }
     let sf = so_of(&f);
     let sa = sockaddr(addr, len)?;
     crate::ktrace::sockaddr(s, &sa);
@@ -276,6 +309,18 @@ pub(super) fn connectat(s: &Sleepable, fd: u64, sock_fd: u64, addr: u64, len: u6
         crate::capsicum::refuse(crate::ktrace::CapFail::Namei(b"AT_FDCWD"))?;
     }
     let f = sock(s, sock_fd, &crate::capsicum::rights::CONNECT)?;
+    if let Some(so) = super::inet::so_of(&f) {
+        if int(fd) != AT_FDCWD {
+            return Err(Errno::EOPNOTSUPP);
+        }
+        let sa = sockaddr(addr, len)?;
+        crate::ktrace::sockaddr(s, &sa);
+        return super::inet::connect(s, &f, so, &sa);
+    }
+    if super::netlink::is_netlink(&f) {
+        let sa = sockaddr(addr, len)?;
+        return super::netlink::connect(&f, &sa);
+    }
     let so = &so_of(&f).so;
     let sa = sockaddr(addr, len)?;
     crate::ktrace::sockaddr(s, &sa);
@@ -303,6 +348,12 @@ pub(super) fn connect(s: &Sleepable, sock_fd: u64, addr: u64, len: u64) -> SysRe
 /// `listen(s, backlog)`.
 pub(super) fn listen(s: &Sleepable, sock_fd: u64, backlog: u64) -> SysResult {
     let f = sock(s, sock_fd, &crate::capsicum::rights::LISTEN)?;
+    if let Some(so) = super::inet::so_of(&f) {
+        return super::inet::listen(so, int(backlog));
+    }
+    if super::netlink::is_netlink(&f) {
+        return Err(Errno::EOPNOTSUPP);
+    }
     so_of(&f)
         .so
         .listen(int(backlog), &crate::fs::socket::cred())?;
@@ -312,7 +363,7 @@ pub(super) fn listen(s: &Sleepable, sock_fd: u64, backlog: u64) -> SysResult {
 /// Copies out a name to `name` of the size at `lenp` (if given): as much
 /// as fits, and at `lenp`, `real` (the name's whole size, for `accept`)
 /// or what was copied.
-fn put_name(sa: &[u8], name: u64, lenp: u64, real: bool) -> Result<(), Errno> {
+pub(super) fn put_name(sa: &[u8], name: u64, lenp: u64, real: bool) -> Result<(), Errno> {
     if name == 0 || lenp == 0 {
         return Ok(());
     }
@@ -350,6 +401,12 @@ pub(super) fn accept4(
             .map_err(|_| Errno::EFAULT)?;
     }
     let f = sock(s, sock_fd, &crate::capsicum::rights::ACCEPT)?;
+    if let Some(so) = super::inet::so_of(&f) {
+        return super::inet::accept(s, &f, so, sock_fd, name, lenp, flags, inherit);
+    }
+    if super::netlink::is_netlink(&f) {
+        return Err(Errno::EOPNOTSUPP);
+    }
     let so = &so_of(&f).so;
     if !so.is_listening() {
         return Err(Errno::EINVAL);
@@ -387,6 +444,12 @@ pub(super) fn accept4(
 /// `shutdown(s, how)`.
 pub(super) fn shutdown(s: &Sleepable, sock_fd: u64, how: u64) -> SysResult {
     let f = sock(s, sock_fd, &crate::capsicum::rights::SHUTDOWN)?;
+    if let Some(so) = super::inet::so_of(&f) {
+        return super::inet::shutdown(so, int(how));
+    }
+    if super::netlink::is_netlink(&f) {
+        return Err(Errno::EOPNOTSUPP);
+    }
     let how = int(how);
     if !(0..=SHUT_RDWR).contains(&how) {
         return Err(Errno::EINVAL);
@@ -412,8 +475,14 @@ pub(super) fn getname(s: &Sleepable, sock_fd: u64, name: u64, lenp: u64, peer: b
             &crate::capsicum::rights::GETSOCKNAME
         },
     )?;
-    let so = &so_of(&f).so;
-    let sa = if peer { so.peername()? } else { so.sockname() };
+    let sa = if let Some(so) = super::inet::so_of(&f) {
+        super::inet::name(so, peer)?
+    } else if super::netlink::is_netlink(&f) {
+        super::netlink::name(&f, peer)?
+    } else {
+        let so = &so_of(&f).so;
+        if peer { so.peername()? } else { so.sockname() }
+    };
     put_name(&sa, name, lenp, false)?;
     crate::ktrace::sockaddr(s, &sa);
     Ok(0)
@@ -436,6 +505,12 @@ pub(super) fn setsockopt(
     let mut buf = alloc::vec![0u8; n.min(256)];
     if !buf.is_empty() {
         uaccess::copy_in(&mut buf, val).map_err(|_| Errno::EFAULT)?;
+    }
+    if let Some(so) = super::inet::so_of(&f) {
+        return super::inet::setsockopt(so, int(level), int(name), &buf);
+    }
+    if super::netlink::is_netlink(&f) {
+        return super::netlink::setsockopt(&f, int(level), int(name), &buf);
     }
     so_of(&f).so.setopt(int(level), int(name), &buf)?;
     Ok(0)
@@ -461,7 +536,13 @@ pub(super) fn getsockopt(
         return Err(Errno::EINVAL);
     }
     let f = sock(s, sock_fd, &crate::capsicum::rights::GETSOCKOPT)?;
-    let v = so_of(&f).so.getopt(int(level), int(name))?;
+    let v = if let Some(so) = super::inet::so_of(&f) {
+        super::inet::getsockopt(so, int(level), int(name))?
+    } else if super::netlink::is_netlink(&f) {
+        super::netlink::getsockopt(&f, int(level), int(name))?
+    } else {
+        so_of(&f).so.getopt(int(level), int(name))?
+    };
     let n = (size as usize).min(v.len());
     if val != 0 {
         uaccess::copy_out(val, &v[..n]).map_err(|_| Errno::EFAULT)?;
@@ -586,6 +667,12 @@ fn sendit(
             &crate::capsicum::rights::SEND
         },
     )?;
+    if let Some(so) = super::inet::so_of(&f) {
+        return super::inet::sendit(s, &f, so, sock_fd, uio, to, control, flags);
+    }
+    if super::netlink::is_netlink(&f) {
+        return super::netlink::sendit(s, &f, sock_fd, uio, flags);
+    }
     let so = &so_of(&f).so;
     let control = match control {
         Some(raw) => internalize(s, &raw)?,
@@ -766,6 +853,12 @@ fn recvit(
     control: Option<(u64, u32)>,
 ) -> Result<(usize, u32, u32, i32), Errno> {
     let f = sock(s, sock_fd, &crate::capsicum::rights::RECV)?;
+    if let Some(so) = super::inet::so_of(&f) {
+        return super::inet::recvit(s, &f, so, sock_fd, uio, flags, name, control);
+    }
+    if super::netlink::is_netlink(&f) {
+        return super::netlink::recvit(s, &f, sock_fd, uio, flags, name);
+    }
     let so = &so_of(&f).so;
     let mut msgs: Vec<Vec<u8>> = Vec::new();
     let mut ext = |c: Vec<Control>| -> Result<(), Errno> {

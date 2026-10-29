@@ -54,7 +54,7 @@ impl VnodeFile {
                 if write && d.ops.dtype() == vfs::D_DISK {
                     super::cred().securelevel_ge(2)?;
                 }
-                if let Some(ops) = d.ops.instance_nonblock(s, nonblock)? {
+                if let Some(ops) = d.ops.instance_open(s, nonblock, write)? {
                     d.ops = ops;
                 }
                 Some(d)
@@ -143,6 +143,10 @@ pub(crate) enum FileKind {
     Jail(crate::prison::JailDesc),
     /// A UNIX-domain socket.
     Socket(super::socket::SocketFile),
+    /// An internet (`AF_INET`, `AF_INET6`) socket.
+    Inet(super::inet::InetFile),
+    /// A netlink socket.
+    Netlink(crate::net::netlink::NetlinkFile),
     /// A named pipe.
     Fifo(super::fifo::FifoFile),
     /// POSIX shared memory.
@@ -216,6 +220,15 @@ impl File {
         &self.kind
     }
 
+    /// An internet socket's domain (`None` for another file, a UNIX one
+    /// included).
+    pub(crate) fn inet_family(&self) -> Option<inet::Family> {
+        match &self.kind {
+            FileKind::Inet(so) => Some(so.so.family),
+            _ => None,
+        }
+    }
+
     /// The vnode, if this is a file system object.
     pub(crate) fn vnode(&self) -> Option<&Arc<Vnode>> {
         match &self.kind {
@@ -225,6 +238,8 @@ impl File {
             | FileKind::Process(_)
             | FileKind::Jail(_)
             | FileKind::Socket(_)
+            | FileKind::Inet(_)
+            | FileKind::Netlink(_)
             | FileKind::Shm(_)
             | FileKind::Kqueue(_)
             | FileKind::Timerfd(_)
@@ -245,6 +260,15 @@ impl File {
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |f| {
                 Some(f & !mask | bits & mask)
             });
+        // A device that signals hears of `O_ASYNC` (FreeBSD's `FIOASYNC`
+        // to `fo_ioctl`).
+        if mask & abi::fcntl::O_ASYNC != 0
+            && let FileKind::Vnode(VnodeFile {
+                device: Some(d), ..
+            }) = &self.kind
+        {
+            d.ops.set_async(bits & abi::fcntl::O_ASYNC != 0);
+        }
     }
 
     fn nonblock(&self) -> bool {
@@ -258,12 +282,20 @@ impl File {
         }
         match &self.kind {
             FileKind::Vnode(f) => {
+                if let Some(d) = &f.device {
+                    if f.dead() {
+                        return dead_read(d);
+                    }
+                    // Not under the offset lock (`devfs_read_f`'s
+                    // `FOF_NOLOCK`): a read waiting on a terminal must not
+                    // hold up writes through the same file.
+                    let at = *self.offset.lock(s);
+                    let n = d.ops.read(s, uio, at, self.nonblock())?;
+                    *self.offset.lock(s) = at + n as u64;
+                    return Ok(n);
+                }
                 let mut off = self.offset.lock(s);
-                let n = match &f.device {
-                    Some(d) if f.dead() => return dead_read(d),
-                    Some(d) => d.ops.read(s, uio, *off, self.nonblock())?,
-                    None => f.vnode.read_at(s, *off, uio)?,
-                };
+                let n = f.vnode.read_at(s, *off, uio)?;
                 *off += n as u64;
                 Ok(n)
             }
@@ -271,6 +303,8 @@ impl File {
             FileKind::Pipe(p) => p.read(s, uio, self.nonblock()),
             FileKind::Process(_) | FileKind::Jail(_) => Err(Errno::EOPNOTSUPP),
             FileKind::Socket(so) => so.read(s, uio, self.nonblock()),
+            FileKind::Inet(so) => so.read(s, uio, self.nonblock()),
+            FileKind::Netlink(nl) => nl.read(s, uio, self.nonblock()),
             FileKind::Fifo(f) => f.read(s, uio, self.nonblock()),
             FileKind::Shm(m) => {
                 let mut off = self.offset.lock(s);
@@ -308,6 +342,8 @@ impl File {
             | FileKind::Process(_)
             | FileKind::Jail(_)
             | FileKind::Socket(_)
+            | FileKind::Inet(_)
+            | FileKind::Netlink(_)
             | FileKind::Fifo(_)
             | FileKind::Kqueue(_)
             | FileKind::Timerfd(_)
@@ -323,17 +359,21 @@ impl File {
         }
         match &self.kind {
             FileKind::Vnode(f) => {
-                let mut off = self.offset.lock(s);
-                let n = match &f.device {
-                    Some(_) if f.dead() => return Err(Errno::ENXIO),
-                    Some(d) => d.ops.write(s, uio, *off, self.nonblock())?,
-                    None => {
-                        if self.flags() & O_APPEND != 0 {
-                            *off = f.vnode.size(s)?;
-                        }
-                        write_regular(s, &f.vnode, *off, uio)?
+                if let Some(d) = &f.device {
+                    if f.dead() {
+                        return Err(Errno::ENXIO);
                     }
-                };
+                    // As for reads (`devfs_write_f`'s `FOF_NOLOCK`).
+                    let at = *self.offset.lock(s);
+                    let n = d.ops.write(s, uio, at, self.nonblock())?;
+                    *self.offset.lock(s) = at + n as u64;
+                    return Ok(n);
+                }
+                let mut off = self.offset.lock(s);
+                if self.flags() & O_APPEND != 0 {
+                    *off = f.vnode.size(s)?;
+                }
+                let n = write_regular(s, &f.vnode, *off, uio)?;
                 *off += n as u64;
                 Ok(n)
             }
@@ -341,6 +381,8 @@ impl File {
             FileKind::Pipe(p) => p.write(s, uio, self.nonblock()),
             FileKind::Process(_) | FileKind::Jail(_) => Err(Errno::EOPNOTSUPP),
             FileKind::Socket(so) => so.write(s, uio, self.nonblock()),
+            FileKind::Inet(so) => so.write(s, uio, self.nonblock()),
+            FileKind::Netlink(nl) => nl.write(uio),
             FileKind::Fifo(f) => f.write(s, uio, self.nonblock()),
             FileKind::Shm(m) => {
                 let mut off = self.offset.lock(s);
@@ -369,6 +411,8 @@ impl File {
             | FileKind::Process(_)
             | FileKind::Jail(_)
             | FileKind::Socket(_)
+            | FileKind::Inet(_)
+            | FileKind::Netlink(_)
             | FileKind::Fifo(_)
             | FileKind::Kqueue(_)
             | FileKind::Timerfd(_)
@@ -451,6 +495,8 @@ impl File {
             FileKind::Process(pd) => Ok(pd.stat()),
             FileKind::Jail(j) => Ok(j.stat()),
             FileKind::Socket(so) => Ok(so.stat()),
+            FileKind::Inet(so) => Ok(so.stat()),
+            FileKind::Netlink(nl) => Ok(nl.stat()),
             FileKind::Fifo(f) => f.vnode.stat(s),
             FileKind::Shm(m) => Ok(m.stat(s)),
             // `kqueue_stat`: a FIFO, otherwise empty.
@@ -505,6 +551,8 @@ impl File {
             }
             FileKind::Jail(j) => j.poll(w),
             FileKind::Socket(so) => so.so.poll(events, w),
+            FileKind::Inet(so) => so.so.poll(events, w),
+            FileKind::Netlink(nl) => nl.poll(events, w),
             FileKind::Shm(_) => vfs::node::poll_no_poll(events),
             FileKind::Kqueue(k) => k.poll(events, w),
             FileKind::Timerfd(t) => t.poll(events, w),
@@ -535,6 +583,8 @@ impl File {
                 crate::event::ProcdescFilter(Arc::clone(this)),
             )),
             FileKind::Socket(so) => socket::filter(&so.so, kev),
+            FileKind::Inet(so) => inet::filter(&so.so, kev),
+            FileKind::Netlink(nl) => nl.kqfilter(kev),
             // No `EVFILT_JAILDESC` yet (docs/compat-deviations.md).
             FileKind::Process(_) | FileKind::Jail(_) | FileKind::Shm(_) => Err(Errno::EINVAL),
             FileKind::Kqueue(k) if kev.filter == abi::event::EVFILT_READ => Ok(
@@ -579,7 +629,17 @@ impl File {
             }) if group != u32::from(b't') => vnode.named().map(|(_, n)| n),
             FileKind::Pipe(_) if group == u32::from(b'f') => Some(b"pipe".to_vec()),
             FileKind::Fifo(_) if group == u32::from(b'f') => Some(b"fifo".to_vec()),
-            FileKind::Socket(_) if group == u32::from(b'f') => Some(b"socket".to_vec()),
+            FileKind::Socket(_) | FileKind::Inet(_) | FileKind::Netlink(_)
+                if group == u32::from(b'f') =>
+            {
+                Some(b"socket".to_vec())
+            }
+            // `ifioctl`'s and `rtioctl`'s, on any socket.
+            FileKind::Socket(_) | FileKind::Inet(_) | FileKind::Netlink(_)
+                if group == u32::from(b'i') || group == u32::from(b'r') =>
+            {
+                Some(b"socket".to_vec())
+            }
             FileKind::Vnode(_) if group == u32::from(b'f') => Some(b"vnode".to_vec()),
             _ => None,
         };
@@ -602,7 +662,15 @@ impl File {
         };
         match &self.kind {
             FileKind::Process(_) | FileKind::Jail(_) => Err(Errno::ENOTTY),
-            // `soo_ioctl`.
+            // `soo_ioctl`: the interface and routing requests on any
+            // socket (`ifioctl`), then the socket's own.
+            FileKind::Socket(_) | FileKind::Inet(_) | FileKind::Netlink(_)
+                if crate::net::ioctl::is_interface_request(req) =>
+            {
+                crate::net::ioctl::ifioctl(s, req, arg, self.inet_family())
+            }
+            FileKind::Inet(so) => crate::net::ioctl::soioctl(&so.so, req, arg),
+            FileKind::Netlink(nl) => nl.ioctl(req, arg),
             FileKind::Socket(so) => match req {
                 FIONBIO | FIOASYNC => Ok(0),
                 FIONREAD => {
@@ -670,6 +738,8 @@ impl File {
                     );
                     Ok(0)
                 }
+                // devfs's rule requests (`devfs_rioctl`).
+                (None, Kind::Directory) => super::devfs::rule_ioctl(f.vnode.vnode(), req, arg),
                 _ => Err(Errno::ENOTTY),
             },
         }

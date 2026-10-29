@@ -214,6 +214,8 @@ pub(super) fn fspacectl(
         FileKind::Pipe(_)
         | FileKind::Fifo(_)
         | FileKind::Socket(_)
+        | FileKind::Inet(_)
+        | FileKind::Netlink(_)
         | FileKind::Process(_)
         | FileKind::Jail(_)
         | FileKind::Kqueue(_)

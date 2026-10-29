@@ -273,6 +273,12 @@ pub struct PrimaryHeader {
     pub entries_lba: u64,
     /// The entry array's length in bytes.
     pub entries_len: usize,
+    /// The sector this header says it is in.
+    pub my_lba: u64,
+    /// The sector it says the other header is in.
+    pub alternate_lba: u64,
+    /// The entries in the array.
+    pub entries: u32,
     entry_size: usize,
     entries_crc: u32,
 }
@@ -311,9 +317,25 @@ impl PrimaryHeader {
             last_usable: le64(h, 48),
             entries_lba: le64(h, 72),
             entries_len,
+            my_lba: le64(h, 24),
+            alternate_lba: le64(h, 32),
+            entries: le32(h, 80),
             entry_size,
             entries_crc: le32(h, 88),
         })
+    }
+
+    /// Whether `other` (the backup header, for a primary) describes the
+    /// same table: the same disk, usable sectors, and entries, with the
+    /// same checksum (FreeBSD's `gpt_matched_hdrs`).
+    #[must_use]
+    pub fn matches(&self, other: &Self) -> bool {
+        self.disk_guid == other.disk_guid
+            && self.first_usable == other.first_usable
+            && self.last_usable == other.last_usable
+            && self.entries == other.entries
+            && self.entry_size == other.entry_size
+            && self.entries_crc == other.entries_crc
     }
 }
 

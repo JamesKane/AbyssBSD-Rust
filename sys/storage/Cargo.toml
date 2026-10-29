@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 bus = { path = "../bus" }
+geom = { path = "../../lib/geom" }
 gpt = { path = "../../lib/gpt" }
 sched = { path = "../sched" }
 sync = { path = "../sync" }

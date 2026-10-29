@@ -1,0 +1,50 @@
+(mount 0)
+(exit 0)
+(exit 0)
+(exit 0)
+(exit 0)
+(exit 0)
+(exit 0)
+devfs rule: ioctl DEVFSIO_RADD: File exists
+(exit 1)
+(exit 0)
+(exit 0)
+devfs rule: ioctl DEVFSIO_RADD: No such process
+(exit 1)
+100 hide
+200 path null unhide
+300 path zero unhide group operator mode 600
+(exit 0)
+100 path random unhide
+150 path pts/* unhide
+(exit 0)
+100 include 101
+200 include 100
+(exit 0)
+200 include 100
+(exit 0)
+(exit 0)
+(exit 0)
+null zero
+crw-rw-rw- root:wheel dev/null
+crw------- root:operator dev/zero
+crw-rw-rw- root:wheel /dev/zero
+(exit 0)
+null random zero
+(exit 0)
+null zero
+(exit 0)
+devfs rule: ioctl DEVFSIO_SAPPLY: No such process
+(exit 1)
+(exit 0)
+100 path random unhide
+(exit 0)
+(exit 0)
+(exit 0)
+100 include 101
+200 include 100
+(exit 0)
+(exit 0)
+(exit 0)
+(exit 0)
+(umount 0)

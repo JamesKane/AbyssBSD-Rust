@@ -262,8 +262,16 @@ impl acpi::Ops for KernelAcpi {
             return;
         }
         kprintln!("acpi: power button pressed: powering off");
-        // Not on this (AML or SCI) thread: shutdown detaches acpi0.
-        let _ = sched::spawn("shutdown", sched::Priority::KERNEL, |s| crate::power_off(s));
+        // Not on this (AML or SCI) thread: shutdown detaches acpi0. With
+        // init, it is asked (`acpi_system_eventhandler_sleep` for S5 is
+        // `shutdown_nice(RB_POWEROFF)`); without, the power goes off.
+        let _ = sched::spawn("shutdown", sched::Priority::KERNEL, |s| {
+            if crate::proc::find(crate::proc::INIT).is_some() {
+                crate::shutdown::shutdown_nice(s, crate::shutdown::RB_POWEROFF);
+            } else {
+                crate::power_off(s)
+            }
+        });
     }
 
     fn log(&self, args: core::fmt::Arguments<'_>) {

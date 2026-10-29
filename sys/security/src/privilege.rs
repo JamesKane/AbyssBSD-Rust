@@ -268,14 +268,42 @@ pub enum Priv {
     NetRaw = 395,
     /// `PRIV_NET_ROUTE`: Administer routing.
     NetRoute = 396,
+    /// `PRIV_NET_SETIFMTU`: Set interface MTU.
+    NetSetifmtu = 398,
+    /// `PRIV_NET_SETIFFLAGS`: Set interface flags.
+    NetSetifflags = 399,
+    /// `PRIV_NET_SETIFCAP`: Set interface capabilities.
+    NetSetifcap = 400,
+    /// `PRIV_NET_SETIFNAME`: Set interface name.
+    NetSetifname = 401,
+    /// `PRIV_NET_SETIFMETRIC`: Set interface metrics.
+    NetSetifmetric = 402,
+    /// `PRIV_NET_ADDIFGROUP`: Add new interface group.
+    NetAddifgroup = 409,
+    /// `PRIV_NET_DELIFGROUP`: Delete interface group.
+    NetDelifgroup = 410,
+    /// `PRIV_NET_IFCREATE`: Create cloned interface.
+    NetIfcreate = 411,
+    /// `PRIV_NET_ADDIFADDR`: Add protocol addr to interface.
+    NetAddifaddr = 413,
+    /// `PRIV_NET_DELIFADDR`: Delete protocol addr on interface.
+    NetDelifaddr = 414,
+    /// `PRIV_NET_SETIFDESCR`: Set interface description.
+    NetSetifdescr = 418,
     /// `PRIV_NETINET_RESERVEDPORT`: Bind low port number.
     NetinetReservedport = 490,
     /// `PRIV_NETINET_RAW`: Open netinet raw socket.
     NetinetRaw = 497,
     /// `PRIV_NETINET_GETCRED`: Query netinet pcb credentials.
     NetinetGetcred = 498,
+    /// `PRIV_NETINET_ADDRCTRL6`: Administer IPv6 address scopes.
+    NetinetAddrctl6 = 499,
+    /// `PRIV_NETINET_ND6`: Administer IPv6 neighbor disc.
+    NetinetNd6 = 500,
     /// `PRIV_NETINET_REUSEPORT`: Allow [rapid] port/address reuse.
     NetinetReuseport = 504,
+    /// `PRIV_NETINET_BINDANY`: Allow bind to any address.
+    NetinetBindany = 506,
     /// `PRIV_PIPEBUF`: Allow to allocate reserved pipebuf space.
     Pipebuf = 560,
     /// `PRIV_KMEM_READ`: Open mem/kmem for reading.

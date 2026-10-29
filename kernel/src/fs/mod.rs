@@ -7,8 +7,9 @@
 //! disk, which may be named by its GPT label or GUID (`/dev/gpt/rootfs0`,
 //! `/dev/gptid/…`). Without one, the memory disk is the root, mounted as
 //! tarfs (read-only), and without that an empty directory, so devfs and
-//! the console still work. devfs goes on `/dev`, tmpfs on `/tmp`, and the
-//! EFI System Partition on `/boot/efi`.
+//! the console still work. devfs goes on `/dev`; for the boot shell
+//! (`abyss.shell`), tmpfs on `/tmp` and the EFI System Partition on
+//! `/boot/efi` too, which with init `rc` mounts.
 //!
 //! Behavior reference: sys/kern/vfs_mount.c (`vfs_getnewfsid`),
 //! sys/kern/vfs_mountroot.c.
@@ -19,6 +20,7 @@ pub(crate) mod eventfd;
 pub(crate) mod fdtable;
 pub(crate) mod fifo;
 pub(crate) mod file;
+pub(crate) mod inet;
 pub(crate) mod msdosfs;
 pub(crate) mod pipe;
 pub(crate) mod shm;
@@ -179,6 +181,8 @@ pub(crate) fn init() {
     };
     devfs::init();
     crate::mdisk::init();
+    crate::devctl::init();
+    crate::klog::init(&s);
     let dev = Mount::new(
         MountInfo {
             type_name: "devfs",
@@ -186,7 +190,7 @@ pub(crate) fn init() {
             from: b"devfs".to_vec(),
             io_size: 4096,
         },
-        Box::new(devfs::DevFs),
+        Box::new(devfs::DevFs::new(0)),
     );
     let root = Arc::clone(ns.root());
     let at = Lookup {
@@ -204,8 +208,11 @@ pub(crate) fn init() {
         },
         Err(e) => kprintln!("fs: no /dev on the root file system ({e:?}); devfs not mounted"),
     }
+    // For the boot shell (`abyss.shell`), what `rc` would mount: with
+    // init, `rc` does, from `fstab` (`mount -a`) and `rc.conf` (`tmpmfs`).
+    let shell = crate::boot::flag("abyss.shell");
     // A tmpfs on /tmp, as a FreeBSD install with `tmpmfs` has.
-    if let Ok(t) = ns.lookup(&s, &at, b"/tmp") {
+    if shell && let Ok(t) = ns.lookup(&s, &at, b"/tmp") {
         let tmp = Mount::new(
             MountInfo {
                 type_name: "tmpfs",
@@ -227,7 +234,7 @@ pub(crate) fn init() {
     // The EFI System Partition on /boot/efi, read-write, as FreeBSD's
     // installer mounts it: the root disk's, or else the first disk's (the
     // boot disk's in the test machines).
-    if let Ok(dir) = ns.lookup(&s, &at, b"/boot/efi") {
+    if shell && let Ok(dir) = ns.lookup(&s, &at, b"/boot/efi") {
         let root_parent = root_disk
             .as_ref()
             .and_then(|d| d.partition().map(|(p, _)| Arc::clone(p)));
@@ -367,6 +374,7 @@ pub(crate) fn sysctl_init(s: &Sleepable) {
                 )
                 .expect("vfs node"),
         };
+        devfs::sysctl_init(t, vfs);
         t.add_handler(
             vfs,
             sysctl::Number::Auto,

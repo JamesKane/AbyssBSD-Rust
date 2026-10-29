@@ -171,25 +171,28 @@ pub fn noname() -> Vec<u8> {
     a
 }
 
-/// Locks two sockets' state in address order (once if the same).
+/// Locks two sockets' state in address order (once if the same). Bind
+/// the [`IrqOff`](sync::IrqOff) first, so it outlives both guards.
 fn lock2<'a>(
     a: &'a Socket,
     b: &'a Socket,
 ) -> (
+    sync::IrqOff,
     sync::SpinGuard<'a, Inner>,
     Option<sync::SpinGuard<'a, Inner>>,
 ) {
+    let irq = sync::IrqOff::new();
     if core::ptr::eq(a, b) {
-        return (a.inner.lock(), None);
+        return (irq, a.inner.lock(), None);
     }
     if core::ptr::from_ref(a).addr() < core::ptr::from_ref(b).addr() {
         let ga = a.inner.lock();
         let gb = b.inner.lock();
-        (ga, Some(gb))
+        (irq, ga, Some(gb))
     } else {
         let gb = b.inner.lock();
         let ga = a.inner.lock();
-        (ga, Some(gb))
+        (irq, ga, Some(gb))
     }
 }
 
@@ -495,7 +498,7 @@ impl Socket {
             return Err(Errno::EPROTOTYPE);
         }
         if !self.ty.connreq() {
-            let (mut a, b) = lock2(self, to);
+            let (irq, mut a, b) = lock2(self, to);
             if a.peer.is_some() {
                 return Err(Errno::EISCONN);
             }
@@ -510,6 +513,7 @@ impl Socket {
             refs.push(Arc::downgrade(self));
             drop(b);
             drop(a);
+            drop(irq);
             self.wake();
             return Ok(());
         }
@@ -561,7 +565,7 @@ impl Socket {
     /// `unp_connect2` for stream and seqpacket (and `socketpair`).
     fn connect2(a: &Arc<Self>, b: &Arc<Self>) {
         {
-            let (mut ga, gb) = lock2(a, b);
+            let (_irq, mut ga, gb) = lock2(a, b);
             ga.peer = Some(Arc::clone(b));
             ga.state = (ga.state & !state::ISDISCONNECTED) | state::ISCONNECTED;
             if let Some(mut gb) = gb {
@@ -593,7 +597,7 @@ impl Socket {
             return Ok(());
         }
         for (x, y) in [(a, b), (b, a)] {
-            let (mut gx, gy) = lock2(x, y);
+            let (_irq, mut gx, gy) = lock2(x, y);
             gx.peer = Some(Arc::clone(y));
             gx.state |= state::ISCONNECTED;
             match gy {
@@ -628,7 +632,7 @@ impl Socket {
             return;
         };
         let dropped = {
-            let (mut a, mut b) = lock2(self, &peer);
+            let (_irq, mut a, mut b) = lock2(self, &peer);
             if !a.peer.as_ref().is_some_and(|p| Arc::ptr_eq(p, &peer)) {
                 return;
             }

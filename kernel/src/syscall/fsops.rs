@@ -743,9 +743,26 @@ pub(super) fn nmount(s: &Sleepable, iov: u64, iovcnt: u64, flags: u64) -> SysRes
     if !covered.is_dir() {
         return Err(Errno::ENOTDIR);
     }
+    let devfs = fstype.strip_suffix(b"\0").unwrap_or(fstype) == b"devfs";
+    let rsnum = if devfs {
+        devfs_ruleset(&p, get(b"ruleset"), get(b"export").is_some())?
+    } else {
+        0
+    };
     if flags & abi::mount::MNT_UPDATE != 0 {
         let force = flags & abi::mount::MNT_FORCE != 0 || get(b"force").is_some();
-        return update(s, &covered, fstype, flags, force);
+        let r = update(s, &covered, fstype, flags, force)?;
+        // `devfs_mount`'s update: a new ruleset, applied at once.
+        if let Some(fs) = covered
+            .mount()
+            .fs()
+            .as_any()
+            .downcast_ref::<crate::fs::devfs::DevFs>()
+            && rsnum != 0
+        {
+            fs.set_ruleset(rsnum);
+        }
+        return Ok(r);
     }
     let num = |name: &[u8], default: u32| -> Result<u32, Errno> {
         get(name).map_or(Ok(default), |v| {
@@ -856,6 +873,15 @@ pub(super) fn nmount(s: &Sleepable, iov: u64, iovcnt: u64, flags: u64) -> SysRes
                 Box::new(fs),
             )
         }
+        b"devfs" => vfs::Mount::new(
+            vfs::MountInfo {
+                type_name: "devfs",
+                flags: abi::mount::MNT_LOCAL | flags,
+                from: b"devfs".to_vec(),
+                io_size: 512,
+            },
+            Box::new(crate::fs::devfs::DevFs::new(rsnum)),
+        ),
         _ => return Err(Errno::ENODEV),
     };
     let on = crate::fs::namespace().path_of(s, &covered, &crate::fs::root())?;
@@ -881,6 +907,43 @@ fn update(s: &Sleepable, v: &Arc<vfs::Vnode>, fstype: &[u8], flags: u64, force: 
         m.update(s, MNT_SOFTDEP, softdep, false)?;
     }
     Ok(0)
+}
+
+/// A devfs mount's ruleset (`devfs_mount`): the `ruleset` option, read
+/// as `%d` from 0 to 65535; in a jail, the jail's (and only that one may
+/// be asked for). `export` is not supported.
+fn devfs_ruleset(p: &crate::proc::Process, opt: Option<&[u8]>, export: bool) -> Result<u16, Errno> {
+    if export {
+        return Err(Errno::EOPNOTSUPP);
+    }
+    let asked = match opt {
+        None => 0,
+        Some(v) => {
+            // `sscanf("%d")`: spaces, a sign, digits; the rest is ignored.
+            let t = v.trim_ascii_start();
+            let (neg, t) = match t.first() {
+                Some(b'-') => (true, &t[1..]),
+                Some(b'+') => (false, &t[1..]),
+                _ => (false, t),
+            };
+            let digits = t.iter().take_while(|b| b.is_ascii_digit()).count();
+            if digits == 0 {
+                return Err(Errno::EINVAL);
+            }
+            let n = t[..digits].iter().fold(0i64, |n, &d| {
+                n.saturating_mul(10).saturating_add(i64::from(d - b'0'))
+            });
+            u16::try_from(if neg { -n } else { n }).map_err(|_| Errno::EINVAL)?
+        }
+    };
+    if !p.cred().jailed() {
+        return Ok(asked);
+    }
+    let own = u16::try_from(crate::prison::current().settings().devfs_ruleset).unwrap_or(0);
+    if asked != 0 && asked != own {
+        return Err(Errno::EPERM);
+    }
+    Ok(own)
 }
 
 /// The disk device node at `path` (a mount's `from`): its name in devfs
@@ -923,7 +986,10 @@ pub(super) fn unmount(s: &Sleepable, path_ptr: u64, flags: u64) -> SysResult {
             .find(|m| super::path::fsid(m) == want)
             .ok_or(Errno::ENOENT)?
     } else {
-        let v = crate::fs::lookup(s, &p, At::Cwd, &path, Walk::FOLLOW)?;
+        // `kern_unmount` finds the mount by its name, so a path that is
+        // not there is `EINVAL` too, as a path that is no mount point.
+        let v = crate::fs::lookup(s, &p, At::Cwd, &path, Walk::FOLLOW)
+            .map_err(|e| if e == Errno::ENOENT { Errno::EINVAL } else { e })?;
         if !v.is_mount_root() {
             return Err(Errno::EINVAL);
         }

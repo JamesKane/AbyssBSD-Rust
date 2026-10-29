@@ -135,6 +135,12 @@ struct Sinks {
     /// Text held back from the framebuffer (the rest is dropped).
     fb_held: [u8; HELD],
     fb_held_len: usize,
+    /// The message buffer's last priority (`msg_lastpri`), and whether
+    /// its last line is unfinished (`MSGBUF_NEEDNL`).
+    log_pri: i32,
+    log_open_line: bool,
+    /// Where `/dev/klog` reads next (`msg_rseq`).
+    log_rseq: u64,
 }
 
 /// Bytes of framebuffer output held at most.
@@ -167,12 +173,73 @@ pub(crate) fn set_muted(muted: bool) {
 
 impl Write for Sinks {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        if MUTED.load(core::sync::atomic::Ordering::Relaxed) {
-            if let Some(ring) = &mut self.ring {
-                ring.write(s.as_bytes());
-            }
-            return Ok(());
+        if !MUTED.load(core::sync::atomic::Ordering::Relaxed) {
+            self.write_consoles(s)?;
         }
+        self.log_ring(-1, s.as_bytes());
+        Ok(())
+    }
+}
+
+/// Set when the message buffer gains text (`msgbuftrigger`), for
+/// `/dev/klog`'s periodic wakeup.
+static LOG_TRIGGER: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+impl Sinks {
+    /// Appends `bytes` to the message buffer with priority `pri` (-1 for
+    /// none: `printf`'s), as FreeBSD's `msgbuf_addstr` does: a line of a
+    /// priority starts with `<pri>`, a change of priority ends an
+    /// unfinished line first, and carriage returns are dropped.
+    fn log_ring(&mut self, pri: i32, bytes: &[u8]) {
+        let Some(ring) = &mut self.ring else {
+            return;
+        };
+        if bytes.is_empty() {
+            return;
+        }
+        if self.log_pri != pri && self.log_open_line {
+            ring.write(b"\n");
+            self.log_open_line = false;
+        }
+        // `<pri>`, written from the right.
+        let mut prefix = [0u8; 12];
+        let mut at = prefix.len();
+        if let Ok(mut v) = u32::try_from(pri) {
+            at -= 1;
+            prefix[at] = b'>';
+            loop {
+                at -= 1;
+                prefix[at] = b'0' + u8::try_from(v % 10).unwrap_or(0);
+                v /= 10;
+                if v == 0 {
+                    break;
+                }
+            }
+            at -= 1;
+            prefix[at] = b'<';
+        }
+        let prefix = &prefix[at..];
+        let mut from = 0;
+        for (i, &b) in bytes.iter().enumerate() {
+            if !self.log_open_line && !prefix.is_empty() {
+                ring.write(&bytes[from..i]);
+                ring.write(prefix);
+                from = i;
+            }
+            if b == b'\r' {
+                ring.write(&bytes[from..i]);
+                from = i + 1;
+                continue;
+            }
+            self.log_open_line = b != b'\n';
+        }
+        ring.write(&bytes[from..]);
+        self.log_pri = pri;
+        LOG_TRIGGER.store(true, core::sync::atomic::Ordering::Release);
+    }
+
+    /// Writes to the serial port and the screen, not the message buffer.
+    fn write_consoles(&mut self, s: &str) -> fmt::Result {
         let (to_serial, to_video) = consoles();
         match &mut self.serial {
             #[cfg(target_arch = "x86_64")]
@@ -200,11 +267,65 @@ impl Write for Sinks {
                 self.fb_held_len += n;
             }
         }
-        if let Some(ring) = &mut self.ring {
-            ring.write(s.as_bytes());
-        }
         Ok(())
     }
+}
+
+/// A message of priority `pri` (`log(9)`, `vlog`): into the message
+/// buffer with its `<pri>`, and on the consoles too when `to_console`
+/// (FreeBSD's while no one has `/dev/klog` open).
+pub(crate) fn log(pri: i32, to_console: bool, args: fmt::Arguments<'_>) {
+    struct Log<'a>(&'a mut Sinks, i32, bool);
+    impl Write for Log<'_> {
+        fn write_str(&mut self, s: &str) -> fmt::Result {
+            if self.2 && !MUTED.load(core::sync::atomic::Ordering::Relaxed) {
+                self.0.write_consoles(s)?;
+            }
+            self.0.log_ring(self.1, s.as_bytes());
+            Ok(())
+        }
+    }
+    let mut c = CONSOLE.lock();
+    let _ = Log(&mut c, pri, to_console).write_fmt(args);
+}
+
+/// Puts `bytes` in the message buffer only, with priority `pri`
+/// (`msglogstr`: console output that `log_console` keeps).
+pub(crate) fn log_bytes(pri: i32, bytes: &[u8]) {
+    CONSOLE.lock().log_ring(pri, bytes);
+}
+
+/// Whether the message buffer gained text since the last call
+/// (`msgbuftrigger`, cleared).
+pub(crate) fn take_log_trigger() -> bool {
+    LOG_TRIGGER.swap(false, core::sync::atomic::Ordering::AcqRel)
+}
+
+/// Bytes of the message buffer `/dev/klog` has not read
+/// (`msgbuf_getcount`).
+pub(crate) fn msgbuf_unread() -> usize {
+    let c = CONSOLE.lock();
+    let Some(ring) = &c.ring else {
+        return 0;
+    };
+    let (a, b) = ring.contents();
+    usize::try_from(ring.written().saturating_sub(c.log_rseq))
+        .unwrap_or(usize::MAX)
+        .min(a.len() + b.len())
+}
+
+/// Takes unread bytes of the message buffer into `buf`
+/// (`msgbuf_getbytes`): as many as fit before the end of its storage.
+pub(crate) fn msgbuf_read(buf: &mut [u8]) -> usize {
+    let mut guard = CONSOLE.lock();
+    let c = &mut *guard;
+    let rseq = c.log_rseq;
+    let Some(ring) = &c.ring else {
+        return 0;
+    };
+    let (at, n) = ring.read_from(rseq, buf);
+    c.log_rseq = at + n as u64;
+    n
 }
 
 /// Holds (`true`) or releases (`false`) framebuffer output; calls nest.
@@ -248,6 +369,9 @@ static CONSOLE: SpinLock<Sinks> = SpinLock::new(Sinks {
     fb_holds: 0,
     fb_held: [0; HELD],
     fb_held_len: 0,
+    log_pri: -1,
+    log_open_line: false,
+    log_rseq: 0,
 });
 
 /// Takes over the devices the loader described.
@@ -676,4 +800,43 @@ macro_rules! kprint {
 macro_rules! kprintln {
     () => { $crate::console::print(format_args!("\n")) };
     ($($t:tt)*) => { $crate::console::print(format_args!("{}\n", format_args!($($t)*))) };
+}
+
+/// `kern.console` (`sysctl_kern_console`): the consoles in use, the best
+/// first, then `/` and every console the kernel has: the serial port's
+/// named `ttyu0` once it is a console (`uart_tty_attach`), `uart` before.
+/// libc's `getttyent` reads it for `/etc/ttys`'s `onifconsole`.
+pub(crate) fn sysctl_init(s: &sched::Sleepable) {
+    use sysctl::{Number, Value};
+    crate::sysctl::with(s, |t| {
+        let kern = t.child(t.root(), "kern").expect("kern node");
+        t.add_value(
+            kern,
+            Number::Auto,
+            "console",
+            "Console device control",
+            Value::ByteStr(alloc::boxed::Box::new(|out| {
+                let (serial, video) = consoles();
+                let serial = serial && has_serial();
+                let video = video && VIDEO.load(core::sync::atomic::Ordering::Relaxed);
+                let mut active: Vec<&str> = Vec::new();
+                if serial {
+                    active.push("ttyu0");
+                }
+                if video {
+                    active.push("ttyv0");
+                }
+                if !serial_primary() {
+                    active.reverse();
+                }
+                for c in active {
+                    out.extend_from_slice(c.as_bytes());
+                    out.push(b',');
+                }
+                out.extend_from_slice(if serial { b"/ttyu0," } else { b"/uart," });
+                out.extend_from_slice(b"ttyv0,");
+            })),
+        )
+        .expect("kern.console");
+    });
 }

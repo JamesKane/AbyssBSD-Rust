@@ -37,6 +37,7 @@ mod machdep;
 #[cfg(target_arch = "x86_64")]
 #[path = "x86_64.rs"]
 mod machdep;
+pub(crate) mod sigio;
 mod trap;
 
 pub(crate) use machdep::{get_context, prepare_context};
@@ -1245,14 +1246,16 @@ pub(super) fn kill_self(s: &Sleepable, sig: u32) -> ! {
                 let c = p.cred();
                 let comm = p.with_comm(|n| alloc::string::String::from_utf8_lossy(n).into_owned());
                 let (pid, jid, uid) = (p.pid(), c.jail_id(), c.uid);
+                // `log(LOG_INFO, ...)`, for syslogd.
+                let info = abi::syslog::LOG_INFO;
                 match &dumped {
-                    Ok(()) => kprintln!(
-                        "pid {pid} ({comm}), jid {jid}, uid {uid}: exited on signal {sig} (core dumped)"
-                    ),
-                    Err(e) => kprintln!(
-                        "pid {pid} ({comm}), jid {jid}, uid {uid}: exited on signal {sig} (no core dump - {})",
+                    Ok(()) => crate::klog::log(info, format_args!(
+                        "pid {pid} ({comm}), jid {jid}, uid {uid}: exited on signal {sig} (core dumped)\n"
+                    )),
+                    Err(e) => crate::klog::log(info, format_args!(
+                        "pid {pid} ({comm}), jid {jid}, uid {uid}: exited on signal {sig} (no core dump - {})\n",
                         e.reason()
-                    ),
+                    )),
                 }
             }
             Some(dumped.is_ok())

@@ -183,17 +183,20 @@ impl core::fmt::Debug for dyn Line {
 }
 
 impl Port for TermPort {
+    /// Under the registers' lock, as the filter decides the transmitter
+    /// is done under it: a burst started outside it could be marked done
+    /// by the filter before its bytes were in the FIFO.
     fn transmit(&self, getc: &mut dyn FnMut(&mut [u8]) -> usize) {
-        if self.txbusy.load(Ordering::Acquire) {
-            return;
-        }
-        let mut buf = [0u8; uart_16550::TX_FIFO];
-        let n = getc(&mut buf);
-        if n == 0 {
-            return;
-        }
-        self.txbusy.store(true, Ordering::Release);
         with_port!(self, u => {
+            if self.txbusy.load(Ordering::Acquire) {
+                return;
+            }
+            let mut buf = [0u8; uart_16550::TX_FIFO];
+            let n = getc(&mut buf);
+            if n == 0 {
+                return;
+            }
+            self.txbusy.store(true, Ordering::Release);
             for &b in &buf[..n] {
                 u.put_now(b);
             }
@@ -306,8 +309,12 @@ impl TermPort {
                 // What the terminal refuses is dropped (its queue is
                 // full); the receive interrupt is back on either way.
                 let _ = line.input(s, &buf[..n]);
-                let tx = self.txbusy.load(Ordering::Acquire);
-                with_port!(self, u => u.set_interrupts(true, tx, true), ());
+                // Whether a burst is out is read under the registers' lock:
+                // read before it, a burst started meanwhile would have its
+                // interrupt turned off, and output would wait for input.
+                with_port!(self, u => {
+                    u.set_interrupts(true, self.txbusy.load(Ordering::Acquire), true);
+                }, ());
             }
         }
         if pend & PEND_SIG != 0 {

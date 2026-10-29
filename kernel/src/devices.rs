@@ -204,6 +204,16 @@ pub(crate) fn init(s: &Sleepable) {
             workers,
             fault_one_in: faults,
             fault_seed: crate::time::counter(),
+            // The tunables (`TUNABLE_INT`'s reading: a bad value leaves
+            // the default).
+            devctl_queue: crate::boot::value("hw.bus.devctl_queue")
+                .and_then(|v| v.parse::<i32>().ok())
+                .map_or(bus::DEVCTL_DEFAULT_QUEUE, |q| {
+                    usize::try_from(q).unwrap_or(0)
+                }),
+            devctl_nomatch: crate::boot::value("hw.bus.devctl_nomatch_enabled")
+                .and_then(|v| v.parse::<i32>().ok())
+                .is_none_or(|v| v != 0),
         },
     );
     // The platform root, and the devices the kernel set up itself, as

@@ -22,6 +22,6 @@ pub mod disk;
 
 pub use bio::{Bio, BioError, BioOp};
 pub use disk::{
-    Disk, DiskInfo, DiskQueues, PartitionEntry, alloc_bus, alloc_unit, disks, find, free_bus,
-    partitions, publish, reserve_unit, withdraw,
+    Description, Disk, DiskInfo, DiskQueues, PartitionEntry, Rotation, Table, alloc_bus,
+    alloc_unit, disks, find, free_bus, partitions, publish, reserve_unit, retaste, spoil, withdraw,
 };

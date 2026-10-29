@@ -139,6 +139,38 @@ impl<T> Drop for SpinGuard<'_, T> {
     }
 }
 
+/// Interrupts masked for as long as it lives, restored when it goes.
+///
+/// Each [`SpinGuard`] restores the state it found, so of two guards taken
+/// with interrupts on, the first dropped before the second would unmask
+/// them with the other lock still held: a preemption then, and a thread
+/// spinning on that lock on this CPU never lets it go. Masking first, and
+/// dropping this after both guards, makes their order not matter.
+#[derive(Debug)]
+pub struct IrqOff(Option<hal::irq::Saved>);
+
+impl IrqOff {
+    /// Masks interrupts on this CPU.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Some(hal::irq::disable()))
+    }
+}
+
+impl Default for IrqOff {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for IrqOff {
+    fn drop(&mut self) {
+        if let Some(saved) = self.0.take() {
+            hal::irq::restore(saved);
+        }
+    }
+}
+
 /// A FIFO ticket spin lock for state no interrupt handler touches: holding
 /// it holds off preemption on this CPU, not interrupts. Taking it in an
 /// interrupt handler could spin forever on the holder it interrupted, so

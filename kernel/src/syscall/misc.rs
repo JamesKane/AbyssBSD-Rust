@@ -424,8 +424,181 @@ pub(super) fn kldload(file: u64) -> SysResult {
     }
 }
 
-/// `kldnext(fileid)`: there are no loaded files (the kernel's own modules
-/// are built in), so the list is empty.
-pub(super) fn kldnext(_fileid: u64) -> SysResult {
+/// The kernel's file id: the only file, everything being built in.
+const KERNEL_FILE: i32 = 1;
+
+/// The modules the kernel file holds, by FreeBSD's module names
+/// (`DECLARE_MODULE`'s, `bus/driver` for drivers), for what AbyssBSD
+/// implements; `modfind` of any other is `ENOENT`, as on a kernel built
+/// without it. Each one's id is its place here plus one.
+const MODULES: &[&[u8]] = &[
+    b"shell",
+    b"elf64",
+    b"sysvmsg",
+    b"sysvsem",
+    b"sysvshm",
+    b"ufs",
+    b"tmpfs",
+    b"msdosfs",
+    b"devfs",
+    b"acl_posix1e",
+    b"g_class",
+    b"g_part",
+    b"g_part_gpt",
+    b"g_label",
+    b"g_vfs",
+    b"g_disk",
+    b"g_dev",
+    b"g_md",
+    b"g_flashmap",
+    b"g_raid",
+    b"cam",
+    b"xpt",
+    b"da",
+    b"nda",
+    b"nvme",
+    b"virtio",
+    b"random_device",
+    b"rootbus",
+    b"efirt",
+    b"mem",
+    b"null",
+    b"if_lo",
+    b"netlink",
+    b"kbdmux",
+    b"watchdog",
+    b"pci/nvme",
+    b"pci/xhci",
+    b"pci/ahci",
+    b"pci/virtio_pci_modern",
+    b"uhub/uhub",
+    b"uhub/umass",
+    b"uhub/usbhid",
+    b"usbhid/hidbus",
+    b"hidbus/hkbd",
+    b"hidbus/hms",
+    b"acpi/uart",
+    b"nexus/efirtc",
+];
+
+/// The module with id `id`.
+fn module(id: i32) -> Result<(i32, &'static [u8]), Errno> {
+    let i = usize::try_from(id).ok().and_then(|i| i.checked_sub(1));
+    let name = i.and_then(|i| MODULES.get(i)).ok_or(Errno::ENOENT)?;
+    Ok((id, name))
+}
+
+/// `kldnext(fileid)`: the file after `fileid`, the kernel after 0.
+pub(super) fn kldnext(fileid: u64) -> SysResult {
+    match super::int(fileid) {
+        0 => Ok(KERNEL_FILE as u64),
+        KERNEL_FILE => Ok(0),
+        _ => Err(Errno::ENOENT),
+    }
+}
+
+/// `kldfind(file)`: the kernel's id for `kernel`, by base name.
+pub(super) fn kldfind(file: u64) -> SysResult {
+    let file = super::path::path(file)?;
+    let name = file.rsplit(|&b| b == b'/').next().unwrap_or(&file);
+    if name == b"kernel" {
+        Ok(KERNEL_FILE as u64)
+    } else {
+        Err(Errno::ENOENT)
+    }
+}
+
+/// `kldstat(fileid, stat)`: the kernel's record, in either version's
+/// size. The address is the link address, not where KASLR put it.
+pub(super) fn kldstat(fileid: u64, stat: u64) -> SysResult {
+    use abi::linker::{KLD_FILE_STAT_1_SIZE, KldFileStat};
+    if super::int(fileid) != KERNEL_FILE {
+        return Err(Errno::ENOENT);
+    }
+    let version = uaccess::load_u32(stat).map_err(|_| Errno::EFAULT)?;
+    let version = usize::try_from(version).unwrap_or(usize::MAX);
+    if version != KLD_FILE_STAT_1_SIZE && version != size_of::<KldFileStat>() {
+        return Err(Errno::EINVAL);
+    }
+    let k = crate::boot::info().kernel;
+    let mut st = KldFileStat {
+        version: i32::try_from(version).unwrap_or(0),
+        name: [0; abi::linker::MAXPATHLEN],
+        refs: i32::try_from(MODULES.len() + 1).unwrap_or(i32::MAX),
+        id: KERNEL_FILE,
+        _pad0: [0; 4],
+        address: k.virt.get().wrapping_sub(k.slide),
+        size: k.size,
+        pathname: [0; abi::linker::MAXPATHLEN],
+    };
+    st.name[..6].copy_from_slice(b"kernel");
+    st.pathname[..19].copy_from_slice(b"/boot/kernel/kernel");
+    uaccess::copy_out(stat, &uaccess::bytes_of(&st)[..version]).map_err(|_| Errno::EFAULT)?;
     Ok(0)
+}
+
+/// `kldfirstmod(fileid)`: the kernel's first module.
+pub(super) fn kldfirstmod(fileid: u64) -> SysResult {
+    if super::int(fileid) != KERNEL_FILE {
+        return Err(Errno::ENOENT);
+    }
+    Ok(1)
+}
+
+/// `modnext(modid)`: the module after `modid`, the first after 0; 0
+/// after the last.
+pub(super) fn modnext(modid: u64) -> SysResult {
+    match super::int(modid) {
+        0 => Ok(1),
+        _ => modfnext(modid),
+    }
+}
+
+/// `modfnext(modid)`: the next module in `modid`'s file.
+pub(super) fn modfnext(modid: u64) -> SysResult {
+    let (id, _) = module(super::int(modid))?;
+    Ok(if usize::try_from(id).is_ok_and(|i| i < MODULES.len()) {
+        u64::from(id.cast_unsigned()) + 1
+    } else {
+        0
+    })
+}
+
+/// `modstat(modid, stat)`: its name and id, with `data` in the second
+/// version's size.
+pub(super) fn modstat(modid: u64, stat: u64) -> SysResult {
+    use abi::linker::{MODULE_STAT_V1_SIZE, ModuleStat};
+    let (id, name) = module(super::int(modid))?;
+    let version = uaccess::load_u32(stat).map_err(|_| Errno::EFAULT)?;
+    let version = usize::try_from(version).unwrap_or(usize::MAX);
+    if version != MODULE_STAT_V1_SIZE && version != size_of::<ModuleStat>() {
+        return Err(Errno::EINVAL);
+    }
+    let mut st = ModuleStat {
+        version: i32::try_from(version).unwrap_or(0),
+        name: [0; abi::linker::MAXMODNAME],
+        refs: 1,
+        id,
+        _pad0: [0; 4],
+        data: 0,
+    };
+    let n = name.len().min(abi::linker::MAXMODNAME - 1);
+    st.name[..n].copy_from_slice(&name[..n]);
+    // `version` is not written back.
+    let bytes = &uaccess::bytes_of(&st)[4..version];
+    uaccess::copy_out(stat + 4, bytes).map_err(|_| Errno::EFAULT)?;
+    Ok(0)
+}
+
+/// `modfind(name)`: the id of the module `name`.
+pub(super) fn modfind(name: u64) -> SysResult {
+    let name = uaccess::copy_in_str_vec(name, abi::linker::MAXMODNAME).map_err(|e| match e {
+        uaccess::StrError::Fault => Errno::EFAULT,
+        uaccess::StrError::TooLong => Errno::ENAMETOOLONG,
+    })?;
+    MODULES
+        .iter()
+        .position(|m| *m == name.as_slice())
+        .map(|i| i as u64 + 1)
+        .ok_or(Errno::ENOENT)
 }
