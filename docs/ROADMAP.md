@@ -1988,27 +1988,32 @@ ports see it, implemented natively, and a step order for this milestone).
 - Kernel modesetting interface (KMS-equivalent: CRTCs, planes, connectors, atomic commits, dma-buf
   style buffer sharing, sync files). Decide between FreeBSD/Linux DRM ioctl compatibility and a
   new interface. The decision drives which userland GPU stacks can be reused.
-- Drivers: GOP-backed simple KMS, then virtio-gpu (2D, then 3D/venus), then a native GPU (Intel Xe
-  or AMD RDNA; one first, chosen by reference hardware).
-- evdev-compatible input interface (likely needed by a Wayland stack).
+- Drivers: GOP-backed simple KMS, then virtio-gpu (2D, then 3D/venus), then a native GPU: AMD
+  RDNA2, which the desktop's metal target and all three amd64 Tier 1 machines have
+  ([ADR-0018](adr/0018-desktop-architecture.md)).
+- evdev-compatible input interface: done in the USB track.
+- The desktop (M-D) is the acceptance workload: its `undertow` compositor on `gop-kms`, then
+  accelerated on virtio-gpu, then on RDNA2 ([DESKTOP.md](DESKTOP.md) §4).
 
 ### M-D: Desktop
 
-Forward design: [DESKTOP.md](DESKTOP.md) (draft; a Vulkan-only Wayland desktop on M-G's
-interfaces, capability IPC in place of D-Bus, one cascading configuration tree, and a step order
-for this milestone).
+Plan: [DESKTOP.md](DESKTOP.md) under [ADR-0018](adr/0018-desktop-architecture.md).
 
-- An original Wayland compositor with dynamic tiling, workspaces, animations, IPC, and declarative
-  configuration (in the spirit of Hyprland, with new code and design).
-- Wayland protocol library, renderer (software → Vulkan), panel/launcher/notifications,
-  terminal emulator, and a minimal toolkit.
-- Built for BSD, not ported to it ([VISION](VISION.md) goal 11 applies here most of all). Most
-  existing desktop stacks assume Linux: systemd/logind for seats and sessions, udev for hotplug,
-  epoll/timerfd/signalfd event loops, D-Bus as the system bus. Ours is designed for AbyssBSD's
-  interfaces from the start: kqueue event loops, devd for hotplug, Capsicum for sandboxing
-  clients, sysctl and rc for configuration and services. Portability to other systems is a
-  non-goal.
-- Prerequisites: M-G, plus audio (HDA/USB audio, later) and power management maturity.
+- **The desktop is the AbyssBSD Swift desktop** (`../AbyssBSD/desktop`): the `undertow`
+  compositor over wlroots, the Aqua toolkit and shell, portals, its applications, the login window,
+  application jails, and its installer. AbyssBSD designs no desktop of its own. It runs this one
+  as FreeBSD userland, installed from packages built for FreeBSD 15.1, unmodified.
+- The work here is the kernel beneath it. Most of what the desktop uses is P4–P6 ABI and is done.
+  Still to schedule: nullfs, the MAC framework with `mac_priority`, `sound(4)` (OSS, `sndstat`,
+  `snd_dummy`, then HDA), ACPI sleep and buttons, and ZFS (M-Z) for the installer's default
+  layout and boot environments (DESKTOP.md §3.2).
+- The desktop's own harness becomes a conformance suite, each lane compared with FreeBSD 15.1 as
+  kyua is. Its headless lanes need no graphics, so **M-D.1 can start once P6 exits**, before
+  M-G, and does not gate Day 1. First light follows M-G.1, acceleration M-G.3, and metal M-G.6.
+- Changes the desktop itself needs (a 15.1 package build, a UFS install layout, arm64 packages)
+  are made in the monorepo's plan, not carried here (DESKTOP.md §8).
+- Prerequisites by step: P6 (headless), M-G (display), P8 (network panes, Firefox), audio, P9 power
+  management (sleep), M-Z (ZFS install), INSTALLER.md (the boot loader for installed systems).
 
 ### M-Z: OpenZFS
 
@@ -2043,6 +2048,7 @@ for this milestone).
 | The X870E holds user data (Fedora NVMe, RAID array) | Catastrophic data loss | Non-designated disks attach read-only until P9. `xtask deploy` identifies the media NVMe by serial number. AbyssBSD never writes the Fedora ESP or boot entries |
 | No serial console on the X870E | Blind debugging of early hangs | Framebuffer console, persistent RAM log saved by the loader, FCH watchdog, an optional PCIe serial card or polled network log |
 | Bring-up on the Orange Pi 6 Plus costs power cycles | Slow iteration | QEMU first. Serial console from day one, the watchdog in P3. Capture the Linux/FreeBSD ground truth (ACPI dumps, register state) before the board is reimaged, and read it before experimenting |
+| The desktop is another project's plan, on FreeBSD `main` | M-D waits on changes made elsewhere; the desktop drifts toward 16-only interfaces | Its harness runs against FreeBSD 15.1 here, so drift shows as a failing lane. The asks are listed in DESKTOP.md §8 and tracked in the monorepo's plan |
 
 ## Open decisions
 
@@ -2066,3 +2072,6 @@ Decided items are struck through. Each decision is recorded as an ADR.
    never reading GPL driver source, per [ADR-0007](adr/0007-license-and-clean-implementation.md)).
    Support a limited set of hardware and expand organically, driven by the reference machines.
    Decided by ADR at the start of M-G, the first milestone that would need it.
+8. ~~Desktop~~: decided. The AbyssBSD Swift desktop, run as FreeBSD userland, with its packages
+   built for FreeBSD 15.1 ([ADR-0018](adr/0018-desktop-architecture.md)). 16-CURRENT follows once
+   the desktop is stable here.

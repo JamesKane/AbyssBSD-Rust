@@ -12,8 +12,8 @@ VFS, and UFS2 with soft updates) is built in-house on stable Rust with **zero ex
 dependencies** (`core` and `alloc` only). AMD64 (`x86_64`) and ARM64 (`aarch64`) are developed side
 by side as first-class targets, and every phase is gated on matching or beating stock FreeBSD 15.1's
 performance on the same hardware. Once the kernel is self-hosting on real AMD64 and ARM64 machines,
-the project extends to RV64 (`riscv64gc`), a Rust userland, and a native BSD-first Wayland tiling
-desktop.
+the project extends to RV64 (`riscv64gc`), a Rust userland, and the AbyssBSD Swift desktop, run
+unmodified as FreeBSD userland ([ADR-0018](docs/adr/0018-desktop-architecture.md)).
 
 ## Documents
 

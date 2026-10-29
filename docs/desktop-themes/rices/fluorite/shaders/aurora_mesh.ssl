@@ -1,9 +1,0 @@
-// Sable Shading Language (SSL) — DESKTOP.md §4.7.4
-// Kind: fill (inputs: uv, size, base_color, time)
-
-fn shade_fill(uv: vec2<f32>, _size: vec2<f32>, _base: vec4<f32>, time: f32) -> vec4<f32> {
-    let t = 0.5 + 0.5 * sin(uv.x * 3.5 - uv.y * 2.0 + time * 0.9);
-    let mag  = vec3<f32>(0.90, 0.44, 0.86);
-    let cyan = vec3<f32>(0.36, 0.88, 0.92);
-    return vec4<f32>(mix(mag, cyan, t), 1.0);
-}

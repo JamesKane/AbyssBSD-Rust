@@ -31,7 +31,7 @@ The ROM Kernel Reference Manuals worked because of a few properties, none of whi
 | **Complete example programs that compile** | Every example in the manuals builds and runs in CI on both architectures (§8.2) |
 | **A volume per audience** | Applications programmers, device programmers, hardware people, and UI designers each had a book. We keep the audiences (§2) |
 | **A hardware reference** | The machines we support, described as the kernel sees them (Volume 4) |
-| **A user-interface style guide** | Volume 6, written for M-D |
+| **A user-interface style guide** | Volume 6: the desktop's own guide, from its monorepo (§2) |
 | **Versioned with the system** (1.3, 2.0, 3.1) | A bundle names the kernel it describes; readers warn on a mismatch (§7.4) |
 
 What we drop: print layout as the primary form, and copying material another source already owns.
@@ -48,7 +48,7 @@ document only where AbyssBSD adds, differs, or has not caught up.
 | 3 | **Interface Reference** | Everyone; looked up, not read | *Includes & Autodocs* | Generated entries (§5): every system call with its AbyssBSD status, every ioctl, every sysctl, every ABI structure with its layout per architecture, errno values, loader variables and kernel environment, devfs names | D1, generated |
 | 4 | **Platforms and Hardware** | Hardware people, porters | *Hardware Reference Manual* | Boot (loader, UEFI services used, handover), ACPI as the kernel consumes it, each architecture's traps and memory model as seen from outside, each reference machine and board, the supported-hardware list | P7 onward |
 | 5 | **Kernel and Driver Guide** | People who change the kernel | (none; Amiga drivers were outside the ROM) | The architecture, the driver model and onboarding, the VFS, unsafe policy, performance rules, and generated reference for kernel-internal crates (§5.3). Internal: no stability promise | D2 |
-| 6 | **Desktop Style Guide** | Writers of desktop applications | *User Interface Style Guide* | Interaction and keyboard conventions, the compositor's IPC, the toolkit ([TOOLKIT.md](TOOLKIT.md)), the help protocol (§7.3). Forward design: [STYLE.md](STYLE.md) | M-D |
+| 6 | **Desktop Style Guide** | Writers of desktop applications | *User Interface Style Guide* | The Swift desktop's interface conventions, Aqua toolkit, menu protocol, and portals, the help protocol (§7.3). Written in the desktop's monorepo with its code ([ADR-0018](adr/0018-desktop-architecture.md)) and included here | M-D |
 | A | **Design Record** | The curious | none | The ADRs and design documents from `docs/`, included verbatim as an appendix volume, so an installed system carries its own rationale | D1 |
 
 Each volume has a stable short name used in links and paths: `user`, `sysprog`, `devices`, `ref`,
@@ -312,12 +312,13 @@ a built-in target with `std`; `aarch64-unknown-freebsd` has no prebuilt `std` an
 userland Rust target, the reader is built natively on AbyssBSD with FreeBSD's `rust` package (P9
 self-hosting), or on FreeBSD/arm64. On the host it runs from day one via `cargo xtask manual read`.
 
-**The desktop browser** (M-D): a toolkit application over the same `lib/manual` layout and index,
-with the same navigation and keys, proportional text, and SVG figures where they exist. Two
-integrations make it part of the desktop rather than an app beside it:
+**The desktop browser** (M-D): an Aqua application, written in the desktop's monorepo, over the
+same bundle and index (through `lib/manual`'s text output or a C interface to it), with the same
+navigation and keys, proportional text, and SVG figures where they exist. Two integrations make
+it part of the desktop rather than an app beside it:
 
-- **Help protocol.** Applications ask for help by address (`doc:style/keyboard#focus`) over the
-  compositor's IPC; the browser opens the node. F1 or Help in any conforming application does
+- **Help protocol.** Applications ask for help by address (`doc:style/keyboard#focus`) through the
+  desktop's IPC; the browser opens the node. F1 or Help in any conforming application does
   this, and Volume 6 makes it a rule, as the Amiga style guide made the Help key one.
 - **Launcher search provider.** The launcher queries the index directly, so typing a symbol or
   phrase there offers manual nodes beside applications.
@@ -401,7 +402,7 @@ parser in the tree and one is not worth writing for this.
 | **D2** | Installed into the image (`abyss-doc.txz`, the manpath file); `man 2abyss open` and `apropos` work on AbyssBSD in QEMU; Volume 0 (installation guide, supported hardware) and Volume 5's first chapters; the host-side TUI reader | D1; P9's documentation item | A shell case reads an entry with `man` on both architectures |
 | **D3** | The terminal reader on AbyssBSD; the examples tier; Volume 1 chapters for the P2–P6 subsystems; HTML output | D2; Rust userland builds (P9 self-hosting or M-U) | `abyssdoc` runs on the VT on both architectures; every example builds and passes |
 | **D4** | Volume 2 chapters with each device class (evdev, DRM in M-G); Volume 4 with P7 and P10 | The phases that build them | Per phase |
-| **D5** | The desktop browser, help protocol, launcher provider, Volume 6 | M-D's toolkit and IPC | F1 in a toolkit application opens its help node |
+| **D5** | The desktop browser, help protocol, launcher provider, Volume 6 (all in the desktop's monorepo) | M-D.2 | F1 in an Aqua application opens its help node |
 
 D1 can start alongside P6, since it reads the code and changes none of it. Narrative chapters then
 follow the subsystems instead of trailing them by years.

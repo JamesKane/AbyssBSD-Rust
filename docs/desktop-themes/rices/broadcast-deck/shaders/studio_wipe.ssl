@@ -1,9 +1,0 @@
-// Sable Shading Language (SSL) — DESKTOP.md §4.7.4
-// Kind: transition (inputs: from_tex, to_tex, uv, progress)
-
-fn shade_transition(uv: vec2<f32>, progress: f32) -> vec4<f32> {
-    let slant = uv.x * 0.88 + uv.y * 0.12;
-    let feather = 0.06;
-    let t = smoothstep(progress - feather, progress + feather, slant);
-    return mix(sample_to(uv), sample_from(uv), t);
-}

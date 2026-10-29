@@ -35,8 +35,8 @@ hardware is an aggregate of drivers behind a KMS class.
 - **Linux interfaces outside DRM**: sysfs, udev, uevents, fdinfo, debugfs. Where Mesa or a
   compositor needs what they give on Linux, we provide FreeBSD's equivalent (sysctl, devd).
 - **fbdev** (`/dev/fb*`) for userland. The kernel console keeps its own path (§7.6).
-- **New userland graphics APIs.** M-D's compositor uses the same DRM/KMS and Vulkan interfaces as
-  everything else.
+- **New userland graphics APIs.** M-D's compositor (the desktop's `undertow`, over wlroots) uses
+  the same DRM/KMS, GBM/EGL, and Vulkan interfaces as everything else.
 
 ## 2. The ABI decision
 
@@ -59,8 +59,9 @@ hardware is an aggregate of drivers behind a KMS class.
   build server, and reproduced byte for byte, as `devinfo` is.
 
 **Why not a new interface.** It would mean new Vulkan and GL drivers, or a translation layer in
-userland, for every GPU. That is several person-decades of Mesa. M-D's compositor gains nothing
-from a new kernel interface that DRM/KMS lacks.
+userland, for every GPU. That is several person-decades of Mesa. M-D's compositor runs on wlroots,
+libdrm, and Mesa from ports ([DESKTOP.md](DESKTOP.md) §3.3) and gains nothing from a new kernel
+interface that DRM/KMS lacks.
 
 **Sources.** We may use DRM's user interface headers (`include/uapi/drm/*.h`, MIT), libdrm (MIT),
 Mesa (MIT), and the clean-room specifications. Kernel sources are used only where the file is
@@ -354,12 +355,11 @@ Backlights are FreeBSD's `backlight(9)` devices (`/dev/backlight/backlight<N>`,
 | 2 | `virtio-gpu` 2D, then 3D (Venus, virgl) | QEMU | The test vehicle for fences, syncobj, dma-buf, and submission. Venus needs host-visible blob memory |
 | 3 | Sky1 display: `linlondp` + DP-TX + combo PHY + eDP panel + backlight | Orange Pi 6 Plus | Specifications exist; the Tier 1 arm64 board's only display path |
 | 4 | `panthor` (Immortalis-G720) | Orange Pi 6 Plus | Specifications exist; the hardest test of firmware loading, device MMUs, and the scheduler |
-| 5 | amd64 native: Radeon iGPU (RDNA2) or the RTX 4070 | X870E | §13 question 1 |
+| 5 | amd64 native: RDNA2 (Radeon 610M iGPU, Navi 22) | X870E, Z690-A | §13 question 1; the desktop's metal target |
 | Tier 2 | `msm` (Adreno 690 + DPU1) | Radxa Dragon Q8B | Specifications exist; depends on the PEP providers and the SMMUv2 backend |
 
-The ROADMAP's M-G entry names Intel Xe or AMD RDNA as the first native GPU. The X870E has no Intel
-GPU: its boot GPU is an NVIDIA RTX 4070, and its CPU has an RDNA2 iGPU. The ROADMAP should name the
-reference machines' GPUs instead.
+The ROADMAP's M-G entry names RDNA2 as the first native GPU. The X870E has no Intel GPU: its boot
+GPU is an NVIDIA RTX 4070, and its CPU has an RDNA2 iGPU.
 
 ## 10. Prerequisites from earlier phases
 
@@ -404,10 +404,11 @@ those results are recorded and do not gate.
 
 ## 13. Open questions
 
-1. **The amd64 native GPU.** The Radeon iGPU (RDNA2, amdgpu sources largely MIT, FreeBSD has
-   `drm-kmod` amdgpu for a baseline) or the RTX 4070 (NVIDIA's open kernel modules are dual
-   MIT/GPL, GSP firmware does most of the work, and FreeBSD's baseline is NVIDIA's own driver).
-   The iGPU is the likelier first choice.
+1. **The amd64 native GPU.** Decided in [ADR-0018](adr/0018-desktop-architecture.md): RDNA2
+   (amdgpu sources largely MIT, FreeBSD has `drm-kmod` amdgpu for a baseline). The desktop's metal
+   target is a Navi 22 card, the Z690-A has one, and the X870E and B650E have RDNA2 iGPUs. The
+   RTX 4070 (NVIDIA's open kernel modules are dual MIT/GPL, GSP firmware does most of the work,
+   and FreeBSD's baseline is NVIDIA's own driver) comes later.
 2. **FreeBSD's discovery and policy details** (§2, §7.4, §8): sysctl names, devd strings, master
    privileges, device node modes. Record them from FreeBSD 15.1 with `drm-kmod` before writing
    `sys/drm`.
@@ -430,9 +431,9 @@ those results are recorded and do not gate.
 | Step | Work |
 |---|---|
 | **M-G.0** | This document finalized, the ADR for open decisions 6 and 7, and FreeBSD `drm-kmod` behavior recorded (§13 question 2) |
-| **M-G.1** | `sys/drm` core (files, GEM, KMS atomic core, events), `gop-kms`, `vt` handover. Exit: a compositor from ports runs on `gop-kms` in QEMU and on both reference machines, with software rendering |
+| **M-G.1** | `sys/drm` core (files, GEM, KMS atomic core, events), `gop-kms`, `vt` handover. Exit: a compositor from ports runs on `gop-kms` in QEMU and on both reference machines, with software rendering, and the desktop's `undertow` does too (DESKTOP.md M-D.2) |
 | **M-G.2** | `sys/fence`, syncobj, sync files, dma-buf, `BufferObject` and its pager, `virtio-gpu` 2D. Exit: igt's core tests pass in QEMU |
 | **M-G.3** | `virtio-gpu` 3D (Venus). Exit: `vkcube` and Vulkan CTS subsets in QEMU |
 | **M-G.4** | Sky1 display aggregate. Exit: native modesetting on the Orange Pi 6 Plus, hotplug, backlight |
 | **M-G.5** | `panthor`. Exit: panvk runs `vkcube` and the CTS subset on the Orange Pi 6 Plus |
-| **M-G.6** | amd64 native GPU. Exit: parity with FreeBSD `drm-kmod` on the X870E |
+| **M-G.6** | amd64 native GPU (RDNA2). Exit: parity with FreeBSD `drm-kmod` on the X870E and the Z690-A, with the desktop running accelerated (DESKTOP.md M-D.4) |
