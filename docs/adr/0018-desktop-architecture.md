@@ -68,9 +68,9 @@ Writing a second one would split the work across two products.
   them.
 - The window model is the desktop's: overlapping windows with Islands, Shoals, and Ebb, not
   tiling. The look is Aqua by default, with the desktop's theme system.
-- The desktop's metal target (an i7-12700KF with a Navi 22 RDNA2 card) and AbyssBSD's Tier 1 amd64
-  machines overlap: the Z690-A in HARDWARE.md §7 has that CPU and GPU family, and the X870E and
-  B650E have RDNA2 iGPUs.
+- The desktop's metal target (an i7-12700KF with a Navi 22 RDNA2 card) is the build server, the
+  Z690-A in HARDWARE.md §7. It is tested from USB, and from a spare NVMe once that is free. The
+  X870E and B650E have RDNA2 iGPUs.
 - The desktop's base is FreeBSD `main` (16-CURRENT); AbyssBSD's ABI target is 15.x (ADR-0004).
   Decided 2026-10-29: the desktop's packages for AbyssBSD are built for FreeBSD 15.1. Moving to
   16-CURRENT comes after the desktop runs stably here, as its own decision (DESKTOP.md §2).

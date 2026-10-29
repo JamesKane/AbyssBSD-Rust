@@ -166,10 +166,13 @@ contract (C1–C5) still applies, judged by its plan.
 
 ## 7. Hardware
 
-- **amd64.** The desktop's metal target is an i7-12700KF with a Navi 22 card (RDNA2, `1002:73df`).
-  The Z690-A in HARDWARE.md §7 is that CPU with a Navi 22 card. The X870E and B650E carry RDNA2
-  iGPUs (Radeon 610M). One native driver family, RDNA2, covers all three, which is why ADR-0018
-  makes it the first native amd64 GPU. NVIDIA (RTX 4070, RTX 5070 Ti) does not gate the desktop.
+- **amd64.** The desktop's metal target, an i7-12700KF with a Navi 22 card (RDNA2, `1002:73df`),
+  is the build server: the Z690-A in HARDWARE.md §7. Desktop runs there boot from USB, outside CI
+  and benchmark windows, and never write its internal drives. Installs go to a spare NVMe, which
+  is fitted once it is freed, after the CIX board (the Orange Pi 6 Plus) is running. The X870E
+  and B650E carry RDNA2 iGPUs (Radeon 610M). One native driver family, RDNA2, covers all three,
+  which is why ADR-0018 makes it the first native amd64 GPU. NVIDIA (RTX 4070, RTX 5070 Ti) does
+  not gate the desktop.
 - **arm64.** The desktop's port is amd64-only today. Swift 6.3.3 runs on arm64 FreeBSD (built on
   the Q8B), and the desktop has run there by hand. The Orange Pi 6 Plus needs the desktop's arm64
   packages (§8) and GRAPHICS.md's Sky1 display and `panthor`.
@@ -194,9 +197,8 @@ Changes to the desktop are made in the monorepo (ADR-0018 rule 4). This plan nee
 
 1. ~~15.1 or 16~~: decided 2026-10-29. The desktop is built for 15.1 (§2). 16-CURRENT, which the
    desktop and its fork already use, comes after the desktop is stable here.
-2. **Is the desktop's 12700KF the build server?** HARDWARE.md §7 lists the Z690-A's card as an
-   RX 6700 XT; the desktop's PLAN.md says RX 6750 XT. Both are Navi 22 (`1002:73df`). If it is
-   one machine, its metal lane competes with its build and benchmark duties.
+2. ~~Is the desktop's 12700KF the build server?~~ Yes (decided 2026-10-29). It is tested from USB,
+   and from a spare NVMe once that is free (§7).
 3. **virtio-gpu renderer.** wlroots' Vulkan renderer on Venus, or virgl for GLES2 (§3.3).
 4. **Audio.** No audio design exists in this repository. The desktop needs OSS `sound(4)` first and
    HDA soon after. It needs its own document, like USB.md.
@@ -213,6 +215,6 @@ Changes to the desktop are made in the monorepo (ADR-0018 rule 4). This plan nee
 | **M-D.1** | Headless: nullfs, `snd_dummy` and the `sound(4)` core, whatever the lanes find | P6 exit | Every `--live` lane passes as on FreeBSD 15.1, or is listed; `desk` (headless) within 2% in bhyve |
 | **M-D.2** | First light: `undertow` on `gop-kms`, seatd, MAC with `mac_priority`, libinput on evdev, the login window | M-G.1, P7 | The desktop is used with a real keyboard and mouse in QEMU and on the X870E and Orange Pi 6 Plus framebuffers (the latter on arm64 packages, §8 ask 5) |
 | **M-D.3** | Accelerated in QEMU: dma-buf, syncobj, GPU rendering; Firefox; network lanes | M-G.2, M-G.3, P8 | Firefox renders a page with GPU acceleration under `undertow` in QEMU; the network lanes pass |
-| **M-D.4** | Metal: native RDNA2, HDA audio, S3 and lid | M-G.6, audio, P9 | `desk` (metal) within 2% of FreeBSD with `drm-kmod` on the same machine; the desktop's C1 holds |
-| **M-D.5** | Installed: the desktop's medium boots this kernel, `abyss-install` installs it (UFS before M-Z, ZFS with boot environments after) | INSTALLER.md I.1–I.3; M-Z for ZFS | The `--full` scenarios pass as QEMU boots (§5.3), and an install to the X870E's second NVMe boots to the desktop |
+| **M-D.4** | Metal: native RDNA2, HDA audio, S3 and lid | M-G.6, audio, P9 | `desk` (metal) within 2% of FreeBSD with `drm-kmod` on the same machine (the X870E, and the Z690-A from USB); the desktop's C1 holds |
+| **M-D.5** | Installed: the desktop's medium boots this kernel, `abyss-install` installs it (UFS before M-Z, ZFS with boot environments after) | INSTALLER.md I.1–I.3; M-Z for ZFS | The `--full` scenarios pass as QEMU boots (§5.3), and an install to the X870E's second NVMe, and to the Z690-A's spare NVMe once fitted, boots to the desktop |
 | **M-D.6** | arm64: the Orange Pi 6 Plus with accelerated graphics | M-G.4, M-G.5 | The headless lanes on arm64 in QEMU, and the desktop on the board with `panthor` |

@@ -288,6 +288,10 @@ The FreeBSD 15.1-RELEASE build, test, and `bhyve` benchmark server (`abyss-build
   P-cores), and FreeBSD differential/filesystem reference tooling ([BUILD-AND-TEST.md](BUILD-AND-TEST.md)).
 - Bare-metal testing on this machine is occasional (manual USB boot outside CI windows) to validate
   Intel-specific kernel paths without disturbing the FreeBSD ZFS pool on `nda1`.
+- It is also the Swift desktop's metal target ([ADR-0018](adr/0018-desktop-architecture.md),
+  [DESKTOP.md](DESKTOP.md) §7), whose plan names the card an RX 6750 XT; both cards are Navi 22
+  (`1002:73df`). Desktop runs boot from USB. Installs go to a spare NVMe, fitted once it is freed
+  after the CIX board (the Orange Pi 6 Plus) is running; the internal drives above stay untouched.
 
 ## 8. Board profile: RV64 Banana Pi BPI-SM10 (SpacemiT K3)
 
