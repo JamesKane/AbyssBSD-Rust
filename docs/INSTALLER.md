@@ -194,7 +194,7 @@ userland on this kernel:
 
 | Step | Interfaces | Where here |
 |---|---|---|
-| Find disks | `geom disk list`, `kern.disks`, `DIOCGIDENT` (serial numbers), `DIOCGMEDIASIZE` | GEOM work in progress (`lib/geom`, `geom_kern`); P3.7 |
+| Find disks | `geom disk list`, `kern.disks`, `DIOCGMEDIASIZE` | GEOM work in progress (`lib/geom`, `geom_kern`); P3.7 |
 | Partition | `gpart create/add/destroy` (GEOM's `gctl` requests), `/dev/gpt/*` labels | GEOM work in progress |
 | ESP | `newfs_msdos`, `mount_msdosfs` | P5.6 |
 | Root | `zpool create`, `zfs create`, `bootfs` (ZFS); `newfs -U -j` (UFS, §6) | M-Z; P5.5, P5.7 |
@@ -202,9 +202,12 @@ userland on this kernel:
 | Boot entry | `efibootmgr` (`/dev/efi`, UEFI variable services) | Runtime services are in (P3.8); the `/dev/efi` device for `efivar` is planned (HARDWARE.md §3) and not yet in a phase |
 | Loader | `loader-efi` copied to the ESP in place of FreeBSD's `loader.efi` | §6 ask |
 
-**Disks with user data.** On the X870E only the second NVMe may be written (HARDWARE.md §5). The
-installer must name its target by serial number as well as by device and refuse a disk whose
-serial differs at write time. Whether `abyss-install` already does is to check (§7 question 4).
+**Disks with data.** The installer shows what is on each disk and warns before erasing it
+(`de/install/Safety.swift`): it refuses a disk that is mounted, holds the running root, or holds
+a ZFS pool not imported, and it names the partitions on a full disk (`ntfs`, `efi`, …) and
+erases them only once a person confirms. That warning is only as good as what the kernel reports,
+so `geom disk list`, `gpart show`, and `zpool import` must describe a disk here exactly as they do
+on FreeBSD 15.1, which the GEOM work checks differentially.
 
 ---
 
@@ -215,7 +218,6 @@ In addition to DESKTOP.md §8:
 1. The medium recipe takes the kernel and the loader as inputs (§4).
 2. `abyss-install` installs `loader-efi` when the target runs AbyssBSD's kernel, and offers the UFS
    layout (DESKTOP.md §8 ask 2) until M-Z.
-3. The installer identifies target disks by serial number (§5).
 
 ---
 
@@ -240,5 +242,3 @@ In addition to DESKTOP.md §8:
    handoff the desktop's login window accepts.
 3. **Live medium persistence.** Whether spare space on a large stick becomes a writable partition
    (for saved settings and corpus captures) on first boot, or stays unallocated unless asked.
-4. **Does `abyss-install` check serial numbers today** (§5)? If not, it is a desktop-side change
-   before any install to the X870E.
