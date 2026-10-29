@@ -37,7 +37,7 @@ loader, and the interfaces they use.
 
 | # | Principle | Consequence |
 |---|---|---|
-| B1 | **One mode set, no flicker** | `loader-efi` keeps the firmware's native mode and hands it to the kernel and the compositor without a text-mode reset (§3.4) |
+| B1 | **One mode set, no flicker** | `loader-efi` keeps the firmware's native mode and hands it to the kernel and the compositor without a text-mode reset (§3.5) |
 | B2 | **Silent unless asked** | No countdown. The menu appears on a held key, after a crash, or when `autoboot_delay` says so (§3.3) |
 | B3 | **FreeBSD's configuration, read as FreeBSD reads it** | `/boot/loader.conf`, `loader.conf.local`, and `loader.conf.d/*.conf` give tunables and loader variables with FreeBSD's names. `*_load` lines for modules built into the kernel are accepted (ADR-0005) |
 | B4 | **Crash evidence on screen** | On machines with no serial port, the saved `LogRing` is readable from the menu (§3.3) |
@@ -54,8 +54,8 @@ loader, and the interfaces they use.
 
 | Piece | Where | Kind | Purpose |
 |---|---|---|---|
-| `boot/bootproto` | here | `no_std`, pure | `BootInfo` v3: `SplashState` and `BootFlags` (§3.4) |
-| `boot/loader-efi` | here | UEFI | Splash, boot menu, boot environments, `loader.conf`, `PREVLOG.TXT` viewer |
+| `boot/bootproto` | here | `no_std`, pure | `BootInfo` v3: `SplashState` and `BootFlags` (§3.5), and the GELI key buffer (§3.4) |
+| `boot/loader-efi` | here | UEFI | Splash, boot menu, boot environments, GELI unlock, `loader.conf`, `PREVLOG.TXT` viewer |
 | `lib/loaderconf` | here | `no_std`, pure, fuzzed | FreeBSD `loader.conf` syntax: variables, `*_load` lines, includes, and the `loader.conf.d` order |
 | `lib/qoi` | here | `no_std`, pure, fuzzed | QOI decoder for the splash image |
 | `lib/zfs-boot` | here | `no_std`, pure, fuzzed | Read-only ZFS: vdev labels, uberblocks, the MOS, DSL under `zroot/ROOT/*`, and ZPL files (`lz4`, `zstd`, uncompressed) |
@@ -125,13 +125,36 @@ loading the kernel. With no key held and a clean previous boot, the kernel loads
   `freebsd-zfs`, reads the four vdev labels, picks the newest valid uberblock, walks the MOS and
   the DSL directory under `zroot/ROOT`, and lists each boot environment, the pool's `bootfs` first.
   Choosing one loads its `/boot/kernel/kernel` and `loader.conf` from that dataset and sets
-  `vfs.root.mountfrom=zfs:zroot/ROOT/<be>`. This is what the desktop's `abyss update` relies on to
-  fall back to the previous environment (`desktop/docs/PRODUCT.md` §6.2).
+  `vfs.root.mountfrom=zfs:zroot/ROOT/<be>`. This is FreeBSD's way: its `loader.efi` reads kernels
+  from the pool, so `bectl` and the desktop's `abyss update` create an environment with no step on
+  the ESP, and an update that does not boot falls back to the previous environment
+  (`desktop/docs/PRODUCT.md` §6.2). Kernels are not copied to the ESP (decided 2026-10-29).
 - **Crash log.** On a machine with no serial port (the X870E, HARDWARE.md §5), after a panic or a
   watchdog reset, `loader-efi` saves the `LogRing` to `\EFI\ABYSS\PREVLOG.TXT` (as it does now) and
   offers it in the menu.
 
-### 3.4 Handover (`bootproto` v3 → `sys/vt` → `gop-kms` → `undertow`)
+### 3.4 Encrypted disks and one password
+
+Encryption is FreeBSD's: the pool sits on GELI providers, laid out as `bsdinstall`'s encrypted ZFS
+install does (`geli init -b -g`: boot-time attach, readable by the loader). Decided 2026-10-29: one
+password unlocks the disk and the session.
+
+- **One prompt.** `loader-efi` finds GELI providers flagged for boot, asks for the passphrase once
+  over the splash, decrypts them (AES-XTS, the key derived with PKCS #5 v2 as GELI records it), and
+  reads the pool through them. It hands the keys to the kernel in the boot key buffer, as FreeBSD's
+  loader does (`MODINFOMD_KEYBUF`), so the kernel attaches the providers without asking again.
+  The passphrase itself is wiped once the keys are derived and is never passed on.
+- **One password.** The installer uses the owner's account password as the GELI passphrase. When
+  the loader unlocked the root disk at this boot, it says so in the kernel environment (an AbyssBSD
+  addition, recorded in compat-deviations.md), and the login window logs the owner in without
+  asking, through the desktop's existing automatic login. Unlocking the disk was the
+  authentication. The lock screen, fast user switching, and every other account still ask.
+- **Staying one password.** Changing the owner's password in System Preferences also re-keys the
+  disk (`geli setkey`), through the privileged helper.
+- **Kernel side.** `geom_eli` (GELI providers, the keys from the boot key buffer) and the crypto it
+  uses, on `lib/crypto`. Not yet scheduled; it is needed before encrypted installs (I.4).
+
+### 3.5 Handover (`bootproto` v3 → `sys/vt` → `gop-kms` → `undertow`)
 
 1. **`BootInfo` v3** carries the splash:
    ```rust
@@ -181,8 +204,13 @@ in the session. AbyssBSD's medium is the same recipe with three substitutions:
 the reference machines, from the recipe in the monorepo, so the two cannot drift. The recipe
 accepting a kernel and loader from outside is an ask of the desktop's plan (§6).
 
+**Persistence** (decided 2026-10-29). On its first boot from a stick with spare space beyond the
+image, the medium creates a writable UFS partition in that space, labelled `abyss-persist`, and
+mounts it on every later boot. It keeps the live session's settings and saved files across
+boots, and corpus captures. A stick with no spare space boots as before, with nothing kept.
+
 On new hardware, the medium is also how a board's ground truth is captured (`acpidump -dt`,
-`devinfo -rv`, `pciconf -lv`, EDIDs) into `tests/corpus/<board>/` (P7.0).
+`devinfo -rv`, `pciconf -lv`, EDIDs) into `tests/corpus/<board>/` (P7.0), onto `abyss-persist`.
 
 ---
 
@@ -218,6 +246,11 @@ In addition to DESKTOP.md §8:
 1. The medium recipe takes the kernel and the loader as inputs (§4).
 2. `abyss-install` installs `loader-efi` when the target runs AbyssBSD's kernel, and offers the UFS
    layout (DESKTOP.md §8 ask 2) until M-Z.
+3. Encrypted installs as §3.4 describes: GELI under the pool with the owner's password, automatic
+   login for the owner when the loader unlocked the disk at boot, and `geli setkey` when the owner's
+   password changes.
+4. The medium's `abyss-persist` partition (§4): created on first boot when the stick has room,
+   mounted after, and used for the live session's settings and files.
 
 ---
 
@@ -226,19 +259,17 @@ In addition to DESKTOP.md §8:
 | Step | Work | Needs | Exit |
 |---|---|---|---|
 | **I.1** | `lib/loaderconf`, `lib/qoi`, `bootproto` v3; splash, silence, and the boot menu in `loader-efi`; the quiet console in `fb-console` and `sys/vt` | — | QEMU boots silently through the splash on both arches; a held `Space` opens the menu; FreeBSD 15.1's `loader.conf` from a P6 image is honored |
-| **I.2** | `lib/zfs-boot`, fuzzed against `zpool`-made images from the build server | M-Z's on-disk work, or images made on FreeBSD | `loader-efi` lists and boots `zroot/ROOT/*` from images FreeBSD wrote |
+| **I.2** | `lib/zfs-boot`, fuzzed against `zpool`-made images from the build server; GELI in `loader-efi` and the boot key buffer | M-Z's on-disk work, or images made on FreeBSD | `loader-efi` lists and boots `zroot/ROOT/*` from images FreeBSD wrote, including a GELI-encrypted one after one passphrase prompt |
 | **I.3** | `cargo xtask live-image` over the desktop's recipe | DESKTOP.md M-D.2 | The medium boots this kernel to the desktop's login window in QEMU |
-| **I.4** | The desktop's installer installs AbyssBSD (UFS, then ZFS) | I.3, §5's rows, M-Z for ZFS | DESKTOP.md M-D.5's exit: the install lanes pass as QEMU boots, and an install to the X870E's second NVMe boots to the desktop |
+| **I.4** | The desktop's installer installs AbyssBSD (UFS, then ZFS, then encrypted ZFS) | I.3, §5's rows, M-Z for ZFS, `geom_eli` for encryption | DESKTOP.md M-D.5's exit: the install lanes pass as QEMU boots, and an install to the X870E's second NVMe boots to the desktop |
 
 ---
 
-## 8. Open questions
+## 8. Decisions
 
-1. **Kernels from ZFS or from the ESP.** `lib/zfs-boot` (§3.3) reads kernels from any boot
-   environment with no copying. The alternative stages each environment's kernel on the ESP and
-   keeps ZFS out of the loader, at the cost of a copy step whenever a boot environment is made.
-2. **One password for disk and login.** With an encrypted pool, should the passphrase entered in
-   `loader-efi` also unlock the session, so the login window does not ask again? That needs a
-   handoff the desktop's login window accepts.
-3. **Live medium persistence.** Whether spare space on a large stick becomes a writable partition
-   (for saved settings and corpus captures) on first boot, or stays unallocated unless asked.
+Decided 2026-10-29:
+
+1. **Kernels are read from ZFS**, from each boot environment, as FreeBSD's loader reads them
+   (§3.3). Nothing is staged on the ESP.
+2. **One password** unlocks the disk at boot and logs the owner in (§3.4).
+3. **The live medium keeps a persistence partition** in a stick's spare space (§4).

@@ -93,6 +93,7 @@ check that it is in place for this program.
 | **ACPI sleep and buttons**: `acpiconf -s 3` (S3), `hw.acpi.supported_sleep_state`, `hw.acpi.power_button_state`, lid and button devd notifies, `hw.acpi.battery.*` | Power, lid, Sleep menu item | P9 power management; the sysctls and notifies earlier (P7) |
 | **Networking for the desktop**: `getifaddrs` with `AF_LINK`, `PF_ROUTE` sockets, `wlan(4)`, `wpa_supplicant`, `ifconfig wlanN create` | Network pane, Wi-Fi, Firefox | P8; Wi-Fi drivers after P8 |
 | **ZFS**: `zpool`, `zfs`, boot environments, `zfs snapshot/rollback` | Installer default layout, Disk Utility, `abyss update` | M-Z |
+| **GELI** (`geom_eli`, keys from the loader's boot key buffer) | Encrypted installs: one password for disk and login (INSTALLER.md §3.4) | Not scheduled; before M-D.5's encrypted installs |
 | **GEOM tools**: `geom disk list`, `gpart`, `newfs_msdos`, `mdconfig` | Installer, harness | Partly in progress (`geom_kern`); finish before M-D.5 |
 | **`allow.rtprio` jail parameter, power-button devctl notify** | Desktop features its fork plans (ADR-0018 rule 5) | When the fork defines them |
 | **`vmm`, `nmdm`** | `--full` lanes (nested bhyve) | Not planned (AbyssBSD is not a bhyve host); those lanes become QEMU boots (§5.3) |
