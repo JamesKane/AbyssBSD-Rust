@@ -723,8 +723,10 @@ fn request(
         PT_ATTACH => {
             p.set_traced(p.ppid_tree(), true);
             crate::proc::reparent_traced(p, me.pid());
-            // A stop from a signal ends first; the attach's comes next.
-            p.end_stop();
+            // A stop from a signal becomes the attach's in place: its
+            // threads stay parked (FreeBSD ends the one and starts the
+            // other under the process lock). Ended first, a thread could
+            // run on, to `_exit`, before the attach's stop began.
             let _ = crate::signal::post(
                 p,
                 crate::signal::user_info(SIGSTOP, 0, abi::signal::code::SI_USER),

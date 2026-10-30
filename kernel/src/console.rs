@@ -669,25 +669,7 @@ impl uart::ConsolePort for Port {
         let Some(serial) = &c.serial else {
             return false;
         };
-        let mut r = RECEIVED.lock();
-        let mut got = false;
-        // Cleared before draining: a byte arriving after the last read
-        // raises the interrupt again (cleared after, its receive timeout
-        // would be lost and the byte left in the FIFO).
-        serial.ack_rx();
-        while r.len < r.buf.len() {
-            let Some(b) = serial.get() else {
-                return got;
-            };
-            got = true;
-            let at = r.len;
-            r.buf[at] = b;
-            r.len += 1;
-        }
-        // Full: the rest waits in the FIFO until the thread catches up.
-        serial.set_rx_interrupt(false);
-        r.held = true;
-        true
+        drain(serial, &mut RECEIVED.lock())
     }
 
     fn deliver(&self, s: &Sleepable) {
@@ -703,6 +685,10 @@ impl uart::ConsolePort for Port {
                     r.held = false;
                     if let Some(serial) = &c.serial {
                         serial.set_rx_interrupt(true);
+                        // What waited in the FIFO is taken here: a PL011
+                        // raises its receive interrupt again only once
+                        // the FIFO has been empty, which it never was.
+                        drain(serial, &mut r);
                     }
                 }
                 n
@@ -715,6 +701,28 @@ impl uart::ConsolePort for Port {
             }
         }
     }
+}
+
+/// Takes what the FIFO holds into `r`, whether anything came. The
+/// interrupt is cleared before the FIFO is read: a byte arriving after
+/// the last read raises it again (cleared after, its receive timeout
+/// would be lost and the byte left in the FIFO). With `r` full, the rest
+/// waits in the FIFO, the interrupt masked, until the thread catches up.
+fn drain(serial: &SerialSink, r: &mut Received) -> bool {
+    let mut got = false;
+    serial.ack_rx();
+    while r.len < r.buf.len() {
+        let Some(b) = serial.get() else {
+            return got;
+        };
+        got = true;
+        let at = r.len;
+        r.buf[at] = b;
+        r.len += 1;
+    }
+    serial.set_rx_interrupt(false);
+    r.held = true;
+    true
 }
 
 /// # Safety
