@@ -1,6 +1,6 @@
 # FreeBSD multi-user
 
-The design for Phase 6 ([ROADMAP.md](ROADMAP.md#phase-6-freebsd-multi-user-xl--in-progress)): what it takes for
+The design for Phase 6 ([ROADMAP.md](ROADMAP.md#phase-6-freebsd-multi-user-xl--done-2026-10-30)): what it takes for
 stock FreeBSD 15.1 `/sbin/init` to run `rc` and reach a multi-user `login:` on both architectures,
 in QEMU and bhyve, and then on the two physical reference machines.
 [ADR-0016](adr/0016-multi-user.md) records the decision.

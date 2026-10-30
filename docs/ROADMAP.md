@@ -1367,7 +1367,7 @@ USB mass-storage throughput (sequential and random, BBB on both sides) cannot be
 an emulator, since FreeBSD's host cannot run QEMU with acceleration and bhyve has no USB disk; it
 joins the suite on the physical machines at P6.
 
-## Phase 6: FreeBSD multi-user (XL) — in progress
+## Phase 6: FreeBSD multi-user (XL) — done 2026-10-30
 
 **Goal:** stock FreeBSD `/sbin/init` → `rc` → multi-user `login:`.
 
@@ -1884,7 +1884,7 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
   process after it. Jails now have root sets (`cpuset.id`), attaching rebases onto them, and a
   thread's own mask is tracked apart from its set's, as `kern_cpuset.c` does with anonymous sets.
 
-**P6.11 Performance and exit.**
+**P6.11 Performance and exit.** — done 2026-10-30
 - The P6 suite (MULTIUSER.md §16) in bhyve.
   - Done 2026-10-30: `perf --suite p6` boots both systems multi-user from the root as the
     installer leaves it (NVMe, the same `rc.conf`), times the boot on the serial console, logs
@@ -1905,8 +1905,18 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
     busy umtx chain is no longer handed to its next waiter, still busy, but freed with the
     waiter woken (`umtxq_unbusy`): `thr.mutex.pi.t4` went from 24x to about 6x; `t8` stays
     about 38x, its cause still open.
+  - The second brought two more. `PT_ATTACH` to a process stopped by a signal makes that stop
+    its own in place, its threads parked throughout (FreeBSD does both under the process lock):
+    ending it first let the thread run on to `_exit` before the attach's stop began
+    (`tests/user/ptrace.c`, x86_64). And the console's receive thread, unmasking the interrupt
+    of a full buffer, takes what waited in the FIFO itself: a PL011 raises its receive
+    interrupt again only once its FIFO has been empty, so under load input stopped at 256
+    bytes (aarch64). Two host tests that shared process-wide state (ufs's scratch directory,
+    the socket layer's count of descriptors in flight) no longer race.
 - Exit: the phase's exit criteria above, in CI on both arches, and every component within the
   bound in bhyve.
+  - Done 2026-10-30: `exit/p6` at `4596dc5` passes in CI, the unit tier and all 15 boot cases on
+    both architectures (multi-user in QEMU and bhyve included).
 
 ## Phase 7: Networking (XL)
 
