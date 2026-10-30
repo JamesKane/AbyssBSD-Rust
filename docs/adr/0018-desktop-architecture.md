@@ -2,6 +2,8 @@
 
 - Status: Accepted
 - Date: 2026-10-29
+- Amended: 2026-10-30. Swift does not exist on FreeBSD riscv64, which blocks an rv64 desktop. The
+  desktop's Swift implementation will be rewritten in Rust, in the monorepo (decision 7).
 
 ## Context
 
@@ -50,6 +52,11 @@ Writing a second one would split the work across two products.
    implemented natively, with no LinuxKPI. The desktop reaches the GPU only through wlroots, libdrm,
    and Mesa, so it needs nothing beyond that interface. Its metal target is RDNA2, which settles
    GRAPHICS.md §13 question 1 in favor of RDNA2 as the first native amd64 GPU.
+7. **The desktop will be rewritten in Rust** (amended 2026-10-30). Swift does not exist on FreeBSD
+   riscv64, so the Swift desktop cannot reach rv64. The rewrite is the monorepo's work (rule 4) and
+   changes nothing above: the desktop stays userland consumed as packages (rule 2, with its own
+   toolchain), and this repository still builds the kernel beneath it. Until the rewrite lands,
+   M-D runs the Swift desktop on amd64 and arm64, and rv64 has no desktop (DESKTOP.md §7).
 
 ## Consequences
 

@@ -17,6 +17,9 @@ interfaces, so every need it has is FreeBSD ABI that this kernel implements anyw
 ABI is done (P4–P6). The rest is scheduled below. The desktop's own harness becomes a conformance
 suite here, compared test by test with FreeBSD 15.1, and its first lanes need no graphics at all.
 
+> **Note.** The desktop's Swift implementation will be rewritten in Rust, because Swift does not
+> exist on FreeBSD riscv64 and that blocks rv64 support (§7).
+
 ## 1. The desktop
 
 The desktop lives in the AbyssBSD monorepo (`../AbyssBSD`), beside its FreeBSD fork (`src/`), the
@@ -183,7 +186,9 @@ contract (C1–C5) still applies, judged by its plan.
 - **arm64.** The desktop's port is amd64-only today. Swift 6.3.3 runs on arm64 FreeBSD (built on
   the Q8B), and the desktop has run there by hand. The Orange Pi 6 Plus needs the desktop's arm64
   packages (§8) and GRAPHICS.md's Sky1 display and `panthor`.
-- **rv64.** Not planned. Swift on FreeBSD riscv64 does not exist.
+- **rv64.** Blocked: Swift on FreeBSD riscv64 does not exist. The desktop's Swift implementation
+  will therefore be rewritten in Rust, in the monorepo (ADR-0018 decision 7). Until then, rv64 has
+  no desktop, and this plan covers the Swift desktop on amd64 and arm64.
 
 ## 8. Asks of the desktop's plan
 
