@@ -96,15 +96,12 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
         )
         .into());
     }
-    // AbyssBSD runs all of p6 from the installed root once base runs;
-    // `p6.thr`, `p6.event`, `p6.unix`, and `p6.pty`, its threads, events,
-    // UNIX-domain sockets, and pseudo-terminals components, need only the
-    // static ubench.
-    if suite == "p6" && !freebsd_only {
-        return Err(
-            "suite p6 runs on FreeBSD alone for now: add --freebsd-only, or run p6.thr or p6.event"
-                .into(),
-        );
+    // All of p6 runs multi-user, from the installed root on both sides,
+    // and times the boot as well (`run_multiuser`); `p6.thr`, `p6.event`,
+    // `p6.unix`, and `p6.pty` need only the static ubench.
+    let multiuser = suite == "p6";
+    if multiuser && prof {
+        return Err("--prof profiles the single-user suites, not p6".into());
     }
     if !cfg!(target_os = "freebsd") {
         return Err(format!("perf needs bhyve: run it on the build server\n{USAGE}").into());
@@ -125,7 +122,11 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
 
     let dirs = Dirs::new();
     fs::create_dir_all(&dirs.perf)?;
-    let freebsd = prepare_image(&dirs)?;
+    let freebsd = if multiuser {
+        prepare_multiuser_image(&dirs)?
+    } else {
+        prepare_image(&dirs)?
+    };
     let kbench = build_kbench(&dirs)?;
     let ubench = if suite.starts_with("p6") {
         build_ubench_p6(&dirs)?
@@ -184,7 +185,11 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     } else {
         format!("abyss.bench={suite}")
     };
-    let abyss = image::build_with(Arch::X86_64, opts, &cmdline, extra)?;
+    let abyss = if multiuser {
+        image::build_installed_root(Arch::X86_64, opts, MULTIUSER_CMDLINE)?
+    } else {
+        image::build_with(Arch::X86_64, opts, &cmdline, extra)?
+    };
 
     let mut samples: BTreeMap<String, BTreeMap<Side, Vec<f64>>> = BTreeMap::new();
     let mut raw = String::from("side\trun\tname\tvalue\tunit\n");
@@ -210,6 +215,7 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
             eprintln!("xtask: perf: run {}/{runs}: {}", run + 1, side.name());
             // One retry: a VM run can fail for reasons outside the kernels
             // (a console glitch, a host hiccup); the first log is kept.
+            let run_one = if multiuser { run_multiuser } else { run_one };
             let results = match run_one(disk, &bench_disk, &log) {
                 Ok(r) => r,
                 Err(e) => {
@@ -491,6 +497,39 @@ fn prepare_image(dirs: &Dirs) -> Result<PathBuf> {
     with_root(dirs, &tmp, configure_guest)?;
     fs::rename(&tmp, &img)?;
     fs::write(&stamp, PREP_VERSION)?;
+    Ok(img)
+}
+
+/// The boot options of AbyssBSD's installed root, as the multi-user boot
+/// cases give them: both consoles, the serial one primary.
+const MULTIUSER_CMDLINE: &str = "boot_multicons=YES boot_serial=YES";
+
+/// Bumped whenever [`prepare_multiuser_image`] changes what it writes.
+const MULTIUSER_PERF_VERSION: &str = "1";
+
+/// FreeBSD's side of suite `p6`: the release image as its installer leaves
+/// it ([`freebsd_multiuser_image`]), as AbyssBSD's installed root is, with
+/// PTI off as for every suite ([`configure_guest`]).
+fn prepare_multiuser_image(dirs: &Dirs) -> Result<PathBuf> {
+    let img = dirs.perf.join(format!("freebsd-{RELEASE}-p6.img"));
+    let stamp = img.with_extension("img.prepared");
+    if img.exists() && fs::read_to_string(&stamp).is_ok_and(|s| s.trim() == MULTIUSER_PERF_VERSION)
+    {
+        return Ok(img);
+    }
+    let (base, _) = freebsd_multiuser_image(Arch::X86_64)?;
+    let tmp = img.with_extension("img.tmp");
+    util::run(Command::new("cp").arg(&base).arg(&tmp))?;
+    with_root(dirs, &tmp, |mnt| {
+        let conf = mnt.join("boot/loader.conf.local");
+        let loader = fs::read_to_string(&conf)? + "vm.pmap.pti=\"0\"\n";
+        install_files(
+            mnt,
+            &[("boot/loader.conf.local", 0o644, loader.into_bytes())],
+        )
+    })?;
+    fs::rename(&tmp, &img)?;
+    fs::write(&stamp, MULTIUSER_PERF_VERSION)?;
     Ok(img)
 }
 
@@ -793,6 +832,9 @@ fn make_bench_disk(
         fs::copy(file, dir.join(name))?;
     }
     fs::write(dir.join("suite"), suite)?;
+    if suite == "p6" {
+        fs::write(dir.join("run.sh"), MULTIUSER_RUN)?;
+    }
     if freebsd_prof {
         // FreeBSD's rc.local runs `run.sh` in place of the suite.
         fs::write(dir.join("run.sh"), FREEBSD_PROF_RUN)?;
@@ -1090,6 +1132,68 @@ fn run_one(disk: &Path, bench_disk: &Path, log: &Path) -> Result<Vec<(String, f6
     let text = fs::read_to_string(log)?;
     let results =
         parse(&text).map_err(|e| format!("{}: {e} (outcome {:?})", log.display(), run.outcome))?;
+    Ok(results)
+}
+
+/// What suite `p6`'s guests run once root has logged in: as the
+/// single-user suites' `rc.local` (device interrupts on CPU 0), the whole
+/// suite, then power off. The bench disk is `vtbd0`, the root being on
+/// NVMe.
+const MULTIUSER_RUN: &str = "#!/bin/sh\n\
+    rm -f /tmp/ubench\n\
+    cp /mnt/ubench /tmp/ && umount /mnt\n\
+    sysctl vm.pmap.pti hw.ibrs_active hw.mds_disable_state\n\
+    for irq in $(vmstat -ai | awk '/virtio_pci|nvme/ { sub(/^irq/, \"\", $1); sub(/:$/, \"\", $1); print $1 }'); do\n\
+    \tcpuset -l 0 -x \"$irq\"\n\
+    done\n\
+    /tmp/ubench p6\n\
+    shutdown -p now\n";
+
+/// The kernel's first console line: FreeBSD's message buffer banner, and
+/// AbyssBSD's own.
+const KERNEL_FIRST: [&str; 2] = ["---<<BOOT>>---", ") kernel at 0x"];
+/// The line both kernels print before mounting the root and starting
+/// init (`vfs_mountroot`).
+const MOUNTROOT: &str = "Trying to mount root from ";
+
+/// One run of suite `p6`: boots the installed root on NVMe, multi-user,
+/// with the bench disk beside it; times the boot from the console
+/// (`boot.kernel`, the kernel's first line to the serial console's
+/// `login:`; `boot.rc`, the root mount, where init starts, to it); logs
+/// in as root and runs [`MULTIUSER_RUN`].
+fn run_multiuser(disk: &Path, bench_disk: &Path, log: &Path) -> Result<Vec<(String, f64, String)>> {
+    let vm = Vm {
+        smp: 8,
+        mem: "2G".into(),
+        nvme: true,
+        extra_disk: Some(bench_disk.to_path_buf()),
+        pin: true,
+        ..Vm::new(Vmm::Bhyve, Arch::X86_64, disk.to_path_buf())
+    };
+    let mut session = crate::expect::Session::start(vm, log)?;
+    let mut boot = || -> Result<(Duration, Duration)> {
+        let minute = Duration::from_secs(60);
+        session.expect_any(&KERNEL_FIRST, minute)?;
+        let kernel = std::time::Instant::now();
+        session.expect(MOUNTROOT, minute)?;
+        let root = std::time::Instant::now();
+        session.expect("login: ", Duration::from_secs(300))?;
+        let login = std::time::Instant::now();
+        session.send("root\n")?;
+        session.expect(crate::multiuser::ROOT_PROMPT, minute)?;
+        session.send("mount -o ro /dev/vtbd0 /mnt && sh /mnt/run.sh\n")?;
+        Ok((login - kernel, login - root))
+    };
+    let times = boot();
+    // The suite takes minutes; then the guest powers itself off.
+    let exited = session.finish(Duration::from_secs(1800))?;
+    let (kernel, rc) = times?;
+    let text = fs::read_to_string(log)?;
+    let mut results =
+        parse(&text).map_err(|e| format!("{}: {e} (exited: {exited})", log.display()))?;
+    for (name, d) in [("boot.kernel", kernel), ("boot.rc", rc)] {
+        results.push((name.to_owned(), d.as_nanos() as f64, "ns".to_owned()));
+    }
     Ok(results)
 }
 

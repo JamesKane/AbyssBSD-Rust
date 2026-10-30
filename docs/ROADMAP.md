@@ -1886,6 +1886,16 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
 
 **P6.11 Performance and exit.**
 - The P6 suite (MULTIUSER.md §16) in bhyve.
+  - Done 2026-10-30: `perf --suite p6` boots both systems multi-user from the root as the
+    installer leaves it (NVMe, the same `rc.conf`), times the boot on the serial console, logs
+    in as root, and runs `ubench p6` (tests/perf/README.md). Against FreeBSD 15.1, 10 runs a
+    side, every component is within the bound: `boot` 0.166, `event` 0.841, `exec` 0.907, `pty`
+    0.431, `thr` 0.855, `unix` 0.930 (geometric mean of all 40 benchmarks 0.761). FreeBSD's
+    `boot.kernel` (12.6 s against 1.8 s) includes 6.5 s attaching `pci0` in bhyve and 1.7 s
+    probing the PS/2 keyboard and mouse; `boot.rc` (4.25 s against 0.84 s) is `rc` alone, where
+    FreeBSD's `devd` takes 1.7 s to start. Open diagnostics, as when each component was first
+    measured: `thr.mutex.pi.t4` and `t8` (24x, 42x), `unix.stream.bw4k` and `bw64k` (4.2x,
+    2.7x), `unix.rights` (2.0x), `kevent` on pipes (1.5x), and `thr.create` (1.38x).
 - Exit: the phase's exit criteria above, in CI on both arches, and every component within the
   bound in bhyve.
 

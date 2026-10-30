@@ -170,9 +170,15 @@ others run three rounds and report the median.
 
 Multi-user's components ([MULTIUSER.md §16](../../docs/MULTIUSER.md#16-performance)): `ubench p6`,
 from a second build of the same source with `-DUB_P6` and `libthr`, so the earlier suites' binary
-stays single-threaded and unchanged. It runs as root on the full base (the exec benchmarks run
-base's own dynamic programs). Until AbyssBSD runs base, `cargo xtask --remote perf --suite p6
---freebsd-only` records FreeBSD's baseline. The component is each name's first field.
+stays single-threaded and unchanged. The component is each name's first field.
+
+All of `p6` runs multi-user: each run boots the root as the installer leaves it (FreeBSD's release
+image with the multi-user boot cases' `rc.conf`, and AbyssBSD's installed root with the same), on
+NVMe, with the bench disk on virtio-blk (`vtbd0`). The harness times the boot on the serial console,
+logs in as root there, and runs the bench disk's `run.sh`: device interrupts to CPU 0, as for the
+single-user suites, `/tmp/ubench p6` (the exec benchmarks run base's own dynamic programs), and
+`shutdown -p now`. `p6.thr`, `p6.event`, `p6.unix`, and `p6.pty` run one component each from the
+static `ubench`, single-user, as the earlier suites do.
 
 - Team benchmarks (`thr.mutex*`, `thr.rwlock`) follow kbench's rules: worker *i* of *T* bound to
   CPU `(i + 1) mod 8`, the coordinator on CPU 0; the workers start together at a barrier, run until
@@ -208,8 +214,8 @@ base's own dynamic programs). Until AbyssBSD runs base, `cargo xtask --remote pe
 | `exec.true` | `vfork`, `execve` of `/usr/bin/true` (rtld, `libc`, `libsys`), `wait4` |
 | `exec.lib10` | As above with `/usr/bin/tar --version`: `libarchive` and ten more libraries |
 | `exec.rcsubr` | As above with `/usr/sbin/service -e`: a shell per `rc.d` script, each loading `rc.subr` and `rc.conf` |
-| `boot.kernel` | Not in `ubench`: the harness's time from the loader's handoff to the first `login:` on the serial console (P6.9) |
-| `boot.rc` | Not in `ubench`: from init's start to that `login:` (P6.9) |
+| `boot.kernel` | Not in `ubench`: the harness's time from the kernel's first console line (FreeBSD's `---<<BOOT>>---`, AbyssBSD's banner), just after the loader's handoff, to the first `login:` on the serial console |
+| `boot.rc` | Not in `ubench`: from `Trying to mount root from`, which both kernels print as they mount the root and start init, to that `login:` |
 
 ## Suite `vt`
 
