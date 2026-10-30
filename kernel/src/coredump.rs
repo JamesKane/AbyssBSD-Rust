@@ -24,10 +24,12 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use abi::errno::Errno;
+use abi::ptrace::{PRARGSZ, PRFNAMESZ, Prpsinfo, Thrmisc};
 use sched::Sleepable;
 use sync::SpinLock;
 
 use crate::proc::Process;
+use crate::uaccess::bytes_of;
 use crate::uthread::UserThread;
 
 /// `kern.coredump`.
@@ -74,11 +76,6 @@ const NT_X86_XSTATE: u32 = 0x202;
 const NT_ARM_TLS: u32 = 0x401;
 #[cfg(target_arch = "aarch64")]
 const NT_ARM_ADDR_MASK: u32 = 0x406;
-
-/// `PRPSINFO_VERSION`, `PRFNAMESZ`, `PRARGSZ`.
-const PRPSINFO_VERSION: i32 = 1;
-const PRFNAMESZ: usize = 16;
-const PRARGSZ: usize = 80;
 
 const PAGE: u64 = 4096;
 const PAGE_BYTES: usize = 4096;
@@ -366,7 +363,7 @@ fn note(out: &mut Vec<u8>, ty: u32, desc: &[u8]) {
 fn notes(s: &Sleepable, t: &UserThread, sig: u32) -> Vec<u8> {
     let p = t.process();
     let mut out = Vec::new();
-    note(&mut out, NT_PRPSINFO, &prpsinfo(p));
+    note(&mut out, NT_PRPSINFO, bytes_of(&prpsinfo(p)));
     let mut threads = alloc::vec![Arc::clone(
         &t.process().thread_by_tid(t.tid()).unwrap_or_else(|| {
             // The dumping thread is its process's.
@@ -382,25 +379,24 @@ fn notes(s: &Sleepable, t: &UserThread, sig: u32) -> Vec<u8> {
 }
 
 /// `struct prpsinfo`: the command and its arguments, spaces between.
-fn prpsinfo(p: &Process) -> Vec<u8> {
-    let mut b = alloc::vec![0u8; 120];
-    b[0..4].copy_from_slice(&PRPSINFO_VERSION.to_le_bytes());
-    b[8..16].copy_from_slice(&120u64.to_le_bytes());
+fn prpsinfo(p: &Process) -> Prpsinfo {
+    let mut ps = Prpsinfo {
+        pr_pid: p.pid(),
+        ..Prpsinfo::default()
+    };
     let image = p.image();
     let n = image.comm.len().min(PRFNAMESZ);
-    b[16..16 + n].copy_from_slice(&image.comm[..n]);
+    ps.pr_fname[..n].copy_from_slice(&image.comm[..n]);
     let args = &image.args;
     let len = args.len().saturating_sub(1).min(PRARGSZ);
-    let at = 16 + PRFNAMESZ + 1;
     if len == 0 {
-        b[at..at + n].copy_from_slice(&image.comm[..n]);
+        ps.pr_psargs[..n].copy_from_slice(&image.comm[..n]);
     } else {
-        for (i, &c) in args[..len].iter().enumerate() {
-            b[at + i] = if c == 0 { b' ' } else { c };
+        for (d, &c) in ps.pr_psargs.iter_mut().zip(&args[..len]) {
+            *d = if c == 0 { b' ' } else { c };
         }
     }
-    b[116..120].copy_from_slice(&p.pid().to_le_bytes());
-    b
+    ps
 }
 
 /// A thread's notes: `NT_PRSTATUS` first, its other register sets, its
@@ -412,12 +408,12 @@ fn thread_notes(out: &mut Vec<u8>, t: &UserThread, sig: u32) {
     if let Ok(fp) = crate::ptrace::read_fpregs(t) {
         note(out, NT_FPREGSET, crate::uaccess::bytes_of(&fp));
     }
-    // `struct thrmisc`.
-    let mut misc = [0u8; 24];
+    let mut misc = Thrmisc::default();
     let name = t.name();
     let name = name.as_bytes();
-    misc[..name.len()].copy_from_slice(name);
-    note(out, NT_THRMISC, &misc);
+    let n = name.len().min(misc.pr_tname.len() - 1);
+    misc.pr_tname[..n].copy_from_slice(&name[..n]);
+    note(out, NT_THRMISC, bytes_of(&misc));
     let mut pl = Vec::with_capacity(4 + size_of::<abi::ptrace::PtraceLwpinfo>());
     pl.extend_from_slice(
         &i32::try_from(size_of::<abi::ptrace::PtraceLwpinfo>())
@@ -431,11 +427,9 @@ fn thread_notes(out: &mut Vec<u8>, t: &UserThread, sig: u32) {
 
 #[cfg(target_arch = "x86_64")]
 fn machine_notes(out: &mut Vec<u8>, t: &UserThread) {
-    // `struct segbasereg`.
-    let (fs, gs) = crate::ptrace::user_bases(t);
-    let mut b = fs.to_le_bytes().to_vec();
-    b.extend_from_slice(&gs.to_le_bytes());
-    note(out, NT_X86_SEGBASES, &b);
+    let (r_fsbase, r_gsbase) = crate::ptrace::user_bases(t);
+    let bases = abi::ptrace::regs_amd64::Segbasereg { r_fsbase, r_gsbase };
+    note(out, NT_X86_SEGBASES, bytes_of(&bases));
     // The XSAVE area, the enabled features recorded in its software part
     // (`X86_XSTATE_XCR0_OFFSET`).
     if let Some(mut x) = crate::ptrace::xsave_area(t) {
@@ -451,10 +445,12 @@ fn machine_notes(out: &mut Vec<u8>, t: &UserThread) {
 fn machine_notes(out: &mut Vec<u8>, t: &UserThread) {
     let (tls, _) = crate::ptrace::user_bases(t);
     note(out, NT_ARM_TLS, &tls.to_le_bytes());
-    // `struct arm64_addr_mask`: the top byte is ignored.
-    let mut b = 0xff00_0000_0000_0000u64.to_le_bytes().to_vec();
-    b.extend_from_slice(&0xff00_0000_0000_0000u64.to_le_bytes());
-    note(out, NT_ARM_ADDR_MASK, &b);
+    // The top byte is ignored.
+    let mask = abi::ptrace::regs_arm64::AddrMask {
+        code: 0xff00_0000_0000_0000,
+        data: 0xff00_0000_0000_0000,
+    };
+    note(out, NT_ARM_ADDR_MASK, bytes_of(&mask));
 }
 
 /// The process information notes, each its structure's size then the

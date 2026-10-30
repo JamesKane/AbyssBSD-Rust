@@ -50,7 +50,8 @@ what userland sees, not the source of the code ([ADR-0007](adr/0007-license-and-
   device, as on a machine without one.
 - Linux and 32-bit ABIs (permanent, [COMPATIBILITY.md §1](COMPATIBILITY.md#1-target)).
 - POSIX AIO beyond what the base boot and kyua's `lib/libc` need; `EVFILT_AIO`, `EVFILT_LIO`,
-  `EVFILT_SENDFILE` (P7, with `sendfile`), `inotify` (16-CURRENT only, outside the 15.x ABI).
+  `EVFILT_SENDFILE` (P7, with `sendfile`). (`inotify`, listed here at first as 16-CURRENT's,
+  is in 15.1 and kyua's `sys/kern`, and came in P6.10.)
 
 ## 2. Principles
 
@@ -567,7 +568,14 @@ and `PT_SUSPEND`/`PT_RESUME`; process descriptors' `pdptrace` is outside 15.x. D
 `lib/abi` carries the FreeBSD header and name it mirrors; the tool generates a C program on the
 build server that compares size, alignment, and every field's offset against FreeBSD 15.1's
 headers for both amd64 and arm64 (the arm64 headers from the release's `src.txz`). A type without a
-check fails.
+check fails, both in `abi-check` and in `cargo xtask policy`:
+
+- Every `#[repr(C)]` type in `lib/abi` is named in a layout's Rust type (generic arguments count,
+  so `Prstatus<regs_arm64::Reg>` checks both), is a part checked through the C type that holds it
+  (`FpState` in `mcontext_t`), or mirrors a declaration private to a FreeBSD source file, listed
+  with that file (`module_stat`'s 32-byte-name v1 and v2 records, `kern_module.c`).
+- A `#[repr(C)]` type outside `lib/abi` that the kernel copies to or from user memory (`Plain`)
+  is a violation: such a type belongs in `lib/abi`, with its check.
 
 ## 14. Testing
 

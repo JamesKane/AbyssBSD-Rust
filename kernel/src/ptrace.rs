@@ -58,6 +58,18 @@ unsafe impl Plain for Reg {}
 unsafe impl Plain for Fpreg {}
 // SAFETY: as above.
 unsafe impl Plain for Dbreg {}
+// SAFETY: as above.
+unsafe impl Plain for Prstatus<Reg> {}
+// SAFETY: as above.
+unsafe impl Plain for Prpsinfo {}
+// SAFETY: as above.
+unsafe impl Plain for Thrmisc {}
+#[cfg(target_arch = "x86_64")]
+// SAFETY: as above.
+unsafe impl Plain for abi::ptrace::regs_amd64::Segbasereg {}
+#[cfg(target_arch = "aarch64")]
+// SAFETY: as above.
+unsafe impl Plain for abi::ptrace::regs_arm64::AddrMask {}
 
 /// A thread's debugging state bits (`td_dbgflags`, `TDB_*`).
 pub(crate) mod tdb {
@@ -1457,8 +1469,18 @@ fn machdep(t: &UserThread, req: i32, addr: u64, data: i32) -> Result<u64, Errno>
 
 /// `struct prstatus` of thread `t` (`NT_PRSTATUS`, also for core dumps).
 pub(crate) fn prstatus(t: &UserThread, cursig: i32) -> Result<Vec<u8>, Errno> {
-    let r = read_regs(t)?;
-    Ok(machdep::prstatus(t.tid(), cursig, &r))
+    let st = Prstatus {
+        pr_version: PRSTATUS_VERSION,
+        pr_statussz: size_of::<Prstatus<Reg>>() as u64,
+        pr_gregsetsz: size_of::<Reg>() as u64,
+        pr_fpregsetsz: size_of::<Fpreg>() as u64,
+        pr_osreldate: abi::sysctl::identity::OSRELDATE,
+        pr_cursig: cursig,
+        pr_pid: t.tid(),
+        pr_reg: read_regs(t)?,
+        ..Prstatus::default()
+    };
+    Ok(crate::uaccess::bytes_of(&st).to_vec())
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -1586,7 +1608,7 @@ mod machdep {
     pub(super) fn regset_set(t: &UserThread, note: i32, b: &[u8]) -> Result<(), Errno> {
         match note {
             NT_PRSTATUS => {
-                let off = PRSTATUS_REG;
+                let off = core::mem::offset_of!(Prstatus<Reg>, pr_reg);
                 let mut r = Reg::default();
                 crate::uaccess::bytes_of_mut(&mut r)
                     .copy_from_slice(&b[off..off + size_of::<Reg>()]);
@@ -1599,19 +1621,6 @@ mod machdep {
             }
             _ => Err(Errno::EINVAL),
         }
-    }
-
-    /// Where `pr_reg` is in `struct prstatus`.
-    const PRSTATUS_REG: usize = 48;
-
-    pub(super) fn prstatus(tid: i32, cursig: i32, r: &Reg) -> Vec<u8> {
-        super::prstatus_bytes(
-            tid,
-            cursig,
-            crate::uaccess::bytes_of(r),
-            size_of::<Fpreg>(),
-            PRSTATUS_REG,
-        )
     }
 
     /// amd64's requests: the FS and GS bases, the XSAVE state.
@@ -1751,7 +1760,7 @@ mod machdep {
     pub(super) fn regset_set(t: &UserThread, note: i32, b: &[u8]) -> Result<(), Errno> {
         match note {
             NT_PRSTATUS => {
-                let off = PRSTATUS_REG;
+                let off = core::mem::offset_of!(Prstatus<Reg>, pr_reg);
                 let mut r = Reg::default();
                 crate::uaccess::bytes_of_mut(&mut r)
                     .copy_from_slice(&b[off..off + size_of::<Reg>()]);
@@ -1766,19 +1775,6 @@ mod machdep {
         }
     }
 
-    /// Where `pr_reg` is in `struct prstatus`.
-    const PRSTATUS_REG: usize = 48;
-
-    pub(super) fn prstatus(tid: i32, cursig: i32, r: &Reg) -> Vec<u8> {
-        super::prstatus_bytes(
-            tid,
-            cursig,
-            crate::uaccess::bytes_of(r),
-            size_of::<Fpreg>(),
-            PRSTATUS_REG,
-        )
-    }
-
     pub(super) fn request(
         _t: &UserThread,
         _req: i32,
@@ -1787,22 +1783,6 @@ mod machdep {
     ) -> Result<u64, Errno> {
         Err(Errno::EINVAL)
     }
-}
-
-/// `struct prstatus` (`sys/procfs.h`, version 1) around registers `reg`
-/// at offset `reg_at`.
-fn prstatus_bytes(tid: i32, cursig: i32, reg: &[u8], fpregset: usize, reg_at: usize) -> Vec<u8> {
-    let mut b = alloc::vec![0u8; reg_at + reg.len()];
-    let size = b.len() as u64;
-    b[0..4].copy_from_slice(&1i32.to_ne_bytes());
-    b[8..16].copy_from_slice(&size.to_ne_bytes());
-    b[16..24].copy_from_slice(&(reg.len() as u64).to_ne_bytes());
-    b[24..32].copy_from_slice(&(fpregset as u64).to_ne_bytes());
-    b[32..36].copy_from_slice(&abi::sysctl::identity::OSRELDATE.to_ne_bytes());
-    b[36..40].copy_from_slice(&cursig.to_ne_bytes());
-    b[40..44].copy_from_slice(&tid.to_ne_bytes());
-    b[reg_at..].copy_from_slice(reg);
-    b
 }
 
 /// Thread `t`'s `struct ptrace_lwpinfo` in a core (`get_lwpinfo`): its

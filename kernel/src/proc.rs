@@ -426,6 +426,9 @@ pub(crate) struct Waited {
     pub(crate) pid: i32,
     pub(crate) status: i32,
     pub(crate) trapped: bool,
+    /// An exited child's usage and its children's; none for a stop or a
+    /// continue (`report_alive_proc` leaves the `rusage` zero).
+    pub(crate) usage: Option<(crate::kinfo::Usage, crate::kinfo::Usage)>,
 }
 
 impl Waited {
@@ -434,6 +437,14 @@ impl Waited {
             pid,
             status,
             trapped: false,
+            usage: None,
+        }
+    }
+
+    fn exited(c: &Process, status: i32) -> Self {
+        Self {
+            usage: Some(crate::kinfo::exit_usage(c)),
+            ..Self::new(c.pid, status)
         }
     }
 }
@@ -1625,6 +1636,22 @@ impl Process {
         Ok((pid, fd.unwrap_or(-1)))
     }
 
+    /// `pdrfork`: [`pdfork`](Self::pdfork) in `rfork`'s forms, `how`
+    /// being (`vfork`, caught signals to their defaults, the descriptor
+    /// table shared) and `pd` (`PD_DAEMON`, `PD_CLOEXEC`, the table's
+    /// limit). Returns the child's pid and the descriptor.
+    pub(crate) fn pdrfork(
+        self: &Arc<Self>,
+        s: &Sleepable,
+        frame: &TrapFrame,
+        how: (bool, bool, bool),
+        pd: (bool, bool, usize),
+    ) -> Result<(i32, i32), Errno> {
+        let (vfork, drop_caught, share_files) = how;
+        let (pid, fd) = self.fork_with(s, frame, vfork, Some(pd), drop_caught, share_files)?;
+        Ok((pid, fd.unwrap_or(-1)))
+    }
+
     fn fork_with(
         self: &Arc<Self>,
         s: &Sleepable,
@@ -2233,7 +2260,7 @@ impl Process {
     pub(crate) fn thread_exit(t: Arc<UserThread>) -> ! {
         let p = Arc::clone(t.process());
         p.dead_runtime
-            .fetch_add(sched::current().runtime(), Ordering::Relaxed);
+            .fetch_add(sched::current_runtime(), Ordering::Relaxed);
         crate::signal::thread_gone(&t);
         t.set_sched(None);
         drop(t);
@@ -2295,6 +2322,10 @@ impl Process {
         // process holds it; this breaks the cycle.
         if let Some(t) = UserThread::current().filter(|t| core::ptr::eq(t.process().as_ref(), self))
         {
+            // Its time so far counts, as any thread's that leaves does
+            // (`thread_exit`), for `wait`'s usage and the parent's.
+            self.dead_runtime
+                .fetch_add(sched::current_runtime(), Ordering::Relaxed);
             t.set_sched(None);
         }
         let gone = core::mem::take(&mut *self.threads.lock());
@@ -2617,19 +2648,22 @@ impl Process {
                             if let Some(rp) = find(to) {
                                 crate::signal::notify_exit(&rp, &c);
                             }
-                            return Ok(Some(Waited::new(c.pid, status)));
+                            return Ok(Some(Waited::exited(&c, status)));
                         }
                         kids.remove(i);
                         tree.parent.remove(&c.pid);
                         tree.clear_orphan(c.pid);
                         tree.reaped(c.pid);
                         drop(tree);
+                        let w = Waited::exited(&c, status);
                         crate::kinfo::reaped(self, &c);
                         crate::event::proc_reaped(&c);
+                        return Ok(Some(w));
                     }
-                    return Ok(Some(Waited::new(c.pid, status)));
+                    return Ok(Some(Waited::exited(&c, status)));
                 }
                 let kids = tree.children.entry(self.pid).or_default();
+                let mut alive = None;
                 for c in kids.iter().filter(|c| selects(c)) {
                     let mut job = c.job.lock();
                     // A traced child's stop, once every thread is stopped
@@ -2643,29 +2677,39 @@ impl Process {
                         if options & WNOWAIT == 0 {
                             job.stop_report = false;
                         }
-                        return Ok(Some(Waited {
-                            pid: c.pid,
-                            status: (job.stopped.cast_signed() << 8) | 0o177,
+                        alive = Some(Waited {
                             trapped: true,
-                        }));
+                            ..Waited::new(c.pid, (job.stopped.cast_signed() << 8) | 0o177)
+                        });
+                        break;
                     }
                     if options & WUNTRACED != 0 && job.stopped != 0 && job.stop_report {
                         if options & WNOWAIT == 0 {
                             job.stop_report = false;
                         }
                         // WIFSTOPPED: the signal, then 0177.
-                        return Ok(Some(Waited::new(
-                            c.pid,
-                            (job.stopped.cast_signed() << 8) | 0o177,
-                        )));
+                        alive = Some(Waited::new(c.pid, (job.stopped.cast_signed() << 8) | 0o177));
+                        break;
                     }
                     if options & WCONTINUED != 0 && job.cont_report {
                         if options & WNOWAIT == 0 {
                             job.cont_report = false;
                         }
                         // WIFCONTINUED: SIGCONT's number.
-                        return Ok(Some(Waited::new(c.pid, abi::signal::SIGCONT.cast_signed())));
+                        alive = Some(Waited::new(c.pid, abi::signal::SIGCONT.cast_signed()));
+                        break;
                     }
+                }
+                if let Some(w) = alive {
+                    drop(tree);
+                    // The child's `SIGCHLD` for what was just reported goes
+                    // too (`report_alive_proc`, `kern.wait_dequeue_sigchld`).
+                    if options & WNOWAIT == 0
+                        && crate::signal::WAIT_DEQUEUE_SIGCHLD.load(Ordering::Relaxed)
+                    {
+                        crate::signal::dequeue_child(self, w.pid);
+                    }
+                    return Ok(Some(w));
                 }
             }
             if options & WNOHANG != 0 {

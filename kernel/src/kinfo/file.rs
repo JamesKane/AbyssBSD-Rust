@@ -48,6 +48,8 @@ unsafe impl Plain for KfProc {}
 // SAFETY: as above.
 unsafe impl Plain for KfEventfd {}
 // SAFETY: as above.
+unsafe impl Plain for KfInotify {}
+// SAFETY: as above.
 unsafe impl Plain for KfTimerfd {}
 // SAFETY: as above.
 unsafe impl Plain for KfJail {}
@@ -363,6 +365,15 @@ pub(crate) fn file_record(
             k.kf_un.kf_eventfd_value = value;
             k.kf_un.kf_eventfd_flags = flags;
             k.kf_un.kf_eventfd_addr = identity(e.as_ref());
+            k.kf_status |= KF_ATTR_VALID;
+            out!(k)
+        }
+        FileKind::Inotify(i) => {
+            let mut k: Box<KinfoFile<KfInotify>> = record(fd, fflags);
+            k.kf_type = KF_TYPE_INOTIFY;
+            let st = i.0.stat();
+            k.kf_un.kf_inotify_npending = st.records;
+            k.kf_un.kf_inotify_nbpending = st.bytes;
             k.kf_status |= KF_ATTR_VALID;
             out!(k)
         }

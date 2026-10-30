@@ -14,6 +14,7 @@
 //! (`vaccess`), sys/ufs/ufs/ufs_vnops.c (rename rules).
 
 use abi::event::{NOTE_ATTRIB, NOTE_DELETE, NOTE_EXTEND, NOTE_LINK, NOTE_RENAME, NOTE_WRITE};
+use abi::inotify::{IN_ACCESS, IN_ATTRIB, IN_CREATE, IN_DELETE};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
@@ -207,7 +208,7 @@ pub fn create(
     if let Some(d) = &dacl {
         crate::acl::inherit(s, &v, c.mode, d)?;
     }
-    if dir.mount().fs().caches_created() || v.is_dir() {
+    if dir.mount().fs().caches_created() || v.is_dir() || crate::inotify::watched(dir) {
         cache::enter_made(dir, name, &v);
     } else {
         // A negative entry for the name goes.
@@ -219,6 +220,7 @@ pub fn create(
     } else {
         NOTE_WRITE
     });
+    crate::inotify::name_event(s, &v, dir, name, IN_CREATE);
     Ok((v, true))
 }
 
@@ -273,6 +275,12 @@ pub fn remove(
             NOTE_WRITE
         });
         child.knote(NOTE_DELETE);
+        // A directory's removal is its deletion; a file's changes its link
+        // count first.
+        if !dir_wanted {
+            crate::inotify::name_event(s, &child, dir, name, crate::inotify::ATTRIB_LINKCOUNT);
+        }
+        crate::inotify::name_event(s, &child, dir, name, IN_DELETE);
         child
     };
     child.release_if_unlinked(s);
@@ -315,6 +323,8 @@ pub fn link(
     // `vop_link_post`.
     target.knote(NOTE_LINK);
     dir.knote(NOTE_WRITE);
+    crate::inotify::name_event(s, target, dir, name, crate::inotify::ATTRIB_LINKCOUNT);
+    crate::inotify::name_event(s, target, dir, name, IN_CREATE);
     Ok(())
 }
 
@@ -586,6 +596,11 @@ pub fn rename(
     }
     drop(held);
     rename_notes(fdir, tdir, &from, to.as_deref());
+    // A file now in a watched directory answers to its new name there.
+    if !from.is_dir() && crate::inotify::watched(tdir) {
+        from.set_named(tdir, tname);
+    }
+    crate::inotify::move_event(s, &from, (fdir, fname), (tdir, tname), to.as_deref());
     if let Some(t) = to {
         if t.is_dir() {
             cache::purge(&t);
@@ -753,6 +768,7 @@ pub fn setattr(
         v.size_changed(size);
     }
     v.knote(hint);
+    crate::inotify::event(v, IN_ATTRIB);
     Ok(())
 }
 
@@ -766,6 +782,11 @@ pub fn getdirentries(
     room: usize,
     out: &mut Vec<u8>,
 ) -> Result<u64, Errno> {
+    // A directory removed while open has nothing to read
+    // (`kern_getdirentries`' `VV_UNLINKED`).
+    if dir.attr(s)?.nlink == 0 {
+        return Err(Errno::ENOENT);
+    }
     let mut next = from;
     let mut full = false;
     dir.readdir(s, from, &mut |e| {
@@ -789,6 +810,8 @@ pub fn getdirentries(
     if out.is_empty() && full {
         return Err(Errno::EINVAL);
     }
+    // `vop_readdir_post`.
+    crate::inotify::event(dir, IN_ACCESS);
     Ok(next)
 }
 
@@ -853,7 +876,11 @@ pub fn set_extattr(
 ) -> Result<(), Errno> {
     extattr_check(s, v, cred, ns, Some(name), VWRITE)?;
     let mut st = v.write(s);
-    st.live_mut()?.node_mut().set_extattr(s, ns, name, value)
+    st.live_mut()?.node_mut().set_extattr(s, ns, name, value)?;
+    drop(st);
+    // `vop_setextattr_post`.
+    crate::inotify::event(v, IN_ATTRIB);
+    Ok(())
 }
 
 /// `extattr_delete_*`.
@@ -866,7 +893,11 @@ pub fn delete_extattr(
 ) -> Result<(), Errno> {
     extattr_check(s, v, cred, ns, Some(name), VWRITE)?;
     let mut st = v.write(s);
-    st.live_mut()?.node_mut().delete_extattr(s, ns, name)
+    st.live_mut()?.node_mut().delete_extattr(s, ns, name)?;
+    drop(st);
+    // `vop_deleteextattr_post`.
+    crate::inotify::event(v, IN_ATTRIB);
+    Ok(())
 }
 
 /// `extattr_list_*`: each name in `ns`, as the list `extattr_list_*`

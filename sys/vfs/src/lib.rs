@@ -28,6 +28,7 @@ pub mod acl;
 pub mod cache;
 pub mod devfsrule;
 pub mod devices;
+pub mod inotify;
 pub mod lockf;
 pub mod mount;
 pub mod namei;

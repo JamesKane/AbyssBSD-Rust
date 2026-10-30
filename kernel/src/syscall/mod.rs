@@ -28,6 +28,7 @@ mod event;
 mod extattr;
 mod fsops;
 mod inet;
+mod inotify;
 mod io;
 mod ipc;
 mod jail;
@@ -289,6 +290,7 @@ fn run(s: &Sleepable, frame: &mut TrapFrame, call: Call) -> Result<Option<u64>, 
         Sysno::Getpriority => proc::getpriority(a0, a1),
         Sysno::Setpriority => proc::setpriority(a0, a1, a2),
         Sysno::Pdfork => proc::pdfork(s, frame, a0, a1),
+        Sysno::Pdrfork => proc::pdrfork(s, frame, a0, a1, a2),
         Sysno::Pdgetpid => proc::pdgetpid(s, a0, a1),
         Sysno::Pdkill => proc::pdkill(s, a0, a1),
         Sysno::Wait4 => proc::wait4(s, a0, a1, a2, a3),
@@ -357,6 +359,8 @@ fn run(s: &Sleepable, frame: &mut TrapFrame, call: Call) -> Result<Option<u64>, 
         Sysno::TimerfdGettime => timers::timerfd_gettime(s, a0, a1),
         Sysno::TimerfdSettime => timers::timerfd_settime(s, a0, a1, a2, a3),
         Sysno::Specialfd => timers::specialfd(s, a0, a1, a2),
+        Sysno::InotifyAddWatchAt => inotify::inotify_add_watch_at(s, a0, a1, a2, a3),
+        Sysno::InotifyRmWatch => inotify::inotify_rm_watch(s, a0, a1),
         Sysno::Poll => event::poll(s, a0, a1, a2),
         Sysno::Ppoll => event::ppoll(s, a0, a1, a2, a3),
         Sysno::Select => event::select(s, a0, [a1, a2, a3], a4),
@@ -545,6 +549,7 @@ fn run(s: &Sleepable, frame: &mut TrapFrame, call: Call) -> Result<Option<u64>, 
         Sysno::Sigwait => sig::sigwait(s, a0, a1),
         Sysno::Sigfastblock => sig::sigfastblock(a0, a1),
         Sysno::SchedYield => thr::sched_yield(),
+        Sysno::SchedGetcpu => Ok(thr::sched_getcpu()),
         Sysno::SchedGetPriorityMax => thr::sched_priority_bound(a0, true),
         Sysno::SchedGetscheduler => thr::sched_getscheduler(a0),
         Sysno::SchedGetparam => thr::sched_getparam(a0, a1),

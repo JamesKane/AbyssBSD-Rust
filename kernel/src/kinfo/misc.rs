@@ -19,7 +19,7 @@ use abi::resource::rlimit;
 use sched::Sleepable;
 use sysctl::{Number, ReadError, Tree};
 
-use super::{Access, arg, process, sleepable, text};
+use super::{Access, arg, process, process_or_self, sleepable, text};
 use crate::proc::Process;
 use crate::uaccess::{Plain, bytes_of};
 
@@ -323,7 +323,7 @@ pub(crate) fn add_nodes(t: &mut Tree, kern: sysctl::NodeId, procs: sysctl::NodeI
         "args",
         "Process argument list",
         |r, out| {
-            let p = process(arg(r)?, Access::See)?;
+            let p = process_or_self(arg(r)?, Access::See)?;
             out.extend_from_slice(&p.image().args);
             Ok(())
         },
@@ -335,13 +335,12 @@ pub(crate) fn add_nodes(t: &mut Tree, kern: sysctl::NodeId, procs: sysctl::NodeI
             args,
             abi::sysctl::ctlflag::WR | abi::sysctl::ctlflag::ANYBODY,
             Arc::new(|r, new| {
-                let p =
-                    process(arg(r).map_err(|_| Errno::EINVAL)?, Access::See).map_err(
-                        |e| match e {
-                            ReadError::Failed(e) => e,
-                            _ => Errno::EINVAL,
-                        },
-                    )?;
+                let p = process_or_self(arg(r).map_err(|_| Errno::EINVAL)?, Access::See).map_err(
+                    |e| match e {
+                        ReadError::Failed(e) => e,
+                        _ => Errno::EINVAL,
+                    },
+                )?;
                 if Process::current().is_none_or(|me| !Arc::ptr_eq(&me, &p)) {
                     return Err(Errno::EPERM);
                 }
@@ -364,7 +363,7 @@ pub(crate) fn add_nodes(t: &mut Tree, kern: sysctl::NodeId, procs: sysctl::NodeI
         "pathname",
         "Process executable path",
         |r, out| {
-            let p = process(arg(r)?, Access::See)?;
+            let p = process_or_self(arg(r)?, Access::See)?;
             out.extend_from_slice(&p.image().path);
             out.push(0);
             Ok(())
@@ -417,7 +416,7 @@ pub(crate) fn add_nodes(t: &mut Tree, kern: sysctl::NodeId, procs: sysctl::NodeI
         "groups",
         "Process groups",
         |r, out| {
-            let p = process(arg(r)?, Access::See)?;
+            let p = process_or_self(arg(r)?, Access::See)?;
             let c = p.cred();
             out.extend_from_slice(&c.gid.to_ne_bytes());
             for g in c.groups() {

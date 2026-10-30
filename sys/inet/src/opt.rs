@@ -204,8 +204,11 @@ impl Socket {
                 }
             }
             // No accept filters are loaded (`accept_filt_setopt`).
+            // From the state held here: `is_listening` would take the
+            // lock again.
             SO_ACCEPTFILTER => {
-                return Err(if self.is_listening() {
+                let listening = i.tcp.as_ref().is_some_and(|t| t.listen.is_some());
+                return Err(if listening {
                     Errno::ENOENT
                 } else {
                     Errno::EINVAL

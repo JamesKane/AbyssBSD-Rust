@@ -347,6 +347,17 @@ fn handle(frame: &mut TrapFrame) {
     }
     let trap = Trap::decode(frame);
     let user = frame.cs & 3 != 0;
+    if trap == Trap::Nmi {
+        let report = TrapReport {
+            frame: *frame,
+            trap,
+            cr3: crate::cpu::cr3(),
+            user_gs: false,
+        };
+        // SAFETY: defined by the kernel through `kernel_hooks!`.
+        unsafe { crate::abyss_nmi(&report) };
+        return;
+    }
     let fixup = (!user).then(|| crate::fixup::lookup(frame.rip)).flatten();
     if let Trap::PageFault { address, cause } = trap {
         let fault = hal::PageFault {

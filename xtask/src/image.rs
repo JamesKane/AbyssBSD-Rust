@@ -342,6 +342,13 @@ pub(crate) fn build_installed_root(
     ufs_root(arch, opts, cmdline, Root::Installed)
 }
 
+/// As [`build_installed_root`], with all of FreeBSD's `/usr/tests` (from
+/// `tests.txz`): the root `cargo xtask kyua` runs the suite on
+/// (docs/MULTIUSER.md §14).
+pub(crate) fn build_kyua_root(arch: Arch, opts: build::Options, cmdline: &str) -> Result<PathBuf> {
+    ufs_root(arch, opts, cmdline, Root::Kyua)
+}
+
 /// Which UFS2 root to make.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Root {
@@ -349,6 +356,8 @@ enum Root {
     Tests,
     /// That, as the installer leaves it.
     Installed,
+    /// That, with the whole of FreeBSD's test suite.
+    Kyua,
 }
 
 fn ufs_root(arch: Arch, opts: build::Options, cmdline: &str, root: Root) -> Result<PathBuf> {
@@ -360,6 +369,7 @@ fn ufs_root(arch: Arch, opts: build::Options, cmdline: &str, root: Root) -> Resu
     let name = match root {
         Root::Tests => "ufsroot",
         Root::Installed => "installedroot",
+        Root::Kyua => "kyuaroot",
     };
     // What goes over the base: made afresh each time.
     let stage = dir.join(name);
@@ -369,7 +379,7 @@ fn ufs_root(arch: Arch, opts: build::Options, cmdline: &str, root: Root) -> Resu
     fs::create_dir_all(stage.join(STATIC_TOOLS))?;
     fs::copy(&images.kernel, stage.join("boot/kernel/kernel"))?;
     fs::write(stage.join("etc/fstab"), FSTAB)?;
-    if root == Root::Installed {
+    if root != Root::Tests {
         for (path, mode, data) in crate::multiuser::installed_files(&crate::base::full(arch)?)? {
             let dst = stage.join(path);
             if let Some(parent) = dst.parent() {
@@ -395,8 +405,17 @@ fn ufs_root(arch: Arch, opts: build::Options, cmdline: &str, root: Root) -> Resu
     for (name, bin) in crate::base::static_tools(arch)? {
         fs::copy(&bin, stage.join(STATIC_TOOLS).join(name))?;
     }
-    // FreeBSD's own tests of what has landed, from `tests.txz`.
-    for dir in FREEBSD_TESTS {
+    // FreeBSD's own tests of what has landed, from `tests.txz`, or all
+    // of them.
+    if root == Root::Kyua {
+        util::run(
+            std::process::Command::new("cp")
+                .arg("-R")
+                .arg(crate::base::tests(arch)?.join("usr/tests/."))
+                .arg(stage.join("usr/tests")),
+        )?;
+    }
+    for dir in FREEBSD_TESTS.iter().filter(|_| root != Root::Kyua) {
         let dst = stage.join(dir);
         if let Some(parent) = dst.parent() {
             fs::create_dir_all(parent)?;
@@ -485,7 +504,7 @@ fn ufs_root(arch: Arch, opts: build::Options, cmdline: &str, root: Root) -> Resu
     fs::remove_file(&img)?;
     let cmdline = match root {
         Root::Tests => with_shell(cmdline),
-        Root::Installed => cmdline.to_owned(),
+        Root::Installed | Root::Kyua => cmdline.to_owned(),
     };
     let disk = make_disk(
         arch,
@@ -500,6 +519,7 @@ fn ufs_root(arch: Arch, opts: build::Options, cmdline: &str, root: Root) -> Resu
     let path = dir.join(match root {
         Root::Tests => "disk-ufs.img",
         Root::Installed => "disk-installed.img",
+        Root::Kyua => "disk-kyua.img",
     });
     fs::write(&path, &disk)?;
     Ok(path)
@@ -522,9 +542,17 @@ fn add_spec(
         let rel = path.strip_prefix(stage).map_err(|e| e.to_string())?;
         let name = format!("./{}", rel.display());
         let meta = e.metadata()?;
-        let kind = if meta.is_dir() { "dir" } else { "file" };
         if !known.contains(name.as_str()) {
             let mode = meta.permissions().mode() & 0o7777;
+            // `tests.txz` has symbolic links.
+            let kind = if meta.is_dir() {
+                "dir".to_owned()
+            } else if meta.is_symlink() {
+                let to = fs::read_link(&path)?;
+                format!("link link={}", to.display())
+            } else {
+                "file".to_owned()
+            };
             let _ = writeln!(
                 spec,
                 "{name} type={kind} mode={mode:o} uid=0 gid=0 flags=none"

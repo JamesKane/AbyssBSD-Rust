@@ -48,6 +48,21 @@ pub(crate) fn fatal_trap(report: &arch::TrapReport) -> ! {
     stop(false)
 }
 
+/// An NMI (`bhyvectl --inject-nmi`, QEMU's `nmi`): where this CPU is,
+/// then back to it, so a hung machine can be asked CPU by CPU.
+#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
+pub(crate) fn nmi(report: &arch::TrapReport) {
+    out!(
+        "\nNMI on cpu {}: at {}\n",
+        hal::cpu_id().0,
+        Symbolized::pc(report.pc())
+    );
+    // A user-mode PC is a lower-half address, and its frames are not ours.
+    if report.pc() >> 63 != 0 {
+        backtrace(report.frame_pointer());
+    }
+}
+
 /// Prints this thread's backtrace (witness reports).
 pub(crate) fn backtrace_here() {
     backtrace(arch::cpu::frame_pointer());

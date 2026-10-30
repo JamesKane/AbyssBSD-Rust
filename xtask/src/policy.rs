@@ -27,12 +27,15 @@ pub(crate) fn check() -> Result<()> {
             violations.push(format!("{}: {v}", rel(&root, &manifest)));
         }
     }
+    let mut sources = Vec::new();
     for src in files(&root, ".rs") {
         let text = fs::read_to_string(&src)?;
         if text.lines().next() != Some(SPDX) {
             violations.push(format!("{}: first line must be `{SPDX}`", rel(&root, &src)));
         }
+        sources.push((rel(&root, &src), text));
     }
+    violations.extend(crate::abicheck::unchecked(&sources));
     if violations.is_empty() {
         println!("policy: ok");
         Ok(())

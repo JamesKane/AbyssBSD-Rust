@@ -9,7 +9,9 @@ use std::sync::Mutex;
 
 use abi::errno::Errno;
 use abi::inet::{IPPROTO_IPV6, ipv6};
-use abi::socket::{SHUT_WR, SO_LINGER, SO_OOBINLINE, SO_REUSEADDR, SO_REUSEPORT, SOL_SOCKET};
+use abi::socket::{
+    SHUT_WR, SO_ACCEPTFILTER, SO_LINGER, SO_OOBINLINE, SO_REUSEADDR, SO_REUSEPORT, SOL_SOCKET,
+};
 
 use crate::addr::{self, LOOPBACK6, Sockaddr, sockaddr_in, sockaddr_in6, v4mapped};
 use crate::ifnet::{self, NET};
@@ -356,6 +358,27 @@ fn tcp_write_after_peer_close_resets() {
 }
 
 #[test]
+fn accept_filter_is_absent() {
+    let _g = setup();
+    // No filters are loaded: `ENOENT` on a listener, `EINVAL` otherwise
+    // (`accept_filt_setopt`), and the socket's lock is free afterwards.
+    let l = listener(20120);
+    let filter = [0u8; 256];
+    assert_eq!(
+        l.setopt(SOL_SOCKET, SO_ACCEPTFILTER, &filter, &user()),
+        Err(Errno::ENOENT)
+    );
+    assert!(l.is_listening());
+    let c = tcp4();
+    assert_eq!(
+        c.setopt(SOL_SOCKET, SO_ACCEPTFILTER, &filter, &user()),
+        Err(Errno::EINVAL)
+    );
+    c.close();
+    l.close();
+}
+
+#[test]
 fn tcp_listen_backlog_and_close_aborts_queue() {
     let _g = setup();
     let l = tcp4();
@@ -668,4 +691,181 @@ fn iflist_records() {
     let d = crate::rtmsg::dump(&n, abi::inet::AF_INET);
     assert!(!d.is_empty());
     assert_eq!(d[3], abi::net::rtm::GET);
+}
+
+/// Runs the splice worker until nothing waits (at most `turns` turns);
+/// returns whether work was still queued after them.
+fn splice_drain(turns: usize) -> bool {
+    for _ in 0..turns {
+        if crate::splice::pending() {
+            crate::splice::run();
+        } else {
+            return false;
+        }
+    }
+    crate::splice::pending()
+}
+
+/// Two connections, `left` and `right`, with `left.1` spliced both ways
+/// with `right.0`, as `socket_splice.c`'s `splice_conn_init` makes them.
+fn splice_conn(port: u16, max: i64) -> [Arc<Socket>; 6] {
+    let (l1, a0, a1) = connected(port);
+    let (l2, b1, b0) = connected(port + 1);
+    // `connected` gives (listener, client, accepted): left[0] writes,
+    // left[1] is the accepted end; right[0] the accepted, right[1] the
+    // client.
+    a1.splice(&b0, max).unwrap();
+    b0.splice(&a1, max).unwrap();
+    l1.close();
+    l2.close();
+    [a0, a1, b0, b1, l1, l2]
+}
+
+#[test]
+fn splice_moves_both_ways_and_counts() {
+    let _g = setup();
+    let [a0, a1, b0, b1, ..] = splice_conn(20300, 0);
+    assert_eq!(a1.splice_sent(), 0);
+    assert_eq!(a0.send_stream(b"M", false), Ok(1));
+    assert!(!splice_drain(10));
+    assert_eq!(b1.recv_stream(10, false, false).unwrap().data, b"M");
+    assert_eq!(a1.splice_sent(), 1);
+    assert_eq!(b0.splice_sent(), 0);
+    assert_eq!(a1.nread(), 0);
+    assert_eq!(b1.send_stream(b"J", false), Ok(1));
+    assert!(!splice_drain(10));
+    assert_eq!(a0.recv_stream(10, false, false).unwrap().data, b"J");
+    assert_eq!(b0.splice_sent(), 1);
+    // A spliced source is not readable.
+    assert_eq!(a0.send_stream(b"x", false), Ok(1));
+    assert_eq!(a1.poll(abi::event::POLLIN, None), 0);
+    assert!(!splice_drain(10));
+    assert_eq!(b1.recv_stream(10, false, false).unwrap().data, b"x");
+    // Unsplicing keeps the counts; a second time is ENOTCONN.
+    a1.unsplice().unwrap();
+    b0.unsplice().unwrap();
+    assert_eq!(a1.unsplice(), Err(Errno::ENOTCONN));
+    assert_eq!(a1.splice_sent(), 2);
+    assert_eq!(b0.splice_sent(), 1);
+    // Unspliced, the data stays.
+    assert_eq!(a0.send_stream(b"y", false), Ok(1));
+    assert!(!splice_drain(10));
+    assert_eq!(a1.recv_stream(10, false, false).unwrap().data, b"y");
+    // Splicing again counts anew.
+    a1.splice(&b0, 0).unwrap();
+    assert_eq!(a1.splice_sent(), 0);
+    a1.unsplice().unwrap();
+    for x in [a0, a1, b0, b1] {
+        x.close();
+    }
+}
+
+#[test]
+fn splice_refusals() {
+    let _g = setup();
+    let (l1, a0, a1) = connected(20310);
+    let (l2, b1, b0) = connected(20311);
+    assert_eq!(a1.splice(&b0, -3).unwrap_err(), Errno::EINVAL);
+    assert_eq!(a1.unsplice(), Err(Errno::ENOTCONN));
+    a1.splice(&b0, 0).unwrap();
+    // A spliced source, and a sink spliced to.
+    assert_eq!(a1.splice(&b1, 0).unwrap_err(), Errno::EBUSY);
+    assert_eq!(a0.splice(&b0, 0).unwrap_err(), Errno::EBUSY);
+    // The refused splice of `a0` left it unspliced.
+    assert_eq!(a0.unsplice(), Err(Errno::ENOTCONN));
+    a1.unsplice().unwrap();
+    // Unconnected, listening, UDP.
+    let u = tcp4();
+    assert_eq!(a1.splice(&u, 0).unwrap_err(), Errno::ENOTCONN);
+    assert_eq!(u.splice(&b0, 0).unwrap_err(), Errno::ENOTCONN);
+    assert_eq!(a1.splice(&l1, 0).unwrap_err(), Errno::EINVAL);
+    assert_eq!(l1.splice(&a1, 0).unwrap_err(), Errno::EINVAL);
+    assert_eq!(l1.unsplice(), Err(Errno::EINVAL));
+    assert_eq!(l1.splice_sent(), 0);
+    let d = udp4();
+    assert_eq!(a1.splice(&d, 0).unwrap_err(), Errno::EPROTONOSUPPORT);
+    // Nothing was left spliced.
+    assert_eq!(a1.unsplice(), Err(Errno::ENOTCONN));
+    for x in [a0, a1, b0, b1, l1, l2, u, d] {
+        x.close();
+    }
+}
+
+#[test]
+fn splice_limit_unsplices() {
+    let _g = setup();
+    let [a0, a1, b0, b1, ..] = splice_conn(20320, 129);
+    let buf = [b'A'; 128];
+    assert_eq!(a0.send_stream(&buf, false), Ok(128));
+    assert!(!splice_drain(10));
+    assert_eq!(b1.recv_stream(1000, false, false).unwrap().data.len(), 128);
+    assert_eq!(a1.splice_sent(), 128);
+    // Two bytes: the limit takes one, and the other stays.
+    assert_eq!(a0.send_stream(b"BC", false), Ok(2));
+    assert!(!splice_drain(10));
+    assert_eq!(b1.recv_stream(10, false, false).unwrap().data, b"B");
+    assert_eq!(a1.splice_sent(), 129);
+    assert!(!a1.is_spliced());
+    assert_eq!(a1.recv_stream(10, false, false).unwrap().data, b"C");
+    assert!(b0.is_spliced());
+    for x in [a0, a1, b0, b1] {
+        x.close();
+    }
+}
+
+#[test]
+fn splice_ends_with_the_connection() {
+    let _g = setup();
+    let [a0, a1, b0, b1, ..] = splice_conn(20330, 0);
+    // The source's peer closes: the next transfer finds the end.
+    a0.close();
+    assert!(!splice_drain(10));
+    assert!(!a1.is_spliced());
+    assert!(b0.is_spliced());
+    // A closed sink ends the splice to it.
+    b0.close();
+    assert!(!b0.is_spliced());
+    assert_eq!(b0.unsplice(), Err(Errno::ENOTCONN));
+    for x in [a1, b1] {
+        x.close();
+    }
+}
+
+#[test]
+fn splice_flow_control_and_loop() {
+    let _g = setup();
+    let [a0, a1, b0, b1, ..] = splice_conn(20340, 0);
+    // More than all the buffers hold, moved as the reader reads.
+    let big = alloc::vec![7u8; 1_000_000];
+    let (mut sent, mut got) = (0, 0);
+    while got < big.len() {
+        if sent < big.len() {
+            match a0.send_stream(&big[sent..], false) {
+                Ok(n) => sent += n,
+                Err(Errno::EAGAIN) => {}
+                Err(e) => panic!("{e:?}"),
+            }
+        }
+        splice_drain(100);
+        match b1.recv_stream(100_000, false, false) {
+            Ok(r) => got += r.data.len(),
+            Err(Errno::EAGAIN) => {}
+            Err(e) => panic!("{e:?}"),
+        }
+    }
+    assert_eq!(got, big.len());
+    assert_eq!(a1.splice_sent(), 1_000_000);
+    for x in [a0, a1, b0, b1] {
+        x.close();
+    }
+    // A connection spliced to itself loops until it closes.
+    let (l, c, s) = connected(20345);
+    c.splice(&s, 0).unwrap();
+    s.splice(&c, 0).unwrap();
+    assert_eq!(c.send_stream(b"*", false), Ok(1));
+    assert!(splice_drain(50));
+    c.close();
+    s.close();
+    assert!(!splice_drain(10));
+    l.close();
 }

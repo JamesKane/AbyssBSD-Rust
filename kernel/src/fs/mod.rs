@@ -21,6 +21,7 @@ pub(crate) mod fdtable;
 pub(crate) mod fifo;
 pub(crate) mod file;
 pub(crate) mod inet;
+pub(crate) mod inotify;
 pub(crate) mod msdosfs;
 pub(crate) mod pipe;
 pub(crate) mod shm;
@@ -375,6 +376,7 @@ pub(crate) fn sysctl_init(s: &Sleepable) {
                 .expect("vfs node"),
         };
         devfs::sysctl_init(t, vfs);
+        inotify::sysctl_init(t, vfs);
         t.add_handler(
             vfs,
             sysctl::Number::Auto,

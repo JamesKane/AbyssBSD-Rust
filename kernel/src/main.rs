@@ -102,6 +102,7 @@ arch::kernel_hooks!(
     syscall = syscall::entry,
     user_trap = syscall::user_trap,
     user_return = signal::user_return,
+    nmi = panic::nmi,
 );
 
 fn kmain(boot_info: PhysAddr) -> ! {

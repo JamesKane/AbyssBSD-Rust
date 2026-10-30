@@ -9,6 +9,7 @@
 
 pub(crate) mod ioctl;
 pub(crate) mod netlink;
+pub(crate) mod splice;
 mod sysctl;
 
 use sched::Sleepable;
@@ -41,5 +42,6 @@ pub(crate) fn init(s: &Sleepable) {
     });
     let now = i64::try_from(crate::time::realtime_ns().unwrap_or(0) / 1_000_000_000).unwrap_or(0);
     inet::ifnet::attach_loopback(now);
+    splice::init();
     sysctl::init(s);
 }

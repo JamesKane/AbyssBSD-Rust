@@ -46,6 +46,8 @@ unsafe impl<T: Plain, const N: usize> Plain for [T; N] {}
 unsafe impl Plain for abi::linker::KldFileStat {}
 // SAFETY: as above.
 unsafe impl Plain for abi::linker::ModuleStat {}
+// SAFETY: as above.
+unsafe impl Plain for abi::linker::ModuleStatV2 {}
 
 /// The bytes of a [`Plain`] value (for replies built in the kernel).
 pub(crate) fn bytes_of<T: Plain>(v: &T) -> &[u8] {

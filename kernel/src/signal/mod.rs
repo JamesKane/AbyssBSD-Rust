@@ -132,6 +132,33 @@ pub(crate) fn sysctl_init(s: &Sleepable) {
             Value::int(0),
         )
         .expect("kern.sigqueue.alloc_fail");
+        for (name, descr, flag) in [
+            (
+                "sig_discard_ign",
+                "Discard ignored signals on delivery, otherwise queue them to the target queue",
+                &DISCARD_IGN,
+            ),
+            (
+                "wait_dequeue_sigchld",
+                "Dequeue SIGCHLD on wait(2) for live process",
+                &WAIT_DEQUEUE_SIGCHLD,
+            ),
+        ] {
+            t.add_writable(
+                kern,
+                Number::Auto,
+                name,
+                descr,
+                0,
+                Value::U8(alloc::boxed::Box::new(|| u8::from(flag.load(Relaxed)))),
+                // `SYSCTL_BOOL`: any nonzero byte is true.
+                sysctl::u8_writer(|v| {
+                    flag.store(v != 0, Relaxed);
+                    Ok(())
+                }),
+            )
+            .expect(name);
+        }
     });
 }
 
@@ -267,6 +294,30 @@ impl Queue {
         self.info.push_back(Queued { info, ptrace });
         self.pending.add(sig);
         Ok(())
+    }
+
+    /// Drops `child`'s state-change `SIGCHLD`, which waits once
+    /// ([`add_as`](Self::add_as)); `SIGCHLD` stays pending while another
+    /// does.
+    fn take_child(&mut self, child: i32) {
+        let is_child = |q: &Queued| {
+            q.info.si_signo == SIGCHLD.cast_signed()
+                && q.info.si_pid == child
+                && (code::CLD_EXITED..=code::CLD_CONTINUED).contains(&q.info.si_code)
+        };
+        let Some(at) = self.info.iter().position(is_child) else {
+            return;
+        };
+        self.info.remove(at);
+        let more = self.bare.has(SIGCHLD)
+            || self.ptrace.has(SIGCHLD)
+            || self
+                .info
+                .iter()
+                .any(|q| q.info.si_signo == SIGCHLD.cast_signed());
+        if !more {
+            self.pending.remove(SIGCHLD);
+        }
     }
 
     /// Takes one pending `sig` (FreeBSD's `sigqueue_get`): one handed on
@@ -848,7 +899,11 @@ fn send_as(
         // A traced process stays stopped for its debugger.
         let held = traced && p.job.lock().stopped != 0;
         let continued = (sig == SIGCONT || sig == SIGKILL) && !held && p.resume(sig == SIGCONT);
-        if (st.ignored(sig) && sig != SIGKILL) || (orphaned && st.action(sig).sa_handler == SIG_DFL)
+        // With `kern.sig_discard_ign` off, an ignored signal is queued
+        // all the same, for `sigwait` (delivery drops it otherwise).
+        let discard = DISCARD_IGN.load(core::sync::atomic::Ordering::Relaxed);
+        if (st.ignored(sig) && sig != SIGKILL && discard)
+            || (orphaned && st.action(sig).sa_handler == SIG_DFL)
         {
             (continued, None)
         } else {
@@ -1214,6 +1269,23 @@ fn deliver(s: &Sleepable, frame: &mut TrapFrame) -> bool {
             }
         }
     }
+}
+
+/// `kern.sig_discard_ign`: whether a signal sent to a process that
+/// ignores it is dropped at once, even while a thread waits for it in
+/// `sigwait`.
+pub(crate) static DISCARD_IGN: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(true);
+
+/// `kern.wait_dequeue_sigchld`: whether `wait` reporting a live child's
+/// stop or continue also takes that child's pending `SIGCHLD`.
+pub(crate) static WAIT_DEQUEUE_SIGCHLD: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(true);
+
+/// Takes `child`'s state-change `SIGCHLD` from `p`'s queue, if pending
+/// (`sigqueue_take(p->p_ksi)`).
+pub(crate) fn dequeue_child(p: &Process, child: i32) {
+    p.signals.lock().queue.take_child(child);
 }
 
 /// `kern.logsigexit`: whether a process a core-dumping signal ends is

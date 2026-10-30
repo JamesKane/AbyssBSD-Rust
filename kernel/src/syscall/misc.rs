@@ -295,21 +295,28 @@ pub(super) fn cpuset_setaffinity(
     }
     let online = sched::online_cpus();
     let mut bits = 0u64;
+    let mut absent = false;
     for (i, &b) in set.iter().enumerate() {
         for bit in 0..8 {
             if b & (1 << bit) == 0 {
                 continue;
             }
             let cpu = i * 8 + bit;
-            // An absent CPU is simply never used.
             if cpu < online.min(64) {
                 bits |= 1 << cpu;
+            } else {
+                absent = true;
             }
         }
     }
-    // A thread with nowhere to run.
-    if bits == 0 {
+    // A thread with nowhere to run (`kern_cpuset_setaffinity`), then a CPU
+    // outside the root set, which has every CPU there is (`cpuset_modify`,
+    // `cpuset_testshadow`).
+    if bits == 0 && !absent {
         return Err(Errno::EDEADLK);
+    }
+    if absent {
+        return Err(Errno::EINVAL);
     }
     // A numbered set (`cpuset_modify`), or a thread's or process's own
     // CPUs within its set.
@@ -319,11 +326,11 @@ pub(super) fn cpuset_setaffinity(
         return Ok(0);
     }
     let target = Target::find(which, id)?;
+    // Within the set it belongs to (`cpuset_testshadow`).
     let within = crate::cpuset::mask(target.set())?;
-    if bits & within == 0 {
-        return Err(Errno::EDEADLK);
+    if bits & !within != 0 {
+        return Err(Errno::EINVAL);
     }
-    let bits = bits & within;
     match target {
         Target::Thread(t) => t.set_cpus(bits),
         Target::Process(p) => p.set_cpus(bits),
@@ -564,29 +571,47 @@ pub(super) fn modfnext(modid: u64) -> SysResult {
     })
 }
 
-/// `modstat(modid, stat)`: its name and id, with `data` in the second
-/// version's size.
+/// `modstat(modid, stat)`: its name, references, id, and (past the first
+/// version) data, in whichever of the three versions the caller's
+/// `version` names, as `sys_modstat` does. The name is cut to the
+/// version's length, its NUL included when it fits.
 pub(super) fn modstat(modid: u64, stat: u64) -> SysResult {
-    use abi::linker::{MODULE_STAT_V1_SIZE, ModuleStat};
+    use abi::linker::{MODULE_STAT_V1_SIZE, MODULE_STAT_V2_SIZE, ModuleStat, ModuleStatV2};
+    // `buf` is zero: the NUL is there unless the name fills it.
+    fn name_into(buf: &mut [u8], name: &[u8]) {
+        let n = name.len().min(buf.len());
+        buf[..n].copy_from_slice(&name[..n]);
+    }
     let (id, name) = module(super::int(modid))?;
     let version = uaccess::load_u32(stat).map_err(|_| Errno::EFAULT)?;
     let version = usize::try_from(version).unwrap_or(usize::MAX);
-    if version != MODULE_STAT_V1_SIZE && version != size_of::<ModuleStat>() {
+    let record = if version == size_of::<ModuleStat>() {
+        let mut st = ModuleStat {
+            version: 0,
+            name: [0; abi::linker::MAXMODNAME],
+            refs: 1,
+            id,
+            _pad0: [0; 4],
+            data: 0,
+        };
+        name_into(&mut st.name, name);
+        uaccess::bytes_of(&st).to_vec()
+    } else if version == MODULE_STAT_V1_SIZE || version == MODULE_STAT_V2_SIZE {
+        let mut st = ModuleStatV2 {
+            version: 0,
+            name: [0; abi::linker::MAXMODNAMEV1V2],
+            refs: 1,
+            id,
+            _pad0: [0; 4],
+            data: 0,
+        };
+        name_into(&mut st.name, name);
+        uaccess::bytes_of(&st).to_vec()
+    } else {
         return Err(Errno::EINVAL);
-    }
-    let mut st = ModuleStat {
-        version: i32::try_from(version).unwrap_or(0),
-        name: [0; abi::linker::MAXMODNAME],
-        refs: 1,
-        id,
-        _pad0: [0; 4],
-        data: 0,
     };
-    let n = name.len().min(abi::linker::MAXMODNAME - 1);
-    st.name[..n].copy_from_slice(&name[..n]);
     // `version` is not written back.
-    let bytes = &uaccess::bytes_of(&st)[4..version];
-    uaccess::copy_out(stat + 4, bytes).map_err(|_| Errno::EFAULT)?;
+    uaccess::copy_out(stat + 4, &record[4..version]).map_err(|_| Errno::EFAULT)?;
     Ok(0)
 }
 

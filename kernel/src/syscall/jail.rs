@@ -1154,32 +1154,18 @@ fn get(
     Ok(pr.id())
 }
 
-/// `struct jail` (version 2).
-#[derive(Clone, Copy, Debug, Default)]
-#[repr(C)]
-struct JailV2 {
-    version: u32,
-    pad: u32,
-    path: u64,
-    hostname: u64,
-    jailname: u64,
-    ip4s: u32,
-    ip6s: u32,
-    ip4: u64,
-    ip6: u64,
-}
-
-// SAFETY: integers and addresses, padding explicit.
-unsafe impl crate::uaccess::Plain for JailV2 {}
+// SAFETY: integers and addresses, padding explicit (`abi-check` holds
+// the C layout).
+unsafe impl crate::uaccess::Plain for abi::jail::Jail {}
 
 /// `jail(jail)` (`kern_jail`): creates a jail with the old structure's
 /// path, hostname, and name, and enters it. No addresses.
 pub(super) fn jail(s: &Sleepable, ptr: u64) -> SysResult {
     let version = UserPtr::<u32>::new(ptr).read().map_err(|_| Errno::EFAULT)?;
-    if version != 2 {
+    if version != abi::jail::JAIL_API_VERSION {
         return Err(Errno::EINVAL);
     }
-    let j = UserPtr::<JailV2>::new(ptr)
+    let j = UserPtr::<abi::jail::Jail>::new(ptr)
         .read()
         .map_err(|_| Errno::EFAULT)?;
     if j.ip4s > 0 || j.ip6s > 0 {

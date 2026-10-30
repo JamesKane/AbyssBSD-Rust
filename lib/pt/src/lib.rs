@@ -574,8 +574,10 @@ impl<F: Format> PageTable<F> {
 
     fn free_below(mem: &mut impl Memory, table: PhysAddr, level: Level) {
         if level.0 > 1 {
-            let entries = *mem.frame(table);
-            for e in entries {
+            // One entry at a time: a copy of the table would put 4 KiB on
+            // the kernel stack at each level.
+            for i in 0..mem.frame(table).len() {
+                let e = mem.frame(table)[i];
                 if F::is_valid(e) && F::is_table(e, level) {
                     Self::free_below(mem, F::address(e, level), Level(level.0 - 1));
                 }
@@ -663,12 +665,17 @@ impl<F: Format> PageTable<F> {
     }
 
     fn count(mem: &mut impl Memory, table: PhysAddr, level: Level) -> usize {
-        let entries = *mem.frame(table);
-        1 + entries
-            .iter()
-            .filter(|e| level.0 > 1 && F::is_valid(**e) && F::is_table(**e, level))
-            .map(|e| Self::count(mem, F::address(*e, level), Level(level.0 - 1)))
-            .sum::<usize>()
+        let mut n = 1;
+        if level.0 > 1 {
+            // An entry at a time, as in `free_below`.
+            for i in 0..mem.frame(table).len() {
+                let e = mem.frame(table)[i];
+                if F::is_valid(e) && F::is_table(e, level) {
+                    n += Self::count(mem, F::address(e, level), Level(level.0 - 1));
+                }
+            }
+        }
+        n
     }
 }
 

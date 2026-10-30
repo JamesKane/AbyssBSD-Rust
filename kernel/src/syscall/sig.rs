@@ -441,17 +441,34 @@ pub(super) fn sigqueue(pid: u64, signum: u64, value: u64) -> SysResult {
 /// unblocked while waiting, so posting it wakes us, but nothing in it is
 /// delivered; another signal that must be handled ends the wait with
 /// `EINTR`. `EAGAIN` once `timeout` (nanoseconds) passes.
-fn wait_for(s: &Sleepable, set: Sigset, timeout: Option<u64>) -> Result<Siginfo, Errno> {
+/// How long `kern_sigtimedwait` waits.
+#[derive(Clone, Copy)]
+enum Limit {
+    Forever,
+    /// Nanoseconds from now (0: already past).
+    After(u64),
+    /// A `tv_nsec` out of range: `EINVAL`, once no signal is pending.
+    Invalid,
+}
+
+fn wait_for(s: &Sleepable, set: Sigset, limit: Limit) -> Result<Siginfo, Errno> {
     let set = set.minus(signal::cant_mask());
     let td = thread()?;
     let t = sched::current();
     let before = td.sig.lock().mask;
     signal::swap_mask(&td, before.minus(set));
     let q = WaitQueue::new();
-    let deadline = timeout.map(|ns| crate::time::now_ns().saturating_add(ns));
+    let deadline = match limit {
+        Limit::After(ns) => Some(crate::time::now_ns().saturating_add(ns)),
+        Limit::Forever | Limit::Invalid => None,
+    };
     let r = loop {
         if let Some(info) = signal::take_from(&td, set) {
             break Ok(info);
+        }
+        // Checked after the pending signals, as POSIX says.
+        if matches!(limit, Limit::Invalid) {
+            break Err(Errno::EINVAL);
         }
         let left = deadline.map(|d| d.saturating_sub(crate::time::now_ns()));
         if left == Some(0) {
@@ -489,20 +506,27 @@ fn write_info(info: u64, si: &Siginfo) -> Result<(), Errno> {
 pub(super) fn sigtimedwait(s: &Sleepable, set: u64, info: u64, timeout: u64) -> SysResult {
     let set = read_set(set)?;
     let limit = if timeout == 0 {
-        None
+        Limit::Forever
     } else {
         let t = UserPtr::<Timespec>::new(timeout)
             .read()
             .map_err(|_| Errno::EFAULT)?;
-        if t.tv_sec < 0 || !(0..1_000_000_000).contains(&t.tv_nsec) {
-            return Err(Errno::EINVAL);
+        // `kern_sigtimedwait`: a negative time is already past, and one of
+        // `INT32_MAX / 2` seconds or more is no limit.
+        if !(0..1_000_000_000).contains(&t.tv_nsec) {
+            Limit::Invalid
+        } else if t.tv_sec >= i64::from(i32::MAX / 2) {
+            Limit::Forever
+        } else if t.tv_sec < 0 {
+            Limit::After(0)
+        } else {
+            Limit::After(
+                t.tv_sec
+                    .cast_unsigned()
+                    .saturating_mul(1_000_000_000)
+                    .saturating_add(t.tv_nsec.cast_unsigned()),
+            )
         }
-        Some(
-            t.tv_sec
-                .cast_unsigned()
-                .saturating_mul(1_000_000_000)
-                .saturating_add(t.tv_nsec.cast_unsigned()),
-        )
     };
     let si = wait_for(s, set, limit)?;
     write_info(info, &si)?;
@@ -511,14 +535,14 @@ pub(super) fn sigtimedwait(s: &Sleepable, set: u64, info: u64, timeout: u64) -> 
 
 /// `sigwaitinfo(set, info)`.
 pub(super) fn sigwaitinfo(s: &Sleepable, set: u64, info: u64) -> SysResult {
-    let si = wait_for(s, read_set(set)?, None)?;
+    let si = wait_for(s, read_set(set)?, Limit::Forever)?;
     write_info(info, &si)?;
     Ok(u64::from(si.si_signo.cast_unsigned()))
 }
 
 /// `sigwait(set, sig)`: returns the error rather than setting `errno`.
 pub(super) fn sigwait(s: &Sleepable, set: u64, sig: u64) -> SysResult {
-    let r = read_set(set).and_then(|set| wait_for(s, set, None));
+    let r = read_set(set).and_then(|set| wait_for(s, set, Limit::Forever));
     match r {
         Ok(si) => {
             UserPtr::<i32>::new(sig)

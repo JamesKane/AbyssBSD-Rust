@@ -365,6 +365,7 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("KF_TYPE_DEV", "sys/user.h", KF_TYPE_DEV as i64),
     c("KF_TYPE_EVENTFD", "sys/user.h", KF_TYPE_EVENTFD as i64),
     c("KF_TYPE_TIMERFD", "sys/user.h", KF_TYPE_TIMERFD as i64),
+    c("KF_TYPE_INOTIFY", "sys/user.h", KF_TYPE_INOTIFY as i64),
     c("KF_TYPE_JAILDESC", "sys/user.h", KF_TYPE_JAILDESC as i64),
     c("KF_TYPE_UNKNOWN", "sys/user.h", KF_TYPE_UNKNOWN as i64),
     c("KF_VTYPE_VNON", "sys/user.h", KF_VTYPE_VNON as i64),
@@ -820,6 +821,15 @@ pub struct KfEventfd {
     pub _pad: KfPad<34>,
 }
 
+/// `kf_un.kf_inotify` (padded).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KfInotify {
+    pub kf_inotify_npending: u64,
+    pub kf_inotify_nbpending: u64,
+    pub _pad: KfPad<36>,
+}
+
 /// `kf_un.kf_timerfd` (padded).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -876,6 +886,7 @@ const _: () = {
     assert!(size_of::<KfProc>() == KF_UN_SIZE);
     assert!(size_of::<KfEventfd>() == KF_UN_SIZE);
     assert!(size_of::<KfTimerfd>() == KF_UN_SIZE);
+    assert!(size_of::<KfInotify>() == KF_UN_SIZE);
     assert!(size_of::<KfJail>() == KF_UN_SIZE);
     assert!(size_of::<KfKqueue>() == KF_UN_SIZE);
     assert!(size_of::<KfNone>() == KF_UN_SIZE);
@@ -898,6 +909,7 @@ pub const KF_TYPE_PROCDESC: i32 = 11;
 pub const KF_TYPE_DEV: i32 = 12;
 pub const KF_TYPE_EVENTFD: i32 = 13;
 pub const KF_TYPE_TIMERFD: i32 = 14;
+pub const KF_TYPE_INOTIFY: i32 = 15;
 pub const KF_TYPE_JAILDESC: i32 = 16;
 pub const KF_TYPE_UNKNOWN: i32 = 255;
 

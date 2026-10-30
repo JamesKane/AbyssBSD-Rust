@@ -101,6 +101,11 @@ pub struct Vnode {
     /// Its size as the generic layer last saw it, kept while it is
     /// watched (for `EVFILT_READ`, whose filter cannot sleep).
     size_hint: AtomicU64,
+    /// Its inotify watches (FreeBSD's `vpi_inotify`), and whether it is
+    /// watched or may be in a watched directory (`VIRF_INOTIFY`,
+    /// `VIRF_INOTIFY_PARENT`): see [`crate::inotify`].
+    inotify: PreemptLock<Vec<Arc<crate::inotify::Watch>>>,
+    inotify_flags: core::sync::atomic::AtomicU8,
 }
 
 /// Vnode recency as a generation, advanced by each reclaim pass
@@ -150,7 +155,30 @@ impl Vnode {
             writecount: core::sync::atomic::AtomicI64::new(0),
             poll: sync::Once::new(),
             size_hint: AtomicU64::new(0),
+            inotify: PreemptLock::new(Vec::new()),
+            inotify_flags: core::sync::atomic::AtomicU8::new(0),
         }
+    }
+
+    /// Its inotify flags ([`crate::inotify::WATCHED`], `PARENT`).
+    pub(crate) fn inotify_flags(&self) -> u8 {
+        self.inotify_flags.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_inotify(&self, flag: u8) {
+        if self.inotify_flags() & flag != flag {
+            self.inotify_flags.fetch_or(flag, Ordering::Relaxed);
+        }
+    }
+
+    pub(crate) fn clear_inotify(&self, flag: u8) {
+        if self.inotify_flags() & flag != 0 {
+            self.inotify_flags.fetch_and(!flag, Ordering::Relaxed);
+        }
+    }
+
+    pub(crate) fn inotify_watches(&self) -> &PreemptLock<Vec<Arc<crate::inotify::Watch>>> {
+        &self.inotify
     }
 
     /// The size as last seen while watched ([`Vnode::watch_size`]).
@@ -357,6 +385,11 @@ impl Vnode {
 
     pub(crate) fn set_named(&self, parent: &Arc<Vnode>, name: &[u8]) {
         *self.named.lock() = Some((Arc::downgrade(parent), name.into()));
+        // Named in a watched directory: its events look for the watch
+        // (`cache_enter_time` setting `VIRF_INOTIFY_PARENT`).
+        if crate::inotify::watched(parent) {
+            self.set_inotify(crate::inotify::PARENT);
+        }
     }
 
     pub(crate) fn clear_named(&self) {
@@ -417,6 +450,7 @@ impl Vnode {
         }?;
         // `vop_read_post`.
         self.knote(abi::event::NOTE_READ);
+        crate::inotify::event(self, abi::inotify::IN_ACCESS);
         Ok(n)
     }
 
@@ -449,6 +483,8 @@ impl Vnode {
             self.size_hint.fetch_max(end, Ordering::Relaxed);
             self.knote(hint);
         }
+        // `vop_write_post`.
+        crate::inotify::event(self, abi::inotify::IN_MODIFY);
         Ok(n)
     }
 
@@ -517,6 +553,8 @@ impl Vnode {
     /// vnode leaves its mount's table and the name cache, and holders of
     /// references find it doomed (FreeBSD's `vgone`).
     pub fn reclaim(self: &Arc<Self>, s: &Sleepable) {
+        // Its watches end (`vop_reclaim_post`'s `INOTIFY_REVOKE`).
+        crate::inotify::revoke(self);
         crate::cache::purge(self);
         let ops = {
             let mut st = self.write(s);

@@ -87,6 +87,7 @@ cargo xtask --remote freebsd-shell                 # the boot-to-shell script ag
 cargo xtask --remote freebsd-multiuser             # the multi-user login script against FreeBSD
 cargo xtask --remote freebsd-usertests             # tests/user on FreeBSD 15.1 itself, either arch
 cargo xtask --remote kyua-baseline [--resume]      # FreeBSD's kyua results, per test case, in bhyve
+cargo xtask --remote kyua [--resume] [--only DIR,...]  # AbyssBSD's, compared with them
 ```
 
 `--freebsd-only` records FreeBSD's numbers alone, for a suite AbyssBSD cannot run yet (`p4`
@@ -265,6 +266,27 @@ report on the guest's disk. A panic reboots the guest, the harness boots it agai
 directory it was in is recorded as `crashed`. The results, one `<program>:<case>` per line with
 kyua's result and reason, go to `~/abyss/kyua/` on the server and are kept in
 `tests/kyua/freebsd/`. It holds perf's lock, since its eight busy vCPUs would skew a benchmark run.
+
+`cargo xtask --remote kyua` runs the same harness on AbyssBSD: the multi-user image with all of
+`tests.txz` under `/usr/tests`, in the same 8-CPU bhyve VM. AbyssBSD halts on a panic, so the
+harness watches the console for one (`panic: panicked at`, `fatal trap:`, or the
+`ABYSS-TEST-RESULT: FAIL` that ends every report), stops bhyve, and boots again; the cases of the
+directory it was in that had not ended are recorded as `crashed`. Every 30 seconds the guest
+prints its free pages and the test programs running, so a starved or hung guest shows what it was
+doing. On amd64 an NMI makes the kernel print that CPU's backtrace and go on: for a hung guest,
+`doas bhyvectl --vm=abyss-<pid> --inject-nmi --cpu=N` for each vCPU (`ls /dev/vmm` names the
+VM; QEMU's monitor has `nmi`). `--only bin,sys/kern` runs those directories alone (each prefix matches itself and
+everything under it; a test program or a case runs on its own), and `--resume` continues a run
+that was stopped. The results go to `~/abyss/kyua/abyss-x86_64-bhyve.txt`, kyua's verbose
+report of each directory's failures to `abyss-x86_64-bhyve/failed/`, and the comparison with
+FreeBSD's to `abyss-x86_64-bhyve-compare.txt`. For each of ADR-0016's four areas (`sys/kern`,
+`lib/libc`, `bin`, `usr.bin`) it counts the cases FreeBSD passes and how many of them AbyssBSD
+passes, and the command fails if an area is below 95%, or if a case FreeBSD passes in one of
+them fails on AbyssBSD without a line in `tests/kyua/known-failures.txt` (`<program>:<case>`, a
+tab, and the reason). Such failures outside the four areas are reported but don't fail it, and
+lines for cases that now pass are reported as stale. Test programs whose subject comes in a later
+phase (`DEFERRED` in `xtask/src/kyua.rs`: `sys/kern/ktls_test` until P7) are counted on a line of
+their own and left out of the target.
 
 ### Differential tests of command output
 

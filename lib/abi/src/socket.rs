@@ -69,6 +69,7 @@ pub const SO_PROTOCOL: i32 = 0x1016;
 pub const SO_TS_CLOCK: i32 = 0x1017;
 pub const SO_MAX_PACING_RATE: i32 = 0x1018;
 pub const SO_DOMAIN: i32 = 0x1019;
+pub const SO_SPLICE: i32 = 0x1023;
 pub const SO_TS_CLOCK_MAX: i32 = 3;
 
 /// `SOL_LOCAL` options.
@@ -218,6 +219,18 @@ pub struct Linger {
     pub l_linger: i32,
 }
 
+/// `struct splice`: `SO_SPLICE`'s argument, the sink's descriptor (-1
+/// to unsplice), the most bytes to move (0: no limit), and the timeout.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Splice {
+    pub sp_fd: i32,
+    /// Alignment for `sp_max`.
+    pub _pad0: [u8; 4],
+    pub sp_max: i64,
+    pub sp_idle: crate::time::Timeval,
+}
+
 pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("AF_UNIX", "sys/socket.h", AF_UNIX as i64),
     c("SOCK_STREAM", "sys/socket.h", SOCK_STREAM as i64),
@@ -269,6 +282,7 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
         SO_MAX_PACING_RATE as i64,
     ),
     c("SO_DOMAIN", "sys/socket.h", SO_DOMAIN as i64),
+    c("SO_SPLICE", "sys/socket.h", SO_SPLICE as i64),
     c("SO_TS_CLOCK_MAX", "sys/socket.h", SO_TS_CLOCK_MAX as i64),
     c("MSG_OOB", "sys/socket.h", MSG_OOB as i64),
     c("MSG_PEEK", "sys/socket.h", MSG_PEEK as i64),

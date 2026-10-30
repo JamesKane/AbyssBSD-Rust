@@ -49,6 +49,7 @@ mod opt;
 pub mod pcb;
 mod poll;
 pub mod rtmsg;
+pub mod splice;
 mod tcp;
 #[cfg(test)]
 mod tests;
@@ -367,6 +368,10 @@ pub(crate) struct Inner {
     pub(crate) tcp: Option<alloc::boxed::Box<tcp::Tcb>>,
     pub(crate) user_cookie: u32,
     pub(crate) ts_clock: i32,
+    /// The splice this socket is the source of (`so_splice`), and the
+    /// one it is the sink of (`so_splice_back`).
+    pub(crate) splice: Option<Arc<splice::Splice>>,
+    pub(crate) splice_back: Option<Arc<splice::Splice>>,
 }
 
 /// An internet socket (FreeBSD's `struct socket` with its `inpcb` and,
@@ -382,6 +387,11 @@ pub struct Socket {
     /// Readers and accepters (`so_rdsel`), and writers (`so_wrsel`).
     pub rd: Notify,
     pub wr: Notify,
+    /// `SB_SPLICED` on either buffer ([`splice::RCV`], [`splice::SND`]),
+    /// for the wakeups to look at without the lock.
+    pub(crate) spliced: core::sync::atomic::AtomicU8,
+    /// Bytes spliced from it since its last splice (`so_splice_sent`).
+    pub(crate) splice_sent: AtomicU64,
 }
 
 impl core::fmt::Debug for Socket {
@@ -470,9 +480,13 @@ impl Socket {
                 tcp: (proto == Proto::Tcp).then(|| alloc::boxed::Box::new(tcp::Tcb::new())),
                 user_cookie: 0,
                 ts_clock: 0,
+                splice: None,
+                splice_back: None,
             }),
             rd: Notify::new(),
             wr: Notify::new(),
+            spliced: core::sync::atomic::AtomicU8::new(0),
+            splice_sent: AtomicU64::new(0),
         });
         table.lock().alloc(&so, cred.uid);
         so
@@ -484,10 +498,21 @@ impl Socket {
         self.options.load(Ordering::Relaxed)
     }
 
-    /// Wakes readers and writers.
+    /// Wakes readers and writers (`sorwakeup`, `sowwakeup`); a spliced
+    /// buffer's wakeup is its splice's work instead.
     pub(crate) fn wake(&self) {
-        self.rd.notify(0);
-        self.wr.notify(0);
+        // Relaxed: set under the socket's lock, which whoever changed the
+        // buffer this wakeup is for has taken since.
+        let spliced = self.spliced.load(Ordering::Relaxed);
+        if spliced & splice::RCV == 0 {
+            self.rd.notify(0);
+        }
+        if spliced & splice::SND == 0 {
+            self.wr.notify(0);
+        }
+        if spliced != 0 {
+            self.splice_wake();
+        }
     }
 
     /// Whether it is listening (`SOLISTENING`).
@@ -598,6 +623,10 @@ impl Socket {
     /// The last descriptor closed (`soclose`): what each protocol does,
     /// then its buffers' contents go.
     pub fn close(self: &Arc<Self>) {
+        // Relaxed: as in `wake`.
+        if self.spliced.load(Ordering::Relaxed) != 0 {
+            self.splice_close();
+        }
         match self.proto {
             Proto::Udp => self.udp_close(),
             Proto::Tcp => self.tcp_close(),

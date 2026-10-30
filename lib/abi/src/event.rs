@@ -208,6 +208,13 @@ pub struct SpecialfdEventfd {
     pub flags: i32,
 }
 
+/// `struct specialfd_inotify`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SpecialfdInotify {
+    pub flags: i32,
+}
+
 const fn c(c_name: &'static str, header: &'static str, value: i64) -> ConstValue {
     ConstValue {
         c_name,

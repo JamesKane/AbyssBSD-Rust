@@ -656,7 +656,10 @@ fn read_head(s: &Sleepable, file: &vfs::Vnode) -> Result<Cow<'static, [u8]>, Err
         return Ok(Cow::Borrowed(d));
     }
     let size = usize::try_from(file.size(s)?).unwrap_or(usize::MAX);
-    let mut buf = alloc::vec![0u8; size.min(HEAD_MAX)];
+    let len = size.min(HEAD_MAX);
+    let mut buf = Vec::new();
+    buf.try_reserve_exact(len).map_err(|_| Errno::ENOMEM)?;
+    buf.resize(len, 0u8);
     let mut r = vfs::ReadBuf::new(&mut buf);
     let n = file.read_at(s, 0, &mut r)?;
     buf.truncate(n);

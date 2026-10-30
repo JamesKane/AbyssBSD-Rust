@@ -109,6 +109,8 @@ pub(crate) mod rights {
     pub(crate) const PDGETPID: CapRights = one(CAP_PDGETPID);
     pub(crate) const PDKILL: CapRights = one(CAP_PDKILL);
     pub(crate) const PDWAIT: CapRights = one(CAP_PDWAIT);
+    pub(crate) const INOTIFY_ADD: CapRights = one(CAP_INOTIFY_ADD);
+    pub(crate) const INOTIFY_RM: CapRights = one(CAP_INOTIFY_RM);
     pub(crate) const ACCEPT: CapRights = one(CAP_ACCEPT);
     pub(crate) const BIND: CapRights = one(CAP_BIND);
     pub(crate) const CONNECT: CapRights = one(CAP_CONNECT);

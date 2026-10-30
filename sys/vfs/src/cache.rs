@@ -539,7 +539,9 @@ pub fn enter(dir: &Arc<Vnode>, name: &[u8], target: Option<&Arc<Vnode>>) {
 /// `MAKEENTRY`): its first lookup does, and names it, so `vn_fullpath`
 /// finds it from then on.
 pub fn enter_made(dir: &Arc<Vnode>, name: &[u8], target: &Arc<Vnode>) {
-    if target.is_dir() {
+    // In a watched directory a file is entered too, so that its events
+    // find the watch (`vn_open_cred` asks for `MAKEENTRY` then).
+    if target.is_dir() || crate::inotify::watched(dir) {
         target.set_named(dir, name);
         insert(dir, name, Some(target));
     } else {

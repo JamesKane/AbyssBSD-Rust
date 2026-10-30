@@ -86,7 +86,7 @@ pub(crate) fn timeval(us: u64) -> Timeval {
 /// Resource use, as FreeBSD's `struct rusage` keeps it, plus the run time
 /// behind its times: a process's children's (`p_cru`), added to as each
 /// is reaped.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Usage {
     pub(crate) utime_us: u64,
     pub(crate) stime_us: u64,
@@ -105,7 +105,7 @@ impl Usage {
         self.nivcsw += o.nivcsw;
     }
 
-    fn rusage(&self) -> Rusage {
+    pub(crate) fn rusage(&self) -> Rusage {
         Rusage {
             ru_utime: timeval(self.utime_us),
             ru_stime: timeval(self.stime_us),
@@ -152,9 +152,15 @@ pub(crate) fn process_usage(p: &Process) -> Usage {
 /// `p`'s child `c` was reaped: what it and its own children used goes to
 /// `p`'s children's usage (`proc_reap`'s `ruadd`).
 pub(crate) fn reaped(p: &Process, c: &Process) {
-    let mut u = process_usage(c);
-    u.add(&c.child_usage.lock());
+    let (mut u, children) = exit_usage(c);
+    u.add(&children);
     p.child_usage.lock().add(&u);
+}
+
+/// What an exited `c` used, and what its reaped children did: `wait6`'s
+/// `__wrusage` (`proc_reap`'s `wru_self` and `wru_children`).
+pub(crate) fn exit_usage(c: &Process) -> (Usage, Usage) {
+    (process_usage(c), *c.child_usage.lock())
 }
 
 /// `p`'s address space, as kinfo_proc counts it: the bytes it maps but
@@ -517,12 +523,10 @@ pub(crate) enum Access {
     Debug,
 }
 
-/// The process `id` names (a pid, a thread id, or -1 for the caller), or
-/// `ESRCH`, if the caller may look at it as `access` asks (`pget`).
+/// The process `id` names (a pid or a thread id), or `ESRCH`, if the
+/// caller may look at it as `access` asks (`pget`). -1 names none.
 pub(crate) fn process(id: i32, access: Access) -> Result<Arc<Process>, ReadError> {
-    let p = if id == -1 {
-        Process::current()
-    } else if id > crate::proc::PID_MAX {
+    let p = if id > crate::proc::PID_MAX {
         crate::uthread::find(id).map(|t| Arc::clone(t.process()))
     } else {
         crate::proc::find(id)
@@ -536,6 +540,15 @@ pub(crate) fn process(id: i32, access: Access) -> Result<Arc<Process>, ReadError
         .map_err(ReadError::Failed)?;
     }
     Ok(p)
+}
+
+/// [`process`], with -1 for the caller: the nodes that take it
+/// (`kern.proc.args`, `pathname`, and `groups`).
+pub(crate) fn process_or_self(id: i32, access: Access) -> Result<Arc<Process>, ReadError> {
+    if id == -1 {
+        return Process::current().ok_or(ReadError::Failed(Errno::ESRCH));
+    }
+    process(id, access)
 }
 
 /// Adds `kern.proc` to the tree.

@@ -951,6 +951,16 @@ impl Drop for PreemptGuard {
     }
 }
 
+/// The current thread's CPU time, in platform time units, its running
+/// slice included (what `calcru` brings up to date for the caller;
+/// [`Thread::runtime`] is as of the last switch).
+#[must_use]
+pub fn current_runtime() -> u64 {
+    let t = current();
+    let since = t.inner.lock().since;
+    t.runtime() + platform().now().saturating_sub(since)
+}
+
 /// When the current time slice ends, if threads are waiting for this CPU
 /// (nothing to preempt otherwise). Interrupts must be masked.
 #[must_use]

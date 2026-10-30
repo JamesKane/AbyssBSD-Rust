@@ -221,6 +221,7 @@ pub(super) fn fspacectl(
         | FileKind::Kqueue(_)
         | FileKind::Timerfd(_)
         | FileKind::Eventfd(_)
+        | FileKind::Inotify(_)
         | FileKind::Pts(_) => return Err(Errno::ESPIPE),
         FileKind::Vnode(_) => return Err(Errno::ENODEV),
     };

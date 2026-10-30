@@ -175,7 +175,7 @@ Volume 3 is generated, not written, from the places the facts already live:
 | ioctls | The dispatcher tables of each device class | A registry next to the dispatch code that names the request, its structure, and its direction |
 | Boot options and loader variables | Loader and kernel option parsers | Each option is declared once, with a description, and parsed from that declaration |
 | Kernel-internal API | `///` and `//!` comments in `kernel/`, `sys/`, `drivers/`, `lib/` | §5.3 |
-| Test coverage per interface | kyua results and `tests/kyua/abyss-known.txt` | Which FreeBSD tests exercise the interface and whether they pass |
+| Test coverage per interface | kyua results and `tests/kyua/known-failures.txt` | Which FreeBSD tests exercise the interface and whether they pass |
 
 Generated text is never committed. A writer adds prose to a generated entry with a **supplement**
 file (`manual/ref/syscall/open.md`) that the build merges under fixed headings; a supplement for an

@@ -68,6 +68,8 @@ pub const S_ISGID: u16 = 0o2000;
 /// On a directory: only an entry's owner (or the directory's) may remove
 /// or rename it.
 pub const S_ISVTX: u16 = 0o1000;
+/// Read permission for the owner.
+pub const S_IRUSR: u16 = 0o400;
 
 /// `chflags` flags: the owner may set these.
 pub const UF_SETTABLE: u32 = 0x0000_ffff;
@@ -106,6 +108,7 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("S_IFSOCK", S_IFSOCK),
     c("ALLPERMS", ALLPERMS),
     c("S_ISUID", S_ISUID),
+    c("S_IRUSR", S_IRUSR),
     c("S_ISGID", S_ISGID),
     c("S_ISVTX", S_ISVTX),
     f("UF_SETTABLE", UF_SETTABLE),

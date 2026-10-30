@@ -889,6 +889,20 @@ impl Socket {
     /// `EPIPE` once it cannot send; its pending error; `ENOTCONN`
     /// unconnected; `EWOULDBLOCK` with less room than the low water mark.
     pub fn send_stream(self: &Arc<Self>, data: &[u8], oob: bool) -> Result<usize, Errno> {
+        self.send_stream_to(data, oob, None)
+    }
+
+    /// [`Socket::send_stream`]; with `spliced`, a splice's send
+    /// (`sosend_generic_locked` from `so_splice_xfer_data`), which takes
+    /// whatever fits, its low water mark aside, and counts what it took
+    /// in `spliced` before the receiver can see it.
+    #[inline]
+    pub(crate) fn send_stream_to(
+        self: &Arc<Self>,
+        data: &[u8],
+        oob: bool,
+        spliced: Option<&core::sync::atomic::AtomicU64>,
+    ) -> Result<usize, Errno> {
         let peer = {
             let mut i = self.inner.lock();
             if i.snd.cant {
@@ -920,8 +934,10 @@ impl Socket {
                 // `SS_NOFDREF` check), and this send has gone.
                 drop_side(&peer, &mut b, Errno::ECONNRESET, &mut fx);
                 drop_side(self, &mut a, Errno::ECONNRESET, &mut fx);
+                count(spliced, data.len());
                 Ok(data.len())
             } else if b.rcv.cant {
+                count(spliced, data.len());
                 Ok(data.len())
             } else {
                 let direct = if a.sndq.is_empty() {
@@ -930,7 +946,12 @@ impl Socket {
                     0
                 };
                 let room = direct + a.snd.space() as usize;
-                if room < data.len() && room < a.snd.lowat as usize {
+                let least = if spliced.is_some() {
+                    1
+                } else {
+                    a.snd.lowat as usize
+                };
+                if room < data.len() && room < least {
                     Err(Errno::EAGAIN)
                 } else {
                     let n = data.len().min(room);
@@ -952,6 +973,7 @@ impl Socket {
                     if oob && n == data.len() && now == n {
                         urgent(&mut b, peer.so_options() & SO_OOBINLINE != 0);
                     }
+                    count(spliced, n);
                     Ok(n)
                 }
             }
@@ -1012,8 +1034,34 @@ impl Socket {
             out.flags = abi::socket::MSG_OOB;
             return Ok(out);
         }
+        self.recv_data(max, peek, |_| true)
+            .map(Option::unwrap_or_default)
+    }
+
+    /// A splice's receive: [`Socket::recv_stream`] of up to `max` bytes,
+    /// if `still` holds of the socket's state (`None` if not).
+    pub(crate) fn recv_stream_if(
+        self: &Arc<Self>,
+        max: usize,
+        still: impl FnOnce(&Inner) -> bool,
+    ) -> Result<Option<crate::Received>, Errno> {
+        self.recv_data(max, false, still)
+    }
+
+    /// `soreceive_generic`'s data path, if `still` holds under the lock.
+    #[inline]
+    fn recv_data(
+        self: &Arc<Self>,
+        max: usize,
+        peek: bool,
+        still: impl FnOnce(&Inner) -> bool,
+    ) -> Result<Option<crate::Received>, Errno> {
+        let mut out = crate::Received::default();
         {
             let mut i = self.inner.lock();
+            if !still(&i) {
+                return Ok(None);
+            }
             if i.stream.is_empty() {
                 if let Some(e) = i.error {
                     if !peek {
@@ -1022,13 +1070,13 @@ impl Socket {
                     return Err(e);
                 }
                 if i.rcv.cant {
-                    return Ok(out);
+                    return Ok(Some(out));
                 }
                 if i.state & (ss::ISCONNECTED | ss::ISCONNECTING) == 0 {
                     return Err(Errno::ENOTCONN);
                 }
                 if max == 0 {
-                    return Ok(out);
+                    return Ok(Some(out));
                 }
                 return Err(Errno::EAGAIN);
             }
@@ -1038,7 +1086,7 @@ impl Socket {
             let n = n.min(i.stream.len());
             if peek {
                 out.data.extend(i.stream.iter().take(n));
-                return Ok(out);
+                return Ok(Some(out));
             }
             out.data.extend(i.stream.drain(..n));
             i.rcv.cc -= u32::try_from(n).unwrap_or(0);
@@ -1063,7 +1111,7 @@ impl Socket {
             }
             fx.run();
         }
-        Ok(out)
+        Ok(Some(out))
     }
 
     /// `SIOCATMARK`.
@@ -1074,6 +1122,16 @@ impl Socket {
     /// Bytes before the urgent mark (`so_oobmark`).
     pub fn oobmark(&self) -> usize {
         self.inner.lock().tcp.as_ref().map_or(0, |t| t.oobmark)
+    }
+}
+
+/// Counts `n` bytes a splice sent, with the receiver still locked.
+#[inline]
+fn count(spliced: Option<&core::sync::atomic::AtomicU64>, n: usize) {
+    if let Some(c) = spliced {
+        // Relaxed: the receiver's lock, held, publishes it to whoever
+        // reads what was sent.
+        c.fetch_add(n as u64, Ordering::Relaxed);
     }
 }
 

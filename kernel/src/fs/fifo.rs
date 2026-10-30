@@ -201,6 +201,8 @@ impl FifoFile {
                 crate::signal::sleep(s, &f.opened, || f.gens.lock().0 != rgen, None)?;
             }
         }
+        // `vop_open_post`.
+        vfs::inotify::event(v, abi::inotify::IN_OPEN);
         Ok(file)
     }
 
@@ -338,6 +340,15 @@ impl Drop for FifoFile {
         if changed {
             f.notify.notify(0);
         }
+        // `vop_close_post`.
+        vfs::inotify::event(
+            &self.vnode,
+            if self.write {
+                abi::inotify::IN_CLOSE_WRITE
+            } else {
+                abi::inotify::IN_CLOSE_NOWRITE
+            },
+        );
     }
 }
 

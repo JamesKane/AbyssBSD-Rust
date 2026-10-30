@@ -238,6 +238,14 @@ pub mod regs_amd64 {
     pub struct Dbreg {
         pub dr: [u64; 16],
     }
+
+    /// `struct segbasereg`: the `NT_X86_SEGBASES` note.
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Segbasereg {
+        pub r_fsbase: u64,
+        pub r_gsbase: u64,
+    }
 }
 
 /// arm64's register sets (`machine/reg.h`).
@@ -283,6 +291,74 @@ pub mod regs_arm64 {
         pub db_breakregs: [DbregPair; 16],
         pub db_watchregs: [DbregPair; 16],
     }
+
+    /// `struct arm64_addr_mask`: the `NT_ARM_ADDR_MASK` note, the address
+    /// bits pointer authentication or tagging take.
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct AddrMask {
+        pub code: u64,
+        pub data: u64,
+    }
+}
+
+/// `PRSTATUS_VERSION`, `PRPSINFO_VERSION`, `PRFNAMESZ`, `PRARGSZ`
+/// (`sys/procfs.h`).
+pub const PRSTATUS_VERSION: i32 = 1;
+pub const PRPSINFO_VERSION: i32 = 1;
+pub const PRFNAMESZ: usize = 16;
+pub const PRARGSZ: usize = 80;
+
+/// `prstatus_t`: a thread's status and registers `R` (`NT_PRSTATUS`, in a
+/// core and for `PT_GETREGSET`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Prstatus<R> {
+    pub pr_version: i32,
+    pub _pad0: u32,
+    pub pr_statussz: u64,
+    pub pr_gregsetsz: u64,
+    pub pr_fpregsetsz: u64,
+    pub pr_osreldate: i32,
+    pub pr_cursig: i32,
+    pub pr_pid: i32,
+    pub _pad1: u32,
+    pub pr_reg: R,
+}
+
+/// `prpsinfo_t`: the process's command and arguments (`NT_PRPSINFO`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Prpsinfo {
+    pub pr_version: i32,
+    pub _pad0: u32,
+    pub pr_psinfosz: u64,
+    pub pr_fname: [u8; PRFNAMESZ + 1],
+    pub pr_psargs: [u8; PRARGSZ + 1],
+    pub _pad1: [u8; 2],
+    pub pr_pid: i32,
+}
+
+impl Default for Prpsinfo {
+    fn default() -> Self {
+        Self {
+            pr_version: PRPSINFO_VERSION,
+            _pad0: 0,
+            pr_psinfosz: size_of::<Self>() as u64,
+            pr_fname: [0; PRFNAMESZ + 1],
+            pr_psargs: [0; PRARGSZ + 1],
+            _pad1: [0; 2],
+            pr_pid: 0,
+        }
+    }
+}
+
+/// `thrmisc_t`: a thread's name (`NT_THRMISC`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Thrmisc {
+    pub pr_tname: [u8; crate::kinfo::MAXCOMLEN + 1],
+    pub _pad: u32,
 }
 
 /// This architecture's register sets.

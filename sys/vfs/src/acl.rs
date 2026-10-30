@@ -528,5 +528,6 @@ pub fn set(
         }
     }
     v.knote(NOTE_ATTRIB);
+    crate::inotify::event(v, abi::inotify::IN_ATTRIB);
     Ok(())
 }

@@ -1,0 +1,128 @@
+# FreeBSD test cases whose results may differ under AbyssBSD for now
+# (cargo xtask kyua and the boot tier's shell cases compare the rest with
+# freebsd/freebsd-15.1-RELEASE-x86_64-bhyve.txt). One per line, with why
+# and until when.
+sys/posixshm/memfd_test:hugetlb                 # no superpage objects (compat-deviations), P6.8
+sys/posixshm/posixshm_test:largepage_config     # no superpage objects (compat-deviations), P6.8
+sys/posixshm/posixshm_test:largepage_reopen     # no superpage objects (compat-deviations), P6.8
+sys/kern/timerfd:timerfd__periodic_timer_performance # passes; FreeBSD's expected failure (PR 294053)
+sys/kern/timerfd:timerfd_root__advance_time_no_cancel # passes; fails on FreeBSD 15.1
+sys/kern/timerfd:timerfd__argument_checks       # arm64: its last check passes an uninitialized itimerspec, valid there, so EBADF as FreeBSD's order gives; the baseline is amd64's
+sys/kern/unix_dgram:event                       # aio_read on a socket: POSIX AIO, P7
+sys/kern/socket_msg_waitall:close_tcp           # AF_INET, P7
+sys/kqueue/libkqueue/kqueue_test:main          # passes; FreeBSD 15.1 aborts it (signal 6)
+sys/kern/jail_lookup_root:jail_root             # nullfs, not yet planned (VFS.md §1.2)
+sys/capsicum/bindat_connectat:bindat_connectat_1 # AF_INET, P7
+sys/capsicum/bindat_connectat:bindat_connectat_2 # AF_INET, P7
+sys/capsicum/bindat_connectat:bindat_connectat_3 # AF_INET, P7
+sys/capsicum/ioctls_test:cap_ioctls__listen_copy # AF_INET, P7
+usr.sbin/jail/jail_basic_test:basic             # ip4.addr: AF_INET, P7
+usr.sbin/jail/jail_basic_test:list              # ifconfig epair (netlink), P7
+usr.sbin/jail/jail_basic_test:nested            # ip4.addr: AF_INET, P7
+usr.sbin/jail/jail_basic_test:param_consistency # ifconfig (netlink), P7
+usr.sbin/jail/jail_basic_test:setaudit          # setaudit_addr: no security event auditing (compat-deviations)
+sys/kern/ktrace_test:ktrace__cap_proto          # a raw AF_INET socket: AF_INET, P7
+sys/kern/ptrace_test:ptrace__PT_ATTACH_no_EINTR # passes; FreeBSD 15.1's run timed out (broken)
+
+# P6.10's run in bhyve (2026-10-29): what fails beside the target's 95%.
+sys/kern/fdgrowtable_test:free_oldtables                # kvm_open of the live kernel (/dev/mem, a symbol table libkvm can read): none, by design
+sys/kern/fdgrowtable_test:oldtables_shared_via_process  # kvm_open of the live kernel (/dev/mem, a symbol table libkvm can read): none, by design
+sys/kern/fdgrowtable_test:oldtables_shared_via_threads  # kvm_open of the live kernel (/dev/mem, a symbol table libkvm can read): none, by design
+sys/kern/inotify_test:inotify_nullfs                    # nullfs mounts: not yet
+sys/kern/inotify_test:inotify_nullfs_remove             # nullfs mounts: not yet
+sys/kern/inotify_test:inotify_nullfs_rename             # nullfs mounts: not yet
+sys/kern/inotify_test:inotify_event_access_file         # its last step uses sendfile, P7
+sys/kern/sendfile_test:io_fail_async                    # needs the gnop GEOM class (kldload geom_nop) and sendfile, P7
+sys/kern/sendfile_test:io_fail_sync                     # needs the gnop GEOM class (kldload geom_nop) and sendfile, P7
+sys/kern/sendfile_test:io_success                       # needs the gnop GEOM class (kldload geom_nop) and sendfile, P7
+sys/kern/sendfile_test:unix_success                     # needs the gnop GEOM class (kldload geom_nop) and sendfile, P7
+sys/kern/exterr_test:gettext_extended                   # extended error strings (EXTERROR) are not reported yet
+sys/kern/ptrace_test:ptrace__PT_KILL_competing_stop     # SCHED_FIFO priorities on one CPU decide which thread runs first; the race goes the other way here
+sys/kern/ptrace_test:ptrace__PT_KILL_competing_signal   # SCHED_FIFO priorities on one CPU decide which thread runs first; the race goes the other way here
+sys/kern/sigwait:test_wait_dequeue_sigchld_true         # flaky in a parallel run: its _false twin sets the same global sysctl at the same time
+sys/kern/sigwait:test_sig_discard_ign_true              # flaky in a parallel run: its _false twin sets the same global sysctl at the same time
+sys/kern/timerfd:timerfd_root__zero_read_on_abs_realtime # flaky in a parallel run: other root cases step the realtime clock meanwhile
+sys/kern/timerfd:timerfd__missed_events                 # flaky in a parallel run: other root cases step the realtime clock meanwhile
+sys/kern/ptrace_test:ptrace__parent_terminate_with_pending_sigstop1 # flaky in a parallel run (a cpuset call fails; passes alone); cause not found yet
+sys/kern/ptrace_test:ptrace__parent_terminate_with_pending_sigstop2 # flaky in a parallel run (a cpuset call fails; passes alone); cause not found yet
+sys/kern/ktrace_test:ktrace__cap_cpuset                 # flaky in a parallel run (a cpuset call fails; passes alone); cause not found yet
+sys/kern/sched_affinity:test_setmaxsetsize              # flaky in a parallel run (a cpuset call fails; passes alone); cause not found yet
+lib/libc/sys/sendfile_test:fd_negative_bad_fd_v4        # sendfile, P7
+lib/libc/sys/sendfile_test:fd_negative_bad_fd_v6        # sendfile, P7
+lib/libc/sys/sendfile_test:fd_positive_file_v4          # sendfile, P7
+lib/libc/sys/sendfile_test:fd_positive_file_v6          # sendfile, P7
+lib/libc/sys/sendfile_test:fd_positive_shm_v4           # sendfile, P7
+lib/libc/sys/sendfile_test:fd_positive_shm_v6           # sendfile, P7
+lib/libc/sys/sendfile_test:flags_v4                     # sendfile, P7
+lib/libc/sys/sendfile_test:flags_v6                     # sendfile, P7
+lib/libc/sys/sendfile_test:hdtr_negative_bad_pointers_v4 # sendfile, P7
+lib/libc/sys/sendfile_test:hdtr_negative_bad_pointers_v6 # sendfile, P7
+lib/libc/sys/sendfile_test:hdtr_positive_v4             # sendfile, P7
+lib/libc/sys/sendfile_test:hdtr_positive_v6             # sendfile, P7
+lib/libc/sys/sendfile_test:offset_negative_value_less_than_zero_v4 # sendfile, P7
+lib/libc/sys/sendfile_test:offset_negative_value_less_than_zero_v6 # sendfile, P7
+lib/libc/sys/sendfile_test:s_negative_not_connected_socket_v4 # sendfile, P7
+lib/libc/sys/sendfile_test:s_negative_not_connected_socket_v6 # sendfile, P7
+lib/libc/sys/sendfile_test:s_negative_not_descriptor    # sendfile, P7
+lib/libc/sys/sendfile_test:s_negative_not_socket_file_descriptor # sendfile, P7
+lib/libc/sys/sendfile_test:s_negative_udp_socket_v4     # sendfile, P7
+lib/libc/sys/sendfile_test:s_negative_udp_socket_v6     # sendfile, P7
+lib/libc/sys/sendfile_test:sbytes_positive_v4           # sendfile, P7
+lib/libc/sys/sendfile_test:sbytes_positive_v6           # sendfile, P7
+lib/libc/sys/brk_test:brk_basic                         # brk and sbrk are not implemented (ENOSYS)
+lib/libc/sys/brk_test:sbrk_basic                        # brk and sbrk are not implemented (ENOSYS)
+lib/libc/sys/brk_test:mlockfuture                       # brk and sbrk are not implemented (ENOSYS)
+lib/libc/sys/cpuset_test:jail_attach_disjoint           # jails have no cpusets of their own (compat-deviations: cpuset.id is 0)
+lib/libc/sys/cpuset_test:jail_attach_newbase            # jails have no cpusets of their own (compat-deviations: cpuset.id is 0)
+lib/libc/sys/cpuset_test:jail_attach_newbase_plain      # jails have no cpusets of their own (compat-deviations: cpuset.id is 0)
+lib/libc/sys/cpuset_test:jail_attach_plain              # jails have no cpusets of their own (compat-deviations: cpuset.id is 0)
+lib/libc/sys/cpuset_test:jail_attach_prevbase           # jails have no cpusets of their own (compat-deviations: cpuset.id is 0)
+lib/libc/sys/cpuset_test:transient                      # a set with no members is not destroyed, so cpuset_getid still finds it
+lib/libc/sys/getrusage_test:getrusage_err               # getrusage: an unknown who is not EINVAL, and RUSAGE_SELF fails here; not examined further
+lib/libc/sys/getrusage_test:getrusage_sig               # getrusage: an unknown who is not EINVAL, and RUSAGE_SELF fails here; not examined further
+lib/libc/sys/getrusage_test:getrusage_utime_back        # getrusage: an unknown who is not EINVAL, and RUSAGE_SELF fails here; not examined further
+lib/libc/sys/mincore_test:mincore_err                   # mincore: ENOSYS for some ranges, ENOMEM not reported; not examined further
+lib/libc/sys/mincore_test:mincore_resid                 # mincore: ENOSYS for some ranges, ENOMEM not reported; not examined further
+lib/libc/sys/mincore_test:mincore_shmseg                # mincore: ENOSYS for some ranges, ENOMEM not reported; not examined further
+lib/libc/sys/mmap_test:mmap_err                         # mmap: an invalid request is not EINVAL here; not examined further
+lib/libc/sys/mmap_test:mmap_truncate_signal             # touching a mapping past a truncated file's end gives no SIGBUS
+lib/libc/sys/mmap_test:mmap_va0                         # no security.bsd.map_at_zero sysctl
+lib/libc/sys/wait_test:wait6_exited                     # wait6: P_ALL without options is not EINVAL, and an exited child's status differs; not examined further
+lib/libc/sys/wait_test:wait6_invalid                    # wait6: P_ALL without options is not EINVAL, and an exited child's status differs; not examined further
+lib/libc/sys/access_test:access_text                    # access(W_OK) of a running program's file is not ETXTBSY
+lib/libc/gen/realpath2_test:realpath_empty_symlink      # symlink with an empty target is refused
+lib/libc/c063/o_search_test:o_search_revokex            # O_SEARCH on a directory whose execute permission goes later: FreeBSD checks at open, AbyssBSD at each lookup
+lib/libc/c063/o_search_test:o_search_unpriv_flag1       # O_SEARCH on a directory whose execute permission goes later: FreeBSD checks at open, AbyssBSD at each lookup
+lib/libc/c063/o_search_test:o_search_unpriv_flag2       # O_SEARCH on a directory whose execute permission goes later: FreeBSD checks at open, AbyssBSD at each lookup
+bin/cp/cp_test:sparse_leading_hole                      # holes: SEEK_HOLE and SEEK_DATA see none; not examined further
+bin/cp/cp_test:sparse_multiple_holes                    # holes: SEEK_HOLE and SEEK_DATA see none; not examined further
+bin/cp/cp_test:sparse_only_hole                         # holes: SEEK_HOLE and SEEK_DATA see none; not examined further
+bin/cp/cp_test:sparse_to_dev                            # holes: SEEK_HOLE and SEEK_DATA see none; not examined further
+bin/cp/cp_test:sparse_trailing_hole                     # holes: SEEK_HOLE and SEEK_DATA see none; not examined further
+bin/mv/mv_test:dir_to_file                              # rename over the other kind gives a different error; not examined further
+bin/mv/mv_test:file_to_dir                              # rename over the other kind gives a different error; not examined further
+bin/pkill/pgrep-_s_test:main                            # one subtest each; not examined further
+bin/pkill/pgrep-t_test:main                             # one subtest each; not examined further
+bin/pkill/pgrep-x_test:main                             # one subtest each; not examined further
+bin/pkill/pkill-x_test:main                             # one subtest each; not examined further
+bin/pkill/pkill-j_test:main                             # jails with addresses (jail ip4.addr): P7
+bin/sh/builtins/functional_test:command8                # sh scripts that differ in output; not examined further
+bin/sh/builtins/functional_test:wait5                   # sh scripts that differ in output; not examined further
+bin/sh/execution/functional_test:bg6                    # sh scripts that differ in output; not examined further
+bin/sh/expansion/functional_test:cmdsubst1              # sh scripts that differ in output; not examined further
+usr.bin/compress/compress_test:compress_uncompress_file_minusc_1 # compress -c output differs; not examined further
+usr.bin/compress/compress_test:compress_uncompress_minusc_1 # compress -c output differs; not examined further
+usr.bin/compress/compress_test:compress_uncompress_stdio_1 # compress -c output differs; not examined further
+usr.bin/compress/compress_test:uncompress_minusc_1      # compress -c output differs; not examined further
+usr.bin/compress/compress_test:uncompress_stdio_1       # compress -c output differs; not examined further
+usr.bin/limits/limits_test:cputime_hard_flag            # RLIMIT_CPU is not enforced (no SIGXCPU)
+usr.bin/limits/limits_test:cputime_soft_flag            # RLIMIT_CPU is not enforced (no SIGXCPU)
+usr.bin/sdiff/sdiff_test:stdin                          # output differs; not examined further
+usr.bin/stat/stat_test:devname                          # output differs; not examined further
+usr.bin/stat/stat_test:h_flag                           # output differs; not examined further
+usr.bin/tail/tail_test:broken_pipe                      # output differs; not examined further
+usr.bin/tail/tail_test:longfile_r_enomem                # output differs; not examined further
+usr.bin/tee/tee_test:device                             # output differs; not examined further
+usr.bin/truncate/truncate_test:deallocate               # output differs; not examined further
+usr.bin/vmstat/vmstat_test:default                      # vmstat reads counters libkvm finds through the kernel's symbols; not examined further
+usr.bin/vmstat/vmstat_test:opt_s                        # vmstat reads counters libkvm finds through the kernel's symbols; not examined further

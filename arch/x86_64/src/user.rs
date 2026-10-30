@@ -34,6 +34,7 @@ const MSR_STAR: u32 = 0xc000_0081;
 const MSR_LSTAR: u32 = 0xc000_0082;
 const MSR_SFMASK: u32 = 0xc000_0084;
 const MSR_FS_BASE: u32 = 0xc000_0100;
+const MSR_TSC_AUX: u32 = 0xc000_0103;
 const EFER_SCE: u64 = 1 << 0;
 
 /// RFLAGS bits `syscall` clears on entry: TF, IF, DF, NT, AC.
@@ -45,8 +46,9 @@ unsafe extern "C" {
 
 /// Prepares this CPU for user mode: `syscall` entry, `rdfsbase` and
 /// friends, SMEP (no executing user pages in kernel mode) and SMAP (no
-/// touching them outside the copy routines) where the CPU has them. Call
-/// on every CPU.
+/// touching them outside the copy routines) where the CPU has them, and
+/// the CPU's number in `IA32_TSC_AUX` for `rdtscp` and `rdpid` (libc's
+/// `sched_getcpu`). Call on every CPU, after [`crate::gdt::load`].
 pub fn init_cpu() {
     let leaf7 = core::arch::x86_64::__cpuid_count(7, 0);
     let mut cr4 = crate::cpu::cr4();
@@ -79,6 +81,16 @@ pub fn init_cpu() {
         crate::cpu::wrmsr(MSR_SFMASK, SYSCALL_MASK);
         let efer = crate::cpu::rdmsr(crate::cpu::MSR_EFER);
         crate::cpu::wrmsr(crate::cpu::MSR_EFER, efer | EFER_SCE);
+    }
+    // FreeBSD's `initializecpu`: `cpu_auxmsr`, the CPU's number.
+    let ext = core::arch::x86_64::__cpuid(0x8000_0000).eax;
+    let rdtscp =
+        ext >= 0x8000_0001 && core::arch::x86_64::__cpuid(0x8000_0001).edx & (1 << 27) != 0;
+    let rdpid = leaf7.ecx & (1 << 22) != 0;
+    if rdtscp || rdpid {
+        // SAFETY: the MSR exists where either instruction does; it only
+        // holds the value they return.
+        unsafe { crate::cpu::wrmsr(MSR_TSC_AUX, u64::from(crate::gdt::cpu_id())) };
     }
     // Relaxed: every CPU sets the same values before any user code runs.
     SMAP.store(smap, Ordering::Relaxed);

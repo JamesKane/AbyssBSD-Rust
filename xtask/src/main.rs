@@ -55,6 +55,7 @@ commands:
   freebsd-usertests [--arch <a|all>] [--test N,...]   run tests/user on FreeBSD 15.1 itself (server only)
   freebsd-diff [--arch <a|all>] [--scenario N,...]    record FreeBSD's output of tests/diff's scenarios (server only)
   kyua-baseline [--resume]                               record FreeBSD's kyua results per test case in bhyve (server only)
+  kyua        [--resume] [--only DIR,...]                kyua's suite on AbyssBSD in bhyve, against FreeBSD's results (server only)
   fetch-base  [--arch <a|all>]                           FreeBSD base.txz: /rescue image, sysroot (server only)
   acpidump    --arch <a> [--vmm qemu|bhyve] [--machine M] --out DIR   capture a VM's ACPI tables
   freebsd-record [--out DIR] [--usb]                     record FreeBSD's device tree in bhyve; --usb: its USB
@@ -116,6 +117,7 @@ fn run() -> Result<()> {
         "freebsd-usertests" => usertests::cmd(args),
         "freebsd-diff" => diff::cmd_freebsd_diff(args),
         "kyua-baseline" => kyua::cmd_kyua_baseline(args),
+        "kyua" => kyua::cmd_kyua(args),
         "acpidump" => acpidump::cmd(args),
         "check" => test::cmd_check(args),
         "policy" => policy::cmd(args),

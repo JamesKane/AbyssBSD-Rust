@@ -1299,3 +1299,143 @@ fn acls_need_a_mount_that_keeps_them() {
         Err(Errno::EOPNOTSUPP)
     );
 }
+
+/// Records an inotify read returned: (watch, mask, cookie, name).
+fn inotify_records(b: &[u8]) -> Vec<(i32, u32, u32, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at < b.len() {
+        let word = |i: usize| u32::from_ne_bytes(b[at + 4 * i..at + 4 * i + 4].try_into().unwrap());
+        let len = word(3) as usize;
+        let name = &b[at + 16..at + 16 + len];
+        let name = name.split(|&c| c == 0).next().unwrap_or(&[]).to_vec();
+        out.push((word(0).cast_signed(), word(1), word(2), name));
+        at += 16 + len;
+    }
+    out
+}
+
+/// One test, since the queue limit it changes is global.
+#[test]
+fn inotify_watches_and_events() {
+    use abi::inotify::*;
+    use core::sync::atomic::Ordering;
+    let s = s();
+    let ns = tmp();
+    let d = mk(&ns, b"/d", NewNode::Directory).unwrap();
+    let sc = inotify::Inotify::new(0, 0);
+    let all = |sc: &inotify::Inotify| inotify_records(&sc.read(1 << 16).unwrap_or_default());
+    let wd = sc.add_watch(&s, &d, IN_ALL_EVENTS).unwrap();
+    assert_eq!(wd, 1);
+    assert_eq!(sc.read(4096), Err(Errno::EAGAIN));
+
+    // Names made and removed in the directory, a write to one through its
+    // name (twice: coalesced), and the directory's own listing.
+    let f = mk(&ns, b"/d/f", NewNode::Regular).unwrap();
+    write_all(&f, 0, b"x");
+    write_all(&f, 1, b"y");
+    mk(&ns, b"/d/sub", NewNode::Directory).unwrap();
+    names(&d);
+    let mut out = Vec::new();
+    ops::getdirentries(&s, &d, 0, 4096, &mut out).unwrap();
+    rm(&ns, b"/d/sub", true).unwrap();
+    assert_eq!(
+        all(&sc),
+        [
+            (wd, IN_CREATE, 0, b"f".to_vec()),
+            (wd, IN_MODIFY, 0, b"f".to_vec()),
+            (wd, IN_CREATE | IN_ISDIR, 0, b"sub".to_vec()),
+            (wd, IN_ACCESS | IN_ISDIR, 0, Vec::new()),
+            (wd, IN_DELETE | IN_ISDIR, 0, b"sub".to_vec()),
+        ]
+    );
+
+    // A rename's halves share a cookie; a file watched itself hears it
+    // moved, then deleted.
+    let wf = sc.add_watch(&s, &f, IN_MOVE_SELF | IN_DELETE_SELF).unwrap();
+    assert_ne!(wf, wd);
+    mv(&ns, b"/d/f", b"/d/g").unwrap();
+    let r = all(&sc);
+    // The file's own event first, as `vn_inotify` logs it.
+    assert_eq!(r.len(), 3, "{r:?}");
+    assert_eq!(r[0], (wf, IN_MOVE_SELF, 0, Vec::new()));
+    assert_eq!(
+        (r[1].0, r[1].1, &r[1].3[..]),
+        (wd, IN_MOVED_FROM, &b"f"[..])
+    );
+    assert_eq!((r[2].0, r[2].1, &r[2].3[..]), (wd, IN_MOVED_TO, &b"g"[..]));
+    assert_eq!(r[1].2, r[2].2);
+    rm(&ns, b"/d/g", false).unwrap();
+    assert_eq!(
+        all(&sc),
+        [
+            (wf, IN_DELETE_SELF, 0, Vec::new()),
+            (wf, IN_IGNORED, 0, Vec::new()),
+            (wd, IN_DELETE, 0, b"g".to_vec()),
+        ]
+    );
+
+    // Updating a watch, and the flags that refuse to.
+    assert_eq!(
+        sc.add_watch(&s, &d, IN_CREATE | IN_MASK_CREATE),
+        Err(Errno::EEXIST)
+    );
+    assert_eq!(sc.add_watch(&s, &d, IN_CREATE), Ok(wd));
+    assert_eq!(sc.add_watch(&s, &d, IN_DELETE | IN_MASK_ADD), Ok(wd));
+
+    // A full queue ends with one overflow record.
+    inotify::MAX_QUEUED_EVENTS.store(2, Ordering::Relaxed);
+    for name in [&b"/d/a"[..], b"/d/b", b"/d/c", b"/d/e"] {
+        mk(&ns, name, NewNode::Regular).unwrap();
+    }
+    inotify::MAX_QUEUED_EVENTS.store(16384, Ordering::Relaxed);
+    let r = all(&sc);
+    assert_eq!(r.len(), 3, "{r:?}");
+    assert_eq!(r[2], (-1, IN_Q_OVERFLOW, 0, Vec::new()));
+
+    // A read too small for the first record.
+    mk(&ns, b"/d/h", NewNode::Regular).unwrap();
+    assert_eq!(sc.read(16), Err(Errno::EINVAL));
+    assert_eq!(sc.pending_bytes(), 16 + name_size(1));
+
+    // One-shot, and removal.
+    let e = lookup(&ns, b"/d/e", false).unwrap();
+    let we = sc.add_watch(&s, &e, IN_ATTRIB | IN_ONESHOT).unwrap();
+    ops::setattr(
+        &s,
+        &e,
+        &SetAttr {
+            mode: Some(0o600),
+            ..SetAttr::default()
+        },
+        &Cred::root(),
+        false,
+    )
+    .unwrap();
+    ops::setattr(
+        &s,
+        &e,
+        &SetAttr {
+            mode: Some(0o644),
+            ..SetAttr::default()
+        },
+        &Cred::root(),
+        false,
+    )
+    .unwrap();
+    let r = all(&sc);
+    assert_eq!(
+        &r[r.len() - 2..],
+        [
+            (we, IN_ATTRIB, 0, Vec::new()),
+            (we, IN_IGNORED, 0, Vec::new())
+        ]
+    );
+    assert_eq!(sc.rm_watch(we), Err(Errno::EINVAL));
+    sc.rm_watch(wd).unwrap();
+    assert_eq!(all(&sc), [(wd, IN_IGNORED, 0, Vec::new())]);
+    mk(&ns, b"/d/i", NewNode::Regular).unwrap();
+    assert_eq!(sc.read(4096), Err(Errno::EAGAIN));
+    sc.close();
+    assert_eq!(inotify::WATCHES.load(Ordering::Relaxed), 0);
+}

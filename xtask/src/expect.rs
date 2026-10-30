@@ -312,10 +312,9 @@ pub(crate) const FREEBSD_TESTS: &[Step] = &[step(
     "FreeBSD's libthr tests",
 )];
 
-/// Where FreeBSD 15.1's own results are (`kyua-baseline`), and the cases
-/// whose results may differ here yet, with why.
-const KYUA_BASELINE: &str = "tests/kyua/freebsd/freebsd-15.1-RELEASE-x86_64-bhyve.txt";
-const KYUA_KNOWN: &str = "tests/kyua/abyss-known.txt";
+// Where FreeBSD 15.1's own results are (`kyua-baseline`), and the cases
+// whose results may differ here yet, with why.
+use crate::kyua::{BASELINE as KYUA_BASELINE, KNOWN_FAILURES as KYUA_KNOWN};
 
 /// The `atf:` lines in `console` against FreeBSD's results: every case
 /// FreeBSD has in [`crate::image::FREEBSD_TESTS`], that this architecture's programs list

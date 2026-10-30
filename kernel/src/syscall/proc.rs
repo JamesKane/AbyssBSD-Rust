@@ -37,15 +37,16 @@ pub(super) fn fork(s: &Sleepable, frame: &mut TrapFrame, vfork: bool) -> SysResu
 /// `RFPROC | RFFDG` (`fork`), and `RFPROC | RFFDG | RFMEM | RFPPWAIT`
 /// (`vfork`), and `RFPROC` (the descriptor table shared); the rest are
 /// `EINVAL` for now.
+const RFFDG: u32 = 1 << 2;
+const RFPROC: u32 = 1 << 4;
+const RFMEM: u32 = 1 << 5;
+const RFSTOPPED: u32 = 1 << 17;
+const RFHIGHPID: u32 = 1 << 18;
+const RFPROCDESC: u32 = 1 << 28;
+const RFPPWAIT: u32 = 1 << 31;
+const RFSPAWN: u32 = 1 << 31;
+
 pub(super) fn rfork(s: &Sleepable, frame: &mut TrapFrame, flags: u64) -> SysResult {
-    const RFFDG: u32 = 1 << 2;
-    const RFPROC: u32 = 1 << 4;
-    const RFMEM: u32 = 1 << 5;
-    const RFSTOPPED: u32 = 1 << 17;
-    const RFHIGHPID: u32 = 1 << 18;
-    const RFPROCDESC: u32 = 1 << 28;
-    const RFPPWAIT: u32 = 1 << 31;
-    const RFSPAWN: u32 = 1 << 31;
     let flags = int(flags).cast_unsigned();
     if flags & (RFSTOPPED | RFHIGHPID | RFPROCDESC) != 0 {
         return Err(Errno::EINVAL);
@@ -97,6 +98,61 @@ pub(super) fn pdfork(s: &Sleepable, frame: &mut TrapFrame, fdp: u64, flags: u64)
     Ok(u64::from(pid.unsigned_abs()))
 }
 
+/// `pdrfork(fdp, pdflags, rfflags)`: `rfork` with `RFPROCDESC`, in the
+/// forms `rfork` takes, the child's descriptor written to `fdp`.
+pub(super) fn pdrfork(
+    s: &Sleepable,
+    frame: &mut TrapFrame,
+    fdp: u64,
+    pdflags: u64,
+    rfflags: u64,
+) -> SysResult {
+    let rf = int(rfflags).cast_unsigned();
+    if rf & (RFSTOPPED | RFHIGHPID) != 0 {
+        return Err(Errno::EINVAL);
+    }
+    // (vfork, drop caught signals, share the descriptor table)
+    let how = if rf & RFSPAWN != 0 {
+        // RFSPAWN must not appear with others.
+        if rf != RFSPAWN {
+            return Err(Errno::EINVAL);
+        }
+        (true, true, false)
+    } else if rf == RFPROC | RFPROCDESC | RFFDG {
+        (false, false, false)
+    } else if rf == RFPROC | RFPROCDESC | RFFDG | RFMEM | RFPPWAIT {
+        (true, false, false)
+    } else if rf == RFPROC | RFPROCDESC {
+        (false, false, true)
+    } else {
+        // Without both RFPROC and RFPROCDESC, or a form `rfork` does not
+        // take here either.
+        return Err(Errno::EINVAL);
+    };
+    let pdflags = int(pdflags).cast_unsigned();
+    if pdflags & !PD_ALLOWED_AT_FORK != 0 {
+        return Err(Errno::EINVAL);
+    }
+    let p = process()?;
+    let limit = super::io::max_files(&p);
+    let (pid, fd) = p.pdrfork(
+        s,
+        frame,
+        how,
+        (pdflags & PD_DAEMON != 0, pdflags & PD_CLOEXEC != 0, limit),
+    )?;
+    #[cfg(target_arch = "x86_64")]
+    {
+        frame.rdx = 0;
+    }
+    // As `pdfork`: the child runs already; a bad pointer only fails the
+    // call.
+    UserPtr::<i32>::new(fdp)
+        .write(&fd)
+        .map_err(|_| Errno::EFAULT)?;
+    Ok(u64::from(pid.unsigned_abs()))
+}
+
 /// The process behind descriptor `fd` (`EBADF` if it is not a process
 /// descriptor).
 fn described(
@@ -127,6 +183,10 @@ pub(super) fn pdkill(s: &Sleepable, fd: u64, signum: u64) -> SysResult {
         return Err(Errno::EINVAL);
     }
     let target = described(s, fd, &crate::capsicum::rights::PDKILL)?;
+    // Reaped: the descriptor names no process now (`procdesc_reap`).
+    if target.is_zombie() && target.parent().is_none() {
+        return Err(Errno::ESRCH);
+    }
     let me = process()?;
     me.can_signal(&target, sig)?;
     let _ = crate::signal::post(
@@ -264,10 +324,11 @@ pub(super) fn wait4(s: &Sleepable, pid: u64, status: u64, options: u64, rusage: 
             .map_err(|_| Errno::EFAULT)?;
     }
     if rusage != 0 {
-        // Resource accounting comes later; FreeBSD's is zero for a child
-        // that used nothing measurable.
+        let ru = w
+            .usage
+            .map_or_else(Rusage::default, |(own, _)| own.rusage());
         UserPtr::<Rusage>::new(rusage)
-            .write(&Rusage::default())
+            .write(&ru)
             .map_err(|_| Errno::EFAULT)?;
     }
     Ok(u64::from(child.unsigned_abs()))
@@ -365,9 +426,12 @@ fn report(w: crate::proc::Waited, status: u64, wrusage: u64, info: u64) -> Resul
             .map_err(|_| Errno::EFAULT)?;
     }
     if wrusage != 0 {
-        // `struct __wrusage`: the child's and its children's, both zero.
+        // `struct __wrusage`: the child's and its children's.
+        let ru = w.usage.map_or([Rusage::default(); 2], |(own, children)| {
+            [own.rusage(), children.rusage()]
+        });
         UserPtr::<[Rusage; 2]>::new(wrusage)
-            .write(&[Rusage::default(); 2])
+            .write(&ru)
             .map_err(|_| Errno::EFAULT)?;
     }
     if info != 0 {
@@ -700,24 +764,9 @@ pub(super) fn setloginclass(name: u64) -> SysResult {
     Ok(0)
 }
 
-/// `struct setcred`.
-#[derive(Clone, Copy, Debug, Default)]
-#[repr(C)]
-struct SetcredArg {
-    uid: u32,
-    ruid: u32,
-    svuid: u32,
-    gid: u32,
-    rgid: u32,
-    svgid: u32,
-    pad: u32,
-    supp_groups_nb: u32,
-    supp_groups: u64,
-    label: u64,
-}
-
-// SAFETY: integers and addresses, no padding.
-unsafe impl Plain for SetcredArg {}
+// SAFETY: integers and addresses, no padding (`abi-check` holds the C
+// layout).
+unsafe impl Plain for abi::ucred::Setcred {}
 
 /// `SETCREDF_*`.
 mod setcredf {
@@ -739,22 +788,22 @@ mod setcredf {
 pub(super) fn setcred(flags: u64, wcred: u64, size: u64) -> SysResult {
     use setcredf as f;
     let flags = u32::try_from(flags & 0xffff_ffff).unwrap_or(u32::MAX);
-    if size != size_of::<SetcredArg>() as u64 {
+    if size != size_of::<abi::ucred::Setcred>() as u64 {
         return Err(Errno::EINVAL);
     }
-    let w = UserPtr::<SetcredArg>::new(wcred)
+    let w = UserPtr::<abi::ucred::Setcred>::new(wcred)
         .read()
         .map_err(|_| Errno::EFAULT)?;
     if flags & !f::MASK != 0 {
         return Err(Errno::EINVAL);
     }
     let groups = if flags & f::SUPP_GROUPS != 0 {
-        let n = w.supp_groups_nb as usize;
+        let n = w.sc_supp_groups_nb as usize;
         if n > crate::cred::NGROUPS_MAX {
             return Err(Errno::EINVAL);
         }
         let mut raw = alloc::vec![0u8; n * 4];
-        uaccess::copy_in(&mut raw, w.supp_groups).map_err(|_| Errno::EFAULT)?;
+        uaccess::copy_in(&mut raw, w.sc_supp_groups).map_err(|_| Errno::EFAULT)?;
         Some(crate::cred::groups_from(&raw))
     } else {
         None
@@ -764,12 +813,12 @@ pub(super) fn setcred(flags: u64, wcred: u64, size: u64) -> SysResult {
     }
     let pick = |bit: u32, v: u32| (flags & bit != 0).then_some(v);
     let set = crate::cred::SetCred {
-        uid: pick(f::UID, w.uid),
-        ruid: pick(f::RUID, w.ruid),
-        svuid: pick(f::SVUID, w.svuid),
-        gid: pick(f::GID, w.gid),
-        rgid: pick(f::RGID, w.rgid),
-        svgid: pick(f::SVGID, w.svgid),
+        uid: pick(f::UID, w.sc_uid),
+        ruid: pick(f::RUID, w.sc_ruid),
+        svuid: pick(f::SVUID, w.sc_svuid),
+        gid: pick(f::GID, w.sc_gid),
+        rgid: pick(f::RGID, w.sc_rgid),
+        svgid: pick(f::SVGID, w.sc_svgid),
         groups,
     };
     let p = process()?;

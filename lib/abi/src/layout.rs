@@ -36,6 +36,8 @@ pub struct FieldLayout {
 /// The layout of one structure.
 #[derive(Clone, Copy, Debug)]
 pub struct StructLayout {
+    /// The Rust type, as written in [`LAYOUTS`].
+    pub rust_type: &'static str,
     /// The C type, e.g. `struct stat`.
     pub c_type: &'static str,
     /// Headers that declare it, in include order.
@@ -92,6 +94,7 @@ pub const CONSTANTS: &[&[ConstValue]] = &[
     crate::md::CONSTANTS,
     crate::socket::CONSTANTS,
     crate::inet::CONSTANTS,
+    crate::inotify::CONSTANTS,
     crate::net::CONSTANTS,
     crate::netlink::CONSTANTS,
     crate::procdesc::CONSTANTS,
@@ -169,6 +172,7 @@ pub const fn field_size<T, F>(_f: fn(&T) -> &F) -> usize {
 macro_rules! layout {
     ($ty:ty, $c_type:literal, [$($h:literal),*], $arches:ident, { $($($field:ident).+ => $c:literal),* $(,)? }) => {
         StructLayout {
+            rust_type: stringify!($ty),
             c_type: $c_type,
             headers: &[$($h),*],
             arches: Arches::$arches,
@@ -423,6 +427,11 @@ pub static LAYOUTS: &[StructLayout] = &[
     layout!(socket::Linger, "struct linger", ["sys/types.h", "sys/socket.h"], All, {
         l_onoff => "l_onoff",
         l_linger => "l_linger",
+    }),
+    layout!(socket::Splice, "struct splice", ["sys/types.h", "sys/socket.h"], All, {
+        sp_fd => "sp_fd",
+        sp_max => "sp_max",
+        sp_idle => "sp_idle",
     }),
     layout!(inet::SockaddrIn, "struct sockaddr_in", ["sys/types.h", "sys/socket.h", "netinet/in.h"], All, {
         sin_len => "sin_len",
@@ -1000,6 +1009,10 @@ pub static LAYOUTS: &[StructLayout] = &[
         kf_un.kf_timerfd_flags => "kf_un.kf_timerfd.kf_timerfd_flags",
         kf_un.kf_timerfd_addr => "kf_un.kf_timerfd.kf_timerfd_addr",
     }),
+    layout!(crate::kinfo::KinfoFile<crate::kinfo::KfInotify>, "struct kinfo_file", ["sys/param.h", "sys/proc.h", "sys/user.h"], All, {
+        kf_un.kf_inotify_npending => "kf_un.kf_inotify.kf_inotify_npending",
+        kf_un.kf_inotify_nbpending => "kf_un.kf_inotify.kf_inotify_nbpending",
+    }),
     layout!(crate::kinfo::KinfoFile<crate::kinfo::KfJail>, "struct kinfo_file", ["sys/param.h", "sys/proc.h", "sys/user.h"], All, {
         kf_un.kf_jid => "kf_un.kf_jail.kf_jid",
     }),
@@ -1167,6 +1180,15 @@ pub static LAYOUTS: &[StructLayout] = &[
     layout!(crate::event::SpecialfdEventfd, "struct specialfd_eventfd", ["sys/types.h", "sys/specialfd.h"], All, {
         initval => "initval",
         flags => "flags",
+    }),
+    layout!(crate::event::SpecialfdInotify, "struct specialfd_inotify", ["sys/types.h", "sys/specialfd.h"], All, {
+        flags => "flags",
+    }),
+    layout!(crate::inotify::InotifyEvent, "struct inotify_event", ["sys/types.h", "sys/inotify.h"], All, {
+        wd => "wd",
+        mask => "mask",
+        cookie => "cookie",
+        len => "len",
     }),
     layout!(crate::acl::AclEntry, "struct acl_entry", ["sys/types.h", "sys/acl.h"], All, {
         ae_tag => "ae_tag",
@@ -1622,6 +1644,81 @@ pub static LAYOUTS: &[StructLayout] = &[
     layout!(ucontext::SigframeArm, "struct sigframe", ["sys/types.h", "ucontext.h", "machine/frame.h"], Arm64, {
         sf_si => "sf_si",
         sf_uc => "sf_uc",
+    }),
+    layout!(crate::jail::Jail, "struct jail", ["sys/param.h", "sys/jail.h"], All, {
+        version => "version",
+        path => "path",
+        hostname => "hostname",
+        jailname => "jailname",
+        ip4s => "ip4s",
+        ip6s => "ip6s",
+        ip4 => "ip4",
+        ip6 => "ip6",
+    }),
+    layout!(crate::ucred::Setcred, "struct setcred", ["sys/types.h", "sys/ucred.h"], All, {
+        sc_uid => "sc_uid",
+        sc_ruid => "sc_ruid",
+        sc_svuid => "sc_svuid",
+        sc_gid => "sc_gid",
+        sc_rgid => "sc_rgid",
+        sc_svgid => "sc_svgid",
+        sc_pad => "sc_pad",
+        sc_supp_groups_nb => "sc_supp_groups_nb",
+        sc_supp_groups => "sc_supp_groups",
+        sc_label => "sc_label",
+    }),
+    layout!(crate::ptrace::Prstatus<crate::ptrace::regs_amd64::Reg>, "prstatus_t", ["sys/types.h", "sys/procfs.h"], Amd64, {
+        pr_version => "pr_version",
+        pr_statussz => "pr_statussz",
+        pr_gregsetsz => "pr_gregsetsz",
+        pr_fpregsetsz => "pr_fpregsetsz",
+        pr_osreldate => "pr_osreldate",
+        pr_cursig => "pr_cursig",
+        pr_pid => "pr_pid",
+        pr_reg => "pr_reg",
+    }),
+    layout!(crate::ptrace::Prstatus<crate::ptrace::regs_arm64::Reg>, "prstatus_t", ["sys/types.h", "sys/procfs.h"], Arm64, {
+        pr_version => "pr_version",
+        pr_statussz => "pr_statussz",
+        pr_gregsetsz => "pr_gregsetsz",
+        pr_fpregsetsz => "pr_fpregsetsz",
+        pr_osreldate => "pr_osreldate",
+        pr_cursig => "pr_cursig",
+        pr_pid => "pr_pid",
+        pr_reg => "pr_reg",
+    }),
+    layout!(crate::ptrace::Prpsinfo, "prpsinfo_t", ["sys/types.h", "sys/procfs.h"], All, {
+        pr_version => "pr_version",
+        pr_psinfosz => "pr_psinfosz",
+        pr_fname => "pr_fname",
+        pr_psargs => "pr_psargs",
+        pr_pid => "pr_pid",
+    }),
+    layout!(crate::ptrace::Thrmisc, "thrmisc_t", ["sys/types.h", "sys/procfs.h"], All, {
+        pr_tname => "pr_tname",
+        _pad => "_pad",
+    }),
+    layout!(crate::ptrace::regs_amd64::Segbasereg, "struct segbasereg", ["sys/types.h", "machine/reg.h"], Amd64, {
+        r_fsbase => "r_fsbase",
+        r_gsbase => "r_gsbase",
+    }),
+    layout!(crate::ptrace::regs_arm64::AddrMask, "struct arm64_addr_mask", ["sys/types.h", "machine/reg.h"], Arm64, {
+        code => "code",
+        data => "data",
+    }),
+    layout!(crate::mount::Fsid, "fsid_t", ["sys/param.h", "sys/mount.h"], All, {
+        val => "val",
+    }),
+    layout!(kbio::FkeyTab, "fkeytab_t", ["sys/types.h", "sys/kbio.h"], All, {
+        str => "str",
+        len => "len",
+    }),
+    layout!(bus::DevreqBuffer, "struct devreq_buffer", ["sys/types.h", "sys/bus.h"], All, {
+        buffer => "buffer",
+        length => "length",
+    }),
+    layout!(crate::kinfo::KinfoFile<crate::kinfo::KfNone>, "struct kinfo_file", ["sys/param.h", "sys/proc.h", "sys/user.h"], All, {
+        kf_un => "kf_un",
     }),
 ];
 

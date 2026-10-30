@@ -18,8 +18,8 @@ use abi::fcntl::{AT_FDCWD, FREAD, FWRITE, O_NONBLOCK};
 use abi::socket::{
     AF_UNIX, CMSG_HDR, MSG_CMSG_CLOEXEC, MSG_CMSG_CLOFORK, MSG_CTRUNC, MSG_TRUNC, Msghdr,
     SCM_BINTIME, SCM_CREDS, SCM_MONOTONIC, SCM_REALTIME, SCM_RIGHTS, SCM_TIMESTAMP, SHUT_RDWR,
-    SOCK_CLOEXEC, SOCK_CLOFORK, SOCK_DGRAM, SOCK_MAXADDRLEN, SOCK_NONBLOCK, SOCK_SEQPACKET,
-    SOCK_STREAM, SOL_SOCKET, cmsg_len, cmsg_space,
+    SO_SPLICE, SOCK_CLOEXEC, SOCK_CLOFORK, SOCK_DGRAM, SOCK_MAXADDRLEN, SOCK_NONBLOCK,
+    SOCK_SEQPACKET, SOCK_STREAM, SOL_SOCKET, cmsg_len, cmsg_space,
 };
 use sched::Sleepable;
 use socket::{Control, InFlight, Socket, Type};
@@ -395,10 +395,15 @@ pub(super) fn accept4(
     if flags & !(SOCK_CLOEXEC | SOCK_CLOFORK | SOCK_NONBLOCK) != 0 {
         return Err(Errno::EINVAL);
     }
-    if name != 0 && lenp != 0 {
-        UserPtr::<u32>::new(lenp)
+    // `accept1` reads the length whenever there is a name, before waiting
+    // (a NULL `anamelen` is EFAULT), and `kern_accept4` refuses a negative one.
+    if name != 0 {
+        let len = UserPtr::<u32>::new(lenp)
             .read()
             .map_err(|_| Errno::EFAULT)?;
+        if len.cast_signed() < 0 {
+            return Err(Errno::EINVAL);
+        }
     }
     let f = sock(s, sock_fd, &crate::capsicum::rights::ACCEPT)?;
     if let Some(so) = super::inet::so_of(&f) {
@@ -506,6 +511,9 @@ pub(super) fn setsockopt(
     if !buf.is_empty() {
         uaccess::copy_in(&mut buf, val).map_err(|_| Errno::EFAULT)?;
     }
+    if int(level) == SOL_SOCKET && int(name) == SO_SPLICE {
+        return splice(s, sock_fd, &f, &buf);
+    }
     if let Some(so) = super::inet::so_of(&f) {
         return super::inet::setsockopt(so, int(level), int(name), &buf);
     }
@@ -513,6 +521,47 @@ pub(super) fn setsockopt(
         return super::netlink::setsockopt(&f, int(level), int(name), &buf);
     }
     so_of(&f).so.setopt(int(level), int(name), &buf)?;
+    Ok(0)
+}
+
+/// `sosetopt`'s `SO_SPLICE`: splices the socket open as `sock_fd` (`f`)
+/// to the one `struct splice` names, or unsplices it (`sp_fd` -1). The
+/// source needs `CAP_RECV`, the sink `CAP_SEND`; unsplicing needs only
+/// the `CAP_SETSOCKOPT` already checked.
+fn splice(s: &Sleepable, sock_fd: u64, f: &File, raw: &[u8]) -> SysResult {
+    let mut sp = abi::socket::Splice::default();
+    let b = uaccess::bytes_of_mut(&mut sp);
+    // `sooptcopyin`: shorter than the structure is `EINVAL`.
+    let Some(raw) = raw.get(..b.len()) else {
+        return Err(Errno::EINVAL);
+    };
+    b.copy_from_slice(raw);
+    let Ok(fd) = u32::try_from(sp.sp_fd) else {
+        return match super::inet::so_of(f) {
+            Some(so) => so.unsplice().map(|()| 0),
+            None => Err(Errno::ENOTCONN),
+        };
+    };
+    sock(s, sock_fd, &crate::capsicum::rights::RECV)?;
+    let sink = sock(s, u64::from(fd), &crate::capsicum::rights::SEND)?;
+    let (Some(src), Some(dst)) = (super::inet::so_of(f), super::inet::so_of(&sink)) else {
+        // `so_splice`'s first checks.
+        return Err(if sp.sp_max < 0 {
+            Errno::EINVAL
+        } else {
+            Errno::EPROTONOSUPPORT
+        });
+    };
+    let spliced = src.splice(dst, sp.sp_max)?;
+    let idle = sp.sp_idle;
+    if idle.tv_sec != 0 || idle.tv_usec != 0 {
+        let sec = u64::try_from(idle.tv_sec).unwrap_or(0);
+        let usec = u64::try_from(idle.tv_usec).unwrap_or(0);
+        let ns = sec
+            .saturating_mul(1_000_000_000)
+            .saturating_add(usec.saturating_mul(1000));
+        crate::net::splice::arm(&spliced, ns);
+    }
     Ok(0)
 }
 
@@ -536,7 +585,11 @@ pub(super) fn getsockopt(
         return Err(Errno::EINVAL);
     }
     let f = sock(s, sock_fd, &crate::capsicum::rights::GETSOCKOPT)?;
-    let v = if let Some(so) = super::inet::so_of(&f) {
+    let v = if int(level) == SOL_SOCKET && int(name) == SO_SPLICE {
+        // Only internet sockets splice; the others have moved nothing.
+        let n = super::inet::so_of(&f).map_or(0, |so| so.splice_sent());
+        n.to_ne_bytes().to_vec()
+    } else if let Some(so) = super::inet::so_of(&f) {
         super::inet::getsockopt(so, int(level), int(name))?
     } else if super::netlink::is_netlink(&f) {
         super::netlink::getsockopt(&f, int(level), int(name))?

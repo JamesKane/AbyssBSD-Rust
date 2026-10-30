@@ -505,8 +505,11 @@ impl AddressSpace {
         {
             // The kernel's half: the same root entries, so the same tables.
             let kernel = super::kernel_root();
-            let upper = *pt::Memory::frame(&mut frames, kernel);
-            pt::Memory::frame(&mut frames, table.root())[256..].copy_from_slice(&upper[256..]);
+            // An entry at a time, not 4 KiB of table on the stack.
+            for i in 256..512 {
+                let e = pt::Memory::frame(&mut frames, kernel)[i];
+                pt::Memory::frame(&mut frames, table.root())[i] = e;
+            }
         }
         Ok(Arc::new(Self {
             map: Mutex::new(&MAP_LOCK, map),

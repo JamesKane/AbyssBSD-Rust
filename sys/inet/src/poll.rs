@@ -74,10 +74,14 @@ impl Socket {
             };
         }
         let mut revents = 0;
-        if events & (POLLIN | POLLRDNORM) != 0 && i.readable() {
+        // A spliced buffer's data and room are the splice's.
+        if events & (POLLIN | POLLRDNORM) != 0 && i.readable() && i.splice.is_none() {
             revents |= events & (POLLIN | POLLRDNORM);
         }
-        if events & (POLLOUT | POLLWRNORM) != 0 && i.writeable(self.proto) {
+        if events & (POLLOUT | POLLWRNORM) != 0
+            && i.writeable(self.proto)
+            && i.splice_back.is_none()
+        {
             revents |= events & (POLLOUT | POLLWRNORM);
         }
         if events & (POLLPRI | POLLRDBAND) != 0 && crate::tcp::urgent_pending(&i) {
@@ -146,6 +150,9 @@ impl SockFilter {
                 return true;
             }
             return n > 0;
+        }
+        if i.splice.is_some() {
+            return false;
         }
         note.kev.data = i64::from(i.avail());
         if i.rcv.cant {

@@ -67,6 +67,7 @@ impl VnodeFile {
         }
         // `vop_open_post`.
         v.knote(abi::event::NOTE_OPEN);
+        vfs::inotify::event(v, abi::inotify::IN_OPEN);
         Ok(Self {
             vnode: v.use_ref(),
             device,
@@ -83,6 +84,8 @@ impl VnodeFile {
 
     /// `v` as `O_PATH` opens it: a name only.
     pub(crate) fn path_only(v: &Arc<Vnode>) -> Self {
+        // `vn_open_vnode` reports an `O_PATH` open too.
+        vfs::inotify::event(v, abi::inotify::IN_OPEN);
         Self {
             vnode: v.use_ref(),
             device: None,
@@ -130,6 +133,14 @@ impl Drop for VnodeFile {
         } else {
             abi::event::NOTE_CLOSE
         });
+        vfs::inotify::event(
+            &self.vnode,
+            if self.write {
+                abi::inotify::IN_CLOSE_WRITE
+            } else {
+                abi::inotify::IN_CLOSE_NOWRITE
+            },
+        );
     }
 }
 
@@ -157,6 +168,8 @@ pub(crate) enum FileKind {
     Timerfd(Arc<crate::timers::Timerfd>),
     /// An `eventfd`.
     Eventfd(Arc<super::eventfd::Eventfd>),
+    /// An inotify descriptor.
+    Inotify(super::inotify::InotifyFile),
     /// A pseudo-terminal's master.
     Pts(Arc<crate::tty::pts::Master>),
 }
@@ -244,6 +257,7 @@ impl File {
             | FileKind::Kqueue(_)
             | FileKind::Timerfd(_)
             | FileKind::Eventfd(_)
+            | FileKind::Inotify(_)
             | FileKind::Pts(_) => None,
         }
     }
@@ -315,6 +329,7 @@ impl File {
             FileKind::Kqueue(_) => Err(Errno::EOPNOTSUPP),
             FileKind::Timerfd(t) => t.read(s, uio, self.nonblock()),
             FileKind::Eventfd(e) => e.read(s, uio, self.nonblock()),
+            FileKind::Inotify(i) => i.read(s, uio, self.nonblock()),
         }
     }
 
@@ -348,6 +363,7 @@ impl File {
             | FileKind::Kqueue(_)
             | FileKind::Timerfd(_)
             | FileKind::Eventfd(_)
+            | FileKind::Inotify(_)
             | FileKind::Pts(_) => Err(Errno::ESPIPE),
         }
     }
@@ -393,6 +409,8 @@ impl File {
             }
             FileKind::Kqueue(_) | FileKind::Timerfd(_) => Err(Errno::EOPNOTSUPP),
             FileKind::Eventfd(e) => e.write(s, uio, self.nonblock()),
+            // `invfo_rdwr`.
+            FileKind::Inotify(_) => Err(Errno::EOPNOTSUPP),
         }
     }
 
@@ -417,6 +435,7 @@ impl File {
             | FileKind::Kqueue(_)
             | FileKind::Timerfd(_)
             | FileKind::Eventfd(_)
+            | FileKind::Inotify(_)
             | FileKind::Pts(_) => Err(Errno::ESPIPE),
             FileKind::Shm(m) => {
                 let at = u64::try_from(offset).map_err(|_| Errno::EINVAL)?;
@@ -506,6 +525,7 @@ impl File {
             }),
             FileKind::Timerfd(t) => Ok(t.stat()),
             FileKind::Eventfd(_) => Ok(super::eventfd::Eventfd::stat()),
+            FileKind::Inotify(i) => Ok(i.stat()),
             FileKind::Pts(m) => Ok(m.stat()),
         }
     }
@@ -557,6 +577,7 @@ impl File {
             FileKind::Kqueue(k) => k.poll(events, w),
             FileKind::Timerfd(t) => t.poll(events, w),
             FileKind::Eventfd(e) => e.poll(events, w),
+            FileKind::Inotify(i) => i.poll(events, w),
             FileKind::Pts(m) => m.poll(events, w),
         }
     }
@@ -593,6 +614,7 @@ impl File {
             FileKind::Kqueue(_) => Err(Errno::EINVAL),
             FileKind::Timerfd(t) => t.kqfilter(kev),
             FileKind::Eventfd(e) => e.kqfilter(kev),
+            FileKind::Inotify(i) => i.kqfilter(kev),
             FileKind::Pts(m) => m.kqfilter(kev),
         }
     }
@@ -691,6 +713,15 @@ impl File {
             // generic layer already set the flag.
             FileKind::Kqueue(_) | FileKind::Timerfd(_) | FileKind::Eventfd(_) => match req {
                 FIONBIO | FIOASYNC => Ok(0),
+                _ => Err(Errno::ENOTTY),
+            },
+            // `inotify_ioctl`.
+            FileKind::Inotify(i) => match req {
+                FIONBIO | FIOASYNC => Ok(0),
+                FIONREAD => {
+                    put(arg, i.nread());
+                    Ok(0)
+                }
                 _ => Err(Errno::ENOTTY),
             },
             // Non-blocking and asynchronous mean nothing to memory, but

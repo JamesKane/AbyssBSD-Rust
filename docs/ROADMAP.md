@@ -1529,7 +1529,7 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
     cases run each case with `run-atf` (no kyua until interval timers) and hold it to FreeBSD
     15.1's recorded result: 60 cases on amd64 and 59 on arm64 end as FreeBSD's, and the 10 that
     need P6.3's kernel condition variables, rwlocks, and timed mutexes or P6.4's `setitimer` are
-    listed in `tests/kyua/abyss-known.txt`. Getting there brought `UMTX_OP_NWAKE_PRIVATE`, `#!`
+    listed in `tests/kyua/known-failures.txt`. Getting there brought `UMTX_OP_NWAKE_PRIVATE`, `#!`
     scripts (`exec_shell_imgact`), `sigqueue` to a thread, `sched_get_priority_{min,max}`,
     `kern.sched.cpusetsize{,min}`, `kern.vm_guest`, `kern.hostname`, FreeBSD's `cpuset` sizes,
     and `getcontext` without the bases.
@@ -1552,7 +1552,7 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
   - The shell cases run `tests.txz`'s `lib/libthr`, `lib/libc/gen`, `sys/posixshm`, and the System V
     tests (`sys/kern/sysv_test`, `lib/libc/sys/msg*_test`) as kyua would (each case's own `TMPDIR`,
     `require.user=unprivileged` cases as `tests`): every case ends as on FreeBSD but those listed in
-    `tests/kyua/abyss-known.txt` for P6.4, P6.7, and P6.8. Getting there brought `rfork`
+    `tests/kyua/known-failures.txt` for P6.4, P6.7, and P6.8. Getting there brought `rfork`
     (`RFSPAWN`), `getpriority`/`setpriority`, the `sched_*` policy calls, `execve`'s empty-`argv`
     check, the permission check before `#!`, `getdirentries`' `ENOTDIR`, and a vfork parent released
     only once the child is a zombie.
@@ -1591,7 +1591,7 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
     clock, timer, `kevent`, `poll`, `select`, `nanosleep`, and `sigtimedwait` tests as kyua does
     (programs from their Kyuafiles, plain programs as kyua reports them, `SIGINT` and `SIGQUIT`
     at their defaults): 417 cases on amd64 (QEMU and bhyve) end as on FreeBSD, and arm64's too,
-    but those `tests/kyua/abyss-known.txt` lists (`socketpair` for P6.5, two `timerfd` cases that
+    but those `tests/kyua/known-failures.txt` lists (`socketpair` for P6.5, two `timerfd` cases that
     pass where FreeBSD's fail, and one arm64 artifact). The 12 cases P6.2 and P6.3 left for
     P6.4 pass. Getting there brought `rfork(RFPROC)` (a shared descriptor table), a partial
     `F_KINFO`, and a larger ESP in the test images (the debug kernel had outgrown it).
@@ -1617,7 +1617,7 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
     `fchmod` on sockets; the "UNIX-domain sockets" deviation narrowed to what is left.
   - The shell cases run `sys/kern/unix_*`, `socket_msg_*`, `shutdown_dgram`, `listener_wakeup`,
     and `lib/libc/sys`'s socket tests as kyua does: 531 cases on amd64 (QEMU, bhyve) and 527
-    on arm64 end as on FreeBSD but those `tests/kyua/abyss-known.txt` lists (`AF_INET`, P7;
+    on arm64 end as on FreeBSD but those `tests/kyua/known-failures.txt` lists (`AF_INET`, P7;
     jails, P6.7; ktrace, P6.8; AIO). The shell case also runs base's `head` through Casper
     and `logger` to a `syslogd` started by hand. Getting there brought process descriptors'
     `FREAD | FWRITE`, kyua's 300-second case timeout (with a watchdog that takes its `sleep`
@@ -1695,7 +1695,7 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
   - kyua (the shell cases): `sys/capsicum`, `sys/kern`'s reaper, pdeathsig, procdesc,
     logsigexit, jail, jaildesc, and jailmeta programs, `usr.sbin/jail`, and libc's set-id,
     `getlogin`, `setrlimit`, `kill`, `getgroups`, `chroot`, and `mlock` tests join the run: 628
-    cases on amd64 and 624 on arm64 end as on FreeBSD, but those `tests/kyua/abyss-known.txt` lists (`AF_INET` and
+    cases on amd64 and 624 on arm64 end as on FreeBSD, but those `tests/kyua/known-failures.txt` lists (`AF_INET` and
     `ifconfig`, P7; `ptrace`, P6.8; nullfs; audit). `run-atf` now runs cleanup routines and
     honors a program's `required_kmods`, as kyua does.
   - pjdfstest: every script as on FreeBSD on tmpfs and UFS2 but `chflags/09`'s 117 `jexpect` tests,
@@ -1863,6 +1863,21 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
 - `abi-check` over every structure crossing the boundary, for amd64 and arm64 headers
   (MULTIUSER.md §13), failing on unchecked types.
 - Exit: the kyua target met in all four areas in bhyve; `abi-check` complete.
+- `sys/kern/ktls_test` is out of the target until P7 (ADR-0016, amended 2026-10-29): it is 566 of
+  `sys/kern`'s 972 FreeBSD passes, and needs TCP and kernel TLS.
+- Progress 2026-10-29: `cargo xtask --remote kyua` runs the four areas in one 8-CPU bhyve boot in
+  about an hour. Of FreeBSD's passes, `bin` passes 97.9%, `lib/libc` 97.3%, `usr.bin` 98.5%, and
+  `sys/kern` 94.3–95.3% from run to run: about a dozen of its cases race with each other in a
+  parallel run (a global clock, global sysctls, cpusets), on FreeBSD too but less often. Getting
+  there brought inotify (`sys/vfs/src/inotify.rs`, which 15.1 has though MULTIUSER.md first
+  counted it 16-CURRENT's), `SO_SPLICE` (`sys/inet/src/splice.rs`), `pdrfork`, `sched_getcpu`
+  and `IA32_TSC_AUX`, a reaped child's resource use from `wait`, `kern.sig_discard_ign`,
+  `kern.wait_dequeue_sigchld`, and fixes found on the way: a self-deadlock in
+  `SO_ACCEPTFILTER` that froze the guest, a double fault freeing page tables, `module_stat`'s
+  1024-byte name, `accept`'s order of checks, and more. Every other failure is in
+  `tests/kyua/known-failures.txt`. `abi-check` covers every `#[repr(C)]` type in `lib/abi`
+  (4804 assertions on amd64, 4717 on arm64) and fails on one it does not check. NMIs now print
+  each CPU's backtrace and return, which is how the freeze was found.
 
 **P6.11 Performance and exit.**
 - The P6 suite (MULTIUSER.md §16) in bhyve.
@@ -1878,6 +1893,9 @@ bring-up (P8) then starts with `ssh`, `scp`, and `pkg` on both of them.
   baseline, SACK, window scaling, timestamps, NewReno + CUBIC), loopback, `bpf` (for `dhclient`
   and `tcpdump`).
 - Socket API completeness for INET/INET6, `sendfile`, multicast basics.
+- Kernel TLS in software (`TCP_TXTLS_ENABLE`, `TCP_RXTLS_ENABLE`; TLS 1.0–1.3 records with
+  AES-CBC + HMAC, AES-GCM, and ChaCha20-Poly1305, written in-tree) and `sendfile` over it. kyua's
+  `sys/kern/ktls_test` rejoins the `sys/kern` target here (ADR-0016).
 - Control plane: routing tables (FIB), routing socket, **netlink** (`NETLINK_ROUTE` +
   `NETLINK_GENERIC` as used by 15.x `ifconfig`/`route`/`netstat`), and interface ioctls.
 - Drivers: virtio-net (multi-queue, checksum/TSO offload). The physical machines' NICs come with
@@ -1887,8 +1905,9 @@ bring-up (P8) then starts with `ssh`, `scp`, and `pkg` on both of them.
 **Exit:** in QEMU on both arches and in bhyve, the system obtains an address with `dhclient` and
 SLAAC, `sshd` accepts logins, `scp` copies both ways, and `fetch` and
 `pkg update && pkg install <curated set>` succeed. Sustained `iperf3` runs complete without stalls
-or leaks. The P7 performance suite (TCP/UDP throughput, request/response latency, connection rate,
-`sendfile`, CPU per gigabit) is within 2% of FreeBSD over loopback and virtio-net in bhyve.
+or leaks. The kyua target is met in `sys/kern` with `ktls_test`. The P7 performance suite (TCP/UDP
+throughput, request/response latency, connection rate, `sendfile`, CPU per gigabit) is within 2% of
+FreeBSD over loopback and virtio-net in bhyve.
 
 ## Phase 8: Board bring-up (XL)
 

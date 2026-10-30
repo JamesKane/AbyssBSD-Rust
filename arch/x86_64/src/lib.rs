@@ -53,7 +53,7 @@ pub const NAME: &str = "amd64";
 /// ```
 #[macro_export]
 macro_rules! kernel_hooks {
-    (main = $main:path, ap_main = $ap:path, fatal_trap = $trap:path, interrupt = $irq:path, page_fault = $pf:path, syscall = $sc:path, user_trap = $ut:path, user_return = $ur:path $(,)?) => {
+    (main = $main:path, ap_main = $ap:path, fatal_trap = $trap:path, interrupt = $irq:path, page_fault = $pf:path, syscall = $sc:path, user_trap = $ut:path, user_return = $ur:path, nmi = $nmi:path $(,)?) => {
         #[unsafe(no_mangle)]
         fn abyss_kernel_main(boot_info: $crate::PhysAddr) -> ! {
             $main(boot_info)
@@ -93,6 +93,11 @@ macro_rules! kernel_hooks {
         fn abyss_user_return(frame: &mut $crate::trap::TrapFrame) -> bool {
             $ur(frame)
         }
+
+        #[unsafe(no_mangle)]
+        fn abyss_nmi(report: &$crate::TrapReport) {
+            $nmi(report)
+        }
     };
 }
 
@@ -103,6 +108,9 @@ unsafe extern "Rust" {
     fn abyss_ap_main(arg: usize) -> !;
     /// Defined by [`kernel_hooks!`].
     fn abyss_fatal_trap(report: &TrapReport) -> !;
+    /// Defined by [`kernel_hooks!`]: an NMI, which returns to what it
+    /// interrupted.
+    fn abyss_nmi(report: &TrapReport);
     /// Defined by [`kernel_hooks!`].
     fn abyss_interrupt(irq: Interrupt);
     /// Defined by [`kernel_hooks!`]: whether the VM resolved the fault.

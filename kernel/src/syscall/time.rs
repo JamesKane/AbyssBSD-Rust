@@ -47,7 +47,7 @@ pub(super) fn read(id: u64) -> Result<u64, Errno> {
         | clock::UPTIME_PRECISE
         | clock::UPTIME_FAST => to_ns(uptime()),
         clock::SECOND => to_ns(realtime()) / NANOS * NANOS,
-        clock::THREAD_CPUTIME_ID => crate::time::ticks_to_ns(sched::current().runtime()),
+        clock::THREAD_CPUTIME_ID => crate::time::ticks_to_ns(sched::current_runtime()),
         clock::PROCESS_CPUTIME_ID | clock::VIRTUAL | clock::PROF => crate::time::ticks_to_ns(
             crate::proc::Process::with_current(crate::proc::Process::runtime)
                 .unwrap_or_else(|| sched::current().runtime()),

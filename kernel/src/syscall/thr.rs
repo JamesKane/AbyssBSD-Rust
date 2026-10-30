@@ -49,6 +49,11 @@ pub(super) fn sched_yield() -> SysResult {
     Ok(0)
 }
 
+/// `sched_getcpu()`: the CPU this thread runs on now (`td_oncpu`).
+pub(super) fn sched_getcpu() -> u64 {
+    u64::from(hal::cpu_id().0)
+}
+
 /// `sched_get_priority_max(policy)` and `sched_get_priority_min`: the
 /// POSIX range for `SCHED_FIFO` and `SCHED_RR` (FreeBSD's real-time
 /// priorities, 0 to 31 inverted), and for `SCHED_OTHER` 0 up to 15.1's

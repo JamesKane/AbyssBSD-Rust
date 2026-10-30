@@ -12,9 +12,11 @@ use alloc::sync::Arc;
 use abi::errno::Errno;
 use abi::event::{
     EFD_CLOEXEC, EFD_NONBLOCK, EFD_SEMAPHORE, ITIMER_PROF, Itimerspec, Itimerval, SIGEV_THREAD_ID,
-    SPECIALFD_EVENTFD, Sigevent, SpecialfdEventfd, TIMER_ABSTIME,
+    SPECIALFD_EVENTFD, SPECIALFD_INOTIFY, Sigevent, SpecialfdEventfd, SpecialfdInotify,
+    TIMER_ABSTIME,
 };
 use abi::fcntl::{FREAD, FWRITE, O_CLOEXEC, O_NONBLOCK};
+use abi::inotify::{IN_CLOEXEC, IN_NONBLOCK};
 use abi::time::{Timespec, Timeval, clock};
 use sched::Sleepable;
 
@@ -34,6 +36,8 @@ unsafe impl Plain for Itimerspec {}
 unsafe impl Plain for Sigevent {}
 // SAFETY: as above.
 unsafe impl Plain for SpecialfdEventfd {}
+// SAFETY: as above.
+unsafe impl Plain for SpecialfdInotify {}
 
 fn tv_ns(tv: &Timeval) -> u64 {
     tv.tv_sec
@@ -290,6 +294,28 @@ pub(super) fn specialfd(s: &Sleepable, ty: u64, req: u64, len: u64) -> SysResult
                     0
                 };
             install(s, FileKind::Eventfd(e), status, flags & EFD_CLOEXEC != 0)
+        }
+        // `inotify_create_file`.
+        SPECIALFD_INOTIFY => {
+            if len != size_of::<SpecialfdInotify>() as u64 {
+                return Err(Errno::EINVAL);
+            }
+            let ai = UserPtr::<SpecialfdInotify>::new(req)
+                .read()
+                .map_err(|_| Errno::EFAULT)?;
+            let flags = ai.flags.cast_unsigned();
+            if flags & !(IN_NONBLOCK | IN_CLOEXEC) != 0 {
+                return Err(Errno::EINVAL);
+            }
+            let c = process()?.cred();
+            let i = crate::fs::inotify::InotifyFile::new(c.ruid, c.rgid);
+            let status = FREAD
+                | if flags & IN_NONBLOCK != 0 {
+                    O_NONBLOCK
+                } else {
+                    0
+                };
+            install(s, FileKind::Inotify(i), status, flags & IN_CLOEXEC != 0)
         }
         _ => Err(Errno::EINVAL),
     }
