@@ -915,7 +915,8 @@ pub(crate) struct NewThread {
 
 impl NewThread {
     /// A process's first thread, made by the kernel: on `cpu` alone, if
-    /// given.
+    /// given. That is the kernel's placement, not a mask of the thread's
+    /// own: a change to its set replaces it.
     fn first(cpu: Option<hal::CpuId>) -> Self {
         Self {
             tls: [0; 2],
@@ -924,7 +925,7 @@ impl NewThread {
             fork_fpu: false,
             cpus: crate::uthread::Cpus {
                 mask: cpu.map_or(u64::MAX, |c| 1 << c.0),
-                own: cpu.is_some(),
+                own: false,
             },
             rtprio: crate::uthread::NORMAL,
             context: None,

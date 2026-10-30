@@ -311,7 +311,7 @@ pub struct Waiter<T: Thread> {
     /// On a queue (`UQF_UMTXQ`); changed under the chain lock, read by
     /// the sleeper without it.
     queued: AtomicBool,
-    /// Waiting for a busy chain, which its holder hands over.
+    /// Waiting for a busy chain to be free.
     busy_wait: AtomicBool,
     /// Priority-inheritance state, under [`Umtx::pi_lock`].
     pi: PreemptLock<pi::WaiterPi<T>>,
@@ -532,30 +532,30 @@ impl<T: Thread> Umtx<T> {
     /// (`umtxq_busy`); `g` is its lock, dropped while waiting and taken
     /// again.
     fn busy<'a, E: Env<T = T>>(&'a self, env: &E, key: &Key, mut g: Guard<'a, T>) -> Guard<'a, T> {
-        if !g.busy {
-            g.busy = true;
-            return g;
-        }
         let me = env.me();
-        me.busy_wait.store(true, Ordering::Release);
-        g.busy_waiters.push_back(me.clone());
-        drop(g);
-        // The holder hands the chain over, still busy, and clears the
-        // flag.
-        env.park(&|| !me.busy_wait.load(Ordering::Acquire));
-        self.lock(key)
+        while g.busy {
+            me.busy_wait.store(true, Ordering::Release);
+            g.busy_waiters.push_back(me.clone());
+            drop(g);
+            // Woken when the chain is no longer busy; another operation
+            // may take it first, as on FreeBSD.
+            env.park(&|| !me.busy_wait.load(Ordering::Acquire));
+            g = self.lock(key);
+        }
+        g.busy = true;
+        g
     }
 
-    /// Ends a busy period: hands the chain to the next operation waiting
-    /// for it, if any (`umtxq_unbusy`).
+    /// Ends a busy period and wakes the next operation waiting for the
+    /// chain, if any (`umtxq_unbusy`). The chain is not handed over: one
+    /// already running takes it at once, rather than every operation
+    /// after waiting for the woken thread to run.
     fn unbusy(g: &mut Guard<'_, T>) {
         debug_assert!(g.busy);
-        match g.busy_waiters.pop_front() {
-            Some(w) => {
-                w.busy_wait.store(false, Ordering::Release);
-                w.thread.unpark();
-            }
-            None => g.busy = false,
+        g.busy = false;
+        if let Some(w) = g.busy_waiters.pop_front() {
+            w.busy_wait.store(false, Ordering::Release);
+            w.thread.unpark();
         }
     }
 

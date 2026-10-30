@@ -1896,6 +1896,15 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
     FreeBSD's `devd` takes 1.7 s to start. Open diagnostics, as when each component was first
     measured: `thr.mutex.pi.t4` and `t8` (24x, 42x), `unix.stream.bw4k` and `bw64k` (4.2x,
     2.7x), `unix.rights` (2.0x), `kevent` on pipes (1.5x), and `thr.create` (1.38x).
+  - The first `exit/p6` CI run (2026-10-30) failed and brought three fixes. A CPU binding the
+    kernel gives a process at spawn is no longer the thread's own mask, which P6.10 had made it,
+    so `cpuset` replaces it again. A signal sent to a stopped process still asks its thread to
+    look at its signals on the way out (`signotify`), only without waking it: a thread that hit
+    a breakpoint while another's report stopped the process went back to user mode with its
+    `SIGTRAP` pending and trapped again (`ptrace__PT_CONTINUE_different_thread`, arm64). And a
+    busy umtx chain is no longer handed to its next waiter, still busy, but freed with the
+    waiter woken (`umtxq_unbusy`): `thr.mutex.pi.t4` went from 24x to about 6x; `t8` stays
+    about 38x, its cause still open.
 - Exit: the phase's exit criteria above, in CI on both arches, and every component within the
   bound in bhyve.
 

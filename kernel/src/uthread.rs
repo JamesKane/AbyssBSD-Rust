@@ -258,7 +258,7 @@ impl UserThread {
     }
 
     /// [`sched::Thread::poke`] on its scheduler thread, if it has one.
-    fn poke(&self, ast: u32) {
+    pub(crate) fn poke(&self, ast: u32) {
         if let Some(t) = self.sched() {
             t.poke(ast);
         }

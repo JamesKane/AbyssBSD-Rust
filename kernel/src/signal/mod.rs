@@ -917,18 +917,25 @@ fn send_as(
                     sigtd(p, sig)
                 }
             };
+            // The target looks at its signals on its way out
+            // (`signotify`); a stop keeps it asleep, but for a `SIGKILL`
+            // to a process not traced (`tdsendsignal`).
             let stopped = p.job.lock().stopped != 0;
-            let interrupt = target.filter(|t| {
-                !t.sig.lock().mask.has(sig) && (!stopped || (sig == SIGKILL && !traced))
-            });
-            (continued, interrupt)
+            let notify = target
+                .filter(|t| !t.sig.lock().mask.has(sig))
+                .map(|t| (t, !stopped || (sig == SIGKILL && !traced)));
+            (continued, notify)
         }
     };
     if continued {
         notify_parent(p, code::CLD_CONTINUED, SIGCONT.cast_signed());
     }
-    if let Some(t) = interrupt {
-        t.interrupt(AST_SIGNAL);
+    match interrupt {
+        Some((t, true)) => t.interrupt(AST_SIGNAL),
+        // Without this, a thread that traps while another stops the
+        // process would return to user mode with its signal pending.
+        Some((t, false)) => t.poke(AST_SIGNAL),
+        None => {}
     }
     Ok(())
 }
