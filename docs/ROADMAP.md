@@ -1878,6 +1878,11 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
   `tests/kyua/known-failures.txt`. `abi-check` covers every `#[repr(C)]` type in `lib/abi`
   (4804 assertions on amd64, 4717 on arm64) and fails on one it does not check. NMIs now print
   each CPU's backtrace and return, which is how the freeze was found.
+- Exit met 2026-10-30: `bin` 98.2%, `lib/libc` 97.6%, `sys/kern` 95.6% (388 of 406), `usr.bin`
+  98.5%, with no failure unlisted. The cpuset cases had not been racing: `cpuset_test:jail_nproc`
+  narrows its jail's root set, and with no root set of their own, jails narrowed set 1 for every
+  process after it. Jails now have root sets (`cpuset.id`), attaching rebases onto them, and a
+  thread's own mask is tracked apart from its set's, as `kern_cpuset.c` does with anonymous sets.
 
 **P6.11 Performance and exit.**
 - The P6 suite (MULTIUSER.md §16) in bhyve.

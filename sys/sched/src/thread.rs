@@ -634,6 +634,21 @@ impl Thread {
         self.interrupted.store(false, Ordering::SeqCst);
     }
 
+    /// Sets `ast` bits for the thread's next return to user mode, and makes
+    /// another CPU running it enter the kernel, without ending a sleep
+    /// (FreeBSD's `sched_affinity`, which leaves a sleeping thread to
+    /// choose its CPU when it wakes).
+    pub fn poke(&self, ast: u32) {
+        self.request_ast(ast);
+        let (state, cpu) = {
+            let inner = self.inner.lock();
+            (inner.state, inner.cpu)
+        };
+        if state == State::Running && cpu != hal::cpu_id() {
+            crate::platform().kick(cpu);
+        }
+    }
+
     /// Interrupts the thread (FreeBSD's `tdsignal` wakeup): sets `ast` bits
     /// and the interrupted flag, ends an interruptible sleep in progress,
     /// and makes another CPU running the thread enter the kernel, so the

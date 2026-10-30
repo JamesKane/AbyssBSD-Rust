@@ -210,7 +210,7 @@ fn create(
         sig: me.sig.lock().created(),
         // amd64 copies the creator's FP state; arm64 starts afresh.
         fork_fpu: cfg!(target_arch = "x86_64"),
-        cpus: me.cpus(),
+        cpus: me.affinity(),
         rtprio,
         context,
     };

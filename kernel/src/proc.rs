@@ -906,7 +906,7 @@ pub(crate) struct NewThread {
     /// one.
     pub(crate) fork_fpu: bool,
     /// The CPUs it may run on (its `cpuset`); bound if that is one.
-    pub(crate) cpus: u64,
+    pub(crate) cpus: crate::uthread::Cpus,
     /// Its class and priority.
     pub(crate) rtprio: abi::thr::Rtprio,
     /// A context it loads first (`thr_create`): FP state, a thread pointer.
@@ -922,7 +922,10 @@ impl NewThread {
             tls_base: None,
             sig: ThreadSignals::new(),
             fork_fpu: false,
-            cpus: cpu.map_or(u64::MAX, |c| 1 << c.0),
+            cpus: crate::uthread::Cpus {
+                mask: cpu.map_or(u64::MAX, |c| 1 << c.0),
+                own: cpu.is_some(),
+            },
             rtprio: crate::uthread::NORMAL,
             context: None,
         }
@@ -1214,11 +1217,11 @@ impl Process {
         mask
     }
 
-    /// Restricts every thread to the CPUs in `mask` (`cpuset_setaffinity`
+    /// Gives every thread `mask` as CPUs of its own (`cpuset_setaffinity`
     /// for a process).
-    pub(crate) fn set_cpus(&self, mask: u64) {
+    pub(crate) fn set_own_cpus(&self, mask: u64) {
         for t in self.threads() {
-            t.set_cpus(mask);
+            t.set_own_cpus(mask);
         }
     }
 
@@ -1575,7 +1578,7 @@ impl Process {
         } else {
             b.fpu()
         };
-        if let Some(cpu) = crate::uthread::bound(new.cpus) {
+        if let Some(cpu) = crate::uthread::bound(new.cpus.mask) {
             b = b.bind(cpu);
         }
         match b.spawn_raw(enter, arg) {
@@ -1728,8 +1731,15 @@ impl Process {
         let mut cf = *frame;
         arch_fork_return(&mut cf);
         let (sig, rtprio, cpus) =
-            UserThread::with_current(|t| (t.sig.lock().forked(), t.rtprio(), t.cpus()))
-                .unwrap_or((ThreadSignals::new(), crate::uthread::NORMAL, u64::MAX));
+            UserThread::with_current(|t| (t.sig.lock().forked(), t.rtprio(), t.affinity()))
+                .unwrap_or((
+                    ThreadSignals::new(),
+                    crate::uthread::NORMAL,
+                    crate::uthread::Cpus {
+                        mask: u64::MAX,
+                        own: false,
+                    },
+                ));
         let new = NewThread {
             tls: [hal::user::tls(), hal::user::tls2()],
             // The child's FS base is the parent's, but no TLS base is

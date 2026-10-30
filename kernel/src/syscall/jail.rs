@@ -854,6 +854,9 @@ fn attach(s: &Sleepable, p: &Arc<crate::proc::Process>, pr: &Arc<Prison>) -> Res
     }
     vfs::acl::access(s, &root, &p.cred(), vfs::ops::VEXEC)?;
     let old = prison::of(&p.cred());
+    // Under the jail's root CPU set before the credential changes, as
+    // `do_jail_attach`.
+    crate::cpuset::rebase(p, old.cpuset(), pr.cpuset())?;
     pr.proc_joined();
     p.change_cred(|c| Ok(prison::cred_in(c, pr)))?;
     let use_ref = root.use_ref();
@@ -1078,7 +1081,7 @@ fn get(
     opts.set_int("parent", parent).map_err(e)?;
     opts.set_str("name", pr.name_from(mypr).as_bytes())
         .map_err(e)?;
-    opts.set_int("cpuset.id", 0).map_err(e)?;
+    opts.set_int("cpuset.id", pr.cpuset()).map_err(e)?;
     opts.set_str("path", &pr.path_from(mypr)).map_err(e)?;
     opts.set_int("securelevel", st.securelevel).map_err(e)?;
     opts.set_int(

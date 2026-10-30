@@ -6,8 +6,9 @@ use core::sync::atomic::Ordering;
 
 use abi::errno::Errno;
 use abi::thr::{
-    CPU_LEVEL_CPUSET, CPU_LEVEL_ROOT, CPU_LEVEL_WHICH, CPU_WHICH_CPUSET, CPU_WHICH_PID,
-    CPU_WHICH_TID, CPU_WHICH_TIDPID, CPUSET_BYTES, EXTERRCTL_DISABLE, EXTERRCTL_ENABLE,
+    CPU_LEVEL_CPUSET, CPU_LEVEL_ROOT, CPU_LEVEL_WHICH, CPU_WHICH_CPUSET, CPU_WHICH_JAIL,
+    CPU_WHICH_PID, CPU_WHICH_TID, CPU_WHICH_TIDPID, CPUSET_BYTES, EXTERRCTL_DISABLE,
+    EXTERRCTL_ENABLE,
 };
 
 use alloc::sync::Arc;
@@ -124,15 +125,27 @@ impl Target {
     }
 }
 
-/// The numbered set `which` and `id` name: a set's id itself, or the set
-/// of the thread's or process's.
+/// The numbered set `which` and `id` name: a set's id itself, a jail's
+/// root set (a jail below the caller's), or the set of the thread's or
+/// process's.
 fn set_of(which: u64, id: u64) -> Result<i32, Errno> {
     if which == u64::from(CPU_WHICH_CPUSET) {
         let id = i32::try_from(id.cast_signed()).map_err(|_| Errno::ESRCH)?;
         crate::cpuset::mask(id)?;
         return Ok(id);
     }
+    if which == u64::from(CPU_WHICH_JAIL) {
+        let id = i32::try_from(id.cast_signed()).map_err(|_| Errno::ESRCH)?;
+        let pr = crate::prison::find_child(&crate::prison::current(), id).ok_or(Errno::ESRCH)?;
+        return Ok(pr.cpuset());
+    }
     Ok(Target::find(which, id)?.set())
+}
+
+/// Whether `which` names a numbered set rather than threads: a set or a
+/// jail's.
+fn names_set(which: u64) -> bool {
+    which == u64::from(CPU_WHICH_CPUSET) || which == u64::from(CPU_WHICH_JAIL)
 }
 
 /// The set at `level` above set `set`: itself, or its root.
@@ -210,7 +223,7 @@ fn check_capabilities(level: u32, which: u64, id: u64) -> Result<(), Errno> {
 
 /// `cpuset_getaffinity(level, which, id, setsize, mask)`: the CPUs a
 /// thread may run on, or a process's threads (the union); at the root and
-/// cpuset levels, every CPU (there is one set).
+/// cpuset levels, those of the numbered set named or its root.
 pub(super) fn cpuset_getaffinity(
     s: &sched::Sleepable,
     level: u64,
@@ -225,7 +238,7 @@ pub(super) fn cpuset_getaffinity(
         return Err(Errno::EINVAL);
     }
     check_capabilities(level, which, id)?;
-    let allowed = if level == CPU_LEVEL_WHICH && which != u64::from(CPU_WHICH_CPUSET) {
+    let allowed = if level == CPU_LEVEL_WHICH && !names_set(which) {
         Target::find(which, id)?.cpus()
     } else {
         crate::cpuset::mask(at_level(level, set_of(which, id)?))?
@@ -320,7 +333,7 @@ pub(super) fn cpuset_setaffinity(
     }
     // A numbered set (`cpuset_modify`), or a thread's or process's own
     // CPUs within its set.
-    if level != CPU_LEVEL_WHICH || which == u64::from(CPU_WHICH_CPUSET) {
+    if level != CPU_LEVEL_WHICH || names_set(which) {
         let set = at_level(level, set_of(which, id)?);
         crate::cpuset::modify(&*process()?, set, bits)?;
         return Ok(0);
@@ -332,8 +345,8 @@ pub(super) fn cpuset_setaffinity(
         return Err(Errno::EINVAL);
     }
     match target {
-        Target::Thread(t) => t.set_cpus(bits),
-        Target::Process(p) => p.set_cpus(bits),
+        Target::Thread(t) => t.set_own_cpus(bits),
+        Target::Process(p) => p.set_own_cpus(bits),
     }
     Ok(0)
 }

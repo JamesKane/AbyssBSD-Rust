@@ -38,15 +38,10 @@ sys/kern/sendfile_test:io_success                       # needs the gnop GEOM cl
 sys/kern/sendfile_test:unix_success                     # needs the gnop GEOM class (kldload geom_nop) and sendfile, P7
 sys/kern/exterr_test:gettext_extended                   # extended error strings (EXTERROR) are not reported yet
 sys/kern/ptrace_test:ptrace__PT_KILL_competing_stop     # SCHED_FIFO priorities on one CPU decide which thread runs first; the race goes the other way here
-sys/kern/ptrace_test:ptrace__PT_KILL_competing_signal   # SCHED_FIFO priorities on one CPU decide which thread runs first; the race goes the other way here
 sys/kern/sigwait:test_wait_dequeue_sigchld_true         # flaky in a parallel run: its _false twin sets the same global sysctl at the same time
 sys/kern/sigwait:test_sig_discard_ign_true              # flaky in a parallel run: its _false twin sets the same global sysctl at the same time
 sys/kern/timerfd:timerfd_root__zero_read_on_abs_realtime # flaky in a parallel run: other root cases step the realtime clock meanwhile
 sys/kern/timerfd:timerfd__missed_events                 # flaky in a parallel run: other root cases step the realtime clock meanwhile
-sys/kern/ptrace_test:ptrace__parent_terminate_with_pending_sigstop1 # flaky in a parallel run (a cpuset call fails; passes alone); cause not found yet
-sys/kern/ptrace_test:ptrace__parent_terminate_with_pending_sigstop2 # flaky in a parallel run (a cpuset call fails; passes alone); cause not found yet
-sys/kern/ktrace_test:ktrace__cap_cpuset                 # flaky in a parallel run (a cpuset call fails; passes alone); cause not found yet
-sys/kern/sched_affinity:test_setmaxsetsize              # flaky in a parallel run (a cpuset call fails; passes alone); cause not found yet
 lib/libc/sys/sendfile_test:fd_negative_bad_fd_v4        # sendfile, P7
 lib/libc/sys/sendfile_test:fd_negative_bad_fd_v6        # sendfile, P7
 lib/libc/sys/sendfile_test:fd_positive_file_v4          # sendfile, P7
@@ -72,12 +67,6 @@ lib/libc/sys/sendfile_test:sbytes_positive_v6           # sendfile, P7
 lib/libc/sys/brk_test:brk_basic                         # brk and sbrk are not implemented (ENOSYS)
 lib/libc/sys/brk_test:sbrk_basic                        # brk and sbrk are not implemented (ENOSYS)
 lib/libc/sys/brk_test:mlockfuture                       # brk and sbrk are not implemented (ENOSYS)
-lib/libc/sys/cpuset_test:jail_attach_disjoint           # jails have no cpusets of their own (compat-deviations: cpuset.id is 0)
-lib/libc/sys/cpuset_test:jail_attach_newbase            # jails have no cpusets of their own (compat-deviations: cpuset.id is 0)
-lib/libc/sys/cpuset_test:jail_attach_newbase_plain      # jails have no cpusets of their own (compat-deviations: cpuset.id is 0)
-lib/libc/sys/cpuset_test:jail_attach_plain              # jails have no cpusets of their own (compat-deviations: cpuset.id is 0)
-lib/libc/sys/cpuset_test:jail_attach_prevbase           # jails have no cpusets of their own (compat-deviations: cpuset.id is 0)
-lib/libc/sys/cpuset_test:transient                      # a set with no members is not destroyed, so cpuset_getid still finds it
 lib/libc/sys/getrusage_test:getrusage_err               # getrusage: an unknown who is not EINVAL, and RUSAGE_SELF fails here; not examined further
 lib/libc/sys/getrusage_test:getrusage_sig               # getrusage: an unknown who is not EINVAL, and RUSAGE_SELF fails here; not examined further
 lib/libc/sys/getrusage_test:getrusage_utime_back        # getrusage: an unknown who is not EINVAL, and RUSAGE_SELF fails here; not examined further

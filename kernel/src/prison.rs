@@ -122,6 +122,8 @@ pub(crate) struct Prison {
     procs: AtomicUsize,
     /// The jail descriptors naming it (`pr_descs`).
     descs: SpinLock<Vec<Arc<DescState>>>,
+    /// Its root CPU set (`pr_cpuset`): set 1 for prison0.
+    cpuset: i32,
 }
 
 impl Prison {
@@ -131,6 +133,11 @@ impl Prison {
 
     pub(crate) fn is_prison0(&self) -> bool {
         self.parent.is_none()
+    }
+
+    /// Its root CPU set's id (`cpuset.id`).
+    pub(crate) const fn cpuset(&self) -> i32 {
+        self.cpuset
     }
 
     /// A copy of its settings, with prison0's globals filled in.
@@ -534,6 +541,7 @@ pub(crate) fn prison0() -> &'static Arc<Prison> {
             }),
             procs: AtomicUsize::new(0),
             descs: SpinLock::new(Vec::new()),
+            cpuset: crate::cpuset::DEFAULT,
         }));
     }
     PRISON0.get().expect("prison0 set")
@@ -685,6 +693,7 @@ pub(crate) fn create(n: New) -> Arc<Prison> {
         }),
         procs: AtomicUsize::new(0),
         descs: SpinLock::new(Vec::new()),
+        cpuset: crate::cpuset::create_root(n.parent.cpuset()),
     });
     let mut jails = JAILS.lock();
     let at = jails

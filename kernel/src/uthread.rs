@@ -83,6 +83,15 @@ pub(crate) fn find(tid: i32) -> Option<Arc<UserThread>> {
     TIDS.lock().get(&tid)?.upgrade()
 }
 
+/// A thread's CPUs: `mask`, and whether they are its own (an anonymous
+/// set, `cpuset_setaffinity` at `CPU_LEVEL_WHICH`) rather than its
+/// numbered set's, which it follows.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Cpus {
+    pub(crate) mask: u64,
+    pub(crate) own: bool,
+}
+
 /// The CPU a thread with set `mask` is bound to: its one CPU, if it has
 /// one.
 pub(crate) fn bound(mask: u64) -> Option<hal::CpuId> {
@@ -145,6 +154,8 @@ pub(crate) struct UserThread {
     rtprio: SpinLock<Rtprio>,
     /// The CPUs it may run on, one bit each.
     cpus: AtomicU64,
+    /// They are its own, not its set's (see [`Cpus`]).
+    own_cpus: AtomicBool,
     /// The TLS base `sysarch(AMD64_SET_TLSBASE)` recorded, `u64::MAX` for
     /// none.
     tls_base: AtomicU64,
@@ -176,7 +187,7 @@ impl UserThread {
         name: Name,
         tls_base: Option<u64>,
         rtprio: Rtprio,
-        cpus: u64,
+        cpus: Cpus,
     ) -> Result<Arc<Self>, Errno> {
         let mut tid = Err(Errno::EAGAIN);
         let t = Arc::new_cyclic(|me| {
@@ -189,7 +200,8 @@ impl UserThread {
                 sig: SpinLock::new(sig),
                 name: SpinLock::new(name),
                 rtprio: SpinLock::new(rtprio),
-                cpus: AtomicU64::new(cpus),
+                cpus: AtomicU64::new(cpus.mask),
+                own_cpus: AtomicBool::new(cpus.own),
                 tls_base: AtomicU64::new(tls_base.unwrap_or(u64::MAX)),
                 woken: AtomicBool::new(false),
                 suspend_wait: WaitQueue::new(),
@@ -245,6 +257,13 @@ impl UserThread {
         }
     }
 
+    /// [`sched::Thread::poke`] on its scheduler thread, if it has one.
+    fn poke(&self, ast: u32) {
+        if let Some(t) = self.sched() {
+            t.poke(ast);
+        }
+    }
+
     pub(crate) fn name(&self) -> Name {
         *self.name.lock()
     }
@@ -256,6 +275,20 @@ impl UserThread {
     /// The CPUs it may run on, one bit each.
     pub(crate) fn cpus(&self) -> u64 {
         self.cpus.load(Ordering::Relaxed)
+    }
+
+    /// Its CPUs, and whether they are its own.
+    pub(crate) fn affinity(&self) -> Cpus {
+        Cpus {
+            mask: self.cpus(),
+            own: self.own_cpus.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Gives it CPUs of its own (`cpuset_setthread`, an anonymous set).
+    pub(crate) fn set_own_cpus(&self, mask: u64) {
+        self.own_cpus.store(true, Ordering::Relaxed);
+        self.set_cpus(mask);
     }
 
     /// The CPU it is bound to, if its set is one CPU (the scheduler binds
@@ -272,7 +305,7 @@ impl UserThread {
         if Self::with_current(|me| core::ptr::eq(me, self)) == Some(true) {
             sched::move_to(bound(mask));
         } else {
-            self.interrupt(crate::signal::AST_AFFINITY);
+            self.poke(crate::signal::AST_AFFINITY);
         }
     }
 
