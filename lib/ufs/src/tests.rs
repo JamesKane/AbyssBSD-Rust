@@ -100,7 +100,11 @@ pub(crate) fn have_makefs() -> bool {
 
 /// A scratch directory under the target directory, emptied.
 pub(crate) fn scratch(name: &str) -> std::path::PathBuf {
-    let d = std::env::temp_dir().join(std::format!("abyss-ufs-{name}-{}", std::process::id()));
+    // One per call: tests running at once may ask for the same name (the
+    // EA tests' blank images), and must not clear each other's.
+    static NEXT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    let n = NEXT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let d = std::env::temp_dir().join(std::format!("abyss-ufs-{name}-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
