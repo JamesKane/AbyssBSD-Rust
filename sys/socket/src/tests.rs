@@ -13,6 +13,10 @@ use abi::socket::{
 
 use crate::{Control, Cred, InFlight, Passable, Socket, Type, chain, gc, inflight};
 
+/// Held by the tests that put descriptors in flight: the count of them
+/// and the collector are the whole process's.
+static IN_FLIGHT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn cred() -> Cred {
     Cred {
         pid: 7,
@@ -220,6 +224,9 @@ impl Passable for File {
 
 #[test]
 fn collector_frees_a_socket_sent_to_itself() {
+    let _g = IN_FLIGHT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (a, b) = pair(Type::Stream);
     let fb: Arc<dyn Passable> = Arc::new(File(Arc::clone(&b)));
     let before = inflight();
@@ -239,6 +246,9 @@ fn collector_frees_a_socket_sent_to_itself() {
 
 #[test]
 fn control_only_sends_are_received_alone() {
+    let _g = IN_FLIGHT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (a, b) = pair(Type::Stream);
     let fb: Arc<dyn Passable> = Arc::new(File(Arc::clone(&a)));
     for _ in 0..2 {
