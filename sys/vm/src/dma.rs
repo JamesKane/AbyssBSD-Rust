@@ -7,7 +7,7 @@
 //!   boundary, segment size and count, coherency) and chooses a backend:
 //!   **direct** when the device reaches every byte of RAM, **bounce** when
 //!   it cannot (buffers out of its reach are copied through memory it can
-//!   reach). An IOMMU backend comes in P8.
+//!   reach). An IOMMU backend comes in P7.
 //! - [`DmaCoherent`] is memory shared for a binding's whole life (queues,
 //!   rings), allocated within the device's reach and accessed only through
 //!   volatile reads and writes of whole [`DeviceShared`] elements.

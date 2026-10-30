@@ -45,7 +45,7 @@ compatibility test suite.
     (UNIX), kqueue, `thr_*`, `_umtx_op`, `cap_*`, `procctl`, `jail_*`, `kenv`, `reboot`, `mount`
     family, `ptrace` (basic), `posix_openpt`, `utimensat`, `copy_file_range`, `__realpathat`, and
     related calls.
-  - **Tier C, network and daemons** (Phase 8): INET/INET6 sockets, `sendfile`, `sctp_*` →
+  - **Tier C, network and daemons** (Phase 7): INET/INET6 sockets, `sendfile`, `sctp_*` →
     `ENOSYS`, and `aio_*` as needed.
 
 ### 2.2 Data structure layouts

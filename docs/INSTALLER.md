@@ -210,7 +210,7 @@ mounts it on every later boot. It keeps the live session's settings and saved fi
 boots, and corpus captures. A stick with no spare space boots as before, with nothing kept.
 
 On new hardware, the medium is also how a board's ground truth is captured (`acpidump -dt`,
-`devinfo -rv`, `pciconf -lv`, EDIDs) into `tests/corpus/<board>/` (P7.0), onto `abyss-persist`.
+`devinfo -rv`, `pciconf -lv`, EDIDs) into `tests/corpus/<board>/` (P8.0), onto `abyss-persist`.
 
 ---
 

@@ -940,7 +940,7 @@ disk and iflib (S§13.3).
 | Class (crate) | Driver trait | Published as | User-visible names |
 |---|---|---|---|
 | storage (`sys/storage`) | `DiskQueues`: submit a batch of bios to a hardware queue, completion via the class's callback | GEOM-lite disk provider | `nda*`, `ada*`, `vtbd*`, plus partitions |
-| net (`sys/net`, P8) | `EtherQueues`: tx/rx queue pairs, offload capabilities, link state, filter programming (iflib-shaped) | `ifnet` | `vtnet*`, `re*`, `igc*`, … |
+| net (`sys/net`, P7) | `EtherQueues`: tx/rx queue pairs, offload capabilities, link state, filter programming (iflib-shaped) | `ifnet` | `vtnet*`, `re*`, `igc*`, … |
 | tty (`sys/tty`) | `UartHw`: line settings, tx/rx FIFOs, modem lines | tty | `ttyu*`, `cuau*` |
 | console | `ConsoleOut`, `ConsoleIn` | Kernel console | `/dev/console`, `ttyv*` (with fb) |
 | input (USB track) | `KbdSource`, `PointerSource` | kbd / evdev (FreeBSD's evdev ABI) | `/dev/kbd*`, `/dev/input/event*` |
@@ -1163,9 +1163,9 @@ formats, because `devd.conf` rules and `devmatch` match on them:
   full, and quoting follows `devctl_safe_quote_sb()`.
 - Notifications that devd's stock rules expect come from their owning subsystems: `ACPI` (power
   button, lid, AC adapter, thermal, and `notify=0x..` for ACPI `Notify`), `kernel power resume`,
-  `IFNET` link state (P8), `GEOM` (`DEV` create and destroy), `USB`, and `DEVFS` (`CDEV` create and
+  `IFNET` link state (P7), `GEOM` (`DEV` create and destroy), `USB`, and `DEVFS` (`CDEV` create and
   destroy).
-- devctl events also feed the netlink `nlsysevent` hook when netlink lands (P8), as in FreeBSD.
+- devctl events also feed the netlink `nlsysevent` hook when netlink lands (P7), as in FreeBSD.
 
 ### 11.4 `/dev/devctl2`
 
@@ -1218,7 +1218,7 @@ Rules for hot paths:
 - Generic code is monomorphized only where it pays off (the per-driver handler shims). Bus and
   manager code uses `&dyn` ([ENGINEERING.md §6](ENGINEERING.md#6-style-and-lints)).
 - MSI-X vectors per CPU or per cluster, so completions run where submissions did.
-- Polling mode (busy-poll and interrupt moderation) is a class feature for net (P8), not a driver
+- Polling mode (busy-poll and interrupt moderation) is a class feature for net (P7), not a driver
   rewrite.
 
 The P3 suite already measures interrupt latency and block IOPS and latency through virtio-blk and
@@ -1339,8 +1339,8 @@ These are not Day-1 work. The design keeps room for them so they do not need a n
 | **P5** | The storage class grows GEOM-lite partition providers and FreeBSD disk naming |
 | **USB track** | USB bus, hubs, surprise removal, threaded-only GPIO interrupt domains on arm64 (GED's arrives in P3), input class |
 | **P6** | `/dev/devctl2`, `/dev/pci`, devd running on stock rules, `devinfo`/`devctl`/`pciconf` differential tests. Device reset and rebind. IRQ affinity through `cpuset` |
-| **P7** | Board bring-up: the platform description (§5.5) with the Sky1 entries (the Q8B's are Tier 2, best effort), the Order and Power edge kinds and the new edge sources (§6.1), the `Clock`, `Reset`, and `PowerDomain` provider traits with their first providers (§8.5, §9.3), `PciFunction::acpi_companion`, firmware-shared and declared-shared ranges (§8.1), and the firmware store (§8.6) if a P7 driver needs an image |
-| **P8** | Net class (queue pairs, offloads), virtio-net, e1000e, igc, rge. `miibus` and PHY drivers as a child bus of the MAC. Driver-published IRQ domains (§8.3) |
+| **P7** | Net class (queue pairs, offloads), virtio-net. `miibus` and PHY drivers as a child bus of the MAC. Driver-published IRQ domains (§8.3) |
+| **P8** | Board bring-up: the platform description (§5.5) with the Sky1 entries (the Q8B's are Tier 2, best effort), the Order and Power edge kinds and the new edge sources (§6.1), the `Clock`, `Reset`, and `PowerDomain` provider traits with their first providers (§8.5, §9.3), `PciFunction::acpi_companion`, firmware-shared and declared-shared ranges (§8.1), and the firmware store (§8.6) if a P8 driver needs an image. The physical machines' NICs: e1000e, igc, rge |
 | **P9** | IOMMU backends (VT-d, AMD-Vi, SMMUv3, and SMMUv2 for the SC8280XP) and interrupt remapping. IORT, DMAR, and IVRS dependency edges. Suspend and resume (stretch), wake interrupts. Runtime PM (§8.5). `PerfDomain` and `Interconnect` providers. Firmware calls and the secure-monitor provider (§8.7). PCIe hotplug |
 | **M-G** | Display and GPU classes. Function children and aggregates in anger: synthetic aggregate nodes, `Phy` lane leasing, Type-C events. Device-walked page tables, shared buffers, and fences (§8.4, §17) |
 

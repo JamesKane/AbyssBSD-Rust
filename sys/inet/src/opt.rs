@@ -301,7 +301,7 @@ impl Socket {
                 self.inner.lock().ip.mif = a;
                 Ok(())
             }
-            // Loopback joins no groups (P8 brings multicast).
+            // Loopback joins no groups (P7 brings multicast).
             ip::IP_ADD_MEMBERSHIP | ip::IP_DROP_MEMBERSHIP => Err(Errno::EADDRNOTAVAIL),
             _ => Err(Errno::ENOPROTOOPT),
         }

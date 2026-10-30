@@ -14,7 +14,7 @@
 //! ICMP port unreachable on a connected UDP socket, half-close, resets,
 //! `TIME_WAIT` holding a port, the listen queue's limit, urgent data) is
 //! FreeBSD's. There is no wire format, retransmission, or congestion
-//! control; those are P8's, with the interfaces that need them.
+//! control; those are P7's, with the interfaces that need them.
 //!
 //! As the UNIX-domain crate does, this one holds state only: the kernel
 //! copies user memory and sleeps. An operation that would block returns

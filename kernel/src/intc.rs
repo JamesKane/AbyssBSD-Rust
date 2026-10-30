@@ -457,7 +457,7 @@ struct LapicMsi;
 impl pci::msi::MsiPlatform for LapicMsi {
     fn compose(&self, _: pci::PciAddress, cpu: CpuId) -> Option<(u64, u32, u32)> {
         // The address holds an 8-bit destination; larger APIC IDs need
-        // interrupt remapping (P8).
+        // interrupt remapping (P7).
         let dest = u8::try_from(hw_id(cpu)?).ok()?;
         let vector = ::irq::alloc_vector(cpu)?;
         Some((0xfee0_0000 | (u64::from(dest) << 12), vector, vector))

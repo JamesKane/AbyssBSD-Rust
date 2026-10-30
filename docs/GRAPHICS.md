@@ -365,8 +365,8 @@ GPU is an NVIDIA RTX 4070, and its CPU has an RDNA2 iGPU.
 
 | Need | Where |
 |---|---|
-| Firmware store (GPU firmware by GPU ID) | DRIVER-MODEL.md §8.6 (P7) |
-| Clock, reset, power, and SCMI providers; the platform description | DRIVER-MODEL.md §5.5, §8.5, §9.3 (P7) |
+| Firmware store (GPU firmware by GPU ID) | DRIVER-MODEL.md §8.6 (P8) |
+| Clock, reset, power, and SCMI providers; the platform description | DRIVER-MODEL.md §5.5, §8.5, §9.3 (P8) |
 | Runtime PM with driver-held `PowerRef` | DRIVER-MODEL.md §8.5 (P9) |
 | `PerfDomain` (GPU DVFS) and thermal capping | DRIVER-MODEL.md §9.3 (P9) |
 | IOMMU backends (SMMUv3, SMMUv2) and device address spaces | DRIVER-MODEL.md §8.4 (P9) |

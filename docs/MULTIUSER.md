@@ -31,18 +31,18 @@ what userland sees, not the source of the code ([ADR-0007](adr/0007-license-and-
   lacks, so the long tail is a list worked down, not a surprise. The kyua suite runs nightly
   against FreeBSD's results.
 - **The physical machines follow.** P6 gates in QEMU and bhyve. The X870E and the Orange Pi 6 Plus
-  join in P7 (board bring-up), with the USB track's hardware half, and every performance suite then
+  join in P8 (board bring-up), with the USB track's hardware half, and every performance suite then
   holds on bare metal ([ADR-0010](adr/0010-qemu-first-development.md)).
 - **Performance parity** for the P6 components (§16).
 
 ### 1.2 Non-goals for Phase 6
 
 - Networking beyond loopback. `AF_INET` and `AF_INET6` UDP and TCP sockets work between local
-  addresses over `lo0` (§8.4), brought forward from P8 because stock `rc.conf` runs `syslogd -s`,
+  addresses over `lo0` (§8.4), brought forward from P7 because stock `rc.conf` runs `syslogd -s`,
   whose `getaddrinfo(NULL, "syslog", AI_PASSIVE)` fails without them and makes it exit. Interfaces
   other than `lo0`, packets on a wire (Ethernet, ARP, ND, ICMP, IP forwarding), raw sockets, the
   TCP of RFC 9293 (segments, retransmission, congestion control), multicast, firewalls, routing
-  sockets, and generic netlink families stay P8.
+  sockets, and generic netlink families stay P7.
 - The MAC framework, `audit`, and `rctl`/`racct`: their system calls answer as on a kernel without
   those options (`ENOSYS`, or `kern.racct.enable=0`), which base copes with.
 - VNET jails, jail descriptors (`jail_attach_jd`), and hierarchical jail resource limits.
@@ -50,7 +50,7 @@ what userland sees, not the source of the code ([ADR-0007](adr/0007-license-and-
   device, as on a machine without one.
 - Linux and 32-bit ABIs (permanent, [COMPATIBILITY.md §1](COMPATIBILITY.md#1-target)).
 - POSIX AIO beyond what the base boot and kyua's `lib/libc` need; `EVFILT_AIO`, `EVFILT_LIO`,
-  `EVFILT_SENDFILE` (P8, with `sendfile`), `inotify` (16-CURRENT only, outside the 15.x ABI).
+  `EVFILT_SENDFILE` (P7, with `sendfile`), `inotify` (16-CURRENT only, outside the 15.x ABI).
 
 ## 2. Principles
 
@@ -70,7 +70,7 @@ what userland sees, not the source of the code ([ADR-0007](adr/0007-license-and-
 4. **Rights are types at the descriptor boundary.** A descriptor lookup states the Capsicum rights
    it needs, and fails with `ENOTCAPABLE` before a file is in hand (§10.3). Privilege is a typed
    `priv_check`, never `euid == 0` (§10.1).
-5. **The socket layer is protocol-neutral.** UNIX domain is its first protocol; P8's are its next.
+5. **The socket layer is protocol-neutral.** UNIX domain is its first protocol; P7's are its next.
    Nothing UNIX-specific lives in the socket or socket-buffer code (§8).
 6. **Host-testable cores.** The parts with tricky state (umtx queues and priority inheritance,
    knote state, socket buffers and the rights collector, Capsicum rights algebra, the jail tree,
@@ -152,7 +152,7 @@ FreeBSD's `thread_single` with its modes, as one operation:
   stay.
 - arm64: `TPIDR_EL0` is saved and restored per thread (EL0 writes it directly); `TPIDRRO_EL0` is 0.
 - The arm64 SVE signal context ([compat-deviations.md](compat-deviations.md)) lands with threads
-  (P6.2), well before the Orange Pi 6 Plus is brought up (P7), since its cores have SVE2.
+  (P6.2), well before the Orange Pi 6 Plus is brought up (P8), since its cores have SVE2.
 
 ### 4.6 Limits and accounting
 
@@ -338,7 +338,7 @@ past `RLIMIT_NOFILE` truncates with `MSG_CTRUNC`, as FreeBSD does.
 
 ### 8.4 Internet sockets over loopback
 
-A slice of P8, brought forward for `rc`'s daemons (§1.2), in `sys/inet` with the kernel's glue in
+A slice of P7, brought forward for `rc`'s daemons (§1.2), in `sys/inet` with the kernel's glue in
 `kernel/src/fs/inet.rs`, `kernel/src/syscall/inet.rs`, and `kernel/src/net/`.
 
 - **Sockets.** `AF_INET` and `AF_INET6`, `SOCK_DGRAM` (UDP) and `SOCK_STREAM` (TCP), each with a
@@ -590,13 +590,13 @@ check fails.
 - **Compat.** kyua's suite runs nightly in bhyve, per test case, against FreeBSD 15.1's results in
   the same VM, with every expected failure listed with a reason in `tests/kyua/known-failures.txt`.
   Not under QEMU: emulated, the suite takes days, and its timing-sensitive tests measure the
-  emulator. arm64's results come from the Orange Pi 6 Plus once it runs AbyssBSD (P7), against
+  emulator. arm64's results come from the Orange Pi 6 Plus once it runs AbyssBSD (P8), against
   FreeBSD on the same board.
 - **Differential.** Programs and their `ktrace`/`kdump` traces on AbyssBSD and FreeBSD.
 
 ## 15. Hardware bring-up
 
-The physical machines are brought up in P7, the phase after this one, and gate from then on
+The physical machines are brought up in P8, after networking (P7), and gate from then on
 ([ADR-0010](adr/0010-qemu-first-development.md)). This section records what P6 prepares for it. They are
 touched only after P6.9 (FreeBSD userland end to end in QEMU), and every root step on them goes
 through a script the user runs.

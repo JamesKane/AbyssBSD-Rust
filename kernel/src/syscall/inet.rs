@@ -38,7 +38,7 @@ fn proto(ty: u32, protocol: i32) -> Result<Proto, Errno> {
     match (ty, protocol) {
         (SOCK_STREAM, 0 | IPPROTO_TCP) => Ok(Proto::Tcp),
         (SOCK_DGRAM, 0 | IPPROTO_UDP) => Ok(Proto::Udp),
-        // No raw IP, SCTP, or UDP-Lite on loopback yet (P8).
+        // No raw IP, SCTP, or UDP-Lite on loopback yet (P7).
         (abi::inet::SOCK_RAW, _) => Err(Errno::EPROTONOSUPPORT),
         (SOCK_SEQPACKET, 0) => Err(Errno::EPROTOTYPE),
         (SOCK_STREAM | SOCK_DGRAM | SOCK_SEQPACKET, _) => Err(Errno::EPROTONOSUPPORT),

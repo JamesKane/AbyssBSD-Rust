@@ -90,8 +90,8 @@ check that it is in place for this program.
 | **nullfs** (`ro`, `nosuid`) | `abyss-jaild` mounts the session's directories into jails | VFS.md non-goal today; add to P6.10 or a VFS follow-up before M-D.1 |
 | **MAC framework with `mac_priority`** (the `realtime` group may use `rtprio`) | Real-time compositor thread for an unprivileged user | MULTIUSER.md answers "no MAC"; add the framework's hooks `mac_priority` uses, before M-D.2 |
 | **`sound(4)`**: OSS `/dev/dsp` and `/dev/mixer`, `sndstat` (`SNDSTIOC_*`, nvlist), `hw.snd.default_unit`, `snd_dummy` | Sound pane, volume keys, Firefox (cubeb's OSS backend), harness | No audio plan exists. `snd_dummy` and the sound core before M-D.1's sound lanes; HDA and USB audio before M-D.4 |
-| **ACPI sleep and buttons**: `acpiconf -s 3` (S3), `hw.acpi.supported_sleep_state`, `hw.acpi.power_button_state`, lid and button devd notifies, `hw.acpi.battery.*` | Power, lid, Sleep menu item | P9 power management; the sysctls and notifies earlier (P7) |
-| **Networking for the desktop**: `getifaddrs` with `AF_LINK`, `PF_ROUTE` sockets, `wlan(4)`, `wpa_supplicant`, `ifconfig wlanN create` | Network pane, Wi-Fi, Firefox | P8; Wi-Fi drivers after P8 |
+| **ACPI sleep and buttons**: `acpiconf -s 3` (S3), `hw.acpi.supported_sleep_state`, `hw.acpi.power_button_state`, lid and button devd notifies, `hw.acpi.battery.*` | Power, lid, Sleep menu item | P9 power management; the sysctls and notifies earlier (P8) |
+| **Networking for the desktop**: `getifaddrs` with `AF_LINK`, `PF_ROUTE` sockets, `wlan(4)`, `wpa_supplicant`, `ifconfig wlanN create` | Network pane, Wi-Fi, Firefox | P7; Wi-Fi drivers after P7 |
 | **ZFS**: `zpool`, `zfs`, boot environments, `zfs snapshot/rollback` | Installer default layout, Disk Utility, `abyss update` | M-Z |
 | **GELI** (`geom_eli`, keys from the loader's boot key buffer) | Encrypted installs: one password for disk and login (INSTALLER.md §3.4) | Not scheduled; before M-D.5's encrypted installs |
 | **GEOM tools**: `geom disk list`, `gpart`, `newfs_msdos`, `mdconfig` | Installer, harness | Partly in progress (`geom_kern`); finish before M-D.5 |
@@ -147,8 +147,8 @@ read Linux's `/sys/class/drm` and `/proc`) are not counted until they have a Fre
 ### 5.2 Running it without a network
 
 `run.sh --vm` copies the tree into its guest with rsync over ssh, and AbyssBSD has no networking
-until P8. Until then `xtask` builds an image with the packages and the test tree already in it,
-and drives the lanes from the serial console, as `xtask multiuser` drives the P6 tests. After P8,
+until P7. Until then `xtask` builds an image with the packages and the test tree already in it,
+and drives the lanes from the serial console, as `xtask multiuser` drives the P6 tests. After P7,
 the `--vm` path is used as it is.
 
 ### 5.3 The `--full` lanes
@@ -222,8 +222,8 @@ Changes to the desktop are made in the monorepo (ADR-0018 rule 4). This plan nee
 |---|---|---|---|
 | **M-D.0** | The desktop's 15.1 packages (§8 ask 1); `xtask` image with the packages and test tree (§5.2); FreeBSD 15.1's results for every lane recorded | P6 | The FreeBSD 15.1 baseline is recorded in `tests/desktop/` |
 | **M-D.1** | Headless: nullfs, `snd_dummy` and the `sound(4)` core, whatever the lanes find | P6 exit | Every `--live` lane passes as on FreeBSD 15.1, or is listed; `desk` (headless) within 2% in bhyve |
-| **M-D.2** | First light: `undertow` on `gop-kms`, seatd, MAC with `mac_priority`, libinput on evdev, the login window | M-G.1, P7 | The desktop is used with a real keyboard and mouse in QEMU and on the X870E and Orange Pi 6 Plus framebuffers (the latter on arm64 packages, §8 ask 5) |
-| **M-D.3** | Accelerated in QEMU: dma-buf, syncobj, `undertow` on wlroots' Vulkan renderer over Venus (§8 ask 6); Firefox; network lanes | M-G.2, M-G.3, P8 | `undertow` composites on Venus in QEMU with explicit sync; Firefox renders a page under it (WebRender on Zink, or software, recorded); the network lanes pass |
+| **M-D.2** | First light: `undertow` on `gop-kms`, seatd, MAC with `mac_priority`, libinput on evdev, the login window | M-G.1, P8 | The desktop is used with a real keyboard and mouse in QEMU and on the X870E and Orange Pi 6 Plus framebuffers (the latter on arm64 packages, §8 ask 5) |
+| **M-D.3** | Accelerated in QEMU: dma-buf, syncobj, `undertow` on wlroots' Vulkan renderer over Venus (§8 ask 6); Firefox; network lanes | M-G.2, M-G.3, P7 | `undertow` composites on Venus in QEMU with explicit sync; Firefox renders a page under it (WebRender on Zink, or software, recorded); the network lanes pass |
 | **M-D.4** | Metal: native RDNA2, HDA audio, S3 and lid | M-G.6, audio, P9 | `desk` (metal) within 2% of FreeBSD with `drm-kmod` on the same machine (the X870E, and the Z690-A from USB); the desktop's C1 holds |
 | **M-D.5** | Installed: the desktop's medium boots this kernel, `abyss-install` installs it (UFS before M-Z, ZFS with boot environments after) | INSTALLER.md I.1–I.3; M-Z for ZFS | The `--full` scenarios pass as QEMU boots (§5.3), and an install to the X870E's second NVMe, and to the Z690-A's spare NVMe once fitted, boots to the desktop |
 | **M-D.6** | arm64: the Orange Pi 6 Plus with accelerated graphics | M-G.4, M-G.5 | The headless lanes on arm64 in QEMU, and the desktop on the board with `panthor` |
