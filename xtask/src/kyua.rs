@@ -78,6 +78,10 @@ fn rc_local() -> String {
     format!(
         r#"#!/bin/sh
 # cargo xtask kyua: run kyua's suite one directory at a time.
+# The packages' programs (python3, jq, ...) are in /usr/local, which rc's
+# PATH leaves out.
+PATH=$PATH:/usr/local/sbin:/usr/local/bin
+export PATH
 out=/{GUEST_DIR}
 mkdir -p $out
 cd /usr/tests || exit 1
@@ -150,9 +154,40 @@ shutdown -p now
 
 /// The loader settings beyond FreeBSD's multi-user image's: a panic
 /// reboots at once, without entering the debugger, so the harness can
-/// carry on. (AbyssBSD's kernel halts, and the harness sees the panic.)
+/// carry on (AbyssBSD's kernel halts, and the harness sees the panic);
+/// and FreeBSD's CI's three FIBs ([`FIBS`]).
 const LOADER_CONF: &str = "debug.debugger_on_panic=\"0\"\n\
-                           kern.panic_reboot_wait_time=\"0\"\n";
+                           kern.panic_reboot_wait_time=\"0\"\n\
+                           net.fibs=\"3\"\n";
+
+/// The test environment of FreeBSD's own CI (`tests/ci/tools/ci.conf` in
+/// its tree), on both systems: routing tables 1 and 2 for the tests (the
+/// kernel's `net.fibs`, from the loader on FreeBSD and the command line on
+/// AbyssBSD), tests that change sysctls allowed, and the `ci` property,
+/// with which tests known to be unreliable there skip themselves.
+const FIBS: &str = "net.fibs=3";
+const KYUA_CONF: &str = "test_suites.FreeBSD.ci = 'true'\n\
+                         test_suites.FreeBSD.fibs = '1 2'\n\
+                         test_suites.FreeBSD.allow_sysctl_side_effects = '1'\n";
+
+/// Of the modules FreeBSD's CI loads for the tests (its `kld_list`), those
+/// of P7's scope: `epair`, which the network tests build their topologies
+/// from, and which kyua's `required_kmods` wants loaded before a test.
+const RC_CONF: &str = "kld_list=\"if_epair\"\n";
+
+/// The packages of FreeBSD's CI that tests in P7's directories need
+/// (Python with `pytest`, `scapy`, and `dpkt`; `jq`; `ndisc6`), installed
+/// into both systems' roots. Fetched once with their dependencies and kept
+/// ([`packages`]), so every run, on either system, has the same builds.
+const PACKAGES: &[&str] = &[
+    "python",
+    "python3",
+    "py312-pytest",
+    "py312-scapy",
+    "py312-dpkt",
+    "jq",
+    "ndisc6",
+];
 
 /// What AbyssBSD's kernel prints when it panics (Rust's panic message
 /// follows `panic: `) or takes a fatal trap. Matched without the newline
@@ -209,14 +244,20 @@ fn home() -> PathBuf {
     std::env::var_os("HOME").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from)
 }
 
-/// `cargo xtask --remote kyua-baseline [--resume]`. `--resume` carries on
-/// with the last run's disk: it boots it again if the suite is not done,
-/// then collects. Results go to
+/// `cargo xtask --remote kyua-baseline [--resume] [--only DIR,...]`.
+/// `--resume` carries on with the last run's disk: it boots it again if
+/// the suite is not done, then collects. Results go to
 /// `~/abyss/kyua/freebsd-<release>-x86_64-bhyve.txt` on the server
 /// (outside the mirrored tree, which a sync would delete), to be copied
-/// into `tests/kyua/freebsd/`.
+/// into `tests/kyua/freebsd/`. `--only`, as for `kyua`, runs part of the
+/// suite, into `...-bhyve-only.txt`: for checking the harness, not a
+/// baseline.
 pub(crate) fn cmd_kyua_baseline(mut args: Args) -> Result<()> {
     let resume = args.take_flag("--resume");
+    let only: Vec<String> = args
+        .take_value("--only")?
+        .map(|v| v.split(',').map(str::to_owned).collect())
+        .unwrap_or_default();
     args.finish()?;
     if !cfg!(target_os = "freebsd") {
         return Err("kyua-baseline needs the build server (bhyve, mdconfig)".into());
@@ -226,13 +267,14 @@ pub(crate) fn cmd_kyua_baseline(mut args: Args) -> Result<()> {
     }
     let results = home().join("abyss/kyua");
     fs::create_dir_all(&results)?;
-    let out = results.join(format!("freebsd-{RELEASE}-{MACHINE}.txt"));
+    let part = if only.is_empty() { "" } else { "-only" };
+    let out = results.join(format!("freebsd-{RELEASE}-{MACHINE}{part}.txt"));
     let fresh = || -> Result<PathBuf> {
         let (image, _) = crate::perf::freebsd_multiuser_image(Arch::X86_64)?;
         Ok(image)
     };
     let work = results.join(MACHINE);
-    run(System::FreeBsd, &work, &out, resume, &[], &fresh)?;
+    run(System::FreeBsd, &work, &out, resume, &only, &fresh)?;
     println!("kyua-baseline: results in {}", out.display());
     Ok(())
 }
@@ -265,7 +307,11 @@ pub(crate) fn cmd_kyua(mut args: Args) -> Result<()> {
             release: false,
             ktest: false,
         };
-        crate::image::build_kyua_root(Arch::X86_64, opts, "boot_multicons=YES boot_serial=YES")
+        crate::image::build_kyua_root(
+            Arch::X86_64,
+            opts,
+            &format!("boot_multicons=YES boot_serial=YES {FIBS}"),
+        )
     };
     let work = results.join(format!("abyss-{MACHINE}"));
     run(System::Abyss, &work, &out, resume, &only, &fresh)?;
@@ -297,6 +343,7 @@ fn run(
     let mnt = work.join("mnt");
     let results = |root: &Path| root.join(GUEST_DIR);
     let mut done = false;
+    let packages = packages()?;
     if resume && disk.exists() {
         crate::perf::mounted_root(&disk, &mnt, |root| {
             done = results(root).join("end").exists();
@@ -323,6 +370,11 @@ fn run(
                 let loader = fs::read_to_string(&conf)? + LOADER_CONF;
                 files.push(("boot/loader.conf.local", 0o644, loader.into_bytes()));
             }
+            let conf = fs::read_to_string(root.join("etc/kyua/kyua.conf"))? + KYUA_CONF;
+            files.push(("etc/kyua/kyua.conf", 0o644, conf.into_bytes()));
+            let rc = fs::read_to_string(root.join("etc/rc.conf"))? + RC_CONF;
+            files.push(("etc/rc.conf", 0o644, rc.into_bytes()));
+            install_packages(root, &packages)?;
             let list = only.join("\n") + "\n";
             let only_txt = format!("{GUEST_DIR}/only.txt");
             if !only.is_empty() {
@@ -402,7 +454,12 @@ fn run(
     let _ = fs::remove_dir_all(&details);
     fs::create_dir_all(&details)?;
     crate::perf::mounted_root(&disk, &mnt, |root| {
-        text = collect(&results(root), &system.name(), started.elapsed())?;
+        text = collect(
+            &results(root),
+            &system.name(),
+            started.elapsed(),
+            &package_names(&packages)?,
+        )?;
         for e in fs::read_dir(results(root))? {
             let p = e?.path();
             if p.extension().is_some_and(|x| x == "failed")
@@ -414,6 +471,89 @@ fn run(
         Ok(())
     })?;
     fs::write(out, text)?;
+    Ok(())
+}
+
+/// The directory of [`PACKAGES`] and their dependencies as
+/// `<name>-<version>.pkg`, fetched from the server's repository the first
+/// time and kept.
+fn packages() -> Result<PathBuf> {
+    let dir = home().join("abyss/kyua/packages");
+    let mark = dir.join(".fetched");
+    if fs::read_to_string(&mark).is_ok_and(|m| m == PACKAGES.join(" ")) {
+        return Ok(dir);
+    }
+    let tmp = dir.with_extension("tmp");
+    let _ = crate::perf::doas(&["rm", "-rf", &tmp.to_string_lossy(), &dir.to_string_lossy()]);
+    fs::create_dir_all(&tmp)?;
+    let mut fetch = vec!["pkg", "fetch", "-d", "-y", "-o"];
+    let tmp_name = tmp.to_string_lossy().into_owned();
+    fetch.push(&tmp_name);
+    fetch.extend_from_slice(PACKAGES);
+    crate::perf::doas(&fetch)?;
+    fs::create_dir_all(&dir)?;
+    // `pkg fetch` names them `<name>-<version>~<hash>.pkg`; `pkg add`
+    // finds a package's dependencies beside it by name and version.
+    let found = crate::util::output(
+        std::process::Command::new("find")
+            .arg(&tmp)
+            .args(["-name", "*.pkg"]),
+    )?;
+    for path in found.lines() {
+        let file = Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or("odd package name")?;
+        let name = file.split_once('~').map_or(file, |(n, _)| n);
+        let name = name.strip_suffix(".pkg").unwrap_or(name);
+        fs::copy(path, dir.join(format!("{name}.pkg")))?;
+    }
+    let _ = crate::perf::doas(&["rm", "-rf", &tmp_name]);
+    fs::write(&mark, PACKAGES.join(" "))?;
+    Ok(dir)
+}
+
+/// The packages in `dir`, as `<name>-<version>`, sorted: for the results'
+/// header.
+fn package_names(dir: &Path) -> Result<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            e.file_name()
+                .to_str()?
+                .strip_suffix(".pkg")
+                .map(str::to_owned)
+        })
+        .collect();
+    names.sort();
+    Ok(names.join(" "))
+}
+
+/// Installs [`PACKAGES`], with their dependencies, from `dir` into the
+/// root mounted at `root`.
+fn install_packages(root: &Path, dir: &Path) -> Result<()> {
+    let files: Vec<PathBuf> = fs::read_dir(dir)?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .collect();
+    for name in PACKAGES {
+        let prefix = format!("{name}-");
+        let file = files
+            .iter()
+            .find(|f| {
+                f.file_name()
+                    .and_then(|n| n.to_str())
+                    .and_then(|n| n.strip_prefix(&prefix))
+                    .is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit()))
+            })
+            .ok_or_else(|| format!("no {name} package in {}", dir.display()))?;
+        crate::perf::doas(&[
+            "pkg",
+            "-r",
+            &root.to_string_lossy(),
+            "add",
+            &file.to_string_lossy(),
+        ])?;
+    }
     Ok(())
 }
 
@@ -458,7 +598,7 @@ fn in_chunk(case: &str, chunk: &str) -> bool {
 }
 
 /// Reads the guest's reports in `dir` into the results file's text.
-fn collect(dir: &Path, system: &str, wall: Duration) -> Result<String> {
+fn collect(dir: &Path, system: &str, wall: Duration, packages: &str) -> Result<String> {
     let read = |name: &str| fs::read_to_string(dir.join(name)).unwrap_or_default();
     let listed: Vec<String> = read("list.txt")
         .lines()
@@ -511,6 +651,7 @@ fn collect(dir: &Path, system: &str, wall: Duration) -> Result<String> {
     );
     let summary: Vec<String> = counts.iter().map(|(r, n)| format!("{r} {n}")).collect();
     let _ = writeln!(text, "# {}", summary.join(", "));
+    let _ = writeln!(text, "# packages: {packages}");
     let _ = writeln!(
         text,
         "# wall time: suite {} s, harness {} s",

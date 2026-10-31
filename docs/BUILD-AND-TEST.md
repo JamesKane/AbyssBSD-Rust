@@ -101,7 +101,7 @@ cargo xtask --remote freebsd-multiuser             # the multi-user login script
 cargo xtask --remote freebsd-net [--vmm qemu|bhyve]  # the network script against FreeBSD
 cargo xtask --remote netdiff [--freebsd] [--scenario NAME]  # packet captures vs FreeBSD's
 cargo xtask --remote freebsd-usertests             # tests/user on FreeBSD 15.1 itself, either arch
-cargo xtask --remote kyua-baseline [--resume]      # FreeBSD's kyua results, per test case, in bhyve
+cargo xtask --remote kyua-baseline [--resume] [--only DIR,...]  # FreeBSD's kyua results, per test case, in bhyve
 cargo xtask --remote kyua [--resume] [--only DIR,...]  # AbyssBSD's, compared with them
 ```
 
@@ -299,7 +299,13 @@ copy the traces into `tests/net/freebsd/`), and `--scenario NAME` runs one. Unti
 `vtnet0` (P7.3) its run fails at the addresses.
 
 `cargo xtask --remote kyua-baseline` records FreeBSD 15.1's own kyua results in bhyve, where
-AbyssBSD's are compared (8 CPUs, `parallelism=8`). Not under QEMU: emulated, the suite takes days
+AbyssBSD's are compared (8 CPUs, `parallelism=8`). Both systems run it in FreeBSD's own CI's test environment
+(`tests/ci/tools/ci.conf` in its tree), as far as it is in scope: `net.fibs=3`; kyua's `ci`,
+`fibs = '1 2'`, and `allow_sysctl_side_effects`; `if_epair` loaded at boot; and the packages the
+network tests need (Python 3.12 with `pytest`, `scapy`, and `dpkt`, `jq`, `ndisc6`), fetched once
+with their dependencies into `~/abyss/kyua/packages/` on the server and added to both roots with
+`pkg -r`, their versions listed in each results file's header. `--only` runs part of the suite,
+into a separate `-only.txt` file, for checking the harness. Not under QEMU: emulated, the suite takes days
 and its timing-sensitive tests measure the emulator; arm64's baseline is taken on the Orange Pi 6
 Plus. The release image ships `kyua` and `/usr/tests`. An `rc.local` in a copy of the
 multi-user image runs the suite one directory at a time (`bin/cat`, `sys/kern`, ...), keeping each
