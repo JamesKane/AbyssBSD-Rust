@@ -151,21 +151,28 @@ impl Notify {
         // Kqueues that newly have an event and are themselves watched:
         // told once this list is unlocked.
         let mut watched: Vec<Arc<Kqueue>> = Vec::new();
-        {
+        // Taken off under the lock, woken after it: a wakeup (and the
+        // interrupt to another CPU it may send) does not hold up the
+        // object's other waiters and notifiers.
+        let woken = {
             let mut i = self.inner.lock();
-            if pollers {
-                for p in i.pollers.drain(..) {
-                    if let Some(p) = p.upgrade() {
-                        p.wake();
-                    }
-                }
-            }
+            let woken = if pollers {
+                core::mem::take(&mut i.pollers)
+            } else {
+                Vec::new()
+            };
             for kn in &i.knotes {
                 if let Some(kq) = kn.deliver(hint) {
                     watched.push(kq);
                 }
             }
             Self::rearm(&self.armed, &i);
+            woken
+        };
+        for p in woken {
+            if let Some(p) = p.upgrade() {
+                p.wake();
+            }
         }
         for kq in watched {
             kq.sel.notify(0);

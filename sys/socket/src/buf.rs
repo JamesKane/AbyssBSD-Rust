@@ -85,6 +85,44 @@ pub fn chain(bytes: &[u8], eor: bool) -> VecDeque<Mbuf> {
     out
 }
 
+/// [`chain`] for `len` bytes that `fill` copies straight into each mbuf
+/// (`mc_uiotomc`'s `uiomove`), rather than from a buffer of their own.
+/// `fill` returns how much it copied; a short copy ends the chain there.
+///
+/// # Errors
+///
+/// What `fill` returns.
+pub fn chain_from<E>(
+    len: usize,
+    eor: bool,
+    mut fill: impl FnMut(&mut [u8]) -> Result<usize, E>,
+) -> Result<VecDeque<Mbuf>, E> {
+    let mut out = VecDeque::new();
+    if len == 0 {
+        return Ok(out);
+    }
+    for (n, ext) in carve(u32::try_from(len).unwrap_or(u32::MAX)) {
+        let mut data = alloc::vec![0u8; n as usize];
+        let got = fill(&mut data)?;
+        let short = got < data.len();
+        data.truncate(got);
+        if !data.is_empty() {
+            out.push_back(Mbuf {
+                data,
+                ext,
+                eor: false,
+            });
+        }
+        if short {
+            return Ok(out);
+        }
+    }
+    if eor && let Some(last) = out.back_mut() {
+        last.eor = true;
+    }
+    Ok(out)
+}
+
 /// Splits `c` after `len` bytes (`mc_split`): the rest is returned. An
 /// mbuf cut in two keeps its cluster in both halves (both charged for it);
 /// a plain one's tail is copied to a new mbuf.

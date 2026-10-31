@@ -72,7 +72,15 @@ impl ClassSpec {
         // Objects are aligned to the largest power of two dividing their
         // size, which is what consecutive objects can guarantee.
         let align = 1 << size.trailing_zeros();
-        let order = if size <= 512 { Order::ZERO } else { Order(2) };
+        // A page-sized object is page-aligned, so its slab's header takes a
+        // page: eight pages hold seven.
+        let order = if size <= 512 {
+            Order::ZERO
+        } else if size <= 2048 {
+            Order(2)
+        } else {
+            Order(3)
+        };
         Self { size, align, order }
     }
 
@@ -89,7 +97,7 @@ impl ClassSpec {
     }
 }
 
-const CLASSES: [ClassSpec; 14] = [
+const CLASSES: [ClassSpec; 15] = [
     ClassSpec::new(16),
     ClassSpec::new(32),
     ClassSpec::new(48),
@@ -104,11 +112,14 @@ const CLASSES: [ClassSpec; 14] = [
     ClassSpec::new(1024),
     ClassSpec::new(1536),
     ClassSpec::new(2048),
+    // `malloc-4096`, and the page-sized mbuf clusters a stream socket's
+    // data is in (`zone_jumbop`).
+    ClassSpec::new(4096),
 ];
 const NCLASSES: usize = CLASSES.len();
 
 /// The largest request served from a size class.
-pub const MAX_SMALL: usize = 2048;
+pub const MAX_SMALL: usize = 4096;
 
 /// The smallest class holding each 16-byte granule count, `0..=MAX_SMALL / 16`.
 const CLASS_BY_GRANULE: [u8; MAX_SMALL / 16 + 1] = {
@@ -848,8 +859,11 @@ mod tests {
         assert_eq!(class_for(layout(40, 16)), Some(2));
         // 48 is only 16-aligned; a 32-aligned request skips it.
         assert_eq!(CLASSES[class_for(layout(40, 32)).unwrap()].size, 64);
-        assert_eq!(class_for(layout(2049, 8)), None);
-        assert_eq!(class_for(layout(64, 4096)), None);
+        assert_eq!(CLASSES[class_for(layout(2049, 8)).unwrap()].size, 4096);
+        assert_eq!(class_for(layout(4097, 8)), None);
+        // Page-aligned is the most a class gives.
+        assert_eq!(CLASSES[class_for(layout(64, 4096)).unwrap()].size, 4096);
+        assert_eq!(class_for(layout(64, 8192)), None);
     }
 
     fn exercise<const CPUS: usize>() {

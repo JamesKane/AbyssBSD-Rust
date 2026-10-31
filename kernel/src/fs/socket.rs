@@ -146,9 +146,10 @@ pub(crate) fn collect() {
     }
 }
 
-/// Waits for a change `notify` tells of: `retry` first (after
-/// registering, so a change meanwhile is seen), and if it would still
-/// block, until woken, `timeout` (0: none) passes, or a signal.
+/// Waits for a change `notify` tells of: `retry` first, then, if it
+/// would block, again after registering (so a change meanwhile is seen),
+/// and if it still would, until woken, `timeout` (0: none) passes, or a
+/// signal.
 /// `EAGAIN` when the time runs out.
 pub(crate) fn wait_until<R>(
     s: &Sleepable,
@@ -156,6 +157,12 @@ pub(crate) fn wait_until<R>(
     timeout: u64,
     mut retry: impl FnMut() -> Result<R, Errno>,
 ) -> Result<R, Errno> {
+    // Once without waiting: most calls need not (`sbwait` only when the
+    // buffer has no room or nothing to read).
+    match retry() {
+        Err(Errno::EAGAIN) => {}
+        r => return r,
+    }
     let poller = Poller::new();
     let w: Arc<dyn Wake> = Arc::clone(&poller) as Arc<dyn Wake>;
     let deadline = (timeout != 0).then(|| crate::time::now_ns().saturating_add(timeout));
@@ -212,7 +219,8 @@ pub(crate) fn send(
         return Err(Errno::EOPNOTSUPP);
     }
     let nonblock = nonblock || flags & (MSG_DONTWAIT | MSG_NBIO) != 0;
-    let cred = cred();
+    // Built only if the receiver wants it (`LOCAL_CREDS`).
+    let cred: &dyn Fn() -> Cred = &cred;
     let r = if so.ty == Type::Dgram {
         let len = uio.resid();
         if len as u64 > socket::space::DGRAM_MAX.load(Ordering::Relaxed) {
@@ -221,11 +229,10 @@ pub(crate) fn send(
             let mut data = alloc::vec![0u8; len];
             let n = uio.copy_in(&mut data)?;
             data.truncate(n);
-            so.send_dgram(&data, control, to.as_ref(), &cred)
-                .map(|()| n)
+            so.send_dgram(&data, control, to.as_ref(), cred).map(|()| n)
         }
     } else {
-        send_stream(s, so, uio, &mut control, flags, nonblock, &cred)
+        send_stream(s, so, uio, &mut control, flags, nonblock, cred)
     };
     if r == Err(Errno::EPIPE)
         && flags & MSG_NOSIGNAL == 0
@@ -247,7 +254,7 @@ fn send_stream(
     control: &mut Vec<Control>,
     flags: i32,
     nonblock: bool,
-    cred: &Cred,
+    cred: &dyn Fn() -> Cred,
 ) -> Result<usize, Errno> {
     let eor = flags & MSG_EOR != 0;
     let (timeo, _) = so.timeouts();
@@ -256,10 +263,9 @@ fn send_stream(
     loop {
         if chain.is_empty() && (uio.resid() > 0 || !control.is_empty()) {
             let n = uio.resid().min(so.stream_send_window()).min(PIECE);
-            let mut data = alloc::vec![0u8; n];
-            let got = uio.copy_in(&mut data)?;
-            data.truncate(got);
-            chain = socket::chain(&data, eor && uio.resid() == 0);
+            // Copied in straight to the mbufs.
+            let last = eor && uio.resid() == n;
+            chain = socket::chain_from(n, last, |b| uio.copy_in(b))?;
         }
         if chain.is_empty() && control.is_empty() {
             return Ok(sent);
@@ -351,44 +357,49 @@ pub(crate) fn receive(
         // A look that may wait, then what more is there without waiting.
         let want = uio.resid().min(PIECE);
         let skip = got.count;
-        let first = || so.recv_stream(want, peek, skip, false, want_control);
+        let first = || so.recv_stream_parts(want, peek, skip, false, want_control);
         let r = if nonblock {
             first()
         } else {
             let _w = sched::wait_message("sbwait");
             wait_until(s, &so.rd, timeo, first)
         };
-        let mut r = match r {
+        let (mut r, mut parts) = match r {
             Ok(r) => r,
             Err(Errno::EINTR | Errno::ERESTART | Errno::EAGAIN) if got.count > 0 => return Ok(got),
             Err(e) => return Err(e),
         };
         loop {
             let asked = uio.resid().min(PIECE);
-            let n = r.data.len();
+            let n = r.data.len() + parts.iter().map(Vec::len).sum::<usize>();
             if let Some(ext) = ext.as_mut()
                 && !r.control.is_empty()
             {
                 let c = core::mem::take(&mut r.control);
                 if let Err(e) = ext(c) {
                     if !peek {
-                        so.unread(&r.data, r.flags & abi::socket::MSG_EOR != 0);
+                        let data: Vec<u8> = parts.concat();
+                        so.unread(&data, r.flags & abi::socket::MSG_EOR != 0);
                     }
                     return Err(e);
                 }
             }
+            // Each mbuf's bytes straight out (a peek's copy is in `data`).
             got.count += uio.copy_out(&r.data)?;
+            for d in &parts {
+                got.count += uio.copy_out(d)?;
+            }
             got.flags |= r.flags;
             if n == 0 || n < asked || r.flags & abi::socket::MSG_EOR != 0 || uio.resid() == 0 {
                 break;
             }
             let more = uio.resid().min(PIECE);
-            match so.recv_stream(more, peek, got.count, true, want_control) {
-                Ok(m) => r = m,
+            match so.recv_stream_parts(more, peek, got.count, true, want_control) {
+                Ok((m, p)) => (r, parts) = (m, p),
                 Err(_) => break,
             }
         }
-        let empty = r.data.is_empty();
+        let empty = r.data.is_empty() && parts.iter().all(Vec::is_empty);
         if !waitall || got.flags & abi::socket::MSG_EOR != 0 || uio.resid() == 0 || empty {
             return Ok(got);
         }

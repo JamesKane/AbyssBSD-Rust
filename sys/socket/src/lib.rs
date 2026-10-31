@@ -43,7 +43,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use abi::errno::Errno;
 use abi::socket::{AF_UNIX, SHUT_RD, SHUT_RDWR, SHUT_WR, SO_ACCEPTCONN, SOMAXCONN, Xucred};
 use event::Notify;
-use sync::SpinLock;
+use sync::{DelayLock, SpinLock};
 
 use buf::{Item, Sockbuf};
 pub use control::{Control, Cred, InFlight, Passable, cmsgcred, gc, inflight};
@@ -141,7 +141,7 @@ pub struct Socket {
     pub ty: Type,
     /// `unp_ino`, its `st_ino`.
     pub ino: u64,
-    inner: SpinLock<Inner>,
+    inner: DelayLock<Inner>,
     /// Readers and accepters (`so_rdsel`), and writers (`so_wrsel`).
     pub rd: Notify,
     pub wr: Notify,
@@ -171,28 +171,25 @@ pub fn noname() -> Vec<u8> {
     a
 }
 
-/// Locks two sockets' state in address order (once if the same). Bind
-/// the [`IrqOff`](sync::IrqOff) first, so it outlives both guards.
+/// Locks two sockets' state in address order (once if the same).
 fn lock2<'a>(
     a: &'a Socket,
     b: &'a Socket,
 ) -> (
-    sync::IrqOff,
-    sync::SpinGuard<'a, Inner>,
-    Option<sync::SpinGuard<'a, Inner>>,
+    sync::DelayLockGuard<'a, Inner>,
+    Option<sync::DelayLockGuard<'a, Inner>>,
 ) {
-    let irq = sync::IrqOff::new();
     if core::ptr::eq(a, b) {
-        return (irq, a.inner.lock(), None);
+        return (a.inner.lock(), None);
     }
     if core::ptr::from_ref(a).addr() < core::ptr::from_ref(b).addr() {
         let ga = a.inner.lock();
         let gb = b.inner.lock();
-        (irq, ga, Some(gb))
+        (ga, Some(gb))
     } else {
         let gb = b.inner.lock();
         let ga = a.inner.lock();
-        (irq, ga, Some(gb))
+        (ga, Some(gb))
     }
 }
 
@@ -252,7 +249,7 @@ impl Socket {
         let so = Arc::new(Self {
             ty,
             ino: NEXT_INO.fetch_add(1, Ordering::Relaxed),
-            inner: SpinLock::new(Inner {
+            inner: DelayLock::new(Inner {
                 state: 0,
                 flags: 0,
                 options: 0,
@@ -498,7 +495,7 @@ impl Socket {
             return Err(Errno::EPROTOTYPE);
         }
         if !self.ty.connreq() {
-            let (irq, mut a, b) = lock2(self, to);
+            let (mut a, b) = lock2(self, to);
             if a.peer.is_some() {
                 return Err(Errno::EISCONN);
             }
@@ -513,7 +510,6 @@ impl Socket {
             refs.push(Arc::downgrade(self));
             drop(b);
             drop(a);
-            drop(irq);
             self.wake();
             return Ok(());
         }
@@ -565,7 +561,7 @@ impl Socket {
     /// `unp_connect2` for stream and seqpacket (and `socketpair`).
     fn connect2(a: &Arc<Self>, b: &Arc<Self>) {
         {
-            let (_irq, mut ga, gb) = lock2(a, b);
+            let (mut ga, gb) = lock2(a, b);
             ga.peer = Some(Arc::clone(b));
             ga.state = (ga.state & !state::ISDISCONNECTED) | state::ISCONNECTED;
             if let Some(mut gb) = gb {
@@ -597,7 +593,7 @@ impl Socket {
             return Ok(());
         }
         for (x, y) in [(a, b), (b, a)] {
-            let (_irq, mut gx, gy) = lock2(x, y);
+            let (mut gx, gy) = lock2(x, y);
             gx.peer = Some(Arc::clone(y));
             gx.state |= state::ISCONNECTED;
             match gy {
@@ -632,7 +628,7 @@ impl Socket {
             return;
         };
         let dropped = {
-            let (_irq, mut a, mut b) = lock2(self, &peer);
+            let (mut a, mut b) = lock2(self, &peer);
             if !a.peer.as_ref().is_some_and(|p| Arc::ptr_eq(p, &peer)) {
                 return;
             }
@@ -804,7 +800,7 @@ impl Socket {
         &self,
         data: &mut VecDeque<Mbuf>,
         control: &mut Vec<Control>,
-        cred: &Cred,
+        cred: &dyn Fn() -> Cred,
     ) -> Result<usize, Errno> {
         let peer = {
             let i = self.inner.lock();
@@ -827,7 +823,7 @@ impl Socket {
             if !persistent {
                 control.retain(|c| !c.is_creds());
             }
-            control.insert(0, control::sockcred(cred, persistent));
+            control.insert(0, control::sockcred(&cred(), persistent));
             p.flags &= !flags::WANTCRED_ONESHOT;
         }
         let clen: u32 = control.iter().map(Control::len).sum();
@@ -890,7 +886,39 @@ impl Socket {
         cont: bool,
         want_control: bool,
     ) -> Result<Received, Errno> {
+        let (mut out, taken) = self.recv_stream_parts(max, peek, skip, cont, want_control)?;
+        if taken.len() == 1 {
+            out.data = taken.into_iter().next().unwrap_or_default();
+        } else if !taken.is_empty() {
+            out.data = Vec::with_capacity(taken.iter().map(Vec::len).sum());
+            for d in &taken {
+                out.data.extend_from_slice(d);
+            }
+        }
+        Ok(out)
+    }
+
+    /// [`recv_stream`](Self::recv_stream), with the data taken (not
+    /// peeked) left in the mbufs' own buffers, in order, for the caller
+    /// to copy out one by one (`soreceive_stream`'s `uiomove` of each).
+    /// A peek's copy is in the result's `data`.
+    ///
+    /// # Errors
+    ///
+    /// As [`recv_stream`](Self::recv_stream).
+    pub fn recv_stream_parts(
+        &self,
+        max: usize,
+        peek: bool,
+        skip: usize,
+        cont: bool,
+        want_control: bool,
+    ) -> Result<(Received, Vec<Vec<u8>>), Errno> {
         let mut out = Received::default();
+        // What a receive takes, moved off the buffer under its lock and
+        // joined after it (`soreceive_stream` unlinks the mbufs, then
+        // copies them out unlocked).
+        let mut taken: Vec<Vec<u8>> = Vec::new();
         let peer = {
             let mut i = self.inner.lock();
             if i.state & (state::ISCONNECTED | state::ISDISCONNECTED) == 0 {
@@ -904,14 +932,14 @@ impl Socket {
                     return Err(e);
                 }
                 if i.rcv.cant {
-                    return Ok(out);
+                    return Ok((out, Vec::new()));
                 }
                 return Err(Errno::EAGAIN);
             }
             let rcv = &mut i.rcv;
             let mut idx = 0;
             if cont && matches!(rcv.items.front(), Some(Item::Control(..))) {
-                return Ok(out);
+                return Ok((out, Vec::new()));
             }
             // Leading control.
             while let Some(Item::Control(..)) = rcv.items.get(idx) {
@@ -958,13 +986,14 @@ impl Socket {
                 }
                 if space >= m.data.len() {
                     space -= m.data.len();
-                    out.data.extend_from_slice(&m.data);
                     let eor = m.eor;
                     if peek {
+                        out.data.extend_from_slice(&m.data);
                         idx += 1;
                     } else {
                         let n = m.len();
                         let cost = m.cost();
+                        taken.push(core::mem::take(&mut m.data));
                         rcv.items.remove(idx);
                         rcv.cc -= n;
                         rcv.mbcnt -= cost;
@@ -974,9 +1003,12 @@ impl Socket {
                         break;
                     }
                 } else {
-                    out.data.extend_from_slice(&m.data[..space]);
-                    if !peek {
-                        m.data.drain(..space);
+                    if peek {
+                        out.data.extend_from_slice(&m.data[..space]);
+                    } else {
+                        // The rest stays, in the same mbuf (`m_adj`).
+                        let rest = m.data.split_off(space);
+                        taken.push(core::mem::replace(&mut m.data, rest));
                         rcv.cc -= u32::try_from(space).unwrap_or(0);
                     }
                     break;
@@ -994,7 +1026,7 @@ impl Socket {
         if !peek && let Some(p) = peer {
             p.wr.notify(0);
         }
-        Ok(out)
+        Ok((out, taken))
     }
 
     /// Puts `data` back at the front of a stream's receive buffer: a
@@ -1051,7 +1083,7 @@ impl Socket {
         data: &[u8],
         mut control: Vec<Control>,
         to: Option<&Arc<Self>>,
-        cred: &Cred,
+        cred: &dyn Fn() -> Cred,
     ) -> Result<(), Errno> {
         if data.len() as u64 > space::DGRAM_MAX.load(Ordering::Relaxed) {
             return Err(Errno::EMSGSIZE);
@@ -1088,7 +1120,7 @@ impl Socket {
                 if !persistent {
                     control.retain(|c| !c.is_creds());
                 }
-                control.insert(0, control::sockcred(cred, persistent));
+                control.insert(0, control::sockcred(&cred(), persistent));
             }
             let d = dgram::Dgram::new(from, control, data);
             let conn = to.is_none();
@@ -1190,7 +1222,7 @@ fn xucred(c: &Cred) -> Xucred {
     x
 }
 
-pub use buf::{Mbuf, chain};
+pub use buf::{Mbuf, chain, chain_from};
 
 pub use poll::filter;
 

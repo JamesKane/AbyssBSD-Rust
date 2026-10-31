@@ -11,7 +11,7 @@ use abi::socket::{
     LOCAL_CREDS, MSG_EOR, MSG_TRUNC, SHUT_WR, SO_RCVBUF, SO_SNDBUF, SOL_LOCAL, SOL_SOCKET,
 };
 
-use crate::{Control, Cred, InFlight, Passable, Socket, Type, chain, gc, inflight};
+use crate::{Control, Cred, InFlight, Passable, Socket, Type, chain, chain_from, gc, inflight};
 
 /// Held by the tests that put descriptors in flight: the count of them
 /// and the collector are the whole process's.
@@ -38,7 +38,7 @@ fn pair(ty: Type) -> (Arc<Socket>, Arc<Socket>) {
 /// Sends all of `data` it can: returns what went.
 fn send(s: &Socket, data: &[u8], eor: bool) -> Result<usize, Errno> {
     let mut c: VecDeque<_> = chain(data, eor);
-    s.send_stream(&mut c, &mut Vec::new(), &cred())
+    s.send_stream(&mut c, &mut Vec::new(), &cred)
 }
 
 #[test]
@@ -63,6 +63,29 @@ fn stream_round_trip_and_eof() {
             .is_empty()
     );
     assert_eq!(send(&b, b"x", false), Err(Errno::EPIPE));
+}
+
+#[test]
+fn chain_from_fills_as_chain_does() {
+    let bytes: Vec<u8> = (0..=255u8).cycle().take(5000).collect();
+    let mut at = 0;
+    let c = chain_from(bytes.len(), true, |b| -> Result<usize, ()> {
+        b.copy_from_slice(&bytes[at..at + b.len()]);
+        at += b.len();
+        Ok(b.len())
+    })
+    .unwrap();
+    let want = chain(&bytes, true);
+    assert_eq!(c.len(), want.len());
+    for (a, b) in c.iter().zip(&want) {
+        assert_eq!((&a.data, a.ext, a.eor), (&b.data, b.ext, b.eor));
+    }
+    // A short copy ends the chain, unmarked.
+    let c = chain_from(5000, true, |b| -> Result<usize, ()> {
+        Ok(b.len().min(100))
+    })
+    .unwrap();
+    assert_eq!((c.len(), c[0].data.len(), c[0].eor), (1, 100, false));
 }
 
 #[test]
@@ -108,7 +131,7 @@ fn seqpacket_records() {
 #[test]
 fn dgram_queues_and_enobufs() {
     let (a, b) = pair(Type::Dgram);
-    a.send_dgram(b"abc", Vec::new(), None, &cred()).unwrap();
+    a.send_dgram(b"abc", Vec::new(), None, &cred).unwrap();
     let r = b.recv_dgram(2, false, false).unwrap();
     assert_eq!(
         (r.data.as_slice(), r.flags & MSG_TRUNC),
@@ -117,14 +140,14 @@ fn dgram_queues_and_enobufs() {
     assert_eq!(b.recv_dgram(8, false, false).unwrap_err(), Errno::EAGAIN);
     let max = vec![0u8; 8192];
     assert_eq!(
-        a.send_dgram(&[0; 8193], Vec::new(), None, &cred()),
+        a.send_dgram(&[0; 8193], Vec::new(), None, &cred),
         Err(Errno::EMSGSIZE)
     );
     // The sender's 16 KiB send buffer holds one 8 KiB datagram and its
     // name, not two.
-    a.send_dgram(&max, Vec::new(), None, &cred()).unwrap();
+    a.send_dgram(&max, Vec::new(), None, &cred).unwrap();
     assert_eq!(
-        a.send_dgram(&max, Vec::new(), None, &cred()),
+        a.send_dgram(&max, Vec::new(), None, &cred),
         Err(Errno::ENOBUFS)
     );
     assert_eq!(b.recv_dgram(9000, true, false).unwrap().data.len(), 8192);
@@ -235,7 +258,7 @@ fn collector_frees_a_socket_sent_to_itself() {
     a.send_stream(
         &mut c,
         &mut vec![Control::Rights(vec![InFlight::new(Arc::clone(&fb), 0)])],
-        &cred(),
+        &cred,
     )
     .unwrap();
     assert_eq!(inflight(), before + 1);
@@ -255,7 +278,7 @@ fn control_only_sends_are_received_alone() {
         let mut c: VecDeque<_> = chain(b"", false);
         let rights = vec![Control::Rights(vec![InFlight::new(Arc::clone(&fb), 0)])];
         let mut ctl = rights;
-        assert_eq!(a.send_stream(&mut c, &mut ctl, &cred()), Ok(0));
+        assert_eq!(a.send_stream(&mut c, &mut ctl, &cred), Ok(0));
         let r = b.recv_stream(0, false, 0, false, true).unwrap();
         assert_eq!((r.control.len(), r.data.len()), (1, 0));
     }
