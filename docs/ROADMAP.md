@@ -1986,7 +1986,7 @@ P7.0 ─► P7.1 ─► P7.2 ─► P7.3 ─► P7.4 ─┬─► P7.5 ───
   └─► P7.7a (ciphers, host) ─────────────────────────────┘
 ```
 
-**P7.0 Design and harness.**
+**P7.0 Design and harness.** Done 2026-10-31.
 - NETWORKING.md and ADR-0019.
 - The test network: virtio-net in the QEMU machines on user-mode networking; on the build server
   the bridge, taps, dnsmasq (DHCPv4, DNS), `rtadvd`, and outbound NAT, set up by a script run
