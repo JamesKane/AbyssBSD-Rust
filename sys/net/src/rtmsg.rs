@@ -14,14 +14,14 @@ use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
 
 use abi::inet::{AF_INET, AF_INET6, AF_LINK};
-use abi::net::{IfData, RTM_VERSION, iff, net_rt, rta, rtf, rtm};
+use abi::net::{IfData, RTM_VERSION, net_rt, rta, rtf, rtm};
 
 use crate::Family;
 use crate::addr::{In6, is_linklocal6, sockaddr_in, sockaddr_in6, v4_of};
-use crate::ifnet::{Gateway, Ifaddr, Ifnet, LO_STATS, Net, masked};
+use crate::ifnet::{Gateway, Ifaddr, Ifnet, Net, masked};
 
 /// `SA_SIZE`: an address's room, rounded up to a `long`.
-fn sa_size(len: usize) -> usize {
+pub(crate) fn sa_size(len: usize) -> usize {
     if len == 0 { 8 } else { 1 + ((len - 1) | 7) }
 }
 
@@ -30,19 +30,22 @@ fn sa_size(len: usize) -> usize {
 #[must_use]
 pub fn link_sockaddr(ifp: &Ifnet) -> Vec<u8> {
     let name = ifp.name.as_bytes();
-    let len = (8 + name.len()).max(54);
+    let ll: &[u8] = ifp.lladdr.as_ref().map_or(&[], |a| &a[..]);
+    let len = (8 + name.len() + ll.len()).max(54);
     let mut d = alloc::vec![0u8; len];
     d[0] = u8::try_from(len).unwrap_or(u8::MAX);
     d[1] = AF_LINK;
     d[2..4].copy_from_slice(&ifp.index.to_ne_bytes());
     d[4] = ifp.ty;
     d[5] = u8::try_from(name.len()).unwrap_or(0);
+    d[6] = u8::try_from(ll.len()).unwrap_or(0);
     d[8..8 + name.len()].copy_from_slice(name);
+    d[8 + name.len()..8 + name.len() + ll.len()].copy_from_slice(ll);
     d
 }
 
 /// An address's `sockaddr` (an IPv6 link-local one with its zone).
-fn sa_of(family: Family, a: &In6, zone: u16) -> Vec<u8> {
+pub(crate) fn sa_of(family: Family, a: &In6, zone: u16) -> Vec<u8> {
     match family {
         Family::Inet => sockaddr_in(v4_of(a), 0),
         Family::Inet6 => sockaddr_in6(a, 0, if is_linklocal6(a) { u32::from(zone) } else { 0 }),
@@ -51,7 +54,7 @@ fn sa_of(family: Family, a: &In6, zone: u16) -> Vec<u8> {
 
 /// The netmask of `plen` bits as a `sockaddr` the size of its address
 /// (`rtsock_fix_netmask`).
-fn mask_of(family: Family, plen: u8) -> Vec<u8> {
+pub(crate) fn mask_of(family: Family, plen: u8) -> Vec<u8> {
     let ones = [0xffu8; 16];
     let m = masked(family, &ones, plen);
     match family {
@@ -63,26 +66,20 @@ fn mask_of(family: Family, plen: u8) -> Vec<u8> {
 /// `if_data_copy`.
 #[must_use]
 pub fn if_data(ifp: &Ifnet) -> IfData {
-    let s = &LO_STATS;
-    let loopback = ifp.flags & iff::LOOPBACK != 0;
-    let c = |a: &core::sync::atomic::AtomicU64| {
-        if loopback {
-            a.load(Ordering::Relaxed)
-        } else {
-            0
-        }
-    };
+    let s = &ifp.stats;
+    let c = |a: &core::sync::atomic::AtomicU64| a.load(Ordering::Relaxed);
     IfData {
         ifi_type: ifp.ty,
         ifi_physical: 0,
-        ifi_addrlen: 0,
-        ifi_hdrlen: 0,
+        // `ether_ifattach`: `ETHER_ADDR_LEN` and `ETHER_HDR_LEN`.
+        ifi_addrlen: if ifp.lladdr.is_some() { 6 } else { 0 },
+        ifi_hdrlen: if ifp.lladdr.is_some() { 14 } else { 0 },
         ifi_link_state: ifp.link_state,
         ifi_vhid: 0,
         ifi_datalen: u16::try_from(size_of::<IfData>()).unwrap_or(0),
         ifi_mtu: ifp.mtu,
         ifi_metric: ifp.metric,
-        ifi_baudrate: 0,
+        ifi_baudrate: ifp.baudrate,
         ifi_ipackets: c(&s.ipackets),
         ifi_ierrors: 0,
         ifi_opackets: c(&s.opackets),
@@ -102,7 +99,7 @@ pub fn if_data(ifp: &Ifnet) -> IfData {
     }
 }
 
-fn put<T: Copy>(out: &mut Vec<u8>, v: &T) {
+pub(crate) fn put<T: Copy>(out: &mut Vec<u8>, v: &T) {
     // SAFETY: `T` is an `abi` record of integers with explicit padding
     // fields (no implicit padding), so all its bytes are initialized.
     let b =
@@ -112,7 +109,7 @@ fn put<T: Copy>(out: &mut Vec<u8>, v: &T) {
 
 /// A record: `hdr` (with its length, version, and type set), the
 /// addresses in `RTAX_*` order, padded to a `long` (`rtsock_msg_buffer`).
-fn record(mut hdr: Vec<u8>, ty: u8, addrs: &[Option<Vec<u8>>]) -> (Vec<u8>, i32) {
+pub(crate) fn record(mut hdr: Vec<u8>, ty: u8, addrs: &[Option<Vec<u8>>]) -> (Vec<u8>, i32) {
     let mut bits = 0;
     for (i, a) in addrs.iter().enumerate() {
         if let Some(a) = a {
@@ -135,7 +132,7 @@ fn record(mut hdr: Vec<u8>, ty: u8, addrs: &[Option<Vec<u8>>]) -> (Vec<u8>, i32)
 /// `rti_addrs` goes at this offset of each header kind.
 const ADDRS_AT: usize = 4;
 
-fn set_addrs(rec: &mut [u8], bits: i32) {
+pub(crate) fn set_addrs(rec: &mut [u8], bits: i32) {
     rec[ADDRS_AT..ADDRS_AT + 4].copy_from_slice(&bits.to_ne_bytes());
 }
 
@@ -194,7 +191,7 @@ pub fn iflist(n: &Net, af: u8, ifindex: i32, long: bool) -> Vec<u8> {
 }
 
 /// One address's record (`RTM_NEWADDR`).
-fn ifa_record(ifp: &Ifnet, a: &Ifaddr, long: bool) -> Vec<u8> {
+pub(crate) fn ifa_record(ifp: &Ifnet, a: &Ifaddr, long: bool) -> Vec<u8> {
     let metric = ifp.metric.cast_signed();
     let hdr = if long {
         let h = abi::net::IfaMsghdrl {
@@ -234,6 +231,31 @@ fn ifa_record(ifp: &Ifnet, a: &Ifaddr, long: bool) -> Vec<u8> {
     r
 }
 
+/// An address's record as `ty` (`RTM_NEWADDR` or `RTM_DELADDR`), short
+/// (`rt_newaddrmsg_fib`).
+#[must_use]
+pub(crate) fn ifa_record_typed(ifp: &Ifnet, a: &Ifaddr, ty: u8) -> Vec<u8> {
+    let mut r = ifa_record(ifp, a, false);
+    r[3] = ty;
+    r
+}
+
+/// An interface's `RTM_IFINFO` record (`rt_ifmsg`): its flags and
+/// `if_data`, with no addresses.
+#[must_use]
+pub(crate) fn ifinfo_record(ifp: &Ifnet) -> Vec<u8> {
+    let h = abi::net::IfMsghdr {
+        ifm_flags: ifp.flags.cast_signed(),
+        ifm_index: ifp.index,
+        ifm_data: if_data(ifp),
+        ..abi::net::IfMsghdr::default()
+    };
+    let mut v = Vec::new();
+    put(&mut v, &h);
+    let (r, _) = record(v, rtm::IFINFO, &[]);
+    r
+}
+
 /// `NET_RT_DUMP` of family `af` (0 for all): each route as
 /// `sysctl_dumpnhop` writes it.
 #[must_use]
@@ -268,11 +290,17 @@ pub fn dump(n: &Net, af: u8) -> Vec<u8> {
         let ifp = n.by_index(r.ifindex);
         let mut addrs: [Option<Vec<u8>>; 8] = Default::default();
         addrs[0] = Some(sa_of(r.family, &r.dst, r.ifindex));
+        // An interface route's gateway names only the interface
+        // (`link#N`: index and type).
         addrs[1] = Some(match r.gateway {
-            Gateway::Link(i) => match ifp {
-                Some(f) if f.index == i => link_sockaddr(f),
-                _ => alloc::vec![0u8; 8],
-            },
+            Gateway::Link(i) => {
+                let mut d = alloc::vec![0u8; 54];
+                d[0] = 54;
+                d[1] = AF_LINK;
+                d[2..4].copy_from_slice(&i.to_ne_bytes());
+                d[4] = n.by_index(i).map_or(0, |f| f.ty);
+                d
+            }
             Gateway::Addr(g) => sa_of(r.family, &g, r.ifindex),
         });
         if r.plen != max_plen(r.family) {
@@ -291,7 +319,7 @@ pub fn dump(n: &Net, af: u8) -> Vec<u8> {
     out
 }
 
-const fn max_plen(f: Family) -> u8 {
+pub(crate) const fn max_plen(f: Family) -> u8 {
     match f {
         Family::Inet => 32,
         Family::Inet6 => 128,

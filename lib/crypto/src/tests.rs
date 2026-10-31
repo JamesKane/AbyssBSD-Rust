@@ -85,3 +85,33 @@ fn blake2b_incremental_matches_one_shot() {
         )
     );
 }
+
+#[test]
+fn sha1_fips180() {
+    use crate::sha1::{Sha1, digest};
+    let h = |d: [u8; 20]| {
+        d.iter()
+            .map(|b| alloc_hex(*b))
+            .collect::<std::string::String>()
+    };
+    assert_eq!(
+        h(digest(b"abc")),
+        "a9993e364706816aba3e25717850c26c9cd0d89d"
+    );
+    assert_eq!(h(digest(b"")), "da39a3ee5e6b4b0d3255bfef95601890afd80709");
+    assert_eq!(
+        h(digest(
+            b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+        )),
+        "84983e441c3bd26ebaae4aa1f95129e5e54670f1"
+    );
+    let mut s = Sha1::new();
+    for _ in 0..1000 {
+        s.update(&[b'a'; 1000]);
+    }
+    assert_eq!(h(s.finish()), "34aa973cd4c4daa4f61eeb2bdbad27316534016f");
+}
+
+fn alloc_hex(b: u8) -> std::string::String {
+    std::format!("{b:02x}")
+}

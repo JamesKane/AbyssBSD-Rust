@@ -14,7 +14,7 @@ use abi::socket::{
 };
 
 use crate::addr::{self, LOOPBACK6, Sockaddr, sockaddr_in, sockaddr_in6, v4mapped};
-use crate::ifnet::{self, NET};
+use crate::ifnet;
 use crate::pcb::{TCB, UDB};
 use crate::{Cred, Family, Proto, Socket, Tstate, tune};
 
@@ -24,8 +24,13 @@ fn setup() -> std::sync::MutexGuard<'static, ()> {
     let g = LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    ifnet::attach_loopback(0);
+    ifnet::configure_loopback(&mut net().lock(), 0);
     g
+}
+
+/// The system VNET's interfaces and routes.
+fn net() -> &'static net::announce::NetLock {
+    &net::vnet0().net
 }
 
 fn user() -> Cred {
@@ -56,7 +61,7 @@ fn set_int(s: &Socket, level: i32, name: i32, v: i32) {
 #[test]
 fn lo0_has_its_addresses_and_routes() {
     let _g = setup();
-    let n = NET.lock();
+    let n = net().lock();
     let lo = n.by_name(b"lo0").unwrap();
     assert_eq!(lo.index, 1);
     assert!(lo.flags & abi::net::iff::UP != 0);
@@ -508,6 +513,7 @@ fn netlink_links_addresses_and_routes() {
     // ifconfig's link dump: lo0, then the end (no separate ack).
     let r = handle(
         &ctx,
+        net(),
         &nlreq(ty::GETLINK, nlm::DUMP | nlm::ACK, 1, &[0; 16], &[]),
         0,
     );
@@ -525,6 +531,7 @@ fn netlink_links_addresses_and_routes() {
     // One link by name, acknowledged.
     let r = handle(
         &ctx,
+        net(),
         &nlreq(
             ty::GETLINK,
             nlm::ACK,
@@ -543,6 +550,7 @@ fn netlink_links_addresses_and_routes() {
     );
     let r = handle(
         &ctx,
+        net(),
         &nlreq(
             ty::GETLINK,
             nlm::ACK,
@@ -557,7 +565,7 @@ fn netlink_links_addresses_and_routes() {
     let mut ifa = [0u8; 8];
     ifa[0] = abi::inet::AF_INET;
     ifa[4..8].copy_from_slice(&1u32.to_ne_bytes());
-    let r = handle(&ctx, &nlreq(ty::GETADDR, nlm::DUMP, 4, &ifa, &[]), 0);
+    let r = handle(&ctx, net(), &nlreq(ty::GETADDR, nlm::DUMP, 4, &ifa, &[]), 0);
     assert_eq!(
         nlreplies(&r).iter().filter(|k| k.0 == ty::NEWADDR).count(),
         1
@@ -574,11 +582,12 @@ fn netlink_links_addresses_and_routes() {
         &[(abi::netlink::IFA_LOCAL, &[127, 0, 0, 2])],
     );
     assert_eq!(
-        nlreplies(&handle(&ctx, &add, 0)),
+        nlreplies(&handle(&ctx, net(), &add, 0)),
         [(ty::ERROR, nlm::CAPPED, 0)]
     );
     assert!(
-        NET.lock()
+        net()
+            .lock()
             .is_local(Family::Inet, &addr::from_v4([127, 0, 0, 2]), 0)
     );
     let del = nlreq(
@@ -589,11 +598,12 @@ fn netlink_links_addresses_and_routes() {
         &[(abi::netlink::IFA_LOCAL, &[127, 0, 0, 2])],
     );
     assert_eq!(
-        nlreplies(&handle(&ctx, &del, 0)),
+        nlreplies(&handle(&ctx, net(), &del, 0)),
         [(ty::ERROR, nlm::CAPPED, 0)]
     );
     assert!(
-        !NET.lock()
+        !net()
+            .lock()
             .is_local(Family::Inet, &addr::from_v4([127, 0, 0, 2]), 0)
     );
     // Without the privilege.
@@ -601,7 +611,10 @@ fn netlink_links_addresses_and_routes() {
         port: 98,
         ..Ctx::default()
     };
-    assert_eq!(nlreplies(&handle(&user, &add, 0))[0].2, Errno::EPERM.get());
+    assert_eq!(
+        nlreplies(&handle(&user, net(), &add, 0))[0].2,
+        Errno::EPERM.get()
+    );
     // route add -inet6 ::ffff:0.0.0.0 -prefixlen 96 ::1 -reject: once.
     let mut rtm = [0u8; 12];
     rtm[0] = abi::inet::AF_INET6;
@@ -620,15 +633,15 @@ fn netlink_links_addresses_and_routes() {
         ],
     );
     assert_eq!(
-        nlreplies(&handle(&ctx, &route, 0)),
+        nlreplies(&handle(&ctx, net(), &route, 0)),
         [(ty::ERROR, nlm::CAPPED, 0)]
     );
     assert_eq!(
-        nlreplies(&handle(&ctx, &route, 0))[0].2,
+        nlreplies(&handle(&ctx, net(), &route, 0))[0].2,
         Errno::EEXIST.get()
     );
     assert_eq!(
-        NET.lock().lookup(Family::Inet6, &v4mapped([10, 0, 0, 1])),
+        net().lock().lookup(Family::Inet6, &v4mapped([10, 0, 0, 1])),
         Err(crate::ifnet::NoRoute::Rejected)
     );
     // route get 127.0.0.1.
@@ -636,6 +649,7 @@ fn netlink_links_addresses_and_routes() {
     get[0] = abi::inet::AF_INET;
     let r = handle(
         &ctx,
+        net(),
         &nlreq(
             ty::GETROUTE,
             0,
@@ -648,7 +662,7 @@ fn netlink_links_addresses_and_routes() {
     assert_eq!(nlreplies(&r)[0].0, ty::NEWROUTE);
     // An unknown type.
     assert_eq!(
-        nlreplies(&handle(&ctx, &nlreq(99, 0, 9, &[], &[]), 0))[0].2,
+        nlreplies(&handle(&ctx, net(), &nlreq(99, 0, 9, &[], &[]), 0))[0].2,
         Errno::EOPNOTSUPP.get()
     );
     let mut del = rtm;
@@ -661,7 +675,7 @@ fn netlink_links_addresses_and_routes() {
         &[(abi::netlink::NL_RTA_DST, &dst)],
     );
     assert_eq!(
-        nlreplies(&handle(&ctx, &unroute, 0)),
+        nlreplies(&handle(&ctx, net(), &unroute, 0)),
         [(ty::ERROR, nlm::CAPPED, 0)]
     );
 }
@@ -669,7 +683,7 @@ fn netlink_links_addresses_and_routes() {
 #[test]
 fn iflist_records() {
     let _g = setup();
-    let n = NET.lock();
+    let n = net().lock();
     let b = crate::rtmsg::iflist(&n, 0, 0, true);
     drop(n);
     // Each record: its length (aligned), version 5, a type.
@@ -687,7 +701,7 @@ fn iflist_records() {
     assert!(types[1..].iter().all(|&t| t == abi::net::rtm::NEWADDR));
     assert_eq!(types.len(), 4, "the link and three addresses");
     // The routing table: the host route to 127.0.0.1 among them.
-    let n = NET.lock();
+    let n = net().lock();
     let d = crate::rtmsg::dump(&n, abi::inet::AF_INET);
     assert!(!d.is_empty());
     assert_eq!(d[3], abi::net::rtm::GET);

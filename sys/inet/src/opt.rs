@@ -295,7 +295,9 @@ impl Socket {
                     .and_then(|b| b.try_into().ok())
                     .ok_or(Errno::EINVAL)?;
                 if a != [0; 4]
-                    && !crate::ifnet::NET
+                    && !self
+                        .vnet
+                        .net
                         .lock()
                         .is_local(Family::Inet, &crate::addr::from_v4(a), 0)
                 {
@@ -384,7 +386,9 @@ impl Socket {
             ipv6::IPV6_MULTICAST_IF => {
                 let v = int(val)?.cast_unsigned();
                 if v != 0
-                    && crate::ifnet::NET
+                    && self
+                        .vnet
+                        .net
                         .lock()
                         .by_index(u16::try_from(v).unwrap_or(0))
                         .is_none()

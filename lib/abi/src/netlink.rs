@@ -122,6 +122,7 @@ pub const RTM_GETROUTE: u16 = 26;
 pub const RTM_GETNEIGH: u16 = 30;
 
 pub const IFLA_ADDRESS: u16 = 1;
+pub const IFLA_BROADCAST: u16 = 2;
 pub const IFLA_IFNAME: u16 = 3;
 pub const IFLA_MTU: u16 = 4;
 pub const IFLA_OPERSTATE: u16 = 16;
@@ -203,6 +204,7 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("NL_RTM_GETROUTE", RTM_GETROUTE as i64),
     c("NL_RTM_GETNEIGH", RTM_GETNEIGH as i64),
     c("IFLA_ADDRESS", IFLA_ADDRESS as i64),
+    c("IFLA_BROADCAST", IFLA_BROADCAST as i64),
     c("IFLA_IFNAME", IFLA_IFNAME as i64),
     c("IFLA_MTU", IFLA_MTU as i64),
     c("IFLA_OPERSTATE", IFLA_OPERSTATE as i64),

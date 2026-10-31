@@ -65,6 +65,8 @@ pub(crate) mod flags {
     pub(crate) const PERSIST: u32 = 0x0000_0001;
     /// It has a host identity of its own (`host=new`).
     pub(crate) const HOST: u32 = 0x0000_0002;
+    /// It has a network stack of its own (`vnet=new`, `PR_VNET`).
+    pub(crate) const VNET: u32 = 0x0000_0010;
 }
 
 /// The `allow.mount.<fs>` flags, past the static ones (FreeBSD allocates
@@ -102,6 +104,8 @@ pub(crate) struct Settings {
     pub(crate) osreldate: i32,
     /// `jail_remove` was called, or it has no reason to live (`dying`).
     pub(crate) dying: bool,
+    /// Its own network stack was torn down (once, as it died).
+    pub(crate) vnet_gone: bool,
     /// `env` and `meta`, the free-form key-value metadata.
     pub(crate) env: Vec<u8>,
     pub(crate) meta: Vec<u8>,
@@ -124,11 +128,19 @@ pub(crate) struct Prison {
     descs: SpinLock<Vec<Arc<DescState>>>,
     /// Its root CPU set (`pr_cpuset`): set 1 for prison0.
     cpuset: i32,
+    /// Its network stack (`pr_vnet`): its own with `vnet=new`, else its
+    /// parent's.
+    vnet: Arc<net::Vnet>,
 }
 
 impl Prison {
     pub(crate) const fn id(&self) -> i32 {
         self.id
+    }
+
+    /// Its network stack.
+    pub(crate) fn vnet(&self) -> &Arc<net::Vnet> {
+        &self.vnet
     }
 
     pub(crate) fn is_prison0(&self) -> bool {
@@ -303,8 +315,18 @@ impl Prison {
             st.flags & flags::PERSIST != 0 && !st.dying
         };
         if !persist && self.procs.load(Ordering::Acquire) == 0 {
-            self.st.lock().dying = true;
+            let own_vnet = {
+                let mut st = self.st.lock();
+                let first = !st.vnet_gone;
+                st.dying = true;
+                st.vnet_gone = true;
+                first && st.flags & flags::VNET != 0
+            };
             self.started_dying();
+            // `vnet_destroy`: lent interfaces go home, its own go.
+            if own_vnet {
+                net::clone::shutdown(&self.vnet);
+            }
             // Its children go with it once theirs are gone too; those
             // with none go now.
             let mut jails = JAILS.lock();
@@ -500,6 +522,10 @@ impl Jail for Prison {
         self.st.lock().securelevel
     }
 
+    fn vnet(&self) -> bool {
+        self.st.lock().flags & flags::VNET != 0
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -536,12 +562,14 @@ pub(crate) fn prison0() -> &'static Arc<Prison> {
                 osrelease: String::from(abi::sysctl::identity::OSRELEASE),
                 osreldate: abi::sysctl::identity::OSRELDATE,
                 dying: false,
+                vnet_gone: false,
                 env: Vec::new(),
                 meta: Vec::new(),
             }),
             procs: AtomicUsize::new(0),
             descs: SpinLock::new(Vec::new()),
             cpuset: crate::cpuset::DEFAULT,
+            vnet: Arc::clone(net::vnet0()),
         }));
     }
     PRISON0.get().expect("prison0 set")
@@ -637,6 +665,8 @@ pub(crate) struct New {
     pub(crate) path: Vec<u8>,
     pub(crate) osrelease: Option<String>,
     pub(crate) osreldate: Option<i32>,
+    /// `vnet=new`: a network stack of its own.
+    pub(crate) vnet: bool,
 }
 
 /// The next free jail id (`get_next_prid`), 0 if none.
@@ -679,7 +709,7 @@ pub(crate) fn create(n: New) -> Arc<Prison> {
             domainname: Vec::new(),
             hostuuid: String::from(DEFAULT_HOSTUUID),
             hostid: 0,
-            flags: flags::HOST,
+            flags: flags::HOST | if n.vnet { flags::VNET } else { 0 },
             securelevel: ps.securelevel,
             enforce_statfs: DEFAULT_ENFORCE_STATFS,
             allow: DEFAULT_ALLOW & ps.allow,
@@ -688,12 +718,18 @@ pub(crate) fn create(n: New) -> Arc<Prison> {
             osrelease: n.osrelease.unwrap_or(ps.osrelease),
             osreldate: n.osreldate.unwrap_or(ps.osreldate),
             dying: false,
+            vnet_gone: false,
             env: Vec::new(),
             meta: Vec::new(),
         }),
         procs: AtomicUsize::new(0),
         descs: SpinLock::new(Vec::new()),
         cpuset: crate::cpuset::create_root(n.parent.cpuset()),
+        vnet: if n.vnet {
+            net::Vnet::new(crate::net::now_s())
+        } else {
+            Arc::clone(&n.parent.vnet)
+        },
     });
     let mut jails = JAILS.lock();
     let at = jails
@@ -1021,8 +1057,16 @@ pub(crate) fn sysctl_init(s: &Sleepable) {
             })),
         )
         .expect("security.jail.jailed");
-        t.add_value(jail, Number::Auto, "vnet", "Jail owns vnet?", Value::int(0))
-            .expect("security.jail.vnet");
+        t.add_value(
+            jail,
+            Number::Auto,
+            "vnet",
+            "Jail owns vnet?",
+            Value::Int(alloc::boxed::Box::new(|| {
+                i32::from(current().settings().flags & flags::VNET != 0)
+            })),
+        )
+        .expect("security.jail.vnet");
         let children = t
             .add_node(
                 jail,

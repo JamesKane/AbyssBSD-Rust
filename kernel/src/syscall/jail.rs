@@ -329,8 +329,11 @@ fn set(
             }
             ("host", JAIL_SYS_INHERIT) => ch_flags |= flags::HOST,
             ("host" | "vnet", JAIL_SYS_DISABLE) => return Err(plain(Errno::EINVAL)),
-            // No virtual network stacks.
-            ("vnet", JAIL_SYS_NEW) => return Err(plain(Errno::EINVAL)),
+            ("vnet", JAIL_SYS_NEW) => {
+                pr_flags |= flags::VNET;
+                ch_flags |= flags::VNET;
+            }
+            ("vnet", JAIL_SYS_INHERIT) => ch_flags |= flags::VNET,
             (_, JAIL_SYS_DISABLE | JAIL_SYS_NEW | JAIL_SYS_INHERIT) => {}
             _ => return Err(plain(Errno::EINVAL)),
         }
@@ -571,6 +574,7 @@ fn set(
                 path,
                 osrelease,
                 osreldate,
+                vnet: pr_flags & flags::VNET != 0,
             })
         }
     };
@@ -1115,7 +1119,12 @@ fn get(
         JAIL_SYS_INHERIT
     };
     opts.set_int("host", host).map_err(e)?;
-    opts.set_int("vnet", JAIL_SYS_INHERIT).map_err(e)?;
+    let vnet = if st.flags & flags::VNET != 0 {
+        JAIL_SYS_NEW
+    } else {
+        JAIL_SYS_INHERIT
+    };
+    opts.set_int("vnet", vnet).map_err(e)?;
     for name in ["ip4", "ip6", "sysvmsg", "sysvsem", "sysvshm"] {
         opts.set_int(name, JAIL_SYS_INHERIT).map_err(e)?;
     }
@@ -1215,6 +1224,7 @@ pub(super) fn jail(s: &Sleepable, ptr: u64) -> SysResult {
         path: global,
         osrelease: None,
         osreldate: None,
+        vnet: false,
     });
     if let Some(h) = host {
         pr.update(|st| st.hostname = h.into_bytes());

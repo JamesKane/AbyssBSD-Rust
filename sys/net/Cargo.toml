@@ -1,0 +1,17 @@
+[package]
+name = "net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+abi = { path = "../../lib/abi" }
+crypto = { path = "../../lib/crypto" }
+epoch = { path = "../epoch" }
+hal = { path = "../../arch/hal" }
+mbuf = { path = "../mbuf" }
+sync = { path = "../sync" }
+
+[lints]
+workspace = true

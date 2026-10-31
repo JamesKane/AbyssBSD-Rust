@@ -28,7 +28,8 @@ use abi::net::{iff, rtf};
 
 use crate::Family;
 use crate::addr::{In6, from_v4, is_linklocal6, v4_of};
-use crate::ifnet::{Gateway, INFINITE, Ifaddr, LO_STATS, LOMTU, NET, Net, Route};
+use crate::announce::NetLock;
+use crate::ifnet::{Gateway, INFINITE, Ifaddr, LOMTU, Net, Route};
 
 /// Netlink protocols (`NETLINK_*`) and the socket option level.
 pub const NETLINK_ROUTE: i32 = 0;
@@ -83,10 +84,10 @@ pub mod ty {
 mod ifla {
     pub(super) use abi::netlink::{
         IF_OPER_DOWN as OPER_DOWN, IF_OPER_UP as OPER_UP, IFLA_ADDRESS as ADDRESS,
-        IFLA_CARRIER as CARRIER, IFLA_FREEBSD as FREEBSD, IFLA_IFALIAS as IFALIAS,
-        IFLA_IFNAME as IFNAME, IFLA_MTU as MTU, IFLA_OPERSTATE as OPERSTATE,
-        IFLA_PROMISCUITY as PROMISCUITY, IFLA_STATS64 as STATS64, IFLAF_CAPS as CAPS,
-        IFLAF_ORIG_HWADDR as ORIG_HWADDR, NLA_BITSET_MASK as BITSET_MASK,
+        IFLA_BROADCAST as BROADCAST, IFLA_CARRIER as CARRIER, IFLA_FREEBSD as FREEBSD,
+        IFLA_IFALIAS as IFALIAS, IFLA_IFNAME as IFNAME, IFLA_MTU as MTU,
+        IFLA_OPERSTATE as OPERSTATE, IFLA_PROMISCUITY as PROMISCUITY, IFLA_STATS64 as STATS64,
+        IFLAF_CAPS as CAPS, IFLAF_ORIG_HWADDR as ORIG_HWADDR, NLA_BITSET_MASK as BITSET_MASK,
         NLA_BITSET_SIZE as BITSET_SIZE, NLA_BITSET_VALUE as BITSET_VALUE,
     };
 }
@@ -250,7 +251,7 @@ struct Outcome {
 /// Processes one written buffer of requests (`nl_process_nbuf`): every
 /// reply, in order, in one buffer.
 #[must_use]
-pub fn handle(ctx: &Ctx, packet: &[u8], now_s: u64) -> Vec<u8> {
+pub fn handle(ctx: &Ctx, net: &NetLock, packet: &[u8], now_s: u64) -> Vec<u8> {
     let mut out = Vec::new();
     let mut at = 0;
     while packet.len() - at >= 16 {
@@ -266,7 +267,7 @@ pub fn handle(ctx: &Ctx, packet: &[u8], now_s: u64) -> Vec<u8> {
         let msg = &packet[at..at + h.len];
         let mut o = Outcome::default();
         if h.flags & nlm::REQUEST != 0 && h.ty >= ty::MIN_TYPE {
-            dispatch(ctx, &h, msg, &mut out, &mut o, now_s);
+            dispatch(ctx, net, &h, msg, &mut out, &mut o, now_s);
         }
         let error = o.error;
         if !o.done && (h.flags & nlm::ACK != 0 || error.is_some()) {
@@ -317,19 +318,27 @@ fn done(ctx: &Ctx, h: &Hdr, error: Option<Errno>, out: &mut Vec<u8>, o: &mut Out
     o.error = error;
 }
 
-fn dispatch(ctx: &Ctx, h: &Hdr, msg: &[u8], out: &mut Vec<u8>, o: &mut Outcome, now_s: u64) {
+fn dispatch(
+    ctx: &Ctx,
+    net: &NetLock,
+    h: &Hdr,
+    msg: &[u8],
+    out: &mut Vec<u8>,
+    o: &mut Outcome,
+    now_s: u64,
+) {
     let body = &msg[16..];
     let r = match h.ty {
-        ty::GETLINK => getlink(ctx, h, body, out, o),
-        ty::GETADDR => getaddr(ctx, h, body, out, o),
+        ty::GETLINK => getlink(ctx, net, h, body, out, o),
+        ty::GETADDR => getaddr(ctx, net, h, body, out, o),
         ty::NEWADDR if !ctx.may_addaddr => Err(Errno::EPERM),
         ty::DELADDR if !ctx.may_deladdr => Err(Errno::EPERM),
-        ty::NEWADDR => newaddr(body, o),
-        ty::DELADDR => deladdr(body, o),
-        ty::GETROUTE => getroute(ctx, h, body, out, o),
+        ty::NEWADDR => newaddr(net, body, o),
+        ty::DELADDR => deladdr(net, body, o),
+        ty::GETROUTE => getroute(ctx, net, h, body, out, o),
         ty::NEWROUTE | ty::DELROUTE if !ctx.may_route => Err(Errno::EPERM),
-        ty::NEWROUTE => newroute(h, body, o),
-        ty::DELROUTE => delroute(body, o),
+        ty::NEWROUTE => newroute(net, h, body, o),
+        ty::DELROUTE => delroute(net, body, o),
         ty::GETNEIGH if h.flags & nlm::DUMP != 0 => {
             done(ctx, h, None, out, o);
             Ok(())
@@ -347,7 +356,12 @@ fn dispatch(ctx: &Ctx, h: &Hdr, msg: &[u8], out: &mut Vec<u8>, o: &mut Outcome, 
 fn link_msg(ctx: &Ctx, h: &Hdr, n: &Net, i: &crate::ifnet::Ifnet, multi: bool) -> Vec<u8> {
     let flags = if multi { h.flags | nlm::MULTI } else { h.flags };
     let mut m = Msg::new(ty::NEWLINK, flags, h.seq, ctx.port);
-    let up = i.flags & iff::UP != 0;
+    // `get_operstate`: an Ethernet interface's from its media, others'
+    // from `IFF_UP`.
+    let up = match i.link.0.as_ref().and_then(|l| l.media()) {
+        Some(md) if i.ty == abi::net::IFT_ETHER => md.status & crate::link::ifm::ACTIVE != 0,
+        _ => i.flags & iff::UP != 0,
+    };
     let mut ifi = [0u8; 16];
     ifi[0] = AF_UNSPEC;
     ifi[2..4].copy_from_slice(&u16::from(i.ty).to_ne_bytes());
@@ -361,11 +375,18 @@ fn link_msg(ctx: &Ctx, h: &Hdr, n: &Net, i: &crate::ifnet::Ifnet, multi: bool) -
         if up { ifla::OPER_UP } else { ifla::OPER_DOWN },
     );
     m.u8(ifla::CARRIER, u8::from(up));
+    if let Some(a) = &i.lladdr {
+        m.attr(ifla::ADDRESS, a);
+        m.attr(ifla::BROADCAST, &[0xff; 6]);
+    }
     m.u32(ifla::MTU, i.mtu);
     if let Some(d) = &i.description {
         m.string(ifla::IFALIAS, d);
     }
     let fb = m.nest(ifla::FREEBSD);
+    if let Some(a) = &i.lladdr {
+        m.attr(ifla::ORIG_HWADDR, a);
+    }
     let caps = m.nest(ifla::CAPS);
     // `IFCAP_B_SIZE` bits, two 32-bit words of each.
     m.u32(ifla::BITSET_SIZE, 64);
@@ -379,8 +400,8 @@ fn link_msg(ctx: &Ctx, h: &Hdr, n: &Net, i: &crate::ifnet::Ifnet, multi: bool) -
     m.end_nest(fb);
     // `rtnl_link_stats64`: 24 counters.
     let mut st = [0u64; 24];
-    if i.flags & iff::LOOPBACK != 0 {
-        let s = &LO_STATS;
+    {
+        let s = &i.stats;
         st[0] = s.ipackets.load(Ordering::Relaxed);
         st[1] = s.opackets.load(Ordering::Relaxed);
         st[2] = s.ibytes.load(Ordering::Relaxed);
@@ -402,6 +423,7 @@ fn link_msg(ctx: &Ctx, h: &Hdr, n: &Net, i: &crate::ifnet::Ifnet, multi: bool) -
 /// `rtnl_handle_getlink`.
 fn getlink(
     ctx: &Ctx,
+    net: &NetLock,
     h: &Hdr,
     body: &[u8],
     out: &mut Vec<u8>,
@@ -410,7 +432,7 @@ fn getlink(
     let index = rd32(body, 4);
     let a = attrs(body.get(16..).unwrap_or(&[]));
     let name = find(&a, ifla::IFNAME).map(|n| n.split(|&b| b == 0).next().unwrap_or(n));
-    let n = NET.lock();
+    let n = net.lock();
     if index != 0 || name.is_some() {
         let i = if index != 0 {
             n.ifaces.iter().find(|i| u32::from(i.index) == index)
@@ -503,6 +525,7 @@ fn addr_msg(ctx: &Ctx, h: &Hdr, i: &crate::ifnet::Ifnet, a: &Ifaddr, now_s: u64)
 /// `rtnl_handle_getaddr`.
 fn getaddr(
     ctx: &Ctx,
+    net: &NetLock,
     h: &Hdr,
     body: &[u8],
     out: &mut Vec<u8>,
@@ -510,7 +533,7 @@ fn getaddr(
 ) -> Result<(), Errno> {
     let family = body.first().copied().unwrap_or(0);
     let index = rd32(body, 4);
-    let n = NET.lock();
+    let n = net.lock();
     let mut err = None;
     if index != 0 && n.by_index(u16::try_from(index).unwrap_or(0)).is_none() {
         err = Some(Errno::ENOENT);
@@ -557,7 +580,7 @@ fn ifname(n: &Net, index: u32) -> Result<Vec<u8>, Errno> {
 
 /// `rtnl_handle_newaddr`: `handle_newaddr_inet` (`SIOCAIFADDR`) and
 /// `handle_newaddr_inet6` (`SIOCAIFADDR_IN6`).
-fn newaddr(body: &[u8], o: &mut Outcome) -> Result<(), Errno> {
+fn newaddr(net: &NetLock, body: &[u8], o: &mut Outcome) -> Result<(), Errno> {
     let family = match body.first().copied() {
         Some(AF_INET) => Family::Inet,
         Some(AF_INET6) => Family::Inet6,
@@ -593,7 +616,7 @@ fn newaddr(body: &[u8], o: &mut Outcome) -> Result<(), Errno> {
                     if pl == 0 { INFINITE } else { pl },
                 )
             });
-    let mut n = NET.lock();
+    let mut n = net.lock();
     let name = ifname(&n, index)?;
     let loopback = n
         .by_name(&name)
@@ -622,7 +645,7 @@ fn newaddr(body: &[u8], o: &mut Outcome) -> Result<(), Errno> {
 }
 
 /// `rtnl_handle_deladdr`.
-fn deladdr(body: &[u8], o: &mut Outcome) -> Result<(), Errno> {
+fn deladdr(net: &NetLock, body: &[u8], o: &mut Outcome) -> Result<(), Errno> {
     let family = match body.first().copied() {
         Some(AF_INET) => Family::Inet,
         Some(AF_INET6) => Family::Inet6,
@@ -636,7 +659,7 @@ fn deladdr(body: &[u8], o: &mut Outcome) -> Result<(), Errno> {
         o.msg = Some(b"IFA_LOCAL is not set");
         return Err(Errno::EINVAL);
     };
-    let mut n = NET.lock();
+    let mut n = net.lock();
     let name = ifname(&n, index)?;
     n.delete_addr(&name, family, Some(&addr)).map(|_| ())
 }
@@ -686,6 +709,7 @@ fn route_msg(ctx: &Ctx, h: &Hdr, r: &Route, multi: bool) -> Vec<u8> {
 /// `rtnl_handle_getroute`: a dump, or the route a destination takes.
 fn getroute(
     ctx: &Ctx,
+    net: &NetLock,
     h: &Hdr,
     body: &[u8],
     out: &mut Vec<u8>,
@@ -697,7 +721,7 @@ fn getroute(
         o.msg = Some(b"invalid fib");
         return Err(Errno::EINVAL);
     }
-    let n = NET.lock();
+    let n = net.lock();
     if h.flags & nlm::DUMP != 0 {
         let mut routes: Vec<&Route> = n
             .routes
@@ -735,7 +759,7 @@ fn getroute(
 /// `rtnl_handle_newroute`: a route to `RTA_DST/rtm_dst_len` through
 /// `RTA_GATEWAY` or out of `RTA_OIF`, rejecting or blackholing by
 /// `rtm_type`.
-fn newroute(h: &Hdr, body: &[u8], o: &mut Outcome) -> Result<(), Errno> {
+fn newroute(net: &NetLock, h: &Hdr, body: &[u8], o: &mut Outcome) -> Result<(), Errno> {
     let family = match body.first().copied() {
         Some(AF_INET) => Family::Inet,
         Some(AF_INET6) => Family::Inet6,
@@ -766,7 +790,7 @@ fn newroute(h: &Hdr, body: &[u8], o: &mut Outcome) -> Result<(), Errno> {
         .map(attrs)
         .and_then(|m| find(&m, rta::AX_MTU).map(|d| rd32(d, 0)))
         .unwrap_or(LOMTU);
-    let mut n = NET.lock();
+    let mut n = net.lock();
     // The interface: the one named, or the one the gateway is reached
     // through (or is an address of).
     let ifindex = match (oif, gw) {
@@ -832,7 +856,7 @@ fn newroute(h: &Hdr, body: &[u8], o: &mut Outcome) -> Result<(), Errno> {
 }
 
 /// `rtnl_handle_delroute`.
-fn delroute(body: &[u8], o: &mut Outcome) -> Result<(), Errno> {
+fn delroute(net: &NetLock, body: &[u8], o: &mut Outcome) -> Result<(), Errno> {
     let family = match body.first().copied() {
         Some(AF_INET) => Family::Inet,
         Some(AF_INET6) => Family::Inet6,
@@ -844,7 +868,7 @@ fn delroute(body: &[u8], o: &mut Outcome) -> Result<(), Errno> {
         o.msg = Some(b"RTA_DST is not set");
         return Err(Errno::ESRCH);
     };
-    let mut n = NET.lock();
+    let mut n = net.lock();
     let pinned = n.routes.iter().any(|x| {
         x.family == family
             && x.plen == plen

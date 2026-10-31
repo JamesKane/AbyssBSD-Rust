@@ -278,16 +278,22 @@ pub enum Priv {
     NetSetifname = 401,
     /// `PRIV_NET_SETIFMETRIC`: Set interface metrics.
     NetSetifmetric = 402,
+    /// `PRIV_NET_SETLLADDR`: Set interface link-level address.
+    NetSetlladdr = 408,
     /// `PRIV_NET_ADDIFGROUP`: Add new interface group.
     NetAddifgroup = 409,
     /// `PRIV_NET_DELIFGROUP`: Delete interface group.
     NetDelifgroup = 410,
     /// `PRIV_NET_IFCREATE`: Create cloned interface.
     NetIfcreate = 411,
+    /// `PRIV_NET_IFDESTROY`: Destroy cloned interface.
+    NetIfdestroy = 412,
     /// `PRIV_NET_ADDIFADDR`: Add protocol addr to interface.
     NetAddifaddr = 413,
     /// `PRIV_NET_DELIFADDR`: Delete protocol addr on interface.
     NetDelifaddr = 414,
+    /// `PRIV_NET_SETIFVNET`: Move interface to vnet.
+    NetSetifvnet = 417,
     /// `PRIV_NET_SETIFDESCR`: Set interface description.
     NetSetifdescr = 418,
     /// `PRIV_NETINET_RESERVEDPORT`: Bind low port number.

@@ -424,7 +424,10 @@ pub(super) fn sysarch(op: u64, _parms: u64) -> SysResult {
 }
 
 /// Modules built into the kernel, by the names `kldload` takes.
-const BUILT_IN: &[&[u8]] = &[b"geom_md"];
+/// `if_bridge` is answered as one though there are no bridges, so that
+/// `vnet.subr`'s `vnet_init` (`kldload -n if_bridge`) lets the VNET tests
+/// run (docs/compat-deviations.md); `modfind` does not find it.
+const BUILT_IN: &[&[u8]] = &[b"geom_md", b"if_epair", b"if_bridge"];
 
 /// `kldload(file)`: there are no loadable modules; one built in is
 /// `EEXIST`, as FreeBSD answers for a module compiled into its kernel.
@@ -484,6 +487,7 @@ const MODULES: &[&[u8]] = &[
     b"mem",
     b"null",
     b"if_lo",
+    b"if_epair",
     b"netlink",
     b"kbdmux",
     b"watchdog",

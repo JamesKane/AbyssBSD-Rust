@@ -26,13 +26,15 @@ use crate::addr::{
     ANY, In6, LOOPBACK6, Sockaddr, from_v4, is_broadcast4, is_multicast4, is_multicast6,
     is_unspecified, is_v4mapped, v4_of,
 };
-use crate::ifnet::NET;
 use crate::{Cred, Family, Proto, Socket, tune};
 
 /// One PCB (`struct inpcb`).
 #[derive(Debug)]
 pub struct Pcb {
     pub(crate) so: Weak<Socket>,
+    /// Its socket's VNET, whose addresses and routes it binds and
+    /// connects by.
+    pub vnet: Arc<net::Vnet>,
     /// The socket's domain.
     pub family: Family,
     /// `inp_vflag`.
@@ -162,6 +164,7 @@ impl Table {
             so.id,
             Pcb {
                 so: Arc::downgrade(so),
+                vnet: Arc::clone(&so.vnet),
                 family: so.family,
                 vflag,
                 flags,
@@ -467,7 +470,11 @@ impl Table {
             }
         } else if laddr != [0; 4]
             && me.flags & inp::BINDANY == 0
-            && !NET.lock().is_local(Family::Inet, &from_v4(laddr), 0)
+            && !me
+                .vnet
+                .net
+                .lock()
+                .is_local(Family::Inet, &from_v4(laddr), 0)
         {
             return Err(Errno::EADDRNOTAVAIL);
         }
@@ -522,7 +529,7 @@ impl Table {
             }
         } else if !is_unspecified(laddr)
             && me.flags & inp::BINDANY == 0
-            && !NET.lock().is_local(Family::Inet6, laddr, zone)
+            && !me.vnet.net.lock().is_local(Family::Inet6, laddr, zone)
         {
             return Err(Errno::EADDRNOTAVAIL);
         }
@@ -868,7 +875,11 @@ impl Table {
         }
         let me = self.pcbs.get(&id).ok_or(Errno::EINVAL)?;
         let laddr = if me.laddr4() == [0; 4] {
-            let (src, _) = NET.lock().source(Family::Inet, &from_v4(faddr), 0)?;
+            let (src, _) = me
+                .vnet
+                .net
+                .lock()
+                .source(Family::Inet, &from_v4(faddr), 0)?;
             v4_of(&src)
         } else {
             me.laddr4()
@@ -915,7 +926,7 @@ impl Table {
         let target = Sockaddr::v6(faddr, dst.port, zone);
         let me = self.pcbs.get(&id).ok_or(Errno::EINVAL)?;
         let (laddr, lzone) = if is_unspecified(&me.laddr) {
-            NET.lock().source(Family::Inet6, &faddr, zone)?
+            me.vnet.net.lock().source(Family::Inet6, &faddr, zone)?
         } else {
             (me.laddr, me.zone)
         };
@@ -964,19 +975,22 @@ impl Table {
         match dst.family {
             Family::Inet => {
                 let a = if p.laddr4() == [0; 4] {
-                    v4_of(&NET.lock().source(Family::Inet, &dst.addr, 0)?.0)
+                    v4_of(&p.vnet.net.lock().source(Family::Inet, &dst.addr, 0)?.0)
                 } else {
                     // A send from a bound address still needs a route.
-                    let _ = NET.lock().lookup(Family::Inet, &dst.addr)?;
+                    let _ = p.vnet.net.lock().lookup(Family::Inet, &dst.addr)?;
                     p.laddr4()
                 };
                 Ok(Sockaddr::v4(a, p.lport))
             }
             Family::Inet6 => {
                 let (a, z) = if is_unspecified(&p.laddr) {
-                    NET.lock().source(Family::Inet6, &dst.addr, dst.scope)?
+                    p.vnet
+                        .net
+                        .lock()
+                        .source(Family::Inet6, &dst.addr, dst.scope)?
                 } else {
-                    let n = NET.lock();
+                    let n = p.vnet.net.lock();
                     if !crate::addr::is_linklocal6(&dst.addr) {
                         let _ = n.lookup(Family::Inet6, &dst.addr)?;
                     }

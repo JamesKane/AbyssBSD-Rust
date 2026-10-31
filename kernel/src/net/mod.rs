@@ -33,7 +33,56 @@ fn random_u32() -> u32 {
     u32::from_ne_bytes(b)
 }
 
-/// Attaches `lo0` and adds the sysctls. Call once, after the sysctl tree
+/// The current thread's VNET (`curvnet`).
+pub(crate) fn curvnet() -> alloc::sync::Arc<net::Vnet> {
+    alloc::sync::Arc::clone(crate::prison::current().vnet())
+}
+
+/// The time in seconds, for interfaces' attach times.
+pub(crate) fn now_s() -> i64 {
+    i64::try_from(crate::time::realtime_ns().unwrap_or(0) / 1_000_000_000).unwrap_or(0)
+}
+
+/// Work for the `netisr` thread, and where it waits.
+static NETISR_WORK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static NETISR_WQ: sched::WaitQueue = sched::WaitQueue::new();
+
+fn netisr_kick() {
+    NETISR_WORK.store(true, core::sync::atomic::Ordering::Release);
+    NETISR_WQ.wake_one();
+}
+
+/// The `netisr` thread (`swi1: netisr 0`): hands each VNET's queued
+/// packets to their protocols.
+fn start_netisr() {
+    net::netisr::set_kick(netisr_kick);
+    let _ = sched::spawn("netisr", sched::Priority::KERNEL, |s| {
+        loop {
+            NETISR_WQ.wait_until(s, || {
+                NETISR_WORK.swap(false, core::sync::atomic::Ordering::Acquire)
+            });
+            for v in net::Vnet::all() {
+                net::netisr::drain(&v);
+            }
+        }
+    });
+}
+
+/// What a clone needs from the creating thread (`ether_gen_addr_byname`'s
+/// host UUID and jail name).
+pub(crate) fn clone_ctx() -> net::clone::Ctx {
+    let pr = crate::prison::current().settings();
+    let mut random = [0u8; 12];
+    let _ = crate::random::fill(&mut random);
+    net::clone::Ctx {
+        now: now_s(),
+        hostuuid: pr.hostuuid,
+        jail: pr.name,
+        random,
+    }
+}
+
+/// Configures `lo0` and adds the sysctls. Call once, after the sysctl tree
 /// and `kern.features` exist.
 pub(crate) fn init(s: &Sleepable) {
     inet::set_hooks(inet::Hooks {
@@ -41,7 +90,8 @@ pub(crate) fn init(s: &Sleepable) {
         random: random_u32,
     });
     let now = i64::try_from(crate::time::realtime_ns().unwrap_or(0) / 1_000_000_000).unwrap_or(0);
-    inet::ifnet::attach_loopback(now);
+    inet::ifnet::configure_loopback(&mut net::vnet0().net.lock(), now);
     splice::init();
+    start_netisr();
     sysctl::init(s);
 }

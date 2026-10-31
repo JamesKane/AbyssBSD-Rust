@@ -315,6 +315,7 @@ dependencies = [
  "abi",
  "event",
  "hal",
+ "net",
  "sync",
 ]
 
@@ -389,6 +390,7 @@ dependencies = [
  "ktest",
  "logring",
  "mbuf",
+ "net",
  "pci",
  "pt",
  "random",
@@ -447,6 +449,18 @@ version = "0.0.0"
 dependencies = [
  "abi",
  "hal",
+]
+
+[[package]]
+name = "net"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "crypto",
+ "epoch",
+ "hal",
+ "mbuf",
+ "sync",
 ]
 
 [[package]]

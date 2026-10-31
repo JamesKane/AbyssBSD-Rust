@@ -85,7 +85,7 @@ pub(super) fn socket(
     protocol: i32,
 ) -> SysResult {
     let p = proto(ty, protocol)?;
-    let so = Socket::new(family, p, &crate::fs::inet::cred());
+    let so = Socket::new_in(&crate::net::curvnet(), family, p, &crate::fs::inet::cred());
     let fd = install(s, so, flags, None)?;
     Ok(u64::from(fd.cast_unsigned()))
 }

@@ -18,7 +18,9 @@ use abi::inet::{AF_INET, AF_INET6};
 use abi::ioctl::{FIOASYNC, FIONBIO, FIONREAD, FIONSPACE, FIONWRITE};
 use abi::net::{IFNAMSIZ, iff, nd6_iff, sio};
 use inet::addr::{In6, from_v4, v4_of};
-use inet::ifnet::{INFINITE, Ifaddr, Ifnet, LOMTU, NET, Net};
+use inet::ifnet::{INFINITE, Ifaddr, Ifnet, LOMTU, Net};
+
+use super::curvnet;
 use inet::{Family, Socket};
 use sched::Sleepable;
 
@@ -187,14 +189,26 @@ pub(crate) fn ifioctl(
     let _ = s;
     match req {
         sio::SIOCGIFCONF => return ifconf(arg),
-        sio::SIOCIFCREATE2 => {
-            priv_check(Priv::NetIfcreate)?;
-            return Err(if NET.lock().by_name(name_of(arg)).is_some() {
-                Errno::EEXIST
-            } else {
-                Errno::EINVAL
-            });
+        sio::SIOCSIFVNET | sio::SIOCSIFRVNET => {
+            priv_check(Priv::NetSetifvnet)?;
+            vmove(req == sio::SIOCSIFVNET, arg)?;
+            return Ok(0);
         }
+        sio::SIOCIFCREATE | sio::SIOCIFCREATE2 => {
+            priv_check(Priv::NetIfcreate)?;
+            let name = net::clone::create(&curvnet(), name_of(arg), &super::clone_ctx())?;
+            // The name it got (`if_clone_create` copies it back).
+            arg[..IFNAMSIZ].fill(0);
+            let n = name.len().min(IFNAMSIZ - 1);
+            arg[..n].copy_from_slice(&name.as_bytes()[..n]);
+            return Ok(0);
+        }
+        sio::SIOCIFDESTROY => {
+            priv_check(Priv::NetIfdestroy)?;
+            net::clone::destroy(&curvnet(), name_of(arg))?;
+            return Ok(0);
+        }
+        sio::SIOCIFGCLONERS => return cloners(arg),
         _ => {}
     }
     match req {
@@ -214,14 +228,10 @@ pub(crate) fn ifioctl(
         | sio::SIOCSIFCAP
         | sio::SIOCSIFFIB
         | sio::SIOCSIFDESCR => return set(req, arg),
+        sio::SIOCGIFMEDIA | sio::SIOCGIFXMEDIA => return media(arg),
         // `lo_ioctl` takes none of these.
-        sio::SIOCGIFSTATUS
-        | sio::SIOCGIFMEDIA
-        | sio::SIOCGIFXMEDIA
-        | sio::SIOCGIFCAPNV
-        | sio::SIOCGLANPCP
-        | sio::SIOCGTUNFIB => {
-            ifp(&NET.lock(), arg)?;
+        sio::SIOCGIFSTATUS | sio::SIOCGIFCAPNV | sio::SIOCGLANPCP | sio::SIOCGTUNFIB => {
+            ifp(&curvnet().net.lock(), arg)?;
             return Err(Errno::EINVAL);
         }
         _ => {}
@@ -231,15 +241,98 @@ pub(crate) fn ifioctl(
         Some(Family::Inet6) => in6_control(req, arg),
         // `pr_control_notsupp`.
         None => {
-            ifp(&NET.lock(), arg)?;
+            ifp(&curvnet().net.lock(), arg)?;
             Err(Errno::EOPNOTSUPP)
         }
     }
 }
 
+/// `if_vmove_loan` (`loan`) and `if_vmove_reclaim`: moves the interface
+/// into the VNET of jail `ifr_jid` (below this one), or back from it.
+fn vmove(loan: bool, arg: &[u8]) -> Result<(), Errno> {
+    let jid = i32::from_ne_bytes(arg[IFRU..IFRU + 4].try_into().unwrap_or([0; 4]));
+    let me = curvnet();
+    let name = name_of(arg);
+    if loan && me.net.lock().by_name(name).is_none() {
+        return Err(Errno::ENXIO);
+    }
+    let pr = crate::prison::find_child(&crate::prison::current(), jid).ok_or(Errno::ENXIO)?;
+    let there = pr.vnet();
+    if !loan && there.net.lock().by_name(name).is_none() {
+        return Err(Errno::ENXIO);
+    }
+    if alloc::sync::Arc::ptr_eq(there, &me) {
+        return Err(Errno::EEXIST);
+    }
+    if loan {
+        net::clone::vmove(&me, name, there)
+    } else {
+        net::clone::vmove(there, name, &me)
+    }
+}
+
+/// `if_clone_list`: the cloners' names, `IFNAMSIZ` bytes each, as many
+/// as `ifcr_count` asks for, and how many there are.
+fn cloners(arg: &mut [u8]) -> Result<usize, Errno> {
+    let count = i32::from_ne_bytes(arg[4..8].try_into().unwrap_or([0; 4]));
+    let buf = u64::from_ne_bytes(arg[8..16].try_into().unwrap_or([0; 8]));
+    let count = usize::try_from(count).map_err(|_| Errno::EINVAL)?;
+    let all = net::clone::CLONERS;
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        reason = "two"
+    )]
+    arg[0..4].copy_from_slice(&(all.len() as i32).to_ne_bytes());
+    if buf != 0 {
+        let n = count.min(all.len());
+        let mut out = alloc::vec![0u8; n * IFNAMSIZ];
+        for (i, c) in all.iter().take(n).enumerate() {
+            out[i * IFNAMSIZ..i * IFNAMSIZ + c.len()].copy_from_slice(c.as_bytes());
+        }
+        crate::uaccess::copy_out(buf, &out).map_err(|_| Errno::EFAULT)?;
+    }
+    Ok(0)
+}
+
+/// `ifmedia_ioctl`'s `SIOCGIFMEDIA` (`struct ifmediareq`): the current,
+/// active, and status words, and the supported ones into `ifm_ulist` as
+/// far as `ifm_count` allows (`E2BIG` if not all fit).
+fn media(arg: &mut [u8]) -> Result<usize, Errno> {
+    let m = {
+        let vn = curvnet();
+        let n = vn.net.lock();
+        let i = ifp(&n, arg)?;
+        i.link
+            .0
+            .as_ref()
+            .and_then(|l| l.media())
+            .ok_or(Errno::EINVAL)?
+    };
+    let count = i32::from_ne_bytes(arg[32..36].try_into().unwrap_or([0; 4]));
+    let ulist = u64::from_ne_bytes(arg[40..48].try_into().unwrap_or([0; 8]));
+    if count < 0 {
+        return Err(Errno::EINVAL);
+    }
+    for (at, v) in [
+        (16, m.current),
+        (20, 0),
+        (24, m.status),
+        (28, m.active),
+        (32, 1),
+    ] {
+        arg[at..at + 4].copy_from_slice(&v.to_ne_bytes());
+    }
+    if count > 0 {
+        crate::uaccess::copy_out(ulist, &m.supported.to_ne_bytes()).map_err(|_| Errno::EFAULT)?;
+    }
+    Ok(0)
+}
+
 /// `ifhwioctl`'s reads.
 fn get(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
-    let n = NET.lock();
+    let vn = curvnet();
+    let n = vn.net.lock();
     let i = ifp(&n, arg)?;
     match req {
         sio::SIOCGIFINDEX => {
@@ -321,12 +414,14 @@ fn set(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
             priv_check(Priv::NetSetifflags)?;
             let lo = u32::from(u16::from_ne_bytes([arg[IFRU], arg[IFRU + 1]]));
             let hi = u32::from(u16::from_ne_bytes([arg[IFRU + 2], arg[IFRU + 3]]));
-            NET.lock().set_flags(&name, lo | (hi << 16))?;
+            curvnet().net.lock().set_flags(&name, lo | (hi << 16))?;
         }
         sio::SIOCSIFMETRIC => {
             priv_check(Priv::NetSetifmetric)?;
             let v = rd32(arg, IFRU);
-            NET.lock()
+            curvnet()
+                .net
+                .lock()
                 .with_iface(&name, |i| i.metric = v)
                 .ok_or(Errno::ENXIO)?;
         }
@@ -335,17 +430,20 @@ fn set(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
             let v = rd32(arg, IFRU);
             // `lo_ioctl`: up to `LOMAXMTU`; `ifhwioctl`: at least 72.
             if !(72..=LOMAXMTU).contains(&v) {
-                ifp(&NET.lock(), arg)?;
+                ifp(&curvnet().net.lock(), arg)?;
                 return Err(Errno::EINVAL);
             }
-            NET.lock()
+            curvnet()
+                .net
+                .lock()
                 .with_iface(&name, |i| i.mtu = v)
                 .ok_or(Errno::ENXIO)?;
         }
         sio::SIOCSIFCAP => {
             priv_check(Priv::NetSetifcap)?;
             let want = rd32(arg, IFRU);
-            let mut n = NET.lock();
+            let vn = curvnet();
+            let mut n = vn.net.lock();
             let i = n.by_name(&name).ok_or(Errno::ENXIO)?;
             if want & !i.capabilities != 0 {
                 return Err(Errno::EINVAL);
@@ -353,7 +451,7 @@ fn set(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
             n.with_iface(&name, |i| i.capenable = want);
         }
         sio::SIOCSIFFIB => {
-            ifp(&NET.lock(), arg)?;
+            ifp(&curvnet().net.lock(), arg)?;
             if rd32(arg, IFRU) != 0 {
                 return Err(Errno::EINVAL);
             }
@@ -375,7 +473,9 @@ fn set(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
                 b.truncate(end);
                 Some(b)
             };
-            NET.lock()
+            curvnet()
+                .net
+                .lock()
                 .with_iface(&name, |i| i.description = d)
                 .ok_or(Errno::ENXIO)?;
         }
@@ -392,7 +492,8 @@ fn ifconf(arg: &mut [u8]) -> Result<usize, Errno> {
     let ptr = u64::from_ne_bytes(arg[8..16].try_into().unwrap_or([0; 8]));
     let mut out = Vec::new();
     {
-        let n = NET.lock();
+        let vn = curvnet();
+        let n = vn.net.lock();
         for i in &n.ifaces {
             let mut entries = alloc::vec![inet::rtmsg::link_sockaddr(i)];
             for a in &i.addrs {
@@ -455,7 +556,8 @@ fn in_control(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
     let name = name_of(arg).to_vec();
     match req {
         sio::SIOCGIFADDR | sio::SIOCGIFNETMASK | sio::SIOCGIFDSTADDR | sio::SIOCGIFBRDADDR => {
-            let n = NET.lock();
+            let vn = curvnet();
+            let n = vn.net.lock();
             let i = ifp(&n, arg)?;
             let a = first4(i, req_addr4(arg, IFRU)).ok_or(Errno::EADDRNOTAVAIL)?;
             let sa = match req {
@@ -486,7 +588,8 @@ fn in_control(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
             let mask = arg
                 .get(48 + 4..48 + 8)
                 .filter(|_| arg[49] == AF_INET || arg[48] != 0);
-            let mut n = NET.lock();
+            let vn = curvnet();
+            let mut n = vn.net.lock();
             let i = ifp(&n, arg)?;
             let loopback = i.flags & iff::LOOPBACK != 0;
             let p2p = i.flags & iff::POINTOPOINT != 0;
@@ -516,12 +619,14 @@ fn in_control(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
         sio::SIOCDIFADDR => {
             priv_check(Priv::NetDelifaddr)?;
             let addr = req_addr4(arg, IFRU).map(from_v4);
-            NET.lock()
+            curvnet()
+                .net
+                .lock()
                 .delete_addr(&name, Family::Inet, addr.as_ref())
                 .map(|_| 0)
         }
         _ => {
-            ifp(&NET.lock(), arg)?;
+            ifp(&curvnet().net.lock(), arg)?;
             Err(Errno::EINVAL)
         }
     }
@@ -546,7 +651,8 @@ fn in6_control(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
             priv_check(Priv::NetinetNd6)?;
             let v = u64::from_ne_bytes(arg[IFNAMSIZ..IFNAMSIZ + 8].try_into().unwrap_or([0; 8]));
             if v != 0
-                && NET
+                && curvnet()
+                    .net
                     .lock()
                     .by_index(u16::try_from(v).map_err(|_| Errno::EINVAL)?)
                     .is_none()
@@ -558,7 +664,8 @@ fn in6_control(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
             Ok(0)
         }
         sio::SIOCGIFINFO_IN6 => {
-            let n = NET.lock();
+            let vn = curvnet();
+            let n = vn.net.lock();
             let i = ifp(&n, arg)?;
             let ndi = abi::net::NdIfinfo {
                 linkmtu: i.mtu,
@@ -579,7 +686,8 @@ fn in6_control(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
         sio::SIOCSIFINFO_IN6 => {
             priv_check(Priv::NetinetNd6)?;
             let flags = rd32(arg, IFNAMSIZ + 20);
-            let mut n = NET.lock();
+            let vn = curvnet();
+            let mut n = vn.net.lock();
             let i = ifp(&n, arg)?;
             let index = i.index;
             let was = i.nd6_flags;
@@ -601,7 +709,8 @@ fn in6_control(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
         | sio::SIOCGIFNETMASK_IN6
         | sio::SIOCGIFDSTADDR_IN6 => {
             let want = req_addr6(arg, IFRU);
-            let n = NET.lock();
+            let vn = curvnet();
+            let n = vn.net.lock();
             let i = ifp(&n, arg)?;
             let a = find6(i, want.as_ref()).ok_or(Errno::EADDRNOTAVAIL)?;
             let u = &mut arg[IFRU..];
@@ -638,7 +747,7 @@ fn in6_control(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
             Ok(0)
         }
         sio::SIOCGIFSTAT_IN6 | sio::SIOCGIFSTAT_ICMP6 => {
-            ifp(&NET.lock(), arg)?;
+            ifp(&curvnet().net.lock(), arg)?;
             arg[IFRU..].fill(0);
             Ok(0)
         }
@@ -657,7 +766,7 @@ fn in6_control(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
             if plen > 128 {
                 return Err(Errno::EINVAL);
             }
-            NET.lock().add_addr(
+            curvnet().net.lock().add_addr(
                 &name,
                 Ifaddr {
                     family: Family::Inet6,
@@ -676,12 +785,14 @@ fn in6_control(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
         sio::SIOCDIFADDR_IN6 => {
             priv_check(Priv::NetDelifaddr)?;
             let addr = req_addr6(arg, IFRU).ok_or(Errno::EADDRNOTAVAIL)?;
-            NET.lock()
+            curvnet()
+                .net
+                .lock()
                 .delete_addr(&name, Family::Inet6, Some(&addr))
                 .map(|_| 0)
         }
         _ => {
-            ifp(&NET.lock(), arg)?;
+            ifp(&curvnet().net.lock(), arg)?;
             Err(Errno::EINVAL)
         }
     }

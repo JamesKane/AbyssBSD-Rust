@@ -4098,7 +4098,7 @@ ktest! {
             port: 1,
             ..inet::netlink::Ctx::default()
         };
-        let reply = inet::netlink::handle(&ctx, &req, 0);
+        let reply = inet::netlink::handle(&ctx, &net::vnet0().net, &req, 0);
         assert_eq!(
             u16::from_ne_bytes([reply[4], reply[5]]),
             abi::netlink::RTM_NEWLINK

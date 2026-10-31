@@ -101,6 +101,9 @@ pub(super) fn socket(s: &Sleepable, domain: u64, ty: u64, protocol: u64) -> SysR
     if d == i32::from(abi::inet::AF_NETLINK) {
         return super::netlink::socket(s, raw & !tflags, tflags, int(protocol));
     }
+    if d == i32::from(abi::inet::AF_ROUTE) {
+        return super::netlink::socket_route(s, raw & !tflags, tflags, int(protocol));
+    }
     if d != i32::from(AF_UNIX) {
         return Err(Errno::EAFNOSUPPORT);
     }

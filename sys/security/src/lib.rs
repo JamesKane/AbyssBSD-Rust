@@ -80,6 +80,10 @@ pub trait Jail: Send + Sync + core::fmt::Debug {
     fn enforce_statfs(&self) -> i32;
     /// Its securelevel, never below its parent's (`pr_securelevel`).
     fn securelevel(&self) -> i32;
+    /// Whether it has a network stack of its own (`PR_VNET`).
+    fn vnet(&self) -> bool {
+        false
+    }
     /// For the kernel to reach its own prison.
     fn as_any(&self) -> &dyn Any;
 }
@@ -368,6 +372,33 @@ impl Cred {
                 Err(Errno::EPERM)
             }
         };
+        // A VNET jail administers its own network stack.
+        if j.vnet()
+            && matches!(
+                p,
+                Priv::NetRoute
+                    | Priv::NetSetifmtu
+                    | Priv::NetSetifflags
+                    | Priv::NetSetifcap
+                    | Priv::NetSetifdescr
+                    | Priv::NetSetifname
+                    | Priv::NetSetifmetric
+                    | Priv::NetSetlladdr
+                    | Priv::NetAddifgroup
+                    | Priv::NetDelifgroup
+                    | Priv::NetIfcreate
+                    | Priv::NetIfdestroy
+                    | Priv::NetAddifaddr
+                    | Priv::NetDelifaddr
+                    | Priv::NetSetifvnet
+                    | Priv::NetinetRaw
+                    | Priv::NetinetAddrctl6
+                    | Priv::NetinetNd6
+                    | Priv::NetinetBindany
+            )
+        {
+            return Ok(());
+        }
         match p {
             Priv::Ktrace
             | Priv::CredSetcred

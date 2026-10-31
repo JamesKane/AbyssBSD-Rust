@@ -55,12 +55,15 @@ pub mod iff {
 pub mod ifcap {
     pub const RXCSUM: u32 = 1 << 0;
     pub const TXCSUM: u32 = 1 << 1;
+    pub const VLAN_MTU: u32 = 1 << 3;
+    pub const VLAN_HWTAGGING: u32 = 1 << 4;
     pub const LINKSTATE: u32 = 1 << 19;
     pub const RXCSUM_IPV6: u32 = 1 << 21;
     pub const TXCSUM_IPV6: u32 = 1 << 22;
 }
 
-/// `IFT_LOOP`, `LINK_STATE_UP`.
+/// `IFT_ETHER`, `IFT_LOOP`, `LINK_STATE_UP`.
+pub const IFT_ETHER: u8 = 0x6;
 pub const IFT_LOOP: u8 = 0x18;
 pub const LINK_STATE_UNKNOWN: u8 = 0;
 pub const LINK_STATE_DOWN: u8 = 1;
@@ -363,6 +366,12 @@ pub mod rta {
     pub const AUTHOR: i32 = 0x40;
     pub const BRD: i32 = 0x80;
 }
+/// `rtm_inits` bits (`RTV_*`).
+pub mod rtv {
+    pub const MTU: u64 = 0x1;
+    pub const EXPIRE: u64 = 0x4;
+    pub const WEIGHT: u64 = 0x100;
+}
 /// Route flags (`RTF_*`).
 pub mod rtf {
     pub const UP: i32 = 0x1;
@@ -372,6 +381,10 @@ pub mod rtf {
     pub const DONE: i32 = 0x40;
     pub const STATIC: i32 = 0x800;
     pub const BLACKHOLE: i32 = 0x1000;
+    pub const PROTO2: i32 = 0x4000;
+    pub const PROTO1: i32 = 0x8000;
+    pub const PROTO3: i32 = 0x4_0000;
+    pub const FIXEDMTU: i32 = 0x8_0000;
     pub const PINNED: i32 = 0x10_0000;
     pub const LOCAL: i32 = 0x20_0000;
 }
@@ -463,7 +476,12 @@ pub mod sio {
     pub const SIOCGIFFIB: u32 = ioc(INOUT, b'i', 92, IFREQ);
     pub const SIOCSIFFIB: u32 = ioc(IN, b'i', 93, IFREQ);
     pub const SIOCGTUNFIB: u32 = ioc(INOUT, b'i', 94, IFREQ);
+    pub const SIOCSIFVNET: u32 = ioc(INOUT, b'i', 90, IFREQ);
+    pub const SIOCSIFRVNET: u32 = ioc(INOUT, b'i', 91, IFREQ);
+    pub const SIOCIFCREATE: u32 = ioc(INOUT, b'i', 122, IFREQ);
     pub const SIOCIFCREATE2: u32 = ioc(INOUT, b'i', 124, IFREQ);
+    /// `struct if_clonereq`: `ifcr_total`, `ifcr_count`, `ifcr_buffer`.
+    pub const SIOCIFGCLONERS: u32 = ioc(INOUT, b'i', 120, 16);
     pub const SIOCIFDESTROY: u32 = ioc(IN, b'i', 121, IFREQ);
     pub const SIOCAIFGROUP: u32 = ioc(IN, b'i', 135, size_of::<Ifgroupreq>());
     pub const SIOCGIFGROUP: u32 = ioc(INOUT, b'i', 136, size_of::<Ifgroupreq>());
@@ -518,9 +536,16 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("IFF_CANTCHANGE", "net/if.h", iff::CANTCHANGE as i64),
     c("IFCAP_RXCSUM", "net/if.h", ifcap::RXCSUM as i64),
     c("IFCAP_TXCSUM", "net/if.h", ifcap::TXCSUM as i64),
+    c("IFCAP_VLAN_MTU", "net/if.h", ifcap::VLAN_MTU as i64),
+    c(
+        "IFCAP_VLAN_HWTAGGING",
+        "net/if.h",
+        ifcap::VLAN_HWTAGGING as i64,
+    ),
     c("IFCAP_LINKSTATE", "net/if.h", ifcap::LINKSTATE as i64),
     c("IFCAP_RXCSUM_IPV6", "net/if.h", ifcap::RXCSUM_IPV6 as i64),
     c("IFCAP_TXCSUM_IPV6", "net/if.h", ifcap::TXCSUM_IPV6 as i64),
+    c("IFT_ETHER", "net/if_types.h", IFT_ETHER as i64),
     c("IFT_LOOP", "net/if_types.h", IFT_LOOP as i64),
     c("LINK_STATE_UNKNOWN", "net/if.h", LINK_STATE_UNKNOWN as i64),
     c("LINK_STATE_DOWN", "net/if.h", LINK_STATE_DOWN as i64),
@@ -548,6 +573,13 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("RTF_STATIC", "net/route.h", rtf::STATIC as i64),
     c("RTF_BLACKHOLE", "net/route.h", rtf::BLACKHOLE as i64),
     c("RTF_PINNED", "net/route.h", rtf::PINNED as i64),
+    c("RTF_PROTO1", "net/route.h", rtf::PROTO1 as i64),
+    c("RTF_PROTO2", "net/route.h", rtf::PROTO2 as i64),
+    c("RTF_PROTO3", "net/route.h", rtf::PROTO3 as i64),
+    c("RTF_FIXEDMTU", "net/route.h", rtf::FIXEDMTU as i64),
+    c("RTV_MTU", "net/route.h", rtv::MTU as i64),
+    c("RTV_EXPIRE", "net/route.h", rtv::EXPIRE as i64),
+    c("RTV_WEIGHT", "net/route.h", rtv::WEIGHT as i64),
     c("RTF_LOCAL", "net/route.h", rtf::LOCAL as i64),
     c("NET_RT_DUMP", "sys/socket.h", net_rt::DUMP as i64),
     c("NET_RT_FLAGS", "sys/socket.h", net_rt::FLAGS as i64),
@@ -668,7 +700,11 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("SIOCGIFFIB", "sys/sockio.h", sio::SIOCGIFFIB as i64),
     c("SIOCSIFFIB", "sys/sockio.h", sio::SIOCSIFFIB as i64),
     c("SIOCGTUNFIB", "sys/sockio.h", sio::SIOCGTUNFIB as i64),
+    c("SIOCSIFVNET", "sys/sockio.h", sio::SIOCSIFVNET as i64),
+    c("SIOCSIFRVNET", "sys/sockio.h", sio::SIOCSIFRVNET as i64),
+    c("SIOCIFCREATE", "sys/sockio.h", sio::SIOCIFCREATE as i64),
     c("SIOCIFCREATE2", "sys/sockio.h", sio::SIOCIFCREATE2 as i64),
+    c("SIOCIFGCLONERS", "sys/sockio.h", sio::SIOCIFGCLONERS as i64),
     c("SIOCIFDESTROY", "sys/sockio.h", sio::SIOCIFDESTROY as i64),
     c("SIOCAIFGROUP", "sys/sockio.h", sio::SIOCAIFGROUP as i64),
     c("SIOCGIFGROUP", "sys/sockio.h", sio::SIOCGIFGROUP as i64),

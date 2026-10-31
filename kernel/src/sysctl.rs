@@ -633,6 +633,7 @@ const FEATURES: &[(&str, &str)] = &[
     ("softupdates", "FFS soft-updates support"),
     ("evdev", "Input event devices support"),
     ("evdev_support", "evdev support in legacy drivers"),
+    ("vimage", "VIMAGE kernel virtualization"),
 ];
 
 /// Adds `kern.features`.

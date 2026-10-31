@@ -34,7 +34,7 @@ use abi::socket::{SHUT_RD, SHUT_RDWR, SHUT_WR, SO_ACCEPTCONN, SO_LINGER, SO_OOBI
 use crate::addr::{
     self, Sockaddr, is_broadcast4, is_multicast4, is_multicast6, is_v4mapped, v4_of,
 };
-use crate::ifnet::{LO_STATS, LOMTU};
+use crate::ifnet::LOMTU;
 use crate::pcb::TCB;
 use crate::{Cred, Family, Inner, Proto, Socket, lock2, tune};
 
@@ -304,7 +304,7 @@ fn push(a_so: &Arc<Socket>, a: &mut Inner, b_so: &Arc<Socket>, b: &mut Inner, fx
                 b.rcv.cc += n32;
                 b.rcv.mbcnt = crate::mbuf_cost(b.stream.len());
                 a.snd.mbcnt = crate::mbuf_cost(a.sndq.len());
-                LO_STATS.looped(n + 40);
+                a_so.vnet.lo.looped(n + 40);
                 fx.wake.push(Arc::clone(b_so));
                 fx.wake.push(Arc::clone(a_so));
             }
@@ -460,7 +460,9 @@ impl Socket {
             t.state = Tstate::SynSent;
             t.maxseg = mss;
         }
-        LO_STATS.looped(if family == Family::Inet { 60 } else { 80 });
+        self.vnet
+            .lo
+            .looped(if family == Family::Inet { 60 } else { 80 });
         let made = match listener {
             Some(l) if l.is_listening() => self.join(&l, &src, &dst, family),
             _ => Err(Errno::ECONNREFUSED),
@@ -554,7 +556,7 @@ impl Socket {
             uid,
             ..Cred::default()
         };
-        let s = Socket::with_buffers(l.family, Proto::Tcp, &cred, rcv, snd);
+        let s = Socket::with_buffers(&l.vnet, l.family, Proto::Tcp, &cred, rcv, snd);
         s.options
             .store(l.so_options() & !SO_ACCEPTCONN, Ordering::Relaxed);
         {
@@ -962,7 +964,7 @@ impl Socket {
                         b.rcv.cc += n32;
                         b.rcv.mbcnt = crate::mbuf_cost(b.stream.len());
                         tcb(&mut b).rcvtime = crate::now();
-                        LO_STATS.looped(now + 40);
+                        self.vnet.lo.looped(now + 40);
                         fx.wake.push(Arc::clone(&peer));
                     }
                     if n > now {

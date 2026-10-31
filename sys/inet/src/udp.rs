@@ -17,7 +17,6 @@ use abi::inet::{inp, ss};
 use abi::socket::{MSG_TRUNC, SHUT_RD, SHUT_RDWR, SHUT_WR, SO_BINTIME, SO_BROADCAST, SO_TIMESTAMP};
 
 use crate::addr::{self, Sockaddr, is_broadcast4, is_unspecified, is_v4mapped, v4_of};
-use crate::ifnet::LO_STATS;
 use crate::pcb::UDB;
 use crate::{Cred, Family, MSIZE, Socket, mbuf_cost};
 
@@ -228,7 +227,7 @@ impl Socket {
             Family::Inet => 28,
             Family::Inet6 => 48,
         };
-        LO_STATS.looped(data.len() + hdr);
+        self.vnet.lo.looped(data.len() + hdr);
         let (ttl, tos) = {
             let i = self.inner.lock();
             match family {
@@ -313,7 +312,8 @@ impl Socket {
         {
             let mut i = self.inner.lock();
             if cc > i.rcv.space() {
-                LO_STATS
+                self.vnet
+                    .lo
                     .iqdrops
                     .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 return;

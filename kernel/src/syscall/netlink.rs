@@ -46,6 +46,33 @@ pub(super) fn socket(s: &Sleepable, ty: u32, flags: u32, protocol: i32) -> SysRe
     Ok(u64::from(fd.cast_unsigned()))
 }
 
+/// `socket(PF_ROUTE, SOCK_RAW, af)`: a routing socket hearing `af`.
+pub(super) fn socket_route(s: &Sleepable, ty: u32, flags: u32, protocol: i32) -> SysResult {
+    if ty != SOCK_RAW {
+        return Err(Errno::EPROTOTYPE);
+    }
+    let af = u8::try_from(protocol).map_err(|_| Errno::EPROTONOSUPPORT)?;
+    let p = process()?;
+    let c = p.cred();
+    let nl = NetlinkFile::new_route(af, ty, c.euid(), c.egid());
+    let status = FREAD
+        | FWRITE
+        | if flags & SOCK_NONBLOCK != 0 {
+            O_NONBLOCK
+        } else {
+            0
+        };
+    let fdf = FdFlags {
+        cloexec: flags & SOCK_CLOEXEC != 0,
+        clofork: flags & SOCK_CLOFORK != 0,
+        resolve_beneath: false,
+    };
+    let limit = super::io::max_files(&p);
+    let file = File::new(FileKind::Netlink(nl), status)?;
+    let fd = p.files.lock(s).alloc_with(file, fdf, None, 0, limit)?;
+    Ok(u64::from(fd.cast_unsigned()))
+}
+
 /// Whether `f` is a netlink socket.
 pub(super) fn is_netlink(f: &File) -> bool {
     matches!(f.kind(), FileKind::Netlink(_))

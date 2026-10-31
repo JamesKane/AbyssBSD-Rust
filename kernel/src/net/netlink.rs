@@ -10,7 +10,13 @@
 //! no `carp`, `pfsync`, or `wlan` here). Group subscriptions are
 //! recorded but no notifications are sent.
 //!
-//! Behavior reference: sys/netlink/netlink_domain.c (`nl_attach`,
+//! Routing sockets (`PF_ROUTE`, `SOCK_RAW`) are the same machinery with
+//! one message per record: a write is a routing request
+//! ([`net::rtsock::request`]), whose reply goes to every routing socket of
+//! the VNET as its announcement, and they hear the VNET's changes.
+//!
+//! Behavior reference: sys/net/rtsock.c (`rts_attach`, `rts_send`,
+//! `rt_dispatch`), sys/netlink/netlink_domain.c (`nl_attach`,
 //! `nl_bind`, `nl_assign_port`, `nl_ctloutput`, `nl_soreceive`),
 //! sys/netlink/netlink_io.c.
 
@@ -55,11 +61,18 @@ struct State {
     msg_info: bool,
     groups: u64,
     port: u32,
+    /// A routing socket hears its own replies (`SO_USELOOPBACK`, on by
+    /// default: `rts_attach`).
+    useloopback: bool,
 }
 
 /// A netlink socket (`struct nlpcb`).
 pub(crate) struct Nl {
     pub(crate) proto: i32,
+    /// A routing socket, and the family it hears (0: all).
+    route: Option<u8>,
+    /// Its creator's VNET (`so_vnet`), which its requests read and change.
+    vnet: Arc<net::Vnet>,
     pub(crate) ty: u32,
     state: SpinLock<State>,
     rd: Notify,
@@ -100,9 +113,20 @@ impl NetlinkFile {
         if proto != NETLINK_ROUTE && proto != NETLINK_GENERIC {
             return Err(Errno::EPROTONOSUPPORT);
         }
-        Ok(Self {
+        Ok(Self::make(proto, None, ty, pid, uid, gid))
+    }
+
+    /// `rts_attach`: a routing socket hearing family `af` (0: all).
+    pub(crate) fn new_route(af: u8, ty: u32, uid: u32, gid: u32) -> Self {
+        Self::make(i32::from(af), Some(af), ty, 0, uid, gid)
+    }
+
+    fn make(proto: i32, route: Option<u8>, ty: u32, pid: u32, uid: u32, gid: u32) -> Self {
+        let f = Self {
             nl: Arc::new(Nl {
+                route,
                 proto,
+                vnet: super::curvnet(),
                 ty,
                 state: SpinLock::new(State {
                     queue: VecDeque::new(),
@@ -116,13 +140,18 @@ impl NetlinkFile {
                     msg_info: false,
                     groups: 0,
                     port: assign_port(pid),
+                    useloopback: true,
                 }),
                 rd: Notify::new(),
                 wr: Notify::new(),
             }),
             uid,
             gid,
-        })
+        };
+        // It hears its VNET's changes while it is open.
+        let l: Arc<dyn net::announce::Listener> = Arc::clone(&f.nl) as _;
+        f.nl.vnet.net.listen(&l);
+        f
     }
 
     pub(crate) fn stat(&self) -> Stat {
@@ -210,6 +239,9 @@ impl Nl {
     /// Processes requests, queueing the replies.
     pub(crate) fn process(&self, buf: &[u8]) -> Result<(), Errno> {
         use crate::cred::Priv;
+        if self.route.is_some() {
+            return self.route_request(buf);
+        }
         let (ctx, rcvbuf) = {
             let st = self.state.lock();
             (
@@ -225,7 +257,12 @@ impl Nl {
             )
         };
         let replies = if self.proto == NETLINK_ROUTE {
-            inet::netlink::handle(&ctx, buf, crate::time::now_ns() / 1_000_000_000)
+            inet::netlink::handle(
+                &ctx,
+                &self.vnet.net,
+                buf,
+                crate::time::now_ns() / 1_000_000_000,
+            )
         } else {
             generic(&ctx, buf)
         };
@@ -246,10 +283,59 @@ impl Nl {
         Ok(())
     }
 
+    /// `rts_send`: one routing request, its reply sent to every routing
+    /// socket of the VNET (this one's only with `SO_USELOOPBACK`).
+    fn route_request(&self, buf: &[u8]) -> Result<(), Errno> {
+        let may = crate::fs::priv_check(crate::cred::Priv::NetRoute).is_ok();
+        let pid = crate::proc::Process::current().map_or(0, |p| p.pid());
+        let mut n = self.vnet.net.lock();
+        let (reply, r) = net::rtsock::request(&mut n, buf, pid, may);
+        if !reply.is_empty() {
+            let family = buf
+                .get(core::mem::size_of::<abi::net::RtMsghdr>() + 1)
+                .and_then(|af| net::Family::from_af(*af));
+            n.outbox.push(net::announce::Event::Reply {
+                family,
+                msg: reply,
+                from: core::ptr::from_ref(self).addr(),
+            });
+        }
+        drop(n);
+        r
+    }
+
+    /// Queues a record for the reader, unless it is full.
+    fn queue(&self, rec: Vec<u8>) {
+        {
+            let mut st = self.state.lock();
+            if st.queued + rec.len() > st.rcvbuf as usize {
+                return;
+            }
+            st.queued += rec.len();
+            st.queue.push_back(rec);
+        }
+        self.rd.notify(0);
+    }
+
     /// One look: whole messages of the next record to `max` bytes (the
-    /// first cut short, `MSG_TRUNC`, if none fits).
+    /// first cut short, `MSG_TRUNC`, if none fits); a routing socket's
+    /// record is one message.
     fn take(&self, max: usize, peek: bool) -> Result<(Vec<u8>, i32), Errno> {
         let mut st = self.state.lock();
+        if self.route.is_some() {
+            let rec = if peek {
+                st.queue.front().cloned()
+            } else {
+                st.queue.pop_front()
+            };
+            let mut rec = rec.ok_or(Errno::EAGAIN)?;
+            if !peek {
+                st.queued -= rec.len();
+            }
+            let flags = if rec.len() > max { MSG_TRUNC } else { 0 };
+            rec.truncate(max);
+            return Ok((rec, flags));
+        }
         let Some(front) = st.queue.front_mut() else {
             return Err(Errno::EAGAIN);
         };
@@ -380,6 +466,7 @@ impl Nl {
                     st.rcvtimeo = sec.cast_unsigned() * 1_000_000_000 + usec.cast_unsigned() * 1000;
                 }
             }
+            (SOL_SOCKET, abi::socket::SO_USELOOPBACK) => st.useloopback = int()? != 0,
             (SOL_SOCKET, _) => {}
             (SOL_NETLINK, _) => return Err(Errno::ENOPROTOOPT),
             _ => return Err(Errno::ENOPROTOOPT),
@@ -402,7 +489,9 @@ impl Nl {
             (SOL_SOCKET, SO_SNDBUF) => i(st.sndbuf.cast_signed()),
             (SOL_SOCKET, SO_TYPE) => i(self.ty.cast_signed()),
             (SOL_SOCKET, SO_PROTOCOL) => i(self.proto),
+            (SOL_SOCKET, SO_DOMAIN) if self.route.is_some() => i(i32::from(abi::inet::AF_ROUTE)),
             (SOL_SOCKET, SO_DOMAIN) => i(i32::from(abi::inet::AF_NETLINK)),
+            (SOL_SOCKET, abi::socket::SO_USELOOPBACK) => b(st.useloopback),
             (SOL_SOCKET, SO_ERROR) => i(0),
             _ => return Err(Errno::ENOPROTOOPT),
         })
@@ -473,5 +562,26 @@ impl Filter for NlFilter {
             nl: Arc::clone(&self.nl),
             read: self.read,
         }))
+    }
+}
+
+impl net::announce::Listener for Nl {
+    fn event(&self, e: &net::announce::Event) {
+        let Some(af) = self.route else {
+            return;
+        };
+        if let net::announce::Event::Reply { from, .. } = e
+            && *from == core::ptr::from_ref(self).addr()
+            && !self.state.lock().useloopback
+        {
+            return;
+        }
+        let Some((family, msg)) = net::rtsock::announce(e) else {
+            return;
+        };
+        if af != 0 && family.is_some_and(|f| f.af() != af) {
+            return;
+        }
+        self.queue(msg);
     }
 }

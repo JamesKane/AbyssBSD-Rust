@@ -532,7 +532,8 @@ pub(crate) fn init(s: &Sleepable) {
             "Maximum known interface index",
             Value::Int(Box::new(|| {
                 i32::from(
-                    inet::ifnet::NET
+                    super::curvnet()
+                        .net
                         .lock()
                         .ifaces
                         .iter()
@@ -606,7 +607,8 @@ fn rtsock(r: &[i32], out: &mut Vec<u8>) -> Result<(), ReadError> {
     }
     let af = u8::try_from(r[0]).map_err(|_| ReadError::Failed(Errno::EINVAL))?;
     let arg = r[2];
-    let n = inet::ifnet::NET.lock();
+    let vn = super::curvnet();
+    let n = vn.net.lock();
     match op {
         net_rt::DUMP | net_rt::FLAGS => {
             if op == net_rt::FLAGS {

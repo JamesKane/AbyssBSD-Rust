@@ -18,9 +18,7 @@ sys/capsicum/bindat_connectat:bindat_connectat_2 # AF_INET, P7
 sys/capsicum/bindat_connectat:bindat_connectat_3 # AF_INET, P7
 sys/capsicum/ioctls_test:cap_ioctls__listen_copy # AF_INET, P7
 usr.sbin/jail/jail_basic_test:basic             # ip4.addr: AF_INET, P7
-usr.sbin/jail/jail_basic_test:list              # ifconfig epair (netlink), P7
 usr.sbin/jail/jail_basic_test:nested            # ip4.addr: AF_INET, P7
-usr.sbin/jail/jail_basic_test:param_consistency # ifconfig (netlink), P7
 usr.sbin/jail/jail_basic_test:setaudit          # setaudit_addr: no security event auditing (compat-deviations)
 sys/kern/ktrace_test:ktrace__cap_proto          # a raw AF_INET socket: AF_INET, P7
 sys/kern/ptrace_test:ptrace__PT_ATTACH_no_EINTR # passes; FreeBSD 15.1's run timed out (broken)

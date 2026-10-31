@@ -41,14 +41,10 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
-pub mod addr;
 pub mod export;
-pub mod ifnet;
-pub mod netlink;
 mod opt;
 pub mod pcb;
 mod poll;
-pub mod rtmsg;
 pub mod splice;
 mod tcp;
 #[cfg(test)]
@@ -61,42 +57,16 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 use abi::errno::Errno;
-use abi::inet::{AF_INET, AF_INET6, IPPROTO_TCP, IPPROTO_UDP, ss};
+use abi::inet::{IPPROTO_TCP, IPPROTO_UDP, ss};
 use event::Notify;
 use sync::SpinLock;
+
+pub use net::{Family, Vnet, addr, ifnet, netlink, rtmsg};
 
 pub use addr::Sockaddr;
 pub use poll::filter;
 pub use tcp::Tstate;
 pub use udp::{Meta, Received, want};
-
-/// A socket's domain.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Family {
-    Inet,
-    Inet6,
-}
-
-impl Family {
-    /// Its `AF_*`.
-    #[must_use]
-    pub const fn af(self) -> u8 {
-        match self {
-            Self::Inet => AF_INET,
-            Self::Inet6 => AF_INET6,
-        }
-    }
-
-    /// The family of `AF_*` `af`.
-    #[must_use]
-    pub const fn from_af(af: u8) -> Option<Self> {
-        match af {
-            AF_INET => Some(Self::Inet),
-            AF_INET6 => Some(Self::Inet6),
-            _ => None,
-        }
-    }
-}
 
 /// A socket's protocol.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -377,6 +347,8 @@ pub(crate) struct Inner {
 /// An internet socket (FreeBSD's `struct socket` with its `inpcb` and,
 /// for TCP, `tcpcb`).
 pub struct Socket {
+    /// The VNET it was made in (`so_vnet`).
+    pub vnet: Arc<Vnet>,
     pub family: Family,
     pub proto: Proto,
     /// Its PCB in its protocol's table.
@@ -430,10 +402,17 @@ pub(crate) fn lock2<'a>(
 }
 
 impl Socket {
-    /// A new socket (`socreate` with `udp_attach` or `tcp_usr_attach`):
-    /// its buffers reserved, its PCB in the table, unbound.
+    /// A new socket in the system's VNET.
     #[must_use]
     pub fn new(family: Family, proto: Proto, cred: &Cred) -> Arc<Self> {
+        Self::new_in(net::vnet0(), family, proto, cred)
+    }
+
+    /// A new socket in `vnet` (`socreate` with `udp_attach` or
+    /// `tcp_usr_attach`, the creator's VNET as `so_vnet`): its buffers
+    /// reserved, its PCB in the table, unbound.
+    #[must_use]
+    pub fn new_in(vnet: &Arc<Vnet>, family: Family, proto: Proto, cred: &Cred) -> Arc<Self> {
         let (send, recv) = match proto {
             Proto::Udp => (
                 tune::UDP_SENDSPACE.load(Ordering::Relaxed),
@@ -450,10 +429,11 @@ impl Socket {
         snd.reserve(u32::try_from(send).unwrap_or(u32::MAX));
         rcv.lowat = 1;
         snd.lowat = MCLBYTES.min(snd.hiwat);
-        Self::with_buffers(family, proto, cred, rcv, snd)
+        Self::with_buffers(vnet, family, proto, cred, rcv, snd)
     }
 
     pub(crate) fn with_buffers(
+        vnet: &Arc<Vnet>,
         family: Family,
         proto: Proto,
         cred: &Cred,
@@ -463,6 +443,7 @@ impl Socket {
         let table = pcb::table(proto);
         let id = table.lock().reserve_id();
         let so = Arc::new(Self {
+            vnet: Arc::clone(vnet),
             family,
             proto,
             id,
