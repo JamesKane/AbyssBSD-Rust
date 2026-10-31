@@ -1917,6 +1917,18 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
   bound in bhyve.
   - Done 2026-10-30: `exit/p6` at `4596dc5` passes in CI, the unit tier and all 15 boot cases on
     both architectures (multi-user in QEMU and bhyve included).
+  - Correction, 2026-10-30: the performance bound no longer holds for `event` and `unix`. The
+    scheduler recorded each CPU's SMT flag and capacity before the CPU's own block existed, so
+    every CPU but the first kept neither; CPUs 1-7 spun when idle where FreeBSD, which sees the
+    bhyve guest as SMT (CPUID leaf 0x1F), halts. The spinning made the ping-pong benchmarks 3-4x
+    FreeBSD's speed and hid the slow ones. With it fixed (and with the fixes it led to: dead
+    threads reaped by the next thread start, umtx and socket locks that back off as FreeBSD's
+    mutexes do rather than serving waiters in order, UNIX stream data moved with FreeBSD's two
+    copies, and a 4096-byte heap class), 10 runs a side give `boot` 0.532, `event` 1.078, `exec`
+    0.902, `pty` 0.863, `thr` 0.870, `unix` 1.173. `thr.mutex.pi.t4` and `t8` went from 24x and
+    42x to 1.13x and 1.41x. Still slower: `unix.rights` 1.85x, `unix.stream.bw4k` 1.60x,
+    `event.kevent.pipe1` and `pipe1000` 1.5x, `thr.create` 1.24x. Performance work is parked
+    for features; these are where it resumes.
 
 ## Phase 7: Networking (XL)
 
