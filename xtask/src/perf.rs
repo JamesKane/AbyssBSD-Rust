@@ -270,7 +270,7 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     Ok(())
 }
 
-fn home() -> PathBuf {
+pub(crate) fn home() -> PathBuf {
     std::env::var_os("HOME").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from)
 }
 

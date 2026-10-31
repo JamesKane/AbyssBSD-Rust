@@ -1,0 +1,3 @@
+# The peer's ARP entry flushed, then a ping: the request, the reply.
+filter: arp
+guest: arp -d 10.77.0.1 > /dev/null; ping -c 1 10.77.0.1 > /dev/null

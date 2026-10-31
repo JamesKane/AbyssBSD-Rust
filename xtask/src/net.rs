@@ -186,11 +186,31 @@ impl Lab {
     }
 }
 
+/// Waits for `login:` on the serial console (failing at once on any of
+/// `give_up` before it), logs in as root, and sets [`PROMPT`].
+pub(crate) fn login(session: &mut Session, boot_timeout: Duration, give_up: &[&str]) -> Result<()> {
+    let mut patterns = vec!["login: "];
+    patterns.extend_from_slice(give_up);
+    let hit = session
+        .expect_any(&patterns, boot_timeout)
+        .map_err(|e| format!("no login prompt on the serial console: {e}"))?;
+    if hit > 0 {
+        return Err(format!("{:?} before a login prompt", patterns[hit]).into());
+    }
+    session.send("root\n")?;
+    session
+        .expect(ROOT_PROMPT, Duration::from_secs(120))
+        .map_err(|e| format!("serial login: {e}"))?;
+    session.send("PS1='@''sh> '\n")?;
+    session.expect(PROMPT, Duration::from_secs(30))?;
+    Ok(())
+}
+
 /// Runs `steps` as [`Session::script`] does, except that a step whose
 /// command ends (the prompt is back) without printing what it should
 /// fails then, not at the timeout: a system without the network fails in
 /// seconds.
-fn run(session: &mut Session, steps: &[Step], timeout: Duration) -> Result<()> {
+pub(crate) fn run(session: &mut Session, steps: &[Step], timeout: Duration) -> Result<()> {
     for (i, s) in steps.iter().enumerate() {
         session.send(s.send)?;
         match session.expect_any(&[s.expect, "\npanic: ", PROMPT], timeout) {
@@ -247,20 +267,7 @@ pub(crate) fn net_script(
                 .arg(&key),
         )?;
         let public = fs::read_to_string(key.with_extension("pub"))?;
-        let mut patterns = vec!["login: "];
-        patterns.extend_from_slice(give_up);
-        let hit = session
-            .expect_any(&patterns, boot_timeout)
-            .map_err(|e| format!("no login prompt on the serial console: {e}"))?;
-        if hit > 0 {
-            return Err(format!("{:?} before a login prompt", patterns[hit]).into());
-        }
-        session.send("root\n")?;
-        session
-            .expect(ROOT_PROMPT, Duration::from_secs(120))
-            .map_err(|e| format!("serial login: {e}"))?;
-        session.send("PS1='@''sh> '\n")?;
-        session.expect(PROMPT, Duration::from_secs(30))?;
+        login(&mut session, boot_timeout, give_up)?;
         // `pkg` and the waits for addresses take minutes under emulation.
         run(&mut session, &lab.steps(), Duration::from_secs(900))?;
         session.send(&format!(

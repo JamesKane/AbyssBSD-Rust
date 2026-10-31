@@ -1,0 +1,4 @@
+# A connection to a closed port on the peer: SYN, then RST and ACK.
+filter: tcp port 7002
+ports: 7002
+guest: nc -z 10.77.0.1 7002

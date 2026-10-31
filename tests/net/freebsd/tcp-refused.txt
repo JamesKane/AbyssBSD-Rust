@@ -1,0 +1,3 @@
+# A connection to a closed port on the peer: SYN, then RST and ACK.
+GUEST-MAC > PEER-MAC, ethertype IPv4 (0x0800), length 74: (tos 0x0, ttl 64, id _, offset 0, flags [DF], proto TCP (6), length 60) GUEST.eph > PEER.7002: Flags [S], cksum _ (correct), seq _, win 65535, options [mss 1460,nop,wscale 8,sackOK,TS val _ ecr 0], length 0
+PEER-MAC > GUEST-MAC, ethertype IPv4 (0x0800), length 54: (tos 0x0, ttl 64, id _, offset 0, flags [DF], proto TCP (6), length 40) PEER.7002 > GUEST.eph: Flags [R.], cksum _ (correct), seq 0, ack _, win 0, length 0

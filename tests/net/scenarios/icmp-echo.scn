@@ -1,0 +1,3 @@
+# Three ICMP echoes to the peer and their replies.
+filter: icmp
+guest: ping -c 3 -i 0.2 10.77.0.1 > /dev/null

@@ -1,0 +1,3 @@
+# The peer's ARP entry flushed, then a ping: the request, the reply.
+GUEST-MAC > ff:ff:ff:ff:ff:ff, ethertype ARP (0x0806), length 42: Ethernet (len 6), IPv4 (len 4), Request who-has PEER tell GUEST, length 28
+PEER-MAC > GUEST-MAC, ethertype ARP (0x0806), length 42: Ethernet (len 6), IPv4 (len 4), Reply PEER is-at PEER-MAC, length 28

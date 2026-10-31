@@ -1,0 +1,3 @@
+# Three ICMPv6 echoes to the peer and their replies.
+filter: icmp6 and (ip6[40] == 128 or ip6[40] == 129)
+guest: ping -6 -c 3 -i 0.2 fd77:77:77::1 > /dev/null

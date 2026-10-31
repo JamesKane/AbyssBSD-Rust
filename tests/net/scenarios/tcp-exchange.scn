@@ -1,0 +1,6 @@
+# A TCP connection to the peer: the handshake, 100 bytes, and an orderly
+# close from the guest's side (nc -N shuts down its sending half).
+filter: tcp port 7001
+ports: 7001
+peer: nc -l 10.77.0.1 7001 > /dev/null
+guest: jot -b abcdefghi 10 | nc -N 10.77.0.1 7001

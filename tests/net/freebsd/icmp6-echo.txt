@@ -1,0 +1,7 @@
+# Three ICMPv6 echoes to the peer and their replies.
+GUEST-MAC > PEER-MAC, ethertype IPv6 (0x86dd), length 70: (hlim 64, next-header ICMPv6 (58), payload length 16) GUEST6 > PEER6: [icmp6 sum ok] ICMP6, echo request, id _, seq 0
+PEER-MAC > GUEST-MAC, ethertype IPv6 (0x86dd), length 70: (hlim 64, next-header ICMPv6 (58), payload length 16) PEER6 > GUEST6: [icmp6 sum ok] ICMP6, echo reply, id _, seq 0
+GUEST-MAC > PEER-MAC, ethertype IPv6 (0x86dd), length 70: (hlim 64, next-header ICMPv6 (58), payload length 16) GUEST6 > PEER6: [icmp6 sum ok] ICMP6, echo request, id _, seq 1
+PEER-MAC > GUEST-MAC, ethertype IPv6 (0x86dd), length 70: (hlim 64, next-header ICMPv6 (58), payload length 16) PEER6 > GUEST6: [icmp6 sum ok] ICMP6, echo reply, id _, seq 1
+GUEST-MAC > PEER-MAC, ethertype IPv6 (0x86dd), length 70: (hlim 64, next-header ICMPv6 (58), payload length 16) GUEST6 > PEER6: [icmp6 sum ok] ICMP6, echo request, id _, seq 2
+PEER-MAC > GUEST-MAC, ethertype IPv6 (0x86dd), length 70: (hlim 64, next-header ICMPv6 (58), payload length 16) PEER6 > GUEST6: [icmp6 sum ok] ICMP6, echo reply, id _, seq 2

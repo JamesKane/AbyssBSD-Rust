@@ -99,6 +99,7 @@ cargo xtask --remote fetch-base [--arch <a|all>]   # base.txz, SHA-256 pinned: /
 cargo xtask --remote freebsd-shell                 # the boot-to-shell script against FreeBSD
 cargo xtask --remote freebsd-multiuser             # the multi-user login script against FreeBSD
 cargo xtask --remote freebsd-net [--vmm qemu|bhyve]  # the network script against FreeBSD
+cargo xtask --remote netdiff [--freebsd] [--scenario NAME]  # packet captures vs FreeBSD's
 cargo xtask --remote freebsd-usertests             # tests/user on FreeBSD 15.1 itself, either arch
 cargo xtask --remote kyua-baseline [--resume]      # FreeBSD's kyua results, per test case, in bhyve
 cargo xtask --remote kyua [--resume] [--only DIR,...]  # AbyssBSD's, compared with them
@@ -278,6 +279,24 @@ and runs `xtask/src/net.rs`'s script: the DHCP and SLAAC addresses and default r
 `ping -6` to the router, DNS, `fetch` over HTTPS, `pkg install`, then `ssh` and an `scp` round trip
 from the host with a key made for the run. Until P7.6 they are expected to fail (`XFAIL`).
 `cargo xtask --remote freebsd-net` runs the same script against FreeBSD 15.1.
+
+### Differential captures
+
+What a guest puts on the wire must match what FreeBSD 15.1 puts there (docs/NETWORKING.md §16.3;
+`xtask/src/netdiff.rs`, `tests/net/`). `cargo xtask --remote netdiff` boots the installed root on
+bhyve with a tap on the test bridge, waits for its DHCP and SLAAC addresses, and runs each
+scenario in `tests/net/scenarios/NAME.scn` while `tcpdump` captures the tap. A scenario is a
+`#` description and `key: value` lines: `filter:` (the capture's filter), `guest:` (the command
+on the guest's console), `peer:` (an optional listener the host starts first, such as `nc -l`),
+and `ports:` (the fixed ports, kept; the others are ephemeral). The capture is decoded with
+`tcpdump -n -e -t -v`, one packet per line, and normalized: addresses and MACs become roles
+(`GUEST`, `GUEST6`, `GUEST-LL`, `PEER`, ...), ephemeral ports `.eph`, and IP ids, checksums,
+flow labels, ICMP echo ids, TCP timestamps, and the absolute sequence and acknowledgement numbers
+of SYNs and resets `_`. Each trace goes to `~/abyss/net/<os>/NAME.txt` on the server and is
+compared line by line with FreeBSD's, kept in `tests/net/freebsd/`; the first differing line is
+reported. `--freebsd` runs FreeBSD's release image instead (to record or check the baseline:
+copy the traces into `tests/net/freebsd/`), and `--scenario NAME` runs one. Until AbyssBSD has
+`vtnet0` (P7.3) its run fails at the addresses.
 
 `cargo xtask --remote kyua-baseline` records FreeBSD 15.1's own kyua results in bhyve, where
 AbyssBSD's are compared (8 CPUs, `parallelism=8`). Not under QEMU: emulated, the suite takes days

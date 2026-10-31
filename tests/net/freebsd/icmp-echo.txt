@@ -1,0 +1,7 @@
+# Three ICMP echoes to the peer and their replies.
+GUEST-MAC > PEER-MAC, ethertype IPv4 (0x0800), length 98: (tos 0x0, ttl 64, id _, offset 0, flags [none], proto ICMP (1), length 84) GUEST > PEER: ICMP echo request, id _, seq 0, length 64
+PEER-MAC > GUEST-MAC, ethertype IPv4 (0x0800), length 98: (tos 0x0, ttl 64, id _, offset 0, flags [none], proto ICMP (1), length 84) PEER > GUEST: ICMP echo reply, id _, seq 0, length 64
+GUEST-MAC > PEER-MAC, ethertype IPv4 (0x0800), length 98: (tos 0x0, ttl 64, id _, offset 0, flags [none], proto ICMP (1), length 84) GUEST > PEER: ICMP echo request, id _, seq 1, length 64
+PEER-MAC > GUEST-MAC, ethertype IPv4 (0x0800), length 98: (tos 0x0, ttl 64, id _, offset 0, flags [none], proto ICMP (1), length 84) PEER > GUEST: ICMP echo reply, id _, seq 1, length 64
+GUEST-MAC > PEER-MAC, ethertype IPv4 (0x0800), length 98: (tos 0x0, ttl 64, id _, offset 0, flags [none], proto ICMP (1), length 84) GUEST > PEER: ICMP echo request, id _, seq 2, length 64
+PEER-MAC > GUEST-MAC, ethertype IPv4 (0x0800), length 98: (tos 0x0, ttl 64, id _, offset 0, flags [none], proto ICMP (1), length 84) PEER > GUEST: ICMP echo reply, id _, seq 2, length 64
