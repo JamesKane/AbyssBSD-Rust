@@ -122,7 +122,7 @@ pub(super) fn openat(s: &Sleepable, fd: u64, path_ptr: u64, flags: u64, mode: u6
             beneath: flags & O_RESOLVE_BENEATH != 0,
             create: flags & O_CREAT != 0,
         };
-        let ucred = p.cred();
+        let ucred = crate::fs::cred();
         let cred = &*ucred;
         let mut created = false;
         // What the directory must allow (`flags_to_rights`); through a
@@ -592,9 +592,9 @@ pub(super) fn faccessat(s: &Sleepable, fd: u64, path_ptr: u64, amode: u64, flag:
     // Without AT_EACCESS, the lookup and the check both use the real ids
     // (FreeBSD's `kern_accessat`).
     let cred = if flag & AT_EACCESS != 0 {
-        p.cred()
+        crate::fs::cred()
     } else {
-        Arc::new(p.cred().as_real())
+        Arc::new(crate::fs::cred().as_real())
     };
     let v = if path.is_empty() && flag & AT_EMPTY_PATH != 0 {
         at_vnode(

@@ -709,6 +709,9 @@ pub(crate) struct Process {
     execed: AtomicBool,
     /// Its credential; inherited.
     cred: PreemptLock<Arc<Ucred>>,
+    /// Bumped as the credential is replaced (FreeBSD's `p_cowgen`), so a
+    /// thread's own copy is renewed at its next system call.
+    cred_gen: AtomicU64,
     /// The program it runs, while it runs it.
     /// The program and its interpreter.
     text: SpinLock<Vec<Text>>,
@@ -1010,6 +1013,7 @@ impl Process {
                 started: crate::time::now_ns(),
                 execed: AtomicBool::new(execed),
                 cred: PreemptLock::new(cred),
+                cred_gen: AtomicU64::new(0),
                 text: SpinLock::new(text),
                 sugid: AtomicBool::new(sugid),
                 flag2: AtomicU32::new(
@@ -1049,9 +1053,34 @@ impl Process {
         self.vforked.load(Ordering::Acquire)
     }
 
-    /// Its credential.
+    /// Its credential. The running thread's own is [`crate::fs::cred`].
     pub(crate) fn cred(&self) -> Arc<Ucred> {
         Arc::clone(&self.cred.lock())
+    }
+
+    /// Its credential, with the generation it is of.
+    pub(crate) fn cred_with_gen(&self) -> (u64, Arc<Ucred>) {
+        // Acquire: a credential set before the generation it bumped is seen.
+        let g = self.cred_gen.load(Ordering::Acquire);
+        (g, self.cred())
+    }
+
+    /// The credential's generation (`p_cowgen`).
+    pub(crate) fn cred_gen(&self) -> u64 {
+        self.cred_gen.load(Ordering::Acquire)
+    }
+
+    /// Replaces its credential (`proc_set_cred`). The calling thread, if
+    /// one of its own, takes the new one at once; its others at their next
+    /// system call (`thread_cow_update`).
+    fn set_cred(&self, c: Ucred) {
+        *self.cred.lock() = Arc::new(c);
+        self.cred_gen.fetch_add(1, Ordering::Release);
+        UserThread::with_current(|t| {
+            if core::ptr::eq(Arc::as_ptr(t.process()), self) {
+                t.update_cred();
+            }
+        });
     }
 
     /// Its credential's jail (`None` on the host), without taking the
@@ -1132,7 +1161,7 @@ impl Process {
         let old = self.cred();
         let new = change(&old)?;
         if new != *old {
-            *self.cred.lock() = Arc::new(new);
+            self.set_cred(new);
             self.sugid.store(true, Ordering::Relaxed);
         }
         Ok(())
@@ -1146,7 +1175,7 @@ impl Process {
         change: impl FnOnce(&Ucred) -> Result<Ucred, Errno>,
     ) -> Result<(), Errno> {
         let new = change(&self.cred())?;
-        *self.cred.lock() = Arc::new(new);
+        self.set_cred(new);
         Ok(())
     }
 
@@ -1920,7 +1949,7 @@ impl Process {
             }
         }
         if let Some(c) = new_cred {
-            *self.cred.lock() = Arc::new(c);
+            self.set_cred(c);
         }
         let f2 = self.flag2.load(Ordering::Relaxed);
         let mut clear = 0;

@@ -30,8 +30,9 @@ use abi::errno::Errno;
 use abi::kinfo::MAXCOMLEN;
 use abi::thr::{RTP_PRIO_FIFO_BIT, RTP_PRIO_IDLE, RTP_PRIO_NORMAL, RTP_PRIO_REALTIME, Rtprio};
 use sched::WaitQueue;
-use sync::SpinLock;
+use sync::{PreemptLock, SpinLock};
 
+use crate::cred::Ucred;
 use crate::proc::Process;
 use crate::signal::ThreadSignals;
 
@@ -176,6 +177,12 @@ pub(crate) struct UserThread {
     /// The child of a traced `vfork` it still waits for
     /// (`td_rfppwait_p`).
     pub(crate) vfork_child: SpinLock<Option<Arc<Process>>>,
+    /// Its credential (`td_ucred`): its own copy of the process's, of the
+    /// generation paired with it, renewed at system call entry. Taking a
+    /// reference to it touches no line another thread's does, where the
+    /// process's credential, shared across `fork`, would move between
+    /// CPUs on every count.
+    cred: PreemptLock<(u64, Arc<Ucred>)>,
 }
 
 impl UserThread {
@@ -213,6 +220,7 @@ impl UserThread {
                 code: AtomicU32::new(0),
                 dbg: crate::ptrace::ThreadDebug::default(),
                 vfork_child: SpinLock::new(None),
+                cred: PreemptLock::new(own_cred(process)),
             }
         });
         tid.map(|_| t)
@@ -233,6 +241,23 @@ impl UserThread {
 
     pub(crate) fn process(&self) -> &Arc<Process> {
         &self.process
+    }
+
+    /// Its credential (`td_ucred`).
+    pub(crate) fn cred(&self) -> Arc<Ucred> {
+        Arc::clone(&self.cred.lock().1)
+    }
+
+    /// Takes the process's credential if it changed since this thread last
+    /// did (`thread_cow_update`, at `syscallenter`). Only the thread
+    /// itself calls this.
+    pub(crate) fn update_cred(&self) {
+        if self.cred.lock().0 == self.process.cred_gen() {
+            return;
+        }
+        let new = own_cred(&self.process);
+        let old = core::mem::replace(&mut *self.cred.lock(), new);
+        drop(old);
     }
 
     pub(crate) fn umtx(&self) -> &Arc<crate::umtx::Entry> {
@@ -344,6 +369,12 @@ impl UserThread {
     pub(crate) fn with_current<R>(f: impl FnOnce(&Self) -> R) -> Option<R> {
         sched::with_owner(|o| o?.downcast_ref::<Self>().map(f))
     }
+}
+
+/// A thread's own copy of `p`'s credential, with its generation.
+fn own_cred(p: &Process) -> (u64, Arc<Ucred>) {
+    let (g, c) = p.cred_with_gen();
+    (g, Arc::new(Ucred::clone(&c)))
 }
 
 impl Drop for UserThread {

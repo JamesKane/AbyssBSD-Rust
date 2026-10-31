@@ -68,7 +68,7 @@ fn install_caps(
     caps: Option<crate::fs::fdtable::FileCaps>,
 ) -> Result<i32, Errno> {
     let p = process()?;
-    let c = p.cred();
+    let c = crate::fs::cred();
     let status = FREAD
         | FWRITE
         | if flags & SOCK_NONBLOCK != 0 {
@@ -253,7 +253,7 @@ pub(super) fn bindat(s: &Sleepable, fd: u64, sock_fd: u64, addr: u64, len: u64) 
             &parent.name,
             &NewNode::Socket,
             &super::fsops::create_as(mode & !mask),
-            &p.cred(),
+            &crate::fs::cred(),
             true,
         )
         .map_err(|e| {
@@ -297,7 +297,7 @@ fn peer_by_name(s: &Sleepable, fd: i32, path: &[u8]) -> Result<Arc<Socket>, Errn
     if v.kind() != Kind::Socket {
         return Err(Errno::ENOTSOCK);
     }
-    vfs::acl::access(s, &v, &p.cred(), vfs::ops::VWRITE)?;
+    vfs::acl::access(s, &v, &crate::fs::cred(), vfs::ops::VWRITE)?;
     crate::fs::socket::bound_to(&v).ok_or(Errno::ECONNREFUSED)
 }
 
@@ -804,7 +804,7 @@ pub(super) fn sendmsg(s: &Sleepable, sock_fd: u64, msg: u64, flags: u64) -> SysR
 /// their descriptors installed; each a whole `CMSG_SPACE`.
 fn externalize(s: &Sleepable, control: Vec<Control>, flags: i32) -> Result<Vec<Vec<u8>>, Errno> {
     let p = process()?;
-    let cred = p.cred();
+    let cred = crate::fs::cred();
     let fdf = FdFlags {
         cloexec: flags & MSG_CMSG_CLOEXEC != 0,
         clofork: flags & MSG_CMSG_CLOFORK != 0,

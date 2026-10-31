@@ -73,8 +73,8 @@ pub(crate) fn priv_check(p: crate::cred::Priv) -> Result<(), Errno> {
 /// The credential file operations run with: the current process's, or
 /// the superuser's for kernel threads.
 pub(crate) fn cred() -> Arc<Ucred> {
-    // The process borrowed, not referenced: one count taken, not two.
-    crate::proc::Process::with_current(crate::proc::Process::cred)
+    // The thread's own (`td_ucred`), whose count no other CPU touches.
+    crate::uthread::UserThread::with_current(crate::uthread::UserThread::cred)
         .unwrap_or_else(crate::cred::root_shared)
 }
 

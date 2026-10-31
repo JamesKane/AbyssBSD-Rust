@@ -188,7 +188,7 @@ pub(crate) fn cred() -> Cred {
     let Some(p) = crate::proc::Process::current() else {
         return Cred::default();
     };
-    let c = p.cred();
+    let c = crate::fs::cred();
     let mut groups = Vec::with_capacity(c.groups().len() + 1);
     groups.push(c.egid());
     groups.extend(c.groups().iter().copied().filter(|&g| g != c.egid()));

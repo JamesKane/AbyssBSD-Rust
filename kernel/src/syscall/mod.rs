@@ -198,6 +198,7 @@ pub(crate) fn entry(frame: &mut TrapFrame) {
     let (ktraced, debugged) = crate::uthread::UserThread::with_current(|t| {
         t.dbg.entered(frame);
         t.set_syscall_code(code);
+        t.update_cred();
         let p = t.process();
         (p.ktrace.flags() != 0, p.is_traced())
     })
