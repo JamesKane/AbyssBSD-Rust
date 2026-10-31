@@ -41,7 +41,7 @@ use alloc::vec::Vec;
 
 use abi::errno::Errno;
 use abi::kinfo::*;
-use abi::resource::Rusage;
+use abi::resource::{RUSAGE_CHILDREN, RUSAGE_SELF, RUSAGE_THREAD, Rusage};
 use abi::time::Timeval;
 use sched::Sleepable;
 use sysctl::{Number, ReadError};
@@ -146,7 +146,33 @@ pub(crate) fn process_usage(p: &Process) -> Usage {
     });
     let gone = crate::time::ticks_to_ns(p.runtime().saturating_sub(live_ticks)) / 1000;
     u.stime_us += gone;
+    let (nvcsw, nivcsw) = p.dead_switches();
+    u.nvcsw += nvcsw;
+    u.nivcsw += nivcsw;
     u
+}
+
+/// `getrusage(who)` for the current thread `t` of `p` (`kern_getrusage`):
+/// the process's own use, its reaped children's, or the thread's. The
+/// peak resident size is the one `kinfo_proc` reports.
+pub(crate) fn getrusage(
+    s: &Sleepable,
+    p: &Process,
+    t: &UserThread,
+    who: i32,
+) -> Result<Rusage, Errno> {
+    let mut u = match who {
+        RUSAGE_SELF => process_usage(p),
+        RUSAGE_CHILDREN => return Ok(p.child_usage.lock().rusage()),
+        RUSAGE_THREAD => t
+            .sched()
+            .map_or_else(Usage::default, |st| thread_usage(&st)),
+        _ => return Err(Errno::EINVAL),
+    };
+    let (_, resident, _) = space_sizes(s, p);
+    let kstacks = u64::try_from(p.thread_count()).unwrap_or(0) * crate::threads::STACK_PAGES;
+    u.maxrss_kb = i64::try_from(resident + kstacks).unwrap_or(i64::MAX) * 4;
+    Ok(u.rusage())
 }
 
 /// `p`'s child `c` was reaped: what it and its own children used goes to

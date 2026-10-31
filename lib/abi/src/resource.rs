@@ -20,6 +20,11 @@ pub const fn exit_status(code: i32) -> i32 {
     code.wrapping_shl(8)
 }
 
+/// `getrusage`'s `who`: the process, its reaped children, the thread.
+pub const RUSAGE_SELF: i32 = 0;
+pub const RUSAGE_CHILDREN: i32 = -1;
+pub const RUSAGE_THREAD: i32 = 1;
+
 /// `struct rusage`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -83,6 +88,9 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("WEXITED", WEXITED as i64, "sys/wait.h"),
     c("WTRAPPED", WTRAPPED as i64, "sys/wait.h"),
     c("W_EXITCODE(3, 0)", exit_status(3) as i64, "sys/wait.h"),
+    c("RUSAGE_SELF", RUSAGE_SELF as i64, "sys/resource.h"),
+    c("RUSAGE_CHILDREN", RUSAGE_CHILDREN as i64, "sys/resource.h"),
+    c("RUSAGE_THREAD", RUSAGE_THREAD as i64, "sys/resource.h"),
     c("RLIMIT_CPU", rlimit::CPU as i64, "sys/resource.h"),
     c("RLIMIT_FSIZE", rlimit::FSIZE as i64, "sys/resource.h"),
     c("RLIMIT_DATA", rlimit::DATA as i64, "sys/resource.h"),

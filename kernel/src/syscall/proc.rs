@@ -13,6 +13,7 @@ use super::{SysResult, int, process};
 use crate::arch::trap::TrapFrame;
 use crate::cred::{Ids, Priv};
 use crate::uaccess::{self, Plain, UserPtr};
+use crate::uthread::UserThread;
 
 // SAFETY: integers and timevals only, no padding.
 unsafe impl Plain for Rusage {}
@@ -305,6 +306,16 @@ pub(super) fn fexecve(
         &envv,
     )?;
     Ok(None)
+}
+
+/// `getrusage(who, rusage)`.
+pub(super) fn getrusage(s: &Sleepable, who: u64, rusage: u64) -> SysResult {
+    let t = UserThread::current().ok_or(Errno::ESRCH)?;
+    let ru = crate::kinfo::getrusage(s, t.process(), &t, int(who))?;
+    UserPtr::<Rusage>::new(rusage)
+        .write(&ru)
+        .map_err(|_| Errno::EFAULT)?;
+    Ok(0)
 }
 
 /// `wait4(pid, status, options, rusage)`.

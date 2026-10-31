@@ -683,6 +683,9 @@ pub(crate) struct Process {
     had_threads: AtomicBool,
     /// CPU time of its threads that have left, in platform time units.
     dead_runtime: AtomicU64,
+    /// Their voluntary and involuntary context switches (`p_ru`'s
+    /// `ru_nvcsw` and `ru_nivcsw`, which `thread_exit` adds to).
+    dead_switches: [AtomicU64; 2],
     /// The shortest timeout a umtx wait takes, in nanoseconds
     /// (`UMTX_OP_SET_MIN_TIMEOUT`, FreeBSD's `p_umtx_min_timeout`).
     pub(crate) umtx_min_timeout: AtomicU64,
@@ -994,6 +997,7 @@ impl Process {
                 single_wait: WaitQueue::new(),
                 had_threads: AtomicBool::new(false),
                 dead_runtime: AtomicU64::new(0),
+                dead_switches: [AtomicU64::new(0), AtomicU64::new(0)],
                 nice: AtomicI32::new(parent.map_or(0, |p| p.nice.load(Ordering::Relaxed))),
                 umtx_min_timeout: AtomicU64::new(
                     parent.map_or(0, |p| p.umtx_min_timeout.load(Ordering::Relaxed)),
@@ -1423,6 +1427,25 @@ impl Process {
             true
         });
         ticks
+    }
+
+    /// The context switches of its threads that have left: voluntary,
+    /// involuntary.
+    pub(crate) fn dead_switches(&self) -> (u64, u64) {
+        (
+            self.dead_switches[0].load(Ordering::Relaxed),
+            self.dead_switches[1].load(Ordering::Relaxed),
+        )
+    }
+
+    /// The current thread, leaving, leaves its time and its context
+    /// switches with the process (`thread_exit`'s `ruxagg` and `rucollect`).
+    fn bank_current_usage(&self) {
+        self.dead_runtime
+            .fetch_add(sched::current_runtime(), Ordering::Relaxed);
+        let (v, i) = sched::current().context_switches();
+        self.dead_switches[0].fetch_add(v, Ordering::Relaxed);
+        self.dead_switches[1].fetch_add(i, Ordering::Relaxed);
     }
 
     /// Its thread `tid`.
@@ -2270,8 +2293,7 @@ impl Process {
     /// nothing on a stack that never unwinds may keep them.
     pub(crate) fn thread_exit(t: Arc<UserThread>) -> ! {
         let p = Arc::clone(t.process());
-        p.dead_runtime
-            .fetch_add(sched::current_runtime(), Ordering::Relaxed);
+        p.bank_current_usage();
         crate::signal::thread_gone(&t);
         t.set_sched(None);
         drop(t);
@@ -2335,8 +2357,7 @@ impl Process {
         {
             // Its time so far counts, as any thread's that leaves does
             // (`thread_exit`), for `wait`'s usage and the parent's.
-            self.dead_runtime
-                .fetch_add(sched::current_runtime(), Ordering::Relaxed);
+            self.bank_current_usage();
             t.set_sched(None);
         }
         let gone = core::mem::take(&mut *self.threads.lock());
