@@ -2006,6 +2006,11 @@ P7.0 ─► P7.1 ─► P7.2 ─► P7.3 ─► P7.4 ─┬─► P7.5 ───
 - `sys/epoch`: enter, exit, deferred reclamation, with host tests of reclamation order.
 - Socket buffers hold `sys/mbuf` chains; UNIX-domain sockets move to them with their accounting
   and the P6 `unix` suite unchanged or better.
+- Done 2026-10-31. The kernel's first epoch, `net_epoch`, comes with its first readers (interfaces
+  and routes) in P7.2. A stream receive now unlinks all it can take at once and a send copies in
+  the peer's room plus its own buffer, as FreeBSD's do; `unix` went from 1.167 to 1.138
+  (`bw4k` 645 to 563 ns, `bw64k` 6.4 to 6.6 µs, within its noise). `kern.ipc.nmbclusters` and
+  its siblings are set from memory and may grow, as on FreeBSD.
 
 **P7.2 Interfaces, VNET, and the control plane.**
 - `sys/net`: `Vnet`, `ifnet`, cloners, `lo` with its `netisr` loopback path, `epair`; the

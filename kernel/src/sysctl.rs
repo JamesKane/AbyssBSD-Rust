@@ -310,6 +310,110 @@ pub(crate) fn init() {
                 .expect("kern.ipc.sem*, msg*");
         }
     }
+    // The mbuf zones' limits, from memory (`tunable_mbinit`). Each may
+    // only grow, and a cluster zone's only while the mbufs cover every
+    // cluster (`sysctl_nmbclusters`).
+    {
+        use abi::errno::Errno;
+        use mbuf::zone::{self, Limits, Zone};
+        let ipc = t.child(k, "ipc").expect("kern.ipc");
+        let l = Limits::for_memory(crate::mm::phys_stats().managed * 4096);
+        l.apply();
+        let maxmbufmem = i64::try_from(l.maxmbufmem).unwrap_or(i64::MAX);
+        t.add_value(
+            ipc,
+            Number::Auto,
+            "maxmbufmem",
+            "Maximum real memory allocatable to various mbuf types",
+            Value::Long(alloc::boxed::Box::new(move || maxmbufmem)),
+        )
+        .expect("kern.ipc.maxmbufmem");
+        fn covered() -> bool {
+            let clusters = [&zone::CLUSTER, &zone::JUMBOP, &zone::JUMBO9, &zone::JUMBO16]
+                .iter()
+                .map(|z| z.limit())
+                .fold(0u64, u64::saturating_add);
+            zone::MBUF.limit() >= clusters
+        }
+        let limits: [(&str, &str, &'static Zone, bool); 5] = [
+            (
+                "nmbclusters",
+                "Maximum number of mbuf clusters allowed",
+                &zone::CLUSTER,
+                true,
+            ),
+            (
+                "nmbjumbop",
+                "Maximum number of mbuf page size jumbo clusters allowed",
+                &zone::JUMBOP,
+                true,
+            ),
+            (
+                "nmbjumbo9",
+                "Maximum number of mbuf 9k jumbo clusters allowed",
+                &zone::JUMBO9,
+                true,
+            ),
+            (
+                "nmbjumbo16",
+                "Maximum number of mbuf 16k jumbo clusters allowed",
+                &zone::JUMBO16,
+                true,
+            ),
+            (
+                "nmbufs",
+                "Maximum number of mbufs allowed",
+                &zone::MBUF,
+                false,
+            ),
+        ];
+        for (name, descr, z, cluster) in limits {
+            t.add_writable(
+                ipc,
+                Number::Auto,
+                name,
+                descr,
+                0,
+                Value::Int(alloc::boxed::Box::new(|| {
+                    i32::try_from(z.limit()).unwrap_or(i32::MAX)
+                })),
+                sysctl::int_writer(move |v| {
+                    let old = i64::try_from(z.limit()).unwrap_or(i64::MAX);
+                    if i64::from(v) == old {
+                        return Ok(());
+                    }
+                    if i64::from(v) > old && (!cluster || covered()) {
+                        z.set_limit(u64::try_from(v).map_err(|_| Errno::EINVAL)?);
+                        return Ok(());
+                    }
+                    Err(Errno::EINVAL)
+                }),
+            )
+            .expect("kern.ipc.nmb*");
+        }
+        let hdrs: [(&str, &str, u32); 3] = [
+            (
+                "max_linkhdr",
+                "Size of largest link layer header",
+                mbuf::MAX_LINKHDR,
+            ),
+            (
+                "max_protohdr",
+                "Size of largest protocol layer header",
+                mbuf::MAX_PROTOHDR,
+            ),
+            (
+                "max_hdr",
+                "Size of largest link plus protocol header",
+                mbuf::MAX_HDR,
+            ),
+        ];
+        for (name, descr, v) in hdrs {
+            #[allow(clippy::cast_possible_wrap, reason = "under 100")]
+            t.add_value(ipc, Number::Auto, name, descr, Value::int(v as i32))
+                .expect("kern.ipc.max_*hdr");
+        }
+    }
     // UNIX-domain sockets' sizes (`net.local`, read-only here) and the
     // socket layer's limits.
     {

@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 abi = { path = "../../lib/abi" }
 event = { path = "../event" }
+mbuf = { path = "../mbuf" }
 sync = { path = "../sync" }
 
 [lints]

@@ -239,6 +239,11 @@ inside `tests/`.
 | **Corpus** | `acpidump` DSDT/SSDT blobs from real machines through the AML interpreter. `fsck_ffs` validation of images AbyssBSD wrote | Host + server | Every commit |
 | **Hardware** | Boot matrix on physical machines | Lab | Per milestone |
 
+Miri runs on the host from a nightly toolchain with its `miri` component; nothing it checks is
+built with that toolchain. The crates with lock-free or pointer-linked code run under it:
+`cargo +nightly miri test -p mbuf -p epoch` (about a minute; the stress tests shrink under
+`cfg(miri)`).
+
 The boot tier currently runs these configurations, each booting the test loader and test kernel,
 running both sets of in-image tests, and ending with a deliberate fatal page fault on the boot
 stack's guard page. xtask checks the serial log for the decoded fault, the register dump and a

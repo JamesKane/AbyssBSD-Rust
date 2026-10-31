@@ -45,9 +45,10 @@ use abi::socket::{AF_UNIX, SHUT_RD, SHUT_RDWR, SHUT_WR, SO_ACCEPTCONN, SOMAXCONN
 use event::Notify;
 use sync::{DelayLock, SpinLock};
 
-use buf::{Item, Sockbuf};
+use buf::{Item, Sockbuf, len32};
 pub use control::{Control, Cred, InFlight, Passable, cmsgcred, gc, inflight};
 use dgram::Dgrams;
+pub use mbuf::{Chain, NoBufs};
 
 /// A socket's type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -219,7 +220,10 @@ pub struct Info {
 /// What a receive got.
 #[derive(Debug, Default)]
 pub struct Received {
+    /// A peek's copy of the data.
     pub data: Vec<u8>,
+    /// The data taken, in its mbufs, for the caller to copy out.
+    pub chain: Chain,
     pub control: Vec<Control>,
     /// The sender's name, for a datagram.
     pub from: Option<Vec<u8>>,
@@ -838,7 +842,7 @@ impl Socket {
     /// As [`Self::send_stream_to`], and `ENOTCONN` unconnected.
     pub fn send_stream(
         &self,
-        data: &mut VecDeque<Mbuf>,
+        data: &mut Chain,
         control: &mut Vec<Control>,
         cred: &dyn Fn() -> Cred,
     ) -> Result<usize, Errno> {
@@ -859,7 +863,7 @@ impl Socket {
     pub fn send_stream_to(
         &self,
         peer: &Socket,
-        data: &mut VecDeque<Mbuf>,
+        data: &mut Chain,
         control: &mut Vec<Control>,
         cred: &dyn Fn() -> Cred,
     ) -> Result<(usize, u32), Errno> {
@@ -889,14 +893,13 @@ impl Socket {
         for c in control.drain(..) {
             p.rcv.push_control(c);
         }
-        let total: u32 = data.iter().map(Mbuf::len).sum();
-        let rest = if space < total {
-            buf::split(data, space)
+        let now = if (space as usize) < data.len() {
+            data.take_front(space as usize)
+                .map_err(|_| Errno::ENOBUFS)?
         } else {
-            VecDeque::new()
+            core::mem::take(data)
         };
-        let sent = data.iter().map(|m| m.data.len()).sum();
-        let now = core::mem::replace(data, rest);
+        let sent = now.len();
         p.rcv.push_data(now);
         let left = p.rcv.stream_space();
         drop(p);
@@ -924,20 +927,16 @@ impl Socket {
         cont: bool,
         want_control: bool,
     ) -> Result<Received, Errno> {
-        let (mut out, taken) = self.recv_stream_parts(max, peek, skip, cont, want_control)?;
-        if taken.len() == 1 {
-            out.data = taken.into_iter().next().unwrap_or_default();
-        } else if !taken.is_empty() {
-            out.data = Vec::with_capacity(taken.iter().map(Vec::len).sum());
-            for d in &taken {
-                out.data.extend_from_slice(d);
-            }
+        let mut out = self.recv_stream_parts(max, peek, skip, cont, want_control)?;
+        if !out.chain.is_empty() {
+            out.data = out.chain.segments().flatten().copied().collect();
+            out.chain = Chain::new();
         }
         Ok(out)
     }
 
     /// [`recv_stream`](Self::recv_stream), with the data taken (not
-    /// peeked) left in the mbufs' own buffers, in order, for the caller
+    /// peeked) left in its mbufs, in the result's `chain`, for the caller
     /// to copy out one by one (`soreceive_stream`'s `uiomove` of each).
     /// A peek's copy is in the result's `data`.
     ///
@@ -951,12 +950,11 @@ impl Socket {
         skip: usize,
         cont: bool,
         want_control: bool,
-    ) -> Result<(Received, Vec<Vec<u8>>), Errno> {
+    ) -> Result<Received, Errno> {
         let mut out = Received::default();
-        // What a receive takes, moved off the buffer under its lock and
-        // joined after it (`soreceive_stream` unlinks the mbufs, then
+        // What a receive takes is moved off the buffer under its lock and
+        // copied out after it (`soreceive_stream` unlinks the mbufs, then
         // copies them out unlocked).
-        let mut taken: Vec<Vec<u8>> = Vec::new();
         let peer = {
             let mut i = self.inner.lock();
             if i.state & (state::ISCONNECTED | state::ISDISCONNECTED) == 0 {
@@ -970,14 +968,14 @@ impl Socket {
                     return Err(e);
                 }
                 if i.rcv.cant {
-                    return Ok((out, Vec::new()));
+                    return Ok(out);
                 }
                 return Err(Errno::EAGAIN);
             }
             let rcv = &mut i.rcv;
             let mut idx = 0;
             if cont && matches!(rcv.items.front(), Some(Item::Control(..))) {
-                return Ok((out, Vec::new()));
+                return Ok(out);
             }
             // Leading control.
             while let Some(Item::Control(..)) = rcv.items.get(idx) {
@@ -994,61 +992,63 @@ impl Socket {
             let mut space = max;
             let mut skip = if peek { skip } else { 0 };
             while space > 0 {
-                let Some(Item::Data(m)) = rcv.items.get_mut(idx) else {
+                let Some(Item::Data(c)) = rcv.items.get_mut(idx) else {
                     break;
                 };
-                if skip > 0 {
-                    if skip >= m.data.len() {
-                        skip -= m.data.len();
-                        if m.eor {
+                let eor = c.eor();
+                if peek {
+                    // A peek copies, past what earlier pieces had.
+                    if skip >= c.len() {
+                        skip -= c.len();
+                        if eor {
                             out.flags |= abi::socket::MSG_EOR;
                             break;
                         }
                         idx += 1;
                         continue;
                     }
-                    let rest = m.data.len() - skip;
+                    let rest = c.len() - skip;
                     let n = rest.min(space);
-                    out.data.extend_from_slice(&m.data[skip..skip + n]);
+                    let at = out.data.len();
+                    out.data.resize(at + n, 0);
+                    c.copy_out(skip, &mut out.data[at..]);
                     space -= n;
                     skip = 0;
                     if n < rest {
                         break;
                     }
-                    if m.eor {
+                    if eor {
                         out.flags |= abi::socket::MSG_EOR;
                         break;
                     }
                     idx += 1;
                     continue;
                 }
-                if space >= m.data.len() {
-                    space -= m.data.len();
-                    let eor = m.eor;
-                    if peek {
-                        out.data.extend_from_slice(&m.data);
-                        idx += 1;
-                    } else {
-                        let n = m.len();
-                        let cost = m.cost();
-                        taken.push(core::mem::take(&mut m.data));
-                        rcv.items.remove(idx);
-                        rcv.cc -= n;
-                        rcv.mbcnt -= cost;
-                    }
+                if space >= c.len() {
+                    space -= c.len();
+                    let Some(Item::Data(c)) = rcv.items.remove(idx) else {
+                        break;
+                    };
+                    rcv.cc -= len32(c.len());
+                    rcv.mbcnt -= c.cost();
+                    out.chain.append(c);
                     if eor {
                         out.flags |= abi::socket::MSG_EOR;
                         break;
                     }
                 } else {
-                    if peek {
-                        out.data.extend_from_slice(&m.data[..space]);
-                    } else {
-                        // The rest stays, in the same mbuf (`m_adj`).
-                        let rest = m.data.split_off(space);
-                        taken.push(core::mem::replace(&mut m.data, rest));
-                        rcv.cc -= u32::try_from(space).unwrap_or(0);
-                    }
+                    // The rest stays; a cut mbuf's cluster is in both
+                    // (`m_adj` leaves it in place).
+                    let before = c.cost();
+                    let Ok(head) = c.take_front(space) else {
+                        if out.chain.is_empty() {
+                            return Err(Errno::ENOBUFS);
+                        }
+                        break;
+                    };
+                    rcv.cc -= len32(head.len());
+                    rcv.mbcnt -= before - c.cost();
+                    out.chain.append(head);
                     break;
                 }
             }
@@ -1064,23 +1064,20 @@ impl Socket {
         if !peek && let Some(p) = peer {
             p.wr.notify(0);
         }
-        Ok((out, taken))
+        Ok(out)
     }
 
     /// Puts `data` back at the front of a stream's receive buffer: a
     /// receive whose control could not be delivered leaves its data
     /// queued (`uipc_soreceive_stream_or_seqpacket`'s error path).
-    pub fn unread(&self, data: &[u8], eor: bool) {
+    pub fn unread(&self, data: Chain) {
         if data.is_empty() {
             return;
         }
         let mut i = self.inner.lock();
-        let c = buf::chain(data, eor);
-        for m in c.into_iter().rev() {
-            i.rcv.cc += m.len();
-            i.rcv.mbcnt += m.cost();
-            i.rcv.items.push_front(Item::Data(m));
-        }
+        i.rcv.cc += len32(data.len());
+        i.rcv.mbcnt += data.cost();
+        i.rcv.items.push_front(Item::Data(data));
     }
 
     /// Bytes waiting to be read, less control (`FIONREAD`, `st_size`).
@@ -1118,7 +1115,7 @@ impl Socket {
     /// `to`, `ENOTCONN` with neither, `ENOBUFS` when the receiver is full.
     pub fn send_dgram(
         &self,
-        data: &[u8],
+        data: Chain,
         mut control: Vec<Control>,
         to: Option<&Arc<Self>>,
         cred: &dyn Fn() -> Cred,
@@ -1210,15 +1207,22 @@ impl Socket {
             from: Some(d.from.clone()),
             ..Received::default()
         };
-        let n = d.data.len().min(max);
-        out.data.extend_from_slice(&d.data[..n]);
-        if n < d.data.len() {
+        if d.data.len() > max {
             out.flags |= abi::socket::MSG_TRUNC;
         }
-        if let Some(d) = d.take()
-            && want_control
-        {
-            out.control = d.control;
+        match d {
+            // Peeked: a copy, as `m_copym` would make.
+            dgram::Next::Peeked(p) => {
+                out.data = alloc::vec![0; out.full.min(max)];
+                p.data.copy_out(0, &mut out.data);
+            }
+            // Taken: the caller copies out up to `max` of it.
+            dgram::Next::Taken(d) => {
+                out.chain = d.data;
+                if want_control {
+                    out.control = d.control;
+                }
+            }
         }
         Ok(out)
     }
@@ -1259,8 +1263,6 @@ fn xucred(c: &Cred) -> Xucred {
     x.cr_groups[..n].copy_from_slice(&c.groups[..n]);
     x
 }
-
-pub use buf::{Mbuf, chain, chain_from};
 
 pub use poll::filter;
 

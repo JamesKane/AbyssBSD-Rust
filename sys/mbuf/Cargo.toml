@@ -1,0 +1,13 @@
+[package]
+name = "mbuf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+abi = { path = "../../lib/abi" }
+hal = { path = "../../arch/hal" }
+
+[lints]
+workspace = true

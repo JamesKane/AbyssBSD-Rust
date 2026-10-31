@@ -55,6 +55,7 @@ pt = { path = "../lib/pt" }
 regs = { path = "../lib/regs" }
 sched = { path = "../sys/sched" }
 security = { path = "../sys/security" }
+mbuf = { path = "../sys/mbuf" }
 socket = { path = "../sys/socket" }
 inet = { path = "../sys/inet" }
 sync = { path = "../sys/sync" }

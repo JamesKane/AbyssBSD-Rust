@@ -9,7 +9,9 @@
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
-use crate::buf::{self, MSIZE, Sockbuf};
+use mbuf::Chain;
+
+use crate::buf::{MSIZE, Sockbuf, len32};
 use crate::control::{Control, InFlight};
 
 /// One datagram: who sent it, its control messages, and its data, with
@@ -18,7 +20,7 @@ use crate::control::{Control, InFlight};
 pub(crate) struct Dgram {
     pub(crate) from: Vec<u8>,
     pub(crate) control: Vec<Control>,
-    pub(crate) data: Vec<u8>,
+    pub(crate) data: Chain,
     /// Data plus control bytes, control bytes, memory.
     cc: u32,
     ctl: u32,
@@ -26,22 +28,18 @@ pub(crate) struct Dgram {
 }
 
 impl Dgram {
-    pub(crate) fn new(from: Vec<u8>, control: Vec<Control>, data: &[u8]) -> Self {
-        let ctl: u32 =
-            u32::try_from(from.len()).unwrap_or(0) + control.iter().map(Control::len).sum::<u32>();
-        // The name's mbuf, the control's, and the data's (as
-        // `m_uiotombuf` carves it).
-        let n = u32::try_from(data.len()).unwrap_or(u32::MAX);
+    pub(crate) fn new(from: Vec<u8>, control: Vec<Control>, data: Chain) -> Self {
+        let ctl: u32 = len32(from.len()) + control.iter().map(Control::len).sum::<u32>();
+        // The name's mbuf, the control's, and the data's (`m_uiotombuf`
+        // gives even no data an mbuf).
+        let n = len32(data.len());
         let mbcnt = MSIZE
             + control.iter().map(Control::cost).sum::<u32>()
-            + buf::carve(n)
-                .iter()
-                .map(|&(_, ext)| MSIZE + ext)
-                .sum::<u32>();
+            + if data.is_empty() { MSIZE } else { data.cost() };
         Self {
             from,
             control,
-            data: data.to_vec(),
+            data,
             cc: n + ctl,
             ctl,
             mbcnt,
@@ -104,16 +102,6 @@ impl core::ops::Deref for Next<'_> {
         match self {
             Self::Peeked(d) => d,
             Self::Taken(d) => d,
-        }
-    }
-}
-
-impl Next<'_> {
-    /// The datagram, taken.
-    pub(crate) fn take(self) -> Option<Dgram> {
-        match self {
-            Self::Peeked(_) => None,
-            Self::Taken(d) => Some(d),
         }
     }
 }

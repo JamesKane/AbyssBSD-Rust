@@ -11,7 +11,7 @@
 //! Behavior reference: sys/kern/sys_socket.c, sys/kern/uipc_syscalls.c,
 //! sys/kern/uipc_usrreq.c (`unp_connectat`, `vfs_unp_reclaim`).
 
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::BTreeMap;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -226,10 +226,10 @@ pub(crate) fn send(
         if len as u64 > socket::space::DGRAM_MAX.load(Ordering::Relaxed) {
             Err(Errno::EMSGSIZE)
         } else {
-            let mut data = alloc::vec![0u8; len];
-            let n = uio.copy_in(&mut data)?;
-            data.truncate(n);
-            so.send_dgram(&data, control, to.as_ref(), cred).map(|()| n)
+            // Copied in straight to the mbufs (`m_uiotombuf`).
+            let data = socket::Chain::fill(len, |b, _| uio.copy_in(b))?;
+            let n = data.len();
+            so.send_dgram(data, control, to.as_ref(), cred).map(|()| n)
         }
     } else {
         send_stream(s, so, uio, &mut control, flags, nonblock, cred)
@@ -264,13 +264,15 @@ fn send_stream(
     // that and the room the last round left.
     let mut window = so.snd_hiwat() as usize;
     let mut sent = 0;
-    let mut chain: VecDeque<socket::Mbuf> = VecDeque::new();
+    let mut chain = socket::Chain::new();
     loop {
         if chain.is_empty() && (uio.resid() > 0 || !control.is_empty()) {
-            let n = uio.resid().min(window.max(1)).min(PIECE);
+            let n = uio.resid().min(window.max(1));
             // Copied in straight to the mbufs.
             let last = eor && uio.resid() == n;
-            chain = socket::chain_from(n, last, |b| uio.copy_in(b))?;
+            chain = socket::Chain::fill(n, |b, _| uio.copy_in(b))?;
+            // A short copy ends the send there, not the record.
+            chain.set_eor(last && chain.len() == n);
         }
         if chain.is_empty() && control.is_empty() {
             return Ok(sent);
@@ -298,8 +300,29 @@ fn send_stream(
     }
 }
 
-/// The most a send or receive moves through the kernel at once.
+/// Copies out each mbuf's data, as far as `uio` has room.
+fn copy_chain(uio: &mut dyn Uio, c: &socket::Chain) -> Result<usize, Errno> {
+    let mut n = 0;
+    for seg in c.segments() {
+        if uio.resid() == 0 {
+            break;
+        }
+        n += uio.copy_out(seg)?;
+    }
+    Ok(n)
+}
+
+/// The most a peek copies out at once.
 const PIECE: usize = 16 * 1024;
+
+/// What one look at a stream takes: all `uio` wants, or a peek's piece.
+fn piece(uio: &dyn Uio, peek: bool) -> usize {
+    if peek {
+        uio.resid().min(PIECE)
+    } else {
+        uio.resid()
+    }
+}
 
 /// What a receive got besides its data, which went to the caller's
 /// buffers.
@@ -314,7 +337,9 @@ pub(crate) struct Got {
 /// `soreceive` into `uio`: what waits, to its size (and the control
 /// before it, if `want_control`), waiting unless `nonblock`;
 /// `MSG_WAITALL` waits for all of it on a stream, a partial result
-/// counting after a signal. Data moves in pieces of [`PIECE`].
+/// counting after a signal. A receive unlinks all it can take at once
+/// and wakes the writer once (`uipc_soreceive_stream_or_seqpacket`); a
+/// peek, which copies under the lock, moves pieces of [`PIECE`].
 ///
 /// Control goes to `ext` (which installs descriptors) before the data it
 /// came with is copied; if that fails, a stream's data goes back, as
@@ -355,6 +380,7 @@ pub(crate) fn receive(
             ext(r.control)?;
         }
         got.count = uio.copy_out(&r.data)?;
+        got.count += copy_chain(uio, &r.chain)?;
         got.from = r.from;
         got.flags = r.flags;
         got.full = r.full;
@@ -363,7 +389,7 @@ pub(crate) fn receive(
     let waitall = flags & MSG_WAITALL != 0 && !peek;
     loop {
         // A look that may wait, then what more is there without waiting.
-        let want = uio.resid().min(PIECE);
+        let want = piece(uio, peek);
         let skip = got.count;
         let first = || so.recv_stream_parts(want, peek, skip, false, want_control);
         let r = if nonblock {
@@ -372,42 +398,39 @@ pub(crate) fn receive(
             let _w = sched::wait_message("sbwait");
             wait_until(s, &so.rd, timeo, first)
         };
-        let (mut r, mut parts) = match r {
+        let mut r = match r {
             Ok(r) => r,
             Err(Errno::EINTR | Errno::ERESTART | Errno::EAGAIN) if got.count > 0 => return Ok(got),
             Err(e) => return Err(e),
         };
         loop {
-            let asked = uio.resid().min(PIECE);
-            let n = r.data.len() + parts.iter().map(Vec::len).sum::<usize>();
+            let asked = piece(uio, peek);
+            let n = r.data.len() + r.chain.len();
             if let Some(ext) = ext.as_mut()
                 && !r.control.is_empty()
             {
                 let c = core::mem::take(&mut r.control);
                 if let Err(e) = ext(c) {
                     if !peek {
-                        let data: Vec<u8> = parts.concat();
-                        so.unread(&data, r.flags & abi::socket::MSG_EOR != 0);
+                        so.unread(core::mem::take(&mut r.chain));
                     }
                     return Err(e);
                 }
             }
             // Each mbuf's bytes straight out (a peek's copy is in `data`).
             got.count += uio.copy_out(&r.data)?;
-            for d in &parts {
-                got.count += uio.copy_out(d)?;
-            }
+            got.count += copy_chain(uio, &r.chain)?;
             got.flags |= r.flags;
             if n == 0 || n < asked || r.flags & abi::socket::MSG_EOR != 0 || uio.resid() == 0 {
                 break;
             }
-            let more = uio.resid().min(PIECE);
+            let more = piece(uio, peek);
             match so.recv_stream_parts(more, peek, got.count, true, want_control) {
-                Ok((m, p)) => (r, parts) = (m, p),
+                Ok(m) => r = m,
                 Err(_) => break,
             }
         }
-        let empty = r.data.is_empty() && parts.iter().all(Vec::is_empty);
+        let empty = r.data.is_empty() && r.chain.is_empty();
         if !waitall || got.flags & abi::socket::MSG_EOR != 0 || uio.resid() == 0 || empty {
             return Ok(got);
         }
