@@ -6,6 +6,8 @@
 //! sys/kern/uipc_sockbuf.c (`sbsetopt`), sys/kern/uipc_usrreq.c
 //! (`uipc_ctloutput`).
 
+use core::sync::atomic::Ordering;
+
 use alloc::vec::Vec;
 
 use abi::errno::Errno;
@@ -101,12 +103,18 @@ impl Socket {
                     return Err(Errno::EINVAL);
                 }
                 let cc = v.cast_unsigned();
-                let sb = if name == SO_SNDBUF || name == SO_SNDLOWAT {
+                if name == SO_SNDBUF {
+                    if !self.reserve_snd(&mut i, cc) {
+                        return Err(Errno::ENOBUFS);
+                    }
+                    return Ok(());
+                }
+                let sb = if name == SO_SNDLOWAT {
                     &mut i.snd
                 } else {
                     &mut i.rcv
                 };
-                if name == SO_SNDBUF || name == SO_RCVBUF {
+                if name == SO_RCVBUF {
                     if !sb.reserve(cc) {
                         return Err(Errno::ENOBUFS);
                     }
@@ -128,9 +136,9 @@ impl Socket {
                     sec.cast_unsigned() * NANOS + usec.cast_unsigned() * 1000
                 };
                 if name == SO_SNDTIMEO {
-                    i.snd.timeo = ns;
+                    self.snd_timeo.store(ns, Ordering::Relaxed);
                 } else {
-                    i.rcv.timeo = ns;
+                    self.rcv_timeo.store(ns, Ordering::Relaxed);
                 }
             }
             SO_TS_CLOCK => {
@@ -246,8 +254,8 @@ impl Socket {
             SO_RCVBUF => i32v(i.rcv.hiwat.cast_signed()),
             SO_SNDLOWAT => i32v(i.snd.lowat.cast_signed()),
             SO_RCVLOWAT => i32v(i.rcv.lowat.cast_signed()),
-            SO_SNDTIMEO => tv(i.snd.timeo),
-            SO_RCVTIMEO => tv(i.rcv.timeo),
+            SO_SNDTIMEO => tv(self.snd_timeo.load(Ordering::Relaxed)),
+            SO_RCVTIMEO => tv(self.rcv_timeo.load(Ordering::Relaxed)),
             SO_LISTENQLIMIT => i32v(qlimit.cast_signed()),
             SO_LISTENQLEN => i32v(qlen.cast_signed()),
             SO_LISTENINCQLEN => i32v(0),

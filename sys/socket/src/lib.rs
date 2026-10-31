@@ -142,6 +142,14 @@ pub struct Socket {
     /// `unp_ino`, its `st_ino`.
     pub ino: u64,
     inner: DelayLock<Inner>,
+    /// The send buffer's size (`so_snd.sb_hiwat`), kept beside the lock
+    /// so a send sizes its first copy-in without taking it, as FreeBSD's
+    /// reads `sb_hiwat` unlocked.
+    snd_hiwat: AtomicU32,
+    /// The timeouts of waits to send and to receive (`sb_timeo`), in
+    /// nanoseconds (0: none), read on every send and receive.
+    snd_timeo: AtomicU64,
+    rcv_timeo: AtomicU64,
     /// Readers and accepters (`so_rdsel`), and writers (`so_wrsel`).
     pub rd: Notify,
     pub wr: Notify,
@@ -246,6 +254,7 @@ impl Socket {
         snd.reserve(u32::try_from(send).unwrap_or(u32::MAX));
         rcv.lowat = 1;
         snd.lowat = buf::MCLBYTES.min(snd.hiwat);
+        let snd_hiwat = AtomicU32::new(snd.hiwat);
         let so = Arc::new(Self {
             ty,
             ino: NEXT_INO.fetch_add(1, Ordering::Relaxed),
@@ -268,6 +277,9 @@ impl Socket {
                 ts_clock: 0,
                 pacing: u32::MAX,
             }),
+            snd_hiwat,
+            snd_timeo: AtomicU64::new(0),
+            rcv_timeo: AtomicU64::new(0),
             rd: Notify::new(),
             wr: Notify::new(),
             file: SpinLock::new(None),
@@ -289,14 +301,24 @@ impl Socket {
 
     /// Its send buffer's size (`st_blksize`).
     pub fn snd_hiwat(&self) -> u32 {
-        self.inner.lock().snd.hiwat
+        self.snd_hiwat.load(Ordering::Relaxed)
     }
 
     /// The timeouts of waits to send and to receive, in nanoseconds (0:
     /// none).
     pub fn timeouts(&self) -> (u64, u64) {
-        let i = self.inner.lock();
-        (i.snd.timeo, i.rcv.timeo)
+        (
+            self.snd_timeo.load(Ordering::Relaxed),
+            self.rcv_timeo.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Sets the send buffer's size (`sbreserve_locked`), keeping the
+    /// unlocked copy with it.
+    fn reserve_snd(&self, i: &mut Inner, cc: u32) -> bool {
+        let ok = i.snd.reserve(cc);
+        self.snd_hiwat.store(i.snd.hiwat, Ordering::Relaxed);
+        ok
     }
 
     /// Whether `SO_NOSIGPIPE` is set.
@@ -527,11 +549,12 @@ impl Socket {
             }
             let mut s = server.inner.lock();
             s.rcv.reserve(l.rcv.hiwat);
-            s.snd.reserve(l.snd.hiwat);
+            server.reserve_snd(&mut s, l.snd.hiwat);
             s.rcv.lowat = l.rcv.lowat;
             s.snd.lowat = l.snd.lowat;
-            s.rcv.timeo = l.rcv.timeo;
-            s.snd.timeo = l.snd.timeo;
+            let (snd, rcv) = to.timeouts();
+            server.snd_timeo.store(snd, Ordering::Relaxed);
+            server.rcv_timeo.store(rcv, Ordering::Relaxed);
             s.options = l.options & !SO_ACCEPTCONN;
             s.linger = l.linger;
             s.addr.clone_from(&l.addr);
@@ -786,6 +809,25 @@ impl Socket {
 
     // --- Stream and seqpacket data ---
 
+    /// The peer a stream send goes to (`uipc_lock_peer`), held for the
+    /// whole send: the connection's end shows as its receive side shut
+    /// (`SBS_CANTRCVMORE`), which [`Self::send_stream_to`] reports.
+    ///
+    /// # Errors
+    ///
+    /// `EPIPE` once disconnected, `ENOTCONN` if never connected.
+    pub fn stream_peer(&self) -> Result<Arc<Socket>, Errno> {
+        let i = self.inner.lock();
+        match &i.peer {
+            Some(p) => Ok(Arc::clone(p)),
+            None => Err(if i.state & state::ISDISCONNECTED != 0 {
+                Errno::EPIPE
+            } else {
+                Errno::ENOTCONN
+            }),
+        }
+    }
+
     /// `uipc_sosend_stream_or_seqpacket`, one round: as much of `data`
     /// as the peer's buffer takes now (`control` with the first of it, if
     /// it fits), the last piece marked `eor` if it is the end of `data`.
@@ -793,28 +835,34 @@ impl Socket {
     ///
     /// # Errors
     ///
-    /// `ENOTCONN` unconnected, `EPIPE` if the peer receives no more,
-    /// `EMSGSIZE` for control larger than its buffer, `EWOULDBLOCK` when
-    /// it has no room.
+    /// As [`Self::send_stream_to`], and `ENOTCONN` unconnected.
     pub fn send_stream(
         &self,
         data: &mut VecDeque<Mbuf>,
         control: &mut Vec<Control>,
         cred: &dyn Fn() -> Cred,
     ) -> Result<usize, Errno> {
-        let peer = {
-            let i = self.inner.lock();
-            match &i.peer {
-                Some(p) => Arc::clone(p),
-                None => {
-                    return Err(if i.state & state::ISDISCONNECTED != 0 {
-                        Errno::EPIPE
-                    } else {
-                        Errno::ENOTCONN
-                    });
-                }
-            }
-        };
+        let peer = self.stream_peer()?;
+        self.send_stream_to(&peer, data, control, cred)
+            .map(|(n, _)| n)
+    }
+
+    /// [`Self::send_stream`] to `peer`, from [`Self::stream_peer`], under
+    /// its buffer's lock alone. Also returns the room left after it,
+    /// which with the send buffer's size bounds the next copy-in, as
+    /// FreeBSD's loop sizes its next `mc_uiotomc`.
+    ///
+    /// # Errors
+    ///
+    /// `EPIPE` if the peer receives no more, `EMSGSIZE` for control
+    /// larger than its buffer, `EWOULDBLOCK` when it has no room.
+    pub fn send_stream_to(
+        &self,
+        peer: &Socket,
+        data: &mut VecDeque<Mbuf>,
+        control: &mut Vec<Control>,
+        cred: &dyn Fn() -> Cred,
+    ) -> Result<(usize, u32), Errno> {
         let mut p = peer.inner.lock();
         // A receiver asking for credentials gets them with the first send
         // (`LOCAL_CREDS`) or every one (`LOCAL_CREDS_PERSISTENT`).
@@ -850,20 +898,10 @@ impl Socket {
         let sent = data.iter().map(|m| m.data.len()).sum();
         let now = core::mem::replace(data, rest);
         p.rcv.push_data(now);
+        let left = p.rcv.stream_space();
         drop(p);
         peer.rd.notify(0);
-        Ok(sent)
-    }
-
-    /// How much a stream send may copy in next: the peer's room and this
-    /// socket's send buffer size (the virtual send buffer).
-    pub fn stream_send_window(&self) -> usize {
-        let (peer, hiwat) = {
-            let i = self.inner.lock();
-            (i.peer.clone(), i.snd.hiwat)
-        };
-        let space = peer.map_or(0, |p| p.inner.lock().rcv.stream_space());
-        (space as usize).saturating_add(hiwat as usize).max(1)
+        Ok((sent, left))
     }
 
     /// `uipc_soreceive_stream_or_seqpacket`, one look: up to `max` bytes

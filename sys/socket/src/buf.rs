@@ -168,8 +168,6 @@ pub(crate) struct Sockbuf {
     pub(crate) hiwat: u32,
     pub(crate) lowat: u32,
     pub(crate) mbmax: u32,
-    /// Timeout of a wait on it, in nanoseconds; 0 for none.
-    pub(crate) timeo: u64,
     /// Data bytes (`sb_ccc`, `sb_acc`), control bytes (`sb_ctl`), memory
     /// (`sb_mbcnt`).
     pub(crate) cc: u32,
@@ -196,7 +194,6 @@ impl Sockbuf {
             hiwat: 0,
             lowat: 0,
             mbmax: 0,
-            timeo: 0,
             cc: 0,
             ctl: 0,
             mbcnt: 0,

@@ -258,11 +258,16 @@ fn send_stream(
 ) -> Result<usize, Errno> {
     let eor = flags & MSG_EOR != 0;
     let (timeo, _) = so.timeouts();
+    // Found once; each round then takes only its buffer's lock.
+    let peer = so.stream_peer()?;
+    // The first copy-in is sized to the send buffer, the later ones to
+    // that and the room the last round left.
+    let mut window = so.snd_hiwat() as usize;
     let mut sent = 0;
     let mut chain: VecDeque<socket::Mbuf> = VecDeque::new();
     loop {
         if chain.is_empty() && (uio.resid() > 0 || !control.is_empty()) {
-            let n = uio.resid().min(so.stream_send_window()).min(PIECE);
+            let n = uio.resid().min(window.max(1)).min(PIECE);
             // Copied in straight to the mbufs.
             let last = eor && uio.resid() == n;
             chain = socket::chain_from(n, last, |b| uio.copy_in(b))?;
@@ -271,15 +276,18 @@ fn send_stream(
             return Ok(sent);
         }
         let r = if nonblock {
-            so.send_stream(&mut chain, control, cred)
+            so.send_stream_to(&peer, &mut chain, control, cred)
         } else {
             let _w = sched::wait_message("sbwait");
             wait_until(s, &so.wr, timeo, || {
-                so.send_stream(&mut chain, control, cred)
+                so.send_stream_to(&peer, &mut chain, control, cred)
             })
         };
         match r {
-            Ok(n) => sent += n,
+            Ok((n, left)) => {
+                sent += n;
+                window = (left as usize).saturating_add(so.snd_hiwat() as usize);
+            }
             // What went counts after a signal or a full buffer.
             Err(Errno::EINTR | Errno::ERESTART | Errno::EAGAIN) if sent > 0 => return Ok(sent),
             Err(e) => return Err(e),
