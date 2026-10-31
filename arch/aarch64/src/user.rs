@@ -287,6 +287,7 @@ global_asm!(
 
     /* x0 = dst (kernel), x1 = src (user), x2 = len; 0, or 1 on a fault. */
     .global abyss_copy_from_user
+    .type abyss_copy_from_user, @function
 abyss_copy_from_user:
     cmp x2, #8
     b.lo 2f
@@ -304,9 +305,11 @@ abyss_copy_from_user:
     b.ne 3b
 4:  mov x0, #0
     ret
+    .size abyss_copy_from_user, . - abyss_copy_from_user
 
     /* x0 = dst (user), x1 = src (kernel), x2 = len. */
     .global abyss_copy_to_user
+    .type abyss_copy_to_user, @function
 abyss_copy_to_user:
     cmp x2, #8
     b.lo 6f
@@ -327,6 +330,7 @@ abyss_copy_to_user:
 
 9:  mov x0, #1
     ret
+    .size abyss_copy_to_user, . - abyss_copy_to_user
 
     .pushsection abyss_extable, "aw"
     .balign 8

@@ -301,6 +301,7 @@ global_asm!(
 
     /* rdi = dst, rsi = src, rdx = len; returns 0, or 1 on a fault. */
     .global abyss_user_copy
+    .type abyss_user_copy, @function
 abyss_user_copy:
     mov rcx, rdx
 1:  rep movsb
@@ -308,9 +309,11 @@ abyss_user_copy:
     ret
 2:  mov eax, 1
     ret
+    .size abyss_user_copy, . - abyss_user_copy
 
     /* The same, with user access opened for SMAP. */
     .global abyss_user_copy_smap
+    .type abyss_user_copy_smap, @function
 abyss_user_copy_smap:
     mov rcx, rdx
     stac
@@ -321,6 +324,7 @@ abyss_user_copy_smap:
 4:  clac
     mov eax, 1
     ret
+    .size abyss_user_copy_smap, . - abyss_user_copy_smap
 
     .pushsection abyss_extable, "aw"
     .balign 8
