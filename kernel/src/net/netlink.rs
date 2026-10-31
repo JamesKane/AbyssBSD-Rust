@@ -5,10 +5,10 @@
 //! for the next read, as FreeBSD's `nl_process_nbuf` writes them to the
 //! socket's receive buffer.
 //!
-//! `NETLINK_ROUTE` is served; `NETLINK_GENERIC` sockets open, and every
-//! request on them is `EOPNOTSUPP` (no generic families are registered:
-//! no `carp`, `pfsync`, or `wlan` here). Group subscriptions are
-//! recorded but no notifications are sent.
+//! `NETLINK_ROUTE` is served, and its sockets hear the link, address, and
+//! route notifications of the groups they join; `NETLINK_GENERIC` has
+//! its controller (`nlctrl`) and no other family (no `carp`, `pfsync`,
+//! or `wlan` here).
 //!
 //! Routing sockets (`PF_ROUTE`, `SOCK_RAW`) are the same machinery with
 //! one message per record: a write is a routing request
@@ -71,6 +71,8 @@ pub(crate) struct Nl {
     pub(crate) proto: i32,
     /// A routing socket, and the family it hears (0: all).
     route: Option<u8>,
+    /// Its routing table (`so_fibnum`): its creator's, or `SO_SETFIB`'s.
+    fib: core::sync::atomic::AtomicU16,
     /// Its creator's VNET (`so_vnet`), which its requests read and change.
     vnet: Arc<net::Vnet>,
     pub(crate) ty: u32,
@@ -125,6 +127,9 @@ impl NetlinkFile {
         let f = Self {
             nl: Arc::new(Nl {
                 route,
+                fib: core::sync::atomic::AtomicU16::new(
+                    crate::proc::Process::current().map_or(0, |p| p.fib.load(Ordering::Relaxed)),
+                ),
                 proto,
                 vnet: super::curvnet(),
                 ty,
@@ -252,6 +257,7 @@ impl Nl {
                     may_addaddr: crate::fs::priv_check(Priv::NetAddifaddr).is_ok(),
                     may_deladdr: crate::fs::priv_check(Priv::NetDelifaddr).is_ok(),
                     may_route: crate::fs::priv_check(Priv::NetRoute).is_ok(),
+                    fib: self.fib.load(Ordering::Relaxed),
                 },
                 st.rcvbuf,
             )
@@ -264,7 +270,7 @@ impl Nl {
                 crate::time::now_ns() / 1_000_000_000,
             )
         } else {
-            generic(&ctx, buf)
+            inet::netlink::handle_generic(&ctx, buf)
         };
         if replies.is_empty() {
             return Ok(());
@@ -289,7 +295,8 @@ impl Nl {
         let may = crate::fs::priv_check(crate::cred::Priv::NetRoute).is_ok();
         let pid = crate::proc::Process::current().map_or(0, |p| p.pid());
         let mut n = self.vnet.net.lock();
-        let (reply, r) = net::rtsock::request(&mut n, buf, pid, may);
+        let fib = self.fib.load(Ordering::Relaxed);
+        let (reply, r) = net::rtsock::request(&mut n, buf, pid, may, fib);
         if !reply.is_empty() {
             let family = buf
                 .get(core::mem::size_of::<abi::net::RtMsghdr>() + 1)
@@ -298,6 +305,7 @@ impl Nl {
                 family,
                 msg: reply,
                 from: core::ptr::from_ref(self).addr(),
+                fib,
             });
         }
         drop(n);
@@ -467,6 +475,14 @@ impl Nl {
                 }
             }
             (SOL_SOCKET, abi::socket::SO_USELOOPBACK) => st.useloopback = int()? != 0,
+            (SOL_SOCKET, abi::socket::SO_FIB) => {
+                let f = u32::try_from(int()?).map_err(|_| Errno::EINVAL)?;
+                if f >= net::numfibs() {
+                    return Err(Errno::EINVAL);
+                }
+                #[allow(clippy::cast_possible_truncation, reason = "below RT_MAXFIBS")]
+                self.fib.store(f as u16, Ordering::Relaxed);
+            }
             (SOL_SOCKET, _) => {}
             (SOL_NETLINK, _) => return Err(Errno::ENOPROTOOPT),
             _ => return Err(Errno::ENOPROTOOPT),
@@ -492,35 +508,11 @@ impl Nl {
             (SOL_SOCKET, SO_DOMAIN) if self.route.is_some() => i(i32::from(abi::inet::AF_ROUTE)),
             (SOL_SOCKET, SO_DOMAIN) => i(i32::from(abi::inet::AF_NETLINK)),
             (SOL_SOCKET, abi::socket::SO_USELOOPBACK) => b(st.useloopback),
+            (SOL_SOCKET, abi::socket::SO_FIB) => i(i32::from(self.fib.load(Ordering::Relaxed))),
             (SOL_SOCKET, SO_ERROR) => i(0),
             _ => return Err(Errno::ENOPROTOOPT),
         })
     }
-}
-
-/// `NETLINK_GENERIC` with no families: each request is `EOPNOTSUPP`,
-/// acknowledged as `nl_receive_message` does.
-fn generic(ctx: &inet::netlink::Ctx, buf: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut at = 0;
-    while buf.len() - at >= 16 {
-        let len = u32::from_ne_bytes(buf[at..at + 4].try_into().unwrap_or([0; 4])) as usize;
-        if len < 16 || len > buf.len() - at {
-            break;
-        }
-        let mut m = Vec::new();
-        let total = 16 + 4 + 16;
-        m.extend_from_slice(&u32::try_from(total).unwrap_or(0).to_ne_bytes());
-        m.extend_from_slice(&abi::netlink::NLMSG_ERROR.to_ne_bytes());
-        m.extend_from_slice(&abi::netlink::NLM_F_CAPPED.to_ne_bytes());
-        m.extend_from_slice(&buf[at + 8..at + 12]);
-        m.extend_from_slice(&ctx.port.to_ne_bytes());
-        m.extend_from_slice(&Errno::EOPNOTSUPP.get().to_ne_bytes());
-        m.extend_from_slice(&buf[at..at + 16]);
-        out.extend(m);
-        at += (len + 3) & !3;
-    }
-    out
 }
 
 struct NlFilter {
@@ -568,6 +560,16 @@ impl Filter for NlFilter {
 impl net::announce::Listener for Nl {
     fn event(&self, e: &net::announce::Event) {
         let Some(af) = self.route else {
+            // A netlink socket hears the groups it joined.
+            let groups = self.state.lock().groups;
+            if self.proto == NETLINK_ROUTE
+                && groups != 0
+                && let Some((g, msg)) =
+                    inet::netlink::notify(e, crate::time::now_ns() / 1_000_000_000)
+                && groups & (1u64 << (g - 1)) != 0
+            {
+                self.queue(msg);
+            }
             return;
         };
         if let net::announce::Event::Reply { from, .. } = e
@@ -575,6 +577,13 @@ impl net::announce::Listener for Nl {
             && !self.state.lock().useloopback
         {
             return;
+        }
+        // Route messages reach the sockets of their table only.
+        let fib = self.fib.load(Ordering::Relaxed);
+        match e {
+            net::announce::Event::Route { route, .. } if route.fib != fib => return,
+            net::announce::Event::Reply { fib: f, .. } if *f != fib => return,
+            _ => {}
         }
         let Some((family, msg)) = net::rtsock::announce(e) else {
             return;

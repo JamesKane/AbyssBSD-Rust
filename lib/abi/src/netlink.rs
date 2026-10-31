@@ -154,6 +154,7 @@ pub const NL_RTA_OIF: u16 = 4;
 pub const NL_RTA_GATEWAY: u16 = 5;
 pub const NL_RTA_METRICS: u16 = 8;
 pub const NL_RTA_KNH_ID: u16 = 10;
+pub const NL_RTA_MULTIPATH: u16 = 9;
 pub const NL_RTA_WEIGHT: u16 = 13;
 pub const NL_RTA_RTFLAGS: u16 = 14;
 pub const NL_RTA_TABLE: u16 = 15;
@@ -234,6 +235,7 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("NL_RTA_GATEWAY", NL_RTA_GATEWAY as i64),
     c("NL_RTA_METRICS", NL_RTA_METRICS as i64),
     c("NL_RTA_KNH_ID", NL_RTA_KNH_ID as i64),
+    c("NL_RTA_MULTIPATH", NL_RTA_MULTIPATH as i64),
     c("NL_RTA_WEIGHT", NL_RTA_WEIGHT as i64),
     c("NL_RTA_RTFLAGS", NL_RTA_RTFLAGS as i64),
     c("NL_RTA_TABLE", NL_RTA_TABLE as i64),

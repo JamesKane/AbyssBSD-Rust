@@ -219,6 +219,7 @@ fn epair_ifnet(
         dname: "epair",
         dunit: unit,
         home: 0,
+        fib: 0,
         flags: iff::BROADCAST | iff::SIMPLEX | iff::MULTICAST | iff::RUNNING,
         mtu: ETHERMTU,
         metric: 0,

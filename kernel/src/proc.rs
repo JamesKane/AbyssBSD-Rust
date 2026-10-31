@@ -701,6 +701,8 @@ pub(crate) struct Process {
     pub(crate) root: PreemptLock<Option<vfs::VnodeUse>>,
     /// The file creation mask.
     pub(crate) umask: AtomicU16,
+    /// The routing table its new sockets use (`p_fibnum`, `setfib(2)`).
+    pub(crate) fib: AtomicU16,
     /// What `ps` shows of the program it runs.
     image: SpinLock<Image>,
     /// When it was created, in nanoseconds since boot.
@@ -1009,6 +1011,7 @@ impl Process {
                 cwd: PreemptLock::new(cwd),
                 root: PreemptLock::new(parent.and_then(|p| p.root.lock().clone())),
                 umask: AtomicU16::new(umask),
+                fib: AtomicU16::new(parent.map_or(0, |p| p.fib.load(Ordering::Relaxed))),
                 image: SpinLock::new(image),
                 started: crate::time::now_ns(),
                 execed: AtomicBool::new(execed),

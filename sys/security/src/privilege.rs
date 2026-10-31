@@ -296,6 +296,8 @@ pub enum Priv {
     NetSetifvnet = 417,
     /// `PRIV_NET_SETIFDESCR`: Set interface description.
     NetSetifdescr = 418,
+    /// `PRIV_NET_SETIFFIB`: Set interface fib.
+    NetSetiffib = 419,
     /// `PRIV_NETINET_RESERVEDPORT`: Bind low port number.
     NetinetReservedport = 490,
     /// `PRIV_NETINET_RAW`: Open netinet raw socket.

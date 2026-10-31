@@ -252,7 +252,7 @@ mod rtsock {
                 (rta::NETMASK, sin([255, 255, 255, 0])),
             ],
         );
-        let (reply, r) = crate::rtsock::request(&mut v.net.lock(), &m, 7, true);
+        let (reply, r) = crate::rtsock::request(&mut v.net.lock(), &m, 7, true, 0);
         r.unwrap();
         let h = hdr(&reply);
         assert_eq!(
@@ -268,10 +268,10 @@ mod rtsock {
         assert_eq!(u16::from_ne_bytes([gw[2], gw[3]]), index);
         // Longest prefix, and none.
         let m = msg(rtm::GET, 0, &[(rta::DST, sin([192, 0, 2, 77]))]);
-        let (reply, _) = crate::rtsock::request(&mut v.net.lock(), &m, 7, true);
+        let (reply, _) = crate::rtsock::request(&mut v.net.lock(), &m, 7, true, 0);
         assert_eq!(hdr(&reply).rtm_index, index);
         let m = msg(rtm::GET, 0, &[(rta::DST, sin([198, 51, 100, 1]))]);
-        let (reply, r) = crate::rtsock::request(&mut v.net.lock(), &m, 7, true);
+        let (reply, r) = crate::rtsock::request(&mut v.net.lock(), &m, 7, true, 0);
         assert_eq!(r, Err(Errno::ESRCH));
         assert_eq!(hdr(&reply).rtm_errno, Errno::ESRCH.get());
     }
@@ -290,7 +290,7 @@ mod rtsock {
                 (rta::NETMASK, mask.clone()),
             ],
         );
-        let (reply, r) = crate::rtsock::request(&mut v.net.lock(), &m, 1, true);
+        let (reply, r) = crate::rtsock::request(&mut v.net.lock(), &m, 1, true, 0);
         r.unwrap();
         let h = hdr(&reply);
         assert_eq!(
@@ -298,7 +298,7 @@ mod rtsock {
             rtf::UP | rtf::DONE | rtf::GATEWAY | rtf::STATIC
         );
         assert_eq!(h.rtm_index, index);
-        let (_, r) = crate::rtsock::request(&mut v.net.lock(), &m, 1, true);
+        let (_, r) = crate::rtsock::request(&mut v.net.lock(), &m, 1, true, 0);
         assert_eq!(r, Err(Errno::EEXIST));
         // Unreachable gateway; and no privilege.
         let bad = msg(
@@ -311,11 +311,11 @@ mod rtsock {
             ],
         );
         assert_eq!(
-            crate::rtsock::request(&mut v.net.lock(), &bad, 1, true).1,
+            crate::rtsock::request(&mut v.net.lock(), &bad, 1, true, 0).1,
             Err(Errno::ENETUNREACH)
         );
         assert_eq!(
-            crate::rtsock::request(&mut v.net.lock(), &m, 1, false).1,
+            crate::rtsock::request(&mut v.net.lock(), &m, 1, false, 0).1,
             Err(Errno::EPERM)
         );
         // A host route without RTF_HOST.
@@ -327,7 +327,7 @@ mod rtsock {
                 (rta::GATEWAY, sin([192, 0, 2, 254])),
             ],
         );
-        let (reply, r) = crate::rtsock::request(&mut v.net.lock(), &host, 1, true);
+        let (reply, r) = crate::rtsock::request(&mut v.net.lock(), &host, 1, true, 0);
         r.unwrap();
         assert_eq!(
             hdr(&reply).rtm_flags,
@@ -343,17 +343,77 @@ mod rtsock {
                 (rta::NETMASK, mask.clone()),
             ],
         );
-        crate::rtsock::request(&mut v.net.lock(), &ch, 1, true)
+        crate::rtsock::request(&mut v.net.lock(), &ch, 1, true, 0)
             .1
             .unwrap();
         let del = msg(rtm::DELETE, 0, &[(rta::DST, net), (rta::NETMASK, mask)]);
-        let (reply, r) = crate::rtsock::request(&mut v.net.lock(), &del, 1, true);
+        let (reply, r) = crate::rtsock::request(&mut v.net.lock(), &del, 1, true, 0);
         r.unwrap();
         assert_eq!(hdr(&reply).rtm_type, rtm::DELETE);
         assert_eq!(
-            crate::rtsock::request(&mut v.net.lock(), &del, 1, true).1,
+            crate::rtsock::request(&mut v.net.lock(), &del, 1, true, 0).1,
             Err(Errno::ESRCH)
         );
+    }
+
+    #[test]
+    fn multipath_groups() {
+        let (v, _) = setup();
+        let net = sin([128, 66, 0, 0]);
+        let mask = sin([255, 255, 255, 0]);
+        let add = |gw: u8, w: u64, ty: u8| {
+            let mut m = msg(
+                ty,
+                rtf::GATEWAY,
+                &[
+                    (rta::DST, net.clone()),
+                    (rta::GATEWAY, sin([192, 0, 2, gw])),
+                    (rta::NETMASK, mask.clone()),
+                ],
+            );
+            let at = core::mem::offset_of!(RtMsghdr, rtm_inits);
+            m[at..at + 8].copy_from_slice(&abi::net::rtv::WEIGHT.to_ne_bytes());
+            let at = core::mem::offset_of!(RtMsghdr, rtm_rmx)
+                + core::mem::offset_of!(abi::net::RtMetrics, rmx_weight);
+            m[at..at + 8].copy_from_slice(&w.to_ne_bytes());
+            crate::rtsock::request(&mut v.net.lock(), &m, 1, true, 0).1
+        };
+        add(10, 2, rtm::ADD).unwrap();
+        add(5, 3, rtm::ADD).unwrap();
+        assert_eq!(add(5, 3, rtm::ADD), Err(Errno::EEXIST));
+        add(5, 4, rtm::CHANGE).unwrap();
+        assert_eq!(add(7, 4, rtm::CHANGE), Err(Errno::ESRCH));
+        let paths = |v: &Vnet| {
+            let mut p: Vec<(u8, u32)> = v
+                .net
+                .lock()
+                .routes
+                .iter()
+                .filter(|r| r.dst == from_v4([128, 66, 0, 0]))
+                .map(|r| match r.gateway {
+                    crate::ifnet::Gateway::Addr(g) => (g[15], r.weight),
+                    crate::ifnet::Gateway::Link(_) => (0, r.weight),
+                })
+                .collect();
+            p.sort_unstable();
+            p
+        };
+        assert_eq!(paths(&v), [(5, 4), (10, 2)]);
+        add(10, 2, rtm::DELETE).unwrap();
+        assert_eq!(paths(&v), [(5, 4)]);
+        // The dump lists each path.
+        add(11, 1, rtm::ADD).unwrap();
+        let d = crate::rtmsg::dump(&v.net.lock(), abi::inet::AF_INET, Some(0));
+        let mut at = 0;
+        let mut seen = 0;
+        while at < d.len() {
+            let h = hdr(&d[at..]);
+            if h.rtm_flags & rtf::GATEWAY != 0 {
+                seen += 1;
+            }
+            at += usize::from(h.rtm_msglen);
+        }
+        assert_eq!(seen, 2);
     }
 
     #[test]
@@ -397,4 +457,99 @@ mod rtsock {
             ]
         );
     }
+}
+
+#[test]
+fn a_prefix_route_moves_to_the_next_address() {
+    use crate::addr::from_v4;
+    use crate::ifnet::{INFINITE, Ifaddr};
+    let v = Vnet::new(0);
+    clone::create(&v, b"epair", &ctx()).unwrap();
+    let a = |last: u8| Ifaddr {
+        family: Family::Inet,
+        addr: from_v4([192, 0, 2, last]),
+        plen: 24,
+        dst: None,
+        broadcast: None,
+        flags6: 0,
+        vltime: INFINITE,
+        pltime: INFINITE,
+        vhid: 0,
+    };
+    v.net.lock().add_addr(b"epair0a", a(1)).unwrap();
+    v.net.lock().add_addr(b"epair0b", a(2)).unwrap();
+    let ib = v.net.lock().by_name(b"epair0b").unwrap().index;
+    let prefix = |n: &crate::ifnet::Net| {
+        n.routes
+            .iter()
+            .filter(|r| r.plen == 24)
+            .map(|r| (r.ifindex, r.ifa))
+            .collect::<alloc::vec::Vec<_>>()
+    };
+    assert_eq!(prefix(&v.net.lock()).len(), 1);
+    v.net
+        .lock()
+        .delete_addr(b"epair0a", Family::Inet, Some(&from_v4([192, 0, 2, 1])))
+        .unwrap();
+    assert_eq!(prefix(&v.net.lock()), [(ib, from_v4([192, 0, 2, 2]))]);
+}
+
+#[test]
+fn generic_netlink_has_its_controller() {
+    use crate::netlink::{Ctx, handle_generic};
+    let req = |flags: u16, name: Option<&[u8]>| {
+        let mut m = alloc::vec::Vec::new();
+        m.extend_from_slice(&0u32.to_ne_bytes());
+        m.extend_from_slice(&16u16.to_ne_bytes());
+        m.extend_from_slice(&flags.to_ne_bytes());
+        m.extend_from_slice(&7u32.to_ne_bytes());
+        m.extend_from_slice(&0u32.to_ne_bytes());
+        m.extend_from_slice(&[3, 1, 0, 0]);
+        if let Some(n) = name {
+            let len = u16::try_from(4 + n.len() + 1).unwrap();
+            m.extend_from_slice(&len.to_ne_bytes());
+            m.extend_from_slice(&2u16.to_ne_bytes());
+            m.extend_from_slice(n);
+            m.push(0);
+            m.resize(m.len().div_ceil(4) * 4, 0);
+        }
+        let l = u32::try_from(m.len()).unwrap();
+        m[0..4].copy_from_slice(&l.to_ne_bytes());
+        m
+    };
+    let ty = |r: &[u8]| u16::from_ne_bytes([r[4], r[5]]);
+    // By name: the family, version 2.
+    let r = handle_generic(&Ctx::default(), &req(1, Some(b"nlctrl")));
+    assert_eq!((ty(&r), r[16], r[17]), (16, 1, 2));
+    // Unknown: ENOENT.
+    let r = handle_generic(&Ctx::default(), &req(1, Some(b"carp")));
+    assert_eq!(ty(&r), 2);
+    assert_eq!(
+        i32::from_ne_bytes([r[16], r[17], r[18], r[19]]),
+        Errno::ENOENT.get()
+    );
+    // A dump: the family, then the end.
+    let r = handle_generic(&Ctx::default(), &req(1 | 0x300, None));
+    let first = u32::from_ne_bytes([r[0], r[1], r[2], r[3]]) as usize;
+    assert_eq!((ty(&r), ty(&r[first.div_ceil(4) * 4..])), (16, 3));
+}
+
+#[test]
+fn netlink_notifications_name_their_groups() {
+    use crate::announce::Event;
+    use crate::netlink::{group, notify};
+    let v = Vnet::new(0);
+    clone::create(&v, b"epair", &ctx()).unwrap();
+    let ifp = v.net.lock().by_name(b"epair0a").unwrap().clone();
+    let (g, m) = notify(&Event::Info(ifp.clone()), 0).unwrap();
+    assert_eq!((g, u16::from_ne_bytes([m[4], m[5]])), (group::LINK, 16));
+    let (g, m) = notify(
+        &Event::Announce {
+            ifp,
+            arrival: false,
+        },
+        0,
+    )
+    .unwrap();
+    assert_eq!((g, u16::from_ne_bytes([m[4], m[5]])), (group::LINK, 17));
 }

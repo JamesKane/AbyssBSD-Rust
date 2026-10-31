@@ -352,7 +352,8 @@ fn get(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
             wr32(arg, IFRU, i.capabilities);
             wr32(arg, IFRU + 4, i.capenable);
         }
-        sio::SIOCGIFFIB | sio::SIOCGIFPHYS => wr32(arg, IFRU, 0),
+        sio::SIOCGIFFIB => wr32(arg, IFRU, u32::from(i.fib)),
+        sio::SIOCGIFPHYS => wr32(arg, IFRU, 0),
         sio::SIOCGIFDESCR => {
             // `ifr_buffer`: its length and a user pointer.
             let Some(d) = i.description.clone() else {
@@ -451,10 +452,16 @@ fn set(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
             n.with_iface(&name, |i| i.capenable = want);
         }
         sio::SIOCSIFFIB => {
-            ifp(&curvnet().net.lock(), arg)?;
-            if rd32(arg, IFRU) != 0 {
+            priv_check(Priv::NetSetiffib)?;
+            let fib = rd32(arg, IFRU);
+            let vn = curvnet();
+            let mut n = vn.net.lock();
+            ifp(&n, arg)?;
+            if fib >= net::numfibs() {
                 return Err(Errno::EINVAL);
             }
+            #[allow(clippy::cast_possible_truncation, reason = "below RT_MAXFIBS")]
+            n.with_iface(&name, |i| i.fib = fib as u16);
         }
         sio::SIOCSIFDESCR => {
             priv_check(Priv::NetSetifdescr)?;

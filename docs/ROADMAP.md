@@ -2021,6 +2021,13 @@ P7.0 ─► P7.1 ─► P7.2 ─► P7.3 ─► P7.4 ─┬─► P7.5 ───
   announcements; netlink group notifications and `NETLINK_GENERIC`'s controller.
 - `tests/sys/common/vnet.subr`'s helpers work: jails with `epair` ends, addresses and routes in
   each.
+- Done 2026-10-31. Targeted kyua: every case FreeBSD passes in `sys/net` (less P7's non-goals),
+  `sbin/route`, `sbin/ifconfig`, and `etc/rc.d` passes, or is listed (static ARP and ND entries,
+  `bpf`, and IPv4 over `epair` wait for P7.3 and P7.4; `tun` is a non-goal). The network `sysctl`
+  nodes P6 added are constants, the same in every VNET, until their protocols are per VNET; the
+  PCB tables become per VNET with UDP on packets (P7.4). Next hops are one per path (FreeBSD
+  shares identical ones), and `nlctrl` is the only generic netlink family. `kldload if_bridge`
+  answers `EEXIST` so `vnet.subr` runs (compat-deviations).
 
 **P7.3 virtio-net, Ethernet, and `bpf`.**
 - The `EtherQueues` class: queue pairs, completion exactly once, budgeted receive, moderation,

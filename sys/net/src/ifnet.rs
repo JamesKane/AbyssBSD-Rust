@@ -87,6 +87,9 @@ pub struct Ifnet {
     pub dunit: i32,
     /// The VNET it was made in (`if_home_vnet`), its id.
     pub home: u32,
+    /// The routing table its addresses' routes go to (`if_fib`; with
+    /// `net.add_addr_allfibs` 0, only that one).
+    pub fib: u16,
     /// `if_flags` (with `IFF_DRV_RUNNING`).
     pub flags: u32,
     pub mtu: u32,
@@ -135,6 +138,14 @@ pub struct Route {
     pub ifa: In6,
     pub mtu: u32,
     pub weight: u32,
+    /// When it expires (`rt_expire`), seconds of the realtime clock; 0
+    /// for never.
+    pub expire: u64,
+    /// Its next hop's index (`nh_idx`), given when it is added; each
+    /// path has its own (FreeBSD shares one between identical paths).
+    pub nhidx: u32,
+    /// The routing table it is in.
+    pub fib: u16,
 }
 
 /// The interfaces and routes.
@@ -144,6 +155,8 @@ pub struct Net {
     pub routes: Vec<Route>,
     /// Changes not yet announced ([`crate::announce`]).
     pub outbox: Vec<crate::announce::Event>,
+    /// The last next-hop index given.
+    pub last_nh: u32,
     /// Bumped on any change (netlink dumps, `getifaddrs` callers).
     pub generation: u64,
 }
@@ -207,6 +220,7 @@ impl Net {
             ifaces: Vec::new(),
             routes: Vec::new(),
             outbox: Vec::new(),
+            last_nh: 0,
             generation: 0,
         }
     }
@@ -222,8 +236,7 @@ impl Net {
     /// Adds an interface (`if_attach`).
     pub fn attach(&mut self, i: Ifnet) {
         self.outbox.push(Event::Announce {
-            index: i.index,
-            name: i.name.clone(),
+            ifp: i.clone(),
             arrival: true,
         });
         self.ifaces.push(i);
@@ -251,8 +264,7 @@ impl Net {
         let at = self.ifaces.iter().position(|i| i.index == index)?;
         let i = self.ifaces.remove(at);
         self.outbox.push(Event::Announce {
-            index,
-            name: i.name.clone(),
+            ifp: i.clone(),
             arrival: false,
         });
         self.generation += 1;
@@ -311,7 +323,9 @@ impl Net {
         let r = self
             .routes
             .iter()
-            .filter(|r| r.family == family && prefix_match(family, &r.dst, dst, r.plen))
+            .filter(|r| {
+                r.family == family && r.fib == 0 && prefix_match(family, &r.dst, dst, r.plen)
+            })
             .max_by_key(|r| r.plen)
             .ok_or(NoRoute::Unreachable)?;
         if r.flags & (rtf::REJECT | rtf::BLACKHOLE) != 0 {
@@ -368,6 +382,42 @@ impl Net {
         self.generation += 1;
     }
 
+    /// Deletes exactly route `r` (one path of a multipath group).
+    ///
+    /// # Errors
+    ///
+    /// `ESRCH` if it is not there.
+    pub fn delete_exact(&mut self, r: &Route) -> Result<Route, Errno> {
+        let i = self
+            .routes
+            .iter()
+            .position(|x| x == r)
+            .ok_or(Errno::ESRCH)?;
+        self.bump();
+        let r = self.routes.remove(i);
+        self.outbox.push(Event::Route {
+            ty: abi::net::rtm::DELETE,
+            route: r.clone(),
+            ifp: self.by_index(r.ifindex).cloned(),
+            rtsock: false,
+        });
+        Ok(r)
+    }
+
+    /// Deletes the routes whose time has come (`expire_callout`),
+    /// announced.
+    pub fn expire(&mut self, now: u64) {
+        let gone: Vec<Route> = self
+            .routes
+            .iter()
+            .filter(|r| r.expire != 0 && r.expire <= now)
+            .cloned()
+            .collect();
+        for r in gone {
+            let _ = self.delete_route(r.family, &r.dst, r.plen);
+        }
+    }
+
     /// Adds a route.
     ///
     /// # Errors
@@ -379,18 +429,29 @@ impl Net {
             return Err(Errno::ESRCH);
         }
         let dst = masked(r.family, &r.dst, r.plen);
-        if self
-            .routes
-            .iter()
-            .any(|x| x.family == r.family && x.plen == r.plen && x.dst == dst)
-        {
+        // `ROUTE_MPATH`: another path to a prefix is a new member of its
+        // group; the same path again is `EEXIST`.
+        if self.routes.iter().any(|x| {
+            x.family == r.family
+                && x.fib == r.fib
+                && x.plen == r.plen
+                && x.dst == dst
+                && x.gateway == r.gateway
+                && x.ifindex == r.ifindex
+        }) {
             return Err(Errno::EEXIST);
         }
-        let r = Route { dst, ..r };
+        self.last_nh += 1;
+        let r = Route {
+            dst,
+            nhidx: self.last_nh,
+            ..r
+        };
         self.outbox.push(Event::Route {
             ty: abi::net::rtm::ADD,
             route: r.clone(),
             ifp: self.by_index(r.ifindex).cloned(),
+            rtsock: false,
         });
         self.routes.push(r);
         self.bump();
@@ -415,6 +476,7 @@ impl Net {
             ty: abi::net::rtm::DELETE,
             route: r.clone(),
             ifp: self.by_index(r.ifindex).cloned(),
+            rtsock: false,
         });
         Ok(r)
     }
@@ -446,6 +508,9 @@ impl Net {
             ifa: a.addr,
             mtu,
             weight: 1,
+            expire: 0,
+            nhidx: 0,
+            fib: ifp.fib,
         };
         let here = (index, ifp.mtu);
         let local = rtf::UP | rtf::HOST | rtf::STATIC | rtf::PINNED;
@@ -464,16 +529,13 @@ impl Net {
                 }
                 out.push(route(a.addr, 32, local, lo));
             }
+            // `in6_update_ifa` announces the address's host route before
+            // its prefix's.
             Family::Inet6 => {
+                out.push(route(a.addr, 128, local, if loopback { here } else { lo }));
                 if a.plen < 128 {
                     out.push(route(a.addr, a.plen, rtf::UP | rtf::PINNED, here));
                 }
-                out.push(route(
-                    a.addr,
-                    128,
-                    local | rtf::LOCAL,
-                    if loopback { here } else { lo },
-                ));
             }
         }
         out
@@ -518,6 +580,11 @@ impl Net {
             addr: a.clone(),
         });
         for r in self.implied(index, &a) {
+            // `in_addprefix`: a prefix another address already routes
+            // keeps its route.
+            if r.flags & rtf::HOST == 0 && self.prefix_route(&r).is_some() {
+                continue;
+            }
             let _ = self.add_route(r);
         }
         if !was {
@@ -529,8 +596,55 @@ impl Net {
 
     fn drop_implied(&mut self, index: u16, a: &Ifaddr) {
         for r in self.implied(index, a) {
-            let _ = self.delete_route(r.family, &r.dst, r.plen);
+            if r.flags & rtf::HOST != 0 {
+                let _ = self.delete_route(r.family, &r.dst, r.plen);
+                continue;
+            }
+            // Only the prefix route this address made goes; another
+            // address with the prefix takes it over (`in_scrubprefix`).
+            let Some(mine) = self
+                .prefix_route(&r)
+                .filter(|x| x.ifindex == index && same_addr(a.family, &x.ifa, &a.addr))
+            else {
+                continue;
+            };
+            let _ = self.delete_exact(&mine);
+            let heir = self.ifaces.iter().find_map(|i| {
+                i.addrs
+                    .iter()
+                    .find(|x| {
+                        x.family == a.family
+                            && x.plen == a.plen
+                            && !same_addr(a.family, &x.addr, &a.addr)
+                            && masked(a.family, &x.addr, x.plen)
+                                == masked(a.family, &a.addr, a.plen)
+                    })
+                    .map(|x| (i.index, x.clone()))
+            });
+            if let Some((hi, ha)) = heir
+                && let Some(nr) = self
+                    .implied(hi, &ha)
+                    .into_iter()
+                    .find(|x| x.flags & rtf::HOST == 0)
+            {
+                let _ = self.add_route(nr);
+            }
         }
+    }
+
+    /// The interface route for `r`'s prefix, if there is one.
+    fn prefix_route(&self, r: &Route) -> Option<Route> {
+        let dst = masked(r.family, &r.dst, r.plen);
+        self.routes
+            .iter()
+            .find(|x| {
+                x.family == r.family
+                    && x.fib == r.fib
+                    && x.plen == r.plen
+                    && x.dst == dst
+                    && x.flags & rtf::PINNED != 0
+            })
+            .cloned()
     }
 
     /// Deletes an address (`SIOCDIFADDR`, `RTM_DELADDR`); `None` deletes
@@ -696,6 +810,7 @@ pub fn loopback(index: u16, now: i64, stats: Arc<Stats>) -> Ifnet {
         dname: "lo",
         dunit: 0,
         home: 0,
+        fib: 0,
         flags: iff::LOOPBACK | iff::MULTICAST,
         mtu: LOMTU,
         metric: 0,

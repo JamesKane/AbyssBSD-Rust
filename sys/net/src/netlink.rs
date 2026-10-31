@@ -101,8 +101,9 @@ mod ifa {
 mod rta {
     pub(super) use abi::netlink::{
         NL_RTA_DST as DST, NL_RTA_GATEWAY as GATEWAY, NL_RTA_KNH_ID as KNH_ID,
-        NL_RTA_METRICS as METRICS, NL_RTA_OIF as OIF, NL_RTA_RTFLAGS as RTFLAGS,
-        NL_RTA_TABLE as TABLE, NL_RTAX_MTU as AX_MTU,
+        NL_RTA_METRICS as METRICS, NL_RTA_MULTIPATH as MULTIPATH, NL_RTA_OIF as OIF,
+        NL_RTA_RTFLAGS as RTFLAGS, NL_RTA_TABLE as TABLE, NL_RTA_WEIGHT as WEIGHT,
+        NL_RTAX_MTU as AX_MTU,
     };
 }
 mod rtn {
@@ -236,6 +237,9 @@ pub struct Ctx {
     pub may_addaddr: bool,
     pub may_deladdr: bool,
     pub may_route: bool,
+    /// The socket's routing table (`nlp_get_fib`), for requests that name
+    /// none.
+    pub fib: u16,
 }
 
 /// What a request's handler leaves: an error, and its message for the
@@ -337,8 +341,8 @@ fn dispatch(
         ty::DELADDR => deladdr(net, body, o),
         ty::GETROUTE => getroute(ctx, net, h, body, out, o),
         ty::NEWROUTE | ty::DELROUTE if !ctx.may_route => Err(Errno::EPERM),
-        ty::NEWROUTE => newroute(net, h, body, o),
-        ty::DELROUTE => delroute(net, body, o),
+        ty::NEWROUTE => newroute(ctx, net, h, body, o),
+        ty::DELROUTE => delroute(ctx, net, body, o),
         ty::GETNEIGH if h.flags & nlm::DUMP != 0 => {
             done(ctx, h, None, out, o);
             Ok(())
@@ -665,7 +669,11 @@ fn deladdr(net: &NetLock, body: &[u8], o: &mut Outcome) -> Result<(), Errno> {
 }
 
 /// `dump_px`.
-fn route_msg(ctx: &Ctx, h: &Hdr, r: &Route, multi: bool) -> Vec<u8> {
+/// `dump_px`: one prefix, with its one path (`dump_rc_nhop`) or its
+/// multipath group (`dump_rc_nhg`: an `rtnexthop` for each, its weight
+/// in `rtnh_hops`).
+fn route_msg(ctx: &Ctx, h: &Hdr, group: &[&Route], multi: bool) -> Vec<u8> {
+    let r = group[0];
     let flags = if multi { h.flags | nlm::MULTI } else { h.flags };
     let mut m = Msg::new(ty::NEWROUTE, flags, h.seq, ctx.port);
     let mut rtm = [0u8; 12];
@@ -686,24 +694,70 @@ fn route_msg(ctx: &Ctx, h: &Hdr, r: &Route, multi: bool) -> Vec<u8> {
         rtn::UNICAST
     };
     m.raw(&rtm);
-    m.u32(rta::TABLE, 0);
+    m.u32(rta::TABLE, u32::from(r.fib));
     m.attr(rta::DST, addr_bytes(r.family, &r.dst));
     if let Gateway::Addr(g) = r.gateway {
         m.attr(rta::GATEWAY, addr_bytes(r.family, &g));
     }
-    m.u32(rta::KNH_ID, 1);
-    let mut fl = r.flags.cast_unsigned();
-    if matches!(r.gateway, Gateway::Addr(_)) {
-        fl |= rtf::GATEWAY.cast_unsigned();
+    let flags_of = |r: &Route| {
+        let mut fl = r.flags.cast_unsigned();
+        if matches!(r.gateway, Gateway::Addr(_)) {
+            fl |= rtf::GATEWAY.cast_unsigned();
+        }
+        fl
+    };
+    if group.len() > 1 {
+        m.u32(rta::KNH_ID, r.nhidx);
+        let base = flags_of(r);
+        m.u32(rta::RTFLAGS, base);
+        let at = m.nest(rta::MULTIPATH);
+        for p in group {
+            // `struct rtnexthop`: its length (patched), flags, hops, index.
+            let nh = m.buf.len();
+            m.buf.extend_from_slice(&0u16.to_ne_bytes());
+            m.buf.push(0);
+            m.buf.push(u8::try_from(p.weight).unwrap_or(u8::MAX));
+            m.buf.extend_from_slice(&i32::from(p.ifindex).to_ne_bytes());
+            if let Gateway::Addr(g) = p.gateway {
+                m.attr(rta::GATEWAY, addr_bytes(p.family, &g));
+            }
+            if flags_of(p) != base {
+                m.u32(rta::RTFLAGS, flags_of(p));
+            }
+            let len = u16::try_from(m.buf.len() - nh).unwrap_or(u16::MAX);
+            m.buf[nh..nh + 2].copy_from_slice(&len.to_ne_bytes());
+        }
+        m.end_nest(at);
+        return m.finish();
     }
-    m.u32(rta::RTFLAGS, fl);
+    m.u32(rta::KNH_ID, r.nhidx);
+    m.u32(rta::RTFLAGS, flags_of(r));
     if r.mtu != LOMTU {
         let at = m.nest(rta::METRICS);
         m.u32(rta::AX_MTU, r.mtu);
         m.end_nest(at);
     }
     m.u32(rta::OIF, u32::from(r.ifindex));
+    if r.weight != 1 {
+        m.u32(rta::WEIGHT, r.weight);
+    }
     m.finish()
+}
+
+/// Routes grouped by prefix, in a radix walk's order.
+fn groups<'a>(routes: impl Iterator<Item = &'a Route>) -> Vec<Vec<&'a Route>> {
+    let mut all: Vec<&Route> = routes.collect();
+    all.sort_by_key(|r| (r.family, r.dst, r.plen));
+    let mut out: Vec<Vec<&Route>> = Vec::new();
+    for r in all {
+        match out.last_mut() {
+            Some(g) if g[0].family == r.family && g[0].dst == r.dst && g[0].plen == r.plen => {
+                g.push(r)
+            }
+            _ => out.push(alloc::vec![r]),
+        }
+    }
+    out
 }
 
 /// `rtnl_handle_getroute`: a dump, or the route a destination takes.
@@ -717,20 +771,21 @@ fn getroute(
 ) -> Result<(), Errno> {
     let family = body.first().copied().unwrap_or(0);
     let a = attrs(body.get(12..).unwrap_or(&[]));
-    if find(&a, rta::TABLE).is_some_and(|t| rd32(t, 0) != 0) {
+    let fib = find(&a, rta::TABLE).map_or(u32::from(ctx.fib), |t| rd32(t, 0));
+    if fib >= crate::numfibs() {
         o.msg = Some(b"invalid fib");
         return Err(Errno::EINVAL);
     }
+    #[allow(clippy::cast_possible_truncation, reason = "below RT_MAXFIBS")]
+    let fib = fib as u16;
     let n = net.lock();
     if h.flags & nlm::DUMP != 0 {
-        let mut routes: Vec<&Route> = n
-            .routes
-            .iter()
-            .filter(|r| family == 0 || r.family.af() == family)
-            .collect();
-        routes.sort_by_key(|r| (r.family, r.dst, r.plen));
-        for r in routes {
-            out.extend(route_msg(ctx, h, r, true));
+        for g in groups(
+            n.routes
+                .iter()
+                .filter(|r| r.fib == fib && (family == 0 || r.family.af() == family)),
+        ) {
+            out.extend(route_msg(ctx, h, &g, true));
         }
         drop(n);
         done(ctx, h, None, out, o);
@@ -748,10 +803,17 @@ fn getroute(
     let r = n
         .routes
         .iter()
-        .filter(|r| r.family == f && crate::addr::prefix_match(f, &r.dst, &dst, r.plen))
+        .filter(|r| {
+            r.fib == fib && r.family == f && crate::addr::prefix_match(f, &r.dst, &dst, r.plen)
+        })
         .max_by_key(|r| r.plen)
         .ok_or(Errno::ESRCH)?;
-    let msg = route_msg(ctx, h, r, false);
+    let group: Vec<&Route> = n
+        .routes
+        .iter()
+        .filter(|x| x.fib == r.fib && x.family == r.family && x.plen == r.plen && x.dst == r.dst)
+        .collect();
+    let msg = route_msg(ctx, h, &group, false);
     out.extend(msg);
     Ok(())
 }
@@ -759,7 +821,7 @@ fn getroute(
 /// `rtnl_handle_newroute`: a route to `RTA_DST/rtm_dst_len` through
 /// `RTA_GATEWAY` or out of `RTA_OIF`, rejecting or blackholing by
 /// `rtm_type`.
-fn newroute(net: &NetLock, h: &Hdr, body: &[u8], o: &mut Outcome) -> Result<(), Errno> {
+fn newroute(ctx: &Ctx, net: &NetLock, h: &Hdr, body: &[u8], o: &mut Outcome) -> Result<(), Errno> {
     let family = match body.first().copied() {
         Some(AF_INET) => Family::Inet,
         Some(AF_INET6) => Family::Inet6,
@@ -772,12 +834,13 @@ fn newroute(net: &NetLock, h: &Hdr, body: &[u8], o: &mut Outcome) -> Result<(), 
         o.msg = Some(b"missing RTA_DST");
         return Err(Errno::EINVAL);
     };
-    if find(&a, rta::TABLE).is_some_and(|t| rd32(t, 0) != 0)
-        || body.get(4).copied().unwrap_or(0) != 0
-    {
+    let fib = find(&a, rta::TABLE).map_or(u32::from(ctx.fib), |t| rd32(t, 0));
+    if fib >= crate::numfibs() {
         o.msg = Some(b"invalid fib");
         return Err(Errno::EINVAL);
     }
+    #[allow(clippy::cast_possible_truncation, reason = "below RT_MAXFIBS")]
+    let fib = fib as u16;
     let gw = ip_attr(family, find(&a, rta::GATEWAY));
     let oif = find(&a, rta::OIF).map(|d| rd32(d, 0));
     let mut flags = find(&a, rta::RTFLAGS).map_or(0, |d| rd32(d, 0).cast_signed());
@@ -838,9 +901,15 @@ fn newroute(net: &NetLock, h: &Hdr, body: &[u8], o: &mut Outcome) -> Result<(), 
         ifa,
         mtu,
         weight: 1,
+        expire: 0,
+        nhidx: 0,
+        fib,
     };
     let exists = n.routes.iter().position(|x| {
-        x.family == family && x.plen == plen && x.dst == crate::ifnet::masked(family, &dst, plen)
+        x.family == family
+            && x.fib == fib
+            && x.plen == plen
+            && x.dst == crate::ifnet::masked(family, &dst, plen)
     });
     match exists {
         Some(i) if h.flags & nlm::REPLACE != 0 => {
@@ -856,7 +925,7 @@ fn newroute(net: &NetLock, h: &Hdr, body: &[u8], o: &mut Outcome) -> Result<(), 
 }
 
 /// `rtnl_handle_delroute`.
-fn delroute(net: &NetLock, body: &[u8], o: &mut Outcome) -> Result<(), Errno> {
+fn delroute(ctx: &Ctx, net: &NetLock, body: &[u8], o: &mut Outcome) -> Result<(), Errno> {
     let family = match body.first().copied() {
         Some(AF_INET) => Family::Inet,
         Some(AF_INET6) => Family::Inet6,
@@ -868,9 +937,12 @@ fn delroute(net: &NetLock, body: &[u8], o: &mut Outcome) -> Result<(), Errno> {
         o.msg = Some(b"RTA_DST is not set");
         return Err(Errno::ESRCH);
     };
+    let fib =
+        find(&a, rta::TABLE).map_or(ctx.fib, |t| u16::try_from(rd32(t, 0)).unwrap_or(u16::MAX));
     let mut n = net.lock();
     let pinned = n.routes.iter().any(|x| {
         x.family == family
+            && x.fib == fib
             && x.plen == plen
             && x.dst == crate::ifnet::masked(family, &dst, plen)
             && x.flags & rtf::PINNED != 0
@@ -879,5 +951,194 @@ fn delroute(net: &NetLock, body: &[u8], o: &mut Outcome) -> Result<(), Errno> {
     if pinned && !force {
         return Err(Errno::EADDRINUSE);
     }
-    n.delete_route(family, &dst, plen).map(|_| ())
+    let d = crate::ifnet::masked(family, &dst, plen);
+    let r = n
+        .routes
+        .iter()
+        .find(|x| x.family == family && x.fib == fib && x.plen == plen && x.dst == d)
+        .cloned()
+        .ok_or(Errno::ESRCH)?;
+    n.delete_exact(&r).map(|_| ())
+}
+
+/// Netlink's multicast groups (`RTNLGRP_*`).
+pub mod group {
+    pub const LINK: u32 = 1;
+    pub const IPV4_IFADDR: u32 = 5;
+    pub const IPV4_ROUTE: u32 = 7;
+    pub const IPV6_IFADDR: u32 = 9;
+    pub const IPV6_ROUTE: u32 = 11;
+}
+
+/// The notification a change makes for netlink listeners, and its group
+/// (`rtnl_handle_ifevent`, `rtnl_handle_ifaddr`, `rtnl_handle_route_event`).
+#[must_use]
+pub fn notify(e: &crate::announce::Event, now_s: u64) -> Option<(u32, Vec<u8>)> {
+    use crate::announce::Event;
+    let ctx = Ctx::default();
+    let hdr = |t: u16| Hdr {
+        len: 0,
+        ty: t,
+        flags: 0,
+        seq: 0,
+    };
+    // A notification carries no request's flags.
+    let fix = |mut m: Vec<u8>, t: u16| {
+        m[4..6].copy_from_slice(&t.to_ne_bytes());
+        m[6..8].copy_from_slice(&0u16.to_ne_bytes());
+        m
+    };
+    let net = Net::new();
+    match e {
+        Event::Announce { ifp, arrival } => {
+            let t = if *arrival { ty::NEWLINK } else { ty::DELLINK };
+            Some((
+                group::LINK,
+                fix(link_msg(&ctx, &hdr(t), &net, ifp, false), t),
+            ))
+        }
+        Event::Info(ifp) => Some((
+            group::LINK,
+            fix(
+                link_msg(&ctx, &hdr(ty::NEWLINK), &net, ifp, false),
+                ty::NEWLINK,
+            ),
+        )),
+        Event::Addr { add, ifp, addr } => {
+            let t = if *add { ty::NEWADDR } else { ty::DELADDR };
+            let g = match addr.family {
+                Family::Inet => group::IPV4_IFADDR,
+                Family::Inet6 => group::IPV6_IFADDR,
+            };
+            Some((g, fix(addr_msg(&ctx, &hdr(t), ifp, addr, now_s), t)))
+        }
+        Event::Route { ty: rt, route, .. } => {
+            let t = if *rt == abi::net::rtm::DELETE {
+                ty::DELROUTE
+            } else {
+                ty::NEWROUTE
+            };
+            let g = match route.family {
+                Family::Inet => group::IPV4_ROUTE,
+                Family::Inet6 => group::IPV6_ROUTE,
+            };
+            Some((g, fix(route_msg(&ctx, &hdr(t), &[route], false), t)))
+        }
+        Event::Reply { .. } => None,
+    }
+}
+
+/// The generic controller (`nlctrl`): the one family registered, and its
+/// notification group. Families of modules AbyssBSD does not have
+/// (`carp`, `pfsync`, `wlan`) are absent, as on a kernel without them.
+mod genl {
+    /// `GENL_ID_CTRL`, `CTRL_CMD_NEWFAMILY`, `CTRL_CMD_GETFAMILY`.
+    pub(super) const ID_CTRL: u16 = 16;
+    pub(super) const CMD_NEWFAMILY: u8 = 1;
+    pub(super) const CMD_GETFAMILY: u8 = 3;
+    /// `CTRL_ATTR_*`.
+    pub(super) const FAMILY_ID: u16 = 1;
+    pub(super) const FAMILY_NAME: u16 = 2;
+    pub(super) const VERSION: u16 = 3;
+    pub(super) const HDRSIZE: u16 = 4;
+    pub(super) const MAXATTR: u16 = 5;
+    pub(super) const OPS: u16 = 6;
+    pub(super) const MCAST_GROUPS: u16 = 7;
+    pub(super) const OP_ID: u16 = 1;
+    pub(super) const OP_FLAGS: u16 = 2;
+    pub(super) const GRP_NAME: u16 = 1;
+    pub(super) const GRP_ID: u16 = 2;
+    /// `CTRL_ATTR_MAX`.
+    pub(super) const ATTR_MAX: u32 = 10;
+    /// `GENL_CMD_CAP_DO | GENL_CMD_CAP_DUMP | GENL_CMD_CAP_HASPOL`.
+    pub(super) const GETFAMILY_FLAGS: u32 = 0x2 | 0x4 | 0x8;
+    /// `MIN_GROUP_NUM`: the controller's `notify` group.
+    pub(super) const NOTIFY_GROUP: u32 = 48;
+}
+
+/// `dump_family` of `nlctrl`.
+fn family_msg(ctx: &Ctx, h: &Hdr, flags: u16) -> Vec<u8> {
+    let mut m = Msg::new(genl::ID_CTRL, flags, h.seq, ctx.port);
+    m.raw(&[genl::CMD_NEWFAMILY, 2, 0, 0]);
+    m.string(genl::FAMILY_NAME, b"nlctrl");
+    m.attr(genl::FAMILY_ID, &genl::ID_CTRL.to_ne_bytes());
+    m.u32(genl::VERSION, 2);
+    m.u32(genl::HDRSIZE, 0);
+    m.u32(genl::MAXATTR, genl::ATTR_MAX);
+    let ops = m.nest(genl::OPS);
+    let op = m.nest(1);
+    m.u32(genl::OP_ID, u32::from(genl::CMD_GETFAMILY));
+    m.u32(genl::OP_FLAGS, genl::GETFAMILY_FLAGS);
+    m.end_nest(op);
+    m.end_nest(ops);
+    let groups = m.nest(genl::MCAST_GROUPS);
+    let g = m.nest(1);
+    m.u32(genl::GRP_ID, genl::NOTIFY_GROUP);
+    m.string(genl::GRP_NAME, b"notify");
+    m.end_nest(g);
+    m.end_nest(groups);
+    m.finish()
+}
+
+/// `genl_handle_message` for one request.
+fn generic_one(
+    ctx: &Ctx,
+    h: &Hdr,
+    msg: &[u8],
+    out: &mut Vec<u8>,
+    o: &mut Outcome,
+) -> Result<(), Errno> {
+    if msg.len() < 20 {
+        return Err(Errno::EINVAL);
+    }
+    if h.ty != genl::ID_CTRL || msg[16] != genl::CMD_GETFAMILY {
+        return Err(Errno::EOPNOTSUPP);
+    }
+    let a = attrs(&msg[20..]);
+    let id = find(&a, genl::FAMILY_ID)
+        .map(|v| rd16(v, 0))
+        .filter(|&v| v != 0);
+    let name = find(&a, genl::FAMILY_NAME).map(|v| v.split(|&b| b == 0).next().unwrap_or(&[]));
+    if id.is_some() || name.is_some() {
+        if id.is_some_and(|i| i != genl::ID_CTRL) || name.is_some_and(|n| n != b"nlctrl") {
+            return Err(Errno::ENOENT);
+        }
+        out.extend(family_msg(ctx, h, h.flags));
+        return Ok(());
+    }
+    out.extend(family_msg(ctx, h, h.flags | nlm::MULTI));
+    done(ctx, h, None, out, o);
+    Ok(())
+}
+
+/// Processes one written buffer of `NETLINK_GENERIC` requests.
+#[must_use]
+pub fn handle_generic(ctx: &Ctx, packet: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while packet.len() - at >= 16 {
+        let h = Hdr {
+            len: rd32(packet, at) as usize,
+            ty: rd16(packet, at + 4),
+            flags: rd16(packet, at + 6),
+            seq: rd32(packet, at + 8),
+        };
+        if h.len < 16 || h.len > packet.len() - at {
+            break;
+        }
+        let msg = &packet[at..at + h.len];
+        let mut o = Outcome::default();
+        if h.flags & nlm::REQUEST != 0
+            && h.ty >= ty::MIN_TYPE
+            && let Err(e) = generic_one(ctx, &h, msg, &mut out, &mut o)
+        {
+            o.error = Some(e);
+        }
+        let error = o.error;
+        if !o.done && (h.flags & nlm::ACK != 0 || error.is_some()) {
+            ack(ctx, &h, msg, error, o.msg, &mut out);
+        }
+        at += align(h.len);
+    }
+    out
 }

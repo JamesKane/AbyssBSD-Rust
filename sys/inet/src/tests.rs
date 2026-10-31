@@ -702,7 +702,7 @@ fn iflist_records() {
     assert_eq!(types.len(), 4, "the link and three addresses");
     // The routing table: the host route to 127.0.0.1 among them.
     let n = net().lock();
-    let d = crate::rtmsg::dump(&n, abi::inet::AF_INET);
+    let d = crate::rtmsg::dump(&n, abi::inet::AF_INET, Some(0));
     assert!(!d.is_empty());
     assert_eq!(d[3], abi::net::rtm::GET);
 }

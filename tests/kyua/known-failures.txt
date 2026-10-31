@@ -114,3 +114,14 @@ usr.bin/tee/tee_test:device                             # output differs; not ex
 usr.bin/truncate/truncate_test:deallocate               # output differs; not examined further
 usr.bin/vmstat/vmstat_test:default                      # vmstat reads counters libkvm finds through the kernel's symbols; not examined further
 usr.bin/vmstat/vmstat_test:opt_s                        # vmstat reads counters libkvm finds through the kernel's symbols; not examined further
+sys/net/routing/test_rtsock_lladdr:rtm_add_v4_gu_lle_success   # static ARP entries through the routing socket: the lltable, P7.3
+sys/net/routing/test_rtsock_lladdr:rtm_add_v6_gu_lle_success   # static ND entries: the lltable, P7.3
+sys/net/routing/test_rtsock_lladdr:rtm_add_v6_ll_lle_success   # static ND entries: the lltable, P7.3
+sys/net/routing/test_rtsock_lladdr:rtm_del_v4_gu_lle_success   # static ARP entries: the lltable, P7.3
+sys/net/routing/test_rtsock_lladdr:rtm_del_v6_gu_lle_success   # static ND entries: the lltable, P7.3
+sys/net/routing/test_rtsock_lladdr:rtm_del_v6_ll_lle_success   # static ND entries: the lltable, P7.3
+sys/net/routing/test_routing_l3.py:TestRouteCornerCase1::test_add_direct_route_p2p_wo_ifa[inet]   # needs tun(4), a P7 non-goal
+sys/net/routing/test_routing_l3.py:TestRouteCornerCase1::test_add_direct_route_p2p_wo_ifa[inet6]  # needs tun(4), a P7 non-goal
+sys/net/routing/test_routing_l3.py:TestIfOps::test_change_prefix_route_same_iface[inet6]  # passes: the IPv6 prefix route moves to the remaining address; FreeBSD's keeps the deleted one (the test marks it xfail)
+sys/net/bpf/bpf:multi_read                     # /dev/bpf, P7.3
+sys/net/if_epair_test:pcp                      # ping over the epair: IPv4 on packets, P7.4

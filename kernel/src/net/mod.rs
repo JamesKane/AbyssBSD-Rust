@@ -68,6 +68,22 @@ fn start_netisr() {
     });
 }
 
+/// Deletes routes as they expire (`rt_expire`'s callout), once a second.
+fn start_route_expiry() {
+    let _ = sched::spawn("rtexpire", sched::Priority::KERNEL, |s| {
+        loop {
+            crate::time::sleep_ns(s, 1_000_000_000);
+            let now = u64::try_from(now_s()).unwrap_or(0);
+            for v in net::Vnet::all() {
+                let has = v.net.lock().routes.iter().any(|r| r.expire != 0);
+                if has {
+                    v.net.lock().expire(now);
+                }
+            }
+        }
+    });
+}
+
 /// What a clone needs from the creating thread (`ether_gen_addr_byname`'s
 /// host UUID and jail name).
 pub(crate) fn clone_ctx() -> net::clone::Ctx {
@@ -85,6 +101,14 @@ pub(crate) fn clone_ctx() -> net::clone::Ctx {
 /// Configures `lo0` and adds the sysctls. Call once, after the sysctl tree
 /// and `kern.features` exist.
 pub(crate) fn init(s: &Sleepable) {
+    // `net.fibs` (`CTLFLAG_RDTUN`).
+    if let Some(n) = crate::kenv::get(b"net.fibs").and_then(|v| {
+        core::str::from_utf8(&v)
+            .ok()
+            .and_then(|t| t.trim().parse::<u32>().ok())
+    }) {
+        net::set_numfibs(n);
+    }
     inet::set_hooks(inet::Hooks {
         now: crate::time::now_ns,
         random: random_u32,
@@ -93,5 +117,6 @@ pub(crate) fn init(s: &Sleepable) {
     inet::ifnet::configure_loopback(&mut net::vnet0().net.lock(), now);
     splice::init();
     start_netisr();
+    start_route_expiry();
     sysctl::init(s);
 }

@@ -413,6 +413,7 @@ fn run(s: &Sleepable, frame: &mut TrapFrame, call: Call) -> Result<Option<u64>, 
         Sysno::Statfs => path::statfs(s, a0, a1),
         Sysno::Getfsstat => path::getfsstat(s, a0, a1, a2),
         Sysno::Umask => path::umask(a0),
+        Sysno::Setfib => setfib(a0),
         Sysno::Pathconf => path::pathconf(s, a0, a1, false),
         Sysno::AclGetFile => acl::get(s, extattr::By::File, a0, a1, a2),
         Sysno::AclSetFile => acl::set(s, extattr::By::File, a0, a1, a2),
@@ -756,4 +757,17 @@ pub(crate) fn user_trap(report: &arch::TrapReport, frame: &mut TrapFrame) {
     crate::uthread::UserThread::with_current(|t| t.dbg.entered(frame));
     crate::signal::trap(&s, report, frame);
     let _ = hal::irq::disable();
+}
+
+/// `setfib(fib)`: the routing table the process's new sockets use.
+fn setfib(fib: u64) -> SysResult {
+    let fib = u32::try_from(fib.cast_signed()).map_err(|_| Errno::EINVAL)?;
+    if fib >= net::numfibs() {
+        return Err(Errno::EINVAL);
+    }
+    let p = crate::proc::Process::current().ok_or(Errno::EINVAL)?;
+    #[allow(clippy::cast_possible_truncation, reason = "below RT_MAXFIBS")]
+    p.fib
+        .store(fib as u16, core::sync::atomic::Ordering::Relaxed);
+    Ok(0)
 }

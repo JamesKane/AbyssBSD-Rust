@@ -259,12 +259,12 @@ pub(crate) fn ifinfo_record(ifp: &Ifnet) -> Vec<u8> {
 /// `NET_RT_DUMP` of family `af` (0 for all): each route as
 /// `sysctl_dumpnhop` writes it.
 #[must_use]
-pub fn dump(n: &Net, af: u8) -> Vec<u8> {
+pub fn dump(n: &Net, af: u8, fib: Option<u16>) -> Vec<u8> {
     let mut out = Vec::new();
     let mut routes: Vec<_> = n
         .routes
         .iter()
-        .filter(|r| af == 0 || r.family.af() == af)
+        .filter(|r| fib.is_none_or(|f| r.fib == f) && (af == 0 || r.family.af() == af))
         .collect();
     // A radix walk: by family, then address.
     routes.sort_by_key(|r| (r.family, r.dst, r.plen));
@@ -281,6 +281,7 @@ pub fn dump(n: &Net, af: u8) -> Vec<u8> {
             rtm_rmx: abi::net::RtMetrics {
                 rmx_mtu: u64::from(r.mtu),
                 rmx_weight: u64::from(r.weight),
+                rmx_nhidx: u64::from(r.nhidx),
                 ..abi::net::RtMetrics::default()
             },
             ..abi::net::RtMsghdr::default()
@@ -324,4 +325,89 @@ pub(crate) const fn max_plen(f: Family) -> u8 {
         Family::Inet => 32,
         Family::Inet6 => 128,
     }
+}
+
+/// `NET_RT_NHOP` of family `af`: each route's next hop as
+/// `dump_nhop_entry` writes it (`rt_msghdr`, `nhop_external`,
+/// `nhop_addrs`, then the gateway and source addresses).
+#[must_use]
+pub fn nhops(n: &Net, af: u8, fib: Option<u16>) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut routes: Vec<_> = n
+        .routes
+        .iter()
+        .filter(|r| fib.is_none_or(|f| r.fib == f) && r.family.af() == af)
+        .collect();
+    routes.sort_by_key(|r| r.nhidx);
+    for r in routes {
+        let gw = match r.gateway {
+            Gateway::Link(i) => {
+                // `sockaddr_dl_short`.
+                let mut d = alloc::vec![0u8; 16];
+                d[0] = 16;
+                d[1] = AF_LINK;
+                d[2..4].copy_from_slice(&i.to_ne_bytes());
+                d[4] = n.by_index(i).map_or(0, |f| f.ty);
+                d
+            }
+            Gateway::Addr(g) => sa_of(r.family, &g, r.ifindex),
+        };
+        let src = sa_of(r.family, &r.ifa, r.ifindex);
+        let aif = match r.gateway {
+            Gateway::Link(i) => i,
+            Gateway::Addr(_) => r.ifindex,
+        };
+        let gateway = matches!(r.gateway, Gateway::Addr(_));
+        let mut nhe = [0u8; 120];
+        nhe[0..4].copy_from_slice(&120u32.to_ne_bytes());
+        nhe[4..8].copy_from_slice(&r.nhidx.to_ne_bytes());
+        nhe[12..16].copy_from_slice(&u32::from(r.ifindex).to_ne_bytes());
+        nhe[16..20].copy_from_slice(&u32::from(aif).to_ne_bytes());
+        nhe[21] = r.family.af();
+        let ty: u16 = match (r.family, gateway) {
+            (Family::Inet, false) => 1,
+            (Family::Inet, true) => 2,
+            (Family::Inet6, false) => 3,
+            (Family::Inet6, true) => 4,
+        };
+        nhe[22..24].copy_from_slice(&ty.to_ne_bytes());
+        nhe[24..26].copy_from_slice(&u16::try_from(r.mtu).unwrap_or(u16::MAX).to_ne_bytes());
+        let mut nf: u16 = 0;
+        if gateway {
+            nf |= 0x0200;
+        }
+        if r.plen == max_plen(r.family) {
+            nf |= 0x0400;
+        }
+        if r.flags & rtf::REJECT != 0 {
+            nf |= 0x0010;
+        }
+        if r.flags & rtf::BLACKHOLE != 0 {
+            nf |= 0x0020;
+        }
+        nhe[26..28].copy_from_slice(&nf.to_ne_bytes());
+        if r.family == Family::Inet {
+            if let Gateway::Addr(g) = r.gateway {
+                nhe[28..32].copy_from_slice(&g[12..16]);
+            }
+            nhe[32..36].copy_from_slice(&r.ifa[12..16]);
+        }
+        nhe[112..120].copy_from_slice(&1u64.to_ne_bytes());
+        let na_len = 8 + gw.len() + src.len();
+        let h = abi::net::RtMsghdr {
+            rtm_msglen: u16::try_from(size_of::<abi::net::RtMsghdr>() + 120 + na_len).unwrap_or(0),
+            rtm_version: RTM_VERSION,
+            rtm_type: rtm::GET,
+            rtm_flags: r.flags,
+            ..abi::net::RtMsghdr::default()
+        };
+        put(&mut out, &h);
+        out.extend_from_slice(&nhe);
+        out.extend_from_slice(&u32::try_from(na_len).unwrap_or(0).to_ne_bytes());
+        out.extend_from_slice(&8u16.to_ne_bytes());
+        out.extend_from_slice(&u16::try_from(8 + gw.len()).unwrap_or(0).to_ne_bytes());
+        out.extend(gw);
+        out.extend(src);
+    }
+    out
 }

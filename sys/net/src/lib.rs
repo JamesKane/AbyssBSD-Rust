@@ -31,7 +31,27 @@ mod vnet;
 
 pub use vnet::{Vnet, vnet0};
 
+use core::sync::atomic::{AtomicU32, Ordering};
+
 use abi::inet::{AF_INET, AF_INET6};
+
+/// `net.fibs` (`rt_numfibs`): the routing tables every VNET has, set once
+/// at boot.
+static NUMFIBS: AtomicU32 = AtomicU32::new(1);
+
+/// `RT_MAXFIBS`.
+pub const MAXFIBS: u32 = 65536;
+
+/// The number of routing tables.
+#[must_use]
+pub fn numfibs() -> u32 {
+    NUMFIBS.load(Ordering::Relaxed)
+}
+
+/// Sets `net.fibs` from the boot tunable (1 to `RT_MAXFIBS`).
+pub fn set_numfibs(n: u32) {
+    NUMFIBS.store(n.clamp(1, MAXFIBS), Ordering::Relaxed);
+}
 
 /// An address family the network layer carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

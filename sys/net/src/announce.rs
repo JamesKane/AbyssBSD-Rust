@@ -11,7 +11,6 @@
 //! Behavior reference: sys/net/rtsock.c, sys/netlink/route/iface.c
 //! (`rtnl_handle_ifevent`), sys/netlink/route/rt.c (`rtnl_handle_route_event`).
 
-use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::ops::{Deref, DerefMut};
@@ -23,12 +22,9 @@ use crate::ifnet::{Ifaddr, Ifnet, Net, Route};
 /// A change.
 #[derive(Clone, Debug)]
 pub enum Event {
-    /// An interface came or went (`RTM_IFANNOUNCE`).
-    Announce {
-        index: u16,
-        name: String,
-        arrival: bool,
-    },
+    /// An interface came or went (`RTM_IFANNOUNCE`, netlink's
+    /// `RTM_NEWLINK` and `RTM_DELLINK`), as it was.
+    Announce { ifp: Ifnet, arrival: bool },
     /// An interface's flags or link changed (`RTM_IFINFO`): its state
     /// after.
     Info(Ifnet),
@@ -37,10 +33,13 @@ pub enum Event {
     Addr { add: bool, ifp: Ifnet, addr: Ifaddr },
     /// A route was added, deleted, or changed (`RTM_ADD`, `RTM_DELETE`,
     /// `RTM_CHANGE`), with its interface, if it still has one.
+    /// `rtsock` marks one its reply already announces to routing
+    /// sockets.
     Route {
         ty: u8,
         route: Route,
         ifp: Option<Ifnet>,
+        rtsock: bool,
     },
     /// A routing socket's reply, which announces what its request did
     /// (`rts_send`'s `rt_dispatch`): for every routing socket of the
@@ -50,6 +49,8 @@ pub enum Event {
         msg: Vec<u8>,
         /// The sending socket's identity.
         from: usize,
+        /// The routing table the request was in.
+        fib: u16,
     },
 }
 

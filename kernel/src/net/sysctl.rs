@@ -129,14 +129,28 @@ pub(crate) fn init(s: &Sleepable) {
     crate::sysctl::with(s, |t| {
         let root = t.root();
         let net = t.child(root, "net").expect("net node");
-        let fibs = [
-            ("fibs", "Number of available FIBs", 1),
-            ("my_fibnum", "default FIB of caller", 0),
-        ];
-        for (name, descr, v) in fibs {
-            t.add_value(net, Number::Auto, name, descr, Value::int(v))
-                .expect("net.fibs");
-        }
+        t.add_value(
+            net,
+            Number::Auto,
+            "fibs",
+            "Number of available FIBs",
+            Value::Int(Box::new(|| {
+                i32::try_from(net::numfibs()).unwrap_or(i32::MAX)
+            })),
+        )
+        .expect("net.fibs");
+        t.add_value(
+            net,
+            Number::Auto,
+            "my_fibnum",
+            "default FIB of caller",
+            Value::Int(Box::new(|| {
+                crate::proc::Process::current().map_or(0, |p| {
+                    i32::from(p.fib.load(core::sync::atomic::Ordering::Relaxed))
+                })
+            })),
+        )
+        .expect("net.my_fibnum");
         knobs(t, net, &[("add_addr_allfibs", "", 0)]);
 
         // `net.inet` (`PF_INET`).
@@ -599,7 +613,7 @@ fn rtsock(r: &[i32], out: &mut Vec<u8>) -> Result<(), ReadError> {
         if r.len() > 4 {
             return Err(ReadError::Failed(Errno::ENOTDIR));
         }
-        if r.len() == 4 && r[3] != 0 && r[3] != -1 {
+        if r.len() == 4 && r[3] != -1 && u32::try_from(r[3]).map_or(true, |f| f >= net::numfibs()) {
             return Err(ReadError::Failed(Errno::EINVAL));
         }
     } else if r.len() != 3 {
@@ -607,6 +621,15 @@ fn rtsock(r: &[i32], out: &mut Vec<u8>) -> Result<(), ReadError> {
     }
     let af = u8::try_from(r[0]).map_err(|_| ReadError::Failed(Errno::EINVAL))?;
     let arg = r[2];
+    // The table named (`RT_ALL_FIBS`: every one), or the caller's.
+    let fib = match r.get(3) {
+        Some(-1) => None,
+        Some(&f) => u16::try_from(f).ok(),
+        None => Some(
+            crate::proc::Process::current()
+                .map_or(0, |p| p.fib.load(core::sync::atomic::Ordering::Relaxed)),
+        ),
+    };
     let vn = super::curvnet();
     let n = vn.net.lock();
     match op {
@@ -618,13 +641,14 @@ fn rtsock(r: &[i32], out: &mut Vec<u8>) -> Result<(), ReadError> {
             if af != 0 && af != abi::inet::AF_INET && af != abi::inet::AF_INET6 {
                 return Err(ReadError::Failed(Errno::EAFNOSUPPORT));
             }
-            out.extend(inet::rtmsg::dump(&n, af));
+            out.extend(inet::rtmsg::dump(&n, af, fib));
         }
         net_rt::IFLIST | net_rt::IFLISTL => {
             out.extend(inet::rtmsg::iflist(&n, af, arg, op == net_rt::IFLISTL));
         }
-        // No multicast memberships, nexthops, or groups to list.
-        net_rt::IFMALIST | net_rt::NHOP | net_rt::NHGRP => {}
+        net_rt::NHOP => out.extend(inet::rtmsg::nhops(&n, af, fib)),
+        // No multicast memberships or next-hop groups to list.
+        net_rt::IFMALIST | net_rt::NHGRP => {}
         _ => return Err(ReadError::Failed(Errno::EINVAL)),
     }
     Ok(())

@@ -391,6 +391,7 @@ impl Cred {
                     | Priv::NetAddifaddr
                     | Priv::NetDelifaddr
                     | Priv::NetSetifvnet
+                    | Priv::NetSetiffib
                     | Priv::NetinetRaw
                     | Priv::NetinetAddrctl6
                     | Priv::NetinetNd6

@@ -168,6 +168,15 @@ fn route_msg(r: &Route, gw_ty: u8, ifp: Option<&Ifnet>, mut base: RtMsghdr, ty: 
         };
     base.rtm_rmx.rmx_mtu = u64::from(r.mtu);
     base.rtm_rmx.rmx_weight = u64::from(r.weight);
+    base.rtm_rmx.rmx_nhidx = u64::from(r.nhidx);
+    base.rtm_rmx.rmx_expire = r.expire;
+    if r.expire != 0 {
+        base.rtm_inits |= rtv::EXPIRE;
+    }
+    // A deleted route is no longer up.
+    if ty == rtm::DELETE {
+        base.rtm_flags &= !rtf::UP;
+    }
     let mut v = Vec::new();
     put(&mut v, &base);
     let (mut rec, bits) = record(v, ty, &route_addrs(r, gw_ty, ifp));
@@ -176,10 +185,10 @@ fn route_msg(r: &Route, gw_ty: u8, ifp: Option<&Ifnet>, mut base: RtMsghdr, ty: 
 }
 
 /// The route `dst/plen` (exact) or covering `dst` (longest prefix).
-fn find(n: &Net, family: Family, dst: &In6, plen: Option<u8>) -> Option<Route> {
+fn find(n: &Net, fib: u16, family: Family, dst: &In6, plen: Option<u8>) -> Option<Route> {
     n.routes
         .iter()
-        .filter(|r| r.family == family)
+        .filter(|r| r.family == family && r.fib == fib)
         .filter(|r| match plen {
             Some(p) => r.plen == p && r.dst == masked(family, dst, p),
             None => crate::addr::prefix_match(family, &r.dst, dst, r.plen),
@@ -206,14 +215,18 @@ fn via(n: &Net, family: Family, gw: &Sa) -> Option<(u16, In6, bool)> {
                 .map_or([0; 16], |a| a.addr);
             Some((ifp.index, ifa, false))
         }
-        Sa::In(f, g) if *f == family => n.ifaces.iter().find_map(|i| {
-            i.addrs.iter().find_map(|a| {
-                (a.family == family
+        // `ifa_ifwithnet`: the most specific prefix holding it.
+        Sa::In(f, g) if *f == family => n
+            .ifaces
+            .iter()
+            .flat_map(|i| i.addrs.iter().map(move |a| (i, a)))
+            .filter(|(_, a)| {
+                a.family == family
                     && (crate::ifnet::same_addr(family, &a.addr, g)
-                        || crate::addr::prefix_match(family, &a.addr, g, a.plen)))
-                .then_some((i.index, a.addr, true))
+                        || crate::addr::prefix_match(family, &a.addr, g, a.plen))
             })
-        }),
+            .max_by_key(|(_, a)| a.plen)
+            .map(|(i, a)| (i.index, a.addr, true)),
         _ => None,
     }
 }
@@ -238,6 +251,7 @@ pub fn request(
     msg: &[u8],
     pid: i32,
     may_change: bool,
+    fib: u16,
 ) -> (Vec<u8>, Result<(), Errno>) {
     let req = match parse(msg) {
         Ok(r) => r,
@@ -274,9 +288,10 @@ pub fn request(
     let gw = req.sas[1].map(parse_sa);
     let before = n.outbox.len();
     let r = match ty {
-        rtm::GET => find(n, family, &dst_addr, plen).ok_or(Errno::ESRCH),
+        rtm::GET => find(n, fib, family, &dst_addr, plen).ok_or(Errno::ESRCH),
         rtm::ADD => add(
             n,
+            fib,
             family,
             &dst_addr,
             plen.unwrap_or(max_plen(family)),
@@ -285,24 +300,23 @@ pub fn request(
         ),
         rtm::DELETE => {
             let plen = plen.unwrap_or(max_plen(family));
-            match find(n, family, &dst_addr, Some(plen)) {
-                Some(old) if gw.as_ref().is_none_or(|g| gw_matches(&old, g)) => {
-                    n.delete_route(family, &old.dst, old.plen)
-                }
-                _ => Err(Errno::ESRCH),
+            // A gateway picks the path of a multipath group.
+            match paths(n, fib, family, &dst_addr, plen)
+                .into_iter()
+                .find(|r| gw.as_ref().is_none_or(|g| gw_matches(r, g)))
+            {
+                Some(old) => n.delete_exact(&old),
+                None => Err(Errno::ESRCH),
             }
         }
-        rtm::CHANGE => change(n, family, &dst_addr, plen, gw.as_ref(), &base),
+        rtm::CHANGE => change(n, fib, family, &dst_addr, plen, gw.as_ref(), &base),
         _ => Err(Errno::EOPNOTSUPP),
     };
-    // The reply announces the change; drop the route events the change
-    // queued.
-    let mut i = before;
-    while i < n.outbox.len() {
-        if matches!(n.outbox[i], Event::Route { .. }) {
-            n.outbox.remove(i);
-        } else {
-            i += 1;
+    // The reply announces the change to routing sockets; netlink still
+    // hears the route events.
+    for e in &mut n.outbox[before..] {
+        if let Event::Route { rtsock, .. } = e {
+            *rtsock = true;
         }
     }
     match r {
@@ -316,7 +330,7 @@ pub fn request(
             };
             let ifp = want_ifp.then(|| n.by_index(route.ifindex)).flatten();
             let mut out = route_msg(&route, gw_ty, ifp, h, ty);
-            let flags = route.flags
+            let mut flags = route.flags
                 | rtf::UP
                 | rtf::DONE
                 | if route.plen == max_plen(family) {
@@ -324,6 +338,9 @@ pub fn request(
                 } else {
                     0
                 };
+            if ty == rtm::DELETE {
+                flags &= !rtf::UP;
+            }
             let at = core::mem::offset_of!(RtMsghdr, rtm_flags);
             out[at..at + 4].copy_from_slice(&flags.to_ne_bytes());
             (out, Ok(()))
@@ -342,6 +359,7 @@ fn gw_matches(r: &Route, g: &Sa) -> bool {
 
 fn add(
     n: &mut Net,
+    fib: u16,
     family: Family,
     dst: &In6,
     plen: u8,
@@ -376,21 +394,46 @@ fn add(
         ifindex,
         ifa,
         mtu,
-        weight: 1,
+        weight: if h.rtm_inits & rtv::WEIGHT != 0 {
+            weight(h.rtm_rmx.rmx_weight)
+        } else {
+            1
+        },
+        expire: if h.rtm_inits & rtv::EXPIRE != 0 {
+            h.rtm_rmx.rmx_expire
+        } else {
+            0
+        },
+        nhidx: 0,
+        fib,
     };
     n.add_route(r.clone())?;
-    Ok(r)
+    // As stored, with its next hop.
+    Ok(n.routes.last().cloned().unwrap_or(r))
 }
 
 fn change(
     n: &mut Net,
+    fib: u16,
     family: Family,
     dst: &In6,
     plen: Option<u8>,
     gw: Option<&Sa>,
     h: &RtMsghdr,
 ) -> Result<Route, Errno> {
-    let old = find(n, family, dst, Some(plen.unwrap_or(max_plen(family)))).ok_or(Errno::ESRCH)?;
+    let plen = plen.unwrap_or(max_plen(family));
+    let all = paths(n, fib, family, dst, plen);
+    // In a multipath group the gateway names the path; a single path's
+    // gateway may change.
+    let old = match (all.len(), gw) {
+        (0, _) => return Err(Errno::ESRCH),
+        (1, _) | (_, None) => all[0].clone(),
+        (_, Some(g)) => all
+            .iter()
+            .find(|r| gw_matches(r, g))
+            .cloned()
+            .ok_or(Errno::ESRCH)?,
+    };
     let mut new = old.clone();
     if let Some(g) = gw {
         let (ifindex, ifa, by_addr) = via(n, family, g).ok_or(Errno::ENETUNREACH)?;
@@ -404,23 +447,47 @@ fn change(
     if h.rtm_inits & rtv::MTU != 0 {
         new.mtu = u32::try_from(h.rtm_rmx.rmx_mtu).unwrap_or(new.mtu);
     }
-    if h.rtm_fmask != 0 {
-        new.flags = (new.flags & !h.rtm_fmask) | (h.rtm_flags & h.rtm_fmask & KEPT);
+    if h.rtm_inits & rtv::WEIGHT != 0 {
+        new.weight = weight(h.rtm_rmx.rmx_weight);
     }
-    n.delete_route(family, &old.dst, old.plen)?;
+    // The request's flags replace the route's (`rib_change_route` makes
+    // the next hop anew from them), the gateway's kind kept.
+    new.flags = h.rtm_flags & KEPT & !rtf::GATEWAY
+        | rtf::UP
+        | match new.gateway {
+            Gateway::Addr(_) => rtf::GATEWAY,
+            Gateway::Link(_) => 0,
+        };
+    n.delete_exact(&old)?;
     n.add_route(new.clone())?;
-    Ok(new)
+    Ok(n.routes.last().cloned().unwrap_or(new))
+}
+
+/// The paths to exactly `dst/plen`.
+fn paths(n: &Net, fib: u16, family: Family, dst: &In6, plen: u8) -> Vec<Route> {
+    let d = masked(family, dst, plen);
+    n.routes
+        .iter()
+        .filter(|r| r.family == family && r.fib == fib && r.plen == plen && r.dst == d)
+        .cloned()
+        .collect()
+}
+
+/// `RTV_WEIGHT`'s weight: 0 is the default (`RT_DEFAULT_WEIGHT`), and
+/// the most is `RT_MAX_WEIGHT`.
+fn weight(w: u64) -> u32 {
+    match w {
+        0 => 1,
+        w => u32::try_from(w).unwrap_or(u32::MAX).min(16_777_215),
+    }
 }
 
 /// The routing message announcing `e`, if routing sockets hear of it.
 #[must_use]
 pub fn announce(e: &Event) -> Option<(Option<Family>, Vec<u8>)> {
     match e {
-        Event::Announce {
-            index,
-            name,
-            arrival,
-        } => {
+        Event::Announce { ifp, arrival } => {
+            let (index, name) = (&ifp.index, &ifp.name);
             // `struct if_announcemsghdr`.
             let mut v = alloc::vec![0u8; 24];
             v[0..2].copy_from_slice(&24u16.to_ne_bytes());
@@ -440,7 +507,8 @@ pub fn announce(e: &Event) -> Option<(Option<Family>, Vec<u8>)> {
             Some((Some(addr.family), rtmsg::ifa_record_typed(ifp, addr, ty)))
         }
         Event::Reply { family, msg, .. } => Some((*family, msg.clone())),
-        Event::Route { ty, route, ifp } => {
+        Event::Route { rtsock: true, .. } => None,
+        Event::Route { ty, route, ifp, .. } => {
             let h = RtMsghdr {
                 rtm_version: RTM_VERSION,
                 ..RtMsghdr::default()
