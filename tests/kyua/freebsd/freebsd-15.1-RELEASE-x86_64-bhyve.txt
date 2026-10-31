@@ -1,7 +1,8 @@
 # kyua on FreeBSD 15.1-RELEASE, x86_64-bhyve, 8 CPUs, parallelism=8
-# written by cargo xtask kyua-baseline; 9845 test cases
-# broken 107, crashed 11, expected_failure 38, failed 6, passed 8442, skipped 1241
-# wall time: about 2500 s running (the 35117 s between start and end marks includes 9 h stopped after the ctladm crash)
+# written by cargo xtask kyua; 10155 test cases
+# broken 106, crashed 11, expected_failure 43, failed 5, passed 8853, skipped 1137
+# packages: expat-2.8.4 gettext-runtime-1.0_1 indexinfo-0.3.1_1 jq-1.8.2 libffi-3.8.0 mpdecimal-4.0.1 ndisc6-1.0.9 oniguruma-6.9.10 perl5-5.42.3 py312-cffi-2.1.1 py312-cryptography-50.0.1,1 py312-dpkt-1.9.6_1 py312-iniconfig-2.3.0 py312-packaging-26.3 py312-pluggy-1.6.0 py312-pycparser-3.0 py312-pygments-2.21.0 py312-pypcap-1.3.0_1 py312-pytest-9.1.1,1 py312-scapy-2.8.0 python-3.12_3,2 python3-3_4 python312-3.12.15 readline-8.3.6
+# wall time: suite 3373 s, harness 3408 s
 # crashed in: usr.sbin/ctladm
 bin/cat/cat_test:align	passed
 bin/cat/cat_test:b_output	passed
@@ -217,7 +218,7 @@ bin/mv/mv_test:mv_v	passed
 bin/mv/mv_test:rename_dir	passed
 bin/mv/mv_test:rename_fifo	passed
 bin/mv/mv_test:rename_file	passed
-bin/pax/legacy_test:main	skipped	Required program '/usr/local/bin/perl' not found
+bin/pax/legacy_test:main	passed
 bin/pkill/pgrep-_f_test:main	passed
 bin/pkill/pgrep-_g_test:main	passed
 bin/pkill/pgrep-_lf_test:main	passed
@@ -790,8 +791,24 @@ cddl/usr.bin/ztest/ztest:ztest	skipped	Required configuration property 'rt_long'
 cddl/usr.sbin/zfsd/zfsd_unittest:main	passed
 etc/rc.d/routing_test:static_ipv4_loopback_route_for_each_fib	passed
 etc/rc.d/routing_test:static_ipv6_loopback_route_for_each_fib	passed
-examples/test_examples.py:__test_cases_list_pytest_binary_not_found__	skipped	Required program 'pytest' not found in PATH
-examples/test_ktest_example.py:__test_cases_list_pytest_binary_not_found__	skipped	Required program 'pytest' not found in PATH
+examples/test_examples.py:TestExampleSimple::test_get_properties	skipped	comment me to run the test
+examples/test_examples.py:TestExampleSimple::test_one	skipped	comment me to run the test
+examples/test_examples.py:TestExampleSimple::test_parametrize[AF_INET6]	skipped	comment me to run the test
+examples/test_examples.py:TestExampleSimple::test_parametrize[AF_INET]	skipped	comment me to run the test
+examples/test_examples.py:TestExampleSimple::test_parametrize[FAMILY_39]	skipped	comment me to run the test
+examples/test_examples.py:TestExampleSimple::test_syscall_failure	skipped	comment me to run the test
+examples/test_examples.py:TestExampleSimple::test_two	skipped	Required file '/path/file1' not found
+examples/test_examples.py:TestExampleSimple::test_with_cleanup	passed
+examples/test_examples.py:TestExampleSimplest::test_one	skipped	comment me to run the test
+examples/test_examples.py:TestVnetDual1::test_ifstat	skipped	comment me to run the test
+examples/test_examples.py:TestVnetSimple::test_ping	skipped	comment me to run the test
+examples/test_examples.py:TestVnetSimple::test_topology	skipped	comment me to run the test
+examples/test_ktest_example.py:TestExample::test_failed	skipped	comment me ( or delete the func) to run the test
+examples/test_ktest_example.py:TestExample::test_failed2	skipped	comment me ( or delete the func) to run the test
+examples/test_ktest_example.py:TestExample::test_something	passed
+examples/test_ktest_example.py:TestExample::test_something_else	passed
+examples/test_ktest_example.py:TestExample::test_with_params[1_2_Sum]	passed
+examples/test_ktest_example.py:TestExample::test_with_params[3_4_Sum]	passed
 include/byteswap_endian_test:byteswap	passed
 include/byteswap_test:byteswap	passed
 include/endian_sys_endian_test:sys_endian	passed
@@ -2178,7 +2195,7 @@ lib/libc/gen/sig2str_test:str2sig_rtmin_rtmax	passed
 lib/libc/gen/sigsetops_test:extended_sigsetop_test	passed
 lib/libc/gen/sigsetops_test:posix_sigsetop_test	passed
 lib/libc/gen/sleep_test:kevent	passed
-lib/libc/gen/sleep_test:nanosleep	expected_failure	Long reschedule latency due to PR kern/43997: Reschedule latency -6155280538700255712 exceeds allowable fuzz 40000000
+lib/libc/gen/sleep_test:nanosleep	expected_failure	Long reschedule latency due to PR kern/43997: Reschedule latency -3157675218686017002 exceeds allowable fuzz 40000000
 lib/libc/gen/sleep_test:select	passed
 lib/libc/gen/sleep_test:sleep	passed
 lib/libc/gen/syslog_test:syslog_pthread	passed
@@ -3479,11 +3496,11 @@ lib/libc/sys/mknod_test:mknod_exist	passed
 lib/libc/sys/mknod_test:mknod_perm	passed
 lib/libc/sys/mknod_test:mknod_stat	expected_failure	mknod does not allow S_IFREG: /usr/src/contrib/netbsd-tests/lib/libc/sys/t_mknod.c:179: mknod(path, S_IFREG, 0) == 0 not met
 lib/libc/sys/mlock_test:mlock_clip	passed
-lib/libc/sys/mlock_test:mlock_err	skipped	Required configuration property 'allow_sysctl_side_effects' not defined
+lib/libc/sys/mlock_test:mlock_err	passed
 lib/libc/sys/mlock_test:mlock_limits	passed
-lib/libc/sys/mlock_test:mlock_mmap	skipped	Required configuration property 'allow_sysctl_side_effects' not defined
-lib/libc/sys/mlock_test:mlock_nested	skipped	Required configuration property 'allow_sysctl_side_effects' not defined
-lib/libc/sys/mlock_test:mlock_unaligned	skipped	Required configuration property 'allow_sysctl_side_effects' not defined
+lib/libc/sys/mlock_test:mlock_mmap	passed
+lib/libc/sys/mlock_test:mlock_nested	passed
+lib/libc/sys/mlock_test:mlock_unaligned	passed
 lib/libc/sys/mlock_test:munlock_unlocked	passed
 lib/libc/sys/mmap_test:mmap_err	passed
 lib/libc/sys/mmap_test:mmap_loan	passed
@@ -3571,7 +3588,7 @@ lib/libc/sys/setrlimit_test:setrlimit_basic	passed
 lib/libc/sys/setrlimit_test:setrlimit_current	passed
 lib/libc/sys/setrlimit_test:setrlimit_err	passed
 lib/libc/sys/setrlimit_test:setrlimit_fsize	passed
-lib/libc/sys/setrlimit_test:setrlimit_memlock	skipped	Required configuration property 'allow_sysctl_side_effects' not defined
+lib/libc/sys/setrlimit_test:setrlimit_memlock	passed
 lib/libc/sys/setrlimit_test:setrlimit_nofile_1	passed
 lib/libc/sys/setrlimit_test:setrlimit_nofile_2	passed
 lib/libc/sys/setrlimit_test:setrlimit_nproc	passed
@@ -4739,14 +4756,71 @@ sbin/devd/client_test:stream	passed
 sbin/dhclient/option-domain-search_test:main	passed
 sbin/dhclient/pcp:normal	skipped	ISC dhcp server (isc-dhcp44-server) not installed
 sbin/dhclient/pcp:pcp	skipped	ISC dhcp server (isc-dhcp44-server) not installed
-sbin/growfs/legacy_test:main	skipped	Required program '/usr/local/bin/perl' not found
-sbin/ifconfig/ifconfig:badfib	skipped	if_epair.ko is required to run this test.
-sbin/ifconfig/inet6:broadcast	skipped	if_epair.ko is required to run this test.
-sbin/ifconfig/inet6:delete6	skipped	if_epair.ko is required to run this test.
-sbin/ifconfig/inet6:netmask	skipped	if_epair.ko is required to run this test.
+sbin/growfs/legacy_test:main	passed
+sbin/ifconfig/ifconfig:badfib	skipped	if_bridge.ko is required to run this test.
+sbin/ifconfig/inet6:broadcast	skipped	if_bridge.ko is required to run this test.
+sbin/ifconfig/inet6:delete6	skipped	if_bridge.ko is required to run this test.
+sbin/ifconfig/inet6:netmask	skipped	if_bridge.ko is required to run this test.
 sbin/ifconfig/nonexistent_test:nonexistent	passed
 sbin/ipfw/ipfw_test:nptv6	skipped	Required kmods are not loaded: ipfw_nptv6.
-sbin/ipfw/test_add_rule.py:__test_cases_list_pytest_binary_not_found__	skipped	Required program 'pytest' not found in PATH
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_action[abort6]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_action[abort]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_action[accept]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_action[call_420]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_action[count]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_action[deny]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_action[divert_42]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_action[divert_natd]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_action[netgraph_42]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_action[ngtee_42]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_action[pipe_42]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_action[queue_42]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_action[reass]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_action[reject]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_action[reset6]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_action[reset]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_action[return]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_action[setdscp_42]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_action[setfib_1]	skipped	needs net.fibs>1
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_action[skipto_4200]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_action[skipto_42]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_action[tee_42]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_action[test_allow]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_action[unreach6_port]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_action[unreach_needfrag]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_action[unreach_needfrag_mtu]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_action[unreach_port0]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_action[unreach_port1]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_ports[test_range-dst]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_ports[test_range-src]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_ports[test_ranges-dst]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_ports[test_ranges-src]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_ports[test_single-dst]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_ports[test_single-src]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_rule[test_action_comment]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_rule[test_check_state]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_rule[test_comment]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_rule[test_eaction_nptv6]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_rule[test_eaction_tcp-setmss]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_rule[test_keep_state]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_rule[test_or]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_rule[test_record_state]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_rule[test_rulenum]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_rule[test_tables]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_rule[test_tables_check_value_legacy]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_rule[test_tables_check_value_nat]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_rule[test_tables_check_value_nh4]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_rule[test_tables_check_value_nh6]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_rule[test_tables_lookup_dst_ip4_numeric]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_rule[test_tables_lookup_dst_ip6]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_rule[test_tables_lookup_jail_addr]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_rule[test_tables_lookup_mac_mask]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_rule[test_tables_lookup_no_mask]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_rule[test_tables_lookup_src_ip4_addr]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_rule[test_tables_lookup_u32_mask]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_single_instruction[test_ports]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_single_instruction[test_prob]	passed
+sbin/ipfw/test_add_rule.py:TestAddRule::test_add_single_instruction[test_proto]	passed
 sbin/md5/md5_test:bsd_md5_vec1	passed
 sbin/md5/md5_test:bsd_md5_vec2	passed
 sbin/md5/md5_test:bsd_md5_vec3	passed
@@ -4954,69 +5028,69 @@ sbin/md5/md5_test:gnu_skein512_vec5	passed
 sbin/md5/md5_test:gnu_skein512_vec6	passed
 sbin/md5/md5_test:gnu_skein512_vec7	passed
 sbin/md5/md5_test:gnu_skein512_vec8	passed
-sbin/md5/md5_test:perl_check_sha1	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_check_sha224	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_check_sha256	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_check_sha384	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_check_sha512	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_check_sha512t224	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_check_sha512t256	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha1_vec1	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha1_vec2	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha1_vec3	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha1_vec4	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha1_vec5	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha1_vec6	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha1_vec7	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha1_vec8	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha224_vec1	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha224_vec2	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha224_vec3	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha224_vec4	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha224_vec5	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha224_vec6	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha224_vec7	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha224_vec8	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha256_vec1	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha256_vec2	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha256_vec3	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha256_vec4	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha256_vec5	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha256_vec6	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha256_vec7	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha256_vec8	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha384_vec1	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha384_vec2	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha384_vec3	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha384_vec4	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha384_vec5	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha384_vec6	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha384_vec7	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha384_vec8	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha512_vec1	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha512_vec2	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha512_vec3	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha512_vec4	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha512_vec5	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha512_vec6	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha512_vec7	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha512_vec8	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha512t224_vec1	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha512t224_vec2	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha512t224_vec3	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha512t224_vec4	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha512t224_vec5	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha512t224_vec6	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha512t224_vec7	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha512t224_vec8	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha512t256_vec1	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha512t256_vec2	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha512t256_vec3	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha512t256_vec4	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha512t256_vec5	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha512t256_vec6	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha512t256_vec7	skipped	Required program 'shasum' not found in PATH
-sbin/md5/md5_test:perl_sha512t256_vec8	skipped	Required program 'shasum' not found in PATH
+sbin/md5/md5_test:perl_check_sha1	passed
+sbin/md5/md5_test:perl_check_sha224	passed
+sbin/md5/md5_test:perl_check_sha256	passed
+sbin/md5/md5_test:perl_check_sha384	passed
+sbin/md5/md5_test:perl_check_sha512	passed
+sbin/md5/md5_test:perl_check_sha512t224	passed
+sbin/md5/md5_test:perl_check_sha512t256	passed
+sbin/md5/md5_test:perl_sha1_vec1	passed
+sbin/md5/md5_test:perl_sha1_vec2	passed
+sbin/md5/md5_test:perl_sha1_vec3	passed
+sbin/md5/md5_test:perl_sha1_vec4	passed
+sbin/md5/md5_test:perl_sha1_vec5	passed
+sbin/md5/md5_test:perl_sha1_vec6	passed
+sbin/md5/md5_test:perl_sha1_vec7	passed
+sbin/md5/md5_test:perl_sha1_vec8	passed
+sbin/md5/md5_test:perl_sha224_vec1	passed
+sbin/md5/md5_test:perl_sha224_vec2	passed
+sbin/md5/md5_test:perl_sha224_vec3	passed
+sbin/md5/md5_test:perl_sha224_vec4	passed
+sbin/md5/md5_test:perl_sha224_vec5	passed
+sbin/md5/md5_test:perl_sha224_vec6	passed
+sbin/md5/md5_test:perl_sha224_vec7	passed
+sbin/md5/md5_test:perl_sha224_vec8	passed
+sbin/md5/md5_test:perl_sha256_vec1	passed
+sbin/md5/md5_test:perl_sha256_vec2	passed
+sbin/md5/md5_test:perl_sha256_vec3	passed
+sbin/md5/md5_test:perl_sha256_vec4	passed
+sbin/md5/md5_test:perl_sha256_vec5	passed
+sbin/md5/md5_test:perl_sha256_vec6	passed
+sbin/md5/md5_test:perl_sha256_vec7	passed
+sbin/md5/md5_test:perl_sha256_vec8	passed
+sbin/md5/md5_test:perl_sha384_vec1	passed
+sbin/md5/md5_test:perl_sha384_vec2	passed
+sbin/md5/md5_test:perl_sha384_vec3	passed
+sbin/md5/md5_test:perl_sha384_vec4	passed
+sbin/md5/md5_test:perl_sha384_vec5	passed
+sbin/md5/md5_test:perl_sha384_vec6	passed
+sbin/md5/md5_test:perl_sha384_vec7	passed
+sbin/md5/md5_test:perl_sha384_vec8	passed
+sbin/md5/md5_test:perl_sha512_vec1	passed
+sbin/md5/md5_test:perl_sha512_vec2	passed
+sbin/md5/md5_test:perl_sha512_vec3	passed
+sbin/md5/md5_test:perl_sha512_vec4	passed
+sbin/md5/md5_test:perl_sha512_vec5	passed
+sbin/md5/md5_test:perl_sha512_vec6	passed
+sbin/md5/md5_test:perl_sha512_vec7	passed
+sbin/md5/md5_test:perl_sha512_vec8	passed
+sbin/md5/md5_test:perl_sha512t224_vec1	passed
+sbin/md5/md5_test:perl_sha512t224_vec2	passed
+sbin/md5/md5_test:perl_sha512t224_vec3	passed
+sbin/md5/md5_test:perl_sha512t224_vec4	passed
+sbin/md5/md5_test:perl_sha512t224_vec5	passed
+sbin/md5/md5_test:perl_sha512t224_vec6	passed
+sbin/md5/md5_test:perl_sha512t224_vec7	passed
+sbin/md5/md5_test:perl_sha512t224_vec8	passed
+sbin/md5/md5_test:perl_sha512t256_vec1	passed
+sbin/md5/md5_test:perl_sha512t256_vec2	passed
+sbin/md5/md5_test:perl_sha512t256_vec3	passed
+sbin/md5/md5_test:perl_sha512t256_vec4	passed
+sbin/md5/md5_test:perl_sha512t256_vec5	passed
+sbin/md5/md5_test:perl_sha512t256_vec6	passed
+sbin/md5/md5_test:perl_sha512t256_vec7	passed
+sbin/md5/md5_test:perl_sha512t256_vec8	passed
 sbin/md5/md5_test:self_test_md5	passed
 sbin/md5/md5_test:self_test_rmd160	passed
 sbin/md5/md5_test:self_test_sha1	passed
@@ -5334,9 +5408,9 @@ sbin/ping/in_cksum_test:aligned_even_length	passed
 sbin/ping/in_cksum_test:aligned_odd_length	passed
 sbin/ping/in_cksum_test:unaligned_even_length	passed
 sbin/ping/in_cksum_test:unaligned_odd_length	passed
-sbin/ping/ping_test:inject_opts	skipped	Required program 'python3' not found in PATH
-sbin/ping/ping_test:inject_pip	skipped	Required program 'python3' not found in PATH
-sbin/ping/ping_test:inject_reply	skipped	Required program 'python3' not found in PATH
+sbin/ping/ping_test:inject_opts	passed
+sbin/ping/ping_test:inject_pip	passed
+sbin/ping/ping_test:inject_reply	passed
 sbin/ping/ping_test:ping4_nohost	passed
 sbin/ping/ping_test:ping6_4	passed
 sbin/ping/ping_test:ping6_c1_s8_t1	passed
@@ -5350,11 +5424,64 @@ sbin/ping/ping_test:ping_c1_s56_t1_S127	passed
 sbin/ping/ping_test:ping_c1_s8_t1_S1	passed
 sbin/ping/ping_test:ping_c1t6	passed
 sbin/ping/ping_test:ping_nohost	passed
-sbin/ping/test_ping.py:__test_cases_list_pytest_binary_not_found__	skipped	Required program 'pytest' not found in PATH
-sbin/route/basic:basic_v4	skipped	Required program 'jq' not found in PATH
-sbin/route/basic:basic_v6	skipped	Required program 'jq' not found in PATH
-sbin/route/basic:interface_route_v4	skipped	Required program 'jq' not found in PATH
-sbin/route/basic:interface_route_v6	skipped	Required program 'jq' not found in PATH
+sbin/ping/test_ping.py:TestPing::test_ping[_4_c1_s56_t1_localhost]	passed
+sbin/ping/test_ping.py:TestPing::test_ping[_6_c1_s8_t1_localhost]	passed
+sbin/ping/test_ping.py:TestPing::test_ping[_A_3_192_0.2.1]	passed
+sbin/ping/test_ping.py:TestPing::test_ping[_A_c1_192_0_2_1]	passed
+sbin/ping/test_ping.py:TestPing::test_ping[_A_c1_192_0_2_2]	passed
+sbin/ping/test_ping.py:TestPing::test_ping[_A_c1_2001_db8__1]	passed
+sbin/ping/test_ping.py:TestPing::test_ping[_A_c1_2001_db8__2]	passed
+sbin/ping/test_ping.py:TestPing::test_ping[_A_c3_192_0_2_2]	passed
+sbin/ping/test_ping.py:TestPing::test_ping[_A_c3_2001_db8__1]	passed
+sbin/ping/test_ping.py:TestPing::test_ping[_A_c3_2001_db8__2]	passed
+sbin/ping/test_ping.py:TestPing::test_ping[_c1_192_0_2_1]	passed
+sbin/ping/test_ping.py:TestPing::test_ping[_c1_192_0_2_2]	passed
+sbin/ping/test_ping.py:TestPing::test_ping[_c1_2001_db8__1]	passed
+sbin/ping/test_ping.py:TestPing::test_ping[_c1_2001_db8__2]	passed
+sbin/ping/test_ping.py:TestPing::test_ping[_c1_S127_0_0_1_s56_t1_localhost]	passed
+sbin/ping/test_ping.py:TestPing::test_ping[_c1_S__1_s8_t1_localhost]	passed
+sbin/ping/test_ping.py:TestPing::test_ping[_c3_192_0_2_1]	passed
+sbin/ping/test_ping.py:TestPing::test_ping[_c3_192_0_2_2]	passed
+sbin/ping/test_ping.py:TestPing::test_ping[_c3_2001_db8__1]	passed
+sbin/ping/test_ping.py:TestPing::test_ping[_c3_2001_db8__2]	passed
+sbin/ping/test_ping.py:TestPing::test_ping[_q_c1_192_0_2_1]	passed
+sbin/ping/test_ping.py:TestPing::test_ping[_q_c1_192_0_2_2]	passed
+sbin/ping/test_ping.py:TestPing::test_ping[_q_c1_2001_db8__1]	passed
+sbin/ping/test_ping.py:TestPing::test_ping[_q_c1_2001_db8__2]	passed
+sbin/ping/test_ping.py:TestPing::test_ping[_q_c3_192_0_2_1]	passed
+sbin/ping/test_ping.py:TestPing::test_ping[_q_c3_192_0_2_2]	passed
+sbin/ping/test_ping.py:TestPing::test_ping[_q_c3_2001_db8__1]	passed
+sbin/ping/test_ping.py:TestPing::test_ping[_q_c3_2001_db8__2]	passed
+sbin/ping/test_ping.py:TestPing::test_ping_46[_Wx_localhost]	passed
+sbin/ping/test_ping.py:TestPing::test_pinger[_0_0]	passed
+sbin/ping/test_ping.py:TestPing::test_pinger[_0_0_opts_EOL]	passed
+sbin/ping/test_ping.py:TestPing::test_pinger[_0_0_opts_LSRR]	passed
+sbin/ping/test_ping.py:TestPing::test_pinger[_0_0_opts_LSRR_trunc]	passed
+sbin/ping/test_ping.py:TestPing::test_pinger[_0_0_opts_NOP]	passed
+sbin/ping/test_ping.py:TestPing::test_pinger[_0_0_opts_NOP_40]	passed
+sbin/ping/test_ping.py:TestPing::test_pinger[_0_0_opts_RR]	passed
+sbin/ping/test_ping.py:TestPing::test_pinger[_0_0_opts_RR_same]	passed
+sbin/ping/test_ping.py:TestPing::test_pinger[_0_0_opts_RR_trunc]	passed
+sbin/ping/test_ping.py:TestPing::test_pinger[_0_0_opts_SSRR]	passed
+sbin/ping/test_ping.py:TestPing::test_pinger[_0_0_opts_SSRR_trunc]	passed
+sbin/ping/test_ping.py:TestPing::test_pinger[_0_0_opts_unk]	passed
+sbin/ping/test_ping.py:TestPing::test_pinger[_0_0_special_warp]	passed
+sbin/ping/test_ping.py:TestPing::test_pinger[_0_0_special_wrong]	passed
+sbin/ping/test_ping.py:TestPing::test_pinger[_3_1_flags_DF]	passed
+sbin/ping/test_ping.py:TestPing::test_pinger[_3_1_opts_NOP_40]	passed
+sbin/ping/test_ping.py:TestPing::test_pinger[_3_1_special_not_mine_verbose_false]	passed
+sbin/ping/test_ping.py:TestPing::test_pinger[_3_1_special_tcp]	passed
+sbin/ping/test_ping.py:TestPing::test_pinger[_3_1_special_udp]	passed
+sbin/ping/test_ping.py:TestPing::test_pinger[_3_1_verbose_false]	passed
+sbin/ping/test_ping.py:TestPing::test_pinger[_IHL_too_short]	passed
+sbin/ping/test_ping.py:TestPing::test_pinger[_inner_IHL_too_short]	passed
+sbin/ping/test_ping.py:TestPing::test_pinger[_inner_packet_too_short]	passed
+sbin/ping/test_ping.py:TestPing::test_pinger[_max_inner_packet_ihl_without_payload]	passed
+sbin/ping/test_ping.py:TestPing::test_pinger[_quoted_data_too_short]	passed
+sbin/route/basic:basic_v4	passed
+sbin/route/basic:basic_v6	passed
+sbin/route/basic:interface_route_v4	passed
+sbin/route/basic:interface_route_v6	passed
 sbin/savecore/livedump_test:livedump_kldstat	skipped	Required program 'kgdb' not found in PATH
 sbin/savecore/log_test:log_perror	passed
 sbin/swapon/swapon_test:attach_dev_md	passed
@@ -5401,11 +5528,11 @@ share/examples/tests/plain/printf_test:main	passed
 share/examples/tests/tap/cp_test:main	passed
 share/examples/tests/tap/printf_test:main	passed
 share/zoneinfo/backward_test:links	passed
-sys/acl/00:main	skipped	Required program 'perl' not found in PATH
-sys/acl/01:main	skipped	Required program 'perl' not found in PATH
-sys/acl/02:main	skipped	Required program 'perl' not found in PATH
-sys/acl/03:main	skipped	Required program 'perl' not found in PATH
-sys/acl/04:main	skipped	Required program 'perl' not found in PATH
+sys/acl/00:main	passed
+sys/acl/01:main	passed
+sys/acl/02:main	passed
+sys/acl/03:main	passed
+sys/acl/04:main	passed
 sys/acl/acl-api-test:acl_cmp_test	passed
 sys/acl/acl-api-test:acl_equiv_mode_test	passed
 sys/acl/acl-api-test:acl_mode_roundup	passed
@@ -5468,8 +5595,8 @@ sys/aio/aio_test:vectored_file_poll	skipped	Unsafe AIO is disabled
 sys/aio/aio_test:vectored_md_poll	passed
 sys/aio/aio_test:vectored_socket_poll	passed
 sys/aio/aio_test:vectored_thread	skipped	Unsafe AIO is disabled
-sys/aio/aio_test:vectored_unaligned	skipped	Unsafe AIO is disabled
-sys/aio/aio_test:vectored_zvol_poll	passed
+sys/aio/aio_test:vectored_unaligned	skipped	https://bugs.freebsd.org/258766
+sys/aio/aio_test:vectored_zvol_poll	skipped	https://bugs.freebsd.org/258766
 sys/aio/lio_kqueue_test:main	passed
 sys/aio/lio_test:lio_listio_eagain_kevent	skipped	Unsafe AIO is disabled
 sys/aio/lio_test:lio_listio_empty_nowait	passed
@@ -6299,7 +6426,7 @@ sys/geom/class/eli/setkey_test:setkey	passed
 sys/geom/class/eli/setkey_test:setkey_passphrase	passed
 sys/geom/class/eli/setkey_test:setkey_readonly	passed
 sys/geom/class/gate/ggate_test:ggatec_trim	passed
-sys/geom/class/gate/ggate_test:ggated	failed	atf-check failed; see the output of the test for details
+sys/geom/class/gate/ggate_test:ggated	passed
 sys/geom/class/gate/ggate_test:ggatel_file	passed
 sys/geom/class/gate/ggate_test:ggatel_md	passed
 sys/geom/class/mirror/10_test:main	passed
@@ -6318,7 +6445,7 @@ sys/geom/class/mirror/9_test:main	passed
 sys/geom/class/mirror/component_selection:run_latest_genid	passed
 sys/geom/class/mirror/sync_error:sync_read_error_2_disks	passed
 sys/geom/class/mirror/sync_error:sync_read_error_3_disks	passed
-sys/geom/class/multipath/failloop:failloop	skipped	Required configuration property 'allow_sysctl_side_effects' not defined
+sys/geom/class/multipath/failloop:failloop	passed
 sys/geom/class/multipath/misc:add	passed
 sys/geom/class/multipath/misc:create_A	passed
 sys/geom/class/multipath/misc:create_R	passed
@@ -6382,7 +6509,7 @@ sys/kern/basic_signal:trap_signal_test	passed
 sys/kern/copy_file_range:copy_file_range_invalid	passed
 sys/kern/copy_file_range:copy_file_range_offset	passed
 sys/kern/copy_file_range:copy_file_range_truncate	passed
-sys/kern/coredump_phnum_test:coredump_phnum	skipped	Required configuration property 'allow_sysctl_side_effects' not defined
+sys/kern/coredump_phnum_test:coredump_phnum	expected_failure	PR285547: llvm-objdump does not support large phdr count: atf-check failed; see the output of the test for details
 sys/kern/execve/execve_test:bad_interp_len	passed
 sys/kern/execve/execve_test:empty	passed
 sys/kern/execve/execve_test:empty_args	passed
@@ -6456,7 +6583,7 @@ sys/kern/kcov:kcov_thread_pc	skipped	Failed to open /dev/kcov
 sys/kern/kern_copyin:kern_copyin	passed
 sys/kern/kern_descrip_test:dup2__ebadf_when_2nd_arg_out_of_range	passed
 sys/kern/kern_descrip_test:dup2__simple	passed
-sys/kern/kern_descrip_test:kern_maxfiles__increase	skipped	Required configuration property 'allow_sysctl_side_effects' not defined
+sys/kern/kern_descrip_test:kern_maxfiles__increase	passed
 sys/kern/kill_zombie:kill_zombie	passed
 sys/kern/ktls_test:ktls_listening_socket	passed
 sys/kern/ktls_test:ktls_receive_aes128_cbc_1_1_sha1_bad_data	passed
@@ -7174,8 +7301,8 @@ sys/kern/sendfile_test:io_success	passed
 sys/kern/sendfile_test:unix_success	passed
 sys/kern/shutdown_dgram:unblock	passed
 sys/kern/sigaltstack:ss_onstack	passed
-sys/kern/sigsys:sigsys_test_off	skipped	Required configuration property 'allow_sysctl_side_effects' not defined
-sys/kern/sigsys:sigsys_test_on	skipped	Required configuration property 'allow_sysctl_side_effects' not defined
+sys/kern/sigsys:sigsys_test_off	passed
+sys/kern/sigsys:sigsys_test_on	passed
 sys/kern/sigwait:test_sig_discard_ign_false	passed
 sys/kern/sigwait:test_sig_discard_ign_true	passed
 sys/kern/sigwait:test_sigtimedwait_einval	passed
@@ -7215,7 +7342,7 @@ sys/kern/socket_splice:splice_nonblock	passed
 sys/kern/socket_splice:splice_resplice	passed
 sys/kern/socket_splice:splice_throughput	passed
 sys/kern/socket_splice:splice_v4v6	passed
-sys/kern/sonewconn_overflow:sonewconn_overflow_01	skipped	Required program 'python' not found in PATH
+sys/kern/sonewconn_overflow:sonewconn_overflow_01	passed
 sys/kern/subr_physmem_test:hwregion	passed
 sys/kern/subr_physmem_test:hwregion_exclude	passed
 sys/kern/subr_physmem_test:hwregion_unordered	passed
@@ -7238,7 +7365,7 @@ sys/kern/timerfd:timerfd__complex_periodic_timer	passed
 sys/kern/timerfd:timerfd__expire_five	passed
 sys/kern/timerfd:timerfd__many_timers	passed
 sys/kern/timerfd:timerfd__missed_events	passed
-sys/kern/timerfd:timerfd__periodic_timer_performance	expected_failure	https://bugs.freebsd.org/bugzilla/show_bug.cgi?id=294053: /usr/src/tests/sys/kern/timerfd.c:742: 343874982
+sys/kern/timerfd:timerfd__periodic_timer_performance	expected_failure	https://bugs.freebsd.org/bugzilla/show_bug.cgi?id=294053: /usr/src/tests/sys/kern/timerfd.c:742: 345666911
 sys/kern/timerfd:timerfd__reenable_periodic_timer	passed
 sys/kern/timerfd:timerfd__reset_absolute	passed
 sys/kern/timerfd:timerfd__reset_periodic_timer	passed
@@ -7376,7 +7503,7 @@ sys/kern/waitpid_nohang:waitpid_nohang	passed
 sys/kqueue/kqueue_fork:cponfork_notes	passed
 sys/kqueue/kqueue_fork:shared_table_filt_sig	passed
 sys/kqueue/kqueue_peek_signal:main	passed
-sys/kqueue/libkqueue/kqueue_test:main	broken	Received signal 6
+sys/kqueue/libkqueue/kqueue_test:main	passed
 sys/kqueue/proc1_test:proc1	passed
 sys/kqueue/proc3_test:proc3	passed
 sys/kqueue/sig_test:sig	passed
@@ -7430,10 +7557,10 @@ sys/net/if_bridge_test:member_ifaddrs_disabled	passed
 sys/net/if_bridge_test:member_ifaddrs_enabled	passed
 sys/net/if_bridge_test:member_ifaddrs_vlan	passed
 sys/net/if_bridge_test:mtu	passed
-sys/net/if_bridge_test:span	skipped	Required program 'python3' not found in PATH
+sys/net/if_bridge_test:span	passed
 sys/net/if_bridge_test:static	passed
 sys/net/if_bridge_test:stp	passed
-sys/net/if_bridge_test:stp_validation	skipped	Required program 'python3' not found in PATH
+sys/net/if_bridge_test:stp_validation	passed
 sys/net/if_bridge_test:stp_vlan	passed
 sys/net/if_bridge_test:vlan	passed
 sys/net/if_bridge_test:vlan_defuntagged	passed
@@ -7488,7 +7615,7 @@ sys/net/if_lagg_test:set_ether	passed
 sys/net/if_lagg_test:status_stress	passed
 sys/net/if_lagg_test:up_destroy_stress	passed
 sys/net/if_lagg_test:updown	passed
-sys/net/if_lagg_test:witness	passed
+sys/net/if_lagg_test:witness	skipped	https://bugs.freebsd.org/244163 and https://bugs.freebsd.org/251726
 sys/net/if_ovpn/if_ovpn:4in4	skipped	Required program 'openvpn' not found in PATH
 sys/net/if_ovpn/if_ovpn:4in6	skipped	Required program 'openvpn' not found in PATH
 sys/net/if_ovpn/if_ovpn:4mapped	skipped	Required program 'openvpn' not found in PATH
@@ -7515,7 +7642,7 @@ sys/net/if_tun_test:235704	passed
 sys/net/if_tun_test:basic	passed
 sys/net/if_tun_test:transient	passed
 sys/net/if_vlan:basic	passed
-sys/net/if_vlan:bpf_pcp	skipped	Required program 'python3' not found in PATH
+sys/net/if_vlan:bpf_pcp	passed
 sys/net/if_vlan:bridge_vlandev	passed
 sys/net/if_vlan:conflict_id	passed
 sys/net/if_vlan:qinq_deep	passed
@@ -7532,7 +7659,12 @@ sys/net/if_wg:wg_basic_netmap	passed
 sys/net/if_wg:wg_key_peerdev_makeshared	passed
 sys/net/if_wg:wg_key_peerdev_shared	passed
 sys/net/if_wg:wg_vnet_parent_routing	passed
-sys/net/routing/test_routing_l3.py:__test_cases_list_pytest_binary_not_found__	skipped	Required program 'pytest' not found in PATH
+sys/net/routing/test_routing_l3.py:TestIfOps::test_change_prefix_route[inet6]	passed
+sys/net/routing/test_routing_l3.py:TestIfOps::test_change_prefix_route[inet]	passed
+sys/net/routing/test_routing_l3.py:TestIfOps::test_change_prefix_route_same_iface[inet6]	expected_failure	/usr/tests/sys/net/routing/test_routing_l3.py:88: AssertionError
+sys/net/routing/test_routing_l3.py:TestIfOps::test_change_prefix_route_same_iface[inet]	passed
+sys/net/routing/test_routing_l3.py:TestRouteCornerCase1::test_add_direct_route_p2p_wo_ifa[inet6]	passed
+sys/net/routing/test_routing_l3.py:TestRouteCornerCase1::test_add_direct_route_p2p_wo_ifa[inet]	passed
 sys/net/routing/test_rtsock_l3:rtm_add_v4_gu_ifa_ordered_success	passed
 sys/net/routing/test_rtsock_l3:rtm_add_v4_gw_direct_success	passed
 sys/net/routing/test_rtsock_l3:rtm_add_v4_no_rtf_host_success	passed
@@ -7563,7 +7695,42 @@ sys/net/routing/test_rtsock_lladdr:rtm_add_v6_ll_lle_success	passed
 sys/net/routing/test_rtsock_lladdr:rtm_del_v4_gu_lle_success	passed
 sys/net/routing/test_rtsock_lladdr:rtm_del_v6_gu_lle_success	passed
 sys/net/routing/test_rtsock_lladdr:rtm_del_v6_ll_lle_success	passed
-sys/net/routing/test_rtsock_multipath.py:__test_cases_list_pytest_binary_not_found__	skipped	Required program 'pytest' not found in PATH
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath4[change_new_weight1]	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath4[change_new_weight2]	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath4[change_new_weight3]	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath4[change_same_weight1]	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath4[change_same_weight2]	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath4[correctness1]	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath4[correctness2]	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath4[transition_multi]	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath4[transition_single1]	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath4[transition_single2]	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath4[weight1]	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath4[weight2]	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath4[weight3_max]	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath4_add_same_eexist	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath4_add_zero_weight	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath4_change_unknown_esrch	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath4_del_unknown_esrch	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath4_getroute	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath6[change_new_weight1]	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath6[change_new_weight2]	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath6[change_new_weight3]	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath6[change_same_weight1]	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath6[change_same_weight2]	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath6[correctness1]	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath6[correctness2]	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath6[transition_multi]	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath6[transition_single1]	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath6[transition_single2]	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath6[weight1]	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath6[weight2]	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath6[weight3_max0]	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath6[weight3_max1]	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath6_add_same_eexist	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath6_change_unknown_esrch	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath6_del_unknown_esrch	passed
+sys/net/routing/test_rtsock_multipath.py:TestRtmMultipath::test_rtm_multipath6_getroute	passed
 sys/net/routing/test_rtsock_ops:socket_rtsock_openclose	passed
 sys/netgraph/basic:message	passed
 sys/netgraph/basic:node	passed
@@ -7586,7 +7753,7 @@ sys/netgraph/ksocket:udp6_bind	passed
 sys/netgraph/ksocket:udp6_connect	passed
 sys/netgraph/ksocket:udp_bind	passed
 sys/netgraph/ksocket:udp_connect	passed
-sys/netgraph/ng_macfilter_test:main	skipped	Required program 'perl' not found in PATH
+sys/netgraph/ng_macfilter_test:main	skipped	could not find a valid interface
 sys/netgraph/socket:getsockname	passed
 sys/netgraph/vlan_rotate:basic	passed
 sys/netgraph/vlan_rotate:ethertype	passed
@@ -7602,7 +7769,8 @@ sys/netinet/arp:static	passed
 sys/netinet/broadcast:INADDR_BROADCAST	skipped	Required configuration property 'allow_network_access' not defined
 sys/netinet/broadcast:IP_ONESBCAST	skipped	No broadcast address found
 sys/netinet/broadcast:local_broadcast	skipped	No broadcast address found
-sys/netinet/carp.py:__test_cases_list_pytest_binary_not_found__	skipped	Required program 'pytest' not found in PATH
+sys/netinet/carp.py:TestCarp::test_source_mac	skipped	kernel module 'carp' not available: No such file or directory
+sys/netinet/carp.py:TestCarp::test_source_mac_vrrp	skipped	kernel module 'carp' not available: No such file or directory
 sys/netinet/carp:basic_v4	skipped	This test requires carp
 sys/netinet/carp:basic_v6	skipped	This test requires carp
 sys/netinet/carp:nd6_ns_source_mac	skipped	This test requires carp
@@ -7613,27 +7781,27 @@ sys/netinet/carp:unicast_v4	skipped	This test requires carp
 sys/netinet/carp:unicast_v6	skipped	This test requires carp
 sys/netinet/carp:vrrp_v4	skipped	This test requires carp
 sys/netinet/carp:vrrp_v6	skipped	This test requires carp
-sys/netinet/divert:ipdivert_ip_input_local_success	skipped	Required program 'python3' not found in PATH
-sys/netinet/divert:ipdivert_ip_output_remote_success	skipped	Required program 'python3' not found in PATH
+sys/netinet/divert:ipdivert_ip_input_local_success	skipped	ipdivert module is not loaded
+sys/netinet/divert:ipdivert_ip_output_remote_success	skipped	ipdivert module is not loaded
 sys/netinet/fibs:fibs_ifroutes1_success	passed
-sys/netinet/fibs_multibind_test:multibind_different_user_tcp	skipped	multiple FIBs not enabled
-sys/netinet/fibs_multibind_test:multibind_different_user_tcp6	skipped	multiple FIBs not enabled
-sys/netinet/fibs_multibind_test:multibind_different_user_udp	skipped	multiple FIBs not enabled
-sys/netinet/fibs_multibind_test:multibind_different_user_udp6	skipped	multiple FIBs not enabled
-sys/netinet/fibs_multibind_test:multibind_lbgroup_dgram_udp	skipped	multiple FIBs not enabled
-sys/netinet/fibs_multibind_test:multibind_lbgroup_dgram_udp6	skipped	multiple FIBs not enabled
-sys/netinet/fibs_multibind_test:multibind_lbgroup_stream_tcp	skipped	multiple FIBs not enabled
-sys/netinet/fibs_multibind_test:multibind_lbgroup_stream_tcp6	skipped	multiple FIBs not enabled
-sys/netinet/fibs_multibind_test:no_setfib_after_bind_tcp	skipped	multiple FIBs not enabled
-sys/netinet/fibs_multibind_test:no_setfib_after_bind_tcp6	skipped	multiple FIBs not enabled
-sys/netinet/fibs_multibind_test:no_setfib_after_bind_udp	skipped	multiple FIBs not enabled
-sys/netinet/fibs_multibind_test:no_setfib_after_bind_udp6	skipped	multiple FIBs not enabled
-sys/netinet/fibs_multibind_test:per_fib_dgram_socket_udp	skipped	multiple FIBs not enabled
-sys/netinet/fibs_multibind_test:per_fib_dgram_socket_udp6	skipped	multiple FIBs not enabled
-sys/netinet/fibs_multibind_test:per_fib_listening_socket_tcp	skipped	multiple FIBs not enabled
-sys/netinet/fibs_multibind_test:per_fib_listening_socket_tcp6	skipped	multiple FIBs not enabled
-sys/netinet/fibs_multibind_test:per_fib_raw_socket_raw	skipped	multiple FIBs not enabled
-sys/netinet/fibs_multibind_test:per_fib_raw_socket_raw6	skipped	multiple FIBs not enabled
+sys/netinet/fibs_multibind_test:multibind_different_user_tcp	skipped	FIB multibind not configured (net.inet.tcp.bind_all_fibs)
+sys/netinet/fibs_multibind_test:multibind_different_user_tcp6	skipped	FIB multibind not configured (net.inet.tcp.bind_all_fibs)
+sys/netinet/fibs_multibind_test:multibind_different_user_udp	skipped	FIB multibind not configured (net.inet.udp.bind_all_fibs)
+sys/netinet/fibs_multibind_test:multibind_different_user_udp6	skipped	FIB multibind not configured (net.inet.udp.bind_all_fibs)
+sys/netinet/fibs_multibind_test:multibind_lbgroup_dgram_udp	skipped	FIB multibind not configured (net.inet.udp.bind_all_fibs)
+sys/netinet/fibs_multibind_test:multibind_lbgroup_dgram_udp6	skipped	FIB multibind not configured (net.inet.udp.bind_all_fibs)
+sys/netinet/fibs_multibind_test:multibind_lbgroup_stream_tcp	skipped	FIB multibind not configured (net.inet.tcp.bind_all_fibs)
+sys/netinet/fibs_multibind_test:multibind_lbgroup_stream_tcp6	skipped	FIB multibind not configured (net.inet.tcp.bind_all_fibs)
+sys/netinet/fibs_multibind_test:no_setfib_after_bind_tcp	skipped	FIB multibind not configured (net.inet.tcp.bind_all_fibs)
+sys/netinet/fibs_multibind_test:no_setfib_after_bind_tcp6	skipped	FIB multibind not configured (net.inet.tcp.bind_all_fibs)
+sys/netinet/fibs_multibind_test:no_setfib_after_bind_udp	skipped	FIB multibind not configured (net.inet.udp.bind_all_fibs)
+sys/netinet/fibs_multibind_test:no_setfib_after_bind_udp6	skipped	FIB multibind not configured (net.inet.udp.bind_all_fibs)
+sys/netinet/fibs_multibind_test:per_fib_dgram_socket_udp	skipped	FIB multibind not configured (net.inet.udp.bind_all_fibs)
+sys/netinet/fibs_multibind_test:per_fib_dgram_socket_udp6	skipped	FIB multibind not configured (net.inet.udp.bind_all_fibs)
+sys/netinet/fibs_multibind_test:per_fib_listening_socket_tcp	skipped	FIB multibind not configured (net.inet.tcp.bind_all_fibs)
+sys/netinet/fibs_multibind_test:per_fib_listening_socket_tcp6	skipped	FIB multibind not configured (net.inet.tcp.bind_all_fibs)
+sys/netinet/fibs_multibind_test:per_fib_raw_socket_raw	skipped	FIB multibind not configured (net.inet.raw.bind_all_fibs)
+sys/netinet/fibs_multibind_test:per_fib_raw_socket_raw6	skipped	FIB multibind not configured (net.inet.raw.bind_all_fibs)
 sys/netinet/fibs_test:arpresolve_checks_interface_fib	skipped	Required program 'nping' not found in PATH
 sys/netinet/fibs_test:default_route_with_multiple_fibs_on_same_subnet	passed
 sys/netinet/fibs_test:default_route_with_multiple_fibs_on_same_subnet_inet6	passed
@@ -7642,18 +7810,19 @@ sys/netinet/fibs_test:loopback_and_network_routes_on_nondefault_fib_inet6	passed
 sys/netinet/fibs_test:same_ip_multiple_ifaces	passed
 sys/netinet/fibs_test:same_ip_multiple_ifaces_fib0	expected_failure	The test results in an ifconfig error and thus spuriously fails: atf-check failed; see the output of the test for details
 sys/netinet/fibs_test:same_ip_multiple_ifaces_inet6	passed
-sys/netinet/fibs_test:slaac_on_nondefault_fib6	skipped	Required configuration property 'allow_sysctl_side_effects' not defined
+sys/netinet/fibs_test:slaac_on_nondefault_fib6	passed
 sys/netinet/fibs_test:subnet_route_with_multiple_fibs_on_same_subnet	passed
 sys/netinet/fibs_test:subnet_route_with_multiple_fibs_on_same_subnet_inet6	passed
 sys/netinet/fibs_test:udp_dontroute	passed
 sys/netinet/fibs_test:udp_dontroute6	passed
-sys/netinet/forward:fwd_ip_blackhole	skipped	Required program 'python' not found in PATH
-sys/netinet/forward:fwd_ip_icmp_gw_fast_success	skipped	Required program 'python3' not found in PATH
-sys/netinet/forward:fwd_ip_icmp_gw_slow_success	skipped	Required program 'python3' not found in PATH
-sys/netinet/forward:fwd_ip_icmp_iface_fast_success	skipped	Required program 'python3' not found in PATH
-sys/netinet/forward:fwd_ip_icmp_iface_slow_success	skipped	Required program 'python3' not found in PATH
-sys/netinet/igmp.py:__test_cases_list_pytest_binary_not_found__	skipped	Required program 'pytest' not found in PATH
-sys/netinet/ip6_v4mapped_test:tcp_v4mapped_bind	skipped	Required configuration property 'allow_sysctl_side_effects' not defined
+sys/netinet/forward:fwd_ip_blackhole	passed
+sys/netinet/forward:fwd_ip_icmp_gw_fast_success	passed
+sys/netinet/forward:fwd_ip_icmp_gw_slow_success	passed
+sys/netinet/forward:fwd_ip_icmp_iface_fast_success	passed
+sys/netinet/forward:fwd_ip_icmp_iface_slow_success	passed
+sys/netinet/igmp.py:TestIGMP::test_igmp2_join_leave	passed
+sys/netinet/igmp.py:TestIGMP::test_igmp3_join_leave	passed
+sys/netinet/ip6_v4mapped_test:tcp_v4mapped_bind	passed
 sys/netinet/ip6_v4mapped_test:udp_v4mapped_sendto	passed
 sys/netinet/ip_reass_test:ip_reass__large_fragment	passed
 sys/netinet/ip_reass_test:ip_reass__multiple_last_fragments	passed
@@ -7683,13 +7852,13 @@ sys/netinet/libalias/3_natin:6_oneshot	passed
 sys/netinet/lpm:lpm_test1_success	passed
 sys/netinet/lpm:lpm_test2_success	passed
 sys/netinet/multicast:IP_MULTICAST_IF	passed
-sys/netinet/output:output_raw_flowid_mpath_success	skipped	Required program 'python' not found in PATH
-sys/netinet/output:output_raw_success	skipped	Required program 'python' not found in PATH
-sys/netinet/output:output_tcp_flowid_mpath_success	skipped	Required program 'python' not found in PATH
-sys/netinet/output:output_tcp_setup_success	skipped	Required program 'python' not found in PATH
-sys/netinet/output:output_udp_flowid_mpath_success	skipped	Required program 'python' not found in PATH
-sys/netinet/output:output_udp_setup_success	skipped	Required program 'python' not found in PATH
-sys/netinet/redirect:valid_redirect	skipped	Required program 'python3' not found in PATH
+sys/netinet/output:output_raw_flowid_mpath_success	passed
+sys/netinet/output:output_raw_success	passed
+sys/netinet/output:output_tcp_flowid_mpath_success	passed
+sys/netinet/output:output_tcp_setup_success	passed
+sys/netinet/output:output_udp_flowid_mpath_success	passed
+sys/netinet/output:output_udp_setup_success	passed
+sys/netinet/redirect:valid_redirect	passed
 sys/netinet/so_reuseport_lb_test:basic_ipv4	passed
 sys/netinet/so_reuseport_lb_test:basic_ipv6	passed
 sys/netinet/so_reuseport_lb_test:bind_without_listen	passed
@@ -7709,8 +7878,8 @@ sys/netinet/socket_afinet:socket_afinet_multibind	passed
 sys/netinet/socket_afinet:socket_afinet_poll_no_rdhup	passed
 sys/netinet/socket_afinet:socket_afinet_poll_rdhup	passed
 sys/netinet/socket_afinet:socket_afinet_stream_reconnect	passed
-sys/netinet/tcp_connect_port_test:basic_ipv4	skipped	Required configuration property 'allow_sysctl_side_effects' not defined
-sys/netinet/tcp_connect_port_test:basic_ipv6	skipped	Required configuration property 'allow_sysctl_side_effects' not defined
+sys/netinet/tcp_connect_port_test:basic_ipv4	passed
+sys/netinet/tcp_connect_port_test:basic_ipv6	passed
 sys/netinet/tcp_implied_connect:tcp_implied_connect	passed
 sys/netinet/tcp_md5_getsockopt:tcp_md5_getsockopt_v4	skipped	Test requires the tcpmd5 kernel module to be loaded
 sys/netinet/tcp_md5_getsockopt:tcp_md5_getsockopt_v6	skipped	Test requires the tcpmd5 kernel module to be loaded
@@ -7722,59 +7891,87 @@ sys/netinet/udp_io:peek	passed
 sys/netinet/udp_io:trunc	passed
 sys/netinet6/addr6:addr6_invalid_addr	passed
 sys/netinet6/addr6:anycast_raw_addr	passed
-sys/netinet6/divert:ipdivert_ip6_output_remote_success	skipped	Required program 'python3' not found in PATH
-sys/netinet6/exthdr:exthdr	skipped	Required program 'python3' not found in PATH
+sys/netinet6/divert:ipdivert_ip6_output_remote_success	skipped	ipdivert module is not loaded
+sys/netinet6/exthdr:exthdr	passed
 sys/netinet6/fibs6:fibs6_ifroutes1_success	passed
 sys/netinet6/forward6:fwd_ip6_blackhole	passed
-sys/netinet6/forward6:fwd_ip6_gu_icmp_gw_gu_fast_success	skipped	Required program 'python3' not found in PATH
-sys/netinet6/forward6:fwd_ip6_gu_icmp_gw_gu_slow_success	skipped	Required program 'python3' not found in PATH
-sys/netinet6/forward6:fwd_ip6_gu_icmp_gw_ll_fast_success	skipped	Required program 'python3' not found in PATH
-sys/netinet6/forward6:fwd_ip6_gu_icmp_gw_ll_slow_success	skipped	Required program 'python3' not found in PATH
-sys/netinet6/forward6:fwd_ip6_gu_icmp_iface_fast_success	skipped	Required program 'python3' not found in PATH
-sys/netinet6/forward6:fwd_ip6_gu_icmp_iface_slow_success	skipped	Required program 'python3' not found in PATH
-sys/netinet6/frag6/frag6_01:frag6_01	skipped	Required program 'python3' not found in PATH
-sys/netinet6/frag6/frag6_02:frag6_02	skipped	Required program 'python3' not found in PATH
-sys/netinet6/frag6/frag6_03:frag6_03	skipped	Required program 'python3' not found in PATH
-sys/netinet6/frag6/frag6_04:frag6_04	skipped	Required program 'python3' not found in PATH
-sys/netinet6/frag6/frag6_05:frag6_05_0	skipped	Required program 'python3' not found in PATH
-sys/netinet6/frag6/frag6_05:frag6_05_1	skipped	Required program 'python3' not found in PATH
-sys/netinet6/frag6/frag6_06:frag6_06_0	skipped	Required program 'python3' not found in PATH
-sys/netinet6/frag6/frag6_07:frag6_07	skipped	Required program 'python3' not found in PATH
-sys/netinet6/frag6/frag6_08:frag6_08	skipped	Required program 'python3' not found in PATH
-sys/netinet6/frag6/frag6_09:frag6_09	skipped	Required program 'python3' not found in PATH
-sys/netinet6/frag6/frag6_10:frag6_10	skipped	Required program 'python3' not found in PATH
-sys/netinet6/frag6/frag6_11:frag6_11	skipped	Required program 'python3' not found in PATH
-sys/netinet6/frag6/frag6_12:frag6_12	skipped	Required program 'python3' not found in PATH
-sys/netinet6/frag6/frag6_13:frag6_13	skipped	Required program 'python3' not found in PATH
-sys/netinet6/frag6/frag6_14:frag6_14	skipped	Required program 'python3' not found in PATH
-sys/netinet6/frag6/frag6_15:frag6_15	skipped	Required program 'python3' not found in PATH
-sys/netinet6/frag6/frag6_16:frag6_16	skipped	Required program 'python3' not found in PATH
-sys/netinet6/frag6/frag6_17:frag6_17	skipped	Required program 'python3' not found in PATH
-sys/netinet6/frag6/frag6_18:frag6_18	skipped	Required program 'python3' not found in PATH
-sys/netinet6/frag6/frag6_19:frag6_19	skipped	Required program 'python3' not found in PATH
-sys/netinet6/frag6/frag6_20:frag6_20	skipped	Required program 'python3' not found in PATH
+sys/netinet6/forward6:fwd_ip6_gu_icmp_gw_gu_fast_success	passed
+sys/netinet6/forward6:fwd_ip6_gu_icmp_gw_gu_slow_success	passed
+sys/netinet6/forward6:fwd_ip6_gu_icmp_gw_ll_fast_success	passed
+sys/netinet6/forward6:fwd_ip6_gu_icmp_gw_ll_slow_success	passed
+sys/netinet6/forward6:fwd_ip6_gu_icmp_iface_fast_success	passed
+sys/netinet6/forward6:fwd_ip6_gu_icmp_iface_slow_success	passed
+sys/netinet6/frag6/frag6_01:frag6_01	skipped	Sending IPv6 Jumbograms needs 1 kernel changes and BPF fixes
+sys/netinet6/frag6/frag6_02:frag6_02	passed
+sys/netinet6/frag6/frag6_03:frag6_03	passed
+sys/netinet6/frag6/frag6_04:frag6_04	passed
+sys/netinet6/frag6/frag6_05:frag6_05_0	passed
+sys/netinet6/frag6/frag6_05:frag6_05_1	passed
+sys/netinet6/frag6/frag6_06:frag6_06_0	passed
+sys/netinet6/frag6/frag6_07:frag6_07	skipped	https://bugs.freebsd.org/244170
+sys/netinet6/frag6/frag6_08:frag6_08	passed
+sys/netinet6/frag6/frag6_09:frag6_09	passed
+sys/netinet6/frag6/frag6_10:frag6_10	passed
+sys/netinet6/frag6/frag6_11:frag6_11	passed
+sys/netinet6/frag6/frag6_12:frag6_12	passed
+sys/netinet6/frag6/frag6_13:frag6_13	passed
+sys/netinet6/frag6/frag6_14:frag6_14	passed
+sys/netinet6/frag6/frag6_15:frag6_15	passed
+sys/netinet6/frag6/frag6_16:frag6_16	passed
+sys/netinet6/frag6/frag6_17:frag6_17	passed
+sys/netinet6/frag6/frag6_18:frag6_18	passed
+sys/netinet6/frag6/frag6_19:frag6_19	skipped	https://bugs.freebsd.org/274941
+sys/netinet6/frag6/frag6_20:frag6_20	passed
 sys/netinet6/lpm6:lpm6_test1_success	passed
 sys/netinet6/lpm6:lpm6_test2_success	passed
-sys/netinet6/mld:mldraw01	skipped	Required program 'python3' not found in PATH
+sys/netinet6/mld:mldraw01	passed
 sys/netinet6/mld:pr233683	passed
 sys/netinet6/ndp:ndp_add_gu_success	passed
 sys/netinet6/ndp:ndp_del_gu_success	passed
-sys/netinet6/ndp:ndp_prefix_lifetime	skipped	Required program 'python3' not found in PATH
-sys/netinet6/ndp:ndp_prefix_lifetime_extend	skipped	Required program 'jq' not found in PATH
-sys/netinet6/ndp:ndp_slaac_default_route	skipped	Required program 'python3' not found in PATH
-sys/netinet6/output6:output6_raw_flowid_mpath_success	skipped	Required program 'python' not found in PATH
-sys/netinet6/output6:output6_raw_success	skipped	Required program 'python' not found in PATH
-sys/netinet6/output6:output6_tcp_flowid_mpath_success	skipped	Required program 'python' not found in PATH
-sys/netinet6/output6:output6_tcp_setup_success	skipped	Required program 'python' not found in PATH
-sys/netinet6/output6:output6_udp_flowid_mpath_success	skipped	Required program 'python' not found in PATH
-sys/netinet6/output6:output6_udp_setup_success	skipped	Required program 'python' not found in PATH
+sys/netinet6/ndp:ndp_prefix_lifetime	failed	atf-check failed; see the output of the test for details
+sys/netinet6/ndp:ndp_prefix_lifetime_extend	passed
+sys/netinet6/ndp:ndp_slaac_default_route	passed
+sys/netinet6/output6:output6_raw_flowid_mpath_success	passed
+sys/netinet6/output6:output6_raw_success	passed
+sys/netinet6/output6:output6_tcp_flowid_mpath_success	passed
+sys/netinet6/output6:output6_tcp_setup_success	passed
+sys/netinet6/output6:output6_udp_flowid_mpath_success	passed
+sys/netinet6/output6:output6_udp_setup_success	passed
 sys/netinet6/proxy_ndp:pndp_add_gu_success	passed
 sys/netinet6/proxy_ndp:pndp_del_gu_success	passed
 sys/netinet6/proxy_ndp:pndp_ifdestroy_success	passed
 sys/netinet6/proxy_ndp:pndp_neighbor_advert	passed
-sys/netinet6/redirect:valid_redirect	skipped	Required program 'python3' not found in PATH
-sys/netinet6/scapyi386:scapyi386	skipped	Required program 'python3' not found in PATH
-sys/netinet6/test_ip6_output.py:__test_cases_list_pytest_binary_not_found__	skipped	Required program 'pytest' not found in PATH
+sys/netinet6/redirect:valid_redirect	passed
+sys/netinet6/scapyi386:scapyi386	passed
+sys/netinet6/test_ip6_output.py:TestIP6Output::test_output6_base	passed
+sys/netinet6/test_ip6_output.py:TestIP6Output::test_output6_nhop	passed
+sys/netinet6/test_ip6_output.py:TestIP6Output::test_output6_pktinfo[empty]	passed
+sys/netinet6/test_ip6_output.py:TestIP6Output::test_output6_pktinfo[ifsame]	passed
+sys/netinet6/test_ip6_output.py:TestIP6Output::test_output6_pktinfo[ipandif]	passed
+sys/netinet6/test_ip6_output.py:TestIP6Output::test_output6_pktinfo[iponly1]	passed
+sys/netinet6/test_ip6_output.py:TestIP6Output::test_output6_pktinfo[nolocalip]	passed
+sys/netinet6/test_ip6_output.py:TestIP6OutputLL::test_output6_linklocal	passed
+sys/netinet6/test_ip6_output.py:TestIP6OutputLoopback::test_output6_self_tcp[gu-no_sav]	passed
+sys/netinet6/test_ip6_output.py:TestIP6OutputLoopback::test_output6_self_tcp[gu-sav]	passed
+sys/netinet6/test_ip6_output.py:TestIP6OutputLoopback::test_output6_self_tcp[ll-no_sav]	passed
+sys/netinet6/test_ip6_output.py:TestIP6OutputLoopback::test_output6_self_tcp[ll-sav]	passed
+sys/netinet6/test_ip6_output.py:TestIP6OutputLoopback::test_output6_self_tcp[lo-no_sav]	passed
+sys/netinet6/test_ip6_output.py:TestIP6OutputLoopback::test_output6_self_tcp[lo-sav]	passed
+sys/netinet6/test_ip6_output.py:TestIP6OutputLoopback::test_output6_self_udp[gu-no_sav]	passed
+sys/netinet6/test_ip6_output.py:TestIP6OutputLoopback::test_output6_self_udp[gu-sav]	passed
+sys/netinet6/test_ip6_output.py:TestIP6OutputLoopback::test_output6_self_udp[ll-no_sav]	passed
+sys/netinet6/test_ip6_output.py:TestIP6OutputLoopback::test_output6_self_udp[ll-sav]	passed
+sys/netinet6/test_ip6_output.py:TestIP6OutputLoopback::test_output6_self_udp[lo-no_sav]	passed
+sys/netinet6/test_ip6_output.py:TestIP6OutputLoopback::test_output6_self_udp[lo-sav]	passed
+sys/netinet6/test_ip6_output.py:TestIP6OutputMulticast::test_output6_multicast[ff02]	passed
+sys/netinet6/test_ip6_output.py:TestIP6OutputMulticast::test_output6_multicast[ff05]	passed
+sys/netinet6/test_ip6_output.py:TestIP6OutputMulticast::test_output6_multicast[ff08]	passed
+sys/netinet6/test_ip6_output.py:TestIP6OutputMulticast::test_output6_multicast[ff0e]	passed
+sys/netinet6/test_ip6_output.py:TestIP6OutputNhopLL::test_output6_nhop_linklocal	passed
+sys/netinet6/test_ip6_output.py:TestIP6OutputScope::test_output6_linklocal_scope[gu_to_ll]	passed
+sys/netinet6/test_ip6_output.py:TestIP6OutputScope::test_output6_linklocal_scope[ll_differentif1]	passed
+sys/netinet6/test_ip6_output.py:TestIP6OutputScope::test_output6_linklocal_scope[ll_differentif2]	passed
+sys/netinet6/test_ip6_output.py:TestIP6OutputScope::test_output6_linklocal_scope[same]	passed
 sys/netipsec/tunnel/aes_cbc_128_hmac_sha1:v4	skipped	This test requires ipsec
 sys/netipsec/tunnel/aes_cbc_128_hmac_sha1:v6	skipped	This test requires ipsec
 sys/netipsec/tunnel/aes_cbc_256_hmac_sha2_256:v4	skipped	This test requires ipsec
@@ -7799,12 +7996,92 @@ sys/netlink/netlink_socket:membership	passed
 sys/netlink/netlink_socket:overflow	passed
 sys/netlink/netlink_socket:peek	passed
 sys/netlink/netlink_socket:sizes	passed
-sys/netlink/test_netlink_message_writer.py:__test_cases_list_pytest_binary_not_found__	skipped	Required program 'pytest' not found in PATH
-sys/netlink/test_nl_core.py:__test_cases_list_pytest_binary_not_found__	skipped	Required program 'pytest' not found in PATH
-sys/netlink/test_rtnl_iface.py:__test_cases_list_pytest_binary_not_found__	skipped	Required program 'pytest' not found in PATH
-sys/netlink/test_rtnl_ifaddr.py:__test_cases_list_pytest_binary_not_found__	skipped	Required program 'pytest' not found in PATH
-sys/netlink/test_rtnl_neigh.py:__test_cases_list_pytest_binary_not_found__	skipped	Required program 'pytest' not found in PATH
-sys/netlink/test_rtnl_route.py:__test_cases_list_pytest_binary_not_found__	skipped	Required program 'pytest' not found in PATH
+sys/netlink/test_netlink_message_writer.py:TestNetlinkMessageWriter::test_nlbuf_writer_allocation[NLMSG_LARGE+256-NOWAIT]	passed
+sys/netlink/test_netlink_message_writer.py:TestNetlinkMessageWriter::test_nlbuf_writer_allocation[NLMSG_LARGE+256-WAITOK]	passed
+sys/netlink/test_netlink_message_writer.py:TestNetlinkMessageWriter::test_nlbuf_writer_allocation[NLMSG_LARGE-NOWAIT]	passed
+sys/netlink/test_netlink_message_writer.py:TestNetlinkMessageWriter::test_nlbuf_writer_allocation[NLMSG_LARGE-WAITOK]	passed
+sys/netlink/test_netlink_message_writer.py:TestNetlinkMessageWriter::test_nlbuf_writer_allocation[NLMSG_SMALL-NOWAIT]	passed
+sys/netlink/test_netlink_message_writer.py:TestNetlinkMessageWriter::test_nlbuf_writer_allocation[NLMSG_SMALL-WAITOK]	passed
+sys/netlink/test_nl_core.py:TestNlCore::test_socket_type[SOCK_DGRAM]	passed
+sys/netlink/test_nl_core.py:TestNlCore::test_socket_type[SOCK_RAW]	passed
+sys/netlink/test_nl_core.py:TestNlCore::test_socket_type_unsup[SOCK_RDM]	passed
+sys/netlink/test_nl_core.py:TestNlCore::test_socket_type_unsup[SOCK_SEQPACKET]	passed
+sys/netlink/test_nl_core.py:TestNlCore::test_socket_type_unsup[SOCK_STREAM]	passed
+sys/netlink/test_rtnl_iface.py:TestRtNlIface::test_create_iface_attrs	passed
+sys/netlink/test_rtnl_iface.py:TestRtNlIface::test_create_iface_plain	passed
+sys/netlink/test_rtnl_iface.py:TestRtNlIface::test_create_iface_plain_retvals	passed
+sys/netlink/test_rtnl_iface.py:TestRtNlIface::test_create_vlan_plain	passed
+sys/netlink/test_rtnl_iface.py:TestRtNlIface::test_delete_iface	passed
+sys/netlink/test_rtnl_iface.py:TestRtNlIface::test_dump_ifaces_many	passed
+sys/netlink/test_rtnl_iface.py:TestRtNlIface::test_get_iface_byindex_error	passed
+sys/netlink/test_rtnl_iface.py:TestRtNlIface::test_get_iface_byname_error	passed
+sys/netlink/test_rtnl_iface.py:TestRtNlIface::test_modify_iface_attrs	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlAddIfaddrLo::test_add_4[host]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlAddIfaddrLo::test_add_4[prefix]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlAddIfaddrLo::test_add_6[gu_host]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlAddIfaddrLo::test_add_6[gu_prefix]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlAddIfaddrLo::test_del[ifa_address-ipv4_host]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlAddIfaddrLo::test_del[ifa_address-ipv4_prefix]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlAddIfaddrLo::test_del[ifa_address-ipv6_gu_host]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlAddIfaddrLo::test_del[ifa_address-ipv6_gu_prefix]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlAddIfaddrLo::test_del[ifa_local-ipv4_host]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlAddIfaddrLo::test_del[ifa_local-ipv4_prefix]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlAddIfaddrLo::test_del[ifa_local-ipv6_gu_host]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlAddIfaddrLo::test_del[ifa_local-ipv6_gu_prefix]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrList::test_46_filter_family_compat	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrList::test_46_filter_iface	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrList::test_46_nofilter	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrList::test_4_broadcast	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrList::test_6_broadcast	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsBroadcast::test_add_4	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsBroadcast::test_add_4_brd[auto_30]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsBroadcast::test_add_4_brd[auto_31]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsBroadcast::test_add_4_brd[auto_32]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsBroadcast::test_add_4_brd[custom_24]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsBroadcast::test_add_4_brd[custom_30]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsBroadcast::test_add_4_carp	skipped	kernel module 'carp' not available: No such file or directory
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsBroadcast::test_add_4_empty_addr	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsBroadcast::test_add_4_empty_ifindex	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsBroadcast::test_add_4_empty_message	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsBroadcast::test_add_6	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsBroadcast::test_add_6_carp	skipped	kernel module 'carp' not available: No such file or directory
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsBroadcast::test_add_6_flags[autoconf,deprecated]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsBroadcast::test_add_6_flags[autoconf]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsBroadcast::test_add_6_flags[deprecated]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsBroadcast::test_add_6_flags[prefer_source]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsBroadcast::test_add_6_lifetime	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsBroadcast::test_del[ifa_address-ipv4_host]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsBroadcast::test_del[ifa_address-ipv4_prefix]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsBroadcast::test_del[ifa_address-ipv6_gu_host]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsBroadcast::test_del[ifa_address-ipv6_gu_prefix]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsBroadcast::test_del[ifa_local-ipv4_host]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsBroadcast::test_del[ifa_local-ipv4_prefix]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsBroadcast::test_del[ifa_local-ipv6_gu_host]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsBroadcast::test_del[ifa_local-ipv6_gu_prefix]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsP2p::test_add_4[dst_inside_24]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsP2p::test_add_4[dst_inside_30]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsP2p::test_add_4[dst_inside_31]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsP2p::test_add_4[dst_outside_30]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsP2p::test_add_4[dst_outside_32]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsP2p::test_add_6[dst_inside_127]	expected_failure	/usr/tests/sys/netlink/test_rtnl_ifaddr.py:193: AssertionError
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsP2p::test_add_6[dst_inside_64]	expected_failure	/usr/tests/sys/netlink/test_rtnl_ifaddr.py:193: AssertionError
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsP2p::test_add_6[dst_outside_128]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsP2p::test_add_6[dst_outside_64]	expected_failure	/usr/tests/sys/netlink/test_rtnl_ifaddr.py:193: AssertionError
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsP2p::test_del[ifa_addr=addr,ifa_local=addr-ip6_dst_outside_128]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsP2p::test_del[ifa_addr=addr,ifa_local=addr-ipv4_dst_inside_30]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsP2p::test_del[ifa_addr=addr,ifa_local=addr-ipv4_dst_outside_32]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsP2p::test_del[ifa_addr=addr-ip6_dst_outside_128]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsP2p::test_del[ifa_addr=addr-ipv4_dst_inside_30]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsP2p::test_del[ifa_addr=addr-ipv4_dst_outside_32]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsP2p::test_del[ifa_local=addr-ip6_dst_outside_128]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsP2p::test_del[ifa_local=addr-ipv4_dst_inside_30]	passed
+sys/netlink/test_rtnl_ifaddr.py:TestRtNlIfaddrOpsP2p::test_del[ifa_local=addr-ipv4_dst_outside_32]	passed
+sys/netlink/test_rtnl_neigh.py:TestRtNlNeigh::test_4_filter_iface	passed
+sys/netlink/test_rtnl_neigh.py:TestRtNlNeigh::test_6_filter_iface	passed
+sys/netlink/test_rtnl_route.py:TestRtNlRoute::test_add_route4_ll_if_gw	passed
+sys/netlink/test_rtnl_route.py:TestRtNlRoute::test_add_route6_ll_gw	passed
+sys/netlink/test_rtnl_route.py:TestRtNlRoute::test_add_route6_ll_if_gw	passed
+sys/netlink/test_rtnl_route.py:TestRtNlRoute::test_buffer_override	passed
 sys/netlink/test_snl:snl_list_ifaces	passed
 sys/netlink/test_snl:snl_parse_errmsg_capped	skipped	does not work
 sys/netlink/test_snl:snl_parse_errmsg_capped_extack	passed
@@ -7834,9 +8111,9 @@ sys/netpfil/common/dummynet:pf_pls_gilbert	skipped	This test requires pf
 sys/netpfil/common/dummynet:pf_queue	skipped	This test requires pf
 sys/netpfil/common/dummynet:pf_queue_v6	skipped	This test requires pf
 sys/netpfil/common/dummynet:pf_wf2q_heap	skipped	This test requires pf
-sys/netpfil/common/forward:ipf_v4	skipped	Required program 'python3' not found in PATH
-sys/netpfil/common/forward:ipfw_v4	skipped	Required program 'python3' not found in PATH
-sys/netpfil/common/forward:pf_v4	skipped	Required program 'python3' not found in PATH
+sys/netpfil/common/forward:ipf_v4	skipped	This test requires ipf
+sys/netpfil/common/forward:ipfw_v4	skipped	This test requires ipfw
+sys/netpfil/common/forward:pf_v4	skipped	This test requires pf
 sys/netpfil/common/fragments:ipf_fragments	skipped	This test requires ipf
 sys/netpfil/common/fragments:ipfw_fragments	skipped	This test requires ipfw
 sys/netpfil/common/fragments:pf_fragments	skipped	This test requires pf
@@ -7856,8 +8133,8 @@ sys/netpfil/common/rdr:ipfnat_basic	skipped	This test requires ipf
 sys/netpfil/common/rdr:ipfnat_local_redirect	skipped	This test requires ipf
 sys/netpfil/common/rdr:pf_basic	skipped	This test requires pf
 sys/netpfil/common/rdr:pf_local_redirect	skipped	This test requires pf
-sys/netpfil/common/tos:ipfw_tos	skipped	Required program 'python3' not found in PATH
-sys/netpfil/common/tos:pf_tos	skipped	Required program 'python3' not found in PATH
+sys/netpfil/common/tos:ipfw_tos	skipped	This test requires ipfw
+sys/netpfil/common/tos:pf_tos	skipped	This test requires pf
 sys/netpfil/ipfw/divert:in_div	skipped	This test requires ipfw
 sys/netpfil/ipfw/divert:in_div_in	skipped	This test requires ipfw
 sys/netpfil/ipfw/divert:in_div_in_fwd_out_div_out	skipped	This test requires ipfw
@@ -7866,8 +8143,8 @@ sys/netpfil/ipfw/divert:out_div_out	skipped	This test requires ipfw
 sys/netpfil/ipfw/fwd:local	skipped	This test requires ipfw
 sys/netpfil/ipfw/lookup:dscp_v4	skipped	This test requires ipfw
 sys/netpfil/ipfw/lookup:dscp_v6	skipped	This test requires ipfw
-sys/netpfil/ipfw/lookup:ip4	skipped	Required program 'scapy' not found in PATH
-sys/netpfil/ipfw/lookup:ip6	skipped	Required program 'scapy' not found in PATH
+sys/netpfil/ipfw/lookup:ip4	skipped	This test requires ipfw
+sys/netpfil/ipfw/lookup:ip6	skipped	This test requires ipfw
 sys/netpfil/ipfw/lookup:port	skipped	This test requires ipfw
 sys/netpfil/ipfw/lookup:rulenum	skipped	This test requires ipfw
 sys/netpfil/pf/altq:cbq_vlan	skipped	This test requires pf
@@ -7909,58 +8186,66 @@ sys/netpfil/pf/divert-to:out_div	skipped	Required kmods are not loaded: ipdivert
 sys/netpfil/pf/divert-to:out_div_out	skipped	Required kmods are not loaded: ipdivert.
 sys/netpfil/pf/divert-to:pr260867	skipped	Required kmods are not loaded: ipdivert.
 sys/netpfil/pf/divert-to:pr260867_icmp	skipped	Required kmods are not loaded: ipdivert.
-sys/netpfil/pf/dup:dup_to	skipped	Required program 'python3' not found in PATH
+sys/netpfil/pf/dup:dup_to	skipped	This test requires pf
 sys/netpfil/pf/ether:anchor	skipped	This test requires pf
-sys/netpfil/pf/ether:bridge_to	skipped	Required program 'python3' not found in PATH
+sys/netpfil/pf/ether:bridge_to	skipped	This test requires pf
 sys/netpfil/pf/ether:captive	skipped	This test requires pf
 sys/netpfil/pf/ether:captive_long	skipped	This test requires pf
-sys/netpfil/pf/ether:direction	skipped	Required program 'jq' not found in PATH
+sys/netpfil/pf/ether:direction	skipped	This test requires pf
 sys/netpfil/pf/ether:dummynet	skipped	This test requires pf
 sys/netpfil/pf/ether:ip	skipped	This test requires pf
 sys/netpfil/pf/ether:mac	skipped	This test requires pf
 sys/netpfil/pf/ether:match_tag	skipped	This test requires pf
 sys/netpfil/pf/ether:proto	skipped	This test requires pf
-sys/netpfil/pf/ether:short_pkt	skipped	Required program 'python3' not found in PATH
+sys/netpfil/pf/ether:short_pkt	skipped	This test requires pf
 sys/netpfil/pf/ether:tag	skipped	This test requires pf
-sys/netpfil/pf/forward:v4	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/forward:v6	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/frag4.py:__test_cases_list_pytest_binary_not_found__	skipped	Required program 'pytest' not found in PATH
-sys/netpfil/pf/frag6.py:__test_cases_list_pytest_binary_not_found__	skipped	Required program 'pytest' not found in PATH
+sys/netpfil/pf/forward:v4	skipped	This test requires pf
+sys/netpfil/pf/forward:v6	skipped	This test requires pf
+sys/netpfil/pf/frag4.py:TestFrag4_NoReassemble::test_udp_frag	skipped	kernel module 'pf' not available: No such file or directory
+sys/netpfil/pf/frag6.py:TestFrag6::test_dup_frag_hdr	skipped	kernel module 'pf' not available: No such file or directory
+sys/netpfil/pf/frag6.py:TestFrag6::test_overlong	skipped	kernel module 'pf' not available: No such file or directory
+sys/netpfil/pf/frag6.py:TestFrag6HopHyHop::test_hop_by_hop	skipped	kernel module 'pf' not available: No such file or directory
+sys/netpfil/pf/frag6.py:TestFrag6_Overlap::test_overlap	skipped	kernel module 'pf' not available: No such file or directory
+sys/netpfil/pf/frag6.py:TestFrag6_RouteTo::test_too_big	skipped	kernel module 'pf' not available: No such file or directory
 sys/netpfil/pf/fragmentation_compat:mtu_diff	skipped	This test requires pf
-sys/netpfil/pf/fragmentation_compat:overindex	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/fragmentation_compat:overlimit	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/fragmentation_compat:overreplace	skipped	Required program 'python3' not found in PATH
+sys/netpfil/pf/fragmentation_compat:overindex	skipped	This test requires pf
+sys/netpfil/pf/fragmentation_compat:overlimit	skipped	This test requires pf
+sys/netpfil/pf/fragmentation_compat:overreplace	skipped	This test requires pf
 sys/netpfil/pf/fragmentation_compat:reassemble	skipped	This test requires pf
 sys/netpfil/pf/fragmentation_compat:too_many_fragments	skipped	This test requires pf
-sys/netpfil/pf/fragmentation_compat:v6	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/fragmentation_no_reassembly:compat_override_v4	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/fragmentation_no_reassembly:match_fragment_v4	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/fragmentation_no_reassembly:match_full_v4	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/fragmentation_pass:adjhole	skipped	Required program 'python3' not found in PATH
+sys/netpfil/pf/fragmentation_compat:v6	skipped	This test requires pf
+sys/netpfil/pf/fragmentation_no_reassembly:compat_override_v4	skipped	This test requires pf
+sys/netpfil/pf/fragmentation_no_reassembly:match_fragment_v4	skipped	This test requires pf
+sys/netpfil/pf/fragmentation_no_reassembly:match_full_v4	skipped	This test requires pf
+sys/netpfil/pf/fragmentation_pass:adjhole	skipped	This test requires pf
 sys/netpfil/pf/fragmentation_pass:dummynet	skipped	This test requires pf
-sys/netpfil/pf/fragmentation_pass:dummynet_fragmented	skipped	Required program 'python3' not found in PATH
+sys/netpfil/pf/fragmentation_pass:dummynet_fragmented	skipped	This test requires pf
 sys/netpfil/pf/fragmentation_pass:dummynet_nat	skipped	This test requires pf
 sys/netpfil/pf/fragmentation_pass:mtu_diff	skipped	This test requires pf
-sys/netpfil/pf/fragmentation_pass:no_df	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/fragmentation_pass:overhole	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/fragmentation_pass:overindex	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/fragmentation_pass:overlimit	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/fragmentation_pass:overreplace	skipped	Required program 'python3' not found in PATH
+sys/netpfil/pf/fragmentation_pass:no_df	skipped	This test requires pf
+sys/netpfil/pf/fragmentation_pass:overhole	skipped	This test requires pf
+sys/netpfil/pf/fragmentation_pass:overindex	skipped	This test requires pf
+sys/netpfil/pf/fragmentation_pass:overlimit	skipped	This test requires pf
+sys/netpfil/pf/fragmentation_pass:overreplace	skipped	This test requires pf
 sys/netpfil/pf/fragmentation_pass:reassemble	skipped	This test requires pf
-sys/netpfil/pf/fragmentation_pass:reassemble_slowpath	skipped	Required program 'python3' not found in PATH
+sys/netpfil/pf/fragmentation_pass:reassemble_slowpath	skipped	This test requires ipsec
 sys/netpfil/pf/fragmentation_pass:too_many_fragments	skipped	This test requires pf
-sys/netpfil/pf/fragmentation_pass:v6	skipped	Required program 'python3' not found in PATH
+sys/netpfil/pf/fragmentation_pass:v6	skipped	This test requires pf
 sys/netpfil/pf/fragmentation_pass:v6_route_to	skipped	This test requires pf
-sys/netpfil/pf/get_state:many	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/header.py:__test_cases_list_pytest_binary_not_found__	skipped	Required program 'pytest' not found in PATH
-sys/netpfil/pf/icmp.py:__test_cases_list_pytest_binary_not_found__	skipped	Required program 'pytest' not found in PATH
-sys/netpfil/pf/icmp6:repeat	skipped	Required program 'ndisc6' not found in PATH
+sys/netpfil/pf/get_state:many	skipped	This test requires pf
+sys/netpfil/pf/header.py:TestHeader6::test_too_many	skipped	kernel module 'pf' not available: No such file or directory
+sys/netpfil/pf/header.py:TestHeader::test_too_many	skipped	kernel module 'pf' not available: No such file or directory
+sys/netpfil/pf/icmp.py:TestICMP::test_fragmentation_needed	skipped	kernel module 'pf' not available: No such file or directory
+sys/netpfil/pf/icmp.py:TestICMP::test_inner_match	skipped	kernel module 'pf' not available: No such file or directory
+sys/netpfil/pf/icmp.py:TestICMP::test_truncated_opts	skipped	kernel module 'pf' not available: No such file or directory
+sys/netpfil/pf/icmp.py:TestICMP_NAT::test_id_conflict	skipped	kernel module 'pf' not available: No such file or directory
+sys/netpfil/pf/icmp6:repeat	skipped	This test requires pf
 sys/netpfil/pf/icmp6:ttl_exceeded	skipped	This test requires pf
-sys/netpfil/pf/icmp6:zero_id	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/icmp:cve_2019_5598	skipped	Required program 'python3' not found in PATH
+sys/netpfil/pf/icmp6:zero_id	skipped	This test requires pf
+sys/netpfil/pf/icmp:cve_2019_5598	skipped	This test requires pf
 sys/netpfil/pf/icmp:ttl_exceeded	skipped	This test requires pf
 sys/netpfil/pf/if_enc:ip4_pfil_in_after_stripping	skipped	This test requires pf
-sys/netpfil/pf/igmp.py:__test_cases_list_pytest_binary_not_found__	skipped	Required program 'pytest' not found in PATH
+sys/netpfil/pf/igmp.py:TestIGMP::test_ip_opts	skipped	kernel module 'pf' not available: No such file or directory
 sys/netpfil/pf/ioctl/validation:addaddrs	skipped	pf not loaded
 sys/netpfil/pf/ioctl/validation:addstate	skipped	Required kmods are not loaded: pfsync.
 sys/netpfil/pf/ioctl/validation:addtables	skipped	pf not loaded
@@ -7986,21 +8271,21 @@ sys/netpfil/pf/ioctl/validation:setaddrs	skipped	pf not loaded
 sys/netpfil/pf/ioctl/validation:settflags	skipped	pf not loaded
 sys/netpfil/pf/ioctl/validation:tag	skipped	pf not loaded
 sys/netpfil/pf/ioctl/validation:tstaddrs	skipped	pf not loaded
-sys/netpfil/pf/killstate:gateway	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/killstate:id	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/killstate:interface	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/killstate:key	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/killstate:label	skipped	Required program 'python3' not found in PATH
+sys/netpfil/pf/killstate:gateway	skipped	This test requires pf
+sys/netpfil/pf/killstate:id	skipped	This test requires pf
+sys/netpfil/pf/killstate:interface	skipped	This test requires pf
+sys/netpfil/pf/killstate:key	skipped	This test requires pf
+sys/netpfil/pf/killstate:label	skipped	This test requires pf
 sys/netpfil/pf/killstate:match	skipped	This test requires pf
-sys/netpfil/pf/killstate:multilabel	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/killstate:nat	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/killstate:v4	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/killstate:v6	skipped	Required program 'python3' not found in PATH
+sys/netpfil/pf/killstate:multilabel	skipped	This test requires pf
+sys/netpfil/pf/killstate:nat	skipped	This test requires pf
+sys/netpfil/pf/killstate:v4	skipped	This test requires pf
+sys/netpfil/pf/killstate:v6	skipped	This test requires pf
 sys/netpfil/pf/limits:basic	skipped	This test requires pf
 sys/netpfil/pf/limits:zero	skipped	This test requires pf
 sys/netpfil/pf/loginterface:basic	skipped	This test requires pf
 sys/netpfil/pf/macro:nr	skipped	This test requires pf
-sys/netpfil/pf/match:allow_opts	skipped	Required program 'python3' not found in PATH
+sys/netpfil/pf/match:allow_opts	skipped	This test requires pf
 sys/netpfil/pf/match:double_match	skipped	This test requires pf
 sys/netpfil/pf/match:dummynet	skipped	This test requires pf
 sys/netpfil/pf/match:quick	skipped	This test requires pf
@@ -8008,17 +8293,28 @@ sys/netpfil/pf/max_pkt_rate:anchor	skipped	This test requires pf
 sys/netpfil/pf/max_pkt_rate:basic	skipped	This test requires pf
 sys/netpfil/pf/max_pkt_size:basic	skipped	This test requires pf
 sys/netpfil/pf/max_pkt_size:match	skipped	This test requires pf
-sys/netpfil/pf/max_states:max_states	skipped	Required program 'python3' not found in PATH
+sys/netpfil/pf/max_states:max_states	skipped	This test requires pf
 sys/netpfil/pf/mbuf:ethernet_in_mbuf_len	skipped	This test requires pf
 sys/netpfil/pf/mbuf:inet6_in_mbuf_len	skipped	This test requires pf
 sys/netpfil/pf/mbuf:inet_in_mbuf_len	skipped	This test requires pf
-sys/netpfil/pf/mld.py:__test_cases_list_pytest_binary_not_found__	skipped	Required program 'pytest' not found in PATH
-sys/netpfil/pf/modulate:modulate_v4	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/modulate:modulate_v6	skipped	Required program 'python3' not found in PATH
+sys/netpfil/pf/mld.py:TestMLD::test_router_alert	skipped	kernel module 'pf' not available: No such file or directory
+sys/netpfil/pf/modulate:modulate_v4	skipped	This test requires pf
+sys/netpfil/pf/modulate:modulate_v6	skipped	This test requires pf
 sys/netpfil/pf/names:group	skipped	This test requires pf
 sys/netpfil/pf/names:names	skipped	This test requires pf
-sys/netpfil/pf/nat44.py:__test_cases_list_pytest_binary_not_found__	skipped	Required program 'pytest' not found in PATH
-sys/netpfil/pf/nat64.py:__test_cases_list_pytest_binary_not_found__	skipped	Required program 'pytest' not found in PATH
+sys/netpfil/pf/nat44.py:TestNAT44::test_nat_igmp	skipped	kernel module 'pf' not available: No such file or directory
+sys/netpfil/pf/nat64.py:TestNAT64::test_address_unreachable	skipped	kernel module 'pf' not available: No such file or directory
+sys/netpfil/pf/nat64.py:TestNAT64::test_bad_len	skipped	kernel module 'pf' not available: No such file or directory
+sys/netpfil/pf/nat64.py:TestNAT64::test_noip6	skipped	kernel module 'pf' not available: No such file or directory
+sys/netpfil/pf/nat64.py:TestNAT64::test_source_addr_icmp	skipped	kernel module 'pf' not available: No such file or directory
+sys/netpfil/pf/nat64.py:TestNAT64::test_source_addr_sctp	skipped	kernel module 'pf' not available: No such file or directory
+sys/netpfil/pf/nat64.py:TestNAT64::test_source_addr_tcp	skipped	kernel module 'pf' not available: No such file or directory
+sys/netpfil/pf/nat64.py:TestNAT64::test_source_addr_udp	skipped	kernel module 'pf' not available: No such file or directory
+sys/netpfil/pf/nat64.py:TestNAT64::test_tcp_rst	skipped	kernel module 'pf' not available: No such file or directory
+sys/netpfil/pf/nat64.py:TestNAT64::test_ttl_one	skipped	kernel module 'pf' not available: No such file or directory
+sys/netpfil/pf/nat64.py:TestNAT64::test_ttl_zero	skipped	kernel module 'pf' not available: No such file or directory
+sys/netpfil/pf/nat64.py:TestNAT64::test_udp_checksum	skipped	kernel module 'pf' not available: No such file or directory
+sys/netpfil/pf/nat64.py:TestNAT64::test_udp_port_closed	skipped	kernel module 'pf' not available: No such file or directory
 sys/netpfil/pf/nat64:dummynet	skipped	This test requires pf
 sys/netpfil/pf/nat64:fragmentation_in	skipped	This test requires pf
 sys/netpfil/pf/nat64:fragmentation_out	skipped	This test requires pf
@@ -8045,10 +8341,11 @@ sys/netpfil/pf/nat64:tos	skipped	This test requires pf
 sys/netpfil/pf/nat64:udp_in	skipped	This test requires pf
 sys/netpfil/pf/nat64:udp_out	skipped	This test requires pf
 sys/netpfil/pf/nat64:v6_gateway	skipped	This test requires pf
-sys/netpfil/pf/nat66.py:__test_cases_list_pytest_binary_not_found__	skipped	Required program 'pytest' not found in PATH
-sys/netpfil/pf/nat:binat_compat	skipped	Required program 'scapy' not found in PATH
-sys/netpfil/pf/nat:binat_match	skipped	Required program 'scapy' not found in PATH
-sys/netpfil/pf/nat:empty_pool	skipped	Required program 'python3' not found in PATH
+sys/netpfil/pf/nat66.py:TestNAT66::test_npt_icmp	skipped	kernel module 'pf' not available: No such file or directory
+sys/netpfil/pf/nat66.py:TestNAT66::test_npt_route_to_icmp	skipped	kernel module 'pf' not available: No such file or directory
+sys/netpfil/pf/nat:binat_compat	skipped	This test requires pf
+sys/netpfil/pf/nat:binat_match	skipped	This test requires pf
+sys/netpfil/pf/nat:empty_pool	skipped	This test requires pf
 sys/netpfil/pf/nat:empty_table_random	skipped	This test requires pf
 sys/netpfil/pf/nat:empty_table_source_hash	skipped	This test requires pf
 sys/netpfil/pf/nat:endpoint_independent_compat	skipped	This test requires pf
@@ -8059,9 +8356,9 @@ sys/netpfil/pf/nat:exhaust	skipped	This test requires pf
 sys/netpfil/pf/nat:map_e_compat	skipped	This test requires pf
 sys/netpfil/pf/nat:map_e_pass	skipped	This test requires pf
 sys/netpfil/pf/nat:nat6_nolinklocal	skipped	This test requires pf
-sys/netpfil/pf/nat:nat_match	skipped	Required program 'scapy' not found in PATH
-sys/netpfil/pf/nat:nat_pass_in	skipped	Required program 'scapy' not found in PATH
-sys/netpfil/pf/nat:nat_pass_out	skipped	Required program 'scapy' not found in PATH
+sys/netpfil/pf/nat:nat_match	skipped	This test requires pf
+sys/netpfil/pf/nat:nat_pass_in	skipped	This test requires pf
+sys/netpfil/pf/nat:nat_pass_out	skipped	This test requires pf
 sys/netpfil/pf/nat:nested_anchor	skipped	This test requires pf
 sys/netpfil/pf/nat:no_addrs_random	skipped	This test requires pf
 sys/netpfil/pf/nat:no_addrs_source_hash	skipped	This test requires pf
@@ -8073,10 +8370,10 @@ sys/netpfil/pf/pass_block:nested_inline	skipped	This test requires pf
 sys/netpfil/pf/pass_block:noalias	skipped	This test requires pf
 sys/netpfil/pf/pass_block:optimize_any	skipped	This test requires pf
 sys/netpfil/pf/pass_block:received_on	skipped	This test requires pf
-sys/netpfil/pf/pass_block:urpf	skipped	Required program 'python3' not found in PATH
+sys/netpfil/pf/pass_block:urpf	skipped	This test requires pf
 sys/netpfil/pf/pass_block:v4	skipped	This test requires pf
 sys/netpfil/pf/pass_block:v6	skipped	This test requires pf
-sys/netpfil/pf/pflog:malformed	skipped	Required program 'python3' not found in PATH
+sys/netpfil/pf/pflog:malformed	skipped	This test requires pf
 sys/netpfil/pf/pflog:matches	skipped	This test requires pf
 sys/netpfil/pf/pflog:matches_logif	skipped	This test requires pf
 sys/netpfil/pf/pflog:rdr_action	skipped	This test requires pf
@@ -8085,95 +8382,109 @@ sys/netpfil/pf/pflog:unspecified_v4	skipped	This test requires pf
 sys/netpfil/pf/pflog:unspecified_v6	skipped	This test requires pf
 sys/netpfil/pf/pflow:basic	skipped	This test requires pf
 sys/netpfil/pf/pflow:max_entries	skipped	This test requires pf
-sys/netpfil/pf/pflow:nat	skipped	Required program 'python3' not found in PATH
+sys/netpfil/pf/pflow:nat	skipped	This test requires pf
 sys/netpfil/pf/pflow:obs_dom	skipped	This test requires pf
-sys/netpfil/pf/pflow:rule	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/pflow:state_defaults	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/pflow:v6	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/pfsync:af_to_in_floating	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/pfsync:af_to_in_if_bound	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/pfsync:af_to_out_if_bound	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/pfsync:altq_queues	skipped	Required program 'python3' not found in PATH
+sys/netpfil/pf/pflow:rule	skipped	This test requires pf
+sys/netpfil/pf/pflow:state_defaults	skipped	This test requires pf
+sys/netpfil/pf/pflow:v6	skipped	This test requires pf
+sys/netpfil/pf/pfsync:af_to_in_floating	skipped	This test requires pf
+sys/netpfil/pf/pfsync:af_to_in_if_bound	skipped	This test requires pf
+sys/netpfil/pf/pfsync:af_to_out_if_bound	skipped	This test requires pf
+sys/netpfil/pf/pfsync:altq_queues	skipped	This test requires pf
 sys/netpfil/pf/pfsync:basic	skipped	This test requires pf
 sys/netpfil/pf/pfsync:basic_defer	skipped	This test requires pf
 sys/netpfil/pf/pfsync:basic_ipv6	skipped	This test requires pf
 sys/netpfil/pf/pfsync:basic_ipv6_unicast	skipped	This test requires pf
 sys/netpfil/pf/pfsync:bulk	skipped	This test requires pf
-sys/netpfil/pf/pfsync:defer	skipped	Required program 'python3' not found in PATH
+sys/netpfil/pf/pfsync:defer	skipped	This test requires pf
 sys/netpfil/pf/pfsync:ipsec	skipped	This test requires ipsec
 sys/netpfil/pf/pfsync:pbr	skipped	This test requires carp
 sys/netpfil/pf/pfsync:pfsync_pbr	skipped	This test requires carp
-sys/netpfil/pf/pfsync:route_to_1301	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/pfsync:route_to_1301_bad_rpool	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/pfsync:route_to_1301_bad_ruleset	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/pfsync:route_to_1400_bad_ifname	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/pfsync:route_to_1400_bad_ruleset	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/pfsync:rt_af	skipped	Required program 'python3' not found in PATH
+sys/netpfil/pf/pfsync:route_to_1301	skipped	This test requires pf
+sys/netpfil/pf/pfsync:route_to_1301_bad_rpool	skipped	This test requires pf
+sys/netpfil/pf/pfsync:route_to_1301_bad_ruleset	skipped	This test requires pf
+sys/netpfil/pf/pfsync:route_to_1400_bad_ifname	skipped	This test requires pf
+sys/netpfil/pf/pfsync:route_to_1400_bad_ruleset	skipped	This test requires pf
+sys/netpfil/pf/pfsync:rt_af	skipped	This test requires pf
 sys/netpfil/pf/pfsync:rtable	skipped	This test requires pf
-sys/netpfil/pf/pfsync:tag	skipped	Required program 'python3' not found in PATH
+sys/netpfil/pf/pfsync:tag	skipped	This test requires pf
 sys/netpfil/pf/pfsync:timeout	skipped	This test requires pf
 sys/netpfil/pf/prio:set_prio	skipped	This test requires pf
 sys/netpfil/pf/proxy:ftp	skipped	Required program 'twistd' not found in PATH
 sys/netpfil/pf/rdr:natpass	skipped	This test requires pf
 sys/netpfil/pf/rdr:pr290177	skipped	This test requires pf
-sys/netpfil/pf/rdr:srcport_compat	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/rdr:srcport_pass	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/rdr:tcp_v6_compat	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/rdr:tcp_v6_pass	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/return.py:__test_cases_list_pytest_binary_not_found__	skipped	Required program 'pytest' not found in PATH
+sys/netpfil/pf/rdr:srcport_compat	skipped	This test requires pf
+sys/netpfil/pf/rdr:srcport_pass	skipped	This test requires pf
+sys/netpfil/pf/rdr:tcp_v6_compat	skipped	This test requires pf
+sys/netpfil/pf/rdr:tcp_v6_pass	skipped	This test requires pf
+sys/netpfil/pf/return.py:TestReturn::test_sctp	skipped	kernel module 'pf' not available: No such file or directory
+sys/netpfil/pf/return.py:TestReturn::test_tcp	skipped	kernel module 'pf' not available: No such file or directory
+sys/netpfil/pf/return.py:TestReturn::test_udp	skipped	kernel module 'pf' not available: No such file or directory
 sys/netpfil/pf/ridentifier:basic	skipped	This test requires pf
 sys/netpfil/pf/route_to:dummynet	skipped	This test requires pf
 sys/netpfil/pf/route_to:dummynet_double	skipped	This test requires pf
 sys/netpfil/pf/route_to:dummynet_frag	skipped	This test requires pf
 sys/netpfil/pf/route_to:dummynet_in	skipped	This test requires pf
-sys/netpfil/pf/route_to:empty_pool	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/route_to:icmp_nat	skipped	Required program 'python3' not found in PATH
+sys/netpfil/pf/route_to:empty_pool	skipped	This test requires pf
+sys/netpfil/pf/route_to:icmp_nat	skipped	This test requires pf
 sys/netpfil/pf/route_to:ifbound	skipped	This test requires pf
-sys/netpfil/pf/route_to:ifbound_reply_to	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/route_to:ifbound_reply_to_rdr_dummynet	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/route_to:ifbound_reply_to_v6	skipped	Required program 'python3' not found in PATH
+sys/netpfil/pf/route_to:ifbound_reply_to	skipped	This test requires pf
+sys/netpfil/pf/route_to:ifbound_reply_to_rdr_dummynet	skipped	This test requires pf
+sys/netpfil/pf/route_to:ifbound_reply_to_v6	skipped	This test requires pf
 sys/netpfil/pf/route_to:ifbound_v6	skipped	This test requires pf
 sys/netpfil/pf/route_to:multiwan	skipped	This test requires pf
 sys/netpfil/pf/route_to:multiwanlocal	skipped	This test requires pf
-sys/netpfil/pf/route_to:prefer_ipv6_nexthop_ipv4_random_prefix_ipv4	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/route_to:prefer_ipv6_nexthop_ipv4_random_prefix_ipv6	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/route_to:prefer_ipv6_nexthop_ipv4_random_table_ipv4	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/route_to:prefer_ipv6_nexthop_ipv4_random_table_ipv6	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/route_to:prefer_ipv6_nexthop_ipv6_random_prefix_ipv4	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/route_to:prefer_ipv6_nexthop_ipv6_random_prefix_ipv6	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/route_to:prefer_ipv6_nexthop_mixed_af_random_table_ipv4	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/route_to:prefer_ipv6_nexthop_mixed_af_roundrobin_ipv4	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/route_to:prefer_ipv6_nexthop_mixed_af_roundrobin_ipv6	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/route_to:prefer_ipv6_nexthop_single_ipv4	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/route_to:prefer_ipv6_nexthop_single_ipv6	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/route_to:random_prefix	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/route_to:random_table	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/route_to:roundrobin	skipped	Required program 'python3' not found in PATH
+sys/netpfil/pf/route_to:prefer_ipv6_nexthop_ipv4_random_prefix_ipv4	skipped	This test requires pf
+sys/netpfil/pf/route_to:prefer_ipv6_nexthop_ipv4_random_prefix_ipv6	skipped	This test requires pf
+sys/netpfil/pf/route_to:prefer_ipv6_nexthop_ipv4_random_table_ipv4	skipped	This test requires pf
+sys/netpfil/pf/route_to:prefer_ipv6_nexthop_ipv4_random_table_ipv6	skipped	This test requires pf
+sys/netpfil/pf/route_to:prefer_ipv6_nexthop_ipv6_random_prefix_ipv4	skipped	This test requires pf
+sys/netpfil/pf/route_to:prefer_ipv6_nexthop_ipv6_random_prefix_ipv6	skipped	This test requires pf
+sys/netpfil/pf/route_to:prefer_ipv6_nexthop_mixed_af_random_table_ipv4	skipped	This test requires pf
+sys/netpfil/pf/route_to:prefer_ipv6_nexthop_mixed_af_roundrobin_ipv4	skipped	This test requires pf
+sys/netpfil/pf/route_to:prefer_ipv6_nexthop_mixed_af_roundrobin_ipv6	skipped	This test requires pf
+sys/netpfil/pf/route_to:prefer_ipv6_nexthop_single_ipv4	skipped	This test requires pf
+sys/netpfil/pf/route_to:prefer_ipv6_nexthop_single_ipv6	skipped	This test requires pf
+sys/netpfil/pf/route_to:random_prefix	skipped	This test requires pf
+sys/netpfil/pf/route_to:random_table	skipped	This test requires pf
+sys/netpfil/pf/route_to:roundrobin	skipped	This test requires pf
 sys/netpfil/pf/route_to:sticky	skipped	This test requires pf
-sys/netpfil/pf/route_to:table_loop	skipped	Required program 'python3' not found in PATH
+sys/netpfil/pf/route_to:table_loop	skipped	This test requires pf
 sys/netpfil/pf/route_to:ttl	skipped	This test requires pf
 sys/netpfil/pf/route_to:v4	skipped	This test requires pf
 sys/netpfil/pf/route_to:v6	skipped	This test requires pf
-sys/netpfil/pf/rtable:forward_v4	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/rtable:forward_v6	skipped	Required program 'python3' not found in PATH
+sys/netpfil/pf/rtable:forward_v4	skipped	This test requires pf
+sys/netpfil/pf/rtable:forward_v6	skipped	This test requires pf
 sys/netpfil/pf/rules_counter:4G	skipped	This test requires pf
 sys/netpfil/pf/rules_counter:get_clear	skipped	This test requires pf
 sys/netpfil/pf/rules_counter:keepcounters	skipped	This test requires pf
-sys/netpfil/pf/scrub_compat:max_mss_v4	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/scrub_compat:max_mss_v6	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/scrub_compat:min_ttl_v4	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/scrub_compat:min_ttl_v6	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/scrub_compat:no_scrub_v4	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/scrub_compat:no_scrub_v6	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/scrub_compat:set_tos_v4	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/scrub_compat:set_tos_v6	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/scrub_pass:max_mss_v4	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/scrub_pass:max_mss_v6	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/scrub_pass:min_ttl_v4	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/scrub_pass:min_ttl_v6	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/scrub_pass:set_tos_v4	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/scrub_pass:set_tos_v6	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/sctp.py:__test_cases_list_pytest_binary_not_found__	skipped	Required program 'pytest' not found in PATH
+sys/netpfil/pf/scrub_compat:max_mss_v4	skipped	This test requires pf
+sys/netpfil/pf/scrub_compat:max_mss_v6	skipped	This test requires pf
+sys/netpfil/pf/scrub_compat:min_ttl_v4	skipped	This test requires pf
+sys/netpfil/pf/scrub_compat:min_ttl_v6	skipped	This test requires pf
+sys/netpfil/pf/scrub_compat:no_scrub_v4	skipped	This test requires pf
+sys/netpfil/pf/scrub_compat:no_scrub_v6	skipped	This test requires pf
+sys/netpfil/pf/scrub_compat:set_tos_v4	skipped	This test requires pf
+sys/netpfil/pf/scrub_compat:set_tos_v6	skipped	This test requires pf
+sys/netpfil/pf/scrub_pass:max_mss_v4	skipped	This test requires pf
+sys/netpfil/pf/scrub_pass:max_mss_v6	skipped	This test requires pf
+sys/netpfil/pf/scrub_pass:min_ttl_v4	skipped	This test requires pf
+sys/netpfil/pf/scrub_pass:min_ttl_v6	skipped	This test requires pf
+sys/netpfil/pf/scrub_pass:set_tos_v4	skipped	This test requires pf
+sys/netpfil/pf/scrub_pass:set_tos_v6	skipped	This test requires pf
+sys/netpfil/pf/sctp.py:TestSCTP::test_allow_related	skipped	kernel module 'sctp' not available: No such file or directory
+sys/netpfil/pf/sctp.py:TestSCTP::test_disallow_related	skipped	kernel module 'sctp' not available: No such file or directory
+sys/netpfil/pf/sctp.py:TestSCTP::test_limit_addresses	skipped	kernel module 'sctp' not available: No such file or directory
+sys/netpfil/pf/sctp.py:TestSCTP::test_multihome	skipped	kernel module 'sctp' not available: No such file or directory
+sys/netpfil/pf/sctp.py:TestSCTP::test_multihome_asconf	skipped	kernel module 'sctp' not available: No such file or directory
+sys/netpfil/pf/sctp.py:TestSCTP::test_permutation_floating	skipped	kernel module 'sctp' not available: No such file or directory
+sys/netpfil/pf/sctp.py:TestSCTP::test_permutation_if_bound	skipped	kernel module 'sctp' not available: No such file or directory
+sys/netpfil/pf/sctp.py:TestSCTP_SRV::test_initiate_tag_check	skipped	kernel module 'sctp' not available: No such file or directory
+sys/netpfil/pf/sctp.py:TestSCTP_SRV::test_too_many_add_ip	skipped	kernel module 'sctp' not available: No such file or directory
+sys/netpfil/pf/sctp.py:TestSCTPv6::test_multihome	skipped	kernel module 'sctp' not available: No such file or directory
+sys/netpfil/pf/sctp.py:TestSCTPv6::test_multihome_asconf	skipped	kernel module 'sctp' not available: No such file or directory
+sys/netpfil/pf/sctp.py:TestSCTPv6::test_permutation	skipped	kernel module 'sctp' not available: No such file or directory
+sys/netpfil/pf/sctp.py:TestSCTPv6::test_permutation_floating	skipped	kernel module 'sctp' not available: No such file or directory
 sys/netpfil/pf/sctp:abort_v4	skipped	Required kmods are not loaded: sctp.
 sys/netpfil/pf/sctp:abort_v6	skipped	Required kmods are not loaded: sctp.
 sys/netpfil/pf/sctp:basic_v4	skipped	Required kmods are not loaded: sctp.
@@ -8190,20 +8501,20 @@ sys/netpfil/pf/set_skip:set_skip_dynamic	skipped	This test requires pf
 sys/netpfil/pf/set_skip:set_skip_group	skipped	This test requires pf
 sys/netpfil/pf/set_skip:set_skip_group_lo	skipped	This test requires pf
 sys/netpfil/pf/set_skip:unset	skipped	This test requires pf
-sys/netpfil/pf/set_tos:v4	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/set_tos:v6	skipped	Required program 'python3' not found in PATH
+sys/netpfil/pf/set_tos:v4	skipped	This test requires pf
+sys/netpfil/pf/set_tos:v6	skipped	This test requires pf
 sys/netpfil/pf/snmp:basic	skipped	This test requires pf
 sys/netpfil/pf/snmp:table	skipped	This test requires pf
 sys/netpfil/pf/src_track:kill	skipped	This test requires pf
-sys/netpfil/pf/src_track:max_src_conn_rule	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/src_track:max_src_states_global	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/src_track:max_src_states_rule	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/src_track:mixed_af	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/src_track:sn_types_compat	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/src_track:sn_types_pass	skipped	Required program 'python3' not found in PATH
+sys/netpfil/pf/src_track:max_src_conn_rule	skipped	This test requires pf
+sys/netpfil/pf/src_track:max_src_states_global	skipped	This test requires pf
+sys/netpfil/pf/src_track:max_src_states_rule	skipped	This test requires pf
+sys/netpfil/pf/src_track:mixed_af	skipped	This test requires pf
+sys/netpfil/pf/src_track:sn_types_compat	skipped	This test requires pf
+sys/netpfil/pf/src_track:sn_types_pass	skipped	This test requires pf
 sys/netpfil/pf/src_track:source_track	skipped	This test requires pf
 sys/netpfil/pf/status:basic	skipped	This test requires pf
-sys/netpfil/pf/syncookie:adaptive	skipped	Required program 'python3' not found in PATH
+sys/netpfil/pf/syncookie:adaptive	skipped	This test requires pf
 sys/netpfil/pf/syncookie:basic	skipped	This test requires pf
 sys/netpfil/pf/syncookie:basic_v6	skipped	This test requires pf
 sys/netpfil/pf/syncookie:forward	skipped	This test requires pf
@@ -8211,8 +8522,8 @@ sys/netpfil/pf/syncookie:forward_v6	skipped	This test requires pf
 sys/netpfil/pf/syncookie:limits	skipped	This test requires pf
 sys/netpfil/pf/syncookie:loopback	skipped	This test requires pf
 sys/netpfil/pf/syncookie:loopback_v6	skipped	This test requires pf
-sys/netpfil/pf/syncookie:nostate	skipped	Required program 'python3' not found in PATH
-sys/netpfil/pf/syncookie:nostate_v6	skipped	Required program 'python3' not found in PATH
+sys/netpfil/pf/syncookie:nostate	skipped	This test requires pf
+sys/netpfil/pf/syncookie:nostate_v6	skipped	This test requires pf
 sys/netpfil/pf/syncookie:port_reuse	skipped	This test requires pf
 sys/netpfil/pf/synproxy:local	skipped	This test requires pf
 sys/netpfil/pf/synproxy:local_v6	skipped	This test requires pf
@@ -8232,8 +8543,8 @@ sys/netpfil/pf/table:v4_counters	skipped	This test requires pf
 sys/netpfil/pf/table:v6_counters	skipped	This test requires pf
 sys/netpfil/pf/table:zero_all	skipped	This test requires pf
 sys/netpfil/pf/table:zero_one	skipped	This test requires pf
-sys/netpfil/pf/tcp.py:__test_cases_list_pytest_binary_not_found__	skipped	Required program 'pytest' not found in PATH
-sys/netpfil/pf/tcp:rst	skipped	Required program 'python3' not found in PATH
+sys/netpfil/pf/tcp.py:TestTcp::test_challenge_ack	skipped	kernel module 'pf' not available: No such file or directory
+sys/netpfil/pf/tcp:rst	skipped	This test requires pf
 sys/netpfil/pf/tos:v4	skipped	This test requires pf
 sys/netpfil/pf/tos:v6	skipped	This test requires pf
 sys/opencrypto/blake2_test:blake2b_vectors	skipped	requires kern.crypto.allow_soft=1, =0
@@ -8241,7 +8552,7 @@ sys/opencrypto/blake2_test:blake2b_vectors_x86	skipped	requires kern.crypto.allo
 sys/opencrypto/blake2_test:blake2s_vectors	skipped	requires kern.crypto.allow_soft=1, =0
 sys/opencrypto/blake2_test:blake2s_vectors_x86	skipped	requires kern.crypto.allow_soft=1, =0
 sys/opencrypto/poly1305_test:poly1305_vectors	skipped	requires kern.crypto.allow_soft=1, =0
-sys/opencrypto/runtests:main	skipped	Required program 'python3' not found in PATH
+sys/opencrypto/runtests:main	skipped	: nist-kat package not installed for test vectors
 sys/posixshm/memfd_test:basic	passed
 sys/posixshm/memfd_test:cloexec	passed
 sys/posixshm/memfd_test:disallowed_sealing	passed
@@ -8357,7 +8668,7 @@ sys/sys/qmath_test:basic_u8q	passed
 sys/sys/qmath_test:circle_u64q	passed
 sys/sys/qmath_test:qaddi_s64q	passed
 sys/sys/qmath_test:qaddq_s64q	passed
-sys/sys/qmath_test:qdivq_s64q	passed
+sys/sys/qmath_test:qdivq_s64q	skipped	https://bugs.freebsd.org/240219
 sys/sys/qmath_test:qfraci_s64q	passed
 sys/sys/qmath_test:qmuli_s64q	passed
 sys/sys/qmath_test:qmulq_s64q	passed
@@ -9604,7 +9915,7 @@ usr.sbin/makefs/makefs_zfs_tests:T_flag_mtree	passed
 usr.sbin/makefs/makefs_zfs_tests:autoexpand	passed
 usr.sbin/makefs/makefs_zfs_tests:basic	passed
 usr.sbin/makefs/makefs_zfs_tests:compression	passed
-usr.sbin/makefs/makefs_zfs_tests:dataset_removal	failed	atf-check failed; see the output of the test for details
+usr.sbin/makefs/makefs_zfs_tests:dataset_removal	passed
 usr.sbin/makefs/makefs_zfs_tests:devfs	passed
 usr.sbin/makefs/makefs_zfs_tests:empty_dir	passed
 usr.sbin/makefs/makefs_zfs_tests:empty_fs	passed
