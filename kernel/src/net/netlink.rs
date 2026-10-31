@@ -64,6 +64,10 @@ struct State {
     /// A routing socket hears its own replies (`SO_USELOOPBACK`, on by
     /// default: `rts_attach`).
     useloopback: bool,
+    /// Shut for reading (`SBS_CANTRCVMORE`) and for writing
+    /// (`SBS_CANTSENDMORE`).
+    cant_rcv: bool,
+    cant_snd: bool,
 }
 
 /// A netlink socket (`struct nlpcb`).
@@ -146,6 +150,8 @@ impl NetlinkFile {
                     groups: 0,
                     port: assign_port(pid),
                     useloopback: true,
+                    cant_rcv: false,
+                    cant_snd: false,
                 }),
                 rd: Notify::new(),
                 wr: Notify::new(),
@@ -173,8 +179,14 @@ impl NetlinkFile {
     /// `write(2)`: a buffer of requests.
     pub(crate) fn write(&self, uio: &mut dyn Uio) -> Result<usize, Errno> {
         let len = uio.resid();
-        if len > self.nl.state.lock().sndbuf as usize {
-            return Err(Errno::EMSGSIZE);
+        {
+            let st = self.nl.state.lock();
+            if st.cant_snd {
+                return Err(Errno::EPIPE);
+            }
+            if len > st.sndbuf as usize {
+                return Err(Errno::EMSGSIZE);
+            }
         }
         let mut buf = alloc::vec![0u8; len];
         let n = uio.copy_in(&mut buf)?;
@@ -312,11 +324,11 @@ impl Nl {
         r
     }
 
-    /// Queues a record for the reader, unless it is full.
+    /// Queues a record for the reader, unless it is full or shut.
     fn queue(&self, rec: Vec<u8>) {
         {
             let mut st = self.state.lock();
-            if st.queued + rec.len() > st.rcvbuf as usize {
+            if st.cant_rcv || st.queued + rec.len() > st.rcvbuf as usize {
                 return;
             }
             st.queued += rec.len();
@@ -330,6 +342,9 @@ impl Nl {
     /// record is one message.
     fn take(&self, max: usize, peek: bool) -> Result<(Vec<u8>, i32), Errno> {
         let mut st = self.state.lock();
+        if st.cant_rcv && st.queue.is_empty() {
+            return Ok((Vec::new(), 0));
+        }
         if self.route.is_some() {
             let rec = if peek {
                 st.queue.front().cloned()
@@ -396,6 +411,32 @@ impl Nl {
         };
         let n = uio.copy_out(&data)?;
         Ok((n, f))
+    }
+
+    /// `shutdown(2)` on a routing socket (`rts_shutdown`): reading ends
+    /// and what is queued goes, writing ends, or both. A netlink socket
+    /// has none.
+    pub(crate) fn shutdown(&self, how: i32) -> Result<(), Errno> {
+        if self.route.is_none() {
+            return Err(Errno::EOPNOTSUPP);
+        }
+        if !(abi::socket::SHUT_RD..=abi::socket::SHUT_RDWR).contains(&how) {
+            return Err(Errno::EINVAL);
+        }
+        {
+            let mut st = self.state.lock();
+            if how != abi::socket::SHUT_WR {
+                st.cant_rcv = true;
+                st.queue.clear();
+                st.queued = 0;
+            }
+            if how != abi::socket::SHUT_RD {
+                st.cant_snd = true;
+            }
+        }
+        self.rd.notify(0);
+        self.wr.notify(0);
+        Ok(())
     }
 
     /// Its name (`sockaddr_nl`).

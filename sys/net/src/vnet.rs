@@ -32,6 +32,9 @@ pub struct Vnet {
     pub netisr: Queues,
     /// The units its cloners have handed out (`ifc_unrhdr`).
     pub(crate) units: SpinLock<Vec<(&'static str, i32)>>,
+    /// The internet protocols' state in it (their `VNET_DEFINE`s), made
+    /// by them on first use.
+    pub inet: Once<Arc<dyn core::any::Any + Send + Sync>>,
 }
 
 static NEXT: AtomicU32 = AtomicU32::new(1);
@@ -61,6 +64,7 @@ impl Vnet {
                 lotap,
                 netisr: Queues::new(),
                 units: SpinLock::new(alloc::vec![("lo", 0)]),
+                inet: Once::new(),
             }
         });
         let mut all = ALL.lock();

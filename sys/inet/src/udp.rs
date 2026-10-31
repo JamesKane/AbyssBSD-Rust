@@ -16,9 +16,14 @@ use abi::errno::Errno;
 use abi::inet::{inp, ss};
 use abi::socket::{MSG_TRUNC, SHUT_RD, SHUT_RDWR, SHUT_WR, SO_BINTIME, SO_BROADCAST, SO_TIMESTAMP};
 
+use mbuf::{Packet, csum};
+use net::Vnet;
+
 use crate::addr::{self, Sockaddr, is_broadcast4, is_unspecified, is_v4mapped, v4_of};
+use crate::ip::{self, Ip};
 use crate::pcb::UDB;
-use crate::{Cred, Family, MSIZE, Socket, mbuf_cost};
+use crate::state::udps;
+use crate::{Cred, Family, MSIZE, Socket, cksum, icmp, mbuf_cost};
 
 /// What a receiver asked to be told about a datagram, decided when it
 /// arrives (`udp_append`'s `ip_savecontrol`, `ip6_savecontrol`).
@@ -33,6 +38,10 @@ pub mod want {
     pub const TCLASS: u32 = 1 << 7;
     pub const TIMESTAMP: u32 = 1 << 8;
     pub const BINTIME: u32 = 1 << 9;
+    /// `SO_TIMESTAMP` with `SO_TS_REALTIME` (`SCM_REALTIME`) and
+    /// `SO_TS_MONOTONIC` (`SCM_MONOTONIC`).
+    pub const REALTIME: u32 = 1 << 10;
+    pub const MONOTONIC: u32 = 1 << 11;
 }
 
 /// A datagram's facts, for the control messages its receiver wants.
@@ -60,6 +69,14 @@ pub(crate) struct Dgram {
     /// What it is charged (`sb_ccc`, `sb_mbcnt`).
     cc: u32,
     mb: u32,
+}
+
+/// What a send's control messages ask of its one datagram (`udp_send`'s
+/// `IP_SENDSRCADDR` and `IP_TOS`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SendCtl {
+    pub src: Option<[u8; 4]>,
+    pub tos: Option<u8>,
 }
 
 /// What a receive got.
@@ -155,6 +172,26 @@ impl Socket {
     /// `EINVAL`, `EADDRNOTAVAIL`); `EACCES` to a broadcast address
     /// without `SO_BROADCAST`; `ENETUNREACH` or `EHOSTUNREACH`.
     pub fn send_dgram(&self, data: &[u8], to: Option<&[u8]>, cred: &Cred) -> Result<usize, Errno> {
+        self.send_dgram_ctl(data, to, cred, SendCtl::default())
+    }
+
+    /// [`Socket::send_dgram`] with the control messages' choices.
+    ///
+    /// # Errors
+    ///
+    /// As [`Socket::send_dgram`]; `EINVAL` for a source address on a
+    /// socket with no port, or neither it nor the socket with an
+    /// address; `EADDRNOTAVAIL` for a source not this host's.
+    pub fn send_dgram_ctl(
+        &self,
+        data: &[u8],
+        to: Option<&[u8]>,
+        cred: &Cred,
+        ctl: SendCtl,
+    ) -> Result<usize, Errno> {
+        if let crate::Proto::Raw(_) = self.proto {
+            return self.raw_send(data, to, cred);
+        }
         let connected = {
             let mut i = self.inner.lock();
             if i.snd.cant {
@@ -168,8 +205,29 @@ impl Socket {
             }
             i.state & ss::ISCONNECTED != 0
         };
+        // `IP_MULTICAST_IF`'s interface, looked at before the table's lock.
+        let mif = self.mopts().map_or(0, |m| m.ifindex);
         let (src, dst, family) = {
             let mut t = UDB.lock();
+            // `IP_SENDSRCADDR`: `in_pcbbind_setup` of the address with
+            // the socket's port, for this datagram, checked before the
+            // destination is.
+            if let Some(a) = ctl.src {
+                let p = t.get(self.id).ok_or(Errno::EINVAL)?;
+                if p.lport == 0 || (is_unspecified(&p.laddr) && a == [0; 4]) {
+                    return Err(Errno::EINVAL);
+                }
+                if a != [0; 4]
+                    && p.flags & inp::BINDANY == 0
+                    && !self
+                        .vnet
+                        .net
+                        .lock()
+                        .is_local(Family::Inet, &addr::from_v4(a), 0)
+                {
+                    return Err(Errno::EADDRNOTAVAIL);
+                }
+            }
             let dst = match to {
                 Some(raw) => {
                     if connected {
@@ -219,15 +277,50 @@ impl Socket {
             if t.get(self.id).is_some_and(|p| p.lport == 0) {
                 t.bind_anon(self, cred)?;
             }
-            let src = t.source_for(self.id, &dst)?;
+            // `in_pcbladdr`: to a group, from the address of the interface
+            // `IP_MULTICAST_IF` chose, no route needed.
+            let mcast_src = (dst.family == Family::Inet
+                && crate::addr::is_multicast4(&v4_of(&dst.addr))
+                && mif != 0)
+                .then(|| {
+                    let p = t.get(self.id)?;
+                    let bound = v4_of(&p.laddr);
+                    if bound != [0; 4] {
+                        return Some(Ok(Sockaddr::v4(bound, p.lport)));
+                    }
+                    let n = self.vnet.net.lock();
+                    let a = n.by_index(mif).and_then(|i| {
+                        i.addrs
+                            .iter()
+                            .find(|a| a.family == Family::Inet)
+                            .map(|a| v4_of(&a.addr))
+                    });
+                    Some(
+                        a.map(|a| Sockaddr::v4(a, p.lport))
+                            .ok_or(Errno::EADDRNOTAVAIL),
+                    )
+                })
+                .flatten();
+            let mut src = match mcast_src {
+                Some(r) => r?,
+                None => t.source_for(self.id, &dst)?,
+            };
+            if let Some(a) = ctl
+                .src
+                .filter(|a| *a != [0; 4] && dst.family == Family::Inet)
+            {
+                src = Sockaddr::v4(a, src.port);
+            }
             let family = dst.family;
             (src, dst, family)
         };
-        let hdr = match family {
-            Family::Inet => 28,
-            Family::Inet6 => 48,
-        };
-        self.vnet.lo.looped(data.len() + hdr);
+        if family == Family::Inet {
+            return self
+                .udp_output4(data, &src, &dst, ctl.tos)
+                .map(|()| data.len());
+        }
+        // IPv6 still goes straight to its receiver, over `lo0` (P7.5).
+        self.vnet.lo.looped(data.len() + 48);
         let (ttl, tos) = {
             let i = self.inner.lock();
             match family {
@@ -238,11 +331,12 @@ impl Socket {
                 ),
             }
         };
-        let target = UDB.lock().deliver(family, &src, &dst);
+        let target = UDB.lock().deliver(self.vnet.id, family, &src, &dst);
         match target {
             Some((rcvr, flags, flags2, rfamily)) => {
                 let orig = flags2 & inp::ORIGDSTADDR != 0;
-                rcvr.udp_append(&src, &dst, data, flags, orig, rfamily, ttl, tos);
+                let lo = self.vnet.net.lock().by_name(b"lo0").map_or(1, |i| i.index);
+                rcvr.dgram_append(&src, &dst, data, flags, orig, rfamily, ttl, tos, lo);
             }
             None if connected => {
                 // `udp_notify`: the error waits for the next call.
@@ -254,11 +348,12 @@ impl Socket {
         Ok(data.len())
     }
 
-    /// `udp_append`: queues a datagram from `src` to `dst` if there is
-    /// room (else it is dropped, as `udps_fullsock`), with the facts its
-    /// PCB flags ask for.
+    /// `udp_append` and `rip_append`: queues a datagram from `src` to
+    /// `dst` that came in on interface `ifindex`, if there is room (else
+    /// it is dropped, as `udps_fullsock`), with the facts its PCB flags
+    /// ask for; whether it was.
     #[allow(clippy::too_many_arguments, reason = "udp_append's")]
-    fn udp_append(
+    pub(crate) fn dgram_append(
         self: &Arc<Self>,
         src: &Sockaddr,
         dst: &Sockaddr,
@@ -268,7 +363,8 @@ impl Socket {
         family: Family,
         ttl: u8,
         tos: u8,
-    ) {
+        ifindex: u16,
+    ) -> bool {
         let mut wanted = if orig { want::ORIGDSTADDR } else { 0 };
         let v4 = src.family == Family::Inet;
         let bit = |f: i32, w: u32| if flags & f != 0 { w } else { 0 };
@@ -283,8 +379,15 @@ impl Socket {
                 | bit(inp::IN6P_TCLASS, want::TCLASS);
         }
         let so = self.so_options();
+        // `ip_savecontrol`'s `CHECK_SO_CT`: `SO_TIMESTAMP` in the clock
+        // `SO_TS_CLOCK` names.
         if so & SO_TIMESTAMP != 0 {
-            wanted |= want::TIMESTAMP;
+            wanted |= match self.inner.lock().ts_clock {
+                SO_TS_BINTIME => want::BINTIME,
+                SO_TS_REALTIME => want::REALTIME,
+                SO_TS_MONOTONIC => want::MONOTONIC,
+                _ => want::TIMESTAMP,
+            };
         }
         if so & SO_BINTIME != 0 {
             wanted |= want::BINTIME;
@@ -300,7 +403,7 @@ impl Socket {
             dst: to,
             ttl,
             tos,
-            ifindex: 1,
+            ifindex,
             stamp: crate::now(),
         };
         let salen: u32 = match from.family {
@@ -312,11 +415,12 @@ impl Socket {
         {
             let mut i = self.inner.lock();
             if cc > i.rcv.space() {
-                self.vnet
-                    .lo
-                    .iqdrops
-                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                return;
+                if self.proto == crate::Proto::Udp {
+                    crate::state::of(&self.vnet)
+                        .udpstat
+                        .inc(crate::state::udps::FULLSOCK);
+                }
+                return false;
             }
             i.rcv.cc += cc;
             i.rcv.mbcnt += mb;
@@ -329,6 +433,7 @@ impl Socket {
             });
         }
         self.rd.notify(0);
+        true
     }
 
     /// `soreceive_dgram`, one look: the next datagram, its data to
@@ -342,7 +447,7 @@ impl Socket {
         let mut i = self.inner.lock();
         if peek {
             let Some(d) = i.dgrams.front() else {
-                return empty(&mut i, max, peek);
+                return empty(&mut i, peek);
             };
             let mut r = cut(
                 d.from,
@@ -357,7 +462,7 @@ impl Socket {
             return Ok(r);
         }
         let Some(d) = i.dgrams.pop_front() else {
-            return empty(&mut i, max, peek);
+            return empty(&mut i, peek);
         };
         i.rcv.cc -= d.cc;
         i.rcv.mbcnt -= d.mb;
@@ -367,14 +472,14 @@ impl Socket {
 }
 
 /// A receive's result with nothing queued.
-fn empty(i: &mut crate::Inner, max: usize, peek: bool) -> Result<Received, Errno> {
+fn empty(i: &mut crate::Inner, peek: bool) -> Result<Received, Errno> {
     if let Some(e) = i.error {
         if !peek {
             i.error = None;
         }
         return Err(e);
     }
-    if i.rcv.cant || max == 0 {
+    if i.rcv.cant {
         return Ok(Received::default());
     }
     Err(Errno::EAGAIN)
@@ -408,5 +513,339 @@ pub(crate) fn hops(h: i16) -> u8 {
         .unwrap_or(64)
     } else {
         u8::try_from(h).unwrap_or(64)
+    }
+}
+
+/// The UDP header's length.
+const HDR: usize = 8;
+
+/// `M_HASHTYPE_OPAQUE`.
+pub(crate) const HASHTYPE_OPAQUE: u32 = 63;
+
+/// `udp_flowid`: each new UDP socket's flow (`udp_attach`).
+static FLOWID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+pub(crate) fn next_flowid() -> u32 {
+    // Relaxed: a counter.
+    FLOWID.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+}
+
+/// `SO_TS_BINTIME`, `SO_TS_REALTIME`, `SO_TS_MONOTONIC`.
+const SO_TS_BINTIME: i32 = 1;
+const SO_TS_REALTIME: i32 = 2;
+const SO_TS_MONOTONIC: i32 = 3;
+
+impl Socket {
+    /// `udp_send`'s IPv4 half: `data` from `src` to `dst` in a datagram,
+    /// its checksum's pseudo-header part in the header for whoever
+    /// finishes it (`CSUM_UDP`), through `ip_output`.
+    fn udp_output4(
+        &self,
+        data: &[u8],
+        src: &Sockaddr,
+        dst: &Sockaddr,
+        tos: Option<u8>,
+    ) -> Result<(), Errno> {
+        let st = crate::state::of(&self.vnet);
+        let ulen = HDR + data.len();
+        let len = u16::try_from(ip::HDR_LEN + ulen).map_err(|_| Errno::EMSGSIZE)?;
+        let (s4, d4) = (v4_of(&src.addr), v4_of(&dst.addr));
+        let ipo = self.inner.lock().ip;
+        let flags = UDB.lock().get(self.id).map_or(0, |p| p.flags);
+        let mut m = Packet::for_output(ulen + ip::HDR_LEN).map_err(|_| Errno::ENOBUFS)?;
+        m.data.extend_from_slice(data).map_err(|_| Errno::ENOBUFS)?;
+        let mut uh = [0u8; HDR];
+        uh[0..2].copy_from_slice(&src.port.to_be_bytes());
+        uh[2..4].copy_from_slice(&dst.port.to_be_bytes());
+        #[allow(clippy::cast_possible_truncation, reason = "under 64 KiB, checked")]
+        uh[4..6].copy_from_slice(&(ulen as u16).to_be_bytes());
+        if crate::state::on(&st.conf.udp_cksum) {
+            let p = cksum::fold(cksum::pseudo4(s4, d4, ip::proto::UDP, ulen));
+            uh[6..8].copy_from_slice(&p.to_be_bytes());
+            m.hdr.csum_flags = csum::IP_UDP;
+            m.hdr.csum_data = 6;
+        }
+        m.prepend(HDR)
+            .map_err(|_| Errno::ENOBUFS)?
+            .copy_from_slice(&uh);
+        let mut h = Ip::new(ip::proto::UDP, s4, d4, len, ipo.ttl, tos.unwrap_or(ipo.tos));
+        if flags & inp::DONTFRAG != 0 {
+            h.off = ip::DF;
+        }
+        m.prepend(ip::HDR_LEN)
+            .map_err(|_| Errno::ENOBUFS)?
+            .copy_from_slice(&h.bytes());
+        let so = self.so_options();
+        let mut o = ip::Opts {
+            flags: 0,
+            mcast: self.mopts(),
+            fib: 0,
+            pcp: self.pcp(),
+            router_alert: false,
+            flowid: self.inner.lock().ip.flowid,
+        };
+        // `udp_send`'s `CALC_FLOWID_OUTBOUND_SENDTO`.
+        if ip::hash_outbound(&self.vnet) {
+            o.flowid = ip::flow_hash(s4, d4, src.port, dst.port, ip::proto::UDP);
+        }
+        if so & SO_BROADCAST != 0 {
+            o.flags |= ip::out::ALLOWBROADCAST;
+        }
+        if so & abi::socket::SO_DONTROUTE != 0 {
+            o.flags |= ip::out::ROUTETOIF;
+        }
+        if flags & inp::ONESBCAST != 0 {
+            o.flags |= ip::out::SENDONES;
+        }
+        st.udpstat.inc(udps::OPACKETS);
+        ip::output(&self.vnet, m, &o)
+    }
+
+    /// Its multicast choices (`inp_moptions`): `IP_MULTICAST_IF`'s
+    /// interface, the TTL, and the loopback.
+    pub(crate) fn mopts(&self) -> Option<ip::Mopts> {
+        let o = self.inner.lock().ip;
+        let ifindex = if o.mif == [0; 4] {
+            0
+        } else {
+            self.vnet
+                .net
+                .lock()
+                .ifaddr(Family::Inet, &addr::from_v4(o.mif))
+                .map_or(0, |(i, _)| i.index)
+        };
+        Some(ip::Mopts {
+            ifindex,
+            ttl: o.mttl,
+            loop_: o.mloop != 0,
+        })
+    }
+
+    /// Its `IP_VLAN_PCP` priority, if set.
+    pub(crate) fn pcp(&self) -> Option<u8> {
+        u8::try_from(self.inner.lock().ip.pcp).ok()
+    }
+
+    /// Whether it joined `group` on interface `ifindex` (`imo_multi_filter`
+    /// passing it).
+    pub(crate) fn member4(&self, group: [u8; 4], ifindex: u16) -> bool {
+        self.inner
+            .lock()
+            .groups
+            .iter()
+            .any(|&(g, i)| g == group && i == ifindex)
+    }
+
+    /// Whether it joined any group (has `inp_moptions` memberships).
+    pub(crate) fn has_groups(&self) -> bool {
+        !self.inner.lock().groups.is_empty()
+    }
+}
+
+/// `udp_input`: a datagram for this host in IPv4 packet `m` (header `ip`),
+/// checked, to the socket bound to its destination, to every socket
+/// that may hear it if it is broadcast or multicast; a port no one is
+/// bound to is answered with ICMP port unreachable.
+pub(crate) fn input4(vnet: &Arc<Vnet>, mut m: Packet, ip: &Ip) {
+    let st = crate::state::of(vnet);
+    st.udpstat.inc(udps::IPACKETS);
+    let hlen = usize::from(ip.hl);
+    if m.len() < hlen + HDR {
+        st.udpstat.inc(udps::HDROPS);
+        return;
+    }
+    let mut uh = [0u8; HDR];
+    m.data.copy_out(hlen, &mut uh);
+    let sport = u16::from_be_bytes([uh[0], uh[1]]);
+    let dport = u16::from_be_bytes([uh[2], uh[3]]);
+    let ulen = usize::from(u16::from_be_bytes([uh[4], uh[5]]));
+    let sum = u16::from_be_bytes([uh[6], uh[7]]);
+    if dport == 0 {
+        return;
+    }
+    let ip_len = usize::from(ip.len) - hlen;
+    if ip_len != ulen {
+        if ulen > ip_len || ulen < HDR {
+            st.udpstat.inc(udps::BADLEN);
+            return;
+        }
+        if m.data.split_off(hlen + ulen).is_err() {
+            return;
+        }
+    }
+    if sum != 0 {
+        let f = m.hdr.csum_flags;
+        let bad = if f & csum::DATA_VALID != 0 {
+            let s = if f & csum::PSEUDO_HDR != 0 {
+                #[allow(clippy::cast_possible_truncation, reason = "a 16-bit sum")]
+                {
+                    m.hdr.csum_data as u16
+                }
+            } else {
+                cksum::fold(
+                    cksum::pseudo4(ip.src, ip.dst, ip::proto::UDP, ulen)
+                        + u64::from(m.hdr.csum_data),
+                )
+            };
+            s ^ 0xffff != 0
+        } else if f & csum::IP_UDP != 0 {
+            false
+        } else {
+            let s = cksum::pseudo4(ip.src, ip.dst, ip::proto::UDP, ulen)
+                + cksum::sum_chain(&m.data, hlen, ulen);
+            !cksum::fold(s) != 0
+        };
+        if bad {
+            st.udpstat.inc(udps::BADSUM);
+            return;
+        }
+    } else {
+        st.udpstat.inc(udps::NOSUM);
+    }
+    let from = Sockaddr::v4(ip.src, sport);
+    let to = Sockaddr::v4(ip.dst, dport);
+    let rcvif = m.hdr.rcvif;
+    let bcast = ip.dst == [0xff; 4] || ip.dst == [0; 4] || {
+        let n = vnet.net.lock();
+        n.by_index(rcvif).is_some_and(|i| {
+            i.addrs.iter().any(|a| {
+                a.family == Family::Inet
+                    && a.plen < 32
+                    && a.broadcast.is_some_and(|b| v4_of(&b) == ip.dst)
+            })
+        })
+    };
+    let mut data = alloc::vec![0u8; ulen - HDR];
+    m.data.copy_out(hlen + HDR, &mut data);
+    if crate::addr::is_multicast4(&ip.dst) || bcast {
+        multi_input(vnet, &st, &from, &to, &data, ip, rcvif);
+        return;
+    }
+    let target = UDB.lock().deliver(vnet.id, Family::Inet, &from, &to);
+    let Some((so, flags, flags2, family)) = target else {
+        if crate::state::on(&st.conf.udp_log_in_vain) {
+            crate::log(&alloc::format!(
+                "Connection attempt to UDP {}:{} from {}:{}\n",
+                net::addr::fmt4(ip.dst),
+                dport,
+                net::addr::fmt4(ip.src),
+                sport
+            ));
+        }
+        st.udpstat.inc(udps::NOPORT);
+        if m.hdr.flags & mbuf::flags::MCAST != 0 {
+            st.udpstat.inc(udps::NOPORTMCAST);
+            return;
+        }
+        if m.hdr.flags & mbuf::flags::BCAST != 0 {
+            st.udpstat.inc(udps::NOPORTBCAST);
+            return;
+        }
+        if crate::state::on(&st.conf.udp_blackhole)
+            && (crate::state::on(&st.conf.udp_blackhole_local)
+                || !ip::is_local4(&vnet.net.lock(), &ip.src))
+        {
+            return;
+        }
+        if !icmp::bandlim(&st, crate::state::bandlim::UNREACH) {
+            return;
+        }
+        icmp::error(
+            vnet,
+            m,
+            icmp::ty::UNREACH,
+            icmp::code::UNREACH_PORT,
+            [0; 4],
+            0,
+        );
+        return;
+    };
+    let minttl = so.inner.lock().ip.minttl;
+    if minttl != 0 && minttl > ip.ttl {
+        return;
+    }
+    let orig = flags2 & inp::ORIGDSTADDR != 0;
+    so.dgram_append(
+        &from, &to, &data, flags, orig, family, ip.ttl, ip.tos, rcvif,
+    );
+}
+
+/// `udp_multi_input`: a broadcast or multicast datagram to each socket
+/// bound to its port that may hear it (a multicast one only by members
+/// of its group), until one without `SO_REUSEADDR` or `SO_REUSEPORT`.
+fn multi_input(
+    vnet: &Arc<Vnet>,
+    st: &crate::state::State,
+    from: &Sockaddr,
+    to: &Sockaddr,
+    data: &[u8],
+    ip: &Ip,
+    rcvif: u16,
+) {
+    let candidates: Vec<(Arc<Socket>, i32, i32, Family)> = {
+        let t = UDB.lock();
+        t.pcbs
+            .values()
+            .filter(|p| {
+                let (l, f) = (v4_of(&p.laddr), v4_of(&p.faddr));
+                p.vnet.id == vnet.id
+                    && p.hashed
+                    && p.lport == to.port
+                    && p.vflag & abi::inet::INP_IPV4 != 0
+                    && (l == [0; 4] || l == ip.dst)
+                    && (f == [0; 4] || f == ip.src)
+                    && (p.fport == 0 || p.fport == from.port)
+            })
+            .filter_map(|p| p.socket().map(|s| (s, p.flags, p.flags2, p.family)))
+            .collect()
+    };
+    let mut appends = 0;
+    for (so, flags, flags2, family) in candidates {
+        if crate::addr::is_multicast4(&ip.dst) {
+            if !so.has_groups() {
+                continue;
+            }
+            if !so.member4(ip.dst, rcvif) {
+                st.ipstat.inc(crate::state::ips::NOTMEMBER);
+                continue;
+            }
+        }
+        let orig = flags2 & inp::ORIGDSTADDR != 0;
+        if so.dgram_append(from, to, data, flags, orig, family, ip.ttl, ip.tos, rcvif) {
+            appends += 1;
+        }
+        if so.so_options()
+            & (abi::socket::SO_REUSEPORT | abi::socket::SO_REUSEPORT_LB | abi::socket::SO_REUSEADDR)
+            == 0
+        {
+            break;
+        }
+    }
+    if appends == 0 {
+        st.udpstat.inc(udps::NOPORT);
+        if crate::addr::is_multicast4(&ip.dst) {
+            st.udpstat.inc(udps::NOPORTMCAST);
+        } else {
+            st.udpstat.inc(udps::NOPORTBCAST);
+        }
+    }
+}
+
+/// `udp_common_ctlinput`: an ICMP error of type `t`, code `c` about a
+/// datagram this host sent (inner header `oip`, its first 8 bytes after
+/// in `ports`) is the error of the connected socket that sent it.
+pub(crate) fn ctlinput4(vnet: &Arc<Vnet>, t: u8, c: u8, oip: &Ip, ports: &[u8; 8]) {
+    let Some(e) = icmp::errmap(t, c) else {
+        return;
+    };
+    let sport = u16::from_be_bytes([ports[0], ports[1]]);
+    let dport = u16::from_be_bytes([ports[2], ports[3]]);
+    let so = UDB
+        .lock()
+        .lookup4(vnet.id, oip.dst, dport, oip.src, sport, false)
+        .and_then(crate::pcb::Pcb::socket);
+    if let Some(so) = so {
+        so.inner.lock().error = Some(e);
+        so.wake();
     }
 }

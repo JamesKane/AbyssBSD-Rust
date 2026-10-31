@@ -306,8 +306,31 @@ impl Socket {
                 self.inner.lock().ip.mif = a;
                 Ok(())
             }
-            // Loopback joins no groups (P7 brings multicast).
-            ip::IP_ADD_MEMBERSHIP | ip::IP_DROP_MEMBERSHIP => Err(Errno::EADDRNOTAVAIL),
+            ip::IP_ADD_MEMBERSHIP | ip::IP_DROP_MEMBERSHIP => {
+                self.membership(name == ip::IP_ADD_MEMBERSHIP, val)
+            }
+            ip::IP_FLOWID | ip::IP_FLOWTYPE => {
+                let v = int(val)?.cast_unsigned();
+                let mut i = self.inner.lock();
+                if name == ip::IP_FLOWID {
+                    i.ip.flowid = v;
+                } else {
+                    i.ip.flowtype = v;
+                }
+                Ok(())
+            }
+            ip::IP_VLAN_PCP => {
+                let v = int(val)?;
+                if !(-1..=7).contains(&v) {
+                    return Err(Errno::EINVAL);
+                }
+                self.inner.lock().ip.pcp = i8::try_from(v).unwrap_or(-1);
+                Ok(())
+            }
+            ip::IP_HDRINCL if matches!(self.proto, Proto::Raw(_)) => {
+                pcb::set_flag(self.proto, self.id, inp::HDRINCL, int(val)? != 0);
+                Ok(())
+            }
             _ => Err(Errno::ENOPROTOOPT),
         }
     }
@@ -592,9 +615,106 @@ impl Socket {
             ip::IP_MULTICAST_TTL => i32v(i32::from(i.ip.mttl)),
             ip::IP_MULTICAST_LOOP => i32v(i32::from(i.ip.mloop)),
             ip::IP_MULTICAST_IF => i.ip.mif.to_vec(),
-            ip::IP_FLOWID | ip::IP_FLOWTYPE => i32v(0),
+            ip::IP_FLOWID => i32v(i.ip.flowid.cast_signed()),
+            ip::IP_FLOWTYPE => i32v(i.ip.flowtype.cast_signed()),
+            ip::IP_VLAN_PCP => i32v(i32::from(i.ip.pcp)),
+            ip::IP_HDRINCL if matches!(self.proto, Proto::Raw(_)) => {
+                i32v(i32::from(flags & inp::HDRINCL != 0))
+            }
             _ => return Err(Errno::ENOPROTOOPT),
         })
+    }
+
+    /// `inp_join_group` and `inp_leave_group` with an `ip_mreq` or
+    /// `ip_mreqn`: the group on the interface named by index, by address,
+    /// or (neither) by the route to the group; the interface's
+    /// link-layer filter takes the group's address.
+    fn membership(&self, join: bool, val: &[u8]) -> Result<(), Errno> {
+        if val.len() < 8 {
+            return Err(Errno::EINVAL);
+        }
+        let group: [u8; 4] = val[0..4].try_into().map_err(|_| Errno::EINVAL)?;
+        let ifaddr: [u8; 4] = val[4..8].try_into().map_err(|_| Errno::EINVAL)?;
+        let ifindex = if val.len() >= 12 {
+            i32::from_ne_bytes(val[8..12].try_into().map_err(|_| Errno::EINVAL)?)
+        } else {
+            0
+        };
+        if !crate::addr::is_multicast4(&group) {
+            return Err(Errno::EINVAL);
+        }
+        let (index, ether) = {
+            let n = self.vnet.net.lock();
+            let i = if ifindex > 0 {
+                u16::try_from(ifindex).ok().and_then(|x| n.by_index(x))
+            } else if ifaddr != [0; 4] {
+                n.ifaddr(Family::Inet, &crate::addr::from_v4(ifaddr))
+                    .map(|(i, _)| i)
+            } else {
+                // `inp_lookup_mcast_ifp`: the route to the group, else
+                // the first interface with an IPv4 address that is a
+                // multicast one and not a loopback.
+                n.route_in(0, Family::Inet, &crate::addr::from_v4(group))
+                    .and_then(|r| n.by_index(r.ifindex))
+                    .or_else(|| {
+                        n.ifaces.iter().find(|i| {
+                            i.flags & abi::net::iff::MULTICAST != 0
+                                && i.flags & abi::net::iff::LOOPBACK == 0
+                                && i.addrs.iter().any(|a| a.family == Family::Inet)
+                        })
+                    })
+            };
+            let i = i
+                .filter(|i| i.flags & abi::net::iff::MULTICAST != 0)
+                .ok_or(Errno::EADDRNOTAVAIL)?;
+            (i.index, i.lladdr.is_some())
+        };
+        {
+            let mut i = self.inner.lock();
+            let at = i.groups.iter().position(|&(g, x)| g == group && x == index);
+            match (join, at) {
+                (true, Some(_)) => return Err(Errno::EADDRINUSE),
+                (true, None) => i.groups.push((group, index)),
+                (false, Some(at)) => {
+                    i.groups.remove(at);
+                }
+                (false, None) => return Err(Errno::EADDRNOTAVAIL),
+            }
+        }
+        if ether {
+            let ll = crate::igmp::ether_group(group);
+            let mut n = self.vnet.net.lock();
+            let _ = if join {
+                n.add_multi(index, ll, false)
+            } else {
+                n.del_multi(index, ll)
+            };
+        }
+        if join {
+            crate::igmp::join(&self.vnet, index, group);
+        } else {
+            crate::igmp::leave(&self.vnet, index, group);
+        }
+        Ok(())
+    }
+
+    /// Leaves every group (`inp_freemoptions`), as its last close does.
+    pub(crate) fn leave_groups(&self) {
+        let groups = core::mem::take(&mut self.inner.lock().groups);
+        if groups.is_empty() {
+            return;
+        }
+        {
+            let mut n = self.vnet.net.lock();
+            for &(g, index) in &groups {
+                if n.by_index(index).is_some_and(|i| i.lladdr.is_some()) {
+                    let _ = n.del_multi(index, crate::igmp::ether_group(g));
+                }
+            }
+        }
+        for (g, index) in groups {
+            crate::igmp::leave(&self.vnet, index, g);
+        }
     }
 
     fn ip6_getopt(&self, name: i32) -> Result<Vec<u8>, Errno> {

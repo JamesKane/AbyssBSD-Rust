@@ -293,3 +293,28 @@ fn default_limits() {
     assert_eq!(l.nmbjumbo9, (4u64 << 30) / 9216 / 6);
     assert_eq!(l.nmbufs, (4 << 30) / 256 / 5);
 }
+
+#[test]
+fn copy_in_writes_in_place_or_replaces_shared_bytes() {
+    let data = bytes(6000);
+    let mut c = Chain::from_slice(&data).unwrap();
+    // Within the first, writable cluster: in place.
+    c.copy_in(10, &[1, 2, 3]).unwrap();
+    assert_eq!(c.mbufs(), 2);
+    let mut want = data.clone();
+    want[10..13].copy_from_slice(&[1, 2, 3]);
+    assert_eq!(flat(&c), want);
+    // Across the two mbufs, and while shared: the copy keeps the old bytes.
+    let shared = c.copy(0, c.len()).unwrap();
+    c.copy_in(4094, &[7, 7, 7, 7]).unwrap();
+    want[4094..4098].copy_from_slice(&[7, 7, 7, 7]);
+    assert_eq!(flat(&c), want);
+    assert_eq!(flat(&shared)[4094..4098], data[4094..4098]);
+    assert_eq!(c.len(), data.len());
+    c.copy_in(0, &[5]).unwrap();
+    assert_eq!(flat(&c)[0], 5);
+    assert_eq!(flat(&shared)[0], data[0]);
+    // Past the end: refused, unchanged.
+    assert_eq!(c.copy_in(5999, &[1, 2]), Err(NoBufs));
+    assert_eq!(c.len(), data.len());
+}

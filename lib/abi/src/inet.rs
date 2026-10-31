@@ -8,6 +8,7 @@ use crate::layout::{Arches, ConstValue};
 
 pub const AF_UNSPEC: u8 = 0;
 pub const AF_INET: u8 = 2;
+pub const AF_IMPLINK: u8 = 3;
 pub const AF_ROUTE: u8 = 17;
 pub const AF_LINK: u8 = 18;
 pub const AF_INET6: u8 = 28;
@@ -83,6 +84,7 @@ pub mod ip {
     pub const IP_DONTFRAG: i32 = 67;
     pub const IP_RECVTOS: i32 = 68;
     pub const IP_FLOWID: i32 = 90;
+    pub const IP_VLAN_PCP: i32 = 75;
     pub const IP_FLOWTYPE: i32 = 91;
     pub const IP_RECVFLOWID: i32 = 93;
     pub const IP_PORTRANGE_DEFAULT: i32 = 0;
@@ -174,6 +176,7 @@ pub mod inp {
     pub const RECVOPTS: i32 = 0x0000_0001;
     pub const RECVRETOPTS: i32 = 0x0000_0002;
     pub const RECVDSTADDR: i32 = 0x0000_0004;
+    pub const HDRINCL: i32 = 0x0000_0008;
     pub const HIGHPORT: i32 = 0x0000_0010;
     pub const LOWPORT: i32 = 0x0000_0020;
     pub const ANONPORT: i32 = 0x0000_0040;
@@ -473,6 +476,7 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("IP_DONTFRAG", "netinet/in.h", ip::IP_DONTFRAG as i64),
     c("IP_RECVTOS", "netinet/in.h", ip::IP_RECVTOS as i64),
     c("IP_FLOWID", "netinet/in.h", ip::IP_FLOWID as i64),
+    c("IP_VLAN_PCP", "netinet/in.h", ip::IP_VLAN_PCP as i64),
     c("IP_FLOWTYPE", "netinet/in.h", ip::IP_FLOWTYPE as i64),
     c("IP_RECVFLOWID", "netinet/in.h", ip::IP_RECVFLOWID as i64),
     c(

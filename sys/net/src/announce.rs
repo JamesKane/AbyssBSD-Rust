@@ -149,30 +149,42 @@ impl DerefMut for NetGuard<'_> {
 
 impl Drop for NetGuard<'_> {
     fn drop(&mut self) {
-        let (events, tx, vnet) = match self.g.as_mut() {
+        let (events, tx, isr, vnet) = match self.g.as_mut() {
             Some(g) => {
                 let tx: Vec<_> = core::mem::take(&mut g.txq)
                     .into_iter()
-                    .filter_map(|(index, m)| {
+                    .filter_map(|(index, family, mut m)| {
                         let i = g.by_index(index)?;
-                        Some((index, i.flags, i.link.0.clone()?, m))
+                        // `ether_output_frame`'s `ether_do_pcp`.
+                        if i.ty == abi::net::IFT_ETHER
+                            && (i.pcp != crate::ifnet::PCP_NONE
+                                || m.hdr.flags & mbuf::flags::VLANTAG != 0)
+                        {
+                            let hw = i.capenable & abi::net::ifcap::VLAN_HWTAGGING != 0;
+                            crate::ether::set_pcp(&mut m, i.pcp, hw).ok()?;
+                        }
+                        Some((index, family, i.flags, i.link.0.clone()?, m))
                     })
                     .collect();
-                let vnet = if tx.is_empty() {
+                let isr = core::mem::take(&mut g.isrq);
+                let vnet = if tx.is_empty() && isr.is_empty() {
                     None
                 } else {
                     g.owner.upgrade()
                 };
-                (core::mem::take(&mut g.outbox), tx, vnet)
+                (core::mem::take(&mut g.outbox), tx, isr, vnet)
             }
-            None => (Vec::new(), Vec::new(), None),
+            None => (Vec::new(), Vec::new(), Vec::new(), None),
         };
         drop(self.g.take());
         self.owner.deliver(&events);
         // Frames queued under the lock go out now, in order.
         if let Some(v) = vnet {
-            for (index, flags, link, m) in tx {
-                let _ = crate::ether::output_frame(&v, index, &link, flags, m);
+            for (proto, m) in isr {
+                let _ = v.netisr.queue(proto, m);
+            }
+            for (index, family, flags, link, m) in tx {
+                let _ = crate::ether::output_frame(&v, index, &link, flags, family, m);
             }
         }
     }

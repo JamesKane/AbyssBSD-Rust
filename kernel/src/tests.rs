@@ -4026,7 +4026,16 @@ ktest! {
             let mut dst = to.clone();
             dst[2..4].copy_from_slice(&port.to_be_bytes());
             assert_eq!(tx.send_dgram(b"dgram", Some(&dst), &root), Ok(5));
-            let r = rx.recv_dgram(64, false).unwrap();
+            // IPv4 loops through `lo0`'s `netisr` queue, as FreeBSD's does.
+            let mut r = rx.recv_dgram(64, false);
+            for _ in 0..100 {
+                if !matches!(r, Err(abi::errno::Errno::EAGAIN)) {
+                    break;
+                }
+                crate::time::sleep_ns(&s, 1_000_000);
+                r = rx.recv_dgram(64, false);
+            }
+            let r = r.unwrap();
             assert_eq!(r.data, b"dgram");
             assert_eq!(r.from.unwrap().port, tx.sockname().port);
             rx.close();

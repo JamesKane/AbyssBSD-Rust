@@ -77,7 +77,15 @@ impl InetFile {
         uio: &mut dyn Uio,
         nonblock: bool,
     ) -> Result<usize, Errno> {
-        send(s, &self.so, uio, None, 0, nonblock)
+        send(
+            s,
+            &self.so,
+            uio,
+            None,
+            inet::SendCtl::default(),
+            0,
+            nonblock,
+        )
     }
 }
 
@@ -97,6 +105,7 @@ pub(crate) fn cred() -> inet::Cred {
         reservedport: super::priv_check(Priv::NetinetReservedport).is_ok(),
         reuseport: super::priv_check(Priv::NetinetReuseport).is_ok(),
         bindany: super::priv_check(Priv::NetinetBindany).is_ok(),
+        raw: super::priv_check(Priv::NetinetRaw).is_ok(),
     }
 }
 
@@ -112,12 +121,13 @@ pub(crate) fn send(
     so: &Arc<Socket>,
     uio: &mut dyn Uio,
     to: Option<&[u8]>,
+    ctl: inet::SendCtl,
     flags: i32,
     nonblock: bool,
 ) -> Result<usize, Errno> {
     let nonblock = nonblock || flags & (MSG_DONTWAIT | MSG_NBIO) != 0;
     let r = match so.proto {
-        Proto::Udp => {
+        Proto::Udp | Proto::Raw(_) => {
             if flags & MSG_OOB != 0 {
                 Err(Errno::EOPNOTSUPP)
             } else {
@@ -128,7 +138,7 @@ pub(crate) fn send(
                     let mut data = alloc::vec![0u8; len];
                     let n = uio.copy_in(&mut data)?;
                     data.truncate(n);
-                    so.send_dgram(&data, to, &cred())
+                    so.send_dgram_ctl(&data, to, &cred(), ctl)
                 }
             }
         }
@@ -221,7 +231,7 @@ pub(crate) fn receive(
         full: 0,
         meta: None,
     };
-    if so.proto == Proto::Udp {
+    if so.proto.is_dgram() {
         if flags & MSG_OOB != 0 {
             return Err(Errno::EOPNOTSUPP);
         }
@@ -285,7 +295,7 @@ pub(crate) fn connect(
     nonblock: bool,
 ) -> Result<(), Errno> {
     so.connect(raw, &cred(), nonblock)?;
-    if so.proto == Proto::Udp {
+    if so.proto.is_dgram() {
         return Ok(());
     }
     let _w = sched::wait_message("connec");

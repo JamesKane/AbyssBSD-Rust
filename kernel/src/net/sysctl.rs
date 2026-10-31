@@ -22,6 +22,7 @@ use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 use abi::errno::Errno;
 use abi::net::net_rt;
+use abi::sysctl::ctlflag;
 use inet::tune;
 use sched::Sleepable;
 use sysctl::{Number, ReadError, Tree, Value};
@@ -110,10 +111,111 @@ fn knobs(t: &mut Tree, parent: sysctl::NodeId, list: &[(&str, &str, i32)]) {
 }
 
 /// `net.link.ether.inet`'s ARP settings, each the current VNET's.
+/// A per-VNET internet setting (`CTLFLAG_VNET`), the current thread's
+/// VNET's.
+fn vknob(
+    t: &mut Tree,
+    parent: sysctl::NodeId,
+    name: &str,
+    descr: &str,
+    field: fn(&inet::state::State) -> &AtomicI32,
+) {
+    t.add_writable(
+        parent,
+        Number::Auto,
+        name,
+        descr,
+        ctlflag::VNET,
+        // Relaxed: a setting.
+        Value::Int(Box::new(move || {
+            field(&inet::state::of(&super::curvnet())).load(Ordering::Relaxed)
+        })),
+        sysctl::int_writer(move |v| {
+            field(&inet::state::of(&super::curvnet())).store(v, Ordering::Relaxed);
+            Ok(())
+        }),
+    )
+    .expect("a net.inet sysctl");
+}
+
+/// [`vknob`] for an unsigned one.
+fn vknob_u32(
+    t: &mut Tree,
+    parent: sysctl::NodeId,
+    name: &str,
+    descr: &str,
+    field: fn(&inet::state::State) -> &AtomicU32,
+) {
+    t.add_writable(
+        parent,
+        Number::Auto,
+        name,
+        descr,
+        ctlflag::VNET,
+        // Relaxed: a setting.
+        Value::Uint(Box::new(move || {
+            field(&inet::state::of(&super::curvnet())).load(Ordering::Relaxed)
+        })),
+        sysctl::int_writer(move |v| {
+            let v = u32::try_from(v).map_err(|_| Errno::EINVAL)?;
+            field(&inet::state::of(&super::curvnet())).store(v, Ordering::Relaxed);
+            Ok(())
+        }),
+    )
+    .expect("a net.inet sysctl");
+}
+
+/// A protocol's statistics structure (`VNET_PCPUSTAT_SYSINIT`), the
+/// current VNET's.
+fn vstats(
+    t: &mut Tree,
+    parent: sysctl::NodeId,
+    format: &'static str,
+    descr: &str,
+    bytes: fn(&inet::state::State) -> Vec<u8>,
+) {
+    t.add_value(
+        parent,
+        Number::Auto,
+        "stats",
+        descr,
+        Value::Opaque {
+            format,
+            read: Box::new(move |out| out.extend(bytes(&inet::state::of(&super::curvnet())))),
+        },
+    )
+    .expect("a net.inet stats sysctl");
+}
+
+/// `bind_all_fibs` (`CTLFLAG_RDTUN`, 1): a socket hears every FIB's
+/// traffic, so tests of per-FIB binding skip.
+fn bind_all_fibs(t: &mut Tree, parent: sysctl::NodeId) {
+    t.add_value(
+        parent,
+        Number::Auto,
+        "bind_all_fibs",
+        "Bound sockets receive traffic from all FIBs",
+        Value::int(1),
+    )
+    .expect("a bind_all_fibs sysctl");
+}
+
 fn arp_knobs(t: &mut Tree, parent: sysctl::NodeId) {
     type Get = fn(&net::arp::Conf) -> i32;
     type Set = fn(&mut net::arp::Conf, i32) -> Result<(), Errno>;
-    let list: [(&str, &str, Get, Set); 5] = [
+    let list: [(&str, &str, Get, Set); 6] = [
+        (
+            "garp_rexmit_count",
+            "Number of times to retransmit GARP packets; 0 to disable, maximum of 16",
+            |c| i32::from(c.garp_rexmit_count),
+            // `sysctl_garp_rexmit`: clamped, not refused.
+            |c, v| {
+                c.garp_rexmit_count =
+                    u8::try_from(v.clamp(0, i32::from(net::arp::MAX_GARP_RETRANSMITS)))
+                        .unwrap_or(0);
+                Ok(())
+            },
+        ),
         (
             "max_age",
             "ARP entry lifetime in seconds",
@@ -168,7 +270,7 @@ fn arp_knobs(t: &mut Tree, parent: sysctl::NodeId) {
             Number::Auto,
             name,
             descr,
-            0,
+            ctlflag::VNET,
             Value::Int(Box::new(move || get(&super::curvnet().net.lock().arp))),
             sysctl::int_writer(move |v| set(&mut super::curvnet().net.lock().arp, v)),
         )
@@ -221,14 +323,22 @@ pub(crate) fn init(s: &Sleepable) {
     crate::sysctl::with(s, |t| {
         let root = t.root();
         let net = t.child(root, "net").expect("net node");
-        t.add_value(
+        // `sysctl_fibs`: tables may be added, never taken away.
+        t.add_writable(
             net,
             Number::Auto,
             "fibs",
-            "Number of available FIBs",
-            Value::Int(Box::new(|| {
-                i32::try_from(net::numfibs()).unwrap_or(i32::MAX)
-            })),
+            "set number of fibs",
+            ctlflag::VNET | ctlflag::TUN,
+            Value::Uint(Box::new(net::numfibs)),
+            sysctl::int_writer(|v| {
+                let n = u32::try_from(v).unwrap_or(0).clamp(1, net::MAXFIBS);
+                if n < net::numfibs() {
+                    return Err(Errno::ENOTCAPABLE);
+                }
+                net::set_numfibs(n);
+                Ok(())
+            }),
         )
         .expect("net.fibs");
         t.add_value(
@@ -281,12 +391,65 @@ pub(crate) fn init(s: &Sleepable) {
             &tune::IP_TTL,
             |v| (0..=255).contains(&v),
         );
+        vknob(
+            t,
+            ip,
+            "forwarding",
+            "Enable IP forwarding between interfaces",
+            |s| &s.conf.forwarding,
+        );
+        vknob(t, ip, "redirect", "Enable sending IP redirects", |s| {
+            &s.conf.redirect
+        });
+        vknob(t, ip, "random_id", "Assign random ip_id values", |s| {
+            &s.conf.random_id
+        });
+        vknob(
+            t,
+            ip,
+            "rfc6864",
+            "Use constant IP ID for atomic datagrams",
+            |s| &s.conf.rfc6864,
+        );
+        vknob(
+            t,
+            ip,
+            "rfc1122_strong_es",
+            "Packet's IP destination address must match address on arrival interface",
+            |s| &s.conf.strong_es,
+        );
+        vknob(
+            t,
+            ip,
+            "source_address_validation",
+            "Drop incoming packets with source address that is a local address",
+            |s| &s.conf.sav,
+        );
+        vknob(
+            t,
+            ip,
+            "maxfragsperpacket",
+            "Maximum number of IPv4 fragments allowed per packet",
+            |s| &s.conf.maxfragsperpacket,
+        );
+        vknob(
+            t,
+            ip,
+            "fragttl",
+            "IP fragment life time on reassembly queue (seconds)",
+            |s| &s.conf.fragttl,
+        );
+        vstats(
+            t,
+            ip,
+            "S,ipstat",
+            "IP statistics (struct ipstat, netinet/ip_var.h)",
+            |s| s.ipstat.bytes(),
+        );
         knobs(
             t,
             ip,
             &[
-                ("forwarding", "Enable IP forwarding between interfaces", 0),
-                ("redirect", "Enable sending IP redirects", 1),
                 (
                     "sourceroute",
                     "Enable forwarding source routed IP packets",
@@ -302,36 +465,134 @@ pub(crate) fn init(s: &Sleepable) {
                     "Allow connecting to INADDR_ANY or INADDR_BROADCAST for connect(2)",
                     0,
                 ),
-                ("random_id", "Assign random ip_id values", 0),
                 (
                     "check_interface",
                     "Verify packet arrives on correct interface",
                     0,
                 ),
-                (
-                    "rfc1122_strong_es",
-                    "Packet's IP destination address must match address on arrival interface",
-                    0,
-                ),
             ],
         );
         let icmp = node(t, inet, 1, "icmp", "ICMP");
-        knobs(
+        vknob(
             t,
             icmp,
+            "bmcastecho",
+            "Reply to multicast ICMP Echo Request and Timestamp packets",
+            |s| &s.conf.bmcastecho,
+        );
+        vknob(t, icmp, "drop_redirect", "Ignore ICMP redirects", |s| {
+            &s.conf.drop_redirect
+        });
+        vknob(
+            t,
+            icmp,
+            "log_redirect",
+            "Log ICMP redirects to the console",
+            |s| &s.conf.log_redirect,
+        );
+        vknob_u32(
+            t,
+            icmp,
+            "icmplim",
+            "Maximum number of ICMP responses per second",
+            |s| &s.conf.icmplim,
+        );
+        vknob_u32(
+            t,
+            icmp,
+            "icmplim_jitter",
+            "Random icmplim jitter adjustment limit",
+            |s| &s.conf.icmplim_jitter,
+        );
+        vknob(
+            t,
+            icmp,
+            "icmplim_output",
+            "Enable logging of ICMP response rate limiting",
+            |s| &s.conf.icmplim_output,
+        );
+        vknob(
+            t,
+            icmp,
+            "maskrepl",
+            "Reply to ICMP Address Mask Request packets",
+            |s| &s.conf.maskrepl,
+        );
+        vknob(
+            t,
+            icmp,
+            "tstamprepl",
+            "Respond to ICMP Timestamp packets",
+            |s| &s.conf.tstamprepl,
+        );
+        vknob(
+            t,
+            icmp,
+            "quotelen",
+            "Number of bytes from original packet to quote in ICMP reply",
+            |s| &s.conf.quotelen,
+        );
+        vknob(
+            t,
+            icmp,
+            "reply_from_interface",
+            "ICMP reply from incoming interface for non-local packets",
+            |s| &s.conf.rfi,
+        );
+        vstats(
+            t,
+            icmp,
+            "S,icmpstat",
+            "ICMP statistics (struct icmpstat, netinet/icmp_var.h)",
+            |s| s.icmpstat.bytes(),
+        );
+        let igmp = node(t, inet, 2, "igmp", "IGMP");
+        vknob(
+            t,
+            igmp,
+            "sendra",
+            "Send IP Router Alert option in IGMPv2/v3 messages",
+            |s| &s.conf.igmp_sendra,
+        );
+        vknob(
+            t,
+            igmp,
+            "sendlocal",
+            "Send IGMP membership reports for 224.0.0.0/24 groups",
+            |s| &s.conf.igmp_sendlocal,
+        );
+        vknob(
+            t,
+            igmp,
+            "default_version",
+            "Default version of IGMP to run on each interface",
+            |s| &s.conf.igmp_version,
+        );
+        knobs(
+            t,
+            igmp,
             &[
-                ("bmcastecho", "", 0),
-                ("drop_redirect", "Ignore ICMP redirects", 0),
-                ("log_redirect", "Log ICMP redirects to the console", 0),
                 (
-                    "icmplim",
-                    "Maximum number of ICMP responses per second",
-                    200,
+                    "recvifkludge",
+                    "Rewrite IGMPv1/v2 reports from 0.0.0.0 to contain subnet address",
+                    1,
                 ),
-                ("maskrepl", "Reply to ICMP Address Mask Request packets", 0),
+                ("v1enable", "Enable backwards compatibility with IGMPv1", 1),
+                ("v2enable", "Enable backwards compatibility with IGMPv2", 1),
+                (
+                    "legacysupp",
+                    "Allow v1/v2 reports to suppress v3 group responses",
+                    0,
+                ),
+                (
+                    "gsrdelay",
+                    "Rate limit for IGMPv3 Group-and-Source queries in seconds",
+                    10,
+                ),
             ],
         );
         let tcp = node(t, inet, 6, "tcp", "TCP");
+        bind_all_fibs(t, tcp);
         rw_u64(
             t,
             tcp,
@@ -436,7 +697,9 @@ pub(crate) fn init(s: &Sleepable) {
             "List of active TCP connections",
             Value::Opaque {
                 format: "S,xtcpcb",
-                read: Box::new(|out| out.extend(inet::export::tcp_pcblist(&|_| true))),
+                read: Box::new(|out| {
+                    out.extend(inet::export::tcp_pcblist(super::curvnet().id, &|_| true))
+                }),
             },
         )
         .expect("net.inet.tcp.pcblist");
@@ -446,7 +709,8 @@ pub(crate) fn init(s: &Sleepable) {
             "pcbcount",
             "Number of active PCBs",
             Value::Uint(Box::new(|| {
-                u32::try_from(inet::export::count(inet::Proto::Tcp)).unwrap_or(u32::MAX)
+                u32::try_from(inet::export::count(inet::Proto::Tcp, super::curvnet().id))
+                    .unwrap_or(u32::MAX)
             })),
         )
         .expect("net.inet.tcp.pcbcount");
@@ -485,6 +749,7 @@ pub(crate) fn init(s: &Sleepable) {
         )
         .expect("net.inet.tcp.functions_default");
         let udp = node(t, inet, 17, "udp", "UDP");
+        bind_all_fibs(t, udp);
         rw_u64(
             t,
             udp,
@@ -499,18 +764,32 @@ pub(crate) fn init(s: &Sleepable) {
             "Maximum space for incoming UDP datagrams",
             &tune::UDP_RECVSPACE,
         );
-        knobs(
+        vknob(t, udp, "log_in_vain", "Log all incoming UDP packets", |s| {
+            &s.conf.udp_log_in_vain
+        });
+        vknob(
             t,
             udp,
-            &[
-                ("log_in_vain", "Log all incoming UDP packets", 0),
-                (
-                    "blackhole",
-                    "Do not send port unreachables for refused connects",
-                    0,
-                ),
-                ("checksum", "compute udp checksum", 1),
-            ],
+            "blackhole",
+            "Do not send port unreachables for refused connects",
+            |s| &s.conf.udp_blackhole,
+        );
+        vknob(
+            t,
+            udp,
+            "blackhole_local",
+            "Enforce net.inet.udp.blackhole for locally originated packets",
+            |s| &s.conf.udp_blackhole_local,
+        );
+        vknob(t, udp, "checksum", "compute udp checksum", |s| {
+            &s.conf.udp_cksum
+        });
+        vstats(
+            t,
+            udp,
+            "S,udpstat",
+            "UDP statistics (struct udpstat, netinet/udp_var.h)",
+            |s| s.udpstat.bytes(),
         );
         t.add_value(
             udp,
@@ -519,10 +798,41 @@ pub(crate) fn init(s: &Sleepable) {
             "List of active UDP sockets",
             Value::Opaque {
                 format: "S,xinpcb",
-                read: Box::new(|out| out.extend(inet::export::udp_pcblist(&|_| true))),
+                read: Box::new(|out| {
+                    out.extend(inet::export::udp_pcblist(super::curvnet().id, &|_| true))
+                }),
             },
         )
         .expect("net.inet.udp.pcblist");
+        let raw = node(t, inet, 255, "raw", "RAW");
+        bind_all_fibs(t, raw);
+        rw_u64(
+            t,
+            raw,
+            "maxdgram",
+            "Maximum outgoing raw IP datagram size",
+            &inet::raw::SENDSPACE,
+        );
+        rw_u64(
+            t,
+            raw,
+            "recvspace",
+            "Maximum space for incoming raw IP datagrams",
+            &inet::raw::RECVSPACE,
+        );
+        t.add_value(
+            raw,
+            Number::Auto,
+            "pcblist",
+            "List of active raw IP sockets",
+            Value::Opaque {
+                format: "S,xinpcb",
+                read: Box::new(|out| {
+                    out.extend(inet::export::raw_pcblist(super::curvnet().id, &|_| true));
+                }),
+            },
+        )
+        .expect("net.inet.raw.pcblist");
 
         // `net.inet6` (`PF_INET6`).
         let inet6 = node(t, net, 28, "inet6", "Internet6 Family");
@@ -653,6 +963,30 @@ pub(crate) fn init(s: &Sleepable) {
         let ether = node(t, link, 6, "ether", "Ethernet");
         let ether_inet = node(t, ether, 2, "inet", "");
         arp_knobs(t, ether_inet);
+        rw_i32(
+            t,
+            ether_inet,
+            "log_arp_movements",
+            "log arp replies from MACs different than the one in the cache",
+            &net::arp::LOG_MOVEMENTS,
+            |_| true,
+        );
+        rw_i32(
+            t,
+            ether_inet,
+            "log_arp_permanent_modify",
+            "log arp replies from MACs different than the one in the permanent arp entry",
+            &net::arp::LOG_PERMANENT_MODIFY,
+            |_| true,
+        );
+        rw_i32(
+            t,
+            ether_inet,
+            "max_log_per_second",
+            "Maximum number of remotely triggered ARP messages that can be logged per second",
+            &net::arp::MAX_LOG_PER_SECOND,
+            |_| true,
+        );
         knobs(
             t,
             ether_inet,
@@ -662,27 +996,7 @@ pub(crate) fn init(s: &Sleepable) {
                     "log arp packets arriving on the wrong interface",
                     1,
                 ),
-                (
-                    "log_arp_movements",
-                    "log arp replies from MACs different than the one in the cache",
-                    1,
-                ),
-                (
-                    "log_arp_permanent_modify",
-                    "log arp replies from MACs different than the one in the permanent arp entry",
-                    1,
-                ),
                 ("allow_multicast", "accept multicast addresses", 0),
-                (
-                    "max_log_per_second",
-                    "Maximum number of remotely triggered ARP messages that can be logged per second",
-                    1,
-                ),
-                (
-                    "garp_rexmit_count",
-                    "Number of times to retransmit GARP packets; 0 to disable, maximum of 16",
-                    0,
-                ),
             ],
         );
         let ether_arp = node(t, ether, 35, "arp", "");
@@ -707,14 +1021,13 @@ pub(crate) fn init(s: &Sleepable) {
             },
         )
         .expect("net.link.ether.arp.stats");
-        knobs(
+        rw_i32(
             t,
             ether_arp,
-            &[(
-                "log_level",
-                "Minimum log(9) level for recording rate limited arp log messages. The higher will be log more (emerg=0, info=6 (default), debug=7).",
-                6,
-            )],
+            "log_level",
+            "Minimum log(9) level for recording rate limited arp log messages. The higher will be log more (emerg=0, info=6 (default), debug=7).",
+            &net::arp::LOG_LEVEL,
+            |_| true,
         );
         bpf_knobs(t, net);
         let lo = node(t, link, 24, "loif", "");
@@ -729,6 +1042,24 @@ pub(crate) fn init(s: &Sleepable) {
             Arc::new(rtsock),
         )
         .expect("net.routetable");
+        // `net.route`: routes have several paths (`ROUTE_MPATH`, as in
+        // GENERIC).
+        let route = t
+            .add_node(net, Number::Auto, "route", "")
+            .expect("net.route");
+        vknob(t, route, "multipath", "Enable route multipath", |s| {
+            &s.conf.route_multipath
+        });
+        t.add_value(
+            route,
+            Number::Auto,
+            "hash_outbound",
+            "Compute flowid for locally-originated packets",
+            Value::Uint(Box::new(|| {
+                u32::from(super::curvnet().net.lock().hash_outbound)
+            })),
+        )
+        .expect("net.route.hash_outbound");
 
         // `FEATURE(inet)`, `FEATURE(inet6)`.
         if let Some(f) = t.name2oid("kern.features").and_then(|o| t.lookup(&o)) {

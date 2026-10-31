@@ -455,8 +455,9 @@ pub(super) fn shutdown(s: &Sleepable, sock_fd: u64, how: u64) -> SysResult {
     if let Some(so) = super::inet::so_of(&f) {
         return super::inet::shutdown(so, int(how));
     }
-    if super::netlink::is_netlink(&f) {
-        return Err(Errno::EOPNOTSUPP);
+    if let FileKind::Netlink(n) = f.kind() {
+        n.nl.shutdown(int(how))?;
+        return Ok(0);
     }
     let how = int(how);
     if !(0..=SHUT_RDWR).contains(&how) {

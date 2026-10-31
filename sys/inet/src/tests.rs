@@ -20,10 +20,18 @@ use crate::{Cred, Family, Proto, Socket, Tstate, tune};
 
 static LOCK: Mutex<()> = Mutex::new(());
 
-fn setup() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn setup() -> std::sync::MutexGuard<'static, ()> {
     let g = LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    net::init();
+    crate::init();
+    // The `netisr` thread's work, done as soon as there is some.
+    net::netisr::set_kick(|| {
+        for v in net::Vnet::all() {
+            net::netisr::drain(&v);
+        }
+    });
     ifnet::configure_loopback(&mut net().lock(), 0);
     g
 }
@@ -444,13 +452,13 @@ fn pcblist_shapes() {
     let _g = setup();
     let (l, c, s) = connected(20110);
     let all = |_| true;
-    let tcp = crate::export::tcp_pcblist(&all);
+    let tcp = crate::export::tcp_pcblist(0, &all);
     let gen_ = size_of::<abi::inet::Xinpgen>();
     let rec = size_of::<abi::inet::Xtcpcb>();
     assert_eq!((tcp.len() - 2 * gen_) % rec, 0);
     let n = (tcp.len() - 2 * gen_) / rec;
     assert!(n >= 3);
-    let udp = crate::export::udp_pcblist(&all);
+    let udp = crate::export::udp_pcblist(0, &all);
     assert_eq!((udp.len() - 2 * gen_) % size_of::<abi::inet::Xinpcb>(), 0);
     for x in [c, s, l] {
         x.close();
@@ -459,7 +467,13 @@ fn pcblist_shapes() {
 }
 
 /// A netlink request: header, fixed part, attributes.
-fn nlreq(ty: u16, flags: u16, seq: u32, fixed: &[u8], attrs: &[(u16, &[u8])]) -> std::vec::Vec<u8> {
+pub(crate) fn nlreq(
+    ty: u16,
+    flags: u16,
+    seq: u32,
+    fixed: &[u8],
+    attrs: &[(u16, &[u8])],
+) -> std::vec::Vec<u8> {
     let mut m = std::vec::Vec::new();
     m.extend_from_slice(&0u32.to_ne_bytes());
     m.extend_from_slice(&ty.to_ne_bytes());
@@ -480,7 +494,7 @@ fn nlreq(ty: u16, flags: u16, seq: u32, fixed: &[u8], attrs: &[(u16, &[u8])]) ->
 }
 
 /// The (type, flags, error-or-0) of each reply message.
-fn nlreplies(b: &[u8]) -> std::vec::Vec<(u16, u16, i32)> {
+pub(crate) fn nlreplies(b: &[u8]) -> std::vec::Vec<(u16, u16, i32)> {
     let mut out = std::vec::Vec::new();
     let mut at = 0;
     while at + 16 <= b.len() {
@@ -881,5 +895,47 @@ fn splice_flow_control_and_loop() {
     c.close();
     s.close();
     assert!(!splice_drain(10));
+    l.close();
+}
+
+#[test]
+fn tcp6_connect_to_the_unspecified_address_is_loopback() {
+    let _g = setup();
+    let l = Socket::new(Family::Inet6, Proto::Tcp, &root());
+    l.bind(&sockaddr_in6(&[0; 16], 0, 0), &root()).unwrap();
+    l.listen(1, &root()).unwrap();
+    let port = l.sockname().port;
+    let c = Socket::new(Family::Inet6, Proto::Tcp, &root());
+    c.connect(&sockaddr_in6(&[0; 16], port, 0), &root(), true)
+        .or_else(|e| {
+            if e == Errno::EINPROGRESS {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        })
+        .unwrap();
+    c.close();
+    l.close();
+}
+
+#[test]
+fn tcp4_connect_to_a_wildcard_listener() {
+    let _g = setup();
+    let l = Socket::new(Family::Inet, Proto::Tcp, &root());
+    l.bind(&sockaddr_in([0; 4], 0), &root()).unwrap();
+    l.listen(1, &root()).unwrap();
+    let port = l.sockname().port;
+    let c = Socket::new(Family::Inet, Proto::Tcp, &root());
+    c.connect(&sockaddr_in(LO, port), &root(), true)
+        .or_else(|e| {
+            if e == Errno::EINPROGRESS {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        })
+        .unwrap();
+    c.close();
     l.close();
 }

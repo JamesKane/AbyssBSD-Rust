@@ -1,0 +1,3 @@
+# An echo too big for one frame: its fragments, and the reply's.
+filter: icmp or (ip[6:2] & 0x3fff != 0)
+guest: ping -c 1 -s 3000 10.77.0.1 > /dev/null

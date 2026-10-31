@@ -31,8 +31,8 @@ fn cksum(b: &[u8]) -> u16 {
     !(sum as u16)
 }
 
-/// A broadcast DHCPDISCOVER from `mac` with transaction `xid`.
-fn discover(mac: [u8; 6], xid: u32) -> Vec<u8> {
+/// A DHCPDISCOVER's BOOTP message from `mac` with transaction `xid`.
+fn bootp(mac: [u8; 6], xid: u32) -> Vec<u8> {
     let mut bootp = alloc::vec![0u8; 300];
     bootp[0] = 1; // BOOTREQUEST
     bootp[1] = 1; // Ethernet
@@ -43,6 +43,12 @@ fn discover(mac: [u8; 6], xid: u32) -> Vec<u8> {
     bootp[236..240].copy_from_slice(&[99, 130, 83, 99]);
     bootp[240..243].copy_from_slice(&[53, 1, 1]); // DHCPDISCOVER
     bootp[243] = 255;
+    bootp
+}
+
+/// A broadcast DHCPDISCOVER from `mac` with transaction `xid`.
+fn discover(mac: [u8; 6], xid: u32) -> Vec<u8> {
+    let bootp = bootp(mac, xid);
     let udp_len = 8 + bootp.len();
     let ip_len = 20 + udp_len;
     let mut f = Vec::with_capacity(14 + ip_len);
@@ -171,7 +177,7 @@ ktest! {
         };
         v.net.lock().add_addr(b"vtnet0", a).unwrap();
         let now = super::uptime_s();
-        let r = net::arp::resolve(&mut v.net.lock(), index, false, None, [10, 0, 2, 2], now);
+        let r = net::arp::resolve(&mut v.net.lock(), index, false, &mut None, [10, 0, 2, 2], now);
         assert_eq!(r, Ok(net::arp::Resolved::Held));
         let router = net::addr::from_v4([10, 0, 2, 2]);
         let mut resolved = false;
@@ -198,5 +204,114 @@ ktest! {
         let st = v.net.lock().by_index(index).map(|i| Arc::clone(&i.stats)).unwrap();
         assert!(st.ipackets.load(Ordering::Relaxed) >= 2);
         assert!(st.opackets.load(Ordering::Relaxed) >= 3);
+    }
+}
+
+/// Polls `f` every 10 ms for up to three seconds.
+fn poll<T>(s: &sched::Sleepable, mut f: impl FnMut() -> Option<T>) -> Option<T> {
+    for _ in 0..300 {
+        if let Some(v) = f() {
+            return Some(v);
+        }
+        crate::time::sleep_ns(s, 10_000_000);
+    }
+    None
+}
+
+ktest! {
+    fn vtnet_carries_udp_and_icmp_sockets() {
+        let s = cx();
+        let v = net::vnet0();
+        let Some((index, flags, mac)) = v
+            .net
+            .lock()
+            .by_name(b"vtnet0")
+            .map(|i| (i.index, i.flags, i.lladdr.unwrap_or_default()))
+        else {
+            kprintln!("ktest: no vtnet0; the network test is skipped");
+            return;
+        };
+        v.net.lock().set_flags(b"vtnet0", flags | iff::UP).unwrap();
+        let a = Ifaddr {
+            family: Family::Inet,
+            addr: net::addr::from_v4([10, 0, 2, 15]),
+            plen: 24,
+            dst: None,
+            broadcast: Some(net::addr::from_v4([10, 0, 2, 255])),
+            flags6: 0,
+            vltime: u32::MAX,
+            pltime: u32::MAX,
+            vhid: 0,
+        };
+        v.net.lock().add_addr(b"vtnet0", a).unwrap();
+        let gw = net::ifnet::Route {
+            family: Family::Inet,
+            dst: net::addr::from_v4([0; 4]),
+            plen: 0,
+            gateway: net::ifnet::Gateway::Addr(net::addr::from_v4([10, 0, 2, 2])),
+            flags: abi::net::rtf::UP | abi::net::rtf::GATEWAY | abi::net::rtf::STATIC,
+            ifindex: index,
+            ifa: net::addr::from_v4([10, 0, 2, 15]),
+            mtu: 0,
+            weight: 1,
+            expire: 0,
+            nhidx: 0,
+            fib: 0,
+        };
+        v.net.lock().add_route(gw).unwrap();
+        let root = inet::Cred::root();
+
+        // ICMP echo to the router through a raw socket, as `ping` sends it.
+        let p = inet::Socket::new_in(v, Family::Inet, inet::Proto::Raw(1), &root);
+        let mut req = alloc::vec![8u8, 0, 0, 0, 0x12, 0x34, 0, 1];
+        req.extend_from_slice(b"abyss ping");
+        let c = cksum(&req);
+        req[2..4].copy_from_slice(&c.to_be_bytes());
+        p.send_dgram(&req, Some(&net::addr::sockaddr_in([10, 0, 2, 2], 0)), &root)
+            .unwrap();
+        let reply = poll(&s, || p.recv_dgram(512, false).ok()).expect("no echo reply");
+        let d = &reply.data;
+        assert_eq!(&d[12..16], &[10, 0, 2, 2]);
+        assert_eq!((d[20], &d[24..26]), (0, &[0x12, 0x34][..]));
+        assert_eq!(&d[28..], b"abyss ping");
+        p.close();
+
+        // DHCP through a UDP socket: a broadcast to the servers' port, the
+        // offer back to this one.
+        let u = inet::Socket::new_in(v, Family::Inet, inet::Proto::Udp, &root);
+        u.bind(&net::addr::sockaddr_in([0; 4], 68), &root).unwrap();
+        u.setopt(
+            abi::socket::SOL_SOCKET,
+            abi::socket::SO_BROADCAST,
+            &1i32.to_ne_bytes(),
+            &root,
+        )
+        .unwrap();
+        let xid = 0x5152_5354;
+        u.send_dgram(
+            &bootp(mac, xid),
+            Some(&net::addr::sockaddr_in([255; 4], 67)),
+            &root,
+        )
+        .unwrap();
+        let got = poll(&s, || u.recv_dgram(1500, false).ok()).expect("no DHCP offer");
+        let b = &got.data;
+        assert_eq!((b[0], &b[4..8]), (2, &xid.to_be_bytes()[..]));
+        assert_eq!(&b[16..20], &[10, 0, 2, 15]);
+        assert_eq!(got.from.unwrap().port, 67);
+        u.close();
+        let st = inet::state::of(v);
+        assert!(st.udpstat.get(inet::state::udps::IPACKETS) >= 1);
+        assert!(st.icmpstat.get(inet::state::icps::INHIST) >= 1);
+
+        v.net
+            .lock()
+            .delete_route(Family::Inet, &net::addr::from_v4([0; 4]), 0)
+            .unwrap();
+        v.net
+            .lock()
+            .delete_addr(b"vtnet0", Family::Inet, None)
+            .unwrap();
+        v.net.lock().set_flags(b"vtnet0", flags & !iff::UP).unwrap();
     }
 }

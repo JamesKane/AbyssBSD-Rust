@@ -282,6 +282,53 @@ impl Chain {
         at
     }
 
+    /// Writes `src` over the bytes at `off` (`m_copyback` within the
+    /// chain): in place when they lie in one writable mbuf, else in a new
+    /// mbuf that replaces them, so shared storage is never written.
+    ///
+    /// # Errors
+    ///
+    /// `NoBufs` if the chain is shorter than `off + src.len()`, or at the
+    /// mbuf zone's limit; the chain is unchanged then.
+    pub fn copy_in(&mut self, off: usize, src: &[u8]) -> Result<(), NoBufs> {
+        let end = off.checked_add(src.len()).ok_or(NoBufs)?;
+        if end > self.len {
+            return Err(NoBufs);
+        }
+        let mut n = self.head;
+        let mut o = off;
+        while let Some(p) = NonNull::new(n) {
+            // SAFETY: a live node of ours, borrowed for the write; the
+            // chain is borrowed mutably, so no one else reads it.
+            let mut m = core::mem::ManuallyDrop::new(unsafe { Mbuf::from_raw(p) });
+            if o < m.len() {
+                if o + src.len() <= m.len()
+                    && let Some(b) = m.bytes_mut()
+                {
+                    b[o..o + src.len()].copy_from_slice(src);
+                    return Ok(());
+                }
+                break;
+            }
+            o -= m.len();
+            // SAFETY: as above.
+            n = unsafe { (*p.as_ptr()).next };
+        }
+        let fresh = Self::from_slice(src)?;
+        let tail = self.split_off(end)?;
+        match self.split_off(off) {
+            Ok(_old) => {
+                self.append(fresh);
+                self.append(tail);
+                Ok(())
+            }
+            Err(e) => {
+                self.append(tail);
+                Err(e)
+            }
+        }
+    }
+
     /// `len` bytes from `off` by reference (`m_copym`): clusters and
     /// pages shared, inline data copied.
     ///

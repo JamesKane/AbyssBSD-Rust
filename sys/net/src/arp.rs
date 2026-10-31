@@ -11,6 +11,7 @@
 //! `arp_ifinit`).
 
 use alloc::sync::Arc;
+use core::sync::atomic::{AtomicI32, Ordering};
 
 use abi::errno::Errno;
 use abi::net::{IFT_ETHER, iff};
@@ -45,6 +46,75 @@ pub struct Conf {
     pub rexmit: u64,
     /// `maxhold`: packets held per entry.
     pub maxhold: usize,
+    /// `garp_rexmit_count`: gratuitous ARPs repeated after the first, at
+    /// 1, 2, 4, ... seconds (at most [`MAX_GARP_RETRANSMITS`]).
+    pub garp_rexmit_count: u8,
+}
+
+/// `net.link.ether.inet.log_arp_movements`,
+/// `log_arp_permanent_modify`, `max_log_per_second`, and
+/// `net.link.ether.arp.log_level` (global, as FreeBSD's are).
+pub static LOG_MOVEMENTS: AtomicI32 = AtomicI32::new(1);
+pub static LOG_PERMANENT_MODIFY: AtomicI32 = AtomicI32::new(1);
+pub static MAX_LOG_PER_SECOND: AtomicI32 = AtomicI32::new(1);
+pub static LOG_LEVEL: AtomicI32 = AtomicI32::new(LOG_INFO);
+
+/// `LOG_ERR`, `LOG_INFO`.
+const LOG_ERR: i32 = 3;
+const LOG_INFO: i32 = 6;
+
+/// `ppsratecheck`'s state for ARP's messages (`arp_lastlog`,
+/// `arp_curpps`): the second and the count in it.
+static LOG_RATE: sync::SpinLock<(u64, u32)> = sync::SpinLock::new((0, 0));
+
+/// `ARP_LOG`: `msg` at `pri`, if the level lets it through and fewer than
+/// `max_log_per_second` went this second.
+fn arp_log(pri: i32, msg: core::fmt::Arguments<'_>) {
+    // Relaxed: settings.
+    if pri > LOG_LEVEL.load(Ordering::Relaxed) {
+        return;
+    }
+    {
+        let now = crate::uptime();
+        let mut r = LOG_RATE.lock();
+        if r.0 != now {
+            *r = (now, 0);
+        }
+        let max = u32::try_from(MAX_LOG_PER_SECOND.load(Ordering::Relaxed)).unwrap_or(0);
+        if r.1 >= max {
+            return;
+        }
+        r.1 += 1;
+    }
+    crate::log(pri, &alloc::format!("arp: {msg}"));
+}
+
+/// `%*D` with `":"`: a link-layer address in hex.
+struct Mac([u8; 6]);
+
+impl core::fmt::Display for Mac {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let m = self.0;
+        write!(
+            f,
+            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            m[0], m[1], m[2], m[3], m[4], m[5]
+        )
+    }
+}
+
+/// `MAX_GARP_RETRANSMITS`.
+pub const MAX_GARP_RETRANSMITS: u8 = 16;
+
+/// An address's gratuitous ARP still to repeat (`ia_garp_timer`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Garp {
+    pub ifindex: u16,
+    pub addr: [u8; 4],
+    /// Sent so far after the first (`ia_garp_count`), and when the next
+    /// goes (uptime seconds).
+    pub count: u8,
+    pub at: u64,
 }
 
 impl Conf {
@@ -56,6 +126,7 @@ impl Conf {
         wait: 20,
         rexmit: 1,
         maxhold: 16,
+        garp_rexmit_count: 0,
     };
 }
 
@@ -147,7 +218,7 @@ fn send(n: &mut Net, ifindex: u16, dst: [u8; 6], body: &[u8], bcast: bool) -> Re
     if bcast {
         m.hdr.flags |= flags::BCAST;
     }
-    n.txq.push((ifindex, m));
+    n.txq.push((ifindex, None, m));
     Ok(())
 }
 
@@ -230,7 +301,7 @@ fn flush_hold(n: &mut Net, ifindex: u16, dst: [u8; 6], held: alloc::vec::Vec<Pac
             ty: ether::ty::IP,
         };
         if ether::encap(&mut m, &h).is_ok() {
-            n.txq.push((ifindex, m));
+            n.txq.push((ifindex, None, m));
         }
     }
 }
@@ -306,7 +377,20 @@ fn in_input(n: &mut Net, ifindex: u16, mut a: Arp, now: u64, m: &mut Packet) {
     let c = n.arp;
     'learn: {
         if isaddr == myaddr && myaddr != [0; 4] {
-            // "is using my IP address": defend it.
+            // Defend it.
+            let name = n
+                .by_index(ifindex)
+                .map(|i| i.name.clone())
+                .unwrap_or_default();
+            arp_log(
+                LOG_ERR,
+                format_args!(
+                    "{} is using my IP address {} on {}!\n",
+                    Mac(a.sha),
+                    crate::addr::fmt4(isaddr),
+                    name
+                ),
+            );
             itaddr = myaddr;
             n.arpstat.dupips += 1;
             break 'learn;
@@ -315,11 +399,39 @@ fn in_input(n: &mut Net, ifindex: u16, mut a: Arp, now: u64, m: &mut Packet) {
             break 'learn;
         }
         let ia = from_v4(isaddr);
+        let name = n
+            .by_index(ifindex)
+            .map(|i| i.name.clone())
+            .unwrap_or_default();
         if let Some(e) = n.lle_mut(ifindex, Family::Inet, &ia) {
             // `arp_check_update_lle`.
-            if e.flags & lle::VALID != 0 && e.lladdr != a.sha && e.flags & lle::STATIC != 0 {
-                // "attempts to modify permanent entry".
-                break 'learn;
+            if e.flags & lle::VALID != 0 && e.lladdr != a.sha {
+                if e.flags & lle::STATIC != 0 {
+                    if LOG_PERMANENT_MODIFY.load(Ordering::Relaxed) != 0 {
+                        arp_log(
+                            LOG_ERR,
+                            format_args!(
+                                "{} attempts to modify permanent entry for {} on {}\n",
+                                Mac(a.sha),
+                                crate::addr::fmt4(isaddr),
+                                name
+                            ),
+                        );
+                    }
+                    break 'learn;
+                }
+                if LOG_MOVEMENTS.load(Ordering::Relaxed) != 0 {
+                    arp_log(
+                        LOG_INFO,
+                        format_args!(
+                            "{} moved from {} to {} on {}\n",
+                            crate::addr::fmt4(isaddr),
+                            Mac(e.lladdr),
+                            Mac(a.sha),
+                            name
+                        ),
+                    );
+                }
             }
             e.set_lladdr(a.sha);
             mark_reachable(e, &c, sticky, now);
@@ -381,7 +493,8 @@ pub enum Resolved {
 }
 
 /// The link-layer address for IPv4 next hop `dst` on interface `ifindex`
-/// (`arpresolve`), sending a request and holding `m` if it is not known.
+/// (`arpresolve`), sending a request and holding `m` (taking it) if it is
+/// not known.
 ///
 /// # Errors
 ///
@@ -393,11 +506,11 @@ pub fn resolve(
     n: &mut Net,
     ifindex: u16,
     is_gw: bool,
-    m: Option<Packet>,
+    m: &mut Option<Packet>,
     dst: [u8; 4],
     now: u64,
 ) -> Result<Resolved, Errno> {
-    if let Some(m) = &m {
+    if let Some(m) = m.as_ref() {
         if m.hdr.flags & flags::BCAST != 0 {
             return Ok(Resolved::Addr(BROADCAST));
         }
@@ -425,7 +538,7 @@ pub fn resolve(
     }
     let renew = e.asked == 0 || e.expire != now;
     let mut dropped = 0;
-    if let Some(m) = m {
+    if let Some(m) = m.take() {
         while e.hold.len() >= c.maxhold && !e.hold.is_empty() {
             e.hold.remove(0);
             dropped += 1;
@@ -514,6 +627,17 @@ pub fn ifinit(n: &mut Net, ifindex: u16, addr: [u8; 4]) {
         return;
     };
     let _ = request(n, ifindex, Some(addr), addr, Some(ll));
+    // `garp_timer_start`: repeats, if asked for.
+    if n.arp.garp_rexmit_count > 0 {
+        let at = crate::uptime() + 1;
+        n.garp.retain(|g| !(g.ifindex == ifindex && g.addr == addr));
+        n.garp.push(Garp {
+            ifindex,
+            addr,
+            count: 0,
+            at,
+        });
+    }
     let mut e = Lle::new(
         Family::Inet,
         from_v4(addr),
@@ -522,4 +646,29 @@ pub fn ifinit(n: &mut Net, ifindex: u16, addr: [u8; 4]) {
     );
     e.set_lladdr(ll);
     n.lle_link(e);
+}
+
+/// Repeats the gratuitous ARPs due by `now` (`garp_rexmit`), each at
+/// twice the last interval, until `garp_rexmit_count` went; one whose
+/// address is gone stops.
+pub fn garp_tick(n: &mut Net, now: u64) {
+    let due: alloc::vec::Vec<Garp> = n.garp.iter().copied().filter(|g| g.at <= now).collect();
+    n.garp.retain(|g| g.at > now);
+    for mut g in due {
+        let here = n.by_index(g.ifindex).is_some_and(|i| {
+            i.addrs
+                .iter()
+                .any(|a| a.family == Family::Inet && v4_of(&a.addr) == g.addr)
+        });
+        if !here {
+            continue;
+        }
+        let ll = n.by_index(g.ifindex).and_then(|i| i.lladdr);
+        let _ = request(n, g.ifindex, Some(g.addr), g.addr, ll);
+        g.count += 1;
+        if g.count < n.arp.garp_rexmit_count {
+            g.at = now + (1u64 << g.count.min(16));
+            n.garp.push(g);
+        }
+    }
 }

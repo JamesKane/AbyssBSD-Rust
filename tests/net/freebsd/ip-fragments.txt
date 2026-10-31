@@ -1,0 +1,7 @@
+# An echo too big for one frame: its fragments, and the reply's.
+GUEST-MAC > PEER-MAC, ethertype IPv4 (0x0800), length 1514: (tos 0x0, ttl 64, id _, offset 0, flags [+], proto ICMP (1), length 1500) GUEST > PEER: ICMP echo request, id _, seq 0, length 1480
+GUEST-MAC > PEER-MAC, ethertype IPv4 (0x0800), length 1514: (tos 0x0, ttl 64, id _, offset 1480, flags [+], proto ICMP (1), length 1500) GUEST > PEER: ip-proto-1
+GUEST-MAC > PEER-MAC, ethertype IPv4 (0x0800), length 82: (tos 0x0, ttl 64, id _, offset 2960, flags [none], proto ICMP (1), length 68) GUEST > PEER: ip-proto-1
+PEER-MAC > GUEST-MAC, ethertype IPv4 (0x0800), length 1514: (tos 0x0, ttl 64, id _, offset 0, flags [+], proto ICMP (1), length 1500) PEER > GUEST: ICMP echo reply, id _, seq 0, length 1480
+PEER-MAC > GUEST-MAC, ethertype IPv4 (0x0800), length 1514: (tos 0x0, ttl 64, id _, offset 1480, flags [+], proto ICMP (1), length 1500) PEER > GUEST: ip-proto-1
+PEER-MAC > GUEST-MAC, ethertype IPv4 (0x0800), length 82: (tos 0x0, ttl 64, id _, offset 2960, flags [none], proto ICMP (1), length 68) PEER > GUEST: ip-proto-1

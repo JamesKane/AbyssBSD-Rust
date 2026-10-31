@@ -494,6 +494,14 @@ pub(crate) fn add(
     Some(ino)
 }
 
+/// Adds `path` as a symbolic link to `target` (`make_dev_alias`).
+pub(crate) fn link(path: &[u8], target: &[u8]) -> Option<u64> {
+    let t = super::now();
+    let ino = with(|r| r.insert(path, What::Link(target.to_vec()), attr(0o755, 0, 0, 1, t)))?;
+    forget_names(path);
+    Some(ino)
+}
+
 /// Drops the name cache's entries along `path`, a node just made: a
 /// lookup that failed before must not hide it (FreeBSD's devfs purges
 /// negative entries as it populates).

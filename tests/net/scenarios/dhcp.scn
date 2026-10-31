@@ -1,0 +1,4 @@
+# dhclient restarted: its lease asked for again, and granted.
+filter: udp port 67 or udp port 68
+guest: service dhclient restart vtnet0 > /dev/null 2>&1; sleep 3
+ports: 67 68

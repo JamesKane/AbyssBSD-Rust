@@ -491,6 +491,74 @@ pub(crate) fn f_kinfo(
     file_record(s, p, fd, f, NO_RIGHTS, false).ok_or(Errno::EBADF)
 }
 
+/// `sizeof(struct xfile)`.
+const XFILE_LEN: usize = 128;
+
+/// One descriptor as `kern.file` gives it (`struct xfile`): its owner,
+/// number, type, references, offset, and the identities of the file,
+/// what it holds (a socket's, as the PCB lists name it), and its vnode.
+fn xfile(p: &Process, fd: i32, f: &Arc<File>) -> [u8; XFILE_LEN] {
+    // `DTYPE_*`.
+    let (ty, data, vnode): (i16, u64, u64) = match f.kind() {
+        FileKind::Vnode(v) => (
+            1,
+            identity(v.vnode.vnode().as_ref()),
+            identity(v.vnode.vnode().as_ref()),
+        ),
+        FileKind::Socket(sf) => (2, identity(sf.so.as_ref()), 0),
+        FileKind::Inet(i) => (2, inet::export::so_addr(&i.so), 0),
+        FileKind::Netlink(n) => (2, identity(n.nl.as_ref()), 0),
+        FileKind::Pipe(e) => (3, identity(e), 0),
+        FileKind::Fifo(ff) => (4, identity(ff), identity(ff.vnode.vnode().as_ref())),
+        FileKind::Kqueue(k) => (5, identity(k), 0),
+        FileKind::Shm(m) => (8, identity(m.as_ref()), 0),
+        FileKind::Pts(m) => (10, identity(m.as_ref()), 0),
+        FileKind::Process(d) => (12, identity(d), 0),
+        FileKind::Eventfd(e) => (13, identity(e.as_ref()), 0),
+        FileKind::Timerfd(t) => (14, identity(t.as_ref()), 0),
+        FileKind::Inotify(i) => (15, identity(i), 0),
+        FileKind::Jail(j) => (16, identity(j), 0),
+    };
+    let mut b = [0u8; XFILE_LEN];
+    b[0..8].copy_from_slice(&(XFILE_LEN as u64).to_ne_bytes());
+    b[8..12].copy_from_slice(&p.pid().to_ne_bytes());
+    b[12..16].copy_from_slice(&p.cred().euid().to_ne_bytes());
+    b[16..20].copy_from_slice(&fd.to_ne_bytes());
+    b[24..32].copy_from_slice(&identity(f.as_ref()).to_ne_bytes());
+    b[32..34].copy_from_slice(&ty.to_ne_bytes());
+    // The descriptor's reference and the one held here.
+    let refs = i32::try_from(Arc::strong_count(f)).unwrap_or(i32::MAX);
+    b[36..40].copy_from_slice(&refs.to_ne_bytes());
+    let offset = i64::try_from(f.offset_hint()).unwrap_or(i64::MAX);
+    b[48..56].copy_from_slice(&offset.to_ne_bytes());
+    b[56..64].copy_from_slice(&data.to_ne_bytes());
+    b[64..72].copy_from_slice(&vnode.to_ne_bytes());
+    b[72..76].copy_from_slice(&f.flags().to_ne_bytes());
+    b
+}
+
+/// `sysctl_kern_file`: every descriptor of every process the caller may
+/// see.
+fn all_files(s: &Sleepable) -> Vec<u8> {
+    let me = Process::current();
+    let mut out = Vec::new();
+    for p in crate::proc::all() {
+        if p.is_zombie() || me.as_ref().is_some_and(|m| m.can_see(&p).is_err()) {
+            continue;
+        }
+        let files: Vec<(i32, Arc<File>)> = {
+            let t = p.files.lock(s);
+            (0..i32::try_from(t.len()).unwrap_or(0))
+                .filter_map(|fd| Some((fd, Arc::clone(&t.slot(fd).ok()?.file))))
+                .collect()
+        };
+        for (fd, f) in files {
+            out.extend_from_slice(&xfile(&p, fd, &f));
+        }
+    }
+    out
+}
+
 /// Every named POSIX shared memory object (`kern.ipc.posix_shm_list`),
 /// whole records with their names, as `sysctl_posix_shm_list` gives them.
 fn shm_list(s: &Sleepable) -> Vec<u8> {
@@ -505,7 +573,7 @@ fn shm_list(s: &Sleepable) -> Vec<u8> {
     out
 }
 
-/// Adds `kern.proc.filedesc`, `kern.proc.cwd`, and
+/// Adds `kern.proc.filedesc`, `kern.proc.cwd`, `kern.file`, and
 /// `kern.ipc.posix_shm_list`.
 pub(crate) fn add_nodes(t: &mut Tree, kern: sysctl::NodeId, procs: sysctl::NodeId) {
     t.add_handler(
@@ -543,6 +611,20 @@ pub(crate) fn add_nodes(t: &mut Tree, kern: sysctl::NodeId, procs: sysctl::NodeI
         }),
     )
     .expect("kern.proc.cwd");
+    t.add_handler(
+        kern,
+        Number::Fixed(abi::sysctl::kern::FILE),
+        "file",
+        "Entire file table",
+        Arc::new(|r: &[i32], out: &mut Vec<u8>| {
+            if !r.is_empty() {
+                return Err(ReadError::Invalid);
+            }
+            out.extend(all_files(&sleepable()));
+            Ok(())
+        }),
+    )
+    .expect("kern.file");
     let ipc = t.child(kern, "ipc").expect("kern.ipc");
     t.add_handler(
         ipc,

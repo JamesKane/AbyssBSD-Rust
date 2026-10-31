@@ -112,7 +112,7 @@ fn resolution_asks_and_the_answer_releases_the_held_packet() {
         &mut v.net.lock(),
         a,
         false,
-        Some(pkt),
+        &mut Some(pkt),
         [192, 0, 2, 2],
         clock(),
     );
@@ -142,14 +142,21 @@ fn resolution_asks_and_the_answer_releases_the_held_packet() {
     // The held IPv4 packet went: request, reply, and it.
     assert!(j.netisr.handled.load(Ordering::Relaxed) >= held_before + 2);
     // Now it resolves at once.
-    let r = arp::resolve(&mut v.net.lock(), a, false, None, [192, 0, 2, 2], clock());
+    let r = arp::resolve(
+        &mut v.net.lock(),
+        a,
+        false,
+        &mut None,
+        [192, 0, 2, 2],
+        clock(),
+    );
     assert_eq!(r, Ok(Resolved::Addr(lb)));
     // Off the network, nothing to make.
     let r = arp::resolve(
         &mut v.net.lock(),
         a,
         false,
-        None,
+        &mut None,
         [198, 51, 100, 1],
         clock(),
     );
@@ -162,16 +169,16 @@ fn unanswered_entries_give_up_and_age_out() {
     let dst = [192, 0, 2, 99];
     let t0 = clock();
     for k in 0..5u64 {
-        let r = arp::resolve(&mut v.net.lock(), a, false, None, dst, t0 + k);
+        let r = arp::resolve(&mut v.net.lock(), a, false, &mut None, dst, t0 + k);
         assert_eq!(r, Ok(Resolved::Held));
     }
     // A sixth try within the same second sends nothing more.
     assert_eq!(
-        arp::resolve(&mut v.net.lock(), a, true, None, dst, t0 + 4),
+        arp::resolve(&mut v.net.lock(), a, true, &mut None, dst, t0 + 4),
         Err(Errno::EHOSTUNREACH)
     );
     assert_eq!(
-        arp::resolve(&mut v.net.lock(), a, false, None, dst, t0 + 5),
+        arp::resolve(&mut v.net.lock(), a, false, &mut None, dst, t0 + 5),
         Err(Errno::EHOSTDOWN)
     );
     arp::tick(&mut v.net.lock(), t0 + 5 + 20);
@@ -183,7 +190,7 @@ fn unanswered_entries_give_up_and_age_out() {
 fn resolved_entries_verify_then_expire() {
     let (v, j, a, _b) = wire();
     let t0 = clock();
-    let _ = arp::resolve(&mut v.net.lock(), a, false, None, [192, 0, 2, 2], t0);
+    let _ = arp::resolve(&mut v.net.lock(), a, false, &mut None, [192, 0, 2, 2], t0);
     settle(&v, &j);
     let dst = ip4([192, 0, 2, 2]);
     let expire = v.net.lock().lle(a, Family::Inet, &dst).unwrap().expire;
@@ -274,7 +281,14 @@ fn static_entries_through_the_routing_socket() {
 #[test]
 fn deleting_the_address_clears_its_network() {
     let (v, j, a, _b) = wire();
-    let _ = arp::resolve(&mut v.net.lock(), a, false, None, [192, 0, 2, 2], clock());
+    let _ = arp::resolve(
+        &mut v.net.lock(),
+        a,
+        false,
+        &mut None,
+        [192, 0, 2, 2],
+        clock(),
+    );
     settle(&v, &j);
     let m = lla_msg(rtm::ADD, [192, 0, 2, 3], a, [2, 0, 0, 0, 0, 3]);
     crate::rtsock::request(&mut v.net.lock(), &m, 7, true, 0)

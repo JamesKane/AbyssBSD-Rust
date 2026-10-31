@@ -141,6 +141,7 @@ pub fn attach_ether(e: &Ether, port: &Arc<Port>, link: Arc<dyn Link>) -> String 
         bpf: Some(Arc::clone(&port.tap)),
         pcount: 0,
         maddrs: alloc::vec::Vec::new(),
+        pcp: crate::ifnet::PCP_NONE,
     };
     n.attach(i);
     name

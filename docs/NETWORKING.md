@@ -211,6 +211,16 @@ deliver each other's frames, and either end can move into a VNET jail (§10).
 - **Raw sockets.** `SOCK_RAW` for `IPPROTO_ICMP`, `IPPROTO_ICMPV6`, and others, with `IP_HDRINCL`,
   so `ping`, `ping6`, `traceroute`, and `rtsold` run unchanged.
 
+As built for IPv4 (P7.4): `sys/inet::ip`, `icmp`, `reass`, `raw`, `igmp`, and `udp`'s packet
+path, with each VNET's protocol state (statistics, the `CTLFLAG_VNET` settings, reassembly
+queues, ICMP's rate limits, group memberships) in the slot `Vnet::inet` keeps for it. Output
+runs under the interfaces' lock: the route, ARP, and the frame are decided there, and frames and
+looped copies (a simplex broadcast, a multicast loopback) are queued on the lock and leave when
+it is let go, so nothing below re-enters it. `lo0` takes the checksum work as FreeBSD's does
+(`LO_CSUM_FEATURES` on output, `LO_CSUM_SET` on input), so its UDP checksums carry only the
+pseudo-header, as on FreeBSD. The PCB tables stay one per protocol, each lookup filtered by
+VNET, until their hashing with P7's performance work.
+
 ## 9. Transport
 
 ### 9.1 UDP

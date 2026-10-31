@@ -114,10 +114,11 @@ fn frames_cross_an_epair() {
         Err(Errno::ENETDOWN)
     );
     up(&v, b"epair0a");
-    // The other end down: dropped.
+    // The other end down: tapped, then dropped without an error
+    // (`epair_transmit`).
     assert_eq!(
         clone::output(&v, ia, Family::Inet, packet(&[1; 60])),
-        Err(Errno::ENOBUFS)
+        Ok(())
     );
     up(&v, b"epair0b");
     clone::output(&v, ia, Family::Inet, packet(&[2; 60])).unwrap();

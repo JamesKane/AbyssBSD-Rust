@@ -95,7 +95,9 @@ impl Queues {
             q.len() == 1
         };
         self.queued.fetch_add(1, Ordering::Relaxed);
-        if was_empty && let Some(k) = *KICK.lock() {
+        // The hook runs with no lock held: it may hand packets on at once.
+        let kick = *KICK.lock();
+        if was_empty && let Some(k) = kick {
             k();
         }
         Ok(())

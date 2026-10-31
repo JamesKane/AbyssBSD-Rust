@@ -84,6 +84,8 @@ pub mod kern {
     pub const VERSION: i32 = 4;
     /// `kern.maxfiles` (int).
     pub const MAXFILES: i32 = 7;
+    /// `kern.file` (`struct xfile` records).
+    pub const FILE: i32 = 15;
     /// `kern.argmax` (int).
     pub const ARGMAX: i32 = 8;
     /// `kern.securelevel` (int).
@@ -214,6 +216,8 @@ pub mod ctlflag {
     pub const TUN: u32 = 0x0008_0000;
     /// The handler needs no Giant.
     pub const MPSAFE: u32 = 0x0004_0000;
+    /// Per VNET: writable by root in a jail with its own network stack.
+    pub const VNET: u32 = 0x0002_0000;
     /// Readable in capability mode.
     pub const CAPRD: u32 = 0x0000_8000;
     /// Writable in capability mode.
@@ -251,6 +255,7 @@ pub const CONSTANTS: &[ConstValue] = &[
     c("KERN_OSTYPE", kern::OSTYPE as i64),
     c("KERN_OSRELEASE", kern::OSRELEASE as i64),
     c("KERN_OSREV", kern::OSREV as i64),
+    c("KERN_FILE", kern::FILE as i64),
     c("KERN_VERSION", kern::VERSION as i64),
     c("KERN_MAXFILES", kern::MAXFILES as i64),
     c("KERN_ARGMAX", kern::ARGMAX as i64),
@@ -305,6 +310,7 @@ pub const CONSTANTS: &[ConstValue] = &[
     c("CTLFLAG_RD", ctlflag::RD as i64),
     c("CTLFLAG_WR", ctlflag::WR as i64),
     c("CTLFLAG_ANYBODY", ctlflag::ANYBODY as i64),
+    c("CTLFLAG_VNET", ctlflag::VNET as i64),
     c("CTLFLAG_SECURE", ctlflag::SECURE as i64),
     c("CTLFLAG_PRISON", ctlflag::PRISON as i64),
     c("CTLFLAG_DYN", ctlflag::DYN as i64),

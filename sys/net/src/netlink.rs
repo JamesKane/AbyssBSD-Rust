@@ -57,6 +57,7 @@ pub mod nlm {
     pub const REPLACE: u16 = 0x100;
     pub const EXCL: u16 = 0x200;
     pub const CREATE: u16 = 0x400;
+    pub const APPEND: u16 = 0x800;
     pub const CAPPED: u16 = 0x100;
     pub const ACK_TLVS: u16 = 0x200;
 }
@@ -77,7 +78,28 @@ pub mod ty {
     pub const DELROUTE: u16 = 25;
     pub const GETROUTE: u16 = 26;
     pub const NEWNEIGH: u16 = 28;
+    pub const DELNEIGH: u16 = 29;
     pub const GETNEIGH: u16 = 30;
+}
+
+/// Neighbor attributes, flags, and states (`netlink/route/neigh.h`).
+mod nda {
+    pub(super) const DST: u16 = 1;
+    pub(super) const LLADDR: u16 = 2;
+    pub(super) const CACHEINFO: u16 = 3;
+    pub(super) const PROBES: u16 = 4;
+    pub(super) const IFINDEX: u16 = 8;
+    pub(super) const FLAGS_EXT: u16 = 15;
+    pub(super) const FREEBSD: u16 = 18;
+    pub(super) const F_NEXT_STATE_TS: u16 = 1;
+    pub(super) const NTF_SELF: u8 = 0x02;
+    pub(super) const NTF_PROXY: u8 = 0x08;
+    pub(super) const NTF_STICKY: u8 = 0x40;
+    pub(super) const NUD_INCOMPLETE: u16 = 0x01;
+    pub(super) const NUD_REACHABLE: u16 = 0x02;
+    pub(super) const NUD_STALE: u16 = 0x04;
+    pub(super) const NUD_DELAY: u16 = 0x08;
+    pub(super) const NUD_PROBE: u16 = 0x10;
 }
 
 /// Attributes, by their `abi` names.
@@ -343,14 +365,12 @@ fn dispatch(
         ty::NEWROUTE | ty::DELROUTE if !ctx.may_route => Err(Errno::EPERM),
         ty::NEWROUTE => newroute(ctx, net, h, body, o),
         ty::DELROUTE => delroute(ctx, net, body, o),
-        ty::GETNEIGH if h.flags & nlm::DUMP != 0 => {
-            done(ctx, h, None, out, o);
-            Ok(())
-        }
-        ty::GETNEIGH => Err(Errno::ENOENT),
+        ty::GETNEIGH => getneigh(ctx, net, h, body, out, o, now_s),
+        ty::NEWNEIGH | ty::DELNEIGH if !ctx.may_route => Err(Errno::EPERM),
+        ty::NEWNEIGH => newneigh(net, h, body, o, now_s),
+        ty::DELNEIGH => delneigh(net, body, o),
         _ => Err(Errno::EOPNOTSUPP),
     };
-    let _ = now_s;
     if let Err(e) = r {
         o.error = Some(e);
     }
@@ -668,6 +688,246 @@ fn deladdr(net: &NetLock, body: &[u8], o: &mut Outcome) -> Result<(), Errno> {
     n.delete_addr(&name, family, Some(&addr)).map(|_| ())
 }
 
+/// A neighbor request's fixed part and attributes (`ndmsg_parser`):
+/// family, flags, interface, destination, link-layer address.
+struct NeighReq<'a> {
+    family: Option<Family>,
+    flags: u32,
+    ifindex: u32,
+    dst: Option<In6>,
+    lladdr: Option<&'a [u8]>,
+    next_ts: u32,
+}
+
+fn neigh_req(body: &[u8]) -> NeighReq<'_> {
+    let family = Family::from_af(body.first().copied().unwrap_or(0));
+    let a = attrs(body.get(12..).unwrap_or(&[]));
+    let mut ifindex = rd32(body, 4);
+    if let Some(d) = find(&a, nda::IFINDEX) {
+        ifindex = rd32(d, 0);
+    }
+    let mut flags = u32::from(body.get(10).copied().unwrap_or(0));
+    if let Some(d) = find(&a, nda::FLAGS_EXT) {
+        flags = rd32(d, 0);
+    }
+    let next_ts = find(&a, nda::FREEBSD)
+        .map(attrs)
+        .and_then(|n| find(&n, nda::F_NEXT_STATE_TS).map(|d| rd32(d, 0)))
+        .unwrap_or(0);
+    NeighReq {
+        family,
+        flags,
+        ifindex,
+        dst: family.and_then(|f| ip_attr(f, find(&a, nda::DST))),
+        lladdr: find(&a, nda::LLADDR),
+        next_ts,
+    }
+}
+
+/// `dump_lle_locked`: one entry as `RTM_NEWNEIGH`.
+fn neigh_msg(ctx: &Ctx, h: &Hdr, e: &crate::lltable::Lle, multi: bool, now_s: u64) -> Vec<u8> {
+    use crate::lltable::{lle, state};
+    let flags = if multi { h.flags | nlm::MULTI } else { h.flags };
+    let mut m = Msg::new(ty::NEWNEIGH, flags, h.seq, ctx.port);
+    let st = match e.family {
+        Family::Inet => {
+            let s = if e.flags & (lle::STATIC | lle::IFADDR) != 0 {
+                state::REACHABLE
+            } else {
+                e.state
+            };
+            match s {
+                state::INCOMPLETE => nda::NUD_INCOMPLETE,
+                state::REACHABLE => nda::NUD_REACHABLE,
+                state::VERIFY => nda::NUD_PROBE,
+                _ => 0,
+            }
+        }
+        // `ND6_LLINFO_*`: incomplete 0, reachable 1, stale 2, delay 3,
+        // probe 4.
+        Family::Inet6 => match e.state {
+            0 => nda::NUD_INCOMPLETE,
+            1 => nda::NUD_REACHABLE,
+            2 => nda::NUD_STALE,
+            3 => nda::NUD_DELAY,
+            4 => nda::NUD_PROBE,
+            _ => 0,
+        },
+    };
+    let mut nf = 0u8;
+    if e.flags & lle::IFADDR != 0 {
+        nf |= nda::NTF_SELF;
+    }
+    if e.flags & lle::PUB != 0 {
+        nf |= nda::NTF_PROXY;
+    }
+    if e.flags & lle::STATIC != 0 {
+        nf |= nda::NTF_STICKY;
+    }
+    let mut ndm = [0u8; 12];
+    ndm[0] = e.family.af();
+    ndm[4..8].copy_from_slice(&u32::from(e.ifindex).to_ne_bytes());
+    ndm[8..10].copy_from_slice(&st.to_ne_bytes());
+    ndm[10] = nf;
+    m.raw(&ndm);
+    match e.family {
+        Family::Inet => m.attr(nda::DST, &v4_of(&e.addr)),
+        Family::Inet6 => m.attr(nda::DST, &e.addr),
+    }
+    if e.flags & lle::VALID != 0 {
+        m.attr(nda::LLADDR, &e.lladdr);
+    }
+    m.u32(nda::PROBES, u32::from(e.asked));
+    // `struct nda_cacheinfo`: confirmed, used, updated, refcnt.
+    m.attr(nda::CACHEINFO, &[0u8; 16]);
+    let at = m.nest(nda::FREEBSD);
+    // `get_lle_next_ts`: when it next changes, on the realtime clock.
+    let ts = if e.expire == 0 {
+        0
+    } else {
+        let real = u64::try_from(crate::realtime()).unwrap_or(0);
+        u32::try_from((e.expire + real).saturating_sub(crate::uptime())).unwrap_or(u32::MAX)
+    };
+    m.u32(nda::F_NEXT_STATE_TS, ts);
+    m.end_nest(at);
+    let _ = now_s;
+    m.finish()
+}
+
+/// `rtnl_handle_getneigh`: every entry (of a family, an interface), or
+/// the one for a destination.
+fn getneigh(
+    ctx: &Ctx,
+    net: &NetLock,
+    h: &Hdr,
+    body: &[u8],
+    out: &mut Vec<u8>,
+    o: &mut Outcome,
+    now_s: u64,
+) -> Result<(), Errno> {
+    let r = neigh_req(body);
+    let n = net.lock();
+    let ifindex = u16::try_from(r.ifindex).unwrap_or(0);
+    if r.ifindex != 0 && n.by_index(ifindex).is_none() {
+        return Err(Errno::ENOENT);
+    }
+    if let Some(dst) = r.dst {
+        if r.ifindex == 0 {
+            o.msg = Some(b"has NDA_DST but no ifindex provided");
+            return Err(Errno::EINVAL);
+        }
+        let family = r.family.ok_or(Errno::EINVAL)?;
+        let e = n.lle(ifindex, family, &dst).ok_or(Errno::ESRCH)?;
+        out.extend(neigh_msg(ctx, h, e, false, now_s));
+        return Ok(());
+    }
+    // `dump_llts`: interface by interface, IPv4 before IPv6.
+    for i in &n.ifaces {
+        if r.ifindex != 0 && i.index != ifindex {
+            continue;
+        }
+        for fam in [Family::Inet, Family::Inet6] {
+            if r.family.is_some_and(|f| f != fam) {
+                continue;
+            }
+            for e in n
+                .lle
+                .iter()
+                .filter(|e| e.ifindex == i.index && e.family == fam)
+            {
+                out.extend(neigh_msg(ctx, h, e, true, now_s));
+            }
+        }
+    }
+    drop(n);
+    done(ctx, h, None, out, o);
+    Ok(())
+}
+
+/// `rtnl_handle_newneigh`: a static (`NTF_STICKY`) or expiring entry, a
+/// published one with `NTF_PROXY`; with `NLM_F_REPLACE` over one that is
+/// not an interface's own.
+fn newneigh(net: &NetLock, h: &Hdr, body: &[u8], o: &mut Outcome, now_s: u64) -> Result<(), Errno> {
+    use crate::lltable::{Lle, lle};
+    let r = neigh_req(body);
+    let mut n = net.lock();
+    let ifindex = u16::try_from(r.ifindex).unwrap_or(0);
+    let (Some(ifp), Some(dst), Some(ll)) = (n.by_index(ifindex), r.dst, r.lladdr) else {
+        o.msg = Some(if r.ifindex == 0 || n.by_index(ifindex).is_none() {
+            b"NDA_IFINDEX / ndm_ifindex not set"
+        } else if r.dst.is_none() {
+            b"NDA_DST not set"
+        } else {
+            b"NDA_LLADDR not set"
+        });
+        return Err(Errno::EINVAL);
+    };
+    let family = r.family.ok_or(Errno::EINVAL)?;
+    if ifp.lladdr.is_none() || ll.len() != 6 {
+        o.msg = Some(b"NDA_LLADDR address length is different from expected");
+        return Err(Errno::EINVAL);
+    }
+    let supported = u32::from(nda::NTF_PROXY | nda::NTF_STICKY);
+    if r.flags & !supported != 0 {
+        o.msg = Some(b"ndm_flags not supported");
+        return Err(Errno::EOPNOTSUPP);
+    }
+    if h.flags & (nlm::CREATE | nlm::REPLACE) == 0 {
+        return Err(Errno::EOPNOTSUPP);
+    }
+    let mut flags = 0;
+    if r.flags & u32::from(nda::NTF_PROXY) != 0 {
+        flags |= lle::PUB;
+    }
+    if r.flags & u32::from(nda::NTF_STICKY) != 0 {
+        flags |= lle::STATIC;
+    }
+    let mut e = Lle::new(family, dst, ifindex, flags);
+    e.set_lladdr(ll.try_into().map_err(|_| Errno::EINVAL)?);
+    e.state = crate::lltable::state::REACHABLE;
+    if flags & lle::STATIC == 0 {
+        // `ndaf_next_ts - time_second + time_uptime`.
+        let real = u64::try_from(crate::realtime()).unwrap_or(0);
+        e.expire = (u64::from(r.next_ts) + crate::uptime()).saturating_sub(real);
+    }
+    match n.lle(ifindex, family, &dst) {
+        Some(old) if h.flags & nlm::REPLACE == 0 => {
+            let _ = old;
+            return Err(Errno::EEXIST);
+        }
+        Some(old) if old.flags & lle::IFADDR != 0 => return Err(Errno::EPERM),
+        None if h.flags & nlm::CREATE == 0 => return Err(Errno::ENOENT),
+        _ => {}
+    }
+    let publish = flags & lle::PUB != 0;
+    n.lle_link(e);
+    // `in_lltable_post_resolved`: a published IPv4 entry is announced.
+    if publish && family == Family::Inet {
+        let a = v4_of(&dst);
+        let ll: [u8; 6] = ll.try_into().map_err(|_| Errno::EINVAL)?;
+        let _ = crate::arp::request(&mut n, ifindex, Some(a), a, Some(ll));
+    }
+    let _ = now_s;
+    Ok(())
+}
+
+/// `rtnl_handle_delneigh`.
+fn delneigh(net: &NetLock, body: &[u8], o: &mut Outcome) -> Result<(), Errno> {
+    let r = neigh_req(body);
+    let Some(dst) = r.dst else {
+        o.msg = Some(b"NDA_DST not set");
+        return Err(Errno::EINVAL);
+    };
+    let mut n = net.lock();
+    let ifindex = u16::try_from(r.ifindex).unwrap_or(0);
+    if r.ifindex == 0 || n.by_index(ifindex).is_none() {
+        o.msg = Some(b"no ifindex provided");
+        return Err(Errno::EINVAL);
+    }
+    let family = r.family.ok_or(Errno::EAFNOSUPPORT)?;
+    n.lle_delete(ifindex, family, &dst, false).map(|_| ())
+}
+
 /// `dump_px`.
 /// `dump_px`: one prefix, with its one path (`dump_rc_nhop`) or its
 /// multipath group (`dump_rc_nhg`: an `rtnexthop` for each, its weight
@@ -867,6 +1127,14 @@ fn newroute(ctx: &Ctx, net: &NetLock, h: &Hdr, body: &[u8], o: &mut Outcome) -> 
                     .ifindex
             }
         }
+        // `nhop_set_blackhole`: a blackhole or reject route needs none;
+        // it goes through `lo0`.
+        (None, None) if flags & (rtf::REJECT | rtf::BLACKHOLE) != 0 => n
+            .ifaces
+            .iter()
+            .find(|i| i.flags & iff::LOOPBACK != 0 && i.dunit == 0)
+            .map(|i| i.index)
+            .ok_or(Errno::EINVAL)?,
         (None, None) => return Err(Errno::EINVAL),
     };
     let ifa = n
@@ -919,9 +1187,27 @@ fn newroute(ctx: &Ctx, net: &NetLock, h: &Hdr, body: &[u8], o: &mut Outcome) -> 
             };
             Ok(())
         }
+        // `rib_add_route` with `RTM_F_APPEND` (`route add`'s default): a
+        // new path joins the prefix's multipath group if both can
+        // (`nhop_can_multipath`); the same path again is `EEXIST`.
+        Some(i)
+            if h.flags & nlm::APPEND != 0
+                && h.flags & nlm::EXCL == 0
+                && can_multipath(&n.routes[i])
+                && can_multipath(&r) =>
+        {
+            n.add_route(r)
+        }
         Some(_) => Err(Errno::EEXIST),
         None => n.add_route(r),
     }
+}
+
+/// `nhop_can_multipath`: a gateway route that is not a redirect's.
+fn can_multipath(r: &Route) -> bool {
+    /// `RTF_DYNAMIC`.
+    const DYNAMIC: i32 = 0x10;
+    r.flags & rtf::GATEWAY != 0 && r.flags & DYNAMIC == 0
 }
 
 /// `rtnl_handle_delroute`.

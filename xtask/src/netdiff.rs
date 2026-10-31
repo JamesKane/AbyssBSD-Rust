@@ -15,8 +15,8 @@
 //! Normalization leaves what a peer can rely on and removes what differs
 //! from run to run on FreeBSD too: addresses and MACs become roles
 //! (`GUEST`, `PEER`, ...), and IP IDs, checksums, initial sequence
-//! numbers, timestamp values, ICMP identifiers, IPv6 flow labels, and
-//! ephemeral ports become `_`. FreeBSD against itself is its first test.
+//! numbers, timestamp values, ICMP identifiers, IPv6 flow labels, DHCP
+//! transaction IDs, and ephemeral ports become `_`. FreeBSD against itself is its first test.
 
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -198,6 +198,8 @@ fn normalize(decoded: &str, roles: &Roles, fixed_ports: &[u16]) -> String {
         l = blank_after(&l, "cksum ", |_| false);
         l = blank_after(&l, "flowlabel ", |_| false);
         l = blank_after(&l, "TS val ", |_| false);
+        // A DHCP transaction.
+        l = blank_after(&l, "xid ", |_| false);
         l = blank_after(&l, " ecr ", |t| t == "0");
         // A SYN's sequence number, and a SYN-ACK's acknowledgement, are
         // absolute (`tcpdump` makes the rest relative to them).
@@ -319,11 +321,13 @@ fn guest_identity(session: &mut Session, log: &Path) -> Result<[String; 4]> {
                 _ => format!("the guest has no {prefix}... address on vtnet0"),
             })
     };
+    // An IPv6 address may be missing (a guest without IPv6): its
+    // scenarios then differ, and the others still compare.
     Ok([
         find("nd-ether", "")?,
         find("nd-inet", "10.77.0.")?,
-        find("nd-inet6", "fe80:")?,
-        find("nd-inet6", "fd77:")?,
+        find("nd-inet6", "fe80:").unwrap_or_default(),
+        find("nd-inet6", "fd77:").unwrap_or_default(),
     ])
 }
 

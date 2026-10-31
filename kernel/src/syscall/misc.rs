@@ -525,7 +525,11 @@ pub(super) fn kldnext(fileid: u64) -> SysResult {
 pub(super) fn kldfind(file: u64) -> SysResult {
     let file = super::path::path(file)?;
     let name = file.rsplit(|&b| b == b'/').next().unwrap_or(&file);
-    if name == b"kernel" {
+    // A built-in module's file is the kernel that holds it: `kldstat -n
+    // if_epair.ko` succeeds as it does where the module was loaded, which
+    // is what a jail, unable to load it, checks for (`vnet_init`).
+    let module = name.strip_suffix(b".ko").filter(|m| BUILT_IN.contains(m));
+    if name == b"kernel" || module.is_some() {
         Ok(KERNEL_FILE as u64)
     } else {
         Err(Errno::ENOENT)

@@ -160,7 +160,8 @@ fn demux(vnet: &Arc<Vnet>, ifflags: u32, stats: &crate::ifnet::Stats, ety: u16, 
 }
 
 /// Sends frame `m`, its header on, out of interface `index` through
-/// `link` (`ether_output_frame` and `if_transmit`).
+/// `link` (`ether_output_frame` and `if_transmit`); for a loopback
+/// interface, a packet of `family`.
 ///
 /// # Errors
 ///
@@ -171,12 +172,53 @@ pub fn output_frame(
     index: u16,
     link: &Arc<dyn Link>,
     ifflags: u32,
+    family: Option<crate::Family>,
     m: Packet,
 ) -> Result<(), Errno> {
     if ifflags & (iff::UP | iff::RUNNING) != iff::UP | iff::RUNNING {
         return Err(Errno::ENETDOWN);
     }
-    link.transmit(vnet, index, None, m).map_err(Errno::from)
+    link.transmit(vnet, index, family, m).map_err(Errno::from)
+}
+
+/// `ether_set_pcp` with `ether_8021q_frame`: frame `m` tagged with
+/// priority `pcp` on VLAN 0, or the priority its packet asked for
+/// (`M_VLANTAG`); left to the device if it inserts tags itself, else an
+/// 802.1Q header after the addresses. A frame already tagged is left
+/// alone.
+///
+/// # Errors
+///
+/// `ENOBUFS` without buffers.
+pub fn set_pcp(m: &mut Packet, pcp: u8, hwtag: bool) -> Result<(), Errno> {
+    let Ok(h) = m.header::<Header>(0) else {
+        return Ok(());
+    };
+    if h.ty == ty::VLAN || h.ty == ty::QINQ {
+        m.hdr.flags &= !flags::VLANTAG;
+        return Ok(());
+    }
+    let pcp = if m.hdr.flags & flags::VLANTAG != 0 {
+        u8::try_from(m.hdr.vlan_tag >> 13).unwrap_or(0)
+    } else {
+        pcp
+    };
+    // `EVL_MAKETAG(0, pcp, 0)`.
+    let tag = u16::from(pcp & 7) << 13;
+    if hwtag {
+        m.hdr.vlan_tag = tag;
+        m.hdr.flags |= flags::VLANTAG;
+        return Ok(());
+    }
+    // `ether_vlanencap`.
+    m.data.trim_front(HDR_LEN);
+    let b = m.prepend(HDR_LEN + VLAN_ENCAP_LEN)?;
+    b[..12].copy_from_slice(&h.bytes()[..12]);
+    b[12..14].copy_from_slice(&ty::VLAN.to_be_bytes());
+    b[14..16].copy_from_slice(&tag.to_be_bytes());
+    b[16..18].copy_from_slice(&h.ty.to_be_bytes());
+    m.hdr.flags &= !flags::VLANTAG;
+    Ok(())
 }
 
 /// Puts header `h` before `m`'s data (`M_PREPEND` of the link header).

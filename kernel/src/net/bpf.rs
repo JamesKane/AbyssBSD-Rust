@@ -326,7 +326,7 @@ fn send(out: net::bpf::Outgoing) -> Result<(), Errno> {
                 .ok_or(Errno::EAFNOSUPPORT)?;
             net::clone::output(&v, index, fam, m)?;
         }
-        _ => net::ether::output_frame(&v, index, &link, flags, out.frame)?,
+        _ => net::ether::output_frame(&v, index, &link, flags, None, out.frame)?,
     }
     if let Some(c) = back {
         feed(&v, c);
@@ -487,4 +487,6 @@ fn clock() -> (u64, u64) {
 pub(crate) fn init() {
     net::bpf::set_clock(clock);
     crate::fs::devfs::add(b"bpf", 0o600, 0, 0, Arc::new(Bpf));
+    // `bpf_drvinit`: `bpf0` for compatibility, which `dhclient` opens.
+    crate::fs::devfs::link(b"bpf0", b"bpf");
 }

@@ -20,7 +20,6 @@ sys/capsicum/ioctls_test:cap_ioctls__listen_copy # AF_INET, P7
 usr.sbin/jail/jail_basic_test:basic             # ip4.addr: AF_INET, P7
 usr.sbin/jail/jail_basic_test:nested            # ip4.addr: AF_INET, P7
 usr.sbin/jail/jail_basic_test:setaudit          # setaudit_addr: no security event auditing (compat-deviations)
-sys/kern/ktrace_test:ktrace__cap_proto          # a raw AF_INET socket: AF_INET, P7
 sys/kern/ptrace_test:ptrace__PT_ATTACH_no_EINTR # passes; FreeBSD 15.1's run timed out (broken)
 
 # P6.10's run in bhyve (2026-10-29): what fails beside the target's 95%.
@@ -117,5 +116,71 @@ usr.bin/vmstat/vmstat_test:opt_s                        # vmstat reads counters 
 sys/net/routing/test_routing_l3.py:TestRouteCornerCase1::test_add_direct_route_p2p_wo_ifa[inet]   # needs tun(4), a P7 non-goal
 sys/net/routing/test_routing_l3.py:TestRouteCornerCase1::test_add_direct_route_p2p_wo_ifa[inet6]  # needs tun(4), a P7 non-goal
 sys/net/routing/test_routing_l3.py:TestIfOps::test_change_prefix_route_same_iface[inet6]  # passes: the IPv6 prefix route moves to the remaining address; FreeBSD's keeps the deleted one (the test marks it xfail)
-sys/net/bpf/bpf:multi_read                     # ping over the epair: IPv4 on packets, P7.4
-sys/net/if_epair_test:pcp                      # ping over the epair: IPv4 on packets, P7.4
+
+# P7.4's targeted run (2026-10-31): what waits for later milestones or is a non-goal.
+sbin/ping/ping_test:ping6_c1_s8_t1               # IPv6, P7.5
+sbin/ping/ping_test:ping6_c1t4                   # IPv6, P7.5
+sbin/ping/ping_test:ping_6_c1_s8_t1              # IPv6, P7.5
+sbin/ping/ping_test:ping_c1_s8_t1_S1             # IPv6, P7.5
+sbin/ping/ping_test:inject_opts                  # needs tun(4), a P7 non-goal
+sbin/ping/ping_test:inject_pip                   # needs tun(4), a P7 non-goal
+sbin/ping/ping_test:inject_reply                 # needs tun(4), a P7 non-goal
+sbin/ping/test_ping.py:TestPing::test_ping[_6_c1_s8_t1_localhost] # IPv6, P7.5
+sbin/ping/test_ping.py:TestPing::test_ping[_A_c1_2001_db8__1] # IPv6, P7.5
+sbin/ping/test_ping.py:TestPing::test_ping[_A_c1_2001_db8__2] # IPv6, P7.5
+sbin/ping/test_ping.py:TestPing::test_ping[_A_c3_2001_db8__1] # IPv6, P7.5
+sbin/ping/test_ping.py:TestPing::test_ping[_A_c3_2001_db8__2] # IPv6, P7.5
+sbin/ping/test_ping.py:TestPing::test_ping[_c1_2001_db8__1] # IPv6, P7.5
+sbin/ping/test_ping.py:TestPing::test_ping[_c1_2001_db8__2] # IPv6, P7.5
+sbin/ping/test_ping.py:TestPing::test_ping[_c1_S__1_s8_t1_localhost] # IPv6, P7.5
+sbin/ping/test_ping.py:TestPing::test_ping[_c3_2001_db8__1] # IPv6, P7.5
+sbin/ping/test_ping.py:TestPing::test_ping[_c3_2001_db8__2] # IPv6, P7.5
+sbin/ping/test_ping.py:TestPing::test_ping[_q_c1_2001_db8__1] # IPv6, P7.5
+sbin/ping/test_ping.py:TestPing::test_ping[_q_c1_2001_db8__2] # IPv6, P7.5
+sbin/ping/test_ping.py:TestPing::test_ping[_q_c3_2001_db8__1] # IPv6, P7.5
+sbin/ping/test_ping.py:TestPing::test_ping[_q_c3_2001_db8__2] # IPv6, P7.5
+sbin/ping/test_ping.py:TestPing::test_pinger[_0_0] # needs tun(4), a P7 non-goal
+sbin/ping/test_ping.py:TestPing::test_pinger[_0_0_opts_EOL] # needs tun(4), a P7 non-goal
+sbin/ping/test_ping.py:TestPing::test_pinger[_0_0_opts_LSRR] # needs tun(4), a P7 non-goal
+sbin/ping/test_ping.py:TestPing::test_pinger[_0_0_opts_LSRR_trunc] # needs tun(4), a P7 non-goal
+sbin/ping/test_ping.py:TestPing::test_pinger[_0_0_opts_NOP] # needs tun(4), a P7 non-goal
+sbin/ping/test_ping.py:TestPing::test_pinger[_0_0_opts_NOP_40] # needs tun(4), a P7 non-goal
+sbin/ping/test_ping.py:TestPing::test_pinger[_0_0_opts_RR] # needs tun(4), a P7 non-goal
+sbin/ping/test_ping.py:TestPing::test_pinger[_0_0_opts_RR_same] # needs tun(4), a P7 non-goal
+sbin/ping/test_ping.py:TestPing::test_pinger[_0_0_opts_RR_trunc] # needs tun(4), a P7 non-goal
+sbin/ping/test_ping.py:TestPing::test_pinger[_0_0_opts_SSRR] # needs tun(4), a P7 non-goal
+sbin/ping/test_ping.py:TestPing::test_pinger[_0_0_opts_SSRR_trunc] # needs tun(4), a P7 non-goal
+sbin/ping/test_ping.py:TestPing::test_pinger[_0_0_opts_unk] # needs tun(4), a P7 non-goal
+sbin/ping/test_ping.py:TestPing::test_pinger[_0_0_special_warp] # needs tun(4), a P7 non-goal
+sbin/ping/test_ping.py:TestPing::test_pinger[_0_0_special_wrong] # needs tun(4), a P7 non-goal
+sbin/ping/test_ping.py:TestPing::test_pinger[_3_1_flags_DF] # needs tun(4), a P7 non-goal
+sbin/ping/test_ping.py:TestPing::test_pinger[_3_1_opts_NOP_40] # needs tun(4), a P7 non-goal
+sbin/ping/test_ping.py:TestPing::test_pinger[_3_1_special_not_mine_verbose_false] # needs tun(4), a P7 non-goal
+sbin/ping/test_ping.py:TestPing::test_pinger[_3_1_special_tcp] # needs tun(4), a P7 non-goal
+sbin/ping/test_ping.py:TestPing::test_pinger[_3_1_special_udp] # needs tun(4), a P7 non-goal
+sbin/ping/test_ping.py:TestPing::test_pinger[_3_1_verbose_false] # needs tun(4), a P7 non-goal
+sbin/ping/test_ping.py:TestPing::test_pinger[_IHL_too_short] # needs tun(4), a P7 non-goal
+sbin/ping/test_ping.py:TestPing::test_pinger[_inner_IHL_too_short] # needs tun(4), a P7 non-goal
+sbin/ping/test_ping.py:TestPing::test_pinger[_inner_packet_too_short] # needs tun(4), a P7 non-goal
+sbin/ping/test_ping.py:TestPing::test_pinger[_max_inner_packet_ihl_without_payload] # needs tun(4), a P7 non-goal
+sbin/ping/test_ping.py:TestPing::test_pinger[_quoted_data_too_short] # needs tun(4), a P7 non-goal
+sys/netinet/fibs_test:default_route_with_multiple_fibs_on_same_subnet # needs tap(4), a P7 non-goal
+sys/netinet/fibs_test:default_route_with_multiple_fibs_on_same_subnet_inet6 # needs tap(4), a P7 non-goal
+sys/netinet/fibs_test:loopback_and_network_routes_on_nondefault_fib # needs tap(4), a P7 non-goal
+sys/netinet/fibs_test:loopback_and_network_routes_on_nondefault_fib_inet6 # needs tap(4), a P7 non-goal
+sys/netinet/fibs_test:same_ip_multiple_ifaces    # needs tap(4), a P7 non-goal
+sys/netinet/fibs_test:same_ip_multiple_ifaces_inet6 # needs tap(4), a P7 non-goal
+sys/netinet/fibs_test:subnet_route_with_multiple_fibs_on_same_subnet # needs tap(4), a P7 non-goal
+sys/netinet/fibs_test:subnet_route_with_multiple_fibs_on_same_subnet_inet6 # needs tap(4), a P7 non-goal
+sys/netinet/fibs_test:udp_dontroute              # needs tap(4), a P7 non-goal
+sys/netinet/fibs_test:udp_dontroute6             # needs tap(4), a P7 non-goal
+sys/netinet/fibs_test:slaac_on_nondefault_fib6   # SLAAC, P7.5
+sys/netinet/output:output_tcp_setup_success      # TCP on packets, P7.6
+sys/netinet/output:output_tcp_flowid_mpath_success # TCP on packets, P7.6
+sys/netinet/tcp_implied_connect:tcp_implied_connect # TCP on packets, P7.6
+sys/netinet/so_reuseport_lb_test:basic_ipv4      # SO_REUSEPORT_LB groups (NETWORKING.md §14), P7.8
+sys/netinet/so_reuseport_lb_test:basic_ipv6      # SO_REUSEPORT_LB groups (NETWORKING.md §14), P7.8
+sys/netinet/so_reuseport_lb_test:concurrent_add  # SO_REUSEPORT_LB groups (NETWORKING.md §14), P7.8
+sys/netinet/so_reuseport_lb_test:connect_bound   # SO_REUSEPORT_LB groups (NETWORKING.md §14), P7.8
+sys/netinet/so_reuseport_lb_test:connect_not_bound # SO_REUSEPORT_LB groups (NETWORKING.md §14), P7.8
+sys/netinet/udp_bindings:gethostname_jailed      # a jail with ip4.addr: AF_INET jails, P7.8

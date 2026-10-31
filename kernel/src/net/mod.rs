@@ -71,6 +71,16 @@ fn start_netisr() {
     });
 }
 
+/// The time of day in nanoseconds since the epoch.
+fn realtime_ns() -> u64 {
+    crate::time::realtime_ns().unwrap_or(0)
+}
+
+/// `log(LOG_NOTICE, ...)` for the protocols.
+fn log_notice(msg: &str) {
+    crate::klog::log(abi::syslog::LOG_NOTICE, format_args!("{msg}"));
+}
+
 /// Seconds since boot (`time_uptime`).
 pub(crate) fn uptime_s() -> u64 {
     crate::time::now_ns() / 1_000_000_000
@@ -91,6 +101,14 @@ fn start_route_expiry() {
                 }
                 if n.lle.iter().any(|e| e.timer.is_some_and(|t| t <= up)) {
                     net::arp::tick(&mut n, up);
+                }
+                if n.garp.iter().any(|g| g.at <= up) {
+                    net::arp::garp_tick(&mut n, up);
+                }
+                drop(n);
+                // `ipreass_callout`.
+                if v.inet.get().is_some() {
+                    inet::reass::tick(&inet::state::of(&v), up);
                 }
             }
         }
@@ -152,6 +170,7 @@ pub(crate) fn init(s: &Sleepable) {
         net::set_numfibs(n);
     }
     net::set_uptime(uptime_s);
+    net::set_log(|pri, msg| crate::klog::log(pri, format_args!("{msg}")));
     net::set_realtime(now_s);
     net::init();
     let _ = DEVD.set(alloc::sync::Arc::new(Devd));
@@ -162,7 +181,11 @@ pub(crate) fn init(s: &Sleepable) {
     inet::set_hooks(inet::Hooks {
         now: crate::time::now_ns,
         random: random_u32,
+        realtime: realtime_ns,
+        log: log_notice,
     });
+    inet::init();
+    inet::reass::set_nmbclusters(mbuf::zone::CLUSTER.limit());
     let now = i64::try_from(crate::time::realtime_ns().unwrap_or(0) / 1_000_000_000).unwrap_or(0);
     inet::ifnet::configure_loopback(&mut net::vnet0().net.lock(), now);
     splice::init();

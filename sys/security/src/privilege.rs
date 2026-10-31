@@ -298,6 +298,8 @@ pub enum Priv {
     NetDelifaddr = 414,
     /// `PRIV_NET_SETIFVNET`: Move interface to vnet.
     NetSetifvnet = 417,
+    /// `PRIV_NET_SETLANPCP`: Set LAN priority.
+    NetSetlanpcp = 421,
     /// `PRIV_NET_SETIFDESCR`: Set interface description.
     NetSetifdescr = 418,
     /// `PRIV_NET_SETIFFIB`: Set interface fib.

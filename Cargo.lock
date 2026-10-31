@@ -316,6 +316,7 @@ dependencies = [
  "abi",
  "event",
  "hal",
+ "mbuf",
  "net",
  "sync",
 ]

@@ -181,7 +181,9 @@ fn serve(
             cred.securelevel_gt(lvl.cast_signed())?;
         }
         if kind & ctlflag::ANYBODY == 0 {
-            cred.priv_check(if kind & ctlflag::PRISON != 0 {
+            // `prison_owns_vnet`: a VNET jail's root sets its stack's.
+            let owns_vnet = kind & ctlflag::VNET != 0 && crate::prison::current().vnet().id != 0;
+            cred.priv_check(if kind & ctlflag::PRISON != 0 || owns_vnet {
                 crate::cred::Priv::SysctlWritejail
             } else {
                 crate::cred::Priv::SysctlWrite

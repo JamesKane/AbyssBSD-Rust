@@ -30,6 +30,7 @@ pub mod lltable;
 pub mod netif;
 pub mod netisr;
 pub mod netlink;
+pub mod output;
 pub mod rtmsg;
 pub mod rtsock;
 #[cfg(test)]
@@ -69,7 +70,8 @@ pub fn set_uptime(f: fn() -> u64) {
 }
 
 /// Seconds since boot (`time_uptime`).
-pub(crate) fn uptime() -> u64 {
+#[must_use]
+pub fn uptime() -> u64 {
     UPTIME.get().map_or(0, |f| f())
 }
 
@@ -82,8 +84,24 @@ pub fn set_realtime(f: fn() -> i64) {
 }
 
 /// Seconds since the epoch (`time_second`).
-pub(crate) fn realtime() -> i64 {
+#[must_use]
+pub fn realtime() -> i64 {
     REALTIME.get().map_or(0, |f| f())
+}
+
+/// The kernel's log (`log(9)`): a priority and the message.
+static LOG: sync::Once<fn(i32, &str)> = sync::Once::new();
+
+/// Sets the log.
+pub fn set_log(f: fn(i32, &str)) {
+    let _ = LOG.set(f);
+}
+
+/// Logs `msg` at priority `pri`.
+pub(crate) fn log(pri: i32, msg: &str) {
+    if let Some(f) = LOG.get() {
+        f(pri, msg);
+    }
 }
 
 /// Registers the link layer's protocols with `netisr`: Ethernet input,

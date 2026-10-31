@@ -35,6 +35,7 @@ struct Snap {
     uid: u32,
     gencnt: u64,
     tw: bool,
+    ip_p: u8,
 }
 
 /// The kernel address a record names a socket by (`xso_so`), and its
@@ -142,7 +143,7 @@ fn xinpcb(c: &Snap, so: Option<&Arc<Socket>>) -> Xinpcb {
     x.inp_flags = c.flags;
     x.inp_flags2 = c.flags2;
     x.inp_vflag = c.vflag;
-    x.inp_ip_p = 0;
+    x.inp_ip_p = c.ip_p;
     if let Some(s) = so {
         let i = s.inner.lock();
         x.inp_ip_ttl = i.ip.ttl;
@@ -157,10 +158,13 @@ fn xinpcb(c: &Snap, so: Option<&Arc<Socket>>) -> Xinpcb {
     x
 }
 
-fn copies(proto: Proto) -> (u64, Vec<Snap>) {
+fn copies(proto: Proto, vnet: u32) -> (u64, Vec<Snap>) {
     let mut t = table(proto).lock();
     let mut v = Vec::new();
     for (_, p) in t.iter() {
+        if p.vnet.id != vnet {
+            continue;
+        }
         v.push(Snap {
             so: p.so.clone(),
             family: p.family,
@@ -175,6 +179,7 @@ fn copies(proto: Proto) -> (u64, Vec<Snap>) {
             uid: p.uid,
             gencnt: p.gencnt,
             tw: p.tw_until.is_some(),
+            ip_p: p.ip_p,
         });
     }
     (t.gencnt, v)
@@ -201,11 +206,21 @@ fn push<T: Copy>(out: &mut Vec<u8>, v: &T) {
     out.extend_from_slice(b);
 }
 
-/// `udp_pcblist`: the records for the PCBs `visible` lets the caller
-/// see (by uid, `cr_canseeinpcb`).
+/// `udp_pcblist`: the records for the PCBs of VNET `vnet` that
+/// `visible` lets the caller see (by uid, `cr_canseeinpcb`).
 #[must_use]
-pub fn udp_pcblist(visible: &dyn Fn(u32) -> bool) -> Vec<u8> {
-    let (gen_, list) = copies(Proto::Udp);
+pub fn udp_pcblist(vnet: u32, visible: &dyn Fn(u32) -> bool) -> Vec<u8> {
+    dgram_pcblist(Proto::Udp, vnet, visible)
+}
+
+/// `rip_pcblist`: the raw sockets', as [`udp_pcblist`].
+#[must_use]
+pub fn raw_pcblist(vnet: u32, visible: &dyn Fn(u32) -> bool) -> Vec<u8> {
+    dgram_pcblist(Proto::Raw(0), vnet, visible)
+}
+
+fn dgram_pcblist(proto: Proto, vnet: u32, visible: &dyn Fn(u32) -> bool) -> Vec<u8> {
+    let (gen_, list) = copies(proto, vnet);
     let list: Vec<_> = list.into_iter().filter(|c| visible(c.uid)).collect();
     let mut out = Vec::new();
     push(&mut out, &xinpgen(list.len(), gen_));
@@ -220,8 +235,8 @@ pub fn udp_pcblist(visible: &dyn Fn(u32) -> bool) -> Vec<u8> {
 
 /// `tcp_pcblist`, with `tcp_inptoxtp`'s fields.
 #[must_use]
-pub fn tcp_pcblist(visible: &dyn Fn(u32) -> bool) -> Vec<u8> {
-    let (gen_, list) = copies(Proto::Tcp);
+pub fn tcp_pcblist(vnet: u32, visible: &dyn Fn(u32) -> bool) -> Vec<u8> {
+    let (gen_, list) = copies(Proto::Tcp, vnet);
     let list: Vec<_> = list.into_iter().filter(|c| visible(c.uid)).collect();
     let mut out = Vec::new();
     push(&mut out, &xinpgen(list.len(), gen_));
@@ -261,8 +276,13 @@ pub fn tcp_pcblist(visible: &dyn Fn(u32) -> bool) -> Vec<u8> {
     out
 }
 
-/// The number of PCBs of `proto` (`net.inet.*.pcbcount`'s value).
+/// The number of PCBs of `proto` in VNET `vnet` (`net.inet.*.pcbcount`'s
+/// value).
 #[must_use]
-pub fn count(proto: Proto) -> usize {
-    table(proto).lock().iter().count()
+pub fn count(proto: Proto, vnet: u32) -> usize {
+    table(proto)
+        .lock()
+        .iter()
+        .filter(|(_, p)| p.vnet.id == vnet)
+        .count()
 }

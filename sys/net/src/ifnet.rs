@@ -121,7 +121,13 @@ pub struct Ifnet {
     /// Its link-layer multicast memberships (`if_multiaddrs`), each with
     /// its references.
     pub maddrs: Vec<([u8; 6], u32)>,
+    /// The 802.1p priority its frames are tagged with (`if_pcp`),
+    /// [`PCP_NONE`] for none.
+    pub pcp: u8,
 }
+
+/// `IFNET_PCP_NONE`.
+pub const PCP_NONE: u8 = 0xff;
 
 /// Where a route goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -171,12 +177,21 @@ pub struct Net {
     pub owner: alloc::sync::Weak<crate::Vnet>,
     /// The link-layer table's entries ([`crate::lltable`]).
     pub lle: Vec<crate::lltable::Lle>,
-    /// Frames to send once the lock is let go: the interface, and the
-    /// frame with its header.
-    pub txq: Vec<(u16, mbuf::Packet)>,
+    /// Frames to send once the lock is let go: the interface, the family
+    /// of a packet for a loopback one, and the frame (with its header on
+    /// an Ethernet one).
+    pub txq: Vec<(u16, Option<Family>, mbuf::Packet)>,
+    /// Packets for this host's own input, queued to `netisr` once the
+    /// lock is let go (looped broadcasts and multicasts).
+    pub isrq: Vec<(crate::netisr::Proto, mbuf::Packet)>,
     /// ARP's settings and counts.
     pub arp: crate::arp::Conf,
     pub arpstat: crate::arp::Stat,
+    /// Gratuitous ARPs to repeat.
+    pub garp: Vec<crate::arp::Garp>,
+    /// `net.route.hash_outbound`: flows of this host's packets hashed
+    /// over multipath routes, on since the first one.
+    pub hash_outbound: bool,
 }
 
 /// Why a route lookup failed.
@@ -240,8 +255,11 @@ impl Net {
             owner: alloc::sync::Weak::new(),
             lle: Vec::new(),
             txq: Vec::new(),
+            isrq: Vec::new(),
             arp: crate::arp::Conf::DEFAULT,
             arpstat: crate::arp::Stat::ZERO,
+            garp: Vec::new(),
+            hash_outbound: false,
             outbox: Vec::new(),
             last_nh: 0,
             generation: 0,
@@ -347,14 +365,7 @@ impl Net {
     ///
     /// [`NoRoute`] when nothing matches, or a reject route does.
     pub fn lookup(&self, family: Family, dst: &In6) -> Result<&Route, NoRoute> {
-        let r = self
-            .routes
-            .iter()
-            .filter(|r| {
-                r.family == family && r.fib == 0 && prefix_match(family, &r.dst, dst, r.plen)
-            })
-            .max_by_key(|r| r.plen)
-            .ok_or(NoRoute::Unreachable)?;
+        let r = self.route_in(0, family, dst).ok_or(NoRoute::Unreachable)?;
         if r.flags & (rtf::REJECT | rtf::BLACKHOLE) != 0 {
             return Err(NoRoute::Rejected);
         }
@@ -365,6 +376,19 @@ impl Net {
             return Err(NoRoute::Unreachable);
         }
         Ok(r)
+    }
+
+    /// The route to `dst` in table `fib`, longest prefix first, whatever
+    /// its flags (`fib4_lookup`, `fib6_lookup`).
+    #[must_use]
+    pub fn route_in(&self, fib: u16, family: Family, dst: &In6) -> Option<&Route> {
+        self.routes
+            .iter()
+            .filter(|r| {
+                r.family == family && r.fib == fib && prefix_match(family, &r.dst, dst, r.plen)
+            })
+            // The longest prefix; of a multipath group's paths, the first.
+            .min_by_key(|r| (core::cmp::Reverse(r.plen), r.nhidx))
     }
 
     /// Source address selection for a packet to `dst` (`in_pcbladdr`,
@@ -467,6 +491,15 @@ impl Net {
                 && x.ifindex == r.ifindex
         }) {
             return Err(Errno::EEXIST);
+        }
+        // The first multipath group turns on hashing of this host's own
+        // packets (`nhgrp_ctl_alloc_default`'s `V_fib_hash_outbound`).
+        if self
+            .routes
+            .iter()
+            .any(|x| x.family == r.family && x.fib == r.fib && x.plen == r.plen && x.dst == dst)
+        {
+            self.hash_outbound = true;
         }
         self.last_nh += 1;
         let r = Route {
@@ -1023,6 +1056,7 @@ pub fn loopback(index: u16, now: i64, stats: Arc<Stats>) -> Ifnet {
         bpf: Some(crate::bpf::Tap::null()),
         pcount: 0,
         maddrs: Vec::new(),
+        pcp: PCP_NONE,
     }
 }
 

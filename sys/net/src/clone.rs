@@ -100,6 +100,13 @@ impl Link for Loop {
         vnet.lotap
             .mtap2(&af.to_ne_bytes(), &m, crate::bpf::Way::Out);
         m.hdr.rcvif = index;
+        // `looutput` with `IFCAP_RXCSUM`: whatever checksum work the
+        // sender left to the device counts as done (`LO_CSUM_SET`).
+        m.hdr.csum_data = 0xffff;
+        m.hdr.csum_flags = mbuf::csum::DATA_VALID
+            | mbuf::csum::PSEUDO_HDR
+            | mbuf::csum::IP_CHECKED
+            | mbuf::csum::IP_VALID;
         let proto = match family {
             Some(Family::Inet6) => Proto::Ipv6,
             _ => Proto::Ip,
@@ -169,17 +176,28 @@ impl Link for Epair {
         _family: Option<Family>,
         mut m: Packet,
     ) -> Result<(), NoBufs> {
-        let peer = self.peer();
-        let there = peer.as_ref().map(|p| p.home());
-        let ok = running(vnet, index) && matches!(&there, Some((Some(v), i)) if running(v, *i));
-        let (Some(peer), Some((Some(pv), pi)), true) = (peer, there, ok) else {
-            // `epair_transmit` with either end down: dropped.
+        // `epair_transmit`: refused while this end is down or too big for
+        // its MTU (and a VLAN header) ...
+        let mtu = vnet
+            .net
+            .lock()
+            .by_index(index)
+            .map_or(0, |i| i.mtu as usize);
+        if !running(vnet, index) || m.len() > mtu + crate::ether::HDR_LEN + 4 {
             self.stats.oerrors.fetch_add(1, Ordering::Relaxed);
             return Err(NoBufs);
-        };
-        // `epair_transmit`'s `BPF_MTAP`; the other end's `ether_input`
-        // taps it coming in.
+        }
+        // ... tapped going out (the other end's `ether_input` taps it
+        // coming in), then dropped, without an error, if the other end
+        // cannot take it.
         self.tap.mtap(&m, crate::bpf::Way::Out);
+        let peer = self.peer();
+        let there = peer.as_ref().map(|p| p.home());
+        let ok = matches!(&there, Some((Some(v), i)) if running(v, *i));
+        let (Some(peer), Some((Some(pv), pi)), true) = (peer, there, ok) else {
+            self.stats.oerrors.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
+        };
         let len = m.len() as u64;
         self.stats.opackets.fetch_add(1, Ordering::Relaxed);
         self.stats.obytes.fetch_add(len, Ordering::Relaxed);
@@ -253,6 +271,7 @@ fn epair_ifnet(
         bpf: Some(Arc::clone(&link.tap)),
         pcount: 0,
         maddrs: Vec::new(),
+        pcp: crate::ifnet::PCP_NONE,
         link: LinkRef(Some(link)),
     }
 }

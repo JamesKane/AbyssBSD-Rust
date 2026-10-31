@@ -41,15 +41,24 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+pub mod cksum;
 pub mod export;
+pub mod icmp;
+pub mod igmp;
+pub mod ip;
 mod opt;
 pub mod pcb;
 mod poll;
+pub mod raw;
+pub mod reass;
 pub mod splice;
+pub mod state;
 mod tcp;
 #[cfg(test)]
 mod tests;
 mod udp;
+#[cfg(test)]
+mod wire_tests;
 
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
@@ -66,13 +75,15 @@ pub use net::{Family, Vnet, addr, ifnet, netlink, rtmsg};
 pub use addr::Sockaddr;
 pub use poll::filter;
 pub use tcp::Tstate;
-pub use udp::{Meta, Received, want};
+pub use udp::{Meta, Received, SendCtl, want};
 
 /// A socket's protocol.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Proto {
     Udp,
     Tcp,
+    /// A raw socket, of the IP protocol its creator named (0 for all).
+    Raw(u8),
 }
 
 impl Proto {
@@ -82,6 +93,7 @@ impl Proto {
         match self {
             Self::Udp => IPPROTO_UDP,
             Self::Tcp => IPPROTO_TCP,
+            Self::Raw(p) => p as i32,
         }
     }
 
@@ -91,7 +103,14 @@ impl Proto {
         match self {
             Self::Udp => abi::socket::SOCK_DGRAM,
             Self::Tcp => abi::socket::SOCK_STREAM,
+            Self::Raw(_) => abi::inet::SOCK_RAW,
         }
+    }
+
+    /// Whether it moves datagrams (UDP and raw).
+    #[must_use]
+    pub const fn is_dgram(self) -> bool {
+        !matches!(self, Self::Tcp)
     }
 }
 
@@ -106,6 +125,8 @@ pub struct Cred {
     pub reuseport: bool,
     /// `PRIV_NETINET_BINDANY`.
     pub bindany: bool,
+    /// `PRIV_NETINET_RAW`.
+    pub raw: bool,
 }
 
 impl Cred {
@@ -117,6 +138,7 @@ impl Cred {
             reservedport: true,
             reuseport: true,
             bindany: true,
+            raw: true,
         }
     }
 }
@@ -166,11 +188,14 @@ pub mod tune {
 }
 
 /// The clock `TIME_WAIT` and the timestamps run on (nanoseconds, any
-/// epoch), and the random source of ephemeral ports; the kernel sets
-/// them at boot.
+/// epoch), the random source of ephemeral ports, the time of day
+/// (nanoseconds since the epoch, for ICMP timestamps), and the kernel's
+/// log (`log(9)`); the kernel sets them at boot.
 pub struct Hooks {
     pub now: fn() -> u64,
     pub random: fn() -> u32,
+    pub realtime: fn() -> u64,
+    pub log: fn(&str),
 }
 
 impl core::fmt::Debug for Hooks {
@@ -194,9 +219,17 @@ fn default_random() -> u32 {
     x ^ (x << 5)
 }
 
+fn default_realtime() -> u64 {
+    0
+}
+
+fn default_log(_: &str) {}
+
 static HOOKS: SpinLock<Hooks> = SpinLock::new(Hooks {
     now: default_now,
     random: default_random,
+    realtime: default_realtime,
+    log: default_log,
 });
 
 /// Installs the kernel's clock and random source.
@@ -212,6 +245,21 @@ pub(crate) fn now() -> u64 {
 pub(crate) fn random() -> u32 {
     let f = HOOKS.lock().random;
     f()
+}
+
+pub(crate) fn realtime() -> u64 {
+    let f = HOOKS.lock().realtime;
+    f()
+}
+
+pub(crate) fn log(msg: &str) {
+    let f = HOOKS.lock().log;
+    f(msg);
+}
+
+/// Registers IPv4's input with `netisr`.
+pub fn init() {
+    net::netisr::register(net::netisr::Proto::Ip, ip::input);
 }
 
 /// `MSIZE`, `MCLBYTES`, `MLEN`, `MINCLSIZE`: what a buffer charges its
@@ -300,6 +348,11 @@ pub(crate) struct IpOpts {
     pub(crate) mif6: u32,
     pub(crate) tclass: i16,
     pub(crate) prefer_tempaddr: i32,
+    /// `IP_VLAN_PCP` (`INP_2PCP_SET` and its value); -1 for none.
+    pub(crate) pcp: i8,
+    /// `inp_flowid` and `inp_flowtype` (`IP_FLOWID`, `IP_FLOWTYPE`).
+    pub(crate) flowid: u32,
+    pub(crate) flowtype: u32,
 }
 
 impl IpOpts {
@@ -317,6 +370,9 @@ impl IpOpts {
             mif6: 0,
             tclass: -1,
             prefer_tempaddr: -1,
+            pcp: -1,
+            flowid: 0,
+            flowtype: 0,
         }
     }
 }
@@ -342,6 +398,9 @@ pub(crate) struct Inner {
     /// one it is the sink of (`so_splice_back`).
     pub(crate) splice: Option<Arc<splice::Splice>>,
     pub(crate) splice_back: Option<Arc<splice::Splice>>,
+    /// The IPv4 groups it joined, with their interfaces
+    /// (`imo_membership`).
+    pub(crate) groups: Vec<([u8; 4], u16)>,
 }
 
 /// An internet socket (FreeBSD's `struct socket` with its `inpcb` and,
@@ -414,6 +473,10 @@ impl Socket {
     #[must_use]
     pub fn new_in(vnet: &Arc<Vnet>, family: Family, proto: Proto, cred: &Cred) -> Arc<Self> {
         let (send, recv) = match proto {
+            Proto::Raw(_) => (
+                raw::SENDSPACE.load(Ordering::Relaxed),
+                raw::RECVSPACE.load(Ordering::Relaxed),
+            ),
             Proto::Udp => (
                 tune::UDP_SENDSPACE.load(Ordering::Relaxed),
                 tune::UDP_RECVSPACE.load(Ordering::Relaxed),
@@ -426,10 +489,17 @@ impl Socket {
         let mut rcv = Sb::default();
         let mut snd = Sb::default();
         rcv.reserve(u32::try_from(recv).unwrap_or(u32::MAX));
+        let so_flow = (proto == Proto::Udp).then(udp::next_flowid);
         snd.reserve(u32::try_from(send).unwrap_or(u32::MAX));
         rcv.lowat = 1;
         snd.lowat = MCLBYTES.min(snd.hiwat);
-        Self::with_buffers(vnet, family, proto, cred, rcv, snd)
+        let so = Self::with_buffers(vnet, family, proto, cred, rcv, snd);
+        if let Some(f) = so_flow {
+            let mut i = so.inner.lock();
+            i.ip.flowid = f;
+            i.ip.flowtype = udp::HASHTYPE_OPAQUE;
+        }
+        so
     }
 
     pub(crate) fn with_buffers(
@@ -463,6 +533,7 @@ impl Socket {
                 ts_clock: 0,
                 splice: None,
                 splice_back: None,
+                groups: Vec::new(),
             }),
             rd: Notify::new(),
             wr: Notify::new(),
@@ -532,7 +603,7 @@ impl Socket {
         let i = self.inner.lock();
         match self.proto {
             Proto::Tcp => i.stream.len(),
-            Proto::Udp => i.dgrams.iter().map(|d| d.data.len()).sum(),
+            Proto::Udp | Proto::Raw(_) => i.dgrams.iter().map(|d| d.data.len()).sum(),
         }
     }
 
@@ -592,6 +663,9 @@ impl Socket {
         if self.proto == Proto::Tcp && self.inner.lock().tcp.as_ref().is_some_and(|t| t.dropped) {
             return Err(Errno::EINVAL);
         }
+        if let Proto::Raw(_) = self.proto {
+            return self.raw_bind(raw);
+        }
         let sa = match self.family {
             Family::Inet => addr::parse_in(raw, true)?,
             Family::Inet6 => addr::parse_in6(raw)?,
@@ -608,9 +682,11 @@ impl Socket {
         if self.spliced.load(Ordering::Relaxed) != 0 {
             self.splice_close();
         }
+        self.leave_groups();
         match self.proto {
             Proto::Udp => self.udp_close(),
             Proto::Tcp => self.tcp_close(),
+            Proto::Raw(_) => self.raw_close(),
         }
         self.rd.clear();
         self.wr.clear();
@@ -625,6 +701,7 @@ impl Socket {
         match self.proto {
             Proto::Udp => self.udp_shutdown(how),
             Proto::Tcp => self.tcp_shutdown(how),
+            Proto::Raw(_) => self.raw_shutdown(how),
         }
     }
 
@@ -640,6 +717,7 @@ impl Socket {
         match self.proto {
             Proto::Udp => self.udp_connect(raw, cred),
             Proto::Tcp => self.tcp_connect(raw, cred, nonblock),
+            Proto::Raw(_) => self.raw_connect(raw),
         }
     }
 

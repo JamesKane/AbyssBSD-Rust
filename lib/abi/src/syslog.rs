@@ -7,6 +7,8 @@ use crate::layout::{Arches, ConstValue};
 
 /// Error conditions.
 pub const LOG_ERR: i32 = 3;
+/// Normal but significant.
+pub const LOG_NOTICE: i32 = 5;
 /// Informational.
 pub const LOG_INFO: i32 = 6;
 /// The level within a priority.

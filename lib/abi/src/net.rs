@@ -515,6 +515,7 @@ pub mod sio {
     pub const SIOCDIFGROUP: u32 = ioc(IN, b'i', 137, size_of::<Ifgroupreq>());
     pub const SIOCGIFGMEMB: u32 = ioc(INOUT, b'i', 138, size_of::<Ifgroupreq>());
     pub const SIOCGLANPCP: u32 = ioc(INOUT, b'i', 152, IFREQ);
+    pub const SIOCSLANPCP: u32 = ioc(IN, b'i', 153, IFREQ);
     pub const SIOCGIFCAPNV: u32 = ioc(INOUT, b'i', 156, IFREQ);
     pub const SIOCGIFADDR_IN6: u32 = ioc(INOUT, b'i', 33, IN6IFREQ);
     pub const SIOCGIFDSTADDR_IN6: u32 = ioc(INOUT, b'i', 34, IN6IFREQ);
@@ -754,6 +755,7 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("SIOCDIFGROUP", "sys/sockio.h", sio::SIOCDIFGROUP as i64),
     c("SIOCGIFGMEMB", "sys/sockio.h", sio::SIOCGIFGMEMB as i64),
     c("SIOCGLANPCP", "sys/sockio.h", sio::SIOCGLANPCP as i64),
+    c("SIOCSLANPCP", "sys/sockio.h", sio::SIOCSLANPCP as i64),
     c("SIOCGIFCAPNV", "sys/sockio.h", sio::SIOCGIFCAPNV as i64),
     c(
         "SIOCGIFADDR_IN6",

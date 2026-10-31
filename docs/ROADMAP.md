@@ -2056,6 +2056,24 @@ P7.0 ─► P7.1 ─► P7.2 ─► P7.3 ─► P7.4 ─┬─► P7.5 ───
 - UDP on packets, `sys/inet`'s direct delivery removed for UDP; IGMP as far as group joins need.
 - `dhclient` configures `vtnet0` from the QEMU and bhyve responders; DNS resolves.
 - Captures: ARP, DHCP, ICMP echo and errors, UDP exchanges, fragments.
+- Done (2026-10-31): `sys/inet`'s IPv4 (input with `ip_input`'s checks and address rules,
+  output with the route, source, broadcast and multicast rules and the checksums the interface
+  does not take, fragmentation, reassembly with FreeBSD's limits, forwarding with redirects and
+  the fast path's counts), ICMP (echo and timestamp replies, errors to their protocols,
+  redirects, `icmp_error` under `icmplim` with its jitter), raw IP sockets (`IP_HDRINCL`,
+  `CAPFAIL_PROTO`), UDP on packets for IPv4 (IPv6 still goes straight to its receiver until
+  P7.5), group membership with IGMPv3 and IGMPv2 join and leave reports, multipath flows
+  (`IP_FLOWID`, the outbound Toeplitz hash), `IP_VLAN_PCP` and `ifconfig pcp`, per-VNET PCB
+  lookups, statistics, and settings (`CTLFLAG_VNET`, writable from VNET jails), `kern.file`, and
+  ARP's log messages. On the server's test network `dhclient` (`/dev/bpf0`, the routing socket's
+  `shutdown`) configures `vtnet0` in QEMU on both architectures and in bhyve, and `ping` and DNS
+  work; the networked boots now stop at SLAAC (P7.5). The `arp`, `icmp-echo`,
+  `udp-unreachable`, `ip-fragments`, and `dhcp` captures match FreeBSD's. Targeted kyua:
+  every case FreeBSD passes in `sys/netinet`, `sys/net`, and `sbin/ping` passes or is listed
+  (IPv6, TCP, `tun` and `tap`, `SO_REUSEPORT_LB` groups, and AF_INET jails wait for their
+  milestones). Left: IGMP's query answers and repeated reports, IP options beyond their structure
+  (record route, timestamps, source routing), and the PCB tables' hashing (with P7's performance
+  work).
 
 **P7.5 IPv6.**
 - IPv6 input and output with extension headers, fragmentation and reassembly, forwarding; ICMPv6;

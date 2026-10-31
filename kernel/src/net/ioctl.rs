@@ -230,8 +230,9 @@ pub(crate) fn ifioctl(
         | sio::SIOCSIFDESCR => return set(req, arg),
         sio::SIOCGIFMEDIA | sio::SIOCGIFXMEDIA => return media(arg),
         sio::SIOCADDMULTI | sio::SIOCDELMULTI => return multi(req == sio::SIOCADDMULTI, arg),
+        sio::SIOCSLANPCP | sio::SIOCGLANPCP => return lanpcp(req, arg),
         // `lo_ioctl` takes none of these.
-        sio::SIOCGIFSTATUS | sio::SIOCGIFCAPNV | sio::SIOCGLANPCP | sio::SIOCGTUNFIB => {
+        sio::SIOCGIFSTATUS | sio::SIOCGIFCAPNV | sio::SIOCGTUNFIB => {
             ifp(&curvnet().net.lock(), arg)?;
             return Err(Errno::EINVAL);
         }
@@ -444,6 +445,29 @@ fn multi(add: bool, arg: &mut [u8]) -> Result<usize, Errno> {
     } else {
         n.del_multi(index, ll)?;
     }
+    Ok(0)
+}
+
+/// `ether_ioctl`'s `SIOCSLANPCP` and `SIOCGLANPCP` (`ifr_lan_pcp`): an
+/// Ethernet interface's priority, 0 to 7 or none; `EINVAL` elsewhere.
+fn lanpcp(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
+    let name = name_of(arg).to_vec();
+    let v = curvnet();
+    let mut n = v.net.lock();
+    let i = n.by_name(&name).ok_or(Errno::ENXIO)?;
+    if i.ty != abi::net::IFT_ETHER {
+        return Err(Errno::EINVAL);
+    }
+    if req == sio::SIOCGLANPCP {
+        arg[IFRU] = i.pcp;
+        return Ok(0);
+    }
+    priv_check(Priv::NetSetlanpcp)?;
+    let pcp = arg[IFRU];
+    if pcp > 7 && pcp != net::ifnet::PCP_NONE {
+        return Err(Errno::EINVAL);
+    }
+    n.with_iface(&name, |i| i.pcp = pcp).ok_or(Errno::ENXIO)?;
     Ok(0)
 }
 

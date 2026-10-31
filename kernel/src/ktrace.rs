@@ -605,6 +605,9 @@ pub(crate) enum CapFail<'a> {
     Syscall(Option<i32>),
     /// A signal to another process.
     Signal(i32),
+    /// A socket of a protocol capability mode forbids (`PR_CAPATTACH`
+    /// unset).
+    Proto(i32),
     /// An address capability mode forbids (`struct sockaddr`'s bytes).
     Sockaddr(&'a [u8]),
     /// A lookup outside a descriptor's subtree: its path.
@@ -663,6 +666,10 @@ pub(crate) fn capfail(v: CapFail<'_>) {
         CapFail::Signal(sig) => {
             int(d, sig);
             CAPFAIL_SIGNAL
+        }
+        CapFail::Proto(p) => {
+            int(d, p);
+            CAPFAIL_PROTO
         }
         CapFail::Sockaddr(sa) => {
             // `sa_len` bytes, at most a `struct sockaddr`'s.

@@ -58,6 +58,8 @@ pub struct Pcb {
     /// A TCP connection in `TIME_WAIT` after its socket went: when it
     /// ends (the table's clock).
     pub tw_until: Option<u64>,
+    /// A raw socket's protocol (`inp_ip_p`).
+    pub ip_p: u8,
 }
 
 impl Pcb {
@@ -117,6 +119,8 @@ impl Table {
 /// The UDP and TCP tables (`V_udbinfo`, `V_tcbinfo`).
 pub static UDB: SpinLock<Table> = SpinLock::new(Table::new());
 pub static TCB: SpinLock<Table> = SpinLock::new(Table::new());
+/// The raw sockets' (`V_ripcbinfo`).
+pub static RIPCB: SpinLock<Table> = SpinLock::new(Table::new());
 
 /// The table of `proto`.
 #[must_use]
@@ -124,6 +128,7 @@ pub fn table(proto: Proto) -> &'static SpinLock<Table> {
     match proto {
         Proto::Udp => &UDB,
         Proto::Tcp => &TCB,
+        Proto::Raw(_) => &RIPCB,
     }
 }
 
@@ -178,6 +183,10 @@ impl Table {
                 uid,
                 gencnt: self.gencnt,
                 tw_until: None,
+                ip_p: match so.proto {
+                    Proto::Raw(p) => p,
+                    _ => 0,
+                },
             },
         );
     }
@@ -251,11 +260,19 @@ impl Table {
     /// `in_pcblookup_local`: a PCB bound to `laddr:lport` (IPv4); with
     /// `wildcard`, the best match counting wildcards (other than
     /// `exclude`).
-    fn local4(&self, laddr: [u8; 4], lport: u16, wildcard: bool, exclude: u64) -> Option<&Pcb> {
+    fn local4(
+        &self,
+        vnet: u32,
+        laddr: [u8; 4],
+        lport: u16,
+        wildcard: bool,
+        exclude: u64,
+    ) -> Option<&Pcb> {
         let laddr_any = laddr == [0; 4];
         if !wildcard {
             return self.pcbs.iter().find_map(|(&id, p)| {
                 (id != exclude
+                    && p.vnet.id == vnet
                     && p.hashed
                     && p.v4()
                     && p.wild()
@@ -267,7 +284,7 @@ impl Table {
         let mut best = None;
         let mut matchwild = 3 + MAPPED_COST;
         for (&id, p) in &self.pcbs {
-            if id == exclude || !p.hashed || p.lport != lport || !p.v4() {
+            if id == exclude || p.vnet.id != vnet || !p.hashed || p.lport != lport || !p.v4() {
                 continue;
             }
             let mut w = 0;
@@ -298,11 +315,19 @@ impl Table {
     }
 
     /// `in6_pcblookup_local`.
-    fn local6(&self, laddr: &In6, lport: u16, wildcard: bool, exclude: u64) -> Option<&Pcb> {
+    fn local6(
+        &self,
+        vnet: u32,
+        laddr: &In6,
+        lport: u16,
+        wildcard: bool,
+        exclude: u64,
+    ) -> Option<&Pcb> {
         let laddr_any = is_unspecified(laddr);
         if !wildcard {
             return self.pcbs.iter().find_map(|(&id, p)| {
                 (id != exclude
+                    && p.vnet.id == vnet
                     && p.hashed
                     && p.v6()
                     && p.wild()
@@ -314,7 +339,7 @@ impl Table {
         let mut best = None;
         let mut matchwild = 3;
         for (&id, p) in &self.pcbs {
-            if id == exclude || !p.hashed || p.lport != lport || !p.v6() {
+            if id == exclude || p.vnet.id != vnet || !p.hashed || p.lport != lport || !p.v6() {
                 continue;
             }
             let mut w = 0;
@@ -347,6 +372,7 @@ impl Table {
     #[must_use]
     pub fn lookup4(
         &self,
+        vnet: u32,
         faddr: [u8; 4],
         fport: u16,
         laddr: [u8; 4],
@@ -354,7 +380,8 @@ impl Table {
         wildcard: bool,
     ) -> Option<&Pcb> {
         let exact = self.pcbs.values().find(|p| {
-            p.hashed
+            p.vnet.id == vnet
+                && p.hashed
                 && p.v4()
                 && !p.wild()
                 && p.faddr4() == faddr
@@ -367,7 +394,7 @@ impl Table {
         }
         let (mut exact_l, mut wild, mut wild_mapped) = (None, None, None);
         for p in self.pcbs.values() {
-            if !p.hashed || !p.v4() || !p.wild() || p.lport != lport {
+            if p.vnet.id != vnet || !p.hashed || !p.v4() || !p.wild() || p.lport != lport {
                 continue;
             }
             if p.laddr4() == laddr {
@@ -389,6 +416,7 @@ impl Table {
     #[must_use]
     pub fn lookup6(
         &self,
+        vnet: u32,
         faddr: &In6,
         fport: u16,
         laddr: &In6,
@@ -396,7 +424,8 @@ impl Table {
         wildcard: bool,
     ) -> Option<&Pcb> {
         let exact = self.pcbs.values().find(|p| {
-            p.hashed
+            p.vnet.id == vnet
+                && p.hashed
                 && p.v6()
                 && !p.wild()
                 && p.faddr == *faddr
@@ -409,7 +438,7 @@ impl Table {
         }
         let (mut exact_l, mut wild) = (None, None);
         for p in self.pcbs.values() {
-            if !p.hashed || !p.v6() || !p.wild() || p.lport != lport {
+            if p.vnet.id != vnet || !p.hashed || !p.v6() || !p.wild() || p.lport != lport {
                 continue;
             }
             if p.laddr == *laddr {
@@ -428,15 +457,21 @@ impl Table {
     #[must_use]
     pub fn deliver(
         &self,
+        vnet: u32,
         family: Family,
         src: &Sockaddr,
         dst: &Sockaddr,
     ) -> Option<(Arc<Socket>, i32, i32, Family)> {
         let p = match family {
-            Family::Inet => {
-                self.lookup4(v4_of(&src.addr), src.port, v4_of(&dst.addr), dst.port, true)
-            }
-            Family::Inet6 => self.lookup6(&src.addr, src.port, &dst.addr, dst.port, true),
+            Family::Inet => self.lookup4(
+                vnet,
+                v4_of(&src.addr),
+                src.port,
+                v4_of(&dst.addr),
+                dst.port,
+                true,
+            ),
+            Family::Inet6 => self.lookup6(vnet, &src.addr, src.port, &dst.addr, dst.port, true),
         }?;
         if p.tw_until.is_some() {
             return None;
@@ -485,14 +520,14 @@ impl Table {
         if !is_multicast4(&laddr) && !cred.reuseport {
             // Another user's binding of the port is refused, unless it
             // is a connected stream's (a unique four-tuple).
-            if let Some(t) = self.local4(laddr, lport, true, id)
+            if let Some(t) = self.local4(me.vnet.id, laddr, lport, true, id)
                 && (!so_type_stream || t.wild())
                 && me.uid != t.uid
             {
                 return Err(Errno::EADDRINUSE);
             }
         }
-        if let Some(t) = self.local4(laddr, lport, wildcard, id)
+        if let Some(t) = self.local4(me.vnet.id, laddr, lport, wildcard, id)
             && (reuseport | reuseport_lb) & so_options_of(t) == 0
             && (laddr != [0; 4]
                 || t.laddr4() != [0; 4]
@@ -539,27 +574,27 @@ impl Table {
         reserved(lport, cred)?;
         let dual = me.flags & inp::IPV6_V6ONLY == 0 && is_unspecified(laddr);
         if !is_multicast6(laddr) && !cred.reuseport {
-            if let Some(t) = self.local6(laddr, lport, true, id)
+            if let Some(t) = self.local6(me.vnet.id, laddr, lport, true, id)
                 && (!so_type_stream || t.wild())
                 && me.uid != t.uid
             {
                 return Err(Errno::EADDRINUSE);
             }
             if dual
-                && let Some(t) = self.local4([0; 4], lport, true, id)
+                && let Some(t) = self.local4(me.vnet.id, [0; 4], lport, true, id)
                 && (!so_type_stream || t.wild())
                 && me.uid != t.uid
             {
                 return Err(Errno::EADDRINUSE);
             }
         }
-        if let Some(t) = self.local6(laddr, lport, wildcard, id)
+        if let Some(t) = self.local6(me.vnet.id, laddr, lport, wildcard, id)
             && (reuseport | reuseport_lb) & so_options_of(t) == 0
         {
             return Err(Errno::EADDRINUSE);
         }
         if dual
-            && let Some(t) = self.local4([0; 4], lport, wildcard, id)
+            && let Some(t) = self.local4(me.vnet.id, [0; 4], lport, wildcard, id)
             && (reuseport | reuseport_lb) & so_options_of(t) == 0
             && (t.laddr4() != [0; 4] || t.vflag & INP_IPV6PROTO != 0)
         {
@@ -581,6 +616,7 @@ impl Table {
     ) -> Result<u16, Errno> {
         use core::sync::atomic::Ordering::Relaxed;
         let me = self.pcbs.get(&id).ok_or(Errno::EINVAL)?;
+        let vn = me.vnet.id;
         let range = if me.flags & inp::HIGHPORT != 0 {
             Range::High
         } else if me.flags & inp::LOWPORT != 0 {
@@ -628,16 +664,16 @@ impl Table {
             let lport = self.last[slot];
             let taken = match dst {
                 Some(d) if v4only || d.family == Family::Inet => self
-                    .lookup4(v4_of(&d.addr), d.port, v4_of(laddr), lport, wildcard)
+                    .lookup4(vn, v4_of(&d.addr), d.port, v4_of(laddr), lport, wildcard)
                     .is_some(),
                 Some(d) => self
-                    .lookup6(&d.addr, d.port, laddr, lport, wildcard)
+                    .lookup6(vn, &d.addr, d.port, laddr, lport, wildcard)
                     .is_some(),
                 None if v6 => {
-                    self.local6(laddr, lport, wildcard, id).is_some()
-                        || (dual && self.local4(v4_of(laddr), lport, wildcard, id).is_some())
+                    self.local6(vn, laddr, lport, wildcard, id).is_some()
+                        || (dual && self.local4(vn, v4_of(laddr), lport, wildcard, id).is_some())
                 }
-                None => self.local4(v4_of(laddr), lport, wildcard, id).is_some(),
+                None => self.local4(vn, v4_of(laddr), lport, wildcard, id).is_some(),
             };
             if !taken {
                 return Ok(lport);
@@ -888,7 +924,7 @@ impl Table {
             self.ephemeral(id, &from_v4(laddr), Some(dst), true, cred)?
         } else {
             if self
-                .lookup4(faddr, dst.port, laddr, me.lport, false)
+                .lookup4(me.vnet.id, faddr, dst.port, laddr, me.lport, false)
                 .is_some()
             {
                 return Err(Errno::EADDRINUSE);
@@ -931,7 +967,7 @@ impl Table {
             (me.laddr, me.zone)
         };
         if self
-            .lookup6(&faddr, dst.port, &laddr, me.lport, false)
+            .lookup6(me.vnet.id, &faddr, dst.port, &laddr, me.lport, false)
             .is_some()
             && me.lport != 0
         {

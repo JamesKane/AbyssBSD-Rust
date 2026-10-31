@@ -445,7 +445,9 @@ impl Socket {
                 Sockaddr::v4(v4_of(&p.laddr), p.lport)
             };
             let family = dst.family;
-            let l = t.deliver(family, &src, &dst).map(|(s, _, _, _)| s);
+            let l = t
+                .deliver(self.vnet.id, family, &src, &dst)
+                .map(|(s, _, _, _)| s);
             (src, dst, family, l)
         };
         let mss = match family {

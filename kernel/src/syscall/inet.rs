@@ -33,12 +33,22 @@ use crate::fs::uio::UserIo;
 use crate::uaccess;
 
 /// `socreate`'s `pffindproto` and `pffindtype` for the internet domains:
-/// TCP and UDP, by type and (optionally) number.
-fn proto(ty: u32, protocol: i32) -> Result<Proto, Errno> {
+/// TCP and UDP, by type and (optionally) number, and raw IPv4 sockets of
+/// any protocol (`rip_attach`, which needs `PRIV_NETINET_RAW`).
+fn proto(family: Family, ty: u32, protocol: i32) -> Result<Proto, Errno> {
     match (ty, protocol) {
         (SOCK_STREAM, 0 | IPPROTO_TCP) => Ok(Proto::Tcp),
         (SOCK_DGRAM, 0 | IPPROTO_UDP) => Ok(Proto::Udp),
-        // No raw IP, SCTP, or UDP-Lite on loopback yet (P7).
+        (abi::inet::SOCK_RAW, p) if family == Family::Inet => {
+            let p = u8::try_from(p).map_err(|_| Errno::EPROTONOSUPPORT)?;
+            // `socreate`: raw IP has no `PR_CAPATTACH`.
+            crate::capsicum::refuse(crate::ktrace::CapFail::Proto(i32::from(p)))?;
+            if !crate::fs::inet::cred().raw {
+                return Err(Errno::EPERM);
+            }
+            Ok(Proto::Raw(p))
+        }
+        // Raw IPv6 sockets come with IPv6 (P7.5); no SCTP or UDP-Lite.
         (abi::inet::SOCK_RAW, _) => Err(Errno::EPROTONOSUPPORT),
         (SOCK_SEQPACKET, 0) => Err(Errno::EPROTOTYPE),
         (SOCK_STREAM | SOCK_DGRAM | SOCK_SEQPACKET, _) => Err(Errno::EPROTONOSUPPORT),
@@ -84,7 +94,7 @@ pub(super) fn socket(
     flags: u32,
     protocol: i32,
 ) -> SysResult {
-    let p = proto(ty, protocol)?;
+    let p = proto(family, ty, protocol)?;
     let so = Socket::new_in(&crate::net::curvnet(), family, p, &crate::fs::inet::cred());
     let fd = install(s, so, flags, None)?;
     Ok(u64::from(fd.cast_unsigned()))
@@ -197,13 +207,14 @@ pub(super) fn getsockopt(so: &Socket, level: i32, name: i32) -> Result<Vec<u8>, 
 }
 
 /// A send's control messages (`udp_send`, `tcp_usr_send`): TCP takes
-/// none; UDP's IP-level `IP_SENDSRCADDR` and `IP_TOS` are the only ones
-/// with meaning, and are taken without effect here; others at the IP
-/// level are `EINVAL`, at other levels ignored.
-fn check_control(so: &Socket, raw: &[u8]) -> Result<(), Errno> {
+/// none; UDP's IP-level `IP_SENDSRCADDR` and `IP_TOS` set the
+/// datagram's source and TOS (IPv6's are taken without effect); others
+/// at the IP level are `EINVAL`, at other levels ignored.
+fn check_control(so: &Socket, raw: &[u8]) -> Result<inet::SendCtl, Errno> {
+    let mut ctl = inet::SendCtl::default();
     if so.proto == Proto::Tcp {
         return if raw.is_empty() {
-            Ok(())
+            Ok(ctl)
         } else {
             Err(Errno::EINVAL)
         };
@@ -238,10 +249,21 @@ fn check_control(so: &Socket, raw: &[u8]) -> Result<(), Errno> {
             if !ok {
                 return Err(Errno::EINVAL);
             }
+            let data = &raw[at + CMSG_HDR..at + len];
+            if so.family == Family::Inet && so.proto == Proto::Udp {
+                if ty == ip::IP_RECVDSTADDR {
+                    ctl.src = Some(data.try_into().map_err(|_| Errno::EINVAL)?);
+                } else {
+                    let [t] = data else {
+                        return Err(Errno::EINVAL);
+                    };
+                    ctl.tos = Some(*t);
+                }
+            }
         }
         at += cmsg_space(len - CMSG_HDR).min(raw.len() - at);
     }
-    Ok(())
+    Ok(ctl)
 }
 
 /// The common part of `sendto` and `sendmsg` (`kern_sendit`).
@@ -256,17 +278,18 @@ pub(super) fn sendit(
     control: Option<Vec<u8>>,
     flags: i32,
 ) -> SysResult {
-    if let Some(c) = &control {
-        check_control(so, c)?;
-    }
+    let ctl = match &control {
+        Some(c) => check_control(so, c)?,
+        None => inet::SendCtl::default(),
+    };
     // A stream's destination is its peer, whatever is named
     // (`tcp_usr_send` with an address on a connected socket).
     let to = match (so.proto, to) {
-        (Proto::Udp, t) => t,
+        (Proto::Udp | Proto::Raw(_), t) => t,
         (Proto::Tcp, _) => None,
     };
     let ktr = crate::ktrace::genio_start(uio);
-    let r = crate::fs::inet::send(s, so, uio, to.as_deref(), flags, nonblock(f));
+    let r = crate::fs::inet::send(s, so, uio, to.as_deref(), ctl, flags, nonblock(f));
     crate::ktrace::genio(s, sock_fd, true, ktr, &r);
     r.map(|n| n as u64)
 }
@@ -285,16 +308,35 @@ fn cmsg(level: i32, ty: i32, data: &[u8]) -> Vec<u8> {
     m
 }
 
-/// `lo0`'s link address as `IP_RECVIF` gives it: a `sockaddr_dl` the
-/// size `if_attach` makes it.
-fn lo0_sdl() -> Vec<u8> {
-    let mut d = alloc::vec![0u8; 54];
-    d[0] = 54;
+/// Interface `index`'s link address as `IP_RECVIF` gives it
+/// (`ip_savecontrol`'s copy of `if_addr`): a `sockaddr_dl` with its
+/// name and hardware address, the size `if_attach` makes it.
+fn if_sdl(index: u16) -> Vec<u8> {
+    let (name, ty, ll) = crate::net::curvnet()
+        .net
+        .lock()
+        .by_index(index)
+        .map(|i| (i.name.clone(), i.ty, i.lladdr))
+        .unwrap_or_default();
+    let name = name.as_bytes();
+    let alen = ll.map_or(0, |l| l.len());
+    // `if_attach`: room for the name and twice the address, at least a
+    // `sockaddr_dl`'s.
+    let len = (8 + name.len() + 2 * alen)
+        .max(20)
+        .next_multiple_of(4)
+        .max(54);
+    let mut d = alloc::vec![0u8; len];
+    d[0] = u8::try_from(len).unwrap_or(54);
     d[1] = abi::inet::AF_LINK;
-    d[2..4].copy_from_slice(&1u16.to_ne_bytes());
-    d[4] = abi::net::IFT_LOOP;
-    d[5] = 3;
-    d[8..11].copy_from_slice(b"lo0");
+    d[2..4].copy_from_slice(&index.to_ne_bytes());
+    d[4] = ty;
+    d[5] = u8::try_from(name.len()).unwrap_or(0);
+    d[6] = u8::try_from(alen).unwrap_or(0);
+    d[8..8 + name.len()].copy_from_slice(name);
+    if let Some(l) = ll {
+        d[8 + name.len()..8 + name.len() + 6].copy_from_slice(&l);
+    }
     d
 }
 
@@ -304,7 +346,7 @@ fn lo0_sdl() -> Vec<u8> {
 fn controls(meta: &inet::Meta) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
     let w = meta.want;
-    if w & (want::TIMESTAMP | want::BINTIME) != 0 {
+    if w & (want::TIMESTAMP | want::BINTIME | want::REALTIME | want::MONOTONIC) != 0 {
         let ns = crate::time::realtime_base_ns().saturating_add(meta.stamp);
         if w & want::BINTIME != 0 {
             let frac = u64::try_from((u128::from(ns % 1_000_000_000) << 64) / 1_000_000_000)
@@ -320,6 +362,19 @@ fn controls(meta: &inet::Meta) -> Vec<Vec<u8>> {
             d.extend_from_slice(&(ns % 1_000_000_000 / 1000).to_ne_bytes());
             out.push(cmsg(SOL_SOCKET, SCM_TIMESTAMP, &d));
         }
+        // `SCM_REALTIME` and `SCM_MONOTONIC`: `struct timespec`s, the
+        // latter on the uptime clock the stamp was taken on.
+        for (bit, ty, t) in [
+            (want::REALTIME, abi::socket::SCM_REALTIME, ns),
+            (want::MONOTONIC, abi::socket::SCM_MONOTONIC, meta.stamp),
+        ] {
+            if w & bit != 0 {
+                let mut d = Vec::new();
+                d.extend_from_slice(&(t / 1_000_000_000).to_ne_bytes());
+                d.extend_from_slice(&(t % 1_000_000_000).to_ne_bytes());
+                out.push(cmsg(SOL_SOCKET, ty, &d));
+            }
+        }
     }
     let dst = &meta.dst;
     if w & want::DSTADDR != 0 {
@@ -332,7 +387,7 @@ fn controls(meta: &inet::Meta) -> Vec<Vec<u8>> {
         out.push(cmsg(IPPROTO_IP, ip::IP_RECVTOS, &[meta.tos]));
     }
     if w & want::IF != 0 {
-        out.push(cmsg(IPPROTO_IP, ip::IP_RECVIF, &lo0_sdl()));
+        out.push(cmsg(IPPROTO_IP, ip::IP_RECVIF, &if_sdl(meta.ifindex)));
     }
     if w & want::PKTINFO != 0 {
         let mut d = dst.addr.to_vec();
