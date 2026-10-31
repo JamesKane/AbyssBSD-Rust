@@ -71,6 +71,15 @@ impl UserIo {
             .ok()
             .filter(|&n| n <= IOV_MAX)
             .ok_or(Errno::EINVAL)?;
+        // One buffer, the usual `sendmsg` and `recvmsg`, is kept inline
+        // as `read`'s is (FreeBSD's `UIO_SMALLIOV` keeps a few on the
+        // stack).
+        if n == 1 {
+            let e = UserPtr::<Iovec>::new(iov)
+                .read()
+                .map_err(|_| Errno::EFAULT)?;
+            return Self::one(e.iov_base, e.iov_len);
+        }
         let mut v = Vec::new();
         v.try_reserve_exact(n).map_err(|_| Errno::ENOMEM)?;
         let mut resid: usize = 0;

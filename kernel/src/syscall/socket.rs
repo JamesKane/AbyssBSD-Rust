@@ -814,13 +814,15 @@ fn externalize(s: &Sleepable, control: Vec<Control>, flags: i32) -> Result<Vec<V
     let mut out = Vec::new();
     let mut err = Ok(());
     for c in control {
-        let (level, ty, data) = match c {
+        match c {
             Control::Rights(rights) => {
                 if err.is_err() {
                     continue;
                 }
-                // All of a message's descriptors or none (`fdallocn`).
-                let mut fds = Vec::new();
+                // Each descriptor is written into the message as it is
+                // installed; all of a message's or none (`fdallocn`).
+                let mut m = cmsg(SOL_SOCKET, SCM_RIGHTS, rights.len() * 4);
+                let mut got = 0;
                 let mut t = p.files.lock(s);
                 for mut r in rights {
                     if err.is_err() {
@@ -845,39 +847,48 @@ fn externalize(s: &Sleepable, control: Vec<Control>, flags: i32) -> Result<Vec<V
                             0,
                             limit,
                         ) {
-                            Ok(fd) => fds.push(fd),
+                            Ok(fd) => {
+                                let at = CMSG_HDR + got * 4;
+                                m[at..at + 4].copy_from_slice(&fd.to_ne_bytes());
+                                got += 1;
+                            }
                             Err(e) => err = Err(e),
                         },
                         None => err = Err(Errno::EBADF),
                     }
                 }
                 if err.is_err() {
-                    let closed: Vec<_> = fds.drain(..).filter_map(|fd| t.close(fd).ok()).collect();
+                    let closed: Vec<_> = m[CMSG_HDR..CMSG_HDR + got * 4]
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .filter_map(|fd| t.close(i32::from_ne_bytes(*fd)).ok())
+                        .collect();
                     drop(t);
                     drop(closed);
                     continue;
                 }
                 drop(t);
-                let mut d = Vec::new();
-                for fd in fds {
-                    d.extend_from_slice(&fd.to_ne_bytes());
-                }
-                (SOL_SOCKET, SCM_RIGHTS, d)
+                out.push(m);
             }
-            Control::Raw { level, ty, data } => (level, ty, data),
-        };
-        let mut m = alloc::vec![0u8; cmsg_space(data.len())];
-        m[0..4].copy_from_slice(
-            &u32::try_from(cmsg_len(data.len()))
-                .unwrap_or(0)
-                .to_ne_bytes(),
-        );
-        m[4..8].copy_from_slice(&level.to_ne_bytes());
-        m[8..12].copy_from_slice(&ty.to_ne_bytes());
-        m[CMSG_HDR..CMSG_HDR + data.len()].copy_from_slice(&data);
-        out.push(m);
+            Control::Raw { level, ty, data } => {
+                let mut m = cmsg(level, ty, data.len());
+                m[CMSG_HDR..CMSG_HDR + data.len()].copy_from_slice(&data);
+                out.push(m);
+            }
+        }
     }
     err.map(|()| out)
+}
+
+/// A control message of `len` data bytes, its header filled in and its
+/// data zero, a whole `CMSG_SPACE`.
+fn cmsg(level: i32, ty: i32, len: usize) -> Vec<u8> {
+    let mut m = alloc::vec![0u8; cmsg_space(len)];
+    m[0..4].copy_from_slice(&u32::try_from(cmsg_len(len)).unwrap_or(0).to_ne_bytes());
+    m[4..8].copy_from_slice(&level.to_ne_bytes());
+    m[8..12].copy_from_slice(&ty.to_ne_bytes());
+    m
 }
 
 /// Closes the descriptors of messages that did not fit

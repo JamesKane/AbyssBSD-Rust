@@ -2605,6 +2605,21 @@ mod user_memory {
             copy_out(at + 300, b"\0").unwrap();
             assert_eq!(copy_in_str_vec(at, 1024).as_deref(), Ok(&long[..]));
             assert_eq!(copy_in_str_vec(at, 300), Err(StrError::TooLong));
+            // Every length the copy treats differently (words, the loop of
+            // 32, `rep movsb`), across a page, both ways; and one byte past
+            // the mapping faults however long the copy.
+            let pattern: Vec<u8> = (0..=255u8).cycle().take(1000).collect();
+            for len in [1, 2, 3, 4, 7, 8, 15, 16, 17, 31, 32, 33, 63, 64, 255, 256, 257, 1000] {
+                let at = a + 6 * PAGE - (len as u64) / 2 - 1;
+                copy_out(at, &pattern[..len]).unwrap();
+                let mut back = alloc::vec![0u8; len];
+                copy_in(&mut back, at).unwrap();
+                assert_eq!(back, pattern[..len], "{len} bytes");
+                let past = end - len as u64 + 1;
+                assert_eq!(copy_in(&mut back, past), Err(Fault), "{len} bytes in");
+                assert_eq!(copy_out(past, &pattern[..len]), Err(Fault), "{len} bytes out");
+            }
+            assert_eq!(copy_out(a + 6 * PAGE, &[]), Ok(()));
             // Read-only: writes fault, reads still work.
             space.protect(&s, VirtAddr::new(a)..VirtAddr::new(a + 4 * PAGE), Prot::READ, None).unwrap();
             assert_eq!(copy_out(a + 3 * PAGE, b"x"), Err(Fault));
