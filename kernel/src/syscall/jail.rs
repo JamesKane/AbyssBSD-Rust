@@ -967,7 +967,8 @@ impl Descs {
         };
         let pr = prison::find_any(jid).ok_or_else(|| plain(Errno::ENOENT))?;
         jd.set_prison(&pr);
-        let file = crate::fs::file::File::new(crate::fs::file::FileKind::Jail(jd), fflags);
+        let file = crate::fs::file::File::new(crate::fs::file::FileKind::Jail(jd), fflags)
+            .map_err(plain)?;
         let fd = super::io::install(s, p, file, crate::fs::fdtable::FdFlags::default())
             .map_err(plain)?;
         let fd = i32::try_from(fd).unwrap_or(i32::MAX);

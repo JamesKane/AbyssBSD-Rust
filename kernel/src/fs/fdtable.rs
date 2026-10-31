@@ -408,7 +408,7 @@ impl FdTable {
                                 let new = crate::event::KqueueFile::new(true);
                                 kqueues.push(Arc::downgrade(&new.kq));
                                 pairs.push((Arc::clone(&k.kq), Arc::clone(&new.kq)));
-                                let f = File::new(FileKind::Kqueue(new), s.file.flags());
+                                let f = File::new(FileKind::Kqueue(new), s.file.flags())?;
                                 copies.push((key, Arc::clone(&f)));
                                 f
                             }

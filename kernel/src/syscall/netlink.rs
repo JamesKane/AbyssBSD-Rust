@@ -41,7 +41,7 @@ pub(super) fn socket(s: &Sleepable, ty: u32, flags: u32, protocol: i32) -> SysRe
         resolve_beneath: false,
     };
     let limit = super::io::max_files(&p);
-    let file = File::new(FileKind::Netlink(nl), status);
+    let file = File::new(FileKind::Netlink(nl), status)?;
     let fd = p.files.lock(s).alloc_with(file, fdf, None, 0, limit)?;
     Ok(u64::from(fd.cast_unsigned()))
 }

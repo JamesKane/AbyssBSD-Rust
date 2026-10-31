@@ -735,5 +735,21 @@ pub(crate) fn init(s: &Sleepable) {
             })),
         )
         .expect("kern.openfiles");
+        // `kern.maxfiles` (`CTLFLAG_RWTUN`): `falloc`'s limit.
+        t.add_writable(
+            kern,
+            Number::Fixed(abi::sysctl::kern::MAXFILES),
+            "maxfiles",
+            "Maximum number of files",
+            0,
+            sysctl::Value::Int(alloc::boxed::Box::new(|| {
+                crate::fs::file::MAX_FILES.load(core::sync::atomic::Ordering::Relaxed)
+            })),
+            sysctl::int_writer(|v| {
+                crate::fs::file::MAX_FILES.store(v, core::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            }),
+        )
+        .expect("kern.maxfiles");
     });
 }

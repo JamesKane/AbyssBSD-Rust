@@ -84,12 +84,29 @@ static MAX_QUEUED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicU
 /// `kern.sigqueue.signal_overflow`: signals the limit turned away.
 static OVERFLOWS: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
 
-/// Adds `kern.sigqueue`.
+/// `kern.signosys`: whether a number that is no system call also raises
+/// `SIGSYS` (`kern_nosys`).
+pub(crate) static SIGNOSYS: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(1);
+
+/// Adds `kern.sigqueue` and `kern.signosys`.
 pub(crate) fn sysctl_init(s: &Sleepable) {
     use core::sync::atomic::Ordering::Relaxed;
     use sysctl::{Number, Value};
     crate::sysctl::with(s, |t| {
         let kern = t.child(t.root(), "kern").expect("kern node");
+        t.add_writable(
+            kern,
+            Number::Auto,
+            "signosys",
+            "Send SIGSYS on return from invalid syscall",
+            0,
+            Value::Int(alloc::boxed::Box::new(|| SIGNOSYS.load(Relaxed))),
+            sysctl::int_writer(|v| {
+                SIGNOSYS.store(v, Relaxed);
+                Ok(())
+            }),
+        )
+        .expect("kern.signosys");
         let q = t
             .add_node(kern, Number::Auto, "sigqueue", "POSIX real time signal")
             .expect("kern.sigqueue");

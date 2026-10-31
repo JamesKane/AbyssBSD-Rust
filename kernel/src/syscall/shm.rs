@@ -48,7 +48,7 @@ fn install(s: &Sleepable, shm: Arc<Shm>, fflags: u32, cloexec: bool) -> SysResul
     let p = process()?;
     let limit = super::io::max_files(&p);
     let fd = p.files.lock(s).alloc(
-        File::new(FileKind::Shm(shm), fflags),
+        File::new(FileKind::Shm(shm), fflags)?,
         FdFlags {
             cloexec,
             clofork: false,

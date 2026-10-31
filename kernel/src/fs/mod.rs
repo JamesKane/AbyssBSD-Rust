@@ -794,8 +794,8 @@ pub(crate) fn console_table() -> FdTable {
     let s = unsafe { Sleepable::assume() };
     if let Some(c) = devfs::console()
         && let Ok(vf) = VnodeFile::open(&s, &c, true, false)
+        && let Ok(f) = File::new(FileKind::Vnode(vf), FREAD | FWRITE)
     {
-        let f = File::new(FileKind::Vnode(vf), FREAD | FWRITE);
         for _ in 0..3 {
             let _ = t.alloc(Arc::clone(&f), FdFlags::default(), 0, 3);
         }
@@ -828,7 +828,7 @@ pub(crate) fn check_std(s: &Sleepable, p: &crate::proc::Process) -> Result<(), E
     )?;
     let v = v.device(s)?.ops.open()?.unwrap_or(v);
     let vf = VnodeFile::open(s, &v, true, false)?;
-    let file = File::new(FileKind::Vnode(vf), FREAD | FWRITE);
+    let file = File::new(FileKind::Vnode(vf), FREAD | FWRITE)?;
     let mut t = p.files.lock(s);
     for fd in missing {
         // Only the process's own thread is in `exec`; nothing else fills

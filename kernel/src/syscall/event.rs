@@ -408,7 +408,7 @@ pub(super) fn kqueuex(s: &Sleepable, flags: u64) -> SysResult {
     let limit = max_files(&p);
     let mut t = p.files.lock(s);
     let fd = t.alloc(
-        File::new(FileKind::Kqueue(k), FREAD | FWRITE),
+        File::new(FileKind::Kqueue(k), FREAD | FWRITE)?,
         fdf,
         0,
         limit,

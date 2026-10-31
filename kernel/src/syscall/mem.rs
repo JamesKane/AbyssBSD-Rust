@@ -474,10 +474,12 @@ pub(super) fn mlock(s: &Sleepable, addr: u64, len: u64) -> SysResult {
     let limit = p.limits.lock()[abi::resource::rlimit::MEMLOCK as usize].rlim_cur;
     let space = p.space();
     let have = space.wired().count;
-    if (npages + have).saturating_mul(PAGE_SIZE) > limit {
+    if npages.saturating_add(have).saturating_mul(PAGE_SIZE) > limit {
         return Err(Errno::ENOMEM);
     }
-    if crate::mm::space::USER_WIRED.load(core::sync::atomic::Ordering::Relaxed) + npages
+    if crate::mm::space::USER_WIRED
+        .load(core::sync::atomic::Ordering::Relaxed)
+        .saturating_add(npages)
         > max_user_wired()
     {
         return Err(Errno::EAGAIN);
@@ -488,8 +490,9 @@ pub(super) fn mlock(s: &Sleepable, addr: u64, len: u64) -> SysResult {
     Ok(0)
 }
 
-/// `munlock(addr, len)`: with `PRIV_VM_MUNLOCK`.
-pub(super) fn munlock(addr: u64, len: u64) -> SysResult {
+/// `munlock(addr, len)`: with `PRIV_VM_MUNLOCK`, over memory mapped
+/// throughout (`ENOMEM`).
+pub(super) fn munlock(s: &Sleepable, addr: u64, len: u64) -> SysResult {
     let p = Process::current().ok_or(Errno::EINVAL)?;
     p.priv_check(crate::cred::Priv::VmMunlock)?;
     let last = addr.checked_add(len).ok_or(Errno::EINVAL)?;
@@ -497,7 +500,9 @@ pub(super) fn munlock(addr: u64, len: u64) -> SysResult {
     let end = last
         .checked_next_multiple_of(PAGE_SIZE)
         .ok_or(Errno::EINVAL)?;
-    p.space().unwire(VirtAddr::new(start)..VirtAddr::new(end));
+    p.space()
+        .unwire_mapped(s, VirtAddr::new(start)..VirtAddr::new(end))
+        .ok_or(Errno::ENOMEM)?;
     Ok(0)
 }
 
@@ -538,5 +543,5 @@ pub(super) fn munlockall() -> SysResult {
 
 /// `vm.max_user_wired`, in pages.
 fn max_user_wired() -> u64 {
-    crate::mm::free_frames() * 4 / 5
+    crate::mm::space::MAX_USER_WIRED.load(core::sync::atomic::Ordering::Relaxed)
 }

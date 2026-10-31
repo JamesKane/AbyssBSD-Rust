@@ -10,6 +10,7 @@ sys/kern/timerfd:timerfd_root__advance_time_no_cancel # passes; fails on FreeBSD
 sys/kern/timerfd:timerfd__argument_checks       # arm64: its last check passes an uninitialized itimerspec, valid there, so EBADF as FreeBSD's order gives; the baseline is amd64's
 sys/kern/unix_dgram:event                       # aio_read on a socket: POSIX AIO, P7
 sys/kern/socket_msg_waitall:close_tcp           # AF_INET, P7
+sys/kern/sonewconn_overflow:sonewconn_overflow_01 # the listen queue overflow log (sonewconn, kern.ipc.sooverinterval) and kern.msgbuf_clear: TCP's listen path, P7.6
 sys/kqueue/libkqueue/kqueue_test:main          # passes; FreeBSD 15.1 aborts it (signal 6)
 sys/kern/jail_lookup_root:jail_root             # nullfs, not yet planned (VFS.md §1.2)
 sys/capsicum/bindat_connectat:bindat_connectat_1 # AF_INET, P7

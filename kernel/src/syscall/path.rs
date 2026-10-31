@@ -252,7 +252,7 @@ pub(super) fn openat(s: &Sleepable, fd: u64, path_ptr: u64, flags: u64, mode: u6
                 fflags & FWRITE != 0,
                 flags & O_NONBLOCK != 0,
             )?;
-            let file = File::new(FileKind::Fifo(f), fflags & keep);
+            let file = File::new(FileKind::Fifo(f), fflags & keep)?;
             let fdf = FdFlags {
                 cloexec: flags & O_CLOEXEC != 0,
                 clofork: flags & O_CLOFORK != 0,
@@ -265,7 +265,7 @@ pub(super) fn openat(s: &Sleepable, fd: u64, path_ptr: u64, flags: u64, mode: u6
         } else {
             VnodeFile::open(s, &v, fflags & FWRITE != 0, flags & O_NONBLOCK != 0)?
         };
-        let file = File::new(FileKind::Vnode(vf), fflags & keep);
+        let file = File::new(FileKind::Vnode(vf), fflags & keep)?;
         // O_SHLOCK and O_EXLOCK take an `flock` lock as the file opens.
         if flags & (O_SHLOCK | O_EXLOCK) != 0
             && flags & O_PATH == 0
@@ -325,7 +325,7 @@ pub(crate) fn open_trace_file(
         return Err(Errno::EACCES);
     }
     let vf = VnodeFile::open(s, &v, true, false)?;
-    Ok(File::new(FileKind::Vnode(vf), FREAD | FWRITE))
+    File::new(FileKind::Vnode(vf), FREAD | FWRITE)
 }
 
 /// A core file (`corefile_open`): `name` opened to write, without
@@ -374,7 +374,7 @@ pub(crate) fn open_core_file(
         }
     };
     let vf = VnodeFile::open(s, &v, true, false)?;
-    Ok(File::new(FileKind::Vnode(vf), FWRITE))
+    File::new(FileKind::Vnode(vf), FWRITE)
 }
 
 /// `open(path, flags, mode)`.

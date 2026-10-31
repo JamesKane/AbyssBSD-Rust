@@ -526,7 +526,7 @@ fn run(s: &Sleepable, frame: &mut TrapFrame, call: Call) -> Result<Option<u64>, 
         Sysno::Mmap => mem::mmap(s, a0, a1, a2, a3, a4, a5),
         Sysno::Munmap => mem::munmap(s, a0, a1),
         Sysno::Mlock => mem::mlock(s, a0, a1),
-        Sysno::Munlock => mem::munlock(a0, a1),
+        Sysno::Munlock => mem::munlock(s, a0, a1),
         Sysno::Mlockall => mem::mlockall(s, a0),
         Sysno::Munlockall => mem::munlockall(),
         Sysno::Mprotect => mem::mprotect(s, a0, a1, a2),
@@ -691,7 +691,15 @@ fn nosys(number: u64) -> SysResult {
             kprintln!("syscall: {number} is not a system call");
         }
     }
-    if !matches!(lookup(number), Some(Slot::Live(_)))
+    // A number that is no system call, or one FreeBSD leaves to a module
+    // its kernel does not load, raises `SIGSYS` there (`kern_nosys`); a
+    // system call AbyssBSD has yet to bring returns `ENOSYS` alone.
+    let unknown = match lookup(number) {
+        Some(Slot::Live(n)) => module_only(n),
+        _ => true,
+    };
+    if unknown
+        && crate::signal::SIGNOSYS.load(Ordering::Relaxed) != 0
         && let Some(t) = crate::uthread::UserThread::current()
     {
         let _ = crate::signal::post_thread(
@@ -700,6 +708,38 @@ fn nosys(number: u64) -> SysResult {
         );
     }
     Err(Errno::ENOSYS)
+}
+
+/// The `NOSTD` system calls whose code is in a module stock GENERIC
+/// neither has nor loads at boot (`nnpfs`, `afs3`; `ksem` without
+/// `P1003_1B_SEMAPHORES`, `mqueuefs`, `sctp`): there they are `lkmressys`.
+fn module_only(n: Sysno) -> bool {
+    use Sysno as S;
+    matches!(
+        n,
+        S::NnpfsSyscall
+            | S::Afs3Syscall
+            | S::KsemClose
+            | S::KsemPost
+            | S::KsemWait
+            | S::KsemTrywait
+            | S::KsemInit
+            | S::KsemOpen
+            | S::KsemUnlink
+            | S::KsemGetvalue
+            | S::KsemDestroy
+            | S::KsemTimedwait
+            | S::KmqOpen
+            | S::KmqSetattr
+            | S::KmqTimedreceive
+            | S::KmqTimedsend
+            | S::KmqNotify
+            | S::KmqUnlink
+            | S::SctpPeeloff
+            | S::SctpGenericSendmsg
+            | S::SctpGenericSendmsgIov
+            | S::SctpGenericRecvmsg
+    )
 }
 
 /// `_exit(rval)`: ends the process.

@@ -1769,7 +1769,8 @@ impl Process {
                     clofork: false,
                     resolve_beneath: false,
                 };
-                let installed = self.files.lock(s).alloc(file, flags, 0, limit);
+                let installed =
+                    file.and_then(|file| self.files.lock(s).alloc(file, flags, 0, limit));
                 match installed {
                     Ok(fd) => Some(fd),
                     Err(e) => {

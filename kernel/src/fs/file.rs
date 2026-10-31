@@ -191,6 +191,12 @@ pub(crate) struct File {
 /// Open files system-wide (`openfiles`, `kern.openfiles`).
 pub(crate) static OPEN_FILES: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
 
+/// `kern.maxfiles`: the open files allowed system-wide (`maxfiles`), and
+/// 95% of it without `PRIV_MAXFILES`. FreeBSD's default for the memory
+/// [`crate::proc::MAXFILESPERPROC`] comes from: nine tenths of it is that.
+pub(crate) static MAX_FILES: core::sync::atomic::AtomicI32 =
+    core::sync::atomic::AtomicI32::new(129_960);
+
 impl Drop for File {
     fn drop(&mut self) {
         OPEN_FILES.fetch_sub(1, Ordering::Relaxed);
@@ -198,16 +204,25 @@ impl Drop for File {
 }
 
 impl File {
-    pub(crate) fn new(kind: FileKind, flags: u32) -> Arc<Self> {
-        OPEN_FILES.fetch_add(1, Ordering::Relaxed);
+    /// A new open file (`falloc`): `ENFILE` past [`MAX_FILES`], or past
+    /// 95% of it without `PRIV_MAXFILES` (`_falloc_noinstall`).
+    pub(crate) fn new(kind: FileKind, flags: u32) -> Result<Arc<Self>, Errno> {
+        let max = MAX_FILES.load(Ordering::Relaxed);
+        let open = OPEN_FILES.fetch_add(1, Ordering::Relaxed) + 1;
+        if open >= max
+            || open >= max - max / 20 && crate::fs::priv_check(crate::cred::Priv::Maxfiles).is_err()
+        {
+            OPEN_FILES.fetch_sub(1, Ordering::Relaxed);
+            return Err(Errno::ENFILE);
+        }
         // As `falloc` takes the opener's credential.
         let jail = crate::proc::Process::with_current(crate::proc::Process::jail).flatten();
-        Arc::new(Self {
+        Ok(Arc::new(Self {
             kind,
             flags: AtomicU32::new(flags),
             offset: Mutex::new(&OFFSET_LOCK, 0),
             jail,
-        })
+        }))
     }
 
     /// Whether a descriptor for it received by `to` must stay beneath it

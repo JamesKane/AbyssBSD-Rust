@@ -683,7 +683,7 @@ pub(super) fn posix_openpt(s: &Sleepable, flags: u64) -> SysResult {
     }
     let master = Arc::new(crate::tty::pts::alloc()?);
     let fflags = (flags & O_ACCMODE) + 1;
-    let file = File::new(FileKind::Pts(master), fflags & (FREAD | FWRITE));
+    let file = File::new(FileKind::Pts(master), fflags & (FREAD | FWRITE))?;
     install(
         s,
         &p,
@@ -713,8 +713,8 @@ pub(super) fn pipe2(s: &Sleepable, fildes: u64, flags: u64) -> SysResult {
     let limit = max_files(&p);
     let fds = {
         let mut t = p.files.lock(s);
-        let fa = t.alloc(File::new(FileKind::Pipe(a), status), fdf, 0, limit)?;
-        match t.alloc(File::new(FileKind::Pipe(b), status), fdf, 0, limit) {
+        let fa = t.alloc(File::new(FileKind::Pipe(a), status)?, fdf, 0, limit)?;
+        match File::new(FileKind::Pipe(b), status).and_then(|f| t.alloc(f, fdf, 0, limit)) {
             Ok(fb) => [fa, fb],
             Err(e) => {
                 let closed = t.close(fa);

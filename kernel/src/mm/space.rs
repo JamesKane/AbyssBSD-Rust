@@ -300,6 +300,10 @@ pub(crate) struct Wired {
 /// Pages user processes have wired, system-wide
 /// (`vm.stats.vm.v_user_wire_count`).
 pub(crate) static USER_WIRED: AtomicU64 = AtomicU64::new(0);
+/// `vm.max_user_wired`, in pages (`vm_page_max_user_wired`): set once
+/// the system is up, then root's to change.
+pub(crate) static MAX_USER_WIRED: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
 
 impl Wired {
     /// Whether all of pages `[start, end)` are wired.
@@ -310,10 +314,11 @@ impl Wired {
             .is_some_and(|(_, &e)| e >= end)
     }
 
-    /// Wires `[start, end)`: the pages newly wired.
+    /// Wires `[start, end)`: the pages newly wired. [`USER_WIRED`] moves
+    /// by this space's count, once: re-wiring wired pages adds nothing.
     fn wire(&mut self, start: u64, end: u64) -> u64 {
         let before = self.count;
-        self.unwire(start, end);
+        self.cut(start, end);
         // Merge with neighbors that touch.
         let (mut s, mut e) = (start, end);
         if let Some((&ps, &pe)) = self.ranges.range(..=s).next_back()
@@ -340,6 +345,14 @@ impl Wired {
 
     /// Unwires whatever of `[start, end)` is wired.
     fn unwire(&mut self, start: u64, end: u64) {
+        let before = self.count;
+        self.cut(start, end);
+        USER_WIRED.fetch_sub(before - self.count, Ordering::Relaxed);
+    }
+
+    /// Takes `[start, end)` out of the ranges and the count, leaving
+    /// [`USER_WIRED`] to the caller.
+    fn cut(&mut self, start: u64, end: u64) {
         let hit: alloc::vec::Vec<(u64, u64)> = self
             .ranges
             .range(..end)
@@ -349,16 +362,13 @@ impl Wired {
         for (s, e) in hit {
             self.ranges.remove(&s);
             self.count -= e - s;
-            USER_WIRED.fetch_sub(e - s, Ordering::Relaxed);
             if s < start {
                 self.ranges.insert(s, start);
                 self.count += start - s;
-                USER_WIRED.fetch_add(start - s, Ordering::Relaxed);
             }
             if e > end {
                 self.ranges.insert(end, e);
                 self.count += e - end;
-                USER_WIRED.fetch_add(e - end, Ordering::Relaxed);
             }
         }
     }
@@ -400,6 +410,11 @@ impl AddressSpace {
         let mut at = range.start;
         while at < range.end {
             let e = map.entry(at)?;
+            // An entry neither readable nor executable cannot be wired
+            // (`vm_map_wire_locked`: `KERN_INVALID_ADDRESS`).
+            if !e.prot().contains(vm::map::Prot::READ) && !e.prot().contains(vm::map::Prot::EXEC) {
+                return None;
+            }
             at = e.range().end;
         }
         drop(map);
@@ -419,6 +434,24 @@ impl AddressSpace {
     pub(crate) fn unwire(&self, range: core::ops::Range<VirtAddr>) {
         let (a, b) = (range.start.get() / PAGE_SIZE, range.end.get() / PAGE_SIZE);
         self.wired.lock().unwire(a, b);
+    }
+
+    /// `munlock`'s unwiring (`vm_map_unwire` with `VM_MAP_WIRE_NOHOLES`):
+    /// `None`, and nothing unwired, if part of `range` is not mapped.
+    pub(crate) fn unwire_mapped(
+        &self,
+        s: &Sleepable,
+        range: core::ops::Range<VirtAddr>,
+    ) -> Option<()> {
+        let map = self.map.lock(s);
+        let mut at = range.start;
+        while at < range.end {
+            let e = map.entry(at)?;
+            at = e.range().end;
+        }
+        drop(map);
+        self.unwire(range);
+        Some(())
     }
 
     /// Unwires everything (`munlockall`, and `MCL_FUTURE` goes).

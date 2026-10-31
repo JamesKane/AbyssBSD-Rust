@@ -82,16 +82,29 @@ pub(crate) fn init() {
     let k = t.child(root, "kern").expect("kern node");
     let h = t.child(root, "hw").expect("hw node");
     // `vm.max_user_wired`: four fifths of the memory free once the system
-    // is up (`vm_pageout_init`).
+    // is up (`vm_pageout_init`); writable (`SYSCTL_ULONG`, `CTLFLAG_RW`).
     {
+        use crate::mm::space::MAX_USER_WIRED;
+        use core::sync::atomic::Ordering;
         let v = t.child(root, "vm").expect("vm node");
-        let wired = crate::mm::free_frames() * 4 / 5;
-        t.add_value(
+        MAX_USER_WIRED.store(crate::mm::free_frames() * 4 / 5, Ordering::Relaxed);
+        t.add_writable(
             v,
             Number::Auto,
             "max_user_wired",
             "system-wide limit to user-wired page count",
-            Value::Ulong(alloc::boxed::Box::new(move || wired)),
+            0,
+            Value::Ulong(alloc::boxed::Box::new(|| {
+                MAX_USER_WIRED.load(Ordering::Relaxed)
+            })),
+            alloc::sync::Arc::new(|b: &[u8]| {
+                let v = b
+                    .first_chunk::<8>()
+                    .map(|c| u64::from_ne_bytes(*c))
+                    .ok_or(abi::errno::Errno::EINVAL)?;
+                MAX_USER_WIRED.store(v, Ordering::Relaxed);
+                Ok(())
+            }),
         )
         .expect("vm.max_user_wired");
         let stats = t

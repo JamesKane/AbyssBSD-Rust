@@ -72,7 +72,7 @@ fn install(
     let file = File::new(
         FileKind::Inet(InetFile::new(so, c.euid(), c.egid())),
         status,
-    );
+    )?;
     p.files.lock(s).alloc_with(file, fdf, caps, 0, limit)
 }
 

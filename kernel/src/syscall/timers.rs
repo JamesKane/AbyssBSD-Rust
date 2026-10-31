@@ -196,7 +196,7 @@ fn install(s: &Sleepable, kind: FileKind, status: u32, cloexec: bool) -> SysResu
     let p = process()?;
     let limit = max_files(&p);
     let fd = p.files.lock(s).alloc(
-        File::new(kind, status),
+        File::new(kind, status)?,
         FdFlags {
             cloexec,
             clofork: false,
