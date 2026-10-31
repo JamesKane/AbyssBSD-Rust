@@ -6,8 +6,10 @@
 //! the same lock for state interrupt handlers never touch: holding it only
 //! holds off preemption (FreeBSD's spin versus default mutexes), which
 //! costs one per-CPU increment rather than masking interrupts (about 12 ns
-//! a lock under bhyve), and leaves the profiler able to see inside it. The
-//! rest of the set
+//! a lock under bhyve), and leaves the profiler able to see inside it.
+//! [`DelayLock`] holds off preemption too, but is not FIFO: a waiter
+//! spins with backoff and whoever finds it free takes it, as on a FreeBSD
+//! default mutex whose owner is running. The rest of the set
 //! (sleepable mutexes, rw/sx locks, epoch) builds on the scheduler
 //! (docs/ARCHITECTURE.md §5.1). [`PerCpuCounter`] counts without sharing
 //! cache lines between CPUs.
@@ -21,7 +23,7 @@ pub use percpu::PerCpuCounter;
 
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 /// A FIFO ticket spin lock. Holding it masks interrupts on this CPU.
 #[derive(Debug)]
@@ -269,6 +271,107 @@ impl<T> Drop for PreemptLockGuard<'_, T> {
     }
 }
 
+/// A test-and-set spin lock for state no interrupt handler touches, not
+/// FIFO: a waiter reads it with exponential backoff and takes it once it
+/// looks free (FreeBSD's `__mtx_lock_sleep` spinning on a running owner,
+/// `lock_delay`). Under contention the holder may take it straight back
+/// rather than wait for every CPU in line, as on FreeBSD; for locks
+/// taken in quick succession by the same threads, such as umtx's chains.
+/// Holding it holds off preemption, as [`PreemptLock`].
+#[derive(Debug)]
+pub struct DelayLock<T> {
+    locked: AtomicBool,
+    value: UnsafeCell<T>,
+}
+
+// SAFETY: the lock serializes all access to `value`.
+unsafe impl<T: Send> Sync for DelayLock<T> {}
+// SAFETY: moving the lock moves the value.
+unsafe impl<T: Send> Send for DelayLock<T> {}
+
+/// The longest backoff, in spin-loop hints: FreeBSD's
+/// `lock_roundup_2(mp_ncpus) * 256`, set once the CPUs are counted.
+static DELAY_MAX: AtomicU32 = AtomicU32::new(512);
+
+/// Sets the backoff limit for `cpus` CPUs (`lock_delay_default_init`).
+pub fn set_delay_cpus(cpus: usize) {
+    let round = (cpus + 1).next_power_of_two();
+    let max = u32::try_from(round * 256)
+        .unwrap_or(u32::MAX)
+        .min(i16::MAX as u32);
+    DELAY_MAX.store(max, Ordering::Relaxed);
+}
+
+impl<T> DelayLock<T> {
+    /// A new unlocked lock.
+    pub const fn new(value: T) -> Self {
+        Self {
+            locked: AtomicBool::new(false),
+            value: UnsafeCell::new(value),
+        }
+    }
+
+    /// Holds off preemption and spins until the lock is held.
+    pub fn lock(&self) -> DelayLockGuard<'_, T> {
+        hal::critical::enter();
+        debug_assert!(
+            !hal::interrupt::active(),
+            "a DelayLock taken in an interrupt handler"
+        );
+        let mut delay = 1u32;
+        while self
+            .locked
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            // Read, not written, while it is held: the holder's cache line
+            // stays put.
+            while self.locked.load(Ordering::Relaxed) {
+                for _ in 0..delay {
+                    core::hint::spin_loop();
+                }
+                delay = delay
+                    .saturating_mul(2)
+                    .min(DELAY_MAX.load(Ordering::Relaxed));
+            }
+        }
+        DelayLockGuard { lock: self }
+    }
+
+    /// The value, through exclusive access to the lock (no locking needed).
+    pub fn get_mut(&mut self) -> &mut T {
+        self.value.get_mut()
+    }
+}
+
+/// Proof that a [`DelayLock`] is held; releases it on drop.
+#[derive(Debug)]
+pub struct DelayLockGuard<'a, T> {
+    lock: &'a DelayLock<T>,
+}
+
+impl<T> Deref for DelayLockGuard<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        // SAFETY: the guard proves the lock is held.
+        unsafe { &*self.lock.value.get() }
+    }
+}
+
+impl<T> DerefMut for DelayLockGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        // SAFETY: the guard proves the lock is held, exclusively.
+        unsafe { &mut *self.lock.value.get() }
+    }
+}
+
+impl<T> Drop for DelayLockGuard<'_, T> {
+    fn drop(&mut self) {
+        self.lock.locked.store(false, Ordering::Release);
+        hal::critical::exit();
+    }
+}
+
 /// A value set once, then read without locking.
 #[derive(Debug)]
 pub struct Once<T> {
@@ -351,6 +454,35 @@ mod tests {
             t.join().unwrap();
         }
         assert_eq!(*lock.lock(), 40_000);
+    }
+
+    #[test]
+    fn delay_lock_serializes_threads() {
+        set_delay_cpus(4);
+        let lock = Arc::new(DelayLock::new(0u64));
+        let threads: std::vec::Vec<_> = (0..4)
+            .map(|_| {
+                let lock = Arc::clone(&lock);
+                std::thread::spawn(move || {
+                    for _ in 0..10_000 {
+                        *lock.lock() += 1;
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(*lock.lock(), 40_000);
+    }
+
+    #[test]
+    fn delay_limit_follows_freebsd() {
+        // `lock_roundup_2`: the next power of two above the count.
+        for (cpus, max) in [(1, 512), (7, 2048), (8, 4096), (16, 8192), (1000, 32767)] {
+            set_delay_cpus(cpus);
+            assert_eq!(DELAY_MAX.load(Ordering::Relaxed), max, "{cpus} CPUs");
+        }
     }
 
     #[test]

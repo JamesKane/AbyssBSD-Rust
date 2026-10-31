@@ -48,7 +48,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use abi::errno::Errno;
 use abi::time::Timespec;
-use sync::PreemptLock;
+use sync::{DelayLock, PreemptLock};
 
 pub use cond::CvTime;
 pub use mutex::Mode;
@@ -371,13 +371,13 @@ struct ChainState<T: Thread> {
 
 /// A chain: some keys' queues and the lock over them.
 struct Chain<T: Thread> {
-    state: PreemptLock<ChainState<T>>,
+    state: DelayLock<ChainState<T>>,
 }
 
 impl<T: Thread> Chain<T> {
     const fn new() -> Self {
         Self {
-            state: PreemptLock::new(ChainState {
+            state: DelayLock::new(ChainState {
                 busy: false,
                 busy_waiters: VecDeque::new(),
                 queues: Vec::new(),
@@ -387,7 +387,7 @@ impl<T: Thread> Chain<T> {
     }
 }
 
-type Guard<'a, T> = sync::PreemptLockGuard<'a, ChainState<T>>;
+type Guard<'a, T> = sync::DelayLockGuard<'a, ChainState<T>>;
 
 impl<T: Thread> ChainState<T> {
     fn queue(&mut self, key: &Key, q: Q) -> Option<&mut Queue<T>> {
@@ -490,7 +490,7 @@ pub struct Umtx<T: Thread> {
     /// FreeBSD's `umtx_lock`: owners and blocked lists of
     /// priority-inheritance mutexes, and what each thread owns and is
     /// blocked on. Taken under a chain lock, never the other way.
-    pi_lock: PreemptLock<()>,
+    pi_lock: DelayLock<()>,
 }
 
 impl<T: Thread> core::fmt::Debug for Umtx<T> {
@@ -516,7 +516,7 @@ impl<T: Thread> Umtx<T> {
                 [const { Chain::new() }; CHAINS],
                 [const { Chain::new() }; CHAINS],
             ],
-            pi_lock: PreemptLock::new(()),
+            pi_lock: DelayLock::new(()),
         }
     }
 

@@ -147,6 +147,7 @@ fn kmain(boot_info: PhysAddr) -> ! {
     let s = unsafe { sched::Sleepable::assume() };
     random::init();
     smp::start_cpus();
+    sync::set_delay_cpus(sched::online_cpus());
     #[cfg(target_arch = "aarch64")]
     idregs::finish();
     topology::summarize();
