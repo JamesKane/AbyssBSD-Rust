@@ -259,12 +259,17 @@ fn packed(mut k: Box<KinfoVmentry>) -> Vec<u8> {
 /// `p`'s map, packed, as `kern.proc.vmmap` returns it. For core dumps'
 /// `NT_PROCSTAT_VMMAP` too.
 pub(crate) fn vmmap(s: &Sleepable, p: &Process) -> Vec<u8> {
-    let entries = p.space().entries(s);
     let mut out = Vec::new();
-    for e in &entries {
-        out.extend(packed(entry_kinfo(s, p, e, &entries)));
-    }
+    vmmap_to(s, p, &mut |b| out.extend_from_slice(b));
     out
+}
+
+/// As [`vmmap`], each record given to `emit` as it is made.
+pub(crate) fn vmmap_to(s: &Sleepable, p: &Process, emit: &mut dyn FnMut(&[u8])) {
+    let entries = p.space().entries(s);
+    for e in &entries {
+        emit(&packed(entry_kinfo(s, p, e, &entries)));
+    }
 }
 
 /// Entry `index` of `p`'s map, whole (for `PT_VM_ENTRY`); `None` past

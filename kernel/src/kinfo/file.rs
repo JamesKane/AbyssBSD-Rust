@@ -422,10 +422,17 @@ fn fill_shm(s: &Sleepable, shm: &crate::fs::shm::Shm, k: &mut KinfoFile<KfFile>)
 /// `kern.proc.filedesc` returns them (`kern_proc_filedesc_out`). For core
 /// dumps' `NT_PROCSTAT_FILES` too.
 pub(crate) fn files(s: &Sleepable, p: &Process) -> Vec<u8> {
-    use abi::fcntl::{FREAD, FWRITE};
     let mut out = Vec::new();
+    files_to(s, p, &mut |b| out.extend_from_slice(b));
+    out
+}
+
+/// As [`files`], each record given to `emit` as it is made, for a core
+/// dump, which never holds them all.
+pub(crate) fn files_to(s: &Sleepable, p: &Process, emit: &mut dyn FnMut(&[u8])) {
+    use abi::fcntl::{FREAD, FWRITE};
     if let Some(v) = p.text_vnode() {
-        out.extend(vnode_entry(s, p, &v, KF_FD_TYPE_TEXT, FREAD));
+        emit(&vnode_entry(s, p, &v, KF_FD_TYPE_TEXT, FREAD));
     }
     if let Some(name) = crate::tty::controlling_node(p.sid()) {
         let path = alloc::format!("/dev/{name}");
@@ -438,14 +445,14 @@ pub(crate) fn files(s: &Sleepable, p: &Process) -> Vec<u8> {
             rec.kf_flags = kf_flags(FREAD | FWRITE);
             rec.kf_ref_count = -1;
             rec.kf_offset = -1;
-            out.extend(finish(rec, true));
+            emit(&finish(rec, true));
         }
     }
     if !p.is_zombie() {
         let cwd = Arc::clone(p.cwd.lock().vnode());
-        out.extend(vnode_entry(s, p, &cwd, KF_FD_TYPE_CWD, FREAD));
+        emit(&vnode_entry(s, p, &cwd, KF_FD_TYPE_CWD, FREAD));
         let root = Arc::clone(crate::fs::root_of(p).as_ref());
-        out.extend(vnode_entry(s, p, &root, KF_FD_TYPE_ROOT, FREAD));
+        emit(&vnode_entry(s, p, &root, KF_FD_TYPE_ROOT, FREAD));
         let prison = p.jail();
         let jroot = prison
             .as_ref()
@@ -454,7 +461,7 @@ pub(crate) fn files(s: &Sleepable, p: &Process) -> Vec<u8> {
         if let Some(jroot) = jroot
             && !Arc::ptr_eq(&jroot, &crate::fs::root())
         {
-            out.extend(vnode_entry(s, p, &jroot, KF_FD_TYPE_JAIL, FREAD));
+            emit(&vnode_entry(s, p, &jroot, KF_FD_TYPE_JAIL, FREAD));
         }
     }
     let slots: Vec<(i32, Arc<File>, CapRights)> = {
@@ -468,10 +475,9 @@ pub(crate) fn files(s: &Sleepable, p: &Process) -> Vec<u8> {
     };
     for (fd, f, rights) in slots {
         if let Some(rec) = file_record(s, p, fd, &f, rights, true) {
-            out.extend(rec);
+            emit(&rec);
         }
     }
-    out
 }
 
 /// `fcntl(F_KINFO)`: descriptor `fd`'s whole record, with no rights, as

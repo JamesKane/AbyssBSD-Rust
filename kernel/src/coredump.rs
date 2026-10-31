@@ -246,13 +246,16 @@ pub(crate) fn write_core(
             });
         }
     }
-    let notes = notes(s, t, sig);
+    let mut measured = Notes::measure();
+    notes(s, t, sig, &mut measured);
+    let notes_len = measured.len;
     // Past `PN_XNUM` program headers the count goes in a section header.
     const PN_XNUM: usize = 0xffff;
     let nph = segments.len() + 1;
     let extended = nph >= PN_XNUM;
     let hdrsize = 64 + 56 * nph + if extended { 64 } else { 0 };
-    let data_at = (hdrsize + notes.len()).next_multiple_of(PAGE_BYTES) as u64;
+    let notes_end = hdrsize as u64 + notes_len;
+    let data_at = notes_end.next_multiple_of(PAGE);
     let total: u64 = data_at + segments.iter().map(|g| g.len).sum::<u64>();
     if total >= limit {
         return Err(Errno::EFAULT);
@@ -283,7 +286,7 @@ pub(crate) fn write_core(
             hdr.extend_from_slice(&v.to_le_bytes());
         }
     };
-    phdr(4, 4, hdrsize as u64, 0, notes.len() as u64, 0, 4);
+    phdr(4, 4, hdrsize as u64, 0, notes_len, 0, 4);
     let mut at = data_at;
     for g in &segments {
         // `__elfN(untrans_prot)`: `PF_X`, `PF_W`, `PF_R`.
@@ -300,11 +303,15 @@ pub(crate) fn write_core(
         hdr.extend_from_slice(&sh);
     }
     write(0, &hdr)?;
-    write(hdrsize as u64, &notes)?;
-    let pad = data_at - (hdrsize + notes.len()) as u64;
+    // The notes again, written this time, then zeros to the first page
+    // of memory.
+    let mut out = Notes::writer(measured, &mut *write, hdrsize as u64);
+    notes(s, t, sig, &mut out);
+    out.finish(notes_len)?;
+    let pad = data_at - notes_end;
     if pad > 0 {
         write(
-            (hdrsize + notes.len()) as u64,
+            notes_end,
             &alloc::vec![0u8; usize::try_from(pad).unwrap_or(0)],
         )?;
     }
@@ -347,23 +354,153 @@ pub(crate) fn dump_for_debugger(
     })
 }
 
-/// One ELF note: header, owner, and `desc`, each part padded to 4.
-fn note(out: &mut Vec<u8>, ty: u32, desc: &[u8]) {
-    out.extend_from_slice(&u32::try_from(VENDOR.len()).unwrap_or(0).to_le_bytes());
-    out.extend_from_slice(&u32::try_from(desc.len()).unwrap_or(0).to_le_bytes());
-    out.extend_from_slice(&ty.to_le_bytes());
-    out.extend_from_slice(VENDOR);
-    out.resize(out.len().next_multiple_of(4), 0);
-    out.extend_from_slice(desc);
-    out.resize(out.len().next_multiple_of(4), 0);
+/// The notes' bytes staged before each write.
+const STAGE: usize = 16 * PAGE_BYTES;
+
+/// Where a core's notes go, as FreeBSD's `sbuf` with `sbuf_count_drain`
+/// and then `sbuf_drain_core_output` (`__elfN(coredump)`): measured first,
+/// each note's size kept (`struct note_info`), so the memory can be placed
+/// after them; then written from `at`, [`STAGE`] bytes at a time. Never
+/// held whole: a process with thousands of descriptors has megabytes of
+/// notes. The first write error sticks.
+struct Notes<'w> {
+    write: Option<CoreWriter<'w>>,
+    /// Each note's description size, from the measuring pass.
+    sizes: Vec<usize>,
+    next: usize,
+    len: u64,
+    /// The end of the description being written: what passes it is
+    /// dropped, as a note may not outgrow its measured size.
+    clip: Option<u64>,
+    at: u64,
+    stage: Vec<u8>,
+    err: Option<Errno>,
+}
+
+impl<'w> Notes<'w> {
+    fn measure() -> Self {
+        Self {
+            write: None,
+            sizes: Vec::new(),
+            next: 0,
+            len: 0,
+            clip: None,
+            at: 0,
+            stage: Vec::new(),
+            err: None,
+        }
+    }
+
+    /// The writing pass, at offset `at`, with the sizes `measured` found.
+    fn writer(measured: Self, write: CoreWriter<'w>, at: u64) -> Self {
+        Self {
+            write: Some(write),
+            sizes: measured.sizes,
+            at,
+            stage: Vec::with_capacity(STAGE),
+            ..Self::measure()
+        }
+    }
+
+    fn put(&mut self, mut b: &[u8]) {
+        if let Some(end) = self.clip {
+            let room = usize::try_from(end.saturating_sub(self.len)).unwrap_or(usize::MAX);
+            b = &b[..b.len().min(room)];
+        }
+        self.len += b.len() as u64;
+        if self.write.is_some() {
+            self.stage.extend_from_slice(b);
+            if self.stage.len() >= STAGE {
+                self.flush();
+            }
+        }
+    }
+
+    fn zeros(&mut self, n: u64) {
+        const Z: [u8; 64] = [0; 64];
+        let mut n = n;
+        while n > 0 {
+            let k = usize::try_from(n).map_or(Z.len(), |n| n.min(Z.len()));
+            self.put(&Z[..k]);
+            n -= k as u64;
+        }
+    }
+
+    fn pad4(&mut self) {
+        self.zeros(self.len.next_multiple_of(4) - self.len);
+    }
+
+    fn flush(&mut self) {
+        if let Some(w) = self.write.as_mut()
+            && !self.stage.is_empty()
+        {
+            if self.err.is_none()
+                && let Err(e) = w(self.at, &self.stage)
+            {
+                self.err = Some(e);
+            }
+            self.at += self.stage.len() as u64;
+            self.stage.clear();
+        }
+    }
+
+    /// The writing pass's end: written out, at the length measured.
+    fn finish(mut self, total: u64) -> Result<(), Errno> {
+        if self.len < total {
+            self.zeros(total - self.len);
+        }
+        self.flush();
+        self.err.map_or(Ok(()), Err)
+    }
+}
+
+/// One ELF note: header, owner, and the description `desc` puts, each
+/// part padded to 4 (`__elfN(putnote)`). Its size is what the measuring
+/// pass found; written, it is clipped or padded with zeros to that.
+fn note_with(out: &mut Notes<'_>, ty: u32, desc: impl FnOnce(&mut Notes<'_>)) {
+    let size = if out.write.is_none() {
+        None
+    } else {
+        let Some(&size) = out.sizes.get(out.next) else {
+            // A note more than measured: left out, as the space is not
+            // there.
+            return;
+        };
+        out.next += 1;
+        Some(size)
+    };
+    out.put(&u32::try_from(VENDOR.len()).unwrap_or(0).to_le_bytes());
+    out.put(&u32::try_from(size.unwrap_or(0)).unwrap_or(0).to_le_bytes());
+    out.put(&ty.to_le_bytes());
+    out.put(VENDOR);
+    out.pad4();
+    let start = out.len;
+    match size {
+        None => {
+            desc(out);
+            let measured = usize::try_from(out.len - start).unwrap_or(0);
+            out.sizes.push(measured);
+        }
+        Some(size) => {
+            let end = start + size as u64;
+            out.clip = Some(end);
+            desc(out);
+            out.clip = None;
+            out.zeros(end - out.len);
+        }
+    }
+    out.pad4();
+}
+
+fn note(out: &mut Notes<'_>, ty: u32, desc: &[u8]) {
+    note_with(out, ty, |o| o.put(desc));
 }
 
 /// `__elfN(prepare_notes)`: the process's, then each thread's (the
 /// dumping one first), then the process information.
-fn notes(s: &Sleepable, t: &UserThread, sig: u32) -> Vec<u8> {
+fn notes(s: &Sleepable, t: &UserThread, sig: u32, out: &mut Notes<'_>) {
     let p = t.process();
-    let mut out = Vec::new();
-    note(&mut out, NT_PRPSINFO, bytes_of(&prpsinfo(p)));
+    note(out, NT_PRPSINFO, bytes_of(&prpsinfo(p)));
     let mut threads = alloc::vec![Arc::clone(
         &t.process().thread_by_tid(t.tid()).unwrap_or_else(|| {
             // The dumping thread is its process's.
@@ -372,10 +509,9 @@ fn notes(s: &Sleepable, t: &UserThread, sig: u32) -> Vec<u8> {
     )];
     threads.extend(p.threads().into_iter().filter(|o| o.tid() != t.tid()));
     for th in &threads {
-        thread_notes(&mut out, th, sig);
+        thread_notes(out, th, sig);
     }
-    procstat_notes(s, &mut out, p);
-    out
+    procstat_notes(s, out, p);
 }
 
 /// `struct prpsinfo`: the command and its arguments, spaces between.
@@ -401,7 +537,7 @@ fn prpsinfo(p: &Process) -> Prpsinfo {
 
 /// A thread's notes: `NT_PRSTATUS` first, its other register sets, its
 /// name, and its `ptrace_lwpinfo`.
-fn thread_notes(out: &mut Vec<u8>, t: &UserThread, sig: u32) {
+fn thread_notes(out: &mut Notes<'_>, t: &UserThread, sig: u32) {
     if let Ok(st) = crate::ptrace::prstatus(t, sig.cast_signed()) {
         note(out, NT_PRSTATUS, &st);
     }
@@ -426,7 +562,7 @@ fn thread_notes(out: &mut Vec<u8>, t: &UserThread, sig: u32) {
 }
 
 #[cfg(target_arch = "x86_64")]
-fn machine_notes(out: &mut Vec<u8>, t: &UserThread) {
+fn machine_notes(out: &mut Notes<'_>, t: &UserThread) {
     let (r_fsbase, r_gsbase) = crate::ptrace::user_bases(t);
     let bases = abi::ptrace::regs_amd64::Segbasereg { r_fsbase, r_gsbase };
     note(out, NT_X86_SEGBASES, bytes_of(&bases));
@@ -442,7 +578,7 @@ fn machine_notes(out: &mut Vec<u8>, t: &UserThread) {
 }
 
 #[cfg(target_arch = "aarch64")]
-fn machine_notes(out: &mut Vec<u8>, t: &UserThread) {
+fn machine_notes(out: &mut Notes<'_>, t: &UserThread) {
     let (tls, _) = crate::ptrace::user_bases(t);
     note(out, NT_ARM_TLS, &tls.to_le_bytes());
     // The top byte is ignored.
@@ -455,32 +591,28 @@ fn machine_notes(out: &mut Vec<u8>, t: &UserThread) {
 
 /// The process information notes, each its structure's size then the
 /// data, as `procstat` reads them from a core.
-fn procstat_notes(s: &Sleepable, out: &mut Vec<u8>, p: &Process) {
+fn procstat_notes(s: &Sleepable, out: &mut Notes<'_>, p: &Process) {
     let with_size = |size: usize, data: &[u8]| {
         let mut b = i32::try_from(size).unwrap_or(0).to_le_bytes().to_vec();
         b.extend_from_slice(data);
         b
     };
+    let struct_size = |size: usize| i32::try_from(size).unwrap_or(0).to_le_bytes();
     // One `kinfo_proc` per thread (`kern_proc_out` without
-    // `KERN_PROC_NOTHREADS`); files and mappings packed.
-    let proc_ = crate::kinfo::proc_entries(s, p, true);
-    note(
-        out,
-        NT_PROCSTAT_PROC,
-        &with_size(abi::kinfo::KINFO_PROC_SIZE, &proc_),
-    );
-    let files = crate::kinfo::file::files(s, p);
-    note(
-        out,
-        NT_PROCSTAT_FILES,
-        &with_size(abi::kinfo::KINFO_FILE_SIZE, &files),
-    );
-    let vmmap = crate::kinfo::vm::vmmap(s, p);
-    note(
-        out,
-        NT_PROCSTAT_VMMAP,
-        &with_size(abi::kinfo::KINFO_VMENTRY_SIZE, &vmmap),
-    );
+    // `KERN_PROC_NOTHREADS`); files and mappings packed. Each record goes
+    // out as it is made.
+    note_with(out, NT_PROCSTAT_PROC, |o| {
+        o.put(&struct_size(abi::kinfo::KINFO_PROC_SIZE));
+        crate::kinfo::proc_entries_to(s, p, true, &mut |b| o.put(b));
+    });
+    note_with(out, NT_PROCSTAT_FILES, |o| {
+        o.put(&struct_size(abi::kinfo::KINFO_FILE_SIZE));
+        crate::kinfo::file::files_to(s, p, &mut |b| o.put(b));
+    });
+    note_with(out, NT_PROCSTAT_VMMAP, |o| {
+        o.put(&struct_size(abi::kinfo::KINFO_VMENTRY_SIZE));
+        crate::kinfo::vm::vmmap_to(s, p, &mut |b| o.put(b));
+    });
     let cred = p.cred();
     let mut groups = cred.gid.to_le_bytes().to_vec();
     for g in cred.groups() {

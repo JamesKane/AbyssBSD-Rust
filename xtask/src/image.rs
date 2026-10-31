@@ -508,8 +508,13 @@ fn ufs_root(arch: Arch, opts: build::Options, cmdline: &str, root: Root) -> Resu
     util::run(
         std::process::Command::new("makefs")
             .args(["-t", "ffs", "-o", "version=2,softupdates=1"])
-            // Room for the tests to write.
-            .args(["-b", "25%", "-f", "25%"])
+            // Room for the tests to write; in the kyua root, also for the
+            // packages its harness adds (Python, Perl: about 350 MB in
+            // 10,000 files). `-b` counts bytes.
+            .args(match root {
+                Root::Kyua => ["-b", "1g", "-f", "30000"],
+                _ => ["-b", "25%", "-f", "25%"],
+            })
             .arg("-F")
             .arg(&spec_path)
             .arg(&img)

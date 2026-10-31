@@ -502,16 +502,26 @@ pub(crate) fn proc_entries(s: &Sleepable, p: &Process, per_thread: bool) -> Vec<
 }
 
 fn entries(s: &Sleepable, out: &mut Vec<u8>, p: &Process, per_thread: bool) {
+    proc_entries_to(s, p, per_thread, &mut |b| out.extend_from_slice(b));
+}
+
+/// As [`proc_entries`], each `kinfo_proc` given to `emit` as it is made.
+pub(crate) fn proc_entries_to(
+    s: &Sleepable,
+    p: &Process,
+    per_thread: bool,
+    emit: &mut dyn FnMut(&[u8]),
+) {
     let threads = if per_thread {
         p.threads()
     } else {
         p.first_thread().into_iter().collect()
     };
     if threads.is_empty() {
-        out.extend_from_slice(crate::uaccess::bytes_of(&fill(s, p, None, per_thread)));
+        emit(crate::uaccess::bytes_of(&fill(s, p, None, per_thread)));
     }
     for t in &threads {
-        out.extend_from_slice(crate::uaccess::bytes_of(&fill(s, p, Some(t), per_thread)));
+        emit(crate::uaccess::bytes_of(&fill(s, p, Some(t), per_thread)));
     }
 }
 
