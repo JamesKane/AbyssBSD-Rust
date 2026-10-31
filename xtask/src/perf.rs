@@ -366,6 +366,32 @@ const MULTIUSER_PREP_VERSION: &str = "1";
 /// the serial one primary, so `getty` runs on `ttyu0` and `ttyv0`), and
 /// no first-boot scripts. Returns the image and the directory to work in.
 pub(crate) fn freebsd_multiuser_image(arch: Arch) -> Result<(PathBuf, PathBuf)> {
+    freebsd_installed_image(
+        arch,
+        "multiuser",
+        MULTIUSER_PREP_VERSION,
+        crate::multiuser::installed_files,
+    )
+}
+
+/// Bumped whenever [`freebsd_net_image`] changes what it writes.
+const NET_PREP_VERSION: &str = "1";
+
+/// As [`freebsd_multiuser_image`], with the installer's lines for a DHCP
+/// and SLAAC `vtnet0` and `sshd` ([`crate::net`]).
+pub(crate) fn freebsd_net_image(arch: Arch) -> Result<(PathBuf, PathBuf)> {
+    freebsd_installed_image(arch, "net", NET_PREP_VERSION, crate::net::installed_files)
+}
+
+/// FreeBSD's release image for `arch` with `files` (from the base tree)
+/// installed over it, both consoles, and no first-boot scripts, kept as
+/// `freebsd-<release>-<arch>-<kind>.img` until `version` changes.
+fn freebsd_installed_image(
+    arch: Arch,
+    kind: &str,
+    version: &str,
+    files: fn(&Path) -> Result<crate::multiuser::InstalledFiles>,
+) -> Result<(PathBuf, PathBuf)> {
     let dirs = Dirs::new();
     fs::create_dir_all(&dirs.perf)?;
     let (xz, sums) = match arch {
@@ -377,10 +403,9 @@ pub(crate) fn freebsd_multiuser_image(arch: Arch) -> Result<(PathBuf, PathBuf)> 
     };
     let img = dirs
         .perf
-        .join(format!("freebsd-{RELEASE}-{arch}-multiuser.img"));
+        .join(format!("freebsd-{RELEASE}-{arch}-{kind}.img"));
     let stamp = img.with_extension("img.prepared");
-    if img.exists() && fs::read_to_string(&stamp).is_ok_and(|s| s.trim() == MULTIUSER_PREP_VERSION)
-    {
+    if img.exists() && fs::read_to_string(&stamp).is_ok_and(|s| s.trim() == version) {
         return Ok((img, dirs.perf));
     }
     let name = xz.file_name().and_then(|n| n.to_str()).unwrap_or_default();
@@ -399,14 +424,14 @@ pub(crate) fn freebsd_multiuser_image(arch: Arch) -> Result<(PathBuf, PathBuf)> 
         let loader = "autoboot_delay=\"0\"\nbeastie_disable=\"YES\"\n\
                       boot_multicons=\"YES\"\nboot_serial=\"YES\"\n\
                       console=\"comconsole,efi\"\n";
-        let mut files = crate::multiuser::installed_files(mnt)?;
+        let mut files = files(mnt)?;
         files.push(("boot/loader.conf.local", 0o644, loader.as_bytes().to_vec()));
         install_files(mnt, &files)?;
         doas(&["rm", "-f", &mnt.join("firstboot").to_string_lossy()])?;
         Ok(())
     })?;
     fs::rename(&tmp, &img)?;
-    fs::write(&stamp, MULTIUSER_PREP_VERSION)?;
+    fs::write(&stamp, version)?;
     Ok((img, dirs.perf))
 }
 

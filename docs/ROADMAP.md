@@ -1966,8 +1966,8 @@ slice (`sys/inet`) keeping its semantics on real packets.
 **Reference configuration.** The P6 reference disk with `bsdinstall`'s lines for a DHCP interface
 (`ifconfig_vtnet0="DHCP"`, `ifconfig_vtnet0_ipv6="inet6 accept_rtadv"`) and `sshd` enabled, and a
 test overlay with `iperf3` from FreeBSD's packages. QEMU `q35` and `virt` with virtio-net on
-user-mode networking; bhyve with virtio-net on a dedicated bridge on the build server, which runs
-the DHCPv4, router-advertisement, and DNS responder and is the performance peer
+user-mode networking; bhyve with virtio-net on a dedicated bridge on the build server, which serves
+DHCPv4, router advertisements, and DNS and is the performance peer
 (NETWORKING.md §15). The FreeBSD 15.1 guests boot the same disks for the baselines.
 
 **kyua target** (ADR-0019): ADR-0016's target for `sys/net`, `sys/netinet`, `sys/netinet6`,
@@ -1989,8 +1989,8 @@ P7.0 ─► P7.1 ─► P7.2 ─► P7.3 ─► P7.4 ─┬─► P7.5 ───
 **P7.0 Design and harness.**
 - NETWORKING.md and ADR-0019.
 - The test network: virtio-net in the QEMU machines on user-mode networking; on the build server
-  the bridge, taps, the `xtask` responder (DHCPv4, router advertisements, DNS), and outbound NAT,
-  set up by a script run under `doas` (NETWORKING.md §15).
+  the bridge, taps, dnsmasq (DHCPv4, DNS), `rtadvd`, and outbound NAT, set up by a script run
+  under `doas` (NETWORKING.md §15).
 - The `<arch>-net` and `x86_64-bhyve-net` boot cases with their scripts (`dhclient`, SLAAC,
   `ping`, `ping6`, `fetch`, `ssh` and `scp` from the host), expected to fail; the same script
   passing on FreeBSD 15.1 in bhyve and QEMU.

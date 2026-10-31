@@ -49,8 +49,8 @@ Adopt the design in [NETWORKING.md](../NETWORKING.md). Its load-bearing parts:
 9. **Kernel TLS with in-tree ciphers**: AES-CBC with HMAC, AES-GCM, ChaCha20-Poly1305, constant
    time, accelerated through `arch/*`, verified against published vectors and `ktls_test`.
 10. **The test network**: QEMU's user-mode networking for the QEMU cases; on the build server a
-    dedicated bridge with an `xtask` responder (DHCPv4, router advertisements, DNS) and outbound
-    NAT; the build server is the performance peer for both kernels.
+    dedicated bridge with dnsmasq (DHCPv4, DNS), base's `rtadvd` (router advertisements), and
+    outbound NAT; the build server is the performance peer for both kernels.
 11. **kyua target**: `sys/net`, `sys/netinet`, `sys/netinet6`, `sys/netlink`, `sbin/ifconfig`,
     `sbin/route`, `sbin/ping`, and `sys/kern/ktls_test` meet ADR-0016's target (95% of what passes
     on FreeBSD 15.1 in the same VM, every other failure listed). Tests of non-goal features

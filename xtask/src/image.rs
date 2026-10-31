@@ -342,6 +342,13 @@ pub(crate) fn build_installed_root(
     ufs_root(arch, opts, cmdline, Root::Installed)
 }
 
+/// As [`build_installed_root`], with the installer's lines for a DHCP and
+/// SLAAC `vtnet0` and `sshd` ([`crate::net`]): the networked boot's root
+/// (docs/NETWORKING.md §16.4).
+pub(crate) fn build_net_root(arch: Arch, opts: build::Options, cmdline: &str) -> Result<PathBuf> {
+    ufs_root(arch, opts, cmdline, Root::Net)
+}
+
 /// As [`build_installed_root`], with all of FreeBSD's `/usr/tests` (from
 /// `tests.txz`): the root `cargo xtask kyua` runs the suite on
 /// (docs/MULTIUSER.md §14).
@@ -356,6 +363,8 @@ enum Root {
     Tests,
     /// That, as the installer leaves it.
     Installed,
+    /// That, with a network interface and `sshd` configured.
+    Net,
     /// That, with the whole of FreeBSD's test suite.
     Kyua,
 }
@@ -369,6 +378,7 @@ fn ufs_root(arch: Arch, opts: build::Options, cmdline: &str, root: Root) -> Resu
     let name = match root {
         Root::Tests => "ufsroot",
         Root::Installed => "installedroot",
+        Root::Net => "netroot",
         Root::Kyua => "kyuaroot",
     };
     // What goes over the base: made afresh each time.
@@ -380,7 +390,13 @@ fn ufs_root(arch: Arch, opts: build::Options, cmdline: &str, root: Root) -> Resu
     fs::copy(&images.kernel, stage.join("boot/kernel/kernel"))?;
     fs::write(stage.join("etc/fstab"), FSTAB)?;
     if root != Root::Tests {
-        for (path, mode, data) in crate::multiuser::installed_files(&crate::base::full(arch)?)? {
+        let full = crate::base::full(arch)?;
+        let files = if root == Root::Net {
+            crate::net::installed_files(&full)?
+        } else {
+            crate::multiuser::installed_files(&full)?
+        };
+        for (path, mode, data) in files {
             let dst = stage.join(path);
             if let Some(parent) = dst.parent() {
                 fs::create_dir_all(parent)?;
@@ -504,7 +520,7 @@ fn ufs_root(arch: Arch, opts: build::Options, cmdline: &str, root: Root) -> Resu
     fs::remove_file(&img)?;
     let cmdline = match root {
         Root::Tests => with_shell(cmdline),
-        Root::Installed | Root::Kyua => cmdline.to_owned(),
+        Root::Installed | Root::Net | Root::Kyua => cmdline.to_owned(),
     };
     let disk = make_disk(
         arch,
@@ -519,6 +535,7 @@ fn ufs_root(arch: Arch, opts: build::Options, cmdline: &str, root: Root) -> Resu
     let path = dir.join(match root {
         Root::Tests => "disk-ufs.img",
         Root::Installed => "disk-installed.img",
+        Root::Net => "disk-net.img",
         Root::Kyua => "disk-kyua.img",
     });
     fs::write(&path, &disk)?;

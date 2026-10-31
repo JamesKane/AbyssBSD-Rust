@@ -32,6 +32,19 @@ The pkg `rust` (1.98 as of writing) is behind the dev workstation, so we use rus
 to get the identical pinned toolchain. For arm64 QEMU on the server, the AArch64 edk2 firmware
 ships inside the `qemu` package (`/usr/local/share/qemu/edk2-aarch64-code.fd`).
 
+For the networked bhyve cases (docs/NETWORKING.md §15), once, from a workstation:
+
+```sh
+ssh abyss-build 'doas sh -s' < tools/netlab/setup-server.sh
+```
+
+It makes `abyssnet0`, a bridge of the server's own (not `bridge0`, which joins the LAN), with
+10.77.0.1/24 and fd77:77:77::1/64; IPv4 forwarding with `pf` NAT through `igc0`, so guests reach
+the internet but not the LAN; dnsmasq on the bridge only (DHCPv4, DNS); and `rtadvd` advertising
+fd77:77:77::/64, with IPv6 forwarding on but `pf` keeping IPv6 on the test link. Everything is in
+`rc.conf`; `tools/netlab/teardown-server.sh` undoes it. Each networked guest gets a tap on the
+bridge for its run.
+
 ## 2. Build orchestration: `cargo xtask`
 
 `xtask` is a workspace crate (host `std`, no external crates). It is the single entry point.
@@ -85,6 +98,7 @@ cargo xtask --remote perf [--suite p2|p3|p4|p5|p6|vt|diag] [--runs N] [--prepare
 cargo xtask --remote fetch-base [--arch <a|all>]   # base.txz, SHA-256 pinned: /rescue image, sysroot
 cargo xtask --remote freebsd-shell                 # the boot-to-shell script against FreeBSD
 cargo xtask --remote freebsd-multiuser             # the multi-user login script against FreeBSD
+cargo xtask --remote freebsd-net [--vmm qemu|bhyve]  # the network script against FreeBSD
 cargo xtask --remote freebsd-usertests             # tests/user on FreeBSD 15.1 itself, either arch
 cargo xtask --remote kyua-baseline [--resume]      # FreeBSD's kyua results, per test case, in bhyve
 cargo xtask --remote kyua [--resume] [--only DIR,...]  # AbyssBSD's, compared with them
@@ -256,6 +270,14 @@ lines outside `tests/multiuser/absent.txt` fail the case, and are written to
 (`XFAIL`), which does not fail the tier. `cargo xtask --remote freebsd-multiuser` runs the same
 script against FreeBSD 15.1's release image configured the same way, on bhyve and QEMU (amd64)
 and QEMU (arm64).
+
+The network cases (docs/NETWORKING.md §16.4) follow, also on FreeBSD hosts only: `x86_64-net` and
+`aarch64-net` on QEMU's user-mode network, and `x86_64-bhyve-net` on the server's test bridge.
+Each boots the installed root with `bsdinstall`'s lines for a DHCP and SLAAC `vtnet0` and `sshd`,
+and runs `xtask/src/net.rs`'s script: the DHCP and SLAAC addresses and default routes, `ping` and
+`ping -6` to the router, DNS, `fetch` over HTTPS, `pkg install`, then `ssh` and an `scp` round trip
+from the host with a key made for the run. Until P7.6 they are expected to fail (`XFAIL`).
+`cargo xtask --remote freebsd-net` runs the same script against FreeBSD 15.1.
 
 `cargo xtask --remote kyua-baseline` records FreeBSD 15.1's own kyua results in bhyve, where
 AbyssBSD's are compared (8 CPUs, `parallelism=8`). Not under QEMU: emulated, the suite takes days

@@ -110,6 +110,54 @@ pub(crate) struct Vm {
     /// QEMU: a QMP socket at this path, to type and read the screen
     /// through ([`crate::qmp`]).
     pub(crate) qmp: Option<PathBuf>,
+    /// A virtio-net interface, `vtnet0` (docs/NETWORKING.md §15); none
+    /// without.
+    pub(crate) net: Option<Net>,
+}
+
+/// The network a machine's virtio-net interface is on.
+#[derive(Debug)]
+pub(crate) enum Net {
+    /// QEMU's user-mode network: DHCPv4 (the guest is 10.0.2.15, the
+    /// router 10.0.2.2), router advertisements for `fec0::/64` (the
+    /// router `fe80::2`), DNS at 10.0.2.3, and outbound NAT. Each pair
+    /// forwards a TCP port on the host's loopback to one on the guest.
+    User { forwards: Vec<(u16, u16)> },
+    /// bhyve: a tap on the build server's test bridge
+    /// (tools/netlab/setup-server.sh), which serves DHCPv4 in
+    /// 10.77.0.0/24, router advertisements for `fd77:77:77::/64`, DNS,
+    /// and outbound NAT.
+    Bridge(Tap),
+}
+
+/// A tap on the test bridge, `abyssnet0`, destroyed when dropped.
+#[derive(Debug)]
+pub(crate) struct Tap(String);
+
+impl Tap {
+    /// The test bridge.
+    pub(crate) const BRIDGE: &str = "abyssnet0";
+
+    /// A new tap, a member of [`Tap::BRIDGE`].
+    pub(crate) fn new() -> Result<Self> {
+        let name = crate::perf::doas(&["ifconfig", "tap", "create"])?
+            .trim()
+            .to_owned();
+        let tap = Self(name);
+        crate::perf::doas(&["ifconfig", Self::BRIDGE, "addm", &tap.0])?;
+        crate::perf::doas(&["ifconfig", &tap.0, "up"])?;
+        Ok(tap)
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Drop for Tap {
+    fn drop(&mut self) {
+        let _ = crate::perf::doas(&["ifconfig", &self.0, "destroy"]);
+    }
 }
 
 /// bhyve's xHCI slot: its only USB device is a tablet.
@@ -254,6 +302,7 @@ impl Vm {
             devices: Vec::new(),
             usb: false,
             qmp: None,
+            net: None,
         }
     }
 
@@ -321,6 +370,17 @@ impl Vm {
         }
         if self.usb {
             c.arg("-s").arg(USB_SLOT);
+        }
+        match &self.net {
+            None => {}
+            Some(Net::User { .. }) => {
+                // Its guests join the build server's test bridge instead
+                // (docs/NETWORKING.md §15).
+                return Err("bhyve has no user-mode network".into());
+            }
+            Some(Net::Bridge(tap)) => {
+                c.arg("-s").arg(format!("5,virtio-net,{}", tap.name()));
+            }
         }
         if self.pin {
             for v in 0..self.smp {
@@ -425,7 +485,21 @@ impl Vm {
         if self.usb {
             c.args(self.usb_args()?);
         }
-        c.args(["-nic", "none"]);
+        match &self.net {
+            None => {
+                c.args(["-nic", "none"]);
+            }
+            Some(Net::User { forwards }) => {
+                // Both named: naming only one turns the other off.
+                let mut netdev = String::from("user,id=net0,ipv4=on,ipv6=on");
+                for (host, guest) in forwards {
+                    netdev.push_str(&format!(",hostfwd=tcp:127.0.0.1:{host}-:{guest}"));
+                }
+                c.arg("-netdev").arg(netdev);
+                c.args(["-device", "virtio-net-pci,netdev=net0"]);
+            }
+            Some(Net::Bridge(_)) => return Err("the test bridge is bhyve's".into()),
+        }
         if let Some(sock) = &self.qmp {
             let _ = fs::remove_file(sock);
             c.arg("-qmp")

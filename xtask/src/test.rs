@@ -144,6 +144,37 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
                 }
             }
         }
+        // The networked boot (ROADMAP P7.0), expected to fail until P7.6:
+        // QEMU on user-mode networking, bhyve on the test bridge.
+        for &arch in &arches {
+            for vmm in [Vmm::Qemu, Vmm::Bhyve] {
+                let name = match vmm {
+                    Vmm::Qemu => format!("{arch}-net"),
+                    Vmm::Bhyve => format!("{arch}-bhyve-net"),
+                };
+                if !wanted(&name) || !vmm.available(arch) {
+                    continue;
+                }
+                if !cfg!(target_os = "freebsd") {
+                    println!("== boot tests ({name}): skipped, needs a FreeBSD host (makefs)");
+                    continue;
+                }
+                println!("== boot tests ({name}, {vmm:?})");
+                match (net(arch, vmm, release)?, NET_EXPECTED) {
+                    (Ok(()), Expected::Pass) => println!("{name}: PASS"),
+                    (Ok(()), Expected::Fail(_)) => {
+                        println!("{name}: XPASS: passes; expect it to (test.rs)");
+                    }
+                    (Err(why), Expected::Fail(until)) => {
+                        println!("{name}: XFAIL (until {until}): {why}");
+                    }
+                    (Err(why), Expected::Pass) => {
+                        println!("{name}: FAIL: {why}");
+                        failed.push("net");
+                    }
+                }
+            }
+        }
         if !failed.is_empty() {
             return Err(format!("boot tests failed on {failed:?}; logs in build/<arch>/").into());
         }
@@ -325,7 +356,6 @@ const BOOT_CASES: &[BootCase] = &[
 enum Expected {
     Pass,
     /// Fail, until the named milestone; a failure does not fail the tier.
-    #[expect(dead_code, reason = "no case is expected to fail now")]
     Fail(&'static str),
 }
 
@@ -403,6 +433,50 @@ fn multiuser(
             first.len(),
             list.display()
         );
+    }
+    Ok(verdict)
+}
+
+const NET_EXPECTED: Expected = Expected::Fail("P7.6");
+
+/// The networked boot (docs/NETWORKING.md §16.4): the networked root boots
+/// on QEMU's user-mode network, and [`crate::net::net_script`] checks the
+/// addresses, routes, `ping`, DNS, `fetch`, and `pkg`, then logs in with
+/// `ssh` and copies with `scp` from the host, and shuts down.
+fn net(arch: Arch, vmm: Vmm, release: bool) -> Result<std::result::Result<(), String>> {
+    let opts = build::Options {
+        release,
+        ktest: false,
+    };
+    let disk = image::build_net_root(arch, opts, "boot_multicons=YES boot_serial=YES")?;
+    let suffix = match vmm {
+        Vmm::Bhyve => "-bhyve",
+        Vmm::Qemu => "",
+    };
+    let log = disk.with_file_name(format!("net{suffix}.log"));
+    let (vm, lab) = crate::net::networked(Vm {
+        smp: 4,
+        mem: "2G".into(),
+        nvme: true,
+        ..Vm::new(vmm, arch, disk.clone())
+    })?;
+    let session = crate::expect::Session::start(vm, &log)?;
+    let dir = disk.parent().unwrap_or(&disk).to_path_buf();
+    let (result, exited) = crate::net::net_script(
+        session,
+        &lab,
+        &log,
+        &dir,
+        Duration::from_secs(600),
+        &["panic:", "(no init)"],
+    );
+    let verdict = match (result, exited) {
+        (Err(e), _) | (_, Err(e)) => Err(e.to_string()),
+        (Ok(()), Ok(false)) => Err("the machine did not power off".into()),
+        (Ok(()), Ok(true)) => Ok(()),
+    };
+    if verdict.is_err() {
+        println!("{arch}{suffix}-net: serial log at {}", log.display());
     }
     Ok(verdict)
 }

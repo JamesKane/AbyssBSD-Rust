@@ -35,10 +35,12 @@ pub(crate) const RC_CONF: &str = "hostname=\"abyss\"\n\
                                   # Set dumpdev to \"AUTO\" to enable crash dumps, \"NO\" to disable\n\
                                   dumpdev=\"AUTO\"\n";
 
-/// The files the installer adds to `base.txz`'s tree (`full`), as (path
-/// under the root, mode, contents). None of them is in the base, so they
-/// can be laid over it.
-pub(crate) fn installed_files(full: &Path) -> Result<Vec<(&'static str, u32, Vec<u8>)>> {
+/// Files laid over a root, as (path under the root, mode, contents).
+pub(crate) type InstalledFiles = Vec<(&'static str, u32, Vec<u8>)>;
+
+/// The files the installer adds to `base.txz`'s tree (`full`). None of
+/// them is in the base, so they can be laid over it.
+pub(crate) fn installed_files(full: &Path) -> Result<InstalledFiles> {
     let utc = full.join("usr/share/zoneinfo/UTC");
     Ok(vec![
         ("etc/rc.conf", 0o644, RC_CONF.as_bytes().to_vec()),

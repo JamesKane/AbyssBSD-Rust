@@ -299,9 +299,10 @@ interfaces, accept filters only if a base daemon enables one, and `sendfile`. Ev
 - **QEMU** (both architectures, CI's network cases): user-mode networking, which provides DHCPv4,
   router advertisements, DNS, and outbound NAT, so `dhclient`, SLAAC, `fetch`, and `pkg` work with
   nothing on the host.
-- **bhyve** (the build server): a dedicated bridge with a tap per guest, and a responder run by
-  `xtask` on the host (DHCPv4, router advertisements, DNS forwarding) with outbound NAT, set up by
-  a script run under `doas`. AbyssBSD and FreeBSD guests can share the bridge for interoperability
+- **bhyve** (the build server): a dedicated bridge, `abyssnet0`, with a tap per guest, dnsmasq
+  on it for DHCPv4 and DNS, base's `rtadvd` for router advertisements, and outbound IPv4 NAT
+  through `pf`, IPv6 kept on the link; set up by `tools/netlab/setup-server.sh` under `doas`
+  (BUILD-AND-TEST.md §1). AbyssBSD and FreeBSD guests can share the bridge for interoperability
   and differential captures, which `tcpdump` on the host's tap records.
 - **The performance peer** is the build server itself, over each guest's virtio-net, the same for
   both kernels.
