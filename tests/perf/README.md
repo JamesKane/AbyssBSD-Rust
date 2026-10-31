@@ -217,6 +217,37 @@ static `ubench`, single-user, as the earlier suites do.
 | `boot.kernel` | Not in `ubench`: the harness's time from the kernel's first console line (FreeBSD's `---<<BOOT>>---`, AbyssBSD's banner), just after the loader's handoff, to the first `login:` on the serial console |
 | `boot.rc` | Not in `ubench`: from `Trying to mount root from`, which both kernels print as they mount the root and start init, to that `login:` |
 
+## Suite `p7`
+
+Networking's components ([NETWORKING.md §17](../../docs/NETWORKING.md#17-performance)): `tcp`,
+`udp`, and `sendfile`, each name's first field. Like `p6`, each run boots the installed root
+multi-user from NVMe (FreeBSD's release image with the network boot cases' `rc.conf`, AbyssBSD's
+installed root with the same), with a DHCP `vtnet0` on a tap of the build server's test bridge
+(docs/NETWORKING.md §15), logs in as root on the serial console, and runs the bench disk's `run.sh`
+(`xtask/src/perf/p7.rs`). The server is the peer, at `10.77.0.1`: for the whole command it runs
+`iperf3 -s` and `ubench p7.peer 10.77.0.1`, pinned to its physical cores 4 to 7. The VM has
+**4 vCPUs**, pinned to cores 0 to 3, so the guest, the peer, and bhyve's device emulation do not
+share a core and neither end is the other's bottleneck.
+
+`iperf3` is FreeBSD's package (3.22, its SHA-256 recorded in `xtask/src/perf/p7.rs`), the same
+build in both guests and on the server; it is not part of base, so the bench disk carries the
+binary and `libiperf.so.0`. Device interrupts go to CPU 0, as in every suite; `iperf3` runs
+unbound, and `ubench` on CPU 1.
+
+| Name | Operation |
+|---|---|
+| `tcp.rr.lo.p50`, `.p99` | One byte to an echo and back over a `TCP_NODELAY` connection on `127.0.0.1`, the echo a child on CPU 2: 20,000 round trips after 1,000 unmeasured |
+| `tcp.rr.net.p50`, `.p99` | As above, to the server's echo |
+| `tcp.connect.lo`, `tcp.connect.net` | `socket`, `connect`, read the peer's one-byte greeting, `close`. The peer closes first, so `TIME_WAIT` is on its side. Throughput rules as `p4`: three rounds of 1 s, median |
+| `tcp.lo.s1`, `tcp.lo.s4` | `iperf3` over loopback in the guest, one stream and four: 10 s after 2 s omitted (`-t 10 -O 2`). One op = 1 KiB at the receiver's rate |
+| `tcp.tx.s1`, `tcp.tx.s4` | As above, the guest sending to the server |
+| `tcp.rx.s1`, `tcp.rx.s4` | As above, the server sending to the guest (`-R`) |
+| `tcp.cpu.tx`, `tcp.cpu.rx` | One stream paced at 1 Gbit/s for 20 s (`-b 1000M`); the guest's busy CPU time over the run (`kern.cp_time`'s user, nice, system, and interrupt ticks over `stathz`) per KiB received |
+| `udp.tx.bulk`, `udp.rx.bulk` | `iperf3 -u -b 0 -l 1448`, unpaced: 1,448-byte datagrams, each direction. One op = 1 KiB at the receiver's rate |
+| `udp.tx.small`, `udp.rx.small` | As above with 64-byte datagrams. One op = one datagram received |
+| `sendfile.plain` | A 64 MiB file just written (so in the page cache) sent whole with `sendfile` over one connection to the server's sink, which reads and discards. One op = 1 KiB; three rounds of 1 s, median |
+| `sendfile.ktls` | As above on a connection with kernel TLS on its transmit side (`TCP_TXTLS_ENABLE`): TLS 1.2, AES-128-GCM, a fixed key. Stock FreeBSD encrypts with `aesni` (in `GENERIC`); the sink discards the records unread |
+
 ## Suite `vt`
 
 Text output to the virtual terminals ([USB.md §10](../../docs/USB.md#10-performance)), in the same

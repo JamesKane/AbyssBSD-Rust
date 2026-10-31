@@ -11,12 +11,14 @@
  *	./ubench p5	(as root: makes and mounts its file systems)
  *	./ubench vt	(as root, with a framebuffer: writes to ttyv1 and ttyv2)
  *	./ubench p6	(built with -DUB_P6 -lthr; runs base's programs)
+ *	./ubench p7 PEER	(the same build; PEER runs `ubench p7.peer PEER`)
  *
  * p4 uses Tier A system calls (docs/COMPATIBILITY.md §2.1), plus
  * cpuset_setaffinity to bind itself as kbench binds its workers. p5 adds
  * the file-system calls, and runs /rescue's newfs, tar, and rm, and fsx.
  * p6 adds threads, kqueue, poll and select, UNIX sockets, and ptys, and
- * execs base's dynamic programs.
+ * execs base's dynamic programs. p7 adds TCP over loopback and to a peer,
+ * sendfile, and kernel TLS.
  */
 
 #ifdef UB_P6
@@ -39,6 +41,11 @@
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/ktls.h>
+#include <crypto/cryptodev.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
 #endif
 
 #include <dirent.h>
@@ -1977,6 +1984,252 @@ suite_p6(void)
 	suite_pty();
 	suite_exec();
 }
+
+/*
+ * Suite p7 (docs/NETWORKING.md §17): TCP over loopback, where the peer is
+ * a child on CPU 2, and to the build server, which runs `ubench p7.peer
+ * ADDR`. iperf3's benchmarks are in the bench disk's run.sh.
+ */
+#define	UB_P7_RR	5301		/* echoes each byte */
+#define	UB_P7_GREET	5302		/* accepts, sends one byte, closes */
+#define	UB_P7_SINK	5303		/* reads and discards */
+#define	UB_P7_SAMPLES	20000		/* tcp.rr.* round trips */
+#define	UB_P7_FILE	(64UL << 20)	/* sendfile.* file size */
+#define	UB_P7_PATH	"/tmp/ubench.sendfile"
+
+static struct sockaddr_in p7_addr;
+
+static void
+p7_at(const char *ip)
+{
+	memset(&p7_addr, 0, sizeof(p7_addr));
+	p7_addr.sin_len = sizeof(p7_addr);
+	p7_addr.sin_family = AF_INET;
+	if (inet_pton(AF_INET, ip, &p7_addr.sin_addr) != 1) {
+		fprintf(stderr, "ubench: bad address %s\n", ip);
+		exit(2);
+	}
+}
+
+static int
+p7_socket(int port, int nodelay, int quiet)
+{
+	struct sockaddr_in a = p7_addr;
+	int s = socket(AF_INET, SOCK_STREAM, 0), one = 1;
+
+	if (s < 0)
+		die("socket");
+	a.sin_port = htons(port);
+	if (connect(s, (struct sockaddr *)&a, sizeof(a)) != 0) {
+		if (quiet) {
+			close(s);
+			return (-1);
+		}
+		die("connect");
+	}
+	if (nodelay && setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &one,
+	    sizeof(one)) != 0)
+		die("TCP_NODELAY");
+	return (s);
+}
+
+/* One of the peer's listeners: connections one at a time. */
+static void *
+p7_serve(void *arg)
+{
+	int port = (int)(intptr_t)arg, one = 1, l, s;
+	struct sockaddr_in a = p7_addr;
+	size_t len = 256 * 1024;
+	char *buf = malloc(len), c = 0;
+
+	if (buf == NULL)
+		die("malloc");
+	a.sin_port = htons(port);
+	if ((l = socket(AF_INET, SOCK_STREAM, 0)) < 0)
+		die("socket");
+	if (setsockopt(l, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) != 0)
+		die("SO_REUSEADDR");
+	if (bind(l, (struct sockaddr *)&a, sizeof(a)) != 0)
+		die("bind");
+	if (listen(l, 128) != 0)
+		die("listen");
+	for (;;) {
+		if ((s = accept(l, NULL, NULL)) < 0)
+			die("accept");
+		switch (port) {
+		case UB_P7_RR:
+			if (setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &one,
+			    sizeof(one)) != 0)
+				die("TCP_NODELAY");
+			while (read(s, &c, 1) == 1 && write(s, &c, 1) == 1)
+				;
+			break;
+		case UB_P7_GREET:
+			(void)write(s, &c, 1);
+			break;
+		default:
+			while (read(s, buf, len) > 0)
+				;
+			break;
+		}
+		close(s);
+	}
+}
+
+/* `ubench p7.peer ADDR`: the three listeners on ADDR, until killed. */
+static void
+p7_peer(void)
+{
+	static const int ports[] = { UB_P7_RR, UB_P7_GREET, UB_P7_SINK };
+	pthread_t t;
+
+	signal(SIGPIPE, SIG_IGN);
+	for (size_t i = 0; i < nitems(ports); i++)
+		if (pthread_create(&t, NULL, p7_serve,
+		    (void *)(intptr_t)ports[i]) != 0)
+			die("pthread_create");
+	for (;;)
+		pause();
+}
+
+static int
+cmp_u64(const void *a, const void *b)
+{
+	uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+
+	return ((x > y) - (x < y));
+}
+
+/* tcp.rr.*: one byte to the echo and back, one round trip per sample. */
+static void
+p7_rr(const char *name)
+{
+	static uint64_t t[UB_P7_SAMPLES];
+	int s = p7_socket(UB_P7_RR, 1, 0);
+	char c = 0;
+
+	for (int i = -1000; i < UB_P7_SAMPLES; i++) {
+		uint64_t t0 = now();
+
+		if (write(s, &c, 1) != 1 || read(s, &c, 1) != 1)
+			die("round trip");
+		if (i >= 0)
+			t[i] = now() - t0;
+	}
+	close(s);
+	qsort(t, UB_P7_SAMPLES, sizeof(t[0]), cmp_u64);
+	printf("kbench %s.p50 %ju ns\n", name,
+	    (uintmax_t)t[UB_P7_SAMPLES / 2]);
+	printf("kbench %s.p99 %ju ns\n", name,
+	    (uintmax_t)t[UB_P7_SAMPLES * 99 / 100]);
+	fflush(stdout);
+}
+
+/*
+ * tcp.connect.*: socket, connect, the peer's one-byte greeting, close.
+ * The peer closes first, so TIME_WAIT is on its side.
+ */
+static uint64_t
+op_p7_connect(void *arg __unused)
+{
+	char c;
+
+	for (int i = 0; i < 10; i++) {
+		int s = p7_socket(UB_P7_GREET, 0, 0);
+
+		if (read(s, &c, 1) != 1)
+			die("greeting");
+		close(s);
+	}
+	return (10);
+}
+
+static int p7_file, p7_out;
+
+/* sendfile.*: the whole file from the page cache; one op = 1 KiB. */
+static uint64_t
+op_p7_sendfile(void *arg __unused)
+{
+	off_t sent = 0;
+
+	if (sendfile(p7_file, p7_out, 0, UB_P7_FILE, NULL, &sent, 0) != 0 ||
+	    sent != (off_t)UB_P7_FILE)
+		die("sendfile");
+	return (UB_P7_FILE / 1024);
+}
+
+/*
+ * Kernel TLS on `s`'s transmit side: TLS 1.2, AES-128-GCM, with a fixed
+ * key (the peer discards the records unread).
+ */
+static void
+p7_ktls(int s)
+{
+	static const uint8_t key[16] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+	    12, 13, 14, 15, 16 };
+	static const uint8_t iv[TLS_AEAD_GCM_LEN] = { 1, 2, 3, 4 };
+	struct tls_enable en;
+
+	memset(&en, 0, sizeof(en));
+	en.cipher_key = key;
+	en.iv = iv;
+	en.cipher_algorithm = CRYPTO_AES_NIST_GCM_16;
+	en.cipher_key_len = sizeof(key);
+	en.iv_len = sizeof(iv);
+	en.tls_vmajor = TLS_MAJOR_VER_ONE;
+	en.tls_vminor = TLS_MINOR_VER_TWO;
+	if (setsockopt(s, IPPROTO_TCP, TCP_TXTLS_ENABLE, &en, sizeof(en)) != 0)
+		die("TCP_TXTLS_ENABLE");
+}
+
+static void
+suite_p7(const char *peer)
+{
+	static char block[UB_IO];
+	pid_t pid;
+	int s;
+
+	signal(SIGPIPE, SIG_IGN);
+	p7_at("127.0.0.1");
+	if ((pid = fork()) < 0)
+		die("fork");
+	if (pid == 0) {
+		bind_cpu(2);
+		p7_peer();
+	}
+	for (int i = 0; (s = p7_socket(UB_P7_RR, 0, 1)) < 0; i++) {
+		if (i == 1000)
+			die("the loopback peer");
+		usleep(10000);
+	}
+	close(s);
+	p7_rr("tcp.rr.lo");
+	throughput("tcp.connect.lo", op_p7_connect, NULL);
+	kill(pid, SIGKILL);
+	waitpid(pid, NULL, 0);
+
+	p7_at(peer);
+	p7_rr("tcp.rr.net");
+	throughput("tcp.connect.net", op_p7_connect, NULL);
+
+	if ((p7_file = open(UB_P7_PATH, O_RDWR | O_CREAT | O_TRUNC, 0600)) < 0)
+		die("open");
+	memset(block, 'a', sizeof(block));
+	for (size_t off = 0; off < UB_P7_FILE; off += sizeof(block))
+		if (write(p7_file, block, sizeof(block)) != sizeof(block))
+			die("write");
+	if (fsync(p7_file) != 0)
+		die("fsync");
+	p7_out = p7_socket(UB_P7_SINK, 0, 0);
+	throughput("sendfile.plain", op_p7_sendfile, NULL);
+	close(p7_out);
+	p7_out = p7_socket(UB_P7_SINK, 0, 0);
+	p7_ktls(p7_out);
+	throughput("sendfile.ktls", op_p7_sendfile, NULL);
+	close(p7_out);
+	close(p7_file);
+	unlink(UB_P7_PATH);
+}
 #endif /* UB_P6 */
 
 int
@@ -1987,7 +2240,15 @@ main(int argc, char **argv)
 		return (0);
 	if (argc == 5 && strcmp(argv[1], "chain") == 0)
 		return (exec_chain(argv));
-	if (argc != 2 || (strcmp(argv[1], "p4") != 0 &&
+#ifdef UB_P6
+	if (argc == 3 && strcmp(argv[1], "p7.peer") == 0) {
+		p7_at(argv[2]);
+		p7_peer();
+	}
+#endif
+	if (UB_HAS_P6 && argc == 3 && strcmp(argv[1], "p7") == 0)
+		;
+	else if (argc != 2 || (strcmp(argv[1], "p4") != 0 &&
 	    strcmp(argv[1], "p5") != 0 && strcmp(argv[1], "vt") != 0 &&
 	    !(UB_HAS_P6 && (strcmp(argv[1], "p6") == 0 ||
 	    strcmp(argv[1], "p6.thr") == 0 ||
@@ -1995,8 +2256,8 @@ main(int argc, char **argv)
 	    strcmp(argv[1], "p6.unix") == 0 ||
 	    strcmp(argv[1], "p6.pty") == 0)))) {
 		fprintf(stderr, "usage: ubench p4 | p5 | vt%s\n",
-		    UB_HAS_P6 ? " | p6 | p6.thr | p6.event | p6.unix | p6.pty" :
-		    "");
+		    UB_HAS_P6 ? " | p6 | p6.thr | p6.event | p6.unix | p6.pty"
+		    " | p7 PEER | p7.peer ADDR" : "");
 		return (2);
 	}
 	printf("kbench begin %s cpus=%ld\n", argv[1],
@@ -2021,7 +2282,9 @@ main(int argc, char **argv)
 	} else if (strcmp(argv[1], "p6.pty") == 0) {
 		signal(SIGPIPE, SIG_IGN);
 		suite_pty();
-	} else
+	} else if (strcmp(argv[1], "p7") == 0)
+		suite_p7(argv[2]);
+	else
 		suite_p6();
 #endif
 	printf("kbench end %s\n", argv[1]);

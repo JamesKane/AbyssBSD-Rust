@@ -25,6 +25,9 @@ use crate::cli::Args;
 use crate::image;
 use crate::qemu::{Outcome, Vm, Vmm};
 use crate::util::{self, Result};
+
+mod p7;
+
 const VM_IMAGE: &str = "FreeBSD-15.1-RELEASE-amd64-ufs.raw.xz";
 const VM_IMAGE_ARM64: &str = "FreeBSD-15.1-RELEASE-arm64-aarch64-ufs.raw.xz";
 /// Bumped whenever [`prepare_image`] changes what it writes.
@@ -37,7 +40,7 @@ const BOUND: f64 = 1.02;
 const MAX_CV: f64 = 0.01;
 const BOOTSTRAP: usize = 2000;
 
-const USAGE: &str = "usage: cargo xtask --remote perf [--suite p2|p3|p4|p5|p6|p6.thr|p6.event|p6.unix|p6.pty|vt|diag] [--runs N] [--prepare] \
+const USAGE: &str = "usage: cargo xtask --remote perf [--suite p2|p3|p4|p5|p6|p6.thr|p6.event|p6.unix|p6.pty|p7|vt|diag] [--runs N] [--prepare] \
                      [--freebsd-only [--prof] | --abyss-only [--prof [--prof-cpu N]]]";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -86,13 +89,13 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     // `diag` holds AbyssBSD-side diagnostics, some with FreeBSD
     // counterparts; it is for investigation, not gating.
     if ![
-        "p2", "p3", "p4", "p5", "p6", "p6.thr", "p6.event", "p6.unix", "p6.pty", "vt", "diag",
+        "p2", "p3", "p4", "p5", "p6", "p6.thr", "p6.event", "p6.unix", "p6.pty", "p7", "vt", "diag",
     ]
     .contains(&suite.as_str())
     {
         return Err(format!(
-            "unknown suite `{suite}` (p2, p3, p4, p5, p6, p6.thr, p6.event, p6.unix, p6.pty, vt, \
-             diag)"
+            "unknown suite `{suite}` (p2, p3, p4, p5, p6, p6.thr, p6.event, p6.unix, p6.pty, p7, \
+             vt, diag)"
         )
         .into());
     }
@@ -100,8 +103,11 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     // and times the boot as well (`run_multiuser`); `p6.thr`, `p6.event`,
     // `p6.unix`, and `p6.pty` need only the static ubench.
     let multiuser = suite == "p6";
-    if multiuser && prof {
-        return Err("--prof profiles the single-user suites, not p6".into());
+    // p7 also runs multi-user, from the installed root with the network
+    // (`p7::run_one`).
+    let net = suite == "p7";
+    if (multiuser || net) && prof {
+        return Err("--prof profiles the single-user suites, not p6 or p7".into());
     }
     if !cfg!(target_os = "freebsd") {
         return Err(format!("perf needs bhyve: run it on the build server\n{USAGE}").into());
@@ -124,11 +130,13 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     fs::create_dir_all(&dirs.perf)?;
     let freebsd = if multiuser {
         prepare_multiuser_image(&dirs)?
+    } else if net {
+        prepare_net_image(&dirs)?
     } else {
         prepare_image(&dirs)?
     };
     let kbench = build_kbench(&dirs)?;
-    let ubench = if suite.starts_with("p6") {
+    let ubench = if suite.starts_with("p6") || net {
         build_ubench_p6(&dirs)?
     } else {
         build_ubench(&dirs)?
@@ -153,12 +161,14 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     // The userland suites run ubench; the earlier ones, kbench. The file
     // systems' suite also needs its tree and fsx beside it.
     let userland = [
-        "p4", "p5", "p6", "p6.thr", "p6.event", "p6.unix", "p6.pty", "vt",
+        "p4", "p5", "p6", "p6.thr", "p6.event", "p6.unix", "p6.pty", "p7", "vt",
     ]
     .contains(&suite.as_str());
     let bench = if userland { &ubench } else { &kbench };
     let extras = if suite == "p5" {
         vec![build_tree(&dirs)?, build_fsx(&dirs)?]
+    } else if net {
+        p7::iperf3(&dirs)?
     } else {
         Vec::new()
     };
@@ -187,10 +197,18 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     };
     let abyss = if multiuser {
         image::build_installed_root(Arch::X86_64, opts, MULTIUSER_CMDLINE)?
+    } else if net {
+        image::build_net_root(Arch::X86_64, opts, MULTIUSER_CMDLINE)?
     } else {
         image::build_with(Arch::X86_64, opts, &cmdline, extra)?
     };
 
+    // p7's far ends, on the server, for every run.
+    let _peers = if net {
+        Some(p7::Peers::start(&ubench, &extras)?)
+    } else {
+        None
+    };
     let mut samples: BTreeMap<String, BTreeMap<Side, Vec<f64>>> = BTreeMap::new();
     let mut raw = String::from("side\trun\tname\tvalue\tunit\n");
     let mut units = BTreeMap::new();
@@ -215,7 +233,13 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
             eprintln!("xtask: perf: run {}/{runs}: {}", run + 1, side.name());
             // One retry: a VM run can fail for reasons outside the kernels
             // (a console glitch, a host hiccup); the first log is kept.
-            let run_one = if multiuser { run_multiuser } else { run_one };
+            let run_one = if multiuser {
+                run_multiuser
+            } else if net {
+                p7::run_one
+            } else {
+                run_one
+            };
             let results = match run_one(disk, &bench_disk, &log) {
                 Ok(r) => r,
                 Err(e) => {
@@ -536,15 +560,30 @@ const MULTIUSER_PERF_VERSION: &str = "1";
 /// it ([`freebsd_multiuser_image`]), as AbyssBSD's installed root is, with
 /// PTI off as for every suite ([`configure_guest`]).
 fn prepare_multiuser_image(dirs: &Dirs) -> Result<PathBuf> {
-    let img = dirs.perf.join(format!("freebsd-{RELEASE}-p6.img"));
+    let (base, _) = freebsd_multiuser_image(Arch::X86_64)?;
+    without_pti(dirs, &base, "p6", MULTIUSER_PERF_VERSION)
+}
+
+/// Bumped whenever [`prepare_net_image`] changes what it writes.
+const NET_PERF_VERSION: &str = "1";
+
+/// FreeBSD's side of suite `p7`: as [`prepare_multiuser_image`], from the
+/// image with the network configured ([`freebsd_net_image`]).
+fn prepare_net_image(dirs: &Dirs) -> Result<PathBuf> {
+    let (base, _) = freebsd_net_image(Arch::X86_64)?;
+    without_pti(dirs, &base, "p7", NET_PERF_VERSION)
+}
+
+/// A copy of `base` with PTI off, kept as `freebsd-<release>-<suite>.img`
+/// until `version` changes.
+fn without_pti(dirs: &Dirs, base: &Path, suite: &str, version: &str) -> Result<PathBuf> {
+    let img = dirs.perf.join(format!("freebsd-{RELEASE}-{suite}.img"));
     let stamp = img.with_extension("img.prepared");
-    if img.exists() && fs::read_to_string(&stamp).is_ok_and(|s| s.trim() == MULTIUSER_PERF_VERSION)
-    {
+    if img.exists() && fs::read_to_string(&stamp).is_ok_and(|s| s.trim() == version) {
         return Ok(img);
     }
-    let (base, _) = freebsd_multiuser_image(Arch::X86_64)?;
     let tmp = img.with_extension("img.tmp");
-    util::run(Command::new("cp").arg(&base).arg(&tmp))?;
+    util::run(Command::new("cp").arg(base).arg(&tmp))?;
     with_root(dirs, &tmp, |mnt| {
         let conf = mnt.join("boot/loader.conf.local");
         let loader = fs::read_to_string(&conf)? + "vm.pmap.pti=\"0\"\n";
@@ -554,7 +593,7 @@ fn prepare_multiuser_image(dirs: &Dirs) -> Result<PathBuf> {
         )
     })?;
     fs::rename(&tmp, &img)?;
-    fs::write(&stamp, MULTIUSER_PERF_VERSION)?;
+    fs::write(&stamp, version)?;
     Ok(img)
 }
 
@@ -859,6 +898,9 @@ fn make_bench_disk(
     fs::write(dir.join("suite"), suite)?;
     if suite == "p6" {
         fs::write(dir.join("run.sh"), MULTIUSER_RUN)?;
+    }
+    if suite == "p7" {
+        fs::write(dir.join("run.sh"), p7::script())?;
     }
     if freebsd_prof {
         // FreeBSD's rc.local runs `run.sh` in place of the suite.
