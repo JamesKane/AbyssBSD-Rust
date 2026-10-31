@@ -28,6 +28,10 @@ pub enum Event {
     /// An interface's flags or link changed (`RTM_IFINFO`): its state
     /// after.
     Info(Ifnet),
+    /// An interface's link went up or down (`if_link_state_change`):
+    /// `RTM_IFINFO` as [`Event::Info`], and `devd`'s `LINK_UP` or
+    /// `LINK_DOWN`.
+    Link { ifp: Ifnet, up: bool },
     /// An address was added or deleted (`RTM_NEWADDR`, `RTM_DELADDR`), on
     /// the interface as it was then.
     Addr { add: bool, ifp: Ifnet, addr: Ifaddr },
@@ -145,12 +149,31 @@ impl DerefMut for NetGuard<'_> {
 
 impl Drop for NetGuard<'_> {
     fn drop(&mut self) {
-        let events = self
-            .g
-            .as_mut()
-            .map(|g| core::mem::take(&mut g.outbox))
-            .unwrap_or_default();
+        let (events, tx, vnet) = match self.g.as_mut() {
+            Some(g) => {
+                let tx: Vec<_> = core::mem::take(&mut g.txq)
+                    .into_iter()
+                    .filter_map(|(index, m)| {
+                        let i = g.by_index(index)?;
+                        Some((index, i.flags, i.link.0.clone()?, m))
+                    })
+                    .collect();
+                let vnet = if tx.is_empty() {
+                    None
+                } else {
+                    g.owner.upgrade()
+                };
+                (core::mem::take(&mut g.outbox), tx, vnet)
+            }
+            None => (Vec::new(), Vec::new(), None),
+        };
         drop(self.g.take());
         self.owner.deliver(&events);
+        // Frames queued under the lock go out now, in order.
+        if let Some(v) = vnet {
+            for (index, flags, link, m) in tx {
+                let _ = crate::ether::output_frame(&v, index, &link, flags, m);
+            }
+        }
     }
 }

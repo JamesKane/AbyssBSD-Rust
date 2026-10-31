@@ -117,6 +117,21 @@ impl Queues {
     }
 }
 
+/// Hands `m` to `proto`'s input now (`netisr_dispatch` with the direct
+/// policy, as Ethernet input does).
+pub fn dispatch(vnet: &Arc<Vnet>, proto: Proto, m: Packet) {
+    let h = HANDLERS.lock()[proto as usize];
+    match h {
+        Some(h) => {
+            h(vnet, m);
+            vnet.netisr.handled.fetch_add(1, Ordering::Relaxed);
+        }
+        None => {
+            vnet.netisr.qdrops.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
 /// Hands everything queued in `vnet` to its protocol, in order; returns
 /// how many packets there were.
 pub fn drain(vnet: &Arc<Vnet>) -> usize {

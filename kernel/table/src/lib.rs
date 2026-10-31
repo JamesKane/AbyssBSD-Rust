@@ -37,6 +37,7 @@ pub static DRIVERS: &[DriverDecl] = &[
     virtio::pci::MODERN,
     virtio::pci::LEGACY,
     virtio_blk::DRIVER,
+    virtio_net::DRIVER,
     nvme::DRIVER,
     ahci::AHCI,
     ahci::AHCICH,

@@ -109,6 +109,98 @@ fn knobs(t: &mut Tree, parent: sysctl::NodeId, list: &[(&str, &str, i32)]) {
     }
 }
 
+/// `net.link.ether.inet`'s ARP settings, each the current VNET's.
+fn arp_knobs(t: &mut Tree, parent: sysctl::NodeId) {
+    type Get = fn(&net::arp::Conf) -> i32;
+    type Set = fn(&mut net::arp::Conf, i32) -> Result<(), Errno>;
+    let list: [(&str, &str, Get, Set); 5] = [
+        (
+            "max_age",
+            "ARP entry lifetime in seconds",
+            |c| i32::try_from(c.max_age).unwrap_or(i32::MAX),
+            // `sysctl_netinet_arp_timers`... a plain `int` here, kept
+            // positive.
+            |c, v| {
+                c.max_age = u64::try_from(v).map_err(|_| Errno::EINVAL)?;
+                Ok(())
+            },
+        ),
+        (
+            "maxtries",
+            "ARP resolution attempts before returning error",
+            |c| i32::from(c.maxtries),
+            |c, v| {
+                c.maxtries = u16::try_from(v).map_err(|_| Errno::EINVAL)?;
+                Ok(())
+            },
+        ),
+        (
+            "proxyall",
+            "Enable proxy ARP for all suitable requests",
+            |c| i32::from(c.proxyall),
+            |c, v| {
+                c.proxyall = v != 0;
+                Ok(())
+            },
+        ),
+        (
+            "wait",
+            "Incomplete ARP entry lifetime in seconds",
+            |c| i32::try_from(c.wait).unwrap_or(i32::MAX),
+            |c, v| {
+                c.wait = u64::try_from(v).map_err(|_| Errno::EINVAL)?;
+                Ok(())
+            },
+        ),
+        (
+            "maxhold",
+            "Number of packets to hold per ARP entry",
+            |c| i32::try_from(c.maxhold).unwrap_or(i32::MAX),
+            |c, v| {
+                c.maxhold = usize::try_from(v).map_err(|_| Errno::EINVAL)?;
+                Ok(())
+            },
+        ),
+    ];
+    for (name, descr, get, set) in list {
+        t.add_writable(
+            parent,
+            Number::Auto,
+            name,
+            descr,
+            0,
+            Value::Int(Box::new(move || get(&super::curvnet().net.lock().arp))),
+            sysctl::int_writer(move |v| set(&mut super::curvnet().net.lock().arp, v)),
+        )
+        .expect("an ARP sysctl");
+    }
+}
+
+/// `net.bpf`: buffer sizes and the program length limit, settable
+/// knobs with FreeBSD's values (the descriptors use the defaults).
+fn bpf_knobs(t: &mut Tree, net: sysctl::NodeId) {
+    let bpf = node(t, net, 0x1000, "bpf", "bpf sysctl");
+    knobs(
+        t,
+        bpf,
+        &[
+            ("bufsize", "Default capture buffer size in bytes", 4096),
+            ("maxbufsize", "Maximum capture buffer in bytes", 524_288),
+            ("maxinsns", "Maximum bpf program instructions", 512),
+            (
+                "zerocopy_enable",
+                "Enable new zero-copy BPF buffer sessions",
+                0,
+            ),
+            (
+                "optimize_writers",
+                "Do not send packets until BPF program is set",
+                0,
+            ),
+        ],
+    );
+}
+
 fn node(
     t: &mut Tree,
     parent: sysctl::NodeId,
@@ -560,14 +652,71 @@ pub(crate) fn init(s: &Sleepable) {
         .expect("net.link.generic.system.ifcount");
         let ether = node(t, link, 6, "ether", "Ethernet");
         let ether_inet = node(t, ether, 2, "inet", "");
+        arp_knobs(t, ether_inet);
         knobs(
             t,
             ether_inet,
             &[
-                ("proxyall", "Enable proxy ARP for all suitable requests", 0),
-                ("max_age", "", 1200),
+                (
+                    "log_arp_wrong_iface",
+                    "log arp packets arriving on the wrong interface",
+                    1,
+                ),
+                (
+                    "log_arp_movements",
+                    "log arp replies from MACs different than the one in the cache",
+                    1,
+                ),
+                (
+                    "log_arp_permanent_modify",
+                    "log arp replies from MACs different than the one in the permanent arp entry",
+                    1,
+                ),
+                ("allow_multicast", "accept multicast addresses", 0),
+                (
+                    "max_log_per_second",
+                    "Maximum number of remotely triggered ARP messages that can be logged per second",
+                    1,
+                ),
+                (
+                    "garp_rexmit_count",
+                    "Number of times to retransmit GARP packets; 0 to disable, maximum of 16",
+                    0,
+                ),
             ],
         );
+        let ether_arp = node(t, ether, 35, "arp", "");
+        t.add_value(
+            ether_arp,
+            Number::Auto,
+            "stats",
+            "ARP statistics (struct arpstat, net/if_arp.h)",
+            Value::Opaque {
+                format: "S,arpstat",
+                read: Box::new(|out| {
+                    let st = super::curvnet().net.lock().arpstat;
+                    // SAFETY: `Stat` is `repr(C)` and all `u64`s.
+                    let b = unsafe {
+                        core::slice::from_raw_parts(
+                            core::ptr::from_ref(&st).cast::<u8>(),
+                            size_of::<net::arp::Stat>(),
+                        )
+                    };
+                    out.extend_from_slice(b);
+                }),
+            },
+        )
+        .expect("net.link.ether.arp.stats");
+        knobs(
+            t,
+            ether_arp,
+            &[(
+                "log_level",
+                "Minimum log(9) level for recording rate limited arp log messages. The higher will be log more (emerg=0, info=6 (default), debug=7).",
+                6,
+            )],
+        );
+        bpf_knobs(t, net);
         let lo = node(t, link, 24, "loif", "");
         let _ = lo;
 
@@ -635,7 +784,14 @@ fn rtsock(r: &[i32], out: &mut Vec<u8>) -> Result<(), ReadError> {
     match op {
         net_rt::DUMP | net_rt::FLAGS => {
             if op == net_rt::FLAGS {
-                // The ARP and ND caches: loopback has none.
+                // `lltable_sysctl_dumparp`: the ARP or ND entries, of one
+                // family.
+                if arg & abi::net::rtf::LLINFO == 0 {
+                    return Ok(());
+                }
+                let family = net::Family::from_af(af).ok_or(ReadError::Failed(Errno::EINVAL))?;
+                let now = u64::try_from(super::now_s()).unwrap_or(0);
+                out.extend(n.lle_dump(family, now, super::uptime_s()));
                 return Ok(());
             }
             if af != 0 && af != abi::inet::AF_INET && af != abi::inet::AF_INET6 {
@@ -647,8 +803,9 @@ fn rtsock(r: &[i32], out: &mut Vec<u8>) -> Result<(), ReadError> {
             out.extend(inet::rtmsg::iflist(&n, af, arg, op == net_rt::IFLISTL));
         }
         net_rt::NHOP => out.extend(inet::rtmsg::nhops(&n, af, fib)),
-        // No multicast memberships or next-hop groups to list.
-        net_rt::IFMALIST | net_rt::NHGRP => {}
+        net_rt::IFMALIST => out.extend(inet::rtmsg::ifmalist(&n, af, arg)),
+        // No next-hop groups to list.
+        net_rt::NHGRP => {}
         _ => return Err(ReadError::Failed(Errno::EINVAL)),
     }
     Ok(())

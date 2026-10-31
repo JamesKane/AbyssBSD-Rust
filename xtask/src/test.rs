@@ -885,6 +885,10 @@ fn boot(
         extra_disk: Some(scratch),
         devices,
         usb,
+        // QEMU's user-mode network, for the network test (`vtnet0`).
+        net: (case.vmm == Vmm::Qemu).then(|| crate::qemu::Net::User {
+            forwards: Vec::new(),
+        }),
         ..Vm::new(case.vmm, case.arch, disk)
     };
     // Emulated aarch64 is slow to start and slow through the file-system

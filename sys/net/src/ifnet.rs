@@ -42,6 +42,7 @@ pub struct Stats {
     pub iqdrops: AtomicU64,
     pub noproto: AtomicU64,
     pub oerrors: AtomicU64,
+    pub ierrors: AtomicU64,
 }
 
 impl Stats {
@@ -113,6 +114,13 @@ pub struct Ifnet {
     pub baudrate: u64,
     /// Its device.
     pub link: crate::link::LinkRef,
+    /// Its `bpf` tap (`if_bpf`).
+    pub bpf: Option<Arc<crate::bpf::Tap>>,
+    /// Promiscuous mode's takers (`if_pcount`).
+    pub pcount: u32,
+    /// Its link-layer multicast memberships (`if_multiaddrs`), each with
+    /// its references.
+    pub maddrs: Vec<([u8; 6], u32)>,
 }
 
 /// Where a route goes.
@@ -159,6 +167,16 @@ pub struct Net {
     pub last_nh: u32,
     /// Bumped on any change (netlink dumps, `getifaddrs` callers).
     pub generation: u64,
+    /// The VNET these are in, for interfaces' taps.
+    pub owner: alloc::sync::Weak<crate::Vnet>,
+    /// The link-layer table's entries ([`crate::lltable`]).
+    pub lle: Vec<crate::lltable::Lle>,
+    /// Frames to send once the lock is let go: the interface, and the
+    /// frame with its header.
+    pub txq: Vec<(u16, mbuf::Packet)>,
+    /// ARP's settings and counts.
+    pub arp: crate::arp::Conf,
+    pub arpstat: crate::arp::Stat,
 }
 
 /// Why a route lookup failed.
@@ -219,6 +237,11 @@ impl Net {
         Self {
             ifaces: Vec::new(),
             routes: Vec::new(),
+            owner: alloc::sync::Weak::new(),
+            lle: Vec::new(),
+            txq: Vec::new(),
+            arp: crate::arp::Conf::DEFAULT,
+            arpstat: crate::arp::Stat::ZERO,
             outbox: Vec::new(),
             last_nh: 0,
             generation: 0,
@@ -235,6 +258,9 @@ impl Net {
 
     /// Adds an interface (`if_attach`).
     pub fn attach(&mut self, i: Ifnet) {
+        if let Some(t) = &i.bpf {
+            t.set_home(self.owner.clone(), i.index);
+        }
         self.outbox.push(Event::Announce {
             ifp: i.clone(),
             arrival: true,
@@ -263,6 +289,7 @@ impl Net {
         }
         let at = self.ifaces.iter().position(|i| i.index == index)?;
         let i = self.ifaces.remove(at);
+        self.lle_purge(index);
         self.outbox.push(Event::Announce {
             ifp: i.clone(),
             arrival: false,
@@ -378,7 +405,7 @@ impl Net {
             .ok_or(Errno::EADDRNOTAVAIL)
     }
 
-    fn bump(&mut self) {
+    pub(crate) fn bump(&mut self) {
         self.generation += 1;
     }
 
@@ -590,11 +617,31 @@ impl Net {
         if !was {
             self.in6_ifattach(index);
         }
+        // `arp_ifinit` and `nd6_add_ifa_lle`: an Ethernet interface's
+        // address is announced and gets a permanent entry.
+        match a.family {
+            Family::Inet => crate::arp::ifinit(self, index, crate::addr::v4_of(&a.addr)),
+            Family::Inet6 => {
+                let ll = self
+                    .by_index(index)
+                    .filter(|i| i.ty == abi::net::IFT_ETHER)
+                    .and_then(|i| i.lladdr);
+                if let Some(ll) = ll {
+                    let f = crate::lltable::lle::IFADDR | crate::lltable::lle::STATIC;
+                    let mut e = crate::lltable::Lle::new(Family::Inet6, a.addr, index, f);
+                    e.set_lladdr(ll);
+                    self.lle_link(e);
+                }
+            }
+        }
         self.bump();
         Ok(())
     }
 
     fn drop_implied(&mut self, index: u16, a: &Ifaddr) {
+        // `in_scrubprefixlle` and `nd6_rem_ifa_lle`: the address's own
+        // entry goes, and with the prefix route every entry inside it.
+        let mut freed = false;
         for r in self.implied(index, a) {
             if r.flags & rtf::HOST != 0 {
                 let _ = self.delete_route(r.family, &r.dst, r.plen);
@@ -628,7 +675,13 @@ impl Net {
                     .find(|x| x.flags & rtf::HOST == 0)
             {
                 let _ = self.add_route(nr);
+            } else {
+                self.lle_prefix_free(a.family, &a.addr, a.plen, &a.addr, true);
+                freed = true;
             }
+        }
+        if !freed {
+            let _ = self.lle_delete(index, a.family, &a.addr, true);
         }
     }
 
@@ -710,9 +763,18 @@ impl Net {
         let was = ifp.flags & iff::UP != 0;
         let before = ifp.flags;
         ifp.flags = (ifp.flags & iff::CANTCHANGE) | (flags & !iff::CANTCHANGE);
-        // A loopback interface runs while up (`lo_ioctl`'s `SIOCSIFFLAGS`);
-        // a device's driver keeps its own `IFF_DRV_RUNNING`.
-        if ifp.flags & iff::LOOPBACK != 0 {
+        // `ifhwioctl`: permanent promiscuous mode is promiscuous; without
+        // it, promiscuous only while someone takes it.
+        if flags & iff::PPROMISC != 0 {
+            ifp.flags |= iff::PROMISC;
+        } else if ifp.pcount == 0 {
+            ifp.flags &= !iff::PROMISC;
+        }
+        // A loopback interface runs while up (`lo_ioctl`'s `SIOCSIFFLAGS`),
+        // as does a driver's whose `if_init` starts it; another keeps its
+        // own `IFF_DRV_RUNNING`.
+        if ifp.flags & iff::LOOPBACK != 0 || ifp.link.0.as_ref().is_some_and(|l| l.runs_while_up())
+        {
             if up {
                 ifp.flags |= iff::RUNNING;
             } else {
@@ -721,14 +783,144 @@ impl Net {
         } else {
             ifp.flags = (ifp.flags & !iff::RUNNING) | (before & iff::RUNNING);
         }
+        if ifp.flags != before
+            && let Some(l) = &ifp.link.0
+        {
+            l.flags_changed(ifp.flags);
+        }
         let index = ifp.index;
+        // A driver started by coming up learns its link
+        // (`vtnet_init_locked`'s `vtnet_update_link_status`).
+        let mut link_event = None;
+        if up
+            && !was
+            && let Some(link) = ifp.link.0.as_ref().and_then(|l| l.link_status())
+        {
+            let state = if link {
+                abi::net::LINK_STATE_UP
+            } else {
+                abi::net::LINK_STATE_DOWN
+            };
+            if ifp.link_state != state {
+                ifp.link_state = state;
+                link_event = Some(link);
+            }
+        }
+        let snap = ifp.clone();
         // `if_up` and `if_down` announce (`rt_ifmsg`).
         if up != was {
-            let snap = ifp.clone();
-            self.outbox.push(Event::Info(snap));
+            self.outbox.push(Event::Info(snap.clone()));
+        }
+        if let Some(link) = link_event {
+            self.outbox.push(Event::Link {
+                ifp: snap,
+                up: link,
+            });
         }
         if up && !was {
             self.in6_ifattach(index);
+        }
+        self.bump();
+        Ok(())
+    }
+
+    /// Takes or lets go of promiscuous mode on interface `index`
+    /// (`ifpromisc`): the first taker turns it on, the last off, unless
+    /// it is permanent (`IFF_PPROMISC`).
+    ///
+    /// # Errors
+    ///
+    /// `ENXIO` for no such interface.
+    pub fn promisc(&mut self, index: u16, on: bool) -> Result<(), Errno> {
+        let ifp = self
+            .ifaces
+            .iter_mut()
+            .find(|i| i.index == index)
+            .ok_or(Errno::ENXIO)?;
+        if on {
+            ifp.pcount += 1;
+            if ifp.pcount > 1 || ifp.flags & iff::PPROMISC != 0 {
+                return Ok(());
+            }
+            ifp.flags |= iff::PROMISC;
+        } else {
+            if ifp.pcount == 0 {
+                return Ok(());
+            }
+            ifp.pcount -= 1;
+            if ifp.pcount > 0 || ifp.flags & iff::PPROMISC != 0 {
+                return Ok(());
+            }
+            ifp.flags &= !iff::PROMISC;
+        }
+        if let Some(l) = &ifp.link.0 {
+            l.flags_changed(ifp.flags);
+        }
+        // `if_setflag`'s `rt_ifmsg`.
+        let snap = ifp.clone();
+        self.outbox.push(Event::Info(snap));
+        self.bump();
+        Ok(())
+    }
+
+    /// Joins link-layer group `ll` on interface `index` (`if_addmulti`):
+    /// a new membership goes to the driver's receive filter. A request
+    /// from userland may join a group once (`SIOCADDMULTI`).
+    ///
+    /// # Errors
+    ///
+    /// `ENXIO` for no such interface, `EOPNOTSUPP` for one without
+    /// multicast, `EADDRINUSE` for a group userland already joined.
+    pub fn add_multi(&mut self, index: u16, ll: [u8; 6], user: bool) -> Result<(), Errno> {
+        let ifp = self
+            .ifaces
+            .iter_mut()
+            .find(|i| i.index == index)
+            .ok_or(Errno::ENXIO)?;
+        if ifp.flags & iff::MULTICAST == 0 {
+            return Err(Errno::EOPNOTSUPP);
+        }
+        if let Some(m) = ifp.maddrs.iter_mut().find(|m| m.0 == ll) {
+            if user {
+                return Err(Errno::EADDRINUSE);
+            }
+            m.1 += 1;
+            return Ok(());
+        }
+        ifp.maddrs.push((ll, 1));
+        if let Some(l) = &ifp.link.0 {
+            let list: Vec<[u8; 6]> = ifp.maddrs.iter().map(|m| m.0).collect();
+            l.multicast_changed(&list);
+        }
+        self.bump();
+        Ok(())
+    }
+
+    /// Leaves group `ll` on interface `index` (`if_delmulti`): the last
+    /// reference takes it out of the driver's filter.
+    ///
+    /// # Errors
+    ///
+    /// `ENXIO` for no such interface, `EADDRNOTAVAIL` for a group it is
+    /// not in.
+    pub fn del_multi(&mut self, index: u16, ll: [u8; 6]) -> Result<(), Errno> {
+        let ifp = self
+            .ifaces
+            .iter_mut()
+            .find(|i| i.index == index)
+            .ok_or(Errno::ENXIO)?;
+        let at = ifp
+            .maddrs
+            .iter()
+            .position(|m| m.0 == ll)
+            .ok_or(Errno::EADDRNOTAVAIL)?;
+        ifp.maddrs[at].1 -= 1;
+        if ifp.maddrs[at].1 == 0 {
+            ifp.maddrs.remove(at);
+            if let Some(l) = &ifp.link.0 {
+                let list: Vec<[u8; 6]> = ifp.maddrs.iter().map(|m| m.0).collect();
+                l.multicast_changed(&list);
+            }
         }
         self.bump();
         Ok(())
@@ -828,6 +1020,9 @@ pub fn loopback(index: u16, now: i64, stats: Arc<Stats>) -> Ifnet {
         lladdr: None,
         baudrate: 0,
         link: crate::link::LinkRef(None),
+        bpf: Some(crate::bpf::Tap::null()),
+        pcount: 0,
+        maddrs: Vec::new(),
     }
 }
 
@@ -836,6 +1031,7 @@ pub fn loopback(index: u16, now: i64, stats: Arc<Stats>) -> Ifnet {
 /// `127.0.0.1/8`, and with that `::1/128` and `fe80::1%lo0/64`; its
 /// attach time becomes `now`.
 pub fn configure_loopback(n: &mut Net, now: i64) {
+    crate::vnet::ensure_lo0(n, now);
     if let Some(lo) = n.by_name_mut(b"lo0") {
         lo.epoch = now;
         lo.lastchange = (now, 0);

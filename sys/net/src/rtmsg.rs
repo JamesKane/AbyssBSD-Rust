@@ -81,7 +81,7 @@ pub fn if_data(ifp: &Ifnet) -> IfData {
         ifi_metric: ifp.metric,
         ifi_baudrate: ifp.baudrate,
         ifi_ipackets: c(&s.ipackets),
-        ifi_ierrors: 0,
+        ifi_ierrors: c(&s.ierrors),
         ifi_opackets: c(&s.opackets),
         ifi_oerrors: 0,
         ifi_collisions: 0,
@@ -185,6 +185,45 @@ pub fn iflist(n: &Net, af: u8, ifindex: i32, long: bool) -> Vec<u8> {
                 continue;
             }
             out.extend(ifa_record(ifp, a, long));
+        }
+    }
+    out
+}
+
+/// `sysctl_ifmalist`: each interface's (`ifindex` 0 for all) multicast
+/// memberships of family `af` (0 for all), as `RTM_NEWMADDR` records with
+/// the interface and the group.
+#[must_use]
+pub fn ifmalist(n: &Net, af: u8, ifindex: i32) -> Vec<u8> {
+    let mut out = Vec::new();
+    if af != 0 && af != AF_LINK {
+        return out;
+    }
+    for ifp in &n.ifaces {
+        if ifindex != 0 && i32::from(ifp.index) != ifindex {
+            continue;
+        }
+        for (ll, _) in &ifp.maddrs {
+            let h = abi::net::IfmaMsghdr {
+                ifmam_index: ifp.index,
+                ..abi::net::IfmaMsghdr::default()
+            };
+            let mut v = Vec::new();
+            put(&mut v, &h);
+            // The group as `ether_resolvemulti` makes it (`link_init_sdl`).
+            let mut g = alloc::vec![0u8; 54];
+            g[0] = 54;
+            g[1] = AF_LINK;
+            g[2..4].copy_from_slice(&ifp.index.to_ne_bytes());
+            g[4] = ifp.ty;
+            g[6] = 6;
+            g[8..14].copy_from_slice(ll);
+            let mut addrs: [Option<Vec<u8>>; 8] = Default::default();
+            addrs[4] = Some(link_sockaddr(ifp));
+            addrs[5] = Some(g);
+            let (mut r, bits) = record(v, rtm::NEWMADDR, &addrs);
+            set_addrs(&mut r, bits);
+            out.extend(r);
         }
     }
     out

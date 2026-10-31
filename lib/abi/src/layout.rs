@@ -96,6 +96,7 @@ pub const CONSTANTS: &[&[ConstValue]] = &[
     crate::inet::CONSTANTS,
     crate::inotify::CONSTANTS,
     crate::net::CONSTANTS,
+    crate::bpf::CONSTANTS,
     crate::netlink::CONSTANTS,
     crate::procdesc::CONSTANTS,
     crate::linker::CONSTANTS,
@@ -547,6 +548,53 @@ pub static LAYOUTS: &[StructLayout] = &[
         sdl_alen => "sdl_alen",
         sdl_slen => "sdl_slen",
         sdl_data => "sdl_data",
+    }),
+    layout!(crate::bpf::BpfInsn, "struct bpf_insn", ["sys/types.h", "sys/time.h", "net/bpf.h"], All, {
+        code => "code",
+        jt => "jt",
+        jf => "jf",
+        k => "k",
+    }),
+    layout!(crate::bpf::BpfProgram, "struct bpf_program", ["sys/types.h", "sys/time.h", "net/bpf.h"], All, {
+        bf_len => "bf_len",
+        bf_insns => "bf_insns",
+    }),
+    layout!(crate::bpf::BpfStat, "struct bpf_stat", ["sys/types.h", "sys/time.h", "net/bpf.h"], All, {
+        bs_recv => "bs_recv",
+        bs_drop => "bs_drop",
+    }),
+    layout!(crate::bpf::BpfVersion, "struct bpf_version", ["sys/types.h", "sys/time.h", "net/bpf.h"], All, {
+        bv_major => "bv_major",
+        bv_minor => "bv_minor",
+    }),
+    layout!(crate::bpf::BpfDltlist, "struct bpf_dltlist", ["sys/types.h", "sys/time.h", "net/bpf.h"], All, {
+        bfl_len => "bfl_len",
+        bfl_list => "bfl_list",
+    }),
+    layout!(crate::bpf::BpfTs, "struct bpf_ts", ["sys/types.h", "sys/time.h", "net/bpf.h"], All, {
+        bt_sec => "bt_sec",
+        bt_frac => "bt_frac",
+    }),
+    layout!(crate::bpf::BpfXhdr, "struct bpf_xhdr", ["sys/types.h", "sys/time.h", "net/bpf.h"], All, {
+        bh_tstamp.bt_sec => "bh_tstamp.bt_sec",
+        bh_tstamp.bt_frac => "bh_tstamp.bt_frac",
+        bh_caplen => "bh_caplen",
+        bh_datalen => "bh_datalen",
+        bh_hdrlen => "bh_hdrlen",
+    }),
+    layout!(crate::bpf::BpfHdr, "struct bpf_hdr", ["sys/types.h", "sys/time.h", "net/bpf.h"], All, {
+        bh_tstamp => "bh_tstamp",
+        bh_caplen => "bh_caplen",
+        bh_datalen => "bh_datalen",
+        bh_hdrlen => "bh_hdrlen",
+    }),
+    layout!(net::IfmaMsghdr, "struct ifma_msghdr", ["sys/types.h", "sys/socket.h", "net/if.h"], All, {
+        ifmam_msglen => "ifmam_msglen",
+        ifmam_version => "ifmam_version",
+        ifmam_type => "ifmam_type",
+        ifmam_addrs => "ifmam_addrs",
+        ifmam_flags => "ifmam_flags",
+        ifmam_index => "ifmam_index",
     }),
     layout!(net::Ifreq, "struct ifreq", ["sys/types.h", "sys/socket.h", "net/if.h"], All, {
         ifr_name => "ifr_name",

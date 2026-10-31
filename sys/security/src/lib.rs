@@ -384,6 +384,8 @@ impl Cred {
                     | Priv::NetSetifname
                     | Priv::NetSetifmetric
                     | Priv::NetSetlladdr
+                    | Priv::NetAddmulti
+                    | Priv::NetDelmulti
                     | Priv::NetAddifgroup
                     | Priv::NetDelifgroup
                     | Priv::NetIfcreate

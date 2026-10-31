@@ -278,6 +278,10 @@ pub enum Priv {
     NetSetifname = 401,
     /// `PRIV_NET_SETIFMETRIC`: Set interface metrics.
     NetSetifmetric = 402,
+    /// `PRIV_NET_ADDMULTI`: Add multicast addr. to ifnet.
+    NetAddmulti = 405,
+    /// `PRIV_NET_DELMULTI`: Delete multicast addr. from ifnet.
+    NetDelmulti = 406,
     /// `PRIV_NET_SETLLADDR`: Set interface link-level address.
     NetSetlladdr = 408,
     /// `PRIV_NET_ADDIFGROUP`: Add new interface group.

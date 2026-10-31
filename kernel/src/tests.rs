@@ -4126,12 +4126,12 @@ ktest! {
             case \"$out\" in *'options=680003<RXCSUM,TXCSUM,LINKSTATE,RXCSUM_IPV6,TXCSUM_IPV6>'*) ;; *) echo \"$out\"; exit 3;; esac; \
             case \"$out\" in *'inet 127.0.0.1 netmask 0xff000000'*) ;; *) echo \"$out\"; exit 4;; esac; \
             case \"$out\" in *'inet6 ::1 prefixlen 128'*) ;; *) echo \"$out\"; exit 5;; esac; \
-            case \"$out\" in *'inet6 fe80::1%lo0 prefixlen 64 scopeid 0x1'*) ;; *) echo \"$out\"; exit 6;; esac; \
+            case \"$out\" in *'inet6 fe80::1%lo0 prefixlen 64 scopeid 0x'*) ;; *) echo \"$out\"; exit 6;; esac; \
             case \"$out\" in *'groups: lo'*) ;; *) echo \"$out\"; exit 7;; esac; \
             case \"$out\" in *'nd6 options=21<PERFORMNUD,AUTO_LINKLOCAL>'*) ;; *) echo \"$out\"; exit 8;; esac; \
             ifconfig lo0 inet 127.0.0.1/8 alias || exit 9; \
             ifconfig lo0 up || exit 10; \
-            [ \"$(ifconfig -l)\" = lo0 ] || exit 11; \
+            case \"$(ifconfig -l)\" in lo0|'vtnet0 lo0') ;; *) exit 11;; esac; \
             case \"$(route -n get 127.0.0.1)\" in *'interface: lo0'*) ;; *) exit 12;; esac; \
             route -n add -inet6 fe80:: -prefixlen 10 ::1 -reject > /dev/null || exit 13; \
             case \"$(route -n add -inet 127.0.0.1 -iface lo0 2>&1)\" in *'File exists'*) ;; *) exit 14;; esac; \

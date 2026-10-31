@@ -2036,6 +2036,19 @@ P7.0 ─► P7.1 ─► P7.2 ─► P7.3 ─► P7.4 ─┬─► P7.5 ───
   as `ifconfig` shows it on FreeBSD.
 - Ethernet input and output, ARP and the `lltable`, interface multicast filters.
 - `/dev/bpf` with its ioctls and the host-tested filter machine; `tcpdump -i vtnet0` works.
+- Done (2026-10-31): `sys/net`'s `bpf` (the classic machine with `bpf_validate`'s
+  rules, descriptors with FreeBSD's buffers, timeouts, directions, write-only opens, feedback, and
+  locking; `/dev/bpf` with every `BIOC*` request but zero-copy), Ethernet input and output, the
+  link-layer table with ARP (requests, replies, learning, resolution with a hold queue, aging,
+  gratuitous ARP for each address, `arp -s` and `ndp -s` through the routing socket, `arp -a`
+  and `ndp -a` through `NET_RT_FLAGS`, the `net.link.ether.inet` settings), interface multicast
+  memberships (`SIOCADDMULTI`, `NET_RT_IFMALIST`), promiscuous mode, `devd`'s `IFNET` and
+  `ETHERNET` events, and `drivers/virtio-net` on a first net class (`netif::Port`): FreeBSD's
+  features, queue pairs with `MQ`, mergeable receive buffers, the control queue's receive filter
+  and address table, link state. A kernel test on QEMU's user network gets a DHCP offer through
+  `/dev/bpf` on `vtnet0` and resolves the router with ARP. Left: the class's moderation,
+  busy-polling, and software LRO, and receive buffers that become packets without a copy (with
+  P7's performance work); `tcpdump` and `dhclient` themselves wait for raw IP sockets (P7.4).
 
 **P7.4 IPv4, ICMP, and UDP on the wire.**
 - IPv4 input, output, fragmentation and reassembly, forwarding; ICMP with its rate limit; raw IP

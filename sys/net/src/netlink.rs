@@ -997,7 +997,7 @@ pub fn notify(e: &crate::announce::Event, now_s: u64) -> Option<(u32, Vec<u8>)> 
                 fix(link_msg(&ctx, &hdr(t), &net, ifp, false), t),
             ))
         }
-        Event::Info(ifp) => Some((
+        Event::Info(ifp) | Event::Link { ifp, .. } => Some((
             group::LINK,
             fix(
                 link_msg(&ctx, &hdr(ty::NEWLINK), &net, ifp, false),

@@ -18,9 +18,16 @@ extern crate std;
 
 pub mod addr;
 pub mod announce;
+pub mod arp;
+pub mod bpf;
 pub mod clone;
+pub mod ether;
 pub mod ifnet;
 pub mod link;
+#[cfg(test)]
+mod link_tests;
+pub mod lltable;
+pub mod netif;
 pub mod netisr;
 pub mod netlink;
 pub mod rtmsg;
@@ -51,6 +58,39 @@ pub fn numfibs() -> u32 {
 /// Sets `net.fibs` from the boot tunable (1 to `RT_MAXFIBS`).
 pub fn set_numfibs(n: u32) {
     NUMFIBS.store(n.clamp(1, MAXFIBS), Ordering::Relaxed);
+}
+
+/// The uptime clock in seconds, for entries that age.
+static UPTIME: sync::Once<fn() -> u64> = sync::Once::new();
+
+/// Sets the uptime clock.
+pub fn set_uptime(f: fn() -> u64) {
+    let _ = UPTIME.set(f);
+}
+
+/// Seconds since boot (`time_uptime`).
+pub(crate) fn uptime() -> u64 {
+    UPTIME.get().map_or(0, |f| f())
+}
+
+/// The time of day in seconds, for interfaces' attach times.
+static REALTIME: sync::Once<fn() -> i64> = sync::Once::new();
+
+/// Sets the time-of-day clock.
+pub fn set_realtime(f: fn() -> i64) {
+    let _ = REALTIME.set(f);
+}
+
+/// Seconds since the epoch (`time_second`).
+pub(crate) fn realtime() -> i64 {
+    REALTIME.get().map_or(0, |f| f())
+}
+
+/// Registers the link layer's protocols with `netisr`: Ethernet input,
+/// and ARP behind it.
+pub fn init() {
+    netisr::register(netisr::Proto::Ether, ether::input);
+    netisr::register(netisr::Proto::Arp, arp::input);
 }
 
 /// An address family the network layer carries.

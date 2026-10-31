@@ -23,9 +23,12 @@ pub struct Media {
     pub supported: i32,
 }
 
-/// `IFM_ETHER`, `IFM_10G_T`, `IFM_FDX`, `IFM_AVALID`, `IFM_ACTIVE`.
+/// `IFM_ETHER`, `IFM_AUTO`, `IFM_NONE`, `IFM_10G_T`, `IFM_FDX`,
+/// `IFM_AVALID`, `IFM_ACTIVE`.
 pub mod ifm {
     pub const ETHER: i32 = 0x20;
+    pub const AUTO: i32 = 0;
+    pub const NONE: i32 = 2;
     pub const T10G: i32 = 26;
     pub const FDX: i32 = 0x0010_0000;
     pub const AVALID: i32 = 0x1;
@@ -54,6 +57,31 @@ pub trait Link: Send + Sync {
     fn media(&self) -> Option<Media> {
         None
     }
+
+    /// Its interface moved to `vnet` as interface `index` (`if_vmove`).
+    fn moved(&self, _vnet: &Arc<Vnet>, _index: u16) {}
+
+    /// Whether it runs (`IFF_DRV_RUNNING`) exactly while up, as a driver
+    /// whose `if_init` starts it on `SIOCSIFFLAGS` does.
+    fn runs_while_up(&self) -> bool {
+        false
+    }
+
+    /// The physical link's state, if the device knows it: read when the
+    /// interface comes up (`if_init`'s `if_link_state_change`).
+    fn link_status(&self) -> Option<bool> {
+        None
+    }
+
+    /// Its interface's flags changed (`SIOCSIFFLAGS` to the driver):
+    /// promiscuous or all-multicast reception went on or off. Called
+    /// under the interfaces' lock; a driver that must sleep to act defers.
+    fn flags_changed(&self, _flags: u32) {}
+
+    /// Its interface's link-layer multicast memberships changed
+    /// (`SIOCADDMULTI` and `SIOCDELMULTI` to the driver): the whole list.
+    /// Called under the interfaces' lock, as `flags_changed` is.
+    fn multicast_changed(&self, _groups: &[[u8; 6]]) {}
 
     fn as_any(&self) -> &dyn Any;
 }

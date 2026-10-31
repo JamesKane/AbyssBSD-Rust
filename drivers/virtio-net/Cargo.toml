@@ -1,0 +1,22 @@
+[package]
+name = "virtio-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+abi = { path = "../../lib/abi" }
+bus = { path = "../../sys/bus" }
+devtree = { path = "../../lib/devtree" }
+hal = { path = "../../arch/hal" }
+irq = { path = "../../sys/irq" }
+mbuf = { path = "../../sys/mbuf" }
+net = { path = "../../sys/net" }
+sched = { path = "../../sys/sched" }
+sync = { path = "../../sys/sync" }
+virtio = { path = "../../sys/virtio" }
+vm = { path = "../../sys/vm" }
+
+[lints]
+workspace = true

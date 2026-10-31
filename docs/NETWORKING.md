@@ -92,8 +92,8 @@ follows them; where it departs from them, FreeBSD's behavior is the target.
 |---|---|---|
 | `sys/mbuf` (new) | `Packet`, buffer segments, cluster and page-backed buffers, the zones, checksum and TSO metadata, `m_*`-style operations (prepend, pullup, split, copy by reference) | Host-tested; replaces the accounting-only `socket::Mbuf` |
 | `sys/epoch` (new) | A preemptible network epoch: enter and exit, deferred reclamation | Also the base a lock-free descriptor lookup can use later |
-| `sys/net` (new) | `Vnet`, `ifnet` and the net driver class (`EtherQueues`), Ethernet, `lo`, `epair`, cloners, `bpf` and its filter interpreter, routes, next hops and FIBs, the link-layer table (`lltable`), the routing socket, netlink | Takes over `sys/inet::ifnet` and `sys/inet::netlink` |
-| `sys/inet` (grows) | PCBs (as today), IPv4, ICMP, ARP, IGMP, raw IP, UDP, IPv6, ICMPv6, ND and SLAAC, MLD, fragmentation and reassembly, forwarding | Its direct delivery between sockets goes |
+| `sys/net` (new) | `Vnet`, `ifnet` and the net driver class (`EtherQueues`), Ethernet, `lo`, `epair`, cloners, `bpf` and its filter interpreter, routes, next hops and FIBs, the link-layer table (`lltable`) and ARP, which fills it under the same lock, the routing socket, netlink | Takes over `sys/inet::ifnet` and `sys/inet::netlink` |
+| `sys/inet` (grows) | PCBs (as today), IPv4, ICMP, IGMP, raw IP, UDP, IPv6, ICMPv6, ND and SLAAC, MLD, fragmentation and reassembly, forwarding | Its direct delivery between sockets goes |
 | `sys/tcp` (new) | TCP: segments, the state machine, timers, SACK, reassembly, syncache and cookies, hostcache, congestion control (NewReno, CUBIC), ECN, LRO, TSO sizing | Host-tested against a simulated network; takes over `sys/inet::tcp`'s states and errors |
 | `sys/crypto` (new) | AES (ECB core, CBC, GCM), ChaCha20-Poly1305, SHA-1, SHA-256, SHA-384, HMAC | Constant-time software; AES-NI, PCLMULQDQ, and the ARMv8 cryptographic extensions through `arch/*` |
 | `sys/ktls` (new) | TLS 1.0–1.3 record framing, encryption on send, decryption on receive | Uses `sys/crypto` and `sys/mbuf` |

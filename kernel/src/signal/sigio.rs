@@ -78,6 +78,15 @@ impl Sigio {
     /// `pgsigio(SIGIO)`: to the owner, or each process of its group, that
     /// the owner's credential may signal.
     pub(crate) fn signal(&self) {
+        self.signal_with(SIGIO);
+    }
+
+    /// `pgsigio(sig)`: [`Sigio::signal`] with another signal, as `bpf`'s
+    /// `BIOCSRSIG` chooses; 0 sends none.
+    pub(crate) fn signal_with(&self, sig: u32) {
+        if sig == 0 {
+            return;
+        }
         let Some((owner, cred)) = self.0.lock().clone() else {
             return;
         };
@@ -90,7 +99,7 @@ impl Sigio {
                 || cred.ruid == c.uid
                 || cred.uid == c.uid
         };
-        let info = super::user_info(SIGIO, 0, code::SI_KERNEL);
+        let info = super::user_info(sig, 0, code::SI_KERNEL);
         match owner {
             Owner::Process(pid) => {
                 if let Some(p) = crate::proc::find(pid).filter(|p| !p.has_exited() && may(p)) {

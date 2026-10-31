@@ -171,6 +171,7 @@ dependencies = [
  "virtio",
  "virtio-blk",
  "virtio-input",
+ "virtio-net",
  "virtio-random",
  "xhci-driver",
 ]
@@ -722,6 +723,23 @@ dependencies = [
  "evdev",
  "input",
  "irq",
+ "sched",
+ "sync",
+ "virtio",
+ "vm",
+]
+
+[[package]]
+name = "virtio-net"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "bus",
+ "devtree",
+ "hal",
+ "irq",
+ "mbuf",
+ "net",
  "sched",
  "sync",
  "virtio",

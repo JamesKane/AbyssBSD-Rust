@@ -277,6 +277,22 @@ pub fn request(
         _ => return fail(base, Errno::EINVAL),
     };
     let (family, dst_addr) = dst;
+    // `arp -s` and `ndp -s` (`lla_rt_output`); their netmask is ignored.
+    if base.rtm_flags & rtf::LLDATA != 0 {
+        return match n.lla_rt_output(&base, family, &dst_addr, req.sas[1]) {
+            Ok(()) => {
+                let mut h = base;
+                h.rtm_errno = 0;
+                h.rtm_flags |= rtf::DONE;
+                let mut v = Vec::new();
+                put(&mut v, &h);
+                v.truncate(HDR);
+                v.extend_from_slice(&msg[HDR..usize::from(h.rtm_msglen).min(msg.len())]);
+                (v, Ok(()))
+            }
+            Err(e) => fail(base, e),
+        };
+    }
     let plen = match req.sas[2] {
         Some(m) => match plen_of(family, m) {
             Ok(p) => Some(p),
@@ -501,7 +517,7 @@ pub fn announce(e: &Event) -> Option<(Option<Family>, Vec<u8>)> {
             v[22..24].copy_from_slice(&what.to_ne_bytes());
             Some((None, v))
         }
-        Event::Info(ifp) => Some((None, rtmsg::ifinfo_record(ifp))),
+        Event::Info(ifp) | Event::Link { ifp, .. } => Some((None, rtmsg::ifinfo_record(ifp))),
         Event::Addr { add, ifp, addr } => {
             let ty = if *add { rtm::NEWADDR } else { rtm::DELADDR };
             Some((Some(addr.family), rtmsg::ifa_record_typed(ifp, addr, ty)))

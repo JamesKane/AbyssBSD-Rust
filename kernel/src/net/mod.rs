@@ -7,7 +7,10 @@
 //! Behavior reference: sys/net/if_loop.c (`vnet_loif_init`),
 //! sys/netinet6/in6_ifattach.c.
 
+pub(crate) mod bpf;
 pub(crate) mod ioctl;
+#[cfg(feature = "ktest")]
+mod ktests;
 pub(crate) mod netlink;
 pub(crate) mod splice;
 mod sysctl;
@@ -68,21 +71,60 @@ fn start_netisr() {
     });
 }
 
-/// Deletes routes as they expire (`rt_expire`'s callout), once a second.
+/// Seconds since boot (`time_uptime`).
+pub(crate) fn uptime_s() -> u64 {
+    crate::time::now_ns() / 1_000_000_000
+}
+
+/// Deletes routes as they expire (`rt_expire`'s callout), and ages the
+/// link-layer table's entries (their `lle_timer`s), once a second.
 fn start_route_expiry() {
     let _ = sched::spawn("rtexpire", sched::Priority::KERNEL, |s| {
         loop {
             crate::time::sleep_ns(s, 1_000_000_000);
             let now = u64::try_from(now_s()).unwrap_or(0);
+            let up = uptime_s();
             for v in net::Vnet::all() {
-                let has = v.net.lock().routes.iter().any(|r| r.expire != 0);
-                if has {
-                    v.net.lock().expire(now);
+                let mut n = v.net.lock();
+                if n.routes.iter().any(|r| r.expire != 0) {
+                    n.expire(now);
+                }
+                if n.lle.iter().any(|e| e.timer.is_some_and(|t| t <= up)) {
+                    net::arp::tick(&mut n, up);
                 }
             }
         }
     });
 }
+
+/// `devd`'s interface events, from the system's VNET (`if_attach`'s,
+/// `ether_ifattach`'s, `if_detach`'s, and `do_link_state_change`'s
+/// `devctl_notify`).
+struct Devd;
+
+impl net::announce::Listener for Devd {
+    fn event(&self, e: &net::announce::Event) {
+        use net::announce::Event;
+        let m = bus::manager();
+        match e {
+            Event::Announce { ifp, arrival } => {
+                let kind = if *arrival { "ATTACH" } else { "DETACH" };
+                m.notify("IFNET", &ifp.name, kind, None);
+                if *arrival && ifp.ty == abi::net::IFT_ETHER {
+                    m.notify("ETHERNET", &ifp.name, "IFATTACH", None);
+                }
+            }
+            Event::Link { ifp, up } => {
+                let kind = if *up { "LINK_UP" } else { "LINK_DOWN" };
+                m.notify("IFNET", &ifp.name, kind, None);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The listener, kept for the system's life.
+static DEVD: sync::Once<alloc::sync::Arc<dyn net::announce::Listener>> = sync::Once::new();
 
 /// What a clone needs from the creating thread (`ether_gen_addr_byname`'s
 /// host UUID and jail name).
@@ -109,6 +151,14 @@ pub(crate) fn init(s: &Sleepable) {
     }) {
         net::set_numfibs(n);
     }
+    net::set_uptime(uptime_s);
+    net::set_realtime(now_s);
+    net::init();
+    let _ = DEVD.set(alloc::sync::Arc::new(Devd));
+    if let Some(l) = DEVD.get() {
+        net::vnet0().net.listen(l);
+    }
+    bpf::init();
     inet::set_hooks(inet::Hooks {
         now: crate::time::now_ns,
         random: random_u32,

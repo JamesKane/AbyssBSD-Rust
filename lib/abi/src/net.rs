@@ -33,6 +33,7 @@ pub mod iff {
     pub const PPROMISC: u32 = 0x2_0000;
     pub const MONITOR: u32 = 0x4_0000;
     pub const STATICARP: u32 = 0x8_0000;
+    pub const STICKYARP: u32 = 0x10_0000;
     pub const DYING: u32 = 0x20_0000;
     pub const RENAMING: u32 = 0x40_0000;
     /// `IFF_NETLINK_1`, which netlink reports as `IFF_LOWER_UP`.
@@ -57,9 +58,17 @@ pub mod ifcap {
     pub const TXCSUM: u32 = 1 << 1;
     pub const VLAN_MTU: u32 = 1 << 3;
     pub const VLAN_HWTAGGING: u32 = 1 << 4;
+    pub const JUMBO_MTU: u32 = 1 << 5;
+    pub const VLAN_HWCSUM: u32 = 1 << 7;
+    pub const TSO4: u32 = 1 << 8;
+    pub const TSO6: u32 = 1 << 9;
+    pub const LRO: u32 = 1 << 10;
+    pub const VLAN_HWFILTER: u32 = 1 << 16;
+    pub const VLAN_HWTSO: u32 = 1 << 18;
     pub const LINKSTATE: u32 = 1 << 19;
     pub const RXCSUM_IPV6: u32 = 1 << 21;
     pub const TXCSUM_IPV6: u32 = 1 << 22;
+    pub const HWSTATS: u32 = 1 << 23;
 }
 
 /// `IFT_ETHER`, `IFT_LOOP`, `LINK_STATE_UP`.
@@ -259,6 +268,19 @@ pub struct IfMsghdrl {
     pub ifm_data: IfData,
 }
 
+/// `struct ifma_msghdr` (`NET_RT_IFMALIST`, `RTM_NEWMADDR`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IfmaMsghdr {
+    pub ifmam_msglen: u16,
+    pub ifmam_version: u8,
+    pub ifmam_type: u8,
+    pub ifmam_addrs: i32,
+    pub ifmam_flags: i32,
+    pub ifmam_index: u16,
+    pub _ifmam_spare1: u16,
+}
+
 /// `struct if_msghdr` (`NET_RT_IFLIST`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -379,9 +401,14 @@ pub mod rtf {
     pub const HOST: i32 = 0x4;
     pub const REJECT: i32 = 0x8;
     pub const DONE: i32 = 0x40;
+    /// `RTF_LLINFO`, also `RTF_LLDATA`: a link-layer table entry.
+    pub const LLINFO: i32 = 0x400;
+    pub const LLDATA: i32 = 0x400;
     pub const STATIC: i32 = 0x800;
     pub const BLACKHOLE: i32 = 0x1000;
     pub const PROTO2: i32 = 0x4000;
+    /// `RTF_ANNOUNCE`: a published (proxy) link-layer entry.
+    pub const ANNOUNCE: i32 = 0x4000;
     pub const PROTO1: i32 = 0x8000;
     pub const PROTO3: i32 = 0x4_0000;
     pub const FIXEDMTU: i32 = 0x8_0000;
@@ -530,6 +557,7 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("IFF_PPROMISC", "net/if.h", iff::PPROMISC as i64),
     c("IFF_MONITOR", "net/if.h", iff::MONITOR as i64),
     c("IFF_STATICARP", "net/if.h", iff::STATICARP as i64),
+    c("IFF_STICKYARP", "net/if.h", iff::STICKYARP as i64),
     c("IFF_DYING", "net/if.h", iff::DYING as i64),
     c("IFF_RENAMING", "net/if.h", iff::RENAMING as i64),
     c("IFF_NETLINK_1", "net/if.h", iff::LOWER_UP as i64),
@@ -537,6 +565,18 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("IFCAP_RXCSUM", "net/if.h", ifcap::RXCSUM as i64),
     c("IFCAP_TXCSUM", "net/if.h", ifcap::TXCSUM as i64),
     c("IFCAP_VLAN_MTU", "net/if.h", ifcap::VLAN_MTU as i64),
+    c("IFCAP_JUMBO_MTU", "net/if.h", ifcap::JUMBO_MTU as i64),
+    c("IFCAP_VLAN_HWCSUM", "net/if.h", ifcap::VLAN_HWCSUM as i64),
+    c("IFCAP_TSO4", "net/if.h", ifcap::TSO4 as i64),
+    c("IFCAP_TSO6", "net/if.h", ifcap::TSO6 as i64),
+    c("IFCAP_LRO", "net/if.h", ifcap::LRO as i64),
+    c(
+        "IFCAP_VLAN_HWFILTER",
+        "net/if.h",
+        ifcap::VLAN_HWFILTER as i64,
+    ),
+    c("IFCAP_VLAN_HWTSO", "net/if.h", ifcap::VLAN_HWTSO as i64),
+    c("IFCAP_HWSTATS", "net/if.h", ifcap::HWSTATS as i64),
     c(
         "IFCAP_VLAN_HWTAGGING",
         "net/if.h",
@@ -571,6 +611,9 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("RTF_REJECT", "net/route.h", rtf::REJECT as i64),
     c("RTF_DONE", "net/route.h", rtf::DONE as i64),
     c("RTF_STATIC", "net/route.h", rtf::STATIC as i64),
+    c("RTF_LLINFO", "net/route.h", rtf::LLINFO as i64),
+    c("RTF_LLDATA", "net/route.h", rtf::LLDATA as i64),
+    c("RTF_ANNOUNCE", "net/route.h", rtf::ANNOUNCE as i64),
     c("RTF_BLACKHOLE", "net/route.h", rtf::BLACKHOLE as i64),
     c("RTF_PINNED", "net/route.h", rtf::PINNED as i64),
     c("RTF_PROTO1", "net/route.h", rtf::PROTO1 as i64),

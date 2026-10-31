@@ -25,6 +25,9 @@ pub struct Vnet {
     pub net: NetLock,
     /// `lo0`'s counters.
     pub lo: Arc<Stats>,
+    /// `lo0`'s tap, which every loopback interface's traffic passes
+    /// (`V_loif->if_bpf`).
+    pub lotap: Arc<crate::bpf::Tap>,
     /// Its `netisr` queues.
     pub netisr: Queues,
     /// The units its cloners have handed out (`ifc_unrhdr`).
@@ -39,18 +42,26 @@ static VNET0: Once<Arc<Vnet>> = Once::new();
 impl Vnet {
     fn with_id(id: u32, now: i64) -> Arc<Self> {
         let lo = Arc::new(Stats::default());
-        let mut net = Net::new();
-        let mut lo0 = crate::clone::lo_ifnet(0, net.next_index(), now, Arc::clone(&lo));
-        lo0.home = id;
-        net.attach(lo0);
-        // No one listens yet.
-        net.outbox.clear();
-        let v = Arc::new(Self {
-            id,
-            net: NetLock::new(net),
-            lo,
-            netisr: Queues::new(),
-            units: SpinLock::new(alloc::vec![("lo", 0)]),
+        let lotap = crate::bpf::Tap::null();
+        let v = Arc::new_cyclic(|me| {
+            let mut net = Net::new();
+            net.owner = me.clone();
+            // The system's `lo0` comes when the network starts, after the
+            // devices found at boot, as FreeBSD numbers them; a new VNET's
+            // comes with it.
+            if id != 0 {
+                attach_lo0(&mut net, id, now, &lo, &lotap);
+            }
+            // No one listens yet.
+            net.outbox.clear();
+            Self {
+                id,
+                net: NetLock::new(net),
+                lo,
+                lotap,
+                netisr: Queues::new(),
+                units: SpinLock::new(alloc::vec![("lo", 0)]),
+            }
         });
         let mut all = ALL.lock();
         all.retain(|w| w.strong_count() > 0);
@@ -69,6 +80,24 @@ impl Vnet {
     #[must_use]
     pub fn new(now: i64) -> Arc<Self> {
         Self::with_id(NEXT.fetch_add(1, Ordering::Relaxed), now)
+    }
+}
+
+/// Attaches loopback interface `lo0` (`vnet_loif_init`).
+fn attach_lo0(net: &mut Net, id: u32, now: i64, lo: &Arc<Stats>, lotap: &Arc<crate::bpf::Tap>) {
+    let mut lo0 = crate::clone::lo_ifnet(0, net.next_index(), now, Arc::clone(lo));
+    lo0.home = id;
+    lo0.bpf = Some(Arc::clone(lotap));
+    net.attach(lo0);
+}
+
+/// Attaches `lo0` to the VNET `net` is, if it has none yet.
+pub(crate) fn ensure_lo0(net: &mut Net, now: i64) {
+    if net.by_name(b"lo0").is_some() {
+        return;
+    }
+    if let Some(v) = net.owner.upgrade() {
+        attach_lo0(net, v.id, now, &v.lo, &v.lotap);
     }
 }
 

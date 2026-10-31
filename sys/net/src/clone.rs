@@ -94,6 +94,11 @@ impl Link for Loop {
     ) -> Result<(), NoBufs> {
         let len = m.len();
         self.stats.looped(len);
+        // `if_simloop`: `lo0`'s tap sees whatever any loopback interface
+        // loops, as sent, behind its family in host order.
+        let af = u32::from(family.map_or(0, Family::af));
+        vnet.lotap
+            .mtap2(&af.to_ne_bytes(), &m, crate::bpf::Way::Out);
         m.hdr.rcvif = index;
         let proto = match family {
             Some(Family::Inet6) => Proto::Ipv6,
@@ -113,6 +118,7 @@ impl Link for Loop {
 /// One end of an `epair`.
 pub struct Epair {
     stats: Arc<Stats>,
+    tap: Arc<crate::bpf::Tap>,
     /// Where this end is: its VNET and index there.
     home: SpinLock<(Weak<Vnet>, u16)>,
     /// The VNET it was made in, whose cloner holds its unit.
@@ -171,6 +177,9 @@ impl Link for Epair {
             self.stats.oerrors.fetch_add(1, Ordering::Relaxed);
             return Err(NoBufs);
         };
+        // `epair_transmit`'s `BPF_MTAP`; the other end's `ether_input`
+        // taps it coming in.
+        self.tap.mtap(&m, crate::bpf::Way::Out);
         let len = m.len() as u64;
         self.stats.opackets.fetch_add(1, Ordering::Relaxed);
         self.stats.obytes.fetch_add(len, Ordering::Relaxed);
@@ -181,6 +190,10 @@ impl Link for Epair {
             peer.stats.iqdrops.fetch_add(1, Ordering::Relaxed);
             NoBufs
         })
+    }
+
+    fn moved(&self, vnet: &Arc<Vnet>, index: u16) {
+        Epair::moved(self, vnet, index);
     }
 
     fn media(&self) -> Option<Media> {
@@ -237,6 +250,9 @@ fn epair_ifnet(
         stats: Arc::clone(&link.stats),
         lladdr: Some(lladdr),
         baudrate: 10_000_000_000,
+        bpf: Some(Arc::clone(&link.tap)),
+        pcount: 0,
+        maddrs: Vec::new(),
         link: LinkRef(Some(link)),
     }
 }
@@ -327,6 +343,7 @@ fn create_epair(vnet: &Arc<Vnet>, unit: Option<i32>, ctx: &Ctx) -> Result<String
     let end = || {
         Arc::new(Epair {
             stats: Arc::new(Stats::default()),
+            tap: crate::bpf::Tap::ether(),
             home: SpinLock::new((Arc::downgrade(vnet), 0)),
             origin: Arc::downgrade(vnet),
             unit: u,
@@ -377,6 +394,7 @@ pub fn destroy(vnet: &Arc<Vnet>, name: &[u8]) -> Result<Vec<(Arc<Vnet>, Ifnet)>,
             && let (Some(pv), pi) = p.home()
             && let Some(i) = pv.net.lock().detach(pi)
         {
+            untap(&i);
             gone.push((Arc::clone(&pv), i));
         }
         if let Some(origin) = e.origin.upgrade() {
@@ -386,9 +404,17 @@ pub fn destroy(vnet: &Arc<Vnet>, name: &[u8]) -> Result<Vec<(Arc<Vnet>, Ifnet)>,
         vnet.free_unit(dname, dunit);
     }
     if let Some(i) = vnet.net.lock().detach(index) {
+        untap(&i);
         gone.insert(0, (Arc::clone(vnet), i));
     }
     Ok(gone)
+}
+
+/// `bpf_ifdetach`: the descriptors on a departing interface let go.
+pub(crate) fn untap(i: &Ifnet) {
+    if let Some(t) = &i.bpf {
+        t.detach_all();
+    }
 }
 
 /// Sends `m` out of interface `index` of `vnet`, an IPv4 or IPv6 packet
@@ -424,17 +450,13 @@ pub fn vmove(from: &Arc<Vnet>, name: &[u8], to: &Arc<Vnet>) -> Result<(), Errno>
         return Err(Errno::EEXIST);
     }
     let mut i = from.net.lock().detach(index).ok_or(Errno::ENXIO)?;
+    untap(&i);
     i.flags &= !iff::UP;
     i.addrs.clear();
     let mut n = to.net.lock();
     i.index = n.next_index();
-    if let Some(e) = i
-        .link
-        .0
-        .as_ref()
-        .and_then(|l| l.as_any().downcast_ref::<Epair>())
-    {
-        e.moved(to, i.index);
+    if let Some(l) = &i.link.0 {
+        l.moved(to, i.index);
     }
     n.attach(i);
     Ok(())
@@ -461,8 +483,10 @@ pub fn shutdown(vnet: &Arc<Vnet>) {
         if destroy(vnet, &name).is_err() {
             // `lo0`: goes with the VNET.
             let index = vnet.net.lock().by_name(&name).map(|i| i.index);
-            if let Some(index) = index {
-                vnet.net.lock().detach(index);
+            if let Some(index) = index
+                && let Some(i) = vnet.net.lock().detach(index)
+            {
+                untap(&i);
             }
         }
     }

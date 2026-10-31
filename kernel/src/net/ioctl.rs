@@ -229,6 +229,7 @@ pub(crate) fn ifioctl(
         | sio::SIOCSIFFIB
         | sio::SIOCSIFDESCR => return set(req, arg),
         sio::SIOCGIFMEDIA | sio::SIOCGIFXMEDIA => return media(arg),
+        sio::SIOCADDMULTI | sio::SIOCDELMULTI => return multi(req == sio::SIOCADDMULTI, arg),
         // `lo_ioctl` takes none of these.
         sio::SIOCGIFSTATUS | sio::SIOCGIFCAPNV | sio::SIOCGLANPCP | sio::SIOCGTUNFIB => {
             ifp(&curvnet().net.lock(), arg)?;
@@ -408,6 +409,44 @@ fn get(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
 }
 
 /// `ifhwioctl`'s changes, each with its privilege.
+/// `SIOCADDMULTI` and `SIOCDELMULTI` (`ifhwioctl`): a link-layer group,
+/// joined once from userland (`if_addmulti` with `ether_resolvemulti`).
+fn multi(add: bool, arg: &mut [u8]) -> Result<usize, Errno> {
+    priv_check(if add {
+        Priv::NetAddmulti
+    } else {
+        Priv::NetDelmulti
+    })?;
+    let v = curvnet();
+    let mut n = v.net.lock();
+    let (index, flags) = {
+        let i = ifp(&n, arg)?;
+        (i.index, i.flags)
+    };
+    if flags & iff::MULTICAST == 0 {
+        return Err(Errno::EOPNOTSUPP);
+    }
+    let sa = &arg[IFRU..];
+    if sa.get(1) != Some(&abi::inet::AF_LINK) {
+        return Err(Errno::EINVAL);
+    }
+    let (nlen, alen) = (usize::from(sa[5]), usize::from(sa[6]));
+    let ll: [u8; 6] = sa
+        .get(8 + nlen..8 + nlen + 6)
+        .filter(|_| alen == 6)
+        .and_then(|b| b.try_into().ok())
+        .ok_or(Errno::EADDRNOTAVAIL)?;
+    if ll[0] & 1 == 0 {
+        return Err(Errno::EADDRNOTAVAIL);
+    }
+    if add {
+        n.add_multi(index, ll, true)?;
+    } else {
+        n.del_multi(index, ll)?;
+    }
+    Ok(0)
+}
+
 fn set(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
     let name = name_of(arg).to_vec();
     match req {

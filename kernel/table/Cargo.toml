@@ -25,6 +25,7 @@ umass = { path = "../../drivers/umass" }
 usbus = { path = "../../sys/usb" }
 virtio = { path = "../../sys/virtio" }
 virtio-blk = { path = "../../drivers/virtio-blk" }
+virtio-net = { path = "../../drivers/virtio-net" }
 virtio-input = { path = "../../drivers/virtio-input" }
 virtio-random = { path = "../../drivers/virtio-random" }
 xhci-driver = { path = "../../drivers/xhci" }

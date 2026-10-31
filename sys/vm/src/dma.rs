@@ -489,6 +489,41 @@ impl<T: DeviceShared> DmaCoherent<T> {
     }
 }
 
+impl DmaCoherent<u8> {
+    /// Copies the bytes at `off` into `dst`: what the device wrote, once
+    /// it said it was done (untrusted, as for `read`).
+    ///
+    /// # Panics
+    ///
+    /// If the range is out of bounds.
+    pub fn copy_to_slice(&self, off: usize, dst: &mut [u8]) {
+        let end = off.checked_add(dst.len()).expect("DMA range overflows");
+        assert!(end <= self.n, "DMA range out of range");
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+        // SAFETY: in bounds; the device is done with the range, and `u8`
+        // has no invalid values.
+        unsafe {
+            core::ptr::copy_nonoverlapping(self.va.as_ptr().add(off), dst.as_mut_ptr(), dst.len())
+        };
+    }
+
+    /// Copies `src` to the bytes at `off`, for the device to read.
+    ///
+    /// # Panics
+    ///
+    /// If the range is out of bounds.
+    pub fn copy_from_slice(&self, off: usize, src: &[u8]) {
+        let end = off.checked_add(src.len()).expect("DMA range overflows");
+        assert!(end <= self.n, "DMA range out of range");
+        // SAFETY: in bounds; the device does not own the range until it
+        // is handed over, after the release fence below.
+        unsafe {
+            core::ptr::copy_nonoverlapping(src.as_ptr(), self.va.as_ptr().add(off), src.len())
+        };
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+    }
+}
+
 impl<T: DeviceShared> Drop for DmaCoherent<T> {
     fn drop(&mut self) {
         // SAFETY: from `alloc` with these values; the binding (and so the
