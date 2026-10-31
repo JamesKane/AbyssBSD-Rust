@@ -381,9 +381,11 @@ ktest! {
         let t = sched::spawn("short", sched::Priority::KERNEL, |_| {}).unwrap();
         t.join(&cx());
         drop(t);
-        // The reaper frees the stack once it runs (and any left over from
-        // earlier tests, so the total may drop below the baseline).
+        // Reaped on demand (and any left over from earlier tests, so the
+        // total may drop below the baseline), once its CPU has switched
+        // away from it.
         for _ in 0..2000 {
+            sched::reap_zombies();
             if crate::mm::kstack::kva_allocated() <= kva {
                 return;
             }
@@ -2659,8 +2661,8 @@ mod user_memory {
         }
     }
 
-    /// [`free_pages`] once it has stopped changing: the reaper frees
-    /// earlier tests' threads in its own time.
+    /// [`free_pages`] once it has stopped changing, exited threads
+    /// reaped (earlier tests', and the workers that unload spaces).
     fn settled_free_pages(s: &sched::Sleepable) -> Pages {
         // A CPU keeps the last address space it ran until it loads
         // another; earlier tests' spaces would otherwise go mid-count.
@@ -2676,9 +2678,11 @@ mod user_memory {
         for w in workers {
             w.join(s);
         }
+        sched::reap_zombies();
         let mut last = free_pages();
         loop {
             crate::time::sleep_ns(s, 10_000_000);
+            sched::reap_zombies();
             let now = free_pages();
             if now == last {
                 return now;
@@ -3807,7 +3811,7 @@ mod user_memory {
             // Exit's teardown: every page goes now, though CPUs the space
             // was loaded on may hold its (empty) tables until they load
             // another. (Page balance is left to the single-threaded tests:
-            // the reaper frees the workers' stacks in its own time.)
+            // exited workers keep their stacks until reaped.)
             space.clear(&s);
             assert!(space.translate(VirtAddr::new(a + PAGE)).is_none());
             assert_eq!(read_u64(a + PAGE), Err(Fault));

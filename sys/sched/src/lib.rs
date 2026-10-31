@@ -48,7 +48,7 @@ use core::cell::Cell;
 use core::fmt;
 use core::ptr;
 use core::sync::atomic::{
-    AtomicBool, AtomicPtr, AtomicU8, AtomicU16, AtomicUsize, Ordering, fence,
+    AtomicBool, AtomicPtr, AtomicU8, AtomicU16, AtomicU64, AtomicUsize, Ordering, fence,
 };
 
 use hal::{CpuId, MAX_CPUS};
@@ -372,6 +372,11 @@ impl PerCpu {
 }
 
 static CPUS: [AtomicPtr<PerCpu>; MAX_CPUS] = [const { AtomicPtr::new(ptr::null_mut()) }; MAX_CPUS];
+/// Each CPU's capacity and SMT flag as topology last set them: a starting
+/// CPU learns its place before its block exists, which takes them from
+/// here.
+static CAPACITY: [AtomicU16; MAX_CPUS] = [const { AtomicU16::new(1024) }; MAX_CPUS];
+static SMT: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
 static ONLINE: AtomicUsize = AtomicUsize::new(0);
 
 /// This CPU's block. Panics before [`init_cpu`].
@@ -428,8 +433,8 @@ fn new_percpu(id: CpuId) -> &'static mut PerCpu {
         slice_start: Cell::new(0),
         need_resched: AtomicBool::new(false),
         current_prio: AtomicU8::new(Priority::KERNEL.get()),
-        capacity: AtomicU16::new(1024),
-        smt: AtomicBool::new(false),
+        capacity: AtomicU16::new(CAPACITY[id.index()].load(Ordering::Relaxed)),
+        smt: AtomicBool::new(SMT[id.index()].load(Ordering::Relaxed)),
         halted: AtomicBool::new(false),
         switches: Cell::new((0, 0)),
         window_end: Cell::new(0),
@@ -645,6 +650,15 @@ impl<'a> Builder<'a> {
     }
 
     fn start(self, entry: thread::Entry) -> Result<Arc<Thread>, SpawnError> {
+        // Exited threads' stacks first, for this one to reuse
+        // (`thread_alloc`'s `thread_reap`); not with interrupts masked,
+        // as freeing one may wait for other CPUs.
+        let irq = hal::irq::disable();
+        let masked = !hal::irq::were_enabled(&irq);
+        hal::irq::restore(irq);
+        if !masked {
+            reap();
+        }
         let fpu = if self.fpu {
             let area = thread::FpuArea::new().ok_or(SpawnError::NoFpuArea)?;
             if self.fpu_inherit {
@@ -701,6 +715,7 @@ pub fn spawn_on(
 
 /// Sets `cpu`'s relative capacity (1024 = the fastest CPUs).
 pub fn set_capacity(cpu: CpuId, capacity: u16) {
+    CAPACITY[cpu.index()].store(capacity, Ordering::Relaxed);
     if let Some(c) = self::cpu(cpu) {
         c.capacity.store(capacity, Ordering::Relaxed);
     }
@@ -708,6 +723,7 @@ pub fn set_capacity(cpu: CpuId, capacity: u16) {
 
 /// Records whether `cpu` shares its core with SMT siblings.
 pub fn set_smt(cpu: CpuId, smt: bool) {
+    SMT[cpu.index()].store(smt, Ordering::Relaxed);
     if let Some(c) = self::cpu(cpu) {
         c.smt.store(smt, Ordering::Relaxed);
     }
@@ -987,6 +1003,14 @@ pub fn tick(slice: u64) {
     }
     // Age the waiting time-sharing threads: their usage falls, so their
     // priority rises until they run.
+    // Exited threads no start has reaped for a while (one CPU looks).
+    if c.id == CpuId::BOOT {
+        let since = ZOMBIES_SINCE.load(Ordering::Relaxed);
+        let stale = now.saturating_sub(since) > platform().frequency() * REAP_AFTER_S;
+        if stale && !ZOMBIES.lock().is_empty() {
+            REAPER.wake_one();
+        }
+    }
     let mut q = c.runq.lock();
     q.reprioritize(|t| {
         t.inner
@@ -1204,8 +1228,14 @@ fn finish_switch() {
             // Off this CPU now: wake it where it is bound.
             make_runnable(t);
         } else if t.inner.lock().state == State::Dead {
-            ZOMBIES.lock().push_back(t);
-            REAPER.wake_one();
+            // Reaped by the next thread to start, or after a while
+            // (`thread_stash`): waking a thread here would cost each exit
+            // a wakeup, often of another CPU.
+            let mut z = ZOMBIES.lock();
+            if z.is_empty() {
+                ZOMBIES_SINCE.store(platform().now(), Ordering::Relaxed);
+            }
+            z.push_back(t);
         }
     }
 }
@@ -1375,27 +1405,45 @@ pub fn exit() -> ! {
 }
 
 static ZOMBIES: SpinLock<ThreadList> = SpinLock::new(ThreadList::new());
+/// When the oldest thread on [`ZOMBIES`] got there.
+static ZOMBIES_SINCE: AtomicU64 = AtomicU64::new(0);
 static REAPER: WaitQueue = WaitQueue::new();
 
-/// Frees the stacks of exited threads. Runs as its own thread.
+/// How long exited threads may wait for a thread start to reap them
+/// before the reaper does (`thread_reap_callout`'s five seconds).
+const REAP_AFTER_S: u64 = 5;
+
+/// Frees the stacks of exited threads that waited too long for a thread
+/// start to (`thread_reap_task`). Runs as its own thread.
 pub fn reaper(s: &Sleepable) -> ! {
     loop {
         REAPER.wait_until(s, || !ZOMBIES.lock().is_empty());
-        loop {
-            // A separate statement: the list lock (which masks interrupts)
-            // must not be held while the stack is freed, since freeing
-            // may wait for other CPUs.
-            let next = ZOMBIES.lock().pop_front();
-            let Some(t) = next else {
-                break;
-            };
-            // The thread is off every CPU: `finish_switch` queued it only
-            // after clearing `on_cpu`.
-            // Taken in its own statement, for the same reason.
-            let stack = t.stack.lock().take();
-            if let Some(stack) = stack {
-                platform().free_stack(stack);
-            }
+        reap();
+    }
+}
+
+/// Frees the stacks of exited threads now, for a caller that counts
+/// memory (`thread_reap_barrier`). Interrupts must be enabled.
+pub fn reap_zombies() {
+    reap();
+}
+
+/// Frees the stacks of exited threads (`thread_reap`).
+fn reap() {
+    loop {
+        // A separate statement: the list lock (which masks interrupts)
+        // must not be held while the stack is freed, since freeing
+        // may wait for other CPUs.
+        let next = ZOMBIES.lock().pop_front();
+        let Some(t) = next else {
+            break;
+        };
+        // The thread is off every CPU: `finish_switch` queued it only
+        // after clearing `on_cpu`.
+        // Taken in its own statement, for the same reason.
+        let stack = t.stack.lock().take();
+        if let Some(stack) = stack {
+            platform().free_stack(stack);
         }
     }
 }
