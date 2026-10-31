@@ -25,6 +25,7 @@ Status values: **Proposed** (awaiting owner confirmation) · **Accepted** · **S
 | [0016](0016-multi-user.md) | FreeBSD multi-user: FreeBSD's boot as the test plan, processes split into threads, host-tested umtx, one readiness type under poll and kqueue, a protocol-neutral socket layer, typed privilege and Capsicum rights, no networking until P7 | Accepted; amended 2026-10-29 |
 | [0017](0017-rv64-reference-board-bpi-sm10.md) | Banana Pi BPI-SM10 (SpacemiT K3) as the RV64 physical reference board, booted UEFI with ACPI through SpacemiT's edk2 port | Accepted |
 | [0018](0018-desktop-architecture.md) | The desktop is the AbyssBSD Swift desktop, run unmodified as FreeBSD userland; this repository builds the kernel beneath it | Accepted; amended 2026-10-30 |
+| [0019](0019-networking.md) | Networking: the wire as the specification (differential captures), per-VNET state from the start, host-tested packet, TCP, and crypto crates, lock-free lookups in a network epoch, FreeBSD 15.1's default TCP, `vtnet` on the `EtherQueues` class, in-tree kernel TLS | Accepted |
 
 Template:
 

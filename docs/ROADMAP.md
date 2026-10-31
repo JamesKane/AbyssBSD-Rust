@@ -1955,6 +1955,118 @@ or leaks. The kyua target is met in `sys/kern` with `ktls_test`. The P7 performa
 throughput, request/response latency, connection rate, `sendfile`, CPU per gigabit) is within 2% of
 FreeBSD over loopback and virtio-net in bhyve.
 
+**Design.** [NETWORKING.md](NETWORKING.md) ([ADR-0019](adr/0019-networking.md)): the wire
+as the specification, checked by differential captures against FreeBSD; all network state per
+VNET from the start, with VNET jails and `epair` as the test bed; host-tested crates for packets
+(`sys/mbuf`), interfaces and the control plane (`sys/net`), TCP (`sys/tcp`, on a simulated
+network), and ciphers (`sys/crypto`); lock-free lookups in a network epoch; FreeBSD 15.1's default
+TCP stack and defaults; `vtnet` as the first driver of the `EtherQueues` class; P6's loopback
+slice (`sys/inet`) keeping its semantics on real packets.
+
+**Reference configuration.** The P6 reference disk with `bsdinstall`'s lines for a DHCP interface
+(`ifconfig_vtnet0="DHCP"`, `ifconfig_vtnet0_ipv6="inet6 accept_rtadv"`) and `sshd` enabled, and a
+test overlay with `iperf3` from FreeBSD's packages. QEMU `q35` and `virt` with virtio-net on
+user-mode networking; bhyve with virtio-net on a dedicated bridge on the build server, which runs
+the DHCPv4, router-advertisement, and DNS responder and is the performance peer
+(NETWORKING.md §15). The FreeBSD 15.1 guests boot the same disks for the baselines.
+
+**kyua target** (ADR-0019): ADR-0016's target for `sys/net`, `sys/netinet`, `sys/netinet6`,
+`sys/netlink`, `sbin/ifconfig`, `sbin/route`, `sbin/ping`, and `sys/kern` with `ktls_test`; test
+programs for P7's non-goals (packet filters, tunnels, bridges, VLANs, CARP, SCTP, IPsec) are left
+out until their phase.
+
+### Milestones
+
+Each milestone ends green on both architectures, with CI passing. Every protocol milestone ends
+with its differential captures (NETWORKING.md §16.3) and its kyua directories at the target.
+
+```
+P7.0 ─► P7.1 ─► P7.2 ─► P7.3 ─► P7.4 ─┬─► P7.5 ──────────┐
+  │                                   └─► P7.6 ─► P7.7 ──┼─► P7.8 ─► P7.9
+  └─► P7.7a (ciphers, host) ─────────────────────────────┘
+```
+
+**P7.0 Design and harness.**
+- NETWORKING.md and ADR-0019.
+- The test network: virtio-net in the QEMU machines on user-mode networking; on the build server
+  the bridge, taps, the `xtask` responder (DHCPv4, router advertisements, DNS), and outbound NAT,
+  set up by a script run under `doas` (NETWORKING.md §15).
+- The `<arch>-net` and `x86_64-bhyve-net` boot cases with their scripts (`dhclient`, SLAAC,
+  `ping`, `ping6`, `fetch`, `ssh` and `scp` from the host), expected to fail; the same script
+  passing on FreeBSD 15.1 in bhyve and QEMU.
+- The differential capture harness: scenarios in `tests/net/scenarios/`, a capture on the host's
+  tap for each guest, normalization, and the comparison; FreeBSD against itself as its first test.
+- kyua's network directories recorded in FreeBSD 15.1's baseline, and suite `p7` (NETWORKING.md
+  §17) with FreeBSD's numbers, the build server as peer.
+
+**P7.1 Packets and the epoch.**
+- `sys/mbuf` (NETWORKING.md §4): `Packet`, segments, inline, cluster, and page-backed buffers,
+  per-CPU zones with their limits, headroom, typed pullup, split and copy by reference, checksum
+  and TSO metadata; host tests and Miri.
+- `sys/epoch`: enter, exit, deferred reclamation, with host tests of reclamation order.
+- Socket buffers hold `sys/mbuf` chains; UNIX-domain sockets move to them with their accounting
+  and the P6 `unix` suite unchanged or better.
+
+**P7.2 Interfaces, VNET, and the control plane.**
+- `sys/net`: `Vnet`, `ifnet`, cloners, `lo` with its `netisr` loopback path, `epair`; the
+  interface and route state and the netlink handlers moved from `sys/inet`, per VNET.
+- VNET jails (`jail -c vnet`), interfaces moved between VNETs and returned on jail removal, per-VNET
+  sysctls; `sys/prison`'s `vnet` parameter.
+- Routes, next hops, and FIBs (`net.fibs`, `setfib`); the routing socket with its requests and
+  announcements; netlink group notifications and `NETLINK_GENERIC`'s controller.
+- `tests/sys/common/vnet.subr`'s helpers work: jails with `epair` ends, addresses and routes in
+  each.
+
+**P7.3 virtio-net, Ethernet, and `bpf`.**
+- The `EtherQueues` class: queue pairs, completion exactly once, budgeted receive, moderation,
+  flow hashing, software LRO (NETWORKING.md §5.2).
+- `drivers/virtio-net` with FreeBSD's negotiated features, multiple queues, and offloads; `vtnet0`
+  as `ifconfig` shows it on FreeBSD.
+- Ethernet input and output, ARP and the `lltable`, interface multicast filters.
+- `/dev/bpf` with its ioctls and the host-tested filter machine; `tcpdump -i vtnet0` works.
+
+**P7.4 IPv4, ICMP, and UDP on the wire.**
+- IPv4 input, output, fragmentation and reassembly, forwarding; ICMP with its rate limit; raw IP
+  sockets (`ping`, `traceroute`).
+- UDP on packets, `sys/inet`'s direct delivery removed for UDP; IGMP as far as group joins need.
+- `dhclient` configures `vtnet0` from the QEMU and bhyve responders; DNS resolves.
+- Captures: ARP, DHCP, ICMP echo and errors, UDP exchanges, fragments.
+
+**P7.5 IPv6.**
+- IPv6 input and output with extension headers, fragmentation and reassembly, forwarding; ICMPv6;
+  ND with NUD, DAD, and redirects; MLD for the groups ND needs; raw ICMPv6 sockets (`ping6`).
+- SLAAC: router advertisements on `accept_rtadv` interfaces, prefixes, default routers, addresses
+  with lifetimes; `rtsold` runs unchanged.
+- Captures: ND, DAD, SLAAC, ICMPv6 errors, UDP over IPv6.
+
+**P7.6 TCP.**
+- `sys/tcp` (NETWORKING.md §9.2): segments, the state machine with P6's states and errors kept,
+  timers, SACK, window scaling, timestamps, ECN, NewReno and CUBIC, SYN cache and cookies,
+  hostcache, path MTU, delayed acknowledgement, buffer autotuning, TSO and LRO; host tests on the
+  simulated network.
+- `sys/inet`'s TCP direct delivery removed; loopback TCP runs on packets through `lo0`.
+- `sshd` logins, `scp` both ways, `fetch`, and `pkg update && pkg install` work in QEMU and bhyve.
+- Captures: handshake and transfer, loss and SACK recovery, zero window and persist, resets,
+  keepalive, path MTU change, simultaneous close.
+
+**P7.7 `sendfile` and kernel TLS.**
+- P7.7a, from P7.0 on the host: `sys/crypto` (AES with CBC and GCM, ChaCha20-Poly1305, SHA-1,
+  SHA-256, SHA-384, HMAC), constant time, with the CPU instructions through `arch/*` and the
+  published vectors.
+- `sendfile` with page-backed buffers, headers and trailers, `SF_NODISKIO`, and read-ahead.
+- `sys/ktls`: `TCP_TXTLS_ENABLE` and `TCP_RXTLS_ENABLE`, TLS 1.0–1.3 records, `sendfile` over TLS;
+  `ktls_test` rejoins `sys/kern`.
+
+**P7.8 Conformance.**
+- The kyua directories at the target with every remaining failure listed; differential scenarios
+  all passing or recorded; the soak case (`iperf3` for an hour, leak and zone checks).
+- The interface, route, and statistics output of `ifconfig`, `netstat` (`-i`, `-r`, `-s`, `-m`),
+  `sockstat`, `arp`, and `ndp` against FreeBSD's in the differential tests.
+
+**P7.9 Performance and exit.**
+- Suite `p7` (`tcp`, `udp`, `sendfile`) within the bound over loopback and virtio-net in bhyve;
+  CI at `exit/p7`.
+
 ## Phase 8: Board bring-up (XL)
 
 **Goal:** the P7 system, networked, on both physical reference machines, with AbyssBSD's own
