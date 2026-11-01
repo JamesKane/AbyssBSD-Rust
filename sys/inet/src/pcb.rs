@@ -60,6 +60,9 @@ pub struct Pcb {
     pub tw_until: Option<u64>,
     /// A raw socket's protocol (`inp_ip_p`).
     pub ip_p: u8,
+    /// The flow label of `inp_flow`, which a connected IPv6 socket's
+    /// datagrams carry.
+    pub flow: u32,
 }
 
 impl Pcb {
@@ -153,17 +156,28 @@ impl Table {
 
     /// `in_pcballoc`: `so`'s PCB, unbound.
     pub(crate) fn alloc(&mut self, so: &Arc<Socket>, uid: u32) {
-        let (vflag, flags) = match so.family {
+        use core::sync::atomic::Ordering::Relaxed;
+        let (vflag, mut flags) = match so.family {
             Family::Inet => (INP_IPV4, 0),
             Family::Inet6 => {
                 // Relaxed: a tunable.
-                if tune::V6ONLY.load(core::sync::atomic::Ordering::Relaxed) != 0 {
+                if tune::V6ONLY.load(Relaxed) != 0 {
                     (INP_IPV6PROTO | INP_IPV6, inp::IPV6_V6ONLY)
                 } else {
                     (INP_IPV6PROTO | INP_IPV6 | INP_IPV4, 0)
                 }
             }
         };
+        // Relaxed: a setting.
+        if so.family == Family::Inet6
+            && crate::state::of(&so.vnet)
+                .conf6
+                .auto_flowlabel
+                .load(Relaxed)
+                != 0
+        {
+            flags |= inp::IN6P_AUTOFLOWLABEL;
+        }
         self.gencnt += 1;
         self.pcbs.insert(
             so.id,
@@ -187,6 +201,7 @@ impl Table {
                     Proto::Raw(p) => p,
                     _ => 0,
                 },
+                flow: 0,
             },
         );
     }
@@ -984,6 +999,12 @@ impl Table {
         }
         p.laddr = laddr;
         p.zone = lzone.max(zone);
+        // `in6_pcbconnect`: a new flow label for the new flow.
+        p.flow = if p.flags & inp::IN6P_AUTOFLOWLABEL != 0 {
+            crate::random() & crate::ip6::FLOWLABEL_MASK
+        } else {
+            0
+        };
         p.faddr = faddr;
         p.fport = dst.port;
         p.lport = lport;
@@ -1001,6 +1022,7 @@ impl Table {
             p.laddr = ANY;
             p.faddr = ANY;
             p.fport = 0;
+            p.flow = 0;
         }
     }
 

@@ -2081,6 +2081,20 @@ P7.0 ─► P7.1 ─► P7.2 ─► P7.3 ─► P7.4 ─┬─► P7.5 ───
 - SLAAC: router advertisements on `accept_rtadv` interfaces, prefixes, default routers, addresses
   with lifetimes; `rtsold` runs unchanged.
 - Captures: ND, DAD, SLAAC, ICMPv6 errors, UDP over IPv6.
+- Done (2026-11-01): `sys/inet`'s IPv6 (input with extension headers, output with source
+  selection, link-local zones and automatic flow labels, fragmentation, reassembly with FreeBSD's
+  limits, forwarding), ICMPv6 (echo, errors under the rate limit, node information), neighbor
+  discovery (resolution with NUD, DAD, redirects, proxy NDP, router and prefix lists, SLAAC with
+  `rtsold` unchanged), MLDv2 and MLDv1, raw ICMPv6 sockets with their filters, and UDP over IPv6
+  on packets. Link-local routes are kept per interface wherever routes are matched (prefix
+  routes, multipath groups, the netlink dump, deletes). `ifmcstat` sees IPv6 groups
+  (`NET_RT_IFMALIST`, `net.inet6.mld.ifinfo`, `net.inet6.ip6.mcast.filters`). The `nd`, `dad`,
+  `slaac`, `icmp6-unreachable`, `ip6-fragments`, and `udp6` captures match FreeBSD's (DAD's
+  nonce and fragment identifications blanked). Targeted kyua: every case FreeBSD passes in
+  `sys/netinet6`, `sys/netinet`, `sys/net`, `sbin/ping`, and `sbin/ifconfig` passes or is listed
+  (TCP waits for P7.6; bridge, gif, lagg, tun, vlan, and wg are non-goals). Left: five
+  `test_ip6_output.py` cases pass their checks, then hang to kyua's time limit with a receiver
+  blocked in `recvmsg` that is never reaped.
 
 **P7.6 TCP.**
 - `sys/tcp` (NETWORKING.md §9.2): segments, the state machine with P6's states and errors kept,

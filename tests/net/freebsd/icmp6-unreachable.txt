@@ -1,0 +1,3 @@
+# A datagram to a closed UDP port over IPv6: the peer's ICMPv6 port unreachable.
+GUEST-MAC > PEER-MAC, ethertype IPv6 (0x86dd), length 64: (flowlabel _, hlim 64, next-header UDP (17), payload length 10) GUEST6.eph > PEER6.40006: [udp sum ok] UDP, length 2
+PEER-MAC > GUEST-MAC, ethertype IPv6 (0x86dd), length 112: (hlim 64, next-header ICMPv6 (58), payload length 58) PEER6 > GUEST6: [icmp6 sum ok] ICMP6, destination unreachable, unreachable port, PEER6 udp port 40006

@@ -1,0 +1,2 @@
+# A UDP datagram to the peer over IPv6.
+GUEST-MAC > PEER-MAC, ethertype IPv6 (0x86dd), length 68: (flowlabel _, hlim 64, next-header UDP (17), payload length 14) GUEST6.eph > PEER6.40007: [udp sum ok] UDP, length 6

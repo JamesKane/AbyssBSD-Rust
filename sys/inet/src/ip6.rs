@@ -40,6 +40,8 @@ pub const MMTU: u32 = 1280;
 pub const PLD_MAXLEN: usize = 1232;
 /// `IPV6_DEFHLIM`.
 pub const DEFHLIM: u8 = 64;
+/// `IPV6_FLOWLABEL_MASK`, in host order.
+pub const FLOWLABEL_MASK: u32 = 0x000f_ffff;
 
 /// The next headers IPv6 handles here (`IPPROTO_*`).
 pub mod proto {

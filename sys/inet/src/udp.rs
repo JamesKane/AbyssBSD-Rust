@@ -215,6 +215,7 @@ impl Socket {
         };
         // `IP_MULTICAST_IF`'s interface, looked at before the table's lock.
         let mif = self.mopts().map_or(0, |m| m.ifindex);
+        let mut flow = 0;
         let (src, dst, family) = {
             let mut t = UDB.lock();
             // `IP_SENDSRCADDR`: `in_pcbbind_setup` of the address with
@@ -314,6 +315,7 @@ impl Socket {
                 // IPv6's source is chosen below, with the table let go.
                 None if dst.family == Family::Inet6 => {
                     let p = t.get(self.id).ok_or(Errno::EINVAL)?;
+                    flow = p.flow;
                     Sockaddr::v6(p.laddr, p.lport, p.zone)
                 }
                 None => t.source_for(self.id, &dst)?,
@@ -332,7 +334,7 @@ impl Socket {
                 .udp_output4(data, &src, &dst, ctl.tos)
                 .map(|()| data.len());
         }
-        self.udp_output6(data, src, dst, connected, &ctl)
+        self.udp_output6(data, src, dst, connected, flow, &ctl)
             .map(|()| data.len())
     }
 
@@ -842,13 +844,15 @@ impl Socket {
     /// `udp6_send`'s output: `data` from `src` (chosen here if the
     /// socket is not bound, or by `IPV6_PKTINFO`) to `dst` in a datagram
     /// whose checksum's pseudo-header part is in the header for whoever
-    /// finishes it (`CSUM_UDP_IPV6`), through `ip6_output`.
+    /// finishes it (`CSUM_UDP_IPV6`), through `ip6_output`, with the
+    /// PCB's flow label `flow`.
     fn udp_output6(
         &self,
         data: &[u8],
         src: Sockaddr,
         mut dst: Sockaddr,
         connected: bool,
+        flow: u32,
         ctl: &SendCtl,
     ) -> Result<(), Errno> {
         let st = crate::state::of(&self.vnet);
@@ -890,7 +894,8 @@ impl Socket {
         m.prepend(HDR)
             .map_err(|_| Errno::ENOBUFS)?
             .copy_from_slice(&uh);
-        let h = crate::ip6::Ip6::new(ip::proto::UDP, saddr, dst.addr, plen, hlim, 0);
+        let mut h = crate::ip6::Ip6::new(ip::proto::UDP, saddr, dst.addr, plen, hlim, 0);
+        h.flow |= flow & crate::ip6::FLOWLABEL_MASK;
         m.prepend(crate::ip6::HDR_LEN)
             .map_err(|_| Errno::ENOBUFS)?
             .copy_from_slice(&h.bytes());

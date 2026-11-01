@@ -1,0 +1,7 @@
+# An ICMPv6 echo too big for one frame: its fragments, and the reply's.
+GUEST-MAC > PEER-MAC, ethertype IPv6 (0x86dd), length 1294: (hlim 64, next-header Fragment (44), payload length 1240) GUEST6 > PEER6: frag (_:0|1232) ICMP6, echo request, id _, seq 0
+GUEST-MAC > PEER-MAC, ethertype IPv6 (0x86dd), length 1294: (hlim 64, next-header Fragment (44), payload length 1240) GUEST6 > PEER6: frag (_:1232|1232)
+GUEST-MAC > PEER-MAC, ethertype IPv6 (0x86dd), length 606: (hlim 64, next-header Fragment (44), payload length 552) GUEST6 > PEER6: frag (_:2464|544)
+PEER-MAC > GUEST-MAC, ethertype IPv6 (0x86dd), length 1294: (hlim 64, next-header Fragment (44), payload length 1240) PEER6 > GUEST6: frag (_:0|1232) ICMP6, echo reply, id _, seq 0
+PEER-MAC > GUEST-MAC, ethertype IPv6 (0x86dd), length 1294: (hlim 64, next-header Fragment (44), payload length 1240) PEER6 > GUEST6: frag (_:1232|1232)
+PEER-MAC > GUEST-MAC, ethertype IPv6 (0x86dd), length 606: (hlim 64, next-header Fragment (44), payload length 552) PEER6 > GUEST6: frag (_:2464|544)

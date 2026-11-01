@@ -43,6 +43,7 @@ pub mod rec {
     pub const MODE_IS_EXCLUDE: u8 = 2;
     pub const CHANGE_TO_INCLUDE_MODE: u8 = 3;
     pub const CHANGE_TO_EXCLUDE_MODE: u8 = 4;
+    pub const BLOCK_OLD_SOURCES: u8 = 6;
 }
 
 /// A group's state (`MLD_*_MEMBER`).
@@ -282,7 +283,13 @@ pub(crate) fn leave(n: &mut Net, st: &State, ifindex: u16, group: &In6) {
                 Member::Reporting | Member::Idle | Member::GQueryPending if version == 2 => {
                     g.timer = 0;
                     g.scrv = rv;
-                    g.pending = rec::CHANGE_TO_INCLUDE_MODE;
+                    // `mld_v2_enqueue_group_record`: with
+                    // `MLIF_USEALLOW`, a leave blocks the (no) sources.
+                    g.pending = if on(&st.conf6.mld_use_allow) {
+                        rec::BLOCK_OLD_SOURCES
+                    } else {
+                        rec::CHANGE_TO_INCLUDE_MODE
+                    };
                     g.state = Member::Leaving;
                     g.sctimer = 1;
                     nd.mld.run();

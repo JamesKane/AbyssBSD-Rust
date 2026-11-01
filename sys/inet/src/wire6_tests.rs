@@ -221,6 +221,12 @@ fn udp_over_ipv6_resolves_its_neighbor() {
     let c = udp6(&h1);
     c.connect(&sockaddr_in6(&dst, 32002, 0), &Cred::root(), false)
         .unwrap();
+    // `IN6P_AUTOFLOWLABEL` (on by default): connecting chose a label.
+    let flow = crate::pcb::UDB.lock().get(c.id).map(|p| p.flow);
+    assert!(
+        flow.is_some_and(|f| f != 0 && f & !0xf_ffff == 0),
+        "{flow:?}"
+    );
     c.send_dgram(b"x", None, &Cred::root()).unwrap();
     assert_eq!(c.recv_dgram(10, false).unwrap_err(), Errno::ECONNREFUSED);
     assert_eq!(state::of(&h2).icmp6stat.get(icp6s::ODST_UNREACH_NOPORT), 1);

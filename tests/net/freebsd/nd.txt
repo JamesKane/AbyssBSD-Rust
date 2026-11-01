@@ -1,0 +1,5 @@
+# Neighbor discovery: the guest's neighbor cache flushed, then its solicitation for the peer, the advertisement, and the echo that waited for it.
+GUEST-MAC > 33:33:ff:00:00:01, ethertype IPv6 (0x86dd), length 86: (hlim 255, next-header ICMPv6 (58), payload length 32) GUEST6 > ff02::1:ff00:1: [icmp6 sum ok] ICMP6, neighbor solicitation, length 32, who has PEER6 source link-address option (1), length 8 (1): GUEST-MAC
+PEER-MAC > GUEST-MAC, ethertype IPv6 (0x86dd), length 86: (hlim 255, next-header ICMPv6 (58), payload length 32) PEER6 > GUEST6: [icmp6 sum ok] ICMP6, neighbor advertisement, length 32, tgt is PEER6, Flags [router, solicited, override] destination link-address option (2), length 8 (1): PEER-MAC
+GUEST-MAC > PEER-MAC, ethertype IPv6 (0x86dd), length 70: (hlim 64, next-header ICMPv6 (58), payload length 16) GUEST6 > PEER6: [icmp6 sum ok] ICMP6, echo request, id _, seq 0
+PEER-MAC > GUEST-MAC, ethertype IPv6 (0x86dd), length 70: (hlim 64, next-header ICMPv6 (58), payload length 16) PEER6 > GUEST6: [icmp6 sum ok] ICMP6, echo reply, id _, seq 0

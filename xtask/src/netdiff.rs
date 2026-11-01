@@ -147,6 +147,33 @@ fn blank_after(line: &str, key: &str, keep: impl Fn(&str) -> bool) -> String {
     out
 }
 
+/// Replaces the bytes of a neighbor solicitation's nonce option (RFC 7527,
+/// which DAD sends), shown by `tcpdump` as an unknown option's hex dump,
+/// with `_`.
+fn blank_nonce(line: &str) -> String {
+    const KEY: &str = "unknown option (14), length ";
+    let Some(at) = line.find(KEY) else {
+        return line.to_owned();
+    };
+    let Some(dump) = line[at..].find("0x0000:").map(|d| at + d + "0x0000:".len()) else {
+        return line.to_owned();
+    };
+    let mut end = dump;
+    let tail = &line[dump..];
+    let mut pos = 0;
+    for word in tail.split(' ') {
+        let next = pos + word.len() + 1;
+        if !word.is_empty() && !word.chars().all(|c| c.is_ascii_hexdigit()) {
+            break;
+        }
+        if !word.is_empty() {
+            end = dump + pos + word.len();
+        }
+        pos = next;
+    }
+    format!("{} _{}", &line[..dump], &line[end..])
+}
+
 /// Replaces `ROLE.<port>` with `ROLE.eph` for ports not in `fixed`.
 fn blank_ports(line: &str, fixed: &[u16]) -> String {
     let mut out = String::with_capacity(line.len());
@@ -200,6 +227,9 @@ fn normalize(decoded: &str, roles: &Roles, fixed_ports: &[u16]) -> String {
         l = blank_after(&l, "TS val ", |_| false);
         // A DHCP transaction.
         l = blank_after(&l, "xid ", |_| false);
+        // An IPv6 fragment's identification.
+        l = blank_after(&l, "frag (", |_| false);
+        l = blank_nonce(&l);
         l = blank_after(&l, " ecr ", |t| t == "0");
         // A SYN's sequence number, and a SYN-ACK's acknowledgement, are
         // absolute (`tcpdump` makes the rest relative to them).
@@ -535,6 +565,19 @@ mod tests {
             &[],
         );
         assert_eq!(n, "GUEST > PEER: ICMP echo request, id _, seq 0\n");
+    }
+
+    #[test]
+    fn a_dad_nonce_and_a_fragment_id_are_blanked() {
+        let n = normalize(
+            ":: > ff02::1:ff00:99: ICMP6, neighbor solicitation, length 32, who has fd77:77:77::99 \
+             unknown option (14), length 8 (1): 0x0000:  381e cbce b9db\n",
+            &roles(),
+            &[],
+        );
+        assert!(n.ends_with("length 8 (1): 0x0000: _\n"), "{n}");
+        let n = normalize("a > b: frag (0xdc96b494:1232|1232)\n", &roles(), &[]);
+        assert_eq!(n, "a > b: frag (_:1232|1232)\n");
     }
 
     #[test]
