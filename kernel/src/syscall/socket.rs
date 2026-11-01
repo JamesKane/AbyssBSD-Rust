@@ -167,7 +167,11 @@ fn close_fd(s: &Sleepable, fd: i32) {
 }
 
 /// The socket open as `fd`, with the rights in `need` (`getsock`).
-fn sock(s: &Sleepable, fd: u64, need: &abi::capsicum::CapRights) -> Result<Arc<File>, Errno> {
+pub(super) fn sock(
+    s: &Sleepable,
+    fd: u64,
+    need: &abi::capsicum::CapRights,
+) -> Result<Arc<File>, Errno> {
     let f = super::io::file(s, &*process()?, fd, need)?;
     match f.kind() {
         FileKind::Socket(_) | FileKind::Inet(_) => Ok(f),

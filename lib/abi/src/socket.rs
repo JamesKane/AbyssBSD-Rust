@@ -126,6 +126,26 @@ pub struct Msghdr {
     pub msg_flags: i32,
 }
 
+/// `struct sf_hdtr`: `sendfile`'s headers and trailers.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SfHdtr {
+    pub headers: u64,
+    pub hdr_cnt: i32,
+    pub _pad0: u32,
+    pub trailers: u64,
+    pub trl_cnt: i32,
+    pub _pad1: u32,
+}
+
+/// `sendfile` flags; the high 16 bits are readahead pages
+/// (`SF_READAHEAD`).
+pub const SF_NODISKIO: i32 = 0x01;
+pub const SF_MNOWAIT: i32 = 0x02;
+pub const SF_SYNC: i32 = 0x04;
+pub const SF_USER_READAHEAD: i32 = 0x08;
+pub const SF_NOCACHE: i32 = 0x10;
+
 /// `struct cmsghdr`, followed by its data at [`CMSG_HDR`].
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -309,6 +329,15 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("SHUT_WR", "sys/socket.h", SHUT_WR as i64),
     c("SHUT_RDWR", "sys/socket.h", SHUT_RDWR as i64),
     c("SOMAXCONN", "sys/socket.h", SOMAXCONN as i64),
+    c("SF_NODISKIO", "sys/socket.h", SF_NODISKIO as i64),
+    c("SF_MNOWAIT", "sys/socket.h", SF_MNOWAIT as i64),
+    c("SF_SYNC", "sys/socket.h", SF_SYNC as i64),
+    c(
+        "SF_USER_READAHEAD",
+        "sys/socket.h",
+        SF_USER_READAHEAD as i64,
+    ),
+    c("SF_NOCACHE", "sys/socket.h", SF_NOCACHE as i64),
     c("CMGROUP_MAX", "sys/socket.h", CMGROUP_MAX as i64),
     c("SOL_LOCAL", "sys/un.h", SOL_LOCAL as i64),
     c("LOCAL_PEERCRED", "sys/un.h", LOCAL_PEERCRED as i64),

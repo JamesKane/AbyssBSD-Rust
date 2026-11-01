@@ -265,6 +265,124 @@ pub mod fpu {
     }
 }
 
+/// The CPU's AES and carry-less multiply instructions (AES-NI and
+/// PCLMULQDQ; the ARMv8 cryptographic extension's AES and PMULL), for
+/// `sys/crypto`. Round keys are FIPS 197 byte strings; GHASH values are
+/// 16-byte blocks as GCM writes them.
+///
+/// Every routine needs a kernel FP/SIMD section (`sched::simd`): it
+/// changes vector registers the current thread may own.
+pub mod crypto {
+    /// Whether this CPU has the instructions (false on the host).
+    #[must_use]
+    pub fn available() -> bool {
+        #[cfg(target_os = "none")]
+        // SAFETY: defined by the linked arch crate with this signature.
+        return unsafe { super::abyss_hal_crypto_available() };
+        #[cfg(not(target_os = "none"))]
+        false
+    }
+
+    /// Encrypts `blocks` blocks at `data` in place.
+    ///
+    /// # Safety
+    ///
+    /// [`available`]; in a kernel FP/SIMD section; `rk` holds
+    /// `16 * (rounds + 1)` bytes and `data` `16 * blocks`; `rounds` is 10,
+    /// 12, or 14.
+    pub unsafe fn aes_ecb_encrypt(rk: *const u8, rounds: usize, data: *mut u8, blocks: usize) {
+        #[cfg(target_os = "none")]
+        // SAFETY: per the contract.
+        unsafe {
+            super::abyss_aes_ecb_encrypt(rk, rounds, data, blocks);
+        }
+        #[cfg(not(target_os = "none"))]
+        let _ = (rk, rounds, data, blocks);
+    }
+
+    /// XORs `blocks` blocks at `data` with the keystream from the counter
+    /// block `ctr`, whose last 32 bits (big-endian) advance per block.
+    ///
+    /// # Safety
+    ///
+    /// As for [`aes_ecb_encrypt`]; `ctr` is 16 writable bytes.
+    pub unsafe fn aes_ctr32(
+        rk: *const u8,
+        rounds: usize,
+        ctr: *mut u8,
+        data: *mut u8,
+        blocks: usize,
+    ) {
+        #[cfg(target_os = "none")]
+        // SAFETY: per the contract.
+        unsafe {
+            super::abyss_aes_ctr32(rk, rounds, ctr, data, blocks);
+        }
+        #[cfg(not(target_os = "none"))]
+        let _ = (rk, rounds, ctr, data, blocks);
+    }
+
+    /// CBC-encrypts `blocks` blocks at `data` in place from `iv`, leaving
+    /// the last ciphertext block in `iv`.
+    ///
+    /// # Safety
+    ///
+    /// As for [`aes_ecb_encrypt`]; `iv` is 16 writable bytes.
+    pub unsafe fn aes_cbc_encrypt(
+        rk: *const u8,
+        rounds: usize,
+        iv: *mut u8,
+        data: *mut u8,
+        blocks: usize,
+    ) {
+        #[cfg(target_os = "none")]
+        // SAFETY: per the contract.
+        unsafe {
+            super::abyss_aes_cbc_encrypt(rk, rounds, iv, data, blocks);
+        }
+        #[cfg(not(target_os = "none"))]
+        let _ = (rk, rounds, iv, data, blocks);
+    }
+
+    /// CBC-decrypts likewise, with the equivalent inverse cipher's round
+    /// keys `dk`.
+    ///
+    /// # Safety
+    ///
+    /// As for [`aes_cbc_encrypt`].
+    pub unsafe fn aes_cbc_decrypt(
+        dk: *const u8,
+        rounds: usize,
+        iv: *mut u8,
+        data: *mut u8,
+        blocks: usize,
+    ) {
+        #[cfg(target_os = "none")]
+        // SAFETY: per the contract.
+        unsafe {
+            super::abyss_aes_cbc_decrypt(dk, rounds, iv, data, blocks);
+        }
+        #[cfg(not(target_os = "none"))]
+        let _ = (dk, rounds, iv, data, blocks);
+    }
+
+    /// Folds `blocks` blocks at `data` into `y` with hash key `h`.
+    ///
+    /// # Safety
+    ///
+    /// [`available`]; in a kernel FP/SIMD section; `h` is 16 bytes, `y`
+    /// 16 writable bytes, and `data` `16 * blocks` bytes.
+    pub unsafe fn ghash(h: *const u8, y: *mut u8, data: *const u8, blocks: usize) {
+        #[cfg(target_os = "none")]
+        // SAFETY: per the contract.
+        unsafe {
+            super::abyss_ghash(h, y, data, blocks);
+        }
+        #[cfg(not(target_os = "none"))]
+        let _ = (h, y, data, blocks);
+    }
+}
+
 /// Per-thread state of user mode that the scheduler switches: where traps
 /// from user mode enter the kernel, and the user's thread pointer (TLS).
 pub mod user {
@@ -343,6 +461,9 @@ pub type SetU64Fn = unsafe fn(u64);
 /// Signature of `abyss_hal_user_tls`.
 pub type GetU64Fn = fn() -> u64;
 
+/// Signature of `abyss_hal_crypto_available`.
+pub type CryptoAvailableFn = fn() -> bool;
+
 /// Signature of `abyss_hal_fpu_size`.
 pub type FpuSizeFn = fn() -> usize;
 /// Signature of `abyss_hal_fpu_init`, `abyss_hal_fpu_save`.
@@ -406,6 +527,7 @@ unsafe extern "Rust" {
     fn abyss_hal_fpu_init(area: *mut u8);
     fn abyss_hal_fpu_save(area: *mut u8);
     fn abyss_hal_fpu_restore(area: *const u8);
+    fn abyss_hal_crypto_available() -> bool;
     fn abyss_hal_set_kernel_stack(top: u64);
     fn abyss_hal_user_tls() -> u64;
     fn abyss_hal_set_user_tls(v: u64);
@@ -416,6 +538,23 @@ unsafe extern "Rust" {
 #[cfg(target_os = "none")]
 unsafe extern "C" {
     fn abyss_context_switch(from: *mut Context, to: *const Context);
+    fn abyss_aes_ecb_encrypt(rk: *const u8, rounds: usize, data: *mut u8, blocks: usize);
+    fn abyss_aes_ctr32(rk: *const u8, rounds: usize, ctr: *mut u8, data: *mut u8, blocks: usize);
+    fn abyss_aes_cbc_encrypt(
+        rk: *const u8,
+        rounds: usize,
+        iv: *mut u8,
+        data: *mut u8,
+        blocks: usize,
+    );
+    fn abyss_aes_cbc_decrypt(
+        dk: *const u8,
+        rounds: usize,
+        iv: *mut u8,
+        data: *mut u8,
+        blocks: usize,
+    );
+    fn abyss_ghash(h: *const u8, y: *mut u8, data: *const u8, blocks: usize);
 }
 
 /// Critical sections: preemption held off on this CPU without masking

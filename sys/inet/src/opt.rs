@@ -190,6 +190,7 @@ impl Socket {
                     sb.auto = false;
                 } else {
                     sb.lowat = cc.min(sb.hiwat);
+                    sb.autolowat = false;
                 }
             }
             SO_SNDTIMEO | SO_RCVTIMEO => {

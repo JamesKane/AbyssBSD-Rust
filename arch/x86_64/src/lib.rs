@@ -17,6 +17,7 @@ pub mod apic;
 pub mod backtrace;
 mod context;
 pub mod cpu;
+pub mod crypto;
 mod entry;
 pub mod fixup;
 pub mod fpu;
@@ -177,6 +178,7 @@ mod hal_hooks {
     const _: hal::FpuAreaFn = abyss_hal_fpu_init;
     const _: hal::FpuAreaFn = abyss_hal_fpu_save;
     const _: hal::FpuRestoreFn = abyss_hal_fpu_restore;
+    const _: hal::CryptoAvailableFn = abyss_hal_crypto_available;
     const _: hal::SetU64Fn = abyss_hal_set_kernel_stack;
     const _: hal::GetU64Fn = abyss_hal_user_tls;
     const _: hal::SetU64Fn = abyss_hal_set_user_tls;
@@ -293,6 +295,11 @@ mod hal_hooks {
     unsafe fn abyss_hal_fpu_restore(area: *const u8) {
         // SAFETY: as above.
         unsafe { crate::fpu::restore(area) }
+    }
+
+    #[unsafe(no_mangle)]
+    fn abyss_hal_crypto_available() -> bool {
+        crate::crypto::available()
     }
 
     /// # Safety

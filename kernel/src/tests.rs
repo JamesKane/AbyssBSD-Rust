@@ -4158,3 +4158,135 @@ ktest! {
         assert_eq!(p.wait(&s), crate::proc::Exit::Code(42));
     }
 }
+
+fn unhex(s: &str) -> alloc::vec::Vec<u8> {
+    let s: alloc::vec::Vec<u8> = s.bytes().filter(u8::is_ascii_hexdigit).collect();
+    s.chunks(2)
+        .map(|p| u8::from_str_radix(core::str::from_utf8(p).unwrap(), 16).unwrap())
+        .collect()
+}
+
+ktest! {
+    fn crypto_matches_the_published_vectors() {
+        // Every machine the boot tier uses has them (QEMU's `max` CPU, the
+        // build server's): the software fallback is tested on the host.
+        assert!(kcrypto::accelerated(), "AES and carry-less multiply instructions not found");
+        // GCM test case 4 (McGrew and Viega), and its text under a
+        // 256-bit key.
+        let p = unhex(
+            "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a72
+             1c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39",
+        );
+        let aad = unhex("feedfacedeadbeeffeedfacedeadbeefabaddad2");
+        let nonce: [u8; 12] = unhex("cafebabefacedbaddecaf888").try_into().unwrap();
+        let k = unhex("feffe9928665731c6d6a8f9467308308");
+        for (key, c, t) in [
+            (
+                k.clone(),
+                "42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e
+                 21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e091",
+                "5bc94fbc3221a5db94fae95ae7121a47",
+            ),
+            (
+                [k.as_slice(), &k].concat(),
+                "522dc1f099567d07f47f37a32a84427d643a8cdcbfe5c0c97598a2bd2555d1aa
+                 8cb08e48590dbb3da7b08b1056828838c5f61e6393ba7a0abcc9f662",
+                "76fc6ece0f4e1768cddf8853bb2d551b",
+            ),
+        ] {
+            let g = kcrypto::Gcm::new(&key).unwrap();
+            let mut d = p.clone();
+            let tag = g.seal(&nonce, &aad, &mut d);
+            assert_eq!(d, unhex(c), "GCM ciphertext, {}-byte key", key.len());
+            assert_eq!(tag.to_vec(), unhex(t), "GCM tag, {}-byte key", key.len());
+            assert!(g.open(&nonce, &aad, &mut d, &tag));
+            assert_eq!(d, p);
+        }
+        // SP 800-38A F.2.1, chained across two calls.
+        let cbc = kcrypto::Cbc::new(&unhex("2b7e151628aed2a6abf7158809cf4f3c")).unwrap();
+        let pt = unhex("6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e51");
+        let mut d = pt.clone();
+        let iv: [u8; 16] = core::array::from_fn(|i| i.to_le_bytes()[0]);
+        let mut v = iv;
+        cbc.with(|e| e.cbc_encrypt(&mut v, &mut d));
+        assert_eq!(d, unhex("7649abac8119b246cee98e9b12e9197d5086cb9b507219ee95db113a917678b2"));
+        let mut v = iv;
+        cbc.with(|e| {
+            e.cbc_decrypt(&mut v, &mut d[..16]);
+            e.cbc_decrypt(&mut v, &mut d[16..]);
+        });
+        assert_eq!(d, pt);
+    }
+}
+
+ktest! {
+    fn crypto_instructions_agree_with_software() {
+        let data: alloc::vec::Vec<u8> = (0..700u32).map(|i| (i * 31 + 7).to_le_bytes()[0]).collect();
+        for klen in [16u8, 24, 32] {
+            let key: alloc::vec::Vec<u8> = (0..klen).map(|i: u8| i * 5 + 1).collect();
+            let (hw, sw) = (kcrypto::Gcm::new(&key).unwrap(), kcrypto::Gcm::new_soft(&key).unwrap());
+            for (len, alen) in [(0usize, 0usize), (1, 13), (15, 5), (16, 16), (17, 0), (255, 13), (700, 31)] {
+                let nonce = [len.to_le_bytes()[0]; 12];
+                let (mut a, mut b) = (data[..len].to_vec(), data[..len].to_vec());
+                let ta = hw.seal(&nonce, &data[..alen], &mut a);
+                let tb = sw.seal(&nonce, &data[..alen], &mut b);
+                assert_eq!((a, ta), (b, tb), "GCM, {klen}-byte key, {len} bytes, {alen} of AAD");
+            }
+            let (hw, sw) = (kcrypto::Cbc::new(&key).unwrap(), kcrypto::Cbc::new_soft(&key).unwrap());
+            let (mut a, mut b) = (data[..640].to_vec(), data[..640].to_vec());
+            let (mut va, mut vb) = ([3u8; 16], [3u8; 16]);
+            hw.with(|e| e.cbc_encrypt(&mut va, &mut a));
+            sw.with(|e| e.cbc_encrypt(&mut vb, &mut b));
+            assert_eq!((&a, va), (&b, vb), "CBC encryption, {klen}-byte key");
+            let (mut va, mut vb) = ([3u8; 16], [3u8; 16]);
+            hw.with(|e| e.cbc_decrypt(&mut va, &mut a));
+            sw.with(|e| e.cbc_decrypt(&mut vb, &mut b));
+            assert_eq!(a, data[..640], "CBC decryption, {klen}-byte key");
+            assert_eq!(b, data[..640]);
+        }
+    }
+}
+
+ktest! {
+    fn crypto_keeps_a_threads_vector_registers() {
+        // A thread with FP state calls the ciphers between loading and
+        // storing its registers: the SIMD section must put them back.
+        let t = sched::Builder::new("simd")
+            .bind(hal::CpuId::BOOT)
+            .fpu()
+            .spawn(|_| {
+                let pattern: [u8; 512] = core::array::from_fn(|i| i.to_le_bytes()[0].wrapping_mul(37) ^ 0xa5);
+                let mut out = [0u8; 512];
+                #[cfg(target_arch = "x86_64")]
+                {
+                    // SAFETY: this thread has FP state; buffers are 512 bytes.
+                    unsafe { arch::fpu::load_call_store(&pattern, &mut out, crypto_between) };
+                    let n = arch::fpu::compared_bytes();
+                    for r in 0..16 {
+                        assert_eq!(&out[r * 32..r * 32 + n], &pattern[r * 32..r * 32 + n], "register {r}");
+                    }
+                }
+                #[cfg(target_arch = "aarch64")]
+                {
+                    let vl = arch::fpu::vector_length();
+                    let sve: alloc::vec::Vec<u8> = (0..32 * vl).map(|i: usize| i.to_le_bytes()[0] ^ 0x3c).collect();
+                    let mut sve_out = alloc::vec![0u8; 32 * vl];
+                    // SAFETY: this thread has FP state; buffers are sized
+                    // as documented.
+                    unsafe { arch::fpu::load_call_store(&pattern, &mut out, &sve, &mut sve_out, crypto_between) };
+                    assert_eq!(out, pattern, "V registers");
+                    assert_eq!(sve_out, sve, "Z registers");
+                }
+            })
+            .expect("spawn");
+        t.join(&cx());
+    }
+}
+
+extern "C" fn crypto_between() {
+    let g = kcrypto::Gcm::new(&[7; 16]).unwrap();
+    let mut d = [9u8; 100];
+    let _ = g.seal(&[1; 12], b"aad", &mut d);
+    let c = kcrypto::Cbc::new(&[8; 32]).unwrap();
+    c.with(|e| e.cbc_decrypt(&mut [0; 16], &mut d[..96]));
+}

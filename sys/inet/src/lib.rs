@@ -365,6 +365,8 @@ pub(crate) struct Sb {
     pub(crate) cant: bool,
     /// `SB_AUTOSIZE`: TCP may grow it.
     pub(crate) auto: bool,
+    /// `SB_AUTOLOWAT`: `sendfile` may raise the low-water mark.
+    pub(crate) autolowat: bool,
 }
 
 impl Sb {
@@ -558,6 +560,7 @@ impl Socket {
             let st = state::of(vnet);
             rcv.auto = ::tcp::on(&st.tcp.conf.recvbuf_auto);
             snd.auto = ::tcp::on(&st.tcp.conf.sendbuf_auto);
+            snd.autolowat = true;
         }
         let so = Self::with_buffers(vnet, family, proto, cred, rcv, snd);
         if let Some(f) = so_flow {

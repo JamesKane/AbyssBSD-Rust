@@ -38,6 +38,7 @@ mod netlink;
 mod path;
 mod proc;
 mod procctl;
+mod sendfile;
 mod shm;
 mod sig;
 mod socket;
@@ -514,6 +515,7 @@ fn run(s: &Sleepable, frame: &mut TrapFrame, call: Call) -> Result<Option<u64>, 
         Sysno::Getsockopt => socket::getsockopt(s, a0, a1, a2, a3, a4),
         Sysno::Sendto => socket::sendto(s, a0, a1, a2, a3, a4, a5),
         Sysno::Sendmsg => socket::sendmsg(s, a0, a1, a2),
+        Sysno::Sendfile => sendfile::sendfile(s, a0, a1, a2, a3, a4, a5, call.args[6]),
         Sysno::Recvfrom => socket::recvfrom(s, a0, a1, a2, a3, a4, a5),
         Sysno::Recvmsg => socket::recvmsg(s, a0, a1, a2),
         Sysno::Getrandom => misc::getrandom(a0, a1, a2),

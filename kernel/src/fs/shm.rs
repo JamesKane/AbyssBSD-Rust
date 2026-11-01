@@ -420,6 +420,11 @@ impl Shm {
         }
     }
 
+    /// Its size.
+    pub(crate) fn size(&self, s: &Sleepable) -> u64 {
+        self.st.lock(s).size
+    }
+
     /// The object behind it (`UMTX_OP_SHM`'s descriptors map it).
     pub(crate) fn object(&self) -> &Arc<Object> {
         &self.object

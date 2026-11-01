@@ -387,6 +387,12 @@ pub static LAYOUTS: &[StructLayout] = &[
         msg_controllen => "msg_controllen",
         msg_flags => "msg_flags",
     }),
+    layout!(socket::SfHdtr, "struct sf_hdtr", ["sys/types.h", "sys/socket.h", "sys/uio.h"], All, {
+        headers => "headers",
+        hdr_cnt => "hdr_cnt",
+        trailers => "trailers",
+        trl_cnt => "trl_cnt",
+    }),
     layout!(socket::Cmsghdr, "struct cmsghdr", ["sys/types.h", "sys/socket.h"], All, {
         cmsg_len => "cmsg_len",
         cmsg_level => "cmsg_level",

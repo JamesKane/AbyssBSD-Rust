@@ -1288,6 +1288,69 @@ impl Socket {
         (self.inner.lock().snd.space() as usize).max(1)
     }
 
+    /// `sendfile_wait_generic`: whether `sendfile` may queue more of the
+    /// `need` bytes it has left, raising an automatic send low-water mark
+    /// first (to half the buffer, and at least a page) so a nonblocking
+    /// sender is woken for big pieces. `Some(room)` to go on; `None` to
+    /// wait for room.
+    ///
+    /// # Errors
+    ///
+    /// `EPIPE` after the send side shut; the pending error (taken);
+    /// `ENOTCONN` unconnected; `EAGAIN` instead of waiting when
+    /// `nonblock`.
+    pub fn sendfile_room(&self, need: usize, nonblock: bool) -> Result<Option<usize>, Errno> {
+        const PAGE: u32 = 4096;
+        let mut i = self.inner.lock();
+        if i.snd.autolowat {
+            i.snd.lowat = i.snd.lowat.max(i.snd.hiwat / 2);
+            if i.snd.lowat < PAGE && i.snd.hiwat >= PAGE {
+                i.snd.lowat = PAGE;
+            }
+        }
+        if i.snd.cant {
+            return Err(Errno::EPIPE);
+        }
+        if let Some(e) = i.error.take() {
+            return Err(e);
+        }
+        if i.state & ss::ISCONNECTED == 0 {
+            return Err(Errno::ENOTCONN);
+        }
+        let room = i.snd.space() as usize;
+        if room < need && (room == 0 || room < i.snd.lowat as usize) {
+            return if nonblock {
+                Err(Errno::EAGAIN)
+            } else {
+                Ok(None)
+            };
+        }
+        Ok(Some(room))
+    }
+
+    /// `tcp_usr_send` of a chain `sendfile` built (a header, file pages):
+    /// queued whole, then sent as the connection allows.
+    ///
+    /// # Errors
+    ///
+    /// `ECONNRESET` if the connection was dropped.
+    pub fn send_chain(self: &Arc<Self>, c: Chain) -> Result<(), Errno> {
+        {
+            let mut i = self.inner.lock();
+            if i.tcp.as_ref().is_some_and(|t| t.dropped) {
+                return Err(Errno::ECONNRESET);
+            }
+            i.snd.cc = i
+                .snd
+                .cc
+                .saturating_add(u32::try_from(c.len()).unwrap_or(u32::MAX));
+            i.sndq.append(c);
+            i.snd.mbcnt = i.sndq.cost();
+        }
+        self.run_tcp(None, |tp, so, cx| ((), tp.send(so, cx, false, false)));
+        Ok(())
+    }
+
     /// `soreceive_generic` on a stream, one look: up to `max` bytes,
     /// stopping at the urgent mark. With `oob`, the urgent byte
     /// (`tcp_usr_rcvoob`).

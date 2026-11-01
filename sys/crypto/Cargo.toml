@@ -1,0 +1,14 @@
+[package]
+name = "kcrypto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+crypto = { path = "../../lib/crypto" }
+hal = { path = "../../arch/hal" }
+sched = { path = "../sched" }
+
+[lints]
+workspace = true

@@ -29,39 +29,16 @@ sys/kern/fdgrowtable_test:oldtables_shared_via_threads  # kvm_open of the live k
 sys/kern/inotify_test:inotify_nullfs                    # nullfs mounts: not yet
 sys/kern/inotify_test:inotify_nullfs_remove             # nullfs mounts: not yet
 sys/kern/inotify_test:inotify_nullfs_rename             # nullfs mounts: not yet
-sys/kern/inotify_test:inotify_event_access_file         # its last step uses sendfile, P7
-sys/kern/sendfile_test:io_fail_async                    # needs the gnop GEOM class (kldload geom_nop) and sendfile, P7
-sys/kern/sendfile_test:io_fail_sync                     # needs the gnop GEOM class (kldload geom_nop) and sendfile, P7
-sys/kern/sendfile_test:io_success                       # needs the gnop GEOM class (kldload geom_nop) and sendfile, P7
-sys/kern/sendfile_test:unix_success                     # needs the gnop GEOM class (kldload geom_nop) and sendfile, P7
+sys/kern/sendfile_test:io_fail_async                    # needs the gnop GEOM class (kldload geom_nop)
+sys/kern/sendfile_test:io_fail_sync                     # needs the gnop GEOM class (kldload geom_nop)
+sys/kern/sendfile_test:io_success                       # needs the gnop GEOM class (kldload geom_nop)
+sys/kern/sendfile_test:unix_success                     # needs the gnop GEOM class (kldload geom_nop)
 sys/kern/exterr_test:gettext_extended                   # extended error strings (EXTERROR) are not reported yet
 sys/kern/ptrace_test:ptrace__PT_KILL_competing_stop     # SCHED_FIFO priorities on one CPU decide which thread runs first; the race goes the other way here
 sys/kern/sigwait:test_wait_dequeue_sigchld_true         # flaky in a parallel run: its _false twin sets the same global sysctl at the same time
 sys/kern/sigwait:test_sig_discard_ign_true              # flaky in a parallel run: its _false twin sets the same global sysctl at the same time
 sys/kern/timerfd:timerfd_root__zero_read_on_abs_realtime # flaky in a parallel run: other root cases step the realtime clock meanwhile
 sys/kern/timerfd:timerfd__missed_events                 # flaky in a parallel run: other root cases step the realtime clock meanwhile
-lib/libc/sys/sendfile_test:fd_negative_bad_fd_v4        # sendfile, P7
-lib/libc/sys/sendfile_test:fd_negative_bad_fd_v6        # sendfile, P7
-lib/libc/sys/sendfile_test:fd_positive_file_v4          # sendfile, P7
-lib/libc/sys/sendfile_test:fd_positive_file_v6          # sendfile, P7
-lib/libc/sys/sendfile_test:fd_positive_shm_v4           # sendfile, P7
-lib/libc/sys/sendfile_test:fd_positive_shm_v6           # sendfile, P7
-lib/libc/sys/sendfile_test:flags_v4                     # sendfile, P7
-lib/libc/sys/sendfile_test:flags_v6                     # sendfile, P7
-lib/libc/sys/sendfile_test:hdtr_negative_bad_pointers_v4 # sendfile, P7
-lib/libc/sys/sendfile_test:hdtr_negative_bad_pointers_v6 # sendfile, P7
-lib/libc/sys/sendfile_test:hdtr_positive_v4             # sendfile, P7
-lib/libc/sys/sendfile_test:hdtr_positive_v6             # sendfile, P7
-lib/libc/sys/sendfile_test:offset_negative_value_less_than_zero_v4 # sendfile, P7
-lib/libc/sys/sendfile_test:offset_negative_value_less_than_zero_v6 # sendfile, P7
-lib/libc/sys/sendfile_test:s_negative_not_connected_socket_v4 # sendfile, P7
-lib/libc/sys/sendfile_test:s_negative_not_connected_socket_v6 # sendfile, P7
-lib/libc/sys/sendfile_test:s_negative_not_descriptor    # sendfile, P7
-lib/libc/sys/sendfile_test:s_negative_not_socket_file_descriptor # sendfile, P7
-lib/libc/sys/sendfile_test:s_negative_udp_socket_v4     # sendfile, P7
-lib/libc/sys/sendfile_test:s_negative_udp_socket_v6     # sendfile, P7
-lib/libc/sys/sendfile_test:sbytes_positive_v4           # sendfile, P7
-lib/libc/sys/sendfile_test:sbytes_positive_v6           # sendfile, P7
 lib/libc/sys/brk_test:brk_basic                         # brk and sbrk are not implemented (ENOSYS)
 lib/libc/sys/brk_test:sbrk_basic                        # brk and sbrk are not implemented (ENOSYS)
 lib/libc/sys/brk_test:mlockfuture                       # brk and sbrk are not implemented (ENOSYS)

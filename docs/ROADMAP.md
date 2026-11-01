@@ -2116,7 +2116,7 @@ P7.0 ─► P7.1 ─► P7.2 ─► P7.3 ─► P7.4 ─┬─► P7.5 ───
   every case FreeBSD passes in `sys/netinet` and `lib/libc/net` passes or is listed. Left:
   FreeBSD as a VM guest runs at `hz` 100 (`HZ_VM`), so its TCP clock has 10 ms ticks there, and
   AbyssBSD's keeps 1 ms ones (FreeBSD's on hardware): RTT samples and timers can differ by a tick
-  in VMs.
+  in VMs. Matching `hz` in VMs is deferred (2026-11-01).
 
 **P7.7 `sendfile` and kernel TLS.**
 - P7.7a, from P7.0 on the host: `sys/crypto` (AES with CBC and GCM, ChaCha20-Poly1305, SHA-1,
@@ -2125,6 +2125,13 @@ P7.0 ─► P7.1 ─► P7.2 ─► P7.3 ─► P7.4 ─┬─► P7.5 ───
 - `sendfile` with page-backed buffers, headers and trailers, `SF_NODISKIO`, and read-ahead.
 - `sys/ktls`: `TCP_TXTLS_ENABLE` and `TCP_RXTLS_ENABLE`, TLS 1.0–1.3 records, `sendfile` over TLS;
   `ktls_test` rejoins `sys/kern`.
+- Progress (2026-11-01): P7.7a done: `lib/crypto` has AES (CBC, GCM), GHASH, ChaCha20-Poly1305,
+  SHA-256/384/512, and HMAC in constant-time software, checked against the published vectors;
+  `sys/crypto` runs AES and GHASH on AES-NI with PCLMULQDQ and on the ARMv8 AES and PMULL
+  instructions in a kernel FP/SIMD section (`sched::simd`), checked in the boot tier on both
+  architectures. `sendfile` lends page-cache pages to TCP without a copy (copies to UNIX-domain
+  sockets), with headers, trailers, and `SB_AUTOLOWAT`; every `lib/libc/sys/sendfile_test` case
+  FreeBSD passes passes. Left: kernel TLS.
 
 **P7.8 Conformance.**
 - The kyua directories at the target with every remaining failure listed; differential scenarios

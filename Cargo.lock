@@ -359,6 +359,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kcrypto"
+version = "0.0.0"
+dependencies = [
+ "crypto",
+ "hal",
+ "sched",
+]
+
+[[package]]
 name = "kernel"
 version = "0.0.0"
 dependencies = [
@@ -390,6 +399,7 @@ dependencies = [
  "input",
  "intmap",
  "irq",
+ "kcrypto",
  "ktest",
  "logring",
  "mbuf",

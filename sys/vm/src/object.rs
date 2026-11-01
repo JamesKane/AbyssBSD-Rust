@@ -323,6 +323,17 @@ impl PageRun {
         }
     }
 
+    /// The bytes, if they lie in one range (a run within one page).
+    #[must_use]
+    pub fn contiguous(&self) -> Option<&[u8]> {
+        match self.ranges.as_slice() {
+            // SAFETY: `n` bytes of a page the run holds (see the type),
+            // never written through it.
+            &[(p, n)] => Some(unsafe { core::slice::from_raw_parts(p.as_ptr(), n) }),
+            _ => None,
+        }
+    }
+
     /// The bytes, copied.
     #[must_use]
     pub fn to_vec(&self) -> Vec<u8> {
@@ -1441,6 +1452,34 @@ impl Object {
         self.io.fetch_add(1, Ordering::SeqCst);
         Some(IoBuf::Lent(PageRun {
             ranges,
+            object: Arc::clone(self),
+        }))
+    }
+
+    /// Page `index` lent for a transfer without a copy (`sendfile`'s
+    /// wired page, `vm_page_grab` with `VM_ALLOC_WIRED`): read from the
+    /// pager if need be (may sleep: call with no map lock held), or a hole
+    /// with no pager behind it filled with a new zeroed page, as
+    /// `sendfile_swapin` does. `Ok(None)` if pages have no fixed place.
+    ///
+    /// # Errors
+    ///
+    /// The pager's failure, or no memory for the page.
+    pub fn lend_page(self: &Arc<Self>, index: PageIndex) -> Result<Option<PageRun>, LookupError> {
+        let _io = self.io();
+        let pfn = match self.page_or_fill(index, true) {
+            Ok(Some(pfn)) => pfn,
+            Ok(None) | Err(LookupError::PastEnd) => self
+                .get_or_insert(index, None)
+                .ok_or(LookupError::OutOfMemory)?,
+            Err(e) => return Err(e),
+        };
+        let Some(p) = self.pages_ops.page_ptr(pfn) else {
+            return Ok(None);
+        };
+        self.io.fetch_add(1, Ordering::SeqCst);
+        Ok(Some(PageRun {
+            ranges: alloc::vec![(p, PAGE_BYTES)],
             object: Arc::clone(self),
         }))
     }

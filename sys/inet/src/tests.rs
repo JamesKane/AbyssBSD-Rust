@@ -10,7 +10,8 @@ use std::sync::Mutex;
 use abi::errno::Errno;
 use abi::inet::{IPPROTO_IPV6, ipv6};
 use abi::socket::{
-    SHUT_WR, SO_ACCEPTFILTER, SO_LINGER, SO_OOBINLINE, SO_REUSEADDR, SO_REUSEPORT, SOL_SOCKET,
+    SHUT_WR, SO_ACCEPTFILTER, SO_LINGER, SO_OOBINLINE, SO_REUSEADDR, SO_REUSEPORT, SO_SNDLOWAT,
+    SOL_SOCKET,
 };
 
 use crate::addr::{self, In6, LOOPBACK6, Sockaddr, sockaddr_in, sockaddr_in6, v4mapped};
@@ -302,6 +303,38 @@ fn tcp_sendto_connects_an_unconnected_socket() {
     assert_eq!(r.send_stream_named(b"y", false, &elsewhere, &user()), Ok(1));
     assert_eq!(r.send_stream(b"z", false), Err(Errno::EPIPE));
     for x in [c, s, r, l] {
+        x.close();
+    }
+}
+
+#[test]
+fn tcp_sendfile_room_and_chains() {
+    let _g = setup();
+    let lowat = |so: &Arc<Socket>| {
+        let v = so.getopt(SOL_SOCKET, SO_SNDLOWAT).unwrap();
+        i32::from_ne_bytes([v[0], v[1], v[2], v[3]])
+    };
+    let u = tcp4();
+    assert_eq!(u.sendfile_room(1, true), Err(Errno::ENOTCONN));
+    let (l, c, s) = connected(20057);
+    // `SB_AUTOLOWAT`: half the buffer once `sendfile` looks.
+    let hiwat = c.snd_hiwat();
+    assert_eq!(c.sendfile_room(10, true), Ok(Some(hiwat as usize)));
+    assert_eq!(lowat(&c), (hiwat / 2).cast_signed());
+    // A chain is queued and delivered whole.
+    let chain = ::tcp::Chain::from_slice(b"pages of a file").unwrap();
+    c.send_chain(chain).unwrap();
+    assert_eq!(
+        s.recv_stream(100, false, false).unwrap().data,
+        b"pages of a file"
+    );
+    // A low-water mark set by hand is kept.
+    set_int(&s, SOL_SOCKET, SO_SNDLOWAT, 100);
+    assert_eq!(s.sendfile_room(10, true).map(|r| r.is_some()), Ok(true));
+    assert_eq!(lowat(&s), 100);
+    c.shutdown(SHUT_WR).unwrap();
+    assert_eq!(c.sendfile_room(1, true), Err(Errno::EPIPE));
+    for x in [c, s, l, u] {
         x.close();
     }
 }

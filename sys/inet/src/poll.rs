@@ -209,6 +209,14 @@ impl SockFilter {
 impl Filter for SockFilter {
     fn attach(&self, kn: &Arc<Knote>) -> Result<(), Errno> {
         self.notify().add(kn);
+        if kn.note().sfflags & NOTE_LOWAT != 0 {
+            // `soo_kqfilter`: a low-water mark of the caller's own.
+            let mut i = self.so.inner.lock();
+            match self.which {
+                Which::Read => i.rcv.autolowat = false,
+                Which::Write | Which::Empty => i.snd.autolowat = false,
+            }
+        }
         Ok(())
     }
 

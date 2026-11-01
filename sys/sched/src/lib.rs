@@ -1372,6 +1372,45 @@ fn restore_fpu() {
     }
 }
 
+/// A kernel FP/SIMD section (FreeBSD's `fpu_kern_enter` with
+/// `FPU_KERN_NOCTX`): kernel code may use the vector registers until it
+/// ends. Preemption is held off, and the current thread's own registers,
+/// if it has any (they are live: the switch in restored them), are saved
+/// now and loaded back at the end. A thread without its own needs nothing
+/// saved: the registers hold another thread's, saved when it left.
+///
+/// Sections do not nest, and interrupt handlers may not open one.
+#[derive(Debug)]
+pub struct Simd {
+    _cpu: core::marker::PhantomData<*const ()>,
+}
+
+/// Opens a kernel FP/SIMD section.
+#[must_use]
+pub fn simd() -> Simd {
+    debug_assert!(!hal::interrupt::active(), "SIMD in an interrupt handler");
+    hal::critical::enter();
+    if let Some(f) = &current().fpu {
+        // SAFETY: the area is this thread's, of the size and alignment the
+        // HAL wants; saving only reads the registers.
+        unsafe { hal::fpu::save(f.as_ptr()) };
+    }
+    Simd {
+        _cpu: core::marker::PhantomData,
+    }
+}
+
+impl Drop for Simd {
+    fn drop(&mut self) {
+        if let Some(f) = &current().fpu {
+            // SAFETY: the area holds the state `simd` saved, and no switch
+            // has happened since (preemption is held off).
+            unsafe { hal::fpu::restore(f.as_ptr()) };
+        }
+        hal::critical::exit();
+    }
+}
+
 /// The first code a new thread runs.
 pub(crate) extern "C" fn thread_start(_: usize) -> ! {
     // The switch that got here did not return into `switch_away`, so do

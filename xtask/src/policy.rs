@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! Repository rules that the compiler cannot check (docs/ENGINEERING.md):
 //! no dependencies from outside the workspace (ADR-0002), and an SPDX
-//! header on every source file (ADR-0007).
+//! header on every source file (ADR-0007): BSD-2-Clause, or MIT with the
+//! original copyright notice for a file derived from MIT-licensed source.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,11 +11,22 @@ use crate::cli::Args;
 use crate::util::{self, Result};
 
 const SPDX: &str = "// SPDX-License-Identifier: BSD-2-Clause";
+const SPDX_MIT: &str = "// SPDX-License-Identifier: MIT";
 const SKIP_DIRS: &[&str] = &["target", "build", ".git", ".cargo"];
 
 pub(crate) fn cmd(args: Args) -> Result<()> {
     args.finish()?;
     check()
+}
+
+/// Whether `text` starts with an accepted SPDX header.
+fn spdx_ok(text: &str) -> bool {
+    let mut lines = text.lines();
+    match lines.next() {
+        Some(SPDX) => true,
+        Some(SPDX_MIT) => lines.next().is_some_and(|l| l.starts_with("// Copyright")),
+        _ => false,
+    }
 }
 
 /// Runs every policy check, reporting all violations at once.
@@ -30,8 +42,11 @@ pub(crate) fn check() -> Result<()> {
     let mut sources = Vec::new();
     for src in files(&root, ".rs") {
         let text = fs::read_to_string(&src)?;
-        if text.lines().next() != Some(SPDX) {
-            violations.push(format!("{}: first line must be `{SPDX}`", rel(&root, &src)));
+        if !spdx_ok(&text) {
+            violations.push(format!(
+                "{}: first line must be `{SPDX}` (or `{SPDX_MIT}` followed by a `// Copyright` line)",
+                rel(&root, &src)
+            ));
         }
         sources.push((rel(&root, &src), text));
     }
@@ -160,6 +175,16 @@ pub(crate) fn cmd_unsafe_report(args: Args) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spdx_headers() {
+        assert!(spdx_ok("// SPDX-License-Identifier: BSD-2-Clause\n//! x"));
+        assert!(spdx_ok(
+            "// SPDX-License-Identifier: MIT\n// Copyright (c) 2016 A\n"
+        ));
+        assert!(!spdx_ok("// SPDX-License-Identifier: MIT\n//! no notice"));
+        assert!(!spdx_ok("// SPDX-License-Identifier: GPL-2.0\n"));
+    }
 
     #[test]
     fn accepts_path_dependencies() {

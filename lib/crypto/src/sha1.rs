@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! SHA-1 (FIPS 180-4 §6.1), for the identifiers FreeBSD derives with it
-//! (`ether_gen_addr_byname`'s link-layer addresses). Not for security.
+//! (`ether_gen_addr_byname`'s link-layer addresses), and for HMAC-SHA1 in
+//! TLS 1.0–1.2's CBC suites.
 
 /// A SHA-1 computation in progress.
 #[derive(Clone, Debug)]
