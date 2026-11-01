@@ -16,6 +16,11 @@ use core::sync::atomic::Ordering;
 
 use abi::errno::Errno;
 use abi::inet::{INP_IPV4, IPPROTO_IP, IPPROTO_IPV6, IPPROTO_TCP, IPPROTO_UDP, inp, ip, ipv6, tcp};
+
+/// `IPPROTO_ICMPV6`.
+const IPPROTO_ICMPV6: i32 = 58;
+/// `IPV6_NEXTHOP`.
+const IPV6_NEXTHOP: i32 = 48;
 use abi::socket::{
     SO_ACCEPTCONN, SO_ACCEPTFILTER, SO_BINTIME, SO_BROADCAST, SO_DEBUG, SO_DOMAIN, SO_DONTROUTE,
     SO_ERROR, SO_FIB, SO_KEEPALIVE, SO_LINGER, SO_LISTENINCQLEN, SO_LISTENQLEN, SO_LISTENQLIMIT,
@@ -118,6 +123,15 @@ impl Socket {
             IPPROTO_UDP if self.proto == Proto::Udp => Err(Errno::ENOPROTOOPT),
             IPPROTO_IP if self.family == Family::Inet => self.ip_setopt(name, val, cred),
             IPPROTO_IPV6 if self.family == Family::Inet6 => self.ip6_setopt(name, val, cred),
+            // `rip6_ctloutput` to `icmp6_ctloutput`.
+            IPPROTO_ICMPV6
+                if self.family == Family::Inet6 && matches!(self.proto, Proto::Raw(_)) =>
+            {
+                match name {
+                    crate::raw6::ICMP6_FILTER => self.set_icmp6_filter(val),
+                    _ => Err(Errno::ENOPROTOOPT),
+                }
+            }
             _ => Err(Errno::EINVAL),
         }
     }
@@ -451,14 +465,122 @@ impl Socket {
                 self.inner.lock().ip.prefer_tempaddr = v;
                 Ok(())
             }
-            ipv6::IPV6_USE_MIN_MTU | ipv6::IPV6_RECVPATHMTU => {
+            ipv6::IPV6_USE_MIN_MTU => {
+                if val.len() != 4 {
+                    return Err(Errno::EINVAL);
+                }
+                let v = int(val)?;
+                if !(-1..=1).contains(&v) {
+                    return Err(Errno::EINVAL);
+                }
+                self.inner.lock().ip.minmtu6 = i8::try_from(v).unwrap_or(-1);
+                Ok(())
+            }
+            ipv6::IPV6_RECVPATHMTU => {
                 int(val)?;
                 Ok(())
             }
+            ipv6::IPV6_CHECKSUM if matches!(self.proto, Proto::Raw(_)) => {
+                if val.len() != 4 {
+                    return Err(Errno::EINVAL);
+                }
+                let v = int(val)?;
+                if v < -1 || v % 2 != 0 {
+                    return Err(Errno::EINVAL);
+                }
+                if self.proto == Proto::Raw(58) {
+                    return if v == 2 { Ok(()) } else { Err(Errno::EINVAL) };
+                }
+                self.set_cksum6(v)
+            }
             ipv6::IPV6_CHECKSUM => Err(Errno::EINVAL),
-            ipv6::IPV6_JOIN_GROUP | ipv6::IPV6_LEAVE_GROUP => Err(Errno::EADDRNOTAVAIL),
+            ipv6::IPV6_JOIN_GROUP | ipv6::IPV6_LEAVE_GROUP => {
+                self.membership6(name == ipv6::IPV6_JOIN_GROUP, val)
+            }
+            // The sticky packet options (`ip6_pcbopt`).
+            ipv6::IPV6_PKTINFO => {
+                if val.is_empty() {
+                    self.inner.lock().ip.pktinfo6 = None;
+                    return Ok(());
+                }
+                let pi = crate::raw6::check_pktinfo(&self.vnet, val)?;
+                self.inner.lock().ip.pktinfo6 = (pi != ([0; 16], 0)).then_some(pi);
+                Ok(())
+            }
+            ipv6::IPV6_HOPLIMIT => {
+                if val.len() != 4 {
+                    return Err(Errno::EINVAL);
+                }
+                let v = int(val)?;
+                if !(-1..256).contains(&v) {
+                    return Err(Errno::EINVAL);
+                }
+                self.inner.lock().ip.hlim6 = i16::try_from(v).unwrap_or(-1);
+                Ok(())
+            }
+            IPV6_NEXTHOP => {
+                if val.is_empty() {
+                    self.inner.lock().ip.nexthop6 = None;
+                    return Ok(());
+                }
+                let a = crate::raw6::check_nexthop(val)?;
+                self.inner.lock().ip.nexthop6 = Some(a);
+                Ok(())
+            }
             _ => Err(Errno::ENOPROTOOPT),
         }
+    }
+
+    /// `in6p_join_group` and `in6p_leave_group` (`IPV6_JOIN_GROUP`,
+    /// `IPV6_LEAVE_GROUP`): a `struct ipv6_mreq`, its interface 0 for the
+    /// one the group's route goes out of.
+    fn membership6(&self, join: bool, val: &[u8]) -> Result<(), Errno> {
+        if val.len() < 20 {
+            return Err(Errno::EINVAL);
+        }
+        let g: [u8; 16] = val[..16].try_into().map_err(|_| Errno::EINVAL)?;
+        let idx = u32::from_ne_bytes(val[16..20].try_into().map_err(|_| Errno::EINVAL)?);
+        if !crate::addr::is_multicast6(&g) {
+            return Err(Errno::EINVAL);
+        }
+        let st = crate::state::of(&self.vnet);
+        let mut n = self.vnet.net.lock();
+        let ifindex = if idx == 0 {
+            // `in6p_lookup_mcast_ifp`: the group's route's interface.
+            match n.route6(0, &g, 0) {
+                Some(r) => r.ifindex,
+                None => 0,
+            }
+        } else {
+            u16::try_from(idx).map_err(|_| Errno::EADDRNOTAVAIL)?
+        };
+        if !join {
+            let mut i = self.inner.lock();
+            let at = i
+                .groups6
+                .iter()
+                .position(|&(x, k)| x == g && (idx == 0 || k == ifindex))
+                .ok_or(Errno::EADDRNOTAVAIL)?;
+            let (_, k) = i.groups6.remove(at);
+            drop(i);
+            crate::mld6::leave(&mut n, &st, k, &g);
+            return Ok(());
+        }
+        let ok = n
+            .by_index(ifindex)
+            .is_some_and(|i| i.flags & abi::net::iff::MULTICAST != 0);
+        if !ok {
+            return Err(Errno::EADDRNOTAVAIL);
+        }
+        {
+            let mut i = self.inner.lock();
+            if i.groups6.iter().any(|&(x, k)| x == g && k == ifindex) {
+                return Err(Errno::EADDRINUSE);
+            }
+            i.groups6.push((g, ifindex));
+        }
+        crate::mld6::join(&mut n, &st, ifindex, &g, 0);
+        Ok(())
     }
 
     fn tcp_setopt(&self, name: i32, val: &[u8]) -> Result<(), Errno> {
@@ -534,6 +656,14 @@ impl Socket {
             IPPROTO_UDP if self.proto == Proto::Udp => Err(Errno::ENOPROTOOPT),
             IPPROTO_IP if self.family == Family::Inet => self.ip_getopt(name),
             IPPROTO_IPV6 if self.family == Family::Inet6 => self.ip6_getopt(name),
+            IPPROTO_ICMPV6
+                if self.family == Family::Inet6 && matches!(self.proto, Proto::Raw(_)) =>
+            {
+                match name {
+                    crate::raw6::ICMP6_FILTER => Ok(self.icmp6_filter()),
+                    _ => Err(Errno::ENOPROTOOPT),
+                }
+            }
             _ => Err(Errno::EINVAL),
         }
     }
@@ -700,6 +830,14 @@ impl Socket {
 
     /// Leaves every group (`inp_freemoptions`), as its last close does.
     pub(crate) fn leave_groups(&self) {
+        let groups6 = core::mem::take(&mut self.inner.lock().groups6);
+        if !groups6.is_empty() {
+            let st = crate::state::of(&self.vnet);
+            let mut n = self.vnet.net.lock();
+            for (g, k) in groups6 {
+                crate::mld6::leave(&mut n, &st, k, &g);
+            }
+        }
         let groups = core::mem::take(&mut self.inner.lock().groups);
         if groups.is_empty() {
             return;
@@ -746,9 +884,22 @@ impl Socket {
             }),
             ipv6::IPV6_ORIGDSTADDR => i32v(i32::from(flags2 & inp::ORIGDSTADDR != 0)),
             ipv6::IPV6_PREFER_TEMPADDR => i32v(i.ip.prefer_tempaddr),
-            ipv6::IPV6_USE_MIN_MTU => i32v(-1),
+            ipv6::IPV6_USE_MIN_MTU => i32v(i32::from(i.ip.minmtu6)),
             ipv6::IPV6_RECVPATHMTU => i32v(0),
-            ipv6::IPV6_CHECKSUM => i32v(-1),
+            ipv6::IPV6_CHECKSUM if self.proto == Proto::Raw(58) => i32v(2),
+            ipv6::IPV6_CHECKSUM => i32v(i.ip.cksum6),
+            ipv6::IPV6_PKTINFO => {
+                let (a, k) = i.ip.pktinfo6.unwrap_or(([0; 16], 0));
+                let mut b = a.to_vec();
+                b.extend_from_slice(&k.to_ne_bytes());
+                b
+            }
+            ipv6::IPV6_HOPLIMIT => i32v(i32::from(i.ip.hlim6)),
+            IPV6_NEXTHOP => {
+                i.ip.nexthop6
+                    .map(|a| net::addr::sockaddr_in6(&a, 0, 0))
+                    .unwrap_or_default()
+            }
             _ => return Err(Errno::ENOPROTOOPT),
         })
     }

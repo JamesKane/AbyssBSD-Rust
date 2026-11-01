@@ -962,7 +962,7 @@ impl Table {
         let target = Sockaddr::v6(faddr, dst.port, zone);
         let me = self.pcbs.get(&id).ok_or(Errno::EINVAL)?;
         let (laddr, lzone) = if is_unspecified(&me.laddr) {
-            me.vnet.net.lock().source(Family::Inet6, &faddr, zone)?
+            selectsrc6(me, &faddr, zone)?
         } else {
             (me.laddr, me.zone)
         };
@@ -1021,10 +1021,7 @@ impl Table {
             }
             Family::Inet6 => {
                 let (a, z) = if is_unspecified(&p.laddr) {
-                    p.vnet
-                        .net
-                        .lock()
-                        .source(Family::Inet6, &dst.addr, dst.scope)?
+                    selectsrc6(p, &dst.addr, dst.scope)?
                 } else {
                     let n = p.vnet.net.lock();
                     if !crate::addr::is_linklocal6(&dst.addr) {
@@ -1056,6 +1053,39 @@ impl Table {
     pub(crate) fn peer_any(&self, so: &Socket) -> Sockaddr {
         self.peername(so).unwrap_or_else(|_| blank(so.family))
     }
+}
+
+/// `in6_selectsrc_socket` for PCB `me`'s socket and a destination
+/// `dst` (with `zone`, 0 if it named none): the source, and the zone the
+/// destination turns out in (the interface's, for an ambiguous
+/// link-local one).
+fn selectsrc6(me: &Pcb, dst: &In6, zone: u32) -> Result<(In6, u32), Errno> {
+    let st = crate::state::of(&me.vnet);
+    let o = me
+        .socket()
+        .map_or_else(crate::IpOpts::new, |s| s.inner.lock().ip);
+    let req = crate::in6::SrcReq {
+        dst: *dst,
+        zone: u16::try_from(zone).unwrap_or(0),
+        pktinfo: o.pktinfo6.map(|(a, i)| (a, u16::try_from(i).unwrap_or(0))),
+        laddr: me.laddr,
+        mif: u16::try_from(o.mif6).unwrap_or(0),
+        oifp: 0,
+        fib: 0,
+        bindany: me.flags & inp::BINDANY != 0,
+        prefer_tempaddr: o.prefer_tempaddr,
+    };
+    let n = me.vnet.net.lock();
+    // A destination must be routable, as `in6_pcbladdr` finds.
+    let (src, ifp) = crate::in6::selectsrc(&n, &st, &req)?;
+    let z = if zone == 0 && crate::in6::is_zoned(dst) {
+        u32::from(ifp)
+    } else if crate::in6::is_zoned(&src) || crate::in6::is_zoned(dst) {
+        zone.max(u32::from(ifp))
+    } else {
+        0
+    };
+    Ok((src, z))
 }
 
 /// The wildcard name of `family`.

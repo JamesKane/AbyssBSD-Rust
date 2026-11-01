@@ -174,6 +174,8 @@ ktest! {
             vltime: u32::MAX,
             pltime: u32::MAX,
             vhid: 0,
+            created: 0,
+            updated: 0,
         };
         v.net.lock().add_addr(b"vtnet0", a).unwrap();
         let now = super::uptime_s();
@@ -242,6 +244,8 @@ ktest! {
             vltime: u32::MAX,
             pltime: u32::MAX,
             vhid: 0,
+            created: 0,
+            updated: 0,
         };
         v.net.lock().add_addr(b"vtnet0", a).unwrap();
         let gw = net::ifnet::Route {

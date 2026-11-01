@@ -13,7 +13,7 @@ use abi::socket::{
     SHUT_WR, SO_ACCEPTFILTER, SO_LINGER, SO_OOBINLINE, SO_REUSEADDR, SO_REUSEPORT, SOL_SOCKET,
 };
 
-use crate::addr::{self, LOOPBACK6, Sockaddr, sockaddr_in, sockaddr_in6, v4mapped};
+use crate::addr::{self, In6, LOOPBACK6, Sockaddr, sockaddr_in, sockaddr_in6, v4mapped};
 use crate::ifnet;
 use crate::pcb::{TCB, UDB};
 use crate::{Cred, Family, Proto, Socket, Tstate, tune};
@@ -26,6 +26,10 @@ pub(crate) fn setup() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     net::init();
     crate::init();
+    // Uptime from the protocols' clock, which tests move on.
+    net::set_uptime(|| {
+        crate::DEFAULT_CLOCK.load(core::sync::atomic::Ordering::Relaxed) / 1_000_000_000
+    });
     // The `netisr` thread's work, done as soon as there is some.
     net::netisr::set_kick(|| {
         for v in net::Vnet::all() {
@@ -938,4 +942,71 @@ fn tcp4_connect_to_a_wildcard_listener() {
         .unwrap();
     c.close();
     l.close();
+}
+
+/// `sys/net/if_clone_test:lo_ipv6_up_stress`: a cloned loopback's
+/// `fe80::1` is its own, so destroying it leaves `lo0`'s routes (and
+/// `::1`, which only the first loopback gets) alone.
+#[test]
+fn a_cloned_loopback_leaves_lo0_alone() {
+    let _g = setup();
+    let v = net::vnet0();
+    let ctx = net::clone::Ctx {
+        now: 0,
+        hostuuid: "6b0c3f6e-1111-2222-3333-444455556666".into(),
+        jail: "0".into(),
+        random: [7; 12],
+    };
+    let mut ll = [0u8; 16];
+    ll[0] = 0xfe;
+    ll[1] = 0x80;
+    ll[15] = 1;
+    let up = |name: &[u8]| {
+        let mut n = v.net.lock();
+        let i = n.by_name(name).unwrap().index;
+        n.with_iface(name, |i| i.nd6_flags &= !abi::net::nd6_iff::IFDISABLED);
+        let flags = n.by_index(i).unwrap().flags | abi::net::iff::UP;
+        n.set_flags(name, flags).unwrap();
+        n.in6_if_up(i);
+        i
+    };
+    let lo0 = up(b"lo0");
+    let host_routes = |v: &net::Vnet| {
+        let mut r: alloc::vec::Vec<In6> = v
+            .net
+            .lock()
+            .routes
+            .iter()
+            .filter(|r| {
+                r.family == Family::Inet6
+                    && r.plen == 128
+                    && matches!(r.gateway, net::ifnet::Gateway::Link(i) if i == lo0)
+            })
+            .map(|r| r.dst)
+            .collect();
+        r.sort_unstable();
+        r
+    };
+    let before = host_routes(v);
+    assert!(before.contains(&LOOPBACK6) && before.contains(&ll));
+    let name = net::clone::create(v, b"lo", &ctx).unwrap();
+    let i = up(name.as_bytes());
+    assert!(
+        !v.net
+            .lock()
+            .by_index(i)
+            .unwrap()
+            .addrs
+            .iter()
+            .any(|a| a.family == Family::Inet6 && a.addr == LOOPBACK6)
+    );
+    net::clone::destroy(v, name.as_bytes()).unwrap();
+    assert_eq!(host_routes(v), before);
+    let s = Socket::new(Family::Inet6, Proto::Udp, &user());
+    s.bind(&sockaddr_in6(&LOOPBACK6, 20090, 0), &user())
+        .unwrap();
+    s.send_dgram(b"x", Some(&sockaddr_in6(&LOOPBACK6, 20090, 0)), &user())
+        .unwrap();
+    assert_eq!(s.recv_dgram(10, false).unwrap().data, b"x");
+    s.close();
 }

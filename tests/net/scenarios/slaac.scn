@@ -1,0 +1,3 @@
+# rtsol on the guest: its router solicitation, and the peer's router advertisement.
+filter: icmp6 and (ip6[40] == 133 or ip6[40] == 134)
+guest: rtsol vtnet0; sleep 2

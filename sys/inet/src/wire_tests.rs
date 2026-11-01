@@ -38,6 +38,8 @@ fn addr(v: &Vnet, name: &[u8], a: [u8; 4]) {
         vltime: u32::MAX,
         pltime: u32::MAX,
         vhid: 0,
+        created: 0,
+        updated: 0,
     };
     v.net.lock().add_addr(name, x).unwrap();
 }

@@ -40,8 +40,13 @@ pub mod state {
     pub const REACHABLE: i16 = 1;
     pub const VERIFY: i16 = 2;
     pub const DELETED: i16 = 3;
-    /// `ND6_LLINFO_REACHABLE`, what a static IPv6 entry is.
+    /// ND's (`ND6_LLINFO_*`).
+    pub const ND6_NOSTATE: i16 = -2;
+    pub const ND6_INCOMPLETE: i16 = 0;
     pub const ND6_REACHABLE: i16 = 1;
+    pub const ND6_STALE: i16 = 2;
+    pub const ND6_DELAY: i16 = 3;
+    pub const ND6_PROBE: i16 = 4;
 }
 
 /// An entry (`struct llentry`).
@@ -67,6 +72,17 @@ pub struct Lle {
     pub timer: Option<u64>,
     /// Used since the timer last asked (`r_skip_req`'s feedback).
     pub used: bool,
+    /// ND: the neighbor is a router (`ln_router`).
+    pub router: bool,
+    /// ND: when its timer fires, nanoseconds of the protocols' clock, 0
+    /// for none (`lle_timer` with `ln_ntick`).
+    pub ntimer: u64,
+    /// ND: when it was last used since feedback was asked for, seconds
+    /// of uptime, 0 for not (`lle_hittime` with `r_skip_req`).
+    pub hit: u64,
+    /// ND: what is left of `nd6_gctimer` in STALE, nanoseconds
+    /// (`lle_remtime`).
+    pub remtime: u64,
 }
 
 impl Lle {
@@ -82,14 +98,19 @@ impl Lle {
             expire: 0,
             asked: 0,
             preempt: 0,
-            state: if family == Family::Inet6 && flags & lle::STATIC != 0 {
-                state::ND6_REACHABLE
-            } else {
-                state::INCOMPLETE
+            // `nd6_alloc` starts an entry with no state.
+            state: match family {
+                Family::Inet6 if flags & lle::STATIC != 0 => state::ND6_REACHABLE,
+                Family::Inet6 => state::ND6_NOSTATE,
+                Family::Inet => state::INCOMPLETE,
             },
             hold: Vec::new(),
             timer: None,
             used: false,
+            router: false,
+            ntimer: 0,
+            hit: 0,
+            remtime: 0,
         }
     }
 
@@ -98,6 +119,11 @@ impl Lle {
         self.lladdr = ll;
         self.flags |= lle::VALID;
     }
+}
+
+/// A published IPv6 entry with an address: one this host answers for.
+fn proxy6(e: &Lle) -> bool {
+    e.family == Family::Inet6 && e.flags & (lle::PUB | lle::VALID) == lle::PUB | lle::VALID
 }
 
 impl Net {
@@ -124,9 +150,20 @@ impl Net {
             .iter()
             .position(|x| x.ifindex == e.ifindex && x.family == e.family && x.addr == e.addr)
             .map(|at| self.lle.swap_remove(at));
+        let (published, ifindex, addr) = (proxy6(&e), e.ifindex, e.addr);
         self.lle.push(e);
         self.bump();
+        if old.as_ref().is_some_and(proxy6) != published {
+            self.proxy_event(ifindex, &addr, published);
+        }
         old
+    }
+
+    /// Tells IPv6 a published entry came or went.
+    fn proxy_event(&mut self, ifindex: u16, addr: &In6, join: bool) {
+        if let Some(h) = crate::in6_hooks() {
+            (h.proxy)(self, ifindex, addr, join);
+        }
     }
 
     /// Removes the entry for `addr` (`lltable_delete_addr`); an
@@ -152,7 +189,11 @@ impl Net {
             return Err(Errno::EPERM);
         }
         self.bump();
-        Ok(self.lle.swap_remove(at))
+        let e = self.lle.swap_remove(at);
+        if proxy6(&e) {
+            self.proxy_event(ifindex, addr, false);
+        }
+        Ok(e)
     }
 
     /// Removes the entries of every interface inside `prefix/plen`

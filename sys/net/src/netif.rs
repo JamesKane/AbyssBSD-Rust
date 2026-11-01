@@ -129,6 +129,7 @@ pub fn attach_ether(e: &Ether, port: &Arc<Port>, link: Arc<dyn Link>) -> String 
         // `nd6_ifattach`: IPv6 off until enabled, as `rc.conf` leaves an
         // interface without `ifconfig_<if>_ipv6`.
         nd6_flags: nd6_iff::PERFORMNUD | nd6_iff::IFDISABLED | nd6_iff::AUTO_LINKLOCAL,
+        nd: crate::ifnet::NdInfo::DEFAULT,
         description: None,
         groups: alloc::vec![String::from(e.dname)],
         addrs: alloc::vec::Vec::new(),

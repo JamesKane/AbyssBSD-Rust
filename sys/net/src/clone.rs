@@ -99,7 +99,12 @@ impl Link for Loop {
         let af = u32::from(family.map_or(0, Family::af));
         vnet.lotap
             .mtap2(&af.to_ne_bytes(), &m, crate::bpf::Way::Out);
-        m.hdr.rcvif = index;
+        // `nd6_output_ifp` passes `looutput` the interface whose address
+        // an IPv6 packet is for, which it arrives on; the rest arrive on
+        // the loopback interface.
+        if family != Some(Family::Inet6) || m.hdr.rcvif == 0 {
+            m.hdr.rcvif = index;
+        }
         // `looutput` with `IFCAP_RXCSUM`: whatever checksum work the
         // sender left to the device counts as done (`LO_CSUM_SET`).
         m.hdr.csum_data = 0xffff;
@@ -108,7 +113,10 @@ impl Link for Loop {
             | mbuf::csum::IP_CHECKED
             | mbuf::csum::IP_VALID;
         let proto = match family {
-            Some(Family::Inet6) => Proto::Ipv6,
+            Some(Family::Inet6) => {
+                m.hdr.flags |= mbuf::flags::LOOP;
+                Proto::Ipv6
+            }
             _ => Proto::Ip,
         };
         vnet.netisr.queue(proto, m).map_err(|_| {
@@ -260,6 +268,7 @@ fn epair_ifnet(
         capenable: caps,
         // `nd6_ifattach`: IPv6 off until enabled (`ifdisabled`).
         nd6_flags: nd6_iff::PERFORMNUD | nd6_iff::IFDISABLED | nd6_iff::AUTO_LINKLOCAL,
+        nd: crate::ifnet::NdInfo::DEFAULT,
         description: None,
         groups: alloc::vec![String::from("epair")],
         addrs: Vec::new(),

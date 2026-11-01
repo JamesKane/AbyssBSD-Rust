@@ -31,7 +31,7 @@ pub const LOMTU: u32 = 16384;
 pub const INFINITE: u32 = u32::MAX;
 
 /// An interface's counters (`if_counter`), counted as packets pass.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Stats {
     pub ipackets: AtomicU64,
     pub opackets: AtomicU64,
@@ -43,9 +43,132 @@ pub struct Stats {
     pub noproto: AtomicU64,
     pub oerrors: AtomicU64,
     pub ierrors: AtomicU64,
+    /// IPv6's (`struct in6_ifstat`, [`in6_ifs`]) and ICMPv6's
+    /// (`struct icmp6_ifstat`, [`icmp6_ifs`]) for it.
+    pub in6: [AtomicU64; in6_ifs::N],
+    pub icmp6: [AtomicU64; icmp6_ifs::N],
+}
+
+/// `struct in6_ifstat`'s fields.
+pub mod in6_ifs {
+    pub const IN_RECEIVE: usize = 0;
+    pub const IN_HDRERR: usize = 1;
+    pub const IN_TOOBIG: usize = 2;
+    pub const IN_NOROUTE: usize = 3;
+    pub const IN_ADDRERR: usize = 4;
+    pub const IN_PROTOUNKNOWN: usize = 5;
+    pub const IN_TRUNCATED: usize = 6;
+    pub const IN_DISCARD: usize = 7;
+    pub const IN_DELIVER: usize = 8;
+    pub const OUT_FORWARD: usize = 9;
+    pub const OUT_REQUEST: usize = 10;
+    pub const OUT_DISCARD: usize = 11;
+    pub const OUT_FRAGOK: usize = 12;
+    pub const OUT_FRAGFAIL: usize = 13;
+    pub const OUT_FRAGCREAT: usize = 14;
+    pub const REASS_REQD: usize = 15;
+    pub const REASS_OK: usize = 16;
+    pub const REASS_FAIL: usize = 17;
+    pub const IN_MCAST: usize = 18;
+    pub const OUT_MCAST: usize = 19;
+    pub const N: usize = 20;
+}
+
+/// `struct icmp6_ifstat`'s fields.
+pub mod icmp6_ifs {
+    pub const IN_MSG: usize = 0;
+    pub const IN_ERROR: usize = 1;
+    pub const IN_DSTUNREACH: usize = 2;
+    pub const IN_ADMINPROHIB: usize = 3;
+    pub const IN_TIMEEXCEED: usize = 4;
+    pub const IN_PARAMPROB: usize = 5;
+    pub const IN_PKTTOOBIG: usize = 6;
+    pub const IN_ECHO: usize = 7;
+    pub const IN_ECHOREPLY: usize = 8;
+    pub const IN_ROUTERSOLICIT: usize = 9;
+    pub const IN_ROUTERADVERT: usize = 10;
+    pub const IN_NEIGHBORSOLICIT: usize = 11;
+    pub const IN_NEIGHBORADVERT: usize = 12;
+    pub const IN_REDIRECT: usize = 13;
+    pub const IN_MLDQUERY: usize = 14;
+    pub const IN_MLDREPORT: usize = 15;
+    pub const IN_MLDDONE: usize = 16;
+    pub const OUT_MSG: usize = 17;
+    pub const OUT_ERROR: usize = 18;
+    pub const OUT_DSTUNREACH: usize = 19;
+    pub const OUT_ADMINPROHIB: usize = 20;
+    pub const OUT_TIMEEXCEED: usize = 21;
+    pub const OUT_PARAMPROB: usize = 22;
+    pub const OUT_PKTTOOBIG: usize = 23;
+    pub const OUT_ECHO: usize = 24;
+    pub const OUT_ECHOREPLY: usize = 25;
+    pub const OUT_ROUTERSOLICIT: usize = 26;
+    pub const OUT_ROUTERADVERT: usize = 27;
+    pub const OUT_NEIGHBORSOLICIT: usize = 28;
+    pub const OUT_NEIGHBORADVERT: usize = 29;
+    pub const OUT_REDIRECT: usize = 30;
+    pub const OUT_MLDQUERY: usize = 31;
+    pub const OUT_MLDREPORT: usize = 32;
+    pub const OUT_MLDDONE: usize = 33;
+    pub const N: usize = 34;
+}
+
+impl Default for Stats {
+    fn default() -> Self {
+        Self {
+            ipackets: AtomicU64::new(0),
+            opackets: AtomicU64::new(0),
+            ibytes: AtomicU64::new(0),
+            obytes: AtomicU64::new(0),
+            imcasts: AtomicU64::new(0),
+            omcasts: AtomicU64::new(0),
+            iqdrops: AtomicU64::new(0),
+            noproto: AtomicU64::new(0),
+            oerrors: AtomicU64::new(0),
+            ierrors: AtomicU64::new(0),
+            in6: [const { AtomicU64::new(0) }; in6_ifs::N],
+            icmp6: [const { AtomicU64::new(0) }; icmp6_ifs::N],
+        }
+    }
 }
 
 impl Stats {
+    /// Counts one of IPv6's (`in6_ifstat_inc`).
+    pub fn in6_inc(&self, i: usize) {
+        if let Some(c) = self.in6.get(i) {
+            // Relaxed: a counter.
+            c.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Counts one of ICMPv6's (`icmp6_ifstat_inc`).
+    pub fn icmp6_inc(&self, i: usize) {
+        if let Some(c) = self.icmp6.get(i) {
+            // Relaxed: a counter.
+            c.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// IPv6's counters as `SIOCGIFSTAT_IN6` returns them.
+    #[must_use]
+    pub fn in6_bytes(&self) -> Vec<u8> {
+        // Relaxed: a snapshot of counters.
+        self.in6
+            .iter()
+            .flat_map(|c| c.load(Ordering::Relaxed).to_ne_bytes())
+            .collect()
+    }
+
+    /// ICMPv6's, as `SIOCGIFSTAT_ICMP6` returns them.
+    #[must_use]
+    pub fn icmp6_bytes(&self) -> Vec<u8> {
+        // Relaxed: a snapshot of counters.
+        self.icmp6
+            .iter()
+            .flat_map(|c| c.load(Ordering::Relaxed).to_ne_bytes())
+            .collect()
+    }
+
     /// One packet of `bytes` looped back: out and in again
     /// (`if_simloop`).
     pub fn looped(&self, bytes: usize) {
@@ -76,6 +199,25 @@ pub struct Ifaddr {
     pub pltime: u32,
     /// The CARP virtual host (`ifa_vhid`).
     pub vhid: u32,
+    /// When it was made and when its lifetimes were last set, seconds of
+    /// uptime (`ia6_createtime`, `ia6_updatetime`); set by
+    /// [`Net::add_addr`].
+    pub created: u64,
+    pub updated: u64,
+}
+
+impl Ifaddr {
+    /// `IFA6_IS_DEPRECATED`: its preferred lifetime has run out at `now`.
+    #[must_use]
+    pub const fn is_deprecated(&self, now: u64) -> bool {
+        self.pltime != INFINITE && now.saturating_sub(self.updated) >= self.pltime as u64
+    }
+
+    /// `IFA6_IS_INVALID`: its valid lifetime has run out at `now`.
+    #[must_use]
+    pub const fn is_invalid(&self, now: u64) -> bool {
+        self.vltime != INFINITE && now.saturating_sub(self.updated) >= self.vltime as u64
+    }
 }
 
 /// An interface (`struct ifnet`).
@@ -101,6 +243,8 @@ pub struct Ifnet {
     pub capenable: u32,
     /// `ND6_IFF_*` (`nd_ifinfo.flags`).
     pub nd6_flags: u32,
+    /// The rest of its `nd_ifinfo`.
+    pub nd: NdInfo,
     pub description: Option<Vec<u8>>,
     pub groups: Vec<String>,
     pub addrs: Vec<Ifaddr>,
@@ -128,6 +272,59 @@ pub struct Ifnet {
 
 /// `IFNET_PCP_NONE`.
 pub const PCP_NONE: u8 = 0xff;
+
+/// An interface's neighbor discovery parameters (`struct nd_ifinfo`,
+/// less its flags), as router advertisements may set them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NdInfo {
+    /// The link MTU a router advertised, 0 for the interface's.
+    pub linkmtu: u32,
+    /// `BaseReachableTime` (milliseconds), the `ReachableTime` drawn
+    /// from it (seconds), and `RetransTimer` (milliseconds).
+    pub basereachable: u32,
+    pub reachable: u32,
+    pub retrans: u32,
+    /// The hop limit for this host's packets (`CurHopLimit`).
+    pub chlim: u8,
+    /// Seconds until `ReachableTime` is drawn again (`recalctm`).
+    pub recalctm: i32,
+    /// Whether IPv6 has drawn its reachable time yet.
+    pub initialized: bool,
+}
+
+impl NdInfo {
+    /// `nd6_ifattach`'s: `REACHABLE_TIME`, `RETRANS_TIMER`,
+    /// `IPV6_DEFHLIM`; IPv6 draws the reachable time when it first sees
+    /// the interface.
+    pub const DEFAULT: Self = Self {
+        linkmtu: 0,
+        basereachable: 30_000,
+        reachable: 30,
+        retrans: 1000,
+        chlim: 64,
+        recalctm: 7200,
+        initialized: false,
+    };
+}
+
+impl Default for NdInfo {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl Ifnet {
+    /// `IN6_LINKMTU`: the advertised link MTU if it is below the
+    /// interface's, else the interface's.
+    #[must_use]
+    pub const fn linkmtu6(&self) -> u32 {
+        if self.nd.linkmtu != 0 && self.nd.linkmtu < self.mtu {
+            self.nd.linkmtu
+        } else {
+            self.mtu
+        }
+    }
+}
 
 /// Where a route goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -291,7 +488,16 @@ impl Net {
     /// through it (`if_detach`), returning it.
     pub fn detach(&mut self, index: u16) -> Option<Ifnet> {
         let at = self.ifaces.iter().position(|i| i.index == index)?;
-        // `if_detach`: its addresses and routes go first, announced.
+        // `if_detach`: IPv6's state for it goes (`in6_ifdetach`), then its
+        // addresses and routes, announced.
+        if let Some(h) = crate::in6_hooks() {
+            (h.if_detach)(self, index);
+        }
+        let at = self
+            .ifaces
+            .iter()
+            .position(|i| i.index == index)
+            .unwrap_or(at);
         let addrs: Vec<Ifaddr> = self.ifaces[at].addrs.clone();
         for a in addrs {
             let _ = self.delete_addr_at(index, a.family, &a.addr);
@@ -303,7 +509,7 @@ impl Net {
             .cloned()
             .collect();
         for r in routes {
-            let _ = self.delete_route(r.family, &r.dst, r.plen);
+            let _ = self.delete_exact(&r);
         }
         let at = self.ifaces.iter().position(|i| i.index == index)?;
         let i = self.ifaces.remove(at);
@@ -391,6 +597,24 @@ impl Net {
             .min_by_key(|r| (core::cmp::Reverse(r.plen), r.nhidx))
     }
 
+    /// `fib6_lookup`: the IPv6 route to `dst` in table `fib`, longest
+    /// prefix first; a link-local destination is looked up in `zone`'s
+    /// (an interface index), where a route to a link-local prefix belongs
+    /// to the interface whose it is.
+    #[must_use]
+    pub fn route6(&self, fib: u16, dst: &In6, zone: u16) -> Option<&Route> {
+        let scoped_dst = is_linklocal6(dst);
+        self.routes
+            .iter()
+            .filter(|r| {
+                r.family == Family::Inet6
+                    && r.fib == fib
+                    && prefix_match(Family::Inet6, &r.dst, dst, r.plen)
+                    && (!route_scoped(r) || (scoped_dst && route_zone(r) == zone))
+            })
+            .min_by_key(|r| (core::cmp::Reverse(r.plen), r.nhidx))
+    }
+
     /// Source address selection for a packet to `dst` (`in_pcbladdr`,
     /// `in6_selectsrc`): the destination itself if it is local, else
     /// the route's interface address of the family; with the zone of a
@@ -465,7 +689,7 @@ impl Net {
             .cloned()
             .collect();
         for r in gone {
-            let _ = self.delete_route(r.family, &r.dst, r.plen);
+            let _ = self.delete_exact(&r);
         }
     }
 
@@ -494,11 +718,13 @@ impl Net {
         }
         // The first multipath group turns on hashing of this host's own
         // packets (`nhgrp_ctl_alloc_default`'s `V_fib_hash_outbound`).
-        if self
-            .routes
-            .iter()
-            .any(|x| x.family == r.family && x.fib == r.fib && x.plen == r.plen && x.dst == dst)
-        {
+        if self.routes.iter().any(|x| {
+            x.family == r.family
+                && x.fib == r.fib
+                && x.plen == r.plen
+                && x.dst == dst
+                && (!route_scoped(&r) || route_zone(x) == route_zone(&r))
+        }) {
             self.hash_outbound = true;
         }
         self.last_nh += 1;
@@ -539,6 +765,28 @@ impl Net {
             rtsock: false,
         });
         Ok(r)
+    }
+
+    /// [`Net::delete_route`] in table `fib` only.
+    ///
+    /// # Errors
+    ///
+    /// `ESRCH` if there is none.
+    pub fn delete_route_fib(
+        &mut self,
+        family: Family,
+        dst: &In6,
+        plen: u8,
+        fib: u16,
+    ) -> Result<Route, Errno> {
+        let dst = masked(family, dst, plen);
+        let r = self
+            .routes
+            .iter()
+            .find(|x| x.family == family && x.plen == plen && x.dst == dst && x.fib == fib)
+            .cloned()
+            .ok_or(Errno::ESRCH)?;
+        self.delete_exact(&r)
     }
 
     /// The routes an address implies on interface `index`
@@ -609,15 +857,42 @@ impl Net {
     ///
     /// `ENXIO` for no such interface, `EINVAL` for a bad prefix length.
     pub fn add_addr(&mut self, name: &[u8], a: Ifaddr) -> Result<(), Errno> {
+        self.add_addr_flags(name, a, 0)
+    }
+
+    /// [`Net::add_addr`] with `in6_update_ifa`'s flags ([`ifa6_update`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Net::add_addr`].
+    pub fn add_addr_flags(&mut self, name: &[u8], mut a: Ifaddr, update: u32) -> Result<(), Errno> {
         if a.plen > prefix_bytes(a.family) {
             return Err(Errno::EINVAL);
         }
+        let now = crate::uptime();
         let ifp = self.by_name_mut(name).ok_or(Errno::ENXIO)?;
         let index = ifp.index;
         let old = ifp
             .addrs
             .iter()
             .position(|x| x.family == a.family && same_addr(a.family, &x.addr, &a.addr));
+        // `in6_validate_ifra`: an existing address keeps its prefix length.
+        if a.family == Family::Inet6 && old.is_some_and(|i| ifp.addrs[i].plen != a.plen) {
+            return Err(Errno::EINVAL);
+        }
+        a.updated = now;
+        a.created = old.map_or(now, |i| ifp.addrs[i].created);
+        if a.family == Family::Inet6 {
+            // `in6_update_ifa_internal`: a new address, or any on a
+            // disabled interface, is tentative until DAD passes.
+            a.flags6 &= !in6_iff::DUPLICATED;
+            if in6if_do_dad(ifp) && (old.is_none() || ifp.nd6_flags & nd6_iff::IFDISABLED != 0) {
+                a.flags6 |= in6_iff::TENTATIVE;
+            }
+            if a.flags6 & in6_iff::DEPRECATED != 0 {
+                a.pltime = 0;
+            }
+        }
         // An address already there is changed in place.
         if let Some(i) = old {
             let gone = core::mem::replace(&mut ifp.addrs[i], a.clone());
@@ -648,7 +923,7 @@ impl Net {
             let _ = self.add_route(r);
         }
         if !was {
-            self.in6_ifattach(index);
+            self.in6_if_up(index);
         }
         // `arp_ifinit` and `nd6_add_ifa_lle`: an Ethernet interface's
         // address is announced and gets a permanent entry.
@@ -665,6 +940,15 @@ impl Net {
                     e.set_lladdr(ll);
                     self.lle_link(e);
                 }
+                // `in6_broadcast_ifa`: its groups, and DAD.
+                if let Some(h) = crate::in6_hooks() {
+                    (h.ifa_added)(self, index, &a.addr, old.is_none(), update);
+                }
+                // `in6_aifaddr`: an address set by hand enables IPv6 on the
+                // interface, unless a link-local address is a duplicate.
+                if update & ifa6_update::AIFADDR != 0 {
+                    self.in6_enable(index);
+                }
             }
         }
         self.bump();
@@ -677,7 +961,21 @@ impl Net {
         let mut freed = false;
         for r in self.implied(index, a) {
             if r.flags & rtf::HOST != 0 {
-                let _ = self.delete_route(r.family, &r.dst, r.plen);
+                // Its own, in its FIB: every loopback has `fe80::1`.
+                if let Some(mine) = self
+                    .routes
+                    .iter()
+                    .find(|x| {
+                        x.family == r.family
+                            && x.fib == r.fib
+                            && x.plen == r.plen
+                            && x.dst == r.dst
+                            && (!route_scoped(&r) || route_zone(x) == route_zone(&r))
+                    })
+                    .cloned()
+                {
+                    let _ = self.delete_exact(&mine);
+                }
                 continue;
             }
             // Only the prefix route this address made goes; another
@@ -689,18 +987,23 @@ impl Net {
                 continue;
             };
             let _ = self.delete_exact(&mine);
-            let heir = self.ifaces.iter().find_map(|i| {
-                i.addrs
-                    .iter()
-                    .find(|x| {
-                        x.family == a.family
-                            && x.plen == a.plen
-                            && !same_addr(a.family, &x.addr, &a.addr)
-                            && masked(a.family, &x.addr, x.plen)
-                                == masked(a.family, &a.addr, a.plen)
-                    })
-                    .map(|x| (i.index, x.clone()))
-            });
+            let scoped = route_scoped(&r);
+            let heir = self
+                .ifaces
+                .iter()
+                .filter(|i| !scoped || i.index == index)
+                .find_map(|i| {
+                    i.addrs
+                        .iter()
+                        .find(|x| {
+                            x.family == a.family
+                                && x.plen == a.plen
+                                && !same_addr(a.family, &x.addr, &a.addr)
+                                && masked(a.family, &x.addr, x.plen)
+                                    == masked(a.family, &a.addr, a.plen)
+                        })
+                        .map(|x| (i.index, x.clone()))
+                });
             if let Some((hi, ha)) = heir
                 && let Some(nr) = self
                     .implied(hi, &ha)
@@ -729,6 +1032,8 @@ impl Net {
                     && x.plen == r.plen
                     && x.dst == dst
                     && x.flags & rtf::PINNED != 0
+                    // A link-local prefix is each interface's own.
+                    && (!route_scoped(r) || route_zone(x) == route_zone(r))
             })
             .cloned()
     }
@@ -773,6 +1078,11 @@ impl Net {
             .ok_or(Errno::EADDRNOTAVAIL)?;
         let gone = ifp.addrs.remove(i);
         let snap = ifp.clone();
+        if family == Family::Inet6
+            && let Some(h) = crate::in6_hooks()
+        {
+            (h.ifa_removed)(self, index, &gone);
+        }
         self.drop_implied(index, &gone);
         self.outbox.push(Event::Addr {
             add: false,
@@ -851,10 +1161,52 @@ impl Net {
             });
         }
         if up && !was {
-            self.in6_ifattach(index);
+            self.in6_if_up(index);
         }
         self.bump();
         Ok(())
+    }
+
+    /// `nd6_ioctl`'s `SIOCSIFINFO_FLAGS` clearing `ND6_IFF_IFDISABLED`:
+    /// refused while a link-local address is a duplicate; else IPv6 is on,
+    /// and an interface that is up gets `in6_if_up`. Whether it is on.
+    pub fn in6_enable(&mut self, index: u16) -> bool {
+        let Some(i) = self.ifaces.iter().find(|i| i.index == index) else {
+            return false;
+        };
+        if i.nd6_flags & nd6_iff::IFDISABLED == 0 {
+            return true;
+        }
+        let dup = i.addrs.iter().any(|a| {
+            a.family == Family::Inet6
+                && a.flags6 & in6_iff::DUPLICATED != 0
+                && a.addr[0] == 0xfe
+                && a.addr[1] & 0xc0 == 0x80
+        });
+        if dup {
+            crate::log(
+                3,
+                "Cannot enable an interface with a link-local address marked duplicate.\n",
+            );
+            return false;
+        }
+        let up = i.flags & iff::UP != 0;
+        if let Some(i) = self.ifaces.iter_mut().find(|i| i.index == index) {
+            i.nd6_flags &= !nd6_iff::IFDISABLED;
+        }
+        if up {
+            self.in6_if_up(index);
+        }
+        true
+    }
+
+    /// `in6_if_up`: DAD again for its tentative addresses, then
+    /// `in6_ifattach`.
+    pub fn in6_if_up(&mut self, index: u16) {
+        if let Some(h) = crate::in6_hooks() {
+            (h.if_up)(self, index);
+        }
+        self.in6_ifattach(index);
     }
 
     /// Takes or lets go of promiscuous mode on interface `index`
@@ -966,27 +1318,39 @@ impl Net {
         r
     }
 
-    /// What an interface gets when it comes up with IPv6 enabled
-    /// (`in6_ifattach`): a loopback interface `::1/128`
-    /// (`in6_ifattach_loopback`), and with `ND6_IFF_AUTO_LINKLOCAL` its
-    /// link-local address, `fe80::1/64` on loopback
-    /// (`in6_ifattach_linklocal`).
+    /// What an interface gets when it comes up (`in6_ifattach`): a
+    /// loopback interface `::1/128` (`in6_ifattach_loopback`) when no
+    /// interface of the VNET has it yet, and with
+    /// IPv6 enabled and `ND6_IFF_AUTO_LINKLOCAL` its link-local address
+    /// (`in6_ifattach_linklocal`): `fe80::1/64` on loopback, else one
+    /// from its EUI-64 (`in6_get_hw_ifid`), its DAD delayed.
     pub fn in6_ifattach(&mut self, index: u16) {
         let Some(ifp) = self.ifaces.iter().find(|i| i.index == index) else {
             return;
         };
-        if ifp.nd6_flags & nd6_iff::IFDISABLED != 0 || ifp.flags & iff::LOOPBACK == 0 {
+        if ifp.flags & iff::MULTICAST == 0 {
             return;
         }
+        let loopback = ifp.flags & iff::LOOPBACK != 0;
         let name = ifp.name.clone();
         let has = |ifp: &Ifnet, f: &dyn Fn(&In6) -> bool| {
             ifp.addrs
                 .iter()
                 .any(|a| a.family == Family::Inet6 && f(&a.addr))
         };
-        let want_lo = !has(ifp, &|a| *a == LOOPBACK6);
-        let want_ll =
-            ifp.nd6_flags & nd6_iff::AUTO_LINKLOCAL != 0 && !has(ifp, &|a| is_linklocal6(a));
+        let want_lo = loopback && !self.ifaces.iter().any(|i| has(i, &|a| *a == LOOPBACK6));
+        let want_ll = ifp.nd6_flags & nd6_iff::IFDISABLED == 0
+            && ifp.nd6_flags & nd6_iff::AUTO_LINKLOCAL != 0
+            && !has(ifp, &|a| is_linklocal6(a) && a[0] == 0xfe);
+        let ll = if loopback {
+            let mut ll = [0u8; 16];
+            ll[0] = 0xfe;
+            ll[1] = 0x80;
+            ll[15] = 1;
+            Some(ll)
+        } else {
+            ifp.lladdr.and_then(|m| eui64_linklocal(&m))
+        };
         let six = |addr: In6, plen: u8| Ifaddr {
             family: Family::Inet6,
             addr,
@@ -997,18 +1361,97 @@ impl Net {
             vltime: INFINITE,
             pltime: INFINITE,
             vhid: 0,
+            created: 0,
+            updated: 0,
         };
         if want_lo {
             let _ = self.add_addr(name.as_bytes(), six(LOOPBACK6, 128));
         }
-        if want_ll {
-            let mut ll = [0u8; 16];
-            ll[0] = 0xfe;
-            ll[1] = 0x80;
-            ll[15] = 1;
-            let _ = self.add_addr(name.as_bytes(), six(ll, 64));
+        if want_ll && let Some(ll) = ll {
+            let _ = self.add_addr_flags(
+                name.as_bytes(),
+                six(ll, 64),
+                ifa6_update::DADDELAY | ifa6_update::LINKLOCAL,
+            );
         }
     }
+}
+
+/// `in6_get_hw_ifid` with `fe80::/64`: the link-local address made from
+/// MAC `m` (its EUI-64 with the universal bit flipped), none for a group
+/// address or one that is all zeros.
+#[must_use]
+pub fn eui64_linklocal(m: &[u8; 6]) -> Option<In6> {
+    let mut a = [0u8; 16];
+    a[0] = 0xfe;
+    a[1] = 0x80;
+    a[8..11].copy_from_slice(&m[..3]);
+    a[11] = 0xff;
+    a[12] = 0xfe;
+    a[13..].copy_from_slice(&m[3..]);
+    // `EUI64_GROUP`.
+    if a[8] & 0x01 != 0 {
+        return None;
+    }
+    // `EUI64_TO_IFID`.
+    a[8] ^= 0x02;
+    if a[8] & !0x03 == 0 && a[9..].iter().all(|&b| b == 0) {
+        return None;
+    }
+    Some(a)
+}
+
+/// Whether IPv6 route `r` is to a link-local prefix of one interface
+/// (`fe80::%if/64`), rather than one unscoped (`fe80::/10`, `ff02::/16`).
+#[must_use]
+pub fn route_scoped(r: &Route) -> bool {
+    r.family == Family::Inet6 && is_linklocal6(&r.dst) && r.plen > 16
+}
+
+/// The interface a scoped route's prefix belongs to: an address's routes
+/// name it as their gateway, others by where they go.
+#[must_use]
+pub const fn route_zone(r: &Route) -> u16 {
+    match r.gateway {
+        Gateway::Link(i) => i,
+        _ => r.ifindex,
+    }
+}
+
+/// `in6if_do_dad`: whether interface `i`'s addresses get duplicate
+/// address detection.
+#[must_use]
+pub const fn in6if_do_dad(i: &Ifnet) -> bool {
+    i.flags & iff::LOOPBACK == 0
+        && i.flags & iff::MULTICAST != 0
+        && i.nd6_flags & (nd6_iff::IFDISABLED | nd6_iff::NO_DAD) == 0
+}
+
+/// `IN6_IFF_*`: an IPv6 address's flags.
+pub mod in6_iff {
+    pub const ANYCAST: i32 = 0x01;
+    pub const TENTATIVE: i32 = 0x02;
+    pub const DUPLICATED: i32 = 0x04;
+    pub const DETACHED: i32 = 0x08;
+    pub const DEPRECATED: i32 = 0x10;
+    pub const NODAD: i32 = 0x20;
+    pub const AUTOCONF: i32 = 0x40;
+    pub const TEMPORARY: i32 = 0x80;
+    pub const PREFER_SOURCE: i32 = 0x100;
+    /// `IN6_IFF_NOTREADY`.
+    pub const NOTREADY: i32 = TENTATIVE | DUPLICATED;
+}
+
+/// `in6_update_ifa`'s flags.
+pub mod ifa6_update {
+    /// `IN6_IFAUPDATE_DADDELAY`: DAD and the solicited-node report wait a
+    /// random part of a second.
+    pub const DADDELAY: u32 = 0x1;
+    /// The interface's own link-local address (`in6_ifattach_linklocal`),
+    /// whose `fe80::/64` goes on the prefix list.
+    pub const LINKLOCAL: u32 = 0x100;
+    /// Set by hand (`in6_aifaddr`): its prefix goes on the prefix list.
+    pub const AIFADDR: u32 = 0x200;
 }
 
 /// Whether two addresses of `family` are the same (IPv4: their last four
@@ -1044,6 +1487,7 @@ pub fn loopback(index: u16, now: i64, stats: Arc<Stats>) -> Ifnet {
         capabilities: caps,
         capenable: caps,
         nd6_flags: nd6_iff::PERFORMNUD | nd6_iff::AUTO_LINKLOCAL,
+        nd: NdInfo::DEFAULT,
         description: None,
         groups: alloc::vec![String::from("lo")],
         addrs: Vec::new(),
@@ -1080,6 +1524,8 @@ pub fn configure_loopback(n: &mut Net, now: i64) {
         vltime: INFINITE,
         pltime: INFINITE,
         vhid: 0,
+        created: 0,
+        updated: 0,
     };
     let _ = n.add_addr(b"lo0", v4);
 }

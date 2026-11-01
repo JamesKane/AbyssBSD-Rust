@@ -145,6 +145,220 @@ pub mod udps {
     pub const N: usize = 14;
 }
 
+/// `struct ip6stat`'s fields; the arrays' first entries.
+pub mod ip6s {
+    pub const TOTAL: usize = 0;
+    pub const TOOSHORT: usize = 1;
+    pub const TOOSMALL: usize = 2;
+    pub const FRAGMENTS: usize = 3;
+    pub const FRAGDROPPED: usize = 4;
+    pub const FRAGTIMEOUT: usize = 5;
+    pub const FRAGOVERFLOW: usize = 6;
+    pub const FORWARD: usize = 7;
+    pub const CANTFORWARD: usize = 8;
+    pub const REDIRECTSENT: usize = 9;
+    pub const DELIVERED: usize = 10;
+    pub const LOCALOUT: usize = 11;
+    pub const ODROPPED: usize = 12;
+    pub const REASSEMBLED: usize = 13;
+    pub const ATOMICFRAGS: usize = 14;
+    pub const FRAGMENTED: usize = 15;
+    pub const OFRAGMENTS: usize = 16;
+    pub const CANTFRAG: usize = 17;
+    pub const BADOPTIONS: usize = 18;
+    pub const NOROUTE: usize = 19;
+    pub const BADVERS: usize = 20;
+    pub const RAWOUT: usize = 21;
+    pub const BADSCOPE: usize = 22;
+    pub const NOTMEMBER: usize = 23;
+    /// `ip6s_nxthist[256]`.
+    pub const NXTHIST: usize = 24;
+    pub const M1: usize = 280;
+    /// `ip6s_m2m[32]`.
+    pub const M2M: usize = 281;
+    pub const MEXT1: usize = 313;
+    pub const MEXT2M: usize = 314;
+    pub const EXTHDRTOOLONG: usize = 315;
+    pub const NOGIF: usize = 316;
+    pub const TOOMANYHDR: usize = 317;
+    pub const SOURCES_NONE: usize = 318;
+    /// `ip6s_sources_sameif[16]` and the other source selection arrays.
+    pub const SOURCES_SAMEIF: usize = 319;
+    pub const SOURCES_OTHERIF: usize = 335;
+    pub const SOURCES_SAMESCOPE: usize = 351;
+    pub const SOURCES_OTHERSCOPE: usize = 367;
+    pub const SOURCES_DEPRECATED: usize = 383;
+    pub const SOURCES_RULE: usize = 399;
+    pub const N: usize = 415;
+}
+
+/// `struct icmp6stat`'s fields; the histograms have 256 entries.
+pub mod icp6s {
+    pub const ERROR: usize = 0;
+    pub const CANTERROR: usize = 1;
+    pub const TOOFREQ: usize = 2;
+    pub const OUTHIST: usize = 3;
+    pub const BADCODE: usize = 259;
+    pub const TOOSHORT: usize = 260;
+    pub const CHECKSUM: usize = 261;
+    pub const BADLEN: usize = 262;
+    pub const DROPPED: usize = 263;
+    pub const REFLECT: usize = 264;
+    pub const INHIST: usize = 265;
+    pub const ND_TOOMANYOPT: usize = 521;
+    pub const ODST_UNREACH_NOROUTE: usize = 522;
+    pub const ODST_UNREACH_ADMIN: usize = 523;
+    pub const ODST_UNREACH_BEYONDSCOPE: usize = 524;
+    pub const ODST_UNREACH_ADDR: usize = 525;
+    pub const ODST_UNREACH_NOPORT: usize = 526;
+    pub const OPACKET_TOO_BIG: usize = 527;
+    pub const OTIME_EXCEED_TRANSIT: usize = 528;
+    pub const OTIME_EXCEED_REASSEMBLY: usize = 529;
+    pub const OPARAMPROB_HEADER: usize = 530;
+    pub const OPARAMPROB_NEXTHEADER: usize = 531;
+    pub const OPARAMPROB_OPTION: usize = 532;
+    pub const OREDIRECT: usize = 533;
+    pub const OUNKNOWN: usize = 534;
+    pub const PMTUCHG: usize = 535;
+    pub const ND_BADOPT: usize = 536;
+    pub const BADNS: usize = 537;
+    pub const BADNA: usize = 538;
+    pub const BADRS: usize = 539;
+    pub const BADRA: usize = 540;
+    pub const BADREDIRECT: usize = 541;
+    pub const OVERFLOWDEFRTR: usize = 542;
+    pub const OVERFLOWPRFX: usize = 543;
+    pub const OVERFLOWNNDP: usize = 544;
+    pub const OVERFLOWREDIRECT: usize = 545;
+    pub const INVLHLIM: usize = 546;
+    /// With `icp6s_spare[32]`.
+    pub const N: usize = 579;
+}
+
+/// `struct rip6stat` (`net.inet6.ip6.rip6stats`).
+pub mod rip6s {
+    pub const IPACKETS: usize = 0;
+    pub const ISUM: usize = 1;
+    pub const BADSUM: usize = 2;
+    pub const NOSOCK: usize = 3;
+    pub const NOSOCKMCAST: usize = 4;
+    pub const FULLSOCK: usize = 5;
+    pub const OPACKETS: usize = 6;
+    pub const N: usize = 7;
+}
+
+/// The per-VNET IPv6 settings (`net.inet6.ip6.*`, `net.inet6.icmp6.*`,
+/// `net.inet6.mld.*`), FreeBSD's defaults.
+#[derive(Debug)]
+pub struct Conf6 {
+    pub forwarding: AtomicI32,
+    /// `net.inet6.ip6.redirect` (`ip6_sendredirects`).
+    pub redirect: AtomicI32,
+    pub defmcasthlim: AtomicI32,
+    pub accept_rtadv: AtomicI32,
+    pub no_radr: AtomicI32,
+    pub norbit_raif: AtomicI32,
+    pub rfc6204w3: AtomicI32,
+    pub hdrnestlimit: AtomicI32,
+    pub dad_count: AtomicI32,
+    pub auto_flowlabel: AtomicI32,
+    pub use_deprecated: AtomicI32,
+    pub use_tempaddr: AtomicI32,
+    pub prefer_tempaddr: AtomicI32,
+    /// `net.inet6.ip6.source_address_validation`.
+    pub sav: AtomicI32,
+    pub log_cannot_forward: AtomicI32,
+    pub maxfragpackets: AtomicI32,
+    pub maxfragbucketsize: AtomicI32,
+    pub maxfragsperpacket: AtomicI32,
+    /// `net.inet6.ip6.fraglifetime_ms`.
+    pub fraglifetime_ms: AtomicI32,
+    /// `net.inet6.icmp6.*`.
+    pub rediraccept: AtomicI32,
+    pub redirtimeout: AtomicI32,
+    pub nodeinfo: AtomicI32,
+    pub errppslimit: AtomicU32,
+    pub icmp6lim_jitter: AtomicU32,
+    pub icmp6lim_output: AtomicI32,
+    pub nd6_prune: AtomicI32,
+    pub nd6_delay: AtomicI32,
+    pub nd6_umaxtries: AtomicI32,
+    pub nd6_mmaxtries: AtomicI32,
+    pub nd6_useloopback: AtomicI32,
+    pub nd6_gctimer: AtomicI32,
+    pub nd6_maxndopt: AtomicI32,
+    pub nd6_maxqueuelen: AtomicI32,
+    pub nd6_debug: AtomicI32,
+    pub nd6_onlink_ns_rfc4861: AtomicI32,
+    pub dad_enhanced: AtomicI32,
+    pub dad_maxtry: AtomicI32,
+    pub nd6_ignore_ipv6_only_ra: AtomicI32,
+    /// `net.inet6.mld.v2enable`, `v1enable`, `use_allow`.
+    pub mld_v2enable: AtomicI32,
+    pub mld_v1enable: AtomicI32,
+    pub mld_use_allow: AtomicI32,
+}
+
+impl Conf6 {
+    const fn new() -> Self {
+        Self {
+            forwarding: AtomicI32::new(0),
+            redirect: AtomicI32::new(1),
+            defmcasthlim: AtomicI32::new(1),
+            accept_rtadv: AtomicI32::new(0),
+            no_radr: AtomicI32::new(0),
+            norbit_raif: AtomicI32::new(0),
+            rfc6204w3: AtomicI32::new(0),
+            hdrnestlimit: AtomicI32::new(15),
+            dad_count: AtomicI32::new(1),
+            auto_flowlabel: AtomicI32::new(1),
+            use_deprecated: AtomicI32::new(1),
+            use_tempaddr: AtomicI32::new(0),
+            prefer_tempaddr: AtomicI32::new(0),
+            sav: AtomicI32::new(1),
+            log_cannot_forward: AtomicI32::new(1),
+            maxfragpackets: AtomicI32::new(0),
+            maxfragbucketsize: AtomicI32::new(1),
+            maxfragsperpacket: AtomicI32::new(64),
+            fraglifetime_ms: AtomicI32::new(60_000),
+            rediraccept: AtomicI32::new(1),
+            redirtimeout: AtomicI32::new(600),
+            nodeinfo: AtomicI32::new(0),
+            errppslimit: AtomicU32::new(100),
+            icmp6lim_jitter: AtomicU32::new(8),
+            icmp6lim_output: AtomicI32::new(1),
+            nd6_prune: AtomicI32::new(1),
+            nd6_delay: AtomicI32::new(5),
+            nd6_umaxtries: AtomicI32::new(3),
+            nd6_mmaxtries: AtomicI32::new(3),
+            nd6_useloopback: AtomicI32::new(1),
+            nd6_gctimer: AtomicI32::new(86_400),
+            nd6_maxndopt: AtomicI32::new(10),
+            nd6_maxqueuelen: AtomicI32::new(16),
+            nd6_debug: AtomicI32::new(0),
+            nd6_onlink_ns_rfc4861: AtomicI32::new(0),
+            dad_enhanced: AtomicI32::new(1),
+            dad_maxtry: AtomicI32::new(15),
+            nd6_ignore_ipv6_only_ra: AtomicI32::new(1),
+            mld_v2enable: AtomicI32::new(1),
+            mld_v1enable: AtomicI32::new(1),
+            mld_use_allow: AtomicI32::new(1),
+        }
+    }
+}
+
+/// Reads a setting's value (for the kernel's handlers).
+#[must_use]
+pub fn val_of(a: &AtomicI32) -> i32 {
+    val(a)
+}
+
+/// Reads a setting's value.
+pub(crate) fn val(a: &AtomicI32) -> i32 {
+    // Relaxed: a setting read as FreeBSD reads its `V_` variable.
+    a.load(Ordering::Relaxed)
+}
+
 /// The per-VNET settings (`net.inet.ip.*`, `net.inet.icmp.*`,
 /// `net.inet.udp.*`), FreeBSD's defaults.
 #[derive(Debug)]
@@ -286,6 +500,25 @@ pub struct State {
     /// The IPv4 groups joined on each interface, with their sockets'
     /// count (`struct in_multi`).
     pub(crate) groups: SpinLock<Vec<(u16, [u8; 4], u32)>>,
+    pub ip6stat: Counters<{ ip6s::N }>,
+    pub icmp6stat: Counters<{ icp6s::N }>,
+    pub rip6stat: Counters<{ rip6s::N }>,
+    pub conf6: Conf6,
+    /// IPv6's reassembly queues.
+    pub(crate) frag6: SpinLock<crate::frag6::Queues>,
+    /// ICMPv6's rate limits (`icmp6_rates`).
+    pub(crate) rates6: SpinLock<[Rate; crate::icmp6::RATELIM_MAX]>,
+    /// Neighbor discovery's and MLD's state, taken after the interfaces'
+    /// lock and never before it.
+    pub(crate) nd6: SpinLock<crate::nd6::Nd6>,
+}
+
+impl State {
+    /// `frag6_nfragpackets`: the packets IPv6 is reassembling.
+    #[must_use]
+    pub fn frag6_len(&self) -> usize {
+        self.frag6.lock().len()
+    }
 }
 
 /// `vnet`'s state, made on first use.
@@ -294,7 +527,7 @@ pub fn of(vnet: &Vnet) -> Arc<State> {
     let any = match vnet.inet.get() {
         Some(a) => Arc::clone(a),
         None => {
-            let s: Arc<dyn core::any::Any + Send + Sync> = Arc::new(State {
+            let s = Arc::new(State {
                 ipstat: Counters::new(),
                 icmpstat: Counters::new(),
                 udpstat: Counters::new(),
@@ -303,7 +536,16 @@ pub fn of(vnet: &Vnet) -> Arc<State> {
                 id: AtomicU32::new(crate::random()),
                 rates: SpinLock::new([Rate::default(); bandlim::N]),
                 groups: SpinLock::new(Vec::new()),
+                ip6stat: Counters::new(),
+                icmp6stat: Counters::new(),
+                rip6stat: Counters::new(),
+                conf6: Conf6::new(),
+                frag6: SpinLock::new(crate::frag6::Queues::new()),
+                rates6: SpinLock::new([Rate::default(); crate::icmp6::RATELIM_MAX]),
+                nd6: SpinLock::new(crate::nd6::Nd6::new()),
             });
+            crate::frag6::init_limits(&s);
+            let s: Arc<dyn core::any::Any + Send + Sync> = s;
             // A racing first use makes one too; one of them is kept.
             let _ = vnet.inet.set(s);
             vnet.inet

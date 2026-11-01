@@ -236,6 +236,8 @@ mod rtsock {
             vltime: INFINITE,
             pltime: INFINITE,
             vhid: 0,
+            created: 0,
+            updated: 0,
         };
         v.net.lock().add_addr(b"epair0a", a).unwrap();
         let i = v.net.lock().by_name(b"epair0a").unwrap().index;
@@ -442,6 +444,8 @@ mod rtsock {
             vltime: INFINITE,
             pltime: INFINITE,
             vhid: 0,
+            created: 0,
+            updated: 0,
         };
         v.net.lock().add_addr(b"epair0a", a).unwrap();
         let got = rec.0.lock().unwrap().clone();
@@ -476,6 +480,8 @@ fn a_prefix_route_moves_to_the_next_address() {
         vltime: INFINITE,
         pltime: INFINITE,
         vhid: 0,
+        created: 0,
+        updated: 0,
     };
     v.net.lock().add_addr(b"epair0a", a(1)).unwrap();
     v.net.lock().add_addr(b"epair0b", a(2)).unwrap();

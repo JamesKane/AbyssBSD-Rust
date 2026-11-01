@@ -524,15 +524,33 @@ fn addr_msg(ctx: &Ctx, h: &Hdr, i: &crate::ifnet::Ifnet, a: &Ifaddr, now_s: u64)
         m.attr(ifa::BROADCAST, addr_bytes(a.family, &b));
     }
     m.string(ifa::LABEL, i.name.as_bytes());
-    // `in6_flags_to_nl`: none of an address made by hand.
-    m.u32(ifa::FLAGS, 0);
+    // `in6_flags_to_nl` (whose permanent and failed-DAD bits never reach
+    // the result).
+    let mut nlf = 0u32;
     if a.family == Family::Inet6 {
+        use crate::ifnet::in6_iff;
+        for (f, n) in [
+            (in6_iff::TEMPORARY, 0x01),
+            (in6_iff::NODAD, 0x02),
+            (in6_iff::DEPRECATED, 0x20),
+            (in6_iff::TENTATIVE, 0x40),
+        ] {
+            if a.flags6 & f != 0 {
+                nlf |= n;
+            }
+        }
+    }
+    m.u32(ifa::FLAGS, nlf);
+    if a.family == Family::Inet6 {
+        // `export_cache_info6`: lifetimes, and when the address was made
+        // and last set, in milliseconds of uptime.
+        let _ = now_s;
+        let ms = |s: u64| u32::try_from(s.saturating_mul(1000)).unwrap_or(0);
         let mut ci = [0u8; 16];
         ci[0..4].copy_from_slice(&a.pltime.to_ne_bytes());
         ci[4..8].copy_from_slice(&a.vltime.to_ne_bytes());
-        let t = u32::try_from(now_s.saturating_mul(1000)).unwrap_or(0);
-        ci[8..12].copy_from_slice(&t.to_ne_bytes());
-        ci[12..16].copy_from_slice(&t.to_ne_bytes());
+        ci[8..12].copy_from_slice(&ms(a.created).to_ne_bytes());
+        ci[12..16].copy_from_slice(&ms(a.updated).to_ne_bytes());
         m.attr(ifa::CACHEINFO, &ci);
     }
     let fb = m.nest(ifa::FREEBSD);
@@ -652,7 +670,13 @@ fn newaddr(net: &NetLock, body: &[u8], o: &mut Outcome) -> Result<(), Errno> {
         _ => None,
     };
     let broadcast = ip_attr(family, find(&a, ifa::BROADCAST));
-    n.add_addr(
+    // `in6_aifaddr` (by way of `in6_control`): its prefix is listed.
+    let update = if family == Family::Inet6 {
+        crate::ifnet::ifa6_update::AIFADDR
+    } else {
+        0
+    };
+    n.add_addr_flags(
         &name,
         Ifaddr {
             family,
@@ -664,7 +688,10 @@ fn newaddr(net: &NetLock, body: &[u8], o: &mut Outcome) -> Result<(), Errno> {
             vltime,
             pltime,
             vhid,
+            created: 0,
+            updated: 0,
         },
+        update,
     )
 }
 
@@ -1004,14 +1031,27 @@ fn route_msg(ctx: &Ctx, h: &Hdr, group: &[&Route], multi: bool) -> Vec<u8> {
     m.finish()
 }
 
-/// Routes grouped by prefix, in a radix walk's order.
+/// Routes grouped by prefix, in a radix walk's order. A link-local
+/// prefix is each interface's own (FreeBSD embeds the zone in it).
 fn groups<'a>(routes: impl Iterator<Item = &'a Route>) -> Vec<Vec<&'a Route>> {
+    let zone = |r: &Route| {
+        if crate::ifnet::route_scoped(r) {
+            crate::ifnet::route_zone(r)
+        } else {
+            0
+        }
+    };
     let mut all: Vec<&Route> = routes.collect();
-    all.sort_by_key(|r| (r.family, r.dst, r.plen));
+    all.sort_by_key(|r| (r.family, r.dst, r.plen, zone(r)));
     let mut out: Vec<Vec<&Route>> = Vec::new();
     for r in all {
         match out.last_mut() {
-            Some(g) if g[0].family == r.family && g[0].dst == r.dst && g[0].plen == r.plen => {
+            Some(g)
+                if g[0].family == r.family
+                    && g[0].dst == r.dst
+                    && g[0].plen == r.plen
+                    && zone(g[0]) == zone(r) =>
+            {
                 g.push(r)
             }
             _ => out.push(alloc::vec![r]),
@@ -1060,14 +1100,26 @@ fn getroute(
         o.msg = Some(b"No RTA_DST supplied");
         return Err(Errno::EINVAL);
     };
-    let r = n
-        .routes
-        .iter()
-        .filter(|r| {
-            r.fib == fib && r.family == f && crate::addr::prefix_match(f, &r.dst, &dst, r.plen)
-        })
-        .max_by_key(|r| r.plen)
-        .ok_or(Errno::ESRCH)?;
+    // `handle_rtm_getroute`: with `RTM_F_PREFIX` the route to exactly
+    // `RTA_DST/rtm_dst_len` (`route get default` asks so), else the
+    // longest match.
+    let rtm_flags = rd32(body, 8);
+    let plen = body.get(1).copied().unwrap_or(0);
+    let r = if rtm_flags & RTM_F_PREFIX != 0 {
+        let key = crate::ifnet::masked(f, &dst, plen);
+        n.routes
+            .iter()
+            .filter(|r| r.fib == fib && r.family == f && r.plen == plen && r.dst == key)
+            .min_by_key(|r| r.nhidx)
+    } else {
+        n.routes
+            .iter()
+            .filter(|r| {
+                r.fib == fib && r.family == f && crate::addr::prefix_match(f, &r.dst, &dst, r.plen)
+            })
+            .max_by_key(|r| r.plen)
+    }
+    .ok_or(Errno::ESRCH)?;
     let group: Vec<&Route> = n
         .routes
         .iter()
@@ -1077,6 +1129,9 @@ fn getroute(
     out.extend(msg);
     Ok(())
 }
+
+/// `RTM_F_PREFIX`: a lookup of the prefix exactly.
+const RTM_F_PREFIX: u32 = 0x800;
 
 /// `rtnl_handle_newroute`: a route to `RTA_DST/rtm_dst_len` through
 /// `RTA_GATEWAY` or out of `RTA_OIF`, rejecting or blackholing by

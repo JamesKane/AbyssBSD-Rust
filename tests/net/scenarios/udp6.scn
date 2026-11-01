@@ -1,0 +1,5 @@
+# A UDP datagram to the peer over IPv6.
+filter: udp port 40007
+ports: 40007
+peer: nc -6 -u -l fd77:77:77::1 40007 > /dev/null
+guest: echo hello | nc -6 -u -w 1 fd77:77:77::1 40007

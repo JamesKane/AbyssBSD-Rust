@@ -588,7 +588,14 @@ pub(crate) fn mpath_select<'a>(
     let mut group: Vec<&net::ifnet::Route> = n
         .routes
         .iter()
-        .filter(|x| x.family == r.family && x.fib == r.fib && x.plen == r.plen && x.dst == r.dst)
+        .filter(|x| {
+            x.family == r.family
+                && x.fib == r.fib
+                && x.plen == r.plen
+                && x.dst == r.dst
+                // Each interface's link-local prefix is its own.
+                && (!net::ifnet::route_scoped(r) || net::ifnet::route_zone(x) == net::ifnet::route_zone(r))
+        })
         .collect();
     if group.len() < 2 {
         return r;

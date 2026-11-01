@@ -1,0 +1,3 @@
+# Neighbor discovery: the guest's neighbor cache flushed, then its solicitation for the peer, the advertisement, and the echo that waited for it.
+filter: icmp6 and (ip6[40] == 135 or ip6[40] == 136 or ip6[40] == 128 or ip6[40] == 129)
+guest: ndp -c > /dev/null; ping -6 -c 1 fd77:77:77::1 > /dev/null

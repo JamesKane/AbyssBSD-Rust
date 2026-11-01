@@ -43,13 +43,22 @@ extern crate std;
 
 pub mod cksum;
 pub mod export;
+pub mod frag6;
 pub mod icmp;
+pub mod icmp6;
 pub mod igmp;
+pub mod in6;
 pub mod ip;
+pub mod ip6;
+mod md5;
+pub mod mld6;
+pub mod nd6;
+pub mod nd6_rtr;
 mod opt;
 pub mod pcb;
 mod poll;
 pub mod raw;
+pub mod raw6;
 pub mod reass;
 pub mod splice;
 pub mod state;
@@ -57,6 +66,8 @@ mod tcp;
 #[cfg(test)]
 mod tests;
 mod udp;
+#[cfg(test)]
+mod wire6_tests;
 #[cfg(test)]
 mod wire_tests;
 
@@ -196,6 +207,11 @@ pub struct Hooks {
     pub random: fn() -> u32,
     pub realtime: fn() -> u64,
     pub log: fn(&str),
+    /// The current jail's host name (IPv6's node information group).
+    pub hostname: fn() -> alloc::string::String,
+    /// Wakes the IPv6 timer thread: a timer is due sooner than it
+    /// planned ([`nd6::next_deadline`]).
+    pub timer_kick: fn(),
 }
 
 impl core::fmt::Debug for Hooks {
@@ -204,10 +220,26 @@ impl core::fmt::Debug for Hooks {
     }
 }
 
+/// The default clock: a counter, which tests move on to fire timers.
+static DEFAULT_CLOCK: AtomicU64 = AtomicU64::new(0);
+
 fn default_now() -> u64 {
-    static T: AtomicU64 = AtomicU64::new(0);
     // Relaxed: a counter.
-    T.fetch_add(1, Ordering::Relaxed)
+    DEFAULT_CLOCK.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Moves the default clock on by `ns` in steps of 50 ms, running the
+/// IPv6 timers due at each, as the timer thread would.
+#[cfg(test)]
+pub(crate) fn advance(ns: u64) {
+    let mut left = ns;
+    while left > 0 {
+        let step = left.min(50_000_000);
+        // Relaxed: a counter.
+        DEFAULT_CLOCK.fetch_add(step, Ordering::Relaxed);
+        nd6::run_timers(now());
+        left -= step;
+    }
 }
 
 fn default_random() -> u32 {
@@ -225,11 +257,19 @@ fn default_realtime() -> u64 {
 
 fn default_log(_: &str) {}
 
+fn default_hostname() -> alloc::string::String {
+    alloc::string::String::new()
+}
+
+fn default_timer_kick() {}
+
 static HOOKS: SpinLock<Hooks> = SpinLock::new(Hooks {
     now: default_now,
     random: default_random,
     realtime: default_realtime,
     log: default_log,
+    hostname: default_hostname,
+    timer_kick: default_timer_kick,
 });
 
 /// Installs the kernel's clock and random source.
@@ -257,9 +297,29 @@ pub(crate) fn log(msg: &str) {
     f(msg);
 }
 
-/// Registers IPv4's input with `netisr`.
+pub(crate) fn hostname() -> alloc::string::String {
+    let f = HOOKS.lock().hostname;
+    f()
+}
+
+pub(crate) fn timer_kick() {
+    let f = HOOKS.lock().timer_kick;
+    f();
+}
+
+/// Registers IPv4's and IPv6's input with `netisr`, and IPv6's hooks
+/// with the interface layer.
 pub fn init() {
     net::netisr::register(net::netisr::Proto::Ip, ip::input);
+    net::netisr::register(net::netisr::Proto::Ipv6, ip6::input);
+    net::set_in6_hooks(net::In6Hooks {
+        resolve: nd6::resolve,
+        ifa_added: nd6::ifa_added,
+        ifa_removed: nd6::ifa_removed,
+        if_up: nd6::if_up,
+        if_detach: nd6::if_detach,
+        proxy: nd6::proxy,
+    });
 }
 
 /// `MSIZE`, `MCLBYTES`, `MLEN`, `MINCLSIZE`: what a buffer charges its
@@ -353,6 +413,19 @@ pub(crate) struct IpOpts {
     /// `inp_flowid` and `inp_flowtype` (`IP_FLOWID`, `IP_FLOWTYPE`).
     pub(crate) flowid: u32,
     pub(crate) flowtype: u32,
+    /// `in6p_cksum` (`IPV6_CHECKSUM`): where a raw IPv6 socket's checksum
+    /// goes, -1 for none.
+    pub(crate) cksum6: i32,
+    /// `in6p_icmp6filt` (`ICMP6_FILTER`): the ICMPv6 types a raw ICMPv6
+    /// socket passes, a bit each.
+    pub(crate) icmp6filt: [u32; 8],
+    /// The sticky packet options (`in6p_outputopts`): `IPV6_PKTINFO`'s
+    /// address and interface, `IPV6_HOPLIMIT`, `IPV6_NEXTHOP`, and
+    /// `IPV6_USE_MIN_MTU`.
+    pub(crate) pktinfo6: Option<([u8; 16], u32)>,
+    pub(crate) hlim6: i16,
+    pub(crate) nexthop6: Option<[u8; 16]>,
+    pub(crate) minmtu6: i8,
 }
 
 impl IpOpts {
@@ -373,6 +446,12 @@ impl IpOpts {
             pcp: -1,
             flowid: 0,
             flowtype: 0,
+            cksum6: -1,
+            icmp6filt: [u32::MAX; 8],
+            pktinfo6: None,
+            hlim6: -1,
+            nexthop6: None,
+            minmtu6: -1,
         }
     }
 }
@@ -401,6 +480,8 @@ pub(crate) struct Inner {
     /// The IPv4 groups it joined, with their interfaces
     /// (`imo_membership`).
     pub(crate) groups: Vec<([u8; 4], u16)>,
+    /// The IPv6 groups it joined (`im6o_membership`).
+    pub(crate) groups6: Vec<([u8; 16], u16)>,
 }
 
 /// An internet socket (FreeBSD's `struct socket` with its `inpcb` and,
@@ -534,6 +615,7 @@ impl Socket {
                 splice: None,
                 splice_back: None,
                 groups: Vec::new(),
+                groups6: Vec::new(),
             }),
             rd: Notify::new(),
             wr: Notify::new(),
@@ -664,7 +746,10 @@ impl Socket {
             return Err(Errno::EINVAL);
         }
         if let Proto::Raw(_) = self.proto {
-            return self.raw_bind(raw);
+            return match self.family {
+                Family::Inet => self.raw_bind(raw),
+                Family::Inet6 => self.raw6_bind(raw),
+            };
         }
         let sa = match self.family {
             Family::Inet => addr::parse_in(raw, true)?,
@@ -717,6 +802,7 @@ impl Socket {
         match self.proto {
             Proto::Udp => self.udp_connect(raw, cred),
             Proto::Tcp => self.tcp_connect(raw, cred, nonblock),
+            Proto::Raw(_) if self.family == Family::Inet6 => self.raw6_connect(raw),
             Proto::Raw(_) => self.raw_connect(raw),
         }
     }

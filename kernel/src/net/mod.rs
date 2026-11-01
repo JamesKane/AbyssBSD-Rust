@@ -183,13 +183,55 @@ pub(crate) fn init(s: &Sleepable) {
         random: random_u32,
         realtime: realtime_ns,
         log: log_notice,
+        hostname,
+        timer_kick: ip6_timer_kick,
     });
     inet::init();
     inet::reass::set_nmbclusters(mbuf::zone::CLUSTER.limit());
+    inet::frag6::set_nmbclusters(mbuf::zone::CLUSTER.limit());
     let now = i64::try_from(crate::time::realtime_ns().unwrap_or(0) / 1_000_000_000).unwrap_or(0);
     inet::ifnet::configure_loopback(&mut net::vnet0().net.lock(), now);
     splice::init();
     start_netisr();
     start_route_expiry();
+    start_ip6_timer();
     sysctl::init(s);
+}
+
+/// The current jail's host name, for IPv6's node information group.
+fn hostname() -> alloc::string::String {
+    let h = crate::prison::current().settings().hostname;
+    alloc::string::String::from_utf8_lossy(&h).into_owned()
+}
+
+/// The IPv6 timer thread's work flag and where it waits.
+static IP6_KICKED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static IP6_WQ: sched::WaitQueue = sched::WaitQueue::new();
+
+fn ip6_timer_kick() {
+    IP6_KICKED.store(true, core::sync::atomic::Ordering::Release);
+    IP6_WQ.wake_one();
+}
+
+/// IPv6's callouts (`nd6_llinfo_timer`, `nd6_dad_timer`,
+/// `mld_fasttimo`, `nd6_timer`, `frag6_slowtimo`): one thread runs
+/// whatever is due and sleeps until the next deadline, or until a sooner
+/// one is armed.
+fn start_ip6_timer() {
+    let _ = sched::spawn("ip6timer", sched::Priority::KERNEL, |s| {
+        loop {
+            let next = inet::nd6::next_deadline();
+            let now = crate::time::now_ns();
+            if next > now {
+                let wait = (next - now).min(60 * 1_000_000_000);
+                crate::time::wait_timeout(
+                    s,
+                    &IP6_WQ,
+                    || IP6_KICKED.swap(false, core::sync::atomic::Ordering::Acquire),
+                    wait,
+                );
+            }
+            inet::nd6::run_timers(crate::time::now_ns());
+        }
+    });
 }

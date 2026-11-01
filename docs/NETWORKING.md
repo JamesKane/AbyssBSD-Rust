@@ -221,6 +221,23 @@ it is let go, so nothing below re-enters it. `lo0` takes the checksum work as Fr
 pseudo-header, as on FreeBSD. The PCB tables stay one per protocol, each lookup filtered by
 VNET, until their hashing with P7's performance work.
 
+As built for IPv6 (P7.5): `sys/inet::ip6` (input with the extension headers, output with
+`in6_selectroute`'s choices, scope zones, multicast loopback, fragmentation, forwarding),
+`frag6`, `icmp6`, `nd6` (the neighbor cache's NUD states and timers in the link-layer table's
+IPv6 entries, resolution with its hold queue, solicitations and advertisements, DAD with
+enhanced DAD's nonces, redirects, path MTUs), `nd6_rtr` (router advertisements, the default
+router and prefix lists, SLAAC addresses and their lifetimes), `mld6` (each interface's groups
+with MLDv2's reports and MLDv1's fallback), `raw6`, `in6` (source selection by
+`in6_selectsrc`'s rules, the address selection policy table), and UDP's IPv6 packet path. A
+link-local address carries its zone beside it, an interface index, where FreeBSD embeds it in
+the address; a route to a link-local prefix of more than 16 bits belongs to its interface's
+zone. The interface layer reaches IPv6 through `net::In6Hooks` (resolution, an address or
+interface coming and going), called under the interfaces' lock; IPv6's ND and MLD state is
+taken after that lock, never before it. One kernel thread runs IPv6's timers (neighbor
+entries, DAD, MLD's fast ticks, `nd6_timer`, reassembly), sleeping until the next deadline or
+until a sooner one is armed. The node information group an address joins is named by the MD5
+of the jail's host name, so `sys/inet` has MD5.
+
 ## 9. Transport
 
 ### 9.1 UDP

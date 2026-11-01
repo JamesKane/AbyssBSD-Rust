@@ -33,13 +33,14 @@ use crate::fs::uio::UserIo;
 use crate::uaccess;
 
 /// `socreate`'s `pffindproto` and `pffindtype` for the internet domains:
-/// TCP and UDP, by type and (optionally) number, and raw IPv4 sockets of
-/// any protocol (`rip_attach`, which needs `PRIV_NETINET_RAW`).
-fn proto(family: Family, ty: u32, protocol: i32) -> Result<Proto, Errno> {
+/// TCP and UDP, by type and (optionally) number, and raw IP sockets of
+/// any protocol (`rip_attach`, `rip6_attach`, which need
+/// `PRIV_NETINET_RAW`).
+fn proto(_family: Family, ty: u32, protocol: i32) -> Result<Proto, Errno> {
     match (ty, protocol) {
         (SOCK_STREAM, 0 | IPPROTO_TCP) => Ok(Proto::Tcp),
         (SOCK_DGRAM, 0 | IPPROTO_UDP) => Ok(Proto::Udp),
-        (abi::inet::SOCK_RAW, p) if family == Family::Inet => {
+        (abi::inet::SOCK_RAW, p) => {
             let p = u8::try_from(p).map_err(|_| Errno::EPROTONOSUPPORT)?;
             // `socreate`: raw IP has no `PR_CAPATTACH`.
             crate::capsicum::refuse(crate::ktrace::CapFail::Proto(i32::from(p)))?;
@@ -48,8 +49,6 @@ fn proto(family: Family, ty: u32, protocol: i32) -> Result<Proto, Errno> {
             }
             Ok(Proto::Raw(p))
         }
-        // Raw IPv6 sockets come with IPv6 (P7.5); no SCTP or UDP-Lite.
-        (abi::inet::SOCK_RAW, _) => Err(Errno::EPROTONOSUPPORT),
         (SOCK_SEQPACKET, 0) => Err(Errno::EPROTOTYPE),
         (SOCK_STREAM | SOCK_DGRAM | SOCK_SEQPACKET, _) => Err(Errno::EPROTONOSUPPORT),
         _ => Err(Errno::EPROTOTYPE),
@@ -208,8 +207,13 @@ pub(super) fn getsockopt(so: &Socket, level: i32, name: i32) -> Result<Vec<u8>, 
 
 /// A send's control messages (`udp_send`, `tcp_usr_send`): TCP takes
 /// none; UDP's IP-level `IP_SENDSRCADDR` and `IP_TOS` set the
-/// datagram's source and TOS (IPv6's are taken without effect); others
-/// at the IP level are `EINVAL`, at other levels ignored.
+/// datagram's source and TOS, IPv6's `IPV6_PKTINFO`, `IPV6_HOPLIMIT`,
+/// `IPV6_TCLASS`, and `IPV6_NEXTHOP` its source, interface, hop limit,
+/// traffic class, and next hop; others at the IP level are `EINVAL`
+/// (`ENOPROTOOPT` for IPv6), at other levels ignored.
+/// `IPV6_NEXTHOP`.
+const IPV6_NEXTHOP: i32 = 48;
+
 fn check_control(so: &Socket, raw: &[u8]) -> Result<inet::SendCtl, Errno> {
     let mut ctl = inet::SendCtl::default();
     if so.proto == Proto::Tcp {
@@ -238,13 +242,43 @@ fn check_control(so: &Socket, raw: &[u8]) -> Result<inet::SendCtl, Errno> {
             Family::Inet => IPPROTO_IP,
             Family::Inet6 => IPPROTO_IPV6,
         };
-        if level == ip_level {
+        if level == ip_level && so.family == Family::Inet6 {
+            // `ip6_setpktopts` (each `ip6_setpktopt` with `cmsg` set).
+            let data = &raw[at + CMSG_HDR..at + len];
+            let int = || -> Result<i32, Errno> {
+                data.try_into()
+                    .map(i32::from_ne_bytes)
+                    .map_err(|_| Errno::EINVAL)
+            };
+            match ty {
+                ipv6::IPV6_PKTINFO => {
+                    ctl.pktinfo6 = Some(inet::raw6::check_pktinfo(&so.vnet, data)?);
+                }
+                ipv6::IPV6_HOPLIMIT => {
+                    let v = int()?;
+                    if !(-1..=255).contains(&v) {
+                        return Err(Errno::EINVAL);
+                    }
+                    ctl.hlim6 = Some(v);
+                }
+                ipv6::IPV6_TCLASS => {
+                    let v = int()?;
+                    if !(-1..=255).contains(&v) {
+                        return Err(Errno::EINVAL);
+                    }
+                    ctl.tclass6 = Some(v);
+                }
+                IPV6_NEXTHOP => ctl.nexthop6 = Some(inet::raw6::check_nexthop(data)?),
+                ipv6::IPV6_USE_MIN_MTU | ipv6::IPV6_DONTFRAG | ipv6::IPV6_PREFER_TEMPADDR => {
+                    int()?;
+                }
+                _ => return Err(Errno::ENOPROTOOPT),
+            }
+        } else if level == ip_level {
             let ok = match so.family {
                 // `IP_SENDSRCADDR` is `IP_RECVDSTADDR`'s number.
                 Family::Inet => ty == ip::IP_RECVDSTADDR || ty == ip::IP_TOS,
-                Family::Inet6 => {
-                    ty == ipv6::IPV6_PKTINFO || ty == ipv6::IPV6_HOPLIMIT || ty == ipv6::IPV6_TCLASS
-                }
+                Family::Inet6 => false,
             };
             if !ok {
                 return Err(Errno::EINVAL);

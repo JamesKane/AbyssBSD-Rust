@@ -60,7 +60,10 @@ pub fn output(
                         Resolved::Held => return Ok(()),
                     }
                 }
-                Family::Inet6 => resolve6(n, ifindex, nexthop, slot.as_ref())?,
+                Family::Inet6 => match resolve6(n, ifindex, nexthop, &mut slot)? {
+                    Resolved::Addr(a) => a,
+                    Resolved::Held => return Ok(()),
+                },
             };
             let Some(mut m) = slot else {
                 return Ok(());
@@ -79,7 +82,10 @@ pub fn output(
                 c.hdr.rcvif = ifindex;
                 let proto = match family {
                     Family::Inet => Proto::Ip,
-                    Family::Inet6 => Proto::Ipv6,
+                    Family::Inet6 => {
+                        c.hdr.flags |= flags::LOOP;
+                        Proto::Ipv6
+                    }
                 };
                 n.isrq.push((proto, c));
             }
@@ -91,24 +97,39 @@ pub fn output(
     }
 }
 
-/// An IPv6 next hop's link-layer address: a multicast group's mapped
-/// address, or a neighbor the cache knows (resolution is ND's, P7.5).
-fn resolve6(n: &Net, ifindex: u16, nexthop: &In6, m: Option<&Packet>) -> Result<[u8; 6], Errno> {
-    if m.is_some_and(|m| m.hdr.flags & flags::MCAST != 0) || nexthop[0] == 0xff {
+/// An IPv6 next hop's link-layer address (`nd6_resolve`): a multicast
+/// group's mapped address, else what neighbor discovery finds, which may
+/// hold the packet while it solicits the neighbor.
+fn resolve6(
+    n: &mut Net,
+    ifindex: u16,
+    nexthop: &In6,
+    m: &mut Option<Packet>,
+) -> Result<Resolved, Errno> {
+    if n.by_index(ifindex)
+        .is_some_and(|i| i.nd6_flags & abi::net::nd6_iff::IFDISABLED != 0)
+    {
+        return Err(Errno::ENETDOWN);
+    }
+    if m.as_ref().is_some_and(|m| m.hdr.flags & flags::MCAST != 0) || nexthop[0] == 0xff {
         // `ETHER_MAP_IPV6_MULTICAST`.
-        return Ok([
+        return Ok(Resolved::Addr([
             0x33,
             0x33,
             nexthop[12],
             nexthop[13],
             nexthop[14],
             nexthop[15],
-        ]);
+        ]));
     }
-    n.lle(ifindex, Family::Inet6, nexthop)
-        .filter(|e| e.flags & crate::lltable::lle::VALID != 0)
-        .map(|e| e.lladdr)
-        .ok_or(Errno::EHOSTUNREACH)
+    match crate::in6_hooks() {
+        Some(h) => (h.resolve)(n, ifindex, nexthop, m),
+        None => n
+            .lle(ifindex, Family::Inet6, nexthop)
+            .filter(|e| e.flags & crate::lltable::lle::VALID != 0)
+            .map(|e| Resolved::Addr(e.lladdr))
+            .ok_or(Errno::EHOSTUNREACH),
+    }
 }
 
 /// `update_mbuf_csumflags`: what a looped copy's sender left for the

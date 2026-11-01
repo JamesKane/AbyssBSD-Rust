@@ -173,18 +173,77 @@ fn vstats(
     format: &'static str,
     descr: &str,
     bytes: fn(&inet::state::State) -> Vec<u8>,
+    clear: fn(&inet::state::State),
 ) {
-    t.add_value(
+    vstats_n(
+        t,
         parent,
         Number::Auto,
         "stats",
+        format,
         descr,
+        bytes,
+        clear,
+    );
+}
+
+/// [`vstats`] with its number and name; a write zeroes them (`netstat
+/// -z`, `VNET_PCPUSTAT_SYSINIT`'s handler).
+#[allow(clippy::too_many_arguments, reason = "the node's parts")]
+fn vstats_n(
+    t: &mut Tree,
+    parent: sysctl::NodeId,
+    number: Number,
+    name: &str,
+    format: &'static str,
+    descr: &str,
+    bytes: fn(&inet::state::State) -> Vec<u8>,
+    clear: fn(&inet::state::State),
+) {
+    t.add_writable(
+        parent,
+        number,
+        name,
+        descr,
+        ctlflag::VNET,
         Value::Opaque {
             format,
             read: Box::new(move |out| out.extend(bytes(&inet::state::of(&super::curvnet())))),
         },
+        Arc::new(move |_: &[u8]| {
+            clear(&inet::state::of(&super::curvnet()));
+            Ok(())
+        }),
     )
     .expect("a net.inet stats sysctl");
+}
+
+/// [`vknob`] with a fixed number (`IPV6CTL_*`, `ICMPV6CTL_*`), which
+/// `rtsold` and `ndp` ask for.
+fn vknob_n(
+    t: &mut Tree,
+    parent: sysctl::NodeId,
+    number: i32,
+    name: &str,
+    descr: &str,
+    field: fn(&inet::state::State) -> &AtomicI32,
+) {
+    t.add_writable(
+        parent,
+        Number::Fixed(number),
+        name,
+        descr,
+        ctlflag::VNET,
+        // Relaxed: a setting.
+        Value::Int(Box::new(move || {
+            field(&inet::state::of(&super::curvnet())).load(Ordering::Relaxed)
+        })),
+        sysctl::int_writer(move |v| {
+            field(&inet::state::of(&super::curvnet())).store(v, Ordering::Relaxed);
+            Ok(())
+        }),
+    )
+    .expect("a net.inet6 sysctl");
 }
 
 /// `bind_all_fibs` (`CTLFLAG_RDTUN`, 1): a socket hears every FIB's
@@ -445,6 +504,7 @@ pub(crate) fn init(s: &Sleepable) {
             "S,ipstat",
             "IP statistics (struct ipstat, netinet/ip_var.h)",
             |s| s.ipstat.bytes(),
+            |s| s.ipstat.clear(),
         );
         knobs(
             t,
@@ -545,6 +605,7 @@ pub(crate) fn init(s: &Sleepable) {
             "S,icmpstat",
             "ICMP statistics (struct icmpstat, netinet/icmp_var.h)",
             |s| s.icmpstat.bytes(),
+            |s| s.icmpstat.clear(),
         );
         let igmp = node(t, inet, 2, "igmp", "IGMP");
         vknob(
@@ -790,6 +851,7 @@ pub(crate) fn init(s: &Sleepable) {
             "S,udpstat",
             "UDP statistics (struct udpstat, netinet/udp_var.h)",
             |s| s.udpstat.bytes(),
+            |s| s.udpstat.clear(),
         );
         t.add_value(
             udp,
@@ -835,106 +897,7 @@ pub(crate) fn init(s: &Sleepable) {
         .expect("net.inet.raw.pcblist");
 
         // `net.inet6` (`PF_INET6`).
-        let inet6 = node(t, net, 28, "inet6", "Internet6 Family");
-        let ip6 = node(t, inet6, 41, "ip6", "IP6");
-        rw_i32(
-            t,
-            ip6,
-            "v6only",
-            "Restrict AF_INET6 sockets to IPv6 addresses only",
-            &tune::V6ONLY,
-            |_| true,
-        );
-        rw_i32(
-            t,
-            ip6,
-            "hlim",
-            "Default hop limit to use for outgoing IPv6 packets",
-            &tune::IP6_HLIM,
-            |v| (0..=255).contains(&v),
-        );
-        knobs(
-            t,
-            ip6,
-            &[
-                (
-                    "forwarding",
-                    "Enable forwarding of IPv6 packets between interfaces",
-                    0,
-                ),
-                (
-                    "redirect",
-                    "Send ICMPv6 redirects for unforwardable IPv6 packets",
-                    1,
-                ),
-                (
-                    "accept_rtadv",
-                    "Default value of per-interface flag for accepting ICMPv6 RA messages",
-                    0,
-                ),
-                (
-                    "no_radr",
-                    "Default value of per-interface flag to control whether routers sending ICMPv6 RA messages on that interface are added into the default router list",
-                    0,
-                ),
-                (
-                    "rfc6204w3",
-                    "Accept the default router list from ICMPv6 RA messages even when packet forwarding is enabled",
-                    0,
-                ),
-                (
-                    "dad_count",
-                    "Number of ICMPv6 NS messages sent during duplicate address detection",
-                    1,
-                ),
-                (
-                    "use_tempaddr",
-                    "Create RFC3041 temporary addresses for autoconfigured addresses",
-                    0,
-                ),
-                (
-                    "prefer_tempaddr",
-                    "Prefer RFC3041 temporary addresses in source address selection",
-                    0,
-                ),
-                (
-                    "use_defaultzone",
-                    "Use the default scope zone when none is specified",
-                    0,
-                ),
-                (
-                    "auto_linklocal",
-                    "Default value of per-interface flag for automatically adding an IPv6 link-local address to interfaces when attached",
-                    1,
-                ),
-                (
-                    "connect_in6addr_wild",
-                    "Allow connecting to the unspecified address for connect(2)",
-                    1,
-                ),
-            ],
-        );
-        // `ip6addrctl(8)` reads it by number.
-        t.add_value(
-            ip6,
-            Number::Fixed(abi::net::IPV6CTL_ADDRCTLPOLICY),
-            "addrctlpolicy",
-            "",
-            Value::Opaque {
-                format: "S,in6_addrpolicy",
-                read: Box::new(super::ioctl::policies),
-            },
-        )
-        .expect("net.inet6.ip6.addrctlpolicy");
-        let icmp6 = node(t, inet6, 58, "icmp6", "ICMP6");
-        knobs(
-            t,
-            icmp6,
-            &[
-                ("rediraccept", "Accept ICMPv6 redirect messages", 1),
-                ("nd6_onlink_ns_rfc4861", "", 0),
-            ],
-        );
+        inet6(t, net);
 
         // `net.link`: interface counts (`if_mib.c`) and the Ethernet
         // knob `rc.d/routing` sets.
@@ -1000,11 +963,12 @@ pub(crate) fn init(s: &Sleepable) {
             ],
         );
         let ether_arp = node(t, ether, 35, "arp", "");
-        t.add_value(
+        t.add_writable(
             ether_arp,
             Number::Auto,
             "stats",
             "ARP statistics (struct arpstat, net/if_arp.h)",
+            ctlflag::VNET,
             Value::Opaque {
                 format: "S,arpstat",
                 read: Box::new(|out| {
@@ -1019,6 +983,11 @@ pub(crate) fn init(s: &Sleepable) {
                     out.extend_from_slice(b);
                 }),
             },
+            // `netstat -z`.
+            Arc::new(|_: &[u8]| {
+                super::curvnet().net.lock().arpstat = net::arp::Stat::ZERO;
+                Ok(())
+            }),
         )
         .expect("net.link.ether.arp.stats");
         rw_i32(
@@ -1134,10 +1103,555 @@ fn rtsock(r: &[i32], out: &mut Vec<u8>) -> Result<(), ReadError> {
             out.extend(inet::rtmsg::iflist(&n, af, arg, op == net_rt::IFLISTL));
         }
         net_rt::NHOP => out.extend(inet::rtmsg::nhops(&n, af, fib)),
-        net_rt::IFMALIST => out.extend(inet::rtmsg::ifmalist(&n, af, arg)),
+        net_rt::IFMALIST => {
+            let g6 = inet::mld6::groups(&super::curvnet());
+            out.extend(inet::rtmsg::ifmalist(&n, af, arg, &g6));
+        }
         // No next-hop groups to list.
         net_rt::NHGRP => {}
         _ => return Err(ReadError::Failed(Errno::EINVAL)),
     }
     Ok(())
+}
+
+/// `net.inet6`: IPv6's, ICMPv6's, and MLD's settings and statistics,
+/// each the current VNET's, with FreeBSD's numbers where programs ask by
+/// them (sys/netinet6/in6_proto.c, frag6.c, icmp6.c, nd6.c, mld6.c).
+fn inet6(t: &mut Tree, net: sysctl::NodeId) {
+    let inet6 = node(t, net, 28, "inet6", "Internet6 Family");
+    let ip6 = node(t, inet6, 41, "ip6", "IP6");
+    vknob_n(
+        t,
+        ip6,
+        1,
+        "forwarding",
+        "Enable forwarding of IPv6 packets between interfaces",
+        |s| &s.conf6.forwarding,
+    );
+    vknob_n(
+        t,
+        ip6,
+        2,
+        "redirect",
+        "Send ICMPv6 redirects for unforwardable IPv6 packets",
+        |s| &s.conf6.redirect,
+    );
+    t.add_writable(
+        ip6,
+        Number::Fixed(3),
+        "hlim",
+        "Default hop limit to use for outgoing IPv6 packets",
+        ctlflag::VNET,
+        // Relaxed: a tunable.
+        Value::Int(Box::new(|| tune::IP6_HLIM.load(Ordering::Relaxed))),
+        sysctl::int_writer(|v| {
+            if !(0..=255).contains(&v) {
+                return Err(Errno::EINVAL);
+            }
+            tune::IP6_HLIM.store(v, Ordering::Relaxed);
+            Ok(())
+        }),
+    )
+    .expect("net.inet6.ip6.hlim");
+    vstats_n(
+        t,
+        ip6,
+        Number::Fixed(6),
+        "stats",
+        "S,ip6stat",
+        "IP6 statistics (struct ip6stat, netinet6/ip6_var.h)",
+        |s| s.ip6stat.bytes(),
+        |s| s.ip6stat.clear(),
+    );
+    t.add_writable(
+        ip6,
+        Number::Fixed(9),
+        "maxfragpackets",
+        "Default maximum number of outstanding fragmented IPv6 packets. A value of 0 means no fragmented packets will be accepted, while a a value of -1 means no limit",
+        ctlflag::VNET,
+        Value::Int(Box::new(|| {
+            inet::state::val_of(&inet::state::of(&super::curvnet()).conf6.maxfragpackets)
+        })),
+        sysctl::int_writer(|v| {
+            let st = inet::state::of(&super::curvnet());
+            st.conf6.maxfragpackets.store(v, Ordering::Relaxed);
+            inet::frag6::set_bucketsize(&st);
+            Ok(())
+        }),
+    )
+    .expect("net.inet6.ip6.maxfragpackets");
+    vknob_n(
+        t,
+        ip6,
+        12,
+        "accept_rtadv",
+        "Default value of per-interface flag for accepting ICMPv6 RA messages",
+        |s| &s.conf6.accept_rtadv,
+    );
+    vknob_n(
+        t,
+        ip6,
+        15,
+        "hdrnestlimit",
+        "Default maximum number of IPv6 extension headers permitted on incoming IPv6 packets, 0 for no artificial limit",
+        |s| &s.conf6.hdrnestlimit,
+    );
+    vknob_n(
+        t,
+        ip6,
+        16,
+        "dad_count",
+        "Number of ICMPv6 NS messages sent during duplicate address detection",
+        |s| &s.conf6.dad_count,
+    );
+    vknob_n(
+        t,
+        ip6,
+        17,
+        "auto_flowlabel",
+        "Provide an IPv6 flowlabel in outbound packets",
+        |s| &s.conf6.auto_flowlabel,
+    );
+    vknob_n(
+        t,
+        ip6,
+        18,
+        "defmcasthlim",
+        "Default hop limit for IPv6 multicast packets originating from this node",
+        |s| &s.conf6.defmcasthlim,
+    );
+    t.add_value(
+        ip6,
+        Number::Fixed(20),
+        "kame_version",
+        "KAME version string",
+        Value::Str(Box::new(|s| s.push_str("FreeBSD"))),
+    )
+    .expect("net.inet6.ip6.kame_version");
+    vknob_n(
+        t,
+        ip6,
+        21,
+        "use_deprecated",
+        "Allow the use of addresses whose preferred lifetimes have expired",
+        |s| &s.conf6.use_deprecated,
+    );
+    rw_i32(
+        t,
+        ip6,
+        "v6only",
+        "Restrict AF_INET6 sockets to IPv6 addresses only",
+        &tune::V6ONLY,
+        |_| true,
+    );
+    vknob_n(
+        t,
+        ip6,
+        32,
+        "use_tempaddr",
+        "Create RFC3041 temporary addresses for autoconfigured addresses",
+        |s| &s.conf6.use_tempaddr,
+    );
+    vstats_n(
+        t,
+        ip6,
+        Number::Fixed(36),
+        "rip6stats",
+        "S,rip6stat",
+        "Raw IP6 statistics (struct rip6stat, netinet6/raw_ip6.h)",
+        |s| s.rip6stat.bytes(),
+        |s| s.rip6stat.clear(),
+    );
+    vknob_n(
+        t,
+        ip6,
+        37,
+        "prefer_tempaddr",
+        "Prefer RFC3041 temporary addresses in source address selection",
+        |s| &s.conf6.prefer_tempaddr,
+    );
+    // `ip6addrctl(8)` reads it by number.
+    t.add_value(
+        ip6,
+        Number::Fixed(abi::net::IPV6CTL_ADDRCTLPOLICY),
+        "addrctlpolicy",
+        "",
+        Value::Opaque {
+            format: "S,in6_addrpolicy",
+            read: Box::new(super::ioctl::policies),
+        },
+    )
+    .expect("net.inet6.ip6.addrctlpolicy");
+    // Relaxed: settings.
+    t.add_writable(
+        ip6,
+        Number::Fixed(41),
+        "maxfrags",
+        "Maximum allowed number of outstanding IPv6 packet fragments. A value of 0 means no fragmented packets will be accepted, while a a value of -1 means no limit",
+        0,
+        Value::Int(Box::new(|| inet::frag6::MAXFRAGS.load(Ordering::Relaxed))),
+        sysctl::int_writer(|v| {
+            inet::frag6::MAXFRAGS.store(v, Ordering::Relaxed);
+            Ok(())
+        }),
+    )
+    .expect("net.inet6.ip6.maxfrags");
+    vknob_n(
+        t,
+        ip6,
+        48,
+        "no_radr",
+        "Default value of per-interface flag to control whether routers sending ICMPv6 RA messages on that interface are added into the default router list",
+        |s| &s.conf6.no_radr,
+    );
+    vknob_n(
+        t,
+        ip6,
+        49,
+        "norbit_raif",
+        "Always set clear the R flag in ICMPv6 NA messages when accepting RA on the interface",
+        |s| &s.conf6.norbit_raif,
+    );
+    vknob_n(
+        t,
+        ip6,
+        50,
+        "rfc6204w3",
+        "Accept the default router list from ICMPv6 RA messages even when packet forwarding is enabled",
+        |s| &s.conf6.rfc6204w3,
+    );
+    vknob_n(
+        t,
+        ip6,
+        53,
+        "maxfragsperpacket",
+        "Maximum allowed number of fragments per packet",
+        |s| &s.conf6.maxfragsperpacket,
+    );
+    vknob_n(
+        t,
+        ip6,
+        54,
+        "maxfragbucketsize",
+        "Maximum number of reassembly queues per hash bucket",
+        |s| &s.conf6.maxfragbucketsize,
+    );
+    vknob(
+        t,
+        ip6,
+        "fraglifetime_ms",
+        "Fragment lifetime, in milliseconds",
+        |s| &s.conf6.fraglifetime_ms,
+    );
+    vknob(
+        t,
+        ip6,
+        "source_address_validation",
+        "Drop incoming packets with source address that is a local address",
+        |s| &s.conf6.sav,
+    );
+    vknob(
+        t,
+        ip6,
+        "log_cannot_forward",
+        "Log packets that cannot be forwarded",
+        |s| &s.conf6.log_cannot_forward,
+    );
+    t.add_value(
+        ip6,
+        Number::Auto,
+        "frag6_nfrags",
+        "Global number of IPv6 fragments across all reassembly queues.",
+        Value::Uint(Box::new(inet::frag6::nfrags)),
+    )
+    .expect("net.inet6.ip6.frag6_nfrags");
+    t.add_value(
+        ip6,
+        Number::Auto,
+        "frag6_nfragpackets",
+        "Per-VNET number of IPv6 fragments across all reassembly queues.",
+        Value::Uint(Box::new(|| {
+            u32::try_from(inet::state::of(&super::curvnet()).frag6_len()).unwrap_or(u32::MAX)
+        })),
+    )
+    .expect("net.inet6.ip6.frag6_nfragpackets");
+    knobs(
+        t,
+        ip6,
+        &[
+            (
+                "use_defaultzone",
+                "Use the default scope zone when none is specified",
+                0,
+            ),
+            (
+                "auto_linklocal",
+                "Default value of per-interface flag for automatically adding an IPv6 link-local address to interfaces when attached",
+                1,
+            ),
+            (
+                "connect_in6addr_wild",
+                "Allow connecting to the unspecified address for connect(2)",
+                1,
+            ),
+        ],
+    );
+    let icmp6 = node(t, inet6, 58, "icmp6", "ICMP6");
+    vstats_n(
+        t,
+        icmp6,
+        Number::Fixed(1),
+        "stats",
+        "S,icmp6stat",
+        "ICMPv6 statistics (struct icmp6stat, netinet/icmp6.h)",
+        |s| s.icmp6stat.bytes(),
+        |s| s.icmp6stat.clear(),
+    );
+    vknob_n(
+        t,
+        icmp6,
+        2,
+        "rediraccept",
+        "Accept ICMPv6 redirect messages",
+        |s| &s.conf6.rediraccept,
+    );
+    vknob_n(
+        t,
+        icmp6,
+        3,
+        "redirtimeout",
+        "Delay in seconds before expiring redirect route",
+        |s| &s.conf6.redirtimeout,
+    );
+    vknob_n(
+        t,
+        icmp6,
+        6,
+        "nd6_prune",
+        "Frequency in seconds of checks for expired prefixes and routers",
+        |s| &s.conf6.nd6_prune,
+    );
+    vknob_n(
+        t,
+        icmp6,
+        8,
+        "nd6_delay",
+        "Delay in seconds before probing for reachability",
+        |s| &s.conf6.nd6_delay,
+    );
+    vknob_n(
+        t,
+        icmp6,
+        9,
+        "nd6_umaxtries",
+        "Number of ICMPv6 NS messages sent during reachability detection",
+        |s| &s.conf6.nd6_umaxtries,
+    );
+    vknob_n(
+        t,
+        icmp6,
+        10,
+        "nd6_mmaxtries",
+        "Number of ICMPv6 NS messages sent during address resolution",
+        |s| &s.conf6.nd6_mmaxtries,
+    );
+    vknob_n(
+        t,
+        icmp6,
+        11,
+        "nd6_useloopback",
+        "Create a loopback route when configuring an IPv6 address",
+        |s| &s.conf6.nd6_useloopback,
+    );
+    vknob_n(
+        t,
+        icmp6,
+        13,
+        "nodeinfo",
+        "Mask of enabled RFC4620 node information query types",
+        |s| &s.conf6.nodeinfo,
+    );
+    t.add_writable(
+        icmp6,
+        Number::Fixed(14),
+        "errppslimit",
+        "Maximum number of ICMPv6 error/reply messages per second",
+        ctlflag::VNET,
+        Value::Uint(Box::new(|| {
+            inet::state::of(&super::curvnet())
+                .conf6
+                .errppslimit
+                .load(Ordering::Relaxed)
+        })),
+        sysctl::int_writer(|v| {
+            let st = inet::state::of(&super::curvnet());
+            let v = u32::try_from(v).map_err(|_| Errno::EINVAL)?;
+            if v != 0 && v <= st.conf6.icmp6lim_jitter.load(Ordering::Relaxed) {
+                return Err(Errno::EINVAL);
+            }
+            st.conf6.errppslimit.store(v, Ordering::Relaxed);
+            Ok(())
+        }),
+    )
+    .expect("net.inet6.icmp6.errppslimit");
+    t.add_writable(
+        icmp6,
+        Number::Auto,
+        "icmp6lim_jitter",
+        "Random errppslimit jitter adjustment limit",
+        ctlflag::VNET,
+        Value::Uint(Box::new(|| {
+            inet::state::of(&super::curvnet())
+                .conf6
+                .icmp6lim_jitter
+                .load(Ordering::Relaxed)
+        })),
+        sysctl::int_writer(|v| {
+            let st = inet::state::of(&super::curvnet());
+            let v = u32::try_from(v).map_err(|_| Errno::EINVAL)?;
+            if v >= st.conf6.errppslimit.load(Ordering::Relaxed) {
+                return Err(Errno::EINVAL);
+            }
+            st.conf6.icmp6lim_jitter.store(v, Ordering::Relaxed);
+            Ok(())
+        }),
+    )
+    .expect("net.inet6.icmp6.icmp6lim_jitter");
+    vknob(
+        t,
+        icmp6,
+        "icmp6lim_output",
+        "Enable logging of ICMPv6 response rate limiting",
+        |s| &s.conf6.icmp6lim_output,
+    );
+    vknob_n(t, icmp6, 18, "nd6_debug", "Log NDP debug messages", |s| {
+        &s.conf6.nd6_debug
+    });
+    for (num, name, descr, f) in [
+        (
+            19,
+            "nd6_drlist",
+            "NDP default router list",
+            inet::nd6_rtr::drlist as fn(&net::Vnet, i64, u64) -> Vec<u8>,
+        ),
+        (20, "nd6_prlist", "NDP prefix list", inet::nd6_rtr::prlist),
+    ] {
+        t.add_value(
+            icmp6,
+            Number::Fixed(num),
+            name,
+            descr,
+            Value::Opaque {
+                format: "S,in6_defrouter",
+                read: Box::new(move |out| {
+                    out.extend(f(&super::curvnet(), super::now_s(), super::uptime_s()));
+                }),
+            },
+        )
+        .expect("an nd6 list sysctl");
+    }
+    vknob_n(
+        t,
+        icmp6,
+        24,
+        "nd6_maxqlen",
+        "Maximum number of outbound packets to hold during address resolution",
+        |s| &s.conf6.nd6_maxqueuelen,
+    );
+    vknob(
+        t,
+        icmp6,
+        "nd6_gctimer",
+        "Interface in seconds between garbage collection passes",
+        |s| &s.conf6.nd6_gctimer,
+    );
+    vknob(
+        t,
+        icmp6,
+        "nd6_maxndopt",
+        "Maximum number of options in an ND message",
+        |s| &s.conf6.nd6_maxndopt,
+    );
+    vknob(
+        t,
+        icmp6,
+        "nd6_onlink_ns_rfc4861",
+        "Accept 'on-link' ICMPv6 NS messages in compliance with RFC 4861",
+        |s| &s.conf6.nd6_onlink_ns_rfc4861,
+    );
+    vknob(
+        t,
+        icmp6,
+        "dad_enhanced",
+        "Enable Enhanced DAD, which adds a random nonce to NS messages for DAD.",
+        |s| &s.conf6.dad_enhanced,
+    );
+    vknob(t, icmp6, "dad_maxtry", "Max DAD retry counts", |s| {
+        &s.conf6.dad_maxtry
+    });
+    vknob(
+        t,
+        icmp6,
+        "nd6_ignore_ipv6_only_ra",
+        "Ignore the 'IPv6-Only flag' in RA messages in compliance with draft-ietf-6man-ipv6only-flag",
+        |s| &s.conf6.nd6_ignore_ipv6_only_ra,
+    );
+    let mld = node(t, inet6, 0, "mld", "IPv6 Multicast Listener Discovery");
+    t.add_handler(
+        mld,
+        Number::Auto,
+        "ifinfo",
+        "Per-interface MLDv2 state",
+        Arc::new(|args: &[i32], out: &mut Vec<u8>| {
+            let [i] = args else {
+                return Err(ReadError::Failed(Errno::EINVAL));
+            };
+            let i = u16::try_from(*i).map_err(|_| ReadError::Failed(Errno::EINVAL))?;
+            let info =
+                inet::mld6::ifinfo(&super::curvnet(), i).ok_or(ReadError::Failed(Errno::ENOENT))?;
+            for w in info {
+                out.extend_from_slice(&w.to_ne_bytes());
+            }
+            Ok(())
+        }),
+    )
+    .expect("net.inet6.mld.ifinfo");
+    let mcast = node(t, ip6, 0, "mcast", "IPv6 multicast");
+    t.add_handler(
+        mcast,
+        Number::Auto,
+        "filters",
+        "Per-interface stack-wide source filters",
+        Arc::new(|args: &[i32], out: &mut Vec<u8>| {
+            let [i, g @ ..] = args else {
+                return Err(ReadError::Failed(Errno::EINVAL));
+            };
+            if g.len() != 4 {
+                return Err(ReadError::Failed(Errno::EINVAL));
+            }
+            let i = u16::try_from(*i).map_err(|_| ReadError::Failed(Errno::EINVAL))?;
+            let mut group = [0u8; 16];
+            for (k, w) in g.iter().enumerate() {
+                group[k * 4..k * 4 + 4].copy_from_slice(&w.to_ne_bytes());
+            }
+            if let Some(mode) = inet::mld6::filter_mode(&super::curvnet(), i, &group) {
+                out.extend_from_slice(&mode.to_ne_bytes());
+            }
+            Ok(())
+        }),
+    )
+    .expect("net.inet6.ip6.mcast.filters");
+    vknob(t, mld, "v1enable", "Enable fallback to MLDv1", |s| {
+        &s.conf6.mld_v1enable
+    });
+    vknob(t, mld, "v2enable", "Enable MLDv2", |s| {
+        &s.conf6.mld_v2enable
+    });
+    vknob(
+        t,
+        mld,
+        "use_allow",
+        "Use ALLOW/BLOCK for RFC 4604 SSM joins/leaves",
+        |s| &s.conf6.mld_use_allow,
+    );
 }

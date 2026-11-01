@@ -43,6 +43,8 @@ fn v4(v: &Vnet, name: &[u8], last: u8) {
         vltime: u32::MAX,
         pltime: u32::MAX,
         vhid: 0,
+        created: 0,
+        updated: 0,
     };
     v.net.lock().add_addr(name, a).unwrap();
 }
@@ -438,7 +440,7 @@ fn multicast_memberships_count_references() {
     n.add_multi(a, g, true).unwrap();
     assert_eq!(n.add_multi(a, g, true), Err(Errno::EADDRINUSE));
     n.add_multi(a, g, false).unwrap();
-    let d = crate::rtmsg::ifmalist(&n, 0, 0);
+    let d = crate::rtmsg::ifmalist(&n, 0, 0, &[]);
     assert_eq!(usize::from(u16::from_ne_bytes([d[0], d[1]])), d.len());
     assert_eq!(d[3], abi::net::rtm::NEWMADDR);
     n.del_multi(a, g).unwrap();
@@ -446,5 +448,5 @@ fn multicast_memberships_count_references() {
     n.del_multi(a, g).unwrap();
     assert!(n.by_index(a).unwrap().maddrs.is_empty());
     assert_eq!(n.del_multi(a, g), Err(Errno::EADDRNOTAVAIL));
-    assert!(crate::rtmsg::ifmalist(&n, 0, 0).is_empty());
+    assert!(crate::rtmsg::ifmalist(&n, 0, 0, &[]).is_empty());
 }

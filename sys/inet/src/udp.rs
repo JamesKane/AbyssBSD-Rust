@@ -72,11 +72,16 @@ pub(crate) struct Dgram {
 }
 
 /// What a send's control messages ask of its one datagram (`udp_send`'s
-/// `IP_SENDSRCADDR` and `IP_TOS`).
+/// `IP_SENDSRCADDR` and `IP_TOS`; `ip6_setpktopts`' `IPV6_PKTINFO`,
+/// `IPV6_HOPLIMIT`, `IPV6_TCLASS`, and `IPV6_NEXTHOP`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SendCtl {
     pub src: Option<[u8; 4]>,
     pub tos: Option<u8>,
+    pub pktinfo6: Option<([u8; 16], u32)>,
+    pub hlim6: Option<i32>,
+    pub tclass6: Option<i32>,
+    pub nexthop6: Option<[u8; 16]>,
 }
 
 /// What a receive got.
@@ -190,6 +195,9 @@ impl Socket {
         ctl: SendCtl,
     ) -> Result<usize, Errno> {
         if let crate::Proto::Raw(_) = self.proto {
+            if self.family == Family::Inet6 {
+                return self.raw6_send(data, to, &ctl);
+            }
             return self.raw_send(data, to, cred);
         }
         let connected = {
@@ -303,6 +311,11 @@ impl Socket {
                 .flatten();
             let mut src = match mcast_src {
                 Some(r) => r?,
+                // IPv6's source is chosen below, with the table let go.
+                None if dst.family == Family::Inet6 => {
+                    let p = t.get(self.id).ok_or(Errno::EINVAL)?;
+                    Sockaddr::v6(p.laddr, p.lport, p.zone)
+                }
                 None => t.source_for(self.id, &dst)?,
             };
             if let Some(a) = ctl
@@ -319,33 +332,8 @@ impl Socket {
                 .udp_output4(data, &src, &dst, ctl.tos)
                 .map(|()| data.len());
         }
-        // IPv6 still goes straight to its receiver, over `lo0` (P7.5).
-        self.vnet.lo.looped(data.len() + 48);
-        let (ttl, tos) = {
-            let i = self.inner.lock();
-            match family {
-                Family::Inet => (i.ip.ttl, i.ip.tos),
-                Family::Inet6 => (
-                    hops(i.ip.hops),
-                    u8::try_from(i.ip.tclass.max(0)).unwrap_or(0),
-                ),
-            }
-        };
-        let target = UDB.lock().deliver(self.vnet.id, family, &src, &dst);
-        match target {
-            Some((rcvr, flags, flags2, rfamily)) => {
-                let orig = flags2 & inp::ORIGDSTADDR != 0;
-                let lo = self.vnet.net.lock().by_name(b"lo0").map_or(1, |i| i.index);
-                rcvr.dgram_append(&src, &dst, data, flags, orig, rfamily, ttl, tos, lo);
-            }
-            None if connected => {
-                // `udp_notify`: the error waits for the next call.
-                self.inner.lock().error = Some(Errno::ECONNREFUSED);
-                self.wake();
-            }
-            None => {}
-        }
-        Ok(data.len())
+        self.udp_output6(data, src, dst, connected, &ctl)
+            .map(|()| data.len())
     }
 
     /// `udp_append` and `rip_append`: queues a datagram from `src` to
@@ -845,6 +833,295 @@ pub(crate) fn ctlinput4(vnet: &Arc<Vnet>, t: u8, c: u8, oip: &Ip, ports: &[u8; 8
         .lookup4(vnet.id, oip.dst, dport, oip.src, sport, false)
         .and_then(crate::pcb::Pcb::socket);
     if let Some(so) = so {
+        so.inner.lock().error = Some(e);
+        so.wake();
+    }
+}
+
+impl Socket {
+    /// `udp6_send`'s output: `data` from `src` (chosen here if the
+    /// socket is not bound, or by `IPV6_PKTINFO`) to `dst` in a datagram
+    /// whose checksum's pseudo-header part is in the header for whoever
+    /// finishes it (`CSUM_UDP_IPV6`), through `ip6_output`.
+    fn udp_output6(
+        &self,
+        data: &[u8],
+        src: Sockaddr,
+        mut dst: Sockaddr,
+        connected: bool,
+        ctl: &SendCtl,
+    ) -> Result<(), Errno> {
+        let st = crate::state::of(&self.vnet);
+        let ulen = HDR + data.len();
+        let plen = u16::try_from(ulen).map_err(|_| Errno::EMSGSIZE)?;
+        let req = {
+            let mut r = self.srcreq(&dst, Some(ctl));
+            // `udp6_send`: a connected socket sends from its address.
+            if connected {
+                r.pktinfo = None;
+            }
+            r
+        };
+        let mut n = self.vnet.net.lock();
+        if dst.scope != 0 && n.by_index(u16::try_from(dst.scope).unwrap_or(0)).is_none() {
+            return Err(Errno::ENXIO);
+        }
+        let (saddr, ifp) = if connected && !is_unspecified(&src.addr) {
+            (src.addr, u16::try_from(src.scope).unwrap_or(0))
+        } else {
+            crate::in6::selectsrc(&n, &st, &req)?
+        };
+        if dst.scope == 0 && crate::in6::is_zoned(&dst.addr) {
+            dst.scope = u32::from(ifp);
+        }
+        let hops = self.inner.lock().ip.hops;
+        let faddr = connected.then_some((&dst.addr, u16::try_from(dst.scope).unwrap_or(0)));
+        let hlim = crate::in6::selecthlim(&n, hops, 0, faddr);
+        let mut m = Packet::for_output(ulen + crate::ip6::HDR_LEN).map_err(|_| Errno::ENOBUFS)?;
+        m.data.extend_from_slice(data).map_err(|_| Errno::ENOBUFS)?;
+        let mut uh = [0u8; HDR];
+        uh[0..2].copy_from_slice(&src.port.to_be_bytes());
+        uh[2..4].copy_from_slice(&dst.port.to_be_bytes());
+        uh[4..6].copy_from_slice(&plen.to_be_bytes());
+        let p = cksum::fold(crate::ip6::pseudo(&saddr, &dst.addr, ip::proto::UDP, ulen));
+        uh[6..8].copy_from_slice(&p.to_be_bytes());
+        m.hdr.csum_flags = csum::IP6_UDP;
+        m.hdr.csum_data = 6;
+        m.prepend(HDR)
+            .map_err(|_| Errno::ENOBUFS)?
+            .copy_from_slice(&uh);
+        let h = crate::ip6::Ip6::new(ip::proto::UDP, saddr, dst.addr, plen, hlim, 0);
+        m.prepend(crate::ip6::HDR_LEN)
+            .map_err(|_| Errno::ENOBUFS)?
+            .copy_from_slice(&h.bytes());
+        let mut o = self.opts6(&dst, Some(ctl), &saddr, ifp);
+        if connected {
+            o.ifindex = 0;
+        }
+        // `udp6_send`'s `CALC_FLOWID_OUTBOUND_SENDTO`.
+        if n.hash_outbound {
+            o.flowid = flow_hash6(&saddr, &dst.addr, src.port, dst.port, ip::proto::UDP);
+        }
+        st.udpstat.inc(udps::OPACKETS);
+        crate::ip6::output_in(&mut n, &st, m, &o)
+    }
+
+    /// Whether it joined IPv6 `group` on interface `ifindex`.
+    pub(crate) fn member6(&self, group: &[u8; 16], ifindex: u16) -> bool {
+        self.inner
+            .lock()
+            .groups6
+            .iter()
+            .any(|(g, i)| g == group && *i == ifindex)
+    }
+
+    /// Whether it joined any IPv6 group (has `in6p_moptions` memberships).
+    pub(crate) fn has_groups6(&self) -> bool {
+        !self.inner.lock().groups6.is_empty()
+    }
+}
+
+/// `fib6_calc_software_hash`: a flow for a packet of this host's, from
+/// its addresses, ports, and protocol (`struct _hash_5tuple_ipv6`).
+#[must_use]
+pub(crate) fn flow_hash6(src: &[u8; 16], dst: &[u8; 16], sport: u16, dport: u16, proto: u8) -> u32 {
+    let mut d = [0u8; 40];
+    d[..16].copy_from_slice(src);
+    d[16..32].copy_from_slice(dst);
+    d[32..34].copy_from_slice(&sport.to_be_bytes());
+    d[34..36].copy_from_slice(&dport.to_be_bytes());
+    d[36] = proto;
+    ip::toeplitz(&ip::MPATH_KEY, &d)
+}
+
+/// `udp6_input`: a datagram for this host at `off` of IPv6 packet `m`,
+/// checked (its checksum is not optional), to the socket bound to its
+/// destination, or to each that may hear a multicast one; a port no one
+/// is bound to is answered with ICMPv6 port unreachable.
+pub(crate) fn input6(vnet: &Arc<Vnet>, mut m: Packet, off: usize) {
+    let st = crate::state::of(vnet);
+    st.udpstat.inc(udps::IPACKETS);
+    let Ok(ip6) = m.header::<crate::ip6::Ip6>(0) else {
+        return;
+    };
+    if m.len() < off + HDR {
+        st.udpstat.inc(udps::HDROPS);
+        return;
+    }
+    let mut uh = [0u8; HDR];
+    m.data.copy_out(off, &mut uh);
+    let sport = u16::from_be_bytes([uh[0], uh[1]]);
+    let dport = u16::from_be_bytes([uh[2], uh[3]]);
+    let ulen = usize::from(u16::from_be_bytes([uh[4], uh[5]]));
+    let sum = u16::from_be_bytes([uh[6], uh[7]]);
+    let plen = usize::from(ip6.plen) + crate::ip6::HDR_LEN - off;
+    if plen != ulen {
+        st.udpstat.inc(udps::BADLEN);
+        return;
+    }
+    if sum == 0 {
+        st.udpstat.inc(udps::NOSUM);
+        return;
+    }
+    let f = m.hdr.csum_flags;
+    let bad = if f & csum::DATA_VALID != 0 {
+        let s = if f & csum::PSEUDO_HDR != 0 {
+            #[allow(clippy::cast_possible_truncation, reason = "a 16-bit sum")]
+            {
+                m.hdr.csum_data as u16
+            }
+        } else {
+            cksum::fold(
+                crate::ip6::pseudo(&ip6.src, &ip6.dst, ip::proto::UDP, ulen)
+                    + u64::from(m.hdr.csum_data),
+            )
+        };
+        s ^ 0xffff != 0
+    } else {
+        crate::ip6::cksum6(&m, ip::proto::UDP, off, ulen) != 0
+    };
+    if bad {
+        st.udpstat.inc(udps::BADSUM);
+        return;
+    }
+    let rcvif = m.hdr.rcvif;
+    let zone = |a: &[u8; 16]| {
+        if crate::in6::is_zoned(a) {
+            u32::from(rcvif)
+        } else {
+            0
+        }
+    };
+    let from = Sockaddr::v6(ip6.src, sport, zone(&ip6.src));
+    let to = Sockaddr::v6(ip6.dst, dport, zone(&ip6.dst));
+    let mut data = alloc::vec![0u8; ulen - HDR];
+    m.data.copy_out(off + HDR, &mut data);
+    if net::addr::is_multicast6(&ip6.dst) {
+        multi_input6(vnet, &st, &from, &to, &data, &ip6, rcvif);
+        return;
+    }
+    let target = UDB.lock().deliver(vnet.id, Family::Inet6, &from, &to);
+    let Some((so, flags, flags2, family)) = target else {
+        st.udpstat.inc(udps::NOPORT);
+        if m.hdr.flags & mbuf::flags::MCAST != 0 {
+            st.udpstat.inc(udps::NOPORTMCAST);
+            return;
+        }
+        if crate::state::on(&st.conf.udp_blackhole)
+            && (crate::state::on(&st.conf.udp_blackhole_local)
+                || !crate::in6::is_local(&vnet.net.lock(), &ip6.src))
+        {
+            return;
+        }
+        crate::icmp6::error(
+            vnet,
+            m,
+            crate::icmp6::ty::DST_UNREACH,
+            crate::icmp6::code::DST_UNREACH_NOPORT,
+            0,
+        );
+        return;
+    };
+    let orig = flags2 & inp::ORIGDSTADDR != 0;
+    so.dgram_append(
+        &from,
+        &to,
+        &data,
+        flags,
+        orig,
+        family,
+        ip6.hlim,
+        ip6.tclass(),
+        rcvif,
+    );
+}
+
+/// `udp6_multi_input`: a multicast datagram to each socket bound to its
+/// port that joined its group (or has no memberships), until one without
+/// `SO_REUSEADDR` or `SO_REUSEPORT`.
+fn multi_input6(
+    vnet: &Arc<Vnet>,
+    st: &crate::state::State,
+    from: &Sockaddr,
+    to: &Sockaddr,
+    data: &[u8],
+    ip6: &crate::ip6::Ip6,
+    rcvif: u16,
+) {
+    let candidates: Vec<(Arc<Socket>, i32, i32, Family)> = {
+        let t = UDB.lock();
+        t.pcbs
+            .values()
+            .filter(|p| {
+                p.vnet.id == vnet.id
+                    && p.lport == to.port
+                    && p.vflag & abi::inet::INP_IPV6 != 0
+                    && (is_unspecified(&p.laddr) || p.laddr == ip6.dst)
+                    && (is_unspecified(&p.faddr) || (p.faddr == ip6.src && p.fport == from.port))
+            })
+            .filter_map(|p| p.socket().map(|s| (s, p.flags, p.flags2, p.family)))
+            .collect()
+    };
+    let mut appends = 0;
+    for (so, flags, flags2, family) in candidates {
+        if so.has_groups6() && !so.member6(&ip6.dst, rcvif) {
+            st.ip6stat.inc(crate::state::ip6s::NOTMEMBER);
+            continue;
+        }
+        let orig = flags2 & inp::ORIGDSTADDR != 0;
+        if so.dgram_append(
+            from,
+            to,
+            data,
+            flags,
+            orig,
+            family,
+            ip6.hlim,
+            ip6.tclass(),
+            rcvif,
+        ) {
+            appends += 1;
+        }
+        if so.so_options() & (abi::socket::SO_REUSEPORT | abi::socket::SO_REUSEADDR) == 0 {
+            break;
+        }
+    }
+    if appends == 0 {
+        st.udpstat.inc(udps::NOPORT);
+        st.udpstat.inc(udps::NOPORTMCAST);
+    }
+}
+
+/// `udp6_common_ctlinput`: an ICMPv6 error about a datagram this host
+/// sent (its UDP header at `ctl.off` of `m`) is the error of the
+/// connected socket that sent it.
+pub(crate) fn ctlinput6(vnet: &Arc<Vnet>, m: &Packet, ctl: &crate::icmp6::Ctl) {
+    let Some(e) = crate::icmp6::errmap(ctl.t, ctl.c) else {
+        return;
+    };
+    let mut ports = [0u8; 4];
+    if m.data.copy_out(ctl.off, &mut ports) != 4 {
+        return;
+    }
+    let sport = u16::from_be_bytes([ports[0], ports[1]]);
+    let dport = u16::from_be_bytes([ports[2], ports[3]]);
+    // `in6_pcbnotify`: the sockets connected to that destination port
+    // from that source.
+    let targets: Vec<Arc<Socket>> = UDB
+        .lock()
+        .pcbs
+        .values()
+        .filter(|p| {
+            p.vnet.id == vnet.id
+                && p.vflag & abi::inet::INP_IPV6 != 0
+                && p.faddr == ctl.dst
+                && p.fport == dport
+                && p.lport == sport
+                && (is_unspecified(&ctl.src) || p.laddr == ctl.src)
+        })
+        .filter_map(crate::pcb::Pcb::socket)
+        .collect();
+    for so in targets {
         so.inner.lock().error = Some(e);
         so.wake();
     }

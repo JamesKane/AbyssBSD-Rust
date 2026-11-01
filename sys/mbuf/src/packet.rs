@@ -38,6 +38,13 @@ pub mod flags {
     pub const PROMISC: u32 = 0x0000_0040;
     pub const VLANTAG: u32 = 0x0000_0080;
     pub const TSTMP: u32 = 0x0000_0400;
+    /// IPv6: came back through a loopback path (`M_LOOP`, which
+    /// `if_simloop` sets).
+    pub const LOOP: u32 = 0x0000_1000;
+    /// IPv6: had a Router Alert option for MLD (`M_RTALERT_MLD`).
+    pub const RTALERT_MLD: u32 = 0x0000_2000;
+    /// IPv6: put together from fragments (`M_FRAGMENTED`).
+    pub const FRAGMENTED: u32 = 0x0000_4000;
 }
 
 /// Flow hash types (`M_HASHTYPE_*`).

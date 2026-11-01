@@ -1,0 +1,3 @@
+# An address added by hand: its duplicate address detection solicitation and its solicited-node group's MLDv2 reports; then its removal's reports.
+filter: (icmp6 and ip6[40] == 135) or (ip6[6] == 0 and ip6[48] == 143)
+guest: ifconfig vtnet0 inet6 fd77:77:77::99/64 alias; sleep 4; ifconfig vtnet0 inet6 fd77:77:77::99 -alias; sleep 4

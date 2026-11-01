@@ -532,6 +532,12 @@ pub mod sio {
     pub const SIOCSIFINFO_IN6: u32 = ioc(INOUT, b'i', 109, size_of::<In6Ndireq>());
     pub const SIOCSDEFIFACE_IN6: u32 = ioc(INOUT, b'i', 85, size_of::<In6Ndifreq>());
     pub const SIOCGDEFIFACE_IN6: u32 = ioc(INOUT, b'i', 86, size_of::<In6Ndifreq>());
+    pub const SIOCSIFINFO_FLAGS: u32 = ioc(INOUT, b'i', 87, size_of::<In6Ndireq>());
+    pub const SIOCSNDFLUSH_IN6: u32 = ioc(INOUT, b'i', 77, IN6IFREQ);
+    /// `struct in6_nbrinfo` is 56 bytes.
+    pub const SIOCGNBRINFO_IN6: u32 = ioc(INOUT, b'i', 78, 56);
+    pub const SIOCSPFXFLUSH_IN6: u32 = ioc(INOUT, b'i', 79, IN6IFREQ);
+    pub const SIOCSRTRFLUSH_IN6: u32 = ioc(INOUT, b'i', 80, IN6IFREQ);
     pub const SIOCAADDRCTL_POLICY: u32 = ioc(IN, b'u', 108, size_of::<In6Addrpolicy>());
     pub const SIOCDADDRCTL_POLICY: u32 = ioc(IN, b'u', 109, size_of::<In6Addrpolicy>());
 }
@@ -831,6 +837,31 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
         "SIOCGDEFIFACE_IN6",
         "netinet6/in6_var.h",
         sio::SIOCGDEFIFACE_IN6 as i64,
+    ),
+    c(
+        "SIOCSIFINFO_FLAGS",
+        "netinet6/in6_var.h",
+        sio::SIOCSIFINFO_FLAGS as i64,
+    ),
+    c(
+        "SIOCSNDFLUSH_IN6",
+        "netinet6/in6_var.h",
+        sio::SIOCSNDFLUSH_IN6 as i64,
+    ),
+    c(
+        "SIOCGNBRINFO_IN6",
+        "netinet6/in6_var.h",
+        sio::SIOCGNBRINFO_IN6 as i64,
+    ),
+    c(
+        "SIOCSPFXFLUSH_IN6",
+        "netinet6/in6_var.h",
+        sio::SIOCSPFXFLUSH_IN6 as i64,
+    ),
+    c(
+        "SIOCSRTRFLUSH_IN6",
+        "netinet6/in6_var.h",
+        sio::SIOCSRTRFLUSH_IN6 as i64,
     ),
     c(
         "SIOCAADDRCTL_POLICY",

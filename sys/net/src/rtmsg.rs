@@ -194,23 +194,14 @@ pub fn iflist(n: &Net, af: u8, ifindex: i32, long: bool) -> Vec<u8> {
 /// memberships of family `af` (0 for all), as `RTM_NEWMADDR` records with
 /// the interface and the group.
 #[must_use]
-pub fn ifmalist(n: &Net, af: u8, ifindex: i32) -> Vec<u8> {
+pub fn ifmalist(n: &Net, af: u8, ifindex: i32, groups6: &[(u16, In6)]) -> Vec<u8> {
     let mut out = Vec::new();
-    if af != 0 && af != AF_LINK {
-        return out;
-    }
     for ifp in &n.ifaces {
         if ifindex != 0 && i32::from(ifp.index) != ifindex {
             continue;
         }
-        for (ll, _) in &ifp.maddrs {
-            let h = abi::net::IfmaMsghdr {
-                ifmam_index: ifp.index,
-                ..abi::net::IfmaMsghdr::default()
-            };
-            let mut v = Vec::new();
-            put(&mut v, &h);
-            // The group as `ether_resolvemulti` makes it (`link_init_sdl`).
+        let lladdr = |ll: &[u8; 6]| {
+            // A group as `ether_resolvemulti` makes it (`link_init_sdl`).
             let mut g = alloc::vec![0u8; 54];
             g[0] = 54;
             g[1] = AF_LINK;
@@ -218,12 +209,43 @@ pub fn ifmalist(n: &Net, af: u8, ifindex: i32) -> Vec<u8> {
             g[4] = ifp.ty;
             g[6] = 6;
             g[8..14].copy_from_slice(ll);
-            let mut addrs: [Option<Vec<u8>>; 8] = Default::default();
-            addrs[4] = Some(link_sockaddr(ifp));
-            addrs[5] = Some(g);
+            g
+        };
+        let mut emit = |addrs: [Option<Vec<u8>>; 8]| {
+            let h = abi::net::IfmaMsghdr {
+                ifmam_index: ifp.index,
+                ..abi::net::IfmaMsghdr::default()
+            };
+            let mut v = Vec::new();
+            put(&mut v, &h);
             let (mut r, bits) = record(v, rtm::NEWMADDR, &addrs);
             set_addrs(&mut r, bits);
             out.extend(r);
+        };
+        // IPv6's groups (`in6_multi`), each with its link-layer group.
+        if af == 0 || af == AF_INET6 {
+            for (_, g) in groups6.iter().filter(|(i, _)| *i == ifp.index) {
+                let mut addrs: [Option<Vec<u8>>; 8] = Default::default();
+                if ifp.lladdr.is_some() {
+                    addrs[1] = Some(lladdr(&[0x33, 0x33, g[12], g[13], g[14], g[15]]));
+                }
+                addrs[4] = Some(link_sockaddr(ifp));
+                let zone = if is_linklocal6(g) || g[1] & 0x0f == 1 {
+                    u32::from(ifp.index)
+                } else {
+                    0
+                };
+                addrs[5] = Some(sockaddr_in6(g, 0, zone));
+                emit(addrs);
+            }
+        }
+        if af == 0 || af == AF_LINK {
+            for (ll, _) in &ifp.maddrs {
+                let mut addrs: [Option<Vec<u8>>; 8] = Default::default();
+                addrs[4] = Some(link_sockaddr(ifp));
+                addrs[5] = Some(lladdr(ll));
+                emit(addrs);
+            }
         }
     }
     out

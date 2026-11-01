@@ -1,0 +1,4 @@
+# A datagram to a closed UDP port over IPv6: the peer's ICMPv6 port unreachable.
+filter: udp port 40006 or (icmp6 and ip6[40] == 1)
+ports: 40006
+guest: echo x | nc -6 -u -w 1 fd77:77:77::1 40006

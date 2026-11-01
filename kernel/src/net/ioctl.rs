@@ -18,7 +18,7 @@ use abi::inet::{AF_INET, AF_INET6};
 use abi::ioctl::{FIOASYNC, FIONBIO, FIONREAD, FIONSPACE, FIONWRITE};
 use abi::net::{IFNAMSIZ, iff, nd6_iff, sio};
 use inet::addr::{In6, from_v4, v4_of};
-use inet::ifnet::{INFINITE, Ifaddr, Ifnet, LOMTU, Net};
+use inet::ifnet::{INFINITE, Ifaddr, Ifnet, Net};
 
 use super::curvnet;
 use inet::{Family, Socket};
@@ -73,50 +73,24 @@ pub(crate) fn soioctl(so: &Socket, req: u32, arg: &mut [u8]) -> Result<usize, Er
     }
 }
 
-/// The address selection policy table (`addrsel_policytab`), which
-/// `ip6addrctl(8)` installs; source selection here has only `lo0`'s
-/// addresses to choose from, so it is kept but not consulted.
-static POLICY: sync::SpinLock<Vec<abi::net::In6Addrpolicy>> = sync::SpinLock::new(Vec::new());
-
-/// `ND6_IFF_DEFAULTIF`'s interface (`V_nd6_defifindex`).
-static DEFIFINDEX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-
 /// `add_addrsel_policyent` and `delete_addrsel_policyent`.
 fn policy(add: bool, arg: &[u8]) -> Result<usize, Errno> {
     let mut p = abi::net::In6Addrpolicy::default();
     let b = crate::uaccess::bytes_of_mut(&mut p);
     let n = b.len().min(arg.len());
     b[..n].copy_from_slice(&arg[..n]);
-    // `ADDR_LABEL_NOTAPP`, and a mask that is not a prefix.
-    if p.label == -1 {
-        return Err(Errno::EINVAL);
-    }
-    let m = p.addrmask.sin6_addr;
-    let plen = plen_of(&m);
-    if mask6(plen) != m {
-        return Err(Errno::EINVAL);
-    }
-    let same = |e: &abi::net::In6Addrpolicy| {
-        e.addr.sin6_addr == p.addr.sin6_addr && e.addrmask.sin6_addr == p.addrmask.sin6_addr
-    };
-    let mut t = POLICY.lock();
     if add {
-        if t.iter().any(same) {
-            return Err(Errno::EEXIST);
-        }
-        p.r#use = 0;
-        t.push(p);
+        inet::in6::policy_add(p)?;
     } else {
-        let i = t.iter().position(same).ok_or(Errno::ESRCH)?;
-        t.remove(i);
+        inet::in6::policy_delete(&p)?;
     }
     Ok(0)
 }
 
 /// `net.inet6.ip6.addrctlpolicy`'s records.
 pub(crate) fn policies(out: &mut Vec<u8>) {
-    for p in POLICY.lock().iter() {
-        out.extend_from_slice(crate::uaccess::bytes_of(p));
+    for p in inet::in6::policies() {
+        out.extend_from_slice(crate::uaccess::bytes_of(&p));
     }
 }
 
@@ -682,6 +656,8 @@ fn in_control(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
                 vltime: INFINITE,
                 pltime: INFINITE,
                 vhid: rd32(arg, 64),
+                created: 0,
+                updated: 0,
             };
             n.add_addr(&name, a)?;
             Ok(0)
@@ -713,24 +689,19 @@ fn in6_control(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
     let name = name_of(arg).to_vec();
     match req {
         sio::SIOCGDEFIFACE_IN6 => {
-            let v = DEFIFINDEX.load(core::sync::atomic::Ordering::Relaxed);
+            let v = u64::from(inet::nd6_rtr::defifindex(&curvnet()));
             arg[IFNAMSIZ..IFNAMSIZ + 8].copy_from_slice(&v.to_ne_bytes());
             Ok(0)
         }
         sio::SIOCSDEFIFACE_IN6 => {
             priv_check(Priv::NetinetNd6)?;
             let v = u64::from_ne_bytes(arg[IFNAMSIZ..IFNAMSIZ + 8].try_into().unwrap_or([0; 8]));
-            if v != 0
-                && curvnet()
-                    .net
-                    .lock()
-                    .by_index(u16::try_from(v).map_err(|_| Errno::EINVAL)?)
-                    .is_none()
-            {
+            let vn = curvnet();
+            let v = u16::try_from(v).map_err(|_| Errno::EINVAL)?;
+            if v != 0 && vn.net.lock().by_index(v).is_none() {
                 return Err(Errno::EINVAL);
             }
-            // Relaxed: one word, read alone.
-            DEFIFINDEX.store(v, core::sync::atomic::Ordering::Relaxed);
+            inet::nd6_rtr::set_defifindex(&vn, v);
             Ok(0)
         }
         sio::SIOCGIFINFO_IN6 => {
@@ -738,14 +709,14 @@ fn in6_control(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
             let n = vn.net.lock();
             let i = ifp(&n, arg)?;
             let ndi = abi::net::NdIfinfo {
-                linkmtu: i.mtu,
-                maxmtu: LOMTU,
-                basereachable: 30_000,
-                reachable: 30_000,
-                retrans: 1000,
+                linkmtu: i.nd.linkmtu,
+                maxmtu: i.mtu,
+                basereachable: i.nd.basereachable,
+                reachable: i.nd.reachable,
+                retrans: i.nd.retrans,
                 flags: i.nd6_flags,
-                recalctm: 7200,
-                chlim: 64,
+                recalctm: i.nd.recalctm,
+                chlim: i.nd.chlim,
                 initialized: 1,
                 ..abi::net::NdIfinfo::default()
             };
@@ -753,24 +724,136 @@ fn in6_control(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
             arg[IFNAMSIZ..IFNAMSIZ + b.len()].copy_from_slice(b);
             Ok(0)
         }
-        sio::SIOCSIFINFO_IN6 => {
+        sio::SIOCSIFINFO_IN6 | sio::SIOCSIFINFO_FLAGS => {
             priv_check(Priv::NetinetNd6)?;
-            let flags = rd32(arg, IFNAMSIZ + 20);
+            let linkmtu = rd32(arg, IFNAMSIZ);
+            let basereachable = rd32(arg, IFNAMSIZ + 8);
+            let retrans = rd32(arg, IFNAMSIZ + 16);
+            let mut flags = rd32(arg, IFNAMSIZ + 20);
+            let chlim = arg.get(IFNAMSIZ + 28).copied().unwrap_or(0);
             let vn = curvnet();
+            let st = inet::state::of(&vn);
             let mut n = vn.net.lock();
             let i = ifp(&n, arg)?;
             let index = i.index;
             let was = i.nd6_flags;
             let up = i.flags & iff::UP != 0;
-            n.with_iface(&name, |i| i.nd6_flags = flags);
-            // IPv6 enabled again, or link-local addresses wanted, on an
-            // interface that is up (`nd6_ioctl`).
-            if up
-                && ((was & nd6_iff::IFDISABLED != 0 && flags & nd6_iff::IFDISABLED == 0)
-                    || (was & nd6_iff::AUTO_LINKLOCAL == 0 && flags & nd6_iff::AUTO_LINKLOCAL != 0))
-            {
+            if req == sio::SIOCSIFINFO_IN6 {
+                if linkmtu != 0 && (linkmtu < 1280 || linkmtu > i.linkmtu6()) {
+                    return Err(Errno::EINVAL);
+                }
+                let old_base = i.nd.basereachable;
+                n.with_iface(&name, |i| {
+                    if linkmtu != 0 {
+                        i.nd.linkmtu = linkmtu;
+                    }
+                    if basereachable != 0 {
+                        i.nd.basereachable = basereachable;
+                        if basereachable != old_base {
+                            i.nd.reachable = inet::nd6::rtime(basereachable);
+                        }
+                    }
+                    if retrans != 0 {
+                        i.nd.retrans = retrans;
+                    }
+                    if chlim != 0 {
+                        i.nd.chlim = chlim;
+                    }
+                });
+            }
+            // `nd6_ioctl`'s `SIOCSIFINFO_FLAGS`: IPv6 enabled again unless
+            // a link-local address is a duplicate, or disabled with every
+            // address tentative again.
+            let mut attach = false;
+            let mut if_up = false;
+            if was & nd6_iff::IFDISABLED != 0 && flags & nd6_iff::IFDISABLED == 0 {
+                let dup = n.by_index(index).is_some_and(|i| {
+                    i.addrs.iter().any(|a| {
+                        a.family == Family::Inet6
+                            && a.flags6 & net::ifnet::in6_iff::DUPLICATED != 0
+                            && inet::in6::is_linklocal(&a.addr)
+                    })
+                });
+                if dup {
+                    flags |= nd6_iff::IFDISABLED;
+                    crate::klog::log(
+                        3,
+                        format_args!(
+                            "Cannot enable an interface with a link-local address marked duplicate.\n"
+                        ),
+                    );
+                } else {
+                    n.with_iface(&name, |i| i.nd6_flags &= !nd6_iff::IFDISABLED);
+                    if_up = up;
+                }
+            } else if was & nd6_iff::IFDISABLED == 0 && flags & nd6_iff::IFDISABLED != 0 {
+                let dad =
+                    inet::state::val_of(&st.conf6.dad_count) > 0 && was & nd6_iff::NO_DAD == 0;
+                n.with_iface(&name, |i| {
+                    i.nd6_flags |= nd6_iff::IFDISABLED;
+                    if dad {
+                        for a in i.addrs.iter_mut().filter(|a| a.family == Family::Inet6) {
+                            a.flags6 |= net::ifnet::in6_iff::TENTATIVE;
+                        }
+                    }
+                });
+            }
+            if flags & nd6_iff::AUTO_LINKLOCAL != 0 {
+                if was & nd6_iff::AUTO_LINKLOCAL == 0 {
+                    n.with_iface(&name, |i| i.nd6_flags |= nd6_iff::AUTO_LINKLOCAL);
+                    attach = true;
+                } else if flags & nd6_iff::IFDISABLED == 0 && up {
+                    attach = n.by_index(index).is_some_and(|i| {
+                        i.addrs
+                            .iter()
+                            .any(|a| a.family == Family::Inet6 && inet::in6::is_linklocal(&a.addr))
+                    });
+                }
+            }
+            if if_up {
+                n.in6_if_up(index);
+            }
+            if attach {
                 n.in6_ifattach(index);
             }
+            n.with_iface(&name, |i| i.nd6_flags = flags);
+            Ok(0)
+        }
+        sio::SIOCSNDFLUSH_IN6 | sio::SIOCSRTRFLUSH_IN6 => {
+            priv_check(Priv::NetinetNd6)?;
+            ifp(&curvnet().net.lock(), arg)?;
+            if req == sio::SIOCSRTRFLUSH_IN6 {
+                inet::nd6_rtr::flush_routers(&curvnet());
+            } else {
+                inet::nd6_rtr::reset_routers(&curvnet());
+            }
+            Ok(0)
+        }
+        sio::SIOCSPFXFLUSH_IN6 => {
+            priv_check(Priv::NetinetNd6)?;
+            ifp(&curvnet().net.lock(), arg)?;
+            inet::nd6_rtr::flush_prefixes(&curvnet());
+            Ok(0)
+        }
+        sio::SIOCGNBRINFO_IN6 => {
+            let addr: In6 = arg
+                .get(16..32)
+                .and_then(|b| b.try_into().ok())
+                .ok_or(Errno::EINVAL)?;
+            let vn = curvnet();
+            let n = vn.net.lock();
+            let i = ifp(&n, arg)?;
+            let e = n.lle(i.index, Family::Inet6, &addr).ok_or(Errno::EINVAL)?;
+            let expire = if e.expire == 0 {
+                0
+            } else {
+                let real = u64::try_from(super::now_s()).unwrap_or(0);
+                (e.expire + e.remtime / 1_000_000_000 + real).saturating_sub(super::uptime_s())
+            };
+            arg[32..40].copy_from_slice(&i64::from(e.asked).to_ne_bytes());
+            arg[40..44].copy_from_slice(&i32::from(e.router).to_ne_bytes());
+            arg[44..48].copy_from_slice(&i32::from(e.state).to_ne_bytes());
+            arg[48..52].copy_from_slice(&i32::try_from(expire).unwrap_or(i32::MAX).to_ne_bytes());
             Ok(0)
         }
         sio::SIOCGIFAFLAG_IN6
@@ -788,7 +871,16 @@ fn in6_control(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
             match req {
                 sio::SIOCGIFAFLAG_IN6 => u[..4].copy_from_slice(&a.flags6.to_ne_bytes()),
                 sio::SIOCGIFALIFETIME_IN6 => {
-                    // `in6_addrlifetime`: no expiry for infinite lifetimes.
+                    // `in6_addrlifetime`: expiry on the uptime clock, none
+                    // for infinite lifetimes.
+                    if a.vltime != INFINITE {
+                        let e = i64::try_from(a.updated + u64::from(a.vltime)).unwrap_or(i64::MAX);
+                        u[0..8].copy_from_slice(&e.to_ne_bytes());
+                    }
+                    if a.pltime != INFINITE {
+                        let p = i64::try_from(a.updated + u64::from(a.pltime)).unwrap_or(i64::MAX);
+                        u[8..16].copy_from_slice(&p.to_ne_bytes());
+                    }
                     u[16..20].copy_from_slice(&a.vltime.to_ne_bytes());
                     u[20..24].copy_from_slice(&a.pltime.to_ne_bytes());
                 }
@@ -817,8 +909,18 @@ fn in6_control(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
             Ok(0)
         }
         sio::SIOCGIFSTAT_IN6 | sio::SIOCGIFSTAT_ICMP6 => {
-            ifp(&curvnet().net.lock(), arg)?;
-            arg[IFRU..].fill(0);
+            let vn = curvnet();
+            let n = vn.net.lock();
+            let i = ifp(&n, arg)?;
+            let b = if req == sio::SIOCGIFSTAT_IN6 {
+                i.stats.in6_bytes()
+            } else {
+                i.stats.icmp6_bytes()
+            };
+            let u = &mut arg[IFRU..];
+            u.fill(0);
+            let k = b.len().min(u.len());
+            u[..k].copy_from_slice(&b[..k]);
             Ok(0)
         }
         sio::SIOCAIFADDR_IN6 => {
@@ -836,7 +938,10 @@ fn in6_control(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
             if plen > 128 {
                 return Err(Errno::EINVAL);
             }
-            curvnet().net.lock().add_addr(
+            if vl != 0 && pl > vl {
+                return Err(Errno::EINVAL);
+            }
+            curvnet().net.lock().add_addr_flags(
                 &name,
                 Ifaddr {
                     family: Family::Inet6,
@@ -848,7 +953,10 @@ fn in6_control(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
                     vltime: if vl == 0 { INFINITE } else { vl },
                     pltime: if pl == 0 { INFINITE } else { pl },
                     vhid: rd32(arg, 136),
+                    created: 0,
+                    updated: 0,
                 },
+                net::ifnet::ifa6_update::AIFADDR,
             )?;
             Ok(0)
         }

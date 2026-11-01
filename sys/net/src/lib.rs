@@ -104,6 +104,49 @@ pub(crate) fn log(pri: i32, msg: &str) {
     }
 }
 
+/// What IPv6 (in the protocols' crate) does for the interface layer,
+/// under the interfaces' lock: neighbor discovery's resolution, and
+/// what an address or interface coming and going sets off (DAD, the
+/// multicast groups an address joins, its ND state).
+#[derive(Clone, Copy, Debug)]
+pub struct In6Hooks {
+    /// `nd6_resolve` for a unicast next hop on an interface: the
+    /// neighbor's address, or the packet held while it is solicited
+    /// (taken from the slot).
+    pub resolve: fn(
+        &mut ifnet::Net,
+        u16,
+        &addr::In6,
+        &mut Option<mbuf::Packet>,
+    ) -> Result<arp::Resolved, abi::errno::Errno>,
+    /// `in6_broadcast_ifa`: an address was added to an interface (new if
+    /// the flag says so), with `ifnet::ifa6_update` flags.
+    pub ifa_added: fn(&mut ifnet::Net, u16, &addr::In6, bool, u32),
+    /// `in6_purgeaddr`: an address left an interface.
+    pub ifa_removed: fn(&mut ifnet::Net, u16, &ifnet::Ifaddr),
+    /// `in6_if_up`: an interface came up.
+    pub if_up: fn(&mut ifnet::Net, u16),
+    /// `in6_ifdetach`: an interface is leaving the VNET.
+    pub if_detach: fn(&mut ifnet::Net, u16),
+    /// `nd6_lle_event`: a published (proxy) entry for an address came
+    /// (true) or went, whose solicited-node group the interface joins or
+    /// leaves.
+    pub proxy: fn(&mut ifnet::Net, u16, &addr::In6, bool),
+}
+
+static IN6: sync::Once<In6Hooks> = sync::Once::new();
+
+/// Sets IPv6's hooks.
+pub fn set_in6_hooks(h: In6Hooks) {
+    let _ = IN6.set(h);
+}
+
+/// IPv6's hooks, once set.
+#[must_use]
+pub fn in6_hooks() -> Option<&'static In6Hooks> {
+    IN6.get()
+}
+
 /// Registers the link layer's protocols with `netisr`: Ethernet input,
 /// and ARP behind it.
 pub fn init() {
