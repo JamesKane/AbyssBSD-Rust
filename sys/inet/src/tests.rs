@@ -32,9 +32,12 @@ pub(crate) fn setup() -> std::sync::MutexGuard<'static, ()> {
     });
     // The `netisr` thread's work, done as soon as there is some.
     net::netisr::set_kick(|| {
-        for v in net::Vnet::all() {
-            net::netisr::drain(&v);
-        }
+        while net::Vnet::all()
+            .iter()
+            .map(net::netisr::drain)
+            .sum::<usize>()
+            > 0
+        {}
     });
     ifnet::configure_loopback(&mut net().lock(), 0);
     g

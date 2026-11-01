@@ -6,7 +6,8 @@
 //! handler each, for every VNET.
 //!
 //! The kernel's `netisr` thread drains them: a queue going from empty to
-//! not calls the kick hook, and the thread calls [`drain`].
+//! not calls the kick hook, and the thread calls [`drain`] on each VNET
+//! in turn until all are empty.
 //!
 //! Behavior reference: sys/net/netisr.c (`netisr_queue_src`,
 //! `netisr_process_workstream_proto`, `net.isr.defaultqlimit`).
@@ -134,12 +135,18 @@ pub fn dispatch(vnet: &Arc<Vnet>, proto: Proto, m: Packet) {
     }
 }
 
-/// Hands everything queued in `vnet` to its protocol, in order; returns
-/// how many packets there were.
+/// Hands what was queued in `vnet` when it was called to its protocol,
+/// in order; returns how many packets there were. What the handlers
+/// queue meanwhile waits for the next call, as
+/// `netisr_process_workstream_proto` takes a snapshot of its queue: a
+/// VNET whose input keeps queueing more (a loopback flood) cannot starve
+/// the others.
 pub fn drain(vnet: &Arc<Vnet>) -> usize {
-    let mut n = 0;
-    while let Some((proto, m)) = vnet.netisr.pop() {
-        n += 1;
+    let n = vnet.netisr.len();
+    for _ in 0..n {
+        let Some((proto, m)) = vnet.netisr.pop() else {
+            break;
+        };
         let h = HANDLERS.lock()[proto as usize];
         match h {
             Some(h) => {

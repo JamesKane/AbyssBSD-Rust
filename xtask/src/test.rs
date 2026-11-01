@@ -339,7 +339,6 @@ const BOOT_CASES: &[BootCase] = &[
     },
 ];
 
-
 /// The multi-user boot (docs/MULTIUSER.md §14): the installed root boots
 /// to `login:`, and [`crate::multiuser::login_script`] logs in on `ttyv0`
 /// (QEMU) and the serial console, checks the daemons, and shuts down;

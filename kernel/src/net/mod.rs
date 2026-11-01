@@ -56,7 +56,8 @@ fn netisr_kick() {
 }
 
 /// The `netisr` thread (`swi1: netisr 0`): hands each VNET's queued
-/// packets to their protocols.
+/// packets to their protocols, a queue's worth at a time per VNET, until
+/// none is left (packets queued behind others did not kick).
 fn start_netisr() {
     net::netisr::set_kick(netisr_kick);
     let _ = sched::spawn("netisr", sched::Priority::KERNEL, |s| {
@@ -64,8 +65,15 @@ fn start_netisr() {
             NETISR_WQ.wait_until(s, || {
                 NETISR_WORK.swap(false, core::sync::atomic::Ordering::Acquire)
             });
-            for v in net::Vnet::all() {
-                net::netisr::drain(&v);
+            loop {
+                let mut more = false;
+                for v in net::Vnet::all() {
+                    net::netisr::drain(&v);
+                    more |= !v.netisr.is_empty();
+                }
+                if !more {
+                    break;
+                }
             }
         }
     });
