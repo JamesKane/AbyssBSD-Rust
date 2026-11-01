@@ -258,6 +258,11 @@ fn notify(
     if oip.p == proto::UDP {
         crate::udp::ctlinput4(vnet, t, c, &oip, &ports);
     }
+    if oip.p == proto::TCP {
+        let mut nm = [0u8; 2];
+        m.data.copy_out(hlen + 6, &mut nm);
+        crate::tcp::ctlinput4(vnet, t, c, &oip, &ports, u16::from_be_bytes(nm));
+    }
     true
 }
 

@@ -85,7 +85,7 @@ pub use net::{Family, Vnet, addr, ifnet, netlink, rtmsg};
 
 pub use addr::Sockaddr;
 pub use poll::filter;
-pub use tcp::Tstate;
+pub use tcp::{Tstate, Vtcp, hostcache_list};
 pub use udp::{Meta, Received, SendCtl, want};
 
 /// A socket's protocol.
@@ -156,7 +156,7 @@ impl Cred {
 
 /// The tunables (`net.inet.*`), as sysctls read and set them.
 pub mod tune {
-    use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64};
+    use core::sync::atomic::{AtomicI32, AtomicU64};
 
     /// `net.inet.ip.portrange.*`.
     pub static LOWFIRST: AtomicI32 = AtomicI32::new(1023);
@@ -177,23 +177,6 @@ pub mod tune {
     /// `40 * (1024 + sizeof(struct sockaddr_in6))`.
     pub static UDP_SENDSPACE: AtomicU64 = AtomicU64::new(9216);
     pub static UDP_RECVSPACE: AtomicU64 = AtomicU64::new(40 * (1024 + 28));
-    /// `net.inet.tcp.sendspace`, `net.inet.tcp.recvspace`.
-    pub static TCP_SENDSPACE: AtomicU64 = AtomicU64::new(32 * 1024);
-    pub static TCP_RECVSPACE: AtomicU64 = AtomicU64::new(64 * 1024);
-    /// `net.inet.tcp.mssdflt`, `net.inet.tcp.v6mssdflt`.
-    pub static TCP_MSSDFLT: AtomicU32 = AtomicU32::new(536);
-    pub static TCP_V6MSSDFLT: AtomicU32 = AtomicU32::new(1220);
-    /// `net.inet.tcp.msl`, ms: `TIME_WAIT` lasts twice it.
-    pub static TCP_MSL: AtomicU32 = AtomicU32::new(30_000);
-    /// `net.inet.tcp.msl_local`, ms: the MSL between local addresses
-    /// (`tcp_eff_msl`), which every connection here is.
-    pub static TCP_MSL_LOCAL: AtomicU32 = AtomicU32::new(10);
-    /// `net.inet.tcp.keepinit`, `keepidle`, `keepintvl` (ms) and
-    /// `keepcnt`.
-    pub static TCP_KEEPINIT: AtomicU32 = AtomicU32::new(75_000);
-    pub static TCP_KEEPIDLE: AtomicU32 = AtomicU32::new(7_200_000);
-    pub static TCP_KEEPINTVL: AtomicU32 = AtomicU32::new(75_000);
-    pub static TCP_KEEPCNT: AtomicU32 = AtomicU32::new(8);
     /// `kern.ipc.somaxconn`.
     pub static SOMAXCONN: AtomicI32 = AtomicI32::new(128);
 }
@@ -229,7 +212,7 @@ fn default_now() -> u64 {
 }
 
 /// Moves the default clock on by `ns` in steps of 50 ms, running the
-/// IPv6 timers due at each, as the timer thread would.
+/// protocols' timers due at each, as the timer thread would.
 #[cfg(test)]
 pub(crate) fn advance(ns: u64) {
     let mut left = ns;
@@ -237,9 +220,21 @@ pub(crate) fn advance(ns: u64) {
         let step = left.min(50_000_000);
         // Relaxed: a counter.
         DEFAULT_CLOCK.fetch_add(step, Ordering::Relaxed);
-        nd6::run_timers(now());
+        run_timers(now());
         left -= step;
     }
+}
+
+/// When the protocols' timers (IPv6's, TCP's) next need to run
+/// (nanoseconds of the protocols' clock), `u64::MAX` for never.
+#[must_use]
+pub fn next_deadline() -> u64 {
+    nd6::next_deadline().min(tcp::next_deadline())
+}
+
+/// Runs every timer due at `now`; returns when they next need to run.
+pub fn run_timers(now: u64) -> u64 {
+    nd6::run_timers(now).min(tcp::run_timers(now))
 }
 
 fn default_random() -> u32 {
@@ -368,6 +363,8 @@ pub(crate) struct Sb {
     pub(crate) mbcnt: u32,
     /// `SBS_CANTRCVMORE` (receive) or `SBS_CANTSENDMORE` (send).
     pub(crate) cant: bool,
+    /// `SB_AUTOSIZE`: TCP may grow it.
+    pub(crate) auto: bool,
 }
 
 impl Sb {
@@ -467,10 +464,12 @@ pub(crate) struct Inner {
     pub(crate) ip: IpOpts,
     /// A UDP socket's received datagrams.
     pub(crate) dgrams: VecDeque<udp::Dgram>,
-    /// A TCP socket's received bytes and the ones waiting to go.
-    pub(crate) stream: VecDeque<u8>,
-    pub(crate) sndq: VecDeque<u8>,
+    /// A TCP socket's received bytes and the ones not yet acknowledged.
+    pub(crate) stream: mbuf::Chain,
+    pub(crate) sndq: mbuf::Chain,
     pub(crate) tcp: Option<alloc::boxed::Box<tcp::Tcb>>,
+    /// A TCP socket's segments waiting to go, in order.
+    pub(crate) txq: VecDeque<tcp::Tx>,
     pub(crate) user_cookie: u32,
     pub(crate) ts_clock: i32,
     /// The splice this socket is the source of (`so_splice`), and the
@@ -504,6 +503,8 @@ pub struct Socket {
     pub(crate) spliced: core::sync::atomic::AtomicU8,
     /// Bytes spliced from it since its last splice (`so_splice_sent`).
     pub(crate) splice_sent: AtomicU64,
+    /// Someone is sending its queued segments ([`Inner::txq`]).
+    pub(crate) txbusy: core::sync::atomic::AtomicBool,
 }
 
 impl core::fmt::Debug for Socket {
@@ -513,31 +514,6 @@ impl core::fmt::Debug for Socket {
             .field("proto", &self.proto)
             .field("id", &self.id)
             .finish_non_exhaustive()
-    }
-}
-
-/// Locks two sockets' state in address order (once if the same). Bind
-/// the [`IrqOff`](sync::IrqOff) first, so it outlives both guards.
-pub(crate) fn lock2<'a>(
-    a: &'a Socket,
-    b: &'a Socket,
-) -> (
-    sync::IrqOff,
-    sync::SpinGuard<'a, Inner>,
-    Option<sync::SpinGuard<'a, Inner>>,
-) {
-    let irq = sync::IrqOff::new();
-    if core::ptr::eq(a, b) {
-        return (irq, a.inner.lock(), None);
-    }
-    if core::ptr::from_ref(a).addr() < core::ptr::from_ref(b).addr() {
-        let ga = a.inner.lock();
-        let gb = b.inner.lock();
-        (irq, ga, Some(gb))
-    } else {
-        let gb = b.inner.lock();
-        let ga = a.inner.lock();
-        (irq, ga, Some(gb))
     }
 }
 
@@ -562,10 +538,13 @@ impl Socket {
                 tune::UDP_SENDSPACE.load(Ordering::Relaxed),
                 tune::UDP_RECVSPACE.load(Ordering::Relaxed),
             ),
-            Proto::Tcp => (
-                tune::TCP_SENDSPACE.load(Ordering::Relaxed),
-                tune::TCP_RECVSPACE.load(Ordering::Relaxed),
-            ),
+            Proto::Tcp => {
+                let st = state::of(vnet);
+                (
+                    u64::try_from(::tcp::get(&st.tcp.conf.sendspace)).unwrap_or(0),
+                    u64::try_from(::tcp::get(&st.tcp.conf.recvspace)).unwrap_or(0),
+                )
+            }
         };
         let mut rcv = Sb::default();
         let mut snd = Sb::default();
@@ -574,6 +553,12 @@ impl Socket {
         snd.reserve(u32::try_from(send).unwrap_or(u32::MAX));
         rcv.lowat = 1;
         snd.lowat = MCLBYTES.min(snd.hiwat);
+        if proto == Proto::Tcp {
+            // `tcp_usr_attach`: TCP's buffers grow with the connection.
+            let st = state::of(vnet);
+            rcv.auto = ::tcp::on(&st.tcp.conf.recvbuf_auto);
+            snd.auto = ::tcp::on(&st.tcp.conf.sendbuf_auto);
+        }
         let so = Self::with_buffers(vnet, family, proto, cred, rcv, snd);
         if let Some(f) = so_flow {
             let mut i = so.inner.lock();
@@ -607,9 +592,11 @@ impl Socket {
                 snd,
                 ip: IpOpts::new(),
                 dgrams: VecDeque::new(),
-                stream: VecDeque::new(),
-                sndq: VecDeque::new(),
-                tcp: (proto == Proto::Tcp).then(|| alloc::boxed::Box::new(tcp::Tcb::new())),
+                stream: mbuf::Chain::default(),
+                sndq: mbuf::Chain::default(),
+                tcp: (proto == Proto::Tcp)
+                    .then(|| alloc::boxed::Box::new(tcp::Tcb::new(vnet, family))),
+                txq: VecDeque::new(),
                 user_cookie: 0,
                 ts_clock: 0,
                 splice: None,
@@ -621,6 +608,7 @@ impl Socket {
             wr: Notify::new(),
             spliced: core::sync::atomic::AtomicU8::new(0),
             splice_sent: AtomicU64::new(0),
+            txbusy: core::sync::atomic::AtomicBool::new(false),
         });
         table.lock().alloc(&so, cred.uid);
         so

@@ -129,22 +129,16 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
                     continue;
                 }
                 println!("== boot tests ({name}, {vmm:?})");
-                match (multiuser(arch, vmm, release, usb)?, MULTIUSER_EXPECTED) {
-                    (Ok(()), Expected::Pass) => println!("{name}: PASS"),
-                    (Ok(()), Expected::Fail(_)) => {
-                        println!("{name}: XPASS: passes; expect it to (test.rs)");
-                    }
-                    (Err(why), Expected::Fail(until)) => {
-                        println!("{name}: XFAIL (until {until}): {why}");
-                    }
-                    (Err(why), Expected::Pass) => {
+                match multiuser(arch, vmm, release, usb)? {
+                    Ok(()) => println!("{name}: PASS"),
+                    Err(why) => {
                         println!("{name}: FAIL: {why}");
                         failed.push("multiuser");
                     }
                 }
             }
         }
-        // The networked boot (ROADMAP P7.0), expected to fail until P7.6:
+        // The networked boot (ROADMAP P7.0), passing since P7.6:
         // QEMU on user-mode networking, bhyve on the test bridge.
         for &arch in &arches {
             for vmm in [Vmm::Qemu, Vmm::Bhyve] {
@@ -160,15 +154,9 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
                     continue;
                 }
                 println!("== boot tests ({name}, {vmm:?})");
-                match (net(arch, vmm, release)?, NET_EXPECTED) {
-                    (Ok(()), Expected::Pass) => println!("{name}: PASS"),
-                    (Ok(()), Expected::Fail(_)) => {
-                        println!("{name}: XPASS: passes; expect it to (test.rs)");
-                    }
-                    (Err(why), Expected::Fail(until)) => {
-                        println!("{name}: XFAIL (until {until}): {why}");
-                    }
-                    (Err(why), Expected::Pass) => {
+                match net(arch, vmm, release)? {
+                    Ok(()) => println!("{name}: PASS"),
+                    Err(why) => {
                         println!("{name}: FAIL: {why}");
                         failed.push("net");
                     }
@@ -351,16 +339,6 @@ const BOOT_CASES: &[BootCase] = &[
     },
 ];
 
-/// What a case is expected to do.
-#[derive(Clone, Copy, Debug)]
-enum Expected {
-    Pass,
-    /// Fail, until the named milestone; a failure does not fail the tier.
-    Fail(&'static str),
-}
-
-/// The multi-user boot passes from P6.9 on.
-const MULTIUSER_EXPECTED: Expected = Expected::Pass;
 
 /// The multi-user boot (docs/MULTIUSER.md §14): the installed root boots
 /// to `login:`, and [`crate::multiuser::login_script`] logs in on `ttyv0`
@@ -436,8 +414,6 @@ fn multiuser(
     }
     Ok(verdict)
 }
-
-const NET_EXPECTED: Expected = Expected::Fail("P7.6");
 
 /// The networked boot (docs/NETWORKING.md §16.4): the networked root boots
 /// on QEMU's user-mode network, and [`crate::net::net_script`] checks the

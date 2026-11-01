@@ -5,7 +5,8 @@
  * of file once the writer closes, EPIPE and SIGPIPE once the reader
  * closes, non-blocking ends, a buffer's capacity, writes of PIPE_BUF
  * bytes staying whole between two writers, a large transfer between
- * processes, EINTR against SA_RESTART, and close-on-exec across execve.
+ * processes, EINTR against SA_RESTART, close-on-exec across execve, and
+ * /dev/fd/N and /dev/stdin sharing a descriptor's file.
  *
  * Runs on FreeBSD too. Exits 0 on success; prints what failed otherwise.
  */
@@ -297,6 +298,48 @@ close_on_exec(const char *self)
 	close(gone[0]);
 }
 
+/*
+ * /dev/fd/0-2 (and /dev/stdin) share that descriptor's file, opened for
+ * no more than it allows; devfs has only those three.
+ */
+static void
+dev_fd(void)
+{
+	char c;
+	int p[2], fd, ro, saved0, saved1;
+
+	CHECK(pipe(p) == 0, "pipe: %s", strerror(errno));
+	fflush(stdout);
+	saved0 = dup(0);
+	saved1 = dup(1);
+	dup2(p[1], 1);
+	fd = open("/dev/fd/1", O_WRONLY);
+	c = 0;
+	if (fd >= 0 && write(fd, "w", 1) == 1)
+		(void)read(p[0], &c, 1);
+	if (fd >= 0)
+		close(fd);
+	dup2(saved1, 1);
+	CHECK(c == 'w', "write through /dev/fd/1");
+	ro = open("/dev/null", O_RDONLY);
+	dup2(ro, 0);
+	FAILS(open("/dev/stdin", O_WRONLY), EACCES);
+	dup2(p[0], 0);
+	fd = open("/dev/stdin", O_RDONLY | O_CLOEXEC);
+	CHECK(fd >= 0, "open /dev/stdin: %s", strerror(errno));
+	/* The copy takes the descriptor's flags, not O_CLOEXEC. */
+	CHECK(fcntl(fd, F_GETFD) == 0, "the copy's flags");
+	CHECK(write(p[1], "s", 1) == 1 && read(fd, &c, 1) == 1 && c == 's',
+	    "read through /dev/stdin");
+	close(fd);
+	dup2(saved0, 0);
+	close(saved0);
+	close(saved1);
+	close(ro);
+	close(p[0]);
+	close(p[1]);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -308,6 +351,7 @@ main(int argc, char **argv)
 	transfer();
 	atomic_writes();
 	interrupted();
+	dev_fd();
 	close_on_exec(argc > 0 && argv[0][0] == '/' ? argv[0] :
 	    "/usr/tests/abyss/pipes");
 	if (!failed)

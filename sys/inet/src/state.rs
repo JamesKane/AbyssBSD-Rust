@@ -442,9 +442,10 @@ pub mod bandlim {
     pub const UNREACH: usize = 0;
     pub const ECHO: usize = 1;
     pub const TSTAMP: usize = 2;
-    pub const N: usize = 3;
+    pub const TCP_RST: usize = 3;
+    pub const N: usize = 4;
     /// `icmp_rate_descrs`.
-    pub const NAMES: [&str; N] = ["icmp unreach", "icmp ping", "icmp tstamp"];
+    pub const NAMES: [&str; N] = ["icmp unreach", "icmp ping", "icmp tstamp", "tcp reset"];
 }
 
 /// One rate limit (`struct counter_rate`) with its jitter.
@@ -511,6 +512,11 @@ pub struct State {
     /// Neighbor discovery's and MLD's state, taken after the interfaces'
     /// lock and never before it.
     pub(crate) nd6: SpinLock<crate::nd6::Nd6>,
+    /// TCP's tunables, statistics, host cache, SYN cache, and secrets.
+    pub tcp: crate::tcp::Vtcp,
+    /// The address selection policy table (`addrsel_policytab`), which
+    /// `ip6addrctl(8)` installs.
+    pub(crate) policy: SpinLock<Vec<abi::net::In6Addrpolicy>>,
 }
 
 impl State {
@@ -521,29 +527,68 @@ impl State {
     }
 }
 
+// Names every field, so one added to `State` must be added to
+// `new_state` too.
+const _: fn(State) = |State {
+                          ipstat: _,
+                          icmpstat: _,
+                          udpstat: _,
+                          conf: _,
+                          reass: _,
+                          id: _,
+                          rates: _,
+                          groups: _,
+                          ip6stat: _,
+                          icmp6stat: _,
+                          rip6stat: _,
+                          conf6: _,
+                          frag6: _,
+                          rates6: _,
+                          nd6: _,
+                          tcp: _,
+                          policy: _,
+                      }| {};
+
+/// A new VNET's state, made in place: at 11 KB it is too big for the
+/// kernel stacks of the paths that first use it.
+#[inline(never)]
+fn new_state() -> Arc<State> {
+    let mut a = Arc::<State>::new_uninit();
+    let p = Arc::get_mut(&mut a)
+        .unwrap_or_else(|| unreachable!("just made"))
+        .as_mut_ptr();
+    // SAFETY: `p` is the new allocation's, aligned and unique; each
+    // field is written once, so every one is initialized below.
+    unsafe {
+        (&raw mut (*p).ipstat).write(Counters::new());
+        (&raw mut (*p).icmpstat).write(Counters::new());
+        (&raw mut (*p).udpstat).write(Counters::new());
+        (&raw mut (*p).conf).write(Conf::new());
+        (&raw mut (*p).reass).write(SpinLock::new(crate::reass::Queues::new()));
+        (&raw mut (*p).id).write(AtomicU32::new(crate::random()));
+        (&raw mut (*p).rates).write(SpinLock::new([Rate::default(); bandlim::N]));
+        (&raw mut (*p).groups).write(SpinLock::new(Vec::new()));
+        (&raw mut (*p).ip6stat).write(Counters::new());
+        (&raw mut (*p).icmp6stat).write(Counters::new());
+        (&raw mut (*p).rip6stat).write(Counters::new());
+        (&raw mut (*p).conf6).write(Conf6::new());
+        (&raw mut (*p).frag6).write(SpinLock::new(crate::frag6::Queues::new()));
+        (&raw mut (*p).rates6).write(SpinLock::new([Rate::default(); crate::icmp6::RATELIM_MAX]));
+        (&raw mut (*p).nd6).write(SpinLock::new(crate::nd6::Nd6::new()));
+        (&raw mut (*p).tcp).write(crate::tcp::Vtcp::new());
+        (&raw mut (*p).policy).write(SpinLock::new(Vec::new()));
+    }
+    // SAFETY: every field was written above.
+    unsafe { a.assume_init() }
+}
+
 /// `vnet`'s state, made on first use.
 #[must_use]
 pub fn of(vnet: &Vnet) -> Arc<State> {
     let any = match vnet.inet.get() {
         Some(a) => Arc::clone(a),
         None => {
-            let s = Arc::new(State {
-                ipstat: Counters::new(),
-                icmpstat: Counters::new(),
-                udpstat: Counters::new(),
-                conf: Conf::new(),
-                reass: SpinLock::new(crate::reass::Queues::new()),
-                id: AtomicU32::new(crate::random()),
-                rates: SpinLock::new([Rate::default(); bandlim::N]),
-                groups: SpinLock::new(Vec::new()),
-                ip6stat: Counters::new(),
-                icmp6stat: Counters::new(),
-                rip6stat: Counters::new(),
-                conf6: Conf6::new(),
-                frag6: SpinLock::new(crate::frag6::Queues::new()),
-                rates6: SpinLock::new([Rate::default(); crate::icmp6::RATELIM_MAX]),
-                nd6: SpinLock::new(crate::nd6::Nd6::new()),
-            });
+            let s = new_state();
             crate::frag6::init_limits(&s);
             let s: Arc<dyn core::any::Any + Send + Sync> = s;
             // A racing first use makes one too; one of them is kept.

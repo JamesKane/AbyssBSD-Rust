@@ -253,13 +253,21 @@ for e in $(progs); do
 		# an unprivileged user runs as `tests`.
 		u=
 		[ $kind = atf ] && u=$($p -l | sed -n "/^ident: $c\$/,/^\$/s/^require.user: //p")
-		# kyua defines no configuration properties here, and loads no
-		# modules: such cases are skipped, as kyua reports them.
+		# Of FreeBSD CI's configuration (kyua.rs's KYUA_CONF), `ci` and
+		# `allow_sysctl_side_effects` are defined here, and no modules
+		# are loaded: a case that needs more is skipped, as kyua
+		# reports it.
 		if [ $kind = atf ]; then
 			cfg=$($p -l | sed -n "/^ident: $c\$/,/^\$/s/^require.config: //p")
-			if [ -n "$cfg" ]; then
-				set -- $cfg
-				echo "atf: ${p#/usr/tests/}:$c skipped: Required configuration property '$1' not defined"
+			miss=
+			for v in $cfg; do
+				case $v in
+				ci|allow_sysctl_side_effects) ;;
+				*) miss=${miss:-$v} ;;
+				esac
+			done
+			if [ -n "$miss" ]; then
+				echo "atf: ${p#/usr/tests/}:$c skipped: Required configuration property '$miss' not defined"
 				rmdir $w
 				continue
 			fi
@@ -279,7 +287,7 @@ for e in $(progs); do
 		if [ $kind = plain ]; then
 			(cd $w && TMPDIR=$w exec $as $p) > $w.out 2>&1 &
 		else
-			(cd $w && TMPDIR=$w exec $as $p -r $w.res -s ${p%/*} $c) > $w.out 2>&1 &
+			(cd $w && TMPDIR=$w exec $as $p -v ci=true -v allow_sysctl_side_effects=1 -r $w.res -s ${p%/*} $c) > $w.out 2>&1 &
 		fi
 		pid=$!
 		# The watchdog takes its `sleep` with it when told to go.
@@ -291,7 +299,7 @@ for e in $(progs); do
 		# A case with a cleanup routine has it run after its body, in
 		# the same directory and as the same user, as kyua does.
 		if [ $kind = atf ] && [ -n "$($p -l | sed -n "/^ident: $c\$/,/^\$/s/^has.cleanup: true$/y/p")" ]; then
-			(cd $w && TMPDIR=$w exec $as $p -s ${p%/*} $c:cleanup) >> $w.out 2>&1
+			(cd $w && TMPDIR=$w exec $as $p -v ci=true -v allow_sysctl_side_effects=1 -s ${p%/*} $c:cleanup) >> $w.out 2>&1
 		fi
 		r=
 		if [ $kind = plain ]; then

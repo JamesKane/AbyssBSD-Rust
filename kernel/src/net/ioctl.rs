@@ -67,29 +67,33 @@ pub(crate) fn soioctl(so: &Socket, req: u32, arg: &mut [u8]) -> Result<usize, Er
         // `in6_control`'s `in6_src_ioctl`.
         sio::SIOCAADDRCTL_POLICY | sio::SIOCDADDRCTL_POLICY if so.family == Family::Inet6 => {
             priv_check(Priv::NetinetAddrctl6)?;
-            policy(req == sio::SIOCAADDRCTL_POLICY, arg)
+            policy(
+                &inet::state::of(&so.vnet),
+                req == sio::SIOCAADDRCTL_POLICY,
+                arg,
+            )
         }
         _ => Err(Errno::ENOTTY),
     }
 }
 
 /// `add_addrsel_policyent` and `delete_addrsel_policyent`.
-fn policy(add: bool, arg: &[u8]) -> Result<usize, Errno> {
+fn policy(st: &inet::state::State, add: bool, arg: &[u8]) -> Result<usize, Errno> {
     let mut p = abi::net::In6Addrpolicy::default();
     let b = crate::uaccess::bytes_of_mut(&mut p);
     let n = b.len().min(arg.len());
     b[..n].copy_from_slice(&arg[..n]);
     if add {
-        inet::in6::policy_add(p)?;
+        inet::in6::policy_add(st, p)?;
     } else {
-        inet::in6::policy_delete(&p)?;
+        inet::in6::policy_delete(st, &p)?;
     }
     Ok(0)
 }
 
 /// `net.inet6.ip6.addrctlpolicy`'s records.
 pub(crate) fn policies(out: &mut Vec<u8>) {
-    for p in inet::in6::policies() {
+    for p in inet::in6::policies(&inet::state::of(&super::curvnet())) {
         out.extend_from_slice(crate::uaccess::bytes_of(&p));
     }
 }

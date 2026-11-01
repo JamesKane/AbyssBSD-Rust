@@ -644,7 +644,10 @@ fn notify_error(vnet: &Arc<Vnet>, st: &State, m: &Packet, off: usize, icmp6len: 
     };
     match nxt {
         proto::UDP => crate::udp::ctlinput6(vnet, m, &ctl),
-        proto::TCP => {}
+        proto::TCP => {
+            let mtu = u32::from_be_bytes([h[4], h[5], h[6], h[7]]);
+            crate::tcp::ctlinput6(vnet, m, &ctl, mtu);
+        }
         _ => crate::raw6::ctlinput(vnet, &ctl),
     }
     true

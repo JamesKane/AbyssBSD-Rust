@@ -55,28 +55,6 @@ fn rw_i32(
     .expect("a net sysctl");
 }
 
-/// A `u_int` tunable (seconds and milliseconds alike).
-fn rw_u32(t: &mut Tree, parent: sysctl::NodeId, name: &str, descr: &str, a: &'static AtomicU32) {
-    t.add_writable(
-        parent,
-        Number::Auto,
-        name,
-        descr,
-        0,
-        Value::Int(Box::new(move || {
-            i32::try_from(a.load(Ordering::Relaxed)).unwrap_or(i32::MAX)
-        })),
-        sysctl::int_writer(move |v| {
-            if v < 0 {
-                return Err(Errno::EINVAL);
-            }
-            a.store(v.cast_unsigned(), Ordering::Relaxed);
-            Ok(())
-        }),
-    )
-    .expect("a net sysctl");
-}
-
 /// A `u_long` tunable.
 fn rw_u64(t: &mut Tree, parent: sysctl::NodeId, name: &str, descr: &str, a: &'static AtomicU64) {
     t.add_writable(
@@ -111,6 +89,266 @@ fn knobs(t: &mut Tree, parent: sysctl::NodeId, list: &[(&str, &str, i32)]) {
 }
 
 /// `net.link.ether.inet`'s ARP settings, each the current VNET's.
+/// `net.inet.tcp`'s settings, each the current VNET's.
+type Knob = (
+    &'static str,
+    &'static str,
+    fn(&inet::state::State) -> &AtomicI32,
+);
+const TCP_KNOBS: &[Knob] = &[
+    ("sendspace", "Initial send socket buffer size", |s| {
+        &s.tcp.conf.sendspace
+    }),
+    ("recvspace", "Initial receive socket buffer size", |s| {
+        &s.tcp.conf.recvspace
+    }),
+    ("mssdflt", "Default TCP Maximum Segment Size", |s| {
+        &s.tcp.conf.mssdflt
+    }),
+    (
+        "v6mssdflt",
+        "Default TCP Maximum Segment Size for IPv6",
+        |s| &s.tcp.conf.v6mssdflt,
+    ),
+    ("minmss", "Minimum TCP Maximum Segment Size", |s| {
+        &s.tcp.conf.minmss
+    }),
+    (
+        "rfc1323",
+        "Enable rfc1323 (high performance TCP) extensions",
+        |s| &s.tcp.conf.rfc1323,
+    ),
+    ("msl", "Maximum segment lifetime", |s| &s.tcp.conf.msl),
+    (
+        "msl_local",
+        "Maximum segment lifetime for local communication",
+        |s| &s.tcp.conf.msl_local,
+    ),
+    (
+        "nolocaltimewait",
+        "Do not create TCP TIME_WAIT state for local connections",
+        |s| &s.tcp.conf.nolocaltimewait,
+    ),
+    ("keepinit", "time to establish connection", |s| {
+        &s.tcp.conf.keepinit
+    }),
+    ("keepidle", "time before keepalive probes begin", |s| {
+        &s.tcp.conf.keepidle
+    }),
+    ("keepintvl", "time between keepalive probes", |s| {
+        &s.tcp.conf.keepintvl
+    }),
+    ("keepcnt", "Number of keepalive probes to send", |s| {
+        &s.tcp.conf.keepcnt
+    }),
+    (
+        "always_keepalive",
+        "Assume SO_KEEPALIVE on all TCP connections",
+        |s| &s.tcp.conf.always_keepalive,
+    ),
+    ("delacktime", "Time before a delayed ACK is sent", |s| {
+        &s.tcp.conf.delacktime
+    }),
+    (
+        "delayed_ack",
+        "Delay ACK to try and piggyback it onto a data packet",
+        |s| &s.tcp.conf.delayed_ack,
+    ),
+    ("rexmit_initial", "Initial Retransmission Timeout", |s| {
+        &s.tcp.conf.rexmit_initial
+    }),
+    ("rexmit_min", "Minimum Retransmission Timeout", |s| {
+        &s.tcp.conf.rexmit_min
+    }),
+    ("rexmit_max", "Maximum Retransmission Timeout", |s| {
+        &s.tcp.conf.rexmit_max
+    }),
+    ("rexmit_slop", "Retransmission Timer Slop", |s| {
+        &s.tcp.conf.rexmit_slop
+    }),
+    (
+        "retries",
+        "maximum number of consecutive timer based retransmissions",
+        |s| &s.tcp.conf.retries,
+    ),
+    ("persmin", "minimum persistence interval", |s| {
+        &s.tcp.conf.persmin
+    }),
+    ("persmax", "maximum persistence interval", |s| {
+        &s.tcp.conf.persmax
+    }),
+    ("finwait2_timeout", "FIN-WAIT2 timeout", |s| {
+        &s.tcp.conf.finwait2_timeout
+    }),
+    (
+        "fast_finwait2_recycle",
+        "Recycle closed FIN_WAIT_2 connections faster",
+        |s| &s.tcp.conf.fast_finwait2_recycle,
+    ),
+    (
+        "maxunacktime",
+        "Maximum time (in ms) that a session can linger without making progress",
+        |s| &s.tcp.conf.maxunacktime,
+    ),
+    ("drop_synfin", "Drop TCP packets with SYN+FIN set", |s| {
+        &s.tcp.conf.drop_synfin
+    }),
+    (
+        "blackhole",
+        "Do not send RST on segments to closed ports",
+        |s| &s.tcp.conf.blackhole,
+    ),
+    (
+        "log_in_vain",
+        "Log all incoming TCP segments to closed ports",
+        |s| &s.tcp.conf.log_in_vain,
+    ),
+    (
+        "tolerate_missing_ts",
+        "Tolerate missing TCP timestamps",
+        |s| &s.tcp.conf.tolerate_missing_ts,
+    ),
+    (
+        "ts_offset_per_conn",
+        "Initialize TCP timestamps per connection instead of per host pair",
+        |s| &s.tcp.conf.ts_offset_per_conn,
+    ),
+    (
+        "insecure_rst",
+        "Follow RFC793 instead of RFC5961 criteria for accepting RST packets",
+        |s| &s.tcp.conf.insecure_rst,
+    ),
+    (
+        "insecure_syn",
+        "Follow RFC793 instead of RFC5961 criteria for accepting SYN packets",
+        |s| &s.tcp.conf.insecure_syn,
+    ),
+    (
+        "insecure_ack",
+        "Follow RFC793 criteria for validating SEG.ACK",
+        |s| &s.tcp.conf.insecure_ack,
+    ),
+    (
+        "icmp_may_rst",
+        "Certain ICMP unreachable messages may abort connections in SYN_SENT",
+        |s| &s.tcp.conf.icmp_may_rst,
+    ),
+    (
+        "ack_war_timewindow",
+        "Time interval in ms used to limit the number (ack_war_cnt) of challenge ACKs sent per TCP connection",
+        |s| &s.tcp.conf.ack_war_timewindow,
+    ),
+    (
+        "ack_war_cnt",
+        "Maximum number of challenge ACKs sent per TCP connection during the time interval (ack_war_timewindow)",
+        |s| &s.tcp.conf.ack_war_cnt,
+    ),
+    (
+        "syncookies",
+        "Use TCP SYN cookies if the syncache overflows",
+        |s| &s.tcp.conf.syncookies,
+    ),
+    ("syncookies_only", "Use only TCP SYN cookies", |s| {
+        &s.tcp.conf.syncookies_only
+    }),
+    ("path_mtu_discovery", "Enable Path MTU Discovery", |s| {
+        &s.tcp.conf.path_mtu_discovery
+    }),
+    (
+        "pmtud_blackhole_detection",
+        "Path MTU Discovery Black Hole Detection Enabled",
+        |s| &s.tcp.conf.pmtud_blackhole_detect,
+    ),
+    (
+        "pmtud_blackhole_mss",
+        "Path MTU Discovery Black Hole Detection lowered MSS",
+        |s| &s.tcp.conf.pmtud_blackhole_mss,
+    ),
+    (
+        "v6pmtud_blackhole_mss",
+        "Path MTU Discovery IPv6 Black Hole Detection lowered MSS",
+        |s| &s.tcp.conf.v6pmtud_blackhole_mss,
+    ),
+    ("tso", "Enable TCP Segmentation Offload", |s| {
+        &s.tcp.conf.tso
+    }),
+    ("sendbuf_auto", "Enable automatic send buffer sizing", |s| {
+        &s.tcp.conf.sendbuf_auto
+    }),
+    (
+        "sendbuf_inc",
+        "Incrementor step size of automatic send buffer",
+        |s| &s.tcp.conf.sendbuf_inc,
+    ),
+    ("sendbuf_max", "Max size of automatic send buffer", |s| {
+        &s.tcp.conf.sendbuf_max
+    }),
+    (
+        "sendbuf_auto_lowat",
+        "Modify threshold for auto send buffer growth to account for SO_SNDLOWAT",
+        |s| &s.tcp.conf.sendbuf_auto_lowat,
+    ),
+    (
+        "recvbuf_auto",
+        "Enable automatic receive buffer sizing",
+        |s| &s.tcp.conf.recvbuf_auto,
+    ),
+    ("recvbuf_max", "Max size of automatic receive buffer", |s| {
+        &s.tcp.conf.recvbuf_max
+    }),
+    (
+        "initcwnd_segments",
+        "Slow-start flight size (initial congestion window) in number of segments",
+        |s| &s.tcp.conf.initcwnd_segments,
+    ),
+    ("rfc3042", "Enable RFC 3042 (Limited Transmit)", |s| {
+        &s.tcp.conf.rfc3042
+    }),
+    (
+        "rfc3390",
+        "Enable RFC 3390 (Increasing TCP's Initial Congestion Window)",
+        |s| &s.tcp.conf.rfc3390,
+    ),
+    (
+        "rfc3465",
+        "Enable RFC 3465 (Appropriate Byte Counting)",
+        |s| &s.tcp.conf.rfc3465,
+    ),
+    (
+        "abc_l_var",
+        "Cap the max cwnd increment during slow-start to this number of segments",
+        |s| &s.tcp.conf.abc_l_var,
+    ),
+    (
+        "newcwv",
+        "Enable New Congestion Window Validation per RFC7661",
+        |s| &s.tcp.conf.newcwv,
+    ),
+    (
+        "do_prr",
+        "Enable Proportional Rate Reduction per RFC 6937",
+        |s| &s.tcp.conf.do_prr,
+    ),
+    (
+        "isn_reseed_interval",
+        "Seconds between reseeding of ISN secret",
+        |s| &s.tcp.conf.isn_reseed_interval,
+    ),
+    (
+        "udp_tunneling_port",
+        "Tunneling port for tcp over udp",
+        |s| &s.tcp.conf.udp_tunneling_port,
+    ),
+];
+
+/// An opaque per-VNET value from `s`.
+fn ctlflag_vnet_opaque(format: &'static str, f: fn(&inet::state::State) -> Vec<u8>) -> Value {
+    Value::Opaque {
+        format,
+        read: Box::new(move |out| out.extend(f(&inet::state::of(&super::curvnet())))),
+    }
+}
+
 /// A per-VNET internet setting (`CTLFLAG_VNET`), the current thread's
 /// VNET's.
 fn vknob(
@@ -654,103 +892,212 @@ pub(crate) fn init(s: &Sleepable) {
         );
         let tcp = node(t, inet, 6, "tcp", "TCP");
         bind_all_fibs(t, tcp);
-        rw_u64(
+        for &(name, descr, f) in TCP_KNOBS {
+            vknob(t, tcp, name, descr, f);
+        }
+        vstats(
             t,
             tcp,
-            "sendspace",
-            "Initial send socket buffer size",
-            &tune::TCP_SENDSPACE,
+            "S,tcpstat",
+            "TCP statistics (struct tcpstat, netinet/tcp_var.h)",
+            |s| {
+                s.tcp
+                    .stats
+                    .snapshot()
+                    .iter()
+                    .flat_map(|w| w.to_ne_bytes())
+                    .collect()
+            },
+            |s| s.tcp.stats.clear(),
         );
-        rw_u64(
-            t,
+        t.add_value(
             tcp,
-            "recvspace",
-            "Initial receive socket buffer size",
-            &tune::TCP_RECVSPACE,
-        );
-        rw_u32(
+            Number::Auto,
+            "states",
+            "TCP connection counts by TCP state",
+            ctlflag_vnet_opaque("QU", |s| {
+                s.tcp
+                    .stats
+                    .states()
+                    .iter()
+                    .flat_map(|w| w.to_ne_bytes())
+                    .collect()
+            }),
+        )
+        .expect("net.inet.tcp.states");
+        let sack = t
+            .add_node(tcp, Number::Auto, "sack", "TCP SACK")
+            .expect("net.inet.tcp.sack");
+        vknob(t, sack, "enable", "Enable/Disable TCP SACK support", |s| {
+            &s.tcp.conf.sack_enable
+        });
+        vknob(
             t,
-            tcp,
-            "mssdflt",
-            "Default TCP Maximum Segment Size",
-            &tune::TCP_MSSDFLT,
+            sack,
+            "maxholes",
+            "Maximum number of TCP SACK holes allowed per connection",
+            |s| &s.tcp.conf.sack_maxholes,
         );
-        rw_u32(
+        vknob(
             t,
-            tcp,
-            "v6mssdflt",
-            "Default TCP Maximum Segment Size for IPv6",
-            &tune::TCP_V6MSSDFLT,
+            sack,
+            "globalmaxholes",
+            "Global maximum number of TCP SACK holes",
+            |s| &s.tcp.conf.sack_globalmaxholes,
         );
-        rw_u32(t, tcp, "msl", "Maximum segment lifetime", &tune::TCP_MSL);
-        rw_u32(
+        t.add_value(
+            sack,
+            Number::Auto,
+            "globalholes",
+            "Global number of TCP SACK holes currently allocated",
+            Value::Int(Box::new(|| {
+                inet::state::of(&super::curvnet())
+                    .tcp
+                    .stats
+                    .sack_globalholes
+                    .load(Ordering::Relaxed)
+            })),
+        )
+        .expect("net.inet.tcp.sack.globalholes");
+        vknob(
             t,
-            tcp,
-            "msl_local",
-            "Maximum segment lifetime for local communication",
-            &tune::TCP_MSL_LOCAL,
+            sack,
+            "lrd",
+            "Perform Lost Retransmission Detection",
+            |s| &s.tcp.conf.do_lrd,
         );
-        rw_u32(
+        let ecn = t
+            .add_node(tcp, Number::Auto, "ecn", "TCP ECN")
+            .expect("net.inet.tcp.ecn");
+        vknob(t, ecn, "enable", "TCP ECN support", |s| {
+            &s.tcp.conf.ecn_enable
+        });
+        vknob(
             t,
-            tcp,
-            "keepinit",
-            "time to establish connection",
-            &tune::TCP_KEEPINIT,
+            ecn,
+            "maxretries",
+            "Max retries before giving up on ECN",
+            |s| &s.tcp.conf.ecn_maxretries,
         );
-        rw_u32(
+        let hc = t
+            .add_node(tcp, Number::Auto, "hostcache", "TCP Host cache")
+            .expect("net.inet.tcp.hostcache");
+        vknob(t, hc, "enable", "Enable the TCP hostcache", |s| {
+            &s.tcp.hc.enable
+        });
+        vknob(
             t,
-            tcp,
-            "keepidle",
-            "time before keepalive probes begin",
-            &tune::TCP_KEEPIDLE,
+            hc,
+            "expire",
+            "Expire time of TCP hostcache entries",
+            |s| &s.tcp.hc.expire,
         );
-        rw_u32(
+        vknob(t, hc, "prune", "Time between purge runs", |s| {
+            &s.tcp.hc.prune
+        });
+        vknob_u32(
             t,
-            tcp,
-            "keepintvl",
-            "time between keepalive probes",
-            &tune::TCP_KEEPINTVL,
+            hc,
+            "cachelimit",
+            "Overall entry limit for hostcache",
+            |s| &s.tcp.hc.cache_limit,
         );
-        rw_u32(
+        vknob_u32(
             t,
-            tcp,
-            "keepcnt",
-            "Number of keepalive probes to send",
-            &tune::TCP_KEEPCNT,
+            hc,
+            "bucketlimit",
+            "Per-bucket hash limit for hostcache",
+            |s| &s.tcp.hc.bucket_limit,
         );
-        knobs(
+        t.add_value(
+            hc,
+            Number::Auto,
+            "hashsize",
+            "Size of TCP hostcache hashtable",
+            Value::Uint(Box::new(|| {
+                u32::try_from(tcp::hostcache::HASHSIZE).unwrap_or(0)
+            })),
+        )
+        .expect("net.inet.tcp.hostcache.hashsize");
+        t.add_value(
+            hc,
+            Number::Auto,
+            "count",
+            "The current number of entries in the host cache",
+            Value::Uint(Box::new(|| {
+                inet::state::of(&super::curvnet()).tcp.hc.count()
+            })),
+        )
+        .expect("net.inet.tcp.hostcache.count");
+        t.add_value(
+            hc,
+            Number::Auto,
+            "list",
+            "List of all hostcache entries",
+            Value::Str(Box::new(|out| {
+                out.push_str(&inet::hostcache_list(&inet::state::of(&super::curvnet())));
+            })),
+        )
+        .expect("net.inet.tcp.hostcache.list");
+        t.add_writable(
+            hc,
+            Number::Auto,
+            "purgenow",
+            "Immediately purge all entries",
+            ctlflag::VNET,
+            Value::Int(Box::new(|| 0)),
+            sysctl::int_writer(|v| {
+                if v != 0 {
+                    inet::state::of(&super::curvnet()).tcp.hc.purge(true);
+                }
+                Ok(())
+            }),
+        )
+        .expect("net.inet.tcp.hostcache.purgenow");
+        let sc = t
+            .add_node(tcp, Number::Auto, "syncache", "TCP SYN cache")
+            .expect("net.inet.tcp.syncache");
+        vknob_u32(
             t,
-            tcp,
-            &[
-                (
-                    "always_keepalive",
-                    "Assume SO_KEEPALIVE on all TCP connections",
-                    1,
-                ),
-                (
-                    "log_in_vain",
-                    "Log all incoming TCP segments to closed ports",
-                    0,
-                ),
-                ("drop_synfin", "Drop TCP packets with SYN+FIN set", 0),
-                (
-                    "rfc1323",
-                    "Enable rfc1323 (high performance TCP) extensions",
-                    1,
-                ),
-                (
-                    "blackhole",
-                    "Do not send RST on segments to closed ports",
-                    0,
-                ),
-                (
-                    "delayed_ack",
-                    "Delay ACK to try and piggyback it onto a data packet",
-                    1,
-                ),
-                ("tolerate_missing_ts", "Tolerate missing TCP timestamps", 1),
-            ],
+            sc,
+            "bucketlimit",
+            "Per-bucket hash limit for syncache",
+            |s| &s.tcp.syncache.bucket_limit,
         );
+        vknob_u32(
+            t,
+            sc,
+            "cachelimit",
+            "Overall entry limit for syncache",
+            |s| &s.tcp.syncache.cache_limit,
+        );
+        vknob_u32(
+            t,
+            sc,
+            "rexmtlimit",
+            "Limit on SYN/ACK retransmissions",
+            |s| &s.tcp.syncache.rexmt_limit,
+        );
+        t.add_value(
+            sc,
+            Number::Auto,
+            "count",
+            "Current number of entries in syncache",
+            Value::Uint(Box::new(|| {
+                inet::state::of(&super::curvnet()).tcp.syncache.count()
+            })),
+        )
+        .expect("net.inet.tcp.syncache.count");
+        t.add_value(
+            sc,
+            Number::Auto,
+            "hashsize",
+            "Size of TCP syncache hashtable",
+            Value::Uint(Box::new(|| {
+                u32::try_from(tcp::syncache::HASHSIZE).unwrap_or(0)
+            })),
+        )
+        .expect("net.inet.tcp.syncache.hashsize");
         t.add_value(
             tcp,
             Number::Auto,
@@ -783,12 +1130,24 @@ pub(crate) fn init(s: &Sleepable) {
                 "Congestion control related settings",
             )
             .expect("net.inet.tcp.cc");
-        t.add_value(
+        t.add_writable(
             cc,
             Number::Auto,
             "algorithm",
             "Default congestion control algorithm",
-            Value::text("cubic"),
+            ctlflag::VNET,
+            Value::Str(Box::new(|out| {
+                out.push_str(inet::state::of(&super::curvnet()).tcp.cc_algo().name());
+            })),
+            sysctl::str_writer(16, |b| {
+                let a = tcp::cc::Algo::by_name(b).ok_or(Errno::ESRCH)?;
+                let i = tcp::cc::Algo::ALL.iter().position(|x| *x == a).unwrap_or(1);
+                inet::state::of(&super::curvnet())
+                    .tcp
+                    .default_cc
+                    .store(u8::try_from(i).unwrap_or(1), Ordering::Relaxed);
+                Ok(())
+            }),
         )
         .expect("net.inet.tcp.cc.algorithm");
         t.add_value(
@@ -796,9 +1155,20 @@ pub(crate) fn init(s: &Sleepable) {
             Number::Auto,
             "available",
             "List available congestion control algorithms",
-            Value::text(
-                "CCmod           D PCB count\nnewreno            0\ncubic           *  0\n",
-            ),
+            Value::Str(Box::new(|out| {
+                use core::fmt::Write;
+                let d = inet::state::of(&super::curvnet()).tcp.cc_algo();
+                out.push_str("CCmod           D PCB count\n");
+                for a in tcp::cc::Algo::ALL {
+                    let _ = writeln!(
+                        out,
+                        "{:<15} {} {:>2}",
+                        a.name(),
+                        if a == d { '*' } else { ' ' },
+                        0
+                    );
+                }
+            })),
         )
         .expect("net.inet.tcp.cc.available");
         t.add_value(

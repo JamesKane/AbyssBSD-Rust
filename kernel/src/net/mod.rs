@@ -220,7 +220,7 @@ fn ip6_timer_kick() {
 fn start_ip6_timer() {
     let _ = sched::spawn("ip6timer", sched::Priority::KERNEL, |s| {
         loop {
-            let next = inet::nd6::next_deadline();
+            let next = inet::next_deadline();
             let now = crate::time::now_ns();
             if next > now {
                 let wait = (next - now).min(60 * 1_000_000_000);
@@ -231,7 +231,7 @@ fn start_ip6_timer() {
                     wait,
                 );
             }
-            inet::nd6::run_timers(crate::time::now_ns());
+            inet::run_timers(crate::time::now_ns());
         }
     });
 }

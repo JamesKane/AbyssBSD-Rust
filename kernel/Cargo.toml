@@ -59,6 +59,7 @@ mbuf = { path = "../sys/mbuf" }
 net = { path = "../sys/net" }
 socket = { path = "../sys/socket" }
 inet = { path = "../sys/inet" }
+tcp = { path = "../sys/tcp" }
 sync = { path = "../sys/sync" }
 sysctl = { path = "../sys/sysctl" }
 tty = { path = "../sys/tty" }

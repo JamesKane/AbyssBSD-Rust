@@ -405,8 +405,14 @@ fn run(
         let mut session = Session::start(vm, &log)?;
         // FreeBSD's console says only when each directory starts, and
         // kyua's own timeouts bound each test, so a long quiet means the
-        // guest hung; AbyssBSD's carries each case's result as well.
-        let quiet = Duration::from_secs(6 * 3600);
+        // guest hung; AbyssBSD's carries each case's result as well, so
+        // half an hour without one (kyua's longest timeout is 300 s by
+        // default) is a hang, and an NMI shows where its CPUs are.
+        let quiet = Duration::from_secs(if system == System::Abyss {
+            1800
+        } else {
+            6 * 3600
+        });
         let mut panicked = false;
         loop {
             match session.expect_any(&[DONE, ABYSS_PANIC, ABYSS_TRAP, ABYSS_FAIL, "\n"], quiet) {
@@ -423,6 +429,12 @@ fn run(
                 // The VM ended (FreeBSD's panic reboots it) or went quiet.
                 Err(e) => {
                     eprintln!("xtask: kyua: boot {boot}: {e}");
+                    if system == System::Abyss && session.nmi(Duration::from_secs(10))? {
+                        eprintln!(
+                            "xtask: kyua: boot {boot}: each CPU's backtrace is in {}",
+                            log.display()
+                        );
+                    }
                     break;
                 }
             }

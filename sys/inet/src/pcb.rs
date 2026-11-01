@@ -250,17 +250,6 @@ impl Table {
         self.gencnt += 1;
     }
 
-    /// Starts `TIME_WAIT` on `id` for twice the MSL.
-    pub(crate) fn time_wait(&mut self, id: u64) {
-        // Relaxed: a tunable.
-        let msl = u64::from(tune::TCP_MSL_LOCAL.load(core::sync::atomic::Ordering::Relaxed));
-        let until = crate::now().saturating_add(2 * msl * 1_000_000);
-        if let Some(p) = self.pcbs.get_mut(&id) {
-            p.tw_until = Some(until);
-            self.next_reap = self.next_reap.min(until);
-        }
-    }
-
     /// `in_pcbdrop` and `in_pcbremhash`: out of the lookups, its port
     /// free, listed until its socket goes.
     pub(crate) fn drop_hash(&mut self, id: u64) {

@@ -52,6 +52,22 @@ pub(crate) fn fatal_trap(report: &arch::TrapReport) -> ! {
 /// then back to it, so a hung machine can be asked CPU by CPU.
 #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
 pub(crate) fn nmi(report: &arch::TrapReport) {
+    // One CPU's report at a time: an NMI sent to all of them lands at
+    // once. Only NMIs take it, and they do not nest.
+    static PRINTING: AtomicBool = AtomicBool::new(false);
+    // Acquire: pairs with the store below.
+    while PRINTING
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+    nmi_report(report);
+    // Release: this report is out before the next starts.
+    PRINTING.store(false, Ordering::Release);
+}
+
+fn nmi_report(report: &arch::TrapReport) {
     out!(
         "\nNMI on cpu {}: at {}\n",
         hal::cpu_id().0,

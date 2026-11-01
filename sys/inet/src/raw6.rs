@@ -313,20 +313,26 @@ impl Socket {
         }
     }
 
+    /// The PCB's `inp_flags`, read before the interfaces' lock: a table's
+    /// lock is taken before that one, never under it.
+    pub(crate) fn pcb_flags(&self) -> i32 {
+        crate::pcb::table(self.proto)
+            .lock()
+            .get(self.id)
+            .map_or(0, |p| p.flags)
+    }
+
     /// The packet options for a send to `dst` (`ip6_setpktopts` over the
-    /// sticky ones, and `in6p_moptions`).
+    /// sticky ones, and `in6p_moptions`), with the PCB's `pflags`.
     pub(crate) fn opts6(
         &self,
         dst: &Sockaddr,
         ctl: Option<&SendCtl>,
         src: &In6,
         ifp: u16,
+        pflags: i32,
     ) -> Opts6 {
         let o = self.inner.lock().ip;
-        let pflags = crate::pcb::table(self.proto)
-            .lock()
-            .get(self.id)
-            .map_or(0, |p| p.flags);
         let hlim = ctl
             .and_then(|c| c.hlim6)
             .map(i16::try_from)
@@ -422,6 +428,9 @@ impl Socket {
         if data.len() + HDR_LEN > ip6::MAXPACKET + HDR_LEN {
             return Err(Errno::EMSGSIZE);
         }
+        // The table's lock before the interfaces', never under it.
+        let pflags = self.pcb_flags();
+        let laddr = RIPCB.lock().get(self.id).map_or([0; 16], |x| x.laddr);
         let mut n = self.vnet.net.lock();
         if dst.scope != 0 && n.by_index(u16::try_from(dst.scope).unwrap_or(0)).is_none() {
             return Err(Errno::ENXIO);
@@ -448,10 +457,9 @@ impl Socket {
                 .copy_in(at, &c.to_be_bytes())
                 .map_err(|_| Errno::ENOBUFS)?;
         }
-        let mut o = self.opts6(&dst, Some(ctl), &src, ifp);
+        let mut o = self.opts6(&dst, Some(ctl), &src, ifp, pflags);
         // `rip6_send`'s `CALC_FLOWID_OUTBOUND`: from the bound address.
         if n.hash_outbound {
-            let laddr = RIPCB.lock().get(self.id).map_or([0; 16], |x| x.laddr);
             o.flowid = crate::udp::flow_hash6(&laddr, &dst.addr, 0, 0, p);
         }
         let r = ip6::output_if(&mut n, &st, m, &o);

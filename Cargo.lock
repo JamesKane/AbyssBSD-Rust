@@ -319,6 +319,7 @@ dependencies = [
  "mbuf",
  "net",
  "sync",
+ "tcp",
 ]
 
 [[package]]
@@ -404,6 +405,7 @@ dependencies = [
  "storage",
  "sync",
  "sysctl",
+ "tcp",
  "tty",
  "uart",
  "uart-16550",
@@ -578,6 +580,15 @@ name = "sysctl"
 version = "0.0.0"
 dependencies = [
  "abi",
+]
+
+[[package]]
+name = "tcp"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "mbuf",
+ "sync",
 ]
 
 [[package]]

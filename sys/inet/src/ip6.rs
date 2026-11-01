@@ -502,9 +502,10 @@ fn deliver(vnet: &Arc<Vnet>, st: &State, mut m: Packet, mut off: usize, mut nxt:
                 crate::udp::input6(vnet, m, off);
                 return;
             }
-            // TCP on the wire is P7.6's; raw sockets still see it.
             proto::TCP => {
-                crate::raw6::input(vnet, m, off, nxt, true);
+                if let Ok(h) = m.header::<Ip6>(0) {
+                    crate::tcp::input6(vnet, m, off, &h);
+                }
                 return;
             }
             _ => {

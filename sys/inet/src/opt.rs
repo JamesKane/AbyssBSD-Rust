@@ -11,6 +11,7 @@
 //! (`ip6_ctloutput`), sys/netinet/tcp_usrreq.c (`tcp_ctloutput_set`,
 //! `tcp_default_ctloutput`).
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
 
@@ -116,7 +117,13 @@ impl Socket {
     /// for an out-of-range time, `ENOBUFS` for a buffer too big,
     /// `EACCES` for `IP_BINDANY` without privilege, `ENOPROTOOPT` for an
     /// unknown option.
-    pub fn setopt(&self, level: i32, name: i32, val: &[u8], cred: &Cred) -> Result<(), Errno> {
+    pub fn setopt(
+        self: &Arc<Self>,
+        level: i32,
+        name: i32,
+        val: &[u8],
+        cred: &Cred,
+    ) -> Result<(), Errno> {
         match level {
             SOL_SOCKET => self.sol_setopt(name, val),
             IPPROTO_TCP if self.proto == Proto::Tcp => self.tcp_setopt(name, val),
@@ -179,6 +186,8 @@ impl Socket {
                     if !sb.reserve(cc) {
                         return Err(Errno::ENOBUFS);
                     }
+                    // `sbsetopt`: a size set by hand is kept.
+                    sb.auto = false;
                 } else {
                     sb.lowat = cc.min(sb.hiwat);
                 }
@@ -583,61 +592,81 @@ impl Socket {
         Ok(())
     }
 
-    fn tcp_setopt(&self, name: i32, val: &[u8]) -> Result<(), Errno> {
-        let mut i = self.inner.lock();
-        let t = i.tcp.as_mut().ok_or(Errno::EINVAL)?;
-        if t.dropped {
-            return Err(Errno::ECONNRESET);
+    fn tcp_setopt(self: &Arc<Self>, name: i32, val: &[u8]) -> Result<(), Errno> {
+        let st = crate::state::of(&self.vnet);
+        let mut push = false;
+        {
+            let mut i = self.inner.lock();
+            let t = i.tcp.as_mut().ok_or(Errno::EINVAL)?;
+            if t.dropped {
+                return Err(Errno::ECONNRESET);
+            }
+            let tp = &mut t.tp;
+            let bit = |tp: &mut ::tcp::Tcpcb, b: u32, on: bool| {
+                if on {
+                    tp.flags |= b;
+                } else {
+                    tp.flags &= !b;
+                }
+            };
+            match name {
+                tcp::TCP_NODELAY => bit(tp, ::tcp::tf::NODELAY, int(val)? != 0),
+                tcp::TCP_NOOPT => bit(tp, ::tcp::tf::NOOPT, int(val)? != 0),
+                tcp::TCP_NOPUSH => {
+                    let on = int(val)? != 0;
+                    // Clearing it sends what it held back.
+                    push = !on && tp.flags & ::tcp::tf::NOPUSH != 0 && tp.state.have_established();
+                    bit(tp, ::tcp::tf::NOPUSH, on);
+                }
+                tcp::TCP_MAXSEG => {
+                    let v = int(val)?;
+                    let minmss = ::tcp::get(&st.tcp.conf.minmss);
+                    if v > 0 && v.cast_unsigned() <= tp.t_maxseg && v + 40 >= minmss {
+                        tp.t_maxseg = v.cast_unsigned();
+                        tp.user_maxseg = v.cast_unsigned();
+                    } else {
+                        return Err(Errno::EINVAL);
+                    }
+                }
+                tcp::TCP_KEEPIDLE | tcp::TCP_KEEPINTVL | tcp::TCP_KEEPINIT => {
+                    let v = u32::from_ne_bytes(
+                        val.get(..4)
+                            .ok_or(Errno::EINVAL)?
+                            .try_into()
+                            .map_err(|_| Errno::EINVAL)?,
+                    );
+                    // Seconds, at most `UINT_MAX / hz`.
+                    if v > u32::MAX / 1000 {
+                        return Err(Errno::EINVAL);
+                    }
+                    let ms = v * 1000;
+                    match name {
+                        tcp::TCP_KEEPIDLE => tp.keepidle = ms,
+                        tcp::TCP_KEEPINTVL => tp.keepintvl = ms,
+                        _ => tp.keepinit = ms,
+                    }
+                }
+                tcp::TCP_KEEPCNT => {
+                    let v = int(val)?;
+                    if v < 0 {
+                        return Err(Errno::EINVAL);
+                    }
+                    tp.keepcnt = v.cast_unsigned();
+                }
+                tcp::TCP_CONGESTION => {
+                    let n = val.iter().position(|&b| b == 0).unwrap_or(val.len());
+                    let a = ::tcp::cc::Algo::by_name(&val[..n]).ok_or(Errno::ESRCH)?;
+                    if tp.cc.algo() != a {
+                        tp.cc = ::tcp::cc::Cc::new(a);
+                    }
+                }
+                tcp::TCP_FASTOPEN => return Err(Errno::EINVAL),
+                tcp::TCP_INFO => return Err(Errno::EINVAL),
+                _ => return Err(Errno::ENOPROTOOPT),
+            }
         }
-        let bit = |t: &mut crate::tcp::Tcb, b: u32, on: bool| {
-            if on {
-                t.flags |= b;
-            } else {
-                t.flags &= !b;
-            }
-        };
-        match name {
-            tcp::TCP_NODELAY => bit(t, tcp::TF_NODELAY, int(val)? != 0),
-            tcp::TCP_NOPUSH => bit(t, tcp::TF_NOPUSH, int(val)? != 0),
-            tcp::TCP_NOOPT => bit(t, tcp::TF_NOOPT, int(val)? != 0),
-            tcp::TCP_MAXSEG => {
-                let v = int(val)?;
-                // `V_tcp_minmss` 216 to the current MSS.
-                if v < 216 || v.cast_unsigned() > t.maxseg.max(536) {
-                    return Err(Errno::EINVAL);
-                }
-                t.maxseg = v.cast_unsigned();
-            }
-            tcp::TCP_KEEPIDLE | tcp::TCP_KEEPINTVL | tcp::TCP_KEEPINIT => {
-                let v = int(val)?;
-                // Seconds, at most `UINT_MAX / hz`.
-                if !(0..=i32::MAX / 1000).contains(&v) {
-                    return Err(Errno::EINVAL);
-                }
-                let ms = v.cast_unsigned() * 1000;
-                match name {
-                    tcp::TCP_KEEPIDLE => t.keepidle = ms,
-                    tcp::TCP_KEEPINTVL => t.keepintvl = ms,
-                    _ => t.keepinit = ms,
-                }
-            }
-            tcp::TCP_KEEPCNT => {
-                let v = int(val)?;
-                if v < 0 {
-                    return Err(Errno::EINVAL);
-                }
-                t.keepcnt = v.cast_unsigned();
-            }
-            tcp::TCP_CONGESTION => {
-                // Only the default algorithm is here.
-                let n = val.iter().position(|&b| b == 0).unwrap_or(val.len());
-                if &val[..n] != b"cubic" && &val[..n] != b"newreno" {
-                    return Err(Errno::ESRCH);
-                }
-            }
-            tcp::TCP_FASTOPEN => return Err(Errno::EINVAL),
-            tcp::TCP_INFO => return Err(Errno::EINVAL),
-            _ => return Err(Errno::ENOPROTOOPT),
+        if push {
+            self.tcp_output();
         }
         Ok(())
     }
@@ -905,23 +934,34 @@ impl Socket {
     }
 
     fn tcp_getopt(&self, name: i32) -> Result<Vec<u8>, Errno> {
+        let st = crate::state::of(&self.vnet);
+        let conf = &st.tcp.conf;
         let i = self.inner.lock();
         let t = i.tcp.as_ref().ok_or(Errno::EINVAL)?;
         if t.dropped {
             return Err(Errno::ECONNRESET);
         }
+        let tp = &t.tp;
+        let or = |v: u32, d: &core::sync::atomic::AtomicI32| {
+            if v != 0 {
+                v
+            } else {
+                ::tcp::get(d).cast_unsigned()
+            }
+        };
         Ok(match name {
-            tcp::TCP_NODELAY => i32v(i32::from(t.flags & tcp::TF_NODELAY != 0)),
-            tcp::TCP_NOPUSH => i32v(i32::from(t.flags & tcp::TF_NOPUSH != 0)),
-            tcp::TCP_NOOPT => i32v(i32::from(t.flags & tcp::TF_NOOPT != 0)),
-            tcp::TCP_MAXSEG => i32v(t.maxseg.cast_signed()),
-            tcp::TCP_KEEPIDLE => i32v((t.keepidle / 1000).cast_signed()),
-            tcp::TCP_KEEPINTVL => i32v((t.keepintvl / 1000).cast_signed()),
-            tcp::TCP_KEEPINIT => i32v((t.keepinit / 1000).cast_signed()),
-            tcp::TCP_KEEPCNT => i32v(t.keepcnt.cast_signed()),
+            tcp::TCP_NODELAY => i32v(i32::from(tp.flags & ::tcp::tf::NODELAY != 0)),
+            tcp::TCP_NOPUSH => i32v(i32::from(tp.flags & ::tcp::tf::NOPUSH != 0)),
+            tcp::TCP_NOOPT => i32v(i32::from(tp.flags & ::tcp::tf::NOOPT != 0)),
+            tcp::TCP_MAXSEG => i32v(tp.t_maxseg.cast_signed()),
+            tcp::TCP_KEEPIDLE => i32v((or(tp.keepidle, &conf.keepidle) / 1000).cast_signed()),
+            tcp::TCP_KEEPINTVL => i32v((or(tp.keepintvl, &conf.keepintvl) / 1000).cast_signed()),
+            tcp::TCP_KEEPINIT => i32v((or(tp.keepinit, &conf.keepinit) / 1000).cast_signed()),
+            tcp::TCP_KEEPCNT => i32v(or(tp.keepcnt, &conf.keepcnt).cast_signed()),
             tcp::TCP_CONGESTION => {
                 let mut b = alloc::vec![0u8; tcp::TCP_CA_NAME_MAX];
-                b[..5].copy_from_slice(b"cubic");
+                let n = tp.cc.algo().name().as_bytes();
+                b[..n.len()].copy_from_slice(n);
                 b
             }
             tcp::TCP_FASTOPEN => i32v(0),
@@ -932,14 +972,7 @@ impl Socket {
                 b[..7].copy_from_slice(b"freebsd");
                 b
             }
-            tcp::TCP_INFO => {
-                let mut b = alloc::vec![0u8; 256];
-                b[0] = u8::try_from(t.state.number()).unwrap_or(0);
-                b[16..20].copy_from_slice(&t.maxseg.to_ne_bytes());
-                b[20..24].copy_from_slice(&t.maxseg.to_ne_bytes());
-                b[96..100].copy_from_slice(&i.rcv.space().to_ne_bytes());
-                b
-            }
+            tcp::TCP_INFO => tcp_info(tp),
             _ => return Err(Errno::ENOPROTOOPT),
         })
     }
@@ -950,4 +983,75 @@ impl Socket {
     pub fn wants(meta: &udp::Meta, want: u32) -> bool {
         meta.want & want != 0
     }
+}
+
+/// `tcp_fill_info`: `struct tcp_info`.
+fn tcp_info(tp: &::tcp::Tcpcb) -> Vec<u8> {
+    use ::tcp::{tf, tf2};
+    let mut b = alloc::vec![0u8; 256];
+    let put = |b: &mut [u8], off: usize, v: u32| b[off..off + 4].copy_from_slice(&v.to_ne_bytes());
+    b[0] = u8::try_from(tp.state.number()).unwrap_or(0);
+    let mut opts = 0u8;
+    if tp.flags & tf::REQ_TSTMP != 0 && tp.flags & tf::RCVD_TSTMP != 0 {
+        opts |= 0x01;
+    }
+    if tp.flags & tf::SACK_PERMIT != 0 {
+        opts |= 0x02;
+    }
+    if tp.flags & tf::REQ_SCALE != 0 && tp.flags & tf::RCVD_SCALE != 0 {
+        opts |= 0x04;
+        b[6] = (tp.snd_scale & 0xf) | (tp.rcv_scale << 4);
+    }
+    match tp.flags2 & (tf2::ECN_PERMIT | tf2::ACE_PERMIT) {
+        tf2::ECN_PERMIT => opts |= 0x08,
+        0 => {}
+        _ => opts |= 0x40,
+    }
+    b[5] = opts;
+    let now = crate::now() / 1_000_000;
+    put(&mut b, 8, tp.rxtcur * 1000);
+    put(&mut b, 16, tp.t_maxseg);
+    put(&mut b, 20, tp.t_maxseg);
+    put(
+        &mut b,
+        52,
+        u32::try_from(now.saturating_sub(tp.rcvtime) * 1000).unwrap_or(u32::MAX),
+    );
+    put(
+        &mut b,
+        68,
+        u32::try_from((i64::from(tp.srtt) * 1000) >> 5).unwrap_or(0),
+    );
+    put(
+        &mut b,
+        72,
+        u32::try_from((i64::from(tp.rttvar) * 1000) >> 4).unwrap_or(0),
+    );
+    put(&mut b, 76, tp.snd_ssthresh);
+    put(&mut b, 80, tp.snd_cwnd);
+    put(&mut b, 96, tp.rcv_wnd);
+    put(&mut b, 100, tp.snd_wnd);
+    put(&mut b, 108, tp.snd_nxt);
+    put(&mut b, 112, tp.rcv_nxt);
+    put(&mut b, 120, tp.sndrexmitpack);
+    put(&mut b, 124, tp.rcvoopack);
+    put(&mut b, 128, tp.sndzerowin);
+    let ace = tf2::ECN_PERMIT | tf2::ACE_PERMIT;
+    put(
+        &mut b,
+        132,
+        if tp.flags2 & ace == ace {
+            tp.scep.wrapping_sub(5)
+        } else {
+            tp.scep
+        },
+    );
+    put(&mut b, 136, tp.rcep);
+    put(&mut b, 176, tp.snd_una);
+    put(&mut b, 180, tp.snd_max);
+    put(&mut b, 184, u32::try_from(tp.rcv_numsacks).unwrap_or(0));
+    put(&mut b, 188, tp.rcv_adv);
+    put(&mut b, 192, tp.dupacks);
+    put(&mut b, 196, tp.rttlow.cast_unsigned());
+    b
 }

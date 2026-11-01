@@ -21,7 +21,6 @@ use abi::net::{In6Addrpolicy, iff, nd6_iff, rtf};
 use net::Family;
 use net::addr::{In6, LOOPBACK6, is_multicast6, is_unspecified};
 use net::ifnet::{Ifnet, Net, Route, in6_iff, route_zone};
-use sync::SpinLock;
 
 use crate::state::{State, ip6s, on};
 
@@ -144,10 +143,6 @@ pub fn matchlen(a: &In6, b: &In6) -> u8 {
 /// `ADDR_LABEL_NOTAPP`: no policy applies.
 pub const LABEL_NOTAPP: i32 = -1;
 
-/// The address selection policy table (`addrsel_policytab`), which
-/// `ip6addrctl(8)` installs.
-static POLICY: SpinLock<Vec<In6Addrpolicy>> = SpinLock::new(Vec::new());
-
 /// The prefix length of mask `m`, or `None` if it is not a prefix.
 fn mask_plen(m: &In6) -> Option<u8> {
     let ones: u32 = m.iter().map(|b| b.count_ones()).sum();
@@ -161,11 +156,11 @@ fn mask_plen(m: &In6) -> Option<u8> {
 ///
 /// `EINVAL` for `ADDR_LABEL_NOTAPP` or a mask that is not a prefix,
 /// `EEXIST` for one already there.
-pub fn policy_add(mut p: In6Addrpolicy) -> Result<(), Errno> {
+pub fn policy_add(st: &State, mut p: In6Addrpolicy) -> Result<(), Errno> {
     if p.label == LABEL_NOTAPP || mask_plen(&p.addrmask.sin6_addr).is_none() {
         return Err(Errno::EINVAL);
     }
-    let mut t = POLICY.lock();
+    let mut t = st.policy.lock();
     if t.iter().any(|e| same_policy(e, &p)) {
         return Err(Errno::EEXIST);
     }
@@ -179,11 +174,11 @@ pub fn policy_add(mut p: In6Addrpolicy) -> Result<(), Errno> {
 /// # Errors
 ///
 /// `EINVAL` for a mask that is not a prefix, `ESRCH` for none.
-pub fn policy_delete(p: &In6Addrpolicy) -> Result<(), Errno> {
+pub fn policy_delete(st: &State, p: &In6Addrpolicy) -> Result<(), Errno> {
     if mask_plen(&p.addrmask.sin6_addr).is_none() {
         return Err(Errno::EINVAL);
     }
-    let mut t = POLICY.lock();
+    let mut t = st.policy.lock();
     let i = t
         .iter()
         .position(|e| same_policy(e, p))
@@ -198,14 +193,14 @@ fn same_policy(a: &In6Addrpolicy, b: &In6Addrpolicy) -> bool {
 
 /// The table, as `net.inet6.ip6.addrctlpolicy` reports it.
 #[must_use]
-pub fn policies() -> Vec<In6Addrpolicy> {
-    POLICY.lock().clone()
+pub fn policies(st: &State) -> Vec<In6Addrpolicy> {
+    st.policy.lock().clone()
 }
 
 /// `lookup_addrsel_policy`: the label of the most specific policy whose
 /// prefix holds `a` (its use counted), `ADDR_LABEL_NOTAPP` for none.
-fn policy_label(a: &In6) -> i32 {
-    let mut t = POLICY.lock();
+fn policy_label(st: &State, a: &In6) -> i32 {
+    let mut t = st.policy.lock();
     let mut best: Option<(usize, u8)> = None;
     for (i, p) in t.iter().enumerate() {
         let m = &p.addrmask.sin6_addr;
@@ -423,9 +418,9 @@ pub(crate) fn selectsrc(n: &Net, st: &State, r: &SrcReq) -> Result<(In6, u16), E
                     }
                 }
                 // Rule 6: a matching label.
-                let dl = *dst_label.get_or_insert_with(|| policy_label(&dst));
+                let dl = *dst_label.get_or_insert_with(|| policy_label(st, &dst));
                 if dl != LABEL_NOTAPP {
-                    let nl = policy_label(&src);
+                    let nl = policy_label(st, &src);
                     if dl == b.label && dl != nl {
                         break 'v Verdict::Next;
                     }
@@ -482,7 +477,7 @@ pub(crate) fn selectsrc(n: &Net, st: &State, r: &SrcReq) -> Result<(In6, u16), E
                         ifp: i1,
                         a,
                         scope: new_scope,
-                        label: policy_label(&src),
+                        label: policy_label(st, &src),
                         matchlen: matchlen(&src, &dst),
                     });
                     if matches!(verdict, Verdict::Take(_)) {

@@ -1,94 +1,129 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! TCP between local sockets: a connection is two sockets, each the
-//! other's peer. A send lands in the peer's receive buffer as far as its
-//! room allows (the window), the rest waiting in the sender's send
-//! buffer until the receiver reads; a FIN follows the last of it. The
-//! states a connection passes through are FreeBSD's, each segment's
-//! effect taken at once (its acknowledgement too), so the side that
-//! closes first ends in `TIME_WAIT` for twice the MSL, holding its port,
-//! and the other goes straight from `LAST_ACK` to `CLOSED`.
+//! TCP sockets on the wire (docs/NETWORKING.md §9.2): the socket layer of
+//! FreeBSD's TCP around `sys/tcp`'s protocol.
 //!
-//! A connection to a listener is queued on it complete (no syncache);
-//! past the listen queue's limit a connect waits, as a client
-//! retransmitting its SYN would, until `accept` makes room or
-//! `TCP_KEEPINIT` passes.
+//! A socket's connection is a [`::tcp::Tcpcb`] kept with the socket's
+//! state, under its lock (FreeBSD's INP lock); its buffers are mbuf
+//! chains the protocol reads and appends to through [`::tcp::Sock`].
+//! What a call into the protocol sends is put on the wire once the lock
+//! is let go, with the IP header the connection's addresses and options
+//! give it. Arriving segments find their connection in [`TCB`] (or a
+//! listener, whose half-open connections the VNET's SYN cache holds);
+//! a closed port answers with a reset.
 //!
-//! Behavior reference: sys/netinet/tcp_usrreq.c (`tcp_usr_listen`,
-//! `tcp_usr_connect`, `tcp_usr_shutdown`, `tcp_disconnect`,
-//! `tcp_usrclosed`, `tcp_usr_rcvoob`, `tcp_usr_send` with `PRUS_OOB`),
-//! sys/netinet/tcp_input.c (the FIN and RST transitions, data after
-//! close, `tcp_pulloutofband`), sys/netinet/tcp_syncache.c
-//! (`syncache_socket`: what a new connection inherits),
-//! sys/kern/uipc_socket.c (`solisten_proto`, `sonewconn`,
+//! A socket closed while its connection still runs (`SS_NOFDREF`) stays
+//! in its VNET's orphans until the connection ends (`INP_SOCKREF`), so
+//! TIME_WAIT is a socket like any other.
+//!
+//! Timers: every connection's earliest deadline is in one queue, which
+//! the kernel's protocol timer thread runs ([`run_timers`]), with each
+//! VNET's SYN cache and host cache.
+//!
+//! Behavior reference: sys/netinet/tcp_usrreq.c, sys/netinet/tcp_input.c
+//! (`tcp_input_with_port`: the lookup, the listener, `tcp_dropwithreset`),
+//! sys/netinet/tcp_output.c and tcp_subr.c (the IP headers,
+//! `tcpip_fillheaders`), sys/netinet/tcp_syncache.c (`syncache_socket`),
+//! sys/kern/uipc_socket.c (`solisten_proto`, `sonewconn`, `soabort`,
 //! `soreceive_generic`'s out-of-band mark, `sosend_generic`).
 
-use alloc::collections::VecDeque;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::{Arc, Weak};
+use alloc::vec;
 use alloc::vec::Vec;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
+use ::tcp::cc::Algo;
+use ::tcp::hdr::{Accept, Opts, Th, th};
+use ::tcp::hostcache::HostCache;
+use ::tcp::isn::Secrets;
+use ::tcp::syncache::{Expand, Listener, Reply, SynCache};
+use ::tcp::{Chain, Conf, Ctx, Fate, Inc, Path, Seg, Segment, Sock, Stats, Tcpcb, TwVerdict, tf};
 use abi::errno::Errno;
-use abi::inet::{INP_IPV4, INP_IPV6, inp, ss, tcp as tcpopt, tcps};
+use abi::inet::{INP_IPV4, INP_IPV6, inp, ss};
 use abi::socket::{SHUT_RD, SHUT_RDWR, SHUT_WR, SO_ACCEPTCONN, SO_LINGER, SO_OOBINLINE};
+use mbuf::{Packet, csum};
+use net::Vnet;
+use sync::SpinLock;
 
-use crate::addr::{
-    self, Sockaddr, is_broadcast4, is_multicast4, is_multicast6, is_v4mapped, v4_of,
-};
-use crate::ifnet::LOMTU;
-use crate::pcb::TCB;
-use crate::{Cred, Family, Inner, Proto, Socket, lock2, tune};
+use crate::addr::{self, is_broadcast4, is_multicast4, is_multicast6, is_v4mapped, v4_of};
+use crate::ip::{self, Ip};
+use crate::pcb::{Pcb, TCB};
+use crate::{Cred, Family, Inner, Proto, Socket, cksum, state, tune};
 
-/// A connection's state (`t_state`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Tstate {
-    Closed,
-    Listen,
-    SynSent,
-    SynReceived,
-    Established,
-    CloseWait,
-    FinWait1,
-    Closing,
-    LastAck,
-    FinWait2,
-    TimeWait,
+pub use ::tcp::State as Tstate;
+
+/// A VNET's TCP (`V_tcbinfo`'s neighbors): tunables, statistics, the
+/// host cache, the SYN cache, the secrets, and the closed sockets whose
+/// connections still run.
+#[derive(Debug)]
+pub struct Vtcp {
+    pub conf: Conf,
+    pub stats: Stats,
+    pub hc: HostCache,
+    pub syncache: SynCache,
+    pub(crate) secrets: SpinLock<Option<Secrets>>,
+    /// `INP_SOCKREF`: sockets the connection holds after their close.
+    orphans: SpinLock<BTreeMap<u64, Arc<Socket>>>,
+    /// `net.inet.tcp.cc.algorithm` (an [`Algo`] index).
+    pub default_cc: AtomicU8,
+    /// When the host cache is next purged (ns).
+    hc_purge_at: AtomicU64,
 }
 
-impl Tstate {
-    /// Its `TCPS_*`.
+impl Default for Vtcp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Vtcp {
     #[must_use]
-    pub const fn number(self) -> i32 {
-        match self {
-            Self::Closed => tcps::CLOSED,
-            Self::Listen => tcps::LISTEN,
-            Self::SynSent => tcps::SYN_SENT,
-            Self::SynReceived => tcps::SYN_RECEIVED,
-            Self::Established => tcps::ESTABLISHED,
-            Self::CloseWait => tcps::CLOSE_WAIT,
-            Self::FinWait1 => tcps::FIN_WAIT_1,
-            Self::Closing => tcps::CLOSING,
-            Self::LastAck => tcps::LAST_ACK,
-            Self::FinWait2 => tcps::FIN_WAIT_2,
-            Self::TimeWait => tcps::TIME_WAIT,
+    pub const fn new() -> Self {
+        Self {
+            conf: Conf::new(),
+            stats: Stats::new(),
+            hc: HostCache::new(),
+            syncache: SynCache::new(),
+            secrets: SpinLock::new(None),
+            orphans: SpinLock::new(BTreeMap::new()),
+            default_cc: AtomicU8::new(1),
+            hc_purge_at: AtomicU64::new(0),
         }
     }
 
-    /// Past `CLOSE_WAIT`: this side has sent its FIN.
-    const fn fin_sent(self) -> bool {
-        matches!(
-            self,
-            Self::FinWait1 | Self::Closing | Self::LastAck | Self::FinWait2 | Self::TimeWait
-        )
+    /// The secrets, made from the random source on first use.
+    fn secrets(&self) -> Secrets {
+        let mut s = self.secrets.lock();
+        *s.get_or_insert_with(|| {
+            let mut k = Secrets::default();
+            for b in k.isn.chunks_mut(4).chain(k.ts.chunks_mut(4)) {
+                b.copy_from_slice(&crate::random().to_ne_bytes());
+            }
+            k
+        })
+    }
+
+    /// The algorithm new connections use.
+    #[must_use]
+    pub fn cc_algo(&self) -> Algo {
+        // Relaxed: a setting.
+        Algo::ALL[usize::from(self.default_cc.load(Ordering::Relaxed)).min(Algo::ALL.len() - 1)]
+    }
+
+    /// Connections whose sockets were closed (`net.inet.tcp.pcblist`'s
+    /// unowned ones).
+    #[must_use]
+    pub fn orphan_count(&self) -> usize {
+        self.orphans.lock().len()
     }
 }
 
-/// A listener's queue of complete connections (`sol_comp`), its limit,
-/// and the connects waiting for room.
+/// `sonewconn`'s queue of a listener: complete connections not yet
+/// accepted, and the backlog.
 #[derive(Debug)]
 pub(crate) struct Listen {
     pub(crate) comp: VecDeque<Arc<Socket>>,
     pub(crate) qlimit: u32,
-    pending: VecDeque<Weak<Socket>>,
 }
 
 impl Listen {
@@ -98,7 +133,7 @@ impl Listen {
     }
 }
 
-/// `TCPOOB_HAVEDATA`, `TCPOOB_HADDATA`.
+/// `TCPOOB_HAVEDATA`, `TCPOOB_HADDATA` with the byte.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Oob {
     None,
@@ -106,218 +141,715 @@ enum Oob {
     Had,
 }
 
-/// The TCP state of a socket (`struct tcpcb`).
+/// What the socket keeps of its connection besides the control block.
 #[derive(Debug)]
-pub(crate) struct Tcb {
-    pub(crate) state: Tstate,
-    pub(crate) peer: Option<Arc<Socket>>,
-    pub(crate) listen: Option<Listen>,
-    /// The listener a waiting connect is queued on.
-    target: Option<Weak<Socket>>,
-    /// `INP_DROPPED`: reset or refused; it connects no more.
-    pub(crate) dropped: bool,
-    /// `TF_NEEDFIN`: a FIN goes once the send buffer drains.
-    fin_wanted: bool,
+pub(crate) struct Side {
     /// `SS_NOFDREF`: its descriptor is closed.
     nofdref: bool,
-    /// `t_flags` the options set (`TF_NODELAY`, `TF_NOPUSH`,
-    /// `TF_NOOPT`), and `TF_SENTFIN`.
-    pub(crate) flags: u32,
-    pub(crate) maxseg: u32,
-    /// `TCP_KEEPINIT` and the keepalive parameters, ms and count.
-    pub(crate) keepinit: u32,
-    pub(crate) keepidle: u32,
-    pub(crate) keepintvl: u32,
-    pub(crate) keepcnt: u32,
-    /// The urgent byte (`t_iobc`), how many bytes come before the mark
-    /// (`so_oobmark`), and whether reading is at it (`SBS_RCVATMARK`).
     oob: Oob,
+    /// `so_oobmark`: bytes before the urgent mark; `SBS_RCVATMARK`.
     oobmark: usize,
     atmark: bool,
-    /// When it last received (`t_rcvtime`, the hooks' clock).
-    pub(crate) rcvtime: u64,
+    /// The route's limits when the connection began (`inp_route`).
+    path: Path,
+    /// The IPv6 flow label (`inp_flow`).
+    flow: u32,
+    /// Readers or writers to wake once the lock goes.
+    wake: bool,
+}
+
+/// A TCP socket's protocol state (`struct tcpcb` and what of `struct
+/// socket` it drives).
+#[derive(Debug)]
+pub(crate) struct Tcb {
+    pub(crate) tp: Tcpcb,
+    pub(crate) listen: Option<Listen>,
+    /// `INP_DROPPED`: the connection is over; it connects no more.
+    pub(crate) dropped: bool,
+    pub(crate) side: Side,
+    vnet: Arc<Vnet>,
 }
 
 impl Tcb {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(vnet: &Arc<Vnet>, family: Family) -> Self {
+        let st = state::of(vnet);
+        let inc = Inc {
+            v6: family == Family::Inet6,
+            ..Inc::default()
+        };
+        let tp = Tcpcb::new(inc, st.tcp.cc_algo(), &st.tcp.conf, ms(crate::now()));
+        // `tcp_usr_attach`.
+        st.tcp.stats.state_inc(Tstate::Closed);
         Self {
-            state: Tstate::Closed,
-            peer: None,
+            tp,
             listen: None,
-            target: None,
             dropped: false,
-            fin_wanted: false,
-            nofdref: false,
-            flags: 0,
-            maxseg: tune::TCP_MSSDFLT.load(Ordering::Relaxed),
-            keepinit: tune::TCP_KEEPINIT.load(Ordering::Relaxed),
-            keepidle: tune::TCP_KEEPIDLE.load(Ordering::Relaxed),
-            keepintvl: tune::TCP_KEEPINTVL.load(Ordering::Relaxed),
-            keepcnt: tune::TCP_KEEPCNT.load(Ordering::Relaxed),
-            oob: Oob::None,
-            oobmark: 0,
-            atmark: false,
-            rcvtime: 0,
+            side: Side {
+                nofdref: false,
+                oob: Oob::None,
+                oobmark: 0,
+                atmark: false,
+                path: Path::default(),
+                flow: 0,
+                wake: false,
+            },
+            vnet: Arc::clone(vnet),
+        }
+    }
+
+    /// The connection's state.
+    pub(crate) fn state(&self) -> Tstate {
+        self.tp.state
+    }
+}
+
+impl Drop for Tcb {
+    /// `tcp_discardcb`: what the connection learned goes to the host
+    /// cache.
+    fn drop(&mut self) {
+        let st = state::of(&self.vnet);
+        let mut out = Vec::new();
+        let path = |_: &Inc| Path::default();
+        let secrets = Secrets::default();
+        let cx = Ctx {
+            now: ms(crate::now()),
+            conf: &st.tcp.conf,
+            stats: &st.tcp.stats,
+            random: crate::random,
+            out: &mut out,
+            hc: &st.tcp.hc,
+            path: &path,
+            secrets: &secrets,
+        };
+        self.tp.free_sackholes(&st.tcp.stats);
+        self.tp.discard(&cx, &st.tcp.hc, 0);
+    }
+}
+
+/// The protocols' clock (ns) in TCP's ticks of a millisecond.
+fn ms(ns: u64) -> u64 {
+    ns / 1_000_000
+}
+
+/// The socket as `sys/tcp` sees it: its buffers and state, locked.
+struct View<'a> {
+    i: &'a mut Inner,
+    side: &'a mut Side,
+    options: i32,
+}
+
+impl Sock for View<'_> {
+    fn snd_cc(&self) -> u32 {
+        self.i.snd.cc
+    }
+    fn snd_hiwat(&self) -> u32 {
+        self.i.snd.hiwat
+    }
+    fn snd_autosize(&self) -> bool {
+        self.i.snd.auto
+    }
+    fn snd_reserve(&mut self, hiwat: u32) -> bool {
+        self.i.snd.reserve(hiwat)
+    }
+    fn snd_autosize_off(&mut self) {
+        self.i.snd.auto = false;
+    }
+    fn snd_copy(&self, off: u32, len: u32) -> Option<Chain> {
+        self.i.sndq.copy(off as usize, len as usize).ok()
+    }
+    fn snd_drop(&mut self, n: u32) {
+        let n = n.min(self.i.snd.cc);
+        self.i.sndq.trim_front(n as usize);
+        self.i.snd.cc -= n;
+        self.i.snd.mbcnt = self.i.sndq.cost();
+        self.side.wake = true;
+    }
+    fn cantsendmore(&self) -> bool {
+        self.i.snd.cant
+    }
+    fn rcv_cc(&self) -> u32 {
+        self.i.rcv.cc
+    }
+    fn rcv_hiwat(&self) -> u32 {
+        self.i.rcv.hiwat
+    }
+    fn rcv_space(&self) -> i64 {
+        let r = &self.i.rcv;
+        (i64::from(r.hiwat) - i64::from(r.cc)).min(i64::from(r.mbmax) - i64::from(r.mbcnt))
+    }
+    fn rcv_mbcnt(&self) -> u32 {
+        self.i.rcv.mbcnt
+    }
+    fn rcv_mbmax(&self) -> u32 {
+        self.i.rcv.mbmax
+    }
+    fn rcv_autosize(&self) -> bool {
+        self.i.rcv.auto
+    }
+    fn rcv_reserve(&mut self, hiwat: u32) -> bool {
+        self.i.rcv.reserve(hiwat)
+    }
+    fn rcv_autosize_off(&mut self) {
+        self.i.rcv.auto = false;
+    }
+    fn rcv_append(&mut self, data: Chain) {
+        if self.i.rcv.cant {
+            return;
+        }
+        self.i.rcv.cc += u32::try_from(data.len()).unwrap_or(u32::MAX);
+        self.i.stream.append(data);
+        self.i.rcv.mbcnt = self.i.stream.cost();
+        self.side.wake = true;
+    }
+    fn cantrcvmore(&mut self) {
+        self.i.rcv.cant = true;
+        self.side.wake = true;
+    }
+    fn rcv_closed(&self) -> bool {
+        self.i.rcv.cant
+    }
+    fn options(&self) -> i32 {
+        self.options
+    }
+    fn nofdref(&self) -> bool {
+        self.side.nofdref
+    }
+    fn connected(&mut self) {
+        self.i.state = (self.i.state & !(ss::ISCONNECTING | ss::ISDISCONNECTING)) | ss::ISCONNECTED;
+        self.side.wake = true;
+    }
+    fn disconnecting(&mut self) {
+        self.i.state = (self.i.state & !ss::ISCONNECTING) | ss::ISDISCONNECTING;
+        self.i.rcv.cant = true;
+        self.i.snd.cant = true;
+        self.side.wake = true;
+    }
+    fn disconnected(&mut self) {
+        self.i.state = (self.i.state & !(ss::ISCONNECTING | ss::ISCONNECTED | ss::ISDISCONNECTING))
+            | ss::ISDISCONNECTED;
+        self.i.rcv.cant = true;
+        self.i.snd.cant = true;
+        // `sbdrop` of the send buffer.
+        self.i.sndq = Chain::default();
+        self.i.snd.cc = 0;
+        self.i.snd.mbcnt = 0;
+        self.side.wake = true;
+    }
+    fn set_error(&mut self, e: Option<Errno>) {
+        self.i.error = e;
+        self.side.wake = true;
+    }
+    fn urgent(&mut self, oobmark: u32) {
+        self.side.oobmark = oobmark as usize;
+        self.side.atmark = oobmark == 0;
+        self.side.wake = true;
+    }
+    fn oob_byte(&mut self, c: u8) {
+        self.side.oob = Oob::Have(c);
+    }
+    fn wake_writers(&mut self) {
+        self.side.wake = true;
+    }
+}
+
+/// A segment waiting to go, with what its IP header takes.
+#[derive(Debug)]
+pub(crate) struct Tx {
+    inc: Inc,
+    info: TxInfo,
+    seg: Seg,
+}
+
+/// What the IP header of a connection's segments takes from its socket.
+#[derive(Clone, Copy, Debug)]
+struct TxInfo {
+    ttl: u8,
+    tos: u8,
+    hops: i16,
+    tclass: i16,
+    flow: u32,
+    dontroute: bool,
+    fib: u16,
+}
+
+impl TxInfo {
+    fn of(i: &Inner, options: i32, flow: u32) -> Self {
+        Self {
+            ttl: i.ip.ttl,
+            tos: i.ip.tos,
+            hops: i.ip.hops,
+            tclass: i.ip.tclass,
+            flow,
+            dontroute: options & abi::socket::SO_DONTROUTE != 0,
+            fib: 0,
+        }
+    }
+
+    /// A segment sent for no socket (a reset): the defaults.
+    fn default_for() -> Self {
+        Self {
+            ttl: u8::try_from(tune::IP_TTL.load(Ordering::Relaxed)).unwrap_or(64),
+            tos: 0,
+            hops: -1,
+            tclass: -1,
+            flow: 0,
+            dontroute: false,
+            fib: 0,
         }
     }
 }
 
-/// What to do once the sockets' locks are dropped: PCB changes and
-/// wakeups.
-#[derive(Debug, Default)]
-struct After {
-    /// PCBs to free, to unhash, and to put in `TIME_WAIT`.
-    free: Vec<u64>,
-    unhash: Vec<u64>,
-    time_wait: Vec<u64>,
-    wake: Vec<Arc<Socket>>,
-    /// References to let go of with no lock held.
-    drop: Vec<Arc<Socket>>,
-}
+// --- Addresses ---
 
-impl After {
-    fn run(self) {
-        if !self.free.is_empty() || !self.unhash.is_empty() || !self.time_wait.is_empty() {
-            let mut t = TCB.lock();
-            for id in self.free {
-                t.free(id);
-            }
-            for id in self.unhash {
-                t.drop_hash(id);
-            }
-            for id in self.time_wait {
-                t.time_wait(id);
-            }
+/// A PCB's endpoints as `sys/tcp` keeps them (IPv4 in the first four
+/// bytes).
+fn inc_of(p: &Pcb) -> Inc {
+    let v6 = p.vflag & INP_IPV6 != 0;
+    let conv = |a: &[u8; 16]| {
+        if v6 {
+            *a
+        } else {
+            let mut b = [0u8; 16];
+            b[..4].copy_from_slice(&v4_of(a));
+            b
         }
-        for s in self.wake {
-            s.wake();
-        }
-        drop(self.drop);
+    };
+    Inc {
+        laddr: conv(&p.laddr),
+        faddr: conv(&p.faddr),
+        lport: p.lport,
+        fport: p.fport,
+        v6,
+        zone: p.zone,
+        fib: 0,
     }
 }
 
-fn tcb(i: &mut Inner) -> &mut Tcb {
-    // Every TCP socket has its control block from `Socket::new`.
-    i.tcp.as_mut().expect("a TCP socket's tcpcb")
+fn a4(a: &[u8; 16]) -> [u8; 4] {
+    [a[0], a[1], a[2], a[3]]
 }
 
-fn tcb_ref(i: &Inner) -> &Tcb {
-    i.tcp.as_ref().expect("a TCP socket's tcpcb")
+fn wide4(a: [u8; 4]) -> [u8; 16] {
+    let mut b = [0u8; 16];
+    b[..4].copy_from_slice(&a);
+    b
 }
 
-/// `soisdisconnected`, with the error a reset or refusal leaves.
-fn disconnected(i: &mut Inner, err: Option<Errno>) {
-    i.state = (i.state & !(ss::ISCONNECTED | ss::ISCONNECTING | ss::ISDISCONNECTING))
-        | ss::ISDISCONNECTED;
-    i.rcv.cant = true;
-    i.snd.cant = true;
-    if let Some(e) = err {
-        i.error = Some(e);
-    }
-}
-
-/// `tcp_drop` of the side `s` (locked as `i`): it is reset with `err`,
-/// leaves the lookups, and lets go of its peer.
-fn drop_side(s: &Arc<Socket>, i: &mut Inner, err: Errno, fx: &mut After) {
-    disconnected(i, Some(err));
-    // Unsent data goes with the connection (`tcp_discardcb`).
-    i.sndq.clear();
-    i.snd.cc = 0;
-    let t = tcb(i);
-    t.state = Tstate::Closed;
-    t.dropped = true;
-    t.fin_wanted = false;
-    if let Some(p) = t.peer.take() {
-        fx.drop.push(p);
-    }
-    if t.nofdref {
-        fx.free.push(s.id);
+/// `tcp_maxmtu`, `tcp_maxmtu6`, `in_localaddr`, `in_localip`: what the
+/// route to `inc`'s peer allows.
+fn path_for(vnet: &Vnet, inc: &Inc) -> Path {
+    let n = vnet.net.lock();
+    let (family, dst) = if inc.v6 {
+        (Family::Inet6, inc.faddr)
     } else {
-        fx.unhash.push(s.id);
-    }
-    fx.wake.push(Arc::clone(s));
-}
-
-/// The FIN from `a` (whose send buffer has drained) reaching `b`, and
-/// its acknowledgement (`tcp_usrclosed`, then `tcp_input`'s `TH_FIN`
-/// handling on the other side).
-fn fin(a_so: &Arc<Socket>, a: &mut Inner, b_so: &Arc<Socket>, b: &mut Inner, fx: &mut After) {
-    let at = tcb(a);
-    at.fin_wanted = false;
-    at.flags |= tcpopt::TF_SENTFIN;
-    at.state = match at.state {
-        Tstate::CloseWait => Tstate::LastAck,
-        // Established: FIN_WAIT_1, acknowledged at once.
-        _ => Tstate::FinWait2,
+        (Family::Inet, addr::from_v4(a4(&inc.faddr)))
     };
-    // `socantrcvmore` at the receiver: the end follows its data.
-    b.rcv.cant = true;
-    let bt = tcb(b);
-    bt.rcvtime = crate::now();
-    let b_had_fin = bt.state.fin_sent();
-    bt.state = match bt.state {
-        Tstate::Established => Tstate::CloseWait,
-        s if s.fin_sent() => Tstate::TimeWait,
-        s => s,
+    let route = if inc.v6 {
+        n.route6(0, &dst, u16::try_from(inc.zone).unwrap_or(0))
+    } else {
+        n.route_in(0, family, &dst)
     };
-    fx.wake.push(Arc::clone(b_so));
-    fx.wake.push(Arc::clone(a_so));
-    if b_had_fin {
-        // Both FINs are in: `b` (the active closer) waits in
-        // `TIME_WAIT`, `a` goes from `LAST_ACK` to `CLOSED` on its ACK.
-        let at = tcb(a);
-        at.state = Tstate::Closed;
-        if let Some(p) = at.peer.take() {
-            fx.drop.push(p);
-        }
-        let a_gone = at.nofdref;
-        disconnected(a, None);
-        if a_gone {
-            fx.free.push(a_so.id);
-        } else {
-            fx.unhash.push(a_so.id);
-        }
-        let bt = tcb(b);
-        if let Some(p) = bt.peer.take() {
-            fx.drop.push(p);
-        }
-        disconnected(b, None);
-        fx.time_wait.push(b_so.id);
+    let Some(r) = route else {
+        return Path::default();
+    };
+    let ifmtu = n.by_index(r.ifindex).map_or(0, |i| i.mtu);
+    let maxmtu = if r.mtu != 0 { r.mtu.min(ifmtu) } else { ifmtu };
+    let localip = n.is_local(family, &dst, inc.zone);
+    Path {
+        maxmtu,
+        local: matches!(r.gateway, net::ifnet::Gateway::Link(_)) || localip,
+        localip,
+        tso: None,
     }
 }
 
-/// Moves what `a` has queued into `b`'s receive buffer as far as its room
-/// goes, then `a`'s FIN if it was waiting for that.
-fn push(a_so: &Arc<Socket>, a: &mut Inner, b_so: &Arc<Socket>, b: &mut Inner, fx: &mut After) {
-    if !a.sndq.is_empty() {
-        if b.rcv.cant {
-            // `SHUT_RD` at the receiver: what comes is acknowledged and
-            // dropped.
-            a.snd.cc = 0;
-            a.sndq.clear();
+// --- Output ---
+
+fn transmit_one(vnet: &Arc<Vnet>, inc: &Inc, tx: &TxInfo, s: Seg) -> Result<(), Errno> {
+    let mut m = s.pkt;
+    let tlen = m.len();
+    if inc.v6 {
+        let (src, dst) = (inc.laddr, inc.faddr);
+        let p = cksum::fold(crate::ip6::pseudo(&src, &dst, ip::proto::TCP, tlen));
+        m.data
+            .copy_in(16, &p.to_be_bytes())
+            .map_err(|_| Errno::ENOBUFS)?;
+        m.hdr.csum_flags = csum::IP6_TCP;
+        m.hdr.csum_data = 16;
+        if s.tso_segsz != 0 {
+            m.hdr.csum_flags |= csum::IP6_TSO;
+            m.hdr.tso_segsz = s.tso_segsz;
+        }
+        let hlim = if tx.hops >= 0 {
+            u8::try_from(tx.hops).unwrap_or(64)
         } else {
-            let n = a.sndq.len().min(b.rcv.space() as usize);
-            if n > 0 {
-                b.stream.extend(a.sndq.drain(..n));
-                let n32 = u32::try_from(n).unwrap_or(u32::MAX);
-                a.snd.cc -= n32;
-                b.rcv.cc += n32;
-                b.rcv.mbcnt = crate::mbuf_cost(b.stream.len());
-                a.snd.mbcnt = crate::mbuf_cost(a.sndq.len());
-                a_so.vnet.lo.looped(n + 40);
-                fx.wake.push(Arc::clone(b_so));
-                fx.wake.push(Arc::clone(a_so));
+            crate::ip6::DEFHLIM
+        };
+        let tclass = if tx.tclass >= 0 {
+            u8::try_from(tx.tclass).unwrap_or(0)
+        } else {
+            0
+        };
+        let plen = u16::try_from(tlen).map_err(|_| Errno::EMSGSIZE)?;
+        let mut h = crate::ip6::Ip6::new(
+            ip::proto::TCP,
+            src,
+            dst,
+            plen,
+            hlim,
+            (tclass & !::tcp::ecn::MASK) | s.ecn,
+        );
+        h.flow |= tx.flow & ::tcp::FLOWLABEL_MASK;
+        m.prepend(crate::ip6::HDR_LEN)
+            .map_err(|_| Errno::ENOBUFS)?
+            .copy_from_slice(&h.bytes());
+        let zone = u16::try_from(inc.zone).unwrap_or(0);
+        let mut o = crate::ip6::Opts6 {
+            flags: 0,
+            mcast: None,
+            fib: tx.fib,
+            pcp: None,
+            flowid: 0,
+            hlim: None,
+            tclass: None,
+            ifindex: 0,
+            nexthop: None,
+            zone,
+            src_zone: zone,
+            router_alert: false,
+            minmtu: -1,
+        };
+        if ip::hash_outbound(vnet) {
+            o.flowid = crate::udp::flow_hash6(&src, &dst, inc.lport, inc.fport, ip::proto::TCP);
+        }
+        crate::ip6::output(vnet, m, &o)
+    } else {
+        let (s4, d4) = (a4(&inc.laddr), a4(&inc.faddr));
+        let p = cksum::fold(cksum::pseudo4(s4, d4, ip::proto::TCP, tlen));
+        m.data
+            .copy_in(16, &p.to_be_bytes())
+            .map_err(|_| Errno::ENOBUFS)?;
+        m.hdr.csum_flags = csum::IP_TCP;
+        m.hdr.csum_data = 16;
+        if s.tso_segsz != 0 {
+            m.hdr.csum_flags |= csum::IP_TSO;
+            m.hdr.tso_segsz = s.tso_segsz;
+        }
+        let len = u16::try_from(tlen + ip::HDR_LEN).map_err(|_| Errno::EMSGSIZE)?;
+        let mut h = Ip::new(
+            ip::proto::TCP,
+            s4,
+            d4,
+            len,
+            tx.ttl,
+            (tx.tos & !::tcp::ecn::MASK) | s.ecn,
+        );
+        if s.df {
+            h.off = ip::DF;
+        }
+        m.prepend(ip::HDR_LEN)
+            .map_err(|_| Errno::ENOBUFS)?
+            .copy_from_slice(&h.bytes());
+        let mut o = ip::Opts {
+            flags: 0,
+            mcast: None,
+            fib: tx.fib,
+            pcp: None,
+            router_alert: false,
+            flowid: 0,
+        };
+        if tx.dontroute {
+            o.flags |= ip::out::ROUTETOIF;
+        }
+        if ip::hash_outbound(vnet) {
+            o.flowid = ip::flow_hash(s4, d4, inc.lport, inc.fport, ip::proto::TCP);
+        }
+        ip::output(vnet, m, &o)
+    }
+}
+
+/// The SYN cache's segments.
+fn transmit_replies(vnet: &Arc<Vnet>, rs: Vec<Reply>) {
+    for r in rs {
+        let tx = TxInfo {
+            flow: r.flowlabel,
+            ..TxInfo::default_for()
+        };
+        let _ = transmit_one(vnet, &r.inc, &tx, r.seg);
+    }
+}
+
+// --- Timers ---
+
+/// Every connection's next deadline (ns), by time and by socket.
+#[derive(Debug)]
+struct TimerQ {
+    by_time: BTreeMap<(u64, u64), Weak<Socket>>,
+    by_id: BTreeMap<u64, u64>,
+}
+
+static TIMERS: SpinLock<TimerQ> = SpinLock::new(TimerQ {
+    by_time: BTreeMap::new(),
+    by_id: BTreeMap::new(),
+});
+
+/// The earliest TCP deadline (ns), for the timer thread.
+static NEXT: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// Sets `so`'s timer to `at` (TCP's ticks), or clears it.
+fn schedule(so: &Arc<Socket>, at: Option<u64>) {
+    let mut q = TIMERS.lock();
+    if let Some(old) = q.by_id.remove(&so.id) {
+        q.by_time.remove(&(old, so.id));
+    }
+    if let Some(t) = at {
+        let ns = t.saturating_mul(1_000_000);
+        q.by_id.insert(so.id, ns);
+        q.by_time.insert((ns, so.id), Arc::downgrade(so));
+        drop(q);
+        // AcqRel: an earlier deadline wins, and the thread sees it.
+        if NEXT.fetch_min(ns, Ordering::AcqRel) > ns {
+            crate::timer_kick();
+        }
+    }
+}
+
+/// When TCP's timers (connections, SYN caches, host caches) next need
+/// to run (ns), `u64::MAX` for never.
+#[must_use]
+pub(crate) fn next_deadline() -> u64 {
+    // Acquire: pairs with `schedule`.
+    NEXT.load(Ordering::Acquire)
+}
+
+/// `tcp_timer_enter` for every connection due at `now` (ns), each VNET's
+/// `syncache_timer` and host cache purge; returns the next deadline.
+pub(crate) fn run_timers(now: u64) -> u64 {
+    // Release: a deadline set while these run lowers it again.
+    NEXT.store(u64::MAX, Ordering::Release);
+    loop {
+        let due = {
+            let mut q = TIMERS.lock();
+            let Some((&(t, id), _)) = q.by_time.iter().next() else {
+                break;
+            };
+            if t > now {
+                break;
             }
+            let w = q.by_time.remove(&(t, id));
+            q.by_id.remove(&id);
+            w
+        };
+        if let Some(so) = due.and_then(|w| w.upgrade()) {
+            so.tcp_timers();
         }
     }
-    if a.sndq.is_empty() && tcb_ref(a).fin_wanted {
-        fin(a_so, a, b_so, b, fx);
+    let mut next = TIMERS
+        .lock()
+        .by_time
+        .keys()
+        .next()
+        .map_or(u64::MAX, |&(t, _)| t);
+    for v in Vnet::all() {
+        if v.inet.get().is_none() {
+            continue;
+        }
+        let st = state::of(&v);
+        let replies = {
+            let secrets = st.tcp.secrets();
+            let path = |inc: &Inc| path_for(&v, inc);
+            let mut out = Vec::new();
+            let cx = Ctx {
+                now: ms(now),
+                conf: &st.tcp.conf,
+                stats: &st.tcp.stats,
+                random: crate::random,
+                out: &mut out,
+                hc: &st.tcp.hc,
+                path: &path,
+                secrets: &secrets,
+            };
+            if st
+                .tcp
+                .syncache
+                .next_deadline()
+                .is_some_and(|d| d <= ms(now))
+            {
+                st.tcp.syncache.timer(&cx)
+            } else {
+                Vec::new()
+            }
+        };
+        transmit_replies(&v, replies);
+        if let Some(d) = st.tcp.syncache.next_deadline() {
+            next = next.min(d.saturating_mul(1_000_000));
+        }
+        // `tcp_hc_purge`, every `prune` seconds.
+        // Relaxed: the timer thread alone moves it.
+        let at = st.tcp.hc_purge_at.load(Ordering::Relaxed);
+        let prune = u64::try_from(st.tcp.hc.prune.load(Ordering::Relaxed)).unwrap_or(300);
+        if at == 0 || at <= now {
+            if at != 0 {
+                st.tcp.hc.purge(false);
+            }
+            st.tcp
+                .hc_purge_at
+                .store(now + prune * 1_000_000_000, Ordering::Relaxed);
+        }
+        if st.tcp.hc.count() > 0 {
+            next = next.min(st.tcp.hc_purge_at.load(Ordering::Relaxed));
+        }
     }
+    // AcqRel: as in `schedule`.
+    NEXT.fetch_min(next, Ordering::AcqRel);
+    next_deadline()
+}
+
+/// The SYN cache's timer is due sooner than the thread knows.
+fn syncache_armed(vnet: &Vnet) {
+    let st = state::of(vnet);
+    if let Some(d) = st.tcp.syncache.next_deadline() {
+        let ns = d.saturating_mul(1_000_000);
+        if NEXT.fetch_min(ns, Ordering::AcqRel) > ns {
+            crate::timer_kick();
+        }
+    }
+}
+
+// --- Running the protocol ---
+
+/// What a call into a connection left to do once the lock is gone.
+struct Done {
+    fate: Fate,
+    deadline: Option<u64>,
+    wake: bool,
+    nofdref: bool,
 }
 
 impl Socket {
-    fn peer(&self) -> Option<Arc<Socket>> {
-        self.inner.lock().tcp.as_ref().and_then(|t| t.peer.clone())
+    /// Runs `f` on the connection with its socket locked, then sends what
+    /// it sent, wakes whoever waits, ends the connection if it ended,
+    /// and sets its timer. `None` if it has no connection.
+    fn run_tcp<R>(
+        self: &Arc<Self>,
+        path: Option<Path>,
+        f: impl FnOnce(&mut Tcpcb, &mut View, &mut Ctx) -> (R, Fate),
+    ) -> Option<R> {
+        let st = state::of(&self.vnet);
+        let options = self.so_options();
+        let secrets = st.tcp.secrets();
+        let mut out = Vec::new();
+        let (r, done) = {
+            let mut i = self.inner.lock();
+            let mut tcb = i.tcp.take()?;
+            let tx = TxInfo::of(&i, options, tcb.side.flow);
+            let p = path.unwrap_or(tcb.side.path);
+            let pathf = move |_: &Inc| p;
+            let Tcb { tp, side, .. } = &mut *tcb;
+            let (r, fate) = {
+                let mut v = View {
+                    i: &mut i,
+                    side,
+                    options,
+                };
+                let mut cx = Ctx {
+                    now: ms(crate::now()),
+                    conf: &st.tcp.conf,
+                    stats: &st.tcp.stats,
+                    random: crate::random,
+                    out: &mut out,
+                    hc: &st.tcp.hc,
+                    path: &pathf,
+                    secrets: &secrets,
+                };
+                f(tp, &mut v, &mut cx)
+            };
+            if fate == Fate::Closed {
+                tcb.dropped = true;
+            }
+            // In order: queued under the lock, sent after it.
+            let inc = tcb.tp.inc;
+            i.txq
+                .extend(out.drain(..).map(|seg| Tx { inc, info: tx, seg }));
+            let done = Done {
+                fate,
+                deadline: if fate == Fate::Closed {
+                    None
+                } else {
+                    tcb.tp.next_deadline()
+                },
+                wake: core::mem::take(&mut tcb.side.wake),
+                nofdref: tcb.side.nofdref,
+            };
+            i.tcp = Some(tcb);
+            (r, done)
+        };
+        self.finish(done);
+        Some(r)
+    }
+
+    /// After a call: segments out, wakeups, the end, the timer.
+    fn finish(self: &Arc<Self>, d: Done) {
+        self.tcp_send_queued();
+        if d.wake {
+            self.wake();
+        }
+        if d.fate == Fate::Closed {
+            self.tcp_ended(d.nofdref);
+        } else {
+            schedule(self, d.deadline);
+        }
+    }
+
+    /// Sends the queued segments in order. One caller at a time does; a
+    /// caller that finds another at it (perhaps itself, further up the
+    /// stack, as a looped segment's answer comes back) leaves its own to
+    /// it.
+    fn tcp_send_queued(self: &Arc<Self>) {
+        loop {
+            if self.txbusy.swap(true, Ordering::Acquire) {
+                return;
+            }
+            loop {
+                let next = self.inner.lock().txq.pop_front();
+                let Some(t) = next else {
+                    break;
+                };
+                let _ = transmit_one(&self.vnet, &t.inc, &t.info, t.seg);
+            }
+            // Release: what was sent before is seen by the next sender.
+            self.txbusy.store(false, Ordering::Release);
+            if self.inner.lock().txq.is_empty() {
+                return;
+            }
+        }
+    }
+
+    /// `tcp_close`'s `in_pcbdrop`, and `INP_SOCKREF`'s release: out of
+    /// the lookups; freed if its socket was closed.
+    fn tcp_ended(self: &Arc<Self>, nofdref: bool) {
+        schedule(self, None);
+        {
+            let mut t = TCB.lock();
+            if nofdref {
+                t.free(self.id);
+            } else {
+                t.drop_hash(self.id);
+            }
+        }
+        let st = state::of(&self.vnet);
+        let gone = st.tcp.orphans.lock().remove(&self.id);
+        drop(gone);
+    }
+
+    /// `tcp_output`, for an option that lets held data go.
+    pub(crate) fn tcp_output(self: &Arc<Self>) {
+        let _ = self.run_tcp(None, |tp, so, cx| ((), tp.output(so, cx)));
+    }
+
+    /// The connection's timers are due.
+    fn tcp_timers(self: &Arc<Self>) {
+        let _ = self.run_tcp(None, |tp, so, cx| ((), tp.timers(so, cx)));
     }
 
     /// The connection's state.
@@ -326,7 +858,7 @@ impl Socket {
             .lock()
             .tcp
             .as_ref()
-            .map_or(Tstate::Closed, |t| t.state)
+            .map_or(Tstate::Closed, |t| t.state())
     }
 
     /// `tcp_usr_listen` and `tcp6_usr_listen` with `solisten_proto`:
@@ -342,9 +874,9 @@ impl Socket {
             return Err(Errno::EOPNOTSUPP);
         }
         {
-            let mut i = self.inner.lock();
+            let i = self.inner.lock();
             if i.state & (ss::ISCONNECTED | ss::ISCONNECTING | ss::ISDISCONNECTING) != 0
-                || tcb(&mut i).dropped
+                || i.tcp.as_ref().is_some_and(|t| t.dropped)
             {
                 return Err(Errno::EINVAL);
             }
@@ -361,16 +893,18 @@ impl Socket {
         } else {
             backlog
         };
+        let st = state::of(&self.vnet);
         let mut i = self.inner.lock();
-        let t = tcb(&mut i);
-        t.state = Tstate::Listen;
+        let t = i.tcp.as_mut().ok_or(Errno::EINVAL)?;
+        if t.tp.state != Tstate::Listen {
+            t.tp.listen(&st.tcp.stats);
+        }
         match &mut t.listen {
             Some(l) => l.qlimit = backlog.cast_unsigned(),
             None => {
                 t.listen = Some(Listen {
                     comp: VecDeque::new(),
                     qlimit: backlog.cast_unsigned(),
-                    pending: VecDeque::new(),
                 });
             }
         }
@@ -378,11 +912,9 @@ impl Socket {
         Ok(())
     }
 
-    /// `tcp_usr_connect` and `tcp6_usr_connect`: the connection is made
-    /// at once if a listener has room, or waits for room. A blocking
+    /// `tcp_usr_connect` and `tcp6_usr_connect`: the SYN goes; a blocking
     /// caller then waits with [`Socket::connect_done`]; `nonblock`
-    /// returns `EINPROGRESS` either way, as FreeBSD's does before its
-    /// handshake ends.
+    /// returns `EINPROGRESS`.
     pub(crate) fn tcp_connect(
         self: &Arc<Self>,
         raw: &[u8],
@@ -391,18 +923,23 @@ impl Socket {
     ) -> Result<(), Errno> {
         {
             let mut i = self.inner.lock();
-            let t = tcb(&mut i);
+            let t = i.tcp.as_ref().ok_or(Errno::EINVAL)?;
             if t.listen.is_some() {
                 return Err(Errno::EOPNOTSUPP);
             }
+            // `kern_connectat` and `soconnectat`, then `tcp_usr_connect`'s
+            // `INP_DROPPED`, then `tcp_connect`'s state check.
             if i.state & ss::ISCONNECTING != 0 {
                 return Err(Errno::EALREADY);
             }
-            if i.state & ss::ISCONNECTED != 0 {
+            if i.state & (ss::ISCONNECTED | ss::ISDISCONNECTING) != 0 {
                 return Err(Errno::EISCONN);
             }
-            if tcb(&mut i).dropped {
+            if t.dropped {
                 return Err(Errno::ECONNREFUSED);
+            }
+            if i.state & ss::ISDISCONNECTED != 0 {
+                return Err(Errno::EISCONN);
             }
             i.error = None;
         }
@@ -435,192 +972,36 @@ impl Socket {
                 }
             }
         }
-        let (src, dst, family, listener) = {
+        let (inc, flow) = {
             let mut t = TCB.lock();
-            let dst = t.connect(self, &sa, cred)?;
+            t.connect(self, &sa, cred)?;
             let p = t.get(self.id).ok_or(Errno::EINVAL)?;
-            let src = if p.vflag & INP_IPV6 != 0 {
-                Sockaddr::v6(p.laddr, p.lport, p.zone)
-            } else {
-                Sockaddr::v4(v4_of(&p.laddr), p.lport)
-            };
-            let family = dst.family;
-            let l = t
-                .deliver(self.vnet.id, family, &src, &dst)
-                .map(|(s, _, _, _)| s);
-            (src, dst, family, l)
+            (inc_of(p), p.flow)
         };
-        let mss = match family {
-            Family::Inet => LOMTU - 40,
-            Family::Inet6 => LOMTU - 60,
-        };
+        let path = path_for(&self.vnet, &inc);
         {
             let mut i = self.inner.lock();
-            i.state |= ss::ISCONNECTING;
-            i.state &= !ss::ISDISCONNECTED;
-            let t = tcb(&mut i);
-            t.state = Tstate::SynSent;
-            t.maxseg = mss;
-        }
-        self.vnet
-            .lo
-            .looped(if family == Family::Inet { 60 } else { 80 });
-        let made = match listener {
-            Some(l) if l.is_listening() => self.join(&l, &src, &dst, family),
-            _ => Err(Errno::ECONNREFUSED),
-        };
-        match made {
-            Ok(()) => {}
-            Err(e) => {
-                // The RST: refused, and done with (`tcp_drop`).
-                let mut fx = After::default();
-                {
-                    let mut i = self.inner.lock();
-                    drop_side(self, &mut i, e, &mut fx);
-                }
-                fx.run();
-                if !nonblock {
-                    self.inner.lock().error = None;
-                    return Err(e);
-                }
+            i.state = (i.state & !ss::ISDISCONNECTED) | ss::ISCONNECTING;
+            if let Some(t) = i.tcp.as_mut() {
+                t.tp.inc = inc;
+                t.side.path = path;
+                t.side.flow = flow;
             }
         }
+        let st = state::of(&self.vnet);
+        let secrets = st.tcp.secrets();
+        let iss = secrets.new_isn(&inc, ms(crate::now()));
+        let off = secrets.new_ts_offset(&inc, ::tcp::on(&st.tcp.conf.ts_offset_per_conn));
+        self.run_tcp(Some(path), |tp, so, cx| ((), tp.connect(so, cx, iss, off)));
         if nonblock {
             return Err(Errno::EINPROGRESS);
         }
-        Ok(())
-    }
-
-    /// Queues the connection on listener `l`: made now if it has room,
-    /// else waiting for it.
-    fn join(
-        self: &Arc<Self>,
-        l: &Arc<Self>,
-        src: &Sockaddr,
-        dst: &Sockaddr,
-        family: Family,
-    ) -> Result<(), Errno> {
-        let room = {
-            let mut li = l.inner.lock();
-            let lt = tcb(&mut li);
-            match &mut lt.listen {
-                None => return Err(Errno::ECONNREFUSED),
-                Some(q) if q.over() => {
-                    q.pending.push_back(Arc::downgrade(self));
-                    false
-                }
-                Some(_) => true,
-            }
-        };
-        if !room {
-            tcb(&mut self.inner.lock()).target = Some(Arc::downgrade(l));
-            return Ok(());
+        // An answer that came at once (a reset over loopback) is the
+        // connect's; otherwise the caller waits with `connect_done`.
+        match self.connect_done() {
+            Err(Errno::EAGAIN) => Ok(()),
+            r => r,
         }
-        self.establish(l, src, dst, family)
-    }
-
-    /// `syncache_socket` and `soisconnected`: the listener's new socket
-    /// for this connection, which inherits its options, and the two
-    /// joined.
-    fn establish(
-        self: &Arc<Self>,
-        l: &Arc<Self>,
-        src: &Sockaddr,
-        dst: &Sockaddr,
-        family: Family,
-    ) -> Result<(), Errno> {
-        let (rcv, snd, linger, ip, tflags, keep, uid, lflags) = {
-            let li = l.inner.lock();
-            let lt = tcb_ref(&li);
-            let mut rcv = li.rcv;
-            let mut snd = li.snd;
-            rcv.cc = 0;
-            rcv.mbcnt = 0;
-            rcv.cant = false;
-            snd.cc = 0;
-            snd.mbcnt = 0;
-            snd.cant = false;
-            let p = TCB.lock();
-            let (uid, flags) = p.get(l.id).map_or((0, 0), |p| (p.uid, p.flags));
-            drop(p);
-            (
-                rcv,
-                snd,
-                li.linger,
-                li.ip,
-                lt.flags & (tcpopt::TF_NODELAY | tcpopt::TF_NOPUSH | tcpopt::TF_NOOPT),
-                (lt.keepinit, lt.keepidle, lt.keepintvl, lt.keepcnt),
-                uid,
-                flags,
-            )
-        };
-        let cred = Cred {
-            uid,
-            ..Cred::default()
-        };
-        let s = Socket::with_buffers(&l.vnet, l.family, Proto::Tcp, &cred, rcv, snd);
-        s.options
-            .store(l.so_options() & !SO_ACCEPTCONN, Ordering::Relaxed);
-        {
-            let mut t = TCB.lock();
-            if let Some(p) = t.get_mut(s.id) {
-                p.vflag = (p.vflag & !(INP_IPV4 | INP_IPV6))
-                    | if family == Family::Inet {
-                        INP_IPV4
-                    } else {
-                        INP_IPV6
-                    };
-                p.flags =
-                    (lflags & !(inp::ANONPORT | inp::INHASHLIST | inp::DROPPED)) | inp::INHASHLIST;
-                p.laddr = dst.addr;
-                p.lport = dst.port;
-                p.faddr = src.addr;
-                p.fport = src.port;
-                p.zone = dst.scope.max(src.scope);
-                p.hashed = true;
-            }
-        }
-        let now = crate::now();
-        let mss = tcb_ref(&self.inner.lock()).maxseg;
-        {
-            let (_irq, mut a, b) = lock2(self, &s);
-            let mut b = b.expect("a new socket is another");
-            b.linger = linger;
-            b.ip = ip;
-            b.state = ss::ISCONNECTED;
-            let bt = tcb(&mut b);
-            bt.state = Tstate::Established;
-            bt.flags = tflags;
-            (bt.keepinit, bt.keepidle, bt.keepintvl, bt.keepcnt) = keep;
-            bt.maxseg = mss;
-            bt.peer = Some(Arc::clone(self));
-            bt.rcvtime = now;
-            a.state = (a.state & !ss::ISCONNECTING) | ss::ISCONNECTED;
-            let at = tcb(&mut a);
-            at.state = Tstate::Established;
-            at.peer = Some(Arc::clone(&s));
-            at.target = None;
-            at.rcvtime = now;
-        }
-        let queued = {
-            let mut li = l.inner.lock();
-            match &mut tcb(&mut li).listen {
-                Some(q) => {
-                    q.comp.push_back(Arc::clone(&s));
-                    true
-                }
-                None => false,
-            }
-        };
-        if !queued {
-            // The listener closed meanwhile: its new socket is aborted.
-            s.abort(Errno::ECONNREFUSED);
-            return Ok(());
-        }
-        // `solisten_wakeup`, and the connecter's `soisconnected`.
-        l.rd.notify(0);
-        self.wake();
-        Ok(())
     }
 
     /// Where a connect stands, for a caller waiting on it.
@@ -642,119 +1023,57 @@ impl Socket {
         Err(Errno::ECONNREFUSED)
     }
 
-    /// How long a connect may wait (`TCP_KEEPINIT`), ns.
+    /// How long a connect may wait, ns: no limit of its own; the
+    /// connection's `TCP_KEEPINIT` timer ends it.
     pub fn connect_timeout(&self) -> u64 {
-        self.inner
-            .lock()
-            .tcp
-            .as_ref()
-            .map_or(0, |t| u64::from(t.keepinit) * 1_000_000)
+        0
     }
 
-    /// A connect that waited too long: `ETIMEDOUT` (`tcp_timer_keep` in
-    /// `SYN_SENT`), and the socket is done with.
-    pub fn connect_timed_out(self: &Arc<Self>) {
-        let mut fx = After::default();
-        {
-            let mut i = self.inner.lock();
-            if i.state & ss::ISCONNECTING == 0 {
-                return;
-            }
-            drop_side(self, &mut i, Errno::ETIMEDOUT, &mut fx);
-            tcb(&mut i).target = None;
-        }
-        fx.run();
-    }
+    /// A connect whose wait ended without a result: nothing more to do
+    /// (the connection's timer ends it).
+    pub fn connect_timed_out(self: &Arc<Self>) {}
 
-    /// `solisten_dequeue`: the next connection, letting a waiting
-    /// connect in.
+    /// `solisten_dequeue`: the next connection.
     ///
     /// # Errors
     ///
     /// `EINVAL` if not listening; its error, once; `EWOULDBLOCK` with
     /// none queued.
     pub fn accept(self: &Arc<Self>) -> Result<Arc<Self>, Errno> {
-        let (s, waiting) = {
+        let mut i = self.inner.lock();
+        if i.tcp.as_ref().is_none_or(|t| t.listen.is_none()) {
+            return Err(Errno::EINVAL);
+        }
+        if let Some(e) = i.error.take() {
+            return Err(e);
+        }
+        let q = i
+            .tcp
+            .as_mut()
+            .and_then(|t| t.listen.as_mut())
+            .ok_or(Errno::EINVAL)?;
+        q.comp.pop_front().ok_or(Errno::EAGAIN)
+    }
+
+    /// `soabort`: a queued connection the listener let go of; it resets.
+    fn abort(self: &Arc<Self>) {
+        {
             let mut i = self.inner.lock();
-            if tcb(&mut i).listen.is_none() {
-                return Err(Errno::EINVAL);
-            }
-            if let Some(e) = i.error.take() {
-                return Err(e);
-            }
-            let q = tcb(&mut i).listen.as_mut().ok_or(Errno::EINVAL)?;
-            let s = q.comp.pop_front().ok_or(Errno::EAGAIN)?;
-            let mut w = None;
-            while let Some(c) = q.pending.pop_front() {
-                if let Some(c) = c.upgrade() {
-                    w = Some(c);
-                    break;
-                }
-            }
-            (s, w)
-        };
-        if let Some(c) = waiting {
-            c.promote(self);
-        }
-        Ok(s)
-    }
-
-    /// A waiting connect let in by an `accept` on `l`.
-    fn promote(self: &Arc<Self>, l: &Arc<Self>) {
-        if self.inner.lock().state & ss::ISCONNECTING == 0 {
-            return;
-        }
-        let (src, dst, family) = {
-            let t = TCB.lock();
-            let Some(p) = t.get(self.id) else {
-                return;
-            };
-            if p.vflag & INP_IPV6 != 0 {
-                (
-                    Sockaddr::v6(p.laddr, p.lport, p.zone),
-                    Sockaddr::v6(p.faddr, p.fport, p.zone),
-                    Family::Inet6,
-                )
-            } else {
-                (
-                    Sockaddr::v4(v4_of(&p.laddr), p.lport),
-                    Sockaddr::v4(v4_of(&p.faddr), p.fport),
-                    Family::Inet,
-                )
-            }
-        };
-        let _ = self.establish(l, &src, &dst, family);
-    }
-
-    /// `soabort`: a queued connection the listener let go of; its peer
-    /// is reset.
-    fn abort(self: &Arc<Self>, err: Errno) {
-        let mut fx = After::default();
-        let peer = self.peer();
-        match peer {
-            Some(p) => {
-                let (_irq, mut a, b) = lock2(self, &p);
-                let tcb_a = tcb(&mut a);
-                tcb_a.nofdref = true;
-                drop_side(self, &mut a, Errno::ECONNABORTED, &mut fx);
-                if let Some(mut b) = b {
-                    drop_side(&p, &mut b, err, &mut fx);
-                }
-            }
-            None => {
-                let mut a = self.inner.lock();
-                tcb(&mut a).nofdref = true;
-                drop_side(self, &mut a, Errno::ECONNABORTED, &mut fx);
+            if let Some(t) = i.tcp.as_mut() {
+                t.side.nofdref = true;
             }
         }
-        fx.run();
+        let r = self.run_tcp(None, |tp, so, cx| ((), tp.abort(so, cx)));
+        if r.is_none() {
+            TCB.lock().free(self.id);
+        }
     }
 
     /// `tcp_usr_shutdown`.
     pub(crate) fn tcp_shutdown(self: &Arc<Self>, how: i32) -> Result<(), Errno> {
         {
             let mut i = self.inner.lock();
-            if tcb(&mut i).listen.is_some() {
+            if i.tcp.as_ref().is_some_and(|t| t.listen.is_some()) {
                 if how != SHUT_WR {
                     i.error = Some(Errno::ECONNABORTED);
                     drop(i);
@@ -768,125 +1087,76 @@ impl Socket {
             if how == SHUT_RD || how == SHUT_RDWR {
                 // `sorflush`.
                 i.rcv.cant = true;
-                i.stream.clear();
+                i.stream = Chain::default();
                 i.rcv.cc = 0;
                 i.rcv.mbcnt = 0;
             }
-            if (how == SHUT_WR || how == SHUT_RDWR) && !i.snd.cant {
-                i.snd.cant = true;
-                i.state |= ss::ISDISCONNECTING;
-                let t = tcb(&mut i);
-                if matches!(t.state, Tstate::Established | Tstate::CloseWait) {
-                    t.fin_wanted = true;
-                }
-            }
         }
-        self.flush();
+        if how == SHUT_WR || how == SHUT_RDWR {
+            let dropped = self.inner.lock().tcp.as_ref().is_none_or(|t| t.dropped);
+            if dropped {
+                self.wake();
+                return Err(Errno::ECONNRESET);
+            }
+            self.run_tcp(None, |tp, so, cx| {
+                so.i.snd.cant = true;
+                ((), tp.shutdown(so, cx))
+            });
+        }
         self.wake();
         Ok(())
     }
 
-    /// Sends what can go now: queued data, then a FIN waiting on it.
-    fn flush(self: &Arc<Self>) {
-        let Some(p) = self.peer() else {
-            return;
-        };
-        let mut fx = After::default();
-        {
-            let (_irq, mut a, b) = lock2(self, &p);
-            if let Some(mut b) = b {
-                push(self, &mut a, &p, &mut b, &mut fx);
-            }
-        }
-        fx.run();
-    }
-
-    /// `tcp_usr_close` and `tcp_disconnect`: a listener's queue is
-    /// aborted; an embryonic connection goes; `SO_LINGER` with no time
-    /// resets; otherwise the connection closes in order (unread data
-    /// flushed, a FIN after what is queued), and data the peer still
-    /// sends resets it.
+    /// `tcp_usr_close` with `soclose`: a listener's queue is aborted and
+    /// its half-open connections dropped; a connection closes in order
+    /// (unread data flushed, a FIN after what is queued) or, with
+    /// `SO_LINGER` of zero, resets. The socket stays with its connection
+    /// until that ends.
     pub(crate) fn tcp_close(self: &Arc<Self>) {
-        let mut fx = After::default();
         let linger0 = self.so_options() & SO_LINGER != 0 && self.inner.lock().linger == 0;
-        let (listen, target, state) = {
+        let (listen, dropped) = {
             let mut i = self.inner.lock();
-            let t = tcb(&mut i);
-            t.nofdref = true;
-            let listen = t.listen.take();
-            let target = t.target.take();
-            let state = t.state;
-            if listen.is_some() {
-                t.state = Tstate::Closed;
-            }
-            (listen, target, state)
-        };
-        drop(target);
-        if let Some(q) = listen {
-            TCB.lock().free(self.id);
-            for s in q.comp {
-                s.abort(Errno::ECONNRESET);
-            }
-            for c in q.pending.into_iter().filter_map(|w| w.upgrade()) {
-                let mut i = c.inner.lock();
-                if i.state & ss::ISCONNECTING != 0 {
-                    drop_side(&c, &mut i, Errno::ECONNREFUSED, &mut fx);
-                }
-            }
-            fx.run();
-            return;
-        }
-        match state {
-            Tstate::Closed | Tstate::SynSent | Tstate::Listen => {
-                TCB.lock().free(self.id);
-                let mut i = self.inner.lock();
-                i.state &= !ss::ISCONNECTING;
-                return;
-            }
-            Tstate::TimeWait => {
-                // The PCB waits out its time without the socket.
-                return;
-            }
-            _ => {}
-        }
-        let Some(peer) = self.peer() else {
-            TCB.lock().free(self.id);
-            return;
-        };
-        {
-            let (_irq, mut a, b) = lock2(self, &peer);
-            let Some(mut b) = b else {
+            let Some(t) = i.tcp.as_mut() else {
                 return;
             };
-            // `sbflush` of what was not read.
-            a.stream.clear();
-            a.rcv.cc = 0;
-            a.rcv.mbcnt = 0;
-            a.rcv.cant = true;
-            if linger0 || !b.sndq.is_empty() {
-                // `tcp_drop`'s RST, or the peer's data arriving after
-                // the close.
-                drop_side(self, &mut a, Errno::ECONNRESET, &mut fx);
-                drop_side(&peer, &mut b, Errno::ECONNRESET, &mut fx);
-            } else {
-                if !a.snd.cant {
-                    a.snd.cant = true;
-                    a.state |= ss::ISDISCONNECTING;
-                    let t = tcb(&mut a);
-                    if matches!(t.state, Tstate::Established | Tstate::CloseWait) {
-                        t.fin_wanted = true;
-                    }
-                }
-                push(self, &mut a, &peer, &mut b, &mut fx);
+            t.side.nofdref = true;
+            (t.listen.take(), t.dropped)
+        };
+        let st = state::of(&self.vnet);
+        if let Some(q) = listen {
+            st.tcp.syncache.drop_listener(&st.tcp.stats, self.id);
+            let _ = self.run_tcp(None, |tp, so, cx| ((), tp.close(so, cx)));
+            TCB.lock().free(self.id);
+            for s in q.comp {
+                s.abort();
             }
+            return;
         }
-        fx.run();
+        if dropped {
+            schedule(self, None);
+            TCB.lock().free(self.id);
+            return;
+        }
+        // `sbflush` of what was not read.
+        {
+            let mut i = self.inner.lock();
+            i.stream = Chain::default();
+            i.rcv.cc = 0;
+            i.rcv.mbcnt = 0;
+        }
+        // Held until the connection ends (`INP_SOCKREF`).
+        st.tcp.orphans.lock().insert(self.id, Arc::clone(self));
+        let r = self.run_tcp(None, |tp, so, cx| ((), tp.usr_close(so, cx, linger0)));
+        if r.is_none() {
+            let gone = st.tcp.orphans.lock().remove(&self.id);
+            drop(gone);
+            TCB.lock().free(self.id);
+        }
     }
 
     /// `sosend_generic` with `tcp_usr_send`, one round: as much of `data`
-    /// as the peer's window and this socket's send buffer take now.
-    /// `oob` marks its last byte urgent (`MSG_OOB`). Returns the bytes
-    /// taken.
+    /// as the send buffer takes now. `oob` marks its last byte urgent
+    /// (`MSG_OOB`). Returns the bytes taken.
     ///
     /// # Errors
     ///
@@ -896,10 +1166,9 @@ impl Socket {
         self.send_stream_to(data, oob, None)
     }
 
-    /// [`Socket::send_stream`]; with `spliced`, a splice's send
-    /// (`sosend_generic_locked` from `so_splice_xfer_data`), which takes
-    /// whatever fits, its low water mark aside, and counts what it took
-    /// in `spliced` before the receiver can see it.
+    /// [`Socket::send_stream`]; with `spliced`, a splice's send, which
+    /// takes whatever fits, its low water mark aside, and counts what it
+    /// took in `spliced`.
     #[inline]
     pub(crate) fn send_stream_to(
         self: &Arc<Self>,
@@ -907,7 +1176,7 @@ impl Socket {
         oob: bool,
         spliced: Option<&core::sync::atomic::AtomicU64>,
     ) -> Result<usize, Errno> {
-        let peer = {
+        let n = {
             let mut i = self.inner.lock();
             if i.snd.cant {
                 return Err(Errno::EPIPE);
@@ -918,95 +1187,49 @@ impl Socket {
             if i.state & ss::ISCONNECTED == 0 {
                 return Err(Errno::ENOTCONN);
             }
-            tcb(&mut i).peer.clone()
-        };
-        let Some(peer) = peer else {
-            return Err(Errno::ENOTCONN);
-        };
-        if data.is_empty() {
-            return Ok(0);
-        }
-        let mut fx = After::default();
-        let r = {
-            let (_irq, mut a, b) = lock2(self, &peer);
-            let Some(mut b) = b else {
-                return Err(Errno::ENOTCONN);
-            };
-            let bt = tcb_ref(&b);
-            if bt.nofdref && bt.state.fin_sent() {
-                // Data after the peer closed: it resets (`tcp_input`'s
-                // `SS_NOFDREF` check), and this send has gone.
-                drop_side(&peer, &mut b, Errno::ECONNRESET, &mut fx);
-                drop_side(self, &mut a, Errno::ECONNRESET, &mut fx);
-                count(spliced, data.len());
-                Ok(data.len())
-            } else if b.rcv.cant {
-                count(spliced, data.len());
-                Ok(data.len())
-            } else {
-                let direct = if a.sndq.is_empty() {
-                    b.rcv.space() as usize
-                } else {
-                    0
-                };
-                let room = direct + a.snd.space() as usize;
-                let least = if spliced.is_some() {
-                    1
-                } else {
-                    a.snd.lowat as usize
-                };
-                if room < data.len() && room < least {
-                    Err(Errno::EAGAIN)
-                } else {
-                    let n = data.len().min(room);
-                    let now = direct.min(n);
-                    if now > 0 {
-                        b.stream.extend(&data[..now]);
-                        let n32 = u32::try_from(now).unwrap_or(u32::MAX);
-                        b.rcv.cc += n32;
-                        b.rcv.mbcnt = crate::mbuf_cost(b.stream.len());
-                        tcb(&mut b).rcvtime = crate::now();
-                        self.vnet.lo.looped(now + 40);
-                        fx.wake.push(Arc::clone(&peer));
-                    }
-                    if n > now {
-                        a.sndq.extend(&data[now..n]);
-                        a.snd.cc += u32::try_from(n - now).unwrap_or(u32::MAX);
-                        a.snd.mbcnt = crate::mbuf_cost(a.sndq.len());
-                    }
-                    if oob && n == data.len() && now == n {
-                        urgent(&mut b, peer.so_options() & SO_OOBINLINE != 0);
-                    }
-                    count(spliced, n);
-                    Ok(n)
-                }
+            if data.is_empty() {
+                return Ok(0);
             }
+            let room = i.snd.space() as usize;
+            let least = if spliced.is_some() {
+                1
+            } else {
+                i.snd.lowat as usize
+            };
+            if room < data.len() && room < least.max(1) {
+                return Err(Errno::EAGAIN);
+            }
+            let n = data.len().min(room);
+            let c = Chain::from_slice(&data[..n]).map_err(|_| Errno::ENOBUFS)?;
+            i.sndq.append(c);
+            i.snd.cc += u32::try_from(n).unwrap_or(u32::MAX);
+            i.snd.mbcnt = i.sndq.cost();
+            n
         };
-        fx.run();
-        r
+        if let Some(c) = spliced {
+            // Relaxed: counted before the receiver can see it.
+            c.fetch_add(n as u64, Ordering::Relaxed);
+        }
+        let urgent = oob && n == data.len();
+        self.run_tcp(None, |tp, so, cx| {
+            let f = if urgent {
+                tp.send_oob(so, cx)
+            } else {
+                tp.send(so, cx, false, false)
+            };
+            ((), f)
+        });
+        Ok(n)
     }
 
-    /// How much a send may copy in at once: the peer's window and this
-    /// socket's send buffer room.
+    /// How much a send may copy in at once: the send buffer's room.
     pub fn send_window(&self) -> usize {
-        let (peer, space, queued) = {
-            let i = self.inner.lock();
-            (
-                i.tcp.as_ref().and_then(|t| t.peer.clone()),
-                i.snd.space() as usize,
-                !i.sndq.is_empty(),
-            )
-        };
-        let direct = match (peer, queued) {
-            (Some(p), false) => p.inner.lock().rcv.space() as usize,
-            _ => 0,
-        };
-        (direct + space).max(1)
+        (self.inner.lock().snd.space() as usize).max(1)
     }
 
     /// `soreceive_generic` on a stream, one look: up to `max` bytes,
-    /// stopping at the urgent mark. Reading lets the peer's queued data
-    /// in. With `oob`, the urgent byte (`tcp_usr_rcvoob`).
+    /// stopping at the urgent mark. With `oob`, the urgent byte
+    /// (`tcp_usr_rcvoob`).
     ///
     /// # Errors
     ///
@@ -1024,15 +1247,17 @@ impl Socket {
         if oob {
             let mut i = self.inner.lock();
             let inline = self.so_options() & SO_OOBINLINE != 0;
-            let t = tcb(&mut i);
-            if (t.oobmark == 0 && !t.atmark) || inline || t.oob == Oob::Had {
+            let t = i.tcp.as_mut().ok_or(Errno::EINVAL)?;
+            let s = &mut t.side;
+            if (s.oobmark == 0 && !s.atmark) || inline || s.oob == Oob::Had {
                 return Err(Errno::EINVAL);
             }
-            let Oob::Have(b) = t.oob else {
+            let Oob::Have(b) = s.oob else {
                 return Err(Errno::EAGAIN);
             };
             if !peek {
-                t.oob = Oob::Had;
+                s.oob = Oob::Had;
+                t.tp.oobflags = ::tcp::oob::HADDATA;
             }
             out.data.push(b);
             out.flags = abi::socket::MSG_OOB;
@@ -1052,7 +1277,8 @@ impl Socket {
         self.recv_data(max, false, still)
     }
 
-    /// `soreceive_generic`'s data path, if `still` holds under the lock.
+    /// `soreceive_generic`'s data path, if `still` holds under the lock;
+    /// what is read opens the window (`tcp_usr_rcvd`).
     #[inline]
     fn recv_data(
         self: &Arc<Self>,
@@ -1084,105 +1310,761 @@ impl Socket {
                 }
                 return Err(Errno::EAGAIN);
             }
-            let t = tcb(&mut i);
-            let limit = if t.oobmark > 0 { t.oobmark } else { usize::MAX };
-            let n = max.min(limit);
-            let n = n.min(i.stream.len());
+            let mark = i.tcp.as_ref().map_or(0, |t| t.side.oobmark);
+            let limit = if mark > 0 { mark } else { usize::MAX };
+            let n = max.min(limit).min(i.stream.len());
+            out.data = vec![0u8; n];
+            i.stream.copy_out(0, &mut out.data);
             if peek {
-                out.data.extend(i.stream.iter().take(n));
                 return Ok(Some(out));
             }
-            out.data.extend(i.stream.drain(..n));
+            i.stream.trim_front(n);
             i.rcv.cc -= u32::try_from(n).unwrap_or(0);
-            i.rcv.mbcnt = crate::mbuf_cost(i.stream.len());
-            let t = tcb(&mut i);
-            t.atmark = false;
-            if t.oobmark > 0 {
-                t.oobmark -= n;
-                if t.oobmark == 0 {
-                    t.atmark = true;
+            i.rcv.mbcnt = i.stream.cost();
+            if let Some(t) = i.tcp.as_mut() {
+                let s = &mut t.side;
+                s.atmark = false;
+                if s.oobmark > 0 {
+                    s.oobmark -= n;
+                    if s.oobmark == 0 {
+                        s.atmark = true;
+                    }
                 }
             }
         }
-        // `tcp_usr_rcvd`: the window opens.
-        if let Some(p) = self.peer() {
-            let mut fx = After::default();
-            {
-                let (_irq, mut a, b) = lock2(&p, self);
-                if let Some(mut b) = b {
-                    push(&p, &mut a, self, &mut b, &mut fx);
-                }
+        self.run_tcp(None, |tp, so, cx| {
+            if tp.state.have_established() {
+                ((), tp.rcvd(so, cx))
+            } else {
+                ((), Fate::Alive)
             }
-            fx.run();
-        }
+        });
         Ok(Some(out))
     }
 
     /// `SIOCATMARK`.
     pub fn at_mark(&self) -> bool {
-        self.inner.lock().tcp.as_ref().is_some_and(|t| t.atmark)
+        self.inner
+            .lock()
+            .tcp
+            .as_ref()
+            .is_some_and(|t| t.side.atmark)
     }
 
     /// Bytes before the urgent mark (`so_oobmark`).
     pub fn oobmark(&self) -> usize {
-        self.inner.lock().tcp.as_ref().map_or(0, |t| t.oobmark)
-    }
-}
-
-/// Counts `n` bytes a splice sent, with the receiver still locked.
-#[inline]
-fn count(spliced: Option<&core::sync::atomic::AtomicU64>, n: usize) {
-    if let Some(c) = spliced {
-        // Relaxed: the receiver's lock, held, publishes it to whoever
-        // reads what was sent.
-        c.fetch_add(n as u64, Ordering::Relaxed);
+        self.inner.lock().tcp.as_ref().map_or(0, |t| t.side.oobmark)
     }
 }
 
 /// Whether urgent data is ahead or reading is at its mark (`so_oobmark`
 /// or `SBS_RCVATMARK`).
 pub(crate) fn urgent_pending(i: &Inner) -> bool {
-    i.tcp.as_ref().is_some_and(|t| t.oobmark > 0 || t.atmark)
+    i.tcp
+        .as_ref()
+        .is_some_and(|t| t.side.oobmark > 0 || t.side.atmark)
 }
 
-/// What `net.inet.tcp.pcblist` shows of a connection: its state, `t_flags`,
-/// MSS, and windows (its receive room, its peer's).
-pub(crate) fn snapshot(so: &Socket) -> (Tstate, u32, u32, u32, u32, u64) {
-    let (state, flags, mss, rwnd, peer, rcvtime) = {
-        let i = so.inner.lock();
-        let Some(t) = i.tcp.as_ref() else {
-            return (Tstate::Closed, 0, 0, 0, 0, 0);
-        };
-        (
-            t.state,
-            t.flags,
-            t.maxseg,
-            i.rcv.space(),
-            t.peer.clone(),
-            t.rcvtime,
-        )
+/// What `net.inet.tcp.pcblist` shows of a connection.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Snapshot {
+    pub(crate) state: i32,
+    pub(crate) flags: u32,
+    pub(crate) maxseg: u32,
+    pub(crate) rcv_wnd: u32,
+    pub(crate) snd_wnd: u32,
+    pub(crate) snd_cwnd: u32,
+    pub(crate) snd_ssthresh: u32,
+    /// Ticks since it last received.
+    pub(crate) idle: u64,
+    pub(crate) sndzerowin: u32,
+    pub(crate) sndrexmitpack: u32,
+    pub(crate) rcvoopack: u32,
+    /// The timers' ticks left, 0 if stopped: rexmt, persist, keep, 2msl,
+    /// delack.
+    pub(crate) timers: [u64; 5],
+    pub(crate) cc: &'static str,
+    pub(crate) ecn: u32,
+    pub(crate) dsack_bytes: u32,
+    pub(crate) dsack_pack: u32,
+}
+
+pub(crate) fn snapshot(so: &Socket) -> Snapshot {
+    let i = so.inner.lock();
+    let Some(t) = i.tcp.as_ref() else {
+        return Snapshot::default();
     };
-    let swnd = peer.map_or(0, |p| p.inner.lock().rcv.space());
-    (state, flags, mss, rwnd, swnd, rcvtime)
+    let tp = &t.tp;
+    let now = ms(crate::now());
+    let left = |w: ::tcp::timer::Tt| {
+        tp.timer_deadline(w)
+            .map_or(0, |d| d.saturating_sub(now).max(1))
+    };
+    use ::tcp::timer::Tt;
+    Snapshot {
+        state: tp.state.number(),
+        flags: tp.flags,
+        maxseg: tp.t_maxseg,
+        rcv_wnd: tp.rcv_wnd,
+        snd_wnd: tp.snd_wnd,
+        snd_cwnd: tp.snd_cwnd,
+        snd_ssthresh: tp.snd_ssthresh,
+        idle: now.saturating_sub(tp.rcvtime),
+        sndzerowin: tp.sndzerowin,
+        sndrexmitpack: tp.sndrexmitpack,
+        rcvoopack: tp.rcvoopack,
+        timers: [
+            left(Tt::Rexmt),
+            left(Tt::Persist),
+            left(Tt::Keep),
+            left(Tt::TwoMsl),
+            left(Tt::Delack),
+        ],
+        cc: tp.cc.algo().name(),
+        ecn: u32::from(tp.flags2 & ::tcp::tf2::ECN_PERMIT != 0),
+        dsack_bytes: tp.dsack_bytes,
+        dsack_pack: tp.dsack_pack,
+    }
 }
 
-/// `tcp_pulloutofband` and the urgent mark: the last byte that came is
-/// urgent; unless `SO_OOBINLINE` it leaves the stream for `t_iobc`.
-fn urgent(b: &mut Inner, inline: bool) {
-    let Some(&last) = b.stream.back() else {
+// --- Input ---
+
+/// A segment that arrived, its addresses in `sys/tcp`'s form.
+struct Arrival {
+    family: Family,
+    /// The local (destination) and foreign (source) addresses.
+    local: [u8; 16],
+    foreign: [u8; 16],
+    zone: u32,
+    iptos: u8,
+    /// `M_BCAST` or `M_MCAST`, or a multicast or broadcast address.
+    multi: bool,
+}
+
+/// `tcp_input` for IPv4: `m` holds the IP header (`ip`) and the segment.
+pub(crate) fn input4(vnet: &Arc<Vnet>, mut m: Packet, ip: &Ip) {
+    let st = state::of(vnet);
+    let hlen = usize::from(ip.hl);
+    let tlen = usize::from(ip.len).saturating_sub(hlen);
+    st.tcp.stats.inc(::tcp::tcps::RCVTOTAL);
+    if tlen < ::tcp::hdr::HDR_LEN || m.len() < hlen + tlen {
+        st.tcp.stats.inc(::tcp::tcps::RCVSHORT);
+        return;
+    }
+    if m.len() > hlen + tlen {
+        let _ = m.data.split_off(hlen + tlen);
+    }
+    // The checksum, by the device or here.
+    let f = m.hdr.csum_flags;
+    let bad = if f & csum::DATA_VALID != 0 {
+        #[allow(clippy::cast_possible_truncation, reason = "a 16-bit sum")]
+        let s = if f & csum::PSEUDO_HDR != 0 {
+            m.hdr.csum_data as u16
+        } else {
+            cksum::fold(
+                cksum::pseudo4(ip.src, ip.dst, ip::proto::TCP, tlen) + u64::from(m.hdr.csum_data),
+            )
+        };
+        s ^ 0xffff != 0
+    } else if f & csum::IP_TCP != 0 {
+        false
+    } else {
+        let s = cksum::pseudo4(ip.src, ip.dst, ip::proto::TCP, tlen)
+            + cksum::sum_chain(&m.data, hlen, tlen);
+        !cksum::fold(s) != 0
+    };
+    if bad {
+        st.tcp.stats.inc(::tcp::tcps::RCVBADSUM);
+        return;
+    }
+    let multi = m.hdr.flags & (mbuf::flags::BCAST | mbuf::flags::MCAST) != 0
+        || is_multicast4(&ip.dst)
+        || is_multicast4(&ip.src)
+        || ip.src == [0xff; 4];
+    m.data.trim_front(hlen);
+    let a = Arrival {
+        family: Family::Inet,
+        local: wide4(ip.dst),
+        foreign: wide4(ip.src),
+        zone: 0,
+        iptos: ip.tos,
+        multi,
+    };
+    input(vnet, &st, m, &a);
+}
+
+/// `tcp6_input`: the segment at `off` in `m`, IPv6 header `h`.
+pub(crate) fn input6(vnet: &Arc<Vnet>, mut m: Packet, off: usize, h: &crate::ip6::Ip6) {
+    let st = state::of(vnet);
+    st.tcp.stats.inc(::tcp::tcps::RCVTOTAL);
+    let tlen = m.len().saturating_sub(off);
+    if tlen < ::tcp::hdr::HDR_LEN {
+        st.tcp.stats.inc(::tcp::tcps::RCVSHORT);
+        return;
+    }
+    let f = m.hdr.csum_flags;
+    let bad = if f & csum::DATA_VALID != 0 {
+        #[allow(clippy::cast_possible_truncation, reason = "a 16-bit sum")]
+        let s = if f & csum::PSEUDO_HDR != 0 {
+            m.hdr.csum_data as u16
+        } else {
+            cksum::fold(
+                crate::ip6::pseudo(&h.src, &h.dst, ip::proto::TCP, tlen)
+                    + u64::from(m.hdr.csum_data),
+            )
+        };
+        s ^ 0xffff != 0
+    } else if f & csum::IP6_TCP != 0 {
+        false
+    } else {
+        crate::ip6::cksum6(&m, ip::proto::TCP, off, tlen) != 0
+    };
+    if bad {
+        st.tcp.stats.inc(::tcp::tcps::RCVBADSUM);
+        return;
+    }
+    let multi = is_multicast6(&h.dst) || is_multicast6(&h.src);
+    let zone = if crate::addr::is_linklocal6(&h.src) {
+        u32::from(m.hdr.rcvif)
+    } else {
+        0
+    };
+    let iptos = ((h.flow >> 20) & 0xff) as u8;
+    m.data.trim_front(off);
+    let a = Arrival {
+        family: Family::Inet6,
+        local: h.dst,
+        foreign: h.src,
+        zone,
+        iptos,
+        multi,
+    };
+    input(vnet, &st, m, &a);
+}
+
+/// `tcp_input_with_port` after IP: the segment (TCP header first) to its
+/// connection, its listener, or a reset.
+fn input(vnet: &Arc<Vnet>, st: &state::State, m: Packet, a: &Arrival) {
+    let mut hb = [0u8; 60];
+    let n = m.data.copy_out(0, &mut hb[..m.len().min(60)]);
+    let Some(t) = Th::parse(&hb[..n]) else {
+        st.tcp.stats.inc(::tcp::tcps::RCVBADOFF);
         return;
     };
-    if !inline {
-        b.stream.pop_back();
-        b.rcv.cc -= 1;
+    if t.off > m.len() {
+        st.tcp.stats.inc(::tcp::tcps::RCVBADOFF);
+        return;
     }
-    let mark = if inline {
-        b.stream.len() - 1
-    } else {
-        b.stream.len()
+    let opts = hb[::tcp::hdr::HDR_LEN..t.off].to_vec();
+    let mut data = m.data;
+    data.trim_front(t.off);
+    let tlen = u32::try_from(data.len()).unwrap_or(u32::MAX);
+    let inc = Inc {
+        laddr: a.local,
+        faddr: a.foreign,
+        lport: t.dport,
+        fport: t.sport,
+        v6: a.family == Family::Inet6,
+        zone: a.zone,
+        fib: 0,
     };
-    let t = tcb(b);
-    t.oob = Oob::Have(last);
-    t.oobmark = mark;
-    t.atmark = mark == 0;
+    // Lookups, more than once after a TIME_WAIT gives way.
+    for _ in 0..2 {
+        let found = {
+            let tb = TCB.lock();
+            let p = match a.family {
+                Family::Inet => tb.lookup4(
+                    vnet.id,
+                    a4(&a.foreign),
+                    t.sport,
+                    a4(&a.local),
+                    t.dport,
+                    true,
+                ),
+                Family::Inet6 => tb.lookup6(vnet.id, &a.foreign, t.sport, &a.local, t.dport, true),
+            };
+            p.and_then(|p| p.socket().map(|s| (s, p.flags & inp::DROPPED != 0)))
+        };
+        let Some((so, dropped)) = found else {
+            closed_port(vnet, st, &inc, &t, tlen, a);
+            return;
+        };
+        if dropped {
+            closed_port(vnet, st, &inc, &t, tlen, a);
+            return;
+        }
+        let listening = so
+            .inner
+            .lock()
+            .tcp
+            .as_ref()
+            .is_some_and(|x| x.listen.is_some());
+        if listening {
+            listen_input(vnet, st, &so, &inc, &t, &opts, data, a);
+            return;
+        }
+        let path = so
+            .inner
+            .lock()
+            .tcp
+            .as_ref()
+            .map(|x| x.side.path)
+            .unwrap_or_default();
+        let mut seg = Some(Segment {
+            th: t,
+            opts: &opts,
+            data: core::mem::take(&mut data),
+            iptos: a.iptos,
+            nsegs: 1,
+        });
+        let mut reset = false;
+        let mut recycle = false;
+        let ran = so.run_tcp(Some(path), |tp, sk, cx| match tp.state {
+            Tstate::TimeWait => {
+                let v = seg.as_ref().map(|s| tp.twcheck(sk, cx, s));
+                if v == Some(TwVerdict::Recycle) {
+                    recycle = true;
+                    ((), Fate::Closed)
+                } else {
+                    ((), Fate::Alive)
+                }
+            }
+            Tstate::Closed | Tstate::Listen => {
+                reset = true;
+                ((), Fate::Alive)
+            }
+            _ => match seg.take() {
+                Some(s) => ((), tp.do_segment(sk, cx, s)),
+                None => ((), Fate::Alive),
+            },
+        });
+        if ran.is_none() || reset {
+            closed_port(vnet, st, &inc, &t, tlen, a);
+            return;
+        }
+        if !recycle {
+            return;
+        }
+        // A new SYN ended the TIME_WAIT: it looks again, now for the
+        // listener (`goto findpcb`).
+        if let Some(s) = seg.take() {
+            data = s.data;
+        }
+    }
+}
+
+/// `dropwithreset` for a segment no connection takes: a reset, unless
+/// the segment is one or `net.inet.tcp.blackhole` says not to.
+fn closed_port(vnet: &Arc<Vnet>, st: &state::State, inc: &Inc, t: &Th, tlen: u32, a: &Arrival) {
+    let bh = ::tcp::get(&st.tcp.conf.blackhole);
+    if (bh == 1 && t.has(th::SYN)) || bh > 1 {
+        return;
+    }
+    if a.multi {
+        return;
+    }
+    if !crate::icmp::bandlim(st, crate::state::bandlim::TCP_RST) {
+        return;
+    }
+    let Some(r) = ::tcp::reset_for(t, tlen) else {
+        return;
+    };
+    let Some(pkt) = ::tcp::build(r, &Opts::default(), None) else {
+        return;
+    };
+    let seg = Seg {
+        pkt,
+        ecn: 0,
+        df: false,
+        tso_segsz: 0,
+    };
+    let _ = transmit_one(vnet, inc, &TxInfo::default_for(), seg);
+}
+
+/// A segment for a listener: the SYN cache's (a SYN, the handshake's
+/// ACK, a reset), and a new connection when the handshake is done.
+#[allow(clippy::too_many_arguments)]
+fn listen_input(
+    vnet: &Arc<Vnet>,
+    st: &state::State,
+    lso: &Arc<Socket>,
+    inc: &Inc,
+    t: &Th,
+    opts: &[u8],
+    data: Chain,
+    a: &Arrival,
+) {
+    // The table's lock before the socket's, never with it.
+    let autoflow = TCB
+        .lock()
+        .get(lso.id)
+        .is_some_and(|p| p.flags & inp::IN6P_AUTOFLOWLABEL != 0);
+    let (l, lflags, lkeep, algo, over, lrcv, lsnd, linger, lip) = {
+        let i = lso.inner.lock();
+        let Some(x) = i.tcp.as_ref() else {
+            return;
+        };
+        let Some(q) = x.listen.as_ref() else {
+            return;
+        };
+        (
+            Listener {
+                id: lso.id,
+                rcv_hiwat: i.rcv.hiwat,
+                noopt: x.tp.flags & tf::NOOPT != 0,
+                autoflowlabel: autoflow,
+            },
+            x.tp.flags,
+            [x.tp.keepinit, x.tp.keepidle, x.tp.keepintvl, x.tp.keepcnt],
+            x.tp.cc.algo(),
+            q.over(),
+            i.rcv,
+            i.snd,
+            i.linger,
+            i.ip,
+        )
+    };
+    let path = path_for(vnet, inc);
+    let secrets = st.tcp.secrets();
+    let pathf = move |_: &Inc| path;
+    let mut out = Vec::new();
+    let mut replies = Vec::new();
+    let cx = Ctx {
+        now: ms(crate::now()),
+        conf: &st.tcp.conf,
+        stats: &st.tcp.stats,
+        random: crate::random,
+        out: &mut out,
+        hc: &st.tcp.hc,
+        path: &pathf,
+        secrets: &secrets,
+    };
+    let sack = ::tcp::on(&st.tcp.conf.sack_enable);
+    let tlen = u32::try_from(data.len()).unwrap_or(u32::MAX);
+    if t.flags & (th::RST | th::ACK | th::SYN) == th::ACK {
+        let to = Opts::parse(opts, Accept { syn: false, sack });
+        match st.tcp.syncache.expand(&cx, inc, &to, t, &l, &mut replies) {
+            Expand::Socket(e) => {
+                transmit_replies(vnet, replies);
+                if over {
+                    // `sonewconn` refused: no socket, a reset.
+                    st.tcp.stats.inc(::tcp::tcps::LISTENDROP);
+                    closed_port(vnet, st, inc, t, tlen, a);
+                    return;
+                }
+                accept_new(
+                    st,
+                    lso,
+                    &e,
+                    path,
+                    lflags,
+                    lkeep,
+                    algo,
+                    (lrcv, lsnd, linger, lip),
+                    t,
+                    opts,
+                    data,
+                    a.iptos,
+                );
+            }
+            Expand::Reset => {
+                transmit_replies(vnet, replies);
+                closed_port(vnet, st, inc, t, tlen, a);
+            }
+            Expand::Drop => {
+                transmit_replies(vnet, replies);
+            }
+        }
+        return;
+    }
+    if t.has(th::RST) {
+        if let Some(r) = st.tcp.syncache.chkrst(&cx, inc, t) {
+            replies.push(r);
+        }
+        transmit_replies(vnet, replies);
+        return;
+    }
+    if !t.has(th::SYN) || t.has(th::ACK) {
+        st.tcp.stats.inc(::tcp::tcps::BADSYN);
+        if t.has(th::ACK) {
+            closed_port(vnet, st, inc, t, tlen, a);
+        }
+        return;
+    }
+    if t.has(th::FIN) && ::tcp::on(&st.tcp.conf.drop_synfin) {
+        st.tcp.stats.inc(::tcp::tcps::BADSYN);
+        return;
+    }
+    // No connections from or to broadcast, multicast, or itself.
+    if a.multi || (t.dport == t.sport && a.local == a.foreign) {
+        return;
+    }
+    let to = Opts::parse(opts, Accept { syn: true, sack });
+    if let Some(r) = st.tcp.syncache.add(&cx, inc, &to, t, a.iptos, &l) {
+        replies.push(r);
+    }
+    transmit_replies(vnet, replies);
+    syncache_armed(vnet);
+}
+
+/// `syncache_socket` and `solisten_enqueue`: the listener's new socket
+/// for a completed handshake, which inherits its options, its first
+/// segment, and its place on the accept queue.
+#[allow(clippy::too_many_arguments)]
+fn accept_new(
+    st: &state::State,
+    lso: &Arc<Socket>,
+    e: &::tcp::syncache::Entry,
+    path: Path,
+    lflags: u32,
+    lkeep: [u32; 4],
+    algo: Algo,
+    inherit: (crate::Sb, crate::Sb, i32, crate::IpOpts),
+    t: &Th,
+    opts: &[u8],
+    data: Chain,
+    iptos: u8,
+) {
+    let (mut rcv, mut snd, linger, ip) = inherit;
+    rcv.cc = 0;
+    rcv.mbcnt = 0;
+    rcv.cant = false;
+    snd.cc = 0;
+    snd.mbcnt = 0;
+    snd.cant = false;
+    let (uid, pflags) = TCB.lock().get(lso.id).map_or((0, 0), |p| (p.uid, p.flags));
+    let cred = Cred {
+        uid,
+        ..Cred::default()
+    };
+    let s = Socket::with_buffers(&lso.vnet, lso.family, Proto::Tcp, &cred, rcv, snd);
+    s.options
+        .store(lso.so_options() & !SO_ACCEPTCONN, Ordering::Relaxed);
+    let v6 = e.inc.v6;
+    {
+        let mut tb = TCB.lock();
+        if let Some(p) = tb.get_mut(s.id) {
+            p.vflag = (p.vflag & !(INP_IPV4 | INP_IPV6)) | if v6 { INP_IPV6 } else { INP_IPV4 };
+            p.flags =
+                (pflags & !(inp::ANONPORT | inp::INHASHLIST | inp::DROPPED)) | inp::INHASHLIST;
+            if v6 {
+                p.laddr = e.inc.laddr;
+                p.faddr = e.inc.faddr;
+            } else {
+                p.laddr = addr::from_v4(a4(&e.inc.laddr));
+                p.faddr = addr::from_v4(a4(&e.inc.faddr));
+            }
+            p.lport = e.inc.lport;
+            p.fport = e.inc.fport;
+            p.zone = e.inc.zone;
+            p.flow = e.flowlabel;
+            p.hashed = true;
+        }
+    }
+    {
+        let mut i = s.inner.lock();
+        i.linger = linger;
+        i.ip = ip;
+        // `solisten_enqueue(so, SS_ISCONNECTED)`.
+        i.state = ss::ISCONNECTED;
+        if let Some(x) = i.tcp.as_mut() {
+            x.side.path = path;
+            x.side.flow = e.flowlabel;
+        }
+    }
+    let seg = Segment {
+        th: *t,
+        opts,
+        data,
+        iptos,
+        nsegs: 1,
+    };
+    let e = *e;
+    let made = s.run_tcp(Some(path), |tp, so, cx| {
+        // The control block `tcp_usr_attach` made goes; the cache's
+        // connection takes its place, already counted in SYN_RECEIVED.
+        cx.stats.state_dec(Tstate::Closed);
+        *tp = Tcpcb::from_syncache(&e, so, cx, algo, lflags, lkeep);
+        let f = tp.do_segment(so, cx, seg);
+        ((), f)
+    });
+    let _ = (made, st);
+    let queued = {
+        let mut li = lso.inner.lock();
+        match li.tcp.as_mut().and_then(|x| x.listen.as_mut()) {
+            Some(q) => {
+                q.comp.push_back(Arc::clone(&s));
+                true
+            }
+            None => false,
+        }
+    };
+    if !queued {
+        s.abort();
+        return;
+    }
+    // `solisten_wakeup`.
+    lso.rd.notify(0);
+}
+
+// --- ICMP errors ---
+
+/// The connection (or the SYN cache's entry) an ICMP error is about,
+/// told (`tcp_ctlinput`, `tcp6_ctlinput`).
+fn ctlinput(vnet: &Arc<Vnet>, inc: &Inc, th_seq: u32, n: ::tcp::Notify) {
+    let found = {
+        let tb = TCB.lock();
+        let p = if inc.v6 {
+            tb.lookup6(vnet.id, &inc.faddr, inc.fport, &inc.laddr, inc.lport, false)
+        } else {
+            tb.lookup4(
+                vnet.id,
+                a4(&inc.faddr),
+                inc.fport,
+                a4(&inc.laddr),
+                inc.lport,
+                false,
+            )
+        };
+        p.and_then(|p| p.socket().map(|s| (s, p.flags & inp::DROPPED != 0)))
+    };
+    match found {
+        Some((so, false)) => {
+            let _ = so.run_tcp(None, |tp, sk, cx| {
+                if tp.state == Tstate::Listen {
+                    return ((), Fate::Alive);
+                }
+                ((), tp.ctlinput(sk, cx, th_seq, n))
+            });
+        }
+        Some((_, true)) => {}
+        None => {
+            let st = state::of(vnet);
+            let secrets = st.tcp.secrets();
+            let path = |_: &Inc| Path::default();
+            let mut out = Vec::new();
+            let cx = Ctx {
+                now: ms(crate::now()),
+                conf: &st.tcp.conf,
+                stats: &st.tcp.stats,
+                random: crate::random,
+                out: &mut out,
+                hc: &st.tcp.hc,
+                path: &path,
+                secrets: &secrets,
+            };
+            st.tcp.syncache.unreach(&cx, inc, th_seq);
+        }
+    }
+}
+
+/// `tcp_ctlinput`: ICMP type `t`, code `c` about a segment this host
+/// sent (inner header `oip`, the first 8 bytes of its TCP header in
+/// `th8`), with the next-hop MTU of a "fragmentation needed".
+pub(crate) fn ctlinput4(vnet: &Arc<Vnet>, t: u8, c: u8, oip: &Ip, th8: &[u8; 8], nextmtu: u16) {
+    let Some(e) = crate::icmp::errmap(t, c) else {
+        return;
+    };
+    let st = state::of(vnet);
+    let may_rst = ::tcp::on(&st.tcp.conf.icmp_may_rst);
+    let n = match e {
+        Errno::EMSGSIZE => {
+            // `tcp_next_pmtu`.
+            let mut mtu = u32::from(nextmtu);
+            if mtu == 0 {
+                mtu = ::tcp::next_mtu_down(u32::from(oip.len));
+            }
+            let least = ::tcp::get(&st.tcp.conf.minmss).cast_unsigned() + 40;
+            ::tcp::Notify::Mtu(mtu.max(least))
+        }
+        Errno::ECONNREFUSED if may_rst => ::tcp::Notify::DropSynSent(e),
+        Errno::EHOSTUNREACH if may_rst && t == crate::icmp::ty::TIMXCEED => {
+            ::tcp::Notify::DropSynSent(e)
+        }
+        _ => ::tcp::Notify::Soft(e),
+    };
+    let inc = Inc {
+        laddr: wide4(oip.src),
+        faddr: wide4(oip.dst),
+        lport: u16::from_be_bytes([th8[0], th8[1]]),
+        fport: u16::from_be_bytes([th8[2], th8[3]]),
+        v6: false,
+        zone: 0,
+        fib: 0,
+    };
+    let th_seq = u32::from_be_bytes([th8[4], th8[5], th8[6], th8[7]]);
+    ctlinput(vnet, &inc, th_seq, n);
+}
+
+/// `tcp6_ctlinput`: an ICMPv6 error about a segment this host sent.
+pub(crate) fn ctlinput6(vnet: &Arc<Vnet>, m: &Packet, ctl: &crate::icmp6::Ctl, mtu: u32) {
+    let Some(e) = crate::icmp6::errmap(ctl.t, ctl.c) else {
+        return;
+    };
+    let mut th8 = [0u8; 8];
+    if m.data.copy_out(ctl.off, &mut th8) != 8 {
+        return;
+    }
+    let st = state::of(vnet);
+    let may_rst = ::tcp::on(&st.tcp.conf.icmp_may_rst);
+    let n = match e {
+        Errno::EMSGSIZE => {
+            if mtu < crate::ip6::MMTU {
+                return;
+            }
+            ::tcp::Notify::Mtu(mtu)
+        }
+        Errno::ECONNREFUSED if may_rst => ::tcp::Notify::DropSynSent(e),
+        Errno::EHOSTUNREACH if may_rst && ctl.t == crate::icmp6::ty::TIME_EXCEEDED => {
+            ::tcp::Notify::DropSynSent(e)
+        }
+        _ => ::tcp::Notify::Soft(e),
+    };
+    let zone = if crate::addr::is_linklocal6(&ctl.dst) {
+        u32::from(m.hdr.rcvif)
+    } else {
+        0
+    };
+    let inc = Inc {
+        laddr: ctl.src,
+        faddr: ctl.dst,
+        lport: u16::from_be_bytes([th8[0], th8[1]]),
+        fport: u16::from_be_bytes([th8[2], th8[3]]),
+        v6: true,
+        zone,
+        fib: 0,
+    };
+    let th_seq = u32::from_be_bytes([th8[4], th8[5], th8[6], th8[7]]);
+    ctlinput(vnet, &inc, th_seq, n);
+}
+
+/// `net.inet.tcp.hostcache.list` (`sysctl_tcp_hc_list`).
+#[must_use]
+pub fn hostcache_list(st: &state::State) -> alloc::string::String {
+    use core::fmt::Write;
+    let mut s = alloc::string::String::from(
+        "\nIP address        MTU  SSTRESH      RTT   RTTVAR     CWND SENDPIPE RECVPIPE EXP\n",
+    );
+    // `msec(rtt * (RTM_RTTUNIT / (hz * TCP_RTT_SCALE)))`.
+    let msec = |u: u64| (u + 500) / 1000;
+    for e in st.tcp.hc.entries() {
+        let a = if e.peer.v6 {
+            crate::nd6::fmt6(&e.peer.addr)
+        } else {
+            net::addr::fmt4(a4(&e.peer.addr))
+        };
+        let _ = writeln!(
+            s,
+            "{a:<15} {:5} {:8} {:6}ms {:6}ms {:8} {:8} {:8} {:4}",
+            e.m.mtu,
+            e.m.ssthresh,
+            msec(u64::from(e.m.rtt) * (1_000_000 / (1000 * 32))),
+            msec(u64::from(e.m.rttvar) * (1_000_000 / (1000 * 16))),
+            e.m.cwnd,
+            e.m.sendpipe,
+            e.m.recvpipe,
+            e.expire
+        );
+    }
+    s
 }

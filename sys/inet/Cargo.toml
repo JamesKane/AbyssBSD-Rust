@@ -12,6 +12,7 @@ hal = { path = "../../arch/hal" }
 mbuf = { path = "../mbuf" }
 net = { path = "../net" }
 sync = { path = "../sync" }
+tcp = { path = "../tcp" }
 
 [lints]
 workspace = true

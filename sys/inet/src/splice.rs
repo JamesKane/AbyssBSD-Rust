@@ -443,25 +443,14 @@ impl Socket {
         self.inner.lock().rcv.cant
     }
 
-    /// Room for a splice to send (`sbspace` of the send buffer, with the
-    /// peer's window as a send's); `None` once it can send no more.
+    /// Room for a splice to send (`sbspace` of the send buffer); `None`
+    /// once it can send no more.
     fn splice_room(&self) -> Option<usize> {
-        let (peer, space, queued) = {
-            let i = self.inner.lock();
-            if i.snd.cant {
-                return None;
-            }
-            (
-                i.tcp.as_ref().and_then(|t| t.peer.clone()),
-                i.snd.space() as usize,
-                !i.sndq.is_empty(),
-            )
-        };
-        let direct = match (peer, queued) {
-            (Some(p), false) => p.inner.lock().rcv.space() as usize,
-            _ => 0,
-        };
-        Some(direct + space)
+        let i = self.inner.lock();
+        if i.snd.cant {
+            return None;
+        }
+        Some(i.snd.space() as usize)
     }
 
     /// A splice's receive (`soreceive_stream_locked`): up to `max` bytes,

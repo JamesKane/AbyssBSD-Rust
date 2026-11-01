@@ -16,7 +16,7 @@ use abi::socket::{
 use crate::addr::{self, In6, LOOPBACK6, Sockaddr, sockaddr_in, sockaddr_in6, v4mapped};
 use crate::ifnet;
 use crate::pcb::{TCB, UDB};
-use crate::{Cred, Family, Proto, Socket, Tstate, tune};
+use crate::{Cred, Family, Proto, Socket, Tstate};
 
 static LOCK: Mutex<()> = Mutex::new(());
 
@@ -66,7 +66,7 @@ fn tcp4() -> Arc<Socket> {
     Socket::new(Family::Inet, Proto::Tcp, &user())
 }
 
-fn set_int(s: &Socket, level: i32, name: i32, v: i32) {
+fn set_int(s: &Arc<Socket>, level: i32, name: i32, v: i32) {
     s.setopt(level, name, &v.to_ne_bytes(), &user()).unwrap();
 }
 
@@ -323,13 +323,15 @@ fn tcp_flow_control_and_window() {
             Err(e) => panic!("{e:?}"),
         }
     }
-    // The receive buffer and the send buffer, full.
-    let rcv =
-        usize::try_from(tune::TCP_RECVSPACE.load(core::sync::atomic::Ordering::Relaxed)).unwrap();
-    let snd =
-        usize::try_from(tune::TCP_SENDSPACE.load(core::sync::atomic::Ordering::Relaxed)).unwrap();
-    assert_eq!(sent, rcv + snd);
-    assert_eq!(c.nwrite(), snd);
+    // The receive buffer and the send buffer, full (each at least its
+    // starting size; TCP rounds them to whole segments and may grow
+    // them).
+    let st = crate::state::of(net::vnet0());
+    let rcv = usize::try_from(::tcp::get(&st.tcp.conf.recvspace)).unwrap();
+    let snd = usize::try_from(::tcp::get(&st.tcp.conf.sendspace)).unwrap();
+    assert!(sent >= rcv + snd, "{sent}");
+    assert_eq!(c.nwrite() + s.nread(), sent);
+    assert!(c.nwrite() >= snd);
     let mut got = 0;
     while got < sent {
         let r = s.recv_stream(10_000, false, false).unwrap();
@@ -401,26 +403,25 @@ fn tcp_listen_backlog_and_close_aborts_queue() {
     let l = tcp4();
     l.bind(&sockaddr_in(LO, 20090), &user()).unwrap();
     l.listen(0, &user()).unwrap();
-    // Backlog 0: one complete connection (`3 * 0 / 2`), then waiting.
+    // Backlog 0: one complete connection (`3 * 0 / 2`); past that,
+    // `solisten_clone` refuses the handshake's last ACK and the client
+    // is reset (`net.inet.tcp.syncache.rst_on_sock_fail`).
     let a = tcp4();
     a.connect(&sockaddr_in(LO, 20090), &user(), false).unwrap();
     let b = tcp4();
     assert_eq!(
-        b.connect(&sockaddr_in(LO, 20090), &user(), true),
-        Err(Errno::EINPROGRESS)
+        b.connect(&sockaddr_in(LO, 20090), &user(), false),
+        Err(Errno::ECONNRESET)
     );
-    assert_eq!(b.connect_done(), Err(Errno::EAGAIN));
-    assert_eq!(b.tcp_state(), Tstate::SynSent);
-    // Accepting lets the waiting one in.
-    let sa = l.accept().unwrap();
-    assert_eq!(b.connect_done(), Ok(()));
+    let st = crate::state::of(net::vnet0());
+    assert!(st.tcp.stats.get(::tcp::tcps::LISTENDROP) >= 1);
+    // Closing the listener aborts what it queued: the client is reset.
     l.close();
-    // The queued connection is reset.
     assert_eq!(
-        b.recv_stream(10, false, false).unwrap_err(),
+        a.recv_stream(10, false, false).unwrap_err(),
         Errno::ECONNRESET
     );
-    for x in [a, b, sa] {
+    for x in [a, b] {
         x.close();
     }
 }
@@ -729,6 +730,9 @@ fn iflist_records() {
 /// returns whether work was still queued after them.
 fn splice_drain(turns: usize) -> bool {
     for _ in 0..turns {
+        // Time for delayed acknowledgements (and the small sends Nagle
+        // holds for them) to go.
+        crate::advance(50_000_000);
         if crate::splice::pending() {
             crate::splice::run();
         } else {

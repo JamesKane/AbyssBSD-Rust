@@ -238,6 +238,27 @@ pub(super) fn openat(s: &Sleepable, fd: u64, path_ptr: u64, flags: u64, mode: u6
                 vfs::ops::setattr(s, &v, &zero, cred, false)?;
             }
         }
+        // `/dev/fd/N` shares descriptor `N` (`kern_openat`'s `ENODEV`
+        // case, `dupfdopen`): opened for no more than it allows, the copy
+        // takes its flags and limits (`fde_copy`), not the open's.
+        if v.kind() == Kind::CharDevice
+            && flags & O_PATH == 0
+            && let Some(n) = v.device(s)?.ops.dup_fd()
+        {
+            let (file, fdf, caps) = {
+                let t = p.files.lock(s);
+                let slot = t.slot(n)?;
+                (
+                    Arc::clone(&slot.file),
+                    slot.flags,
+                    slot.caps.as_deref().cloned(),
+                )
+            };
+            if (fflags & (FREAD | FWRITE)) | file.flags() != file.flags() {
+                return Err(Errno::EACCES);
+            }
+            return super::io::install_caps(s, p, file, fdf, caps);
+        }
         // A device may open as another (`/dev/tty`).
         let v = match v.kind() {
             Kind::CharDevice if flags & O_PATH == 0 => v.device(s)?.ops.open()?.unwrap_or(v),

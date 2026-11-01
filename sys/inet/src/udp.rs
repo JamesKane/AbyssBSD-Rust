@@ -866,6 +866,8 @@ impl Socket {
             }
             r
         };
+        // The table's lock before the interfaces', never under it.
+        let pflags = self.pcb_flags();
         let mut n = self.vnet.net.lock();
         if dst.scope != 0 && n.by_index(u16::try_from(dst.scope).unwrap_or(0)).is_none() {
             return Err(Errno::ENXIO);
@@ -899,7 +901,7 @@ impl Socket {
         m.prepend(crate::ip6::HDR_LEN)
             .map_err(|_| Errno::ENOBUFS)?
             .copy_from_slice(&h.bytes());
-        let mut o = self.opts6(&dst, Some(ctl), &saddr, ifp);
+        let mut o = self.opts6(&dst, Some(ctl), &saddr, ifp, pflags);
         if connected {
             o.ifindex = 0;
         }

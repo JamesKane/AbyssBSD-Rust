@@ -332,6 +332,11 @@ pub trait CharDevice: Send + Sync {
     fn open(&self) -> Result<Option<Arc<crate::Vnode>>, Errno> {
         Ok(None)
     }
+    /// `/dev/fd/N` (`fdopen`): `Some(N)` makes an open of it share the
+    /// caller's descriptor `N` instead (`dupfdopen`).
+    fn dup_fd(&self) -> Option<i32> {
+        None
+    }
     /// Called when the device is opened, after [`CharDevice::open`]:
     /// `Some` serves this open file's I/O from that per-open device
     /// instead, which is dropped when the file closes (FreeBSD's

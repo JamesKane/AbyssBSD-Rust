@@ -123,6 +123,24 @@ impl CharDevice for Console {
     }
 }
 
+/// `/dev/fd/N` (`fildesc_cdevsw`): an open shares the caller's
+/// descriptor `N` (`dupfdopen`), so I/O never reaches it.
+struct FdDev(i32);
+
+impl CharDevice for FdDev {
+    fn dup_fd(&self) -> Option<i32> {
+        Some(self.0)
+    }
+
+    fn read(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
+        Err(Errno::EBADF)
+    }
+
+    fn write(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
+        Err(Errno::EBADF)
+    }
+}
+
 /// A raw disk or partition (FreeBSD's `geom_dev`), by its node's name
 /// (`md9`, `gpt/rootfs0`): the provider GEOM shows an open of it on.
 struct DiskDev(Arc<storage::Disk>, alloc::string::String);
@@ -737,6 +755,12 @@ pub(crate) fn init() {
     });
     add(b"tty", 0o666, 0, 0, Arc::new(crate::tty::ControllingTty));
     add(b"zero", 0o666, 0, 0, Arc::new(Zero));
+    // `fildesc_drvinit`.
+    for (n, alias) in [(0, "stdin"), (1, "stdout"), (2, "stderr")] {
+        let path = alloc::format!("fd/{n}");
+        add(path.as_bytes(), 0o666, 0, 0, Arc::new(FdDev(n)));
+        link(alias.as_bytes(), path.as_bytes());
+    }
     storage::disk::set_listener(disk_event);
     for d in storage::disk::all() {
         for name in names(&d) {

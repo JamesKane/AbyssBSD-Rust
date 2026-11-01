@@ -614,3 +614,71 @@ fn toeplitz_matches_the_rss_verification_suite() {
     t.extend_from_slice(&4739u16.to_be_bytes());
     assert_eq!(crate::ip::toeplitz(k, &t), 0xc626_b0ea);
 }
+
+fn tcp_in(v: &Arc<Vnet>) -> Arc<Socket> {
+    Socket::new_in(v, Family::Inet, Proto::Tcp, &Cred::root())
+}
+
+/// Moves `data` from `c` to `s`, reading as it comes, with time passing
+/// for the timers.
+fn stream(c: &Arc<Socket>, s: &Arc<Socket>, data: &[u8]) -> Vec<u8> {
+    let (mut sent, mut got) = (0, Vec::new());
+    let mut rounds = 0;
+    while got.len() < data.len() {
+        if sent < data.len() {
+            match c.send_stream(&data[sent..], false) {
+                Ok(n) => sent += n,
+                Err(Errno::EAGAIN) => {}
+                Err(e) => panic!("{e:?}"),
+            }
+        }
+        crate::advance(10_000_000);
+        loop {
+            match s.recv_stream(1 << 20, false, false) {
+                Ok(r) if !r.data.is_empty() => got.extend(r.data),
+                Ok(_) | Err(Errno::EAGAIN) => break,
+                Err(e) => panic!("{e:?}"),
+            }
+        }
+        rounds += 1;
+        assert!(rounds < 10_000, "stuck at {} of {}", got.len(), data.len());
+    }
+    got
+}
+
+#[test]
+fn tcp_crosses_the_wire_and_closes() {
+    let _g = crate::tests::setup();
+    let (h1, h2, _) = pair(1, 2);
+    let l = tcp_in(&h2);
+    l.bind(&sockaddr_in([0; 4], 32100), &Cred::root()).unwrap();
+    l.listen(5, &Cred::root()).unwrap();
+    let c = tcp_in(&h1);
+    c.connect(&sockaddr_in([192, 0, 2, 2], 32100), &Cred::root(), false)
+        .unwrap();
+    assert_eq!(c.connect_done(), Ok(()));
+    let s = l.accept().unwrap();
+    assert_eq!(s.tcp_state(), crate::Tstate::Established);
+    // The SYN asked for an MSS of the epair's MTU less the headers.
+    let mss = |so: &Socket| crate::tcp::snapshot(so).maxseg;
+    assert_eq!(mss(&c), 1460);
+    assert_eq!(mss(&s), 1460);
+    let data: Vec<u8> = (0..1_000_000u32)
+        .map(|i| (i * 13 + i / 255).to_le_bytes()[0])
+        .collect();
+    assert_eq!(stream(&c, &s, &data), data);
+    let st1 = state::of(&h1);
+    assert!(st1.tcp.stats.get(::tcp::tcps::SNDPACK) > 600);
+    assert_eq!(st1.tcp.stats.get(::tcp::tcps::SNDREXMITPACK), 0);
+    // An orderly close from the client: TIME_WAIT there, CLOSED here.
+    c.shutdown(abi::socket::SHUT_WR).unwrap();
+    crate::advance(100_000_000);
+    assert_eq!(s.recv_stream(10, false, false).unwrap().data.len(), 0);
+    s.close();
+    crate::advance(100_000_000);
+    assert_eq!(c.tcp_state(), crate::Tstate::TimeWait);
+    c.close();
+    // Twice the MSL later the port is free again.
+    crate::advance(61_000_000_000);
+    l.close();
+}

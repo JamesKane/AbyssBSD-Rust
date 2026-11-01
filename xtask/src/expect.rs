@@ -557,6 +557,21 @@ impl Session {
         Ok(())
     }
 
+    /// Raises an NMI on every vCPU and logs what the guest prints for
+    /// the next `wait`: a hung kernel's backtraces.
+    pub(crate) fn nmi(&mut self, wait: Duration) -> Result<bool> {
+        if !self.vm.nmi() {
+            return Ok(false);
+        }
+        let deadline = Instant::now() + wait;
+        while Instant::now() < deadline {
+            if let Ok(bytes) = self.rx.recv_timeout(Duration::from_millis(100)) {
+                self.log.write_all(&bytes)?;
+            }
+        }
+        Ok(true)
+    }
+
     /// Stops the VM at once, as pulling the plug would (what is written
     /// stays on its disks; the rest is lost).
     pub(crate) fn kill(mut self) {

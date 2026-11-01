@@ -4050,7 +4050,8 @@ ktest! {
         dst[2..4].copy_from_slice(&l.sockname().port.to_be_bytes());
         let c = Socket::new(Family::Inet, Proto::Tcp, &root);
         c.connect(&dst, &root, false).unwrap();
-        let a = l.accept().unwrap();
+        // The handshake runs on `lo0`'s `netisr` queue, as on FreeBSD.
+        let a = crate::fs::socket::wait_until(&s, &l.rd, 0, || l.accept()).unwrap();
         const TOTAL: usize = 512 * 1024;
         let writer = {
             let c = Arc::clone(&c);

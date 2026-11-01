@@ -516,3 +516,41 @@ fn host_routes_through_link_local_gateways() {
     }
     p.close();
 }
+
+#[test]
+fn tcp_over_ipv6_resolves_its_neighbor_and_carries_data() {
+    let _g = crate::tests::setup();
+    let (h1, h2, _, _) = pair6(1, 2);
+    let l = Socket::new_in(&h2, Family::Inet6, Proto::Tcp, &Cred::root());
+    l.bind(&sockaddr_in6(&[0; 16], 32200, 0), &Cred::root())
+        .unwrap();
+    l.listen(5, &Cred::root()).unwrap();
+    let c = Socket::new_in(&h1, Family::Inet6, Proto::Tcp, &Cred::root());
+    let dst = a6(&[0x2001, 0xdb8, 0, 0, 0, 0, 0, 2]);
+    c.connect(&sockaddr_in6(&dst, 32200, 0), &Cred::root(), false)
+        .unwrap();
+    assert_eq!(c.connect_done(), Ok(()));
+    let s = l.accept().unwrap();
+    assert_eq!(crate::tcp::snapshot(&s).maxseg, 1440);
+    let data: Vec<u8> = (0..200_000u32).map(|i| (i * 7).to_le_bytes()[0]).collect();
+    let mut sent = 0;
+    let mut got = Vec::new();
+    while got.len() < data.len() {
+        if sent < data.len()
+            && let Ok(n) = c.send_stream(&data[sent..], false)
+        {
+            sent += n;
+        }
+        crate::advance(10_000_000);
+        while let Ok(r) = s.recv_stream(1 << 20, false, false) {
+            if r.data.is_empty() {
+                break;
+            }
+            got.extend(r.data);
+        }
+    }
+    assert_eq!(got, data);
+    for x in [c, s, l] {
+        x.close();
+    }
+}

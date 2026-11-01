@@ -12,7 +12,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 
 use abi::inet::{
-    INC_ISIPV6, INP_IPV6, InConninfo, InEndpoints, Xinpcb, Xinpgen, Xsockbuf, Xsocket, Xtcpcb, tcps,
+    INC_ISIPV6, INP_IPV6, InConninfo, InEndpoints, Xinpcb, Xinpgen, Xsockbuf, Xsocket, Xtcpcb,
 };
 
 use crate::addr::In6;
@@ -34,7 +34,6 @@ struct Snap {
     zone: u32,
     uid: u32,
     gencnt: u64,
-    tw: bool,
     ip_p: u8,
 }
 
@@ -178,7 +177,6 @@ fn copies(proto: Proto, vnet: u32) -> (u64, Vec<Snap>) {
             zone: p.zone,
             uid: p.uid,
             gencnt: p.gencnt,
-            tw: p.tw_until.is_some(),
             ip_p: p.ip_p,
         });
     }
@@ -240,7 +238,6 @@ pub fn tcp_pcblist(vnet: u32, visible: &dyn Fn(u32) -> bool) -> Vec<u8> {
     let list: Vec<_> = list.into_iter().filter(|c| visible(c.uid)).collect();
     let mut out = Vec::new();
     push(&mut out, &xinpgen(list.len(), gen_));
-    let now = crate::now();
     for c in &list {
         let so = c.so.upgrade();
         let mut x = Xtcpcb {
@@ -249,27 +246,34 @@ pub fn tcp_pcblist(vnet: u32, visible: &dyn Fn(u32) -> bool) -> Vec<u8> {
         };
         x.xt_inp = xinpcb(c, so.as_ref());
         x.xt_stack[..7].copy_from_slice(b"freebsd");
-        x.xt_cc[..5].copy_from_slice(b"cubic");
-        let (state, flags, mss, rwnd, swnd, rcvtime) = match (&so, c.tw) {
-            (_, true) => (tcps::TIME_WAIT, 0, 0, 0, 0, now),
-            (Some(s), false) => {
-                let (st, f, m, r, w, t) = crate::tcp::snapshot(s);
-                (st.number(), f, m, r, w, t)
-            }
-            (None, false) => (tcps::CLOSED, 0, 0, 0, 0, now),
-        };
-        x.t_state = state;
-        x.t_flags = flags;
-        x.t_maxseg = mss;
-        x.t_rcv_wnd = rwnd;
-        x.t_snd_wnd = swnd;
-        x.t_snd_cwnd = 10 * mss;
-        x.t_snd_ssthresh = 0x3fff_c000;
-        // Ticks since it last received.
-        x.t_rcvtime = i32::try_from(now.saturating_sub(rcvtime) / 1_000_000).unwrap_or(i32::MAX);
-        x.tt_rexmt = 0;
-        x.tt_keep = 0;
-        x.tt_2msl = 0;
+        let snap = so
+            .as_ref()
+            .map(|s| crate::tcp::snapshot(s))
+            .unwrap_or_default();
+        x.t_state = snap.state;
+        x.t_flags = snap.flags;
+        x.t_maxseg = snap.maxseg;
+        x.t_rcv_wnd = snap.rcv_wnd;
+        x.t_snd_wnd = snap.snd_wnd;
+        x.t_snd_cwnd = snap.snd_cwnd;
+        x.t_snd_ssthresh = snap.snd_ssthresh;
+        x.t_sndzerowin = snap.sndzerowin.cast_signed();
+        x.t_sndrexmitpack = snap.sndrexmitpack.cast_signed();
+        x.t_rcvoopack = snap.rcvoopack.cast_signed();
+        // Ticks (`hz` 1000) since it last received, and the timers' left.
+        x.t_rcvtime = i32::try_from(snap.idle).unwrap_or(i32::MAX);
+        let tick = |v: u64| i32::try_from(v).unwrap_or(i32::MAX);
+        x.tt_rexmt = tick(snap.timers[0]);
+        x.tt_persist = tick(snap.timers[1]);
+        x.tt_keep = tick(snap.timers[2]);
+        x.tt_2msl = tick(snap.timers[3]);
+        x.tt_delack = tick(snap.timers[4]);
+        x.xt_ecn = snap.ecn;
+        x.t_dsack_bytes = snap.dsack_bytes;
+        x.t_dsack_pack = snap.dsack_pack;
+        x.xt_cc = [0; abi::inet::tcp::TCP_CA_NAME_MAX];
+        let cc = if snap.cc.is_empty() { "cubic" } else { snap.cc };
+        x.xt_cc[..cc.len()].copy_from_slice(cc.as_bytes());
         push(&mut out, &x);
     }
     push(&mut out, &xinpgen(list.len(), gen_));

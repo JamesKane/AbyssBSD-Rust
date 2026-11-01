@@ -406,6 +406,21 @@ impl Vm {
         }
     }
 
+    /// Raises an NMI on every vCPU (bhyve only), for the kernel's
+    /// backtraces of a hung guest; false if it could not.
+    pub(crate) fn nmi(&self) -> bool {
+        self.vmm == Vmm::Bhyve
+            && (0..self.smp).all(|cpu| {
+                Command::new("doas")
+                    .args(["bhyvectl", "--inject-nmi"])
+                    .arg(format!("--vm={}", self.bhyve_name()))
+                    .arg(format!("--cpu={cpu}"))
+                    .stderr(Stdio::null())
+                    .status()
+                    .is_ok_and(|s| s.success())
+            })
+    }
+
     fn qemu_command(&self) -> Result<Command> {
         let (bin, code, vars) = match self.arch {
             Arch::X86_64 => (

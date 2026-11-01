@@ -384,8 +384,7 @@ fn deliver(vnet: &Arc<Vnet>, m: Packet, ip: &Ip) {
         proto::ICMP => icmp::input(vnet, m, ip),
         proto::UDP => crate::udp::input4(vnet, m, ip),
         proto::IGMP => crate::igmp::input(vnet, m, ip),
-        // TCP on the wire is P7.6's; raw sockets still see it.
-        proto::TCP => crate::raw::input4(vnet, m, ip, true),
+        proto::TCP => crate::tcp::input4(vnet, m, ip),
         _ => crate::raw::input4(vnet, m, ip, false),
     }
 }

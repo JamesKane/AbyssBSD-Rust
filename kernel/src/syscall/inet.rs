@@ -195,7 +195,12 @@ pub(super) fn name(so: &Socket, peer: bool) -> Result<Vec<u8>, Errno> {
 }
 
 /// `setsockopt`.
-pub(super) fn setsockopt(so: &Socket, level: i32, name: i32, val: &[u8]) -> SysResult {
+pub(super) fn setsockopt(
+    so: &alloc::sync::Arc<Socket>,
+    level: i32,
+    name: i32,
+    val: &[u8],
+) -> SysResult {
     so.setopt(level, name, val, &crate::fs::inet::cred())?;
     Ok(0)
 }
