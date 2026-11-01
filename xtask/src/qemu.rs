@@ -113,6 +113,9 @@ pub(crate) struct Vm {
     /// A virtio-net interface, `vtnet0` (docs/NETWORKING.md §15); none
     /// without.
     pub(crate) net: Option<Net>,
+    /// bhyve: told apart from this process's other machines by this
+    /// suffix to its name.
+    pub(crate) instance: &'static str,
 }
 
 /// The network a machine's virtio-net interface is on.
@@ -303,6 +306,7 @@ impl Vm {
             usb: false,
             qmp: None,
             net: None,
+            instance: "",
         }
     }
 
@@ -329,9 +333,10 @@ impl Vm {
         }
     }
 
-    /// The bhyve instance name: unique per xtask process.
+    /// The bhyve instance name: unique per xtask process and
+    /// [`Vm::instance`].
     fn bhyve_name(&self) -> String {
-        format!("abyss-{}", std::process::id())
+        format!("abyss-{}{}", std::process::id(), self.instance)
     }
 
     fn bhyve_command(&self) -> Result<Command> {
@@ -387,8 +392,10 @@ impl Vm {
                 c.arg("-p").arg(format!("{v}:{}", v * PIN_STRIDE));
             }
         }
-        // A framebuffer so the guest gets a GOP; VNC on a per-process port.
-        let port = 5900 + std::process::id() % 1000;
+        // A framebuffer so the guest gets a GOP; VNC on a port per process
+        // (and per instance: another 2000 up for a second machine).
+        let second = if self.instance.is_empty() { 0 } else { 2000 };
+        let port = 5900 + std::process::id() % 1000 + second;
         c.arg("-s")
             .arg(format!("29,fbuf,tcp=127.0.0.1:{port},w=1024,h=768"));
         c.arg(self.bhyve_name());

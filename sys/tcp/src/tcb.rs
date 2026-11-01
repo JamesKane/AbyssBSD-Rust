@@ -649,9 +649,18 @@ impl Tcpcb {
 
     /// `tcp_respond` from a connection: a bare segment with `ack`, `seq`,
     /// and `flags` (an ACK, a keepalive probe, a challenge ACK, or a
-    /// reset), with timestamps if the connection uses them.
-    pub(crate) fn respond(&mut self, cx: &mut Ctx, ack: Seq, seq: Seq, flags: u16) {
-        self.respond_win(cx, ack, seq, flags, None);
+    /// reset), with timestamps if the connection uses them, advertising
+    /// the receive buffer's room.
+    pub(crate) fn respond<S: Sock>(
+        &mut self,
+        so: &S,
+        cx: &mut Ctx,
+        ack: Seq,
+        seq: Seq,
+        flags: u16,
+    ) {
+        let win = self.rcv_space_win(so);
+        self.respond_win(cx, ack, seq, flags, Some(win));
     }
 
     /// [`Tcpcb::respond`] with the window computed from `win` (bytes),

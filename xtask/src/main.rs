@@ -55,7 +55,7 @@ commands:
   freebsd-shell                                          run the boot-to-shell script against FreeBSD (server only)
   freebsd-multiuser [--arch <a|all>] [--vmm qemu|bhyve] run the multi-user login script against FreeBSD (server only)
   freebsd-net [--arch <a|all>] [--vmm qemu|bhyve]  run the network script against FreeBSD (server only)
-  netdiff [--freebsd] [--scenario NAME]  differential captures on the test bridge (server only)
+  netdiff [--freebsd] [--scenario NAME,...]  differential captures on the test bridge (server only)
   freebsd-usertests [--arch <a|all>] [--test N,...]   run tests/user on FreeBSD 15.1 itself (server only)
   freebsd-diff [--arch <a|all>] [--scenario N,...]    record FreeBSD's output of tests/diff's scenarios (server only)
   kyua-baseline [--resume] [--only DIR,...]              record FreeBSD's kyua results per test case in bhyve (server only)

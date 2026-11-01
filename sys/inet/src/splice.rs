@@ -232,7 +232,7 @@ impl Splice {
         }
         match self
             .dst
-            .send_stream_to(&buf, false, Some(&self.src.splice_sent))
+            .send_stream_to(&buf, false, Some(&self.src.splice_sent), None)
         {
             Ok(n) => {
                 buf.drain(..n);

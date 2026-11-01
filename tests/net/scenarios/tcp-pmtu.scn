@@ -1,0 +1,7 @@
+# A path MTU of 1280: the scripted peer drops larger packets and answers the
+# first with ICMP's fragmentation needed; the guest sends its 14480 bytes
+# again in smaller segments.
+filter: tcp port 7007 or (icmp and host 10.77.0.2)
+ports: 7007
+raw: python3.12 /root/peers/pmtu.py
+guest: sysctl -q net.inet.tcp.hostcache.purgenow=1; jot -b x 7240 >/tmp/nd; nc -N 10.77.0.2 7007 </tmp/nd

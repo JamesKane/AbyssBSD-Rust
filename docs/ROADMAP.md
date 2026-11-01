@@ -2105,6 +2105,18 @@ P7.0 ─► P7.1 ─► P7.2 ─► P7.3 ─► P7.4 ─┬─► P7.5 ───
 - `sshd` logins, `scp` both ways, `fetch`, and `pkg update && pkg install` work in QEMU and bhyve.
 - Captures: handshake and transfer, loss and SACK recovery, zero window and persist, resets,
   keepalive, path MTU change, simultaneous close.
+- Done (2026-11-01): `sys/tcp` is FreeBSD 15.1's default stack (NewReno and CUBIC, SACK with
+  PRR, SYN cache and cookies, host cache, path MTU discovery from ICMP and ICMPv6, ECN, delayed
+  ACKs, keepalive, persist, buffer autotuning), host-tested on the simulated network; `sys/inet`
+  runs it on packets, loopback included, with `net.inet.tcp.*`, implied connect (`sendto` naming
+  the peer), and the PCB list. `sshd` logins, `scp` both ways, `fetch`, and `pkg update && pkg
+  install` pass in QEMU and bhyve. Captures: `tcp-exchange`, `tcp-refused`, `tcp-zero-window`,
+  `tcp-keepalive`, and, against a scripted peer (a second FreeBSD guest with scapy), `tcp-sack`,
+  `tcp-pmtu`, and `tcp-simultaneous-close` match FreeBSD's; all 19 scenarios match. Targeted kyua:
+  every case FreeBSD passes in `sys/netinet` and `lib/libc/net` passes or is listed. Left:
+  FreeBSD as a VM guest runs at `hz` 100 (`HZ_VM`), so its TCP clock has 10 ms ticks there, and
+  AbyssBSD's keeps 1 ms ones (FreeBSD's on hardware): RTT samples and timers can differ by a tick
+  in VMs.
 
 **P7.7 `sendfile` and kernel TLS.**
 - P7.7a, from P7.0 on the host: `sys/crypto` (AES with CBC and GCM, ChaCha20-Poly1305, SHA-1,

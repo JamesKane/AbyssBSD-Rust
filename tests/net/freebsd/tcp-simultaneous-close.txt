@@ -1,0 +1,10 @@
+# Both ends close at once: the scripted peer's FIN crosses the guest's
+# (it does not acknowledge the guest's), the guest goes through CLOSING,
+# and the peer's last ACK puts it in TIME_WAIT.
+GUEST-MAC > RAW-MAC, ethertype IPv4 (0x0800), length 74: (tos 0x0, ttl 64, id _, offset 0, flags [DF], proto TCP (6), length 60) GUEST.eph > RAW.7005: Flags [S], cksum _ (correct), seq _, win 65535, options [mss 1460,nop,wscale 8,sackOK,TS val _ ecr 0], length 0
+RAW-MAC > GUEST-MAC, ethertype IPv4 (0x0800), length 58: (tos 0x0, ttl 64, id _, offset 0, flags [DF], proto TCP (6), length 44) RAW.7005 > GUEST.eph: Flags [S.], cksum _ (correct), seq _, ack _, win 65535, options [mss 1460], length 0
+GUEST-MAC > RAW-MAC, ethertype IPv4 (0x0800), length 54: (tos 0x0, ttl 64, id _, offset 0, flags [DF], proto TCP (6), length 40) GUEST.eph > RAW.7005: Flags [.], cksum _ (correct), ack 1, win 65535, length 0
+GUEST-MAC > RAW-MAC, ethertype IPv4 (0x0800), length 54: (tos 0x0, ttl 64, id _, offset 0, flags [DF], proto TCP (6), length 40) GUEST.eph > RAW.7005: Flags [F.], cksum _ (correct), seq 1, ack 1, win 65535, length 0
+RAW-MAC > GUEST-MAC, ethertype IPv4 (0x0800), length 54: (tos 0x0, ttl 64, id _, offset 0, flags [DF], proto TCP (6), length 40) RAW.7005 > GUEST.eph: Flags [F.], cksum _ (correct), seq 1, ack 1, win 65535, length 0
+GUEST-MAC > RAW-MAC, ethertype IPv4 (0x0800), length 54: (tos 0x0, ttl 64, id _, offset 0, flags [DF], proto TCP (6), length 40) GUEST.eph > RAW.7005: Flags [F.], cksum _ (correct), seq 1, ack 2, win 65535, length 0
+RAW-MAC > GUEST-MAC, ethertype IPv4 (0x0800), length 54: (tos 0x0, ttl 64, id _, offset 0, flags [DF], proto TCP (6), length 40) RAW.7005 > GUEST.eph: Flags [.], cksum _ (correct), ack 2, win 65535, length 0

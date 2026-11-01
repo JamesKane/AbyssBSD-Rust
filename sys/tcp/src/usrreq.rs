@@ -13,11 +13,40 @@ use crate::tcb::{Tcpcb, tf};
 use crate::timer::Tt;
 use crate::{Ctx, Errno, Fate, Sock, State, get, on, so, tcps};
 
+/// `TTCP_CLIENT_SND_WND`: an implied connect's send window before the
+/// peer's arrives.
+const TTCP_CLIENT_SND_WND: u32 = 4096;
+
 impl Tcpcb {
     /// `tcp_connect` after `in_pcbconnect`, and `tcp_usr_connect`'s
     /// start: SYN_SENT with initial sequence number `iss` and timestamp
     /// offset `ts_offset`, the connection timer, and the SYN.
     pub fn connect<S: Sock>(&mut self, so: &mut S, cx: &mut Ctx, iss: u32, ts_offset: u32) -> Fate {
+        self.start(cx, iss, ts_offset);
+        self.output(so, cx)
+    }
+
+    /// `tcp_usr_send`'s implied connect (`sendto` naming the peer of an
+    /// unconnected socket, the data already queued): as [`Self::connect`],
+    /// with `TTCP_CLIENT_SND_WND` as the send window until the peer's comes
+    /// and the MSS of a connection that has seen no SYN (`tcp_mss(tp, -1)`).
+    pub fn connect_implied<S: Sock>(
+        &mut self,
+        so: &mut S,
+        cx: &mut Ctx,
+        iss: u32,
+        ts_offset: u32,
+    ) -> Fate {
+        self.start(cx, iss, ts_offset);
+        self.snd_wnd = TTCP_CLIENT_SND_WND;
+        let path = (cx.path)(&self.inc);
+        let hc = cx.hc;
+        self.mss(so, cx, hc, &path, -1);
+        self.output(so, cx)
+    }
+
+    /// `tcp_connect`'s part after `in_pcbconnect`.
+    fn start(&mut self, cx: &mut Ctx, iss: u32, ts_offset: u32) {
         let sb_max = get(&cx.conf.sb_max) as u64;
         while self.request_r_scale < MAX_WINSHIFT
             && (u64::from(MAXWIN) << self.request_r_scale) < sb_max
@@ -33,7 +62,6 @@ impl Tcpcb {
         self.sendseqinit();
         let d = self.keepinit(cx.conf);
         self.timer_activate(Tt::Keep, d, cx.now);
-        self.output(so, cx)
     }
 
     /// `tcp_usr_listen`'s state change.

@@ -277,6 +277,36 @@ fn tcp_connect_refused_and_established() {
 }
 
 #[test]
+fn tcp_sendto_connects_an_unconnected_socket() {
+    let _g = setup();
+    let l = listener(20055);
+    let to = sockaddr_in(LO, 20055);
+    let c = tcp4();
+    assert_eq!(c.send_stream(b"x", false), Err(Errno::ENOTCONN));
+    assert_eq!(
+        l.send_stream_named(b"x", false, &to, &user()),
+        Err(Errno::EINVAL)
+    );
+    // `tcp_implied_connect`: the SYN, then the data after the handshake.
+    assert_eq!(c.send_stream_named(b"hello", false, &to, &user()), Ok(5));
+    let s = l.accept().unwrap();
+    assert_eq!(c.tcp_state(), Tstate::Established);
+    assert_eq!(s.recv_stream(100, false, false).unwrap().data, b"hello");
+    // Connected, the address named is not the peer's.
+    let elsewhere = sockaddr_in(LO, 20056);
+    assert_eq!(c.send_stream_named(b"!", false, &elsewhere, &user()), Ok(1));
+    assert_eq!(c.peername().unwrap(), Sockaddr::v4(LO, 20055));
+    // Nobody listening: the reset drops the connection, and the next send
+    // finds its send side shut (`SBS_CANTSENDMORE` before `so_error`).
+    let r = tcp4();
+    assert_eq!(r.send_stream_named(b"y", false, &elsewhere, &user()), Ok(1));
+    assert_eq!(r.send_stream(b"z", false), Err(Errno::EPIPE));
+    for x in [c, s, r, l] {
+        x.close();
+    }
+}
+
+#[test]
 fn tcp_data_half_close_and_time_wait() {
     let _g = setup();
     let (l, c, s) = connected(20050);

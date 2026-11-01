@@ -280,6 +280,7 @@ impl Tcpcb {
             // peer must answer (`tcp_respond` with `snd_una - 1`).
             cx.stats.inc(tcps::KEEPPROBE);
             self.respond(
+                so,
                 cx,
                 self.rcv_nxt,
                 self.snd_una.wrapping_sub(1),

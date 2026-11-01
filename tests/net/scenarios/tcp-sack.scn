@@ -1,0 +1,7 @@
+# The guest's second segment of 14480 bytes is lost: the scripted peer
+# acknowledges the first, then each later one with a duplicate ACK and a
+# SACK block; the guest resends the hole and the peer closes after it.
+filter: tcp port 7006
+ports: 7006
+raw: python3.12 /root/peers/sack.py
+guest: sysctl -q net.inet.tcp.hostcache.purgenow=1; jot -b x 7240 >/tmp/nd; nc -N 10.77.0.2 7006 </tmp/nd

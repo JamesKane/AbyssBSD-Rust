@@ -156,9 +156,6 @@ sys/netinet/fibs_test:subnet_route_with_multiple_fibs_on_same_subnet # needs tap
 sys/netinet/fibs_test:subnet_route_with_multiple_fibs_on_same_subnet_inet6 # needs tap(4), a P7 non-goal
 sys/netinet/fibs_test:udp_dontroute              # needs tap(4), a P7 non-goal
 sys/netinet/fibs_test:udp_dontroute6             # needs tap(4), a P7 non-goal
-sys/netinet/output:output_tcp_setup_success      # TCP on packets, P7.6
-sys/netinet/output:output_tcp_flowid_mpath_success # TCP on packets, P7.6
-sys/netinet/tcp_implied_connect:tcp_implied_connect # TCP on packets, P7.6
 sys/netinet6/output6:output6_tcp_setup_success   # TCP on packets, P7.6
 sys/netinet6/output6:output6_tcp_flowid_mpath_success # TCP on packets, P7.6
 sys/netinet6/exthdr:exthdr                       # TCP on packets, P7.6: its sniffer waits up to 90 s for each probe's RST, so it passes only when other traffic ends the waits in time
@@ -169,7 +166,6 @@ sys/netinet6/test_ip6_output.py:TestIP6OutputScope::test_output6_linklocal_scope
 sys/netinet6/test_ip6_output.py:TestIP6OutputScope::test_output6_linklocal_scope[ll_differentif2] # as test_output6_pktinfo[ipandif]
 sys/netinet/so_reuseport_lb_test:basic_ipv4      # SO_REUSEPORT_LB groups (NETWORKING.md §14), P7.8
 sys/netinet/so_reuseport_lb_test:basic_ipv6      # SO_REUSEPORT_LB groups (NETWORKING.md §14), P7.8
-sys/netinet/so_reuseport_lb_test:concurrent_add  # SO_REUSEPORT_LB groups (NETWORKING.md §14), P7.8
 sys/netinet/so_reuseport_lb_test:connect_bound   # SO_REUSEPORT_LB groups (NETWORKING.md §14), P7.8
 sys/netinet/so_reuseport_lb_test:connect_not_bound # SO_REUSEPORT_LB groups (NETWORKING.md §14), P7.8
 sys/netinet/udp_bindings:gethostname_jailed      # a jail with ip4.addr: AF_INET jails, P7.8

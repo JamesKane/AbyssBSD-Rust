@@ -321,12 +321,6 @@ pub(super) fn sendit(
         Some(c) => check_control(so, c)?,
         None => inet::SendCtl::default(),
     };
-    // A stream's destination is its peer, whatever is named
-    // (`tcp_usr_send` with an address on a connected socket).
-    let to = match (so.proto, to) {
-        (Proto::Udp | Proto::Raw(_), t) => t,
-        (Proto::Tcp, _) => None,
-    };
     let ktr = crate::ktrace::genio_start(uio);
     let r = crate::fs::inet::send(s, so, uio, to.as_deref(), ctl, flags, nonblock(f));
     crate::ktrace::genio(s, sock_fd, true, ktr, &r);

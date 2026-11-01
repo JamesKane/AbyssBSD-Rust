@@ -1,0 +1,10 @@
+# A peer with a 4 KB receive buffer that reads nothing for 13 s: the guest
+# fills the window, persist (5 s, the minimum) sends what the last 256 bytes
+# of window take, then a one-byte probe into the closed window, and 8000
+# bytes finish once the peer reads (the windows it then advertises race
+# with its reads).
+filter: tcp port 7003
+ports: 7003
+peer: exec python3.12 -c 'import socket,time;s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_RCVBUF,4096);s.bind(("10.77.0.1",7003));s.listen(1);c=s.accept()[0];time.sleep(13);exec("while c.recv(65536): pass");c.close()'
+guest: jot -b abcdefg 1000 | nc -N 10.77.0.1 7003
+vary: peer-window

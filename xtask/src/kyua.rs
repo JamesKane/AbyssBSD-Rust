@@ -489,7 +489,7 @@ fn run(
 /// The directory of [`PACKAGES`] and their dependencies as
 /// `<name>-<version>.pkg`, fetched from the server's repository the first
 /// time and kept.
-fn packages() -> Result<PathBuf> {
+pub(crate) fn packages() -> Result<PathBuf> {
     let dir = home().join("abyss/kyua/packages");
     let mark = dir.join(".fetched");
     if fs::read_to_string(&mark).is_ok_and(|m| m == PACKAGES.join(" ")) {
@@ -543,7 +543,7 @@ fn package_names(dir: &Path) -> Result<String> {
 
 /// Installs [`PACKAGES`], with their dependencies, from `dir` into the
 /// root mounted at `root`.
-fn install_packages(root: &Path, dir: &Path) -> Result<()> {
+pub(crate) fn install_packages(root: &Path, dir: &Path) -> Result<()> {
     let files: Vec<PathBuf> = fs::read_dir(dir)?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .collect();

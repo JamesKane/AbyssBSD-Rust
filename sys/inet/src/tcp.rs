@@ -943,6 +943,23 @@ impl Socket {
             }
             i.error = None;
         }
+        self.tcp_start(raw, cred, false)?;
+        if nonblock {
+            return Err(Errno::EINPROGRESS);
+        }
+        // An answer that came at once (a reset over loopback) is the
+        // connect's; otherwise the caller waits with `connect_done`.
+        match self.connect_done() {
+            Err(Errno::EAGAIN) => Ok(()),
+            r => r,
+        }
+    }
+
+    /// `tcp_connect` and `tcp6_connect`, after `tcp_usr_connect`'s (or
+    /// `tcp_usr_send`'s) checks of the peer's address `raw`: the
+    /// connection bound to it, SYN_SENT, and the SYN. `implied`:
+    /// `tcp_usr_send`'s, the data already queued.
+    fn tcp_start(self: &Arc<Self>, raw: &[u8], cred: &Cred, implied: bool) -> Result<(), Errno> {
         let sa = match self.family {
             Family::Inet => addr::parse_in(raw, false)?,
             Family::Inet6 => addr::parse_in6(raw)?,
@@ -992,16 +1009,15 @@ impl Socket {
         let secrets = st.tcp.secrets();
         let iss = secrets.new_isn(&inc, ms(crate::now()));
         let off = secrets.new_ts_offset(&inc, ::tcp::on(&st.tcp.conf.ts_offset_per_conn));
-        self.run_tcp(Some(path), |tp, so, cx| ((), tp.connect(so, cx, iss, off)));
-        if nonblock {
-            return Err(Errno::EINPROGRESS);
-        }
-        // An answer that came at once (a reset over loopback) is the
-        // connect's; otherwise the caller waits with `connect_done`.
-        match self.connect_done() {
-            Err(Errno::EAGAIN) => Ok(()),
-            r => r,
-        }
+        self.run_tcp(Some(path), |tp, so, cx| {
+            let f = if implied {
+                tp.connect_implied(so, cx, iss, off)
+            } else {
+                tp.connect(so, cx, iss, off)
+            };
+            ((), f)
+        });
+        Ok(())
     }
 
     /// Where a connect stands, for a caller waiting on it.
@@ -1163,7 +1179,26 @@ impl Socket {
     /// `EPIPE` once it cannot send; its pending error; `ENOTCONN`
     /// unconnected; `EWOULDBLOCK` with less room than the low water mark.
     pub fn send_stream(self: &Arc<Self>, data: &[u8], oob: bool) -> Result<usize, Errno> {
-        self.send_stream_to(data, oob, None)
+        self.send_stream_to(data, oob, None, None)
+    }
+
+    /// [`Socket::send_stream`] naming the peer (`sendto`): an unconnected
+    /// socket connects to `to` first, its data going after the handshake
+    /// (TCP's `PR_IMPLOPCL`); a connecting or connected one sends as if
+    /// unnamed.
+    ///
+    /// # Errors
+    ///
+    /// As [`Socket::send_stream`], but not `ENOTCONN`; `EINVAL` listening;
+    /// as `connect(2)` for `to` (the data is then not sent).
+    pub fn send_stream_named(
+        self: &Arc<Self>,
+        data: &[u8],
+        oob: bool,
+        to: &[u8],
+        cred: &Cred,
+    ) -> Result<usize, Errno> {
+        self.send_stream_to(data, oob, None, Some((to, cred)))
     }
 
     /// [`Socket::send_stream`]; with `spliced`, a splice's send, which
@@ -1175,8 +1210,9 @@ impl Socket {
         data: &[u8],
         oob: bool,
         spliced: Option<&core::sync::atomic::AtomicU64>,
+        to: Option<(&[u8], &Cred)>,
     ) -> Result<usize, Errno> {
-        let n = {
+        let (n, implied) = {
             let mut i = self.inner.lock();
             if i.snd.cant {
                 return Err(Errno::EPIPE);
@@ -1184,10 +1220,21 @@ impl Socket {
             if let Some(e) = i.error.take() {
                 return Err(e);
             }
-            if i.state & ss::ISCONNECTED == 0 {
+            if i.state & ss::ISCONNECTED == 0 && to.is_none() {
                 return Err(Errno::ENOTCONN);
             }
-            if data.is_empty() {
+            // `tcp_usr_send`: a peer named before SYN_SENT is connected to.
+            let implied = match (to, i.tcp.as_ref()) {
+                (Some(_), Some(t)) if t.dropped => return Err(Errno::ECONNRESET),
+                (Some((raw, cred)), Some(t)) if t.tp.state < ::tcp::State::SynSent => {
+                    if t.listen.is_some() {
+                        return Err(Errno::EINVAL);
+                    }
+                    Some((raw, cred))
+                }
+                _ => None,
+            };
+            if data.is_empty() && implied.is_none() {
                 return Ok(0);
             }
             let room = i.snd.space() as usize;
@@ -1200,12 +1247,26 @@ impl Socket {
                 return Err(Errno::EAGAIN);
             }
             let n = data.len().min(room);
-            let c = Chain::from_slice(&data[..n]).map_err(|_| Errno::ENOBUFS)?;
-            i.sndq.append(c);
-            i.snd.cc += u32::try_from(n).unwrap_or(u32::MAX);
-            i.snd.mbcnt = i.sndq.cost();
-            n
+            if n > 0 {
+                let c = Chain::from_slice(&data[..n]).map_err(|_| Errno::ENOBUFS)?;
+                i.sndq.append(c);
+                i.snd.cc += u32::try_from(n).unwrap_or(u32::MAX);
+                i.snd.mbcnt = i.sndq.cost();
+            }
+            (n, implied)
         };
+        if let Some((raw, cred)) = implied {
+            if let Err(e) = self.tcp_start(raw, cred, true) {
+                // `sbflush`.
+                let mut i = self.inner.lock();
+                i.sndq = Chain::default();
+                i.snd.cc = 0;
+                i.snd.mbcnt = 0;
+                return Err(e);
+            }
+            // The SYN went; the data waits for the handshake.
+            return Ok(n);
+        }
         if let Some(c) = spliced {
             // Relaxed: counted before the receiver can see it.
             c.fetch_add(n as u64, Ordering::Relaxed);

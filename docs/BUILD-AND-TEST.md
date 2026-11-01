@@ -99,7 +99,7 @@ cargo xtask --remote fetch-base [--arch <a|all>]   # base.txz, SHA-256 pinned: /
 cargo xtask --remote freebsd-shell                 # the boot-to-shell script against FreeBSD
 cargo xtask --remote freebsd-multiuser             # the multi-user login script against FreeBSD
 cargo xtask --remote freebsd-net [--vmm qemu|bhyve]  # the network script against FreeBSD
-cargo xtask --remote netdiff [--freebsd] [--scenario NAME]  # packet captures vs FreeBSD's
+cargo xtask --remote netdiff [--freebsd] [--scenario NAME,...]  # packet captures vs FreeBSD's
 cargo xtask --remote freebsd-usertests             # tests/user on FreeBSD 15.1 itself, either arch
 cargo xtask --remote kyua-baseline [--resume] [--only DIR,...]  # FreeBSD's kyua results, per test case, in bhyve
 cargo xtask --remote kyua [--resume] [--only DIR,...]  # AbyssBSD's, compared with them
@@ -282,7 +282,7 @@ The network cases (docs/NETWORKING.md §16.4) follow, also on FreeBSD hosts only
 Each boots the installed root with `bsdinstall`'s lines for a DHCP and SLAAC `vtnet0` and `sshd`,
 and runs `xtask/src/net.rs`'s script: the DHCP and SLAAC addresses and default routes, `ping` and
 `ping -6` to the router, DNS, `fetch` over HTTPS, `pkg install`, then `ssh` and an `scp` round trip
-from the host with a key made for the run. Until P7.6 they are expected to fail (`XFAIL`).
+from the host with a key made for the run.
 `cargo xtask --remote freebsd-net` runs the same script against FreeBSD 15.1.
 
 ### Differential captures
@@ -293,15 +293,28 @@ bhyve with a tap on the test bridge, waits for its DHCP and SLAAC addresses, and
 scenario in `tests/net/scenarios/NAME.scn` while `tcpdump` captures the tap. A scenario is a
 `#` description and `key: value` lines: `filter:` (the capture's filter), `guest:` (the command
 on the guest's console), `peer:` (an optional listener the host starts first, such as `nc -l`),
-and `ports:` (the fixed ports, kept; the others are ephemeral). The capture is decoded with
+`raw:` (a script from `tests/net/peers/` the scripted peer runs first; see below),
+`ports:` (the fixed ports, kept; the others are ephemeral), and `vary:` (what differs between
+FreeBSD's own runs: `peer-window`, the window a peer advertises while its application reads, is
+blanked on the peer's segments). The capture is decoded with
 `tcpdump -n -e -t -v`, one packet per line, and normalized: addresses and MACs become roles
 (`GUEST`, `GUEST6`, `GUEST-LL`, `PEER`, ...), ephemeral ports `.eph`, and IP ids, checksums,
 flow labels, ICMP echo ids, TCP timestamps, and the absolute sequence and acknowledgement numbers
 of SYNs and resets `_`. Each trace goes to `~/abyss/net/<os>/NAME.txt` on the server and is
 compared line by line with FreeBSD's, kept in `tests/net/freebsd/`; the first differing line is
 reported. `--freebsd` runs FreeBSD's release image instead (to record or check the baseline:
-copy the traces into `tests/net/freebsd/`), and `--scenario NAME` runs one. Until AbyssBSD has
-`vtnet0` (P7.3) its run fails at the addresses.
+run it twice, compare, and copy the traces into `tests/net/freebsd/`), and `--scenario NAME,...` runs
+those. The guest's commands share one boot, so a scenario that changes a sysctl or the host cache
+puts it back or starts by clearing it.
+
+What the host's own TCP will not do (lose a segment, report a smaller path MTU, close at the same
+moment) a scripted peer does: when a scenario has `raw:`, a second bhyve machine boots on the
+bridge, FreeBSD 15.1's networked image with kyua's packages (Python and scapy, kept as
+`~/abyss/net/peer.img`), at 10.77.0.2 (`RAW`, outside the bridge's DHCP range) with
+`net.inet.tcp.blackhole=2` so its kernel keeps out of the way. Its scripts (`tests/net/peers/`,
+on `peer.py`) answer the guest segment by segment and wait for the guest to go quiet before each
+answer, so the capture's order does not depend on either side's speed. A script that gives up
+says why on `peer-console.log` and fails its scenario.
 
 `cargo xtask --remote kyua-baseline` records FreeBSD 15.1's own kyua results in bhyve, where
 AbyssBSD's are compared (8 CPUs, `parallelism=8`). Both systems run it in FreeBSD's own CI's test environment

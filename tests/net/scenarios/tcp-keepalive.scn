@@ -1,0 +1,7 @@
+# An idle connection with keepalive after 3 s (net.inet.tcp.keepidle;
+# always_keepalive is on by default): one probe and its answer, then the
+# guest closes at 4.5 s.
+filter: tcp port 7004
+ports: 7004
+peer: exec nc -l 10.77.0.1 7004 > /dev/null
+guest: sysctl -q net.inet.tcp.keepidle=3000; sleep 4.5 | nc -N 10.77.0.1 7004; sysctl -q net.inet.tcp.keepidle=7200000

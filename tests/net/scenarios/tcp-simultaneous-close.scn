@@ -1,0 +1,7 @@
+# Both ends close at once: the scripted peer's FIN crosses the guest's
+# (it does not acknowledge the guest's), the guest goes through CLOSING,
+# and the peer's last ACK puts it in TIME_WAIT.
+filter: tcp port 7005
+ports: 7005
+raw: python3.12 /root/peers/close.py
+guest: sysctl -q net.inet.tcp.hostcache.purgenow=1; nc -N 10.77.0.2 7005 </dev/null

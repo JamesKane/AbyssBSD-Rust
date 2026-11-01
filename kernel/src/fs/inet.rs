@@ -142,7 +142,7 @@ pub(crate) fn send(
                 }
             }
         }
-        Proto::Tcp => send_stream(s, so, uio, flags & MSG_OOB != 0, nonblock),
+        Proto::Tcp => send_stream(s, so, uio, to, flags & MSG_OOB != 0, nonblock),
     };
     if r == Err(Errno::EPIPE)
         && flags & MSG_NOSIGNAL == 0
@@ -157,14 +157,22 @@ pub(crate) fn send(
     r
 }
 
+/// A stream's send; `to`, a peer named, is connected to if the socket is
+/// not yet (an implied connect), and otherwise ignored.
 fn send_stream(
     s: &Sleepable,
     so: &Arc<Socket>,
     uio: &mut dyn Uio,
+    to: Option<&[u8]>,
     oob: bool,
     nonblock: bool,
 ) -> Result<usize, Errno> {
     let (timeo, _) = so.timeouts();
+    let cred = to.map(|_| cred());
+    let send = |data: &[u8], last: bool| match (to, &cred) {
+        (Some(to), Some(cred)) => so.send_stream_named(data, last, to, cred),
+        _ => so.send_stream(data, last),
+    };
     let mut sent = 0;
     let mut buf: Vec<u8> = Vec::new();
     let mut at = 0;
@@ -184,10 +192,10 @@ fn send_stream(
         }
         let last = oob && uio.resid() == 0;
         let r = if nonblock {
-            so.send_stream(&buf[at..], last)
+            send(&buf[at..], last)
         } else {
             let _w = sched::wait_message("sbwait");
-            wait_until(s, &so.wr, timeo, || so.send_stream(&buf[at..], last))
+            wait_until(s, &so.wr, timeo, || send(&buf[at..], last))
         };
         match r {
             Ok(n) => {
