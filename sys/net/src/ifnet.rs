@@ -372,6 +372,8 @@ pub struct Net {
     pub generation: u64,
     /// The VNET these are in, for interfaces' taps.
     pub owner: alloc::sync::Weak<crate::Vnet>,
+    /// It is a VNET's, so its interface indexes are the system's.
+    pub(crate) in_vnet: bool,
     /// The link-layer table's entries ([`crate::lltable`]).
     pub lle: Vec<crate::lltable::Lle>,
     /// Frames to send once the lock is let go: the interface, the family
@@ -442,6 +444,10 @@ impl Default for Net {
     }
 }
 
+/// The interface indexes in use (`ifindex_table`).
+static INDEXES: sync::SpinLock<alloc::collections::BTreeSet<u16>> =
+    sync::SpinLock::new(alloc::collections::BTreeSet::new());
+
 impl Net {
     /// No interfaces or routes.
     #[must_use]
@@ -450,6 +456,7 @@ impl Net {
             ifaces: Vec::new(),
             routes: Vec::new(),
             owner: alloc::sync::Weak::new(),
+            in_vnet: false,
             lle: Vec::new(),
             txq: Vec::new(),
             isrq: Vec::new(),
@@ -463,12 +470,26 @@ impl Net {
         }
     }
 
-    /// The lowest index no interface has (`ifindex_alloc`).
-    #[must_use]
+    /// The lowest index no interface has (`ifindex_alloc`), taken: an
+    /// index is the system's, not a VNET's, and stays with its interface
+    /// when it moves. A [`Net`] outside any VNET counts its own.
     pub fn next_index(&self) -> u16 {
-        (1..=u16::MAX)
-            .find(|i| self.by_index(*i).is_none())
-            .unwrap_or(u16::MAX)
+        if !self.in_vnet {
+            return (1..=u16::MAX)
+                .find(|i| self.by_index(*i).is_none())
+                .unwrap_or(u16::MAX);
+        }
+        let mut used = INDEXES.lock();
+        let i = (1..=u16::MAX)
+            .find(|i| !used.contains(i))
+            .unwrap_or(u16::MAX);
+        used.insert(i);
+        i
+    }
+
+    /// Lets interface index `i` be taken again (`ifindex_free`).
+    pub fn free_index(i: u16) {
+        INDEXES.lock().remove(&i);
     }
 
     /// Adds an interface (`if_attach`).
@@ -882,6 +903,13 @@ impl Net {
         }
         a.updated = now;
         a.created = old.map_or(now, |i| ifp.addrs[i].created);
+        // `in_aifaddr_ioctl`: with none given, the subnet's.
+        if a.family == Family::Inet && ifp.flags & iff::BROADCAST != 0 && a.broadcast.is_none() {
+            let v = u32::from_be_bytes(crate::addr::v4_of(&a.addr));
+            let mask = u32::MAX.checked_shl(32 - u32::from(a.plen)).unwrap_or(0);
+            let b = if a.plen == 31 { u32::MAX } else { v | !mask };
+            a.broadcast = Some(crate::addr::from_v4(b.to_be_bytes()));
+        }
         if a.family == Family::Inet6 {
             // `in6_update_ifa_internal`: a new address, or any on a
             // disabled interface, is tentative until DAD passes.
@@ -1406,6 +1434,17 @@ pub fn eui64_linklocal(m: &[u8; 6]) -> Option<In6> {
 #[must_use]
 pub fn route_scoped(r: &Route) -> bool {
     r.family == Family::Inet6 && is_linklocal6(&r.dst) && r.plen > 16
+}
+
+/// A route's place in a radix walk: its destination, a scoped one with the
+/// zone in its second word, as FreeBSD's key has it.
+#[must_use]
+pub fn route_key(r: &Route) -> In6 {
+    let mut k = r.dst;
+    if route_scoped(r) {
+        k[2..4].copy_from_slice(&route_zone(r).to_be_bytes());
+    }
+    k
 }
 
 /// The interface a scoped route's prefix belongs to: an address's routes

@@ -16,6 +16,7 @@
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 use abi::errno::Errno;
 use abi::fcntl::{FREAD, O_NONBLOCK};
@@ -61,6 +62,7 @@ pub(super) fn sendfile(
     sbytes: u64,
     _flags: u64,
 ) -> SysResult {
+    SF_SYSCALLS.fetch_add(1, Relaxed);
     // A start past the end sends only the header and trailer; a negative
     // one is refused.
     if offset.cast_signed() < 0 {
@@ -175,6 +177,19 @@ fn xfsize(i: u64, n: u64, off: u64, len: u64) -> u64 {
         return (off + len) % PAGE;
     }
     PAGE
+}
+
+/// `sf_syscalls` and `sf_pages_valid` (`SFSTAT_INC`).
+static SF_SYSCALLS: AtomicU64 = AtomicU64::new(0);
+static SF_PAGES_VALID: AtomicU64 = AtomicU64::new(0);
+
+/// `kern.ipc.sfstat`.
+pub(crate) fn stats() -> abi::memstat::Sfstat {
+    abi::memstat::Sfstat {
+        sf_syscalls: SF_SYSCALLS.load(Relaxed),
+        sf_pages_valid: SF_PAGES_VALID.load(Relaxed),
+        ..abi::memstat::Sfstat::default()
+    }
 }
 
 /// The pages of a record (`num_pages(max_frame_len)`).
@@ -311,6 +326,7 @@ fn send(
                             continue;
                         }
                     };
+                    SF_PAGES_VALID.fetch_add(1, Relaxed);
                     chain.push_back(m);
                     if tls && (i + 1) % TLS_PAGES == 0 {
                         so.send_chain(core::mem::take(&mut chain))?;

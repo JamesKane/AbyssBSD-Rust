@@ -38,6 +38,7 @@ pub mod ktrace;
 pub mod layout;
 pub mod linker;
 pub mod md;
+pub mod memstat;
 pub mod mman;
 pub mod mount;
 pub mod mouse;

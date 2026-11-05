@@ -51,6 +51,7 @@ commands:
                                                          --quick leaves the shell cases' test programs out
   perf        [--suite p2|p3|p4|p5|vt|diag] [--runs N] [--prepare] [--freebsd-only]
                                                          compare with FreeBSD in bhyve (server only)
+  net-soak    [--duration SECONDS]                       iperf3 for an hour with leak checks (server only)
   ubench      [--arch <a|all>] [--runs N] [--bhyve]      the P4 suite on AbyssBSD alone (QEMU, or bhyve on the server)
   freebsd-shell                                          run the boot-to-shell script against FreeBSD (server only)
   freebsd-multiuser [--arch <a|all>] [--vmm qemu|bhyve] run the multi-user login script against FreeBSD (server only)
@@ -108,6 +109,7 @@ fn run() -> Result<()> {
         "qmp" => qmp::cmd(args),
         "test" => test::cmd(args),
         "perf" => perf::cmd(args),
+        "net-soak" => perf::cmd_soak(args),
         "ubench" => perf::cmd_ubench(args),
         "freebsd-record" => perf::cmd_record(args),
         "fs-image" => fs::cmd_image(args),

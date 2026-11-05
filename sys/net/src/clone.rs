@@ -423,6 +423,7 @@ pub fn destroy(vnet: &Arc<Vnet>, name: &[u8]) -> Result<Vec<(Arc<Vnet>, Ifnet)>,
             && let Some(i) = pv.net.lock().detach(pi)
         {
             untap(&i);
+            ifnet::Net::free_index(pi);
             gone.push((Arc::clone(&pv), i));
         }
         if let Some(origin) = e.origin.upgrade() {
@@ -433,6 +434,7 @@ pub fn destroy(vnet: &Arc<Vnet>, name: &[u8]) -> Result<Vec<(Arc<Vnet>, Ifnet)>,
     }
     if let Some(i) = vnet.net.lock().detach(index) {
         untap(&i);
+        ifnet::Net::free_index(index);
         gone.insert(0, (Arc::clone(vnet), i));
     }
     Ok(gone)
@@ -482,7 +484,6 @@ pub fn vmove(from: &Arc<Vnet>, name: &[u8], to: &Arc<Vnet>) -> Result<(), Errno>
     i.flags &= !iff::UP;
     i.addrs.clear();
     let mut n = to.net.lock();
-    i.index = n.next_index();
     if let Some(l) = &i.link.0 {
         l.moved(to, i.index);
     }
@@ -515,6 +516,7 @@ pub fn shutdown(vnet: &Arc<Vnet>) {
                 && let Some(i) = vnet.net.lock().detach(index)
             {
                 untap(&i);
+                ifnet::Net::free_index(index);
             }
         }
     }

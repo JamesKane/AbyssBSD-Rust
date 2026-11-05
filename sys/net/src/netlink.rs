@@ -1042,7 +1042,7 @@ fn groups<'a>(routes: impl Iterator<Item = &'a Route>) -> Vec<Vec<&'a Route>> {
         }
     };
     let mut all: Vec<&Route> = routes.collect();
-    all.sort_by_key(|r| (r.family, r.dst, r.plen, zone(r)));
+    all.sort_by_key(|r| (r.family, crate::ifnet::route_key(r), r.plen));
     let mut out: Vec<Vec<&Route>> = Vec::new();
     for r in all {
         match out.last_mut() {

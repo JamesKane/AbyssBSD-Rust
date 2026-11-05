@@ -830,7 +830,8 @@ pub(crate) fn linklocal_prefix(n: &mut Net, st: &State, ifindex: u16, addr: &In6
         lastupdate: net::uptime(),
         stateflags: 0,
         onlink: false,
-        addrcnt: 0,
+        // The address it was made for.
+        addrcnt: 1,
         advrtrs: Vec::new(),
     };
     prelist_add(n, st, p, None);

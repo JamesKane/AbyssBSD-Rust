@@ -1,0 +1,438 @@
+$ jexec n1 ifconfig -l
+lo0 epair0a
+(exit 0)
+$ jexec n1 ifconfig -a
+lo0: flags=1008049<UP,LOOPBACK,RUNNING,MULTICAST,LOWER_UP> metric 0 mtu 16384
+options=680003<RXCSUM,TXCSUM,LINKSTATE,RXCSUM_IPV6,TXCSUM_IPV6>
+inet 127.0.0.1 netmask <addr>
+inet6 ::1 prefixlen 128
+inet6 fe80::<iid>%lo0 prefixlen 64 scopeid 0x4
+groups: lo
+nd6 options=21<PERFORMNUD,AUTO_LINKLOCAL>
+epair0a: flags=1008843<UP,BROADCAST,RUNNING,SIMPLEX,MULTICAST,LOWER_UP> metric 0 mtu 1500
+options=60001b<RXCSUM,TXCSUM,VLAN_MTU,VLAN_HWTAGGING,RXCSUM_IPV6,TXCSUM_IPV6>
+ether <mac>
+inet 10.99.0.1 netmask <addr> broadcast 10.99.0.255
+inet6 fd99::1 prefixlen 64
+inet6 fe80::<iid>%epair0a prefixlen 64 scopeid 0x2
+groups: epair
+media: Ethernet 10Gbase-T (10Gbase-T <full-duplex>)
+status: active
+nd6 options=21<PERFORMNUD,AUTO_LINKLOCAL>
+(exit 0)
+$ jexec n1 ifconfig epair0a inet
+epair0a: flags=1008843<UP,BROADCAST,RUNNING,SIMPLEX,MULTICAST,LOWER_UP> metric 0 mtu 1500
+options=60001b<RXCSUM,TXCSUM,VLAN_MTU,VLAN_HWTAGGING,RXCSUM_IPV6,TXCSUM_IPV6>
+inet 10.99.0.1 netmask <addr> broadcast 10.99.0.255
+(exit 0)
+$ jexec n1 netstat -rn
+Routing tables
+
+Internet:
+Destination Gateway Flags Netif Expire
+10.98.0.0/24 10.99.0.2 UGS epair0a
+10.99.0.0/24 link#2 U epair0a
+10.99.0.1 link#4 UHS lo0
+127.0.0.1 link#4 UH lo0
+
+Internet6:
+Destination Gateway Flags Netif Expire
+::1 link#4 UHS lo0
+fd98::/64 fd99::2 UGS epair0a
+fd99::/64 link#2 U epair0a
+fd99::1 link#4 UHS lo0
+fe80::%epair0a/64 link#2 U epair0a
+fe80::<iid>%lo0 link#4 UHS lo0
+fe80::%lo0/64 link#4 U lo0
+fe80::<iid>%lo0 link#4 UHS lo0
+(exit 0)
+$ jexec n1 netstat -rn -f inet
+Routing tables
+
+Internet:
+Destination Gateway Flags Netif Expire
+10.98.0.0/24 10.99.0.2 UGS epair0a
+10.99.0.0/24 link#2 U epair0a
+10.99.0.1 link#4 UHS lo0
+127.0.0.1 link#4 UH lo0
+(exit 0)
+$ jexec n1 netstat -rn -f inet6
+Routing tables
+
+Internet6:
+Destination Gateway Flags Netif Expire
+::1 link#4 UHS lo0
+fd98::/64 fd99::2 UGS epair0a
+fd99::/64 link#2 U epair0a
+fd99::1 link#4 UHS lo0
+fe80::%epair0a/64 link#2 U epair0a
+fe80::<iid>%lo0 link#4 UHS lo0
+fe80::%lo0/64 link#4 U lo0
+fe80::<iid>%lo0 link#4 UHS lo0
+(exit 0)
+$ jexec n1 route -n get 10.98.0.5
+route to: 10.98.0.5
+destination: 10.98.0.0
+mask: 255.255.255.0
+gateway: 10.99.0.2
+fib: 0
+interface: epair0a
+flags: <UP,GATEWAY,DONE,STATIC>
+recvpipe sendpipe ssthresh rtt,msec mtu weight expire
+0 0 0 0 1500 1 0
+(exit 0)
+$ jexec n1 route -n get -inet6 fd98::5
+route to: fd98::5
+destination: fd98::
+mask: ffff:ffff:ffff:ffff::
+gateway: fd99::2
+fib: 0
+interface: epair0a
+flags: <UP,GATEWAY,DONE,STATIC>
+recvpipe sendpipe ssthresh rtt,msec mtu weight expire
+0 0 0 0 1500 1 0
+(exit 0)
+$ jexec n1 arp -an
+(exit 0)
+? (10.99.0.1) at <mac> on epair0a permanent [ethernet]
+? (10.99.0.2) at <mac> on epair0a expires in <n> seconds [ethernet]
+$ jexec n1 arp -s 10.99.0.9 <time>:<time>
+(exit 0)
+$ jexec n1 arp -an
+(exit 0)
+? (10.99.0.1) at <mac> on epair0a permanent [ethernet]
+? (10.99.0.2) at <mac> on epair0a expires in <n> seconds [ethernet]
+? (10.99.0.9) at <mac> on epair0a permanent [ethernet]
+$ jexec n1 arp -d 10.99.0.9
+10.99.0.9 (10.99.0.9) deleted
+(exit 0)
+$ jexec n1 ndp -an
+(exit 0)
+Neighbor Linklayer Address Netif Expire S Flags
+fd99::1 <mac> epair0a permanent R
+fd99::2 <mac> epair0a <t> R
+fe80::<iid>%epair0a <mac> epair0a permanent R
+$ jexec n1 ndp -p
+fe80::%epair0a/64 if=epair0a
+flags=LAO vltime=infinity, pltime=infinity, expire=Never, ref=1
+No advertising router
+fd99::/64 if=epair0a
+flags=LO vltime=infinity, pltime=infinity, expire=Never, ref=1
+No advertising router
+fe80::%lo0/64 if=lo0
+flags=LAO vltime=infinity, pltime=infinity, expire=Never, ref=1
+No advertising router
+(exit 0)
+$ jexec n1 ndp -r
+(exit 0)
+$ jexec n<n> netstat -in
+Name Mtu Network Address Ipkts Ierrs Idrop Opkts Oerrs Coll
+lo<n> <n> <Link#<n>> lo<n> <n> <n> <n> <n> <n> <n>
+lo<n> - ::<n>/<n> ::<n> <n> - - <n> - -
+lo<n> - fe<n>::%lo<n>/<n> fe<n>::<iid>%lo<n> <n> - - <n> - -
+lo<n> - <n>.<n>.<n>.<n>/<n> <n>.<n>.<n>.<n> <n> - - <n> - -
+epair<n>a <n> <Link#<n>> <mac> <n> <n> <n> <n> <n> <n>
+epair<n>a - <n>.<n>.<n>.<n>/<n> <n>.<n>.<n>.<n> <n> - - <n> - -
+epair<n>a - fd<n>::/<n> fd<n>::<n> <n> - - <n> - -
+epair<n>a - fe<n>::%epair<n>a/<n> fe<n>::<iid>%epair<n>a <n> - - <n> - -
+(exit <n>)
+$ jexec n1 netstat -s -p icmp
+icmp:
+0 calls to icmp_error
+0 errors not generated in response to an icmp message
+0 messages with bad code fields
+0 messages less than the minimum length
+0 messages with bad checksum
+0 messages with bad length
+0 multicast echo requests ignored
+0 multicast timestamp requests ignored
+Input histogram:
+echo reply: 1
+0 message responses generated
+0 invalid return addresses
+0 no return routes
+ICMP address mask responses are disabled
+(exit 0)
+$ jexec n1 netstat -s -p udp
+udp:
+0 datagrams received
+0 with incomplete header
+0 with bad data length field
+0 with bad checksum
+0 with no checksum
+0 dropped due to no socket
+0 broadcast/multicast datagrams undelivered
+0 dropped due to full socket buffers
+0 not for hashed pcb
+0 delivered
+0 datagrams output
+0 times multicast source filter matched
+(exit 0)
+$ jexec n1 netstat -s -p arp
+arp:
+2 ARP requests sent
+0 ARP requests failed to sent
+0 ARP replies sent
+1 ARP request received
+1 ARP reply received
+2 ARP packets received
+0 total packets dropped due to no ARP entry
+0 ARP entrys timed out
+0 Duplicate IPs seen
+(exit 0)
+$ jexec n<n> netstat -s -p tcp
+tcp:
+<n> packets sent
+<n> data packets (<n> bytes)
+<n> data packets (<n> bytes) retransmitted
+<n> data packets unnecessarily retransmitted
+<n> resends initiated by MTU discovery
+<n> ack-only packets (<n> delayed)
+<n> URG only packets
+<n> window probe packets
+<n> window update packets
+<n> control packets
+<n> packets received
+<n> acks (for <n> bytes)
+<n> duplicate acks
+<n> UDP tunneled pkts
+<n> UDP tunneled pkt cnt with errors
+<n> acks for data not yet sent
+<n> acks for data never been sent (ghost acks)
+<n> acks for data being too old
+<n> packets (<n> bytes) received in-sequence
+<n> completely duplicate packets (<n> bytes)
+<n> old duplicate packets
+<n> packets with some dup. data (<n> bytes duped)
+<n> out-of-order packets (<n> bytes)
+<n> packets (<n> bytes) of data after window
+<n> window probes
+<n> window update packets
+<n> packets received with dsack
+<n> dsack bytes received (no TLP involved)
+<n> dsack bytes received (TLP responsible)
+<n> packets received after close
+<n> discarded for bad checksums
+<n> discarded for bad header offset fields
+<n> discarded because packet too short
+<n> discarded due to full reassembly queue
+<n> connection requests
+<n> connection accepts
+<n> bad connection attempts
+<n> listen queue overflows
+<n> ignored RSTs in the windows
+<n> connections established (including accepts)
+<n> times used RTT from hostcache
+<n> times used RTT variance from hostcache
+<n> times used slow-start threshold from hostcache
+<n> connections closed (including <n> drops)
+<n> connections updated cached RTT on close
+<n> connections updated cached RTT variance on close
+<n> connections updated cached ssthresh on close
+<n> embryonic connections dropped
+<n> segments updated rtt (of <n> attempts)
+<n> retransmit timeouts
+<n> connections dropped by rexmit timeout
+<n> persist timeouts
+<n> connections dropped by persist timeout
+<n> Connections (fin_wait_<n>) dropped because of timeout
+<n> keepalive timeouts
+<n> keepalive probes sent
+<n> connections dropped by keepalive
+<n> connections dropped due to exceeding progress time
+<n> correct ACK header predictions
+<n> correct data packet header predictions
+<n> syncache entries added
+<n> retransmitted
+<n> dupsyn
+<n> dropped
+<n> completed
+<n> bucket overflow
+<n> cache overflow
+<n> reset
+<n> stale
+<n> aborted
+<n> badack
+<n> unreach
+<n> zone failures
+<n> cookies sent
+<n> cookies received
+<n> spurious cookies rejected
+<n> failed cookies rejected
+<n> hostcache entries added
+<n> bucket overflow
+<n> SACK recovery episodes
+<n> segment rexmits in SACK recovery episodes
+<n> tso chunk rexmits in SACK recovery episodes
+<n> byte rexmits in SACK recovery episodes
+<n> SACK options (SACK blocks) received
+<n> SACK options (SACK blocks) sent
+<n> SACK retransmissions lost
+<n> SACK scoreboard overflow
+<n> packets received with ECN CE bit set
+<n> packets received with ECN ECT(<n>) bit set
+<n> packets received with ECN ECT(<n>) bit set
+<n> packets sent with ECN ECT(<n>) bit set
+<n> packets sent with ECN ECT(<n>) bit set
+<n> successful ECN handshakes
+<n> times ECN reduced the congestion window
+<n> ACE SYN packets with Non-ECT
+<n> ACE SYN packets with ECT<n>
+<n> ACE SYN packets with ECT<n>
+<n> ACE SYN packets with CE
+<n> packets with matching signature received
+<n> packets with bad signature received
+<n> times failed to make signature due to no SA
+<n> times unexpected signature received
+<n> times no signature provided by segment
+<n> Path MTU discovery black hole detection activations
+<n> Path MTU discovery black hole detection min MSS activations
+<n> Path MTU discovery black hole detection failures
+<n> times connection in TIME-WAIT responded with ACK
+<n> times connection in TIME-WAIT was actively recycled
+<n> times connection in TIME-WAIT responded with RST
+TCP connection count by state:
+<n> connections in CLOSED state
+<n> connections in LISTEN state
+<n> connections in SYN_SENT state
+<n> connections in SYN_RCVD state
+<n> connections in ESTABLISHED state
+<n> connections in CLOSE_WAIT state
+<n> connections in FIN_WAIT_<n> state
+<n> connections in CLOSING state
+<n> connections in LAST_ACK state
+<n> connections in FIN_WAIT_<n> state
+<n> connections in TIME_WAIT state
+(exit <n>)
+$ jexec n<n> netstat -s -p ip
+ip:
+<n> total packet received
+<n> bad header checksums
+<n> with size smaller than minimum
+<n> with data size < data length
+<n> with ip length > max ip packet size
+<n> with header length < data size
+<n> with data length < header length
+<n> with bad options
+<n> with incorrect version number
+<n> fragments received
+<n> fragments dropped (dup or out of space)
+<n> fragments dropped after timeout
+<n> packets reassembled ok
+<n> packet for this host
+<n> packets for unknown/unsupported protocol
+<n> packets forwarded (<n> packets fast forwarded)
+<n> packets not forwardable
+<n> packets received for unknown multicast group
+<n> redirects sent
+<n> packet sent from this host
+<n> packets sent with fabricated ip header
+<n> output packets dropped due to no bufs, etc.
+<n> output packets discarded due to no route
+<n> output datagrams fragmented
+<n> fragments created
+<n> datagrams that can't be fragmented
+<n> tunneling packets that can't find gif
+<n> datagrams with bad address in header
+(exit <n>)
+$ jexec n<n> netstat -s -p ip<n>
+ip<n>:
+<n> total packets received
+<n> with size smaller than minimum
+<n> with data size < data length
+<n> with bad options
+<n> with incorrect version number
+<n> fragments received
+<n> fragments dropped (dup or out of space)
+<n> fragments dropped after timeout
+<n> fragments that exceeded limit
+<n> atomic fragments
+<n> packets reassembled ok
+<n> packets for this host
+<n> packets forwarded
+<n> packets not forwardable
+<n> redirects sent
+<n> packets sent from this host
+<n> packets sent with fabricated ip header
+<n> output packets dropped due to no bufs, etc.
+<n> output packets discarded due to no route
+<n> output datagrams fragmented
+<n> fragments created
+<n> datagrams that can't be fragmented
+<n> packets that violated scope rules
+<n> multicast packets which we don't join
+Input histogram:
+Mbuf statistics:
+<n> one mbuf
+<n> one ext mbuf
+<n> two or more ext mbuf
+<n> packets whose headers are not contiguous
+<n> tunneling packets that can't find gif
+<n> packets discarded because of too many headers
+<n> failures of source address selection
+source addresses on an outgoing I/F
+source addresses of same scope
+Source addresses selection rule applied:
+<n> first candidate
+(exit <n>)
+$ netstat -m
+<n>/<n>/<n> mbufs in use (current/cache/total)
+<n>/<n>/<n>/<n> mbuf clusters in use (current/cache/total/max)
+<n>/<n> mbuf+clusters out of packet secondary zone in use (current/cache)
+<n>/<n>/<n>/<n> <n>k (page size) jumbo clusters in use (current/cache/total/max)
+<n>/<n>/<n>/<n> <n>k jumbo clusters in use (current/cache/total/max)
+<n>/<n>/<n>/<n> <n>k jumbo clusters in use (current/cache/total/max)
+<n>K/<n>K/<n>K bytes allocated to network (current/cache/total)
+<n>/<n>/<n> requests for mbufs denied (mbufs/clusters/mbuf+clusters)
+<n>/<n>/<n> requests for mbufs delayed (mbufs/clusters/mbuf+clusters)
+<n>/<n>/<n> requests for jumbo clusters delayed (<n>k/<n>k/<n>k)
+<n>/<n>/<n> requests for jumbo clusters denied (<n>k/<n>k/<n>k)
+<n> sendfile syscalls
+<n> sendfile syscalls completed without I/O request
+<n> requests for I/O initiated by sendfile
+<n> pages read by sendfile as part of a request
+<n> pages were valid at time of a sendfile request
+<n> pages were valid and substituted to bogus page
+<n> pages were requested for read ahead by applications
+<n> pages were read ahead by sendfile
+<n> times sendfile encountered an already busy page
+<n> requests for sfbufs denied
+<n> requests for sfbufs delayed
+(exit <n>)
+$ jexec n1 sockstat -4 -l
+(exit 0)
+USER COMMAND PID FD PROTO LOCAL ADDRESS FOREIGN ADDRESS
+root nc <lsn> 3 tcp4 10.99.0.1:<port> *:*
+root nc <udp> 3 udp4 10.99.0.1:<port> *:*
+$ jexec n1 sockstat -6 -l
+(exit 0)
+USER COMMAND PID FD PROTO LOCAL ADDRESS FOREIGN ADDRESS
+root nc <lsn6> 3 tcp6 [fd99::1]:<port> *:*
+$ jexec n1 netstat -an -f inet
+Active Internet connections (including servers)
+Proto Recv-Q Send-Q Local Address Foreign Address (state)
+tcp4 0 0 10.99.0.1.<port> *.* LISTEN
+udp4 0 0 10.99.0.1.<port> *.*
+(exit 0)
+$ jexec n1 netstat -an -f inet6
+Active Internet connections (including servers)
+Proto Recv-Q Send-Q Local Address Foreign Address (state)
+tcp6 0 0 fd99::1.<port> *.* LISTEN
+(exit 0)
+$ jexec n1 sockstat -4 -c
+(exit 0)
+USER COMMAND PID FD PROTO LOCAL ADDRESS FOREIGN ADDRESS
+root nc <lsn> 4 tcp4 10.99.0.1:<port> 10.99.0.2:<port>
+$ jexec n1 netstat -an -p tcp -f inet
+Active Internet connections (including servers)
+Proto Recv-Q Send-Q Local Address Foreign Address (state)
+tcp4 0 0 10.99.0.1.<port> 10.99.0.2.<port> ESTABLISHED
+tcp4 0 0 10.99.0.1.<port> *.* LISTEN
+(exit 0)
+$ jexec n2 netstat -an -p tcp -f inet
+Active Internet connections (including servers)
+Proto Recv-Q Send-Q Local Address Foreign Address (state)
+tcp4 0 0 10.99.0.2.<port> 10.99.0.1.<port> ESTABLISHED
+(exit 0)
+n2: removed
+n1: removed

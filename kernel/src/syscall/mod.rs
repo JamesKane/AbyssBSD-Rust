@@ -38,7 +38,7 @@ mod netlink;
 mod path;
 mod proc;
 mod procctl;
-mod sendfile;
+pub(crate) mod sendfile;
 mod shm;
 mod sig;
 mod socket;

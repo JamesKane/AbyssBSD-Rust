@@ -49,6 +49,7 @@ impl Vnet {
         let v = Arc::new_cyclic(|me| {
             let mut net = Net::new();
             net.owner = me.clone();
+            net.in_vnet = true;
             // The system's `lo0` comes when the network starts, after the
             // devices found at boot, as FreeBSD numbers them; a new VNET's
             // comes with it.

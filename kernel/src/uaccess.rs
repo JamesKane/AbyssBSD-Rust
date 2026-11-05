@@ -44,6 +44,16 @@ plain!(u8, u16, u32, u64, usize, i8, i16, i32, i64, isize);
 unsafe impl<T: Plain, const N: usize> Plain for [T; N] {}
 // SAFETY: integers and byte arrays; the tail pad is a field.
 unsafe impl Plain for abi::ktls::TlsEnable {}
+// SAFETY: integers and byte arrays, with no padding.
+unsafe impl Plain for abi::memstat::UmaStreamHeader {}
+// SAFETY: as above.
+unsafe impl Plain for abi::memstat::UmaTypeHeader {}
+// SAFETY: as above.
+unsafe impl Plain for abi::memstat::MallocTypeStreamHeader {}
+// SAFETY: as above.
+unsafe impl Plain for abi::memstat::MallocTypeHeader {}
+// SAFETY: as above.
+unsafe impl Plain for abi::memstat::Sfstat {}
 // SAFETY: integers and byte arrays; the alignment pads are fields.
 unsafe impl Plain for abi::linker::KldFileStat {}
 // SAFETY: as above.

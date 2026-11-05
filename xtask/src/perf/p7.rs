@@ -176,6 +176,114 @@ impl Drop for Peers {
     }
 }
 
+/// The soak's script (docs/NETWORKING.md §16): `iperf3` both ways, four
+/// streams each, for `$2` seconds, between two looks at what the kernel
+/// holds. The first look comes after a warm-up, so caches and rings have
+/// filled; the second after `TIME_WAIT` has ended.
+const SOAK: &str = r#"#!/bin/sh
+peer=$1 secs=$2
+rm -f /tmp/iperf3 /tmp/libiperf.so.0
+cp /mnt/iperf3 /mnt/libiperf.so.0 /tmp/ && umount /mnt
+for i in $(jot 120); do
+	ifconfig vtnet0 | grep -q 'inet 10\.77\.0\.' && break
+	sleep 1
+done
+export LD_LIBRARY_PATH=/tmp
+look() {
+	netstat -m | awk -v w="$1" -v free="$(sysctl -n vm.stats.vm.v_free_count)" '
+	    /mbufs in use/ { split($1, a, "/"); m = a[1] }
+	    /mbuf clusters in use/ { split($1, a, "/"); c = a[1] }
+	    /denied/ { n = split($1, a, "/"); for (i = 1; i <= n; i++) d += a[i] }
+	    END { print "soak", w, m + 0, c + 0, d + 0, free }'
+}
+/tmp/iperf3 -c "$peer" -t 30 -P 4 --bidir > /dev/null
+sleep 70
+look before
+/tmp/iperf3 -c "$peer" -t "$secs" -P 4 --bidir -f m > /tmp/soak.out &
+pid=$!
+sleep $((secs / 2))
+look during
+wait $pid
+echo "soak iperf3 $?"
+tail -8 /tmp/soak.out
+sleep 70
+look after
+shutdown -p now
+"#;
+
+/// The most the soak may leave behind: mbufs and clusters (a ring's
+/// refill), and free pages (32 MiB).
+const SOAK_SLACK: i64 = 256;
+const SOAK_PAGES: i64 = 8192;
+
+/// What a look found: mbufs, clusters, denied requests, free pages.
+fn soak_look(log: &str, which: &str) -> Result<[i64; 4]> {
+    let mark = format!("soak {which} ");
+    let line = log
+        .lines()
+        .rev()
+        .find_map(|l| l.find(&mark).map(|at| &l[at + mark.len()..]))
+        .ok_or_else(|| format!("no `{mark}` line in the console log"))?;
+    let v: Vec<i64> = line
+        .split_whitespace()
+        .map(str::parse)
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|_| format!("bad line `{line}`"))?;
+    <[i64; 4]>::try_from(v).map_err(|_| format!("bad line `{line}`").into())
+}
+
+/// Whether the two looks in `log` show nothing leaked or refused.
+fn soak_verdict(log: &str) -> Result<String> {
+    if !log.contains("soak iperf3 0") {
+        return Err("iperf3 did not finish".into());
+    }
+    let [m0, c0, _, f0] = soak_look(log, "before")?;
+    let [md, cd, ..] = soak_look(log, "during")?;
+    let [m1, c1, denied, f1] = soak_look(log, "after")?;
+    let seen = format!(
+        "mbufs {m0} -> {md} -> {m1}, clusters {c0} -> {cd} -> {c1}, denied {denied}, \
+         free pages {f0} -> {f1}"
+    );
+    // Counts that never move would show no leak either.
+    if md <= m0 {
+        return Err(format!("no mbufs in use under load: {seen}").into());
+    }
+    if m1 - m0 > SOAK_SLACK || c1 - c0 > SOAK_SLACK || denied != 0 || f0 - f1 > SOAK_PAGES {
+        return Err(format!("the soak left something behind: {seen}").into());
+    }
+    Ok(seen)
+}
+
+/// The soak: boots `disk` with the bench disk on the test bridge, runs
+/// [`SOAK`] for `secs` seconds, and judges the two looks.
+pub(super) fn soak(disk: &Path, bench_disk: &Path, log: &Path, secs: u64) -> Result<String> {
+    let vm = Vm {
+        smp: SMP,
+        mem: "2G".into(),
+        nvme: true,
+        extra_disk: Some(bench_disk.to_path_buf()),
+        pin: true,
+        net: Some(Net::Bridge(Tap::new()?)),
+        ..Vm::new(Vmm::Bhyve, Arch::X86_64, disk.to_path_buf())
+    };
+    let mut session = Session::start(vm, log)?;
+    let started = (|| -> Result<()> {
+        crate::net::login(&mut session, Duration::from_secs(600), &["panic:"])?;
+        session.send(&format!(
+            "mount -o ro /dev/vtbd0 /mnt && sh /mnt/run.sh {PEER} {secs}\n"
+        ))
+    })();
+    let exited = session.finish(Duration::from_secs(secs + 900))?;
+    started?;
+    let text = fs::read_to_string(log)?;
+    soak_verdict(&text).map_err(|e| format!("{}: {e} (exited: {exited})", log.display()).into())
+}
+
+/// The soak's script.
+pub(super) fn soak_script() -> &'static str {
+    SOAK
+}
+
 /// The bench disk's script.
 pub(super) fn script() -> &'static str {
     RUN
@@ -209,4 +317,27 @@ pub(super) fn run_one(
     started?;
     let text = fs::read_to_string(log)?;
     parse(&text).map_err(|e| format!("{}: {e} (exited: {exited})", log.display()).into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::soak_verdict;
+
+    #[test]
+    fn soak_judges_what_it_left() {
+        let log = |m, d, f| {
+            format!(
+                "soak before 1000 900 0 400000\nsoak during 2000 900 0 400000\n\
+                 soak iperf3 0\nsoak after {m} 900 {d} {f}\n"
+            )
+        };
+        assert!(soak_verdict(&log(1100, 0, 399_000)).is_ok());
+        assert!(soak_verdict(&log(5000, 0, 399_000)).is_err());
+        assert!(soak_verdict(&log(1100, 3, 399_000)).is_err());
+        assert!(soak_verdict(&log(1100, 0, 100_000)).is_err());
+        assert!(soak_verdict("soak before 1 1 0 1\nsoak after 1 1 0 1\n").is_err());
+        // Counts that do not move prove nothing.
+        let flat = "soak before 0 0 0 1\nsoak during 0 0 0 1\nsoak iperf3 0\nsoak after 0 0 0 1\n";
+        assert!(soak_verdict(flat).is_err());
+    }
 }

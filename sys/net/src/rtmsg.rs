@@ -328,7 +328,7 @@ pub fn dump(n: &Net, af: u8, fib: Option<u16>) -> Vec<u8> {
         .filter(|r| fib.is_none_or(|f| r.fib == f) && (af == 0 || r.family.af() == af))
         .collect();
     // A radix walk: by family, then address.
-    routes.sort_by_key(|r| (r.family, r.dst, r.plen));
+    routes.sort_by_key(|r| (r.family, crate::ifnet::route_key(r), r.plen));
     for r in routes {
         let h = abi::net::RtMsghdr {
             rtm_index: r.ifindex,

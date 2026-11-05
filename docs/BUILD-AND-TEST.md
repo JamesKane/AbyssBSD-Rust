@@ -354,6 +354,14 @@ lines for cases that now pass are reported as stale. Test programs whose subject
 phase (`DEFERRED` in `xtask/src/kyua.rs`, empty now) are counted on a line of their own and left out
 of the target.
 
+### The network soak
+
+`cargo xtask --remote net-soak [--duration SECONDS]` runs `iperf3` both ways, four streams each,
+between the guest and the build server over the test bridge, an hour by default, on the networked
+root in bhyve. It looks at `netstat -m` and the free pages after a warm-up, halfway through, and
+once `TIME_WAIT` has ended, and fails if mbufs or clusters stay in use, a request was denied, free
+memory fell by more than 32 MiB, or the counts did not move under load. It is a milestone's check.
+
 ### Differential tests of command output
 
 The same programs on AbyssBSD and on FreeBSD 15.1 must print the same thing, once what

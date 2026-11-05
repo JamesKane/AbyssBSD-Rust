@@ -2145,6 +2145,13 @@ P7.0 ─► P7.1 ─► P7.2 ─► P7.3 ─► P7.4 ─┬─► P7.5 ───
   all passing or recorded; the soak case (`iperf3` for an hour, leak and zone checks).
 - The interface, route, and statistics output of `ifconfig`, `netstat` (`-i`, `-r`, `-s`, `-m`),
   `sockstat`, `arp`, and `ndp` against FreeBSD's in the differential tests.
+- Progress 2026-11-05: differential scenario `net` (two VNET jails on an `epair`) matches FreeBSD on
+  both architectures. It found and fixed: interface indexes were per VNET (FreeBSD's are the
+  system's, and move with an interface); no default broadcast address; link-local prefixes counted
+  no address; route dumps ignored the zone in a link-local key; `netstat -m` had none of
+  `vm.zone_stats`, `kern.malloc_stats`, or `kern.ipc.sfstat`. Of what FreeBSD passes in the network
+  directories, every case not passing is listed: the non-goals' 57 and those before. `cargo xtask
+  --remote net-soak` is the soak.
 
 **P7.9 Performance and exit.**
 - Suite `p7` (`tcp`, `udp`, `sendfile`) within the bound over loopback and virtio-net in bhyve;

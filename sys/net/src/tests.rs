@@ -134,15 +134,18 @@ fn frames_cross_an_epair() {
 
 #[test]
 fn loopback_output_comes_back_through_netisr() {
+    static LO0: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
     static SEEN: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
     fn ip6(_: &Arc<Vnet>, m: Packet) {
-        assert_eq!(m.hdr.rcvif, 1);
+        assert_eq!(m.hdr.rcvif, LO0.load(Ordering::Relaxed));
         SEEN.fetch_add(m.len(), Ordering::Relaxed);
     }
     netisr::register(Proto::Ipv6, ip6);
     let v = Vnet::new(0);
     up(&v, b"lo0");
-    clone::output(&v, 1, Family::Inet6, packet(&[0; 40])).unwrap();
+    let lo0 = v.net.lock().by_name(b"lo0").unwrap().index;
+    LO0.store(lo0, Ordering::Relaxed);
+    clone::output(&v, lo0, Family::Inet6, packet(&[0; 40])).unwrap();
     assert_eq!(netisr::drain(&v), 1);
     assert_eq!(SEEN.load(Ordering::Relaxed), 40);
     assert_eq!(v.lo.opackets.load(Ordering::Relaxed), 1);
@@ -156,6 +159,9 @@ fn interfaces_move_between_vnets_and_go_home() {
     clone::create(&host, b"epair", &ctx()).unwrap();
     up(&host, b"epair0a");
     up(&host, b"epair0b");
+    let moved = host.net.lock().by_name(b"epair0b").unwrap().index;
+    let lo0 = jail.net.lock().by_name(b"lo0").unwrap().index;
+    assert_ne!(moved, lo0);
     clone::vmove(&host, b"epair0b", &jail).unwrap();
     assert!(host.net.lock().by_name(b"epair0b").is_none());
     let (ib, flags) = {
@@ -163,8 +169,8 @@ fn interfaces_move_between_vnets_and_go_home() {
         let b = n.by_name(b"epair0b").unwrap();
         (b.index, b.flags)
     };
-    // lo0 is 1 there; it came in down.
-    assert_eq!((ib, flags & iff::UP), (2, 0));
+    // An index is the system's, so it moves along; it came in down.
+    assert_eq!((ib, flags & iff::UP), (moved, 0));
     assert_eq!(clone::vmove(&host, b"epair0b", &jail), Err(Errno::ENXIO));
     // Frames follow it: the jail's end gets them once up.
     up(&jail, b"epair0b");

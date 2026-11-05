@@ -448,6 +448,8 @@ pub(crate) fn init() {
             .expect("kern.ipc.somaxconn");
         }
         tls_nodes(&mut t, ipc);
+        let vm = t.child(root, "vm").expect("vm node");
+        crate::net::memstat::nodes(&mut t, vm, k, ipc);
         let net = t.child(root, "net").expect("net node");
         let local = t
             .add_node(net, Number::Fixed(1), "local", "Local domain")

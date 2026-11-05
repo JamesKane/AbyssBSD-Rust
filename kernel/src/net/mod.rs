@@ -11,6 +11,7 @@ pub(crate) mod bpf;
 pub(crate) mod ioctl;
 #[cfg(feature = "ktest")]
 mod ktests;
+pub(crate) mod memstat;
 pub(crate) mod netlink;
 pub(crate) mod splice;
 mod sysctl;

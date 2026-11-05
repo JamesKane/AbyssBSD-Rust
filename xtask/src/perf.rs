@@ -810,6 +810,53 @@ fn build_ubench_p6(dirs: &Dirs) -> Result<PathBuf> {
 /// alone, in local QEMU (KVM where it can), for comparing AbyssBSD with
 /// itself while working on it. The numbers that count come from `perf`,
 /// against FreeBSD on the same bhyve host.
+/// `cargo xtask --remote net-soak [--duration SECONDS]`: `iperf3` over the
+/// test bridge, an hour unless told otherwise, and what the kernel held
+/// before and after (docs/NETWORKING.md §16). A milestone's check, not a
+/// boot case: it has the server to itself, as a perf run does.
+pub(crate) fn cmd_soak(mut args: Args) -> Result<()> {
+    let secs: u64 = match args.take_value("--duration")? {
+        Some(s) => s.parse().map_err(|_| format!("bad --duration `{s}`"))?,
+        None => 3600,
+    };
+    args.finish()?;
+    if !cfg!(target_os = "freebsd") {
+        return Err("net-soak needs bhyve: run it on the build server".into());
+    }
+    if std::env::var_os("ABYSS_PERF_LOCKED").is_none() {
+        let lock = home().join("abyss/ci/.lock");
+        eprintln!("xtask: net-soak: waiting for {}", lock.display());
+        return util::run(
+            Command::new("lockf")
+                .arg("-k")
+                .arg(lock)
+                .arg(std::env::current_exe()?)
+                .args(std::env::args().skip(1))
+                .env("ABYSS_PERF_LOCKED", "1"),
+        );
+    }
+    let dirs = Dirs::new();
+    fs::create_dir_all(&dirs.perf)?;
+    let ubench = build_ubench_p6(&dirs)?;
+    let extras = p7::iperf3(&dirs)?;
+    let stamp = util::output(Command::new("date").arg("+%Y%m%d-%H%M%S"))?;
+    let out = home().join("abyss/ci/soak").join(stamp.trim());
+    fs::create_dir_all(&out)?;
+    let bench_disk = make_bench_disk(&out, &ubench, "p7.soak", &extras, false)?;
+    let opts = build::Options {
+        release: true,
+        ktest: false,
+    };
+    let abyss = image::build_net_root(Arch::X86_64, opts, MULTIUSER_CMDLINE)?;
+    let _peers = p7::Peers::start(&ubench, &extras)?;
+    let log = out.join("console.log");
+    eprintln!("xtask: net-soak: {secs} s, console in {}", log.display());
+    let seen = p7::soak(&abyss, &bench_disk, &log, secs)?;
+    println!("net-soak: {seen}");
+    println!("net-soak: PASS");
+    Ok(())
+}
+
 pub(crate) fn cmd_ubench(mut args: Args) -> Result<()> {
     let arches = Arch::from_args(&mut args)?;
     let runs: usize = args
@@ -901,6 +948,9 @@ fn make_bench_disk(
     }
     if suite == "p7" {
         fs::write(dir.join("run.sh"), p7::script())?;
+    }
+    if suite == "p7.soak" {
+        fs::write(dir.join("run.sh"), p7::soak_script())?;
     }
     if freebsd_prof {
         // FreeBSD's rc.local runs `run.sh` in place of the suite.
