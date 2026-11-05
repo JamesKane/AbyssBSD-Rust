@@ -643,6 +643,28 @@ impl Proc {
 }
 
 #[test]
+fn dead_file_objects_do_not_pile_up() {
+    let pages = Pages::new();
+    let file = Arc::new(File {
+        pages: 1,
+        fills: std::sync::atomic::AtomicU64::new(0),
+    });
+    for _ in 0..100_000 {
+        drop(crate::object::Object::with_pager(
+            pages,
+            Arc::clone(&file) as Arc<dyn crate::object::Pager>,
+        ));
+    }
+    // Pruned each time the list reaches a power of two; other tests may
+    // be holding a few.
+    assert!(
+        crate::object::paged_len() < 4096,
+        "{}",
+        crate::object::paged_len()
+    );
+}
+
+#[test]
 fn file_pages_are_filled_once_and_shared() {
     let pages = Pages::new();
     let file = Arc::new(File {

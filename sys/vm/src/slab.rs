@@ -22,6 +22,14 @@
 //! 64 KiB of objects (16 to 510 of them) and lives in one page from the
 //! page source.
 //!
+//! A depot would otherwise keep what the busiest moment freed for good.
+//! [`Heap::trim`], called every [`TRIM_SECONDS`], gives back the magazines
+//! beyond each class's working set, an estimate of the most it has drawn
+//! on lately, which decays; [`Heap::reclaim`] gives back all of them, when
+//! memory is short. (UMA trims as `Heap::trim` does only under memory
+//! pressure, and otherwise waits a quarter of an hour; with no page daemon
+//! to ask, the timer does it here.)
+//!
 //! Requests larger than the largest class, or more aligned than a page, go
 //! straight to the page source as one buddy block.
 //!
@@ -227,11 +235,20 @@ impl CpuMags {
     }
 }
 
+/// How often the kernel calls [`Heap::trim`] (`UMA_TIMEOUT`).
+pub const TRIM_SECONDS: u64 = 20;
+
 /// A class's spare magazines.
 struct Depot {
     full: *mut Mag,
     nfull: usize,
     empty: *mut Mag,
+    /// The most and the fewest full magazines since the last trim
+    /// (`uzd_imax`, `uzd_imin`).
+    high: usize,
+    low: usize,
+    /// Magazines it is thought to need (`uzd_wss`).
+    working_set: usize,
 }
 
 // SAFETY: the magazines are owned by the depot and only touched under its
@@ -244,6 +261,42 @@ impl Depot {
             full: ptr::null_mut(),
             nfull: 0,
             empty: ptr::null_mut(),
+            high: 0,
+            low: 0,
+            working_set: 0,
+        }
+    }
+
+    /// Updates the working set (`zone_domain_update_wss`) for a new period.
+    fn update_working_set(&mut self) {
+        self.working_set = (self.working_set * 3 / 4).max(self.high - self.low);
+        // Half the peak stays, against the period's edge.
+        self.high -= (self.high - self.nfull).div_ceil(2);
+        self.low = self.nfull;
+    }
+
+    /// Takes all but `keep` of the full magazines, and of the empty ones.
+    fn take(&mut self, keep: usize) -> (*mut Mag, *mut Mag) {
+        let full = Self::split(&mut self.full, keep);
+        self.nfull = self.nfull.min(keep);
+        self.high = self.high.min(self.nfull);
+        self.low = self.low.min(self.nfull);
+        (full, Self::split(&mut self.empty, keep))
+    }
+
+    /// Cuts `list` after its first `keep` magazines, and returns the rest.
+    fn split(list: &mut *mut Mag, keep: usize) -> *mut Mag {
+        let mut link: *mut *mut Mag = list;
+        // SAFETY: magazines on a depot list are live and the depot's, and
+        // `link` is the list's head or a live magazine's `next`.
+        unsafe {
+            for _ in 0..keep {
+                if (*link).is_null() {
+                    return ptr::null_mut();
+                }
+                link = &raw mut (**link).next;
+            }
+            core::mem::replace(&mut *link, ptr::null_mut())
         }
     }
 
@@ -397,6 +450,7 @@ impl<S: PageSource, const CPUS: usize> Heap<S, CPUS> {
             let full = Depot::pop(&mut d.full);
             if !full.is_null() {
                 d.nfull -= 1;
+                d.low = d.low.min(d.nfull);
                 if !m.prev.is_null() {
                     // SAFETY: an empty magazine of ours, handed over.
                     unsafe { Depot::push(&mut d.empty, m.prev) };
@@ -490,6 +544,7 @@ impl<S: PageSource, const CPUS: usize> Heap<S, CPUS> {
                 // SAFETY: a full magazine of ours, handed over.
                 unsafe { Depot::push(&mut d.full, m.prev) };
                 d.nfull += 1;
+                d.high = d.high.max(d.nfull);
             }
             m.prev = m.loaded;
             m.loaded = Depot::pop(&mut d.empty);
@@ -551,11 +606,7 @@ impl<S: PageSource, const CPUS: usize> Heap<S, CPUS> {
     /// depots, to their classes, and frees the magazines involved.
     pub fn drain_this_cpu(&self) {
         for c in 0..if CPUS == 0 { 0 } else { NCLASSES } {
-            let mut d = self.depots[c].lock();
-            let mut mags = core::mem::replace(&mut d.full, ptr::null_mut());
-            d.nfull = 0;
-            let mut empties = core::mem::replace(&mut d.empty, ptr::null_mut());
-            drop(d);
+            let (mut mags, empties) = self.depots[c].lock().take(0);
             self.with_mags(c, |m| {
                 for own in [&mut m.loaded, &mut m.prev] {
                     let x = core::mem::replace(own, ptr::null_mut());
@@ -565,6 +616,38 @@ impl<S: PageSource, const CPUS: usize> Heap<S, CPUS> {
                     }
                 }
             });
+            self.release(c, mags, empties);
+        }
+    }
+
+    /// Gives back the magazines beyond each class's working set. From
+    /// thread context, every [`TRIM_SECONDS`].
+    pub fn trim(&self) {
+        for c in 0..if CPUS == 0 { 0 } else { NCLASSES } {
+            let (mags, empties) = {
+                let mut d = self.depots[c].lock();
+                d.update_working_set();
+                let keep = d.working_set;
+                d.take(keep)
+            };
+            self.release(c, mags, empties);
+        }
+    }
+
+    /// Gives back every magazine in the depots (`uma_reclaim`'s drain):
+    /// memory is short. From thread context.
+    pub fn reclaim(&self) {
+        for c in 0..if CPUS == 0 { 0 } else { NCLASSES } {
+            let (mags, empties) = self.depots[c].lock().take(0);
+            self.release(c, mags, empties);
+        }
+    }
+
+    /// Returns the objects of the magazines on `mags` to class `c`, and
+    /// frees those magazines and the ones on `empties`, none of them
+    /// reachable by anyone else.
+    fn release(&self, c: usize, mut mags: *mut Mag, mut empties: *mut Mag) {
+        if !mags.is_null() {
             let mut class = self.classes[c].lock();
             loop {
                 let x = Depot::pop(&mut mags);
@@ -582,16 +665,15 @@ impl<S: PageSource, const CPUS: usize> Heap<S, CPUS> {
                     Depot::push(&mut empties, x);
                 }
             }
-            drop(class);
-            loop {
-                let x = Depot::pop(&mut empties);
-                let Some(page) = NonNull::new(x.cast::<u8>()) else {
-                    break;
-                };
-                self.magazine_pages.fetch_sub(1, Ordering::Relaxed);
-                // SAFETY: the page came from `new_mag` and is unused now.
-                unsafe { self.source.free_pages(page, Order::ZERO) };
-            }
+        }
+        loop {
+            let x = Depot::pop(&mut empties);
+            let Some(page) = NonNull::new(x.cast::<u8>()) else {
+                break;
+            };
+            self.magazine_pages.fetch_sub(1, Ordering::Relaxed);
+            // SAFETY: the page came from `new_mag` and is unused now.
+            unsafe { self.source.free_pages(page, Order::ZERO) };
         }
     }
 
@@ -864,6 +946,68 @@ mod tests {
         // Page-aligned is the most a class gives.
         assert_eq!(CLASSES[class_for(layout(64, 4096)).unwrap()].size, 4096);
         assert_eq!(class_for(layout(64, 8192)), None);
+    }
+
+    /// Fills `heap`'s depot: allocates `n` objects, then frees them.
+    fn burst(heap: &Heap<HostPages, 1>, n: usize) {
+        let l = layout(64, 8);
+        let v: Vec<_> = (0..n)
+            // SAFETY: a nonzero size.
+            .map(|_| unsafe { heap.alloc(l) })
+            .collect();
+        for p in v {
+            assert!(!p.is_null());
+            // SAFETY: from `alloc` with `l`.
+            unsafe { heap.dealloc(p, l) };
+        }
+    }
+
+    fn out(heap: &Heap<HostPages, 1>) -> i64 {
+        heap.source.out.load(Ordering::Relaxed)
+    }
+
+    #[test]
+    fn trim_gives_back_what_stays_unused() {
+        let heap: Heap<HostPages, 1> = Heap::new(HostPages::default());
+        burst(&heap, 50_000);
+        let peak = out(&heap);
+        assert!(peak > 500, "{peak}");
+        // No trim has seen the burst leave, so the first keeps it...
+        heap.trim();
+        assert!(out(&heap) > peak / 2);
+        // ...and an idle heap's working set decays to nothing.
+        for _ in 0..40 {
+            heap.trim();
+        }
+        assert!(out(&heap) < 50, "{}", out(&heap));
+    }
+
+    #[test]
+    fn trim_keeps_the_working_set() {
+        let heap: Heap<HostPages, 1> = Heap::new(HostPages::default());
+        burst(&heap, 50_000);
+        let peak = out(&heap);
+        // In steady use the depot is drawn down each period.
+        for _ in 0..10 {
+            burst(&heap, 50_000);
+            heap.trim();
+        }
+        assert!(out(&heap) > peak / 2, "{} of {peak}", out(&heap));
+        burst(&heap, 50_000);
+        assert!(out(&heap) <= peak + 1, "{} of {peak}", out(&heap));
+    }
+
+    #[test]
+    fn reclaim_gives_back_all_the_depot_holds() {
+        let heap: Heap<HostPages, 1> = Heap::new(HostPages::default());
+        burst(&heap, 50_000);
+        heap.reclaim();
+        assert!(out(&heap) < 50, "{}", out(&heap));
+        // It still works, and counts stay right.
+        burst(&heap, 50_000);
+        heap.reclaim();
+        heap.trim();
+        assert!(out(&heap) < 50, "{}", out(&heap));
     }
 
     fn exercise<const CPUS: usize>() {

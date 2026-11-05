@@ -594,7 +594,9 @@ pub(crate) fn init(s: &Sleepable) {
                 Number::Auto,
                 "bufspace",
                 "Physical memory used for buffers",
-                Value::Long(Box::new(|| 0)),
+                Value::Long(Box::new(|| {
+                    i64::try_from(bufcache::bufspace()).unwrap_or(i64::MAX)
+                })),
             )
             .expect("vfs.bufspace");
         }

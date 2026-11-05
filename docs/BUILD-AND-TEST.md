@@ -356,11 +356,17 @@ of the target.
 
 ### The network soak
 
-`cargo xtask --remote net-soak [--duration SECONDS]` runs `iperf3` both ways, four streams each,
-between the guest and the build server over the test bridge, an hour by default, on the networked
-root in bhyve. It looks at `netstat -m` and the free pages after a warm-up, halfway through, and
-once `TIME_WAIT` has ended, and fails if mbufs or clusters stay in use, a request was denied, free
-memory fell by more than 32 MiB, or the counts did not move under load. It is a milestone's check.
+`cargo xtask --remote net-soak [--duration SECONDS] [--freebsd]` runs `iperf3` between the guest
+and the build server over the test bridge, four streams, in one-minute legs: out, in, then both at
+once, an hour by default, on the networked root in bhyve. The legs are there because under `--bidir`
+alone one way starves, on stock FreeBSD as here (which way differs), and the soak would test only
+the other. After five minutes of warm-up, a `dd` asks for more memory than is free, so that what is only
+cached gives way, and five idle minutes let `TIME_WAIT` end and the heap's trimming give back what
+the load and the `dd` left cached. Then it looks at `netstat -m` and the free and wired pages. It
+looks again under load, and after the same `dd` and wait at the end. It fails if mbufs or clusters
+stay in use, a request was denied, wired memory grew by more than 4 MiB or free memory fell by more
+than 32 MiB between the two idle looks, or the counts did not move under load. `--freebsd` runs the same
+script on stock FreeBSD, to compare rates. It is a milestone's check.
 
 ### Differential tests of command output
 

@@ -190,34 +190,60 @@ for i in $(jot 120); do
 done
 export LD_LIBRARY_PATH=/tmp
 look() {
-	netstat -m | awk -v w="$1" -v free="$(sysctl -n vm.stats.vm.v_free_count)" '
+	netstat -m | awk -v w="$1" -v free="$(sysctl -n vm.stats.vm.v_free_count)" \
+	    -v wired="$(sysctl -n vm.stats.vm.v_wire_count)" '
 	    /mbufs in use/ { split($1, a, "/"); m = a[1] }
 	    /mbuf clusters in use/ { split($1, a, "/"); c = a[1] }
 	    /denied/ { n = split($1, a, "/"); for (i = 1; i <= n; i++) d += a[i] }
-	    END { print "soak", w, m + 0, c + 0, d + 0, free }'
+	    END { print "soak", w, m + 0, c + 0, d + 0, free, wired }'
 }
-/tmp/iperf3 -c "$peer" -t 30 -P 4 --bidir > /dev/null
-sleep 70
+# Asks for more than is free, so what is only cached gives way, and frees
+# it, then waits for the heap to trim what that took: what the looks then
+# miss is held.
+press() {
+	dd if=/dev/zero of=/dev/null count=1 \
+	    bs=$(($(sysctl -n vm.stats.vm.v_free_count) * 4096 + 16777216)) 2> /dev/null
+	echo "soak press $?"
+	sleep 300
+	echo "soak rss $(ps -axo rss= | awk '{ n += $1 } END { print n }')"
+}
+failed=0
+leg() {
+	/tmp/iperf3 -c "$peer" -t 60 -P 4 -i 0 -f m "$@" > /tmp/leg.out || failed=1
+	grep -E 'SUM.*receiver' /tmp/leg.out
+}
+# Each way alone, then both: with both at once under bhyve one way starves,
+# on FreeBSD as here, so `--bidir` alone leaves the other all but idle.
+legs() {
+	end=$(($(date +%s) + $1))
+	while [ "$(date +%s)" -lt "$end" ]; do
+		leg
+		leg -R
+		leg --bidir
+	done
+}
+legs 300
+press
 look before
-/tmp/iperf3 -c "$peer" -t "$secs" -P 4 --bidir -f m > /tmp/soak.out &
-pid=$!
-sleep $((secs / 2))
-look during
-wait $pid
-echo "soak iperf3 $?"
-tail -8 /tmp/soak.out
-sleep 70
+(sleep 30; look during) &
+legs "$secs"
+echo "soak iperf3 $failed"
+netstat -s -p tcp | grep -E 'data packets .* retransmitted|retransmit timeouts'
+press
 look after
 shutdown -p now
 "#;
 
-/// The most the soak may leave behind: mbufs and clusters (a ring's
-/// refill), and free pages (32 MiB).
+/// The most the soak may leave behind from one idle look to the other:
+/// mbufs and clusters (a ring's refill), wired pages (4 MiB: a page leaked
+/// every three seconds of the hour is over it), and free pages (32 MiB,
+/// which the file cache also takes).
 const SOAK_SLACK: i64 = 256;
-const SOAK_PAGES: i64 = 8192;
+const SOAK_WIRED: i64 = 1024;
+const SOAK_FREE: i64 = 8192;
 
-/// What a look found: mbufs, clusters, denied requests, free pages.
-fn soak_look(log: &str, which: &str) -> Result<[i64; 4]> {
+/// What a look found: mbufs, clusters, denied requests, free and wired pages.
+fn soak_look(log: &str, which: &str) -> Result<[i64; 5]> {
     let mark = format!("soak {which} ");
     let line = log
         .lines()
@@ -229,26 +255,31 @@ fn soak_look(log: &str, which: &str) -> Result<[i64; 4]> {
         .map(str::parse)
         .collect::<std::result::Result<_, _>>()
         .map_err(|_| format!("bad line `{line}`"))?;
-    <[i64; 4]>::try_from(v).map_err(|_| format!("bad line `{line}`").into())
+    <[i64; 5]>::try_from(v).map_err(|_| format!("bad line `{line}`").into())
 }
 
 /// Whether the two looks in `log` show nothing leaked or refused.
 fn soak_verdict(log: &str) -> Result<String> {
     if !log.contains("soak iperf3 0") {
-        return Err("iperf3 did not finish".into());
+        return Err("an iperf3 run failed".into());
     }
-    let [m0, c0, _, f0] = soak_look(log, "before")?;
+    let [m0, c0, _, f0, w0] = soak_look(log, "before")?;
     let [md, cd, ..] = soak_look(log, "during")?;
-    let [m1, c1, denied, f1] = soak_look(log, "after")?;
+    let [m1, c1, denied, f1, w1] = soak_look(log, "after")?;
     let seen = format!(
         "mbufs {m0} -> {md} -> {m1}, clusters {c0} -> {cd} -> {c1}, denied {denied}, \
-         free pages {f0} -> {f1}"
+         free pages {f0} -> {f1}, wired {w0} -> {w1}"
     );
     // Counts that never move would show no leak either.
     if md <= m0 {
         return Err(format!("no mbufs in use under load: {seen}").into());
     }
-    if m1 - m0 > SOAK_SLACK || c1 - c0 > SOAK_SLACK || denied != 0 || f0 - f1 > SOAK_PAGES {
+    if m1 - m0 > SOAK_SLACK
+        || c1 - c0 > SOAK_SLACK
+        || denied != 0
+        || f0 - f1 > SOAK_FREE
+        || w1 - w0 > SOAK_WIRED
+    {
         return Err(format!("the soak left something behind: {seen}").into());
     }
     Ok(seen)
@@ -273,7 +304,7 @@ pub(super) fn soak(disk: &Path, bench_disk: &Path, log: &Path, secs: u64) -> Res
             "mount -o ro /dev/vtbd0 /mnt && sh /mnt/run.sh {PEER} {secs}\n"
         ))
     })();
-    let exited = session.finish(Duration::from_secs(secs + 900))?;
+    let exited = session.finish(Duration::from_secs(secs + 2000))?;
     started?;
     let text = fs::read_to_string(log)?;
     soak_verdict(&text).map_err(|e| format!("{}: {e} (exited: {exited})", log.display()).into())
@@ -325,19 +356,21 @@ mod tests {
 
     #[test]
     fn soak_judges_what_it_left() {
-        let log = |m, d, f| {
+        let log = |m, d, f, w| {
             format!(
-                "soak before 1000 900 0 400000\nsoak during 2000 900 0 400000\n\
-                 soak iperf3 0\nsoak after {m} 900 {d} {f}\n"
+                "soak before 1000 900 0 400000 9000\nsoak during 2000 900 0 400000 9000\n\
+                 soak iperf3 0\nsoak after {m} 900 {d} {f} {w}\n"
             )
         };
-        assert!(soak_verdict(&log(1100, 0, 399_000)).is_ok());
-        assert!(soak_verdict(&log(5000, 0, 399_000)).is_err());
-        assert!(soak_verdict(&log(1100, 3, 399_000)).is_err());
-        assert!(soak_verdict(&log(1100, 0, 100_000)).is_err());
-        assert!(soak_verdict("soak before 1 1 0 1\nsoak after 1 1 0 1\n").is_err());
+        assert!(soak_verdict(&log(1100, 0, 399_500, 9500)).is_ok());
+        assert!(soak_verdict(&log(5000, 0, 399_500, 9500)).is_err());
+        assert!(soak_verdict(&log(1100, 3, 399_500, 9500)).is_err());
+        assert!(soak_verdict(&log(1100, 0, 390_000, 9500)).is_err());
+        assert!(soak_verdict(&log(1100, 0, 399_500, 12000)).is_err());
+        assert!(soak_verdict("soak before 1 1 0 1 1\nsoak after 1 1 0 1 1\n").is_err());
         // Counts that do not move prove nothing.
-        let flat = "soak before 0 0 0 1\nsoak during 0 0 0 1\nsoak iperf3 0\nsoak after 0 0 0 1\n";
+        let flat =
+            "soak before 0 0 0 1 1\nsoak during 0 0 0 1 1\nsoak iperf3 0\nsoak after 0 0 0 1 1\n";
         assert!(soak_verdict(flat).is_err());
     }
 }

@@ -60,14 +60,20 @@ impl KernelPages {
 }
 
 /// A page for an object: from the free lists, or, when they are empty,
-/// after reclaiming clean file pages nothing maps.
+/// after the heap gives back what it caches, or reclaiming clean file
+/// pages nothing maps.
 fn user_page() -> Option<vm::PhysAddr> {
-    alloc_pages(Order::ZERO).or_else(|| {
-        // A batch, so the next allocations find pages too.
-        (vm::object::reclaim_clean(256) > 0)
-            .then(|| alloc_pages(Order::ZERO))
-            .flatten()
-    })
+    alloc_pages(Order::ZERO)
+        .or_else(|| {
+            super::heap_reclaim();
+            alloc_pages(Order::ZERO)
+        })
+        .or_else(|| {
+            // A batch, so the next allocations find pages too.
+            (vm::object::reclaim_clean(256) > 0)
+                .then(|| alloc_pages(Order::ZERO))
+                .flatten()
+        })
 }
 
 /// Pages `vm` objects hold (anonymous memory and file pages): what

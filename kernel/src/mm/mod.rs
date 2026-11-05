@@ -34,7 +34,7 @@ use vm::{Order, Pfn};
 
 use crate::arch;
 
-pub(crate) use heap::heap_stats;
+pub(crate) use heap::{heap_reclaim, heap_stats, start_heap_trim};
 
 type Format = arch::mmu::Format;
 

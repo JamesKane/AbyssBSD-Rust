@@ -173,9 +173,16 @@ const PAGE_BYTES: usize = 4096;
 /// Pages dirty in every object, for throttling writers.
 static DIRTY: AtomicUsize = AtomicUsize::new(0);
 
-/// Every pager object, for reclaiming clean pages (dead ones are pruned
-/// as reclaiming passes).
+/// Every pager object, for reclaiming clean pages. Dead ones are pruned
+/// as reclaiming passes and as the list grows: a `Weak` keeps a dead
+/// object's allocation, and memory may never run out.
 static PAGED: PreemptLock<Vec<Weak<Object>>> = PreemptLock::new(Vec::new());
+
+/// How many objects [`PAGED`] lists, dead ones too.
+#[cfg(test)]
+pub(crate) fn paged_len() -> usize {
+    PAGED.lock().len()
+}
 
 /// Pages dirty in all objects together.
 #[must_use]
@@ -758,7 +765,12 @@ impl Object {
             ahead: PreemptLock::new(VecDeque::new()),
             device: None,
         });
-        PAGED.lock().push(Arc::downgrade(&o));
+        let mut list = PAGED.lock();
+        if list.len() >= 64 && list.len().is_power_of_two() {
+            list.retain(|w| w.strong_count() > 0);
+        }
+        list.push(Arc::downgrade(&o));
+        drop(list);
         o
     }
 

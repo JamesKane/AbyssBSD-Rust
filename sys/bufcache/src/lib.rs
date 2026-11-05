@@ -189,6 +189,15 @@ impl Default for Limits {
     }
 }
 
+/// Bytes in all the buffer caches.
+static BUFSPACE: AtomicUsize = AtomicUsize::new(0);
+
+/// Bytes in all the buffer caches (`vfs.bufspace`).
+#[must_use]
+pub fn bufspace() -> usize {
+    BUFSPACE.load(Ordering::Relaxed)
+}
+
 /// The buffer cache of one device.
 pub struct BufCache {
     dev: Arc<dyn BlockDev>,
@@ -204,6 +213,12 @@ pub struct BufCache {
     io: Arc<Io>,
     /// Dirty bytes whose background writes are not finished.
     started: AtomicUsize,
+}
+
+impl Drop for BufCache {
+    fn drop(&mut self) {
+        BUFSPACE.fetch_sub(*self.bytes.get_mut(), Ordering::Relaxed);
+    }
 }
 
 impl core::fmt::Debug for BufCache {
@@ -237,6 +252,14 @@ pub enum Fill {
 }
 
 impl BufCache {
+    /// Counts `added` bytes in and `removed` out, here and in all.
+    fn account(&self, added: usize, removed: usize) {
+        self.bytes.fetch_add(added, Ordering::Relaxed);
+        self.bytes.fetch_sub(removed, Ordering::Relaxed);
+        BUFSPACE.fetch_add(added, Ordering::Relaxed);
+        BUFSPACE.fetch_sub(removed, Ordering::Relaxed);
+    }
+
     #[must_use]
     pub fn new(dev: Arc<dyn BlockDev>, limits: Limits, clock: fn() -> u64) -> Self {
         Self {
@@ -433,7 +456,7 @@ impl BufCache {
                             evicted: AtomicBool::new(false),
                         });
                         t.insert(offset, Arc::clone(&b));
-                        self.bytes.fetch_add(size, Ordering::Relaxed);
+                        self.account(size, 0);
                         b
                     }
                 }
@@ -458,8 +481,7 @@ impl BufCache {
                 } else {
                     data.bytes.resize(size, 0);
                 }
-                self.bytes.fetch_sub(old, Ordering::Relaxed);
-                self.bytes.fetch_add(size, Ordering::Relaxed);
+                self.account(size, old);
                 if data.dirty.is_some() {
                     self.dirty.fetch_sub(old, Ordering::Relaxed);
                     self.dirty.fetch_add(size, Ordering::Relaxed);
@@ -696,7 +718,7 @@ impl BufCache {
             }
             t.remove(&b.offset);
             b.evicted.store(true, Ordering::Release);
-            self.bytes.fetch_sub(g.bytes.len(), Ordering::Relaxed);
+            self.account(0, g.bytes.len());
         }
     }
 
@@ -730,7 +752,7 @@ impl BufCache {
             t.remove(&b.offset);
             b.evicted.store(true, Ordering::Release);
             drop(t);
-            self.bytes.fetch_sub(blen, Ordering::Relaxed);
+            self.account(0, blen);
             if data.dirty.is_some() {
                 self.dirty.fetch_sub(blen, Ordering::Relaxed);
             }
@@ -743,7 +765,7 @@ impl BufCache {
         for b in gone.values() {
             b.evicted.store(true, Ordering::Release);
         }
-        self.bytes.store(0, Ordering::Relaxed);
+        BUFSPACE.fetch_sub(self.bytes.swap(0, Ordering::Relaxed), Ordering::Relaxed);
         self.dirty.store(0, Ordering::Relaxed);
         drop(gone);
     }

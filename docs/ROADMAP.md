@@ -2152,6 +2152,14 @@ P7.0 ─► P7.1 ─► P7.2 ─► P7.3 ─► P7.4 ─┬─► P7.5 ───
   `vm.zone_stats`, `kern.malloc_stats`, or `kern.ipc.sfstat`. Of what FreeBSD passes in the network
   directories, every case not passing is listed: the non-goals' 57 and those before. `cargo xtask
   --remote net-soak` is the soak.
+- Progress 2026-11-05 (soak): not passed yet. The hour ends with mbufs and clusters at 0, none
+  denied, free pages within the limit, and wired pages 8405 -> 9911, over the 4 MiB limit. Fixed on
+  the way: the heap's depots never gave memory back (they now trim to their working sets every
+  20 s, and empty when user pages run short); the list of paged objects grew without bound
+  (`vfs.bufspace` is real now, and was not the cause). Left: each process leaves one 256-byte heap
+  object behind (+1006, then +1005, over 1000 `true`s each), owner not found; slab space unused by
+  anything rose over 48 short `iperf3` legs (2133, 2018, 2284, 2372 pages after emptying the
+  depots), with no plateau shown yet. Pages outside the heap stayed flat.
 
 **P7.9 Performance and exit.**
 - Suite `p7` (`tcp`, `udp`, `sendfile`) within the bound over loopback and virtio-net in bhyve;

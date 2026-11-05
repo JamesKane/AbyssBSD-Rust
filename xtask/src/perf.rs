@@ -819,6 +819,8 @@ pub(crate) fn cmd_soak(mut args: Args) -> Result<()> {
         Some(s) => s.parse().map_err(|_| format!("bad --duration `{s}`"))?,
         None => 3600,
     };
+    // Stock FreeBSD on the same bridge: what a rate here should look like.
+    let freebsd = args.take_flag("--freebsd");
     args.finish()?;
     if !cfg!(target_os = "freebsd") {
         return Err("net-soak needs bhyve: run it on the build server".into());
@@ -847,11 +849,15 @@ pub(crate) fn cmd_soak(mut args: Args) -> Result<()> {
         release: true,
         ktest: false,
     };
-    let abyss = image::build_net_root(Arch::X86_64, opts, MULTIUSER_CMDLINE)?;
+    let disk = if freebsd {
+        prepare_net_image(&dirs)?
+    } else {
+        image::build_net_root(Arch::X86_64, opts, MULTIUSER_CMDLINE)?
+    };
     let _peers = p7::Peers::start(&ubench, &extras)?;
     let log = out.join("console.log");
     eprintln!("xtask: net-soak: {secs} s, console in {}", log.display());
-    let seen = p7::soak(&abyss, &bench_disk, &log, secs)?;
+    let seen = p7::soak(&disk, &bench_disk, &log, secs)?;
     println!("net-soak: {seen}");
     println!("net-soak: PASS");
     Ok(())

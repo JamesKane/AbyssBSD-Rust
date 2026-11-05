@@ -32,6 +32,22 @@ unsafe impl PageSource for KernelPages {
 #[global_allocator]
 static HEAP: Heap<KernelPages, { hal::MAX_CPUS }> = Heap::new(KernelPages);
 
+/// Gives back all the magazines the heap's depots hold: memory is short.
+pub(crate) fn heap_reclaim() {
+    HEAP.reclaim();
+}
+
+/// Trims the heap's depots to their working sets, as often as `UMA_TIMEOUT`
+/// has `uma_timeout` run.
+pub(crate) fn start_heap_trim() {
+    let _ = sched::spawn("heaptrim", sched::Priority::KERNEL, |s| {
+        loop {
+            crate::time::sleep_ns(s, vm::slab::TRIM_SECONDS * 1_000_000_000);
+            HEAP.trim();
+        }
+    });
+}
+
 /// Heap occupancy, after returning this CPU's cached objects.
 pub(crate) fn heap_stats() -> HeapStats {
     HEAP.drain_this_cpu();
