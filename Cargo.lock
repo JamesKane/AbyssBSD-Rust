@@ -316,6 +316,7 @@ dependencies = [
  "abi",
  "event",
  "hal",
+ "ktls",
  "mbuf",
  "net",
  "sync",
@@ -401,6 +402,7 @@ dependencies = [
  "irq",
  "kcrypto",
  "ktest",
+ "ktls",
  "logring",
  "mbuf",
  "net",
@@ -433,6 +435,15 @@ dependencies = [
 [[package]]
 name = "ktest"
 version = "0.0.0"
+
+[[package]]
+name = "ktls"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "crypto",
+ "kcrypto",
+]
 
 [[package]]
 name = "loader-efi"

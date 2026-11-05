@@ -133,6 +133,17 @@ pub mod tcp {
     pub const TCP_NOPUSH: i32 = 4;
     pub const TCP_NOOPT: i32 = 8;
     pub const TCP_INFO: i32 = 32;
+    pub const TCP_TXTLS_ENABLE: i32 = 39;
+    pub const TCP_TXTLS_MODE: i32 = 40;
+    pub const TCP_RXTLS_ENABLE: i32 = 41;
+    pub const TCP_RXTLS_MODE: i32 = 42;
+    /// `TCP_TXTLS_MODE`'s and `TCP_RXTLS_MODE`'s values.
+    pub const TCP_TLS_MODE_NONE: i32 = 0;
+    pub const TCP_TLS_MODE_SW: i32 = 1;
+    pub const TCP_TLS_MODE_IFNET: i32 = 2;
+    /// Control messages at `IPPROTO_TCP`.
+    pub const TLS_SET_RECORD_TYPE: i32 = 1;
+    pub const TLS_GET_RECORD: i32 = 2;
     pub const TCP_CONGESTION: i32 = 64;
     pub const TCP_KEEPINIT: i32 = 128;
     pub const TCP_KEEPIDLE: i32 = 256;
@@ -606,6 +617,51 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("TCP_NOPUSH", "netinet/tcp.h", tcp::TCP_NOPUSH as i64),
     c("TCP_NOOPT", "netinet/tcp.h", tcp::TCP_NOOPT as i64),
     c("TCP_INFO", "netinet/tcp.h", tcp::TCP_INFO as i64),
+    c(
+        "TCP_TXTLS_ENABLE",
+        "netinet/tcp.h",
+        tcp::TCP_TXTLS_ENABLE as i64,
+    ),
+    c(
+        "TCP_TXTLS_MODE",
+        "netinet/tcp.h",
+        tcp::TCP_TXTLS_MODE as i64,
+    ),
+    c(
+        "TCP_RXTLS_ENABLE",
+        "netinet/tcp.h",
+        tcp::TCP_RXTLS_ENABLE as i64,
+    ),
+    c(
+        "TCP_RXTLS_MODE",
+        "netinet/tcp.h",
+        tcp::TCP_RXTLS_MODE as i64,
+    ),
+    c(
+        "TCP_TLS_MODE_NONE",
+        "netinet/tcp.h",
+        tcp::TCP_TLS_MODE_NONE as i64,
+    ),
+    c(
+        "TCP_TLS_MODE_SW",
+        "netinet/tcp.h",
+        tcp::TCP_TLS_MODE_SW as i64,
+    ),
+    c(
+        "TCP_TLS_MODE_IFNET",
+        "netinet/tcp.h",
+        tcp::TCP_TLS_MODE_IFNET as i64,
+    ),
+    c(
+        "TLS_SET_RECORD_TYPE",
+        "netinet/tcp.h",
+        tcp::TLS_SET_RECORD_TYPE as i64,
+    ),
+    c(
+        "TLS_GET_RECORD",
+        "netinet/tcp.h",
+        tcp::TLS_GET_RECORD as i64,
+    ),
     c(
         "TCP_CONGESTION",
         "netinet/tcp.h",

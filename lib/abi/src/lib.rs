@@ -33,6 +33,7 @@ pub mod ipc;
 pub mod jail;
 pub mod kbio;
 pub mod kinfo;
+pub mod ktls;
 pub mod ktrace;
 pub mod layout;
 pub mod linker;

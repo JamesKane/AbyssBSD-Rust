@@ -29,6 +29,7 @@ bus = { path = "../sys/bus" }
 evdev = { path = "../sys/evdev" }
 input = { path = "../sys/input" }
 kcrypto = { path = "../sys/crypto" }
+ktls = { path = "../sys/ktls" }
 vt = { path = "../sys/vt" }
 clock = { path = "../sys/clock" }
 devtree = { path = "../lib/devtree" }

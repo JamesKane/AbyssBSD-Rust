@@ -288,6 +288,9 @@ impl Socket {
             if i.state & (ss::ISCONNECTED | ss::ISCONNECTING) == 0 {
                 return Err(Errno::ENOTCONN);
             }
+            if i.tls_rx.is_some() {
+                return Err(Errno::EINVAL);
+            }
             if i.splice.is_some() {
                 return Err(Errno::EBUSY);
             }
@@ -301,6 +304,8 @@ impl Socket {
                 Some(Errno::EINVAL)
             } else if d.state & (ss::ISCONNECTED | ss::ISCONNECTING) == 0 {
                 Some(Errno::ENOTCONN)
+            } else if d.tls_tx.is_some() {
+                Some(Errno::EINVAL)
             } else if d.splice_back.is_some() {
                 Some(Errno::EBUSY)
             } else {

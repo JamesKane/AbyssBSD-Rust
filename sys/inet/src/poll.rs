@@ -30,7 +30,7 @@ impl Inner {
 
     /// `soreadabledata`.
     fn readable(&self) -> bool {
-        self.avail() >= self.rcv.lowat.max(1) || self.error.is_some()
+        self.avail() >= self.rcv.lowat.max(1) || self.error.is_some() || self.tls_record_ready()
     }
 
     /// `sowriteable`.

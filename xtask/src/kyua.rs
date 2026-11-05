@@ -56,6 +56,10 @@ const DONE: &str = "kyua-run: done";
 pub(crate) const BASELINE: &str = "tests/kyua/freebsd/freebsd-15.1-RELEASE-x86_64-bhyve.txt";
 pub(crate) const KNOWN_FAILURES: &str = "tests/kyua/known-failures.txt";
 
+/// How a reason in [`KNOWN_FAILURES`] starts for a case whose result depends
+/// on timing, which the comparison leaves out.
+const TIMING: &str = "timing:";
+
 /// The areas ADR-0016's target is set for, as directories of
 /// `/usr/tests`, and the share of FreeBSD's passing cases that must pass.
 const AREAS: &[&str] = &["sys/kern", "lib/libc", "bin", "usr.bin"];
@@ -64,7 +68,7 @@ const TARGET: f64 = 0.95;
 /// Test programs left out of the target until the phase that brings what
 /// they test (ADR-0016): their cases are counted on their own line, and
 /// fail nothing.
-const DEFERRED: &[(&str, &str)] = &[("sys/kern/ktls_test", "P7, kernel TLS")];
+const DEFERRED: &[(&str, &str)] = &[];
 
 /// The guest's script. Each directory's results are kept as
 /// `<dir with / as _>.report`; a `.started` mark left over from an earlier
@@ -781,6 +785,10 @@ fn compare(freebsd: &str, abyss: &str, known: &str) -> Comparison {
             }
             continue;
         }
+        // Its result depends on timing: neither a pass nor a failure.
+        if known.get(case).is_some_and(|w| w.starts_with(TIMING)) {
+            continue;
+        }
         let listed = known.contains_key(case);
         if want == result {
             if listed {
@@ -925,6 +933,22 @@ mod tests {
     }
 
     #[test]
+    fn timing_cases_are_left_out() {
+        let freebsd = "sys/kern/x:a\tpassed\nsys/kern/x:b\tpassed\nsys/kern/x:c\tpassed\n";
+        let abyss = "sys/kern/x:a\tfailed\nsys/kern/x:b\tpassed\nsys/kern/x:c\tpassed\n";
+        let known = "sys/kern/x:a # timing: a race\nsys/kern/x:b # timing: a race\n";
+        let c = compare(freebsd, abyss, known);
+        assert!(c.unlisted.is_empty() && c.stale.is_empty());
+        assert_eq!(
+            c.areas["sys/kern"],
+            Tally {
+                freebsd: 1,
+                abyss: 1
+            }
+        );
+    }
+
+    #[test]
     fn comparison() {
         let freebsd = "# header\n\
                        bin/cat/t:a\tpassed\n\
@@ -932,7 +956,6 @@ mod tests {
                        bin/cat/t:c\tpassed\n\
                        bin/cat/t:d\tskipped\tno\n\
                        sys/kern/x:y\tpassed\n\
-                       sys/kern/ktls_test:a\tpassed\n\
                        sys/net/z:w\tpassed\n";
         let abyss = "# header\n\
                      bin/cat/t:a\tpassed\n\
@@ -940,7 +963,6 @@ mod tests {
                      bin/cat/t:c\tbroken\n\
                      bin/cat/t:d\tfailed\n\
                      sys/kern/x:y\tpassed\n\
-                     sys/kern/ktls_test:a\tskipped\n\
                      sys/net/z:w\tskipped\n";
         let known = "# why\nbin/cat/t:c   # P7\nsys/kern/x:y # was broken\n";
         let c = compare(freebsd, abyss, known);
@@ -961,13 +983,6 @@ mod tests {
         assert_eq!(c.areas["lib/libc"], Tally::default());
         assert_eq!(
             c.rest,
-            Tally {
-                freebsd: 1,
-                abyss: 0
-            }
-        );
-        assert_eq!(
-            c.deferred,
             Tally {
                 freebsd: 1,
                 abyss: 0

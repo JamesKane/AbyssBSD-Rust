@@ -82,6 +82,8 @@ pub struct SendCtl {
     pub hlim6: Option<i32>,
     pub tclass6: Option<i32>,
     pub nexthop6: Option<[u8; 16]>,
+    /// `TLS_SET_RECORD_TYPE`.
+    pub tls_type: Option<u8>,
 }
 
 /// What a receive got.
@@ -95,6 +97,8 @@ pub struct Received {
     /// With `MSG_TRUNC`, a datagram's whole length.
     pub full: usize,
     pub meta: Option<Meta>,
+    /// A TLS record's `TLS_GET_RECORD`.
+    pub tls: Option<crate::tls::RecordInfo>,
 }
 
 impl Socket {
@@ -488,6 +492,7 @@ fn cut(from: Sockaddr, mut data: Vec<u8>, meta: Meta, max: usize) -> Received {
         flags,
         full,
         meta: Some(meta),
+        tls: None,
     }
 }
 

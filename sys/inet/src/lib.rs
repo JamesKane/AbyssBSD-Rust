@@ -65,6 +65,7 @@ pub mod state;
 mod tcp;
 #[cfg(test)]
 mod tests;
+pub mod tls;
 mod udp;
 #[cfg(test)]
 mod wire6_tests;
@@ -483,6 +484,11 @@ pub(crate) struct Inner {
     pub(crate) groups: Vec<([u8; 4], u16)>,
     /// The IPv6 groups it joined (`im6o_membership`).
     pub(crate) groups6: Vec<([u8; 16], u16)>,
+    /// A sending TLS session's sizes (`so_snd.sb_tls_info`); the session
+    /// is [`Socket::tls_tx`].
+    pub(crate) tls_tx: Option<::ktls::Layout>,
+    /// A receiving TLS session (`so_rcv.sb_tls_info`).
+    pub(crate) tls_rx: Option<alloc::boxed::Box<tls::Rx>>,
 }
 
 /// An internet socket (FreeBSD's `struct socket` with its `inpcb` and,
@@ -507,6 +513,8 @@ pub struct Socket {
     pub(crate) splice_sent: AtomicU64,
     /// Someone is sending its queued segments ([`Inner::txq`]).
     pub(crate) txbusy: core::sync::atomic::AtomicBool,
+    /// Its sending TLS session; taken before [`Socket::inner`].
+    pub(crate) tls_tx: sync::PreemptLock<Option<::ktls::Tx>>,
 }
 
 impl core::fmt::Debug for Socket {
@@ -606,12 +614,15 @@ impl Socket {
                 splice_back: None,
                 groups: Vec::new(),
                 groups6: Vec::new(),
+                tls_tx: None,
+                tls_rx: None,
             }),
             rd: Notify::new(),
             wr: Notify::new(),
             spliced: core::sync::atomic::AtomicU8::new(0),
             splice_sent: AtomicU64::new(0),
             txbusy: core::sync::atomic::AtomicBool::new(false),
+            tls_tx: sync::PreemptLock::new(None),
         });
         table.lock().alloc(&so, cred.uid);
         so

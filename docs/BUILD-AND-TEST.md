@@ -348,10 +348,11 @@ FreeBSD's to `abyss-x86_64-bhyve-compare.txt`. For each of ADR-0016's four areas
 `lib/libc`, `bin`, `usr.bin`) it counts the cases FreeBSD passes and how many of them AbyssBSD
 passes, and the command fails if an area is below 95%, or if a case FreeBSD passes in one of
 them fails on AbyssBSD without a line in `tests/kyua/known-failures.txt` (`<program>:<case>`, a
-tab, and the reason). Such failures outside the four areas are reported but don't fail it, and
+tab, and the reason; a reason starting `timing:` leaves the case out of the comparison altogether,
+as its result depends on timing and says nothing). Such failures outside the four areas are reported but don't fail it, and
 lines for cases that now pass are reported as stale. Test programs whose subject comes in a later
-phase (`DEFERRED` in `xtask/src/kyua.rs`: `sys/kern/ktls_test` until P7) are counted on a line of
-their own and left out of the target.
+phase (`DEFERRED` in `xtask/src/kyua.rs`, empty now) are counted on a line of their own and left out
+of the target.
 
 ### Differential tests of command output
 

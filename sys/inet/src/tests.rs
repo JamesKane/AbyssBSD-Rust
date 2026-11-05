@@ -1080,3 +1080,231 @@ fn a_cloned_loopback_leaves_lo0_alone() {
     assert_eq!(s.recv_dgram(10, false).unwrap().data, b"x");
     s.close();
 }
+
+/// A TLS 1.2 AES-GCM session's parameters, sequence number 5.
+fn tls_en() -> ::ktls::Enable<'static> {
+    ::ktls::Enable {
+        cipher_key: &[0x11; 16],
+        iv: &[0x22; 4],
+        auth_key: &[],
+        cipher_algorithm: abi::ktls::CRYPTO_AES_NIST_GCM_16,
+        auth_algorithm: 0,
+        flags: 0,
+        vmajor: abi::ktls::TLS_MAJOR_VER_ONE,
+        vminor: abi::ktls::TLS_MINOR_VER_TWO,
+        rec_seq: 5u64.to_be_bytes(),
+    }
+}
+
+/// What a `ktls` thread would do.
+fn tls_run() {
+    while let Some(so) = crate::tls::next() {
+        so.ktls_decrypt();
+    }
+}
+
+/// Everything `s` has received.
+fn drain(s: &Arc<Socket>) -> alloc::vec::Vec<u8> {
+    let mut v = alloc::vec::Vec::new();
+    while let Ok(r) = s.recv_stream(1 << 20, false, false) {
+        if r.data.is_empty() {
+            break;
+        }
+        v.extend_from_slice(&r.data);
+    }
+    v
+}
+
+/// A record of `data` as a peer would send it.
+fn tls_record(tx: &mut ::ktls::Tx, rtype: u8, data: &[u8]) -> alloc::vec::Vec<u8> {
+    let l = tx.layout();
+    let mut rec = alloc::vec![0; l.record_len(data.len())];
+    rec[l.hlen..l.hlen + data.len()].copy_from_slice(data);
+    tx.seal(rtype, &mut rec, data.len(), &mut |_| {});
+    rec
+}
+
+#[test]
+fn tls_send_seals_records_in_order() {
+    let _g = setup();
+    let (l, c, s) = connected(20071);
+    c.tls_enable_tx(&tls_en()).unwrap();
+    assert_eq!(c.tls_enable_tx(&tls_en()), Err(Errno::EALREADY));
+    // More than a record: 16384 and then the rest, in two records.
+    let data: alloc::vec::Vec<u8> = (0..20000).map(|i| u8::try_from(i % 253).unwrap()).collect();
+    assert_eq!(c.send_stream(&data, false), Ok(data.len()));
+    let wire = drain(&s);
+    let rx = ::ktls::Session::new(&tls_en(), ::ktls::Direction::Rx).unwrap();
+    let hlen = rx.layout().hlen;
+    let (mut at, mut seq, mut got) = (0, 5, alloc::vec::Vec::new());
+    while at < wire.len() {
+        let len = rx.check_header(&wire[at..at + hlen]).unwrap();
+        let mut rec = wire[at..at + len].to_vec();
+        let o = rx.open(&mut rec, seq).unwrap();
+        assert_eq!(o.rtype, abi::ktls::TLS_RLTYPE_APP);
+        got.extend_from_slice(&rec[o.start..o.start + o.len]);
+        at += len;
+        seq += 1;
+    }
+    assert_eq!(seq, 7);
+    assert_eq!(got, data);
+    for x in [c, s, l] {
+        x.close();
+    }
+}
+
+#[test]
+fn tls_send_of_a_chain_is_sealed_too() {
+    let _g = setup();
+    let (l, c, s) = connected(20072);
+    c.tls_enable_tx(&tls_en()).unwrap();
+    let chain = ::tcp::Chain::from_slice(b"pages of a file").unwrap();
+    c.send_chain(chain).unwrap();
+    let mut wire = drain(&s);
+    let rx = ::ktls::Session::new(&tls_en(), ::ktls::Direction::Rx).unwrap();
+    let o = rx.open(&mut wire, 5).unwrap();
+    assert_eq!(&wire[o.start..o.start + o.len], b"pages of a file");
+    for x in [c, s, l] {
+        x.close();
+    }
+}
+
+#[test]
+fn tls_receive_reads_record_by_record() {
+    use abi::ktls::{TLS_RLTYPE_ALERT, TLS_RLTYPE_APP};
+    use abi::socket::MSG_EOR;
+    let _g = setup();
+    let (l, c, s) = connected(20073);
+    set_int(&c, abi::inet::IPPROTO_TCP, abi::inet::tcp::TCP_NODELAY, 1);
+    s.tls_enable_rx(&tls_en()).unwrap();
+    let mut tx = ::ktls::Tx::new(&tls_en(), &mut |_| {}).unwrap();
+    let one = tls_record(&mut tx, TLS_RLTYPE_APP, b"first");
+    let two = tls_record(&mut tx, TLS_RLTYPE_ALERT, b"second");
+    // Half a record is nothing yet, and TCP counts it as held.
+    assert_eq!(c.send_stream(&one[..7], false), Ok(7));
+    tls_run();
+    assert_eq!(s.nread(), 0);
+    assert_eq!(s.recv_stream(100, false, false).unwrap_err(), Errno::EAGAIN);
+    assert_eq!(c.send_stream(&one[7..], false), Ok(one.len() - 7));
+    assert_eq!(c.send_stream(&two, false), Ok(two.len()));
+    tls_run();
+    assert_eq!(s.nread(), 11);
+    // One read stops at a record's end, the first read of it with its
+    // control message, and a short read does not end it.
+    let r = s.recv_stream(2, false, false).unwrap();
+    assert_eq!(r.data, b"fi");
+    assert_eq!(r.flags & MSG_EOR, 0);
+    assert_eq!(r.tls, Some([TLS_RLTYPE_APP, 3, 3, 0, 0, 5]));
+    let r = s.recv_stream(100, false, false).unwrap();
+    assert_eq!(r.data, b"rst");
+    assert_eq!(r.flags & MSG_EOR, MSG_EOR);
+    assert_eq!(r.tls, None);
+    // `MSG_TLSAPPDATA` stops before an alert, and leaves it.
+    assert_eq!(s.recv_tls_app(100, false).unwrap_err(), Errno::ENXIO);
+    let r = s.recv_stream(100, true, false).unwrap();
+    assert_eq!(r.data, b"second");
+    let r = s.recv_stream(100, false, false).unwrap();
+    assert_eq!(r.tls, Some([TLS_RLTYPE_ALERT, 3, 3, 0, 0, 6]));
+    assert_eq!(r.data, b"second");
+    for x in [c, s, l] {
+        x.close();
+    }
+}
+
+#[test]
+fn tls_receive_takes_what_was_there_for_records() {
+    let _g = setup();
+    let (l, c, s) = connected(20074);
+    let mut tx = ::ktls::Tx::new(&tls_en(), &mut |_| {}).unwrap();
+    let rec = tls_record(&mut tx, abi::ktls::TLS_RLTYPE_APP, b"early");
+    assert_eq!(c.send_stream(&rec, false), Ok(rec.len()));
+    assert_eq!(s.nread(), rec.len());
+    s.tls_enable_rx(&tls_en()).unwrap();
+    assert_eq!(s.nread(), 0);
+    tls_run();
+    assert_eq!(s.recv_stream(100, false, false).unwrap().data, b"early");
+    for x in [c, s, l] {
+        x.close();
+    }
+}
+
+#[test]
+fn tls_receive_loses_a_bad_record_and_goes_on() {
+    let _g = setup();
+    let (l, c, s) = connected(20075);
+    set_int(&c, abi::inet::IPPROTO_TCP, abi::inet::tcp::TCP_NODELAY, 1);
+    s.tls_enable_rx(&tls_en()).unwrap();
+    let mut tx = ::ktls::Tx::new(&tls_en(), &mut |_| {}).unwrap();
+    let mut bad = tls_record(&mut tx, abi::ktls::TLS_RLTYPE_APP, b"spoilt");
+    let at = bad.len() - 1;
+    bad[at] ^= 1;
+    let good = tls_record(&mut tx, abi::ktls::TLS_RLTYPE_APP, b"fine");
+    assert_eq!(c.send_stream(&bad, false), Ok(bad.len()));
+    assert_eq!(c.send_stream(&good, false), Ok(good.len()));
+    tls_run();
+    // What was opened comes first, then the error, once.
+    assert_eq!(s.recv_stream(100, false, false).unwrap().data, b"fine");
+    let e = s.recv_stream(100, false, false).unwrap_err();
+    assert_eq!(e, Errno::EBADMSG);
+    assert_eq!(s.recv_stream(100, false, false).unwrap_err(), Errno::EAGAIN);
+    for x in [c, s, l] {
+        x.close();
+    }
+}
+
+#[test]
+fn tls_receive_drops_the_connection_when_out_of_step() {
+    let _g = setup();
+    let (l, c, s) = connected(20076);
+    set_int(&c, abi::inet::IPPROTO_TCP, abi::inet::tcp::TCP_NODELAY, 1);
+    s.tls_enable_rx(&tls_en()).unwrap();
+    assert_eq!(c.send_stream(&[0x17, 9, 9, 0, 40], false), Ok(5));
+    assert_eq!(c.send_stream(&[0; 40], false), Ok(40));
+    tls_run();
+    assert_eq!(s.recv_stream(100, false, false).unwrap_err(), Errno::EINVAL);
+    // The peer got a reset.
+    assert_eq!(
+        c.recv_stream(100, false, false).unwrap_err(),
+        Errno::ECONNRESET
+    );
+    for x in [c, s, l] {
+        x.close();
+    }
+}
+
+#[test]
+fn tls_a_stream_ending_inside_a_record_is_an_error() {
+    let _g = setup();
+    let (l, c, s) = connected(20077);
+    s.tls_enable_rx(&tls_en()).unwrap();
+    assert_eq!(c.send_stream(&[0x17, 3, 3, 0, 40, 1, 2], false), Ok(7));
+    c.shutdown(SHUT_WR).unwrap();
+    tls_run();
+    let e = s.recv_stream(100, false, false).unwrap_err();
+    assert_eq!(e, Errno::EMSGSIZE);
+    for x in [c, s, l] {
+        x.close();
+    }
+}
+
+#[test]
+fn tls_refusals() {
+    let _g = setup();
+    // `solisten_proto_check`, and a listening socket's I/O lock.
+    let t = tcp4();
+    t.tls_enable_tx(&tls_en()).unwrap();
+    assert_eq!(t.listen(1, &user()), Err(Errno::EINVAL));
+    t.close();
+    let lis = listener(20078);
+    assert_eq!(lis.tls_enable_tx(&tls_en()), Err(Errno::ENOTCONN));
+    assert_eq!(lis.tls_enable_rx(&tls_en()), Err(Errno::ENOTCONN));
+    lis.close();
+    // Only a suite TLS 1.0 can send.
+    let (l, c, s) = connected(20079);
+    assert_eq!(s.send_tls(b"x", 23, false, false, None), Err(Errno::EINVAL));
+    c.tls_enable_tx(&tls_en()).unwrap();
+    assert_eq!(c.send_tls(&[], 23, false, false, None), Err(Errno::EINVAL));
+    for x in [c, s, l] {
+        x.close();
+    }
+}

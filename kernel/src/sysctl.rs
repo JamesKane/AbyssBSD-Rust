@@ -447,6 +447,7 @@ pub(crate) fn init() {
             )
             .expect("kern.ipc.somaxconn");
         }
+        tls_nodes(&mut t, ipc);
         let net = t.child(root, "net").expect("net node");
         let local = t
             .add_node(net, Number::Fixed(1), "local", "Local domain")
@@ -718,4 +719,242 @@ pub(crate) fn mark_capability_readable(s: &Sleepable) {
             t.set_flags(id, abi::sysctl::ctlflag::CAPRD);
         }
     });
+}
+
+/// `kern.ipc.tls`: its knobs and counters (sys/kern/uipc_ktls.c,
+/// sys/opencrypto/ktls_ocf.c). Every session is in software, so the
+/// `ifnet`, `toe`, and switching counters stay 0.
+fn tls_nodes(t: &mut sysctl::Tree, ipc: sysctl::NodeId) {
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+    use ktls::stats as st;
+    let u64v = |a: &'static AtomicU64| Value::U64(alloc::boxed::Box::new(move || a.load(Relaxed)));
+    let zero = || Value::U64(alloc::boxed::Box::new(|| 0));
+    let tls = t
+        .add_node(ipc, Number::Auto, "tls", "Kernel TLS offload")
+        .expect("kern.ipc.tls");
+    let stats = t
+        .add_node(tls, Number::Auto, "stats", "Kernel TLS offload stats")
+        .expect("kern.ipc.tls.stats");
+    let knobs: [(&str, &str, &'static AtomicBool); 2] = [
+        (
+            "enable",
+            "Enable support for kernel TLS offload",
+            &st::ENABLE,
+        ),
+        (
+            "cbc_enable",
+            "Enable support of AES-CBC crypto for kernel TLS",
+            &st::CBC_ENABLE,
+        ),
+    ];
+    for (name, descr, b) in knobs {
+        t.add_writable(
+            tls,
+            Number::Auto,
+            name,
+            descr,
+            0,
+            Value::U8(alloc::boxed::Box::new(move || u8::from(b.load(Relaxed)))),
+            sysctl::u8_writer(move |v| {
+                b.store(v != 0, Relaxed);
+                Ok(())
+            }),
+        )
+        .expect("kern.ipc.tls knob");
+    }
+    t.add_value(
+        tls,
+        Number::Auto,
+        "bind_threads",
+        "Bind crypto threads to cores (1) or cores and domains (2) at boot",
+        Value::int(0),
+    )
+    .expect("kern.ipc.tls.bind_threads");
+    t.add_value(
+        tls,
+        Number::Auto,
+        "maxlen",
+        "Maximum TLS record size",
+        Value::Uint(alloc::boxed::Box::new(|| {
+            u32::try_from(ktls::MAX_FRAME).unwrap_or(u32::MAX)
+        })),
+    )
+    .expect("kern.ipc.tls.maxlen");
+    let fixed = [
+        (
+            "ifnet_max_rexmit_pct",
+            "Max percent bytes retransmitted before ifnet TLS is disabled",
+            Value::Uint(alloc::boxed::Box::new(|| 2)),
+        ),
+        (
+            "sw_buffer_cache",
+            "Enable caching of output buffers for SW encryption",
+            Value::U8(alloc::boxed::Box::new(|| 1)),
+        ),
+        (
+            "max_reclaim",
+            "Max number of 16k buffers to reclaim in thread context",
+            Value::int(1024),
+        ),
+        (
+            "tasks_active",
+            "Number of active tasks",
+            Value::U64(alloc::boxed::Box::new(|| 0)),
+        ),
+    ];
+    for (name, descr, v) in fixed {
+        t.add_value(tls, Number::Auto, name, descr, v)
+            .expect("kern.ipc.tls");
+    }
+    t.add_value(
+        stats,
+        Number::Auto,
+        "threads",
+        "Number of TLS threads in thread-pool",
+        Value::Int(alloc::boxed::Box::new(|| st::THREADS.load(Relaxed))),
+    )
+    .expect("kern.ipc.tls.stats.threads");
+    let live: [(&str, &str, &'static AtomicU64); 6] = [
+        (
+            "sw_rx_inqueue",
+            "Number of TLS sockets in queue to tasks for SW decryption",
+            &st::SW_RX_INQUEUE,
+        ),
+        (
+            "offload_total",
+            "Total successful TLS setups (parameters set)",
+            &st::OFFLOAD_TOTAL,
+        ),
+        (
+            "enable_calls",
+            "Total number of TLS enable calls made",
+            &st::ENABLE_CALLS,
+        ),
+        ("active", "Total Active TLS sessions", &st::ACTIVE),
+        (
+            "corrupted_records",
+            "Total corrupted TLS records received",
+            &st::CORRUPTED_RECORDS,
+        ),
+        (
+            "failed_crypto",
+            "Total TLS crypto failures",
+            &st::FAILED_CRYPTO,
+        ),
+    ];
+    for (name, descr, a) in live {
+        t.add_value(stats, Number::Auto, name, descr, u64v(a))
+            .expect("kern.ipc.tls.stats");
+    }
+    let idle = [
+        (
+            "sw_tx_pending",
+            "Number of TLS 1.0 records waiting for earlier TLS records",
+        ),
+        (
+            "sw_tx_inqueue",
+            "Number of TLS records in queue to tasks for SW encryption",
+        ),
+        ("switch_to_ifnet", "TLS sessions switched from SW to ifnet"),
+        ("switch_to_sw", "TLS sessions switched from ifnet to SW"),
+        (
+            "switch_failed",
+            "TLS sessions unable to switch between SW and ifnet",
+        ),
+        (
+            "ifnet_disable_failed",
+            "TLS sessions unable to switch to SW from ifnet",
+        ),
+        (
+            "ifnet_disable_ok",
+            "TLS sessions able to switch to SW from ifnet",
+        ),
+        (
+            "destroy_task",
+            "Number of times ktls session was destroyed via taskqueue",
+        ),
+    ];
+    for (name, descr) in idle {
+        t.add_value(stats, Number::Auto, name, descr, zero())
+            .expect("kern.ipc.tls.stats");
+    }
+    let ocf = t
+        .add_node(
+            stats,
+            Number::Auto,
+            "ocf",
+            "Kernel TLS offload via OCF stats",
+        )
+        .expect("kern.ipc.tls.stats.ocf");
+    for ((name, descr), a) in st::OCF_NAMES.iter().zip(&st::OCF) {
+        t.add_value(ocf, Number::Auto, name, descr, u64v(a))
+            .expect("kern.ipc.tls.stats.ocf");
+    }
+    let sw = t
+        .add_node(tls, Number::Auto, "sw", "Software TLS session stats")
+        .expect("kern.ipc.tls.sw");
+    let kinds: [(&str, &str, &'static AtomicU64); 3] = [
+        (
+            "cbc",
+            "Active number of software TLS sessions using AES-CBC",
+            &st::SW_CBC,
+        ),
+        (
+            "gcm",
+            "Active number of software TLS sessions using AES-GCM",
+            &st::SW_GCM,
+        ),
+        (
+            "chacha20",
+            "Active number of software TLS sessions using Chacha20-Poly1305",
+            &st::SW_CHACHA20,
+        ),
+    ];
+    for (name, descr, a) in kinds {
+        t.add_value(sw, Number::Auto, name, descr, u64v(a))
+            .expect("kern.ipc.tls.sw");
+    }
+    for (node, descr) in [
+        ("ifnet", "Hardware (ifnet) TLS session stats"),
+        ("toe", "TOE TLS session stats"),
+    ] {
+        let n = t
+            .add_node(tls, Number::Auto, node, descr)
+            .expect("kern.ipc.tls.ifnet, toe");
+        for name in ["cbc", "gcm", "chacha20"] {
+            t.add_value(
+                n,
+                Number::Auto,
+                name,
+                "Active number of TLS sessions",
+                zero(),
+            )
+            .expect("kern.ipc.tls.ifnet, toe");
+        }
+        if node == "ifnet" {
+            let resets = [
+                ("reset", "TLS sessions updated to a new ifnet send tag"),
+                (
+                    "reset_dropped",
+                    "TLS sessions dropped after failing to update ifnet send tag",
+                ),
+                (
+                    "reset_failed",
+                    "TLS sessions that failed to allocate a new ifnet send tag",
+                ),
+            ];
+            for (name, descr) in resets {
+                t.add_value(n, Number::Auto, name, descr, zero())
+                    .expect("kern.ipc.tls.ifnet");
+            }
+            t.add_value(
+                n,
+                Number::Auto,
+                "permitted",
+                "Whether to permit hardware (ifnet) TLS sessions",
+                Value::Uint(alloc::boxed::Box::new(|| 1)),
+            )
+            .expect("kern.ipc.tls.ifnet.permitted");
+        }
+    }
 }

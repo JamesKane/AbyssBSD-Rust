@@ -156,6 +156,8 @@ pub(crate) struct Side {
     flow: u32,
     /// Readers or writers to wake once the lock goes.
     wake: bool,
+    /// Whole TLS records to open once the lock goes.
+    tls: bool,
 }
 
 /// A TCP socket's protocol state (`struct tcpcb` and what of `struct
@@ -192,6 +194,7 @@ impl Tcb {
                 path: Path::default(),
                 flow: 0,
                 wake: false,
+                tls: false,
             },
             vnet: Arc::clone(vnet),
         }
@@ -268,14 +271,15 @@ impl Sock for View<'_> {
         self.i.snd.cant
     }
     fn rcv_cc(&self) -> u32 {
-        self.i.rcv.cc
+        self.i.rcv.cc + self.i.tls_pending()
     }
     fn rcv_hiwat(&self) -> u32 {
         self.i.rcv.hiwat
     }
     fn rcv_space(&self) -> i64 {
         let r = &self.i.rcv;
-        (i64::from(r.hiwat) - i64::from(r.cc)).min(i64::from(r.mbmax) - i64::from(r.mbcnt))
+        let cc = i64::from(r.cc) + i64::from(self.i.tls_pending());
+        (i64::from(r.hiwat) - cc).min(i64::from(r.mbmax) - i64::from(r.mbcnt))
     }
     fn rcv_mbcnt(&self) -> u32 {
         self.i.rcv.mbcnt
@@ -296,6 +300,10 @@ impl Sock for View<'_> {
         if self.i.rcv.cant {
             return;
         }
+        if self.i.tls_rx.is_some() {
+            self.side.tls |= self.i.tls_append(data);
+            return;
+        }
         self.i.rcv.cc += u32::try_from(data.len()).unwrap_or(u32::MAX);
         self.i.stream.append(data);
         self.i.rcv.mbcnt = self.i.stream.cost();
@@ -303,6 +311,7 @@ impl Sock for View<'_> {
     }
     fn cantrcvmore(&mut self) {
         self.i.rcv.cant = true;
+        self.side.tls |= self.i.tls_check_rx();
         self.side.wake = true;
     }
     fn rcv_closed(&self) -> bool {
@@ -322,6 +331,7 @@ impl Sock for View<'_> {
         self.i.state = (self.i.state & !ss::ISCONNECTING) | ss::ISDISCONNECTING;
         self.i.rcv.cant = true;
         self.i.snd.cant = true;
+        self.side.tls |= self.i.tls_check_rx();
         self.side.wake = true;
     }
     fn disconnected(&mut self) {
@@ -329,6 +339,7 @@ impl Sock for View<'_> {
             | ss::ISDISCONNECTED;
         self.i.rcv.cant = true;
         self.i.snd.cant = true;
+        self.side.tls |= self.i.tls_check_rx();
         // `sbdrop` of the send buffer.
         self.i.sndq = Chain::default();
         self.i.snd.cc = 0;
@@ -719,10 +730,52 @@ fn syncache_armed(vnet: &Vnet) {
 // --- Running the protocol ---
 
 /// What a call into a connection left to do once the lock is gone.
+/// `sosend_generic`'s checks before a round, and `tcp_usr_send`'s of a
+/// named peer: the peer to connect to first, if any.
+fn send_check<'a>(
+    i: &mut Inner,
+    to: Option<(&'a [u8], &'a Cred)>,
+) -> Result<Option<(&'a [u8], &'a Cred)>, Errno> {
+    if i.snd.cant {
+        return Err(Errno::EPIPE);
+    }
+    if let Some(e) = i.error.take() {
+        return Err(e);
+    }
+    if i.state & ss::ISCONNECTED == 0 && to.is_none() {
+        return Err(Errno::ENOTCONN);
+    }
+    // `tcp_usr_send`: a peer named before SYN_SENT is connected to.
+    match (to, i.tcp.as_ref()) {
+        (Some(_), Some(t)) if t.dropped => Err(Errno::ECONNRESET),
+        (Some((raw, cred)), Some(t)) if t.tp.state < ::tcp::State::SynSent => {
+            if t.listen.is_some() {
+                return Err(Errno::EINVAL);
+            }
+            Ok(Some((raw, cred)))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// How much of `len` bytes the send buffer takes now.
+///
+/// # Errors
+///
+/// `EAGAIN` with not all the room and less than `least`.
+fn send_room(i: &Inner, len: usize, least: usize) -> Result<usize, Errno> {
+    let room = i.snd.space() as usize;
+    if room < len && room < least.max(1) {
+        return Err(Errno::EAGAIN);
+    }
+    Ok(len.min(room))
+}
+
 struct Done {
     fate: Fate,
     deadline: Option<u64>,
     wake: bool,
+    tls: bool,
     nofdref: bool,
 }
 
@@ -779,6 +832,7 @@ impl Socket {
                     tcb.tp.next_deadline()
                 },
                 wake: core::mem::take(&mut tcb.side.wake),
+                tls: core::mem::take(&mut tcb.side.tls),
                 nofdref: tcb.side.nofdref,
             };
             i.tcp = Some(tcb);
@@ -791,6 +845,9 @@ impl Socket {
     /// After a call: segments out, wakeups, the end, the timer.
     fn finish(self: &Arc<Self>, d: Done) {
         self.tcp_send_queued();
+        if d.tls {
+            crate::tls::enqueue(self);
+        }
         if d.wake {
             self.wake();
         }
@@ -847,6 +904,11 @@ impl Socket {
         let _ = self.run_tcp(None, |tp, so, cx| ((), tp.output(so, cx)));
     }
 
+    /// `tcp_drop` for `e`.
+    pub(crate) fn tcp_drop_for(self: &Arc<Self>, e: Errno) {
+        let _ = self.run_tcp(None, |tp, so, cx| ((), tp.drop(so, cx, e)));
+    }
+
     /// The connection's timers are due.
     fn tcp_timers(self: &Arc<Self>) {
         let _ = self.run_tcp(None, |tp, so, cx| ((), tp.timers(so, cx)));
@@ -878,6 +940,10 @@ impl Socket {
             if i.state & (ss::ISCONNECTED | ss::ISCONNECTING | ss::ISDISCONNECTING) != 0
                 || i.tcp.as_ref().is_some_and(|t| t.dropped)
             {
+                return Err(Errno::EINVAL);
+            }
+            // `solisten_proto_check`.
+            if i.tls_tx.is_some() || i.tls_rx.is_some() {
                 return Err(Errno::EINVAL);
             }
         }
@@ -1103,9 +1169,7 @@ impl Socket {
             if how == SHUT_RD || how == SHUT_RDWR {
                 // `sorflush`.
                 i.rcv.cant = true;
-                i.stream = Chain::default();
-                i.rcv.cc = 0;
-                i.rcv.mbcnt = 0;
+                i.rcv_flush();
             }
         }
         if how == SHUT_WR || how == SHUT_RDWR {
@@ -1154,12 +1218,7 @@ impl Socket {
             return;
         }
         // `sbflush` of what was not read.
-        {
-            let mut i = self.inner.lock();
-            i.stream = Chain::default();
-            i.rcv.cc = 0;
-            i.rcv.mbcnt = 0;
-        }
+        self.inner.lock().rcv_flush();
         // Held until the connection ends (`INP_SOCKREF`).
         st.tcp.orphans.lock().insert(self.id, Arc::clone(self));
         let r = self.run_tcp(None, |tp, so, cx| ((), tp.usr_close(so, cx, linger0)));
@@ -1214,39 +1273,20 @@ impl Socket {
     ) -> Result<usize, Errno> {
         let (n, implied) = {
             let mut i = self.inner.lock();
-            if i.snd.cant {
-                return Err(Errno::EPIPE);
+            if i.tls_tx.is_some() {
+                drop(i);
+                return self.send_tls(data, abi::ktls::TLS_RLTYPE_APP, false, oob, to);
             }
-            if let Some(e) = i.error.take() {
-                return Err(e);
-            }
-            if i.state & ss::ISCONNECTED == 0 && to.is_none() {
-                return Err(Errno::ENOTCONN);
-            }
-            // `tcp_usr_send`: a peer named before SYN_SENT is connected to.
-            let implied = match (to, i.tcp.as_ref()) {
-                (Some(_), Some(t)) if t.dropped => return Err(Errno::ECONNRESET),
-                (Some((raw, cred)), Some(t)) if t.tp.state < ::tcp::State::SynSent => {
-                    if t.listen.is_some() {
-                        return Err(Errno::EINVAL);
-                    }
-                    Some((raw, cred))
-                }
-                _ => None,
-            };
+            let implied = send_check(&mut i, to)?;
             if data.is_empty() && implied.is_none() {
                 return Ok(0);
             }
-            let room = i.snd.space() as usize;
             let least = if spliced.is_some() {
                 1
             } else {
                 i.snd.lowat as usize
             };
-            if room < data.len() && room < least.max(1) {
-                return Err(Errno::EAGAIN);
-            }
-            let n = data.len().min(room);
+            let n = send_room(&i, data.len(), least)?;
             if n > 0 {
                 let c = Chain::from_slice(&data[..n]).map_err(|_| Errno::ENOBUFS)?;
                 i.sndq.append(c);
@@ -1255,6 +1295,54 @@ impl Socket {
             }
             (n, implied)
         };
+        self.send_queued(n, implied, spliced, oob && n == data.len())
+    }
+
+    /// `sosend_generic` with a sending TLS session, one round: as much of
+    /// `data` as the buffer takes now, or with `atomic` all of it or none,
+    /// in records of type `rtype`. Returns the bytes taken.
+    ///
+    /// # Errors
+    ///
+    /// As [`Socket::send_stream`]; `EINVAL` with no session, or nothing to
+    /// send where an empty record is not allowed.
+    pub fn send_tls(
+        self: &Arc<Self>,
+        data: &[u8],
+        rtype: u8,
+        atomic: bool,
+        oob: bool,
+        to: Option<(&[u8], &Cred)>,
+    ) -> Result<usize, Errno> {
+        let (n, implied, layout) = {
+            let mut i = self.inner.lock();
+            let layout = i.tls_tx.ok_or(Errno::EINVAL)?;
+            if data.is_empty() && !layout.permit_empty() {
+                return Err(Errno::EINVAL);
+            }
+            let implied = send_check(&mut i, to)?;
+            let least = if atomic {
+                data.len()
+            } else {
+                i.snd.lowat as usize
+            };
+            (send_room(&i, data.len(), least)?, implied, layout)
+        };
+        if n > 0 || data.is_empty() {
+            self.tls_frame(&data[..n], rtype, layout)?;
+        }
+        self.send_queued(n, implied, None, oob && n == data.len())
+    }
+
+    /// What `sosend_generic` does after a round is in the buffer: connects
+    /// if `implied` (the data then waits for the handshake), or sends.
+    fn send_queued(
+        self: &Arc<Self>,
+        n: usize,
+        implied: Option<(&[u8], &Cred)>,
+        spliced: Option<&core::sync::atomic::AtomicU64>,
+        urgent: bool,
+    ) -> Result<usize, Errno> {
         if let Some((raw, cred)) = implied {
             if let Err(e) = self.tcp_start(raw, cred, true) {
                 // `sbflush`.
@@ -1271,7 +1359,6 @@ impl Socket {
             // Relaxed: counted before the receiver can see it.
             c.fetch_add(n as u64, Ordering::Relaxed);
         }
-        let urgent = oob && n == data.len();
         self.run_tcp(None, |tp, so, cx| {
             let f = if urgent {
                 tp.send_oob(so, cx)
@@ -1335,11 +1422,22 @@ impl Socket {
     ///
     /// `ECONNRESET` if the connection was dropped.
     pub fn send_chain(self: &Arc<Self>, c: Chain) -> Result<(), Errno> {
-        {
-            let mut i = self.inner.lock();
+        let tls = {
+            let i = self.inner.lock();
             if i.tcp.as_ref().is_some_and(|t| t.dropped) {
                 return Err(Errno::ECONNRESET);
             }
+            i.tls_tx
+        };
+        if let Some(layout) = tls {
+            // Into new buffers: the pages of a file stay as they are.
+            if !c.is_empty() {
+                let mut b = vec![0; c.len()];
+                c.copy_out(0, &mut b);
+                self.tls_frame(&b, abi::ktls::TLS_RLTYPE_APP, layout)?;
+            }
+        } else {
+            let mut i = self.inner.lock();
             i.snd.cc = i
                 .snd
                 .cc
@@ -1387,7 +1485,22 @@ impl Socket {
             out.flags = abi::socket::MSG_OOB;
             return Ok(out);
         }
-        self.recv_data(max, peek, |_| true)
+        self.recv_data(max, peek, false, |_| true)
+            .map(Option::unwrap_or_default)
+    }
+
+    /// [`Socket::recv_stream`] of data with `MSG_TLSAPPDATA`: on a socket
+    /// with a receiving TLS session, stops before an alert record.
+    ///
+    /// # Errors
+    ///
+    /// As [`Socket::recv_stream`]; `ENXIO` at an alert.
+    pub fn recv_tls_app(
+        self: &Arc<Self>,
+        max: usize,
+        peek: bool,
+    ) -> Result<crate::Received, Errno> {
+        self.recv_data(max, peek, true, |_| true)
             .map(Option::unwrap_or_default)
     }
 
@@ -1398,7 +1511,7 @@ impl Socket {
         max: usize,
         still: impl FnOnce(&Inner) -> bool,
     ) -> Result<Option<crate::Received>, Errno> {
-        self.recv_data(max, false, still)
+        self.recv_data(max, false, false, still)
     }
 
     /// `soreceive_generic`'s data path, if `still` holds under the lock;
@@ -1408,6 +1521,7 @@ impl Socket {
         self: &Arc<Self>,
         max: usize,
         peek: bool,
+        appdata: bool,
         still: impl FnOnce(&Inner) -> bool,
     ) -> Result<Option<crate::Received>, Errno> {
         let mut out = crate::Received::default();
@@ -1415,6 +1529,15 @@ impl Socket {
             let mut i = self.inner.lock();
             if !still(&i) {
                 return Ok(None);
+            }
+            if Self::tls_rx_on(&i) {
+                out = Self::tls_recv(&mut i, max, peek, appdata)?;
+                let read = !peek && !out.data.is_empty();
+                drop(i);
+                if read {
+                    self.tcp_rcvd();
+                }
+                return Ok(Some(out));
             }
             if i.stream.is_empty() {
                 if let Some(e) = i.error {
@@ -1456,6 +1579,12 @@ impl Socket {
                 }
             }
         }
+        self.tcp_rcvd();
+        Ok(Some(out))
+    }
+
+    /// `tcp_usr_rcvd`.
+    fn tcp_rcvd(self: &Arc<Self>) {
         self.run_tcp(None, |tp, so, cx| {
             if tp.state.have_established() {
                 ((), tp.rcvd(so, cx))
@@ -1463,7 +1592,6 @@ impl Socket {
                 ((), Fate::Alive)
             }
         });
-        Ok(Some(out))
     }
 
     /// `SIOCATMARK`.

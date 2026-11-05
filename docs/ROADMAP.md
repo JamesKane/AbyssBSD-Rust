@@ -1864,7 +1864,7 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
   (MULTIUSER.md §13), failing on unchecked types.
 - Exit: the kyua target met in all four areas in bhyve; `abi-check` complete.
 - `sys/kern/ktls_test` is out of the target until P7 (ADR-0016, amended 2026-10-29): it is 566 of
-  `sys/kern`'s 972 FreeBSD passes, and needs TCP and kernel TLS.
+  `sys/kern`'s 972 FreeBSD passes, and needs TCP and kernel TLS. Back in the target since P7.7.
 - Progress 2026-10-29: `cargo xtask --remote kyua` runs the four areas in one 8-CPU bhyve boot in
   about an hour. Of FreeBSD's passes, `bin` passes 97.9%, `lib/libc` 97.3%, `usr.bin` 98.5%, and
   `sys/kern` 94.3–95.3% from run to run: about a dozen of its cases race with each other in a
@@ -2132,6 +2132,13 @@ P7.0 ─► P7.1 ─► P7.2 ─► P7.3 ─► P7.4 ─┬─► P7.5 ───
   architectures. `sendfile` lends page-cache pages to TCP without a copy (copies to UNIX-domain
   sockets), with headers, trailers, and `SB_AUTOLOWAT`; every `lib/libc/sys/sendfile_test` case
   FreeBSD passes passes. Left: kernel TLS.
+- Done 2026-11-05. `sys/ktls` seals and opens records for TLS 1.0–1.3 (send only for TLS 1.0, as
+  FreeBSD): AES-CBC with HMAC, AES-GCM, ChaCha20-Poly1305. Records are sealed in the sender's
+  context and opened on `ktls` threads, one per CPU, started by the first receiving session.
+  `TLS_SET_RECORD_TYPE`, `TLS_GET_RECORD`, `MSG_TLSAPPDATA`, `sendfile` over TLS, and `kern.ipc.tls`
+  are in. All 566 `ktls_test` cases FreeBSD passes pass on x86_64 and aarch64, and `ktls_test` is
+  back in the target. `tests/user/inet.c` checks `sendfile`'s records on both systems. Perf debt for
+  P7.9: a record is built in one `Vec`, then copied into mbufs (send) or out of them (receive).
 
 **P7.8 Conformance.**
 - The kyua directories at the target with every remaining failure listed; differential scenarios

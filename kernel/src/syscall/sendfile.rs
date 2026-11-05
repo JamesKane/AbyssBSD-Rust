@@ -177,6 +177,9 @@ fn xfsize(i: u64, n: u64, off: u64, len: u64) -> u64 {
     PAGE
 }
 
+/// The pages of a record (`num_pages(max_frame_len)`).
+const TLS_PAGES: u64 = ktls::MAX_FRAME as u64 / PAGE;
+
 /// `vn_sendfile` from the source file to the socket open as `sock_fd`;
 /// `sent` counts what was queued, also on error.
 #[allow(clippy::too_many_arguments, reason = "the system call's state")]
@@ -276,6 +279,12 @@ fn send(
         match sink {
             Sink::Tcp(so) => {
                 let mut chain = Chain::from_slice(&head).map_err(|_| Errno::ENOBUFS)?;
+                // Over TLS the header is its own records and each run of
+                // `TLS_PAGES` pages one more (`vn_sendfile`'s `max_pgs`).
+                let tls = so.tls_tx_layout().is_some();
+                if tls {
+                    so.send_chain(core::mem::take(&mut chain))?;
+                }
                 for i in 0..npages {
                     let at = if i == 0 {
                         off
@@ -303,6 +312,9 @@ fn send(
                         }
                     };
                     chain.push_back(m);
+                    if tls && (i + 1) % TLS_PAGES == 0 {
+                        so.send_chain(core::mem::take(&mut chain))?;
+                    }
                 }
                 so.send_chain(chain)?;
             }

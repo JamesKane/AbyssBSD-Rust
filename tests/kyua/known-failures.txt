@@ -2,14 +2,15 @@
 # (cargo xtask kyua and the boot tier's shell cases compare the rest with
 # freebsd/freebsd-15.1-RELEASE-x86_64-bhyve.txt). One per line, with why
 # and until when.
+# A reason starting `timing:` takes the case out of the comparison: what it
+# ends as depends on timing, not on what it tests, so it says nothing.
 sys/posixshm/memfd_test:hugetlb                 # no superpage objects (compat-deviations), P6.8
 sys/posixshm/posixshm_test:largepage_config     # no superpage objects (compat-deviations), P6.8
 sys/posixshm/posixshm_test:largepage_reopen     # no superpage objects (compat-deviations), P6.8
-sys/kern/timerfd:timerfd__periodic_timer_performance # passes; FreeBSD's expected failure (PR 294053)
-sys/kern/timerfd:timerfd_root__advance_time_no_cancel # passes; fails on FreeBSD 15.1
+sys/kern/timerfd:timerfd__periodic_timer_performance # timing: a performance limit
+sys/kern/timerfd:timerfd_root__advance_time_no_cancel # timing: steps the realtime clock
 sys/kern/timerfd:timerfd__argument_checks       # arm64: its last check passes an uninitialized itimerspec, valid there, so EBADF as FreeBSD's order gives; the baseline is amd64's
 sys/kern/unix_dgram:event                       # aio_read on a socket: POSIX AIO, P7
-sys/kern/socket_msg_waitall:close_tcp           # AF_INET, P7
 sys/kern/sonewconn_overflow:sonewconn_overflow_01 # the listen queue overflow log (sonewconn, kern.ipc.sooverinterval) and kern.msgbuf_clear: TCP's listen path, P7.6
 sys/kqueue/libkqueue/kqueue_test:main          # passes; FreeBSD 15.1 aborts it (signal 6)
 sys/kern/jail_lookup_root:jail_root             # nullfs, not yet planned (VFS.md §1.2)
@@ -20,7 +21,7 @@ sys/capsicum/ioctls_test:cap_ioctls__listen_copy # AF_INET, P7
 usr.sbin/jail/jail_basic_test:basic             # ip4.addr: AF_INET, P7
 usr.sbin/jail/jail_basic_test:nested            # ip4.addr: AF_INET, P7
 usr.sbin/jail/jail_basic_test:setaudit          # setaudit_addr: no security event auditing (compat-deviations)
-sys/kern/ptrace_test:ptrace__PT_ATTACH_no_EINTR # passes; FreeBSD 15.1's run timed out (broken)
+sys/kern/ptrace_test:ptrace__PT_ATTACH_no_EINTR # timing: FreeBSD 15.1's run timed out
 
 # P6.10's run in bhyve (2026-10-29): what fails beside the target's 95%.
 sys/kern/fdgrowtable_test:free_oldtables                # kvm_open of the live kernel (/dev/mem, a symbol table libkvm can read): none, by design
@@ -34,17 +35,15 @@ sys/kern/sendfile_test:io_fail_sync                     # needs the gnop GEOM cl
 sys/kern/sendfile_test:io_success                       # needs the gnop GEOM class (kldload geom_nop)
 sys/kern/sendfile_test:unix_success                     # needs the gnop GEOM class (kldload geom_nop)
 sys/kern/exterr_test:gettext_extended                   # extended error strings (EXTERROR) are not reported yet
-sys/kern/ptrace_test:ptrace__PT_KILL_competing_stop     # SCHED_FIFO priorities on one CPU decide which thread runs first; the race goes the other way here
-sys/kern/sigwait:test_wait_dequeue_sigchld_true         # flaky in a parallel run: its _false twin sets the same global sysctl at the same time
-sys/kern/sigwait:test_sig_discard_ign_true              # flaky in a parallel run: its _false twin sets the same global sysctl at the same time
-sys/kern/timerfd:timerfd_root__zero_read_on_abs_realtime # flaky in a parallel run: other root cases step the realtime clock meanwhile
-sys/kern/timerfd:timerfd__missed_events                 # flaky in a parallel run: other root cases step the realtime clock meanwhile
+sys/kern/ptrace_test:ptrace__PT_KILL_competing_stop # timing: which thread runs first
+sys/kern/sigwait:test_wait_dequeue_sigchld_true # timing: its _false twin sets the same global sysctl at the same time
+sys/kern/sigwait:test_sig_discard_ign_true # timing: its _false twin sets the same global sysctl at the same time
+sys/kern/timerfd:timerfd_root__zero_read_on_abs_realtime # timing: other root cases step the realtime clock meanwhile
+sys/kern/timerfd:timerfd__missed_events # timing: other root cases step the realtime clock meanwhile
 lib/libc/sys/brk_test:brk_basic                         # brk and sbrk are not implemented (ENOSYS)
 lib/libc/sys/brk_test:sbrk_basic                        # brk and sbrk are not implemented (ENOSYS)
 lib/libc/sys/brk_test:mlockfuture                       # brk and sbrk are not implemented (ENOSYS)
-lib/libc/sys/getrusage_test:getrusage_err               # getrusage: an unknown who is not EINVAL, and RUSAGE_SELF fails here; not examined further
 lib/libc/sys/getrusage_test:getrusage_sig               # getrusage: an unknown who is not EINVAL, and RUSAGE_SELF fails here; not examined further
-lib/libc/sys/getrusage_test:getrusage_utime_back        # getrusage: an unknown who is not EINVAL, and RUSAGE_SELF fails here; not examined further
 lib/libc/sys/mincore_test:mincore_err                   # mincore: ENOSYS for some ranges, ENOMEM not reported; not examined further
 lib/libc/sys/mincore_test:mincore_resid                 # mincore: ENOSYS for some ranges, ENOMEM not reported; not examined further
 lib/libc/sys/mincore_test:mincore_shmseg                # mincore: ENOSYS for some ranges, ENOMEM not reported; not examined further

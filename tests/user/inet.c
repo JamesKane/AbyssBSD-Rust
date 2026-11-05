@@ -10,7 +10,9 @@
  * SO_ERROR, TIME_WAIT holding a port, out-of-band data with SIOCATMARK),
  * getaddrinfo's passive wildcard for syslogd's "syslog" service, and lo0
  * as getifaddrs, if_nametoindex, SIOCGIFFLAGS, netlink, the
- * net.inet.*.pcblist sysctls, and kern.features show it.
+ * net.inet.*.pcblist sysctls, and kern.features show it. Also sendfile
+ * over kernel TLS, read back through a receiving session: ktls_test
+ * covers the records of a send, not those of a file.
  *
  * Runs on FreeBSD too (as root, with lo0 configured as rc.d/netif does).
  * Exits 0 on success; prints what failed otherwise.
@@ -18,10 +20,15 @@
 
 #include <sys/types.h>
 #include <sys/ioctl.h>
+#include <sys/ktls.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/sockio.h>
 #include <sys/sysctl.h>
+#include <sys/uio.h>
 #include <sys/wait.h>
+
+#include <crypto/cryptodev.h>
 
 #include <net/if.h>
 #include <netinet/in.h>
@@ -594,6 +601,161 @@ netlink(void)
 	close(s);
 }
 
+/*
+ * A connected pair over loopback: *c, connected, and *s, accepted.
+ */
+static void
+tcp_pair(int *c, int *s)
+{
+	struct sockaddr_in a;
+	socklen_t alen;
+	int l;
+
+	l = socket(AF_INET, SOCK_STREAM, 0);
+	a = sin4(0);
+	CHECK(bind(l, (struct sockaddr *)&a, sizeof(a)) == 0, "bind");
+	CHECK(listen(l, 1) == 0, "listen");
+	alen = sizeof(a);
+	CHECK(getsockname(l, (struct sockaddr *)&a, &alen) == 0, "name");
+	*c = socket(AF_INET, SOCK_STREAM, 0);
+	CHECK(connect(*c, (struct sockaddr *)&a, sizeof(a)) == 0, "connect");
+	*s = accept(l, NULL, NULL);
+	CHECK(*s >= 0, "accept");
+	close(l);
+}
+
+/*
+ * A file with a header and a trailer through sendfile on a TLS connection,
+ * and each record read back: the header and the trailer are records of
+ * their own, the file's come whole, and the file's pages are not changed.
+ * The ciphertext goes through user space on its way to the receiving
+ * session: FreeBSD cannot open a record still on the sender's pages,
+ * which a loopback connection would hand it.
+ */
+static void
+ktls_sendfile(void)
+{
+	enum { OFF = 1000, LEN = 40000 };
+	static const uint8_t key[16] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+	    12, 13, 14, 15, 16 };
+	static const uint8_t iv[TLS_AEAD_GCM_LEN] = { 1, 2, 3, 4 };
+	static char file[OFF + LEN], want[LEN + 6], got[LEN + 6], rec[16384];
+	static char wire[2 * LEN];
+	char cbuf[CMSG_SPACE(sizeof(struct tls_get_record))];
+	struct tls_get_record tgr;
+	struct tls_enable en;
+	struct sf_hdtr hdtr;
+	struct iovec hdr, trl;
+	struct msghdr msg;
+	struct iovec iov;
+	struct cmsghdr *cm;
+	size_t have, first, last, nwire;
+	ssize_t rv;
+	off_t sent;
+	pid_t pid;
+	int c, c2, f, s, s2, status;
+
+	for (size_t i = 0; i < sizeof(file); i++)
+		file[i] = (char)(i * 31 + (i >> 8));
+	memcpy(want, "HDR", 3);
+	memcpy(want + 3, file + OFF, LEN);
+	memcpy(want + 3 + LEN, "TRL", 3);
+	f = shm_open(SHM_ANON, O_RDWR, 0600);
+	CHECK(f >= 0, "shm_open: %s", strerror(errno));
+	CHECK(ftruncate(f, sizeof(file)) == 0, "ftruncate");
+	CHECK(pwrite(f, file, sizeof(file), 0) == sizeof(file), "pwrite");
+
+	tcp_pair(&c, &s);
+	tcp_pair(&c2, &s2);
+
+	memset(&en, 0, sizeof(en));
+	en.cipher_key = key;
+	en.iv = iv;
+	en.cipher_algorithm = CRYPTO_AES_NIST_GCM_16;
+	en.cipher_key_len = sizeof(key);
+	en.iv_len = sizeof(iv);
+	en.tls_vmajor = TLS_MAJOR_VER_ONE;
+	en.tls_vminor = TLS_MINOR_VER_TWO;
+	CHECK(setsockopt(c, IPPROTO_TCP, TCP_TXTLS_ENABLE, &en,
+	    sizeof(en)) == 0, "TCP_TXTLS_ENABLE: %s", strerror(errno));
+	CHECK(setsockopt(s2, IPPROTO_TCP, TCP_RXTLS_ENABLE, &en,
+	    sizeof(en)) == 0, "TCP_RXTLS_ENABLE: %s", strerror(errno));
+
+	pid = fork();
+	if (pid == 0) {
+		hdr.iov_base = "HDR";
+		hdr.iov_len = 3;
+		trl.iov_base = "TRL";
+		trl.iov_len = 3;
+		hdtr.headers = &hdr;
+		hdtr.hdr_cnt = 1;
+		hdtr.trailers = &trl;
+		hdtr.trl_cnt = 1;
+		if (sendfile(f, c, OFF, LEN, &hdtr, &sent, 0) != 0 ||
+		    sent != LEN + 6)
+			_exit(1);
+		_exit(0);
+	}
+	close(c);
+	nwire = 0;
+	while ((rv = read(s, wire + nwire, sizeof(wire) - nwire)) > 0)
+		nwire += (size_t)rv;
+	CHECK(rv == 0, "read: %s", strerror(errno));
+	CHECK(waitpid(pid, &status, 0) == pid && status == 0, "sender %#x",
+	    status);
+	close(s);
+
+	pid = fork();
+	if (pid == 0)
+		_exit(write(c2, wire, nwire) != (ssize_t)nwire);
+	close(c2);
+
+	have = first = last = 0;
+	for (;;) {
+		memset(&msg, 0, sizeof(msg));
+		iov.iov_base = rec;
+		iov.iov_len = sizeof(rec);
+		msg.msg_iov = &iov;
+		msg.msg_iovlen = 1;
+		msg.msg_control = cbuf;
+		msg.msg_controllen = sizeof(cbuf);
+		rv = recvmsg(s2, &msg, 0);
+		CHECK(rv >= 0, "recvmsg: %s", strerror(errno));
+		if (rv <= 0)
+			break;
+		CHECK((msg.msg_flags & MSG_EOR) != 0, "flags %#x",
+		    msg.msg_flags);
+		cm = CMSG_FIRSTHDR(&msg);
+		CHECK(cm != NULL && cm->cmsg_level == IPPROTO_TCP &&
+		    cm->cmsg_type == TLS_GET_RECORD, "no TLS_GET_RECORD");
+		if (cm != NULL) {
+			memcpy(&tgr, CMSG_DATA(cm), sizeof(tgr));
+			CHECK(tgr.tls_type == TLS_RLTYPE_APP, "type %d",
+			    tgr.tls_type);
+			CHECK(ntohs(tgr.tls_length) == rv, "length %d of %zd",
+			    ntohs(tgr.tls_length), rv);
+		}
+		CHECK(have + (size_t)rv <= sizeof(got), "too much");
+		if (have + (size_t)rv > sizeof(got))
+			break;
+		memcpy(got + have, rec, (size_t)rv);
+		have += (size_t)rv;
+		if (first == 0)
+			first = (size_t)rv;
+		last = (size_t)rv;
+	}
+	CHECK(waitpid(pid, &status, 0) == pid && status == 0, "relay %#x",
+	    status);
+	CHECK(have == sizeof(want), "%zu bytes", have);
+	CHECK(memcmp(got, want, sizeof(want)) == 0, "the bytes differ");
+	CHECK(first == 3 && last == 3, "first record %zu, last %zu", first,
+	    last);
+	CHECK(pread(f, rec, sizeof(rec), OFF) == sizeof(rec), "pread");
+	CHECK(memcmp(rec, file + OFF, sizeof(rec)) == 0, "the file changed");
+	close(s2);
+	close(f);
+}
+
 int
 main(void)
 {
@@ -606,5 +768,6 @@ main(void)
 	lo0();
 	pcblist();
 	netlink();
+	ktls_sendfile();
 	return (failed);
 }

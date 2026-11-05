@@ -55,6 +55,37 @@ fn netisr_kick() {
     NETISR_WQ.wake_one();
 }
 
+/// The `ktls` threads' work, and where they wait.
+static KTLS_WQ: sched::WaitQueue = sched::WaitQueue::new();
+static KTLS_STARTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+fn ktls_kick() {
+    KTLS_WQ.wake_one();
+}
+
+/// `ktls_start_kthreads`: one `ktls` thread per CPU, the first time a
+/// receiving session is set up. Each opens the records of a socket at a
+/// time (a socket with work is on the queue once).
+pub(crate) fn ktls_start() {
+    if KTLS_STARTED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    inet::tls::set_kick(ktls_kick);
+    for _ in 0..sched::online_cpus() {
+        let r = sched::spawn("ktls", sched::Priority::KERNEL, |s| {
+            loop {
+                KTLS_WQ.wait_until(s, inet::tls::pending);
+                while let Some(so) = inet::tls::next() {
+                    so.ktls_decrypt();
+                }
+            }
+        });
+        if r.is_ok() {
+            ktls::stats::THREADS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
 /// The `netisr` thread (`swi1: netisr 0`): hands each VNET's queued
 /// packets to their protocols, a queue's worth at a time per VNET, until
 /// none is left (packets queued behind others did not kick).

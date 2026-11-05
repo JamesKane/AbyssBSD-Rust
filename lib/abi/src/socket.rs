@@ -90,6 +90,9 @@ pub const MSG_NBIO: i32 = 0x4000;
 pub const MSG_NOSIGNAL: i32 = 0x0002_0000;
 pub const MSG_CMSG_CLOEXEC: i32 = 0x0004_0000;
 pub const MSG_WAITFORONE: i32 = 0x0008_0000;
+/// `soreceive` stops before an alert record, with `ENXIO`. Under `_KERNEL`
+/// in `sys/socket.h`, so `abi-check` cannot see it.
+pub const MSG_TLSAPPDATA: i32 = 0x0020_0000;
 pub const MSG_CMSG_CLOFORK: i32 = 0x0040_0000;
 
 pub const SCM_RIGHTS: i32 = 0x01;

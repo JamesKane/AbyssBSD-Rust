@@ -17,7 +17,8 @@ use alloc::vec::Vec;
 
 use abi::errno::Errno;
 use abi::fcntl::{FREAD, FWRITE, O_NONBLOCK};
-use abi::inet::{IPPROTO_IP, IPPROTO_IPV6, IPPROTO_TCP, IPPROTO_UDP, ip, ipv6};
+use abi::inet::{IPPROTO_IP, IPPROTO_IPV6, IPPROTO_TCP, IPPROTO_UDP, ip, ipv6, tcp};
+use abi::ktls::{TLS_ENABLE_V0_SIZE, TlsEnable};
 use abi::socket::{
     CMSG_HDR, MSG_TRUNC, SCM_BINTIME, SCM_TIMESTAMP, SHUT_RDWR, SOCK_CLOEXEC, SOCK_CLOFORK,
     SOCK_DGRAM, SOCK_NONBLOCK, SOCK_SEQPACKET, SOCK_STREAM, SOL_SOCKET, cmsg_len, cmsg_space,
@@ -201,8 +202,70 @@ pub(super) fn setsockopt(
     name: i32,
     val: &[u8],
 ) -> SysResult {
+    if level == IPPROTO_TCP
+        && so.proto == Proto::Tcp
+        && matches!(name, tcp::TCP_TXTLS_ENABLE | tcp::TCP_RXTLS_ENABLE)
+    {
+        return tls_enable(so, name, val);
+    }
     so.setopt(level, name, val, &crate::fs::inet::cred())?;
     Ok(0)
+}
+
+/// `ktls_copyin_tls_enable`: `val` as a `struct tls_enable`, or the older
+/// structure without `rec_seq`.
+fn tls_header(val: &[u8]) -> Result<TlsEnable, Errno> {
+    let mut en = TlsEnable::default();
+    let b = uaccess::bytes_of_mut(&mut en);
+    let size = b.len();
+    if val.len() == TLS_ENABLE_V0_SIZE {
+        b[..TLS_ENABLE_V0_SIZE].copy_from_slice(val);
+        // Its tail is padding where `rec_seq` is now.
+        b[TLS_ENABLE_V0_SIZE - 6..].fill(0);
+    } else {
+        // `sooptcopyin`: shorter is `EINVAL`, longer is cut.
+        b.copy_from_slice(val.get(..size).ok_or(Errno::EINVAL)?);
+    }
+    ktls::check_lengths(en.cipher_key_len, en.iv_len, en.auth_key_len)?;
+    Ok(en)
+}
+
+/// A key `en` points at.
+fn tls_key(addr: u64, len: i32) -> Result<Vec<u8>, Errno> {
+    let mut k = alloc::vec![0; usize::try_from(len).unwrap_or(0)];
+    if !k.is_empty() {
+        uaccess::copy_in(&mut k, addr).map_err(|_| Errno::EFAULT)?;
+    }
+    Ok(k)
+}
+
+/// `TCP_TXTLS_ENABLE` and `TCP_RXTLS_ENABLE`, with the keys copied in.
+fn tls_enable(so: &alloc::sync::Arc<Socket>, name: i32, val: &[u8]) -> SysResult {
+    let en = tls_header(val)?;
+    let mut cipher_key = tls_key(en.cipher_key, en.cipher_key_len)?;
+    let mut iv = tls_key(en.iv, en.iv_len)?;
+    let mut auth_key = tls_key(en.auth_key, en.auth_key_len)?;
+    let e = ktls::Enable {
+        cipher_key: &cipher_key,
+        iv: &iv,
+        auth_key: &auth_key,
+        cipher_algorithm: en.cipher_algorithm,
+        auth_algorithm: en.auth_algorithm,
+        flags: en.flags,
+        vmajor: en.tls_vmajor,
+        vminor: en.tls_vminor,
+        rec_seq: en.rec_seq,
+    };
+    let r = if name == tcp::TCP_TXTLS_ENABLE {
+        so.tls_enable_tx(&e)
+    } else {
+        crate::net::ktls_start();
+        so.tls_enable_rx(&e)
+    };
+    cipher_key.fill(0);
+    iv.fill(0);
+    auth_key.fill(0);
+    r.map(|()| 0)
 }
 
 /// `getsockopt`'s value.
@@ -211,7 +274,8 @@ pub(super) fn getsockopt(so: &Socket, level: i32, name: i32) -> Result<Vec<u8>, 
 }
 
 /// A send's control messages (`udp_send`, `tcp_usr_send`): TCP takes
-/// none; UDP's IP-level `IP_SENDSRCADDR` and `IP_TOS` set the
+/// none but, with a sending TLS session, a first `TLS_SET_RECORD_TYPE`
+/// (`sosend_generic`); UDP's IP-level `IP_SENDSRCADDR` and `IP_TOS` set the
 /// datagram's source and TOS, IPv6's `IPV6_PKTINFO`, `IPV6_HOPLIMIT`,
 /// `IPV6_TCLASS`, and `IPV6_NEXTHOP` its source, interface, hop limit,
 /// traffic class, and next hop; others at the IP level are `EINVAL`
@@ -222,11 +286,17 @@ const IPV6_NEXTHOP: i32 = 48;
 fn check_control(so: &Socket, raw: &[u8]) -> Result<inet::SendCtl, Errno> {
     let mut ctl = inet::SendCtl::default();
     if so.proto == Proto::Tcp {
-        return if raw.is_empty() {
-            Ok(ctl)
-        } else {
-            Err(Errno::EINVAL)
-        };
+        if raw.is_empty() {
+            return Ok(ctl);
+        }
+        let ty = raw.get(8..12).and_then(|b| b.try_into().ok());
+        if ty.map(i32::from_ne_bytes) == Some(tcp::TLS_SET_RECORD_TYPE)
+            && so.tls_tx_layout().is_some()
+        {
+            ctl.tls_type = Some(*raw.get(CMSG_HDR).ok_or(Errno::EINVAL)?);
+            return Ok(ctl);
+        }
+        return Err(Errno::EINVAL);
     }
     let rd = |i: usize| -> u32 {
         u32::from_ne_bytes(
@@ -494,7 +564,10 @@ pub(super) fn recvit(
     }
     let mut ctllen = 0;
     if let Some((addr, len)) = control {
-        let msgs = r.meta.as_ref().map(controls).unwrap_or_default();
+        let mut msgs = r.meta.as_ref().map(controls).unwrap_or_default();
+        if let Some(t) = r.tls {
+            msgs.push(cmsg(IPPROTO_TCP, tcp::TLS_GET_RECORD, &t));
+        }
         let mut left = len as usize;
         let mut at = 0;
         for m in &msgs {

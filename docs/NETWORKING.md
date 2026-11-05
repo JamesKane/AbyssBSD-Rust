@@ -309,7 +309,11 @@ control plane in P7.2, before the protocols, and every protocol milestone is tes
 - **Kernel TLS.** `TCP_TXTLS_ENABLE` and `TCP_RXTLS_ENABLE` with TLS 1.0–1.3 records: AES-CBC with
   HMAC-SHA1/SHA-256/SHA-384, AES-GCM, and ChaCha20-Poly1305, written in-tree (`sys/crypto`).
   `sendfile` over a TLS socket encrypts the pages into new buffers. `kern.ipc.tls.*` sysctls and
-  statistics as FreeBSD has them.
+  statistics as FreeBSD has them. Sending seals a record in the sender's context under a per-socket
+  lock, which keeps sequence numbers in stream order; no cipher runs under the socket's lock.
+  Receiving holds ciphertext apart from the stream until a record is whole, and `ktls` threads, one
+  per CPU, open it. `rcv.cc` counts only what can be read, like `sbavail`; TCP's window counts the
+  rest too.
 - **Ciphers** are constant-time in software, use the CPU's instructions where present (AES-NI and
   PCLMULQDQ, the ARMv8 AES and PMULL instructions) behind `arch/*`, and are tested against the
   published vectors (NIST CAVP, RFC 8439, RFC 4231) on the host. `ktls_test` is the end-to-end

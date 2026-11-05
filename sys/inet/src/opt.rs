@@ -663,6 +663,11 @@ impl Socket {
                 }
                 tcp::TCP_FASTOPEN => return Err(Errno::EINVAL),
                 tcp::TCP_INFO => return Err(Errno::EINVAL),
+                tcp::TCP_TXTLS_MODE => {
+                    let v = int(val)?;
+                    drop(i);
+                    return Self::tls_set_tx_mode(&self.inner.lock(), v);
+                }
                 _ => return Err(Errno::ENOPROTOOPT),
             }
         }
@@ -974,6 +979,7 @@ impl Socket {
                 b
             }
             tcp::TCP_INFO => tcp_info(tp),
+            tcp::TCP_TXTLS_MODE | tcp::TCP_RXTLS_MODE => i32v(Self::tls_mode(&i, name)?),
             _ => return Err(Errno::ENOPROTOOPT),
         })
     }

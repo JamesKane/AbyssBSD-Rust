@@ -17,7 +17,9 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use abi::errno::Errno;
-use abi::socket::{MSG_DONTWAIT, MSG_NBIO, MSG_NOSIGNAL, MSG_OOB, MSG_PEEK, MSG_WAITALL};
+use abi::socket::{
+    MSG_DONTWAIT, MSG_EOR, MSG_NBIO, MSG_NOSIGNAL, MSG_OOB, MSG_PEEK, MSG_TLSAPPDATA, MSG_WAITALL,
+};
 use abi::stat::{S_IFSOCK, Stat};
 use inet::{Proto, Socket};
 use sched::Sleepable;
@@ -142,7 +144,10 @@ pub(crate) fn send(
                 }
             }
         }
-        Proto::Tcp => send_stream(s, so, uio, to, flags & MSG_OOB != 0, nonblock),
+        Proto::Tcp => {
+            let tls_type = ctl.tls_type;
+            send_stream(s, so, uio, to, flags & MSG_OOB != 0, nonblock, tls_type)
+        }
     };
     if r == Err(Errno::EPIPE)
         && flags & MSG_NOSIGNAL == 0
@@ -158,7 +163,9 @@ pub(crate) fn send(
 }
 
 /// A stream's send; `to`, a peer named, is connected to if the socket is
-/// not yet (an implied connect), and otherwise ignored.
+/// not yet (an implied connect), and otherwise ignored. `tls_type`, from
+/// `TLS_SET_RECORD_TYPE`, makes it all records of that type, sent at once
+/// or not at all.
 fn send_stream(
     s: &Sleepable,
     so: &Arc<Socket>,
@@ -166,13 +173,25 @@ fn send_stream(
     to: Option<&[u8]>,
     oob: bool,
     nonblock: bool,
+    tls_type: Option<u8>,
 ) -> Result<usize, Errno> {
     let (timeo, _) = so.timeouts();
     let cred = to.map(|_| cred());
-    let send = |data: &[u8], last: bool| match (to, &cred) {
-        (Some(to), Some(cred)) => so.send_stream_named(data, last, to, cred),
-        _ => so.send_stream(data, last),
+    let peer = to.zip(cred.as_ref());
+    let send = |data: &[u8], last: bool| match (tls_type, peer) {
+        (Some(t), _) => so.send_tls(data, t, true, last, peer),
+        (None, Some((to, cred))) => so.send_stream_named(data, last, to, cred),
+        (None, None) => so.send_stream(data, last),
     };
+    // `sosend_generic`: with a TLS session, sending nothing is an empty
+    // record where the suite has them, and otherwise an error.
+    if uio.resid() == 0 && so.tls_tx_layout().is_some() {
+        let t = tls_type.unwrap_or(abi::ktls::TLS_RLTYPE_APP);
+        return so.send_tls(&[], t, false, false, peer);
+    }
+    if tls_type.is_some() && uio.resid() > so.snd_hiwat() as usize {
+        return Err(Errno::EMSGSIZE);
+    }
     let mut sent = 0;
     let mut buf: Vec<u8> = Vec::new();
     let mut at = 0;
@@ -181,7 +200,11 @@ fn send_stream(
             if uio.resid() == 0 {
                 return Ok(sent);
             }
-            let n = uio.resid().min(so.send_window()).min(PIECE);
+            let n = if tls_type.is_some() {
+                uio.resid()
+            } else {
+                uio.resid().min(so.send_window()).min(PIECE)
+            };
             buf.resize(n, 0);
             let got = uio.copy_in(&mut buf)?;
             buf.truncate(got);
@@ -217,6 +240,8 @@ pub(crate) struct Got {
     /// A datagram's whole length.
     pub(crate) full: usize,
     pub(crate) meta: Option<inet::Meta>,
+    /// A TLS record's `TLS_GET_RECORD`.
+    pub(crate) tls: Option<inet::tls::RecordInfo>,
 }
 
 /// `soreceive` into `uio`, waiting unless `nonblock`; `MSG_WAITALL` waits
@@ -238,6 +263,7 @@ pub(crate) fn receive(
         flags: 0,
         full: 0,
         meta: None,
+        tls: None,
     };
     if so.proto.is_dgram() {
         if flags & MSG_OOB != 0 {
@@ -265,9 +291,16 @@ pub(crate) fn receive(
         return Ok(got);
     }
     let waitall = flags & MSG_WAITALL != 0 && !peek;
+    let appdata = flags & MSG_TLSAPPDATA != 0;
     loop {
         let want = uio.resid().min(PIECE);
-        let first = || so.recv_stream(want, peek, false);
+        let first = || {
+            if appdata {
+                so.recv_tls_app(want, peek)
+            } else {
+                so.recv_stream(want, peek, false)
+            }
+        };
         let r = if nonblock || (got.count > 0 && !waitall) {
             first()
         } else {
@@ -281,7 +314,10 @@ pub(crate) fn receive(
         };
         let n = r.data.len();
         got.count += uio.copy_out(&r.data)?;
-        if n == 0 || uio.resid() == 0 || peek {
+        got.flags |= r.flags;
+        got.tls = got.tls.or(r.tls);
+        // A TLS record is a read's end.
+        if n == 0 || uio.resid() == 0 || peek || r.flags & MSG_EOR != 0 {
             return Ok(got);
         }
         // More waits only with `MSG_WAITALL`; without, what is there now

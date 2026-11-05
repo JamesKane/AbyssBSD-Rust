@@ -175,6 +175,7 @@ pub(crate) const FREEBSD_TESTS: &[&str] = &[
     "usr/tests/sys/capsicum",
     "usr/tests/usr.sbin/jail",
     "usr/tests/usr.bin/procstat",
+    "usr/tests/sys/kern/ktls_test",
 ];
 
 /// `ABYSS_ATF`: while working on a feature, the test directories (of
