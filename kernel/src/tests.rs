@@ -3696,6 +3696,39 @@ mod user_memory {
     }
 
     ktest! {
+        fn processes_leave_nothing_on_the_heap() {
+            // Every new thread's start record is freed once it runs: with
+            // it kept, each of the 200 processes left an object behind.
+            use crate::proc::{Exit, Process};
+            let s = cx();
+            let run = |n: u32| {
+                let script = alloc::format!(
+                    "i=0; while [ $i -lt {n} ]; do /rescue/sh -c :; i=$((i+1)); done"
+                );
+                let p = Process::spawn(
+                    &s,
+                    b"/rescue/sh",
+                    &[b"sh", b"-c", script.as_bytes()],
+                    &[b"PATH=/rescue", b"HOME=/"],
+                    Some(hal::cpu_id()),
+                )
+                .unwrap();
+                assert_eq!(p.wait(&s), Exit::Code(0));
+            };
+            // Caches the programs and their lookups.
+            run(20);
+            let before = crate::mm::heap_stats().live_objects;
+            run(200);
+            let after = crate::mm::heap_stats().live_objects;
+            assert!(
+                after < before + 100,
+                "200 processes left {} heap objects",
+                after.saturating_sub(before)
+            );
+        }
+    }
+
+    ktest! {
         fn interactive_sh_job_control_on_the_console() {
             // /rescue/sh on the console as its controlling terminal, typed
             // at through the terminal's input path: ^C ends a foreground

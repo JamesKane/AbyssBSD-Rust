@@ -2944,14 +2944,18 @@ impl Drop for ProcDesc {
 /// A new user thread's first code: joins its process and leaves for user
 /// mode. Nothing on this stack outlives the jump.
 fn enter(s: &Sleepable, arg: usize) -> ! {
-    // SAFETY: `start` made `arg` with `Box::into_raw` and handed it over.
-    let start = unsafe { alloc::boxed::Box::from_raw(arg as *mut Start) };
+    // The box is freed at the end of this block: this function never
+    // returns, so a box still in scope here would never be.
     let Start {
         thread,
         frame,
         tls,
         context,
-    } = *start;
+    } = {
+        // SAFETY: `start` made `arg` with `Box::into_raw` and handed it over.
+        let start = unsafe { alloc::boxed::Box::from_raw(arg as *mut Start) };
+        *start
+    };
     sched::set_address_space(Some(
         thread.process().space() as Arc<dyn sched::AddressSpace>
     ));

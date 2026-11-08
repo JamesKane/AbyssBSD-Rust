@@ -2160,6 +2160,13 @@ P7.0 ─► P7.1 ─► P7.2 ─► P7.3 ─► P7.4 ─┬─► P7.5 ───
   object behind (+1006, then +1005, over 1000 `true`s each), owner not found; slab space unused by
   anything rose over 48 short `iperf3` legs (2133, 2018, 2284, 2372 pages after emptying the
   depots), with no plateau shown yet. Pages outside the heap stayed flat.
+- Progress 2026-11-08 (soak): passed, narrowly: wired 8453 -> 9455 pages (+1002 of the 1024
+  allowed), free 481092 -> 478836, mbufs and clusters back to 0, none denied. The 256-byte object
+  was each new thread's start record: the thread's entry never returns, so the box it unpacked was
+  never freed (a ktest now counts what 200 processes leave on the heap). With it gone the heap
+  levels off: over four rounds of 12 short legs, pages outside the heap stayed at about 2890 and the
+  heap at 5409, 5493, 5887, 5909 pages after emptying the depots. If the exit soak fails, look
+  first at whether the heap's working set is still filling.
 
 **P7.9 Performance and exit.**
 - Suite `p7` (`tcp`, `udp`, `sendfile`) within the bound over loopback and virtio-net in bhyve;
