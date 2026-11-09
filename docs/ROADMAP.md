@@ -2313,6 +2313,20 @@ P7.0 ─► P7.1 ─► P7.2 ─► P7.3 ─► P7.4 ─┬─► P7.5 ───
   Not taken: the append and the output under one hold (-2.6%), and a sender skipping the relock
   after its batch when nothing more was queued (slower, noisier: netisr sends more itself). The
   sender's copy now stalls in the copy itself (27%), as FreeBSD's does in `copyin`.
+- Progress 2026-11-09 (the suite's other benchmarks): `p7-ubench.sh` and `p7-rest.sh` probe the
+  rest of suite p7 on either system. AES-GCM with AES-NI runs four blocks at a time (interleaved
+  rounds, GHASH aggregated over H^2..H^4, as FreeBSD's AES-NI driver; d04ddb3): sendfile.ktls
+  3362 -> 1591 ns/op (FreeBSD 1604-1730). Correction to the audit and to 1f23358: FreeBSD's
+  `if_simloop` ignores `netisr_queue`'s failure, so a full loopback queue is a loss recovered by
+  SACK, not an `ENOBUFS` for `tcp_output` to back out; loopback now drops it the same way
+  (a2d4099). TCP input finds a connection in an epoch-published connected hash, no table lock
+  (3da1bbc). Together: tcp.lo.s4 64.5 -> 67.1, tcp.lo.s1 66.4 -> 69.3 (same session). Probe
+  ratios to FreeBSD for the rest: tcp.lo.s4 1.4 (four streams: ~85 retransmit timeouts in 10 s
+  against FreeBSD's 45, each a 200 ms stall, from tail losses at the full netisr queue, as our
+  netisr still costs more a packet), tcp.cpu.tx 1.31, tcp.connect.lo 1.07, tcp.cpu.rx 0.45,
+  tcp.rx.s4 0.89, udp.rx.small 0.94, tcp.rr.lo 0.76, sendfile.plain 0.87. Estimated geometric mean
+  over the suite's 20 benchmarks about 0.95. Not taken: a wildcard PCB index (connect.lo
+  unchanged; one unexplained refused connection).
 
 ## Phase 8: Board bring-up (XL)
 
