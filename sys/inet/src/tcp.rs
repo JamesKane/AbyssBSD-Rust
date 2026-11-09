@@ -569,9 +569,8 @@ fn transmit_one(vnet: &Arc<Vnet>, inc: &Inc, tx: &TxInfo, s: Seg) -> Result<(), 
         if s.df {
             h.off = ip::DF;
         }
-        m.prepend(ip::HDR_LEN)
-            .map_err(|_| Errno::ENOBUFS)?
-            .copy_from_slice(&h.bytes());
+        // Room for the header, which `ip_output` writes once it is whole.
+        m.prepend(ip::HDR_LEN).map_err(|_| Errno::ENOBUFS)?;
         let mut o = ip::Opts {
             flags: 0,
             mcast: None,
@@ -586,7 +585,7 @@ fn transmit_one(vnet: &Arc<Vnet>, inc: &Inc, tx: &TxInfo, s: Seg) -> Result<(), 
         if ip::hash_outbound(vnet) {
             o.flowid = ip::flow_hash(s4, d4, inc.lport, inc.fport, ip::proto::TCP);
         }
-        ip::output(vnet, m, &o)
+        ip::output_parsed(vnet, m, h, &o)
     }
 }
 

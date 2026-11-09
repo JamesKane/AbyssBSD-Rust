@@ -642,7 +642,6 @@ fn send(
     nexthop: &[u8; 16],
     is_gw: bool,
     m: Packet,
-    now: u64,
 ) -> Result<(), Errno> {
     if i.ty == IFT_LOOP
         && let Some(link) = &i.link.0
@@ -658,7 +657,7 @@ fn send(
         nexthop,
         is_gw,
         m,
-        now,
+        net::uptime(),
     )
 }
 
@@ -719,8 +718,20 @@ fn header_bytes(ip: &Ip, opts: &[u8], sum: bool) -> HeaderBytes {
 /// `lo0`; `EMSGSIZE` for a broadcast or `IP_DF` packet over the MTU;
 /// `ENETDOWN`, `ENOBUFS`, and ARP's errors from the interface.
 pub fn output(vnet: &Arc<Vnet>, mut m: Packet, o: &Opts) -> Result<(), Errno> {
+    let ip = m.header::<Ip>(0).map_err(|_| Errno::EINVAL)?;
+    output_parsed(vnet, m, ip, o)
+}
+
+/// [`output`] of a packet whose header its caller built as `ip` (the
+/// 20 bytes for it already at the front of `m`, written here), as
+/// `tcp_output` fills in the header `ip_output` sends: not read back.
+pub(crate) fn output_parsed(
+    vnet: &Arc<Vnet>,
+    mut m: Packet,
+    mut ip: Ip,
+    o: &Opts,
+) -> Result<(), Errno> {
     let st = state::of(vnet);
-    let mut ip = m.header::<Ip>(0).map_err(|_| Errno::EINVAL)?;
     if o.flags & (out::FORWARDING | out::RAWOUTPUT) == 0 {
         ip.v = VERSION;
         ip.hl = 20;
@@ -741,11 +752,12 @@ pub fn output(vnet: &Arc<Vnet>, mut m: Packet, o: &Opts) -> Result<(), Errno> {
     }
     let mut opts = [0u8; 40];
     let opts = &mut opts[..hlen - HDR_LEN];
-    m.data.copy_out(HDR_LEN, opts);
+    if !opts.is_empty() {
+        m.data.copy_out(HDR_LEN, opts);
+    }
     if o.flags & out::FORWARDING == 0 {
         st.ipstat.inc(ips::LOCALOUT);
     }
-    let now = net::uptime();
     // The route and the interface under the network epoch, no lock
     // (`ip_output` runs in a `NET_EPOCH` section).
     let section = net::view::enter();
@@ -826,7 +838,7 @@ pub fn output(vnet: &Arc<Vnet>, mut m: Packet, o: &Opts) -> Result<(), Errno> {
         m.data
             .copy_in(0, &header_bytes(&ip, opts, sum))
             .map_err(|_| Errno::ENOBUFS)?;
-        return send(vnet, i, &nexthop, is_gw, m, now);
+        return send(vnet, i, &nexthop, is_gw, m);
     }
     if ip.off & DF != 0 {
         st.ipstat.inc(ips::CANTFRAG);
@@ -836,7 +848,7 @@ pub fn output(vnet: &Arc<Vnet>, mut m: Packet, o: &Opts) -> Result<(), Errno> {
     let mut r = Ok(());
     for f in frags {
         if r.is_ok() {
-            r = send(vnet, i, &nexthop, is_gw, f, now);
+            r = send(vnet, i, &nexthop, is_gw, f);
         }
     }
     if r.is_ok() {
