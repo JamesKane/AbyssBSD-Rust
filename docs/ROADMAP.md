@@ -2280,6 +2280,18 @@ P7.0 ─► P7.1 ─► P7.2 ─► P7.3 ─► P7.4 ─┬─► P7.5 ───
   snapshot drain and limit, one timer a connection. Order: the small items as a batch; UDP
   receive on chains; the net epoch view with error propagation and the nhop cache; PCB lookup
   under the epoch; UMA-style zone buckets; the socket lock split.
+- Progress 2026-11-09 (audit, first steps): the small items (a68f65c: per-CPU statistics,
+  lock-free hooks, acknowledged data freed after the lock, netisr signalled only when idle, UDP
+  sends with leading space, no 64 KiB pieces): tcp.lo.s1 55.2 -> 58.7, udp.rx.bulk 10.16 ->
+  10.78. UDP receive on the datagram's own mbufs (d90fb12): udp.rx.bulk 10.69 -> 11.06. The
+  network epoch view (e2abd55): Ethernet and IP input, UDP's broadcast check and IP output read a
+  copy of the interfaces, addresses and routes published under `sys/epoch`; loopback output hands
+  the packet to its device at once and gets its `ENOBUFS`; detach waits out the epoch
+  (`epoch_drain_callbacks`, else a view kept the driver's grant): tcp.lo.s1 58.6 -> 65.9.
+  `tcp_output`'s error path (1f23358): 0 SACK recoveries in 8 s (were 149; FreeBSD 3), but the
+  window cut to a segment on ~1,500 full queues costs tcp.lo.s1 about 3% until netisr is faster.
+  Next: PCB lookup under the epoch (the PCB tables are global spin locks over B-trees, each lookup
+  taking an `Arc`; FreeBSD's `in_pcblookup_hash_smr` hashes under SMR and takes no reference).
 
 ## Phase 8: Board bring-up (XL)
 
