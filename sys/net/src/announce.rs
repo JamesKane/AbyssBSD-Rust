@@ -15,7 +15,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::ops::{Deref, DerefMut};
 
-use sync::{SpinGuard, SpinLock};
+use sync::SpinLock;
 
 use crate::ifnet::{Ifaddr, Ifnet, Net, Route};
 
@@ -65,8 +65,10 @@ pub trait Listener: Send + Sync {
 }
 
 /// A VNET's interfaces and routes, and who listens for their changes.
+/// The lock holds off preemption, not interrupts: no interrupt handler
+/// takes it (FreeBSD's are sleep mutexes and rmlocks, interrupts on).
 pub struct NetLock {
-    net: SpinLock<Net>,
+    net: sync::PreemptLock<Net>,
     listeners: SpinLock<Vec<Weak<dyn Listener>>>,
 }
 
@@ -80,7 +82,7 @@ impl NetLock {
     #[must_use]
     pub const fn new(net: Net) -> Self {
         Self {
-            net: SpinLock::new(net),
+            net: sync::PreemptLock::new(net),
             listeners: SpinLock::new(Vec::new()),
         }
     }
@@ -120,7 +122,7 @@ impl NetLock {
 
 /// The lock held; changes are announced when it goes.
 pub struct NetGuard<'a> {
-    g: Option<SpinGuard<'a, Net>>,
+    g: Option<sync::PreemptLockGuard<'a, Net>>,
     owner: &'a NetLock,
 }
 

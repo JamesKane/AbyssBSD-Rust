@@ -584,21 +584,20 @@ pub(crate) fn mpath_select<'a>(
     r: &'a net::ifnet::Route,
     flowid: u32,
 ) -> &'a net::ifnet::Route {
-    let mut group: Vec<&net::ifnet::Route> = n
-        .routes
-        .iter()
-        .filter(|x| {
-            x.family == r.family
-                && x.fib == r.fib
-                && x.plen == r.plen
-                && x.dst == r.dst
-                // Each interface's link-local prefix is its own.
-                && (!net::ifnet::route_scoped(r) || net::ifnet::route_zone(x) == net::ifnet::route_zone(r))
-        })
-        .collect();
-    if group.len() < 2 {
+    let same = |x: &&net::ifnet::Route| {
+        x.family == r.family
+            && x.fib == r.fib
+            && x.plen == r.plen
+            && x.dst == r.dst
+            // Each interface's link-local prefix is its own.
+            && (!net::ifnet::route_scoped(r) || net::ifnet::route_zone(x) == net::ifnet::route_zone(r))
+    };
+    // A route of one path, as most are: nothing to choose, nothing to
+    // allocate.
+    if n.routes.iter().filter(same).nth(1).is_none() {
         return r;
     }
+    let mut group: Vec<&net::ifnet::Route> = n.routes.iter().filter(same).collect();
     group.sort_by_key(|x| x.nhidx);
     let gcd = |mut a: u32, mut b: u32| {
         while b != 0 {
