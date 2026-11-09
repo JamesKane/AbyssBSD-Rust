@@ -78,6 +78,7 @@ Kernel command-line words understood so far:
 | `abyss.halt=1` | Halt at the end instead of powering off, so the framebuffer stays visible |
 | `abyss.qemu_exit=1` | Test kernels report their verdict as QEMU's exit status (set by `xtask test`) |
 | `abyss.test.warm_reset=1` | Test kernels warm-reset once to exercise the persistent log ring |
+| `abyss.test.skip=P[,P]` | Test kernels leave out the tests whose names start with any `P` |
 | `abyss.stress=S` | Run the Phase 2 stress test for S seconds, then report and power off |
 
 `--tier stress` runs the Phase 2 stress test on both architectures with 8 CPUs and 2 GiB,
@@ -256,6 +257,7 @@ symbolized backtrace, and checks the VMM's exit status:
 | `aarch64` | QEMU virt + edk2, firmware at EL1 | |
 | `aarch64-el2` | QEMU virt + edk2, firmware at EL2 | the EL2 stub and drop to EL1 |
 | `aarch64-warm-reset`, `x86_64-warm-reset` | QEMU, two boots | the loader saved the first boot's log to `EFI/ABYSS/PREVLOG.TXT` |
+| `x86_64-watchdog` | QEMU, two boots | the first boot's armed `ichwd` reset the machine |
 | `x86_64-bhyve` | bhyve + `BHYVE_UEFI` (FreeBSD hosts only; skipped elsewhere) | power-off through UEFI runtime services |
 
 After these come the shell cases (`x86_64-shell`, `aarch64-shell`, `x86_64-bhyve-shell`, above), and
@@ -427,6 +429,14 @@ and `mtree` checks, for a quicker look.
 
 Every machine in the boot tier has the USB and input set ([USB.md](USB.md) §9; bhyve's
 `xhci,tablet`). `--no-usb` leaves it out for a quicker run, and `--case NAME` runs one case.
+
+The reset and watchdog cases skip the user-memory tests (`abyss.test.skip=
+kernel::tests::user_memory`: the file-system, USB-disk, and user-program tests, most of a run's
+time), which the plain cases run; `aarch64-el2` runs them all, as its INTx interrupts are
+what they exercise there. The cases run side by side, four at a time (`--jobs N`; `--jobs 1`
+runs them one after another), each as its own `xtask test --tier boot --case NAME` with its
+output in `build/boot-tier/NAME.out`, printed whole when it ends, longest first. Each case boots
+its own copy of its image; images are made one at a time under `build/.image-lock`.
 
 While working on a feature, three environment variables shorten the loop (and pass through
 `--remote`):

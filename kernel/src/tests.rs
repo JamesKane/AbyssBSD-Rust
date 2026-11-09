@@ -56,7 +56,16 @@ pub(crate) fn run(_s: &sched::Sleepable) -> ! {
     // (USB) would be counted with them.
     bus::root_mount_wait(&cx());
     let clock = || crate::time::now_ns() / 1_000_000;
-    let _ = ktest::run_tests_timed(&mut crate::console::Writer, Some(&clock));
+    // `abyss.test.skip=a::b,c::d` leaves out the tests under those paths
+    // (the boot tier's reset and watchdog cases skip the slow user-memory
+    // tests, which the plain cases run).
+    let skip = crate::boot::value("abyss.test.skip").unwrap_or("");
+    let keep = |name: &str| {
+        !skip
+            .split(',')
+            .any(|p| !p.is_empty() && name.starts_with(p))
+    };
+    let _ = ktest::run_selected(&mut crate::console::Writer, Some(&clock), &keep);
     crate::panic::EXPECT_FATAL_TRAP.store(true, Ordering::Relaxed);
     kprintln!("ktest: taking a deliberate fatal page fault on the stack guard page");
     deliberate_fault();

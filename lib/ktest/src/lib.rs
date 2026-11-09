@@ -155,10 +155,25 @@ pub fn run_tests_timed(
     out: &mut impl Write,
     clock: Option<&dyn Fn() -> u64>,
 ) -> Result<Summary, fmt::Error> {
+    run_selected(out, clock, &|_| true)
+}
+
+/// Like [`run_tests_timed`], running only the tests `keep` accepts (by
+/// name) and counting the rest as skipped.
+pub fn run_selected(
+    out: &mut impl Write,
+    clock: Option<&dyn Fn() -> u64>,
+    keep: &dyn Fn(&str) -> bool,
+) -> Result<Summary, fmt::Error> {
     let total = tests().count();
-    writeln!(out, "{BEGIN_MARKER} ({total} tests)")?;
+    let skipped = tests().filter(|t| !keep(t.name)).count();
+    if skipped == 0 {
+        writeln!(out, "{BEGIN_MARKER} ({total} tests)")?;
+    } else {
+        writeln!(out, "{BEGIN_MARKER} ({total} tests, {skipped} skipped)")?;
+    }
     let mut passed = 0;
-    for t in tests() {
+    for t in tests().filter(|t| keep(t.name)) {
         write!(out, "ktest: {} ... ", t.name)?;
         let start = clock.map(|c| c());
         (t.run)();
@@ -192,6 +207,18 @@ mod tests {
         fn registered_on_host() {
             assert!(crate::tests().count() >= 1);
         }
+    }
+
+    #[test]
+    fn a_selection_runs_only_what_it_keeps() {
+        let mut out = String::new();
+        let none = super::run_selected(&mut out, None, &|_| false).unwrap();
+        assert_eq!(none.passed, 0);
+        assert!(out.contains("1 skipped"), "{out}");
+        out.clear();
+        let all = super::run_selected(&mut out, None, &|_| true).unwrap();
+        assert_eq!(all.passed, 1);
+        assert!(!out.contains("skipped"), "{out}");
     }
 
     #[test]

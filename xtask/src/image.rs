@@ -48,6 +48,17 @@ struct Contents<'a> {
     ufs: Option<&'a [u8]>,
 }
 
+/// Holds `build/`'s images to one maker at a time across processes (the
+/// boot tier runs its cases side by side): taken around building an image
+/// and copying it to a case's own name, released when dropped.
+pub(crate) fn lock() -> Result<fs::File> {
+    let dir = util::root().join("build");
+    fs::create_dir_all(&dir)?;
+    let f = fs::File::create(dir.join(".image-lock"))?;
+    f.lock()?;
+    Ok(f)
+}
+
 /// Builds the loader, the kernel, and the disk image, returning the image's
 /// path.
 pub(crate) fn build(arch: Arch, opts: build::Options, cmdline: &str) -> Result<PathBuf> {

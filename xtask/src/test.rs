@@ -42,12 +42,32 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     let quick = args.take_flag("--quick");
     // One boot-tier case, by name (`x86_64-console`).
     let only = args.take_value("--case")?;
+    // How many boot-tier cases run at once, each its own xtask process;
+    // `--jobs 1` runs them one after another in this one.
+    let jobs: usize = args
+        .take_value("--jobs")?
+        .map_or(Ok(4), |s| s.parse())
+        .map_err(|_| "bad --jobs (a count)")?;
     let wanted = |name: &str| only.as_deref().is_none_or(|o| o == name);
     args.finish()?;
 
     if matches!(tier, Tier::Unit | Tier::All) {
         println!("== unit tests (host)");
         util::run(util::cargo().args(["test", "--quiet"]))?;
+    }
+    if matches!(tier, Tier::Boot | Tier::All) && only.is_none() && jobs > 1 {
+        let mut flags = Vec::new();
+        for (on, flag) in [
+            (release, "--release"),
+            (verbose, "--verbose"),
+            (!usb, "--no-usb"),
+            (quick, "--quick"),
+        ] {
+            if on {
+                flags.push(flag);
+            }
+        }
+        return side_by_side(&case_names(&arches), jobs, &flags);
     }
     if matches!(tier, Tier::Boot | Tier::All) {
         let mut failed = Vec::new();
@@ -186,6 +206,94 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     Ok(())
 }
 
+/// Every boot-tier case for `arches`, by the name `--case` takes, longest
+/// first (by what an emulated or bhyve run of each has taken), so the
+/// long ones start at once and the short ones fill in around them.
+fn case_names(arches: &[Arch]) -> Vec<String> {
+    let mut names: Vec<String> = BOOT_CASES
+        .iter()
+        .filter(|c| arches.contains(&c.arch))
+        .map(|c| c.name.to_owned())
+        .collect();
+    for &arch in arches {
+        for kind in ["shell", "console", "multiuser", "net"] {
+            names.push(format!("{arch}-{kind}"));
+            if kind != "console" && Vmm::Bhyve.available(arch) {
+                names.push(format!("{arch}-bhyve-{kind}"));
+            }
+        }
+    }
+    // Minutes, roughly, from the CI logs of 2026-11-09.
+    let minutes = |n: &str| match n {
+        "aarch64-shell" => 25,
+        "x86_64-shell" => 22,
+        "x86_64-bhyve-shell" => 9,
+        "aarch64" | "aarch64-el2" => 6,
+        "x86_64" | "aarch64-net" | "aarch64-multiuser" => 5,
+        n if n.ends_with("-net") || n.ends_with("-multiuser") => 4,
+        _ => 2,
+    };
+    names.sort_by_key(|n| std::cmp::Reverse(minutes(n)));
+    names
+}
+
+/// Runs the boot tier's `cases` `jobs` at a time, each as `xtask test
+/// --tier boot --case NAME` (its own process, so its own bhyve names,
+/// VNC ports, and QMP sockets; images are made under [`image::lock`]).
+/// A case's output is printed whole when it ends.
+fn side_by_side(cases: &[String], jobs: usize, flags: &[&str]) -> Result<()> {
+    let exe = std::env::current_exe()?;
+    let out_dir = util::root().join("build").join("boot-tier");
+    std::fs::create_dir_all(&out_dir)?;
+    let mut queue = cases.iter();
+    let mut running: Vec<(
+        &String,
+        std::process::Child,
+        std::path::PathBuf,
+        std::time::Instant,
+    )> = Vec::new();
+    let mut failed = Vec::new();
+    loop {
+        while running.len() < jobs
+            && let Some(name) = queue.next()
+        {
+            let out = out_dir.join(format!("{name}.out"));
+            let file = std::fs::File::create(&out)?;
+            let child = std::process::Command::new(&exe)
+                .args(["test", "--tier", "boot", "--case", name])
+                .args(flags)
+                .stdin(std::process::Stdio::null())
+                .stdout(file.try_clone()?)
+                .stderr(file)
+                .spawn()?;
+            running.push((name, child, out, std::time::Instant::now()));
+        }
+        if running.is_empty() {
+            break;
+        }
+        let mut i = 0;
+        while i < running.len() {
+            if let Some(status) = running[i].1.try_wait()? {
+                let (name, _, out, start) = running.swap_remove(i);
+                let text = std::fs::read_to_string(&out).unwrap_or_default();
+                print!("{text}");
+                println!("({name}: {} s)", start.elapsed().as_secs());
+                if !status.success() {
+                    failed.push(name.as_str());
+                }
+            } else {
+                i += 1;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("boot tests failed on {failed:?}; logs in build/<arch>/").into())
+    }
+}
+
 /// The Phase 2 stress test: 64 kernel threads on 8 CPUs for `duration`
 /// seconds (see kernel/src/stress.rs).
 fn stress(
@@ -295,7 +403,9 @@ const BOOT_CASES: &[BootCase] = &[
         arch: Arch::Aarch64,
         el2: false,
         warm_reset: true,
-        cmdline: "",
+        // The reset is what this case adds: the user-memory tests (most of
+        // a run's time) are the plain case's.
+        cmdline: "abyss.test.skip=kernel::tests::user_memory",
         pass_status: 0,
         expect: None,
         expect_saved: None,
@@ -307,7 +417,7 @@ const BOOT_CASES: &[BootCase] = &[
         el2: false,
         warm_reset: true,
         // A real power-off at the end: QEMU exits 0 on ACPI S5.
-        cmdline: "abyss.test.poweroff=1",
+        cmdline: "abyss.test.poweroff=1 abyss.test.skip=kernel::tests::user_memory",
         pass_status: 0,
         expect: Some("power: off (ACPI S5)"),
         expect_saved: None,
@@ -320,7 +430,7 @@ const BOOT_CASES: &[BootCase] = &[
         warm_reset: true,
         // The first boot arms ichwd and hangs; its expiry must reset the
         // machine, and the second boot runs the tests.
-        cmdline: "abyss.test.watchdog_reset=1",
+        cmdline: "abyss.test.watchdog_reset=1 abyss.test.skip=kernel::tests::user_memory",
         pass_status: 33,
         expect: None,
         expect_saved: Some("watchdog: armed for"),
@@ -355,6 +465,7 @@ fn multiuser(
         release,
         ktest: false,
     };
+    let lock = image::lock()?;
     let disk = image::build_installed_root(arch, opts, "boot_multicons=YES boot_serial=YES")?;
     let suffix = match vmm {
         Vmm::Bhyve => "-bhyve",
@@ -365,6 +476,7 @@ fn multiuser(
         std::fs::copy(&disk, &copy)?;
         copy
     };
+    drop(lock);
     let log = disk.with_file_name(format!("multiuser{suffix}.log"));
     let sock = disk.with_file_name(format!("multiuser{suffix}.qmp"));
     let shot = disk.with_file_name(format!("multiuser{suffix}.ppm"));
@@ -423,11 +535,20 @@ fn net(arch: Arch, vmm: Vmm, release: bool) -> Result<std::result::Result<(), St
         release,
         ktest: false,
     };
-    let disk = image::build_net_root(arch, opts, "boot_multicons=YES boot_serial=YES")?;
     let suffix = match vmm {
         Vmm::Bhyve => "-bhyve",
         Vmm::Qemu => "",
     };
+    let lock = image::lock()?;
+    let disk = image::build_net_root(arch, opts, "boot_multicons=YES boot_serial=YES")?;
+    // Its own copy: the guest writes to it, and the other VMM's case may
+    // run beside it.
+    let disk = {
+        let copy = disk.with_file_name(format!("disk-net{suffix}.img"));
+        std::fs::copy(&disk, &copy)?;
+        copy
+    };
+    drop(lock);
     let log = disk.with_file_name(format!("net{suffix}.log"));
     let (vm, lab) = crate::net::networked(Vm {
         smp: 4,
@@ -436,7 +557,9 @@ fn net(arch: Arch, vmm: Vmm, release: bool) -> Result<std::result::Result<(), St
         ..Vm::new(vmm, arch, disk.clone())
     })?;
     let session = crate::expect::Session::start(vm, &log)?;
-    let dir = disk.parent().unwrap_or(&disk).to_path_buf();
+    // The ssh key and the copies, apart from the other VMM's case.
+    let dir = disk.with_file_name(format!("net{suffix}"));
+    std::fs::create_dir_all(&dir)?;
     let (result, exited) = crate::net::net_script(
         session,
         &lab,
@@ -479,6 +602,7 @@ fn shell(
     // On FreeBSD (which has makefs) the root is UFS2 on an NVMe disk, all
     // of base.txz; elsewhere the memory disk's /rescue.
     let ufs_root = cfg!(target_os = "freebsd");
+    let lock = image::lock()?;
     let disk = if ufs_root {
         image::build_ufs_root(arch, opts, "abyss.verifier=1")?
     } else {
@@ -493,6 +617,7 @@ fn shell(
         std::fs::copy(&disk, &copy)?;
         copy
     };
+    drop(lock);
     let log = disk.with_file_name(format!("shell{suffix}.log"));
     let vm = Vm {
         smp: 4,
@@ -574,12 +699,14 @@ fn console(arch: Arch, release: bool) -> Result<std::result::Result<(), String>>
         release,
         ktest: false,
     };
+    let lock = image::lock()?;
     let disk = image::build(arch, opts, "abyss.verifier=1 boot_multicons=YES")?;
     let disk = {
         let copy = disk.with_file_name("disk-console.img");
         std::fs::copy(&disk, &copy)?;
         copy
     };
+    drop(lock);
     let log = disk.with_file_name("console.log");
     let shot = disk.with_file_name("console.ppm");
     let sock = disk.with_file_name("console.qmp");
@@ -685,7 +812,8 @@ fn console(arch: Arch, release: bool) -> Result<std::result::Result<(), String>>
 /// `fsck_ffs -f -n` finds nothing.
 pub(crate) fn root_left_clean(disk: &std::path::Path) -> std::result::Result<(), String> {
     let part = image::ufs_partition(disk).map_err(|e| e.to_string())?;
-    let root = disk.with_file_name("shell-root.img");
+    let stem = disk.file_stem().unwrap_or_default().to_string_lossy();
+    let root = disk.with_file_name(format!("{stem}-root.img"));
     let copy = || -> Result<()> {
         use std::io::{Read, Seek, SeekFrom};
         let mut f = std::fs::File::open(disk)?;
@@ -743,6 +871,7 @@ fn boot(
     };
     let cmdline = format!("{base} {}", case.cmdline);
     let cmdline = cmdline.trim();
+    let lock = image::lock()?;
     let disk = image::build(
         case.arch,
         build::Options {
@@ -751,14 +880,14 @@ fn boot(
         },
         cmdline,
     )?;
-    let disk = if case.warm_reset {
-        // Its own copy: the guest writes to it.
+    // Its own copy: the guest may write to it, and other cases (with
+    // other command lines) build theirs beside it.
+    let disk = {
         let copy = disk.with_file_name(format!("disk-{}.img", case.name));
         std::fs::copy(&disk, &copy)?;
         copy
-    } else {
-        disk
     };
+    drop(lock);
     let log = disk.with_file_name(format!("boot-{}.log", case.name));
     // Blank 16 MiB disks the storage tests may write: virtio-blk (vtbd1)
     // and NVMe (nda0), in the bhyve slots FreeBSD's recording uses.
