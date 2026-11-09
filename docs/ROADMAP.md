@@ -2227,6 +2227,19 @@ P7.0 ─► P7.1 ─► P7.2 ─► P7.3 ─► P7.4 ─┬─► P7.5 ───
   after its batch when nothing more was queued. Drops match FreeBSD's (372 vs about 340 in 8 s),
   but ours make 170 SACK recoveries to its 3. Next: the reader's remaining costs (the chain walk
   in `split_off`, freeing, the wakeup's switch).
+- Progress 2026-11-09 (night): correction, the reader is not the busiest stage either. Its
+  "post-wake masked switch" (samples just after `wait_interruptible`'s `sti`, about 20%) is a
+  profiler artifact under bhyve: every tick fires about 12 µs late, and late ticks bunch at the
+  VM entries wakeup IPIs cause. Stamping the counter at interrupt entry and at the resume puts the
+  real span at 1–2 µs for most wakes. Ours sleeps about 20,000 times a second, so it waits on
+  data; FreeBSD's (`tcp-lo-pin-freebsd.sh`) and its sender are both fully busy. What is saturated
+  here is `netisr` (`--prof-thread netisr`: busy throughout). Its costs are spread out: TCP input
+  24% (about 10% of it spinning on the socket lock against the sender or reader, 4% under the PCB
+  table's lock), IP input 9%, freeing acknowledged send data 6%, wakeup IPIs 6%. Tried and not
+  taken: a zone's per-CPU credit as plain loads and stores in a critical section, with interrupt
+  handlers charging the total. It removes the `lock xadd` after which the sender's
+  `with_cluster` takes 34% (the drain of the previous copy's stores), but the stall moves:
+  tcp.lo.s1 unchanged, udp.rx.bulk +3.6%, tcp.rx.s1 -2.3%.
 
 ## Phase 8: Board bring-up (XL)
 
