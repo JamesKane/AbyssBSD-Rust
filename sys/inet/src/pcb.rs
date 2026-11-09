@@ -14,8 +14,9 @@
 //! `in_pcbdisconnect`, `in_pcblookup_local`, `in_pcblookup_hash_locked`),
 //! sys/netinet6/in6_pcb.c (the same for IPv6, `in6_pcbsetport`).
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::{Arc, Weak};
+use core::ops::{Deref, DerefMut};
 
 use abi::errno::Errno;
 use abi::inet::{INP_IPV4, INP_IPV6, INP_IPV6PROTO, inp};
@@ -63,6 +64,18 @@ pub struct Pcb {
     /// The flow label of `inp_flow`, which a connected IPv6 socket's
     /// datagrams carry.
     pub flow: u32,
+    /// Where the table's lookup indices hold it, as of the last change.
+    idx: Option<Indexed>,
+}
+
+/// A hashed PCB's place in the lookup indices: its VNET, ports, and
+/// whether it is connected (in the exact index too).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Indexed {
+    vnet: u32,
+    lport: u16,
+    fport: u16,
+    connected: bool,
 }
 
 impl Pcb {
@@ -97,7 +110,14 @@ impl Pcb {
 /// A protocol's PCBs (`struct inpcbinfo`).
 #[derive(Debug)]
 pub struct Table {
-    pub(crate) pcbs: BTreeMap<u64, Pcb>,
+    pcbs: BTreeMap<u64, Pcb>,
+    /// Hashed PCBs by VNET and local port (`ipi_porthashbase`, and the
+    /// wildcard hash's role): every lookup that names a local port
+    /// looks only here, in PCB order.
+    ports: BTreeSet<(u32, u16, u64)>,
+    /// Hashed connected PCBs by VNET and both ports (`ipi_hashbase`,
+    /// the exact four-tuple hash).
+    exact: BTreeSet<(u32, u16, u16, u64)>,
     next_id: u64,
     /// `ipi_gencnt`.
     pub gencnt: u64,
@@ -111,6 +131,8 @@ impl Table {
     const fn new() -> Self {
         Self {
             pcbs: BTreeMap::new(),
+            ports: BTreeSet::new(),
+            exact: BTreeSet::new(),
             next_id: 1,
             gencnt: 0,
             last: [0; 3],
@@ -202,15 +224,19 @@ impl Table {
                     _ => 0,
                 },
                 flow: 0,
+                idx: None,
             },
         );
     }
 
     /// `in_pcbfree`.
     pub(crate) fn free(&mut self, id: u64) {
-        if self.pcbs.remove(&id).is_some() {
+        if let Some(p) = self.pcbs.remove(&id) {
+            self.unindex(id, p.idx);
             self.gencnt += 1;
         }
+        #[cfg(test)]
+        self.check_indices();
     }
 
     /// The PCB `id`.
@@ -219,8 +245,22 @@ impl Table {
         self.pcbs.get(&id)
     }
 
-    pub(crate) fn get_mut(&mut self, id: u64) -> Option<&mut Pcb> {
-        self.pcbs.get_mut(&id)
+    /// The PCB `id`, to change: the lookup indices follow its addresses
+    /// and ports when the guard goes.
+    pub(crate) fn get_mut(&mut self, id: u64) -> Option<PcbMut<'_>> {
+        self.pcbs
+            .contains_key(&id)
+            .then_some(PcbMut { table: self, id })
+    }
+
+    /// PCB `id`'s `inp_vflag`, which no index depends on.
+    fn vflag_mut(&mut self, id: u64) -> Option<&mut u8> {
+        self.pcbs.get_mut(&id).map(|p| &mut p.vflag)
+    }
+
+    /// Every PCB, in PCB order.
+    pub(crate) fn values(&self) -> impl Iterator<Item = &Pcb> {
+        self.pcbs.values()
     }
 
     /// Every PCB, newest first (`ipi_listhead`'s order), expired
@@ -229,8 +269,7 @@ impl Table {
         self.reap();
         // A socket gone without a close (a kernel bug, or a test) leaves
         // its PCB behind; it goes here.
-        self.pcbs
-            .retain(|_, p| p.tw_until.is_some() || p.so.strong_count() > 0);
+        self.remove_where(|p| p.tw_until.is_none() && p.so.strong_count() == 0);
         self.pcbs.iter().rev()
     }
 
@@ -240,7 +279,7 @@ impl Table {
         if now < self.next_reap {
             return;
         }
-        self.pcbs.retain(|_, p| p.tw_until.is_none_or(|t| t > now));
+        self.remove_where(|p| p.tw_until.is_some_and(|t| t <= now));
         self.next_reap = self
             .pcbs
             .values()
@@ -250,10 +289,91 @@ impl Table {
         self.gencnt += 1;
     }
 
+    /// Removes the PCBs `gone` picks, from the indices too.
+    fn remove_where(&mut self, gone: impl Fn(&Pcb) -> bool) {
+        let ids: alloc::vec::Vec<u64> = self
+            .pcbs
+            .iter()
+            .filter_map(|(&id, p)| gone(p).then_some(id))
+            .collect();
+        for id in ids {
+            if let Some(p) = self.pcbs.remove(&id) {
+                self.unindex(id, p.idx);
+            }
+        }
+    }
+
+    /// Takes `id` out of the indices at `at`.
+    fn unindex(&mut self, id: u64, at: Option<Indexed>) {
+        if let Some(i) = at {
+            self.ports.remove(&(i.vnet, i.lport, id));
+            if i.connected {
+                self.exact.remove(&(i.vnet, i.lport, i.fport, id));
+            }
+        }
+    }
+
+    /// Moves PCB `id` to where its addresses and ports now put it in the
+    /// indices (`in_pcbrehash`).
+    fn reindex(&mut self, id: u64) {
+        let Some(p) = self.pcbs.get_mut(&id) else {
+            return;
+        };
+        let now = p.hashed.then(|| Indexed {
+            vnet: p.vnet.id,
+            lport: p.lport,
+            fport: p.fport,
+            connected: !p.wild(),
+        });
+        if now == p.idx {
+            return;
+        }
+        let was = core::mem::replace(&mut p.idx, now);
+        self.unindex(id, was);
+        if let Some(i) = now {
+            self.ports.insert((i.vnet, i.lport, id));
+            if i.connected {
+                self.exact.insert((i.vnet, i.lport, i.fport, id));
+            }
+        }
+    }
+
+    /// Tests: the indices hold exactly what the PCBs say they should.
+    #[cfg(test)]
+    fn check_indices(&self) {
+        let mut ports = BTreeSet::new();
+        let mut exact = BTreeSet::new();
+        for (&id, p) in &self.pcbs {
+            if p.hashed {
+                ports.insert((p.vnet.id, p.lport, id));
+                if !p.wild() {
+                    exact.insert((p.vnet.id, p.lport, p.fport, id));
+                }
+            }
+        }
+        assert_eq!(ports, self.ports, "port index");
+        assert_eq!(exact, self.exact, "exact index");
+    }
+
+    /// The hashed PCBs bound to `lport` in `vnet`, in PCB order.
+    fn on_port(&self, vnet: u32, lport: u16) -> impl Iterator<Item = (u64, &Pcb)> {
+        self.ports
+            .range((vnet, lport, 0)..=(vnet, lport, u64::MAX))
+            .filter_map(|&(_, _, id)| self.pcbs.get(&id).map(|p| (id, p)))
+    }
+
+    /// The hashed connected PCBs with ports `lport` and `fport` in
+    /// `vnet`, in PCB order.
+    fn on_ports(&self, vnet: u32, lport: u16, fport: u16) -> impl Iterator<Item = &Pcb> {
+        self.exact
+            .range((vnet, lport, fport, 0)..=(vnet, lport, fport, u64::MAX))
+            .filter_map(|&(_, _, _, id)| self.pcbs.get(&id))
+    }
+
     /// `in_pcbdrop` and `in_pcbremhash`: out of the lookups, its port
     /// free, listed until its socket goes.
     pub(crate) fn drop_hash(&mut self, id: u64) {
-        if let Some(p) = self.pcbs.get_mut(&id) {
+        if let Some(mut p) = self.get_mut(id) {
             p.hashed = false;
             p.flags |= inp::DROPPED;
         }
@@ -274,7 +394,7 @@ impl Table {
     ) -> Option<&Pcb> {
         let laddr_any = laddr == [0; 4];
         if !wildcard {
-            return self.pcbs.iter().find_map(|(&id, p)| {
+            return self.on_port(vnet, lport).find_map(|(id, p)| {
                 (id != exclude
                     && p.vnet.id == vnet
                     && p.hashed
@@ -287,7 +407,7 @@ impl Table {
         }
         let mut best = None;
         let mut matchwild = 3 + MAPPED_COST;
-        for (&id, p) in &self.pcbs {
+        for (id, p) in self.on_port(vnet, lport) {
             if id == exclude || p.vnet.id != vnet || !p.hashed || p.lport != lport || !p.v4() {
                 continue;
             }
@@ -329,7 +449,7 @@ impl Table {
     ) -> Option<&Pcb> {
         let laddr_any = is_unspecified(laddr);
         if !wildcard {
-            return self.pcbs.iter().find_map(|(&id, p)| {
+            return self.on_port(vnet, lport).find_map(|(id, p)| {
                 (id != exclude
                     && p.vnet.id == vnet
                     && p.hashed
@@ -342,7 +462,7 @@ impl Table {
         }
         let mut best = None;
         let mut matchwild = 3;
-        for (&id, p) in &self.pcbs {
+        for (id, p) in self.on_port(vnet, lport) {
             if id == exclude || p.vnet.id != vnet || !p.hashed || p.lport != lport || !p.v6() {
                 continue;
             }
@@ -383,7 +503,7 @@ impl Table {
         lport: u16,
         wildcard: bool,
     ) -> Option<&Pcb> {
-        let exact = self.pcbs.values().find(|p| {
+        let exact = self.on_ports(vnet, lport, fport).find(|p| {
             p.vnet.id == vnet
                 && p.hashed
                 && p.v4()
@@ -397,7 +517,7 @@ impl Table {
             return exact;
         }
         let (mut exact_l, mut wild, mut wild_mapped) = (None, None, None);
-        for p in self.pcbs.values() {
+        for (_, p) in self.on_port(vnet, lport) {
             if p.vnet.id != vnet || !p.hashed || !p.v4() || !p.wild() || p.lport != lport {
                 continue;
             }
@@ -427,7 +547,7 @@ impl Table {
         lport: u16,
         wildcard: bool,
     ) -> Option<&Pcb> {
-        let exact = self.pcbs.values().find(|p| {
+        let exact = self.on_ports(vnet, lport, fport).find(|p| {
             p.vnet.id == vnet
                 && p.hashed
                 && p.v6()
@@ -441,7 +561,7 @@ impl Table {
             return exact;
         }
         let (mut exact_l, mut wild) = (None, None);
-        for p in self.pcbs.values() {
+        for (_, p) in self.on_port(vnet, lport) {
             if p.vnet.id != vnet || !p.hashed || !p.v6() || !p.wild() || p.lport != lport {
                 continue;
             }
@@ -722,17 +842,17 @@ impl Table {
                     return Err(Errno::EAFNOSUPPORT);
                 }
                 let v6only = me.flags & inp::IPV6_V6ONLY != 0;
-                let p = self.pcbs.get_mut(&id).ok_or(Errno::EINVAL)?;
-                p.vflag = (p.vflag & !INP_IPV4) | INP_IPV6;
+                let vflag = self.vflag_mut(id).ok_or(Errno::EINVAL)?;
+                *vflag = (*vflag & !INP_IPV4) | INP_IPV6;
                 let r = if !v6only && is_unspecified(&sa.addr) {
-                    p.vflag |= INP_IPV4;
+                    *vflag |= INP_IPV4;
                     self.bind6(id, sa, sooptions, wildcard, cred, tcp)
                 } else if !v6only && is_v4mapped(&sa.addr) {
                     let a = v4_of(&sa.addr);
                     if tcp && is_multicast4(&a) {
                         Err(Errno::EAFNOSUPPORT)
                     } else {
-                        p.vflag = (p.vflag | INP_IPV4) & !INP_IPV6;
+                        *vflag = (*vflag | INP_IPV4) & !INP_IPV6;
                         self.bind4(id, a, sa.port, sooptions, wildcard, cred, tcp)
                     }
                 } else if is_v4mapped(&sa.addr) {
@@ -742,9 +862,9 @@ impl Table {
                     self.bind6(id, sa, sooptions, wildcard, cred, tcp)
                 };
                 if r.is_err()
-                    && let Some(p) = self.pcbs.get_mut(&id)
+                    && let Some(vflag) = self.vflag_mut(id)
                 {
-                    p.vflag = saved;
+                    *vflag = saved;
                 }
                 r
             }
@@ -769,7 +889,7 @@ impl Table {
         } else {
             port
         };
-        let p = self.pcbs.get_mut(&id).ok_or(Errno::EINVAL)?;
+        let mut p = self.get_mut(id).ok_or(Errno::EINVAL)?;
         p.laddr = from_v4(laddr);
         p.lport = lport;
         p.hashed = true;
@@ -807,7 +927,7 @@ impl Table {
         } else {
             sa.port
         };
-        let p = self.pcbs.get_mut(&id).ok_or(Errno::EINVAL)?;
+        let mut p = self.get_mut(id).ok_or(Errno::EINVAL)?;
         p.laddr = sa.addr;
         p.zone = zone;
         p.lport = lport;
@@ -827,19 +947,21 @@ impl Table {
         let id = so.id;
         let sooptions = so.so_options();
         let wildcard = sooptions & (SO_REUSEADDR | SO_REUSEPORT | SO_REUSEPORT_LB) == 0;
-        let p = self.pcbs.get_mut(&id).ok_or(Errno::EINVAL)?;
-        if p.lport != 0 {
-            return Ok(());
-        }
-        if so.family == Family::Inet6 && is_unspecified(&p.laddr) && p.vflag & INP_IPV6 != 0 {
-            p.vflag &= !INP_IPV4;
-            if p.flags & inp::IPV6_V6ONLY == 0 {
-                p.vflag |= INP_IPV4;
+        let laddr = {
+            let mut p = self.get_mut(id).ok_or(Errno::EINVAL)?;
+            if p.lport != 0 {
+                return Ok(());
             }
-        }
-        let laddr = p.laddr;
+            if so.family == Family::Inet6 && is_unspecified(&p.laddr) && p.vflag & INP_IPV6 != 0 {
+                p.vflag &= !INP_IPV4;
+                if p.flags & inp::IPV6_V6ONLY == 0 {
+                    p.vflag |= INP_IPV4;
+                }
+            }
+            p.laddr
+        };
         let lport = self.ephemeral(id, &laddr, None, wildcard, cred)?;
-        let p = self.pcbs.get_mut(&id).ok_or(Errno::EINVAL)?;
+        let mut p = self.get_mut(id).ok_or(Errno::EINVAL)?;
         p.lport = lport;
         p.hashed = true;
         p.flags |= inp::ANONPORT | inp::INHASHLIST;
@@ -880,25 +1002,25 @@ impl Table {
                     if me.vflag & INP_IPV4 == 0 {
                         return Err(Errno::EAFNOSUPPORT);
                     }
-                    let p = self.pcbs.get_mut(&id).ok_or(Errno::EINVAL)?;
-                    p.vflag = (p.vflag | INP_IPV4) & !INP_IPV6;
+                    let vflag = self.vflag_mut(id).ok_or(Errno::EINVAL)?;
+                    *vflag = (*vflag | INP_IPV4) & !INP_IPV6;
                     self.connect4(id, &dst.unmapped(), cred)
                 } else {
                     if me.vflag & INP_IPV6 == 0 {
                         return Err(Errno::EAFNOSUPPORT);
                     }
-                    let p = self.pcbs.get_mut(&id).ok_or(Errno::EINVAL)?;
-                    p.vflag = (p.vflag & !INP_IPV4) | INP_IPV6;
+                    let vflag = self.vflag_mut(id).ok_or(Errno::EINVAL)?;
+                    *vflag = (*vflag & !INP_IPV4) | INP_IPV6;
                     self.connect6(id, dst, cred)
                 }
             }
         };
         if r.is_err()
             && unbound
-            && let Some(p) = self.pcbs.get_mut(&id)
-            && p.lport == 0
+            && self.get(id).is_some_and(|p| p.lport == 0)
+            && let Some(vflag) = self.vflag_mut(id)
         {
-            p.vflag = saved;
+            *vflag = saved;
         }
         r
     }
@@ -935,7 +1057,7 @@ impl Table {
             }
             me.lport
         };
-        let p = self.pcbs.get_mut(&id).ok_or(Errno::EINVAL)?;
+        let mut p = self.get_mut(id).ok_or(Errno::EINVAL)?;
         if p.lport == 0 {
             p.flags |= inp::ANONPORT;
         }
@@ -982,7 +1104,7 @@ impl Table {
         } else {
             me.lport
         };
-        let p = self.pcbs.get_mut(&id).ok_or(Errno::EINVAL)?;
+        let mut p = self.get_mut(id).ok_or(Errno::EINVAL)?;
         if p.lport == 0 {
             p.flags |= inp::ANONPORT;
         }
@@ -1005,7 +1127,7 @@ impl Table {
     /// `in_pcbdisconnect`, `in6_pcbdisconnect`: out of the lookups, its
     /// addresses the wildcard (it keeps its port).
     pub(crate) fn disconnect(&mut self, id: u64) {
-        if let Some(p) = self.pcbs.get_mut(&id) {
+        if let Some(mut p) = self.get_mut(id) {
             p.hashed = false;
             p.flags &= !inp::INHASHLIST;
             p.laddr = ANY;
@@ -1149,11 +1271,46 @@ fn reserved(lport: u16, cred: &Cred) -> Result<(), Errno> {
 
 /// Sets or clears `inp_flags` bits.
 pub(crate) fn set_flag(proto: Proto, id: u64, bit: i32, on: bool) {
-    if let Some(p) = table(proto).lock().get_mut(id) {
+    if let Some(mut p) = table(proto).lock().get_mut(id) {
         if on {
             p.flags |= bit;
         } else {
             p.flags &= !bit;
         }
+    }
+}
+
+/// A PCB being changed ([`Table::get_mut`]): when it goes, the table
+/// moves it in its lookup indices.
+pub(crate) struct PcbMut<'a> {
+    table: &'a mut Table,
+    id: u64,
+}
+
+impl Deref for PcbMut<'_> {
+    type Target = Pcb;
+
+    fn deref(&self) -> &Pcb {
+        self.table
+            .pcbs
+            .get(&self.id)
+            .expect("PcbMut of a PCB in its table")
+    }
+}
+
+impl DerefMut for PcbMut<'_> {
+    fn deref_mut(&mut self) -> &mut Pcb {
+        self.table
+            .pcbs
+            .get_mut(&self.id)
+            .expect("PcbMut of a PCB in its table")
+    }
+}
+
+impl Drop for PcbMut<'_> {
+    fn drop(&mut self) {
+        self.table.reindex(self.id);
+        #[cfg(test)]
+        self.table.check_indices();
     }
 }

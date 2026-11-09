@@ -278,7 +278,7 @@ impl Socket {
             }
             ip::IP_ORIGDSTADDR => {
                 let on = int(val)? != 0;
-                if let Some(p) = table(self.proto).lock().get_mut(self.id) {
+                if let Some(mut p) = table(self.proto).lock().get_mut(self.id) {
                     if on {
                         p.flags2 |= inp::ORIGDSTADDR;
                     } else {
@@ -377,7 +377,7 @@ impl Socket {
                 }
                 let on = int(val)? != 0;
                 let mut t = table(self.proto).lock();
-                let p = t.get_mut(self.id).ok_or(Errno::EINVAL)?;
+                let mut p = t.get_mut(self.id).ok_or(Errno::EINVAL)?;
                 if p.lport != 0 || !crate::addr::is_unspecified(&p.laddr) {
                     return Err(Errno::EINVAL);
                 }
@@ -458,7 +458,7 @@ impl Socket {
             }
             ipv6::IPV6_ORIGDSTADDR => {
                 let on = int(val)? != 0;
-                if let Some(p) = table(self.proto).lock().get_mut(self.id) {
+                if let Some(mut p) = table(self.proto).lock().get_mut(self.id) {
                     if on {
                         p.flags2 |= inp::ORIGDSTADDR;
                     } else {

@@ -793,7 +793,7 @@ pub(crate) fn console_table() -> FdTable {
     // SAFETY: tables are made in thread context (process creation).
     let s = unsafe { Sleepable::assume() };
     if let Some(c) = devfs::console()
-        && let Ok(vf) = VnodeFile::open(&s, &c, true, false)
+        && let Ok(vf) = VnodeFile::open(&s, &c, true, true, false)
         && let Ok(f) = File::new(FileKind::Vnode(vf), FREAD | FWRITE)
     {
         for _ in 0..3 {
@@ -827,7 +827,7 @@ pub(crate) fn check_std(s: &Sleepable, p: &crate::proc::Process) -> Result<(), E
         b"/dev/null",
     )?;
     let v = v.device(s)?.ops.open()?.unwrap_or(v);
-    let vf = VnodeFile::open(s, &v, true, false)?;
+    let vf = VnodeFile::open(s, &v, true, true, false)?;
     let file = File::new(FileKind::Vnode(vf), FREAD | FWRITE)?;
     let mut t = p.files.lock(s);
     for fd in missing {

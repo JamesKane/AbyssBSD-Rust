@@ -80,7 +80,7 @@ use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 use abi::errno::Errno;
 use abi::inet::{IPPROTO_TCP, IPPROTO_UDP, ss};
 use event::Notify;
-use sync::SpinLock;
+use sync::{PreemptLock, SpinLock};
 
 pub use net::{Family, Vnet, addr, ifnet, netlink, rtmsg};
 
@@ -502,7 +502,7 @@ pub struct Socket {
     pub id: u64,
     /// `so_options` (`SO_*` bits), read by other sockets' binds.
     pub(crate) options: AtomicI32,
-    pub(crate) inner: SpinLock<Inner>,
+    pub(crate) inner: PreemptLock<Inner>,
     /// Readers and accepters (`so_rdsel`), and writers (`so_wrsel`).
     pub rd: Notify,
     pub wr: Notify,
@@ -513,6 +513,9 @@ pub struct Socket {
     pub(crate) splice_sent: AtomicU64,
     /// Someone is sending its queued segments ([`Inner::txq`]).
     pub(crate) txbusy: core::sync::atomic::AtomicBool,
+    /// When its TCP timer is queued for (ns), `u64::MAX` if not: the
+    /// timer queue's entry, written under its lock, read without.
+    pub(crate) timer_at: core::sync::atomic::AtomicU64,
     /// Its sending TLS session; taken before [`Socket::inner`].
     pub(crate) tls_tx: sync::PreemptLock<Option<::ktls::Tx>>,
 }
@@ -595,7 +598,7 @@ impl Socket {
             proto,
             id,
             options: AtomicI32::new(0),
-            inner: SpinLock::new(Inner {
+            inner: PreemptLock::new(Inner {
                 state: 0,
                 error: None,
                 linger: 0,
@@ -622,6 +625,7 @@ impl Socket {
             spliced: core::sync::atomic::AtomicU8::new(0),
             splice_sent: AtomicU64::new(0),
             txbusy: core::sync::atomic::AtomicBool::new(false),
+            timer_at: core::sync::atomic::AtomicU64::new(u64::MAX),
             tls_tx: sync::PreemptLock::new(None),
         });
         table.lock().alloc(&so, cred.uid);

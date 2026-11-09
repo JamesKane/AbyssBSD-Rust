@@ -318,3 +318,106 @@ fn copy_in_writes_in_place_or_replaces_shared_bytes() {
     assert_eq!(c.copy_in(5999, &[1, 2]), Err(NoBufs));
     assert_eq!(c.len(), data.len());
 }
+
+#[test]
+fn sequential_copies_match_copies_from_the_start() {
+    // `copy_seq` against the bytes, through every change at the front and
+    // back that its remembered place must follow.
+    let mut c = Chain::new();
+    let mut model: Vec<u8> = Vec::new();
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let mut rnd = |n: usize| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        usize::try_from(seed % n.max(1) as u64).unwrap()
+    };
+    let mut fill = 0u8;
+    let mut more = |n: usize| -> Vec<u8> {
+        (0..n)
+            .map(|_| {
+                fill = fill.wrapping_add(1);
+                fill
+            })
+            .collect()
+    };
+    let mut off = 0usize;
+    let rounds = if cfg!(miri) { 300 } else { 4000 };
+    for round in 0..rounds {
+        match rnd(10) {
+            0 | 1 => {
+                let b = more(1 + rnd(5000));
+                c.extend_from_slice(&b).unwrap();
+                model.extend_from_slice(&b);
+            }
+            2 => {
+                let mut m = Mbuf::new().unwrap();
+                let b = more(1 + rnd(100));
+                m.append(&b);
+                c.push_back(m);
+                model.extend_from_slice(&b);
+            }
+            3 => {
+                let n = rnd(model.len() / 4 + 1);
+                c.trim_front(n);
+                model.drain(..n);
+                off = off.saturating_sub(n);
+            }
+            4 if !model.is_empty() => {
+                let m = c.pop_front().unwrap();
+                let n = m.len();
+                if rnd(2) == 0 {
+                    c.push_front(m);
+                } else {
+                    model.drain(..n);
+                    off = off.saturating_sub(n);
+                }
+            }
+            5 if model.len() > 2 => {
+                let at = 1 + rnd(model.len() - 1);
+                let rest = c.split_off(at).unwrap();
+                if rnd(2) == 0 {
+                    c.append(rest);
+                } else {
+                    c = rest;
+                    model.drain(..at);
+                    off = off.saturating_sub(at);
+                }
+            }
+            6 if model.len() >= 40 => {
+                c.pullup(40).unwrap();
+            }
+            7 => {
+                let b = c.prepend(8).unwrap();
+                b.copy_from_slice(&[0xee; 8]);
+                model.splice(0..0, [0xee; 8]);
+                off += 8;
+            }
+            8 if model.len() >= 16 => {
+                let at = rnd(model.len() - 16);
+                let b = more(16);
+                c.copy_in(at, &b).unwrap();
+                model[at..at + 16].copy_from_slice(&b);
+            }
+            _ => {}
+        }
+        assert_eq!(c.len(), model.len(), "round {round}");
+        // Mostly forward, as TCP sends; sometimes back (a retransmit).
+        if rnd(8) == 0 {
+            off = rnd(model.len() + 1);
+        }
+        if off > model.len() {
+            off = 0;
+        }
+        let len = rnd(3000).min(model.len() - off);
+        let got = c.copy_seq(off, len).unwrap();
+        assert_eq!(
+            flat(&got),
+            model[off..off + len],
+            "round {round}, {off}+{len}"
+        );
+        let plain = c.copy(off, len).unwrap();
+        assert_eq!(flat(&plain), flat(&got), "round {round}");
+        off += len;
+    }
+}

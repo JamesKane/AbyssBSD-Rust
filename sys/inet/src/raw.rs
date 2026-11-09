@@ -38,8 +38,7 @@ pub(crate) fn input4(vnet: &Arc<Vnet>, m: Packet, ip: &Ip, known: bool) {
     let targets: Vec<(Arc<Socket>, i32)> = {
         let t = RIPCB.lock();
         let matches = |exact: bool| {
-            t.pcbs
-                .values()
+            t.values()
                 .filter(move |p| {
                     let (l, f) = (v4_of(&p.laddr), v4_of(&p.faddr));
                     p.vnet.id == vnet.id
@@ -140,7 +139,7 @@ impl Socket {
         }
         let a: [u8; 4] = raw[4..8].try_into().map_err(|_| Errno::EINVAL)?;
         let mut t = RIPCB.lock();
-        let p = t.get_mut(self.id).ok_or(Errno::EINVAL)?;
+        let mut p = t.get_mut(self.id).ok_or(Errno::EINVAL)?;
         if a != [0; 4]
             && p.flags & inp::BINDANY == 0
             && !self.vnet.net.lock().is_local(Family::Inet, &from_v4(a), 0)

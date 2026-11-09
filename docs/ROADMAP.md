@@ -2171,6 +2171,20 @@ P7.0 ─► P7.1 ─► P7.2 ─► P7.3 ─► P7.4 ─┬─► P7.5 ───
 **P7.9 Performance and exit.**
 - Suite `p7` (`tcp`, `udp`, `sendfile`) within the bound over loopback and virtio-net in bhyve;
   CI at `exit/p7`.
+- Progress 2026-11-08: `perf --prof` now runs the multi-user suites. Fixed: PCB lookups scanned
+  every PCB (now indexed by port and by both ports, as `ipi_porthash` and the exact hash); the ISN
+  lacked `V_isn_offset`, so a four-tuple used again within a millisecond met the peer's
+  `TIME_WAIT` and waited out a 1 s SYN retransmit; the statistics clock restarted its period at
+  each wakeup, so short bursts of work read as idle and `tcp.cpu.*` were a tenth of the truth (it
+  keeps a fixed grid now, as `nextstat`); each segment's copy walked the send buffer from its start
+  (`copy_seq` keeps `sb_sndptr`); `/dev/bpf` treated every open as readable, so `dhclient`'s
+  write-only descriptor copied every frame; the socket lock masked interrupts (it holds off
+  preemption now, as FreeBSD's mutex does); TCP timers were requeued after every segment, and
+  queued segments popped under the socket lock one at a time. Last measured (before the bpf fix):
+  tcp 1.72, udp 1.96, sendfile 2.36. Left: under bhyve each sent UDP frame takes a VM exit
+  (~3.5 µs), as FreeBSD's do when it is slowed down; FreeBSD sends fast enough that bhyve's
+  transmit thread is still busy and suppresses the kick. The `procstat` scenario's process order
+  differs from FreeBSD's (already so before these changes).
 
 ## Phase 8: Board bring-up (XL)
 

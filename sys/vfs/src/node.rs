@@ -354,16 +354,18 @@ pub trait CharDevice: Send + Sync {
         let _ = nonblock;
         self.instance(s)
     }
-    /// [`CharDevice::instance_nonblock`] for an open for writing or not
-    /// (`d_open`'s `FWRITE`): a disk counts its readers and writers, as
-    /// GEOM's DEV class does.
+    /// [`CharDevice::instance_nonblock`] for an open for reading or not,
+    /// and for writing or not (`d_open`'s `FREAD` and `FWRITE`): a disk
+    /// counts its readers and writers, as GEOM's DEV class does; a write-only
+    /// `/dev/bpf` taps nothing.
     fn instance_open(
         &self,
         s: &Sleepable,
         nonblock: bool,
+        read: bool,
         write: bool,
     ) -> Result<Option<Arc<dyn CharDevice>>, Errno> {
-        let _ = write;
+        let _ = (read, write);
         self.instance_nonblock(s, nonblock)
     }
     /// Reads into `uio` from `offset` (the file's offset, which disks use

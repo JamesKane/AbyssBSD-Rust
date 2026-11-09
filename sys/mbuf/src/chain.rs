@@ -19,6 +19,12 @@ pub struct Chain {
     /// `MSIZE` and external storage of each mbuf (`sb_mbcnt`'s share).
     cost: u32,
     count: u32,
+    /// Where [`Chain::copy_seq`] last ended (`sb_sndptr`): one of its
+    /// nodes, or null, and the offset of that node's first byte
+    /// (`sb_sndptroff`). Kept right as mbufs come and go at the front, as
+    /// `sbdrop` keeps the send pointer.
+    hint: *mut Node,
+    hint_at: usize,
 }
 
 // SAFETY: a chain owns its nodes, which are `Send` as `Mbuf`s are.
@@ -80,6 +86,8 @@ impl Chain {
             len: 0,
             cost: 0,
             count: 0,
+            hint: ptr::null_mut(),
+            hint_at: 0,
         }
     }
 
@@ -151,6 +159,9 @@ impl Chain {
         self.len += len;
         self.cost += cost;
         self.count += 1;
+        if !self.hint.is_null() {
+            self.hint_at += len;
+        }
     }
 
     /// Takes the first mbuf.
@@ -167,6 +178,11 @@ impl Chain {
             self.len -= m.len();
             self.cost -= m.cost();
             self.count -= 1;
+            if self.hint == n.as_ptr() {
+                self.hint = ptr::null_mut();
+            } else if !self.hint.is_null() {
+                self.hint_at -= m.len();
+            }
             Some(m)
         }
     }
@@ -350,6 +366,43 @@ impl Chain {
                 len -= take;
                 off = 0;
             }
+            // SAFETY: as above.
+            n = unsafe { (*n).next };
+        }
+        Ok(out)
+    }
+
+    /// [`Chain::copy`] for copies that move forward through the chain, as
+    /// TCP's sends move through its send buffer (`sbsndptr_noadv` and
+    /// `sbsndptr_adv`): from where the last one ended when that is at or
+    /// before `off`, instead of from the first mbuf.
+    ///
+    /// # Errors
+    ///
+    /// As [`Chain::copy`].
+    pub fn copy_seq(&mut self, off: usize, len: usize) -> Result<Self, NoBufs> {
+        let (mut n, mut at) = if !self.hint.is_null() && self.hint_at <= off {
+            (self.hint, self.hint_at)
+        } else {
+            (self.head, 0)
+        };
+        let mut out = Self::new();
+        let mut left = len;
+        while !n.is_null() && left > 0 {
+            // SAFETY: a live node of ours (the hint is one, see `hint`),
+            // borrowed for the copy.
+            let m =
+                core::mem::ManuallyDrop::new(unsafe { Mbuf::from_raw(NonNull::new_unchecked(n)) });
+            let end = at + m.len();
+            let pos = off + (len - left);
+            if pos < end {
+                let take = (end - pos).min(left);
+                out.push_back(m.share(pos - at, take)?);
+                left -= take;
+                self.hint = n;
+                self.hint_at = at;
+            }
+            at = end;
             // SAFETY: as above.
             n = unsafe { (*n).next };
         }

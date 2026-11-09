@@ -772,6 +772,7 @@ mod tests {
             hc: &crate::hostcache::HostCache::new(),
             path: &|_| crate::tcb::Path::default(),
             secrets: &crate::isn::Secrets::default(),
+            isn: &crate::isn::Offset::new(),
         };
         let mut t = tcb();
         t.snd_una = 0;

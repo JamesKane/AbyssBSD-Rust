@@ -106,9 +106,6 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     // p7 also runs multi-user, from the installed root with the network
     // (`p7::run_one`).
     let net = suite == "p7";
-    if (multiuser || net) && prof {
-        return Err("--prof profiles the single-user suites, not p6 or p7".into());
-    }
     if !cfg!(target_os = "freebsd") {
         return Err(format!("perf needs bhyve: run it on the build server\n{USAGE}").into());
     }
@@ -188,17 +185,19 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     } else {
         &[]
     };
-    let cmdline = if let Some(cpu) = &prof_cpu {
-        format!("abyss.bench={suite} abyss.prof abyss.prof.cpu={cpu}")
-    } else if prof {
-        format!("abyss.bench={suite} abyss.prof")
-    } else {
-        format!("abyss.bench={suite}")
+    let profiler = match &prof_cpu {
+        Some(cpu) => format!(" abyss.prof abyss.prof.cpu={cpu}"),
+        None if prof => " abyss.prof".to_owned(),
+        None => String::new(),
     };
+    let cmdline = format!("abyss.bench={suite}{profiler}");
+    // The multi-user suites boot the installed root, the profiler's
+    // reports going to the serial console with the results.
+    let multiuser_cmdline = format!("{MULTIUSER_CMDLINE}{profiler}");
     let abyss = if multiuser {
-        image::build_installed_root(Arch::X86_64, opts, MULTIUSER_CMDLINE)?
+        image::build_installed_root(Arch::X86_64, opts, &multiuser_cmdline)?
     } else if net {
-        image::build_net_root(Arch::X86_64, opts, MULTIUSER_CMDLINE)?
+        image::build_net_root(Arch::X86_64, opts, &multiuser_cmdline)?
     } else {
         image::build_with(Arch::X86_64, opts, &cmdline, extra)?
     };

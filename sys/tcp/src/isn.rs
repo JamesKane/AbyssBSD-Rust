@@ -12,8 +12,16 @@
 
 use crate::tcb::Inc;
 
-/// `ISN_BYTES_PER_SECOND`: how fast the ISN space advances.
-const ISN_BYTES_PER_SECOND: u64 = 1_048_576;
+/// `ISN_BYTES_PER_SECOND`: how fast the ISN space advances at least.
+const ISN_BYTES_PER_SECOND: u32 = 1_048_576;
+/// `ISN_STATIC_INCREMENT`, `ISN_RANDOM_INCREMENT`: what each new ISN
+/// adds to the offset, so that a four-tuple used again soon still starts
+/// past the sequence numbers its last connection used.
+const ISN_STATIC_INCREMENT: u32 = 4096;
+const ISN_RANDOM_INCREMENT: u32 = 4096 - 1;
+/// The clock's ticks per second (`hz`: [`Ctx::now`](crate::Ctx) counts
+/// milliseconds).
+const HZ: u32 = 1000;
 
 /// SipHash-2-4 of `data` under `key`.
 #[must_use]
@@ -85,15 +93,62 @@ pub struct Secrets {
     pub ts: [u8; 16],
 }
 
-impl Secrets {
-    /// `tcp_new_isn`: a hash of the endpoints, moving on with the clock
-    /// (`now` in ticks of a millisecond).
+/// A VNET's ISN offset (`V_isn_offset`, `V_isn_offset_old`,
+/// `V_isn_last`), under its lock (`isn_mtx`).
+#[derive(Debug)]
+pub struct Offset(sync::SpinLock<OffsetState>);
+
+#[derive(Debug)]
+struct OffsetState {
+    offset: u32,
+    old: u32,
+    last: u64,
+}
+
+impl Offset {
     #[must_use]
-    pub fn new_isn(&self, inc: &Inc, now: u64) -> u32 {
+    pub const fn new() -> Self {
+        Self(sync::SpinLock::new(OffsetState {
+            offset: 0,
+            old: 0,
+            last: 0,
+        }))
+    }
+}
+
+impl Default for Offset {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Secrets {
+    /// `tcp_new_isn`: a hash of the endpoints plus the VNET's offset,
+    /// which every ISN moves on by 4 KiB and a random part (`random`), and
+    /// the clock (`now`, in ticks of a millisecond) by at least
+    /// `ISN_BYTES_PER_SECOND`.
+    #[must_use]
+    pub fn new_isn(&self, inc: &Inc, now: u64, offset: &Offset, random: u32) -> u32 {
         let mut b = [0u8; 40];
         let n = endpoints(inc, true, &mut b);
         let h = siphash24(&self.isn, &b[..n]) as u32;
-        h.wrapping_add((now * ISN_BYTES_PER_SECOND / 1000) as u32)
+        let mut o = offset.0.lock();
+        o.offset = o
+            .offset
+            .wrapping_add(ISN_STATIC_INCREMENT + (random & ISN_RANDOM_INCREMENT));
+        if now != o.last {
+            // Ticks are 32 bits in FreeBSD's arithmetic too.
+            let ticks = now.wrapping_sub(o.last) as u32;
+            let projected = o
+                .old
+                .wrapping_add((ISN_BYTES_PER_SECOND / HZ).wrapping_mul(ticks));
+            if crate::seq::gt(projected, o.offset) {
+                o.offset = projected;
+            }
+            o.old = o.offset;
+            o.last = now;
+        }
+        h.wrapping_add(o.offset)
     }
 
     /// `tcp_new_ts_offset`: a hash of the addresses (and the ports, with
@@ -144,10 +199,19 @@ mod tests {
             lport: 80,
             ..Inc::default()
         };
-        let i1 = s.new_isn(&a, 0);
-        assert_eq!(s.new_isn(&a, 1000).wrapping_sub(i1), 1_048_576);
+        let o = Offset::new();
+        let i1 = s.new_isn(&a, 0, &o, 0);
+        // The same tick: past the last by the static increment at least.
+        let i2 = s.new_isn(&a, 0, &o, 7);
+        assert_eq!(i2.wrapping_sub(i1), 4096 + 7);
+        // A second on: the clock's rate (1048 a tick) from the offset as
+        // of the last tick change (none yet: 0), past `i1`'s 4096.
+        let i3 = s.new_isn(&a, 1000, &o, 0);
+        assert_eq!(i3.wrapping_sub(i1), 1048 * 1000 - 4096);
+        // Other ports, another hash.
+        let i4 = s.new_isn(&a, 1000, &o, 0);
         a.fport = 1001;
-        assert_ne!(s.new_isn(&a, 0), i1);
+        assert_ne!(s.new_isn(&a, 1000, &o, 0), i4.wrapping_add(4096));
         // Without per-connection offsets the ports do not count.
         let o = s.new_ts_offset(&a, false);
         a.fport = 1000;

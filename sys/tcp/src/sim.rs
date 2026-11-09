@@ -75,8 +75,8 @@ impl Sock for SimSock {
     fn snd_autosize_off(&mut self) {
         self.snd_auto = false;
     }
-    fn snd_copy(&self, off: u32, len: u32) -> Option<Chain> {
-        self.snd.copy(off as usize, len as usize).ok()
+    fn snd_copy(&mut self, off: u32, len: u32) -> Option<Chain> {
+        self.snd.copy_seq(off as usize, len as usize).ok()
     }
     fn snd_drop(&mut self, n: u32) {
         self.snd.trim_front(n as usize);
@@ -195,6 +195,7 @@ fn rnd() -> u32 {
     x ^ (x << 5)
 }
 
+static ISN: crate::isn::Offset = crate::isn::Offset::new();
 const SECRETS: Secrets = Secrets {
     isn: [1; 16],
     ts: [2; 16],
@@ -268,6 +269,7 @@ impl Net {
                 hc: &host.hc,
                 path: &path,
                 secrets: &SECRETS,
+                isn: &ISN,
             };
             f(&mut tp, &mut host.so, &mut cx)
         };
@@ -315,7 +317,7 @@ impl Net {
         self.hosts[1].sc = Some(SynCache::new());
         let inc = self.inc(0);
         self.hosts[0].tp = Some(Tcpcb::new(inc, Algo::Cubic, &self.conf, self.now));
-        let iss = SECRETS.new_isn(&inc, self.now);
+        let iss = SECRETS.new_isn(&inc, self.now, &ISN, 0);
         let off = SECRETS.new_ts_offset(&inc, true);
         self.with(0, |tp, so, cx| tp.connect(so, cx, iss, off));
     }
@@ -359,6 +361,7 @@ impl Net {
                     hc: &host.hc,
                     path: &path,
                     secrets: &SECRETS,
+                    isn: &ISN,
                 };
                 if t.flags & (th::RST | th::ACK | th::SYN) == th::ACK {
                     let to = Opts::parse(
@@ -506,6 +509,7 @@ impl Net {
                                 hc: &host.hc,
                                 path: &path,
                                 secrets: &SECRETS,
+                                isn: &ISN,
                             };
                             sc.timer(&cx)
                         };

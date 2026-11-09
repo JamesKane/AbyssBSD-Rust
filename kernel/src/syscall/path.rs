@@ -284,7 +284,13 @@ pub(super) fn openat(s: &Sleepable, fd: u64, path_ptr: u64, flags: u64, mode: u6
         let vf = if flags & O_PATH != 0 {
             VnodeFile::path_only(&v)
         } else {
-            VnodeFile::open(s, &v, fflags & FWRITE != 0, flags & O_NONBLOCK != 0)?
+            VnodeFile::open(
+                s,
+                &v,
+                fflags & FREAD != 0,
+                fflags & FWRITE != 0,
+                flags & O_NONBLOCK != 0,
+            )?
         };
         let file = File::new(FileKind::Vnode(vf), fflags & keep)?;
         // O_SHLOCK and O_EXLOCK take an `flock` lock as the file opens.
@@ -345,7 +351,7 @@ pub(crate) fn open_trace_file(
     if v.kind() != Kind::Regular {
         return Err(Errno::EACCES);
     }
-    let vf = VnodeFile::open(s, &v, true, false)?;
+    let vf = VnodeFile::open(s, &v, false, true, false)?;
     File::new(FileKind::Vnode(vf), FREAD | FWRITE)
 }
 
@@ -394,7 +400,7 @@ pub(crate) fn open_core_file(
             vfs::ops::create(s, &dir, &name, &NewNode::Regular, &c, &cred, excl)?.0
         }
     };
-    let vf = VnodeFile::open(s, &v, true, false)?;
+    let vf = VnodeFile::open(s, &v, false, true, false)?;
     File::new(FileKind::Vnode(vf), FWRITE)
 }
 

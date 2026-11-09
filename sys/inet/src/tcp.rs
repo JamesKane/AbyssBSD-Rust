@@ -62,6 +62,8 @@ pub struct Vtcp {
     pub hc: HostCache,
     pub syncache: SynCache,
     pub(crate) secrets: SpinLock<Option<Secrets>>,
+    /// The ISN offset (`V_isn_offset` and its clock).
+    pub(crate) isn: ::tcp::isn::Offset,
     /// `INP_SOCKREF`: sockets the connection holds after their close.
     orphans: SpinLock<BTreeMap<u64, Arc<Socket>>>,
     /// `net.inet.tcp.cc.algorithm` (an [`Algo`] index).
@@ -85,6 +87,7 @@ impl Vtcp {
             hc: HostCache::new(),
             syncache: SynCache::new(),
             secrets: SpinLock::new(None),
+            isn: ::tcp::isn::Offset::new(),
             orphans: SpinLock::new(BTreeMap::new()),
             default_cc: AtomicU8::new(1),
             hc_purge_at: AtomicU64::new(0),
@@ -223,6 +226,7 @@ impl Drop for Tcb {
             hc: &st.tcp.hc,
             path: &path,
             secrets: &secrets,
+            isn: &st.tcp.isn,
         };
         self.tp.free_sackholes(&st.tcp.stats);
         self.tp.discard(&cx, &st.tcp.hc, 0);
@@ -257,8 +261,8 @@ impl Sock for View<'_> {
     fn snd_autosize_off(&mut self) {
         self.i.snd.auto = false;
     }
-    fn snd_copy(&self, off: u32, len: u32) -> Option<Chain> {
-        self.i.sndq.copy(off as usize, len as usize).ok()
+    fn snd_copy(&mut self, off: u32, len: u32) -> Option<Chain> {
+        self.i.sndq.copy_seq(off as usize, len as usize).ok()
     }
     fn snd_drop(&mut self, n: u32) {
         let n = n.min(self.i.snd.cc);
@@ -609,12 +613,19 @@ static NEXT: AtomicU64 = AtomicU64::new(u64::MAX);
 
 /// Sets `so`'s timer to `at` (TCP's ticks), or clears it.
 fn schedule(so: &Arc<Socket>, at: Option<u64>) {
+    let want = at.map_or(u64::MAX, |t| t.saturating_mul(1_000_000));
+    // Relaxed: the queue's lock orders the entry; an unchanged deadline
+    // (often: many segments a tick) leaves it be.
+    if so.timer_at.load(Ordering::Relaxed) == want {
+        return;
+    }
     let mut q = TIMERS.lock();
     if let Some(old) = q.by_id.remove(&so.id) {
         q.by_time.remove(&(old, so.id));
     }
-    if let Some(t) = at {
-        let ns = t.saturating_mul(1_000_000);
+    so.timer_at.store(want, Ordering::Relaxed);
+    if at.is_some() {
+        let ns = want;
         q.by_id.insert(so.id, ns);
         q.by_time.insert((ns, so.id), Arc::downgrade(so));
         drop(q);
@@ -647,11 +658,17 @@ pub(crate) fn run_timers(now: u64) -> u64 {
             if t > now {
                 break;
             }
-            let w = q.by_time.remove(&(t, id));
             q.by_id.remove(&id);
-            w
+            // Taken out under the lock, and dropped after it (a last
+            // reference's drop may schedule).
+            let so = q.by_time.remove(&(t, id)).and_then(|w| w.upgrade());
+            if let Some(so) = &so {
+                // Relaxed: under the queue's lock, as in `schedule`.
+                so.timer_at.store(u64::MAX, Ordering::Relaxed);
+            }
+            so
         };
-        if let Some(so) = due.and_then(|w| w.upgrade()) {
+        if let Some(so) = due {
             so.tcp_timers();
         }
     }
@@ -679,6 +696,7 @@ pub(crate) fn run_timers(now: u64) -> u64 {
                 hc: &st.tcp.hc,
                 path: &path,
                 secrets: &secrets,
+                isn: &st.tcp.isn,
             };
             if st
                 .tcp
@@ -814,6 +832,7 @@ impl Socket {
                     hc: &st.tcp.hc,
                     path: &pathf,
                     secrets: &secrets,
+                    isn: &st.tcp.isn,
                 };
                 f(tp, &mut v, &mut cx)
             };
@@ -867,11 +886,9 @@ impl Socket {
             if self.txbusy.swap(true, Ordering::Acquire) {
                 return;
             }
-            loop {
-                let next = self.inner.lock().txq.pop_front();
-                let Some(t) = next else {
-                    break;
-                };
+            // All that is queued, under one hold of the lock.
+            let batch = core::mem::take(&mut self.inner.lock().txq);
+            for t in batch {
                 let _ = transmit_one(&self.vnet, &t.inc, &t.info, t.seg);
             }
             // Release: what was sent before is seen by the next sender.
@@ -1073,7 +1090,7 @@ impl Socket {
         }
         let st = state::of(&self.vnet);
         let secrets = st.tcp.secrets();
-        let iss = secrets.new_isn(&inc, ms(crate::now()));
+        let iss = secrets.new_isn(&inc, ms(crate::now()), &st.tcp.isn, crate::random());
         let off = secrets.new_ts_offset(&inc, ::tcp::on(&st.tcp.conf.ts_offset_per_conn));
         self.run_tcp(Some(path), |tp, so, cx| {
             let f = if implied {
@@ -1990,6 +2007,7 @@ fn listen_input(
         hc: &st.tcp.hc,
         path: &pathf,
         secrets: &secrets,
+        isn: &st.tcp.isn,
     };
     let sack = ::tcp::on(&st.tcp.conf.sack_enable);
     let tlen = u32::try_from(data.len()).unwrap_or(u32::MAX);
@@ -2095,7 +2113,7 @@ fn accept_new(
     let v6 = e.inc.v6;
     {
         let mut tb = TCB.lock();
-        if let Some(p) = tb.get_mut(s.id) {
+        if let Some(mut p) = tb.get_mut(s.id) {
             p.vflag = (p.vflag & !(INP_IPV4 | INP_IPV6)) | if v6 { INP_IPV6 } else { INP_IPV4 };
             p.flags =
                 (pflags & !(inp::ANONPORT | inp::INHASHLIST | inp::DROPPED)) | inp::INHASHLIST;
@@ -2204,6 +2222,7 @@ fn ctlinput(vnet: &Arc<Vnet>, inc: &Inc, th_seq: u32, n: ::tcp::Notify) {
                 hc: &st.tcp.hc,
                 path: &path,
                 secrets: &secrets,
+                isn: &st.tcp.isn,
             };
             st.tcp.syncache.unreach(&cx, inc, th_seq);
         }

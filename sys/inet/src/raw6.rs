@@ -39,8 +39,7 @@ pub const ICMP6_FILTER: i32 = 18;
 /// their PCB flags.
 fn matching(vnet: &Vnet, ip6: &Ip6, p: u8, exact_proto: bool) -> Vec<(Arc<Socket>, i32)> {
     let t = RIPCB.lock();
-    t.pcbs
-        .values()
+    t.values()
         .filter(|x| {
             x.vnet.id == vnet.id
                 && x.vflag & INP_IPV6 != 0
@@ -241,7 +240,7 @@ impl Socket {
         }
         drop(n);
         let mut t = RIPCB.lock();
-        let p = t.get_mut(self.id).ok_or(Errno::EINVAL)?;
+        let mut p = t.get_mut(self.id).ok_or(Errno::EINVAL)?;
         p.laddr = sa.addr;
         p.zone = sa.scope;
         Ok(())
@@ -276,7 +275,7 @@ impl Socket {
         };
         {
             let mut t = RIPCB.lock();
-            let p = t.get_mut(self.id).ok_or(Errno::EINVAL)?;
+            let mut p = t.get_mut(self.id).ok_or(Errno::EINVAL)?;
             p.faddr = sa.addr;
             p.laddr = src;
             p.zone = zone;

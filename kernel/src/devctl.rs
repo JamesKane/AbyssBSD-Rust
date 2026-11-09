@@ -329,12 +329,12 @@ pub(crate) mod ktests {
         unsafe { Sleepable::assume() }
     }
 
-    /// Opens `/dev/<name>` as `open(2)` would: its per-open device, or the
-    /// node's own.
+    /// Opens `/dev/<name>` read-write as `open(2)` would: its per-open
+    /// device, or the node's own.
     pub(crate) fn open(s: &Sleepable, name: &[u8]) -> Result<Arc<dyn CharDevice>, Errno> {
         let v = crate::fs::devfs::vnode_of(s, name).ok_or(Errno::ENOENT)?;
         let d = v.device(s)?.ops;
-        Ok(d.instance(s)?.unwrap_or(d))
+        Ok(d.instance_open(s, false, true, true)?.unwrap_or(d))
     }
 
     /// One descriptor, `dev`, for a kqueue to watch.

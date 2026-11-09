@@ -66,8 +66,15 @@ impl net::bpf::Notify for Waker {
 struct Bpf;
 
 impl CharDevice for Bpf {
-    /// `bpfopen`.
-    fn instance(&self, _s: &Sleepable) -> Result<Option<Arc<dyn CharDevice>>, Errno> {
+    /// `bpfopen`: an open without `FREAD` is a writer, which taps skip
+    /// until it sets a read filter (`bd_writer`).
+    fn instance_open(
+        &self,
+        _s: &Sleepable,
+        _nonblock: bool,
+        read: bool,
+        _write: bool,
+    ) -> Result<Option<Arc<dyn CharDevice>>, Errno> {
         let w = Arc::new(Waker {
             wq: WaitQueue::new(),
             notify: Notify::new(),
@@ -76,9 +83,7 @@ impl CharDevice for Bpf {
             sig: AtomicU32::new(SIGIO),
             wakes: AtomicU64::new(0),
         });
-        // Opens for writing alone cannot be told from read-write ones
-        // here; either reads once it has a filter.
-        let d = Desc::new(Arc::clone(&w) as Arc<dyn net::bpf::Notify>, true);
+        let d = Desc::new(Arc::clone(&w) as Arc<dyn net::bpf::Notify>, read);
         Ok(Some(Arc::new(BpfOpen::new(d, w))))
     }
 

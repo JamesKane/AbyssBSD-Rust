@@ -181,6 +181,7 @@ impl CharDevice for DiskDev {
         &self,
         s: &Sleepable,
         _: bool,
+        _: bool,
         write: bool,
     ) -> Result<Option<Arc<dyn CharDevice>>, Errno> {
         let dev = Arc::new(DiskDev(Arc::clone(&self.0), self.1.clone()));

@@ -779,8 +779,7 @@ fn multi_input(
 ) {
     let candidates: Vec<(Arc<Socket>, i32, i32, Family)> = {
         let t = UDB.lock();
-        t.pcbs
-            .values()
+        t.values()
             .filter(|p| {
                 let (l, f) = (v4_of(&p.laddr), v4_of(&p.faddr));
                 p.vnet.id == vnet.id
@@ -1062,8 +1061,7 @@ fn multi_input6(
 ) {
     let candidates: Vec<(Arc<Socket>, i32, i32, Family)> = {
         let t = UDB.lock();
-        t.pcbs
-            .values()
+        t.values()
             .filter(|p| {
                 p.vnet.id == vnet.id
                     && p.lport == to.port
@@ -1121,7 +1119,6 @@ pub(crate) fn ctlinput6(vnet: &Arc<Vnet>, m: &Packet, ctl: &crate::icmp6::Ctl) {
     // from that source.
     let targets: Vec<Arc<Socket>> = UDB
         .lock()
-        .pcbs
         .values()
         .filter(|p| {
             p.vnet.id == vnet.id

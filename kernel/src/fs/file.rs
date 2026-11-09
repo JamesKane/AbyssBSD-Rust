@@ -37,12 +37,14 @@ pub(crate) struct VnodeFile {
 }
 
 impl VnodeFile {
-    /// `v` opened, for writing if `write`, without waiting if `nonblock`:
+    /// `v` opened, for reading if `read` and writing if `write`, without
+    /// waiting if `nonblock`:
     /// a devfs node's device is looked up once, here. `ETXTBSY` to write a
     /// file a program runs.
     pub(crate) fn open(
         s: &Sleepable,
         v: &Arc<Vnode>,
+        read: bool,
         write: bool,
         nonblock: bool,
     ) -> Result<Self, Errno> {
@@ -54,7 +56,7 @@ impl VnodeFile {
                 if write && d.ops.dtype() == vfs::D_DISK {
                     super::cred().securelevel_ge(2)?;
                 }
-                if let Some(ops) = d.ops.instance_open(s, nonblock, write)? {
+                if let Some(ops) = d.ops.instance_open(s, nonblock, read, write)? {
                     d.ops = ops;
                 }
                 Some(d)

@@ -9,9 +9,13 @@
 //! system, and interrupt ticks, by which its run time is divided between
 //! user and system time (`calcru`).
 //!
-//! The clock stops while its CPU idles, as FreeBSD's event-timer code
-//! skips statistics ticks then: the ticks an idle stretch would have taken
-//! are counted as idle when the CPU next runs a thread.
+//! The ticks fall on a fixed grid, each a period after the last
+//! (`nextstat += statperiod`), so that work shorter than a period is
+//! sampled in proportion to its length wherever it starts. The clock
+//! stops while its CPU idles, as FreeBSD's event-timer code skips
+//! statistics ticks then: the grid points an idle stretch passed are
+//! counted as idle when the CPU next runs a thread, and the clock goes on
+//! at the next one.
 //!
 //! The load average (`vm.loadavg`, `getloadavg`) is FreeBSD's `loadav`:
 //! every five seconds the threads running or waiting to run decay into
@@ -55,15 +59,15 @@ static CP_TIME: [[AtomicU64; CPUSTATES]; MAX_CPUS] =
 static TIMERS: [Once<Pin<&'static Timer>>; MAX_CPUS] = [const { Once::new() }; MAX_CPUS];
 /// The timer is armed (the CPU is busy).
 static ARMED: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
-/// When the CPU's clock stopped, in counter ticks, while it is stopped.
-static STOPPED: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+/// The CPU's next grid point, in nanoseconds since boot (`nextstat`).
+static NEXT: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 /// The interrupt being handled on each CPU came from user mode.
 static FROM_USER: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
 /// Interrupts taken (`vm.stats.sys.v_intr`).
 pub(crate) static INTERRUPTS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
 /// The period, in nanoseconds.
-const PERIOD_NS: u64 = NANOS / STATHZ;
+pub(crate) const PERIOD_NS: u64 = NANOS / STATHZ;
 
 /// Makes this CPU's clock. Once per CPU, at start-up, after its timer
 /// queue; it starts with the CPU's first busy moment.
@@ -71,7 +75,7 @@ pub(crate) fn start_cpu() {
     let cpu = hal::cpu_id().index();
     let t: Pin<&'static Timer> = Pin::static_ref(Box::leak(Box::new(Timer::new())));
     let _ = TIMERS[cpu].set(t);
-    STOPPED[cpu].store(crate::time::counter(), Ordering::Relaxed);
+    NEXT[cpu].store(crate::time::now_ns() + PERIOD_NS, Ordering::Relaxed);
 }
 
 /// Notes where the interrupt about to be handled came from.
@@ -82,8 +86,8 @@ pub(crate) fn interrupted(from_user: bool) {
 }
 
 /// This CPU may be about to run a thread (a switch or a wakeup re-armed
-/// its timer): restarts a stopped clock, counting the ticks it missed as
-/// idle. Interrupts are masked.
+/// its timer): restarts a stopped clock, counting the grid points it
+/// missed as idle, for the next one. Interrupts are masked.
 pub(crate) fn resume() {
     let cpu = hal::cpu_id().index();
     if ARMED[cpu].load(Ordering::Relaxed) || sched::current().is_idle() {
@@ -92,16 +96,33 @@ pub(crate) fn resume() {
     let Some(t) = TIMERS[cpu].get() else {
         return;
     };
-    let now = crate::time::counter();
-    let stopped = STOPPED[cpu].load(Ordering::Relaxed);
-    let missed = crate::time::ticks_to_ns(now.saturating_sub(stopped)) / PERIOD_NS;
+    let now = crate::time::now_ns();
+    let missed = passed(cpu, now);
     CP_TIME[cpu][CP_IDLE].fetch_add(missed, Ordering::Relaxed);
     ARMED[cpu].store(true, Ordering::Relaxed);
-    t.reset(PERIOD_NS, tick, cpu);
+    t.reset(NEXT[cpu].load(Ordering::Relaxed) - now, tick, cpu);
 }
 
-/// One statistics tick (`statclock`): charged to the state the CPU was
-/// found in. An idle CPU's clock stops until [`resume`].
+/// CPU `cpu`'s next grid point (ns since boot).
+#[cfg_attr(not(feature = "ktest"), allow(dead_code))]
+pub(crate) fn next_tick(cpu: usize) -> u64 {
+    NEXT.get(cpu).map_or(0, |n| n.load(Ordering::Relaxed))
+}
+
+/// Moves CPU `cpu`'s next grid point past `now`; the points passed.
+fn passed(cpu: usize, now: u64) -> u64 {
+    let next = NEXT[cpu].load(Ordering::Relaxed);
+    if now < next {
+        return 0;
+    }
+    let n = (now - next) / PERIOD_NS + 1;
+    NEXT[cpu].store(next + n * PERIOD_NS, Ordering::Relaxed);
+    n
+}
+
+/// One statistics tick (`statclock`), with any grid points a late timer
+/// passed: charged to the state the CPU was found in. An idle CPU's clock
+/// stops until [`resume`].
 fn tick(cpu: usize, _: &IrqCx) {
     let user = FROM_USER[cpu].load(Ordering::Relaxed);
     let state = match sched::stat_tick(user) {
@@ -111,14 +132,22 @@ fn tick(cpu: usize, _: &IrqCx) {
         TickState::Interrupt => CP_INTR,
         TickState::Idle => CP_IDLE,
     };
-    CP_TIME[cpu][state].fetch_add(1, Ordering::Relaxed);
+    let now = crate::time::now_ns();
+    let runs = match passed(cpu, now) {
+        // A hair early (the timer rounds): the point it was armed for.
+        0 => {
+            NEXT[cpu].fetch_add(PERIOD_NS, Ordering::Relaxed);
+            1
+        }
+        n => n,
+    };
+    CP_TIME[cpu][state].fetch_add(runs, Ordering::Relaxed);
     if state == CP_IDLE {
         ARMED[cpu].store(false, Ordering::Relaxed);
-        STOPPED[cpu].store(crate::time::counter(), Ordering::Relaxed);
         return;
     }
     if let Some(t) = TIMERS[cpu].get() {
-        t.reset(PERIOD_NS, tick, cpu);
+        t.reset(NEXT[cpu].load(Ordering::Relaxed) - now, tick, cpu);
     }
 }
 
@@ -137,11 +166,13 @@ pub(crate) fn cp_time(cpu: usize) -> [u64; CPUSTATES] {
         return [0; CPUSTATES];
     };
     let mut v = [0, 1, 2, 3, 4].map(|i| c[i].load(Ordering::Relaxed));
-    // A stopped clock's idle stretch so far.
+    // A stopped clock's idle stretch so far: the grid points it passed.
     if !ARMED[cpu].load(Ordering::Relaxed) && TIMERS[cpu].get().is_some() {
-        let stopped = STOPPED[cpu].load(Ordering::Relaxed);
-        let now = crate::time::counter();
-        v[CP_IDLE] += crate::time::ticks_to_ns(now.saturating_sub(stopped)) / PERIOD_NS;
+        let next = NEXT[cpu].load(Ordering::Relaxed);
+        let now = crate::time::now_ns();
+        if now >= next {
+            v[CP_IDLE] += (now - next) / PERIOD_NS + 1;
+        }
     }
     v
 }

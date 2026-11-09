@@ -182,8 +182,9 @@ pub trait Sock {
     /// Clears `SB_AUTOSIZE` on the send buffer.
     fn snd_autosize_off(&mut self);
     /// `m_copym` of `len` bytes from `off` in the send buffer, by
-    /// reference; `None` out of buffers.
-    fn snd_copy(&self, off: u32, len: u32) -> Option<Chain>;
+    /// reference, from the send pointer (`sbsndptr_noadv`) when it is at
+    /// or before `off`; `None` out of buffers.
+    fn snd_copy(&mut self, off: u32, len: u32) -> Option<Chain>;
     /// `sbdrop`: the first `n` bytes were acknowledged; wakes writers.
     fn snd_drop(&mut self, n: u32);
     /// `SBS_CANTSENDMORE` on the send buffer.
@@ -443,6 +444,8 @@ pub struct Ctx<'a> {
     pub path: &'a dyn Fn(&Inc) -> Path,
     /// The VNET's secrets for ISNs and timestamp offsets.
     pub secrets: &'a isn::Secrets,
+    /// The VNET's ISN offset.
+    pub isn: &'a isn::Offset,
 }
 
 impl core::fmt::Debug for Ctx<'_> {
@@ -464,7 +467,8 @@ impl Ctx<'_> {
     /// `tcp_new_isn` for `inc`.
     #[must_use]
     pub fn new_isn(&self, inc: &Inc) -> u32 {
-        self.secrets.new_isn(inc, self.now)
+        self.secrets
+            .new_isn(inc, self.now, self.isn, (self.random)())
     }
 
     /// `tcp_ts_getticks`: the timestamp clock.

@@ -254,6 +254,7 @@ fn reassembly_fills_gaps_in_any_order() {
         hc: &hc,
         path: &|_| crate::tcb::Path::default(),
         secrets: &crate::isn::Secrets::default(),
+        isn: &crate::isn::Offset::new(),
     };
     let data = pattern(10_000);
     // Pieces of 1000 bytes (some overlapping their neighbors), out of

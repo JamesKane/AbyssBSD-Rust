@@ -111,7 +111,8 @@ until P4.7). `--abyss-only` runs AbyssBSD alone, for investigating; with `--prof
 each benchmark: the functions sampled most (every CPU every 100 µs), the hottest with their
 callers, and the time spent waiting for the disk, by the waiter's call chain, with each CPU's
 busy samples. `--prof-cpu N` (`abyss.prof.cpu=N`) lists the functions of CPU N's samples only:
-`ubench` binds itself to CPU 1, so `--prof-cpu 1` leaves out what other threads do meanwhile. Under
+`ubench` binds itself to CPU 1, so `--prof-cpu 1` leaves out what other threads do meanwhile. The multi-user suites (`p6`, `p7`) take `--prof` too: the
+installed root boots with `abyss.prof`, and each result line on its console ends a report. Under
 the profiler `ubench` runs each create/rename/unlink storm phase 30 rounds with only that phase
 sampled (`kprof pause` and `kprof resume` lines). `fetch-base` keeps each architecture's `base.txz` under
 `~/abyss/dist/15.1-RELEASE/<arch>/`: the archive, `root/` (`/rescue`, `/lib`, `/usr/include`,

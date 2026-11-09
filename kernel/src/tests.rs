@@ -407,6 +407,43 @@ ktest! {
 }
 
 ktest! {
+    fn statclock_ticks_stay_on_their_grid() {
+        // A thread on one CPU that sleeps and wakes again and again: each
+        // wakeup restarts that CPU's statistics clock, and its next tick
+        // must stay on the grid it started on, whole periods on, however
+        // the wakeup fell. (Restarting the period at each wakeup put every
+        // tick after a short burst of work, in idle time.)
+        let ncpu = u32::try_from(sched::online_cpus()).unwrap();
+        let cpu = hal::CpuId(ncpu - 1);
+        let t = sched::Builder::new("grid")
+            .bind(cpu)
+            .spawn(move |s| {
+                let i = cpu.index();
+                let start = crate::statclock::next_tick(i);
+                let mut moved = false;
+                for _ in 0..40 {
+                    crate::time::sleep_ns(s, 1_300_000);
+                    let t0 = crate::time::now_ns();
+                    while crate::time::now_ns() - t0 < 200_000 {
+                        core::hint::spin_loop();
+                    }
+                    let next = crate::statclock::next_tick(i);
+                    assert!(next >= start, "the grid went back: {next} < {start}");
+                    assert_eq!(
+                        (next - start) % crate::statclock::PERIOD_NS,
+                        0,
+                        "off the grid: {next} from {start}"
+                    );
+                    moved |= next != start;
+                }
+                assert!(moved, "no tick in 40 wakeups");
+            })
+            .unwrap();
+        t.join(&cx());
+    }
+}
+
+ktest! {
     fn timers_fire_in_order_and_stop() {
         use core::pin::pin;
         use core::sync::atomic::AtomicU64;
