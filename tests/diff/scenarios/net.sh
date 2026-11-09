@@ -72,7 +72,10 @@ show jexec n1 sockstat -4 -l | ports | sort
 show jexec n1 sockstat -6 -l | ports | sort
 show jexec n1 netstat -an -f inet | ports
 show jexec n1 netstat -an -f inet6 | ports
-spawn cli sh -c 'sleep 60 | jexec n2 nc 10.99.0.1 5000'
+# The client's input is a FIFO it holds open itself, so it waits without a
+# writer that would outlive the scenario.
+mkfifo cli.in
+spawn cli jexec n2 nc 10.99.0.1 5000 <> cli.in
 sleep 1
 show jexec n1 sockstat -4 -c | ports | sort
 show jexec n1 netstat -an -p tcp -f inet | ports
@@ -82,5 +85,6 @@ kill $lsn $lsn6 $udp $cli 2> /dev/null
 pkill -j n1 nc
 pkill -j n2 nc
 jail -r n1 n2
+rm -f cli.in
 # The interfaces go home in the background on FreeBSD.
 ifconfig $a destroy 2> /dev/null
