@@ -2212,6 +2212,21 @@ P7.0 ─► P7.1 ─► P7.2 ─► P7.3 ─► P7.4 ─┬─► P7.5 ───
   The per-packet `Vec`s (the IP header, the net lock's frame lists) are gone. tcp.lo.s1 50.9 ->
   56.1 Gbit/s (three runs; FreeBSD 75); tcp.rx.s1 6534, tcp.tx.s1 5109, udp.tx.bulk 7273 (all
   above FreeBSD's). A deeper netisr queue (no drops) made it slower: 32.8.
+- Progress 2026-11-09 (evening): loopback is not `netisr`-bound after all (the profiler has it
+  about half busy). FreeBSD's iperf3 threads never sleep (about 10 switches a second each); ours
+  sleep 2,400 times a second each (`tcp-lo-csw.sh`), with the sender's buffer full and the
+  reader's empty in turn (`tcp-lo-rq.sh`). Neither idle CPUs always spinning nor a 1 ms cap on
+  socket sleeps changes the rate, and the gap is the same at every window (`tcp-lo-win.sh`:
+  256K 44 vs 60, 1M 49.6 vs 84, default 56 vs 75), so each round trip costs more. With wakeups
+  made cheap the reader is the busiest (93%), at 25% more CPU a byte than FreeBSD's
+  (`tcp-lo-pin.sh` profiles it alone). A stream read now calls `tcp_rcvd` once, as
+  `soreceive_generic` calls `pr_rcvd`, reads the timeout only to wait, and learns what is left
+  from the take: two socket lock holds a 128K read instead of seven. tcp.lo.s1 56.1 -> 57.4,
+  57.5 (two sets of three runs); tcp.rx.s1 and udp.rx.bulk unchanged. Tried and not taken (no
+  gain): lock-free `inet` hooks with the TCP options borrowed, and a sender skipping the lock
+  after its batch when nothing more was queued. Drops match FreeBSD's (372 vs about 340 in 8 s),
+  but ours make 170 SACK recoveries to its 3. Next: the reader's remaining costs (the chain walk
+  in `split_off`, freeing, the wakeup's switch).
 
 ## Phase 8: Board bring-up (XL)
 

@@ -140,6 +140,10 @@ pub struct Received {
     /// A stream's data as the socket buffer's mbufs, when asked for them
     /// ([`Socket::recv_stream_mbufs`]); `data` is then empty.
     pub chain: mbuf::Chain,
+    /// A stream read: more is there to read now, before any urgent mark
+    /// (what `FIONREAD` and `SIOCATMARK` would tell, under the same
+    /// hold of the lock).
+    pub more: bool,
 }
 
 impl Socket {
@@ -577,6 +581,7 @@ fn cut(from: Sockaddr, mut data: Vec<u8>, meta: Meta, max: usize) -> Received {
         meta: Some(meta),
         tls: None,
         chain: mbuf::Chain::new(),
+        more: false,
     }
 }
 

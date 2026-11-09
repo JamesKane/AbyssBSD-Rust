@@ -1581,7 +1581,10 @@ impl Socket {
     /// [`Socket::recv_stream`] of in-band data, which comes as the socket
     /// buffer's own mbufs (`soreceive_stream`'s `sbcut`, or by reference
     /// with `peek`) for the caller to copy out once the lock is let go;
-    /// a receiving TLS session's records come in `data`.
+    /// a receiving TLS session's records come in `data`. The window the
+    /// plain data opens waits for [`Socket::stream_rcvd`], which the
+    /// caller makes once at the end of its read, as `soreceive_generic`
+    /// calls `pr_rcvd` once (TLS records open it as they are read).
     ///
     /// # Errors
     ///
@@ -1591,8 +1594,14 @@ impl Socket {
         max: usize,
         peek: bool,
     ) -> Result<crate::Received, Errno> {
-        self.recv_data(max, peek, false, true, |_| true)
+        self.recv_data_then(max, peek, false, true, false, |_| true)
             .map(Option::unwrap_or_default)
+    }
+
+    /// `pr_rcvd` after [`Socket::recv_stream_mbufs`] took data: the window
+    /// it opened goes to the peer if it should (`tcp_usr_rcvd`).
+    pub fn stream_rcvd(self: &Arc<Self>) {
+        self.tcp_rcvd();
     }
 
     /// [`Socket::recv_stream`] of data with `MSG_TLSAPPDATA`: on a socket
@@ -1630,6 +1639,21 @@ impl Socket {
         peek: bool,
         appdata: bool,
         mbufs: bool,
+        still: impl FnOnce(&Inner) -> bool,
+    ) -> Result<Option<crate::Received>, Errno> {
+        self.recv_data_then(max, peek, appdata, mbufs, true, still)
+    }
+
+    /// [`Socket::recv_data`]; without `rcvd`, plain data read leaves
+    /// `tcp_rcvd` to the caller. Sets [`crate::Received::more`].
+    #[inline]
+    fn recv_data_then(
+        self: &Arc<Self>,
+        max: usize,
+        peek: bool,
+        appdata: bool,
+        mbufs: bool,
+        rcvd: bool,
         still: impl FnOnce(&Inner) -> bool,
     ) -> Result<Option<crate::Received>, Errno> {
         let mut out = crate::Received::default();
@@ -1684,6 +1708,7 @@ impl Socket {
             }
             i.rcv.cc -= u32::try_from(n).unwrap_or(0);
             i.rcv.mbcnt = i.stream.cost();
+            let mut atmark = false;
             if let Some(t) = i.tcp.as_mut() {
                 let s = &mut t.side;
                 s.atmark = false;
@@ -1693,9 +1718,13 @@ impl Socket {
                         s.atmark = true;
                     }
                 }
+                atmark = s.atmark;
             }
+            out.more = !i.stream.is_empty() && !atmark;
         }
-        self.tcp_rcvd();
+        if rcvd {
+            self.tcp_rcvd();
+        }
         Ok(Some(out))
     }
 

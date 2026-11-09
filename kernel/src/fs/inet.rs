@@ -310,7 +310,8 @@ pub(crate) fn receive(
 ) -> Result<Got, Errno> {
     let nonblock = nonblock || flags & (MSG_DONTWAIT | MSG_NBIO) != 0;
     let peek = flags & MSG_PEEK != 0;
-    let (_, timeo) = so.timeouts();
+    // Looked up only to wait: most reads find data.
+    let timeo = || so.timeouts().1;
     let mut got = Got {
         count: 0,
         from: None,
@@ -329,7 +330,7 @@ pub(crate) fn receive(
             once()
         } else {
             let _w = sched::wait_message("sbwait");
-            wait_until(s, &so.rd, timeo, once)
+            wait_until(s, &so.rd, timeo(), once)
         }?;
         got.count = uio.copy_out(&r.data)?;
         got.from = r.from;
@@ -346,6 +347,33 @@ pub(crate) fn receive(
     }
     let waitall = flags & MSG_WAITALL != 0 && !peek;
     let appdata = flags & MSG_TLSAPPDATA != 0;
+    // Plain data taken whose window is not yet told (`pr_rcvd`, once a
+    // read as `soreceive_generic` calls it, and before waiting for more).
+    let mut owed = false;
+    let r = receive_stream(
+        s, so, uio, &mut got, &mut owed, peek, nonblock, waitall, appdata, &timeo,
+    );
+    if owed {
+        so.stream_rcvd();
+    }
+    r.map(|()| got)
+}
+
+/// [`receive`]'s stream loop; `owed` set while data taken waits for its
+/// `pr_rcvd`.
+#[allow(clippy::too_many_arguments, reason = "receive's state, split out")]
+fn receive_stream(
+    s: &Sleepable,
+    so: &Arc<Socket>,
+    uio: &mut dyn Uio,
+    got: &mut Got,
+    owed: &mut bool,
+    peek: bool,
+    nonblock: bool,
+    waitall: bool,
+    appdata: bool,
+    timeo: &dyn Fn() -> u64,
+) -> Result<(), Errno> {
     loop {
         let want = uio.resid().min(PIECE);
         let first = || {
@@ -358,14 +386,19 @@ pub(crate) fn receive(
         let r = if nonblock || (got.count > 0 && !waitall) {
             first()
         } else {
+            if core::mem::take(owed) {
+                // The window opens before the wait (`MSG_WAITALL`).
+                so.stream_rcvd();
+            }
             let _w = sched::wait_message("sbwait");
-            wait_until(s, &so.rd, timeo, first)
+            wait_until(s, &so.rd, timeo(), first)
         };
         let r = match r {
             Ok(r) => r,
-            Err(Errno::EINTR | Errno::ERESTART | Errno::EAGAIN) if got.count > 0 => return Ok(got),
+            Err(Errno::EINTR | Errno::ERESTART | Errno::EAGAIN) if got.count > 0 => return Ok(()),
             Err(e) => return Err(e),
         };
+        *owed |= !peek && !r.chain.is_empty();
         // A TLS record comes in `data`, plain data as mbufs, copied out
         // now that the socket's lock is not held (`m_mbuftouio`).
         let n = r.data.len() + r.chain.len();
@@ -377,12 +410,18 @@ pub(crate) fn receive(
         got.tls = got.tls.or(r.tls);
         // A TLS record is a read's end.
         if n == 0 || uio.resid() == 0 || peek || r.flags & MSG_EOR != 0 {
-            return Ok(got);
+            return Ok(());
         }
         // More waits only with `MSG_WAITALL`; without, what is there now
-        // still comes (a read stops short at the urgent mark).
-        if !waitall && (n < want || so.nread() == 0 || so.at_mark()) {
-            return Ok(got);
+        // still comes (a read stops short at the urgent mark). Plain data
+        // says so as it is taken; a TLS record is asked after.
+        let more = if r.chain.is_empty() {
+            so.nread() != 0 && !so.at_mark()
+        } else {
+            r.more
+        };
+        if !waitall && (n < want || !more) {
+            return Ok(());
         }
     }
 }
