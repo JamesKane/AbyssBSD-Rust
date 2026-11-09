@@ -76,19 +76,13 @@ impl mbuf::Header for Header {
 /// `NETISR_ETHER`): its interface is `m.hdr.rcvif`.
 pub fn input(vnet: &Arc<Vnet>, mut m: Packet) {
     let index = m.hdr.rcvif;
-    let (ifflags, lladdr, tap, fib, stats) = {
-        let n = vnet.net.lock();
-        let Some(i) = n.by_index(index) else {
-            return;
-        };
-        (
-            i.flags,
-            i.lladdr,
-            i.bpf.clone(),
-            i.fib,
-            Arc::clone(&i.stats),
-        )
+    // The interface under the network epoch, borrowed, no lock or
+    // reference (`ether_input` runs in a `NET_EPOCH` section).
+    let section = crate::view::enter();
+    let Some(i) = vnet.net.view(&section).by_index(index) else {
+        return;
     };
+    let (ifflags, lladdr, tap, fib, stats) = (i.flags, i.lladdr, &i.bpf, i.fib, &*i.stats);
     if ifflags & iff::UP == 0 {
         return;
     }
@@ -104,7 +98,7 @@ pub fn input(vnet: &Arc<Vnet>, mut m: Packet) {
         };
         stats.imcasts.add(1);
     }
-    if let Some(t) = &tap {
+    if let Some(t) = tap {
         t.mtap(&m, Way::In);
     }
     // An 802.1Q header the device did not take off, as the device would
@@ -134,7 +128,7 @@ pub fn input(vnet: &Arc<Vnet>, mut m: Packet) {
     if !is_multicast(&eh.dst) && lladdr.is_some_and(|l| l != eh.dst) {
         m.hdr.flags |= flags::PROMISC;
     }
-    demux(vnet, ifflags, &stats, eh.ty, m);
+    demux(vnet, ifflags, stats, eh.ty, m);
 }
 
 /// `ether_demux`: to the protocol for its type, the header off.

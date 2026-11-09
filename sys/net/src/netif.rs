@@ -156,5 +156,8 @@ pub fn detach(port: &Port) {
     let gone = v.net.lock().detach(index);
     if let Some(i) = gone {
         crate::clone::untap(&i);
+        // No view may still hold its device once the driver detaches.
+        drop(i);
+        crate::view::drain();
     }
 }

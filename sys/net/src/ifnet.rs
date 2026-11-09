@@ -393,6 +393,16 @@ pub struct Net {
     pub hash_outbound: bool,
 }
 
+/// [`Net::route_in`] in `routes`.
+#[must_use]
+pub fn route_in<'a>(routes: &'a [Route], fib: u16, family: Family, dst: &In6) -> Option<&'a Route> {
+    routes
+        .iter()
+        .filter(|r| r.family == family && r.fib == fib && prefix_match(family, &r.dst, dst, r.plen))
+        // The longest prefix; of a multipath group's paths, the first.
+        .min_by_key(|r| (core::cmp::Reverse(r.plen), r.nhidx))
+}
+
 /// Why a route lookup failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NoRoute {
@@ -609,13 +619,7 @@ impl Net {
     /// its flags (`fib4_lookup`, `fib6_lookup`).
     #[must_use]
     pub fn route_in(&self, fib: u16, family: Family, dst: &In6) -> Option<&Route> {
-        self.routes
-            .iter()
-            .filter(|r| {
-                r.family == family && r.fib == fib && prefix_match(family, &r.dst, dst, r.plen)
-            })
-            // The longest prefix; of a multipath group's paths, the first.
-            .min_by_key(|r| (core::cmp::Reverse(r.plen), r.nhidx))
+        route_in(&self.routes, fib, family, dst)
     }
 
     /// `fib6_lookup`: the IPv6 route to `dst` in table `fib`, longest

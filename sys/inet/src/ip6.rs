@@ -685,7 +685,7 @@ pub(crate) fn delayed_cksum(m: &mut Packet, off: usize) {
 pub fn output(vnet: &Arc<Vnet>, m: Packet, o: &Opts6) -> Result<(), Errno> {
     let st = state::of(vnet);
     let mut n = vnet.net.lock();
-    output_in(&mut n, st, m, o)
+    output_in(n.data_path(), st, m, o)
 }
 
 /// [`output`] under the interfaces' lock (neighbor discovery and MLD
@@ -930,7 +930,7 @@ fn select_route(n: &Net, st: &State, ip6: &Ip6, o: &Opts6) -> Result<Path6, Errn
         st.ip6stat.inc(ip6s::NOROUTE);
         return Err(Errno::EHOSTUNREACH);
     };
-    let r = crate::ip::mpath_select(n, r, o.flowid);
+    let r = crate::ip::mpath_select(&n.routes, r, o.flowid);
     if o.nexthop.is_some() && r.flags & rtf::GATEWAY != 0 {
         st.ip6stat.inc(ip6s::NOROUTE);
         return Err(Errno::EHOSTUNREACH);
@@ -1042,7 +1042,7 @@ pub(crate) fn forward(vnet: &Arc<Vnet>, st: &State, mut m: Packet, srcrt: bool) 
         match n.route6(m.hdr.fib, &ip6.dst, dst_zone) {
             None => Err(None),
             Some(r) => {
-                let r = crate::ip::mpath_select(&n, r, m.hdr.flowid);
+                let r = crate::ip::mpath_select(&n.routes, r, m.hdr.flowid);
                 if r.flags & rtf::REJECT != 0 {
                     Err(Some(icmp6::code::DST_UNREACH_REJECT))
                 } else if r.flags & rtf::BLACKHOLE != 0 {
@@ -1125,7 +1125,7 @@ pub(crate) fn forward(vnet: &Arc<Vnet>, st: &State, mut m: Packet, srcrt: bool) 
     m.hdr.flags &= !(flags::BCAST | flags::MCAST);
     let r = {
         let mut n = vnet.net.lock();
-        send(&mut n, outif, origif, &nexthop, m)
+        send(n.data_path(), outif, origif, &nexthop, m)
     };
     match r {
         Ok(()) => {

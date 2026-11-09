@@ -577,7 +577,7 @@ fn flows_spread_over_a_multipath_route() {
     n.routes.push(path(10, 1, 7));
     n.routes.push(path(20, 1, 3));
     let first = n.routes[0].clone();
-    let gw = |flow: u32| match crate::ip::mpath_select(&n, &first, flow).gateway {
+    let gw = |flow: u32| match crate::ip::mpath_select(&n.routes, &first, flow).gateway {
         Gateway::Addr(a) => a[15],
         Gateway::Link(_) => 0,
     };
@@ -587,10 +587,12 @@ fn flows_spread_over_a_multipath_route() {
     n.routes[1].weight = 2;
     let first = n.routes[0].clone();
     let picks: Vec<u8> = (0..6)
-        .map(|f| match crate::ip::mpath_select(&n, &first, f).gateway {
-            Gateway::Addr(a) => a[15],
-            Gateway::Link(_) => 0,
-        })
+        .map(
+            |f| match crate::ip::mpath_select(&n.routes, &first, f).gateway {
+                Gateway::Addr(a) => a[15],
+                Gateway::Link(_) => 0,
+            },
+        )
         .collect();
     assert_eq!(picks, [20, 20, 10, 20, 20, 10]);
 }

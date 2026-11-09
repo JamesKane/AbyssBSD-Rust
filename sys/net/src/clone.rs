@@ -436,6 +436,8 @@ pub fn destroy(vnet: &Arc<Vnet>, name: &[u8]) -> Result<Vec<(Arc<Vnet>, Ifnet)>,
         ifnet::Net::free_index(index);
         gone.insert(0, (Arc::clone(vnet), i));
     }
+    // No view still holds the device once it is destroyed.
+    crate::view::drain();
     Ok(gone)
 }
 

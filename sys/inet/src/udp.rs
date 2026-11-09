@@ -843,7 +843,8 @@ pub(crate) fn input4(vnet: &Arc<Vnet>, mut m: Packet, ip: &Ip) {
     let to = Sockaddr::v4(ip.dst, dport);
     let rcvif = m.hdr.rcvif;
     let bcast = ip.dst == [0xff; 4] || ip.dst == [0; 4] || {
-        let n = vnet.net.lock();
+        let section = net::view::enter();
+        let n = vnet.net.view(&section);
         n.by_index(rcvif).is_some_and(|i| {
             i.addrs.iter().any(|a| {
                 a.family == Family::Inet

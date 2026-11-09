@@ -36,6 +36,7 @@ pub mod rtmsg;
 pub mod rtsock;
 #[cfg(test)]
 mod tests;
+pub mod view;
 mod vnet;
 
 pub use vnet::{Vnet, vnet0};

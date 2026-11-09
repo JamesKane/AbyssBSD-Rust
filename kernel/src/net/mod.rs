@@ -146,6 +146,9 @@ fn start_route_expiry() {
     let _ = sched::spawn("rtexpire", sched::Priority::KERNEL, |s| {
         loop {
             crate::time::sleep_ns(s, 1_000_000_000);
+            // The network epoch's callback task: views and the like
+            // retired a grace period ago go now.
+            net::view::reclaim(&mut || crate::time::sleep_ns(s, 1_000_000));
             let now = u64::try_from(now_s()).unwrap_or(0);
             let up = uptime_s();
             for v in net::Vnet::all() {

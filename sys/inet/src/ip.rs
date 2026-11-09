@@ -23,6 +23,7 @@ use abi::net::{IFT_LOOP, ifcap, iff, rtf};
 use mbuf::{MHLEN, Packet, csum, flags};
 use net::addr::{from_v4, is_loopback4, is_multicast4, prefix_match, v4_of};
 use net::ifnet::{Gateway, Ifaddr, Ifnet, Net};
+use net::view::{IfView, View};
 use net::{Family, Vnet};
 
 use crate::cksum;
@@ -178,7 +179,7 @@ pub(crate) fn is_local4(n: &Net, a: &[u8; 4]) -> bool {
 /// What the device takes of the checksum work (`if_hwassist`): a loopback
 /// interface with transmit checksums enabled does it all, never on the
 /// wire; the others leave it here.
-fn hwassist(i: &Ifnet) -> u32 {
+fn hwassist(i: &IfView) -> u32 {
     if i.ty == IFT_LOOP && i.capenable & ifcap::TXCSUM != 0 {
         csum::IP | csum::IP_UDP | csum::IP_TCP
     } else {
@@ -219,8 +220,15 @@ enum Dest {
 /// (one of its addresses, a broadcast address of the receiving
 /// interface, a multicast group, the limited broadcast), to be
 /// forwarded, or dropped.
-fn classify(n: &Net, st: &State, ip: &Ip, rcvif: u16, ifflags: u32, mflags: u32) -> Dest {
-    let any4 = n.ifaces.iter().any(|i| addrs4(i).next().is_some());
+fn classify(
+    n: &net::view::View,
+    st: &State,
+    ip: &Ip,
+    rcvif: u16,
+    ifflags: u32,
+    mflags: u32,
+) -> Dest {
+    let any4 = n.ifaces.iter().any(|i| i.addrs4().next().is_some());
     if !any4 && mflags & (flags::MCAST | flags::BCAST) == 0 {
         return Dest::Ours;
     }
@@ -228,13 +236,13 @@ fn classify(n: &Net, st: &State, ip: &Ip, rcvif: u16, ifflags: u32, mflags: u32)
     let loopback = ifflags & iff::LOOPBACK != 0;
     let strong_es = on(&st.conf.strong_es) && !forwarding && !loopback;
     for i in &n.ifaces {
-        if addrs4(i).any(|a| v4_of(&a.addr) == ip.dst) {
+        if i.addrs4().any(|a| v4_of(&a.addr) == ip.dst) {
             if strong_es && i.index != rcvif {
                 return Dest::Drop(ips::BADADDR);
             }
             // `net.inet.ip.source_address_validation`: a packet from the
             // wire pretending to come from here.
-            if on(&st.conf.sav) && !loopback && is_local4(n, &ip.src) {
+            if on(&st.conf.sav) && !loopback && n.is_local4(&ip.src) {
                 return Dest::Drop(ips::BADADDR);
             }
             return Dest::Ours;
@@ -242,7 +250,8 @@ fn classify(n: &Net, st: &State, ip: &Ip, rcvif: u16, ifflags: u32, mflags: u32)
     }
     if ifflags & iff::BROADCAST != 0
         && let Some(i) = n.by_index(rcvif)
-        && addrs4(i).any(|a| a.broadcast.is_some_and(|b| v4_of(&b) == ip.dst))
+        && i.addrs4()
+            .any(|a| a.broadcast.is_some_and(|b| v4_of(&b) == ip.dst))
     {
         return Dest::Ours;
     }
@@ -307,7 +316,11 @@ pub fn input(vnet: &Arc<Vnet>, mut m: Packet) {
         return;
     }
     let rcvif = m.hdr.rcvif;
-    let ifflags = vnet.net.lock().by_index(rcvif).map_or(0, |i| i.flags);
+    // The interface and the addresses under the network epoch, no lock
+    // (`ip_input` runs in a `NET_EPOCH` section).
+    let section = net::view::enter();
+    let view = vnet.net.view(&section);
+    let ifflags = view.by_index(rcvif).map_or(0, |i| i.flags);
     // RFC 1122: the loopback network never on the wire.
     if (is_loopback4(&ip.dst) || is_loopback4(&ip.src)) && ifflags & iff::LOOPBACK == 0 {
         st.ipstat.inc(ips::BADADDR);
@@ -351,7 +364,7 @@ pub fn input(vnet: &Arc<Vnet>, mut m: Packet) {
             return;
         }
     }
-    let dest = classify(&vnet.net.lock(), st, &ip, rcvif, ifflags, m.hdr.flags);
+    let dest = classify(view, st, &ip, rcvif, ifflags, m.hdr.flags);
     match dest {
         Dest::Drop(stat) => {
             st.ipstat.inc(stat);
@@ -442,12 +455,12 @@ struct Path {
 }
 
 /// `ip_output`'s choice of interface for `dst`.
-fn path(n: &Net, st: &State, ip: &mut Ip, o: &Opts) -> Result<Option<Path>, Errno> {
+fn path(n: &View, st: &State, ip: &mut Ip, o: &Opts) -> Result<Option<Path>, Errno> {
     let dst = ip.dst;
     let find = |pred: &dyn Fn(&Ifaddr) -> bool| {
         n.ifaces
             .iter()
-            .find_map(|i| addrs4(i).find(|a| pred(a)).map(|a| (i, a)))
+            .find_map(|i| i.addrs4().find(|a| pred(a)).map(|a| (i, a)))
     };
     if o.flags & out::SENDONES != 0 {
         let Some((i, a)) = find(&|a| {
@@ -493,7 +506,7 @@ fn path(n: &Net, st: &State, ip: &mut Ip, o: &Opts) -> Result<Option<Path>, Errn
             ifindex: i.index,
             mtu: i.mtu,
             gw: None,
-            src: addrs4(i).next().map_or([0; 4], |a| v4_of(&a.addr)),
+            src: i.addrs4().next().map_or([0; 4], |a| v4_of(&a.addr)),
             bcast: false,
         }));
     }
@@ -501,7 +514,7 @@ fn path(n: &Net, st: &State, ip: &mut Ip, o: &Opts) -> Result<Option<Path>, Errn
         st.ipstat.inc(ips::NOROUTE);
         return Err(Errno::EHOSTUNREACH);
     };
-    let r = mpath_select(n, r, o.flowid);
+    let r = mpath_select(&n.routes, r, o.flowid);
     // `looutput` on a reject or blackhole next hop.
     if r.flags & rtf::BLACKHOLE != 0 {
         return Ok(None);
@@ -515,7 +528,7 @@ fn path(n: &Net, st: &State, ip: &mut Ip, o: &Opts) -> Result<Option<Path>, Errn
         _ => None,
     };
     let src = v4_of(&r.ifa);
-    let ia = addrs4(i).find(|a| v4_of(&a.addr) == src);
+    let ia = i.addrs4().find(|a| v4_of(&a.addr) == src);
     let target = gw.unwrap_or(dst);
     let bcast = (r.flags & (rtf::HOST | RTF_BROADCAST) == rtf::HOST | RTF_BROADCAST)
         || (i.flags & iff::BROADCAST != 0
@@ -570,7 +583,7 @@ pub fn flow_hash(src: [u8; 4], dst: [u8; 4], sport: u16, dport: u16, proto: u8) 
 
 /// Whether this host's packets get hashed flows (`V_fib_hash_outbound`).
 pub(crate) fn hash_outbound(vnet: &Vnet) -> bool {
-    vnet.net.lock().hash_outbound
+    vnet.net.hash_outbound()
 }
 
 /// `RIB_MAX_MPATH_WIDTH`.
@@ -580,7 +593,7 @@ const MAX_MPATH_WIDTH: u32 = 64;
 /// next-hop index), the one flow `flowid` takes, each path given slots in
 /// proportion to its weight (`calc_min_mpath_slots`).
 pub(crate) fn mpath_select<'a>(
-    n: &'a Net,
+    routes: &'a [net::ifnet::Route],
     r: &'a net::ifnet::Route,
     flowid: u32,
 ) -> &'a net::ifnet::Route {
@@ -594,10 +607,10 @@ pub(crate) fn mpath_select<'a>(
     };
     // A route of one path, as most are: nothing to choose, nothing to
     // allocate.
-    if n.routes.iter().filter(same).nth(1).is_none() {
+    if routes.iter().filter(same).nth(1).is_none() {
         return r;
     }
-    let mut group: Vec<&net::ifnet::Route> = n.routes.iter().filter(same).collect();
+    let mut group: Vec<&net::ifnet::Route> = routes.iter().filter(same).collect();
     group.sort_by_key(|x| x.nhidx);
     let gcd = |mut a: u32, mut b: u32| {
         while b != 0 {
@@ -617,6 +630,36 @@ pub(crate) fn mpath_select<'a>(
         slots = group;
     }
     slots[flowid as usize % slots.len()]
+}
+
+/// Hands `m` to interface `i` (`ip_output_send`): a loopback interface's
+/// device takes it at once and says whether it could (`looutput`'s
+/// `if_simloop`, whose `ENOBUFS` from a full queue reaches the caller);
+/// an Ethernet one resolves the next hop under the lock first.
+fn send(
+    vnet: &Arc<Vnet>,
+    i: &IfView,
+    nexthop: &[u8; 16],
+    is_gw: bool,
+    m: Packet,
+    now: u64,
+) -> Result<(), Errno> {
+    if i.ty == IFT_LOOP
+        && let Some(link) = &i.link.0
+    {
+        return net::ether::output_frame(vnet, i.index, link, i.flags, Some(Family::Inet), m);
+    }
+    let mut guard = vnet.net.lock();
+    // The way out changes only the frame queues and the link-layer table.
+    net::output::output(
+        guard.data_path(),
+        i.index,
+        Family::Inet,
+        nexthop,
+        is_gw,
+        m,
+        now,
+    )
 }
 
 /// `in_delayed_cksum`: the transport checksum the device would have
@@ -703,8 +746,11 @@ pub fn output(vnet: &Arc<Vnet>, mut m: Packet, o: &Opts) -> Result<(), Errno> {
         st.ipstat.inc(ips::LOCALOUT);
     }
     let now = net::uptime();
-    let mut n = vnet.net.lock();
-    let Some(p) = path(&n, st, &mut ip, o)? else {
+    // The route and the interface under the network epoch, no lock
+    // (`ip_output` runs in a `NET_EPOCH` section).
+    let section = net::view::enter();
+    let n = vnet.net.view(&section);
+    let Some(p) = path(n, st, &mut ip, o)? else {
         return Ok(());
     };
     let i = n.by_index(p.ifindex).ok_or(Errno::EHOSTUNREACH)?;
@@ -732,7 +778,7 @@ pub fn output(vnet: &Arc<Vnet>, mut m: Packet, o: &Opts) -> Result<(), Errno> {
                 .map_err(|_| Errno::ENOBUFS)?;
             c.hdr.csum_flags = csum::IP_CHECKED | csum::IP_VALID;
             c.hdr.rcvif = p.ifindex;
-            n.isrq.push((net::netisr::Proto::Ip, c));
+            let _ = vnet.netisr.queue(net::netisr::Proto::Ip, c);
         }
         // Not to the wire with TTL 0, nor out of a loopback interface:
         // the copy above was it.
@@ -780,7 +826,7 @@ pub fn output(vnet: &Arc<Vnet>, mut m: Packet, o: &Opts) -> Result<(), Errno> {
         m.data
             .copy_in(0, &header_bytes(&ip, opts, sum))
             .map_err(|_| Errno::ENOBUFS)?;
-        return net::output::output(&mut n, p.ifindex, Family::Inet, &nexthop, is_gw, m, now);
+        return send(vnet, i, &nexthop, is_gw, m, now);
     }
     if ip.off & DF != 0 {
         st.ipstat.inc(ips::CANTFRAG);
@@ -790,7 +836,7 @@ pub fn output(vnet: &Arc<Vnet>, mut m: Packet, o: &Opts) -> Result<(), Errno> {
     let mut r = Ok(());
     for f in frags {
         if r.is_ok() {
-            r = net::output::output(&mut n, p.ifindex, Family::Inet, &nexthop, is_gw, f, now);
+            r = send(vnet, i, &nexthop, is_gw, f, now);
         }
     }
     if r.is_ok() {
