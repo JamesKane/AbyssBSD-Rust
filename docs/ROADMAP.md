@@ -2327,6 +2327,16 @@ P7.0 ─► P7.1 ─► P7.2 ─► P7.3 ─► P7.4 ─┬─► P7.5 ───
   tcp.rx.s4 0.89, udp.rx.small 0.94, tcp.rr.lo 0.76, sendfile.plain 0.87. Estimated geometric mean
   over the suite's 20 benchmarks about 0.95. Not taken: a wildcard PCB index (connect.lo
   unchanged; one unexplained refused connection).
+- Progress 2026-11-09 (late): bpf's tap and readers' locks hold off preemption only, as
+  `BPFD_LOCK` (they masked interrupts while every frame ran dhclient's filter), and vtnet
+  gathers a frame into an unzeroed buffer (1c9f1ed): tcp.cpu.tx 2021 -> 1947, tcp.cpu.rx 1404 ->
+  1275. Under bhyve neither system's vtnet gets offloads (no CSUM or TSO from the tap
+  backend). The transmit rates flip between two regimes run to run (udp.tx.small 319 or 396 on
+  one build); `udp-tx-small5.sh` takes five samples a boot. tcp.lo.s4 (four streams, 1.4) is
+  netisr-bound: about 85 retransmit timeouts in 10 s against FreeBSD's 45, tail losses at the
+  full queue; netisr's remaining costs are spread (TCP input 15%, output 14%, the send batch
+  6%, freeing acknowledged data 5%, struct moves 5%: a `Tx` is 168 bytes, a `Packet` 88, moved
+  by value where FreeBSD passes an mbuf pointer; socket lock spin 3.6%, FreeBSD's 27%).
 
 ## Phase 8: Board bring-up (XL)
 
