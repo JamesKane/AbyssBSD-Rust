@@ -12,7 +12,7 @@ for i in $(jot 120); do
 done
 export LD_LIBRARY_PATH=/tmp
 # Device interrupts to CPU 0, as suite p7 sets them.
-for irq in $(vmstat -ai | awk '/virtio_pci|nvme/ { sub(/^irq/, "", $1); sub(/:$/, "", $1); print $1 }'); do
+for irq in $(vmstat -ai | awk '/virtio_pci|vtnet|nvme/ { sub(/^irq/, "", $1); sub(/:$/, "", $1); print $1 }'); do
 	cpuset -l 0 -x "$irq"
 done
 sysctl -n vfs.heapx > /dev/null 2>&1

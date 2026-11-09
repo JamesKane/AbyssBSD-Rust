@@ -2191,6 +2191,12 @@ P7.0 ─► P7.1 ─► P7.2 ─► P7.3 ─► P7.4 ─┬─► P7.5 ───
   copied out after it, `soreceive_stream`): loopback TCP 23.8 -> 39 Gbit/s (FreeBSD 75). `vmstat
   -i` works (`hw.intrnames`, `hw.intrcnt`). TCP receive: CPU 0 spends about 46% in VM exits (ACK
   notifies, wakeup IPIs) and about 3.2 us per segment besides, FreeBSD about 2.2 us in all.
+- Progress 2026-11-08 (later still): what a receive batch sends (its ACKs, and data the ACKs
+  release) is kicked every 16 frames and at the batch's end, not frame by frame: TCP receive 1.8 ->
+  3.6 Gbit/s, send 2.4 -> 3.7. `cpuset -x` binds an interrupt's threads (`CPU_WHICH_IRQ`), so
+  suite p7's pinning to CPU 0 now holds here too, and IRQ numbers are unique. Probe ratios with both
+  systems pinned: lo 1.91, tcp.tx 1.17-1.25, tcp.rx 1.80, udp.rx 1.57, udp.tx.small 1.11;
+  udp.tx.bulk still flips between 1.5 and 5.9 Gbit/s with bhyve's kick regime (FreeBSD 6.6).
 
 ## Phase 8: Board bring-up (XL)
 

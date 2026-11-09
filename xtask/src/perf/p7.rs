@@ -47,7 +47,7 @@ peer=$1
 rm -f /tmp/ubench /tmp/iperf3 /tmp/libiperf.so.0
 cp /mnt/ubench /mnt/iperf3 /mnt/libiperf.so.0 /tmp/ && umount /mnt
 sysctl vm.pmap.pti hw.ibrs_active hw.mds_disable_state
-for irq in $(vmstat -ai | awk '/virtio_pci|nvme/ { sub(/^irq/, "", $1); sub(/:$/, "", $1); print $1 }'); do
+for irq in $(vmstat -ai | awk '/virtio_pci|vtnet|nvme/ { sub(/^irq/, "", $1); sub(/:$/, "", $1); print $1 }'); do
 	cpuset -l 0 -x "$irq"
 done
 for i in $(jot 120); do

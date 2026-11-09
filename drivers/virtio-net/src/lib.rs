@@ -205,6 +205,8 @@ struct TxQ {
     /// Each head's header slot.
     headers: DmaCoherent<u8>,
     sent: Vec<Option<Sent>>,
+    /// Frames pushed during a receive batch whose kick is still owed.
+    kick_owed: bool,
 }
 
 impl TxQ {
@@ -246,7 +248,14 @@ pub struct Shared {
     port: Arc<Port>,
     /// The receive filter last set: promiscuous, all-multicast.
     filter: SpinLock<(bool, bool)>,
+    /// The CPU delivering a receive batch, `u32::MAX` if none: what it
+    /// sends meanwhile (the batch's ACKs) is kicked every
+    /// [`KICK_EVERY`] frames and at the batch's end, not frame by frame.
+    batch_cpu: core::sync::atomic::AtomicU32,
 }
+
+/// Received frames delivered between a batch's kicks of what it sent.
+const KICK_EVERY: usize = 16;
 
 impl core::fmt::Debug for Shared {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -372,27 +381,55 @@ impl Shared {
             r.vq.kick();
             more
         };
-        for m in frames {
+        // Kicks for what the frames' handling sends (ACKs, mostly) are
+        // owed until every `KICK_EVERY` frames and the end: under a
+        // hypervisor each one exits.
+        self.batch_cpu.store(hal::cpu_id().0, Ordering::Relaxed);
+        for (i, m) in frames.into_iter().enumerate() {
             self.port.stats.ipackets.fetch_add(1, Ordering::Relaxed);
             self.port
                 .stats
                 .ibytes
                 .fetch_add(m.len() as u64, Ordering::Relaxed);
             self.port.input(m);
+            if (i + 1) % KICK_EVERY == 0 {
+                self.pay_kicks();
+            }
         }
+        self.batch_cpu.store(u32::MAX, Ordering::Relaxed);
+        self.pay_kicks();
         more
+    }
+
+    /// Kicks every transmit queue that is owed one.
+    fn pay_kicks(&self) {
+        for t in &self.tx {
+            let mut t = t.lock();
+            if t.kick_owed {
+                t.kick_owed = false;
+                t.vq.kick();
+            }
+        }
     }
 
     /// One used buffer of `len` bytes in `slot`: a whole frame, or part of
     /// one with mergeable buffers.
     fn rx_buf(&self, r: &mut RxQ, slot: u32, len: usize) -> Option<Packet> {
         let len = len.min(SLOT);
+        // Straight from the slot into mbufs (one copy).
+        let take = |r: &RxQ, off: usize, n: usize| {
+            Chain::fill(n, |b, at| {
+                r.slot_copy(slot, off + at, b);
+                Ok::<usize, mbuf::NoBufs>(b.len())
+            })
+        };
         if let Some((mut chain, left)) = r.partial.take() {
-            let mut b = alloc::vec![0u8; len];
-            r.slot_copy(slot, 0, &mut b);
-            if chain.extend_from_slice(&b).is_err() {
-                self.port.stats.iqdrops.fetch_add(1, Ordering::Relaxed);
-                return None;
+            match take(r, 0, len) {
+                Ok(c) => chain.append(c),
+                Err(_) => {
+                    self.port.stats.iqdrops.fetch_add(1, Ordering::Relaxed);
+                    return None;
+                }
             }
             if left > 1 {
                 r.partial = Some((chain, left - 1));
@@ -406,9 +443,7 @@ impl Shared {
         }
         let mut h = [0u8; 12];
         r.slot_copy(slot, 0, &mut h[..self.hdr_len]);
-        let mut b = alloc::vec![0u8; len - self.hdr_len];
-        r.slot_copy(slot, self.hdr_len, &mut b);
-        let Ok(chain) = Chain::from_slice(&b) else {
+        let Ok(chain) = take(r, self.hdr_len, len - self.hdr_len) else {
             self.port.stats.iqdrops.fetch_add(1, Ordering::Relaxed);
             return None;
         };
@@ -474,7 +509,11 @@ impl Shared {
         match t.vq.push(&out, &[]) {
             Ok(h) => {
                 t.sent[usize::from(h)] = Some(Sent { data });
-                t.vq.kick();
+                if self.batch_cpu.load(Ordering::Relaxed) == hal::cpu_id().0 {
+                    t.kick_owed = true;
+                } else {
+                    t.vq.kick();
+                }
             }
             Err(_) => {
                 drop(data.unmap());
@@ -704,6 +743,7 @@ impl Driver for VtNet {
                     vq: tvq,
                     headers,
                     sent: (0..tsize).map(|_| None).collect(),
+                    kick_owed: false,
                 }));
             }
             let ctrl = if features & f::CTRL_VQ != 0 {
@@ -817,6 +857,7 @@ impl Driver for VtNet {
                 ctrl,
                 port: Port::new(),
                 filter: SpinLock::new((false, false)),
+                batch_cpu: core::sync::atomic::AtomicU32::new(u32::MAX),
             };
             Ok((shared, lines, routes, masks, info))
         })();

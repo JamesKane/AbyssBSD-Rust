@@ -6,9 +6,9 @@ use core::sync::atomic::Ordering;
 
 use abi::errno::Errno;
 use abi::thr::{
-    CPU_LEVEL_CPUSET, CPU_LEVEL_ROOT, CPU_LEVEL_WHICH, CPU_WHICH_CPUSET, CPU_WHICH_JAIL,
-    CPU_WHICH_PID, CPU_WHICH_TID, CPU_WHICH_TIDPID, CPUSET_BYTES, EXTERRCTL_DISABLE,
-    EXTERRCTL_ENABLE,
+    CPU_LEVEL_CPUSET, CPU_LEVEL_ROOT, CPU_LEVEL_WHICH, CPU_WHICH_CPUSET, CPU_WHICH_INTRHANDLER,
+    CPU_WHICH_IRQ, CPU_WHICH_ITHREAD, CPU_WHICH_JAIL, CPU_WHICH_PID, CPU_WHICH_TID,
+    CPU_WHICH_TIDPID, CPUSET_BYTES, EXTERRCTL_DISABLE, EXTERRCTL_ENABLE,
 };
 
 use alloc::sync::Arc;
@@ -181,6 +181,20 @@ pub(super) fn cpuset_setid(which: u64, id: u64, setid: u64) -> SysResult {
     Ok(0)
 }
 
+/// Whether `which` names an interrupt (`CPU_WHICH_IRQ`,
+/// `CPU_WHICH_INTRHANDLER`, `CPU_WHICH_ITHREAD`).
+fn is_irq(which: u64) -> bool {
+    [CPU_WHICH_IRQ, CPU_WHICH_INTRHANDLER, CPU_WHICH_ITHREAD]
+        .iter()
+        .any(|&w| u64::from(w) == which)
+}
+
+/// Every online CPU (up to 64), as a mask.
+fn all_cpus() -> u64 {
+    let n = sched::online_cpus().min(64);
+    if n == 64 { u64::MAX } else { (1u64 << n) - 1 }
+}
+
 /// `cpuset_getid(level, which, id, setid)`.
 pub(super) fn cpuset_getid(level: u64, which: u64, id: u64, setid: u64) -> SysResult {
     let level = u32::try_from(level).map_err(|_| Errno::EINVAL)?;
@@ -238,7 +252,14 @@ pub(super) fn cpuset_getaffinity(
         return Err(Errno::EINVAL);
     }
     check_capabilities(level, which, id)?;
-    let allowed = if level == CPU_LEVEL_WHICH && !names_set(which) {
+    let allowed = if level == CPU_LEVEL_WHICH && is_irq(which) {
+        // `intr_getaffinity`: where the interrupt's threads are bound.
+        let n = u32::try_from(id).map_err(|_| Errno::ESRCH)?;
+        match ::irq::ithread_cpu(n).ok_or(Errno::ESRCH)? {
+            Some(cpu) => 1 << cpu.index(),
+            None => all_cpus(),
+        }
+    } else if level == CPU_LEVEL_WHICH && !names_set(which) {
         Target::find(which, id)?.cpus()
     } else {
         crate::cpuset::mask(at_level(level, set_of(which, id)?))?
@@ -330,6 +351,27 @@ pub(super) fn cpuset_setaffinity(
     }
     if absent {
         return Err(Errno::EINVAL);
+    }
+    // An interrupt (`intr_setaffinity`): one CPU, or all of them to
+    // unbind it. Its threads are bound; the interrupt stays where it was
+    // connected (docs/compat-deviations.md).
+    if level == CPU_LEVEL_WHICH && is_irq(which) {
+        process()?.priv_check(crate::cred::Priv::SchedCpusetIntr)?;
+        let n = u32::try_from(id).map_err(|_| Errno::ESRCH)?;
+        let cpu = if bits == all_cpus() {
+            None
+        } else if bits.count_ones() == 1 {
+            Some(hal::CpuId(bits.trailing_zeros()))
+        } else {
+            return Err(Errno::EINVAL);
+        };
+        if which != u64::from(CPU_WHICH_INTRHANDLER) && !::irq::bind_ithread(n, cpu) {
+            return Err(Errno::ESRCH);
+        }
+        if which == u64::from(CPU_WHICH_INTRHANDLER) && ::irq::ithread_cpu(n).is_none() {
+            return Err(Errno::ESRCH);
+        }
+        return Ok(0);
     }
     // A numbered set (`cpuset_modify`), or a thread's or process's own
     // CPUs within its set.

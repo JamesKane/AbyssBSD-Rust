@@ -736,6 +736,12 @@ fn better_cpu(load: usize, capacity: u16, best_load: usize, best_capacity: u16) 
     load < best_load || (load == best_load && capacity > best_capacity)
 }
 
+/// Binds thread `t` to `cpu`, or lets it run anywhere (`None`), from its
+/// next wakeup (an interrupt thread's `intr_event_bind_ithread`).
+pub fn set_bound(t: &Thread, cpu: Option<CpuId>) {
+    t.inner.lock().bound = cpu;
+}
+
 /// Binds the current thread to `cpu`, or lets it run anywhere (`None`),
 /// and moves it there now if it runs elsewhere.
 pub fn move_to(cpu: Option<CpuId>) {

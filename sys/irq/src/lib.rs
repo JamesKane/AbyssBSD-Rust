@@ -142,6 +142,12 @@ pub struct Handler {
 struct Line {
     domain: &'static dyn IrqDomain,
     hw: u32,
+    /// Its number for `vmstat -i` and `cpuset -x`, unique among lines:
+    /// an interrupt pin's own, an MSI's from [`MSI_FIRST`] on (as x86's
+    /// `first_msi_irq` follows the I/O APIC pins).
+    number: u32,
+    /// The CPU its interrupt threads are bound to (`ie_cpu`), if any.
+    bound: SpinLock<Option<CpuId>>,
     trigger: Trigger,
     cpu: CpuId,
     root: u32,
@@ -367,9 +373,12 @@ pub fn install(
                     return refuse(e);
                 }
             };
+            let number = line_number(&lines, domain, hw);
             let l = Box::into_raw(Box::new(Line {
                 domain,
                 hw,
+                number,
+                bound: SpinLock::new(None),
                 trigger,
                 cpu,
                 root,
@@ -411,6 +420,12 @@ pub fn install(
     // SAFETY: the entry is ours until published below.
     if let Some(it) = unsafe { &(*entry).ithread } {
         let _ = it.entry.set(entry.expose_provenance());
+        // A line already bound binds its new thread too.
+        // SAFETY: the line is registered and we hold the lock.
+        let bound = *unsafe { &*line }.bound.lock();
+        if let (Some(cpu), Some(t)) = (bound, it.thread.get()) {
+            sched::set_bound(t, Some(cpu));
+        }
     }
     // Append. Release: the entry is fully built before dispatch can load
     // it.
@@ -696,8 +711,63 @@ fn storm_check(t: &Table, l: &Line) {
     }
 }
 
+/// The first number an MSI line gets.
+pub const MSI_FIRST: u32 = 64;
+
+/// A new line's number: its pin's, unless it signals by message (or that
+/// number is taken), else the first free one from [`MSI_FIRST`].
+fn line_number(lines: &Lines, domain: &dyn IrqDomain, hw: u32) -> u32 {
+    // SAFETY: registered lines live while the list's lock is held.
+    let taken = |n: u32| lines.0.iter().any(|&l| unsafe { (*l).number } == n);
+    if domain.name() != "pci-msi" && hw < MSI_FIRST && !taken(hw) {
+        return hw;
+    }
+    (MSI_FIRST..).find(|&n| !taken(n)).unwrap_or(u32::MAX)
+}
+
+/// Binds line `number`'s interrupt threads to `cpu`, or frees them
+/// (`None`); `false` if there is no such line. The interrupt itself
+/// stays on the CPU it was connected on.
+pub fn bind_ithread(number: u32, cpu: Option<CpuId>) -> bool {
+    let lines = LINES.lock();
+    // SAFETY: registered lines live until removed from the list, which
+    // needs the lock we hold.
+    let Some(line) = lines
+        .0
+        .iter()
+        .map(|&l| unsafe { &*l })
+        .find(|l| l.number == number)
+    else {
+        return false;
+    };
+    *line.bound.lock() = cpu;
+    let mut e = line.entries.load(Ordering::Acquire);
+    // SAFETY: a line's entries live while it is registered.
+    while let Some(en) = unsafe { e.as_ref() } {
+        if let Some(t) = en.ithread.as_ref().and_then(|it| it.thread.get()) {
+            sched::set_bound(t, cpu);
+        }
+        e = en.next.load(Ordering::Acquire);
+    }
+    true
+}
+
+/// The CPU line `number`'s interrupt threads are bound to: `None` if there
+/// is no such line, `Some(None)` if they run anywhere.
+#[must_use]
+pub fn ithread_cpu(number: u32) -> Option<Option<CpuId>> {
+    let lines = LINES.lock();
+    // SAFETY: as in `bind_ithread`.
+    lines
+        .0
+        .iter()
+        .map(|&l| unsafe { &*l })
+        .find(|l| l.number == number)
+        .map(|l| *l.bound.lock())
+}
+
 /// Every connected line, in the order connected (`intrcnt`'s sources): its
-/// input, its handlers' names joined by spaces (`ie_fullname`), and the
+/// number, its handlers' names joined by spaces (`ie_fullname`), and the
 /// interrupts its handlers took.
 #[must_use]
 pub fn sources() -> Vec<(u32, String, u64)> {
@@ -719,7 +789,7 @@ pub fn sources() -> Vec<(u32, String, u64)> {
             count += en.count.load(Ordering::Relaxed);
             e = en.next.load(Ordering::Acquire);
         }
-        out.push((line.hw, names, count));
+        out.push((line.number, names, count));
     }
     out
 }

@@ -41,6 +41,10 @@ pub(crate) const SLICE_NS: u64 = 10_000_000;
 
 /// Counter ticks per second.
 static FREQUENCY: AtomicU64 = AtomicU64::new(0);
+/// Nanoseconds per counter tick in 32.32 fixed point, from the frequency
+/// (as a timecounter's `tc_scale`): a multiply and a shift per reading
+/// instead of a division.
+static SCALE: AtomicU64 = AtomicU64::new(0);
 /// Counter value at boot (time zero).
 static EPOCH: AtomicU64 = AtomicU64::new(0);
 
@@ -103,9 +107,16 @@ pub(crate) fn counter() -> u64 {
 }
 
 /// Converts counter ticks to nanoseconds.
+#[inline]
 pub(crate) fn ticks_to_ns(ticks: u64) -> u64 {
-    let f = frequency().max(1);
-    u64::try_from(u128::from(ticks) * u128::from(NANOS) / u128::from(f)).unwrap_or(u64::MAX)
+    let scale = SCALE.load(Ordering::Relaxed);
+    if scale == 0 {
+        // Before `init_clock`.
+        let f = frequency().max(1);
+        return u64::try_from(u128::from(ticks) * u128::from(NANOS) / u128::from(f))
+            .unwrap_or(u64::MAX);
+    }
+    u64::try_from((u128::from(ticks) * u128::from(scale)) >> 32).unwrap_or(u64::MAX)
 }
 
 /// Converts nanoseconds to counter ticks.
@@ -121,6 +132,8 @@ pub(crate) fn now_ns() -> u64 {
 /// Sets the clock rate. Call once on the boot CPU.
 pub(crate) fn init_clock(frequency: u64) {
     FREQUENCY.store(frequency, Ordering::Relaxed);
+    let scale = (u128::from(NANOS) << 32) / u128::from(frequency.max(1));
+    SCALE.store(u64::try_from(scale).unwrap_or(u64::MAX), Ordering::Relaxed);
     EPOCH.store(counter(), Ordering::Relaxed);
     kprintln!(
         "time: counter at {}.{:03} MHz",

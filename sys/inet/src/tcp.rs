@@ -61,7 +61,7 @@ pub struct Vtcp {
     pub stats: Stats,
     pub hc: HostCache,
     pub syncache: SynCache,
-    pub(crate) secrets: SpinLock<Option<Secrets>>,
+    pub(crate) secrets: sync::Once<Secrets>,
     /// The ISN offset (`V_isn_offset` and its clock).
     pub(crate) isn: ::tcp::isn::Offset,
     /// `INP_SOCKREF`: sockets the connection holds after their close.
@@ -86,7 +86,7 @@ impl Vtcp {
             stats: Stats::new(),
             hc: HostCache::new(),
             syncache: SynCache::new(),
-            secrets: SpinLock::new(None),
+            secrets: sync::Once::new(),
             isn: ::tcp::isn::Offset::new(),
             orphans: SpinLock::new(BTreeMap::new()),
             default_cc: AtomicU8::new(1),
@@ -96,14 +96,16 @@ impl Vtcp {
 
     /// The secrets, made from the random source on first use.
     fn secrets(&self) -> Secrets {
-        let mut s = self.secrets.lock();
-        *s.get_or_insert_with(|| {
-            let mut k = Secrets::default();
-            for b in k.isn.chunks_mut(4).chain(k.ts.chunks_mut(4)) {
-                b.copy_from_slice(&crate::random().to_ne_bytes());
-            }
-            k
-        })
+        if let Some(k) = self.secrets.get() {
+            return *k;
+        }
+        let mut k = Secrets::default();
+        for b in k.isn.chunks_mut(4).chain(k.ts.chunks_mut(4)) {
+            b.copy_from_slice(&crate::random().to_ne_bytes());
+        }
+        // A racing first use may set them first: theirs stand.
+        let _ = self.secrets.set(k);
+        self.secrets.get().copied().unwrap_or(k)
     }
 
     /// The algorithm new connections use.
