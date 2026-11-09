@@ -16,7 +16,7 @@ use crate::sack::REXMTTHRESH;
 use crate::seq;
 use crate::tcb::{Tcpcb, build, tf, tf2};
 use crate::timer::Tt;
-use crate::{Ctx, Fate, Seg, Sock, State, ecn, get, on, tcps};
+use crate::{Ctx, Errno, Fate, Seg, Sent, Sock, State, ecn, get, on, tcps};
 
 /// `MHLEN` less the room for headers: data this short is copied into the
 /// header's mbuf rather than referenced (`len <= MHLEN - hdrlen -
@@ -24,6 +24,49 @@ use crate::{Ctx, Fate, Seg, Sock, State, ecn, get, on, tcps};
 const SMALL: u32 = mbuf::MHLEN - mbuf::MAX_LINKHDR;
 
 impl Tcpcb {
+    /// `tcp_output`'s error path, for segments built under the lock that
+    /// could not be sent once it was let go: `failed` (in the order they
+    /// were built, the first the one that met `e`, the rest left unsent
+    /// after it) are taken back as each would have been (`snd_nxt`, or
+    /// the SACK hole's `rxmit` and `sack_bytes_rexmit`, and `prr_out`),
+    /// if nothing has moved past them since; then `ENOBUFS` cuts the
+    /// window to a segment and an unreachable path is a soft error. A
+    /// segment something went out after stays sent, for recovery to find.
+    pub fn send_failed(&mut self, failed: &[Sent], e: Errno) {
+        if e != Errno::EPERM {
+            for s in failed.iter().rev() {
+                if s.sack {
+                    let hole = self.snd_holes.0.iter_mut().find(|p| {
+                        seq::geq(s.seq, p.start)
+                            && seq::lt(s.seq, p.end)
+                            && seq::min(p.end, p.rxmit).wrapping_sub(s.len) == s.seq
+                    });
+                    if let Some(p) = hole {
+                        p.rxmit = s.seq;
+                        let len = i32::try_from(s.len).unwrap_or(i32::MAX);
+                        self.sackhint.sack_bytes_rexmit =
+                            (self.sackhint.sack_bytes_rexmit - len).max(0);
+                    }
+                } else if self.snd_nxt == s.seq.wrapping_add(s.len + u32::from(s.fin)) {
+                    self.snd_nxt = s.seq;
+                }
+                if self.in_recovery() {
+                    self.sackhint.prr_out = self.sackhint.prr_out.wrapping_sub(s.len);
+                }
+            }
+        }
+        match e {
+            Errno::EACCES | Errno::EPERM => self.softerror = Some(e),
+            Errno::ENOBUFS => self.snd_cwnd = self.maxseg(),
+            Errno::EHOSTDOWN | Errno::EHOSTUNREACH | Errno::ENETDOWN | Errno::ENETUNREACH
+                if self.state.have_rcvd_syn() =>
+            {
+                self.softerror = Some(e);
+            }
+            _ => {}
+        }
+    }
+
     /// `tcp_output`: sends what there is to send. A connection only ends
     /// here through [`Tcpcb::drop`]; this returns [`Fate::Alive`].
     pub fn output<S: Sock>(&mut self, so: &mut S, cx: &mut Ctx) -> Fate {
@@ -523,11 +566,22 @@ impl Tcpcb {
             self.snd_cwnd = self.maxseg();
             return false;
         };
+        // `tcp_output`'s error path takes back what this segment moved,
+        // unless it is a SYN or a forced byte while persisting.
+        let sent = (flags & (th::SYN | th::RST) == 0
+            && (self.flags & tf::FORCEDATA == 0 || !self.timer_active(Tt::Persist)))
+        .then_some(Sent {
+            seq: th_seq,
+            len: len as u32,
+            fin: flags & th::FIN != 0,
+            sack: sack_rxmit.is_some(),
+        });
         cx.out.push(Seg {
             pkt,
             ecn: ipecn,
             df,
             tso_segsz,
+            sent,
         });
 
         // `out`: the sequence space and the timers.

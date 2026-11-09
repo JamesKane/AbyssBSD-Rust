@@ -282,3 +282,33 @@ fn reassembly_fills_gaps_in_any_order() {
     assert_eq!(tp.rcv_nxt, 10_100);
     assert_eq!(so.read(20_000), data);
 }
+
+#[test]
+fn segments_that_could_not_go_are_taken_back() {
+    use crate::Sent;
+    let mut n = Net::new();
+    n.connect();
+    n.run(100);
+    let tp = n.hosts[0].tp.as_mut().expect("a connection");
+    let base = tp.snd_una;
+    let seg = |k: u32| Sent {
+        seq: base.wrapping_add(1000 * k),
+        len: 1000,
+        fin: false,
+        sack: false,
+    };
+    // Three built, the second met a full queue: it and the third go back.
+    tp.snd_nxt = base.wrapping_add(3000);
+    tp.snd_max = tp.snd_nxt;
+    tp.send_failed(&[seg(1), seg(2)], crate::Errno::ENOBUFS);
+    assert_eq!(tp.snd_nxt, base.wrapping_add(1000));
+    assert_eq!(tp.snd_max, base.wrapping_add(3000), "snd_max stays");
+    assert_eq!(tp.snd_cwnd, tp.maxseg());
+    // Something went out after them: they stay sent, for recovery.
+    tp.snd_nxt = base.wrapping_add(4000);
+    tp.send_failed(&[seg(2)], crate::Errno::ENOBUFS);
+    assert_eq!(tp.snd_nxt, base.wrapping_add(4000));
+    // An unreachable path is a soft error once the SYN came.
+    tp.send_failed(&[], crate::Errno::EHOSTUNREACH);
+    assert_eq!(tp.softerror, Some(crate::Errno::EHOSTUNREACH));
+}

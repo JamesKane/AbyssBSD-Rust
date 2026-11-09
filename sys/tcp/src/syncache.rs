@@ -425,6 +425,7 @@ impl SynCache {
                 ecn: ecn::NOTECT,
                 df: on(&cx.conf.path_mtu_discovery) && e.flags & scf::UNREACH == 0,
                 tso_segsz: 0,
+                sent: None,
             },
             flowlabel: e.flowlabel,
         })

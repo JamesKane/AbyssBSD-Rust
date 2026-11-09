@@ -924,8 +924,25 @@ impl Socket {
     /// queued meanwhile.
     fn tcp_send_batch(self: &Arc<Self>, mut batch: VecDeque<Tx>) {
         loop {
+            // `tcp_output` stops at the first segment that cannot go
+            // (`ENOBUFS` from a full queue, an unreachable path); the
+            // ones built after it are not sent, and all are taken back.
+            let mut failed: Option<(Errno, Vec<::tcp::Sent>)> = None;
             for t in batch.drain(..) {
-                let _ = transmit_one(&self.vnet, &t.inc, &t.info, t.seg);
+                let sent = t.seg.sent;
+                if let Some((_, f)) = &mut failed {
+                    f.extend(sent);
+                    continue;
+                }
+                if let Err(e) = transmit_one(&self.vnet, &t.inc, &t.info, t.seg) {
+                    failed = Some((e, sent.into_iter().collect()));
+                }
+            }
+            if let Some((e, f)) = failed {
+                let _ = self.run_tcp(None, |tp, _, _| {
+                    tp.send_failed(&f, e);
+                    ((), Fate::Alive)
+                });
             }
             // Release: what was sent before is seen by the next sender.
             self.txbusy.store(false, Ordering::Release);
@@ -2080,6 +2097,7 @@ fn closed_port(vnet: &Arc<Vnet>, st: &state::State, inc: &Inc, t: &Th, tlen: u32
         ecn: 0,
         df: false,
         tso_segsz: 0,
+        sent: None,
     };
     let _ = transmit_one(vnet, inc, &TxInfo::default_for(), seg);
 }

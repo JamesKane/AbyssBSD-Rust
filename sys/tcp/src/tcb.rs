@@ -706,6 +706,7 @@ impl Tcpcb {
                 ecn: ect,
                 df: self.pmtud,
                 tso_segsz: 0,
+                sent: None,
             });
         }
     }

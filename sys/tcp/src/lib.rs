@@ -423,6 +423,20 @@ pub struct Seg {
     pub df: bool,
     /// TSO: the segment size the interface cuts it into, or 0.
     pub tso_segsz: u16,
+    /// What sending it moved, for [`Tcpcb::send_failed`] to take back if
+    /// it cannot go; `None` for what `tcp_output` would not take back (a
+    /// SYN, a reset, a forced byte while persisting, a reply).
+    pub sent: Option<Sent>,
+}
+
+/// The sequence space a segment took (`tcp_output`'s `len`, its FIN, and
+/// whether it was a SACK retransmission), as its error path backs it out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sent {
+    pub seq: seq::Seq,
+    pub len: u32,
+    pub fin: bool,
+    pub sack: bool,
 }
 
 /// `IPV6_FLOWLABEL_MASK`, in host order.
