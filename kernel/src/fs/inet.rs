@@ -137,10 +137,18 @@ pub(crate) fn send(
                 if len > so.snd_hiwat() as usize {
                     Err(Errno::EMSGSIZE)
                 } else {
-                    let mut data = alloc::vec![0u8; len];
-                    let n = uio.copy_in(&mut data)?;
-                    data.truncate(n);
-                    so.send_dgram_ctl(&data, to, &cred(), ctl)
+                    // Straight into mbufs (`m_uiotombuf`), unless it fits
+                    // the header's mbuf with them (`max_hdr`'s room).
+                    if so.proto == Proto::Udp && len > mbuf::MHLEN as usize - mbuf::MAX_HDR as usize
+                    {
+                        let data = mbuf::Chain::fill(len, |b, _| uio.copy_in(b))?;
+                        so.send_dgram_chain(data, to, &cred(), ctl)
+                    } else {
+                        let mut data = alloc::vec![0u8; len];
+                        let n = uio.copy_in(&mut data)?;
+                        data.truncate(n);
+                        so.send_dgram_ctl(&data, to, &cred(), ctl)
+                    }
                 }
             }
         }

@@ -16,7 +16,7 @@ use abi::errno::Errno;
 use abi::inet::{inp, ss};
 use abi::socket::{MSG_TRUNC, SHUT_RD, SHUT_RDWR, SHUT_WR, SO_BINTIME, SO_BROADCAST, SO_TIMESTAMP};
 
-use mbuf::{Packet, csum};
+use mbuf::{Chain, Packet, csum};
 use net::Vnet;
 
 use crate::addr::{self, Sockaddr, is_broadcast4, is_unspecified, is_v4mapped, v4_of};
@@ -87,6 +87,44 @@ pub struct SendCtl {
 }
 
 /// What a receive got.
+/// A datagram to send: bytes to copy into mbufs, or the mbufs themselves.
+pub(crate) enum Payload<'a> {
+    Bytes(&'a [u8]),
+    Chain(Chain),
+}
+
+impl Payload<'_> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Bytes(b) => b.len(),
+            Self::Chain(c) => c.len(),
+        }
+    }
+
+    /// Its bytes, copied out of mbufs if need be (raw sockets).
+    fn bytes(&self) -> alloc::borrow::Cow<'_, [u8]> {
+        match self {
+            Self::Bytes(b) => alloc::borrow::Cow::Borrowed(b),
+            Self::Chain(c) => {
+                let mut v = alloc::vec![0u8; c.len()];
+                c.copy_out(0, &mut v);
+                alloc::borrow::Cow::Owned(v)
+            }
+        }
+    }
+
+    /// Onto the end of `to`.
+    fn append_to(self, to: &mut Chain) -> Result<(), Errno> {
+        match self {
+            Self::Bytes(b) => to.extend_from_slice(b).map_err(|_| Errno::ENOBUFS),
+            Self::Chain(c) => {
+                to.append(c);
+                Ok(())
+            }
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Received {
     pub data: Vec<u8>,
@@ -201,13 +239,40 @@ impl Socket {
         cred: &Cred,
         ctl: SendCtl,
     ) -> Result<usize, Errno> {
+        self.send_payload(Payload::Bytes(data), to, cred, ctl)
+    }
+
+    /// [`Socket::send_dgram_ctl`] of a datagram already in mbufs, which go
+    /// out as they are (`udp_send`'s `m`, from `m_uiotombuf`).
+    ///
+    /// # Errors
+    ///
+    /// As [`Socket::send_dgram_ctl`].
+    pub fn send_dgram_chain(
+        &self,
+        data: Chain,
+        to: Option<&[u8]>,
+        cred: &Cred,
+        ctl: SendCtl,
+    ) -> Result<usize, Errno> {
+        self.send_payload(Payload::Chain(data), to, cred, ctl)
+    }
+
+    fn send_payload(
+        &self,
+        data: Payload<'_>,
+        to: Option<&[u8]>,
+        cred: &Cred,
+        ctl: SendCtl,
+    ) -> Result<usize, Errno> {
         if let crate::Proto::Raw(_) = self.proto {
+            let bytes = data.bytes();
             if self.family == Family::Inet6 {
-                return self.raw6_send(data, to, &ctl);
+                return self.raw6_send(&bytes, to, &ctl);
             }
-            return self.raw_send(data, to, cred);
+            return self.raw_send(&bytes, to, cred);
         }
-        let connected = {
+        let (connected, ipo) = {
             let mut i = self.inner.lock();
             if i.snd.cant {
                 return Err(Errno::EPIPE);
@@ -218,10 +283,16 @@ impl Socket {
             if data.len() > i.snd.hiwat as usize {
                 return Err(Errno::EMSGSIZE);
             }
-            i.state & ss::ISCONNECTED != 0
+            (i.state & ss::ISCONNECTED != 0, i.ip)
         };
-        // `IP_MULTICAST_IF`'s interface, looked at before the table's lock.
-        let mif = self.mopts().map_or(0, |m| m.ifindex);
+        // `IP_MULTICAST_IF`'s interface, looked at before the table's lock
+        // (none unless it is set).
+        let mif = if ipo.mif == [0; 4] {
+            0
+        } else {
+            self.mopts().map_or(0, |m| m.ifindex)
+        };
+        let pflags;
         let mut flow = 0;
         let (src, dst, family) = {
             let mut t = UDB.lock();
@@ -325,8 +396,16 @@ impl Socket {
                     flow = p.flow;
                     Sockaddr::v6(p.laddr, p.lport, p.zone)
                 }
-                None => t.source_for(self.id, &dst)?,
+                // `udp_send`: a bound address as it is (`in_pcbladdr` only
+                // for the wildcard); a missing route shows in `ip_output`.
+                None => match t.get(self.id) {
+                    Some(p) if v4_of(&p.laddr) != [0; 4] && p.vflag & abi::inet::INP_IPV4 != 0 => {
+                        Sockaddr::v4(v4_of(&p.laddr), p.lport)
+                    }
+                    _ => t.source_for(self.id, &dst)?,
+                },
             };
+            pflags = t.get(self.id).map_or(0, |p| p.flags);
             if let Some(a) = ctl
                 .src
                 .filter(|a| *a != [0; 4] && dst.family == Family::Inet)
@@ -336,13 +415,14 @@ impl Socket {
             let family = dst.family;
             (src, dst, family)
         };
+        let n = data.len();
         if family == Family::Inet {
             return self
-                .udp_output4(data, &src, &dst, ctl.tos)
-                .map(|()| data.len());
+                .udp_output4(data, &src, &dst, ctl.tos, ipo, pflags)
+                .map(|()| n);
         }
         self.udp_output6(data, src, dst, connected, flow, &ctl)
-            .map(|()| data.len())
+            .map(|()| n)
     }
 
     /// `udp_append` and `rip_append`: queues a datagram from `src` to
@@ -538,21 +618,23 @@ impl Socket {
     /// `udp_send`'s IPv4 half: `data` from `src` to `dst` in a datagram,
     /// its checksum's pseudo-header part in the header for whoever
     /// finishes it (`CSUM_UDP`), through `ip_output`.
+    /// `udp_send`'s IPv4 path, with the socket's IP options and PCB flags
+    /// as the send found them.
     fn udp_output4(
         &self,
-        data: &[u8],
+        data: Payload<'_>,
         src: &Sockaddr,
         dst: &Sockaddr,
         tos: Option<u8>,
+        ipo: crate::IpOpts,
+        flags: i32,
     ) -> Result<(), Errno> {
         let st = crate::state::of(&self.vnet);
         let ulen = HDR + data.len();
         let len = u16::try_from(ip::HDR_LEN + ulen).map_err(|_| Errno::EMSGSIZE)?;
         let (s4, d4) = (v4_of(&src.addr), v4_of(&dst.addr));
-        let ipo = self.inner.lock().ip;
-        let flags = UDB.lock().get(self.id).map_or(0, |p| p.flags);
         let mut m = Packet::for_output(ulen + ip::HDR_LEN).map_err(|_| Errno::ENOBUFS)?;
-        m.data.extend_from_slice(data).map_err(|_| Errno::ENOBUFS)?;
+        data.append_to(&mut m.data)?;
         let mut uh = [0u8; HDR];
         uh[0..2].copy_from_slice(&src.port.to_be_bytes());
         uh[2..4].copy_from_slice(&dst.port.to_be_bytes());
@@ -577,11 +659,17 @@ impl Socket {
         let so = self.so_options();
         let mut o = ip::Opts {
             flags: 0,
-            mcast: self.mopts(),
+            // Only a group's datagram needs them (and they may take the
+            // interfaces' lock).
+            mcast: if crate::addr::is_multicast4(&d4) {
+                self.mopts()
+            } else {
+                None
+            },
             fib: 0,
-            pcp: self.pcp(),
+            pcp: u8::try_from(ipo.pcp).ok(),
             router_alert: false,
-            flowid: self.inner.lock().ip.flowid,
+            flowid: ipo.flowid,
         };
         // `udp_send`'s `CALC_FLOWID_OUTBOUND_SENDTO`.
         if ip::hash_outbound(&self.vnet) {
@@ -856,7 +944,7 @@ impl Socket {
     /// PCB's flow label `flow`.
     fn udp_output6(
         &self,
-        data: &[u8],
+        data: Payload<'_>,
         src: Sockaddr,
         mut dst: Sockaddr,
         connected: bool,
@@ -892,7 +980,7 @@ impl Socket {
         let faddr = connected.then_some((&dst.addr, u16::try_from(dst.scope).unwrap_or(0)));
         let hlim = crate::in6::selecthlim(&n, hops, 0, faddr);
         let mut m = Packet::for_output(ulen + crate::ip6::HDR_LEN).map_err(|_| Errno::ENOBUFS)?;
-        m.data.extend_from_slice(data).map_err(|_| Errno::ENOBUFS)?;
+        data.append_to(&mut m.data)?;
         let mut uh = [0u8; HDR];
         uh[0..2].copy_from_slice(&src.port.to_be_bytes());
         uh[2..4].copy_from_slice(&dst.port.to_be_bytes());
