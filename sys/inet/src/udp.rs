@@ -64,7 +64,9 @@ pub struct Meta {
 #[derive(Debug)]
 pub(crate) struct Dgram {
     pub(crate) from: Sockaddr,
-    pub(crate) data: Vec<u8>,
+    /// Its bytes as they came, in their own mbufs (`sbappendaddr`'s
+    /// chain, the headers cut off).
+    pub(crate) data: Chain,
     pub(crate) meta: Meta,
     /// What it is charged (`sb_ccc`, `sb_mbcnt`).
     cc: u32,
@@ -453,6 +455,27 @@ impl Socket {
         tos: u8,
         ifindex: u16,
     ) -> bool {
+        let Ok(c) = Chain::from_slice(data) else {
+            return false;
+        };
+        self.dgram_append_chain(src, dst, c, flags, orig, family, ttl, tos, ifindex)
+    }
+
+    /// [`Socket::dgram_append`] of the mbufs the datagram came in
+    /// (`udp_append`'s `sbappendaddr_locked` of the packet itself).
+    #[allow(clippy::too_many_arguments, reason = "udp_append's")]
+    pub(crate) fn dgram_append_chain(
+        self: &Arc<Self>,
+        src: &Sockaddr,
+        dst: &Sockaddr,
+        data: Chain,
+        flags: i32,
+        orig: bool,
+        family: Family,
+        ttl: u8,
+        tos: u8,
+        ifindex: u16,
+    ) -> bool {
         let mut wanted = if orig { want::ORIGDSTADDR } else { 0 };
         let v4 = src.family == Family::Inet;
         let bit = |f: i32, w: u32| if flags & f != 0 { w } else { 0 };
@@ -514,7 +537,7 @@ impl Socket {
             i.rcv.mbcnt += mb;
             i.dgrams.push_back(Dgram {
                 from,
-                data: data.to_vec(),
+                data,
                 meta,
                 cc,
                 mb,
@@ -532,19 +555,34 @@ impl Socket {
     /// With nothing queued: its pending error, else `EWOULDBLOCK`; after
     /// `shutdown` an empty result.
     pub fn recv_dgram(&self, max: usize, peek: bool) -> Result<Received, Errno> {
+        let mut r = self.recv_dgram_mbufs(max, peek)?;
+        let mut data = alloc::vec![0u8; r.chain.len()];
+        r.chain.copy_out(0, &mut data);
+        r.data = data;
+        r.chain = Chain::new();
+        Ok(r)
+    }
+
+    /// [`Socket::recv_dgram`] with the datagram's data as its mbufs in
+    /// `chain`, for the caller to copy out once the lock is let go
+    /// (`soreceive_dgram`'s one `uiomove` from the record).
+    ///
+    /// # Errors
+    ///
+    /// As [`Socket::recv_dgram`].
+    pub fn recv_dgram_mbufs(&self, max: usize, peek: bool) -> Result<Received, Errno> {
         let mut i = self.inner.lock();
         if peek {
             let Some(d) = i.dgrams.front() else {
                 return empty(&mut i, peek);
             };
-            let mut r = cut(
-                d.from,
-                d.data[..d.data.len().min(max)].to_vec(),
-                d.meta,
-                max,
-            );
-            r.full = d.data.len();
-            if r.full > max {
+            let (from, meta, full) = (d.from, d.meta, d.data.len());
+            // By reference (`m_copym`), as much as is read.
+            let c = d.data.copy(0, full.min(max)).map_err(|_| Errno::ENOBUFS)?;
+            drop(i);
+            let mut r = cut(from, c, meta, max);
+            r.full = full;
+            if full > max {
                 r.flags |= MSG_TRUNC;
             }
             return Ok(r);
@@ -573,21 +611,22 @@ fn empty(i: &mut crate::Inner, peek: bool) -> Result<Received, Errno> {
     Err(Errno::EAGAIN)
 }
 
-fn cut(from: Sockaddr, mut data: Vec<u8>, meta: Meta, max: usize) -> Received {
+fn cut(from: Sockaddr, mut data: Chain, meta: Meta, max: usize) -> Received {
     let full = data.len();
     let mut flags = 0;
     if data.len() > max {
-        data.truncate(max);
+        // The rest goes with the record (`MSG_TRUNC`).
+        data = data.copy(0, max).unwrap_or_default();
         flags |= MSG_TRUNC;
     }
     Received {
-        data,
+        data: Vec::new(),
         from: Some(from),
         flags,
         full,
         meta: Some(meta),
         tls: None,
-        chain: mbuf::Chain::new(),
+        chain: data,
         more: false,
     }
 }
@@ -813,10 +852,16 @@ pub(crate) fn input4(vnet: &Arc<Vnet>, mut m: Packet, ip: &Ip) {
             })
         })
     };
-    let mut data = alloc::vec![0u8; ulen - HDR];
-    m.data.copy_out(hlen + HDR, &mut data);
     if crate::addr::is_multicast4(&ip.dst) || bcast {
-        multi_input(vnet, st, &from, &to, &data, ip, rcvif);
+        multi_input(
+            vnet,
+            st,
+            &from,
+            &to,
+            &payload(m.data, hlen + HDR, ulen - HDR),
+            ip,
+            rcvif,
+        );
         return;
     }
     let target = UDB.lock().deliver(vnet.id, Family::Inet, &from, &to);
@@ -863,9 +908,18 @@ pub(crate) fn input4(vnet: &Arc<Vnet>, mut m: Packet, ip: &Ip) {
         return;
     }
     let orig = flags2 & inp::ORIGDSTADDR != 0;
-    so.dgram_append(
-        &from, &to, &data, flags, orig, family, ip.ttl, ip.tos, rcvif,
-    );
+    let data = payload(m.data, hlen + HDR, ulen - HDR);
+    so.dgram_append_chain(&from, &to, data, flags, orig, family, ip.ttl, ip.tos, rcvif);
+}
+
+/// A datagram's data: its packet's mbufs with the `off` bytes of headers
+/// before it cut off (`m_adj`), and anything past its `len` bytes.
+fn payload(mut c: Chain, off: usize, len: usize) -> Chain {
+    c.trim_front(off);
+    if c.len() > len && c.split_off(len).is_err() {
+        return c.copy(0, len).unwrap_or_default();
+    }
+    c
 }
 
 /// `udp_multi_input`: a broadcast or multicast datagram to each socket
@@ -876,7 +930,7 @@ fn multi_input(
     st: &crate::state::State,
     from: &Sockaddr,
     to: &Sockaddr,
-    data: &[u8],
+    data: &Chain,
     ip: &Ip,
     rcvif: u16,
 ) {
@@ -908,7 +962,11 @@ fn multi_input(
             }
         }
         let orig = flags2 & inp::ORIGDSTADDR != 0;
-        if so.dgram_append(from, to, data, flags, orig, family, ip.ttl, ip.tos, rcvif) {
+        // Each by reference (`m_copym`), as `udp_multi_input` copies.
+        let Ok(c) = data.copy(0, data.len()) else {
+            continue;
+        };
+        if so.dgram_append_chain(from, to, c, flags, orig, family, ip.ttl, ip.tos, rcvif) {
             appends += 1;
         }
         if so.so_options()
@@ -1107,9 +1165,8 @@ pub(crate) fn input6(vnet: &Arc<Vnet>, mut m: Packet, off: usize) {
     };
     let from = Sockaddr::v6(ip6.src, sport, zone(&ip6.src));
     let to = Sockaddr::v6(ip6.dst, dport, zone(&ip6.dst));
-    let mut data = alloc::vec![0u8; ulen - HDR];
-    m.data.copy_out(off + HDR, &mut data);
     if net::addr::is_multicast6(&ip6.dst) {
+        let data = payload(m.data, off + HDR, ulen - HDR);
         multi_input6(vnet, st, &from, &to, &data, &ip6, rcvif);
         return;
     }
@@ -1136,10 +1193,10 @@ pub(crate) fn input6(vnet: &Arc<Vnet>, mut m: Packet, off: usize) {
         return;
     };
     let orig = flags2 & inp::ORIGDSTADDR != 0;
-    so.dgram_append(
+    so.dgram_append_chain(
         &from,
         &to,
-        &data,
+        payload(m.data, off + HDR, ulen - HDR),
         flags,
         orig,
         family,
@@ -1157,7 +1214,7 @@ fn multi_input6(
     st: &crate::state::State,
     from: &Sockaddr,
     to: &Sockaddr,
-    data: &[u8],
+    data: &Chain,
     ip6: &crate::ip6::Ip6,
     rcvif: u16,
 ) {
@@ -1181,10 +1238,13 @@ fn multi_input6(
             continue;
         }
         let orig = flags2 & inp::ORIGDSTADDR != 0;
-        if so.dgram_append(
+        let Ok(c) = data.copy(0, data.len()) else {
+            continue;
+        };
+        if so.dgram_append_chain(
             from,
             to,
-            data,
+            c,
             flags,
             orig,
             family,

@@ -329,20 +329,7 @@ pub(crate) fn receive(
         if flags & MSG_OOB != 0 {
             return Err(Errno::EOPNOTSUPP);
         }
-        let max = uio.resid();
-        let once = || so.recv_dgram(max, peek);
-        let r = if nonblock {
-            once()
-        } else {
-            let _w = sched::wait_message("sbwait");
-            wait_until(s, &so.rd, timeo(), once)
-        }?;
-        got.count = uio.copy_out(&r.data)?;
-        got.from = r.from;
-        got.flags = r.flags;
-        got.full = r.full;
-        got.meta = r.meta;
-        return Ok(got);
+        return receive_dgram(s, so, uio, peek, nonblock, got);
     }
     if flags & MSG_OOB != 0 {
         let r = so.recv_stream(uio.resid().min(1), peek, true)?;
@@ -362,6 +349,35 @@ pub(crate) fn receive(
         so.stream_rcvd();
     }
     r.map(|()| got)
+}
+
+/// [`receive`] of a datagram (`soreceive_dgram`): the next record,
+/// copied out from its mbufs once the lock is let go.
+#[inline(never)]
+fn receive_dgram(
+    s: &Sleepable,
+    so: &Arc<Socket>,
+    uio: &mut dyn Uio,
+    peek: bool,
+    nonblock: bool,
+    mut got: Got,
+) -> Result<Got, Errno> {
+    let max = uio.resid();
+    let once = || so.recv_dgram_mbufs(max, peek);
+    let r = if nonblock {
+        once()
+    } else {
+        let _w = sched::wait_message("sbwait");
+        wait_until(s, &so.rd, so.timeouts().1, once)
+    }?;
+    for seg in r.chain.segments() {
+        got.count += uio.copy_out(seg)?;
+    }
+    got.from = r.from;
+    got.flags = r.flags;
+    got.full = r.full;
+    got.meta = r.meta;
+    Ok(got)
 }
 
 /// [`receive`]'s stream loop; `owed` set while data taken waits for its
