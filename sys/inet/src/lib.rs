@@ -56,6 +56,7 @@ pub mod nd6;
 pub mod nd6_rtr;
 mod opt;
 pub mod pcb;
+mod pcbhash;
 mod poll;
 pub mod raw;
 pub mod raw6;

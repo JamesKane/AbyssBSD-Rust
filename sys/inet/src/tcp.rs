@@ -1993,7 +1993,24 @@ fn input(vnet: &Arc<Vnet>, st: &state::State, m: Packet, a: &Arrival) {
     };
     // Lookups, more than once after a TIME_WAIT gives way.
     for _ in 0..2 {
-        let found = {
+        // A connection's segment: the connected hash, no lock
+        // (`in_pcblookup_hash_smr`); else the table, for listeners.
+        let fast = {
+            let section = net::view::enter();
+            match a.family {
+                Family::Inet => crate::pcb::TCB_HASH.lookup4(
+                    &section,
+                    vnet.id,
+                    a4(&a.foreign),
+                    t.sport,
+                    a4(&a.local),
+                    t.dport,
+                ),
+                Family::Inet6 => crate::pcb::TCB_HASH
+                    .lookup6(&section, vnet.id, &a.foreign, t.sport, &a.local, t.dport),
+            }
+        };
+        let found = fast.map(|so| (so, false)).or_else(|| {
             let tb = TCB.lock();
             let p = match a.family {
                 Family::Inet => tb.lookup4(
@@ -2007,7 +2024,7 @@ fn input(vnet: &Arc<Vnet>, st: &state::State, m: Packet, a: &Arrival) {
                 Family::Inet6 => tb.lookup6(vnet.id, &a.foreign, t.sport, &a.local, t.dport, true),
             };
             p.and_then(|p| p.socket().map(|s| (s, p.flags & inp::DROPPED != 0)))
-        };
+        });
         let Some((so, dropped)) = found else {
             closed_port(vnet, st, &inc, &t, tlen, a);
             return;
@@ -2016,15 +2033,20 @@ fn input(vnet: &Arc<Vnet>, st: &state::State, m: Packet, a: &Arrival) {
             closed_port(vnet, st, &inc, &t, tlen, a);
             return;
         }
-        // Whether it listens, and its path, under one hold of the lock.
-        let (listening, path) = so
+        // Whether it listens, and its path, under one hold of the lock;
+        // one the hash still showed may have ended since (`INP_FREED`).
+        let (listening, path, dropped) = so
             .inner
             .lock()
             .tcp
             .as_ref()
-            .map_or((false, Path::default()), |x| {
-                (x.listen.is_some(), x.side.path)
+            .map_or((false, Path::default(), true), |x| {
+                (x.listen.is_some(), x.side.path, x.dropped)
             });
+        if dropped {
+            closed_port(vnet, st, &inc, &t, tlen, a);
+            return;
+        }
         if listening {
             listen_input(vnet, st, &so, &inc, &t, opts, data, a);
             return;

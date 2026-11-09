@@ -154,6 +154,12 @@ impl Drop for Published {
     }
 }
 
+/// Drops `x` after a grace period (`epoch_call`): for what a reader in a
+/// section may still be looking at when its writer unlinked it.
+pub fn defer_drop<T: Send + 'static>(x: T) {
+    NET_EPOCH.call(Box::new(move || drop(x)));
+}
+
 /// Frees `old` after a grace period (`epoch_call`).
 fn retire(old: *mut View) {
     let old = SendPtr(old);

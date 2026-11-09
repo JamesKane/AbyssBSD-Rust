@@ -66,6 +66,9 @@ pub struct Pcb {
     pub flow: u32,
     /// Where the table's lookup indices hold it, as of the last change.
     idx: Option<Indexed>,
+    /// Its entry in the table's connected hash for the packet paths, as
+    /// last published.
+    conn: Option<crate::pcbhash::Conn>,
 }
 
 /// A hashed PCB's place in the lookup indices: its VNET, ports, and
@@ -125,11 +128,15 @@ pub struct Table {
     last: [u16; 3],
     /// The earliest `TIME_WAIT` end, to reap lazily.
     next_reap: u64,
+    /// The connected PCBs for lookups without the lock, if this table's
+    /// packet paths use them.
+    hash: Option<&'static crate::pcbhash::Exact>,
 }
 
 impl Table {
-    const fn new() -> Self {
+    const fn new(hash: Option<&'static crate::pcbhash::Exact>) -> Self {
         Self {
+            hash,
             pcbs: BTreeMap::new(),
             ports: BTreeSet::new(),
             exact: BTreeSet::new(),
@@ -142,10 +149,12 @@ impl Table {
 }
 
 /// The UDP and TCP tables (`V_udbinfo`, `V_tcbinfo`).
-pub static UDB: SpinLock<Table> = SpinLock::new(Table::new());
-pub static TCB: SpinLock<Table> = SpinLock::new(Table::new());
+pub static UDB: SpinLock<Table> = SpinLock::new(Table::new(None));
+pub static TCB: SpinLock<Table> = SpinLock::new(Table::new(Some(&TCB_HASH)));
 /// The raw sockets' (`V_ripcbinfo`).
-pub static RIPCB: SpinLock<Table> = SpinLock::new(Table::new());
+pub static RIPCB: SpinLock<Table> = SpinLock::new(Table::new(None));
+/// TCP's connected PCBs, read by its input without [`TCB`]'s lock.
+pub(crate) static TCB_HASH: crate::pcbhash::Exact = crate::pcbhash::Exact::new();
 
 /// The table of `proto`.
 #[must_use]
@@ -225,6 +234,7 @@ impl Table {
                 },
                 flow: 0,
                 idx: None,
+                conn: None,
             },
         );
     }
@@ -232,6 +242,7 @@ impl Table {
     /// `in_pcbfree`.
     pub(crate) fn free(&mut self, id: u64) {
         if let Some(p) = self.pcbs.remove(&id) {
+            self.unhash(p.conn.as_ref());
             self.unindex(id, p.idx);
             self.gencnt += 1;
         }
@@ -298,8 +309,16 @@ impl Table {
             .collect();
         for id in ids {
             if let Some(p) = self.pcbs.remove(&id) {
+                self.unhash(p.conn.as_ref());
                 self.unindex(id, p.idx);
             }
+        }
+    }
+
+    /// Takes a PCB's entry out of the connected hash.
+    fn unhash(&self, c: Option<&crate::pcbhash::Conn>) {
+        if let (Some(h), Some(c)) = (self.hash, c) {
+            h.remove(c);
         }
     }
 
@@ -319,6 +338,31 @@ impl Table {
         let Some(p) = self.pcbs.get_mut(&id) else {
             return;
         };
+        // The connected hash follows the PCB's addresses, ports and
+        // flags (`in_pcbrehash`).
+        if let Some(h) = self.hash {
+            let want = (p.hashed && !p.wild()).then(|| crate::pcbhash::Conn {
+                id,
+                vnet: p.vnet.id,
+                lport: p.lport,
+                fport: p.fport,
+                laddr: p.laddr,
+                faddr: p.faddr,
+                vflag: p.vflag,
+                so: p.so.clone(),
+            });
+            match (&p.conn, want) {
+                (None, None) => {}
+                (was, Some(c)) => {
+                    h.set(was.as_ref(), c.clone());
+                    p.conn = Some(c);
+                }
+                (Some(w), None) => {
+                    h.remove(w);
+                    p.conn = None;
+                }
+            }
+        }
         let now = p.hashed.then(|| Indexed {
             vnet: p.vnet.id,
             lport: p.lport,
@@ -353,6 +397,17 @@ impl Table {
         }
         assert_eq!(ports, self.ports, "port index");
         assert_eq!(exact, self.exact, "exact index");
+        // The connected hash has each connected PCB, as it is now.
+        if let Some(h) = self.hash {
+            for (&id, p) in &self.pcbs {
+                let want = p.hashed && !p.wild();
+                assert_eq!(p.conn.is_some(), want, "pcb {id} in the connected hash");
+                if let Some(c) = &p.conn {
+                    assert!(h.holds(c), "pcb {id}'s entry published");
+                    assert!(c.laddr == p.laddr && c.faddr == p.faddr && c.vflag == p.vflag);
+                }
+            }
+        }
     }
 
     /// The hashed PCBs bound to `lport` in `vnet`, in PCB order.
