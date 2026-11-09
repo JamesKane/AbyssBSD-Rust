@@ -155,6 +155,17 @@ pub(crate) fn wait_until<R>(
     s: &Sleepable,
     notify: &event::Notify,
     timeout: u64,
+    retry: impl FnMut() -> Result<R, Errno>,
+) -> Result<R, Errno> {
+    wait_until_lazy(s, notify, || timeout, retry)
+}
+
+/// [`wait_until`] with the timeout looked up only if it has to wait
+/// (`sbwait` reads `sb_timeo` then): most calls find room or data at once.
+pub(crate) fn wait_until_lazy<R>(
+    s: &Sleepable,
+    notify: &event::Notify,
+    timeout: impl FnOnce() -> u64,
     mut retry: impl FnMut() -> Result<R, Errno>,
 ) -> Result<R, Errno> {
     // Once without waiting: most calls need not (`sbwait` only when the
@@ -163,6 +174,7 @@ pub(crate) fn wait_until<R>(
         Err(Errno::EAGAIN) => {}
         r => return r,
     }
+    let timeout = timeout();
     let poller = Poller::new();
     let w: Arc<dyn Wake> = Arc::clone(&poller) as Arc<dyn Wake>;
     let deadline = (timeout != 0).then(|| crate::time::now_ns().saturating_add(timeout));

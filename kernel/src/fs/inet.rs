@@ -25,7 +25,7 @@ use inet::{Proto, Socket};
 use sched::Sleepable;
 use vfs::Uio;
 
-use super::socket::wait_until;
+use super::socket::{wait_until, wait_until_lazy};
 
 /// An open internet socket.
 pub(crate) struct InetFile {
@@ -188,11 +188,14 @@ fn send_stream(
     nonblock: bool,
     tls_type: Option<u8>,
 ) -> Result<usize, Errno> {
-    let (timeo, _) = so.timeouts();
-    // Plain data goes into mbufs before any lock (`sosend_generic`).
-    if to.is_none() && tls_type.is_none() && so.tls_tx_layout().is_none() {
-        return send_mbufs(s, so, uio, oob, nonblock, timeo);
+    // Plain data goes into mbufs before any lock (`sosend_generic`); a
+    // sending TLS session takes them too, as the send buffer finds it
+    // under its lock. Sending nothing is the other path's (an empty
+    // record, with a session).
+    if to.is_none() && tls_type.is_none() && uio.resid() > 0 {
+        return send_mbufs(s, so, uio, oob, nonblock);
     }
+    let (timeo, _) = so.timeouts();
     let cred = to.map(|_| cred());
     let peer = to.zip(cred.as_ref());
     let send = |data: &[u8], last: bool| match (tls_type, peer) {
@@ -258,7 +261,6 @@ fn send_mbufs(
     uio: &mut dyn Uio,
     oob: bool,
     nonblock: bool,
-    timeo: u64,
 ) -> Result<usize, Errno> {
     let mut sent = 0;
     let mut pending = mbuf::Chain::new();
@@ -278,9 +280,12 @@ fn send_mbufs(
             so.send_stream_chain(&mut pending, last)
         } else {
             let _w = sched::wait_message("sbwait");
-            wait_until(s, &so.wr, timeo, || {
-                so.send_stream_chain(&mut pending, last)
-            })
+            wait_until_lazy(
+                s,
+                &so.wr,
+                || so.timeouts().0,
+                || so.send_stream_chain(&mut pending, last),
+            )
         };
         match r {
             Ok(n) => sent += n,
@@ -368,7 +373,7 @@ fn receive_dgram(
         once()
     } else {
         let _w = sched::wait_message("sbwait");
-        wait_until(s, &so.rd, so.timeouts().1, once)
+        wait_until_lazy(s, &so.rd, || so.timeouts().1, once)
     }?;
     for seg in r.chain.segments() {
         got.count += uio.copy_out(seg)?;
@@ -417,7 +422,7 @@ fn receive_stream(
                 so.stream_rcvd();
             }
             let _w = sched::wait_message("sbwait");
-            wait_until(s, &so.rd, timeo(), first)
+            wait_until_lazy(s, &so.rd, timeo, first)
         };
         let r = match r {
             Ok(r) => r,
