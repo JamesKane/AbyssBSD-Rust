@@ -2292,6 +2292,18 @@ P7.0 ─► P7.1 ─► P7.2 ─► P7.3 ─► P7.4 ─┬─► P7.5 ───
   window cut to a segment on ~1,500 full queues costs tcp.lo.s1 about 3% until netisr is faster.
   Next: PCB lookup under the epoch (the PCB tables are global spin locks over B-trees, each lookup
   taking an `Arc`; FreeBSD's `in_pcblookup_hash_smr` hashes under SMR and takes no reference).
+- Progress 2026-11-09 (audit, the rest): TCP's connected PCBs in an epoch-published hash (fixed
+  buckets of immutable lists, FreeBSD's SMR lookup) measured neutral (-0.6%) and is not taken.
+  UMA-style zone buckets are not done: our sender's copy and allocation together match FreeBSD's
+  (49% against 54%; FreeBSD pays the misses in `copyin`, ours stall at the zone's locked add after
+  it). The socket lock split is not done: our reader's lock holds cost about 4% (FreeBSD's spins
+  16%) and it waits on data at times. Per-CPU statistics add without a lock prefix, as amd64's
+  `counter_u64_add`, and netisr's queue lock holds off preemption only (`MTX_DEF`), e6a9864:
+  tcp.lo.s1 +1.3%, tcp.rx.s1 +1.6%. netisr is no longer saturated; the sender and the reader
+  are fully busy, as FreeBSD's. Probe, both pinned, back to back (Mbit/s, FreeBSD/ours): tcp.lo.s1
+  65037/75192 = 1.16, tcp.tx.s1 0.94, tcp.tx.s4 0.89, tcp.rx.s1 0.85, udp.tx.bulk 0.93,
+  udp.tx.small 0.88, udp.rx.bulk 1.01 (was 1.57); geometric mean 0.94. Left for the gate: the
+  suite itself (`sendfile` and the rest) at P7's exit.
 
 ## Phase 8: Board bring-up (XL)
 
