@@ -2240,6 +2240,46 @@ P7.0 ─► P7.1 ─► P7.2 ─► P7.3 ─► P7.4 ─┬─► P7.5 ───
   handlers charging the total. It removes the `lock xadd` after which the sender's
   `with_cluster` takes 34% (the drain of the previous copy's stores), but the stall moves:
   tcp.lo.s1 unchanged, udp.rx.bulk +3.6%, tcp.rx.s1 -2.3%.
+- Progress 2026-11-09 (algorithm audit): FreeBSD's `netisr` on loopback (`tcp-lo-netisr-freebsd.sh`)
+  is 79% busy, a third of it spinning on locks: its useful work a packet is about 1/2.5 of ours,
+  at equal packet counts. One-hotspot tweaks came back as noise (the sender's append and output in
+  one hold; a deeper netisr queue, which removes the drops), so the path was audited against
+  FreeBSD's design (three read-only passes, claims checked). Divergences, by expected effect:
+  - **Net epoch unused.** `sys/epoch` exists and `sys/net` depends on it, but every read goes
+    through `NetLock` (a preemption-holding spin lock, one per VNET): twice in `ip::input`, once a
+    TCP segment for `hash_outbound`, in `ip::output`, `ether::input`, and UDP input's broadcast
+    check; each release's `NetGuard::drop` scans interfaces per frame, clones the link `Arc` and
+    upgrades the VNET. FreeBSD reads `ifnet`, `in_ifaddr` and nhops under `NET_EPOCH` with no
+    lock, finds local addresses by `INADDR_HASH`, and caches the nhop in `inp_route`
+    (`NH_VALIDATE`). Ours scans routes (`route_in`, `mpath_select`) and interfaces (`by_index`),
+    and computes the Toeplitz flow hash a segment. To do: a read-only view published under the
+    epoch, nhops cached in the PCB, an address hash.
+  - **UDP receive copies four times** (driver slot to mbufs, mbufs to a zeroed `Vec`, `to_vec`
+    under the socket lock, out to the user); FreeBSD's `udp_append` links the mbufs
+    (`sbappendaddr_locked`) and `soreceive_dgram` copies once. Each datagram also takes the
+    global UDP table lock both ways. udp.rx.bulk's 1.57.
+  - **Transmit errors lost.** Frames go out at `NetGuard` drop and TCP's `tcp_send_batch`
+    ignores the result, so a full netisr queue is a loss (149 SACK recoveries in 8 s, FreeBSD 3)
+    where `tcp_output` backs out `snd_nxt` and sets cwnd to a segment. Correctness; the deeper
+    queue showed the drops are not what limits throughput.
+  - **One socket lock for the connection and both buffers** (FreeBSD: INP lock, and each
+    sockbuf's own around `sbappendstream` and `sbcut`); acknowledged data is freed under it
+    (FreeBSD frees `sbcut`'s chain after the unlock). The PCB lookup takes a global spin lock,
+    walks B-trees and bumps the `Arc` count (FreeBSD: SMR hash, no reference).
+  - **Mbuf zones charge their limit on every allocation and free**, then go through the generic
+    heap; UMA charges `uz_max_items` only when a bucket moves to or from the keg.
+  - **Smaller items:** every `crate::now()` takes the global hooks spin lock and reads the
+    counter (FreeBSD: `ticks`); IP and interface statistics are shared atomics (FreeBSD:
+    per-CPU `counter(9)`; `PerCpuCounter` exists); netisr kicks while running and regrows its
+    queue each batch; a blocking socket wait allocates a poller (FreeBSD: `sbwait` on a sleep
+    queue); a kick is not skipped while one is pending (`tdq_owepreempt`); UDP send allocates an
+    unused cluster (`for_output`) instead of prepending into leading space; TCP input copies
+    its options to a `Vec`; sends go in 64 KiB pieces.
+  Already as FreeBSD: header prediction, delayed ACK, `sb_sndptr`, `m_copym` sharing, cluster
+  sizes, embedded refcounts with the single-reference shortcut, ULE's idle spin, the netisr
+  snapshot drain and limit, one timer a connection. Order: the small items as a batch; UDP
+  receive on chains; the net epoch view with error propagation and the nhop cache; PCB lookup
+  under the epoch; UMA-style zone buckets; the socket lock split.
 
 ## Phase 8: Board bring-up (XL)
 
