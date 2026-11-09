@@ -369,6 +369,13 @@ stay in use, a request was denied, wired memory grew by more than 4 MiB or free 
 than 32 MiB between the two idle looks, or the counts did not move under load. `--freebsd` runs the same
 script on stock FreeBSD, to compare rates. It is a milestone's check.
 
+`--probe FILE` runs a short script of its own on the same guest and bridge instead (minutes, not
+the hour), for investigating: the scripts are in `tests/net/probes/` (`p7-net.sh`: each network
+benchmark of suite p7 for 5 seconds), and print `probe` lines, which are all the command prints.
+With `--freebsd` it runs on stock FreeBSD, for the same numbers there. `--prof` boots AbyssBSD with
+the kernel's profiler, each `kbench` line the script prints ending a report (`--prof-cpu N`: CPU
+N's samples only, as for `perf`).
+
 ### Differential tests of command output
 
 The same programs on AbyssBSD and on FreeBSD 15.1 must print the same thing, once what

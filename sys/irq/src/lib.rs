@@ -34,6 +34,7 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
@@ -693,6 +694,34 @@ fn storm_check(t: &Table, l: &Line) {
     if w.0 > c.storm_threshold && !l.masked_by_storm.swap(true, Ordering::Relaxed) {
         l.domain.mask(l.hw);
     }
+}
+
+/// Every connected line, in the order connected (`intrcnt`'s sources): its
+/// input, its handlers' names joined by spaces (`ie_fullname`), and the
+/// interrupts its handlers took.
+#[must_use]
+pub fn sources() -> Vec<(u32, String, u64)> {
+    let lines = LINES.lock();
+    let mut out = Vec::with_capacity(lines.0.len());
+    for &l in &lines.0 {
+        // SAFETY: registered lines live until removed from the list, which
+        // needs the lock we hold.
+        let line = unsafe { &*l };
+        let mut names = String::new();
+        let mut count = 0;
+        let mut e = line.entries.load(Ordering::Acquire);
+        // SAFETY: a line's entries live while it is registered.
+        while let Some(en) = unsafe { e.as_ref() } {
+            if !names.is_empty() {
+                names.push(' ');
+            }
+            names.push_str(en.handler.name);
+            count += en.count.load(Ordering::Relaxed);
+            e = en.next.load(Ordering::Acquire);
+        }
+        out.push((line.hw, names, count));
+    }
+    out
 }
 
 /// Interrupts that arrived with no handler installed.

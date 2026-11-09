@@ -1315,6 +1315,45 @@ impl Socket {
         self.send_queued(n, implied, spliced, oob && n == data.len())
     }
 
+    /// [`Socket::send_stream`] of mbufs the caller filled before taking any
+    /// lock (`sosend_generic`'s `m_uiotombuf`): as much of `data`'s front
+    /// as the buffer takes now goes to the send buffer as it is; the rest
+    /// stays in `data`. A sending TLS session takes a copy of the bytes.
+    ///
+    /// # Errors
+    ///
+    /// As [`Socket::send_stream`].
+    pub fn send_stream_chain(
+        self: &Arc<Self>,
+        data: &mut Chain,
+        oob: bool,
+    ) -> Result<usize, Errno> {
+        let (n, implied) = {
+            let mut i = self.inner.lock();
+            if i.tls_tx.is_some() {
+                drop(i);
+                let mut b = vec![0u8; data.len()];
+                data.copy_out(0, &mut b);
+                let n = self.send_tls(&b, abi::ktls::TLS_RLTYPE_APP, false, oob, None)?;
+                data.trim_front(n);
+                return Ok(n);
+            }
+            let implied = send_check(&mut i, None)?;
+            if data.is_empty() && implied.is_none() {
+                return Ok(0);
+            }
+            let n = send_room(&i, data.len(), i.snd.lowat as usize)?;
+            if n > 0 {
+                let c = data.take_front(n).map_err(|_| Errno::ENOBUFS)?;
+                i.sndq.append(c);
+                i.snd.cc += u32::try_from(n).unwrap_or(u32::MAX);
+                i.snd.mbcnt = i.sndq.cost();
+            }
+            (n, implied)
+        };
+        self.send_queued(n, implied, None, oob && data.is_empty())
+    }
+
     /// `sosend_generic` with a sending TLS session, one round: as much of
     /// `data` as the buffer takes now, or with `atomic` all of it or none,
     /// in records of type `rtype`. Returns the bytes taken.
@@ -1502,7 +1541,24 @@ impl Socket {
             out.flags = abi::socket::MSG_OOB;
             return Ok(out);
         }
-        self.recv_data(max, peek, false, |_| true)
+        self.recv_data(max, peek, false, false, |_| true)
+            .map(Option::unwrap_or_default)
+    }
+
+    /// [`Socket::recv_stream`] of in-band data, which comes as the socket
+    /// buffer's own mbufs (`soreceive_stream`'s `sbcut`, or by reference
+    /// with `peek`) for the caller to copy out once the lock is let go;
+    /// a receiving TLS session's records come in `data`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Socket::recv_stream`].
+    pub fn recv_stream_mbufs(
+        self: &Arc<Self>,
+        max: usize,
+        peek: bool,
+    ) -> Result<crate::Received, Errno> {
+        self.recv_data(max, peek, false, true, |_| true)
             .map(Option::unwrap_or_default)
     }
 
@@ -1517,7 +1573,7 @@ impl Socket {
         max: usize,
         peek: bool,
     ) -> Result<crate::Received, Errno> {
-        self.recv_data(max, peek, true, |_| true)
+        self.recv_data(max, peek, true, false, |_| true)
             .map(Option::unwrap_or_default)
     }
 
@@ -1528,17 +1584,19 @@ impl Socket {
         max: usize,
         still: impl FnOnce(&Inner) -> bool,
     ) -> Result<Option<crate::Received>, Errno> {
-        self.recv_data(max, false, false, still)
+        self.recv_data(max, false, false, false, still)
     }
 
     /// `soreceive_generic`'s data path, if `still` holds under the lock;
-    /// what is read opens the window (`tcp_usr_rcvd`).
+    /// what is read opens the window (`tcp_usr_rcvd`). With `mbufs`, the
+    /// data comes as mbufs in `chain`.
     #[inline]
     fn recv_data(
         self: &Arc<Self>,
         max: usize,
         peek: bool,
         appdata: bool,
+        mbufs: bool,
         still: impl FnOnce(&Inner) -> bool,
     ) -> Result<Option<crate::Received>, Errno> {
         let mut out = crate::Received::default();
@@ -1577,12 +1635,20 @@ impl Socket {
             let mark = i.tcp.as_ref().map_or(0, |t| t.side.oobmark);
             let limit = if mark > 0 { mark } else { usize::MAX };
             let n = max.min(limit).min(i.stream.len());
-            out.data = vec![0u8; n];
-            i.stream.copy_out(0, &mut out.data);
-            if peek {
-                return Ok(Some(out));
+            if mbufs {
+                if peek {
+                    out.chain = i.stream.copy(0, n)?;
+                    return Ok(Some(out));
+                }
+                out.chain = i.stream.take_front(n)?;
+            } else {
+                out.data = vec![0u8; n];
+                i.stream.copy_out(0, &mut out.data);
+                if peek {
+                    return Ok(Some(out));
+                }
+                i.stream.trim_front(n);
             }
-            i.stream.trim_front(n);
             i.rcv.cc -= u32::try_from(n).unwrap_or(0);
             i.rcv.mbcnt = i.stream.cost();
             if let Some(t) = i.tcp.as_mut() {

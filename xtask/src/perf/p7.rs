@@ -287,6 +287,45 @@ fn soak_verdict(log: &str) -> Result<String> {
 
 /// The soak: boots `disk` with the bench disk on the test bridge, runs
 /// [`SOAK`] for `secs` seconds, and judges the two looks.
+/// A probe (`net-soak --probe`): boots as [`soak`] does and runs the bench
+/// disk's script, which powers the guest off; returns its `probe` lines and
+/// the profiler's `prof` ones.
+pub(super) fn probe(disk: &Path, bench_disk: &Path, log: &Path, secs: u64) -> Result<String> {
+    let vm = Vm {
+        smp: SMP,
+        mem: "2G".into(),
+        nvme: true,
+        extra_disk: Some(bench_disk.to_path_buf()),
+        pin: true,
+        net: Some(Net::Bridge(Tap::new()?)),
+        ..Vm::new(Vmm::Bhyve, Arch::X86_64, disk.to_path_buf())
+    };
+    let mut session = Session::start(vm, log)?;
+    let started = (|| -> Result<()> {
+        crate::net::login(&mut session, Duration::from_secs(600), &["panic:"])?;
+        session.send(&format!(
+            "mount -o ro /dev/vtbd0 /mnt && sh /mnt/run.sh {PEER} {secs}\n"
+        ))
+    })();
+    let exited = session.finish(Duration::from_secs(secs + 1200))?;
+    started?;
+    let text = fs::read_to_string(log)?;
+    let mut seen = String::new();
+    let mut last = "";
+    for l in text.lines().map(|l| l.trim_end_matches('\r')) {
+        // The profiler's lines come twice when the console echoes them.
+        if (l.starts_with("probe ") || l.starts_with("prof ")) && l != last {
+            seen.push_str(l);
+            seen.push('\n');
+            last = l;
+        }
+    }
+    if !exited {
+        seen.push_str("probe: the guest did not power off\n");
+    }
+    Ok(seen)
+}
+
 pub(super) fn soak(disk: &Path, bench_disk: &Path, log: &Path, secs: u64) -> Result<String> {
     let vm = Vm {
         smp: SMP,

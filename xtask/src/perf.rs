@@ -820,7 +820,20 @@ pub(crate) fn cmd_soak(mut args: Args) -> Result<()> {
     };
     // Stock FreeBSD on the same bridge: what a rate here should look like.
     let freebsd = args.take_flag("--freebsd");
+    // A short script of its own instead (`tests/net/probes/`), for
+    // investigating, and under the kernel's profiler with `--prof`.
+    let probe = args.take_value("--probe")?;
+    let prof = args.take_flag("--prof");
+    // With `--prof`: only CPU N's samples by function (`abyss.prof.cpu`).
+    let prof_cpu = args.take_value("--prof-cpu")?;
     args.finish()?;
+    if prof_cpu.is_some() && !prof {
+        return Err("net-soak: --prof-cpu goes with --prof".into());
+    }
+    if prof && (freebsd || probe.is_none()) {
+        return Err("net-soak: --prof goes with --probe, on AbyssBSD".into());
+    }
+    let probe_script = probe.as_deref().map(fs::read_to_string).transpose()?;
     if !cfg!(target_os = "freebsd") {
         return Err("net-soak needs bhyve: run it on the build server".into());
     }
@@ -844,6 +857,11 @@ pub(crate) fn cmd_soak(mut args: Args) -> Result<()> {
     let out = home().join("abyss/ci/soak").join(stamp.trim());
     fs::create_dir_all(&out)?;
     let bench_disk = make_bench_disk(&out, &ubench, "p7.soak", &extras, false)?;
+    if let Some(script) = &probe_script {
+        // The soak's script replaced, and the disk made again with it.
+        fs::write(out.join("bench-disk").join("run.sh"), script)?;
+        remake_bench_disk(&out)?;
+    }
     let opts = build::Options {
         release: true,
         ktest: false,
@@ -851,10 +869,22 @@ pub(crate) fn cmd_soak(mut args: Args) -> Result<()> {
     let disk = if freebsd {
         prepare_net_image(&dirs)?
     } else {
-        image::build_net_root(Arch::X86_64, opts, MULTIUSER_CMDLINE)?
+        let cmdline = if let Some(cpu) = &prof_cpu {
+            format!("{MULTIUSER_CMDLINE} abyss.prof abyss.prof.cpu={cpu}")
+        } else if prof {
+            format!("{MULTIUSER_CMDLINE} abyss.prof")
+        } else {
+            MULTIUSER_CMDLINE.to_owned()
+        };
+        image::build_net_root(Arch::X86_64, opts, &cmdline)?
     };
     let _peers = p7::Peers::start(&ubench, &extras)?;
     let log = out.join("console.log");
+    if probe.is_some() {
+        eprintln!("xtask: net-soak: probe, console in {}", log.display());
+        print!("{}", p7::probe(&disk, &bench_disk, &log, secs)?);
+        return Ok(());
+    }
     eprintln!("xtask: net-soak: {secs} s, console in {}", log.display());
     let seen = p7::soak(&disk, &bench_disk, &log, secs)?;
     println!("net-soak: {seen}");
@@ -966,7 +996,14 @@ fn make_bench_disk(
     // formats it. Sparse.
     let nvme = if suite == "p5" { 4 << 30 } else { 64 << 20 };
     fs::File::create(out.join("nvme.img"))?.set_len(nvme)?;
+    remake_bench_disk(out)
+}
+
+/// `out`'s bench disk, made from its `bench-disk` directory.
+fn remake_bench_disk(out: &Path) -> Result<PathBuf> {
+    let dir = out.join("bench-disk");
     let disk = out.join("bench-disk.img");
+    let _ = fs::remove_file(&disk);
     // Sized to fit, with room for makefs's own overhead. UFS2 (makefs
     // makes UFS1 by default), which AbyssBSD's suites mount too.
     util::run(

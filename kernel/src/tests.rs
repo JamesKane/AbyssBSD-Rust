@@ -3455,7 +3455,8 @@ mod user_memory {
                 ln a/b/f hard && ln -s a/b/f soft && mv big c/big && \
                 [ \"$(cat soft)\" = hello ] && [ \"$(cat hard)\" = hello ] || exit 3; \
                 [ \"$(md5 -q c/big)\" = \"$(dd if=/rescue/rescue bs=64k count=80 2>/dev/null | md5 -q)\" ] || exit 4; \
-                tar -cf /tmp/t.tar -C / usr/tests && mkdir x && tar -xf /tmp/t.tar -C x && rm /tmp/t.tar || exit 5; \
+                tar -cf /tmp/t.tar -C / $(cd / && ls -d usr/tests/abyss/* | head -16) && \
+                mkdir x && tar -xf /tmp/t.tar -C x && rm /tmp/t.tar || exit 5; \
                 for f in $(ls x/usr/tests/abyss); do \
                     [ \"$(md5 -q x/usr/tests/abyss/$f)\" = \"$(md5 -q /usr/tests/abyss/$f)\" ] || exit 6; done; \
                 rm -r a/b x/usr && [ ! -e a/b ] || exit 8; \

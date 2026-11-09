@@ -2185,6 +2185,12 @@ P7.0 ─► P7.1 ─► P7.2 ─► P7.3 ─► P7.4 ─┬─► P7.5 ───
   (~3.5 µs), as FreeBSD's do when it is slowed down; FreeBSD sends fast enough that bhyve's
   transmit thread is still busy and suppresses the kick. The `procstat` scenario's process order
   differs from FreeBSD's (already so before these changes).
+- Progress 2026-11-08 (later): `net-soak --probe` runs short probes (`tests/net/probes/`) in
+  minutes, on AbyssBSD (with `--prof`) or FreeBSD. Socket sends and receives copy once (mbufs built
+  from user memory before any lock, `m_uiotombuf`; received mbufs detached under the lock and
+  copied out after it, `soreceive_stream`): loopback TCP 23.8 -> 39 Gbit/s (FreeBSD 75). `vmstat
+  -i` works (`hw.intrnames`, `hw.intrcnt`). TCP receive: CPU 0 spends about 46% in VM exits (ACK
+  notifies, wakeup IPIs) and about 3.2 us per segment besides, FreeBSD about 2.2 us in all.
 
 ## Phase 8: Board bring-up (XL)
 

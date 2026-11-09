@@ -99,6 +99,9 @@ pub struct Received {
     pub meta: Option<Meta>,
     /// A TLS record's `TLS_GET_RECORD`.
     pub tls: Option<crate::tls::RecordInfo>,
+    /// A stream's data as the socket buffer's mbufs, when asked for them
+    /// ([`Socket::recv_stream_mbufs`]); `data` is then empty.
+    pub chain: mbuf::Chain,
 }
 
 impl Socket {
@@ -493,6 +496,7 @@ fn cut(from: Sockaddr, mut data: Vec<u8>, meta: Meta, max: usize) -> Received {
         full,
         meta: Some(meta),
         tls: None,
+        chain: mbuf::Chain::new(),
     }
 }
 

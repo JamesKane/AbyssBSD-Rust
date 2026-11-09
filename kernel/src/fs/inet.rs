@@ -176,6 +176,10 @@ fn send_stream(
     tls_type: Option<u8>,
 ) -> Result<usize, Errno> {
     let (timeo, _) = so.timeouts();
+    // Plain data goes into mbufs before any lock (`sosend_generic`).
+    if to.is_none() && tls_type.is_none() && so.tls_tx_layout().is_none() {
+        return send_mbufs(s, so, uio, oob, nonblock, timeo);
+    }
     let cred = to.map(|_| cred());
     let peer = to.zip(cred.as_ref());
     let send = |data: &[u8], last: bool| match (tls_type, peer) {
@@ -225,6 +229,48 @@ fn send_stream(
                 at += n;
                 sent += n;
             }
+            // What went counts after a signal or a full buffer.
+            Err(Errno::EINTR | Errno::ERESTART | Errno::EAGAIN) if sent > 0 => return Ok(sent),
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// [`send_stream`] of plain data: each piece copied from `uio` straight
+/// into mbufs (`m_uiotombuf`), which the send buffer then takes as they
+/// are, as much as it has room for each time.
+fn send_mbufs(
+    s: &Sleepable,
+    so: &Arc<Socket>,
+    uio: &mut dyn Uio,
+    oob: bool,
+    nonblock: bool,
+    timeo: u64,
+) -> Result<usize, Errno> {
+    let mut sent = 0;
+    let mut pending = mbuf::Chain::new();
+    loop {
+        if pending.is_empty() {
+            if uio.resid() == 0 {
+                return Ok(sent);
+            }
+            let n = uio.resid().min(so.send_window()).min(PIECE);
+            pending = mbuf::Chain::fill(n, |b, _| uio.copy_in(b))?;
+            if pending.is_empty() {
+                return Ok(sent);
+            }
+        }
+        let last = oob && uio.resid() == 0;
+        let r = if nonblock {
+            so.send_stream_chain(&mut pending, last)
+        } else {
+            let _w = sched::wait_message("sbwait");
+            wait_until(s, &so.wr, timeo, || {
+                so.send_stream_chain(&mut pending, last)
+            })
+        };
+        match r {
+            Ok(n) => sent += n,
             // What went counts after a signal or a full buffer.
             Err(Errno::EINTR | Errno::ERESTART | Errno::EAGAIN) if sent > 0 => return Ok(sent),
             Err(e) => return Err(e),
@@ -298,7 +344,7 @@ pub(crate) fn receive(
             if appdata {
                 so.recv_tls_app(want, peek)
             } else {
-                so.recv_stream(want, peek, false)
+                so.recv_stream_mbufs(want, peek)
             }
         };
         let r = if nonblock || (got.count > 0 && !waitall) {
@@ -312,8 +358,13 @@ pub(crate) fn receive(
             Err(Errno::EINTR | Errno::ERESTART | Errno::EAGAIN) if got.count > 0 => return Ok(got),
             Err(e) => return Err(e),
         };
-        let n = r.data.len();
+        // A TLS record comes in `data`, plain data as mbufs, copied out
+        // now that the socket's lock is not held (`m_mbuftouio`).
+        let n = r.data.len() + r.chain.len();
         got.count += uio.copy_out(&r.data)?;
+        for seg in r.chain.segments() {
+            got.count += uio.copy_out(seg)?;
+        }
         got.flags |= r.flags;
         got.tls = got.tls.or(r.tls);
         // A TLS record is a read's end.

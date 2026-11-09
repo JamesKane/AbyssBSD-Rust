@@ -189,6 +189,42 @@ pub(crate) fn init() {
         "Maximum number of supplemental groups a user can belong to",
         Value::int(i32::try_from(crate::cred::NGROUPS_MAX).unwrap_or(i32::MAX)),
     );
+    // `hw.intrnames` and `hw.intrcnt` (`vmstat -i`): each source's name in
+    // a slot of `INTRNAME_LEN` bytes, padded with spaces
+    // (`intrcnt_setname`), and its count as a `u_long`; the device lines,
+    // then each CPU's timer.
+    add(
+        h,
+        Number::Auto,
+        "intrnames",
+        "Interrupt Names",
+        Value::Opaque {
+            format: "",
+            read: alloc::boxed::Box::new(|out| {
+                for name in intr_sources().into_iter().map(|(n, _)| n) {
+                    let mut slot = [b' '; INTRNAME_LEN];
+                    let n = name.len().min(INTRNAME_LEN - 1);
+                    slot[..n].copy_from_slice(&name.as_bytes()[..n]);
+                    slot[INTRNAME_LEN - 1] = 0;
+                    out.extend_from_slice(&slot);
+                }
+            }),
+        },
+    );
+    add(
+        h,
+        Number::Auto,
+        "intrcnt",
+        "Interrupt Counts",
+        Value::Opaque {
+            format: "LU",
+            read: alloc::boxed::Box::new(|out| {
+                for (_, count) in intr_sources() {
+                    out.extend_from_slice(&count.to_ne_bytes());
+                }
+            }),
+        },
+    );
     add(
         h,
         Number::Fixed(hw::NCPU),
@@ -959,4 +995,25 @@ fn tls_nodes(t: &mut sysctl::Tree, ipc: sysctl::NodeId) {
             .expect("kern.ipc.tls.ifnet.permitted");
         }
     }
+}
+
+/// An interrupt name's slot in `hw.intrnames`: `MAXCOMLEN + 1` on x86
+/// (`intr_machdep.c`), `2 * MAXCOMLEN + 1` with INTRNG (`subr_intr.c`).
+#[cfg(target_arch = "x86_64")]
+const INTRNAME_LEN: usize = 19 + 1;
+#[cfg(not(target_arch = "x86_64"))]
+const INTRNAME_LEN: usize = 2 * 19 + 1;
+
+/// `vmstat -i`'s sources: `irq<N>: <handlers>` for each connected line,
+/// then `cpu<N>:timer` for each CPU, with their counts.
+fn intr_sources() -> alloc::vec::Vec<(alloc::string::String, u64)> {
+    let mut v: alloc::vec::Vec<_> = ::irq::sources()
+        .into_iter()
+        .map(|(hw, names, count)| (alloc::format!("irq{hw}: {names}"), count))
+        .collect();
+    for i in 0..sched::online_cpus() {
+        let cpu = hal::CpuId(u32::try_from(i).unwrap_or(0));
+        v.push((alloc::format!("cpu{i}:timer"), crate::time::ticks(cpu)));
+    }
+    v
 }
