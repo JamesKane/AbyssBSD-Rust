@@ -2337,6 +2337,12 @@ P7.0 ─► P7.1 ─► P7.2 ─► P7.3 ─► P7.4 ─┬─► P7.5 ───
   full queue; netisr's remaining costs are spread (TCP input 15%, output 14%, the send batch
   6%, freeing acknowledged data 5%, struct moves 5%: a `Tx` is 168 bytes, a `Packet` 88, moved
   by value where FreeBSD passes an mbuf pointer; socket lock spin 3.6%, FreeBSD's 27%).
+- Progress 2026-11-09 (suite): `perf --suite p7` at 4f38400, 10 runs a side, passes: geometric
+  mean 0.935 over 20 benchmarks; components tcp 0.922 (14), udp 0.980 (4), sendfile 0.943 (2),
+  all under the 1.02 gate. Diagnostics above 1.02: tcp.connect.lo 1.51 (the probe read 1.07),
+  tcp.lo.s4 1.49, tcp.lo.s1 1.11, udp.tx.bulk 1.08, tcp.cpu.tx 1.06, tcp.connect.net 1.04.
+  Wins: tcp.cpu.rx 0.35, tcp.rr.lo 0.71-0.77, tcp.rx.s4 0.83, udp.tx.small 0.85. Results in
+  `ci/perf/20261109-150248-exit/u6-119-g4f38400e60cc` on the build server.
 
 ## Phase 8: Board bring-up (XL)
 
