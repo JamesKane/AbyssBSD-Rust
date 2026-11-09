@@ -631,19 +631,36 @@ fn delayed_cksum(m: &mut Packet, hlen: usize) {
     m.hdr.csum_flags &= !(csum::IP_UDP | csum::IP_TCP);
 }
 
+/// An IPv4 header's bytes, options included (at most 60), on the stack.
+struct HeaderBytes {
+    b: [u8; 60],
+    n: usize,
+}
+
+impl core::ops::Deref for HeaderBytes {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.b[..self.n]
+    }
+}
+
 /// The header bytes `ip` (with `opts` after its first 20), its checksum
 /// computed unless the device does it.
-fn header_bytes(ip: &Ip, opts: &[u8], sum: bool) -> Vec<u8> {
+fn header_bytes(ip: &Ip, opts: &[u8], sum: bool) -> HeaderBytes {
     let mut ip = *ip;
     ip.sum = 0;
-    let mut b = Vec::with_capacity(usize::from(ip.hl));
-    b.extend_from_slice(&ip.bytes());
-    b.extend_from_slice(opts);
+    let opts = &opts[..opts.len().min(40)];
+    let mut h = HeaderBytes {
+        b: [0; 60],
+        n: HDR_LEN + opts.len(),
+    };
+    h.b[..HDR_LEN].copy_from_slice(&ip.bytes());
+    h.b[HDR_LEN..h.n].copy_from_slice(opts);
     if sum {
-        let c = cksum::of(&b);
-        b[10..12].copy_from_slice(&c.to_be_bytes());
+        let c = cksum::of(&h.b[..h.n]);
+        h.b[10..12].copy_from_slice(&c.to_be_bytes());
     }
-    b
+    h
 }
 
 /// Sends IPv4 packet `m`, its header first (`ip_output`): the

@@ -149,43 +149,85 @@ impl DerefMut for NetGuard<'_> {
     }
 }
 
+/// What a [`NetGuard`] hands on after the lock goes, the first kept
+/// inline: most holds send one frame, and allocate nothing for it.
+struct Few<T> {
+    first: Option<T>,
+    rest: Vec<T>,
+}
+
+impl<T> Few<T> {
+    const fn new() -> Self {
+        Self {
+            first: None,
+            rest: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, x: T) {
+        if self.first.is_none() {
+            self.first = Some(x);
+        } else {
+            self.rest.push(x);
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.first.is_none()
+    }
+
+    fn into_iter(self) -> impl Iterator<Item = T> {
+        self.first.into_iter().chain(self.rest)
+    }
+}
+
 impl Drop for NetGuard<'_> {
     fn drop(&mut self) {
-        let (events, tx, isr, vnet) = match self.g.as_mut() {
+        let mut tx = Few::new();
+        let mut isr = Few::new();
+        let (events, vnet) = match self.g.as_mut() {
             Some(g) => {
-                let tx: Vec<_> = core::mem::take(&mut g.txq)
-                    .into_iter()
-                    .filter_map(|(index, family, mut m)| {
-                        let i = g.by_index(index)?;
-                        // `ether_output_frame`'s `ether_do_pcp`.
-                        if i.ty == abi::net::IFT_ETHER
-                            && (i.pcp != crate::ifnet::PCP_NONE
-                                || m.hdr.flags & mbuf::flags::VLANTAG != 0)
-                        {
-                            let hw = i.capenable & abi::net::ifcap::VLAN_HWTAGGING != 0;
-                            crate::ether::set_pcp(&mut m, i.pcp, hw).ok()?;
+                // Drained, not taken: the queues keep their room.
+                let g = &mut **g;
+                for (index, family, mut m) in g.txq.drain(..) {
+                    let Some(i) = g.ifaces.iter().find(|i| i.index == index) else {
+                        continue;
+                    };
+                    // `ether_output_frame`'s `ether_do_pcp`.
+                    if i.ty == abi::net::IFT_ETHER
+                        && (i.pcp != crate::ifnet::PCP_NONE
+                            || m.hdr.flags & mbuf::flags::VLANTAG != 0)
+                    {
+                        let hw = i.capenable & abi::net::ifcap::VLAN_HWTAGGING != 0;
+                        if crate::ether::set_pcp(&mut m, i.pcp, hw).is_err() {
+                            continue;
                         }
-                        Some((index, family, i.flags, i.link.0.clone()?, m))
-                    })
-                    .collect();
-                let isr = core::mem::take(&mut g.isrq);
+                    }
+                    let Some(link) = i.link.0.clone() else {
+                        continue;
+                    };
+                    tx.push((index, family, i.flags, link, m));
+                }
+                for e in g.isrq.drain(..) {
+                    isr.push(e);
+                }
                 let vnet = if tx.is_empty() && isr.is_empty() {
                     None
                 } else {
                     g.owner.upgrade()
                 };
-                (core::mem::take(&mut g.outbox), tx, isr, vnet)
+                (core::mem::take(&mut g.outbox), vnet)
             }
-            None => (Vec::new(), Vec::new(), Vec::new(), None),
+            None => (Vec::new(), None),
         };
         drop(self.g.take());
         self.owner.deliver(&events);
         // Frames queued under the lock go out now, in order.
         if let Some(v) = vnet {
-            for (proto, m) in isr {
+            for (proto, m) in isr.into_iter() {
                 let _ = v.netisr.queue(proto, m);
             }
-            for (index, family, flags, link, m) in tx {
+            for (index, family, flags, link, m) in tx.into_iter() {
                 let _ = crate::ether::output_frame(&v, index, &link, flags, family, m);
             }
         }

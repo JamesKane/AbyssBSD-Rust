@@ -826,9 +826,12 @@ pub(crate) fn cmd_soak(mut args: Args) -> Result<()> {
     let prof = args.take_flag("--prof");
     // With `--prof`: only CPU N's samples by function (`abyss.prof.cpu`).
     let prof_cpu = args.take_value("--prof-cpu")?;
+    // With `--prof`: only the samples of the thread named so
+    // (`abyss.prof.thread`).
+    let prof_thread = args.take_value("--prof-thread")?;
     args.finish()?;
-    if prof_cpu.is_some() && !prof {
-        return Err("net-soak: --prof-cpu goes with --prof".into());
+    if (prof_cpu.is_some() || prof_thread.is_some()) && !prof {
+        return Err("net-soak: --prof-cpu and --prof-thread go with --prof".into());
     }
     if prof && (freebsd || probe.is_none()) {
         return Err("net-soak: --prof goes with --probe, on AbyssBSD".into());
@@ -869,13 +872,16 @@ pub(crate) fn cmd_soak(mut args: Args) -> Result<()> {
     let disk = if freebsd {
         prepare_net_image(&dirs)?
     } else {
-        let cmdline = if let Some(cpu) = &prof_cpu {
-            format!("{MULTIUSER_CMDLINE} abyss.prof abyss.prof.cpu={cpu}")
-        } else if prof {
-            format!("{MULTIUSER_CMDLINE} abyss.prof")
-        } else {
-            MULTIUSER_CMDLINE.to_owned()
-        };
+        let mut cmdline = MULTIUSER_CMDLINE.to_owned();
+        if prof {
+            cmdline.push_str(" abyss.prof");
+        }
+        if let Some(cpu) = &prof_cpu {
+            cmdline.push_str(&format!(" abyss.prof.cpu={cpu}"));
+        }
+        if let Some(t) = &prof_thread {
+            cmdline.push_str(&format!(" abyss.prof.thread={t}"));
+        }
         image::build_net_root(Arch::X86_64, opts, &cmdline)?
     };
     let _peers = p7::Peers::start(&ubench, &extras)?;

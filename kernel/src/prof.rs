@@ -52,6 +52,13 @@ static ON: AtomicBool = AtomicBool::new(false);
 /// all. Every CPU's busy count is reported either way.
 static ONLY_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
 
+/// Only this thread's samples (`abyss.prof.thread=NAME`), if set.
+static ONLY_THREAD: Once<&'static str> = Once::new();
+
+/// An interrupted address standing for another thread's, with
+/// [`ONLY_THREAD`]: not sampled.
+const OTHER: u64 = 1;
+
 /// A report is being made: what it costs is no benchmark's.
 static REPORTING: AtomicBool = AtomicBool::new(false);
 
@@ -104,6 +111,9 @@ pub(crate) fn start_cpu() {
         if let Some(cpu) = crate::boot::value("abyss.prof.cpu").and_then(|v| v.parse().ok()) {
             ONLY_CPU.store(cpu, Ordering::Relaxed);
         }
+        if let Some(t) = crate::boot::value("abyss.prof.thread") {
+            let _ = ONLY_THREAD.set(t);
+        }
         storage::disk::set_wait_hook(storage::disk::WaitHook {
             now: crate::time::now_ns,
             waited: io_waited,
@@ -121,7 +131,12 @@ pub(crate) fn start_cpu() {
 pub(crate) fn interrupted(pc: u64, fp: u64, from_user: bool) {
     if on() {
         let cpu = hal::cpu_id().index();
-        let (pc, caller) = if from_user {
+        let (pc, caller) = if ONLY_THREAD
+            .get()
+            .is_some_and(|t| sched::current().name() != *t)
+        {
+            (OTHER, 0)
+        } else if from_user {
             (USER, 0)
         } else {
             (pc, crate::arch::backtrace::walk(fp).next().unwrap_or(0))
@@ -139,7 +154,7 @@ pub(crate) fn interrupted(pc: u64, fp: u64, from_user: bool) {
 fn sample(cpu: usize, _: &IrqCx) {
     let pc = PC[cpu].load(Ordering::Relaxed);
     let caller = CALLER[cpu].load(Ordering::Relaxed);
-    if !ignored() {
+    if !ignored() && pc != OTHER {
         let mut v = SAMPLES[cpu].lock();
         if v.len() < v.capacity() {
             v.push((pc, caller));

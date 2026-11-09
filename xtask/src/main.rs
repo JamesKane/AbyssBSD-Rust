@@ -51,7 +51,7 @@ commands:
                                                          --quick leaves the shell cases' test programs out
   perf        [--suite p2|p3|p4|p5|vt|diag] [--runs N] [--prepare] [--freebsd-only]
                                                          compare with FreeBSD in bhyve (server only)
-  net-soak    [--duration SECONDS] [--freebsd] [--probe FILE [--prof [--prof-cpu N]]]
+  net-soak    [--duration SECONDS] [--freebsd] [--probe FILE [--prof [--prof-cpu N] [--prof-thread NAME]]]
                                                          iperf3 for an hour with leak checks, or a probe (server only)
   ubench      [--arch <a|all>] [--runs N] [--bhyve]      the P4 suite on AbyssBSD alone (QEMU, or bhyve on the server)
   freebsd-shell                                          run the boot-to-shell script against FreeBSD (server only)

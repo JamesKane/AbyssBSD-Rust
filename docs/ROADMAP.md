@@ -2204,6 +2204,14 @@ P7.0 ─► P7.1 ─► P7.2 ─► P7.3 ─► P7.4 ─┬─► P7.5 ───
   CPU 0. Now 451k. Probe, Mbit/s (FreeBSD): tcp.tx.s1 3520 -> 4394-4799 (4387-4692), tcp.tx.s4
   3504 -> 5109 (4311), tcp.rx.s1 4294 -> 6234 (6358). Batching UDP receive's and netisr's
   wakeups the same way showed no clear gain in one run; not taken yet.
+- Progress 2026-11-09 (later): loopback TCP is bound by the `netisr` thread (100% busy, never
+  sleeping; FreeBSD's 80%): our sender's window stays full, so `netisr` builds the data segments
+  that FreeBSD's sender sends itself. `net-soak --prof-thread netisr` profiles it alone. It took
+  the socket lock three or four times a segment, spinning on the senders' and readers' holds:
+  now once in input, and the segments a call queued are taken under the lock that queued them.
+  The per-packet `Vec`s (the IP header, the net lock's frame lists) are gone. tcp.lo.s1 50.9 ->
+  56.1 Gbit/s (three runs; FreeBSD 75); tcp.rx.s1 6534, tcp.tx.s1 5109, udp.tx.bulk 7273 (all
+  above FreeBSD's). A deeper netisr queue (no drops) made it slower: 32.8.
 
 ## Phase 8: Board bring-up (XL)
 

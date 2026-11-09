@@ -374,7 +374,8 @@ the hour), for investigating: the scripts are in `tests/net/probes/` (`p7-net.sh
 benchmark of suite p7 for 5 seconds), and print `probe` lines, which are all the command prints.
 With `--freebsd` it runs on stock FreeBSD, for the same numbers there. `--prof` boots AbyssBSD with
 the kernel's profiler, each `kbench` line the script prints ending a report (`--prof-cpu N`: CPU
-N's samples only, as for `perf`).
+N's samples only, as for `perf`; `--prof-thread NAME`, `abyss.prof.thread=NAME`: only the samples
+of the threads of that name, such as `netisr`).
 
 ### Differential tests of command output
 

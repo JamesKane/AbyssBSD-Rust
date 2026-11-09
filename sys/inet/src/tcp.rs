@@ -805,6 +805,9 @@ fn send_room(i: &Inner, len: usize, least: usize) -> Result<usize, Errno> {
 }
 
 struct Done {
+    /// The queued segments, to send once the lock goes, if this call is
+    /// the one to send them ([`Socket::take_queued`]).
+    batch: Option<VecDeque<Tx>>,
     fate: Fate,
     deadline: Option<u64>,
     wake: bool,
@@ -859,6 +862,7 @@ impl Socket {
             i.txq
                 .extend(out.drain(..).map(|seg| Tx { inc, info: tx, seg }));
             let done = Done {
+                batch: self.take_queued(&mut i),
                 fate,
                 deadline: if fate == Fate::Closed {
                     None
@@ -878,7 +882,9 @@ impl Socket {
 
     /// After a call: segments out, wakeups, the end, the timer.
     fn finish(self: &Arc<Self>, d: Done) {
-        self.tcp_send_queued();
+        if let Some(b) = d.batch {
+            self.tcp_send_batch(b);
+        }
         if d.tls {
             crate::tls::enqueue(self);
         }
@@ -892,25 +898,37 @@ impl Socket {
         }
     }
 
-    /// Sends the queued segments in order. One caller at a time does; a
+    /// The queued segments, taken to send, if there are any and nobody is
+    /// sending already (then [`Socket::txbusy`] is the caller's until
+    /// [`Socket::tcp_send_batch`] is done). One caller at a time sends; a
     /// caller that finds another at it (perhaps itself, further up the
     /// stack, as a looped segment's answer comes back) leaves its own to
     /// it.
-    fn tcp_send_queued(self: &Arc<Self>) {
+    fn take_queued(&self, i: &mut Inner) -> Option<VecDeque<Tx>> {
+        if i.txq.is_empty() || self.txbusy.swap(true, Ordering::Acquire) {
+            return None;
+        }
+        Some(core::mem::take(&mut i.txq))
+    }
+
+    /// Sends `batch` (from [`Socket::take_queued`]) in order, and what was
+    /// queued meanwhile.
+    fn tcp_send_batch(self: &Arc<Self>, mut batch: VecDeque<Tx>) {
         loop {
-            if self.txbusy.swap(true, Ordering::Acquire) {
-                return;
-            }
-            // All that is queued, under one hold of the lock.
-            let batch = core::mem::take(&mut self.inner.lock().txq);
-            for t in batch {
+            for t in batch.drain(..) {
                 let _ = transmit_one(&self.vnet, &t.inc, &t.info, t.seg);
             }
             // Release: what was sent before is seen by the next sender.
             self.txbusy.store(false, Ordering::Release);
-            if self.inner.lock().txq.is_empty() {
+            let mut i = self.inner.lock();
+            let Some(more) = self.take_queued(&mut i) else {
+                if i.txq.is_empty() {
+                    // The queue's room back, for the next segments.
+                    i.txq = batch;
+                }
                 return;
-            }
+            };
+            i.txq = core::mem::replace(&mut batch, more);
         }
     }
 
@@ -1943,23 +1961,19 @@ fn input(vnet: &Arc<Vnet>, st: &state::State, m: Packet, a: &Arrival) {
             closed_port(vnet, st, &inc, &t, tlen, a);
             return;
         }
-        let listening = so
+        // Whether it listens, and its path, under one hold of the lock.
+        let (listening, path) = so
             .inner
             .lock()
             .tcp
             .as_ref()
-            .is_some_and(|x| x.listen.is_some());
+            .map_or((false, Path::default()), |x| {
+                (x.listen.is_some(), x.side.path)
+            });
         if listening {
             listen_input(vnet, st, &so, &inc, &t, &opts, data, a);
             return;
         }
-        let path = so
-            .inner
-            .lock()
-            .tcp
-            .as_ref()
-            .map(|x| x.side.path)
-            .unwrap_or_default();
         let mut seg = Some(Segment {
             th: t,
             opts: &opts,
