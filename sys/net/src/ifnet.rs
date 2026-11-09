@@ -33,16 +33,16 @@ pub const INFINITE: u32 = u32::MAX;
 /// An interface's counters (`if_counter`), counted as packets pass.
 #[derive(Debug)]
 pub struct Stats {
-    pub ipackets: AtomicU64,
-    pub opackets: AtomicU64,
-    pub ibytes: AtomicU64,
-    pub obytes: AtomicU64,
-    pub imcasts: AtomicU64,
-    pub omcasts: AtomicU64,
-    pub iqdrops: AtomicU64,
-    pub noproto: AtomicU64,
-    pub oerrors: AtomicU64,
-    pub ierrors: AtomicU64,
+    pub ipackets: sync::PerCpuU64,
+    pub opackets: sync::PerCpuU64,
+    pub ibytes: sync::PerCpuU64,
+    pub obytes: sync::PerCpuU64,
+    pub imcasts: sync::PerCpuU64,
+    pub omcasts: sync::PerCpuU64,
+    pub iqdrops: sync::PerCpuU64,
+    pub noproto: sync::PerCpuU64,
+    pub oerrors: sync::PerCpuU64,
+    pub ierrors: sync::PerCpuU64,
     /// IPv6's (`struct in6_ifstat`, [`in6_ifs`]) and ICMPv6's
     /// (`struct icmp6_ifstat`, [`icmp6_ifs`]) for it.
     pub in6: [AtomicU64; in6_ifs::N],
@@ -116,16 +116,16 @@ pub mod icmp6_ifs {
 impl Default for Stats {
     fn default() -> Self {
         Self {
-            ipackets: AtomicU64::new(0),
-            opackets: AtomicU64::new(0),
-            ibytes: AtomicU64::new(0),
-            obytes: AtomicU64::new(0),
-            imcasts: AtomicU64::new(0),
-            omcasts: AtomicU64::new(0),
-            iqdrops: AtomicU64::new(0),
-            noproto: AtomicU64::new(0),
-            oerrors: AtomicU64::new(0),
-            ierrors: AtomicU64::new(0),
+            ipackets: sync::PerCpuU64::new(),
+            opackets: sync::PerCpuU64::new(),
+            ibytes: sync::PerCpuU64::new(),
+            obytes: sync::PerCpuU64::new(),
+            imcasts: sync::PerCpuU64::new(),
+            omcasts: sync::PerCpuU64::new(),
+            iqdrops: sync::PerCpuU64::new(),
+            noproto: sync::PerCpuU64::new(),
+            oerrors: sync::PerCpuU64::new(),
+            ierrors: sync::PerCpuU64::new(),
             in6: [const { AtomicU64::new(0) }; in6_ifs::N],
             icmp6: [const { AtomicU64::new(0) }; icmp6_ifs::N],
         }
@@ -174,10 +174,10 @@ impl Stats {
     pub fn looped(&self, bytes: usize) {
         let b = bytes as u64;
         // Relaxed: counters only.
-        self.opackets.fetch_add(1, Ordering::Relaxed);
-        self.ipackets.fetch_add(1, Ordering::Relaxed);
-        self.obytes.fetch_add(b, Ordering::Relaxed);
-        self.ibytes.fetch_add(b, Ordering::Relaxed);
+        self.opackets.add(1);
+        self.ipackets.add(1);
+        self.obytes.add(b);
+        self.ibytes.add(b);
     }
 }
 

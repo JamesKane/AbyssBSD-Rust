@@ -10,19 +10,20 @@
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 
 use net::Vnet;
 use sync::SpinLock;
 
-/// Statistics counters (a `struct *stat` of `uint64_t`s).
+/// Statistics counters (a `struct *stat` of `uint64_t`s), per CPU as
+/// `VNET_PCPUSTAT_DEFINE`'s.
 #[derive(Debug)]
-pub struct Counters<const N: usize>([AtomicU64; N]);
+pub struct Counters<const N: usize>(sync::PerCpuStats<N>);
 
 impl<const N: usize> Counters<N> {
     #[must_use]
-    pub const fn new() -> Self {
-        Self([const { AtomicU64::new(0) }; N])
+    pub fn new() -> Self {
+        Self(sync::PerCpuStats::new())
     }
 
     pub fn inc(&self, i: usize) {
@@ -30,42 +31,28 @@ impl<const N: usize> Counters<N> {
     }
 
     pub fn add(&self, i: usize, n: u64) {
-        if let Some(c) = self.0.get(i) {
-            // Relaxed: a statistic.
-            c.fetch_add(n, Ordering::Relaxed);
-        }
+        self.0.add(i, n);
     }
 
     /// Takes one back (`IPSTAT_DEC`).
     pub fn dec(&self, i: usize) {
-        if let Some(c) = self.0.get(i) {
-            // Relaxed: a statistic.
-            c.fetch_sub(1, Ordering::Relaxed);
-        }
+        self.0.sub(i, 1);
     }
 
     #[must_use]
     pub fn get(&self, i: usize) -> u64 {
-        // Relaxed: a statistic.
-        self.0.get(i).map_or(0, |c| c.load(Ordering::Relaxed))
+        self.0.get(i)
     }
 
-    /// The structure's bytes, as `sysctl` returns it.
+    /// The structure's bytes, as `sysctl` returns it (`COUNTER_ARRAY_COPY`).
     #[must_use]
     pub fn bytes(&self) -> Vec<u8> {
-        self.0
-            .iter()
-            // Relaxed: a snapshot of statistics.
-            .flat_map(|c| c.load(Ordering::Relaxed).to_ne_bytes())
-            .collect()
+        (0..N).flat_map(|i| self.0.get(i).to_ne_bytes()).collect()
     }
 
     /// Zeroes them (a write of zeros to the `stats` sysctl).
     pub fn clear(&self) {
-        for c in &self.0 {
-            // Relaxed: a statistic.
-            c.store(0, Ordering::Relaxed);
-        }
+        self.0.clear();
     }
 }
 

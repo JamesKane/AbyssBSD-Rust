@@ -65,6 +65,8 @@ fn handler(proto: Proto) -> Option<Handler> {
 struct Waiting {
     q: VecDeque<(Proto, Packet)>,
     len: [usize; PROTOS],
+    /// The last batch's emptied queue, the next one's room.
+    spare: VecDeque<(Proto, Packet)>,
 }
 
 /// A VNET's queues (`struct netisr_workstream`'s, one per protocol).
@@ -91,6 +93,7 @@ impl Queues {
             q: SpinLock::new(Waiting {
                 q: VecDeque::new(),
                 len: [0; PROTOS],
+                spare: VecDeque::new(),
             }),
             queued: AtomicU64::new(0),
             handled: AtomicU64::new(0),
@@ -126,7 +129,18 @@ impl Queues {
     fn take(&self) -> VecDeque<(Proto, Packet)> {
         let mut w = self.q.lock();
         w.len = [0; PROTOS];
-        core::mem::take(&mut w.q)
+        let spare = core::mem::take(&mut w.spare);
+        core::mem::replace(&mut w.q, spare)
+    }
+
+    /// A drained batch's room, back for the next one (the queue keeps its
+    /// size, as `m_nextpkt` lists need no room at all).
+    fn give_back(&self, b: VecDeque<(Proto, Packet)>) {
+        debug_assert!(b.is_empty());
+        let mut w = self.q.lock();
+        if w.spare.capacity() < b.capacity() {
+            w.spare = b;
+        }
     }
 
     /// Packets waiting.
@@ -162,9 +176,9 @@ pub fn dispatch(vnet: &Arc<Vnet>, proto: Proto, m: Packet) {
 /// VNET whose input keeps queueing more (a loopback flood) cannot starve
 /// the others.
 pub fn drain(vnet: &Arc<Vnet>) -> usize {
-    let batch = vnet.netisr.take();
+    let mut batch = vnet.netisr.take();
     let n = batch.len();
-    for (proto, m) in batch {
+    for (proto, m) in batch.drain(..) {
         match handler(proto) {
             Some(h) => {
                 h(vnet, m);
@@ -175,5 +189,6 @@ pub fn drain(vnet: &Arc<Vnet>) -> usize {
             }
         }
     }
+    vnet.netisr.give_back(batch);
     n
 }

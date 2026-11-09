@@ -255,16 +255,35 @@ impl Chain {
     /// What `f` returns, `NoBufs` (converted) at a zone's limit.
     pub fn fill<E: From<NoBufs>>(
         len: usize,
+        f: impl FnMut(&mut [u8], usize) -> Result<usize, E>,
+    ) -> Result<Self, E> {
+        Self::fill_leading(len, 0, f)
+    }
+
+    /// [`Chain::fill`] whose first mbuf keeps `lspace` bytes free at its
+    /// front for headers prepended later (`m_uiotombuf`'s `lspace`, which
+    /// `sosend_dgram` passes as `max_hdr`).
+    ///
+    /// # Errors
+    ///
+    /// As [`Chain::fill`].
+    pub fn fill_leading<E: From<NoBufs>>(
+        len: usize,
+        lspace: usize,
         mut f: impl FnMut(&mut [u8], usize) -> Result<usize, E>,
     ) -> Result<Self, E> {
         let mut out = Self::new();
         let mut at = 0;
+        let mut lead = lspace;
         while at < len {
-            let (room, c) = carve_next(len - at);
+            let (room, c) = carve_next(len - at + lead);
             let mut m = match c {
                 Some(c) => Mbuf::with_cluster(c)?,
                 None => Mbuf::new()?,
             };
+            m.reserve(lead);
+            let room = room.saturating_sub(lead).max(1);
+            lead = 0;
             let want = room.min(len - at);
             let got = m.fill(want, |b| f(b, at))?;
             at += got;
@@ -480,6 +499,27 @@ impl Chain {
             }
             n -= m.len();
         }
+    }
+
+    /// [`Chain::trim_front`] that hands back the mbufs it empties instead
+    /// of freeing them (`sbcut_internal`'s `mfree`), for the caller to
+    /// free once its lock is let go. A cut mbuf stays, trimmed.
+    #[must_use]
+    pub fn cut_front(&mut self, mut n: usize) -> Self {
+        let mut freed = Self::new();
+        while n > 0 {
+            let Some(mut m) = self.pop_front() else {
+                break;
+            };
+            if m.len() > n {
+                m.trim_front(n);
+                self.push_front(m);
+                break;
+            }
+            n -= m.len();
+            freed.push_back(m);
+        }
+        freed
     }
 
     /// Makes the first `n` bytes contiguous in the first mbuf and returns

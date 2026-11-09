@@ -113,13 +113,20 @@ impl Payload<'_> {
         }
     }
 
-    /// Onto the end of `to`.
-    fn append_to(self, to: &mut Chain) -> Result<(), Errno> {
+    /// A packet of it for headers of `hdrs` bytes to be prepended: the
+    /// mbufs the send filled as they are (their first keeps `max_hdr` of
+    /// room, as `m_uiotombuf` leaves it), or bytes copied after a header
+    /// mbuf's room.
+    fn into_packet(self, hdrs: usize) -> Result<Packet, Errno> {
         match self {
-            Self::Bytes(b) => to.extend_from_slice(b).map_err(|_| Errno::ENOBUFS),
-            Self::Chain(c) => {
-                to.append(c);
-                Ok(())
+            Self::Chain(c) => Ok(Packet {
+                hdr: mbuf::PktHdr::default(),
+                data: c,
+            }),
+            Self::Bytes(b) => {
+                let mut m = Packet::for_output(hdrs + b.len()).map_err(|_| Errno::ENOBUFS)?;
+                m.data.extend_from_slice(b).map_err(|_| Errno::ENOBUFS)?;
+                Ok(m)
             }
         }
     }
@@ -638,8 +645,7 @@ impl Socket {
         let ulen = HDR + data.len();
         let len = u16::try_from(ip::HDR_LEN + ulen).map_err(|_| Errno::EMSGSIZE)?;
         let (s4, d4) = (v4_of(&src.addr), v4_of(&dst.addr));
-        let mut m = Packet::for_output(ulen + ip::HDR_LEN).map_err(|_| Errno::ENOBUFS)?;
-        data.append_to(&mut m.data)?;
+        let mut m = data.into_packet(HDR + ip::HDR_LEN)?;
         let mut uh = [0u8; HDR];
         uh[0..2].copy_from_slice(&src.port.to_be_bytes());
         uh[2..4].copy_from_slice(&dst.port.to_be_bytes());
@@ -984,8 +990,7 @@ impl Socket {
         let hops = self.inner.lock().ip.hops;
         let faddr = connected.then_some((&dst.addr, u16::try_from(dst.scope).unwrap_or(0)));
         let hlim = crate::in6::selecthlim(&n, hops, 0, faddr);
-        let mut m = Packet::for_output(ulen + crate::ip6::HDR_LEN).map_err(|_| Errno::ENOBUFS)?;
-        data.append_to(&mut m.data)?;
+        let mut m = data.into_packet(HDR + crate::ip6::HDR_LEN)?;
         let mut uh = [0u8; HDR];
         uh[0..2].copy_from_slice(&src.port.to_be_bytes());
         uh[2..4].copy_from_slice(&dst.port.to_be_bytes());

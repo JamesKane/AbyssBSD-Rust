@@ -20,7 +20,6 @@
 //! `rtnl_handle_getroute`).
 
 use alloc::vec::Vec;
-use core::sync::atomic::Ordering;
 
 use abi::errno::Errno;
 use abi::inet::{AF_INET, AF_INET6, AF_UNSPEC};
@@ -426,13 +425,13 @@ fn link_msg(ctx: &Ctx, h: &Hdr, n: &Net, i: &crate::ifnet::Ifnet, multi: bool) -
     let mut st = [0u64; 24];
     {
         let s = &i.stats;
-        st[0] = s.ipackets.load(Ordering::Relaxed);
-        st[1] = s.opackets.load(Ordering::Relaxed);
-        st[2] = s.ibytes.load(Ordering::Relaxed);
-        st[3] = s.obytes.load(Ordering::Relaxed);
-        st[6] = s.iqdrops.load(Ordering::Relaxed);
-        st[8] = s.imcasts.load(Ordering::Relaxed);
-        st[23] = s.noproto.load(Ordering::Relaxed);
+        st[0] = s.ipackets.get();
+        st[1] = s.opackets.get();
+        st[2] = s.ibytes.get();
+        st[3] = s.obytes.get();
+        st[6] = s.iqdrops.get();
+        st[8] = s.imcasts.get();
+        st[23] = s.noproto.get();
     }
     let mut sb = Vec::with_capacity(24 * 8);
     for v in st {

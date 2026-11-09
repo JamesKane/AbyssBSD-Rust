@@ -80,7 +80,7 @@ impl Default for Vtcp {
 
 impl Vtcp {
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             conf: Conf::new(),
             stats: Stats::new(),
@@ -163,6 +163,9 @@ pub(crate) struct Side {
     wake: bool,
     /// Whole TLS records to open once the lock goes.
     tls: bool,
+    /// Acknowledged send data, freed once the lock goes (`sbcut`'s
+    /// `mfree`, freed after `SOCKBUF_UNLOCK`).
+    freed: Chain,
 }
 
 /// A TCP socket's protocol state (`struct tcpcb` and what of `struct
@@ -200,6 +203,7 @@ impl Tcb {
                 flow: 0,
                 wake: false,
                 tls: false,
+                freed: Chain::default(),
             },
             vnet: Arc::clone(vnet),
         }
@@ -268,7 +272,8 @@ impl Sock for View<'_> {
     }
     fn snd_drop(&mut self, n: u32) {
         let n = n.min(self.i.snd.cc);
-        self.i.sndq.trim_front(n as usize);
+        let freed = self.i.sndq.cut_front(n as usize);
+        self.side.freed.append(freed);
         self.i.snd.cc -= n;
         self.i.snd.mbcnt = self.i.sndq.cost();
         self.side.wake = true;
@@ -813,6 +818,8 @@ struct Done {
     wake: bool,
     tls: bool,
     nofdref: bool,
+    /// [`Side::freed`], dropped with this after the lock.
+    _freed: Chain,
 }
 
 impl Socket {
@@ -827,10 +834,10 @@ impl Socket {
         let st = state::of(&self.vnet);
         let options = self.so_options();
         let secrets = st.tcp.secrets();
-        let mut out = Vec::new();
         let (r, done) = {
             let mut i = self.inner.lock();
             let mut tcb = i.tcp.take()?;
+            let mut out = core::mem::take(&mut i.segs);
             let tx = TxInfo::of(&i, options, tcb.side.flow);
             let p = path.unwrap_or(tcb.side.path);
             let pathf = move |_: &Inc| p;
@@ -861,6 +868,7 @@ impl Socket {
             let inc = tcb.tp.inc;
             i.txq
                 .extend(out.drain(..).map(|seg| Tx { inc, info: tx, seg }));
+            i.segs = out;
             let done = Done {
                 batch: self.take_queued(&mut i),
                 fate,
@@ -872,6 +880,7 @@ impl Socket {
                 wake: core::mem::take(&mut tcb.side.wake),
                 tls: core::mem::take(&mut tcb.side.tls),
                 nofdref: tcb.side.nofdref,
+                _freed: core::mem::take(&mut tcb.side.freed),
             };
             i.tcp = Some(tcb);
             (r, done)
@@ -1952,7 +1961,8 @@ fn input(vnet: &Arc<Vnet>, st: &state::State, m: Packet, a: &Arrival) {
         st.tcp.stats.inc(::tcp::tcps::RCVBADOFF);
         return;
     }
-    let opts = hb[::tcp::hdr::HDR_LEN..t.off].to_vec();
+    // Parsed in place, as `tcp_dooptions` reads the header's own bytes.
+    let opts = &hb[::tcp::hdr::HDR_LEN..t.off];
     let mut data = m.data;
     data.trim_front(t.off);
     let tlen = u32::try_from(data.len()).unwrap_or(u32::MAX);
@@ -2000,12 +2010,12 @@ fn input(vnet: &Arc<Vnet>, st: &state::State, m: Packet, a: &Arrival) {
                 (x.listen.is_some(), x.side.path)
             });
         if listening {
-            listen_input(vnet, st, &so, &inc, &t, &opts, data, a);
+            listen_input(vnet, st, &so, &inc, &t, opts, data, a);
             return;
         }
         let mut seg = Some(Segment {
             th: t,
-            opts: &opts,
+            opts,
             data: core::mem::take(&mut data),
             iptos: a.iptos,
             nsegs: 1,

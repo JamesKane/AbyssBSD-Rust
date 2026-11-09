@@ -80,7 +80,7 @@ use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 use abi::errno::Errno;
 use abi::inet::{IPPROTO_TCP, IPPROTO_UDP, ss};
 use event::Notify;
-use sync::{PreemptLock, SpinLock};
+use sync::PreemptLock;
 
 pub use net::{Family, Vnet, addr, ifnet, netlink, rtmsg};
 
@@ -259,48 +259,51 @@ fn default_hostname() -> alloc::string::String {
 
 fn default_timer_kick() {}
 
-static HOOKS: SpinLock<Hooks> = SpinLock::new(Hooks {
+static DEFAULT_HOOKS: Hooks = Hooks {
     now: default_now,
     random: default_random,
     realtime: default_realtime,
     log: default_log,
     hostname: default_hostname,
     timer_kick: default_timer_kick,
-});
+};
 
-/// Installs the kernel's clock and random source.
+/// Set once at start-up and read without a lock on every packet, as
+/// FreeBSD calls its clock and `arc4random` directly.
+static HOOKS: sync::Once<Hooks> = sync::Once::new();
+
+fn hooks() -> &'static Hooks {
+    HOOKS.get().unwrap_or(&DEFAULT_HOOKS)
+}
+
+/// Installs the kernel's clock and random source (once; a second call is
+/// ignored).
 pub fn set_hooks(h: Hooks) {
-    *HOOKS.lock() = h;
+    let _ = HOOKS.set(h);
 }
 
 pub(crate) fn now() -> u64 {
-    let f = HOOKS.lock().now;
-    f()
+    (hooks().now)()
 }
 
 pub(crate) fn random() -> u32 {
-    let f = HOOKS.lock().random;
-    f()
+    (hooks().random)()
 }
 
 pub(crate) fn realtime() -> u64 {
-    let f = HOOKS.lock().realtime;
-    f()
+    (hooks().realtime)()
 }
 
 pub(crate) fn log(msg: &str) {
-    let f = HOOKS.lock().log;
-    f(msg);
+    (hooks().log)(msg);
 }
 
 pub(crate) fn hostname() -> alloc::string::String {
-    let f = HOOKS.lock().hostname;
-    f()
+    (hooks().hostname)()
 }
 
 pub(crate) fn timer_kick() {
-    let f = HOOKS.lock().timer_kick;
-    f();
+    (hooks().timer_kick)();
 }
 
 /// Registers IPv4's and IPv6's input with `netisr`, and IPv6's hooks
@@ -473,6 +476,9 @@ pub(crate) struct Inner {
     pub(crate) tcp: Option<alloc::boxed::Box<tcp::Tcb>>,
     /// A TCP socket's segments waiting to go, in order.
     pub(crate) txq: VecDeque<tcp::Tx>,
+    /// Where a TCP call puts the segments it makes, kept for its room
+    /// (empty between calls).
+    pub(crate) segs: Vec<::tcp::Seg>,
     pub(crate) user_cookie: u32,
     pub(crate) ts_clock: i32,
     /// The splice this socket is the source of (`so_splice`), and the
@@ -614,6 +620,7 @@ impl Socket {
                 tcp: (proto == Proto::Tcp)
                     .then(|| alloc::boxed::Box::new(tcp::Tcb::new(vnet, family))),
                 txq: VecDeque::new(),
+                segs: Vec::new(),
                 user_cookie: 0,
                 ts_clock: 0,
                 splice: None,

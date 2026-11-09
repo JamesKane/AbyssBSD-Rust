@@ -389,11 +389,8 @@ impl Shared {
         // reader finds what the frames before the flush brought.
         let batch = net::defer::begin();
         for (i, m) in frames.into_iter().enumerate() {
-            self.port.stats.ipackets.fetch_add(1, Ordering::Relaxed);
-            self.port
-                .stats
-                .ibytes
-                .fetch_add(m.len() as u64, Ordering::Relaxed);
+            self.port.stats.ipackets.add(1);
+            self.port.stats.ibytes.add(m.len() as u64);
             self.port.input(m);
             if (i + 1) % KICK_EVERY == 0 {
                 self.pay_kicks();
@@ -432,7 +429,7 @@ impl Shared {
             match take(r, 0, len) {
                 Ok(c) => chain.append(c),
                 Err(_) => {
-                    self.port.stats.iqdrops.fetch_add(1, Ordering::Relaxed);
+                    self.port.stats.iqdrops.add(1);
                     return None;
                 }
             }
@@ -443,13 +440,13 @@ impl Shared {
             return Some(self.frame(chain, r.partial_hdr.take()));
         }
         if len < self.hdr_len {
-            self.port.stats.ierrors.fetch_add(1, Ordering::Relaxed);
+            self.port.stats.ierrors.add(1);
             return None;
         }
         let mut h = [0u8; 12];
         r.slot_copy(slot, 0, &mut h[..self.hdr_len]);
         let Ok(chain) = take(r, self.hdr_len, len - self.hdr_len) else {
-            self.port.stats.iqdrops.fetch_add(1, Ordering::Relaxed);
+            self.port.stats.iqdrops.add(1);
             return None;
         };
         let nbufs = if self.mrg {
@@ -527,10 +524,10 @@ impl Shared {
         }
         drop(t);
         let st = &self.port.stats;
-        st.opackets.fetch_add(1, Ordering::Relaxed);
-        st.obytes.fetch_add(len as u64, Ordering::Relaxed);
+        st.opackets.add(1);
+        st.obytes.add(len as u64);
         if mcast {
-            st.omcasts.fetch_add(1, Ordering::Relaxed);
+            st.omcasts.add(1);
         }
         Ok(())
     }
@@ -555,7 +552,7 @@ impl Link for Iface {
             hal::cpu_id().0 as usize % n
         };
         self.0.send(q, m).inspect_err(|_| {
-            self.0.port.stats.oerrors.fetch_add(1, Ordering::Relaxed);
+            self.0.port.stats.oerrors.add(1);
         })
     }
 

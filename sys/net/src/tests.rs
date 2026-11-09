@@ -127,9 +127,9 @@ fn frames_cross_an_epair() {
     assert_eq!(netisr::drain(&v), 1);
     let n = v.net.lock();
     let (a, b) = (n.by_index(ia).unwrap(), n.by_index(ib).unwrap());
-    assert_eq!(a.stats.opackets.load(Ordering::Relaxed), 1);
-    assert_eq!(a.stats.oerrors.load(Ordering::Relaxed), 1);
-    assert_eq!(b.stats.ibytes.load(Ordering::Relaxed), 60);
+    assert_eq!(a.stats.opackets.get(), 1);
+    assert_eq!(a.stats.oerrors.get(), 1);
+    assert_eq!(b.stats.ibytes.get(), 60);
 }
 
 #[test]
@@ -148,8 +148,8 @@ fn loopback_output_comes_back_through_netisr() {
     clone::output(&v, lo0, Family::Inet6, packet(&[0; 40])).unwrap();
     assert_eq!(netisr::drain(&v), 1);
     assert_eq!(SEEN.load(Ordering::Relaxed), 40);
-    assert_eq!(v.lo.opackets.load(Ordering::Relaxed), 1);
-    assert_eq!(v.lo.ipackets.load(Ordering::Relaxed), 1);
+    assert_eq!(v.lo.opackets.get(), 1);
+    assert_eq!(v.lo.ipackets.get(), 1);
 }
 
 #[test]

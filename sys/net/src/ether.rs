@@ -7,7 +7,6 @@
 //! `ether_demux`, `ether_output_frame`, `ether_requestencap`).
 
 use alloc::sync::Arc;
-use core::sync::atomic::Ordering;
 
 use abi::errno::Errno;
 use abi::net::iff;
@@ -94,7 +93,7 @@ pub fn input(vnet: &Arc<Vnet>, mut m: Packet) {
         return;
     }
     let Ok(mut eh) = m.header::<Header>(0) else {
-        stats.ierrors.fetch_add(1, Ordering::Relaxed);
+        stats.ierrors.add(1);
         return;
     };
     if is_multicast(&eh.dst) {
@@ -103,7 +102,7 @@ pub fn input(vnet: &Arc<Vnet>, mut m: Packet) {
         } else {
             flags::MCAST
         };
-        stats.imcasts.fetch_add(1, Ordering::Relaxed);
+        stats.imcasts.add(1);
     }
     if let Some(t) = &tap {
         t.mtap(&m, Way::In);
@@ -113,7 +112,7 @@ pub fn input(vnet: &Arc<Vnet>, mut m: Packet) {
     if m.hdr.flags & flags::VLANTAG == 0 && (eh.ty == ty::VLAN || eh.ty == ty::QINQ) {
         let mut v = [0u8; HDR_LEN + VLAN_ENCAP_LEN];
         if m.data.copy_out(0, &mut v) != v.len() {
-            stats.ierrors.fetch_add(1, Ordering::Relaxed);
+            stats.ierrors.add(1);
             return;
         }
         m.hdr.vlan_tag = u16::from_be_bytes([v[14], v[15]]);
@@ -142,7 +141,7 @@ pub fn input(vnet: &Arc<Vnet>, mut m: Packet) {
 fn demux(vnet: &Arc<Vnet>, ifflags: u32, stats: &crate::ifnet::Stats, ety: u16, mut m: Packet) {
     // A VLAN other than 0 with no trunk here.
     if m.hdr.flags & flags::VLANTAG != 0 && m.hdr.vlan_tag & 0xfff != 0 {
-        stats.noproto.fetch_add(1, Ordering::Relaxed);
+        stats.noproto.add(1);
         return;
     }
     if ifflags & iff::PPROMISC == 0 && m.hdr.flags & flags::PROMISC != 0 {

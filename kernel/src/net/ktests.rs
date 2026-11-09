@@ -7,7 +7,6 @@
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::Ordering;
 
 use abi::bpf::bioc;
 use abi::net::iff;
@@ -204,8 +203,8 @@ ktest! {
             .unwrap();
         v.net.lock().set_flags(b"vtnet0", flags & !iff::UP).unwrap();
         let st = v.net.lock().by_index(index).map(|i| Arc::clone(&i.stats)).unwrap();
-        assert!(st.ipackets.load(Ordering::Relaxed) >= 2);
-        assert!(st.opackets.load(Ordering::Relaxed) >= 3);
+        assert!(st.ipackets.get() >= 2);
+        assert!(st.opackets.get() >= 3);
     }
 }
 

@@ -111,7 +111,9 @@ pub(crate) fn cred() -> inet::Cred {
     }
 }
 
-/// The most a send or receive moves through the kernel at once.
+/// The most a send copies into a kernel buffer of its own at once (the
+/// paths through mbufs take what the socket buffer has room for, as
+/// `sosend_generic` and `soreceive_stream` do).
 const PIECE: usize = 64 * 1024;
 
 /// `sosend` (and `sousrsend`'s rules): `uio` on `so`, to `to` (a
@@ -141,7 +143,10 @@ pub(crate) fn send(
                     // the header's mbuf with them (`max_hdr`'s room).
                     if so.proto == Proto::Udp && len > mbuf::MHLEN as usize - mbuf::MAX_HDR as usize
                     {
-                        let data = mbuf::Chain::fill(len, |b, _| uio.copy_in(b))?;
+                        let data =
+                            mbuf::Chain::fill_leading(len, mbuf::MAX_HDR as usize, |b, _| {
+                                uio.copy_in(b)
+                            })?;
                         so.send_dgram_chain(data, to, &cred(), ctl)
                     } else {
                         let mut data = alloc::vec![0u8; len];
@@ -262,7 +267,7 @@ fn send_mbufs(
             if uio.resid() == 0 {
                 return Ok(sent);
             }
-            let n = uio.resid().min(so.send_window()).min(PIECE);
+            let n = uio.resid().min(so.send_window());
             pending = mbuf::Chain::fill(n, |b, _| uio.copy_in(b))?;
             if pending.is_empty() {
                 return Ok(sent);
@@ -375,7 +380,12 @@ fn receive_stream(
     timeo: &dyn Fn() -> u64,
 ) -> Result<(), Errno> {
     loop {
-        let want = uio.resid().min(PIECE);
+        // A TLS record is opened into a buffer of its own: bounded.
+        let want = if appdata {
+            uio.resid().min(PIECE)
+        } else {
+            uio.resid()
+        };
         let first = || {
             if appdata {
                 so.recv_tls_app(want, peek)

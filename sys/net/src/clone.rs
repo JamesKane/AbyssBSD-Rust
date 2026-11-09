@@ -13,7 +13,6 @@ use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::any::Any;
-use core::sync::atomic::Ordering;
 
 use abi::errno::Errno;
 use abi::net::{IFT_ETHER, LINK_STATE_UP, ifcap, iff, nd6_iff};
@@ -120,7 +119,7 @@ impl Link for Loop {
             _ => Proto::Ip,
         };
         vnet.netisr.queue(proto, m).map_err(|_| {
-            self.stats.iqdrops.fetch_add(1, Ordering::Relaxed);
+            self.stats.iqdrops.add(1);
             NoBufs
         })
     }
@@ -192,7 +191,7 @@ impl Link for Epair {
             .by_index(index)
             .map_or(0, |i| i.mtu as usize);
         if !running(vnet, index) || m.len() > mtu + crate::ether::HDR_LEN + 4 {
-            self.stats.oerrors.fetch_add(1, Ordering::Relaxed);
+            self.stats.oerrors.add(1);
             return Err(NoBufs);
         }
         // ... tapped going out (the other end's `ether_input` taps it
@@ -203,17 +202,17 @@ impl Link for Epair {
         let there = peer.as_ref().map(|p| p.home());
         let ok = matches!(&there, Some((Some(v), i)) if running(v, *i));
         let (Some(peer), Some((Some(pv), pi)), true) = (peer, there, ok) else {
-            self.stats.oerrors.fetch_add(1, Ordering::Relaxed);
+            self.stats.oerrors.add(1);
             return Ok(());
         };
         let len = m.len() as u64;
-        self.stats.opackets.fetch_add(1, Ordering::Relaxed);
-        self.stats.obytes.fetch_add(len, Ordering::Relaxed);
-        peer.stats.ipackets.fetch_add(1, Ordering::Relaxed);
-        peer.stats.ibytes.fetch_add(len, Ordering::Relaxed);
+        self.stats.opackets.add(1);
+        self.stats.obytes.add(len);
+        peer.stats.ipackets.add(1);
+        peer.stats.ibytes.add(len);
         m.hdr.rcvif = pi;
         pv.netisr.queue(Proto::Ether, m).map_err(|_| {
-            peer.stats.iqdrops.fetch_add(1, Ordering::Relaxed);
+            peer.stats.iqdrops.add(1);
             NoBufs
         })
     }

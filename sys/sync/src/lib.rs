@@ -11,15 +11,17 @@
 //! spins with backoff and whoever finds it free takes it, as on a FreeBSD
 //! default mutex whose owner is running. The rest of the set
 //! (sleepable mutexes, rw/sx locks, epoch) builds on the scheduler
-//! (docs/ARCHITECTURE.md §5.1). [`PerCpuCounter`] counts without sharing
-//! cache lines between CPUs.
+//! (docs/ARCHITECTURE.md §5.1). [`PerCpuCounter`] and [`PerCpuStats`]
+//! count without sharing cache lines between CPUs.
 
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+extern crate alloc;
+
 mod percpu;
 
-pub use percpu::PerCpuCounter;
+pub use percpu::{PerCpuCounter, PerCpuStats, PerCpuU64, set_possible};
 
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};

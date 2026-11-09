@@ -49,11 +49,21 @@ pub(crate) fn now_s() -> i64 {
 
 /// Work for the `netisr` thread, and where it waits.
 static NETISR_WORK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// The thread is draining (`NWS_RUNNING`): what is queued meanwhile it
+/// finds without being woken.
+static NETISR_RUNNING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 static NETISR_WQ: sched::WaitQueue = sched::WaitQueue::new();
 
+/// `netisr_queue_workstream`'s signal: only when the thread is neither
+/// scheduled (work already flagged) nor running.
 fn netisr_kick() {
-    NETISR_WORK.store(true, core::sync::atomic::Ordering::Release);
-    NETISR_WQ.wake_one();
+    use core::sync::atomic::Ordering::SeqCst;
+    // SeqCst, paired with the thread's store of `NETISR_RUNNING` and its
+    // swap of `NETISR_WORK`: either it sees the work, or this sees it
+    // stopped and wakes it.
+    if !NETISR_WORK.swap(true, SeqCst) && !NETISR_RUNNING.load(SeqCst) {
+        NETISR_WQ.wake_one();
+    }
 }
 
 /// The `ktls` threads' work, and where they wait.
@@ -94,10 +104,13 @@ fn start_netisr() {
     net::netisr::set_kick(netisr_kick);
     let _ = sched::spawn("netisr", sched::Priority::KERNEL, |s| {
         loop {
-            NETISR_WQ.wait_until(s, || {
-                NETISR_WORK.swap(false, core::sync::atomic::Ordering::Acquire)
-            });
+            use core::sync::atomic::Ordering::SeqCst;
+            // SeqCst: see `netisr_kick`.
+            NETISR_WQ.wait_until(s, || NETISR_WORK.swap(false, SeqCst));
+            NETISR_RUNNING.store(true, SeqCst);
             loop {
+                // Taken first, so a kick while draining is a pass more.
+                NETISR_WORK.store(false, SeqCst);
                 let mut more = false;
                 for v in net::Vnet::all() {
                     net::netisr::drain(&v);
@@ -107,6 +120,7 @@ fn start_netisr() {
                     break;
                 }
             }
+            NETISR_RUNNING.store(false, SeqCst);
         }
     });
 }

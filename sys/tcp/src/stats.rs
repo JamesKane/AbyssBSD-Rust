@@ -139,7 +139,8 @@ pub mod tcps {
 /// A VNET's TCP statistics.
 #[derive(Debug)]
 pub struct Stats {
-    words: [AtomicU64; tcps::N],
+    /// Per CPU, as `VNET_PCPUSTAT_DEFINE`'s.
+    words: sync::PerCpuStats<{ tcps::N }>,
     /// `tcps_states`: connections in each `TCPS_*`.
     states: [AtomicU64; crate::State::COUNT],
     /// `V_tcp_sack_globalholes` (`net.inet.tcp.sack.globalholes`).
@@ -154,9 +155,9 @@ impl Default for Stats {
 
 impl Stats {
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
-            words: [const { AtomicU64::new(0) }; tcps::N],
+            words: sync::PerCpuStats::new(),
             states: [const { AtomicU64::new(0) }; crate::State::COUNT],
             sack_globalholes: AtomicI32::new(0),
         }
@@ -169,31 +170,23 @@ impl Stats {
 
     /// `TCPSTAT_ADD`.
     pub fn add(&self, i: usize, n: u64) {
-        if let Some(c) = self.words.get(i) {
-            // Relaxed: a statistic.
-            c.fetch_add(n, Ordering::Relaxed);
-        }
+        self.words.add(i, n);
     }
 
     #[must_use]
     pub fn get(&self, i: usize) -> u64 {
-        // Relaxed: a statistic.
-        self.words.get(i).map_or(0, |c| c.load(Ordering::Relaxed))
+        self.words.get(i)
     }
 
     /// The statistics as `struct tcpstat`'s words.
     #[must_use]
     pub fn snapshot(&self) -> [u64; tcps::N] {
-        // Relaxed: statistics.
-        core::array::from_fn(|i| self.words[i].load(Ordering::Relaxed))
+        core::array::from_fn(|i| self.words.get(i))
     }
 
     /// Zeroes them (a write to `net.inet.tcp.stats`).
     pub fn clear(&self) {
-        for w in &self.words {
-            // Relaxed: statistics.
-            w.store(0, Ordering::Relaxed);
-        }
+        self.words.clear();
     }
 
     /// `TCPSTATES_INC`.

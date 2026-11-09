@@ -11,7 +11,6 @@
 //! address).
 
 use alloc::vec::Vec;
-use core::sync::atomic::Ordering;
 
 use abi::inet::{AF_INET, AF_INET6, AF_LINK};
 use abi::net::{IfData, RTM_VERSION, net_rt, rta, rtf, rtm};
@@ -67,7 +66,7 @@ pub(crate) fn mask_of(family: Family, plen: u8) -> Vec<u8> {
 #[must_use]
 pub fn if_data(ifp: &Ifnet) -> IfData {
     let s = &ifp.stats;
-    let c = |a: &core::sync::atomic::AtomicU64| a.load(Ordering::Relaxed);
+    let c = |a: &sync::PerCpuU64| a.get();
     IfData {
         ifi_type: ifp.ty,
         ifi_physical: 0,
