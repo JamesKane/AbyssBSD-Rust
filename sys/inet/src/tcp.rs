@@ -883,7 +883,7 @@ impl Socket {
             crate::tls::enqueue(self);
         }
         if d.wake {
-            self.wake();
+            self.wake_soon(crate::side::RD | crate::side::WR);
         }
         if d.fate == Fate::Closed {
             self.tcp_ended(d.nofdref);

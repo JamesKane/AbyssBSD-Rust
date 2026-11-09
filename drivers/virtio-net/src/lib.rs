@@ -385,6 +385,9 @@ impl Shared {
         // owed until every `KICK_EVERY` frames and the end: under a
         // hypervisor each one exits.
         self.batch_cpu.store(hal::cpu_id().0, Ordering::Relaxed);
+        // And the wakeups of the sockets they feed, so a woken sender or
+        // reader finds what the frames before the flush brought.
+        let batch = net::defer::begin();
         for (i, m) in frames.into_iter().enumerate() {
             self.port.stats.ipackets.fetch_add(1, Ordering::Relaxed);
             self.port
@@ -394,10 +397,12 @@ impl Shared {
             self.port.input(m);
             if (i + 1) % KICK_EVERY == 0 {
                 self.pay_kicks();
+                batch.flush();
             }
         }
         self.batch_cpu.store(u32::MAX, Ordering::Relaxed);
         self.pay_kicks();
+        drop(batch);
         more
     }
 

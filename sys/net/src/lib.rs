@@ -21,6 +21,7 @@ pub mod announce;
 pub mod arp;
 pub mod bpf;
 pub mod clone;
+pub mod defer;
 pub mod ether;
 pub mod ifnet;
 pub mod link;

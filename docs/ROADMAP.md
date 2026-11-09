@@ -2197,6 +2197,13 @@ P7.0 ─► P7.1 ─► P7.2 ─► P7.3 ─► P7.4 ─┬─► P7.5 ───
   suite p7's pinning to CPU 0 now holds here too, and IRQ numbers are unique. Probe ratios with both
   systems pinned: lo 1.91, tcp.tx 1.17-1.25, tcp.rx 1.80, udp.rx 1.57, udp.tx.small 1.11;
   udp.tx.bulk still flips between 1.5 and 5.9 Gbit/s with bhyve's kick regime (FreeBSD 6.6).
+- Progress 2026-11-09: TCP's socket wakeups during a receive batch wait for its flush points
+  (`net::defer`, every 16 frames and the end), once per socket. Woken by each ACK, our sender took
+  a little room and slept again before the batch was over: 731k wakeup IPIs in 10 s of TCP send
+  (FreeBSD 507k, whose sender spins on the PCB lock the interrupt thread holds instead), 20% of
+  CPU 0. Now 451k. Probe, Mbit/s (FreeBSD): tcp.tx.s1 3520 -> 4394-4799 (4387-4692), tcp.tx.s4
+  3504 -> 5109 (4311), tcp.rx.s1 4294 -> 6234 (6358). Batching UDP receive's and netisr's
+  wakeups the same way showed no clear gain in one run; not taken yet.
 
 ## Phase 8: Board bring-up (XL)
 

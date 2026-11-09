@@ -516,6 +516,9 @@ pub struct Socket {
     /// When its TCP timer is queued for (ns), `u64::MAX` if not: the
     /// timer queue's entry, written under its lock, read without.
     pub(crate) timer_at: core::sync::atomic::AtomicU64,
+    /// The sides ([`side`]) whose wakeup waits for a receive batch's
+    /// flush ([`Socket::wake_soon`]).
+    pub(crate) wake_owed: core::sync::atomic::AtomicU8,
     /// Its sending TLS session; taken before [`Socket::inner`].
     pub(crate) tls_tx: sync::PreemptLock<Option<::ktls::Tx>>,
 }
@@ -626,6 +629,7 @@ impl Socket {
             splice_sent: AtomicU64::new(0),
             txbusy: core::sync::atomic::AtomicBool::new(false),
             timer_at: core::sync::atomic::AtomicU64::new(u64::MAX),
+            wake_owed: core::sync::atomic::AtomicU8::new(0),
             tls_tx: sync::PreemptLock::new(None),
         });
         table.lock().alloc(&so, cred.uid);
@@ -641,17 +645,50 @@ impl Socket {
     /// Wakes readers and writers (`sorwakeup`, `sowwakeup`); a spliced
     /// buffer's wakeup is its splice's work instead.
     pub(crate) fn wake(&self) {
+        self.wake_sides(side::RD | side::WR);
+    }
+
+    /// [`Socket::wake`] of the readers ([`side::RD`]), the writers
+    /// ([`side::WR`]), or both.
+    fn wake_sides(&self, sides: u8) {
         // Relaxed: set under the socket's lock, which whoever changed the
         // buffer this wakeup is for has taken since.
         let spliced = self.spliced.load(Ordering::Relaxed);
-        if spliced & splice::RCV == 0 {
+        if sides & side::RD != 0 && spliced & splice::RCV == 0 {
             self.rd.notify(0);
         }
-        if spliced & splice::SND == 0 {
+        if sides & side::WR != 0 && spliced & splice::SND == 0 {
             self.wr.notify(0);
         }
         if spliced != 0 {
             self.splice_wake();
+        }
+    }
+
+    /// [`Socket::wake_sides`] for a segment's or datagram's arrival: at
+    /// the flush point of the receive batch running on this CPU, if one
+    /// is (`net::defer`), once however many arrive; now otherwise.
+    /// Nothing if nobody waits.
+    pub(crate) fn wake_soon(self: &Arc<Self>, sides: u8) {
+        if (sides & side::RD == 0 || !self.rd.armed())
+            && (sides & side::WR == 0 || !self.wr.armed())
+            && self.spliced.load(Ordering::Relaxed) == 0
+        {
+            return;
+        }
+        if !net::defer::active() {
+            self.wake_sides(sides);
+            return;
+        }
+        // AcqRel pairs with the swap in `run`: the flush that takes the
+        // sides sees what the batch did before it. Already owed: the
+        // flush to come does these too.
+        if self.wake_owed.fetch_or(sides, Ordering::AcqRel) != 0 {
+            return;
+        }
+        if net::defer::defer(Arc::clone(self) as Arc<dyn net::defer::Deferred>).is_err() {
+            let owed = self.wake_owed.swap(0, Ordering::AcqRel);
+            self.wake_sides(owed | sides);
         }
     }
 
@@ -836,4 +873,22 @@ pub fn names(so: &Socket) -> (Vec<u8>, Vec<u8>) {
     let local = t.sockname(so).encode();
     let peer = t.peer_any(so).encode();
     (local, peer)
+}
+
+/// A socket's sides to wake ([`Socket::wake_soon`]).
+pub(crate) mod side {
+    /// Its readers (`so_rdsel`, `so_rcv`).
+    pub(crate) const RD: u8 = 1;
+    /// Its writers (`so_wrsel`, `so_snd`).
+    pub(crate) const WR: u8 = 2;
+}
+
+impl net::defer::Deferred for Socket {
+    fn run(&self) {
+        // Taken first: a wakeup owed after this one is owed anew.
+        let sides = self.wake_owed.swap(0, Ordering::AcqRel);
+        if sides != 0 {
+            self.wake_sides(sides);
+        }
+    }
 }

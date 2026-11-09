@@ -115,6 +115,14 @@ impl Notify {
         }
     }
 
+    /// Whether anything is registered, as [`Notify::notify`] sees it (the
+    /// caller changed the state it is about first).
+    #[must_use]
+    pub fn armed(&self) -> bool {
+        fence(Ordering::SeqCst);
+        self.armed.load(Ordering::Relaxed)
+    }
+
     /// The object's state changed: pollers wake (`selwakeup`) and knotes
     /// see `hint` (`KNOTE_LOCKED`).
     pub fn notify(&self, hint: u64) {
