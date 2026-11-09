@@ -2304,6 +2304,15 @@ P7.0 ─► P7.1 ─► P7.2 ─► P7.3 ─► P7.4 ─┬─► P7.5 ───
   65037/75192 = 1.16, tcp.tx.s1 0.94, tcp.tx.s4 0.89, tcp.rx.s1 0.85, udp.tx.bulk 0.93,
   udp.tx.small 0.88, udp.rx.bulk 1.01 (was 1.57); geometric mean 0.94. Left for the gate: the
   suite itself (`sendfile` and the rest) at P7's exit.
+- Progress 2026-11-09 (loopback, the sender): with netisr no longer saturated, the sender is the
+  critical path, and each lock-prefixed instruction or hold of the socket lock it takes per write
+  shows. Mbuf zones charge their limit with a plain load and store in a critical section, as UMA's
+  buckets do (5fdd01c); a send reads its timeout only to wait and leaves the TLS check to the send
+  buffer (4de8095): together 65.6 -> 70.2. IP output takes TCP's header as built, not reading it
+  back, and reads the clock only for ARP (59404b0): 70.2 -> 73.3 (FreeBSD 75, three runs each).
+  Not taken: the append and the output under one hold (-2.6%), and a sender skipping the relock
+  after its batch when nothing more was queued (slower, noisier: netisr sends more itself). The
+  sender's copy now stalls in the copy itself (27%), as FreeBSD's does in `copyin`.
 
 ## Phase 8: Board bring-up (XL)
 
