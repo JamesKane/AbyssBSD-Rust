@@ -484,8 +484,11 @@ impl Shared {
         if len > MAX_FRAME {
             return Err(NoBufs);
         }
-        let mut buf = alloc::vec![0u8; len];
-        m.data.copy_out(0, &mut buf);
+        // The frame gathered into one buffer, not zeroed first.
+        let mut buf = Vec::with_capacity(len);
+        for seg in m.data.segments() {
+            buf.extend_from_slice(seg);
+        }
         let mcast = m.hdr.flags & (flags::BCAST | flags::MCAST) != 0;
         self.port.tap.mtap(&m, net::bpf::Way::Out);
         drop(m);

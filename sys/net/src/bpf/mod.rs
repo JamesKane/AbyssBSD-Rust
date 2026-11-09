@@ -31,7 +31,7 @@ use abi::bpf::{BpfInsn, MAXINSNS, bufmode, dir, dlt, ts, wordalign};
 use abi::errno::Errno;
 use abi::net::iff;
 use mbuf::{Packet, flags};
-use sync::{Once, SpinLock};
+use sync::{Once, PreemptLock};
 
 use crate::Vnet;
 use filter::{Prefixed, Source};
@@ -80,9 +80,11 @@ pub struct Tap {
     pub dlt: u32,
     pub hdrlen: u32,
     /// Its interface: the VNET it is in, and its index there.
-    home: SpinLock<(Weak<Vnet>, u16)>,
+    home: PreemptLock<(Weak<Vnet>, u16)>,
     /// Descriptors set to it, readers and writers alike.
-    descs: SpinLock<Vec<Arc<Desc>>>,
+    /// The readers (`bif_dlist`), under a default mutex as FreeBSD's
+    /// `BPFIF` and `BPFD` locks are: no interrupt handler taps.
+    descs: PreemptLock<Vec<Arc<Desc>>>,
     /// How many of them read (`bif_dlist` not empty).
     readers: AtomicUsize,
 }
@@ -113,8 +115,8 @@ impl Tap {
         Arc::new(Self {
             dlt,
             hdrlen,
-            home: SpinLock::new((Weak::new(), 0)),
-            descs: SpinLock::new(Vec::new()),
+            home: PreemptLock::new((Weak::new(), 0)),
+            descs: PreemptLock::new(Vec::new()),
             readers: AtomicUsize::new(0),
         })
     }
@@ -435,7 +437,7 @@ pub struct Outgoing {
 
 /// An open `/dev/bpf` (`struct bpf_d`).
 pub struct Desc {
-    st: SpinLock<State>,
+    st: PreemptLock<State>,
     notify: Arc<dyn Notify>,
 }
 
@@ -451,7 +453,7 @@ impl Desc {
     #[must_use]
     pub fn new(notify: Arc<dyn Notify>, readable: bool) -> Arc<Self> {
         Arc::new(Self {
-            st: SpinLock::new(State {
+            st: PreemptLock::new(State {
                 bufsize: BUFSIZE as usize,
                 sbuf: None,
                 slen: 0,
