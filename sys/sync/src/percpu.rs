@@ -51,39 +51,75 @@ impl<const N: usize> core::fmt::Debug for PerCpuStats<N> {
 }
 
 impl<const N: usize> PerCpuStats<N> {
-    /// All zero, a row for each CPU there is now.
+    /// All zero, two rows for each CPU there is now: its threads', and
+    /// its interrupt handlers'.
     #[must_use]
     pub fn new() -> Self {
-        let rows = Box::<[Row<N>]>::new_zeroed_slice(POSSIBLE.load(Ordering::Relaxed));
+        let rows = Box::<[Row<N>]>::new_zeroed_slice(2 * POSSIBLE.load(Ordering::Relaxed));
         // SAFETY: a row is atomics only, for which all-zero bytes are
         // valid (zero).
         let rows = unsafe { rows.assume_init() };
         Self { rows }
     }
 
-    /// This CPU's row; another's (a CPU beyond the rows, or a migration
-    /// between the look and the add) only shares its line, as the adds
-    /// are atomic.
+    /// This CPU's interrupt row (the second half); another's (a CPU
+    /// beyond the rows, or nested interrupts) only shares its line, as
+    /// the adds there are atomic.
     #[inline]
-    fn mine(&self) -> &Row<N> {
-        &self.rows[hal::cpu_id().index() % self.rows.len()]
+    fn interrupt_row(&self) -> &Row<N> {
+        let half = self.rows.len() / 2;
+        &self.rows[half + hal::cpu_id().index() % half]
     }
 
     /// Adds `n` to word `i` (`counter_u64_add`).
     #[inline]
     pub fn add(&self, i: usize, n: u64) {
-        if let Some(c) = self.mine().0.get(i) {
-            // Relaxed: a statistic.
-            c.fetch_add(n, Ordering::Relaxed);
-        }
+        self.update(i, n, false);
     }
 
     /// Takes `n` from word `i`.
     #[inline]
     pub fn sub(&self, i: usize, n: u64) {
-        if let Some(c) = self.mine().0.get(i) {
-            // Relaxed: a statistic.
+        self.update(i, n, true);
+    }
+
+    /// Word `i` plus `n` (less, with `sub`), on this CPU's row. As amd64's
+    /// `counter_u64_add` is one unlocked `add` to the CPU's own copy, a
+    /// thread changes its CPU's thread row with a plain load and store,
+    /// with no lock prefix (no barrier draining the store buffer), in a
+    /// critical section so no other thread of the CPU comes between them.
+    /// Interrupt handlers, which could, count in a row of their own with
+    /// atomic adds, as does a CPU started after the rows were made.
+    #[inline]
+    fn update(&self, i: usize, n: u64, sub: bool) {
+        if i >= N {
+            return;
+        }
+        if cfg!(target_os = "none") && !hal::interrupt::active() {
+            hal::critical::enter();
+            let cpu = hal::cpu_id().index();
+            if cpu < self.rows.len() / 2 {
+                let c = &self.rows[cpu].0[i];
+                // Relaxed: a statistic only this CPU's threads write, and
+                // none of them can run until the store is done.
+                let v = c.load(Ordering::Relaxed);
+                let v = if sub {
+                    v.wrapping_sub(n)
+                } else {
+                    v.wrapping_add(n)
+                };
+                c.store(v, Ordering::Relaxed);
+                hal::critical::exit();
+                return;
+            }
+            hal::critical::exit();
+        }
+        let c = &self.interrupt_row().0[i];
+        // Relaxed: a statistic.
+        if sub {
             c.fetch_sub(n, Ordering::Relaxed);
+        } else {
+            c.fetch_add(n, Ordering::Relaxed);
         }
     }
 

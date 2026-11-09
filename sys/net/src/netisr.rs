@@ -17,7 +17,7 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use mbuf::Packet;
-use sync::SpinLock;
+use sync::PreemptLock;
 
 use crate::Vnet;
 
@@ -72,7 +72,9 @@ struct Waiting {
 /// A VNET's queues (`struct netisr_workstream`'s, one per protocol).
 #[derive(Debug)]
 pub struct Queues {
-    q: SpinLock<Waiting>,
+    /// `nws_mtx`, a default mutex (`MTX_DEF`): it holds off preemption,
+    /// not interrupts, as no interrupt handler queues here.
+    q: PreemptLock<Waiting>,
     /// Queued, handled, and dropped for a full queue or no handler
     /// (`nw_queued`, `nw_handled`, `nw_qdrops`).
     pub queued: AtomicU64,
@@ -90,7 +92,7 @@ impl Queues {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            q: SpinLock::new(Waiting {
+            q: PreemptLock::new(Waiting {
                 q: VecDeque::new(),
                 len: [0; PROTOS],
                 spare: VecDeque::new(),
