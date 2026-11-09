@@ -616,11 +616,24 @@ static NEXT: AtomicU64 = AtomicU64::new(u64::MAX);
 /// Sets `so`'s timer to `at` (TCP's ticks), or clears it.
 fn schedule(so: &Arc<Socket>, at: Option<u64>) {
     let want = at.map_or(u64::MAX, |t| t.saturating_mul(1_000_000));
-    // Relaxed: the queue's lock orders the entry; an unchanged deadline
-    // (often: many segments a tick) leaves it be.
-    if so.timer_at.load(Ordering::Relaxed) == want {
+    // Relaxed: the queue's lock orders the entry. An entry no later than
+    // the new deadline stands (a delayed ACK's comes and goes every other
+    // segment): it fires, finds nothing due (`tcp_timer_enter` runs only
+    // what is), and the connection's run queues the real one.
+    let have = so.timer_at.load(Ordering::Relaxed);
+    if have <= want {
         return;
     }
+    requeue(so, at, want);
+}
+
+/// Takes `so`'s timer out of the queue: its connection is gone.
+fn unschedule(so: &Arc<Socket>) {
+    requeue(so, None, u64::MAX);
+}
+
+/// Puts `so`'s timer in the queue for `want` (ns), or out of it.
+fn requeue(so: &Arc<Socket>, at: Option<u64>, want: u64) {
     let mut q = TIMERS.lock();
     if let Some(old) = q.by_id.remove(&so.id) {
         q.by_time.remove(&(old, so.id));
@@ -904,7 +917,7 @@ impl Socket {
     /// `tcp_close`'s `in_pcbdrop`, and `INP_SOCKREF`'s release: out of
     /// the lookups; freed if its socket was closed.
     fn tcp_ended(self: &Arc<Self>, nofdref: bool) {
-        schedule(self, None);
+        unschedule(self);
         {
             let mut t = TCB.lock();
             if nofdref {
@@ -1232,7 +1245,7 @@ impl Socket {
             return;
         }
         if dropped {
-            schedule(self, None);
+            unschedule(self);
             TCB.lock().free(self.id);
             return;
         }
