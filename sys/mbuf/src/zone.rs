@@ -6,7 +6,7 @@
 //! per-CPU magazines (UMA's buckets); a zone adds the limit and the counts
 //! `netstat -m` reports. The limit is charged in batches: each CPU holds
 //! credit taken from the zone's total, so the common allocation and free
-//! touch only that CPU's cache line, with one atomic add each (and no
+//! touch only that CPU's cache line, with no locked instruction (and no
 //! separate counts: what is in use is what is charged less the credit),
 //! as UMA counts items in its per-CPU
 //! buckets against `uz_max_items`. A zone may therefore run short by up to
@@ -25,6 +25,11 @@ use crate::{MCLBYTES, MJUM9BYTES, MJUM16BYTES, MJUMPAGESIZE, MSIZE};
 
 /// Credit a CPU takes from a zone's total at once.
 const BATCH: i64 = 32;
+
+/// Whether CPUs keep credit: in the kernel, where a critical section keeps
+/// a thread on its CPU. Host tests' threads share "CPUs", so they charge
+/// the total.
+const LOCAL: bool = cfg!(target_os = "none");
 
 /// One CPU's credit and counts, alone on its cache line.
 #[repr(align(64))]
@@ -99,23 +104,20 @@ impl Zone {
         &self.slots[hal::cpu_id().index() % MAX_CPUS]
     }
 
-    /// Charges one item to the limit; false if it is reached.
-    fn charge(&self) -> bool {
-        let s = self.slot();
-        if s.credit.fetch_sub(1, Ordering::Relaxed) > 0 {
-            return true;
-        }
-        s.credit.fetch_add(1, Ordering::Relaxed);
+    /// Charges up to `n` items straight to the zone's total: an interrupt
+    /// handler's one, or a batch for a CPU's credit. Returns how many: `n`,
+    /// or one near the limit, or none at it.
+    fn charge_total(&self, n: u64) -> u64 {
         let limit = self.limit.load(Ordering::Relaxed);
         let mut t = self.taken.load(Ordering::Relaxed);
         loop {
-            // A batch if it fits, else the last items one by one.
-            let want = if t.saturating_add(BATCH as u64) <= limit {
-                BATCH as u64
+            // All of them if they fit, else the last items one by one.
+            let want = if t.saturating_add(n) <= limit {
+                n
             } else if t < limit {
                 1
             } else {
-                return false;
+                return 0;
             };
             match self.taken.compare_exchange_weak(
                 t,
@@ -123,29 +125,61 @@ impl Zone {
                 Ordering::Relaxed,
                 Ordering::Relaxed,
             ) {
-                Ok(_) => {
-                    // One of them is this allocation's.
-                    #[allow(clippy::cast_possible_wrap, reason = "at most BATCH")]
-                    s.credit.fetch_add(want as i64 - 1, Ordering::Relaxed);
-                    return true;
-                }
+                Ok(_) => return want,
                 Err(now) => t = now,
             }
         }
     }
 
+    /// Charges one item to the limit; false if it is reached.
+    ///
+    /// A CPU's credit changes only on that CPU, from thread context in a
+    /// critical section (so no other thread runs there meanwhile), and
+    /// interrupt handlers charge the total instead: a plain load and store
+    /// suffice, with no locked instruction to wait for the stores before
+    /// it (UMA's per-CPU buckets, under `critical_enter`, take none
+    /// either). A handler's item freed by a thread becomes credit, and the
+    /// reverse comes out of the total: either way what is charged stays
+    /// what is in use plus the credit.
+    fn charge(&self) -> bool {
+        if !LOCAL || hal::interrupt::active() {
+            return self.charge_total(1) == 1;
+        }
+        hal::critical::enter();
+        let s = self.slot();
+        let c = s.credit.load(Ordering::Relaxed);
+        let ok = if c > 0 {
+            s.credit.store(c - 1, Ordering::Relaxed);
+            true
+        } else {
+            let got = self.charge_total(BATCH as u64);
+            if got > 0 {
+                // One of them is this allocation's.
+                #[allow(clippy::cast_possible_wrap, reason = "at most BATCH")]
+                s.credit.store(c + got as i64 - 1, Ordering::Relaxed);
+            }
+            got > 0
+        };
+        hal::critical::exit();
+        ok
+    }
+
     /// Returns one item's charge, and a batch to the zone when this CPU
     /// holds more than two.
     fn uncharge(&self) {
+        if !LOCAL || hal::interrupt::active() {
+            self.taken.fetch_sub(1, Ordering::Relaxed);
+            return;
+        }
+        hal::critical::enter();
         let s = self.slot();
-        let c = s.credit.fetch_add(1, Ordering::Relaxed) + 1;
-        if c > 2 * BATCH
-            && s.credit
-                .compare_exchange(c, c - BATCH, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-        {
+        let mut c = s.credit.load(Ordering::Relaxed) + 1;
+        if c > 2 * BATCH {
+            c -= BATCH;
             self.taken.fetch_sub(BATCH as u64, Ordering::Relaxed);
         }
+        s.credit.store(c, Ordering::Relaxed);
+        hal::critical::exit();
     }
 
     fn layout(&self) -> Layout {
