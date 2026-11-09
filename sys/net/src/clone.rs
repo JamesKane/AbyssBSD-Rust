@@ -118,10 +118,13 @@ impl Link for Loop {
             }
             _ => Proto::Ip,
         };
-        vnet.netisr.queue(proto, m).map_err(|_| {
+        // `if_simloop` ignores `netisr_queue`'s failure ("mbuf is free'd
+        // on failure"): a full queue is a loss the protocol recovers from,
+        // not an error its sender sees.
+        if vnet.netisr.queue(proto, m).is_err() {
             self.stats.iqdrops.add(1);
-            NoBufs
-        })
+        }
+        Ok(())
     }
 
     fn as_any(&self) -> &dyn Any {
