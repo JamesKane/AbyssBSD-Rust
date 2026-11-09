@@ -345,7 +345,7 @@ const TCP_KNOBS: &[Knob] = &[
 fn ctlflag_vnet_opaque(format: &'static str, f: fn(&inet::state::State) -> Vec<u8>) -> Value {
     Value::Opaque {
         format,
-        read: Box::new(move |out| out.extend(f(&inet::state::of(&super::curvnet())))),
+        read: Box::new(move |out| out.extend(f(&inet::state::of_arc(&super::curvnet())))),
     }
 }
 
@@ -366,10 +366,10 @@ fn vknob(
         ctlflag::VNET,
         // Relaxed: a setting.
         Value::Int(Box::new(move || {
-            field(&inet::state::of(&super::curvnet())).load(Ordering::Relaxed)
+            field(&inet::state::of_arc(&super::curvnet())).load(Ordering::Relaxed)
         })),
         sysctl::int_writer(move |v| {
-            field(&inet::state::of(&super::curvnet())).store(v, Ordering::Relaxed);
+            field(&inet::state::of_arc(&super::curvnet())).store(v, Ordering::Relaxed);
             Ok(())
         }),
     )
@@ -392,11 +392,11 @@ fn vknob_u32(
         ctlflag::VNET,
         // Relaxed: a setting.
         Value::Uint(Box::new(move || {
-            field(&inet::state::of(&super::curvnet())).load(Ordering::Relaxed)
+            field(&inet::state::of_arc(&super::curvnet())).load(Ordering::Relaxed)
         })),
         sysctl::int_writer(move |v| {
             let v = u32::try_from(v).map_err(|_| Errno::EINVAL)?;
-            field(&inet::state::of(&super::curvnet())).store(v, Ordering::Relaxed);
+            field(&inet::state::of_arc(&super::curvnet())).store(v, Ordering::Relaxed);
             Ok(())
         }),
     )
@@ -446,10 +446,10 @@ fn vstats_n(
         ctlflag::VNET,
         Value::Opaque {
             format,
-            read: Box::new(move |out| out.extend(bytes(&inet::state::of(&super::curvnet())))),
+            read: Box::new(move |out| out.extend(bytes(&inet::state::of_arc(&super::curvnet())))),
         },
         Arc::new(move |_: &[u8]| {
-            clear(&inet::state::of(&super::curvnet()));
+            clear(&inet::state::of_arc(&super::curvnet()));
             Ok(())
         }),
     )
@@ -474,10 +474,10 @@ fn vknob_n(
         ctlflag::VNET,
         // Relaxed: a setting.
         Value::Int(Box::new(move || {
-            field(&inet::state::of(&super::curvnet())).load(Ordering::Relaxed)
+            field(&inet::state::of_arc(&super::curvnet())).load(Ordering::Relaxed)
         })),
         sysctl::int_writer(move |v| {
-            field(&inet::state::of(&super::curvnet())).store(v, Ordering::Relaxed);
+            field(&inet::state::of_arc(&super::curvnet())).store(v, Ordering::Relaxed);
             Ok(())
         }),
     )
@@ -951,7 +951,7 @@ pub(crate) fn init(s: &Sleepable) {
             "globalholes",
             "Global number of TCP SACK holes currently allocated",
             Value::Int(Box::new(|| {
-                inet::state::of(&super::curvnet())
+                inet::state::of_arc(&super::curvnet())
                     .tcp
                     .stats
                     .sack_globalholes
@@ -1025,7 +1025,7 @@ pub(crate) fn init(s: &Sleepable) {
             "count",
             "The current number of entries in the host cache",
             Value::Uint(Box::new(|| {
-                inet::state::of(&super::curvnet()).tcp.hc.count()
+                inet::state::of_arc(&super::curvnet()).tcp.hc.count()
             })),
         )
         .expect("net.inet.tcp.hostcache.count");
@@ -1035,7 +1035,9 @@ pub(crate) fn init(s: &Sleepable) {
             "list",
             "List of all hostcache entries",
             Value::Str(Box::new(|out| {
-                out.push_str(&inet::hostcache_list(&inet::state::of(&super::curvnet())));
+                out.push_str(&inet::hostcache_list(&inet::state::of_arc(
+                    &super::curvnet(),
+                )));
             })),
         )
         .expect("net.inet.tcp.hostcache.list");
@@ -1048,7 +1050,7 @@ pub(crate) fn init(s: &Sleepable) {
             Value::Int(Box::new(|| 0)),
             sysctl::int_writer(|v| {
                 if v != 0 {
-                    inet::state::of(&super::curvnet()).tcp.hc.purge(true);
+                    inet::state::of_arc(&super::curvnet()).tcp.hc.purge(true);
                 }
                 Ok(())
             }),
@@ -1084,7 +1086,7 @@ pub(crate) fn init(s: &Sleepable) {
             "count",
             "Current number of entries in syncache",
             Value::Uint(Box::new(|| {
-                inet::state::of(&super::curvnet()).tcp.syncache.count()
+                inet::state::of_arc(&super::curvnet()).tcp.syncache.count()
             })),
         )
         .expect("net.inet.tcp.syncache.count");
@@ -1137,12 +1139,12 @@ pub(crate) fn init(s: &Sleepable) {
             "Default congestion control algorithm",
             ctlflag::VNET,
             Value::Str(Box::new(|out| {
-                out.push_str(inet::state::of(&super::curvnet()).tcp.cc_algo().name());
+                out.push_str(inet::state::of_arc(&super::curvnet()).tcp.cc_algo().name());
             })),
             sysctl::str_writer(16, |b| {
                 let a = tcp::cc::Algo::by_name(b).ok_or(Errno::ESRCH)?;
                 let i = tcp::cc::Algo::ALL.iter().position(|x| *x == a).unwrap_or(1);
-                inet::state::of(&super::curvnet())
+                inet::state::of_arc(&super::curvnet())
                     .tcp
                     .default_cc
                     .store(u8::try_from(i).unwrap_or(1), Ordering::Relaxed);
@@ -1157,7 +1159,7 @@ pub(crate) fn init(s: &Sleepable) {
             "List available congestion control algorithms",
             Value::Str(Box::new(|out| {
                 use core::fmt::Write;
-                let d = inet::state::of(&super::curvnet()).tcp.cc_algo();
+                let d = inet::state::of_arc(&super::curvnet()).tcp.cc_algo();
                 out.push_str("CCmod           D PCB count\n");
                 for a in tcp::cc::Algo::ALL {
                     let _ = writeln!(
@@ -1540,10 +1542,10 @@ fn inet6(t: &mut Tree, net: sysctl::NodeId) {
         "Default maximum number of outstanding fragmented IPv6 packets. A value of 0 means no fragmented packets will be accepted, while a a value of -1 means no limit",
         ctlflag::VNET,
         Value::Int(Box::new(|| {
-            inet::state::val_of(&inet::state::of(&super::curvnet()).conf6.maxfragpackets)
+            inet::state::val_of(&inet::state::of_arc(&super::curvnet()).conf6.maxfragpackets)
         })),
         sysctl::int_writer(|v| {
-            let st = inet::state::of(&super::curvnet());
+            let st = inet::state::of_arc(&super::curvnet());
             st.conf6.maxfragpackets.store(v, Ordering::Relaxed);
             inet::frag6::set_bucketsize(&st);
             Ok(())
@@ -1741,7 +1743,7 @@ fn inet6(t: &mut Tree, net: sysctl::NodeId) {
         "frag6_nfragpackets",
         "Per-VNET number of IPv6 fragments across all reassembly queues.",
         Value::Uint(Box::new(|| {
-            u32::try_from(inet::state::of(&super::curvnet()).frag6_len()).unwrap_or(u32::MAX)
+            u32::try_from(inet::state::of_arc(&super::curvnet()).frag6_len()).unwrap_or(u32::MAX)
         })),
     )
     .expect("net.inet6.ip6.frag6_nfragpackets");
@@ -1848,13 +1850,13 @@ fn inet6(t: &mut Tree, net: sysctl::NodeId) {
         "Maximum number of ICMPv6 error/reply messages per second",
         ctlflag::VNET,
         Value::Uint(Box::new(|| {
-            inet::state::of(&super::curvnet())
+            inet::state::of_arc(&super::curvnet())
                 .conf6
                 .errppslimit
                 .load(Ordering::Relaxed)
         })),
         sysctl::int_writer(|v| {
-            let st = inet::state::of(&super::curvnet());
+            let st = inet::state::of_arc(&super::curvnet());
             let v = u32::try_from(v).map_err(|_| Errno::EINVAL)?;
             if v != 0 && v <= st.conf6.icmp6lim_jitter.load(Ordering::Relaxed) {
                 return Err(Errno::EINVAL);
@@ -1871,13 +1873,13 @@ fn inet6(t: &mut Tree, net: sysctl::NodeId) {
         "Random errppslimit jitter adjustment limit",
         ctlflag::VNET,
         Value::Uint(Box::new(|| {
-            inet::state::of(&super::curvnet())
+            inet::state::of_arc(&super::curvnet())
                 .conf6
                 .icmp6lim_jitter
                 .load(Ordering::Relaxed)
         })),
         sysctl::int_writer(|v| {
-            let st = inet::state::of(&super::curvnet());
+            let st = inet::state::of_arc(&super::curvnet());
             let v = u32::try_from(v).map_err(|_| Errno::EINVAL)?;
             if v >= st.conf6.errppslimit.load(Ordering::Relaxed) {
                 return Err(Errno::EINVAL);

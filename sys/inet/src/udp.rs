@@ -805,7 +805,7 @@ pub(crate) fn input4(vnet: &Arc<Vnet>, mut m: Packet, ip: &Ip) {
     let mut data = alloc::vec![0u8; ulen - HDR];
     m.data.copy_out(hlen + HDR, &mut data);
     if crate::addr::is_multicast4(&ip.dst) || bcast {
-        multi_input(vnet, &st, &from, &to, &data, ip, rcvif);
+        multi_input(vnet, st, &from, &to, &data, ip, rcvif);
         return;
     }
     let target = UDB.lock().deliver(vnet.id, Family::Inet, &from, &to);
@@ -834,7 +834,7 @@ pub(crate) fn input4(vnet: &Arc<Vnet>, mut m: Packet, ip: &Ip) {
         {
             return;
         }
-        if !icmp::bandlim(&st, crate::state::bandlim::UNREACH) {
+        if !icmp::bandlim(st, crate::state::bandlim::UNREACH) {
             return;
         }
         icmp::error(
@@ -971,7 +971,7 @@ impl Socket {
         let (saddr, ifp) = if connected && !is_unspecified(&src.addr) {
             (src.addr, u16::try_from(src.scope).unwrap_or(0))
         } else {
-            crate::in6::selectsrc(&n, &st, &req)?
+            crate::in6::selectsrc(&n, st, &req)?
         };
         if dst.scope == 0 && crate::in6::is_zoned(&dst.addr) {
             dst.scope = u32::from(ifp);
@@ -1006,7 +1006,7 @@ impl Socket {
             o.flowid = flow_hash6(&saddr, &dst.addr, src.port, dst.port, ip::proto::UDP);
         }
         st.udpstat.inc(udps::OPACKETS);
-        crate::ip6::output_in(&mut n, &st, m, &o)
+        crate::ip6::output_in(&mut n, st, m, &o)
     }
 
     /// Whether it joined IPv6 `group` on interface `ifindex`.
@@ -1100,7 +1100,7 @@ pub(crate) fn input6(vnet: &Arc<Vnet>, mut m: Packet, off: usize) {
     let mut data = alloc::vec![0u8; ulen - HDR];
     m.data.copy_out(off + HDR, &mut data);
     if net::addr::is_multicast6(&ip6.dst) {
-        multi_input6(vnet, &st, &from, &to, &data, &ip6, rcvif);
+        multi_input6(vnet, st, &from, &to, &data, &ip6, rcvif);
         return;
     }
     let target = UDB.lock().deliver(vnet.id, Family::Inet6, &from, &to);

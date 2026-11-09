@@ -351,15 +351,15 @@ pub fn input(vnet: &Arc<Vnet>, mut m: Packet) {
             return;
         }
     }
-    let dest = classify(&vnet.net.lock(), &st, &ip, rcvif, ifflags, m.hdr.flags);
+    let dest = classify(&vnet.net.lock(), st, &ip, rcvif, ifflags, m.hdr.flags);
     match dest {
         Dest::Drop(stat) => {
             st.ipstat.inc(stat);
         }
-        Dest::Forward => forward(vnet, &st, m, ip),
+        Dest::Forward => forward(vnet, st, m, ip),
         Dest::Ours => {
             let (m, ip) = if ip.is_fragment() {
-                match crate::reass::reass(&st, m, &ip) {
+                match crate::reass::reass(st, m, &ip) {
                     Some(m) => {
                         let mut m = m;
                         let Ok(ip) = m.header::<Ip>(0) else {
@@ -674,7 +674,7 @@ pub fn output(vnet: &Arc<Vnet>, mut m: Packet, o: &Opts) -> Result<(), Errno> {
             ip.hl = 24;
             ip.len += 4;
         }
-        fill_id(&st, &mut ip);
+        fill_id(st, &mut ip);
     }
     let hlen = usize::from(ip.hl);
     if hlen < HDR_LEN || hlen > m.len() {
@@ -688,7 +688,7 @@ pub fn output(vnet: &Arc<Vnet>, mut m: Packet, o: &Opts) -> Result<(), Errno> {
     }
     let now = net::uptime();
     let mut n = vnet.net.lock();
-    let Some(p) = path(&n, &st, &mut ip, o)? else {
+    let Some(p) = path(&n, st, &mut ip, o)? else {
         return Ok(());
     };
     let i = n.by_index(p.ifindex).ok_or(Errno::EHOSTUNREACH)?;
@@ -770,7 +770,7 @@ pub fn output(vnet: &Arc<Vnet>, mut m: Packet, o: &Opts) -> Result<(), Errno> {
         st.ipstat.inc(ips::CANTFRAG);
         return Err(Errno::EMSGSIZE);
     }
-    let frags = fragment(&st, m, &ip, opts, mtu, assist)?;
+    let frags = fragment(st, m, &ip, opts, mtu, assist)?;
     let mut r = Ok(());
     for f in frags {
         if r.is_ok() {

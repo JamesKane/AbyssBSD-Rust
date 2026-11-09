@@ -68,7 +68,7 @@ pub(crate) fn soioctl(so: &Socket, req: u32, arg: &mut [u8]) -> Result<usize, Er
         sio::SIOCAADDRCTL_POLICY | sio::SIOCDADDRCTL_POLICY if so.family == Family::Inet6 => {
             priv_check(Priv::NetinetAddrctl6)?;
             policy(
-                &inet::state::of(&so.vnet),
+                inet::state::of(&so.vnet),
                 req == sio::SIOCAADDRCTL_POLICY,
                 arg,
             )
@@ -93,7 +93,7 @@ fn policy(st: &inet::state::State, add: bool, arg: &[u8]) -> Result<usize, Errno
 
 /// `net.inet6.ip6.addrctlpolicy`'s records.
 pub(crate) fn policies(out: &mut Vec<u8>) {
-    for p in inet::in6::policies(&inet::state::of(&super::curvnet())) {
+    for p in inet::in6::policies(&inet::state::of_arc(&super::curvnet())) {
         out.extend_from_slice(crate::uaccess::bytes_of(&p));
     }
 }

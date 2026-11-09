@@ -301,7 +301,7 @@ impl Socket {
             let mut d = data.to_vec();
             // No program can ask for identification 0; it gets one.
             if h.id == 0 {
-                ip::fill_id(&st, &mut h);
+                ip::fill_id(st, &mut h);
                 d[4..6].copy_from_slice(&h.id.to_be_bytes());
             }
             o.flags |= out::RAWOUTPUT;

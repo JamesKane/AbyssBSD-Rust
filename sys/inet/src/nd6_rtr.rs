@@ -1145,7 +1145,7 @@ pub fn flush_routers(vnet: &Vnet) {
     let mut n = vnet.net.lock();
     let routers: Vec<DefRouter> = core::mem::take(&mut st.nd6.lock().routers);
     for d in routers {
-        defrouter_del(&mut n, &st, &d);
+        defrouter_del(&mut n, st, &d);
     }
 }
 
@@ -1156,9 +1156,9 @@ pub fn reset_routers(vnet: &Vnet) {
     let mut n = vnet.net.lock();
     let routers: Vec<DefRouter> = st.nd6.lock().routers.clone();
     for d in routers.iter().filter(|d| d.installed) {
-        delreq(&mut n, &st, d);
+        delreq(&mut n, st, d);
     }
-    defrouter_select(&mut n, &st);
+    defrouter_select(&mut n, st);
 }
 
 /// `SIOCSPFXFLUSH_IN6` (`ndp -P`): every prefix made by advertisements
@@ -1198,7 +1198,7 @@ pub fn flush_prefixes(vnet: &Vnet) {
             let _ = n.delete_addr(name.as_bytes(), Family::Inet6, Some(&a));
         }
         if p.stateflags & NDPRF_ONLINK != 0 {
-            prefix_offlink(&mut n, &st, &p);
+            prefix_offlink(&mut n, st, &p);
         }
     }
 }

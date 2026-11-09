@@ -573,7 +573,7 @@ impl Socket {
                 .ok_or(Errno::EADDRNOTAVAIL)?;
             let (_, k) = i.groups6.remove(at);
             drop(i);
-            crate::mld6::leave(&mut n, &st, k, &g);
+            crate::mld6::leave(&mut n, st, k, &g);
             return Ok(());
         }
         let ok = n
@@ -589,7 +589,7 @@ impl Socket {
             }
             i.groups6.push((g, ifindex));
         }
-        crate::mld6::join(&mut n, &st, ifindex, &g, 0);
+        crate::mld6::join(&mut n, st, ifindex, &g, 0);
         Ok(())
     }
 
@@ -870,7 +870,7 @@ impl Socket {
             let st = crate::state::of(&self.vnet);
             let mut n = self.vnet.net.lock();
             for (g, k) in groups6 {
-                crate::mld6::leave(&mut n, &st, k, &g);
+                crate::mld6::leave(&mut n, st, k, &g);
             }
         }
         let groups = core::mem::take(&mut self.inner.lock().groups);

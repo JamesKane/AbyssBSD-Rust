@@ -211,17 +211,17 @@ fn run_vnet(vnet: &Arc<Vnet>, now: u64) -> u64 {
     let mut next = u64::MAX;
     {
         let mut n = vnet.net.lock();
-        llinfo_timers(&mut n, &st, now, &mut errors);
-        dad_timers(&mut n, &st, now);
-        crate::mld6::fasttimo(&mut n, &st, now);
+        llinfo_timers(&mut n, st, now, &mut errors);
+        dad_timers(&mut n, st, now);
+        crate::mld6::fasttimo(&mut n, st, now);
         let due = {
             let nd = st.nd6.lock();
             nd.slow_at != 0 && nd.slow_at <= now
         };
         if due {
-            crate::nd6_rtr::nd6_timer(&mut n, &st, now);
+            crate::nd6_rtr::nd6_timer(&mut n, st, now);
         }
-        next = next.min(deadlines(&n, &st, now));
+        next = next.min(deadlines(&n, st, now));
     }
     // `frag6_slowtimo`, every half second while fragments wait.
     let frag_due = {
@@ -240,7 +240,7 @@ fn run_vnet(vnet: &Arc<Vnet>, now: u64) -> u64 {
         }
     };
     if frag_due {
-        crate::frag6::tick(vnet, &st);
+        crate::frag6::tick(vnet, st);
     }
     {
         let nd = st.nd6.lock();
@@ -448,7 +448,7 @@ pub(crate) fn resolve(
         return Err(Errno::ENOBUFS);
     };
     if e.state == lls::ND6_STALE {
-        setstate(e, lls::ND6_DELAY, &ndi, &st, now);
+        setstate(e, lls::ND6_DELAY, &ndi, st, now);
     }
     if e.state > lls::ND6_INCOMPLETE {
         return Ok(Resolved::Addr(e.lladdr));
@@ -467,10 +467,10 @@ pub(crate) fn resolve(
     if e.asked == 0 {
         e.asked += 1;
         send = Some(holdsrc(e));
-        setstate(e, lls::ND6_INCOMPLETE, &ndi, &st, now);
+        setstate(e, lls::ND6_INCOMPLETE, &ndi, st, now);
     }
     if let Some(src) = send {
-        ns_output(n, &st, ifindex, src.as_ref(), None, dst, None);
+        ns_output(n, st, ifindex, src.as_ref(), None, dst, None);
     }
     Ok(Resolved::Held)
 }
@@ -1553,7 +1553,7 @@ pub(crate) fn fmt6(a: &In6) -> alloc::string::String {
 
 /// The VNET's protocol state, from under the interfaces' lock.
 fn st_of(n: &Net) -> Option<Arc<State>> {
-    n.owner.upgrade().map(|v| state::of(&v))
+    n.owner.upgrade().map(|v| state::of_arc(&v))
 }
 
 /// A random delay up to `MAX_RTR_SOLICITATION_DELAY` (`arc4random() %
@@ -1810,7 +1810,7 @@ pub(crate) fn redirect_output(
     if !ok || is_multicast6(&sip6.dst) {
         return;
     }
-    if icmp6::ratelimit(&st, ty::REDIRECT) {
+    if icmp6::ratelimit(st, ty::REDIRECT) {
         return;
     }
     let Some(ifp) = n.by_index(ifindex) else {
@@ -1864,11 +1864,11 @@ pub(crate) fn redirect_output(
         minmtu: ip6::minmtu::MCASTONLY,
         ..Opts6::default()
     };
-    if let Ok(outif) = ip6::output_if(&mut n, &st, m, &o)
+    if let Ok(outif) = ip6::output_if(&mut n, st, m, &o)
         && let Some(i) = n.by_index(outif)
     {
         i.stats.icmp6_inc(icmp6_ifs::OUT_MSG);
         i.stats.icmp6_inc(icmp6_ifs::OUT_REDIRECT);
     }
-    ip6::count_out(&st, ty::REDIRECT);
+    ip6::count_out(st, ty::REDIRECT);
 }

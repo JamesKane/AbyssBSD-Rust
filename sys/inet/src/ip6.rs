@@ -409,7 +409,7 @@ pub fn input(vnet: &Arc<Vnet>, mut m: Packet) {
             st.ip6stat.inc(ip6s::BADSCOPE);
             return;
         }
-        classify(&n, &st, &ip6, rcvif, looped)
+        classify(&n, st, &ip6, rcvif, looped)
     };
     let mut ours = match dest {
         Dest::Ours => true,
@@ -422,7 +422,7 @@ pub fn input(vnet: &Arc<Vnet>, mut m: Packet) {
         }
     };
     let (mut m, off, nxt) = if ip6.nxt == proto::HOPOPTS {
-        let Some((m, off, nxt, rtalert)) = hopopts(vnet, &st, m, HDR_LEN) else {
+        let Some((m, off, nxt, rtalert)) = hopopts(vnet, st, m, HDR_LEN) else {
             return;
         };
         let mut m = m;
@@ -445,11 +445,11 @@ pub fn input(vnet: &Arc<Vnet>, mut m: Packet) {
         return;
     }
     if !ours {
-        forward(vnet, &st, m, false);
+        forward(vnet, st, m, false);
         return;
     }
     st.ip6stat.inc(ip6s::DELIVERED);
-    deliver(vnet, &st, m, off, nxt);
+    deliver(vnet, st, m, off, nxt);
 }
 
 /// `ip6_input`'s address checks: multicast is this host's (its
@@ -685,7 +685,7 @@ pub(crate) fn delayed_cksum(m: &mut Packet, off: usize) {
 pub fn output(vnet: &Arc<Vnet>, m: Packet, o: &Opts6) -> Result<(), Errno> {
     let st = state::of(vnet);
     let mut n = vnet.net.lock();
-    output_in(&mut n, &st, m, o)
+    output_in(&mut n, st, m, o)
 }
 
 /// [`output`] under the interfaces' lock (neighbor discovery and MLD

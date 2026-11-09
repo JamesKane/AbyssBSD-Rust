@@ -582,23 +582,34 @@ fn new_state() -> Arc<State> {
     unsafe { a.assume_init() }
 }
 
-/// `vnet`'s state, made on first use.
+/// `vnet`'s state, made on first use, borrowed from it: no reference
+/// count to touch on a path every packet takes.
 #[must_use]
-pub fn of(vnet: &Vnet) -> Arc<State> {
+pub fn of(vnet: &Vnet) -> &State {
     let any = match vnet.inet.get() {
-        Some(a) => Arc::clone(a),
+        Some(a) => a,
         None => {
             let s = new_state();
             crate::frag6::init_limits(&s);
             let s: Arc<dyn core::any::Any + Send + Sync> = s;
             // A racing first use makes one too; one of them is kept.
             let _ = vnet.inet.set(s);
-            vnet.inet
-                .get()
-                .map(Arc::clone)
-                .unwrap_or_else(|| unreachable!("just set"))
+            vnet.inet.get().unwrap_or_else(|| unreachable!("just set"))
         }
     };
+    any.downcast_ref::<State>()
+        .unwrap_or_else(|| unreachable!("only this crate sets it"))
+}
+
+/// [`of`], counted: for a holder that outlives the borrow.
+#[must_use]
+pub fn of_arc(vnet: &Vnet) -> Arc<State> {
+    let _ = of(vnet);
+    let any = vnet
+        .inet
+        .get()
+        .map(Arc::clone)
+        .unwrap_or_else(|| unreachable!("made above"));
     any.downcast::<State>()
         .unwrap_or_else(|_| unreachable!("only this crate sets it"))
 }

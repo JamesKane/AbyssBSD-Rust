@@ -74,8 +74,8 @@ pub(crate) fn join(vnet: &Arc<Vnet>, ifindex: u16, group: [u8; 4]) {
             }
         }
     };
-    if first && reported(&st, group) {
-        report(vnet, &st, ifindex, group, true);
+    if first && reported(st, group) {
+        report(vnet, st, ifindex, group, true);
     }
 }
 
@@ -96,8 +96,8 @@ pub(crate) fn leave(vnet: &Arc<Vnet>, ifindex: u16, group: [u8; 4]) {
             false
         }
     };
-    if last && reported(&st, group) {
-        report(vnet, &st, ifindex, group, false);
+    if last && reported(st, group) {
+        report(vnet, st, ifindex, group, false);
     }
 }
 

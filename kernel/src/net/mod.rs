@@ -148,7 +148,7 @@ fn start_route_expiry() {
                 drop(n);
                 // `ipreass_callout`.
                 if v.inet.get().is_some() {
-                    inet::reass::tick(&inet::state::of(&v), up);
+                    inet::reass::tick(inet::state::of(&v), up);
                 }
             }
         }

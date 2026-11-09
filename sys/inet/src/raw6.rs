@@ -263,7 +263,7 @@ impl Socket {
                 return Err(Errno::EADDRNOTAVAIL);
             }
             let req = self.srcreq(&sa, None);
-            let (src, ifp) = in6::selectsrc(&n, &st, &req)?;
+            let (src, ifp) = in6::selectsrc(&n, st, &req)?;
             (
                 src,
                 if sa.scope == 0 && is_zoned(&sa.addr) {
@@ -435,7 +435,7 @@ impl Socket {
             return Err(Errno::ENXIO);
         }
         let req = self.srcreq(&dst, Some(ctl));
-        let (src, ifp) = in6::selectsrc(&n, &st, &req)?;
+        let (src, ifp) = in6::selectsrc(&n, st, &req)?;
         if dst.scope == 0 && is_zoned(&dst.addr) {
             dst.scope = u32::from(ifp);
         }
@@ -461,7 +461,7 @@ impl Socket {
         if n.hash_outbound {
             o.flowid = crate::udp::flow_hash6(&laddr, &dst.addr, 0, 0, p);
         }
-        let r = ip6::output_if(&mut n, &st, m, &o);
+        let r = ip6::output_if(&mut n, st, m, &o);
         if p == proto::ICMPV6 {
             let (t, c) = (data[0], data[1]);
             if let Ok(outif) = r {

@@ -175,7 +175,7 @@ pub(crate) fn input(vnet: &Arc<Vnet>, m: Packet, ip: &Ip) {
             };
             if c > max {
                 st.icmpstat.inc(icps::BADCODE);
-            } else if !notify(vnet, &st, &m, hlen, icmplen, t, c) {
+            } else if !notify(vnet, st, &m, hlen, icmplen, t, c) {
                 return;
             }
         }
@@ -183,10 +183,10 @@ pub(crate) fn input(vnet: &Arc<Vnet>, m: Packet, ip: &Ip) {
             if !on(&st.conf.bmcastecho) && m.hdr.flags & (flags::MCAST | flags::BCAST) != 0 {
                 st.icmpstat.inc(icps::BMCASTECHO);
             } else {
-                if !bandlim(&st, bandlim::ECHO) {
+                if !bandlim(st, bandlim::ECHO) {
                     return;
                 }
-                reply(vnet, &st, m, ip, ty::ECHOREPLY, None);
+                reply(vnet, st, m, ip, ty::ECHOREPLY, None);
                 return;
             }
         }
@@ -197,11 +197,11 @@ pub(crate) fn input(vnet: &Arc<Vnet>, m: Packet, ip: &Ip) {
             } else if icmplen < TSLEN {
                 st.icmpstat.inc(icps::BADLEN);
             } else {
-                if !bandlim(&st, bandlim::TSTAMP) {
+                if !bandlim(st, bandlim::TSTAMP) {
                     return;
                 }
                 let t = iptime().to_be_bytes();
-                reply(vnet, &st, m, ip, ty::TSTAMPREPLY, Some(t));
+                reply(vnet, st, m, ip, ty::TSTAMPREPLY, Some(t));
                 return;
             }
         }
@@ -209,11 +209,11 @@ pub(crate) fn input(vnet: &Arc<Vnet>, m: Packet, ip: &Ip) {
             // `net.inet.icmp.maskrepl` is 0 by default; a reply would
             // carry the receiving address's mask.
             if on(&st.conf.maskrepl) {
-                maskreply(vnet, &st, m, ip, icmplen);
+                maskreply(vnet, st, m, ip, icmplen);
                 return;
             }
         }
-        ty::REDIRECT => redirect(vnet, &st, &m, ip, hlen, icmplen, c),
+        ty::REDIRECT => redirect(vnet, st, &m, ip, hlen, icmplen, c),
         _ => {}
     }
     crate::raw::input4(vnet, m, ip, true);
@@ -532,5 +532,5 @@ pub(crate) fn error(vnet: &Arc<Vnet>, n: Packet, t: u8, mut c: u8, gw: [u8; 4], 
     let mut back = oip;
     back.hl = 20;
     back.tos = 0;
-    reflect(vnet, &st, m, &back);
+    reflect(vnet, st, m, &back);
 }

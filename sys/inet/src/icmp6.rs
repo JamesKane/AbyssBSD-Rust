@@ -238,7 +238,7 @@ pub(crate) fn ifstat(vnet: &Vnet, ifindex: u16, in6: Option<usize>, icmp6: Optio
 pub(crate) fn error(vnet: &Arc<Vnet>, mut m: Packet, t: u8, c: u8, param: usize) {
     let st = state::of(vnet);
     st.icmp6stat.inc(icp6s::ERROR);
-    errcount(&st, t, c);
+    errcount(st, t, c);
     let Ok(oip6) = m.header::<Ip6>(0) else {
         st.ip6stat.inc(ip6s::EXTHDRTOOLONG);
         return;
@@ -267,7 +267,7 @@ pub(crate) fn error(vnet: &Arc<Vnet>, mut m: Packet, t: u8, c: u8, param: usize)
             return;
         }
     }
-    if ratelimit(&st, t) {
+    if ratelimit(st, t) {
         return;
     }
     if m.len() >= PLD_MAXLEN {
@@ -284,7 +284,7 @@ pub(crate) fn error(vnet: &Arc<Vnet>, mut m: Packet, t: u8, c: u8, param: usize)
     };
     b.copy_from_slice(&h);
     st.icmp6stat.inc(icp6s::OUTHIST + usize::from(t));
-    reflect(vnet, &st, m, HDR_LEN);
+    reflect(vnet, st, m, HDR_LEN);
 }
 
 /// `icmp6_reflect`: ICMPv6 packet `m` (its message at `off`) back to its
@@ -383,7 +383,7 @@ pub(crate) fn input(vnet: &Arc<Vnet>, mut m: Packet, off: usize) {
     };
     let ifp = m.hdr.rcvif;
     // Only groups the interface joined (no source filters for ICMPv6).
-    if is_multicast6(&ip6.dst) && !crate::mld6::member(&st, ifp, &ip6.dst) {
+    if is_multicast6(&ip6.dst) && !crate::mld6::member(st, ifp, &ip6.dst) {
         st.ip6stat.inc(ip6s::NOTMEMBER);
         ifstat(vnet, ifp, Some(in6_ifs::IN_DISCARD), None);
         return;
@@ -443,7 +443,7 @@ pub(crate) fn input(vnet: &Arc<Vnet>, mut m: Packet, off: usize) {
             icount(icmp6_ifs::IN_ECHO);
             if c != 0 {
                 badcode();
-            } else if !ratelimit(&st, ty::ECHO_REPLY)
+            } else if !ratelimit(st, ty::ECHO_REPLY)
                 && let Ok(mut n) = m.copy()
             {
                 // Only the IPv6 and ICMPv6 headers and the data, any
@@ -456,7 +456,7 @@ pub(crate) fn input(vnet: &Arc<Vnet>, mut m: Packet, off: usize) {
                 st.icmp6stat.inc(icp6s::REFLECT);
                 st.icmp6stat
                     .inc(icp6s::OUTHIST + usize::from(ty::ECHO_REPLY));
-                reflect(vnet, &st, n, HDR_LEN);
+                reflect(vnet, st, n, HDR_LEN);
             }
         }
         ty::ECHO_REPLY => {
@@ -473,7 +473,7 @@ pub(crate) fn input(vnet: &Arc<Vnet>, mut m: Packet, off: usize) {
             if ip6.hlim != 1 || m.hdr.flags & flags::RTALERT_MLD == 0 {
                 return;
             }
-            if !crate::mld6::input(vnet, &st, &m, off, icmp6len) {
+            if !crate::mld6::input(vnet, st, &m, off, icmp6len) {
                 return;
             }
         }
@@ -492,7 +492,7 @@ pub(crate) fn input(vnet: &Arc<Vnet>, mut m: Packet, off: usize) {
             } else if icmp6len < 8 {
                 badlen();
             } else {
-                crate::nd6_rtr::rs_input(vnet, &st, &m, off, icmp6len);
+                crate::nd6_rtr::rs_input(vnet, st, &m, off, icmp6len);
             }
         }
         ty::ROUTER_ADVERT => {
@@ -502,7 +502,7 @@ pub(crate) fn input(vnet: &Arc<Vnet>, mut m: Packet, off: usize) {
             } else if icmp6len < 16 {
                 badlen();
             } else {
-                crate::nd6_rtr::ra_input(vnet, &st, &m, off, icmp6len);
+                crate::nd6_rtr::ra_input(vnet, st, &m, off, icmp6len);
             }
         }
         ty::NEIGHBOR_SOLICIT => {
@@ -512,7 +512,7 @@ pub(crate) fn input(vnet: &Arc<Vnet>, mut m: Packet, off: usize) {
             } else if icmp6len < 24 {
                 badlen();
             } else {
-                crate::nd6::ns_input(vnet, &st, &m, off, icmp6len);
+                crate::nd6::ns_input(vnet, st, &m, off, icmp6len);
             }
         }
         ty::NEIGHBOR_ADVERT => {
@@ -522,7 +522,7 @@ pub(crate) fn input(vnet: &Arc<Vnet>, mut m: Packet, off: usize) {
             } else if icmp6len < 24 {
                 badlen();
             } else {
-                crate::nd6::na_input(vnet, &st, &m, off, icmp6len);
+                crate::nd6::na_input(vnet, st, &m, off, icmp6len);
             }
         }
         ty::REDIRECT => {
@@ -532,7 +532,7 @@ pub(crate) fn input(vnet: &Arc<Vnet>, mut m: Packet, off: usize) {
             } else if icmp6len < 40 {
                 badlen();
             } else {
-                crate::nd6::redirect_input(vnet, &st, &m, off, icmp6len);
+                crate::nd6::redirect_input(vnet, st, &m, off, icmp6len);
             }
         }
         ty::ROUTER_RENUMBERING => {
@@ -550,10 +550,10 @@ pub(crate) fn input(vnet: &Arc<Vnet>, mut m: Packet, off: usize) {
             }
         }
     }
-    if deliver && !notify_error(vnet, &st, &m, off, icmp6len) {
+    if deliver && !notify_error(vnet, st, &m, off, icmp6len) {
         return;
     }
-    crate::raw6::icmp6_input(vnet, &st, m, off, t);
+    crate::raw6::icmp6_input(vnet, st, m, off, t);
 }
 
 /// `icmp6_notify_error`: the packet an error quotes, followed through its

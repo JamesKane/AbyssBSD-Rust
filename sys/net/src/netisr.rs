@@ -39,23 +39,38 @@ pub const QLIMIT: usize = 256;
 /// A protocol's input.
 pub type Handler = fn(&Arc<Vnet>, Packet);
 
-static HANDLERS: SpinLock<[Option<Handler>; PROTOS]> = SpinLock::new([None; PROTOS]);
-static KICK: SpinLock<Option<fn()>> = SpinLock::new(None);
+/// The protocols' inputs and the kick hook, each set once at start-up,
+/// read without a lock on every packet.
+static HANDLERS: [sync::Once<Handler>; PROTOS] = [const { sync::Once::new() }; PROTOS];
+static KICK: sync::Once<fn()> = sync::Once::new();
 
-/// Registers `proto`'s input (`netisr_register`).
+/// Registers `proto`'s input (`netisr_register`); a second registration
+/// is ignored.
 pub fn register(proto: Proto, h: Handler) {
-    HANDLERS.lock()[proto as usize] = Some(h);
+    let _ = HANDLERS[proto as usize].set(h);
 }
 
-/// Sets what is called when a queue gets work.
+/// Sets what is called when a queue gets work (once).
 pub fn set_kick(f: fn()) {
-    *KICK.lock() = Some(f);
+    let _ = KICK.set(f);
+}
+
+fn handler(proto: Proto) -> Option<Handler> {
+    HANDLERS[proto as usize].get().copied()
+}
+
+/// A VNET's queued packets, and how many each protocol has
+/// (`nw_len`).
+#[derive(Debug)]
+struct Waiting {
+    q: VecDeque<(Proto, Packet)>,
+    len: [usize; PROTOS],
 }
 
 /// A VNET's queues (`struct netisr_workstream`'s, one per protocol).
 #[derive(Debug)]
 pub struct Queues {
-    q: SpinLock<VecDeque<(Proto, Packet)>>,
+    q: SpinLock<Waiting>,
     /// Queued, handled, and dropped for a full queue or no handler
     /// (`nw_queued`, `nw_handled`, `nw_qdrops`).
     pub queued: AtomicU64,
@@ -73,7 +88,10 @@ impl Queues {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            q: SpinLock::new(VecDeque::new()),
+            q: SpinLock::new(Waiting {
+                q: VecDeque::new(),
+                len: [0; PROTOS],
+            }),
             queued: AtomicU64::new(0),
             handled: AtomicU64::new(0),
             qdrops: AtomicU64::new(0),
@@ -87,31 +105,34 @@ impl Queues {
     /// The packet back when the queue is full (`ENOBUFS`).
     pub fn queue(&self, proto: Proto, m: Packet) -> Result<(), Packet> {
         let was_empty = {
-            let mut q = self.q.lock();
-            if q.iter().filter(|(p, _)| *p == proto).count() >= QLIMIT {
+            let mut w = self.q.lock();
+            if w.len[proto as usize] >= QLIMIT {
                 self.qdrops.fetch_add(1, Ordering::Relaxed);
                 return Err(m);
             }
-            q.push_back((proto, m));
-            q.len() == 1
+            w.q.push_back((proto, m));
+            w.len[proto as usize] += 1;
+            w.q.len() == 1
         };
         self.queued.fetch_add(1, Ordering::Relaxed);
         // The hook runs with no lock held: it may hand packets on at once.
-        let kick = *KICK.lock();
-        if was_empty && let Some(k) = kick {
+        if was_empty && let Some(k) = KICK.get() {
             k();
         }
         Ok(())
     }
 
-    fn pop(&self) -> Option<(Proto, Packet)> {
-        self.q.lock().pop_front()
+    /// Everything waiting, taken at once.
+    fn take(&self) -> VecDeque<(Proto, Packet)> {
+        let mut w = self.q.lock();
+        w.len = [0; PROTOS];
+        core::mem::take(&mut w.q)
     }
 
     /// Packets waiting.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.q.lock().len()
+        self.q.lock().q.len()
     }
 
     #[must_use]
@@ -123,8 +144,7 @@ impl Queues {
 /// Hands `m` to `proto`'s input now (`netisr_dispatch` with the direct
 /// policy, as Ethernet input does).
 pub fn dispatch(vnet: &Arc<Vnet>, proto: Proto, m: Packet) {
-    let h = HANDLERS.lock()[proto as usize];
-    match h {
+    match handler(proto) {
         Some(h) => {
             h(vnet, m);
             vnet.netisr.handled.fetch_add(1, Ordering::Relaxed);
@@ -142,13 +162,10 @@ pub fn dispatch(vnet: &Arc<Vnet>, proto: Proto, m: Packet) {
 /// VNET whose input keeps queueing more (a loopback flood) cannot starve
 /// the others.
 pub fn drain(vnet: &Arc<Vnet>) -> usize {
-    let n = vnet.netisr.len();
-    for _ in 0..n {
-        let Some((proto, m)) = vnet.netisr.pop() else {
-            break;
-        };
-        let h = HANDLERS.lock()[proto as usize];
-        match h {
+    let batch = vnet.netisr.take();
+    let n = batch.len();
+    for (proto, m) in batch {
+        match handler(proto) {
             Some(h) => {
                 h(vnet, m);
                 vnet.netisr.handled.fetch_add(1, Ordering::Relaxed);

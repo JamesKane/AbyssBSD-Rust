@@ -704,5 +704,5 @@ pub fn filter_mode(vnet: &Vnet, ifindex: u16, group: &In6) -> Option<u32> {
         .groups
         .iter()
         .any(|g| g.ifindex == ifindex && g.addr == *group);
-    listed.then(|| if member(&st, ifindex, group) { 2 } else { 0 })
+    listed.then(|| if member(st, ifindex, group) { 2 } else { 0 })
 }

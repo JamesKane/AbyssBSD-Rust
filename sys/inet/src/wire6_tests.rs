@@ -145,12 +145,12 @@ fn link_local_addresses_pass_dad() {
     let st = state::of(&h1);
     assert!(st.icmp6stat.get(icp6s::OUTHIST + 135) >= 2);
     assert!(crate::mld6::member(
-        &st,
+        st,
         index(&h1, &na),
         &crate::in6::solicited_node(&ll1)
     ));
     assert!(crate::mld6::member(
-        &st,
+        st,
         index(&h1, &na),
         &crate::in6::ALLNODES
     ));

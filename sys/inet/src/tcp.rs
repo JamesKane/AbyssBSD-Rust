@@ -1827,7 +1827,7 @@ pub(crate) fn input4(vnet: &Arc<Vnet>, mut m: Packet, ip: &Ip) {
         iptos: ip.tos,
         multi,
     };
-    input(vnet, &st, m, &a);
+    input(vnet, st, m, &a);
 }
 
 /// `tcp6_input`: the segment at `off` in `m`, IPv6 header `h`.
@@ -1876,7 +1876,7 @@ pub(crate) fn input6(vnet: &Arc<Vnet>, mut m: Packet, off: usize, h: &crate::ip6
         iptos,
         multi,
     };
-    input(vnet, &st, m, &a);
+    input(vnet, st, m, &a);
 }
 
 /// `tcp_input_with_port` after IP: the segment (TCP header first) to its

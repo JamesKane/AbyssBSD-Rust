@@ -1210,7 +1210,7 @@ fn selectsrc6(me: &Pcb, dst: &In6, zone: u32) -> Result<(In6, u32), Errno> {
     };
     let n = me.vnet.net.lock();
     // A destination must be routable, as `in6_pcbladdr` finds.
-    let (src, ifp) = crate::in6::selectsrc(&n, &st, &req)?;
+    let (src, ifp) = crate::in6::selectsrc(&n, st, &req)?;
     let z = if zone == 0 && crate::in6::is_zoned(dst) {
         u32::from(ifp)
     } else if crate::in6::is_zoned(&src) || crate::in6::is_zoned(dst) {
