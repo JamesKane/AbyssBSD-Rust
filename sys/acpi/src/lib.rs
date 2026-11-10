@@ -19,6 +19,7 @@ extern crate alloc;
 
 pub mod bus;
 pub mod button;
+pub mod cix;
 pub mod cpc;
 pub mod deps;
 #[cfg(test)]

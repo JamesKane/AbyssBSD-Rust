@@ -411,4 +411,120 @@ mod hand {
             ]
         );
     }
+
+    /// The CIX tables' rules the Sky1 does not exercise: references as
+    /// path strings, an entry without a consumer or reset name, malformed
+    /// entries reported with their position, and nothing read without
+    /// `CIXA1019`.
+    #[test]
+    fn cix_tables() {
+        use alloc::string::String;
+        use devtree::graph::EdgeKind;
+
+        use crate::cix::{Malformed, Table};
+        use crate::deps::{Via, build};
+
+        let hid = |h: &str| name_op("_HID", &aml::asm::string(h));
+        let s = |t: &str| aml::asm::string(t);
+        let build_with = |tables: bool| {
+            let body = aml::asm::scope(
+                "\\_SB",
+                &cat(&[
+                    &device("REST", &hid(if tables { "CIXA1019" } else { "XNOT0001" })),
+                    &device("CCLK", &hid("CIXHA010")),
+                    &device("RST1", &hid("CIXHA021")),
+                    &device(
+                        "UAR0",
+                        &cat(&[
+                            &hid("XUAR0001"),
+                            // No consumer: the carrier. An empty name.
+                            &name_op("CLKT", &package(&[package(&[int(0x107), s("")])])),
+                            // Path strings; no name.
+                            &name_op(
+                                "RSTL",
+                                &package(&[package(&[s("^RST1"), int(4), s("\\_SB.UAR0")])]),
+                            ),
+                            &name_op(
+                                "RSNL",
+                                &package(&[
+                                    package(&[name("UAR0"), int(0x400), int(0), s("irq")]),
+                                    // An unknown resource type.
+                                    package(&[name("UAR0"), int(0x100), int(0), s("io")]),
+                                ]),
+                            ),
+                            // A link to nothing, and a short entry.
+                            &name_op(
+                                "DLKL",
+                                &package(&[
+                                    package(&[s("\\_SB.NONE"), name("UAR0"), int(0)]),
+                                    package(&[name("RST1")]),
+                                ]),
+                            ),
+                            &name_op("RSVL", &int(5)),
+                        ]),
+                    ),
+                ]),
+            );
+            let mut i = load(&dsdt(&body));
+            let devs: Vec<aml::NodeId> = ["REST", "CCLK", "RST1", "UAR0"]
+                .iter()
+                .map(|d| node(&i, &alloc::format!("\\_SB.{d}")))
+                .collect();
+            let deps = build(&mut i, &mut Quiet, &devs, &[]);
+            (deps, devs)
+        };
+
+        let (deps, _) = build_with(false);
+        assert!(deps.platform.is_empty() && deps.edges.is_empty() && deps.malformed.is_empty());
+
+        let (deps, devs) = build_with(true);
+        let [_, cclk, rst1, uar0] = devs[..] else {
+            unreachable!()
+        };
+        let p = &deps.platform;
+        let c = p.clock(&uar0, None).unwrap();
+        assert_eq!((c.provider, c.id, c.name.as_deref()), (cclk, 0x107, None));
+        let r = p.reset(&uar0, None).unwrap();
+        assert_eq!((r.controller, r.index, r.name.as_deref()), (rst1, 4, None));
+        assert_eq!(
+            p.resource(&uar0, devtree::platform::ResourceKind::Interrupt, "irq"),
+            Some(0)
+        );
+        assert!(p.links.is_empty() && p.reserved.is_empty());
+        let edges: Vec<_> = deps
+            .edges
+            .iter()
+            .map(|e| (e.supplier, e.consumer, e.kind, e.via.clone()))
+            .collect();
+        assert_eq!(
+            edges,
+            [
+                (cclk, uar0, EdgeKind::Required, Via::Cix(Table::Clkt)),
+                (rst1, uar0, EdgeKind::Required, Via::Cix(Table::Rstl)),
+            ]
+        );
+        let unresolved: Vec<_> = deps
+            .unresolved
+            .iter()
+            .map(|u| (u.consumer, u.via.clone(), u.name.clone()))
+            .collect();
+        assert_eq!(
+            unresolved,
+            [(uar0, Via::Cix(Table::Dlkl), String::from("\\_SB.NONE"))]
+        );
+        let m = |table, entry: Option<usize>, why: &str| Malformed {
+            carrier: uar0,
+            table,
+            entry,
+            why: String::from(why),
+        };
+        assert_eq!(
+            deps.malformed,
+            [
+                m(Table::Rsnl, Some(1), "resource type 0x100"),
+                m(Table::Dlkl, Some(1), "1 elements"),
+                m(Table::Rsvl, None, "not a package"),
+            ]
+        );
+    }
 }

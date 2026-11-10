@@ -12,7 +12,9 @@ use aml::host::{Host, HostError, RegionAccess, RegionSpace};
 use aml::{Config, Interpreter, Limits, NodeId};
 use devtree::graph::{Edge, EdgeKind, Graph, Origin};
 
+use crate::cix::Table as Cix;
 use crate::deps::{FirmwareDeps, FirmwareEdge, Provider, Via, build};
+use devtree::platform::ResourceKind;
 
 /// Registers as sparse memory (unwritten bytes read as zero), with
 /// index/data port pairs, seeded with the firmware state each machine's
@@ -369,7 +371,7 @@ fn virtual_machines_name_no_suppliers() {
     for name in ["qemu-q35", "qemu-virt", "bhyve"] {
         let (_, _, deps) = machine(name);
         assert!(
-            deps.edges.is_empty() && deps.unresolved.is_empty(),
+            deps.edges.is_empty() && deps.unresolved.is_empty() && deps.platform.is_empty(),
             "{name}"
         );
     }
@@ -413,6 +415,9 @@ fn opi6p_graph() {
             // Static data: a fixed clock rate, a TrustZone description.
             ("Required \"tzgt\" bus", 1),
             ("Required \"uartclk\" bus", 4),
+            ("Required Cix(Clkt) device", 69),
+            ("Required Cix(Dlkl) device", 37),
+            ("Required Cix(Rstl) device", 65),
             ("Required Dma device", 7),
             ("Required Gpio device", 22),
             ("Required Interrupt device", 10),
@@ -476,6 +481,84 @@ fn opi6p_graph() {
         let e = edge(&i, &deps, consumer, supplier);
         assert_eq!((e.kind, &e.via), (EdgeKind::Required, &Via::Dma));
     }
+    cix_tables(&i, &deps);
+}
+
+/// The Sky1's CIX lookup tables (`\_SB.REST` is `CIXA1019`): every entry
+/// reads, and every name in them resolves.
+fn cix_tables(i: &Interpreter, deps: &FirmwareDeps) {
+    let p = &deps.platform;
+    assert!(deps.malformed.is_empty(), "{:?}", deps.malformed);
+    let counts = (
+        p.clocks.len(),
+        p.resets.len(),
+        p.resource_names.len(),
+        p.links.len(),
+        p.reserved.len(),
+    );
+    assert_eq!(counts, (183, 109, 130, 37, 3));
+    let node = |path: &str| i.lookup(&aml::AmlPath::parse(path).unwrap()).unwrap();
+    let cclk = node("\\_SB.CCLK");
+    // A clock line names its consumer, which need not carry the table:
+    // DMA0's clock is in DMA1's CLKT.
+    let dma0 = node("\\_SB.DMA0");
+    let c = p.clock(&dma0, None).unwrap();
+    assert_eq!((c.provider, c.id, c.name.as_deref()), (cclk, 0xef, None));
+    let com0 = node("\\_SB.COM0");
+    assert_eq!(p.clock(&com0, Some("uartclk")).map(|c| c.id), Some(0x107));
+    assert!(p.clock(&com0, None).is_none(), "two named clocks");
+    // Resets: the FCH controller's I2C line 18, the audio subsystem's own
+    // controller for HDA.
+    let r = p.reset(&node("\\_SB.I2C0"), Some("i2c_reset")).unwrap();
+    assert_eq!((r.controller, r.index), (node("\\_SB.RST1"), 18));
+    let r = p.reset(&node("\\_SB.HDA"), None).unwrap();
+    assert_eq!((r.controller, r.index), (node("\\_SB.ADSS.ARST"), 14));
+    // Resource names: 0x200 counts memory ranges, 0x400 interrupts.
+    let prc0 = node("\\_SB.PRC0");
+    assert_eq!(p.resource(&prc0, ResourceKind::Memory, "rcsu"), Some(1));
+    assert_eq!(
+        p.resource(&prc0, ResourceKind::Interrupt, "phy_int"),
+        Some(4)
+    );
+    // Firmware's carveouts for the audio DMA, HDA, and DSP.
+    let reserved: Vec<_> = p
+        .reserved
+        .iter()
+        .map(|r| (i.path(r.device).to_text(), r.base, r.size, r.no_map))
+        .collect();
+    assert_eq!(
+        reserved,
+        [
+            (String::from("\\_SB_.DMA1"), 0xd000_0000, 0x70_0000, true),
+            (String::from("\\_SB_.HDA_"), 0xd070_0000, 0x70_0000, true),
+            (String::from("\\_SB_.DSP_"), 0xcde0_8000, 0x10_0000, true),
+        ]
+    );
+    // The edges they make.
+    for (consumer, supplier, table) in [
+        ("\\_SB_.COM0", "\\_SB_.CCLK", Cix::Clkt),
+        ("\\_SB_.DMA0", "\\_SB_.CCLK", Cix::Clkt),
+        ("\\_SB_.I2C0", "\\_SB_.RST1", Cix::Rstl),
+        ("\\_SB_.HDA_", "\\_SB_.ADSS.ARST", Cix::Rstl),
+        ("\\_SB_.HDA_", "\\_SB_.ADSS.ACLK", Cix::Dlkl),
+        ("\\_SB_.PRC0", "\\_SB_.PCP0", Cix::Dlkl),
+        ("\\_SB_.EDP0", "\\_SB_.DPBL", Cix::Dlkl),
+    ] {
+        let e = deps.edges.iter().find(|e| {
+            e.via == Via::Cix(table)
+                && i.path(e.consumer).to_text() == consumer
+                && i.path(e.supplier).to_text() == supplier
+        });
+        assert_eq!(
+            e.map(|e| e.kind),
+            Some(EdgeKind::Required),
+            "{supplier} -> {consumer}"
+        );
+    }
+    // MAC1 is absent (`_STA` 0), so its tables are not read.
+    let mac1 = node("\\_SB.MAC1");
+    assert!(p.clocks.iter().all(|c| c.consumer != mac1));
+    assert!(deps.edges.iter().all(|e| e.consumer != mac1));
 }
 
 /// The Q8B depends by `_DEP`; with its camera and sensor hubs off, six of
@@ -555,4 +638,5 @@ fn x870e_graph() {
     );
     assert!(deps.unresolved.is_empty());
     assert!(absent(&i, &deps).is_empty());
+    assert!(deps.platform.is_empty());
 }

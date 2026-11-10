@@ -19,7 +19,10 @@
 //!   controller, SMBus and IPMI regions through the device that declares
 //!   them, PCC regions through `acpi0`): the device defining a field in
 //!   one, and each device whose methods name the field, use that driver
-//!   ([`region_edges`]).
+//!   ([`region_edges`]);
+//! - on a CIX platform, the clock and reset lines and device links of its
+//!   lookup tables ([`crate::cix`]), whose entries are kept as the
+//!   platform description ([`FirmwareDeps::platform`]).
 //!
 //! Suppliers are namespace objects, not yet devices: a power resource, a
 //! `_STA = 0` stub, or a data node becomes a provider's sub-handle later.
@@ -38,8 +41,10 @@ use alloc::collections::BTreeSet;
 use aml::resource::Resource;
 use aml::{DepRef, Interpreter, NodeId, ObjectType, RegionSpace, Value};
 use devtree::graph::{EdgeKind, Origin};
+use devtree::platform::Description;
 
 use crate::DmaController;
+use crate::cix::{Malformed, Table};
 
 /// `_DSD` device properties (daffd814-6eba-4d8c-8a91-bc9bbf4aa301).
 const PROPERTIES_UUID: [u8; 16] = [
@@ -81,6 +86,8 @@ pub enum Via {
     /// A field in an operation region of this space, which the supplier's
     /// driver serves.
     Region(RegionSpace),
+    /// A CIX lookup table (`CLKT`, `RSTL`, `DLKL`; [`crate::cix`]).
+    Cix(Table),
 }
 
 impl Via {
@@ -98,6 +105,7 @@ impl Via {
             Self::PowerResource { d3hot: true } => String::from("_PR3"),
             Self::Property(p) => alloc::format!("_DSD {p}"),
             Self::Region(space) => alloc::format!("{space:?} region"),
+            Self::Cix(t) => String::from(t.name()),
         }
     }
 
@@ -113,6 +121,7 @@ impl Via {
             Self::Property(_) => Origin::Dsd,
             Self::Region(RegionSpace::Pcc) => Origin::Pcc,
             Self::Region(_) => Origin::Region,
+            Self::Cix(_) => Origin::Platform,
         }
     }
 }
@@ -187,6 +196,10 @@ pub struct FirmwareDeps {
     pub unresolved: Vec<Unresolved>,
     /// References under property names the table does not know.
     pub unclassified: Vec<Unclassified>,
+    /// What the platform's own tables describe (DRIVER-MODEL.md §5.5).
+    pub platform: Description<NodeId>,
+    /// Entries of those tables that could not be read.
+    pub malformed: Vec<Malformed>,
 }
 
 impl FirmwareDeps {
@@ -237,6 +250,9 @@ pub fn build(
         }
     }
     region_edges(interp, devices, &mut out);
+    if let Some(x) = crate::cix::extract(interp, host, devices) {
+        platform_edges(x, devices, &mut out);
+    }
     let mut enumerated: BTreeMap<NodeId, bool> = BTreeMap::new();
     for i in 0..out.edges.len() {
         out.edges[i].provider = provider(interp, host, out.edges[i].supplier, &mut enumerated);
@@ -443,6 +459,37 @@ fn region_edges(interp: &Interpreter, devices: &[NodeId], out: &mut FirmwareDeps
             Err(name) => out.unresolved(consumer, via, name.clone()),
         }
     }
+}
+
+/// The edges the CIX tables make, each from the device serving the line
+/// to its consumer, for the consumers in `devices` (a table may describe
+/// a device firmware left out, as the Sky1's `MAC1`):
+/// - a clock line (`CLKT`) from the clock provider, `CIXHA010`, which
+///   serves the clocks through its AML methods (Sky1-Linux makes every
+///   `CLKT` consumer wait for it in the same way);
+/// - a reset line (`RSTL`) from its reset controller;
+/// - a device link (`DLKL`) from its supplier.
+///
+/// All are required: a driver needs its clocks and resets in attach, and
+/// a link is an attach order by definition.
+fn platform_edges(x: crate::cix::Extracted, devices: &[NodeId], out: &mut FirmwareDeps) {
+    let p = &x.description;
+    for &d in devices {
+        for c in p.clocks.iter().filter(|c| c.consumer == d) {
+            out.edge(c.provider, d, EdgeKind::Required, Via::Cix(Table::Clkt));
+        }
+        for r in p.resets.iter().filter(|r| r.consumer == d) {
+            out.edge(r.controller, d, EdgeKind::Required, Via::Cix(Table::Rstl));
+        }
+        for l in p.links.iter().filter(|l| l.consumer == d) {
+            out.edge(l.supplier, d, EdgeKind::Required, Via::Cix(Table::Dlkl));
+        }
+    }
+    for (carrier, table, name) in x.unresolved {
+        out.unresolved(carrier, Via::Cix(table), name);
+    }
+    out.platform = x.description;
+    out.malformed = x.malformed;
 }
 
 /// The nearest of `n` and its ancestors that `pred` accepts.

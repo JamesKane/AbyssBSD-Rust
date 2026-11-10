@@ -7,6 +7,8 @@
 //! - [`ids`]: device identities and match-table entries per bus.
 //! - [`graph`]: the supplier → consumer dependency graph that orders
 //!   attach, shutdown, suspend, and resume.
+//! - [`platform`]: the platform description's typed entries (clock and
+//!   reset lines, resource names, device links, reserved memory).
 //! - [`units`]: unit numbers per devclass.
 //! - [`strings`]: pnpinfo and location strings, byte for byte FreeBSD's.
 //! - [`udevice`]: `hw.bus.devices` records for `devinfo(8)`.
@@ -22,6 +24,7 @@ pub mod dsd;
 pub mod graph;
 pub mod ids;
 pub mod matching;
+pub mod platform;
 pub mod strings;
 pub mod udevice;
 pub mod units;

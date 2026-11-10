@@ -2468,6 +2468,17 @@ machines against FreeBSD on bare metal; the exit criteria above.
   mailbox in `SystemMemory` at `0x065D0000`, not PCC (DRIVER-MODEL §17 q7 answered,
   HARDWARE §4 corrected). Next: the platform description (§5.5), provider traits, the ACPI
   companion, and shared ranges.
+- Progress 2026-11-09 (P8.1, platform description): `lib/devtree::platform` holds the
+  description's typed entries (clock and reset lines, resource names, device links, reserved
+  memory), and `sys/acpi::cix` extracts CIX's lookup tables into it when a `CIXA1019` is
+  present, reading the tables of every present device and reporting malformed entries. The
+  Sky1: 183 clock lines, 109 reset lines, 130 resource names, 37 device links, three no-map
+  carveouts (audio DMA, HDA, DSP), every entry well formed and every name resolved. Clock,
+  reset, and link entries make required edges (69, 65, and 37 consumer/supplier pairs), and
+  still no required or power edge closes a cycle. `RSNL`'s type values are 0x200 (memory) and
+  0x400 (interrupt), which the clean-room spec left open. No `const` override entries yet: the
+  first come with the drivers that need them (the GPU's `_CCA`). Next: provider traits, the
+  ACPI companion, and shared ranges.
 
 ## Phase 9: Self-hosting and hardening = **v1.0 / Day 1 complete** (L)
 

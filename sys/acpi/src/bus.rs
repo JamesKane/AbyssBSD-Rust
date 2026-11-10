@@ -147,6 +147,18 @@ pub(crate) fn walk(
             u.name
         ));
     }
+    for m in &deps.malformed {
+        let at = m
+            .entry
+            .map(|k| alloc::format!(" entry {k}"))
+            .unwrap_or_default();
+        notes.push(alloc::format!(
+            "acpi0: {}: {}{at} is malformed ({}), ignored",
+            interp.path(m.carrier),
+            m.table.name(),
+            m.why
+        ));
+    }
     Walk { found, notes }
 }
 

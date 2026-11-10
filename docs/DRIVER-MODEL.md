@@ -336,7 +336,11 @@ data and widened. It may:
 | **Describe reserved memory** (§8.4) | Carveouts, firmware shared memory |
 
 An extractor for vendor tables that live in AML (CIX's `CLKT`, `RSTL`, `RSNL`, `DLKL`, `RSVL`)
-also belongs here: it evaluates them at graph build and produces the same typed entries.
+also belongs here: it evaluates them at graph build and produces the same typed entries. The typed
+entries are `lib/devtree::platform` (clock and reset lines, resource names, device links, reserved
+memory); CIX's extractor is `sys/acpi::cix`, selected by a present `CIXA1019`. Its clock, reset,
+and link entries make required edges (origin `Platform`) from the clock provider (`CIXHA010`),
+the reset controller, and the link's supplier.
 
 Rules:
 
