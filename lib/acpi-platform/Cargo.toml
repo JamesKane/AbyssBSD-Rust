@@ -1,0 +1,13 @@
+[package]
+name = "acpi-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+aml = { path = "../aml" }
+devtree = { path = "../devtree" }
+
+[lints]
+workspace = true

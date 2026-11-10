@@ -130,6 +130,8 @@ pub(crate) fn walk(
     interp: &mut aml::Interpreter,
     host: &mut dyn aml::Host,
     dma: &[crate::DmaController],
+    platforms: &[&dyn acpi_platform::PlatformSource],
+    id: &acpi_platform::FirmwareIdentity,
 ) -> Walk {
     let mut found = Vec::new();
     let mut companions = Vec::new();
@@ -155,10 +157,13 @@ pub(crate) fn walk(
             lines: Vec::new(),
         });
     }
+    let mut notes = Vec::new();
     let mut nodes: Vec<aml::NodeId> = found.iter().map(|f| f.device.node).collect();
     nodes.extend_from_slice(&companions);
-    let deps = crate::deps::build(interp, host, &nodes, dma);
-    let mut notes = Vec::new();
+    let deps = crate::deps::build(interp, host, &nodes, dma, platforms, id);
+    for p in &deps.platforms {
+        notes.push(alloc::format!("acpi0: platform {p}"));
+    }
     let mut companion_deps: Vec<(String, ChildDep)> = Vec::new();
     for e in &deps.edges {
         let what = e.via.describe();
@@ -222,9 +227,10 @@ pub(crate) fn walk(
             .map(|k| alloc::format!(" entry {k}"))
             .unwrap_or_default();
         notes.push(alloc::format!(
-            "acpi0: {}: {}{at} is malformed ({}), ignored",
+            "acpi0: {}: {} {}{at} is malformed ({}), ignored",
             interp.path(m.carrier),
-            m.table.name(),
+            m.source,
+            m.table,
             m.why
         ));
     }
@@ -384,11 +390,16 @@ impl Driver for AcpiBus {
             );
         }
         let dma = svc.ops().dma_controllers();
+        let platforms: Vec<&'static dyn acpi_platform::PlatformSource> =
+            svc.ops().platforms().to_vec();
+        let id = svc.ops().firmware_identity();
         let Walk {
             found,
             notes,
             companion_deps,
-        } = svc.run(cx.sleepable(), move |i, h| walk(i, h, &dma));
+        } = svc.run(cx.sleepable(), move |i, h| {
+            walk(i, h, &dma, &platforms, &id)
+        });
         for note in &notes {
             svc.ops().log(format_args!("{note}"));
         }

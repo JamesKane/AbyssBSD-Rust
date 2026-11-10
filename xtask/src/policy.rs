@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! Repository rules that the compiler cannot check (docs/ENGINEERING.md):
-//! no dependencies from outside the workspace (ADR-0002), and an SPDX
+//! no dependencies from outside the workspace (ADR-0002), an SPDX
 //! header on every source file (ADR-0007): BSD-2-Clause, or MIT with the
-//! original copyright notice for a file derived from MIT-licensed source.
+//! original copyright notice for a file derived from MIT-licensed source,
+//! and no vendor in the generic ACPI crates (ADR-0020).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -51,6 +52,7 @@ pub(crate) fn check() -> Result<()> {
         sources.push((rel(&root, &src), text));
     }
     violations.extend(crate::abicheck::unchecked(&sources));
+    violations.extend(vendor_violations(&sources));
     if violations.is_empty() {
         println!("policy: ok");
         Ok(())
@@ -60,6 +62,54 @@ pub(crate) fn check() -> Result<()> {
         }
         Err(format!("{} policy violation(s)", violations.len()).into())
     }
+}
+
+/// The crates that must name no vendor (ADR-0020): platform knowledge
+/// lives in `platform/<soc>`.
+const VENDOR_FREE: &[&str] = &[
+    "sys/acpi/src/",
+    "lib/devtree/src/",
+    "lib/acpi-platform/src/",
+];
+
+/// Vendor names and IDs those crates' code may not contain.
+const VENDOR_NAMES: &[&str] = &["CIX", "cix", "Sky1", "sky1", "QCOM", "qcom", "Qualcomm"];
+
+/// Vendor names in the identifiers and string literals of the vendor-free
+/// crates' non-test code. Comments may name a board as an example, and
+/// tests name their corpus machines: test files (`tests.rs`,
+/// `*_corpus.rs`) and everything after a file's `#[cfg(test)]` module
+/// are skipped.
+fn vendor_violations(sources: &[(String, String)]) -> Vec<String> {
+    let mut out = Vec::new();
+    for (path, text) in sources {
+        if !VENDOR_FREE.iter().any(|d| path.starts_with(d))
+            || path.ends_with("/tests.rs")
+            || path.ends_with("_corpus.rs")
+        {
+            continue;
+        }
+        for (n, line) in text.lines().enumerate() {
+            if line.trim_start() == "#[cfg(test)]" && is_test_module(text, n) {
+                break;
+            }
+            let code = line.split("//").next().unwrap_or("");
+            if let Some(v) = VENDOR_NAMES.iter().find(|v| code.contains(*v)) {
+                out.push(format!(
+                    "{path}:{}: `{v}` in a vendor-free crate (ADR-0020); it belongs in platform/<soc>",
+                    n + 1
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// Whether the `#[cfg(test)]` at line `n` opens an inline test module.
+fn is_test_module(text: &str, n: usize) -> bool {
+    text.lines()
+        .nth(n + 1)
+        .is_some_and(|l| l.trim_start().starts_with("mod ") && l.trim_end().ends_with('{'))
 }
 
 /// Dependencies that are not `path` dependencies inside the workspace.
@@ -175,6 +225,35 @@ pub(crate) fn cmd_unsafe_report(args: Args) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vendor_names() {
+        let src = |path: &str, text: &str| (path.to_string(), text.to_string());
+        let sources = [
+            // Comments may name a board.
+            src("sys/acpi/src/a.rs", "// the Sky1's PMMX\nfn f() {}\n"),
+            // Code may not.
+            src("sys/acpi/src/b.rs", "fn f() { let _ = \"CIXA1019\"; }\n"),
+            // Nor a vendor-free lib.
+            src("lib/devtree/src/c.rs", "const N: &str = \"cix,hw\";\n"),
+            // Tests and inline test modules may.
+            src("sys/acpi/src/tests.rs", "const M: &str = \"opi6p cix\";\n"),
+            src("sys/acpi/src/x_corpus.rs", "const M: &str = \"CIX\";\n"),
+            src(
+                "lib/devtree/src/d.rs",
+                "fn f() {}\n#[cfg(test)]\nmod tests {\n    const C: &str = \"cix\";\n}\n",
+            ),
+            // Platform crates are where vendors live.
+            src(
+                "platform/cix-sky1/src/lib.rs",
+                "pub const NAME: &str = \"cix-sky1\";\n",
+            ),
+        ];
+        let v = vendor_violations(&sources);
+        assert_eq!(v.len(), 2, "{v:?}");
+        assert!(v[0].starts_with("sys/acpi/src/b.rs:1:"));
+        assert!(v[1].starts_with("lib/devtree/src/c.rs:1:"));
+    }
 
     #[test]
     fn spdx_headers() {

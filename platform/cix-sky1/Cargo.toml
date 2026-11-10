@@ -1,0 +1,19 @@
+[package]
+name = "cix-sky1"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+acpi-platform = { path = "../../lib/acpi-platform" }
+aml = { path = "../../lib/aml" }
+devtree = { path = "../../lib/devtree" }
+
+[dev-dependencies]
+acpi = { path = "../../sys/acpi" }
+acpi-corpus = { path = "../../lib/acpi-corpus" }
+aml = { path = "../../lib/aml", features = ["asm"] }
+
+[lints]
+workspace = true

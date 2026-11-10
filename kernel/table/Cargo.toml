@@ -6,6 +6,8 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+acpi-platform = { path = "../../lib/acpi-platform" }
+cix-sky1 = { path = "../../platform/cix-sky1" }
 ahci = { path = "../../drivers/ahci" }
 amdsbwd = { path = "../../drivers/amdsbwd" }
 atrtc = { path = "../../drivers/atrtc" }
@@ -31,6 +33,7 @@ virtio-random = { path = "../../drivers/virtio-random" }
 xhci-driver = { path = "../../drivers/xhci" }
 
 [dev-dependencies]
+acpi-corpus = { path = "../../lib/acpi-corpus" }
 devtree = { path = "../../lib/devtree" }
 
 [lints]

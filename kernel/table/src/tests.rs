@@ -210,3 +210,52 @@ fn a_duplicate_is_caught() {
     assert_eq!(ties.len(), 3, "{ties:?}");
     assert!(ties.iter().all(|t| t.starts_with("vtrnd and vtrnd2")));
 }
+
+/// Every corpus machine with every built-in platform, as the kernel
+/// builds its graph (ADR-0020): at most one platform claims a machine,
+/// no required or power edge closes a cycle, every `_DSD` reference is
+/// classified, and every platform entry reads.
+#[test]
+fn every_machine_with_every_platform() {
+    use acpi_platform::FirmwareIdentity;
+    use devtree::graph::EdgeKind;
+
+    for (name, _) in acpi_corpus::machines() {
+        let (mut i, mut h) = acpi_corpus::load(name);
+        let devices = acpi::deps::devices(&mut i, &mut h);
+        let dma: Vec<acpi::DmaController> = acpi_corpus::dma_controllers(name)
+            .into_iter()
+            .map(|(mmio_base, requests)| acpi::DmaController {
+                mmio_base,
+                requests,
+            })
+            .collect();
+        let id = FirmwareIdentity::default();
+        let deps = acpi::deps::build(&mut i, &mut h, &devices, &dma, crate::PLATFORMS, &id);
+        assert!(deps.platforms.len() <= 1, "{name}: {:?}", deps.platforms);
+        let unclassified: Vec<_> = deps
+            .unclassified
+            .iter()
+            .map(|u| u.property.clone())
+            .collect();
+        assert!(unclassified.is_empty(), "{name}: {unclassified:?}");
+        assert!(deps.malformed.is_empty(), "{name}: {:?}", deps.malformed);
+        let mut g = deps.graph(&i);
+        let dropped = g.break_cycles().unwrap_or_else(|c| panic!("{name}: {c:?}"));
+        for e in dropped {
+            assert!(
+                matches!(e.kind, EdgeKind::Optional | EdgeKind::Order),
+                "{name}: {} -> {} {:?}",
+                i.path(e.supplier),
+                i.path(e.consumer),
+                e.kind
+            );
+        }
+        g.topo_order().unwrap();
+        println!(
+            "{name}: platforms {:?}, {} edges",
+            deps.platforms,
+            deps.edges.len()
+        );
+    }
+}

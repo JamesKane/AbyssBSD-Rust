@@ -77,7 +77,14 @@ fn osc_absent_is_none() {
 #[test]
 fn q8b_dependencies() {
     let mut i = load(Q8B);
-    let found = crate::bus::walk(&mut i, &mut Quiet, &[]).found;
+    let found = crate::bus::walk(
+        &mut i,
+        &mut Quiet,
+        &[],
+        &[],
+        &acpi_platform::FirmwareIdentity::default(),
+    )
+    .found;
     let paths: std::vec::Vec<&str> = found.iter().map(|f| f.device.path.as_str()).collect();
     let mut forward = 0;
     let mut edges = 0;
@@ -361,7 +368,14 @@ mod hand {
             .iter()
             .map(|d| node(&i, &alloc::format!("\\_SB.{d}")))
             .collect();
-        let deps = build(&mut i, &mut Quiet, &devs, &[]);
+        let deps = build(
+            &mut i,
+            &mut Quiet,
+            &devs,
+            &[],
+            &[],
+            &acpi_platform::FirmwareIdentity::default(),
+        );
         let got: Vec<(aml::NodeId, aml::NodeId, EdgeKind, Via, Provider)> = deps
             .edges
             .iter()
@@ -412,118 +426,133 @@ mod hand {
         );
     }
 
-    /// The CIX tables' rules the Sky1 does not exercise: references as
-    /// path strings, an entry without a consumer or reset name, malformed
-    /// entries reported with their position, and nothing read without
-    /// `CIXA1019`.
-    #[test]
-    fn cix_tables() {
-        use alloc::string::String;
-        use devtree::graph::EdgeKind;
+    /// A platform for the tests below: it applies when `\_SB.TAGD` is
+    /// present, gives `UAR0` a clock and a reset line from `PROV`, and
+    /// knows the vendor property `x,ctl`.
+    struct Fake;
 
-        use crate::cix::{Malformed, Table};
-        use crate::deps::{Via, build};
+    impl acpi_platform::PlatformSource for Fake {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+
+        fn applies(
+            &self,
+            _: &acpi_platform::FirmwareIdentity,
+            interp: &mut aml::Interpreter,
+            _: &mut dyn aml::Host,
+            devices: &[aml::NodeId],
+        ) -> bool {
+            devices.contains(&node(interp, "\\_SB.TAGD"))
+        }
+
+        fn extract(
+            &self,
+            interp: &mut aml::Interpreter,
+            _: &mut dyn aml::Host,
+            _: &[aml::NodeId],
+        ) -> acpi_platform::Extracted {
+            use devtree::platform::{ClockLine, ResetLine};
+            let (uar0, prov) = (node(interp, "\\_SB.UAR0"), node(interp, "\\_SB.PROV"));
+            let mut x = acpi_platform::Extracted::default();
+            x.description.clocks.push(ClockLine {
+                consumer: uar0,
+                name: Some("core".into()),
+                provider: prov,
+                id: 7,
+            });
+            x.description.resets.push(ResetLine {
+                consumer: uar0,
+                name: None,
+                controller: prov,
+                index: 3,
+            });
+            x
+        }
+
+        fn reference_kinds(&self) -> &'static [(&'static str, devtree::graph::EdgeKind)] {
+            &[("x,ctl", devtree::graph::EdgeKind::Required)]
+        }
+    }
+
+    static FAKE: Fake = Fake;
+
+    /// What `acpi0` does with a platform's output, whatever the platform:
+    /// its lines become required edges and the child's lines (by the
+    /// serving device's path), its vendor `_DSD` names classify
+    /// references, and nothing of it happens when it does not apply.
+    #[test]
+    fn a_platform_feeds_the_walk() {
+        use alloc::string::String;
+        use bus::LineKind;
+        use devtree::graph::{EdgeKind, Origin};
 
         let hid = |h: &str| name_op("_HID", &aml::asm::string(h));
         let s = |t: &str| aml::asm::string(t);
-        let build_with = |tables: bool| {
+        let walk_with = |tagged: bool| {
+            let dsd = name_op(
+                "_DSD",
+                &package(&[
+                    aml::asm::buffer(&[
+                        0x14, 0xd8, 0xff, 0xda, 0xba, 0x6e, 0x8c, 0x4d, 0x8a, 0x91, 0xbc, 0x9b,
+                        0xbf, 0x4a, 0xa3, 0x01,
+                    ]),
+                    package(&[package(&[s("x,ctl"), name("\\_SB.CTL0")])]),
+                ]),
+            );
             let body = aml::asm::scope(
                 "\\_SB",
                 &cat(&[
-                    &device("REST", &hid(if tables { "CIXA1019" } else { "XNOT0001" })),
-                    &device("CCLK", &hid("CIXHA010")),
-                    &device("RST1", &hid("CIXHA021")),
-                    &device(
-                        "UAR0",
-                        &cat(&[
-                            &hid("XUAR0001"),
-                            // No consumer: the carrier. An empty name.
-                            &name_op("CLKT", &package(&[package(&[int(0x107), s("")])])),
-                            // Path strings; no name.
-                            &name_op(
-                                "RSTL",
-                                &package(&[package(&[s("^RST1"), int(4), s("\\_SB.UAR0")])]),
-                            ),
-                            &name_op(
-                                "RSNL",
-                                &package(&[
-                                    package(&[name("UAR0"), int(0x400), int(0), s("irq")]),
-                                    // An unknown resource type.
-                                    package(&[name("UAR0"), int(0x100), int(0), s("io")]),
-                                ]),
-                            ),
-                            // A link to nothing, and a short entry.
-                            &name_op(
-                                "DLKL",
-                                &package(&[
-                                    package(&[s("\\_SB.NONE"), name("UAR0"), int(0)]),
-                                    package(&[name("RST1")]),
-                                ]),
-                            ),
-                            &name_op("RSVL", &int(5)),
-                        ]),
-                    ),
+                    &device("TAGD", &hid(if tagged { "XTAG0001" } else { "XNOT0001" })),
+                    &device("PROV", &hid("XPRV0001")),
+                    &device("CTL0", &hid("XCTL0001")),
+                    &device("UAR0", &cat(&[&hid("XUAR0001"), &dsd])),
                 ]),
             );
             let mut i = load(&dsdt(&body));
-            let devs: Vec<aml::NodeId> = ["REST", "CCLK", "RST1", "UAR0"]
+            let platforms: &[&dyn acpi_platform::PlatformSource] =
+                if tagged { &[&FAKE] } else { &[] };
+            crate::bus::walk(
+                &mut i,
+                &mut Quiet,
+                &[],
+                platforms,
+                &acpi_platform::FirmwareIdentity::default(),
+            )
+        };
+        let uar0 = |w: &crate::bus::Walk| {
+            let f = w
+                .found
                 .iter()
-                .map(|d| node(&i, &alloc::format!("\\_SB.{d}")))
-                .collect();
-            let deps = build(&mut i, &mut Quiet, &devs, &[]);
-            (deps, devs)
+                .find(|f| f.device.path == "\\_SB_.UAR0")
+                .unwrap();
+            (f.deps.clone(), f.lines.clone())
         };
 
-        let (deps, _) = build_with(false);
-        assert!(deps.platform.is_empty() && deps.edges.is_empty() && deps.malformed.is_empty());
+        // Without the platform: an unclassified reference, no lines.
+        let w = walk_with(false);
+        assert_eq!(uar0(&w), (Vec::new(), Vec::new()));
 
-        let (deps, devs) = build_with(true);
-        let [_, cclk, rst1, uar0] = devs[..] else {
-            unreachable!()
-        };
-        let p = &deps.platform;
-        let c = p.clock(&uar0, None).unwrap();
-        assert_eq!((c.provider, c.id, c.name.as_deref()), (cclk, 0x107, None));
-        let r = p.reset(&uar0, None).unwrap();
-        assert_eq!((r.controller, r.index, r.name.as_deref()), (rst1, 4, None));
-        assert_eq!(
-            p.resource(&uar0, devtree::platform::ResourceKind::Interrupt, "irq"),
-            Some(0)
+        let w = walk_with(true);
+        assert!(
+            w.notes.iter().any(|n| n == "acpi0: platform fake"),
+            "{:?}",
+            w.notes
         );
-        assert!(p.links.is_empty() && p.reserved.is_empty());
-        let edges: Vec<_> = deps
-            .edges
-            .iter()
-            .map(|e| (e.supplier, e.consumer, e.kind, e.via.clone()))
-            .collect();
+        let (deps, lines) = uar0(&w);
+        let prov = String::from("\\_SB_.PROV");
         assert_eq!(
-            edges,
+            deps,
             [
-                (cclk, uar0, EdgeKind::Required, Via::Cix(Table::Clkt)),
-                (rst1, uar0, EdgeKind::Required, Via::Cix(Table::Rstl)),
+                (String::from("\\_SB_.CTL0"), EdgeKind::Required, Origin::Dsd),
+                (prov.clone(), EdgeKind::Required, Origin::Platform),
             ]
         );
-        let unresolved: Vec<_> = deps
-            .unresolved
-            .iter()
-            .map(|u| (u.consumer, u.via.clone(), u.name.clone()))
-            .collect();
         assert_eq!(
-            unresolved,
-            [(uar0, Via::Cix(Table::Dlkl), String::from("\\_SB.NONE"))]
-        );
-        let m = |table, entry: Option<usize>, why: &str| Malformed {
-            carrier: uar0,
-            table,
-            entry,
-            why: String::from(why),
-        };
-        assert_eq!(
-            deps.malformed,
+            lines,
             [
-                m(Table::Rsnl, Some(1), "resource type 0x100"),
-                m(Table::Dlkl, Some(1), "1 elements"),
-                m(Table::Rsvl, None, "not a package"),
+                (LineKind::Clock, Some(String::from("core")), prov.clone(), 7),
+                (LineKind::Reset, None, prov, 3),
             ]
         );
     }

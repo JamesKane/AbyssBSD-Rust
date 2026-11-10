@@ -4,8 +4,11 @@
 //! namespace object, the kind of edge from that object to the device.
 //!
 //! Firmware borrows devicetree's names, so the table follows their
-//! devicetree meaning. A name not here is reported, not guessed at: the
-//! board corpus tests fail on one, so each new name is classified once.
+//! devicetree meaning. It holds only generic names (devicetree's core
+//! bindings, standard ACPI `_DSD` properties); a vendor's bindings
+//! (`cix,usb_syscon`) belong to its platform crate (ADR-0020). A name no
+//! table knows is reported, not guessed at: the board corpus tests fail
+//! on one, so each new name is classified once.
 
 use crate::graph::EdgeKind;
 
@@ -16,39 +19,19 @@ const NAMES: &[(&str, EdgeKind)] = &[
     // Firmware channels and the memory they share.
     ("mboxes", EdgeKind::Required),
     ("shmem", EdgeKind::Required),
-    // Clocks, PWMs, and register blocks leased from another device
-    // (Sky1's CRU, syscon, and FCH handles).
+    // Clocks and PWMs a device consumes.
     ("clocks", EdgeKind::Required),
-    ("uartclk", EdgeKind::Required),
     ("pwms", EdgeKind::Required),
-    ("cru-ctrl", EdgeKind::Required),
-    ("cdns,cru-ctrl", EdgeKind::Required),
-    ("audss_cru", EdgeKind::Required),
-    ("sky1,fch_cru", EdgeKind::Required),
-    ("cix,hw", EdgeKind::Required),
-    ("cix,usb_syscon", EdgeKind::Required),
-    ("cix,usbphy_syscon", EdgeKind::Required),
-    ("cix,gmac-ctrl", EdgeKind::Required),
-    ("cix,dsp-ctrl", EdgeKind::Required),
-    ("arm,remote-ctrl", EdgeKind::Required),
     // PHYs a controller drives.
     ("phys", EdgeKind::Required),
-    ("dp_phy", EdgeKind::Required),
-    ("cdns,pcie-phy", EdgeKind::Required),
-    ("cdnsp,usb3-phy", EdgeKind::Required),
-    // The GPU's memory managers and TrustZone guard (Arm's kbase names).
-    ("physical-memory-group-manager", EdgeKind::Required),
-    ("protected-memory-allocator", EdgeKind::Required),
-    ("tzgt", EdgeKind::Required),
     // A MAC finds its PHY on its own MDIO bus after attaching, as
     // FreeBSD's miibus does.
     ("phy-handle", EdgeKind::Optional),
-    // Things a device works without, and is told of when they appear.
+    // A panel's backlight: it works without one, and is told when it
+    // appears.
     ("backlight", EdgeKind::Optional),
-    ("edp-panel", EdgeKind::Optional),
-    ("isp-src", EdgeKind::Optional),
-    ("actuator-src", EdgeKind::Optional),
-    // Ordering only: a media pipeline's links, a USB4 port's host.
+    // Ordering only: a media pipeline's links, a USB4 port's host
+    // (Microsoft's USB4 `_DSD` property).
     ("remote-endpoint", EdgeKind::Order),
     ("usb4-host-interface", EdgeKind::Order),
 ];

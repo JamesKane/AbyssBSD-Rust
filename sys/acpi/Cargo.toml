@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+acpi-platform = { path = "../../lib/acpi-platform" }
 aml = { path = "../../lib/aml" }
 bus = { path = "../bus" }
 devtree = { path = "../../lib/devtree" }
@@ -15,6 +16,7 @@ sched = { path = "../sched" }
 sync = { path = "../sync" }
 
 [dev-dependencies]
+acpi-corpus = { path = "../../lib/acpi-corpus" }
 acpi-tables = { path = "../../lib/acpi-tables" }
 aml = { path = "../../lib/aml", features = ["asm"] }
 

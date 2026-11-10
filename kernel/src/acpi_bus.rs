@@ -278,6 +278,21 @@ impl acpi::Ops for KernelAcpi {
         kprintln!("{args}");
     }
 
+    fn platforms(&self) -> &'static [&'static dyn acpi_platform::PlatformSource] {
+        driver_table::PLATFORMS
+    }
+
+    fn firmware_identity(&self) -> acpi_platform::FirmwareIdentity {
+        let mut id = acpi_platform::FirmwareIdentity::default();
+        if let Some(t) = crate::acpi::tables() {
+            let x = t.xsdt();
+            id.oem_id.copy_from_slice(x.oem_id());
+            id.oem_table_id.copy_from_slice(x.oem_table_id());
+            id.oem_revision = x.oem_revision();
+        }
+        id
+    }
+
     fn dma_controllers(&self) -> Vec<acpi::DmaController> {
         let Some(c) = crate::acpi::find(*b"CSRT").and_then(|t| acpi_tables::csrt::parse(&t).ok())
         else {

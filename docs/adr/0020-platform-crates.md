@@ -1,6 +1,6 @@
 # ADR-0020: Platform knowledge in per-SoC crates behind one interface; the ACPI bus names no vendor
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-09
 
 ## Context

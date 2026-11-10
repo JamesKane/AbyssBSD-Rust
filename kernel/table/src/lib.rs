@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! The drivers a kernel build includes (docs/DRIVER-MODEL.md §7.1):
-//! reviewable code rather than linker sections.
+//! The drivers and platforms a kernel build includes (docs/DRIVER-MODEL.md
+//! §7.1, ADR-0020): reviewable code rather than linker sections.
 //!
 //! It is its own crate so the host can check it: [`DRIVERS`] must have no
 //! unresolved tie, two drivers matching some device at the same rank with
@@ -53,6 +53,11 @@ pub static DRIVERS: &[DriverDecl] = &[
     hms::DRIVER,
     umass::DRIVER,
 ];
+
+/// The platforms built in (ADR-0020): every one is always present, and
+/// the ACPI bus runs each whose firmware identity matches. Adding a SoC
+/// family is a crate under `platform/` and a line here.
+pub static PLATFORMS: &[&'static dyn acpi_platform::PlatformSource] = &[&cix_sky1::PLATFORM];
 
 #[cfg(test)]
 mod tests;

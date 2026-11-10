@@ -2496,6 +2496,14 @@ machines against FreeBSD on bare metal; the exit criteria above.
   The Q8B's PCIe root ports wait for the GPIO controller driving PERST# and are ordered after
   their USB4 ports; the X870E's and the Sky1's companions depend only on power resources or on
   objects above them, so they add no edges. Next: shared ranges.
+- Progress 2026-11-09 (P8.1, ADR-0020): platform knowledge moved out of the generic crates. The
+  interface is `lib/acpi-platform` (`PlatformSource`: applies, extract, vendor `_DSD` names),
+  the Sky1's is `platform/cix-sky1` (its lookup tables and the 19 vendor property names that left
+  `lib/devtree::dsd`), and `kernel/table` lists `PLATFORMS` beside `DRIVERS`. `sys/acpi` tests
+  standard ACPI alone; the platform crate tests its tables; `kernel/table` checks every corpus
+  machine with every platform (one platform per machine, no unclassified reference, no required
+  or power edge in a cycle). `lib/acpi-corpus` holds the corpus loader the three share, and the
+  policy check keeps vendor names out of the generic crates' code.
 
 ## Phase 9: Self-hosting and hardening = **v1.0 / Day 1 complete** (L)
 

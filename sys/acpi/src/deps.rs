@@ -13,16 +13,18 @@
 //! - the power resources of `_PR0` and `_PR3`;
 //! - `_DSD`'s reference properties (`power-domains`, `mboxes`, `phys`,
 //!   graph endpoints, ...), following the Hierarchical Data Extension into
-//!   data nodes, and classifying each by [`devtree::dsd::reference_kind`];
+//!   data nodes, and classifying each by [`devtree::dsd::reference_kind`]
+//!   and then by the applying platforms' vendor names;
 //! - the operation regions whose accesses an OS driver serves (GPIO and
 //!   serial-bus regions through their field's `Connection`, embedded
 //!   controller, SMBus and IPMI regions through the device that declares
 //!   them, PCC regions through `acpi0`): the device defining a field in
 //!   one, and each device whose methods name the field, use that driver
 //!   ([`region_edges`]);
-//! - on a CIX platform, the clock and reset lines and device links of its
-//!   lookup tables ([`crate::cix`]), whose entries are kept as the
-//!   platform description ([`FirmwareDeps::platform`]).
+//! - the clock and reset lines and device links the applying platforms
+//!   extract from their vendor tables (ADR-0020, [`acpi_platform`]), whose
+//!   entries are kept as the platform description
+//!   ([`FirmwareDeps::platform`]).
 //!
 //! Suppliers are namespace objects, not yet devices: a power resource, a
 //! `_STA = 0` stub, or a data node becomes a provider's sub-handle later.
@@ -40,11 +42,11 @@ use alloc::collections::BTreeSet;
 
 use aml::resource::Resource;
 use aml::{DepRef, Interpreter, NodeId, ObjectType, RegionSpace, Value};
-use devtree::graph::{EdgeKind, Origin};
+use devtree::graph::{Edge, EdgeKind, Graph, Origin};
 use devtree::platform::Description;
 
 use crate::DmaController;
-use crate::cix::{Malformed, Table};
+use acpi_platform::{FirmwareIdentity, Malformed, PlatformSource};
 
 /// `_DSD` device properties (daffd814-6eba-4d8c-8a91-bc9bbf4aa301).
 const PROPERTIES_UUID: [u8; 16] = [
@@ -86,8 +88,15 @@ pub enum Via {
     /// A field in an operation region of this space, which the supplier's
     /// driver serves.
     Region(RegionSpace),
-    /// A CIX lookup table (`CLKT`, `RSTL`, `DLKL`; [`crate::cix`]).
-    Cix(Table),
+    /// A platform's description (ADR-0020): from `source`, its `table`
+    /// (the description's `"clocks"`, `"resets"`, or `"links"` for an
+    /// edge; the vendor table's name for an unresolved reference).
+    Platform {
+        /// The platform (`"cix-sky1"`).
+        source: &'static str,
+        /// The section or table.
+        table: &'static str,
+    },
 }
 
 impl Via {
@@ -105,7 +114,7 @@ impl Via {
             Self::PowerResource { d3hot: true } => String::from("_PR3"),
             Self::Property(p) => alloc::format!("_DSD {p}"),
             Self::Region(space) => alloc::format!("{space:?} region"),
-            Self::Cix(t) => String::from(t.name()),
+            Self::Platform { source, table } => alloc::format!("{source} {table}"),
         }
     }
 
@@ -121,7 +130,7 @@ impl Via {
             Self::Property(_) => Origin::Dsd,
             Self::Region(RegionSpace::Pcc) => Origin::Pcc,
             Self::Region(_) => Origin::Region,
-            Self::Cix(_) => Origin::Platform,
+            Self::Platform { .. } => Origin::Platform,
         }
     }
 }
@@ -198,8 +207,11 @@ pub struct FirmwareDeps {
     pub unclassified: Vec<Unclassified>,
     /// What the platform's own tables describe (DRIVER-MODEL.md §5.5).
     pub platform: Description<NodeId>,
-    /// Entries of those tables that could not be read.
+    /// Entries of those tables that could not be read, and lines two
+    /// entries give.
     pub malformed: Vec<Malformed>,
+    /// The platforms that applied, by name.
+    pub platforms: Vec<&'static str>,
 }
 
 impl FirmwareDeps {
@@ -231,14 +243,78 @@ impl FirmwareDeps {
     }
 }
 
-/// Reads the dependencies of `devices` from the namespace.
+/// The devices `acpi0` adds a child for, in namespace order: the ones
+/// [`build`] is asked about.
+pub fn devices(interp: &mut Interpreter, host: &mut dyn aml::Host) -> Vec<NodeId> {
+    let mut out = Vec::new();
+    for d in interp.devices() {
+        if crate::bus::enumerated(interp, host, d).is_some() {
+            out.push(d);
+        }
+    }
+    out
+}
+
+impl FirmwareDeps {
+    /// The namespace tree (parent → child, over every node an edge
+    /// touches) and the edges between serving devices, as the manager's
+    /// graph holds them. An edge from a consumer's own ancestor adds
+    /// nothing to the tree's order and is left out.
+    #[must_use]
+    pub fn graph(&self, interp: &Interpreter) -> Graph<NodeId> {
+        let mut g = Graph::new();
+        let tree = |g: &mut Graph<NodeId>, mut n: NodeId| {
+            while let Some(p) = interp.parent(n) {
+                let added = g.add_edge(Edge {
+                    supplier: p,
+                    consumer: n,
+                    kind: EdgeKind::Required,
+                    origin: Origin::Tree,
+                });
+                if !added {
+                    break;
+                }
+                n = p;
+            }
+        };
+        for e in &self.edges {
+            let s = match e.provider {
+                Provider::Device(n) | Provider::Sub { owner: n, .. } | Provider::Absent(n) => n,
+                Provider::Bus(_) => interp.root(),
+            };
+            if nearest(interp, e.consumer, |_, a| a == s).is_some() {
+                continue;
+            }
+            tree(&mut g, s);
+            tree(&mut g, e.consumer);
+            g.add_edge(Edge {
+                supplier: s,
+                consumer: e.consumer,
+                kind: e.kind,
+                origin: e.via.origin(),
+            });
+        }
+        g
+    }
+}
+
+/// Reads the dependencies of `devices` from the namespace, with what
+/// each of `platforms` that applies to the firmware `id` adds.
 pub fn build(
     interp: &mut Interpreter,
     host: &mut dyn aml::Host,
     devices: &[NodeId],
     dma: &[DmaController],
+    platforms: &[&dyn PlatformSource],
+    id: &FirmwareIdentity,
 ) -> FirmwareDeps {
     let mut out = FirmwareDeps::default();
+    let applying: Vec<&dyn PlatformSource> = platforms
+        .iter()
+        .copied()
+        .filter(|p| p.applies(id, interp, host, devices))
+        .collect();
+    out.platforms = applying.iter().map(|p| p.name()).collect();
     let mut dma_devices: Option<Vec<(u64, NodeId)>> = None;
     for &d in devices {
         dep(interp, host, d, &mut out);
@@ -246,13 +322,15 @@ pub fn build(
         fixed_dma(interp, host, d, dma, &mut dma_devices, &mut out);
         power_resources(interp, host, d, &mut out);
         if let Ok(Some(dsd)) = interp.evaluate_child(d, "_DSD", Vec::new(), host) {
-            dsd_package(interp, host, d, d, &dsd, 0, &mut out);
+            dsd_package(interp, host, &applying, d, d, &dsd, 0, &mut out);
         }
     }
     region_edges(interp, devices, &mut out);
-    if let Some(x) = crate::cix::extract(interp, host, devices) {
-        platform_edges(x, devices, &mut out);
+    for p in &applying {
+        let x = p.extract(interp, host, devices);
+        platform_edges(p.name(), x, devices, &mut out);
     }
+    duplicate_lines(&mut out);
     let mut enumerated: BTreeMap<NodeId, bool> = BTreeMap::new();
     for i in 0..out.edges.len() {
         out.edges[i].provider = provider(interp, host, out.edges[i].supplier, &mut enumerated);
@@ -461,35 +539,78 @@ fn region_edges(interp: &Interpreter, devices: &[NodeId], out: &mut FirmwareDeps
     }
 }
 
-/// The edges the CIX tables make, each from the device serving the line
-/// to its consumer, for the consumers in `devices` (a table may describe
-/// a device firmware left out, as the Sky1's `MAC1`):
-/// - a clock line (`CLKT`) from the clock provider, `CIXHA010`, which
-///   serves the clocks through its AML methods (Sky1-Linux makes every
-///   `CLKT` consumer wait for it in the same way);
-/// - a reset line (`RSTL`) from its reset controller;
-/// - a device link (`DLKL`) from its supplier.
-///
-/// All are required: a driver needs its clocks and resets in attach, and
-/// a link is an attach order by definition.
-fn platform_edges(x: crate::cix::Extracted, devices: &[NodeId], out: &mut FirmwareDeps) {
+/// The edges a platform's description makes, each from the device
+/// serving the line to its consumer, for the consumers in `devices` (a
+/// table may describe a device firmware left out, as the Sky1's `MAC1`):
+/// a clock line from its clock provider, a reset line from its reset
+/// controller, a device link from its supplier. All are required: a
+/// driver needs its clocks and resets in attach, and a link is an attach
+/// order by definition. The entries join [`FirmwareDeps::platform`].
+fn platform_edges(
+    source: &'static str,
+    x: acpi_platform::Extracted,
+    devices: &[NodeId],
+    out: &mut FirmwareDeps,
+) {
     let p = &x.description;
+    let via = |table| Via::Platform { source, table };
     for &d in devices {
         for c in p.clocks.iter().filter(|c| c.consumer == d) {
-            out.edge(c.provider, d, EdgeKind::Required, Via::Cix(Table::Clkt));
+            out.edge(c.provider, d, EdgeKind::Required, via("clocks"));
         }
         for r in p.resets.iter().filter(|r| r.consumer == d) {
-            out.edge(r.controller, d, EdgeKind::Required, Via::Cix(Table::Rstl));
+            out.edge(r.controller, d, EdgeKind::Required, via("resets"));
         }
         for l in p.links.iter().filter(|l| l.consumer == d) {
-            out.edge(l.supplier, d, EdgeKind::Required, Via::Cix(Table::Dlkl));
+            out.edge(l.supplier, d, EdgeKind::Required, via("links"));
         }
     }
-    for (carrier, table, name) in x.unresolved {
-        out.unresolved(carrier, Via::Cix(table), name);
+    for u in x.unresolved {
+        out.unresolved(u.carrier, via(u.table), u.name);
     }
-    out.platform = x.description;
-    out.malformed = x.malformed;
+    let mut d = x.description;
+    let all = &mut out.platform;
+    all.clocks.append(&mut d.clocks);
+    all.resets.append(&mut d.resets);
+    all.resource_names.append(&mut d.resource_names);
+    all.links.append(&mut d.links);
+    all.reserved.append(&mut d.reserved);
+    out.malformed.extend(x.malformed);
+}
+
+/// Two clock or reset lines of one consumer under one name, from one
+/// platform or two: a diagnostic, never a silent choice (ADR-0020).
+fn duplicate_lines(out: &mut FirmwareDeps) {
+    let mut dups = Vec::new();
+    let p = &out.platform;
+    let mut check = |table: &'static str, keys: Vec<(NodeId, Option<&String>)>| {
+        for (k, &(consumer, name)) in keys.iter().enumerate() {
+            if keys[..k].contains(&(consumer, name)) {
+                dups.push(Malformed {
+                    source: "platform",
+                    table,
+                    carrier: consumer,
+                    entry: None,
+                    why: alloc::format!("two lines named {name:?}"),
+                });
+            }
+        }
+    };
+    check(
+        "clocks",
+        p.clocks
+            .iter()
+            .map(|c| (c.consumer, c.name.as_ref()))
+            .collect(),
+    );
+    check(
+        "resets",
+        p.resets
+            .iter()
+            .map(|r| (r.consumer, r.name.as_ref()))
+            .collect(),
+    );
+    out.malformed.extend(dups);
 }
 
 /// The nearest of `n` and its ancestors that `pred` accepts.
@@ -605,9 +726,11 @@ fn power_resources(
 }
 
 /// A `_DSD` package (or a data node's): pairs of a UUID and its data.
+#[allow(clippy::too_many_arguments)]
 fn dsd_package(
     interp: &mut Interpreter,
     host: &mut dyn aml::Host,
+    platforms: &[&dyn PlatformSource],
     device: NodeId,
     scope: NodeId,
     v: &Value,
@@ -627,7 +750,7 @@ fn dsd_package(
                     && let Some(node) = data_node(interp, scope, entry)
                     && let Ok(data) = interp.evaluate_node(node, Vec::new(), host)
                 {
-                    dsd_package(interp, host, device, node, &data, depth + 1, out);
+                    dsd_package(interp, host, platforms, device, node, &data, depth + 1, out);
                 }
             }
         } else if uuid.as_slice() == PROPERTIES_UUID || is_property_list(entries) {
@@ -635,7 +758,7 @@ fn dsd_package(
                 if let Value::Package(kv) = entry
                     && let [Value::String(name), value] = kv.as_slice()
                 {
-                    property(interp, device, name, value, out);
+                    property(interp, platforms, device, name, value, out);
                 }
             }
         }
@@ -669,6 +792,7 @@ fn data_node(interp: &Interpreter, scope: NodeId, entry: &Value) -> Option<NodeI
 /// come with arguments: `{GPI4, 3, 0}`, `{MPC3, "port@0", "endpoint@1"}`).
 fn property(
     interp: &Interpreter,
+    platforms: &[&dyn PlatformSource],
     device: NodeId,
     name: &str,
     value: &Value,
@@ -677,14 +801,14 @@ fn property(
     match value {
         Value::Package(items) => {
             for v in items {
-                property(interp, device, name, v, out);
+                property(interp, platforms, device, name, v, out);
             }
         }
         Value::Name(..) | Value::Reference(_) => {
             let via = Via::Property(String::from(name));
             match (
                 interp.resolve_value_name(value),
-                devtree::dsd::reference_kind(name),
+                acpi_platform::reference_kind(platforms, name),
             ) {
                 (Some(s), Some(kind)) => out.edge(s, device, kind, via),
                 (Some(s), None) => {

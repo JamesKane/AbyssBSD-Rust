@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! CIX's lookup tables (DRIVER-MODEL.md §5.5): the Sky1 describes its
+//! CIX's lookup tables (DRIVER-MODEL.md §5.5, ADR-0020): the Sky1 describes its
 //! clocks, resets, resource names, device links, and reserved memory in
 //! named AML objects outside the standard ones, and a `CIXA1019` device
 //! says they are there. Any present device may carry them, and an entry
@@ -24,10 +24,13 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use acpi_platform::{Extracted, Malformed, Unresolved};
 use aml::{Interpreter, NodeId, Value};
 use devtree::platform::{
-    ClockLine, Description, DeviceLink, ReservedMemory, ResetLine, ResourceKind, ResourceName,
+    ClockLine, DeviceLink, ReservedMemory, ResetLine, ResourceKind, ResourceName,
 };
+
+use crate::NAME;
 
 /// The device whose presence says the tables are there.
 pub const TABLES_HID: &str = "CIXA1019";
@@ -65,53 +68,27 @@ impl Table {
     }
 }
 
-/// An entry the extractor could not read.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Malformed {
-    /// The device carrying the table.
-    pub carrier: NodeId,
-    /// The table.
-    pub table: Table,
-    /// The entry's position, or `None` if the table itself is not a
-    /// package.
-    pub entry: Option<usize>,
-    /// What is wrong.
-    pub why: String,
-}
-
-/// What the tables describe, with the names in them that resolve to
-/// nothing.
-#[derive(Clone, Debug, Default)]
-pub struct Extracted {
-    /// The entries.
-    pub description: Description<NodeId>,
-    /// The clock provider (`CIXHA010`) the clock lines name.
-    pub clock_provider: Option<NodeId>,
-    /// Entries the extractor could not read.
-    pub malformed: Vec<Malformed>,
-    /// `(carrier, table, name)` for each reference to nothing.
-    pub unresolved: Vec<(NodeId, Table, String)>,
-}
-
-/// Reads the CIX tables of `devices` (the present ones), if one of them is
-/// `CIXA1019`; otherwise returns `None`.
-pub fn extract(
+/// The first of `devices` whose `_HID` is `hid`.
+pub(crate) fn find_hid(
     interp: &mut Interpreter,
     host: &mut dyn aml::Host,
     devices: &[NodeId],
-) -> Option<Extracted> {
-    let mut tables = false;
+    hid: &str,
+) -> Option<NodeId> {
+    devices
+        .iter()
+        .copied()
+        .find(|&d| interp.hid(d, host).ok().flatten().as_deref() == Some(hid))
+}
+
+/// Reads the CIX tables of `devices` (the present ones).
+pub(crate) fn extract(
+    interp: &mut Interpreter,
+    host: &mut dyn aml::Host,
+    devices: &[NodeId],
+) -> Extracted {
+    let clock_provider = find_hid(interp, host, devices, CLOCKS_HID);
     let mut out = Extracted::default();
-    for &d in devices {
-        match interp.hid(d, host).ok().flatten().as_deref() {
-            Some(TABLES_HID) => tables = true,
-            Some(CLOCKS_HID) => out.clock_provider = out.clock_provider.or(Some(d)),
-            _ => {}
-        }
-    }
-    if !tables {
-        return None;
-    }
     for &d in devices {
         for t in Table::ALL {
             match interp.evaluate_child(d, t.name(), Vec::new(), host) {
@@ -122,12 +99,14 @@ pub fn extract(
                             interp,
                             carrier: d,
                             table: t,
+                            clock_provider,
                             out: &mut out,
                         };
                         if let Err(why) = cx.read(e) {
                             out.malformed.push(Malformed {
+                                source: NAME,
+                                table: t.name(),
                                 carrier: d,
-                                table: t,
                                 entry: Some(k),
                                 why,
                             });
@@ -135,21 +114,23 @@ pub fn extract(
                     }
                 }
                 Ok(Some(_)) => out.malformed.push(Malformed {
+                    source: NAME,
+                    table: t.name(),
                     carrier: d,
-                    table: t,
                     entry: None,
                     why: String::from("not a package"),
                 }),
                 Err(e) => out.malformed.push(Malformed {
+                    source: NAME,
+                    table: t.name(),
                     carrier: d,
-                    table: t,
                     entry: None,
                     why: alloc::format!("evaluation failed: {e:?}"),
                 }),
             }
         }
     }
-    Some(out)
+    out
 }
 
 /// One table entry being read.
@@ -157,6 +138,8 @@ struct Entry<'a> {
     interp: &'a Interpreter,
     carrier: NodeId,
     table: Table,
+    /// The clock provider (`CIXHA010`) the clock lines name.
+    clock_provider: Option<NodeId>,
     out: &'a mut Extracted,
 }
 
@@ -181,8 +164,8 @@ impl Entry<'_> {
                     [c] => self.node(c, "consumer")?,
                     _ => return Err(arity(f.len())),
                 };
-                let (Some(consumer), Some(provider)) = (consumer, self.out.clock_provider) else {
-                    if self.out.clock_provider.is_none() {
+                let (Some(consumer), Some(provider)) = (consumer, self.clock_provider) else {
+                    if self.clock_provider.is_none() {
                         self.unresolved(String::from(CLOCKS_HID));
                     }
                     return Ok(());
@@ -303,7 +286,11 @@ impl Entry<'_> {
     }
 
     fn unresolved(&mut self, name: String) {
-        let u = (self.carrier, self.table, name);
+        let u = Unresolved {
+            carrier: self.carrier,
+            table: self.table.name(),
+            name,
+        };
         if !self.out.unresolved.contains(&u) {
             self.out.unresolved.push(u);
         }

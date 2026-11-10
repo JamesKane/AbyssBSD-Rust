@@ -19,7 +19,6 @@ extern crate alloc;
 
 pub mod bus;
 pub mod button;
-pub mod cix;
 pub mod cpc;
 pub mod deps;
 #[cfg(test)]
@@ -76,6 +75,15 @@ pub trait Ops: Sync {
     fn power_button(&self);
     /// A console line.
     fn log(&self, args: core::fmt::Arguments<'_>);
+    /// The platforms built in (`kernel/table`'s `PLATFORMS`, ADR-0020):
+    /// the graph builder runs each that applies. None by default.
+    fn platforms(&self) -> &'static [&'static dyn acpi_platform::PlatformSource] {
+        &[]
+    }
+    /// The firmware's identity, from the root table's header.
+    fn firmware_identity(&self) -> acpi_platform::FirmwareIdentity {
+        acpi_platform::FirmwareIdentity::default()
+    }
     /// The DMA controllers the CSRT describes, which serve `_CRS`
     /// `FixedDMA` request lines. None by default.
     fn dma_controllers(&self) -> Vec<DmaController> {

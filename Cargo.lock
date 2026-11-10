@@ -10,6 +10,8 @@ version = "0.0.0"
 name = "acpi"
 version = "0.0.0"
 dependencies = [
+ "acpi-corpus",
+ "acpi-platform",
  "acpi-tables",
  "aml",
  "bus",
@@ -18,6 +20,22 @@ dependencies = [
  "pci",
  "sched",
  "sync",
+]
+
+[[package]]
+name = "acpi-corpus"
+version = "0.0.0"
+dependencies = [
+ "acpi-tables",
+ "aml",
+]
+
+[[package]]
+name = "acpi-platform"
+version = "0.0.0"
+dependencies = [
+ "aml",
+ "devtree",
 ]
 
 [[package]]
@@ -122,6 +140,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "cix-sky1"
+version = "0.0.0"
+dependencies = [
+ "acpi",
+ "acpi-corpus",
+ "acpi-platform",
+ "aml",
+ "devtree",
+]
+
+[[package]]
 name = "clock"
 version = "0.0.0"
 dependencies = [
@@ -152,10 +181,13 @@ name = "driver-table"
 version = "0.0.0"
 dependencies = [
  "acpi",
+ "acpi-corpus",
+ "acpi-platform",
  "ahci",
  "amdsbwd",
  "atrtc",
  "bus",
+ "cix-sky1",
  "devtree",
  "hidbus",
  "hkbd",
@@ -375,6 +407,7 @@ version = "0.0.0"
 dependencies = [
  "abi",
  "acpi",
+ "acpi-platform",
  "acpi-tables",
  "addr",
  "aml",

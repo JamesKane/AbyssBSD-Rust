@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! The graph builder against the firmware corpus (`tests/corpus/acpi`):
-//! each machine's edges, unresolved references, and cycles.
+//! each machine's edges, unresolved references, and cycles, from standard
+//! ACPI alone. What a platform adds is tested in its crate, and the
+//! whole-machine checks with every platform in `kernel/table`
+//! (ADR-0020).
 
 extern crate std;
 
@@ -8,264 +11,46 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use aml::host::{Host, HostError, RegionAccess, RegionSpace};
-use aml::{Config, Interpreter, Limits, NodeId};
-use devtree::graph::{Edge, EdgeKind, Graph, Origin};
+use acpi_corpus::Machine;
+use acpi_platform::FirmwareIdentity;
+use aml::Interpreter;
+use aml::host::RegionSpace;
+use devtree::graph::EdgeKind;
 
-use crate::cix::Table as Cix;
 use crate::deps::{FirmwareDeps, FirmwareEdge, Provider, Via, build};
-use devtree::platform::ResourceKind;
 
-/// Registers as sparse memory (unwritten bytes read as zero), with
-/// index/data port pairs, seeded with the firmware state each machine's
-/// AML reads (as `lib/aml`'s corpus tests establish it from Linux's view
-/// of the machine).
-#[derive(Default)]
-struct Machine {
-    mem: BTreeMap<(RegionSpace, u64), u8>,
-    /// `(space, index port, data port)`.
-    pairs: Vec<(RegionSpace, u64, u64)>,
-}
-
-impl Machine {
-    fn poke(&mut self, space: RegionSpace, addr: u64, bytes: &[u8]) {
-        for (k, &b) in (addr..).zip(bytes) {
-            self.mem.insert((space, k), b);
-        }
-    }
-
-    /// Where byte `i` of an access lives: behind a data port, the register
-    /// its index port selects.
-    fn slot(&self, a: &RegionAccess, i: u64) -> (RegionSpace, u64) {
-        let addr = a.address();
-        for &(space, index, data) in &self.pairs {
-            if space == a.space && data == addr {
-                let reg = self.mem.get(&(space, index)).copied().unwrap_or(0);
-                return (space, 1 << 63 | data << 8 | u64::from(reg));
-            }
-        }
-        (a.space, addr.wrapping_add(i))
-    }
-
-    fn for_machine(name: &str) -> Self {
-        let mut m = Self::default();
-        match name {
-            // GETV's switches at 0xFFFE0000: on, but for I2C6, PCIe port
-            // 4, and three xHCI controllers.
-            "opi6p" => {
-                let mut g = [1u8; 0x2c];
-                for k in [0x0b, 0x11, 0x1c, 0x1d, 0x1e] {
-                    g[k] = 0;
-                }
-                m.poke(RegionSpace::SystemMemory, 0xfffe_0000, &g);
-            }
-            // AMI's setup variables, HPET's enable, the FCH controller
-            // block (behind extended CMOS 0x08-0x0B), the interrupt
-            // router.
-            "x870e" => {
-                const FRTB: u32 = 0x7000_0000;
-                m.poke(RegionSpace::SystemMemory, 0x8fe0_d000, &[1, 0, 2, 1]);
-                m.poke(RegionSpace::SystemMemory, 0xfed8_0300, &[0x40]);
-                m.pairs.push((RegionSpace::SystemIo, 0x72, 0x73));
-                for (k, b) in (8u64..).zip(FRTB.to_le_bytes()) {
-                    m.mem
-                        .insert((RegionSpace::SystemIo, 1 << 63 | 0x73 << 8 | k), b);
-                }
-                m.poke(RegionSpace::SystemMemory, u64::from(FRTB) + 4, &[0x60]);
-                m.poke(RegionSpace::SystemMemory, u64::from(FRTB) + 0x1c, &[0x0e]);
-                m.pairs.push((RegionSpace::SystemIo, 0xc00, 0xc01));
-                for k in 0..8u64 {
-                    m.mem
-                        .insert((RegionSpace::SystemIo, 1 << 63 | 0xc01 << 8 | k), 0x0b);
-                }
-            }
-            _ => {}
-        }
-        m
-    }
-}
-
-impl Host for Machine {
-    fn read(&mut self, a: &RegionAccess) -> Result<u64, HostError> {
-        let mut v = 0;
-        for i in 0..a.width.bytes() {
-            let b = self.mem.get(&self.slot(a, i)).copied().unwrap_or(0);
-            v |= u64::from(b) << (8 * i);
-        }
-        Ok(v)
-    }
-
-    fn write(&mut self, a: &RegionAccess, value: u64) -> Result<(), HostError> {
-        for (i, &b) in (0..a.width.bytes()).zip(&value.to_le_bytes()) {
-            let slot = self.slot(a, i);
-            self.mem.insert(slot, b);
-        }
-        Ok(())
-    }
-}
-
-macro_rules! corpus {
-    ($path:literal) => {
-        include_bytes!(concat!("../../../tests/corpus/acpi/", $path)).as_slice()
-    };
-}
-
-/// Each machine's AML tables, in XSDT order.
-fn machines() -> Vec<(&'static str, Vec<&'static [u8]>)> {
-    alloc::vec![
-        ("qemu-q35", alloc::vec![corpus!("qemu-q35/dsdt.dat")]),
-        ("qemu-virt", alloc::vec![corpus!("qemu-virt/dsdt.dat")]),
-        ("bhyve", alloc::vec![corpus!("bhyve/dsdt.dat")]),
-        ("radxa-q8b", alloc::vec![corpus!("radxa-q8b/dsdt.dat")]),
-        (
-            "opi6p",
-            alloc::vec![
-                corpus!("opi6p/dsdt.dat"),
-                corpus!("opi6p/ssdt1.dat"),
-                corpus!("opi6p/ssdt2.dat"),
-            ]
-        ),
-        (
-            "x870e",
-            alloc::vec![
-                corpus!("x870e/dsdt.dat"),
-                corpus!("x870e/ssdt1.dat"),
-                corpus!("x870e/ssdt2.dat"),
-                corpus!("x870e/ssdt3.dat"),
-                corpus!("x870e/ssdt4.dat"),
-                corpus!("x870e/ssdt5.dat"),
-                corpus!("x870e/ssdt6.dat"),
-                corpus!("x870e/ssdt7.dat"),
-                corpus!("x870e/ssdt8.dat"),
-                corpus!("x870e/ssdt9.dat"),
-                corpus!("x870e/ssdt10.dat"),
-                corpus!("x870e/ssdt11.dat"),
-                corpus!("x870e/ssdt12.dat"),
-                corpus!("x870e/ssdt13.dat"),
-                corpus!("x870e/ssdt14.dat"),
-                corpus!("x870e/ssdt15.dat"),
-            ]
-        ),
-    ]
-}
-
-/// A machine's namespace, loaded with its firmware state in place, and
-/// `_INI` run.
-fn load(name: &str, tables: &[&[u8]]) -> (Interpreter, Machine) {
-    let mut i = Interpreter::new(Config {
-        limits: Limits::for_stack(64 * 1024),
-        ..Config::default()
-    });
-    let mut h = Machine::for_machine(name);
-    for t in tables {
-        let r = i.load_table(t, &mut h).unwrap();
-        assert!(r.warnings.is_empty(), "{name}: {:?}", r.warnings);
-    }
-    let _ = i.initialize(&mut h);
-    (i, h)
-}
-
-/// The dependencies of the devices `acpi0` adds, as the bus asks for them.
-fn deps_of(name: &str, i: &mut Interpreter, h: &mut Machine) -> FirmwareDeps {
-    let devices: Vec<NodeId> = i
-        .devices()
-        .into_iter()
-        .filter(|&d| crate::bus::enumerated(i, h, d).is_some())
-        .collect();
-    build(i, h, &devices, &dma_controllers(name))
-}
-
-/// A table's bytes as the memory it is read from, at address 0.
-struct Table(&'static [u8]);
-
-impl acpi_tables::PhysMem<'static> for &Table {
-    fn bytes(&self, pa: u64, len: usize) -> Option<&'static [u8]> {
-        let start = usize::try_from(pa).ok()?;
-        self.0.get(start..start.checked_add(len)?)
-    }
-}
-
-/// The DMA controllers a machine's CSRT describes, as the kernel reads
-/// them.
+/// A machine's DMA controllers, as the kernel hands them to the builder.
 fn dma_controllers(name: &str) -> Vec<crate::DmaController> {
-    let csrt = match name {
-        "opi6p" => corpus!("opi6p/csrt.dat"),
-        _ => return Vec::new(),
-    };
-    let t = acpi_tables::Sdt::read(&&Table(csrt), 0).unwrap();
-    acpi_tables::csrt::parse(&t)
-        .unwrap()
-        .groups()
-        .filter_map(|g| g.ok()?.dma_controller())
-        .map(|c| crate::DmaController {
-            mmio_base: c.mmio_base,
-            requests: c.base_request_line..c.base_request_line.saturating_add(c.request_lines),
+    acpi_corpus::dma_controllers(name)
+        .into_iter()
+        .map(|(mmio_base, requests)| crate::DmaController {
+            mmio_base,
+            requests,
         })
         .collect()
 }
 
-/// The device that serves an edge's supplier: the namespace root stands
-/// for `acpi0`.
-fn serving(i: &Interpreter, p: Provider) -> NodeId {
-    match p {
-        Provider::Device(n) | Provider::Sub { owner: n, .. } | Provider::Absent(n) => n,
-        Provider::Bus(_) => i.root(),
-    }
+/// The dependencies of the devices `acpi0` adds, as the bus asks for
+/// them, with no platform registered: standard ACPI only (ADR-0020).
+fn deps_of(name: &str, i: &mut Interpreter, h: &mut Machine) -> FirmwareDeps {
+    let devices = crate::deps::devices(i, h);
+    build(
+        i,
+        h,
+        &devices,
+        &dma_controllers(name),
+        &[],
+        &FirmwareIdentity::default(),
+    )
 }
 
-/// Whether `a` is `b` or one of its namespace ancestors.
-fn ancestor_or_self(i: &Interpreter, a: NodeId, b: NodeId) -> bool {
-    let mut cur = Some(b);
-    while let Some(n) = cur {
-        if n == a {
-            return true;
-        }
-        cur = i.parent(n);
-    }
-    false
-}
-
-/// The namespace tree (parent → child, over every node an edge touches)
-/// and the firmware edges between serving devices, as the manager's graph
-/// would hold them. An edge from a consumer's own ancestor adds nothing to
-/// the tree's order and is left out.
-fn graph(i: &Interpreter, deps: &FirmwareDeps) -> Graph<NodeId> {
-    let mut g = Graph::new();
-    let tree = |g: &mut Graph<NodeId>, mut n: NodeId| {
-        while let Some(p) = i.parent(n) {
-            let added = g.add_edge(Edge {
-                supplier: p,
-                consumer: n,
-                kind: EdgeKind::Required,
-                origin: Origin::Tree,
-            });
-            if !added {
-                break;
-            }
-            n = p;
-        }
-    };
-    for e in &deps.edges {
-        let s = serving(i, e.provider);
-        if ancestor_or_self(i, s, e.consumer) {
-            continue;
-        }
-        tree(&mut g, s);
-        tree(&mut g, e.consumer);
-        g.add_edge(Edge {
-            supplier: s,
-            consumer: e.consumer,
-            kind: e.kind,
-            origin: e.via.origin(),
-        });
-    }
-    g
+fn machines() -> Vec<(&'static str, Vec<&'static [u8]>)> {
+    acpi_corpus::machines()
 }
 
 /// A machine's namespace, its firmware state, and its dependencies.
 fn machine(name: &str) -> (Interpreter, Machine, FirmwareDeps) {
-    let (_, tables) = machines().into_iter().find(|(n, _)| *n == name).unwrap();
-    let (mut i, mut h) = load(name, &tables);
+    let (mut i, mut h) = acpi_corpus::load(name);
     let deps = deps_of(name, &mut i, &mut h);
     (i, h, deps)
 }
@@ -334,13 +119,40 @@ fn edge<'a>(
 #[test]
 fn every_reference_is_classified() {
     for (name, _) in machines() {
-        let (i, _, deps) = machine(name);
-        let left: Vec<_> = deps
+        let (_, _, deps) = machine(name);
+        let mut left: Vec<&str> = deps
             .unclassified
             .iter()
-            .map(|u| (i.path(u.consumer).to_text(), u.property.clone()))
+            .map(|u| u.property.as_str())
             .collect();
-        assert!(left.is_empty(), "{name}: {left:?}");
+        left.sort_unstable();
+        left.dedup();
+        // The Sky1's vendor bindings are its platform's to classify.
+        let want: &[&str] = match name {
+            "opi6p" => &[
+                "actuator-src",
+                "arm,remote-ctrl",
+                "audss_cru",
+                "cdns,cru-ctrl",
+                "cdns,pcie-phy",
+                "cdnsp,usb3-phy",
+                "cix,dsp-ctrl",
+                "cix,hw",
+                "cix,usb_syscon",
+                "cix,usbphy_syscon",
+                "cru-ctrl",
+                "dp_phy",
+                "edp-panel",
+                "isp-src",
+                "physical-memory-group-manager",
+                "protected-memory-allocator",
+                "sky1,fch_cru",
+                "tzgt",
+                "uartclk",
+            ],
+            _ => &[],
+        };
+        assert_eq!(left, want, "{name}");
     }
 }
 
@@ -351,7 +163,7 @@ fn every_reference_is_classified() {
 fn only_soft_edges_close_cycles() {
     for (name, _) in machines() {
         let (i, _, deps) = machine(name);
-        let mut g = graph(&i, &deps);
+        let mut g = deps.graph(&i);
         let dropped = g.break_cycles().unwrap_or_else(|c| panic!("{name}: {c:?}"));
         for e in dropped {
             assert!(
@@ -385,39 +197,16 @@ fn opi6p_graph() {
     expect(
         &deps,
         &[
-            ("Optional \"actuator-src\" device", 1),
             ("Optional \"backlight\" device", 1),
-            ("Optional \"edp-panel\" device", 1),
-            ("Optional \"isp-src\" device", 1),
             ("Order \"remote-endpoint\" device", 22),
             ("Power \"power-domains\" sub", 3),
             ("Power \"power-supply\" device", 1),
             ("Power \"vcc-pcie-supply\" device", 2),
             ("Power _PR0 bus", 16),
             ("Power _PR3 bus", 16),
-            ("Required \"arm,remote-ctrl\" device", 1),
-            ("Required \"audss_cru\" device", 2),
-            ("Required \"cdns,cru-ctrl\" device", 4),
-            ("Required \"cdns,pcie-phy\" sub", 4),
-            ("Required \"cdnsp,usb3-phy\" sub", 6),
-            ("Required \"cix,dsp-ctrl\" device", 1),
-            ("Required \"cix,hw\" device", 2),
-            ("Required \"cix,usb_syscon\" device", 10),
-            ("Required \"cix,usbphy_syscon\" device", 5),
-            ("Required \"cru-ctrl\" device", 1),
-            ("Required \"dp_phy\" sub", 4),
             ("Required \"mboxes\" device", 6),
-            ("Required \"physical-memory-group-manager\" device", 1),
-            ("Required \"protected-memory-allocator\" device", 1),
             ("Required \"pwms\" device", 1),
             ("Required \"shmem\" device", 2),
-            ("Required \"sky1,fch_cru\" device", 3),
-            // Static data: a fixed clock rate, a TrustZone description.
-            ("Required \"tzgt\" bus", 1),
-            ("Required \"uartclk\" bus", 4),
-            ("Required Cix(Clkt) device", 69),
-            ("Required Cix(Dlkl) device", 37),
-            ("Required Cix(Rstl) device", 65),
             ("Required Dma device", 7),
             ("Required Gpio device", 22),
             ("Required Interrupt device", 10),
@@ -481,84 +270,6 @@ fn opi6p_graph() {
         let e = edge(&i, &deps, consumer, supplier);
         assert_eq!((e.kind, &e.via), (EdgeKind::Required, &Via::Dma));
     }
-    cix_tables(&i, &deps);
-}
-
-/// The Sky1's CIX lookup tables (`\_SB.REST` is `CIXA1019`): every entry
-/// reads, and every name in them resolves.
-fn cix_tables(i: &Interpreter, deps: &FirmwareDeps) {
-    let p = &deps.platform;
-    assert!(deps.malformed.is_empty(), "{:?}", deps.malformed);
-    let counts = (
-        p.clocks.len(),
-        p.resets.len(),
-        p.resource_names.len(),
-        p.links.len(),
-        p.reserved.len(),
-    );
-    assert_eq!(counts, (183, 109, 130, 37, 3));
-    let node = |path: &str| i.lookup(&aml::AmlPath::parse(path).unwrap()).unwrap();
-    let cclk = node("\\_SB.CCLK");
-    // A clock line names its consumer, which need not carry the table:
-    // DMA0's clock is in DMA1's CLKT.
-    let dma0 = node("\\_SB.DMA0");
-    let c = p.clock(&dma0, None).unwrap();
-    assert_eq!((c.provider, c.id, c.name.as_deref()), (cclk, 0xef, None));
-    let com0 = node("\\_SB.COM0");
-    assert_eq!(p.clock(&com0, Some("uartclk")).map(|c| c.id), Some(0x107));
-    assert!(p.clock(&com0, None).is_none(), "two named clocks");
-    // Resets: the FCH controller's I2C line 18, the audio subsystem's own
-    // controller for HDA.
-    let r = p.reset(&node("\\_SB.I2C0"), Some("i2c_reset")).unwrap();
-    assert_eq!((r.controller, r.index), (node("\\_SB.RST1"), 18));
-    let r = p.reset(&node("\\_SB.HDA"), None).unwrap();
-    assert_eq!((r.controller, r.index), (node("\\_SB.ADSS.ARST"), 14));
-    // Resource names: 0x200 counts memory ranges, 0x400 interrupts.
-    let prc0 = node("\\_SB.PRC0");
-    assert_eq!(p.resource(&prc0, ResourceKind::Memory, "rcsu"), Some(1));
-    assert_eq!(
-        p.resource(&prc0, ResourceKind::Interrupt, "phy_int"),
-        Some(4)
-    );
-    // Firmware's carveouts for the audio DMA, HDA, and DSP.
-    let reserved: Vec<_> = p
-        .reserved
-        .iter()
-        .map(|r| (i.path(r.device).to_text(), r.base, r.size, r.no_map))
-        .collect();
-    assert_eq!(
-        reserved,
-        [
-            (String::from("\\_SB_.DMA1"), 0xd000_0000, 0x70_0000, true),
-            (String::from("\\_SB_.HDA_"), 0xd070_0000, 0x70_0000, true),
-            (String::from("\\_SB_.DSP_"), 0xcde0_8000, 0x10_0000, true),
-        ]
-    );
-    // The edges they make.
-    for (consumer, supplier, table) in [
-        ("\\_SB_.COM0", "\\_SB_.CCLK", Cix::Clkt),
-        ("\\_SB_.DMA0", "\\_SB_.CCLK", Cix::Clkt),
-        ("\\_SB_.I2C0", "\\_SB_.RST1", Cix::Rstl),
-        ("\\_SB_.HDA_", "\\_SB_.ADSS.ARST", Cix::Rstl),
-        ("\\_SB_.HDA_", "\\_SB_.ADSS.ACLK", Cix::Dlkl),
-        ("\\_SB_.PRC0", "\\_SB_.PCP0", Cix::Dlkl),
-        ("\\_SB_.EDP0", "\\_SB_.DPBL", Cix::Dlkl),
-    ] {
-        let e = deps.edges.iter().find(|e| {
-            e.via == Via::Cix(table)
-                && i.path(e.consumer).to_text() == consumer
-                && i.path(e.supplier).to_text() == supplier
-        });
-        assert_eq!(
-            e.map(|e| e.kind),
-            Some(EdgeKind::Required),
-            "{supplier} -> {consumer}"
-        );
-    }
-    // MAC1 is absent (`_STA` 0), so its tables are not read.
-    let mac1 = node("\\_SB.MAC1");
-    assert!(p.clocks.iter().all(|c| c.consumer != mac1));
-    assert!(deps.edges.iter().all(|e| e.consumer != mac1));
 }
 
 /// The Q8B depends by `_DEP`; with its camera and sensor hubs off, six of
@@ -641,50 +352,6 @@ fn x870e_graph() {
     assert!(deps.platform.is_empty());
 }
 
-/// `acpi0` hands each Sky1 child its clock and reset lines, by the path
-/// of the device serving them.
-#[test]
-fn opi6p_children_get_their_lines() {
-    use bus::LineKind;
-    let (_, tables) = machines().into_iter().find(|(n, _)| *n == "opi6p").unwrap();
-    let (mut i, mut h) = load("opi6p", &tables);
-    let walk = crate::bus::walk(&mut i, &mut h, &dma_controllers("opi6p"));
-    let lines = |path: &str| {
-        walk.found
-            .iter()
-            .find(|f| f.device.path == path)
-            .map(|f| f.lines.clone())
-            .unwrap_or_default()
-    };
-    let line = |kind, name: Option<&str>, sup: &str, id| {
-        (kind, name.map(String::from), String::from(sup), id)
-    };
-    assert_eq!(
-        lines("\\_SB_.COM0"),
-        [
-            line(LineKind::Clock, Some("apb_pclk"), "\\_SB_.CCLK", 0xf6),
-            line(LineKind::Clock, Some("uartclk"), "\\_SB_.CCLK", 0x107),
-        ]
-    );
-    assert_eq!(
-        lines("\\_SB_.GPI0"),
-        [
-            line(LineKind::Clock, None, "\\_SB_.CCLK", 0x106),
-            line(LineKind::Reset, Some("apb_reset"), "\\_SB_.RST1", 26),
-        ]
-    );
-    // DMA0's clock comes from DMA1's table.
-    assert_eq!(
-        lines("\\_SB_.DMA0"),
-        [
-            line(LineKind::Clock, None, "\\_SB_.CCLK", 0xef),
-            line(LineKind::Reset, Some("dma_reset"), "\\_SB_.RST1", 11),
-        ]
-    );
-    let total: usize = walk.found.iter().map(|f| f.lines.len()).sum();
-    assert_eq!(total, 183 + 109);
-}
-
 /// The dependencies of devices named only by `_ADR`, which `acpi0` hands
 /// to whatever node stands for them (a PCI function's ACPI companion,
 /// DRIVER-MODEL.md §5.2). The Q8B's PCIe root ports wait for the GPIO
@@ -695,9 +362,9 @@ fn opi6p_children_get_their_lines() {
 fn companion_deps() {
     use devtree::graph::Origin;
     let walk_of = |name: &str| {
-        let (_, tables) = machines().into_iter().find(|(n, _)| *n == name).unwrap();
-        let (mut i, mut h) = load(name, &tables);
-        crate::bus::walk(&mut i, &mut h, &dma_controllers(name)).companion_deps
+        let (mut i, mut h) = acpi_corpus::load(name);
+        let id = FirmwareIdentity::default();
+        crate::bus::walk(&mut i, &mut h, &dma_controllers(name), &[], &id).companion_deps
     };
     assert!(walk_of("opi6p").is_empty());
     assert!(walk_of("x870e").is_empty());

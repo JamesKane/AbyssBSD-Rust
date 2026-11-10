@@ -329,8 +329,8 @@ those passes order is either initialized before the tree, or ordered by the grap
 
 ACPI tables on arm64 SoCs are often incomplete or wrong, and some vendors describe clocks, resets,
 and power outside the standard objects. Rather than spreading fixes through drivers, each
-supported platform may have a **platform description**: `const` data in `lib/devtree`, selected by
-the firmware's identity (FADT/MCFG OEM ID, a namespace object such as Qualcomm's `\_SB.SOID` or
+supported platform may have a **platform description**: data in its own crate under `platform/`
+([ADR-0020](adr/0020-platform-crates.md)), selected by the firmware's identity (FADT/MCFG OEM ID, a namespace object such as Qualcomm's `\_SB.SOID` or
 CIX's `CIXA1019`), host-tested against the captured tables. It is FreeBSD's `acpi_quirks`, made
 data and widened. It may:
 
@@ -344,11 +344,24 @@ data and widened. It may:
 | **Describe reserved memory** (§8.4) | Carveouts, firmware shared memory |
 
 An extractor for vendor tables that live in AML (CIX's `CLKT`, `RSTL`, `RSNL`, `DLKL`, `RSVL`)
-also belongs here: it evaluates them at graph build and produces the same typed entries. The typed
-entries are `lib/devtree::platform` (clock and reset lines, resource names, device links, reserved
-memory); CIX's extractor is `sys/acpi::cix`, selected by a present `CIXA1019`. Its clock, reset,
-and link entries make required edges (origin `Platform`) from the clock provider (`CIXHA010`),
-the reset controller, and the link's supplier.
+also belongs here: it evaluates them at graph build and produces the same typed entries, as do a
+vendor's `_DSD` property names (`cix,usb_syscon`). As built (ADR-0020):
+
+- A platform implements `acpi_platform::PlatformSource` (`lib/acpi-platform`): `applies` (by
+  identity or a present namespace object), `extract` (its tables, into the common types), and
+  `reference_kinds` (its vendor `_DSD` names). The typed entries are `lib/devtree::platform`
+  (clock and reset lines, resource names, device links, reserved memory); `lib/devtree::dsd`
+  holds only generic property names.
+- The platforms are listed in `kernel/table`'s `PLATFORMS` and reach `sys/acpi` through
+  `acpi::Ops::platforms`. The graph builder runs every one that applies and concatenates their
+  entries; two lines of one consumer under one name are a diagnostic. Clock, reset, and link
+  entries make required edges (`Via::Platform`, origin `Platform`) from the line's provider, the
+  reset controller, and the link's supplier.
+- The first platform is `platform/cix-sky1`, applying when a `CIXA1019` is present.
+- `sys/acpi`, `lib/devtree`, and `lib/acpi-platform` name no vendor in code; `cargo xtask
+  check`'s policy enforces it.
+- The corrections in the table above are not built yet. Each kind gets one generic applier in
+  `sys/acpi`, and platforms supply only the entries, with the first driver that needs one.
 
 Rules:
 

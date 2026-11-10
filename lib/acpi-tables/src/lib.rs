@@ -141,6 +141,17 @@ impl<'a> Sdt<'a> {
         &self.bytes[16..24]
     }
 
+    /// The OEM revision.
+    #[must_use]
+    pub fn oem_revision(&self) -> u32 {
+        u32::from_le_bytes([
+            self.bytes[24],
+            self.bytes[25],
+            self.bytes[26],
+            self.bytes[27],
+        ])
+    }
+
     /// The whole table, header included.
     #[must_use]
     pub fn bytes(&self) -> &'a [u8] {
