@@ -106,12 +106,32 @@ fn an_output_gets_its_level_before_its_direction() {
     // A bias is the pad's, not this controller's.
     // SAFETY: host tests run on a thread that may block.
     let s = unsafe { Sleepable::assume() };
-    let p = Pins::new(Arc::new(c), &NO_DOMAIN);
+    let p = Pins::new(Arc::new(c), &NO_DOMAIN, "0".into());
     assert_eq!(
         p.configure(&s, 1, PinMode::Input, Pull::Up),
         Err(ProviderError::Unsupported)
     );
     assert_eq!(p.configure(&s, 1, PinMode::Input, Pull::Default), Ok(()));
+}
+
+#[test]
+fn pins_report_their_state_and_toggle() {
+    let (m, c) = controller(32);
+    m.put(reg::BYPASS_MODE, 0b100);
+    m.put(reg::DIRECTION_MODE, 0b011);
+    assert_eq!(c.state(0), Ok(PinState::Input));
+    assert_eq!(c.state(2), Ok(PinState::Peripheral));
+    assert_eq!(c.state(3), Ok(PinState::Output));
+    assert_eq!(c.state(32), Err(ProviderError::NoSuchLine));
+    m.put(reg::OUTPUT_VALUE, 0b1000);
+    c.toggle(3).unwrap();
+    c.toggle(4).unwrap();
+    assert_eq!(m.get(reg::OUTPUT_VALUE), 0b1_0000);
+    // SAFETY: host tests run on a thread that may block.
+    let s = unsafe { Sleepable::assume() };
+    let p = Pins::new(Arc::new(c), &NO_DOMAIN, "4".into());
+    assert_eq!(p.name(7), "gpio4.7");
+    assert_eq!(p.state(&s, 3), Ok(PinState::Output));
 }
 
 #[test]

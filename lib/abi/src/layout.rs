@@ -112,6 +112,7 @@ pub const CONSTANTS: &[&[ConstValue]] = &[
     crate::syslog::CONSTANTS,
     crate::devfs::CONSTANTS,
     crate::efi::CONSTANTS,
+    crate::gpio::CONSTANTS,
 ];
 
 const fn bus_const(c_name: &'static str, value: i64) -> ConstValue {
@@ -1872,6 +1873,31 @@ pub static LAYOUTS: &[StructLayout] = &[
         waketime => "waketime",
         enabled => "enabled",
         pending => "pending",
+    }),
+    layout!(crate::gpio::GpioPin, "struct gpio_pin", ["sys/types.h", "sys/gpio.h"], All, {
+        gp_pin => "gp_pin",
+        gp_name => "gp_name",
+        gp_caps => "gp_caps",
+        gp_flags => "gp_flags",
+    }),
+    layout!(crate::gpio::GpioReq, "struct gpio_req", ["sys/types.h", "sys/gpio.h"], All, {
+        gp_pin => "gp_pin",
+        gp_value => "gp_value",
+    }),
+    layout!(crate::gpio::GpioAccess32, "struct gpio_access_32", ["sys/types.h", "sys/gpio.h"], All, {
+        first_pin => "first_pin",
+        clear_pins => "clear_pins",
+        change_pins => "change_pins",
+        orig_pins => "orig_pins",
+    }),
+    layout!(crate::gpio::GpioConfig32, "struct gpio_config_32", ["sys/types.h", "sys/gpio.h"], All, {
+        first_pin => "first_pin",
+        num_pins => "num_pins",
+        pin_flags => "pin_flags",
+    }),
+    layout!(crate::gpio::GpioEventConfig, "struct gpio_event_config", ["sys/types.h", "sys/gpio.h"], All, {
+        gp_report_type => "gp_report_type",
+        gp_fifo_size => "gp_fifo_size",
     }),
     layout!(bus::DevreqBuffer, "struct devreq_buffer", ["sys/types.h", "sys/bus.h"], All, {
         buffer => "buffer",

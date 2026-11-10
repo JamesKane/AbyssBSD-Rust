@@ -60,7 +60,7 @@ fn same_bus(ids: &Ids, ident: &Ident) -> bool {
         (ids, ident),
         (
             Ids::Nexus(_),
-            Ident::Nexus(_) | Ident::Channel { .. } | Ident::Child { .. }
+            Ident::Nexus(_) | Ident::Channel { .. } | Ident::Child { .. } | Ident::Pins { .. }
         ) | (Ids::PciBus, Ident::PciBus { .. })
             | (Ids::Acpi(_), Ident::Acpi(..))
             | (Ids::Pci(_), Ident::Pci(..))

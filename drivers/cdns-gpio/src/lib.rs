@@ -44,7 +44,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::sync::Arc;
 
-use bus::gpio::{Gpio, PinMode, Pull};
+use bus::gpio::{Gpio, PinMode, PinState, Pull};
 use bus::provider::{ClockHandle, ProviderError, ResetHandle};
 use bus::{
     AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, IrqLine, MmioGrant, Resource,
@@ -211,6 +211,28 @@ impl<W: Words> Controller<W> {
         Ok(self.words.read32(reg::INPUT_VALUE) & b != 0)
     }
 
+    /// What `line` is doing: a peripheral's while its bypass bit is set,
+    /// else an input or an output by its direction bit.
+    pub fn state(&self, line: u32) -> Result<PinState, ProviderError> {
+        let b = self.bit(line).ok_or(ProviderError::NoSuchLine)?;
+        Ok(if self.words.read32(reg::BYPASS_MODE) & b != 0 {
+            PinState::Peripheral
+        } else if self.words.read32(reg::DIRECTION_MODE) & b != 0 {
+            PinState::Input
+        } else {
+            PinState::Output
+        })
+    }
+
+    /// Inverts what `line` drives.
+    pub fn toggle(&self, line: u32) -> Result<(), ProviderError> {
+        let b = self.bit(line).ok_or(ProviderError::NoSuchLine)?;
+        let _g = self.config.lock();
+        let v = self.words.read32(reg::OUTPUT_VALUE);
+        self.words.write32(reg::OUTPUT_VALUE, v ^ b);
+        Ok(())
+    }
+
     /// Drives `line` (an output) to `high`.
     pub fn drive(&self, line: u32, high: bool) -> Result<(), ProviderError> {
         let b = self.bit(line).ok_or(ProviderError::NoSuchLine)?;
@@ -341,6 +363,8 @@ impl<W: Words> Cascade for Controller<W> {
 pub struct Pins<W> {
     ctl: Arc<Controller<W>>,
     domain: &'static dyn IrqDomain,
+    /// The controller's `_UID`, which its pins' names carry.
+    uid: String,
 }
 
 impl<W> core::fmt::Debug for Pins<W> {
@@ -350,9 +374,9 @@ impl<W> core::fmt::Debug for Pins<W> {
 }
 
 impl<W: Words> Pins<W> {
-    /// `ctl`'s lines, interrupting in `domain`.
-    pub fn new(ctl: Arc<Controller<W>>, domain: &'static dyn IrqDomain) -> Self {
-        Self { ctl, domain }
+    /// `ctl`'s lines, interrupting in `domain`, named for `uid`.
+    pub fn new(ctl: Arc<Controller<W>>, domain: &'static dyn IrqDomain, uid: String) -> Self {
+        Self { ctl, domain, uid }
     }
 }
 
@@ -390,6 +414,20 @@ impl<W: Words> Gpio for Pins<W> {
     fn interrupts(&self) -> Option<&'static dyn IrqDomain> {
         Some(self.domain)
     }
+
+    fn state(&self, _: &Sleepable, pin: u32) -> Result<PinState, ProviderError> {
+        self.ctl.state(pin)
+    }
+
+    /// `gpio<uid>.<pin>`, as the AbyssBSD Project's FreeBSD driver names
+    /// them.
+    fn name(&self, pin: u32) -> String {
+        alloc::format!("gpio{}.{pin}", self.uid)
+    }
+
+    fn toggle(&self, _: &Sleepable, pin: u32) -> Result<(), ProviderError> {
+        self.ctl.toggle(pin)
+    }
 }
 
 /// `gpioN`.
@@ -398,6 +436,8 @@ pub struct CdnsGpio {
     cascade: CascadeDomain,
     node: Option<aml::NodeId>,
     parent: SpinLock<Option<IrqLine>>,
+    /// Its `_UID`, for its pins' names.
+    uid: String,
     _clock: Option<ClockHandle>,
     _reset: Option<ResetHandle>,
 }
@@ -466,7 +506,12 @@ impl Driver for CdnsGpio {
             .map_err(|e| AttachError::from(ResourceError::Irq(e)))?;
         let parent = cx.irq(0)?;
         let node = cx.bus_data::<acpi::AcpiDevice>().map(|d| d.node);
+        let uid = match cx.ident() {
+            Ident::Acpi(i, _) => i.uid.clone().unwrap_or_default(),
+            _ => String::new(),
+        };
         Ok(Self {
+            uid,
             ctl,
             cascade,
             node,
@@ -477,18 +522,28 @@ impl Driver for CdnsGpio {
     }
 
     fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
-        cx.provide_gpio(Arc::new(Pins::new(
+        let source = cx.provide_gpio(Arc::new(Pins::new(
             Arc::clone(&self.ctl),
             self.cascade.domain(),
+            self.uid.clone(),
         )));
         // Taken in its own statement: installing may sleep.
         let parent = self.parent.lock().take();
         if let Some(line) = parent {
             cx.interrupt(line, Some(intr), None, 0)?;
         }
-        if let Some(node) = self.node {
-            acpi::aei::add(cx, node);
-        }
+        // Its bus, which adds `gpioc` and the `_AEI`'s `gpio_aei`
+        // (`gpiobus_add_bus`).
+        let data = gpiobus::GpioBusData {
+            source,
+            controller: cx.node(),
+            acpi: self.node,
+        };
+        cx.add_child(
+            gpiobus::bus_ident(self.node.is_some()),
+            Some(Arc::new(data)),
+            alloc::vec::Vec::new(),
+        );
         Ok(())
     }
 

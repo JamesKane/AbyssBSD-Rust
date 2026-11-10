@@ -32,8 +32,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use aml::resource::{GpioKind, Resource as AmlResource};
 use bus::gpio::{GpioMode, GpioUse};
 use bus::{
-    AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, IrqLine, Line, LineDetail, LineKind,
-    StartCx, StopCx, StopReason,
+    AttachCx, AttachError, DeviceId, Driver, DriverDecl, Ident, Ids, IrqLine, Line, LineDetail,
+    LineKind, StartCx, StopCx, StopReason,
 };
 use sched::Sleepable;
 
@@ -118,21 +118,25 @@ pub fn events(
     (out, notes)
 }
 
-/// Adds the `gpio_aei` child for the `_AEI` of `controller`, the GPIO
-/// controller `cx` is starting, if it has events. Call it after
-/// publishing the pins (`StartCx::provide_gpio`).
-pub fn add<D: Driver>(cx: &mut StartCx<'_, D>, controller: aml::NodeId) {
+/// Adds the `gpio_aei` child for the `_AEI` of `controller`, whose pins
+/// `supplier` serves, under the device `cx` is starting (the controller's
+/// `gpiobus`, as FreeBSD's `acpi_gpiobus_attach_aei` adds it), if it has
+/// events. Call it once the pins are published (`StartCx::provide_gpio`).
+pub fn add<D: Driver>(cx: &mut StartCx<'_, D>, controller: aml::NodeId, supplier: DeviceId) {
     let Some(svc) = service() else { return };
-    let (events, notes) = svc.run(cx.sleepable(), move |interp, host| {
-        events(interp, host, controller)
+    let (events, notes, handle) = svc.run(cx.sleepable(), move |interp, host| {
+        let (e, n) = events(interp, host, controller);
+        (e, n, alloc::format!("{}._AEI", interp.path(controller)))
     });
-    for n in &notes {
-        svc.ops().log(format_args!("acpi0: {n}"));
+    if bus::bootverbose() {
+        for n in &notes {
+            svc.ops().log(format_args!("acpi0: {n}"));
+        }
     }
     if events.is_empty() {
         return;
     }
-    let me = cx.node();
+    let me = supplier;
     let lines = events
         .iter()
         .map(|e| Line {
@@ -143,10 +147,13 @@ pub fn add<D: Driver>(cx: &mut StartCx<'_, D>, controller: aml::NodeId) {
             detail: LineDetail::Gpio(e.pin.clone()),
         })
         .collect();
+    let pins: Vec<u32> = events.iter().map(|e| e.pin.pins[0]).collect();
     let child = cx.add_child(
-        Ident::Child {
+        Ident::Pins {
             class: "gpio_aei",
             desc: "ACPI Event Information Device",
+            pins: bus::gpio::pin_list(&pins),
+            handle: Some(handle),
         },
         Some(Arc::new(AeiEvents { controller, events })),
         Vec::new(),

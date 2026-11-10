@@ -89,6 +89,21 @@ pub enum Ident {
         /// The channel number.
         channel: u32,
     },
+    /// A named child of a GPIO bus at some of its pins (`gpioc` at every
+    /// pin, `gpio_aei` at its events'), claimed by class as a [`Self::Child`]
+    /// is. Its location is `pins=` and the pins (FreeBSD's
+    /// `gpiobus_child_location`), then, on an ACPI bus, `handle=` and the
+    /// handle, `(unknown)` for none (`acpi_gpiobus_child_location`).
+    Pins {
+        /// The class (the driver's name).
+        class: &'static str,
+        /// The description.
+        desc: &'static str,
+        /// The pins, as [`crate::gpio::pin_list`] writes them.
+        pins: String,
+        /// The ACPI handle's path, if the bus is ACPI's.
+        handle: Option<String>,
+    },
     /// A test bus child.
     Test(TestIdent),
 }
@@ -136,7 +151,10 @@ impl Ids {
         match (self, ident) {
             (
                 Self::Nexus(names),
-                Ident::Nexus(n) | Ident::Channel { class: n, .. } | Ident::Child { class: n, .. },
+                Ident::Nexus(n)
+                | Ident::Channel { class: n, .. }
+                | Ident::Child { class: n, .. }
+                | Ident::Pins { class: n, .. },
             ) => names.contains(n).then_some(Rank::DEFAULT),
             (Self::PciBus, Ident::PciBus { .. }) => Some(Rank::DEFAULT),
             (Self::Acpi(t), Ident::Acpi(i, _)) => best(t, i),
@@ -432,7 +450,8 @@ impl Ident {
             | Self::Nexus(_)
             | Self::PciBus { .. }
             | Self::Channel { .. }
-            | Self::Child { .. } => Ok(()),
+            | Self::Child { .. }
+            | Self::Pins { .. } => Ok(()),
             Self::Acpi(i, _) => strings::acpi_pnpinfo(out, i),
             Self::Pci(i, _, _) => strings::pci_pnpinfo(out, i),
             Self::Virtio(i) => strings::virtio_pnpinfo(out, i),
@@ -452,6 +471,13 @@ impl Ident {
             | Self::PciBus { .. }
             | Self::Virtio(_)
             | Self::Child { .. } => Ok(()),
+            Self::Pins { pins, handle, .. } => {
+                let w = fmt::Write::write_fmt(out, format_args!("pins={pins}"));
+                match handle {
+                    Some(h) => fmt::Write::write_fmt(out, format_args!(" handle={h}")),
+                    None => w,
+                }
+            }
             Self::Acpi(_, path) => strings::acpi_location(out, path, None),
             Self::Pci(_, a, path) => strings::pci_location(out, a, path.as_deref(), None),
             Self::Channel { channel, .. } => {

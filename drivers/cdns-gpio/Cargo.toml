@@ -10,6 +10,7 @@ acpi = { path = "../../sys/acpi" }
 aml = { path = "../../lib/aml" }
 bus = { path = "../../sys/bus" }
 devtree = { path = "../../lib/devtree" }
+gpiobus = { path = "../../sys/gpio" }
 irq = { path = "../../sys/irq" }
 regs = { path = "../../lib/regs" }
 sched = { path = "../../sys/sched" }

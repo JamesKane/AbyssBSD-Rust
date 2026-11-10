@@ -60,6 +60,37 @@ pub enum PinMode {
     },
 }
 
+/// What a pin is doing now (FreeBSD's `GPIO_PIN_GETFLAGS`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PinState {
+    /// Reads the pad.
+    Input,
+    /// Drives the pad.
+    Output,
+    /// A peripheral's, not the controller's (reported as no direction).
+    Peripheral,
+}
+
+/// What a pin can be (FreeBSD's `GPIO_PIN_GETCAPS`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct PinCaps {
+    pub input: bool,
+    pub output: bool,
+    pub pull_up: bool,
+    pub pull_down: bool,
+}
+
+impl PinCaps {
+    /// An input or an output, with no bias of its own.
+    pub const IN_OUT: Self = Self {
+        input: true,
+        output: true,
+        pull_up: false,
+        pull_down: false,
+    };
+}
+
 /// What a `GpioIo` descriptor allows (ACPI's `IoRestriction`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Restriction {
@@ -134,6 +165,26 @@ pub trait Gpio: Send + Sync {
     fn interrupts(&self) -> Option<&'static dyn irq::IrqDomain> {
         None
     }
+    /// What `pin` is doing now; [`ProviderError::Unsupported`] if the
+    /// controller cannot say.
+    fn state(&self, s: &Sleepable, pin: u32) -> Result<PinState, ProviderError> {
+        let _ = (s, pin);
+        Err(ProviderError::Unsupported)
+    }
+    /// What `pin` can be.
+    fn caps(&self, pin: u32) -> PinCaps {
+        let _ = pin;
+        PinCaps::IN_OUT
+    }
+    /// `pin`'s name (FreeBSD's `GPIO_PIN_GETNAME`).
+    fn name(&self, pin: u32) -> alloc::string::String {
+        alloc::format!("pin {pin}")
+    }
+    /// Inverts what `pin` (an output) drives.
+    fn toggle(&self, s: &Sleepable, pin: u32) -> Result<(), ProviderError> {
+        let _ = (s, pin);
+        Err(ProviderError::Unsupported)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -179,6 +230,20 @@ impl GpioSource {
     #[must_use]
     pub fn interrupts(&self) -> Option<&'static dyn irq::IrqDomain> {
         self.imp.interrupts()
+    }
+
+    /// `pin` as `gpioc` reaches it: through the bus, past any claim, as
+    /// FreeBSD's `gpiobus` passes `gpioc`'s requests to the controller
+    /// ([`ProviderError::NoSuchLine`] past the last pin).
+    pub fn raw(&self, pin: u32) -> Result<RawPin<'_>, ProviderError> {
+        self.live()?;
+        if pin >= self.imp.pins() {
+            return Err(ProviderError::NoSuchLine);
+        }
+        Ok(RawPin {
+            imp: &*self.imp,
+            pin,
+        })
     }
 
     /// `(holders, shared)` for `pin`.
@@ -266,6 +331,81 @@ impl GpioSource {
             Ok(())
         }
     }
+}
+
+/// One pin, unclaimed, for `gpioc` ([`GpioSource::raw`]).
+pub struct RawPin<'a> {
+    imp: &'a dyn Gpio,
+    pin: u32,
+}
+
+impl core::fmt::Debug for RawPin<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("RawPin")
+            .field("pin", &self.pin)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RawPin<'_> {
+    pub fn state(&self, s: &Sleepable) -> Result<PinState, ProviderError> {
+        self.imp.state(s, self.pin)
+    }
+
+    #[must_use]
+    pub fn caps(&self) -> PinCaps {
+        self.imp.caps(self.pin)
+    }
+
+    #[must_use]
+    pub fn name(&self) -> alloc::string::String {
+        self.imp.name(self.pin)
+    }
+
+    pub fn configure(&self, s: &Sleepable, mode: PinMode, pull: Pull) -> Result<(), ProviderError> {
+        self.imp.configure(s, self.pin, mode, pull)
+    }
+
+    pub fn get(&self, s: &Sleepable) -> Result<bool, ProviderError> {
+        self.imp.get(s, self.pin)
+    }
+
+    pub fn set(&self, s: &Sleepable, high: bool) -> Result<(), ProviderError> {
+        self.imp.set(s, self.pin, high)
+    }
+
+    pub fn toggle(&self, s: &Sleepable) -> Result<(), ProviderError> {
+        self.imp.toggle(s, self.pin)
+    }
+}
+
+/// The pins `gpiobus` names for a child, as FreeBSD's
+/// `gpiobus_print_pins` writes them, in their order: ascending runs as
+/// `first-last`, joined by commas (`0-31`, `6`, `1,3-5`).
+#[must_use]
+pub fn pin_list(pins: &[u32]) -> alloc::string::String {
+    use core::fmt::Write;
+    let sorted = pins;
+    let mut out = alloc::string::String::new();
+    let mut i = 0;
+    while i < sorted.len() {
+        let first = sorted[i];
+        let mut last = first;
+        while i + 1 < sorted.len() && sorted[i + 1] == last.wrapping_add(1) {
+            i += 1;
+            last = sorted[i];
+        }
+        if !out.is_empty() {
+            out.push(',');
+        }
+        let _ = if first == last {
+            write!(out, "{first}")
+        } else {
+            write!(out, "{first}-{last}")
+        };
+        i += 1;
+    }
+    out
 }
 
 /// A consumer's claim on a descriptor's pins, by their index in it.
@@ -504,5 +644,14 @@ mod tests {
             src.claim(&s, &[2], Restriction::None, false).unwrap_err(),
             ProviderError::Revoked
         );
+    }
+
+    #[test]
+    fn pin_lists_print_as_gpiobus_does() {
+        assert_eq!(pin_list(&(0..32).collect::<Vec<_>>()), "0-31");
+        assert_eq!(pin_list(&[6]), "6");
+        assert_eq!(pin_list(&[1, 3, 4, 5]), "1,3-5");
+        assert_eq!(pin_list(&[5, 4]), "5,4");
+        assert_eq!(pin_list(&[]), "");
     }
 }

@@ -78,7 +78,9 @@ pub static X86_64: &[DriverDecl] = drivers![
 ];
 
 /// The aarch64 kernel's drivers: the SBSA watchdog and the xHCI that
-/// firmware describes in ACPI (`files.arm64`), and the Sky1's SoC blocks,
+/// firmware describes in ACPI (`files.arm64`), `gpiobus` and `gpioc`
+/// (arm64's `std.dev` has `device gpio`; amd64's GENERIC does not), and
+/// the Sky1's SoC blocks,
 /// which FreeBSD lacks or builds for arm64 only (`cdnc_i2c`).
 #[cfg(any(target_arch = "aarch64", not(target_os = "none")))]
 pub static AARCH64: &[DriverDecl] = drivers![
@@ -92,6 +94,8 @@ pub static AARCH64: &[DriverDecl] = drivers![
     sky1_syscon::DRIVER,
     cix_mbox::DRIVER,
     cdns_gpio::DRIVER,
+    gpiobus::GPIOBUS,
+    gpiobus::GPIOC,
     cdnc_i2c::DRIVER,
 ];
 

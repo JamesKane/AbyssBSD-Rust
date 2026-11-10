@@ -41,6 +41,7 @@ timers = { path = "../../drivers/timers" }
 cix-sky1 = { path = "../../platform/cix-sky1" }
 cdnc-i2c = { path = "../../drivers/cdnc-i2c" }
 cdns-gpio = { path = "../../drivers/cdns-gpio" }
+gpiobus = { path = "../../sys/gpio" }
 cix-mbox = { path = "../../drivers/cix-mbox" }
 sbsa-gwdt = { path = "../../drivers/sbsa-gwdt" }
 sky1-clk = { path = "../../drivers/sky1-clk" }

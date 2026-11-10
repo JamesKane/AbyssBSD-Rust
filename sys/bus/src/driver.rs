@@ -1082,10 +1082,11 @@ impl<D: Driver> StartCx<'_, D> {
     /// Publishes this device as a GPIO controller: consumers whose GPIO
     /// lines name it claim pins from it, and their `GpioInt`s interrupt in
     /// the domain [`Gpio::interrupts`] returns.
-    pub fn provide_gpio(&mut self, imp: Arc<dyn Gpio>) {
+    pub fn provide_gpio(&mut self, imp: Arc<dyn Gpio>) -> Arc<GpioSource> {
         let src = GpioSource::new(imp);
         self.mgr
-            .provide(self.s, self.binding.node, Provided::Gpio(src));
+            .provide(self.s, self.binding.node, Provided::Gpio(Arc::clone(&src)));
+        src
     }
 
     /// Publishes this device as a mailbox: clients whose mailbox lines

@@ -27,6 +27,7 @@ pub mod event;
 pub mod exec;
 pub mod fbio;
 pub mod fcntl;
+pub mod gpio;
 pub mod inet;
 pub mod inotify;
 pub mod ioctl;
