@@ -719,6 +719,31 @@ impl Hc {
         let Some(sl) = g.as_ref() else { return };
         let ep = EndpointContext::decode(&Self::read_ctx(&sl.out, self.csz.device_endpoint(dci)));
         let slot_ctx = Self::read_ctx(&sl.out, 0);
+        // The ring's first TRBs as the controller reads them: for a
+        // control transfer, setup, data (its buffer address), status.
+        if let Some(r) = sl
+            .eps
+            .get(usize::from(dci.get()))
+            .and_then(Option::as_ref)
+            .and_then(|e| match &e.rings {
+                Rings::One(r) => Some(r),
+                Rings::Streams { .. } => None,
+            })
+        {
+            let m = r.memory();
+            for i in 0..4.min(m.slots()) {
+                let t = m.read(i);
+                bus::manager().log(format_args!(
+                    "{}: slot {slot} ring {:#x} TRB {i}: {:08x} {:08x} {:08x} {:08x}",
+                    self.name,
+                    m.bus_addr(),
+                    t.0[0],
+                    t.0[1],
+                    t.0[2],
+                    t.0[3]
+                ));
+            }
+        }
         bus::manager().log(format_args!(
             "{}: slot {slot} endpoint {}: state {} dequeue {:#x} (cycle {}), slot context {:08x} {:08x} {:08x} {:08x}",
             self.name,
