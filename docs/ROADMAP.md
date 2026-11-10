@@ -2544,8 +2544,11 @@ machines against FreeBSD on bare metal; the exit criteria above.
     engine is its driver's call, and a PL011 runs on programmed I/O, as FreeBSD's does. So the
     UARTs no longer wait for the FCH DMA-350 (`DMA0`).
   - `kernel/table`'s `nothing_with_a_driver_waits_forever` keeps the ledger of devices with a
-    driver that would still wait: the Sky1's COM0, COM1, and COM3, on the FCH CRU (`UCRU`). Next:
-    `UCRU`, then GPIO, I2C, and the GPT timer.
+    driver that would still wait. It held the Sky1's COM0, COM1, and COM3 on the FCH CRU (`UCRU`)
+    until `sky1_syscon` (`CIXHA018`, a shared register window) bound it without touching it; it
+    now holds no Sky1 device. Leasing fields of such a window to the devices that program it
+    comes with the first of them.
+  - Next: GPIO, I2C (the RTC), the GPT timer, and the SCMI agent with its mailboxes.
 
 ## Phase 9: Self-hosting and hardening = **v1.0 / Day 1 complete** (L)
 

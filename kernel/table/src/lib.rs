@@ -35,6 +35,7 @@ pub static DRIVERS: &[DriverDecl] = &[
     sky1_clk::DRIVER,
     sky1_pinctrl::DRIVER,
     sky1_reset::DRIVER,
+    sky1_syscon::DRIVER,
     pci::bus::DRIVER,
     pci::bridge::DRIVER,
     virtio::pci::MODERN,

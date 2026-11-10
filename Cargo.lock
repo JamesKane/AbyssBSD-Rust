@@ -185,6 +185,7 @@ dependencies = [
  "acpi-platform",
  "ahci",
  "amdsbwd",
+ "aml",
  "atrtc",
  "bus",
  "cix-sky1",
@@ -200,6 +201,7 @@ dependencies = [
  "sky1-clk",
  "sky1-pinctrl",
  "sky1-reset",
+ "sky1-syscon",
  "timers",
  "uart",
  "umass",
@@ -637,6 +639,14 @@ dependencies = [
  "regs",
  "sched",
  "sync",
+]
+
+[[package]]
+name = "sky1-syscon"
+version = "0.0.0"
+dependencies = [
+ "bus",
+ "devtree",
 ]
 
 [[package]]

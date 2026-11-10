@@ -352,13 +352,6 @@ fn nothing_with_a_driver_waits_forever() {
             r.iter().map(|s| String::from(*s)).collect::<Vec<_>>(),
         )
     };
-    // COM0, COM1, and COM3 name the FCH CRU (`sky1,fch_cru`), which has
-    // no driver yet.
-    let sky1 = alloc::vec![
-        pair("\\_SB_.COM0", &["\\_SB_.UCRU"]),
-        pair("\\_SB_.COM1", &["\\_SB_.UCRU"]),
-        pair("\\_SB_.COM3", &["\\_SB_.UCRU"]),
-    ];
     // The Q8B (Tier 2): two PCIe hosts wait for Qualcomm's power
     // framework device and its PCIe power device.
     let q8b = alloc::vec![
@@ -367,7 +360,6 @@ fn nothing_with_a_driver_waits_forever() {
     ];
     for (name, _) in acpi_corpus::machines() {
         let want = match name {
-            "opi6p" => sky1.clone(),
             "radxa-q8b" => q8b.clone(),
             _ => Vec::new(),
         };

@@ -24,6 +24,7 @@ sbsa-gwdt = { path = "../../drivers/sbsa-gwdt" }
 sky1-clk = { path = "../../drivers/sky1-clk" }
 sky1-pinctrl = { path = "../../drivers/sky1-pinctrl" }
 sky1-reset = { path = "../../drivers/sky1-reset" }
+sky1-syscon = { path = "../../drivers/sky1-syscon" }
 timers = { path = "../../drivers/timers" }
 uart = { path = "../../drivers/uart" }
 umass = { path = "../../drivers/umass" }
