@@ -728,3 +728,63 @@ pub fn cpu_id() -> CpuId {
     let id = 0;
     CpuId(id)
 }
+
+/// Ordering between the CPU and DMA-capable devices (DRIVER-MODEL.md
+/// §8.2): what a driver needs around descriptors it shares with a device
+/// in coherent memory, and before a doorbell register write.
+///
+/// On arm64, normal-memory writes are not ordered before a later device
+/// write, nor are a device's descriptor fields before the word that hands
+/// it over, without a barrier; on x86-64 stores to write-back memory and
+/// uncached registers are already in order, so these only stop the
+/// compiler. The arm64 forms are Linux's `dma_wmb`/`dma_rmb` (DMB in the
+/// outer-shareable domain, where devices observe) and FreeBSD's `wmb`
+/// (DSB ST).
+pub mod dma {
+    #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+    use core::sync::atomic::{Ordering, compiler_fence, fence};
+
+    /// Orders earlier writes to DMA memory before later ones, as a device
+    /// sees them: a descriptor's fields before the word that gives it to
+    /// the device.
+    #[inline]
+    pub fn write_barrier() {
+        #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+        // SAFETY: a barrier; no memory or register effects.
+        unsafe {
+            core::arch::asm!("dmb oshst", options(nostack, preserves_flags));
+        }
+        #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+        fence(Ordering::Release);
+    }
+
+    /// Orders an earlier read of DMA memory before later ones: the word
+    /// that says a device is done with a descriptor before its other
+    /// fields and its buffer.
+    #[inline]
+    pub fn read_barrier() {
+        #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+        // SAFETY: a barrier; no memory or register effects.
+        unsafe {
+            core::arch::asm!("dmb oshld", options(nostack, preserves_flags));
+        }
+        #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+        fence(Ordering::Acquire);
+    }
+
+    /// Completes earlier writes to DMA memory before a later register
+    /// write: what a device a doorbell tells to read memory then finds.
+    #[inline]
+    pub fn doorbell_barrier() {
+        #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+        // SAFETY: a barrier; no memory or register effects.
+        unsafe {
+            core::arch::asm!("dsb st", options(nostack, preserves_flags));
+        }
+        #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+        {
+            compiler_fence(Ordering::SeqCst);
+            fence(Ordering::SeqCst);
+        }
+    }
+}

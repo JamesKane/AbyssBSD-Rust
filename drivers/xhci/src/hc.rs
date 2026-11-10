@@ -103,6 +103,8 @@ impl Regs {
         self.op + op::portsc(port)
     }
     fn doorbell(&self, slot: u8, value: u32) {
+        // The TRBs reach memory before the controller is told.
+        hal::dma::doorbell_barrier();
         self.mmio.write32(self.db + 4 * usize::from(slot), value);
     }
 }

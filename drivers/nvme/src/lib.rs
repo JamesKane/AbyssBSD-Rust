@@ -220,6 +220,8 @@ impl Regs {
     }
 
     fn sq_doorbell(&self, q: u16, tail: u16) {
+        // The new entries reach memory before the controller is told.
+        hal::dma::doorbell_barrier();
         self.mmio.write32(
             reg::DOORBELLS + 2 * usize::from(q) * self.stride,
             u32::from(tail),
@@ -227,6 +229,7 @@ impl Regs {
     }
 
     fn cq_doorbell(&self, q: u16, head: u16) {
+        hal::dma::doorbell_barrier();
         self.mmio.write32(
             reg::DOORBELLS + (2 * usize::from(q) + 1) * self.stride,
             u32::from(head),

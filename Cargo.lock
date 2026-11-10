@@ -533,6 +533,7 @@ version = "0.0.0"
 dependencies = [
  "bus",
  "devtree",
+ "hal",
  "irq",
  "pci",
  "regs",
@@ -577,6 +578,7 @@ version = "0.0.0"
 name = "rge"
 version = "0.0.0"
 dependencies = [
+ "hal",
  "net",
 ]
 
@@ -933,6 +935,7 @@ version = "0.0.0"
 dependencies = [
  "bus",
  "devtree",
+ "hal",
  "irq",
  "pci",
  "regs",

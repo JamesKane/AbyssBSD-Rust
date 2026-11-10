@@ -2505,7 +2505,12 @@ ktest! {
             assert_eq!(virtio_random::read(&s, &mut buf), Some(64));
             nonzero |= buf.iter().any(|&b| b != 0);
         }
-        let ns = (crate::time::counter() - start) * 1_000_000_000 / crate::time::frequency();
+        // In u128: a slow host makes the product overflow 64 bits.
+        let ns = u64::try_from(
+            u128::from(crate::time::counter() - start) * 1_000_000_000
+                / u128::from(crate::time::frequency()),
+        )
+        .unwrap_or(u64::MAX);
         // A device may complete a request before its interrupt arrives
         // (bhyve does the work in the notify exit): let the last land.
         for _ in 0..100 {
