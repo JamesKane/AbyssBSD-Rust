@@ -130,8 +130,17 @@ const IO_ENTRIES: u16 = 256;
 /// `MAXPHYS`, so a file system's cluster is one command and one doorbell
 /// (each an exit to the hypervisor in a VM).
 const MAX_TRANSFER: usize = 1024 * 1024;
-/// PRP list bytes per command: enough entries for the largest transfer.
-const PRP_LIST: usize = (MAX_TRANSFER / PAGE + 1) * 8;
+/// PRP list bytes per command: one entry per page after the first, so
+/// the largest transfer (a page more when it starts mid-page) needs
+/// `MAX_TRANSFER / PAGE` entries. A list must not cross a page: the
+/// controller takes a page's last entry as a pointer to the next list
+/// page (the base specification's PRP list rules), so a crossing list
+/// sends the data wherever the following entry points. FreeBSD keeps
+/// each tracker's list within a page (`nvme_qpair_construct`); here the
+/// lists sit at multiples of their size in page-aligned memory, and the
+/// size divides a page.
+const PRP_LIST: usize = MAX_TRANSFER / PAGE * 8;
+const _: () = assert!(PAGE.is_multiple_of(PRP_LIST));
 /// A polled admin command that never completes, or a controller gone.
 const ADMIN_FAILED: Status = 0xffff;
 
@@ -1053,7 +1062,7 @@ impl DiskQueues for NsQueues {
                 (i == 0 || g.bus % PAGE as u64 == 0)
                     && (i + 1 == segs.len() || (g.bus + g.len) % PAGE as u64 == 0)
             });
-            if !prp_ok || segs.len() > PRP_LIST / 8 {
+            if !prp_ok || segs.len() > PRP_LIST / 8 + 1 {
                 InFlight {
                     bio,
                     data,
