@@ -40,7 +40,8 @@ unmodified as FreeBSD userland ([ADR-0018](docs/adr/0018-desktop-architecture.md
 
 Phases 0 through 7 and the QEMU exit of the USB and input track (U.0–U.6) are complete:
 unmodified FreeBSD 15.1 boots multi-user and networked on both architectures in QEMU and bhyve.
-Phase 8 (bring-up on the physical reference machines) is next. See
+Phase 8 (bring-up on the physical reference machines) is under way, with both machines' ACPI
+tables and FreeBSD and Linux ground truth captured (P8.0). See
 [docs/ROADMAP.md](docs/ROADMAP.md) for the detail.
 
 - **Boot (Phase 1):** our UEFI loader boots our kernel on x86_64 and aarch64, in QEMU and bhyve.
