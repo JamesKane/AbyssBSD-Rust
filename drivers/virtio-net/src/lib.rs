@@ -698,10 +698,13 @@ impl Driver for VtNet {
             1
         };
         let built = (|| -> Result<_, AttachError> {
-            let tag = cx.dma_tag(DmaConstraints {
-                addr_bits: if dev.is_modern() { 64 } else { 44 },
-                ..DmaConstraints::UNLIMITED
-            })?;
+            let tag = dev.dma_tag(
+                cx,
+                DmaConstraints {
+                    addr_bits: if dev.is_modern() { 64 } else { 44 },
+                    ..DmaConstraints::UNLIMITED
+                },
+            )?;
             let mrg = features & f::MRG_RXBUF != 0;
             let hdr_len = if mrg || dev.is_modern() { 12 } else { 10 };
             let separate = !mrg && !dev.is_modern();

@@ -722,9 +722,16 @@ impl Driver for AcpiBus {
         // order), then the edges between them: a dependency may name a
         // device that comes later. None attaches before this returns.
         let mut added: Vec<(String, bus::DeviceId, Vec<ChildDep>, Vec<ChildLine>)> = Vec::new();
+        // The memory windows each device produces (a host bridge's), for
+        // the domains of the devices behind it.
+        let mut windows: Vec<(String, Vec<(u64, u64)>)> = Vec::new();
         for f in found {
             let res = resources(svc.ops(), &f.device.crs);
             let path = f.device.path.clone();
+            let w = crate::ranges::windows(&f.device.crs);
+            if !w.is_empty() {
+                windows.push((path.clone(), w));
+            }
             let id = cx.add_child(
                 Ident::Acpi(f.ident, path.clone()),
                 Some(Arc::new(f.device)),
@@ -800,8 +807,19 @@ impl Driver for AcpiBus {
             recorded.push(consumer);
             let tr = match c.how {
                 crate::iort::Translated::HostBridge { segment, map } => {
-                    bus::iommu::Translation::Pci { unit, segment, map }
+                    let windows = windows
+                        .iter()
+                        .find(|w| w.0 == c.path)
+                        .map(|w| w.1.clone())
+                        .unwrap_or_default();
+                    bus::iommu::Translation::Pci {
+                        unit,
+                        segment,
+                        map,
+                        windows,
+                    }
                 }
+
                 crate::iort::Translated::Named { streams } => {
                     bus::iommu::Translation::Named { unit, streams }
                 }

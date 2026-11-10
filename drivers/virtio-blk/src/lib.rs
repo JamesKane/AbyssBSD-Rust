@@ -322,11 +322,14 @@ impl Driver for VtBlk {
             } else {
                 u64::MAX
             };
-            let tag = cx.dma_tag(DmaConstraints {
-                addr_bits: if dev.is_modern() { 64 } else { 44 },
-                max_segment: size_max,
-                ..DmaConstraints::UNLIMITED
-            })?;
+            let tag = dev.dma_tag(
+                cx,
+                DmaConstraints {
+                    addr_bits: if dev.is_modern() { 64 } else { 44 },
+                    max_segment: size_max,
+                    ..DmaConstraints::UNLIMITED
+                },
+            )?;
             let vq = dev
                 .queue(&tag, 0, QUEUE)
                 .map_err(|_| AttachError::Device("request queue"))?;

@@ -396,10 +396,13 @@ impl Driver for VtInput {
         // Once a queue is set up the device may DMA: any failure from here
         // resets it before the memory goes.
         let built = (|| {
-            let tag = cx.dma_tag(DmaConstraints {
-                addr_bits: if dev.is_modern() { 64 } else { 44 },
-                ..DmaConstraints::UNLIMITED
-            })?;
+            let tag = dev.dma_tag(
+                cx,
+                DmaConstraints {
+                    addr_bits: if dev.is_modern() { 64 } else { 44 },
+                    ..DmaConstraints::UNLIMITED
+                },
+            )?;
             let vq = dev
                 .queue(&tag, 0, QUEUE)
                 .map_err(|_| AttachError::Device("event queue"))?;

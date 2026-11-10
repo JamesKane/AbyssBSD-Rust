@@ -148,7 +148,26 @@ pub fn consumed(crs: &[Resource]) -> Vec<Range> {
     out
 }
 
+/// The memory windows a bridge's `_CRS` produces, at their bus addresses
+/// (`_MIN`, as FreeBSD's `AcpiResourceToAddress64` gives `Minimum`):
+/// (start, length). A PCI domain reserves them, since a request to one of
+/// them reaches a device there rather than memory (docs/IOMMU.md §4.6).
+#[must_use]
+pub fn windows(crs: &[Resource]) -> Vec<(u64, u64)> {
+    crs.iter()
+        .filter_map(|r| match r {
+            Resource::Address(a)
+                if !a.consumer && a.length > 0 && matches!(a.kind, AddressKind::Memory { .. }) =>
+            {
+                Some((a.min, a.length))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// What a device's range overlaps.
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Party {
     /// An operation region AML touches.

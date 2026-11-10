@@ -24,6 +24,14 @@
 //!   written, then word 0 with V, each step followed by `CMD_CFGI_STE` and
 //!   a sync; a new level-1 descriptor is invalidated with the STE
 //!   (`CMD_CFGI_STE`, not leaf).
+//! - **Translation** (stage 3). A domain's context descriptor (one per
+//!   domain, keyed by its ASID, [`Unit::attach_stage1`]) is written whole,
+//!   word 0 with V last; the stream's STE then points at it (stage 1, no
+//!   substreams), by the same break-before-make, with `CMD_CFGI_CD` beside
+//!   the `CMD_CFGI_STE`. [`Unit::invalidate`] issues `CMD_TLBI_NH_VA` (leaf)
+//!   per page, or `CMD_TLBI_NH_ASID` beyond [`TLBI_ASID_PAGES`], and one
+//!   sync. ASIDs come from a bitmap of IDR0's 8 or 16 bits; 0 is never
+//!   given out.
 //! - **Errors.** The event queue is drained on demand ([`Unit::drain_events`],
 //!   from the driver's event thread), its overflow acknowledged once per
 //!   overflow. Global errors are acknowledged (`GERRORN`); a command the
@@ -44,14 +52,16 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-use iommu::cmd::{CMD_BYTES, CMD_WORDS, Command, SyncCompletion};
+use iommu::cd::{CD_BYTES, CD_WORDS, ContextDescriptor};
+use iommu::cmd::{CMD_BYTES, CMD_WORDS, Command, SyncCompletion, TlbiVa};
 use iommu::event::{EVENT_BYTES, EVENT_WORDS, Event};
 use iommu::queue::{OVERFLOW, Pos, Queue};
 use iommu::regs::{
     CmdError, Cr1, Features, Gbpa, QueueBase, StrtabBase, cr0, cr2, gerror, irq_ctrl, off,
 };
-use iommu::ste::{Geometry, L1Desc, STE_BYTES, STE_WORDS, Ste, SteSlot};
-use iommu::{PhysAddr, StreamId};
+use iommu::regs::{MemAttrs, StallModel};
+use iommu::ste::{Geometry, L1Desc, STE_BYTES, STE_WORDS, Stage1, Ste, SteSlot};
+use iommu::{Asid, Iova, PAGE, PhysAddr, StreamId};
 
 use crate::hw::Hw;
 
@@ -62,6 +72,10 @@ pub const EVTQ_MAX_LOG2: u8 = 11;
 /// How long a sync, a full queue, or a register acknowledgement is waited
 /// for: FreeBSD's `SBT_1S`.
 pub const TIMEOUT_NS: u64 = 1_000_000_000;
+/// Above this many pages, an invalidation drops the whole ASID rather
+/// than issuing a command per page (docs/IOMMU.md §4.7): 2 MiB, past
+/// which per-page commands cost more than the refills they save.
+pub const TLBI_ASID_PAGES: u64 = 512;
 
 /// How a `CMD_SYNC` signals its completion.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,6 +116,8 @@ pub enum Error {
     QueueFull,
     /// The stream is beyond the stream table.
     NoStream(u32),
+    /// Every ASID is in use.
+    NoAsid,
 }
 
 impl Error {
@@ -109,7 +125,7 @@ impl Error {
     #[must_use]
     pub const fn for_bus(self) -> bus::iommu::IommuError {
         match self {
-            Self::NoMemory => bus::iommu::IommuError::NoMemory,
+            Self::NoMemory | Self::NoAsid => bus::iommu::IommuError::NoMemory,
             Self::NoStream(_) => bus::iommu::IommuError::NoStream,
             Self::NoAck(_) | Self::SyncTimeout | Self::QueueFull => {
                 bus::iommu::IommuError::Hardware
@@ -211,6 +227,10 @@ pub struct Unit<H: Hw> {
     firmware: Option<Firmware>,
     notices: Vec<Notice>,
     stats: Stats,
+    /// ASIDs in use, one bit each.
+    asids: Vec<u64>,
+    /// The context descriptors, by their domain's ASID.
+    cds: BTreeMap<u16, H::Mem>,
 }
 
 impl<H: Hw> core::fmt::Debug for Unit<H> {
@@ -273,6 +293,13 @@ impl<H: Hw> Unit<H> {
             firmware: None,
             notices: Vec::new(),
             stats: Stats::default(),
+            // ASID 0 is never given out.
+            asids: {
+                let mut a = alloc::vec![0u64; (1usize << features.asid_bits()) / 64];
+                a[0] = 1;
+                a
+            },
+            cds: BTreeMap::new(),
         })
     }
 
@@ -403,6 +430,12 @@ impl<H: Hw> Unit<H> {
     ///
     /// [`Error::NoStream`], [`Error::NoMemory`], or a sync's.
     pub fn set_stream(&mut self, sid: u32, ste: Ste) -> Result<(), Error> {
+        self.set_stream_with(sid, ste, None)
+    }
+
+    /// [`Unit::set_stream`], with `also` issued beside the last
+    /// `CMD_CFGI_STE`, before its sync.
+    fn set_stream_with(&mut self, sid: u32, ste: Ste, also: Option<Command>) -> Result<(), Error> {
         let new_l1 = self.ensure_l2(sid)?;
         let words = ste.encode();
         let (cur, live) = {
@@ -438,9 +471,120 @@ impl<H: Hw> Unit<H> {
                 sid: StreamId(sid),
                 leaf: !new_l1,
             })?;
+            if let Some(c) = also {
+                self.push(c)?;
+            }
             self.sync()?;
         }
         Ok(())
+    }
+
+    // ---- Translation.
+
+    /// Takes a free ASID.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NoAsid`].
+    pub fn alloc_asid(&mut self) -> Result<Asid, Error> {
+        for (i, w) in self.asids.iter_mut().enumerate() {
+            if *w != u64::MAX {
+                let bit = w.trailing_ones();
+                *w |= 1 << bit;
+                let n = u32::try_from(i).map_err(|_| Error::NoAsid)? * 64 + bit;
+                return u16::try_from(n).map(Asid).map_err(|_| Error::NoAsid);
+            }
+        }
+        Err(Error::NoAsid)
+    }
+
+    /// Gives `asid` back, its TLB entries and context descriptor gone
+    /// (its streams must no longer point at the descriptor).
+    ///
+    /// # Errors
+    ///
+    /// A sync's; the ASID is then kept out of use.
+    pub fn free_asid(&mut self, asid: Asid) -> Result<(), Error> {
+        self.push(Command::TlbiNhAsid { asid })?;
+        self.sync()?;
+        self.cds.remove(&asid.0);
+        if let Some(w) = self.asids.get_mut(usize::from(asid.0 / 64)) {
+            *w &= !(1 << (asid.0 % 64));
+        }
+        Ok(())
+    }
+
+    /// The STE of a stream translated through the CD at `cd`.
+    fn stage1(&self, cd: u64) -> Ste {
+        Ste::Stage1(Stage1 {
+            cd: PhysAddr::new(cd),
+            cd_attrs: MemAttrs::for_coherency(self.features.coherent),
+            // Stalls are not used (FreeBSD sets S1STALLD unless the SMMU
+            // forces stalls).
+            stall_disable: self.features.idr0.stall_model == StallModel::StallAndTerminate,
+        })
+    }
+
+    /// Translates `sid` through the domain whose descriptor is `cd`
+    /// (FreeBSD's `smmu_init_cd` and `smmu_init_ste_s1`): the descriptor
+    /// is written for its ASID the first time, then the stream's STE
+    /// points at it, the stream's cached descriptor invalidated with it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NoMemory`], [`Error::NoStream`], or a sync's.
+    pub fn attach_stage1(&mut self, sid: u32, cd: &ContextDescriptor) -> Result<(), Error> {
+        if !self.cds.contains_key(&cd.asid.0) {
+            let mem = self.hw.alloc(CD_BYTES, CD_BYTES).ok_or(Error::NoMemory)?;
+            let words = cd.encode();
+            for (i, &w) in words.iter().enumerate().skip(1) {
+                self.hw.store(&mem, i, w);
+            }
+            // The rest of it before V.
+            self.hw.write_barrier();
+            self.hw.store(&mem, 0, words[0]);
+            debug_assert_eq!(words.len(), CD_WORDS);
+            self.cds.insert(cd.asid.0, mem);
+        }
+        let pa = self
+            .cds
+            .get(&cd.asid.0)
+            .map(|m| self.hw.pa(m))
+            .ok_or(Error::NoMemory)?;
+        let ste = self.stage1(pa);
+        self.set_stream_with(
+            sid,
+            ste,
+            Some(Command::CfgiCd {
+                sid: StreamId(sid),
+                ssid: 0,
+                leaf: true,
+            }),
+        )
+    }
+
+    /// Invalidates `asid`'s cached leaf translations of `[iova, iova +
+    /// len)` and waits (FreeBSD's `smmu_tlbi_va` per page, then
+    /// `smmu_sync`): one command per page, or one for the whole ASID past
+    /// [`TLBI_ASID_PAGES`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::SyncTimeout`], [`Error::QueueFull`].
+    pub fn invalidate(&mut self, asid: Asid, iova: u64, len: u64) -> Result<(), Error> {
+        let pages = len.div_ceil(PAGE);
+        if pages > TLBI_ASID_PAGES {
+            self.push(Command::TlbiNhAsid { asid })?;
+        } else {
+            let first = iova & !(PAGE - 1);
+            for p in 0..pages {
+                self.push(Command::TlbiNhVa {
+                    asid,
+                    va: TlbiVa::page(Iova::new(first + p * PAGE), true),
+                })?;
+            }
+        }
+        self.sync()
     }
 
     fn store_ste_word(&self, sid: u32, i: usize, v: u64) -> Result<(), Error> {

@@ -91,6 +91,8 @@ struct Node {
     translation: Option<crate::iommu::Translation>,
     /// Its requester ID, for a PCI function (`%iommu`).
     requester: Option<u16>,
+    /// Its bus's hook for a translated context of that requester.
+    requester_hook: Option<Arc<dyn crate::iommu::RequesterHook>>,
 }
 
 /// The providers a node's driver published (DRIVER-MODEL.md §9.3).
@@ -386,6 +388,7 @@ pub fn init(
         dma: None,
         translation: None,
         requester: None,
+        requester_hook: None,
     }));
     topo.graph.add_node(0);
     let faults = (o.fault_one_in > 0).then_some(Faults {
@@ -586,6 +589,7 @@ impl Manager {
                 dma: None,
                 translation: None,
                 requester: None,
+                requester_hook: None,
             };
             if index as usize == t.nodes.len() {
                 t.nodes.push(Some(node));
@@ -657,6 +661,7 @@ impl Manager {
             dma: None,
             translation: None,
             requester: None,
+            requester_hook: None,
         };
         let (index, generation) = match t.free.pop() {
             Some((i, g)) => (i, g),
@@ -815,6 +820,7 @@ impl Manager {
             dma: o.dma,
             translation: o.translation,
             requester: o.requester,
+            requester_hook: o.requester_hook,
         };
         if index as usize == t.nodes.len() {
             t.nodes.push(Some(node));
@@ -995,11 +1001,27 @@ impl Manager {
         self.topo.read(s).node(id)?.requester
     }
 
-    /// Gives `id`'s requester a context on the IOMMU unit that translates
-    /// it, if one does and has published its provider (docs/IOMMU.md
-    /// §4.4; pass-through for now, §8 stage 2). Nothing for a node without
-    /// a stream (no translation, no requester ID, or an ID the root
-    /// complex does not map to the unit).
+    /// Records the hook `id`'s bus wants run when its requester first gets
+    /// a translated context.
+    pub(crate) fn set_requester_hook(
+        &self,
+        s: &Sleepable,
+        id: DeviceId,
+        hook: Arc<dyn crate::iommu::RequesterHook>,
+    ) {
+        if let Some(n) = self.topo.write(s).node_mut(id) {
+            n.requester_hook = Some(hook);
+        }
+    }
+
+    /// Gives `id`'s requester its context on the IOMMU unit that
+    /// translates it, if one does and has published its provider
+    /// (docs/IOMMU.md §4.4), and returns it. `None` for a node without a
+    /// stream (no translation, no requester ID, or an ID the root complex
+    /// does not map to the unit) or whose unit is not running. When the
+    /// context translates, the requester's bus hook runs, and its report
+    /// is printed under the requester's name (the board port's `relaxed
+    /// ordering disabled (IOMMU translation)`).
     ///
     /// # Errors
     ///
@@ -1008,42 +1030,78 @@ impl Manager {
         &self,
         s: &Sleepable,
         id: DeviceId,
-    ) -> Result<(), crate::iommu::IommuError> {
+        want: crate::iommu::Want,
+    ) -> Result<Option<crate::iommu::Context>, crate::iommu::IommuError> {
         let Some(tr) = self.dma_translation(s, id) else {
-            return Ok(());
+            return Ok(None);
         };
         // A device below a PCI function (a virtio device on its transport,
         // a USB device) does its DMA as that function: the nearest
         // requester ID up the tree is its (FreeBSD's `iommu_get_requester`
         // starts from the PCI device too).
-        let rid = {
+        let found = {
             let t = self.topo.read(s);
-            let mut at = t.node(id);
-            let mut rid = None;
-            while let Some(n) = at {
+            let mut at = t.node(id).map(|n| (id, n));
+            let mut found = None;
+            while let Some((nid, n)) = at {
                 if let Some(r) = n.requester {
-                    rid = Some(r);
+                    found = Some((r, nid, n.requester_hook.clone()));
                     break;
                 }
-                at = n
-                    .parent
-                    .and_then(|p| t.nodes.get(p as usize))
-                    .and_then(Option::as_ref);
+                at = n.parent.and_then(|p| {
+                    let pn = t.nodes.get(p as usize)?.as_ref()?;
+                    Some((
+                        DeviceId {
+                            index: p,
+                            generation: pn.generation,
+                        },
+                        pn,
+                    ))
+                });
             }
-            rid
+            found
         };
-        let Some(stream) = rid.and_then(|rid| tr.stream(rid)) else {
-            return Ok(());
+        let Some((rid, holder, hook)) = found else {
+            return Ok(None);
+        };
+        let Some(stream) = tr.stream(rid) else {
+            return Ok(None);
         };
         let unit = self
             .topo
             .read(s)
             .node(tr.unit())
             .and_then(|n| n.provides.iommu.clone());
-        match unit {
-            Some(u) => u.pass_through(stream),
-            None => Ok(()),
+        let Some(unit) = unit else {
+            return Ok(None);
+        };
+        let segment = tr.segment().unwrap_or(0);
+        let name = self.nameunit(holder, s).unwrap_or_else(|| {
+            alloc::format!(
+                "pci{segment}:{}:{}:{}",
+                rid >> 8,
+                (rid >> 3) & 0x1f,
+                rid & 7
+            )
+        });
+        let req = crate::iommu::ContextRequest {
+            want,
+            name: &name,
+            rid,
+            segment,
+            coherent: self.dma_limits(s, id).coherency == vm::dma::Coherency::Coherent,
+            reserved: tr.windows(),
+        };
+        let ctx = unit.context(stream, &req)?;
+        if matches!(ctx, crate::iommu::Context::Translated(_))
+            && let Some(h) = hook
+            && h.translated()
+        {
+            self.log(format_args!(
+                "{name}: relaxed ordering disabled (IOMMU translation)"
+            ));
         }
+        Ok(Some(ctx))
     }
 
     /// The IOMMU translation that applies to `id`: its own record or its
@@ -1180,6 +1238,7 @@ impl Manager {
             dma: None,
             translation: None,
             requester: None,
+            requester_hook: None,
         };
         let (index, generation) = match t.free.pop() {
             Some((i, g)) => (i, g),

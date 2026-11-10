@@ -15,10 +15,18 @@
 //!   memory)` reports them; so are named components' streams with
 //!   `hw.smmu.bypass_named=1` (IOMMU.md §4.9).
 //! - It publishes a [`bus::iommu::Iommu`] provider. The broker asks it for
-//!   a device's context when the device first needs DMA (its tag or MSI);
-//!   for now every context is pass-through (a bypass STE), as FreeBSD's
-//!   disabled requesters. `dev.smmu.N.dma` stays 0: nothing is translated
-//!   until stage 3.
+//!   a device's context when the device first needs DMA (its tag or MSI),
+//!   and it makes one per stream (stage 3): a translated context is a
+//!   `sys/iommu` domain with its own ASID and context descriptor, the
+//!   stream's STE pointing at it (stage 1); a pass-through one (FreeBSD's
+//!   disabled requesters, a virtio device using physical addresses) a
+//!   bypass STE. Domains reach the unit for their invalidations
+//!   ([`iommu_framework::domain::Invalidate`]). `dev.smmu.N.dma` says
+//!   whether it translates: `hw.iommu.dma`, while message-signalled
+//!   interrupts are off (until stage 4 maps the ITS doorbell, IOMMU.md
+//!   §16).
+//! - Its event lines name the device whose context the stream is
+//!   (IOMMU.md §4.10).
 //! - Events are drained in the event interrupt's thread and printed as
 //!   FreeBSD's `smmu_print_event` does, rate-limited per stream; global
 //!   errors are acknowledged, a refused command skipped.
@@ -41,8 +49,11 @@
 //! Behavior reference: sys/arm64/iommu/smmu.c, smmu_acpi.c (and the
 //! user's branch orangepi-6-plus of them).
 
+// The translated-DMA tests' shared memory implements unsafe traits; the
+// crate itself has no unsafe code.
+#![cfg_attr(not(test), forbid(unsafe_code))]
+#![cfg_attr(test, deny(unsafe_code))]
 #![no_std]
-#![forbid(unsafe_code)]
 
 extern crate alloc;
 
@@ -51,11 +62,14 @@ pub mod unit;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+#[allow(unsafe_code)]
+mod tests_dma;
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicI32, Ordering};
 
@@ -66,15 +80,18 @@ use bus::{
     AttachCx, AttachError, Busy, Driver, DriverDecl, Ident, Ids, IrqLine, MmioGrant, StartCx,
     StopCx, StopReason,
 };
+use iommu::cd::ContextDescriptor;
 use iommu::event::{EVENT_WORDS, Event, code};
 use iommu::regs::{Features, Missing, gerror, off};
 use iommu::ste::{Geometry, STE_WORDS, Ste};
+use iommu::{Asid, PhysAddr};
+use iommu_framework::domain::{Domain, Invalidate, Params, Unconfirmed};
 use irq::Filter;
 use regs::Bytes;
 use sched::{IrqCx, Sleepable};
 use sync::SpinLock;
 use sysctl::{Number, Tree, Value};
-use vm::dma::{Coherency, DmaCoherent, DmaConstraints, DmaTag};
+use vm::dma::{Coherency, DmaCoherent, DmaConstraints, DmaMemory, DmaTag};
 
 use crate::hw::Hw;
 use crate::unit::{Notice, Unit};
@@ -279,14 +296,68 @@ pub struct StreamEvents {
 /// counted (IOMMU.md §4.10).
 pub const EVENTS_PER_SECOND: u32 = 5;
 
-/// What a unit shares with its interrupt threads and its provider.
-struct Shared {
-    unit_no: u32,
-    unit: SpinLock<Option<Unit<Kernel>>>,
-    streams: SpinLock<BTreeMap<u32, StreamEvents>>,
+/// A stream's context: translated through a domain, or pass-through.
+struct Ctx {
+    domain: Option<Arc<Domain>>,
+    /// The device, for event lines: `nvme0 (rid 0xc100)`.
+    label: String,
 }
 
-impl Shared {
+/// The §4.10 line for an event of a device: what happened, where, and
+/// which way (`nvme0 (rid 0xc100): translation fault at 0x1234000
+/// (write)`).
+#[must_use]
+pub fn event_line(label: &str, e: &Event) -> String {
+    match e.record.input() {
+        Some(i) => alloc::format!(
+            "{label}: {} at {:#x} ({})",
+            e.record.describe(),
+            i.addr.get(),
+            if i.access.read { "read" } else { "write" }
+        ),
+        None => alloc::format!("{label}: {}", e.record.describe()),
+    }
+}
+
+/// What a unit shares with its interrupt threads, its provider, and the
+/// domains it made.
+pub(crate) struct Shared<H: Hw> {
+    unit_no: u32,
+    unit: SpinLock<Option<Unit<H>>>,
+    streams: SpinLock<BTreeMap<u32, StreamEvents>>,
+    /// The contexts made, by stream.
+    contexts: SpinLock<BTreeMap<u32, Ctx>>,
+    /// Memory for the domains' page tables: `Some` when the unit
+    /// translates.
+    tables: Option<&'static dyn DmaMemory>,
+    /// Itself, for the domains' way back to the unit.
+    me: Weak<Self>,
+}
+
+impl<H: Hw + Send + Sync + 'static> Shared<H>
+where
+    H::Mem: Send,
+{
+    pub(crate) fn new(
+        unit_no: u32,
+        unit: Option<Unit<H>>,
+        tables: Option<&'static dyn DmaMemory>,
+    ) -> Arc<Self> {
+        Arc::new_cyclic(|me| Self {
+            unit_no,
+            unit: SpinLock::new(unit),
+            streams: SpinLock::new(BTreeMap::new()),
+            contexts: SpinLock::new(BTreeMap::new()),
+            tables,
+            me: me.clone(),
+        })
+    }
+
+    /// Whether contexts translate.
+    fn translates(&self) -> bool {
+        self.tables.is_some()
+    }
+
     fn log(&self, args: core::fmt::Arguments<'_>) {
         bus::manager().log(format_args!("smmu{}: {args}", self.unit_no));
     }
@@ -327,9 +398,29 @@ impl Shared {
         }
     }
 
+    /// Runs `f` on the unit while it is enabled, and reports what it
+    /// noted; `None` if it is not running.
+    fn with_unit<R>(&self, f: impl FnOnce(&mut Unit<H>) -> R) -> Option<R> {
+        let (r, notices) = {
+            let mut g = self.unit.lock();
+            let u = g.as_mut()?;
+            if u.state() != unit::State::Enabled {
+                return None;
+            }
+            let r = f(u);
+            (r, u.take_notices())
+        };
+        if !notices.is_empty() {
+            self.report(notices);
+        }
+        Some(r)
+    }
+
     /// The event interrupt's work: drains the queue and prints each event
     /// as FreeBSD's `smmu_print_event` does (the record's 32-bit words,
-    /// then the stream's STE), at most [`EVENTS_PER_SECOND`] per stream.
+    /// then the stream's STE), at most [`EVENTS_PER_SECOND`] per stream,
+    /// each led by the line naming the device whose context the stream is
+    /// (IOMMU.md §4.10).
     fn drain_events(&self) {
         type Dump = (Option<u64>, Option<[u64; STE_WORDS]>);
         let mut seen: Vec<(Event, [u64; EVENT_WORDS], Dump)> = Vec::new();
@@ -377,6 +468,10 @@ impl Shared {
             if !show {
                 continue;
             }
+            let label = self.contexts.lock().get(&e.sid.0).map(|c| c.label.clone());
+            if let Some(label) = label {
+                self.log(format_args!("{}", event_line(&label, &e)));
+            }
             let c = e.record.code();
             match code::freebsd(c) {
                 Some((name, msg)) => self.log(format_args!("Event {name} ({msg}) received.")),
@@ -422,37 +517,137 @@ impl Shared {
 
     /// Gives `sid` the STE `ste`, reporting what the unit noted.
     fn set_stream(&self, sid: u32, ste: Ste) -> Result<(), unit::Error> {
-        let (r, notices) = {
-            let mut g = self.unit.lock();
-            let Some(u) = g.as_mut() else {
-                return Err(unit::Error::NoStream(sid));
-            };
-            if u.state() != unit::State::Enabled {
-                return Err(unit::Error::NoStream(sid));
+        self.with_unit(|u| u.set_stream(sid, ste))
+            .unwrap_or(Err(unit::Error::NoStream(sid)))
+    }
+
+    /// A domain for `stream`, its STE pointing at its descriptor
+    /// (FreeBSD's `smmu_domain_alloc` and `smmu_ctx_init`): an ASID, an
+    /// empty space with `req`'s ranges reserved, empty tables, and a CD.
+    fn make_domain(
+        &self,
+        stream: u32,
+        req: &bus::iommu::ContextRequest<'_>,
+    ) -> Result<Arc<Domain>, unit::Error> {
+        let mem = self.tables.ok_or(unit::Error::NoMemory)?;
+        let (asid, features) = self
+            .with_unit(|u| u.alloc_asid().map(|a| (a, *u.features())))
+            .unwrap_or(Err(unit::Error::NoStream(stream)))?;
+        let oas = features.idr5.oas;
+        let me: Weak<dyn Invalidate> = self.me.clone();
+        let made = Domain::new(
+            mem,
+            me,
+            Params {
+                asid: asid.0,
+                reach: 1u64 << oas.bits(),
+                walk_coherent: features.coherent,
+                device_coherent: req.coherent,
+            },
+        )
+        .map_err(|_| unit::Error::NoMemory)
+        .and_then(|d| {
+            for &(start, len) in req.reserved {
+                d.reserve(start, start.saturating_add(len))
+                    .map_err(|_| unit::Error::NoMemory)?;
             }
-            let r = u.set_stream(sid, ste);
-            (r, u.take_notices())
+            let cd = ContextDescriptor::new(asid, PhysAddr::new(d.root()), oas, features.coherent);
+            self.with_unit(|u| u.attach_stage1(stream, &cd))
+                .unwrap_or(Err(unit::Error::NoStream(stream)))?;
+            Ok(d)
+        });
+        if made.is_err() {
+            let _ = self.with_unit(|u| u.free_asid(asid));
+        }
+        made
+    }
+
+    /// The context of `stream` (the provider's `context`).
+    fn context(
+        &self,
+        stream: u32,
+        req: &bus::iommu::ContextRequest<'_>,
+    ) -> Result<bus::iommu::Context, unit::Error> {
+        use bus::iommu::{Context, Want};
+        let mut ctxs = self.contexts.lock();
+        if let Some(c) = ctxs.get(&stream) {
+            return Ok(match (&c.domain, req.want) {
+                (Some(d), Want::Translate) => Context::Translated(Arc::clone(d) as _),
+                _ => Context::PassThrough,
+            });
+        }
+        // FreeBSD's disabled requesters (`hw.busdma.*=bounce`) and devices
+        // that use physical addresses pass through.
+        let translate = self.translates()
+            && req.want == Want::Translate
+            && !iommu_framework::requester_disabled(req.segment, req.rid);
+        let domain = if translate {
+            Some(self.make_domain(stream, req)?)
+        } else {
+            self.set_stream(stream, Ste::Bypass)?;
+            None
         };
-        self.report(notices);
-        r
+        ctxs.insert(
+            stream,
+            Ctx {
+                domain: domain.clone(),
+                label: alloc::format!("{} (rid {:#x})", req.name, req.rid),
+            },
+        );
+        Ok(match domain {
+            Some(d) => Context::Translated(d),
+            None => Context::PassThrough,
+        })
+    }
+
+    /// Ends `stream`'s context: its STE invalid (its DMA aborts again),
+    /// its domain's ASID and descriptor freed. The domain itself goes when
+    /// its last tag does.
+    fn release(&self, stream: u32) -> Result<(), unit::Error> {
+        let Some(c) = self.contexts.lock().remove(&stream) else {
+            return Ok(());
+        };
+        self.set_stream(stream, Ste::Invalid)?;
+        if let Some(d) = c.domain {
+            self.with_unit(|u| u.free_asid(Asid(d.asid())))
+                .unwrap_or(Ok(()))?;
+        }
+        Ok(())
+    }
+}
+
+impl<H: Hw + Send + Sync + 'static> Invalidate for Shared<H>
+where
+    H::Mem: Send,
+{
+    fn invalidate(&self, asid: u16, iova: u64, len: u64) -> Result<(), Unconfirmed> {
+        // A unit no longer running translates nothing.
+        self.with_unit(|u| u.invalidate(Asid(asid), iova, len))
+            .unwrap_or(Ok(()))
+            .map_err(|_| Unconfirmed)
     }
 }
 
 /// The unit as the broker sees it.
-struct Provider(Arc<Shared>);
+pub(crate) struct Provider<H: Hw>(pub(crate) Arc<Shared<H>>);
 
-impl bus::iommu::Iommu for Provider {
-    fn pass_through(&self, stream: u32) -> Result<(), bus::iommu::IommuError> {
-        self.0
-            .set_stream(stream, Ste::Bypass)
-            .map_err(unit::Error::for_bus)
+impl<H: Hw + Send + Sync + 'static> bus::iommu::Iommu for Provider<H>
+where
+    H::Mem: Send,
+{
+    fn context(
+        &self,
+        stream: u32,
+        req: &bus::iommu::ContextRequest<'_>,
+    ) -> Result<bus::iommu::Context, bus::iommu::IommuError> {
+        self.0.context(stream, req).map_err(unit::Error::for_bus)
     }
 }
 
 /// The running units, for [`set_stream`] and [`stream_events`].
-static UNITS: SpinLock<Vec<Arc<Shared>>> = SpinLock::new(Vec::new());
+static UNITS: SpinLock<Vec<Arc<Shared<Kernel>>>> = SpinLock::new(Vec::new());
 
-fn running(unit: u32) -> Option<Arc<Shared>> {
+fn running(unit: u32) -> Option<Arc<Shared<Kernel>>> {
     UNITS.lock().iter().find(|s| s.unit_no == unit).cloned()
 }
 
@@ -465,6 +660,8 @@ pub enum StreamState {
     Abort,
     /// Bypass: traffic reaches memory untranslated.
     Bypass,
+    /// Stage 1: traffic is translated through a domain.
+    Translated,
 }
 
 /// Whether `smmuN` is running (attached, translation on, enabled).
@@ -473,13 +670,20 @@ pub fn is_running(unit: u32) -> bool {
     running(unit).is_some()
 }
 
+/// Whether `smmuN` gives translated contexts (`dev.smmu.N.dma`).
+#[must_use]
+pub fn translates(unit: u32) -> bool {
+    running(unit).is_some_and(|s| s.translates())
+}
+
 /// Sets stream `sid` of `smmuN` (tests and diagnostics: the broker owns
 /// streams of devices with contexts).
 ///
 /// # Errors
 ///
 /// [`unit::Error::NoStream`] if the unit is not running or the stream is
-/// beyond its table; or the unit's.
+/// beyond its table, or the state is [`StreamState::Translated`] (only a
+/// context translates); or the unit's.
 pub fn set_stream(unit: u32, sid: u32, state: StreamState) -> Result<(), unit::Error> {
     let s = running(unit).ok_or(unit::Error::NoStream(sid))?;
     s.set_stream(
@@ -488,22 +692,44 @@ pub fn set_stream(unit: u32, sid: u32, state: StreamState) -> Result<(), unit::E
             StreamState::Invalid => Ste::Invalid,
             StreamState::Abort => Ste::Abort,
             StreamState::Bypass => Ste::Bypass,
+            StreamState::Translated => return Err(unit::Error::NoStream(sid)),
         },
     )
 }
 
 /// What stream `sid` of `smmuN` does now; `None` if the unit is not
-/// running (or the stream translates, which nothing does yet).
+/// running.
 #[must_use]
 pub fn stream(unit: u32, sid: u32) -> Option<StreamState> {
     let s = running(unit)?;
     let g = s.unit.lock();
-    match g.as_ref()?.stream(sid) {
-        Ste::Invalid => Some(StreamState::Invalid),
-        Ste::Abort => Some(StreamState::Abort),
-        Ste::Bypass => Some(StreamState::Bypass),
-        Ste::Stage1(_) => None,
-    }
+    Some(match g.as_ref()?.stream(sid) {
+        Ste::Invalid => StreamState::Invalid,
+        Ste::Abort => StreamState::Abort,
+        Ste::Bypass => StreamState::Bypass,
+        Ste::Stage1(_) => StreamState::Translated,
+    })
+}
+
+/// The device whose context stream `sid` of `smmuN` is, as its event
+/// lines name it (`nvme0 (rid 0x10)`).
+#[must_use]
+pub fn stream_device(unit: u32, sid: u32) -> Option<String> {
+    running(unit)?
+        .contexts
+        .lock()
+        .get(&sid)
+        .map(|c| c.label.clone())
+}
+
+/// Ends stream `sid`'s context on `smmuN` (tests: a context otherwise
+/// lives as long as its device's node).
+///
+/// # Errors
+///
+/// The unit's.
+pub fn release_context(unit: u32, sid: u32) -> Result<(), unit::Error> {
+    running(unit).map_or(Ok(()), |s| s.release(sid))
 }
 
 /// The events `smmuN` has drained for stream `sid`.
@@ -513,7 +739,6 @@ pub fn stream_events(unit: u32, sid: u32) -> StreamEvents {
         .and_then(|s| s.streams.lock().get(&sid).copied())
         .unwrap_or_default()
 }
-
 /// Why the unit does not translate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Off {
@@ -533,7 +758,7 @@ pub struct Smmu {
     /// lines; those beyond the table.
     bypassed: Vec<(u32, String)>,
     out_of_range: Vec<u32>,
-    shared: Arc<Shared>,
+    shared: Arc<Shared<Kernel>>,
     /// The registers when no unit holds them (translation off).
     _regs: Option<MmioGrant<Bytes>>,
     /// The event, sync, and gerror lines, until `start` installs the
@@ -592,6 +817,7 @@ impl Driver for Smmu {
             Ok(()) => None,
         };
         let mut out_of_range = Vec::new();
+        let mut tables = None;
         let (unit, idle) = if off.is_some() {
             (None, Some(regs))
         } else {
@@ -607,6 +833,12 @@ impl Driver for Smmu {
                 },
                 ..DmaConstraints::UNLIMITED
             })?;
+            // Page tables come from the same memory, within the unit's
+            // reach; contexts translate unless message-signalled
+            // interrupts would fault (IOMMU.md §16).
+            if iommu_framework::translating() {
+                tables = Some(tag.memory());
+            }
             let hw = Kernel { regs, tag };
             let mut u = Unit::new(hw, features).map_err(|_| AttachError::NoMemory)?;
             for &(sid, _) in &bypassed {
@@ -625,11 +857,7 @@ impl Driver for Smmu {
             off,
             bypassed,
             out_of_range,
-            shared: Arc::new(Shared {
-                unit_no: cx.unit(),
-                unit: SpinLock::new(unit),
-                streams: SpinLock::new(BTreeMap::new()),
-            }),
+            shared: Shared::new(cx.unit(), unit, tables),
             _regs: idle,
             lines: SpinLock::new(lines),
         })
@@ -671,14 +899,21 @@ impl Driver for Smmu {
                     "left disabled: DMA translation is off (hw.iommu.dma)"
                 ));
             }
-            None => self.run(cx)?,
+            None => {
+                self.run(cx)?;
+                if !sh.translates() && iommu_framework::messages_untranslated() {
+                    sh.log(format_args!(
+                        "message-signalled interrupts are not translated: devices pass through"
+                    ));
+                }
+            }
         }
-        // `dev.smmu.N.dma`: whether this unit translates DMA; none does
-        // yet (IOMMU.md §8, stage 3).
+        // `dev.smmu.N.dma`: whether this unit translates DMA.
         let unit = self.unit;
+        let dma = i32::from(sh.translates());
         bus::manager().sysctl(cx.sleepable(), &mut |t| {
             if let Some(n) = bus::device_node(t, Self::NAME, unit) {
-                let _ = t.add_value(n, Number::Auto, "dma", "DMA ops enabled", Value::int(0));
+                let _ = t.add_value(n, Number::Auto, "dma", "DMA ops enabled", Value::int(dma));
             }
         });
         Ok(())
@@ -744,7 +979,8 @@ impl Smmu {
             sh.log(format_args!("Couldn't reset SMMU ({e:?})."));
             return Err(AttachError::Device("smmu: reset failed"));
         }
-        cx.provide_iommu(Arc::new(Provider(Arc::clone(sh))));
+        cx.provide_iommu(Arc::new(Provider(Arc::clone(sh))) as Arc<dyn bus::iommu::Iommu>);
+
         UNITS.lock().push(Arc::clone(sh));
         // Anything raised before the handlers were in.
         sh.gerror();

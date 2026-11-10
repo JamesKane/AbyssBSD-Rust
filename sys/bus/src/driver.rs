@@ -638,29 +638,54 @@ impl<'a> AttachCx<'a> {
 
     /// A DMA tag with the device's constraints and those of every bus
     /// above it ([`StartCx::set_dma_constraints`]: an ACPI device's
-    /// `_CCA`, say).
+    /// `_CCA`, say). The broker chooses the backend (docs/IOMMU.md §5):
+    /// IOMMU when the device's requester has a translated context, else
+    /// direct or bounce by the device's reach.
     pub fn dma_tag(&mut self, c: DmaConstraints) -> Result<DmaTag, ResourceError> {
+        self.tag_for(c, crate::iommu::Want::Translate)
+    }
+
+    /// A DMA tag that hands the device physical addresses, its stream
+    /// passing through the IOMMU: for a virtio device that does not accept
+    /// platform translation (`VIRTIO_F_ACCESS_PLATFORM`), which by the
+    /// virtio specification uses physical addresses whatever the platform
+    /// does (docs/IOMMU.md §4.4).
+    pub fn dma_tag_pass_through(&mut self, c: DmaConstraints) -> Result<DmaTag, ResourceError> {
+        self.tag_for(c, crate::iommu::Want::PassThrough)
+    }
+
+    fn tag_for(
+        &mut self,
+        c: DmaConstraints,
+        want: crate::iommu::Want,
+    ) -> Result<DmaTag, ResourceError> {
         if self.injected() {
             return Err(ResourceError::MapFailed);
         }
-        self.iommu_context()?;
+        let ctx = self
+            .mgr
+            .iommu_context(self.s, self.node, want)
+            .map_err(ResourceError::Iommu)?;
         let c = c.intersect(&self.mgr.dma_limits(self.s, self.node));
         let p = self.mgr.platform();
-        Ok(DmaTag::new(p.dma_memory(), c, p.top_of_ram()))
+        Ok(match ctx {
+            Some(crate::iommu::Context::Translated(d)) => DmaTag::translated(p.dma_memory(), c, d),
+            _ => DmaTag::new(p.dma_memory(), c, p.top_of_ram()),
+        })
     }
 
     /// Gives the device's requester its context on the IOMMU unit that
     /// translates it, if any (docs/IOMMU.md §4.4): [`AttachCx::dma_tag`]
     /// does, and so must a path that makes the device write memory
-    /// without a tag (MSI). Pass-through for now (§8, stage 2).
+    /// without a tag (MSI).
     ///
     /// # Errors
     ///
     /// [`ResourceError::Iommu`] if the unit could not make it: the
     /// device's DMA would abort.
-    pub fn iommu_context(&mut self) -> Result<(), ResourceError> {
+    pub fn iommu_context(&mut self) -> Result<Option<crate::iommu::Context>, ResourceError> {
         self.mgr
-            .iommu_context(self.s, self.node)
+            .iommu_context(self.s, self.node, crate::iommu::Want::Translate)
             .map_err(ResourceError::Iommu)
     }
 
@@ -1091,6 +1116,19 @@ impl<D: Driver> StartCx<'_, D> {
     pub fn set_requester_id(&mut self, consumer: DeviceId, rid: u16) {
         if self.children_contains(consumer) {
             self.mgr.set_requester(self.s, consumer, rid);
+        }
+    }
+
+    /// Records what to do when a child's requester first gets a
+    /// translated context (the PCI bus turns relaxed ordering off,
+    /// docs/IOMMU.md §4.4).
+    pub fn set_requester_hook(
+        &mut self,
+        consumer: DeviceId,
+        hook: Arc<dyn crate::iommu::RequesterHook>,
+    ) {
+        if self.children_contains(consumer) {
+            self.mgr.set_requester_hook(self.s, consumer, hook);
         }
     }
 

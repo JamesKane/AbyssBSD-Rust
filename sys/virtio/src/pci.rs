@@ -270,6 +270,7 @@ impl Driver for Modern {
             vectors: Vectors::None,
             queues: 0,
             event_idx: core::sync::atomic::AtomicBool::new(false),
+            access_platform: core::sync::atomic::AtomicBool::new(false),
         };
         dev.reset();
         dev.queues = dev.modern_queues();
@@ -315,6 +316,7 @@ impl Driver for Legacy {
             vectors: Vectors::None,
             queues: 0,
             event_idx: core::sync::atomic::AtomicBool::new(false),
+            access_platform: core::sync::atomic::AtomicBool::new(false),
         };
         dev.reset();
         dev.queues = (0..LEGACY_MAX_QUEUES)

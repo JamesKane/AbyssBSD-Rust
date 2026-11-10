@@ -118,6 +118,9 @@ pub struct VirtioDevice {
     pub(crate) queues: u16,
     /// `RING_EVENT_IDX` was negotiated: rings use the event fields.
     pub(crate) event_idx: core::sync::atomic::AtomicBool,
+    /// `ACCESS_PLATFORM` was negotiated: the device's addresses go through
+    /// the platform's translation.
+    pub(crate) access_platform: core::sync::atomic::AtomicBool,
 }
 
 impl VirtioDevice {
@@ -281,6 +284,10 @@ impl VirtioDevice {
             want & feature::RING_EVENT_IDX != 0,
             core::sync::atomic::Ordering::Relaxed,
         );
+        self.access_platform.store(
+            want & feature::ACCESS_PLATFORM != 0,
+            core::sync::atomic::Ordering::Relaxed,
+        );
         if modern {
             self.set_status(status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK);
             if self.status() & status::FEATURES_OK == 0 {
@@ -289,6 +296,38 @@ impl VirtioDevice {
             }
         }
         Ok(want)
+    }
+
+    /// The device driver's DMA tag, after [`VirtioDevice::negotiate`]: a
+    /// device that accepted `ACCESS_PLATFORM` gets the platform's tag
+    /// (translated under an IOMMU); one that did not uses physical
+    /// addresses whatever the platform does (the virtio specification), so
+    /// its requester gets a pass-through context and its tag the direct
+    /// backend (docs/IOMMU.md §4.4).
+    ///
+    /// # Errors
+    ///
+    /// The broker's.
+    pub fn dma_tag(
+        &self,
+        cx: &mut bus::AttachCx<'_>,
+        c: vm::dma::DmaConstraints,
+    ) -> Result<DmaTag, bus::ResourceError> {
+        if self
+            .access_platform
+            .load(core::sync::atomic::Ordering::Relaxed)
+        {
+            cx.dma_tag(c)
+        } else {
+            cx.dma_tag_pass_through(c)
+        }
+    }
+
+    /// Whether `ACCESS_PLATFORM` was negotiated.
+    #[must_use]
+    pub fn access_platform(&self) -> bool {
+        self.access_platform
+            .load(core::sync::atomic::Ordering::Relaxed)
     }
 
     /// Tells the device the driver is ready: queues set up, handlers

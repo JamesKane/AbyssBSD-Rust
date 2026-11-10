@@ -250,6 +250,35 @@ pub fn msi_line(cx: &mut AttachCx<'_>) -> Result<(bus::IrqLine, Messages), crate
     Ok((line, owner))
 }
 
+/// PCI Express Device Control (in the PCIe capability) and its Enable
+/// Relaxed Ordering bit (`PCIER_DEVICE_CTL`, `PCIEM_CTL_RELAXED_ORD_ENABLE`).
+const PCIER_DEVICE_CTL: u16 = 0x8;
+const RELAXED_ORD_ENABLE: u16 = 1 << 4;
+
+/// A translated function keeps its writes in order: with relaxed
+/// ordering an NVMe completion could reach memory before the last of its
+/// data, and the buffer be unmapped on the completion with the data
+/// still in flight (the board port's `db2f0538c8b`, docs/IOMMU.md §4.4).
+/// `hw.iommu.relaxed_ordering=1` keeps it. The bit is cleared in the
+/// function itself; nothing restores a saved configuration over it yet.
+impl bus::iommu::RequesterHook for PciChild {
+    fn translated(&self) -> bool {
+        if iommu_framework::relaxed_ordering() {
+            return false;
+        }
+        let Some(c) = crate::caps::find(&self.function.caps, crate::caps::id::PCIE) else {
+            return false;
+        };
+        let (a, at) = (self.function.addr, u16::from(c.offset) + PCIER_DEVICE_CTL);
+        let v = self.cfg.read16(a, at);
+        if v & RELAXED_ORD_ENABLE == 0 {
+            return false;
+        }
+        self.cfg.write16(a, at, v & !RELAXED_ORD_ENABLE);
+        true
+    }
+}
+
 /// `pciN`.
 #[derive(Debug)]
 pub struct PciBus {
@@ -322,14 +351,15 @@ impl Driver for PciBus {
             let ident = Ident::Pci(f.header.ident, f.addr, path);
             let express = crate::requester::express_type(self.data.cfg, f.addr, &f.caps);
             let rid = self.data.upstream.requester(f.addr, express.is_some());
-            let child = PciChild {
+            let child = Arc::new(PciChild {
                 cfg: self.data.cfg,
                 function: f,
                 bus: Arc::clone(&self.data),
-            };
-            let id = cx.add_child(ident, Some(Arc::new(child)), res);
+            });
+            let id = cx.add_child(ident, Some(Arc::clone(&child) as _), res);
             if let Some(rid) = rid {
                 cx.set_requester_id(id, rid);
+                cx.set_requester_hook(id, child);
             }
         }
         Ok(())

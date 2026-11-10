@@ -830,6 +830,17 @@ fn qemu_virt_smmuv3_iort() {
     assert_eq!(map[0].map(0x100), Some(0x100));
     assert_eq!(map[0].map(0x200), None);
     assert!(p.notes.is_empty());
+    // The windows its domains reserve (IOMMU.md §4.6): `virt`'s 32-bit
+    // and 64-bit MMIO windows, not its I/O window or ECAM.
+    let pci0 = w
+        .found
+        .iter()
+        .find(|f| f.device.path == "\\_SB_.PCI0")
+        .expect("PCI0");
+    assert_eq!(
+        crate::ranges::windows(&pci0.device.crs),
+        [(0x1000_0000, 0x2eff_0000), (0x80_0000_0000, 0x80_0000_0000)]
+    );
 }
 
 /// The board's graph with the IORT's edges (IOMMU.md §4.3): an `smmu`

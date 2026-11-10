@@ -178,10 +178,13 @@ impl Driver for VtRnd {
         let built = (|| {
             // The legacy interface takes a 32-bit page number.
             let addr_bits = if dev.is_modern() { 64 } else { 44 };
-            let tag = cx.dma_tag(DmaConstraints {
-                addr_bits,
-                ..DmaConstraints::UNLIMITED
-            })?;
+            let tag = dev.dma_tag(
+                cx,
+                DmaConstraints {
+                    addr_bits,
+                    ..DmaConstraints::UNLIMITED
+                },
+            )?;
             let buf = tag
                 .coherent::<u8>(REQUEST)
                 .map_err(|_| AttachError::NoMemory)?;

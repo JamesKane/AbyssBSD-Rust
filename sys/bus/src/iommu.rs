@@ -13,11 +13,15 @@
 //! ([`crate::StartCx::provide_iommu`]). When a translated device first
 //! needs DMA (its DMA tag, or MSI, whichever comes first, as FreeBSD's
 //! `iommu_get_dev_ctx`), the broker asks the unit for a context for its
-//! stream ([`crate::AttachCx::iommu_context`]). So far (IOMMU.md §8,
-//! stage 2) every context is pass-through: the stream bypasses
-//! translation, and the device keeps its direct or bounce tag, as
-//! FreeBSD's disabled requesters (`IOMMU_CTX_DISABLED`). A stream no
-//! device asked for stays invalid: its DMA aborts.
+//! stream ([`crate::AttachCx::iommu_context`]). A translated context
+//! gives the device's tags the IOMMU backend over its domain
+//! ([`Context::Translated`]); a pass-through one (FreeBSD's disabled
+//! requesters, `IOMMU_CTX_DISABLED`; a virtio device that does not
+//! accept platform translation) leaves its stream bypassing and its tag
+//! direct or bounce. A stream no device asked for stays invalid: its DMA
+//! aborts. When a PCI function's requester first gets a translated
+//! context, the function's bus hears of it ([`RequesterHook`]): PCIe
+//! relaxed ordering goes off (docs/IOMMU.md §4.4).
 //!
 //! Behavior reference: sys/dev/iommu/busdma_iommu.c (`iommu_get_requester`,
 //! `iommu_get_dev_ctx`), sys/arm64/acpica/acpi_iort.c.
@@ -26,6 +30,8 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ops::RangeInclusive;
 use core::sync::atomic::{AtomicBool, Ordering};
+
+use vm::dma::IoDomain;
 
 use crate::types::DeviceId;
 
@@ -42,15 +48,77 @@ pub enum IommuError {
     Revoked,
 }
 
+/// What a device asks of its context.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Want {
+    /// Translation, if the unit translates.
+    Translate,
+    /// Physical addresses: a virtio device that does not accept platform
+    /// translation (`VIRTIO_F_ACCESS_PLATFORM`) uses them whatever the
+    /// platform does.
+    PassThrough,
+}
+
+/// A device's request for its stream's context.
+#[derive(Clone, Copy, Debug)]
+pub struct ContextRequest<'a> {
+    /// What it wants.
+    pub want: Want,
+    /// The name of the node holding the requester ID (the PCI function)
+    /// for the unit's event lines: its driver's name and unit, or its PCI
+    /// selector (`pci0:0:3:0`) when no driver has it.
+    pub name: &'a str,
+
+    /// The requester ID.
+    pub rid: u16,
+    /// The PCI segment.
+    pub segment: u32,
+    /// The device's accesses snoop the CPU's caches.
+    pub coherent: bool,
+    /// Bus address ranges the domain must never hand out: the host
+    /// bridge's windows (start, length).
+    pub reserved: &'a [(u64, u64)],
+}
+
+/// A stream's context, as a device's tag uses it.
+#[derive(Clone)]
+pub enum Context {
+    /// The stream bypasses translation: bus address = physical address.
+    PassThrough,
+    /// The stream is translated through this domain.
+    Translated(Arc<dyn IoDomain>),
+}
+
+impl core::fmt::Debug for Context {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::PassThrough => "PassThrough",
+            Self::Translated(_) => "Translated",
+        })
+    }
+}
+
 /// An IOMMU unit, as the broker uses it.
 pub trait Iommu: Send + Sync {
-    /// Gives `stream` a pass-through context: its DMA reaches memory
-    /// untranslated (an STE in bypass). Idempotent.
+    /// The context of `stream`, made on its first request (FreeBSD's
+    /// `iommu_get_ctx`): translated if the unit translates and the
+    /// request wants it, pass-through otherwise. A later request gets the
+    /// same context, except that one wanting physical addresses gets
+    /// [`Context::PassThrough`] whatever the stream does.
     ///
     /// # Errors
     ///
     /// Why the stream has no context: its DMA still aborts.
-    fn pass_through(&self, stream: u32) -> Result<(), IommuError>;
+    fn context(&self, stream: u32, req: &ContextRequest<'_>) -> Result<Context, IommuError>;
+}
+
+/// The bus of a node with a requester ID, told when its requester gets a
+/// translated context (the PCI bus: relaxed ordering off).
+pub trait RequesterHook: Send + Sync {
+    /// The requester's context translates. Returns whether the device
+    /// changed in a way to report (relaxed ordering was on and is now
+    /// off).
+    fn translated(&self) -> bool;
 }
 
 /// A published [`Iommu`], revoked when its driver detaches.
@@ -82,16 +150,16 @@ impl IommuSource {
         self.revoked.store(true, Ordering::Release);
     }
 
-    /// [`Iommu::pass_through`], unless revoked.
+    /// [`Iommu::context`], unless revoked.
     ///
     /// # Errors
     ///
     /// The provider's, or [`IommuError::Revoked`].
-    pub fn pass_through(&self, stream: u32) -> Result<(), IommuError> {
+    pub fn context(&self, stream: u32, req: &ContextRequest<'_>) -> Result<Context, IommuError> {
         if self.revoked.load(Ordering::Acquire) {
             return Err(IommuError::Revoked);
         }
-        self.imp.pass_through(stream)
+        self.imp.context(stream, req)
     }
 }
 
@@ -136,6 +204,9 @@ pub enum Translation {
         segment: u32,
         /// Requester ID to stream.
         map: Vec<IdMap>,
+        /// The host bridge's memory windows at their bus addresses
+        /// (start, length): never IOVAs (docs/IOMMU.md §4.6).
+        windows: Vec<(u64, u64)>,
     },
     /// A device firmware names (an IORT named component), with the
     /// streams it uses on `unit`.
@@ -153,6 +224,24 @@ impl Translation {
     pub fn unit(&self) -> DeviceId {
         match self {
             Self::Pci { unit, .. } | Self::Named { unit, .. } => *unit,
+        }
+    }
+
+    /// The PCI segment, for a PCI translation.
+    #[must_use]
+    pub fn segment(&self) -> Option<u32> {
+        match self {
+            Self::Pci { segment, .. } => Some(*segment),
+            Self::Named { .. } => None,
+        }
+    }
+
+    /// The bus address ranges a domain of this translation reserves.
+    #[must_use]
+    pub fn windows(&self) -> &[(u64, u64)] {
+        match self {
+            Self::Pci { windows, .. } => windows,
+            Self::Named { .. } => &[],
         }
     }
 
@@ -186,7 +275,9 @@ mod tests {
                 output: 0,
                 single: false,
             }],
+            windows: alloc::vec![(0x1000_0000, 0x2eff_0000)],
         };
+
         assert_eq!(t.unit(), unit);
         assert_eq!(t.stream(0x100), Some(0x100));
         assert_eq!(t.stream(0x200), None);
