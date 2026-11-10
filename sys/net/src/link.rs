@@ -23,14 +23,22 @@ pub struct Media {
     pub supported: i32,
 }
 
-/// `IFM_ETHER`, `IFM_AUTO`, `IFM_NONE`, `IFM_10G_T`, `IFM_FDX`,
-/// `IFM_AVALID`, `IFM_ACTIVE`.
+/// `IFM_ETHER`, `IFM_AUTO`, `IFM_NONE`, the twisted-pair subtypes,
+/// `IFM_FDX`, `IFM_HDX`, `IFM_AVALID`, `IFM_ACTIVE`.
 pub mod ifm {
     pub const ETHER: i32 = 0x20;
     pub const AUTO: i32 = 0;
     pub const NONE: i32 = 2;
     pub const T10G: i32 = 26;
+    pub const T10: i32 = 3;
+    pub const TX100: i32 = 6;
+    pub const T1000: i32 = 16;
+    /// `IFM_X(37)` and `IFM_X(38)`: extended subtypes, bits above the
+    /// five of `IFM_TMASK` shifted into `IFM_ETH_XTYPE`.
+    pub const T2500: i32 = 0x805;
+    pub const T5000: i32 = 0x806;
     pub const FDX: i32 = 0x0010_0000;
+    pub const HDX: i32 = 0x0020_0000;
     pub const AVALID: i32 = 0x1;
     pub const ACTIVE: i32 = 0x2;
 }

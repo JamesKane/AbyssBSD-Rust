@@ -338,7 +338,7 @@ fn configure_and_start() {
     assert_eq!(s.get(regs::MAR4, 4), (1u32 << 31).swap_bytes());
     assert_eq!(s.get(regs::MAR0, 4), 0);
     assert_eq!(s.get(regs::CMD, 1) as u8, regs::CMD_TXENB | regs::CMD_RXENB);
-    assert_eq!(s.get(regs::IMR, 4), regs::INTRS_TIMER);
+    assert_eq!(s.get(regs::IMR, 4), regs::INTRS);
     assert_eq!(
         s.get(regs::CPLUSCMD, 2) as u16 & regs::CPLUSCMD_RXCSUM,
         regs::CPLUSCMD_RXCSUM
@@ -358,4 +358,18 @@ fn configure_and_start() {
 fn multicast_hash_bits() {
     let h = crate::multicast_hash(&[[0x33, 0x33, 0, 0, 0, 1], [0xff; 6], [1, 0, 0x5e, 0, 0, 1]]);
     assert_eq!(h, [1 << 31, 1 << 30 | 1 << 31]);
+}
+
+/// The factory address stands; a missing or multicast one is replaced by
+/// a local unicast one.
+#[test]
+fn station_fallback() {
+    use crate::driver::station;
+    let board = [0xc0, 0x74, 0x2b, 0xf9, 0x42, 0x34];
+    assert_eq!(station(board, 0), board);
+    for bad in [[0; 6], [0x01, 0, 0x5e, 0, 0, 1]] {
+        let a = station(bad, 1);
+        assert_eq!(a[0] & 0x03, 0x02, "local unicast: {a:02x?}");
+        assert_ne!(station(bad, 1), station(bad, 2));
+    }
 }

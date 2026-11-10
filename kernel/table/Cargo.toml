@@ -20,6 +20,7 @@ hkbd = { path = "../../drivers/hkbd" }
 hms = { path = "../../drivers/hms" }
 nvme = { path = "../../drivers/nvme" }
 pci = { path = "../../sys/pci" }
+rge = { path = "../../drivers/rge" }
 sbsa-gwdt = { path = "../../drivers/sbsa-gwdt" }
 sky1-clk = { path = "../../drivers/sky1-clk" }
 sky1-pinctrl = { path = "../../drivers/sky1-pinctrl" }

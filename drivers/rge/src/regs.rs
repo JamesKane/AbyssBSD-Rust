@@ -75,6 +75,15 @@ pub const ISR_TX_DESC_UNAVAIL: u32 = 0x0000_0080;
 pub const ISR_SWI: u32 = 0x0000_0100;
 pub const ISR_PCS_TIMEOUT: u32 = 0x0000_4000;
 pub const ISR_SYSTEM_ERR: u32 = 0x0000_8000;
+/// The interrupts the driver takes without moderation (`RGE_INTRS`).
+pub const INTRS: u32 = ISR_RX_OK
+    | ISR_RX_ERR
+    | ISR_TX_OK
+    | ISR_TX_ERR
+    | ISR_LINKCHG
+    | ISR_TX_DESC_UNAVAIL
+    | ISR_PCS_TIMEOUT
+    | ISR_SYSTEM_ERR;
 /// The interrupts the driver takes with simulated moderation: completions
 /// come from the timer (`ISR_PCS_TIMEOUT`).
 pub const INTRS_TIMER: u32 = ISR_RX_ERR | ISR_TX_ERR | ISR_PCS_TIMEOUT | ISR_SYSTEM_ERR;

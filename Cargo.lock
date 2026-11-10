@@ -197,6 +197,7 @@ dependencies = [
  "isa",
  "nvme",
  "pci",
+ "rge",
  "sbsa-gwdt",
  "sky1-clk",
  "sky1-pinctrl",
@@ -578,8 +579,18 @@ version = "0.0.0"
 name = "rge"
 version = "0.0.0"
 dependencies = [
+ "abi",
+ "bus",
+ "devtree",
  "hal",
+ "irq",
+ "mbuf",
  "net",
+ "pci",
+ "regs",
+ "sched",
+ "sync",
+ "vm",
 ]
 
 [[package]]

@@ -5,6 +5,8 @@
 //! - [`hw`]: bringing the chip up, over [`hw::Regs`]: the OCP, CSI, and
 //!   EPHY register windows, reset, MAC and PHY microcode, PHY
 //!   configuration, and the MAC setup `rge_init_locked` does.
+//! - [`ring`]: the descriptor rings and frame reassembly.
+//! - [`driver`]: `rgeN`, the PCI driver and its interface.
 //! - [`generated`]: Realtek's microcode and PHY configuration programs,
 //!   read from FreeBSD's driver by `cargo xtask rgegen`; [`program`]
 //!   replays them.
@@ -17,13 +19,19 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+pub use driver::DRIVER;
+
 extern crate alloc;
 
+pub mod driver;
 pub mod generated;
 pub mod hw;
 pub mod program;
 pub mod regs;
+pub mod ring;
 
+#[cfg(test)]
+mod ring_tests;
 #[cfg(test)]
 mod tests;
 

@@ -2549,6 +2549,22 @@ machines against FreeBSD on bare metal; the exit criteria above.
     now holds no Sky1 device. Leasing fields of such a window to the devices that program it
     comes with the first of them.
   - Next: GPIO, I2C (the RTC), the GPT timer, and the SCMI agent with its mailboxes.
+- Progress 2026-11-09 (P8.3, `rge`): the Orange Pi 6 Plus's two NICs are RTL8126 (`RTL8126_2`).
+  No emulator models the chip, so the driver is built and tested on the host against a model of its
+  register protocol before it meets the board.
+  - The chip programming follows FreeBSD's `sys/dev/rge`: the OCP, CSI, and EPHY windows, reset,
+    MAC and PHY microcode, PHY configuration, the MAC setup, autonegotiation (2.5 and 5 Gb/s).
+    `cargo xtask rgegen [--check]` reads Realtek's microcode and each revision's PHY
+    configuration from FreeBSD's source into `drivers/rge/src/generated.rs`, refusing any
+    statement shape it does not know.
+  - The rings (1024 descriptors each) copy received frames out of fixed slots and hand transmit
+    frames over first-descriptor-last; short frames are padded to 60 bytes (the delta
+    specification). One MSI, unmoderated interrupts, receive checksum offload; transmit offloads,
+    timer moderation, and the second copy on receive are left for the performance work.
+  - `hal::dma` barriers (DMB OSHST/OSHLD, DSB ST) order descriptor hand-over and doorbells, which
+    DRIVER-MODEL §8.2 promised and nothing provided. NVMe and xHCI now use them too, since on
+    arm64 hardware a doorbell write is not ordered after normal-memory writes without one.
+  - Only the RTL8126 is matched; the RTL8125 family (the X870E's NIC) comes with P8.2.
 
 ## Phase 9: Self-hosting and hardening = **v1.0 / Day 1 complete** (L)
 

@@ -784,8 +784,8 @@ impl<R: Regs> Chip<R> {
 
     /// Finishes `rge_init_locked`: ends configuration writes, starts
     /// autonegotiation, starts the receiver and transmitter, and unmasks
-    /// the interrupts with simulated moderation (a timer interrupt every
-    /// 0x2600 clocks, which reaps completions).
+    /// every completion and link interrupt, unmoderated
+    /// (`RGE_IMTYPE_NONE`).
     pub fn start(&self) {
         self.disable_aspm_clkreq();
         self.clr8(regs::EECMD, regs::EECMD_WRITECFG);
@@ -793,10 +793,35 @@ impl<R: Regs> Chip<R> {
         self.autoneg();
         self.regs
             .write8(regs::CMD, regs::CMD_TXENB | regs::CMD_RXENB);
-        self.regs.write32(regs::IMR, regs::INTRS_TIMER);
         self.regs.write16(regs::IM, 0);
-        self.regs.write32(regs::TIMERINT0, 0x2600);
-        self.regs.write32(regs::TIMERCNT, 1);
+        self.regs.write32(regs::TIMERINT0, 0);
+        self.regs.write32(regs::IMR, regs::INTRS);
+    }
+
+    /// Masks every interrupt (the filter, before the thread runs).
+    pub fn mask(&self) {
+        self.regs.write32(regs::IMR, 0);
+    }
+
+    /// Unmasks the interrupts [`Chip::start`] enabled.
+    pub fn unmask(&self) {
+        self.regs.write32(regs::IMR, regs::INTRS);
+    }
+
+    /// Reads and acknowledges what is pending.
+    pub fn ack(&self) -> u32 {
+        let st = self.regs.read32(regs::ISR);
+        if st != 0 {
+            self.regs.write32(regs::ISR, st);
+        }
+        st
+    }
+
+    /// Tells the transmitter new descriptors are ready (after
+    /// [`hal::dma::doorbell_barrier`]).
+    pub fn kick_tx(&self) {
+        hal::dma::doorbell_barrier();
+        self.regs.write16(regs::TXSTART, regs::TXSTART_START);
     }
 }
 

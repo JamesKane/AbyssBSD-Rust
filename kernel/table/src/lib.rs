@@ -43,6 +43,7 @@ pub static DRIVERS: &[DriverDecl] = &[
     virtio_blk::DRIVER,
     virtio_net::DRIVER,
     nvme::DRIVER,
+    rge::DRIVER,
     ahci::AHCI,
     ahci::AHCICH,
     virtio_random::DRIVER,
