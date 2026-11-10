@@ -2687,7 +2687,10 @@ compat-deviations with a reason, and a day of looped scenarios without a hang.
     `uart_tty_attach`'s `ttyu%r`.
   - The held key: in QEMU, holding Up at the shell and in Scroll Lock mode (15 s, Up, PgUp,
     Down) never hangs the guest; the lag a test sees after a long `send-key` hold is QEMU's
-    (its hold runs on the virtual clock). Still open, for the board. On the way, scrolling the
+    (its hold runs on the virtual clock). On the board, with this kernel (2e44eb9), holding Up
+    at the `vt` login prompt did not hang either: getty took the escape sequences as the name
+    until its buffer filled (`MAXLOGNAME*3`), then ran `login`, which asks every name for a
+    password, as on FreeBSD. Not reproduced, so left open until it is seen again. On the way, scrolling the
     history no longer blanks the whole framebuffer and forgets every cell: it draws only the
     cells that differ, the drawn state being known.
   - Noise: the root has `kldxref`'s empty `linker.hints`, so `devmatch` reads the device tree,
