@@ -165,7 +165,7 @@ for this hardware, and its Q8B `lessons.md` has the general bring-up hazards.
 
 | Item | Fact | What it means for AbyssBSD |
 |---|---|---|
-| SoC | CIX P1 (CD8180, "Sky1"): 12 Armv9.2 cores, 4× A720 @ 2.6 GHz + 4× A720 @ 2.5 GHz + 4× A520; 32 GB | Three core classes, so the scheduler needs capacity-aware placement (PPTT + `_CPC`). Armv9.2 means PAC, BTI, MTE, and SVE are available |
+| SoC | CIX P1 (CD8180, "Sky1"): 12 Armv9.2 cores, 4× A720 @ 2.6 GHz + 4× A720 @ 2.5 GHz + 4× A520; 32 GB. Five PPTT clusters; Linux's capacities: CPUs 0-1 1024, 2-5 (A520) 279, 6-7 905, 8-9 866, 10-11 984. The boot CPU is MPIDR `0xA00` | Three core classes, so the scheduler needs capacity-aware placement (PPTT + `_CPC`). The MADT's efficiency class is 0 on every CPU, so it can't tell them apart. Armv9.2 means PAC, BTI, MTE, and SVE are available |
 | Firmware | UEFI, ACPI only (no DT): APIC (MADT), GTDT, IORT, MCFG, PCCT, PPTT, SDEI, DBG2, CSRT, DSDT + 2 SSDTs. **No SPCR** | Early console must fall back to **DBG2** (COM2, `ARMH0011` at `0x40d0000`). No board-specific settings ("nothing special") |
 | Exception level | UEFI enters the kernel at **EL2**. VHE capable. No vendor hypervisor | The arm64 entry path must handle EL2: install a minimal EL2 stub and drop to EL1 for Day 1, leaving EL2 available for a future hypervisor |
 | FP/SIMD | **SVE** implemented | `FpuState` must save SVE state, `AT_HWCAP`/`AT_HWCAP2` must advertise it correctly, and the SVE vector length must be restored after core power-down |
@@ -175,7 +175,7 @@ for this hardware, and its Q8B `lessons.md` has the general bring-up hazards.
 | Clocks / power | Power domains as ACPI power resources (`_PR0`/`_PR3`). Clocks are **AML methods that call SCMI over PCC** | The AML interpreter must support **PCC operation regions** and power resources (P3) |
 | AML quirks | DSDT references nonexistent `I2C0.UXC0`–`UXC3`. "Could not update all GPEs" | Unresolved references must be a logged, non-fatal error, never a panic |
 | PCIe | ECAM (MCFG), 3 `PNP0A08` root ports | Generic ECAM host. No quirks known |
-| Storage | NVMe (Micron 2550), behind SMMUv3. Relaxed ordering off | Works without the SMMU (firmware leaves bypass). SMMUv3 + IORT RMRs come in P9 |
+| Storage | Two NVMe, behind SMMUv3; relaxed ordering off. **Crucial P3 500 GB** (`CT500P3SSD8`, Micron controller): the ESP, Ubuntu, FreeBSD 16-CURRENT, swap. **Samsung 990 PRO 1 TB**: a test volume AbyssBSD may use (one GPT partition, `taisce`); a dedicated 256 GB drive may replace it later | Works without the SMMU (firmware leaves bypass). SMMUv3 + IORT RMRs come in P9. The Crucial disk isn't written until the reimage |
 | Network | 2× **RTL8126 5 GbE** on PCIe | The only wired NIC, so P8 needs an `rge`-class driver for the board's exit |
 | USB | 10 xHCI hosts described in ACPI as `PNP0D10` (not PCI) | xHCI must attach via ACPI as well as PCI |
 | Watchdog | SBSA generic watchdog (GTDT). Writes to the refresh frame **do not refresh** it; refresh through `WOR` | Bring this up early (P3): it turns hangs into resets instead of power cycles |
@@ -189,8 +189,16 @@ for this hardware, and its Q8B `lessons.md` has the general bring-up hazards.
   it before P6's exit. When the board's gating phase arrives (P8), **it is reimaged for AbyssBSD**. Before that, capture the ground truth (`acpidump` tables, `devinfo`,
   `pciconf`, Linux register dumps) into `tests/corpus/opi6p/`, because the reference OSes will be
   gone afterwards.
-- Network: Ubuntu at `192.168.0.27` (user `jkane`, key login; root steps go through a script the
-  user runs).
+- Network: `192.168.0.25`, whichever OS is booted (user `jkane`, key login). Ubuntu: passwordless
+  `sudo`. FreeBSD: `su` (no root password); root ssh is refused, and the console is `ttyv0` only,
+  so the serial header is silent under it.
+- **Never read `/dev/mem` on the board under FreeBSD.** Reading ACPI tables that way panicked it
+  (2026-11-09). The tables are in `tests/corpus/acpi/opi6p/`, from Linux's sysfs.
+- The ground truth is captured (P8.0, 2026-11-09): `tests/corpus/opi6p/` (FreeBSD and Linux) and
+  `tests/corpus/acpi/opi6p/`. Firmware details found there: most `_STA` methods read firmware
+  variables at `0xFFFE0000` (`GETV`), and the embedded controller (battery, AC) is reached by AML
+  driving the I2C6 controller directly, under a hardware mutex (`AMTX`); `I2C6` is hidden from the
+  OS (`_STA` 0).
 - **Read before experimenting.** Hangs cost power cycles. Every risky step starts from the Linux
   and FreeBSD ground truth (register dumps, ACPI tables), with the serial console attached and the
   watchdog armed once it works.

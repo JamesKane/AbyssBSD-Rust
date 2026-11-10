@@ -12,7 +12,7 @@ extern crate std;
 use alloc::vec::Vec;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use super::corpus::DSDTS;
+use super::corpus::{DSDTS, real_firmware};
 use super::util::{FakeHost, fix_checksum, table, test_config};
 use crate::{Config, Interpreter, Limits, Value};
 
@@ -153,10 +153,10 @@ fn iterations() -> (u64, u64) {
 fn mutated_corpus_never_panics() {
     let (iters, seed) = iterations();
     for (k, (name, dsdt)) in DSDTS.iter().enumerate() {
-        // The Q8B table is 15–50 times larger than the others.
+        // The vendor tables are 15–50 times larger than the others.
         let n = if iters > 0 {
             iters
-        } else if *name == "radxa-q8b" {
+        } else if real_firmware(name) {
             500
         } else {
             2000
@@ -231,7 +231,7 @@ fn mutated_methods_never_panic() {
     for (k, (name, dsdt)) in DSDTS.iter().enumerate() {
         let n = if iters > 0 {
             iters / 4
-        } else if *name == "radxa-q8b" {
+        } else if real_firmware(name) {
             40
         } else {
             300

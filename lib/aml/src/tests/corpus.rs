@@ -11,7 +11,8 @@ use crate::resource::{
     Address, AddressKind, AddressWidth, Caching, Io, Polarity, Resource, SerialBusKind, Trigger,
 };
 use crate::{
-    AmlPath, Config, IntWidth, Interpreter, NodeId, PrtEntry, PrtSource, RegionSpace, Value,
+    AmlPath, Config, Error, IntWidth, Interpreter, NodeId, PrtEntry, PrtSource, RegionSpace, Uid,
+    Value,
 };
 
 macro_rules! corpus {
@@ -26,7 +27,14 @@ pub(crate) const DSDTS: &[(&str, &[u8])] = &[
     ("qemu-virt", corpus!("qemu-virt/dsdt.dat")),
     ("bhyve", corpus!("bhyve/dsdt.dat")),
     ("radxa-q8b", corpus!("radxa-q8b/dsdt.dat")),
+    ("opi6p", corpus!("opi6p/dsdt.dat")),
 ];
+
+/// The vendor firmware, whose AML nests deeper than the default limits allow
+/// (see [`stack_budgets_for_real_firmware`]).
+pub(crate) fn real_firmware(name: &str) -> bool {
+    matches!(name, "radxa-q8b" | "opi6p")
+}
 
 pub(crate) fn load(dsdt: &[u8]) -> (Interpreter, FakeHost) {
     let mut i = Interpreter::new(test_config());
@@ -107,6 +115,7 @@ fn integer_width_follows_dsdt_revision() {
         ("qemu-virt", IntWidth::W64),
         ("bhyve", IntWidth::W64),
         ("radxa-q8b", IntWidth::W64),
+        ("opi6p", IntWidth::W64),
     ] {
         let (i, _) = load(dsdt(name));
         assert_eq!(i.int_width(), w, "{name}");
@@ -473,12 +482,13 @@ fn q8b_serial_and_gpio_resources() {
 }
 
 /// The default limits (a 10 KiB stack budget, for a 16 KiB kernel thread
-/// stack) serve the QEMU and bhyve firmware; the Q8B's AML nests deeper
-/// and runs within the budget for a 64 KiB stack.
+/// stack) serve the QEMU and bhyve firmware; the Q8B's and the Orange Pi 6
+/// Plus's AML nest deeper (the latter to about 15 KiB) and run within the
+/// budget for the 64 KiB stack the kernel's ACPI thread has.
 #[test]
 fn stack_budgets_for_real_firmware() {
     for (name, t) in DSDTS {
-        let limits = if *name == "radxa-q8b" {
+        let limits = if real_firmware(name) {
             crate::Limits::for_stack(64 * 1024)
         } else {
             crate::Limits::default()
@@ -609,4 +619,122 @@ fn bench_ssdt_loads_beside_bhyve() {
     );
     node(&i, "\\KBNS.KSB.PCI0");
     node(&i, "\\KBNS.KSB.HPET");
+}
+
+/// The Orange Pi 6 Plus's firmware variables (`\_SB.GNVA`, 0x2C bytes at
+/// 0xFFFE0000), which `GETV` reads for most devices' `_STA`. FreeBSD can't
+/// read them (that region is firmware-reserved), so these are inferred
+/// from Linux's `_STA` results on the board: nonzero except the switches
+/// for I2C6 (0x0B), PCIe port 4 (0x11), and the three that turn
+/// `XHC0`, `XHC4`, and `XHC5` off (0x1C-0x1E).
+fn opi6p_gnvs() -> [u8; 0x2c] {
+    let mut g = [1u8; 0x2c];
+    for k in [0x0b, 0x11, 0x1c, 0x1d, 0x1e] {
+        g[k] = 0;
+    }
+    g
+}
+
+/// The whole Orange Pi 6 Plus namespace: the DSDT and both SSDTs, in the
+/// XSDT's order, with the firmware variables in place.
+fn load_opi6p() -> (Interpreter, FakeHost) {
+    let config = Config {
+        limits: crate::Limits::for_stack(64 * 1024),
+        ..test_config()
+    };
+    let mut i = Interpreter::new(config);
+    let mut h = FakeHost::default();
+    h.poke(RegionSpace::SystemMemory, 0xfffe_0000, &opi6p_gnvs());
+    for t in [
+        corpus!("opi6p/dsdt.dat"),
+        corpus!("opi6p/ssdt1.dat"),
+        corpus!("opi6p/ssdt2.dat"),
+    ] {
+        let r = i.load_table(t, &mut h).unwrap();
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    }
+    (i, h)
+}
+
+/// Every device Linux enumerated on the board
+/// (`tests/corpus/opi6p/linux/acpi-devices.txt`), and no other, with the
+/// same `_HID`, `_UID`, `_ADR`, and `_STA` (all but `BAT0`'s).
+#[test]
+fn opi6p_devices_match_linux() {
+    let linux = include_str!("../../../../tests/corpus/opi6p/linux/acpi-devices.txt");
+    let (mut i, mut h) = load_opi6p();
+    let mut want = std::collections::BTreeSet::new();
+    for line in linux.lines() {
+        let mut words = line.split(' ');
+        let name = words.next().unwrap();
+        let field = |k: &str| {
+            line.split(' ')
+                .find_map(|w| w.strip_prefix(k)?.strip_prefix('='))
+                .unwrap_or("")
+        };
+        let path = field("path");
+        // Linux's own nodes (the root, \_SB, \_TZ), power resources, and
+        // thermal zones aren't devices.
+        if ["LNXSY", "LNXPOWER", "LNXTHERM"]
+            .iter()
+            .any(|p| name.starts_with(p))
+        {
+            continue;
+        }
+        want.insert(std::string::String::from(path));
+        let d = node(&i, path);
+        let hid = i.hid(d, &mut h).unwrap();
+        assert_eq!(hid.as_deref().unwrap_or(""), field("hid"), "{path} _HID");
+        let uid = match i.uid(d, &mut h).unwrap() {
+            None => std::string::String::new(),
+            Some(Uid::Integer(x)) => alloc::format!("{x}"),
+            Some(Uid::String(s)) => s,
+        };
+        assert_eq!(uid, field("uid"), "{path} _UID");
+        let adr = i.adr(d, &mut h).unwrap();
+        let adr = adr.map(|a| alloc::format!("{a:#010x}")).unwrap_or_default();
+        assert_eq!(adr, field("adr"), "{path} _ADR");
+        // BAT0 asks the embedded controller over I2C6, which FakeHost
+        // doesn't model (see `opi6p_initialize_and_reg`).
+        if path == "\\_SB_.BAT0" {
+            assert_eq!(i.sta(d, &mut h), Err(Error::LoopLimit));
+            continue;
+        }
+        // Linux shows `status` only for devices with a `_STA`.
+        if !field("status").is_empty() {
+            let sta = i.sta(d, &mut h).unwrap();
+            assert_eq!(alloc::format!("{sta}"), field("status"), "{path} _STA");
+        }
+    }
+    let ours: std::collections::BTreeSet<_> =
+        i.devices().iter().map(|&d| i.path(d).to_text()).collect();
+    assert_eq!(ours, want);
+}
+
+/// Initialization over the whole namespace, against [`FakeHost`], whose
+/// registers read back what was last written.
+///
+/// One device fails: `BAT0._STA` (from an SSDT) asks the embedded
+/// controller through `EC0.TRAS`, which drives the I2C6 controller
+/// (0x04070000) from AML, and `EC0.CLRF` spins on `While (CR & 0x40) {}`
+/// until the hardware clears the bit. Here it never does, and the loop limit
+/// ends it, as ACPICA's loop timeout would.
+#[test]
+fn opi6p_initialize_and_reg() {
+    let (mut i, mut h) = load_opi6p();
+    let errors = i.initialize(&mut h);
+    let got: Vec<_> = errors
+        .iter()
+        .map(|(n, e)| (i.path(*n).to_text(), e.clone()))
+        .collect();
+    assert_eq!(got, [("\\_SB_.BAT0".into(), Error::LoopLimit)]);
+    for space in [
+        RegionSpace::SystemMemory,
+        RegionSpace::SystemIo,
+        RegionSpace::PciConfig,
+    ] {
+        let (_, errors) = i.run_reg(space, &mut h);
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+    assert!(i.peak_stack() <= i.config().limits.stack_budget);
 }

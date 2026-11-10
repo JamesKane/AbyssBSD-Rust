@@ -3,6 +3,10 @@
 //! with `GICv3`, both `-smp 8,sockets=2,cores=2,threads=2` with two NUMA nodes
 //! (CPUs 0–3 and 4–7, 256 MiB each, distance 21). Captured by dumping guest
 //! RAM from the QEMU monitor once firmware reached its shell.
+//!
+//! And the Orange Pi 6 Plus's (CIX P1 / Sky1) firmware, from
+//! `tests/corpus/acpi/opi6p`, checked against what Linux and FreeBSD
+//! reported on the board (`tests/corpus/opi6p`).
 
 extern crate std;
 use std::vec::Vec;
@@ -13,6 +17,13 @@ use crate::{AddressSpace, Sdt, dbg2, fadt, gtdt, hpet, madt, mcfg, pptt, slit, s
 macro_rules! corpus {
     ($path:literal) => {
         Mem(include_bytes!(concat!("../../tests/corpus/", $path)).to_vec())
+    };
+}
+
+/// The Orange Pi 6 Plus's tables.
+macro_rules! opi6p {
+    ($name:literal) => {
+        Mem(include_bytes!(concat!("../../../../tests/corpus/acpi/opi6p/", $name)).to_vec())
     };
 }
 
@@ -307,4 +318,169 @@ fn aarch64_console() {
     let ports: Vec<_> = dbg2::serial_ports(&sdt(&m)).collect();
     assert_eq!(ports.len(), 1);
     assert_eq!(ports[0].map(|p| p.base.address), Ok(0x0900_0000));
+}
+
+#[test]
+fn opi6p_every_table_survives_the_exerciser() {
+    for m in [
+        opi6p!("apic.dat"),
+        opi6p!("csrt.dat"),
+        opi6p!("dbg2.dat"),
+        opi6p!("facp.dat"),
+        opi6p!("gtdt.dat"),
+        opi6p!("iort.dat"),
+        opi6p!("mcfg.dat"),
+        opi6p!("pcct.dat"),
+        opi6p!("pptt.dat"),
+        opi6p!("sdei.dat"),
+    ] {
+        exercise(&sdt(&m));
+    }
+}
+
+#[test]
+fn opi6p_madt() {
+    let m = opi6p!("apic.dat");
+    let t = madt::parse(&sdt(&m)).unwrap();
+    assert!(t.entries().all(|e| e.is_ok()));
+    assert_eq!(t.enabled_cpu_count(), 12);
+    // GICv4.1: Linux reports "Using GICv4.1 mode".
+    let d = t.gic_distributor().unwrap();
+    assert_eq!((d.physical_base, d.version), (0x0e01_0000, 4));
+    // The boot CPU is the first of the cluster at MPIDR 0xA00 (Linux: "CPU0:
+    // found redistributor a00"); the A520s are 0x000-0x300.
+    let mpidrs: Vec<_> = t.cpus().map(|c| c.hw_id).collect();
+    let want: Vec<_> = [
+        0xa00, 0xb00, 0, 0x100, 0x200, 0x300, 0x400, 0x500, 0x600, 0x700, 0x800, 0x900,
+    ]
+    .into_iter()
+    .map(madt::HwId::Mpidr)
+    .collect();
+    assert_eq!(mpidrs, want);
+    // Every efficiency class is 0, though Linux finds five capacities
+    // (1024, 279, 905, 866, 984): the core classes come from _CPC.
+    for e in t.entries() {
+        if let Ok(madt::MadtEntry::GicCpuInterface(g)) = e {
+            assert_eq!(g.efficiency_class, Some(0));
+            assert_eq!(g.performance_interrupt, 23);
+        }
+    }
+    // One redistributor region of 4 x 64 KiB frames per CPU: CPU0 (core 10)
+    // at 0x0E310000, where Linux found it.
+    let gicr = t.entries().find_map(|e| match e {
+        Ok(madt::MadtEntry::GicRedistributor(r)) => Some(r),
+        _ => None,
+    });
+    let gicr = gicr.unwrap();
+    assert_eq!((gicr.base, gicr.length), (0x0e09_0000, 12 * 0x4_0000));
+    assert_eq!(gicr.base + 10 * 0x4_0000, 0x0e31_0000);
+    // Linux: "ITS [mem 0x0e050000-0x0e06ffff]".
+    let its: Vec<_> = t
+        .entries()
+        .filter_map(|e| match e {
+            Ok(madt::MadtEntry::GicIts(i)) => Some(i.physical_base),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(its, [0x0e05_0000]);
+}
+
+#[test]
+fn opi6p_fadt_psci_over_smc() {
+    let m = opi6p!("facp.dat");
+    let f = fadt::parse(&sdt(&m)).unwrap();
+    assert_eq!((f.major_version(), f.minor_version()), (6, Some(3)));
+    assert!(f.flags().unwrap().hw_reduced_acpi());
+    let arm = f.arm_boot_arch().unwrap();
+    assert!(arm.psci_compliant() && !arm.psci_use_hvc());
+    assert_eq!(f.dsdt(), Some(0x7_f986_0018));
+    assert_eq!(f.facs(), None);
+}
+
+/// No memory-mapped timer (HARDWARE.md §4), and the SBSA watchdog.
+#[test]
+fn opi6p_gtdt() {
+    let m = opi6p!("gtdt.dat");
+    let g = gtdt::parse(&sdt(&m)).unwrap();
+    assert_eq!(g.cnt_control_base(), None);
+    assert_eq!(g.cnt_read_base(), None);
+    let gsivs = [
+        g.secure_el1(),
+        g.nonsecure_el1(),
+        g.virtual_el1(),
+        g.nonsecure_el2(),
+        g.virtual_el2(),
+    ]
+    .map(|t| t.map(|t| t.gsiv));
+    assert_eq!(gsivs, [Some(29), Some(30), Some(27), Some(26), Some(28)]);
+    let timers: Vec<_> = g.platform_timers().map(Result::unwrap).collect();
+    let [gtdt::PlatformTimer::Watchdog(w)] = timers.as_slice() else {
+        panic!("{timers:?}")
+    };
+    assert_eq!(
+        (w.refresh_frame, w.control_frame, w.gsiv),
+        (0x1600_8000, 0x1600_3000, 408)
+    );
+    assert!(!w.edge_triggered && !w.active_low && !w.secure);
+}
+
+/// Four root complexes share one ECAM base in segment 0, each decoding
+/// its own buses. Each window starts where Linux's `sky1-pcie-cix` found
+/// it ("ECAM at [mem 0x2c000000-0x2fffffff] for [bus c0-ff]", ...), though
+/// that driver gives the last three 48 buses where the MCFG gives 32.
+#[test]
+fn opi6p_mcfg_windows() {
+    let m = opi6p!("mcfg.dat");
+    let t = mcfg::parse(&sdt(&m)).unwrap();
+    let r: Vec<_> = t.regions().map(Result::unwrap).collect();
+    let got: Vec<_> = r
+        .iter()
+        .map(|r| {
+            (
+                r.segment,
+                r.start_bus,
+                r.end_bus,
+                r.function_address(r.start_bus, 0, 0),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (0, 0xc0, 0xff, Some(0x2c00_0000)),
+            (0, 0x90, 0xaf, Some(0x2900_0000)),
+            (0, 0x60, 0x7f, Some(0x2600_0000)),
+            (0, 0x30, 0x4f, Some(0x2300_0000)),
+        ]
+    );
+    assert!(r.iter().all(|r| r.base == 0x2000_0000));
+}
+
+/// The bring-up console (HARDWARE.md §4): no SPCR, so DBG2's PL011.
+#[test]
+fn opi6p_dbg2_console() {
+    let m = opi6p!("dbg2.dat");
+    let ports: Vec<_> = dbg2::serial_ports(&sdt(&m)).collect();
+    assert_eq!(ports.len(), 1);
+    let p = ports[0].unwrap();
+    assert_eq!(p.base.address, 0x040d_0000);
+    assert_eq!(p.kind, crate::UartKind::Pl011);
+}
+
+/// One package of five clusters, as Linux's `topology/cluster_id`: 1 (CPUs
+/// 0-1), 2 (2-5, the A520s), 3 (6-7), 4 (8-9), 5 (10-11).
+#[test]
+fn opi6p_pptt_clusters() {
+    let m = opi6p!("pptt.dat");
+    let p = pptt::parse(&sdt(&m)).unwrap();
+    assert!(p.nodes().all(|n| n.is_ok()));
+    let mut clusters = Vec::new();
+    for uid in 0..12 {
+        let t = p.topology(uid).unwrap();
+        assert!(!t.is_thread());
+        assert_eq!(t.package.unwrap().offset, 36);
+        clusters.push(t.cluster.unwrap().acpi_processor_id);
+    }
+    assert_eq!(clusters, [1, 1, 2, 2, 2, 2, 3, 3, 4, 4, 5, 5]);
+    assert_eq!(p.topology(12), None);
 }

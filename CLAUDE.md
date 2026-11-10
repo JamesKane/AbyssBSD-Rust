@@ -33,13 +33,14 @@ that runs unmodified FreeBSD userland. Read `docs/ROADMAP.md` for the current ph
 - Build/test server: `ssh abyss-build` (alias in ~/.ssh/config, currently 192.168.0.17; FreeBSD 15.1 amd64, 20 threads, 128 GiB, `doas`). Used
   for UFS2 images (`makefs`), `fsck_ffs`, `abi-check`, bhyve, kyua, and differential tests.
 - Local: Rust 1.99, `qemu-system-{x86_64,aarch64}`, edk2 firmware under `/usr/share/edk2/`.
-- ARM64 reference board: **Orange Pi 6 Plus** (CIX P1/Sky1), Ubuntu at `192.168.0.27` (key login;
-  root steps go through a script the user runs). FreeBSD 16-CURRENT is on the same NVMe. Board
+- ARM64 reference board: **Orange Pi 6 Plus** (CIX P1/Sky1), at `192.168.0.25` in Ubuntu or FreeBSD
+  (key login as `jkane`; Ubuntu has passwordless `sudo`, FreeBSD `su`). FreeBSD 16-CURRENT is on the same NVMe. Board
   facts: `docs/HARDWARE.md` §4. Prior bring-up notes are in the sibling project
   `../AbyssBSD/docs/boards/orangepi-6-plus/`, plus `../AbyssBSD/docs/boards/radxa-dragon-q8b/lessons.md`.
   - **Read before experimenting on the board.** Hangs cost power cycles.
-  - Until it is reimaged for AbyssBSD (planned at P8, board bring-up), don't write to its NVMe; boot from USB.
-    Capture its ground truth into `tests/corpus/opi6p/` before reimaging.
+  - Until it is reimaged for AbyssBSD (planned at P8, board bring-up), don't write to its boot NVMe (Crucial P3);
+    boot from USB. The Samsung 990 PRO is a test volume AbyssBSD may use. Never read `/dev/mem` under FreeBSD (it panics).
+    Its ground truth (FreeBSD and Linux, captured 2026-11-09) is in `tests/corpus/opi6p/`.
   - "Nothing special": no board-specific config knobs. A board setting means a driver bug.
 - AMD64 reference machine: **Ryzen 9 7900X / Gigabyte X870E AORUS ELITE WIFI7**, Fedora 44 at
   `192.168.0.30` (key login; `sudo` needs the user's password, so root steps go through a script

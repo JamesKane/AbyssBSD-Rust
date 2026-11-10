@@ -10,8 +10,8 @@ files are the only record of how FreeBSD and Linux saw the hardware.
 | `linux/` | Ubuntu 26.04.1, kernel `7.0.0-41-cix`, from the same NVMe. Captured 2026-11-09 |
 
 The board has two NVMe drives: a Crucial P3 500 GB (`CT500P3SSD8`, Micron controller), which holds
-the ESP, Ubuntu, FreeBSD, and swap, and a Samsung 990 PRO 1 TB with one partition (`taisce`) that
-is not ours. The binary ACPI tables are in [`../acpi/opi6p/`](../acpi/opi6p/).
+the ESP, Ubuntu, FreeBSD, and swap, and a Samsung 990 PRO 1 TB with one partition (`taisce`), a
+test volume AbyssBSD may use. The binary ACPI tables are in [`../acpi/opi6p/`](../acpi/opi6p/).
 
 ## `freebsd/`
 
