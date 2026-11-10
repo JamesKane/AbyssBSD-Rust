@@ -41,6 +41,51 @@ type Format = arch::mmu::Format;
 /// Frames below this are left alone (x86 real-mode trampolines later).
 pub(crate) const LOW_RESERVE: u64 = 1 << 20;
 
+/// The address past which RAM is left unused: `hw.physmem`, a size with an
+/// optional `K`, `M`, or `G` suffix, counts RAM up from the bottom and the
+/// rest goes unused, as FreeBSD's loader tunable trims physical memory.
+/// Without it, no limit.
+fn physmem_top() -> u64 {
+    // 0 until worked out (no RAM ends at 0).
+    static TOP: AtomicU64 = AtomicU64::new(0);
+    let top = TOP.load(Ordering::Relaxed);
+    if top != 0 {
+        return top;
+    }
+    let top = (|| {
+        let Some(v) = crate::boot::value("hw.physmem") else {
+            return u64::MAX;
+        };
+        let (digits, shift) = match v.as_bytes().last() {
+            Some(b'k' | b'K') => (&v[..v.len() - 1], 10),
+            Some(b'm' | b'M') => (&v[..v.len() - 1], 20),
+            Some(b'g' | b'G') => (&v[..v.len() - 1], 30),
+            _ => (v, 0),
+        };
+        let Some(want) = digits
+            .parse::<u64>()
+            .ok()
+            .and_then(|n| n.checked_shl(shift))
+        else {
+            return u64::MAX;
+        };
+        let mut seen = 0u64;
+        for r in crate::boot::memory_map().iter().filter(|r| r.kind.is_ram()) {
+            let range = r.range();
+            let len = range.end.get() - range.start.get();
+            if seen + len >= want {
+                let top = range.start.get() + (want - seen);
+                kprintln!("memory: hw.physmem={v}: RAM above {top:#x} left unused");
+                return top;
+            }
+            seen += len;
+        }
+        u64::MAX
+    })();
+    TOP.store(top, Ordering::Relaxed);
+    top
+}
+
 /// Hands out free frames in address order until the buddy allocator takes
 /// over.
 #[derive(Debug)]
@@ -70,7 +115,8 @@ impl BootFrames {
         while let Some(r) = map.get(self.region) {
             let range = r.range();
             let start = self.next.max(range.start.get()).max(LOW_RESERVE);
-            if r.kind == MemoryKind::Free && start + 4096 <= range.end.get() {
+            let end = range.end.get().min(physmem_top());
+            if r.kind == MemoryKind::Free && start + 4096 <= end {
                 self.next = start + 4096;
                 self.used += 1;
                 return Some(PhysAddr::new(start));
@@ -90,7 +136,8 @@ impl BootFrames {
         if i == self.region {
             start = start.max(self.next);
         }
-        (start < range.end.get()).then_some((start, range.end.get()))
+        let end = range.end.get().min(physmem_top());
+        (start < end).then_some((start, end))
     }
 
     /// `pages` contiguous frames from the top of the highest free region
