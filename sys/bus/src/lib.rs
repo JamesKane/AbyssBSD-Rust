@@ -8,6 +8,8 @@
 //!   workers, and detach.
 //! - [`gate`]: revocable references from long-lived objects to bindings.
 //! - [`platform`]: what the kernel provides.
+//! - [`provider`]: clock, reset, and power-domain providers, and the
+//!   counted handles consumers hold.
 //!
 //! The pure logic it builds on (ranking, the graph, units, FreeBSD's
 //! strings) is in `lib/devtree`.
@@ -21,6 +23,7 @@ pub mod driver;
 pub mod gate;
 pub mod manager;
 pub mod platform;
+pub mod provider;
 mod roothold;
 mod sysctl;
 pub mod types;

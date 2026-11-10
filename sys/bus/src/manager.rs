@@ -210,6 +210,14 @@ pub(crate) fn try_sleep_ms(s: &Sleepable, ms: u64) -> u64 {
     }
 }
 
+/// Sleeps `ns` through the manager's platform if there is one (without
+/// one, on the host, there is no hardware to wait for).
+pub(crate) fn try_sleep_ns(s: &Sleepable, ns: u64) {
+    if let Some(m) = MANAGER.get() {
+        m.platform().sleep_ns(s, ns);
+    }
+}
+
 /// Marks a claim as I/O ports rather than memory: the spaces overlap
 /// numerically but never in fact.
 pub(crate) const IO_SPACE: u64 = 1 << 63;
