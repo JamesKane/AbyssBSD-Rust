@@ -61,7 +61,7 @@ loader, and the interfaces they use.
 | `lib/zfs-boot` | here | `no_std`, pure, fuzzed | Read-only ZFS: vdev labels, uberblocks, the MOS, DSL under `zroot/ROOT/*`, and ZPL files (`lz4`, `zstd`, uncompressed) |
 | `cargo xtask live-image` | here | host | A test medium: FreeBSD 15.1's `base.txz`, this kernel, `loader-efi`, and the desktop's packages, built with the desktop's medium recipe (§4) |
 | Live medium recipe | monorepo (`abyss/mk/live-image.sh`) | shell | The shipping medium: UFS root, the desktop, `Installer` at login |
-| `Installer`, `abyss-install` | monorepo (`de/install`, `de/installrun`) | Swift | The installer: an unprivileged GUI sending a plan to a root service over the desktop's IPC |
+| `Installer`, `abyss-install` | monorepo (`de/install`, `de/installrun`) | Rust | The installer: an unprivileged GUI sending a plan to a root service over the desktop's IPC |
 
 ---
 
@@ -231,7 +231,7 @@ userland on this kernel:
 | Loader | `loader-efi` copied to the ESP in place of FreeBSD's `loader.efi` | §6 ask |
 
 **Disks with data.** The installer shows what is on each disk and warns before erasing it
-(`de/install/Safety.swift`): it refuses a disk that is mounted, holds the running root, or holds
+(`de/install/src/safety.rs`): it refuses a disk that is mounted, holds the running root, or holds
 a ZFS pool not imported, and it names the partitions on a full disk (`ntfs`, `efi`, …) and
 erases them only once a person confirms. That warning is only as good as what the kernel reports,
 so `geom disk list`, `gpart show`, and `zpool import` must describe a disk here exactly as they do

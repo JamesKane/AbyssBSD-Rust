@@ -2819,7 +2819,7 @@ ports see it, implemented natively, and a step order for this milestone).
 
 Plan: [DESKTOP.md](DESKTOP.md) under [ADR-0018](adr/0018-desktop-architecture.md).
 
-- **The desktop is the AbyssBSD Swift desktop** (`../AbyssBSD/desktop`): the `undertow`
+- **The desktop is the AbyssBSD desktop** (`../AbyssBSD/desktop`, Rust since 2026-10-31): the `undertow`
   compositor over wlroots, the Aqua toolkit and shell, portals, its applications, the login window,
   application jails, and its installer. AbyssBSD designs no desktop of its own. It runs this one
   as FreeBSD userland, installed from packages built for FreeBSD 15.1, unmodified.
@@ -2892,6 +2892,6 @@ Decided items are struck through. Each decision is recorded as an ADR.
    never reading GPL driver source, per [ADR-0007](adr/0007-license-and-clean-implementation.md)).
    Support a limited set of hardware and expand organically, driven by the reference machines.
    Decided by ADR at the start of M-G, the first milestone that would need it.
-8. ~~Desktop~~: decided. The AbyssBSD Swift desktop, run as FreeBSD userland, with its packages
+8. ~~Desktop~~: decided. The AbyssBSD desktop (Rust), run as FreeBSD userland, with its packages
    built for FreeBSD 15.1 ([ADR-0018](adr/0018-desktop-architecture.md)). 16-CURRENT follows once
    the desktop is stable here.

@@ -3,7 +3,7 @@
 - Status: **Draft**. The plan for M-D under [ADR-0018](adr/0018-desktop-architecture.md)
   (Accepted)
 - Date: 2026-10-29
-- Scope: running the AbyssBSD Swift desktop (`../AbyssBSD/desktop`) on this kernel: what it needs
+- Scope: running the AbyssBSD desktop (`../AbyssBSD/desktop`) on this kernel: what it needs
   from the kernel, the order those needs are met in, how it is tested and measured here, and what
   this project asks of the desktop's own plan. The desktop's design is its own documents'
   (`desktop/docs/PLAN.md`, `PRODUCT.md`, `STATUS.md`) and is out of scope here
@@ -11,37 +11,41 @@
   [GRAPHICS.md](GRAPHICS.md), [MULTIUSER.md](MULTIUSER.md), [USB.md](USB.md),
   [INSTALLER.md](INSTALLER.md), and a survey of the desktop's sources (2026-10-29)
 
-The short version: **AbyssBSD designs no desktop. It runs the Swift desktop as FreeBSD userland,
+The short version: **AbyssBSD designs no desktop. It runs the AbyssBSD desktop as FreeBSD userland,
 from packages, unmodified.** The desktop already runs on FreeBSD through ordinary FreeBSD
 interfaces, so every need it has is FreeBSD ABI that this kernel implements anyway. Most of that
 ABI is done (P4–P6). The rest is scheduled below. The desktop's own harness becomes a conformance
 suite here, compared test by test with FreeBSD 15.1, and its first lanes need no graphics at all.
 
-> **Note.** The desktop's Swift implementation will be rewritten in Rust, because Swift does not
-> exist on FreeBSD riscv64 and that blocks rv64 support (§7).
+> **Note.** The desktop was written in Swift and has been Rust since 2026-10-31 (ADR-0018
+> decision 7), because Swift does not exist on FreeBSD riscv64. The port kept every binary name,
+> wire format, and protocol, so nothing here changed but the toolchain (§7).
 
 ## 1. The desktop
 
 The desktop lives in the AbyssBSD monorepo (`../AbyssBSD`), beside its FreeBSD fork (`src/`), the
-drm-kmod fork, and a ports overlay. It is Swift 6, with C only for shims over system libraries:
+drm-kmod fork, and a ports overlay. It is Rust (a Cargo workspace), with C only for shims over
+system libraries:
 
 | Part | What |
 |---|---|
-| `undertow` | The compositor: Swift over wlroots 0.20, libseat for the seat, explicit sync (`linux-drm-syncobj`) |
-| Aqua | Toolkit and shell: menu bar with a global menu protocol, Dock, Finder, Islands/Shoals/Ebb (workspaces, window sets, an Exposé equivalent), two themes (Jaguar, Trench) |
+| `undertow` | The compositor: Rust over wlroots 0.20, libseat for the seat, explicit sync (`linux-drm-syncobj`) |
+| Aqua | Toolkit and shell: menu bar with a global menu protocol, Dock, Finder, Islands/Shoals/Ebb (workspaces, window sets, an Exposé equivalent), two themes (Aqua, Trench) |
 | Portals, `abyss-dbus` | Capability portals (descriptors, not paths); a D-Bus bridge so GTK applications get the menu bar and the Finder as their file chooser |
 | Applications | System Preferences (privileged helper), Terminal, TextEdit, Grab, Activity Monitor, Disk Utility, Firefox ESR from ports |
 | Session | Login window, lock, idle, power, `anchor` supervisor, application jails (`abyss-jaild`), opt-in agents in jails |
 | Installer | `Installer` (unprivileged GUI) and `abyss-install` (root): GPT, ESP, ZFS root with boot environments, dist-set extraction |
 | Harness | `abyss/tests/run.sh`: unit tests, `--live` lanes (headless compositor, virtual input, screenshots), `--full` lanes (nested bhyve: medium, install, installed desktop) |
 
-Status on 2026-10-29 (its PLAN.md): every phase complete but 4 (first metal, mostly done on an
-i7-12700KF with an RX 6750 XT) and 17 (delivery: overlay, release pipeline, `abyss update`).
+Status (its STATUS.md): every phase complete but 4 (first metal, mostly done on an i7-12700KF
+with an RX 6750 XT) and 17 (delivery: overlay, release pipeline, `abyss update`). The port to Rust
+finished on 2026-10-31, and the first pure-Rust build passed `--vm --live --full`; its rv64
+bring-up (R8) is next.
 
 ## 2. The contract
 
-- **Binaries, not source.** The desktop is built in the monorepo by its toolchain (`lang/swift6`
-  6.3.3, poudriere with the overlay) and installed here as packages. Nothing of it is built in
+- **Binaries, not source.** The desktop is built in the monorepo by its toolchain (Cargo and
+  `lang/rust`, poudriere with the overlay; port `x11/abyss-desktop`) and installed here as packages. Nothing of it is built in
   this workspace.
 - **FreeBSD 15.1 userland.** The desktop's base is FreeBSD `main`; AbyssBSD's ABI target is 15.x
   (ADR-0004). Everything the desktop calls exists in 15.1, including jail descriptors
@@ -66,8 +70,8 @@ cairo, pixman, GTK, Firefox), and the commands it runs.
 
 | Need | Used by | Where here |
 |---|---|---|
-| rtld, ELF TLS, `dl_iterate_phdr`, libthr and umtx, libc++ | Swift runtime, every program | P6.1–P6.3 |
-| kqueue (`EVFILT_READ`, `USER`, `TIMER`, `VNODE`, `PROCDESC`, `JAILDESC`), `kqueuex`, `poll`, `timerfd` | Event loops, libdispatch, config watching (`cpoolwatch`), libwayland's epoll-shim | P6.4 |
+| rtld, ELF TLS, `dl_iterate_phdr`, libthr and umtx, libc++ | Rust's `std`, every program | P6.1–P6.3 |
+| kqueue (`EVFILT_READ`, `USER`, `TIMER`, `VNODE`, `PROCDESC`, `JAILDESC`), `kqueuex`, `poll`, `timerfd` | Event loops, config watching (`cpoolwatch`), libwayland's epoll-shim | P6.4 |
 | UNIX sockets with `SCM_RIGHTS`, `getpeereid`, `MSG_NOSIGNAL`, `SO_NOSIGPIPE` | Wayland, desktop IPC, portals, seatd | P6.5 |
 | `shm_open(SHM_ANON)`, `ftruncate`, `mmap` | Wayland shm buffers | P6.3, P5 |
 | ptys (`posix_openpt`, `TIOCSWINSZ`, `TIOCSCTTY`) | Terminal | P6.6 |
@@ -115,7 +119,7 @@ carry into M-G:
 - **Renderer.** wlroots renders with pixman, GLES2 (EGL), or Vulkan. Headless and `gop-kms` use
   pixman. On virtio-gpu, `undertow` uses **wlroots' Vulkan renderer on Venus** (decided
   2026-10-29), so virgl is not needed. `undertow` creates its renderer with
-  `wlr_renderer_autocreate` and lets `WLR_RENDERER` override it (`de/undertow/Backend.swift`), so
+  `wlr_renderer_autocreate` and lets `WLR_RENDERER` override it (`de/undertow`), so
   this is a session setting (`WLR_RENDERER=vulkan`), not a compositor change. The Vulkan renderer
   needs Venus to import and export dma-bufs with DRM format modifiers
   (`VK_EXT_image_drm_format_modifier`, `VK_EXT_external_memory_dma_buf`), which M-G.3's exit
@@ -183,12 +187,12 @@ contract (C1–C5) still applies, judged by its plan.
   and B650E carry RDNA2 iGPUs (Radeon 610M). One native driver family, RDNA2, covers all three,
   which is why ADR-0018 makes it the first native amd64 GPU. NVIDIA (RTX 4070, RTX 5070 Ti) does
   not gate the desktop.
-- **arm64.** The desktop's port is amd64-only today. Swift 6.3.3 runs on arm64 FreeBSD (built on
-  the Q8B), and the desktop has run there by hand. The Orange Pi 6 Plus needs the desktop's arm64
-  packages (§8) and GRAPHICS.md's Sky1 display and `panthor`.
-- **rv64.** Blocked: Swift on FreeBSD riscv64 does not exist. The desktop's Swift implementation
-  will therefore be rewritten in Rust, in the monorepo (ADR-0018 decision 7). Until then, rv64 has
-  no desktop, and this plan covers the Swift desktop on amd64 and arm64.
+- **arm64.** The desktop's port (`x11/abyss-desktop`, `USES=cargo`) no longer depends on a
+  hand-built Swift (the Swift desktop ran on arm64 FreeBSD by hand, on the Q8B). The Orange Pi 6
+  Plus needs the desktop's arm64 packages (§8) and GRAPHICS.md's Sky1 display and `panthor`.
+- **rv64.** Unblocked by the Rust rewrite (ADR-0018 decision 7). The monorepo's R8 brings the
+  desktop up on FreeBSD riscv64 in QEMU, cross-built from amd64, then on SpacemiT boards. Here it
+  waits for P12 and the BPI-SM10's graphics; until then this plan covers amd64 and arm64.
 
 ## 8. Asks of the desktop's plan
 
@@ -202,8 +206,8 @@ Changes to the desktop are made in the monorepo (ADR-0018 rule 4). This plan nee
    `procstat` instead of `/sys` and `/proc`.
 4. **A harness mode that runs from a prepared image** without ssh or rsync (§5.2), and the
    `--full` scenarios as steps an outer driver can run (§5.3).
-5. **arm64 packages**: the port's `ONLY_FOR_ARCHS` widened, and the Q8B's hand-built Swift made
-   a package.
+5. **arm64 packages**: the desktop's packages built for FreeBSD 15.1 arm64 in the same
+   poudriere setup as amd64.
 6. **The Vulkan renderer on virtio-gpu**: the session sets `WLR_RENDERER=vulkan` when the GPU is
    virtio-gpu (§3.3), and `undertow`'s lanes pass with the Vulkan renderer as they do with GLES2.
 

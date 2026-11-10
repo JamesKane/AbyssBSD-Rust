@@ -1,10 +1,11 @@
-# ADR-0018: The desktop is the Swift desktop, run as FreeBSD userland
+# ADR-0018: The desktop is the AbyssBSD desktop, run as FreeBSD userland
 
 - Status: Accepted
 - Date: 2026-10-29
 - Amended: 2026-10-30. Swift does not exist on FreeBSD riscv64, which blocks an rv64 desktop. The
   desktop's Swift implementation will be rewritten in Rust, in the monorepo (decision 7).
-- Amended: 2026-11-10. M-G is accepted on stock Wayland and Sway; `undertow` is M-D's acceptance
+- Amended: 2026-11-10. The rewrite is done: the desktop has been Rust since 2026-10-31
+  (decision 7). M-G is accepted on stock Wayland and Sway; `undertow` is M-D's acceptance
   (Consequences).
 
 ## Context
@@ -15,7 +16,8 @@ file manager, and installer) was drafted in DESKTOP.md and six companion documen
 None of it was built.
 
 A desktop already exists. The AbyssBSD monorepo's `desktop/` (`../AbyssBSD/desktop`) is a complete
-Swift 6 desktop on Wayland: the `undertow` compositor (Swift over wlroots), the Aqua toolkit and
+desktop on Wayland, written in Swift 6 when this was decided and in Rust since 2026-10-31
+(decision 7): the `undertow` compositor (over wlroots), the Aqua toolkit and
 shell (Jaguar-style menu bar, Dock, Finder), portals, a D-Bus bridge for GTK applications, System
 Preferences with a privileged helper, the Islands/Shoals/Ebb window model, a theme system with two
 themes, the application layer (Terminal, TextEdit, Grab, Activity Monitor, Disk Utility, Firefox
@@ -31,12 +33,13 @@ Writing a second one would split the work across two products.
 
 ## Decision
 
-1. **M-D is the Swift desktop.** AbyssBSD ships the desktop from `../AbyssBSD/desktop` and designs
+1. **M-D is the AbyssBSD desktop.** AbyssBSD ships the desktop from `../AbyssBSD/desktop` and designs
    no desktop of its own. DESKTOP.md is replaced by the plan for running it here. TOOLKIT.md,
    FILEMANAGER.md, TERMINAL.md, CLIPBOARD.md, STYLE.md, and `docs/desktop-themes/` are deleted.
    They remain in git history at commit `8ff58ee`.
 2. **The desktop is userland, consumed as packages.** It is built in the monorepo by its own
-   toolchain (Swift 6.3.3, poudriere with its ports overlay) and installed on AbyssBSD as FreeBSD
+   toolchain (Cargo and `lang/rust`, poudriere with its ports overlay; Swift 6.3.3 until
+   2026-10-31) and installed on AbyssBSD as FreeBSD
    packages. No desktop source enters this workspace. ADR-0002 and ADR-0003 are unaffected.
 3. **This repository's job is the kernel beneath it.** Each interface the desktop uses is FreeBSD
    ABI, implemented as FreeBSD 15.1 behaves (DESKTOP.md §3 lists them). The desktop's own test
@@ -54,11 +57,16 @@ Writing a second one would split the work across two products.
    implemented natively, with no LinuxKPI. The desktop reaches the GPU only through wlroots, libdrm,
    and Mesa, so it needs nothing beyond that interface. Its metal target is RDNA2, which settles
    GRAPHICS.md §13 question 1 in favor of RDNA2 as the first native amd64 GPU.
-7. **The desktop will be rewritten in Rust** (amended 2026-10-30). Swift does not exist on FreeBSD
-   riscv64, so the Swift desktop cannot reach rv64. The rewrite is the monorepo's work (rule 4) and
-   changes nothing above: the desktop stays userland consumed as packages (rule 2, with its own
-   toolchain), and this repository still builds the kernel beneath it. Until the rewrite lands,
-   M-D runs the Swift desktop on amd64 and arm64, and rv64 has no desktop (DESKTOP.md §7).
+7. **The desktop is rewritten in Rust** (amended 2026-10-30; done 2026-10-31, amended
+   2026-11-10). Swift does not exist on FreeBSD riscv64, so the Swift desktop could not reach rv64.
+   The monorepo ported it binary by binary, keeping every wire format, protocol, binary name, and
+   behavior, with the Swift tree's tests, live scripts, and goldens as the acceptance criteria
+   (its `docs/RUST.md`). The Swift sources are gone, and the first pure-Rust build passed the
+   harness's `--vm --live --full` lanes. Nothing above changes: the desktop stays userland
+   consumed as packages (rule 2, now built with Cargo), and this repository still builds the
+   kernel beneath it. The desktop's C shims over system libraries remain. Its rv64 bring-up (the
+   monorepo's R8) is under way; until it lands, M-D runs the desktop on amd64 and arm64
+   (DESKTOP.md §7).
 
 ## Consequences
 
