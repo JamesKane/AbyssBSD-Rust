@@ -180,6 +180,16 @@ pub(crate) fn add_device(
 }
 
 /// Removes a device's node.
+/// The node `dev.<class>.<unit>` of an attached (or attaching) device,
+/// under which its driver adds its own (FreeBSD's
+/// `device_get_sysctl_tree`).
+#[must_use]
+pub fn device_node(t: &Tree, class: &str, unit: u32) -> Option<NodeId> {
+    let dev = t.child(t.root(), "dev")?;
+    let class = t.child(dev, class)?;
+    t.child(class, &alloc::format!("{unit}"))
+}
+
 pub(crate) fn remove_device(mgr: &Manager, s: &Sleepable, node: NodeId) {
     mgr.platform().sysctl(s, &mut |t| {
         t.remove(node);

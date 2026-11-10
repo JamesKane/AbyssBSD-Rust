@@ -25,6 +25,7 @@ pci = { path = "../../sys/pci" }
 rge = { path = "../../drivers/rge" }
 sbsa-gwdt = { path = "../../drivers/sbsa-gwdt" }
 cix-mbox = { path = "../../drivers/cix-mbox" }
+cpufreq = { path = "../../sys/cpufreq" }
 sky1-clk = { path = "../../drivers/sky1-clk" }
 sky1-pinctrl = { path = "../../drivers/sky1-pinctrl" }
 sky1-reset = { path = "../../drivers/sky1-reset" }

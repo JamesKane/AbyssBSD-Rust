@@ -200,7 +200,7 @@ impl Witness<VirtioIdent> for VirtioId {
     }
 }
 
-/// An ACPI namespace device's identity.
+/// An ACPI namespace object's identity.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AcpiIdent {
     /// `_HID`, as a string (EISA IDs decoded, e.g. `PNP0A08`).
@@ -209,6 +209,23 @@ pub struct AcpiIdent {
     pub cids: Vec<String>,
     /// `_UID`, as the string firmware gave (or an integer's decimal form).
     pub uid: Option<String>,
+    /// The kind of object.
+    pub kind: AcpiKind,
+}
+
+/// The namespace objects `acpi0` adds children for, besides devices
+/// (FreeBSD's `acpi_probe_child` adds devices, processors, thermal zones,
+/// and power resources).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AcpiKind {
+    /// A `Device`, matched by its IDs.
+    #[default]
+    Device,
+    /// A processor: a `Processor` object (no IDs) or an `ACPI0007`
+    /// device (`acpi_cpu` takes either).
+    Processor,
+    /// A `ThermalZone`, which has no IDs (`acpi_tz`).
+    ThermalZone,
 }
 
 /// One ACPI match-table entry: a hardware or compatible ID.

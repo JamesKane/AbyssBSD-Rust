@@ -951,8 +951,12 @@ impl Manager {
                 })
                 .map(|h| h.unit)
         });
+        let chosen = t
+            .node(id)
+            .and_then(|n| (decl.unit)(&n.ident, n.bus_data.as_deref()));
         let hinted: Vec<u32> = decl.hints.iter().map(|h| h.unit).collect();
-        let unit = wired
+        let unit = chosen
+            .or(wired)
             .and_then(|u| t.units.alloc(decl.name, Some(u)).ok())
             .unwrap_or_else(|| t.units.alloc_skipping(decl.name, &hinted));
         let desc = match t.node(id) {
@@ -1161,14 +1165,15 @@ impl Manager {
         // time, in tree order.
         let announce = {
             let t = self.topo.read(s);
-            t.node(id).map(|n| {
+            t.node(id).and_then(|n| {
                 let parent = t.nameunit(self.drivers, n.parent.unwrap_or(0));
-                match decl.announce {
-                    Announce::Description if !n.desc.is_empty() => {
+                Some(match decl.announce {
+                    Announce::FirstUnit if unit != 0 => return None,
+                    Announce::Description | Announce::FirstUnit if !n.desc.is_empty() => {
                         alloc::format!("{}{unit}: <{}> on {parent}", decl.name, n.desc)
                     }
                     _ => alloc::format!("{}{unit} on {parent}", decl.name),
-                }
+                })
             })
         };
         if let Some(line) = announce {

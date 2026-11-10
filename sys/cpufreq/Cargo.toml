@@ -1,0 +1,18 @@
+[package]
+name = "cpufreq"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+abi = { path = "../../lib/abi" }
+bus = { path = "../bus" }
+devtree = { path = "../../lib/devtree" }
+hal = { path = "../../arch/hal" }
+sched = { path = "../sched" }
+sync = { path = "../sync" }
+sysctl = { path = "../sysctl" }
+
+[lints]
+workspace = true

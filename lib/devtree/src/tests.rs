@@ -149,6 +149,7 @@ fn acpi_ids_match_hid_or_cid() {
         hid: Some(String::from("PNP0A08")),
         cids: vec![String::from("PNP0A03")],
         uid: Some(String::from("0")),
+        ..AcpiIdent::default()
     };
     assert_eq!(
         select(&d, &host_bridge, |_| false),

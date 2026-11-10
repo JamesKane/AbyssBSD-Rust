@@ -50,6 +50,9 @@ pub struct AcpiDevice {
     /// Every `_CRS` descriptor, including produced ranges (a host bridge's
     /// windows).
     pub crs: Vec<AmlResource>,
+    /// A processor's UID, which the MADT matches: an `ACPI0007` device's
+    /// `_UID`, a `Processor` object's ID.
+    pub processor: Option<u32>,
 }
 
 /// A dependency on another child: the path of the device that serves the
@@ -99,7 +102,12 @@ pub(crate) fn enumerated(
         Uid::Integer(n) => alloc::format!("{n}"),
         Uid::String(s) => s,
     });
-    let ident = AcpiIdent { hid, cids, uid };
+    let ident = AcpiIdent {
+        hid,
+        cids,
+        uid,
+        ..AcpiIdent::default()
+    };
     let present = interp.sta(node, host).map_or(true, |sta| sta & 1 != 0);
     (present || always_present(&ident)).then_some(ident)
 }
@@ -118,7 +126,12 @@ pub fn companion(cx: &AttachCx<'_>) -> Option<AcpiDevice> {
     svc.run(cx.sleepable(), move |interp, host| {
         let node = interp.lookup(&parsed)?;
         let crs = interp.crs(node, host).ok().flatten().unwrap_or_default();
-        Some(AcpiDevice { node, path, crs })
+        Some(AcpiDevice {
+            node,
+            path,
+            crs,
+            processor: None,
+        })
     })
 }
 
@@ -164,8 +177,21 @@ pub(crate) fn walk(
         let _ = crate::power::to_d0(interp, node, host);
         let crs = interp.crs(node, host).ok().flatten().unwrap_or_default();
         let coherent = cache_coherency(interp, host, node);
+        // A processor device (`acpi_cpu` takes it, as a Processor object).
+        let mut ident = ident;
+        let processor = if ident.hid.as_deref() == Some("ACPI0007") {
+            ident.kind = devtree::ids::AcpiKind::Processor;
+            ident.uid.as_deref().and_then(|u| u.parse().ok())
+        } else {
+            None
+        };
         found.push(Found {
-            device: AcpiDevice { node, path, crs },
+            device: AcpiDevice {
+                node,
+                path,
+                crs,
+                processor,
+            },
             ident,
             deps: Vec::new(),
             lines: Vec::new(),
@@ -294,6 +320,36 @@ pub(crate) fn walk(
             m.table,
             m.why
         ));
+    }
+    // Processor objects and thermal zones, which have no IDs or resources
+    // (FreeBSD's `acpi_probe_child` adds them with the devices; `acpi_cpu`
+    // and `acpi_tz` take them).
+    for node in interp.nodes() {
+        let (kind, processor) = match interp.object_type(node) {
+            Some(aml::ObjectType::ThermalZone) => (devtree::ids::AcpiKind::ThermalZone, None),
+            Some(aml::ObjectType::Processor)
+                if interp.sta(node, host).map_or(true, |sta| sta & 1 != 0) =>
+            {
+                let id = interp.processor_info(node).map(|p| u32::from(p.id));
+                (devtree::ids::AcpiKind::Processor, id)
+            }
+            _ => continue,
+        };
+        found.push(Found {
+            device: AcpiDevice {
+                node,
+                path: alloc::format!("{}", interp.path(node)),
+                crs: Vec::new(),
+                processor,
+            },
+            ident: AcpiIdent {
+                kind,
+                ..AcpiIdent::default()
+            },
+            deps: Vec::new(),
+            lines: Vec::new(),
+            coherent: None,
+        });
     }
     Walk {
         found,

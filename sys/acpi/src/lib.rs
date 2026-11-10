@@ -21,6 +21,8 @@ pub mod aei;
 pub mod bus;
 pub mod button;
 pub mod cpc;
+pub mod cppc;
+pub mod cpu;
 pub mod deps;
 #[cfg(test)]
 mod deps_corpus;
@@ -34,14 +36,18 @@ pub mod ranges;
 #[cfg(test)]
 mod ranges_corpus;
 pub mod service;
+pub mod thermal;
 
 pub use aei::GPIO_AEI;
 pub use bus::{AcpiBus, AcpiDevice, DRIVER, companion};
 pub use button::BUTTON;
+pub use cppc::CPPC;
+pub use cpu::CPU;
 pub use events::{Block, FixedHardware, Space};
 pub use ged::GED;
 pub use pcib::{AcpiPciBridge, AcpiPcib, PCI_PCI_BRIDGE, PCIB};
 pub use service::{LoadSummary, init, service};
+pub use thermal::THERMAL;
 
 use alloc::vec::Vec;
 
@@ -94,6 +100,31 @@ pub trait Ops: Sync {
     /// `FixedDMA` request lines. None by default.
     fn dma_controllers(&self) -> Vec<DmaController> {
         Vec::new()
+    }
+    /// The kernel's ID of the CPU whose MADT entry has processor UID
+    /// `uid` (FreeBSD's `acpi_pcpu_get_id`). None by default.
+    fn cpu_of_uid(&self, uid: u32) -> Option<u32> {
+        let _ = uid;
+        None
+    }
+    /// Reads functional fixed hardware register `address` on the current
+    /// CPU, as the architecture defines them for `_CPC`: on arm64, 0 is
+    /// the activity monitors' core cycle counter and 1 their constant
+    /// cycle counter. `None` where there is no such register.
+    fn ffh_read(&self, address: u64) -> Option<u64> {
+        let _ = address;
+        None
+    }
+    /// The rate of the constant cycle counter `ffh_read(1)` reads, in Hz
+    /// (arm64's system counter frequency). `None` where there is none.
+    fn ffh_constant_hz(&self) -> Option<u64> {
+        None
+    }
+    /// A thermal zone reached its critical temperature: shut down now
+    /// (FreeBSD's `acpi_tz_monitor` calls `shutdown_nice(RB_POWEROFF)`).
+    /// Called on a thermal zone's thread; by default, as the power button.
+    fn critical_temperature(&self) {
+        self.power_button();
     }
 }
 

@@ -262,16 +262,30 @@ impl acpi::Ops for KernelAcpi {
             return;
         }
         kprintln!("acpi: power button pressed: powering off");
-        // Not on this (AML or SCI) thread: shutdown detaches acpi0. With
-        // init, it is asked (`acpi_system_eventhandler_sleep` for S5 is
-        // `shutdown_nice(RB_POWEROFF)`); without, the power goes off.
-        let _ = sched::spawn("shutdown", sched::Priority::KERNEL, |s| {
-            if crate::proc::find(crate::proc::INIT).is_some() {
-                crate::shutdown::shutdown_nice(s, crate::shutdown::RB_POWEROFF);
-            } else {
-                crate::power_off(s)
-            }
-        });
+        power_off_nicely();
+    }
+
+    fn critical_temperature(&self) {
+        kprintln!("acpi: critical temperature: powering off");
+        power_off_nicely();
+    }
+
+    fn cpu_of_uid(&self, uid: u32) -> Option<u32> {
+        crate::topology::cpu_of_uid(uid).map(|c| c.0)
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn ffh_read(&self, address: u64) -> Option<u64> {
+        match address {
+            0 => crate::arch::cpu::amu_core_cycles(),
+            1 => crate::arch::cpu::amu_constant_cycles(),
+            _ => None,
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn ffh_constant_hz(&self) -> Option<u64> {
+        crate::arch::cpu::has_amu().then(crate::time::frequency)
     }
 
     fn log(&self, args: core::fmt::Arguments<'_>) {
@@ -317,6 +331,20 @@ pub(crate) static POWER_BUTTON_TEST: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
 static OPS: KernelAcpi = KernelAcpi;
+
+/// Powers off as `shutdown_nice(RB_POWEROFF)` does, from a thread of its
+/// own: the caller (the AML, SCI, or a thermal zone's thread) is under
+/// acpi0, which shutdown detaches. With init, it is asked
+/// (`acpi_system_eventhandler_sleep` for S5); without, the power goes off.
+fn power_off_nicely() {
+    let _ = sched::spawn("shutdown", sched::Priority::KERNEL, |s| {
+        if crate::proc::find(crate::proc::INIT).is_some() {
+            crate::shutdown::shutdown_nice(s, crate::shutdown::RB_POWEROFF);
+        } else {
+            crate::power_off(s)
+        }
+    });
+}
 
 /// CPU capacities from `_CPC`, where firmware gives performance levels.
 pub(crate) fn apply_cppc(s: &sched::Sleepable) {

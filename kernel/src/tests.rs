@@ -2755,6 +2755,42 @@ ktest! {
 }
 
 ktest! {
+    fn processors_are_cpu_devices_numbered_as_their_cpus() {
+        use bus::Ident;
+        let s = cx();
+        let m = bus::manager();
+        m.wait_idle(&s);
+        let acpi0 = m
+            .children(crate::devices::nexus(), &s)
+            .into_iter()
+            .find(|&c| m.nameunit(c, &s).as_deref() == Some("acpi0"))
+            .expect("acpi0 on nexus0");
+        // ACPI0007 devices (arm64 QEMU) or Processor objects (q35).
+        let mut units = alloc::vec::Vec::new();
+        for c in m.children(acpi0, &s) {
+            let Some(Ident::Acpi(i, path)) = m.ident(c, &s) else {
+                continue;
+            };
+            if i.kind != devtree::ids::AcpiKind::Processor {
+                continue;
+            }
+            let name = m.nameunit(c, &s).unwrap_or_default();
+            kprintln!("acpi: {name} at {path}");
+            assert_eq!(m.description(c, &s).as_deref(), Some("ACPI CPU"));
+            let unit: u32 = name
+                .strip_prefix("cpu")
+                .and_then(|u| u.parse().ok())
+                .unwrap_or_else(|| panic!("{name} is not a cpu"));
+            units.push(unit);
+        }
+        units.sort_unstable();
+        let cpus: alloc::vec::Vec<u32> =
+            (0..u32::try_from(sched::online_cpus()).unwrap()).collect();
+        assert_eq!(units, cpus, "cpuN for each CPU N");
+    }
+}
+
+ktest! {
     fn acpi_bus_children() {
         use bus::Ident;
         let s = cx();

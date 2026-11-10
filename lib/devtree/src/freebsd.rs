@@ -123,6 +123,7 @@ fn virtio_and_acpi_formats_match_freebsd() {
             hid: Some("PNP0501".into()),
             cids: Vec::new(),
             uid: Some("1".into()),
+            ..AcpiIdent::default()
         },
     )
     .unwrap();

@@ -243,6 +243,10 @@ mod hand {
         }
         fn power_button(&self) {}
         fn log(&self, _: core::fmt::Arguments<'_>) {}
+        fn cpu_of_uid(&self, uid: u32) -> Option<u32> {
+            // UID 9 has no CPU (disabled in the MADT).
+            (uid != 9).then_some(uid)
+        }
     }
 
     /// A `Register (SystemMemory, 32, 0, address)` resource template.
@@ -291,6 +295,143 @@ mod hand {
         let highest: Vec<(u32, u64)> = got.iter().map(|c| (c.uid, c.highest)).collect();
         assert_eq!(highest, [(0, 300), (1, 150), (2, 600)]);
         assert_eq!((got[0].nominal, got[0].lowest), (Some(200), Some(10)));
+    }
+
+    /// A revision 3 `_CPC` (Sky1's big cores' scale) whose desired
+    /// performance register is at `desired`, and a `_PSD` naming `domain`.
+    fn cppc_cpu(n: &str, uid: u64, desired: u64, domain: Option<u64>, pss: bool) -> Vec<u8> {
+        let null = || register(0);
+        let mut cpc = alloc::vec![int(23), int(3), int(8192), int(8192), int(2520), int(2520)];
+        cpc.push(null()); // guaranteed
+        cpc.push(register(desired));
+        for _ in 8..13 {
+            cpc.push(null());
+        }
+        cpc.push(null()); // reference counter
+        cpc.push(null()); // delivered counter
+        for _ in 15..20 {
+            cpc.push(int(0));
+        }
+        cpc.extend([int(1000), int(800), int(2600)]);
+        let mut body = cat(&[
+            &name_op("_HID", &aml::asm::string("ACPI0007")),
+            &name_op("_UID", &int(uid)),
+            &name_op("_CPC", &package(&cpc)),
+        ]);
+        if let Some(d) = domain {
+            let psd = package(&[package(&[int(5), int(0), int(d), int(0xfd), int(2)])]);
+            body.extend_from_slice(&name_op("_PSD", &psd));
+        }
+        if pss {
+            body.extend_from_slice(&name_op("_PSS", &package(&[])));
+        }
+        device(n, &body)
+    }
+
+    #[test]
+    fn cppc_domains_and_controls() {
+        let body = aml::asm::scope(
+            "\\_SB",
+            &cat(&[
+                &cppc_cpu("CPU0", 0, 0x6590_0000, Some(4), false),
+                &cppc_cpu("CPU1", 1, 0x6590_0040, Some(4), false),
+                &cppc_cpu("CPU2", 2, 0x6590_0080, Some(5), false),
+                // No _PSD: a domain of its own.
+                &cppc_cpu("CPU3", 3, 0x6590_00c0, None, false),
+                // _PSS: acpi_perf's, not CPPC's.
+                &cppc_cpu("CPU4", 4, 0x6590_0100, Some(4), true),
+                // No CPU runs it.
+                &cppc_cpu("CPU9", 9, 0x6590_0140, Some(4), false),
+            ]),
+        );
+        let mut i = load(&dsdt(&body));
+        let node = |i: &aml::Interpreter, p: &str| i.lookup(&AmlPath::parse(p).unwrap()).unwrap();
+        let cpus = |i: &mut aml::Interpreter, p: &str| {
+            let n = node(i, p);
+            crate::cppc::domain_cpus(i, &mut Quiet, &TestOps, n)
+                .into_iter()
+                .map(|(c, _)| c)
+                .collect::<Vec<u32>>()
+        };
+        assert_eq!(cpus(&mut i, "\\_SB.CPU1"), [0, 1]);
+        assert_eq!(cpus(&mut i, "\\_SB.CPU2"), [2]);
+        assert_eq!(cpus(&mut i, "\\_SB.CPU3"), [3]);
+        assert!(cpus(&mut i, "\\_SB.CPU4").is_empty());
+        let n = node(&i, "\\_SB.CPU1");
+        let c = crate::cpc::control(&mut i, &mut Quiet, &TestOps, n).unwrap();
+        assert_eq!(
+            (c.highest, c.nominal, c.lowest, c.reference_perf),
+            (8192, 8192, 2520, 1000)
+        );
+        assert_eq!((c.lowest_mhz, c.nominal_mhz), (800, 2600));
+        let d = c.desired.unwrap();
+        assert_eq!((d.address, d.memory_bytes()), (0x6590_0040, Some(4)));
+        // Null registers are absent.
+        assert_eq!((c.reference_ctr, c.delivered_ctr), (None, None));
+        let scale = crate::cppc::Scale::of(&c);
+        assert_eq!(scale.levels().first(), Some(&2600));
+    }
+
+    /// A thermal zone as Sky1's `TZB1`, its `_PSL` naming two
+    /// processors, and one with an absurd `_CRT` and an active level.
+    #[test]
+    fn thermal_zone_settings() {
+        let zone = |n: &str, body: &[u8]| aml::asm::pkg(&[0x5b, 0x85], &cat(&[&name(n), body]));
+        let cpu = |n: &str, uid: u64| {
+            device(
+                n,
+                &cat(&[
+                    &name_op("_HID", &aml::asm::string("ACPI0007")),
+                    &name_op("_UID", &int(uid)),
+                ]),
+            )
+        };
+        let body = aml::asm::scope(
+            "\\_SB",
+            &cat(&[
+                &cpu("CPU0", 0),
+                &cpu("CPU1", 1),
+                &zone(
+                    "TZB1",
+                    &cat(&[
+                        &name_op("_PSV", &int(0x0dfe)),
+                        &name_op("_CRT", &int(0x0e80)),
+                        &name_op("_TC1", &int(4)),
+                        &name_op("_TC2", &int(3)),
+                        &name_op("_TSP", &int(3)),
+                        &name_op("_TZP", &int(10)),
+                        &name_op("_PSL", &package(&[name("\\_SB.CPU1"), name("\\_SB.CPU0")])),
+                        &name_op("_TMP", &int(0x0c4b)),
+                    ]),
+                ),
+                &zone(
+                    "TZVU",
+                    &cat(&[
+                        &name_op("_CRT", &int(9999)),
+                        &name_op("_AC0", &int(0x0d04)),
+                        &name_op("_TMP", &int(0x0c4b)),
+                    ]),
+                ),
+            ]),
+        );
+        let mut i = load(&dsdt(&body));
+        let node = |i: &aml::Interpreter, p: &str| i.lookup(&AmlPath::parse(p).unwrap()).unwrap();
+        let b1 = node(&i, "\\_SB.TZB1");
+        let s = crate::thermal::establish(&mut i, &mut Quiet, &TestOps, b1);
+        assert_eq!((s.psv, s.crt, s.hot, s.cr3), (0x0dfe, 0x0e80, -1, -1));
+        assert_eq!((s.tc1, s.tc2, s.tsp, s.tzp), (4, 3, 3, 10));
+        assert_eq!(s.psl, [1, 0]);
+        assert!(s.passive());
+        let vu = node(&i, "\\_SB.TZVU");
+        let s = crate::thermal::establish(&mut i, &mut Quiet, &TestOps, vu);
+        // 999.9 K is absurd; _AC0 is 60.1 °C.
+        assert_eq!((s.crt, s.ac[0], s.ac[1]), (-1, 0x0d04, -1));
+        assert!(!s.passive() && s.psl.is_empty());
+        assert_eq!(
+            i.object_type(vu),
+            Some(aml::ObjectType::ThermalZone),
+            "acpi0 adds it as a thermal zone"
+        );
     }
 
     /// `OperationRegion (n, space, base, len)` and a byte-access field of

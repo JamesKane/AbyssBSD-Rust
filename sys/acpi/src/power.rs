@@ -66,6 +66,38 @@ pub fn to_d0(interp: &mut Interpreter, node: NodeId, host: &mut dyn Host) -> Pow
     out
 }
 
+/// Takes `node` to D3: `_PS3`, then its `_PR0` power resources released,
+/// each switched off (`_OFF`) when its last consumer lets it go (FreeBSD's
+/// `acpi_pwr_switch_consumer` to D3, as `acpi_tz` turns coolers off).
+pub fn to_d3(interp: &mut Interpreter, node: NodeId, host: &mut dyn Host) {
+    if interp.child(node, "_PS3").is_some() {
+        let _ = interp.evaluate_child(node, "_PS3", Vec::new(), host);
+    }
+    let resources: Vec<NodeId> = match interp.evaluate_child(node, "_PR0", Vec::new(), host) {
+        Ok(Some(Value::Package(refs))) => refs
+            .iter()
+            .filter_map(|r| interp.resolve_value_name(r))
+            .filter(|&r| interp.object_type(r) == Some(ObjectType::PowerResource))
+            .collect(),
+        _ => Vec::new(),
+    };
+    for r in resources {
+        let last = {
+            let mut refs = REFS.lock();
+            match refs.get_mut(&r) {
+                Some(n) if *n > 0 => {
+                    *n -= 1;
+                    *n == 0
+                }
+                _ => false,
+            }
+        };
+        if last {
+            let _ = interp.evaluate_child(r, "_OFF", Vec::new(), host);
+        }
+    }
+}
+
 /// Consumers counted for power resource `r` (tests and diagnostics).
 #[must_use]
 pub fn consumers(r: NodeId) -> u32 {

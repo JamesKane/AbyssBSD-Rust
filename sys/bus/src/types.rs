@@ -7,8 +7,8 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use devtree::ids::{
-    AcpiId, AcpiIdent, HidId, HidIdent, PciId, PciIdent, UsbId, UsbIdent, UsbPlace, VirtioId,
-    VirtioIdent,
+    AcpiId, AcpiIdent, AcpiKind, HidId, HidIdent, PciId, PciIdent, UsbId, UsbIdent, UsbPlace,
+    VirtioId, VirtioIdent,
 };
 use devtree::matching::{Candidate, Matches, Rank};
 use devtree::strings::PciAddress;
@@ -104,6 +104,8 @@ pub enum Ids {
     PciBus,
     /// ACPI `_HID`/`_CID`s.
     Acpi(&'static [AcpiId]),
+    /// ACPI objects of a kind that has no IDs (thermal zones).
+    AcpiKind(AcpiKind),
     /// PCI vendor/device/class entries.
     Pci(&'static [PciId]),
     /// Virtio device types.
@@ -138,6 +140,7 @@ impl Ids {
             ) => names.contains(n).then_some(Rank::DEFAULT),
             (Self::PciBus, Ident::PciBus { .. }) => Some(Rank::DEFAULT),
             (Self::Acpi(t), Ident::Acpi(i, _)) => best(t, i),
+            (Self::AcpiKind(k), Ident::Acpi(i, _)) => (i.kind == *k).then_some(Rank::DEFAULT),
             (Self::Pci(t), Ident::Pci(i, _, _)) => best(t, i),
             (Self::Virtio(t), Ident::Virtio(i)) => best(t, i),
             (Self::Usb(t), Ident::Usb(i, _)) => best(t, i),
@@ -267,6 +270,10 @@ pub enum Announce {
     /// `umass0 on uhub0` whatever the description: the driver prints its
     /// own, as FreeBSD's USB drivers do (`device_set_usb_desc`).
     Bare,
+    /// As [`Announce::Description`] for unit 0, and silent for the rest
+    /// (FreeBSD's `acpi_cpu` makes every processor but the first
+    /// `device_quiet`).
+    FirstUnit,
 }
 
 /// A hardware resource a bus describes for a child.

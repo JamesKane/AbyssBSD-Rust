@@ -57,6 +57,15 @@ pub trait Driver: Sized + Send + Sync + 'static {
     /// hinted units (`acpi_hint_device_unit`, `devclass_alloc_unit`).
     const HINTS: &'static [Hint] = &[];
 
+    /// The unit the device must take, for a driver whose units are
+    /// numbers the system already gave (FreeBSD's `acpi_cpu_probe` sets a
+    /// processor's unit to its CPU's ID with `device_set_unit`). `None`
+    /// takes the next free unit, as does a unit already taken.
+    fn unit(ident: &Ident, bus_data: Option<&(dyn Any + Send + Sync)>) -> Option<u32> {
+        let _ = (ident, bus_data);
+        None
+    }
+
     /// The device description (`%desc`, `devinfo`'s `<…>`).
     fn describe(ident: &Ident) -> String;
 
@@ -102,6 +111,7 @@ pub struct DriverDecl {
     pub hints: &'static [Hint],
     pub(crate) announce: Announce,
     pub(crate) describe: fn(&Ident, Option<&(dyn Any + Send + Sync)>) -> String,
+    pub(crate) unit: fn(&Ident, Option<&(dyn Any + Send + Sync)>) -> Option<u32>,
     pub(crate) attach: fn(&mut AttachCx<'_>) -> Result<Box<dyn Bound>, AttachError>,
 }
 
@@ -131,6 +141,7 @@ impl DriverDecl {
             hints: D::HINTS,
             announce: D::ANNOUNCE,
             describe: D::describe_with,
+            unit: D::unit,
             attach: attach_erased::<D>,
         }
     }

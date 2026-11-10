@@ -742,6 +742,12 @@ pub fn set_bound(t: &Thread, cpu: Option<CpuId>) {
     t.inner.lock().bound = cpu;
 }
 
+/// The CPU the current thread is bound to, if any.
+#[must_use]
+pub fn bound_cpu() -> Option<CpuId> {
+    current().inner.lock().bound
+}
+
 /// Binds the current thread to `cpu`, or lets it run anywhere (`None`),
 /// and moves it there now if it runs elsewhere.
 pub fn move_to(cpu: Option<CpuId>) {

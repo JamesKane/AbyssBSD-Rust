@@ -187,6 +187,9 @@ replaces ivars.
   chosen when the driver is chosen, before attach. Attaches then run in parallel (§6.4), but units
   never depend on attach timing. Differential tests against FreeBSD on the same VM configuration
   check that the names match (`nvme0`, `nvme1`, `vtblk0`, …).
+- **A driver may choose the unit** (`Driver::unit`) when the system already numbers the devices:
+  `cpu` takes its CPU's ID, as FreeBSD's `acpi_cpu_probe` does with `device_set_unit`, and
+  `cpufreqN` its CPU's. A unit already taken falls back to the next free one.
 - **Hints**: `hint.<driver>.<unit>.disabled=1` from the loader environment is honored. Wiring hints
   (`at`, resource hints) are a legacy ISA mechanism and are not supported.
 - Class objects have their own names, chosen by the class, as in FreeBSD: an `nvme0` controller

@@ -10,16 +10,20 @@ version = "0.0.0"
 name = "acpi"
 version = "0.0.0"
 dependencies = [
+ "abi",
  "acpi-corpus",
  "acpi-platform",
  "acpi-tables",
  "aml",
  "bus",
+ "cpufreq",
  "devtree",
+ "hal",
  "irq",
  "pci",
  "sched",
  "sync",
+ "sysctl",
  "vm",
 ]
 
@@ -204,6 +208,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cpufreq"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "bus",
+ "devtree",
+ "hal",
+ "sched",
+ "sync",
+ "sysctl",
+]
+
+[[package]]
 name = "crc"
 version = "0.0.0"
 
@@ -238,6 +255,7 @@ dependencies = [
  "cdns-gpio",
  "cix-mbox",
  "cix-sky1",
+ "cpufreq",
  "devtree",
  "hidbus",
  "hkbd",

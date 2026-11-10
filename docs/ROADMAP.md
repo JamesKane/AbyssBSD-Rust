@@ -2596,6 +2596,25 @@ machines against FreeBSD on bare metal; the exit criteria above.
   - Next: drivers for the devices (the RX8900 RTC on I2C3, the RTS5453 PD controllers), `iicbus`
     and `iic` (`/dev/iicN`, `i2c(8)`), `gpioc` (`gpioctl(8)`), the `GeneralPurposeIo` and
     `GenericSerialBus` operation-region handlers, wake (§1.5's firmware call, P9).
+- Progress 2026-11-10 (P8.4, CPU frequency and thermal zones), brought forward from P9 because the
+  board runs at whatever clock firmware left, with nothing to slow it when hot:
+  - `cpu` (`sys/acpi::cpu`) takes the processors (`ACPI0007` devices, `Processor` objects, which
+    `acpi0` now adds), its unit the CPU's (a driver may now
+    choose its unit, `Driver::unit`, as `acpi_cpu` uses `device_set_unit`).
+  - `sys/cpufreq` is cpufreq(4) (`kern_cpu.c`): levels, priorities and saved levels,
+    `dev.cpu.N.freq`/`freq_levels`, `cpufreqN` under its CPU.
+  - `acpi_cppc` (`sys/acpi::cppc`), the AbyssBSD Project's FreeBSD driver: one per `_PSD` domain,
+    100 MHz levels from `_CPC`'s lowest to highest frequency, the desired performance register
+    written for each CPU of the domain, `delivered_mhz` from the feedback counters (arm64's
+    activity monitors, `arch/aarch64`).
+  - `acpi_tz` (`sys/acpi::thermal`, `acpi_thermal.c`): `acpi0` adds the `ThermalZone` objects;
+    `hw.acpi.thermal.tzN`, the poll thread, active cooling (`_ACx`/`_ALx`, with
+    `power::to_d3`), passive cooling of the domain of each zone's `_PSL`, and power-off at
+    `_HOT`/`_CRT` held for three polls.
+  - Tested on the host (`cpufreq` policy, `_CPC`/`_PSD` and `ThermalZone` namespaces, the Sky1's
+    scale and passive steps) and in QEMU (`processors_are_cpu_devices_numbered_as_their_cpus`);
+    QEMU has no `_CPC` or thermal zones, so neither driver has met hardware yet. Idle states
+    (`_LPI`, the Sky1 GPT as broadcast timer) remain P9.
 
 ## Phase 9: Self-hosting and hardening = **v1.0 / Day 1 complete** (L)
 
@@ -2605,8 +2624,7 @@ machines against FreeBSD on bare metal; the exit criteria above.
 - IOMMU (VT-d, AMD-Vi, SMMUv3 with IORT RMR identity maps) with busdma integration. Watch for the
   SMMUv3 event-queue interrupt storm reported on Sky1 under Linux.
 - CPU idle and frequency: `_LPI` (with PSCI power-down states and a broadcast event timer, e.g.
-  Sky1's CIX GPT), CPPC (SystemMemory + AMU counters, per `_PSD` domain), `_CST`, HWP. ACPI thermal
-  zones with per-domain passive cooling. SCMI clients over PCC.
+  Sky1's CIX GPT), `_CST`, HWP. (CPPC and ACPI thermal zones came in P8.4.) SCMI clients over PCC.
 - Security hardening: SMEP/SMAP/PAN enforced, KASLR, stack canaries in the loader, kernel W^X
   audit, speculative-execution mitigations, and arm64 PAC/BTI if stable-toolchain support allows.
 - Suspend/resume (S3 / s2idle) is a **stretch goal**.

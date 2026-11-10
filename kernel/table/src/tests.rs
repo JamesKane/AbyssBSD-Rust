@@ -55,6 +55,7 @@ fn recorded_acpi() -> Vec<AcpiIdent> {
             hid: field(l, "_HID="),
             cids: field(l, "_CID=").into_iter().collect(),
             uid: field(l, "_UID="),
+            ..AcpiIdent::default()
         })
         .collect()
 }
@@ -285,6 +286,7 @@ fn stuck(name: &str) -> Vec<(String, Vec<String>)> {
             hid: i.hid(d, &mut h).ok().flatten(),
             cids: i.cids(d, &mut h).unwrap_or_default(),
             uid: None,
+            ..AcpiIdent::default()
         };
         let has = DRIVERS.iter().any(|drv| match drv.ids {
             Ids::Acpi(t) => t.iter().any(|e| e.rank_for(&ident).is_some()),

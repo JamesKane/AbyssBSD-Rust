@@ -98,6 +98,24 @@ pub fn revidr() -> u64 {
     read_sysreg!("revidr_el1")
 }
 
+/// Whether the activity monitors are implemented (`ID_AA64PFR0_EL1.AMU`).
+pub fn has_amu() -> bool {
+    (id_register(4, 0) >> 44) & 0xf != 0
+}
+
+/// The activity monitors' core cycle counter (`AMEVCNTR00_EL0`), which
+/// counts at the core's clock while it runs; `None` without them.
+pub fn amu_core_cycles() -> Option<u64> {
+    // An access traps (undefined) where the monitors are absent.
+    has_amu().then(|| read_sysreg!("s3_3_c13_c4_0"))
+}
+
+/// The activity monitors' constant cycle counter (`AMEVCNTR01_EL0`), at
+/// the system counter's rate while the core runs; `None` without them.
+pub fn amu_constant_cycles() -> Option<u64> {
+    has_amu().then(|| read_sysreg!("s3_3_c13_c4_1"))
+}
+
 /// The AArch64 ID register at `op0` 3, `op1` 0, `CRn` 0, `CRm` 4–7 and
 /// `op2` (by encoding, so that registers the assembler does not name
 /// read too: unassigned ones read as zero).

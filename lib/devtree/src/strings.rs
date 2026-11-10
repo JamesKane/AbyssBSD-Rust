@@ -229,6 +229,7 @@ mod tests {
             hid: Some("PNP0A08".into()),
             cids: vec!["PNP0A03".into()],
             uid: Some("0".into()),
+            ..AcpiIdent::default()
         };
         let mut s = String::new();
         acpi_pnpinfo(&mut s, &i).unwrap();

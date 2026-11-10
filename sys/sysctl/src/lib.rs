@@ -630,6 +630,13 @@ impl Tree {
         }
     }
 
+    /// Sets the format of the leaf `id` (a writable temperature's `IK`).
+    pub fn set_format(&mut self, id: NodeId, format: &'static str) {
+        if self.node(id).is_some() {
+            self.at_mut(id.index).format = Some(format);
+        }
+    }
+
     /// Sets `CTLFLAG_*` bits on the node `id` (`CTLFLAG_CAPRD` on nodes a
     /// sandboxed program may read).
     pub fn set_flags(&mut self, id: NodeId, flags: u32) {

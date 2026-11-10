@@ -328,6 +328,42 @@ pub(crate) fn summarize() {
     }
 }
 
+/// Each online CPU's ACPI processor UID: the MADT entry with its hardware
+/// ID. Built once, after the CPUs start.
+fn uids() -> &'static [(CpuId, u32)] {
+    static UIDS: sync::Once<Vec<(CpuId, u32)>> = sync::Once::new();
+    if let Some(u) = UIDS.get() {
+        return u;
+    }
+    let Some(madt) = crate::acpi::find(*b"APIC").and_then(|t| acpi_tables::madt::parse(&t).ok())
+    else {
+        return &[];
+    };
+    let table: Vec<(CpuId, u32)> = (0..u32::try_from(sched::online_cpus()).unwrap_or(0))
+        .filter_map(|i| {
+            let cpu = CpuId(i);
+            let hw = crate::intc::hw_id(cpu)?;
+            madt.cpus().find_map(|c| {
+                let id = match c.hw_id {
+                    acpi_tables::madt::HwId::Apic(a) => u64::from(a),
+                    acpi_tables::madt::HwId::Mpidr(m) => m,
+                    acpi_tables::madt::HwId::GicCpuInterface(_) => return None,
+                };
+                (id == hw).then_some((cpu, c.uid))
+            })
+        })
+        .collect();
+    // A racing builder computed the same table; either is kept.
+    let _ = UIDS.set(table);
+    UIDS.get().map_or(&[], Vec::as_slice)
+}
+
+/// The CPU whose ACPI processor UID is `uid` (FreeBSD's
+/// `acpi_pcpu_get_id`).
+pub(crate) fn cpu_of_uid(uid: u32) -> Option<CpuId> {
+    uids().iter().find(|&&(_, u)| u == uid).map(|&(c, _)| c)
+}
+
 /// Sets capacities from CPPC: each CPU's highest performance, scaled so
 /// the fastest is 1024. `levels` holds (ACPI processor UID, highest
 /// performance); CPUs without a level keep their estimate.
@@ -335,25 +371,9 @@ pub(crate) fn apply_cppc(levels: &[(u32, u64)]) {
     let Some(max) = levels.iter().map(|&(_, h)| h).max().filter(|&m| m > 0) else {
         return;
     };
-    let Some(madt) = crate::acpi::find(*b"APIC").and_then(|t| acpi_tables::madt::parse(&t).ok())
-    else {
-        return;
-    };
     let mut changed = 0;
-    for i in 0..u32::try_from(sched::online_cpus()).unwrap_or(0) {
-        let cpu = CpuId(i);
-        let Some(hw) = crate::intc::hw_id(cpu) else {
-            continue;
-        };
-        let uid = madt.cpus().find_map(|c| {
-            let id = match c.hw_id {
-                acpi_tables::madt::HwId::Apic(a) => u64::from(a),
-                acpi_tables::madt::HwId::Mpidr(m) => m,
-                acpi_tables::madt::HwId::GicCpuInterface(_) => return None,
-            };
-            (id == hw).then_some(c.uid)
-        });
-        let Some(&(_, highest)) = uid.and_then(|u| levels.iter().find(|(l, _)| *l == u)) else {
+    for &(cpu, uid) in uids() {
+        let Some(&(_, highest)) = levels.iter().find(|(l, _)| *l == uid) else {
             continue;
         };
         let capacity =
