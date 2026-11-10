@@ -259,3 +259,118 @@ fn every_machine_with_every_platform() {
         );
     }
 }
+
+/// The devices of `name` that have a driver in the build but would wait
+/// forever: each with the suppliers no driver serves that hold it back
+/// (directly or through a supplier that waits itself).
+fn stuck(name: &str) -> Vec<(String, Vec<String>)> {
+    use acpi::deps::Provider;
+    use acpi_platform::FirmwareIdentity;
+    use alloc::collections::{BTreeMap, BTreeSet};
+
+    let (mut i, mut h) = acpi_corpus::load(name);
+    let devices = acpi::deps::devices(&mut i, &mut h);
+    let dma: Vec<acpi::DmaController> = acpi_corpus::dma_controllers(name)
+        .into_iter()
+        .map(|(mmio_base, requests)| acpi::DmaController {
+            mmio_base,
+            requests,
+        })
+        .collect();
+    let id = FirmwareIdentity::default();
+    let deps = acpi::deps::build(&mut i, &mut h, &devices, &dma, crate::PLATFORMS, &id);
+    let mut driven = BTreeSet::new();
+    for &d in &devices {
+        let ident = AcpiIdent {
+            hid: i.hid(d, &mut h).ok().flatten(),
+            cids: i.cids(d, &mut h).unwrap_or_default(),
+            uid: None,
+        };
+        let has = DRIVERS.iter().any(|drv| match drv.ids {
+            Ids::Acpi(t) => t.iter().any(|e| e.rank_for(&ident).is_some()),
+            _ => false,
+        });
+        if has {
+            driven.insert(d);
+        }
+    }
+    // Each device's gating suppliers: the device serving each, or `None`
+    // for one nothing will serve.
+    let mut needs: BTreeMap<aml::NodeId, BTreeSet<Option<aml::NodeId>>> = BTreeMap::new();
+    for e in deps.edges.iter().filter(|e| e.kind.gates_attach()) {
+        let server = match e.provider {
+            Provider::Device(n) | Provider::Sub { owner: n, .. } => Some(n),
+            Provider::Bus(_) => continue,
+            Provider::Absent(_) => None,
+        };
+        needs.entry(e.consumer).or_default().insert(server);
+    }
+    // The unserved suppliers behind each device, to a fixed point.
+    let mut roots: BTreeMap<aml::NodeId, BTreeSet<String>> = BTreeMap::new();
+    loop {
+        let mut changed = false;
+        for (&d, sups) in &needs {
+            let mut mine: BTreeSet<String> = BTreeSet::new();
+            for s in sups {
+                match s {
+                    None => {
+                        mine.insert("(absent)".into());
+                    }
+                    Some(s) if !driven.contains(s) => {
+                        mine.insert(i.path(*s).to_text());
+                    }
+                    Some(s) => mine.extend(roots.get(s).into_iter().flatten().cloned()),
+                }
+            }
+            if roots.get(&d) != Some(&mine) && !mine.is_empty() {
+                roots.insert(d, mine);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let mut out: Vec<(String, Vec<String>)> = roots
+        .into_iter()
+        .filter(|(d, _)| driven.contains(d))
+        .map(|(d, r)| (i.path(d).to_text(), r.into_iter().collect()))
+        .collect();
+    out.sort();
+    out
+}
+
+/// No device with a driver in the build waits forever, on any corpus
+/// machine, except those listed with the suppliers that hold them: the
+/// ledger of what P8 still owes (ROADMAP: no node stays `Waiting` without
+/// a named reason).
+#[test]
+fn nothing_with_a_driver_waits_forever() {
+    let pair = |d: &str, r: &[&str]| {
+        (
+            String::from(d),
+            r.iter().map(|s| String::from(*s)).collect::<Vec<_>>(),
+        )
+    };
+    // COM0, COM1, and COM3 name the FCH CRU (`sky1,fch_cru`) and the FCH
+    // DMA controller (their `FixedDMA` lines); neither has a driver yet.
+    let sky1 = alloc::vec![
+        pair("\\_SB_.COM0", &["\\_SB_.DMA0", "\\_SB_.UCRU"]),
+        pair("\\_SB_.COM1", &["\\_SB_.DMA0", "\\_SB_.UCRU"]),
+        pair("\\_SB_.COM3", &["\\_SB_.DMA0", "\\_SB_.UCRU"]),
+    ];
+    // The Q8B (Tier 2): two PCIe hosts wait for Qualcomm's power
+    // framework device and its PCIe power device.
+    let q8b = alloc::vec![
+        pair("\\_SB_.PCI2", &["\\_SB_.PEP0", "\\_SB_.QPPX"]),
+        pair("\\_SB_.PCI4", &["\\_SB_.PEP0", "\\_SB_.QPPX"]),
+    ];
+    for (name, _) in acpi_corpus::machines() {
+        let want = match name {
+            "opi6p" => sky1.clone(),
+            "radxa-q8b" => q8b.clone(),
+            _ => Vec::new(),
+        };
+        assert_eq!(stuck(name), want, "{name}");
+    }
+}

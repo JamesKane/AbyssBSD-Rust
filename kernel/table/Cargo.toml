@@ -36,6 +36,7 @@ virtio-random = { path = "../../drivers/virtio-random" }
 xhci-driver = { path = "../../drivers/xhci" }
 
 [dev-dependencies]
+aml = { path = "../../lib/aml" }
 acpi-corpus = { path = "../../lib/acpi-corpus" }
 devtree = { path = "../../lib/devtree" }
 
