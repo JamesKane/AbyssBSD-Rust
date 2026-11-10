@@ -66,3 +66,4 @@ pub mod ucred;
 pub mod uio;
 pub mod umtx;
 pub mod vdso;
+pub mod watchdog;

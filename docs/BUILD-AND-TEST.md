@@ -259,7 +259,7 @@ symbolized backtrace, and checks the VMM's exit status:
 | `aarch64` | QEMU virt + edk2, firmware at EL1 | |
 | `aarch64-el2` | QEMU virt + edk2, firmware at EL2 | the EL2 stub and drop to EL1 |
 | `aarch64-warm-reset`, `x86_64-warm-reset` | QEMU, two boots | the loader saved the first boot's log to `EFI/ABYSS/PREVLOG.TXT` |
-| `x86_64-watchdog` | QEMU, two boots | the first boot's armed `ichwd` reset the machine |
+| `x86_64-watchdog` | QEMU, two boots | the first boot's `watchdogd` patted `ichwd` through `/dev/fido` past its timeout, and once it was killed the watchdog reset the machine |
 | `x86_64-bhyve` | bhyve + `BHYVE_UEFI` (FreeBSD hosts only; skipped elsewhere) | power-off through UEFI runtime services |
 
 After these come the shell cases (`x86_64-shell`, `aarch64-shell`, `x86_64-bhyve-shell`, above), and

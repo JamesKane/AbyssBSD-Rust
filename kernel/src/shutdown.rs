@@ -69,6 +69,7 @@ pub(crate) fn kern_reboot(s: &Sleepable, howto: i32) -> ! {
         // `shutdown_halt`; there is no reading the console here, so it
         // stays halted.
         kprintln!("\nThe operating system has halted.\nPlease press any key to reboot.\n");
+        crate::fido::shutdown_halt();
         crate::devices::shutdown(s);
         crate::arch::cpu::halt_forever()
     }

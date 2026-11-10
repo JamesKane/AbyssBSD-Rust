@@ -114,6 +114,7 @@ pub const CONSTANTS: &[&[ConstValue]] = &[
     crate::efi::CONSTANTS,
     crate::gpio::CONSTANTS,
     crate::iic::CONSTANTS,
+    crate::watchdog::CONSTANTS,
 ];
 
 const fn bus_const(c_name: &'static str, value: i64) -> ConstValue {

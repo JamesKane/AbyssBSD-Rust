@@ -428,12 +428,13 @@ const BOOT_CASES: &[BootCase] = &[
         arch: Arch::X86_64,
         el2: false,
         warm_reset: true,
-        // The first boot arms ichwd and hangs; its expiry must reset the
-        // machine, and the second boot runs the tests.
+        // The first boot runs watchdogd on /dev/fido (ichwd), which keeps
+        // it patted past its timeout, then kills it; the watchdog's expiry
+        // must reset the machine, and the second boot runs the tests.
         cmdline: "abyss.test.watchdog_reset=1 abyss.test.skip=kernel::tests::user_memory",
         pass_status: 33,
         expect: None,
-        expect_saved: Some("watchdog: armed for"),
+        expect_saved: Some("watchdog: patting stopped (watchdogd killed)"),
     },
     BootCase {
         name: "x86_64-bhyve",

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! Threads: `thr_new` and `thr_create`, `thr_exit`, `thr_self`,
-//! `thr_suspend` and `thr_wake`, `thr_set_name`, and `rtprio_thread`.
+//! `thr_suspend` and `thr_wake`, `thr_set_name`, `rtprio_thread`, and
+//! `rtprio`.
 //!
 //! A new thread starts as a copy of its creator's registers at the system
 //! call (FreeBSD's `cpu_copy_thread`), with the entry, argument, and stack
@@ -462,23 +463,90 @@ pub(super) fn rtprio_thread(function: u64, lwpid: u64, rtp: u64) -> SysResult {
             let r = wanted
                 .unwrap_or(Err(crate::uaccess::Fault))
                 .map_err(|_| Errno::EFAULT)?;
-            let base = r.type_ & !RTP_PRIO_FIFO_BIT;
-            // Real-time and idle classes need privilege.
-            if base == RTP_PRIO_REALTIME {
-                t.process().priv_check(Priv::SchedRtprio)?;
-            }
-            if base == RTP_PRIO_IDLE {
-                t.process().priv_check(Priv::SchedIdprio)?;
-            }
-            match base {
-                RTP_PRIO_REALTIME | RTP_PRIO_IDLE if r.prio > RTP_PRIO_MAX => Err(Errno::EINVAL),
-                RTP_PRIO_NORMAL if r.prio > RTP_PRIO_NORMAL_MAX => Err(Errno::EINVAL),
-                RTP_PRIO_REALTIME | RTP_PRIO_IDLE | RTP_PRIO_NORMAL => {
-                    t.set_rtprio(r);
-                    Ok(0)
+            check_class(t.process(), r)?;
+            set_class(&t, r)?;
+            Ok(0)
+        }
+        _ => Err(Errno::EINVAL),
+    }
+}
+
+/// Real-time and idle classes need privilege (of `p`).
+fn check_class(p: &Process, r: Rtprio) -> Result<(), Errno> {
+    let base = r.type_ & !RTP_PRIO_FIFO_BIT;
+    if base == RTP_PRIO_REALTIME {
+        p.priv_check(Priv::SchedRtprio)?;
+    }
+    if base == RTP_PRIO_IDLE {
+        p.priv_check(Priv::SchedIdprio)?;
+    }
+    Ok(())
+}
+
+/// `rtp_to_pri`: `t` takes class and priority `r` if they are valid.
+fn set_class(t: &UserThread, r: Rtprio) -> Result<(), Errno> {
+    match r.type_ & !RTP_PRIO_FIFO_BIT {
+        RTP_PRIO_REALTIME | RTP_PRIO_IDLE if r.prio > RTP_PRIO_MAX => Err(Errno::EINVAL),
+        RTP_PRIO_NORMAL if r.prio > RTP_PRIO_NORMAL_MAX => Err(Errno::EINVAL),
+        RTP_PRIO_REALTIME | RTP_PRIO_IDLE | RTP_PRIO_NORMAL => {
+            t.set_rtprio(r);
+            Ok(())
+        }
+        _ => Err(Errno::EINVAL),
+    }
+}
+
+/// `rtprio(function, pid, rtp)` (`sys_rtprio`): for pid 0 the calling
+/// thread's class and priority; for a process, the best of its threads'
+/// (looked up), or all of them (set). `watchdogd(8)` makes itself
+/// real-time with it.
+pub(super) fn rtprio(function: u64, pid: u64, rtp: u64) -> SysResult {
+    let p = UserPtr::<Rtprio>::new(rtp);
+    let function = u32::try_from(function).unwrap_or(u32::MAX);
+    // The copy-in comes first, its error after the permission checks.
+    let wanted = (function == RTP_SET).then(|| p.read());
+    let me = process()?;
+    let pid = int(pid);
+    let target = if pid == 0 {
+        Arc::clone(&me)
+    } else {
+        crate::proc::find(pid).ok_or(Errno::ESRCH)?
+    };
+    match function {
+        RTP_LOOKUP => {
+            me.can_see(&target)?;
+            let r = if pid == 0 {
+                thread()?.rtprio()
+            } else {
+                let mut best = Rtprio {
+                    type_: RTP_PRIO_IDLE,
+                    prio: RTP_PRIO_MAX,
+                };
+                for t in target.threads() {
+                    let r = t.rtprio();
+                    if r.type_ < best.type_ || (r.type_ == best.type_ && r.prio < best.prio) {
+                        best = r;
+                    }
                 }
-                _ => Err(Errno::EINVAL),
+                best
+            };
+            p.write(&r).map_err(|_| Errno::EFAULT)?;
+            Ok(0)
+        }
+        RTP_SET => {
+            me.can_sched(&target)?;
+            let r = wanted
+                .unwrap_or(Err(crate::uaccess::Fault))
+                .map_err(|_| Errno::EFAULT)?;
+            check_class(&me, r)?;
+            if pid == 0 {
+                set_class(&*thread()?, r)?;
+            } else {
+                for t in target.threads() {
+                    set_class(&t, r)?;
+                }
             }
+            Ok(0)
         }
         _ => Err(Errno::EINVAL),
     }

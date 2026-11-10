@@ -5,7 +5,7 @@
 //! `vm.loadavg`, `kern.cp_time` and `kern.cp_times`, `vm.swap_info` and
 //! `vm.nswapdev` (there is no swap), the memory sizes under `hw`,
 //! `kern.boottime`, `kern.lastpid`, `kern.fscale`, `kern.ccpu`,
-//! `kern.clockrate`, `kern.smp.*`, `machdep.consdev`, and
+//! `kern.clockrate`, `kern.hz`, `kern.smp.*`, `machdep.consdev`, and
 //! `kern.devname` (`devname(3)`).
 //!
 //! Pages are counted as FreeBSD's queues would hold them, from what is
@@ -491,6 +491,14 @@ pub(crate) fn init(s: &Sleepable) {
                     out.extend_from_slice(bytes_of(&c));
                 }),
             },
+        );
+        // `hz` (subr_param.c), which `watchdogd` sizes its timeouts by.
+        add(
+            k,
+            Number::Auto,
+            "hz",
+            "Number of clock ticks per second",
+            Value::Int(Box::new(|| statclock::HZ)),
         );
         let cpus = || sched::online_cpus();
         drop(add);

@@ -5,6 +5,8 @@
 
 use crate::layout::{Arches, ConstValue};
 
+/// The system is unusable.
+pub const LOG_EMERG: i32 = 0;
 /// Error conditions.
 pub const LOG_ERR: i32 = 3;
 /// Normal but significant.
@@ -21,6 +23,7 @@ pub const LOG_CONSOLE: i32 = 14 << 3;
 pub const LOG_FACMASK: i32 = 0x03f8;
 
 pub(crate) const CONSTANTS: &[ConstValue] = &[
+    c("LOG_EMERG", LOG_EMERG),
     c("LOG_ERR", LOG_ERR),
     c("LOG_INFO", LOG_INFO),
     c("LOG_PRIMASK", LOG_PRIMASK),

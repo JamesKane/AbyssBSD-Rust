@@ -22,6 +22,44 @@ fn cx() -> sched::Sleepable {
     unsafe { sched::Sleepable::assume() }
 }
 
+/// The `x86_64-watchdog` case's first boot: FreeBSD's `watchdogd -t 4
+/// -s 1` arms the watchdog through `/dev/fido` and keeps it patted well
+/// past its timeout; then it is killed (no disarming on its way out), and
+/// the watchdog must reset the machine while the kernel idles. Without
+/// `watchdogd` on the memory disk, the class arms it directly and the
+/// kernel hangs with interrupts off.
+fn watchdog_reset_first_boot(s: &sched::Sleepable) -> ! {
+    use abi::watchdog::SBT_1S;
+    let name =
+        watchdog::first().map_or_else(|| "?".into(), |w| alloc::string::String::from(w.name()));
+    let argv: [&[u8]; 6] = [b"watchdogd", b"-d", b"-t", b"4", b"-s", b"1"];
+    match crate::proc::Process::spawn(s, b"/usr/sbin/watchdogd", &argv, &[], None) {
+        Ok(p) => {
+            // Twice the timeout, and more: only the pats keep us up.
+            crate::time::sleep_ns(s, 10_000_000_000);
+            assert!(!p.has_exited(), "watchdogd exited: {:?}", p.wait(s));
+            kprintln!("watchdog: watchdogd kept {name} patted for 10 s past a 4 s timeout");
+            let info =
+                crate::signal::user_info(abi::signal::SIGKILL, 0, abi::signal::code::SI_KERNEL);
+            let _ = crate::signal::post(&p, info);
+            let _ = p.wait(s);
+            kprintln!("watchdog: patting stopped (watchdogd killed); waiting for the reset");
+            loop {
+                crate::time::sleep_ns(s, 1_000_000_000);
+            }
+        }
+        Err(e) => {
+            kprintln!("watchdog: no watchdogd ({e:?}); arming {name} through the class");
+            crate::fido::pat_sbt(3 * SBT_1S).expect("a watchdog takes 3 s");
+            kprintln!("watchdog: patting stopped (hanging); waiting for the reset");
+            crate::arch::cpu::disable_interrupts();
+            loop {
+                core::hint::spin_loop();
+            }
+        }
+    }
+}
+
 /// Runs every test, then the deliberate fault. Does not return.
 ///
 /// With `abyss.test.warm_reset`, the first boot instead writes a marker to
@@ -34,14 +72,7 @@ pub(crate) fn run(_s: &sched::Sleepable) -> ! {
         if log.recovered == 0 {
             kprintln!("logring: first boot marker, boot {}", log.boots);
             if crate::boot::flag("abyss.test.watchdog_reset") {
-                // Hang with a watchdog armed: its expiry must reset us.
-                let w = watchdog::first().expect("a watchdog to arm");
-                let ms = w.arm(3000).expect("arm");
-                kprintln!("watchdog: armed for {ms} ms on {}; hanging", w.name());
-                crate::arch::cpu::disable_interrupts();
-                loop {
-                    core::hint::spin_loop();
-                }
+                watchdog_reset_first_boot(_s);
             }
             // The ACPI reset register (x86) or PSCI (arm64); RAM survives
             // either under QEMU, so the loader finds the log.

@@ -38,6 +38,7 @@ mod efirtc;
 mod errata;
 mod event;
 mod exec;
+mod fido;
 mod firmware;
 mod firstuse;
 mod fs;
@@ -174,6 +175,7 @@ fn kmain(boot_info: PhysAddr) -> ! {
     mib::sysctl_init(&s);
     random::sysctl_init(&s);
     shutdown::sysctl_init(&s);
+    fido::sysctl_init(&s);
     vmmeter::init(&s);
     statclock::start_loadav();
     prison::sysctl_init(&s);

@@ -545,6 +545,41 @@ fn console_tools(
     ])
 }
 
+/// `watchdogd` built static into `out` when stale, with the parts of
+/// `libutil` it uses (`pidfile`, `flopen`), which the local sysroot lacks;
+/// none without the FreeBSD tree.
+fn watchdogd(
+    arch: Arch,
+    out: &Path,
+    built_by: Option<std::time::SystemTime>,
+) -> Result<Option<PathBuf>> {
+    let src = util::root().join("../freebsd-src");
+    let sources = [
+        src.join("usr.sbin/watchdogd/watchdogd.c"),
+        src.join("lib/libutil/pidfile.c"),
+        src.join("lib/libutil/flopen.c"),
+    ];
+    if !sources.iter().all(|p| p.exists()) {
+        return Ok(None);
+    }
+    let bin = out.join("watchdogd");
+    let fresh = match fs::metadata(&bin).and_then(|m| m.modified()) {
+        Ok(b) => {
+            let mut newest = built_by.unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            for p in &sources {
+                newest = newest.max(fs::metadata(p)?.modified()?);
+            }
+            newest <= b
+        }
+        Err(_) => false,
+    };
+    if !fresh {
+        let refs: Vec<&Path> = sources.iter().map(PathBuf::as_path).collect();
+        cc_static_program(arch, &refs, &[], &bin)?;
+    }
+    Ok(Some(bin))
+}
+
 /// The parts of the FreeBSD tree beside this one that third-party
 /// programs built here come from (they are never kept here); the remote
 /// mirror copies them beside its tree.
@@ -553,6 +588,8 @@ pub(crate) const FREEBSD_SOURCES: &[&str] = &[
     "usr.sbin/kbdcontrol",
     "usr.sbin/vidcontrol",
     "usr.sbin/i2c",
+    "usr.sbin/watchdogd",
+    "lib/libutil",
     "usr.bin/find",
     "contrib/mtree",
     "contrib/mknod",
@@ -960,6 +997,8 @@ pub(crate) fn md_image(arch: Arch, extra: &[(&str, &Path)]) -> Result<Option<Vec
     append(&mut md, "boot/", b'5', 0o755, &[])?;
     append(&mut md, "boot/efi/", b'5', 0o755, &[])?;
     append(&mut md, "dev/", b'5', 0o555, &[])?;
+    // An empty `/etc`: `watchdogd` pats only while `stat("/etc")` works.
+    append(&mut md, "etc/", b'5', 0o755, &[])?;
     append(&mut md, "mnt/", b'5', 0o755, &[])?;
     append(&mut md, "tmp/", b'5', 0o1777, &[])?;
     append(&mut md, "bench/", b'5', 0o755, &[])?;
@@ -1021,7 +1060,13 @@ pub(crate) fn md_image(arch: Arch, extra: &[(&str, &Path)]) -> Result<Option<Vec
     // FreeBSD's `kbdcontrol`, `vidcontrol`, and `i2c`, built static from
     // the FreeBSD tree beside this one until dynamic linking (P6) lets
     // base's own run, for `tests/user/vtools.c` and `tests/user/iic.c`.
-    let console_tools = console_tools(arch, &out_dir, built_by)?;
+    let mut console_tools = console_tools(arch, &out_dir, built_by)?;
+    // `watchdogd(8)`, as `watchdog(8)` too (one program, two links), for
+    // `tests/user/fido.c` and the `x86_64-watchdog` case.
+    if let Some(bin) = watchdogd(arch, &out_dir, built_by)? {
+        console_tools.push(("watchdogd", bin.clone()));
+        console_tools.push(("watchdog", bin));
+    }
     if !console_tools.is_empty() {
         append(&mut md, "usr/sbin/", b'5', 0o755, &[])?;
     }
