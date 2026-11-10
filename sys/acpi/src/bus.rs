@@ -658,8 +658,12 @@ impl Driver for AcpiBus {
         } = svc.run(cx.sleepable(), move |i, h| {
             walk(i, h, &dma, &platforms, &id)
         });
-        for note in &notes {
-            svc.ops().log(format_args!("{note}"));
+        // What the walk noticed (firmware naming what it lacks, the
+        // platforms found): bring-up notes, said under `bootverbose`.
+        if bus::bootverbose() {
+            for note in &notes {
+                svc.ops().log(format_args!("{note}"));
+            }
         }
         // The shared ranges before any child that may be granted one.
         for r in firmware_shared {

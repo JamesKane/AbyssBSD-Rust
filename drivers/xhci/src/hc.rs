@@ -1526,8 +1526,9 @@ impl Hc {
             "xhci{unit}: {ctx} bytes context size, {dma}-bit DMA"
         ));
         // FreeBSD's ACPI attachments say it under bootverbose ("Bus is not
-        // cache-coherent"); worth saying on a machine where it matters.
-        if self.tag.constraints().coherency == vm::dma::Coherency::NonCoherent {
+        // cache-coherent"), and so does this.
+        if bus::bootverbose() && self.tag.constraints().coherency == vm::dma::Coherency::NonCoherent
+        {
             m.log(format_args!("xhci{unit}: DMA is not cache-coherent"));
         }
         if self.xecp.is_empty() {

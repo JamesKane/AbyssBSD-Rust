@@ -230,7 +230,8 @@ impl Driver for SbsaGwdt {
         let gwdt = Gwdt::new(refresh, control, frequency, || {
             bus::manager().sleep_ms(s, 2)
         });
-        if gwdt.refreshes_by_wor() {
+        // A bring-up note (`bootverbose`): the watchdog works either way.
+        if gwdt.refreshes_by_wor() && bus::bootverbose() {
             bus::manager().log(format_args!(
                 "sbsa_gwdt{}: refresh frame writes do not refresh; refreshing through WOR",
                 cx.unit()
