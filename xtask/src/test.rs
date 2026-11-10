@@ -544,7 +544,12 @@ fn net(arch: Arch, vmm: Vmm, release: bool) -> Result<std::result::Result<(), St
     // Its own copy: the guest writes to it, and the other VMM's case may
     // run beside it.
     let disk = {
-        let copy = disk.with_file_name(format!("disk-net{suffix}.img"));
+        // Not `disk-net.img` itself, which the build writes.
+        let vmm_name = match vmm {
+            Vmm::Bhyve => "bhyve",
+            Vmm::Qemu => "qemu",
+        };
+        let copy = disk.with_file_name(format!("disk-net-{vmm_name}.img"));
         std::fs::copy(&disk, &copy)?;
         copy
     };
