@@ -35,6 +35,7 @@ pub mod config;
 pub mod enumerate;
 pub mod header;
 pub mod msi;
+pub mod requester;
 
 pub use bar::{Bar, BarError, BarKind};
 pub use caps::{Capability, ExtCapability};

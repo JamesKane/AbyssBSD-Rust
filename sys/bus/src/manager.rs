@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 use core::any::Any;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
-use devtree::graph::{Edge, EdgeKind, Graph, Origin};
+use devtree::graph::{Edge, EdgeKind, Graph, Origin, Supply};
 use devtree::matching::Rank;
 use devtree::units::Units;
 use sched::lock::{LockClass, SxLock};
@@ -86,6 +86,11 @@ struct Node {
     /// The DMA limits its bus puts on it and its descendants (ACPI
     /// `_CCA`), if any.
     dma: Option<vm::dma::DmaConstraints>,
+    /// The IOMMU translation its bus records for it and its descendants
+    /// (IORT), if any.
+    translation: Option<crate::iommu::Translation>,
+    /// Its requester ID, for a PCI function (`%iommu`).
+    requester: Option<u16>,
 }
 
 /// The providers a node's driver published (DRIVER-MODEL.md §9.3).
@@ -224,6 +229,21 @@ impl Topology {
             .and_then(Option::as_ref)
             .is_some_and(|n| n.state == NodeState::Attached)
     }
+
+    /// Where node `index` is, for the edges to its consumers: attached;
+    /// settled without attaching (its attach failed, no driver matched
+    /// it, it is disabled, or it is gone); or pending.
+    fn supply(&self, index: u32) -> Supply {
+        let Some(n) = self.nodes.get(index as usize).and_then(Option::as_ref) else {
+            return Supply::Settled;
+        };
+        match n.state {
+            NodeState::Attached => Supply::Attached,
+            NodeState::Failed(_) | NodeState::Gone => Supply::Settled,
+            NodeState::NotPresent if n.driver.is_none() => Supply::Settled,
+            _ => Supply::Pending,
+        }
+    }
 }
 
 /// The device manager. There is one, set up by [`init`].
@@ -359,6 +379,8 @@ pub fn init(
         lines: Vec::new(),
         provides: Provides::default(),
         dma: None,
+        translation: None,
+        requester: None,
     }));
     topo.graph.add_node(0);
     let faults = (o.fault_one_in > 0).then_some(Faults {
@@ -557,6 +579,8 @@ impl Manager {
                 lines: Vec::new(),
                 provides: Provides::default(),
                 dma: None,
+                translation: None,
+                requester: None,
             };
             if index as usize == t.nodes.len() {
                 t.nodes.push(Some(node));
@@ -626,6 +650,8 @@ impl Manager {
             lines: Vec::new(),
             provides: Provides::default(),
             dma: None,
+            translation: None,
+            requester: None,
         };
         let (index, generation) = match t.free.pop() {
             Some((i, g)) => (i, g),
@@ -782,6 +808,8 @@ impl Manager {
             lines: o.lines,
             provides: Provides::default(),
             dma: o.dma,
+            translation: o.translation,
+            requester: o.requester,
         };
         if index as usize == t.nodes.len() {
             t.nodes.push(Some(node));
@@ -861,7 +889,7 @@ impl Manager {
         self.break_cycles(&mut t);
         let missing: Vec<DeviceId> = t
             .graph
-            .missing(consumer.index, |i| t.attached(i))
+            .missing(consumer.index, |i| t.supply(i))
             .iter()
             .filter_map(|&i| t.id(i))
             .collect();
@@ -878,7 +906,7 @@ impl Manager {
     /// edge a consumer waited on.
     fn break_cycles(&self, t: &mut Topology) {
         if let Ok(broken) = t.graph.break_cycles() {
-            for e in broken.into_iter().filter(|e| e.kind.gates_attach()) {
+            for e in broken.into_iter().filter(|e| e.kind.waits()) {
                 let (a, b) = (
                     t.nameunit(self.drivers, e.supplier),
                     t.nameunit(self.drivers, e.consumer),
@@ -933,6 +961,55 @@ impl Manager {
         if let Some(n) = self.topo.write(s).node_mut(id) {
             n.dma = Some(c);
         }
+    }
+
+    /// Records the IOMMU translation `id`'s bus gives it and its
+    /// descendants.
+    pub(crate) fn set_translation(
+        &self,
+        s: &Sleepable,
+        id: DeviceId,
+        tr: crate::iommu::Translation,
+    ) {
+        if let Some(n) = self.topo.write(s).node_mut(id) {
+            n.translation = Some(tr);
+        }
+    }
+
+    /// Records `id`'s requester ID (a PCI function's, by FreeBSD's
+    /// requester walk), which its `%iommu` shows.
+    pub(crate) fn set_requester(&self, s: &Sleepable, id: DeviceId, rid: u16) {
+        if let Some(n) = self.topo.write(s).node_mut(id) {
+            n.requester = Some(rid);
+        }
+    }
+
+    /// `id`'s requester ID, if its bus found one.
+    #[must_use]
+    pub fn requester_id(&self, s: &Sleepable, id: DeviceId) -> Option<u16> {
+        self.topo.read(s).node(id)?.requester
+    }
+
+    /// The IOMMU translation that applies to `id`: its own record or its
+    /// nearest ancestor's (docs/IOMMU.md §4.4).
+    #[must_use]
+    pub fn dma_translation(
+        &self,
+        s: &Sleepable,
+        id: DeviceId,
+    ) -> Option<crate::iommu::Translation> {
+        let t = self.topo.read(s);
+        let mut at = t.node(id);
+        while let Some(n) = at {
+            if let Some(tr) = &n.translation {
+                return Some(tr.clone());
+            }
+            at = n
+                .parent
+                .and_then(|p| t.nodes.get(p as usize))
+                .and_then(Option::as_ref);
+        }
+        None
     }
 
     /// The DMA limits on `id`: those of every bus between it and the root,
@@ -1043,6 +1120,8 @@ impl Manager {
             lines: Vec::new(),
             provides: Provides::default(),
             dma: None,
+            translation: None,
+            requester: None,
         };
         let (index, generation) = match t.free.pop() {
             Some((i, g)) => (i, g),
@@ -1085,8 +1164,10 @@ impl Manager {
             }
         }
         let Some((d, _)) = best else {
-            // No match: FreeBSD's nomatch event, once per node.
+            // No match: FreeBSD's nomatch event, once per node. It has
+            // settled, for consumers waiting on that.
             self.nomatch(t, id);
+            self.release_consumers(t, id.index);
             return;
         };
         let decl = &self.drivers[d];
@@ -1116,13 +1197,14 @@ impl Manager {
                 n.unit = Some(unit);
                 n.state = NodeState::NotPresent;
             }
+            self.release_consumers(t, id.index);
             return;
         }
         let desc = match t.node(id) {
             Some(n) => (decl.describe)(&n.ident, n.bus_data.as_deref()),
             None => (decl.describe)(&Ident::Root, None),
         };
-        let missing = t.graph.missing(id.index, |i| t.attached(i));
+        let missing = t.graph.missing(id.index, |i| t.supply(i));
         let state = if missing.is_empty() {
             NodeState::Attaching
         } else {
@@ -1244,6 +1326,7 @@ impl Manager {
             };
             n.ident.location(&mut strings.location);
             n.ident.pnpinfo(&mut strings.pnpinfo);
+            let _ = devtree::strings::iommu_rid(&mut strings.iommu, n.requester);
             (
                 d,
                 n.ident.clone(),
@@ -1357,12 +1440,22 @@ impl Manager {
             n.start = StartPhase::Attach;
         }
         // Only this node's consumers can have become ready.
-        let consumers: Vec<u32> = t.graph.consumers(id.index).map(|e| e.consumer).collect();
+        self.release_consumers(&mut t, id.index);
+        self.release_starts(&mut t);
+        drop(t);
+        self.event(line);
+        self.bump();
+    }
+
+    /// Queues the consumers of node `index` that wait on nothing any more,
+    /// now that it has attached or settled. Topology lock held.
+    fn release_consumers(&self, t: &mut Topology, index: u32) {
+        let consumers: Vec<u32> = t.graph.consumers(index).map(|e| e.consumer).collect();
         for c in consumers {
             let Some(cid) = t.id(c) else {
                 continue;
             };
-            let ready = t.graph.missing(c, |i| t.attached(i)).is_empty();
+            let ready = t.graph.missing(c, |i| t.supply(i)).is_empty();
             if let Some(n) = t.node_mut(cid)
                 && matches!(n.state, NodeState::Waiting(_))
                 && ready
@@ -1371,10 +1464,6 @@ impl Manager {
                 self.queue(cid);
             }
         }
-        self.release_starts(&mut t);
-        drop(t);
-        self.event(line);
-        self.bump();
     }
 
     fn attach_failed(&self, id: DeviceId, decl_index: usize, e: AttachError, s: &Sleepable) {
@@ -1422,6 +1511,9 @@ impl Manager {
                 if let Some(u) = unit {
                     t.units.release(name, u);
                 }
+                // It has settled: what waited for it to (settle edges)
+                // goes on without it.
+                self.release_consumers(&mut t, id.index);
             }
         }
         // It no longer holds back the nodes after it.
@@ -1455,9 +1547,7 @@ impl Manager {
             kind: EdgeKind::Required,
             origin: Origin::Driver,
         });
-        if t.graph
-            .missing(consumer.index, |i| t.attached(i))
-            .is_empty()
+        if t.graph.missing(consumer.index, |i| t.supply(i)).is_empty()
             && let Some(n) = t.node_mut(consumer)
         {
             n.state = NodeState::Attaching;
@@ -1559,10 +1649,10 @@ impl Manager {
             let binding = n.binding.take();
             // No consumer finds its providers from now on.
             let provides = core::mem::take(&mut n.provides);
-            // Graph consumers that wait on it (required and power edges)
-            // detach before it too.
+            // Graph consumers that wait on it (required, power, and settle
+            // edges) detach before it too.
             for e in t.graph.consumers(id.index) {
-                if e.kind.gates_attach()
+                if e.kind.orders_detach()
                     && let Some(c) = t.id(e.consumer)
                     && !children.contains(&c)
                 {

@@ -1009,8 +1009,8 @@ impl<D: Driver> StartCx<'_, D> {
     /// Makes child `consumer` depend on `supplier` (another node), for a
     /// firmware dependency that names a sibling added after it, with the
     /// edge's kind and where firmware said so. Children do not attach
-    /// before their parent's `start` returns, so a required or power edge
-    /// added here always holds the consumer back.
+    /// before their parent's `start` returns, so a required, power, or
+    /// settle edge added here always holds the consumer back.
     pub fn add_dependency(
         &mut self,
         consumer: DeviceId,
@@ -1057,6 +1057,24 @@ impl<D: Driver> StartCx<'_, D> {
     pub fn set_dma_constraints(&mut self, consumer: DeviceId, c: DmaConstraints) {
         if self.children_contains(consumer) {
             self.mgr.set_dma(self.s, consumer, c);
+        }
+    }
+
+    /// Records that child `consumer`'s DMA, and its descendants', goes
+    /// through an IOMMU unit as `tr` says (an IORT root complex or named
+    /// component; docs/IOMMU.md §4.4).
+    pub fn set_dma_translation(&mut self, consumer: DeviceId, tr: crate::iommu::Translation) {
+        if self.children_contains(consumer) {
+            self.mgr.set_translation(self.s, consumer, tr);
+        }
+    }
+
+    /// Records child `consumer`'s requester ID: the ID its DMA carries to
+    /// the root complex, as FreeBSD's `iommu_get_requester` finds it
+    /// (`%iommu` shows it).
+    pub fn set_requester_id(&mut self, consumer: DeviceId, rid: u16) {
+        if self.children_contains(consumer) {
+            self.mgr.set_requester(self.s, consumer, rid);
         }
     }
 

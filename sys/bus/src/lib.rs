@@ -14,6 +14,7 @@
 //!   and bus connections consumers hold.
 //! - [`space`]: granted memory and I/O ranges, and the ranges firmware
 //!   or another device shares.
+//! - [`iommu`]: the IOMMU translation and requester IDs buses record.
 //!
 //! The pure logic it builds on (ranking, the graph, units, FreeBSD's
 //! strings) is in `lib/devtree`.
@@ -27,6 +28,7 @@ pub mod driver;
 pub mod gate;
 pub mod gpio;
 pub mod i2c;
+pub mod iommu;
 pub mod mailbox;
 pub mod manager;
 pub mod platform;

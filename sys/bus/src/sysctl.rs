@@ -26,6 +26,8 @@ pub(crate) struct DeviceStrings {
     pub(crate) location: String,
     pub(crate) pnpinfo: String,
     pub(crate) parent: String,
+    /// `%iommu`: `rid=…` for a PCI function.
+    pub(crate) iommu: String,
 }
 
 fn child_or_add(t: &mut Tree, parent: NodeId, name: &str, description: &str) -> Option<NodeId> {
@@ -177,11 +179,7 @@ pub(crate) fn add_device(
             ),
             ("%pnpinfo", "device identification", d.pnpinfo),
             ("%parent", "parent device", d.parent),
-            (
-                "%iommu",
-                "iommu unit handling the device requests",
-                String::new(),
-            ),
+            ("%iommu", "iommu unit handling the device requests", d.iommu),
         ] {
             let _ = t.add_value(node, Number::Auto, name, descr, text(v));
         }

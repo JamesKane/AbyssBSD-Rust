@@ -32,6 +32,8 @@ pub struct PciBusData {
     pub intx: Vec<(u8, u8, Resource)>,
     /// Bridges above the bus (0 behind a host bridge).
     pub depth: u8,
+    /// What is above the bus, for its functions' requester IDs.
+    pub upstream: crate::requester::Upstream,
 }
 
 impl core::fmt::Debug for PciBusData {
@@ -312,12 +314,17 @@ impl Driver for PciBus {
             let res = resources(&f, &self.data);
             let path = acpi_path(&self.data, f.addr);
             let ident = Ident::Pci(f.header.ident, f.addr, path);
+            let express = crate::requester::express_type(self.data.cfg, f.addr, &f.caps);
+            let rid = self.data.upstream.requester(f.addr, express.is_some());
             let child = PciChild {
                 cfg: self.data.cfg,
                 function: f,
                 bus: Arc::clone(&self.data),
             };
-            cx.add_child(ident, Some(Arc::new(child)), res);
+            let id = cx.add_child(ident, Some(Arc::new(child)), res);
+            if let Some(rid) = rid {
+                cx.set_requester_id(id, rid);
+            }
         }
         Ok(())
     }

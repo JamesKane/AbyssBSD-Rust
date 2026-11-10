@@ -431,6 +431,7 @@ fn drivers_write_only_device_registers() {
             adr_paths: Vec::new(),
             intx: Vec::new(),
             depth: 0,
+            upstream: crate::requester::Upstream::Host,
         }),
     };
     // The header: command, BARs, bus numbers, the interrupt line.
@@ -460,4 +461,77 @@ fn drivers_write_only_device_registers() {
     assert_eq!(child.read16(COMMAND), CMD_MEMORY | CMD_IO | CMD_BUS_MASTER);
     child.set_bus_master(false);
     assert_eq!(child.read16(COMMAND), CMD_MEMORY | CMD_IO);
+}
+
+/// A device in a FreeBSD `sysctl` listing: its `dev.<class>.<unit>`, its
+/// address, and its `%iommu`.
+type Recorded = (alloc::string::String, PciAddress, alloc::string::String);
+
+/// `%iommu` and `%location` per device in a FreeBSD `sysctl` listing, for
+/// the PCI functions (those with `dbsf=`).
+fn recorded_rids(listing: &str) -> Vec<Recorded> {
+    let mut iommu: BTreeMap<&str, &str> = BTreeMap::new();
+    let mut at: BTreeMap<&str, PciAddress> = BTreeMap::new();
+    for line in listing.lines() {
+        if let Some((dev, v)) = line.split_once(".%iommu:") {
+            iommu.insert(dev, v.trim());
+        } else if let Some((dev, v)) = line.split_once(".%location: ")
+            && let Some(d) = v
+                .split_whitespace()
+                .find_map(|w| w.strip_prefix("dbsf=pci"))
+        {
+            let n: Vec<u32> = d.split(':').map(|x| x.parse().unwrap()).collect();
+            at.insert(
+                dev,
+                PciAddress {
+                    domain: n[0],
+                    bus: u8::try_from(n[1]).unwrap(),
+                    slot: u8::try_from(n[2]).unwrap(),
+                    function: u8::try_from(n[3]).unwrap(),
+                },
+            );
+        }
+    }
+    at.into_iter()
+        .map(|(dev, a)| (dev.into(), a, iommu.get(dev).copied().unwrap_or("").into()))
+        .collect()
+}
+
+/// `%iommu` against FreeBSD's: bhyve's functions, all on the root bus,
+/// and the Orange Pi 6 Plus's root ports with a PCIe device behind each.
+#[test]
+fn requester_ids_match_freebsd() {
+    use crate::requester::Upstream;
+    let show = |rid: Option<u16>| {
+        let mut s = alloc::string::String::new();
+        devtree::strings::iommu_rid(&mut s, rid).unwrap();
+        s
+    };
+    let bhyve = recorded_rids(include_str!(
+        "../../../tests/corpus/freebsd/bhyve/sysctl-dev.txt"
+    ));
+    assert!(bhyve.len() >= 12, "{bhyve:?}");
+    for (dev, a, want) in &bhyve {
+        assert_eq!(a.bus, 0, "{dev}");
+        assert_eq!(&show(Upstream::Host.requester(*a, false)), want, "{dev}");
+    }
+    let opi6p = recorded_rids(include_str!(
+        "../../../tests/corpus/opi6p/freebsd/sysctl-a.txt"
+    ));
+    assert_eq!(opi6p.len(), 8, "{opi6p:?}");
+    let root_buses = [48, 96, 144, 192];
+    for (dev, a, want) in &opi6p {
+        let up = if root_buses.contains(&a.bus) {
+            Upstream::Host
+        } else {
+            let port = PciAddress {
+                bus: a.bus - 1,
+                slot: 0,
+                function: 0,
+                ..*a
+            };
+            Upstream::Host.behind(port, Some(0x4))
+        };
+        assert_eq!(&show(up.requester(*a, true)), want, "{dev}");
+    }
 }

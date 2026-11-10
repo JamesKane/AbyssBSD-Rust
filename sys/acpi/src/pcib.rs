@@ -182,6 +182,20 @@ fn link_route(crs: &[AmlResource], index: u32) -> Option<Route> {
     irqs.into_iter().nth(index as usize)
 }
 
+/// A host bridge's PCI segment: its `_SEG` (the low 16 bits), else 0.
+pub(crate) fn segment(
+    interp: &mut aml::Interpreter,
+    node: aml::NodeId,
+    host: &mut dyn aml::Host,
+) -> u32 {
+    int(interp
+        .evaluate_child(node, "_SEG", Vec::new(), host)
+        .ok()
+        .flatten())
+    .and_then(|s| u32::try_from(s & 0xffff).ok())
+    .unwrap_or(0)
+}
+
 fn probe(
     node: aml::NodeId,
     crs: &[AmlResource],
@@ -194,12 +208,7 @@ fn probe(
     });
     move |interp, host| {
         let osc = osc(interp, node, host, osc_supported(), 0);
-        let segment = int(interp
-            .evaluate_child(node, "_SEG", Vec::new(), host)
-            .ok()
-            .flatten())
-        .and_then(|s| u32::try_from(s & 0xffff).ok())
-        .unwrap_or(0);
+        let segment = segment(interp, node, host);
         let bus = int(interp
             .evaluate_child(node, "_BBN", Vec::new(), host)
             .ok()
@@ -328,6 +337,7 @@ impl Driver for AcpiPcib {
                 adr_paths: found.below.adr_paths,
                 intx,
                 depth: 0,
+                upstream: pci::requester::Upstream::Host,
             }),
             segment: found.segment,
             bus: found.bus,

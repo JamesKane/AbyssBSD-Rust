@@ -81,6 +81,16 @@ pub enum Ident {
         /// The description.
         desc: &'static str,
     },
+    /// A child `acpi0` adds for a driver by name, with no namespace
+    /// object behind it (FreeBSD's identify routines on `acpi0`: `smmu`
+    /// from the IORT). Claimed by class as a [`Self::Child`] is; its
+    /// pnpinfo is `unknown`, as `acpi_pnpinfo` says for no handle.
+    AcpiChild {
+        /// The class (the driver's name).
+        class: &'static str,
+        /// The description.
+        desc: &'static str,
+    },
     /// A controller's channel, a child with a fixed class (`ahcich` at
     /// `channel=0`), as FreeBSD adds them by name.
     Channel {
@@ -174,6 +184,7 @@ impl Ids {
                 Ident::Nexus(n)
                 | Ident::Channel { class: n, .. }
                 | Ident::Child { class: n, .. }
+                | Ident::AcpiChild { class: n, .. }
                 | Ident::Pins { class: n, .. },
             ) => names.contains(n).then_some(Rank::DEFAULT),
             (Self::PciBus, Ident::PciBus { .. }) => Some(Rank::DEFAULT),
@@ -482,6 +493,7 @@ impl Ident {
             | Self::Channel { .. }
             | Self::Child { .. }
             | Self::Pins { .. } => Ok(()),
+            Self::AcpiChild { .. } => fmt::Write::write_str(out, "unknown"),
             Self::Acpi(i, _) => strings::acpi_pnpinfo(out, i),
             Self::Pci(i, _, _) => strings::pci_pnpinfo(out, i),
             Self::Virtio(i) => strings::virtio_pnpinfo(out, i),
@@ -504,7 +516,8 @@ impl Ident {
             | Self::Nexus(_)
             | Self::PciBus { .. }
             | Self::Virtio(_)
-            | Self::Child { .. } => Ok(()),
+            | Self::Child { .. }
+            | Self::AcpiChild { .. } => Ok(()),
             Self::Pins { pins, handle, .. } => {
                 let w = fmt::Write::write_fmt(out, format_args!("pins={pins}"));
                 match handle {

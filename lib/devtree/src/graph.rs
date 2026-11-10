@@ -3,14 +3,16 @@
 //! from the tree and from firmware (DRIVER-MODEL.md §6).
 //!
 //! One graph orders every transition: a node attaches once its required
-//! suppliers have, and shuts down before them. When a node attaches, only
-//! its consumers are re-examined; there is no global retry. A node that is
-//! waiting can always say what for ([`Graph::blocking`]).
+//! suppliers have (and its settle suppliers have settled), and shuts down
+//! before them. When a node attaches or settles, only its consumers are
+//! re-examined; there is no global retry. A node that is waiting can
+//! always say what for ([`Graph::blocking`]).
 //!
 //! Firmware can describe cycles. [`Graph::break_cycles`] removes edges
-//! until none remain: optional and order edges first, then non-tree edges
-//! whose consumer is a tree ancestor of another node in the cycle, then
-//! any other non-tree edge. Tree and power edges are never removed.
+//! until none remain: optional, order, and settle edges first, then
+//! non-tree edges whose consumer is a tree ancestor of another node in the
+//! cycle, then any other non-tree edge. Tree and power edges are never
+//! removed.
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
@@ -32,6 +34,12 @@ pub enum EdgeKind {
     /// consumer is (a power domain, a supply). Never dropped to break a
     /// cycle.
     Power,
+    /// The consumer waits until the supplier has *settled*: attached,
+    /// failed, or matched by no driver. Then it attaches whatever the
+    /// outcome. Ordered as [`EdgeKind::Required`] while the supplier is
+    /// attached (an IOMMU and the devices it translates: they run
+    /// untranslated if it does not attach; docs/IOMMU.md §4.3).
+    Settle,
 }
 
 impl EdgeKind {
@@ -42,9 +50,47 @@ impl EdgeKind {
         matches!(self, Self::Required | Self::Power)
     }
 
+    /// Whether the consumer waits for the supplier at all: to attach, or
+    /// (for [`EdgeKind::Settle`]) to settle.
+    #[must_use]
+    pub const fn waits(self) -> bool {
+        matches!(self, Self::Required | Self::Power | Self::Settle)
+    }
+
+    /// Whether the consumer detaches before an attached supplier does.
+    #[must_use]
+    pub const fn orders_detach(self) -> bool {
+        self.waits()
+    }
+
     /// Whether cycle breaking drops this kind first.
     const fn soft(self) -> bool {
-        matches!(self, Self::Optional | Self::Order)
+        matches!(self, Self::Optional | Self::Order | Self::Settle)
+    }
+}
+
+/// Where a supplier is, as the edges to its consumers see it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Supply {
+    /// Matched to a driver and not attached yet: waiting, or attaching.
+    Pending,
+    /// Done without attaching: its attach failed, or no driver matched it
+    /// (or it is disabled).
+    Settled,
+    /// Attached.
+    Attached,
+}
+
+impl Supply {
+    /// Whether a consumer's edge of kind `kind` is still waiting on a
+    /// supplier in this state.
+    #[must_use]
+    pub const fn holds(self, kind: EdgeKind) -> bool {
+        match kind {
+            EdgeKind::Required | EdgeKind::Power => !matches!(self, Self::Attached),
+            EdgeKind::Settle => matches!(self, Self::Pending),
+            EdgeKind::Optional | EdgeKind::Order => false,
+        }
     }
 }
 
@@ -176,29 +222,31 @@ impl<N: Copy + Ord> Graph<N> {
         self.edges.iter().filter(move |e| e.supplier == n)
     }
 
-    /// The suppliers `n` waits for (required and power edges) that are
-    /// not attached, each once; empty means `n` is ready.
-    pub fn missing(&self, n: N, attached: impl Fn(N) -> bool) -> Vec<N> {
+    /// The suppliers `n` waits for, each once: those of its required and
+    /// power edges that are not attached, and those of its settle edges
+    /// that have not settled ([`Supply::holds`]). Empty means `n` is
+    /// ready.
+    pub fn missing(&self, n: N, supply: impl Fn(N) -> Supply) -> Vec<N> {
         let mut out: Vec<N> = Vec::new();
         for e in self.suppliers(n) {
-            if e.kind.gates_attach() && !attached(e.supplier) && !out.contains(&e.supplier) {
+            if supply(e.supplier).holds(e.kind) && !out.contains(&e.supplier) {
                 out.push(e.supplier);
             }
         }
         out
     }
 
-    /// Why `n` waits: for each missing required supplier, the chain from
-    /// it down to a supplier that is itself not waiting on anything (the
-    /// root cause), as `kern.abyss.bus.waiting` reports.
-    pub fn blocking(&self, n: N, attached: impl Fn(N) -> bool + Copy) -> Vec<Vec<N>> {
-        self.missing(n, attached)
+    /// Why `n` waits: for each missing supplier, the chain from it down to
+    /// a supplier that is itself not waiting on anything (the root cause),
+    /// as `kern.abyss.bus.waiting` reports.
+    pub fn blocking(&self, n: N, supply: impl Fn(N) -> Supply + Copy) -> Vec<Vec<N>> {
+        self.missing(n, supply)
             .into_iter()
             .map(|s| {
                 let mut chain = alloc::vec![s];
                 let mut seen = BTreeSet::from([n, s]);
                 let mut cur = s;
-                while let Some(&next) = self.missing(cur, attached).first() {
+                while let Some(&next) = self.missing(cur, supply).first() {
                     if !seen.insert(next) {
                         break; // a cycle; break_cycles reports it
                     }
@@ -407,10 +455,21 @@ mod tests {
         }
     }
 
+    /// Nodes up to `n` attached, the rest pending.
+    fn up_to(n: u32) -> impl Fn(u32) -> Supply + Copy {
+        move |m| {
+            if m <= n {
+                Supply::Attached
+            } else {
+                Supply::Pending
+            }
+        }
+    }
+
     #[test]
     fn readiness_and_blame() {
         let g = sample();
-        let attached = |n: u32| n <= 1;
+        let attached = up_to(1);
         assert_eq!(g.missing(4, attached), vec![2, 3]);
         assert_eq!(g.blocking(4, attached), vec![vec![2], vec![3, 2]]);
         assert!(g.missing(2, attached).is_empty(), "gpio is ready");
@@ -451,16 +510,49 @@ mod tests {
         let dropped = g.break_cycles().unwrap();
         assert_eq!(dropped, vec![dep(3, 2, EdgeKind::Order)]);
         // Power gates attach as required edges do; order edges do not.
-        assert_eq!(g.missing(3, |n| n <= 1), vec![2]);
+        assert_eq!(g.missing(3, up_to(1)), vec![2]);
         let mut g = sample();
         g.add_edge(dep(4, 2, EdgeKind::Order));
-        assert!(g.missing(2, |n| n <= 1).is_empty());
+        assert!(g.missing(2, up_to(1)).is_empty());
         // Power edges are never dropped: a cycle of them is reported.
         let mut g = Graph::new();
         g.add_edge(tree(0, 1));
         g.add_edge(dep(1, 2, EdgeKind::Power));
         g.add_edge(dep(2, 1, EdgeKind::Power));
         assert!(matches!(g.break_cycles(), Err(Cycle(_))));
+    }
+
+    #[test]
+    fn settle_edges_wait_for_any_outcome() {
+        // An IOMMU (5) under acpi (1), translating a host bridge (2).
+        let mut g = sample();
+        g.add_edge(tree(1, 5));
+        g.add_edge(dep(5, 2, EdgeKind::Settle));
+        let with = |iommu: Supply| move |n: u32| if n == 5 { iommu } else { up_to(1)(n) };
+        assert_eq!(g.missing(2, with(Supply::Pending)), vec![5]);
+        assert_eq!(
+            g.blocking(2, with(Supply::Pending)),
+            vec![vec![5]],
+            "a pending supplier is its own root cause"
+        );
+        // Attached, failed, or matched by no driver: released either way.
+        assert!(g.missing(2, with(Supply::Attached)).is_empty());
+        assert!(g.missing(2, with(Supply::Settled)).is_empty());
+        // A required edge is not released by a supplier that settled
+        // without attaching.
+        let mut r = sample();
+        r.add_edge(tree(1, 5));
+        r.add_edge(dep(5, 2, EdgeKind::Required));
+        assert_eq!(r.missing(2, with(Supply::Settled)), vec![5]);
+        // Shutdown orders the consumer (and its own consumers) first.
+        let order = g.shutdown_order().unwrap();
+        let pos = |n: u32| order.iter().position(|&m| m == n).unwrap();
+        assert!(pos(2) < pos(5) && pos(4) < pos(5));
+        assert!(EdgeKind::Settle.orders_detach() && !EdgeKind::Settle.gates_attach());
+        // Cycle breaking treats it as soft.
+        g.add_edge(dep(2, 5, EdgeKind::Required));
+        let dropped = g.break_cycles().unwrap();
+        assert_eq!(dropped, vec![dep(5, 2, EdgeKind::Settle)]);
     }
 
     #[test]
@@ -496,9 +588,10 @@ mod tests {
                 let c = next(u64::from(nodes)) as u32;
                 if s != c {
                     // No power edges: a cycle of them is unbreakable.
-                    let kind = match next(3) {
+                    let kind = match next(4) {
                         0 => EdgeKind::Required,
                         1 => EdgeKind::Optional,
+                        2 => EdgeKind::Settle,
                         _ => EdgeKind::Order,
                     };
                     g.add_edge(dep(s, c, kind));

@@ -74,6 +74,7 @@ pub fn secondary(
         .cfg
         .write16(f.addr, COMMAND, cmd | CMD_IO | CMD_MEMORY | CMD_BUS_MASTER);
     let intx = intx.unwrap_or_else(|| swizzle(&child.bus.intx, f.addr.slot));
+    let express = crate::requester::express_type(child.cfg, f.addr, &f.caps);
     Ok((
         b.secondary,
         PciBusData {
@@ -81,6 +82,7 @@ pub fn secondary(
             adr_paths,
             intx,
             depth: f.depth + 1,
+            upstream: child.bus.upstream.behind(f.addr, express),
         },
     ))
 }

@@ -200,6 +200,18 @@ pub fn iic_location(out: &mut impl Write, addr: u16, handle: Option<&str>) -> fm
     Ok(())
 }
 
+/// A device's `%iommu`: `rid=0xc100`, its requester ID as C's `%#x`
+/// prints it (`rid=0` for 0), for a PCI device whose requester the walk
+/// found (`device_sysctl_handler` with `iommu_get_requester`); empty
+/// otherwise.
+pub fn iommu_rid(out: &mut impl Write, rid: Option<u16>) -> fmt::Result {
+    match rid {
+        None => Ok(()),
+        Some(0) => out.write_str("rid=0"),
+        Some(r) => write!(out, "rid={r:#x}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use alloc::string::String;
@@ -271,6 +283,19 @@ mod tests {
         let mut s = String::new();
         iic_location(&mut s, 0x1a, None).unwrap();
         assert_eq!(s, "addr=0x1a");
+    }
+
+    #[test]
+    fn iommu() {
+        let mut s = String::new();
+        iommu_rid(&mut s, Some(0)).unwrap();
+        assert_eq!(s, "rid=0");
+        let mut s = String::new();
+        iommu_rid(&mut s, Some(0xc100)).unwrap();
+        assert_eq!(s, "rid=0xc100");
+        let mut s = String::new();
+        iommu_rid(&mut s, None).unwrap();
+        assert_eq!(s, "");
     }
 
     #[test]
