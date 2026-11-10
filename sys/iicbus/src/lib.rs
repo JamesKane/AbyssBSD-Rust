@@ -79,6 +79,10 @@ impl Driver for Iicbus {
         "Philips I2C bus".into()
     }
 
+    fn unit(_: &Ident, bus_data: Option<&(dyn Any + Send + Sync)>) -> Option<u32> {
+        bus_data?.downcast_ref::<IicbusOf>().map(|o| o.unit)
+    }
+
     fn describe_with(ident: &Ident, bus_data: Option<&(dyn Any + Send + Sync)>) -> String {
         let hinted = bus_data
             .and_then(|d| d.downcast_ref::<IicbusOf>())
@@ -134,7 +138,10 @@ impl Driver for Iicbus {
                 addr: 0,
                 acpi: None,
             }),
-            Some(Arc::clone(&self.source) as Arc<dyn Any + Send + Sync>),
+            Some(Arc::new(IicOf {
+                source: Arc::clone(&self.source),
+                unit: self.unit,
+            }) as Arc<dyn Any + Send + Sync>),
             Vec::new(),
         );
         Ok(())
@@ -196,6 +203,14 @@ struct Softc {
     gone: AtomicBool,
 }
 
+/// What `iicbus` gives its `iic`: the controller, and the bus's unit,
+/// which `iic` takes (`iicN` is `iicbusN`'s, as FreeBSD's serial attach
+/// numbers them).
+struct IicOf {
+    source: Arc<I2cSource>,
+    unit: u32,
+}
+
 /// `iicN`.
 #[derive(Debug)]
 pub struct Iic {
@@ -211,8 +226,15 @@ impl Driver for Iic {
         "I2C generic I/O".into()
     }
 
+    fn unit(_: &Ident, bus_data: Option<&(dyn Any + Send + Sync)>) -> Option<u32> {
+        bus_data?.downcast_ref::<IicOf>().map(|o| o.unit)
+    }
+
     fn attach(cx: &mut AttachCx<'_>) -> Result<Self, AttachError> {
-        let source = cx.bus_data_arc::<I2cSource>().ok_or(AttachError::Decline)?;
+        let source = cx
+            .bus_data::<IicOf>()
+            .map(|o| Arc::clone(&o.source))
+            .ok_or(AttachError::Decline)?;
         Ok(Self {
             sc: Arc::new(Softc {
                 source,

@@ -900,6 +900,12 @@ impl<D: Driver> core::fmt::Debug for StartCx<'_, D> {
 }
 
 impl<D: Driver> StartCx<'_, D> {
+    /// The device's unit number.
+    #[must_use]
+    pub fn unit(&self) -> u32 {
+        self.mgr.unit(self.binding.node, self.s).unwrap_or(0)
+    }
+
     /// The thread context.
     #[must_use]
     pub fn sleepable(&self) -> &Sleepable {
@@ -1132,7 +1138,10 @@ impl<D: Driver> StartCx<'_, D> {
                 class: "iicbus",
                 desc: "Philips I2C bus",
             },
-            Some(Arc::new(crate::i2c::IicbusOf { acpi })),
+            Some(Arc::new(crate::i2c::IicbusOf {
+                acpi,
+                unit: self.unit(),
+            })),
             Vec::new(),
         )
     }

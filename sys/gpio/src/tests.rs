@@ -73,6 +73,7 @@ fn node() -> (Node, Arc<Fake>) {
     let node = Node {
         bus: Arc::new(Bus {
             source: GpioSource::new(Arc::clone(&fake) as Arc<dyn Gpio>),
+            unit: 0,
             names: SpinLock::new(BTreeMap::new()),
         }),
     };

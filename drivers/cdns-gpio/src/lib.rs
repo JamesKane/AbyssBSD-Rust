@@ -538,6 +538,7 @@ impl Driver for CdnsGpio {
             source,
             controller: cx.node(),
             acpi: self.node,
+            unit: cx.unit(),
         };
         cx.add_child(
             gpiobus::bus_ident(self.node.is_some()),

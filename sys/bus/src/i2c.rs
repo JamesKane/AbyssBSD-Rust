@@ -107,6 +107,10 @@ pub trait I2c: Send + Sync {
 pub struct IicbusOf {
     /// The controller's namespace path (`\_SB_.I2C3`).
     pub acpi: Option<String>,
+    /// The controller's unit, which its bus takes: FreeBSD attaches the
+    /// controllers one after another, so `iicbusN` is `cdnc_i2cN`'s;
+    /// here they attach at once, in no set order.
+    pub unit: u32,
 }
 
 /// An I2C controller, run one transfer at a time.

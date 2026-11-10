@@ -53,6 +53,9 @@ pub struct GpioBusData {
     pub controller: DeviceId,
     /// Its ACPI namespace node, if firmware describes it there.
     pub acpi: Option<aml::NodeId>,
+    /// Its unit, which the bus takes (`gpiobusN` is `gpioN`'s, as
+    /// FreeBSD's one-after-another attach numbers them).
+    pub unit: u32,
 }
 
 impl core::fmt::Debug for GpioBusData {
@@ -66,6 +69,8 @@ impl core::fmt::Debug for GpioBusData {
 /// What a `gpiobus` shares with its `gpioc`: the pins and their names.
 struct Bus {
     source: Arc<GpioSource>,
+    /// The bus's unit, which `gpioc` takes (`gpiocN` is `gpiobusN`'s).
+    unit: u32,
     /// Names set with `GPIOSETNAME` (`gpiobus`'s `sc_pins[].name`).
     names: SpinLock<BTreeMap<u32, String>>,
 }
@@ -94,11 +99,16 @@ impl Driver for GpioBus {
         }
     }
 
+    fn unit(_: &Ident, bus_data: Option<&(dyn core::any::Any + Send + Sync)>) -> Option<u32> {
+        bus_data?.downcast_ref::<GpioBusData>().map(|d| d.unit)
+    }
+
     fn attach(cx: &mut AttachCx<'_>) -> Result<Self, AttachError> {
         let d = cx.bus_data::<GpioBusData>().ok_or(AttachError::Decline)?;
         Ok(Self {
             bus: Arc::new(Bus {
                 source: Arc::clone(&d.source),
+                unit: d.unit,
                 names: SpinLock::new(BTreeMap::new()),
             }),
             controller: d.controller,
@@ -158,6 +168,10 @@ impl Driver for Gpioc {
 
     fn describe(_: &Ident) -> String {
         "GPIO controller".into()
+    }
+
+    fn unit(_: &Ident, bus_data: Option<&(dyn core::any::Any + Send + Sync)>) -> Option<u32> {
+        bus_data?.downcast_ref::<Bus>().map(|b| b.unit)
     }
 
     fn attach(cx: &mut AttachCx<'_>) -> Result<Self, AttachError> {

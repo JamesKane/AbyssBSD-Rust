@@ -1778,6 +1778,12 @@ impl Manager {
         Some(self.topo.read(s).node(id)?.state.clone())
     }
 
+    /// `id`'s unit, once it has one.
+    #[must_use]
+    pub fn unit(&self, id: DeviceId, s: &Sleepable) -> Option<u32> {
+        self.topo.read(s).node(id)?.unit
+    }
+
     /// `id`'s name with unit (`nvme0`), if it has a driver.
     #[must_use]
     pub fn nameunit(&self, id: DeviceId, s: &Sleepable) -> Option<String> {
