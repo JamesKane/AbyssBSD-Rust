@@ -7,7 +7,9 @@
 //!   boundary, segment size and count, coherency) and chooses a backend:
 //!   **direct** when the device reaches every byte of RAM, **bounce** when
 //!   it cannot (buffers out of its reach are copied through memory it can
-//!   reach). An IOMMU backend comes in P7.
+//!   reach), and **IOMMU** when a translation domain ([`IoDomain`]) maps
+//!   its buffers at bus addresses of the domain's choosing
+//!   (docs/IOMMU.md §4.5).
 //! - [`DmaCoherent`] is memory shared for a binding's whole life (queues,
 //!   rings), allocated within the device's reach and accessed only through
 //!   volatile reads and writes of whole [`DeviceShared`] elements. For a
@@ -33,9 +35,11 @@
 //! Memory comes from the kernel through [`DmaMemory`]; this module holds
 //! the policy, tested on the host against fake memory.
 //!
-//! Behavior reference: sys/kern/subr_bus_dma.c, sys/x86/x86/busdma_bounce.c.
+//! Behavior reference: sys/kern/subr_bus_dma.c, sys/x86/x86/busdma_bounce.c,
+//! sys/dev/iommu/busdma_iommu.c.
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 use core::ptr::NonNull;
@@ -170,6 +174,62 @@ pub enum Backend {
     /// Some RAM is out of reach: such buffers are copied through bounce
     /// pages within reach.
     Bounce,
+    /// An IOMMU translates the device's addresses: buffers are mapped at
+    /// bus addresses (IOVAs) of its domain's choosing, and the tag's
+    /// constraints apply to those (docs/IOMMU.md §4.5).
+    Iommu,
+}
+
+/// A translated mapping: the domain's entry `[start, end)` (whole pages)
+/// and the bus address of the buffer's first byte.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IoMapping {
+    /// The entry's first page.
+    pub start: u64,
+    /// One past its last page.
+    pub end: u64,
+    /// The bus address of the first byte mapped.
+    pub addr: u64,
+    /// The bytes mapped from `addr`.
+    pub len: u64,
+}
+
+/// A translation domain, as `vm::dma` sees it: what an IOMMU backend maps
+/// through (docs/IOMMU.md §4.5; `sys/iommu` implements it). Its methods
+/// never sleep: they run in submission paths and completion filters.
+pub trait IoDomain: Send + Sync {
+    /// The first physical address the domain cannot map (the unit's
+    /// output size): memory for the device comes from below it.
+    fn reach(&self) -> u64;
+    /// Maps physical `ranges`, in order, at one range of bus addresses
+    /// that `c` allows (below its limit, aligned, within its boundary
+    /// when the buffer fits in one), read-only to the device unless
+    /// `write`. Every range but the first starts on a page boundary and
+    /// every range but the last ends on one, so the bytes are contiguous
+    /// at the bus side.
+    ///
+    /// # Errors
+    ///
+    /// [`DmaError::NoMemory`] when the domain has no space or no memory
+    /// for its tables.
+    fn map(
+        &self,
+        ranges: &[(u64, u64)],
+        write: bool,
+        c: &DmaConstraints,
+    ) -> Result<IoMapping, DmaError>;
+    /// Unmaps `m`, invalidates the unit's cached translations, and waits
+    /// for that before the range is reused (strict: when this returns,
+    /// the device can no longer reach the pages).
+    fn unmap(&self, m: &IoMapping);
+    /// The bus address at which the MSI doorbell page holding `pa` is
+    /// mapped in this domain, mapping it the first time (§4.8).
+    ///
+    /// # Errors
+    ///
+    /// [`DmaError::NoMemory`], or [`DmaError::Unsatisfiable`] for a
+    /// second doorbell page.
+    fn doorbell(&self, pa: u64) -> Result<u64, DmaError>;
 }
 
 /// Why DMA memory could not be provided.
@@ -247,14 +307,17 @@ impl Segments {
     }
 }
 
-/// A device's DMA tag.
-#[derive(Clone, Copy)]
+/// A device's DMA tag. A translated tag holds its domain (counted), so
+/// tags are `Clone`, not `Copy`.
+#[derive(Clone)]
 pub struct DmaTag {
     constraints: DmaConstraints,
     backend: Backend,
     mem: &'static dyn DmaMemory,
     /// `mem.linear()`, or an empty window.
     linear: (usize, usize),
+    /// The domain of an [`Backend::Iommu`] tag.
+    domain: Option<Arc<dyn IoDomain>>,
 }
 
 impl core::fmt::Debug for DmaTag {
@@ -290,6 +353,43 @@ impl DmaTag {
             backend,
             mem,
             linear: mem.linear().unwrap_or((0, 0)),
+            domain: None,
+        }
+    }
+
+    /// A tag whose buffers `domain` maps (the IOMMU backend): `constraints`
+    /// apply to bus addresses, and memory comes from anywhere the domain
+    /// reaches (docs/IOMMU.md §4.5).
+    #[must_use]
+    pub fn translated(
+        mem: &'static dyn DmaMemory,
+        constraints: DmaConstraints,
+        domain: Arc<dyn IoDomain>,
+    ) -> Self {
+        let mut t = Self::new(mem, constraints, 0);
+        t.backend = Backend::Iommu;
+        t.domain = Some(domain);
+        t
+    }
+
+    /// The memory the tag allocates from.
+    #[must_use]
+    pub fn memory(&self) -> &'static dyn DmaMemory {
+        self.mem
+    }
+
+    /// The domain of a translated tag.
+    #[must_use]
+    pub fn domain(&self) -> Option<&Arc<dyn IoDomain>> {
+        self.domain.as_ref()
+    }
+
+    /// The first physical address memory for the device may not reach:
+    /// the domain's reach when translated, the device's limit otherwise.
+    fn alloc_limit(&self) -> u64 {
+        match &self.domain {
+            Some(d) => d.reach(),
+            None => self.constraints.limit(),
         }
     }
 
@@ -303,14 +403,15 @@ impl DmaTag {
         }
     }
 
-    /// A tag for a child with further `constraints`.
+    /// A tag for a child with further `constraints` (translated if this
+    /// one is).
     #[must_use]
     pub fn derive(&self, constraints: &DmaConstraints, top_of_ram: u64) -> Self {
-        Self::new(
-            self.mem,
-            self.constraints.intersect(constraints),
-            top_of_ram,
-        )
+        let c = self.constraints.intersect(constraints);
+        match &self.domain {
+            Some(d) => Self::translated(self.mem, c, Arc::clone(d)),
+            None => Self::new(self.mem, c, top_of_ram),
+        }
     }
 
     /// The effective constraints.
@@ -370,7 +471,7 @@ impl DmaTag {
         }
         let pa = self
             .mem
-            .alloc(bytes, align, self.constraints.limit())
+            .alloc(bytes, align, self.alloc_limit())
             .ok_or(DmaError::NoMemory)?;
         let va = self.mem.virt(pa);
         // SAFETY: freshly allocated, `bytes` long, ours alone.
@@ -378,13 +479,27 @@ impl DmaTag {
         if self.constraints.coherency == Coherency::NonCoherent {
             self.mem.clean(va.as_ptr(), to_usize(bytes));
         }
+        // Translated: mapped once, for the memory's life (§4.5).
+        let (bus, mapping) = match &self.domain {
+            Some(d) => match d.map(&[(pa, bytes)], true, &self.constraints) {
+                Ok(m) => (m.addr, Some((Arc::clone(d), m))),
+                Err(e) => {
+                    // SAFETY: just allocated, never handed out.
+                    unsafe { self.mem.free(pa, bytes) };
+                    return Err(e);
+                }
+            },
+            None => (pa, None),
+        };
         Ok(DmaCoherent {
             pa,
+            bus,
             va: va.cast(),
             n: n.max(1),
             bytes,
             mem: self.mem,
             non_coherent: self.constraints.coherency == Coherency::NonCoherent,
+            mapping,
             _t: PhantomData,
         })
     }
@@ -393,12 +508,16 @@ impl DmaTag {
 /// `n` elements of `T` shared with a device for a binding's life.
 pub struct DmaCoherent<T: DeviceShared> {
     pa: u64,
+    /// The address the device uses: `pa`, or its IOVA when translated.
+    bus: u64,
     va: NonNull<T>,
     n: usize,
     bytes: u64,
     mem: &'static dyn DmaMemory,
     /// The device does not snoop: accesses maintain the caches.
     non_coherent: bool,
+    /// The translated mapping, removed before the memory is freed.
+    mapping: Option<(Arc<dyn IoDomain>, IoMapping)>,
     _t: PhantomData<T>,
 }
 
@@ -411,18 +530,19 @@ unsafe impl<T: DeviceShared> Sync for DmaCoherent<T> {}
 impl<T: DeviceShared> core::fmt::Debug for DmaCoherent<T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("DmaCoherent")
-            .field("bus", &format_args!("{:#x}", self.pa))
+            .field("bus", &format_args!("{:#x}", self.bus))
             .field("len", &self.n)
             .finish()
     }
 }
 
 impl<T: DeviceShared> DmaCoherent<T> {
-    /// The bus address of element 0 (direct and bounce tags allocate
-    /// within reach, so it is the physical address).
+    /// The bus address of element 0: the physical address for direct and
+    /// bounce tags (which allocate within reach), the IOVA for a
+    /// translated one.
     #[must_use]
     pub fn bus_addr(&self) -> u64 {
-        self.pa
+        self.bus
     }
 
     /// The number of elements.
@@ -563,6 +683,10 @@ impl DmaCoherent<u8> {
 
 impl<T: DeviceShared> Drop for DmaCoherent<T> {
     fn drop(&mut self) {
+        // Out of the device's reach before the memory goes back.
+        if let Some((d, m)) = self.mapping.take() {
+            d.unmap(&m);
+        }
         // SAFETY: from `alloc` with these values; the binding (and so the
         // device's use of it) is over when the owner drops it.
         unsafe { self.mem.free(self.pa, self.bytes) };
@@ -625,6 +749,14 @@ pub unsafe trait DmaBuf {
     fn total(&self) -> usize {
         (0..self.ranges()).map(|i| self.range(i).1).sum()
     }
+    /// Whether the bytes lie in memory that holds only device payload
+    /// (buffer-cache pages, mbuf clusters): a translated tag maps such a
+    /// buffer in place even where it shares its pages. A buffer from the
+    /// general heap (the default) is bounced unless it fills whole pages
+    /// (DRIVER-MODEL.md §8.4, rule 2; docs/IOMMU.md §13 decision 5).
+    fn payload_only(&self) -> bool {
+        false
+    }
 }
 
 // SAFETY: the boxed bytes, owned.
@@ -648,13 +780,17 @@ struct Bounce {
 }
 
 /// What a mapping needs beyond one segment: more segments, bounce pages,
-/// or cache maintenance when it ends. Boxed, so the common mapping stays
-/// small: moving a value over 64 bytes costs a `rep movs` here.
+/// a translated mapping, or cache maintenance when it ends. Boxed, so the
+/// common mapping stays small: moving a value over 64 bytes costs a
+/// `rep movs` here.
 struct Spill {
     segments: Vec<Segment>,
     bounce: Option<Bounce>,
     mem: &'static dyn DmaMemory,
     non_coherent: bool,
+    /// The domain mapping of a translated tag, unmapped first when the
+    /// transfer ends.
+    iommu: Option<(Arc<dyn IoDomain>, IoMapping)>,
 }
 
 /// A mapping's bus side.
@@ -700,6 +836,9 @@ impl DmaTag {
     }
 
     fn build<D: Direction, B: DmaBuf>(&self, buf: &B) -> Result<Map, DmaError> {
+        if let Some(d) = &self.domain {
+            return self.build_iommu::<D, B>(buf, d);
+        }
         let c = &self.constraints;
         let mut segments = Segments::new();
         // Direct when every byte is within reach and the start is aligned
@@ -778,7 +917,115 @@ impl DmaTag {
             bounce,
             mem: self.mem,
             non_coherent: self.constraints.coherency == Coherency::NonCoherent,
+            iommu: None,
         }))
+    }
+
+    /// The IOMMU backend's map: the buffer's physical pages at one range
+    /// of bus addresses, as FreeBSD's `iommu_bus_dmamap_load_something`
+    /// gives it (a scattered buffer is one segment when the constraints
+    /// allow). Bounced instead, through pages the domain maps, when rule
+    /// 2 says so, when a page is beyond the domain's reach, when the
+    /// start is misaligned, or when the pieces do not meet at page
+    /// boundaries.
+    #[inline(never)]
+    fn build_iommu<D: Direction, B: DmaBuf>(
+        &self,
+        buf: &B,
+        domain: &Arc<dyn IoDomain>,
+    ) -> Result<Map, DmaError> {
+        let c = &self.constraints;
+        let reach = domain.reach();
+        let payload = buf.payload_only();
+        let page = to_usize(PAGE_SIZE);
+        let mut ranges: Vec<(u64, u64)> = Vec::new();
+        let mut in_place = true;
+        'ranges: for i in 0..buf.ranges() {
+            let (ptr, len) = buf.range(i);
+            // Rule 2: heap memory only as whole pages of its own.
+            if !payload
+                && len > 0
+                && (!(ptr as usize).is_multiple_of(page) || !len.is_multiple_of(page))
+            {
+                in_place = false;
+                break;
+            }
+            let mut off = 0usize;
+            while off < len {
+                let va = ptr.wrapping_add(off).cast_const();
+                let pa = self.phys(va).ok_or(DmaError::BadBuffer)?;
+                let in_page = to_usize(PAGE_SIZE - (pa % PAGE_SIZE));
+                let n = in_page.min(len - off);
+                let n64 = u64::try_from(n).unwrap_or(u64::MAX);
+                if pa.saturating_add(n64) > reach {
+                    in_place = false;
+                    break 'ranges;
+                }
+                match ranges.last_mut() {
+                    Some((p, l)) if *p + *l == pa => *l += n64,
+                    // The bus side is contiguous only if the pieces meet
+                    // at page boundaries.
+                    Some((p, l))
+                        if (*p + *l).is_multiple_of(PAGE_SIZE) && pa.is_multiple_of(PAGE_SIZE) =>
+                    {
+                        ranges.push((pa, n64));
+                    }
+                    Some(_) => {
+                        in_place = false;
+                        break 'ranges;
+                    }
+                    None => {
+                        // The start's alignment within its page is the
+                        // bus address's; beyond a page the domain aligns
+                        // a page-aligned start.
+                        let misaligned = if c.align > PAGE_SIZE {
+                            !pa.is_multiple_of(PAGE_SIZE)
+                        } else {
+                            pa & (c.align - 1) != 0
+                        };
+                        if misaligned {
+                            in_place = false;
+                            break 'ranges;
+                        }
+                        ranges.push((pa, n64));
+                    }
+                }
+                off += n;
+            }
+        }
+        if !in_place {
+            return self.bounce::<D, B>(buf);
+        }
+        let mut segments = Segments::new();
+        let total: u64 = ranges.iter().map(|r| r.1).sum();
+        let mapping = if total == 0 {
+            None
+        } else {
+            let m = domain.map(&ranges, D::WRITES, c)?;
+            if let Err(e) = self.split(m.addr, total, &mut segments) {
+                domain.unmap(&m);
+                return Err(e);
+            }
+            Some((Arc::clone(domain), m))
+        };
+        let non_coherent = c.coherency == Coherency::NonCoherent;
+        if non_coherent {
+            for i in 0..buf.ranges() {
+                let (ptr, len) = buf.range(i);
+                if D::READS {
+                    self.mem.clean(ptr, len);
+                } else {
+                    self.mem.invalidate(ptr, len);
+                }
+            }
+        }
+        Ok(Map::Spill(Box::new(Spill {
+            segments: segments.into_vec(),
+            bounce: None,
+            mem: self.mem,
+            non_coherent,
+            iommu: mapping,
+        })))
     }
 
     /// Bounce: one contiguous allocation within reach. Out of line, so the
@@ -793,7 +1040,7 @@ impl DmaTag {
         let align = c.align.max(PAGE_SIZE);
         let alloc = len.next_multiple_of(align);
         let pa = mem
-            .alloc(alloc, align, c.limit())
+            .alloc(alloc, align, self.alloc_limit())
             .ok_or(DmaError::NoMemory)?;
         let bva = mem.virt(pa);
         if D::READS {
@@ -815,12 +1062,33 @@ impl DmaTag {
             }
         }
         let mut segments = Segments::new();
-        if let Err(e) = self.split(pa, len, &mut segments) {
+        // Translated, the bounce pages are mapped like any buffer (whole
+        // pages of their own).
+        let mapping = match &self.domain {
+            Some(d) if len > 0 => match d.map(&[(pa, len)], D::WRITES, c) {
+                Ok(m) => Some((Arc::clone(d), m)),
+                Err(e) => {
+                    // SAFETY: just allocated, unused.
+                    unsafe { mem.free(pa, alloc) };
+                    return Err(e);
+                }
+            },
+            _ => None,
+        };
+        let bus = mapping.as_ref().map_or(pa, |(_, m)| m.addr);
+        if let Err(e) = self.split(bus, len, &mut segments) {
+            if let Some((d, m)) = &mapping {
+                d.unmap(m);
+            }
             // SAFETY: just allocated, unused.
             unsafe { mem.free(pa, alloc) };
             return Err(e);
         }
-        Ok(self.spill(segments.into_vec(), Some(Bounce { pa, bytes: alloc })))
+        let mut map = self.spill(segments.into_vec(), Some(Bounce { pa, bytes: alloc }));
+        if let Map::Spill(s) = &mut map {
+            s.iommu = mapping;
+        }
+        Ok(map)
     }
 }
 
@@ -855,6 +1123,10 @@ impl<B: DmaBuf, D: Direction> Mapped<B, D> {
     #[cold]
     fn finish(buf: &mut B, s: Spill) {
         let mem = s.mem;
+        // Strict: out of the device's reach before the CPU looks.
+        if let Some((d, m)) = &s.iommu {
+            d.unmap(m);
+        }
         if let Some(b) = s.bounce {
             let bva = mem.virt(b.pa);
             if D::WRITES {
@@ -888,8 +1160,10 @@ impl<B: DmaBuf, D: Direction> Mapped<B, D> {
 pub struct DmaPool {
     tag: DmaTag,
     size: u64,
-    free: sync::SpinLock<Vec<u64>>,
-    chunks: Vec<(u64, u64)>,
+    /// Free buffers: physical and bus address.
+    free: sync::SpinLock<Vec<(u64, u64)>>,
+    /// The chunks: physical address, bytes, and the translated mapping.
+    chunks: Vec<(u64, u64, Option<IoMapping>)>,
 }
 
 impl core::fmt::Debug for DmaPool {
@@ -905,6 +1179,7 @@ impl core::fmt::Debug for DmaPool {
 pub struct PoolBuf<'p> {
     pool: &'p DmaPool,
     pa: u64,
+    bus: u64,
 }
 
 impl core::fmt::Debug for PoolBuf<'_> {
@@ -916,7 +1191,8 @@ impl core::fmt::Debug for PoolBuf<'_> {
 impl DmaPool {
     /// `count` buffers of `size` bytes (rounded up to the tag's alignment),
     /// carved from page-sized or larger chunks within reach. A buffer never
-    /// crosses a page unless it is larger than one.
+    /// crosses a page unless it is larger than one. Translated, each chunk
+    /// is mapped once, for the pool's life (docs/IOMMU.md §4.5).
     pub fn new(tag: &DmaTag, size: u64, count: usize) -> Result<Self, DmaError> {
         let size = size.max(1).next_multiple_of(tag.constraints.align.max(8));
         let per_chunk = if size >= PAGE_SIZE {
@@ -927,7 +1203,7 @@ impl DmaPool {
         let align = tag.constraints.align.max(PAGE_SIZE);
         let chunk_bytes = if size >= PAGE_SIZE { size } else { PAGE_SIZE }.next_multiple_of(align);
         let mut pool = Self {
-            tag: *tag,
+            tag: tag.clone(),
             size,
             free: sync::SpinLock::new(Vec::with_capacity(count)),
             chunks: Vec::new(),
@@ -936,15 +1212,27 @@ impl DmaPool {
         while made < count {
             let pa = tag
                 .mem
-                .alloc(chunk_bytes, align, tag.constraints.limit())
+                .alloc(chunk_bytes, align, tag.alloc_limit())
                 .ok_or(DmaError::NoMemory)?;
-            pool.chunks.push((pa, chunk_bytes));
+            let mapping = match &tag.domain {
+                Some(d) => match d.map(&[(pa, chunk_bytes)], true, &tag.constraints) {
+                    Ok(m) => Some(m),
+                    Err(e) => {
+                        // SAFETY: just allocated, unused.
+                        unsafe { tag.mem.free(pa, chunk_bytes) };
+                        return Err(e);
+                    }
+                },
+                None => None,
+            };
+            let bus = mapping.map_or(pa, |m| m.addr);
+            pool.chunks.push((pa, chunk_bytes, mapping));
             let mut free = pool.free.lock();
             for k in 0..per_chunk {
                 if made == count {
                     break;
                 }
-                free.push(pa + k * size);
+                free.push((pa + k * size, bus + k * size));
                 made += 1;
             }
         }
@@ -953,8 +1241,12 @@ impl DmaPool {
 
     /// Takes a buffer, or `None` when all are in use.
     pub fn take(&self) -> Option<PoolBuf<'_>> {
-        let pa = self.free.lock().pop()?;
-        Some(PoolBuf { pool: self, pa })
+        let (pa, bus) = self.free.lock().pop()?;
+        Some(PoolBuf {
+            pool: self,
+            pa,
+            bus,
+        })
     }
 
     /// The buffer size.
@@ -966,7 +1258,10 @@ impl DmaPool {
 
 impl Drop for DmaPool {
     fn drop(&mut self) {
-        for &(pa, bytes) in &self.chunks {
+        for &(pa, bytes, mapping) in &self.chunks {
+            if let (Some(d), Some(m)) = (&self.tag.domain, mapping) {
+                d.unmap(&m);
+            }
             // SAFETY: allocated in `new`; every PoolBuf borrows the pool,
             // so none outlives it.
             unsafe { self.tag.mem.free(pa, bytes) };
@@ -978,7 +1273,7 @@ impl PoolBuf<'_> {
     /// The bus address.
     #[must_use]
     pub fn bus_addr(&self) -> u64 {
-        self.pa
+        self.bus
     }
 
     /// The buffer's bytes (the CPU's view between transfers).
@@ -999,7 +1294,7 @@ impl PoolBuf<'_> {
 
 impl Drop for PoolBuf<'_> {
     fn drop(&mut self) {
-        self.pool.free.lock().push(self.pa);
+        self.pool.free.lock().push((self.pa, self.bus));
     }
 }
 

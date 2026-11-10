@@ -666,7 +666,7 @@ impl Driver for Ahci {
                         drive: None,
                     },
                 ),
-                tag,
+                tag: tag.clone(),
                 disk: SpinLock::new(None),
             }));
         }

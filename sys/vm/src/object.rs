@@ -380,6 +380,11 @@ unsafe impl crate::dma::DmaBuf for PageRun {
         let (p, n) = self.ranges[i];
         (p.as_ptr(), n)
     }
+    /// Pages of an object: file data only (a payload-only zone, mapped in
+    /// place under an IOMMU).
+    fn payload_only(&self) -> bool {
+        true
+    }
 }
 
 /// The part `from..from + len` of `ranges` (each within one page).
@@ -610,6 +615,11 @@ unsafe impl crate::dma::DmaBuf for IoBuf {
                 (p.as_ptr(), n)
             }
         }
+    }
+    /// A lent run's or fresh pages are object pages (payload only); owned
+    /// bytes are the general heap's.
+    fn payload_only(&self) -> bool {
+        !matches!(self, Self::Owned(_))
     }
 }
 
