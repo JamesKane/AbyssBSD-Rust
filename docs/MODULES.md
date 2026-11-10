@@ -75,9 +75,13 @@ not invented:
 |---|---|---|---|
 | `isa`, `atrtc`, `attimer`, `hpet`, `acpi_timer` | `files.x86` / `files.amd64` | yes | no |
 | `ichwd`, `amdsbwd` | `files.x86` | yes | no |
-| `sbsa_gwdt` | `files.arm64` | no | yes |
-| Sky1 drivers (`sky1-*`, `cix-mbox`, `cdns-gpio`, `cdnc-i2c`) | no counterpart; arm64 SoC | no | yes |
-| PCI and USB function drivers (`nvme`, `ahci`, `rge`, `xhci`, `virtio-*`, HID, `umass`) | `files` | yes | yes |
+| `sbsa_gwdt`, xHCI described in ACPI (`generic_xhci_acpi`) | `files.arm64` | no | yes |
+| Sky1 drivers (`sky1-*`, `cix-mbox`, `cdns-gpio`, `cdnc-i2c`) | `cdnc_i2c` in `files.arm64`; the others have no counterpart | no | yes |
+| PCI and USB function drivers (`nvme`, `ahci`, `rge`, `xhci` on PCI, `virtio-*`, HID, `umass`) | `files` | yes | yes |
+| ACPI devices (`acpi_button`, `acpi_thermal`, `acpi_ged`, `acpi_gpiobus`, CPPC, `uart`) | `files` | yes | yes |
+
+One driver crate may have entries in different tables: the `xhci` crate's PCI attachment is
+common and its ACPI one is aarch64 only.
 
 A driver for a device on a plug-in card (PCIe, USB) is in both, whatever machine it was written
 for. A driver for an SoC block or a chipset is in its ISA only. The same rule applies to
@@ -89,18 +93,25 @@ is unchanged within an ISA).
 `kernel/table` holds one table per architecture, all of them compiled on the host:
 
 ```rust
-// kernel/table/src/lib.rs
-pub mod common;   // COMMON: &[DriverDecl], buses and plug-in device drivers
-pub mod x86_64;   // X86_64: &[DriverDecl], PLATFORMS_X86_64
-pub mod aarch64;  // AARCH64: &[DriverDecl], PLATFORMS_AARCH64
+// kernel/table/src/lib.rs (as built, 2026-11-10)
+macro_rules! drivers { ($($isa:expr),*) => { &[acpi::DRIVER, /* … every common entry … */ $($isa),*] } }
+
+#[cfg(any(target_arch = "x86_64", not(target_os = "none")))]
+pub static X86_64: &[DriverDecl] = drivers![isa::ISAB, isa::ISA, atrtc::DRIVER, /* … */];
+#[cfg(any(target_arch = "aarch64", not(target_os = "none")))]
+pub static AARCH64: &[DriverDecl] = drivers![sbsa_gwdt::DRIVER, xhci_driver::ACPI, /* … */];
+// PLATFORMS_X86_64 (empty) and PLATFORMS_AARCH64 (cix-sky1) likewise.
 
 /// The table this kernel uses.
-#[cfg(target_arch = "x86_64")]  pub use x86_64::{DRIVERS, PLATFORMS};
-#[cfg(target_arch = "aarch64")] pub use aarch64::{DRIVERS, PLATFORMS};
+#[cfg(target_arch = "x86_64")]  pub use X86_64 as DRIVERS;
+#[cfg(target_arch = "aarch64")] pub use AARCH64 as DRIVERS;
 ```
 
-- `DRIVERS` per arch is a `const` concatenation of `common` and the arch's own entries. The order
-  rules of §7.1 (buses first) hold for each concatenation.
+- Each ISA's table is one `static`: the common entries, written once in the `drivers!` macro,
+  then the ISA's own. Order breaks no ties (the check forbids them), so the ISA's entries
+  following the common ones changes nothing.
+- The kernel itself names one arch-only driver crate, `sbsa-gwdt` (the GTDT watchdog nexus
+  children in `kernel/src/devices.rs`). That dependency and code are aarch64 only.
 - **Dependencies are gated so the host sees everything and a kernel target sees its own ISA.**
   Arch-only driver crates move to target-scoped dependencies:
 
@@ -117,11 +128,12 @@ pub mod aarch64;  // AARCH64: &[DriverDecl], PLATFORMS_AARCH64
 - The host checks become per table: no unresolved tie **within** each architecture's table, and
   each corpus machine is checked against its own architecture's table and platforms (QEMU and
   bhyve x86 corpora against `X86_64`; QEMU aarch64 and the Orange Pi 6 Plus against `AARCH64`).
-  A new check fails if a corpus device that FreeBSD attached (`tests/corpus/freebsd`) matches no
-  driver in its architecture's table but does match one in another's: that is a driver placed in
-  the wrong table.
-- The `kldstat`/`modfind` built-in list (`kernel/src/syscall/misc.rs` `MODULES`) is derived from
-  the same table, so the aarch64 kernel stops reporting `ichwd` as built in.
+  A new check fails if an ACPI device of a corpus machine matches no driver in its ISA's table
+  but does match one in another's: that is a driver placed in the wrong table. Another pins the
+  difference between the tables to the ISA lists, so the common part cannot drift.
+- The `kldstat`/`modfind` built-in list (`kernel/src/syscall/misc.rs` `MODULES`) stays as it is.
+  It is a hand-written list of FreeBSD module names (file systems, GEOM classes, `bus/driver`
+  pairs) and names no arch-only driver, so there is nothing to derive from the table yet.
 - Driver crates themselves stay ISA-neutral and host-testable (DRIVER-MODEL.md G8, G9). No
   `cfg(target_arch)` appears in `drivers/*`.
 

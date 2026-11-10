@@ -179,7 +179,9 @@ fn reserve_boot_devices() {
     }
 }
 
-/// The GTDT's non-secure SBSA generic watchdogs.
+/// The GTDT's non-secure SBSA generic watchdogs. arm64 only, as FreeBSD's
+/// `sbsa_gwdt` is (`files.arm64`), and its driver is only in that table.
+#[cfg(target_arch = "aarch64")]
 fn sbsa_watchdogs() -> alloc::vec::Vec<acpi_tables::gtdt::Watchdog> {
     let Some(g) = crate::acpi::find(*b"GTDT").and_then(|t| acpi_tables::gtdt::parse(&t).ok())
     else {
@@ -264,6 +266,7 @@ pub(crate) fn init(s: &Sleepable) {
     m.adopt(s, nexus, "apic", "APIC resources", bus::Ident::Platform);
     let _ = NEXUS.set(nexus);
     // The GTDT's non-secure SBSA watchdogs.
+    #[cfg(target_arch = "aarch64")]
     for w in sbsa_watchdogs() {
         let res = alloc::vec![
             bus::Resource::Memory {

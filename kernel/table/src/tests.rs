@@ -11,7 +11,39 @@ use bus::{DriverDecl, Ids};
 use devtree::ids::{AcpiIdent, HidIdent, PciIdent, UsbIdent, VirtioIdent};
 use devtree::matching::{Candidate, Matches, Witness, find_ambiguities};
 
-use crate::DRIVERS;
+use acpi_platform::PlatformSource;
+
+/// The ISAs with a table. Every host build has both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Isa {
+    X86_64,
+    Aarch64,
+}
+
+const ISAS: [Isa; 2] = [Isa::X86_64, Isa::Aarch64];
+
+impl Isa {
+    fn drivers(self) -> &'static [DriverDecl] {
+        match self {
+            Self::X86_64 => crate::X86_64,
+            Self::Aarch64 => crate::AARCH64,
+        }
+    }
+    fn platforms(self) -> &'static [&'static dyn PlatformSource] {
+        match self {
+            Self::X86_64 => crate::PLATFORMS_X86_64,
+            Self::Aarch64 => crate::PLATFORMS_AARCH64,
+        }
+    }
+    /// The ISA of a corpus machine. A new machine must be placed here.
+    fn of(machine: &str) -> Self {
+        match machine {
+            "qemu-q35" | "bhyve" | "x870e" => Self::X86_64,
+            "qemu-virt" | "radxa-q8b" | "opi6p" => Self::Aarch64,
+            m => panic!("corpus machine {m} has no ISA in driver-table's tests"),
+        }
+    }
+}
 
 const PCICONF: &str = include_str!("../../../tests/corpus/freebsd/bhyve/pciconf-lv.txt");
 const DEVINFO: &str = include_str!("../../../tests/corpus/freebsd/bhyve/devinfo-rv.txt");
@@ -167,16 +199,85 @@ fn check(drivers: &[DriverDecl]) -> Vec<String> {
 }
 
 #[test]
-fn the_driver_table_has_no_ties() {
-    let ties = check(DRIVERS);
-    for t in &ties {
-        println!("driver table: {t}");
+fn no_driver_table_has_ties() {
+    let mut n = 0;
+    for isa in ISAS {
+        for t in check(isa.drivers()) {
+            println!("{isa:?} driver table: {t}");
+            n += 1;
+        }
     }
-    assert!(
-        ties.is_empty(),
-        "{} unresolved tie(s) in the driver table",
-        ties.len()
+    assert!(n == 0, "{n} unresolved tie(s) in the driver tables");
+}
+
+/// The tables differ only by each ISA's own drivers: everything in one
+/// and not the other is in the ISA's list (lib.rs), so the shared part
+/// cannot drift.
+#[test]
+fn the_tables_share_the_common_drivers() {
+    let names = |isa: Isa| -> Vec<&str> { isa.drivers().iter().map(|d| d.name).collect() };
+    let (x, a) = (names(Isa::X86_64), names(Isa::Aarch64));
+    let only_x: Vec<&str> = x.iter().filter(|n| !a.contains(n)).copied().collect();
+    let only_a: Vec<&str> = a.iter().filter(|n| !x.contains(n)).copied().collect();
+    assert_eq!(
+        only_x,
+        [
+            "isab",
+            "isa",
+            "atrtc",
+            "attimer",
+            "hpet",
+            "acpi_timer",
+            "ichwd",
+            "amdsbwd"
+        ]
     );
+    assert!(
+        only_a.contains(&"sbsa_gwdt") && !only_a.contains(&"nvme"),
+        "{only_a:?}"
+    );
+}
+
+/// No device of a corpus machine is matched only by a driver of another
+/// ISA's table: that driver would be in the wrong table (MODULES.md §3.2).
+#[test]
+fn every_driver_is_in_its_machines_table() {
+    let matches = |drivers: &[DriverDecl], ident: &AcpiIdent| {
+        drivers
+            .iter()
+            .filter(|drv| match drv.ids {
+                Ids::Acpi(t) => t.iter().any(|e| e.rank_for(ident).is_some()),
+                _ => false,
+            })
+            .map(|d| d.name)
+            .collect::<Vec<_>>()
+    };
+    let mut wrong = Vec::new();
+    for (name, _) in acpi_corpus::machines() {
+        let isa = Isa::of(name);
+        let (mut i, mut h) = acpi_corpus::load(name);
+        for d in acpi::deps::devices(&mut i, &mut h) {
+            let ident = AcpiIdent {
+                hid: i.hid(d, &mut h).ok().flatten(),
+                cids: i.cids(d, &mut h).unwrap_or_default(),
+                uid: None,
+                ..AcpiIdent::default()
+            };
+            if !matches(isa.drivers(), &ident).is_empty() {
+                continue;
+            }
+            for other in ISAS.into_iter().filter(|&o| o != isa) {
+                for drv in matches(other.drivers(), &ident) {
+                    wrong.push(format!(
+                        "{name} ({isa:?}): {} ({:?}) matched only by {other:?}'s {drv}",
+                        i.path(d).to_text(),
+                        ident.hid
+                    ));
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
 #[test]
@@ -212,8 +313,8 @@ fn a_duplicate_is_caught() {
     assert!(ties.iter().all(|t| t.starts_with("vtrnd and vtrnd2")));
 }
 
-/// Every corpus machine with every built-in platform, as the kernel
-/// builds its graph (ADR-0020): at most one platform claims a machine,
+/// Every corpus machine with every platform its ISA's kernel builds in,
+/// as the kernel builds its graph (ADR-0020): at most one platform claims a machine,
 /// no required or power edge closes a cycle, every `_DSD` reference is
 /// classified, and every platform entry reads.
 #[test]
@@ -232,7 +333,14 @@ fn every_machine_with_every_platform() {
             })
             .collect();
         let id = FirmwareIdentity::default();
-        let deps = acpi::deps::build(&mut i, &mut h, &devices, &dma, crate::PLATFORMS, &id);
+        let deps = acpi::deps::build(
+            &mut i,
+            &mut h,
+            &devices,
+            &dma,
+            Isa::of(name).platforms(),
+            &id,
+        );
         assert!(deps.platforms.len() <= 1, "{name}: {:?}", deps.platforms);
         let unclassified: Vec<_> = deps
             .unclassified
@@ -279,7 +387,14 @@ fn stuck(name: &str) -> Vec<(String, Vec<String>)> {
         })
         .collect();
     let id = FirmwareIdentity::default();
-    let deps = acpi::deps::build(&mut i, &mut h, &devices, &dma, crate::PLATFORMS, &id);
+    let deps = acpi::deps::build(
+        &mut i,
+        &mut h,
+        &devices,
+        &dma,
+        Isa::of(name).platforms(),
+        &id,
+    );
     let mut driven = BTreeSet::new();
     for &d in &devices {
         let ident = AcpiIdent {
@@ -288,7 +403,7 @@ fn stuck(name: &str) -> Vec<(String, Vec<String>)> {
             uid: None,
             ..AcpiIdent::default()
         };
-        let has = DRIVERS.iter().any(|drv| match drv.ids {
+        let has = Isa::of(name).drivers().iter().any(|drv| match drv.ids {
             Ids::Acpi(t) => t.iter().any(|e| e.rank_for(&ident).is_some()),
             _ => false,
         });

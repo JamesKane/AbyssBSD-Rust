@@ -2664,7 +2664,7 @@ no hangs, no reboot loops, nothing that needs the screen, and P8's remaining exi
 - **Driver selection** ([ADR-0021](adr/0021-driver-selection-and-modules.md), MODULES.md §3):
   one driver table per ISA in `kernel/table`, so the aarch64 kernel stops carrying `isa`, `atrtc`,
   `ichwd`, `amdsbwd`, and the x86 timers, and the x86_64 kernel the Sky1 drivers and `cix-sky1`.
-  Host checks per table; `kldstat`'s built-in list from the table.
+  Host checks per table, and one that catches a driver in the wrong table.
 - **Verification:** kyua's arm64 target on the board; fsx with `fsck_ffs` on the NVMe and a USB
   disk; the device tree against FreeBSD's `devinfo` wherever FreeBSD has a driver; long runs
   (stress, the multi-user and network scenarios looped) with the watchdog armed.

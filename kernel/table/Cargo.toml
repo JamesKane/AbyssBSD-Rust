@@ -5,32 +5,19 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+# The drivers in every ISA's table.
 [dependencies]
 acpi-platform = { path = "../../lib/acpi-platform" }
-cix-sky1 = { path = "../../platform/cix-sky1" }
 ahci = { path = "../../drivers/ahci" }
-amdsbwd = { path = "../../drivers/amdsbwd" }
-atrtc = { path = "../../drivers/atrtc" }
-cdnc-i2c = { path = "../../drivers/cdnc-i2c" }
-cdns-gpio = { path = "../../drivers/cdns-gpio" }
-ichwd = { path = "../../drivers/ichwd" }
-isa = { path = "../../drivers/isa" }
 acpi = { path = "../../sys/acpi" }
 bus = { path = "../../sys/bus" }
+cpufreq = { path = "../../sys/cpufreq" }
 hidbus = { path = "../../sys/hid" }
 hkbd = { path = "../../drivers/hkbd" }
 hms = { path = "../../drivers/hms" }
 nvme = { path = "../../drivers/nvme" }
 pci = { path = "../../sys/pci" }
 rge = { path = "../../drivers/rge" }
-sbsa-gwdt = { path = "../../drivers/sbsa-gwdt" }
-cix-mbox = { path = "../../drivers/cix-mbox" }
-cpufreq = { path = "../../sys/cpufreq" }
-sky1-clk = { path = "../../drivers/sky1-clk" }
-sky1-pinctrl = { path = "../../drivers/sky1-pinctrl" }
-sky1-reset = { path = "../../drivers/sky1-reset" }
-sky1-syscon = { path = "../../drivers/sky1-syscon" }
-timers = { path = "../../drivers/timers" }
 uart = { path = "../../drivers/uart" }
 umass = { path = "../../drivers/umass" }
 usbus = { path = "../../sys/usb" }
@@ -40,6 +27,26 @@ virtio-net = { path = "../../drivers/virtio-net" }
 virtio-input = { path = "../../drivers/virtio-input" }
 virtio-random = { path = "../../drivers/virtio-random" }
 xhci-driver = { path = "../../drivers/xhci" }
+
+# The x86_64 kernel's own, and every host build's (docs/MODULES.md §3.2).
+[target.'cfg(any(target_arch = "x86_64", not(target_os = "none")))'.dependencies]
+amdsbwd = { path = "../../drivers/amdsbwd" }
+atrtc = { path = "../../drivers/atrtc" }
+ichwd = { path = "../../drivers/ichwd" }
+isa = { path = "../../drivers/isa" }
+timers = { path = "../../drivers/timers" }
+
+# The aarch64 kernel's own, and every host build's.
+[target.'cfg(any(target_arch = "aarch64", not(target_os = "none")))'.dependencies]
+cix-sky1 = { path = "../../platform/cix-sky1" }
+cdnc-i2c = { path = "../../drivers/cdnc-i2c" }
+cdns-gpio = { path = "../../drivers/cdns-gpio" }
+cix-mbox = { path = "../../drivers/cix-mbox" }
+sbsa-gwdt = { path = "../../drivers/sbsa-gwdt" }
+sky1-clk = { path = "../../drivers/sky1-clk" }
+sky1-pinctrl = { path = "../../drivers/sky1-pinctrl" }
+sky1-reset = { path = "../../drivers/sky1-reset" }
+sky1-syscon = { path = "../../drivers/sky1-syscon" }
 
 [dev-dependencies]
 aml = { path = "../../lib/aml" }
