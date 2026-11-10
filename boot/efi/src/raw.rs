@@ -141,7 +141,6 @@ pub struct SimpleTextOutput {
     pub mode: *mut c_void,
 }
 
-/// `EFI_RUNTIME_SERVICES`.
 /// `EFI_TIME` (UEFI 2.10 §8.3).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -161,15 +160,26 @@ pub struct Time {
     pub pad2: u8,
 }
 
+/// `EFI_TIME_CAPABILITIES` (UEFI 2.10 §8.3).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+#[allow(missing_docs)]
+pub struct TimeCapabilities {
+    pub resolution: u32,
+    pub accuracy: u32,
+    pub sets_to_zero: u8,
+}
+
+/// `EFI_RUNTIME_SERVICES` (UEFI 2.10 §4.5).
 #[repr(C)]
 #[derive(Debug)]
 #[allow(missing_docs)]
 pub struct RuntimeServices {
     pub hdr: TableHeader,
-    pub get_time: unsafe extern "efiapi" fn(*mut Time, *mut c_void) -> Status,
-    pub set_time: Slot,
-    pub get_wakeup_time: Slot,
-    pub set_wakeup_time: Slot,
+    pub get_time: unsafe extern "efiapi" fn(*mut Time, *mut TimeCapabilities) -> Status,
+    pub set_time: unsafe extern "efiapi" fn(*const Time) -> Status,
+    pub get_wakeup_time: unsafe extern "efiapi" fn(*mut u8, *mut u8, *mut Time) -> Status,
+    pub set_wakeup_time: unsafe extern "efiapi" fn(u8, *const Time) -> Status,
     pub set_virtual_address_map: Slot,
     pub convert_pointer: Slot,
     pub get_variable: unsafe extern "efiapi" fn(
@@ -179,7 +189,8 @@ pub struct RuntimeServices {
         *mut usize,
         *mut u8,
     ) -> Status,
-    pub get_next_variable_name: Slot,
+    pub get_next_variable_name:
+        unsafe extern "efiapi" fn(*mut usize, *mut u16, *mut RawGuid) -> Status,
     pub set_variable:
         unsafe extern "efiapi" fn(*const u16, *const RawGuid, u32, usize, *const u8) -> Status,
     pub get_next_high_monotonic_count: Slot,

@@ -111,6 +111,7 @@ pub const CONSTANTS: &[&[ConstValue]] = &[
     crate::ptrace::CONSTANTS,
     crate::syslog::CONSTANTS,
     crate::devfs::CONSTANTS,
+    crate::efi::CONSTANTS,
 ];
 
 const fn bus_const(c_name: &'static str, value: i64) -> ConstValue {
@@ -1833,6 +1834,44 @@ pub static LAYOUTS: &[StructLayout] = &[
     layout!(kbio::FkeyTab, "fkeytab_t", ["sys/types.h", "sys/kbio.h"], All, {
         str => "str",
         len => "len",
+    }),
+    layout!(crate::efi::EfiGuid, "efi_guid_t", ["sys/types.h", "sys/efi.h"], All, {
+        data1 => "Data1",
+        data2 => "Data2",
+        data3 => "Data3",
+        data4 => "Data4",
+    }),
+    layout!(crate::efi::EfiTm, "struct efi_tm", ["sys/types.h", "sys/efi.h"], All, {
+        tm_year => "tm_year",
+        tm_mon => "tm_mon",
+        tm_mday => "tm_mday",
+        tm_hour => "tm_hour",
+        tm_min => "tm_min",
+        tm_sec => "tm_sec",
+        pad1 => "__pad1",
+        tm_nsec => "tm_nsec",
+        tm_tz => "tm_tz",
+        tm_dst => "tm_dst",
+        pad2 => "__pad2",
+    }),
+    layout!(crate::efi::EfiGetTableIoctl, "struct efi_get_table_ioctl", ["sys/types.h", "sys/efiio.h"], All, {
+        buf => "buf",
+        guid => "guid",
+        table_len => "table_len",
+        buf_len => "buf_len",
+    }),
+    layout!(crate::efi::EfiVarIoctl, "struct efi_var_ioctl", ["sys/types.h", "sys/efiio.h"], All, {
+        name => "name",
+        namesize => "namesize",
+        vendor => "vendor",
+        attrib => "attrib",
+        data => "data",
+        datasize => "datasize",
+    }),
+    layout!(crate::efi::EfiWaketimeIoctl, "struct efi_waketime_ioctl", ["sys/types.h", "sys/efiio.h"], All, {
+        waketime => "waketime",
+        enabled => "enabled",
+        pending => "pending",
     }),
     layout!(bus::DevreqBuffer, "struct devreq_buffer", ["sys/types.h", "sys/bus.h"], All, {
         buffer => "buffer",

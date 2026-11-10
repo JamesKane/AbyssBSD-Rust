@@ -227,7 +227,7 @@ userland on this kernel:
 | ESP | `newfs_msdos`, `mount_msdosfs` | P5.6 |
 | Root | `zpool create`, `zfs create`, `bootfs` (ZFS); `newfs -U -j` (UFS, §6) | M-Z; P5.5, P5.7 |
 | Extract, configure | `tar` (libarchive), `pw -R`, `pwd_mkdb`, file flags and ACLs | P5, P6.7 |
-| Boot entry | `efibootmgr` (`/dev/efi`, UEFI variable services) | Runtime services are in (P3.8); the `/dev/efi` device for `efivar` is planned (HARDWARE.md §3) and not yet in a phase |
+| Boot entry | `efibootmgr` (`/dev/efi`, UEFI variable services) | In: runtime services (P3.8) and `/dev/efi` (`kernel/src/efidev.rs`); the multi-user boot case sets and deletes `BootNext` |
 | Loader | `loader-efi` copied to the ESP in place of FreeBSD's `loader.efi` | §6 ask |
 
 **Disks with data.** The installer shows what is on each disk and warns before erasing it

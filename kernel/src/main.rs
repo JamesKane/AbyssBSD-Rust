@@ -33,6 +33,7 @@ mod cpuset;
 mod cred;
 mod devctl;
 mod devices;
+mod efidev;
 mod efirtc;
 mod errata;
 mod event;

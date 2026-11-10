@@ -13,8 +13,10 @@
 //! The script logs in as root on `ttyv0` (typed on the USB keyboard over
 //! QMP, in QEMU) and on the serial console, checks that `syslogd`,
 //! `cron`, and `devd` run, that a pty works, that `logger` reaches
-//! `/var/log/messages`, and that cron runs a job, then shuts down with
-//! `shutdown -p now`. Running it against FreeBSD 15.1 keeps it honest:
+//! `/var/log/messages`, that cron runs a job, and that `efibootmgr`
+//! lists the firmware's boot entries and sets and deletes `BootNext`
+//! (through `/dev/efi`, in the firmware's writable variable store), then
+//! shuts down with `shutdown -p now`. Running it against FreeBSD 15.1 keeps it honest:
 //! every step expects what FreeBSD does.
 
 use std::fs;
@@ -95,6 +97,14 @@ const LOGGED_IN: &[Step] = &[
         "crontab -rf && echo uncron-$((6*7))\n",
         "\nuncron-42\r\n",
         "crontab -r",
+    ),
+    step(
+        "cur=$(efibootmgr | sed -n 's/^BootCurrent: //p') && efibootmgr -v | grep -qi \"^+Boot$cur\" \
+         && efibootmgr -n -b $cur >/dev/null \
+         && [ \"$(efibootmgr | sed -n 's/^BootNext : //p')\" = \"$cur\" ] \
+         && efibootmgr -N >/dev/null && ! efibootmgr | grep -q '^BootNext' && echo efi-$((6*7))\n",
+        "\nefi-42\r\n",
+        "efibootmgr lists the boot entries, sets BootNext, and deletes it",
     ),
 ];
 

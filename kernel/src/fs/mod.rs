@@ -184,6 +184,7 @@ pub(crate) fn init() {
     devfs::init();
     crate::mdisk::init();
     crate::devctl::init();
+    crate::efidev::init();
     crate::klog::init(&s);
     let dev = Mount::new(
         MountInfo {

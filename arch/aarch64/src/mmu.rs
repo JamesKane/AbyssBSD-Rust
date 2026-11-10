@@ -70,47 +70,54 @@ pub unsafe fn disable_lower_half() {
     }
 }
 
-/// Runs `f` with `root` as the lower-half table, then disables the lower
-/// half again. Used for UEFI runtime calls, whose table maps the runtime
-/// regions 1:1.
+/// Runs `f` with `root` as the lower-half table, then puts back the lower
+/// half as it was: a user thread's tables (TTBR0 with its ASID, walks
+/// enabled), or none (walks disabled). Used for UEFI runtime calls, whose
+/// table maps the runtime regions 1:1; the calls are made from system
+/// calls (`/dev/efi`), so the caller's user tables must come back.
 ///
 /// # Safety
 ///
-/// Nothing the caller relies on may live in the lower half. Interrupts must
-/// be disabled.
+/// Nothing the caller relies on may live in the lower half while `f` runs.
+/// Interrupts must be disabled.
 pub unsafe fn with_tables<R>(root: PhysAddr, f: impl FnOnce() -> R) -> R {
+    let (ttbr0, tcr): (u64, u64);
     // SAFETY: only the lower half changes, and the caller keeps nothing
-    // there.
+    // there while `f` runs. The firmware table is tagged ASID 0, and every
+    // entry cached for it or for the old tables is dropped on this CPU.
     unsafe {
         asm!(
+            "mrs {ttbr0}, ttbr0_el1",
+            "mrs {tcr}, tcr_el1",
             "dsb ishst",
             "msr ttbr0_el1, {root}",
-            "mrs {tcr}, tcr_el1",
-            "bic {tcr}, {tcr}, {epd0}",
-            "msr tcr_el1, {tcr}",
+            "bic {tmp}, {tcr}, {epd0}",
+            "msr tcr_el1, {tmp}",
             "isb",
             "tlbi vmalle1",
             "dsb ish",
             "isb",
             root = in(reg) root.get(),
             epd0 = in(reg) TCR_EPD0,
-            tcr = out(reg) _,
+            ttbr0 = out(reg) ttbr0,
+            tcr = out(reg) tcr,
+            tmp = out(reg) _,
             options(nostack),
         );
     }
     let r = f();
-    // SAFETY: as above.
+    // SAFETY: restores the lower half that was live on entry; the
+    // firmware table's entries are dropped from this CPU's TLB.
     unsafe {
         asm!(
-            "mrs {tcr}, tcr_el1",
-            "orr {tcr}, {tcr}, {epd0}",
+            "msr ttbr0_el1, {ttbr0}",
             "msr tcr_el1, {tcr}",
             "isb",
             "tlbi vmalle1",
             "dsb ish",
             "isb",
-            epd0 = in(reg) TCR_EPD0,
-            tcr = out(reg) _,
+            ttbr0 = in(reg) ttbr0,
+            tcr = in(reg) tcr,
             options(nostack),
         );
     }
