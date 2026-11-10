@@ -2670,6 +2670,34 @@ no hangs, no reboot loops, nothing that needs the screen, and P8's remaining exi
 **Exit:** the P8 exit criteria on the Orange Pi 6 Plus, every known defect above fixed or recorded in
 compat-deviations with a reason, and a day of looped scenarios without a hang.
 
+- Progress 2026-11-10 (the known defects, in QEMU; none yet tried on the board):
+  - `MNT_RELOAD`: `nmount`'s `reload` on a read-only mount (`vfs_domount_update`'s rule), with
+    `ffs` taken as `ufs` (`chkdoreload` asks for `ffs`, which is why the root's failed with
+    `EOPNOTSUPP`). UFS reads the superblock again (a changed layout is refused, compat-deviations)
+    and keeps it for going read-write, drops the device's cached blocks, and reads every in-core
+    inode again (`ffs_reload`). Going read-only now also re-reads the superblock it wrote, so a
+    second upgrade no longer loads the totals the mount began with. The UFS root shell case runs
+    `mount -u -o ro,reload /` before making it writable.
+  - Serial login: `kern.console` named the serial console `ttyu0` whatever its `uart`'s unit;
+    the board's is `uart2`, so `getty` on `ttyu2` (`onifconsole`) never ran. It is now
+    `uart_tty_attach`'s `ttyu%r`.
+  - The held key: in QEMU, holding Up at the shell and in Scroll Lock mode (15 s, Up, PgUp,
+    Down) never hangs the guest; the lag a test sees after a long `send-key` hold is QEMU's
+    (its hold runs on the virtual clock). Still open, for the board. On the way, scrolling the
+    history no longer blanks the whole framebuffer and forgets every cell: it draws only the
+    cells that differ, the drawn state being known.
+  - Noise: the root has `kldxref`'s empty `linker.hints`, so `devmatch` reads the device tree,
+    which overflowed the kernel stack: `hw.bus.devices` records (3 KiB each) were built and
+    copied on it, and an interrupt on top hit the guard page. They are written in place now.
+    `hw.bus.rman` answers, with no resource manager yet (compat-deviations), so `libdevinfo`
+    works; a handler's own `ENOENT` (the end of `hw.bus.devices`) is no longer a first use.
+    `sky1_pinctrl`'s pad notes need `bootverbose` (`boot_verbose`, `debug.bootverbose`).
+    `route`'s "File exists" is FreeBSD's too (its multi-user console shows the same four lines).
+  - `exit/p8`'s CI found two tests that assumed too much: `heap_serves_collections` (the
+    server's emulated x86 still attaching drivers while it counted) waits for the bus and
+    retries; the `cpuN` test expects none under bhyve, whose tables declare no processors (as
+    FreeBSD's tree there shows).
+
 ## Phase 10: Board bring-up, X870E (L)
 
 **Goal:** the hardened system on the AMD64 reference machine
