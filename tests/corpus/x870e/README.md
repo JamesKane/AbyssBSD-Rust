@@ -1,0 +1,20 @@
+# X870E ground truth
+
+How the reference OSes see the AMD64 reference machine (Ryzen 9 7900X, Gigabyte X870E AORUS ELITE
+WIFI7, HARDWARE.md §5), for ROADMAP P8.0 and the device-tree comparisons of P8.2.
+
+| Directory | Source |
+|---|---|
+| `linux/` | Fedora 44, kernel `7.2.11-200.fc44.x86_64`. Captured 2026-11-09 with `tools/capture/linux-ground-truth.sh x870e`, which lists the command behind each file |
+| `freebsd/` | Not yet: FreeBSD 15.1 (`acpidump`, `devinfo -rv`, `pciconf -lv`, ...) |
+
+The ACPI tables, from Linux's `/sys/firmware/acpi/tables`, are in
+[`../acpi/x870e/`](../acpi/x870e/): 30 tables (the DSDT and 15 SSDTs among them), every checksum
+valid, no tables loaded later (`dynamic/` was empty). `VFCT` is left out: it carries AMD's video
+BIOS image, which isn't ours to redistribute.
+
+At capture time the machine had one NVMe, the Samsung 980 PRO 2 TB (`S6B0NG0R739549M`) that
+Fedora runs from. The second NVMe that AbyssBSD is to use (HARDWARE.md §5) was not installed yet.
+
+Linux reports one ACPI warning: the SystemIO range `0xB00`-`0xB08` (the SMBus controller)
+conflicts with the AML operation region `\GSA1.SMBI`.

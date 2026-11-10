@@ -1,0 +1,125 @@
+Module                  Size  Used by
+uinput                 28672  0
+nvidia_uvm           2682880  0
+rfcomm                122880  4
+snd_seq_dummy          16384  0
+snd_hrtimer            16384  1
+xt_conntrack           12288  1
+xt_MASQUERADE          16384  1
+bridge                483328  0
+stp                    12288  1 bridge
+llc                    16384  2 bridge,stp
+xt_set                 24576  0
+ip_set                 69632  1 xt_set
+xt_addrtype            12288  4
+nft_compat             24576  6
+nf_conntrack_netbios_ns    12288  1
+nf_conntrack_broadcast    12288  1 nf_conntrack_netbios_ns
+nft_fib_inet           12288  1
+nft_fib_ipv4           12288  1 nft_fib_inet
+nft_fib_ipv6           12288  1 nft_fib_inet
+nft_fib                12288  3 nft_fib_ipv6,nft_fib_ipv4,nft_fib_inet
+nft_reject_inet        12288  12
+nf_reject_ipv4         16384  1 nft_reject_inet
+nf_reject_ipv6         24576  1 nft_reject_inet
+nft_reject             12288  1 nft_reject_inet
+nft_ct                 32768  9
+nft_chain_nat          12288  8
+nf_nat                 65536  2 nft_chain_nat,xt_MASQUERADE
+nf_conntrack          221184  6 xt_conntrack,nf_nat,nft_ct,nf_conntrack_netbios_ns,nf_conntrack_broadcast,xt_MASQUERADE
+nf_defrag_ipv6         24576  1 nf_conntrack
+nf_defrag_ipv4         12288  1 nf_conntrack
+overlay               262144  0
+nf_tables             434176  586 nft_ct,nft_compat,nft_reject_inet,nft_fib_ipv6,nft_fib_ipv4,nft_chain_nat,nft_reject,nft_fib,nft_fib_inet
+qrtr                   57344  2
+bnep                   36864  2
+sunrpc                974848  1
+binfmt_misc            28672  1
+vfat                   24576  1
+fat                   126976  1 vfat
+nvidia_drm            180224  36
+nvidia_modeset       2002944  10 nvidia_drm
+mt7925e                28672  0
+amd_atl                81920  1
+mt7925_common         196608  1 mt7925e
+intel_rapl_msr         24576  0
+intel_rapl_common      53248  1 intel_rapl_msr
+mt792x_lib             86016  2 mt7925e,mt7925_common
+edac_mce_amd           40960  0
+mt76_connac_lib       122880  3 mt792x_lib,mt7925e,mt7925_common
+btusb                  90112  0
+kvm_amd               278528  0
+btmtk                  40960  1 btusb
+mt76                  188416  4 mt792x_lib,mt7925e,mt76_connac_lib,mt7925_common
+btrtl                  40960  1 btusb
+btbcm                  24576  1 btusb
+nvidia              18505728  255 nvidia_uvm,nvidia_modeset
+btintel                86016  1 btusb
+mac80211             2084864  4 mt792x_lib,mt76,mt76_connac_lib,mt7925_common
+kvm                  1568768  1 kvm_amd
+snd_hda_codec_alc882    20480  1
+raid0                  32768  2
+bluetooth            1212416  34 btrtl,btmtk,btintel,btbcm,bnep,btusb,rfcomm
+snd_hda_codec_realtek_lib    69632  1 snd_hda_codec_alc882
+snd_hda_codec_generic   139264  2 snd_hda_codec_realtek_lib,snd_hda_codec_alc882
+snd_hda_codec_atihdmi    24576  1
+snd_hda_codec_nvhdmi    16384  1
+snd_hda_codec_hdmi     69632  2 snd_hda_codec_nvhdmi,snd_hda_codec_atihdmi
+irqbypass              16384  1 kvm
+snd_hda_intel          73728  6
+joydev                 32768  0
+snd_hda_codec         241664  7 snd_hda_codec_generic,snd_hda_codec_hdmi,snd_hda_intel,snd_hda_codec_nvhdmi,snd_hda_codec_realtek_lib,snd_hda_codec_alc882,snd_hda_codec_atihdmi
+gigabyte_wmi           12288  0
+wmi_bmof               12288  0
+rapl                   20480  0
+i2c_piix4              40960  0
+cfg80211             1691648  4 mt76,mac80211,mt76_connac_lib,mt7925_common
+pcspkr                 12288  0
+snd_hda_core          163840  6 snd_hda_codec_generic,snd_hda_codec_hdmi,snd_hda_intel,snd_hda_codec,snd_hda_codec_realtek_lib,snd_hda_codec_atihdmi
+k10temp                16384  0
+i2c_smbus              20480  1 i2c_piix4
+snd_intel_dspcfg       49152  1 snd_hda_intel
+snd_seq               143360  7 snd_seq_dummy
+snd_intel_sdw_acpi     16384  1 snd_intel_dspcfg
+r8169                 163840  0
+snd_hwdep              24576  1 snd_hda_codec
+snd_seq_device         16384  1 snd_seq
+snd_pcm               221184  4 snd_hda_codec_hdmi,snd_hda_intel,snd_hda_codec,snd_hda_core
+rfkill                 45056  7 mt7925e,bluetooth,cfg80211
+realtek                65536  1
+libarc4                12288  1 mac80211
+phy_package            16384  1 realtek
+snd_timer              57344  3 snd_seq,snd_hrtimer,snd_pcm
+snd                   159744  24 snd_hda_codec_generic,snd_seq,snd_seq_device,snd_hda_codec_hdmi,snd_hwdep,snd_hda_intel,snd_hda_codec,snd_timer,snd_hda_codec_realtek_lib,snd_pcm
+soundcore              12288  1 snd
+dm_multipath           49152  0
+zram                   77824  1
+lz4hc_compress         20480  1 zram
+amdgpu              23453696  1
+ucsi_acpi              16384  0
+typec_ucsi             94208  1 ucsi_acpi
+typec                 143360  1 typec_ucsi
+drm_buddy              12288  1 amdgpu
+amdxcp                 12288  1 amdgpu
+i2c_algo_bit           24576  1 amdgpu
+drm_ttm_helper         20480  2 amdgpu,nvidia_drm
+ttm                   167936  2 amdgpu,drm_ttm_helper
+drm_exec               12288  1 amdgpu
+drm_panel_backlight_quirks    12288  1 amdgpu
+gpu_sched              77824  1 amdgpu
+drm_suballoc_helper    24576  1 amdgpu
+drm_display_helper    368640  2 amdgpu,nvidia_drm
+nvme                   81920  3
+cec                   110592  2 drm_display_helper,amdgpu
+video                  81920  2 amdgpu,nvidia_modeset
+sp5100_tco             20480  0
+nvme_core             299008  4 nvme
+thunderbolt           647168  1 typec
+nvme_keyring           20480  1 nvme_core
+nvme_auth              36864  1 nvme_core
+wmi                    40960  3 video,gigabyte_wmi,wmi_bmof
+fuse                  315392  5
+i2c_dev                28672  0
+scsi_dh_rdac           16384  0
+scsi_dh_alua           28672  0
+scsi_dh_emc            12288  0

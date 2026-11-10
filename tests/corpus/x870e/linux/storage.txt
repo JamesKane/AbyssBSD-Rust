@@ -1,0 +1,17 @@
+NAME         SIZE TYPE  MODEL                   SERIAL          FSTYPE            PARTLABEL            MOUNTPOINTS
+sda          7.3T disk  WDC WD8003FFBX-68B9AN0  VAHNG5HL                                               
+└─sda1       7.3T part                                          linux_raid_member                      
+  └─md0     14.6T raid0                                         ext4                                   /mnt/md0
+sdb          7.3T disk  WDC WD8003FFBX-68B9AN0  VAHNNH8L                                               
+└─sdb1       7.3T part                                          linux_raid_member                      
+  └─md0     14.6T raid0                                         ext4                                   /mnt/md0
+sdc          5.5T disk  HGST HDN726060ALE614    K8GH0ZPD        linux_raid_member                      
+└─md1       10.9T raid0                                                                                
+zram0          8G disk                                          swap                                   [SWAP]
+nvme0n1      1.8T disk  Samsung SSD 980 PRO 2TB S6B0NG0R739549M                                        
+├─nvme0n1p1  600M part                                          vfat              EFI System Partition /boot/efi
+├─nvme0n1p2    1G part                                          ext4                                   /boot
+└─nvme0n1p3  1.8T part                                          btrfs                                  /home
+                                                                                                       /
+
+/sys/class/nvme/nvme0: Samsung SSD 980 PRO 2TB                  serial S6B0NG0R739549M      fw 3B2QGXA7 at /sys/devices/pci0000:00/0000:00:01.4/0000:02:00.0

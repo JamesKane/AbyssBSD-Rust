@@ -1,0 +1,137 @@
+00000000-00000fff : Reserved
+00001000-0009ffff : System RAM
+000a0000-000fffff : Reserved
+  000a0000-000dffff : PCI Bus 0000:00
+  000f0000-000fffff : System ROM
+00100000-09afefff : System RAM
+09aff000-09ffffff : Reserved
+0a000000-0a1fffff : System RAM
+0a200000-0a20ffff : ACPI Non-volatile Storage
+0a210000-0affffff : System RAM
+0b000000-0b020fff : Reserved
+0b021000-83632fff : System RAM
+83633000-83633fff : Reserved
+83634000-844a8fff : System RAM
+844a9000-844fffff : Reserved
+84500000-88264fff : System RAM
+88265000-8e264fff : Reserved
+  8e23b000-8e23efff : MSFT0101:00
+    8e23b000-8e23efff : MSFT0101:00
+  8e23f000-8e242fff : MSFT0101:00
+    8e23f000-8e242fff : MSFT0101:00
+8e265000-8e47efff : ACPI Tables
+8e47f000-9047efff : ACPI Non-volatile Storage
+9047f000-985fefff : Reserved
+985ff000-99ff8fff : System RAM
+99ff9000-99ffbfff : Reserved
+99ffc000-99ffffff : System RAM
+9a000000-9bffffff : Reserved
+9d7f3000-9fffffff : Reserved
+a0000000-dfffffff : PCI Bus 0000:00
+  ac000000-dc7fffff : PCI Bus 0000:15
+    ac000000-dc7fffff : PCI Bus 0000:16
+      ac000000-c3ffffff : PCI Bus 0000:47
+      c4000000-dbffffff : PCI Bus 0000:17
+      dc000000-dc3fffff : PCI Bus 0000:78
+        dc000000-dc03ffff : 0000:78:00.0
+          dc000000-dc03ffff : thunderbolt
+        dc040000-dc04ffff : 0000:78:00.0
+      dc400000-dc7fffff : PCI Bus 0000:77
+        dc400000-dc407fff : 0000:77:00.0
+          dc400000-dc407fff : xhci-hcd
+  dd000000-de0fffff : PCI Bus 0000:01
+    dd000000-ddffffff : 0000:01:00.0
+      dd000000-ddffffff : nvidia
+    de000000-de07ffff : 0000:01:00.0
+    de080000-de083fff : 0000:01:00.1
+      de080000-de083fff : ICH HD audio
+  de200000-debfffff : PCI Bus 0000:03
+    de200000-debfffff : PCI Bus 0000:04
+      de200000-de9fffff : PCI Bus 0000:0a
+        de200000-de9fffff : PCI Bus 0000:0b
+          de200000-de4fffff : PCI Bus 0000:0d
+            de200000-de3fffff : 0000:0d:00.0
+              de200000-de3fffff : 0000:0d:00.0
+            de400000-de407fff : 0000:0d:00.0
+          de600000-de7fffff : PCI Bus 0000:12
+            de600000-de67ffff : 0000:12:00.0
+            de680000-de6803ff : 0000:12:00.0
+              de680000-de6803ff : ahci
+          de800000-de8fffff : PCI Bus 0000:11
+            de800000-de807fff : 0000:11:00.0
+              de800000-de807fff : xhci-hcd
+          de900000-de9fffff : PCI Bus 0000:0e
+            de900000-de90ffff : 0000:0e:00.0
+              de900000-de90ffff : r8169
+            de910000-de913fff : 0000:0e:00.0
+      dea00000-deafffff : PCI Bus 0000:14
+        dea00000-dea7ffff : 0000:14:00.0
+        dea80000-dea803ff : 0000:14:00.0
+          dea80000-dea803ff : ahci
+      deb00000-debfffff : PCI Bus 0000:13
+        deb00000-deb07fff : 0000:13:00.0
+          deb00000-deb07fff : xhci-hcd
+  dec00000-deffffff : PCI Bus 0000:79
+    dec00000-decfffff : 0000:79:00.4
+      dec00000-decfffff : xhci-hcd
+    ded00000-dedfffff : 0000:79:00.3
+      ded00000-dedfffff : xhci-hcd
+    dee00000-deefffff : 0000:79:00.2
+      dee00000-deefffff : ccp
+    def00000-def7ffff : 0000:79:00.0
+    def80000-def87fff : 0000:79:00.6
+      def80000-def87fff : ICH HD audio
+    def88000-def8bfff : 0000:79:00.1
+      def88000-def8bfff : ICH HD audio
+    def8c000-def8dfff : 0000:79:00.2
+      def8c000-def8dfff : ccp
+  df000000-df0fffff : PCI Bus 0000:7a
+    df000000-df0fffff : 0000:7a:00.0
+      df000000-df0fffff : xhci-hcd
+  df100000-df1fffff : PCI Bus 0000:02
+    df100000-df103fff : 0000:02:00.0
+      df100000-df103fff : nvme
+e0000000-efffffff : PCI ECAM 0000 [bus 00-ff]
+  e0000000-efffffff : PNP0C01:00
+f7200000-f72fffff : PNP0C02:02
+  f7210510-f721053f : MSFT0101:00
+f7700000-f777ffff : amd_iommu
+fe000000-fe01ffff : PNP0C02:03
+feb00000-feb00fff : PNP0C02:04
+  feb00000-feb00007 : SB800 TCO
+fec00000-fec003ff : IOAPIC 0
+fec01000-fec013ff : IOAPIC 1
+fec10000-fec10fff : PNP0C02:04
+fed00000-fed003ff : HPET 0
+  fed00000-fed003ff : PNP0103:00
+fed81500-fed818ff : AMDI0030:00
+  fed81500-fed818ff : AMDI0030:00 AMDI0030:00
+fedc0000-fedc0fff : PNP0C02:04
+fedc2000-fedc2fff : AMDI0010:00
+  fedc2000-fedc2fff : AMDI0010:00 AMDI0010:00
+fedc3000-fedc3fff : AMDI0010:01
+  fedc3000-fedc3fff : AMDI0010:01 AMDI0010:01
+fee00000-fee00fff : Reserved
+  fee00000-fee00fff : PNP0C02:04
+ff000000-ffffffff : PNP0C02:04
+100000000-183de7ffff : System RAM
+  f90800000-f91fe3cdf : Kernel code
+  f92000000-f93238fff : Kernel rodata
+  f93400000-f938b3cbf : Kernel data
+  f943e3000-f947fffff : Kernel bss
+183de80000-183eebffff : RAM buffer
+183eec0000-185fffffff : Reserved
+  1840000000-185fffffff : PNP0C02:01
+1860000000-ffffffffff : PCI Bus 0000:00
+  b800000000-f7ffffffff : PCI Bus 0000:15
+    b800000000-f7ffffffff : PCI Bus 0000:16
+      b800000000-d7ffffffff : PCI Bus 0000:47
+      d800000000-f7ffffffff : PCI Bus 0000:17
+  f800000000-fc01ffffff : PCI Bus 0000:01
+    f800000000-fbffffffff : 0000:01:00.0
+    fc00000000-fc01ffffff : 0000:01:00.0
+  fc10000000-fc201fffff : PCI Bus 0000:79
+    fc10000000-fc1fffffff : 0000:79:00.0
+    fc20000000-fc201fffff : 0000:79:00.0
+  fd00000000-ffffffffff : Reserved
+3ffd10000000-3fffffffffff : nvidia-uvm-hmm

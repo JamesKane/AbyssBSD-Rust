@@ -1,0 +1,341 @@
+ACPI0007:00 path=\_SB_.PLTF.C000 hid=ACPI0007 uid=0 status= adr= phys=/sys/devices/system/cpu/cpu0
+ACPI0007:01 path=\_SB_.PLTF.C001 hid=ACPI0007 uid=1 status= adr= phys=/sys/devices/system/cpu/cpu12
+ACPI0007:02 path=\_SB_.PLTF.C002 hid=ACPI0007 uid=2 status= adr= phys=/sys/devices/system/cpu/cpu1
+ACPI0007:03 path=\_SB_.PLTF.C003 hid=ACPI0007 uid=3 status= adr= phys=/sys/devices/system/cpu/cpu13
+ACPI0007:04 path=\_SB_.PLTF.C004 hid=ACPI0007 uid=4 status= adr= phys=/sys/devices/system/cpu/cpu2
+ACPI0007:05 path=\_SB_.PLTF.C005 hid=ACPI0007 uid=5 status= adr= phys=/sys/devices/system/cpu/cpu14
+ACPI0007:06 path=\_SB_.PLTF.C006 hid=ACPI0007 uid=6 status= adr= phys=/sys/devices/system/cpu/cpu3
+ACPI0007:07 path=\_SB_.PLTF.C007 hid=ACPI0007 uid=7 status= adr= phys=/sys/devices/system/cpu/cpu15
+ACPI0007:08 path=\_SB_.PLTF.C008 hid=ACPI0007 uid=8 status= adr= phys=/sys/devices/system/cpu/cpu4
+ACPI0007:09 path=\_SB_.PLTF.C009 hid=ACPI0007 uid=9 status= adr= phys=/sys/devices/system/cpu/cpu16
+ACPI0007:0a path=\_SB_.PLTF.C00A hid=ACPI0007 uid=10 status= adr= phys=/sys/devices/system/cpu/cpu5
+ACPI0007:0b path=\_SB_.PLTF.C00B hid=ACPI0007 uid=11 status= adr= phys=/sys/devices/system/cpu/cpu17
+ACPI0007:0c path=\_SB_.PLTF.C00C hid=ACPI0007 uid=12 status= adr= phys=/sys/devices/system/cpu/cpu6
+ACPI0007:0d path=\_SB_.PLTF.C00D hid=ACPI0007 uid=13 status= adr= phys=/sys/devices/system/cpu/cpu18
+ACPI0007:0e path=\_SB_.PLTF.C00E hid=ACPI0007 uid=14 status= adr= phys=/sys/devices/system/cpu/cpu7
+ACPI0007:0f path=\_SB_.PLTF.C00F hid=ACPI0007 uid=15 status= adr= phys=/sys/devices/system/cpu/cpu19
+ACPI0007:10 path=\_SB_.PLTF.C010 hid=ACPI0007 uid=16 status= adr= phys=/sys/devices/system/cpu/cpu8
+ACPI0007:11 path=\_SB_.PLTF.C011 hid=ACPI0007 uid=17 status= adr= phys=/sys/devices/system/cpu/cpu20
+ACPI0007:12 path=\_SB_.PLTF.C012 hid=ACPI0007 uid=18 status= adr= phys=/sys/devices/system/cpu/cpu9
+ACPI0007:13 path=\_SB_.PLTF.C013 hid=ACPI0007 uid=19 status= adr= phys=/sys/devices/system/cpu/cpu21
+ACPI0007:14 path=\_SB_.PLTF.C014 hid=ACPI0007 uid=20 status= adr= phys=/sys/devices/system/cpu/cpu10
+ACPI0007:15 path=\_SB_.PLTF.C015 hid=ACPI0007 uid=21 status= adr= phys=/sys/devices/system/cpu/cpu22
+ACPI0007:16 path=\_SB_.PLTF.C016 hid=ACPI0007 uid=22 status= adr= phys=/sys/devices/system/cpu/cpu11
+ACPI0007:17 path=\_SB_.PLTF.C017 hid=ACPI0007 uid=23 status= adr= phys=/sys/devices/system/cpu/cpu23
+ACPI000C:00 path=\_SB_.APAD hid=ACPI000C uid= status=15 adr= phys=/sys/devices/platform/ACPI000C:00
+ACPI0010:00 path=\_SB_.PLTF hid=ACPI0010 uid=1 status= adr=
+AMDI0010:00 path=\_SB_.I2CA hid=AMDI0010 uid=0 status=15 adr= phys=/sys/devices/platform/AMDI0010:00 phys=/sys/devices/platform/AMDI0010:00/i2c-0
+AMDI0010:01 path=\_SB_.I2CB hid=AMDI0010 uid=1 status=15 adr= phys=/sys/devices/platform/AMDI0010:01 phys=/sys/devices/platform/AMDI0010:01/i2c-1
+AMDI0010:02 path=\_SB_.I2CC hid=AMDI0010 uid=2 status=0 adr=
+AMDI0010:03 path=\_SB_.I2CD hid=AMDI0010 uid=3 status=0 adr=
+AMDI0015:00 path=\_SB_.I3CA hid=AMDI0015 uid=0 status=0 adr=
+AMDI0016:00 path=\_SB_.I3CB hid=AMDI0016 uid=1 status=0 adr=
+AMDI0016:01 path=\_SB_.I3CC hid=AMDI0016 uid=2 status=0 adr=
+AMDI0016:02 path=\_SB_.I3CD hid=AMDI0016 uid=3 status=0 adr=
+AMDI0020:00 path=\_SB_.FUR0 hid=AMDI0020 uid=0 status=0 adr=
+AMDI0020:01 path=\_SB_.FUR1 hid=AMDI0020 uid=1 status=0 adr=
+AMDI0020:02 path=\_SB_.FUR2 hid=AMDI0020 uid=2 status=0 adr=
+AMDI0020:03 path=\_SB_.FUR3 hid=AMDI0020 uid=3 status=0 adr=
+AMDI0020:04 path=\_SB_.FUR4 hid=AMDI0020 uid=4 status=0 adr=
+AMDI0030:00 path=\_SB_.GPIO hid=AMDI0030 uid=0 status=15 adr= phys=/sys/devices/platform/AMDI0030:00 phys=/sys/devices/platform/AMDI0030:00/gpiochip0
+AMDI0052:00 path=\_SB_.PPKG hid=AMDI0052 uid= status=15 adr= phys=/sys/devices/platform/AMDI0052:00
+AMDI0060:00 path=\_SB_.HFP1 hid=AMDI0060 uid=0 status=0 adr=
+AMDI0063:00 path=\_SB_.HID0 hid=AMDI0063 uid=0 status=0 adr=
+device:00 path=\_SB_.PCI0.GNBD hid= uid= status= adr=0x00000000 phys=/sys/devices/pci0000:00/0000:00:00.0
+device:01 path=\_SB_.PCI0.D003 hid= uid= status= adr=0x00010000 phys=/sys/devices/pci0000:00/0000:00:01.0
+device:02 path=\_SB_.PCI0.GPP3 hid= uid= status= adr=0x00010004 phys=/sys/devices/pci0000:00/0000:00:01.4
+device:03 path=\_SB_.PCI0.GPP3.D008 hid= uid= status= adr=0x000000ff
+device:04 path=\_SB_.PCI0.GPP4 hid= uid= status= adr=0x00010005
+device:05 path=\_SB_.PCI0.GPP4.D00A hid= uid= status= adr=0x000000ff
+device:06 path=\_SB_.PCI0.GPP5 hid= uid= status= adr=0x00010006
+device:07 path=\_SB_.PCI0.GPP5.D00C hid= uid= status= adr=0x000000ff
+device:08 path=\_SB_.PCI0.GPP6 hid= uid= status= adr=0x00010007
+device:09 path=\_SB_.PCI0.GPP6.D00E hid= uid= status= adr=0x000000ff
+device:0a path=\_SB_.PCI0.D00F hid= uid= status= adr=0x00020000 phys=/sys/devices/pci0000:00/0000:00:02.0
+device:0b path=\_SB_.PCI0.D012 hid= uid= status= adr=0x00030000 phys=/sys/devices/pci0000:00/0000:00:03.0
+device:0c path=\_SB_.PCI0.GPP9 hid= uid= status= adr=0x00030001
+device:0d path=\_SB_.PCI0.GPP9.D014 hid= uid= status= adr=0x000000ff
+device:0e path=\_SB_.PCI0.GPPA hid= uid= status= adr=0x00030002
+device:0f path=\_SB_.PCI0.GPPA.D016 hid= uid= status= adr=0x000000ff
+device:10 path=\_SB_.PCI0.GPPB hid= uid= status= adr=0x00030003
+device:11 path=\_SB_.PCI0.GPPB.D018 hid= uid= status= adr=0x000000ff
+device:12 path=\_SB_.PCI0.GPPC hid= uid= status= adr=0x00030004
+device:13 path=\_SB_.PCI0.GPPC.D01A hid= uid= status= adr=0x000000ff
+device:14 path=\_SB_.PCI0.GPPD hid= uid= status= adr=0x00030005
+device:15 path=\_SB_.PCI0.GPPD.D01C hid= uid= status= adr=0x000000ff
+device:16 path=\_SB_.PCI0.GPPE hid= uid= status= adr=0x00030006
+device:17 path=\_SB_.PCI0.GPPE.D01E hid= uid= status= adr=0x000000ff
+device:18 path=\_SB_.PCI0.GPPF hid= uid= status= adr=0x00030007
+device:19 path=\_SB_.PCI0.GPPF.D020 hid= uid= status= adr=0x000000ff
+device:1a path=\_SB_.PCI0.D021 hid= uid= status= adr=0x00040000 phys=/sys/devices/pci0000:00/0000:00:04.0
+device:1b path=\_SB_.PCI0.GPPG hid= uid= status= adr=0x00040001
+device:1c path=\_SB_.PCI0.GPPG.D023 hid= uid= status= adr=0x000000ff
+device:1d path=\_SB_.PCI0.GPPH hid= uid= status= adr=0x00040002
+device:1e path=\_SB_.PCI0.GPPH.D025 hid= uid= status= adr=0x000000ff
+device:1f path=\_SB_.PCI0.D026 hid= uid= status= adr=0x00080000 phys=/sys/devices/pci0000:00/0000:00:08.0
+device:20 path=\_SB_.PCI0.GP17 hid= uid= status= adr=0x00080001 phys=/sys/devices/pci0000:00/0000:00:08.1
+device:21 path=\_SB_.PCI0.GP17.VGA_.LCD_ hid= uid= status= adr=0x00000110
+device:22 path=\_SB_.PCI0.GP17.HDAU hid= uid= status= adr=0x00000001 phys=/sys/devices/pci0000:00/0000:00:08.1/0000:79:00.1
+device:23 path=\_SB_.PCI0.GP17.ACP_ hid= uid= status= adr=0x00000005
+device:24 path=\_SB_.PCI0.GP17.AZAL hid= uid= status= adr=0x00000006 phys=/sys/devices/pci0000:00/0000:00:08.1/0000:79:00.6
+device:25 path=\_SB_.PCI0.GP17.XHC0 hid= uid= status= adr=0x00000003 phys=/sys/devices/pci0000:00/0000:00:08.1/0000:79:00.3
+device:26 path=\_SB_.PCI0.GP17.XHC0.RHUB hid= uid= status= adr=0x00000000 phys=/sys/devices/pci0000:00/0000:00:08.1/0000:79:00.3/usb7 phys=/sys/devices/pci0000:00/0000:00:08.1/0000:79:00.3/usb7/7-0:1.0 phys=/sys/devices/pci0000:00/0000:00:08.1/0000:79:00.3/usb8 phys=/sys/devices/pci0000:00/0000:00:08.1/0000:79:00.3/usb8/8-0:1.0
+device:27 path=\_SB_.PCI0.GP17.XHC0.RHUB.PRT1 hid= uid= status= adr=0x00000001 phys=/sys/devices/pci0000:00/0000:00:08.1/0000:79:00.3/usb7/7-0:1.0/usb7-port1
+device:28 path=\_SB_.PCI0.GP17.XHC0.RHUB.PRT3 hid= uid= status= adr=0x00000003 phys=/sys/devices/pci0000:00/0000:00:08.1/0000:79:00.3/usb8/8-0:1.0/usb8-port1
+device:29 path=\_SB_.PCI0.GP17.XHC0.RHUB.PRT2 hid= uid= status= adr=0x00000002 phys=/sys/devices/pci0000:00/0000:00:08.1/0000:79:00.3/usb7/7-0:1.0/usb7-port2
+device:2a path=\_SB_.PCI0.GP17.XHC0.RHUB.PRT4 hid= uid= status= adr=0x00000004 phys=/sys/devices/pci0000:00/0000:00:08.1/0000:79:00.3/usb8/8-0:1.0/usb8-port2
+device:2b path=\_SB_.PCI0.GP17.XHC1 hid= uid= status= adr=0x00000004 phys=/sys/devices/pci0000:00/0000:00:08.1/0000:79:00.4
+device:2c path=\_SB_.PCI0.GP17.XHC1.RHUB hid= uid= status= adr=0x00000000 phys=/sys/devices/pci0000:00/0000:00:08.1/0000:79:00.4/usb9 phys=/sys/devices/pci0000:00/0000:00:08.1/0000:79:00.4/usb9/9-0:1.0 phys=/sys/devices/pci0000:00/0000:00:08.1/0000:79:00.4/usb10 phys=/sys/devices/pci0000:00/0000:00:08.1/0000:79:00.4/usb10/10-0:1.0
+device:2d path=\_SB_.PCI0.GP17.XHC1.RHUB.PRT1 hid= uid= status= adr=0x00000001 phys=/sys/devices/pci0000:00/0000:00:08.1/0000:79:00.4/usb9/9-0:1.0/usb9-port1
+device:2e path=\_SB_.PCI0.GP17.XHC1.RHUB.PRT3 hid= uid= status= adr=0x00000003 phys=/sys/devices/pci0000:00/0000:00:08.1/0000:79:00.4/usb10/10-0:1.0/usb10-port1
+device:2f path=\_SB_.PCI0.GP17.XHC1.RHUB.PRT2 hid= uid= status= adr=0x00000002 phys=/sys/devices/pci0000:00/0000:00:08.1/0000:79:00.4/usb9/9-0:1.0/usb9-port2
+device:30 path=\_SB_.PCI0.GP17.XHC1.RHUB.PRT4 hid= uid= status= adr=0x00000004 phys=/sys/devices/pci0000:00/0000:00:08.1/0000:79:00.4/usb10/10-0:1.0/usb10-port2
+device:31 path=\_SB_.PCI0.D032 hid= uid= status= adr=0x00140000 phys=/sys/devices/pci0000:00/0000:00:14.0
+device:32 path=\_SB_.PCI0.SBRG hid= uid= status= adr=0x00140003 phys=/sys/devices/pci0000:00/0000:00:14.3
+device:33 path=\_SB_.PCI0.SDIO hid= uid= status= adr=0x00140007
+device:34 path=\_SB_.PCI0.GP18 hid= uid= status= adr=0x00080002
+device:35 path=\_SB_.PCI0.GP18.D02E hid= uid= status= adr=0x000000ff
+device:36 path=\_SB_.PCI0.GP19 hid= uid= status= adr=0x00080003 phys=/sys/devices/pci0000:00/0000:00:08.3
+device:37 path=\_SB_.PCI0.GP19.XHC2 hid= uid= status= adr=0x00000000 phys=/sys/devices/pci0000:00/0000:00:08.3/0000:7a:00.0
+device:38 path=\_SB_.PCI0.GP19.XHC2.RHUB hid= uid= status= adr=0x00000000 phys=/sys/devices/pci0000:00/0000:00:08.3/0000:7a:00.0/usb11 phys=/sys/devices/pci0000:00/0000:00:08.3/0000:7a:00.0/usb11/11-0:1.0
+device:39 path=\_SB_.PCI0.GP19.XHC2.RHUB.PRT1 hid= uid= status= adr=0x00000001 phys=/sys/devices/pci0000:00/0000:00:08.3/0000:7a:00.0/usb11/11-0:1.0/usb11-port1
+device:3a path=\_SB_.PCI0.GPP0 hid= uid= status= adr=0x00010001 phys=/sys/devices/pci0000:00/0000:00:01.1
+device:3b path=\_SB_.PCI0.GPP0.D004 hid= uid= status= adr=0x000000ff
+device:3c path=\_SB_.PCI0.GPP0.VGA_ hid= uid= status= adr=0x00000000 phys=/sys/devices/pci0000:00/0000:00:01.1/0000:01:00.0
+device:3d path=\_SB_.PCI0.GPP0.HDAU hid= uid= status=15 adr=0x00000001 phys=/sys/devices/pci0000:00/0000:00:01.1/0000:01:00.1
+device:3e path=\_SB_.PCI0.GPP1 hid= uid= status= adr=0x00010002
+device:3f path=\_SB_.PCI0.GPP1.D005 hid= uid= status= adr=0x000000ff
+device:40 path=\_SB_.PCI0.GPP1.NVME hid= uid= status= adr=0x00000000
+device:41 path=\_SB_.PCI0.GPP2 hid= uid= status= adr=0x00010003
+device:42 path=\_SB_.PCI0.GPP2.D006 hid= uid= status= adr=0x000000ff
+device:43 path=\_SB_.PCI0.GPP7 hid= uid= status=15 adr=0x00020001 phys=/sys/devices/pci0000:00/0000:00:02.1
+device:44 path=\_SB_.PCI0.GPP7.D010 hid= uid= status= adr=0x000000ff
+device:45 path=\_SB_.PCI0.GPP7.UP00 hid= uid= status=15 adr=0x00000000 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0
+device:46 path=\_SB_.PCI0.GPP7.UP00.DP00 hid= uid= status=0 adr=0x00000000 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:00.0
+device:47 path=\_SB_.PCI0.GPP7.UP00.DP00.NV00 hid= uid= status=0 adr=0x00000000
+device:48 path=\_SB_.PCI0.GPP7.UP00.DP08 hid= uid= status=0 adr=0x00010000
+device:49 path=\_SB_.PCI0.GPP7.UP00.DP08.EP00 hid= uid= status=0 adr=0x00000000
+device:4a path=\_SB_.PCI0.GPP7.UP00.DP10 hid= uid= status=0 adr=0x00020000
+device:4b path=\_SB_.PCI0.GPP7.UP00.DP10.WN00 hid= uid= status=0 adr=0x00000000
+device:4c path=\_SB_.PCI0.GPP7.UP00.DP18 hid= uid= status=0 adr=0x00030000
+device:4d path=\_SB_.PCI0.GPP7.UP00.DP18.LN00 hid= uid= status=0 adr=0x00000000
+device:4e path=\_SB_.PCI0.GPP7.UP00.DP20 hid= uid= status=0 adr=0x00040000 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:04.0
+device:4f path=\_SB_.PCI0.GPP7.UP00.DP20.NV00 hid= uid= status=0 adr=0x00000000
+device:50 path=\_SB_.PCI0.GPP7.UP00.DP28 hid= uid= status=0 adr=0x00050000 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:05.0
+device:51 path=\_SB_.PCI0.GPP7.UP00.DP28.EP00 hid= uid= status=0 adr=0x00000000
+device:52 path=\_SB_.PCI0.GPP7.UP00.DP30 hid= uid= status=0 adr=0x00060000 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:06.0
+device:53 path=\_SB_.PCI0.GPP7.UP00.DP30.EP00 hid= uid= status=0 adr=0x00000000
+device:54 path=\_SB_.PCI0.GPP7.UP00.DP38 hid= uid= status=0 adr=0x00070000 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:07.0
+device:55 path=\_SB_.PCI0.GPP7.UP00.DP38.EP00 hid= uid= status=0 adr=0x00000000
+device:56 path=\_SB_.PCI0.GPP7.UP00.DP40 hid= uid= status=15 adr=0x00080000 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:08.0
+device:57 path=\_SB_.PCI0.GPP7.UP00.DP40.UP00 hid= uid= status=15 adr=0x00000000 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:08.0/0000:0a:00.0
+device:58 path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP00 hid= uid= status=0 adr=0x00000000 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:08.0/0000:0a:00.0/0000:0b:00.0
+device:59 path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP00.NV00 hid= uid= status=0 adr=0x00000000
+device:5a path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP08 hid= uid= status=0 adr=0x00010000
+device:5b path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP08.EP00 hid= uid= status=0 adr=0x00000000
+device:5c path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP10 hid= uid= status=15 adr=0x00020000 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:08.0/0000:0a:00.0/0000:0b:02.0
+device:5d path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP10.WN00 hid= uid= status=15 adr=0x00000000 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:08.0/0000:0a:00.0/0000:0b:02.0/0000:0d:00.0
+device:5e path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP18 hid= uid= status=15 adr=0x00030000 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:08.0/0000:0a:00.0/0000:0b:03.0
+device:5f path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP18.LN00 hid= uid= status=15 adr=0x00000000 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:08.0/0000:0a:00.0/0000:0b:03.0/0000:0e:00.0
+device:60 path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP20 hid= uid= status=0 adr=0x00040000 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:08.0/0000:0a:00.0/0000:0b:04.0
+device:61 path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP20.NV00 hid= uid= status=0 adr=0x00000000
+device:62 path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP28 hid= uid= status=0 adr=0x00050000
+device:63 path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP28.EP00 hid= uid= status=0 adr=0x00000000
+device:64 path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP30 hid= uid= status=0 adr=0x00060000
+device:65 path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP30.EP00 hid= uid= status=0 adr=0x00000000
+device:66 path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP38 hid= uid= status=0 adr=0x00070000
+device:67 path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP38.EP00 hid= uid= status=0 adr=0x00000000
+device:68 path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP40 hid= uid= status=0 adr=0x00080000 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:08.0/0000:0a:00.0/0000:0b:08.0
+device:69 path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP40.EP00 hid= uid= status=0 adr=0x00000000
+device:6a path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP48 hid= uid= status=0 adr=0x00090000
+device:6b path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP48.EP00 hid= uid= status=0 adr=0x00000000
+device:6c path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP50 hid= uid= status=0 adr=0x000a0000
+device:6d path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP50.EP00 hid= uid= status=0 adr=0x00000000
+device:6e path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP58 hid= uid= status=0 adr=0x000b0000
+device:6f path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP58.EP00 hid= uid= status=0 adr=0x00000000
+device:70 path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP60 hid= uid= status=15 adr=0x000c0000 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:08.0/0000:0a:00.0/0000:0b:0c.0
+device:71 path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP60.XH00 hid= uid= status=15 adr=0x00000000 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:08.0/0000:0a:00.0/0000:0b:0c.0/0000:11:00.0
+device:72 path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP68 hid= uid= status=15 adr=0x000d0000 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:08.0/0000:0a:00.0/0000:0b:0d.0
+device:73 path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP68.SA00 hid= uid= status=15 adr=0x00000000 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:08.0/0000:0a:00.0/0000:0b:0d.0/0000:12:00.0
+device:74 path=\_SB_.PCI0.GPP7.UP00.DP48 hid= uid= status=0 adr=0x00090000
+device:75 path=\_SB_.PCI0.GPP7.UP00.DP48.EP00 hid= uid= status=0 adr=0x00000000
+device:76 path=\_SB_.PCI0.GPP7.UP00.DP50 hid= uid= status=0 adr=0x000a0000
+device:77 path=\_SB_.PCI0.GPP7.UP00.DP50.EP00 hid= uid= status=0 adr=0x00000000
+device:78 path=\_SB_.PCI0.GPP7.UP00.DP58 hid= uid= status=0 adr=0x000b0000
+device:79 path=\_SB_.PCI0.GPP7.UP00.DP58.EP00 hid= uid= status=0 adr=0x00000000
+device:7a path=\_SB_.PCI0.GPP7.UP00.DP60 hid= uid= status=15 adr=0x000c0000 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0
+device:7b path=\_SB_.PCI0.GPP7.UP00.DP60.XH00 hid= uid= status=15 adr=0x00000000 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0
+device:7c path=\_SB_.PCI0.GPP7.UP00.DP60.XH00.RHUB hid= uid= status= adr=0x00000000 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0/usb3 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0/usb3/3-0:1.0 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0/usb4 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0/usb4/4-0:1.0
+device:7d path=\_SB_.PCI0.GPP7.UP00.DP60.XH00.RHUB.POT1 hid= uid= status= adr=0x00000001 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0/usb4/4-0:1.0/usb4-port1
+device:7e path=\_SB_.PCI0.GPP7.UP00.DP60.XH00.RHUB.POT6 hid= uid= status= adr=0x00000006 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0/usb4/4-0:1.0/usb4-port6
+device:7f path=\_SB_.PCI0.GPP7.UP00.DP60.XH00.RHUB.POT2 hid= uid= status= adr=0x00000002 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0/usb4/4-0:1.0/usb4-port2
+device:80 path=\_SB_.PCI0.GPP7.UP00.DP60.XH00.RHUB.POT7 hid= uid= status= adr=0x00000007 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0/usb3/3-0:1.0/usb3-port1
+device:81 path=\_SB_.PCI0.GPP7.UP00.DP60.XH00.RHUB.POT3 hid= uid= status= adr=0x00000003 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0/usb4/4-0:1.0/usb4-port3
+device:82 path=\_SB_.PCI0.GPP7.UP00.DP60.XH00.RHUB.POT8 hid= uid= status= adr=0x00000008 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0/usb3/3-0:1.0/usb3-port2
+device:83 path=\_SB_.PCI0.GPP7.UP00.DP60.XH00.RHUB.POT4 hid= uid= status= adr=0x00000004 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0/usb4/4-0:1.0/usb4-port4
+device:84 path=\_SB_.PCI0.GPP7.UP00.DP60.XH00.RHUB.POT9 hid= uid= status= adr=0x00000009 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0/usb3/3-0:1.0/usb3-port3
+device:85 path=\_SB_.PCI0.GPP7.UP00.DP60.XH00.RHUB.POT5 hid= uid= status= adr=0x00000005 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0/usb4/4-0:1.0/usb4-port5
+device:86 path=\_SB_.PCI0.GPP7.UP00.DP60.XH00.RHUB.POTA hid= uid= status= adr=0x0000000a phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0/usb3/3-0:1.0/usb3-port4
+device:87 path=\_SB_.PCI0.GPP7.UP00.DP60.XH00.RHUB.POTB hid= uid= status= adr=0x0000000b phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0/usb3/3-0:1.0/usb3-port5
+device:88 path=\_SB_.PCI0.GPP7.UP00.DP60.XH00.RHUB.POTC hid= uid= status= adr=0x0000000c phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0/usb3/3-0:1.0/usb3-port6
+device:89 path=\_SB_.PCI0.GPP7.UP00.DP60.XH00.RHUB.POTG hid= uid= status= adr=0x00000010 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0/usb3/3-0:1.0/usb3-port10 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0/usb3/3-10 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0/usb3/3-10/3-10:1.0 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0/usb3/3-10/3-10:1.0/0003:1A2C:506F.0004 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0/usb3/3-10/3-10:1.1 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0/usb3/3-10/3-10:1.1/0003:1A2C:506F.0005
+device:8a path=\_SB_.PCI0.GPP7.UP00.DP60.XH00.RHUB.POTD hid= uid= status= adr=0x0000000d phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0/usb3/3-0:1.0/usb3-port7 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0/usb3/3-7 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0/usb3/3-7/3-7:1.0 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0/usb3/3-7/3-7:1.0/0003:048D:5711.0001 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0/usb3/3-7/3-7:1.1 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0/usb3/3-7/3-7:1.1/0003:048D:5711.0002
+device:8b path=\_SB_.PCI0.GPP7.UP00.DP60.XH00.RHUB.POTE hid= uid= status= adr=0x0000000e phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0/usb3/3-0:1.0/usb3-port8
+device:8c path=\_SB_.PCI0.GPP7.UP00.DP60.XH00.RHUB.POTF hid= uid= status= adr=0x0000000f phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0/usb3/3-0:1.0/usb3-port9 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0/usb3/3-9 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0/usb3/3-9/3-9:1.0 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0/usb3/3-9/3-9:1.0/0003:30FA:0300.0003
+device:8d path=\_SB_.PCI0.GPP7.UP00.DP60.XH00.RHUB.POTH hid= uid= status= adr=0x00000011 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0c.0/0000:13:00.0/usb3/3-0:1.0/usb3-port11
+device:8e path=\_SB_.PCI0.GPP7.UP00.DP68 hid= uid= status=15 adr=0x000d0000 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0d.0
+device:8f path=\_SB_.PCI0.GPP7.UP00.DP68.SA00 hid= uid= status=15 adr=0x00000000 phys=/sys/devices/pci0000:00/0000:00:02.1/0000:03:00.0/0000:04:0d.0/0000:14:00.0
+device:90 path=\_SB_.PCI0.GPP8 hid= uid= status=15 adr=0x00020002 phys=/sys/devices/pci0000:00/0000:00:02.2
+device:91 path=\_SB_.PCI0.GPP8.D011 hid= uid= status= adr=0x000000ff
+device:92 path=\_SB_.PCI0.GPP8.UP00 hid= uid= status= adr=0x00010000
+device:93 path=\_SB_.PCI0.GPP8.UP00.DP40 hid= uid= status= adr=0x00000000
+device:94 path=\_SB_.PCI0.GPP8.UP00.DP40.U4UP hid= uid= status= adr=0x00000000
+device:95 path=\_SB_.PCI0.GPP8.UP00.DP40.U4UP.U4P3 hid= uid= status= adr=0x00000000
+device:96 path=\_SB_.PCI0.GPP8.UP00.DP40.U4UP.U4P3.UHI0 hid= uid= status= adr=0x00000000
+device:97 path=\_SB_.PCI0.GPP8.UP00.DP40.UP00 hid= uid= status= adr=0x00010000
+device:98 path=\_SB_.PCI0.GPP8.UP00.DP40.UP00.DP40 hid= uid= status= adr=0x00000000
+device:99 path=\_SB_.PCI0.GPP8.UP00.DP40.UP00.DP40.U4UP hid= uid= status= adr=0x00000000
+device:9a path=\_SB_.PCI0.GPP8.UP00.DP40.UP00.DP40.U4UP.U4P3 hid= uid= status= adr=0x00000000
+device:9b path=\_SB_.PCI0.GPP8.UP00.DP40.UP00.DP40.U4UP.U4P3.UHI0 hid= uid= status= adr=0x00000000
+device:9c path=\_SB_.PCI0.GPP8.U4UP hid= uid= status=15 adr=0x00000000 phys=/sys/devices/pci0000:00/0000:00:02.2/0000:15:00.0
+device:9d path=\_SB_.PCI0.GPP8.U4UP.U4P0 hid= uid= status=15 adr=0x00000000 phys=/sys/devices/pci0000:00/0000:00:02.2/0000:15:00.0/0000:16:00.0
+device:9e path=\_SB_.PCI0.GPP8.U4UP.U4P0.UP0D hid= uid= status=15 adr=0x00000000
+device:9f path=\_SB_.PCI0.GPP8.U4UP.U4P1 hid= uid= status=15 adr=0x00010000 phys=/sys/devices/pci0000:00/0000:00:02.2/0000:15:00.0/0000:16:01.0
+device:a0 path=\_SB_.PCI0.GPP8.U4UP.U4P1.UP1D hid= uid= status=15 adr=0x00000000
+device:a1 path=\_SB_.PCI0.GPP8.U4UP.U4P2 hid= uid= status=15 adr=0x00020000 phys=/sys/devices/pci0000:00/0000:00:02.2/0000:15:00.0/0000:16:02.0
+device:a2 path=\_SB_.PCI0.GPP8.U4UP.U4P2.UXHC hid= uid= status=15 adr=0x00000000 phys=/sys/devices/pci0000:00/0000:00:02.2/0000:15:00.0/0000:16:02.0/0000:77:00.0
+device:a3 path=\_SB_.PCI0.GPP8.U4UP.U4P2.UXHC.UHUB hid= uid= status= adr=0x00000000 phys=/sys/devices/pci0000:00/0000:00:02.2/0000:15:00.0/0000:16:02.0/0000:77:00.0/usb5 phys=/sys/devices/pci0000:00/0000:00:02.2/0000:15:00.0/0000:16:02.0/0000:77:00.0/usb5/5-0:1.0 phys=/sys/devices/pci0000:00/0000:00:02.2/0000:15:00.0/0000:16:02.0/0000:77:00.0/usb6 phys=/sys/devices/pci0000:00/0000:00:02.2/0000:15:00.0/0000:16:02.0/0000:77:00.0/usb6/6-0:1.0
+device:a4 path=\_SB_.PCI0.GPP8.U4UP.U4P2.UXHC.UHUB.USS1 hid= uid= status= adr=0x00000001 phys=/sys/devices/pci0000:00/0000:00:02.2/0000:15:00.0/0000:16:02.0/0000:77:00.0/usb6/6-0:1.0/usb6-port1
+device:a5 path=\_SB_.PCI0.GPP8.U4UP.U4P2.UXHC.UHUB.USS2 hid= uid= status= adr=0x00000002 phys=/sys/devices/pci0000:00/0000:00:02.2/0000:15:00.0/0000:16:02.0/0000:77:00.0/usb6/6-0:1.0/usb6-port2
+device:a6 path=\_SB_.PCI0.GPP8.U4UP.U4P2.UXHC.UHUB.UHS1 hid= uid= status= adr=0x00000003 phys=/sys/devices/pci0000:00/0000:00:02.2/0000:15:00.0/0000:16:02.0/0000:77:00.0/usb5/5-0:1.0/usb5-port1
+device:a7 path=\_SB_.PCI0.GPP8.U4UP.U4P2.UXHC.UHUB.UHS2 hid= uid= status= adr=0x00000004 phys=/sys/devices/pci0000:00/0000:00:02.2/0000:15:00.0/0000:16:02.0/0000:77:00.0/usb5/5-0:1.0/usb5-port2
+device:a8 path=\_SB_.PCI0.GPP8.U4UP.U4P3 hid= uid= status=15 adr=0x00030000 phys=/sys/devices/pci0000:00/0000:00:02.2/0000:15:00.0/0000:16:03.0
+device:a9 path=\_SB_.PCI0.GPP8.U4UP.U4P3.UHI0 hid= uid= status=15 adr=0x00000000 phys=/sys/devices/pci0000:00/0000:00:02.2/0000:15:00.0/0000:16:03.0/0000:78:00.0
+ITE8800:00 path=\_SB_.I2CB.ITE2 hid=ITE8800 uid=7 status=15 adr= phys=/sys/devices/platform/AMDI0010:01/i2c-1/i2c-ITE8800:00
+ITE8800:01 path=\_SB_.I2CB.ITE3 hid=ITE8800 uid=6 status=15 adr= phys=/sys/devices/platform/AMDI0010:01/i2c-1/i2c-ITE8800:01
+LNXPOWER:00 path=\_SB_.PCI0.GP17.XHC0.P0U0 hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:01 path=\_SB_.PCI0.GP17.XHC1.P0U1 hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:02 path=\_SB_.PCI0.GP19.XHC2.P0U2 hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:03 path=\_SB_.PCI0.GPP0.M237 hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:04 path=\_SB_.PCI0.GPP1.P0NV hid=LNXPOWER uid= status=1 adr=
+LNXPOWER:05 path=\_SB_.PCI0.GPP7.PWRS hid=LNXPOWER uid= status=1 adr=
+LNXPOWER:06 path=\_SB_.PCI0.GPP7.UP00.PWRS hid=LNXPOWER uid= status=1 adr=
+LNXPOWER:07 path=\_SB_.PCI0.GPP7.UP00.DP00.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:08 path=\_SB_.PCI0.GPP7.UP00.DP00.NV00.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:09 path=\_SB_.PCI0.GPP7.UP00.DP08.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:0a path=\_SB_.PCI0.GPP7.UP00.DP08.EP00.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:0b path=\_SB_.PCI0.GPP7.UP00.DP10.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:0c path=\_SB_.PCI0.GPP7.UP00.DP10.WN00.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:0d path=\_SB_.PCI0.GPP7.UP00.DP18.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:0e path=\_SB_.PCI0.GPP7.UP00.DP18.LN00.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:0f path=\_SB_.PCI0.GPP7.UP00.DP20.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:10 path=\_SB_.PCI0.GPP7.UP00.DP20.NV00.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:11 path=\_SB_.PCI0.GPP7.UP00.DP28.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:12 path=\_SB_.PCI0.GPP7.UP00.DP28.EP00.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:13 path=\_SB_.PCI0.GPP7.UP00.DP30.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:14 path=\_SB_.PCI0.GPP7.UP00.DP30.EP00.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:15 path=\_SB_.PCI0.GPP7.UP00.DP38.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:16 path=\_SB_.PCI0.GPP7.UP00.DP38.EP00.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:17 path=\_SB_.PCI0.GPP7.UP00.DP40.PWRS hid=LNXPOWER uid= status=1 adr=
+LNXPOWER:18 path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.PWRS hid=LNXPOWER uid= status=1 adr=
+LNXPOWER:19 path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP00.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:1a path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP00.NV00.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:1b path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP08.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:1c path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP08.EP00.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:1d path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP10.PWRS hid=LNXPOWER uid= status=1 adr=
+LNXPOWER:1e path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP10.WN00.PWRS hid=LNXPOWER uid= status=1 adr=
+LNXPOWER:1f path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP18.PWRS hid=LNXPOWER uid= status=1 adr=
+LNXPOWER:20 path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP18.LN00.PWRS hid=LNXPOWER uid= status=1 adr=
+LNXPOWER:21 path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP20.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:22 path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP20.NV00.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:23 path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP28.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:24 path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP28.EP00.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:25 path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP30.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:26 path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP30.EP00.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:27 path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP38.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:28 path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP38.EP00.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:29 path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP40.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:2a path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP40.EP00.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:2b path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP48.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:2c path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP48.EP00.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:2d path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP50.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:2e path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP50.EP00.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:2f path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP58.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:30 path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP58.EP00.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:31 path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP60.PWRS hid=LNXPOWER uid= status=1 adr=
+LNXPOWER:32 path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP60.XH00.PWRS hid=LNXPOWER uid= status=1 adr=
+LNXPOWER:33 path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP68.PWRS hid=LNXPOWER uid= status=1 adr=
+LNXPOWER:34 path=\_SB_.PCI0.GPP7.UP00.DP40.UP00.DP68.SA00.PWRS hid=LNXPOWER uid= status=1 adr=
+LNXPOWER:35 path=\_SB_.PCI0.GPP7.UP00.DP48.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:36 path=\_SB_.PCI0.GPP7.UP00.DP48.EP00.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:37 path=\_SB_.PCI0.GPP7.UP00.DP50.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:38 path=\_SB_.PCI0.GPP7.UP00.DP50.EP00.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:39 path=\_SB_.PCI0.GPP7.UP00.DP58.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:3a path=\_SB_.PCI0.GPP7.UP00.DP58.EP00.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:3b path=\_SB_.PCI0.GPP7.UP00.DP60.PWRS hid=LNXPOWER uid= status=1 adr=
+LNXPOWER:3c path=\_SB_.PCI0.GPP7.UP00.DP60.XH00.PWRS hid=LNXPOWER uid= status=1 adr=
+LNXPOWER:3d path=\_SB_.PCI0.GPP7.UP00.DP68.PWRS hid=LNXPOWER uid= status=1 adr=
+LNXPOWER:3e path=\_SB_.PCI0.GPP7.UP00.DP68.SA00.PWRS hid=LNXPOWER uid= status=1 adr=
+LNXPOWER:3f path=\_SB_.PCI0.GPP8.PWRS hid=LNXPOWER uid= status=1 adr=
+LNXPOWER:40 path=\_SB_.PCI0.GPP8.U4UP.PWRS hid=LNXPOWER uid= status=1 adr=
+LNXPOWER:41 path=\_SB_.PCI0.GPP8.U4UP.U4P0.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:42 path=\_SB_.PCI0.GPP8.U4UP.U4P0.UP0D.PWRS hid=LNXPOWER uid= status=1 adr=
+LNXPOWER:43 path=\_SB_.PCI0.GPP8.U4UP.U4P1.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:44 path=\_SB_.PCI0.GPP8.U4UP.U4P1.UP1D.PWRS hid=LNXPOWER uid= status=1 adr=
+LNXPOWER:45 path=\_SB_.PCI0.GPP8.U4UP.U4P2.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:46 path=\_SB_.PCI0.GPP8.U4UP.U4P2.UXHC.PWRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:47 path=\_SB_.PCI0.GPP8.U4UP.U4P3.PWRS hid=LNXPOWER uid= status=1 adr=
+LNXPOWER:48 path=\_SB_.PCI0.GPP8.U4UP.U4P3.UHI0.PWRS hid=LNXPOWER uid= status=1 adr=
+LNXPOWER:49 path=\_SB_.PRWL hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:4a path=\_SB_.PRWB hid=LNXPOWER uid= status=0 adr=
+LNXPWRBN:00 path= hid=LNXPWRBN uid= status= adr= phys=/sys/devices/platform/LNXPWRBN:00
+LNXSYBUS:00 path=\_SB_ hid=LNXSYBUS uid= status= adr=
+LNXSYBUS:01 path=\_TZ_ hid=LNXSYBUS uid= status= adr=
+LNXSYSTM:00 path=\ hid=LNXSYSTM uid= status= adr=
+LNXTHERM:00 path=\_TZ_.TZ10 hid=LNXTHERM uid= status=11 adr= phys=/sys/devices/platform/LNXTHERM:00
+LNXVIDEO:00 path=\_SB_.PCI0.GP17.VGA_ hid=LNXVIDEO uid= status= adr=0x00000000 phys=/sys/devices/pci0000:00/0000:00:08.1/0000:79:00.0 phys=/sys/devices/pci0000:00/0000:00:08.1/acpi.video_bus.0
+MSFT0101:00 path=\_SB_.TPM_ hid=MSFT0101 uid=1 status=15 adr= phys=/sys/devices/platform/MSFT0101:00
+MSFT8000:00 path=\_SB_.RHPX hid=MSFT8000 uid=1 status= adr=
+PNP0000:00 path=\_SB_.PCI0.SBRG.PIC_ hid=PNP0000 uid= status= adr=
+PNP0100:00 path=\_SB_.PCI0.SBRG.TMR_ hid=PNP0100 uid= status= adr=
+PNP0103:00 path=\HPET hid=PNP0103 uid= status=15 adr= phys=/sys/devices/platform/PNP0103:00
+PNP0200:00 path=\_SB_.PCI0.SBRG.DMAD hid=PNP0200 uid= status= adr=
+PNP0500:00 path=\_SB_.PCI0.UAR1 hid=PNP0500 uid=1 status=0 adr=
+PNP0500:01 path=\_SB_.PCI0.UAR2 hid=PNP0500 uid=2 status=0 adr=
+PNP0500:02 path=\_SB_.PCI0.UAR3 hid=PNP0500 uid=3 status=0 adr=
+PNP0500:03 path=\_SB_.PCI0.UAR4 hid=PNP0500 uid=4 status=0 adr=
+PNP0800:00 path=\_SB_.PCI0.SBRG.SPKR hid=PNP0800 uid= status= adr= phys=/sys/devices/pci0000:00/0000:00:14.3/PNP0800:00
+PNP0A08:00 path=\_SB_.PCI0 hid=PNP0A08 uid=0 status=15 adr=0x00000000 phys=/sys/devices/pci0000:00
+PNP0B00:00 path=\_SB_.PCI0.SBRG.RTC0 hid=PNP0B00 uid= status= adr= phys=/sys/devices/pci0000:00/0000:00:14.3/PNP0B00:00
+PNP0C01:00 path=\_SB_.PCI0.AMDN hid=PNP0C01 uid=200 status=15 adr=
+PNP0C02:00 path=\_SB_.PCI0.IOMA hid=PNP0C02 uid=21 status= adr=0x00000002 phys=/sys/devices/pci0000:00/0000:00:00.2
+PNP0C02:01 path=\_SB_.PCI0.GNBD.BROD hid=PNP0C02 uid=20 status= adr=
+PNP0C02:02 path=\_SB_.PCI0.GP17.APSP hid=PNP0C02 uid= status=15 adr=0x00000002 phys=/sys/devices/pci0000:00/0000:00:08.1/0000:79:00.2
+PNP0C02:03 path=\_SB_.PCI0.SBRG.SIO1 hid=PNP0C02 uid=0 status= adr=
+PNP0C02:04 path=\_SB_.PCI0.S900 hid=PNP0C02 uid=1792 status=15 adr=
+PNP0C02:05 path=\_SB_.AWR0 hid=PNP0C02 uid=139 status= adr=
+PNP0C02:06 path=\_SB_.AWR0.ABR0 hid=PNP0C02 uid=128 status= adr=
+PNP0C02:07 path=\_SB_.AWR0.ABR1 hid=PNP0C02 uid=129 status= adr=
+PNP0C02:08 path=\_SB_.AWR0.ABR2 hid=PNP0C02 uid=130 status= adr=
+PNP0C02:09 path=\_SB_.AWR0.ABR3 hid=PNP0C02 uid=131 status= adr=
+PNP0C02:0a path=\_SB_.AWR1 hid=PNP0C02 uid=140 status= adr=
+PNP0C02:0b path=\_SB_.AWR1.ABR4 hid=PNP0C02 uid=132 status= adr=
+PNP0C02:0c path=\_SB_.AWR1.ABR5 hid=PNP0C02 uid=133 status= adr=
+PNP0C02:0d path=\_SB_.AWR1.ABR6 hid=PNP0C02 uid=134 status= adr=
+PNP0C02:0e path=\_SB_.AWR1.ABR7 hid=PNP0C02 uid=135 status= adr=
+PNP0C02:0f path=\_SB_.AWR1.ABR8 hid=PNP0C02 uid=136 status= adr=
+PNP0C02:10 path=\_SB_.AWR1.ABR9 hid=PNP0C02 uid=137 status= adr=
+PNP0C02:11 path=\_SB_.AWR1.ABRA hid=PNP0C02 uid=138 status= adr=
+PNP0C08:00 path=\_SB_.PCI0.SBRG.HHMD hid=PNP0C08 uid=0 status=0 adr=
+PNP0C08:01 path=\_SB_.PCI0.SBRG.SGPI hid=PNP0C08 uid=1 status=0 adr=
+PNP0C0C:00 path=\_SB_.PWRB hid=PNP0C0C uid=170 status=11 adr= phys=/sys/devices/platform/PNP0C0C:00
+PNP0C0F:00 path=\_SB_.LNKA hid=PNP0C0F uid=1 status=11 adr=
+PNP0C0F:01 path=\_SB_.LNKB hid=PNP0C0F uid=2 status=11 adr=
+PNP0C0F:02 path=\_SB_.LNKC hid=PNP0C0F uid=3 status=11 adr=
+PNP0C0F:03 path=\_SB_.LNKD hid=PNP0C0F uid=4 status=11 adr=
+PNP0C0F:04 path=\_SB_.LNKE hid=PNP0C0F uid=5 status=11 adr=
+PNP0C0F:05 path=\_SB_.LNKF hid=PNP0C0F uid=6 status=11 adr=
+PNP0C0F:06 path=\_SB_.LNKG hid=PNP0C0F uid=7 status=11 adr=
+PNP0C0F:07 path=\_SB_.LNKH hid=PNP0C0F uid=8 status=11 adr=
+PNP0C14:00 path=\GSA1 hid=PNP0C14 uid=GSADEV0 status=11 adr= phys=/sys/devices/platform/PNP0C14:00
+PNP0C14:01 path=\AOD_ hid=PNP0C14 uid=AOD status= adr= phys=/sys/devices/platform/PNP0C14:01
