@@ -266,6 +266,7 @@ symbolized backtrace, and checks the VMM's exit status:
 | `aarch64-warm-reset`, `x86_64-warm-reset` | QEMU, two boots | the loader saved the first boot's log to `EFI/ABYSS/PREVLOG.TXT` |
 | `aarch64-smmu-warm-reset` | QEMU, two boots, SMMUv3 | the first boot shut its devices down (the SMMU quiesced) before the reset |
 | `x86_64-watchdog` | QEMU, two boots | the first boot's `watchdogd` patted `ichwd` through `/dev/fido` past its timeout, and once it was killed the watchdog reset the machine |
+| `aarch64-panic-reset`, `x86_64-panic-reset` | QEMU, two boots | the first boot panicked with the other CPUs running; they stopped (no "did not stop" line), and after `kern.panic_reboot_wait_time=1` the machine rebooted on its own ("Automatic reboot in 1 seconds" in the saved log); the second boot ran the tests |
 | `x86_64-bhyve` | bhyve + `BHYVE_UEFI` (FreeBSD hosts only; skipped elsewhere) | power-off through UEFI runtime services |
 | `aarch64-lowmem`, `x86_64-lowmem` | QEMU with 512 MiB and a 1.5 GiB virtio disk | only `page_cache_larger_than_memory` (`abyss.test.only=`): files totalling twice RAM written to UFS2 (soft updates), each synced and checksummed, then read back; the page cache must give way to new pages and the kernel's own allocations (ARCHITECTURE.md §5.2). The `lowmem:` lines show free pages and the page daemon's counters after each file |
 

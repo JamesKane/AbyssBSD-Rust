@@ -483,6 +483,38 @@ const BOOT_CASES: &[BootCase] = &[
         lowmem: false,
     },
     BootCase {
+        name: "aarch64-panic-reset",
+        vmm: Vmm::Qemu,
+        arch: Arch::Aarch64,
+        el2: false,
+        iommu: false,
+        warm_reset: true,
+        // The first boot panics with the other CPUs running; they stop,
+        // and the machine reboots after kern.panic_reboot_wait_time (as
+        // FreeBSD's panic does); the second boot runs the tests.
+        cmdline: "abyss.test.panic_reset=1 kern.panic_reboot_wait_time=1 \
+                  abyss.test.skip=kernel::tests::user_memory",
+        pass_status: 0,
+        expect: None,
+        expect_saved: Some("Automatic reboot in 1 seconds"),
+        lowmem: false,
+    },
+    BootCase {
+        name: "x86_64-panic-reset",
+        vmm: Vmm::Qemu,
+        arch: Arch::X86_64,
+        el2: false,
+        iommu: false,
+        warm_reset: true,
+        // As aarch64-panic-reset.
+        cmdline: "abyss.test.panic_reset=1 kern.panic_reboot_wait_time=1 \
+                  abyss.test.skip=kernel::tests::user_memory",
+        pass_status: 33,
+        expect: None,
+        expect_saved: Some("Automatic reboot in 1 seconds"),
+        lowmem: false,
+    },
+    BootCase {
         name: "x86_64-watchdog",
         vmm: Vmm::Qemu,
         arch: Arch::X86_64,

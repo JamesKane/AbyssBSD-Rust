@@ -174,18 +174,23 @@ pub(crate) fn off() -> ! {
 
 /// Resets the machine: the FADT reset register, PSCI `SYSTEM_RESET`, then
 /// UEFI.
-#[cfg_attr(not(feature = "ktest"), allow(dead_code))]
 pub(crate) fn reset() -> ! {
+    reset_saying(&|a| kprintln!("{a}"))
+}
+
+/// [`reset`], its lines printed by `say` (the panic path's own console
+/// writer: a stopped CPU may hold the console's lock).
+pub(crate) fn reset_saying(say: &dyn Fn(core::fmt::Arguments<'_>)) -> ! {
     #[cfg(target_arch = "aarch64")]
-    kprintln!("power: reset (PSCI SYSTEM_RESET)");
+    say(format_args!("power: reset (PSCI SYSTEM_RESET)"));
     arch::cpu::disable_interrupts();
     if let Some(r) = fadt().and_then(|f| f.reset_register()) {
-        kprintln!("power: reset (ACPI reset register)");
+        say(format_args!("power: reset (ACPI reset register)"));
         write_gas(r.register, 1, u32::from(r.value));
         settle();
     }
     #[cfg(target_arch = "aarch64")]
     arch::smp::psci_system_reset(crate::smp::psci_conduit());
-    kprintln!("power: reset (UEFI ResetSystem)");
+    say(format_args!("power: reset (UEFI ResetSystem)"));
     crate::firmware::reset(efi::ResetKind::Cold)
 }

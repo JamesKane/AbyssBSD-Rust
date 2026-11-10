@@ -1,16 +1,31 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! Panics and fatal traps: report with a symbolized backtrace, then stop.
+//! Panics and fatal traps: the other CPUs stopped, a report with a
+//! symbolized backtrace, then a reboot after `kern.panic_reboot_wait_time`
+//! (FreeBSD's `panic`, `shutdown_panic`, and `shutdown_reset`).
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use alloc::boxed::Box;
+use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use crate::arch;
 use crate::symbols::Symbolized;
 
 static PANICKING: AtomicBool = AtomicBool::new(false);
 
+/// `kern.panic_reboot_wait_time`: seconds from a panic's report to the
+/// reboot; 0 reboots at once, -1 never (FreeBSD's `PANIC_REBOOT_WAIT_TIME`
+/// is 15).
+static REBOOT_WAIT: AtomicI32 = AtomicI32::new(15);
+
+/// How long a panic waits for the other CPUs to stop.
+const STOP_WAIT_NS: u64 = 1_000_000_000;
+
 /// Set by the test that deliberately takes a fatal fault, which then counts
 /// as a pass.
 pub(crate) static EXPECT_FATAL_TRAP: AtomicBool = AtomicBool::new(false);
+
+/// Set by the warm-reset case's first boot before it panics on purpose:
+/// no verdict then (no failure marker, no QEMU exit), only the reboot.
+pub(crate) static EXPECT_PANIC_RESET: AtomicBool = AtomicBool::new(false);
 
 macro_rules! out {
     ($($t:tt)*) => { $crate::console::print_panic(format_args!($($t)*)) };
@@ -23,9 +38,14 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
         out!("\nnested panic: {info}\n");
         arch::cpu::halt_forever();
     }
+    let stopped = crate::smp::stop_others(STOP_WAIT_NS);
     out!("\npanic: {info}\n");
+    out!("cpuid = {}\n", hal::cpu_id().0);
+    report_stop(stopped);
     backtrace(arch::backtrace::here());
-    out!("{}\n", ktest::FAIL_MARKER);
+    if !EXPECT_PANIC_RESET.load(Ordering::Relaxed) {
+        out!("{}\n", ktest::FAIL_MARKER);
+    }
     stop(false)
 }
 
@@ -59,7 +79,10 @@ pub(crate) fn fatal_trap(report: &arch::TrapReport) -> ! {
         out!("\nfatal trap while panicking:\n{report}");
         arch::cpu::halt_forever();
     }
+    let stopped = crate::smp::stop_others(STOP_WAIT_NS);
     out!("\nfatal trap:\n{report}");
+    out!("cpuid = {}\n", hal::cpu_id().0);
+    report_stop(stopped);
     out!("at {}\n", Symbolized::pc(report.pc()));
     backtrace(report.frame_pointer());
     if EXPECT_FATAL_TRAP.load(Ordering::Relaxed) {
@@ -114,15 +137,77 @@ fn backtrace(fp: u64) {
     }
 }
 
-/// Ends the run: report to QEMU if asked, power off after a pass, halt
-/// after a failure so the screen stays readable. `abyss.test.poweroff`
-/// skips QEMU's report so a pass powers off for real.
+/// Says so when some other CPU did not stop (it spins with interrupts
+/// masked: FreeBSD's "timeout stopping cpus").
+fn report_stop((stopped, asked): (u32, u32)) {
+    if stopped < asked {
+        out!(
+            "panic: {} of {asked} other CPUs did not stop\n",
+            asked - stopped
+        );
+    }
+}
+
+/// `kern.panic_reboot_wait_time`, from the command line (`TUNABLE_INT`).
+pub(crate) fn init(s: &sched::Sleepable) {
+    if let Some(n) = crate::boot::value("kern.panic_reboot_wait_time").and_then(|v| v.parse().ok())
+    {
+        REBOOT_WAIT.store(n, Ordering::Relaxed);
+    }
+    crate::sysctl::with(s, |t| {
+        let kern = t.child(t.root(), "kern").expect("kern node");
+        t.add_writable(
+            kern,
+            sysctl::Number::Auto,
+            "panic_reboot_wait_time",
+            "Seconds to wait before rebooting after a panic",
+            abi::sysctl::ctlflag::TUN,
+            sysctl::Value::Int(Box::new(|| REBOOT_WAIT.load(Ordering::Relaxed))),
+            sysctl::int_writer(|n| {
+                REBOOT_WAIT.store(n, Ordering::Relaxed);
+                Ok(())
+            }),
+        )
+        .expect("kern.panic_reboot_wait_time");
+    });
+}
+
+/// Ends the run: report to QEMU if asked, power off after a pass, and
+/// after a failure reboot once `kern.panic_reboot_wait_time` is up, as
+/// FreeBSD does (an unattended machine comes back; -1 keeps the report on
+/// the screen). `abyss.test.poweroff` skips QEMU's report so a pass powers
+/// off for real; [`EXPECT_PANIC_RESET`] so a panic reboots for real.
 fn stop(passed: bool) -> ! {
-    if !crate::boot::flag("abyss.test.poweroff") {
+    if !crate::boot::flag("abyss.test.poweroff") && !EXPECT_PANIC_RESET.load(Ordering::Relaxed) {
         crate::qemu::exit(passed);
     }
     if passed {
         crate::power::off()
     }
-    arch::cpu::halt_forever()
+    let wait = REBOOT_WAIT.load(Ordering::Relaxed);
+    if wait < 0 {
+        arch::cpu::halt_forever()
+    }
+    if wait > 0 {
+        out!("Automatic reboot in {wait} seconds\n");
+        delay_s(wait.unsigned_abs());
+    }
+    out!("Rebooting...\n");
+    crate::power::reset_saying(&|a| out!("{a}\n"))
+}
+
+/// Waits `s` seconds, interrupts masked, by the clock (or by spinning
+/// before it is set up).
+fn delay_s(s: u32) {
+    let start = crate::time::now_ns();
+    let ns = u64::from(s) * 1_000_000_000;
+    if start == 0 {
+        for _ in 0..u64::from(s) * 1_000_000_000 {
+            core::hint::spin_loop();
+        }
+        return;
+    }
+    while crate::time::now_ns().saturating_sub(start) < ns {
+        core::hint::spin_loop();
+    }
 }

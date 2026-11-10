@@ -350,8 +350,49 @@ fn cross_call(va: VirtAddr, len: u64, targets: Targets) {
     CALL_BUSY.store(false, Ordering::Release);
 }
 
-/// The cross-call IPI arrived: flush the range and acknowledge.
+/// Set by a panic: every other CPU stops at its next cross-call
+/// interrupt (FreeBSD's `stop_cpus_hard`).
+static STOPPING: AtomicBool = AtomicBool::new(false);
+/// How many CPUs have stopped for a panic.
+static STOPPED: AtomicU32 = AtomicU32::new(0);
+
+/// Stops every other CPU, as FreeBSD's `panic` does with
+/// `stop_cpus_hard`: each halts, interrupts masked, where the cross-call
+/// interrupt finds it, so nothing goes on running (and patting a
+/// watchdog) beside a panic. Waits up to `wait_ns` for them; returns how
+/// many stopped of how many were asked. A CPU spinning with interrupts
+/// masked does not stop; its wait for a lock panics in time, and halts.
+/// Takes no lock and allocates nothing.
+pub(crate) fn stop_others(wait_ns: u64) -> (u32, u32) {
+    STOPPING.store(true, Ordering::Release);
+    let me = hal::cpu_id();
+    let mut asked = 0;
+    for cpu in (0..sched::online_cpus()).filter_map(|i| u32::try_from(i).ok().map(CpuId)) {
+        if cpu != me && ONLINE[cpu.index()].load(Ordering::Acquire) {
+            crate::intc::send_call(cpu);
+            asked += 1;
+        }
+    }
+    let start = crate::time::now_ns();
+    // Bounded by spins too: the clock reads 0 before it is set up.
+    for _ in 0..1_000_000_000u64 {
+        if STOPPED.load(Ordering::Acquire) >= asked
+            || crate::time::now_ns().saturating_sub(start) > wait_ns
+        {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    (STOPPED.load(Ordering::Acquire), asked)
+}
+
+/// The cross-call IPI arrived: flush the range and acknowledge (or stop,
+/// for a panic).
 pub(crate) fn on_call_ipi() {
+    if STOPPING.load(Ordering::Acquire) {
+        STOPPED.fetch_add(1, Ordering::AcqRel);
+        arch::cpu::halt_forever();
+    }
     let va = VirtAddr::new(CALL_VA.load(Ordering::Acquire));
     let len = CALL_LEN.load(Ordering::Acquire);
     if len > 64 * 4096 {

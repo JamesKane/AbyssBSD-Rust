@@ -187,6 +187,7 @@ pub(crate) fn init() {
     crate::efidev::init();
     crate::fido::init();
     crate::klog::init(&s);
+    crate::panic::init(&s);
     let dev = Mount::new(
         MountInfo {
             type_name: "devfs",

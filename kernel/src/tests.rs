@@ -74,6 +74,12 @@ pub(crate) fn run(_s: &sched::Sleepable) -> ! {
             if crate::boot::flag("abyss.test.watchdog_reset") {
                 watchdog_reset_first_boot(_s);
             }
+            // A panic with the other CPUs running: they are stopped, and
+            // the machine reboots after `kern.panic_reboot_wait_time`.
+            if crate::boot::flag("abyss.test.panic_reset") {
+                crate::panic::EXPECT_PANIC_RESET.store(true, Ordering::Relaxed);
+                panic!("deliberate panic (abyss.test.panic_reset)");
+            }
             // As a reboot does: every device stopped first, an IOMMU after
             // the devices it translates.
             if crate::boot::flag("abyss.test.orderly_reset") {
