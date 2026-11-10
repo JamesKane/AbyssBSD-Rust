@@ -295,6 +295,17 @@ impl RawGuid {
     }
 }
 
+/// `EFI_DEVICE_PATH_PROTOCOL`: a path's first node header (UEFI 2.10
+/// §10.2); [`crate::DevicePath`] reads the rest.
+#[repr(C)]
+#[derive(Debug)]
+#[allow(missing_docs)]
+pub struct DevicePathNode {
+    pub kind: u8,
+    pub sub_type: u8,
+    pub length: [u8; 2],
+}
+
 /// `EFI_LOADED_IMAGE_PROTOCOL`.
 #[repr(C)]
 #[derive(Debug)]

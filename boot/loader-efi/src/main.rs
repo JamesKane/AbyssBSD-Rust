@@ -2,7 +2,7 @@
 //! The AbyssBSD UEFI loader.
 //!
 //! Reads the kernel from `/boot/kernel/kernel` on the first UFS2 file
-//! system that has one, as FreeBSD's loader does (with the memory disk from
+//! system on its own disk that has one, as FreeBSD's loader does (with the memory disk from
 //! `/boot/abyss/md` there), or else `\EFI\ABYSS\KERNEL` (and
 //! `\EFI\ABYSS\MD`) from the volume it was loaded from; the optional
 //! command line comes from `\EFI\ABYSS\CMDLINE` there. It places the
@@ -142,17 +142,17 @@ fn boot(image: Handle, st: SystemTable) -> Result<core::convert::Infallible, Err
     // The kernel from UFS2 if one has it, else from the ESP; the memory
     // disk (optional) from the same place.
     let mut cmdline = cmdline;
-    let (file, md) = match ufs::read_file(&st, UFS_KERNEL_PATH) {
+    let (file, md) = match ufs::read_file(&st, device, UFS_KERNEL_PATH) {
         Some((file, origin)) => {
             let _ = writeln!(con, "loader: kernel from UFS2 on {origin}");
-            let md = ufs::read_file(&st, UFS_MD_PATH).map(|(f, _)| f);
+            let md = ufs::read_file(&st, device, UFS_MD_PATH).map(|(f, _)| f);
             // The root is that file system's, unless the command line
             // names one.
             let named = cmdline
                 .split(u8::is_ascii_whitespace)
                 .any(|w| w.starts_with(b"vfs.root.mountfrom="));
             if !named {
-                let root = ufs::root_mount(&st, origin);
+                let root = ufs::root_mount(&st, device, origin);
                 let _ = writeln!(con, "loader: root {root}");
                 if !cmdline.is_empty() {
                     cmdline.push(b' ');

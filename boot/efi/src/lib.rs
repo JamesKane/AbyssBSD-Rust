@@ -9,6 +9,7 @@
 
 #![no_std]
 
+pub mod devpath;
 mod file;
 pub mod memory;
 pub mod raw;
@@ -17,6 +18,7 @@ use core::ffi::c_void;
 use core::fmt::{self, Write as _};
 use core::marker::PhantomData;
 
+pub use devpath::DevicePath;
 pub use file::{File, Mode};
 pub use guid::Guid;
 pub use memory::{MemoryDescriptor, MemoryMap, MemoryType};
@@ -194,6 +196,14 @@ impl SystemTable {
             return Err(Status::NOT_FOUND);
         }
         Ok(out.cast())
+    }
+
+    /// The device path of `handle`, if it has one.
+    pub fn device_path(&self, handle: Handle) -> Option<DevicePath<'_>> {
+        let p = self.handle_protocol::<raw::DevicePathNode>(handle).ok()?;
+        // SAFETY: firmware returned the handle's device path, which it
+        // keeps while boot services (and so `self`) last.
+        unsafe { DevicePath::from_ptr(p.cast::<u8>().cast_const()) }
     }
 
     /// Every handle with protocol `P` (`LocateHandleBuffer` by protocol).
@@ -475,6 +485,10 @@ unsafe impl Protocol for raw::GraphicsOutput {
 // SAFETY: see above (UEFI 2.10 §13.9).
 unsafe impl Protocol for raw::BlockIo {
     const GUID: Guid = Guid::must_parse("964E5B21-6459-11D2-8E39-00A0C969723B");
+}
+// SAFETY: see above (UEFI 2.10 §10.2).
+unsafe impl Protocol for raw::DevicePathNode {
+    const GUID: Guid = Guid::must_parse("09576E91-6D3F-11D2-8E39-00A0C969723B");
 }
 // SAFETY: see above.
 unsafe impl Protocol for raw::Rng {

@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! Files from UFS2 (P5.4), as FreeBSD's `loader.efi` reads the kernel
-//! from the root partition: every whole disk the firmware offers Block I/O
-//! for is searched, in the firmware's order, for GPT partitions of type
-//! `freebsd-ufs`, and the first holding the file supplies it.
+//! from the root partition: the disk the loader was loaded from (the one
+//! whose device path the boot partition's extends) is searched for GPT
+//! partitions of type `freebsd-ufs`, and the first holding the file
+//! supplies it. Other disks are not searched: FreeBSD's `find_currdev`
+//! tries only the boot device's partitions (`try_boot_device_partitions`),
+//! so a machine's own FreeBSD install is never picked up by a loader on a
+//! USB stick.
 //!
 //! Metadata reads go through a small cache of recent blocks (an indirect
 //! block is read again for each block it maps); file data is read run by
@@ -14,7 +18,7 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::fmt::Write;
 
-use efi::{Allocate, SystemTable, raw};
+use efi::{Allocate, Handle, SystemTable, raw};
 
 use crate::kernel::Loaded;
 use crate::{Error, memtype};
@@ -135,9 +139,13 @@ impl core::fmt::Display for Origin {
     }
 }
 
-/// The UFS2 file systems on the machine's disks, each with where it is.
-fn file_systems(st: &SystemTable) -> Vec<(Origin, ufs::Ufs<Partition<'_>>)> {
+/// The UFS2 file systems on the disk that `boot` (the loader's own
+/// partition, or a whole disk) lies on, each with where it is.
+fn file_systems(st: &SystemTable, boot: Handle) -> Vec<(Origin, ufs::Ufs<Partition<'_>>)> {
     let mut out = Vec::new();
+    let Some(boot_path) = st.device_path(boot) else {
+        return out;
+    };
     let Ok(handles) = st.handles_with::<raw::BlockIo>() else {
         return out;
     };
@@ -149,6 +157,12 @@ fn file_systems(st: &SystemTable) -> Vec<(Origin, ufs::Ufs<Partition<'_>>)> {
         // SAFETY: firmware returned this protocol and its media.
         let media = unsafe { *(*bio).media };
         if media.logical_partition != 0 || media.media_present == 0 || media.block_size < 512 {
+            continue;
+        }
+        if !st
+            .device_path(h)
+            .is_some_and(|disk| !disk.is_empty() && boot_path.starts_with(&disk))
+        {
             continue;
         }
         let whole = Partition {
@@ -213,8 +227,8 @@ fn ufs_partitions(disk: &Partition<'_>) -> Vec<(u32, u64, u64, gpt::Guid)> {
 
 /// Reads the regular file at `path` from the first UFS2 file system that
 /// has it, into fresh pages.
-pub(crate) fn read_file(st: &SystemTable, path: &[u8]) -> Option<(Loaded, Origin)> {
-    for (origin, fs) in file_systems(st) {
+pub(crate) fn read_file(st: &SystemTable, boot: Handle, path: &[u8]) -> Option<(Loaded, Origin)> {
+    for (origin, fs) in file_systems(st, boot) {
         let Ok(Some((_, ip))) = fs.namei(&(), path) else {
             continue;
         };
@@ -233,13 +247,13 @@ pub(crate) fn read_file(st: &SystemTable, path: &[u8]) -> Option<(Loaded, Origin
 /// came from the UFS2 file system at `origin`: what that file system's
 /// `/etc/fstab` mounts on `/`, as FreeBSD's loader reads it, or else that
 /// file system by its partition's GUID.
-pub(crate) fn root_mount(st: &SystemTable, origin: Origin) -> String {
+pub(crate) fn root_mount(st: &SystemTable, boot: Handle, origin: Origin) -> String {
     let fallback = || {
         let mut g = String::new();
         let _ = write!(g, "{}", origin.guid);
         format!("ufs:/dev/gptid/{}", g.to_ascii_lowercase())
     };
-    let Some(fs) = file_systems(st)
+    let Some(fs) = file_systems(st, boot)
         .into_iter()
         .find(|(o, _)| o.disk == origin.disk && o.partition == origin.partition)
         .map(|(_, fs)| fs)
