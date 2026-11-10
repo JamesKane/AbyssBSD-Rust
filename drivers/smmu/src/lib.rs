@@ -834,9 +834,9 @@ impl Driver for Smmu {
                 ..DmaConstraints::UNLIMITED
             })?;
             // Page tables come from the same memory, within the unit's
-            // reach; contexts translate unless message-signalled
-            // interrupts would fault (IOMMU.md §16).
-            if iommu_framework::translating() {
+            // reach; contexts translate under `hw.iommu.dma`, their MSIs
+            // too (IOMMU.md §4.8).
+            if iommu_framework::dma() {
                 tables = Some(tag.memory());
             }
             let hw = Kernel { regs, tag };
@@ -899,14 +899,7 @@ impl Driver for Smmu {
                     "left disabled: DMA translation is off (hw.iommu.dma)"
                 ));
             }
-            None => {
-                self.run(cx)?;
-                if !sh.translates() && iommu_framework::messages_untranslated() {
-                    sh.log(format_args!(
-                        "message-signalled interrupts are not translated: devices pass through"
-                    ));
-                }
-            }
+            None => self.run(cx)?,
         }
         // `dev.smmu.N.dma`: whether this unit translates DMA.
         let unit = self.unit;

@@ -3055,7 +3055,7 @@ ktest! {
                 .expect("dev.smmu.N.dma");
             let mut v = alloc::vec::Vec::new();
             crate::sysctl::read_oid(&s, &dma, &mut v).unwrap();
-            let translates = i32::from(iommu_framework::translating());
+            let translates = i32::from(iommu_framework::dma());
             assert_eq!(v, translates.to_ne_bytes(), "{p}.dma");
         }
         if listed == 0 {
@@ -3276,7 +3276,7 @@ mod smmu_running {
             let s = cx();
             let m = bus::manager();
             if !smmu::translates(0) {
-                kprintln!("smmu: not translating (MSI on, or hw.iommu.dma=0); stage 3's checks skipped");
+                kprintln!("smmu: not translating (hw.iommu.dma=0); stage 3's checks skipped");
                 return;
             }
             let smmu0 = m.snapshot(&s).into_iter().find(|n| n.2 == "smmu0").expect("smmu0").0;
@@ -3311,6 +3311,33 @@ mod smmu_running {
                 let pcie = pci::caps::find(&caps, pci::caps::id::PCIE).expect("PCIe");
                 let devctl = cfg.read16(a, u16::from(pcie.offset) + 8);
                 assert_eq!(devctl & (1 << 4), 0, "{name}: relaxed ordering on ({devctl:#x})");
+                // Its messages go through its domain (§4.8): with MSI-X
+                // on, each entry in use is written to the doorbell's IOVA,
+                // at GITS_TRANSLATER's offset in a page that is not its.
+                if let Some(translater) = crate::its::translater()
+                    && let Some(msix) = pci::caps::find(&caps, pci::caps::id::MSIX)
+                    && cfg.read16(a, u16::from(msix.offset) + 2) & (1 << 15) != 0
+                {
+                    let table = cfg.read32(a, u16::from(msix.offset) + 4);
+                    let bar_at = 0x10 + 4 * u16::try_from(table & 7).unwrap_or(0);
+                    let bar = cfg.read32(a, bar_at);
+                    let mut base = u64::from(bar & !0xf);
+                    if (bar >> 1) & 3 == 2 {
+                        base |= u64::from(cfg.read32(a, bar_at + 4)) << 32;
+                    }
+                    let at = addr::PhysAddr::new(base + u64::from(table & !7));
+                    let va = crate::mm::map_device(at, 16).expect("the MSI-X table");
+                    let p = va.get() as *const u32;
+                    // SAFETY: entry 0 of the table, mapped above and
+                    // unmapped below; reads have no side effects.
+                    let msg = unsafe {
+                        u64::from(p.read_volatile()) | u64::from(p.add(1).read_volatile()) << 32
+                    };
+                    crate::mm::unmap_device(va, 16);
+                    kprintln!("smmu: {name}: MSI-X entry 0 at {msg:#x} (GITS_TRANSLATER {translater:#x})");
+                    assert_eq!(msg % 4096, translater % 4096, "{name}: {msg:#x}");
+                    assert_ne!(msg & !4095, translater & !4095, "{name}: physical doorbell");
+                }
                 nvme += 1;
             }
             assert!(nvme >= 1, "no translated NVMe controller");

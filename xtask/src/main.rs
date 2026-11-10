@@ -47,10 +47,11 @@ commands:
               [--qmp SOCK]                               ... with a QMP socket for `qmp`
   qmp         --sock SOCK [--type TEXT] [--key KEYS] [--move DX,DY] [--screendump FILE] [--unplug ID]
                                                          type on, move the mouse of, capture the screen of, or unplug from, a running QEMU
-  test        [--tier unit|boot|all] [--arch <a|all>] [--case NAME] [--no-usb] [--quick]
+  test        [--tier unit|boot|all] [--arch <a|all>] [--case NAME] [--no-usb] [--quick] [--iommu]
                                                          run tests (default: all tiers); --case runs one boot
                                                          case (x86_64-console), --no-usb drops the USB set,
-                                                         --quick leaves the shell cases' test programs out
+                                                         --quick leaves the shell cases' test programs out,
+                                                         --iommu runs aarch64-multiuser behind an SMMUv3
   perf        [--suite p2|p3|p4|p5|vt|diag] [--runs N] [--prepare] [--freebsd-only]
                                                          compare with FreeBSD in bhyve (server only)
   net-soak    [--duration SECONDS] [--freebsd] [--probe FILE [--prof [--prof-cpu N] [--prof-thread NAME]]]

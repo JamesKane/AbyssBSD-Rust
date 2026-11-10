@@ -17,10 +17,11 @@
 //!   `bounce` gives the requester a pass-through context, `iommu` (or
 //!   `dmar`) a translated one ([`requester_disabled`]).
 //!
-//! Until MSI goes through the SMMU (§8 stage 4), a unit translates only
-//! while message-signalled interrupts are off ([`translating`]): a
-//! function's MSI write to the ITS doorbell would otherwise fault under
-//! translation. The kernel says which with [`set_messages_untranslated`].
+//! A translated function's MSI writes go through its domain too: the
+//! interrupt controller's doorbell page is mapped once per domain
+//! ([`domain::Domain`]'s `doorbell`, FreeBSD's `iommu_map_msi`), and the
+//! PCI layer turns the message address into that mapping
+//! (`iommu_translate_msi`; docs/IOMMU.md §4.8, §17).
 //!
 //! The page-table writes of [`domain`] are this crate's only `unsafe`.
 //!
@@ -36,7 +37,7 @@ extern crate alloc;
 pub mod domain;
 
 use alloc::boxed::Box;
-use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use core::sync::atomic::{AtomicI32, Ordering};
 
 use abi::sysctl::ctlflag;
 use sysctl::{Number, Tree, Value};
@@ -45,8 +46,6 @@ use sysctl::{Number, Tree, Value};
 static DMA: AtomicI32 = AtomicI32::new(-1);
 static RELAXED_ORDERING: AtomicI32 = AtomicI32::new(0);
 static CHECK_FREE: AtomicI32 = AtomicI32::new(0);
-/// Message-signalled interrupts are in use and not translated.
-static MESSAGES_UNTRANSLATED: AtomicBool = AtomicBool::new(false);
 /// The kernel environment, for `hw.busdma.*`.
 static ENV: sync::Once<fn(&str) -> Option<&'static str>> = sync::Once::new();
 
@@ -83,28 +82,6 @@ pub fn dma() -> bool {
 #[must_use]
 pub fn relaxed_ordering() -> bool {
     RELAXED_ORDERING.load(Ordering::Relaxed) != 0
-}
-
-/// Records whether message-signalled interrupts are in use: until stage 4
-/// maps the ITS doorbell into each domain, a unit then gives every
-/// context pass-through, as stage 2 did. The kernel calls it once MSI
-/// support is (or is not) installed, before units attach.
-pub fn set_messages_untranslated(v: bool) {
-    // Relaxed: set before any reader runs.
-    MESSAGES_UNTRANSLATED.store(v, Ordering::Relaxed);
-}
-
-/// Whether units translate DMA: `hw.iommu.dma`, and no message-signalled
-/// interrupts that would fault under translation (stage 3).
-#[must_use]
-pub fn translating() -> bool {
-    dma() && !messages_untranslated()
-}
-
-/// Whether message-signalled interrupts keep units from translating.
-#[must_use]
-pub fn messages_untranslated() -> bool {
-    MESSAGES_UNTRANSLATED.load(Ordering::Relaxed)
 }
 
 /// Gives the framework the kernel environment, for `hw.busdma.*`.

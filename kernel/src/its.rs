@@ -477,6 +477,13 @@ impl pci::msi::MsiPlatform for ItsMsi {
     }
 }
 
+/// `GITS_TRANSLATER`'s physical address, once the ITS is set up (the
+/// SMMU's tests check messages against it).
+#[cfg(feature = "ktest")]
+pub(crate) fn translater() -> Option<u64> {
+    ITS.lock().as_ref().map(|its| its.translater)
+}
+
 /// Sets up the ITS and makes it the MSI composer. Call once, with every
 /// CPU online (each gets a collection). Without an ITS, or with tables
 /// the GIC will not snoop, functions keep using INTx.

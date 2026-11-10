@@ -40,6 +40,9 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     // The shell cases without the user tests and FreeBSD's (the rest,
     // the differential scenarios included, still runs).
     let quick = args.take_flag("--quick");
+    // The multi-user cases with an SMMUv3 translating every device
+    // (aarch64 in QEMU; docs/IOMMU.md §8 stage 4).
+    let iommu = args.take_flag("--iommu");
     // One boot-tier case, by name (`x86_64-console`).
     let only = args.take_value("--case")?;
     // How many boot-tier cases run at once, each its own xtask process;
@@ -62,6 +65,7 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
             (verbose, "--verbose"),
             (!usb, "--no-usb"),
             (quick, "--quick"),
+            (iommu, "--iommu"),
         ] {
             if on {
                 flags.push(flag);
@@ -149,7 +153,7 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
                     continue;
                 }
                 println!("== boot tests ({name}, {vmm:?})");
-                match multiuser(arch, vmm, release, usb)? {
+                match multiuser(arch, vmm, release, usb, iommu)? {
                     Ok(()) => println!("{name}: PASS"),
                     Err(why) => {
                         println!("{name}: FAIL: {why}");
@@ -410,12 +414,11 @@ const BOOT_CASES: &[BootCase] = &[
         el2: false,
         iommu: true,
         warm_reset: false,
-        // The SMMU translating (docs/IOMMU.md §8, stage 3): every device's
-        // DMA through its own domain, the edu device's stream (which no
-        // driver takes) aborting until a test gives it a context. On
-        // INTx until MSI goes through the SMMU (stage 4); the user-memory
-        // tests are the plain case's.
-        cmdline: "hw.pci.enable_msix=0 abyss.test.skip=kernel::tests::user_memory",
+        // The SMMU translating (docs/IOMMU.md §8, stages 3 and 4): every
+        // device's DMA and MSI-X messages through its own domain, the edu
+        // device's stream (which no driver takes) aborting until a test
+        // gives it a context. The user-memory tests are the plain case's.
+        cmdline: "abyss.test.skip=kernel::tests::user_memory",
         pass_status: 0,
         expect: Some("smmu0: <ARM System Memory Management Unit> on acpi0"),
         expect_saved: None,
@@ -443,7 +446,8 @@ const BOOT_CASES: &[BootCase] = &[
         warm_reset: true,
         // The first boot shuts its devices down before the reset, as a
         // reboot does, so the SMMU is quiesced (docs/IOMMU.md §4.11); the
-        // second runs the tests with it enabled again.
+        // second runs the tests with it enabled and translating again,
+        // MSI-X included.
         cmdline: "abyss.test.orderly_reset=1 abyss.test.skip=kernel::tests::user_memory",
         pass_status: 0,
         expect: Some("smmu0: <ARM System Memory Management Unit> on acpi0"),
@@ -497,22 +501,28 @@ const BOOT_CASES: &[BootCase] = &[
 /// (QEMU) and the serial console, checks the daemons, and shuts down;
 /// the root must be left clean, and the console may hold no first use of
 /// an interface outside `tests/multiuser/absent.txt`. The first uses go
-/// to `build/<arch>/multiuser<suffix>-first-use.txt` either way.
+/// to `build/<arch>/multiuser<suffix>-first-use.txt` either way. With
+/// `iommu`, an SMMUv3 translates every device (suffix `-smmu`).
 fn multiuser(
     arch: Arch,
     vmm: Vmm,
     release: bool,
     usb: bool,
+    iommu: bool,
 ) -> Result<std::result::Result<(), String>> {
+    if iommu && (arch != Arch::Aarch64 || vmm != Vmm::Qemu) {
+        return Ok(Err("--iommu is aarch64's, in QEMU (SMMUv3)".into()));
+    }
     let opts = build::Options {
         release,
         ktest: false,
     };
     let lock = image::lock()?;
     let disk = image::build_installed_root(arch, opts, "boot_multicons=YES boot_serial=YES")?;
-    let suffix = match vmm {
-        Vmm::Bhyve => "-bhyve",
-        Vmm::Qemu => "",
+    let suffix = match (vmm, iommu) {
+        (Vmm::Bhyve, _) => "-bhyve",
+        (Vmm::Qemu, true) => "-smmu",
+        (Vmm::Qemu, false) => "",
     };
     let disk = {
         let copy = disk.with_file_name(format!("disk-multiuser{suffix}.img"));
@@ -530,6 +540,7 @@ fn multiuser(
         nvme: true,
         usb: usb || qemu,
         qmp: qemu.then(|| sock.clone()),
+        iommu,
         ..Vm::new(vmm, arch, disk.clone())
     };
     let session = crate::expect::Session::start(vm, &log)?;
