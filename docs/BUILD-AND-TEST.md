@@ -261,7 +261,7 @@ symbolized backtrace, and checks the VMM's exit status:
 | `x86_64` | QEMU q35 + OVMF | |
 | `aarch64` | QEMU virt + edk2, firmware at EL1 | |
 | `aarch64-el2` | QEMU virt + edk2, firmware at EL2 | the EL2 stub and drop to EL1 |
-| `aarch64-smmu` | QEMU virt with an SMMUv3 (`iommu=smmuv3`) and an `edu` device, `hw.pci.enable_msix=0` | `smmu0` translating every device's DMA (`dev.smmu.0.dma: 1`); `edu`'s stream aborting with `C_BAD_STE`, then translated, faulting on unmapped IOVAs (IOMMU.md §15, §16) |
+| `aarch64-smmu` | QEMU virt with an SMMUv3 (`iommu=smmuv3`) and an `edu` device | `smmu0` translating every device's DMA and MSI-X messages (`dev.smmu.0.dma: 1`); `edu`'s stream aborting with `C_BAD_STE`, then translated, faulting on unmapped IOVAs (IOMMU.md §15–§17) |
 | `aarch64-warm-reset`, `x86_64-warm-reset` | QEMU, two boots | the loader saved the first boot's log to `EFI/ABYSS/PREVLOG.TXT` |
 | `aarch64-smmu-warm-reset` | QEMU, two boots, SMMUv3 | the first boot shut its devices down (the SMMU quiesced) before the reset |
 | `x86_64-watchdog` | QEMU, two boots | the first boot's `watchdogd` patted `ichwd` through `/dev/fido` past its timeout, and once it was killed the watchdog reset the machine |
@@ -285,7 +285,9 @@ lines outside `tests/multiuser/absent.txt` fail the case, and are written to
 `build/<arch>/multiuser*-first-use.txt` either way. Until P6.9 these cases are expected to fail
 (`XFAIL`), which does not fail the tier. `cargo xtask --remote freebsd-multiuser` runs the same
 script against FreeBSD 15.1's release image configured the same way, on bhyve and QEMU (amd64)
-and QEMU (arm64).
+and QEMU (arm64). `cargo xtask --remote test --tier boot --case aarch64-multiuser --iommu` runs
+the arm64 case behind an SMMUv3 translating every device, MSI-X included. It is not part of the
+tier. Its files are `build/aarch64/multiuser-smmu*` (IOMMU.md §17).
 
 The network cases (docs/NETWORKING.md §16.4) follow, also on FreeBSD hosts only: `x86_64-net` and
 `aarch64-net` on QEMU's user-mode network, and `x86_64-bhyve-net` on the server's test bridge.

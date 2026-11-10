@@ -2,8 +2,8 @@
 
 - Status: **Accepted** ([ADR-0022](adr/0022-smmuv3-in-p9.md)). The design for Phase 9's SMMUv3 item
   ([ROADMAP.md](ROADMAP.md#phase-9-sky1-hardening-l)). Stage 0 (§8) landed 2026-11-10; what it
-  decided where this design was silent or wrong is in §14, stage 2's in §15, and stage 3's in
-  §16
+  decided where this design was silent or wrong is in §14, stage 2's in §15, stage 3's in
+  §16, and stage 4's in §17
 - Date: 2026-11-10
 - Scope: the arm64 SMMUv3 as IORT describes it, the IOMMU framework it plugs into (units, domains,
   contexts, IOVA allocation), the `Iommu` backend of `vm::dma`, and MSI through a translated
@@ -962,3 +962,94 @@ then `iommu_framework::set_messages_untranslated` and the `enable_msix=0` in `aa
 For stage 5: the relaxed-ordering lines, the event names (`nvme0 (rid 0xc100)`), and whether
 `rge` faults at IOVA 0 are the board's to show; `hw.iommu.dma=1` translates there only once
 stage 4 has landed (the board uses MSI-X).
+
+## 17. Stage 4 as built (2026-11-10)
+
+Stage 4 (§8) puts MSI and MSI-X through the SMMU (§4.8). A translated function's messages are
+written to the ITS doorbell's mapping in its own domain, so a unit translates whatever
+interrupts the machine uses, and stage 3's fallback is gone. Where this design was silent or
+wrong, it made these decisions:
+
+1. **The PCI layer applies the translation, after compose** (§4.8 left the choice). This is
+   FreeBSD's own place for it. `intr_map_msi` (sys/kern/subr_intr.c) calls the controller's
+   `MSI_MAP_MSI` and then `iommu_translate_msi` on the result, and AbyssBSD's equivalent of
+   subr_intr.c's MSI half is `pci::msi`. `MsiPlatform::compose` is unchanged. The platform
+   gains one method, `doorbell(from)`: the physical address the function's messages go to
+   (the ITS's `GITS_TRANSLATER`, as FreeBSD's `gicv3_iommu_init` maps `sc_its_res`'s page), or
+   `None` where messages are not DMA an IOMMU translates (amd64's interrupt address range: DMAR
+   and AMD-Vi treat it as interrupts, and both are deferred, §9). `sys/pci` sees only the
+   context's `vm::dma::IoDomain`, never a unit, an STE, or an SMMU.
+2. **Two steps, as FreeBSD's.** `pci::msi::enable_msix` and `enable_msi` take the function's
+   context (`Option<&bus::iommu::Context>`). For a translated one they map the doorbell page
+   (`IoDomain::doorbell`, FreeBSD's `MSI_IOMMU_INIT` → `iommu_map_msi` in `intr_alloc_msix`)
+   before they touch the function, so a failure (`MsiError::Iommu`) leaves it as it was.
+   Each domain input then keeps the domain (an `Arc`). Connecting an input composes the message
+   as before and calls `doorbell` again with the composed address. The page is already mapped,
+   so this is only a lookup under the domain's spin lock, safe under the IRQ layer's lock with
+   interrupts masked. The message address becomes the IOVA plus the offset in the page
+   (`iommu_translate_msi`). A pass-through context, or none, keeps the physical address.
+3. **MSI before first DMA makes the context** (§4.8 step 2). `pci::bus::msix_lines` and
+   `msi_line` ask `AttachCx::iommu_context` first, as before, and now use what it returns. A
+   unit that cannot make the context fails the allocation (`MsiError::Iommu`), as FreeBSD's
+   `intr_alloc_msix` fails when `MSI_IOMMU_INIT` does. Drivers that fall back (`ahci`, `xhci`)
+   then try MSI and INTx; one whose DMA would abort anyway fails at its tag.
+4. **Virtio's transport asks for its context too.** `virtio_pci` sets MSI-X up itself, before
+   any child driver negotiates features. So it reads the offered features first
+   (`VirtioDevice::offers_access_platform`: acknowledge, read, reset). A modern device that
+   offers `ACCESS_PLATFORM` will accept it at negotiation, and gets `iommu_context()`
+   (translated). Any other device gets `AttachCx::iommu_context_pass_through()`. That is the
+   first request for the stream, so the stream bypasses, and both its DMA and its messages use
+   physical addresses (§4.4, §16 note 3). Without the request, a device on MSI-X would have no
+   context until its child asked for a tag, and its first message would abort. If the context
+   fails, the transport stays on INTx.
+5. **The window goes with the domain** (§4.8 step 3). It is mapped on a domain's first MSI
+   allocation and stays until the domain is freed. FreeBSD's `MSI_IOMMU_DEINIT`
+   (`iommu_unmap_msi`) unmaps it when the device releases its vectors. The inputs hold the
+   domain, so the mapping outlives every message that can use it. The unit's context table holds
+   the domain too, for the unit's lifetime (§16 note 4), so a detach and re-attach finds the
+   doorbell already mapped. The page is mapped read-write: VMSAv8 stage 1 has no write-only
+   permission, so FreeBSD's `IOMMU_MAP_ENTRY_WRITE` gets the same entry.
+6. **The fallback is removed.** `iommu_framework::set_messages_untranslated`,
+   `messages_untranslated`, and `translating` are gone, along with the kernel's call. A unit
+   translates under `hw.iommu.dma` alone, and the line `message-signalled interrupts are not
+   translated: devices pass through` no longer exists. `dev.smmu.N.dma` reads `hw.iommu.dma`
+   (1 by default on arm64), with MSI-X on.
+7. **Tests.** Host:
+   - `pci`'s `messages_go_through_the_functions_domain` drives `enable_msix`, `enable_msi`, and
+     `connect` with an ITS-like platform and a recording domain. It checks:
+     - that the doorbell is mapped once, at enable;
+     - that each MSI-X entry holds the IOVA plus `GITS_TRANSLATER`'s offset;
+     - that a pass-through context, or none, keeps the physical address;
+     - that the inputs hold the domain and let it go on removal;
+     - that a domain that cannot map the doorbell fails both allocations with the function
+       untouched.
+   - `smmu`'s `msi_writes_reach_the_its_doorbell` (`tests_dma.rs`) runs the same two calls on a
+     real `sys/iommu` domain over the driver's unit and `iommu::model`. It checks:
+     - that the model's write to the composed IOVA reaches `GITS_TRANSLATER`'s physical page
+       as Device memory;
+     - that the neighbouring page faults, and so does the physical address used as an IOVA;
+     - that a second function's domain maps the doorbell on its own;
+     - that a pass-through stream's write to the physical address bypasses.
+
+   QEMU:
+   - `aarch64-smmu` runs with MSI-X, the default (`hw.pci.enable_msix=0` is gone from its
+     command line). Every storage, network, and file-system ktest passes under translation.
+   - `smmu_translates_dma` also reads each translated NVMe controller's MSI-X entry 0. It must
+     be at `GITS_TRANSLATER`'s offset in a page that is not the ITS's (`nvme0: MSI-X entry 0 at
+     0x7040 (GITS_TRANSLATER 0x8090040)`).
+   - `smmu_units_under_acpi0` checks `dev.smmu.0.dma: 1`.
+   - The only events are `edu`'s deliberate ones (SID 0x30).
+   - `aarch64-smmu-warm-reset` now translates on both boots, MSI-X included.
+   - `cargo xtask test --tier boot --case aarch64-multiuser --iommu` (FreeBSD hosts) runs the
+     multi-user scenario behind the SMMU (§8's "once"). Its logs are
+     `build/aarch64/multiuser-smmu*`. It passed on the build server (2026-11-10): the
+     installed root booted from NVMe on MSI-X, logged in, and shut down clean, with no SMMU event.
+
+For stage 5:
+- Sky1's PCIe functions (NVMe and `rge` on MSI-X, `xhci`) now translate with their interrupts.
+- The board has two SMMUv3 units but one ITS. Each translated function's domain maps that ITS's
+  doorbell page on its own unit, whichever unit that is.
+- `Its::device_id` must keep walking the IORT through the SMMU node (§4.8 step 1). The device ID
+  stays the RID through the SMMU's output mapping, independent of translation.
+- If an MSI-X vector does not arrive on the board while DMA works, look first for a
+  translation fault on that stream at the doorbell IOVA, then at the ITS's device ID.
