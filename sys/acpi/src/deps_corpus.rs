@@ -364,7 +364,7 @@ fn companion_deps() {
     let walk_of = |name: &str| {
         let (mut i, mut h) = acpi_corpus::load(name);
         let id = FirmwareIdentity::default();
-        crate::bus::walk(&mut i, &mut h, &dma_controllers(name), &[], &id).companion_deps
+        crate::bus::walk(&mut i, &mut h, &dma_controllers(name), &[], &id, None).companion_deps
     };
     assert!(walk_of("opi6p").is_empty());
     assert!(walk_of("x870e").is_empty());
@@ -457,6 +457,7 @@ fn connection_lines(name: &str) -> BTreeMap<String, Vec<crate::bus::ChildLine>> 
         &dma_controllers(name),
         &[],
         &FirmwareIdentity::default(),
+        None,
     );
     w.found
         .into_iter()
@@ -620,6 +621,7 @@ fn the_scmi_agent_gets_its_mailbox_channels() {
         &dma_controllers("opi6p"),
         &[],
         &FirmwareIdentity::default(),
+        None,
     );
     let mailboxes: Vec<(String, String, u32)> = w
         .found
@@ -658,6 +660,7 @@ fn devices_say_whether_their_dma_is_coherent() {
             &dma_controllers(name),
             &[],
             &FirmwareIdentity::default(),
+            None,
         );
         w.found
             .into_iter()
@@ -688,4 +691,208 @@ fn devices_say_whether_their_dma_is_coherent() {
     assert_eq!(virt["\\_SB_.PCI0"], Some(true));
     let x870e = coherency("x870e");
     assert!(x870e.values().all(Option::is_none));
+}
+
+/// A machine's walk with its IORT, as `acpi0` makes it.
+fn walk_with_iort(
+    name: &str,
+    tables: &[&'static [u8]],
+    iort: &'static [u8],
+) -> (Interpreter, crate::bus::Walk) {
+    let (mut i, mut h) = acpi_corpus::load_tables(name, tables);
+    let t = acpi_tables::Sdt {
+        phys: 0,
+        bytes: iort,
+    };
+    let w = crate::bus::walk(
+        &mut i,
+        &mut h,
+        &dma_controllers(name),
+        &[],
+        &FirmwareIdentity::default(),
+        Some(t),
+    );
+    (i, w)
+}
+
+fn opi6p_with_iort() -> (Interpreter, crate::bus::Walk) {
+    let (_, tables) = machines().into_iter().find(|m| m.0 == "opi6p").unwrap();
+    walk_with_iort(
+        "opi6p",
+        &tables,
+        include_bytes!("../../../tests/corpus/acpi/opi6p/iort.dat"),
+    )
+}
+
+/// The Sky1's IORT (IOMMU.md §3.1): `smmu0` translates the four PCIe host
+/// bridges, `smmu1` the present named components; the absent ones are
+/// noted.
+#[test]
+fn opi6p_iort() {
+    use crate::iort::Translated;
+    let (_, w) = opi6p_with_iort();
+    let p = &w.iort;
+    let bases: Vec<u64> = p.smmus.iter().map(|s| s.smmu.base).collect();
+    assert_eq!(bases, [0xb01_0000, 0xb1b_0000]);
+    assert_eq!(
+        p.smmus[0].gsivs(),
+        [107, 116, 108, 112],
+        "event, PRI, sync, gerror"
+    );
+    assert_eq!(p.smmus[1].gsivs(), [141, 150, 142, 146]);
+    let by = |smmu: usize| -> Vec<&str> {
+        p.consumers
+            .iter()
+            .filter(|c| c.smmu == smmu)
+            .map(|c| c.path.as_str())
+            .collect()
+    };
+    assert_eq!(
+        by(0),
+        ["\\_SB_.PCI0", "\\_SB_.PCI1", "\\_SB_.PCI2", "\\_SB_.PCI3"]
+    );
+    assert_eq!(
+        by(1),
+        [
+            "\\_SB_.DPU0",
+            "\\_SB_.DPU1",
+            "\\_SB_.DPU2",
+            "\\_SB_.DPU3",
+            "\\_SB_.DPU4",
+            "\\_SB_.NPU0",
+            "\\_SB_.ISPM",
+            "\\_SB_.CBD0"
+        ]
+    );
+    for c in &p.consumers {
+        match &c.how {
+            Translated::HostBridge { segment, map } => {
+                assert_eq!(*segment, 0);
+                assert_eq!(map.len(), 1);
+                assert_eq!(
+                    (map[0].map(0xc100), map[0].map(0xffff)),
+                    (Some(0xc100), Some(0xffff))
+                );
+            }
+            Translated::Named { streams } if c.path == "\\_SB_.DPU2" => {
+                let s: Vec<u32> = streams.iter().cloned().flatten().collect();
+                assert_eq!(s, [0xc, 0xd, 0xf, 0x10, 0x11]);
+            }
+            Translated::Named { streams } => assert!(!streams.is_empty()),
+        }
+    }
+    let absent: Vec<&str> = p.notes.iter().map(String::as_str).collect();
+    assert_eq!(
+        absent,
+        ["AEU0", "AEU1", "AEU2", "AEU3", "AEU4", "CBD2"]
+            .map(|d| alloc::format!("acpi0: IORT names \\_SB_.{d}, which is not present"))
+    );
+}
+
+/// QEMU's `virt,iommu=smmuv3`: one SMMU, translating `PCI0` for buses 0
+/// and 1 only.
+#[test]
+fn qemu_virt_smmuv3_iort() {
+    use crate::iort::Translated;
+    let (_, w) = walk_with_iort(
+        "qemu-virt-smmuv3",
+        &[include_bytes!(
+            "../../../tests/corpus/acpi/qemu-virt-smmuv3/dsdt.dat"
+        )],
+        include_bytes!("../../../tests/corpus/acpi/qemu-virt-smmuv3/iort.dat"),
+    );
+    let p = &w.iort;
+    assert_eq!(p.smmus.len(), 1);
+    assert_eq!(p.smmus[0].smmu.base, 0x905_0000);
+    assert_eq!(p.smmus[0].gsivs(), [106, 107, 108, 109]);
+    assert_eq!(p.consumers.len(), 1);
+    let c = &p.consumers[0];
+    assert_eq!((c.smmu, c.path.as_str()), (0, "\\_SB_.PCI0"));
+    let Translated::HostBridge { segment: 0, map } = &c.how else {
+        panic!("{c:?}");
+    };
+    assert_eq!(map.len(), 1, "the bypassed range is not this SMMU's");
+    assert_eq!(map[0].map(0x100), Some(0x100));
+    assert_eq!(map[0].map(0x200), None);
+    assert!(p.notes.is_empty());
+}
+
+/// The board's graph with the IORT's edges (IOMMU.md §4.3): an `smmu`
+/// child of `acpi0` for each SMMU, a settle edge to each device it
+/// translates. No cycle runs through them, and each SMMU comes before
+/// what it translates.
+#[test]
+fn opi6p_graph_with_iort_edges() {
+    use devtree::graph::{Edge, Graph, Origin};
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    enum Key {
+        Ns(aml::NodeId),
+        Smmu(usize),
+    }
+    let (i, w) = opi6p_with_iort();
+    let (mut i2, mut h2) = acpi_corpus::load("opi6p");
+    let deps = deps_of("opi6p", &mut i2, &mut h2);
+    let mut g: Graph<Key> = Graph::new();
+    for e in deps.graph(&i2).edges() {
+        g.add_edge(Edge {
+            supplier: Key::Ns(e.supplier),
+            consumer: Key::Ns(e.consumer),
+            kind: e.kind,
+            origin: e.origin,
+        });
+    }
+    let root = i.root();
+    let node = |path: &str| {
+        let p = aml::AmlPath::parse(path).unwrap();
+        i.lookup(&p).unwrap()
+    };
+    for s in 0..w.iort.smmus.len() {
+        g.add_edge(Edge {
+            supplier: Key::Ns(root),
+            consumer: Key::Smmu(s),
+            kind: EdgeKind::Required,
+            origin: Origin::Tree,
+        });
+    }
+    for c in &w.iort.consumers {
+        let n = node(&c.path);
+        // The consumer's place in the tree, as the namespace gives it.
+        let mut at = n;
+        while let Some(p) = i.parent(at) {
+            g.add_edge(Edge {
+                supplier: Key::Ns(p),
+                consumer: Key::Ns(at),
+                kind: EdgeKind::Required,
+                origin: Origin::Tree,
+            });
+            at = p;
+        }
+        g.add_edge(Edge {
+            supplier: Key::Smmu(c.smmu),
+            consumer: Key::Ns(n),
+            kind: EdgeKind::Settle,
+            origin: Origin::Iort,
+        });
+    }
+    let dropped = g.break_cycles().unwrap();
+    assert!(
+        dropped.iter().all(|e| e.origin != Origin::Iort),
+        "{dropped:?}"
+    );
+    let order = g.topo_order().unwrap();
+    let pos = |k: Key| order.iter().position(|&x| x == k).unwrap();
+    for c in &w.iort.consumers {
+        assert!(
+            pos(Key::Smmu(c.smmu)) < pos(Key::Ns(node(&c.path))),
+            "{}",
+            c.path
+        );
+    }
+    // Shutdown takes every PCIe host bridge down before smmu0.
+    let down = g.shutdown_order().unwrap();
+    let at = |k: Key| down.iter().position(|&x| x == k).unwrap();
+    for b in ["PCI0", "PCI1", "PCI2", "PCI3"] {
+        assert!(at(Key::Ns(node(&alloc::format!("\\_SB_.{b}")))) < at(Key::Smmu(0)));
+    }
 }

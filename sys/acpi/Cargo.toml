@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 abi = { path = "../../lib/abi" }
 acpi-platform = { path = "../../lib/acpi-platform" }
+acpi-tables = { path = "../../lib/acpi-tables" }
 aml = { path = "../../lib/aml" }
 bus = { path = "../bus" }
 cpufreq = { path = "../cpufreq" }
@@ -22,7 +23,6 @@ vm = { path = "../vm" }
 
 [dev-dependencies]
 acpi-corpus = { path = "../../lib/acpi-corpus" }
-acpi-tables = { path = "../../lib/acpi-tables" }
 aml = { path = "../../lib/aml", features = ["asm"] }
 
 [lints]

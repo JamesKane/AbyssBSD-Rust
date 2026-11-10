@@ -150,6 +150,8 @@ pub(crate) struct Walk {
     /// description declares shared (DRIVER-MODEL.md §8.1).
     pub(crate) firmware_shared: Vec<bus::Range>,
     pub(crate) declared_shared: Vec<bus::Range>,
+    /// The IORT's SMMUs and the devices they translate.
+    pub(crate) iort: crate::iort::IortPlan,
 }
 
 pub(crate) fn walk(
@@ -158,6 +160,7 @@ pub(crate) fn walk(
     dma: &[crate::DmaController],
     platforms: &[&dyn acpi_platform::PlatformSource],
     id: &acpi_platform::FirmwareIdentity,
+    iort: Option<acpi_tables::Sdt<'_>>,
 ) -> Walk {
     let mut found = Vec::new();
     let mut companions = Vec::new();
@@ -351,13 +354,54 @@ pub(crate) fn walk(
             coherent: None,
         });
     }
+    // The IORT's SMMUs, and the host bridges and named components they
+    // translate (IOMMU.md §4.2, §4.3).
+    let iort = iort
+        .and_then(|t| acpi_tables::iort::parse(&t).ok())
+        .map(|t| {
+            let devices: Vec<(aml::NodeId, &AcpiIdent)> =
+                found.iter().map(|f| (f.device.node, &f.ident)).collect();
+            crate::iort::plan(&t, interp, host, &devices)
+        })
+        .unwrap_or_default();
+    notes.extend(iort.notes.iter().cloned());
     Walk {
         found,
         notes,
         companion_deps,
         firmware_shared: regions.into_iter().map(|r| r.range).collect(),
         declared_shared,
+        iort,
     }
+}
+
+/// An `smmu` child's resources, as FreeBSD's `smmu_acpi_identify` sets
+/// them: its registers, then its event, PRI, sync, and gerror interrupts,
+/// edge-triggered and active-high. The interrupts only if all four are
+/// wired GSIVs the platform routes (an SMMU signalling by MSI has none).
+fn smmu_resources(ops: &dyn Ops, s: &crate::iort::SmmuNode) -> Vec<Resource> {
+    let mut out = alloc::vec![Resource::Memory {
+        base: s.smmu.base,
+        len: crate::iort::SMMU_MEMORY,
+        prefetchable: false,
+    }];
+    let irqs: Vec<Resource> = s
+        .gsivs()
+        .iter()
+        .filter_map(|&g| {
+            let (domain, hw) = ops.gsi(g).filter(|_| g != 0)?;
+            Some(Resource::Irq {
+                domain,
+                hw,
+                trigger: irq::Trigger::Edge,
+                polarity: irq::Polarity::High,
+            })
+        })
+        .collect();
+    if irqs.len() == 4 {
+        out.extend(irqs);
+    }
+    out
 }
 
 /// The GPIO and I2C connections a device's `_CRS` consumes, in order: each
@@ -649,14 +693,16 @@ impl Driver for AcpiBus {
         let platforms: Vec<&'static dyn acpi_platform::PlatformSource> =
             svc.ops().platforms().to_vec();
         let id = svc.ops().firmware_identity();
+        let iort = svc.ops().iort();
         let Walk {
             found,
             notes,
             companion_deps,
             firmware_shared,
             declared_shared,
+            iort,
         } = svc.run(cx.sleepable(), move |i, h| {
-            walk(i, h, &dma, &platforms, &id)
+            walk(i, h, &dma, &platforms, &id, iort)
         });
         // What the walk noticed (firmware naming what it lacks, the
         // platforms found): bring-up notes, said under `bootverbose`.
@@ -699,6 +745,24 @@ impl Driver for AcpiBus {
             }
             added.push((path, id, f.deps, f.lines));
         }
+        // The SMMUs the IORT lists, in table order, after the namespace's
+        // devices: FreeBSD's identify routines add theirs once the
+        // namespace walk has (`smmu0` sits after the CPUs and `gic0` in
+        // its `devinfo`).
+        let smmus: Vec<bus::DeviceId> = iort
+            .smmus
+            .iter()
+            .map(|s| {
+                cx.add_child(
+                    Ident::AcpiChild {
+                        class: "smmu",
+                        desc: crate::iort::SMMU_DESC,
+                    },
+                    Some(Arc::new(s.clone())),
+                    smmu_resources(svc.ops(), s),
+                )
+            })
+            .collect();
         let child = |path: &str| added.iter().find(|a| a.0 == path).map(|a| a.1);
         for (_, id, deps, lines) in &added {
             for (d, kind, origin) in deps {
@@ -721,6 +785,28 @@ impl Driver for AcpiBus {
             if !lines.is_empty() {
                 cx.set_lines(*id, lines);
             }
+        }
+        // What each SMMU translates waits for it to settle, and records
+        // how (the first SMMU to claim a device keeps it).
+        let mut recorded: Vec<bus::DeviceId> = Vec::new();
+        for c in iort.consumers {
+            let (Some(consumer), Some(&unit)) = (child(&c.path), smmus.get(c.smmu)) else {
+                continue;
+            };
+            cx.add_dependency(consumer, unit, EdgeKind::Settle, Origin::Iort);
+            if recorded.contains(&consumer) {
+                continue;
+            }
+            recorded.push(consumer);
+            let tr = match c.how {
+                crate::iort::Translated::HostBridge { segment, map } => {
+                    bus::iommu::Translation::Pci { unit, segment, map }
+                }
+                crate::iort::Translated::Named { streams } => {
+                    bus::iommu::Translation::Named { unit, streams }
+                }
+            };
+            cx.set_dma_translation(consumer, tr);
         }
         // A PCI function's companion's dependencies, for the PCI bus's
         // node when it comes.

@@ -307,6 +307,10 @@ impl acpi::Ops for KernelAcpi {
         id
     }
 
+    fn iort(&self) -> Option<acpi_tables::Sdt<'static>> {
+        crate::acpi::find(*b"IORT")
+    }
+
     fn dma_controllers(&self) -> Vec<acpi::DmaController> {
         let Some(c) = crate::acpi::find(*b"CSRT").and_then(|t| acpi_tables::csrt::parse(&t).ok())
         else {

@@ -83,6 +83,7 @@ fn q8b_dependencies() {
         &[],
         &[],
         &acpi_platform::FirmwareIdentity::default(),
+        None,
     )
     .found;
     let paths: std::vec::Vec<&str> = found.iter().map(|f| f.device.path.as_str()).collect();
@@ -659,6 +660,7 @@ mod hand {
                 &[],
                 platforms,
                 &acpi_platform::FirmwareIdentity::default(),
+                None,
             )
         };
         let uar0 = |w: &crate::bus::Walk| {

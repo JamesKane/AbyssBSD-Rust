@@ -9,6 +9,7 @@
 //!   evaluation is a job sent to it.
 //! - [`bus`]: the `acpi` bus driver.
 //! - [`pcib`]: the ACPI host-PCI bridge.
+//! - [`iort`]: the SMMUs the IORT lists, and the devices they translate.
 //!
 //! Behavior reference: sys/dev/acpica/acpi.c.
 
@@ -32,6 +33,7 @@ mod host;
 pub mod iicbus;
 #[cfg(test)]
 mod iicbus_corpus;
+pub mod iort;
 pub mod pcib;
 pub mod power;
 pub mod properties;
@@ -98,6 +100,12 @@ pub trait Ops: Sync {
     /// The firmware's identity, from the root table's header.
     fn firmware_identity(&self) -> acpi_platform::FirmwareIdentity {
         acpi_platform::FirmwareIdentity::default()
+    }
+    /// The IORT, if firmware has one: its SMMUs become children of
+    /// `acpi0`, and the devices they translate depend on them
+    /// ([`iort`]). None by default.
+    fn iort(&self) -> Option<acpi_tables::Sdt<'static>> {
+        None
     }
     /// The DMA controllers the CSRT describes, which serve `_CRS`
     /// `FixedDMA` request lines. None by default.
