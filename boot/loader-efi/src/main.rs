@@ -118,8 +118,11 @@ extern "efiapi" fn efi_main(image: Handle, st: *mut raw::SystemTable) -> Status 
     let mut con = system.console();
     let _ = writeln!(con, "loader: boot failed: {e}");
     let _ = writeln!(con, "{}", ktest::FAIL_MARKER);
-    system.stall(3_000_000);
-    system.reset(ResetKind::Shutdown, Status::ABORTED)
+    // Back to the boot manager, which tries the next boot option (on the
+    // Orange Pi, FreeBSD's), after time enough to read why.
+    let _ = writeln!(con, "loader: returning to the firmware in 10 seconds");
+    system.stall(10_000_000);
+    Status::LOAD_ERROR
 }
 
 /// Loads and starts the kernel. Returns only on failure, and only before
