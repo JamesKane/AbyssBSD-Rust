@@ -18,3 +18,11 @@ Fedora runs from. The second NVMe that AbyssBSD is to use (HARDWARE.md §5) was 
 
 Linux reports one ACPI warning: the SystemIO range `0xB00`-`0xB08` (the SMBus controller)
 conflicts with the AML operation region `\GSA1.SMBI`.
+
+The DSDT's module-level code reads firmware setup variables (around `0x8FE0D000`) and defines
+devices and handlers by them: `\_GPE._L16`, for one, exists only for some values. The AMD
+`DISCUSB4` SSDT defines its own `\_GPE._L16` (chaining to `\_GPE.OL16` if present), so loading
+all the tables with made-up variable values reports `AlreadyExists` for it (and for a `_DSD`).
+Linux loaded all 16 AML tables without an error, so on this machine the DSDT leaves `_L16` out.
+Tests over the full namespace need those variables seeded from Linux's results, as the Orange Pi 6
+Plus's are.
