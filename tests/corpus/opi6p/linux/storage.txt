@@ -1,0 +1,26 @@
+NAME          SIZE TYPE MODEL                   SERIAL          FSTYPE   PARTLABEL MOUNTPOINT
+loop0        14.9M loop                                         squashfs           /snap/snap-store/1368
+loop1       174.6M loop                                         squashfs           /snap/mesa-2404/1166
+loop2        17.5M loop                                         squashfs           /snap/prompting-client/221
+loop3        79.9M loop                                         squashfs           /snap/prompting-client/229
+loop4         560K loop                                         squashfs           /snap/snapd-desktop-integration/363
+loop5        42.6M loop                                         squashfs           /snap/snapd/26869
+loop6        43.5M loop                                         squashfs           /snap/snapd/27740
+loop7        61.8M loop                                         squashfs           /snap/core24/2125
+loop8         804K loop                                         squashfs           /snap/snapd-desktop-integration/396
+loop9        61.9M loop                                         squashfs           /snap/core24/1644
+loop10       91.7M loop                                         squashfs           /snap/gtk-common-themes/1535
+loop11      552.9M loop                                         squashfs           /snap/gnome-46-2404/154
+loop12       90.7M loop                                         squashfs           /snap/desktop-security-center/190
+loop13          4K loop                                         squashfs           /snap/bare/5
+loop14       90.7M loop                                         squashfs           /snap/desktop-security-center/207
+loop15      234.8M loop                                         squashfs           /snap/firefox/8305
+nvme1n1     465.8G disk CT500P3SSD8             241247C0D85A                       
+├─nvme1n1p1     1G part                                         vfat               /boot/efi
+├─nvme1n1p2  97.7G part                                         ext4               /
+├─nvme1n1p3    32G part                                                  swap0     
+├─nvme1n1p4   335G part                                         ufs      rootfs    
+└─nvme1n1p5    56M part                                         vfat     vectra    
+nvme0n1     931.5G disk Samsung SSD 990 PRO 1TB S7LANU0Y715456L                    
+└─nvme0n1p1 931.5G part                                                  taisce    
+sudo: 'nvme': command not found

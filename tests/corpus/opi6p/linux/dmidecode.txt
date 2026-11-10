@@ -1,0 +1,435 @@
+# dmidecode 3.6
+Getting SMBIOS data from sysfs.
+SMBIOS 3.6.0 present.
+Table at 0x7FE810000.
+
+Handle 0x0000, DMI type 7, 27 bytes
+Cache Information
+	Socket Designation: L1 Instruction Cache
+	Configuration: Enabled, Not Socketed, Level 1
+	Operational Mode: Varies With Memory Address
+	Location: Internal
+	Installed Size: 640 kB
+	Maximum Size: 640 kB
+	Supported SRAM Types:
+		Unknown
+	Installed SRAM Type: Unknown
+	Speed: Unknown
+	Error Correction Type: Unknown
+	System Type: Instruction
+	Associativity: 4-way Set-associative
+
+Handle 0x0001, DMI type 7, 27 bytes
+Cache Information
+	Socket Designation: L1 Data Cache
+	Configuration: Enabled, Not Socketed, Level 1
+	Operational Mode: Varies With Memory Address
+	Location: Internal
+	Installed Size: 640 kB
+	Maximum Size: 640 kB
+	Supported SRAM Types:
+		Unknown
+	Installed SRAM Type: Unknown
+	Speed: Unknown
+	Error Correction Type: Unknown
+	System Type: Data
+	Associativity: 4-way Set-associative
+
+Handle 0x0002, DMI type 7, 27 bytes
+Cache Information
+	Socket Designation: L2 Cache
+	Configuration: Enabled, Not Socketed, Level 2
+	Operational Mode: Varies With Memory Address
+	Location: Internal
+	Installed Size: 4 MB
+	Maximum Size: 4 MB
+	Supported SRAM Types:
+		Unknown
+	Installed SRAM Type: Unknown
+	Speed: Unknown
+	Error Correction Type: Unknown
+	System Type: Unified
+	Associativity: 8-way Set-associative
+
+Handle 0x0003, DMI type 7, 27 bytes
+Cache Information
+	Socket Designation: L3 Cache
+	Configuration: Enabled, Not Socketed, Level 3
+	Operational Mode: Varies With Memory Address
+	Location: Internal
+	Installed Size: 12 MB
+	Maximum Size: 12 MB
+	Supported SRAM Types:
+		Unknown
+	Installed SRAM Type: Unknown
+	Speed: Unknown
+	Error Correction Type: Unknown
+	System Type: Unified
+	Associativity: 12-way Set-associative
+
+Handle 0x0004, DMI type 4, 50 bytes
+Processor Information
+	Socket Designation: CPU01
+	Type: Central Processor
+	Family: ARMv9
+	Manufacturer: Cix Technology Group Co., Ltd.
+	ID: 11 D8 0F 41 00 00 00 00
+	Signature: Implementor 0x41, Variant 0x0, Architecture 15, Part 0xd81, Revision 1
+	Version: CIX P1 CD8160
+	Voltage: Unknown
+	External Clock: 1000 MHz
+	Max Speed: 2600 MHz
+	Current Speed: 1900 MHz
+	Status: Populated, Enabled
+	Upgrade: Unknown
+	L1 Cache Handle: 0x0001
+	L2 Cache Handle: 0x0002
+	L3 Cache Handle: 0x0003
+	Serial Number: 44D8160A0491C0E0
+	Asset Tag:  
+	Part Number:  
+	Core Count: 12
+	Core Enabled: 12
+	Thread Count: 12
+	Characteristics:
+		64-bit capable
+		Multi-Core
+		Execute Protection
+		Power/Performance Control
+
+Handle 0x0800, DMI type 16, 23 bytes
+Physical Memory Array
+	Location: System Board Or Motherboard
+	Use: System Memory
+	Error Correction Type: Single-bit ECC
+	Maximum Capacity: 64 GB
+	Error Information Handle: Not Provided
+	Number Of Devices: 4
+
+Handle 0x0005, DMI type 17, 92 bytes
+Memory Device
+	Array Handle: 0x0800
+	Error Information Handle: Not Provided
+	Total Width: 32 bits
+	Data Width: 32 bits
+	Size: 8 GB
+	Form Factor: Row Of Chips
+	Set: None
+	Locator: Top - on board
+	Bank Locator: BANK 0
+	Type: LPDDR5
+	Type Detail: Unbuffered (Unregistered)
+	Speed: 6400 MT/s
+	Manufacturer: Not Specified
+	Serial Number: Not Specified
+	Asset Tag: Not Specified
+	Part Number: Not Specified
+	Rank: 2
+	Configured Memory Speed: 6400 MT/s
+	Minimum Voltage: Unknown
+	Maximum Voltage: Unknown
+	Configured Voltage: Unknown
+	Memory Technology: DRAM
+	Memory Operating Mode Capability: None
+	Firmware Version: Not Specified
+	Module Manufacturer ID: Unknown
+	Module Product ID: Unknown
+	Memory Subsystem Controller Manufacturer ID: Unknown
+	Memory Subsystem Controller Product ID: Unknown
+	Non-Volatile Size: None
+	Volatile Size: None
+	Cache Size: None
+	Logical Size: None
+
+Handle 0x0006, DMI type 17, 92 bytes
+Memory Device
+	Array Handle: 0x0800
+	Error Information Handle: Not Provided
+	Total Width: 32 bits
+	Data Width: 32 bits
+	Size: 8 GB
+	Form Factor: Row Of Chips
+	Set: None
+	Locator: Top - on board
+	Bank Locator: BANK 1
+	Type: LPDDR5
+	Type Detail: Unbuffered (Unregistered)
+	Speed: 6400 MT/s
+	Manufacturer: Not Specified
+	Serial Number: Not Specified
+	Asset Tag: Not Specified
+	Part Number: Not Specified
+	Rank: 2
+	Configured Memory Speed: 6400 MT/s
+	Minimum Voltage: Unknown
+	Maximum Voltage: Unknown
+	Configured Voltage: Unknown
+	Memory Technology: DRAM
+	Memory Operating Mode Capability: None
+	Firmware Version: Not Specified
+	Module Manufacturer ID: Unknown
+	Module Product ID: Unknown
+	Memory Subsystem Controller Manufacturer ID: Unknown
+	Memory Subsystem Controller Product ID: Unknown
+	Non-Volatile Size: None
+	Volatile Size: None
+	Cache Size: None
+	Logical Size: None
+
+Handle 0x0007, DMI type 17, 92 bytes
+Memory Device
+	Array Handle: 0x0800
+	Error Information Handle: Not Provided
+	Total Width: 32 bits
+	Data Width: 32 bits
+	Size: 8 GB
+	Form Factor: Row Of Chips
+	Set: None
+	Locator: Top - on board
+	Bank Locator: BANK 2
+	Type: LPDDR5
+	Type Detail: Unbuffered (Unregistered)
+	Speed: 6400 MT/s
+	Manufacturer: Not Specified
+	Serial Number: Not Specified
+	Asset Tag: Not Specified
+	Part Number: Not Specified
+	Rank: 2
+	Configured Memory Speed: 6400 MT/s
+	Minimum Voltage: Unknown
+	Maximum Voltage: Unknown
+	Configured Voltage: Unknown
+	Memory Technology: DRAM
+	Memory Operating Mode Capability: None
+	Firmware Version: Not Specified
+	Module Manufacturer ID: Unknown
+	Module Product ID: Unknown
+	Memory Subsystem Controller Manufacturer ID: Unknown
+	Memory Subsystem Controller Product ID: Unknown
+	Non-Volatile Size: None
+	Volatile Size: None
+	Cache Size: None
+	Logical Size: None
+
+Handle 0x0008, DMI type 17, 92 bytes
+Memory Device
+	Array Handle: 0x0800
+	Error Information Handle: Not Provided
+	Total Width: 32 bits
+	Data Width: 32 bits
+	Size: 8 GB
+	Form Factor: Row Of Chips
+	Set: None
+	Locator: Top - on board
+	Bank Locator: BANK 3
+	Type: LPDDR5
+	Type Detail: Unbuffered (Unregistered)
+	Speed: 6400 MT/s
+	Manufacturer: Not Specified
+	Serial Number: Not Specified
+	Asset Tag: Not Specified
+	Part Number: Not Specified
+	Rank: 2
+	Configured Memory Speed: 6400 MT/s
+	Minimum Voltage: Unknown
+	Maximum Voltage: Unknown
+	Configured Voltage: Unknown
+	Memory Technology: DRAM
+	Memory Operating Mode Capability: None
+	Firmware Version: Not Specified
+	Module Manufacturer ID: Unknown
+	Module Product ID: Unknown
+	Memory Subsystem Controller Manufacturer ID: Unknown
+	Memory Subsystem Controller Product ID: Unknown
+	Non-Volatile Size: None
+	Volatile Size: None
+	Cache Size: None
+	Logical Size: None
+
+Handle 0x0009, DMI type 19, 31 bytes
+Memory Array Mapped Address
+	Starting Address: 0x0000000080000000k
+	Ending Address: 0x000000087FFFFFFFk
+	Range Size: 32 GB
+	Physical Array Handle: 0x0800
+	Partition Width: 1
+
+Handle 0x000A, DMI type 0, 26 bytes
+BIOS Information
+	Vendor: Cix Technology Group Co., Ltd.
+	Version: 1.3
+	Release Date: 11/13/2025
+	ROM Size: 8 MB
+	Characteristics:
+		PCI is supported
+		PNP is supported
+		BIOS is upgradeable
+		Selectable boot is supported
+		ACPI is supported
+		Targeted content distribution is supported
+		UEFI is supported
+	BIOS Revision: 0.5
+
+Handle 0x000B, DMI type 1, 27 bytes
+System Information
+	Manufacturer: Cix Technology Group Co., Ltd.
+	Product Name: CIX Phecda Board
+	Version: 1.0
+	Serial Number: Cix System Serial Numbe
+	UUID: Not Present
+	Wake-up Type: Power Switch
+	SKU Number: Default
+	Family: Default
+
+Handle 0x1000, DMI type 2, 17 bytes
+Base Board Information
+	Manufacturer: Cix Technology Group Co., Ltd.
+	Product Name: CIX Phecda Board
+	Version: 1.0
+	Serial Number: Cix Base Board Serial Number
+	Asset Tag: Cix Base Board Asset Tag
+	Features:
+		Board is a hosting board
+	Location In Chassis: Part Component
+	Chassis Handle: 0x1001
+	Type: Motherboard
+	Contained Object Handles: 1
+		0x0004
+
+Handle 0x1001, DMI type 3, 24 bytes
+Chassis Information
+	Manufacturer: Cix Technology Group Co., Ltd.
+	Type: Unknown
+	Lock: Not Present
+	Version: 1.0
+	Serial Number: Cix Chassis Serial Number
+	Asset Tag: Cix Chassis Asset Tag
+	Boot-up State: Unknown
+	Power Supply State: Safe
+	Thermal State: Safe
+	Security Status: None
+	OEM Information: 0x00000000
+	Height: Unspecified
+	Number Of Power Cords: Unspecified
+	Contained Elements: 0
+	SKU Number: Not Specified
+
+Handle 0x000C, DMI type 32, 11 bytes
+System Boot Information
+	Status: No errors detected
+
+Handle 0x000D, DMI type 45, 24 bytes
+Firmware Inventory Information
+	Firmware Component Name: SE    Firmware
+	Firmware Version: beta2.0-208899644954
+	Firmware ID: NULL
+	Release Date: NULL
+	Manufacturer: Cix Technology Group Co., Ltd.
+	Lowest Supported Firmware Version: NULL
+	Image Size: 4 kB
+	Characteristics:
+		Updatable: Yes
+		Write-Protect: Yes
+	State: Enabled
+
+Handle 0x000E, DMI type 45, 24 bytes
+Firmware Inventory Information
+	Firmware Component Name: PM    Firmware
+	Firmware Version: 00.10.002-d54cd97fdcdf
+	Firmware ID: NULL
+	Release Date: NULL
+	Manufacturer: Cix Technology Group Co., Ltd.
+	Lowest Supported Firmware Version: NULL
+	Image Size: 4 kB
+	Characteristics:
+		Updatable: Yes
+		Write-Protect: Yes
+	State: Enabled
+
+Handle 0x000F, DMI type 45, 24 bytes
+Firmware Inventory Information
+	Firmware Component Name: PBL   Firmware
+	Firmware Version: 00.10.002-d54cd97fdcdf
+	Firmware ID: NULL
+	Release Date: NULL
+	Manufacturer: Cix Technology Group Co., Ltd.
+	Lowest Supported Firmware Version: NULL
+	Image Size: 4 kB
+	Characteristics:
+		Updatable: Yes
+		Write-Protect: Yes
+	State: Enabled
+
+Handle 0x0010, DMI type 45, 24 bytes
+Firmware Inventory Information
+	Firmware Component Name: ATF   Firmware
+	Firmware Version: v2.7-6f1cdf4f3a61
+	Firmware ID: NULL
+	Release Date: NULL
+	Manufacturer: Cix Technology Group Co., Ltd.
+	Lowest Supported Firmware Version: NULL
+	Image Size: 4 kB
+	Characteristics:
+		Updatable: Yes
+		Write-Protect: Yes
+	State: Enabled
+
+Handle 0x0011, DMI type 45, 24 bytes
+Firmware Inventory Information
+	Firmware Component Name: TEE   Firmware
+	Firmware Version: Beta_2.1.3_release-3.17-7c1538ba6c38
+	Firmware ID: NULL
+	Release Date: NULL
+	Manufacturer: Cix Technology Group Co., Ltd.
+	Lowest Supported Firmware Version: NULL
+	Image Size: 4 kB
+	Characteristics:
+		Updatable: Yes
+		Write-Protect: Yes
+	State: Enabled
+
+Handle 0x0012, DMI type 45, 24 bytes
+Firmware Inventory Information
+	Firmware Component Name: EC   Firmware
+	Firmware Version: V1.13-7e90ed4de22c
+	Firmware ID: NULL
+	Release Date: NULL
+	Manufacturer: Cix Technology Group Co., Ltd.
+	Lowest Supported Firmware Version: NULL
+	Image Size: 4 kB
+	Characteristics:
+		Updatable: Yes
+		Write-Protect: Yes
+	State: Enabled
+
+Handle 0x0013, DMI type 45, 24 bytes
+Firmware Inventory Information
+	Firmware Component Name: STMM  Firmware
+	Firmware Version: Beta2-W28M250709N-59816c6b3a81
+	Firmware ID: NULL
+	Release Date: NULL
+	Manufacturer: <BAD INDEX>
+	Lowest Supported Firmware Version: NULL
+	Image Size: 4 kB
+	Characteristics:
+		Updatable: Yes
+		Write-Protect: Yes
+	State: Enabled
+
+Handle 0x0014, DMI type 45, 24 bytes
+Firmware Inventory Information
+	Firmware Component Name: UEFI  Firmware
+	Firmware Version: BiosV1.3-W20251113-eebde4a7
+	Firmware ID: NULL
+	Release Date: NULL
+	Manufacturer: Cix Technology Group Co., Ltd.
+	Lowest Supported Firmware Version: NULL
+	Image Size: 4 kB
+	Characteristics:
+		Updatable: Yes
+		Write-Protect: Yes
+	State: Enabled
+
+Handle 0xFEFF, DMI type 127, 4 bytes
+End Of Table
+

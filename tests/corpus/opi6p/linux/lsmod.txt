@@ -1,0 +1,93 @@
+Module                  Size  Used by
+snd_seq_dummy          12288  0
+snd_hrtimer            12288  1
+optee_rng              12288  0
+rfkill                 40960  3
+qrtr                   49152  2
+dm_mod                221184  0
+r8169                 151552  0
+realtek                57344  2
+snd_hda_codec_alc269   143360  1
+snd_soc_hdmi_codec     24576  0
+snd_hda_codec_realtek_lib    65536  1 snd_hda_codec_alc269
+snd_hda_scodec_component    20480  1 snd_hda_codec_alc269
+snd_hda_codec_generic   118784  2 snd_hda_codec_realtek_lib,snd_hda_codec_alc269
+snd_soc_rt5682s        98304  0
+snd_seq_midi           24576  0
+snd_seq_midi_event     20480  1 snd_seq_midi
+optee                  81920  0
+snd_soc_cdns_i2s_mc    24576  0
+snd_soc_sky1_card      24576  0
+rpmb_core              20480  1 optee
+ffa_core               20480  1 optee
+snd_rawmidi            53248  1 snd_seq_midi
+amvx                  405504  0
+snd_hda_cix_ipbloq     24576  1
+tee                    69632  2 optee,optee_rng
+videobuf2_dma_sg       20480  1 amvx
+snd_hda_codec         217088  4 snd_hda_codec_generic,snd_hda_codec_realtek_lib,snd_hda_codec_alc269,snd_hda_cix_ipbloq
+snd_soc_core          430080  4 snd_soc_sky1_card,snd_soc_hdmi_codec,snd_soc_cdns_i2s_mc,snd_soc_rt5682s
+videobuf2_memops       16384  1 videobuf2_dma_sg
+snd_hwdep              24576  1 snd_hda_codec
+snd_compress           36864  1 snd_soc_core
+panthor               241664  14
+ac97_bus               12288  1 snd_soc_core
+videobuf2_v4l2         36864  1 amvx
+snd_pcm_dmaengine      16384  1 snd_soc_core
+snd_hda_core          180224  5 snd_hda_codec_generic,snd_hda_codec,snd_hda_codec_realtek_lib,snd_hda_codec_alc269,snd_hda_cix_ipbloq
+gpu_sched              69632  1 panthor
+snd_pcm               200704  8 snd_hda_codec,snd_soc_hdmi_codec,snd_compress,snd_soc_core,snd_soc_cdns_i2s_mc,snd_hda_core,snd_soc_rt5682s,snd_pcm_dmaengine
+snd_seq               126976  9 snd_seq_midi,snd_seq_midi_event,snd_seq_dummy
+videobuf2_common       86016  4 videobuf2_v4l2,videobuf2_dma_sg,amvx,videobuf2_memops
+snd_seq_device         16384  3 snd_seq,snd_seq_midi,snd_rawmidi
+drm_gpuvm              53248  1 panthor
+snd_timer              53248  3 snd_seq,snd_hrtimer,snd_pcm
+drm_exec               16384  2 drm_gpuvm,panthor
+videodev              393216  2 videobuf2_v4l2,amvx
+snd                   151552  18 snd_hda_codec_generic,snd_seq,snd_seq_device,snd_hwdep,snd_hda_codec,snd_soc_hdmi_codec,snd_timer,snd_hda_codec_realtek_lib,snd_compress,snd_hda_codec_alc269,snd_soc_core,snd_hda_cix_ipbloq,snd_pcm,snd_rawmidi
+mc                     98304  3 videodev,videobuf2_v4l2,videobuf2_common
+soundcore              16384  1 snd
+cppc_cpufreq           24576  0
+binfmt_misc            28672  1
+squashfs               90112  16
+nls_ascii              12288  1
+nls_cp437              16384  1
+vfat                   24576  1
+loop                   40960  32
+fat                   110592  1 vfat
+input_leds             12288  0
+evdev                  32768  8
+hid_generic            12288  0
+usbhid                 86016  0
+hid                   286720  2 usbhid,hid_generic
+efi_pstore             12288  0
+nvme                   73728  2
+nvme_core             237568  3 nvme
+nvme_keyring           20480  1 nvme_core
+nvme_auth              28672  1 nvme_core
+hkdf                   12288  1 nvme_auth
+ghash_ce               20480  0
+sm4_ce_gcm             16384  0
+sm4_ce_ccm             16384  0
+sm4_ce                 32768  2 sm4_ce_gcm,sm4_ce_ccm
+sm4_ce_cipher          12288  0
+sm4                    12288  4 sm4_ce,sm4_ce_cipher,sm4_ce_gcm,sm4_ce_ccm
+sm3_ce                 12288  0
+sbsa_gwdt              20480  0
+ramoops                32768  0
+reed_solomon           28672  1 ramoops
+pinctrl_sky1           20480  0
+pinctrl_sky1_base      24576  51 pinctrl_sky1
+trilin_dpsub          167936  0
+pwm_bl                 20480  0
+drm_display_helper    327680  1 trilin_dpsub
+cec                    86016  1 drm_display_helper
+rc_core                73728  1 cec
+linlon_dp             184320  11
+drm_dma_helper         28672  1 linlon_dp
+arm_dma350             40960  0
+i2c_dev                28672  0
+autofs4                57344  2
+aes_neon_bs            24576  0
+aes_neon_blk           24576  1 aes_neon_bs
+aes_ce_blk             36864  0

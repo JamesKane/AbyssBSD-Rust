@@ -7,7 +7,11 @@ files are the only record of how FreeBSD and Linux saw the hardware.
 | Directory | Source |
 |---|---|
 | `freebsd/` | FreeBSD 16.0-CURRENT, the sibling project's `GENERIC-HMP-IOMMU` kernel (`orangepi-6-plus-f12c9f4ee6e3`, built 2026-10-11), from the board's NVMe. Captured 2026-11-09 |
-| `linux/` | Not yet: Ubuntu (CIX kernel) from the same NVMe, including `/sys/firmware/acpi/tables` |
+| `linux/` | Ubuntu 26.04.1, kernel `7.0.0-41-cix`, from the same NVMe. Captured 2026-11-09 |
+
+The board has two NVMe drives: a Crucial P3 500 GB (`CT500P3SSD8`, Micron controller), which holds
+the ESP, Ubuntu, FreeBSD, and swap, and a Samsung 990 PRO 1 TB with one partition (`taisce`) that
+is not ours. The binary ACPI tables are in [`../acpi/opi6p/`](../acpi/opi6p/).
 
 ## `freebsd/`
 
@@ -29,6 +33,25 @@ was written to the board's disk.
 | `storage.txt` | `nvmecontrol devlist; nvmecontrol identify nvme0; camcontrol devlist; geom disk list; gpart show` |
 | `efi.txt` | `efibootmgr -v; efivar -l` |
 
-The binary ACPI tables (`<signature>.dat`, for `tests/corpus/acpi/opi6p/`) are not here: this
-build's `acpidump` has no `-b`. They come from Linux's `/sys/firmware/acpi/tables`. Do not read
-them through `/dev/mem` on FreeBSD: that panicked the board.
+This build's `acpidump` has no `-b`, so the binary tables come from Linux. Do not read them through
+`/dev/mem` on FreeBSD: that panicked the board.
+
+## `linux/`
+
+Read-only: `sudo` over ssh, sysfs and procfs reads, and the listing tools. No `/dev/mem` and no
+register access.
+
+| File | Command |
+|---|---|
+| `uname.txt` | `uname -a`, `/etc/os-release`, `/proc/cmdline` |
+| `dmesg.txt` | `dmesg` (includes ACPICA's `AE_NOT_FOUND` for `^I2C0.UXC0`-`UXC3`) |
+| `lspci.txt` | `lspci -vvvnn; lspci -tvnn` |
+| `lsusb.txt` | `lsusb -v; lsusb -tv` |
+| `acpi-devices.txt` | each `/sys/bus/acpi/devices/*`: `path`, `hid`, `uid`, `status`, `adr`, and its physical nodes |
+| `interrupts.txt`, `iomem.txt`, `cpuinfo.txt` | `/proc/interrupts`, `/proc/iomem`, `/proc/cpuinfo` |
+| `cpu-sysfs.txt` | `cpufreq`, `acpi_cppc`, `cpu_capacity`, `cpuidle` states, and topology for every CPU |
+| `lsmod.txt` | `lsmod` |
+| `dmidecode.txt` | `dmidecode` (from sysfs) |
+| `net.txt` | `ethtool -i` for every interface; `ip -d addr` |
+| `storage.txt` | `lsblk` (`nvme-cli` is not installed) |
+| `efi.txt` | `efibootmgr -v` |

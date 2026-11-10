@@ -1,0 +1,302 @@
+ACPI0003:00 path=\_SB_.AC__ hid=ACPI0003 uid=0 status=15 adr= phys=/sys/devices/platform/ACPI0003:00
+ACPI0007:00 path=\_SB_.C000.C001.CPU0 hid=ACPI0007 uid=0 status=15 adr= phys=/sys/devices/system/cpu/cpu0
+ACPI0007:01 path=\_SB_.C000.C001.CPU1 hid=ACPI0007 uid=1 status=15 adr= phys=/sys/devices/system/cpu/cpu1
+ACPI0007:02 path=\_SB_.C000.C002.CPU2 hid=ACPI0007 uid=2 status=15 adr= phys=/sys/devices/system/cpu/cpu2
+ACPI0007:03 path=\_SB_.C000.C002.CPU3 hid=ACPI0007 uid=3 status=15 adr= phys=/sys/devices/system/cpu/cpu3
+ACPI0007:04 path=\_SB_.C000.C002.CPU4 hid=ACPI0007 uid=4 status=15 adr= phys=/sys/devices/system/cpu/cpu4
+ACPI0007:05 path=\_SB_.C000.C002.CPU5 hid=ACPI0007 uid=5 status=15 adr= phys=/sys/devices/system/cpu/cpu5
+ACPI0007:06 path=\_SB_.C000.C003.CPU6 hid=ACPI0007 uid=6 status=15 adr= phys=/sys/devices/system/cpu/cpu6
+ACPI0007:07 path=\_SB_.C000.C003.CPU7 hid=ACPI0007 uid=7 status=15 adr= phys=/sys/devices/system/cpu/cpu7
+ACPI0007:08 path=\_SB_.C000.C004.CPU8 hid=ACPI0007 uid=8 status=15 adr= phys=/sys/devices/system/cpu/cpu8
+ACPI0007:09 path=\_SB_.C000.C004.CPU9 hid=ACPI0007 uid=9 status=15 adr= phys=/sys/devices/system/cpu/cpu9
+ACPI0007:0a path=\_SB_.C000.C005.CPUA hid=ACPI0007 uid=10 status=15 adr= phys=/sys/devices/system/cpu/cpu10
+ACPI0007:0b path=\_SB_.C000.C005.CPUB hid=ACPI0007 uid=11 status=15 adr= phys=/sys/devices/system/cpu/cpu11
+ACPI0010:00 path=\_SB_.C000 hid=ACPI0010 uid=0 status= adr=
+ACPI0010:01 path=\_SB_.C000.C001 hid=ACPI0010 uid=1 status= adr=
+ACPI0010:02 path=\_SB_.C000.C002 hid=ACPI0010 uid=2 status= adr=
+ACPI0010:03 path=\_SB_.C000.C003 hid=ACPI0010 uid=3 status= adr=
+ACPI0010:04 path=\_SB_.C000.C004 hid=ACPI0010 uid=4 status= adr=
+ACPI0010:05 path=\_SB_.C000.C005 hid=ACPI0010 uid=5 status= adr=
+ARMH0011:00 path=\_SB_.COM0 hid=ARMH0011 uid=1 status=15 adr= phys=/sys/devices/platform/ARMH0011:00 phys=/sys/devices/platform/ARMH0011:00/ARMH0011:00:0 phys=/sys/devices/platform/ARMH0011:00/ARMH0011:00:0/ARMH0011:00:0.0
+ARMH0011:01 path=\_SB_.COM1 hid=ARMH0011 uid=2 status=15 adr= phys=/sys/devices/platform/ARMH0011:01 phys=/sys/devices/platform/ARMH0011:01/ARMH0011:01:0 phys=/sys/devices/platform/ARMH0011:01/ARMH0011:01:0/ARMH0011:01:0.0
+ARMH0011:02 path=\_SB_.COM2 hid=ARMH0011 uid=3 status=15 adr= phys=/sys/devices/platform/ARMH0011:02 phys=/sys/devices/platform/ARMH0011:02/ARMH0011:02:0 phys=/sys/devices/platform/ARMH0011:02/ARMH0011:02:0/ARMH0011:02:0.0
+ARMH0011:03 path=\_SB_.COM3 hid=ARMH0011 uid=4 status=15 adr= phys=/sys/devices/platform/ARMH0011:03 phys=/sys/devices/platform/ARMH0011:03/ARMH0011:03:0 phys=/sys/devices/platform/ARMH0011:03/ARMH0011:03:0/ARMH0011:03:0.0
+CIXA1019:00 path=\_SB_.REST hid=CIXA1019 uid=0 status=11 adr= phys=/sys/devices/platform/CIXA1019:00
+CIXH1002:00 path=\_SB_.GPI0 hid=CIXH1002 uid=0 status=15 adr= phys=/sys/devices/platform/CIXH1002:00 phys=/sys/devices/platform/CIXH1002:00/gpiochip0
+CIXH1003:00 path=\_SB_.GPI1 hid=CIXH1003 uid=1 status=15 adr= phys=/sys/devices/platform/CIXH1003:00 phys=/sys/devices/platform/CIXH1003:00/gpiochip1
+CIXH1003:01 path=\_SB_.GPI2 hid=CIXH1003 uid=2 status=15 adr= phys=/sys/devices/platform/CIXH1003:01 phys=/sys/devices/platform/CIXH1003:01/gpiochip2
+CIXH1003:02 path=\_SB_.GPI3 hid=CIXH1003 uid=3 status=15 adr= phys=/sys/devices/platform/CIXH1003:02 phys=/sys/devices/platform/CIXH1003:02/gpiochip3
+CIXH1003:03 path=\_SB_.GPI4 hid=CIXH1003 uid=4 status=15 adr= phys=/sys/devices/platform/CIXH1003:03 phys=/sys/devices/platform/CIXH1003:03/gpiochip4
+CIXH1003:04 path=\_SB_.GPI5 hid=CIXH1003 uid=5 status=15 adr= phys=/sys/devices/platform/CIXH1003:04 phys=/sys/devices/platform/CIXH1003:04/gpiochip5
+CIXH1003:05 path=\_SB_.GPI6 hid=CIXH1003 uid=6 status=15 adr= phys=/sys/devices/platform/CIXH1003:05 phys=/sys/devices/platform/CIXH1003:05/gpiochip6
+CIXH1006:00 path=\_SB_.DMA1 hid=CIXH1006 uid=0 status=11 adr= phys=/sys/devices/platform/CIXH1006:00
+CIXH1007:00 path=\_SB_.TMR0 hid=CIXH1007 uid=0 status=11 adr= phys=/sys/devices/platform/CIXH1007:00
+CIXH2001:00 path=\_SB_.SPI0 hid=CIXH2001 uid=0 status=15 adr= phys=/sys/devices/platform/CIXH2001:00
+CIXH2001:01 path=\_SB_.SPI1 hid=CIXH2001 uid=1 status=0 adr=
+CIXH2002:00 path=\_SB_.XSPI hid=CIXH2002 uid=0 status=0 adr=
+CIXH200B:00 path=\_SB_.I2C0 hid=CIXH200B uid=0 status=15 adr= phys=/sys/devices/platform/CIXH200B:00 phys=/sys/devices/platform/CIXH200B:00/i2c-6
+CIXH200B:01 path=\_SB_.I2C1 hid=CIXH200B uid=1 status=15 adr= phys=/sys/devices/platform/CIXH200B:01 phys=/sys/devices/platform/CIXH200B:01/i2c-0
+CIXH200B:02 path=\_SB_.I2C2 hid=CIXH200B uid=2 status=15 adr= phys=/sys/devices/platform/CIXH200B:02 phys=/sys/devices/platform/CIXH200B:02/i2c-7
+CIXH200B:03 path=\_SB_.I2C3 hid=CIXH200B uid=3 status=15 adr= phys=/sys/devices/platform/CIXH200B:03 phys=/sys/devices/platform/CIXH200B:03/i2c-8
+CIXH200B:04 path=\_SB_.I2C4 hid=CIXH200B uid=4 status=15 adr= phys=/sys/devices/platform/CIXH200B:04 phys=/sys/devices/platform/CIXH200B:04/i2c-9
+CIXH200B:05 path=\_SB_.I2C5 hid=CIXH200B uid=5 status=15 adr= phys=/sys/devices/platform/CIXH200B:05 phys=/sys/devices/platform/CIXH200B:05/i2c-10
+CIXH200B:06 path=\_SB_.I2C6 hid=CIXH200B uid=6 status=0 adr=
+CIXH200B:07 path=\_SB_.I2C7 hid=CIXH200B uid=7 status=15 adr= phys=/sys/devices/platform/CIXH200B:07 phys=/sys/devices/platform/CIXH200B:07/i2c-1
+CIXH200C:00 path=\_SB_.I3C0 hid=CIXH200C uid=0 status=0 adr=
+CIXH200C:01 path=\_SB_.I3C1 hid=CIXH200C uid=1 status=0 adr=
+CIXH200D:00 path=\_SB_.I2C7.PD00 hid=CIXH200D uid=1 status=11 adr= phys=/sys/devices/platform/CIXH200B:07/i2c-1/i2c-CIXH200D:00
+CIXH200D:01 path=\_SB_.I2C7.PD01 hid=CIXH200D uid=2 status=11 adr= phys=/sys/devices/platform/CIXH200B:07/i2c-1/i2c-CIXH200D:01
+CIXH2011:00 path=\_SB_.PWM0 hid=CIXH2011 uid=0 status=11 adr= phys=/sys/devices/platform/CIXH2011:00
+CIXH2011:01 path=\_SB_.PWM1 hid=CIXH2011 uid=1 status=0 adr=
+CIXH2011:02 path=\_SB_.PWM3 hid=CIXH2011 uid=3 status=0 adr=
+CIXH2011:03 path=\_SB_.PWM5 hid=CIXH2011 uid=5 status=0 adr=
+CIXH2020:00 path=\_SB_.PRC0 hid=CIXH2020 uid=0 status=11 adr= phys=/sys/devices/platform/sky1-pcie.2.auto phys=/sys/devices/platform/sky1-pcie.2.auto/pci0000:c0
+CIXH2020:01 path=\_SB_.PRC1 hid=CIXH2020 uid=1 status=11 adr= phys=/sys/devices/platform/sky1-pcie.3.auto phys=/sys/devices/platform/sky1-pcie.3.auto/pci0000:90
+CIXH2020:02 path=\_SB_.PRC2 hid=CIXH2020 uid=2 status=11 adr= phys=/sys/devices/platform/sky1-pcie.4.auto phys=/sys/devices/platform/sky1-pcie.4.auto/pci0000:60
+CIXH2020:03 path=\_SB_.PRC3 hid=CIXH2020 uid=3 status=11 adr= phys=/sys/devices/platform/sky1-pcie.5.auto phys=/sys/devices/platform/sky1-pcie.5.auto/pci0000:30
+CIXH2020:04 path=\_SB_.PRC4 hid=CIXH2020 uid=4 status=0 adr=
+CIXH2023:00 path=\_SB_.PCP0 hid=CIXH2023 uid=0 status=11 adr= phys=/sys/devices/platform/CIXH2023:00
+CIXH2023:01 path=\_SB_.PCP1 hid=CIXH2023 uid=1 status=11 adr= phys=/sys/devices/platform/CIXH2023:01
+CIXH2023:02 path=\_SB_.PCP2 hid=CIXH2023 uid=2 status=11 adr= phys=/sys/devices/platform/CIXH2023:02
+CIXH2030:00 path=\_SB_.SUB0 hid=CIXH2030 uid=0 status=11 adr= phys=/sys/devices/platform/CIXH2030:00
+CIXH2030:01 path=\_SB_.SUB1 hid=CIXH2030 uid=1 status=11 adr= phys=/sys/devices/platform/CIXH2030:01
+CIXH2030:02 path=\_SB_.SUB2 hid=CIXH2030 uid=2 status=11 adr= phys=/sys/devices/platform/CIXH2030:02
+CIXH2030:03 path=\_SB_.SUB3 hid=CIXH2030 uid=3 status=11 adr= phys=/sys/devices/platform/CIXH2030:03
+CIXH2030:04 path=\_SB_.SUB4 hid=CIXH2030 uid=4 status=11 adr= phys=/sys/devices/platform/CIXH2030:04
+CIXH2030:05 path=\_SB_.SUB5 hid=CIXH2030 uid=5 status=11 adr= phys=/sys/devices/platform/CIXH2030:05
+CIXH2030:06 path=\_SB_.HUB0 hid=CIXH2030 uid=6 status=11 adr= phys=/sys/devices/platform/CIXH2030:06
+CIXH2030:07 path=\_SB_.HUB1 hid=CIXH2030 uid=7 status=11 adr= phys=/sys/devices/platform/CIXH2030:07
+CIXH2030:08 path=\_SB_.HUB2 hid=CIXH2030 uid=8 status=11 adr= phys=/sys/devices/platform/CIXH2030:08
+CIXH2030:09 path=\_SB_.HUB3 hid=CIXH2030 uid=9 status=11 adr= phys=/sys/devices/platform/CIXH2030:09
+CIXH2031:00 path=\_SB_.SUB0.CUB0 hid=CIXH2031 uid=0 status=11 adr= phys=/sys/devices/platform/CIXH2030:00/CIXH2031:00 phys=/sys/devices/platform/CIXH2030:00/CIXH2031:00/usb_role/CIXH2031:00-role-switch
+CIXH2031:01 path=\_SB_.SUB1.CUB1 hid=CIXH2031 uid=1 status=11 adr= phys=/sys/devices/platform/CIXH2030:01/CIXH2031:01 phys=/sys/devices/platform/CIXH2030:01/CIXH2031:01/usb_role/CIXH2031:01-role-switch
+CIXH2031:02 path=\_SB_.SUB2.CUB2 hid=CIXH2031 uid=2 status=11 adr= phys=/sys/devices/platform/CIXH2030:02/CIXH2031:02
+CIXH2031:03 path=\_SB_.SUB3.CUB3 hid=CIXH2031 uid=3 status=11 adr= phys=/sys/devices/platform/CIXH2030:03/CIXH2031:03
+CIXH2031:04 path=\_SB_.SUB4.CUB4 hid=CIXH2031 uid=4 status=11 adr= phys=/sys/devices/platform/CIXH2030:04/CIXH2031:04
+CIXH2031:05 path=\_SB_.SUB5.CUB5 hid=CIXH2031 uid=5 status=11 adr= phys=/sys/devices/platform/CIXH2030:05/CIXH2031:05
+CIXH2031:06 path=\_SB_.HUB0.CUB0 hid=CIXH2031 uid=0 status=11 adr= phys=/sys/devices/platform/CIXH2030:06/CIXH2031:06
+CIXH2031:07 path=\_SB_.HUB1.CUB1 hid=CIXH2031 uid=1 status=11 adr= phys=/sys/devices/platform/CIXH2030:07/CIXH2031:07
+CIXH2031:08 path=\_SB_.HUB2.CUB2 hid=CIXH2031 uid=2 status=11 adr= phys=/sys/devices/platform/CIXH2030:08/CIXH2031:08
+CIXH2031:09 path=\_SB_.HUB3.CUB3 hid=CIXH2031 uid=3 status=11 adr= phys=/sys/devices/platform/CIXH2030:09/CIXH2031:09
+CIXH2032:00 path=\_SB_.U2P4 hid=CIXH2032 uid=4 status=11 adr= phys=/sys/devices/platform/CIXH2032:00
+CIXH2032:01 path=\_SB_.U2P5 hid=CIXH2032 uid=5 status=11 adr= phys=/sys/devices/platform/CIXH2032:01
+CIXH2032:02 path=\_SB_.U2P8 hid=CIXH2032 uid=8 status=11 adr= phys=/sys/devices/platform/CIXH2032:02
+CIXH2032:03 path=\_SB_.U2P9 hid=CIXH2032 uid=9 status=11 adr= phys=/sys/devices/platform/CIXH2032:03
+CIXH2032:04 path=\_SB_.U2P6 hid=CIXH2032 uid=6 status=11 adr= phys=/sys/devices/platform/CIXH2032:04
+CIXH2032:05 path=\_SB_.U2P7 hid=CIXH2032 uid=7 status=11 adr= phys=/sys/devices/platform/CIXH2032:05
+CIXH2032:06 path=\_SB_.U2P0 hid=CIXH2032 uid=0 status=11 adr= phys=/sys/devices/platform/CIXH2032:06
+CIXH2032:07 path=\_SB_.U2P1 hid=CIXH2032 uid=1 status=11 adr= phys=/sys/devices/platform/CIXH2032:07
+CIXH2032:08 path=\_SB_.U2P2 hid=CIXH2032 uid=2 status=11 adr= phys=/sys/devices/platform/CIXH2032:08
+CIXH2032:09 path=\_SB_.U2P3 hid=CIXH2032 uid=3 status=11 adr= phys=/sys/devices/platform/CIXH2032:09
+CIXH2033:00 path=\_SB_.UCP0 hid=CIXH2033 uid=0 status=11 adr= phys=/sys/devices/platform/CIXH2033:00 phys=/sys/devices/platform/CIXH2033:00/typec_mux/CIXH2033:00-switch phys=/sys/devices/platform/CIXH2033:00/typec_mux/CIXH2033:00-mux
+CIXH2033:01 path=\_SB_.UCP1 hid=CIXH2033 uid=1 status=11 adr= phys=/sys/devices/platform/CIXH2033:01 phys=/sys/devices/platform/CIXH2033:01/typec_mux/CIXH2033:01-switch phys=/sys/devices/platform/CIXH2033:01/typec_mux/CIXH2033:01-mux
+CIXH2033:02 path=\_SB_.UCP2 hid=CIXH2033 uid=2 status=11 adr= phys=/sys/devices/platform/CIXH2033:02
+CIXH2033:03 path=\_SB_.UCP3 hid=CIXH2033 uid=3 status=11 adr= phys=/sys/devices/platform/CIXH2033:03
+CIXH2034:00 path=\_SB_.U3P4 hid=CIXH2034 uid=4 status=11 adr= phys=/sys/devices/platform/CIXH2034:00
+CIXH3010:00 path=\_SB_.VPU0 hid=CIXH3010 uid=0 status=11 adr= phys=/sys/devices/platform/CIXH3010:00
+CIXH3020:00 path=\_SB_.V4L2 hid=CIXH3020 uid=0 status=11 adr= phys=/sys/devices/platform/CIXH3020:00
+CIXH3021:00 path=\_SB_.ISP0 hid=CIXH3021 uid=0 status=11 adr= phys=/sys/devices/platform/CIXH3021:00
+CIXH3022:00 path=\_SB_.ISP1 hid=CIXH3022 uid=0 status=0 adr=
+CIXH3022:01 path=\_SB_.ISP2 hid=CIXH3022 uid=1 status=0 adr=
+CIXH3022:02 path=\_SB_.ISP3 hid=CIXH3022 uid=2 status=0 adr=
+CIXH3023:00 path=\_SB_.I2C0.MTR0 hid=CIXH3023 uid=0 status=11 adr= phys=/sys/devices/platform/CIXH200B:00/i2c-6/i2c-CIXH3023:00
+CIXH3024:00 path=\_SB_.I2C0.IIS0 hid=CIXH3024 uid=0 status=11 adr= phys=/sys/devices/platform/CIXH200B:00/i2c-6/i2c-CIXH3024:00
+CIXH3024:01 path=\_SB_.I2C1.IIS2 hid=CIXH3024 uid=2 status=11 adr= phys=/sys/devices/platform/CIXH200B:01/i2c-0/i2c-CIXH3024:01
+CIXH3024:02 path=\_SB_.I2C1.IIS1 hid=CIXH3024 uid=1 status=11 adr= phys=/sys/devices/platform/CIXH200B:01/i2c-0/i2c-CIXH3024:02
+CIXH3025:00 path=\_SB_.ISPM hid=CIXH3025 uid=0 status=11 adr= phys=/sys/devices/platform/CIXH3025:00
+CIXH3026:00 path=\_SB_.VIHW hid=CIXH3026 uid=0 status=11 adr= phys=/sys/devices/platform/CIXH3026:00
+CIXH3027:00 path=\_SB_.CSI0 hid=CIXH3027 uid=0 status=11 adr= phys=/sys/devices/platform/CIXH3027:00
+CIXH3027:01 path=\_SB_.CSI1 hid=CIXH3027 uid=1 status=0 adr=
+CIXH3028:00 path=\_SB_.CBD0 hid=CIXH3028 uid=0 status=11 adr= phys=/sys/devices/platform/CIXH3028:00
+CIXH3028:01 path=\_SB_.CBD1 hid=CIXH3028 uid=1 status=0 adr=
+CIXH3028:02 path=\_SB_.CBD2 hid=CIXH3028 uid=2 status=0 adr=
+CIXH3028:03 path=\_SB_.CBD3 hid=CIXH3028 uid=3 status=0 adr=
+CIXH3029:00 path=\_SB_.MPC0 hid=CIXH3029 uid=0 status=11 adr= phys=/sys/devices/platform/CIXH3029:00
+CIXH3029:01 path=\_SB_.MPC1 hid=CIXH3029 uid=1 status=0 adr=
+CIXH3029:02 path=\_SB_.MPC2 hid=CIXH3029 uid=2 status=0 adr=
+CIXH3029:03 path=\_SB_.MPC3 hid=CIXH3029 uid=3 status=0 adr=
+CIXH302A:00 path=\_SB_.DPH0 hid=CIXH302A uid=0 status=11 adr= phys=/sys/devices/platform/CIXH302A:00
+CIXH302A:01 path=\_SB_.DPH1 hid=CIXH302A uid=1 status=0 adr=
+CIXH302B:00 path=\_SB_.DPR0 hid=CIXH302B uid=0 status=0 adr=
+CIXH302B:01 path=\_SB_.DPR1 hid=CIXH302B uid=1 status=11 adr= phys=/sys/devices/platform/CIXH302B:01
+CIXH302B:02 path=\_SB_.DPR2 hid=CIXH302B uid=2 status=0 adr=
+CIXH302B:03 path=\_SB_.DPR3 hid=CIXH302B uid=3 status=0 adr=
+CIXH302B:04 path=\_SB_.DPR4 hid=CIXH302B uid=4 status=0 adr=
+CIXH302B:05 path=\_SB_.DPR5 hid=CIXH302B uid=5 status=0 adr=
+CIXH4000:00 path=\_SB_.NPU0 hid=CIXH4000 uid=0 status=11 adr= phys=/sys/devices/platform/CIXH4000:00
+CIXH4010:00 path=\_SB_.NPU0.CRE0 hid=CIXH4010 uid=0 status=11 adr= phys=/sys/devices/platform/CIXH4000:00/CIXH4010:00
+CIXH4010:01 path=\_SB_.NPU0.CRE1 hid=CIXH4010 uid=1 status=11 adr= phys=/sys/devices/platform/CIXH4000:00/CIXH4010:01
+CIXH4010:02 path=\_SB_.NPU0.CRE2 hid=CIXH4010 uid=2 status=11 adr= phys=/sys/devices/platform/CIXH4000:00/CIXH4010:02
+CIXH5000:00 path=\_SB_.GPU_ hid=CIXH5000 uid=0 status=11 adr= phys=/sys/devices/platform/CIXH5000:00
+CIXH5001:00 path=\_SB_.GPUP hid=CIXH5001 uid=0 status=11 adr= phys=/sys/devices/platform/CIXH5001:00
+CIXH5010:00 path=\_SB_.DPU0 hid=CIXH5010 uid=0 status=11 adr= phys=/sys/devices/platform/CIXH5010:00
+CIXH5010:01 path=\_SB_.DPU1 hid=CIXH5010 uid=1 status=11 adr= phys=/sys/devices/platform/CIXH5010:01
+CIXH5010:02 path=\_SB_.DPU2 hid=CIXH5010 uid=2 status=11 adr= phys=/sys/devices/platform/CIXH5010:02
+CIXH5010:03 path=\_SB_.DPU3 hid=CIXH5010 uid=3 status=11 adr= phys=/sys/devices/platform/CIXH5010:03
+CIXH5010:04 path=\_SB_.DPU4 hid=CIXH5010 uid=4 status=11 adr= phys=/sys/devices/platform/CIXH5010:04
+CIXH5011:00 path=\_SB_.AEU0 hid=CIXH5011 uid=0 status=0 adr=
+CIXH5011:01 path=\_SB_.AEU1 hid=CIXH5011 uid=1 status=0 adr=
+CIXH5011:02 path=\_SB_.AEU2 hid=CIXH5011 uid=2 status=0 adr=
+CIXH5011:03 path=\_SB_.AEU3 hid=CIXH5011 uid=3 status=0 adr=
+CIXH5011:04 path=\_SB_.AEU4 hid=CIXH5011 uid=4 status=0 adr=
+CIXH502F:00 path=\_SB_.DP00 hid=CIXH502F uid=0 status=11 adr= phys=/sys/devices/platform/CIXH502F:00
+CIXH502F:01 path=\_SB_.DP01 hid=CIXH502F uid=1 status=11 adr= phys=/sys/devices/platform/CIXH502F:01
+CIXH502F:02 path=\_SB_.DP02 hid=CIXH502F uid=2 status=11 adr= phys=/sys/devices/platform/CIXH502F:02
+CIXH502F:03 path=\_SB_.DP03 hid=CIXH502F uid=3 status=11 adr= phys=/sys/devices/platform/CIXH502F:03
+CIXH502F:04 path=\_SB_.DP04 hid=CIXH502F uid=4 status=11 adr= phys=/sys/devices/platform/CIXH502F:04
+CIXH503F:00 path=\_SB_.VDP0 hid=CIXH503F uid=0 status=0 adr=
+CIXH503F:01 path=\_SB_.VDP1 hid=CIXH503F uid=1 status=0 adr=
+CIXH503F:02 path=\_SB_.VDP2 hid=CIXH503F uid=2 status=0 adr=
+CIXH503F:03 path=\_SB_.VDP3 hid=CIXH503F uid=3 status=0 adr=
+CIXH503F:04 path=\_SB_.VDP4 hid=CIXH503F uid=4 status=0 adr=
+CIXH503F:05 path=\_SB_.VDP5 hid=CIXH503F uid=5 status=0 adr=
+CIXH503F:06 path=\_SB_.VDP6 hid=CIXH503F uid=6 status=0 adr=
+CIXH503F:07 path=\_SB_.VDP7 hid=CIXH503F uid=7 status=0 adr=
+CIXH503F:08 path=\_SB_.VDP8 hid=CIXH503F uid=8 status=0 adr=
+CIXH503F:09 path=\_SB_.VDP9 hid=CIXH503F uid=9 status=0 adr=
+CIXH5040:00 path=\_SB_.EDP0 hid=CIXH5040 uid=0 status=11 adr= phys=/sys/devices/platform/CIXH5040:00
+CIXH5041:00 path=\_SB_.DPBL hid=CIXH5041 uid=0 status=11 adr= phys=/sys/devices/platform/CIXH5041:00
+CIXH6000:00 path=\_SB_.DSP_ hid=CIXH6000 uid=0 status=11 adr= phys=/sys/devices/platform/CIXH6000:00
+CIXH6010:00 path=\_SB_.I2S0 hid=CIXH6010 uid=0 status=0 adr=
+CIXH6010:01 path=\_SB_.I2S1 hid=CIXH6010 uid=1 status=0 adr=
+CIXH6010:02 path=\_SB_.I2S2 hid=CIXH6010 uid=2 status=0 adr=
+CIXH6011:00 path=\_SB_.I2S3 hid=CIXH6011 uid=3 status=0 adr=
+CIXH6011:01 path=\_SB_.I2S4 hid=CIXH6011 uid=4 status=0 adr=
+CIXH6011:02 path=\_SB_.I2S5 hid=CIXH6011 uid=5 status=11 adr= phys=/sys/devices/platform/CIXH6011:02
+CIXH6011:03 path=\_SB_.I2S6 hid=CIXH6011 uid=6 status=11 adr= phys=/sys/devices/platform/CIXH6011:03
+CIXH6011:04 path=\_SB_.I2S7 hid=CIXH6011 uid=7 status=0 adr=
+CIXH6011:05 path=\_SB_.I2S8 hid=CIXH6011 uid=8 status=11 adr= phys=/sys/devices/platform/CIXH6011:05
+CIXH6011:06 path=\_SB_.I2S9 hid=CIXH6011 uid=9 status=11 adr= phys=/sys/devices/platform/CIXH6011:06
+CIXH6020:00 path=\_SB_.HDA_ hid=CIXH6020 uid=0 status=11 adr= phys=/sys/devices/platform/CIXH6020:00
+CIXH6060:00 path=\_SB_.ADSS hid=CIXH6060 uid=0 status=11 adr= phys=/sys/devices/platform/CIXH6060:00
+CIXH6061:00 path=\_SB_.ADSS.ACLK hid=CIXH6061 uid=0 status=11 adr= phys=/sys/devices/platform/CIXH6060:00/CIXH6061:00
+CIXH6062:00 path=\_SB_.ADSS.ARST hid=CIXH6062 uid=0 status=11 adr= phys=/sys/devices/platform/CIXH6060:00/CIXH6062:00
+CIXH6070:00 path=\_SB_.SNDC hid=CIXH6070 uid=0 status=11 adr= phys=/sys/devices/platform/CIXH6070:00
+CIXH7020:00 path=\_SB_.MAC0 hid=CIXH7020 uid=0 status=0 adr=
+CIXH7020:01 path=\_SB_.MAC1 hid=CIXH7020 uid=1 status=0 adr=
+CIXHA000:00 path=\_SB_.PMMX hid=CIXHA000 uid= status=3 adr= phys=/sys/devices/platform/CIXHA000:00
+CIXHA001:00 path=\_SB_.MBX0 hid=CIXHA001 uid=0 status=11 adr= phys=/sys/devices/platform/CIXHA001:00
+CIXHA001:01 path=\_SB_.MBX1 hid=CIXHA001 uid=1 status=11 adr= phys=/sys/devices/platform/CIXHA001:01
+CIXHA001:02 path=\_SB_.MBX2 hid=CIXHA001 uid=2 status=0 adr=
+CIXHA001:03 path=\_SB_.MBX3 hid=CIXHA001 uid=3 status=0 adr=
+CIXHA001:04 path=\_SB_.MBX4 hid=CIXHA001 uid=4 status=11 adr= phys=/sys/devices/platform/CIXHA001:04
+CIXHA001:05 path=\_SB_.MBX5 hid=CIXHA001 uid=5 status=11 adr= phys=/sys/devices/platform/CIXHA001:05
+CIXHA001:06 path=\_SB_.MBX6 hid=CIXHA001 uid=6 status=11 adr= phys=/sys/devices/platform/CIXHA001:06
+CIXHA001:07 path=\_SB_.MBX7 hid=CIXHA001 uid=7 status=11 adr= phys=/sys/devices/platform/CIXHA001:07
+CIXHA004:00 path=\_SB_.SHM0 hid=CIXHA004 uid=0 status=11 adr= phys=/sys/devices/platform/CIXHA004:00
+CIXHA005:00 path=\_SB_.SHM1 hid=CIXHA005 uid=0 status=11 adr= phys=/sys/devices/platform/CIXHA005:00
+CIXHA006:00 path=\_SB_.SCMI hid=CIXHA006 uid=0 status=11 adr= phys=/sys/devices/platform/CIXHA006:00 phys=/sys/devices/platform/CIXHA006:00/arm-scmi.6.auto phys=/sys/devices/platform/CIXHA006:00/arm-scmi.6.auto/scmi_dev.1 phys=/sys/devices/platform/CIXHA006:00/arm-scmi.6.auto/scmi_dev.2
+CIXHA008:00 path=\_SB_.SCMI.DVFS hid=CIXHA008 uid=0 status=0 adr= phys=/sys/devices/platform/CIXHA006:00/CIXHA008:00 phys=/sys/devices/platform/CIXHA006:00/arm-scmi.6.auto/scmi_dev.3
+CIXHA009:00 path=\_SB_.SCMI.CLKS hid=CIXHA009 uid=0 status=0 adr= phys=/sys/devices/platform/CIXHA006:00/CIXHA009:00 phys=/sys/devices/platform/CIXHA006:00/arm-scmi.6.auto/scmi_dev.4
+CIXHA010:00 path=\_SB_.CCLK hid=CIXHA010 uid=0 status=11 adr= phys=/sys/devices/platform/CIXHA010:00
+CIXHA012:00 path=\_SB_.PMA_ hid=CIXHA012 uid=0 status=3 adr= phys=/sys/devices/platform/CIXHA012:00
+CIXHA013:00 path=\_SB_.PMGM hid=CIXHA013 uid=0 status=3 adr= phys=/sys/devices/platform/CIXHA013:00
+CIXHA014:00 path=\_SB_.DMA0 hid=CIXHA014 uid=0 status=11 adr= phys=/sys/devices/platform/CIXHA014:00
+CIXHA015:00 path=\_SB_.EC0_ hid=CIXHA015 uid=0 status=3 adr= phys=/sys/devices/platform/CIXHA015:00
+CIXHA016:00 path=\_SB_.MUX0 hid=CIXHA016 uid=0 status=11 adr= phys=/sys/devices/platform/CIXHA016:00
+CIXHA017:00 path=\_SB_.MUX1 hid=CIXHA017 uid=1 status=11 adr= phys=/sys/devices/platform/CIXHA017:00
+CIXHA018:00 path=\_SB_.UCRU hid=CIXHA018 uid=2 status=11 adr= phys=/sys/devices/platform/CIXHA018:00
+CIXHA018:01 path=\_SB_.CRU0 hid=CIXHA018 uid=4 status=11 adr= phys=/sys/devices/platform/CIXHA018:01
+CIXHA018:02 path=\_SB_.GCRU hid=CIXHA018 uid=3 status=0 adr=
+CIXHA018:03 path=\_SB_.ACRU hid=CIXHA018 uid=0 status=11 adr= phys=/sys/devices/platform/CIXHA018:03
+CIXHA018:04 path=\_SB_.DCRU hid=CIXHA018 uid=1 status=11 adr= phys=/sys/devices/platform/CIXHA018:04
+CIXHA019:00 path=\_SB_.PDC0 hid=CIXHA019 uid=0 status=11 adr= phys=/sys/devices/platform/CIXHA019:00
+CIXHA020:00 path=\_SB_.RST0 hid=CIXHA020 uid=0 status=11 adr= phys=/sys/devices/platform/CIXHA020:00
+CIXHA021:00 path=\_SB_.RST1 hid=CIXHA021 uid=0 status=11 adr= phys=/sys/devices/platform/CIXHA021:00
+CIXHA022:00 path=\_SB_.TEE0 hid=CIXHA022 uid=0 status=11 adr= phys=/sys/devices/platform/CIXHA022:00
+CIXHA023:00 path=\_SB_.TREE hid=CIXHA023 uid=0 status=11 adr= phys=/sys/devices/platform/CIXHA023:00
+CIXHA024:00 path=\_SB_.HWMN hid=CIXHA024 uid=0 status=3 adr= phys=/sys/devices/platform/CIXHA024:00
+CIXHA026:00 path=\_SB_.PEP0 hid=CIXHA026 uid=0 status=11 adr= phys=/sys/devices/platform/CIXHA026:00
+device:00 path=\_SB_.MAC0.PHY0 hid= uid= status= adr=0x00000001
+device:01 path=\_SB_.MAC1.PHY1 hid= uid= status= adr=0x00000002
+device:02 path=\_SB_.PCP0.PX8P hid= uid= status= adr=0x00000000
+device:03 path=\_SB_.PCP1.PX4P hid= uid= status= adr=0x00000000
+device:04 path=\_SB_.PCP2.PX10 hid= uid= status=11 adr=0x00000000
+device:05 path=\_SB_.PCP2.PX11 hid= uid= status=11 adr=0x00000001
+device:06 path=\_SB_.PCP2.PX2P hid= uid= status=11 adr=0x00000002
+device:07 path=\_SB_.VPU0.CRE0 hid= uid= status=11 adr=0x00000000
+device:08 path=\_SB_.VPU0.CRE1 hid= uid= status=11 adr=0x00000001
+device:09 path=\_SB_.VPU0.CRE2 hid= uid= status=11 adr=0x00000002
+device:0a path=\_SB_.VPU0.CRE3 hid= uid= status=11 adr=0x00000003
+device:0b path=\_SB_.UCP0.USBP hid= uid= status= adr=0x00000000
+device:0c path=\_SB_.UCP0.UDPP hid= uid= status= adr=0x00000001
+device:0d path=\_SB_.UCP1.USBP hid= uid= status= adr=0x00000000
+device:0e path=\_SB_.UCP1.UDPP hid= uid= status= adr=0x00000001
+device:0f path=\_SB_.UCP2.USBP hid= uid= status= adr=0x00000000
+device:10 path=\_SB_.UCP2.UDPP hid= uid= status= adr=0x00000001
+device:11 path=\_SB_.UCP3.USBP hid= uid= status= adr=0x00000000
+device:12 path=\_SB_.UCP3.UDPP hid= uid= status= adr=0x00000001
+device:13 path=\_SB_.U3P4.USB0 hid= uid= status= adr=0x00000000
+device:14 path=\_SB_.U3P4.USB1 hid= uid= status= adr=0x00000001
+GPIT0000:00 path=\_SB_.GPIT hid=GPIT0000 uid=0 status=15 adr= phys=/sys/devices/platform/GPIT0000:00
+LNXPOWER:00 path=\_SB_.ADSS.ACLK.PPRS hid=LNXPOWER uid= status=1 adr=
+LNXPOWER:01 path=\_SB_.VPU0.PPRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:02 path=\_SB_.VPU0.CRE0.PRS0 hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:03 path=\_SB_.VPU0.CRE1.PRS1 hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:04 path=\_SB_.VPU0.CRE2.PRS2 hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:05 path=\_SB_.VPU0.CRE3.PRS3 hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:06 path=\_SB_.DPU0.PRS0 hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:07 path=\_SB_.DPU1.PRS1 hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:08 path=\_SB_.DPU2.PRS2 hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:09 path=\_SB_.DPU3.PRS3 hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:0a path=\_SB_.DPU4.PRS4 hid=LNXPOWER uid= status=1 adr=
+LNXPOWER:0b path=\_SB_.GPUP.PPRS hid=LNXPOWER uid= status=1 adr=
+LNXPOWER:0c path=\_SB_.NPU0.PPRS hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:0d path=\_SB_.NPU0.CRE0.PRS0 hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:0e path=\_SB_.NPU0.CRE1.PRS1 hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:0f path=\_SB_.NPU0.CRE2.PRS2 hid=LNXPOWER uid= status=0 adr=
+LNXPOWER:10 path=\_SB_.ISPM.PRS0 hid=LNXPOWER uid= status=0 adr=
+LNXSYBUS:00 path=\_SB_ hid=LNXSYBUS uid= status= adr=
+LNXSYBUS:01 path=\_TZ_ hid=LNXSYBUS uid= status= adr=
+LNXSYSTM:00 path=\ hid=LNXSYSTM uid= status= adr=
+LNXTHERM:00 path=\_SB_.TZVU hid=LNXTHERM uid= status= adr= phys=/sys/devices/platform/LNXTHERM:00
+LNXTHERM:01 path=\_SB_.TZGB hid=LNXTHERM uid= status= adr= phys=/sys/devices/platform/LNXTHERM:01
+LNXTHERM:02 path=\_SB_.TZBR hid=LNXTHERM uid= status= adr= phys=/sys/devices/platform/LNXTHERM:02
+LNXTHERM:03 path=\_SB_.TZDB hid=LNXTHERM uid= status= adr= phys=/sys/devices/platform/LNXTHERM:03
+LNXTHERM:04 path=\_SB_.TZDT hid=LNXTHERM uid= status= adr= phys=/sys/devices/platform/LNXTHERM:04
+LNXTHERM:05 path=\_SB_.TZCT hid=LNXTHERM uid= status= adr= phys=/sys/devices/platform/LNXTHERM:05
+LNXTHERM:06 path=\_SB_.TZNU hid=LNXTHERM uid= status= adr= phys=/sys/devices/platform/LNXTHERM:06
+LNXTHERM:07 path=\_SB_.TZB0 hid=LNXTHERM uid= status= adr= phys=/sys/devices/platform/LNXTHERM:07
+LNXTHERM:08 path=\_SB_.TZB1 hid=LNXTHERM uid= status= adr= phys=/sys/devices/platform/LNXTHERM:08
+LNXTHERM:09 path=\_SB_.TZM0 hid=LNXTHERM uid= status= adr= phys=/sys/devices/platform/LNXTHERM:09
+LNXTHERM:0a path=\_SB_.TZM1 hid=LNXTHERM uid= status= adr= phys=/sys/devices/platform/LNXTHERM:0a
+LNXTHERM:0b path=\_SB_.TZTR hid=LNXTHERM uid= status= adr= phys=/sys/devices/platform/LNXTHERM:0b
+LNXTHERM:0c path=\_SB_.TZGT hid=LNXTHERM uid= status= adr= phys=/sys/devices/platform/LNXTHERM:0c
+MSFT0101:00 path=\_SB_.DTPM hid=MSFT0101 uid=1 status=11 adr=
+PNP0A08:00 path=\_SB_.PCI0 hid=PNP0A08 uid=0 status=15 adr=
+PNP0A08:01 path=\_SB_.PCI1 hid=PNP0A08 uid=1 status=15 adr=
+PNP0A08:02 path=\_SB_.PCI2 hid=PNP0A08 uid=2 status=15 adr=
+PNP0A08:03 path=\_SB_.PCI3 hid=PNP0A08 uid=3 status=15 adr=
+PNP0A08:04 path=\_SB_.PCI4 hid=PNP0A08 uid=4 status=0 adr=
+PNP0C02:00 path=\_SB_.RES0 hid=PNP0C02 uid=0 status= adr=
+PNP0C0A:00 path=\_SB_.BAT0 hid=PNP0C0A uid=0 status=15 adr= phys=/sys/devices/platform/PNP0C0A:00
+PNP0C0C:00 path=\_SB_.PWRB hid=PNP0C0C uid= status=15 adr= phys=/sys/devices/platform/PNP0C0C:00
+PNP0D10:00 path=\_SB_.XHC0 hid=PNP0D10 uid=0 status=15 adr=
+PNP0D10:01 path=\_SB_.XHC1 hid=PNP0D10 uid=1 status=15 adr=
+PNP0D10:02 path=\_SB_.XHC2 hid=PNP0D10 uid=2 status=15 adr=
+PNP0D10:03 path=\_SB_.XHC3 hid=PNP0D10 uid=3 status=15 adr=
+PNP0D10:04 path=\_SB_.XHC4 hid=PNP0D10 uid=4 status=15 adr=
+PNP0D10:05 path=\_SB_.XHC5 hid=PNP0D10 uid=5 status=15 adr=
+PNP0D10:06 path=\_SB_.USB0 hid=PNP0D10 uid=6 status=15 adr=
+PNP0D10:07 path=\_SB_.USB1 hid=PNP0D10 uid=7 status=15 adr=
+PNP0D10:08 path=\_SB_.USB2 hid=PNP0D10 uid=8 status=15 adr=
+PNP0D10:09 path=\_SB_.USB3 hid=PNP0D10 uid=9 status=15 adr=
+PRP0001:00 path=\_SB_.DSTD hid=PRP0001 uid=0 status=11 adr= phys=/sys/devices/platform/PRP0001:00
+PRP0001:01 path=\_SB_.DSTD.EXTR hid=PRP0001 uid=1 status=11 adr= phys=/sys/devices/platform/PRP0001:00/PRP0001:01
+PRP0001:02 path=\_SB_.DSTD.APAD hid=PRP0001 uid=2 status=11 adr= phys=/sys/devices/platform/PRP0001:00/PRP0001:02
+PRP0001:03 path=\_SB_.RAOP hid=PRP0001 uid=18 status=3 adr= phys=/sys/devices/platform/PRP0001:03
+PRP0001:04 path=\_SB_.SEPM hid=PRP0001 uid=16 status=3 adr= phys=/sys/devices/platform/PRP0001:04
+PRP0001:05 path=\_SB_.DSMC hid=PRP0001 uid=17 status=3 adr= phys=/sys/devices/platform/PRP0001:05
+PRP0001:06 path=\_SB_.PVC0 hid=PRP0001 uid=7 status=11 adr= phys=/sys/devices/platform/PRP0001:06 phys=/sys/devices/platform/PRP0001:06/regulator/regulator.3
+PRP0001:07 path=\_SB_.PVC1 hid=PRP0001 uid=8 status=11 adr= phys=/sys/devices/platform/PRP0001:07 phys=/sys/devices/platform/PRP0001:07/regulator/regulator.1
+PRP0001:08 path=\_SB_.PVC4 hid=PRP0001 uid=9 status=11 adr= phys=/sys/devices/platform/PRP0001:08 phys=/sys/devices/platform/PRP0001:08/regulator/regulator.2
+PRP0001:09 path=\_SB_.PVC5 hid=PRP0001 uid=32 status=11 adr= phys=/sys/devices/platform/PRP0001:09 phys=/sys/devices/platform/PRP0001:09/regulator/regulator.4
+RTL5682:00 path=\_SB_.I2C2.RTL5 hid=RTL5682 uid=0 status=11 adr= phys=/sys/devices/platform/CIXH200B:02/i2c-7/i2c-RTL5682:00
+RX008900:00 path=\_SB_.I2C3.RTC0 hid=RX008900 uid=0 status=11 adr= phys=/sys/devices/platform/CIXH200B:03/i2c-8/i2c-RX008900:00
+SPBD0000:00 path=\_SB_.SPB0 hid=SPBD0000 uid=0 status=15 adr= phys=/sys/devices/platform/CIXH200B:02/i2c-7/i2c-SPBD0000:00
+SPBD0000:01 path=\_SB_.SPB1 hid=SPBD0000 uid=1 status=15 adr= phys=/sys/devices/platform/CIXH200B:04/i2c-9/i2c-SPBD0000:01
+SPBD0000:02 path=\_SB_.SPB2 hid=SPBD0000 uid=2 status=15 adr= phys=/sys/devices/platform/CIXH200B:05/i2c-10/i2c-SPBD0000:02
+SPBD0000:03 path=\_SB_.SPB3 hid=SPBD0000 uid=3 status=15 adr=
+SPBD0000:04 path=\_SB_.SPB4 hid=SPBD0000 uid=4 status=15 adr=
+SPT0002:00 path=\_SB_.SPI0.TP3_ hid=SPT0002 uid=1 status=11 adr=
+SPT0002:01 path=\_SB_.SPI0.TP4_ hid=SPT0002 uid=2 status=11 adr=

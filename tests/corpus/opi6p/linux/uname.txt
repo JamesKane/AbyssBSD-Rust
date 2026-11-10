@@ -1,0 +1,3 @@
+Linux CIX-Phecda-Board 7.0.0-41-cix #41-Ubuntu SMP PREEMPT_DYNAMIC Tue Jul  7 00:30:03 UTC 2026 aarch64 GNU/Linux
+PRETTY_NAME="Ubuntu 26.04.1 LTS"
+BOOT_IMAGE=/boot/vmlinuz-7.0.0-41-cix root=UUID=dc00d764-4a0b-4ecb-a3fb-ff810da3ea7b ro acpi=on clk_ignore_unused linlon_dp.force_scanout_8bpc_formats=1 quiet splash console=tty0 crashkernel=2G-4G:320M,4G-32G:512M,32G-64G:1024M,64G-128G:2048M,128G-:4096M
