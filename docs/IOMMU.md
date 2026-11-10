@@ -634,31 +634,19 @@ against FreeBSD's design before tuning).
   two-level table updates. The model is written from IHI 0070, and QEMU's implementation is a
   second, independent reading.
 
-## 13. Open questions
+## 13. Decisions (the user, 2026-11-10)
 
-1. **An ADR?** DRIVER-MODEL (ADR-0012) planned IOMMUs for P11; this moves the SMMUv3 into P9 and
-   adds `EdgeKind::Settle`, `sys/iommu`, and `drivers/smmu`. Record it as ADR-0022 when stage 0
-   starts? Should DRIVER-MODEL §3.1 and §16 (whose P11 rows name the SMMUv3), ROADMAP's P11 bullet,
-   and HARDWARE.md's IOMMU rows be amended then?
-2. **Defaults.** `hw.iommu.dma=1` on arm64 when an SMMU attaches, against FreeBSD's 0; and
-   `hw.smmu.bypass_named=0`, against the sibling's compiled-in 1. Both follow the board's working
-   FreeBSD configuration and "nothing special". Confirm, and confirm that they are recorded in
-   compat-deviations.
-3. **The performance baseline on the board**: FreeBSD `GENERIC-HMP-IOMMU` with translation (like
-   for like), or stock `GENERIC` (which does not translate)? The design assumes the former.
-4. **DRIVER-MODEL's "batched and deferred" invalidation.** This design is strict per unmap,
-   batched within it (§4.5), as FreeBSD's arm64 and Linux on this board are. Reword §8.4's table to
-   match?
-5. **Rule 2 (whole pages, small buffers bounced).** Options:
-   - follow FreeBSD (map the page, neighbors exposed);
-   - bounce only buffers from the general heap, and map payload-only zones (mbuf clusters,
-     buffer-cache pages) in place;
-   - enforce rule 2 as written and measure the copy.
+The questions this design raised, settled before stage 0:
 
-   The second keeps rule 1's guarantee (no kernel pointers reachable) at little cost. Which?
-6. **Enabling `smmu1` in P9** when AbyssBSD has no driver behind it. Following FreeBSD, it is
-   enabled: RMR streams bypassed, the rest aborted. The alternative leaves it as firmware left it
-   until M-G, which is safer for the console but gives no isolation. The design takes FreeBSD's
-   way.
-7. **The edge kind's name and placement.** `Settle` as a fifth `EdgeKind`, or a flag on
-   Required ("released if the supplier fails")?
+1. **An ADR:** yes, ADR-0022, written at stage 0, which also amends DRIVER-MODEL §3.1 and §16,
+   ROADMAP's P11 IOMMU bullet, and HARDWARE.md's IOMMU rows (the SMMUv3 is P9's now).
+2. **Defaults:** `hw.iommu.dma=1` on arm64 when an SMMU attaches, and `hw.smmu.bypass_named=0`,
+   as the board's working FreeBSD runs; both recorded in compat-deviations.
+3. **Performance baseline on the board:** FreeBSD `GENERIC-HMP-IOMMU`, translating (like for
+   like).
+4. **Invalidation:** strict per unmap, batched within it (§4.5); DRIVER-MODEL §8.4's "batched and
+   deferred" is reworded to match.
+5. **Rule 2:** bounce only buffers from the general heap; map payload-only zones (mbuf clusters,
+   buffer-cache pages) in place.
+6. **`smmu1`:** enabled in P9 as FreeBSD does: RMR streams bypassed, the rest aborted.
+7. **The edge:** `Settle`, a fifth `EdgeKind`.
