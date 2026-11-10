@@ -9,25 +9,25 @@
 
 use crate::{Attrs, Cache, Format, Level, PageSize, PhysAddr, VirtAddr};
 
-const VALID: u64 = 1 << 0;
+pub(crate) const VALID: u64 = 1 << 0;
 /// At levels 0–2: a table rather than a block. At level 3: a page.
-const TABLE_OR_PAGE: u64 = 1 << 1;
-const ATTR_INDEX_SHIFT: u32 = 2;
+pub(crate) const TABLE_OR_PAGE: u64 = 1 << 1;
+pub(crate) const ATTR_INDEX_SHIFT: u32 = 2;
 /// AP[1]: accessible from EL0.
-const AP_EL0: u64 = 1 << 6;
+pub(crate) const AP_EL0: u64 = 1 << 6;
 /// AP[2]: read-only.
-const AP_RO: u64 = 1 << 7;
-const SH_INNER: u64 = 0b11 << 8;
-const ACCESS_FLAG: u64 = 1 << 10;
-const NOT_GLOBAL: u64 = 1 << 11;
-const PXN: u64 = 1 << 53;
-const UXN: u64 = 1 << 54;
-const ADDR_MASK: u64 = 0x0000_ffff_ffff_f000;
+pub(crate) const AP_RO: u64 = 1 << 7;
+pub(crate) const SH_INNER: u64 = 0b11 << 8;
+pub(crate) const ACCESS_FLAG: u64 = 1 << 10;
+pub(crate) const NOT_GLOBAL: u64 = 1 << 11;
+pub(crate) const PXN: u64 = 1 << 53;
+pub(crate) const UXN: u64 = 1 << 54;
+pub(crate) const ADDR_MASK: u64 = 0x0000_ffff_ffff_f000;
 
 /// `MAIR_EL1` attribute indices.
-const ATTR_WRITE_BACK: u64 = 0;
-const ATTR_DEVICE: u64 = 1;
-const ATTR_NON_CACHEABLE: u64 = 2;
+pub(crate) const ATTR_WRITE_BACK: u64 = 0;
+pub(crate) const ATTR_DEVICE: u64 = 1;
+pub(crate) const ATTR_NON_CACHEABLE: u64 = 2;
 
 /// `MAIR_EL1` value: Attr0 Normal WB RW-allocate (0xff), Attr1
 /// Device-nGnRE (0x04), Attr2 Normal non-cacheable (0x44).

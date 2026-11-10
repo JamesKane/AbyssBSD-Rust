@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! Four-level page tables with 4 KiB granules, for x86_64 and aarch64.
+//! Four-level page tables with 4 KiB granules, for x86_64 and aarch64, and
+//! the aarch64 format as an SMMUv3 walks it for devices ([`smmu`]).
 //!
 //! The walk is the same on both architectures (9 index bits per level,
 //! 4 KiB / 2 MiB / 1 GiB leaves); only the entry encodings differ, and those
@@ -16,6 +17,7 @@
 #![forbid(unsafe_code)]
 
 pub mod aarch64;
+pub mod smmu;
 pub mod x86_64;
 
 use core::marker::PhantomData;
