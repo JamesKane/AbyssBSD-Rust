@@ -183,6 +183,21 @@ mod tests {
     }
 
     #[test]
+    fn matches_freebsd_on_the_orange_pi() {
+        // tests/corpus/opi6p/freebsd/sysctl-a.txt: FreeBSD on the Orange
+        // Pi 6 Plus (one domain, `vm.stats.vm.v_page_count` 8150149,
+        // `v_free_count` 8007295).
+        let t = Thresholds::new(8_150_149, 8_007_295);
+        assert_eq!(t.free_reserved, 10678);
+        assert_eq!(t.free_min, 51428);
+        assert_eq!(t.free_severe, 31053);
+        assert_eq!(t.free_target, 173_678);
+        assert_eq!(t.inactive_target, 260_517);
+        assert_eq!(t.pageout_free_min, 34);
+        assert_eq!(t.interrupt_free_min, 2);
+    }
+
+    #[test]
     fn known_values() {
         // 4 GiB, all free.
         let t = Thresholds::new(1 << 20, 1 << 20);
