@@ -2665,21 +2665,23 @@ no hangs, no reboot loops, nothing that needs the screen, and P8's remaining exi
   FreeBSD's design (an `smmu` unit per IORT node under `acpi0`, a domain per requester, `gas`
   IOVAs, a third `vm::dma` backend, the ITS doorbell mapped per domain, RMR streams bypassed), as
   on the FreeBSD the board runs. Untranslated, DMA to the RAM at `0x80_0000_0000` lands elsewhere
-  and hangs the board (2026-11-10). Until this lands the board runs with `hw.physmem=29G`
-  (`kernel/src/mm/mod.rs`), which leaves that RAM unused; it comes out of `loader.conf` once
-  translated DMA has run clean on the board.
+  and hung the board (2026-11-10). Done on the board 2026-11-10 (stages 0 to 5, IOMMU.md §18): the
+  `hw.physmem=29G` stopgap is gone and the board uses all its RAM with DMA translated; stage 6
+  (performance) remains.
 - **Driver selection** ([ADR-0021](adr/0021-driver-selection-and-modules.md), MODULES.md §3):
   one driver table per ISA in `kernel/table`, so the aarch64 kernel stops carrying `isa`, `atrtc`,
   `ichwd`, `amdsbwd`, and the x86 timers, and the x86_64 kernel the Sky1 drivers and `cix-sky1`.
   Host checks per table, and one that catches a driver in the wrong table.
 - **Verification:** kyua's arm64 target on the board; fsx with `fsck_ffs` on the NVMe and a USB
-  disk; the device tree against FreeBSD's `devinfo` wherever FreeBSD has a driver; long runs
-  (stress, the multi-user and network scenarios looped) with the watchdog armed.
+  disk (done with the SMMU's stage 5, IOMMU.md §18); the device tree against FreeBSD's `devinfo`
+  wherever FreeBSD has a driver. No day-long looped runs (the user, 2026-11-10): kyua and the
+  performance suites are what show a defect.
 - **Performance:** `cargo xtask perf --platform opi6p`, every suite so far within 2% of FreeBSD on
   the board (per core class), P7's over `rge`.
 
 **Exit:** the P8 exit criteria on the Orange Pi 6 Plus, every known defect above fixed or recorded in
-compat-deviations with a reason, and a day of looped scenarios without a hang.
+compat-deviations with a reason, and kyua and the performance suites run on the board without a
+hang.
 
 - Progress 2026-11-10 (the known defects, in QEMU; none yet tried on the board):
   - `MNT_RELOAD`: `nmount`'s `reload` on a read-only mount (`vfs_domount_update`'s rule), with

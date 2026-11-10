@@ -49,8 +49,8 @@ FreeBSD on the same board does not hit this: its DMA goes through the SMMUv3s, w
 default there (`hw.iommu.dma=1`). The IOVAs it hands out are small, since its allocator is
 lowest-first, and the SMMUs output 40-bit physical addresses (`oas 40-bit` in the Linux ground
 truth), which cover the high region. The user has decided against a workaround such as a
-board-specific DMA limit: the fix is the SMMU, FreeBSD's design, in Phase 9. Until it lands, the
-board runs with `hw.physmem=29G`.
+board-specific DMA limit: the fix is the SMMU, FreeBSD's design, in Phase 9. The board ran with
+`hw.physmem=29G` until stage 5 translated its DMA; it uses all its RAM since (§18).
 
 ### 1.2 Goals
 
@@ -609,7 +609,7 @@ listed. Nothing touches the board before stage 5.
 | **2. The SMMU running** | Queues, two-level and linear stream tables, sync (both forms), events and gerror, errata, the initial all-abort state with RMR bypass, quiesce and restore. Every PCI context pass-through for now. `hw.iommu.dma=0` | Model tests. QEMU `aarch64-smmu`: boots with the SMMU enabled and every stream bypassed. A ktest sets one idle device's stream to abort, provokes its DMA, and checks the logged `C_BAD_STE` event. The warm-reset case with the SMMU on |
 | **3. Translated DMA** | `sys/iommu` (units, domains, contexts, page tables), `vm::dma`'s `Iommu` backend, the broker's selection, host-bridge window reservations, relaxed ordering, the virtio pass-through rule. `DmaTag` becomes `Clone` | `vm::dma` host tests against the model. QEMU `aarch64-smmu` with `hw.pci.enable_msix=0`: storage and network ktests, the deliberate fault, unmap-before-reuse |
 | **4. MSI** | The doorbell window and message translation (§4.8) | QEMU `aarch64-smmu` with MSI-X (the default). The multi-user scenario with `--iommu` once |
-| **5. The board** | Deploy with translation on and `hw.physmem` still set. Then without it | Boot. `devinfo -rv` and `sysctl dev.smmu hw.iommu hw.smmu` against the corpus. No events. The high-memory write test that wedged it (512 MiB, then 2 GiB writes, several rounds). fsx with `fsck_ffs` on the NVMe. A USB disk with all RAM in use (§12). `rge` under the P7 suite's load. Warm reboots through `efibootmgr -n`. Then a day of looped scenarios with the watchdog armed (Phase 9's exit). `hw.physmem=29G` comes out of the board's `loader.conf` and the roadmap |
+| **5. The board** | Deploy with translation on and `hw.physmem` still set. Then without it | Boot. `devinfo -rv` and `sysctl dev.smmu hw.iommu hw.smmu` against the corpus. No events. The high-memory write test that wedged it (512 MiB, then 2 GiB writes, several rounds). fsx with `fsck_ffs` on the NVMe. A USB disk with all RAM in use (§12). `rge` under the P7 suite's load. Warm reboots through `efibootmgr -n`. `hw.physmem=29G` comes out of the board's command line and the roadmap. (A day of looped scenarios was dropped, §18) |
 | **6. Performance** | Measure P5's storage suite and P7's network suite on the board against the FreeBSD baseline (§13 question 3). Audit first: the per-I/O path against FreeBSD's (map, unmap, syncs, lock hold times). Only then consider the candidates: no TLBI on map (if IHI 0070 forbids caching invalid entries), range or ASID invalidation, block mappings for large coherent allocations, a three-level 39-bit space, and per-queue command batching | `cargo xtask perf --platform opi6p`, suite geometric means within 2% |
 | **M-G (later)** | Named-component contexts, RMR identity maps, non-coherent domains (§4.9) | With the first display or NPU driver |
 
@@ -1053,3 +1053,70 @@ For stage 5:
   stays the RID through the SMMU's output mapping, independent of translation.
 - If an MSI-X vector does not arrive on the board while DMA works, look first for a
   translation fault on that stream at the doorbell IOVA, then at the ITS's device ID.
+
+## 18. Stage 5 as built (2026-11-10)
+
+Stage 5 (§8) ran the SMMU on the Orange Pi 6 Plus, first with `hw.physmem=29G` and then without
+it. The board uses all its RAM (33.8 GB) with DMA translated. The premise (§12) held: IOVAs stay
+low, and the SMMUs' 40-bit output reaches the RAM at `0x80_0000_0000` that untranslated DMA
+missed.
+
+**What runs translated.** Both units are on (`dev.smmu.0.dma: 1`, `dev.smmu.1.dma: 1`). The two
+NVMe controllers, both `rge` ports, and the PCIe `xhci` translate on MSI-X, and each prints
+FreeBSD's "relaxed ordering disabled (IOMMU translation)" line. The RMR streams stay bypassed.
+`hw.physmem` came out of the AbyssBSD ESP's `EFI/ABYSS/CMDLINE` (the board's command line, its
+`loader.conf`).
+
+**What it found.** Translation turned silent corruption into faults that name the device, and
+the checks turned up four defects. None was the SMMU's:
+
+1. **nvme PRP lists crossed pages** (`47b770b`). `PRP_LIST` was one entry over a page, so a list
+   could run into the next page, where the controller reads the last entry of a page as a
+   pointer to the next list. The SMMU reported it ("smmu0: nvme1 (rid 0x9100): translation fault
+   at 0x0 (write)"), and a file read back three zero pages. Untranslated, those transfers had
+   gone to arbitrary physical addresses: this predates the SMMU, and may account for some of
+   P9's earlier hangs.
+2. **A full page cache panicked the kernel heap** (`70fdef1`..`26c86c3`). Writing more than RAM
+   ran memory out in `softdep`'s allocations. Now there are FreeBSD's allocation classes and
+   thresholds, the heap reclaims before failing, and there is a page daemon (ARCHITECTURE.md
+   §5.2), with the `aarch64-lowmem` and `x86_64-lowmem` boot cases.
+3. **Read-ahead past an end that moved in** (`bf1f692`). fsx's truncates under read-ahead in
+   flight asked the page map for a backward range: a panic in a page fault.
+4. **UFS truncate did not stop at the level the new end lies under** (`059dd24`). FreeBSD's
+   `ffs_truncate` has a `goto done` there. Without it, a file cut to an end under its
+   double-indirect block went on to cut its single indirect block past its end, a panic in
+   `ftruncate`. With soft updates, a crash just then would also have left a hole in the
+   middle of the file.
+
+The first panic also showed that a panic halted only its own CPU. The others went on running, and
+`watchdogd` went on patting the watchdog, so the board wedged rather than reset. A panic now stops
+the other CPUs and reboots after `kern.panic_reboot_wait_time`, as FreeBSD's does (`8858da1`).
+On the board, the next panic reset the machine in 15 s.
+
+**The checks, all with translation on:**
+
+| Check | Result |
+|---|---|
+| The high-memory writes that wedged the board | About 30 GiB written and verified from the disk across reboots, then 36 GiB (more than RAM) with the page cache full: all checksums match |
+| `rge` | 4 GiB each way, checksums matching (37 s and 69 s, over `ssh`); 1 GiB each way every 10 minutes during the loop below |
+| A USB disk with all RAM in use (§12's untranslated-master risk) | The stick (`da0`) wrote and read 1 GiB raw twice with RAM full, then 64 MiB per loop iteration: all match |
+| fsx on the NVMe root | 4 runs (about 320,000 operations), then 5 runs with close and reopen (3.4 million operations, files up to 256 MiB, operations up to 8 MiB, mapped and not): all "All operations completed A-OK!" |
+| `fsck_ffs -f -n` on `abyssroot`, from FreeBSD | Clean, with nothing asked, after the fsx runs and two panics mid-write |
+| Warm resets with the SMMU on | Reboots through `efibootmgr -n`, the watchdog's reset after a panic, and the new panic reboot: firmware booted every time (§12's warm-reset risk did not show) |
+| A short loop (fsx ×3, 16 GiB written and read back, the USB stick, `rge`) | 9 iterations and a warm reboot that re-verified the 16 GiB from disk, all clean |
+| SMMU events | None, but the PRP fault above |
+
+**Not done, by the user's decision.** The day of looped scenarios (§8) was dropped (2026-11-10):
+P9's kyua and performance runs on the board would show what it would. `rge` under the P7 suite's
+load is part of stage 6's measurement.
+
+**Left on the board:**
+- The hang hunt's rc.local line (BootNext=0007 on every boot) is gone, and BootNext is cleared.
+  FreeBSD (`Boot0005`) is the default boot, as before.
+- `watchdogd` still runs with `-t 60 -e /root/wdcheck.sh`, which reads one NVMe block per check.
+- The ESP keeps `CMDLINE.physmem` (the line with `hw.physmem=29G`) and `CMDLINE.base`.
+  `/boot/kernel` keeps `kernel.physmem`, the last kernel run with the stopgap.
+
+For stage 6: an I/O still syncs twice, and `rge` and `vtnet` bounce on transmit. The low-memory
+change adds a check to the allocation path. Stage 6's audit measures all three.
+
