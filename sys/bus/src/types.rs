@@ -335,8 +335,11 @@ pub enum ResourceError {
     NoSuchResource,
     /// The resource is smaller than the register block.
     TooSmall,
-    /// Already granted to someone.
+    /// Already granted to someone, and not declared shared.
     Claimed,
+    /// AML also reads or writes the range: the driver must ask for it
+    /// knowingly (`AttachCx::mmio_shared` and the others).
+    FirmwareShared,
     /// A sensitive range leaf drivers may not map (interrupt controllers,
     /// IOMMUs, ECAM, consoles).
     Sensitive,

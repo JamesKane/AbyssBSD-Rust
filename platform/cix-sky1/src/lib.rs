@@ -8,7 +8,10 @@
 //!   generic devicetree names: CIX's and Cadence's vendor bindings, and
 //!   the unprefixed names its drivers' bindings use.
 //!
-//! No corrections yet: the first come with the drivers that need them.
+//! - The ranges two devices' `_CRS` give on purpose: the SCMI shared
+//!   memory inside its mailbox's window.
+//!
+//! No other corrections yet: they come with the drivers that need them.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -54,6 +57,19 @@ const REFERENCES: &[(&str, EdgeKind)] = &[
     ("actuator-src", EdgeKind::Optional),
 ];
 
+/// Devices whose memory lies inside another device's window by design,
+/// by `_HID` (DRIVER-MODEL.md §8.1).
+pub(crate) const SHARED: &[(&str, &str)] = &[
+    (
+        "CIXHA004",
+        "SCMI tx shared memory: the AP-to-PM mailbox's 32 message registers (MBX6)",
+    ),
+    (
+        "CIXHA005",
+        "SCMI rx shared memory: the PM-to-AP mailbox's 32 message registers (MBX7)",
+    ),
+];
+
 /// The platform.
 #[derive(Debug)]
 pub struct CixSky1;
@@ -80,7 +96,15 @@ impl PlatformSource for CixSky1 {
         host: &mut dyn Host,
         devices: &[NodeId],
     ) -> Extracted {
-        tables::extract(interp, host, devices)
+        let mut x = tables::extract(interp, host, devices);
+        for &(hid, why) in SHARED {
+            if let Some(device) = tables::find_hid(interp, host, devices, hid) {
+                x.description
+                    .shared
+                    .push(devtree::platform::SharedRange { device, why });
+            }
+        }
+        x
     }
 
     fn reference_kinds(&self) -> &'static [(&'static str, EdgeKind)] {

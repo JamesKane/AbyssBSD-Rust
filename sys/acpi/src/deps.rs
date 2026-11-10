@@ -575,6 +575,7 @@ fn platform_edges(
     all.resource_names.append(&mut d.resource_names);
     all.links.append(&mut d.links);
     all.reserved.append(&mut d.reserved);
+    all.shared.append(&mut d.shared);
     out.malformed.extend(x.malformed);
 }
 

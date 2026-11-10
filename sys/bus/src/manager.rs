@@ -34,6 +34,7 @@ use sync::{Once, SpinLock};
 use crate::driver::{AttachCx, Bound, DriverDecl, Faults, Ledger};
 use crate::platform::Platform;
 use crate::provider::{ClockSource, DomainSource, ResetSource};
+use crate::space::{Range, ResourceSpace, Sharing};
 use crate::sysctl::DeviceStrings;
 use crate::types::{
     Announce, AttachError, DetachReason, DeviceId, Ident, Line, LineKind, Need, NodeState,
@@ -217,8 +218,8 @@ pub struct Manager {
     /// Bumped as each job ends, for [`Manager::wait_settled`].
     jobs_done: AtomicU32,
     idle_q: WaitQueue,
-    /// Granted memory ranges (base, length).
-    claims: SpinLock<Vec<(u64, u64)>>,
+    /// Granted ranges, and the ranges firmware or another device shares.
+    space: SpinLock<ResourceSpace>,
     /// devctl event lines, for /dev/devctl, bounded.
     events: SpinLock<devctl::Events>,
     /// Called after a line is queued: /dev/devctl's wakeup.
@@ -265,10 +266,6 @@ pub(crate) fn try_sleep_ns(s: &Sleepable, ns: u64) {
         m.platform().sleep_ns(s, ns);
     }
 }
-
-/// Marks a claim as I/O ports rather than memory: the spaces overlap
-/// numerically but never in fact.
-pub(crate) const IO_SPACE: u64 = 1 << 63;
 
 /// Options for [`init`].
 #[derive(Clone, Copy, Debug)]
@@ -345,7 +342,7 @@ pub fn init(
             busy: AtomicUsize::new(0),
             jobs_done: AtomicU32::new(0),
             idle_q: WaitQueue::new(),
-            claims: SpinLock::new(Vec::new()),
+            space: SpinLock::new(ResourceSpace::new()),
             events: SpinLock::new(devctl::Events::new(o.devctl_queue, o.devctl_nomatch)),
             on_event: Once::new(),
             generation: AtomicU32::new(1),
@@ -416,19 +413,33 @@ impl Manager {
         self.generation.load(Ordering::Relaxed)
     }
 
-    /// Claims `[base, base + len)`: memory addresses, or I/O ports with
-    /// [`IO_SPACE`] set.
-    pub(crate) fn claim(&self, base: u64, len: u64) -> Result<(), ResourceError> {
-        let mut c = self.claims.lock();
-        if c.iter().any(|&(b, l)| base < b + l && b < base + len) {
-            return Err(ResourceError::Claimed);
-        }
-        c.push((base, len));
-        Ok(())
+    /// Grants `r` (DRIVER-MODEL.md §8.1): refused if another grant holds
+    /// part of it outside a declared-shared range, or if AML touches it
+    /// and the driver did not ask knowingly (`firmware_ok`).
+    pub(crate) fn claim(&self, r: Range, firmware_ok: bool) -> Result<Sharing, ResourceError> {
+        self.space.lock().claim(r, firmware_ok)
     }
 
-    pub(crate) fn release_claim(&self, base: u64) {
-        self.claims.lock().retain(|&(b, _)| b != base);
+    pub(crate) fn release_claim(&self, r: Range) {
+        self.space.lock().release(r);
+    }
+
+    /// Records a range AML reads or writes (an operation region), before
+    /// any child that might be granted it attaches.
+    pub(crate) fn share_with_firmware(&self, by: DeviceId, r: Range) {
+        self.space.lock().share_with_firmware(by, r);
+    }
+
+    /// Records a range the platform description lets two devices' grants
+    /// overlap in.
+    pub(crate) fn declare_shared(&self, by: DeviceId, r: Range) {
+        self.space.lock().declare_shared(by, r);
+    }
+
+    /// The firmware-shared ranges and the declared-shared ones.
+    #[must_use]
+    pub fn shared_ranges(&self) -> (Vec<Range>, Vec<Range>) {
+        self.space.lock().shared()
     }
 
     /// A devctl device event line for node `index` (attached as `what`,
@@ -1130,8 +1141,10 @@ impl Manager {
         let Some(n) = t.node_mut(id) else {
             return;
         };
-        // Providers published by a start that failed never served anyone.
+        // Providers published by a start that failed never served anyone,
+        // and the ranges it recorded have no children to share them.
         core::mem::take(&mut n.provides).revoke();
+        self.space.lock().forget(id);
         let unit = n.unit.take();
         n.driver = None;
         n.start = StartPhase::Attach;
@@ -1231,7 +1244,7 @@ impl Manager {
     /// Memory ranges currently granted to drivers.
     #[must_use]
     pub fn claims(&self) -> usize {
-        self.claims.lock().len()
+        self.space.lock().claims()
     }
 
     /// Waits until no attach is queued or running.
@@ -1322,6 +1335,7 @@ impl Manager {
             let _ = self.detach(c, DetachReason::Parent, s);
         }
         provides.revoke();
+        self.space.lock().forget(id);
         // 3-7. The binding's own teardown. Children a bus driver created
         // go with it, before its instance: their bus data may hold the
         // bus's grants (a transport's registers).

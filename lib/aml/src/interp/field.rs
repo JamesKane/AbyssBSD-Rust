@@ -113,6 +113,19 @@ impl Interpreter {
         }
     }
 
+    /// The bytes of its region a field unit's accesses touch, from the
+    /// region's start: its bits, widened to whole access units as reads
+    /// and writes widen them. `None` for an index field, which touches
+    /// its index and data fields instead.
+    pub(crate) fn field_extent(&self, f: &FieldUnit) -> Option<(u64, u64)> {
+        let (_, region) = self.region_of(f)?;
+        let w = self.unit_width(f, Some(region.len));
+        let (ub, bytes) = (w.bits(), w.bytes());
+        let first = f.bit_offset / ub;
+        let end = (f.bit_offset + f.bit_len.max(1)).div_ceil(ub);
+        Some((first * bytes, (end - first) * bytes))
+    }
+
     fn unit_width(&self, f: &FieldUnit, region_len: Option<u64>) -> AccessWidth {
         match f.access {
             AccessType::Byte | AccessType::Buffer => AccessWidth::U8,

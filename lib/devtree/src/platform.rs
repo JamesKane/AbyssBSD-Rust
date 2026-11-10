@@ -90,6 +90,18 @@ pub struct ReservedMemory<N> {
     pub no_map: bool,
 }
 
+/// A device whose memory resources lie, on purpose, inside another
+/// device's (DRIVER-MODEL.md §8.1): both may be granted the overlap. The
+/// Sky1's SCMI shared memory is the first 128 bytes of its mailbox's
+/// window: the mailbox's message registers.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SharedRange<N> {
+    /// The device whose memory resources are shared.
+    pub device: N,
+    /// Why the overlap is intended: the hardware fact it reflects.
+    pub why: &'static str,
+}
+
 /// A platform's description.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Description<N> {
@@ -103,6 +115,8 @@ pub struct Description<N> {
     pub links: Vec<DeviceLink<N>>,
     /// Reserved memory.
     pub reserved: Vec<ReservedMemory<N>>,
+    /// Devices whose ranges overlap another's on purpose.
+    pub shared: Vec<SharedRange<N>>,
 }
 
 impl<N> Default for Description<N> {
@@ -113,6 +127,7 @@ impl<N> Default for Description<N> {
             resource_names: Vec::new(),
             links: Vec::new(),
             reserved: Vec::new(),
+            shared: Vec::new(),
         }
     }
 }
@@ -126,6 +141,7 @@ impl<N: PartialEq> Description<N> {
             && self.resource_names.is_empty()
             && self.links.is_empty()
             && self.reserved.is_empty()
+            && self.shared.is_empty()
     }
 
     /// The clock `consumer`'s driver asks for by `name` (`None`: its

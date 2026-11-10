@@ -32,6 +32,7 @@ use crate::provider::{
     Clock, ClockHandle, ClockSource, DomainSource, PowerDomain, PowerVote, Reset, ResetHandle,
     ResetSource,
 };
+use crate::space::{AddressSpace, Range, Sharing};
 use crate::types::{
     Announce, AttachError, Busy, Concurrency, DeviceId, Ident, Ids, Line, LineKind, Resource,
     ResourceError, StopReason,
@@ -181,8 +182,17 @@ pub struct MmioGrant<B> {
     va: usize,
     len: u64,
     pa: u64,
+    sharing: Sharing,
     mgr: &'static Manager,
     ledger: Arc<Ledger>,
+}
+
+impl<B> MmioGrant<B> {
+    /// Whether firmware or another device shares the range (§8.1).
+    #[must_use]
+    pub fn sharing(&self) -> Sharing {
+        self.sharing
+    }
 }
 
 impl<B> core::fmt::Debug for MmioGrant<B> {
@@ -190,6 +200,7 @@ impl<B> core::fmt::Debug for MmioGrant<B> {
         f.debug_struct("MmioGrant")
             .field("pa", &format_args!("{:#x}", self.pa))
             .field("len", &self.len)
+            .field("sharing", &self.sharing)
             .finish()
     }
 }
@@ -204,8 +215,21 @@ impl<B> core::ops::Deref for MmioGrant<B> {
 impl<B> Drop for MmioGrant<B> {
     fn drop(&mut self) {
         self.mgr.platform().unmap_device(self.va, self.len);
-        self.mgr.release_claim(self.pa);
+        self.mgr.release_claim(Range {
+            space: AddressSpace::Memory,
+            base: self.pa,
+            len: self.len,
+        });
         self.ledger.give_back();
+    }
+}
+
+/// The resource-space range of ports `[base, base + len)`.
+fn io_range(base: u16, len: u16) -> Range {
+    Range {
+        space: AddressSpace::IoPort,
+        base: base.into(),
+        len: len.into(),
     }
 }
 
@@ -213,6 +237,7 @@ impl<B> Drop for MmioGrant<B> {
 pub struct IoGrant {
     base: u16,
     len: u16,
+    sharing: Sharing,
     mgr: &'static Manager,
     ledger: Arc<Ledger>,
 }
@@ -222,6 +247,7 @@ impl core::fmt::Debug for IoGrant {
         f.debug_struct("IoGrant")
             .field("base", &format_args!("{:#x}", self.base))
             .field("len", &self.len)
+            .field("sharing", &self.sharing)
             .finish()
     }
 }
@@ -234,6 +260,12 @@ impl IoGrant {
             "I/O port offset out of range"
         );
         self.base + offset
+    }
+
+    /// Whether firmware shares the ports (§8.1).
+    #[must_use]
+    pub fn sharing(&self) -> Sharing {
+        self.sharing
     }
 
     /// The number of ports.
@@ -296,8 +328,7 @@ impl IoGrant {
 
 impl Drop for IoGrant {
     fn drop(&mut self) {
-        self.mgr
-            .release_claim(crate::manager::IO_SPACE | u64::from(self.base));
+        self.mgr.release_claim(io_range(self.base, self.len));
         self.ledger.give_back();
     }
 }
@@ -402,8 +433,14 @@ impl<'a> AttachCx<'a> {
         self.faults.as_mut().is_some_and(|f| f.fail())
     }
 
-    /// Claims and maps the `index`th memory resource, at least `min` bytes.
-    fn map_memory(&mut self, index: usize, min: usize) -> Result<(usize, u64, u64), ResourceError> {
+    /// Claims and maps the `index`th memory resource, at least `min` bytes;
+    /// a firmware-shared range only if `firmware_ok`.
+    fn map_memory(
+        &mut self,
+        index: usize,
+        min: usize,
+        firmware_ok: bool,
+    ) -> Result<(usize, u64, u64, Sharing), ResourceError> {
         if self.injected() {
             return Err(ResourceError::MapFailed);
         }
@@ -422,49 +459,92 @@ impl<'a> AttachCx<'a> {
         if self.mgr.platform().sensitive(base, len) {
             return Err(ResourceError::Sensitive);
         }
-        self.mgr.claim(base, len)?;
+        let range = Range {
+            space: AddressSpace::Memory,
+            base,
+            len,
+        };
+        let sharing = self.mgr.claim(range, firmware_ok)?;
         let Some(va) = self.mgr.platform().map_device(base, len) else {
-            self.mgr.release_claim(base);
+            self.mgr.release_claim(range);
             return Err(ResourceError::MapFailed);
         };
         self.ledger.issue();
-        Ok((va, base, len))
+        Ok((va, base, len, sharing))
     }
 
-    /// Maps the `index`th memory resource as register block `B`.
-    pub fn mmio<B: RegisterBlock>(&mut self, index: usize) -> Result<MmioGrant<B>, ResourceError> {
-        let (va, pa, len) = self.map_memory(index, B::SIZE)?;
+    fn mmio_grant<B: RegisterBlock>(
+        &mut self,
+        index: usize,
+        firmware_ok: bool,
+    ) -> Result<MmioGrant<B>, ResourceError> {
+        let (va, pa, len, sharing) = self.map_memory(index, B::SIZE, firmware_ok)?;
         Ok(MmioGrant {
             // SAFETY: the platform mapped `len >= B::SIZE` bytes of this
-            // device's registers for us alone (the claim), until the grant
-            // unmaps them.
+            // device's registers for us (the claim: alone, or shared as
+            // `sharing` says), until the grant unmaps them.
             regs: unsafe { Mmio::block(va) },
             va,
             len,
             pa,
+            sharing,
             mgr: self.mgr,
             ledger: Arc::clone(&self.ledger),
         })
     }
 
-    /// Maps the `index`th memory resource whole, untyped, for registers
-    /// at offsets the device itself reports (capability structures).
-    pub fn mmio_bytes(&mut self, index: usize) -> Result<MmioGrant<Bytes>, ResourceError> {
-        let (va, pa, len) = self.map_memory(index, 1)?;
+    fn mmio_bytes_grant(
+        &mut self,
+        index: usize,
+        firmware_ok: bool,
+    ) -> Result<MmioGrant<Bytes>, ResourceError> {
+        let (va, pa, len, sharing) = self.map_memory(index, 1, firmware_ok)?;
         let bytes = usize::try_from(len).map_err(|_| ResourceError::MapFailed)?;
         Ok(MmioGrant {
-            // SAFETY: as in `mmio`, for all `len` bytes.
+            // SAFETY: as in `mmio_grant`, for all `len` bytes.
             regs: unsafe { Mmio::new(va, bytes) },
             va,
             len,
             pa,
+            sharing,
             mgr: self.mgr,
             ledger: Arc::clone(&self.ledger),
         })
     }
 
-    /// Claims the `index`th I/O-port resource.
-    pub fn io_ports(&mut self, index: usize) -> Result<IoGrant, ResourceError> {
+    /// Maps the `index`th memory resource as register block `B`. A range
+    /// AML also touches is refused ([`ResourceError::FirmwareShared`]);
+    /// one the platform declares shared with another device is granted,
+    /// and [`MmioGrant::sharing`] says so.
+    pub fn mmio<B: RegisterBlock>(&mut self, index: usize) -> Result<MmioGrant<B>, ResourceError> {
+        self.mmio_grant(index, false)
+    }
+
+    /// Maps the `index`th memory resource whole, untyped, for registers
+    /// at offsets the device itself reports (capability structures).
+    /// Shared ranges as in [`AttachCx::mmio`].
+    pub fn mmio_bytes(&mut self, index: usize) -> Result<MmioGrant<Bytes>, ResourceError> {
+        self.mmio_bytes_grant(index, false)
+    }
+
+    /// [`AttachCx::mmio`], also granting a range AML reads or writes
+    /// (DRIVER-MODEL.md §8.1), for a driver written to share it: one that
+    /// only reads, or uses only registers the firmware's regions leave
+    /// alone. [`MmioGrant::sharing`] tells which it got.
+    pub fn mmio_shared<B: RegisterBlock>(
+        &mut self,
+        index: usize,
+    ) -> Result<MmioGrant<B>, ResourceError> {
+        self.mmio_grant(index, true)
+    }
+
+    /// [`AttachCx::mmio_bytes`], also granting a firmware-shared range, as
+    /// [`AttachCx::mmio_shared`].
+    pub fn mmio_bytes_shared(&mut self, index: usize) -> Result<MmioGrant<Bytes>, ResourceError> {
+        self.mmio_bytes_grant(index, true)
+    }
+
+    fn io_grant(&mut self, index: usize, firmware_ok: bool) -> Result<IoGrant, ResourceError> {
         if self.injected() {
             return Err(ResourceError::NoSuchResource);
         }
@@ -477,15 +557,28 @@ impl<'a> AttachCx<'a> {
             })
             .nth(index)
             .ok_or(ResourceError::NoSuchResource)?;
-        self.mgr
-            .claim(crate::manager::IO_SPACE | u64::from(base), len.into())?;
+        let sharing = self.mgr.claim(io_range(base, len), firmware_ok)?;
         self.ledger.issue();
         Ok(IoGrant {
             base,
             len,
+            sharing,
             mgr: self.mgr,
             ledger: Arc::clone(&self.ledger),
         })
+    }
+
+    /// Claims the `index`th I/O-port resource. Ports AML also touches are
+    /// refused ([`ResourceError::FirmwareShared`]).
+    pub fn io_ports(&mut self, index: usize) -> Result<IoGrant, ResourceError> {
+        self.io_grant(index, false)
+    }
+
+    /// [`AttachCx::io_ports`], also granting ports AML reads or writes,
+    /// for a driver written to share them (a Super I/O whose
+    /// environment controller the firmware's thermal methods also read).
+    pub fn io_ports_shared(&mut self, index: usize) -> Result<IoGrant, ResourceError> {
+        self.io_grant(index, true)
     }
 
     /// The `index`th interrupt resource.
@@ -788,6 +881,21 @@ impl<D: Driver> StartCx<'_, D> {
         if self.children_contains(consumer) {
             self.mgr.set_lines(self.s, consumer, lines);
         }
+    }
+
+    /// Records a range firmware reads or writes behind the drivers' backs
+    /// (an AML operation region; DRIVER-MODEL.md §8.1). A child's driver
+    /// is granted an overlapping range only if it asks knowingly. Called
+    /// before the children that might hold it are added; the record goes
+    /// when this device detaches.
+    pub fn share_with_firmware(&mut self, r: Range) {
+        self.mgr.share_with_firmware(self.binding.node, r);
+    }
+
+    /// Records a range the platform description declares shared between
+    /// two of the children: both may hold grants overlapping in it.
+    pub fn declare_shared(&mut self, r: Range) {
+        self.mgr.declare_shared(self.binding.node, r);
     }
 
     /// Publishes this device as a clock provider: consumers whose lines

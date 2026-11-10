@@ -208,6 +208,11 @@ fn any_access_picks_a_width() {
     eval(&mut i, &mut h, "\\RA4", Vec::new());
     // A1 (bits 8..24) fits one aligned dword; A4 is one aligned dword.
     assert_eq!(accesses(&h), [(false, 0x1000, 4, 0), (false, 0x1004, 4, 0)]);
+    // The extents say the same.
+    for (n, want) in [("A1", (0, 4)), ("A4", (4, 4))] {
+        let f = i.resolve(i.root(), n).unwrap();
+        assert_eq!(i.field_info(f).unwrap().extent, Some(want), "{n}");
+    }
 }
 
 #[test]
@@ -302,6 +307,17 @@ fn index_and_bank_fields() {
         i.field_info(bf0).unwrap().region,
         i.resolve(i.root(), "BREG")
     );
+    // The bytes each touches: an index field none of its own, the bank
+    // field its byte at offset 4, the index and data fields theirs.
+    let extent = |n: &str| {
+        i.field_info(i.resolve(i.root(), n).unwrap())
+            .unwrap()
+            .extent
+    };
+    assert_eq!(extent("R10"), None);
+    assert_eq!(extent("BF0"), Some((4, 1)));
+    assert_eq!(extent("IDX"), Some((0, 1)));
+    assert_eq!(extent("DAT"), Some((1, 1)));
     h.poke(RegionSpace::SystemIo, 0x71, &[0x42]);
     assert_eq!(eval_int(&mut i, &mut h, "\\RR11"), 0x42);
     assert_eq!(

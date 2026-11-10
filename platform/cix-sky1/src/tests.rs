@@ -292,3 +292,42 @@ fn reference_names() {
         assert_eq!(devtree::dsd::reference_kind(a), None, "{a} is generic");
     }
 }
+
+/// The SCMI shared memory is declared shared with its mailbox: those two
+/// overlaps, and no other, become declared, so each entry still applies.
+#[test]
+fn scmi_shared_memory_is_declared() {
+    use acpi::ranges::{Party, consumed, declared, overlaps};
+    let (mut i, mut h) = acpi_corpus::load("opi6p");
+    let devices = acpi::deps::devices(&mut i, &mut h);
+    let x = PLATFORM.extract(&mut i, &mut h, &devices);
+    let shared = &x.description.shared;
+    let paths: Vec<String> = shared.iter().map(|s| i.path(s.device).to_text()).collect();
+    assert_eq!(paths, ["\\_SB_.SHM0", "\\_SB_.SHM1"]);
+    let ranges: Vec<_> = devices
+        .iter()
+        .map(|&d| {
+            (
+                d,
+                consumed(&i.crs(d, &mut h).ok().flatten().unwrap_or_default()),
+            )
+        })
+        .collect();
+    let declared = declared(shared, &ranges);
+    let got: Vec<(u64, u64)> = declared.iter().map(|r| (r.base, r.len)).collect();
+    assert_eq!(got, [(0x0659_0000, 0x80), (0x065a_0000, 0x80)]);
+    let pairs: Vec<(String, String)> = overlaps(&ranges, &[], &declared)
+        .into_iter()
+        .filter_map(|o| match o.with {
+            Party::Declared(n) => Some((i.path(o.device).to_text(), i.path(n).to_text())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        pairs,
+        [
+            (String::from("\\_SB_.MBX6"), String::from("\\_SB_.SHM0")),
+            (String::from("\\_SB_.MBX7"), String::from("\\_SB_.SHM1")),
+        ]
+    );
+}

@@ -10,6 +10,8 @@
 //! - [`platform`]: what the kernel provides.
 //! - [`provider`]: clock, reset, and power-domain providers, and the
 //!   counted handles consumers hold.
+//! - [`space`]: granted memory and I/O ranges, and the ranges firmware
+//!   or another device shares.
 //!
 //! The pure logic it builds on (ranking, the graph, units, FreeBSD's
 //! strings) is in `lib/devtree`.
@@ -25,6 +27,7 @@ pub mod manager;
 pub mod platform;
 pub mod provider;
 mod roothold;
+pub mod space;
 mod sysctl;
 pub mod types;
 
@@ -38,6 +41,7 @@ pub use manager::{
 };
 pub use platform::Platform;
 pub use roothold::{RootHold, root_mount_hold, root_mount_wait};
+pub use space::{AddressSpace, Range, Sharing};
 pub use types::{
     Announce, AttachError, Busy, Concurrency, DetachReason, DeviceId, Ident, Ids, Line, LineKind,
     Need, NodeState, Resource, ResourceError, StopReason, TestId, TestIdent, WaitReason,

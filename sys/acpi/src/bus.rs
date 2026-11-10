@@ -22,7 +22,8 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use aml::Uid;
-use aml::resource::{AddressKind, Resource as AmlResource};
+use aml::resource::Resource as AmlResource;
+use bus::AddressSpace;
 use bus::{
     AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, Line, LineKind, Resource, StartCx,
     StopCx, StopReason,
@@ -124,6 +125,10 @@ pub(crate) struct Walk {
     /// functions' companions), by the consumer's path: the node another
     /// bus adds for that object takes them.
     pub(crate) companion_deps: Vec<(String, ChildDep)>,
+    /// The ranges AML reads and writes, and those the platform
+    /// description declares shared (DRIVER-MODEL.md §8.1).
+    pub(crate) firmware_shared: Vec<bus::Range>,
+    pub(crate) declared_shared: Vec<bus::Range>,
 }
 
 pub(crate) fn walk(
@@ -221,6 +226,38 @@ pub(crate) fn walk(
             f.lines.push((kind, name.clone(), path, id));
         }
     }
+    // Ranges two parties touch: what drivers of children overlapping
+    // AML's must ask for knowingly, and how many overlaps between
+    // children nothing declares (the first driver to map one wins).
+    let regions = crate::ranges::firmware_regions(interp);
+    let ranges: Vec<(aml::NodeId, Vec<bus::Range>)> = found
+        .iter()
+        .filter(|f| !crate::ranges::system_resource(&f.ident))
+        .map(|f| (f.device.node, crate::ranges::consumed(&f.device.crs)))
+        .collect();
+    let declared_shared = crate::ranges::declared(&deps.platform.shared, &ranges);
+    let (mut undeclared, mut declared) = (0usize, 0usize);
+    let mut seen: Vec<(aml::NodeId, aml::NodeId)> = Vec::new();
+    for o in crate::ranges::overlaps(&ranges, &regions, &declared_shared) {
+        match o.with {
+            crate::ranges::Party::Firmware(region) if !seen.contains(&(o.device, region)) => {
+                seen.push((o.device, region));
+                notes.push(alloc::format!(
+                    "acpi0: {}: AML also touches its registers ({})",
+                    interp.path(o.device),
+                    interp.path(region)
+                ));
+            }
+            crate::ranges::Party::Firmware(_) => {}
+            crate::ranges::Party::Device(_) => undeclared += 1,
+            crate::ranges::Party::Declared(_) => declared += 1,
+        }
+    }
+    if undeclared + declared > 0 {
+        notes.push(alloc::format!(
+            "acpi0: {declared} declared and {undeclared} undeclared overlaps between devices' ranges"
+        ));
+    }
     for m in &deps.malformed {
         let at = m
             .entry
@@ -238,6 +275,8 @@ pub(crate) fn walk(
         found,
         notes,
         companion_deps,
+        firmware_shared: regions.into_iter().map(|r| r.range).collect(),
+        declared_shared,
     }
 }
 
@@ -257,7 +296,20 @@ fn polarity(p: aml::resource::Polarity) -> irq::Polarity {
 
 /// The resources a device consumes, in `_CRS` order.
 fn resources(ops: &dyn Ops, crs: &[AmlResource]) -> Vec<Resource> {
-    let mut out = Vec::new();
+    let mut out: Vec<Resource> = crate::ranges::consumed(crs)
+        .into_iter()
+        .filter_map(|r| match r.space {
+            AddressSpace::Memory => Some(Resource::Memory {
+                base: r.base,
+                len: r.len,
+                prefetchable: false,
+            }),
+            AddressSpace::IoPort => Some(Resource::IoPort {
+                base: u16::try_from(r.base).ok()?,
+                len: u16::try_from(r.len).ok()?,
+            }),
+        })
+        .collect();
     let irq_of = |gsi: u32, t: irq::Trigger, p: irq::Polarity, out: &mut Vec<Resource>| {
         if let Some((domain, hw)) = ops.gsi(gsi) {
             out.push(Resource::Irq {
@@ -281,36 +333,6 @@ fn resources(ops: &dyn Ops, crs: &[AmlResource]) -> Vec<Resource> {
                     irq_of(gsi, trigger(e.trigger), polarity(e.polarity), &mut out);
                 }
             }
-            AmlResource::Io(io) if io.length > 0 => out.push(Resource::IoPort {
-                base: io.min,
-                len: u16::from(io.length),
-            }),
-            AmlResource::FixedIo { base, length } if *length > 0 => out.push(Resource::IoPort {
-                base: *base,
-                len: u16::from(*length),
-            }),
-            AmlResource::Memory24(m) | AmlResource::Memory32(m) | AmlResource::FixedMemory32(m)
-                if m.length > 0 =>
-            {
-                out.push(Resource::Memory {
-                    base: u64::from(m.min),
-                    len: u64::from(m.length),
-                    prefetchable: false,
-                });
-            }
-            AmlResource::Address(a) if a.consumer && a.length > 0 => match a.kind {
-                AddressKind::Memory { .. } => out.push(Resource::Memory {
-                    base: a.min,
-                    len: a.length,
-                    prefetchable: false,
-                }),
-                AddressKind::Io { .. } => {
-                    if let (Ok(base), Ok(len)) = (u16::try_from(a.min), u16::try_from(a.length)) {
-                        out.push(Resource::IoPort { base, len });
-                    }
-                }
-                _ => {}
-            },
             _ => {}
         }
     }
@@ -397,11 +419,20 @@ impl Driver for AcpiBus {
             found,
             notes,
             companion_deps,
+            firmware_shared,
+            declared_shared,
         } = svc.run(cx.sleepable(), move |i, h| {
             walk(i, h, &dma, &platforms, &id)
         });
         for note in &notes {
             svc.ops().log(format_args!("{note}"));
+        }
+        // The shared ranges before any child that may be granted one.
+        for r in firmware_shared {
+            cx.share_with_firmware(r);
+        }
+        for r in declared_shared {
+            cx.declare_shared(r);
         }
         // Every child first, in namespace order (FreeBSD's creation
         // order), then the edges between them: a dependency may name a

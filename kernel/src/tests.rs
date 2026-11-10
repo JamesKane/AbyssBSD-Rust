@@ -1711,6 +1711,110 @@ pub(crate) mod bus_test {
         fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
     }
 
+    /// RAM pages the shared-range bus hands its devices.
+    pub(crate) static SHARED_PAGES: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+    /// What each shared-range device was granted: its label, and the
+    /// grant's sharing or the refusal.
+    pub(crate) static SHARED_GRANTS: sync::SpinLock<
+        alloc::vec::Vec<(u8, Result<bus::Sharing, bus::ResourceError>)>,
+    > = sync::SpinLock::new(alloc::vec::Vec::new());
+
+    /// A bus recording a firmware-shared range in its first page and a
+    /// declared-shared one at the start of its second, as `acpi0` records
+    /// AML's regions and the platform's declarations, with four children:
+    /// (1) the first page, which AML touches; (2) the second page whole
+    /// and (3) its declared start, like the Sky1's mailbox and SCMI
+    /// shared memory; (4) a range of the second page outside the
+    /// declaration.
+    pub(crate) struct SharedBus;
+
+    impl Driver for SharedBus {
+        const NAME: &'static str = "sharebus";
+        const IDS: Ids = Ids::Test(&[TestId {
+            model: 18,
+            rank: Rank::DEFAULT,
+        }]);
+        fn describe(_: &Ident) -> String {
+            "Shared-range test bus".into()
+        }
+        fn attach(_: &mut AttachCx<'_>) -> Result<Self, AttachError> {
+            Ok(Self)
+        }
+        fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
+            use bus::{AddressSpace::Memory, Range};
+            use devtree::graph::{EdgeKind::Required, Origin::ResourceSource};
+            let [a, b] = [0, 1].map(|k| SHARED_PAGES[k].load(Ordering::Relaxed));
+            cx.share_with_firmware(Range {
+                space: Memory,
+                base: a + 0x10,
+                len: 4,
+            });
+            cx.declare_shared(Range {
+                space: Memory,
+                base: b,
+                len: 0x80,
+            });
+            let mem = |base, len| Resource::Memory {
+                base,
+                len,
+                prefetchable: false,
+            };
+            let mut ids = alloc::vec::Vec::new();
+            for (label, r) in [
+                (1u8, mem(a, 4096)),
+                (2, mem(b, 4096)),
+                (3, mem(b, 0x80)),
+                (4, mem(b + 0x100, 0x80)),
+            ] {
+                ids.push(cx.add_child(
+                    Ident::Test(TestIdent { model: 19 }),
+                    Some(alloc::sync::Arc::new(label)),
+                    vec![r],
+                ));
+            }
+            // The fourth maps after the two it overlaps.
+            for sup in [ids[1], ids[2]] {
+                cx.add_dependency(ids[3], sup, Required, ResourceSource);
+            }
+            Ok(())
+        }
+        fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
+    }
+
+    /// Maps its range, asking knowingly only after a plain request is
+    /// refused as firmware-shared, and records what it got.
+    pub(crate) struct SharedDev {
+        _regs: MmioGrant<regs::Bytes>,
+    }
+
+    impl Driver for SharedDev {
+        const NAME: &'static str = "sharedev";
+        const IDS: Ids = Ids::Test(&[TestId {
+            model: 19,
+            rank: Rank::DEFAULT,
+        }]);
+        fn describe(_: &Ident) -> String {
+            "Shared-range test device".into()
+        }
+        fn attach(cx: &mut AttachCx<'_>) -> Result<Self, AttachError> {
+            let label = *cx.bus_data::<u8>().expect("label");
+            let mut got = cx.mmio_bytes(0);
+            if let Err(e) = got {
+                SHARED_GRANTS.lock().push((label, Err(e)));
+                if e == bus::ResourceError::FirmwareShared {
+                    got = cx.mmio_bytes_shared(0);
+                }
+            }
+            let regs = got?;
+            SHARED_GRANTS.lock().push((label, Ok(regs.sharing())));
+            Ok(Self { _regs: regs })
+        }
+        fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
+    }
+
+    pub(crate) const SHARED_BUS: DriverDecl = DriverDecl::of::<SharedBus>();
+    pub(crate) const SHARED_DEV: DriverDecl = DriverDecl::of::<SharedDev>();
+
     pub(crate) const COMPANION_BUS: DriverDecl = DriverDecl::of::<CompanionBus>();
     pub(crate) const COMPANION_DEV: DriverDecl = DriverDecl::of::<CompanionDev>();
     pub(crate) const COMPANION_FN: DriverDecl = DriverDecl::of::<CompanionFn>();
@@ -1736,6 +1840,49 @@ ktest! {
         assert_eq!(order.len(), 3, "{order:?}");
         m.shutdown_under(cb, &s);
         let _ = m.take_events();
+    }
+}
+
+ktest! {
+    fn shared_ranges_are_granted_knowingly() {
+        use bus::{NodeState, ResourceError, Sharing, TestIdent};
+        let s = cx();
+        let m = bus::manager();
+        let pages: alloc::vec::Vec<addr::PhysAddr> =
+            (0..2).map(|_| crate::mm::alloc_pages(vm::Order::ZERO).expect("page")).collect();
+        for (slot, pa) in bus_test::SHARED_PAGES.iter().zip(&pages) {
+            slot.store(pa.get(), Ordering::Relaxed);
+        }
+        bus_test::SHARED_GRANTS.lock().clear();
+        let claims = m.claims();
+        let sb = m.add_child(&s, m.root(), bus::Ident::Test(TestIdent { model: 18 }), None, alloc::vec![], &[]);
+        m.wait_idle(&s);
+        let mut got = bus_test::SHARED_GRANTS.lock().clone();
+        got.sort_by_key(|g| g.0);
+        let (firmware, declared) = (
+            Sharing { firmware: true, declared: false },
+            Sharing { firmware: false, declared: true },
+        );
+        // AML's range is refused until asked for knowingly; both sides of
+        // the declared overlap get it; past the declaration, the second
+        // driver is refused.
+        assert_eq!(got[..2], [(1, Err(ResourceError::FirmwareShared)), (1, Ok(firmware))]);
+        assert_eq!(got[2..4], [(2, Ok(declared)), (3, Ok(declared))]);
+        assert_eq!(got[4..], [(4, Err(ResourceError::Claimed))]);
+        let kids = m.children(sb, &s);
+        let attached = kids.iter().filter(|&&c| m.state(c, &s) == Some(NodeState::Attached)).count();
+        assert_eq!(attached, 3, "{got:?}");
+        assert_eq!(m.claims(), claims + 3);
+        // The bus's records go with it.
+        m.shutdown_under(sb, &s);
+        assert_eq!(m.claims(), claims);
+        let (f, d) = m.shared_ranges();
+        let ours = |r: &bus::Range| pages.iter().any(|p| r.base >> 12 == p.get() >> 12);
+        assert!(!f.iter().chain(&d).any(ours), "{f:?} {d:?}");
+        let _ = m.take_events();
+        for pa in pages {
+            crate::mm::free_pages(pa, vm::Order::ZERO);
+        }
     }
 }
 

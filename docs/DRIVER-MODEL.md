@@ -342,6 +342,7 @@ data and widened. It may:
 | **Create a synthetic node** for a block with no namespace object | Q8B clock controllers (GPUCC, DISPCC, VIDEOCC), cmd-db, SMEM; aggregates (§5.3) |
 | **Add dependency edges** (§6.1) and provider bindings (§9.3) | Q8B: which power domain, clocks, and interconnect paths each `PEP0` consumer needs |
 | **Describe reserved memory** (§8.4) | Carveouts, firmware shared memory |
+| **Declare a shared range** (§8.1) | Sky1: the SCMI shared memory (`CIXHA004`, `CIXHA005`) is the first 128 bytes of its mailbox's window |
 
 An extractor for vendor tables that live in AML (CIX's `CLKT`, `RSTL`, `RSNL`, `DLKL`, `RSVL`)
 also belongs here: it evaluates them at graph build and produces the same typed entries, as do a
@@ -360,7 +361,9 @@ vendor's `_DSD` property names (`cix,usb_syscon`). As built (ADR-0020):
 - The first platform is `platform/cix-sky1`, applying when a `CIXA1019` is present.
 - `sys/acpi`, `lib/devtree`, and `lib/acpi-platform` name no vendor in code; `cargo xtask
   check`'s policy enforces it.
-- The corrections in the table above are not built yet. Each kind gets one generic applier in
+- Declared shared ranges are built: `extract` lists them, and `acpi0` records them in the
+  resource space (§8.1).
+- The other corrections in the table above are not built yet. Each kind gets one generic applier in
   `sys/acpi`, and platforms supply only the entries, with the first driver that needs one.
 
 Rules:
@@ -716,15 +719,26 @@ Each bus that hands out ranges keeps a **resource space** (the `rman` equivalent
   `ResourceError`, logged with the driver's name.
 - **Firmware-reserved ranges** (`PNP0C01`/`PNP0C02` system resources, the UEFI memory map's MMIO
   entries) are claimed at boot by the platform root, as FreeBSD's `sysres` does.
-- **Ranges AML also touches.** The ACPI core records every `SystemMemory` and `SystemIO`
-  operation region in the resource spaces as *firmware-shared*. A grant that overlaps one
-  succeeds as `Grant::Shared { with: Aml }`, and the driver must treat its accesses as racing with
-  firmware: it declines, or restricts itself to reads, unless the platform description (§5.5)
-  says otherwise. A Super I/O whose environment-controller ports a `SystemIO` region covers is
-  the common case.
+- **Ranges AML also touches.** `acpi0` records the bytes that the fields of every
+  `SystemMemory` and `SystemIO` operation region touch, widened to their access units, as
+  *firmware-shared* (`sys/acpi::ranges`). It records them before any child attaches, and they go
+  when it detaches. A region is often far larger than its fields (the X870E's 8 MiB `SMIC` over
+  the whole FCH), and AML reaches its contents only through fields.
+  - A plain request for an overlapping range is refused (`ResourceError::FirmwareShared`), so no
+    driver races firmware without knowing.
+  - A driver written to share asks with `mmio_shared`, `mmio_bytes_shared`, or
+    `io_ports_shared`, and the grant's `sharing()` reports `firmware`. Such a driver only reads,
+    or uses only registers the fields leave alone, unless the platform description (§5.5) says
+    otherwise.
+  - Typical cases: a Super I/O whose environment-controller ports a `SystemIO` region covers,
+    and the Sky1 GPU's power resource, which writes a register inside the GPU's window.
+  - Regions a method creates while it runs are not known in advance and are not recorded.
 - **Ranges two nodes share.** Firmware sometimes gives two devices overlapping ranges on purpose
   (Sky1's SCMI shared memory inside its mailbox's 64 KiB window). Overlaps are refused unless the
-  platform description declares them, and then each side gets a `Grant::Shared { with: node }`.
+  platform description declares them (`SharedRange`, by device). Then both sides are granted the
+  overlap, and each grant's `sharing()` reports `declared`. `acpi0` logs how many overlaps between
+  children are undeclared, leaving out system-resource devices (`PNP0C01`, `PNP0C02`), whose
+  ranges enclose others by design.
   A register block several drivers program (a "syscon": Sky1's audio CRU, the reset
   controller's PHY orientation bits) is never granted to them directly. Its owner publishes a
   `RegisterRegion` provider (§9.3) that leases field subsets and does the read-modify-write under

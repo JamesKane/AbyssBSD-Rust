@@ -2504,6 +2504,22 @@ machines against FreeBSD on bare metal; the exit criteria above.
   machine with every platform (one platform per machine, no unclassified reference, no required
   or power edge in a cycle). `lib/acpi-corpus` holds the corpus loader the three share, and the
   policy check keeps vendor names out of the generic crates' code.
+- Progress 2026-11-09 (P8.1, shared ranges): `sys/bus::space` is the resource space.
+  - Grants overlap only inside a range the platform description declares shared. The Sky1
+    declares its SCMI shared memory (`SHM0`, `SHM1`), which is the first 128 bytes of each
+    mailbox's window.
+  - Ranges AML touches are recorded as firmware-shared. A driver must ask for one knowingly
+    (`mmio_shared`, `mmio_bytes_shared`, `io_ports_shared`), and its grant reports
+    `Sharing { firmware, declared }`.
+  - A firmware-shared range covers only the bytes its fields touch, not the whole region:
+    `lib/aml` reports each field's extent, widened to its access unit. The X870E's 8 MiB `SMIC`
+    region therefore leaves its GPIO and I2C controllers unshared.
+  - In the corpus, AML touches the Sky1's GPU, VPU, DSP and PCIe RC0 registers (power resources
+    writing a control register), the Q8B's GPU and UCSI, and QEMU's hotplug ports.
+  - The Sky1 has 33 overlaps between devices, all syscon-like. Two are declared; the rest wait
+    for their drivers, and the first driver to map an undeclared overlap wins.
+  - The records belong to the bus that made them and go when it detaches. FreeBSD records
+    neither kind. P8.1 is done; next: P8.2 (X870E) and P8.3 (Sky1 providers).
 
 ## Phase 9: Self-hosting and hardening = **v1.0 / Day 1 complete** (L)
 

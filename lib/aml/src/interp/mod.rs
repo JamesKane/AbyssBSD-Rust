@@ -272,6 +272,11 @@ pub struct FieldInfo {
     /// The `Connection` resource descriptor in effect (`GeneralPurposeIo`
     /// and `GenericSerialBus` regions).
     pub connection: Option<Arc<[u8]>>,
+    /// The bytes of `region` its reads and writes touch, as (offset from
+    /// the region's start, length): its bits widened to whole access
+    /// units. `None` for an index field, whose accesses go through its
+    /// index and data fields.
+    pub extent: Option<(u64, u64)>,
 }
 
 /// An AML interpreter and the namespace it maintains.
@@ -608,6 +613,7 @@ impl Interpreter {
         Some(FieldInfo {
             region,
             connection: f.connection.clone(),
+            extent: self.field_extent(f),
         })
     }
 

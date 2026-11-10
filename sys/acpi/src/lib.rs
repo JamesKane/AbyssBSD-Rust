@@ -28,6 +28,9 @@ pub mod ged;
 mod host;
 pub mod pcib;
 pub mod power;
+pub mod ranges;
+#[cfg(test)]
+mod ranges_corpus;
 pub mod service;
 
 pub use bus::{AcpiBus, AcpiDevice, DRIVER, companion};
