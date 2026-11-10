@@ -38,8 +38,10 @@ that runs unmodified FreeBSD userland. Read `docs/ROADMAP.md` for the current ph
   facts: `docs/HARDWARE.md` §4. Prior bring-up notes are in the sibling project
   `../AbyssBSD/docs/boards/orangepi-6-plus/`, plus `../AbyssBSD/docs/boards/radxa-dragon-q8b/lessons.md`.
   - **Read before experimenting on the board.** Hangs cost power cycles.
-  - Until it is reimaged for AbyssBSD (planned at P8, board bring-up), don't write to its boot NVMe (Crucial P3);
-    boot from USB. The Samsung 990 PRO is a test volume AbyssBSD may use. Never read `/dev/mem` under FreeBSD (it panics).
+  - Don't write to its boot NVMe (Crucial P3: the ESP, Ubuntu, FreeBSD, which stays the default boot).
+    AbyssBSD lives on the Samsung 990 PRO (`nda1`, serial S7LANU0Y715456L: ESP `abyssefi`, root
+    `abyssroot`), booted as EFI `Boot0007` by BootNext from FreeBSD; root `ssh` by key. Never read
+    `/dev/mem` under FreeBSD (it panics).
     Its ground truth (FreeBSD and Linux, captured 2026-11-09) is in `tests/corpus/opi6p/`.
   - "Nothing special": no board-specific config knobs. A board setting means a driver bug.
 - AMD64 reference machine: **Ryzen 9 7900X / Gigabyte X870E AORUS ELITE WIFI7**, Fedora 44 at
@@ -52,7 +54,7 @@ that runs unmodified FreeBSD userland. Read `docs/ROADMAP.md` for the current ph
     ESP, and the watchdog.
 - RV64 reference board: **Banana Pi BPI-SM10** (SpacemiT K3), arriving late 2026. Board facts:
   `docs/HARDWARE.md` §6, ADR-0017; SoC spec in `~/Projects/OS/chinese-wall/specs/spacemit-k3/`.
-  - Untouched until FreeBSD riscv64 userland runs end to end in QEMU (P10).
+  - Untouched until FreeBSD riscv64 userland runs end to end in QEMU (P12).
   - Ships with U-Boot and a devicetree only; AbyssBSD needs SpacemiT's edk2 port (UEFI + ACPI).
     Dump the SPI NOR and save the U-Boot environment before changing anything.
 - Entry point for everything: `cargo xtask …` (see `docs/BUILD-AND-TEST.md`).

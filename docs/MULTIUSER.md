@@ -46,7 +46,7 @@ what userland sees, not the source of the code ([ADR-0007](adr/0007-license-and-
 - The MAC framework, `audit`, and `rctl`/`racct`: their system calls answer as on a kernel without
   those options (`ENOSYS`, or `kern.racct.enable=0`), which base copes with.
 - VNET jails, jail descriptors (`jail_attach_jd`), and hierarchical jail resource limits.
-- Swap and the full pageout daemon (P9). Core dumps to swap (`dumpon`, `savecore`) find no dump
+- Swap and the full pageout daemon (P11). Core dumps to swap (`dumpon`, `savecore`) find no dump
   device, as on a machine without one.
 - Linux and 32-bit ABIs (permanent, [COMPATIBILITY.md §1](COMPATIBILITY.md#1-target)).
 - POSIX AIO beyond what the base boot and kyua's `lib/libc` need; `EVFILT_AIO`, `EVFILT_LIO`,

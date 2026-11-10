@@ -27,7 +27,7 @@
 //! - Once it serves lines, it adds the `gpio_aei` child for its `_AEI`
 //!   (the Sky1's EC line on `GPI4`).
 //!
-//! Wake (the firmware call of §1.5) and suspend come with P9.
+//! Wake (the firmware call of §1.5) and suspend come with P11.
 //!
 //! FreeBSD has no driver for this controller; the class is FreeBSD's
 //! (`gpio0`, as `pl061` and the others take it). Recorded in

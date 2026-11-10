@@ -1,7 +1,7 @@
 # The AbyssBSD Reference Manuals
 
 - Status: **Draft**. A forward design for the system's own documentation. It becomes an ADR when
-  the first step (§11, D1) starts, at the latest with P9's documentation item
+  the first step (§11, D1) starts, at the latest with P11's documentation item
 - Date: 2026-10-27
 - Scope: the documentation AbyssBSD installs and ships to the people who use it, program for it,
   and write drivers for it: what it contains, its source format, how it is built, checked,
@@ -42,7 +42,7 @@ document only where AbyssBSD adds, differs, or has not caught up.
 
 | Vol. | Title | Audience | RKM counterpart | Content | Arrives |
 |---|---|---|---|---|---|
-| 0 | **User's Guide** | People installing and running the system | (the Workbench manuals) | Installation, boot options (`abyss.*`), the first-use log and `absent.txt`, upgrading, supported hardware summary, where AbyssBSD differs for an administrator, troubleshooting a boot | P9 (its installation guide and hardware list are P9 deliverables) |
+| 0 | **User's Guide** | People installing and running the system | (the Workbench manuals) | Installation, boot options (`abyss.*`), the first-use log and `absent.txt`, upgrading, supported hardware summary, where AbyssBSD differs for an administrator, troubleshooting a boot | P11 (its installation guide and hardware list are P11 deliverables) |
 | 1 | **System Programming** | Programmers of userland on AbyssBSD | *Libraries* | Narrative chapters, each with whole programs: processes and threads, memory, files and the VFS, events (kqueue, eventfd, timers), signals, time, IPC (pipes, shared memory, umtx), terminals, devices from userland, credentials, jails and Capsicum. Written as "how this works on AbyssBSD", pointing to FreeBSD's pages for the call-by-call contract | D2 onward, chapter by chapter |
 | 2 | **Devices** | Programmers of device-facing userland | *Devices* | One chapter per device class as userland sees it: the node, `open`/`read`/`ioctl`/`mmap`/`kqueue` semantics, every ioctl, an example. Storage, tty and vt, evdev, USB (`ugen`), DRM (M-G), network interfaces (P7), audio (later) | With each class |
 | 3 | **Interface Reference** | Everyone; looked up, not read | *Includes & Autodocs* | Generated entries (§5): every system call with its AbyssBSD status, every ioctl, every sysctl, every ABI structure with its layout per architecture, errno values, loader variables and kernel environment, devfs names | D1, generated |
@@ -309,7 +309,7 @@ second one, so small installs can skip it. When pkgbase-style packages exist, th
 It needs a way to build Rust userland programs for both architectures. `x86_64-unknown-freebsd` is
 a built-in target with `std`; `aarch64-unknown-freebsd` has no prebuilt `std` and
 [ADR-0003](adr/0003-stable-rust-builtin-targets.md) forbids `-Zbuild-std`. So until M-U decides the
-userland Rust target, the reader is built natively on AbyssBSD with FreeBSD's `rust` package (P9
+userland Rust target, the reader is built natively on AbyssBSD with FreeBSD's `rust` package (P11
 self-hosting), or on FreeBSD/arm64. On the host it runs from day one via `cargo xtask manual read`.
 
 **The desktop browser** (M-D): an Aqua application, written in the desktop's monorepo, over the
@@ -399,9 +399,9 @@ parser in the tree and one is not worth writing for this.
 |---|---|---|---|
 | **D0** | This design; an ADR when D1 starts | — | Reviewed |
 | **D1** | `lib/manual` (parser, links, index) with fuzzing; `tools/manual` with the bundle, text, and mdoc outputs; Volume 3 generated for system calls, ABI structures, and sysctls; compat-deviations keyed; `manual check` in `cargo xtask check` with a known-gaps file; Volume A | Nothing beyond P6 | `cargo xtask manual build` produces the bundle; the check passes |
-| **D2** | Installed into the image (`abyss-doc.txz`, the manpath file); `man 2abyss open` and `apropos` work on AbyssBSD in QEMU; Volume 0 (installation guide, supported hardware) and Volume 5's first chapters; the host-side TUI reader | D1; P9's documentation item | A shell case reads an entry with `man` on both architectures |
-| **D3** | The terminal reader on AbyssBSD; the examples tier; Volume 1 chapters for the P2–P6 subsystems; HTML output | D2; Rust userland builds (P9 self-hosting or M-U) | `abyssdoc` runs on the VT on both architectures; every example builds and passes |
-| **D4** | Volume 2 chapters with each device class (evdev, DRM in M-G); Volume 4 with P8 and P10 | The phases that build them | Per phase |
+| **D2** | Installed into the image (`abyss-doc.txz`, the manpath file); `man 2abyss open` and `apropos` work on AbyssBSD in QEMU; Volume 0 (installation guide, supported hardware) and Volume 5's first chapters; the host-side TUI reader | D1; P11's documentation item | A shell case reads an entry with `man` on both architectures |
+| **D3** | The terminal reader on AbyssBSD; the examples tier; Volume 1 chapters for the P2–P6 subsystems; HTML output | D2; Rust userland builds (P11 self-hosting or M-U) | `abyssdoc` runs on the VT on both architectures; every example builds and passes |
+| **D4** | Volume 2 chapters with each device class (evdev, DRM in M-G); Volume 4 with P8 and P12 | The phases that build them | Per phase |
 | **D5** | The desktop browser, help protocol, launcher provider, Volume 6 (all in the desktop's monorepo) | M-D.2 | F1 in an Aqua application opens its help node |
 
 D1 can start alongside P6, since it reads the code and changes none of it. Narrative chapters then

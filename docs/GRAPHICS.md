@@ -82,7 +82,7 @@ are dual MIT/GPL). GPL-only DRM core and driver files are never read
 ──────────────────────────────────────────────────────┴──────────────────────────────────────────
  sys/fence    Fence · Timeline · Reservation · SyncFile · FenceSignalCx
  sys/vm       BufferObject (VM object + device pager) · DmaBuf · reclaim hooks
- sys/vm::dma  IoAddressSpace · IoPageTable<F> · BusAddr · ReservedRegion       (+ sys/iommu, P9)
+ sys/vm::dma  IoAddressSpace · IoPageTable<F> · BusAddr · ReservedRegion       (+ sys/iommu, P11)
 ──────────────────────────────────────────────────────────────────────────────────────────────────
  drivers      gop-kms   virtio-gpu   panthor   linlondp + sky1-dp + phy + panel   amdgpu   msm …
 ──────────────────────────────────────────────────────────────────────────────────────────────────
@@ -168,7 +168,7 @@ impl<F: PteFormat> IoAddressSpace<F> {
   behind the device.
 - **Formats** are data the driver supplies: Mali's AArch64-style tables (panthor 04), Adreno
   through per-process SMMU TTBR switching (`CP_SMMU_TABLE_UPDATE`, adreno-a690 03 §4), AMD's GPUVM.
-  The P9 SMMUv3 stage-1 backend uses the same AArch64 format, so it is one implementation.
+  The P11 SMMUv3 stage-1 backend uses the same AArch64 format, so it is one implementation.
 - **`VM_BIND`.** Binding and unbinding are asynchronous operations with in-fences and out-fences
   (panthor 10 §10.4.3, msm). Page-table memory for a bind is allocated **before** the operation
   enters the fence-signalling path (§5.3).
@@ -367,12 +367,12 @@ GPU is an NVIDIA RTX 4070, and its CPU has an RDNA2 iGPU.
 |---|---|
 | Firmware store (GPU firmware by GPU ID) | DRIVER-MODEL.md §8.6 (P8) |
 | Clock, reset, power, and SCMI providers; the platform description | DRIVER-MODEL.md §5.5, §8.5, §9.3 (P8) |
-| Runtime PM with driver-held `PowerRef` | DRIVER-MODEL.md §8.5 (P9) |
-| `PerfDomain` (GPU DVFS) and thermal capping | DRIVER-MODEL.md §9.3 (P9) |
-| IOMMU backends (SMMUv3, SMMUv2) and device address spaces | DRIVER-MODEL.md §8.4 (P9) |
+| Runtime PM with driver-held `PowerRef` | DRIVER-MODEL.md §8.5 (P11) |
+| `PerfDomain` (GPU DVFS) and thermal capping | DRIVER-MODEL.md §9.3 (P11) |
+| IOMMU backends (SMMUv3, SMMUv2) and device address spaces | DRIVER-MODEL.md §8.4 (P11) |
 | `SCM_RIGHTS`, kqueue, eventfd, shared memory | P6 |
 | evdev (compositors read input from `/dev/input/event*`) | `sys/evdev` (USB track) |
-| VM objects with pagers, swap | P5, P9 |
+| VM objects with pagers, swap | P5, P11 |
 
 ## 11. Testing
 

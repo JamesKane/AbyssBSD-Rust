@@ -16,7 +16,8 @@ ARM64 hardware is in the loop.
 exit criterion run under QEMU (plus bhyve for amd64). **No physical hardware is touched until
 FreeBSD userland runs end to end in QEMU**: no smoke checks, no table captures. That is P6's
 exit. P7 adds networking, still in QEMU and bhyve, so the machines come up with `ssh` and `scp`;
-P8 brings up the physical reference machines, and they are **gating** from then on.
+P8 brings up the Orange Pi 6 Plus, P9 hardens it, and P10 brings up the X870E; each machine is
+**gating** from its bring-up on.
 
 ```
 P0 Foundations ─► P1 Boot ─► P2 Core kernel ─► P3 Devices & ACPI ─► P4 First userspace
@@ -32,10 +33,13 @@ P0 Foundations ─► P1 Boot ─► P2 Core kernel ─► P3 Devices & ACPI ─
                                                  P7 Networking
                                                       │
                                                       ▼
-                                                 P8 Board bring-up ─► P9 Self-hosting & hardening = v1.0 (Day 1)
+                                                 P8 Board bring-up (Sky1) ─► P9 Sky1 hardening ─► P10 X870E bring-up
+                                                                                                         │
+                                                                                                         ▼
+                                                                        P11 Self-hosting & hardening = v1.0 (Day 1)
                                                                                 │
                                                                                 ▼
-                                                                         P10 RV64 (Day 2)
+                                                                         P12 RV64 (Day 2)
                                                                                 │
                                               ┌─────────────────────────────────┼──────────────────┐
                                               ▼                                 ▼                  ▼
@@ -818,7 +822,7 @@ within 2% of FreeBSD.
 - **tmpfs** and **devfs** (complete).
 - **msdosfs** read/write (FAT12/16/32, LFN). Mount the ESP at `/boot/efi`.
 - **UFS2** read, then write (without soft updates; clean unmount required), then **soft updates**.
-  **SU+J** follows in Phase 9.
+  **SU+J** follows in Phase 11.
 - Validation: images written by AbyssBSD must pass FreeBSD `fsck_ffs -f` and `fsck_msdosfs` on the
   build server with zero errors, under a randomized-workload stress test.
 
@@ -2355,11 +2359,14 @@ P7.0 ─► P7.1 ─► P7.2 ─► P7.3 ─► P7.4 ─┬─► P7.5 ───
   12 differential scenarios and 1280-1284 of FreeBSD's test cases as on FreeBSD), and the `p7`
   suite within the bound (geometric mean 0.935).
 
-## Phase 8: Board bring-up (XL)
+## Phase 8: Board bring-up, Orange Pi 6 Plus (XL) — done 2026-11-10
 
-**Goal:** the P7 system, networked, on both physical reference machines, with AbyssBSD's own
-drivers for their firmware, SoC, and NICs, and both machines gating every phase from here on
-([ADR-0010](adr/0010-qemu-first-development.md)).
+**Goal:** the P7 system, networked, on the ARM64 reference board, with AbyssBSD's own drivers for
+its firmware, SoC, and NIC, and the board gating every phase from here on
+([ADR-0010](adr/0010-qemu-first-development.md)). The phase was planned for both physical
+machines; on 2026-11-10 the X870E's half moved to its own phase (P10), after the board is hardened
+(P9). The items below that name the X870E, and the exit criteria not yet run on the board, moved
+with them.
 
 This is the first contact with real firmware. The clean-room specifications
 (`~/Projects/OS/chinese-wall/specs/`) and the Q8B experience show that arm64 SoC firmware describes
@@ -2393,7 +2400,8 @@ corpus rather than designed in the abstract.
 - `cargo xtask perf --platform x870e|opi6p`, and kyua's arm64 baseline on the Orange Pi 6 Plus.
 - The Radxa Dragon Q8B is Tier 2: its platform-description entries are welcome but not gating.
 
-**Exit:** the `<arch>-multiuser` scenario passes on both machines (on the X870E from the
+**Exit (as planned for both machines; what held on the Sky1 is under P8.4's last progress
+entry, and the rest moved to P9 and P10):** the `<arch>-multiuser` scenario passes on both machines (on the X870E from the
 framebuffer and a USB keyboard alone). fsx with `fsck_ffs` passes on their NVMe and on a USB disk.
 Their device trees match FreeBSD's `devinfo` wherever FreeBSD has a driver. The kyua target is met
 on the Orange Pi 6 Plus. Every component of every suite so far is within 2% of FreeBSD on bare
@@ -2412,7 +2420,7 @@ builder reports each machine's edges and unresolved references.
 **P8.1 Driver-model extensions.** The items above, host-tested against both corpora: the platform
 description, edge kinds and sources, provider traits, the ACPI companion, shared ranges.
 
-**P8.2 X870E.** Deploy to the media NVMe; multi-user from the framebuffer and a USB keyboard;
+**P8.2 X870E.** Moved to P10. Deploy to the media NVMe; multi-user from the framebuffer and a USB keyboard;
 `amdsbwd`; the persistent log the loader saves to the ESP.
 
 **P8.3 Sky1 providers.** SCMI (clocks, resets, power domains) and the FCH GPIO, I2C, and pin
@@ -2421,7 +2429,7 @@ board.
 
 **P8.4 Orange Pi 6 Plus.** USB boot, then multi-user from USB, then the NVMe reimaged.
 
-**P8.5 Conformance, performance, and exit.** kyua on the Orange Pi 6 Plus; every suite on both
+**P8.5 Conformance, performance, and exit.** Moved to P9 (the Orange Pi 6 Plus) and P10 (the X870E). kyua on the Orange Pi 6 Plus; every suite on both
 machines against FreeBSD on bare metal; the exit criteria above.
 
 - Progress 2026-11-09 (P8.0): both machines' ground truth is in the corpus
@@ -2595,8 +2603,8 @@ machines against FreeBSD on bare metal; the exit criteria above.
     `gpio_and_i2c_consumers_reach_their_controller`. Neither controller has met the board.
   - Next: drivers for the devices (the RX8900 RTC on I2C3, the RTS5453 PD controllers), `iicbus`
     and `iic` (`/dev/iicN`, `i2c(8)`), `gpioc` (`gpioctl(8)`), the `GeneralPurposeIo` and
-    `GenericSerialBus` operation-region handlers, wake (§1.5's firmware call, P9).
-- Progress 2026-11-10 (P8.4, CPU frequency and thermal zones), brought forward from P9 because the
+    `GenericSerialBus` operation-region handlers, wake (§1.5's firmware call, P11).
+- Progress 2026-11-10 (P8.4, CPU frequency and thermal zones), brought forward from P11 because the
   board runs at whatever clock firmware left, with nothing to slow it when hot:
   - `cpu` (`sys/acpi::cpu`) takes the processors (`ACPI0007` devices, `Processor` objects, which
     `acpi0` now adds), its unit the CPU's (a driver may now
@@ -2614,9 +2622,71 @@ machines against FreeBSD on bare metal; the exit criteria above.
   - Tested on the host (`cpufreq` policy, `_CPC`/`_PSD` and `ThermalZone` namespaces, the Sky1's
     scale and passive steps) and in QEMU (`processors_are_cpu_devices_numbered_as_their_cpus`);
     QEMU has no `_CPC` or thermal zones, so neither driver has met hardware yet. Idle states
-    (`_LPI`, the Sky1 GPT as broadcast timer) remain P9.
+    (`_LPI`, the Sky1 GPT as broadcast timer) remain P11.
+- Done 2026-11-10 (P8.4 and Phase 8 for the Sky1): AbyssBSD runs multi-user on the Orange Pi 6
+  Plus, networked, from its own NVMe.
+  - Boot: from a USB stick first (`xtask image --root installed`), then from the Samsung 990 PRO
+    (`nda1`: a 512 MB ESP `abyssefi` and a 255 GB UFS2 root `abyssroot`), as EFI `Boot0007`
+    reached by BootNext from FreeBSD, which stays the default on the Crucial P3. The kernel is
+    updated in place over `ssh`.
+  - `xtask image --root board --authorized-key <key>`: the installed root with
+    `ifconfig_DEFAULT="DHCP"` and `sshd`, root by key only. `rge0` takes its lease at 1000baseT and
+    root logs in over `ssh`.
+  - CPU frequency and thermal zones on the board: `cpu0`–`11`, `acpi_cppc0`–`4` with `cpufreqN` on
+    cpu0/2/6/8/10, and `acpi_tz0`–`12` attach as under FreeBSD, with the same levels, trip points,
+    and passive cooling on tz7–tz10; the zones read 41–43 °C. `dev.cpu.0.freq=800` brings every
+    domain's `delivered_mhz` to 799, and `=2600` each to its own highest (2599, 1799, 2299, 2199,
+    2499).
+  - Fixed on the way: detach kept a driver's revoked providers, and with them `cdnc_i2c`'s
+    registers, past its grant check, so every reboot on the board panicked; `sysctl` left query
+    nodes (`delivered_mhz`, `kern.devname`, `kern.geom.conf*`) out of its listings.
+  - Not run on the board, so moved to P9: kyua, fsx with `fsck_ffs` on the NVMe and a USB disk, the
+    `devinfo` comparison, and the bare-metal performance gate (shelved until more of the board
+    works).
 
-## Phase 9: Self-hosting and hardening = **v1.0 / Day 1 complete** (L)
+## Phase 9: Sky1 hardening (L)
+
+**Goal:** the Orange Pi 6 Plus as dependable as FreeBSD on it, before the second machine comes up:
+no hangs, no reboot loops, nothing that needs the screen, and P8's remaining exit criteria met.
+
+- **Known defects from bring-up:**
+  - holding a key (the up arrow) on the `vt` console hangs the machine, with nothing on serial;
+  - UFS2 cannot `MNT_RELOAD` the root, so after an unclean shutdown `fsck` repairs it and `rc`
+    reboots once;
+  - `getty` gives no login on the serial console (`ttyu0`), though it is the primary console;
+  - EFI runtime services (`efirt`): `efibootmgr` cannot set BootNext from AbyssBSD, so each update
+    costs a reboot through FreeBSD;
+  - the boot's noise: `devmatch`'s linker hints, `route`'s "File exists", `sky1_pinctrl`'s pad
+    warnings, the `cdnc_i2c` bus-busy poll, `usbhid` "no usable report descriptor", the loader's
+    power-off 3 s after a failure.
+- **The rest of the board:** the RX8900 RTC on I2C3, the PD controllers, `iicbus`/`iic` and
+  `gpioc`, the `GeneralPurposeIo` and `GenericSerialBus` operation-region handlers.
+- **Verification:** kyua's arm64 target on the board; fsx with `fsck_ffs` on the NVMe and a USB
+  disk; the device tree against FreeBSD's `devinfo` wherever FreeBSD has a driver; long runs
+  (stress, the multi-user and network scenarios looped) with the watchdog armed.
+- **Performance:** `cargo xtask perf --platform opi6p`, every suite so far within 2% of FreeBSD on
+  the board (per core class), P7's over `rge`.
+
+**Exit:** the P8 exit criteria on the Orange Pi 6 Plus, every known defect above fixed or recorded in
+compat-deviations with a reason, and a day of looped scenarios without a hang.
+
+## Phase 10: Board bring-up, X870E (L)
+
+**Goal:** the hardened system on the AMD64 reference machine
+([ADR-0009](adr/0009-amd64-reference-machine-ryzen-x870e.md), HARDWARE.md §5), gating from then on.
+This is P8's X870E half (P8.2), with its ground truth already in the corpus (P8.0).
+
+- **Deploy:** `cargo xtask deploy --machine x870e` onto the media NVMe only, by serial number;
+  FreeBSD 15.1 beside it for baselines. Never the Fedora disk, the RAID members, the Fedora ESP, or
+  its boot entry.
+- **Drivers:** the RTL8125 family (`rge`), `amdsbwd`, the persistent log the loader saves to the
+  ESP, ACPI CPPC (`acpi_cppc`, shared with the Sky1), and whatever else the dependency graph shows
+  multi-user needs.
+- **Exit:** the `x86_64-multiuser` scenario from the framebuffer and a USB keyboard alone; fsx with
+  `fsck_ffs` on the media NVMe and a USB disk; the device tree against FreeBSD's `devinfo`; every
+  suite so far within 2% of FreeBSD on the machine, P7's over its physical NIC.
+
+## Phase 11: Self-hosting and hardening = **v1.0 / Day 1 complete** (L)
 
 - **Self-hosting:** `pkg install rust` on AbyssBSD, then build AbyssBSD on AbyssBSD (amd64 and
   arm64) and boot the result.
@@ -2629,7 +2699,7 @@ machines against FreeBSD on bare metal; the exit criteria above.
   audit, speculative-execution mitigations, and arm64 PAC/BTI if stable-toolchain support allows.
 - Suspend/resume (S3 / s2idle) is a **stretch goal**.
 - Performance pass: lock contention profiling and scheduler tuning on hybrid cores, aimed at
-  beating FreeBSD rather than matching it. The P9 suite adds self-hosted build time, SU+J
+  beating FreeBSD rather than matching it. The P11 suite adds self-hosted build time, SU+J
   metadata workloads, and swap throughput.
 - Documentation: installation guide ([INSTALLER.md](INSTALLER.md) (draft)), supported-hardware list,
   compat-deviations list. Forward design for the installed manuals: [MANUALS.md](MANUALS.md) (draft).
@@ -2637,7 +2707,7 @@ machines against FreeBSD on bare metal; the exit criteria above.
 **Exit (v1.0):** the success criteria in [VISION.md](VISION.md#success-criteria-for-day-1-v10) are
 met.
 
-## Phase 10: RV64, Day 2 (L)
+## Phase 12: RV64, Day 2 (L)
 
 - `arch/riscv64`: S-mode entry from UEFI, Sv48 paging, traps, SBI (timer, IPI, HSM, SRST), and the
   AIA interrupt controllers (IMSIC/APLIC), all from ACPI (RHCT, MADT RINTC/IMSIC/APLIC).
@@ -2702,7 +2772,7 @@ Plan: [DESKTOP.md](DESKTOP.md) under [ADR-0018](adr/0018-desktop-architecture.md
   M-G, and does not gate Day 1. First light follows M-G.1, acceleration M-G.3, and metal M-G.6.
 - Changes the desktop itself needs (a 15.1 package build, a UFS install layout, arm64 packages)
   are made in the monorepo's plan, not carried here (DESKTOP.md §8).
-- Prerequisites by step: P6 (headless), M-G (display), P7 (network panes, Firefox), audio, P9 power
+- Prerequisites by step: P6 (headless), M-G (display), P7 (network panes, Firefox), audio, P11 power
   management (sleep), M-Z (ZFS install), INSTALLER.md (the boot loader for installed systems).
 
 ### M-Z: OpenZFS
@@ -2735,7 +2805,7 @@ Plan: [DESKTOP.md](DESKTOP.md) under [ADR-0018](adr/0018-desktop-architecture.md
 | Rust stable-toolchain gaps (e.g. arm64 branch protection) | Hardening delayed | Track upstream. ADR required for any nightly opt-in |
 | Performance below FreeBSD's | AbyssBSD is not a credible replacement | The 2% bound gates every phase from P2 ([ADR-0011](adr/0011-performance-parity.md)), so losses are caught in the layer that causes them. Nightly cumulative suites. Hot-path designs weighed against ARM64 costs before P8 makes arm64 gating |
 | Physical hardware variety | Slow v1.0 | A small set of Tier 1 machines, SystemReady-only on ARM64 |
-| The X870E holds user data (Fedora NVMe, RAID array) | Catastrophic data loss | Non-designated disks attach read-only until P9. `xtask deploy` identifies the media NVMe by serial number. AbyssBSD never writes the Fedora ESP or boot entries |
+| The X870E holds user data (Fedora NVMe, RAID array) | Catastrophic data loss | Non-designated disks attach read-only until P11. `xtask deploy` identifies the media NVMe by serial number. AbyssBSD never writes the Fedora ESP or boot entries |
 | No serial console on the X870E | Blind debugging of early hangs | Framebuffer console, persistent RAM log saved by the loader, FCH watchdog, an optional PCIe serial card or polled network log |
 | Bring-up on the Orange Pi 6 Plus costs power cycles | Slow iteration | QEMU first. Serial console from day one, the watchdog in P3. Capture the Linux/FreeBSD ground truth (ACPI dumps, register state) before the board is reimaged, and read it before experimenting |
 | The desktop is another project's plan, on FreeBSD `main` | M-D waits on changes made elsewhere; the desktop drifts toward 16-only interfaces | Its harness runs against FreeBSD 15.1 here, so drift shows as a failing lane. The asks are listed in DESKTOP.md §8 and tracked in the monorepo's plan |

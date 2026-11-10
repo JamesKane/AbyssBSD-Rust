@@ -7,7 +7,7 @@
 ## Context
 
 The roadmap's exit criteria covered correctness and compatibility but not speed. Performance was
-left to a P9 "performance pass" and a P7 throughput target "set in planning". A rewrite that is
+left to a P11 "performance pass" and a P7 throughput target "set in planning". A rewrite that is
 correct but slower than the code it replaces is not a credible replacement, and performance lost
 in early layers (allocator, locks, scheduler, VM) is expensive to win back once everything is built
 on top of them.
