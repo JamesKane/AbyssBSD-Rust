@@ -285,4 +285,130 @@ mod hand {
         assert_eq!(highest, [(0, 300), (1, 150), (2, 600)]);
         assert_eq!((got[0].nominal, got[0].lowest), (Some(200), Some(10)));
     }
+
+    /// `OperationRegion (n, space, base, len)` and a byte-access field of
+    /// one-byte units over it.
+    fn region_with_fields(n: &str, space: u8, base: u64, units: &[&str]) -> Vec<u8> {
+        let mut list = cat(&[&name(n), &[0x01]]);
+        for u in units {
+            list.extend_from_slice(&name(u));
+            list.push(8);
+        }
+        cat(&[
+            &[0x5b, 0x80],
+            &name(n),
+            &[space],
+            &int(base),
+            &int(0x100),
+            &aml::asm::pkg(&[0x5b, 0x81], &list),
+        ])
+    }
+
+    /// The region-edge rules no corpus machine exercises: an embedded
+    /// controller's region is served by the device declaring it, a PCC
+    /// region by `acpi0`, and a serial-bus field without a `Connection`
+    /// is reported rather than guessed.
+    #[test]
+    fn region_edges_by_space() {
+        use devtree::graph::{EdgeKind, Origin};
+
+        use crate::deps::{Provider, Via, build};
+        use aml::RegionSpace;
+
+        let hid = |h: &str| name_op("_HID", &aml::asm::string(h));
+        let body = aml::asm::scope(
+            "\\_SB",
+            &cat(&[
+                &device(
+                    "EC0",
+                    &cat(&[
+                        &hid("PNP0C09"),
+                        &region_with_fields("ECOR", 3, 0, &["BST0"]),
+                    ]),
+                ),
+                &device(
+                    "BAT0",
+                    &cat(&[
+                        &hid("PNP0C0A"),
+                        &method("_BST", 0, &ret(&name("\\_SB.EC0.BST0"))),
+                    ]),
+                ),
+                &device(
+                    "CPC0",
+                    &cat(&[
+                        &hid("XCPC0001"),
+                        &region_with_fields("PCCR", 0x0a, 3, &["CMD"]),
+                    ]),
+                ),
+                &device(
+                    "I2C1",
+                    &cat(&[
+                        &hid("XI2C0001"),
+                        &region_with_fields("GSB", 9, 0, &["REG0"]),
+                    ]),
+                ),
+                &device(
+                    "PMIC",
+                    &cat(&[
+                        &hid("XPMC0001"),
+                        &method("_PS0", 0, &store(&int(1), &name("^^I2C1.REG0"))),
+                    ]),
+                ),
+            ]),
+        );
+        let mut i = load(&dsdt(&body));
+        let devs: Vec<aml::NodeId> = ["EC0", "BAT0", "CPC0", "I2C1", "PMIC"]
+            .iter()
+            .map(|d| node(&i, &alloc::format!("\\_SB.{d}")))
+            .collect();
+        let deps = build(&mut i, &mut Quiet, &devs, &[]);
+        let got: Vec<(aml::NodeId, aml::NodeId, EdgeKind, Via, Provider)> = deps
+            .edges
+            .iter()
+            .map(|e| (e.supplier, e.consumer, e.kind, e.via.clone(), e.provider))
+            .collect();
+        let pccr = node(&i, "\\_SB.CPC0.PCCR");
+        assert_eq!(
+            got,
+            [
+                (
+                    devs[0],
+                    devs[1],
+                    EdgeKind::Optional,
+                    Via::Region(RegionSpace::EmbeddedControl),
+                    Provider::Device(devs[0])
+                ),
+                (
+                    pccr,
+                    devs[2],
+                    EdgeKind::Optional,
+                    Via::Region(RegionSpace::Pcc),
+                    Provider::Bus(pccr)
+                ),
+            ]
+        );
+        assert_eq!(Via::Region(RegionSpace::Pcc).origin(), Origin::Pcc);
+        assert_eq!(
+            Via::Region(RegionSpace::EmbeddedControl).origin(),
+            Origin::Region
+        );
+        let unresolved: Vec<(aml::NodeId, alloc::string::String)> = deps
+            .unresolved
+            .iter()
+            .map(|u| (u.consumer, u.name.clone()))
+            .collect();
+        assert_eq!(
+            unresolved,
+            [
+                (
+                    devs[3],
+                    alloc::string::String::from("\\_SB_.I2C1.REG0 without Connection")
+                ),
+                (
+                    devs[4],
+                    alloc::string::String::from("\\_SB_.I2C1.REG0 without Connection")
+                ),
+            ]
+        );
+    }
 }

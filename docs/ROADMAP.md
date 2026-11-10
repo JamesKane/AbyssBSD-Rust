@@ -2455,6 +2455,19 @@ machines against FreeBSD on bare metal; the exit criteria above.
   and `I2S9` ask for `pinctrl_substrate_i2sN_dbg` groups that no controller declares
   (SSDT1's `MUX0` has `pinctrl_substrate_i2s5`, `i2s6`, and `i2s8`, and nothing for `i2s9`);
   they are reported as unresolved. Next: operation-region edges (GPIO, serial bus, PCC).
+- Progress 2026-11-09 (P8.1, operation-region edges): `lib/aml` reports a region's space and
+  offset and a field's region and `Connection`, decodes a connection descriptor (an inline
+  `Connection` has no end tag), and finds the fields a method names. A field in a region only
+  a driver serves (GPIO and serial bus through the controller its `Connection` names; EC,
+  SMBus, and IPMI through the declaring device; PCC through `acpi0`) makes an optional edge to
+  the device defining it and to each device whose methods name it: optional, because AML may
+  not touch the region before `_REG` connects it, and the Q8B relies on that (`ABD` waits for
+  `PEP0` by `_DEP` while `PEP0`'s AML talks over `ABD`'s serial bus). The Q8B gets four such
+  edges (`PEP0`, `PMGK` → `ABD`; `IRTC` → `IC13`; `QPPX` → `GIO0`); the Sky1 and the X870E
+  have no such regions. The Sky1's clocks and sensors go through `\_SB.PMMX`, an AML-only SCMI
+  mailbox in `SystemMemory` at `0x065D0000`, not PCC (DRIVER-MODEL §17 q7 answered,
+  HARDWARE §4 corrected). Next: the platform description (§5.5), provider traits, the ACPI
+  companion, and shared ranges.
 
 ## Phase 9: Self-hosting and hardening = **v1.0 / Day 1 complete** (L)
 

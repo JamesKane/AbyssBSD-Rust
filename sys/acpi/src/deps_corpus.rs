@@ -480,12 +480,17 @@ fn opi6p_graph() {
 
 /// The Q8B depends by `_DEP`; with its camera and sensor hubs off, six of
 /// them name a device nothing will serve.
+/// The Q8B's AML reaches its PMIC and RTC over serial-bus regions and a
+/// WLAN enable over a GPIO region; those are its only operation regions a
+/// driver serves.
 #[test]
 fn q8b_graph() {
     let (i, _, deps) = machine("radxa-q8b");
     expect(
         &deps,
         &[
+            ("Optional Region(GeneralPurposeIo) device", 1),
+            ("Optional Region(GenericSerialBus) device", 3),
             ("Power _PR0 bus", 2),
             ("Power _PR3 bus", 2),
             ("Required Dep absent", 6),
@@ -507,6 +512,32 @@ fn q8b_graph() {
     .collect();
     assert_eq!(absent(&i, &deps), want);
     assert!(deps.unresolved.is_empty());
+    // `ABD`, Qualcomm's ACPI bus device, serves `\_SB.ABD.ROP1`, which
+    // `PEP0` and `PMGK` define fields in; `IRTC`'s methods read the RTC
+    // registers `IC13` defines (`\_SB.IC13.TMBK`); `QPPX` drives a pin
+    // of `GIO0`. `ABD` itself waits for `PEP0` by `_DEP`, so only the
+    // region edge's being optional keeps the graph acyclic.
+    for (consumer, supplier, space) in [
+        ("\\_SB_.PEP0", "\\_SB_.ABD_", RegionSpace::GenericSerialBus),
+        ("\\_SB_.PMGK", "\\_SB_.ABD_", RegionSpace::GenericSerialBus),
+        ("\\_SB_.IRTC", "\\_SB_.IC13", RegionSpace::GenericSerialBus),
+        ("\\_SB_.QPPX", "\\_SB_.GIO0", RegionSpace::GeneralPurposeIo),
+    ] {
+        let e = deps.edges.iter().find(|e| {
+            e.via == Via::Region(space)
+                && i.path(e.consumer).to_text() == consumer
+                && i.path(e.supplier).to_text() == supplier
+        });
+        assert_eq!(
+            e.map(|e| e.kind),
+            Some(EdgeKind::Optional),
+            "{supplier} -> {consumer}"
+        );
+    }
+    assert_eq!(
+        edge(&i, &deps, "\\_SB_.ABD_", "\\_SB_.PEP0").kind,
+        EdgeKind::Required
+    );
 }
 
 /// The X870E names few suppliers: its I2C devices' controllers and GPIO

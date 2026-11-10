@@ -51,8 +51,8 @@ pub use host::{
     AccessWidth, BufferTransfer, GpioAccess, Host, HostError, PciAddress, RegionAccess, RegionSpace,
 };
 pub use interp::{
-    Config, FREEBSD_OSI, Interpreter, Limits, LoadReport, LoadWarning, MethodInfo,
-    PowerResourceInfo, ProcessorInfo,
+    Config, FREEBSD_OSI, FieldInfo, Interpreter, Limits, LoadReport, LoadWarning, MethodInfo,
+    PowerResourceInfo, ProcessorInfo, RegionInfo,
 };
 pub use name::{AmlPath, NameSeg, NameString};
 pub use namespace::NodeId;

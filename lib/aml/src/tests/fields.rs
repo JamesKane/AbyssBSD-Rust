@@ -291,6 +291,17 @@ fn index_and_bank_fields() {
         &read_method("RBF0", "BF0"),
     ]);
     let (mut i, mut h) = load(&aml);
+    // An index field is reached through its data field's region.
+    let r10 = i.resolve(i.root(), "R10").unwrap();
+    let bf0 = i.resolve(i.root(), "BF0").unwrap();
+    assert_eq!(
+        i.field_info(r10).unwrap().region,
+        i.resolve(i.root(), "IOR")
+    );
+    assert_eq!(
+        i.field_info(bf0).unwrap().region,
+        i.resolve(i.root(), "BREG")
+    );
     h.poke(RegionSpace::SystemIo, 0x71, &[0x42]);
     assert_eq!(eval_int(&mut i, &mut h, "\\RR11"), 0x42);
     assert_eq!(
@@ -519,6 +530,37 @@ fn gpio_fields_use_the_connection() {
         &write_method("WP1", "P1"),
     ]);
     let (mut i, mut h) = load(&aml);
+    // The accessors report the region and the connection.
+    let p1 = i.resolve(i.root(), "P1").unwrap();
+    let gpo = i.resolve(i.root(), "GPO").unwrap();
+    let info = i.field_info(p1).unwrap();
+    assert_eq!(info.region, Some(gpo));
+    assert_eq!(info.connection.as_deref(), Some(gpio_io.as_slice()));
+    assert_eq!(
+        i.region_info(gpo),
+        Some(crate::RegionInfo {
+            space: RegionSpace::GeneralPurposeIo,
+            base: 0,
+            len: 1
+        })
+    );
+    assert_eq!(i.region_info(p1), None);
+    assert_eq!(i.field_info(gpo), None);
+    // The connection decodes with and without the end tag (an inline
+    // `Connection` has none).
+    let without = &gpio_io[..gpio_io.len() - 2];
+    for conn in [gpio_io.as_slice(), without] {
+        match crate::resource::connection(conn) {
+            Ok(crate::resource::Resource::Gpio(g)) => {
+                assert_eq!(g.source.name, "\\_SB.GPI0");
+                assert_eq!(g.pins, [7, 8, 9]);
+            }
+            r => panic!("{r:?}"),
+        }
+    }
+    assert!(crate::resource::connection(&[0x79, 0]).is_err());
+    assert!(crate::resource::connection(&[]).is_err());
+    assert!(crate::resource::parse(without).is_err());
     eval(&mut i, &mut h, "\\WP1", std::vec![Value::Integer(2)]);
     assert_eq!(h.gpio.get(&1), Some(&false));
     assert_eq!(h.gpio.get(&2), Some(&true));
@@ -534,6 +576,41 @@ fn gpio_fields_use_the_connection() {
         i.evaluate_path("\\RP0", Vec::new(), &mut h),
         Err(Error::NoConnection)
     );
+}
+
+#[test]
+fn method_names_find_field_references() {
+    let aml = cat(&[
+        &device(
+            "DEV",
+            &cat(&[
+                &region("GPO", 8, 0, 1),
+                &field("GPO", BYTE, &[F::Named("P1", 1), F::Named("P2", 1)]),
+                &read_method("M0", "P1"),
+            ]),
+        ),
+        &device(
+            "USR",
+            &cat(&[
+                &read_method("M1", "\\DEV.P1"),
+                &read_method("M2", "^^DEV.P2"),
+                // A string that spells the segment resolves to nothing.
+                &method("M3", 0, &ret(&string("P1__"))),
+                &read_method("M4", "\\DEV.GPO"),
+            ]),
+        ),
+    ]);
+    let (i, _h) = load(&aml);
+    let at = |p: &str| i.resolve(i.root(), p).unwrap();
+    let targets = [at("\\DEV.P1"), at("\\DEV.P2")];
+    let names = |m: &str| i.method_names(at(m), &targets);
+    assert_eq!(names("\\DEV.M0"), [targets[0]]);
+    assert_eq!(names("\\USR.M1"), [targets[0]]);
+    assert_eq!(names("\\USR.M2"), [targets[1]]);
+    assert_eq!(names("\\USR.M3"), []);
+    assert_eq!(names("\\USR.M4"), []);
+    // Not a method.
+    assert_eq!(i.method_names(at("\\DEV"), &targets), []);
 }
 
 #[test]

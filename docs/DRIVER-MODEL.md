@@ -360,14 +360,14 @@ firmware, before any driver runs:
 | ACPI `_DEP` | listed object → device |
 | ACPI `_CRS` resource sources | GPIO controller (`GpioIo`/`GpioInt`), I2C/SPI/UART controller (`*SerialBus`), interrupt combiner (extended IRQ with a source) → device |
 | ACPI power resources (`_PR0`, `_PR3`) | power resource provider → device |
-| PCCT / PCC operation regions | PCC mailbox → device whose AML uses that channel |
+| PCC operation regions | `acpi0` (which owns the PCCT) → device whose AML uses that channel |
 | IORT (P9) | SMMU → each device it translates. ITS group → each device whose MSIs it receives |
 | DMAR / IVRS (P9) | IOMMU unit → each device in its scope |
 | MADT / GSI routing | interrupt controller → each device using its GSIs (mostly satisfied by adoption) |
 | `_PRT` link devices | PCI interrupt link → device |
 | `_CRS` `FixedDMA` | DMA engine → device (with `_DSD` `dma-names` for the channel's role) |
 | `_CRS` `PinFunction`, `PinConfig`, `PinGroup*` | Pin controller → device |
-| `GenericSerialBus` and `GeneralPurposeIo` operation regions | I2C/SPI controller or GPIO controller → device whose AML uses the region (a `_PS0` that talks to a PMIC) |
+| `GenericSerialBus` and `GeneralPurposeIo` operation regions; `EmbeddedControl`, `SMBus`, and `IPMI` regions | I2C/SPI or GPIO controller its field's `Connection` names; the device declaring an EC, SMBus, or IPMI region → device whose AML uses the region (a `_PS0` that talks to a PMIC, a battery's `_BST`). Optional, since AML may not touch the region before `_REG` connects it |
 | `_DSD` reference properties, from a table of known names (`mboxes`, `shmem`, `power-domains`, `phys`, `dp_phy`, `usb4-host-interface`, `phy-handle`, `backlight`, …) | Referenced object → device, with the kind the table gives |
 | `_DSD` graph ports and endpoints | Upstream → downstream in a media pipeline (a DPU → its DP transmitter) |
 | Platform description (§5.5) | Whatever it declares: vendor clock and reset tables, Qualcomm `PEP0` consumers, synthetic nodes |
@@ -1378,8 +1378,12 @@ These are not Day-1 work. The design keeps room for them so they do not need a n
    providers §9.3 needs first. Partly answered (2026-11-09, `sys/acpi`'s corpus graph tests):
    `\_SB.SCMI` names the CIX mailbox (`mboxes` `MBX6`, `MBX7`) and shared memory (`shmem`
    `SHM0`, `SHM1`), and the GPU, VPU, and NPU take their power domain from `\_SB.SCMI.DVFS`, a
-   child of it that is not enumerated (a sub-handle). The clock methods' PCC path is still to
-   be traced (operation-region edges).
+   child of it that is not enumerated (a sub-handle). Answered (2026-11-09, operation-region
+   edges): there is no PCC path. The clock methods (`\_SB.CCLK`, `CIXHA010`) call
+   `\_SB.PMMX`, which speaks SCMI to firmware through a `SystemMemory` mailbox at
+   `0x065D0000` (a PCC shared-memory header, no PCC region, outside every device's `_CRS`),
+   so they need no OS driver and add no graph edge. The OS's SCMI agent over `MBX6`/`MBX7`
+   serves the `power-domains` references; clocks go through `CCLK`'s methods first.
 8. **Platform description format.** §5.5 tables are `const` Rust data. Whether CIX's in-AML tables
    are extracted at boot or transcribed at build time from the corpus is open. Extraction follows
    firmware updates, and transcription is simpler to review.

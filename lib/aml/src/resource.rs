@@ -648,6 +648,32 @@ pub fn parse(buf: &[u8]) -> Result<Vec<Resource>, Error> {
     }
 }
 
+/// Decodes the descriptor a field's `Connection` names (ACPI 6.5
+/// §19.6.15): the first one in the buffer. An inline `Connection` is a
+/// single descriptor with no end tag; a named resource template has one,
+/// and anything after the first descriptor is ignored, as ACPICA does.
+///
+/// # Errors
+///
+/// [`Error::BadResource`] for an empty buffer, a buffer that begins with
+/// the end tag, or a malformed descriptor.
+pub fn connection(buf: &[u8]) -> Result<Resource, Error> {
+    if buf.is_empty() {
+        return Err(bad("empty connection"));
+    }
+    let (tag, hdr, total) = descriptor_at(buf, 0)?;
+    let d = &buf[hdr..total];
+    if tag & 0x80 == 0 {
+        let kind = (tag >> 3) & 0x0f;
+        if kind == END_TAG {
+            return Err(bad("empty connection"));
+        }
+        small(kind, tag, d)
+    } else {
+        large(tag, &buf[..total], d)
+    }
+}
+
 fn small(kind: u8, tag: u8, d: &[u8]) -> Result<Resource, Error> {
     let need = |ok: bool, what| if ok { Ok(()) } else { Err(bad(what)) };
     Ok(match kind {

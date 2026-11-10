@@ -37,7 +37,7 @@ use alloc::vec::Vec;
 use crate::Error;
 use crate::host::Host;
 use crate::name::{AmlPath, NameSeg, NameString};
-use crate::namespace::{MutexObj, Namespace, Native, NodeId, Object};
+use crate::namespace::{FieldKind, MutexObj, Namespace, Native, NodeId, Object};
 use crate::stream::Cursor;
 use crate::value::{IntWidth, ObjectType, Value};
 
@@ -249,6 +249,29 @@ pub struct PowerResourceInfo {
     pub system_level: u8,
     /// Order relative to other power resources.
     pub resource_order: u16,
+}
+
+/// An `OperationRegion`'s operands, as evaluated when it was defined.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegionInfo {
+    /// The address space.
+    pub space: crate::host::RegionSpace,
+    /// The region offset: an address, or the subspace for PCC.
+    pub base: u64,
+    /// The region length in bytes.
+    pub len: u64,
+}
+
+/// What a field unit reads and writes through.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FieldInfo {
+    /// The operation region behind it: its own for a `Field` or
+    /// `BankField`, the data field's for an `IndexField`. `None` if that
+    /// chain is broken.
+    pub region: Option<NodeId>,
+    /// The `Connection` resource descriptor in effect (`GeneralPurposeIo`
+    /// and `GenericSerialBus` regions).
+    pub connection: Option<Arc<[u8]>>,
 }
 
 /// An AML interpreter and the namespace it maintains.
@@ -545,6 +568,88 @@ impl Interpreter {
         }
     }
 
+    /// An `OperationRegion`'s space, offset, and length.
+    #[must_use]
+    pub fn region_info(&self, node: NodeId) -> Option<RegionInfo> {
+        match self.ns.object(self.ns.follow(node)?)? {
+            Object::Region(r) => Some(RegionInfo {
+                space: r.space,
+                base: r.base,
+                len: r.len,
+            }),
+            _ => None,
+        }
+    }
+
+    /// A field unit's region and `Connection`.
+    #[must_use]
+    pub fn field_info(&self, node: NodeId) -> Option<FieldInfo> {
+        let Object::Field(f) = self.ns.object(self.ns.follow(node)?)? else {
+            return None;
+        };
+        let mut kind = f.kind.clone();
+        let mut region = None;
+        // An index field's data register is itself a field; follow it to
+        // a region, a bounded number of steps.
+        for _ in 0..8 {
+            match kind {
+                FieldKind::Region(r) | FieldKind::Bank { region: r, .. } => {
+                    region = Some(r);
+                    break;
+                }
+                FieldKind::Index { data, .. } => {
+                    match self.ns.object(self.ns.follow(data).unwrap_or(data)) {
+                        Some(Object::Field(d)) => kind = d.kind.clone(),
+                        _ => break,
+                    }
+                }
+            }
+        }
+        Some(FieldInfo {
+            region,
+            connection: f.connection.clone(),
+        })
+    }
+
+    /// Which of `targets` a method's body names.
+    ///
+    /// This scans the bytecode for name strings rather than parsing it, so
+    /// a match only counts where the name (with any `\`, `^`, dual or
+    /// multi-segment prefix the bytes before it form) resolves from the
+    /// method to one of `targets`. Bytes that merely look like a target's
+    /// final segment and resolve to it are vanishingly rare, but possible;
+    /// the result is for dependency discovery, not for evaluation.
+    #[must_use]
+    pub fn method_names(&self, method: NodeId, targets: &[NodeId]) -> Vec<NodeId> {
+        let mut found = Vec::new();
+        let Some(method) = self.ns.follow(method) else {
+            return found;
+        };
+        let Some(Object::Method(m)) = self.ns.object(method) else {
+            return found;
+        };
+        let segs: Vec<(NameSeg, NodeId)> = targets
+            .iter()
+            .filter_map(|&t| Some((self.ns.get(t)?.name, t)))
+            .collect();
+        let body = m.data.get(m.start..m.end).unwrap_or(&[]);
+        for i in 0..body.len().saturating_sub(3) {
+            let seg = [body[i], body[i + 1], body[i + 2], body[i + 3]];
+            for &(name, target) in &segs {
+                if seg != name.0 || found.contains(&target) {
+                    continue;
+                }
+                if name_ending_at(&m.data, m.start + i)
+                    .iter()
+                    .any(|n| self.ns.resolve(method, n) == Some(target))
+                {
+                    found.push(target);
+                }
+            }
+        }
+        found
+    }
+
     /// True for a plain scope (the root and the predefined scopes).
     #[must_use]
     pub fn is_scope(&self, node: NodeId) -> bool {
@@ -715,4 +820,51 @@ impl Interpreter {
         }
         errors
     }
+}
+
+/// The name strings that could end with the segment at `seg` (absolute
+/// offset in `data`), longest prefix first: a multi-segment name of up
+/// to eight segments, a dual name, or a bare segment, each with the `\`
+/// or `^` prefix the bytes before it form, and without.
+fn name_ending_at(data: &Arc<[u8]>, seg: usize) -> Vec<NameString> {
+    let end = seg + 4;
+    let mut starts = Vec::new();
+    for n in (3..=8usize).rev() {
+        if let Some(s) = seg.checked_sub(2 + 4 * (n - 1))
+            && data.get(s) == Some(&0x2f)
+            && data.get(s + 1).copied() == u8::try_from(n).ok()
+        {
+            starts.push(s);
+        }
+    }
+    if let Some(s) = seg.checked_sub(5)
+        && data.get(s) == Some(&0x2e)
+    {
+        starts.push(s);
+    }
+    starts.push(seg);
+    let mut out = Vec::new();
+    for s in starts {
+        // The longest run of prefix characters first.
+        let mut p = s;
+        if p > 0 && data.get(p - 1) == Some(&b'\\') {
+            p -= 1;
+        } else {
+            while p > 0 && data.get(p - 1) == Some(&b'^') {
+                p -= 1;
+            }
+        }
+        for from in [p, s] {
+            let mut c = Cursor::new(data.clone(), from, end);
+            if let Ok(n) = c.name_string()
+                && c.at_end()
+            {
+                out.push(n);
+            }
+            if from == s {
+                break;
+            }
+        }
+    }
+    out
 }

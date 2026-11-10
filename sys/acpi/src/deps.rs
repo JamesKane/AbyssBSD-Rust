@@ -13,7 +13,13 @@
 //! - the power resources of `_PR0` and `_PR3`;
 //! - `_DSD`'s reference properties (`power-domains`, `mboxes`, `phys`,
 //!   graph endpoints, ...), following the Hierarchical Data Extension into
-//!   data nodes, and classifying each by [`devtree::dsd::reference_kind`].
+//!   data nodes, and classifying each by [`devtree::dsd::reference_kind`];
+//! - the operation regions whose accesses an OS driver serves (GPIO and
+//!   serial-bus regions through their field's `Connection`, embedded
+//!   controller, SMBus and IPMI regions through the device that declares
+//!   them, PCC regions through `acpi0`): the device defining a field in
+//!   one, and each device whose methods name the field, use that driver
+//!   ([`region_edges`]).
 //!
 //! Suppliers are namespace objects, not yet devices: a power resource, a
 //! `_STA = 0` stub, or a data node becomes a provider's sub-handle later.
@@ -27,8 +33,10 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use alloc::collections::BTreeSet;
+
 use aml::resource::Resource;
-use aml::{DepRef, Interpreter, NodeId, ObjectType, Value};
+use aml::{DepRef, Interpreter, NodeId, ObjectType, RegionSpace, Value};
 use devtree::graph::{EdgeKind, Origin};
 
 use crate::DmaController;
@@ -70,6 +78,9 @@ pub enum Via {
     },
     /// A `_DSD` property, by name.
     Property(String),
+    /// A field in an operation region of this space, which the supplier's
+    /// driver serves.
+    Region(RegionSpace),
 }
 
 impl Via {
@@ -86,6 +97,7 @@ impl Via {
             Self::PowerResource { d3hot: false } => String::from("_PR0"),
             Self::PowerResource { d3hot: true } => String::from("_PR3"),
             Self::Property(p) => alloc::format!("_DSD {p}"),
+            Self::Region(space) => alloc::format!("{space:?} region"),
         }
     }
 
@@ -99,6 +111,8 @@ impl Via {
             Self::Dma => Origin::Dma,
             Self::PowerResource { .. } => Origin::PowerResource,
             Self::Property(_) => Origin::Dsd,
+            Self::Region(RegionSpace::Pcc) => Origin::Pcc,
+            Self::Region(_) => Origin::Region,
         }
     }
 }
@@ -222,6 +236,7 @@ pub fn build(
             dsd_package(interp, host, d, d, &dsd, 0, &mut out);
         }
     }
+    region_edges(interp, devices, &mut out);
     let mut enumerated: BTreeMap<NodeId, bool> = BTreeMap::new();
     for i in 0..out.edges.len() {
         out.edges[i].provider = provider(interp, host, out.edges[i].supplier, &mut enumerated);
@@ -237,7 +252,13 @@ fn provider(
     object: NodeId,
     enumerated: &mut BTreeMap<NodeId, bool>,
 ) -> Provider {
-    if interp.object_type(object) == Some(ObjectType::PowerResource) {
+    // PCC channels belong to the platform (the PCCT), not to the device
+    // whose scope declares the region.
+    if interp.object_type(object) == Some(ObjectType::PowerResource)
+        || interp
+            .region_info(object)
+            .is_some_and(|r| r.space == RegionSpace::Pcc)
+    {
         return Provider::Bus(object);
     }
     let mut cur = Some(object);
@@ -311,6 +332,133 @@ fn resource_sources(
             out.unresolved(d, via, alloc::format!("{name} group \"{label}\""));
         }
     }
+}
+
+/// A field whose region an OS driver serves, and what serves it.
+struct ServedField {
+    field: NodeId,
+    space: RegionSpace,
+    /// The supplier, or the name that resolved to nothing.
+    supplier: Result<NodeId, String>,
+}
+
+/// Operation-region edges. A region in a space only a driver can serve
+/// is unusable until that driver installs its handler (ACPICA dispatches
+/// an access to the handler installed nearest above the region, and
+/// FreeBSD's `acpi_ec`, `acpi_gpiobus`, and `acpi_iicbus` install theirs
+/// on the controller's own handle):
+/// - a GPIO or serial-bus field reaches the controller its `Connection`
+///   names (the descriptor FreeBSD's handlers decode);
+/// - an embedded-controller, SMBus, or IPMI region belongs to the device
+///   declaring it;
+/// - a PCC region belongs to `acpi0`, which owns the PCCT.
+///
+/// The consumers are the device that defines the field and each device
+/// whose methods name it (a battery's `_BST` reading the EC, a `_PS0`
+/// writing a PMIC over I2C). The edges are optional: AML may not touch
+/// such a region before `_REG (space, 1)` says its handler is connected
+/// (ACPI 6.5 §6.5.4), and ACPICA runs `_REG` when the driver installs the
+/// handler, so the consumer can attach first and is told when the region
+/// appears. Firmware relies on that: the Q8B's `ABD` waits for `PEP0` by
+/// `_DEP` while `PEP0`'s AML talks over `ABD`'s serial bus. Memory, I/O, PCI configuration, and CMOS
+/// regions need no driver and make no edge: the Sky1's clock and sensor
+/// methods talk SCMI to firmware through a `SystemMemory` mailbox
+/// (`\_SB.PMMX`, at 0x065d0000, outside every device's `_CRS`), so they
+/// depend on nothing the graph orders.
+fn region_edges(interp: &Interpreter, devices: &[NodeId], out: &mut FirmwareDeps) {
+    let nodes = interp.nodes();
+    let mut served = Vec::new();
+    for &n in &nodes {
+        let Some(f) = interp.field_info(n) else {
+            continue;
+        };
+        let Some(region) = f.region else {
+            continue;
+        };
+        let Some(r) = interp.region_info(region) else {
+            continue;
+        };
+        let supplier = match r.space {
+            RegionSpace::GeneralPurposeIo | RegionSpace::GenericSerialBus => {
+                let scope = interp.parent(n).unwrap_or_else(|| interp.root());
+                match f.connection.as_deref().map(aml::resource::connection) {
+                    Some(Ok(Resource::Gpio(g))) => {
+                        interp.resolve(scope, &g.source.name).ok_or(g.source.name)
+                    }
+                    Some(Ok(Resource::SerialBus(b))) => {
+                        interp.resolve(scope, &b.source.name).ok_or(b.source.name)
+                    }
+                    Some(_) => Err(alloc::format!("{} connection", interp.path(n))),
+                    None => Err(alloc::format!("{} without Connection", interp.path(n))),
+                }
+            }
+            RegionSpace::EmbeddedControl | RegionSpace::SmBus | RegionSpace::Ipmi => {
+                nearest(interp, region, |i, a| {
+                    i.object_type(a) == Some(ObjectType::Device)
+                })
+                .ok_or_else(|| alloc::format!("{} outside a device", interp.path(region)))
+            }
+            RegionSpace::Pcc => Ok(region),
+            _ => continue,
+        };
+        served.push(ServedField {
+            field: n,
+            space: r.space,
+            supplier,
+        });
+    }
+    if served.is_empty() {
+        return;
+    }
+    let listed: BTreeSet<NodeId> = devices.iter().copied().collect();
+    let consumer_of = |i: &Interpreter, n: NodeId| nearest(i, n, |_, a| listed.contains(&a));
+    let mut uses: Vec<(NodeId, NodeId)> = Vec::new();
+    for s in &served {
+        if let Some(c) = consumer_of(interp, s.field) {
+            uses.push((s.field, c));
+        }
+    }
+    let targets: Vec<NodeId> = served.iter().map(|s| s.field).collect();
+    for &m in &nodes {
+        if interp.method_info(m).is_none() {
+            continue;
+        }
+        let named = interp.method_names(m, &targets);
+        if named.is_empty() {
+            continue;
+        }
+        if let Some(c) = consumer_of(interp, m) {
+            uses.extend(named.into_iter().map(|f| (f, c)));
+        }
+    }
+    // In device order, as the other edges are.
+    uses.sort_by_key(|&(_, c)| devices.iter().position(|&d| d == c));
+    for (field, consumer) in uses {
+        let Some(s) = served.iter().find(|s| s.field == field) else {
+            continue;
+        };
+        let via = Via::Region(s.space);
+        match &s.supplier {
+            Ok(supplier) => out.edge(*supplier, consumer, EdgeKind::Optional, via),
+            Err(name) => out.unresolved(consumer, via, name.clone()),
+        }
+    }
+}
+
+/// The nearest of `n` and its ancestors that `pred` accepts.
+fn nearest(
+    interp: &Interpreter,
+    n: NodeId,
+    pred: impl Fn(&Interpreter, NodeId) -> bool,
+) -> Option<NodeId> {
+    let mut cur = Some(n);
+    while let Some(a) = cur {
+        if pred(interp, a) {
+            return Some(a);
+        }
+        cur = interp.parent(a);
+    }
+    None
 }
 
 /// The DMA controller serving each `FixedDMA` request line: the CSRT says
