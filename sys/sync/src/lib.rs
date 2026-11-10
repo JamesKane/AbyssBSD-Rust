@@ -25,7 +25,56 @@ pub use percpu::{PerCpuCounter, PerCpuStats, PerCpuU64, set_possible};
 
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, Ordering};
+
+/// Spins between looks at the clock while a lock is awaited.
+const STUCK_EVERY: u32 = 1 << 20;
+
+/// The kernel's check on a long wait for a spinning lock (FreeBSD's "spin
+/// lock held too long", `_mtx_lock_indefinite_check`): called every
+/// [`STUCK_EVERY`] spins with the lock's address and when the wait began
+/// (0 until the first call sets it), it panics once the wait is too long.
+pub type StuckFn = fn(lock: usize, since: &mut u64);
+
+static STUCK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Installs the check on long waits.
+pub fn set_stuck_check(f: StuckFn) {
+    STUCK.store(f as *mut (), Ordering::Release);
+}
+
+/// A waiter on `lock` has spun [`STUCK_EVERY`] more times.
+#[cold]
+#[inline(never)]
+fn stuck(lock: usize, since: &mut u64) {
+    let h = STUCK.load(Ordering::Acquire);
+    if !h.is_null() {
+        // SAFETY: only `set_stuck_check` stores here, a `StuckFn`.
+        let f: StuckFn = unsafe { core::mem::transmute::<*mut (), StuckFn>(h) };
+        f(lock, since);
+    }
+}
+
+/// Counts a waiter's spins, looking at the clock every [`STUCK_EVERY`].
+struct Spins {
+    n: u32,
+    since: u64,
+}
+
+impl Spins {
+    const fn new() -> Self {
+        Self { n: 0, since: 0 }
+    }
+
+    #[inline(always)]
+    fn spin<L>(&mut self, lock: &L) {
+        core::hint::spin_loop();
+        self.n = self.n.wrapping_add(1);
+        if self.n.is_multiple_of(STUCK_EVERY) {
+            stuck(core::ptr::from_ref(lock) as usize, &mut self.since);
+        }
+    }
+}
 
 /// A FIFO ticket spin lock. Holding it masks interrupts on this CPU.
 #[derive(Debug)]
@@ -56,8 +105,9 @@ impl<T> SpinLock<T> {
         // Relaxed: taking a ticket orders nothing; the Acquire load of
         // `serving` below is what synchronizes with the previous holder.
         let ticket = self.next.fetch_add(1, Ordering::Relaxed);
+        let mut spins = Spins::new();
         while self.serving.load(Ordering::Acquire) != ticket {
-            core::hint::spin_loop();
+            spins.spin(self);
         }
         SpinGuard {
             lock: self,
@@ -210,8 +260,9 @@ impl<T> PreemptLock<T> {
         );
         // As in `SpinLock::lock`.
         let ticket = self.next.fetch_add(1, Ordering::Relaxed);
+        let mut spins = Spins::new();
         while self.serving.load(Ordering::Acquire) != ticket {
-            core::hint::spin_loop();
+            spins.spin(self);
         }
         PreemptLockGuard { lock: self }
     }
@@ -321,6 +372,7 @@ impl<T> DelayLock<T> {
             "a DelayLock taken in an interrupt handler"
         );
         let mut delay = 1u32;
+        let mut spins = Spins::new();
         while self
             .locked
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -330,7 +382,7 @@ impl<T> DelayLock<T> {
             // stays put.
             while self.locked.load(Ordering::Relaxed) {
                 for _ in 0..delay {
-                    core::hint::spin_loop();
+                    spins.spin(self);
                 }
                 delay = delay
                     .saturating_mul(2)
@@ -438,6 +490,31 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+
+    static LOOKS: AtomicU32 = AtomicU32::new(0);
+
+    fn count_looks(_: usize, since: &mut u64) {
+        if *since == 0 {
+            *since = 1;
+        }
+        LOOKS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn a_long_wait_is_looked_at() {
+        set_stuck_check(count_looks);
+        let lock = Arc::new(SpinLock::new(0u32));
+        let held = lock.lock();
+        let l = Arc::clone(&lock);
+        let waiter = std::thread::spawn(move || *l.lock() += 1);
+        // The waiter keeps asking while the lock stays held.
+        while LOOKS.load(Ordering::SeqCst) < 3 {
+            std::thread::yield_now();
+        }
+        drop(held);
+        waiter.join().unwrap();
+        assert_eq!(*lock.lock(), 1);
+    }
 
     #[test]
     fn serializes_threads() {

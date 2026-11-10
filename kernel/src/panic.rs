@@ -29,6 +29,29 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
     stop(false)
 }
 
+/// How long a CPU may wait for a spinning lock before the kernel gives up:
+/// FreeBSD's `_mtx_lock_indefinite_check` panics after 10 s.
+const SPIN_LIMIT_NS: u64 = 10_000_000_000;
+
+/// `sync`'s look at a long wait for lock `lock` begun at `since`: a panic,
+/// with this CPU's backtrace, once it has gone on too long ("spin lock
+/// held too long"), rather than a machine that hangs in silence.
+pub(crate) fn spin_stuck(lock: usize, since: &mut u64) {
+    let now = crate::time::now_ns();
+    if now == 0 {
+        return;
+    }
+    if *since == 0 {
+        *since = now;
+    } else if now.saturating_sub(*since) > SPIN_LIMIT_NS {
+        panic!(
+            "spin lock {lock:#x} ({}) held too long on cpu {}",
+            Symbolized::pc(lock as u64),
+            hal::cpu_id().0
+        );
+    }
+}
+
 /// The arch trap code's report of an exception the kernel cannot handle.
 pub(crate) fn fatal_trap(report: &arch::TrapReport) -> ! {
     arch::cpu::disable_interrupts();

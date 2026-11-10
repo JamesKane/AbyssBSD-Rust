@@ -137,6 +137,8 @@ fn kmain(boot_info: PhysAddr) -> ! {
     arch::user::init_cpu();
     threads::init();
     time::init_cpu();
+    // A lock awaited too long panics rather than hanging in silence.
+    sync::set_stuck_check(panic::spin_stuck);
     prof::start_cpu();
     statclock::start_cpu();
     shared_page::init();
