@@ -52,7 +52,9 @@ Implemented so far:
 
 ```
 cargo xtask build   --arch <x86_64|aarch64|all> [--release] [--ktest]   # loader + kernel
-cargo xtask image   --arch <a> [--release] [--ktest] [--cmdline "..."]  # GPT disk, FAT32 ESP -> build/<arch>/
+cargo xtask image   --arch <a> [--release] [--ktest] [--cmdline "..."] [--root md|installed]
+                    # GPT disk, FAT32 ESP -> build/<arch>/; `installed` is the multi-user
+                    # boot's UFS2 root (disk-installed.img; makefs, so with --remote)
 cargo xtask run     --arch <a> [--release] [--ktest] [--cmdline "..."] [--smp N] [--mem SIZE]
                     [--gdb] [--display] [--el2] [--vmm qemu|bhyve]
 cargo xtask test    [--tier unit|boot|stress|all] [--arch <a|all>] [--duration S] [--verbose]

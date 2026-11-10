@@ -32,8 +32,23 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     let arch = Arch::one_from_args(&mut args)?;
     let opts = build::Options::from_args(&mut args);
     let cmdline = args.take_value("--cmdline")?.unwrap_or_default();
+    let root = args.take_value("--root")?;
     args.finish()?;
-    let path = build(arch, opts, &cmdline)?;
+    let path = match root.as_deref() {
+        None | Some("md") => build(arch, opts, &cmdline)?,
+        // The multi-user boot's root, as the `<arch>-multiuser` cases
+        // boot it (makefs: FreeBSD only, so `--remote`): for a board.
+        Some("installed") => {
+            let cmdline = if cmdline.is_empty() {
+                "boot_multicons=YES boot_serial=YES"
+            } else {
+                &cmdline
+            };
+            let _lock = lock()?;
+            build_installed_root(arch, opts, cmdline)?
+        }
+        Some(other) => return Err(format!("unknown root `{other}` (md, installed)").into()),
+    };
     println!("{}", path.display());
     Ok(())
 }

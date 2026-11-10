@@ -41,7 +41,8 @@ usage: cargo xtask [--remote] <command> [options]
 
 commands:
   build       --arch <a|all> [--release] [--ktest]       build the loader
-  image       --arch <a> [--release] [--ktest]           build a GPT disk image with an ESP
+  image       --arch <a> [--release] [--ktest] [--root md|installed]
+                                                         build a GPT disk image with an ESP
   run         --arch <a> [--release] [--ktest] [--smp N] [--mem SIZE] [--gdb] [--display] [--usb]
               [--qmp SOCK]                               ... with a QMP socket for `qmp`
   qmp         --sock SOCK [--type TEXT] [--key KEYS] [--move DX,DY] [--screendump FILE] [--unplug ID]
