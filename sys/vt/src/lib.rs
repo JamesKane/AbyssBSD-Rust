@@ -180,6 +180,9 @@ struct Vt {
     dirty: AtomicBool,
     /// The next frame draws every cell (`VDF_INVALID`).
     invalid: AtomicBool,
+    /// The visible window's view moved through its history: every row
+    /// is compared with what is drawn, which stays known (scroll mode).
+    moved: AtomicBool,
     /// Drawing is held while nonzero. Each row is drawn under this
     /// lock, so a hold also waits out the row being drawn.
     holds: PreemptLock<u32>,
@@ -246,6 +249,7 @@ pub fn start(display: Display, early: &[u8], host: &'static dyn Host) -> Result<
         active: AtomicUsize::new(CONSWINDOW),
         dirty: AtomicBool::new(true),
         invalid: AtomicBool::new(true),
+        moved: AtomicBool::new(false),
         holds: PreemptLock::new(0),
         wake: WaitQueue::new(),
         renderer: Mutex::new(
@@ -638,6 +642,18 @@ impl Vt {
         }
     }
 
+    /// Window `w`'s view moved: its rows are drawn again where they
+    /// differ from the screen, if it is visible. Unlike
+    /// [`Self::invalidate`], what is drawn stays known, so nothing is
+    /// blanked (FreeBSD's `vt_scroll` invalidates the text instead, but
+    /// draws it without clearing the screen too).
+    pub(crate) fn view_moved(&self, w: usize) {
+        if w == self.active.load(Ordering::Acquire) {
+            self.moved.store(true, Ordering::Release);
+            self.changed(w);
+        }
+    }
+
     /// Redraws window `w` in full, if it is visible.
     fn invalidate(&self, w: usize) {
         if w == self.active.load(Ordering::Acquire) {
@@ -706,6 +722,7 @@ impl Vt {
         };
         let Frame { renderer, view } = &mut *f;
         let mut invalid = self.invalid.swap(false, Ordering::AcqRel);
+        let moved = self.moved.swap(false, Ordering::AcqRel);
         let cursor;
         {
             let a = self.active.load(Ordering::Acquire);
@@ -715,6 +732,7 @@ impl Vt {
             } else {
                 let Some(t) = w.try_lock() else {
                     self.invalid.fetch_or(invalid, Ordering::AcqRel);
+                    self.moved.fetch_or(moved, Ordering::AcqRel);
                     return;
                 };
                 t
@@ -726,12 +744,13 @@ impl Vt {
             } else {
                 let Some(st) = self.state.try_lock() else {
                     self.invalid.fetch_or(invalid, Ordering::AcqRel);
+                    self.moved.fetch_or(moved, Ordering::AcqRel);
                     return;
                 };
                 st.fonts[a].clone()
             };
             invalid |= renderer.set_face(&face);
-            if !invalid && !t.buf.damaged() {
+            if !invalid && !moved && !t.buf.damaged() {
                 return;
             }
             t.buf.take_damage(|_, _, _| {});

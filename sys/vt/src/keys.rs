@@ -164,7 +164,7 @@ impl Vt {
     /// Moves window `w`'s view (`vt_scroll`), redrawing it if visible.
     pub(crate) fn scroll(&self, w: usize, offset: i32, whence: Seek) {
         if self.windows[w].lock().buf.seek(offset, whence) {
-            self.invalidate(w);
+            self.view_moved(w);
         }
     }
 
