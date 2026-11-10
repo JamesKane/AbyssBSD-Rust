@@ -797,6 +797,124 @@ fn sequential_fills_read_ahead_and_random_ones_do_not() {
     assert_eq!(*file.runs.lock().unwrap(), [(10, 1), (3, 1), (17, 1)]);
 }
 
+/// Page memory at fixed addresses, so a pager can start fills into it
+/// (as [`crate::object::Pager::start_run`] does on the kernel's pages).
+#[derive(Default)]
+struct HeldPages {
+    state: Mutex<(u64, HashMap<u64, HeldPage>)>,
+}
+
+type HeldPage = Box<[u8; 4096]>;
+
+impl HeldPages {
+    fn alloc(&self, page: HeldPage) -> Pfn {
+        let mut s = self.state.lock().unwrap();
+        s.0 += 1;
+        let pfn = s.0;
+        s.1.insert(pfn, page);
+        Pfn(pfn)
+    }
+}
+
+impl PageOps for HeldPages {
+    fn alloc_zeroed(&self) -> Option<Pfn> {
+        Some(self.alloc(Box::new([0; 4096])))
+    }
+
+    fn alloc_copy(&self, from: Pfn) -> Option<Pfn> {
+        let page = self.state.lock().unwrap().1[&from.0].clone();
+        Some(self.alloc(page))
+    }
+
+    fn alloc_filled(&self, fill: &mut dyn FnMut(&mut [u8])) -> Option<Pfn> {
+        let mut page = Box::new([0; 4096]);
+        fill(&mut page[..]);
+        Some(self.alloc(page))
+    }
+
+    fn free(&self, pfn: Pfn) {
+        assert!(
+            self.state.lock().unwrap().1.remove(&pfn.0).is_some(),
+            "double free of {pfn:?}"
+        );
+    }
+
+    fn access(&self, pfn: Pfn, f: &mut dyn FnMut(&mut [u8])) {
+        f(&mut self.state.lock().unwrap().1.get_mut(&pfn.0).unwrap()[..]);
+    }
+
+    fn page_ptr(&self, pfn: Pfn) -> Option<core::ptr::NonNull<u8>> {
+        let mut s = self.state.lock().unwrap();
+        Some(core::ptr::NonNull::from(&mut s.1.get_mut(&pfn.0)?[0]))
+    }
+}
+
+/// A file read in runs of 4 pages started without waiting (as UFS's
+/// clustered reads are), whose size can shrink (a truncate).
+struct StartedFile {
+    pages: std::sync::atomic::AtomicU64,
+}
+
+/// A run [`StartedFile`] started: already done.
+struct Started;
+
+impl crate::object::PendingFill for Started {
+    fn wait(&mut self, pages: &crate::object::FreshPages) -> Result<(), crate::object::PagerError> {
+        pages.zero(0, pages.len());
+        Ok(())
+    }
+
+    fn commit(&self, insert: &mut dyn FnMut()) -> bool {
+        insert();
+        true
+    }
+}
+
+impl crate::object::Pager for StartedFile {
+    fn size(&self) -> u64 {
+        self.pages.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn max_run(&self) -> u64 {
+        4
+    }
+
+    fn fill(&self, _index: u64, page: &mut [u8]) -> Result<(), crate::object::PagerError> {
+        page.fill(0);
+        Ok(())
+    }
+
+    fn start_run(
+        &self,
+        _index: u64,
+        _pages: &Arc<crate::object::FreshPages>,
+    ) -> Option<Box<dyn crate::object::PendingFill>> {
+        Some(Box::new(Started))
+    }
+}
+
+#[test]
+fn read_ahead_stops_at_an_end_that_moved_in() {
+    let pages: &'static HeldPages = Box::leak(Box::default());
+    let file = Arc::new(StartedFile {
+        pages: std::sync::atomic::AtomicU64::new(40),
+    });
+    let object = crate::object::Object::with_pager(
+        pages,
+        Arc::clone(&file) as Arc<dyn crate::object::Pager>,
+    );
+    // In order: windows of 2 and 4 pages, then two more read ahead,
+    // [6, 10) and [10, 14), then [14, 18) once [6, 10) is taken.
+    for i in 0..7 {
+        object.fill(i).unwrap();
+    }
+    // The file shrinks under the windows read ahead (fsx's truncate on the
+    // Orange Pi): taking [10, 14) keeps reading ahead from 18, past the end.
+    file.pages.store(12, std::sync::atomic::Ordering::Relaxed);
+    object.fill(10).unwrap();
+    object.fill(11).unwrap();
+}
+
 #[test]
 fn clean_pages_nothing_maps_are_reclaimed() {
     let pages = Pages::new();

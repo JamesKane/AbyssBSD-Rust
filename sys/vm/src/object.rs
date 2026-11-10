@@ -1120,7 +1120,13 @@ impl Object {
                     a.index + PageIndex::try_from(a.pages.len() / PAGE_BYTES).unwrap_or(0)
                 })
             };
-            let end = next.saturating_add(pager.max_run()).min(pager.size());
+            // The last window can end past the end now (a truncate since
+            // it started): nothing more to read ahead.
+            let size = pager.size();
+            if next >= size {
+                return;
+            }
+            let end = next.saturating_add(pager.max_run()).min(size);
             let end = self
                 .inner
                 .lock()
@@ -1209,7 +1215,12 @@ impl Object {
         } else {
             1
         };
-        let end = index.saturating_add(window).min(pager.size());
+        // The size is read again here: never below `index + 1`, should a
+        // truncate have moved it in since the caller checked.
+        let end = index
+            .saturating_add(window)
+            .min(pager.size())
+            .max(index + 1);
         let inner = self.inner.lock();
         let end = inner
             .pages
