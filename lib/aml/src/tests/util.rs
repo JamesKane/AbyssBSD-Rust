@@ -40,6 +40,10 @@ pub(crate) struct FakeHost {
     /// `timer` returns `clock` and then advances it by `clock_step`.
     pub(crate) clock: u64,
     pub(crate) clock_step: u64,
+    /// Index/data register pairs `(space, index port, data port)`, such as
+    /// an `IndexField`'s or the PCI interrupt router's: a byte access to
+    /// the data port reaches the register the index port selects.
+    pub(crate) index_pairs: Vec<(RegionSpace, u64, u64)>,
 }
 
 const LOG_CAP: usize = 100_000;
@@ -62,6 +66,34 @@ fn key(a: &RegionAccess, i: u64) -> (u8, u64) {
 }
 
 impl FakeHost {
+    /// Where a byte of `a` lives: behind an index/data pair, the register
+    /// the index port selects, kept apart from plain addresses.
+    fn slot(&self, a: &RegionAccess, i: u64) -> (u8, u64) {
+        let pair = self.index_pairs.iter().find(|&&(space, _, data)| {
+            space == a.space && data == a.address() && a.width.bytes() == 1
+        });
+        match pair {
+            Some(&(space, index, data)) => {
+                let selected = self
+                    .mem
+                    .get(&(space.to_u8(), index))
+                    .copied()
+                    .unwrap_or(self.fill);
+                indexed_key(space, data, selected)
+            }
+            None => key(a, i),
+        }
+    }
+
+    /// Sets registers `first..` behind the index/data pair whose data port
+    /// is `data`.
+    pub(crate) fn poke_indexed(&mut self, space: RegionSpace, data: u64, first: u8, bytes: &[u8]) {
+        for (i, &b) in bytes.iter().enumerate() {
+            let reg = first.wrapping_add(u8::try_from(i).unwrap());
+            self.mem.insert(indexed_key(space, data, reg), b);
+        }
+    }
+
     pub(crate) fn poke(&mut self, space: RegionSpace, addr: u64, bytes: &[u8]) {
         for (i, &b) in bytes.iter().enumerate() {
             self.mem.insert((space.to_u8(), addr + i as u64), b);
@@ -82,11 +114,17 @@ impl FakeHost {
     }
 }
 
+/// The key of register `reg` behind the data port `data`: the high bit
+/// keeps it apart from memory and port addresses.
+fn indexed_key(space: RegionSpace, data: u64, reg: u8) -> (u8, u64) {
+    (space.to_u8(), 1 << 63 | data << 8 | u64::from(reg))
+}
+
 impl Host for FakeHost {
     fn read(&mut self, a: &RegionAccess) -> Result<u64, HostError> {
         let mut v = 0u64;
         for i in 0..a.width.bytes() {
-            let b = self.mem.get(&key(a, i)).copied().unwrap_or(self.fill);
+            let b = self.mem.get(&self.slot(a, i)).copied().unwrap_or(self.fill);
             v |= u64::from(b) << (8 * i);
         }
         if self.log.len() < LOG_CAP {
@@ -103,8 +141,9 @@ impl Host for FakeHost {
 
     fn write(&mut self, a: &RegionAccess, value: u64) -> Result<(), HostError> {
         for i in 0..a.width.bytes() {
+            let slot = self.slot(a, i);
             self.mem
-                .insert(key(a, i), value.to_le_bytes()[usize::try_from(i).unwrap()]);
+                .insert(slot, value.to_le_bytes()[usize::try_from(i).unwrap()]);
         }
         if self.log.len() < LOG_CAP {
             self.log.push(Access {

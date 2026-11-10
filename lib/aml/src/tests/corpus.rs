@@ -28,12 +28,20 @@ pub(crate) const DSDTS: &[(&str, &[u8])] = &[
     ("bhyve", corpus!("bhyve/dsdt.dat")),
     ("radxa-q8b", corpus!("radxa-q8b/dsdt.dat")),
     ("opi6p", corpus!("opi6p/dsdt.dat")),
+    ("x870e", corpus!("x870e/dsdt.dat")),
 ];
 
 /// The vendor firmware, whose AML nests deeper than the default limits allow
 /// (see [`stack_budgets_for_real_firmware`]).
 pub(crate) fn real_firmware(name: &str) -> bool {
-    matches!(name, "radxa-q8b" | "opi6p")
+    matches!(name, "radxa-q8b" | "opi6p" | "x870e")
+}
+
+/// The DSDTs whose methods call into their SSDTs (the X870E's `_INI`s use
+/// AMD's CPM library in SSDT10), so they run only with them loaded: see
+/// `x870e_devices_match_linux`.
+fn needs_ssdts(name: &str) -> bool {
+    name == "x870e"
 }
 
 pub(crate) fn load(dsdt: &[u8]) -> (Interpreter, FakeHost) {
@@ -116,6 +124,8 @@ fn integer_width_follows_dsdt_revision() {
         ("bhyve", IntWidth::W64),
         ("radxa-q8b", IntWidth::W64),
         ("opi6p", IntWidth::W64),
+        // AMI writes revision 202.
+        ("x870e", IntWidth::W64),
     ] {
         let (i, _) = load(dsdt(name));
         assert_eq!(i.int_width(), w, "{name}");
@@ -482,12 +492,13 @@ fn q8b_serial_and_gpio_resources() {
 }
 
 /// The default limits (a 10 KiB stack budget, for a 16 KiB kernel thread
-/// stack) serve the QEMU and bhyve firmware; the Q8B's and the Orange Pi 6
-/// Plus's AML nest deeper (the latter to about 15 KiB) and run within the
-/// budget for the 64 KiB stack the kernel's ACPI thread has.
+/// stack) serve the QEMU and bhyve firmware; the Q8B's, the Orange Pi 6
+/// Plus's, and the X870E's AML nest deeper (the latter two to about 15 and
+/// 24 KiB) and run within the budget for the 64 KiB stack the kernel's ACPI
+/// thread has.
 #[test]
 fn stack_budgets_for_real_firmware() {
-    for (name, t) in DSDTS {
+    for (name, t) in DSDTS.iter().filter(|(n, _)| !needs_ssdts(n)) {
         let limits = if real_firmware(name) {
             crate::Limits::for_stack(64 * 1024)
         } else {
@@ -513,7 +524,7 @@ fn stack_budgets_for_real_firmware() {
 
 #[test]
 fn initialize_runs_ini_and_reg_without_errors() {
-    for (name, t) in DSDTS {
+    for (name, t) in DSDTS.iter().filter(|(n, _)| !needs_ssdts(n)) {
         let (mut i, mut h) = load(t);
         let errors = i.initialize(&mut h);
         assert!(errors.is_empty(), "{name}: {errors:?}");
@@ -661,39 +672,18 @@ fn load_opi6p() -> (Interpreter, FakeHost) {
 /// same `_HID`, `_UID`, `_ADR`, and `_STA` (all but `BAT0`'s).
 #[test]
 fn opi6p_devices_match_linux() {
-    let linux = include_str!("../../../../tests/corpus/opi6p/linux/acpi-devices.txt");
+    let linux = linux_devices(include_str!(
+        "../../../../tests/corpus/opi6p/linux/acpi-devices.txt"
+    ));
     let (mut i, mut h) = load_opi6p();
     let mut want = std::collections::BTreeSet::new();
-    for line in linux.lines() {
-        let mut words = line.split(' ');
-        let name = words.next().unwrap();
-        let field = |k: &str| {
-            line.split(' ')
-                .find_map(|w| w.strip_prefix(k)?.strip_prefix('='))
-                .unwrap_or("")
-        };
-        let path = field("path");
-        // Linux's own nodes (the root, \_SB, \_TZ), power resources, and
-        // thermal zones aren't devices.
-        if ["LNXSY", "LNXPOWER", "LNXTHERM"]
-            .iter()
-            .any(|p| name.starts_with(p))
-        {
-            continue;
-        }
+    for [path, hid, uid, adr, status] in linux {
         want.insert(std::string::String::from(path));
         let d = node(&i, path);
-        let hid = i.hid(d, &mut h).unwrap();
-        assert_eq!(hid.as_deref().unwrap_or(""), field("hid"), "{path} _HID");
-        let uid = match i.uid(d, &mut h).unwrap() {
-            None => std::string::String::new(),
-            Some(Uid::Integer(x)) => alloc::format!("{x}"),
-            Some(Uid::String(s)) => s,
-        };
-        assert_eq!(uid, field("uid"), "{path} _UID");
-        let adr = i.adr(d, &mut h).unwrap();
-        let adr = adr.map(|a| alloc::format!("{a:#010x}")).unwrap_or_default();
-        assert_eq!(adr, field("adr"), "{path} _ADR");
+        let ours = i.hid(d, &mut h).unwrap();
+        assert_eq!(ours.as_deref().unwrap_or(""), hid, "{path} _HID");
+        assert_eq!(uid_text(&mut i, &mut h, d), uid, "{path} _UID");
+        assert_eq!(adr_text(&mut i, &mut h, d), adr, "{path} _ADR");
         // BAT0 asks the embedded controller over I2C6, which FakeHost
         // doesn't model (see `opi6p_initialize_and_reg`).
         if path == "\\_SB_.BAT0" {
@@ -701,9 +691,9 @@ fn opi6p_devices_match_linux() {
             continue;
         }
         // Linux shows `status` only for devices with a `_STA`.
-        if !field("status").is_empty() {
+        if !status.is_empty() {
             let sta = i.sta(d, &mut h).unwrap();
-            assert_eq!(alloc::format!("{sta}"), field("status"), "{path} _STA");
+            assert_eq!(alloc::format!("{sta}"), status, "{path} _STA");
         }
     }
     let ours: std::collections::BTreeSet<_> =
@@ -737,4 +727,190 @@ fn opi6p_initialize_and_reg() {
         assert!(errors.is_empty(), "{errors:?}");
     }
     assert!(i.peak_stack() <= i.config().limits.stack_budget);
+}
+
+/// Linux's ACPI devices on a machine (`tests/corpus/<machine>/linux/
+/// acpi-devices.txt`): path, `_HID`, `_UID`, `_ADR`, and `_STA` as Linux's
+/// sysfs shows them, empty where the object is absent. Linux's own nodes
+/// (the root, `\_SB`, `\_TZ`, the fixed power button), power resources,
+/// and thermal zones are left out.
+fn linux_devices(text: &str) -> Vec<[&str; 5]> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let name = line.split(' ').next().unwrap();
+        let field = |k: &str| {
+            line.split(' ')
+                .find_map(|w| w.strip_prefix(k)?.strip_prefix('='))
+                .unwrap_or("")
+        };
+        if field("path").is_empty()
+            || ["LNXSY", "LNXPOWER", "LNXTHERM"]
+                .iter()
+                .any(|p| name.starts_with(p))
+        {
+            continue;
+        }
+        out.push([
+            field("path"),
+            field("hid"),
+            field("uid"),
+            field("adr"),
+            field("status"),
+        ]);
+    }
+    out
+}
+
+/// `_UID` as Linux's sysfs prints it.
+fn uid_text(i: &mut Interpreter, h: &mut FakeHost, d: NodeId) -> std::string::String {
+    match i.uid(d, h).unwrap() {
+        None => std::string::String::new(),
+        Some(Uid::Integer(x)) => alloc::format!("{x}"),
+        Some(Uid::String(s)) => s,
+    }
+}
+
+/// `_ADR` as Linux's sysfs prints it.
+fn adr_text(i: &mut Interpreter, h: &mut FakeHost, d: NodeId) -> std::string::String {
+    i.adr(d, h)
+        .unwrap()
+        .map(|a| alloc::format!("{a:#010x}"))
+        .unwrap_or_default()
+}
+
+/// The X870E's firmware state, as far as its AML reads it.
+///
+/// The DSDT's module-level code reads AMI's setup variables (`\CPVS`, at
+/// 0x8FE0D000) and declares devices and handlers by them; bytes 0-3 are
+/// the one setting, of all the values the AML compares them with, that
+/// reproduces Linux's namespace (and lets AMD's `DISCUSB4` SSDT define
+/// `\_GPE._L16` without a clash). The rest: HPET enabled (`\PMRG.HPEN`);
+/// the FCH's controller block (`\_SB.FRTP`, at the address in extended
+/// CMOS 0x08-0x0B, arbitrary here) with I2C 0 and 1 enabled and I3C 1-3 in
+/// I2C mode (`AMDI0016`), as Linux found them; and every PCI interrupt
+/// link routed (any IRQ will do).
+fn x870e_host() -> FakeHost {
+    const FRTB: u32 = 0x7000_0000;
+    let mut h = FakeHost::default();
+    h.poke(RegionSpace::SystemMemory, 0x8fe0_d000, &[1, 0, 2, 1]);
+    h.poke(RegionSpace::SystemMemory, 0xfed8_0300, &[0x40]);
+    h.index_pairs.push((RegionSpace::SystemIo, 0x72, 0x73));
+    h.poke_indexed(RegionSpace::SystemIo, 0x73, 0x08, &FRTB.to_le_bytes());
+    h.poke(RegionSpace::SystemMemory, u64::from(FRTB) + 4, &[0x60]);
+    h.poke(RegionSpace::SystemMemory, u64::from(FRTB) + 0x1c, &[0x0e]);
+    h.index_pairs.push((RegionSpace::SystemIo, 0xc00, 0xc01));
+    h.poke_indexed(RegionSpace::SystemIo, 0xc01, 0, &[0x0b; 8]);
+    h
+}
+
+/// The whole X870E namespace: the DSDT and the 15 SSDTs, in the XSDT's
+/// order.
+fn load_x870e() -> (Interpreter, FakeHost) {
+    let config = Config {
+        limits: crate::Limits::for_stack(64 * 1024),
+        ..test_config()
+    };
+    let mut i = Interpreter::new(config);
+    let mut h = x870e_host();
+    for t in [
+        corpus!("x870e/dsdt.dat"),
+        corpus!("x870e/ssdt1.dat"),
+        corpus!("x870e/ssdt2.dat"),
+        corpus!("x870e/ssdt3.dat"),
+        corpus!("x870e/ssdt4.dat"),
+        corpus!("x870e/ssdt5.dat"),
+        corpus!("x870e/ssdt6.dat"),
+        corpus!("x870e/ssdt7.dat"),
+        corpus!("x870e/ssdt8.dat"),
+        corpus!("x870e/ssdt9.dat"),
+        corpus!("x870e/ssdt10.dat"),
+        corpus!("x870e/ssdt11.dat"),
+        corpus!("x870e/ssdt12.dat"),
+        corpus!("x870e/ssdt13.dat"),
+        corpus!("x870e/ssdt14.dat"),
+        corpus!("x870e/ssdt15.dat"),
+    ] {
+        let r = i.load_table(t, &mut h).unwrap();
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    }
+    (i, h)
+}
+
+/// Whether AMD's CPM library (SSDT10) decides the device's `_STA`: it
+/// reads a firmware data structure (through `\M128`) under a lock the
+/// test host can't model, so these report 0 here where Linux saw some of
+/// them present.
+fn x870e_cpm_status(path: &str) -> bool {
+    path == "\\_SB_.APAD"
+        || path.starts_with("\\_SB_.PCI0.GPP7")
+        || path.starts_with("\\_SB_.PCI0.GPP8")
+}
+
+/// Every device Linux enumerated on the X870E, and no other, with the same
+/// `_HID` (but for the video device Linux names `LNXVIDEO`), `_UID`,
+/// `_ADR`, and `_STA` (but for those AMD's CPM library decides).
+#[test]
+fn x870e_devices_match_linux() {
+    let linux = linux_devices(include_str!(
+        "../../../../tests/corpus/x870e/linux/acpi-devices.txt"
+    ));
+    let (mut i, mut h) = load_x870e();
+    assert!(i.initialize(&mut h).is_empty());
+    let mut want = std::collections::BTreeSet::new();
+    for [path, hid, uid, adr, status] in linux {
+        want.insert(std::string::String::from(path));
+        let d = node(&i, path);
+        let ours = i.hid(d, &mut h).unwrap();
+        if hid == "LNXVIDEO" {
+            assert_eq!(ours, None, "{path} _HID");
+        } else {
+            assert_eq!(ours.as_deref().unwrap_or(""), hid, "{path} _HID");
+        }
+        assert_eq!(uid_text(&mut i, &mut h, d), uid, "{path} _UID");
+        assert_eq!(adr_text(&mut i, &mut h, d), adr, "{path} _ADR");
+        if status.is_empty() {
+            continue;
+        }
+        let sta = i.sta(d, &mut h).unwrap();
+        if x870e_cpm_status(path) {
+            assert_eq!(sta, 0, "{path} _STA");
+        } else {
+            assert_eq!(alloc::format!("{sta}"), status, "{path} _STA");
+        }
+    }
+    let ours: std::collections::BTreeSet<_> =
+        i.devices().iter().map(|&d| i.path(d).to_text()).collect();
+    assert_eq!(ours, want);
+    for space in [
+        RegionSpace::SystemMemory,
+        RegionSpace::SystemIo,
+        RegionSpace::PciConfig,
+    ] {
+        let (_, errors) = i.run_reg(space, &mut h);
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+    assert!(i.peak_stack() <= i.config().limits.stack_budget);
+}
+
+/// The setup variables decide the namespace: with them all zero, the
+/// DSDT keeps its own `\_GPE._L16` and `_DSD`, and AMD's `DISCUSB4` SSDT
+/// can't add its own (as ACPICA would report, `AE_ALREADY_EXISTS`).
+#[test]
+fn x870e_setup_variables_decide_the_namespace() {
+    let mut i = Interpreter::new(test_config());
+    let mut h = FakeHost::default();
+    let r = i.load_table(corpus!("x870e/dsdt.dat"), &mut h).unwrap();
+    assert!(r.warnings.is_empty());
+    for t in [
+        corpus!("x870e/ssdt1.dat"),
+        corpus!("x870e/ssdt2.dat"),
+        corpus!("x870e/ssdt3.dat"),
+        corpus!("x870e/ssdt4.dat"),
+    ] {
+        i.load_table(t, &mut h).unwrap();
+    }
+    let r = i.load_table(corpus!("x870e/ssdt5.dat"), &mut h).unwrap();
+    let errors: Vec<_> = r.warnings.iter().map(|w| w.error.clone()).collect();
+    assert_eq!(errors, [Error::AlreadyExists, Error::AlreadyExists]);
+    node(&i, "\\_GPE._L16");
 }

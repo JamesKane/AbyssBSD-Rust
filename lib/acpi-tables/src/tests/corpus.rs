@@ -4,9 +4,10 @@
 //! (CPUs 0–3 and 4–7, 256 MiB each, distance 21). Captured by dumping guest
 //! RAM from the QEMU monitor once firmware reached its shell.
 //!
-//! And the Orange Pi 6 Plus's (CIX P1 / Sky1) firmware, from
-//! `tests/corpus/acpi/opi6p`, checked against what Linux and FreeBSD
-//! reported on the board (`tests/corpus/opi6p`).
+//! And the reference machines' firmware: the Orange Pi 6 Plus's (CIX P1 /
+//! Sky1, `tests/corpus/acpi/opi6p`) and the X870E's (AMI, `.../x870e`),
+//! checked against what Linux (and FreeBSD) reported on them
+//! (`tests/corpus/opi6p`, `tests/corpus/x870e`).
 
 extern crate std;
 use std::vec::Vec;
@@ -24,6 +25,13 @@ macro_rules! corpus {
 macro_rules! opi6p {
     ($name:literal) => {
         Mem(include_bytes!(concat!("../../../../tests/corpus/acpi/opi6p/", $name)).to_vec())
+    };
+}
+
+/// The X870E's tables.
+macro_rules! x870e {
+    ($name:literal) => {
+        Mem(include_bytes!(concat!("../../../../tests/corpus/acpi/x870e/", $name)).to_vec())
     };
 }
 
@@ -483,4 +491,120 @@ fn opi6p_pptt_clusters() {
     }
     assert_eq!(clusters, [1, 1, 2, 2, 2, 2, 3, 3, 4, 4, 5, 5]);
     assert_eq!(p.topology(12), None);
+}
+
+#[test]
+fn x870e_every_table_survives_the_exerciser() {
+    for m in [
+        x870e!("apic.dat"),
+        x870e!("bgrt.dat"),
+        x870e!("facp.dat"),
+        x870e!("fidt.dat"),
+        x870e!("fpdt.dat"),
+        x870e!("hpet.dat"),
+        x870e!("hwin.dat"),
+        x870e!("ivrs.dat"),
+        x870e!("mcfg.dat"),
+        x870e!("tpm2.dat"),
+        x870e!("wdrt.dat"),
+        x870e!("wpbt.dat"),
+        x870e!("wsmt.dat"),
+    ] {
+        exercise(&sdt(&m));
+    }
+}
+
+/// Linux: "IOAPIC[0]: apic_id 32, ... address 0xfec00000, GSI 0-23",
+/// "IOAPIC[1]: apic_id 33, ... address 0xfec01000, GSI 24-55", and the
+/// CPUs' APIC IDs in `/proc/cpuinfo` order: the first threads of the two
+/// dies' cores (0-11, 16-27), then their siblings.
+#[test]
+fn x870e_madt() {
+    let m = x870e!("apic.dat");
+    let t = madt::parse(&sdt(&m)).unwrap();
+    assert!(t.entries().all(|e| e.is_ok()));
+    assert_eq!(t.local_apic_address(), 0xfee0_0000);
+    assert!(t.pcat_compat());
+    let ioapics: Vec<_> = t
+        .entries()
+        .filter_map(|e| match e {
+            Ok(madt::MadtEntry::IoApic(a)) => Some((a.id, a.address, a.gsi_base)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ioapics, [(32, 0xfec0_0000, 0), (33, 0xfec0_1000, 24)]);
+    let enabled: Vec<_> = t.cpus().filter(|c| c.enabled).map(|c| c.hw_id).collect();
+    let want: Vec<_> = [0, 2, 4, 6, 8, 10, 16, 18, 20, 22, 24, 26]
+        .into_iter()
+        .chain([1, 3, 5, 7, 9, 11, 17, 19, 21, 23, 25, 27])
+        .map(madt::HwId::Apic)
+        .collect();
+    assert_eq!(enabled, want);
+    assert_eq!(t.enabled_cpu_count(), 24);
+    // Linux: "INT_SRC_OVR (bus 0 bus_irq 9 global_irq 9 low level)".
+    let isos: Vec<_> = t
+        .entries()
+        .filter_map(|e| match e {
+            Ok(madt::MadtEntry::InterruptSourceOverride(o)) => Some(o),
+            _ => None,
+        })
+        .collect();
+    assert_eq!((isos[0].source, isos[0].gsi), (0, 2));
+    assert_eq!((isos[1].source, isos[1].gsi), (9, 9));
+    assert_eq!(isos[1].flags.trigger(), madt::Trigger::Level);
+    assert_eq!(isos[1].flags.polarity(), madt::Polarity::ActiveLow);
+}
+
+/// Linux: "PM-Timer IO Port: 0x808", "Reserving FACS table memory at
+/// [mem 0x90462000-...]". The timer is 32 bits wide (`TMR_VAL_EXT`), though
+/// Linux's `acpi_pm` always counts it as 24.
+#[test]
+fn x870e_fadt() {
+    let m = x870e!("facp.dat");
+    let f = fadt::parse(&sdt(&m)).unwrap();
+    assert_eq!((f.major_version(), f.minor_version()), (6, Some(5)));
+    assert!(!f.flags().unwrap().hw_reduced_acpi());
+    assert_eq!(f.facs(), Some(0x9046_2000));
+    assert_eq!(f.sci_interrupt(), Some(9));
+    assert_eq!(f.smi_command_port(), Some(0xb2));
+    let tmr = f.pm_timer().unwrap();
+    assert_eq!(
+        (tmr.block.space, tmr.block.address, tmr.bits),
+        (AddressSpace::Io, 0x808, 32)
+    );
+    assert_eq!(f.pm1a_event_block().map(|g| g.address), Some(0x800));
+    assert_eq!(f.pm1a_control_block().map(|g| g.address), Some(0x804));
+    assert_eq!(f.gpe0_block().map(|g| g.address), Some(0x820));
+    assert_eq!(f.gpe0_len(), Some(8));
+    assert_eq!(
+        f.reset_register().map(|r| (r.register.address, r.value)),
+        Some((0xb2, 0xbe))
+    );
+    assert_eq!(f.century(), Some(0x32));
+    // No 8042 declared (USB keyboards only).
+    assert!(!f.iapc_boot_arch().unwrap().has_8042());
+}
+
+/// Linux: "ACPI: HPET id: 0x10228201 base: 0xfed00000".
+#[test]
+fn x870e_hpet() {
+    let m = x870e!("hpet.dat");
+    let h = hpet::parse(&sdt(&m)).unwrap();
+    assert_eq!(h.base.address, 0xfed0_0000);
+    assert_eq!(h.block_id.vendor_id(), 0x1022);
+    assert_eq!(h.block_id.comparators(), 3);
+    assert!(!h.block_id.counter_64bit() && h.block_id.legacy_replacement());
+}
+
+/// Linux: "PCI: ECAM [mem 0xe0000000-0xefffffff] ... [bus 00-ff]".
+#[test]
+fn x870e_mcfg() {
+    let m = x870e!("mcfg.dat");
+    let t = mcfg::parse(&sdt(&m)).unwrap();
+    let r: Vec<_> = t.regions().map(Result::unwrap).collect();
+    assert_eq!(r.len(), 1);
+    assert_eq!(
+        (r[0].base, r[0].segment, r[0].start_bus, r[0].end_bus),
+        (0xe000_0000, 0, 0, 0xff)
+    );
 }

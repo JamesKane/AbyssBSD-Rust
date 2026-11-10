@@ -24,5 +24,8 @@ devices and handlers by them: `\_GPE._L16`, for one, exists only for some values
 `DISCUSB4` SSDT defines its own `\_GPE._L16` (chaining to `\_GPE.OL16` if present), so loading
 all the tables with made-up variable values reports `AlreadyExists` for it (and for a `_DSD`).
 Linux loaded all 16 AML tables without an error, so on this machine the DSDT leaves `_L16` out.
-Tests over the full namespace need those variables seeded from Linux's results, as the Orange Pi 6
-Plus's are.
+`lib/aml`'s `x870e_devices_match_linux` seeds the variables with the one setting that reproduces
+Linux's namespace (`\CPVS` bytes 0-3: 1, 0, 2, 1), and the other registers the AML reads, as
+Linux's results imply. `_STA` that AMD's CPM library (SSDT10) decides (`APAD`, and the `GPP7` and
+`GPP8` bridges) isn't compared: it reads a firmware data structure under a lock the test host
+doesn't model.
