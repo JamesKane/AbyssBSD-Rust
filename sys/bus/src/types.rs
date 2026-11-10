@@ -104,8 +104,22 @@ pub enum Ident {
         /// The ACPI handle's path, if the bus is ACPI's.
         handle: Option<String>,
     },
+    /// A device on an `iicbus`, at its address.
+    Iic(IicIdent),
     /// A test bus child.
     Test(TestIdent),
+}
+
+/// A device on an `iicbus` (FreeBSD's `iicbus_ivar` and
+/// `acpi_iicbus_ivars`): its address, and for a device firmware
+/// describes, its ACPI identity and namespace path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IicIdent {
+    /// The address its `I2cSerialBusV2` gives (7 or 10 bits, not
+    /// shifted), as `acpi_iicbus` stores it; 0 for `iic`.
+    pub addr: u16,
+    /// The ACPI identity and path, for a device the namespace describes.
+    pub acpi: Option<(AcpiIdent, String)>,
 }
 
 /// A driver's match table, for the bus it attaches to.
@@ -129,6 +143,12 @@ pub enum Ids {
     Usb(&'static [UsbId]),
     /// HID top-level collections.
     Hid(&'static [HidId]),
+    /// `iicbus` children firmware describes, by ACPI `_HID`/`_CID` (an
+    /// I2C device driver on FreeBSD's `iicbus`, matched through
+    /// `acpi_iicbus`).
+    IicAcpi(&'static [AcpiId]),
+    /// `iicbus` children at address 0 (`iic`'s probe).
+    IicGeneric,
     /// Test models.
     Test(&'static [TestId]),
 }
@@ -163,6 +183,13 @@ impl Ids {
             (Self::Virtio(t), Ident::Virtio(i)) => best(t, i),
             (Self::Usb(t), Ident::Usb(i, _)) => best(t, i),
             (Self::Hid(t), Ident::Hid(i, _)) => best(t, i),
+            (
+                Self::IicAcpi(t),
+                Ident::Iic(IicIdent {
+                    acpi: Some((i, _)), ..
+                }),
+            ) => best(t, i),
+            (Self::IicGeneric, Ident::Iic(IicIdent { addr: 0, .. })) => Some(Rank::DEFAULT),
             (Self::Test(t), Ident::Test(i)) => best(t, i),
             _ => None,
         }
@@ -437,6 +464,9 @@ impl Ident {
         match self {
             Self::Acpi(_, p) => Some(p),
             Self::Pci(_, _, p) => p.as_deref(),
+            Self::Iic(IicIdent {
+                acpi: Some((_, p)), ..
+            }) => Some(p),
             _ => None,
         }
     }
@@ -457,6 +487,10 @@ impl Ident {
             Self::Virtio(i) => strings::virtio_pnpinfo(out, i),
             Self::Usb(i, p) => strings::usb_pnpinfo(out, i, p),
             Self::Hid(i, _) => strings::hid_pnpinfo(out, i),
+            Self::Iic(IicIdent { acpi, .. }) => match acpi {
+                Some((i, _)) => strings::acpi_pnpinfo(out, i),
+                None => Ok(()),
+            },
             Self::Test(t) => fmt::Write::write_fmt(out, format_args!("model={}", t.model)),
         };
     }
@@ -485,6 +519,9 @@ impl Ident {
             }
             Self::Usb(i, p) => strings::usb_location(out, i, p),
             Self::Hid(i, _) => strings::hid_location(out, i),
+            Self::Iic(IicIdent { addr, acpi }) => {
+                strings::iic_location(out, *addr, acpi.as_ref().map(|(_, p)| p.as_str()))
+            }
             Self::Test(_) => Ok(()),
         };
     }

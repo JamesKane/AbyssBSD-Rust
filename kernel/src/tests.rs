@@ -2269,6 +2269,288 @@ pub(crate) mod bus_test {
     pub(crate) const PIN_BUS: DriverDecl = DriverDecl::of::<PinBus>();
     pub(crate) const PIN_CONTROLLER: DriverDecl = DriverDecl::of::<PinController>();
     pub(crate) const PIN_USER: DriverDecl = DriverDecl::of::<PinUser>();
+
+    /// The ACPI path of the I2C test device the bus takes over.
+    pub(crate) const IIC_DEV_PATH: &str = "\\_SB_.TI2C.DEV0";
+    /// The path of one that attaches where it is, and stays.
+    pub(crate) const IIC_ATT_PATH: &str = "\\_SB_.TI2C.DEV1";
+    /// What the I2C test device read at attach: its EEPROM's byte 0.
+    pub(crate) static IIC_DEV_READ: sync::SpinLock<Option<u8>> = sync::SpinLock::new(None);
+    /// What the taker's two `take_child` calls returned.
+    pub(crate) static IIC_TAKEN: sync::SpinLock<(Option<bus::DeviceId>, Option<bus::DeviceId>)> =
+        sync::SpinLock::new((None, None));
+
+    fn acpi_ident(hid: &str) -> devtree::ids::AcpiIdent {
+        devtree::ids::AcpiIdent {
+            hid: Some(hid.into()),
+            uid: Some("0".into()),
+            ..devtree::ids::AcpiIdent::default()
+        }
+    }
+
+    /// A bus standing in for `acpi0` on a machine with an I2C bus: an I2C
+    /// controller (model 31), a device whose `I2cSerialBusV2` names it at
+    /// 0x50 (it waits on the controller), and a device a driver takes
+    /// where it is.
+    pub(crate) struct IicTestBus;
+
+    impl Driver for IicTestBus {
+        const NAME: &'static str = "iictestbus";
+        const IDS: Ids = Ids::Test(&[TestId {
+            model: 30,
+            rank: Rank::DEFAULT,
+        }]);
+        fn describe(_: &Ident) -> String {
+            "I2C test firmware bus".into()
+        }
+        fn attach(_: &mut AttachCx<'_>) -> Result<Self, AttachError> {
+            Ok(Self)
+        }
+        fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
+            use bus::{Line, LineDetail, LineKind};
+            use devtree::graph::{EdgeKind::Required, Origin::ResourceSource};
+            let ctl = cx.add_child(Ident::Test(TestIdent { model: 31 }), None, vec![]);
+            let dev = cx.add_child(
+                Ident::Acpi(acpi_ident("TSTI2C01"), IIC_DEV_PATH.into()),
+                None,
+                vec![],
+            );
+            cx.add_child(
+                Ident::Acpi(acpi_ident("TSTATT01"), IIC_ATT_PATH.into()),
+                None,
+                vec![],
+            );
+            cx.add_dependency(dev, ctl, Required, ResourceSource);
+            cx.set_lines(
+                dev,
+                vec![Line {
+                    kind: LineKind::I2c,
+                    name: None,
+                    supplier: ctl,
+                    id: 0x50,
+                    detail: LineDetail::I2c(bus::i2c::I2cTarget {
+                        address: 0x50,
+                        ten_bit: false,
+                        speed: 100_000,
+                    }),
+                }],
+            );
+            Ok(())
+        }
+        fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
+    }
+
+    /// A 256-byte EEPROM at 0x50 (a write sets the pointer from its first
+    /// byte and stores the rest; a read reads on), bytes 0 to 255 at
+    /// first. Nothing else answers.
+    struct Eeprom(sync::SpinLock<([u8; 256], u8)>);
+
+    impl bus::i2c::I2c for Eeprom {
+        fn transfer(
+            &self,
+            _: &sched::Sleepable,
+            msgs: &mut [bus::i2c::Msg<'_>],
+        ) -> Result<(), bus::provider::ProviderError> {
+            let mut m = self.0.lock();
+            for x in msgs.iter_mut() {
+                if x.address != 0x50 {
+                    return Err(bus::provider::ProviderError::NoAck);
+                }
+                match &mut x.op {
+                    bus::i2c::Op::Write(b) => {
+                        if let Some((&p, rest)) = b.split_first() {
+                            m.1 = p;
+                            for &v in rest {
+                                let i = usize::from(m.1);
+                                m.0[i] = v;
+                                m.1 = m.1.wrapping_add(1);
+                            }
+                        }
+                    }
+                    bus::i2c::Op::Read(b) => {
+                        for v in b.iter_mut() {
+                            *v = m.0[usize::from(m.1)];
+                            m.1 = m.1.wrapping_add(1);
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+        fn speed(&self) -> u32 {
+            100_000
+        }
+    }
+
+    /// The controller: the EEPROM's bus, its `iicbus`, and a bus taking
+    /// over the device on it (as `acpi_iicbus` does, with no namespace
+    /// to walk here).
+    pub(crate) struct IicTestCtl;
+
+    impl Driver for IicTestCtl {
+        const NAME: &'static str = "iictestctl";
+        const IDS: Ids = Ids::Test(&[TestId {
+            model: 31,
+            rank: Rank::DEFAULT,
+        }]);
+        fn describe(_: &Ident) -> String {
+            "Test I2C controller".into()
+        }
+        fn attach(_: &mut AttachCx<'_>) -> Result<Self, AttachError> {
+            Ok(Self)
+        }
+        fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
+            let mut mem = [0u8; 256];
+            for (i, b) in mem.iter_mut().enumerate() {
+                *b = u8::try_from(i).unwrap_or(0);
+            }
+            cx.provide_i2c(alloc::sync::Arc::new(Eeprom(sync::SpinLock::new((mem, 0)))));
+            cx.add_iicbus();
+            cx.add_child(
+                Ident::Child {
+                    class: "iictaker",
+                    desc: "I2C takeover test bus",
+                },
+                None,
+                vec![],
+            );
+            Ok(())
+        }
+        fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
+    }
+
+    /// Takes the device on the controller's bus from the firmware bus,
+    /// and tries to take the one attached there.
+    pub(crate) struct IicTaker;
+
+    impl Driver for IicTaker {
+        const NAME: &'static str = "iictaker";
+        const IDS: Ids = Ids::Nexus(&["iictaker"]);
+        fn describe(_: &Ident) -> String {
+            "I2C takeover test bus".into()
+        }
+        fn attach(_: &mut AttachCx<'_>) -> Result<Self, AttachError> {
+            Ok(Self)
+        }
+        fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
+            let make = |old: &Ident| match old {
+                Ident::Acpi(i, p) => Some(Ident::Iic(bus::IicIdent {
+                    addr: 0x50,
+                    acpi: Some((i.clone(), p.clone())),
+                })),
+                _ => None,
+            };
+            let a = cx.take_child(IIC_DEV_PATH, "iictestbus", &make);
+            let b = cx.take_child(IIC_ATT_PATH, "iictestbus", &make);
+            *IIC_TAKEN.lock() = (a, b);
+            Ok(())
+        }
+        fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
+    }
+
+    /// A driver for the I2C device on `iicbus`: it reads the EEPROM's
+    /// first byte through the line its firmware gave it.
+    pub(crate) struct IicTestDev;
+
+    impl Driver for IicTestDev {
+        const NAME: &'static str = "iictestdev";
+        const IDS: Ids = Ids::IicAcpi(&[devtree::ids::AcpiId::new("TSTI2C01")]);
+        fn describe(_: &Ident) -> String {
+            "Test I2C device".into()
+        }
+        fn attach(cx: &mut AttachCx<'_>) -> Result<Self, AttachError> {
+            let s = cx.sleepable();
+            let dev = cx.i2c(0)?;
+            let mut b = [0xffu8];
+            dev.write_read(s, &[0x00], &mut b)
+                .map_err(|e| AttachError::Resource(bus::ResourceError::Provider(e)))?;
+            *IIC_DEV_READ.lock() = Some(b[0]);
+            Ok(Self)
+        }
+        fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
+    }
+
+    /// Attaches the device the firmware bus keeps.
+    pub(crate) struct IicStays;
+
+    impl Driver for IicStays {
+        const NAME: &'static str = "iicstays";
+        const IDS: Ids = Ids::Acpi(&[devtree::ids::AcpiId::new("TSTATT01")]);
+        fn describe(_: &Ident) -> String {
+            "Test device attached on the firmware bus".into()
+        }
+        fn attach(_: &mut AttachCx<'_>) -> Result<Self, AttachError> {
+            Ok(Self)
+        }
+        fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
+    }
+
+    pub(crate) const IIC_TEST_BUS: DriverDecl = DriverDecl::of::<IicTestBus>();
+    pub(crate) const IIC_TEST_CTL: DriverDecl = DriverDecl::of::<IicTestCtl>();
+    pub(crate) const IIC_TAKER: DriverDecl = DriverDecl::of::<IicTaker>();
+    pub(crate) const IIC_TEST_DEV: DriverDecl = DriverDecl::of::<IicTestDev>();
+    pub(crate) const IIC_STAYS: DriverDecl = DriverDecl::of::<IicStays>();
+}
+
+ktest! {
+    /// An I2C controller's `iicbus` and `iic` (`/dev/iicN`), and a bus
+    /// taking over a firmware device on it, which keeps its line to the
+    /// controller; then `tests/user/iic.c` and FreeBSD's `i2c(8)` on the
+    /// node.
+    fn iicbus_and_iic_on_a_controller() {
+        use bus::{Ident, NodeState, TestIdent};
+        let s = cx();
+        let m = bus::manager();
+        *bus_test::IIC_DEV_READ.lock() = None;
+        let tb = m.add_child(&s, m.root(), Ident::Test(TestIdent { model: 30 }), None, alloc::vec![], &[]);
+        m.wait_idle(&s);
+        let kids = m.children(tb, &s);
+        assert_eq!(kids.len(), 2, "the device on the I2C bus left the firmware bus");
+        let (ctl, stays) = (kids[0], kids[1]);
+        assert_eq!(m.state(stays, &s), Some(NodeState::Attached));
+        let (taken, kept) = *bus_test::IIC_TAKEN.lock();
+        assert_eq!(kept, None, "an attached device is not taken");
+        let ck = m.children(ctl, &s);
+        assert_eq!(ck.len(), 2);
+        let (iicbus, taker) = (ck[0], ck[1]);
+        assert_eq!(m.state(iicbus, &s), Some(NodeState::Attached));
+        assert!(m.nameunit(iicbus, &s).is_some_and(|n| n.starts_with("iicbus")));
+        assert_eq!(m.description(iicbus, &s).as_deref(), Some("Philips I2C bus"));
+        let ik = m.children(iicbus, &s);
+        assert_eq!(ik.len(), 1);
+        let iic = ik[0];
+        assert_eq!(m.state(iic, &s), Some(NodeState::Attached));
+        assert_eq!(m.description(iic, &s).as_deref(), Some("I2C generic I/O"));
+        let name = m.nameunit(iic, &s).expect("iic named");
+        let mut loc = alloc::string::String::new();
+        m.ident(iic, &s).expect("ident").location(&mut loc);
+        assert_eq!(loc, "addr=0");
+        // The device taken over: under the taker, matched as an I2C
+        // device, its line to the controller intact.
+        let dev = m.children(taker, &s)[0];
+        assert_eq!(Some(dev), taken);
+        assert_eq!(m.state(dev, &s), Some(NodeState::Attached));
+        assert_eq!(*bus_test::IIC_DEV_READ.lock(), Some(0));
+        let ident = m.ident(dev, &s).expect("ident");
+        let (mut loc, mut pnp) = (alloc::string::String::new(), alloc::string::String::new());
+        ident.location(&mut loc);
+        ident.pnpinfo(&mut pnp);
+        assert_eq!(loc, "addr=0x50 handle=\\_SB_.TI2C.DEV0");
+        assert_eq!(pnp, "_HID=TSTI2C01 _UID=0 _CID=none");
+        // The node and FreeBSD's tool on it.
+        let path = alloc::format!("/dev/{name}");
+        let prog: &[u8] = b"/usr/tests/abyss/iic";
+        if crate::md::archive().is_some() {
+            let p = crate::proc::Process::spawn(&s, prog, &[b"iic", path.as_bytes()], &[], None)
+                .expect("spawn iic");
+            assert_eq!(p.wait(&s), crate::proc::Exit::Code(0), "tests/user/iic.c on {path}");
+        }
+        // Detaching the controller takes its bus's children with it.
+        m.shutdown_under(tb, &s);
+        assert_eq!(m.state(iic, &s), None);
+        assert_eq!(m.state(dev, &s), None);
+        let _ = m.take_events();
+    }
 }
 
 ktest! {

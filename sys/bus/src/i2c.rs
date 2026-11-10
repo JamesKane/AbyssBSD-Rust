@@ -11,12 +11,20 @@
 //! A transfer is FreeBSD's array of `struct iic_msg`: each [`Msg`] is one
 //! direction to one address, joined to the next by a repeated START, and
 //! the last ends with a STOP.
+//!
+//! A controller's driver also adds the `iicbus` child FreeBSD's
+//! controllers add (`StartCx::add_iicbus`), with [`IicbusOf`] as its bus
+//! data; the `iicbus` driver takes the controller's [`I2cSource`] with
+//! `AttachCx::parent_i2c`. A caller holding the bus across several
+//! transfers (`iic`'s `I2CRDWR`, whose messages may each end in a STOP)
+//! takes it with [`I2cSource::acquire`], FreeBSD's `iicbus_request_bus`.
 
+use alloc::string::String;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use sched::Sleepable;
-use sched::lock::{LockClass, Mutex};
+use sched::lock::{LockClass, Mutex, MutexGuard};
 
 use crate::provider::ProviderError;
 
@@ -82,6 +90,23 @@ pub trait I2c: Send + Sync {
     fn transfer(&self, s: &Sleepable, msgs: &mut [Msg<'_>]) -> Result<(), ProviderError>;
     /// The bus clock in Hz.
     fn speed(&self) -> u32;
+    /// Puts the controller back in its idle state (FreeBSD's
+    /// `iicbus_reset`, `I2CRSTCARD`). By default nothing: a controller
+    /// that resets itself after every transfer has nothing to do.
+    fn reset(&self, s: &Sleepable) -> Result<(), ProviderError> {
+        let _ = s;
+        Ok(())
+    }
+}
+
+/// The bus data a controller gives the `iicbus` child it adds: the
+/// controller's ACPI path, when firmware describes it (FreeBSD's
+/// `acpi_iicbus` attaches instead of the plain `iicbus` then, and finds
+/// the devices whose `I2cSerialBusV2` names that path).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IicbusOf {
+    /// The controller's namespace path (`\_SB_.I2C3`).
+    pub acpi: Option<String>,
 }
 
 /// An I2C controller, run one transfer at a time.
@@ -132,15 +157,30 @@ impl I2cSource {
         if msgs.is_empty() {
             return Ok(());
         }
-        for m in msgs.iter() {
-            let max = if m.ten_bit { 0x3ff } else { 0x7f };
-            if m.address > max {
-                return Err(ProviderError::OutOfRange);
-            }
-        }
-        let _bus = self.bus.lock(s);
+        check(msgs)?;
+        self.acquire(s)?.run(s, msgs)
+    }
+
+    /// Takes the bus until the guard drops, waiting for a transfer under
+    /// way (FreeBSD's `iicbus_request_bus` with `IIC_WAIT`).
+    pub fn acquire(&self, s: &Sleepable) -> Result<I2cBus<'_>, ProviderError> {
+        let guard = self.bus.lock(s);
         self.live()?;
-        self.imp.transfer(s, msgs)
+        Ok(I2cBus {
+            src: self,
+            _guard: guard,
+        })
+    }
+
+    /// Takes the bus if nobody holds it ([`ProviderError::BusBusy`]
+    /// otherwise: `iicbus_request_bus` with `IIC_DONTWAIT`).
+    pub fn try_acquire(&self) -> Result<I2cBus<'_>, ProviderError> {
+        let guard = self.bus.try_lock().ok_or(ProviderError::BusBusy)?;
+        self.live()?;
+        Ok(I2cBus {
+            src: self,
+            _guard: guard,
+        })
     }
 
     /// Stops every transfer: the driver is detaching. A transfer under
@@ -160,6 +200,53 @@ impl I2cSource {
         } else {
             Ok(())
         }
+    }
+}
+
+/// Refuses an address too wide for its mode.
+fn check(msgs: &[Msg<'_>]) -> Result<(), ProviderError> {
+    for m in msgs {
+        let max = if m.ten_bit { 0x3ff } else { 0x7f };
+        if m.address > max {
+            return Err(ProviderError::OutOfRange);
+        }
+    }
+    Ok(())
+}
+
+/// The bus, held: transfers run back to back with nobody else's between
+/// them.
+pub struct I2cBus<'a> {
+    src: &'a I2cSource,
+    _guard: MutexGuard<'a, ()>,
+}
+
+impl core::fmt::Debug for I2cBus<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("I2cBus").finish_non_exhaustive()
+    }
+}
+
+impl I2cBus<'_> {
+    /// Runs `msgs` as one transfer (checked as [`I2cSource::transfer`]
+    /// checks them).
+    pub fn transfer(&self, s: &Sleepable, msgs: &mut [Msg<'_>]) -> Result<(), ProviderError> {
+        if msgs.is_empty() {
+            return Ok(());
+        }
+        check(msgs)?;
+        self.run(s, msgs)
+    }
+
+    fn run(&self, s: &Sleepable, msgs: &mut [Msg<'_>]) -> Result<(), ProviderError> {
+        self.src.live()?;
+        self.src.imp.transfer(s, msgs)
+    }
+
+    /// Resets the controller ([`I2c::reset`]).
+    pub fn reset(&self, s: &Sleepable) -> Result<(), ProviderError> {
+        self.src.live()?;
+        self.src.imp.reset(s)
     }
 }
 

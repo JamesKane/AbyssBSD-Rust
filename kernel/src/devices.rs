@@ -150,6 +150,11 @@ static TEST_DRIVERS: &[DriverDecl] = &[
     crate::tests::bus_test::PIN_BUS,
     crate::tests::bus_test::PIN_CONTROLLER,
     crate::tests::bus_test::PIN_USER,
+    crate::tests::bus_test::IIC_TEST_BUS,
+    crate::tests::bus_test::IIC_TEST_CTL,
+    crate::tests::bus_test::IIC_TAKER,
+    crate::tests::bus_test::IIC_TEST_DEV,
+    crate::tests::bus_test::IIC_STAYS,
 ];
 
 /// Drivers that call into the kernel itself (firmware services).
@@ -222,6 +227,7 @@ pub(crate) fn init(s: &Sleepable) {
     storage::bio::set_verifier(verifier);
     // Drivers' device nodes go to devfs.
     vfs::devices::set_registry(&crate::fs::devfs::Hook);
+    crate::iic::init();
     let _ = uart::TERMINALS.set(&crate::tty::serial::HOST);
     // `vt` takes the framebuffer; keyboards type into its windows.
     crate::vtcons::start();

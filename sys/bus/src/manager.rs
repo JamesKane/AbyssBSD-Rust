@@ -685,6 +685,143 @@ impl Manager {
         id
     }
 
+    /// Moves the node standing for the namespace object at `path`, a child
+    /// of a node of class `from_class` that has not attached, under
+    /// `parent` with identity `ident(old)`: FreeBSD's `acpi_iicbus`
+    /// deleting `acpi0`'s child for a device on its bus and adding its
+    /// own. The node is deleted and a new one added, as there, so its id
+    /// changes and it is matched again; its bus data, resources, lines,
+    /// DMA limits, and firmware dependencies both ways go with it.
+    /// `None` if there is no such node, or it is attached or attaching
+    /// (FreeBSD leaves an attached child where it is), or `ident`
+    /// declines it.
+    pub(crate) fn take_child(
+        &self,
+        s: &Sleepable,
+        path: &str,
+        from_class: &str,
+        parent: DeviceId,
+        ident: &dyn Fn(&Ident) -> Option<Ident>,
+    ) -> Option<DeviceId> {
+        let mut t = self.topo.write(s);
+        t.node(parent)?;
+        let n = u32::try_from(t.nodes.len()).unwrap_or(u32::MAX);
+        let old = (0..n)
+            .filter_map(|i| t.id(i))
+            .find(|&id| t.node(id).and_then(|n| n.ident.acpi_path()) == Some(path))?;
+        let o = t.node(old)?;
+        if !matches!(
+            o.state,
+            NodeState::NotPresent | NodeState::Waiting(_) | NodeState::Failed(_)
+        ) || o.adopted.is_some()
+            || o.disabled.is_some()
+            || !o.children.is_empty()
+        {
+            return None;
+        }
+        let from = o.parent.and_then(|p| t.nodes.get(p as usize)?.as_ref())?;
+        if from.class(self.drivers) != Some(from_class) {
+            return None;
+        }
+        let new_ident = ident(&o.ident)?;
+        // Its firmware edges, both ways, but for the tree's.
+        let edges: Vec<Edge<u32>> = t
+            .graph
+            .edges()
+            .filter(|e| {
+                e.origin != Origin::Tree && (e.consumer == old.index || e.supplier == old.index)
+            })
+            .copied()
+            .collect();
+        // Take it out, as `delete` does.
+        let o = t.nodes[old.index as usize].take()?;
+        if let (Some(c), Some(u)) = (o.class(self.drivers), o.unit) {
+            t.units.release(c, u);
+        }
+        if let Some(pn) = o.parent.and_then(|p| t.nodes.get_mut(p as usize)?.as_mut()) {
+            pn.children.retain(|&c| c != old.index);
+        }
+        t.graph.remove_node(old.index);
+        t.free.push((old.index, old.generation.wrapping_add(1)));
+        // And in again under `parent`.
+        let (index, generation) = match t.free.pop() {
+            Some((i, g)) => (i, g),
+            None => (u32::try_from(t.nodes.len()).expect("node count"), 0),
+        };
+        let node = Node {
+            generation,
+            parent: Some(parent.index),
+            children: Vec::new(),
+            ident: new_ident,
+            bus_data: o.bus_data,
+            resources: o.resources,
+            state: NodeState::NotPresent,
+            driver: None,
+            adopted: None,
+            unit: None,
+            desc: String::new(),
+            declined: Vec::new(),
+            binding: None,
+            sysctl: None,
+            start: StartPhase::Attach,
+            disabled: None,
+            fixed: None,
+            nomatch_sent: false,
+            lines: o.lines,
+            provides: Provides::default(),
+            dma: o.dma,
+        };
+        if index as usize == t.nodes.len() {
+            t.nodes.push(Some(node));
+        } else {
+            t.nodes[index as usize] = Some(node);
+        }
+        if let Some(p) = t.node_mut(parent) {
+            p.children.push(index);
+        }
+        t.graph.add_edge(Edge {
+            supplier: parent.index,
+            consumer: index,
+            kind: EdgeKind::Required,
+            origin: Origin::Tree,
+        });
+        let moved = |i: u32| if i == old.index { index } else { i };
+        for e in edges {
+            t.graph.add_edge(Edge {
+                supplier: moved(e.supplier),
+                consumer: moved(e.consumer),
+                ..e
+            });
+        }
+        let id = DeviceId { index, generation };
+        // What named the old node by id names the new one.
+        for d in &mut t.companion_deps {
+            if d.supplier == old {
+                d.supplier = id;
+            }
+        }
+        for n in t.nodes.iter_mut().flatten() {
+            for l in &mut n.lines {
+                if l.supplier == old {
+                    l.supplier = id;
+                }
+            }
+        }
+        self.break_cycles(&mut t);
+        self.match_node(&mut t, id);
+        drop(t);
+        self.bump();
+        Some(id)
+    }
+
+    /// `id`'s parent.
+    #[must_use]
+    pub fn parent(&self, id: DeviceId, s: &Sleepable) -> Option<DeviceId> {
+        let t = self.topo.read(s);
+        let p = t.node(id)?.parent?;
+        t.id(p)
+    }
+
     /// Records that `consumer` also depends on `supplier`: a firmware
     /// dependency found once both exist (a forward `_DEP`). A consumer
     /// already attaching is not held back. An edge that closes a cycle is

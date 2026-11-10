@@ -19,9 +19,9 @@
 //! - So do the GPIO pins (`GpioIo`, `GpioInt`) and I2C connections
 //!   (`I2cSerialBusV2`) its `_CRS` consumes, which its driver asks for by
 //!   index. Their controllers are already its suppliers ([`crate::deps`]).
-//!   A device on an I2C bus stays a child of `acpi0`: FreeBSD's
-//!   `acpi_iicbus` moves it under `iicbus`, but here it is a node with
-//!   the controller as a supplier (DRIVER-MODEL.md §5.3).
+//!   A device on an I2C bus is added here too; the `iicbus` under its
+//!   controller takes it over, lines and dependencies included, as
+//!   FreeBSD's `acpi_iicbus` replaces `acpi0`'s child ([`crate::iicbus`]).
 
 use alloc::string::String;
 use alloc::sync::Arc;

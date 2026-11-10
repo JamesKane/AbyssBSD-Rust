@@ -44,6 +44,7 @@ mod fs;
 mod geom_kern;
 #[cfg(target_arch = "aarch64")]
 mod idregs;
+mod iic;
 mod init;
 mod intc;
 #[cfg(target_arch = "aarch64")]

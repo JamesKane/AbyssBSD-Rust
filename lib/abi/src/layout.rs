@@ -113,6 +113,7 @@ pub const CONSTANTS: &[&[ConstValue]] = &[
     crate::devfs::CONSTANTS,
     crate::efi::CONSTANTS,
     crate::gpio::CONSTANTS,
+    crate::iic::CONSTANTS,
 ];
 
 const fn bus_const(c_name: &'static str, value: i64) -> ConstValue {
@@ -1898,6 +1899,22 @@ pub static LAYOUTS: &[StructLayout] = &[
     layout!(crate::gpio::GpioEventConfig, "struct gpio_event_config", ["sys/types.h", "sys/gpio.h"], All, {
         gp_report_type => "gp_report_type",
         gp_fifo_size => "gp_fifo_size",
+    }),
+    layout!(crate::iic::IicMsg, "struct iic_msg", ["sys/types.h", "dev/iicbus/iic.h"], All, {
+        slave => "slave",
+        flags => "flags",
+        len => "len",
+        buf => "buf",
+    }),
+    layout!(crate::iic::IicCmd, "struct iiccmd", ["sys/types.h", "dev/iicbus/iic.h"], All, {
+        slave => "slave",
+        count => "count",
+        last => "last",
+        buf => "buf",
+    }),
+    layout!(crate::iic::IicRdwrData, "struct iic_rdwr_data", ["sys/types.h", "dev/iicbus/iic.h"], All, {
+        msgs => "msgs",
+        nmsgs => "nmsgs",
     }),
     layout!(bus::DevreqBuffer, "struct devreq_buffer", ["sys/types.h", "sys/bus.h"], All, {
         buffer => "buffer",

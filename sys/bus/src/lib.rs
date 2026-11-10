@@ -64,6 +64,7 @@ pub use roothold::{RootHold, root_mount_hold, root_mount_wait};
 pub use space::{AddressSpace, Range, Sharing};
 pub use sysctl::device_node;
 pub use types::{
-    Announce, AttachError, Busy, Concurrency, DetachReason, DeviceId, Ident, Ids, Line, LineDetail,
-    LineKind, Need, NodeState, Resource, ResourceError, StopReason, TestId, TestIdent, WaitReason,
+    Announce, AttachError, Busy, Concurrency, DetachReason, DeviceId, Ident, Ids, IicIdent, Line,
+    LineDetail, LineKind, Need, NodeState, Resource, ResourceError, StopReason, TestId, TestIdent,
+    WaitReason,
 };

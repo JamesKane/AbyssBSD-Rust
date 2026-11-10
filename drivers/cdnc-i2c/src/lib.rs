@@ -26,9 +26,10 @@
 //! - Any error resets the controller's state (§2.5.4); the bus-hold
 //!   timeout is maxed out and its interrupt never used (§2.6).
 //!
-//! Children of the bus are the devices whose `I2cSerialBusV2` names it;
-//! they stay children of `acpi0` (DRIVER-MODEL.md §5.3) and reach the bus
-//! through `AttachCx::i2c`.
+//! Once the provider is published, the controller adds its `iicbus`
+//! child, as FreeBSD's `cdnc_i2c_attach` does; the bus takes the devices
+//! whose `I2cSerialBusV2` names the controller from `acpi0`, and they
+//! reach the bus through `AttachCx::i2c` (DRIVER-MODEL.md §9.3).
 
 #![no_std]
 // The tests make a `Sleepable` for the host; the crate itself has no
@@ -657,6 +658,7 @@ impl Driver for CdncI2c {
             cx.interrupt(line, Some(intr), None, 0)?;
         }
         cx.provide_i2c(Arc::clone(&self.bus) as Arc<dyn I2c>);
+        cx.add_iicbus();
         Ok(())
     }
 

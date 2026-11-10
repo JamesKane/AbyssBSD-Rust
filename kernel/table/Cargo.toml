@@ -15,6 +15,7 @@ cpufreq = { path = "../../sys/cpufreq" }
 hidbus = { path = "../../sys/hid" }
 hkbd = { path = "../../drivers/hkbd" }
 hms = { path = "../../drivers/hms" }
+iicbus = { path = "../../sys/iicbus" }
 nvme = { path = "../../drivers/nvme" }
 pci = { path = "../../sys/pci" }
 rge = { path = "../../drivers/rge" }

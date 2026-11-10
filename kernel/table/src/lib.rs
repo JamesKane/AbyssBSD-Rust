@@ -59,6 +59,8 @@ macro_rules! drivers {
             hkbd::DRIVER,
             hms::DRIVER,
             umass::DRIVER,
+            iicbus::IICBUS,
+            iicbus::IIC,
             $($isa),*
         ]
     };

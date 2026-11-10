@@ -486,8 +486,8 @@ fn cc_static_program(arch: Arch, sources: &[&Path], args: &[String], out: &Path)
     )
 }
 
-/// `kbdcontrol` (its scanner made by `lex`) and `vidcontrol`, built
-/// static into `out` when stale; none without the FreeBSD tree.
+/// `kbdcontrol` (its scanner made by `lex`), `vidcontrol`, and `i2c`,
+/// built static into `out` when stale; none without the FreeBSD tree.
 fn console_tools(
     arch: Arch,
     out: &Path,
@@ -532,7 +532,17 @@ fn console_tools(
         let refs: Vec<&Path> = sources.iter().map(PathBuf::as_path).collect();
         cc_static_program(arch, &refs, &[format!("-I{}", vid.display())], &vidcontrol)?;
     }
-    Ok(vec![("kbdcontrol", kbdcontrol), ("vidcontrol", vidcontrol)])
+    // `i2c(8)`, for `tests/user/iic.c`.
+    let i2c_src = src.join("i2c");
+    let i2c = out.join("i2c");
+    if !fresh(&i2c, &i2c_src)? {
+        cc_static_program(arch, &[&i2c_src.join("i2c.c")], &[], &i2c)?;
+    }
+    Ok(vec![
+        ("kbdcontrol", kbdcontrol),
+        ("vidcontrol", vidcontrol),
+        ("i2c", i2c),
+    ])
 }
 
 /// The parts of the FreeBSD tree beside this one that third-party
@@ -542,6 +552,7 @@ pub(crate) const FREEBSD_SOURCES: &[&str] = &[
     "tools/regression/fsx",
     "usr.sbin/kbdcontrol",
     "usr.sbin/vidcontrol",
+    "usr.sbin/i2c",
     "usr.bin/find",
     "contrib/mtree",
     "contrib/mknod",
@@ -1007,9 +1018,9 @@ pub(crate) fn md_image(arch: Arch, extra: &[(&str, &Path)]) -> Result<Option<Vec
         append(&mut md, "usr/tests/fsx/", b'5', 0o755, &[])?;
         append(&mut md, "usr/tests/fsx/fsx", b'0', 0o555, &fs::read(&bin)?)?;
     }
-    // FreeBSD's `kbdcontrol` and `vidcontrol`, built static from the
-    // FreeBSD tree beside this one until dynamic linking (P6) lets base's
-    // own run, for `tests/user/vtools.c`.
+    // FreeBSD's `kbdcontrol`, `vidcontrol`, and `i2c`, built static from
+    // the FreeBSD tree beside this one until dynamic linking (P6) lets
+    // base's own run, for `tests/user/vtools.c` and `tests/user/iic.c`.
     let console_tools = console_tools(arch, &out_dir, built_by)?;
     if !console_tools.is_empty() {
         append(&mut md, "usr/sbin/", b'5', 0o755, &[])?;

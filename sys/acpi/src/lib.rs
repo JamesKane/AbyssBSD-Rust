@@ -29,6 +29,9 @@ mod deps_corpus;
 pub mod events;
 pub mod ged;
 mod host;
+pub mod iicbus;
+#[cfg(test)]
+mod iicbus_corpus;
 pub mod pcib;
 pub mod power;
 pub mod properties;

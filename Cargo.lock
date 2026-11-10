@@ -263,6 +263,7 @@ dependencies = [
  "hkbd",
  "hms",
  "ichwd",
+ "iicbus",
  "isa",
  "nvme",
  "pci",
@@ -431,6 +432,21 @@ name = "idregs"
 version = "0.0.0"
 
 [[package]]
+name = "iicbus"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "acpi",
+ "aml",
+ "bus",
+ "devtree",
+ "sched",
+ "sync",
+ "sysctl",
+ "vfs",
+]
+
+[[package]]
 name = "inet"
 version = "0.0.0"
 dependencies = [
@@ -518,6 +534,7 @@ dependencies = [
  "gpt",
  "hal",
  "idregs",
+ "iicbus",
  "inet",
  "input",
  "intmap",

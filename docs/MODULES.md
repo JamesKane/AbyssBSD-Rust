@@ -79,6 +79,7 @@ not invented:
 | Sky1 drivers (`sky1-*`, `cix-mbox`, `cdns-gpio`, `cdnc-i2c`) | `cdnc_i2c` in `files.arm64`; the others have no counterpart | no | yes |
 | PCI and USB function drivers (`nvme`, `ahci`, `rge`, `xhci` on PCI, `virtio-*`, HID, `umass`) | `files` | yes | yes |
 | ACPI devices (`acpi_button`, `acpi_thermal`, `acpi_ged`, `acpi_gpiobus`, CPPC, `uart`) | `files` | yes | yes |
+| `iicbus` (with `acpi_iicbus`) and `iic` | `files` (amd64 builds them as modules) | yes | yes |
 
 One driver crate may have entries in different tables: the `xhci` crate's PCI attachment is
 common and its ACPI one is aarch64 only.

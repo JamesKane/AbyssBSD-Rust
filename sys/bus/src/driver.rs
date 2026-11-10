@@ -826,6 +826,19 @@ impl<'a> AttachCx<'a> {
             _ => Err(ResourceError::NoProvider),
         }
     }
+
+    /// The I2C controller this device's parent publishes: what an
+    /// `iicbus` drives (FreeBSD's `device_get_parent(iicbus)`).
+    pub fn parent_i2c(&self) -> Result<Arc<I2cSource>, ResourceError> {
+        let parent = self
+            .mgr
+            .parent(self.node, self.s)
+            .ok_or(ResourceError::NoProvider)?;
+        match self.mgr.provider(self.s, parent, LineKind::I2c)? {
+            Provided::I2c(i) => Ok(i),
+            _ => Err(ResourceError::NoProvider),
+        }
+    }
 }
 
 /// The trampoline data for one interrupt handler.
@@ -1102,6 +1115,47 @@ impl<D: Driver> StartCx<'_, D> {
         let src = I2cSource::new(imp);
         self.mgr
             .provide(self.s, self.binding.node, Provided::I2c(src));
+    }
+
+    /// Adds the `iicbus` child an I2C controller's attach adds in FreeBSD
+    /// (`device_add_child(dev, "iicbus", DEVICE_UNIT_ANY)`), once the
+    /// controller is published ([`StartCx::provide_i2c`]). Its bus data
+    /// names the controller's ACPI path, if it has one, so the bus finds
+    /// the devices firmware puts on it.
+    pub fn add_iicbus(&mut self) -> DeviceId {
+        let acpi = self
+            .mgr
+            .ident(self.binding.node, self.s)
+            .and_then(|i| i.acpi_path().map(String::from));
+        self.add_child(
+            Ident::Child {
+                class: "iicbus",
+                desc: "Philips I2C bus",
+            },
+            Some(Arc::new(crate::i2c::IicbusOf { acpi })),
+            Vec::new(),
+        )
+    }
+
+    /// Takes over the node another bus (of class `from_class`) added for
+    /// the namespace object at `path`, if it has not attached, as this
+    /// device's child with identity `ident(old)`: FreeBSD's
+    /// `acpi_iicbus` deleting `acpi0`'s child for a device on its bus
+    /// and adding its own. The node keeps its bus data, resources, lines,
+    /// and firmware dependencies; it gets a new id and is matched again.
+    /// `None` if there is no such node, it is attached or attaching, or
+    /// `ident` declines it.
+    pub fn take_child(
+        &mut self,
+        path: &str,
+        from_class: &str,
+        ident: &dyn Fn(&Ident) -> Option<Ident>,
+    ) -> Option<DeviceId> {
+        let id = self
+            .mgr
+            .take_child(self.s, path, from_class, self.binding.node, ident)?;
+        self.binding.sources.push(Source::Child(id));
+        Some(id)
     }
 
     fn children_contains(&self, id: DeviceId) -> bool {

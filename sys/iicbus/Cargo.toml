@@ -1,0 +1,20 @@
+[package]
+name = "iicbus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+abi = { path = "../../lib/abi" }
+acpi = { path = "../acpi" }
+aml = { path = "../../lib/aml" }
+bus = { path = "../bus" }
+devtree = { path = "../../lib/devtree" }
+sched = { path = "../sched" }
+sync = { path = "../sync" }
+sysctl = { path = "../sysctl" }
+vfs = { path = "../vfs" }
+
+[lints]
+workspace = true

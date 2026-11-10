@@ -195,6 +195,27 @@ fn check(drivers: &[DriverDecl]) -> Vec<String> {
     {
         out.push("two drivers claim PCI buses".into());
     }
+    // I2C devices firmware describes, by their ACPI IDs, and the one
+    // driver for address 0 (`iic`).
+    out.extend(ties(
+        drivers,
+        |i| {
+            if let Ids::IicAcpi(t) = i {
+                Some(*t)
+            } else {
+                None
+            }
+        },
+        recorded_acpi(),
+    ));
+    if drivers
+        .iter()
+        .filter(|d| matches!(d.ids, Ids::IicGeneric))
+        .count()
+        > 1
+    {
+        out.push("two drivers claim iicbus address 0".into());
+    }
     out
 }
 

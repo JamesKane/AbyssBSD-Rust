@@ -1080,7 +1080,7 @@ The provider traits, all in `sys/bus` so consumers depend on no particular provi
 | `DmaEngine` | slave and cyclic channels by request line | Sky1 DMA-350 |
 | `Mailbox` (built: doorbell and message registers) | `words`, `read`, `write` of the message registers, `ring` a channel's doorbell; FIFO and fast channels later | CIX mailbox (Sky1); later PCC, Qualcomm IPCC |
 | `Gpio` (built) | pin count, `configure` (direction, output level first, bias), `get`, `set`, `release`, the pins' interrupt domain; pins claimed per descriptor, exclusive unless every holder's descriptor says shared (FreeBSD's `gpiobus` pin ownership) | Cadence GPIO (Sky1); later PL061, AMD, Qualcomm TLMM |
-| `I2c` (built) | `transfer` of FreeBSD's `iic_msg` array (repeated STARTs, one STOP), run one at a time; consumers hold an `I2cDevice` at their address | Cadence I2C (Sky1); later DesignWare (X870E) |
+| `I2c` (built) | `transfer` of FreeBSD's `iic_msg` array (repeated STARTs, one STOP), run one at a time (or several under one hold of the bus, `iicbus_request_bus`); `reset`; consumers hold an `I2cDevice` at their address | Cadence I2C (Sky1); later DesignWare (X870E) |
 | `Spi`, `Pinctrl` | as their FreeBSD counterparts (`spibus`) | SoC controllers |
 
 Providers are reached through supplier edges (§6.1), and a handle names a sub-handle where the
@@ -1091,6 +1091,19 @@ use, in firmware's order; mailbox lines come from `_DSD` `mboxes` (a mailbox and
 per entry), by index the same way. A GPIO controller with an `_AEI` adds a `gpio_aei` child whose lines are
 those pins, each running the controller's `_Exx`, `_Lxx`, or `_EVT`. Operations that talk to firmware sleep, so they
 take a `ThreadCx` or an attach, start, or stop context, never `IrqCx`.
+
+An I2C controller adds an `iicbus` child once its provider is published (`StartCx::add_iicbus`), as
+a FreeBSD controller's attach does. Where the controller has an ACPI path the bus is FreeBSD's
+`acpi_iicbus`: it finds the devices whose first `I2cSerialBus` names the controller
+(`acpi::iicbus`) and takes `acpi0`'s node for each that has not attached (`StartCx::take_child`),
+which deletes the node and adds it again under the bus, as FreeBSD deletes `acpi0`'s child and adds
+its own. `acpi0` still enumerates every device first, so the dependency walk stays one pass: the
+moved node keeps its `AcpiDevice` bus data, its lines, and its firmware edges both ways, and a
+driver for it (the RX8900, the RTS5453) reaches its bus with `cx.i2c(0)`, its `GpioInt`s, and its
+AML as any ACPI device does. It is matched again as `Ident::Iic` (`addr=0x32
+handle=\_SB_.I2C3.RTC0`) by drivers that declare `Ids::IicAcpi`, which no `acpi0` child matches,
+so an I2C device's driver attaches only under its bus. Last, `iic` (`Ids::IicGeneric`, address 0)
+makes `/dev/iicN`.
 
 Provider handles held by a consumer go through the same `Gate` mechanism. A supplier cannot detach
 while it has attached consumers, because the graph detaches consumers first (§10.1). The gate makes

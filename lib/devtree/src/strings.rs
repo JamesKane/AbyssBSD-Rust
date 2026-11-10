@@ -6,7 +6,9 @@
 //! Behavior reference: sys/dev/pci/pci.c (`pci_child_pnpinfo_method`,
 //! `pci_child_location_method`), sys/dev/acpica/acpi.c (`acpi_pnpinfo`,
 //! `acpi_child_location_method`), sys/dev/acpica/acpi_pci.c,
-//! sys/dev/virtio/virtio.c (`virtio_child_pnpinfo`).
+//! sys/dev/virtio/virtio.c (`virtio_child_pnpinfo`),
+//! sys/dev/iicbus/iicbus.c and acpi_iicbus.c (`iicbus_child_location`,
+//! `acpi_iicbus_child_location`).
 
 use core::fmt::{self, Write};
 
@@ -183,6 +185,21 @@ pub fn hid_location(out: &mut impl Write, i: &HidIdent) -> fmt::Result {
     write!(out, "index={}", i.index)
 }
 
+/// An `iicbus` child's location: `addr=0x32`, as C's `%#x` prints it
+/// (`addr=0` for address 0), then ` handle=\_SB_.I2C3.RTC0` for a child
+/// firmware describes (`acpi_iicbus_child_location`).
+pub fn iic_location(out: &mut impl Write, addr: u16, handle: Option<&str>) -> fmt::Result {
+    if addr == 0 {
+        out.write_str("addr=0")?;
+    } else {
+        write!(out, "addr={addr:#x}")?;
+    }
+    if let Some(h) = handle {
+        write!(out, " handle={h}")?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use alloc::string::String;
@@ -241,6 +258,19 @@ mod tests {
         acpi_path(&mut s, &[*b"_SB_", *b"PCI0"]).unwrap();
         acpi_location(&mut String::new(), &s, None).unwrap();
         assert_eq!(s, "\\_SB_.PCI0");
+    }
+
+    #[test]
+    fn iic() {
+        let mut s = String::new();
+        iic_location(&mut s, 0, None).unwrap();
+        assert_eq!(s, "addr=0");
+        let mut s = String::new();
+        iic_location(&mut s, 0x32, Some("\\_SB_.I2C3.RTC0")).unwrap();
+        assert_eq!(s, "addr=0x32 handle=\\_SB_.I2C3.RTC0");
+        let mut s = String::new();
+        iic_location(&mut s, 0x1a, None).unwrap();
+        assert_eq!(s, "addr=0x1a");
     }
 
     #[test]
