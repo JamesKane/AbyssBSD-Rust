@@ -28,6 +28,7 @@ unmodified as FreeBSD userland ([ADR-0018](docs/adr/0018-desktop-architecture.md
 | [docs/VFS.md](docs/VFS.md) | VFS, vnodes, name cache, page and buffer caches, write-back, and file systems |
 | [docs/USB.md](docs/USB.md) | xHCI, USB bus and hubs, HID and input (`kbd`, `evdev`), `vt` terminals, and `umass` |
 | [docs/MULTIUSER.md](docs/MULTIUSER.md) | Phase 6 design: dynamic linking, threads, umtx, kqueue, sockets, ptys, security, and `init` |
+| [docs/NETWORKING.md](docs/NETWORKING.md) | Phase 7 design: mbufs, interfaces, IPv4/IPv6, TCP, UDP, netlink, kernel TLS, and virtio-net |
 | [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | The 2% performance parity gate, methodology, fairness rules, and benchmark suites |
 | [docs/ENGINEERING.md](docs/ENGINEERING.md) | Rust conventions: algebraic types, `unsafe` policy, errors, style |
 | [docs/BUILD-AND-TEST.md](docs/BUILD-AND-TEST.md) | Toolchain, `xtask`, QEMU/bhyve, the build server, the test pyramid |
@@ -37,8 +38,9 @@ unmodified as FreeBSD userland ([ADR-0018](docs/adr/0018-desktop-architecture.md
 
 ## Status
 
-Phases 0 through 5 and the QEMU exit of the USB and input track (U.0–U.6) are complete. Phase 6
-(FreeBSD multi-user) is under way, with P6.0 and P6.1 complete. See
+Phases 0 through 7 and the QEMU exit of the USB and input track (U.0–U.6) are complete:
+unmodified FreeBSD 15.1 boots multi-user and networked on both architectures in QEMU and bhyve.
+Phase 8 (bring-up on the physical reference machines) is next. See
 [docs/ROADMAP.md](docs/ROADMAP.md) for the detail.
 
 - **Boot (Phase 1):** our UEFI loader boots our kernel on x86_64 and aarch64, in QEMU and bhyve.
@@ -72,10 +74,27 @@ Phases 0 through 5 and the QEMU exit of the USB and input track (U.0–U.6) are 
   architectures, the shell on `ttyv0` is driven by a USB keyboard, and in bhyve `vt` text output
   takes 0.70 of FreeBSD 15.1's time.
 
-Next in Phase 6: threads and `libthr` (P6.2–P6.3), kqueue and `poll` (P6.4), UNIX-domain sockets
-(P6.5), ptys (P6.6), Capsicum and jails (P6.7), observability and `ktrace`/`ptrace` (P6.8),
-`/sbin/init` and `rc` to a multi-user `login:` prompt (P6.9), kyua conformance (P6.10), and
-bring-up on the two physical reference machines (P6.11–P6.12).
+- **Multi-user (Phase 6):** stock `/sbin/init` and `rc` reach `login:` on the serial console
+  and `ttyv0`, from FreeBSD 15.1's `base.txz` as the installer leaves it, with `syslogd`, `cron`,
+  and `devd` running. Underneath: `libthr` and the full `_umtx_op` set, `kqueue` and `poll`,
+  UNIX-domain sockets with `SCM_RIGHTS`, ptys, Capsicum, jails, `ktrace` and `ptrace`, and the
+  `kinfo` sysctls behind `ps`, `top`, and `procstat`. kyua pass rates against FreeBSD's own tests:
+  `bin` 98.2%, `lib/libc` 97.6%, `sys/kern` 95.6%, `usr.bin` 98.5%. The P6 suite passed its gate
+  at exit, but a later scheduler fix (idle CPUs spinning where FreeBSD halts) left `event` 1.08
+  and `unix` 1.17 of FreeBSD's time; that work is parked and resumes from those benchmarks.
+- **Networking (Phase 7):** mbufs, `ifnet`, Ethernet, ARP, IPv4, ICMP, IPv6 with ND and SLAAC,
+  UDP, TCP (SACK, window scaling, timestamps, NewReno and CUBIC), loopback, `bpf`, VNET jails
+  and `epair`, routing sockets and netlink for 15.x `ifconfig`, `route`, and `netstat`,
+  `sendfile`, and kernel TLS (TLS 1.0–1.3 with AES-CBC, AES-GCM, and ChaCha20-Poly1305, written
+  in-tree), over virtio-net. The system gets its addresses with `dhclient` and SLAAC, `sshd`
+  accepts logins, `scp`, `fetch`, and `pkg install` work, and hour-long `iperf3` runs finish
+  without leaks. Differential captures and command output match FreeBSD's, and in bhyve the P7
+  suite (TCP and UDP throughput, latency, connection rate, `sendfile`, CPU per gigabit) takes
+  0.935 of FreeBSD 15.1's time.
+
+Next, Phase 8: board bring-up on the two physical reference machines, the Ryzen 9 7900X / X870E
+(AMD64) and the Orange Pi 6 Plus (ARM64, CIX Sky1), starting with `ssh`, `scp`, and `pkg` on
+both.
 
 ## License
 
