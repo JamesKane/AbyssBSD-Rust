@@ -372,16 +372,15 @@ impl Driver for AcpiPciBridge {
     }
 
     fn attach(cx: &mut AttachCx<'_>) -> Result<Self, AttachError> {
-        let Ident::Pci(_, _, Some(path)) = cx.ident() else {
+        if !matches!(cx.ident(), Ident::Pci(..)) {
             return Err(AttachError::Decline);
-        };
-        let path = aml::AmlPath::parse(path).map_err(|_| AttachError::Decline)?;
+        }
+        let node = crate::bus::companion(cx).ok_or(AttachError::Decline)?.node;
         let svc = service().ok_or(AttachError::Decline)?;
         let child = cx.bus_data_arc::<PciChild>().ok_or(AttachError::Decline)?;
         let found = svc.run(cx.sleepable(), move |interp, host| {
-            interp.lookup(&path).map(|node| below(interp, node, host))
+            below(interp, node, host)
         });
-        let found = found.ok_or(AttachError::Decline)?;
         let intx = found.routes.map(|r| resolve(svc.ops(), r));
         let (bus, data) = pci::bridge::secondary(&child, found.adr_paths, intx)?;
         Ok(Self {

@@ -147,6 +147,19 @@ struct Topology {
     free: Vec<(u32, u32)>,
     units: Units,
     graph: Graph<u32>,
+    /// Firmware dependencies of namespace objects no node claims yet,
+    /// by the consumer's path: a PCI function's ACPI companion
+    /// (DRIVER-MODEL.md §5.2), applied when the PCI bus adds the function.
+    companion_deps: Vec<CompanionDep>,
+}
+
+/// A dependency of a namespace object that another bus's node stands
+/// for.
+struct CompanionDep {
+    consumer: String,
+    supplier: DeviceId,
+    kind: EdgeKind,
+    origin: Origin,
 }
 
 impl Topology {
@@ -293,6 +306,7 @@ pub fn init(
         free: Vec::new(),
         units: Units::new(),
         graph: Graph::new(),
+        companion_deps: Vec::new(),
     };
     topo.nodes.push(Some(Node {
         generation: 0,
@@ -581,6 +595,24 @@ impl Manager {
             .and_then(|n| n.ident.acpi_path())
             .map(String::from)
         {
+            // Its namespace object's own dependencies apply to it.
+            let mine: Vec<(DeviceId, EdgeKind, Origin)> = t
+                .companion_deps
+                .iter()
+                .filter(|d| d.consumer == path)
+                .map(|d| (d.supplier, d.kind, d.origin))
+                .collect();
+            for (sup, kind, origin) in mine {
+                if t.node(sup).is_some() && sup != id {
+                    t.graph.add_edge(Edge {
+                        supplier: sup.index,
+                        consumer: index,
+                        kind,
+                        origin,
+                    });
+                }
+            }
+            self.break_cycles(&mut t);
             let waiting: Vec<DeviceId> = (0..u32::try_from(t.nodes.len()).unwrap_or(u32::MAX))
                 .filter_map(|i| t.id(i))
                 .filter(|&w| {
@@ -623,17 +655,7 @@ impl Manager {
             kind,
             origin,
         });
-        if let Ok(broken) = t.graph.break_cycles() {
-            for e in broken.into_iter().filter(|e| e.kind.gates_attach()) {
-                let (a, b) = (
-                    t.nameunit(self.drivers, e.supplier),
-                    t.nameunit(self.drivers, e.consumer),
-                );
-                self.platform.log(format_args!(
-                    "bus: dependency cycle: {b} no longer waits for {a}"
-                ));
-            }
-        }
+        self.break_cycles(&mut t);
         let missing: Vec<DeviceId> = t
             .graph
             .missing(consumer.index, |i| t.attached(i))
@@ -647,6 +669,53 @@ impl Manager {
         }
         drop(t);
         self.bump();
+    }
+
+    /// Breaks the graph's cycles, as firmware cycles are, reporting each
+    /// edge a consumer waited on.
+    fn break_cycles(&self, t: &mut Topology) {
+        if let Ok(broken) = t.graph.break_cycles() {
+            for e in broken.into_iter().filter(|e| e.kind.gates_attach()) {
+                let (a, b) = (
+                    t.nameunit(self.drivers, e.supplier),
+                    t.nameunit(self.drivers, e.consumer),
+                );
+                self.platform.log(format_args!(
+                    "bus: dependency cycle: {b} no longer waits for {a}"
+                ));
+            }
+        }
+    }
+
+    /// Records that whatever node stands for the namespace object at
+    /// `consumer` (a PCI function whose ACPI companion it is) depends on
+    /// `supplier`: applied now if such a node exists, else when one is
+    /// added.
+    pub(crate) fn add_companion_dependency(
+        &self,
+        s: &Sleepable,
+        consumer: String,
+        supplier: DeviceId,
+        kind: EdgeKind,
+        origin: Origin,
+    ) {
+        let existing = {
+            let mut t = self.topo.write(s);
+            let n = u32::try_from(t.nodes.len()).unwrap_or(u32::MAX);
+            let found = (0..n)
+                .filter_map(|i| t.id(i))
+                .find(|&id| t.node(id).and_then(|n| n.ident.acpi_path()) == Some(&consumer));
+            t.companion_deps.push(CompanionDep {
+                consumer,
+                supplier,
+                kind,
+                origin,
+            });
+            found
+        };
+        if let Some(c) = existing {
+            self.add_dependency(s, c, supplier, kind, origin);
+        }
     }
 
     /// Sets the clock, reset, and power-domain lines `id` consumes.

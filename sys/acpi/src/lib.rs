@@ -31,7 +31,7 @@ pub mod pcib;
 pub mod power;
 pub mod service;
 
-pub use bus::{AcpiBus, AcpiDevice, DRIVER};
+pub use bus::{AcpiBus, AcpiDevice, DRIVER, companion};
 pub use button::BUTTON;
 pub use events::{Block, FixedHardware, Space};
 pub use ged::GED;

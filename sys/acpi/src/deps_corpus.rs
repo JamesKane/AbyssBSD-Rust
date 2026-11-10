@@ -684,3 +684,98 @@ fn opi6p_children_get_their_lines() {
     let total: usize = walk.found.iter().map(|f| f.lines.len()).sum();
     assert_eq!(total, 183 + 109);
 }
+
+/// The dependencies of devices named only by `_ADR`, which `acpi0` hands
+/// to whatever node stands for them (a PCI function's ACPI companion,
+/// DRIVER-MODEL.md §5.2). The Q8B's PCIe root ports wait for the GPIO
+/// controller driving their PERST# and are ordered after their USB4
+/// ports; the X870E's and the Sky1's companions depend only on power
+/// resources, which `acpi0` serves, or on objects above them.
+#[test]
+fn companion_deps() {
+    use devtree::graph::Origin;
+    let walk_of = |name: &str| {
+        let (_, tables) = machines().into_iter().find(|(n, _)| *n == name).unwrap();
+        let (mut i, mut h) = load(name, &tables);
+        crate::bus::walk(&mut i, &mut h, &dma_controllers(name)).companion_deps
+    };
+    assert!(walk_of("opi6p").is_empty());
+    assert!(walk_of("x870e").is_empty());
+    let got: Vec<(String, String, EdgeKind, Origin)> = walk_of("radxa-q8b")
+        .into_iter()
+        .map(|(c, (s, k, o))| (c, s, k, o))
+        .collect();
+    let d = |c: &str, s: &str, k, o| (String::from(c), String::from(s), k, o);
+    let gpio = |n: u32| {
+        d(
+            &alloc::format!("\\_SB_.PCI{n}.RP1_"),
+            "\\_SB_.GIO0",
+            EdgeKind::Required,
+            Origin::ResourceSource,
+        )
+    };
+    let mut want = alloc::vec![
+        d(
+            "\\_SB_.ADSP.ADCM",
+            "\\_SB_.MMU0",
+            EdgeKind::Required,
+            Origin::Dep
+        ),
+        d(
+            "\\_SB_.ADSP.ADCM",
+            "\\_SB_.IMM0",
+            EdgeKind::Required,
+            Origin::Dep
+        ),
+        d(
+            "\\_SB_.ADSP.ADCM.AUCD",
+            "\\_SB_.GIO0",
+            EdgeKind::Required,
+            Origin::ResourceSource
+        ),
+        d(
+            "\\_SB_.GPU0.AVS0",
+            "\\_SB_.MMU0",
+            EdgeKind::Required,
+            Origin::Dep
+        ),
+        d(
+            "\\_SB_.GPU0.AVS0",
+            "\\_SB_.IMM0",
+            EdgeKind::Required,
+            Origin::Dep
+        ),
+        d(
+            "\\_SB_.GPU0.AVS0",
+            "\\_SB_.VFE0",
+            EdgeKind::Required,
+            Origin::Dep
+        ),
+        d(
+            "\\_SB_.PCI0.RP1_",
+            "\\_SB_.UBF0.PRT0",
+            EdgeKind::Order,
+            Origin::Dsd
+        ),
+        d(
+            "\\_SB_.PCI1.RP1_",
+            "\\_SB_.UBF0.PRT1",
+            EdgeKind::Order,
+            Origin::Dsd
+        ),
+    ];
+    want.extend((2..=6).map(gpio));
+    want.push(d(
+        "\\_SB_.URS0.USB0.RHUB.PRT1",
+        "\\_SB_.UBF0.PRT0",
+        EdgeKind::Order,
+        Origin::Dsd,
+    ));
+    want.push(d(
+        "\\_SB_.URS1.USB1.RHUB.PRT1",
+        "\\_SB_.UBF0.PRT1",
+        EdgeKind::Order,
+        Origin::Dsd,
+    ));
+    assert_eq!(got, want);
+}

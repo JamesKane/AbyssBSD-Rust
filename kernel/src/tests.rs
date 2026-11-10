@@ -1616,9 +1616,127 @@ pub(crate) mod bus_test {
         fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
     }
 
+    /// What `CompanionBus`'s devices attached, in order.
+    pub(crate) static COMPANION_ORDER: sync::SpinLock<alloc::vec::Vec<&'static str>> =
+        sync::SpinLock::new(alloc::vec::Vec::new());
+
+    /// A PCI function standing for a namespace object.
+    fn companion_ident(slot: u8, path: &str) -> Ident {
+        Ident::Pci(
+            devtree::ids::PciIdent {
+                vendor: 0xfffe,
+                device: 0x0001,
+                subvendor: 0,
+                subdevice: 0,
+                class: 0xff_0000,
+                revision: 0,
+            },
+            devtree::strings::PciAddress {
+                domain: 0,
+                bus: 0xfe,
+                slot,
+                function: 0,
+            },
+            Some(path.into()),
+        )
+    }
+
+    /// A bus whose two "PCI functions" are ACPI companions depending on
+    /// a third device: one added before the dependency is recorded, one
+    /// after (as the PCI bus adds functions after `acpi0` has started).
+    pub(crate) struct CompanionBus;
+
+    impl Driver for CompanionBus {
+        const NAME: &'static str = "compbus";
+        const IDS: Ids = Ids::Test(&[TestId {
+            model: 16,
+            rank: Rank::DEFAULT,
+        }]);
+        fn describe(_: &Ident) -> String {
+            "Companion test bus".into()
+        }
+        fn attach(_: &mut AttachCx<'_>) -> Result<Self, AttachError> {
+            Ok(Self)
+        }
+        fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
+            use devtree::graph::{EdgeKind::Required, Origin::ResourceSource};
+            let _early = cx.add_child(companion_ident(1, "\\_SB_.CMPA"), None, vec![]);
+            let sup = cx.add_child(Ident::Test(TestIdent { model: 17 }), None, vec![]);
+            cx.add_companion_dependency("\\_SB_.CMPA".into(), sup, Required, ResourceSource);
+            cx.add_companion_dependency("\\_SB_.CMPB".into(), sup, Required, ResourceSource);
+            let _late = cx.add_child(companion_ident(2, "\\_SB_.CMPB"), None, vec![]);
+            Ok(())
+        }
+        fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
+    }
+
+    /// Records its attach: the supplier (model 17), or a companion by its
+    /// path.
+    pub(crate) struct CompanionDev;
+
+    impl Driver for CompanionDev {
+        const NAME: &'static str = "compdev";
+        const IDS: Ids = Ids::Test(&[TestId {
+            model: 17,
+            rank: Rank::DEFAULT,
+        }]);
+        fn describe(_: &Ident) -> String {
+            "Companion supplier".into()
+        }
+        fn attach(cx: &mut AttachCx<'_>) -> Result<Self, AttachError> {
+            // Slow enough that a consumer not held back would come first.
+            crate::time::sleep_ns(cx.sleepable(), 20_000_000);
+            COMPANION_ORDER.lock().push("supplier");
+            Ok(Self)
+        }
+        fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
+    }
+
+    pub(crate) struct CompanionFn;
+
+    impl Driver for CompanionFn {
+        const NAME: &'static str = "compfn";
+        const IDS: Ids = Ids::Pci(&[devtree::ids::PciId::device(0xfffe, 0x0001)]);
+        fn describe(_: &Ident) -> String {
+            "Companion PCI function".into()
+        }
+        fn attach(cx: &mut AttachCx<'_>) -> Result<Self, AttachError> {
+            let which = match cx.ident().acpi_path() {
+                Some(p) if p.ends_with("CMPA") => "CMPA",
+                _ => "CMPB",
+            };
+            COMPANION_ORDER.lock().push(which);
+            Ok(Self)
+        }
+        fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
+    }
+
+    pub(crate) const COMPANION_BUS: DriverDecl = DriverDecl::of::<CompanionBus>();
+    pub(crate) const COMPANION_DEV: DriverDecl = DriverDecl::of::<CompanionDev>();
+    pub(crate) const COMPANION_FN: DriverDecl = DriverDecl::of::<CompanionFn>();
+
     pub(crate) const LINE_BUS: DriverDecl = DriverDecl::of::<LineBus>();
     pub(crate) const LINE_PROVIDER: DriverDecl = DriverDecl::of::<LineProvider>();
     pub(crate) const LINE_USER: DriverDecl = DriverDecl::of::<LineUser>();
+}
+
+ktest! {
+    fn companion_dependencies_hold_the_node() {
+        use bus::{Ident, NodeState, TestIdent};
+        let s = cx();
+        let m = bus::manager();
+        bus_test::COMPANION_ORDER.lock().clear();
+        let cb = m.add_child(&s, m.root(), Ident::Test(TestIdent { model: 16 }), None, alloc::vec![], &[]);
+        m.wait_idle(&s);
+        for c in m.children(cb, &s) {
+            assert_eq!(m.state(c, &s), Some(NodeState::Attached));
+        }
+        let order = bus_test::COMPANION_ORDER.lock().clone();
+        assert_eq!(order.first(), Some(&"supplier"), "{order:?}");
+        assert_eq!(order.len(), 3, "{order:?}");
+        m.shutdown_under(cb, &s);
+        let _ = m.take_events();
+    }
 }
 
 ktest! {

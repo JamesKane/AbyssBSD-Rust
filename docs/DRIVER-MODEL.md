@@ -274,7 +274,15 @@ AML handle for notify registration. These views replace FreeBSD's `BUS_READ_IVAR
 A PCI function that firmware also describes in the namespace has an **ACPI companion**, as in
 FreeBSD's `acpi_pci`: `PciFunction::acpi_companion() -> Option<AcpiDevice<'_>>`. Through it a PCI
 driver reads `_DSD` (USB4 `IMR_VALID` and `WAKE_SUPPORTED`), evaluates `_DSM` (retimers), and the
-framework finds `_PRW` and `_S0W`. The companion's dependency edges (§6.1) apply to the PCI node.
+framework finds `_PRW` and `_S0W`. The companion's dependency edges (§6.1) apply to the PCI node. As
+built (P8.1): `sys/pci` cannot depend on `sys/acpi`, so the accessor is `acpi::companion(cx)`,
+which works for any node whose identity carries a namespace path. `acpi0` runs the graph builder
+over present devices named only by `_ADR` too and hands their edges to the manager by the
+consumer's path (`StartCx::add_companion_dependency`); the manager applies them to the node that
+claims the path, whether it exists yet or the PCI bus adds it later. Suppliers above the
+companion (its host bridge) and power resources (`acpi0`'s) need no edge. Bringing a companion to
+D0 through ACPI follows FreeBSD's `acpi_pci_set_powerstate_method`: only when PCI power
+management reports the function out of D0, which is not yet done.
 
 ### 5.3 Multi-function devices
 

@@ -763,6 +763,23 @@ impl<D: Driver> StartCx<'_, D> {
         }
     }
 
+    /// Makes whatever node stands for the namespace object at `path`
+    /// depend on child `supplier`: a dependency of a PCI function's ACPI
+    /// companion (DRIVER-MODEL.md §5.2), which applies to the PCI node
+    /// once the PCI bus adds it.
+    pub fn add_companion_dependency(
+        &mut self,
+        path: String,
+        supplier: DeviceId,
+        kind: devtree::graph::EdgeKind,
+        origin: devtree::graph::Origin,
+    ) {
+        if self.children_contains(supplier) {
+            self.mgr
+                .add_companion_dependency(self.s, path, supplier, kind, origin);
+        }
+    }
+
     /// Sets the clock, reset, and power-domain lines child `consumer`
     /// consumes, as firmware describes them; its driver asks for them by
     /// name in attach. The bus also makes each line's supplier a required

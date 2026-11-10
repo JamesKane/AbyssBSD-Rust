@@ -95,6 +95,24 @@ pub(crate) fn enumerated(
     (present || always_present(&ident)).then_some(ident)
 }
 
+/// The ACPI companion of the device being attached: the namespace device
+/// another bus's node stands for (a PCI function whose `_ADR` the
+/// namespace names, as FreeBSD's `acpi_pci` finds its handle;
+/// DRIVER-MODEL.md §5.2). Through it a PCI driver reads `_DSD` and
+/// evaluates `_DSM`; the companion's dependencies already apply to the
+/// node. `None` if the node has no namespace object or ACPI is not
+/// running.
+pub fn companion(cx: &AttachCx<'_>) -> Option<AcpiDevice> {
+    let path = String::from(cx.ident().acpi_path()?);
+    let parsed = aml::AmlPath::parse(&path).ok()?;
+    let svc = service()?;
+    svc.run(cx.sleepable(), move |interp, host| {
+        let node = interp.lookup(&parsed)?;
+        let crs = interp.crs(node, host).ok().flatten().unwrap_or_default();
+        Some(AcpiDevice { node, path, crs })
+    })
+}
+
 /// What the namespace walk found: the children, and what to log about
 /// their dependencies.
 pub(crate) struct Walk {
@@ -102,6 +120,10 @@ pub(crate) struct Walk {
     /// References to objects that do not exist, and suppliers nothing will
     /// serve.
     pub(crate) notes: Vec<String>,
+    /// The dependencies of present devices named only by `_ADR` (PCI
+    /// functions' companions), by the consumer's path: the node another
+    /// bus adds for that object takes them.
+    pub(crate) companion_deps: Vec<(String, ChildDep)>,
 }
 
 pub(crate) fn walk(
@@ -110,9 +132,17 @@ pub(crate) fn walk(
     dma: &[crate::DmaController],
 ) -> Walk {
     let mut found = Vec::new();
+    let mut companions = Vec::new();
     for node in interp.devices() {
         let path = alloc::format!("{}", interp.path(node));
         let Some(ident) = enumerated(interp, host, node) else {
+            // A device only `_ADR` names stands for a node of another bus
+            // (a PCI function), which takes its dependencies.
+            if interp.child(node, "_ADR").is_some()
+                && interp.sta(node, host).map_or(true, |sta| sta & 1 != 0)
+            {
+                companions.push(node);
+            }
             continue;
         };
         // D0 before any driver sees it.
@@ -125,26 +155,39 @@ pub(crate) fn walk(
             lines: Vec::new(),
         });
     }
-    let nodes: Vec<aml::NodeId> = found.iter().map(|f| f.device.node).collect();
+    let mut nodes: Vec<aml::NodeId> = found.iter().map(|f| f.device.node).collect();
+    nodes.extend_from_slice(&companions);
     let deps = crate::deps::build(interp, host, &nodes, dma);
     let mut notes = Vec::new();
+    let mut companion_deps: Vec<(String, ChildDep)> = Vec::new();
     for e in &deps.edges {
         let what = e.via.describe();
-        let Some(f) = found.iter_mut().find(|f| f.device.node == e.consumer) else {
-            continue;
+        let consumer = alloc::format!("{}", interp.path(e.consumer));
+        let deps = match found.iter_mut().find(|f| f.device.node == e.consumer) {
+            Some(f) => Some(&mut f.deps),
+            None => None,
         };
         match e.provider {
             Provider::Device(n) | Provider::Sub { owner: n, .. } => {
                 let dep = (alloc::format!("{}", interp.path(n)), e.kind, e.via.origin());
-                if dep.0 != f.device.path && !f.deps.contains(&dep) {
-                    f.deps.push(dep);
+                match deps {
+                    Some(d) if dep.0 != consumer && !d.contains(&dep) => d.push(dep),
+                    Some(_) => {}
+                    // A supplier above a companion (its host bridge) is
+                    // above the PCI node in the tree too.
+                    None if consumer.starts_with(&dep.0) => {}
+                    None => {
+                        let c = (consumer, dep);
+                        if !companion_deps.contains(&c) {
+                            companion_deps.push(c);
+                        }
+                    }
                 }
             }
             // acpi0 itself: the tree already orders it first.
             Provider::Bus(_) => {}
             Provider::Absent(n) => notes.push(alloc::format!(
-                "acpi0: {}: {what} names {}, which is not present",
-                f.device.path,
+                "acpi0: {consumer}: {what} names {}, which is not present",
                 interp.path(n)
             )),
         }
@@ -185,7 +228,11 @@ pub(crate) fn walk(
             m.why
         ));
     }
-    Walk { found, notes }
+    Walk {
+        found,
+        notes,
+        companion_deps,
+    }
 }
 
 fn trigger(t: aml::resource::Trigger) -> irq::Trigger {
@@ -337,7 +384,11 @@ impl Driver for AcpiBus {
             );
         }
         let dma = svc.ops().dma_controllers();
-        let Walk { found, notes } = svc.run(cx.sleepable(), move |i, h| walk(i, h, &dma));
+        let Walk {
+            found,
+            notes,
+            companion_deps,
+        } = svc.run(cx.sleepable(), move |i, h| walk(i, h, &dma));
         for note in &notes {
             svc.ops().log(format_args!("{note}"));
         }
@@ -375,6 +426,13 @@ impl Driver for AcpiBus {
                 .collect();
             if !lines.is_empty() {
                 cx.set_lines(*id, lines);
+            }
+        }
+        // A PCI function's companion's dependencies, for the PCI bus's
+        // node when it comes.
+        for (consumer, (d, kind, origin)) in companion_deps {
+            if let Some(sup) = child(&d) {
+                cx.add_companion_dependency(consumer, sup, kind, origin);
             }
         }
         Ok(())

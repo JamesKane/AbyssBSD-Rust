@@ -2490,6 +2490,12 @@ machines against FreeBSD on bare metal; the exit criteria above.
   `providers_serve_lines_by_name` ktest. The first real providers (SCMI over the CIX mailbox,
   the S5 and FCH reset controllers, `CCLK`'s AML clocks) are P8.3. Next: the ACPI companion and
   shared ranges.
+- Progress 2026-11-09 (P8.1, ACPI companion): `acpi::companion(cx)` gives a PCI driver the
+  namespace device its function's `_ADR` names, and the companion's dependencies apply to the
+  PCI node (`StartCx::add_companion_dependency`, applied when the PCI bus adds the function).
+  The Q8B's PCIe root ports wait for the GPIO controller driving PERST# and are ordered after
+  their USB4 ports; the X870E's and the Sky1's companions depend only on power resources or on
+  objects above them, so they add no edges. Next: shared ranges.
 
 ## Phase 9: Self-hosting and hardening = **v1.0 / Day 1 complete** (L)
 
