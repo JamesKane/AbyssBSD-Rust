@@ -9,6 +9,7 @@ publish.workspace = true
 bus = { path = "../bus" }
 devtree = { path = "../../lib/devtree" }
 hal = { path = "../../arch/hal" }
+iommu-framework = { path = "../iommu" }
 irq = { path = "../irq" }
 sync = { path = "../sync" }
 

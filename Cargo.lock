@@ -490,7 +490,11 @@ name = "iommu-framework"
 version = "0.0.0"
 dependencies = [
  "abi",
+ "iommu",
+ "pt",
+ "sync",
  "sysctl",
+ "vm",
 ]
 
 [[package]]
@@ -672,6 +676,7 @@ dependencies = [
  "bus",
  "devtree",
  "hal",
+ "iommu-framework",
  "irq",
  "sync",
 ]
@@ -805,6 +810,7 @@ dependencies = [
  "iommu",
  "iommu-framework",
  "irq",
+ "pt",
  "regs",
  "sched",
  "sync",

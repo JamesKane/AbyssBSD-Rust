@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! The IOMMU framework (docs/IOMMU.md §4.1): FreeBSD's sys/dev/iommu and
-//! arm64/iommu/iommu.c. So far its knobs (IOMMU.md §4.12); units,
-//! domains, contexts, and I/O page tables come with stage 3.
+//! arm64/iommu/iommu.c. Translation domains with their IOVA spaces and
+//! I/O page tables ([`domain`]), which `vm::dma`'s IOMMU backend maps
+//! through; the unit driver (`drivers/smmu`) makes them, one per context,
+//! and owns its stream table, context descriptors, and command queue. And
+//! the knobs (IOMMU.md §4.12):
 //!
 //! - `hw.iommu.dma` (tunable): DMA translation. 1 by default on arm64,
 //!   where translation is what keeps a board's DMA correct (FreeBSD's
@@ -10,18 +13,30 @@
 //!   ordering on functions the IOMMU translates (the board's FreeBSD).
 //! - `hw.iommu.check_free` (`CTLFLAG_RWTUN`, 0): FreeBSD's `iommu_gas`
 //!   self-check, kept for parity.
+//! - `hw.busdma.default` and `hw.busdma.pciD.B.S.F` (environment):
+//!   `bounce` gives the requester a pass-through context, `iommu` (or
+//!   `dmar`) a translated one ([`requester_disabled`]).
 //!
-//! Behavior reference: sys/dev/iommu/busdma_iommu.c (`iommu_init_busdma`),
-//! sys/dev/iommu/iommu_gas.c, the user's sys/arm64/iommu/iommu.c
-//! (branch orangepi-6-plus).
+//! Until MSI goes through the SMMU (§8 stage 4), a unit translates only
+//! while message-signalled interrupts are off ([`translating`]): a
+//! function's MSI write to the ITS doorbell would otherwise fault under
+//! translation. The kernel says which with [`set_messages_untranslated`].
+//!
+//! The page-table writes of [`domain`] are this crate's only `unsafe`.
+//!
+//! Behavior reference: sys/dev/iommu/busdma_iommu.c (`iommu_init_busdma`,
+//! `iommu_bus_dma_is_dev_disabled`), sys/dev/iommu/iommu_gas.c, the user's
+//! sys/arm64/iommu/iommu.c (branch orangepi-6-plus).
 
 #![no_std]
-#![forbid(unsafe_code)]
+#![deny(unsafe_op_in_unsafe_fn)]
 
 extern crate alloc;
 
+pub mod domain;
+
 use alloc::boxed::Box;
-use core::sync::atomic::{AtomicI32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use abi::sysctl::ctlflag;
 use sysctl::{Number, Tree, Value};
@@ -30,6 +45,10 @@ use sysctl::{Number, Tree, Value};
 static DMA: AtomicI32 = AtomicI32::new(-1);
 static RELAXED_ORDERING: AtomicI32 = AtomicI32::new(0);
 static CHECK_FREE: AtomicI32 = AtomicI32::new(0);
+/// Message-signalled interrupts are in use and not translated.
+static MESSAGES_UNTRANSLATED: AtomicBool = AtomicBool::new(false);
+/// The kernel environment, for `hw.busdma.*`.
+static ENV: sync::Once<fn(&str) -> Option<&'static str>> = sync::Once::new();
 
 /// `hw.iommu.dma`'s default: on for arm64 (docs/IOMMU.md §13 decision 2),
 /// off elsewhere (FreeBSD's).
@@ -64,6 +83,63 @@ pub fn dma() -> bool {
 #[must_use]
 pub fn relaxed_ordering() -> bool {
     RELAXED_ORDERING.load(Ordering::Relaxed) != 0
+}
+
+/// Records whether message-signalled interrupts are in use: until stage 4
+/// maps the ITS doorbell into each domain, a unit then gives every
+/// context pass-through, as stage 2 did. The kernel calls it once MSI
+/// support is (or is not) installed, before units attach.
+pub fn set_messages_untranslated(v: bool) {
+    // Relaxed: set before any reader runs.
+    MESSAGES_UNTRANSLATED.store(v, Ordering::Relaxed);
+}
+
+/// Whether units translate DMA: `hw.iommu.dma`, and no message-signalled
+/// interrupts that would fault under translation (stage 3).
+#[must_use]
+pub fn translating() -> bool {
+    dma() && !messages_untranslated()
+}
+
+/// Whether message-signalled interrupts keep units from translating.
+#[must_use]
+pub fn messages_untranslated() -> bool {
+    MESSAGES_UNTRANSLATED.load(Ordering::Relaxed)
+}
+
+/// Gives the framework the kernel environment, for `hw.busdma.*`.
+pub fn set_env(get: fn(&str) -> Option<&'static str>) {
+    let _ = ENV.set(get);
+}
+
+/// Whether the requester `rid` in PCI segment `segment` is to have a
+/// pass-through context: FreeBSD's `iommu_bus_dma_is_dev_disabled`, from
+/// `hw.busdma.pciD.B.S.F`, else `hw.busdma.default` (`bounce` disables,
+/// `iommu` and `dmar` translate; anything else keeps the default, which
+/// is to translate).
+#[must_use]
+pub fn requester_disabled(segment: u32, rid: u16) -> bool {
+    let Some(get) = ENV.get() else {
+        return false;
+    };
+    disabled_by(*get, segment, rid)
+}
+
+/// [`requester_disabled`] over the environment `get`.
+pub(crate) fn disabled_by(
+    get: impl Fn(&str) -> Option<&'static str>,
+    segment: u32,
+    rid: u16,
+) -> bool {
+    let decide = |v: Option<&str>, default: bool| match v {
+        Some("bounce") => true,
+        Some("iommu" | "dmar") => false,
+        _ => default,
+    };
+    let default = decide(get("hw.busdma.default"), false);
+    let (bus, slot, func) = (rid >> 8, (rid >> 3) & 0x1f, rid & 7);
+    let key = alloc::format!("hw.busdma.pci{segment}.{bus}.{slot}.{func}");
+    decide(get(&key), default)
 }
 
 /// Adds `hw.iommu` and its knobs to `t`.
@@ -119,5 +195,25 @@ mod tests {
         let oid = t.name2oid("hw.iommu.check_free").expect("check_free");
         assert_eq!(oid.len(), 3);
         assert!(t.name2oid("hw.iommu.relaxed_ordering").is_some());
+    }
+
+    #[test]
+    fn busdma_knobs() {
+        // rid 0x18 is 0:3:0.
+        let none = |_: &str| None;
+        assert!(!disabled_by(none, 0, 0x18));
+        let def = |k: &str| (k == "hw.busdma.default").then_some("bounce");
+        assert!(disabled_by(def, 0, 0x18));
+        let one = |k: &str| match k {
+            "hw.busdma.default" => Some("bounce"),
+            "hw.busdma.pci0.0.3.0" => Some("iommu"),
+            "hw.busdma.pci1.193.0.1" => Some("bounce"),
+            _ => None,
+        };
+        assert!(!disabled_by(one, 0, 0x18));
+        assert!(disabled_by(one, 0, 0x20));
+        assert!(disabled_by(one, 1, 0xc101));
+        let odd = |k: &str| (k == "hw.busdma.pci0.0.3.0").then_some("dmar");
+        assert!(!disabled_by(odd, 0, 0x18));
     }
 }

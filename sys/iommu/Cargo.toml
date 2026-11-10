@@ -7,7 +7,11 @@ publish.workspace = true
 
 [dependencies]
 abi = { path = "../../lib/abi" }
+iommu = { path = "../../lib/iommu" }
+pt = { path = "../../lib/pt" }
+sync = { path = "../sync" }
 sysctl = { path = "../sysctl" }
+vm = { path = "../vm" }
 
 [lints]
 workspace = true

@@ -20,5 +20,8 @@ sync = { path = "../../sys/sync" }
 sysctl = { path = "../../sys/sysctl" }
 vm = { path = "../../sys/vm" }
 
+[dev-dependencies]
+pt = { path = "../../lib/pt" }
+
 [lints]
 workspace = true
