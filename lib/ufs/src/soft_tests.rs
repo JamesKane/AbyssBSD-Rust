@@ -16,7 +16,9 @@ use core::cell::RefCell;
 use std::process::Command;
 
 use super::softdep::Deps;
-use super::tests::{MNode, Rng, check_model, fsck_clean, have_makefs, scratch, workload};
+use super::tests::{
+    MNode, Mem, Rng, check_model, fsck_clean, have_makefs, maker, scratch, workload,
+};
 use super::*;
 
 /// Debugging: logs what touches byte `UFS_TRACE` of the disk.
@@ -747,6 +749,115 @@ fn crashes_at_random_points_leave_what_fsck_preens() {
     std::eprintln!("{crashes} crash images preened; fsck found:");
     for (k, n) in &found {
         std::eprintln!("  {n:6} {k}");
+    }
+    let _ = std::fs::remove_dir_all(&work);
+}
+
+/// Grows a file into the double-indirect range of 4096-byte blocks (512
+/// pointers a block: the range starts at block 524), then cuts it down
+/// step by step, some ends under the double-indirect block, which keep
+/// the single indirect block whole; after each step `flush` puts the file
+/// data queued on the disk and the contents are checked. Returns the
+/// file's inode and what it must hold.
+fn grow_and_cut<B: BlockIo<Cx = ()>>(
+    fs: &Ufs<B>,
+    sum: &mut Summary,
+    flush: &dyn Fn(),
+) -> (u32, Vec<u8>) {
+    let r = Reserve::Allowed;
+    let mut root = fs.inode(&(), ROOT_INO).unwrap();
+    let (ino, mut ip) = fs
+        .create(
+            &(),
+            sum,
+            ROOT_INO,
+            &mut root,
+            b"f",
+            ops::NewKind::Regular,
+            &maker(&mut Rng(1), r),
+        )
+        .unwrap();
+    let mut want: Vec<u8> = (0..700 * 4096 + 100).map(|i| (i * 7 % 251) as u8).collect();
+    fs.write_data_range(&(), sum, ino, &mut ip, 0, &want, r)
+        .unwrap();
+    fs.write_inode(&(), ino, &ip, Mode::Sync).unwrap();
+    let check = |ip: &Inode, want: &[u8], what: &str| {
+        flush();
+        let mut got = alloc::vec![0u8; want.len()];
+        assert_eq!(fs.read(&(), ip, 0, &mut got).unwrap(), want.len());
+        let bad = got.iter().zip(want).position(|(a, b)| a != b);
+        assert!(
+            bad.is_none(),
+            "contents {what}: first wrong byte at {bad:?}"
+        );
+    };
+    check(&ip, &want, "as written");
+    for blocks in [600u64, 530, 524, 300, 13, 5] {
+        let len = blocks * 4096 + 100;
+        fs.truncate(&(), sum, ino, &mut ip, len, r, false)
+            .unwrap_or_else(|e| panic!("truncate to {len}: {e:?}"));
+        fs.write_inode(&(), ino, &ip, Mode::Sync).unwrap();
+        want.truncate(len as usize);
+        check(&ip, &want, &std::format!("after truncating to {len}"));
+    }
+    (ino, want)
+}
+
+/// FreeBSD's `ffs_truncate` stops at the level the new end lies under
+/// (`goto done`): the levels below are kept whole. fsx hit this on the
+/// Orange Pi (an index past the single indirect block's end).
+#[test]
+fn truncating_under_the_double_indirect_block_keeps_the_single_whole() {
+    if !have_makefs() {
+        std::eprintln!("no newfs (not FreeBSD): skipped");
+        return;
+    }
+    let work = scratch("trunc2");
+    for soft in [false, true] {
+        let img = work.join(std::format!("t-{soft}.img"));
+        let mut newfs = Command::new("newfs");
+        if soft {
+            newfs.arg("-U");
+        }
+        let ok = Command::new("truncate")
+            .args(["-s", "24m"])
+            .arg(&img)
+            .status()
+            .unwrap()
+            .success()
+            && newfs
+                .args(["-b", "4096", "-f", "512"])
+                .arg(&img)
+                .stdout(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success();
+        assert!(ok, "newfs");
+        let (ino, want, bytes) = if soft {
+            let (fs, mut sum) = soft_fs(&img);
+            let (ino, want) = grow_and_cut(&fs, &mut sum, &|| fs.io().write_data_out(usize::MAX));
+            do_work(&fs, &mut sum);
+            settle(&fs, &mut sum);
+            fs.write_summary(&(), &mut sum, true, 1_760_000_100)
+                .unwrap();
+            let bytes = fs.io().disk.borrow().clone();
+            (ino, want, bytes)
+        } else {
+            let fs = Ufs::open(&(), Mem(RefCell::new(std::fs::read(&img).unwrap())), 512).unwrap();
+            let mut sum = fs.load_summary(&()).unwrap();
+            let (ino, want) = grow_and_cut(&fs, &mut sum, &|| {});
+            fs.write_summary(&(), &mut sum, true, 1_760_000_100)
+                .unwrap();
+            let bytes = fs.io().0.borrow().clone();
+            (ino, want, bytes)
+        };
+        let back = Ufs::open(&(), &bytes[..], 512).unwrap();
+        let ip = back.inode(&(), ino).unwrap();
+        let mut got = alloc::vec![0u8; want.len()];
+        assert_eq!(back.read(&(), &ip, 0, &mut got).unwrap(), want.len());
+        assert!(got == want, "contents on the disk (soft updates: {soft})");
+        std::fs::write(&img, &bytes).unwrap();
+        fsck_clean(&img);
     }
     let _ = std::fs::remove_dir_all(&work);
 }

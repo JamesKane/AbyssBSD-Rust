@@ -596,13 +596,17 @@ impl<B: BlockIo> Ufs<B> {
         let mut released = 0u64;
         for level in (0..NIADDR).rev() {
             let bn = oldib[level];
-            if bn == 0 {
-                continue;
+            if bn != 0 {
+                released += self.indirtrunc(cx, sum, bn, level, lastiblock[level])?;
+                if lastiblock[level] < 0 {
+                    self.blkfree(cx, sum, bn, bsize)?;
+                    released += bsize / DEV_BSIZE;
+                }
             }
-            released += self.indirtrunc(cx, sum, bn, level, lastiblock[level])?;
-            if lastiblock[level] < 0 {
-                self.blkfree(cx, sum, bn, bsize)?;
-                released += bsize / DEV_BSIZE;
+            // The end lies under this level: those below are kept whole
+            // (FreeBSD's `goto done`).
+            if lastiblock[level] >= 0 {
+                break;
             }
         }
         for i in (0..NDIRECT).rev() {
@@ -648,7 +652,13 @@ impl<B: BlockIo> Ufs<B> {
         let mut frees = Vec::new();
         let mut moved = Vec::new();
         let mut kept = Vec::new();
+        // The level the end lies under (if an indirect one): those below
+        // it are kept whole (FreeBSD's `goto done`).
+        let cut_level = (0..NIADDR).rev().find(|&l| lastiblock[l] >= 0);
         for level in (0..NIADDR).rev() {
+            if cut_level.is_some_and(|c| level < c) {
+                break;
+            }
             let bn = ip.ib[level];
             if bn == 0 {
                 continue;
@@ -711,10 +721,8 @@ impl<B: BlockIo> Ufs<B> {
         // the disk.
         if !kept.is_empty() {
             let mut cut = ip.clone();
-            for (level, last) in lastiblock.iter().enumerate() {
-                if *last >= 0 {
-                    cut.ib[level] = 0;
-                }
+            if let Some(level) = cut_level {
+                cut.ib[level] = 0;
             }
             self.write_inode(cx, ino, &cut, Mode::Sync)?;
         }

@@ -404,7 +404,7 @@ impl Model {
     }
 }
 
-fn maker(_rng: &mut Rng, reserve: Reserve) -> ops::Maker {
+pub(crate) fn maker(_rng: &mut Rng, reserve: Reserve) -> ops::Maker {
     ops::Maker {
         perm: 0o644,
         uid: 1001,
