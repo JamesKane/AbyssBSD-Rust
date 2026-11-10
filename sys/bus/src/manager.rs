@@ -32,6 +32,8 @@ use sched::{Sleepable, WaitQueue};
 use sync::{Once, SpinLock};
 
 use crate::driver::{AttachCx, Bound, DriverDecl, Faults, Ledger};
+use crate::gpio::GpioSource;
+use crate::i2c::I2cSource;
 use crate::platform::Platform;
 use crate::provider::{ClockSource, DomainSource, ResetSource};
 use crate::space::{Range, ResourceSpace, Sharing};
@@ -88,10 +90,18 @@ struct Provides {
     clocks: Option<Arc<ClockSource>>,
     resets: Option<Arc<ResetSource>>,
     domains: Option<Arc<DomainSource>>,
+    gpio: Option<Arc<GpioSource>>,
+    i2c: Option<Arc<I2cSource>>,
 }
 
 impl Provides {
     fn revoke(&self) {
+        if let Some(g) = &self.gpio {
+            g.revoke();
+        }
+        if let Some(i) = &self.i2c {
+            i.revoke();
+        }
         if let Some(c) = &self.clocks {
             c.revoke();
         }
@@ -109,6 +119,8 @@ pub(crate) enum Provided {
     Clocks(Arc<ClockSource>),
     Resets(Arc<ResetSource>),
     Domains(Arc<DomainSource>),
+    Gpio(Arc<GpioSource>),
+    I2c(Arc<I2cSource>),
 }
 
 /// Starts run in tree order (DRIVER-MODEL.md §4.3): a bus adds children
@@ -761,11 +773,15 @@ impl Manager {
             Provided::Clocks(c) => n.provides.clocks.replace(c).map(Provided::Clocks),
             Provided::Resets(r) => n.provides.resets.replace(r).map(Provided::Resets),
             Provided::Domains(d) => n.provides.domains.replace(d).map(Provided::Domains),
+            Provided::Gpio(g) => n.provides.gpio.replace(g).map(Provided::Gpio),
+            Provided::I2c(i) => n.provides.i2c.replace(i).map(Provided::I2c),
         };
         match old {
             Some(Provided::Clocks(c)) => c.revoke(),
             Some(Provided::Resets(r)) => r.revoke(),
             Some(Provided::Domains(d)) => d.revoke(),
+            Some(Provided::Gpio(g)) => g.revoke(),
+            Some(Provided::I2c(i)) => i.revoke(),
             None => {}
         }
     }
@@ -783,6 +799,8 @@ impl Manager {
             LineKind::Clock => p.and_then(|p| p.clocks.clone()).map(Provided::Clocks),
             LineKind::Reset => p.and_then(|p| p.resets.clone()).map(Provided::Resets),
             LineKind::PowerDomain => p.and_then(|p| p.domains.clone()).map(Provided::Domains),
+            LineKind::Gpio => p.and_then(|p| p.gpio.clone()).map(Provided::Gpio),
+            LineKind::I2c => p.and_then(|p| p.i2c.clone()).map(Provided::I2c),
         };
         found.ok_or(ResourceError::NoProvider)
     }

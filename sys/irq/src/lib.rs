@@ -23,7 +23,12 @@
 //! - storm detection: a line that keeps firing with nobody claiming it is
 //!   masked and reported, as FreeBSD's `hw.intr_storm_threshold` does;
 //! - per-CPU allocation of root ids for controllers that have per-CPU
-//!   vectors (x86).
+//!   vectors (x86);
+//! - **cascaded domains** ([`cascade`]): a device that multiplexes
+//!   interrupts onto one input of its own (a GPIO controller) publishes a
+//!   domain whose inputs get root ids from a range no controller reports,
+//!   and runs their handlers from its own filter with
+//!   [`cascade::CascadeDomain::dispatch`], INTRNG's `intr_isrc_dispatch`.
 //!
 //! Behavior reference: sys/kern/kern_intr.c, sys/x86/x86/intr_machdep.c,
 //! sys/kern/subr_intr.c (INTRNG).
@@ -33,13 +38,15 @@
 
 extern crate alloc;
 
+pub mod cascade;
+
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use hal::{CpuId, MAX_CPUS};
 use sched::{IrqCx, Priority, Sleepable, Thread, WaitQueue};
@@ -78,6 +85,9 @@ pub enum Polarity {
     High,
     /// Active low (or falling edge).
     Low,
+    /// Both edges (ACPI's `ActiveBoth`): edge-triggered inputs of domains
+    /// that can sense both, such as GPIO controllers.
+    Both,
 }
 
 /// Why a handler could not be installed.
@@ -96,6 +106,9 @@ pub enum IrqError {
     NoHandler,
     /// The interrupt thread could not be started.
     NoThread,
+    /// The domain cannot signal this way (both edges on an interrupt
+    /// controller that senses one).
+    Unsupported,
 }
 
 /// A source of interrupts: one interrupt controller's inputs (or, later,
@@ -122,6 +135,13 @@ pub trait IrqDomain: Send + Sync {
     /// bus that needs I/O to acknowledge, or ACPI GED).
     fn threaded_only(&self) -> bool {
         false
+    }
+    /// Whether its lines take their input's number for `vmstat -i` (an
+    /// interrupt pin's), rather than the next free one from
+    /// [`MSI_FIRST`] (message-signalled and cascaded inputs, whose input
+    /// numbers would collide with pins').
+    fn pin_numbered(&self) -> bool {
+        true
     }
 }
 
@@ -202,6 +222,9 @@ pub struct Config {
     pub frequency: u64,
     /// Strays per second that mask a line (0 disables detection).
     pub storm_threshold: u64,
+    /// Global root ids from `global_ids` on that no controller reports,
+    /// for the inputs of cascaded domains ([`cascade`]).
+    pub cascade_ids: u32,
 }
 
 struct Table {
@@ -210,11 +233,21 @@ struct Table {
     slots: Box<[AtomicPtr<Line>]>,
     /// Allocated per-CPU ids (bit per id), per CPU.
     used: SpinLock<Vec<Vec<u64>>>,
+    /// Allocated cascade ids (bit per id from `global_ids`).
+    cascaded: SpinLock<Vec<u64>>,
 }
 
 static TABLE: Once<Table> = Once::new();
-/// The line each CPU is dispatching, for synchronous removal.
-static RUNNING: [AtomicPtr<Line>; MAX_CPUS] = [const { AtomicPtr::new(ptr::null_mut()) }; MAX_CPUS];
+/// How deep dispatch may nest on one CPU: a controller's line, a cascaded
+/// domain's input under it, and one more level of cascade.
+const NEST: usize = 4;
+/// The lines each CPU is dispatching, outermost first, for synchronous
+/// removal: a cascaded input's line is walked while its parent's is.
+static RUNNING: [[AtomicPtr<Line>; NEST]; MAX_CPUS] =
+    [const { [const { AtomicPtr::new(ptr::null_mut()) }; NEST] }; MAX_CPUS];
+/// How many of each CPU's [`RUNNING`] slots are in use. Only that CPU
+/// touches its count, with interrupts masked.
+static DEPTH: [AtomicU8; MAX_CPUS] = [const { AtomicU8::new(0) }; MAX_CPUS];
 
 /// Connected lines by input, for sharing. Installs and removals hold it.
 struct Lines(Vec<*mut Line>);
@@ -232,15 +265,19 @@ static STRAYS: AtomicU64 = AtomicU64::new(0);
 /// If called twice.
 pub fn init(config: Config) {
     let per_cpu = config.per_cpu_ids as usize;
-    let n = per_cpu * MAX_CPUS + config.global_ids.saturating_sub(config.per_cpu_ids) as usize;
+    let n = per_cpu * MAX_CPUS
+        + config.global_ids.saturating_sub(config.per_cpu_ids) as usize
+        + config.cascade_ids as usize;
     let slots: Box<[AtomicPtr<Line>]> = (0..n).map(|_| AtomicPtr::new(ptr::null_mut())).collect();
     let words = (per_cpu).div_ceil(64);
     let used = SpinLock::new((0..MAX_CPUS).map(|_| alloc::vec![0u64; words]).collect());
+    let cascaded = SpinLock::new(alloc::vec![0u64; (config.cascade_ids as usize).div_ceil(64)]);
     let ok = TABLE
         .set(Table {
             config,
             slots,
             used,
+            cascaded,
         })
         .is_ok();
     assert!(ok, "irq::init called twice");
@@ -255,7 +292,7 @@ impl Table {
         let c = &self.config;
         let i = if root < c.per_cpu_ids {
             cpu.index() * c.per_cpu_ids as usize + root as usize
-        } else if root < c.global_ids {
+        } else if root < c.global_ids + c.cascade_ids {
             MAX_CPUS * c.per_cpu_ids as usize + (root - c.per_cpu_ids) as usize
         } else {
             return None;
@@ -285,6 +322,27 @@ pub fn free_vector(cpu: CpuId, id: u32) {
         && let Some(w) = bits.get_mut((id / 64) as usize)
     {
         *w &= !(1 << (id % 64));
+    }
+}
+
+/// Allocates a global root id for a cascaded input: one no controller
+/// reports, reached only through [`dispatch`] from its parent's filter.
+pub(crate) fn alloc_cascade_id() -> Option<u32> {
+    let t = table();
+    let mut bits = t.cascaded.lock();
+    let i = (0..t.config.cascade_ids).find(|&i| bits[(i / 64) as usize] & (1 << (i % 64)) == 0)?;
+    bits[(i / 64) as usize] |= 1 << (i % 64);
+    Some(t.config.global_ids + i)
+}
+
+/// Frees an id from [`alloc_cascade_id`].
+pub(crate) fn free_cascade_id(root: u32) {
+    let t = table();
+    let Some(i) = root.checked_sub(t.config.global_ids) else {
+        return;
+    };
+    if let Some(w) = t.cascaded.lock().get_mut((i / 64) as usize) {
+        *w &= !(1 << (i % 64));
     }
 }
 
@@ -568,7 +626,11 @@ impl Installed {
         // A CPU that loaded the line before the unlink marked it running
         // first; wait for every such CPU to finish walking it.
         core::sync::atomic::fence(Ordering::SeqCst);
-        for (cpu, r) in RUNNING.iter().enumerate() {
+        for (cpu, r) in RUNNING
+            .iter()
+            .enumerate()
+            .flat_map(|(cpu, rs)| rs.iter().map(move |r| (cpu, r)))
+        {
             let mut spins = 0u64;
             while r.load(Ordering::Acquire) == lp {
                 core::hint::spin_loop();
@@ -623,8 +685,8 @@ impl Installed {
 
 /// Runs the handlers for root id `root` on this CPU. Called by the
 /// kernel's interrupt entry with interrupts masked, before it signals end
-/// of interrupt to the controller. Returns false for an interrupt with no
-/// handler.
+/// of interrupt to the controller, and by a cascaded domain's filter for
+/// its inputs. Returns false for an interrupt with no handler.
 pub fn dispatch(root: u32, cx: &IrqCx) -> bool {
     let cpu = hal::cpu_id();
     let Some(t) = TABLE.get() else {
@@ -633,7 +695,13 @@ pub fn dispatch(root: u32, cx: &IrqCx) -> bool {
     let Some(slot) = t.slot(cpu, root) else {
         return false;
     };
-    let running = &RUNNING[cpu.index()];
+    let depth = &DEPTH[cpu.index()];
+    let d = depth.load(Ordering::Relaxed);
+    let Some(running) = RUNNING[cpu.index()].get(usize::from(d)) else {
+        // Cascaded deeper than any platform nests: a loop of domains.
+        STRAYS.fetch_add(1, Ordering::Relaxed);
+        return false;
+    };
     // Load, mark, fence, re-check. A remover unlinks, fences, then waits
     // for marks: either it sees our mark, or we see its unlink.
     let l = slot.load(Ordering::Acquire);
@@ -647,6 +715,9 @@ pub fn dispatch(root: u32, cx: &IrqCx) -> bool {
         running.store(ptr::null_mut(), Ordering::Release);
         return false;
     }
+    // Interrupts are masked: nothing else on this CPU changes the depth
+    // until we put it back.
+    depth.store(d + 1, Ordering::Relaxed);
     // SAFETY: published by `install`, and `remove` cannot free the line or
     // an entry on it while this CPU's mark names the line.
     let line = unsafe { &*l };
@@ -688,6 +759,7 @@ pub fn dispatch(root: u32, cx: &IrqCx) -> bool {
     if !claimed {
         storm_check(t, line);
     }
+    depth.store(d, Ordering::Relaxed);
     running.store(ptr::null_mut(), Ordering::Release);
     true
 }
@@ -719,7 +791,7 @@ pub const MSI_FIRST: u32 = 64;
 fn line_number(lines: &Lines, domain: &dyn IrqDomain, hw: u32) -> u32 {
     // SAFETY: registered lines live while the list's lock is held.
     let taken = |n: u32| lines.0.iter().any(|&l| unsafe { (*l).number } == n);
-    if domain.name() != "pci-msi" && hw < MSI_FIRST && !taken(hw) {
+    if domain.pin_numbered() && hw < MSI_FIRST && !taken(hw) {
         return hw;
     }
     (MSI_FIRST..).find(|&n| !taken(n)).unwrap_or(u32::MAX)

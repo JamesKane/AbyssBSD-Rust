@@ -16,6 +16,12 @@
 //!   to nothing, or to a device left out, is logged.
 //! - The clock and reset lines the platform description gives a child
 //!   become its lines ([`bus::Line`]), which its driver asks for by name.
+//! - So do the GPIO pins (`GpioIo`, `GpioInt`) and I2C connections
+//!   (`I2cSerialBusV2`) its `_CRS` consumes, which its driver asks for by
+//!   index. Their controllers are already its suppliers ([`crate::deps`]).
+//!   A device on an I2C bus stays a child of `acpi0`: FreeBSD's
+//!   `acpi_iicbus` moves it under `iicbus`, but here it is a node with
+//!   the controller as a supplier (DRIVER-MODEL.md §5.3).
 
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -25,8 +31,8 @@ use aml::Uid;
 use aml::resource::Resource as AmlResource;
 use bus::AddressSpace;
 use bus::{
-    AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, Line, LineKind, Resource, StartCx,
-    StopCx, StopReason,
+    AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, Line, LineDetail, LineKind, Resource,
+    StartCx, StopCx, StopReason,
 };
 use devtree::graph::{EdgeKind, Origin};
 use devtree::ids::AcpiIdent;
@@ -50,10 +56,10 @@ pub struct AcpiDevice {
 /// supplier, the edge's kind, and where firmware said so.
 pub(crate) type ChildDep = (String, EdgeKind, Origin);
 
-/// A clock or reset line a child consumes (the platform description's):
-/// its kind, its name, the path of the device serving it, and the
-/// provider's identifier.
-pub(crate) type ChildLine = (LineKind, Option<String>, String, u32);
+/// A line a child consumes: its kind, its name, the path of the device
+/// serving it, the provider's identifier, and what a GPIO or I2C line
+/// adds.
+pub(crate) type ChildLine = (LineKind, Option<String>, String, u32, LineDetail);
 
 /// One device found in the namespace.
 pub(crate) struct Found {
@@ -223,7 +229,15 @@ pub(crate) fn walk(
     for (kind, consumer, name, supplier, id) in clocks.chain(resets) {
         if let Some(f) = found.iter_mut().find(|f| f.device.node == consumer) {
             let path = alloc::format!("{}", interp.path(supplier));
-            f.lines.push((kind, name.clone(), path, id));
+            f.lines
+                .push((kind, name.clone(), path, id, LineDetail::None));
+        }
+    }
+    // The GPIO and I2C lines each child's `_CRS` consumes.
+    for f in &mut found {
+        for (sup, line) in connection_lines(interp, f.device.node, &f.device.crs) {
+            let path = alloc::format!("{}", interp.path(sup));
+            f.lines.push((line.0, None, path, line.1, line.2));
         }
     }
     // Ranges two parties touch: what drivers of children overlapping
@@ -280,7 +294,110 @@ pub(crate) fn walk(
     }
 }
 
-fn trigger(t: aml::resource::Trigger) -> irq::Trigger {
+/// The GPIO and I2C connections a device's `_CRS` consumes, in order: each
+/// one's controller, its kind, its identifier (first pin, address), and
+/// its detail. One whose controller does not resolve is left out (the
+/// dependency walk logs it).
+fn connection_lines(
+    interp: &aml::Interpreter,
+    node: aml::NodeId,
+    crs: &[AmlResource],
+) -> Vec<(aml::NodeId, (LineKind, u32, LineDetail))> {
+    use aml::resource::{GpioKind, SerialBusKind};
+    use bus::gpio::{GpioMode, GpioUse, Restriction};
+    let mut out = Vec::new();
+    for r in crs {
+        let (name, line) = match r {
+            AmlResource::Gpio(g) if g.consumer => {
+                let (mode, shared) = match g.kind {
+                    GpioKind::Interrupt {
+                        trigger: t,
+                        polarity: p,
+                        shared,
+                        wake,
+                    } => (
+                        GpioMode::Interrupt {
+                            trigger: trigger(t),
+                            polarity: gpio_polarity(p),
+                            wake,
+                        },
+                        shared,
+                    ),
+                    GpioKind::Io {
+                        restriction,
+                        shared,
+                    } => (
+                        GpioMode::Io(match restriction {
+                            1 => Restriction::Input,
+                            2 => Restriction::Output,
+                            3 => Restriction::Preserve,
+                            _ => Restriction::None,
+                        }),
+                        shared,
+                    ),
+                };
+                let pull = gpio_pull(g.pin_config);
+                let pins: Vec<u32> = g.pins.iter().map(|&p| u32::from(p)).collect();
+                let Some(&first) = pins.first() else {
+                    continue;
+                };
+                let detail = LineDetail::Gpio(GpioUse {
+                    pins,
+                    mode,
+                    shared,
+                    pull,
+                    debounce_us: u32::from(g.debounce) * 10,
+                });
+                (&g.source.name, (LineKind::Gpio, first, detail))
+            }
+            AmlResource::SerialBus(b) if b.consumer => match b.bus {
+                SerialBusKind::I2c {
+                    ten_bit,
+                    speed,
+                    address,
+                } => {
+                    let target = bus::i2c::I2cTarget {
+                        address,
+                        ten_bit,
+                        speed,
+                    };
+                    (
+                        &b.source.name,
+                        (LineKind::I2c, u32::from(address), LineDetail::I2c(target)),
+                    )
+                }
+                _ => continue,
+            },
+            _ => continue,
+        };
+        if let Some(sup) = interp.resolve(node, name) {
+            out.push((sup, line));
+        }
+    }
+    out
+}
+
+/// A GPIO descriptor's `PinConfig` as a bias; vendor values (0x80 and up)
+/// leave the pin as it is.
+pub(crate) fn gpio_pull(config: u8) -> bus::gpio::Pull {
+    use bus::gpio::Pull;
+    match config {
+        1 => Pull::Up,
+        2 => Pull::Down,
+        3 => Pull::None,
+        _ => Pull::Default,
+    }
+}
+
+pub(crate) fn gpio_polarity(p: aml::resource::Polarity) -> irq::Polarity {
+    match p {
+        aml::resource::Polarity::ActiveHigh => irq::Polarity::High,
+        aml::resource::Polarity::ActiveLow => irq::Polarity::Low,
+        aml::resource::Polarity::ActiveBoth => irq::Polarity::Both,
+    }
+}
+
+pub(crate) fn trigger(t: aml::resource::Trigger) -> irq::Trigger {
     match t {
         aml::resource::Trigger::Edge => irq::Trigger::Edge,
         aml::resource::Trigger::Level => irq::Trigger::Level,
@@ -457,12 +574,13 @@ impl Driver for AcpiBus {
             }
             let lines: Vec<Line> = lines
                 .iter()
-                .filter_map(|(kind, name, sup, line)| {
+                .filter_map(|(kind, name, sup, line, detail)| {
                     Some(Line {
                         kind: *kind,
                         name: name.clone(),
                         supplier: child(sup)?,
                         id: *line,
+                        detail: detail.clone(),
                     })
                 })
                 .collect();

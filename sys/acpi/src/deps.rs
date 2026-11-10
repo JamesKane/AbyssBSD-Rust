@@ -49,7 +49,7 @@ use crate::DmaController;
 use acpi_platform::{FirmwareIdentity, Malformed, PlatformSource};
 
 /// `_DSD` device properties (daffd814-6eba-4d8c-8a91-bc9bbf4aa301).
-const PROPERTIES_UUID: [u8; 16] = [
+pub(crate) const PROPERTIES_UUID: [u8; 16] = [
     0x14, 0xd8, 0xff, 0xda, 0xba, 0x6e, 0x8c, 0x4d, 0x8a, 0x91, 0xbc, 0x9b, 0xbf, 0x4a, 0xa3, 0x01,
 ];
 

@@ -69,6 +69,17 @@ pub enum ProviderError {
     Timeout,
     /// The provider's driver is detaching.
     Revoked,
+    /// A GPIO pin another consumer holds, where either wants it alone.
+    Claimed,
+    /// I2C: nothing acknowledged the address, or the target refused a
+    /// byte (FreeBSD's `IIC_ENOACK`).
+    NoAck,
+    /// I2C: another host won the bus.
+    ArbitrationLost,
+    /// I2C: the bus stayed busy (`IIC_EBUSBSY`).
+    BusBusy,
+    /// I2C: a FIFO overrun or a protocol fault (`IIC_EBUSERR`).
+    BusError,
 }
 
 /// Clocks, by the provider's identifier.

@@ -27,6 +27,8 @@ use sched::lock::{LockClass, Mutex};
 use sched::{IrqCx, Sleepable};
 use vm::dma::{DmaConstraints, DmaTag};
 
+use crate::gpio::{Gpio, GpioMode, GpioPins, GpioSource, PinMode, Restriction};
+use crate::i2c::{I2c, I2cDevice, I2cSource};
 use crate::manager::{Manager, Provided};
 use crate::provider::{
     Clock, ClockHandle, ClockSource, DomainSource, PowerDomain, PowerVote, Reset, ResetHandle,
@@ -34,8 +36,8 @@ use crate::provider::{
 };
 use crate::space::{AddressSpace, Range, Sharing};
 use crate::types::{
-    Announce, AttachError, Busy, Concurrency, DeviceId, Ident, Ids, Line, LineKind, Resource,
-    ResourceError, StopReason,
+    Announce, AttachError, Busy, Concurrency, DeviceId, Ident, Ids, Line, LineDetail, LineKind,
+    Resource, ResourceError, StopReason,
 };
 
 /// A device driver.
@@ -338,6 +340,8 @@ impl Drop for IoGrant {
 pub struct IrqLine {
     resource: Resource,
     ledger: Arc<Ledger>,
+    /// The GPIO pin it is, held as long as the interrupt is.
+    pin: Option<GpioPins>,
 }
 
 impl Drop for IrqLine {
@@ -596,6 +600,7 @@ impl<'a> AttachCx<'a> {
         Ok(IrqLine {
             resource: r,
             ledger: Arc::clone(&self.ledger),
+            pin: None,
         })
     }
 
@@ -609,6 +614,7 @@ impl<'a> AttachCx<'a> {
         Ok(IrqLine {
             resource: r,
             ledger: Arc::clone(&self.ledger),
+            pin: None,
         })
     }
 
@@ -681,6 +687,109 @@ impl<'a> AttachCx<'a> {
             _ => Err(ResourceError::NoProvider),
         }
     }
+
+    /// The device's `index`th GPIO line whose use `pick` accepts, and its
+    /// controller.
+    fn gpio_line(
+        &self,
+        index: usize,
+        pick: impl Fn(&GpioMode) -> bool,
+    ) -> Result<(crate::gpio::GpioUse, Arc<GpioSource>), ResourceError> {
+        let use_ = self
+            .mgr
+            .lines(self.s, self.node)
+            .into_iter()
+            .filter_map(|l| match l.detail {
+                LineDetail::Gpio(g) if l.kind == LineKind::Gpio && pick(&g.mode) => {
+                    Some((l.supplier, g))
+                }
+                _ => None,
+            })
+            .nth(index)
+            .ok_or(ResourceError::NoSuchLine)?;
+        match self.mgr.provider(self.s, use_.0, LineKind::Gpio)? {
+            Provided::Gpio(g) => Ok((use_.1, g)),
+            _ => Err(ResourceError::NoProvider),
+        }
+    }
+
+    /// Claims the pins of the device's `index`th GPIO I/O line (ACPI
+    /// `GpioIo`), in firmware's order (DRIVER-MODEL.md §9.3). The pins
+    /// are configured as the driver says, not here: a `GpioIo` gives no
+    /// direction beyond its restriction.
+    pub fn gpio(&mut self, index: usize) -> Result<GpioPins, ResourceError> {
+        if self.injected() {
+            return Err(ResourceError::NoSuchLine);
+        }
+        let (u, src) = self.gpio_line(index, |m| matches!(m, GpioMode::Io(_)))?;
+        let GpioMode::Io(r) = u.mode else {
+            return Err(ResourceError::NoSuchLine);
+        };
+        src.claim(self.s, &u.pins, r, u.shared)
+            .map_err(ResourceError::Provider)
+    }
+
+    /// The device's `index`th GPIO interrupt (ACPI `GpioInt`), in
+    /// firmware's order: its pin claimed and made an input with the
+    /// descriptor's bias, granted as a line in its controller's domain,
+    /// as FreeBSD's `gpio_alloc_intr_resource` does. A descriptor listing
+    /// several pins grants its first.
+    pub fn gpio_interrupt(&mut self, index: usize) -> Result<IrqLine, ResourceError> {
+        if self.injected() {
+            return Err(ResourceError::NoSuchLine);
+        }
+        let (u, src) = self.gpio_line(index, |m| matches!(m, GpioMode::Interrupt { .. }))?;
+        let GpioMode::Interrupt {
+            trigger, polarity, ..
+        } = u.mode
+        else {
+            return Err(ResourceError::NoSuchLine);
+        };
+        let domain = src.interrupts().ok_or(ResourceError::NoProvider)?;
+        let pin = *u.pins.first().ok_or(ResourceError::NoSuchLine)?;
+        let held = src
+            .claim(self.s, &[pin], Restriction::Input, u.shared)
+            .map_err(ResourceError::Provider)?;
+        match held.configure(self.s, 0, PinMode::Input, u.pull) {
+            // A bias the controller cannot set is the pin controller's,
+            // which firmware has set up.
+            Ok(()) | Err(crate::provider::ProviderError::Unsupported) => {}
+            Err(e) => return Err(ResourceError::Provider(e)),
+        }
+        self.ledger.issue();
+        Ok(IrqLine {
+            resource: Resource::Irq {
+                domain,
+                hw: pin,
+                trigger,
+                polarity,
+            },
+            ledger: Arc::clone(&self.ledger),
+            pin: Some(held),
+        })
+    }
+
+    /// The device's `index`th I2C connection (ACPI `I2cSerialBusV2`), in
+    /// firmware's order: the device at its address on its bus.
+    pub fn i2c(&mut self, index: usize) -> Result<I2cDevice, ResourceError> {
+        if self.injected() {
+            return Err(ResourceError::NoSuchLine);
+        }
+        let (sup, target) = self
+            .mgr
+            .lines(self.s, self.node)
+            .into_iter()
+            .filter_map(|l| match l.detail {
+                LineDetail::I2c(t) if l.kind == LineKind::I2c => Some((l.supplier, t)),
+                _ => None,
+            })
+            .nth(index)
+            .ok_or(ResourceError::NoSuchLine)?;
+        match self.mgr.provider(self.s, sup, LineKind::I2c)? {
+            Provided::I2c(i) => Ok(i.device(target)),
+            _ => Err(ResourceError::NoProvider),
+        }
+    }
 }
 
 /// The trampoline data for one interrupt handler.
@@ -723,7 +832,8 @@ fn thread_shim<D: Driver>(p: usize, s: &Sleepable) {
 
 /// An async source recorded in a binding, for teardown.
 enum Source {
-    Irq(Installed, Box<dyn Any + Send>),
+    /// A handler, its trampoline, and the GPIO pin it is on.
+    Irq(Installed, Box<dyn Any + Send>, Option<GpioPins>),
     Child(DeviceId),
 }
 
@@ -792,10 +902,13 @@ impl<D: Driver> StartCx<'_, D> {
         };
         let installed = irq::install(domain, hw, trigger, polarity, hal::CpuId::BOOT, handler)
             .map_err(ResourceError::Irq)?;
-        // The line's grant is now held by the installed handler.
+        // The line's grant is now held by the installed handler, and its
+        // pin with it.
+        let mut line = line;
+        let pin = line.pin.take();
         drop(line);
         self.binding.ledger.issue();
-        self.binding.sources.push(Source::Irq(installed, shim));
+        self.binding.sources.push(Source::Irq(installed, shim, pin));
         Ok(())
     }
 
@@ -921,6 +1034,22 @@ impl<D: Driver> StartCx<'_, D> {
             .provide(self.s, self.binding.node, Provided::Domains(src));
     }
 
+    /// Publishes this device as a GPIO controller: consumers whose GPIO
+    /// lines name it claim pins from it, and their `GpioInt`s interrupt in
+    /// the domain [`Gpio::interrupts`] returns.
+    pub fn provide_gpio(&mut self, imp: Arc<dyn Gpio>) {
+        let src = GpioSource::new(imp);
+        self.mgr
+            .provide(self.s, self.binding.node, Provided::Gpio(src));
+    }
+
+    /// Publishes this device as an I2C controller.
+    pub fn provide_i2c(&mut self, imp: Arc<dyn I2c>) {
+        let src = I2cSource::new(imp);
+        self.mgr
+            .provide(self.s, self.binding.node, Provided::I2c(src));
+    }
+
     fn children_contains(&self, id: DeviceId) -> bool {
         self.binding
             .sources
@@ -1024,9 +1153,12 @@ impl<D: Driver> Bound for Binding<D> {
         // 5. Tear down async sources, newest first.
         while let Some(src) = self.sources.pop() {
             match src {
-                Source::Irq(installed, shim) => {
+                Source::Irq(installed, shim, pin) => {
                     installed.remove(s);
                     drop(shim);
+                    if let Some(p) = pin {
+                        p.release(s);
+                    }
                     self.ledger.give_back();
                 }
                 Source::Child(_) => {}

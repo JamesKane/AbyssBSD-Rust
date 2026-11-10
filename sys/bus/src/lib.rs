@@ -10,6 +10,8 @@
 //! - [`platform`]: what the kernel provides.
 //! - [`provider`]: clock, reset, and power-domain providers, and the
 //!   counted handles consumers hold.
+//! - [`gpio`], [`i2c`]: GPIO and I2C controllers as providers, the pins
+//!   and bus connections consumers hold.
 //! - [`space`]: granted memory and I/O ranges, and the ranges firmware
 //!   or another device shares.
 //!
@@ -23,6 +25,8 @@ extern crate alloc;
 
 pub mod driver;
 pub mod gate;
+pub mod gpio;
+pub mod i2c;
 pub mod manager;
 pub mod platform;
 pub mod provider;
@@ -43,6 +47,6 @@ pub use platform::Platform;
 pub use roothold::{RootHold, root_mount_hold, root_mount_wait};
 pub use space::{AddressSpace, Range, Sharing};
 pub use types::{
-    Announce, AttachError, Busy, Concurrency, DetachReason, DeviceId, Ident, Ids, Line, LineKind,
-    Need, NodeState, Resource, ResourceError, StopReason, TestId, TestIdent, WaitReason,
+    Announce, AttachError, Busy, Concurrency, DetachReason, DeviceId, Ident, Ids, Line, LineDetail,
+    LineKind, Need, NodeState, Resource, ResourceError, StopReason, TestId, TestIdent, WaitReason,
 };

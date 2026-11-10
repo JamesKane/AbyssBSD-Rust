@@ -1079,6 +1079,179 @@ ktest! {
 }
 
 ktest! {
+    fn irq_cascaded_inputs_dispatch_from_their_parent() {
+        // A GPIO-like device: one parent input whose filter runs the
+        // pending inputs of the device's cascaded domain. An edge input
+        // is handled in its filter; a level input's thread runs with the
+        // input masked, and it is unmasked after.
+        use alloc::sync::Arc;
+        use core::sync::atomic::{AtomicBool, AtomicU32, Ordering::SeqCst};
+        use ::irq::cascade::{Cascade, CascadeDomain};
+        use ::irq::{Filter, IrqError, Polarity, Trigger};
+        static PENDING: AtomicU32 = AtomicU32::new(0);
+        static MASKED: AtomicU32 = AtomicU32::new(u32::MAX);
+        static EDGES: AtomicU32 = AtomicU32::new(0);
+        static LEVEL_RAN: AtomicBool = AtomicBool::new(false);
+        static CASCADE: sync::Once<CascadeDomain> = sync::Once::new();
+        struct Pins;
+        impl Cascade for Pins {
+            fn name(&self) -> &'static str {
+                "ktest-pins"
+            }
+            fn inputs(&self) -> u32 {
+                8
+            }
+            fn configure(&self, hw: u32, t: Trigger, p: Polarity) -> Result<(), IrqError> {
+                match (hw, t, p) {
+                    (_, Trigger::Level, Polarity::Both) => Err(IrqError::Unsupported),
+                    _ => Ok(()),
+                }
+            }
+            fn mask(&self, hw: u32) {
+                MASKED.fetch_or(1 << hw, SeqCst);
+            }
+            fn unmask(&self, hw: u32) {
+                MASKED.fetch_and(!(1 << hw), SeqCst);
+            }
+        }
+        struct Parent;
+        impl ::irq::IrqDomain for Parent {
+            fn name(&self) -> &'static str {
+                "ktest-parent"
+            }
+            fn connect(
+                &self,
+                _: u32,
+                _: Trigger,
+                _: Polarity,
+                cpu: hal::CpuId,
+            ) -> Result<u32, IrqError> {
+                #[cfg(target_arch = "x86_64")]
+                return ::irq::alloc_vector(cpu).ok_or(IrqError::NoVector);
+                #[cfg(target_arch = "aarch64")]
+                {
+                    let _ = cpu;
+                    Ok(285)
+                }
+            }
+            fn disconnect(&self, _: u32, cpu: hal::CpuId, root: u32) {
+                #[cfg(target_arch = "x86_64")]
+                ::irq::free_vector(cpu, root);
+                let _ = (cpu, root);
+            }
+            fn mask(&self, _: u32) {}
+            fn unmask(&self, _: u32) {}
+        }
+        static PARENT: Parent = Parent;
+        // The parent's filter: what a GPIO controller's does.
+        fn parent(_: usize, cx: &sched::IrqCx) -> Filter {
+            let pending = PENDING.swap(0, SeqCst) & !MASKED.load(SeqCst);
+            let c = CASCADE.get().expect("cascade");
+            let mut any = false;
+            for hw in 0..8 {
+                if pending & 1 << hw != 0 {
+                    any = true;
+                    if !c.dispatch(hw, cx) {
+                        MASKED.fetch_or(1 << hw, SeqCst);
+                    }
+                }
+            }
+            if any { Filter::Handled } else { Filter::Stray }
+        }
+        fn edge(_: usize, _: &sched::IrqCx) -> Filter {
+            EDGES.fetch_add(1, SeqCst);
+            Filter::Handled
+        }
+        fn level(_: usize, _: &sched::Sleepable) {
+            // Masked while its thread runs.
+            assert_ne!(MASKED.load(SeqCst) & 1 << 5, 0, "level input unmasked in its thread");
+            LEVEL_RAN.store(true, SeqCst);
+        }
+        let s = cx();
+        let cascade = CascadeDomain::new(Arc::new(Pins)).expect("a cascade slot");
+        let _ = CASCADE.set(cascade);
+        let c = CASCADE.get().expect("cascade");
+        let p = ::irq::install(
+            &PARENT,
+            0,
+            Trigger::Level,
+            Polarity::High,
+            hal::CpuId::BOOT,
+            ::irq::Handler { name: "ktest-parent", filter: Some(parent), thread: None, arg: 0 },
+        )
+        .expect("parent");
+        let handler = |name, filter, thread| ::irq::Handler { name, filter, thread, arg: 0 };
+        let e = ::irq::install(
+            c.domain(),
+            3,
+            Trigger::Edge,
+            Polarity::Both,
+            hal::CpuId::BOOT,
+            handler("ktest-edge", Some(edge as ::irq::FilterFn), None),
+        )
+        .expect("edge input");
+        let l = ::irq::install(
+            c.domain(),
+            5,
+            Trigger::Level,
+            Polarity::Low,
+            hal::CpuId::BOOT,
+            handler("ktest-level", None, Some(level as ::irq::ThreadFn)),
+        )
+        .expect("level input");
+        assert_eq!(
+            ::irq::install(
+                c.domain(),
+                6,
+                Trigger::Level,
+                Polarity::Both,
+                hal::CpuId::BOOT,
+                handler("ktest-bad", Some(edge as ::irq::FilterFn), None),
+            )
+            .map(|_| ()),
+            Err(IrqError::Unsupported)
+        );
+        assert!(c.connected(3) && c.connected(5) && !c.connected(6));
+        // Cascaded inputs are numbered past the pins.
+        let numbers: alloc::vec::Vec<u32> = ::irq::sources()
+            .into_iter()
+            .filter(|(_, name, _)| name.starts_with("ktest-edge") || name.starts_with("ktest-level"))
+            .map(|(n, _, _)| n)
+            .collect();
+        assert!(numbers.len() == 2 && numbers.iter().all(|&n| n >= ::irq::MSI_FIRST), "{numbers:?}");
+        assert_eq!(MASKED.load(SeqCst) & (1 << 3 | 1 << 5), 0, "installed inputs unmasked");
+        // Inputs 3, 5, and 7 (no handler) pending at once.
+        PENDING.store(1 << 3 | 1 << 5 | 1 << 7, SeqCst);
+        let root = p.root();
+        let fire = sched::spawn_on("ktest-fire", sched::Priority::KERNEL, Some(hal::CpuId::BOOT), move |_| {
+            let irq = hal::irq::disable();
+            // SAFETY: interrupts are masked for as long as the token is
+            // used, as in the dispatcher.
+            let cx = unsafe { sched::IrqCx::assume() };
+            assert!(::irq::dispatch(root, &cx), "parent dispatched");
+            hal::irq::restore(irq);
+        })
+        .expect("spawn");
+        fire.join(&s);
+        assert_eq!(EDGES.load(SeqCst), 1);
+        assert_eq!(e.count(), 1);
+        assert_ne!(MASKED.load(SeqCst) & 1 << 7, 0, "an input with no handler is masked");
+        let t0 = crate::time::now_ns();
+        while (!LEVEL_RAN.load(SeqCst) || MASKED.load(SeqCst) & 1 << 5 != 0)
+            && crate::time::now_ns() - t0 < 1_000_000_000
+        {
+            crate::time::sleep_ns(&s, 1_000_000);
+        }
+        assert!(LEVEL_RAN.load(SeqCst), "the level input's thread ran");
+        assert_eq!(MASKED.load(SeqCst) & 1 << 5, 0, "unmasked once its thread was done");
+        l.remove(&s);
+        e.remove(&s);
+        p.remove(&s);
+        assert!(!c.connected(3) && !c.connected(5));
+    }
+}
+
+ktest! {
     fn dma_direct_coherent_and_bounced() {
         use vm::dma::{dir, Backend, DmaBuf, DmaConstraints, DmaMemory, DmaTag};
         let top = crate::mm::dma::top_of_ram();
@@ -1469,6 +1642,7 @@ pub(crate) mod bus_test {
                 name: name.map(String::from),
                 supplier: prov,
                 id,
+                detail: bus::LineDetail::None,
             };
             cx.set_lines(
                 user,
@@ -1822,6 +1996,313 @@ pub(crate) mod bus_test {
     pub(crate) const LINE_BUS: DriverDecl = DriverDecl::of::<LineBus>();
     pub(crate) const LINE_PROVIDER: DriverDecl = DriverDecl::of::<LineProvider>();
     pub(crate) const LINE_USER: DriverDecl = DriverDecl::of::<LineUser>();
+
+    /// What the test GPIO and I2C controller was asked.
+    pub(crate) static PIN_CALLS: sync::SpinLock<alloc::vec::Vec<(&'static str, u32)>> =
+        sync::SpinLock::new(alloc::vec::Vec::new());
+    /// The test controller's interrupt domain, while it is attached.
+    pub(crate) static PIN_CASCADE: sync::SpinLock<Option<::irq::cascade::CascadeDomain>> =
+        sync::SpinLock::new(None);
+    /// Interrupts the consumer's handler took.
+    pub(crate) static PIN_IRQS: AtomicU64 = AtomicU64::new(0);
+
+    /// A bus adding a GPIO and I2C controller (model 21) and a device
+    /// (model 22) whose firmware gives it a `GpioInt`, a `GpioIo`, and an
+    /// `I2cSerialBusV2` on it.
+    pub(crate) struct PinBus;
+
+    impl Driver for PinBus {
+        const NAME: &'static str = "pinbus";
+        const IDS: Ids = Ids::Test(&[TestId {
+            model: 20,
+            rank: Rank::DEFAULT,
+        }]);
+        fn describe(_: &Ident) -> String {
+            "GPIO and I2C test bus".into()
+        }
+        fn attach(_: &mut AttachCx<'_>) -> Result<Self, AttachError> {
+            Ok(Self)
+        }
+        fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
+            use bus::gpio::{GpioMode, GpioUse, Pull, Restriction};
+            use bus::{Line, LineDetail, LineKind};
+            use devtree::graph::{EdgeKind::Required, Origin::ResourceSource};
+            let user = cx.add_child(Ident::Test(TestIdent { model: 22 }), None, vec![]);
+            let ctl = cx.add_child(Ident::Test(TestIdent { model: 21 }), None, vec![]);
+            cx.add_dependency(user, ctl, Required, ResourceSource);
+            let gpio = |pins: alloc::vec::Vec<u32>, mode| Line {
+                kind: LineKind::Gpio,
+                name: None,
+                supplier: ctl,
+                id: pins[0],
+                detail: LineDetail::Gpio(GpioUse {
+                    pins,
+                    mode,
+                    shared: false,
+                    pull: Pull::Up,
+                    debounce_us: 0,
+                }),
+            };
+            cx.set_lines(
+                user,
+                vec![
+                    gpio(
+                        vec![4],
+                        GpioMode::Interrupt {
+                            trigger: ::irq::Trigger::Edge,
+                            polarity: ::irq::Polarity::Both,
+                            wake: false,
+                        },
+                    ),
+                    gpio(vec![1, 2], GpioMode::Io(Restriction::Output)),
+                    Line {
+                        kind: LineKind::I2c,
+                        name: None,
+                        supplier: ctl,
+                        id: 0x32,
+                        detail: LineDetail::I2c(bus::i2c::I2cTarget {
+                            address: 0x32,
+                            ten_bit: false,
+                            speed: 400_000,
+                        }),
+                    },
+                ],
+            );
+            Ok(())
+        }
+        fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
+    }
+
+    /// The controller's pins and bus, recording what it is asked.
+    struct PinCtl;
+
+    impl ::irq::cascade::Cascade for PinCtl {
+        fn name(&self) -> &'static str {
+            "ktest-pinctl"
+        }
+        fn inputs(&self) -> u32 {
+            8
+        }
+        fn configure(
+            &self,
+            hw: u32,
+            _: ::irq::Trigger,
+            _: ::irq::Polarity,
+        ) -> Result<(), ::irq::IrqError> {
+            PIN_CALLS.lock().push(("trigger", hw));
+            Ok(())
+        }
+        fn release(&self, hw: u32) {
+            PIN_CALLS.lock().push(("unhook", hw));
+        }
+        fn mask(&self, _: u32) {}
+        fn unmask(&self, _: u32) {}
+    }
+
+    struct PinGpio(&'static dyn ::irq::IrqDomain);
+
+    impl bus::gpio::Gpio for PinGpio {
+        fn pins(&self) -> u32 {
+            8
+        }
+        fn configure(
+            &self,
+            _: &sched::Sleepable,
+            pin: u32,
+            mode: bus::gpio::PinMode,
+            _: bus::gpio::Pull,
+        ) -> Result<(), bus::provider::ProviderError> {
+            let what = match mode {
+                bus::gpio::PinMode::Input => "input",
+                bus::gpio::PinMode::Output { .. } => "output",
+            };
+            PIN_CALLS.lock().push((what, pin));
+            Ok(())
+        }
+        fn get(&self, _: &sched::Sleepable, _: u32) -> Result<bool, bus::provider::ProviderError> {
+            Ok(false)
+        }
+        fn set(
+            &self,
+            _: &sched::Sleepable,
+            pin: u32,
+            high: bool,
+        ) -> Result<(), bus::provider::ProviderError> {
+            PIN_CALLS
+                .lock()
+                .push((if high { "high" } else { "low" }, pin));
+            Ok(())
+        }
+        fn release(&self, _: &sched::Sleepable, pin: u32) {
+            PIN_CALLS.lock().push(("release", pin));
+        }
+        fn interrupts(&self) -> Option<&'static dyn ::irq::IrqDomain> {
+            Some(self.0)
+        }
+    }
+
+    impl bus::i2c::I2c for PinCtl {
+        fn transfer(
+            &self,
+            _: &sched::Sleepable,
+            msgs: &mut [bus::i2c::Msg<'_>],
+        ) -> Result<(), bus::provider::ProviderError> {
+            for m in msgs.iter_mut() {
+                PIN_CALLS.lock().push(("i2c", u32::from(m.address)));
+                if let bus::i2c::Op::Read(b) = &mut m.op {
+                    b.fill(0x5a);
+                }
+            }
+            Ok(())
+        }
+        fn speed(&self) -> u32 {
+            100_000
+        }
+    }
+
+    /// The controller: a GPIO provider with a cascaded domain, and an I2C
+    /// bus.
+    pub(crate) struct PinController;
+
+    impl Driver for PinController {
+        const NAME: &'static str = "pinctl";
+        const IDS: Ids = Ids::Test(&[TestId {
+            model: 21,
+            rank: Rank::DEFAULT,
+        }]);
+        fn describe(_: &Ident) -> String {
+            "Test GPIO and I2C controller".into()
+        }
+        fn attach(_: &mut AttachCx<'_>) -> Result<Self, AttachError> {
+            let c = ::irq::cascade::CascadeDomain::new(alloc::sync::Arc::new(PinCtl))
+                .map_err(|e| AttachError::Resource(bus::ResourceError::Irq(e)))?;
+            *PIN_CASCADE.lock() = Some(c);
+            Ok(Self)
+        }
+        fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
+            let domain = PIN_CASCADE.lock().as_ref().map(|c| c.domain());
+            let domain = domain.ok_or(AttachError::Device("no domain"))?;
+            cx.provide_gpio(alloc::sync::Arc::new(PinGpio(domain)));
+            cx.provide_i2c(alloc::sync::Arc::new(PinCtl));
+            Ok(())
+        }
+        fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {
+            let gone = PIN_CASCADE.lock().take();
+            drop(gone);
+        }
+    }
+
+    /// The device: its interrupt, its two output pins, and its I2C
+    /// connection.
+    pub(crate) struct PinUser {
+        pins: bus::gpio::GpioPins,
+        irq: sync::SpinLock<Option<bus::IrqLine>>,
+    }
+
+    fn pin_filter(_: &PinUser, _: usize, _: &sched::IrqCx) -> ::irq::Filter {
+        PIN_IRQS.fetch_add(1, Ordering::SeqCst);
+        ::irq::Filter::Handled
+    }
+
+    impl Driver for PinUser {
+        const NAME: &'static str = "pinuser";
+        const IDS: Ids = Ids::Test(&[TestId {
+            model: 22,
+            rank: Rank::DEFAULT,
+        }]);
+        fn describe(_: &Ident) -> String {
+            "GPIO and I2C test device".into()
+        }
+        fn attach(cx: &mut AttachCx<'_>) -> Result<Self, AttachError> {
+            let s = cx.sleepable();
+            let p = |e| AttachError::Resource(bus::ResourceError::Provider(e));
+            let irq = cx.gpio_interrupt(0)?;
+            assert_eq!(
+                cx.gpio_interrupt(1).err(),
+                Some(bus::ResourceError::NoSuchLine)
+            );
+            let pins = cx.gpio(0)?;
+            pins.configure(
+                s,
+                1,
+                bus::gpio::PinMode::Output { high: true },
+                bus::gpio::Pull::Default,
+            )
+            .map_err(p)?;
+            assert_eq!(
+                pins.get(s, 0),
+                Err(bus::provider::ProviderError::Unsupported)
+            );
+            let dev = cx.i2c(0)?;
+            let mut id = [0u8; 2];
+            dev.write_read(s, &[0x0f], &mut id).map_err(p)?;
+            assert_eq!(id, [0x5a, 0x5a]);
+            Ok(Self {
+                pins,
+                irq: sync::SpinLock::new(Some(irq)),
+            })
+        }
+        fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
+            let line = self.irq.lock().take();
+            if let Some(l) = line {
+                cx.interrupt(l, Some(pin_filter), None, 0)?;
+            }
+            let _ = self.pins.len();
+            Ok(())
+        }
+        fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
+    }
+
+    pub(crate) const PIN_BUS: DriverDecl = DriverDecl::of::<PinBus>();
+    pub(crate) const PIN_CONTROLLER: DriverDecl = DriverDecl::of::<PinController>();
+    pub(crate) const PIN_USER: DriverDecl = DriverDecl::of::<PinUser>();
+}
+
+ktest! {
+    fn gpio_and_i2c_consumers_reach_their_controller() {
+        use bus::{DetachReason, Ident, NodeState, TestIdent};
+        let s = cx();
+        let m = bus::manager();
+        bus_test::PIN_CALLS.lock().clear();
+        let pb = m.add_child(&s, m.root(), Ident::Test(TestIdent { model: 20 }), None, alloc::vec![], &[]);
+        m.wait_idle(&s);
+        let kids = m.children(pb, &s);
+        let (user, ctl) = (kids[0], kids[1]);
+        for c in [user, ctl] {
+            assert_eq!(m.state(c, &s), Some(NodeState::Attached));
+        }
+        // The interrupt pin made an input, the outputs driven, a register
+        // read as one transfer, then the interrupt hooked in `start`.
+        assert_eq!(
+            *bus_test::PIN_CALLS.lock(),
+            [("input", 4), ("output", 2), ("i2c", 0x32), ("i2c", 0x32), ("trigger", 4)]
+        );
+        // The controller's filter finds pin 4 pending.
+        let before = bus_test::PIN_IRQS.load(Ordering::SeqCst);
+        let fire = sched::spawn_on("ktest-fire", sched::Priority::KERNEL, Some(hal::CpuId::BOOT), move |_| {
+            let irq = hal::irq::disable();
+            // SAFETY: interrupts are masked for as long as the token is
+            // used, as in the dispatcher.
+            let cx = unsafe { sched::IrqCx::assume() };
+            let c = bus_test::PIN_CASCADE.lock();
+            let c = c.as_ref().expect("controller attached");
+            assert!(c.dispatch(4, &cx), "pin 4 has a handler");
+            assert!(!c.dispatch(5, &cx), "pin 5 has none");
+            hal::irq::restore(irq);
+        })
+        .expect("spawn");
+        fire.join(&s);
+        assert_eq!(bus_test::PIN_IRQS.load(Ordering::SeqCst), before + 1);
+        // Detaching the controller detaches the device first: its handler
+        // goes, then its pins.
+        bus_test::PIN_CALLS.lock().clear();
+        m.detach(ctl, DetachReason::Requested, &s).expect("detach");
+        assert_eq!(m.state(user, &s), Some(NodeState::NotPresent));
+        let calls = bus_test::PIN_CALLS.lock().clone();
+        assert_eq!(calls, [("unhook", 4), ("release", 4), ("release", 1), ("release", 2)]);
+        m.shutdown_under(pb, &s);
+        let _ = m.take_events();
+    }
 }
 
 ktest! {

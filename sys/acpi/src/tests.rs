@@ -484,7 +484,7 @@ mod hand {
     #[test]
     fn a_platform_feeds_the_walk() {
         use alloc::string::String;
-        use bus::LineKind;
+        use bus::{LineDetail, LineKind};
         use devtree::graph::{EdgeKind, Origin};
 
         let hid = |h: &str| name_op("_HID", &aml::asm::string(h));
@@ -551,8 +551,14 @@ mod hand {
         assert_eq!(
             lines,
             [
-                (LineKind::Clock, Some(String::from("core")), prov.clone(), 7),
-                (LineKind::Reset, None, prov, 3),
+                (
+                    LineKind::Clock,
+                    Some(String::from("core")),
+                    prov.clone(),
+                    7,
+                    LineDetail::None
+                ),
+                (LineKind::Reset, None, prov, 3, LineDetail::None),
             ]
         );
     }

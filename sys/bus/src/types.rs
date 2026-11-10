@@ -347,7 +347,8 @@ pub enum ResourceError {
     MapFailed,
     /// Interrupt installation failed.
     Irq(irq::IrqError),
-    /// The node has no clock, reset, or power-domain line by that name.
+    /// The node has no clock, reset, or power-domain line by that name, or
+    /// no GPIO or I2C line at that index.
     NoSuchLine,
     /// The line's supplier has not published a provider of that kind.
     NoProvider,
@@ -364,11 +365,28 @@ pub enum LineKind {
     Reset,
     /// A power domain ([`crate::provider::PowerDomain`]).
     PowerDomain,
+    /// GPIO pins ([`crate::gpio::Gpio`]), for I/O or an interrupt.
+    Gpio,
+    /// A connection to an I2C bus ([`crate::i2c::I2c`]).
+    I2c,
 }
 
-/// A clock, reset, or power-domain line a device consumes, as its bus
-/// read it from firmware (DRIVER-MODEL.md §8.5): its driver asks for it
-/// by name in attach.
+/// What a line carries beyond its supplier and identifier.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum LineDetail {
+    /// Nothing: a clock, reset, or power domain.
+    #[default]
+    None,
+    /// A GPIO descriptor's pins and use.
+    Gpio(crate::gpio::GpioUse),
+    /// The device's address on its bus.
+    I2c(crate::i2c::I2cTarget),
+}
+
+/// A clock, reset, power-domain, GPIO, or I2C line a device consumes, as
+/// its bus read it from firmware (DRIVER-MODEL.md §8.5, §9.3): its driver
+/// asks for a clock, reset, or domain by name in attach, and for GPIO and
+/// I2C lines by their index among the device's lines of that use.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Line {
     /// What it reaches.
@@ -377,8 +395,11 @@ pub struct Line {
     pub name: Option<String>,
     /// The device serving it, which publishes the provider.
     pub supplier: DeviceId,
-    /// The provider's identifier for it.
+    /// The provider's identifier for it: a clock's or power domain's ID, a
+    /// reset index, a GPIO descriptor's first pin, an I2C address.
     pub id: u32,
+    /// The rest of a GPIO or I2C line.
+    pub detail: LineDetail,
 }
 
 impl Ident {

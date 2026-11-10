@@ -446,3 +446,164 @@ fn companion_deps() {
     ));
     assert_eq!(got, want);
 }
+
+/// The GPIO and I2C lines `acpi0` gives a machine's children, by the
+/// child's path: what their drivers ask for by index.
+fn connection_lines(name: &str) -> BTreeMap<String, Vec<crate::bus::ChildLine>> {
+    let (mut i, mut h) = acpi_corpus::load(name);
+    let w = crate::bus::walk(
+        &mut i,
+        &mut h,
+        &dma_controllers(name),
+        &[],
+        &FirmwareIdentity::default(),
+    );
+    w.found
+        .into_iter()
+        .map(|f| {
+            let lines: Vec<_> = f
+                .lines
+                .into_iter()
+                .filter(|l| matches!(l.0, bus::LineKind::Gpio | bus::LineKind::I2c))
+                .collect();
+            (f.device.path, lines)
+        })
+        .filter(|(_, l)| !l.is_empty())
+        .collect()
+}
+
+#[test]
+fn consumers_get_their_gpio_and_i2c_lines() {
+    use bus::LineDetail;
+    use bus::gpio::{GpioMode, GpioUse, Pull, Restriction};
+    use bus::i2c::I2cTarget;
+    let sky1 = connection_lines("opi6p");
+    // The RTC: its bus and address, and its alarm interrupt on S5 GPIO.
+    let rtc = &sky1["\\_SB_.I2C3.RTC0"];
+    assert_eq!(
+        rtc[0],
+        (
+            bus::LineKind::I2c,
+            None,
+            String::from("\\_SB_.I2C3"),
+            0x32,
+            LineDetail::I2c(I2cTarget {
+                address: 0x32,
+                ten_bit: false,
+                speed: 400_000
+            })
+        )
+    );
+    assert_eq!(rtc[1].2, "\\_SB_.GPI4");
+    assert_eq!(
+        rtc[1].4,
+        LineDetail::Gpio(GpioUse {
+            pins: alloc::vec![10],
+            mode: GpioMode::Interrupt {
+                trigger: irq::Trigger::Level,
+                polarity: irq::Polarity::Low,
+                wake: false
+            },
+            shared: false,
+            pull: Pull::Up,
+            debounce_us: 0,
+        })
+    );
+    // The codec's jack detect: both edges, shared, a wake source.
+    let LineDetail::Gpio(jd) = &sky1["\\_SB_.I2C2.RTL5"][0].4 else {
+        panic!("RTL5's first line is its GpioInt");
+    };
+    assert_eq!(
+        jd.mode,
+        GpioMode::Interrupt {
+            trigger: irq::Trigger::Edge,
+            polarity: irq::Polarity::Both,
+            wake: true
+        }
+    );
+    // Both PD controllers share S5 GPIO 0 line 7 (one interrupt).
+    for pd in ["\\_SB_.I2C7.PD00", "\\_SB_.I2C7.PD01"] {
+        assert_eq!(sky1[pd][1].2, "\\_SB_.GPI4");
+        assert_eq!(sky1[pd][1].3, 7);
+    }
+    // An I2C controller's own pins (bus recovery), output only.
+    let LineDetail::Gpio(rec) = &sky1["\\_SB_.I2C2"][0].4 else {
+        panic!("I2C2 has its GpioIo");
+    };
+    assert_eq!(rec.pins, [12, 13]);
+    assert_eq!(rec.mode, GpioMode::Io(Restriction::Output));
+    // Counted over the machine: GPIO lines, then I2C ones.
+    let count = |m: &BTreeMap<String, Vec<crate::bus::ChildLine>>| {
+        let all = m.values().flatten();
+        let gpio = all.clone().filter(|l| l.0 == bus::LineKind::Gpio).count();
+        (gpio, all.count() - gpio)
+    };
+    assert_eq!(count(&sky1), (46, 11));
+    let x870e = connection_lines("x870e");
+    assert_eq!(x870e["\\_SB_.I2CB.ITE2"][0].3, 0x42);
+    assert_eq!(count(&x870e), (2, 3));
+}
+
+#[test]
+fn aei_events_find_their_methods() {
+    use irq::{Polarity, Trigger};
+    let cases: [(&str, &str); 3] = [
+        ("opi6p", "\\_SB.GPI4"),
+        ("x870e", "\\_SB.GPIO"),
+        ("radxa-q8b", "\\_SB.GIO0"),
+    ];
+    let mut got = Vec::new();
+    for (m, path) in cases {
+        let (mut i, mut h) = acpi_corpus::load(m);
+        let node = i
+            .lookup(&aml::AmlPath::parse(path).unwrap())
+            .expect("controller exists");
+        let (events, notes) = crate::aei::events(&mut i, &mut h, node);
+        assert_eq!(notes, Vec::<String>::new(), "{m}");
+        for e in events {
+            let bus::gpio::GpioMode::Interrupt {
+                trigger, polarity, ..
+            } = e.pin.mode
+            else {
+                panic!("an _AEI event is an interrupt");
+            };
+            got.push((m, e.pin.pins[0], e.method, trigger, polarity));
+        }
+    }
+    let s = String::from;
+    assert_eq!(
+        got,
+        [
+            // The Sky1's EC line, level low: its own method.
+            ("opi6p", 6, s("_L06"), Trigger::Level, Polarity::Low),
+            // No _E03 on the X870E: _EVT takes the pin.
+            ("x870e", 3, s("_EVT"), Trigger::Edge, Polarity::Low),
+            ("radxa-q8b", 2, s("_E02"), Trigger::Edge, Polarity::High),
+            // Above 255, only _EVT can take it.
+            ("radxa-q8b", 704, s("_EVT"), Trigger::Edge, Polarity::Both),
+        ]
+    );
+}
+
+#[test]
+fn sky1_i2c_buses_say_their_speed() {
+    let (mut i, mut h) = acpi_corpus::load("opi6p");
+    let mut got = Vec::new();
+    for n in 0..8 {
+        let path = alloc::format!("\\_SB.I2C{n}");
+        let node = i.lookup(&aml::AmlPath::parse(&path).unwrap()).unwrap();
+        let v = crate::properties::property(&mut i, &mut h, node, "clock-frequency");
+        got.push(match v {
+            Some(aml::Value::Integer(f)) => f,
+            other => panic!("{path}: {other:?}"),
+        });
+    }
+    // The PD controllers' buses (I2C1 on the Orion O6's layout, I2C7 on
+    // this board) run at 100 kHz; the rest at 400 kHz.
+    assert_eq!(
+        got,
+        [
+            400_000, 100_000, 400_000, 400_000, 400_000, 400_000, 400_000, 100_000
+        ]
+    );
+}

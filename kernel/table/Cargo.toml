@@ -11,6 +11,8 @@ cix-sky1 = { path = "../../platform/cix-sky1" }
 ahci = { path = "../../drivers/ahci" }
 amdsbwd = { path = "../../drivers/amdsbwd" }
 atrtc = { path = "../../drivers/atrtc" }
+cdnc-i2c = { path = "../../drivers/cdnc-i2c" }
+cdns-gpio = { path = "../../drivers/cdns-gpio" }
 ichwd = { path = "../../drivers/ichwd" }
 isa = { path = "../../drivers/isa" }
 acpi = { path = "../../sys/acpi" }

@@ -137,6 +137,9 @@ static TEST_DRIVERS: &[DriverDecl] = &[
     crate::tests::bus_test::COMPANION_FN,
     crate::tests::bus_test::SHARED_BUS,
     crate::tests::bus_test::SHARED_DEV,
+    crate::tests::bus_test::PIN_BUS,
+    crate::tests::bus_test::PIN_CONTROLLER,
+    crate::tests::bus_test::PIN_USER,
 ];
 
 /// Drivers that call into the kernel itself (firmware services).

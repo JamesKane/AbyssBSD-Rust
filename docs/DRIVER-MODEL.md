@@ -796,6 +796,18 @@ Interrupts form a hierarchy of **IRQ domains**, as in FreeBSD's INTRNG and Linux
   PHY's interrupt, Qualcomm's IPCC) publishes a child domain with `StartCx::irq_domain(...)`. It
   supplies safe mask, unmask, and status callbacks, and its children allocate from it as from any
   domain. The domain is part of the binding and is torn down after its children have detached.
+- **Cascaded domains** (built, `irq::cascade`). A device that multiplexes interrupts onto one input
+  of its own (a GPIO controller) implements `Cascade` (configure, mask, unmask, release) and holds
+  a `CascadeDomain`. Each connected input gets a root id from a range no controller reports
+  (`Config::cascade_ids`), and the driver's filter on its parent input runs the pending inputs'
+  handlers with `CascadeDomain::dispatch`, as INTRNG's `intr_isrc_dispatch` does. Masking, level
+  inputs' threads, shared level inputs, storm detection, and synchronous removal work as for a
+  controller's inputs; dispatch nests (per-CPU marks, four deep), and cascaded lines take
+  `vmstat -i` numbers from `MSI_FIRST` up, like MSIs. Consumers' descriptions name a domain as
+  `&'static dyn IrqDomain`, so the domain they see is one of 64 static slots that forwards to the
+  driver while its `CascadeDomain` lives; dropping it cuts the slot off, and the slot is reused once
+  its last input is disconnected. Both-edges inputs (`Polarity::Both`, ACPI's `ActiveBoth`) exist
+  for these domains; the GIC and I/O APIC refuse them.
 - **Wake.** An interrupt firmware marks as a wake source (`GpioInt` with `…AndWake`, `_PRW`)
   carries that flag on its `IrqLine`. `IrqLine::set_wake(bool)` arms it for suspend, through the
   owning domain (on Sky1, a firmware call; §8.7). This is used from P9.
@@ -1047,8 +1059,9 @@ IOMMUs. They publish **provider** objects, keyed by their firmware identity (an 
 node), and consumers reach them through the dependency graph rather than by global name:
 
 ```rust
-// In a consumer's attach, for a GpioInt in its _CRS:
-let irq = cx.gpio_interrupt(GpioRef::from_crs(0))?;    // resolves the supplier edge from §6.1
+// In a consumer's attach, for the first GpioInt in its _CRS:
+let irq = cx.gpio_interrupt(0)?;    // the pin claimed, made an input, granted in the controller's domain
+let rtc = cx.i2c(0)?;               // the first I2cSerialBusV2: the device at its address
 ```
 
 The provider traits, all in `sys/bus` so consumers depend on no particular provider crate:
@@ -1064,10 +1077,16 @@ The provider traits, all in `sys/bus` so consumers depend on no particular provi
 | `RegisterRegion` | leases a field subset of a shared register block (§8.1) | Sky1 audio CRU; S5 reset controller's PHY bits; TC956x function 0 |
 | `DmaEngine` | slave and cyclic channels by request line | Sky1 DMA-350 |
 | `Mailbox` | typed channels (doorbell, FIFO, shared memory) | CIX mailbox; PCC; Qualcomm IPCC |
-| `Gpio`, `I2c`, `Spi`, `Pinctrl` | as their FreeBSD counterparts (`gpiobus`, `iicbus`, `spibus`) | SoC controllers |
+| `Gpio` (built) | pin count, `configure` (direction, output level first, bias), `get`, `set`, `release`, the pins' interrupt domain; pins claimed per descriptor, exclusive unless every holder's descriptor says shared (FreeBSD's `gpiobus` pin ownership) | Cadence GPIO (Sky1); later PL061, AMD, Qualcomm TLMM |
+| `I2c` (built) | `transfer` of FreeBSD's `iic_msg` array (repeated STARTs, one STOP), run one at a time; consumers hold an `I2cDevice` at their address | Cadence I2C (Sky1); later DesignWare (X870E) |
+| `Spi`, `Pinctrl` | as their FreeBSD counterparts (`spibus`) | SoC controllers |
 
 Providers are reached through supplier edges (§6.1), and a handle names a sub-handle where the
-supplier is a `_STA = 0` stub or data-only child. Operations that talk to firmware sleep, so they
+supplier is a `_STA = 0` stub or data-only child. Clock, reset, and power-domain lines come from
+the platform description and are asked for by name; GPIO and I2C lines come from the consumer's
+`_CRS` (`GpioIo`, `GpioInt`, `I2cSerialBusV2`) and are asked for by index among the lines of that
+use, in firmware's order. A GPIO controller with an `_AEI` adds a `gpio_aei` child whose lines are
+those pins, each running the controller's `_Exx`, `_Lxx`, or `_EVT`. Operations that talk to firmware sleep, so they
 take a `ThreadCx` or an attach, start, or stop context, never `IrqCx`.
 
 Provider handles held by a consumer go through the same `Gate` mechanism. A supplier cannot detach

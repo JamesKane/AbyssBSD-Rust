@@ -17,6 +17,7 @@
 
 extern crate alloc;
 
+pub mod aei;
 pub mod bus;
 pub mod button;
 pub mod cpc;
@@ -28,11 +29,13 @@ pub mod ged;
 mod host;
 pub mod pcib;
 pub mod power;
+pub mod properties;
 pub mod ranges;
 #[cfg(test)]
 mod ranges_corpus;
 pub mod service;
 
+pub use aei::GPIO_AEI;
 pub use bus::{AcpiBus, AcpiDevice, DRIVER, companion};
 pub use button::BUTTON;
 pub use events::{Block, FixedHardware, Space};

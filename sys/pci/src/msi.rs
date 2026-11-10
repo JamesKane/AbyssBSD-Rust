@@ -217,6 +217,10 @@ impl IrqDomain for MsiDomain {
         "pci-msi"
     }
 
+    fn pin_numbered(&self) -> bool {
+        false
+    }
+
     fn connect(&self, hw: u32, _: Trigger, _: Polarity, cpu: CpuId) -> Result<u32, IrqError> {
         let src = self.source(hw).ok_or(IrqError::NoSuchInput)?;
         let p = PLATFORM.get().ok_or(IrqError::NoSuchInput)?;

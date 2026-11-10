@@ -367,6 +367,8 @@ pub(crate) fn init_dispatch() {
         now: crate::time::counter,
         frequency: crate::time::frequency(),
         storm_threshold: 1000,
+        // GPIO pins and the like, above every id a controller reports.
+        cascade_ids: 1024,
     });
 }
 
@@ -401,6 +403,9 @@ impl ::irq::IrqDomain for IoApicDomain {
         polarity: ::irq::Polarity,
         cpu: CpuId,
     ) -> Result<u32, ::irq::IrqError> {
+        if polarity == ::irq::Polarity::Both {
+            return Err(::irq::IrqError::Unsupported);
+        }
         let dest = hw_id(cpu)
             .and_then(|id| u32::try_from(id).ok())
             .ok_or(::irq::IrqError::NoVector)?;
@@ -566,11 +571,14 @@ impl ::irq::IrqDomain for GicSpiDomain {
         &self,
         spi: u32,
         trigger: ::irq::Trigger,
-        _polarity: ::irq::Polarity,
+        polarity: ::irq::Polarity,
         cpu: CpuId,
     ) -> Result<u32, ::irq::IrqError> {
         if !(32..1020).contains(&spi) {
             return Err(::irq::IrqError::NoSuchInput);
+        }
+        if polarity == ::irq::Polarity::Both {
+            return Err(::irq::IrqError::Unsupported);
         }
         let mpidr = hw_id(cpu).ok_or(::irq::IrqError::NoVector)?;
         arch::gic::set_spi_enabled(spi, false);

@@ -140,6 +140,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "cdnc-i2c"
+version = "0.0.0"
+dependencies = [
+ "acpi",
+ "acpi-corpus",
+ "acpi-platform",
+ "aml",
+ "bus",
+ "cix-sky1",
+ "devtree",
+ "regs",
+ "sched",
+]
+
+[[package]]
+name = "cdns-gpio"
+version = "0.0.0"
+dependencies = [
+ "acpi",
+ "acpi-corpus",
+ "acpi-platform",
+ "aml",
+ "bus",
+ "cix-sky1",
+ "devtree",
+ "hal",
+ "irq",
+ "regs",
+ "sched",
+ "sync",
+]
+
+[[package]]
 name = "cix-sky1"
 version = "0.0.0"
 dependencies = [
@@ -188,6 +221,8 @@ dependencies = [
  "aml",
  "atrtc",
  "bus",
+ "cdnc-i2c",
+ "cdns-gpio",
  "cix-sky1",
  "devtree",
  "hidbus",

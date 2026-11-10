@@ -2565,6 +2565,35 @@ machines against FreeBSD on bare metal; the exit criteria above.
     DRIVER-MODEL §8.2 promised and nothing provided. NVMe and xHCI now use them too, since on
     arm64 hardware a doorbell write is not ordered after normal-memory writes without one.
   - Only the RTL8126 is matched; the RTL8125 family (the X870E's NIC) comes with P8.2.
+- Progress 2026-11-09 (P8.3, GPIO and I2C): the subsystems and the Sky1's controllers.
+  - `irq::cascade`: a driver whose device multiplexes interrupts publishes a cascaded domain and
+    runs its inputs' handlers from its own filter (INTRNG's `intr_isrc_dispatch`); dispatch
+    nests, and both-edges inputs exist for it (DRIVER-MODEL §8.3).
+  - `bus::gpio` and `bus::i2c`: the `Gpio` and `I2c` providers, per-pin claims (exclusive unless
+    every holder says shared), and `AttachCx::gpio`, `gpio_interrupt`, and `i2c`. `acpi0` turns
+    each child's `GpioIo`, `GpioInt`, and `I2cSerialBusV2` into its lines: 46 GPIO and 11 I2C
+    lines on the Sky1 (the RTC's alarm, the PD controllers' shared line, the codec's jack detect
+    on both edges), 2 and 3 on the X870E. Devices on an I2C bus stay children of `acpi0`
+    (compat-deviations).
+  - `gpio_aei` runs a controller's `_AEI` events (`_Exx`, `_Lxx`, `_EVT`): the Sky1's EC line on
+    `GPI4` (`_L06`), the X870E's pin 3 (`_EVT`), the Q8B's two. An event whose method fails is
+    disabled, so storm detection masks its pin: the Sky1's level-low `_L06` reads the EC through a
+    `GenericSerialBus` region on `I2C6`, which firmware hides, and would otherwise run forever.
+  - `gpio` (`drivers/cdns-gpio`, `CIXH1002`/`CIXH1003`): the seven Cadence controllers, line
+    counts by address, edge lines acknowledged before their handlers and level lines after, bypass
+    cleared only for lines in use and restored after. Each holds the shared APB clock (262) and,
+    on the FCH, the shared reset (`RST1` 26), counted.
+  - `cdnc_i2c` (`drivers/cdnc-i2c`, `CIXH200B`): the Cadence controllers in host mode, dividers
+    from SCMI's input rate and `_DSD` `clock-frequency` (400 kHz, 100 kHz on I2C1/I2C7), repeated
+    STARTs, FIFO feeding and draining with the bus held, reads up to the counter's chunk. Polled,
+    until the scheduler has a timed sleep for interrupt-driven waits. Firmware hides `I2C6` (the
+    EC's bus) with `_STA` 0, and names a reset line only for I2C0 and I2C2.
+  - Tested on the host against models of both controllers and the corpus, and in the kernel by
+    `irq_cascaded_inputs_dispatch_from_their_parent` and
+    `gpio_and_i2c_consumers_reach_their_controller`. Neither controller has met the board.
+  - Next: drivers for the devices (the RX8900 RTC on I2C3, the RTS5453 PD controllers), `iicbus`
+    and `iic` (`/dev/iicN`, `i2c(8)`), `gpioc` (`gpioctl(8)`), the `GeneralPurposeIo` and
+    `GenericSerialBus` operation-region handlers, wake (§1.5's firmware call, P9).
 
 ## Phase 9: Self-hosting and hardening = **v1.0 / Day 1 complete** (L)
 

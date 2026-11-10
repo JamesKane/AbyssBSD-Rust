@@ -12,6 +12,8 @@ where AbyssBSD differs, and why. A difference not listed here is a bug.
 | `sky1_reset` | CIX Sky1 S5 and FCH reset controllers (`CIXHA020`, `CIXHA021`) | FreeBSD has no driver for them: its drivers use the reset state firmware leaves. The platform's `RSTL` lines make them suppliers of most SoC devices. |
 | `sky1_pinctrl` | CIX Sky1 FCH and S5 pin controllers (`CIXHA016`, `CIXHA017`) | FreeBSD has no driver for them: its drivers use the pads firmware programmed. Consumers name their pin groups in `_CRS`, which makes the controllers their suppliers. |
 | `sky1_syscon` | CIX Sky1 shared register windows (`CIXHA018`) | FreeBSD has no driver for them. Devices name them by `_DSD` reference (the UARTs' `sky1,fch_cru`), which makes them suppliers. |
+| `gpio` (`cdns_gpio` crate) | Cadence GPIO r1p02 on the CIX Sky1 (`CIXH1002`, `CIXH1003`) | FreeBSD has no driver for it. The class is the one every FreeBSD GPIO controller driver takes (`pl061`, `dwgpio`), so the controllers are `gpio0`–`gpio6`. |
+| `cdnc_i2c` on ACPI | Cadence I2C r1p14 on the CIX Sky1 (`CIXH200B`) | FreeBSD's `cdnc_i2c` drives the same IP, but attaches only to `simplebus` (FDT). The name is FreeBSD's. |
 
 ## Device tree
 
@@ -19,6 +21,8 @@ where AbyssBSD differs, and why. A difference not listed here is a bug.
 |---|---|---|---|
 | arm64 `virtio_pci` on QEMU `virt` | FreeBSD would assign the unassigned legacy I/O BAR | The modern interface | Same driver and description FreeBSD 16 picks for transitional devices; no I/O BARs are assigned on arm64. |
 | ACPI devices whose `_STA` says absent | Added, disabled | Not added (except `PNP0C0F` and `PNP0B00`) | `devinfo -v` shows neither; the recorded trees match. |
+| Devices on an I2C bus (`I2cSerialBusV2`) | `acpi_iicbus` deletes them from `acpi0` and adds them under `iicbus` | They stay children of `acpi0`, with the controller as a supplier | DRIVER-MODEL.md §5.3: a device needing a bus controller is a node with that supplier, as one needing a GPIO controller is. `iicbus` and its `iic` device (`/dev/iicN`) are not built yet. |
+| GPIO controllers' children | `gpioN` has `gpiobusN` (and `gpiocN`), and `gpio_aeiN` is a child of `gpiobusN` | `gpio_aeiN` is a child of `gpioN`; no `gpiobus` or `gpioc` | Consumers reach pins through the dependency graph, not `gpiobus`. `gpiobus` and `gpioc` (`/dev/gpiocN`) come with userland GPIO access. |
 
 ## System calls and process behavior
 
