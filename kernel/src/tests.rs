@@ -74,6 +74,13 @@ pub(crate) fn run(_s: &sched::Sleepable) -> ! {
             if crate::boot::flag("abyss.test.watchdog_reset") {
                 watchdog_reset_first_boot(_s);
             }
+            // As a reboot does: every device stopped first, an IOMMU after
+            // the devices it translates.
+            if crate::boot::flag("abyss.test.orderly_reset") {
+                bus::manager().wait_idle(_s);
+                crate::devices::shutdown(_s);
+                kprintln!("logring: devices shut down before the reset");
+            }
             // The ACPI reset register (x86) or PSCI (arm64); RAM survives
             // either under QEMU, so the loader finds the log.
             crate::power::reset();
@@ -3081,6 +3088,165 @@ ktest! {
             let mut v = alloc::vec::Vec::new();
             crate::sysctl::read_oid(&s, &oid, &mut v).unwrap();
             assert_eq!(v, 0i32.to_ne_bytes(), "{knob}");
+        }
+    }
+}
+
+/// The SMMU's tests (arm64's: `smmu` is in its driver table only).
+#[cfg(target_arch = "aarch64")]
+mod smmu_running {
+    use super::*;
+
+    ktest! {
+        /// The SMMU running (docs/IOMMU.md §8, stage 2). Every PCI function
+        /// whose driver asked for DMA has a pass-through context: its stream
+        /// bypasses. A stream nobody claimed aborts: QEMU's `edu` device (the
+        /// SMMU cases add one; no driver takes it) is the idle device whose
+        /// DMA engine the test drives. Bypassed, its DMA reaches memory, both
+        /// ways; invalid (its state with no context), its write is stopped
+        /// and the unit logs FreeBSD's `C_BAD_STE` event for its stream; a
+        /// config-abort STE stops it without an event (IHI 0070).
+        fn smmu_streams_bypass_and_abort() {
+            use bus::{Ident, NodeState};
+            use smmu::StreamState;
+            let s = cx();
+            let m = bus::manager();
+            if !smmu::is_running(0) {
+                return;
+            }
+            let smmu0 = m.snapshot(&s).into_iter().find(|n| n.2 == "smmu0").expect("smmu0").0;
+            let mut edu = None;
+            let mut bypassed = 0;
+            for (id, _, name, _, state) in m.snapshot(&s) {
+                let Some(Ident::Pci(ident, a, _)) = m.ident(id, &s) else {
+                    continue;
+                };
+                let Some(tr) = m.dma_translation(&s, id) else {
+                    continue;
+                };
+                if tr.unit() != smmu0 {
+                    continue;
+                }
+                let Some(sid) = tr.stream(pci::requester::rid(a)) else {
+                    continue;
+                };
+                if (ident.vendor, ident.device) == (0x1234, 0x11e8) {
+                    edu = Some((a, sid));
+                    continue;
+                }
+                // The storage and virtio functions do DMA: each got its
+                // context through its tag (or its MSI-X).
+                let dma = ["nvme", "ahci", "virtio_pci", "xhci"].iter().any(|d| name.starts_with(d));
+                if state == NodeState::Attached && dma {
+                    assert_eq!(smmu::stream(0, sid), Some(StreamState::Bypass), "{name} (stream {sid:#x})");
+                    bypassed += 1;
+                }
+            }
+            assert!(bypassed >= 2, "{bypassed} functions bypassed");
+            let Some((a, sid)) = edu else {
+                kprintln!("smmu: no edu device; the abort half is the aarch64-smmu case's");
+                return;
+            };
+            assert_eq!(smmu::stream(0, sid), Some(StreamState::Invalid), "edu has no context");
+            // Its registers, memory decoding and bus mastering on.
+            let cfg = crate::pci::config_for(a).expect("edu's config space");
+            let command = cfg.read16(a, pci::header::COMMAND);
+            cfg.write16(a, pci::header::COMMAND, command | 0x6);
+            let bar = cfg.read32(a, 0x10);
+            let mut base = u64::from(bar & !0xf);
+            if (bar >> 1) & 3 == 2 {
+                base |= u64::from(cfg.read32(a, 0x14)) << 32;
+            }
+            let regs = crate::mm::map_device(addr::PhysAddr::new(base), 0x100).expect("edu's BAR");
+            let reg = |off: u64| (regs.get() + off) as *mut u64;
+            // SAFETY: edu's register page, mapped above, unmapped below; the
+            // identification register is 32 bits.
+            let r32 = |off: u64| unsafe { (reg(off) as *const u32).read_volatile() };
+            // SAFETY: as above; the DMA registers take 64-bit accesses.
+            let w64 = |off: u64, v: u64| unsafe { reg(off).write_volatile(v) };
+            assert_eq!(r32(0), 0x0100_00ed, "edu's identification");
+            // Its buffer is at 0x40000 in its own space; a transfer runs on a
+            // 100 ms timer.
+            const BUF: u64 = 0x4_0000;
+            let dma = |src: u64, dst: u64, to_ram: bool| {
+                w64(0x80, src);
+                w64(0x88, dst);
+                w64(0x90, 64);
+                w64(0x98, 1 | if to_ram { 2 } else { 0 });
+                for _ in 0..200 {
+                    if r32(0x98) & 1 == 0 {
+                        return;
+                    }
+                    crate::time::sleep_ns(&s, 10_000_000);
+                }
+                panic!("edu's DMA did not finish");
+            };
+            let pages: alloc::vec::Vec<addr::PhysAddr> =
+                (0..2).map(|_| crate::mm::alloc_pages(vm::Order::ZERO).expect("page")).collect();
+            let bytes = |pa: addr::PhysAddr| bootproto::layout::dmap(pa).unwrap().get() as *mut u8;
+            let read = |pa| {
+                let mut b = [0u8; 64];
+                // SAFETY: a page this test owns, through the direct map; the
+                // device wrote it, or not, while the test waited.
+                unsafe { core::ptr::copy_nonoverlapping(bytes(pa), b.as_mut_ptr(), 64) };
+                b
+            };
+            // SAFETY: as above.
+            let clear = |pa| unsafe { core::ptr::write_bytes(bytes(pa), 0, 4096) };
+            let pattern: [u8; 64] = core::array::from_fn(|i| 0xa5 ^ u8::try_from(i).unwrap_or(0));
+            // SAFETY: as above.
+            unsafe { core::ptr::copy_nonoverlapping(pattern.as_ptr(), bytes(pages[0]), 64) };
+            clear(pages[1]);
+
+            // Bypassed: memory to the device and back.
+            smmu::set_stream(0, sid, StreamState::Bypass).expect("bypass");
+            dma(pages[0].get(), BUF, false);
+            dma(BUF, pages[1].get(), true);
+            assert_eq!(read(pages[1]), pattern, "a bypassed stream reaches memory");
+
+            // Invalid: the write is stopped, and the event names the stream.
+            let before = smmu::stream_events(0, sid).total;
+            smmu::set_stream(0, sid, StreamState::Invalid).expect("invalid");
+            clear(pages[1]);
+            dma(BUF, pages[1].get(), true);
+            assert_eq!(read(pages[1]), [0; 64], "an invalid stream's write reached memory");
+            let mut ev = smmu::stream_events(0, sid);
+            for _ in 0..100 {
+                if ev.total > before {
+                    break;
+                }
+                crate::time::sleep_ns(&s, 10_000_000);
+                ev = smmu::stream_events(0, sid);
+            }
+            assert!(ev.total > before, "no event for stream {sid:#x}");
+            // QEMU reports each access of the transfer: wait for the last.
+            loop {
+                crate::time::sleep_ns(&s, 100_000_000);
+                let now = smmu::stream_events(0, sid);
+                if now.total == ev.total {
+                    break;
+                }
+                ev = now;
+            }
+            let e = ev.last.expect("the event");
+            assert_eq!(e.sid.0, sid);
+            assert_eq!(e.record.name(), "C_BAD_STE", "{e:?}");
+
+            // Config abort: stopped, silently.
+            smmu::set_stream(0, sid, StreamState::Abort).expect("abort");
+            let before = smmu::stream_events(0, sid).total;
+            dma(BUF, pages[1].get(), true);
+            crate::time::sleep_ns(&s, 100_000_000);
+            assert_eq!(read(pages[1]), [0; 64], "an aborted stream's write reached memory");
+            assert_eq!(smmu::stream_events(0, sid).total, before, "an abort STE raised an event");
+
+            // Back as it was: no context, no bus mastering.
+            smmu::set_stream(0, sid, StreamState::Invalid).expect("invalid");
+            cfg.write16(a, pci::header::COMMAND, command);
+            crate::mm::unmap_device(regs, 0x100);
+            for pa in pages {
+                crate::mm::free_pages(pa, vm::Order::ZERO);
+            }
         }
     }
 }

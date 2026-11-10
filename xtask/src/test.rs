@@ -228,7 +228,7 @@ fn case_names(arches: &[Arch]) -> Vec<String> {
         "aarch64-shell" => 25,
         "x86_64-shell" => 22,
         "x86_64-bhyve-shell" => 9,
-        "aarch64" | "aarch64-el2" | "aarch64-smmu" => 6,
+        "aarch64" | "aarch64-el2" | "aarch64-smmu" | "aarch64-smmu-warm-reset" => 6,
         "x86_64" | "aarch64-net" | "aarch64-multiuser" => 5,
         n if n.ends_with("-net") || n.ends_with("-multiuser") => 4,
         _ => 2,
@@ -410,9 +410,9 @@ const BOOT_CASES: &[BootCase] = &[
         el2: false,
         iommu: true,
         warm_reset: false,
-        // The SMMU (docs/IOMMU.md §8): stage 0 attaches it and leaves it
-        // alone, so DMA runs untranslated; the user-memory tests are the
-        // plain case's.
+        // The SMMU (docs/IOMMU.md §8): stage 2 runs it, every device's
+        // stream bypassed, the edu device's (which no driver takes)
+        // aborting; the user-memory tests are the plain case's.
         cmdline: "abyss.test.skip=kernel::tests::user_memory",
         pass_status: 0,
         expect: Some("smmu0: <ARM System Memory Management Unit> on acpi0"),
@@ -431,6 +431,21 @@ const BOOT_CASES: &[BootCase] = &[
         pass_status: 0,
         expect: None,
         expect_saved: None,
+    },
+    BootCase {
+        name: "aarch64-smmu-warm-reset",
+        vmm: Vmm::Qemu,
+        arch: Arch::Aarch64,
+        el2: false,
+        iommu: true,
+        warm_reset: true,
+        // The first boot shuts its devices down before the reset, as a
+        // reboot does, so the SMMU is quiesced (docs/IOMMU.md §4.11); the
+        // second runs the tests with it enabled again.
+        cmdline: "abyss.test.orderly_reset=1 abyss.test.skip=kernel::tests::user_memory",
+        pass_status: 0,
+        expect: Some("smmu0: <ARM System Memory Management Unit> on acpi0"),
+        expect_saved: Some("logring: devices shut down before the reset"),
     },
     BootCase {
         name: "x86_64-warm-reset",
@@ -959,6 +974,12 @@ fn boot(
                 }
             };
             d.extend(["-device".into(), format!("ide-hd,drive=sata0,bus={bus}")]);
+            // Behind the SMMU, an idle device whose DMA a test drives:
+            // QEMU's `edu`, reaching all of RAM (its default mask is 28
+            // bits, below virt's RAM).
+            if case.iommu {
+                d.extend(["-device".into(), "edu,dma_mask=0xffffffffffffffff".into()]);
+            }
             d
         }
     };
