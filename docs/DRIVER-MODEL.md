@@ -881,7 +881,7 @@ impl AttachCx<'_, B> {
    that hold nothing else. Buffers from zones that hold only device payload (mbuf clusters,
    buffer-cache pages) are mapped in place, sharing a page only with other payload, as FreeBSD
    maps them ([ADR-0022](adr/0022-smmuv3-in-p9.md); bouncing every 2 KiB cluster would copy all
-   network traffic).
+   network traffic). A buffer type says which it is with `DmaBuf::payload_only`.
 3. Unmapping completes before the CPU reuses a buffer, including the IOTLB invalidation: strict,
    per unmap, batched only within it. The CPU never gets back a page the device can still reach.
 4. Interrupt remapping is enabled together with DMA remapping (P11).

@@ -2,7 +2,8 @@
 
 - Status: **Accepted** ([ADR-0022](adr/0022-smmuv3-in-p9.md)). The design for Phase 9's SMMUv3 item
   ([ROADMAP.md](ROADMAP.md#phase-9-sky1-hardening-l)). Stage 0 (§8) landed 2026-11-10; what it
-  decided where this design was silent or wrong is in §14, and stage 2's in §15
+  decided where this design was silent or wrong is in §14, stage 2's in §15, and stage 3's in
+  §16
 - Date: 2026-11-10
 - Scope: the arm64 SMMUv3 as IORT describes it, the IOMMU framework it plugs into (units, domains,
   contexts, IOVA allocation), the `Iommu` backend of `vm::dma`, and MSI through a translated
@@ -345,7 +346,7 @@ pub trait IoDomain: Send + Sync {
 - **Rule 2** (DRIVER-MODEL §8.4: a mapping covers whole pages holding nothing else; smaller
   buffers are bounced) is where this design is unsure. FreeBSD maps the page and exposes its
   neighbors. Bouncing every buffer smaller than a page would copy every 2 KiB mbuf cluster.
-  §13 question 5.
+  §13 question 5; decision 5 settled it, as §16 note 5 builds it.
 
 ### 4.6 IOVA allocation
 
@@ -837,3 +838,127 @@ calls it at the right moments); `Unit::set_stream` already does the break-before
 a `Ste::Stage1` needs, and `CMD_CFGI_CD` and the TLBI commands go through the same queue
 (`Unit::push` and `Unit::sync`, private now). The event path has the stream, the place to name
 the device.
+
+## 16. Stage 3 as built (2026-11-10)
+
+Stage 3 (§8) translates DMA: `sys/iommu::domain::Domain` (an IOVA space and the I/O page tables
+over `pt::smmu`, implementing `vm::dma::IoDomain`), `vm::dma`'s `Backend::Iommu` (`DmaTag` is
+`Clone` now), the broker's backend choice, and the unit's contexts in `drivers/smmu`. Where this
+design was silent or wrong, it made these decisions:
+
+1. **MSI in stage 3 (what §8 missed).** §8's stage 3 row tests with `hw.pci.enable_msix=0`, but
+   says nothing of the default configuration, where a translated function's MSI write to the ITS
+   doorbell would fault and its interrupts never arrive. So until stage 4, a unit translates only
+   while message-signalled interrupts are off: the kernel tells the framework
+   (`iommu_framework::set_messages_untranslated`, from `pci::msi::available()` once `pci::init` has
+   or has not installed the ITS), `translating()` is `hw.iommu.dma` and not that, and a unit that
+   would translate otherwise gives every context pass-through (stage 2's behavior), prints
+   `smmu0: message-signalled interrupts are not translated: devices pass through`, and reads
+   `dev.smmu.N.dma: 0`. In AbyssBSD `hw.pci.enable_msix=0` (or `enable_msi=0`) turns off both
+   MSI and MSI-X (the ITS is not installed), so "INTx under translation" needs that one knob.
+   `aarch64-smmu` now runs with it (translated); `aarch64-smmu-warm-reset` keeps MSI-X and so
+   covers the pass-through fallback. Stage 4 removes the rule.
+2. **Interfaces.** `IoDomain` is `reach()` (the first physical address the unit cannot output,
+   so memory for a translated device comes from below it), `map(ranges, write, constraints)`
+   (physical ranges in order, each joining the next at a page boundary, at one IOVA range;
+   `write` false is §4.7's read-only `ToDevice`), `unmap(&IoMapping)`, and `doorbell(pa)`.
+   `bus::iommu::Iommu` has one method, `context(stream, &ContextRequest)`, replacing stage 2's
+   `pass_through`; the request carries what is wanted (`Want::Translate` or
+   `Want::PassThrough`), the requester's name and RID, its PCI segment, the device's coherency
+   (`dma_limits`), and the host bridge's windows. The unit keeps its contexts by stream (FreeBSD
+   keys them by requester; §14 note 7 made that the stream). A domain reaches its unit through
+   `iommu_framework::domain::Invalidate` (a `Weak` back-reference, so the unit's contexts and
+   the domains do not keep each other alive).
+3. **What a request gets.** The first request for a stream decides its context: translated when
+   the unit translates, the request wants it, and `hw.busdma.pciD.B.S.F` (else
+   `hw.busdma.default`) is not `bounce` (FreeBSD's `iommu_bus_dma_is_dev_disabled`, read from the
+   kernel environment); pass-through otherwise. Later requests get that context, except that a
+   request for physical addresses always gets `Context::PassThrough` (its tag direct), the stream
+   left as it is. That serves the virtio rule (§4.4): `VirtioDevice::dma_tag` asks for a
+   pass-through tag when `ACCESS_PLATFORM` was not negotiated (the four virtio drivers call it
+   instead of `AttachCx::dma_tag`); such a device uses physical addresses whatever the STE says,
+   by the virtio specification and in QEMU.
+4. **Context lifetime.** Domains are counted (`Arc`): tags, `DmaCoherent` memory, pools, and the
+   unit's context table hold them. A context lives as long as its unit, which covers a detach and
+   re-attach (§4.4). Ending one when its node is deleted needs node deletion, which only hotplug
+   brings (P11); `smmu::release_context` does it for tests: the STE invalid, then the ASID's TLB
+   entries invalidated and its descriptor freed; the domain's tables go with its last reference.
+5. **Rule 2** (§13 decision 5) is `DmaBuf::payload_only`, false by default. `PageRun` and
+   `IoBuf`'s lent and fresh pages (buffer-cache pages) say true. A buffer that does not is mapped
+   in place only if every range of it is whole pages; otherwise it is bounced, and the bounce
+   pages are mapped through the domain like any buffer. No mbuf cluster reaches DMA yet: `rge`
+   and `vtnet` copy each frame they send into a heap buffer, which under translation is bounced
+   too, a second copy per frame. Receive buffers are coherent memory, mapped once. Stage 6
+   should give transmit a payload-only buffer (a cluster zone or a pool) before it measures.
+6. **Mapping in place** also needs the buffer's physical pieces to meet at page boundaries (one
+   contiguous IOVA range), its pages below the unit's reach, and its start aligned as the tag
+   asks (beyond a page, a page-aligned start, which the domain then aligns); otherwise it is
+   bounced. A tag's address limit and alignment become the allocation's (`gas` `limit`,
+   `align`); its boundary is given to `gas` only when the buffer fits in one boundary unit, and
+   otherwise the segments are split at boundaries as on the direct backend.
+7. **Invalidation.** Map enters the pages under the domain's table lock, then issues
+   `CMD_TLBI_NH_VA` (leaf) per page and one sync, as FreeBSD's `smmu_map`; a failure there is
+   ignored, since the entries are in place either way. Unmap clears the entries, then
+   `CMD_TLBI_NH_VA` per page, or one `CMD_TLBI_NH_ASID` past 512 pages
+   (`smmu::unit::TLBI_ASID_PAGES`), and one sync, and only then frees the IOVA range. If the sync
+   is not confirmed, the range is never reused (`Domain::leaked_pages`); FreeBSD frees it anyway.
+   Range invalidation (IDR3.RIL) is stage 6's.
+8. **Locks.** A domain has a spin lock for its tables and one for its space; the unit has its
+   command queue's. None is held while another is taken, so CPUs mapping for different devices
+   meet only at the unit's queue, as on FreeBSD. Making a context holds the unit's context table
+   while it takes the unit's lock; the event thread takes them one after the other.
+9. **Tables.** Frames come from the memory of the unit's own direct tag, below `1 << OAS`, zeroed,
+   and through the direct map; on a unit whose walks are not coherent each frame a change touched
+   is cleaned before the unit is told. A range that crosses bit 47 is entered in two calls (§4.6's
+   stage 1 note). A domain's tables are freed when it goes. The attributes follow the device's
+   coherency as the broker computes it from `_CCA` (§4.7).
+10. **ASIDs and descriptors.** ASIDs come from a bitmap of IDR0's 8 or 16 bits, 0 never given out.
+    One CD per domain, keyed by its ASID, in its own page of the unit's coherent memory, written
+    words 1–7 then word 0 with V. The STE's `S1STALLD` is set when the SMMU's stall model is
+    stall-and-terminate (FreeBSD sets it unless stalls are forced). `CMD_CFGI_CD` goes with the
+    final `CMD_CFGI_STE`, before its sync.
+11. **Windows.** The ACPI bus records each host bridge's produced memory windows (`_CRS` address
+    descriptors that are not consumers, at `_MIN`, as the board port reads `Minimum`) in
+    `Translation::Pci`; each domain reserves them with `reserve_extend`. QEMU's are
+    `0x1000_0000` + `0x2eff_0000` and `0x80_0000_0000` + 512 GiB.
+12. **Relaxed ordering.** The PCI bus gives each function with a requester ID a hook
+    (`bus::iommu::RequesterHook`), which the broker runs when the stream's first translated
+    context is made: it clears `DEVCTL.RO` if set (unless `hw.iommu.relaxed_ordering=1`) and the
+    broker prints `<dev>: relaxed ordering disabled (IOMMU translation)` under the function's
+    name. The bit is cleared on the function itself; FreeBSD's port clears it on the requester,
+    which differs only for a conventional function behind a PCIe-to-PCI bridge, which has no PCIe
+    capability. There is no saved configuration yet for a reset to restore over it. QEMU's
+    devices do not set RO, so the line never shows there; the board's should.
+13. **Event lines** (§4.10): for a stream with a context, `smmu0: nvme0 (rid 0x10): translation
+    fault at 0x1234000 (write)` comes before FreeBSD's lines, under the same per-stream rate
+    limit. The name is the requester's node's (a virtio device's is its transport's,
+    `virtio_pciN`), or, for a function no driver has, its selector (`pci0:0:6:0`). FreeBSD's
+    quirk table (RTL8168 faults at IOVA 0) is not carried: whether the board's RTL8126 needs an
+    entry is stage 5's finding (§4.10).
+14. **The doorbell** (§4.8) is built and host-tested, `IoDomain::doorbell`: one page per domain,
+    Device-nGnRE, read-write, mapped on first use. Nothing calls it until stage 4.
+15. **The boot disk** of `aarch64-smmu` stays virtio-blk (§14 note 11 put NVMe as the boot disk in
+    stage 3): the storage ktests already read and write two NVMe namespaces under translation,
+    and an NVMe boot disk would renumber the `nda` disks they name.
+16. **Tests.** Host: `drivers/smmu/src/tests_dma.rs` runs `vm::dma` tags over domains over the
+    driver's unit over `iommu::model`, in one memory that the CPU side reaches as `DmaMemory` and
+    the model as `PhysMemory` (so the model walks the tables the kernel's code wrote): strict
+    unmap and reuse, read-only `ToDevice`, scattered pages as one segment, rule 2's bounces,
+    constraints on bus addresses, coherent memory and pools mapped for life, windows, contexts per
+    stream and pass-through requests, the doorbell, event lines, and stage 1's randomized
+    strict-unmap test redone through tags (it fails if unmap skips its invalidation).
+    `sys/acpi` checks QEMU's windows; `sys/iommu` the `hw.busdma` knobs. QEMU `aarch64-smmu`
+    (`hw.pci.enable_msix=0`): every storage, network, and file-system ktest under translation;
+    `smmu_translates_dma` checks each NVMe controller's translated STE, its event name, and
+    relaxed ordering off, then gives `edu` a context through the broker and moves memory through
+    IOVAs both ways, checks that an unmapped buffer's old IOVA faults with nothing written
+    (unmap before reuse), and that a read of an IOVA never mapped faults with the event the
+    device's line names.
+
+For stage 4: `IoDomain::doorbell` is ready; the MSI path (`pci::bus::msix_lines`, `msi_line`,
+and virtio's own MSI-X setup, which does not ask for a context at all) gets the context from
+`AttachCx::iommu_context` (which now returns it) and composes the message address through it;
+then `iommu_framework::set_messages_untranslated` and the `enable_msix=0` in `aarch64-smmu` go.
+For stage 5: the relaxed-ordering lines, the event names (`nvme0 (rid 0xc100)`), and whether
+`rge` faults at IOVA 0 are the board's to show; `hw.iommu.dma=1` translates there only once
+stage 4 has landed (the board uses MSI-X).

@@ -261,7 +261,7 @@ symbolized backtrace, and checks the VMM's exit status:
 | `x86_64` | QEMU q35 + OVMF | |
 | `aarch64` | QEMU virt + edk2, firmware at EL1 | |
 | `aarch64-el2` | QEMU virt + edk2, firmware at EL2 | the EL2 stub and drop to EL1 |
-| `aarch64-smmu` | QEMU virt with an SMMUv3 (`iommu=smmuv3`) and an `edu` device | `smmu0` enabled; devices bypassed, `edu`'s stream aborting with `C_BAD_STE` (IOMMU.md §15) |
+| `aarch64-smmu` | QEMU virt with an SMMUv3 (`iommu=smmuv3`) and an `edu` device, `hw.pci.enable_msix=0` | `smmu0` translating every device's DMA (`dev.smmu.0.dma: 1`); `edu`'s stream aborting with `C_BAD_STE`, then translated, faulting on unmapped IOVAs (IOMMU.md §15, §16) |
 | `aarch64-warm-reset`, `x86_64-warm-reset` | QEMU, two boots | the loader saved the first boot's log to `EFI/ABYSS/PREVLOG.TXT` |
 | `aarch64-smmu-warm-reset` | QEMU, two boots, SMMUv3 | the first boot shut its devices down (the SMMU quiesced) before the reset |
 | `x86_64-watchdog` | QEMU, two boots | the first boot's `watchdogd` patted `ichwd` through `/dev/fido` past its timeout, and once it was killed the watchdog reset the machine |
