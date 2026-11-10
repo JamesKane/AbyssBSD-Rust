@@ -33,10 +33,11 @@ use sync::{Once, SpinLock};
 
 use crate::driver::{AttachCx, Bound, DriverDecl, Faults, Ledger};
 use crate::platform::Platform;
+use crate::provider::{ClockSource, DomainSource, ResetSource};
 use crate::sysctl::DeviceStrings;
 use crate::types::{
-    Announce, AttachError, DetachReason, DeviceId, Ident, Need, NodeState, Resource, ResourceError,
-    WaitReason,
+    Announce, AttachError, DetachReason, DeviceId, Ident, Line, LineKind, Need, NodeState,
+    Resource, ResourceError, WaitReason,
 };
 
 mod devctl;
@@ -73,6 +74,40 @@ struct Node {
     fixed: Option<usize>,
     /// Its nomatch event went out (FreeBSD's `DF_DONENOMATCH`).
     nomatch_sent: bool,
+    /// The clock, reset, and power-domain lines its bus read from
+    /// firmware.
+    lines: Vec<Line>,
+    /// The providers its driver published.
+    provides: Provides,
+}
+
+/// The providers a node's driver published (DRIVER-MODEL.md §9.3).
+#[derive(Default)]
+struct Provides {
+    clocks: Option<Arc<ClockSource>>,
+    resets: Option<Arc<ResetSource>>,
+    domains: Option<Arc<DomainSource>>,
+}
+
+impl Provides {
+    fn revoke(&self) {
+        if let Some(c) = &self.clocks {
+            c.revoke();
+        }
+        if let Some(r) = &self.resets {
+            r.revoke();
+        }
+        if let Some(d) = &self.domains {
+            d.revoke();
+        }
+    }
+}
+
+/// A published provider, as [`Manager::provide`] takes it.
+pub(crate) enum Provided {
+    Clocks(Arc<ClockSource>),
+    Resets(Arc<ResetSource>),
+    Domains(Arc<DomainSource>),
 }
 
 /// Starts run in tree order (DRIVER-MODEL.md §4.3): a bus adds children
@@ -278,6 +313,8 @@ pub fn init(
         disabled: None,
         fixed: None,
         nomatch_sent: false,
+        lines: Vec::new(),
+        provides: Provides::default(),
     }));
     topo.graph.add_node(0);
     let faults = (o.fault_one_in > 0).then_some(Faults {
@@ -439,6 +476,8 @@ impl Manager {
                 disabled: None,
                 fixed: None,
                 nomatch_sent: false,
+                lines: Vec::new(),
+                provides: Provides::default(),
             };
             if index as usize == t.nodes.len() {
                 t.nodes.push(Some(node));
@@ -505,6 +544,8 @@ impl Manager {
             disabled: None,
             fixed: None,
             nomatch_sent: false,
+            lines: Vec::new(),
+            provides: Provides::default(),
         };
         let (index, generation) = match t.free.pop() {
             Some((i, g)) => (i, g),
@@ -608,6 +649,58 @@ impl Manager {
         self.bump();
     }
 
+    /// Sets the clock, reset, and power-domain lines `id` consumes.
+    pub(crate) fn set_lines(&self, s: &Sleepable, id: DeviceId, lines: Vec<Line>) {
+        if let Some(n) = self.topo.write(s).node_mut(id) {
+            n.lines = lines;
+        }
+    }
+
+    /// The lines `id` consumes.
+    pub(crate) fn lines(&self, s: &Sleepable, id: DeviceId) -> Vec<Line> {
+        self.topo
+            .read(s)
+            .node(id)
+            .map(|n| n.lines.clone())
+            .unwrap_or_default()
+    }
+
+    /// Publishes a provider for `id`, replacing one of the same kind.
+    pub(crate) fn provide(&self, s: &Sleepable, id: DeviceId, p: Provided) {
+        let mut t = self.topo.write(s);
+        let Some(n) = t.node_mut(id) else {
+            return;
+        };
+        let old = match p {
+            Provided::Clocks(c) => n.provides.clocks.replace(c).map(Provided::Clocks),
+            Provided::Resets(r) => n.provides.resets.replace(r).map(Provided::Resets),
+            Provided::Domains(d) => n.provides.domains.replace(d).map(Provided::Domains),
+        };
+        match old {
+            Some(Provided::Clocks(c)) => c.revoke(),
+            Some(Provided::Resets(r)) => r.revoke(),
+            Some(Provided::Domains(d)) => d.revoke(),
+            None => {}
+        }
+    }
+
+    /// The provider of `kind` that `supplier` published.
+    pub(crate) fn provider(
+        &self,
+        s: &Sleepable,
+        supplier: DeviceId,
+        kind: LineKind,
+    ) -> Result<Provided, ResourceError> {
+        let t = self.topo.read(s);
+        let p = t.node(supplier).map(|n| &n.provides);
+        let found = match kind {
+            LineKind::Clock => p.and_then(|p| p.clocks.clone()).map(Provided::Clocks),
+            LineKind::Reset => p.and_then(|p| p.resets.clone()).map(Provided::Resets),
+            LineKind::PowerDomain => p.and_then(|p| p.domains.clone()).map(Provided::Domains),
+        };
+        found.ok_or(ResourceError::NoProvider)
+    }
+
     /// Adds a disabled channel under `parent`: it takes a unit of its
     /// class, as FreeBSD's named children do, but is never attached
     /// (`devinfo` shows it "(disabled)").
@@ -641,6 +734,8 @@ impl Manager {
             disabled: Some(class),
             fixed: None,
             nomatch_sent: false,
+            lines: Vec::new(),
+            provides: Provides::default(),
         };
         let (index, generation) = match t.free.pop() {
             Some((i, g)) => (i, g),
@@ -966,6 +1061,8 @@ impl Manager {
         let Some(n) = t.node_mut(id) else {
             return;
         };
+        // Providers published by a start that failed never served anyone.
+        core::mem::take(&mut n.provides).revoke();
         let unit = n.unit.take();
         n.driver = None;
         n.start = StartPhase::Attach;
@@ -1116,7 +1213,7 @@ impl Manager {
         s: &Sleepable,
     ) -> Result<(), DetachError> {
         // Take the binding out under the lock; the node becomes ours.
-        let (binding, children, name, unit) = {
+        let (binding, children, name, unit, provides) = {
             let mut t = self.topo.write(s);
             let Some(n) = t.node(id) else {
                 return Err(DetachError::NoSuchDevice);
@@ -1136,6 +1233,8 @@ impl Manager {
             let n = t.node_mut(id).expect("checked above");
             n.state = NodeState::Detaching(why);
             let binding = n.binding.take();
+            // No consumer finds its providers from now on.
+            let provides = core::mem::take(&mut n.provides);
             // Graph consumers that wait on it (required and power edges)
             // detach before it too.
             for e in t.graph.consumers(id.index) {
@@ -1146,12 +1245,14 @@ impl Manager {
                     children.push(c);
                 }
             }
-            (binding, children, name, unit)
+            (binding, children, name, unit, provides)
         };
-        // 2. Children and consumers first, newest first.
+        // 2. Children and consumers first, newest first; then its
+        // providers stop, before its instance goes.
         for c in children.into_iter().rev() {
             let _ = self.detach(c, DetachReason::Parent, s);
         }
+        provides.revoke();
         // 3-7. The binding's own teardown. Children a bus driver created
         // go with it, before its instance: their bus data may hold the
         // bus's grants (a transport's registers).

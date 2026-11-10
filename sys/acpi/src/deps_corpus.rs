@@ -640,3 +640,47 @@ fn x870e_graph() {
     assert!(absent(&i, &deps).is_empty());
     assert!(deps.platform.is_empty());
 }
+
+/// `acpi0` hands each Sky1 child its clock and reset lines, by the path
+/// of the device serving them.
+#[test]
+fn opi6p_children_get_their_lines() {
+    use bus::LineKind;
+    let (_, tables) = machines().into_iter().find(|(n, _)| *n == "opi6p").unwrap();
+    let (mut i, mut h) = load("opi6p", &tables);
+    let walk = crate::bus::walk(&mut i, &mut h, &dma_controllers("opi6p"));
+    let lines = |path: &str| {
+        walk.found
+            .iter()
+            .find(|f| f.device.path == path)
+            .map(|f| f.lines.clone())
+            .unwrap_or_default()
+    };
+    let line = |kind, name: Option<&str>, sup: &str, id| {
+        (kind, name.map(String::from), String::from(sup), id)
+    };
+    assert_eq!(
+        lines("\\_SB_.COM0"),
+        [
+            line(LineKind::Clock, Some("apb_pclk"), "\\_SB_.CCLK", 0xf6),
+            line(LineKind::Clock, Some("uartclk"), "\\_SB_.CCLK", 0x107),
+        ]
+    );
+    assert_eq!(
+        lines("\\_SB_.GPI0"),
+        [
+            line(LineKind::Clock, None, "\\_SB_.CCLK", 0x106),
+            line(LineKind::Reset, Some("apb_reset"), "\\_SB_.RST1", 26),
+        ]
+    );
+    // DMA0's clock comes from DMA1's table.
+    assert_eq!(
+        lines("\\_SB_.DMA0"),
+        [
+            line(LineKind::Clock, None, "\\_SB_.CCLK", 0xef),
+            line(LineKind::Reset, Some("dma_reset"), "\\_SB_.RST1", 11),
+        ]
+    );
+    let total: usize = walk.found.iter().map(|f| f.lines.len()).sum();
+    assert_eq!(total, 183 + 109);
+}

@@ -24,6 +24,7 @@
 
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use sched::Sleepable;
 use sched::lock::{LockClass, Mutex};
@@ -110,6 +111,7 @@ pub trait PowerDomain: Send + Sync {
 pub struct ClockSource {
     imp: Arc<dyn Clock>,
     enabled: Mutex<BTreeMap<u32, u32>>,
+    revoked: AtomicBool,
 }
 
 impl ClockSource {
@@ -119,6 +121,7 @@ impl ClockSource {
         Arc::new(Self {
             imp,
             enabled: Mutex::new(&SOURCE, BTreeMap::new()),
+            revoked: AtomicBool::new(false),
         })
     }
 
@@ -138,6 +141,7 @@ impl ClockSource {
     }
 
     fn enable(&self, s: &Sleepable, id: u32) -> Result<(), ProviderError> {
+        self.live()?;
         let mut counts = self.enabled.lock(s);
         let n = counts.get(&id).copied().unwrap_or(0);
         if n == 0 {
@@ -148,6 +152,7 @@ impl ClockSource {
     }
 
     fn disable(&self, s: &Sleepable, id: u32) -> Result<(), ProviderError> {
+        self.live()?;
         let mut counts = self.enabled.lock(s);
         let n = counts.get(&id).copied().unwrap_or(0);
         if n == 1 {
@@ -200,16 +205,19 @@ impl ClockHandle {
 
     /// The current rate.
     pub fn rate(&self, s: &Sleepable) -> Result<Hz, ProviderError> {
+        self.source.live()?;
         self.source.imp.rate(s, self.id)
     }
 
     /// The rate [`ClockHandle::set_rate`] would give.
     pub fn round_rate(&self, s: &Sleepable, want: Hz) -> Result<Hz, ProviderError> {
+        self.source.live()?;
         self.source.imp.round_rate(s, self.id, want)
     }
 
     /// Sets the rate.
     pub fn set_rate(&self, s: &Sleepable, want: Hz) -> Result<(), ProviderError> {
+        self.source.live()?;
         let _serial = self.source.enabled.lock(s);
         self.source.imp.set_rate(s, self.id, want)
     }
@@ -256,6 +264,7 @@ impl Line {
 pub struct ResetSource {
     imp: Arc<dyn Reset>,
     lines: Mutex<BTreeMap<u32, Line>>,
+    revoked: AtomicBool,
 }
 
 impl ResetSource {
@@ -265,6 +274,7 @@ impl ResetSource {
         Arc::new(Self {
             imp,
             lines: Mutex::new(&SOURCE, BTreeMap::new()),
+            revoked: AtomicBool::new(false),
         })
     }
 
@@ -301,6 +311,7 @@ impl ResetSource {
         let mut lines = self.lines.lock(s);
         let l = lines.entry(line).or_default();
         f(l);
+        self.live()?;
         let want = l.wanted();
         let r = if force || l.applied != Some(want) {
             if want {
@@ -359,6 +370,7 @@ impl ResetHandle {
     /// [`ProviderError::Shared`] if others hold the line and the provider
     /// does not declare its group safe to reset.
     pub fn pulse(&mut self, s: &Sleepable, hold: Micros) -> Result<(), ProviderError> {
+        self.source.live()?;
         let mut lines = self.source.lines.lock(s);
         let l = lines.entry(self.line).or_default();
         if l.holders > 1 && !self.source.imp.group_safe(self.line) {
@@ -410,6 +422,7 @@ impl Drop for ResetHandle {
 pub struct DomainSource {
     imp: Arc<dyn PowerDomain>,
     state: Mutex<Votes>,
+    revoked: AtomicBool,
 }
 
 #[derive(Default)]
@@ -438,6 +451,7 @@ impl DomainSource {
         Arc::new(Self {
             imp,
             state: Mutex::new(&SOURCE, Votes::default()),
+            revoked: AtomicBool::new(false),
         })
     }
 
@@ -468,6 +482,11 @@ impl DomainSource {
         level: Option<PerfLevel>,
     ) -> Result<(), ProviderError> {
         let mut st = self.state.lock(s);
+        if level.is_none() {
+            // A withdrawn vote is gone even if the provider is not.
+            st.votes.remove(&(id, voter));
+        }
+        self.live()?;
         if let Some(l) = level
             && l.0 >= self.imp.levels(id)?
         {
@@ -554,6 +573,34 @@ debug_by!(DomainSource, "DomainSource",);
 debug_by!(ClockHandle, "ClockHandle", id, enabled);
 debug_by!(ResetHandle, "ResetHandle", line, asserting, held);
 debug_by!(PowerVote, "PowerVote", id, voter, voting);
+
+macro_rules! revocable {
+    ($($t:ty),*) => {$(
+        impl $t {
+            /// Stops every call to the provider: its driver is detaching.
+            /// Calls through handles fail with [`ProviderError::Revoked`]
+            /// from now on, and dropping a handle no longer reaches it.
+            pub fn revoke(&self) {
+                self.revoked.store(true, Ordering::Release);
+            }
+
+            /// Whether [`Self::revoke`] has run.
+            pub fn is_revoked(&self) -> bool {
+                self.revoked.load(Ordering::Acquire)
+            }
+
+            fn live(&self) -> Result<(), ProviderError> {
+                if self.is_revoked() {
+                    Err(ProviderError::Revoked)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    )*};
+}
+
+revocable!(ClockSource, ResetSource, DomainSource);
 
 #[cfg(test)]
 mod tests {

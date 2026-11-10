@@ -27,10 +27,14 @@ use sched::lock::{LockClass, Mutex};
 use sched::{IrqCx, Sleepable};
 use vm::dma::{DmaConstraints, DmaTag};
 
-use crate::manager::Manager;
+use crate::manager::{Manager, Provided};
+use crate::provider::{
+    Clock, ClockHandle, ClockSource, DomainSource, PowerDomain, PowerVote, Reset, ResetHandle,
+    ResetSource,
+};
 use crate::types::{
-    Announce, AttachError, Busy, Concurrency, DeviceId, Ident, Ids, Resource, ResourceError,
-    StopReason,
+    Announce, AttachError, Busy, Concurrency, DeviceId, Ident, Ids, Line, LineKind, Resource,
+    ResourceError, StopReason,
 };
 
 /// A device driver.
@@ -530,6 +534,60 @@ impl<'a> AttachCx<'a> {
         let p = self.mgr.platform();
         Ok(DmaTag::new(p.dma_memory(), c, p.top_of_ram()))
     }
+
+    /// The device's line of `kind` its driver asks for by `name`: `None`
+    /// asks for its unnamed line, or its only one.
+    fn line(&self, kind: LineKind, name: Option<&str>) -> Result<Line, ResourceError> {
+        let lines = self.mgr.lines(self.s, self.node);
+        let mut mine = lines.into_iter().filter(|l| l.kind == kind);
+        let found = match name {
+            Some(n) => mine.find(|l| l.name.as_deref() == Some(n)),
+            None => {
+                let all: Vec<Line> = mine.collect();
+                match all.iter().position(|l| l.name.is_none()) {
+                    Some(i) => all.into_iter().nth(i),
+                    None if all.len() == 1 => all.into_iter().next(),
+                    None => None,
+                }
+            }
+        };
+        found.ok_or(ResourceError::NoSuchLine)
+    }
+
+    /// A handle to the clock its driver asks for by `name` (firmware's
+    /// clock name; `None` for its only one), not yet enabled
+    /// (DRIVER-MODEL.md §8.5). The clock's provider attached first: the
+    /// line's supplier is a required edge.
+    pub fn clock(&mut self, name: Option<&str>) -> Result<ClockHandle, ResourceError> {
+        let l = self.line(LineKind::Clock, name)?;
+        match self.mgr.provider(self.s, l.supplier, LineKind::Clock)? {
+            Provided::Clocks(c) => Ok(c.handle(l.id)),
+            _ => Err(ResourceError::NoProvider),
+        }
+    }
+
+    /// A handle to the reset line its driver asks for by `name`, which
+    /// joins the line's holders without changing it.
+    pub fn reset(&mut self, name: Option<&str>) -> Result<ResetHandle, ResourceError> {
+        let l = self.line(LineKind::Reset, name)?;
+        match self.mgr.provider(self.s, l.supplier, LineKind::Reset)? {
+            Provided::Resets(r) => Ok(r.handle(self.s, l.id)),
+            _ => Err(ResourceError::NoProvider),
+        }
+    }
+
+    /// A vote on the power domain its driver asks for by `name`, for
+    /// [`crate::provider::PerfLevel::OFF`] until it votes.
+    pub fn power_domain(&mut self, name: Option<&str>) -> Result<PowerVote, ResourceError> {
+        let l = self.line(LineKind::PowerDomain, name)?;
+        match self
+            .mgr
+            .provider(self.s, l.supplier, LineKind::PowerDomain)?
+        {
+            Provided::Domains(d) => Ok(d.handle(self.s, l.id)),
+            _ => Err(ResourceError::NoProvider),
+        }
+    }
 }
 
 /// The trampoline data for one interrupt handler.
@@ -703,6 +761,39 @@ impl<D: Driver> StartCx<'_, D> {
             self.mgr
                 .add_dependency(self.s, consumer, supplier, kind, origin);
         }
+    }
+
+    /// Sets the clock, reset, and power-domain lines child `consumer`
+    /// consumes, as firmware describes them; its driver asks for them by
+    /// name in attach. The bus also makes each line's supplier a required
+    /// dependency of the child.
+    pub fn set_lines(&mut self, consumer: DeviceId, lines: Vec<Line>) {
+        if self.children_contains(consumer) {
+            self.mgr.set_lines(self.s, consumer, lines);
+        }
+    }
+
+    /// Publishes this device as a clock provider: consumers whose lines
+    /// name it get handles from it. It is revoked when the device
+    /// detaches, after its consumers have.
+    pub fn provide_clocks(&mut self, imp: Arc<dyn Clock>) {
+        let src = ClockSource::new(imp);
+        self.mgr
+            .provide(self.s, self.binding.node, Provided::Clocks(src));
+    }
+
+    /// Publishes this device as a reset controller.
+    pub fn provide_resets(&mut self, imp: Arc<dyn Reset>) {
+        let src = ResetSource::new(imp);
+        self.mgr
+            .provide(self.s, self.binding.node, Provided::Resets(src));
+    }
+
+    /// Publishes this device as a power-domain provider.
+    pub fn provide_power_domains(&mut self, imp: Arc<dyn PowerDomain>) {
+        let src = DomainSource::new(imp);
+        self.mgr
+            .provide(self.s, self.binding.node, Provided::Domains(src));
     }
 
     fn children_contains(&self, id: DeviceId) -> bool {

@@ -39,6 +39,6 @@ pub use manager::{
 pub use platform::Platform;
 pub use roothold::{RootHold, root_mount_hold, root_mount_wait};
 pub use types::{
-    Announce, AttachError, Busy, Concurrency, DetachReason, DeviceId, Ident, Ids, Need, NodeState,
-    Resource, ResourceError, StopReason, TestId, TestIdent, WaitReason,
+    Announce, AttachError, Busy, Concurrency, DetachReason, DeviceId, Ident, Ids, Line, LineKind,
+    Need, NodeState, Resource, ResourceError, StopReason, TestId, TestIdent, WaitReason,
 };

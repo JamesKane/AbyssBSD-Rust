@@ -874,12 +874,18 @@ case of this.
   supplier edges:
 
   ```rust
-  let core = cx.clock("core")?;            // Option-returning variants exist for optional ones
-  let rst  = cx.reset("gpu")?;
-  core.set_rate(Hz(800_000_000))?;          // sleeps: ThreadCx and attach/start/stop only
-  core.enable()?;
-  rst.pulse(Micros(20))?;
+  let mut core = cx.clock(Some("core"))?;   // None: the device's unnamed or only clock
+  let mut rst  = cx.reset(Some("gpu"))?;    // Err(NoSuchLine) for a line firmware lacks
+  core.set_rate(s, Hz(800_000_000))?;       // sleeps: a Sleepable, never IrqCx
+  core.enable(s)?;
+  rst.pulse(s, Micros(20))?;
   ```
+
+  The bus gives each child its lines (`bus::Line`: kind, name, supplier, provider ID; `acpi0`
+  from the platform description), and a provider driver publishes its implementation in `start`
+  (`StartCx::provide_clocks`, `provide_resets`, `provide_power_domains`). The framework wraps it
+  (`sys/bus::provider`) and does the counting, and revokes it when the provider detaches, after
+  its consumers.
 
   Names come from firmware (`_DSD` `clock-names`, CIX's `CLKT`/`RSTL`) or the platform
   description. Handles are counted: a reset line shared by four GPIO controllers is asserted only

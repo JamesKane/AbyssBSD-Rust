@@ -1436,6 +1436,220 @@ pub(crate) mod bus_test {
 
     pub(crate) const DEP_BUS: DriverDecl = DriverDecl::of::<DepBus>();
     pub(crate) const ORDERED: DriverDecl = DriverDecl::of::<Ordered>();
+
+    /// What the test clock and reset provider was told.
+    pub(crate) static PROVIDER_CALLS: sync::SpinLock<alloc::vec::Vec<(&'static str, u32)>> =
+        sync::SpinLock::new(alloc::vec::Vec::new());
+
+    /// A bus adding a clock and reset provider (model 14) and a consumer
+    /// (model 15) whose firmware lines name it.
+    pub(crate) struct LineBus;
+
+    impl Driver for LineBus {
+        const NAME: &'static str = "linebus";
+        const IDS: Ids = Ids::Test(&[TestId {
+            model: 13,
+            rank: Rank::DEFAULT,
+        }]);
+        fn describe(_: &Ident) -> String {
+            "Provider test bus".into()
+        }
+        fn attach(_: &mut AttachCx<'_>) -> Result<Self, AttachError> {
+            Ok(Self)
+        }
+        fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
+            use bus::{Line, LineKind};
+            use devtree::graph::{EdgeKind::Required, Origin::Platform};
+            // The consumer first: its supplier edge holds it back.
+            let user = cx.add_child(Ident::Test(TestIdent { model: 15 }), None, vec![]);
+            let prov = cx.add_child(Ident::Test(TestIdent { model: 14 }), None, vec![]);
+            cx.add_dependency(user, prov, Required, Platform);
+            let line = |kind, name: Option<&str>, id| Line {
+                kind,
+                name: name.map(String::from),
+                supplier: prov,
+                id,
+            };
+            cx.set_lines(
+                user,
+                vec![
+                    line(LineKind::Clock, Some("apb"), 6),
+                    line(LineKind::Clock, Some("core"), 7),
+                    line(LineKind::Reset, None, 3),
+                ],
+            );
+            Ok(())
+        }
+        fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
+    }
+
+    /// Records every call.
+    struct Recorder;
+
+    impl Recorder {
+        fn record(what: &'static str, id: u32) -> Result<(), bus::provider::ProviderError> {
+            PROVIDER_CALLS.lock().push((what, id));
+            Ok(())
+        }
+    }
+
+    impl bus::provider::Clock for Recorder {
+        fn enable(
+            &self,
+            _: &sched::Sleepable,
+            id: u32,
+        ) -> Result<(), bus::provider::ProviderError> {
+            Self::record("enable", id)
+        }
+        fn disable(
+            &self,
+            _: &sched::Sleepable,
+            id: u32,
+        ) -> Result<(), bus::provider::ProviderError> {
+            Self::record("disable", id)
+        }
+        fn rate(
+            &self,
+            _: &sched::Sleepable,
+            _: u32,
+        ) -> Result<bus::provider::Hz, bus::provider::ProviderError> {
+            Ok(bus::provider::Hz(24_000_000))
+        }
+        fn round_rate(
+            &self,
+            _: &sched::Sleepable,
+            _: u32,
+            want: bus::provider::Hz,
+        ) -> Result<bus::provider::Hz, bus::provider::ProviderError> {
+            Ok(want)
+        }
+        fn set_rate(
+            &self,
+            _: &sched::Sleepable,
+            id: u32,
+            _: bus::provider::Hz,
+        ) -> Result<(), bus::provider::ProviderError> {
+            Self::record("set_rate", id)
+        }
+    }
+
+    impl bus::provider::Reset for Recorder {
+        fn assert(
+            &self,
+            _: &sched::Sleepable,
+            line: u32,
+        ) -> Result<(), bus::provider::ProviderError> {
+            Self::record("assert", line)
+        }
+        fn deassert(
+            &self,
+            _: &sched::Sleepable,
+            line: u32,
+        ) -> Result<(), bus::provider::ProviderError> {
+            Self::record("deassert", line)
+        }
+    }
+
+    /// The provider: publishes its clocks and resets in `start`.
+    pub(crate) struct LineProvider;
+
+    impl Driver for LineProvider {
+        const NAME: &'static str = "lineprov";
+        const IDS: Ids = Ids::Test(&[TestId {
+            model: 14,
+            rank: Rank::DEFAULT,
+        }]);
+        fn describe(_: &Ident) -> String {
+            "Test clock and reset provider".into()
+        }
+        fn attach(_: &mut AttachCx<'_>) -> Result<Self, AttachError> {
+            Ok(Self)
+        }
+        fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
+            let r = alloc::sync::Arc::new(Recorder);
+            cx.provide_clocks(r.clone());
+            cx.provide_resets(r);
+            Ok(())
+        }
+        fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
+    }
+
+    /// The consumer: takes its clock and reset by name, as a SoC block's
+    /// driver would.
+    pub(crate) struct LineUser {
+        _core: bus::provider::ClockHandle,
+        _reset: bus::provider::ResetHandle,
+    }
+
+    impl Driver for LineUser {
+        const NAME: &'static str = "lineuser";
+        const IDS: Ids = Ids::Test(&[TestId {
+            model: 15,
+            rank: Rank::DEFAULT,
+        }]);
+        fn describe(_: &Ident) -> String {
+            "Test clock and reset consumer".into()
+        }
+        fn attach(cx: &mut AttachCx<'_>) -> Result<Self, AttachError> {
+            let s = cx.sleepable();
+            let fail = |e| AttachError::Resource(e);
+            // Two named clocks: an unnamed request is ambiguous.
+            assert_eq!(cx.clock(None).err(), Some(bus::ResourceError::NoSuchLine));
+            assert_eq!(
+                cx.clock(Some("pll")).err(),
+                Some(bus::ResourceError::NoSuchLine)
+            );
+            let mut core = cx.clock(Some("core")).map_err(fail)?;
+            core.set_rate(s, bus::provider::Hz(800_000_000))
+                .map_err(|e| fail(bus::ResourceError::Provider(e)))?;
+            core.enable(s)
+                .map_err(|e| fail(bus::ResourceError::Provider(e)))?;
+            let mut reset = cx.reset(None).map_err(fail)?;
+            reset
+                .deassert(s)
+                .map_err(|e| fail(bus::ResourceError::Provider(e)))?;
+            Ok(Self {
+                _core: core,
+                _reset: reset,
+            })
+        }
+        fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
+    }
+
+    pub(crate) const LINE_BUS: DriverDecl = DriverDecl::of::<LineBus>();
+    pub(crate) const LINE_PROVIDER: DriverDecl = DriverDecl::of::<LineProvider>();
+    pub(crate) const LINE_USER: DriverDecl = DriverDecl::of::<LineUser>();
+}
+
+ktest! {
+    fn providers_serve_lines_by_name() {
+        use bus::{DetachReason, Ident, NodeState, TestIdent};
+        let s = cx();
+        let m = bus::manager();
+        bus_test::PROVIDER_CALLS.lock().clear();
+        let lb = m.add_child(&s, m.root(), Ident::Test(TestIdent { model: 13 }), None, alloc::vec![], &[]);
+        m.wait_idle(&s);
+        let kids = m.children(lb, &s);
+        assert_eq!(kids.len(), 2);
+        let (user, prov) = (kids[0], kids[1]);
+        for c in [user, prov] {
+            assert_eq!(m.state(c, &s), Some(NodeState::Attached));
+        }
+        assert_eq!(
+            *bus_test::PROVIDER_CALLS.lock(),
+            [("set_rate", 7), ("enable", 7), ("deassert", 3)]
+        );
+        // Detaching the provider detaches its consumer first, whose
+        // handles gate the clock and leave the reset line as it is.
+        m.detach(prov, DetachReason::Requested, &s).expect("detach");
+        assert_eq!(m.state(user, &s), Some(NodeState::NotPresent));
+        assert_eq!(
+            *bus_test::PROVIDER_CALLS.lock(),
+            [("set_rate", 7), ("enable", 7), ("deassert", 3), ("disable", 7)]
+        );
+        m.shutdown_under(lb, &s);
+        let _ = m.take_events();
+    }
 }
 
 ktest! {

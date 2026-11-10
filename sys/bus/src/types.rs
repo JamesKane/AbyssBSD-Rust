@@ -344,6 +344,38 @@ pub enum ResourceError {
     MapFailed,
     /// Interrupt installation failed.
     Irq(irq::IrqError),
+    /// The node has no clock, reset, or power-domain line by that name.
+    NoSuchLine,
+    /// The line's supplier has not published a provider of that kind.
+    NoProvider,
+    /// The provider refused.
+    Provider(crate::provider::ProviderError),
+}
+
+/// What a [`Line`] reaches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LineKind {
+    /// A clock ([`crate::provider::Clock`]).
+    Clock,
+    /// A reset line ([`crate::provider::Reset`]).
+    Reset,
+    /// A power domain ([`crate::provider::PowerDomain`]).
+    PowerDomain,
+}
+
+/// A clock, reset, or power-domain line a device consumes, as its bus
+/// read it from firmware (DRIVER-MODEL.md §8.5): its driver asks for it
+/// by name in attach.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Line {
+    /// What it reaches.
+    pub kind: LineKind,
+    /// The name the driver asks for; `None` for an unnamed line.
+    pub name: Option<String>,
+    /// The device serving it, which publishes the provider.
+    pub supplier: DeviceId,
+    /// The provider's identifier for it.
+    pub id: u32,
 }
 
 impl Ident {

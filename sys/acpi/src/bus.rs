@@ -14,6 +14,8 @@
 //! - What the namespace says a child depends on ([`crate::deps`]) becomes
 //!   a dependency edge on the child that serves the supplier. A reference
 //!   to nothing, or to a device left out, is logged.
+//! - The clock and reset lines the platform description gives a child
+//!   become its lines ([`bus::Line`]), which its driver asks for by name.
 
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -22,7 +24,8 @@ use alloc::vec::Vec;
 use aml::Uid;
 use aml::resource::{AddressKind, Resource as AmlResource};
 use bus::{
-    AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, Resource, StartCx, StopCx, StopReason,
+    AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, Line, LineKind, Resource, StartCx,
+    StopCx, StopReason,
 };
 use devtree::graph::{EdgeKind, Origin};
 use devtree::ids::AcpiIdent;
@@ -46,11 +49,17 @@ pub struct AcpiDevice {
 /// supplier, the edge's kind, and where firmware said so.
 pub(crate) type ChildDep = (String, EdgeKind, Origin);
 
+/// A clock or reset line a child consumes (the platform description's):
+/// its kind, its name, the path of the device serving it, and the
+/// provider's identifier.
+pub(crate) type ChildLine = (LineKind, Option<String>, String, u32);
+
 /// One device found in the namespace.
 pub(crate) struct Found {
     pub(crate) device: AcpiDevice,
     pub(crate) ident: AcpiIdent,
     pub(crate) deps: Vec<ChildDep>,
+    pub(crate) lines: Vec<ChildLine>,
 }
 
 /// IDs FreeBSD keeps even when `_STA` says absent.
@@ -113,6 +122,7 @@ pub(crate) fn walk(
             device: AcpiDevice { node, path, crs },
             ident,
             deps: Vec::new(),
+            lines: Vec::new(),
         });
     }
     let nodes: Vec<aml::NodeId> = found.iter().map(|f| f.device.node).collect();
@@ -146,6 +156,22 @@ pub(crate) fn walk(
             u.via.describe(),
             u.name
         ));
+    }
+    // The lines drivers ask for by name; their suppliers are edges above.
+    let p = &deps.platform;
+    let clocks = p
+        .clocks
+        .iter()
+        .map(|c| (LineKind::Clock, c.consumer, &c.name, c.provider, c.id));
+    let resets = p
+        .resets
+        .iter()
+        .map(|r| (LineKind::Reset, r.consumer, &r.name, r.controller, r.index));
+    for (kind, consumer, name, supplier, id) in clocks.chain(resets) {
+        if let Some(f) = found.iter_mut().find(|f| f.device.node == consumer) {
+            let path = alloc::format!("{}", interp.path(supplier));
+            f.lines.push((kind, name.clone(), path, id));
+        }
     }
     for m in &deps.malformed {
         let at = m
@@ -318,7 +344,7 @@ impl Driver for AcpiBus {
         // Every child first, in namespace order (FreeBSD's creation
         // order), then the edges between them: a dependency may name a
         // device that comes later. None attaches before this returns.
-        let mut added: Vec<(String, bus::DeviceId, Vec<ChildDep>)> = Vec::new();
+        let mut added: Vec<(String, bus::DeviceId, Vec<ChildDep>, Vec<ChildLine>)> = Vec::new();
         for f in found {
             let res = resources(svc.ops(), &f.device.crs);
             let path = f.device.path.clone();
@@ -327,13 +353,28 @@ impl Driver for AcpiBus {
                 Some(Arc::new(f.device)),
                 res,
             );
-            added.push((path, id, f.deps));
+            added.push((path, id, f.deps, f.lines));
         }
-        for (_, id, deps) in &added {
+        let child = |path: &str| added.iter().find(|a| a.0 == path).map(|a| a.1);
+        for (_, id, deps, lines) in &added {
             for (d, kind, origin) in deps {
-                if let Some((_, sup, _)) = added.iter().find(|(p, _, _)| p == d) {
-                    cx.add_dependency(*id, *sup, *kind, *origin);
+                if let Some(sup) = child(d) {
+                    cx.add_dependency(*id, sup, *kind, *origin);
                 }
+            }
+            let lines: Vec<Line> = lines
+                .iter()
+                .filter_map(|(kind, name, sup, line)| {
+                    Some(Line {
+                        kind: *kind,
+                        name: name.clone(),
+                        supplier: child(sup)?,
+                        id: *line,
+                    })
+                })
+                .collect();
+            if !lines.is_empty() {
+                cx.set_lines(*id, lines);
             }
         }
         Ok(())

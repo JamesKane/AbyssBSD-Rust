@@ -2479,6 +2479,17 @@ machines against FreeBSD on bare metal; the exit criteria above.
   0x400 (interrupt), which the clean-room spec left open. No `const` override entries yet: the
   first come with the drivers that need them (the GPU's `_CCA`). Next: provider traits, the
   ACPI companion, and shared ranges.
+- Progress 2026-11-09 (P8.1, provider traits): `sys/bus::provider` defines `Clock`, `Reset`,
+  and `PowerDomain`, implemented by a provider driver by its own line IDs and wrapped by the
+  framework, which counts: a clock is on while any handle enables it, a shared reset line is
+  asserted only when every holder asks (a pulse on it is refused unless the provider declares
+  the group safe), a power domain runs at the highest vote. A bus gives each child its lines
+  (`bus::Line`; `acpi0` from the platform description, all 292 of the Sky1's), a provider
+  publishes in `start`, and a consumer asks by name in `attach` (`cx.clock(Some("core"))`);
+  a provider is revoked when it detaches, after its consumers. Tested on the host and by the
+  `providers_serve_lines_by_name` ktest. The first real providers (SCMI over the CIX mailbox,
+  the S5 and FCH reset controllers, `CCLK`'s AML clocks) are P8.3. Next: the ACPI companion and
+  shared ranges.
 
 ## Phase 9: Self-hosting and hardening = **v1.0 / Day 1 complete** (L)
 
