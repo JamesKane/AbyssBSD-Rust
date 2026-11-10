@@ -27,7 +27,27 @@ unsafe impl PageSource for KernelPages {
             .expect("heap page outside the DMAP");
         super::free_pages(pa, order);
     }
+
+    /// Frees clean file pages nothing maps, without waiting for any lock
+    /// (`vm::object::reclaim_clean`), and returns the pages freed to the
+    /// buddy allocator so they can merge: a block of `order` needs its
+    /// `2^order` pages free together, so the batch grows with the order.
+    /// FreeBSD's `malloc` needs no physically contiguous pages (`kmem`
+    /// maps single pages into kernel virtual memory) and waits for the
+    /// page daemon instead (docs/compat-deviations.md).
+    fn reclaim(&self, order: Order) -> bool {
+        let want = usize::try_from(order.pages() * 4)
+            .unwrap_or(usize::MAX)
+            .max(RECLAIM_BATCH);
+        let freed = vm::object::reclaim_clean(want);
+        super::drain_page_cache();
+        freed > 0
+    }
 }
+
+/// Pages the heap reclaims at a time when the buddy allocator is out of
+/// the block it needs.
+const RECLAIM_BATCH: usize = 256;
 
 #[global_allocator]
 static HEAP: Heap<KernelPages, { hal::MAX_CPUS }> = Heap::new(KernelPages);
@@ -35,6 +55,12 @@ static HEAP: Heap<KernelPages, { hal::MAX_CPUS }> = Heap::new(KernelPages);
 /// Gives back all the magazines the heap's depots hold: memory is short.
 pub(crate) fn heap_reclaim() {
     HEAP.reclaim();
+}
+
+/// Trims the heap's depots to their working sets (`uma_reclaim`'s
+/// `UMA_RECLAIM_TRIM`).
+pub(crate) fn heap_trim() {
+    HEAP.trim();
 }
 
 /// Trims the heap's depots to their working sets, as often as `UMA_TIMEOUT`

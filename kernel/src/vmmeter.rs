@@ -11,7 +11,8 @@
 //! Pages are counted as FreeBSD's queues would hold them, from what is
 //! known: those memory objects hold (anonymous memory and the file
 //! cache) are active, the rest in use is wired; nothing is inactive or
-//! laundered, as nothing is paged out.
+//! laundered, as nothing is paged out. The page daemon's counters are
+//! those of the daemon that frees clean file pages (`crate::mm::pageout`).
 //!
 //! Behavior reference: sys/vm/vm_meter.c, sys/kern/kern_mib.c,
 //! sys/kern/kern_clock.c (`sysctl_kern_cp_time`, `sysctl_kern_clockrate`),
@@ -55,26 +56,19 @@ fn wired() -> u64 {
     all.saturating_sub(free).saturating_sub(active)
 }
 
-/// FreeBSD's paging thresholds for `all` pages (`vm_pageout_init`'s
-/// defaults): `v_free_min`, `v_free_target`, `v_free_reserved`,
-/// `v_inactive_target`, `v_pageout_free_min`, `v_interrupt_free_min`,
-/// `v_free_severe`.
-fn thresholds(all: u64) -> [u64; 7] {
-    let interrupt_free_min = 2;
-    let pageout_free_min = 34;
-    let free_reserved = pageout_free_min + interrupt_free_min * 4 / 2 + all / 768;
-    let free_min = free_reserved + all / 200;
-    let free_severe = free_min * 4 / 10 + free_reserved * 6 / 10;
-    let free_target = 4 * free_min + free_reserved;
-    let inactive_target = free_target * 3 / 2;
+/// FreeBSD's paging thresholds (`vm_pageout_init_domain`'s defaults):
+/// `v_free_min`, `v_free_target`, `v_free_reserved`, `v_inactive_target`,
+/// `v_pageout_free_min`, `v_interrupt_free_min`, `v_free_severe`.
+fn thresholds() -> [u64; 7] {
+    let t = crate::mm::thresholds();
     [
-        free_min,
-        free_target,
-        free_reserved,
-        inactive_target,
-        pageout_free_min,
-        interrupt_free_min,
-        free_severe,
+        t.free_min,
+        t.free_target,
+        t.free_reserved,
+        t.inactive_target,
+        t.pageout_free_min,
+        t.interrupt_free_min,
+        t.free_severe,
     ]
 }
 
@@ -222,11 +216,12 @@ pub(crate) fn init(s: &Sleepable) {
                 name,
                 descr,
                 Value::Uint(Box::new(move || {
-                    u32::try_from(thresholds(pages().0)[i]).unwrap_or(u32::MAX)
+                    u32::try_from(thresholds()[i]).unwrap_or(u32::MAX)
                 })),
             );
         }
-        // The counters (`VM_STATS_VM`): nothing is paged or swapped.
+        // The counters (`VM_STATS_VM`): the page daemon's, and zero for
+        // the rest, as nothing is paged or swapped.
         for (name, descr) in [
             ("v_vm_faults", "Address memory faults"),
             ("v_io_faults", "Page faults requiring I/O"),
@@ -259,7 +254,23 @@ pub(crate) fn init(s: &Sleepable) {
             ("v_rforkpages", "VM pages affected by rfork()"),
             ("v_kthreadpages", "VM pages affected by fork() by kernel"),
         ] {
-            add(svm, Number::Auto, name, descr, Value::U64(Box::new(|| 0)));
+            use crate::mm::pageout;
+            let counter = match name {
+                "v_pdwakeups" => Some(&pageout::PDWAKEUPS),
+                "v_pdpages" => Some(&pageout::PDPAGES),
+                "v_pdshortfalls" => Some(&pageout::PDSHORTFALLS),
+                "v_dfree" => Some(&pageout::DFREE),
+                _ => None,
+            };
+            add(
+                svm,
+                Number::Auto,
+                name,
+                descr,
+                Value::U64(Box::new(move || {
+                    counter.map_or(0, |c| c.load(Ordering::Relaxed))
+                })),
+            );
         }
         // `vm.stats.sys`.
         add(
@@ -316,7 +327,7 @@ pub(crate) fn init(s: &Sleepable) {
                 name,
                 "",
                 Value::Uint(Box::new(move || {
-                    u32::try_from(thresholds(pages().0)[i]).unwrap_or(u32::MAX)
+                    u32::try_from(thresholds()[i]).unwrap_or(u32::MAX)
                 })),
             );
         }

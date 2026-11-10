@@ -68,6 +68,7 @@ pub(crate) fn init() {
     sched::spawn("reaper", sched::Priority::KERNEL, |s| sched::reaper(s)).expect("reaper thread");
     crate::softclock::init();
     crate::mm::start_heap_trim();
+    crate::mm::pageout::start();
     kprintln!("sched: boot CPU running threads");
 }
 

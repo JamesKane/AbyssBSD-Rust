@@ -36,8 +36,9 @@ unsafe impl DmaMemory for KernelDma {
             phys.alloc(order, vm::phys::DomainId(0))
         } else {
             phys.alloc_below(order, Pfn::containing(PhysAddr::new(below)))
-        }?;
-        Some(pfn.addr().get())
+        };
+        super::publish(phys);
+        Some(pfn?.addr().get())
     }
 
     unsafe fn free(&self, pa: u64, bytes: u64) {

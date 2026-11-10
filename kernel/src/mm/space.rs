@@ -33,7 +33,7 @@ use vm::map::{Entry, MapError, Prot, VmMap};
 use vm::object::{MemAttr, PageOps};
 use vm::{Order, PAGE_SIZE, Pfn};
 
-use super::{Format, Frames, alloc_pages, free_pages};
+use super::{Format, Frames, alloc_pages_for, free_pages};
 
 /// [`PAGE_SIZE`] as a length.
 const PAGE_BYTES: usize = 4096;
@@ -59,21 +59,29 @@ impl KernelPages {
     }
 }
 
-/// A page for an object: from the free lists, or, when they are empty,
-/// after the heap gives back what it caches, or reclaiming clean file
-/// pages nothing maps.
+/// A page for an object (`VM_ALLOC_NORMAL`): from the free pages above
+/// the reserve, waking the page daemon when they run low. At the reserve,
+/// where FreeBSD's allocation would wait in `vm_wait` for the page daemon,
+/// the allocating thread reclaims clean file pages itself (its caller may
+/// hold locks no sleep may), then has the heap give back what it caches.
+/// `None` only when neither frees a page.
 fn user_page() -> Option<vm::PhysAddr> {
-    alloc_pages(Order::ZERO)
-        .or_else(|| {
-            super::heap_reclaim();
-            alloc_pages(Order::ZERO)
-        })
-        .or_else(|| {
-            // A batch, so the next allocations find pages too.
-            (vm::object::reclaim_clean(256) > 0)
-                .then(|| alloc_pages(Order::ZERO))
-                .flatten()
-        })
+    use vm::pageout::AllocClass::Normal;
+    if let Some(pa) = alloc_pages_for(Order::ZERO, Normal) {
+        if super::pageout::needed() {
+            super::pageout::wakeup();
+        }
+        return Some(pa);
+    }
+    super::pageout::wakeup();
+    // A batch, so the next allocations find pages too.
+    while vm::object::reclaim_clean(256) > 0 {
+        if let Some(pa) = alloc_pages_for(Order::ZERO, Normal) {
+            return Some(pa);
+        }
+    }
+    super::heap_reclaim();
+    alloc_pages_for(Order::ZERO, Normal)
 }
 
 /// Pages `vm` objects hold (anonymous memory and file pages): what

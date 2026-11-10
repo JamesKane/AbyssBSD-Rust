@@ -17,6 +17,7 @@
 pub(crate) mod dma;
 mod heap;
 pub(crate) mod kstack;
+pub(crate) mod pageout;
 pub(crate) mod space;
 
 use core::cell::UnsafeCell;
@@ -28,13 +29,14 @@ use bootproto::{BootInfo, MemoryKind, MemoryRegion};
 use hal::MAX_CPUS;
 use pt::{Attrs, Frame, PageTable};
 use sync::SpinLock;
+use vm::pageout::{AllocClass, Thresholds};
 use vm::phys::{self, DomainId, PageMagazine, PhysAllocator, Segment, VmPage};
 use vm::vmem::{Vmem, VmemError};
 use vm::{Order, Pfn};
 
 use crate::arch;
 
-pub(crate) use heap::{heap_reclaim, heap_stats, start_heap_trim};
+pub(crate) use heap::{heap_reclaim, heap_stats, heap_trim, start_heap_trim};
 
 type Format = arch::mmu::Format;
 
@@ -189,22 +191,101 @@ fn with_page_cache<R>(f: impl FnOnce(&mut PageMagazine) -> R) -> R {
     r
 }
 
-/// Allocates a block of `order` from the buddy allocator (single pages
-/// through this CPU's cache).
+/// The paging thresholds, set with the buddy allocator.
+static THRESHOLDS: sync::Once<Thresholds> = sync::Once::new();
+
+/// Free pages in the buddy allocator as of its last change, read without
+/// its lock (FreeBSD's `vmd_free_count`: pages in the CPUs' caches are
+/// not free). Written only under [`PHYS`]'s lock.
+static FREE: AtomicU64 = AtomicU64::new(0);
+
+/// FreeBSD's paging thresholds for this machine's memory.
+pub(crate) fn thresholds() -> Thresholds {
+    THRESHOLDS
+        .get()
+        .copied()
+        .unwrap_or(const { Thresholds::new(0, 0) })
+}
+
+/// Free pages, as the paging policy counts them (see [`FREE`]).
+pub(crate) fn free_count() -> u64 {
+    FREE.load(Ordering::Relaxed)
+}
+
+/// Records `a`'s free pages in [`FREE`]; the caller holds [`PHYS`].
+fn publish(a: &PhysAllocator<'_>) {
+    FREE.store(a.stats().free, Ordering::Relaxed);
+}
+
+/// Allocates a block of `order` from the buddy allocator for the kernel
+/// (`VM_ALLOC_SYSTEM`; `VM_ALLOC_INTERRUPT` in an interrupt handler).
 pub(crate) fn alloc_pages(order: Order) -> Option<PhysAddr> {
-    if order != Order::ZERO || hal::interrupt::active() {
-        return PHYS
-            .lock()
-            .as_mut()?
-            .alloc(order, DomainId(0))
-            .map(Pfn::addr);
+    alloc_pages_for(order, AllocClass::System)
+}
+
+/// Allocates a block of `order` for `class`, leaving the free pages that
+/// class may not take (`_vm_domain_allocate`; see `vm::pageout`), single
+/// pages through this CPU's cache. Never reclaims: callers that may,
+/// do. In an interrupt handler the class is
+/// [`AllocClass::Interrupt`].
+pub(crate) fn alloc_pages_for(order: Order, class: AllocClass) -> Option<PhysAddr> {
+    if hal::interrupt::active() {
+        return alloc_locked(order, AllocClass::Interrupt);
+    }
+    if order != Order::ZERO {
+        return alloc_locked(order, class);
     }
     with_page_cache(|m| {
         if m.is_empty() {
-            m.refill(PHYS.lock().as_mut()?, DomainId(0));
+            let mut phys = PHYS.lock();
+            let a = phys.as_mut()?;
+            // A refill is a `VM_ALLOC_NORMAL` allocation, as
+            // `vm_page_zone_import`'s: below the reserve the cache stays
+            // empty, and the kernel takes its pages one at a time.
+            let t = thresholds();
+            m.refill_above(a, DomainId(0), t.floor(AllocClass::Normal));
+            if m.is_empty() {
+                let page = t
+                    .allows(a.stats().free, class, 1)
+                    .then(|| a.alloc(Order::ZERO, DomainId(0)))
+                    .flatten();
+                publish(a);
+                return page.map(Pfn::addr);
+            }
+            publish(a);
         }
         m.pop().map(Pfn::addr)
     })
+}
+
+/// A block of `order` from the buddy allocator itself, for `class`.
+fn alloc_locked(order: Order, class: AllocClass) -> Option<PhysAddr> {
+    let mut phys = PHYS.lock();
+    let a = phys.as_mut()?;
+    if !thresholds().allows(a.stats().free, class, order.pages()) {
+        return None;
+    }
+    let page = a.alloc(order, DomainId(0));
+    publish(a);
+    page.map(Pfn::addr)
+}
+
+/// Returns the pages this CPU's cache holds to the buddy allocator, so
+/// they can merge into larger blocks. Not from interrupt context.
+pub(crate) fn drain_page_cache() {
+    with_page_cache(|m| {
+        if m.is_empty() {
+            return;
+        }
+        let mut phys = PHYS.lock();
+        let Some(a) = phys.as_mut() else {
+            return;
+        };
+        if let Err(e) = m.drain(a, true) {
+            panic!("drain_page_cache: {e}");
+        }
+        publish(a);
+    });
 }
 
 /// Returns a block from [`alloc_pages`]. A bad free is a kernel bug.
@@ -215,15 +296,14 @@ pub(crate) fn free_pages(pa: PhysAddr, order: Order) {
             if m.push(pfn).is_ok() {
                 return true;
             }
-            let r = m.drain(
-                PHYS.lock()
-                    .as_mut()
-                    .expect("free_pages before the buddy allocator"),
-                false,
-            );
-            if let Err(e) = r {
+            let mut phys = PHYS.lock();
+            let a = phys
+                .as_mut()
+                .expect("free_pages before the buddy allocator");
+            if let Err(e) = m.drain(a, false) {
                 panic!("free_pages: {e}");
             }
+            publish(a);
             m.push(pfn).is_ok()
         });
         if cached {
@@ -237,6 +317,7 @@ pub(crate) fn free_pages(pa: PhysAddr, order: Order) {
     if let Err(e) = phys.free(pfn, order) {
         panic!("free_pages: {e}");
     }
+    publish(phys);
 }
 
 /// Frame counts from the buddy allocator; cached pages count as free.
@@ -480,6 +561,8 @@ fn init_phys(map: &[MemoryRegion]) {
         (stats.free * 4096) >> 20,
         array_pages * 4
     );
+    let _ = THRESHOLDS.set(Thresholds::new(stats.managed, stats.free));
+    publish(&alloc);
     *PHYS.lock() = Some(alloc);
 }
 
