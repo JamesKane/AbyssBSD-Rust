@@ -362,6 +362,21 @@ domain reserves its host bridge's `_CRS` memory windows at their bus addresses (
 never maps more than RAM, so its addresses stay far below 32 GiB. That matters on a root complex
 whose own reach is unknown (memory address size limit 0).
 
+Stage 1 notes (where `lib/iommu::gas` decides what FreeBSD leaves open):
+- The tree is an AVL tree in an arena of nodes, with FreeBSD's `free_down` augmentation. It grows
+  with `try_reserve` and recycles freed nodes, so running out is an error, not an abort, and
+  `reserve_nodes` grows it ahead of a path that must not allocate.
+- A boundary must be at least a page. With a smaller one, FreeBSD's `iommu_gas_match_one` could
+  place an entry off a page boundary.
+- An entry may end at the top of the space. FreeBSD refuses one there (`EINVAL`), which only
+  mattered for a reservation that runs to the end.
+- An identity region is clipped where it overlaps identity regions at its ends, as FreeBSD's RMRR
+  path does. One overlapping an identity region strictly inside it is `Busy`, where FreeBSD would
+  corrupt its tree (its `XXXKIB` case).
+- `lib/pt`'s `map` refuses one range that crosses bit 47, the CPU formats' half boundary, though
+  the SMMU's TTB0 covers all 48 bits. Lowest-first allocation does not get near it. If it ever
+  does, stage 3 maps such a range in two calls.
+
 ### 4.7 The hardware
 
 - **Probe of features.** IDR0–IDR5 and IIDR: stage-1 support and AArch64 tables, the stream-table
@@ -391,6 +406,13 @@ whose own reach is unknown (memory address size limit 0).
   maps Device-nGnRnE, which cost the board's NPU a factor of ten). The doorbell page is
   Device-nGnRE, write-only. Permissions follow the mapping's direction: `ToDevice` is read-only to
   the device, `FromDevice` write-only. AF is always set, since HTTU is not used.
+  - Stage 1 note: stage 1 descriptors cannot express write-only, since AP grants read-write or
+    read-only. So `FromDevice` mappings and the doorbell are read-write, as FreeBSD's busdma maps
+    them, and only `ToDevice` is narrowed, to read-only (`lib/pt::smmu`).
+  - Every leaf has AP[1] set, since PCIe requests are unprivileged. Every leaf is also
+    execute-never and not global (tagged with the domain's ASID), as FreeBSD's `iommu_pmap` makes
+    them.
+  - STEs leave EATS at 0 (§9). FreeBSD writes full ATS.
 - **Commands.** One queue under a spin lock, as FreeBSD. An entry is written, a store barrier
   orders it before the `PROD` update, and `PROD` publishes it. A sync's slot is chosen, written,
   and published under the lock. The wait is a spin on that slot, never a sleep (sibling
@@ -549,6 +571,20 @@ board's PCIe shape, minus named components and RMRs.
   missing TLBI is caught as a stale translation), and event production.
   - `drivers/smmu` runs against it through `lib/regs`'s test backing, as other drivers' host tests
     do.
+  - Stage 1 notes on `lib/iommu::model`:
+    - It owns the memory, a `PhysMemory`. `SparseMemory` is also a `pt::Memory`, so tables built
+      with `pt::PageTable<Smmu>` are the ones it walks. Its registers are offsets
+      (`read32`/`write32`/`read64`/`write64`), so the driver's register trait wraps it.
+    - It caches level-1 descriptors, STEs, and CDs per StreamID until a CFGI. It caches leaves per
+      ASID, plus intermediate walks, until a TLBI (a leaf TLBI keeps the walks). CFGI_STE does not
+      drop the CD.
+    - Two knobs cover what IHI 0070 leaves open. `cache_invalid_config` (default on) also caches
+      invalid structures, so a driver must invalidate after making one valid. `cache_faults`
+      (default off: the Arm rule is that faulting walks are not cached) lets stage 6 test its "no
+      TLBI on map" candidate under either reading.
+    - Commands it does not implement (ATS, PRI, stall, stage 2) stop the queue as illegal and are
+      logged as violations. So are writes the architecture forbids, such as a base register
+      while enabled.
   - `sys/iommu` and `vm::dma`'s `Iommu` backend run against it for map, unmap, coherent, pool,
     doorbell, and the strict-unmap property.
 - `lib/devtree`: `Settle` edges. A failed, unmatched, or attached supplier releases its consumers.
