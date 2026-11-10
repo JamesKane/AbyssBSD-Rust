@@ -2444,6 +2444,17 @@ machines against FreeBSD on bare metal; the exit criteria above.
   platform description. Boot tier: `x86_64-warm-reset` passes; the plain `x86_64` and
   `aarch64` cases stop at `usb_disk_unplugged_while_mounted` (no forced unmount after the
   unplug), which fails the same way on main without this change.
+- Progress 2026-11-09 (P8.1, pin and DMA edges): `lib/aml` decodes the pin descriptors
+  (`PinFunction`, `PinConfig`, `PinGroup`, `PinGroupFunction`, `PinGroupConfig`); a pin
+  descriptor makes a required edge from its pin controller, and a group reference must name one
+  of the controller's `PinGroup` labels. `lib/acpi-tables` parses the CSRT, and the kernel hands
+  its DMA controllers to the builder: a `FixedDMA` request line is served by the controller
+  whose range covers it, found by its MMIO base. On the Sky1: 42 pin edges, all to `MUX0`'s
+  family; the UARTs' lines (0-7) belong to `DMA0` (`CIXHA014`, 0x04190000) and the I2S ports'
+  (32-50) to `DMA1` (`CIXH1006`, 0x07010000). A firmware defect found: `I2S5`, `I2S6`, `I2S8`,
+  and `I2S9` ask for `pinctrl_substrate_i2sN_dbg` groups that no controller declares
+  (SSDT1's `MUX0` has `pinctrl_substrate_i2s5`, `i2s6`, and `i2s8`, and nothing for `i2s9`);
+  they are reported as unresolved. Next: operation-region edges (GPIO, serial bus, PCC).
 
 ## Phase 9: Self-hosting and hardening = **v1.0 / Day 1 complete** (L)
 

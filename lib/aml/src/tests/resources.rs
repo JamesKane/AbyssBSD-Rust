@@ -447,15 +447,119 @@ fn serial_bus_descriptors() {
     assert!(parse(&with_end(&[&bad])).is_err());
 }
 
+/// A large descriptor from its fields after the header (offsets in them
+/// count from the tag byte, as in firmware).
+fn large_fields(tag: u8, fields: &[&[u8]]) -> Vec<u8> {
+    let body: Vec<u8> = fields.iter().flat_map(|f| f.iter().copied()).collect();
+    large(tag, &body)
+}
+
 #[test]
-fn pin_and_unknown_descriptors_are_kept() {
-    // PinFunction (0x8D) and a reserved large type.
-    let r = parse(&with_end(&[&large(0x8d, &[1, 2, 3]), &large(0xa0, &[4])])).unwrap();
+fn pin_descriptors() {
+    // PinFunction (Shared, PullUp, 5, "\_SB.GPI0") {7, 8}.
+    let f = large_fields(
+        0x8d,
+        &[
+            &[1],                 // revision
+            &1u16.to_le_bytes(),  // flags: shared
+            &[1],                 // pull-up
+            &5u16.to_le_bytes(),  // function
+            &18u16.to_le_bytes(), // pin table
+            &[0],                 // resource source index
+            &22u16.to_le_bytes(), // resource source
+            &0u16.to_le_bytes(),  // vendor data
+            &0u16.to_le_bytes(),
+            &7u16.to_le_bytes(),
+            &8u16.to_le_bytes(),
+            b"\\_SB.GPI0\0",
+        ],
+    );
+    // PinGroup ("uart0") {1, 2}, from the controller.
+    let g = large_fields(
+        0x90,
+        &[
+            &[1],
+            &0u16.to_le_bytes(),
+            &14u16.to_le_bytes(), // pin table
+            &18u16.to_le_bytes(), // label
+            &0u16.to_le_bytes(),
+            &0u16.to_le_bytes(),
+            &1u16.to_le_bytes(),
+            &2u16.to_le_bytes(),
+            b"uart0\0",
+        ],
+    );
+    // PinGroupFunction (Exclusive, 3, "\_SB.PIO0", 0, "uart0",
+    // ResourceConsumer,, RawDataBuffer () {0xAA, 0xBB}).
+    let gf = large_fields(
+        0x91,
+        &[
+            &[1],
+            &2u16.to_le_bytes(),  // consumer
+            &3u16.to_le_bytes(),  // function
+            &[0],                 // resource source index
+            &17u16.to_le_bytes(), // resource source
+            &27u16.to_le_bytes(), // group label
+            &33u16.to_le_bytes(), // vendor data
+            &2u16.to_le_bytes(),
+            b"\\_SB.PIO0\0",
+            b"uart0\0",
+            &[0xaa, 0xbb],
+        ],
+    );
+    let r = parse(&with_end(&[&f, &g, &gf])).unwrap();
+    assert_eq!(
+        r,
+        [
+            Resource::PinFunction(PinFunction {
+                revision: 1,
+                flags: 1,
+                pull: 1,
+                function: 5,
+                pins: std::vec![7, 8],
+                source: ResourceSource {
+                    index: 0,
+                    name: "\\_SB.GPI0".into()
+                },
+                vendor: Vec::new(),
+            }),
+            Resource::PinGroup(PinGroup {
+                revision: 1,
+                flags: 0,
+                pins: std::vec![1, 2],
+                label: "uart0".into(),
+                vendor: Vec::new(),
+            }),
+            Resource::PinGroupFunction(PinGroupFunction {
+                revision: 1,
+                flags: 2,
+                function: 3,
+                source: ResourceSource {
+                    index: 0,
+                    name: "\\_SB.PIO0".into()
+                },
+                group: "uart0".into(),
+                vendor: std::vec![0xaa, 0xbb],
+            }),
+        ]
+    );
+    // Offsets past the descriptor, and one too short to hold its fields,
+    // are malformed, not panics.
+    let mut bad = gf.clone();
+    bad[3 + 8..3 + 10].copy_from_slice(&200u16.to_le_bytes());
+    assert!(parse(&with_end(&[&bad])).is_err());
+    assert!(parse(&with_end(&[&large(0x8d, &[1, 2, 3])])).is_err());
+}
+
+#[test]
+fn unknown_descriptors_are_kept() {
+    // ClockInput (0x93) and a reserved large type.
+    let r = parse(&with_end(&[&large(0x93, &[1, 2, 3]), &large(0xa0, &[4])])).unwrap();
     assert_eq!(
         r,
         [
             Resource::Unknown {
-                tag: 0x8d,
+                tag: 0x93,
                 data: std::vec![1, 2, 3]
             },
             Resource::Unknown {

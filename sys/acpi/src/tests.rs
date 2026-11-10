@@ -77,7 +77,7 @@ fn osc_absent_is_none() {
 #[test]
 fn q8b_dependencies() {
     let mut i = load(Q8B);
-    let found = crate::bus::walk(&mut i, &mut Quiet).found;
+    let found = crate::bus::walk(&mut i, &mut Quiet, &[]).found;
     let paths: std::vec::Vec<&str> = found.iter().map(|f| f.device.path.as_str()).collect();
     let mut forward = 0;
     let mut edges = 0;

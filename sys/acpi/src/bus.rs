@@ -95,7 +95,11 @@ pub(crate) struct Walk {
     pub(crate) notes: Vec<String>,
 }
 
-pub(crate) fn walk(interp: &mut aml::Interpreter, host: &mut dyn aml::Host) -> Walk {
+pub(crate) fn walk(
+    interp: &mut aml::Interpreter,
+    host: &mut dyn aml::Host,
+    dma: &[crate::DmaController],
+) -> Walk {
     let mut found = Vec::new();
     for node in interp.devices() {
         let path = alloc::format!("{}", interp.path(node));
@@ -112,7 +116,7 @@ pub(crate) fn walk(interp: &mut aml::Interpreter, host: &mut dyn aml::Host) -> W
         });
     }
     let nodes: Vec<aml::NodeId> = found.iter().map(|f| f.device.node).collect();
-    let deps = crate::deps::build(interp, host, &nodes);
+    let deps = crate::deps::build(interp, host, &nodes, dma);
     let mut notes = Vec::new();
     for e in &deps.edges {
         let what = e.via.describe();
@@ -294,7 +298,8 @@ impl Driver for AcpiBus {
                 Vec::new(),
             );
         }
-        let Walk { found, notes } = svc.run(cx.sleepable(), walk);
+        let dma = svc.ops().dma_controllers();
+        let Walk { found, notes } = svc.run(cx.sleepable(), move |i, h| walk(i, h, &dma));
         for note in &notes {
             svc.ops().log(format_args!("{note}"));
         }

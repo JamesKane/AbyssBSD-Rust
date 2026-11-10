@@ -10,6 +10,7 @@ version = "0.0.0"
 name = "acpi"
 version = "0.0.0"
 dependencies = [
+ "acpi-tables",
  "aml",
  "bus",
  "devtree",

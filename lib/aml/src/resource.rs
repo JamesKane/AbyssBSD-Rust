@@ -6,9 +6,9 @@
 //! tag. Every descriptor's length is checked against its type's minimum and
 //! against the buffer; internal offsets (GPIO pin tables, resource source
 //! names) must stay inside their descriptor. The end tag's checksum, when
-//! non-zero, must make the template sum to zero. Pin function, pin
-//! configuration, pin group, and clock descriptors are returned as
-//! [`Resource::Unknown`] with their bytes.
+//! non-zero, must make the template sum to zero. Clock input and
+//! reserved descriptors are returned as [`Resource::Unknown`] with their
+//! bytes. Pin descriptor layouts follow ACPI 6.5 §6.4.3.10-14.
 //!
 //! Behavior reference: `sys/dev/acpica/acpi_resource.c` (which descriptors
 //! FreeBSD consumes and how it reads their flags).
@@ -282,6 +282,99 @@ pub struct Gpio {
     pub vendor: Vec<u8>,
 }
 
+/// `PinFunction` (large item 0x0D): pins a device muxes to a function on
+/// a pin controller.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PinFunction {
+    /// Descriptor revision.
+    pub revision: u8,
+    /// Flags (bit 0: shared).
+    pub flags: u16,
+    /// Pull configuration (0 default, 1 pull-up, 2 pull-down, 3 none).
+    pub pull: u8,
+    /// The function number, as the controller defines it.
+    pub function: u16,
+    /// Pin numbers on the controller.
+    pub pins: Vec<u16>,
+    /// The pin controller.
+    pub source: ResourceSource,
+    /// Vendor data.
+    pub vendor: Vec<u8>,
+}
+
+/// `PinConfig` (large item 0x0F): an electrical setting for pins.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PinConfig {
+    /// Descriptor revision.
+    pub revision: u8,
+    /// Flags (bit 0: shared; bit 1: consumer).
+    pub flags: u16,
+    /// The configuration type (bias, drive strength, slew rate, ...).
+    pub config_type: u8,
+    /// Its value.
+    pub config_value: u32,
+    /// Pin numbers on the controller.
+    pub pins: Vec<u16>,
+    /// The pin controller.
+    pub source: ResourceSource,
+    /// Vendor data.
+    pub vendor: Vec<u8>,
+}
+
+/// `PinGroup` (large item 0x10): a named set of a pin controller's pins,
+/// declared by the controller for its consumers to refer to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PinGroup {
+    /// Descriptor revision.
+    pub revision: u8,
+    /// Flags (bit 0: consumer).
+    pub flags: u16,
+    /// Pin numbers on the controller.
+    pub pins: Vec<u16>,
+    /// The group's label.
+    pub label: String,
+    /// Vendor data.
+    pub vendor: Vec<u8>,
+}
+
+/// `PinGroupFunction` (large item 0x11): a pin group of a controller
+/// muxed to a function.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PinGroupFunction {
+    /// Descriptor revision.
+    pub revision: u8,
+    /// Flags (bit 0: shared; bit 1: consumer).
+    pub flags: u16,
+    /// The function number.
+    pub function: u16,
+    /// The pin controller.
+    pub source: ResourceSource,
+    /// The label of the controller's `PinGroup`.
+    pub group: String,
+    /// Vendor data.
+    pub vendor: Vec<u8>,
+}
+
+/// `PinGroupConfig` (large item 0x12): an electrical setting for a pin
+/// group of a controller.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PinGroupConfig {
+    /// Descriptor revision.
+    pub revision: u8,
+    /// Flags (bit 0: shared; bit 1: consumer).
+    pub flags: u16,
+    /// The configuration type.
+    pub config_type: u8,
+    /// Its value.
+    pub config_value: u32,
+    /// The pin controller.
+    pub source: ResourceSource,
+    /// The label of the controller's `PinGroup`.
+    pub group: String,
+    /// Vendor data.
+    pub vendor: Vec<u8>,
+}
+
 /// The bus-specific part of a serial bus connection.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SerialBusKind {
@@ -414,9 +507,18 @@ pub enum Resource {
     /// `I2cSerialBusV2`, `SpiSerialBusV2`, `UartSerialBusV2`, or another
     /// serial bus.
     SerialBus(SerialBus),
-    /// A descriptor not decoded here (pin function, pin configuration, pin
-    /// groups, clock input, reserved types): its type byte and the bytes
-    /// after its header.
+    /// `PinFunction`.
+    PinFunction(PinFunction),
+    /// `PinConfig`.
+    PinConfig(PinConfig),
+    /// `PinGroup`.
+    PinGroup(PinGroup),
+    /// `PinGroupFunction`.
+    PinGroupFunction(PinGroupFunction),
+    /// `PinGroupConfig`.
+    PinGroupConfig(PinGroupConfig),
+    /// A descriptor not decoded here (clock input, reserved types): its
+    /// type byte and the bytes after its header.
     Unknown {
         /// The first byte of the descriptor.
         tag: u8,
@@ -712,6 +814,11 @@ fn large(tag: u8, full: &[u8], d: &[u8]) -> Result<Resource, Error> {
         }
         0x8c => Resource::Gpio(gpio(full)?),
         0x8e => Resource::SerialBus(serial_bus(full)?),
+        0x8d => Resource::PinFunction(pin_function(full)?),
+        0x8f => Resource::PinConfig(pin_config(full)?),
+        0x90 => Resource::PinGroup(pin_group(full)?),
+        0x91 => Resource::PinGroupFunction(pin_group_function(full)?),
+        0x92 => Resource::PinGroupConfig(pin_group_config(full)?),
         _ => Resource::Unknown {
             tag,
             data: d.to_vec(),
@@ -791,6 +898,148 @@ fn span(full: &[u8], start: usize, end: usize) -> Result<&[u8], Error> {
         return Err(bad("descriptor offset out of range"));
     }
     Ok(&full[start..end])
+}
+
+/// A pin table: little-endian words.
+fn pin_table(raw: &[u8]) -> Result<Vec<u16>, Error> {
+    if !raw.len().is_multiple_of(2) {
+        return Err(bad("pin table"));
+    }
+    Ok(raw
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
+        .collect())
+}
+
+/// Vendor data at `off` (`len` bytes), and where the strings before it
+/// end: at the vendor data, or at the descriptor's end if there is none.
+fn vendor_data(full: &[u8], off: usize, len: usize) -> Result<(Vec<u8>, usize), Error> {
+    if len == 0 {
+        return Ok((Vec::new(), full.len()));
+    }
+    let end = off.checked_add(len).ok_or(bad("vendor data"))?;
+    Ok((span(full, off, end)?.to_vec(), off))
+}
+
+fn pin_function(full: &[u8]) -> Result<PinFunction, Error> {
+    if full.len() < 18 {
+        return Err(bad("PinFunction length"));
+    }
+    let pin_off = usize::from(u16_at(full, 9)?);
+    let name_off = usize::from(u16_at(full, 12)?);
+    let (vendor, strings_end) = vendor_data(
+        full,
+        usize::from(u16_at(full, 14)?),
+        usize::from(u16_at(full, 16)?),
+    )?;
+    Ok(PinFunction {
+        revision: full[3],
+        flags: u16_at(full, 4)?,
+        pull: full[6],
+        function: u16_at(full, 7)?,
+        pins: pin_table(span(full, pin_off, name_off)?)?,
+        source: ResourceSource {
+            index: full[11],
+            name: name_from(span(full, name_off, strings_end)?),
+        },
+        vendor,
+    })
+}
+
+fn pin_config(full: &[u8]) -> Result<PinConfig, Error> {
+    if full.len() < 20 {
+        return Err(bad("PinConfig length"));
+    }
+    let pin_off = usize::from(u16_at(full, 11)?);
+    let name_off = usize::from(u16_at(full, 14)?);
+    let (vendor, strings_end) = vendor_data(
+        full,
+        usize::from(u16_at(full, 16)?),
+        usize::from(u16_at(full, 18)?),
+    )?;
+    Ok(PinConfig {
+        revision: full[3],
+        flags: u16_at(full, 4)?,
+        config_type: full[6],
+        config_value: u32_at(full, 7)?,
+        pins: pin_table(span(full, pin_off, name_off)?)?,
+        source: ResourceSource {
+            index: full[13],
+            name: name_from(span(full, name_off, strings_end)?),
+        },
+        vendor,
+    })
+}
+
+fn pin_group(full: &[u8]) -> Result<PinGroup, Error> {
+    if full.len() < 14 {
+        return Err(bad("PinGroup length"));
+    }
+    let pin_off = usize::from(u16_at(full, 6)?);
+    let label_off = usize::from(u16_at(full, 8)?);
+    let (vendor, strings_end) = vendor_data(
+        full,
+        usize::from(u16_at(full, 10)?),
+        usize::from(u16_at(full, 12)?),
+    )?;
+    Ok(PinGroup {
+        revision: full[3],
+        flags: u16_at(full, 4)?,
+        pins: pin_table(span(full, pin_off, label_off)?)?,
+        label: name_from(span(full, label_off, strings_end)?),
+        vendor,
+    })
+}
+
+fn pin_group_function(full: &[u8]) -> Result<PinGroupFunction, Error> {
+    if full.len() < 17 {
+        return Err(bad("PinGroupFunction length"));
+    }
+    let name_off = usize::from(u16_at(full, 9)?);
+    let label_off = usize::from(u16_at(full, 11)?);
+    let (vendor, strings_end) = vendor_data(
+        full,
+        usize::from(u16_at(full, 13)?),
+        usize::from(u16_at(full, 15)?),
+    )?;
+    Ok(PinGroupFunction {
+        revision: full[3],
+        flags: u16_at(full, 4)?,
+        function: u16_at(full, 6)?,
+        source: ResourceSource {
+            index: full[8],
+            name: name_from(span(full, name_off, label_off)?),
+        },
+        group: name_from(span(full, label_off, strings_end)?),
+        vendor,
+    })
+}
+
+fn pin_group_config(full: &[u8]) -> Result<PinGroupConfig, Error> {
+    if full.len() < 20 {
+        return Err(bad("PinGroupConfig length"));
+    }
+    let name_off = usize::from(u16_at(full, 12)?);
+    let label_off = usize::from(u16_at(full, 14)?);
+    let (vendor, strings_end) = vendor_data(
+        full,
+        usize::from(u16_at(full, 16)?),
+        usize::from(u16_at(full, 18)?),
+    )?;
+    Ok(PinGroupConfig {
+        revision: full[3],
+        flags: u16_at(full, 4)?,
+        config_type: full[6],
+        config_value: u32_at(full, 7)?,
+        source: ResourceSource {
+            index: full[11],
+            name: name_from(span(full, name_off, label_off)?),
+        },
+        group: name_from(span(full, label_off, strings_end)?),
+        vendor,
+    })
 }
 
 fn gpio(full: &[u8]) -> Result<Gpio, Error> {

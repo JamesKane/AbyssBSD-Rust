@@ -6,7 +6,10 @@
 //! - `_DEP`;
 //! - the resource sources in `_CRS`: the GPIO controller of a `GpioInt` or
 //!   `GpioIo`, the controller of a serial bus, the combiner an `Interrupt`
-//!   names;
+//!   names, the pin controller of a pin function, configuration, or group
+//!   (whose `PinGroup` label must exist);
+//! - the DMA controller serving each `FixedDMA` request line, which the
+//!   CSRT names ([`crate::DmaController`]);
 //! - the power resources of `_PR0` and `_PR3`;
 //! - `_DSD`'s reference properties (`power-domains`, `mboxes`, `phys`,
 //!   graph endpoints, ...), following the Hierarchical Data Extension into
@@ -27,6 +30,8 @@ use alloc::vec::Vec;
 use aml::resource::Resource;
 use aml::{DepRef, Interpreter, NodeId, ObjectType, Value};
 use devtree::graph::{EdgeKind, Origin};
+
+use crate::DmaController;
 
 /// `_DSD` device properties (daffd814-6eba-4d8c-8a91-bc9bbf4aa301).
 const PROPERTIES_UUID: [u8; 16] = [
@@ -53,6 +58,11 @@ pub enum Via {
     Gpio,
     /// The controller of a serial bus connection.
     SerialBus,
+    /// The pin controller of a `PinFunction`, `PinConfig`, or pin group
+    /// descriptor.
+    Pin,
+    /// The DMA controller serving a `FixedDMA` request line (by the CSRT).
+    Dma,
     /// A power resource in `_PR0` (D0) or `_PR3` (D3hot).
     PowerResource {
         /// From `_PR3` rather than `_PR0`.
@@ -71,6 +81,8 @@ impl Via {
             Self::Interrupt => String::from("Interrupt"),
             Self::Gpio => String::from("GpioInt/GpioIo"),
             Self::SerialBus => String::from("SerialBus"),
+            Self::Pin => String::from("pin resource"),
+            Self::Dma => String::from("FixedDMA"),
             Self::PowerResource { d3hot: false } => String::from("_PR0"),
             Self::PowerResource { d3hot: true } => String::from("_PR3"),
             Self::Property(p) => alloc::format!("_DSD {p}"),
@@ -83,6 +95,8 @@ impl Via {
         match self {
             Self::Dep => Origin::Dep,
             Self::Interrupt | Self::Gpio | Self::SerialBus => Origin::ResourceSource,
+            Self::Pin => Origin::Pin,
+            Self::Dma => Origin::Dma,
             Self::PowerResource { .. } => Origin::PowerResource,
             Self::Property(_) => Origin::Dsd,
         }
@@ -195,11 +209,14 @@ pub fn build(
     interp: &mut Interpreter,
     host: &mut dyn aml::Host,
     devices: &[NodeId],
+    dma: &[DmaController],
 ) -> FirmwareDeps {
     let mut out = FirmwareDeps::default();
+    let mut dma_devices: Option<Vec<(u64, NodeId)>> = None;
     for &d in devices {
         dep(interp, host, d, &mut out);
         resource_sources(interp, host, d, &mut out);
+        fixed_dma(interp, host, d, dma, &mut dma_devices, &mut out);
         power_resources(interp, host, d, &mut out);
         if let Ok(Some(dsd)) = interp.evaluate_child(d, "_DSD", Vec::new(), host) {
             dsd_package(interp, host, d, d, &dsd, 0, &mut out);
@@ -268,20 +285,103 @@ fn resource_sources(
 ) {
     let crs = interp.crs(d, host).ok().flatten().unwrap_or_default();
     for r in &crs {
-        let (via, name) = match r {
+        let (via, name, group) = match r {
             Resource::ExtendedIrq(e) => match &e.source {
-                Some(s) => (Via::Interrupt, &s.name),
+                Some(s) => (Via::Interrupt, &s.name, None),
                 None => continue,
             },
-            Resource::Gpio(g) => (Via::Gpio, &g.source.name),
-            Resource::SerialBus(b) => (Via::SerialBus, &b.source.name),
+            Resource::Gpio(g) => (Via::Gpio, &g.source.name, None),
+            Resource::SerialBus(b) => (Via::SerialBus, &b.source.name, None),
+            Resource::PinFunction(p) => (Via::Pin, &p.source.name, None),
+            Resource::PinConfig(p) => (Via::Pin, &p.source.name, None),
+            Resource::PinGroupFunction(p) => (Via::Pin, &p.source.name, Some(&p.group)),
+            Resource::PinGroupConfig(p) => (Via::Pin, &p.source.name, Some(&p.group)),
             _ => continue,
         };
-        match interp.resolve(d, name) {
-            Some(s) => out.edge(s, d, EdgeKind::Required, via),
-            None => out.unresolved(d, via, name.clone()),
+        let Some(s) = interp.resolve(d, name) else {
+            out.unresolved(d, via, name.clone());
+            continue;
+        };
+        out.edge(s, d, EdgeKind::Required, via.clone());
+        // A pin group is named by the label of one of the controller's
+        // `PinGroup` descriptors.
+        if let Some(label) = group
+            && !declares_group(interp, host, s, label)
+        {
+            out.unresolved(d, via, alloc::format!("{name} group \"{label}\""));
         }
     }
+}
+
+/// The DMA controller serving each `FixedDMA` request line: the CSRT says
+/// which controller serves the line, and the controller is the device
+/// whose `_CRS` begins with its MMIO base.
+fn fixed_dma(
+    interp: &mut Interpreter,
+    host: &mut dyn aml::Host,
+    d: NodeId,
+    dma: &[DmaController],
+    devices: &mut Option<Vec<(u64, NodeId)>>,
+    out: &mut FirmwareDeps,
+) {
+    let crs = interp.crs(d, host).ok().flatten().unwrap_or_default();
+    for r in &crs {
+        let Resource::FixedDma { request, .. } = *r else {
+            continue;
+        };
+        let Some(c) = dma.iter().find(|c| c.requests.contains(&request)) else {
+            out.unresolved(d, Via::Dma, alloc::format!("request line {request}"));
+            continue;
+        };
+        // Every device's first memory range, found once.
+        let by_base = devices.get_or_insert_with(|| {
+            let mut v = Vec::new();
+            for n in interp.devices() {
+                let crs = interp.crs(n, host).ok().flatten().unwrap_or_default();
+                if let Some(base) = crs.iter().find_map(memory_base) {
+                    v.push((base, n));
+                }
+            }
+            v
+        });
+        match by_base.iter().find(|&&(b, _)| b == c.mmio_base) {
+            Some(&(_, s)) => out.edge(s, d, EdgeKind::Required, Via::Dma),
+            None => out.unresolved(
+                d,
+                Via::Dma,
+                alloc::format!("DMA controller at {:#x}", c.mmio_base),
+            ),
+        }
+    }
+}
+
+/// The start of a memory range a device consumes.
+fn memory_base(r: &Resource) -> Option<u64> {
+    match r {
+        Resource::FixedMemory32(m) | Resource::Memory32(m) | Resource::Memory24(m) => {
+            Some(u64::from(m.min))
+        }
+        Resource::Address(a) if matches!(a.kind, aml::resource::AddressKind::Memory { .. }) => {
+            Some(a.min)
+        }
+        _ => None,
+    }
+}
+
+/// Whether `controller`'s `_CRS` declares a `PinGroup` labelled `label`.
+fn declares_group(
+    interp: &mut Interpreter,
+    host: &mut dyn aml::Host,
+    controller: NodeId,
+    label: &str,
+) -> bool {
+    let crs = interp
+        .crs(controller, host)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    crs.iter()
+        .any(|r| matches!(r, Resource::PinGroup(g) if g.label == label))
 }
 
 fn power_resources(

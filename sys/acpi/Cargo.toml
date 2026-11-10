@@ -15,6 +15,7 @@ sched = { path = "../sched" }
 sync = { path = "../sync" }
 
 [dev-dependencies]
+acpi-tables = { path = "../../lib/acpi-tables" }
 aml = { path = "../../lib/aml", features = ["asm"] }
 
 [lints]

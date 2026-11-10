@@ -277,6 +277,20 @@ impl acpi::Ops for KernelAcpi {
     fn log(&self, args: core::fmt::Arguments<'_>) {
         kprintln!("{args}");
     }
+
+    fn dma_controllers(&self) -> Vec<acpi::DmaController> {
+        let Some(c) = crate::acpi::find(*b"CSRT").and_then(|t| acpi_tables::csrt::parse(&t).ok())
+        else {
+            return Vec::new();
+        };
+        c.groups()
+            .filter_map(|g| g.ok()?.dma_controller())
+            .map(|d| acpi::DmaController {
+                mmio_base: d.mmio_base,
+                requests: d.base_request_line..d.base_request_line.saturating_add(d.request_lines),
+            })
+            .collect()
+    }
 }
 
 /// Power button presses seen.

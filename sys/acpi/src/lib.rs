@@ -75,6 +75,21 @@ pub trait Ops: Sync {
     fn power_button(&self);
     /// A console line.
     fn log(&self, args: core::fmt::Arguments<'_>);
+    /// The DMA controllers the CSRT describes, which serve `_CRS`
+    /// `FixedDMA` request lines. None by default.
+    fn dma_controllers(&self) -> Vec<DmaController> {
+        Vec::new()
+    }
+}
+
+/// A DMA controller from the CSRT: the MMIO base that identifies its
+/// namespace device, and the request lines it serves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DmaController {
+    /// Its MMIO base, as its device's `_CRS` gives it.
+    pub mmio_base: u64,
+    /// The request lines it serves.
+    pub requests: core::ops::Range<u16>,
 }
 
 #[cfg(test)]

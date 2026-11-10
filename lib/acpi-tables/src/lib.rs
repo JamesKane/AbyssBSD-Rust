@@ -23,6 +23,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+pub mod csrt;
 pub mod dbg2;
 pub mod fadt;
 pub mod gas;

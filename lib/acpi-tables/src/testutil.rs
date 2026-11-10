@@ -146,6 +146,12 @@ pub(crate) fn exercise(t: &crate::Sdt<'_>) {
         }
     }
     let _ = hpet::parse(t);
+    if let Ok(c) = crate::csrt::parse(t) {
+        for g in c.groups().flatten() {
+            let _ = g.dma_controller().map(|d| d.serves(0));
+            let _ = g.resources().count();
+        }
+    }
     if let Ok(g) = gtdt::parse(t) {
         let _ = (g.virtual_el2(), g.cnt_read_base());
         for p in g.platform_timers().flatten() {

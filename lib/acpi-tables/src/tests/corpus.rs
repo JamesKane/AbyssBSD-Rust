@@ -608,3 +608,43 @@ fn x870e_mcfg() {
         (0xe000_0000, 0, 0, 0xff)
     );
 }
+
+/// The Sky1's two DMA controllers: `\_SB.DMA0` (`CIXHA014`, at
+/// 0x04190000) serves request lines 0-31, the UARTs' `FixedDMA`; and
+/// `\_SB.DMA1` (`CIXH1006`, at 0x07010000) lines 32-63, the I2S ports'.
+#[test]
+fn opi6p_csrt_dma_controllers() {
+    let m = opi6p!("csrt.dat");
+    let t = crate::csrt::parse(&sdt(&m)).unwrap();
+    let groups: Vec<_> = t.groups().map(Result::unwrap).collect();
+    assert_eq!(groups.len(), 2);
+    for (k, g) in groups.iter().enumerate() {
+        assert_eq!(g.vendor.to_le_bytes(), *b"CIX ");
+        assert_eq!(g.device, u16::try_from(k).unwrap());
+        assert_eq!(g.resources().count(), 0);
+    }
+    let dma: Vec<_> = groups.iter().map(|g| g.dma_controller().unwrap()).collect();
+    assert_eq!(
+        dma,
+        [
+            crate::csrt::DmaController {
+                mmio_base: 0x0419_0000,
+                gsi: 335,
+                channels: 8,
+                address_width: 32,
+                base_request_line: 0,
+                request_lines: 32,
+            },
+            crate::csrt::DmaController {
+                mmio_base: 0x0701_0000,
+                gsi: 262,
+                channels: 8,
+                address_width: 32,
+                base_request_line: 32,
+                request_lines: 32,
+            },
+        ]
+    );
+    assert!(dma[0].serves(7) && !dma[0].serves(32));
+    assert!(dma[1].serves(50) && !dma[1].serves(64));
+}

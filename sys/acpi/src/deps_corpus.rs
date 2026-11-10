@@ -164,13 +164,42 @@ fn load(name: &str, tables: &[&[u8]]) -> (Interpreter, Machine) {
 }
 
 /// The dependencies of the devices `acpi0` adds, as the bus asks for them.
-fn deps_of(i: &mut Interpreter, h: &mut Machine) -> FirmwareDeps {
+fn deps_of(name: &str, i: &mut Interpreter, h: &mut Machine) -> FirmwareDeps {
     let devices: Vec<NodeId> = i
         .devices()
         .into_iter()
         .filter(|&d| crate::bus::enumerated(i, h, d).is_some())
         .collect();
-    build(i, h, &devices)
+    build(i, h, &devices, &dma_controllers(name))
+}
+
+/// A table's bytes as the memory it is read from, at address 0.
+struct Table(&'static [u8]);
+
+impl acpi_tables::PhysMem<'static> for &Table {
+    fn bytes(&self, pa: u64, len: usize) -> Option<&'static [u8]> {
+        let start = usize::try_from(pa).ok()?;
+        self.0.get(start..start.checked_add(len)?)
+    }
+}
+
+/// The DMA controllers a machine's CSRT describes, as the kernel reads
+/// them.
+fn dma_controllers(name: &str) -> Vec<crate::DmaController> {
+    let csrt = match name {
+        "opi6p" => corpus!("opi6p/csrt.dat"),
+        _ => return Vec::new(),
+    };
+    let t = acpi_tables::Sdt::read(&&Table(csrt), 0).unwrap();
+    acpi_tables::csrt::parse(&t)
+        .unwrap()
+        .groups()
+        .filter_map(|g| g.ok()?.dma_controller())
+        .map(|c| crate::DmaController {
+            mmio_base: c.mmio_base,
+            requests: c.base_request_line..c.base_request_line.saturating_add(c.request_lines),
+        })
+        .collect()
 }
 
 /// The device that serves an edge's supplier: the namespace root stands
@@ -235,7 +264,7 @@ fn graph(i: &Interpreter, deps: &FirmwareDeps) -> Graph<NodeId> {
 fn machine(name: &str) -> (Interpreter, Machine, FirmwareDeps) {
     let (_, tables) = machines().into_iter().find(|(n, _)| *n == name).unwrap();
     let (mut i, mut h) = load(name, &tables);
-    let deps = deps_of(&mut i, &mut h);
+    let deps = deps_of(name, &mut i, &mut h);
     (i, h, deps)
 }
 
@@ -384,22 +413,34 @@ fn opi6p_graph() {
             // Static data: a fixed clock rate, a TrustZone description.
             ("Required \"tzgt\" bus", 1),
             ("Required \"uartclk\" bus", 4),
+            ("Required Dma device", 7),
             ("Required Gpio device", 22),
             ("Required Interrupt device", 10),
+            ("Required Pin device", 42),
             ("Required SerialBus device", 16),
         ],
     );
-    // HARDWARE.md §4: the graph endpoints of the DP ports name USB-C
-    // connectors this firmware never defines; on this board only DPR1 is
-    // present.
-    assert_eq!(
-        unresolved(&i, &deps),
-        [(
-            String::from("\\_SB_.DPR1"),
-            Via::Property(String::from("remote-endpoint")),
-            String::from("^I2C0.UXC0")
-        )]
-    );
+    // Four I2S ports ask the pin controller for "..._dbg" groups it never
+    // declares (SSDT1's MUX0 has pinctrl_substrate_i2s5, i2s6, and i2s8,
+    // no debug variants, and nothing for i2s9). And HARDWARE.md §4: the
+    // graph endpoints of the DP ports name USB-C connectors this firmware
+    // never defines; on this board only DPR1 is present.
+    let mut want: Vec<(String, Via, String)> = [5, 6, 8, 9]
+        .iter()
+        .map(|n| {
+            (
+                alloc::format!("\\_SB_.I2S{n}"),
+                Via::Pin,
+                alloc::format!("\\_SB.MUX0 group \"pinctrl_substrate_i2s{n}_dbg\""),
+            )
+        })
+        .collect();
+    want.push((
+        String::from("\\_SB_.DPR1"),
+        Via::Property(String::from("remote-endpoint")),
+        String::from("^I2C0.UXC0"),
+    ));
+    assert_eq!(unresolved(&i, &deps), want);
     assert!(absent(&i, &deps).is_empty());
     // SCMI runs over the CIX mailbox (DRIVER-MODEL.md §17 question 7),
     // and serves the GPU's, VPU's, and NPU's power domain as a sub-handle.
@@ -423,6 +464,17 @@ fn opi6p_graph() {
         let e = edge(&i, &deps, consumer, "\\_SB_.SCMI.DVFS");
         assert_eq!(e.kind, EdgeKind::Power);
         assert!(matches!(e.provider, Provider::Sub { owner, .. } if owner == scmi));
+    }
+    // FixedDMA, by the CSRT: the UARTs' request lines (0-7) are DMA0's,
+    // the I2S ports' (32-50) DMA1's.
+    for (consumer, supplier) in [
+        ("\\_SB_.COM0", "\\_SB_.DMA0"),
+        ("\\_SB_.COM3", "\\_SB_.DMA0"),
+        ("\\_SB_.I2S5", "\\_SB_.DMA1"),
+        ("\\_SB_.I2S9", "\\_SB_.DMA1"),
+    ] {
+        let e = edge(&i, &deps, consumer, supplier);
+        assert_eq!((e.kind, &e.via), (EdgeKind::Required, &Via::Dma));
     }
 }
 
