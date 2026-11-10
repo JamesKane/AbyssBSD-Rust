@@ -56,7 +56,7 @@ cargo xtask image   --arch <a> [--release] [--ktest] [--cmdline "..."] [--root m
                     # GPT disk, FAT32 ESP -> build/<arch>/; `installed` is the multi-user
                     # boot's UFS2 root (disk-installed.img; makefs, so with --remote)
 cargo xtask run     --arch <a> [--release] [--ktest] [--cmdline "..."] [--smp N] [--mem SIZE]
-                    [--gdb] [--display] [--el2] [--vmm qemu|bhyve]
+                    [--gdb] [--display] [--el2] [--iommu] [--vmm qemu|bhyve]
 cargo xtask test    [--tier unit|boot|stress|all] [--arch <a|all>] [--duration S] [--verbose]
 cargo xtask check                                        # rustfmt, clippy (host, loader, kernel), policy
 cargo xtask policy                                       # path-only dependencies, SPDX headers
@@ -70,6 +70,8 @@ The ESP holds the loader at the removable-media path (`EFI/BOOT/BOOTX64.EFI`,
 `EFI/BOOT/BOOTAA64.EFI`), the kernel at `EFI/ABYSS/KERNEL`, and the kernel command line at
 `EFI/ABYSS/CMDLINE`. Names are 8.3 until `lib/fat` writes long names. `--el2` starts aarch64
 firmware at EL2 (`virtualization=on`, TCG only), so the kernel takes its EL2 exit path.
+`--iommu` puts an SMMUv3 in front of aarch64's PCIe root complex (`iommu=smmuv3`) and every
+virtio device behind it (`iommu_platform=on`; [IOMMU.md](IOMMU.md) §6).
 `--vmm bhyve` runs amd64 under bhyve and needs a FreeBSD host (use `--remote`).
 
 Kernel command-line words understood so far:

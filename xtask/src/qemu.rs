@@ -89,6 +89,10 @@ pub(crate) struct Vm {
     /// aarch64: firmware runs at EL2 (`virtualization=on`), so the kernel
     /// takes its EL2 entry path.
     pub(crate) el2: bool,
+    /// aarch64: an SMMUv3 in front of the PCIe root complex
+    /// (`iommu=smmuv3`), with every virtio device behind it
+    /// (`iommu_platform=on`; docs/IOMMU.md §6).
+    pub(crate) iommu: bool,
     /// Attach the devices tests report through: `isa-debug-exit` on x86,
     /// semihosting on aarch64.
     pub(crate) test_devices: bool,
@@ -202,6 +206,7 @@ pub(crate) fn cmd_run(mut args: Args) -> Result<()> {
     let gdb = args.take_flag("--gdb");
     let display = args.take_flag("--display");
     let el2 = args.take_flag("--el2");
+    let iommu = args.take_flag("--iommu");
     let usb = args.take_flag("--usb");
     let qmp = args.take_value("--qmp")?;
     let vmm = Vmm::parse(&args.take_value("--vmm")?.unwrap_or_else(|| "qemu".into()))?;
@@ -222,6 +227,7 @@ pub(crate) fn cmd_run(mut args: Args) -> Result<()> {
         gdb,
         display,
         el2,
+        iommu,
         usb,
         qmp: qmp.as_ref().map(PathBuf::from),
         ..Vm::new(vmm, arch, disk)
@@ -297,6 +303,7 @@ impl Vm {
             gdb: false,
             display: false,
             el2: false,
+            iommu: false,
             test_devices: false,
             allow_reset: false,
             extra_disk: None,
@@ -447,11 +454,28 @@ impl Vm {
 
         let mut c = Command::new(bin);
         match self.arch {
+            Arch::X86_64 if self.iommu => return Err("--iommu is aarch64's (SMMUv3)".into()),
             Arch::X86_64 => c.args(["-machine", self.machine.as_deref().unwrap_or("q35")]),
-            Arch::Aarch64 if self.el2 => {
-                c.args(["-machine", "virt,gic-version=3,acpi=on,virtualization=on"])
+            Arch::Aarch64 => {
+                let mut m = String::from("virt,gic-version=3,acpi=on");
+                if self.el2 {
+                    m.push_str(",virtualization=on");
+                }
+                if self.iommu {
+                    m.push_str(",iommu=smmuv3");
+                }
+                c.arg("-machine").arg(m)
             }
-            Arch::Aarch64 => c.args(["-machine", "virt,gic-version=3,acpi=on"]),
+        };
+        // Behind the SMMU, a virtio device must say it honours the
+        // platform's DMA translation; without it QEMU's bypass the vIOMMU.
+        // Only a modern (non-transitional) device may offer that.
+        let pci = |d: &str| -> String {
+            if self.iommu && d.starts_with("virtio-") && d.contains("-pci") {
+                format!("{d},disable-legacy=on,iommu_platform=on")
+            } else {
+                d.to_owned()
+            }
         };
         if self.test_devices {
             match self.arch {
@@ -481,12 +505,13 @@ impl Vm {
         if self.nvme {
             c.args(["-device", "nvme,serial=abyssboot,drive=disk0,bootindex=0"]);
         } else {
-            c.args(["-device", "virtio-blk-pci,drive=disk0,bootindex=0"]);
+            c.arg("-device")
+                .arg(pci("virtio-blk-pci,drive=disk0,bootindex=0"));
         }
         if let Some(d) = &self.extra_disk {
             c.arg("-drive")
                 .arg(format!("if=none,id=disk1,format=raw,file={}", d.display()));
-            c.args(["-device", "virtio-blk-pci,drive=disk1"]);
+            c.arg("-device").arg(pci("virtio-blk-pci,drive=disk1"));
         }
         // Gives firmware an EFI_RNG_PROTOCOL, the loader's KASLR source.
         // It sits behind a PCIe root port so a PCI-PCI bridge, and
@@ -494,18 +519,18 @@ impl Vm {
         // (Conventional PCI machines such as `pc` have no root ports.)
         if self.machine.is_none() {
             c.args(["-device", "pcie-root-port,id=rp0,chassis=1,slot=1"]);
-            c.args(["-device", "virtio-rng-pci,bus=rp0"]);
+            c.arg("-device").arg(pci("virtio-rng-pci,bus=rp0"));
         } else {
-            c.args(["-device", "virtio-rng-pci"]);
+            c.arg("-device").arg(pci("virtio-rng-pci"));
         }
         if self.arch == Arch::Aarch64 {
             // `virt` has no display; ramfb gives edk2 a linear-framebuffer
             // GOP (virtio-gpu's GOP is blit-only).
             c.args(["-device", "ramfb,id=video0"]);
         }
-        c.args(&self.devices);
+        c.args(self.devices.iter().map(|d| pci(d)));
         if self.usb {
-            c.args(self.usb_args()?);
+            c.args(self.usb_args()?.iter().map(|d| pci(d)));
         }
         match &self.net {
             None => {
@@ -518,7 +543,7 @@ impl Vm {
                     netdev.push_str(&format!(",hostfwd=tcp:127.0.0.1:{host}-:{guest}"));
                 }
                 c.arg("-netdev").arg(netdev);
-                c.args(["-device", "virtio-net-pci,netdev=net0"]);
+                c.arg("-device").arg(pci("virtio-net-pci,netdev=net0"));
             }
             Some(Net::Bridge(_)) => return Err("the test bridge is bhyve's".into()),
         }

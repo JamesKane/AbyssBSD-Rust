@@ -143,6 +143,16 @@ pub(crate) fn exercise(t: &crate::Sdt<'_>) {
         let _ = i.its_groups();
         for rid in [0, 1, 3, 0x100, 0xffff] {
             let _ = i.its_for_pci(0, rid);
+            let _ = i.stream_for_pci(0, rid);
+        }
+        for n in i.nodes() {
+            let _ = (n.kind(), n.revision(), n.identifier(), n.mappings().count());
+            let _ = (n.smmu_v3(), n.root_complex(), n.named_component());
+            let _ = n.rmr().map(|r| r.ranges().count());
+            let _ = n.map(0);
+            for (smmu, _) in i.smmu_v3s() {
+                let _ = i.node_streams(n.offset(), smmu).count();
+            }
         }
     }
     let _ = hpet::parse(t);

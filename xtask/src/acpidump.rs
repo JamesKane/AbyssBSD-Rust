@@ -22,6 +22,7 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     let arch = Arch::one_from_args(&mut args)?;
     let vmm = Vmm::parse(&args.take_value("--vmm")?.unwrap_or_else(|| "qemu".into()))?;
     let machine = args.take_value("--machine")?;
+    let iommu = args.take_flag("--iommu");
     let out = PathBuf::from(args.take_value("--out")?.ok_or("--out DIR is required")?);
     args.finish()?;
     if !vmm.available(arch) {
@@ -34,6 +35,7 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     let disk = image::build(arch, opts, "abyss.acpidump=1")?;
     let vm = Vm {
         machine,
+        iommu,
         ..Vm::new(vmm, arch, disk.clone())
     };
     let log = disk.with_file_name("acpidump.log");

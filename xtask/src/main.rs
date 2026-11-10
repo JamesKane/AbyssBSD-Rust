@@ -43,7 +43,7 @@ commands:
   build       --arch <a|all> [--release] [--ktest]       build the loader
   image       --arch <a> [--release] [--ktest] [--root md|installed]
                                                          build a GPT disk image with an ESP
-  run         --arch <a> [--release] [--ktest] [--smp N] [--mem SIZE] [--gdb] [--display] [--usb]
+  run         --arch <a> [--release] [--ktest] [--smp N] [--mem SIZE] [--gdb] [--display] [--usb] [--el2] [--iommu]
               [--qmp SOCK]                               ... with a QMP socket for `qmp`
   qmp         --sock SOCK [--type TEXT] [--key KEYS] [--move DX,DY] [--screendump FILE] [--unplug ID]
                                                          type on, move the mouse of, capture the screen of, or unplug from, a running QEMU
@@ -65,7 +65,8 @@ commands:
   kyua-baseline [--resume] [--only DIR,...]              record FreeBSD's kyua results per test case in bhyve (server only)
   kyua        [--resume] [--only DIR,...]                kyua's suite on AbyssBSD in bhyve, against FreeBSD's results (server only)
   fetch-base  [--arch <a|all>]                           FreeBSD base.txz: /rescue image, sysroot (server only)
-  acpidump    --arch <a> [--vmm qemu|bhyve] [--machine M] --out DIR   capture a VM's ACPI tables
+  acpidump    --arch <a> [--vmm qemu|bhyve] [--machine M] [--iommu] --out DIR
+                                                         capture a VM's ACPI tables
   freebsd-record [--out DIR] [--usb]                     record FreeBSD's device tree in bhyve; --usb: its USB
                                                          and input devices, in QEMU and bhyve (server only)
   fs-image    --fs ufs2|msdos --out IMG [--from DIR] [--size S] [--softdep]
