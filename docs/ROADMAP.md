@@ -2693,6 +2693,15 @@ compat-deviations with a reason, and a day of looped scenarios without a hang.
     password, as on FreeBSD. Not reproduced, so left open until it is seen again. On the way, scrolling the
     history no longer blanks the whole framebuffer and forgets every cell: it draws only the
     cells that differ, the drawn state being known.
+  - `efirt`: `/dev/efi` (`efidev`'s ioctls over the runtime variable, time, and wake services, in
+    physical mode under the firmware table); stock `efibootmgr` lists, sets, and deletes
+    `BootNext`, a step of the multi-user script (FreeBSD 15.1 passes it too). arm64's
+    `with_tables` never gave a calling thread its user tables back, harmless while only kernel
+    threads called firmware. On the board, `efibootmgr -n -b 0007; shutdown -r now` from
+    AbyssBSD comes back to AbyssBSD: an update is one reboot now.
+  - On the board with these kernels: login on the serial console (`ttyu2`); `usbhid`'s tree as
+    FreeBSD's (an interface with no report descriptor attaches with an empty one); the boot's
+    notes under `bootverbose`; the loader returns to the firmware after a failure.
   - Noise: the root has `kldxref`'s empty `linker.hints`, so `devmatch` reads the device tree,
     which overflowed the kernel stack: `hw.bus.devices` records (3 KiB each) were built and
     copied on it, and an interrupt on top hit the guard page. They are written in place now.
