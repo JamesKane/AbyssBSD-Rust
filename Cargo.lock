@@ -477,6 +477,14 @@ name = "intmap"
 version = "0.0.0"
 
 [[package]]
+name = "iommu"
+version = "0.0.0"
+dependencies = [
+ "addr",
+ "pt",
+]
+
+[[package]]
 name = "irq"
 version = "0.0.0"
 dependencies = [
