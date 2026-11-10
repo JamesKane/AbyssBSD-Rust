@@ -10,6 +10,7 @@ where AbyssBSD differs, and why. A difference not listed here is a bug.
 | `sbsa_gwdt` | Arm SBSA generic watchdog (GTDT) | FreeBSD 15.1 has no driver for it. The name follows the earlier FreeBSD bring-up branch for the Orange Pi 6 Plus, where it was first written. |
 | `sky1_clk` | CIX Sky1 firmware clocks (`CIXHA010`, `\_SB.CCLK`) | FreeBSD has no driver for it: its drivers use the clock state firmware leaves. AbyssBSD's device graph makes every clock line's consumer wait for its provider, so the device needs a driver. It follows the `sky1_` names of the earlier FreeBSD bring-up branch. |
 | `sky1_reset` | CIX Sky1 S5 and FCH reset controllers (`CIXHA020`, `CIXHA021`) | FreeBSD has no driver for them: its drivers use the reset state firmware leaves. The platform's `RSTL` lines make them suppliers of most SoC devices. |
+| `sky1_pinctrl` | CIX Sky1 FCH and S5 pin controllers (`CIXHA016`, `CIXHA017`) | FreeBSD has no driver for them: its drivers use the pads firmware programmed. Consumers name their pin groups in `_CRS`, which makes the controllers their suppliers. |
 
 ## Device tree
 

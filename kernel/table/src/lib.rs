@@ -33,6 +33,7 @@ pub static DRIVERS: &[DriverDecl] = &[
     amdsbwd::DRIVER,
     sbsa_gwdt::DRIVER,
     sky1_clk::DRIVER,
+    sky1_pinctrl::DRIVER,
     sky1_reset::DRIVER,
     pci::bus::DRIVER,
     pci::bridge::DRIVER,

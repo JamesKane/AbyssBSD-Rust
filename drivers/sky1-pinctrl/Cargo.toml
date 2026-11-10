@@ -1,0 +1,19 @@
+[package]
+name = "sky1-pinctrl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+acpi = { path = "../../sys/acpi" }
+aml = { path = "../../lib/aml" }
+bus = { path = "../../sys/bus" }
+devtree = { path = "../../lib/devtree" }
+regs = { path = "../../lib/regs" }
+
+[dev-dependencies]
+acpi-corpus = { path = "../../lib/acpi-corpus" }
+
+[lints]
+workspace = true

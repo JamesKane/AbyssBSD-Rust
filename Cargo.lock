@@ -198,6 +198,7 @@ dependencies = [
  "pci",
  "sbsa-gwdt",
  "sky1-clk",
+ "sky1-pinctrl",
  "sky1-reset",
  "timers",
  "uart",
@@ -609,6 +610,18 @@ dependencies = [
  "bus",
  "devtree",
  "sched",
+]
+
+[[package]]
+name = "sky1-pinctrl"
+version = "0.0.0"
+dependencies = [
+ "acpi",
+ "acpi-corpus",
+ "aml",
+ "bus",
+ "devtree",
+ "regs",
 ]
 
 [[package]]

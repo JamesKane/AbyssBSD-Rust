@@ -2532,7 +2532,16 @@ machines against FreeBSD on bare metal; the exit criteria above.
   - `sky1_reset` (`CIXHA020`, `CIXHA021`) serves `RST0` and `RST1`: active-low bits, changed
     read-modify-write, with the clean-room specification's index maps. Every `RSTL` line the
     Sky1 names on them has a bit.
-  - Neither changes anything at attach. Next: the pin controllers (`sky1-peripherals` 05).
+  - Neither changes anything at attach.
+  - `sky1_pinctrl` (`CIXHA016` `MUX0`, `CIXHA017` `MUX1`) reads its groups from its own `_CRS`
+    (38 and 24). Each pad's vendor data in a `PinGroup` is the pad register's offset and the low
+    half of its value, both big-endian 16-bit, which answers the specification's open question.
+    The DSDT matches the vendor devicetree's pads and modes, but the UART groups use pull-down
+    where the vendor devicetree pulls up. Attach writes nothing: it logs any grouped pad whose
+    register differs from its declaration. Every group a consumer names exists, except the four
+    I2S `*_dbg` groups firmware never declared.
+  - Next: the FCH CRU (`UCRU`) and `DMA0`, which hold back COM0, COM1, and COM3, then GPIO, I2C,
+    and the GPT timer.
 
 ## Phase 9: Self-hosting and hardening = **v1.0 / Day 1 complete** (L)
 
