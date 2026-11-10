@@ -9,16 +9,91 @@
 //! [`crate::StartCx::set_requester_id`], which `%iommu` shows and which
 //! the root complex's mapping turns into a stream.
 //!
-//! Nothing here translates yet: the records are what the broker will
-//! choose an `Iommu` DMA backend from (IOMMU.md §8, stage 3).
+//! An attached unit publishes an [`Iommu`] provider
+//! ([`crate::StartCx::provide_iommu`]). When a translated device first
+//! needs DMA (its DMA tag, or MSI, whichever comes first, as FreeBSD's
+//! `iommu_get_dev_ctx`), the broker asks the unit for a context for its
+//! stream ([`crate::AttachCx::iommu_context`]). So far (IOMMU.md §8,
+//! stage 2) every context is pass-through: the stream bypasses
+//! translation, and the device keeps its direct or bounce tag, as
+//! FreeBSD's disabled requesters (`IOMMU_CTX_DISABLED`). A stream no
+//! device asked for stays invalid: its DMA aborts.
 //!
-//! Behavior reference: sys/dev/iommu/busdma_iommu.c (`iommu_get_requester`),
-//! sys/arm64/acpica/acpi_iort.c.
+//! Behavior reference: sys/dev/iommu/busdma_iommu.c (`iommu_get_requester`,
+//! `iommu_get_dev_ctx`), sys/arm64/acpica/acpi_iort.c.
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ops::RangeInclusive;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::types::DeviceId;
+
+/// Why a unit could not give a stream a context.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IommuError {
+    /// The stream is beyond the unit's stream table.
+    NoStream,
+    /// Out of memory for the unit's tables.
+    NoMemory,
+    /// The unit did not complete the change (a command timed out).
+    Hardware,
+    /// The unit's driver is detaching.
+    Revoked,
+}
+
+/// An IOMMU unit, as the broker uses it.
+pub trait Iommu: Send + Sync {
+    /// Gives `stream` a pass-through context: its DMA reaches memory
+    /// untranslated (an STE in bypass). Idempotent.
+    ///
+    /// # Errors
+    ///
+    /// Why the stream has no context: its DMA still aborts.
+    fn pass_through(&self, stream: u32) -> Result<(), IommuError>;
+}
+
+/// A published [`Iommu`], revoked when its driver detaches.
+pub struct IommuSource {
+    imp: Arc<dyn Iommu>,
+    revoked: AtomicBool,
+}
+
+impl core::fmt::Debug for IommuSource {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("IommuSource")
+            .field("revoked", &self.revoked)
+            .finish_non_exhaustive()
+    }
+}
+
+impl IommuSource {
+    /// Wraps a provider.
+    #[must_use]
+    pub fn new(imp: Arc<dyn Iommu>) -> Arc<Self> {
+        Arc::new(Self {
+            imp,
+            revoked: AtomicBool::new(false),
+        })
+    }
+
+    /// Stops every request: the driver is detaching.
+    pub fn revoke(&self) {
+        self.revoked.store(true, Ordering::Release);
+    }
+
+    /// [`Iommu::pass_through`], unless revoked.
+    ///
+    /// # Errors
+    ///
+    /// The provider's, or [`IommuError::Revoked`].
+    pub fn pass_through(&self, stream: u32) -> Result<(), IommuError> {
+        if self.revoked.load(Ordering::Acquire) {
+            return Err(IommuError::Revoked);
+        }
+        self.imp.pass_through(stream)
+    }
+}
 
 /// One mapping from a range of input IDs (requester IDs) to streams, as
 /// an IORT root complex gives it.

@@ -643,9 +643,25 @@ impl<'a> AttachCx<'a> {
         if self.injected() {
             return Err(ResourceError::MapFailed);
         }
+        self.iommu_context()?;
         let c = c.intersect(&self.mgr.dma_limits(self.s, self.node));
         let p = self.mgr.platform();
         Ok(DmaTag::new(p.dma_memory(), c, p.top_of_ram()))
+    }
+
+    /// Gives the device's requester its context on the IOMMU unit that
+    /// translates it, if any (docs/IOMMU.md §4.4): [`AttachCx::dma_tag`]
+    /// does, and so must a path that makes the device write memory
+    /// without a tag (MSI). Pass-through for now (§8, stage 2).
+    ///
+    /// # Errors
+    ///
+    /// [`ResourceError::Iommu`] if the unit could not make it: the
+    /// device's DMA would abort.
+    pub fn iommu_context(&mut self) -> Result<(), ResourceError> {
+        self.mgr
+            .iommu_context(self.s, self.node)
+            .map_err(ResourceError::Iommu)
     }
 
     /// The device's `index`th mailbox channel, in firmware's order (ACPI
@@ -1132,6 +1148,14 @@ impl<D: Driver> StartCx<'_, D> {
         let src = crate::mailbox::MailboxSource::new(imp);
         self.mgr
             .provide(self.s, self.binding.node, Provided::Mailbox(src));
+    }
+
+    /// Publishes this device as an IOMMU unit: the broker asks it for the
+    /// contexts of the devices it translates (docs/IOMMU.md §4.4).
+    pub fn provide_iommu(&mut self, imp: Arc<dyn crate::iommu::Iommu>) {
+        let src = crate::iommu::IommuSource::new(imp);
+        self.mgr
+            .provide(self.s, self.binding.node, Provided::Iommu(src));
     }
 
     /// Publishes this device as an I2C controller.

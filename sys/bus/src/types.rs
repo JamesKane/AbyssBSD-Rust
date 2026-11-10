@@ -417,6 +417,8 @@ pub enum ResourceError {
     NoProvider,
     /// The provider refused.
     Provider(crate::provider::ProviderError),
+    /// The IOMMU unit could not give the device a context.
+    Iommu(crate::iommu::IommuError),
 }
 
 /// What a [`Line`] reaches.

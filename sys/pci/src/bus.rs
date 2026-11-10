@@ -217,6 +217,10 @@ pub fn msix_lines(
     let child = cx
         .bus_data_arc::<PciChild>()
         .ok_or(crate::msi::MsiError::NoCapability)?;
+    // A message is a write to memory: the function needs its IOMMU
+    // context first, if it has no DMA tag yet (docs/IOMMU.md §4.8). A
+    // failure shows when the driver asks for its tag.
+    let _ = cx.iommu_context();
     let hws = crate::msi::enable_msix(&child, want)?;
     let owner = Messages {
         child,
@@ -232,6 +236,8 @@ pub fn msi_line(cx: &mut AttachCx<'_>) -> Result<(bus::IrqLine, Messages), crate
     let child = cx
         .bus_data_arc::<PciChild>()
         .ok_or(crate::msi::MsiError::NoCapability)?;
+    // As for MSI-X.
+    let _ = cx.iommu_context();
     let hw = crate::msi::enable_msi(&child)?;
     let owner = Messages {
         child,

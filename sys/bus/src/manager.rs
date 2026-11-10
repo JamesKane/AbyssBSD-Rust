@@ -102,6 +102,7 @@ struct Provides {
     gpio: Option<Arc<GpioSource>>,
     i2c: Option<Arc<I2cSource>>,
     mailbox: Option<Arc<MailboxSource>>,
+    iommu: Option<Arc<crate::iommu::IommuSource>>,
 }
 
 impl Provides {
@@ -124,6 +125,9 @@ impl Provides {
         if let Some(d) = &self.domains {
             d.revoke();
         }
+        if let Some(u) = &self.iommu {
+            u.revoke();
+        }
     }
 }
 
@@ -135,6 +139,7 @@ pub(crate) enum Provided {
     Gpio(Arc<GpioSource>),
     I2c(Arc<I2cSource>),
     Mailbox(Arc<MailboxSource>),
+    Iommu(Arc<crate::iommu::IommuSource>),
 }
 
 /// Starts run in tree order (DRIVER-MODEL.md §4.3): a bus adds children
@@ -990,6 +995,57 @@ impl Manager {
         self.topo.read(s).node(id)?.requester
     }
 
+    /// Gives `id`'s requester a context on the IOMMU unit that translates
+    /// it, if one does and has published its provider (docs/IOMMU.md
+    /// §4.4; pass-through for now, §8 stage 2). Nothing for a node without
+    /// a stream (no translation, no requester ID, or an ID the root
+    /// complex does not map to the unit).
+    ///
+    /// # Errors
+    ///
+    /// The unit's, when it could not make the context.
+    pub fn iommu_context(
+        &self,
+        s: &Sleepable,
+        id: DeviceId,
+    ) -> Result<(), crate::iommu::IommuError> {
+        let Some(tr) = self.dma_translation(s, id) else {
+            return Ok(());
+        };
+        // A device below a PCI function (a virtio device on its transport,
+        // a USB device) does its DMA as that function: the nearest
+        // requester ID up the tree is its (FreeBSD's `iommu_get_requester`
+        // starts from the PCI device too).
+        let rid = {
+            let t = self.topo.read(s);
+            let mut at = t.node(id);
+            let mut rid = None;
+            while let Some(n) = at {
+                if let Some(r) = n.requester {
+                    rid = Some(r);
+                    break;
+                }
+                at = n
+                    .parent
+                    .and_then(|p| t.nodes.get(p as usize))
+                    .and_then(Option::as_ref);
+            }
+            rid
+        };
+        let Some(stream) = rid.and_then(|rid| tr.stream(rid)) else {
+            return Ok(());
+        };
+        let unit = self
+            .topo
+            .read(s)
+            .node(tr.unit())
+            .and_then(|n| n.provides.iommu.clone());
+        match unit {
+            Some(u) => u.pass_through(stream),
+            None => Ok(()),
+        }
+    }
+
     /// The IOMMU translation that applies to `id`: its own record or its
     /// nearest ancestor's (docs/IOMMU.md §4.4).
     #[must_use]
@@ -1052,6 +1108,7 @@ impl Manager {
             Provided::Gpio(g) => n.provides.gpio.replace(g).map(Provided::Gpio),
             Provided::I2c(i) => n.provides.i2c.replace(i).map(Provided::I2c),
             Provided::Mailbox(m) => n.provides.mailbox.replace(m).map(Provided::Mailbox),
+            Provided::Iommu(u) => n.provides.iommu.replace(u).map(Provided::Iommu),
         };
         match old {
             Some(Provided::Clocks(c)) => c.revoke(),
@@ -1060,6 +1117,7 @@ impl Manager {
             Some(Provided::Gpio(g)) => g.revoke(),
             Some(Provided::I2c(i)) => i.revoke(),
             Some(Provided::Mailbox(m)) => m.revoke(),
+            Some(Provided::Iommu(u)) => u.revoke(),
             None => {}
         }
     }
