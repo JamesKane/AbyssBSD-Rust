@@ -215,22 +215,35 @@ ktest! {
     fn heap_serves_collections() {
         use alloc::boxed::Box;
         use alloc::vec::Vec;
-        let before = crate::mm::heap_stats();
-        {
-            let mut v: Vec<u64> = Vec::new();
-            for i in 0..50_000 {
-                v.push(i);
+        // The counts are the whole kernel's: drivers attaching meanwhile
+        // (under emulation the attach is still going) move them too, so
+        // it is waited out. Other work is rarer; a leak shows in every
+        // round, someone else's allocations seldom in three.
+        bus::manager().wait_idle(&cx());
+        let mut last = None;
+        for _ in 0..3 {
+            let before = crate::mm::heap_stats();
+            {
+                let mut v: Vec<u64> = Vec::new();
+                for i in 0..50_000 {
+                    v.push(i);
+                }
+                assert_eq!(v.iter().sum::<u64>(), 50_000 * 49_999 / 2);
+                let boxes: Vec<Box<[u8; 100]>> = (0..1000u32).map(|i| Box::new([i.to_le_bytes()[0]; 100])).collect();
+                assert!(boxes.iter().enumerate().all(|(i, b)| b[99] == i.to_le_bytes()[0]));
+                let big = alloc::vec![7u8; 3 << 20];
+                assert_eq!(big[(3 << 20) - 1], 7);
+                assert!(crate::mm::heap_stats().large_pages >= 768);
             }
-            assert_eq!(v.iter().sum::<u64>(), 50_000 * 49_999 / 2);
-            let boxes: Vec<Box<[u8; 100]>> = (0..1000u32).map(|i| Box::new([i.to_le_bytes()[0]; 100])).collect();
-            assert!(boxes.iter().enumerate().all(|(i, b)| b[99] == i.to_le_bytes()[0]));
-            let big = alloc::vec![7u8; 3 << 20];
-            assert_eq!(big[(3 << 20) - 1], 7);
-            assert!(crate::mm::heap_stats().large_pages >= 768);
+            let after = crate::mm::heap_stats();
+            let before = (before.live_objects, before.large_pages);
+            let after = (after.live_objects, after.large_pages);
+            if after == before {
+                return;
+            }
+            last = Some((before, after));
         }
-        let after = crate::mm::heap_stats();
-        assert_eq!(after.live_objects, before.live_objects);
-        assert_eq!(after.large_pages, before.large_pages);
+        panic!("the heap's (objects, large pages) did not come back in three rounds: {last:?}");
     }
 }
 
@@ -2784,8 +2797,14 @@ ktest! {
             units.push(unit);
         }
         units.sort_unstable();
-        let cpus: alloc::vec::Vec<u32> =
-            (0..u32::try_from(sched::online_cpus()).unwrap()).collect();
+        // bhyve's tables declare no processors, so FreeBSD has no `cpuN`
+        // there either (tests/corpus/freebsd/bhyve/devinfo-rv.txt).
+        let bhyve = m.description(acpi0, &s).as_deref() == Some("BHYVE BVFACP ");
+        let cpus: alloc::vec::Vec<u32> = if bhyve {
+            alloc::vec::Vec::new()
+        } else {
+            (0..u32::try_from(sched::online_cpus()).unwrap()).collect()
+        };
         assert_eq!(units, cpus, "cpuN for each CPU N");
     }
 }
