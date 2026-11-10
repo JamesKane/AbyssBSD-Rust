@@ -365,7 +365,16 @@ struct BootCase {
     expect: Option<&'static str>,
     /// A line the first boot's saved log must contain (warm-reset cases).
     expect_saved: Option<&'static str>,
+    /// A small guest ([`LOWMEM_MEM`]) with a [`LOWMEM_DISK`] virtio disk,
+    /// on which the kernel's `page_cache_larger_than_memory` test writes
+    /// more file data than there is memory.
+    lowmem: bool,
 }
+
+/// The low-memory cases' RAM.
+const LOWMEM_MEM: &str = "512M";
+/// The low-memory cases' disk (the kernel test finds it by this size).
+const LOWMEM_DISK: u64 = 1536 << 20;
 
 const BOOT_CASES: &[BootCase] = &[
     BootCase {
@@ -380,6 +389,7 @@ const BOOT_CASES: &[BootCase] = &[
         pass_status: 33,
         expect: None,
         expect_saved: None,
+        lowmem: false,
     },
     BootCase {
         name: "aarch64",
@@ -392,6 +402,7 @@ const BOOT_CASES: &[BootCase] = &[
         pass_status: 0,
         expect: None,
         expect_saved: None,
+        lowmem: false,
     },
     BootCase {
         name: "aarch64-el2",
@@ -406,6 +417,7 @@ const BOOT_CASES: &[BootCase] = &[
         pass_status: 0,
         expect: Some("power: off (PSCI SYSTEM_OFF)"),
         expect_saved: None,
+        lowmem: false,
     },
     BootCase {
         name: "aarch64-smmu",
@@ -422,6 +434,7 @@ const BOOT_CASES: &[BootCase] = &[
         pass_status: 0,
         expect: Some("smmu0: <ARM System Memory Management Unit> on acpi0"),
         expect_saved: None,
+        lowmem: false,
     },
     BootCase {
         name: "aarch64-warm-reset",
@@ -436,6 +449,7 @@ const BOOT_CASES: &[BootCase] = &[
         pass_status: 0,
         expect: None,
         expect_saved: None,
+        lowmem: false,
     },
     BootCase {
         name: "aarch64-smmu-warm-reset",
@@ -452,6 +466,7 @@ const BOOT_CASES: &[BootCase] = &[
         pass_status: 0,
         expect: Some("smmu0: <ARM System Memory Management Unit> on acpi0"),
         expect_saved: Some("logring: devices shut down before the reset"),
+        lowmem: false,
     },
     BootCase {
         name: "x86_64-warm-reset",
@@ -465,6 +480,7 @@ const BOOT_CASES: &[BootCase] = &[
         pass_status: 0,
         expect: Some("power: off (ACPI S5)"),
         expect_saved: None,
+        lowmem: false,
     },
     BootCase {
         name: "x86_64-watchdog",
@@ -480,6 +496,7 @@ const BOOT_CASES: &[BootCase] = &[
         pass_status: 33,
         expect: None,
         expect_saved: Some("watchdog: patting stopped (watchdogd killed)"),
+        lowmem: false,
     },
     BootCase {
         name: "x86_64-bhyve",
@@ -493,6 +510,35 @@ const BOOT_CASES: &[BootCase] = &[
         pass_status: 1,
         expect: Some("power: off (ACPI S5)"),
         expect_saved: None,
+        lowmem: false,
+    },
+    BootCase {
+        name: "aarch64-lowmem",
+        vmm: Vmm::Qemu,
+        arch: Arch::Aarch64,
+        el2: false,
+        iommu: false,
+        warm_reset: false,
+        // Only the page-cache test: twice RAM written to UFS2 and read
+        // back (docs/ARCHITECTURE.md's memory section, `vm::pageout`).
+        cmdline: "abyss.test.only=kernel::tests::user_memory::page_cache_larger_than_memory",
+        pass_status: 0,
+        expect: Some("lowmem: read back:"),
+        expect_saved: None,
+        lowmem: true,
+    },
+    BootCase {
+        name: "x86_64-lowmem",
+        vmm: Vmm::Qemu,
+        arch: Arch::X86_64,
+        el2: false,
+        iommu: false,
+        warm_reset: false,
+        cmdline: "abyss.test.only=kernel::tests::user_memory::page_cache_larger_than_memory",
+        pass_status: 33,
+        expect: Some("lowmem: read back:"),
+        expect_saved: None,
+        lowmem: true,
     },
 ];
 
@@ -1033,6 +1079,17 @@ fn boot(
             }
         }
     }
+    // The low-memory cases' disk, sparse.
+    if case.lowmem {
+        let img = disk.with_file_name(format!("lowmem-{}.img", case.name));
+        std::fs::File::create(&img)?.set_len(LOWMEM_DISK)?;
+        devices.extend([
+            "-drive".into(),
+            format!("if=none,id=lowmem,format=raw,file={}", img.display()),
+            "-device".into(),
+            "virtio-blk-pci,drive=lowmem".into(),
+        ]);
+    }
     // The FAT test disk, read-only (FreeBSD's listings of it are on the
     // memory disk).
     if let Some(img) = crate::fattest::file("fat-test.img") {
@@ -1060,6 +1117,14 @@ fn boot(
             forwards: Vec::new(),
         }),
         ..Vm::new(case.vmm, case.arch, disk)
+    };
+    let vm = if case.lowmem {
+        Vm {
+            mem: LOWMEM_MEM.into(),
+            ..vm
+        }
+    } else {
+        vm
     };
     // Emulated aarch64 is slow to start and slow through the file-system
     // tests (soft updates and msdosfs alone take minutes under TCG); leave

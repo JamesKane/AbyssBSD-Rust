@@ -96,13 +96,15 @@ pub(crate) fn run(_s: &sched::Sleepable) -> ! {
     let clock = || crate::time::now_ns() / 1_000_000;
     // `abyss.test.skip=a::b,c::d` leaves out the tests under those paths
     // (the boot tier's reset and watchdog cases skip the slow user-memory
-    // tests, which the plain cases run).
+    // tests, which the plain cases run); `abyss.test.only=a::b,c::d` runs
+    // only those (the low-memory cases run their one test).
     let skip = crate::boot::value("abyss.test.skip").unwrap_or("");
-    let keep = |name: &str| {
-        !skip
-            .split(',')
+    let only = crate::boot::value("abyss.test.only").unwrap_or("");
+    let under = |list: &str, name: &str| {
+        list.split(',')
             .any(|p| !p.is_empty() && name.starts_with(p))
     };
+    let keep = |name: &str| !under(skip, name) && (only.is_empty() || under(only, name));
     let _ = ktest::run_selected(&mut crate::console::Writer, Some(&clock), &keep);
     crate::panic::EXPECT_FATAL_TRAP.store(true, Ordering::Relaxed);
     kprintln!("ktest: taking a deliberate fatal page fault on the stack guard page");
@@ -5376,6 +5378,74 @@ mod user_memory {
         /// it holds what was written.
         fn ufs_read_write_survives_fsck() {
             ufs_read_write(false);
+        }
+    }
+
+    /// The low-memory cases' disk (`xtask`'s `LOWMEM_DISK`), which tells
+    /// it apart.
+    const LOWMEM_DISK: u64 = 1536 << 20;
+
+    ktest! {
+        /// More file data than memory (the boot tier's `*-lowmem` cases,
+        /// whose small guest has a 1.5 GiB virtio disk; skipped without
+        /// it): files totalling twice the RAM are written to UFS2 with
+        /// soft updates, each synced and checksummed, then all read back
+        /// and checked. The clean page cache must give way to new pages
+        /// and to the kernel's own allocations (`vm::pageout`): the page
+        /// daemon frees it, and an allocation short of pages reclaims it.
+        fn page_cache_larger_than_memory() {
+            use crate::proc::Process;
+            let s = cx();
+            let Some(disk) = find_disk(&s, "vtbd", |_, d| d.bytes() == LOWMEM_DISK) else {
+                kprintln!("lowmem: no low-memory test disk; skipped");
+                return;
+            };
+            let ram_mib = (crate::mm::phys_stats().managed * PAGE) >> 20;
+            // Files of a quarter of RAM, twice RAM in all, within the disk.
+            let file_mib = (ram_mib / 4).max(16);
+            let files = (2 * ram_mib)
+                .div_ceil(file_mib)
+                .min((LOWMEM_DISK >> 20) * 3 / 4 / file_mib);
+            kprintln!(
+                "lowmem: {ram_mib} MiB of RAM: {files} files of {file_mib} MiB on /dev/{}",
+                disk.name()
+            );
+            let script = alloc::format!(
+                "exec > /tmp/lowmem.out 2>&1; \
+                 stats() {{ echo \"$1: free $(sysctl -n vm.stats.vm.v_free_count) \
+                     dfree $(sysctl -n vm.stats.vm.v_dfree) \
+                     pdwakeups $(sysctl -n vm.stats.vm.v_pdwakeups) \
+                     pdpages $(sysctl -n vm.stats.vm.v_pdpages) \
+                     reserved $(sysctl -n vm.stats.vm.v_free_reserved) \
+                     target $(sysctl -n vm.stats.vm.v_free_target)\"; }}; \
+                 newfs -U /dev/{dev} > /dev/null || exit 1; \
+                 mount -t ufs /dev/{dev} /mnt || exit 2; \
+                 stats start; i=0; while [ $i -lt {files} ]; do \
+                     dd if=/dev/random of=/mnt/w$i bs=1m count={file_mib} 2>/dev/null || exit 3; \
+                     sync; md5 -q /mnt/w$i > /tmp/lowmem.$i || exit 4; \
+                     stats \"w$i written\"; i=$((i+1)); done; \
+                 i=0; while [ $i -lt {files} ]; do \
+                     [ \"$(md5 -q /mnt/w$i)\" = \"$(cat /tmp/lowmem.$i)\" ] || exit 5; \
+                     i=$((i+1)); done; \
+                 stats \"read back\"; rm /mnt/w* /tmp/lowmem.[0-9]*; \
+                 umount /mnt || exit 6; exit 7",
+                dev = disk.name(),
+            );
+            let p = Process::spawn(
+                &s,
+                b"/rescue/sh",
+                &[b"sh", b"-c", script.as_bytes()],
+                &[b"PATH=/rescue", b"HOME=/"],
+                None,
+            )
+            .unwrap();
+            let exit = p.wait(&s);
+            if let Some(out) = read_whole(&s, b"/tmp/lowmem.out") {
+                for l in alloc::string::String::from_utf8_lossy(&out).lines() {
+                    kprintln!("lowmem: {l}");
+                }
+            }
+            assert_eq!(exit, crate::proc::Exit::Code(7));
         }
     }
 
