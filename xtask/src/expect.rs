@@ -118,6 +118,13 @@ pub(crate) const UFS_ROOT: &[Step] = &[
         "/dev/gpt/rootfs0 on / (ufs, local, read-only)",
         "the root is read-only",
     ),
+    // What fsck asks after repairing the root (`chkdoreload`): the
+    // metadata read again under the running system.
+    step(
+        "mount -u -o ro,reload / && echo reload-$?\n",
+        "\nreload-0\r\n",
+        "mount -u -o reload reads the read-only root again",
+    ),
     step(
         "mount -u -o rw / && echo rw-$?\n",
         "\nrw-0\r\n",

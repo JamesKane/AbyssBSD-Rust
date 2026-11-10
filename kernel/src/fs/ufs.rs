@@ -373,6 +373,10 @@ struct Shared {
     deps: Option<Arc<SoftDeps>>,
     /// The superblock asked for a journal, which this mount turned off.
     journal_dropped: bool,
+    /// The superblock as on the disk since the mount last went read-only
+    /// or was reloaded (`MNT_RELOAD`), if it did: what going read-write
+    /// checks and writes back, rather than the one mounted.
+    reloaded: PreemptLock<Option<Arc<ufs::Superblock>>>,
     /// Its disk went away and a forced unmount is under way (FreeBSD's
     /// `UM_FSFAIL_CLEANUP`): writing out fails, and that is no error.
     failing: AtomicBool,
@@ -479,6 +483,7 @@ impl UfsFs {
                 applying: AtomicBool::new(false),
                 deps,
                 journal_dropped,
+                reloaded: PreemptLock::new(None),
                 failing: AtomicBool::new(false),
             }),
         };
@@ -569,7 +574,8 @@ impl Shared {
             return Ok(());
         }
         let ufs = &self.ufs;
-        let sb = ufs.superblock();
+        let reloaded = self.reloaded.lock().clone();
+        let sb = reloaded.as_deref().unwrap_or(ufs.superblock());
         let name = ufs.io().disk.name();
         let soft = self.deps.is_some();
         // With soft updates an unclean file system holds nothing but
@@ -587,9 +593,9 @@ impl Shared {
             kprintln!("ufs: {name}: journaled soft updates not supported; journal disabled");
         }
         let mut sum = if soft {
-            ufs.summary_from_groups(s).map_err(errno)?
+            ufs.summary_from_groups_as(s, sb).map_err(errno)?
         } else {
-            ufs.load_summary(s).map_err(errno)?
+            ufs.load_summary_as(s, sb).map_err(errno)?
         };
         // Dirty until unmounted cleanly.
         ufs.write_summary(s, &mut sum, false, wall_seconds())
@@ -612,6 +618,55 @@ impl Shared {
         }
         self.sync_all(s, true)?;
         self.writable.store(false, Ordering::Release);
+        // What was just written, for going read-write again.
+        self.reread_superblock(s)
+    }
+
+    /// Reads the superblock again into [`Self::reloaded`], as the mount
+    /// keeps it: no journal (`FS_SUJ` stays off).
+    fn reread_superblock(&self, s: &Sleepable) -> Result<(), Errno> {
+        let ufs = &self.ufs;
+        let mut sb = ufs.reread_superblock(s).map_err(errno)?;
+        sb.flags &= !ufs::sb::FS_SUJ;
+        if sb.pending_blocks != 0 || sb.pending_inodes != 0 {
+            kprintln!(
+                "WARNING: {}: reload pending error: blocks {} files {}",
+                ufs.io().disk.name(),
+                sb.pending_blocks,
+                sb.pending_inodes
+            );
+        }
+        *self.reloaded.lock() = Some(Arc::new(sb));
+        Ok(())
+    }
+
+    /// Reads the metadata again from the disk, which a checker changed
+    /// under this read-only mount (FreeBSD's `ffs_reload`): the cached
+    /// blocks go, the superblock is read again (for going read-write
+    /// later), and so is every in-core inode, whose file's cached pages
+    /// past its size go too, as its clean ones not mapped do.
+    fn reload(&self, s: &Sleepable) -> Result<(), Errno> {
+        if self.writable() {
+            return Err(Errno::EINVAL);
+        }
+        let ufs = &self.ufs;
+        ufs.io().cache.invalidate();
+        self.reread_superblock(s)?;
+        for (cell, object) in self.cells() {
+            let ip = ufs.inode(s, cell.ino).map_err(errno)?;
+            let mut st = cell.lock(s);
+            let old = st.ip.size;
+            st.data_gen = st.data_gen.wrapping_add(1);
+            st.ip = ip;
+            st.dirty = false;
+            st.unwritten.clear();
+            cell.publish(&st);
+            if let Some(o) = object {
+                vfs::pagecache::resize(&o, old, st.ip.size);
+                drop(st);
+                o.drop_clean(usize::MAX);
+            }
+        }
         Ok(())
     }
 
@@ -968,7 +1023,10 @@ impl FileSystem for UfsFs {
                 }
                 .stats()
             }
-            None => ufs.stats(),
+            None => match self.shared.reloaded.lock().clone() {
+                Some(sb) => sb.stats(),
+                None => ufs.stats(),
+            },
         };
         // What soft updates will free soon counts free already, as on
         // FreeBSD.
@@ -1106,6 +1164,10 @@ impl FileSystem for UfsFs {
         } else {
             self.shared.make_writable(s, force)
         }
+    }
+
+    fn reload(&self, s: &Sleepable) -> Result<(), Errno> {
+        self.shared.reload(s)
     }
 
     fn as_any(&self) -> &dyn Any {

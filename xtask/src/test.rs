@@ -643,9 +643,9 @@ fn shell(
                 session.script(crate::expect::ATF_SETUP, Duration::from_secs(60))?;
                 session.script(crate::expect::FREEBSD_TESTS, Duration::from_secs(3600))?;
             } else {
-                // Quick: the root made writable, without `mtree`'s checks.
+                // Quick: the root reloaded and made writable, without `mtree`'s checks.
                 let ufs = if quick {
-                    &crate::expect::UFS_ROOT[..4]
+                    &crate::expect::UFS_ROOT[..5]
                 } else {
                     crate::expect::UFS_ROOT
                 };

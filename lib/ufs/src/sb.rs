@@ -195,6 +195,36 @@ pub struct Superblock {
 }
 
 impl Superblock {
+    /// Whether `other` lays the file system out as this one does: the
+    /// geometry, the check-hashes, and soft updates, all of which a mount
+    /// keeps in core from its superblock. A checker changes none of them.
+    #[must_use]
+    pub fn same_layout(&self, other: &Self) -> bool {
+        let layout = |sb: &Self| {
+            (
+                [
+                    sb.sblkno,
+                    sb.cblkno,
+                    sb.iblkno,
+                    sb.dblkno,
+                    sb.ncg,
+                    sb.bsize,
+                    sb.fsize,
+                    sb.frag,
+                    sb.sbsize,
+                    sb.cssize,
+                    sb.cgsize,
+                    sb.ipg,
+                    sb.fpg,
+                    sb.metackhash,
+                    sb.flags & FS_DOSOFTDEP,
+                ],
+                [sb.size, sb.dsize, sb.csaddr],
+            )
+        };
+        layout(self) == layout(other)
+    }
+
     /// Reads the UFS2 superblock and checks it.
     pub fn find<B: BlockIo + ?Sized>(cx: &B::Cx, io: &B, sector: u32) -> Result<Self, Error> {
         let mut r = Err(Error::NotUfs2);

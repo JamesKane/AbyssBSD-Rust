@@ -685,6 +685,7 @@ fn option_flags(opts: &[MountOption], mut flags: u64) -> u64 {
             b"async" => (MNT_ASYNC, 0),
             b"noasync" => (0, MNT_ASYNC),
             b"force" => (MNT_FORCE, 0),
+            b"reload" => (MNT_RELOAD, 0),
             b"multilabel" => (MNT_MULTILABEL, 0),
             b"noatime" => (MNT_NOATIME, 0),
             b"atime" => (0, MNT_NOATIME),
@@ -721,6 +722,11 @@ pub(super) fn nmount(s: &Sleepable, iov: u64, iovcnt: u64, flags: u64) -> SysRes
             .map(|(_, v)| v.as_slice())
     };
     let fstype = get(b"fstype").ok_or(Errno::EINVAL)?;
+    // `ffs` is UFS's other name (`vfs_byname`); `chkdoreload` asks for it.
+    let fstype: &[u8] = match fstype.strip_suffix(b"\0").unwrap_or(fstype) {
+        b"ffs" => b"ufs",
+        _ => fstype,
+    };
     let fspath = get(b"fspath").ok_or(Errno::EINVAL)?;
     let flags = option_flags(&opts, flags);
     let p = process()?;
@@ -890,16 +896,24 @@ pub(super) fn nmount(s: &Sleepable, iov: u64, iovcnt: u64, flags: u64) -> SysRes
 }
 
 /// `nmount` with `MNT_UPDATE`: the mount whose root `v` is goes
-/// read-only or read-write (FreeBSD's `vfs_domount_update`). Soft updates
-/// show (`MNT_SOFTDEP`) only while a UFS mount is read-write.
+/// read-only or read-write (FreeBSD's `vfs_domount_update`), after
+/// reading its metadata from the disk again first with `MNT_RELOAD`,
+/// which only a read-only mount takes (fsck repaired it under the mount).
+/// Soft updates show (`MNT_SOFTDEP`) only while a UFS mount is read-write.
 fn update(s: &Sleepable, v: &Arc<vfs::Vnode>, fstype: &[u8], flags: u64, force: bool) -> SysResult {
-    use abi::mount::{MNT_RDONLY, MNT_SOFTDEP};
+    use abi::mount::{MNT_RDONLY, MNT_RELOAD, MNT_SOFTDEP};
     if !v.is_mount_root() {
         return Err(Errno::EINVAL);
     }
     let m = v.mount();
     if fstype.strip_suffix(b"\0").unwrap_or(fstype) != m.type_name().as_bytes() {
         return Err(Errno::EOPNOTSUPP);
+    }
+    if flags & MNT_RELOAD != 0 {
+        if m.flags() & MNT_RDONLY == 0 {
+            return Err(Errno::EOPNOTSUPP);
+        }
+        m.fs().reload(s)?;
     }
     m.update(s, MNT_RDONLY | abi::mount::MNT_UPDATEMASK, flags, force)?;
     if let Some(fs) = m.fs().as_any().downcast_ref::<crate::fs::ufs::UfsFs>() {

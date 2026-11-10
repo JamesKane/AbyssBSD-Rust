@@ -18,7 +18,7 @@ use alloc::vec::Vec;
 
 use crate::cg::{self, Cg, Csum};
 use crate::inode::Inode;
-use crate::sb::Totals;
+use crate::sb::{Superblock, Totals};
 use crate::softdep::{Deps, Work};
 use crate::{BlockIo, Error, Fill, Kind, Mode, NDADDR, NDIRECT, Ufs, idx, idx64, int32};
 
@@ -40,6 +40,9 @@ pub struct Summary {
     pub optim: u32,
     /// Changed since last written (`fs_fmod`).
     pub modified: bool,
+    /// The superblock written back with it: the one mounted, or the one
+    /// read again since ([`Ufs::reread_superblock`]).
+    sb: Superblock,
 }
 
 /// A way to the summary: held all along (a `Summary`), or taken around
@@ -66,7 +69,12 @@ impl<B: BlockIo> Ufs<B> {
     /// Reads the summary: the totals from the superblock and each group's
     /// counts from the summary area (FreeBSD's `ffs_mountfs`).
     pub fn load_summary(&self, cx: &B::Cx) -> Result<Summary, Error> {
-        let sb = &self.sb;
+        self.load_summary_as(cx, &self.sb)
+    }
+
+    /// [`Self::load_summary`] with superblock `sb` (one read again, of the
+    /// same layout), which is also what the summary writes back.
+    pub fn load_summary_as(&self, cx: &B::Cx, sb: &Superblock) -> Result<Summary, Error> {
         let len = usize::try_from(sb.fragroundup(u64::from(sb.cssize)))
             .map_err(|_| Error::Corrupt("fs_cssize"))?;
         let mut cs = Vec::with_capacity(idx(sb.ncg));
@@ -86,6 +94,7 @@ impl<B: BlockIo> Ufs<B> {
             cgrotor: 0,
             optim: sb.optim,
             modified: false,
+            sb: sb.clone(),
         })
     }
 
@@ -94,7 +103,13 @@ impl<B: BlockIo> Ufs<B> {
     /// behind the groups after a crash, but a group's counts are written
     /// with its maps.
     pub fn summary_from_groups(&self, cx: &B::Cx) -> Result<Summary, Error> {
-        let mut sum = self.load_summary(cx)?;
+        self.summary_from_groups_as(cx, &self.sb)
+    }
+
+    /// [`Self::summary_from_groups`] with superblock `sb`, as
+    /// [`Self::load_summary_as`].
+    pub fn summary_from_groups_as(&self, cx: &B::Cx, sb: &Superblock) -> Result<Summary, Error> {
+        let mut sum = self.load_summary_as(cx, sb)?;
         let mut totals = Totals::default();
         for c in 0..self.sb.ncg {
             let cs = self.with_group(cx, c, |g| g.cs())?;
@@ -153,7 +168,7 @@ impl<B: BlockIo> Ufs<B> {
                 }
             },
         )?;
-        let bytes = sb.encode(&sum.totals, clean, time, sum.optim);
+        let bytes = sum.sb.encode(&sum.totals, clean, time, sum.optim);
         self.io.modify(
             cx,
             crate::sb::SBLOCK,

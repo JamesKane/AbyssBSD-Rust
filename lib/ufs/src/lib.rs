@@ -295,6 +295,8 @@ pub(crate) const EXT_SLOT: usize = NDIRECT + NIADDR;
 pub struct Ufs<B> {
     io: B,
     sb: Superblock,
+    /// The device's sector size, which the superblock is checked against.
+    sector: u32,
     /// Writing with soft updates, through the device's tracker.
     soft: bool,
 }
@@ -307,8 +309,25 @@ impl<B: BlockIo> Ufs<B> {
         Ok(Self {
             io,
             sb,
+            sector,
             soft: false,
         })
+    }
+
+    /// Reads the superblock again (FreeBSD's `ffs_reload`), for a
+    /// read-only mount whose disk a checker changed: what it says now, if
+    /// the layout everything in core depends on is the same (it is unless
+    /// the file system grew, or its check-hashes or soft updates changed,
+    /// which are [`Error::Invalid`] here). The device's cache must hold
+    /// nothing older than the disk. The superblock in use stays; the one
+    /// read goes to [`Self::load_summary_as`] when the mount goes
+    /// read-write.
+    pub fn reread_superblock(&self, cx: &B::Cx) -> Result<Superblock, Error> {
+        let sb = Superblock::find(cx, &self.io, self.sector)?;
+        if !sb.same_layout(&self.sb) {
+            return Err(Error::Invalid);
+        }
+        Ok(sb)
     }
 
     /// Writes with soft updates from now on, if the device keeps a tracker

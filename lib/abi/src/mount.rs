@@ -139,6 +139,7 @@ pub const MNT_NOCLUSTERR: u64 = 0x4000_0000;
 pub const MNT_NOCLUSTERW: u64 = 0x8000_0000;
 /// `nmount`/`unmount` command flags.
 pub const MNT_UPDATE: u64 = 0x0001_0000;
+pub const MNT_RELOAD: u64 = 0x0004_0000;
 pub const MNT_FORCE: u64 = 0x0008_0000;
 /// `unmount`: the path is `FSID:<val0>:<val1>`.
 pub const MNT_BYFSID: u64 = 0x0800_0000;
@@ -170,6 +171,7 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("MNT_NOCLUSTERR", MNT_NOCLUSTERR as i64),
     c("MNT_NOCLUSTERW", MNT_NOCLUSTERW as i64),
     c("MNT_UPDATE", MNT_UPDATE as i64),
+    c("MNT_RELOAD", MNT_RELOAD as i64),
     c("MNT_FORCE", MNT_FORCE as i64),
     c("MNT_BYFSID", MNT_BYFSID as i64),
     c("VFCF_STATIC", VFCF_STATIC as i64),

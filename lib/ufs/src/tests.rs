@@ -913,3 +913,60 @@ fn large_directories_through_the_index() {
     fsck_clean(&img);
     let _ = std::fs::remove_dir_all(&work);
 }
+
+#[test]
+fn a_superblock_read_again_is_what_the_summary_writes_back() {
+    if !have_makefs() {
+        std::eprintln!("no makefs (not FreeBSD): skipped");
+        return;
+    }
+    let work = scratch("reload");
+    let empty = work.join("empty");
+    std::fs::create_dir(&empty).unwrap();
+    let img = work.join("fs.img");
+    let ok = Command::new("makefs")
+        .args(["-t", "ffs", "-o", "version=2", "-s", "32m"])
+        .arg(&img)
+        .arg(&empty)
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "makefs");
+    let fs = Ufs::open(
+        &(),
+        Mem(core::cell::RefCell::new(std::fs::read(&img).unwrap())),
+        512,
+    )
+    .unwrap();
+    let put = |bytes: &[u8]| {
+        let at = sb::SBLOCK as usize;
+        fs.io().0.borrow_mut()[at..at + bytes.len()].copy_from_slice(bytes);
+    };
+    // A checker rewrites the superblock under the mount: left unclean,
+    // other totals, and a volume name (`fs_volname`, byte 680).
+    let mut fixed = fs.superblock().clone();
+    fixed.raw[680..685].copy_from_slice(b"fixed");
+    let mut totals = fixed.totals;
+    totals.nifree -= 1;
+    put(&fixed.encode(&totals, false, 1_760_000_000, fixed.optim));
+    let again = fs.reread_superblock(&()).unwrap();
+    assert!(!again.clean);
+    assert_eq!(again.totals, totals);
+    assert_eq!(&again.volname[..5], b"fixed");
+    assert!(fs.superblock().clean, "the superblock in use stays");
+    // Going read-write with it: its totals, and it is what is written.
+    let mut sum = fs.load_summary_as(&(), &again).unwrap();
+    assert_eq!(sum.totals, totals);
+    fs.write_summary(&(), &mut sum, true, 1_760_000_100)
+        .unwrap();
+    let back = Superblock::find(&(), fs.io(), 512).unwrap();
+    assert!(back.clean);
+    assert_eq!(back.totals, totals);
+    assert_eq!(&back.volname[..5], b"fixed", "written back as read again");
+    // Soft updates turned on under it change the layout: refused.
+    let mut soft = back.clone();
+    soft.flags ^= sb::FS_DOSOFTDEP;
+    put(&soft.encode(&back.totals, true, 1_760_000_200, back.optim));
+    assert!(matches!(fs.reread_superblock(&()), Err(Error::Invalid)));
+    let _ = std::fs::remove_dir_all(&work);
+}

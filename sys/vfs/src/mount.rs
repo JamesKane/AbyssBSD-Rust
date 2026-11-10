@@ -105,6 +105,13 @@ pub trait FileSystem: Send + Sync + Any {
         Err(Errno::EOPNOTSUPP)
     }
 
+    /// Reads the file system's metadata from the disk again
+    /// (`MNT_RELOAD`), on a read-only mount: a checker changed the disk
+    /// under it. By default it is refused.
+    fn reload(&self, _s: &Sleepable) -> Result<(), Errno> {
+        Err(Errno::EOPNOTSUPP)
+    }
+
     /// Whether a new file's name goes in the name cache. FreeBSD's tmpfs
     /// leaves it out (a later lookup finds it in the directory's hash as
     /// fast); UFS puts it in.
