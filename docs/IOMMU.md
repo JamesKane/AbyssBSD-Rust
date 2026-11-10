@@ -2,7 +2,7 @@
 
 - Status: **Accepted** ([ADR-0022](adr/0022-smmuv3-in-p9.md)). The design for Phase 9's SMMUv3 item
   ([ROADMAP.md](ROADMAP.md#phase-9-sky1-hardening-l)). Stage 0 (§8) landed 2026-11-10; what it
-  decided where this design was silent or wrong is in §14
+  decided where this design was silent or wrong is in §14, and stage 2's in §15
 - Date: 2026-11-10
 - Scope: the arm64 SMMUv3 as IORT describes it, the IOMMU framework it plugs into (units, domains,
   contexts, IOVA allocation), the `Iommu` backend of `vm::dma`, and MSI through a translated
@@ -749,3 +749,91 @@ For stage 1: QEMU's SMMUv3 identifies as `IDR0 0xd44101b IDR1 0x2730010 IDR3 0x1
 (two-level stream tables, 16-bit stream IDs, terminate model, coherent, 44-bit output, no MSI),
 which the `bootverbose` attach prints and `lib/iommu`'s tests use.
 
+
+## 15. Stage 2 as built (2026-11-10)
+
+Stage 2 (§8) runs the SMMU: `drivers/smmu` over a register and memory trait (`smmu::hw::Hw`),
+host-tested against `iommu::model` (`drivers/smmu/src/tests.rs`), with the kernel's
+implementation over the granted registers and `DmaCoherent` memory. Where this design was silent
+or wrong, it made these decisions:
+
+1. **Contexts come from the broker, at first DMA.** `bus::iommu::Iommu` is the unit's provider
+   (`StartCx::provide_iommu`), with one method so far, `pass_through(stream)`.
+   `AttachCx::dma_tag` and the PCI MSI and MSI-X setup (`AttachCx::iommu_context`) ask for the
+   device's context, as FreeBSD's `iommu_get_dev_ctx` runs at the first tag. The stream comes
+   from the node's translation record and the nearest requester ID up the tree, so a virtio
+   device's is its transport function's and a USB device's its controller's. "Every PCI context
+   pass-through" therefore means every function whose driver asked for DMA or MSI: each gets a
+   bypass STE. A function no driver takes (QEMU's `edu`) keeps an invalid STE and its DMA
+   aborts, as on FreeBSD with `hw.iommu.dma=1`. Stage 3 makes the same call return translated
+   contexts.
+2. **Level-2 tables on demand.** As FreeBSD's `smmu_init_l1_entry`, a level-2 table is made when
+   a stream of its span first gets an STE. A stream in a span without one is
+   `C_BAD_STREAMID`, not `C_BAD_STE` (IHI 0070, and QEMU): both abort with an event. The new
+   level-1 descriptor is invalidated with the STE that made it (`CMD_CFGI_STE`, not leaf).
+3. **Geometry** is FreeBSD's: two levels whenever offered and the SMMU has more StreamID bits
+   than `STRTAB_SPLIT` (8), so QEMU's 16-bit space is two-level as on FreeBSD (the model tests
+   the linear form); the level-1 table is capped at 2^17 descriptors (`STRTAB_L1_SZ_SHIFT`,
+   25 StreamID bits on the board, as its Linux log says). A linear table is capped at 2^16
+   STEs where FreeBSD would size it for every StreamID (`ste::Geometry::for_smmu`).
+4. **Queue sizes** are capped at 2^12 commands and 2^11 events (64 KiB each). FreeBSD takes
+   IDR1's maximum, 2^19 on QEMU and the board: 24 MiB of contiguous memory per unit
+   (compat-deviations).
+5. **Sync.** MSI completion (data 0 to the sync's own slot) on a coherent SMMU with IDR0.MSI;
+   otherwise CONS is polled, with `CS=SIG_SEV` only when the SMMU has SEV after errata (FreeBSD
+   sends SEV whenever it does not use MSI). The wait spins (`spin_loop`), not WFE: the kernel
+   runs no event stream, so a WFE might not wake before the timeout. The unit's spin lock is held
+   from choosing the slot to the completion (§12's shape), which removes the board port's need
+   for a copy of the indices and the wrap race of an MSI slot. One second without completion is
+   FreeBSD's `Failed to sync` and an error to the caller.
+6. **Reset** is FreeBSD's `smmu_reset` order with four changes: CR0 is written 0, not just
+   SMMUEN cleared, since the queue bases may not be written while their queues are enabled;
+   global errors firmware left are acknowledged before the command queue starts (a stale
+   `CMDQ_ERR` would stop it); CR2.E2H is set only with IDR0.HYP (RES0 otherwise); ATSCHK as
+   FreeBSD when ATS is offered. Firmware's CR0 and GBPA are recorded first, and a unit found
+   enabled prints `smmu_reset: Warning: SMMU is enabled`. The reset runs in `start`, after the
+   event and gerror handlers are installed (one drain follows, for anything raised before),
+   and the provider is published before the node counts as attached, so no device it
+   translates attaches first.
+7. **GBPA** is never written while the unit runs: it governs traffic only while SMMUEN is clear,
+   which happens at quiesce. Quiesce writes CR0 and IRQ_CTRL to 0 and writes GBPA back only if it
+   differs from firmware's, which nothing in the kernel causes. A failed reset leaves the unit
+   disabled, its consumers untranslated.
+8. **STE updates** break before make: a valid entry is first made invalid (`CMD_CFGI_STE`,
+   sync), then words 1–7 are written, a barrier, word 0, `CMD_CFGI_STE`, sync. Giving a stream
+   its current STE does nothing. Before the reset, entries (the RMR streams) are written
+   directly, as the board port's `smmu_init_bypass_sids`, and the reset's `CMD_CFGI_ALL` covers
+   them. FreeBSD's `CMD_PREFETCH_CONFIG` after each change is left out.
+9. **Events** print FreeBSD's lines: `Event C_BAD_STE (Used STE invalid.) received.`,
+   `SID %x, Input Address: %jx`, the eight `evt[i]`, and the stream's level-1 descriptor and
+   STE. At most five per stream per second; the rest are counted and summarized
+   (`SID %x: N more events not shown`). QEMU reports a 64-byte transfer from an invalid stream
+   as sixteen events, so the limit matters. Per-stream counts and the last event are kept
+   (`smmu::stream_events`) but not yet exported as sysctls. §4.10's `nvme0 (rid …)` line, which
+   needs stream-to-device lookup, and FreeBSD's quirk table, which applies to translation
+   faults only, come with stage 3. An overflow is acknowledged and logged once per overflow.
+10. **Global errors** print FreeBSD's `SMMU Global Error`, then each bit's name, and are
+    acknowledged. A refused command (`CMDQ_ERR`) is replaced in its slot with a `CMD_SYNC` that
+    signals nothing, logged with its words, and acknowledged. The check also runs inside every
+    sync and queue-space wait, which would otherwise wait out the timeout on a stopped queue.
+11. **The count line** is the board port's: `N streams bypassed (reserved memory)` (with
+    `, ACPI devices` under `hw.smmu.bypass_named=1`), the streams deduplicated, printed before
+    the reset and also with `hw.iommu.dma=0`, as the port prints it before its `hw.iommu.dma`
+    check. RMR streams come from `Iort::node_streams` over `rmrs()` (`acpi::iort::SmmuNode`'s
+    `reserved`), named components' from every named-component node mapping to the unit
+    (`named`), present in the namespace or not. A stream beyond the table prints
+    `reserved stream %#x out of range`.
+12. **Tests in QEMU.** The SMMU cases add QEMU's `edu` device (`dma_mask` widened to reach
+    `virt`'s RAM) as the idle device: no driver takes it, and the ktest
+    `smmu_running::smmu_streams_bypass_and_abort` drives its DMA engine bypassed (memory to the
+    device and back), invalid (`C_BAD_STE` for its stream, nothing written), and config abort
+    (nothing written, no event: IHI 0070 gives the abort configuration no event). The new
+    `aarch64-smmu-warm-reset` case shuts the first boot's devices down before the reset
+    (`abyss.test.orderly_reset=1`), so the SMMU is quiesced; QEMU's system reset resets its SMMU
+    anyway, so whether the Sky1's PSCI reset does stays stage 5's question (§12).
+
+For stage 3: `Provider::pass_through` is where translated contexts plug in (the broker already
+calls it at the right moments); `Unit::set_stream` already does the break-before-make sequence
+a `Ste::Stage1` needs, and `CMD_CFGI_CD` and the TLBI commands go through the same queue
+(`Unit::push` and `Unit::sync`, private now). The event path has the stream, the place to name
+the device.

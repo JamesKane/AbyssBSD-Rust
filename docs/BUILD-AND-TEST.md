@@ -82,6 +82,7 @@ Kernel command-line words understood so far:
 | `abyss.halt=1` | Halt at the end instead of powering off, so the framebuffer stays visible |
 | `abyss.qemu_exit=1` | Test kernels report their verdict as QEMU's exit status (set by `xtask test`) |
 | `abyss.test.warm_reset=1` | Test kernels warm-reset once to exercise the persistent log ring |
+| `abyss.test.orderly_reset=1` | With `warm_reset`, the first boot shuts its devices down before resetting |
 | `abyss.test.skip=P[,P]` | Test kernels leave out the tests whose names start with any `P` |
 | `abyss.stress=S` | Run the Phase 2 stress test for S seconds, then report and power off |
 
@@ -260,7 +261,9 @@ symbolized backtrace, and checks the VMM's exit status:
 | `x86_64` | QEMU q35 + OVMF | |
 | `aarch64` | QEMU virt + edk2, firmware at EL1 | |
 | `aarch64-el2` | QEMU virt + edk2, firmware at EL2 | the EL2 stub and drop to EL1 |
+| `aarch64-smmu` | QEMU virt with an SMMUv3 (`iommu=smmuv3`) and an `edu` device | `smmu0` enabled; devices bypassed, `edu`'s stream aborting with `C_BAD_STE` (IOMMU.md §15) |
 | `aarch64-warm-reset`, `x86_64-warm-reset` | QEMU, two boots | the loader saved the first boot's log to `EFI/ABYSS/PREVLOG.TXT` |
+| `aarch64-smmu-warm-reset` | QEMU, two boots, SMMUv3 | the first boot shut its devices down (the SMMU quiesced) before the reset |
 | `x86_64-watchdog` | QEMU, two boots | the first boot's `watchdogd` patted `ichwd` through `/dev/fido` past its timeout, and once it was killed the watchdog reset the machine |
 | `x86_64-bhyve` | bhyve + `BHYVE_UEFI` (FreeBSD hosts only; skipped elsewhere) | power-off through UEFI runtime services |
 
