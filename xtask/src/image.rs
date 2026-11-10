@@ -407,6 +407,9 @@ pub(crate) fn build_kyua_root(arch: Arch, opts: build::Options, cmdline: &str) -
     ufs_root(arch, opts, cmdline, Root::Kyua, None)
 }
 
+/// `LINKER_HINTS_VERSION` (sys/sys/linker.h).
+const LINKER_HINTS_VERSION: i32 = 1;
+
 /// Which UFS2 root to make.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Root {
@@ -449,6 +452,12 @@ fn ufs_root(
     fs::create_dir_all(stage.join("etc"))?;
     fs::create_dir_all(stage.join(STATIC_TOOLS))?;
     fs::copy(&images.kernel, stage.join("boot/kernel/kernel"))?;
+    // The kernel has no modules: `kldxref`'s hints hold just their
+    // version (`LINKER_HINTS_VERSION`), which `devmatch` reads quietly.
+    fs::write(
+        stage.join("boot/kernel/linker.hints"),
+        LINKER_HINTS_VERSION.to_le_bytes(),
+    )?;
     fs::write(stage.join("etc/fstab"), FSTAB)?;
     if root != Root::Tests {
         let full = crate::base::full(arch)?;

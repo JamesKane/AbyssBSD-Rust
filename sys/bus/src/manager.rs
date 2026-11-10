@@ -1547,11 +1547,13 @@ impl Manager {
         }
     }
 
-    /// The `index`th device's `hw.bus.devices` record, in node-table
-    /// order (any order serves: `devinfo` links records by handle).
-    pub(crate) fn udevice(&self, s: &Sleepable, index: usize) -> Option<abi::bus::UDevice> {
+    /// Appends the `index`th device's `hw.bus.devices` record to `out`,
+    /// in node-table order (any order serves: `devinfo` links records by
+    /// handle); `None` past the last, or if its fields do not fit. It is
+    /// written in place: a record is over 3 KiB.
+    pub(crate) fn udevice(&self, s: &Sleepable, index: usize, out: &mut Vec<u8>) -> Option<()> {
         use abi::bus::{df, ds};
-        use devtree::udevice::{Fields, encode};
+        use devtree::udevice::{Fields, encode_into};
         let t = self.topo.read(s);
         let (i, n) = t
             .nodes
@@ -1591,7 +1593,16 @@ impl Manager {
             pnpinfo: &pnp,
             location: &loc,
         };
-        encode(handle(i), n.parent.map_or(0, handle), 0, flags, state, &f).ok()
+        encode_into(
+            handle(i),
+            n.parent.map_or(0, handle),
+            0,
+            flags,
+            state,
+            &f,
+            out,
+        )
+        .ok()
     }
 
     /// Whether `id` is disabled (FreeBSD's `device_disable`).

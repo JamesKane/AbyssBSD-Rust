@@ -9,7 +9,8 @@
 //!
 //! A name looked up and not found, an OID not found, and a write are
 //! reported as first uses ([`crate::firstuse`]): FreeBSD may have the node.
-//! Walking off the end of the tree (`sysctl.next`) is not.
+//! Walking off the end of the tree (`sysctl.next`) is not, nor is a
+//! handler's answer that what is under it does not exist.
 //!
 //! Behavior reference: sys/kern/kern_sysctl.c.
 
@@ -192,7 +193,11 @@ fn serve(
     }
     let mut out = Vec::new();
     crate::sysctl::read_oid(s, oid, &mut out).map_err(|e| {
-        if matches!(e, ReadError::NotFound) {
+        // A handler's own `ENOENT` (an index past its last, as `devinfo`
+        // reads `hw.bus.devices` to its end) is its answer, not a node
+        // missing.
+        let handled = || crate::sysctl::read(s, |t| t.handler(oid).is_some());
+        if matches!(e, ReadError::NotFound) && !handled() {
             firstuse::report(
                 Kind::Sysctl,
                 format_args!("{}", Oid(oid, known_prefix(s, oid))),

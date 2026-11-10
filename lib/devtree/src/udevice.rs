@@ -57,6 +57,43 @@ pub fn encode(
     Ok(d)
 }
 
+/// Appends a record to `out` as `struct u_device` lays it out (what
+/// [`encode`] then [`to_bytes`] give), without building it first: a
+/// record is over 3 KiB, too much for a kernel stack to hold copies of.
+/// On [`Overflow`], `out` is as it was.
+pub fn encode_into(
+    handle: usize,
+    parent: usize,
+    devflags: u32,
+    flags: u16,
+    state: i32,
+    f: &Fields<'_>,
+    out: &mut alloc::vec::Vec<u8>,
+) -> Result<(), Overflow> {
+    use core::mem::{offset_of, size_of};
+    let fields = [f.nameunit, f.desc, f.driver, f.pnpinfo, f.location];
+    let text: usize = fields.iter().map(|s| s.len() + 1).sum();
+    // Each field, its NUL, and sbuf's own terminating NUL must fit.
+    if text >= BUS_USER_BUFFER {
+        return Err(Overflow);
+    }
+    let base = out.len();
+    out.resize(base + size_of::<UDevice>(), 0);
+    let o = &mut out[base..];
+    let mut put = |at: usize, b: &[u8]| o[at..at + b.len()].copy_from_slice(b);
+    put(offset_of!(UDevice, dv_handle), &handle.to_ne_bytes());
+    put(offset_of!(UDevice, dv_parent), &parent.to_ne_bytes());
+    put(offset_of!(UDevice, dv_devflags), &devflags.to_ne_bytes());
+    put(offset_of!(UDevice, dv_flags), &flags.to_ne_bytes());
+    put(offset_of!(UDevice, dv_state), &state.to_ne_bytes());
+    let mut at = offset_of!(UDevice, dv_fields);
+    for s in fields {
+        put(at, s.as_bytes());
+        at += s.len() + 1;
+    }
+    Ok(())
+}
+
 /// The text fields of a record (for tests and diagnostics).
 #[must_use]
 pub fn fields(d: &UDevice) -> [&[u8]; 5] {
@@ -142,5 +179,40 @@ mod tests {
             ..Fields::default()
         };
         assert_eq!(encode(1, 0, 0, 0, ds::ALIVE, &f).unwrap_err(), Overflow);
+    }
+
+    #[test]
+    fn encoding_in_place_gives_the_same_bytes() {
+        let fill = |n: usize| alloc::string::String::from_utf8(alloc::vec![b'p'; n]).unwrap();
+        // The field sizes that just fit and just do not.
+        let edge = BUS_USER_BUFFER - "acpi0".len() - "Advanced".len() - "acpi".len() - 5;
+        for (pnp, loc) in [
+            (fill(0), ""),
+            (fill(17), "handle=\\_SB_.PCI0"),
+            (fill(edge - 1), ""),
+            (fill(edge), ""),
+        ] {
+            let f = Fields {
+                nameunit: "acpi0",
+                desc: "Advanced",
+                driver: "acpi",
+                pnpinfo: &pnp,
+                location: loc,
+            };
+            let mut direct = alloc::vec![0xee];
+            let r = encode_into(9, 3, 0, df::ENABLED, ds::ATTACHED, &f, &mut direct);
+            match encode(9, 3, 0, df::ENABLED, ds::ATTACHED, &f) {
+                Ok(d) => {
+                    let mut via = alloc::vec![0xee];
+                    to_bytes(&d, &mut via);
+                    assert_eq!(r, Ok(()));
+                    assert_eq!(direct, via);
+                }
+                Err(e) => {
+                    assert_eq!(r, Err(e));
+                    assert_eq!(direct, [0xee], "unchanged on overflow");
+                }
+            }
+        }
     }
 }

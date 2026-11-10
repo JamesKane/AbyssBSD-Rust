@@ -92,11 +92,22 @@ pub(crate) fn register(mgr: &'static Manager, s: &Sleepable, workers: usize) {
             // syscall path), with no spin lock held: the kernel calls node
             // handlers after dropping the tree's lock.
             let s = unsafe { Sleepable::assume() };
-            let d = mgr.udevice(&s, index).ok_or(ReadError::NotFound)?;
-            devtree::udevice::to_bytes(&d, out);
-            Ok(())
+            mgr.udevice(&s, index, out).ok_or(ReadError::NotFound)
         });
         let _ = t.add_handler(bus, Number::Auto, "devices", "system device tree", devices);
+        // `hw.bus.rman.<generation>.<rman>.<resource>` (`sysctl_rman`),
+        // which `libdevinfo` reads after the devices: no resource manager
+        // is listed yet, so its walk ends at the first (ENOENT).
+        let rman = Arc::new(move |rest: &[i32], _: &mut Vec<u8>| {
+            let &[generation, _, _] = rest else {
+                return Err(ReadError::Invalid);
+            };
+            if generation.cast_unsigned() != mgr.generation() {
+                return Err(ReadError::Invalid);
+            }
+            Err(ReadError::NotFound)
+        });
+        let _ = t.add_handler(bus, Number::Auto, "rman", "kernel resource manager", rman);
         // kern_devctl.c's knobs (`CTLFLAG_RWTUN`: the kernel environment
         // sets them at boot, through `Options`).
         let _ = t.add_writable(
