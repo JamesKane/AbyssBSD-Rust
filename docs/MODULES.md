@@ -150,14 +150,15 @@ same result for the drivers where it matters, without a second static configurat
 ```
 
 The central choice: **a module imports no kernel symbols.** It is a self-contained,
-position-independent ELF shared object with exactly one exported symbol. Everything it needs
+position-independent ELF image (a static PIE, like the kernel) whose entry point is its only
+way in, with no dynamic symbols at all. Everything it needs
 from the kernel arrives at load time as a table of function pointers, and everything the kernel
 needs from it is returned as a `ModuleDecl`. Consequences:
 
 - The kernel can keep fat LTO and full internalization. It exports nothing, so no symbol must
   survive optimization and no kernel symbol table becomes ABI.
 - The in-kernel linker is small: verify, map, apply `R_*_RELATIVE` relocations (which `lib/elf`
-  already decodes for the PIE kernel and the vDSO), find one symbol. No symbol resolution, no
+  already decodes for the PIE kernel and the vDSO), call `e_entry`. No symbol lookup, no
   PLT, no aarch64 branch-range veneers, no x86 `-mcmodel=kernel` placement constraint.
 - Rust's unstable ABI is contained to one boundary whose types are checked at load (§6.3).
 
@@ -187,7 +188,7 @@ deep (§8.3).
 lib/kapi/           the boundary: KernelServices, ModuleDecl, BuildId, the layout table
 sys/<class>/kapi/   a class's module-facing surface (sys/drm/kapi), types and traits only
 drivers/amdgpu/     the driver, unchanged in shape: forbid(unsafe_code), DriverDecl
-modules/amdgpu/     a generated shim crate: crate-type = ["cdylib"], one entry function
+modules/amdgpu/     a generated shim crate: a no_main bin, `kapi::module!(amdgpu::MODULE)`
 ```
 
 - **The `kapi` crates hold types, traits, and inline code only, never `static` items or code that
@@ -215,9 +216,9 @@ modules/amdgpu/     a generated shim crate: crate-type = ["cdylib"], one entry f
 pub struct KernelServices {
     pub build: BuildId,                   // must equal the module's (§6.3)
     pub layout: &'static LayoutTable,     // the kernel's view of every boundary type
-    pub alloc: &'static dyn GlobalAllocFacade,   // the module's #[global_allocator] forwards here
-    pub log: &'static dyn Log,
-    pub panic: fn(&core::panic::PanicInfo<'_>) -> !,   // the module's panic handler forwards here
+    pub alloc: &'static dyn RawAlloc,     // (size, align); the module's #[global_allocator] forwards here
+    pub log: &'static dyn Log,            // takes &str
+    pub abort: fn(&str) -> !,             // the module's panic handler formats, then calls this
     pub bus: &'static dyn bus_kapi::Services,     // contexts, grants, publications
     pub drm: &'static dyn drm_kapi::Services,     // present when the class is built in
     // ... one entry per kapi crate, by name, so adding a class does not move the others
@@ -234,10 +235,18 @@ pub struct ModuleDecl {
     pub pnp: &'static [PnpRecord],        // for linker.hints (§8.2)
 }
 
-// modules/amdgpu/src/lib.rs (generated)
+// modules/amdgpu/src/main.rs (generated): kapi::module! expands to the forwarding allocator,
+// the panic handler, and the entry point, which is e_entry:
 #[unsafe(no_mangle)]
-pub extern "C" fn abyss_module_entry(k: &'static KernelServices) -> Option<&'static ModuleDecl>;
+pub extern "C" fn _start(k: &'static KernelServices) -> Option<&'static ModuleDecl>;
 ```
+
+No core type with private fields crosses the boundary (`fmt::Arguments`, `PanicInfo`,
+`alloc::Layout`): the layout table (§6.3) cannot name their fields, so a difference would go
+unseen. Hence `&str` for the log, `(size, align)` for allocation, and `abort(&str)` for panics,
+with the module formatting its message into a fixed buffer (a panic may be an allocation
+failure). `KernelServices` is `#[repr(C)]` with `build` first, and `_start` compares it before
+storing the pointer or touching anything else (spike finding 5).
 
 The `'static` lifetimes here are a lie that the linker makes true: the module's memory lives until
 `kldunload` has proved nothing refers to it (§7). Every route by which the kernel can hold a
@@ -252,14 +261,18 @@ table (`kernel/table`'s `MODULES_<ARCH>`, beside `DRIVERS`) in **one Cargo invoc
 profile, same target (`x86_64-unknown-none`, `aarch64-unknown-none-softfloat`), and the same
 `RUSTFLAGS`, so every shared crate is compiled identically:
 
-- `crate-type = ["cdylib"]`, `-C relocation-model=pic`, linked by the toolchain's `rust-lld` with
-  `-shared -Bsymbolic -z now -z relro --no-undefined --gc-sections` and a version script exporting
-  only `abyss_module_entry`. (Whether the built-in `*-unknown-none` targets accept `cdylib`
-  unchanged, or the shim is a `staticlib` that xtask links with `rust-lld` itself, is settled by a
-  prototype; §11 question 1. Both are within ADR-0003.)
+- The shim is a `no_main` binary linked as a static PIE, exactly as the kernel is
+  (`-C relocation-model=pie -C link-arg=-pie -C link-arg=-zmax-page-size=4096`), plus
+  `-z separate-loadable-segments` so that `PT_GNU_RELRO`, which holds the vtables in
+  `.data.rel.ro`, starts on a page. Its `_start` is `e_entry`. The built-in `*-unknown-none`
+  targets refuse `cdylib` (no dynamic linking in the target spec); a `staticlib` linked by
+  `rust-lld -shared` also works but adds a step and a symbol table nobody reads
+  (spike (branch `spike/modules`, `spikes/kmod/README.md`), finding 1).
 - xtask checks the result: `ET_DYN`, the dynamic relocations are only `R_X86_64_RELATIVE` /
-  `R_AARCH64_RELATIVE` (and `NONE`), no `DT_NEEDED`, no undefined symbols, no `PT_INTERP`, no
-  TLS, no writable-and-executable segment, one exported symbol.
+  `R_AARCH64_RELATIVE` (and `NONE`), no `DT_NEEDED`, no dynamic symbols, no `PT_INTERP`, no
+  TLS, no writable-and-executable segment, a page-aligned `PT_GNU_RELRO`, and the number of
+  relocations that patch text (allowed, since the image is written before it is executable,
+  but reported; the aarch64 kernel needs `-z notext` for the prebuilt `core`).
 - The file is `<name>.ko` in `/boot/kernel/` beside the kernel, which is where FreeBSD's
   `kern.module_path` looks first. `xtask image` installs it.
 
@@ -312,7 +325,7 @@ and modules. The syscalls in `kernel/src/syscall/misc.rs` move onto it.
    written while mapped `RW`, then remapped.
 4. **Relocate**: `base + addend` for each `RELATIVE` entry (decoded by `lib/elf`'s `Relocation`), then
    RELRO goes read-only.
-5. **Enter**: call `abyss_module_entry(&KERNEL_SERVICES)`. Compare `BuildId` and the layout table.
+5. **Enter**: call `e_entry(&KERNEL_SERVICES)`. Compare `BuildId` and the layout table.
    Then check `depends`. Any failure unmaps and returns `ENOEXEC` or `ENOENT` (missing
    dependency, as FreeBSD).
 6. **Register**: the `DriverDecl`s join the matcher as a new source (DRIVER-MODEL.md §14). The
@@ -425,7 +438,7 @@ needs one.
   loop under I/O and with an open device node, with verifier mode on, before any GPU module
   exists.
 - **Negative**: a module from another build (`ENOEXEC`), a tampered relocation (`ENOEXEC`), an
-  extra exported symbol, a missing dependency (`ENOENT`), load above securelevel 0 (`EPERM`).
+  dynamic symbol, an unaligned RELRO, a missing dependency (`ENOENT`), load above securelevel 0 (`EPERM`).
 - **Differential**: `kldload`/`kldstat`/`kldunload`/`devmatch -p` transcripts against FreeBSD
   15.1 in bhyve, with a FreeBSD module of the same name where one exists.
 
@@ -445,12 +458,16 @@ S2–S7 fall after v1.0, which matches ADR-0005's "revisit loadable modules afte
 
 ## 11. Open questions
 
-1. **`cdylib` on `*-unknown-none`.** Does the built-in target produce a usable PIC shared object
-   with `crate-type = ["cdylib"]` and `rust-lld`, or must the shim be a `staticlib` that xtask
-   links? Prototype in S3. Either stays within ADR-0003; neither needs nightly.
-2. **Allocator and panic forwarding.** A module's `#[global_allocator]` forwards to the kernel's;
-   is a per-module allocation ledger (for leak reports at unload) worth one more indirection on
-   module allocations? Proposed: yes in verifier mode only.
+1. **`cdylib` on `*-unknown-none`.** Answered by the spike (branch `spike/modules`, `spikes/kmod/README.md`)
+   (2026-11-10, Rust 1.99): both built-in targets refuse `cdylib`. A `no_main` bin linked as a
+   static PIE works on both ISAs on stable, with `_start` as `e_entry` and no dynamic symbols;
+   §6.1 now specifies it. The spike loads, runs, unloads, and refuses modules on x86_64 and
+   aarch64 with a `no_std` harness built for the same targets.
+2. **Allocator and panic forwarding.** Forwarding works (spike). A per-module allocation ledger
+   (for leak reports at unload) cannot count at the forwarding layer, because ownership crosses
+   the boundary: the module allocates its `Box<dyn Binding>` and the kernel frees it on detach.
+   It must tag allocations by origin. Is that worth a header per allocation? Proposed: yes in
+   verifier mode only.
 3. **Cross-device objects.** A dma-buf or fence exported by a module driver and imported by a
    built-in one (scanout of a `panthor` buffer on the Linlon display, if they are separate
    modules) must not keep module code alive. GRAPHICS.md §4.4 and §5 should place every such
