@@ -2520,6 +2520,19 @@ machines against FreeBSD on bare metal; the exit criteria above.
     for their drivers, and the first driver to map an undeclared overlap wins.
   - The records belong to the bus that made them and go when it detaches. FreeBSD records
     neither kind. P8.1 is done; next: P8.2 (X870E) and P8.3 (Sky1 providers).
+- Progress 2026-11-09 (P8.3, clocks and resets): the corpus graph shows what holds the Sky1's
+  devices back. PCIe (both NVMe disks, both RTL8126s) and every xHCI host have no supplier at all.
+  The UARTs, GPIO, I2C, SPI, PWM, the GPT timer, and the FCH DMA wait for `CCLK` and `RST1`; most
+  also wait for the pin controllers `MUX0`/`MUX1`, and COM0, COM1, and COM3 for the FCH CRU
+  `UCRU` and `DMA0`. The console (COM2) needs only `MUX0` and `CCLK`.
+  - `sky1_clk` (`CIXHA010`) serves `CCLK`'s lines. Its `Clock` provider evaluates the device's
+    AML methods, which speak SCMI's clock protocol to firmware through `\_SB.PMMX`'s mailbox, so
+    it needs no registers of its own. It is tested against the Sky1's own AML, driving a
+    stand-in for the firmware behind the mailbox.
+  - `sky1_reset` (`CIXHA020`, `CIXHA021`) serves `RST0` and `RST1`: active-low bits, changed
+    read-modify-write, with the clean-room specification's index maps. Every `RSTL` line the
+    Sky1 names on them has a bit.
+  - Neither changes anything at attach. Next: the pin controllers (`sky1-peripherals` 05).
 
 ## Phase 9: Self-hosting and hardening = **v1.0 / Day 1 complete** (L)
 

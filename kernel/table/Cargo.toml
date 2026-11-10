@@ -21,6 +21,8 @@ hms = { path = "../../drivers/hms" }
 nvme = { path = "../../drivers/nvme" }
 pci = { path = "../../sys/pci" }
 sbsa-gwdt = { path = "../../drivers/sbsa-gwdt" }
+sky1-clk = { path = "../../drivers/sky1-clk" }
+sky1-reset = { path = "../../drivers/sky1-reset" }
 timers = { path = "../../drivers/timers" }
 uart = { path = "../../drivers/uart" }
 umass = { path = "../../drivers/umass" }

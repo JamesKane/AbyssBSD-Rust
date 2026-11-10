@@ -197,6 +197,8 @@ dependencies = [
  "nvme",
  "pci",
  "sbsa-gwdt",
+ "sky1-clk",
+ "sky1-reset",
  "timers",
  "uart",
  "umass",
@@ -595,6 +597,33 @@ name = "security"
 version = "0.0.0"
 dependencies = [
  "abi",
+]
+
+[[package]]
+name = "sky1-clk"
+version = "0.0.0"
+dependencies = [
+ "acpi",
+ "acpi-corpus",
+ "aml",
+ "bus",
+ "devtree",
+ "sched",
+]
+
+[[package]]
+name = "sky1-reset"
+version = "0.0.0"
+dependencies = [
+ "acpi",
+ "acpi-corpus",
+ "acpi-platform",
+ "bus",
+ "cix-sky1",
+ "devtree",
+ "regs",
+ "sched",
+ "sync",
 ]
 
 [[package]]
