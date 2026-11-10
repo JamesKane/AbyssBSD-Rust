@@ -465,8 +465,8 @@ None of them is for a milestone's runs.
 The project starts with a **self-hosted pipeline on the build server** (no external CI service is
 required):
 
-1. CI runs at milestone exits, not on every push: a full run takes about an hour, too long to
-   gate each change. Pushing a tag `exit/<milestone>` (`exit/u6`, `exit/p6`) to the server's bare
+1. CI runs at milestone exits, not on every push: a full run takes about half an hour (the
+   boot tier's cases side by side), too long to gate each change. Pushing a tag `exit/<milestone>` (`exit/u6`, `exit/p6`) to the server's bare
    repo (`~/abyss/repo.git`) triggers `tools/ci/post-receive`, which runs
    `cargo xtask test --tier all` (unit tests, then boot tests on both arches in QEMU and bhyve)
    on the tagged commit in a persistent work tree, `~/abyss/ci-work`. Runs are serialized, and

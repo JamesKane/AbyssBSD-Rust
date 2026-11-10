@@ -1930,7 +1930,7 @@ P6.0 ─► P6.1 ─┬─► P6.2 ─┬─► P6.3 ─────────
     `event.kevent.pipe1` and `pipe1000` 1.5x, `thr.create` 1.24x. Performance work is parked
     for features; these are where it resumes.
 
-## Phase 7: Networking (XL)
+## Phase 7: Networking (XL) — done 2026-11-09
 
 **Goal:** a networked FreeBSD system, in QEMU and bhyve, before the physical machines: board
 bring-up (P8) then starts with `ssh`, `scp`, and `pkg` on both of them.
@@ -2167,6 +2167,7 @@ P7.0 ─► P7.1 ─► P7.2 ─► P7.3 ─► P7.4 ─┬─► P7.5 ───
   levels off: over four rounds of 12 short legs, pages outside the heap stayed at about 2890 and the
   heap at 5409, 5493, 5887, 5909 pages after emptying the depots. If the exit soak fails, look
   first at whether the heap's working set is still filling.
+- Done 2026-11-09, with the phase's exit CI (P7.9).
 
 **P7.9 Performance and exit.**
 - Suite `p7` (`tcp`, `udp`, `sendfile`) within the bound over loopback and virtio-net in bhyve;
@@ -2343,6 +2344,16 @@ P7.0 ─► P7.1 ─► P7.2 ─► P7.3 ─► P7.4 ─┬─► P7.5 ───
   tcp.lo.s4 1.49, tcp.lo.s1 1.11, udp.tx.bulk 1.08, tcp.cpu.tx 1.06, tcp.connect.net 1.04.
   Wins: tcp.cpu.rx 0.35, tcp.rr.lo 0.71-0.77, tcp.rx.s4 0.83, udp.tx.small 0.85. Results in
   `ci/perf/20261109-150248-exit/u6-119-g4f38400e60cc` on the build server.
+- The first `exit/p7` CI run (960adfb) failed only in the three shell cases: the `net`
+  scenario's client read from `sleep 60 |`, and killing its shell left the `sleep` running into
+  the `procstat` and `ps` scenarios (27eacb1). It took 101 minutes, the boot tier's cases one
+  after another; they now run side by side, four at a time, each its own xtask process with its
+  own copy of its image, and the reset and watchdog cases skip the user-memory tests the plain
+  cases run (7c79e81). The second run's QEMU `net` cases copied their image onto itself (928e1df).
+- Done 2026-11-09: `exit/p7` at `928e1df` passes in CI in 26 minutes, the unit tier and all 18
+  boot cases on both architectures (shell, multi-user, and networked boots in QEMU and bhyve;
+  12 differential scenarios and 1280-1284 of FreeBSD's test cases as on FreeBSD), and the `p7`
+  suite within the bound (geometric mean 0.935).
 
 ## Phase 8: Board bring-up (XL)
 
