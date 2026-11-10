@@ -1,7 +1,8 @@
 # IOMMU: DMA translation through the SMMUv3
 
-- Status: **Draft**. The design for Phase 9's SMMUv3 item ([ROADMAP.md](ROADMAP.md#phase-9-sky1-hardening-l)).
-  It becomes an ADR when implementation starts (§13 question 1)
+- Status: **Accepted** ([ADR-0022](adr/0022-smmuv3-in-p9.md)). The design for Phase 9's SMMUv3 item
+  ([ROADMAP.md](ROADMAP.md#phase-9-sky1-hardening-l)). Stage 0 (§8) landed 2026-11-10; what it
+  decided where this design was silent or wrong is in §14
 - Date: 2026-11-10
 - Scope: the arm64 SMMUv3 as IORT describes it, the IOMMU framework it plugs into (units, domains,
   contexts, IOVA allocation), the `Iommu` backend of `vm::dma`, and MSI through a translated
@@ -197,18 +198,22 @@ the same `lib/pt` format code.
 ### 4.2 The device tree
 
 - **Children.** The ACPI bus adds one `smmu` child per SMMUv3 node in IORT order, as
-  `smmu_acpi_identify` does, before it walks the namespace. They are `Ident::Child { class: "smmu",
-  desc: "ARM System Memory Management Unit" }` with bus data from the IORT node: base, flags,
-  model, GSIVs, and node offset. Resources: memory `0x20000` at the base, and four IRQs in
+  `smmu_acpi_identify` does, after the namespace's devices (FreeBSD's identify children follow
+  them; §14). They are `Ident::AcpiChild { class: "smmu", desc: "ARM System Memory Management
+  Unit" }` (pnpinfo `unknown`, as `acpi_pnpinfo` says for no handle) with bus data from the IORT
+  node: base, flags, model, GSIVs, and node offset. Resources: memory `0x20000` at the base, and four IRQs in
   FreeBSD's order (event, PRI, sync, gerror). Each IRQ is edge-triggered, active-high: ACPI carries
   no trigger for them, and FreeBSD forces this (`smmu_configure_intr`).
-- **Placement.** They sit in `acpi0`'s child list where FreeBSD's order puts them (after `gic0`,
-  before `generic_timer0`, in the corpus). Units come from IORT order, so `smmu0` is `0xb010000`.
+- **Placement.** They sit in `acpi0`'s child list where FreeBSD's order puts them (after the
+  namespace's devices, `gic0` among the identify children before them, `generic_timer0` after, in
+  the corpus; AbyssBSD has neither under `acpi0`). Units come from IORT order, so `smmu0` is
+  `0xb010000`.
 - **Attach.** Attach claims the memory and the event, sync, and gerror lines. The sync line is
   granted and left without a handler, as FreeBSD's is. That keeps `devinfo -rv` at three active
   interrupts. Probe accepts model 0 only, like FreeBSD (`BUS_PROBE_NOWILDCARD`, so only this child
   is matched). Messages:
-  - `smmuN: ... on acpi0`, built from the resources
+  - `smmuN: <ARM System Memory Management Unit> on acpi0`. FreeBSD's line also lists the
+    resources (`iomem … irq …`), which no AbyssBSD announce line does yet (§14)
   - `smmu1: 10 streams bypassed (reserved memory)` when RMR streams exist
   - under `bootverbose`, the features and each bypassed stream
 - **Sysctls.**
@@ -526,7 +531,8 @@ board's PCIe shape, minus named components and RMRs.
 
 - **`xtask/src/qemu.rs`** gains an `iommu` option. It appends `,iommu=smmuv3` to the aarch64
   `-machine` string (both the EL1 and EL2 forms). It also adds `iommu_platform=on` to every
-  `virtio-*-pci` device, without which QEMU's virtio devices bypass the vIOMMU. `nvme` needs
+  `virtio-*-pci` device, without which QEMU's virtio devices bypass the vIOMMU, and
+  `disable-legacy=on`, since QEMU refuses `iommu_platform` on a transitional device. `nvme` needs
   nothing, since QEMU's NVMe always honors the IOMMU. `cargo xtask run --arch aarch64 --iommu` for
   interactive work. `-trace 'smmuv3_*'` is the debugging aid.
 - **A boot case `aarch64-smmu`**: NVMe as the disk, virtio-net, virtio-rng, and the input devices,
@@ -645,8 +651,9 @@ against FreeBSD's design before tuning).
 - If the SMMU leaves the board unbootable, FreeBSD is still the default boot. Removing
   `hw.physmem` is a separate step after translation has run clean with it.
 - Read before experimenting: the board notes in `../AbyssBSD/docs/boards/orangepi-6-plus/` (the
-  IOMMU row, the branch notes) and HARDWARE.md §4. HARDWARE.md's storage row ("SMMUv3 + IORT RMRs
-  come in P11") is updated when stage 5 lands.
+  IOMMU row, the branch notes) and HARDWARE.md §4. HARDWARE.md's storage row lost its "SMMUv3 +
+  IORT RMRs come in P11" at stage 0 (ADR-0022), and says the board translates when stage 5
+  lands.
 
 ## 12. Risks
 
@@ -686,3 +693,59 @@ The questions this design raised, settled before stage 0:
    buffer-cache pages) in place.
 6. **`smmu1`:** enabled in P9 as FreeBSD does: RMR streams bypassed, the rest aborted.
 7. **The edge:** `Settle`, a fifth `EdgeKind`.
+
+## 14. Stage 0 as built (2026-11-10)
+
+Stage 0 (§8) built what §8's first row lists. Where this design was silent or wrong, it made the
+smallest decision that follows FreeBSD:
+
+1. **Placement.** §4.2 said the `smmu` children come before the namespace walk; the corpus
+   (`devinfo-rv.txt`) has them after the namespace's devices, with FreeBSD's other identify
+   children (`psci0`, `gic0`, `generic_timer0`). They are added after the namespace's devices.
+   Because each host bridge waits for its SMMU to settle, `smmu0` announces before `pcib0`, as on
+   FreeBSD, where it attaches in an earlier pass.
+2. **Identity.** `Ident::Child` gives an empty pnpinfo; FreeBSD's `acpi0` says `unknown` for a child
+   without a handle. A new `Ident::AcpiChild` does. (`acpi_timer` on x86 is such a child too and
+   still shows an empty pnpinfo; that is outside this work.)
+3. **The announce line** is the framework's, `smmu0: <ARM System Memory Management Unit> on
+   acpi0`, without FreeBSD's `iomem … irq …`: no `acpi0` child's line lists resources yet, which
+   goes with the resource managers (compat-deviations, "Resource managers").
+4. **Interrupts.** The four IRQ resources are added only if all four GSIVs route (an SMMU that
+   signals by MSI has none); the driver then fails to claim them, and its consumers go on
+   untranslated, as FreeBSD's attach fails.
+5. **Single mappings.** The old ITS walk skipped single mappings; lookups now follow FreeBSD's
+   `iort_entry_lookup` (a single mapping outputs its base for every ID it covers), and pass over
+   an SMMUv3's own MSI mapping only when the SMMU uses MSIs.
+6. **The settle edge in the manager.** A node is *settled* when it is attached, failed, gone,
+   disabled, or has no driver after matching; a failed attach, a nomatch, and a disabling hint now
+   re-examine the node's consumers, as an attach always did. A detach cascades to settle
+   consumers as to required ones (§4.3's "ordered while the supplier is attached"), and the
+   `smmu` driver refuses a voluntary detach (`EBUSY`), so `devctl detach smmu0` cannot take the
+   PCI tree with it.
+7. **The requester walk** is FreeBSD's, but carried down: each PCI bus records what the walk does
+   above it (`pci::requester::Upstream`), so a function's RID needs only its own bus's record. The
+   PCI bus records it on the node (`StartCx::set_requester_id`), and `%iommu` is fixed at attach
+   (FreeBSD computes it at read; the tree above an attached device does not change). Only the RID
+   is recorded, not the requester device: devices sharing a requester share its RID, so the
+   stream, and stage 3 can key contexts by (unit, stream).
+8. **The translation record** (`bus::iommu::Translation`) holds, for a host bridge, the root
+   complexes' mappings that go to the unit (QEMU maps only buses 0 and 1 through its SMMU, the
+   rest straight to the ITS); a RID no mapping covers has no stream and is untranslated. A device
+   two SMMUs claim keeps the first.
+9. **Crates.** `lib/iommu` (package `iommu`) starts with the IDR decoding stage 1 would have put
+   there; `sys/iommu` (package `iommu-framework`) starts with the knobs; `drivers/smmu` is in
+   aarch64's driver table only (`files.arm64`'s `optional iommu`).
+10. **Knobs.** `hw.iommu.dma` is a tunable only (FreeBSD has no such sysctl): 1 by default on
+    arm64. `hw.iommu.relaxed_ordering` (`RDTUN`), `hw.iommu.check_free` (`RWTUN`), and
+    `hw.smmu.bypass_named` (`RDTUN`) exist on arm64, as on the board's FreeBSD; amd64 has no
+    `hw.iommu` until DMAR (compat-deviations). `dev.smmu.N.dma` reads 0 until stage 3, since
+    nothing is translated. With `hw.iommu.dma=0` the driver prints the board port's
+    `left disabled: DMA translation is off (hw.iommu.dma)`.
+11. **The `aarch64-smmu` boot case** keeps virtio-blk as its boot disk for now (the case's UFS
+    tests already run an NVMe controller behind the SMMU); §6's NVMe boot disk comes with stage 3,
+    when translation makes the difference.
+
+For stage 1: QEMU's SMMUv3 identifies as `IDR0 0xd44101b IDR1 0x2730010 IDR3 0x1414 IDR5 0x74`
+(two-level stream tables, 16-bit stream IDs, terminate model, coherent, 44-bit output, no MSI),
+which the `bootverbose` attach prints and `lib/iommu`'s tests use.
+

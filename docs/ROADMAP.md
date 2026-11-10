@@ -2753,8 +2753,9 @@ This is P8's X870E half (P8.2), with its ground truth already in the corpus (P8.
 - **Self-hosting:** `pkg install rust` on AbyssBSD, then build AbyssBSD on AbyssBSD (amd64 and
   arm64) and boot the result.
 - UFS2 **SU+J**, `fsck` on unclean boot, and swap (swap pager on a GPT partition).
-- IOMMU (VT-d, AMD-Vi, SMMUv3 with IORT RMR identity maps) with busdma integration. Watch for the
-  SMMUv3 event-queue interrupt storm reported on Sky1 under Linux.
+- IOMMU on x86 (VT-d, AMD-Vi) and interrupt remapping, and the SC8280XP's SMMUv2, as units of the
+  framework P9 built for the SMMUv3 ([ADR-0022](adr/0022-smmuv3-in-p9.md), IOMMU.md §9). amd64
+  FreeBSD leaves them off by default, so they are not needed to match it.
 - CPU idle and frequency: `_LPI` (with PSCI power-down states and a broadcast event timer, e.g.
   Sky1's CIX GPT), `_CST`, HWP. (CPPC and ACPI thermal zones came in P8.4.) SCMI clients over PCC.
 - Security hardening: SMEP/SMAP/PAN enforced, KASLR, stack canaries in the loader, kernel W^X

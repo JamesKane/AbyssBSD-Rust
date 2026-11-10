@@ -28,6 +28,7 @@ Status values: **Proposed** (awaiting owner confirmation) · **Accepted** · **S
 | [0019](0019-networking.md) | Networking: the wire as the specification (differential captures), per-VNET state from the start, host-tested packet, TCP, and crypto crates, lock-free lookups in a network epoch, FreeBSD 15.1's default TCP, `vtnet` on the `EtherQueues` class, in-tree kernel TLS | Accepted |
 | [0020](0020-platform-crates.md) | Platform knowledge in per-SoC crates behind one interface; the ACPI bus names no vendor | Accepted; refined by 0021 |
 | [0021](0021-driver-selection-and-modules.md) | Drivers selected per ISA at build time; large drivers as same-build loadable modules that import no kernel symbols | Accepted |
+| [0022](0022-smmuv3-in-p9.md) | The SMMUv3 in Phase 9, in FreeBSD's split: `smmu` units under `acpi0`, a framework and a third DMA backend, a domain per requester with strict invalidation, and a settle edge | Accepted |
 
 Template:
 

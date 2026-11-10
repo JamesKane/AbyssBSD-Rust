@@ -110,7 +110,8 @@ Each principle comes from a failure that a surveyed system documented.
 | `sys/irq` (new, split out of the arch crates) | `IrqDomain` hierarchy, filter and ithread dispatch, MSI/MSI-X allocation, affinity | small (dispatch tables) |
 | `sys/vm::dma` | `DmaTag`, backends (direct, bounce, IOMMU), `DmaCoherent`, `Mapped`, pools | yes (it is the DMA layer) |
 | `sys/acpi`, `sys/pci`, `sys/virtio`, `sys/usb` | Bus drivers: enumeration, per-bus device views, child resources | `sys/pci`: config-space MMIO only |
-| `sys/iommu` (P11) | VT-d, AMD-Vi, SMMUv3 backends for `vm::dma` and interrupt remapping | yes |
+| `lib/iommu` | Pure IOMMU logic: the IOVA allocator, the SMMUv3's formats and identification registers, a host model of the SMMU ([IOMMU.md](IOMMU.md) §4.1) | forbidden |
+| `sys/iommu` | The IOMMU framework: units, domains, contexts, requesters, IOVA spaces, and the I/O page tables, the `IoDomain` the `Iommu` backend of `vm::dma` maps through. The SMMUv3 in P9 (driver in `drivers/smmu`, [ADR-0022](adr/0022-smmuv3-in-p9.md)); VT-d, AMD-Vi, and interrupt remapping later (P11) | yes (the page tables) |
 | `lib/regs` | Typed MMIO register blocks (extended with field-level definitions) | yes (already) |
 | `drivers/*` | Leaf drivers | **forbidden** |
 | `kernel` / platform config | The driver table for each build (§7.1) | — |
@@ -392,7 +393,7 @@ firmware, before any driver runs:
 | ACPI `_CRS` resource sources | GPIO controller (`GpioIo`/`GpioInt`), I2C/SPI/UART controller (`*SerialBus`), interrupt combiner (extended IRQ with a source) → device |
 | ACPI power resources (`_PR0`, `_PR3`) | power resource provider → device |
 | PCC operation regions | `acpi0` (which owns the PCCT) → device whose AML uses that channel |
-| IORT (P11) | SMMU → each device it translates. ITS group → each device whose MSIs it receives |
+| IORT (P9, [ADR-0022](adr/0022-smmuv3-in-p9.md)) | SMMU → each PCI host bridge whose root complex maps to it, and each named component it translates (**Settle**). ITS group → each device whose MSIs it receives (the ITS is set up before the bus, so this is not an edge) |
 | DMAR / IVRS (P11) | IOMMU unit → each device in its scope |
 | MADT / GSI routing | interrupt controller → each device using its GSIs (mostly satisfied by adoption) |
 | `_PRT` link devices | PCI interrupt link → device |
@@ -412,6 +413,7 @@ Edges carry a kind:
 | **Optional** | The consumer attaches without it, and is told when it appears | Ordered once present | An I2S port the audio card can do without |
 | **Order** | Not gated | Ordered: the supplier suspends after and resumes before the consumer | A USB4 port's `usb4-host-interface` reference to its NHI |
 | **Power** | The consumer waits | Ordered, and the supplier stays powered while the consumer is | A DP transmitter in the display controller's power domain |
+| **Settle** | The consumer waits until the supplier has settled: attached, failed, or matched by no driver. Then it attaches whatever the outcome | Ordered while the supplier is attached, as Required | An SMMU and the host bridges it translates: without the SMMU they run untranslated, as on FreeBSD ([IOMMU.md](IOMMU.md) §4.3) |
 
 Keeping **Order** and **Power** apart from **Required** matters for cycles: a DP transmitter needs
 the DPU's power domain while the DPU uses the transmitter as its encoder. Those are a Power edge one
@@ -842,7 +844,7 @@ impl AttachCx<'_, B> {
 |---|---|---|
 | `Direct` | No IOMMU and the device reaches all memory | Address arithmetic only |
 | `Bounce` | The device cannot reach some memory (`addr_bits` below the top of RAM) | Copy, for out-of-range pages only |
-| `Iommu` (P11) | VT-d, AMD-Vi, SMMUv3. One DMA domain per device, or per isolation group | Page-table updates. IOTLB invalidation is batched and deferred |
+| `Iommu` (SMMUv3 in P9, ADR-0022; VT-d, AMD-Vi in P11) | One DMA domain per requester (FreeBSD's arm64 policy), or per isolation group once groups exist | Page-table updates. IOTLB invalidation is strict: every unmap invalidates and waits before it returns the buffer, batched within the unmap (one sync for all of a mapping's pages), never deferred across unmaps |
 
 **Types.**
 
@@ -875,11 +877,13 @@ impl AttachCx<'_, B> {
 1. DMA-visible pages hold only device payload and `DeviceShared` structures. No kernel pointers,
    no list links, no class metadata. `Packet` and `Bio` metadata live outside the buffers they
    describe.
-2. With an IOMMU, a mapping covers whole pages that hold nothing else. Small buffers that would
-   share a page with other data are bounced.
-3. Unmapping completes before the CPU reuses a buffer, including the IOTLB invalidation. Deferred
-   invalidation batches across buffers, but never lets the CPU reuse a page the device can still
-   reach.
+2. With an IOMMU, a buffer from the general kernel heap is bounced unless it fills whole pages
+   that hold nothing else. Buffers from zones that hold only device payload (mbuf clusters,
+   buffer-cache pages) are mapped in place, sharing a page only with other payload, as FreeBSD
+   maps them ([ADR-0022](adr/0022-smmuv3-in-p9.md); bouncing every 2 KiB cluster would copy all
+   network traffic).
+3. Unmapping completes before the CPU reuses a buffer, including the IOTLB invalidation: strict,
+   per unmap, batched only within it. The CPU never gets back a page the device can still reach.
 4. Interrupt remapping is enabled together with DMA remapping (P11).
 
 **Windows and offsets.** Some masters see memory at an offset, or only through a window: Sky1's
@@ -1421,7 +1425,8 @@ These are not Day-1 work. The design keeps room for them so they do not need a n
 | **P6** | `/dev/devctl2`, `/dev/pci`, devd running on stock rules, `devinfo`/`devctl`/`pciconf` differential tests. Device reset and rebind. IRQ affinity through `cpuset` |
 | **P7** | Net class (queue pairs, offloads), virtio-net. `miibus` and PHY drivers as a child bus of the MAC. Driver-published IRQ domains (§8.3) |
 | **P8** | Board bring-up: the platform description (§5.5) with the Sky1 entries (the Q8B's are Tier 2, best effort), the Order and Power edge kinds and the new edge sources (§6.1), the `Clock`, `Reset`, and `PowerDomain` provider traits with their first providers (§8.5, §9.3), `PciFunction::acpi_companion`, firmware-shared and declared-shared ranges (§8.1), and the firmware store (§8.6) if a P8 driver needs an image. The physical machines' NICs: e1000e, igc, rge |
-| **P11** | IOMMU backends (VT-d, AMD-Vi, SMMUv3, and SMMUv2 for the SC8280XP) and interrupt remapping. IORT, DMAR, and IVRS dependency edges. Suspend and resume (stretch), wake interrupts. Runtime PM (§8.5). `PerfDomain` and `Interconnect` providers. Firmware calls and the secure-monitor provider (§8.7). PCIe hotplug |
+| **P9** | The SMMUv3 ([IOMMU.md](IOMMU.md), [ADR-0022](adr/0022-smmuv3-in-p9.md)): `smmu` units from the IORT, the **Settle** edge kind and the IORT edges, `sys/iommu` and the `Iommu` backend of `vm::dma` (§8.4), MSI through translation, RMR bypass, `%iommu` |
+| **P11** | IOMMU backends on x86 (VT-d, AMD-Vi) and SMMUv2 for the SC8280XP, and interrupt remapping, on P9's framework. DMAR and IVRS dependency edges. Suspend and resume (stretch), wake interrupts. Runtime PM (§8.5). `PerfDomain` and `Interconnect` providers. Firmware calls and the secure-monitor provider (§8.7). PCIe hotplug |
 | **M-G** | Display and GPU classes. Function children and aggregates in anger: synthetic aggregate nodes, `Phy` lane leasing, Type-C events. Device-walked page tables, shared buffers, and fences (§8.4, §17) |
 
 ## 17. Open questions
