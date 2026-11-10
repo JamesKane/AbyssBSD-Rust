@@ -240,6 +240,8 @@ pub(crate) struct Hc {
     slots: Vec<SpinLock<Option<Slot>>>,
     explorer: SpinLock<Option<Arc<Explorer>>>,
     stopping: AtomicBool,
+    /// Watchdog ticks since start: a coarse clock for the diagnostics.
+    ticks: core::sync::atomic::AtomicU64,
 }
 
 fn xspeed(s: Speed) -> context::Speed {
@@ -433,6 +435,7 @@ impl Hc {
             slots: (0..=slots).map(|_| SpinLock::new(None)).collect(),
             explorer: SpinLock::new(None),
             stopping: AtomicBool::new(false),
+            ticks: core::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -542,6 +545,12 @@ impl Hc {
                 if let Some(m) = m {
                     *m.tag.result.lock() = Some((code, slot));
                     m.tag.done.store(true, Ordering::Release);
+                } else {
+                    bus::manager().log(format_args!(
+                        "{}: tick {}: unmatched command completion {pointer:#x}: {code:?}, slot {slot}",
+                        self.name,
+                        self.ticks()
+                    ));
                 }
             }
             Event::Transfer {
@@ -581,6 +590,11 @@ impl Hc {
                         | CompletionCode::StoppedLengthInvalid
                         | CompletionCode::StoppedShortPacket
                 ) {
+                    bus::manager().log(format_args!(
+                        "{}: tick {}: slot {slot} endpoint {endpoint} stopped at {pointer:#x}: {code:?}",
+                        self.name,
+                        self.ticks()
+                    ));
                     // Whoever stopped the endpoint completes what is left.
                     return;
                 }
@@ -594,6 +608,12 @@ impl Hc {
                         Err(error(code))
                     };
                     done.push((f, r));
+                } else {
+                    bus::manager().log(format_args!(
+                        "{}: tick {}: unmatched transfer event slot {slot} endpoint {endpoint} at {pointer:#x}: {code:?}",
+                        self.name,
+                        self.ticks()
+                    ));
                 }
             }
             Event::PortStatusChange { .. } => {
@@ -669,10 +689,11 @@ impl Hc {
         let ev = self.events.lock();
         let (slot, want) = ev.next_slot();
         ::bus::manager().log(format_args!(
-            "xhci: {what} not completed: USBCMD {:#x} USBSTS {:#x} \
+            "xhci: tick {}: {what} not completed: USBCMD {:#x} USBSTS {:#x} \
              CRCR {crcr:#x} IMAN {iman:#x} ERDP {erdp:#x}; command ring dequeue {cmd_deq:#x} \
              (cycle {cmd_cycle}), next event at {:#x} wants cycle {want}: {:08x} {:08x} {:08x} {:08x}; \
              DCBAA {:#x}",
+            self.ticks(),
             op(op::USBCMD),
             op(op::USBSTS),
             ev.erdp(),
@@ -681,6 +702,34 @@ impl Hc {
             slot.0[2],
             slot.0[3],
             self.dcbaa.bus_addr(),
+        ));
+    }
+
+    fn ticks(&self) -> u64 {
+        self.ticks.load(Ordering::Relaxed)
+    }
+
+    /// Bring-up diagnostics: what the controller says of a stuck
+    /// endpoint in its device context.
+    fn log_endpoint(&self, slot: u8, dci: Dci) {
+        let Some(cell) = self.slots.get(usize::from(slot)) else {
+            return;
+        };
+        let g = cell.lock();
+        let Some(sl) = g.as_ref() else { return };
+        let ep = EndpointContext::decode(&Self::read_ctx(&sl.out, self.csz.device_endpoint(dci)));
+        let slot_ctx = Self::read_ctx(&sl.out, 0);
+        bus::manager().log(format_args!(
+            "{}: slot {slot} endpoint {}: state {} dequeue {:#x} (cycle {}), slot context {:08x} {:08x} {:08x} {:08x}",
+            self.name,
+            dci.get(),
+            ep.state,
+            ep.dequeue,
+            ep.dcs,
+            slot_ctx[0],
+            slot_ctx[1],
+            slot_ctx[2],
+            slot_ctx[3],
         ));
     }
 
@@ -776,6 +825,7 @@ impl Hc {
 
     /// One watchdog tick: times out transfers whose time ran out.
     pub(crate) fn tick(&self, s: &Sleepable) {
+        self.ticks.fetch_add(1, Ordering::Relaxed);
         let mut expired = Vec::new();
         for (i, cell) in self.slots.iter().enumerate() {
             let mut g = cell.lock();
@@ -808,6 +858,7 @@ impl Hc {
                 "a transfer on slot {slot} endpoint {}",
                 dci.get()
             ));
+            self.log_endpoint(slot, dci);
             self.cancel(s, slot, dci, UsbError::Cancelled, true, Some(n));
         }
     }
