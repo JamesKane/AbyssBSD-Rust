@@ -156,3 +156,13 @@ fn resolution_from_physical_range_and_unit() {
     let d = Descriptor::parse(BOOT_MOUSE).unwrap();
     assert!(d.fields.iter().all(|f| f.resolution() == 0));
 }
+
+#[test]
+fn an_empty_descriptor_parses_to_nothing() {
+    // A device that answers its report descriptor request with nothing
+    // (a Corsair mouse's last two interfaces): `usbhid` attaches with it,
+    // and no child finds a collection to match.
+    let d = Descriptor::parse(&[]).unwrap();
+    assert!(d.collections.is_empty());
+    assert!(d.fields.is_empty());
+}

@@ -173,6 +173,11 @@ impl Driver for Usbhid {
         });
         let desc = match raw.as_deref().map(Descriptor::parse) {
             Some(Ok(d)) if !d.collections.is_empty() => d,
+            // None at all (the request failed or came back empty, as a
+            // Corsair mouse's last two interfaces answer): it attaches
+            // anyway with nothing for a child to match, as FreeBSD's
+            // `hidbus_attach` ignores the error.
+            None | Some(Ok(_)) => Descriptor::default(),
             // Unusable: fall back to the boot protocol, if the interface
             // has it.
             _ if boot => {

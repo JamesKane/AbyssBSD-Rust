@@ -234,7 +234,8 @@ not sleep) once none is started. `hkbd` starts at attach, since the kbd layer al
 `lib/hid` parses the report descriptor into typed fields (usage page and range, logical and
 physical limits, report ID, size, count, flags) and extracts values from reports. It never panics
 on a bad descriptor; it returns an error and `usbhid` falls back to the boot protocol where the
-interface supports it.
+interface supports it. An interface that gives no descriptor at all attaches with an empty one, so
+nothing binds under its `hidbus` (FreeBSD's `hidbus_attach` ignores the failed request).
 
 ### 6.2 Keyboards and mice
 
