@@ -9,7 +9,8 @@
 //! tarfs (read-only), and without that an empty directory, so devfs and
 //! the console still work. devfs goes on `/dev`; for the boot shell
 //! (`abyss.shell`), tmpfs on `/tmp` and the EFI System Partition on
-//! `/boot/efi` too, which with init `rc` mounts.
+//! `/boot/efi` too (the root disk's or the loader's own, never another
+//! disk's), which with init `rc` mounts.
 //!
 //! Behavior reference: sys/kern/vfs_mount.c (`vfs_getnewfsid`),
 //! sys/kern/vfs_mountroot.c.
@@ -233,12 +234,17 @@ pub(crate) fn init() {
         }
     }
     // The EFI System Partition on /boot/efi, read-write, as FreeBSD's
-    // installer mounts it: the root disk's, or else the first disk's (the
-    // boot disk's in the test machines).
+    // installer mounts it: the root disk's, or else the one the loader
+    // came from. Never any other: a read-write mount writes (the clean
+    // bit), and another disk's ESP belongs to another system.
     if shell && let Ok(dir) = ns.lookup(&s, &at, b"/boot/efi") {
         let root_parent = root_disk
             .as_ref()
             .and_then(|d| d.partition().map(|(p, _)| Arc::clone(p)));
+        let booted = crate::boot::info()
+            .boot_partition
+            .get()
+            .map(gpt::Guid::from_uefi_bytes);
         let esps: alloc::vec::Vec<_> = storage::disk::all()
             .into_iter()
             .filter(|d| {
@@ -250,7 +256,13 @@ pub(crate) fn init() {
             d.partition()
                 .is_some_and(|(p, _)| root_parent.as_ref().is_some_and(|r| Arc::ptr_eq(p, r)))
         });
-        let esp = on_root.or(esps.first()).cloned();
+        let loaded_from = || {
+            esps.iter().find(|d| {
+                d.partition()
+                    .is_some_and(|(_, p)| booted == Some(p.unique_guid))
+            })
+        };
+        let esp = on_root.or_else(loaded_from).cloned();
         if let Some(esp) = esp {
             let name = alloc::format!("/dev/{}", esp.name());
             match msdosfs::MsdosFs::mount(&s, esp, false, msdosfs::Opts::default()) {

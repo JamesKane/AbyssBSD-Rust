@@ -35,7 +35,7 @@ pub use addr::{PhysAddr, PhysRange, VirtAddr};
 /// `"ABYSSBI\0"`, little-endian.
 pub const MAGIC: u64 = u64::from_le_bytes(*b"ABYSSBI\0");
 /// The handoff version this crate describes.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// A C-layout optional value.
 ///
@@ -189,6 +189,10 @@ pub struct BootInfo {
     /// The memory disk (`EFI/ABYSS/MD` on the ESP, a ustar archive), in
     /// [`MemoryKind::BootData`], if there was one.
     pub md: Opt<PhysRange>,
+    /// The unique GUID of the GPT partition the loader was loaded from (its
+    /// ESP), in on-disk byte order, as the partition's device path gives
+    /// it. The kernel mounts that ESP, and no other, on `/boot/efi`.
+    pub boot_partition: Opt<[u8; 16]>,
 }
 
 /// The persistent log ring (format: `lib/logring`), in memory of kind

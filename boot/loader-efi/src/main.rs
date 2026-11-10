@@ -135,6 +135,20 @@ fn boot(image: Handle, st: SystemTable) -> Result<core::convert::Infallible, Err
         .open_volume(device)
         .map_err(|s| Error::Efi("open volume", s))?;
 
+    let boot_partition = st.device_path(device).and_then(|p| p.gpt_partition());
+    match boot_partition {
+        Some(g) => {
+            let _ = writeln!(
+                con,
+                "loader: loaded from partition {}",
+                efi::Guid::from_uefi_bytes(g)
+            );
+        }
+        None => {
+            let _ = writeln!(con, "loader: not loaded from a GPT partition");
+        }
+    }
+
     let cmdline = match kernel::read_file(&st, &root, CMDLINE_PATH) {
         Ok(f) => f.bytes().trim_ascii().to_vec(),
         Err(_) => Vec::new(),
@@ -273,6 +287,7 @@ fn boot(image: Handle, st: SystemTable) -> Result<core::convert::Infallible, Err
             entropy,
             log: log.map(|(ring, _)| ring),
             md,
+            boot_partition,
         },
     );
     // SAFETY: the entry point follows the `bootproto` calling contract, the

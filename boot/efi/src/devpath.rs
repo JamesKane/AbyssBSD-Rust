@@ -102,6 +102,20 @@ impl<'a> DevicePath<'a> {
         })
     }
 
+    /// The unique GUID of the GPT partition this path ends in (a Hard
+    /// Drive media node with a GUID signature, UEFI 2.10 §10.3.5.1), in
+    /// on-disk byte order.
+    #[must_use]
+    pub fn gpt_partition(&self) -> Option<[u8; 16]> {
+        let (kind, sub, data) = self.nodes().last()?;
+        // Partition number (4), start (8), size (8), signature (16), MBR
+        // type (1), signature type (1; 2 is a GUID).
+        if kind != 4 || sub != 1 || data.len() < 38 || data[37] != 2 {
+            return None;
+        }
+        data[20..36].try_into().ok()
+    }
+
     /// Whether `ancestor`'s nodes begin this path: the device `self` names
     /// is `ancestor` or lies below it.
     #[must_use]
@@ -158,6 +172,17 @@ mod tests {
         assert!(!disk.starts_with(&part));
         assert!(!part.starts_with(&other));
         assert_eq!(part.nodes().last().unwrap().0, 4);
+        // That HD node has an MBR signature type (0), so no GUID.
+        assert_eq!(part.gpt_partition(), None);
+        assert_eq!(disk.gpt_partition(), None);
+        let mut hd = std::vec![0u8; 38];
+        hd[0] = 1;
+        hd[20..36].copy_from_slice(&[0xab; 16]);
+        hd[36] = 2;
+        hd[37] = 2;
+        let esp: Vec<u8> = [&pci_root[..], &pci, &usb, &node(4, 1, &hd), &end()].concat();
+        let esp = DevicePath::parse(&esp).unwrap();
+        assert_eq!(esp.gpt_partition(), Some([0xab; 16]));
     }
 
     #[test]

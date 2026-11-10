@@ -58,6 +58,7 @@ pub(crate) struct Fields {
     pub(crate) entropy: bootproto::Entropy,
     pub(crate) log: Option<bootproto::LogRing>,
     pub(crate) md: Option<bootproto::PhysRange>,
+    pub(crate) boot_partition: Option<[u8; 16]>,
 }
 
 impl Handoff {
@@ -98,6 +99,7 @@ impl Handoff {
             entropy: f.entropy,
             log: f.log.into(),
             md: f.md.into(),
+            boot_partition: f.boot_partition.into(),
         };
         // SAFETY: `prepare` reserved `INFO_SPACE` bytes at `info`, suitably
         // aligned (page start).
