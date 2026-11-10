@@ -212,8 +212,9 @@ exists for `mmap` of memory-disk files since P4; it gains write-back.
 - **Dirty pages** are written by `write_back`, which clusters contiguous dirty pages into large
   writes.
 - **Truncation** frees pages past the new end and zeroes the tail of the last page.
-- **Pressure**: clean pages of vnodes with no mappings are reclaimed LRU when free memory runs low.
-  Dirty data is throttled (§9.3).
+- **Pressure**: clean pages of vnodes with no mappings are reclaimed, oldest objects first. The page
+  daemon does this from `v_free_target` down, and an allocation at `v_free_reserved` does it
+  itself (ARCHITECTURE.md §5.2). Dirty data is throttled (§9.3).
 
 ### 8.2 Metadata: the buffer cache
 

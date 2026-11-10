@@ -84,6 +84,7 @@ Kernel command-line words understood so far:
 | `abyss.test.warm_reset=1` | Test kernels warm-reset once to exercise the persistent log ring |
 | `abyss.test.orderly_reset=1` | With `warm_reset`, the first boot shuts its devices down before resetting |
 | `abyss.test.skip=P[,P]` | Test kernels leave out the tests whose names start with any `P` |
+| `abyss.test.only=P[,P]` | Test kernels run only the tests whose names start with any `P` (and are not skipped) |
 | `abyss.stress=S` | Run the Phase 2 stress test for S seconds, then report and power off |
 
 `--tier stress` runs the Phase 2 stress test on both architectures with 8 CPUs and 2 GiB,
@@ -266,6 +267,7 @@ symbolized backtrace, and checks the VMM's exit status:
 | `aarch64-smmu-warm-reset` | QEMU, two boots, SMMUv3 | the first boot shut its devices down (the SMMU quiesced) before the reset |
 | `x86_64-watchdog` | QEMU, two boots | the first boot's `watchdogd` patted `ichwd` through `/dev/fido` past its timeout, and once it was killed the watchdog reset the machine |
 | `x86_64-bhyve` | bhyve + `BHYVE_UEFI` (FreeBSD hosts only; skipped elsewhere) | power-off through UEFI runtime services |
+| `aarch64-lowmem`, `x86_64-lowmem` | QEMU with 512 MiB and a 1.5 GiB virtio disk | only `page_cache_larger_than_memory` (`abyss.test.only=`): files totalling twice RAM written to UFS2 (soft updates), each synced and checksummed, then read back; the page cache must give way to new pages and the kernel's own allocations (ARCHITECTURE.md §5.2). The `lowmem:` lines show free pages and the page daemon's counters after each file |
 
 After these come the shell cases (`x86_64-shell`, `aarch64-shell`, `x86_64-bhyve-shell`, above), and
 `x86_64-console` and `aarch64-console`: a normal kernel with `boot_multicons=YES`, so

@@ -248,8 +248,39 @@ We follow FreeBSD's Mach-derived design, adapted to Rust ownership:
   user pointers by construction.
 - **Unified buffer/page cache** for file data (FreeBSD's VMIO model). Metadata is cached through a
   small buffer cache API used by UFS2 and msdosfs.
+- **Free pages** (`vm::pageout`, `kernel/src/mm/pageout.rs`), as FreeBSD keeps them:
+  - FreeBSD's thresholds, from `vm_pageout_init_domain`'s formulas: `v_free_reserved`,
+    `v_free_min`, `v_free_severe`, `v_free_target`, and the wakeup mark, 90% of the target.
+  - Allocation classes, as in `_vm_domain_allocate`. Object pages (the page cache, anonymous
+    memory: `VM_ALLOC_NORMAL`) stop at `v_free_reserved`, and so does refilling a CPU's page
+    cache (`vm_page_zone_import`). The kernel's own pages (the heap, page tables, kernel stacks,
+    DMA: `VM_ALLOC_SYSTEM`) may go down to `v_interrupt_free_min`, and interrupt handlers may take
+    the last page. However much the page cache grows, the kernel keeps the pages it needs to give
+    the cache back. The counts are the buddy allocator's free pages, without those in the CPUs'
+    caches (`vmd_free_count`).
+  - The page daemon (`vm_pageout_worker`). An object-page allocation that leaves fewer free pages
+    than the wakeup mark wakes it (`pagedaemon_wakeup`); otherwise it looks every 100 ms. It
+    frees clean file pages nothing maps, oldest objects first, until `v_free_target` pages are
+    free. While short, it trims the heap's caches every 10 s (`vm_pageout_lowmem`) and drains
+    them below `v_free_severe`. `v_pdwakeups`, `v_pdpages`, `v_dfree`, and `v_pdshortfalls` count
+    what it does.
+  - Synchronous reclaim instead of `vm_wait`. FreeBSD's allocations sleep for the page daemon.
+    Here an object-page allocation at the reserve reclaims clean file pages itself, then has the
+    heap give back its caches. A heap allocation the buddy allocator cannot serve drains the
+    heap's depots, then reclaims clean pages in rounds (at least 256 pages, or four times the
+    block) until the block is free or nothing more can be reclaimed. Each round returns this CPU's
+    page cache to the buddy allocator so the freed pages can merge. Reclaiming never waits for a
+    lock, so it is safe wherever the allocation is made, and interrupt handlers never reclaim.
+    The heap's blocks are physically contiguous, as `kmem`'s are not, which is why an order-4
+    request may take several rounds (compat-deviations.md).
+  - Correctness does not depend on the daemon: the classes and the allocators' own reclaim are
+    what keep the kernel from running out. The daemon keeps allocations off that slow path, and it
+    frees large batches, which gives the buddy allocator whole blocks back.
+  - Dirty pages are bounded apart from all this. A writer that finds more than a tenth of memory
+    dirty writes its own file back (`hidirtybuffers`' role, VFS.md §9.3), and the syncer writes the
+    rest. A synced page is clean and so can be reclaimed.
 - **Paging out / swap**: Phase 6+. The design leaves room for it from the start (pager trait on
-  `VmObject`).
+  `VmObject`). Anonymous memory and dirty pages are not paged out.
 
 ### 5.3 Scheduling (`sys/sched`)
 
