@@ -11,6 +11,8 @@
 //! - [`map`], [`object`], [`fault`]: process address spaces (`vm_map`),
 //!   the memory objects behind them with copy-on-write shadow chains
 //!   (`vm_object`), and page-fault resolution (`vm_fault`).
+//! - [`pageout`]: the paging thresholds and allocation classes that keep
+//!   the page cache from taking the kernel's last pages (`vm_pageout`).
 //!
 //! Everything here is independent of the architecture and of how physical
 //! memory is reached, so it runs in host tests; the kernel crate supplies
@@ -18,7 +20,7 @@
 //!
 //! Behavior reference: sys/vm/vm_phys.c, sys/vm/uma_core.c,
 //! sys/kern/subr_vmem.c, sys/vm/vm_map.c, sys/vm/vm_object.c,
-//! sys/vm/vm_fault.c.
+//! sys/vm/vm_fault.c, sys/vm/vm_pageout.c.
 
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
@@ -29,6 +31,7 @@ pub mod dma;
 pub mod fault;
 pub mod map;
 pub mod object;
+pub mod pageout;
 pub mod phys;
 pub mod slab;
 pub mod vmem;

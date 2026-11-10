@@ -190,23 +190,37 @@ pub fn dirty_total() -> usize {
     DIRTY.load(Ordering::Relaxed)
 }
 
+/// What a reclaiming pass did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Reclaimed {
+    /// Pages freed.
+    pub freed: usize,
+    /// Pages looked at (`v_pdpages`'s count), freed or not.
+    pub scanned: usize,
+}
+
 /// Frees up to `want` clean pages of pager objects nothing maps (only
 /// their file system holds them) and nobody is reading or writing
 /// through, oldest objects first; returns how many it freed. Never waits
 /// for a lock: a caller may hold one. Allocates nothing: it runs when
 /// memory has run out.
 pub fn reclaim_clean(want: usize) -> usize {
+    reclaim_clean_counted(want).freed
+}
+
+/// [`reclaim_clean`], also counting the pages it looked at.
+pub fn reclaim_clean_counted(want: usize) -> Reclaimed {
+    let mut r = Reclaimed::default();
     {
         let Some(mut list) = PAGED.try_lock() else {
-            return 0;
+            return r;
         };
         list.retain(|w| w.strong_count() > 0);
     }
-    let mut freed = 0;
     // One object at a time, the list's lock let go between them (an
     // object being registered meanwhile only shifts what comes after).
     let mut i = 0;
-    while freed < want {
+    while r.freed < want {
         let o = {
             let Some(list) = PAGED.try_lock() else {
                 break;
@@ -218,10 +232,12 @@ pub fn reclaim_clean(want: usize) -> usize {
         };
         i += 1;
         if let Some(o) = o {
-            freed += o.drop_clean(want - freed);
+            let d = o.drop_clean_counted(want - r.freed);
+            r.freed += d.freed;
+            r.scanned += d.scanned;
         }
     }
-    freed
+    r
 }
 
 /// How many pages [`Object::drop_clean`] takes out under the lock at a
@@ -801,11 +817,20 @@ impl Object {
     /// and no transfer is under way. `self` is a reference of the caller's
     /// own, beside the file system's if it has not disowned the object.
     pub fn drop_clean(self: &Arc<Self>, want: usize) -> usize {
-        let mut n = 0;
+        self.drop_clean_counted(want).freed
+    }
+
+    /// [`Object::drop_clean`], also counting the pages it looked at.
+    pub(crate) fn drop_clean_counted(self: &Arc<Self>, want: usize) -> Reclaimed {
+        let mut r = Reclaimed::default();
+        // Where the next batch looks from: each page is looked at once,
+        // however many batches it takes.
+        let mut from: PageIndex = 0;
         // In batches, without allocating, each freed with the lock let go.
-        while n < want {
-            let mut batch = [Pfn(0); DROP_BATCH];
+        while r.freed < want {
+            let mut batch = [(0, Pfn(0)); DROP_BATCH];
             let mut k = 0;
+            let mut more = false;
             {
                 let Some(mut inner) = self.inner.try_lock() else {
                     break;
@@ -819,26 +844,36 @@ impl Object {
                     break;
                 }
                 let Inner { pages, dirty, .. } = &mut *inner;
-                let room = DROP_BATCH.min(want - n);
-                pages.retain(|i, pfn| {
-                    if k < room && !dirty.contains(i) {
-                        batch[k] = *pfn;
+                let room = DROP_BATCH.min(want - r.freed);
+                for (&i, &pfn) in pages.range(from..) {
+                    r.scanned += 1;
+                    if !dirty.contains(&i) {
+                        batch[k] = (i, pfn);
                         k += 1;
-                        false
-                    } else {
-                        true
                     }
-                });
+                    match i.checked_add(1) {
+                        Some(next) if k < room => from = next,
+                        Some(next) => {
+                            from = next;
+                            more = true;
+                            break;
+                        }
+                        None => break,
+                    }
+                }
+                for &(i, _) in &batch[..k] {
+                    pages.remove(&i);
+                }
             }
-            for &pfn in &batch[..k] {
+            for &(_, pfn) in &batch[..k] {
                 self.pages_ops.free(pfn);
             }
-            n += k;
-            if k < DROP_BATCH {
+            r.freed += k;
+            if !more {
                 break;
             }
         }
-        n
+        r
     }
 
     /// Bytes of shared mappings that are or may become writable.

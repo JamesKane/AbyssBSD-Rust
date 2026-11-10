@@ -66,6 +66,15 @@ pub unsafe trait PageSource {
     ///
     /// `p` came from `alloc_pages(order)` and is not used afterwards.
     unsafe fn free_pages(&self, p: NonNull<u8>, order: Order);
+
+    /// A block of `order` could not be had: frees what memory can be freed
+    /// without waiting (caches), and returns whether anything was, so a
+    /// retry may succeed. The heap calls it from thread context only,
+    /// holding none of its own locks; the caller of the allocation may
+    /// hold others, so it must never wait for a lock.
+    fn reclaim(&self, _order: Order) -> bool {
+        false
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -398,9 +407,45 @@ impl<S: PageSource, const CPUS: usize> Heap<S, CPUS> {
 
     /// Allocates memory for `layout`, or returns null.
     pub fn allocate(&self, layout: Layout) -> *mut u8 {
+        let p = self.try_allocate(layout);
+        if p.is_null() {
+            self.allocate_short(layout)
+        } else {
+            p
+        }
+    }
+
+    fn try_allocate(&self, layout: Layout) -> *mut u8 {
         match class_for(layout) {
             Some(c) => self.alloc_small(c),
             None => self.alloc_large(layout),
+        }
+    }
+
+    /// The page source is out of blocks for `layout`: give the depots'
+    /// objects back to their slabs (`uma_reclaim`'s drain), then have the
+    /// source reclaim, retrying after each round while it frees anything
+    /// (`malloc(M_WAITOK)` would instead sleep in `vm_wait` for the page
+    /// daemon, which an allocator that may be called holding spin locks
+    /// cannot). Interrupt handlers get null at once.
+    #[cold]
+    fn allocate_short(&self, layout: Layout) -> *mut u8 {
+        if hal::interrupt::active() {
+            return ptr::null_mut();
+        }
+        let order = match class_for(layout) {
+            Some(c) => CLASSES[c].order,
+            None => match Order::for_bytes(layout.size().max(layout.align()) as u64) {
+                Some(o) => o,
+                None => return ptr::null_mut(),
+            },
+        };
+        self.reclaim();
+        loop {
+            let p = self.try_allocate(layout);
+            if !p.is_null() || !self.source.reclaim(order) {
+                return p;
+            }
         }
     }
 
@@ -910,6 +955,65 @@ mod tests {
             // SAFETY: allocated above with this layout.
             unsafe { std::alloc::dealloc(p.as_ptr(), layout) };
         }
+    }
+
+    /// Pages up to a limit that each reclaim raises by `step`, `rounds`
+    /// times.
+    struct Reclaiming {
+        pages: HostPages,
+        step: i64,
+        rounds: AtomicI64,
+        orders: std::sync::Mutex<Vec<Order>>,
+    }
+
+    // SAFETY: HostPages' blocks, as above.
+    unsafe impl PageSource for Reclaiming {
+        fn alloc_pages(&self, order: Order) -> Option<NonNull<u8>> {
+            self.pages.alloc_pages(order)
+        }
+
+        unsafe fn free_pages(&self, p: NonNull<u8>, order: Order) {
+            // SAFETY: the caller's contract.
+            unsafe { self.pages.free_pages(p, order) }
+        }
+
+        fn reclaim(&self, order: Order) -> bool {
+            self.orders.lock().unwrap().push(order);
+            if self.rounds.fetch_sub(1, Ordering::Relaxed) <= 0 {
+                return false;
+            }
+            // Cannot move `limit` (not atomic): count the step as given
+            // back instead.
+            self.pages.out.fetch_sub(self.step, Ordering::Relaxed);
+            true
+        }
+    }
+
+    #[test]
+    fn short_allocations_reclaim_and_retry() {
+        let source = Reclaiming {
+            pages: HostPages {
+                limit: Some(0),
+                ..HostPages::default()
+            },
+            step: 4,
+            rounds: AtomicI64::new(5),
+            orders: std::sync::Mutex::new(Vec::new()),
+        };
+        let heap: Heap<Reclaiming, 1> = Heap::new(source);
+        // 64 KiB needs 16 pages: four rounds of 4.
+        let l = layout(65536, 8);
+        // SAFETY: a nonzero size.
+        let p = unsafe { heap.alloc(l) };
+        assert!(!p.is_null());
+        assert_eq!(*heap.source().orders.lock().unwrap(), [Order(4); 4]);
+        // SAFETY: from `alloc` with `l`.
+        unsafe { heap.dealloc(p, l) };
+        // One round left, then reclaiming gives up: null, not a loop.
+        let l = layout(1 << 20, 8);
+        // SAFETY: a nonzero size.
+        assert!(unsafe { heap.alloc(l) }.is_null());
+        assert_eq!(heap.source().orders.lock().unwrap().len(), 6);
     }
 
     fn layout(size: usize, align: usize) -> Layout {

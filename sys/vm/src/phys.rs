@@ -524,7 +524,22 @@ impl PageMagazine {
     /// Moves up to [`Self::BATCH`] single pages from `a` (from `domain`)
     /// into the magazine. Returns how many.
     pub fn refill(&mut self, a: &mut PhysAllocator<'_>, domain: DomainId) -> usize {
-        let want = Self::BATCH.min(Self::CAPACITY - self.len);
+        self.refill_above(a, domain, 0)
+    }
+
+    /// As [`Self::refill`], but leaves at least `floor` pages free in `a`
+    /// (a cache refill is a `VM_ALLOC_NORMAL` allocation, as
+    /// `vm_page_zone_import`'s, and stops at the reserve).
+    pub fn refill_above(
+        &mut self,
+        a: &mut PhysAllocator<'_>,
+        domain: DomainId,
+        floor: u64,
+    ) -> usize {
+        let room = a.stats().free.saturating_sub(floor);
+        let want = Self::BATCH
+            .min(Self::CAPACITY - self.len)
+            .min(usize::try_from(room).unwrap_or(usize::MAX));
         let mut got = 0;
         while got < want {
             let Some(p) = a.alloc(Order::ZERO, domain) else {
@@ -791,6 +806,22 @@ mod tests {
             m.drain(a, true).unwrap();
             assert!(m.is_empty());
             assert_eq!(a.stats().free, total);
+        });
+    }
+
+    #[test]
+    fn magazine_refill_stops_at_a_floor() {
+        with(&[seg(0, 256, 0)], |a| {
+            a.add_free(Pfn(0), Pfn(256));
+            let mut m = PageMagazine::new();
+            // 256 free, keep 240: 16 come.
+            assert_eq!(m.refill_above(a, DomainId(0), 240), 16);
+            assert_eq!(a.stats().free, 240);
+            assert_eq!(m.refill_above(a, DomainId(0), 240), 0);
+            assert_eq!(m.refill_above(a, DomainId(0), 1000), 0);
+            assert_eq!(m.len(), 16);
+            m.drain(a, true).unwrap();
+            assert_eq!(a.stats().free, 256);
         });
     }
 

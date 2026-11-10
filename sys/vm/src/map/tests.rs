@@ -843,6 +843,36 @@ fn clean_pages_nothing_maps_are_reclaimed() {
 }
 
 #[test]
+fn reclaiming_looks_at_each_page_once() {
+    let pages = Pages::new();
+    let file = Arc::new(ClusterFile {
+        pages: 1000,
+        runs: std::sync::Mutex::new(Vec::new()),
+    });
+    let object = crate::object::Object::with_pager(
+        pages,
+        Arc::clone(&file) as Arc<dyn crate::object::Pager>,
+    );
+    for i in 0..1000 {
+        object.fill(i).unwrap();
+    }
+    for i in (0..1000).step_by(10) {
+        object.mark_dirty(i);
+    }
+    // 150 clean pages are the first 167 (17 of them dirty, every tenth
+    // from 0): batches pick up where the last left off.
+    let r = Arc::clone(&object).drop_clean_counted(150);
+    assert_eq!(r.freed, 150);
+    assert_eq!(r.scanned, 167);
+    assert_eq!(object.resident(), 850);
+    // The rest: 900 clean in all, each page looked at once.
+    let r = Arc::clone(&object).drop_clean_counted(usize::MAX);
+    assert_eq!(r.freed, 750);
+    assert_eq!(r.scanned, 850);
+    assert_eq!(object.resident(), 100);
+}
+
+#[test]
 fn a_device_mapping_reaches_the_device_pages_write_combining() {
     use crate::object::MemAttr;
     let pages = Pages::new();
