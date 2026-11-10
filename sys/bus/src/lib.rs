@@ -43,6 +43,7 @@ pub use driver::{
 pub use gate::{Gate, GateGuard, Revoked};
 pub use manager::{
     AttachRequestError, DEVCTL_DEFAULT_QUEUE, DetachError, Manager, Options, init, manager,
+    no_hints,
 };
 pub use platform::Platform;
 

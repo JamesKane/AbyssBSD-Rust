@@ -252,6 +252,7 @@ pub(crate) fn init(s: &Sleepable) {
             devctl_nomatch: crate::boot::value("hw.bus.devctl_nomatch_enabled")
                 .and_then(|v| v.parse::<i32>().ok())
                 .is_none_or(|v| v != 0),
+            disabled_hint,
         },
     );
     // The platform root, and the devices the kernel set up itself, as
@@ -354,4 +355,13 @@ pub(crate) fn find_named(
         }
     }
     None
+}
+
+/// `hint.<name>.<unit>.disabled` from the loader's variables, non-zero
+/// (FreeBSD's `resource_disabled`, which reads it as an integer).
+fn disabled_hint(name: &str, unit: u32) -> bool {
+    let key = alloc::format!("hint.{name}.{unit}.disabled");
+    crate::boot::value(&key)
+        .and_then(|v| v.parse::<i64>().ok())
+        .is_some_and(|v| v != 0)
 }

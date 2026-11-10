@@ -229,6 +229,8 @@ impl Topology {
 /// The device manager. There is one, set up by [`init`].
 pub struct Manager {
     platform: &'static dyn Platform,
+    /// [`Options::disabled_hint`].
+    disabled_hint: fn(&str, u32) -> bool,
     drivers: &'static [DriverDecl],
     topo: SxLock<Topology>,
     /// Nodes waiting for a worker.
@@ -305,6 +307,15 @@ pub struct Options {
     /// Nomatch events are queued (the `hw.bus.devctl_nomatch_enabled`
     /// tunable; on by default).
     pub devctl_nomatch: bool,
+    /// Whether the hints disable driver `name`'s unit `unit`
+    /// (`hint.<name>.<unit>.disabled`, FreeBSD's `resource_disabled`).
+    pub disabled_hint: fn(name: &str, unit: u32) -> bool,
+}
+
+/// No device is disabled by hints.
+#[must_use]
+pub fn no_hints(_: &str, _: u32) -> bool {
+    false
 }
 
 /// Sets up the manager with the build's driver table and starts its
@@ -369,6 +380,7 @@ pub fn init(
             on_event: Once::new(),
             generation: AtomicU32::new(1),
             faults: SpinLock::new(faults),
+            disabled_hint: o.disabled_hint,
         })
         .is_ok();
     assert!(ok, "bus::init called twice");
@@ -1096,6 +1108,16 @@ impl Manager {
             .or(wired)
             .and_then(|u| t.units.alloc(decl.name, Some(u)).ok())
             .unwrap_or_else(|| t.units.alloc_skipping(decl.name, &hinted));
+        // Disabled by the hints: named, never attached (FreeBSD's
+        // `device_attach` and `resource_disabled`, "disabled via hints").
+        if (self.disabled_hint)(decl.name, unit) {
+            if let Some(n) = t.node_mut(id) {
+                n.disabled = Some(decl.name);
+                n.unit = Some(unit);
+                n.state = NodeState::NotPresent;
+            }
+            return;
+        }
         let desc = match t.node(id) {
             Some(n) => (decl.describe)(&n.ident, n.bus_data.as_deref()),
             None => (decl.describe)(&Ident::Root, None),
