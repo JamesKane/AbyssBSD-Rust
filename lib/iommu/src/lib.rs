@@ -11,6 +11,10 @@
 //!   [`ste`] (stream table entries, level-1 descriptors, table geometry),
 //!   [`cd`] (context descriptors), [`cmd`] (commands), [`event`] (event
 //!   records).
+//! - [`model`]: a host model of an SMMUv3 that consumes the command queue,
+//!   walks stream table → context descriptor → page tables, caches what
+//!   hardware may cache, and produces events, for the driver's and the
+//!   framework's tests (docs/IOMMU.md §7).
 //!
 //! Behavior references: sys/dev/iommu/iommu_gas.c, sys/arm64/iommu/smmu.c,
 //! smmureg.h.
@@ -24,6 +28,7 @@ pub mod cd;
 pub mod cmd;
 pub mod event;
 pub mod gas;
+pub mod model;
 pub mod queue;
 pub mod regs;
 pub mod ste;
