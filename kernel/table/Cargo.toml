@@ -49,6 +49,7 @@ sky1-clk = { path = "../../drivers/sky1-clk" }
 sky1-pinctrl = { path = "../../drivers/sky1-pinctrl" }
 sky1-reset = { path = "../../drivers/sky1-reset" }
 sky1-syscon = { path = "../../drivers/sky1-syscon" }
+smmu = { path = "../../drivers/smmu" }
 
 [dev-dependencies]
 aml = { path = "../../lib/aml" }

@@ -52,6 +52,7 @@ fb-console = { path = "../drivers/fb-console" }
 hal = { path = "../arch/hal" }
 irq = { path = "../sys/irq" }
 event = { path = "../sys/event" }
+iommu-framework = { path = "../sys/iommu" }
 ktest = { path = "../lib/ktest" }
 logring = { path = "../lib/logring" }
 pt = { path = "../lib/pt" }
@@ -81,6 +82,7 @@ arch-x86_64 = { path = "../arch/x86_64" }
 arch-aarch64 = { path = "../arch/aarch64" }
 idregs = { path = "../lib/idregs" }
 sbsa-gwdt = { path = "../drivers/sbsa-gwdt" }
+smmu = { path = "../drivers/smmu" }
 
 [lints]
 workspace = true

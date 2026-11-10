@@ -79,14 +79,17 @@ pub static X86_64: &[DriverDecl] = drivers![
     amdsbwd::DRIVER,
 ];
 
-/// The aarch64 kernel's drivers: the SBSA watchdog and the xHCI that
-/// firmware describes in ACPI (`files.arm64`), `gpiobus` and `gpioc`
+/// The aarch64 kernel's drivers: the SBSA watchdog, the SMMUv3 the IORT
+/// lists, and the xHCI that firmware describes in ACPI (`files.arm64`;
+/// `smmu` is `optional iommu`, which the board's FreeBSD and its
+/// AbyssBSD have, IOMMU.md §2.2), `gpiobus` and `gpioc`
 /// (arm64's `std.dev` has `device gpio`; amd64's GENERIC does not), and
 /// the Sky1's SoC blocks,
 /// which FreeBSD lacks or builds for arm64 only (`cdnc_i2c`).
 #[cfg(any(target_arch = "aarch64", not(target_os = "none")))]
 pub static AARCH64: &[DriverDecl] = drivers![
     sbsa_gwdt::DRIVER,
+    smmu::DRIVER,
     xhci_driver::ACPI,
     sky1_clk::DRIVER,
     sky1_clk::SCMI_DRIVER,

@@ -32,6 +32,9 @@ pub mod model;
 pub mod queue;
 pub mod regs;
 pub mod ste;
+/// The identification registers as stage 0's driver reads them; stage 2
+/// moves the driver to [`regs`] and drops this.
+pub mod smmu;
 
 use core::fmt;
 

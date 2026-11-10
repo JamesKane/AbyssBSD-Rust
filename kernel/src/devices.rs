@@ -234,7 +234,20 @@ pub(crate) fn init(s: &Sleepable) {
     input::set_consumer(alloc::sync::Arc::new(crate::tty::ConsoleInput));
     bus::set_bootverbose(crate::console::loader_flag("boot_verbose").unwrap_or(false));
     // `hw.nvme.*` (`TUNABLE_INT_FETCH`), before any controller attaches.
-    nvme::set_tunables(&|name| crate::boot::value(name).and_then(|v| v.parse::<i32>().ok()));
+    let tunable = |name: &str| crate::boot::value(name).and_then(|v| v.parse::<i32>().ok());
+    nvme::set_tunables(&tunable);
+    // `hw.iommu.*` and `hw.smmu.*` (docs/IOMMU.md §4.12): arm64's, where
+    // FreeBSD's IOMMU knobs are the SMMU's (x86 DMAR and AMD-Vi are
+    // deferred, §9).
+    iommu_framework::set_tunables(&tunable);
+    #[cfg(target_arch = "aarch64")]
+    {
+        smmu::set_tunables(&tunable);
+        crate::sysctl::with(s, |t| {
+            iommu_framework::sysctl_init(t);
+            smmu::sysctl_init(t);
+        });
+    }
     let drivers = drivers();
     let root = bus::init(
         s,

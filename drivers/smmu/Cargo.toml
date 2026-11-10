@@ -1,0 +1,19 @@
+[package]
+name = "smmu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+abi = { path = "../../lib/abi" }
+acpi = { path = "../../sys/acpi" }
+acpi-tables = { path = "../../lib/acpi-tables" }
+bus = { path = "../../sys/bus" }
+iommu = { path = "../../lib/iommu" }
+iommu-framework = { path = "../../sys/iommu" }
+regs = { path = "../../lib/regs" }
+sysctl = { path = "../../sys/sysctl" }
+
+[lints]
+workspace = true

@@ -273,6 +273,7 @@ dependencies = [
  "sky1-pinctrl",
  "sky1-reset",
  "sky1-syscon",
+ "smmu",
  "timers",
  "uart",
  "umass",
@@ -485,6 +486,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "iommu-framework"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "sysctl",
+]
+
+[[package]]
 name = "irq"
 version = "0.0.0"
 dependencies = [
@@ -546,6 +555,7 @@ dependencies = [
  "inet",
  "input",
  "intmap",
+ "iommu-framework",
  "irq",
  "kcrypto",
  "ktest",
@@ -561,6 +571,7 @@ dependencies = [
  "sbsa-gwdt",
  "sched",
  "security",
+ "smmu",
  "socket",
  "storage",
  "sync",
@@ -780,6 +791,20 @@ version = "0.0.0"
 dependencies = [
  "bus",
  "devtree",
+]
+
+[[package]]
+name = "smmu"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "acpi",
+ "acpi-tables",
+ "bus",
+ "iommu",
+ "iommu-framework",
+ "regs",
+ "sysctl",
 ]
 
 [[package]]

@@ -1,0 +1,13 @@
+[package]
+name = "iommu-framework"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+abi = { path = "../../lib/abi" }
+sysctl = { path = "../sysctl" }
+
+[lints]
+workspace = true
