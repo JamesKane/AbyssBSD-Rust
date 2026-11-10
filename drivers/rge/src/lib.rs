@@ -7,6 +7,8 @@
 //!   configuration, and the MAC setup `rge_init_locked` does.
 //! - [`ring`]: the descriptor rings and frame reassembly.
 //! - [`driver`]: `rgeN`, the PCI driver and its interface.
+//! - [`health`]: the once-a-second tick's decisions: the transmit
+//!   watchdog, receive stalls, a device gone from the bus.
 //! - [`generated`]: Realtek's microcode and PHY configuration programs,
 //!   read from FreeBSD's driver by `cargo xtask rgegen`; [`program`]
 //!   replays them.
@@ -25,11 +27,14 @@ extern crate alloc;
 
 pub mod driver;
 pub mod generated;
+pub mod health;
 pub mod hw;
 pub mod program;
 pub mod regs;
 pub mod ring;
 
+#[cfg(test)]
+mod health_tests;
 #[cfg(test)]
 mod ring_tests;
 #[cfg(test)]

@@ -27,7 +27,7 @@ enum Ev {
 }
 
 #[derive(Default)]
-struct State {
+pub(crate) struct State {
     bytes: BTreeMap<usize, u8>,
     mac: BTreeMap<u16, u16>,
     phy: BTreeMap<u16, u16>,
@@ -39,14 +39,18 @@ struct State {
     phy_latch: u16,
     csi_latch: u32,
     log: Vec<Ev>,
+    /// Soft resets requested (`CMD_RESET` writes).
+    pub(crate) resets: u32,
+    /// Gone from the bus: every read is all ones, writes vanish.
+    pub(crate) gone: bool,
 }
 
 /// An RTL8126's register protocol.
 #[derive(Default)]
-struct Model(RefCell<State>);
+pub(crate) struct Model(pub(crate) RefCell<State>);
 
 impl State {
-    fn get(&self, off: usize, n: usize) -> u32 {
+    pub(crate) fn get(&self, off: usize, n: usize) -> u32 {
         (0..n).fold(0, |v, i| {
             v | u32::from(self.bytes.get(&(off + i)).copied().unwrap_or(0)) << (8 * i)
         })
@@ -97,6 +101,9 @@ impl State {
 impl Regs for Model {
     fn read8(&self, off: usize) -> u8 {
         let s = self.0.borrow();
+        if s.gone {
+            return u8::MAX;
+        }
         match off {
             regs::MCUCMD => regs::MCUCMD_RXFIFO_EMPTY | regs::MCUCMD_TXFIFO_EMPTY,
             _ => s.get(off, 1) as u8,
@@ -105,6 +112,9 @@ impl Regs for Model {
 
     fn read16(&self, off: usize) -> u16 {
         let s = self.0.borrow();
+        if s.gone {
+            return u16::MAX;
+        }
         match off {
             regs::IM => 0x0103,
             regs::TWICMD => 0x0200,
@@ -114,6 +124,9 @@ impl Regs for Model {
 
     fn read32(&self, off: usize) -> u32 {
         let s = self.0.borrow();
+        if s.gone {
+            return u32::MAX;
+        }
         match off {
             regs::MACOCP => u32::from(s.mac.get(&s.mac_latch).copied().unwrap_or(0)),
             // A read's data is ready once the busy flag is set.
@@ -126,6 +139,12 @@ impl Regs for Model {
 
     fn write8(&self, off: usize, v: u8) {
         let mut s = self.0.borrow_mut();
+        if s.gone {
+            return;
+        }
+        if off == regs::CMD && v & regs::CMD_RESET != 0 {
+            s.resets += 1;
+        }
         // The soft reset completes at once.
         let v = if off == regs::CMD {
             v & !regs::CMD_RESET
@@ -136,11 +155,17 @@ impl Regs for Model {
     }
 
     fn write16(&self, off: usize, v: u16) {
-        self.0.borrow_mut().put(off, 2, v.into());
+        let mut s = self.0.borrow_mut();
+        if !s.gone {
+            s.put(off, 2, v.into());
+        }
     }
 
     fn write32(&self, off: usize, v: u32) {
         let mut s = self.0.borrow_mut();
+        if s.gone {
+            return;
+        }
         let addr = ((v >> regs::OCP_ADDR_SHIFT & 0x7fff) << 1) as u16;
         match off {
             regs::MACOCP if v & regs::OCP_BUSY != 0 => {

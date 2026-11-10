@@ -86,6 +86,30 @@ pub trait Regs {
     fn delay_us(&self, us: u32);
 }
 
+impl<R: Regs + ?Sized> Regs for &R {
+    fn read8(&self, off: usize) -> u8 {
+        (**self).read8(off)
+    }
+    fn read16(&self, off: usize) -> u16 {
+        (**self).read16(off)
+    }
+    fn read32(&self, off: usize) -> u32 {
+        (**self).read32(off)
+    }
+    fn write8(&self, off: usize, v: u8) {
+        (**self).write8(off, v);
+    }
+    fn write16(&self, off: usize, v: u16) {
+        (**self).write16(off, v);
+    }
+    fn write32(&self, off: usize, v: u32) {
+        (**self).write32(off, v);
+    }
+    fn delay_us(&self, us: u32) {
+        (**self).delay_us(us);
+    }
+}
+
 /// Why bringing the chip up failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HwError {
@@ -796,6 +820,46 @@ impl<R: Regs> Chip<R> {
         self.regs.write16(regs::IM, 0);
         self.regs.write32(regs::TIMERINT0, 0);
         self.regs.write32(regs::IMR, regs::INTRS);
+    }
+
+    /// `rge_init_locked` up to starting the chip, from any state: stops
+    /// it, programs the station address, has `rings` reset the descriptor
+    /// rings (the controller is stopped while it runs), powers up and
+    /// initializes the MAC and PHY again, and configures the MAC for the
+    /// rings at `rx` and `tx`. [`Chip::set_filter`] and [`Chip::start`]
+    /// follow.
+    ///
+    /// The MAC and PHY microcode versions are read afresh, so microcode
+    /// the chip still runs is not loaded again.
+    ///
+    /// # Errors
+    ///
+    /// A reset that never completes, or a PHY that never leaves reset.
+    pub fn init_locked(
+        &self,
+        lladdr: [u8; 6],
+        rx: u64,
+        tx: u64,
+        rx_csum: bool,
+        rings: impl FnOnce(),
+    ) -> Result<(), HwError>
+    where
+        R: Clone,
+    {
+        self.stop()?;
+        self.set_macaddr(lladdr);
+        rings();
+        let mut c = Self::new(self.regs.clone(), self.mac);
+        c.chip_init()?;
+        c.phy_config()?;
+        self.configure(rx, tx, rx_csum);
+        Ok(())
+    }
+
+    /// Whether the device still answers: `TXCFG` holds the revision, never
+    /// all ones.
+    pub fn responding(&self) -> bool {
+        crate::health::responding(self.regs.read32(regs::TXCFG))
     }
 
     /// Masks every interrupt (the filter, before the thread runs).

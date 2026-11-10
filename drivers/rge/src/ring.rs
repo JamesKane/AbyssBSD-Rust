@@ -190,6 +190,12 @@ impl RxRing {
         }
     }
 
+    /// The head descriptor, if the controller has returned it (a look,
+    /// for the stall check; nothing is taken).
+    pub fn ready(&self, m: &impl Words) -> Option<usize> {
+        (m.get(self.next, rx::CMDSTS) & rx::OWN == 0).then_some(self.next)
+    }
+
     /// The next descriptor the controller has returned, if any; the caller
     /// copies its slot out, then posts it again.
     pub fn take(&mut self, m: &impl Words, b: &impl Barriers) -> Option<RxPiece> {

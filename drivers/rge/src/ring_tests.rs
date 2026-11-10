@@ -18,10 +18,10 @@ use crate::ring::{
     tx,
 };
 
-struct Mem(RefCell<Vec<[u32; 8]>>);
+pub(crate) struct Mem(RefCell<Vec<[u32; 8]>>);
 
 impl Mem {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self(RefCell::new(vec![[0; 8]; DESCS]))
     }
 }
