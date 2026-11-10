@@ -2702,6 +2702,17 @@ compat-deviations with a reason, and a day of looped scenarios without a hang.
   - On the board with these kernels: login on the serial console (`ttyu2`); `usbhid`'s tree as
     FreeBSD's (an interface with no report descriptor attaches with an empty one); the boot's
     notes under `bootverbose`; the loader returns to the firmware after a failure.
+  - The board's buses, as FreeBSD's tree has them on the board: `gpiobus` under each GPIO
+    controller with `gpioc` (`/dev/gpiocN`, `gpioctl(8)`) and the `_AEI`'s `gpio_aei`; `iicbus`
+    under each I2C controller with the namespace's devices at their addresses (taken from `acpi0`,
+    as `acpi_iicbus` does) and `iic` (`/dev/iicN`, `i2c(8)`, tried in QEMU against a test
+    controller). Buses and their nodes take their controller's unit, as FreeBSD's one-at-a-time
+    attach numbers them. Next on these buses: the RX8900 and RTS5453 drivers, and the
+    `GenericSerialBus` and `GeneralPurposeIo` region handlers.
+  - A silent hang, idle, after 2 to 26 minutes (no output, serial and network dead), twice on
+    the `efirt` kernel; once AbyssBSD read a file back wrong just before. Possibly the bring-up's
+    held-key hang too. Being chased: `/dev/fido` for `watchdogd` first, so a hang resets the board
+    and leaves its log in `PREVLOG.TXT`.
   - Noise: the root has `kldxref`'s empty `linker.hints`, so `devmatch` reads the device tree,
     which overflowed the kernel stack: `hw.bus.devices` records (3 KiB each) were built and
     copied on it, and an interrupt on top hit the guard page. They are written in place now.
