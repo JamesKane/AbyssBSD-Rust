@@ -228,7 +228,7 @@ fn case_names(arches: &[Arch]) -> Vec<String> {
         "aarch64-shell" => 25,
         "x86_64-shell" => 22,
         "x86_64-bhyve-shell" => 9,
-        "aarch64" | "aarch64-el2" => 6,
+        "aarch64" | "aarch64-el2" | "aarch64-smmu" => 6,
         "x86_64" | "aarch64-net" | "aarch64-multiuser" => 5,
         n if n.ends_with("-net") || n.ends_with("-multiuser") => 4,
         _ => 2,
@@ -347,6 +347,9 @@ struct BootCase {
     arch: Arch,
     /// aarch64 firmware at EL2, exercising the kernel's EL2 exit.
     el2: bool,
+    /// aarch64: an SMMUv3 in front of the PCIe root complex
+    /// (docs/IOMMU.md §6).
+    iommu: bool,
     /// Boot twice through a warm reset and check that the loader saved the
     /// first boot's log to the ESP.
     warm_reset: bool,
@@ -366,6 +369,7 @@ const BOOT_CASES: &[BootCase] = &[
         vmm: Vmm::Qemu,
         arch: Arch::X86_64,
         el2: false,
+        iommu: false,
         warm_reset: false,
         cmdline: "",
         // isa-debug-exit: (0x10 << 1) | 1.
@@ -378,6 +382,7 @@ const BOOT_CASES: &[BootCase] = &[
         vmm: Vmm::Qemu,
         arch: Arch::Aarch64,
         el2: false,
+        iommu: false,
         warm_reset: false,
         cmdline: "",
         pass_status: 0,
@@ -389,6 +394,7 @@ const BOOT_CASES: &[BootCase] = &[
         vmm: Vmm::Qemu,
         arch: Arch::Aarch64,
         el2: true,
+        iommu: false,
         warm_reset: false,
         // One attach worker, INTx instead of MSI-X (through _PRT and the
         // root port's swizzle), and a real power-off at the end.
@@ -398,10 +404,26 @@ const BOOT_CASES: &[BootCase] = &[
         expect_saved: None,
     },
     BootCase {
+        name: "aarch64-smmu",
+        vmm: Vmm::Qemu,
+        arch: Arch::Aarch64,
+        el2: false,
+        iommu: true,
+        warm_reset: false,
+        // The SMMU (docs/IOMMU.md §8): stage 0 attaches it and leaves it
+        // alone, so DMA runs untranslated; the user-memory tests are the
+        // plain case's.
+        cmdline: "abyss.test.skip=kernel::tests::user_memory",
+        pass_status: 0,
+        expect: Some("smmu0: <ARM System Memory Management Unit> on acpi0"),
+        expect_saved: None,
+    },
+    BootCase {
         name: "aarch64-warm-reset",
         vmm: Vmm::Qemu,
         arch: Arch::Aarch64,
         el2: false,
+        iommu: false,
         warm_reset: true,
         // The reset is what this case adds: the user-memory tests (most of
         // a run's time) are the plain case's.
@@ -415,6 +437,7 @@ const BOOT_CASES: &[BootCase] = &[
         vmm: Vmm::Qemu,
         arch: Arch::X86_64,
         el2: false,
+        iommu: false,
         warm_reset: true,
         // A real power-off at the end: QEMU exits 0 on ACPI S5.
         cmdline: "abyss.test.poweroff=1 abyss.test.skip=kernel::tests::user_memory",
@@ -427,6 +450,7 @@ const BOOT_CASES: &[BootCase] = &[
         vmm: Vmm::Qemu,
         arch: Arch::X86_64,
         el2: false,
+        iommu: false,
         warm_reset: true,
         // The first boot runs watchdogd on /dev/fido (ichwd), which keeps
         // it patted past its timeout, then kills it; the watchdog's expiry
@@ -441,6 +465,7 @@ const BOOT_CASES: &[BootCase] = &[
         vmm: Vmm::Bhyve,
         arch: Arch::X86_64,
         el2: false,
+        iommu: false,
         warm_reset: false,
         // bhyve's status when the guest powers off.
         cmdline: "",
@@ -990,6 +1015,7 @@ fn boot(
     }
     let vm = Vm {
         el2: case.el2,
+        iommu: case.iommu,
         test_devices: true,
         allow_reset: case.warm_reset,
         extra_disk: Some(scratch),

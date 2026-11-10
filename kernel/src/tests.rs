@@ -1590,6 +1590,10 @@ pub(crate) mod bus_test {
 
     /// A bus whose children name dependencies after adding them: model 8
     /// needs model 9, added after it; models 10 and 11 need each other.
+    /// Models 23, 24, and 25 wait for a supplier to settle (a settle
+    /// edge): one whose attach fails (`broken`, model 5), one no driver
+    /// matches (model 98), and one that attaches slowly (model 7, which
+    /// model 25 has as its bus data).
     pub(crate) struct DepBus;
 
     impl Driver for DepBus {
@@ -1607,10 +1611,20 @@ pub(crate) mod bus_test {
         fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
             let mut add = |model| cx.add_child(Ident::Test(TestIdent { model }), None, vec![]);
             let (early, late, a, b) = (add(8), add(9), add(10), add(11));
-            use devtree::graph::{EdgeKind::Required, Origin::Dep};
+            let (failed, unmatched) = (add(23), add(24));
+            let (broken, nobody, slow) = (add(5), add(98), add(7));
+            let after_slow = cx.add_child(
+                Ident::Test(TestIdent { model: 25 }),
+                Some(alloc::sync::Arc::new(slow)),
+                vec![],
+            );
+            use devtree::graph::{EdgeKind::Required, EdgeKind::Settle, Origin::Dep, Origin::Iort};
             cx.add_dependency(early, late, Required, Dep);
             cx.add_dependency(a, b, Required, Dep);
             cx.add_dependency(b, a, Required, Dep);
+            cx.add_dependency(failed, broken, Settle, Iort);
+            cx.add_dependency(unmatched, nobody, Settle, Iort);
+            cx.add_dependency(after_slow, slow, Settle, Iort);
             Ok(())
         }
         fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
@@ -1638,13 +1652,37 @@ pub(crate) mod bus_test {
                 model: 11,
                 rank: Rank::DEFAULT,
             },
+            TestId {
+                model: 23,
+                rank: Rank::DEFAULT,
+            },
+            TestId {
+                model: 24,
+                rank: Rank::DEFAULT,
+            },
+            TestId {
+                model: 25,
+                rank: Rank::DEFAULT,
+            },
         ]);
         fn describe(_: &Ident) -> String {
             "Ordered test device".into()
         }
         fn attach(cx: &mut AttachCx<'_>) -> Result<Self, AttachError> {
             if let Ident::Test(t) = cx.ident() {
-                ATTACHED.lock().push(t.model);
+                // Model 25 records whether its supplier had attached: 125
+                // if so, 225 if not.
+                let model = match cx.bus_data::<bus::DeviceId>() {
+                    Some(&sup)
+                        if bus::manager().state(sup, cx.sleepable())
+                            == Some(bus::NodeState::Attached) =>
+                    {
+                        t.model + 100
+                    }
+                    Some(_) => t.model + 200,
+                    None => t.model,
+                };
+                ATTACHED.lock().push(model);
             }
             Ok(Self)
         }
@@ -2739,8 +2777,21 @@ ktest! {
         // back; a cycle is broken so both attach.
         assert!(at(9) < at(8), "model 8 attached before the model 9 it needs: {order:?}");
         let _ = (at(10), at(11));
+        // Settle edges: a supplier that failed, one nothing matched, and
+        // one that attached each let their consumer go, the last only
+        // once it had attached.
+        let _ = (at(23), at(24), at(125));
+        assert!(!order.contains(&225), "model 25 attached before its supplier: {order:?}");
         for c in m.children(db, &s) {
-            assert_eq!(m.state(c, &s), Some(NodeState::Attached));
+            let want = match m.ident(c, &s) {
+                Some(Ident::Test(TestIdent { model: 5 })) => {
+                    assert!(matches!(m.state(c, &s), Some(NodeState::Failed(_))));
+                    continue;
+                }
+                Some(Ident::Test(TestIdent { model: 98 })) => NodeState::NotPresent,
+                _ => NodeState::Attached,
+            };
+            assert_eq!(m.state(c, &s), Some(want));
         }
         m.shutdown_under(db, &s);
         let _ = m.take_events();
@@ -2887,6 +2938,151 @@ fn check_bus_sysctls(s: &sched::Sleepable) {
     let mut o = devices.clone();
     o.extend([generation.wrapping_sub(1), 0]);
     assert_eq!(read(&o), Err(sysctl::ReadError::Invalid));
+}
+
+/// A `dev.*` string node's text, if the node exists.
+fn dev_text(s: &sched::Sleepable, name: &str) -> Option<alloc::string::String> {
+    let oid = crate::sysctl::read(s, |t| t.name2oid(name))?;
+    let mut v = alloc::vec::Vec::new();
+    crate::sysctl::read_oid(s, &oid, &mut v).ok()?;
+    let text = v.strip_suffix(&[0]).unwrap_or(&v);
+    alloc::string::String::from_utf8(text.to_vec()).ok()
+}
+
+/// `dev.<class>.<unit>` of a node named `name` (`virtio_pci0`).
+fn dev_prefix(name: &str) -> alloc::string::String {
+    let digits = name.len() - name.trim_end_matches(|c: char| c.is_ascii_digit()).len();
+    let (class, unit) = name.split_at(name.len() - digits);
+    alloc::format!("dev.{class}.{unit}")
+}
+
+/// The device names `devinfo` reads (`hw.bus.devices`), in record order.
+fn devinfo_names(s: &sched::Sleepable) -> alloc::vec::Vec<alloc::string::String> {
+    let oid = |name: &str| {
+        crate::sysctl::read(s, |t| t.name2oid(name)).unwrap_or_else(|| panic!("{name}"))
+    };
+    let mut info = alloc::vec::Vec::new();
+    crate::sysctl::read_oid(s, &oid("hw.bus.info"), &mut info).unwrap();
+    let generation = i32::from_ne_bytes(info[4..8].try_into().unwrap());
+    let devices = oid("hw.bus.devices");
+    let mut names = alloc::vec::Vec::new();
+    for index in 0.. {
+        let mut o = devices.clone();
+        o.extend([generation, index]);
+        let mut b = alloc::vec::Vec::new();
+        if crate::sysctl::read_oid(s, &o, &mut b).is_err() {
+            break;
+        }
+        let name: alloc::vec::Vec<u8> = b[28..].iter().copied().take_while(|&c| c != 0).collect();
+        names.push(alloc::string::String::from_utf8(name).unwrap());
+    }
+    names
+}
+
+ktest! {
+    /// `%iommu` as FreeBSD's `device_sysctl_handler` shows it on both
+    /// ISAs (docs/IOMMU.md §4.2): `rid=` and the requester ID for every
+    /// PCI function, empty for everything else. QEMU's functions are all
+    /// seen by their own ID: on a root bus, or PCIe behind a root port
+    /// (as in the bhyve corpus, `dev.ahci.1.%iommu: rid=0x48`).
+    fn iommu_rid_strings() {
+        use bus::{Ident, NodeState};
+        let s = cx();
+        let m = bus::manager();
+        let mut pci = 0;
+        for (id, _, name, _, state) in m.snapshot(&s) {
+            if state != NodeState::Attached || name.is_empty() || name == "root0" {
+                continue;
+            }
+            let Some(got) = dev_text(&s, &alloc::format!("{}.%iommu", dev_prefix(&name))) else {
+                continue;
+            };
+            let want = match m.ident(id, &s) {
+                Some(Ident::Pci(_, a, _)) => {
+                    pci += 1;
+                    let mut w = alloc::string::String::new();
+                    devtree::strings::iommu_rid(&mut w, Some(pci::requester::rid(a))).unwrap();
+                    assert_eq!(m.requester_id(&s, id), Some(pci::requester::rid(a)), "{name}");
+                    w
+                }
+                _ => alloc::string::String::new(),
+            };
+            assert_eq!(got, want, "{name}.%iommu");
+        }
+        assert!(pci >= 2, "{pci} PCI functions attached");
+    }
+}
+
+ktest! {
+    /// The IORT's SMMUs under `acpi0` (docs/IOMMU.md §4.2, stage 0): one
+    /// `smmu` per SMMUv3 node, attached, FreeBSD's strings, translating
+    /// nothing yet; the host bridges they translate waited for them and
+    /// record the unit. None without an IORT SMMU (x86, plain `virt`).
+    fn smmu_units_under_acpi0() {
+        use bus::NodeState;
+        let s = cx();
+        let m = bus::manager();
+        let listed = crate::acpi::find(*b"IORT")
+            .and_then(|t| acpi_tables::iort::parse(&t).ok())
+            .map_or(0, |t| t.smmu_v3s().count());
+        let snap = m.snapshot(&s);
+        let units: alloc::vec::Vec<_> = snap
+            .iter()
+            .filter(|n| n.2.starts_with("smmu"))
+            .collect();
+        assert_eq!(units.len(), listed, "{units:?}");
+        let devinfo = devinfo_names(&s);
+        for (k, (id, _, name, desc, state)) in units.iter().enumerate() {
+            assert_eq!(name, &alloc::format!("smmu{k}"));
+            assert!(devinfo.contains(name), "{name} not in devinfo's {devinfo:?}");
+            assert_eq!(desc, "ARM System Memory Management Unit");
+            assert_eq!(*state, NodeState::Attached);
+            let parent = m.parent(*id, &s).and_then(|p| m.nameunit(p, &s));
+            assert_eq!(parent.as_deref(), Some("acpi0"));
+            let p = dev_prefix(name);
+            assert_eq!(dev_text(&s, &alloc::format!("{p}.%pnpinfo")).as_deref(), Some("unknown"));
+            assert_eq!(dev_text(&s, &alloc::format!("{p}.%location")).as_deref(), Some(""));
+            assert_eq!(dev_text(&s, &alloc::format!("{p}.%iommu")).as_deref(), Some(""));
+            let dma = crate::sysctl::read(&s, |t| t.name2oid(&alloc::format!("{p}.dma")))
+                .expect("dev.smmu.N.dma");
+            let mut v = alloc::vec::Vec::new();
+            crate::sysctl::read_oid(&s, &dma, &mut v).unwrap();
+            assert_eq!(v, 0i32.to_ne_bytes(), "nothing is translated yet");
+        }
+        if listed == 0 {
+            return;
+        }
+        // Every PCI host bridge records smmu0 as its unit (QEMU's virt and
+        // the Sky1 have one root complex, behind smmu0).
+        let smmu0 = units[0].0;
+        let bridges: alloc::vec::Vec<_> = snap
+            .iter()
+            .filter(|n| matches!(m.ident(n.0, &s), Some(bus::Ident::Acpi(i, _)) if i.hid.as_deref() == Some("PNP0A08")))
+            .collect();
+        assert!(!bridges.is_empty());
+        for b in bridges {
+            let tr = m.dma_translation(&s, b.0).expect("the host bridge's translation");
+            assert_eq!(tr.unit(), smmu0, "{}", b.2);
+            assert_eq!(b.4, NodeState::Attached, "{}", b.2);
+        }
+        // A function inherits it, and its stream is its requester ID.
+        let f = snap
+            .iter()
+            .find_map(|n| match m.ident(n.0, &s) {
+                Some(bus::Ident::Pci(_, a, _)) if a.bus <= 1 => Some((n.0, a)),
+                _ => None,
+            })
+            .expect("a PCI function on bus 0 or 1");
+        let tr = m.dma_translation(&s, f.0).expect("inherited");
+        assert_eq!(tr.stream(pci::requester::rid(f.1)), Some(u32::from(pci::requester::rid(f.1))));
+        // The sysctls (FreeBSD's static ones, arm64).
+        for knob in ["hw.iommu.relaxed_ordering", "hw.iommu.check_free", "hw.smmu.bypass_named"] {
+            let oid = crate::sysctl::read(&s, |t| t.name2oid(knob)).unwrap_or_else(|| panic!("{knob}"));
+            let mut v = alloc::vec::Vec::new();
+            crate::sysctl::read_oid(&s, &oid, &mut v).unwrap();
+            assert_eq!(v, 0i32.to_ne_bytes(), "{knob}");
+        }
+    }
 }
 
 ktest! {
