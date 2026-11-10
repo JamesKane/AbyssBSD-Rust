@@ -2585,8 +2585,10 @@ machines against FreeBSD on bare metal; the exit criteria above.
     on the FCH, the shared reset (`RST1` 26), counted.
   - `cdnc_i2c` (`drivers/cdnc-i2c`, `CIXH200B`): the Cadence controllers in host mode, dividers
     from SCMI's input rate and `_DSD` `clock-frequency` (400 kHz, 100 kHz on I2C1/I2C7), repeated
-    STARTs, FIFO feeding and draining with the bus held, reads up to the counter's chunk. Polled,
-    until the scheduler has a timed sleep for interrupt-driven waits. Firmware hides `I2C6` (the
+    STARTs, FIFO feeding and draining with the bus held, reads up to the counter's chunk. A
+    transfer sleeps on the controller's interrupt with a timeout, as FreeBSD's does, through
+    `Manager::wait_timeout` (the kernel's `time::wait_timeout`, newly on `bus::Platform`); only the
+    bus-free check before a transfer polls, as nothing interrupts for it. Firmware hides `I2C6` (the
     EC's bus) with `_STA` 0, and names a reset line only for I2C0 and I2C2.
   - Tested on the host against models of both controllers and the corpus, and in the kernel by
     `irq_cascaded_inputs_dispatch_from_their_parent` and

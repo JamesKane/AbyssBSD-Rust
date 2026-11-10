@@ -391,6 +391,19 @@ impl Manager {
         self.platform.sleep_ns(s, ms.saturating_mul(1_000_000));
     }
 
+    /// Sleeps on `q` until `cond` holds or `ns` nanoseconds pass: a
+    /// driver waiting for its interrupt with a timeout (FreeBSD's
+    /// `msleep(..., timo)`). Whether `cond` held.
+    pub fn wait_timeout(
+        &self,
+        s: &Sleepable,
+        q: &sched::WaitQueue,
+        cond: &mut dyn FnMut() -> bool,
+        ns: u64,
+    ) -> bool {
+        self.platform.wait_timeout(s, q, cond, ns)
+    }
+
     /// Busy-waits for `us` microseconds (FreeBSD's `DELAY`): a register
     /// protocol's short polled wait, in any context.
     pub fn delay_us(&self, us: u64) {

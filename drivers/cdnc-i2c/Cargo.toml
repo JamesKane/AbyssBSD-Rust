@@ -6,6 +6,8 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+sync = { path = "../../sys/sync" }
+irq = { path = "../../sys/irq" }
 acpi = { path = "../../sys/acpi" }
 aml = { path = "../../lib/aml" }
 bus = { path = "../../sys/bus" }

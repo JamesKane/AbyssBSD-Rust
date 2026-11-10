@@ -28,6 +28,17 @@ pub trait Platform: Sync {
     fn io_write(&self, port: u16, width: u8, v: u32);
     /// Sleeps for `ns` nanoseconds (bounded waits in attach and stop).
     fn sleep_ns(&self, s: &Sleepable, ns: u64);
+    /// Sleeps on `q` until `cond` holds or `ns` nanoseconds pass
+    /// (FreeBSD's `msleep` with a timeout); whether `cond` held. `cond`
+    /// runs with the queue locked, as for `WaitQueue::wait_until`; whoever
+    /// makes it true (an interrupt filter) wakes `q`.
+    fn wait_timeout(
+        &self,
+        s: &Sleepable,
+        q: &sched::WaitQueue,
+        cond: &mut dyn FnMut() -> bool,
+        ns: u64,
+    ) -> bool;
     /// Busy-waits for `us` microseconds (FreeBSD's `DELAY`): the short,
     /// polled waits register protocols need, too short to sleep for.
     fn delay_us(&self, us: u64);

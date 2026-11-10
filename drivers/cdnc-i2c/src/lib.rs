@@ -16,11 +16,13 @@
 //!   it holds the bus while the FIFO is drained, up to the transfer-size
 //!   counter's chunk (252 bytes on an 8-bit counter). A longer read, a
 //!   zero-length message (SMBus quick), is refused.
-//! - Transfers are polled: the status is read every 10 µs for the first
-//!   millisecond, then every millisecond, with the specification's
-//!   per-message timeout (its bit time plus 500 ms, at least a second).
-//!   Interrupt-driven transfers wait for a timed sleep the scheduler does
-//!   not have yet; FreeBSD sleeps on the interrupt.
+//! - Transfers sleep on the controller's interrupt, as FreeBSD's do: the
+//!   filter acknowledges the status, records it, and wakes the transfer,
+//!   which unmasks only what it waits for (completion, data, the errors)
+//!   and gives up if that does not come within the specification's
+//!   message timeout (the message's bit time plus 500 ms, at least a
+//!   second), as FreeBSD's sleeps each give up after `hz`. Only the bus-free check before
+//!   a transfer polls: nothing interrupts when the bus goes free.
 //! - Any error resets the controller's state (§2.5.4); the bus-hold
 //!   timeout is maxed out and its interrupt never used (§2.6).
 //!
@@ -42,12 +44,15 @@ use alloc::sync::Arc;
 use bus::i2c::{I2c, Msg, Op};
 use bus::provider::{ClockHandle, ProviderError, ResetHandle};
 use bus::{
-    AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, MmioGrant, ResourceError, StartCx,
-    StopCx, StopReason,
+    AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, IrqLine, MmioGrant, ResourceError,
+    StartCx, StopCx, StopReason,
 };
+use core::sync::atomic::{AtomicU32, Ordering};
 use devtree::ids::AcpiId;
+use irq::Filter;
 use regs::Bytes;
-use sched::Sleepable;
+use sched::{IrqCx, Sleepable, WaitQueue};
+use sync::SpinLock;
 
 /// The register map (§2.2).
 pub mod reg {
@@ -170,52 +175,57 @@ impl Words for MmioGrant<Bytes> {
     }
 }
 
-/// Waiting between polls.
-pub trait Pace: Send + Sync {
-    /// Busy-waits `us` microseconds.
-    fn delay_us(&self, us: u64);
-    /// Sleeps a millisecond (at least).
-    fn sleep_ms(&self, s: &Sleepable);
+/// How a transfer waits for its controller's interrupt.
+pub trait Wait: Send + Sync {
+    /// Sleeps until `cond` holds or `ns` nanoseconds pass; whether it
+    /// held. Whatever makes it true calls [`Wait::wake`].
+    fn wait(&self, s: &Sleepable, cond: &mut dyn FnMut() -> bool, ns: u64) -> bool;
+    /// Wakes a waiter (from the interrupt filter).
+    fn wake(&self);
+    /// Sleeps `ms` milliseconds (the bus-free check, which has no
+    /// interrupt).
+    fn sleep_ms(&self, s: &Sleepable, ms: u64);
 }
 
-/// The kernel's waits.
+/// The kernel's waits: a wait queue the filter wakes, and the timed sleep
+/// on it (FreeBSD's `mtx_sleep(sc, ..., hz)`).
 #[derive(Debug)]
-pub struct Kernel;
-
-impl Pace for Kernel {
-    fn delay_us(&self, us: u64) {
-        bus::manager().delay_us(us);
-    }
-    fn sleep_ms(&self, s: &Sleepable) {
-        bus::manager().sleep_ms(s, 1);
-    }
+pub struct Kernel {
+    q: WaitQueue,
 }
 
-/// Polls: every 10 µs for the first millisecond, then every
-/// millisecond; counts the time waited.
-struct Poll<'a> {
-    pace: &'a dyn Pace,
-    s: &'a Sleepable,
-    waited_us: u64,
-    budget_us: u64,
-}
-
-impl Poll<'_> {
-    /// Waits once; [`ProviderError::Timeout`] past the budget.
-    fn wait(&mut self) -> Result<(), ProviderError> {
-        if self.waited_us >= self.budget_us {
-            return Err(ProviderError::Timeout);
+impl Kernel {
+    /// A queue nobody waits on yet.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            q: WaitQueue::new(),
         }
-        if self.waited_us < 1000 {
-            self.pace.delay_us(10);
-            self.waited_us += 10;
-        } else {
-            self.pace.sleep_ms(self.s);
-            self.waited_us += 1000;
-        }
-        Ok(())
     }
 }
+
+impl Default for Kernel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Wait for Kernel {
+    fn wait(&self, s: &Sleepable, cond: &mut dyn FnMut() -> bool, ns: u64) -> bool {
+        bus::manager().wait_timeout(s, &self.q, cond, ns)
+    }
+    fn wake(&self) {
+        self.q.wake_all();
+    }
+    fn sleep_ms(&self, s: &Sleepable, ms: u64) {
+        bus::manager().sleep_ms(s, ms);
+    }
+}
+
+/// The interrupts a transfer waits on besides what it wants: the errors.
+/// The bus-hold timeout stays masked (§2.6).
+const ERRORS: u32 =
+    reg::ISR_NACK | reg::ISR_ARB_LOST | reg::ISR_RX_OVF | reg::ISR_TX_OVF | reg::ISR_RX_UNF;
 
 /// A controller in host mode, set up for its bus clock.
 pub struct Controller<W> {
@@ -226,6 +236,9 @@ pub struct Controller<W> {
     max_read: usize,
     /// The bus clock it runs, in Hz.
     speed: u32,
+    /// Status the interrupt filter acknowledged and the transfer has not
+    /// taken yet.
+    pending: AtomicU32,
 }
 
 impl<W> core::fmt::Debug for Controller<W> {
@@ -272,6 +285,7 @@ impl<W: Words> Controller<W> {
             idle,
             max_read: width.saturating_sub(3).max(1),
             speed,
+            pending: AtomicU32::new(0),
         };
         c.words.write32(reg::TIME_OUT, 0xff);
         c.reset();
@@ -302,33 +316,63 @@ impl<W: Words> Controller<W> {
         w.write32(reg::ISR, isr);
         let sr = w.read32(reg::SR);
         w.write32(reg::SR, sr);
+        self.pending.store(0, Ordering::Relaxed);
     }
 
-    /// Reads the status until `want` shows, mapping errors.
-    fn wait_for(&self, poll: &mut Poll<'_>, want: u32) -> Result<u32, ProviderError> {
-        loop {
-            let isr = self.words.read32(reg::ISR);
-            if isr & reg::ISR_NACK != 0 {
-                return Err(ProviderError::NoAck);
-            }
-            if isr & reg::ISR_ARB_LOST != 0 {
-                return Err(ProviderError::ArbitrationLost);
-            }
-            if isr & (reg::ISR_RX_OVF | reg::ISR_TX_OVF | reg::ISR_RX_UNF) != 0 {
-                return Err(ProviderError::BusError);
-            }
-            if isr & want != 0 {
-                return Ok(isr);
-            }
-            poll.wait()?;
+    /// The interrupt's work, FreeBSD's `cdnc_i2c_intr`: acknowledges the
+    /// unmasked status and records it for the waiting transfer. False if
+    /// none was pending (not this controller's interrupt).
+    pub fn intr(&self) -> bool {
+        let st = self.words.read32(reg::ISR) & !self.words.read32(reg::IMR) & reg::ISR_ALL;
+        if st == 0 {
+            return false;
         }
+        self.words.write32(reg::ISR, st);
+        self.pending.fetch_or(st, Ordering::AcqRel);
+        true
     }
 
-    /// A message's time budget: its bit time plus 500 ms, at least a
-    /// second (§2.5.4).
-    fn budget_us(&self, len: usize) -> u64 {
+    /// Unmasks `want` and the errors, sleeps until the interrupt reports
+    /// one of them or `budget` runs out, and masks them again. Returns
+    /// the status taken, errors mapped.
+    fn wait_for(
+        &self,
+        w: &dyn Wait,
+        s: &Sleepable,
+        want: u32,
+        budget: u64,
+    ) -> Result<u32, ProviderError> {
+        let mask = want | ERRORS;
+        self.words.write32(reg::IER, mask);
+        let pending = &self.pending;
+        w.wait(
+            s,
+            &mut || pending.load(Ordering::Acquire) & mask != 0,
+            budget,
+        );
+        self.words.write32(reg::IDR, mask);
+        let isr = pending.swap(0, Ordering::AcqRel);
+        if isr & reg::ISR_NACK != 0 {
+            return Err(ProviderError::NoAck);
+        }
+        if isr & reg::ISR_ARB_LOST != 0 {
+            return Err(ProviderError::ArbitrationLost);
+        }
+        if isr & (reg::ISR_RX_OVF | reg::ISR_TX_OVF | reg::ISR_RX_UNF) != 0 {
+            return Err(ProviderError::BusError);
+        }
+        if isr & want == 0 {
+            return Err(ProviderError::Timeout);
+        }
+        Ok(isr)
+    }
+
+    /// A message's time budget in nanoseconds: its bit time plus 500 ms,
+    /// at least a second (§2.5.4).
+    fn budget_ns(&self, len: usize) -> u64 {
         let bits = (len as u64 + 1) * 9;
-        (bits * 1_000_000 / u64::from(self.speed.max(1)) + 500_000).max(1_000_000)
+        let us = (bits * 1_000_000 / u64::from(self.speed.max(1)) + 500_000).max(1_000_000);
+        us * 1000
     }
 
     /// Queues as many of `data` as the FIFO has room for; returns how
@@ -340,6 +384,13 @@ impl<W: Words> Controller<W> {
             self.words.write32(reg::DATA, u32::from(b));
         }
         n
+    }
+
+    /// Acknowledges what the status holds from before a message.
+    fn clear_status(&self) {
+        let isr = self.words.read32(reg::ISR);
+        self.words.write32(reg::ISR, isr);
+        self.pending.store(0, Ordering::Release);
     }
 
     /// The `CR` for a message: host mode, the dividers, the direction,
@@ -358,9 +409,11 @@ impl<W: Words> Controller<W> {
         v
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn write_msg(
         &self,
-        poll: &mut Poll<'_>,
+        wt: &dyn Wait,
+        s: &Sleepable,
         cr: &mut u32,
         address: u16,
         ten_bit: bool,
@@ -370,8 +423,8 @@ impl<W: Words> Controller<W> {
         let w = &self.words;
         *cr = Self::message_cr(*cr, false, ten_bit, !last || data.len() > reg::FIFO);
         w.write32(reg::CR, *cr | reg::CR_CLR_FIFO);
-        let isr = w.read32(reg::ISR);
-        w.write32(reg::ISR, isr);
+        self.clear_status();
+        let budget = self.budget_ns(data.len());
         let mut sent = self.push(data);
         if sent == data.len() && last {
             *cr &= !reg::CR_HOLD;
@@ -379,8 +432,7 @@ impl<W: Words> Controller<W> {
         }
         w.write32(reg::ADDR, u32::from(address));
         loop {
-            self.wait_for(poll, reg::ISR_COMP)?;
-            w.write32(reg::ISR, reg::ISR_COMP);
+            self.wait_for(wt, s, reg::ISR_COMP, budget)?;
             if sent == data.len() {
                 return Ok(());
             }
@@ -392,9 +444,11 @@ impl<W: Words> Controller<W> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn read_msg(
         &self,
-        poll: &mut Poll<'_>,
+        wt: &dyn Wait,
+        s: &Sleepable,
         cr: &mut u32,
         address: u16,
         ten_bit: bool,
@@ -409,8 +463,8 @@ impl<W: Words> Controller<W> {
         let held = *cr & reg::CR_HOLD != 0;
         *cr = Self::message_cr(*cr, true, ten_bit, held || !last || len > reg::FIFO);
         w.write32(reg::CR, *cr | reg::CR_CLR_FIFO);
-        let isr = w.read32(reg::ISR);
-        w.write32(reg::ISR, isr);
+        self.clear_status();
+        let budget = self.budget_ns(len);
         // At most `max_read`, which came from the 8-bit counter.
         w.write32(reg::XFER_SIZE, u32::try_from(len).unwrap_or(0));
         w.write32(reg::ADDR, u32::from(address));
@@ -423,8 +477,7 @@ impl<W: Words> Controller<W> {
         let mut got = 0;
         let mut complete = false;
         loop {
-            let isr = self.wait_for(poll, reg::ISR_COMP | reg::ISR_DATA)?;
-            w.write32(reg::ISR, isr & (reg::ISR_COMP | reg::ISR_DATA));
+            let isr = self.wait_for(wt, s, reg::ISR_COMP | reg::ISR_DATA, budget)?;
             complete |= isr & reg::ISR_COMP != 0;
             while w.read32(reg::SR) & reg::SR_RXDV != 0 {
                 // More than asked for: the counter wrapped.
@@ -448,42 +501,35 @@ impl<W: Words> Controller<W> {
         }
     }
 
-    /// Runs `msgs` as one transfer (§2.5).
+    /// Runs `msgs` as one transfer (§2.5), sleeping on `wt` for the
+    /// controller's interrupts.
     pub fn transfer(
         &self,
-        pace: &dyn Pace,
+        wt: &dyn Wait,
         s: &Sleepable,
         msgs: &mut [Msg<'_>],
     ) -> Result<(), ProviderError> {
         if msgs.iter().any(|m| m.op.is_empty()) {
             return Err(ProviderError::Unsupported);
         }
-        // The bus free first: up to 500 ms (§2.5.1).
-        let mut idle = Poll {
-            pace,
-            s,
-            waited_us: 0,
-            budget_us: 500_000,
-        };
+        // The bus free first. Nothing interrupts when it becomes free:
+        // checked every 100 ms, for up to 500 ms (§2.5.1).
+        let mut tries = 0;
         while self.words.read32(reg::SR) & reg::SR_BA != 0 {
-            if idle.wait().is_err() {
+            if tries == 5 {
                 return Err(ProviderError::BusBusy);
             }
+            wt.sleep_ms(s, 100);
+            tries += 1;
         }
         let mut cr = self.idle;
         let n = msgs.len();
         let mut r = Ok(());
         for (k, m) in msgs.iter_mut().enumerate() {
             let last = k + 1 == n;
-            let mut poll = Poll {
-                pace,
-                s,
-                waited_us: 0,
-                budget_us: self.budget_us(m.op.len()),
-            };
             r = match &mut m.op {
-                Op::Write(d) => self.write_msg(&mut poll, &mut cr, m.address, m.ten_bit, d, last),
-                Op::Read(b) => self.read_msg(&mut poll, &mut cr, m.address, m.ten_bit, b, last),
+                Op::Write(d) => self.write_msg(wt, s, &mut cr, m.address, m.ten_bit, d, last),
+                Op::Read(b) => self.read_msg(wt, s, &mut cr, m.address, m.ten_bit, b, last),
             };
             if r.is_err() {
                 break;
@@ -497,7 +543,7 @@ impl<W: Words> Controller<W> {
 /// The controller as an I2C provider.
 pub struct Bus<W> {
     ctl: Controller<W>,
-    pace: Arc<dyn Pace>,
+    wait: Arc<dyn Wait>,
 }
 
 impl<W> core::fmt::Debug for Bus<W> {
@@ -507,15 +553,26 @@ impl<W> core::fmt::Debug for Bus<W> {
 }
 
 impl<W: Words> Bus<W> {
-    /// `ctl`, waiting with `pace`.
-    pub fn new(ctl: Controller<W>, pace: Arc<dyn Pace>) -> Self {
-        Self { ctl, pace }
+    /// `ctl`, its transfers sleeping on `wait`.
+    pub fn new(ctl: Controller<W>, wait: Arc<dyn Wait>) -> Self {
+        Self { ctl, wait }
+    }
+
+    /// The interrupt filter's work: acknowledges and records the status,
+    /// and wakes the transfer. False if it was not this controller's.
+    pub fn intr(&self) -> bool {
+        if self.ctl.intr() {
+            self.wait.wake();
+            true
+        } else {
+            false
+        }
     }
 }
 
 impl<W: Words> I2c for Bus<W> {
     fn transfer(&self, s: &Sleepable, msgs: &mut [Msg<'_>]) -> Result<(), ProviderError> {
-        self.ctl.transfer(&*self.pace, s, msgs)
+        self.ctl.transfer(&*self.wait, s, msgs)
     }
 
     fn speed(&self) -> u32 {
@@ -526,6 +583,7 @@ impl<W: Words> I2c for Bus<W> {
 /// `cdnc_i2cN`.
 pub struct CdncI2c {
     bus: Arc<Bus<MmioGrant<Bytes>>>,
+    irq: SpinLock<Option<IrqLine>>,
     _clock: ClockHandle,
     _reset: Option<ResetHandle>,
 }
@@ -533,6 +591,14 @@ pub struct CdncI2c {
 impl core::fmt::Debug for CdncI2c {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         self.bus.fmt(f)
+    }
+}
+
+fn intr(d: &CdncI2c, _: usize, _: &IrqCx) -> Filter {
+    if d.bus.intr() {
+        Filter::Handled
+    } else {
+        Filter::Stray
     }
 }
 
@@ -574,14 +640,22 @@ impl Driver for CdncI2c {
             SetupError::NoClock => AttachError::Device("input clock rate unknown"),
             SetupError::Unreachable => AttachError::Device("bus clock out of range"),
         })?;
+        let irq = cx.irq(0)?;
         Ok(Self {
-            bus: Arc::new(Bus::new(ctl, Arc::new(Kernel))),
+            bus: Arc::new(Bus::new(ctl, Arc::new(Kernel::new()))),
+            irq: SpinLock::new(Some(irq)),
             _clock: clock,
             _reset: reset,
         })
     }
 
     fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
+        // Taken in its own statement: installing may sleep. Every
+        // interrupt is masked until a transfer waits for one.
+        let line = self.irq.lock().take();
+        if let Some(line) = line {
+            cx.interrupt(line, Some(intr), None, 0)?;
+        }
         cx.provide_i2c(Arc::clone(&self.bus) as Arc<dyn I2c>);
         Ok(())
     }

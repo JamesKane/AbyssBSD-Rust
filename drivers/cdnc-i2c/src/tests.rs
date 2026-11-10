@@ -37,6 +37,10 @@ struct State {
     busy: bool,
     /// The bus never goes idle (another host).
     stuck: bool,
+    /// The target never finishes (a device holding SCL low).
+    stall: bool,
+    /// Interrupt mask: 1 masked. All masked out of reset.
+    imr: u32,
     regs: Vec<u8>,
     ptr: usize,
     /// START, repeated START, and STOP, in order.
@@ -57,6 +61,9 @@ impl State {
 
     /// The bus moves on: queued bytes go out, wanted bytes come in.
     fn progress(&mut self) {
+        if self.stall {
+            return;
+        }
         let hold = self.cr & reg::CR_HOLD != 0;
         let Some(a) = &mut self.active else { return };
         if a.read {
@@ -139,6 +146,7 @@ impl Words for Arc<Model> {
                 }
             },
             reg::TIME_OUT => st.time_out,
+            reg::IMR => st.imr,
             _ => 0,
         }
     }
@@ -196,21 +204,47 @@ impl Words for Arc<Model> {
             }
             reg::ISR => st.isr &= !v,
             reg::TIME_OUT => st.time_out = v,
+            reg::IER => st.imr &= !v,
+            reg::IDR => st.imr |= v,
             _ => {}
         }
     }
 }
 
-/// Waits cost nothing; counts them.
-#[derive(Default)]
-struct Instant(Mutex<(u64, u64)>);
+/// The interrupt, played by the test: while a transfer waits, the
+/// controller's filter routine runs as the hardware would raise it,
+/// until the condition holds; a hundred quiet rounds are a timeout.
+struct Irq<'a> {
+    ctl: &'a Controller<Arc<Model>>,
+    /// Filter runs that found nothing (not this controller's), and the
+    /// milliseconds slept.
+    counts: Mutex<(u32, u64)>,
+}
 
-impl Pace for Instant {
-    fn delay_us(&self, us: u64) {
-        self.0.lock().unwrap().0 += us;
+impl<'a> Irq<'a> {
+    fn new(ctl: &'a Controller<Arc<Model>>) -> Self {
+        Self {
+            ctl,
+            counts: Mutex::new((0, 0)),
+        }
     }
-    fn sleep_ms(&self, _: &Sleepable) {
-        self.0.lock().unwrap().1 += 1;
+}
+
+impl Wait for Irq<'_> {
+    fn wait(&self, _: &Sleepable, cond: &mut dyn FnMut() -> bool, _: u64) -> bool {
+        for _ in 0..100 {
+            if cond() {
+                return true;
+            }
+            if !self.ctl.intr() {
+                self.counts.lock().unwrap().0 += 1;
+            }
+        }
+        cond()
+    }
+    fn wake(&self) {}
+    fn sleep_ms(&self, _: &Sleepable, ms: u64) {
+        self.counts.lock().unwrap().1 += ms;
     }
 }
 
@@ -270,10 +304,10 @@ fn setup_probes_the_counter_and_programs_the_dividers() {
 #[test]
 fn a_register_read_is_one_transfer_with_a_repeated_start() {
     let (m, c) = setup();
-    let pace = Instant::default();
+    let irq = Irq::new(&c);
     let mut t = [0u8; 7];
     c.transfer(
-        &pace,
+        &irq,
         &s(),
         &mut [msg(Op::Write(&[0x10])), msg(Op::Read(&mut t))],
     )
@@ -287,18 +321,18 @@ fn a_register_read_is_one_transfer_with_a_repeated_start() {
 #[test]
 fn long_messages_feed_and_drain_the_fifo() {
     let (m, c) = setup();
-    let pace = Instant::default();
+    let irq = Irq::new(&c);
     // 40 bytes from register 0x40: the FIFO is fed as it drains.
     let mut data = Vec::from([0x40u8]);
     data.extend((0..40).map(|i| 0xa0 ^ i));
-    c.transfer(&pace, &s(), &mut [msg(Op::Write(&data))])
+    c.transfer(&irq, &s(), &mut [msg(Op::Write(&data))])
         .unwrap();
     assert_eq!(m.0.lock().unwrap().bus, ["S 0x32 W", "P"]);
     // Read them back in one 40-byte message, the bus held while the FIFO
     // is drained.
     let mut back = [0u8; 40];
     c.transfer(
-        &pace,
+        &irq,
         &s(),
         &mut [msg(Op::Write(&[0x40])), msg(Op::Read(&mut back))],
     )
@@ -313,10 +347,10 @@ fn long_messages_feed_and_drain_the_fifo() {
 #[test]
 fn errors_end_the_transfer_and_reset_the_controller() {
     let (m, c) = setup();
-    let pace = Instant::default();
+    let irq = Irq::new(&c);
     let mut b = [0u8; 2];
     let r = c.transfer(
-        &pace,
+        &irq,
         &s(),
         &mut [Msg {
             address: 0x50,
@@ -333,22 +367,51 @@ fn errors_end_the_transfer_and_reset_the_controller() {
     }
     // What the controller cannot do.
     assert_eq!(
-        c.transfer(&pace, &s(), &mut [msg(Op::Write(&[]))]),
+        c.transfer(&irq, &s(), &mut [msg(Op::Write(&[]))]),
         Err(ProviderError::Unsupported)
     );
     let mut big = [0u8; 253];
     assert_eq!(
-        c.transfer(&pace, &s(), &mut [msg(Op::Read(&mut big))]),
+        c.transfer(&irq, &s(), &mut [msg(Op::Read(&mut big))]),
         Err(ProviderError::Unsupported)
     );
     // A bus another host keeps: busy after 500 ms of polling.
     m.0.lock().unwrap().stuck = true;
     assert_eq!(
-        c.transfer(&pace, &s(), &mut [msg(Op::Write(&[0]))]),
+        c.transfer(&irq, &s(), &mut [msg(Op::Write(&[0]))]),
         Err(ProviderError::BusBusy)
     );
-    let (us, ms) = *pace.0.lock().unwrap();
-    assert_eq!((us, ms), (1000, 499));
+    assert_eq!(irq.counts.lock().unwrap().1, 500);
+}
+
+#[test]
+fn the_interrupt_wakes_the_transfer_and_masks_again() {
+    let (m, c) = setup();
+    // Everything masked between transfers: nothing is this controller's.
+    m.0.lock().unwrap().isr = reg::ISR_COMP;
+    assert!(!c.intr());
+    m.0.lock().unwrap().isr = 0;
+    let irq = Irq::new(&c);
+    let mut b = [0u8; 3];
+    c.transfer(
+        &irq,
+        &s(),
+        &mut [msg(Op::Write(&[0x20])), msg(Op::Read(&mut b))],
+    )
+    .unwrap();
+    assert_eq!(b, [0x20, 0x21, 0x22]);
+    // Every wait found its interrupt at once, and left all masked.
+    assert_eq!(irq.counts.lock().unwrap().0, 0);
+    assert_eq!(m.0.lock().unwrap().imr, reg::ISR_ALL);
+    // A target that never finishes: the wait times out, and the
+    // controller is reset.
+    m.0.lock().unwrap().stall = true;
+    assert_eq!(
+        c.transfer(&irq, &s(), &mut [msg(Op::Write(&[0x20, 1]))]),
+        Err(ProviderError::Timeout)
+    );
+    let st = m.0.lock().unwrap();
+    assert_eq!((st.imr, st.cr & reg::CR_HOLD), (reg::ISR_ALL, 0));
 }
 
 /// The Sky1's buses as firmware gives them: each its SCMI clock; only

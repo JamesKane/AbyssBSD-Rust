@@ -93,6 +93,16 @@ impl Platform for KernelPlatform {
         crate::time::sleep_ns(s, ns);
     }
 
+    fn wait_timeout(
+        &self,
+        s: &Sleepable,
+        q: &sched::WaitQueue,
+        cond: &mut dyn FnMut() -> bool,
+        ns: u64,
+    ) -> bool {
+        crate::time::wait_timeout(s, q, cond, ns)
+    }
+
     fn delay_us(&self, us: u64) {
         let ticks = u128::from(us) * u128::from(crate::time::frequency()) / 1_000_000;
         let start = crate::time::counter();
