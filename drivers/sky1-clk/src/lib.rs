@@ -1,27 +1,34 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! `sky1_clk`: the CIX Sky1's clocks (`\_SB.CCLK`, `CIXHA010`), the
-//! provider nearly every SoC device's clock lines name (the platform's
-//! `CLKT` tables, `platform/cix-sky1`).
+//! The CIX Sky1's clocks: the SCMI clock IDs the platform's `CLKT` tables
+//! give nearly every SoC device (`platform/cix-sky1`), and the two ACPI
+//! devices around them.
 //!
-//! The device is AML only. Its methods speak the SCMI clock protocol to
-//! the power-management firmware themselves, through `\_SB.PMMX`'s
-//! `SystemMemory` mailbox, serialized by the AML mutex `MBXM`:
+//! - `sky1_scmi` (`\_SB.SCMI`, `CIXHA006`) is the OS's SCMI agent to the
+//!   power-management processor ([`agent`]), over the mailbox channels its
+//!   `_DSD` names. It serves the clock lines: `CLKT` IDs are SCMI clock
+//!   IDs (the clean-room `sky1-soc` specification, §1.2.4, §1.4).
+//! - `scmi_shmem` (`CIXHA004`, `CIXHA005`) binds the agent's shared
+//!   memory, as FreeBSD's `scmi_shmem` does.
+//! - `sky1_clk` (`\_SB.CCLK`, `CIXHA010`) stands for "the ACPI clock
+//!   provider" so devices can name it in `_DEP`; it is bound and serves
+//!   nothing. Its AML methods (`GCLK`, `SCLK`, `CLKD`, `CLKC`) send SCMI
+//!   clock messages through `\_SB.PMMX` on another agent's channel, which
+//!   answers `NOT_FOUND` for every clock (seen on the board, and in the
+//!   AbyssBSD Project's FreeBSD port); [`invoke`] and the tests keep them
+//!   as a description of the messages.
 //!
-//! | Method | SCMI message |
-//! |---|---|
-//! | `GCLK(id)` | `CLOCK_RATE_GET` |
-//! | `SCLK(id, rate low, rate high)` | `CLOCK_RATE_SET`, rounding down |
-//! | `CLKD(id, index)` | `CLOCK_DESCRIBE_RATES` |
-//! | `CLKC(id, attributes)` | `CLOCK_CONFIG_SET` (bit 0 enables) |
+//! | Operation | SCMI message (protocol `0x14`) | AML method |
+//! |---|---|---|
+//! | rate | `CLOCK_RATE_GET` | `GCLK(id)` |
+//! | set rate | `CLOCK_RATE_SET`, rounding down | `SCLK(id, rate low, rate high)` |
+//! | rates | `CLOCK_DESCRIBE_RATES` | `CLKD(id, index)` |
+//! | enable, disable | `CLOCK_CONFIG_SET` (bit 0 enables) | `CLKC(id, attributes)` |
 //!
-//! Each returns the channel's reply payload ([`scmi`]). So the driver
-//! needs no registers and no mailbox of its own: it publishes a
-//! [`Clock`] provider whose operations evaluate these methods on the ACPI
-//! service thread. Firmware leaves the clocks a booted system needs
-//! running, and attach changes nothing.
+//! Firmware leaves the clocks a booted system needs running, and attach
+//! changes nothing.
 //!
-//! FreeBSD has no driver for it (FreeBSD's consumers rely on firmware's
-//! clock state); the name is recorded in docs/compat-deviations.md.
+//! FreeBSD has neither driver; the names are those of the AbyssBSD
+//! Project's FreeBSD port for the board (docs/compat-deviations.md).
 
 #![no_std]
 // The tests make a `Sleepable` for the host; the crate itself has no
@@ -35,12 +42,12 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use acpi::AcpiDevice;
 use bus::provider::{Clock, Hz, ProviderError};
 use bus::{AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, StartCx, StopCx, StopReason};
 use devtree::ids::AcpiId;
 use sched::Sleepable;
 
+pub mod agent;
 pub mod scmi;
 #[cfg(test)]
 #[allow(unsafe_code)]
@@ -86,25 +93,6 @@ pub fn invoke(
         Ok(Some(aml::Value::Buffer(b))) => Ok(b),
         Ok(None) => Err(ProviderError::Unsupported),
         Ok(Some(_)) | Err(_) => Err(ProviderError::Firmware(0)),
-    }
-}
-
-/// The device's methods, through the ACPI service.
-#[derive(Debug)]
-struct AcpiMethods {
-    node: aml::NodeId,
-}
-
-impl Methods for AcpiMethods {
-    fn call(
-        &self,
-        s: &Sleepable,
-        method: &'static str,
-        args: &[u64],
-    ) -> Result<Vec<u8>, ProviderError> {
-        let svc = acpi::service().ok_or(ProviderError::Revoked)?;
-        let (node, args) = (self.node, args.to_vec());
-        svc.run(s, move |i, h| invoke(i, h, node, method, &args))
     }
 }
 
@@ -167,44 +155,89 @@ impl<M: Methods> Clock for FirmwareClocks<M> {
     }
 }
 
-/// `sky1_clkN`.
+/// `sky1_clkN`: bound so `_DEP`s on the clock provider are met.
 #[derive(Debug)]
-pub struct Sky1Clk {
-    node: aml::NodeId,
-}
+pub struct Sky1Clk;
 
 impl Driver for Sky1Clk {
     const NAME: &'static str = "sky1_clk";
     const IDS: Ids = Ids::Acpi(&[AcpiId::new("CIXHA010")]);
 
     fn describe(_: &Ident) -> String {
-        "CIX Sky1 firmware clocks".into()
+        "CIX Sky1 ACPI clock provider".into()
     }
 
-    fn attach(cx: &mut AttachCx<'_>) -> Result<Self, AttachError> {
-        let svc = acpi::service().ok_or(AttachError::Decline)?;
-        let node = cx
-            .bus_data::<AcpiDevice>()
-            .ok_or(AttachError::Decline)?
-            .node;
-        let complete = svc.run(cx.sleepable(), move |i, _| {
-            METHODS.iter().all(|m| i.child(node, m).is_some())
-        });
-        if !complete {
-            return Err(AttachError::Device("clock methods missing"));
-        }
-        Ok(Self { node })
+    fn attach(_: &mut AttachCx<'_>) -> Result<Self, AttachError> {
+        Ok(Self)
     }
 
-    fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
-        cx.provide_clocks(Arc::new(FirmwareClocks::new(AcpiMethods {
-            node: self.node,
-        })));
+    fn start(&self, _: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
         Ok(())
     }
 
     fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
 }
 
-/// The declaration for the build's driver table.
+/// `sky1_scmiN`: the OS's SCMI agent, serving the clock lines.
+#[derive(Debug)]
+pub struct Sky1Scmi {
+    clocks: Arc<FirmwareClocks<agent::Agent>>,
+}
+
+impl Driver for Sky1Scmi {
+    const NAME: &'static str = "sky1_scmi";
+    const IDS: Ids = Ids::Acpi(&[AcpiId::new("CIXHA006")]);
+
+    fn describe(_: &Ident) -> String {
+        "CIX Sky1 SCMI".into()
+    }
+
+    fn attach(cx: &mut AttachCx<'_>) -> Result<Self, AttachError> {
+        // `mboxes`: the sending channel first, then the receiving one
+        // (unused: replies are polled for).
+        let tx = cx.mailbox(0)?;
+        Ok(Self {
+            clocks: Arc::new(FirmwareClocks::new(agent::Agent::new(tx))),
+        })
+    }
+
+    fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
+        cx.provide_clocks(Arc::clone(&self.clocks) as Arc<dyn Clock>);
+        Ok(())
+    }
+
+    fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
+}
+
+/// `scmi_shmemN`: the SCMI agent's shared memory (`\_SB.SHM0`, `SHM1`;
+/// `_DSD` `compatible` `arm,scmi-shmem`), FreeBSD's `scmi_shmem`. Bound so
+/// the agent's `shmem` references are met; it maps nothing, because the
+/// memory is the mailbox's message registers, which `cix_mbox` serves.
+#[derive(Debug)]
+pub struct ScmiShmem;
+
+impl Driver for ScmiShmem {
+    const NAME: &'static str = "scmi_shmem";
+    const IDS: Ids = Ids::Acpi(&[AcpiId::new("CIXHA004"), AcpiId::new("CIXHA005")]);
+
+    fn describe(_: &Ident) -> String {
+        "ARM SCMI Shared Memory driver".into()
+    }
+
+    fn attach(_: &mut AttachCx<'_>) -> Result<Self, AttachError> {
+        Ok(Self)
+    }
+
+    fn start(&self, _: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
+        Ok(())
+    }
+
+    fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
+}
+
+/// The declarations for the build's driver table.
 pub const DRIVER: DriverDecl = DriverDecl::of::<Sky1Clk>();
+/// The SCMI agent's.
+pub const SCMI_DRIVER: DriverDecl = DriverDecl::of::<Sky1Scmi>();
+/// Its shared memory's.
+pub const SHMEM_DRIVER: DriverDecl = DriverDecl::of::<ScmiShmem>();

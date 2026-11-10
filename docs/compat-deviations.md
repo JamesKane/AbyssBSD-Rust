@@ -8,7 +8,10 @@ where AbyssBSD differs, and why. A difference not listed here is a bug.
 | Name | Device | Why |
 |---|---|---|
 | `sbsa_gwdt` | Arm SBSA generic watchdog (GTDT) | FreeBSD 15.1 has no driver for it. The name follows the earlier FreeBSD bring-up branch for the Orange Pi 6 Plus, where it was first written. |
-| `sky1_clk` | CIX Sky1 firmware clocks (`CIXHA010`, `\_SB.CCLK`) | FreeBSD has no driver for it: its drivers use the clock state firmware leaves. AbyssBSD's device graph makes every clock line's consumer wait for its provider, so the device needs a driver. It follows the `sky1_` names of the earlier FreeBSD bring-up branch. |
+| `sky1_clk` | CIX Sky1 "ACPI clock provider" (`CIXHA010`, `\_SB.CCLK`) | FreeBSD has no driver for it. Bound only so `_DEP`s on it are met; it serves nothing (its AML speaks SCMI for an agent that knows no clocks). It follows the `sky1_` names of the AbyssBSD Project's FreeBSD port for the board. |
+| `sky1_scmi` | CIX Sky1 SCMI agent (`CIXHA006`, `\_SB.SCMI`) | Not in FreeBSD, whose SCMI framework is devicetree only; the name and the polled transport are the AbyssBSD Project's FreeBSD port's. It serves the clock lines the platform's `CLKT` tables give. |
+| `cix_mbox` | CIX Sky1 mailboxes (`CIXHA001`) | Not in FreeBSD; the AbyssBSD Project's FreeBSD port's name. Only the doorbell channel (8) is served, as there. |
+| `scmi_shmem` on ACPI | SCMI shared memory (`CIXHA004`, `CIXHA005`) | FreeBSD's `scmi_shmem` attaches to devicetree nodes only. Here it binds the Sky1's ACPI nodes and maps nothing: the memory is the mailbox's message registers, which `cix_mbox` serves. |
 | `sky1_reset` | CIX Sky1 S5 and FCH reset controllers (`CIXHA020`, `CIXHA021`) | FreeBSD has no driver for them: its drivers use the reset state firmware leaves. The platform's `RSTL` lines make them suppliers of most SoC devices. |
 | `sky1_pinctrl` | CIX Sky1 FCH and S5 pin controllers (`CIXHA016`, `CIXHA017`) | FreeBSD has no driver for them: its drivers use the pads firmware programmed. Consumers name their pin groups in `_CRS`, which makes the controllers their suppliers. |
 | `sky1_syscon` | CIX Sky1 shared register windows (`CIXHA018`) | FreeBSD has no driver for them. Devices name them by `_DSD` reference (the UARTs' `sky1,fch_cru`), which makes them suppliers. |

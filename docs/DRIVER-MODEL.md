@@ -1076,7 +1076,7 @@ The provider traits, all in `sys/bus` so consumers depend on no particular provi
 | `Phy` | counted `power_on`/`off`; `configure(mode)` leases lanes, and a reconfiguration first tells each lessee its lanes are revoked | USB/DP combo PHYs on Sky1 and SC8280XP |
 | `RegisterRegion` | leases a field subset of a shared register block (§8.1) | Sky1 audio CRU; S5 reset controller's PHY bits; TC956x function 0 |
 | `DmaEngine` | slave and cyclic channels by request line | Sky1 DMA-350 |
-| `Mailbox` | typed channels (doorbell, FIFO, shared memory) | CIX mailbox; PCC; Qualcomm IPCC |
+| `Mailbox` (built: doorbell and message registers) | `words`, `read`, `write` of the message registers, `ring` a channel's doorbell; FIFO and fast channels later | CIX mailbox (Sky1); later PCC, Qualcomm IPCC |
 | `Gpio` (built) | pin count, `configure` (direction, output level first, bias), `get`, `set`, `release`, the pins' interrupt domain; pins claimed per descriptor, exclusive unless every holder's descriptor says shared (FreeBSD's `gpiobus` pin ownership) | Cadence GPIO (Sky1); later PL061, AMD, Qualcomm TLMM |
 | `I2c` (built) | `transfer` of FreeBSD's `iic_msg` array (repeated STARTs, one STOP), run one at a time; consumers hold an `I2cDevice` at their address | Cadence I2C (Sky1); later DesignWare (X870E) |
 | `Spi`, `Pinctrl` | as their FreeBSD counterparts (`spibus`) | SoC controllers |
@@ -1085,7 +1085,8 @@ Providers are reached through supplier edges (§6.1), and a handle names a sub-h
 supplier is a `_STA = 0` stub or data-only child. Clock, reset, and power-domain lines come from
 the platform description and are asked for by name; GPIO and I2C lines come from the consumer's
 `_CRS` (`GpioIo`, `GpioInt`, `I2cSerialBusV2`) and are asked for by index among the lines of that
-use, in firmware's order. A GPIO controller with an `_AEI` adds a `gpio_aei` child whose lines are
+use, in firmware's order; mailbox lines come from `_DSD` `mboxes` (a mailbox and a channel number
+per entry), by index the same way. A GPIO controller with an `_AEI` adds a `gpio_aei` child whose lines are
 those pins, each running the controller's `_Exx`, `_Lxx`, or `_EVT`. Operations that talk to firmware sleep, so they
 take a `ThreadCx` or an attach, start, or stop context, never `IrqCx`.
 

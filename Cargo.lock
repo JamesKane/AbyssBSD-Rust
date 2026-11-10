@@ -175,6 +175,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cix-mbox"
+version = "0.0.0"
+dependencies = [
+ "acpi",
+ "bus",
+ "devtree",
+ "regs",
+]
+
+[[package]]
 name = "cix-sky1"
 version = "0.0.0"
 dependencies = [
@@ -225,6 +235,7 @@ dependencies = [
  "bus",
  "cdnc-i2c",
  "cdns-gpio",
+ "cix-mbox",
  "cix-sky1",
  "devtree",
  "hidbus",
@@ -667,7 +678,6 @@ dependencies = [
 name = "sky1-clk"
 version = "0.0.0"
 dependencies = [
- "acpi",
  "acpi-corpus",
  "aml",
  "bus",

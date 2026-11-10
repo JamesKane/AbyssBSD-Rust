@@ -34,6 +34,7 @@ use sync::{Once, SpinLock};
 use crate::driver::{AttachCx, Bound, DriverDecl, Faults, Ledger};
 use crate::gpio::GpioSource;
 use crate::i2c::I2cSource;
+use crate::mailbox::MailboxSource;
 use crate::platform::Platform;
 use crate::provider::{ClockSource, DomainSource, ResetSource};
 use crate::space::{Range, ResourceSpace, Sharing};
@@ -92,6 +93,7 @@ struct Provides {
     domains: Option<Arc<DomainSource>>,
     gpio: Option<Arc<GpioSource>>,
     i2c: Option<Arc<I2cSource>>,
+    mailbox: Option<Arc<MailboxSource>>,
 }
 
 impl Provides {
@@ -101,6 +103,9 @@ impl Provides {
         }
         if let Some(i) = &self.i2c {
             i.revoke();
+        }
+        if let Some(m) = &self.mailbox {
+            m.revoke();
         }
         if let Some(c) = &self.clocks {
             c.revoke();
@@ -121,6 +126,7 @@ pub(crate) enum Provided {
     Domains(Arc<DomainSource>),
     Gpio(Arc<GpioSource>),
     I2c(Arc<I2cSource>),
+    Mailbox(Arc<MailboxSource>),
 }
 
 /// Starts run in tree order (DRIVER-MODEL.md §4.3): a bus adds children
@@ -788,6 +794,7 @@ impl Manager {
             Provided::Domains(d) => n.provides.domains.replace(d).map(Provided::Domains),
             Provided::Gpio(g) => n.provides.gpio.replace(g).map(Provided::Gpio),
             Provided::I2c(i) => n.provides.i2c.replace(i).map(Provided::I2c),
+            Provided::Mailbox(m) => n.provides.mailbox.replace(m).map(Provided::Mailbox),
         };
         match old {
             Some(Provided::Clocks(c)) => c.revoke(),
@@ -795,6 +802,7 @@ impl Manager {
             Some(Provided::Domains(d)) => d.revoke(),
             Some(Provided::Gpio(g)) => g.revoke(),
             Some(Provided::I2c(i)) => i.revoke(),
+            Some(Provided::Mailbox(m)) => m.revoke(),
             None => {}
         }
     }
@@ -814,6 +822,7 @@ impl Manager {
             LineKind::PowerDomain => p.and_then(|p| p.domains.clone()).map(Provided::Domains),
             LineKind::Gpio => p.and_then(|p| p.gpio.clone()).map(Provided::Gpio),
             LineKind::I2c => p.and_then(|p| p.i2c.clone()).map(Provided::I2c),
+            LineKind::Mailbox => p.and_then(|p| p.mailbox.clone()).map(Provided::Mailbox),
         };
         found.ok_or(ResourceError::NoProvider)
     }

@@ -607,3 +607,40 @@ fn sky1_i2c_buses_say_their_speed() {
         ]
     );
 }
+
+/// The Sky1's mailbox clients get their channels from `_DSD` `mboxes`, in
+/// order: the SCMI agent's (sending first), the security engine's, and the
+/// audio DSP's.
+#[test]
+fn the_scmi_agent_gets_its_mailbox_channels() {
+    let (mut i, mut h) = acpi_corpus::load("opi6p");
+    let w = crate::bus::walk(
+        &mut i,
+        &mut h,
+        &dma_controllers("opi6p"),
+        &[],
+        &FirmwareIdentity::default(),
+    );
+    let mailboxes: Vec<(String, String, u32)> = w
+        .found
+        .into_iter()
+        .flat_map(|f| {
+            let path = f.device.path.clone();
+            f.lines
+                .into_iter()
+                .filter(|l| l.0 == bus::LineKind::Mailbox)
+                .map(move |l| (path.clone(), l.2, l.3))
+        })
+        .collect();
+    assert_eq!(
+        mailboxes,
+        [
+            ("\\_SB_.DSMC".into(), "\\_SB_.MBX0".into(), 10),
+            ("\\_SB_.DSMC".into(), "\\_SB_.MBX1".into(), 9),
+            ("\\_SB_.SCMI".into(), "\\_SB_.MBX6".into(), 8),
+            ("\\_SB_.SCMI".into(), "\\_SB_.MBX7".into(), 8),
+            ("\\_SB_.DSP_".into(), "\\_SB_.MBX5".into(), 9),
+            ("\\_SB_.DSP_".into(), "\\_SB_.MBX4".into(), 9),
+        ]
+    );
+}

@@ -369,6 +369,9 @@ pub enum LineKind {
     Gpio,
     /// A connection to an I2C bus ([`crate::i2c::I2c`]).
     I2c,
+    /// A mailbox channel ([`crate::mailbox::Mailbox`]); the line's
+    /// identifier is the channel number.
+    Mailbox,
 }
 
 /// What a line carries beyond its supplier and identifier.

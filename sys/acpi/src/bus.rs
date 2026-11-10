@@ -233,11 +233,17 @@ pub(crate) fn walk(
                 .push((kind, name.clone(), path, id, LineDetail::None));
         }
     }
-    // The GPIO and I2C lines each child's `_CRS` consumes.
+    // The GPIO and I2C lines each child's `_CRS` consumes, and the
+    // mailbox channels its `_DSD` names.
     for f in &mut found {
         for (sup, line) in connection_lines(interp, f.device.node, &f.device.crs) {
             let path = alloc::format!("{}", interp.path(sup));
             f.lines.push((line.0, None, path, line.1, line.2));
+        }
+        for (sup, channel) in mailbox_lines(interp, host, f.device.node) {
+            let path = alloc::format!("{}", interp.path(sup));
+            f.lines
+                .push((LineKind::Mailbox, None, path, channel, LineDetail::None));
         }
     }
     // Ranges two parties touch: what drivers of children overlapping
@@ -375,6 +381,32 @@ fn connection_lines(
         }
     }
     out
+}
+
+/// The mailbox channels a device's `_DSD` `mboxes` names, in order: pairs
+/// of a mailbox and its channel number (the devicetree binding's
+/// `#mbox-cells` = 1, which is what the Sky1's firmware gives). A pair
+/// whose mailbox does not resolve is left out (the dependency walk logs
+/// it).
+pub(crate) fn mailbox_lines(
+    interp: &mut aml::Interpreter,
+    host: &mut dyn aml::Host,
+    node: aml::NodeId,
+) -> Vec<(aml::NodeId, u32)> {
+    let Some(aml::Value::Package(items)) =
+        crate::properties::property(interp, host, node, "mboxes")
+    else {
+        return Vec::new();
+    };
+    items
+        .chunks(2)
+        .filter_map(|pair| match pair {
+            [mbox, aml::Value::Integer(ch)] => {
+                Some((interp.resolve_value_name(mbox)?, u32::try_from(*ch).ok()?))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// A GPIO descriptor's `PinConfig` as a bias; vendor values (0x80 and up)

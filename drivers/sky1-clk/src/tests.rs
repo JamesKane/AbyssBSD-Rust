@@ -298,3 +298,105 @@ fn a_silent_firmware_times_out() {
     let c = FirmwareClocks::new(&sky1);
     assert_eq!(c.rate(&s(), 0x107), Err(ProviderError::Timeout));
 }
+
+/// The power-management firmware behind the agent's mailbox: it answers
+/// a clock message when the doorbell rings, as the platform does, by
+/// writing the reply and marking the channel free.
+struct Platform {
+    regs: Mutex<[u32; 32]>,
+    /// Rates by clock ID; an ID not here is `NOT_FOUND`.
+    rates: BTreeMap<u32, u64>,
+    enabled: Mutex<Vec<(u32, u32)>>,
+    /// Never answers (the channel stays the platform's).
+    silent: bool,
+}
+
+impl Platform {
+    fn new(rates: &[(u32, u64)]) -> Self {
+        let mut regs = [0u32; 32];
+        regs[1] = 1; // channel free
+        Self {
+            regs: Mutex::new(regs),
+            rates: rates.iter().copied().collect(),
+            enabled: Mutex::new(Vec::new()),
+            silent: false,
+        }
+    }
+}
+
+impl bus::mailbox::Mailbox for Platform {
+    fn words(&self) -> usize {
+        32
+    }
+    fn read(&self, w: usize) -> u32 {
+        self.regs.lock().unwrap()[w]
+    }
+    fn write(&self, w: usize, v: u32) {
+        self.regs.lock().unwrap()[w] = v;
+    }
+    fn ring(&self, channel: u32) -> Result<(), ProviderError> {
+        assert_eq!(channel, 8);
+        if self.silent {
+            return Ok(());
+        }
+        let mut r = self.regs.lock().unwrap();
+        let (hdr, len) = (r[6], r[5]);
+        assert_eq!(r[1] & 1, 0, "the agent hands the channel over");
+        assert_eq!(r[4], 0, "polled");
+        let (msg, proto) = (hdr & 0xff, hdr >> 10 & 0xff);
+        assert_eq!(proto, 0x14);
+        let p: Vec<u32> = r[7..7 + (len as usize - 4) / 4].to_vec();
+        let id = if msg == 5 { p[1] } else { p[0] };
+        let reply: Vec<u32> = match (msg, self.rates.get(&id)) {
+            (_, None) => alloc::vec![(-4i32).cast_unsigned()],
+            (6, Some(&hz)) => alloc::vec![0, hz as u32, (hz >> 32) as u32],
+            (7, Some(_)) => {
+                self.enabled.lock().unwrap().push((id, p[1]));
+                alloc::vec![0]
+            }
+            _ => alloc::vec![(-1i32).cast_unsigned()],
+        };
+        for (i, w) in reply.iter().enumerate() {
+            r[7 + i] = *w;
+        }
+        r[5] = 4 + 4 * reply.len() as u32;
+        r[1] = 1;
+        Ok(())
+    }
+}
+
+fn no_pause(_: &Sleepable, _: u32) {}
+
+fn agent_over(p: Arc<Platform>) -> FirmwareClocks<agent::Agent> {
+    let src = bus::mailbox::MailboxSource::new(p);
+    FirmwareClocks::new(agent::Agent::with_pause(src.channel(8), no_pause))
+}
+
+#[test]
+fn the_agent_gates_and_rates_clocks_over_its_mailbox() {
+    let s = s();
+    // The FCH GPIO's APB clock (262) and I2C3's (256).
+    let p = Arc::new(Platform::new(&[(262, 200_000_000), (256, 100_000_000)]));
+    let c = agent_over(Arc::clone(&p));
+    c.enable(&s, 262).unwrap();
+    c.disable(&s, 262).unwrap();
+    assert_eq!(*p.enabled.lock().unwrap(), [(262, 1), (262, 0)]);
+    assert_eq!(c.rate(&s, 256), Ok(Hz(100_000_000)));
+    // An ID the platform does not know.
+    assert_eq!(c.enable(&s, 999), Err(ProviderError::NoSuchLine));
+    // The header carried a fresh token each time.
+    assert_eq!(p.regs.lock().unwrap()[6] >> 18, 4);
+    assert_eq!(agent::header(0x14, 7, 1), 0x0004_5007);
+}
+
+#[test]
+fn a_platform_that_never_answers_times_out() {
+    let s = s();
+    let mut p = Platform::new(&[(262, 1)]);
+    p.silent = true;
+    let p = Arc::new(p);
+    let c = agent_over(Arc::clone(&p));
+    assert_eq!(c.enable(&s, 262), Err(ProviderError::Timeout));
+    // The channel is still the platform's: the next request is refused.
+    assert_eq!(c.enable(&s, 262), Err(ProviderError::BusBusy));
+}

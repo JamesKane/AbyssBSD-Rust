@@ -56,7 +56,7 @@ fn synthetic_tables() {
             "\\_SB",
             &cat(&[
                 &device("REST", &hid(if tables { "CIXA1019" } else { "XNOT0001" })),
-                &device("CCLK", &hid("CIXHA010")),
+                &device("SCMI", &hid("CIXHA006")),
                 &device("RST1", &hid("CIXHA021")),
                 &device(
                     "UAR0",
@@ -100,7 +100,7 @@ fn synthetic_tables() {
         c.limits.stack_budget = 1 << 20;
         let mut i = Interpreter::new(c);
         i.load_table(&table(b"DSDT", 2, &body), &mut Quiet).unwrap();
-        let devs: Vec<aml::NodeId> = ["REST", "CCLK", "RST1", "UAR0"]
+        let devs: Vec<aml::NodeId> = ["REST", "SCMI", "RST1", "UAR0"]
             .iter()
             .map(|d| node(&i, &alloc::format!("\\_SB.{d}")))
             .collect();
@@ -115,12 +115,12 @@ fn synthetic_tables() {
 
     let (deps, devs) = build_with(true);
     assert_eq!(deps.platforms, [NAME]);
-    let [_, cclk, rst1, uar0] = devs[..] else {
+    let [_, scmi, rst1, uar0] = devs[..] else {
         unreachable!()
     };
     let p = &deps.platform;
     let c = p.clock(&uar0, None).unwrap();
-    assert_eq!((c.provider, c.id, c.name.as_deref()), (cclk, 0x107, None));
+    assert_eq!((c.provider, c.id, c.name.as_deref()), (scmi, 0x107, None));
     let r = p.reset(&uar0, None).unwrap();
     assert_eq!((r.controller, r.index, r.name.as_deref()), (rst1, 4, None));
     assert_eq!(p.resource(&uar0, ResourceKind::Interrupt, "irq"), Some(0));
@@ -133,7 +133,7 @@ fn synthetic_tables() {
     assert_eq!(
         edges,
         [
-            (cclk, uar0, EdgeKind::Required, via("clocks")),
+            (scmi, uar0, EdgeKind::Required, via("clocks")),
             (rst1, uar0, EdgeKind::Required, via("resets")),
         ]
     );
@@ -220,12 +220,12 @@ fn sky1_tables() {
         (69, 65, 37)
     );
     let node = |path: &str| node(&i, path);
-    let cclk = node("\\_SB.CCLK");
+    let scmi = node("\\_SB.SCMI");
     // A clock line names its consumer, which need not carry the table:
     // DMA0's clock is in DMA1's CLKT.
     let dma0 = node("\\_SB.DMA0");
     let c = p.clock(&dma0, None).unwrap();
-    assert_eq!((c.provider, c.id, c.name.as_deref()), (cclk, 0xef, None));
+    assert_eq!((c.provider, c.id, c.name.as_deref()), (scmi, 0xef, None));
     let com0 = node("\\_SB.COM0");
     assert_eq!(p.clock(&com0, Some("uartclk")).map(|c| c.id), Some(0x107));
     assert!(p.clock(&com0, None).is_none(), "two named clocks");
@@ -258,8 +258,8 @@ fn sky1_tables() {
     );
     // The edges they make.
     for (consumer, supplier, table) in [
-        ("\\_SB_.COM0", "\\_SB_.CCLK", "clocks"),
-        ("\\_SB_.DMA0", "\\_SB_.CCLK", "clocks"),
+        ("\\_SB_.COM0", "\\_SB_.SCMI", "clocks"),
+        ("\\_SB_.DMA0", "\\_SB_.SCMI", "clocks"),
         ("\\_SB_.I2C0", "\\_SB_.RST1", "resets"),
         ("\\_SB_.HDA_", "\\_SB_.ADSS.ARST", "resets"),
         ("\\_SB_.HDA_", "\\_SB_.ADSS.ACLK", "links"),

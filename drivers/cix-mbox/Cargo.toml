@@ -1,0 +1,15 @@
+[package]
+name = "cix-mbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+acpi = { path = "../../sys/acpi" }
+bus = { path = "../../sys/bus" }
+devtree = { path = "../../lib/devtree" }
+regs = { path = "../../lib/regs" }
+
+[lints]
+workspace = true

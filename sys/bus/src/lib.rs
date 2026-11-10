@@ -27,6 +27,7 @@ pub mod driver;
 pub mod gate;
 pub mod gpio;
 pub mod i2c;
+pub mod mailbox;
 pub mod manager;
 pub mod platform;
 pub mod provider;

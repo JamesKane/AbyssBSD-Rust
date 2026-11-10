@@ -6,9 +6,11 @@
 //! names its consumer, which need not be the device carrying it (the
 //! Sky1's `DMA1` lists `DMA0`'s clock).
 //!
-//! - `CLKT`: `{clock ID, name, consumer}`; the clock is the SCMI clock
-//!   `CIXHA010` serves through its AML methods. An empty name is the
-//!   device's unnamed clock; a missing consumer is the carrier.
+//! - `CLKT`: `{clock ID, name, consumer}`; the clock is the SCMI clock of
+//!   that ID, which the OS's SCMI agent (`CIXHA006`) serves. (`CIXHA010`,
+//!   "the ACPI clock provider", serves nothing: its AML speaks for another
+//!   agent, which knows no clocks.) An empty name is the device's unnamed
+//!   clock; a missing consumer is the carrier.
 //! - `RSTL`: `{controller, index, consumer, name}`; the name is optional.
 //! - `RSNL`: `{device, type, index, name}`, naming the `index`th `_CRS`
 //!   resource of a type: 0x200 a memory range, 0x400 an interrupt (the
@@ -34,8 +36,8 @@ use crate::NAME;
 
 /// The device whose presence says the tables are there.
 pub const TABLES_HID: &str = "CIXA1019";
-/// The clock provider `CLKT` entries refer to.
-pub const CLOCKS_HID: &str = "CIXHA010";
+/// The clock provider `CLKT` entries refer to: the OS's SCMI agent.
+pub const CLOCKS_HID: &str = "CIXHA006";
 
 /// A CIX table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -138,7 +140,7 @@ struct Entry<'a> {
     interp: &'a Interpreter,
     carrier: NodeId,
     table: Table,
-    /// The clock provider (`CIXHA010`) the clock lines name.
+    /// The clock provider (`CIXHA006`) the clock lines name.
     clock_provider: Option<NodeId>,
     out: &'a mut Extracted,
 }

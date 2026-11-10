@@ -634,6 +634,28 @@ impl<'a> AttachCx<'a> {
         Ok(DmaTag::new(p.dma_memory(), c, p.top_of_ram()))
     }
 
+    /// The device's `index`th mailbox channel, in firmware's order (ACPI
+    /// `_DSD` `mboxes`; an SCMI agent's sending channel comes first).
+    pub fn mailbox(
+        &mut self,
+        index: usize,
+    ) -> Result<crate::mailbox::MailboxChannel, ResourceError> {
+        if self.injected() {
+            return Err(ResourceError::NoSuchLine);
+        }
+        let l = self
+            .mgr
+            .lines(self.s, self.node)
+            .into_iter()
+            .filter(|l| l.kind == LineKind::Mailbox)
+            .nth(index)
+            .ok_or(ResourceError::NoSuchLine)?;
+        match self.mgr.provider(self.s, l.supplier, LineKind::Mailbox)? {
+            Provided::Mailbox(m) => Ok(m.channel(l.id)),
+            _ => Err(ResourceError::NoProvider),
+        }
+    }
+
     /// The device's line of `kind` its driver asks for by `name`: `None`
     /// asks for its unnamed line, or its only one.
     fn line(&self, kind: LineKind, name: Option<&str>) -> Result<Line, ResourceError> {
@@ -1041,6 +1063,14 @@ impl<D: Driver> StartCx<'_, D> {
         let src = GpioSource::new(imp);
         self.mgr
             .provide(self.s, self.binding.node, Provided::Gpio(src));
+    }
+
+    /// Publishes this device as a mailbox: clients whose mailbox lines
+    /// name it get channels of it.
+    pub fn provide_mailbox(&mut self, imp: Arc<dyn crate::mailbox::Mailbox>) {
+        let src = crate::mailbox::MailboxSource::new(imp);
+        self.mgr
+            .provide(self.s, self.binding.node, Provided::Mailbox(src));
     }
 
     /// Publishes this device as an I2C controller.
