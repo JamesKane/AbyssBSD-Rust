@@ -1,0 +1,460 @@
+---<<BOOT>>---
+GDB: no debug ports present
+KDB: debugger backends: ddb
+KDB: current backend: ddb
+Copyright (c) 1992-2026 The FreeBSD Project.
+Copyright (c) 1979, 1980, 1983, 1986, 1988, 1989, 1991, 1992, 1993, 1994
+	The Regents of the University of California. All rights reserved.
+FreeBSD is a registered trademark of The FreeBSD Foundation.
+FreeBSD 16.0-CURRENT #0 orangepi-6-plus-f12c9f4ee6e3: Sun Oct 11 08:23:24 CDT 2026
+    jkane@Jamess-Mac-Studio.local:/Users/jkane/Projects/OS/build/fbobj/Users/jkane/Projects/OS/freebsd-src/arm64.aarch64/sys/GENERIC-HMP-IOMMU arm64
+Homebrew clang version 23.1.2
+WARNING: WITNESS option enabled, expect reduced performance.
+VT(efifb): resolution 1920x1080
+real memory  = 34176163840 (32592 MB)
+avail memory = 33377132544 (31830 MB)
+Starting CPU 1 (b00)
+Starting CPU 2 (0)
+Starting CPU 3 (100)
+Starting CPU 4 (200)
+Starting CPU 5 (300)
+Starting CPU 6 (400)
+Starting CPU 7 (500)
+Starting CPU 8 (600)
+Starting CPU 9 (700)
+Starting CPU 10 (800)
+Starting CPU 11 (900)
+FreeBSD/SMP: Multiprocessor System Detected: 12 CPUs
+random: unblocking device.
+random: entropy device external interface
+kbd0 at kbdmux0
+acpi0: <CIXTEK SKY1EDK2>
+ACPI Error: AE_NOT_FOUND, While resolving a named reference package element - ^I2C0.UXC0 (20260408/dspkginit-605)
+ACPI Error: AE_NOT_FOUND, While resolving a named reference package element - ^I2C0.UXC0 (20260408/dspkginit-605)
+ACPI Error: AE_NOT_FOUND, While resolving a named reference package element - ^I2C0.UXC1 (20260408/dspkginit-605)
+ACPI Error: AE_NOT_FOUND, While resolving a named reference package element - ^I2C0.UXC0 (20260408/dspkginit-605)
+ACPI Error: AE_NOT_FOUND, While resolving a named reference package element - ^I2C0.UXC2 (20260408/dspkginit-605)
+ACPI Error: AE_NOT_FOUND, While resolving a named reference package element - ^I2C0.UXC3 (20260408/dspkginit-605)
+acpi0: Power Button (fixed)
+acpi0: Sleep Button (fixed)
+acpi0: Could not update all GPEs: AE_NOT_CONFIGURED
+psci0: <ARM Power State Co-ordination Interface Driver> on acpi0
+smccc0: <ARM SMCCC v1.2> on psci0
+acpi0: No GICv5 IRS
+gic0: <ARM Generic Interrupt Controller v3.0> iomem 0xe010000-0xe01ffff,0xe090000-0xe38ffff on acpi0
+its0: <ARM GIC Interrupt Translation Service> mem 0xe050000-0xe06ffff on gic0
+cix_mbox0: <CIX mailbox> iomem 0x5060000-0x506ffff irq 4 on acpi0
+cix_mbox1: <CIX mailbox> iomem 0x5070000-0x507ffff irq 5 on acpi0
+cix_mbox2: <CIX mailbox> iomem 0x7100000-0x710ffff irq 6 on acpi0
+cix_mbox3: <CIX mailbox> iomem 0x70f0000-0x70fffff irq 7 on acpi0
+cix_mbox4: <CIX mailbox> iomem 0x6590000-0x659ffff irq 8 on acpi0
+cix_mbox5: <CIX mailbox> iomem 0x65a0000-0x65affff irq 9 on acpi0
+smmu0: <ARM System Memory Management Unit> iomem 0xb010000-0xb02ffff irq 136,137,138,139 on acpi0
+smmu1: <ARM System Memory Management Unit> iomem 0xb1b0000-0xb1cffff irq 140,141,142,143 on acpi0
+smmu1: 10 streams bypassed (reserved memory)
+sky1_scmi0: <CIX Sky1 SCMI> on acpi0
+sky1_scmi0: vendor cix
+generic_timer0: <ARM Generic Timer> irq 144,145,146,147 on acpi0
+Timecounter "ARM MPCore Timecounter" frequency 1000000000 Hz quality 1000
+Event timer "ARM MPCore Eventtimer" frequency 1000000000 Hz quality 1000
+sky1_audss0: <CIX Sky1 audio subsystem> on acpi0
+efirtc0: <EFI Realtime Clock>
+efirtc0: registered as a time-of-day clock, resolution 1.000000s
+smbios0: <System Management BIOS>
+smbios0: Entry point: v3 (64-bit), Version: 3.6
+sbsa_gwdt0: <Arm SBSA generic watchdog> iomem 0x16008000-0x16008fff,0x16003000-0x16003fff on acpi0
+sbsa_gwdt0: refresh frame does not refresh; refreshing through WOR
+apei0: <ACPI Platform Error Interface> on acpi0
+pmu0: <Performance Monitoring Unit> on acpi0
+uart0: <PrimeCell UART (PL011)> iomem 0x40b0000-0x40b0fff irq 0 on acpi0
+uart1: <PrimeCell UART (PL011)> iomem 0x40c0000-0x40c0fff irq 1 on acpi0
+uart2: <PrimeCell UART (PL011)> iomem 0x40d0000-0x40d0fff irq 2 on acpi0
+uart3: <PrimeCell UART (PL011)> iomem 0x40e0000-0x40e0fff irq 3 on acpi0
+acpi_tz0: <Thermal Zone> on acpi0
+acpi_tz1: <Thermal Zone> on acpi0
+acpi_tz2: <Thermal Zone> on acpi0
+acpi_tz3: <Thermal Zone> on acpi0
+acpi_tz4: <Thermal Zone> on acpi0
+acpi_tz5: <Thermal Zone> on acpi0
+acpi_tz6: <Thermal Zone> on acpi0
+acpi_tz7: <Thermal Zone> on acpi0
+acpi_tz8: <Thermal Zone> on acpi0
+acpi_tz9: <Thermal Zone> on acpi0
+acpi_tz10: <Thermal Zone> on acpi0
+acpi_tz11: <Thermal Zone> on acpi0
+acpi_tz12: <Thermal Zone> on acpi0
+sky1_gpt0: <CIX Sky1 general purpose timer> iomem 0x4116000-0x4117fff irq 17 on acpi0
+Event timer "Sky1 GPT" frequency 25000000 Hz quality 500
+cdnc_i2c0: <Cadence I2C Controller> iomem 0x4010000-0x401ffff irq 22 on acpi0
+cdnc_i2c1: <Cadence I2C Controller> iomem 0x4020000-0x402ffff irq 23 on acpi0
+cdnc_i2c2: <Cadence I2C Controller> iomem 0x4030000-0x403ffff irq 24 on acpi0
+cdnc_i2c3: <Cadence I2C Controller> iomem 0x4040000-0x404ffff irq 25 on acpi0
+cdnc_i2c4: <Cadence I2C Controller> iomem 0x4050000-0x405ffff irq 26 on acpi0
+cdnc_i2c5: <Cadence I2C Controller> iomem 0x4060000-0x406ffff irq 27 on acpi0
+cdnc_i2c6: <Cadence I2C Controller> iomem 0x4080000-0x408ffff irq 28 on acpi0
+pcib0: <Generic PCI host controller> on acpi0
+pci0: <ACPI PCI bus> on pcib0
+pcib1: <PCI-PCI bridge> at device 0.0 on pci0
+pci1: <PCI bus> on pcib1
+nvme0: <Generic NVMe Device> mem 0x60000000-0x60003fff at device 0.0 on pci1
+nvme0: relaxed ordering disabled (IOMMU translation)
+pcib2: <Generic PCI host controller> on acpi0
+pci2: <ACPI PCI bus> on pcib2
+pcib3: <PCI-PCI bridge> at device 0.0 on pci2
+pci3: <PCI bus> on pcib3
+nvme1: <Generic NVMe Device> mem 0x50000000-0x50003fff at device 0.0 on pci3
+nvme1: relaxed ordering disabled (IOMMU translation)
+pcib4: <Generic PCI host controller> on acpi0
+pci4: <ACPI PCI bus> on pcib4
+pcib5: <PCI-PCI bridge> at device 0.0 on pci4
+pci5: <PCI bus> on pcib5
+pci5: <network, ethernet> at device 0.0 (no driver attached)
+pcib6: <Generic PCI host controller> on acpi0
+pci6: <ACPI PCI bus> on pcib6
+pcib7: <PCI-PCI bridge> at device 0.0 on pci6
+pci7: <PCI bus> on pcib7
+pci7: <network, ethernet> at device 0.0 (no driver attached)
+xhci0: <Generic USB 3.0 controller> iomem 0x9018000-0x901ffff irq 73 on acpi0
+xhci0: 64 bytes context size, 64-bit DMA
+xhci0: xECP capabilities <LEGACY,PROTO,PROTO,VEND(c0),VEND(c1),VEND(c5),VEND(c2),VEND(ce),VEND(c4),VEND(c8),VEND(ca),VEND(c7),POWER,MSG IRQ,VEND(cb),VEND(c9),VEND(cd),VEND(cc)>
+usbus0 on xhci0
+xhci1: <Generic USB 3.0 controller> iomem 0x9088000-0x908ffff irq 74 on acpi0
+xhci1: 64 bytes context size, 64-bit DMA
+xhci1: xECP capabilities <LEGACY,PROTO,PROTO,VEND(c0),VEND(c1),VEND(c5),VEND(c2),VEND(ce),VEND(c4),VEND(c8),VEND(ca),VEND(c7),POWER,MSG IRQ,VEND(cb),VEND(c9),VEND(cd),VEND(cc)>
+usbus1 on xhci1
+xhci2: <Generic USB 3.0 controller> iomem 0x90f8000-0x90fffff irq 75 on acpi0
+xhci2: 64 bytes context size, 64-bit DMA
+xhci2: xECP capabilities <LEGACY,PROTO,PROTO,VEND(c0),VEND(c1),VEND(c5),VEND(c2),VEND(ce),VEND(c4),VEND(c8),VEND(ca),VEND(c7),POWER,MSG IRQ,VEND(cb),VEND(c9),VEND(cd),VEND(cc)>
+usbus2 on xhci2
+xhci3: <Generic USB 3.0 controller> iomem 0x9168000-0x916ffff irq 76 on acpi0
+xhci3: 64 bytes context size, 64-bit DMA
+xhci3: xECP capabilities <LEGACY,PROTO,PROTO,VEND(c0),VEND(c1),VEND(c5),VEND(c2),VEND(ce),VEND(c4),VEND(c8),VEND(ca),VEND(c7),POWER,MSG IRQ,VEND(cb),VEND(c9),VEND(cd),VEND(cc)>
+usbus3 on xhci3
+xhci4: <Generic USB 3.0 controller> iomem 0x91d8000-0x91dffff irq 77 on acpi0
+xhci4: 64 bytes context size, 64-bit DMA
+xhci4: xECP capabilities <LEGACY,PROTO,PROTO,VEND(c0),VEND(c1),VEND(c5),VEND(c2),VEND(ce),VEND(c4),VEND(c8),VEND(ca),VEND(c7),POWER,MSG IRQ,VEND(cb),VEND(c9),VEND(cd),VEND(cc)>
+usbus4 on xhci4
+xhci5: <Generic USB 3.0 controller> iomem 0x91e8000-0x91effff irq 78 on acpi0
+xhci5: 64 bytes context size, 64-bit DMA
+xhci5: xECP capabilities <LEGACY,PROTO,PROTO,VEND(c0),VEND(c1),VEND(c5),VEND(c2),VEND(ce),VEND(c4),VEND(c8),VEND(ca),VEND(c7),POWER,MSG IRQ,VEND(cb),VEND(c9),VEND(cd),VEND(cc)>
+usbus5 on xhci5
+xhci6: <Generic USB 3.0 controller> iomem 0x9268000-0x926ffff irq 79 on acpi0
+xhci6: 64 bytes context size, 64-bit DMA
+xhci6: xECP capabilities <LEGACY,PROTO,VEND(c5),VEND(c2),VEND(ce),VEND(c4),VEND(c8),VEND(ca),VEND(c7),POWER,MSG IRQ,VEND(c9),VEND(cc)>
+usbus6 on xhci6
+xhci7: <Generic USB 3.0 controller> iomem 0x9298000-0x929ffff irq 80 on acpi0
+xhci7: 64 bytes context size, 64-bit DMA
+xhci7: xECP capabilities <LEGACY,PROTO,VEND(c5),VEND(c2),VEND(ce),VEND(c4),VEND(c8),VEND(ca),VEND(c7),POWER,MSG IRQ,VEND(c9),VEND(cc)>
+usbus7 on xhci7
+xhci8: <Generic USB 3.0 controller> iomem 0x92c8000-0x92cffff irq 81 on acpi0
+xhci8: 64 bytes context size, 64-bit DMA
+xhci8: xECP capabilities <LEGACY,PROTO,VEND(c5),VEND(c2),VEND(ce),VEND(c4),VEND(c8),VEND(ca),VEND(c7),POWER,MSG IRQ,VEND(c9),VEND(cc)>
+usbus8 on xhci8
+xhci9: <Generic USB 3.0 controller> iomem 0x92f8000-0x92fffff irq 82 on acpi0
+xhci9: 64 bytes context size, 64-bit DMA
+xhci9: xECP capabilities <LEGACY,PROTO,VEND(c5),VEND(c2),VEND(ce),VEND(c4),VEND(c8),VEND(ca),VEND(c7),POWER,MSG IRQ,VEND(c9),VEND(cc)>
+usbus9 on xhci9
+battery0: <ACPI Control Method Battery> on acpi0
+acpi_button0: <Power Button> on acpi0
+acpi_acad0: <AC Adapter> on acpi0
+cpu0: <ACPI CPU> on acpi0
+armv8crypto0: <AES-CBC,AES-XTS,AES-GCM>
+acpi_cppc0: <ACPI CPPC CPU frequency control> on cpu0
+cpufreq0: <CPU frequency control> on cpu0
+acpi_cppc1: <ACPI CPPC CPU frequency control> on cpu2
+cpufreq2: <CPU frequency control> on cpu2
+acpi_cppc2: <ACPI CPPC CPU frequency control> on cpu6
+cpufreq6: <CPU frequency control> on cpu6
+acpi_cppc3: <ACPI CPPC CPU frequency control> on cpu8
+cpufreq8: <CPU frequency control> on cpu8
+acpi_cppc4: <ACPI CPPC CPU frequency control> on cpu10
+cpufreq10: <CPU frequency control> on cpu10
+Timecounters tick every 1.000 msec
+iicbus0: <Philips I2C bus (ACPI-hinted)> on cdnc_i2c0
+iicbus0: <unknown card> at addr 0x34
+iicbus0: <unknown card> at addr 0x40
+iic0: <I2C generic I/O> on iicbus0
+iicbus1: <Philips I2C bus (ACPI-hinted)> on cdnc_i2c1
+usbus0: 5.0Gbps Super Speed USB v3.0
+usbus1: 5.0Gbps Super Speed USB v3.0
+usbus2: 5.0Gbps Super Speed USB v3.0
+usbus3: 5.0Gbps Super Speed USB v3.0
+usbus4: 5.0Gbps Super Speed USB v3.0
+iicbus1: <unknown card> at addr 0x38
+iicbus1: <unknown card> at addr 0x36
+iic1: <I2C generic I/O> on iicbus1
+iicbus2: <Philips I2C bus (ACPI-hinted)> on cdnc_i2c2
+iicbus2: <unknown card> at addr 0x1a
+iicbus2: <unknown card> at addr 0x38
+iic2: <I2C generic I/O> on iicbus2
+iicbus3: <Philips I2C bus (ACPI-hinted)> on cdnc_i2c3
+iicbus3: <unknown card> at addr 0x32
+iic3: <I2C generic I/O> on iicbus3
+iicbus4: <Philips I2C bus (ACPI-hinted)> on cdnc_i2c4
+iicbus4: <unknown card> at addr 0x38
+iic4: <I2C generic I/O> on iicbus4
+iicbus5: <Philips I2C bus (ACPI-hinted)> on cdnc_i2c5
+iicbus5: <unknown card> at addr 0x38
+iic5: <I2C generic I/O> on iicbus5
+iicbus6: <Philips I2C bus (ACPI-hinted)> on cdnc_i2c6
+iicbus6: <unknown card> at addr 0x30
+iicbus6: <unknown card> at addr 0x31
+iic6: <I2C generic I/O> on iicbus6
+ugen1.1: <Generic XHCI root HUB> at usbus1
+uhub0 on usbus1
+uhub0: <Generic XHCI root HUB, class 9/0, rev 3.00/1.00, addr 1> on usbus1
+ugen2.1: <Generic XHCI root HUB> at usbus2
+uhub1 on usbus2
+uhub1: <Generic XHCI root HUB, class 9/0, rev 3.00/1.00, addr 1> on usbus2
+ugen3.1: <Generic XHCI root HUB> at usbus3
+uhub2 on usbus3
+uhub2: <Generic XHCI root HUB, class 9/0, rev 3.00/1.00, addr 1> on usbus3
+ugen4.1: <Generic XHCI root HUB> at usbus4
+uhub3 on usbus4
+uhub3: <Generic XHCI root HUB, class 9/0, rev 3.00/1.00, addr 1> on usbus4
+ugen0.1: <Generic XHCI root HUB> at usbus0
+uhub4 on usbus0
+uhub4: <Generic XHCI root HUB, class 9/0, rev 3.00/1.00, addr 1> on usbus0
+usbus5: 5.0Gbps Super Speed USB v3.0
+usbus6: 5.0Gbps Super Speed USB v3.0
+usbus7: 5.0Gbps Super Speed USB v3.0
+usbus8: 5.0Gbps Super Speed USB v3.0
+usbus9: 5.0Gbps Super Speed USB v3.0
+ugen5.1: <Generic XHCI root HUB> at usbus5
+uhub5 on usbus5
+uhub5: <Generic XHCI root HUB, class 9/0, rev 3.00/1.00, addr 1> on usbus5
+ugen6.1: <Generic XHCI root HUB> at usbus6
+uhub6 on usbus6
+uhub6: <Generic XHCI root HUB, class 9/0, rev 3.00/1.00, addr 1> on usbus6
+ugen8.1: <Generic XHCI root HUB> at usbus8
+uhub7 on usbus8
+uhub7: <Generic XHCI root HUB, class 9/0, rev 3.00/1.00, addr 1> on usbus8
+ugen7.1: <Generic XHCI root HUB> at usbus7
+uhub8 on usbus7
+uhub8: <Generic XHCI root HUB, class 9/0, rev 3.00/1.00, addr 1> on usbus7
+ugen9.1: <Generic XHCI root HUB> at usbus9
+uhub9 on usbus9
+uhub9: <Generic XHCI root HUB, class 9/0, rev 3.00/1.00, addr 1> on usbus9
+nvme0: Allocated 64MB host memory buffer
+nvme_sim0: <nvme cam> on nvme0
+nvme_sim1: <nvme cam> on nvme1
+CPU  0: ARM Cortex-A720 r0p1 affinity: 10  0
+                   Cache Type = <IDC,64 byte CWG,64 byte ERG,64 byte D-cacheline,PIPT I-cache,64 byte I-cacheline,0x400000000>
+ Instruction Set Attributes 0 = <TLBI-OSR,CondM-8.5,FHM,DP,SM4,SM3,SHA3,RDM,Atomic,CRC32,SHA2+SHA512,SHA1,AES+PMULL>
+ Instruction Set Attributes 1 = <XS,I8MM,DGH,BF16,PredInv v8.5,SB,FRINTTS,RCPC-8.4,FCMA,JSCVT,DCCVADP>
+ Instruction Set Attributes 2 = <PAC_frac,APA3 FPAC+Combined,GPA3,WFxT>
+         Processor Features 0 = <CSV3,CSV2_2,PSTATE.DIT,AMUv1,MPAM,SEL2,SVE,RAS v8.4,GIC 4.1,AdvSIMD+HP,FP+HP,EL3,EL2,EL1,EL0>
+         Processor Features 1 = <MTE_frac,MPAM p1,MTE3,PSTATE.SSBS MSR,BTI>
+         Processor Features 2 = <>
+      Memory Model Features 0 = <ECV POFF,FGT v8.6,S2 TGran4,S2 TGran64,S2 TGran16,TGran4,TGran64,TGran16,SNSMem,BigEnd,16bit ASID,1TB PA>
+      Memory Model Features 1 = <ECBHB,nTLBPA,AFP,HCX,XNX,EPAN,LO,HPD+TTPBHA,VH,16bit VMID,HAF+DS>
+      Memory Model Features 2 = <E0PD,EVT-8.5,BBM level 2,TTL,FWB,IDS,AT,ST,64bit CCIDX,48bit VA,IESB,UAO,CnP>
+      Memory Model Features 3 = <>
+      Memory Model Features 4 = <>
+             Debug Features 0 = <HPMN0,MTPMU res0,TraceBuffer,Trace v8.4,SPEv1p2,2 CTX BKPTs,4 Watchpoints,6 Breakpoints,PMUv3p7,Trace,Debugv8p4>
+             Debug Features 1 = <>
+         Auxiliary Features 0 = <>
+         Auxiliary Features 1 = <>
+               SVE Features 0 = <I8MM,SM4,SHA3,BF16,BitPerm,AES+PMULL,SVE2>
+AArch32 Instruction Set Attributes 5 = <>
+AArch32 Media and VFP Features 0 = <>
+AArch32 Media and VFP Features 1 = <>
+CPU  1: ARM Cortex-A720 r0p1 affinity: 11  0
+CPU  2: ARM Cortex-A520 r0p1 affinity:  0  0
+      Memory Model Features 1 = <ECBHB,nTLBPA,AFP,HCX,XNX,SpecSEI,EPAN,LO,HPD+TTPBHA,VH,16bit VMID,HAF+DS>
+             Debug Features 0 = <HPMN0,MTPMU res0,TraceBuffer,Trace v8.4,2 CTX BKPTs,4 Watchpoints,6 Breakpoints,PMUv3p7,Trace,Debugv8p4>
+CPU  3: ARM Cortex-A520 r0p1 affinity:  1  0
+CPU  4: ARM Cortex-A520 r0p1 affinity:  2  0
+CPU  5: ARM Cortex-A520 r0p1 affinity:  3  0
+CPU  6: ARM Cortex-A720 r0p1 affinity:  4  0
+      Memory Model Features 1 = <ECBHB,nTLBPA,AFP,HCX,XNX,EPAN,LO,HPD+TTPBHA,VH,16bit VMID,HAF+DS>
+             Debug Features 0 = <HPMN0,MTPMU res0,TraceBuffer,Trace v8.4,SPEv1p2,2 CTX BKPTs,4 Watchpoints,6 Breakpoints,PMUv3p7,Trace,Debugv8p4>
+CPU  7: ARM Cortex-A720 r0p1 affinity:  5  0
+CPU  8: ARM Cortex-A720 r0p1 affinity:  6  0
+CPU  9: ARM Cortex-A720 r0p1 affinity:  7  0
+CPU 10: ARM Cortex-A720 r0p1 affinity:  8  0
+CPU 11: ARM Cortex-A720 r0p1 affinity:  9  0
+gic0: using for IPIs
+Release APs...done
+TCP_ratelimit: Is now initialized
+Trying to mount root from ufs:/dev/gpt/rootfs [rw]...
+WARNING: WITNESS option enabled, expect reduced performance.
+nda0 at nvme0 bus 0 scbus0 target 0 lun 1
+nda0: <CT500P3SSD8 P9CR313 241247C0D85A>
+nda0: Serial Number 241247C0D85A
+nda0: nvme version 1.4
+nda0: 476940MB (976773168 512 byte sectors)
+nda1 at nvme1 bus 0 scbus1 target 0 lun 1
+nda1: <Samsung SSD 990 PRO 1TB 5B2QJXD7 S7LANU0Y715456L>
+nda1: Serial Number S7LANU0Y715456L
+nda1: nvme version 2.0
+nda1: 953869MB (1953525168 512 byte sectors)
+uhub6: 1 port with 1 removable, self powered
+uhub0: 2 ports with 2 removable, self powered
+uhub7: 1 port with 1 removable, self powered
+uhub1: 2 ports with 2 removable, self powered
+uhub8: 1 port with 1 removable, self powered
+uhub2: 2 ports with 2 removable, self powered
+uhub9: 1 port with 1 removable, self powered
+uhub3: 2 ports with 2 removable, self powered
+uhub4: 2 ports with 2 removable, self powered
+uhub5: 2 ports with 2 removable, self powered
+ugen7.2: <vendor 0x1a40 USB 2.0 Hub> at usbus7
+uhub10 on uhub8
+uhub10: <vendor 0x1a40 USB 2.0 Hub, class 9/0, rev 2.00/1.11, addr 1> on usbus7
+Root mount waiting for: usbus7
+uhub10: 4 ports with 4 removable, self powered
+ugen7.3: <vendor 0x1b1c product 0x1bac> at usbus7
+usbhid0 on uhub10
+usbhid0: <vendor 0x1b1c product 0x1bac, class 0/0, rev 2.00/1.07, addr 2> on usbus7
+hidbus0: <HID bus> on usbhid0
+usbhid1 on uhub10
+usbhid1: <vendor 0x1b1c product 0x1bac, class 0/0, rev 2.00/1.07, addr 2> on usbus7
+hidbus1: <HID bus> on usbhid1
+usbhid2 on uhub10
+usbhid2: <vendor 0x1b1c product 0x1bac, class 0/0, rev 2.00/1.07, addr 2> on usbus7
+hidbus2: <HID bus> on usbhid2
+usbhid3 on uhub10
+usbhid3: <vendor 0x1b1c product 0x1bac, class 0/0, rev 2.00/1.07, addr 2> on usbus7
+hidbus3: <HID bus> on usbhid3
+ugen7.4: <vendor 0x0c45 product 0x0133> at usbus7
+usbhid4 on uhub10
+usbhid4: <vendor 0x0c45 product 0x0133, class 0/0, rev 1.10/2.00, addr 3> on usbus7
+hidbus4: <HID bus> on usbhid4
+hkbd0: <vendor 0x0c45 product 0x0133 Keyboard> on hidbus4
+kbd1 at hkbd0
+usbhid5 on uhub10
+usbhid5: <vendor 0x0c45 product 0x0133, class 0/0, rev 1.10/2.00, addr 3> on usbus7
+hidbus5: <HID bus> on usbhid5
+WARNING: / was not properly dismounted
+Error reading time-of-day clock (5), system time will not be set accurately
+komeda0: <Arm China Linlon display controller (CIX Sky1)> iomem 0x141d0000-0x141effff irq 64 on acpi0
+komeda0: pipeline 0: 1920x1080, 148500000 Hz pixel clock (firmware's)
+sky1_udphy0: <USB-C/DisplayPort combo PHY (CIX Sky1)> iomem 0x9180000-0x91bffff on acpi0
+sky1_dptx0: <Trilinear DisplayPort transmitter (CIX Sky1)> iomem 0x14224000-0x14227fff,0x14228000-0x1422bfff,0x1422ff00-0x1422ffff,0x14210000-0x14210303 irq 59 on acpi0
+sky1_udphy0: phy init default mode 02
+sky1_udphy0: phy reset
+sky1_udphy0: set dp phy mode: 19
+[drm] Found ARM Mali-D60 version r0p0
+[drm] left the firmware's display running.
+[drm] continue without IOMMU support!
+[drm] CRTC-0: master(pipe-0) slave(pipe-1).
+[drm] CRTC-1: master(pipe-1) slave(pipe-0).
+sky1_dptx0: [drm:trilin_dp_probe][info] Failed to register dptx audio device
+sky1_dptx0: [drm:trilin_dp_probe][info] end
+sky1_dptx0: [drm:trilin_dp_drm_init][info] begin
+sky1_dptx0: [drm:trilin_edp_phy_register][info] end
+sky1_dptx0: [drm:trilin_dp_host_init][info] [OK.]
+sky1_dptx0: succeed register hdcp misc device.
+sky1_dptx0: [drm:trilin_dp_init_config][info] init hpd high is 1
+[drm] Pipeline-0: n_layers: 4, n_scalers: 2, output: single-link.
+[drm] 	output_link[0]: output (the firmware's mode).
+[drm] 	output_link[1]: none.
+[drm] Pipeline-1: n_layers: 4, n_scalers: 2, output: single-link.
+[drm] 	output_link[0]: none.
+[drm] 	output_link[1]: none.
+[drm] Initialized komeda 0.1.0 for komeda on minor 0
+sky1_dptx0: [drm:trilin_dp_connector_get_modes][info] edid is null and read downstream: count=23
+sky1_dptx0: [drm:trilin_dp_hpd_event_work_func][info] dp hpd event received: Plugged
+VT: Replacing driver "efifb" with new "drmfb".
+sky1_dptx0: [drm:trilin_dp_encoder_compute_config][warn] info_format=0, force support RGB444
+sky1_dptx0: [drm:trilin_dp_encoder_compute_config][info] mode 1920x1080 clock=148500 bpc=10 bpp=30 link_rate=162000 (RBR) lanes=4 max_bpc=10
+sky1_dptx0: [drm:trilin_dp_encoder_atomic_mode_set][info] set mode: 1920x1080 148500
+sky1_dptx0: [drm:trilin_dp_encoder_enable][info] enter
+sky1_udphy0: sky1_udphy_init: sky1_udphy_dp_conf
+sky1_dptx0: [drm:trilin_dp_core_on][info] Successly initialize DP phy
+[drm] CRTC[0]: FLIP happened but no pending commit.
+sky1_dptx0: [drm:trilin_dp_core_on][info] main link training done! rate:162000 lanes:4 
+sky1_dptx0: [drm:trilin_dp_ctrl_stream_on][info] trilin_dp_encoder_enable stream_id=0, active_stream_cnt:1
+start FB_INFO:
+height=1080 width=1920 depth=32
+pbase=0x800000 vbase=0xffff000188a00000
+name=komeda0 id=komedadrmfb flags=0x0 stride=7680
+end FB_INFO
+sky1_dptx0: [drm:trilin_dp_connector_get_modes][info] edid is null and read downstream: count=23
+panthor0: <Arm Mali GPU (CIX Sky1)> iomem 0x15000000-0x1500ffff,0x15010000-0x1548ffff irq 65,66,67 on acpi0
+panthor0: [drm] clock rate = 900000000
+panthor0: [drm] Mali-G720-Immortalis id 0xc870 major 0x0 minor 0x0 status 0x8
+panthor0: [drm] Features: L2:0x8130306 Tiler:0x809 Mem:0x301 MMU:0x2830 AS:0xff
+panthor0: [drm] shader_present=0x550555 l2_present=0x1 tiler_present=0x1
+panthor0: successfully loaded firmware image 'arm/mali/arch12.8/mali_csffw.bin'
+panthor0: [drm] Firmware protected mode entry not be supported, ignoring
+panthor0: [drm] Firmware git sha: 95a25d71030715381f33105394285e1dcc860a65 
+panthor0: [drm] CSF FW using interface v3.13.0, Features 0x10 Instrumentation features 0x71
+[drm] Initialized panthor 1.7.0 for panthor on minor 1
+hdac0: <CIX Sky1 HDA controller> iomem 0x70c0000-0x70cffff irq 18 on acpi0
+hdac0: hdac_get_capabilities: Hardware reports invalid rirb size (2), defaulting to 256
+hdacc0: <Realtek ALC269 HDA CODEC> at cad 0 on hdac0
+hdaa0: <Realtek ALC269 Audio Function Group> at nid 1 on hdacc0
+pcm0: <Realtek ALC269 (Analog 2.0+HP/2.0)> at nid 20,21 and 24,25 on hdaa0
+lkpi_v4l2: Linux video capture interface: v2.00
+amvx0: <Arm Mali-V video codec (CIX Sky1)> iomem 0x14230000-0x1423ffff,0x14240000-0x1424ffff irq 54 on acpi0
+amvx: MVX dev warning: Linlon v5276 identified. cores=4, core_mask=0xf, nlsid=4, id=0.
+aipu0: <Arm China Zhouyi NPU (CIX Sky1)> iomem 0x14260000-0x1426ffff irq 68 on acpi0
+aipu0: 3 NPU cores
+aipu0: AIPU KMD (v6.2.0) probe start...
+aipu0: GM policy is shared
+aipu0: AIPU is not behind an IOMMU.
+aipu0: driver mem management is disabled
+aipu0: AIPU detected: zhouyi-v3
+aipu0: ############# ZHOUYI V3 AIPU #############
+aipu0: # Maximum Partition Count: 1
+aipu0: # Maximum Command Pool Count: 1
+aipu0: # Enabled Partition Count: 1
+aipu0: # Enabled Cluster Count: 1
+aipu0: #
+aipu0: # -- Partition #0
+aipu0: # Cluster Count: 1
+aipu0: # Core Count per Cluster: 3
+aipu0: # TEC Count per Core: 4
+aipu0: ##########################################
+gpio0: <Cadence GPIO controller> iomem 0x4120000-0x412ffff irq 10 on acpi0
+gpiobus0: <GPIO bus (ACPI-hinted)> on gpio0
+gpioc0: <GPIO controller> at pins 0-31 on gpiobus0
+gpio1: <Cadence GPIO controller> iomem 0x4130000-0x413ffff irq 11 on acpi0
+gpiobus1: <GPIO bus (ACPI-hinted)> on gpio1
+gpioc1: <GPIO controller> at pins 0-31 on gpiobus1
+gpio2: <Cadence GPIO controller> iomem 0x4140000-0x414ffff irq 12 on acpi0
+gpiobus2: <GPIO bus (ACPI-hinted)> on gpio2
+gpioc2: <GPIO controller> at pins 0-31 on gpiobus2
+gpio3: <Cadence GPIO controller> iomem 0x4150000-0x415ffff irq 13 on acpi0
+gpiobus3: <GPIO bus (ACPI-hinted)> on gpio3
+gpioc3: <GPIO controller> at pins 0-16 on gpiobus3
+gpio4: <Cadence GPIO controller> iomem 0x16004000-0x16004fff irq 14 on acpi0
+gpiobus4: <GPIO bus (ACPI-hinted)> on gpio4
+gpioc4: <GPIO controller> at pins 0-31 on gpiobus4
+gpio_aei0 at pin 6 on gpiobus4
+gpio_aei0: Cannot set pin flags for pin 0x6
+gpio5: <Cadence GPIO controller> iomem 0x16005000-0x16005fff irq 15 on acpi0
+gpiobus5: <GPIO bus (ACPI-hinted)> on gpio5
+gpioc5: <GPIO controller> at pins 0-9 on gpiobus5
+gpio6: <Cadence GPIO controller> iomem 0x16006000-0x16006fff irq 16 on acpi0
+gpiobus6: <GPIO bus (ACPI-hinted)> on gpio6
+gpioc6: <GPIO controller> at pins 0-9 on gpiobus6
+zy7_spi0: <Cadence SPI Controller> iomem 0x4090000-0x409ffff irq 29 on acpi0
+spibus0: <SPI bus (ACPI-hinted)> on zy7_spi0
+spigen0: <SPI Generic IO> at cs 0 mode 0 on spibus0
+spigen1: <SPI Generic IO> at cs 1 mode 0 on spibus0
+spibus0: <unknown card> at cs 0 mode 0
+spibus0: <unknown card> at cs 0 mode 0
+spibus0: <unknown card> at cs 1 mode 0
+rge0: <RTL8126> mem 0x40000000-0x4000ffff,0x40010000-0x40013fff at device 0.0 on pci5
+rge0: relaxed ordering disabled (IOMMU translation)
+rge0: chip rev: RTL8126_2 (0x64a00000)
+rge0: Ethernet address: c0:74:2b:f9:42:34
+rge1: <RTL8126> mem 0x38000000-0x3800ffff,0x38010000-0x38013fff at device 0.0 on pci7
+rge1: relaxed ordering disabled (IOMMU translation)
+rge1: chip rev: RTL8126_2 (0x64a00000)
+rge1: Ethernet address: c0:74:2b:f9:42:35
+hms0: <vendor 0x1b1c product 0x1bac Mouse> on hidbus0
+hms0: 5 buttons and [XYW] coordinates ID=0
+hcons0: <vendor 0x0c45 product 0x0133 Consumer Control> on hidbus5
+hsctrl0: <vendor 0x0c45 product 0x0133 System Control> on hidbus5
+rx88030: <Epson RX8900 Real Time Clock> at addr 0x32 on iicbus3
+rx88030: registered as a time-of-day clock, resolution 1.000000s
+rts54530: <Realtek RTS5453 USB Type-C PD controller> at addr 0x30 on iicbus6
+rts54531: <Realtek RTS5453 USB Type-C PD controller> at addr 0x31 on iicbus6
+rts54531: none, none, data none, power none
+rts54530: USB, reverse, data host, power sink
+lo0: link state changed to UP
+rge0: link state changed to DOWN

@@ -1,0 +1,839 @@
+nexus0
+  acpi0 <CIXTEK SKY1EDK2>
+    unknown pnpinfo _HID=CIXHA018 _UID=2 _CID=none at handle=\_SB_.UCRU
+        I/O memory addresses:
+            0x416009c-0x416011b
+    uart0 <PrimeCell UART (PL011)> pnpinfo _HID=ARMH0011 _UID=1 _CID=none at handle=\_SB_.COM0
+        I/O memory addresses:
+            0x40b0000-0x40b0fff
+        Interrupts:
+            0x0
+    uart1 <PrimeCell UART (PL011)> pnpinfo _HID=ARMH0011 _UID=2 _CID=none at handle=\_SB_.COM1
+        I/O memory addresses:
+            0x40c0000-0x40c0fff
+        Interrupts:
+            0x1
+    uart2 <PrimeCell UART (PL011)> pnpinfo _HID=ARMH0011 _UID=3 _CID=none at handle=\_SB_.COM2
+        I/O memory addresses:
+            0x40d0000-0x40d0fff
+        Interrupts:
+            0x2
+    uart3 <PrimeCell UART (PL011)> pnpinfo _HID=ARMH0011 _UID=4 _CID=none at handle=\_SB_.COM3
+        I/O memory addresses:
+            0x40e0000-0x40e0fff
+        Interrupts:
+            0x3
+    unknown pnpinfo _HID=PRP0001 _UID=0 _CID=none at handle=\_SB_.DSTD
+        I/O memory addresses:
+            0x83000000-0x833fffff
+    unknown pnpinfo _HID=PRP0001 _UID=1 _CID=none at handle=\_SB_.DSTD.EXTR
+    unknown pnpinfo _HID=PRP0001 _UID=2 _CID=none at handle=\_SB_.DSTD.APAD
+        I/O memory addresses:
+            0x83de0000-0x83dfffff
+    unknown pnpinfo _HID=PRP0001 _UID=18 _CID=none at handle=\_SB_.RAOP (disabled)
+    unknown pnpinfo _HID=PRP0001 _UID=16 _CID=none at handle=\_SB_.SEPM (disabled)
+    unknown pnpinfo _HID=PRP0001 _UID=17 _CID=none at handle=\_SB_.DSMC (disabled)
+    unknown pnpinfo _HID=CIXHA019 _UID=0 _CID=none at handle=\_SB_.PDC0
+        I/O memory addresses:
+            0x16000000-0x16000fff
+    cix_mbox0 <CIX mailbox> pnpinfo _HID=CIXHA001 _UID=0 _CID=CIXHA001 at handle=\_SB_.MBX0
+        I/O memory addresses:
+            0x5060000-0x506ffff
+    cix_mbox1 <CIX mailbox> pnpinfo _HID=CIXHA001 _UID=1 _CID=CIXHA001 at handle=\_SB_.MBX1
+        I/O memory addresses:
+            0x5070000-0x507ffff
+    unknown pnpinfo _HID=CIXHA001 _UID=2 _CID=CIXHA001 at handle=\_SB_.MBX2 (disabled)
+    unknown pnpinfo _HID=CIXHA001 _UID=3 _CID=CIXHA001 at handle=\_SB_.MBX3 (disabled)
+    cix_mbox2 <CIX mailbox> pnpinfo _HID=CIXHA001 _UID=4 _CID=CIXHA001 at handle=\_SB_.MBX4
+        I/O memory addresses:
+            0x7100000-0x710ffff
+    cix_mbox3 <CIX mailbox> pnpinfo _HID=CIXHA001 _UID=5 _CID=CIXHA001 at handle=\_SB_.MBX5
+        I/O memory addresses:
+            0x70f0000-0x70fffff
+    cix_mbox4 <CIX mailbox> pnpinfo _HID=CIXHA001 _UID=6 _CID=CIXHA001 at handle=\_SB_.MBX6
+        I/O memory addresses:
+            0x6590000-0x659ffff
+    cix_mbox5 <CIX mailbox> pnpinfo _HID=CIXHA001 _UID=7 _CID=CIXHA001 at handle=\_SB_.MBX7
+        I/O memory addresses:
+            0x65a0000-0x65affff
+    unknown pnpinfo _HID=CIXHA010 _UID=0 _CID=none at handle=\_SB_.CCLK
+    unknown pnpinfo _HID=CIXA1019 _UID=0 _CID=none at handle=\_SB_.REST
+    unknown pnpinfo _HID=CIXHA020 _UID=0 _CID=none at handle=\_SB_.RST0
+    unknown pnpinfo _HID=CIXHA021 _UID=0 _CID=none at handle=\_SB_.RST1
+    unknown pnpinfo _HID=CIXHA018 _UID=4 _CID=none at handle=\_SB_.CRU0
+    unknown pnpinfo _HID=CIXHA018 _UID=3 _CID=none at handle=\_SB_.GCRU (disabled)
+    unknown pnpinfo _HID=CIXH7020 _UID=0 _CID=none at handle=\_SB_.MAC0 (disabled)
+    unknown pnpinfo _HID=CIXH7020 _UID=1 _CID=none at handle=\_SB_.MAC1 (disabled)
+    acpi_tz0 <Thermal Zone> pnpinfo _HID=none _UID=0 _CID=none at handle=\_SB_.TZVU
+    acpi_tz1 <Thermal Zone> pnpinfo _HID=none _UID=0 _CID=none at handle=\_SB_.TZGB
+    acpi_tz2 <Thermal Zone> pnpinfo _HID=none _UID=0 _CID=none at handle=\_SB_.TZBR
+    acpi_tz3 <Thermal Zone> pnpinfo _HID=none _UID=0 _CID=none at handle=\_SB_.TZDB
+    acpi_tz4 <Thermal Zone> pnpinfo _HID=none _UID=0 _CID=none at handle=\_SB_.TZDT
+    acpi_tz5 <Thermal Zone> pnpinfo _HID=none _UID=0 _CID=none at handle=\_SB_.TZCT
+    acpi_tz6 <Thermal Zone> pnpinfo _HID=none _UID=0 _CID=none at handle=\_SB_.TZNU
+    acpi_tz7 <Thermal Zone> pnpinfo _HID=none _UID=0 _CID=none at handle=\_SB_.TZB0
+    acpi_tz8 <Thermal Zone> pnpinfo _HID=none _UID=0 _CID=none at handle=\_SB_.TZB1
+    acpi_tz9 <Thermal Zone> pnpinfo _HID=none _UID=0 _CID=none at handle=\_SB_.TZM0
+    acpi_tz10 <Thermal Zone> pnpinfo _HID=none _UID=0 _CID=none at handle=\_SB_.TZM1
+    acpi_tz11 <Thermal Zone> pnpinfo _HID=none _UID=0 _CID=none at handle=\_SB_.TZTR
+    acpi_tz12 <Thermal Zone> pnpinfo _HID=none _UID=0 _CID=none at handle=\_SB_.TZGT
+    unknown pnpinfo _HID=CIXHA004 _UID=0 _CID=none at handle=\_SB_.SHM0
+    unknown pnpinfo _HID=CIXHA005 _UID=0 _CID=none at handle=\_SB_.SHM1
+    sky1_scmi0 <CIX Sky1 SCMI> pnpinfo _HID=CIXHA006 _UID=0 _CID=none at handle=\_SB_.SCMI
+    unknown pnpinfo _HID=CIXHA008 _UID=0 _CID=none at handle=\_SB_.SCMI.DVFS (disabled)
+    unknown pnpinfo _HID=CIXHA009 _UID=0 _CID=none at handle=\_SB_.SCMI.CLKS (disabled)
+    unknown pnpinfo _HID=CIXHA000 _UID=0 _CID=none at handle=\_SB_.PMMX (disabled)
+    unknown pnpinfo _HID=CIXH6060 _UID=0 _CID=none at handle=\_SB_.ADSS
+        I/O memory addresses:
+            0x7110000-0x711ffff
+    sky1_audss0 <CIX Sky1 audio subsystem> pnpinfo _HID=CIXH6061 _UID=0 _CID=none at handle=\_SB_.ADSS.ACLK
+    unknown pnpinfo _HID=none _UID=0 _CID=none at handle=\_SB_.ADSS.ACLK.PPRS
+    unknown pnpinfo _HID=CIXH6062 _UID=0 _CID=none at handle=\_SB_.ADSS.ARST
+    unknown pnpinfo _HID=CIXHA018 _UID=0 _CID=none at handle=\_SB_.ACRU
+    gpio0 <Cadence GPIO controller> pnpinfo _HID=CIXH1002 _UID=0 _CID=none at handle=\_SB_.GPI0
+        I/O memory addresses:
+            0x4120000-0x412ffff
+      gpiobus0 <GPIO bus (ACPI-hinted)>
+        gpioc0 <GPIO controller> at pins=0-31 handle=(unknown)
+    gpio1 <Cadence GPIO controller> pnpinfo _HID=CIXH1003 _UID=1 _CID=none at handle=\_SB_.GPI1
+        I/O memory addresses:
+            0x4130000-0x413ffff
+      gpiobus1 <GPIO bus (ACPI-hinted)>
+        gpioc1 <GPIO controller> at pins=0-31 handle=(unknown)
+    gpio2 <Cadence GPIO controller> pnpinfo _HID=CIXH1003 _UID=2 _CID=none at handle=\_SB_.GPI2
+        I/O memory addresses:
+            0x4140000-0x414ffff
+      gpiobus2 <GPIO bus (ACPI-hinted)>
+        gpioc2 <GPIO controller> at pins=0-31 handle=(unknown)
+    gpio3 <Cadence GPIO controller> pnpinfo _HID=CIXH1003 _UID=3 _CID=none at handle=\_SB_.GPI3
+        I/O memory addresses:
+            0x4150000-0x415ffff
+      gpiobus3 <GPIO bus (ACPI-hinted)>
+        gpioc3 <GPIO controller> at pins=0-16 handle=(unknown)
+    gpio4 <Cadence GPIO controller> pnpinfo _HID=CIXH1003 _UID=4 _CID=none at handle=\_SB_.GPI4
+        I/O memory addresses:
+            0x16004000-0x16004fff
+      gpiobus4 <GPIO bus (ACPI-hinted)>
+        gpioc4 <GPIO controller> at pins=0-31 handle=(unknown)
+        gpio_aei0 <ACPI Event Information Device> at pins=6 handle=\_SB_.GPI4._AEI
+    gpio5 <Cadence GPIO controller> pnpinfo _HID=CIXH1003 _UID=5 _CID=none at handle=\_SB_.GPI5
+        I/O memory addresses:
+            0x16005000-0x16005fff
+      gpiobus5 <GPIO bus (ACPI-hinted)>
+        gpioc5 <GPIO controller> at pins=0-9 handle=(unknown)
+    gpio6 <Cadence GPIO controller> pnpinfo _HID=CIXH1003 _UID=6 _CID=none at handle=\_SB_.GPI6
+        I/O memory addresses:
+            0x16006000-0x16006fff
+      gpiobus6 <GPIO bus (ACPI-hinted)>
+        gpioc6 <GPIO controller> at pins=0-9 handle=(unknown)
+    unknown pnpinfo _HID=CIXH2011 _UID=0 _CID=none at handle=\_SB_.PWM0
+        I/O memory addresses:
+            0x4110000-0x4110fff
+    unknown pnpinfo _HID=CIXH2011 _UID=1 _CID=none at handle=\_SB_.PWM1 (disabled)
+    unknown pnpinfo _HID=CIXH2011 _UID=3 _CID=none at handle=\_SB_.PWM3 (disabled)
+    unknown pnpinfo _HID=CIXH2011 _UID=5 _CID=none at handle=\_SB_.PWM5 (disabled)
+    sky1_gpt0 <CIX Sky1 general purpose timer> pnpinfo _HID=CIXH1007 _UID=0 _CID=CIXH1007 at handle=\_SB_.TMR0
+        I/O memory addresses:
+            0x4116000-0x4117fff
+        Interrupts:
+            0x11
+    hdac0 <CIX Sky1 HDA controller> pnpinfo _HID=CIXH6020 _UID=0 _CID=none at handle=\_SB_.HDA_
+        I/O memory addresses:
+            0x70c0000-0x70cffff
+        Interrupts:
+            0x12
+      hdacc0 <Realtek ALC269 HDA CODEC> pnpinfo vendor=0x10ec device=0x0269 revision=0x02 stepping=0x03 at cad=0
+        hdaa0 <Realtek ALC269 Audio Function Group> pnpinfo type=0x01 subsystem=0x10ec129e at nid=1
+          pcm0 <Realtek ALC269 (Analog 2.0+HP/2.0)> at nid=20,21,24,25
+    unknown pnpinfo _HID=CIXHA018 _UID=1 _CID=none at handle=\_SB_.DCRU
+    unknown pnpinfo _HID=CIXH6000 _UID=0 _CID=none at handle=\_SB_.DSP_
+    unknown pnpinfo _HID=CIXHA014 _UID=0 _CID=none at handle=\_SB_.DMA0
+        I/O memory addresses:
+            0x4190000-0x419ffff
+    unknown pnpinfo _HID=CIXH1006 _UID=0 _CID=none at handle=\_SB_.DMA1
+        I/O memory addresses:
+            0x7010000-0x701ffff
+    unknown pnpinfo _HID=CIXH2002 _UID=0 _CID=none at handle=\_SB_.XSPI (disabled)
+    cdnc_i2c0 <Cadence I2C Controller> pnpinfo _HID=CIXH200B _UID=0 _CID=none at handle=\_SB_.I2C0
+        I/O memory addresses:
+            0x4010000-0x401ffff
+        Interrupts:
+            0x16
+      iicbus0 <Philips I2C bus (ACPI-hinted)>
+        unknown pnpinfo _HID=CIXH3024 _UID=0 _CID=none at addr=0x34 handle=\_SB_.I2C0.IIS0
+        unknown pnpinfo _HID=CIXH3023 _UID=0 _CID=none at addr=0x40 handle=\_SB_.I2C0.MTR0
+        iic0 <I2C generic I/O> at addr=0
+    cdnc_i2c1 <Cadence I2C Controller> pnpinfo _HID=CIXH200B _UID=1 _CID=none at handle=\_SB_.I2C1
+        I/O memory addresses:
+            0x4020000-0x402ffff
+        Interrupts:
+            0x17
+      iicbus1 <Philips I2C bus (ACPI-hinted)>
+        unknown pnpinfo _HID=CIXH3024 _UID=2 _CID=none at addr=0x38 handle=\_SB_.I2C1.IIS2
+        unknown pnpinfo _HID=CIXH3024 _UID=1 _CID=none at addr=0x36 handle=\_SB_.I2C1.IIS1
+        iic1 <I2C generic I/O> at addr=0
+    cdnc_i2c2 <Cadence I2C Controller> pnpinfo _HID=CIXH200B _UID=2 _CID=none at handle=\_SB_.I2C2
+        I/O memory addresses:
+            0x4030000-0x403ffff
+        Interrupts:
+            0x18
+      iicbus2 <Philips I2C bus (ACPI-hinted)>
+        unknown pnpinfo _HID=RTL5682 _UID=0 _CID=none at addr=0x1a handle=\_SB_.I2C2.RTL5
+        unknown pnpinfo _HID=SPBD0000 _UID=0 _CID=none at addr=0x38 handle=\_SB_.SPB0
+        iic2 <I2C generic I/O> at addr=0
+    cdnc_i2c3 <Cadence I2C Controller> pnpinfo _HID=CIXH200B _UID=3 _CID=none at handle=\_SB_.I2C3
+        I/O memory addresses:
+            0x4040000-0x404ffff
+        Interrupts:
+            0x19
+      iicbus3 <Philips I2C bus (ACPI-hinted)>
+        rx88030 <Epson RX8900 Real Time Clock> pnpinfo _HID=RX008900 _UID=0 _CID=none at addr=0x32 handle=\_SB_.I2C3.RTC0
+        iic3 <I2C generic I/O> at addr=0
+    cdnc_i2c4 <Cadence I2C Controller> pnpinfo _HID=CIXH200B _UID=4 _CID=none at handle=\_SB_.I2C4
+        I/O memory addresses:
+            0x4050000-0x405ffff
+        Interrupts:
+            0x1a
+      iicbus4 <Philips I2C bus (ACPI-hinted)>
+        unknown pnpinfo _HID=SPBD0000 _UID=1 _CID=none at addr=0x38 handle=\_SB_.SPB1
+        iic4 <I2C generic I/O> at addr=0
+    cdnc_i2c5 <Cadence I2C Controller> pnpinfo _HID=CIXH200B _UID=5 _CID=none at handle=\_SB_.I2C5
+        I/O memory addresses:
+            0x4060000-0x406ffff
+        Interrupts:
+            0x1b
+      iicbus5 <Philips I2C bus (ACPI-hinted)>
+        unknown pnpinfo _HID=SPBD0000 _UID=2 _CID=none at addr=0x38 handle=\_SB_.SPB2
+        iic5 <I2C generic I/O> at addr=0
+    unknown pnpinfo _HID=CIXH200B _UID=6 _CID=none at handle=\_SB_.I2C6 (disabled)
+    cdnc_i2c6 <Cadence I2C Controller> pnpinfo _HID=CIXH200B _UID=7 _CID=none at handle=\_SB_.I2C7
+        I/O memory addresses:
+            0x4080000-0x408ffff
+        Interrupts:
+            0x1c
+      iicbus6 <Philips I2C bus (ACPI-hinted)>
+        rts54530 <Realtek RTS5453 USB Type-C PD controller> pnpinfo _HID=CIXH200D _UID=1 _CID=none at addr=0x30 handle=\_SB_.I2C7.PD00
+        rts54531 <Realtek RTS5453 USB Type-C PD controller> pnpinfo _HID=CIXH200D _UID=2 _CID=none at addr=0x31 handle=\_SB_.I2C7.PD01
+        iic6 <I2C generic I/O> at addr=0
+    zy7_spi0 <Cadence SPI Controller> pnpinfo _HID=CIXH2001 _UID=0 _CID=none at handle=\_SB_.SPI0
+        I/O memory addresses:
+            0x4090000-0x409ffff
+        Interrupts:
+            0x1d
+      spibus0 <SPI bus (ACPI-hinted)>
+        spigen0 <SPI Generic IO> pnpinfo _HID=SPT0002 _UID=1 _CID=none at bus=0 cs=0 handle=\_SB_.SPI0.TP3_
+        spigen1 <SPI Generic IO> pnpinfo _HID=SPT0002 _UID=2 _CID=none at bus=0 cs=1 handle=\_SB_.SPI0.TP4_
+        unknown pnpinfo _HID=MSFT0101 _UID=1 _CID=MSFT0101 at bus=0 cs=0 handle=\_SB_.DTPM
+        unknown pnpinfo _HID=SPBD0000 _UID=3 _CID=none at bus=0 cs=0 handle=\_SB_.SPB3
+        unknown pnpinfo _HID=SPBD0000 _UID=4 _CID=none at bus=0 cs=1 handle=\_SB_.SPB4
+    unknown pnpinfo _HID=CIXH2001 _UID=1 _CID=none at handle=\_SB_.SPI1 (disabled)
+    unknown pnpinfo _HID=CIXH200C _UID=0 _CID=none at handle=\_SB_.I3C0 (disabled)
+    unknown pnpinfo _HID=CIXH200C _UID=1 _CID=none at handle=\_SB_.I3C1 (disabled)
+    pcib0 <Generic PCI host controller> pnpinfo _HID=PNP0A08 _UID=0 _CID=PNP0A03 at handle=\_SB_.PCI0
+        I/O memory addresses:
+            0x2c000000-0x2fffffff
+            0x60000000-0x7fffffff
+            0x1800000000-0x1bffffffff
+      pci0 <ACPI PCI bus>
+          PCI domain 0 bus numbers:
+              192
+        pcib1 <PCI-PCI bridge> pnpinfo vendor=0x17cd device=0x0100 subvendor=0x0000 subdevice=0x0000 class=0x060400 at slot=0 function=0 dbsf=pci0:192:0:0
+            pcib0 memory window:
+                0x60000000-0x600fffff
+            PCI domain 0 bus numbers:
+                193
+          pci1 <PCI bus>
+              pcib1 bus numbers:
+                  193
+            nvme0 <Generic NVMe Device> pnpinfo vendor=0x1344 device=0x5416 subvendor=0x1344 subdevice=0x1100 class=0x010802 at slot=0 function=0 dbsf=pci0:193:0:0
+                Interrupts:
+                    0xa0
+                    0xa1
+                    0xa2
+                    0xa3
+                    0xa4
+                    0xa5
+                    0xa6
+                    0xa7
+                    0xa8
+                    0xa9
+                    0xaa
+                    0xab
+                    0xac
+                pcib1 memory window:
+                    0x60000000-0x60003fff
+              nvme_sim0 <nvme cam>
+    pcib2 <Generic PCI host controller> pnpinfo _HID=PNP0A08 _UID=1 _CID=PNP0A03 at handle=\_SB_.PCI1
+        I/O memory addresses:
+            0x29000000-0x2affffff
+            0x50000000-0x5fffffff
+            0x1400000000-0x17ffffffff
+      pci2 <ACPI PCI bus>
+          PCI domain 0 bus numbers:
+              144
+        pcib3 <PCI-PCI bridge> pnpinfo vendor=0x17cd device=0x0100 subvendor=0x0000 subdevice=0x0000 class=0x060400 at slot=0 function=0 dbsf=pci0:144:0:0
+            PCI domain 0 bus numbers:
+                145
+            pcib2 memory window:
+                0x50000000-0x500fffff
+          pci3 <PCI bus>
+              pcib3 bus numbers:
+                  145
+            nvme1 <Generic NVMe Device> pnpinfo vendor=0x144d device=0xa80c subvendor=0x144d subdevice=0xa801 class=0x010802 at slot=0 function=0 dbsf=pci0:145:0:0
+                Interrupts:
+                    0xad
+                    0xae
+                    0xaf
+                    0xb0
+                    0xb1
+                    0xb2
+                    0xb3
+                    0xb4
+                    0xb5
+                    0xb6
+                    0xb7
+                    0xb8
+                    0xb9
+                pcib3 memory window:
+                    0x50000000-0x50003fff
+              nvme_sim1 <nvme cam>
+    pcib4 <Generic PCI host controller> pnpinfo _HID=PNP0A08 _UID=2 _CID=PNP0A03 at handle=\_SB_.PCI2
+        I/O memory addresses:
+            0x26000000-0x27ffffff
+            0x40000000-0x4fffffff
+            0x1000000000-0x13ffffffff
+      pci4 <ACPI PCI bus>
+          PCI domain 0 bus numbers:
+              96
+        pcib5 <PCI-PCI bridge> pnpinfo vendor=0x17cd device=0x0100 subvendor=0x0000 subdevice=0x0000 class=0x060400 at slot=0 function=0 dbsf=pci0:96:0:0
+            PCI domain 0 bus numbers:
+                97
+            pcib4 memory window:
+                0x40000000-0x400fffff
+          pci5 <PCI bus>
+              pcib5 bus numbers:
+                  97
+            rge0 <RTL8126> pnpinfo vendor=0x10ec device=0x8126 subvendor=0x10ec subdevice=0x0123 class=0x020000 at slot=0 function=0 dbsf=pci0:97:0:0
+                Interrupts:
+                    0xba
+                pcib5 memory window:
+                    0x40000000-0x4000ffff
+                    0x40010000-0x40013fff
+    pcib6 <Generic PCI host controller> pnpinfo _HID=PNP0A08 _UID=3 _CID=PNP0A03 at handle=\_SB_.PCI3
+        I/O memory addresses:
+            0x23000000-0x24ffffff
+            0x38000000-0x3fffffff
+            0xc00000000-0xfffffffff
+      pci6 <ACPI PCI bus>
+          PCI domain 0 bus numbers:
+              48
+        pcib7 <PCI-PCI bridge> pnpinfo vendor=0x17cd device=0x0100 subvendor=0x0000 subdevice=0x0000 class=0x060400 at slot=0 function=0 dbsf=pci0:48:0:0
+            PCI domain 0 bus numbers:
+                49
+            pcib6 memory window:
+                0x38000000-0x380fffff
+          pci7 <PCI bus>
+              pcib7 bus numbers:
+                  49
+            rge1 <RTL8126> pnpinfo vendor=0x10ec device=0x8126 subvendor=0x10ec subdevice=0x0123 class=0x020000 at slot=0 function=0 dbsf=pci0:49:0:0
+                Interrupts:
+                    0xbb
+                pcib7 memory window:
+                    0x38000000-0x3800ffff
+                    0x38010000-0x38013fff
+    unknown pnpinfo _HID=PNP0A08 _UID=4 _CID=PNP0A03 at handle=\_SB_.PCI4 (disabled)
+    acpi_sysresource0 <System Resource> pnpinfo _HID=PNP0C02 _UID=0 _CID=none at handle=\_SB_.RES0
+    unknown pnpinfo _HID=CIXH2020 _UID=0 _CID=none at handle=\_SB_.PRC0
+    unknown pnpinfo _HID=CIXH2023 _UID=0 _CID=none at handle=\_SB_.PCP0
+        I/O memory addresses:
+            0xa020000-0xa05ffff
+    unknown pnpinfo _HID=CIXH2020 _UID=1 _CID=none at handle=\_SB_.PRC1
+    unknown pnpinfo _HID=CIXH2023 _UID=1 _CID=none at handle=\_SB_.PCP1
+        I/O memory addresses:
+            0xa080000-0xa0bffff
+    unknown pnpinfo _HID=CIXH2020 _UID=2 _CID=none at handle=\_SB_.PRC2
+    unknown pnpinfo _HID=CIXH2020 _UID=3 _CID=none at handle=\_SB_.PRC3
+    unknown pnpinfo _HID=CIXH2020 _UID=4 _CID=none at handle=\_SB_.PRC4 (disabled)
+    unknown pnpinfo _HID=CIXH2023 _UID=2 _CID=none at handle=\_SB_.PCP2
+        I/O memory addresses:
+            0xa0f0000-0xa12ffff
+    amvx0 <Arm Mali-V video codec (CIX Sky1)> pnpinfo _HID=CIXH3010 _UID=0 _CID=none at handle=\_SB_.VPU0
+        I/O memory addresses:
+            0x14230000-0x1423ffff
+            0x14240000-0x1424ffff
+        Interrupts:
+            0x36
+      video4linux0
+      video4linux1
+      video4linux2
+      video4linux3
+    unknown pnpinfo _HID=none _UID=0 _CID=none at handle=\_SB_.VPU0.PPRS
+    unknown pnpinfo _HID=none _UID=0 _CID=none at handle=\_SB_.VPU0.CRE0.PRS0
+    unknown pnpinfo _HID=none _UID=0 _CID=none at handle=\_SB_.VPU0.CRE1.PRS1
+    unknown pnpinfo _HID=none _UID=0 _CID=none at handle=\_SB_.VPU0.CRE2.PRS2
+    unknown pnpinfo _HID=none _UID=0 _CID=none at handle=\_SB_.VPU0.CRE3.PRS3
+    unknown pnpinfo _HID=CIXH503F _UID=0 _CID=none at handle=\_SB_.VDP0 (disabled)
+    unknown pnpinfo _HID=CIXH503F _UID=1 _CID=none at handle=\_SB_.VDP1 (disabled)
+    unknown pnpinfo _HID=CIXH503F _UID=2 _CID=none at handle=\_SB_.VDP2 (disabled)
+    unknown pnpinfo _HID=CIXH503F _UID=3 _CID=none at handle=\_SB_.VDP3 (disabled)
+    unknown pnpinfo _HID=CIXH503F _UID=4 _CID=none at handle=\_SB_.VDP4 (disabled)
+    unknown pnpinfo _HID=CIXH503F _UID=5 _CID=none at handle=\_SB_.VDP5 (disabled)
+    unknown pnpinfo _HID=CIXH503F _UID=6 _CID=none at handle=\_SB_.VDP6 (disabled)
+    unknown pnpinfo _HID=CIXH503F _UID=7 _CID=none at handle=\_SB_.VDP7 (disabled)
+    unknown pnpinfo _HID=CIXH503F _UID=8 _CID=none at handle=\_SB_.VDP8 (disabled)
+    unknown pnpinfo _HID=CIXH503F _UID=9 _CID=none at handle=\_SB_.VDP9 (disabled)
+    unknown pnpinfo _HID=CIXH502F _UID=0 _CID=none at handle=\_SB_.DP00
+        I/O memory addresses:
+            0x14050000-0x14050303
+            0x14064000-0x14067fff
+            0x14068000-0x1406bfff
+            0x1406ff00-0x1406ffff
+    unknown pnpinfo _HID=CIXH502F _UID=1 _CID=none at handle=\_SB_.DP01
+        I/O memory addresses:
+            0x140c0000-0x140c0303
+            0x140d4000-0x140d7fff
+            0x140d8000-0x140dbfff
+            0x140dff00-0x140dffff
+    unknown pnpinfo _HID=CIXH502F _UID=2 _CID=none at handle=\_SB_.DP02
+        I/O memory addresses:
+            0x14130000-0x1413031f
+            0x14144000-0x14147fff
+            0x14148000-0x1414bfff
+            0x1414c000-0x1414ffff
+    unknown pnpinfo _HID=CIXH502F _UID=3 _CID=none at handle=\_SB_.DP03
+        I/O memory addresses:
+            0x141a0000-0x141a0303
+            0x141b4000-0x141b7fff
+            0x141b8000-0x141bbfff
+            0x141bff00-0x141bffff
+    sky1_dptx0 <Trilinear DisplayPort transmitter (CIX Sky1)> pnpinfo _HID=CIXH502F _UID=4 _CID=none at handle=\_SB_.DP04
+        I/O memory addresses:
+            0x14210000-0x14210303
+            0x14224000-0x14227fff
+            0x14228000-0x1422bfff
+            0x1422ff00-0x1422ffff
+        Interrupts:
+            0x3b
+      lkpi_iic0
+    unknown pnpinfo _HID=CIXH5010 _UID=0 _CID=none at handle=\_SB_.DPU0
+        I/O memory addresses:
+            0x14010000-0x1402ffff
+    unknown pnpinfo _HID=none _UID=0 _CID=none at handle=\_SB_.DPU0.PRS0
+    unknown pnpinfo _HID=CIXH5010 _UID=1 _CID=none at handle=\_SB_.DPU1
+        I/O memory addresses:
+            0x14080000-0x1409ffff
+    unknown pnpinfo _HID=none _UID=0 _CID=none at handle=\_SB_.DPU1.PRS1
+    unknown pnpinfo _HID=CIXH5010 _UID=2 _CID=none at handle=\_SB_.DPU2
+        I/O memory addresses:
+            0x140f0000-0x1410ffff
+    unknown pnpinfo _HID=none _UID=0 _CID=none at handle=\_SB_.DPU2.PRS2
+    unknown pnpinfo _HID=CIXH5010 _UID=3 _CID=none at handle=\_SB_.DPU3
+        I/O memory addresses:
+            0x14160000-0x1417ffff
+    unknown pnpinfo _HID=none _UID=0 _CID=none at handle=\_SB_.DPU3.PRS3
+    komeda0 <Arm China Linlon display controller (CIX Sky1)> pnpinfo _HID=CIXH5010 _UID=4 _CID=none at handle=\_SB_.DPU4
+        I/O memory addresses:
+            0x141d0000-0x141effff
+        Interrupts:
+            0x40
+      drm0
+        drm1
+        drm2
+        drm3
+      fbd0
+    unknown pnpinfo _HID=none _UID=0 _CID=none at handle=\_SB_.DPU4.PRS4
+    unknown pnpinfo _HID=CIXH5011 _UID=0 _CID=none at handle=\_SB_.AEU0 (disabled)
+    unknown pnpinfo _HID=CIXH5011 _UID=1 _CID=none at handle=\_SB_.AEU1 (disabled)
+    unknown pnpinfo _HID=CIXH5011 _UID=2 _CID=none at handle=\_SB_.AEU2 (disabled)
+    unknown pnpinfo _HID=CIXH5011 _UID=3 _CID=none at handle=\_SB_.AEU3 (disabled)
+    unknown pnpinfo _HID=CIXH5011 _UID=4 _CID=none at handle=\_SB_.AEU4 (disabled)
+    unknown pnpinfo _HID=CIXH5041 _UID=0 _CID=none at handle=\_SB_.DPBL
+    unknown pnpinfo _HID=CIXH5040 _UID=0 _CID=none at handle=\_SB_.EDP0
+    unknown pnpinfo _HID=CIXHA012 _UID=0 _CID=none at handle=\_SB_.PMA_ (disabled)
+    unknown pnpinfo _HID=CIXHA013 _UID=0 _CID=none at handle=\_SB_.PMGM (disabled)
+    unknown pnpinfo _HID=CIXH5001 _UID=0 _CID=none at handle=\_SB_.GPUP
+    unknown pnpinfo _HID=none _UID=0 _CID=none at handle=\_SB_.GPUP.PPRS
+    panthor0 <Arm Mali GPU (CIX Sky1)> pnpinfo _HID=CIXH5000 _UID=0 _CID=none at handle=\_SB_.GPU_
+        I/O memory addresses:
+            0x15000000-0x1500ffff
+            0x15010000-0x1548ffff
+        Interrupts:
+            0x41
+            0x42
+            0x43
+      drm128
+    aipu0 <Arm China Zhouyi NPU (CIX Sky1)> pnpinfo _HID=CIXH4000 _UID=0 _CID=none at handle=\_SB_.NPU0
+        I/O memory addresses:
+            0x14260000-0x1426ffff
+        Interrupts:
+            0x44
+    unknown pnpinfo _HID=none _UID=0 _CID=none at handle=\_SB_.NPU0.PPRS
+    unknown pnpinfo _HID=CIXH4010 _UID=0 _CID=none at handle=\_SB_.NPU0.CRE0
+    unknown pnpinfo _HID=none _UID=0 _CID=none at handle=\_SB_.NPU0.CRE0.PRS0
+    unknown pnpinfo _HID=CIXH4010 _UID=1 _CID=none at handle=\_SB_.NPU0.CRE1
+    unknown pnpinfo _HID=none _UID=0 _CID=none at handle=\_SB_.NPU0.CRE1.PRS1
+    unknown pnpinfo _HID=CIXH4010 _UID=2 _CID=none at handle=\_SB_.NPU0.CRE2
+    unknown pnpinfo _HID=none _UID=0 _CID=none at handle=\_SB_.NPU0.CRE2.PRS2
+    unknown pnpinfo _HID=CIXH6010 _UID=0 _CID=none at handle=\_SB_.I2S0 (disabled)
+    unknown pnpinfo _HID=CIXH6010 _UID=1 _CID=none at handle=\_SB_.I2S1 (disabled)
+    unknown pnpinfo _HID=CIXH6010 _UID=2 _CID=none at handle=\_SB_.I2S2 (disabled)
+    unknown pnpinfo _HID=CIXH6011 _UID=3 _CID=none at handle=\_SB_.I2S3 (disabled)
+    unknown pnpinfo _HID=CIXH6011 _UID=4 _CID=none at handle=\_SB_.I2S4 (disabled)
+    unknown pnpinfo _HID=CIXH6011 _UID=5 _CID=none at handle=\_SB_.I2S5
+        I/O memory addresses:
+            0x7070000-0x707ffff
+    unknown pnpinfo _HID=CIXH6011 _UID=6 _CID=none at handle=\_SB_.I2S6
+        I/O memory addresses:
+            0x7080000-0x708ffff
+    unknown pnpinfo _HID=CIXH6011 _UID=7 _CID=none at handle=\_SB_.I2S7 (disabled)
+    unknown pnpinfo _HID=CIXH6011 _UID=8 _CID=none at handle=\_SB_.I2S8
+        I/O memory addresses:
+            0x70a0000-0x70affff
+    unknown pnpinfo _HID=CIXH6011 _UID=9 _CID=none at handle=\_SB_.I2S9
+        I/O memory addresses:
+            0x70b0000-0x70bffff
+    xhci0 <Generic USB 3.0 controller> pnpinfo _HID=PNP0D10 _UID=0 _CID=none at handle=\_SB_.XHC0
+        I/O memory addresses:
+            0x9018000-0x901ffff
+        Interrupts:
+            0x49
+      usbus0
+        uhub4 <Generic XHCI root HUB, class 9/0, rev 3.00/1.00, addr 1>
+    xhci1 <Generic USB 3.0 controller> pnpinfo _HID=PNP0D10 _UID=1 _CID=none at handle=\_SB_.XHC1
+        I/O memory addresses:
+            0x9088000-0x908ffff
+        Interrupts:
+            0x4a
+      usbus1
+        uhub0 <Generic XHCI root HUB, class 9/0, rev 3.00/1.00, addr 1>
+    xhci2 <Generic USB 3.0 controller> pnpinfo _HID=PNP0D10 _UID=2 _CID=none at handle=\_SB_.XHC2
+        I/O memory addresses:
+            0x90f8000-0x90fffff
+        Interrupts:
+            0x4b
+      usbus2
+        uhub1 <Generic XHCI root HUB, class 9/0, rev 3.00/1.00, addr 1>
+    xhci3 <Generic USB 3.0 controller> pnpinfo _HID=PNP0D10 _UID=3 _CID=none at handle=\_SB_.XHC3
+        I/O memory addresses:
+            0x9168000-0x916ffff
+        Interrupts:
+            0x4c
+      usbus3
+        uhub2 <Generic XHCI root HUB, class 9/0, rev 3.00/1.00, addr 1>
+    xhci4 <Generic USB 3.0 controller> pnpinfo _HID=PNP0D10 _UID=4 _CID=none at handle=\_SB_.XHC4
+        I/O memory addresses:
+            0x91d8000-0x91dffff
+        Interrupts:
+            0x4d
+      usbus4
+        uhub3 <Generic XHCI root HUB, class 9/0, rev 3.00/1.00, addr 1>
+    xhci5 <Generic USB 3.0 controller> pnpinfo _HID=PNP0D10 _UID=5 _CID=none at handle=\_SB_.XHC5
+        I/O memory addresses:
+            0x91e8000-0x91effff
+        Interrupts:
+            0x4e
+      usbus5
+        uhub5 <Generic XHCI root HUB, class 9/0, rev 3.00/1.00, addr 1>
+    xhci6 <Generic USB 3.0 controller> pnpinfo _HID=PNP0D10 _UID=6 _CID=none at handle=\_SB_.USB0
+        I/O memory addresses:
+            0x9268000-0x926ffff
+        Interrupts:
+            0x4f
+      usbus6
+        uhub6 <Generic XHCI root HUB, class 9/0, rev 3.00/1.00, addr 1>
+    xhci7 <Generic USB 3.0 controller> pnpinfo _HID=PNP0D10 _UID=7 _CID=none at handle=\_SB_.USB1
+        I/O memory addresses:
+            0x9298000-0x929ffff
+        Interrupts:
+            0x50
+      usbus7
+        uhub8 <Generic XHCI root HUB, class 9/0, rev 3.00/1.00, addr 1>
+          uhub10 <vendor 0x1a40 USB 2.0 Hub, class 9/0, rev 2.00/1.11, addr 1> pnpinfo vendor=0x1a40 product=0x0101 devclass=0x09 devsubclass=0x00 devproto=0x01 sernum="" release=0x0111 mode=host intclass=0x09 intsubclass=0x00 intprotocol=0x00 at bus=7 hubaddr=1 port=1 devaddr=2 interface=0 ugen=ugen7.2
+            usbhid0 <vendor 0x1b1c product 0x1bac, class 0/0, rev 2.00/1.07, addr 2> pnpinfo vendor=0x1b1c product=0x1bac devclass=0x00 devsubclass=0x00 devproto=0x00 sernum="" release=0x0107 mode=host intclass=0x03 intsubclass=0x01 intprotocol=0x02 at bus=7 hubaddr=2 port=2 devaddr=3 interface=0 ugen=ugen7.3
+              hidbus0 <HID bus>
+                hms0 <vendor 0x1b1c product 0x1bac Mouse> pnpinfo page=0x0001 usage=0x0002 bus=0x03 vendor=0x1b1c product=0x1bac version=0x0107 at index=0
+            usbhid1 <vendor 0x1b1c product 0x1bac, class 0/0, rev 2.00/1.07, addr 2> pnpinfo vendor=0x1b1c product=0x1bac devclass=0x00 devsubclass=0x00 devproto=0x00 sernum="" release=0x0107 mode=host intclass=0x03 intsubclass=0x00 intprotocol=0x00 at bus=7 hubaddr=2 port=2 devaddr=3 interface=1 ugen=ugen7.3
+              hidbus1 <HID bus>
+                unknown pnpinfo page=0xff42 usage=0x0001 bus=0x03 vendor=0x1b1c product=0x1bac version=0x0107 at index=0
+            usbhid2 <vendor 0x1b1c product 0x1bac, class 0/0, rev 2.00/1.07, addr 2> pnpinfo vendor=0x1b1c product=0x1bac devclass=0x00 devsubclass=0x00 devproto=0x00 sernum="" release=0x0107 mode=host intclass=0x03 intsubclass=0x00 intprotocol=0x00 at bus=7 hubaddr=2 port=2 devaddr=3 interface=2 ugen=ugen7.3
+              hidbus2 <HID bus>
+            usbhid3 <vendor 0x1b1c product 0x1bac, class 0/0, rev 2.00/1.07, addr 2> pnpinfo vendor=0x1b1c product=0x1bac devclass=0x00 devsubclass=0x00 devproto=0x00 sernum="" release=0x0107 mode=host intclass=0x03 intsubclass=0x01 intprotocol=0x01 at bus=7 hubaddr=2 port=2 devaddr=3 interface=3 ugen=ugen7.3
+              hidbus3 <HID bus>
+            usbhid4 <vendor 0x0c45 product 0x0133, class 0/0, rev 1.10/2.00, addr 3> pnpinfo vendor=0x0c45 product=0x0133 devclass=0x00 devsubclass=0x00 devproto=0x00 sernum="" release=0x0200 mode=host intclass=0x03 intsubclass=0x01 intprotocol=0x01 at bus=7 hubaddr=2 port=3 devaddr=4 interface=0 ugen=ugen7.4
+              hidbus4 <HID bus>
+                hkbd0 <vendor 0x0c45 product 0x0133 Keyboard> pnpinfo page=0x0001 usage=0x0006 bus=0x03 vendor=0x0c45 product=0x0133 version=0x0200 at index=0
+            usbhid5 <vendor 0x0c45 product 0x0133, class 0/0, rev 1.10/2.00, addr 3> pnpinfo vendor=0x0c45 product=0x0133 devclass=0x00 devsubclass=0x00 devproto=0x00 sernum="" release=0x0200 mode=host intclass=0x03 intsubclass=0x01 intprotocol=0x00 at bus=7 hubaddr=2 port=3 devaddr=4 interface=1 ugen=ugen7.4
+              hidbus5 <HID bus>
+                hcons0 <vendor 0x0c45 product 0x0133 Consumer Control> pnpinfo page=0x000c usage=0x0001 bus=0x03 vendor=0x0c45 product=0x0133 version=0x0200 at index=0
+                hsctrl0 <vendor 0x0c45 product 0x0133 System Control> pnpinfo page=0x0001 usage=0x0080 bus=0x03 vendor=0x0c45 product=0x0133 version=0x0200 at index=1
+    xhci8 <Generic USB 3.0 controller> pnpinfo _HID=PNP0D10 _UID=8 _CID=none at handle=\_SB_.USB2
+        I/O memory addresses:
+            0x92c8000-0x92cffff
+        Interrupts:
+            0x51
+      usbus8
+        uhub7 <Generic XHCI root HUB, class 9/0, rev 3.00/1.00, addr 1>
+    xhci9 <Generic USB 3.0 controller> pnpinfo _HID=PNP0D10 _UID=9 _CID=none at handle=\_SB_.USB3
+        I/O memory addresses:
+            0x92f8000-0x92fffff
+        Interrupts:
+            0x52
+      usbus9
+        uhub9 <Generic XHCI root HUB, class 9/0, rev 3.00/1.00, addr 1>
+    unknown pnpinfo _HID=CIXH2030 _UID=0 _CID=none at handle=\_SB_.SUB0
+        I/O memory addresses:
+            0x9000310-0x9000313
+            0x9000400-0x9000403
+    unknown pnpinfo _HID=CIXH2031 _UID=0 _CID=none at handle=\_SB_.SUB0.CUB0
+        I/O memory addresses:
+            0x9010000-0x9013fff
+            0x9014000-0x9017fff
+    unknown pnpinfo _HID=CIXH2032 _UID=4 _CID=none at handle=\_SB_.U2P4
+    unknown pnpinfo _HID=CIXH2033 _UID=0 _CID=none at handle=\_SB_.UCP0
+        I/O memory addresses:
+            0x9030000-0x906ffff
+    unknown pnpinfo _HID=CIXH2030 _UID=1 _CID=none at handle=\_SB_.SUB1
+        I/O memory addresses:
+            0x9070310-0x9070313
+            0x9070400-0x9070403
+    unknown pnpinfo _HID=CIXH2031 _UID=1 _CID=none at handle=\_SB_.SUB1.CUB1
+        I/O memory addresses:
+            0x9080000-0x9083fff
+            0x9084000-0x9087fff
+    unknown pnpinfo _HID=CIXH2032 _UID=5 _CID=none at handle=\_SB_.U2P5
+    unknown pnpinfo _HID=CIXH2033 _UID=1 _CID=none at handle=\_SB_.UCP1
+        I/O memory addresses:
+            0x90a0000-0x90dffff
+    unknown pnpinfo _HID=CIXH2030 _UID=2 _CID=none at handle=\_SB_.SUB2
+        I/O memory addresses:
+            0x90e0310-0x90e0313
+            0x90e0400-0x90e0403
+    unknown pnpinfo _HID=CIXH2031 _UID=2 _CID=none at handle=\_SB_.SUB2.CUB2
+        I/O memory addresses:
+            0x90f0000-0x90f3fff
+            0x90f4000-0x90f7fff
+    unknown pnpinfo _HID=CIXH2032 _UID=8 _CID=none at handle=\_SB_.U2P8
+    unknown pnpinfo _HID=CIXH2033 _UID=2 _CID=none at handle=\_SB_.UCP2
+        I/O memory addresses:
+            0x9110000-0x914ffff
+    unknown pnpinfo _HID=CIXH2030 _UID=3 _CID=none at handle=\_SB_.SUB3
+        I/O memory addresses:
+            0x9150310-0x9150313
+            0x9150400-0x9150403
+    unknown pnpinfo _HID=CIXH2031 _UID=3 _CID=none at handle=\_SB_.SUB3.CUB3
+        I/O memory addresses:
+            0x9160000-0x9163fff
+            0x9164000-0x9167fff
+    unknown pnpinfo _HID=CIXH2032 _UID=9 _CID=none at handle=\_SB_.U2P9
+    sky1_udphy0 <USB-C/DisplayPort combo PHY (CIX Sky1)> pnpinfo _HID=CIXH2033 _UID=3 _CID=none at handle=\_SB_.UCP3
+        I/O memory addresses:
+            0x9180000-0x91bffff
+    unknown pnpinfo _HID=CIXH2030 _UID=4 _CID=none at handle=\_SB_.SUB4
+        I/O memory addresses:
+            0x91c0314-0x91c0317
+            0x91c0400-0x91c0403
+    unknown pnpinfo _HID=CIXH2031 _UID=4 _CID=none at handle=\_SB_.SUB4.CUB4
+        I/O memory addresses:
+            0x91d0000-0x91d3fff
+            0x91d4000-0x91d7fff
+    unknown pnpinfo _HID=CIXH2030 _UID=5 _CID=none at handle=\_SB_.SUB5
+        I/O memory addresses:
+            0x91c0324-0x91c0327
+            0x91c0410-0x91c0413
+    unknown pnpinfo _HID=CIXH2031 _UID=5 _CID=none at handle=\_SB_.SUB5.CUB5
+        I/O memory addresses:
+            0x91e0000-0x91e3fff
+            0x91e4000-0x91e7fff
+    unknown pnpinfo _HID=CIXH2032 _UID=6 _CID=none at handle=\_SB_.U2P6
+    unknown pnpinfo _HID=CIXH2032 _UID=7 _CID=none at handle=\_SB_.U2P7
+    unknown pnpinfo _HID=CIXH2034 _UID=4 _CID=none at handle=\_SB_.U3P4
+        I/O memory addresses:
+            0x9210000-0x924ffff
+    unknown pnpinfo _HID=CIXH2030 _UID=6 _CID=none at handle=\_SB_.HUB0
+        I/O memory addresses:
+            0x9250310-0x9250313
+            0x9250400-0x9250403
+    unknown pnpinfo _HID=CIXH2031 _UID=0 _CID=none at handle=\_SB_.HUB0.CUB0
+        I/O memory addresses:
+            0x9260000-0x9263fff
+            0x9264000-0x9267fff
+    unknown pnpinfo _HID=CIXH2030 _UID=7 _CID=none at handle=\_SB_.HUB1
+        I/O memory addresses:
+            0x9280310-0x9280313
+            0x9280400-0x9280403
+    unknown pnpinfo _HID=CIXH2031 _UID=1 _CID=none at handle=\_SB_.HUB1.CUB1
+        I/O memory addresses:
+            0x9290000-0x9293fff
+            0x9294000-0x9297fff
+    unknown pnpinfo _HID=CIXH2032 _UID=0 _CID=none at handle=\_SB_.U2P0
+    unknown pnpinfo _HID=CIXH2032 _UID=1 _CID=none at handle=\_SB_.U2P1
+    unknown pnpinfo _HID=CIXH2030 _UID=8 _CID=none at handle=\_SB_.HUB2
+        I/O memory addresses:
+            0x92b0310-0x92b0313
+            0x92b0400-0x92b0403
+    unknown pnpinfo _HID=CIXH2031 _UID=2 _CID=none at handle=\_SB_.HUB2.CUB2
+        I/O memory addresses:
+            0x92c0000-0x92c3fff
+            0x92c4000-0x92c7fff
+    unknown pnpinfo _HID=CIXH2032 _UID=2 _CID=none at handle=\_SB_.U2P2
+    unknown pnpinfo _HID=CIXH2030 _UID=9 _CID=none at handle=\_SB_.HUB3
+        I/O memory addresses:
+            0x92e0310-0x92e0313
+            0x92e0400-0x92e0403
+    unknown pnpinfo _HID=CIXH2031 _UID=3 _CID=none at handle=\_SB_.HUB3.CUB3
+        I/O memory addresses:
+            0x92f0000-0x92f3fff
+            0x92f4000-0x92f7fff
+    unknown pnpinfo _HID=CIXH2032 _UID=3 _CID=none at handle=\_SB_.U2P3
+    unknown pnpinfo _HID=CIXH3020 _UID=0 _CID=none at handle=\_SB_.V4L2
+    unknown pnpinfo _HID=CIXH3021 _UID=0 _CID=none at handle=\_SB_.ISP0
+        I/O memory addresses:
+            0x14340000-0x1434ffff
+            0x14360000-0x143affff
+    unknown pnpinfo _HID=CIXH3022 _UID=0 _CID=none at handle=\_SB_.ISP1 (disabled)
+    unknown pnpinfo _HID=CIXH3022 _UID=1 _CID=none at handle=\_SB_.ISP2 (disabled)
+    unknown pnpinfo _HID=CIXH3022 _UID=2 _CID=none at handle=\_SB_.ISP3 (disabled)
+    unknown pnpinfo _HID=CIXH3025 _UID=0 _CID=none at handle=\_SB_.ISPM
+    unknown pnpinfo _HID=none _UID=0 _CID=none at handle=\_SB_.ISPM.PRS0
+    unknown pnpinfo _HID=CIXH3026 _UID=0 _CID=none at handle=\_SB_.VIHW
+    unknown pnpinfo _HID=CIXH3027 _UID=0 _CID=none at handle=\_SB_.CSI0
+        I/O memory addresses:
+            0x14270000-0x1427ffff
+    unknown pnpinfo _HID=CIXH3027 _UID=1 _CID=none at handle=\_SB_.CSI1 (disabled)
+    unknown pnpinfo _HID=CIXH3028 _UID=0 _CID=none at handle=\_SB_.CBD0
+        I/O memory addresses:
+            0x142b0000-0x142bffff
+    unknown pnpinfo _HID=CIXH3028 _UID=1 _CID=none at handle=\_SB_.CBD1 (disabled)
+    unknown pnpinfo _HID=CIXH3028 _UID=2 _CID=none at handle=\_SB_.CBD2 (disabled)
+    unknown pnpinfo _HID=CIXH3028 _UID=3 _CID=none at handle=\_SB_.CBD3 (disabled)
+    unknown pnpinfo _HID=CIXH3029 _UID=0 _CID=none at handle=\_SB_.MPC0
+        I/O memory addresses:
+            0x14280000-0x1428ffff
+    unknown pnpinfo _HID=CIXH3029 _UID=1 _CID=none at handle=\_SB_.MPC1 (disabled)
+    unknown pnpinfo _HID=CIXH3029 _UID=2 _CID=none at handle=\_SB_.MPC2 (disabled)
+    unknown pnpinfo _HID=CIXH3029 _UID=3 _CID=none at handle=\_SB_.MPC3 (disabled)
+    unknown pnpinfo _HID=CIXH302A _UID=0 _CID=none at handle=\_SB_.DPH0
+        I/O memory addresses:
+            0x142a0000-0x142affff
+    unknown pnpinfo _HID=CIXH302A _UID=1 _CID=none at handle=\_SB_.DPH1 (disabled)
+    unknown pnpinfo _HID=CIXH302B _UID=0 _CID=none at handle=\_SB_.DPR0 (disabled)
+    unknown pnpinfo _HID=CIXH302B _UID=1 _CID=none at handle=\_SB_.DPR1
+    unknown pnpinfo _HID=CIXH302B _UID=2 _CID=none at handle=\_SB_.DPR2 (disabled)
+    unknown pnpinfo _HID=CIXH302B _UID=3 _CID=none at handle=\_SB_.DPR3 (disabled)
+    unknown pnpinfo _HID=CIXH302B _UID=4 _CID=none at handle=\_SB_.DPR4 (disabled)
+    unknown pnpinfo _HID=CIXH302B _UID=5 _CID=none at handle=\_SB_.DPR5 (disabled)
+    unknown pnpinfo _HID=CIXHA022 _UID=0 _CID=PRP0001 at handle=\_SB_.TEE0
+    unknown pnpinfo _HID=CIXHA023 _UID=0 _CID=none at handle=\_SB_.TREE
+    unknown pnpinfo _HID=CIXHA026 _UID=0 _CID=none at handle=\_SB_.PEP0
+    unknown pnpinfo _HID=CIXH6070 _UID=0 _CID=none at handle=\_SB_.SNDC
+    unknown pnpinfo _HID=CIXHA015 _UID=0 _CID=none at handle=\_SB_.EC0_ (disabled)
+    battery0 <ACPI Control Method Battery> pnpinfo _HID=PNP0C0A _UID=0 _CID=none at handle=\_SB_.BAT0
+    acpi_button0 <Power Button> pnpinfo _HID=PNP0C0C _UID=0 _CID=none at handle=\_SB_.PWRB
+    acpi_acad0 <AC Adapter> pnpinfo _HID=ACPI0003 _UID=0 _CID=none at handle=\_SB_.AC__
+    unknown pnpinfo _HID=CIXHA016 _UID=0 _CID=none at handle=\_SB_.MUX0
+        I/O memory addresses:
+            0x4170000-0x4170fff
+    unknown pnpinfo _HID=CIXHA017 _UID=1 _CID=none at handle=\_SB_.MUX1
+        I/O memory addresses:
+            0x16007000-0x16007fff
+    unknown pnpinfo _HID=CIXHA024 _UID=0 _CID=none at handle=\_SB_.HWMN (disabled)
+    unknown pnpinfo _HID=PRP0001 _UID=7 _CID=none at handle=\_SB_.PVC0
+    unknown pnpinfo _HID=PRP0001 _UID=8 _CID=none at handle=\_SB_.PVC1
+    unknown pnpinfo _HID=PRP0001 _UID=9 _CID=none at handle=\_SB_.PVC4
+    unknown pnpinfo _HID=PRP0001 _UID=32 _CID=none at handle=\_SB_.PVC5
+    unknown pnpinfo _HID=GPIT0000 _UID=0 _CID=none at handle=\_SB_.GPIT
+    unknown pnpinfo _HID=ACPI0010 _UID=0 _CID=none at handle=\_SB_.C000
+    unknown pnpinfo _HID=ACPI0010 _UID=1 _CID=none at handle=\_SB_.C000.C001
+    cpu0 <ACPI CPU> pnpinfo _HID=ACPI0007 _UID=0 _CID=none at handle=\_SB_.C000.C001.CPU0
+      acpi_cppc0 <ACPI CPPC CPU frequency control>
+      cpufreq0 <CPU frequency control>
+    cpu1 <ACPI CPU> pnpinfo _HID=ACPI0007 _UID=1 _CID=none at handle=\_SB_.C000.C001.CPU1
+    unknown pnpinfo _HID=ACPI0010 _UID=2 _CID=none at handle=\_SB_.C000.C002
+    cpu2 <ACPI CPU> pnpinfo _HID=ACPI0007 _UID=2 _CID=none at handle=\_SB_.C000.C002.CPU2
+      acpi_cppc1 <ACPI CPPC CPU frequency control>
+      cpufreq2 <CPU frequency control>
+    cpu3 <ACPI CPU> pnpinfo _HID=ACPI0007 _UID=3 _CID=none at handle=\_SB_.C000.C002.CPU3
+    cpu4 <ACPI CPU> pnpinfo _HID=ACPI0007 _UID=4 _CID=none at handle=\_SB_.C000.C002.CPU4
+    cpu5 <ACPI CPU> pnpinfo _HID=ACPI0007 _UID=5 _CID=none at handle=\_SB_.C000.C002.CPU5
+    unknown pnpinfo _HID=ACPI0010 _UID=3 _CID=none at handle=\_SB_.C000.C003
+    cpu6 <ACPI CPU> pnpinfo _HID=ACPI0007 _UID=6 _CID=none at handle=\_SB_.C000.C003.CPU6
+      acpi_cppc2 <ACPI CPPC CPU frequency control>
+      cpufreq6 <CPU frequency control>
+    cpu7 <ACPI CPU> pnpinfo _HID=ACPI0007 _UID=7 _CID=none at handle=\_SB_.C000.C003.CPU7
+    unknown pnpinfo _HID=ACPI0010 _UID=4 _CID=none at handle=\_SB_.C000.C004
+    cpu8 <ACPI CPU> pnpinfo _HID=ACPI0007 _UID=8 _CID=none at handle=\_SB_.C000.C004.CPU8
+      acpi_cppc3 <ACPI CPPC CPU frequency control>
+      cpufreq8 <CPU frequency control>
+    cpu9 <ACPI CPU> pnpinfo _HID=ACPI0007 _UID=9 _CID=none at handle=\_SB_.C000.C004.CPU9
+    unknown pnpinfo _HID=ACPI0010 _UID=5 _CID=none at handle=\_SB_.C000.C005
+    cpu10 <ACPI CPU> pnpinfo _HID=ACPI0007 _UID=10 _CID=none at handle=\_SB_.C000.C005.CPUA
+      acpi_cppc4 <ACPI CPPC CPU frequency control>
+      cpufreq10 <CPU frequency control>
+    cpu11 <ACPI CPU> pnpinfo _HID=ACPI0007 _UID=11 _CID=none at handle=\_SB_.C000.C005.CPUB
+    psci0 <ARM Power State Co-ordination Interface Driver> pnpinfo unknown
+      smccc0 <ARM SMCCC v1.2>
+    gic0 <ARM Generic Interrupt Controller v3.0> pnpinfo unknown
+        I/O memory addresses:
+            0xe010000-0xe01ffff
+            0xe090000-0xe38ffff
+      its0 <ARM GIC Interrupt Translation Service>
+          I/O memory addresses:
+              0xe050000-0xe06ffff
+      vgic0
+    smmu0 <ARM System Memory Management Unit> pnpinfo unknown
+        I/O memory addresses:
+            0xb010000-0xb02ffff
+        Interrupts:
+            0x88
+            0x8a
+            0x8b
+    smmu1 <ARM System Memory Management Unit> pnpinfo unknown
+        I/O memory addresses:
+            0xb1b0000-0xb1cffff
+        Interrupts:
+            0x8c
+            0x8e
+            0x8f
+    generic_timer0 <ARM Generic Timer> pnpinfo unknown
+        Interrupts:
+            0x90
+            0x91
+            0x92
+            0x93
+    apei0 <ACPI Platform Error Interface> pnpinfo unknown
+    sbsa_gwdt0 <Arm SBSA generic watchdog> pnpinfo unknown
+        I/O memory addresses:
+            0x16003000-0x16003fff
+            0x16008000-0x16008fff
+    pmu0 <Performance Monitoring Unit> pnpinfo unknown
+        Interrupts:
+            0x94
+            0x95
+            0x96
+            0x97
+            0x98
+            0x99
+            0x9a
+            0x9b
+            0x9c
+            0x9d
+            0x9e
+            0x9f
+  ram0 <System RAM>
+      I/O memory addresses:
+          0x84400000-0x845fffff
+          0x85000000-0x85efffff
+          0x86000000-0x9fffffff
+          0xa8000000-0xfffdffff
+          0xffff0000-0xffffdfff
+          0x100233000-0x7f11fffff
+          0x7f28b6000-0x7f985ffff
+          0x7f9890000-0x7fe13ffff
+          0x7fea40000-0x7ffffffff
+          0x8000000000-0x807fffffff
+  efirtc0 <EFI Realtime Clock>
+  smbios0 <System Management BIOS>
+  cryptosoft0 <software crypto>
+  armv8crypto0 <AES-CBC,AES-XTS,AES-GCM>
+misc0
+misc1

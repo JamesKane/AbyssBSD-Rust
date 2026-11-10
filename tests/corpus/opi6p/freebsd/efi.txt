@@ -1,0 +1,102 @@
+Boot to FW : false
+BootCurrent: 0005
+Timeout    : 5 seconds
+BootOrder  : 0005, 0004, 0000, 0002, 0003, 0001
++Boot0005* FreeBSD
+       dp: HD(1,GPT,bbec220e-a11b-4b8d-82b0-6aadb2cfbe9f,0x800,0x219800)/File(\EFI\freebsd\loader.efi)
+               nda0p1:/EFI/freebsd/loader.efi (null)
+     attr: 0x1<ACTIVE,>
+    categ: 0<BOOT>
+ Boot0004* Ubuntu
+       dp: HD(1,GPT,bbec220e-a11b-4b8d-82b0-6aadb2cfbe9f,0x800,0x219800)/File(\EFI\ubuntu\shimaa64.efi)
+               nda0p1:/EFI/ubuntu/shimaa64.efi (null)
+     attr: 0x1<ACTIVE,>
+    categ: 0<BOOT>
+ Boot0000* UiApp
+       dp: Fv(9a15aa37-d555-4a4e-b541-86391ff68164)/FvFile(462caa21-7614-4503-836e-8ab6f4662331)
+     attr: 0x109<ACTIVE,HIDDEN,>
+    categ: 0x100<APP>
+ Boot0002  UEFI Shell
+       dp: Fv(9a15aa37-d555-4a4e-b541-86391ff68164)/FvFile(7c04a583-9e3e-4f1c-ad65-e05268d0b4d1)
+     attr: 0<>
+    categ: 0<BOOT>
+ Boot0003* UEFI CT500P3SSD8 241247C0D85A 1
+       dp: PciRoot(0x0)/Pci(0x0,0x0)/Pci(0x0,0x0)/NVMe(0x1,5a-d8-c0-47-01-75-a0-00)
+    opt/x: 0000: 4e ac 08 81 11 9f 59 4d 85 0e e2 1a 52 2c 59 b2 
+    opt/a: N%ac%08%81%11%9fYM%85%0e%e2%1aR,Y%b2
+     attr: 0x1<ACTIVE,>
+    categ: 0<BOOT>
+ Boot0001* UEFI Samsung SSD 990 PRO 1TB S7LANU0Y715456L 1
+       dp: PciRoot(0x1)/Pci(0x0,0x0)/Pci(0x0,0x0)/NVMe(0x1,36-fb-a4-51-47-38-25-00)
+    opt/x: 0000: 4e ac 08 81 11 9f 59 4d 85 0e e2 1a 52 2c 59 b2 
+    opt/a: N%ac%08%81%11%9fYM%85%0e%e2%1aR,Y%b2
+     attr: 0x1<ACTIVE,>
+    categ: 0<BOOT>
+
+
+Unreferenced Variables:
+ Boot0007* VectraOS
+       dp: HD(1,GPT,bbec220e-a11b-4b8d-82b0-6aadb2cfbe9f,0x800,0x219800)/File(\EFI\vectra\BOOTAA64.EFI)
+               nda0p1:/EFI/vectra/BOOTAA64.EFI (null)
+     attr: 0x1<ACTIVE,>
+    categ: 0<BOOT>
+ Boot0050* Planar
+       dp: HD(1,GPT,bbec220e-a11b-4b8d-82b0-6aadb2cfbe9f,0x800,0x219800)/File(\EFI\planar\planar.efi)
+               nda0p1:/EFI/planar/planar.efi (null)
+    opt/x: 0000: 72 00 65 00 62 00 6f 00 6f 00 74 00 
+    opt/a: r%00e%00b%00o%00o%00t%00
+     attr: 0x1<ACTIVE,>
+    categ: 0<BOOT>
+ Boot0006* Plan R
+       dp: HD(1,GPT,f4b4d006-e260-4234-874c-13444511bd41,0x800,0x1f7df)/File(\EFI\BOOT\BOOTAA64.EFI)
+     attr: 0x1<ACTIVE,>
+    categ: 0<BOOT>
+8be4df61-93ca-11d2-aa0d-00e098032b8c-SetupMode
+8be4df61-93ca-11d2-aa0d-00e098032b8c-SignatureSupport
+8be4df61-93ca-11d2-aa0d-00e098032b8c-SecureBoot
+d9bee56e-75dc-49d9-b4d7-b534210f637a-certdbv
+8be4df61-93ca-11d2-aa0d-00e098032b8c-VendorKeys
+8be4df61-93ca-11d2-aa0d-00e098032b8c-PKDefault
+8be4df61-93ca-11d2-aa0d-00e098032b8c-KEKDefault
+8be4df61-93ca-11d2-aa0d-00e098032b8c-dbDefault
+8be4df61-93ca-11d2-aa0d-00e098032b8c-dbxDefault
+8be4df61-93ca-11d2-aa0d-00e098032b8c-OsIndicationsSupported
+8be4df61-93ca-11d2-aa0d-00e098032b8c-BootOptionSupport
+8be4df61-93ca-11d2-aa0d-00e098032b8c-LangCodes
+8be4df61-93ca-11d2-aa0d-00e098032b8c-PlatformLangCodes
+8be4df61-93ca-11d2-aa0d-00e098032b8c-PlatformRecovery0000
+8be4df61-93ca-11d2-aa0d-00e098032b8c-PlatformRecovery0001
+8be4df61-93ca-11d2-aa0d-00e098032b8c-ConOutDev
+8be4df61-93ca-11d2-aa0d-00e098032b8c-ErrOutDev
+8be4df61-93ca-11d2-aa0d-00e098032b8c-ConInDev
+8be4df61-93ca-11d2-aa0d-00e098032b8c-BootCurrent
+cfee69ad-a0de-47a9-93a8-f63106f8ae99-LoaderPath
+cfee69ad-a0de-47a9-93a8-f63106f8ae99-LoaderDev
+d9bee56e-75dc-49d9-b4d7-b534210f637a-certdb
+8be4df61-93ca-11d2-aa0d-00e098032b8c-Boot0000
+8be4df61-93ca-11d2-aa0d-00e098032b8c-Timeout
+8be4df61-93ca-11d2-aa0d-00e098032b8c-Lang
+8be4df61-93ca-11d2-aa0d-00e098032b8c-PlatformLang
+d719b2cb-3d3a-4596-a3bc-dad00e67656f-db
+d719b2cb-3d3a-4596-a3bc-dad00e67656f-dbx
+8be4df61-93ca-11d2-aa0d-00e098032b8c-KEK
+8be4df61-93ca-11d2-aa0d-00e098032b8c-PK
+04b37fe8-f6ae-480b-bdd5-37d98c5e89aa-VarErrorFlag
+8be4df61-93ca-11d2-aa0d-00e098032b8c-ConIn
+8be4df61-93ca-11d2-aa0d-00e098032b8c-Key0000
+8be4df61-93ca-11d2-aa0d-00e098032b8c-Key0001
+5b6f7107-bb3c-4660-92cd-542690280bbd-BootDiscoveryPolicy
+8be4df61-93ca-11d2-aa0d-00e098032b8c-Boot0002
+8be4df61-93ca-11d2-aa0d-00e098032b8c-Key0002
+8be4df61-93ca-11d2-aa0d-00e098032b8c-Boot0003
+8be4df61-93ca-11d2-aa0d-00e098032b8c-Boot0004
+8be4df61-93ca-11d2-aa0d-00e098032b8c-Boot0005
+8be4df61-93ca-11d2-aa0d-00e098032b8c-Boot0006
+8be4df61-93ca-11d2-aa0d-00e098032b8c-ConOut
+8be4df61-93ca-11d2-aa0d-00e098032b8c-ErrOut
+8be4df61-93ca-11d2-aa0d-00e098032b8c-Boot0050
+8be4df61-93ca-11d2-aa0d-00e098032b8c-Boot0001
+8be4df61-93ca-11d2-aa0d-00e098032b8c-BootOrder
+8be4df61-93ca-11d2-aa0d-00e098032b8c-Boot0007
+b336f62d-4135-4a55-ae4e-4971bbf0885d-RtcTimeSettings
+eb704011-1402-11d3-8e77-00a0c969723b-MTC

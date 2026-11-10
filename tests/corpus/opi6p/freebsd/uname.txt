@@ -1,0 +1,3 @@
+FreeBSD opi6plus 16.0-CURRENT FreeBSD 16.0-CURRENT #0 orangepi-6-plus-f12c9f4ee6e3: Sun Oct 11 08:23:24 CDT 2026     jkane@Jamess-Mac-Studio.local:/Users/jkane/Projects/OS/build/fbobj/Users/jkane/Projects/OS/freebsd-src/arm64.aarch64/sys/GENERIC-HMP-IOMMU arm64
+16.0-CURRENT
+16.0-CURRENT

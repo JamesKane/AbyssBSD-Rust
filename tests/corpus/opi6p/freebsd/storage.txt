@@ -1,0 +1,136 @@
+ nvme0: CT500P3SSD8
+    nvme0ns1 (476940MB)
+ nvme1: Samsung SSD 990 PRO 1TB
+    nvme1ns1 (953869MB)
+Controller Capabilities/Features
+================================
+Vendor ID:                   1344
+Subsystem Vendor ID:         1344
+Serial Number:               241247C0D85A
+Model Number:                CT500P3SSD8
+Firmware Version:            P9CR313
+Recommended Arb Burst:       6
+IEEE OUI Identifier:         00 a0 75
+Multi-Path I/O Capabilities: Not Supported
+Max Data Transfer Size:      262144 bytes
+Sanitize Crypto Erase:       Not Supported
+Sanitize Block Erase:        Supported
+Sanitize Overwrite:          Not Supported
+Sanitize NDI:                Supported
+Sanitize NODMMAS:            Yes
+Controller ID:               0x0000
+Version:                     1.4.0
+Traffic Based Keep Alive:    Not Supported
+CXL HDM:                     Not Supported
+NVMSS Shutdown Latency:      Not Reported
+PLS Emergency Power Fail:    Not Supported
+PLS Forced Quiescence:       Not Supported
+Controller Type:             I/O Controller
+Keep Alive Timer             Not Supported
+Maximum Outstanding Commands 256
+
+Admin Command Set Attributes
+============================
+Security Send/Receive:       Supported
+Format NVM:                  Supported
+Firmware Activate/Download:  Supported
+Namespace Management:        Not Supported
+Device Self-test:            Supported
+Directives:                  Not Supported
+NVMe-MI Send/Receive:        Not Supported
+Virtualization Management:   Not Supported
+Doorbell Buffer Config:      Not Supported
+Get LBA Status:              Not Supported
+Sanitize:                    block, 
+Abort Command Limit:         4
+Async Event Request Limit:   8
+Number of Firmware Slots:    2
+Firmware Slot 1 Read-Only:   No
+Per-Namespace SMART Log:     No
+Error Log Page Entries:      255
+Number of Power States:      5
+Total NVM Capacity:          0 bytes
+Unallocated NVM Capacity:    0 bytes
+Firmware Update Granularity: 04 (16384 bytes)
+Host Buffer Preferred Size:  67108864 bytes
+Host Buffer Minimum Size:    67108864 bytes
+
+NVM Command Set Attributes
+==========================
+Submission Queue Entry Size
+  Max:                       64
+  Min:                       64
+Completion Queue Entry Size
+  Max:                       16
+  Min:                       16
+Number of Namespaces:        1
+Compare Command:             Supported
+Write Uncorrectable Command: Supported
+Dataset Management Command:  Supported
+Write Zeroes Command:        Not Supported
+Save Features:               Supported
+Reservations:                Not Supported
+Timestamp feature:           Supported
+Verify feature:              Supported
+Fused Operation Support:     Not Supported
+Format NVM Attributes:       Per-NS Erase, Per-NS Format
+Volatile Write Cache:        Present, flush all
+
+NVM Subsystem Name:          nqn.2016-08.com.micron:nvme:nvm-subsystem-sn-241247C0D85A
+<CT500P3SSD8 P9CR313>              at scbus0 target 0 lun 1 (pass0,nda0)
+<Samsung SSD 990 PRO 1TB 5B2QJXD7>  at scbus1 target 0 lun 1 (pass1,nda1)
+Geom name: nda0
+Providers:
+1. Name: nda0
+   Mediasize: 500107862016 (466G)
+   Sectorsize: 512
+   Mode: r2w2e5
+   descr: CT500P3SSD8
+   lunid: 000000000000000100a0752447c0d85a
+   ident: 241247C0D85A
+   rotationrate: 0
+   fwsectors: 0
+   fwheads: 0
+
+Geom name: nda1
+Providers:
+1. Name: nda1
+   Mediasize: 1000204886016 (932G)
+   Sectorsize: 512
+   Mode: r0w0e0
+   descr: Samsung SSD 990 PRO 1TB
+   lunid: 0025384751a4fb36
+   ident: S7LANU0Y715456L
+   rotationrate: 0
+   fwsectors: 0
+   fwheads: 0
+
+=>     2048  976771087  nda0  GPT  (466G)
+       2048    2201600     1  efi  (1.0G)
+    2203648  204800000     2  linux-data  (98G)
+  207003648   67108864     3  freebsd-swap  (32G)
+  274112512  702545920     4  freebsd-ufs  (335G)
+  976658432     114703     5  !a04d3adf-b82f-49fd-a235-f347b70355d4  (56M)
+
+=>    63  114640  nda0p5  MBR  (56M)
+      63  114640          - free -  (56M)
+
+=>        40  1953525088  nda1  GPT  (932G)
+          40        2008        - free -  (1004K)
+        2048  1953521664     1  !4b7e1c5a-3d0e-9a4f-8c21-560bd739e412  (932G)
+  1953523712        1416        - free -  (708K)
+
+=>    63  114640  gpt/vectra  MBR  (56M)
+      63  114640              - free -  (56M)
+
+=>    63  114640  gptid/2dc77560-cefa-11f1-8234-c0742bf94234  MBR  (56M)
+      63  114640                                              - free -  (56M)
+
+=>    63  114640  msdosfs/VECTRAFS  MBR  (56M)
+      63  114640                    - free -  (56M)
+
+=>        40  1953525088  diskid/DISK-S7LANU0Y715456L  GPT  (932G)
+          40        2008                               - free -  (1004K)
+        2048  1953521664                            1  !4b7e1c5a-3d0e-9a4f-8c21-560bd739e412  (932G)
+  1953523712        1416                               - free -  (708K)
+

@@ -1,0 +1,175 @@
+pcib1@pci0:192:0:0:	class=0x060400 rev=0x00 hdr=0x01 vendor=0x17cd device=0x0100 subvendor=0x0000 subdevice=0x0000
+    vendor     = 'Cadence Design Systems, Inc.'
+    device     = 'CIX PCIe Root Port'
+    class      = bridge
+    subclass   = PCI-PCI
+    cap 01[80] = powerspec 3  supports D0 D1 D3  current D0
+    cap 05[90] = MSI supports 32 messages, 64 bit, vector masks 
+    cap 11[b0] = MSI-X supports 2 messages
+                 Table in map 0x10[0x40], PBA in map 0x10[0x40]
+    cap 10[c0] = PCI-Express 2 root port max data 512(512) RO NS
+                 max read 1024
+                 link x4(x4) speed 8.0(16.0) ASPM disabled(L0s/L1)
+    ecap 0001[100] = AER 2 0 fatal 0 non-fatal 0 corrected
+    ecap 0003[150] = Serial 1 0000000000000000
+    ecap 0019[300] = PCIe Sec 1 lane errors 0
+    ecap 0002[4c0] = VC 1 max VC0
+    ecap 001e[900] = L1 PM Substates 1
+    ecap 0025[910] = Data Link Feature 1
+    ecap 0027[920] = Lane Margining at Receiver 1
+    ecap 0026[9c0] = Physical Layer 16.0 GT/s 1
+    ecap 001f[a20] = Precision Time Measurement 1
+    ecap 002f[a90] = unknown 1
+nvme0@pci0:193:0:0:	class=0x010802 rev=0x01 hdr=0x00 vendor=0x1344 device=0x5416 subvendor=0x1344 subdevice=0x1100
+    vendor     = 'Micron Technology Inc'
+    device     = '2550 NVMe SSD (DRAM-less)'
+    class      = mass storage
+    subclass   = NVM
+    bar   [10] = type Memory, range 64, base 0x60000000, size 16384, enabled
+    cap 10[80] = PCI-Express 2 endpoint max data 512(512) FLR NS
+                 max read 512
+                 link x4(x4) speed 8.0(8.0) ASPM disabled(L1)
+    cap 11[d0] = MSI-X supports 33 messages, enabled
+                 Table in map 0x10[0x2000], PBA in map 0x10[0x3000]
+    cap 05[e0] = MSI supports 32 messages, 64 bit, vector masks 
+    cap 01[f8] = powerspec 3  supports D0 D3  current D0
+    ecap 0018[100] = LTR 1
+    ecap 001e[110] = L1 PM Substates 1
+    ecap 000e[128] = ARI 1
+    ecap 0025[1e0] = Data Link Feature 1
+    ecap 0001[200] = AER 2 0 fatal 0 non-fatal 0 corrected
+    ecap 0019[300] = PCIe Sec 1 lane errors 0
+pcib3@pci0:144:0:0:	class=0x060400 rev=0x00 hdr=0x01 vendor=0x17cd device=0x0100 subvendor=0x0000 subdevice=0x0000
+    vendor     = 'Cadence Design Systems, Inc.'
+    device     = 'CIX PCIe Root Port'
+    class      = bridge
+    subclass   = PCI-PCI
+    cap 01[80] = powerspec 3  supports D0 D1 D3  current D0
+    cap 05[90] = MSI supports 32 messages, 64 bit, vector masks 
+    cap 11[b0] = MSI-X supports 2 messages
+                 Table in map 0x10[0x40], PBA in map 0x10[0x40]
+    cap 10[c0] = PCI-Express 2 root port max data 512(512) RO NS
+                 max read 1024
+                 link x4(x4) speed 16.0(16.0) ASPM disabled(L0s/L1)
+    ecap 0001[100] = AER 2 0 fatal 0 non-fatal 0 corrected
+    ecap 0003[150] = Serial 1 0000000000000000
+    ecap 0019[300] = PCIe Sec 1 lane errors 0
+    ecap 0002[4c0] = VC 1 max VC0
+    ecap 001e[900] = L1 PM Substates 1
+    ecap 0025[910] = Data Link Feature 1
+    ecap 0027[920] = Lane Margining at Receiver 1
+    ecap 0026[9c0] = Physical Layer 16.0 GT/s 1
+    ecap 001f[a20] = Precision Time Measurement 1
+    ecap 002f[a90] = unknown 1
+nvme1@pci0:145:0:0:	class=0x010802 rev=0x00 hdr=0x00 vendor=0x144d device=0xa80c subvendor=0x144d subdevice=0xa801
+    vendor     = 'Samsung Electronics Co Ltd'
+    device     = 'NVMe SSD Controller S4LV008[Pascal]'
+    class      = mass storage
+    subclass   = NVM
+    bar   [10] = type Memory, range 64, base 0x50000000, size 16384, enabled
+    cap 01[40] = powerspec 3  supports D0 D3  current D0
+    cap 05[50] = MSI supports 32 messages, 64 bit 
+    cap 10[70] = PCI-Express 2 endpoint max data 512(512) FLR NS
+                 max read 512
+                 link x4(x4) speed 16.0(16.0) ASPM disabled(L1) ClockPM disabled
+    cap 11[b0] = MSI-X supports 17 messages, enabled
+                 Table in map 0x10[0x3000], PBA in map 0x10[0x2000]
+    ecap 0001[100] = AER 2 0 fatal 0 non-fatal 0 corrected
+    ecap 0019[168] = PCIe Sec 1 lane errors 0
+    ecap 0026[188] = Physical Layer 16.0 GT/s 1
+    ecap 0027[1ac] = Lane Margining at Receiver 1
+    ecap 0018[1c4] = LTR 1
+    ecap 001e[1cc] = L1 PM Substates 1
+    ecap 0025[350] = Data Link Feature 1
+pcib5@pci0:96:0:0:	class=0x060400 rev=0x00 hdr=0x01 vendor=0x17cd device=0x0100 subvendor=0x0000 subdevice=0x0000
+    vendor     = 'Cadence Design Systems, Inc.'
+    device     = 'CIX PCIe Root Port'
+    class      = bridge
+    subclass   = PCI-PCI
+    cap 01[80] = powerspec 3  supports D0 D1 D3  current D0
+    cap 05[90] = MSI supports 32 messages, 64 bit, vector masks 
+    cap 11[b0] = MSI-X supports 2 messages
+                 Table in map 0x10[0x40], PBA in map 0x10[0x40]
+    cap 10[c0] = PCI-Express 2 root port max data 512(512) RO NS
+                 max read 1024
+                 link x1(x1) speed 8.0(16.0) ASPM disabled(L0s/L1)
+    ecap 0001[100] = AER 2 0 fatal 0 non-fatal 0 corrected
+    ecap 0003[150] = Serial 1 0000000000000000
+    ecap 0019[300] = PCIe Sec 1 lane errors 0
+    ecap 0002[4c0] = VC 1 max VC0
+    ecap 001e[900] = L1 PM Substates 1
+    ecap 0025[910] = Data Link Feature 1
+    ecap 0027[920] = Lane Margining at Receiver 1
+    ecap 0026[9c0] = Physical Layer 16.0 GT/s 1
+    ecap 001f[a20] = Precision Time Measurement 1
+    ecap 002f[a90] = unknown 1
+rge0@pci0:97:0:0:	class=0x020000 rev=0x01 hdr=0x00 vendor=0x10ec device=0x8126 subvendor=0x10ec subdevice=0x0123
+    vendor     = 'Realtek Semiconductor Co., Ltd.'
+    device     = 'RTL8126 5GbE Controller'
+    class      = network
+    subclass   = ethernet
+    bar   [10] = type I/O Port, range 32, base 0, size 256, disabled
+    bar   [18] = type Memory, range 64, base 0x40000000, size 65536, enabled
+    bar   [20] = type Memory, range 64, base 0x40010000, size 16384, enabled
+    cap 01[40] = powerspec 3  supports D0 D1 D2 D3  current D0
+    cap 05[50] = MSI supports 1 message, 64 bit, vector masks enabled with 1 message
+    cap 10[70] = PCI-Express 2 endpoint MSI 1 max data 512(512)
+                 max read 512
+                 link x1(x1) speed 8.0(8.0) ASPM disabled(L0s/L1) ClockPM disabled
+    cap 11[b0] = MSI-X supports 32 messages
+                 Table in map 0x20[0x0], PBA in map 0x20[0x800]
+    cap 03[d0] = VPD
+    ecap 0001[100] = AER 2 0 fatal 0 non-fatal 0 corrected
+    ecap 0002[148] = VC 1 max VC0
+    ecap 0003[170] = Serial 1 01000000684ce000
+    ecap 0019[180] = PCIe Sec 1 lane errors 0
+    ecap 0017[190] = TPH Requester 1
+    ecap 0018[21c] = LTR 1
+    ecap 001e[224] = L1 PM Substates 1
+    ecap 000b[234] = Vendor [1] ID 0002 Rev 4 Length 256
+pcib7@pci0:48:0:0:	class=0x060400 rev=0x00 hdr=0x01 vendor=0x17cd device=0x0100 subvendor=0x0000 subdevice=0x0000
+    vendor     = 'Cadence Design Systems, Inc.'
+    device     = 'CIX PCIe Root Port'
+    class      = bridge
+    subclass   = PCI-PCI
+    cap 01[80] = powerspec 3  supports D0 D1 D3  current D0
+    cap 05[90] = MSI supports 32 messages, 64 bit, vector masks 
+    cap 11[b0] = MSI-X supports 2 messages
+                 Table in map 0x10[0x40], PBA in map 0x10[0x40]
+    cap 10[c0] = PCI-Express 2 root port max data 512(512) RO NS
+                 max read 1024
+                 link x1(x1) speed 8.0(16.0) ASPM disabled(L0s/L1)
+    ecap 0001[100] = AER 2 0 fatal 0 non-fatal 0 corrected
+    ecap 0003[150] = Serial 1 0000000000000000
+    ecap 0019[300] = PCIe Sec 1 lane errors 0
+    ecap 0002[4c0] = VC 1 max VC0
+    ecap 001e[900] = L1 PM Substates 1
+    ecap 0025[910] = Data Link Feature 1
+    ecap 0027[920] = Lane Margining at Receiver 1
+    ecap 0026[9c0] = Physical Layer 16.0 GT/s 1
+    ecap 001f[a20] = Precision Time Measurement 1
+    ecap 002f[a90] = unknown 1
+rge1@pci0:49:0:0:	class=0x020000 rev=0x01 hdr=0x00 vendor=0x10ec device=0x8126 subvendor=0x10ec subdevice=0x0123
+    vendor     = 'Realtek Semiconductor Co., Ltd.'
+    device     = 'RTL8126 5GbE Controller'
+    class      = network
+    subclass   = ethernet
+    bar   [10] = type I/O Port, range 32, base 0x1000, size 256, disabled
+    bar   [18] = type Memory, range 64, base 0x38000000, size 65536, enabled
+    bar   [20] = type Memory, range 64, base 0x38010000, size 16384, enabled
+    cap 01[40] = powerspec 3  supports D0 D1 D2 D3  current D0
+    cap 05[50] = MSI supports 1 message, 64 bit, vector masks enabled with 1 message
+    cap 10[70] = PCI-Express 2 endpoint MSI 1 max data 512(512)
+                 max read 512
+                 link x1(x1) speed 8.0(8.0) ASPM disabled(L0s/L1) ClockPM disabled
+    cap 11[b0] = MSI-X supports 32 messages
+                 Table in map 0x20[0x0], PBA in map 0x20[0x800]
+    cap 03[d0] = VPD
+    ecap 0001[100] = AER 2 0 fatal 0 non-fatal 0 corrected
+    ecap 0002[148] = VC 1 max VC0
+    ecap 0003[170] = Serial 1 01000000684ce000
+    ecap 0019[180] = PCIe Sec 1 lane errors 0
+    ecap 0017[190] = TPH Requester 1
+    ecap 0018[21c] = LTR 1
+    ecap 001e[224] = L1 PM Substates 1
+    ecap 000b[234] = Vendor [1] ID 0002 Rev 4 Length 256

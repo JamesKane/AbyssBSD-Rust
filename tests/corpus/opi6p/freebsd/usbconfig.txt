@@ -1,0 +1,234 @@
+ugen1.1: <XHCI root HUB Generic> at usbus1, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+ugen2.1: <XHCI root HUB Generic> at usbus2, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+ugen3.1: <XHCI root HUB Generic> at usbus3, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+ugen4.1: <XHCI root HUB Generic> at usbus4, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+ugen0.1: <XHCI root HUB Generic> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+ugen5.1: <XHCI root HUB Generic> at usbus5, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+ugen6.1: <XHCI root HUB Generic> at usbus6, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+ugen8.1: <XHCI root HUB Generic> at usbus8, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+ugen7.1: <XHCI root HUB Generic> at usbus7, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+ugen9.1: <XHCI root HUB Generic> at usbus9, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+ugen7.2: <Hub Terminus Technology Inc.> at usbus7, cfg=0 md=HOST spd=HIGH (480Mbps) pwr=SAVE (100mA)
+ugen7.3: <product 0x1bac Corsair> at usbus7, cfg=0 md=HOST spd=FULL (12Mbps) pwr=ON (500mA)
+ugen7.4: <product 0x0133 Microdia> at usbus7, cfg=0 md=HOST spd=FULL (12Mbps) pwr=ON (100mA)
+ugen1.1: <XHCI root HUB Generic> at usbus1, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+
+  bLength = 0x0012 
+  bDescriptorType = 0x0001 
+  bcdUSB = 0x0300 
+  bDeviceClass = 0x0009  <HUB>
+  bDeviceSubClass = 0x0000 
+  bDeviceProtocol = 0x0003 
+  bMaxPacketSize0 = 0x0009 
+  idVendor = 0x0000 
+  idProduct = 0x0000 
+  bcdDevice = 0x0100 
+  iManufacturer = 0x0001  <Generic>
+  iProduct = 0x0002  <XHCI root HUB>
+  iSerialNumber = 0x0000  <no string>
+  bNumConfigurations = 0x0001 
+
+ugen2.1: <XHCI root HUB Generic> at usbus2, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+
+  bLength = 0x0012 
+  bDescriptorType = 0x0001 
+  bcdUSB = 0x0300 
+  bDeviceClass = 0x0009  <HUB>
+  bDeviceSubClass = 0x0000 
+  bDeviceProtocol = 0x0003 
+  bMaxPacketSize0 = 0x0009 
+  idVendor = 0x0000 
+  idProduct = 0x0000 
+  bcdDevice = 0x0100 
+  iManufacturer = 0x0001  <Generic>
+  iProduct = 0x0002  <XHCI root HUB>
+  iSerialNumber = 0x0000  <no string>
+  bNumConfigurations = 0x0001 
+
+ugen3.1: <XHCI root HUB Generic> at usbus3, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+
+  bLength = 0x0012 
+  bDescriptorType = 0x0001 
+  bcdUSB = 0x0300 
+  bDeviceClass = 0x0009  <HUB>
+  bDeviceSubClass = 0x0000 
+  bDeviceProtocol = 0x0003 
+  bMaxPacketSize0 = 0x0009 
+  idVendor = 0x0000 
+  idProduct = 0x0000 
+  bcdDevice = 0x0100 
+  iManufacturer = 0x0001  <Generic>
+  iProduct = 0x0002  <XHCI root HUB>
+  iSerialNumber = 0x0000  <no string>
+  bNumConfigurations = 0x0001 
+
+ugen4.1: <XHCI root HUB Generic> at usbus4, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+
+  bLength = 0x0012 
+  bDescriptorType = 0x0001 
+  bcdUSB = 0x0300 
+  bDeviceClass = 0x0009  <HUB>
+  bDeviceSubClass = 0x0000 
+  bDeviceProtocol = 0x0003 
+  bMaxPacketSize0 = 0x0009 
+  idVendor = 0x0000 
+  idProduct = 0x0000 
+  bcdDevice = 0x0100 
+  iManufacturer = 0x0001  <Generic>
+  iProduct = 0x0002  <XHCI root HUB>
+  iSerialNumber = 0x0000  <no string>
+  bNumConfigurations = 0x0001 
+
+ugen0.1: <XHCI root HUB Generic> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+
+  bLength = 0x0012 
+  bDescriptorType = 0x0001 
+  bcdUSB = 0x0300 
+  bDeviceClass = 0x0009  <HUB>
+  bDeviceSubClass = 0x0000 
+  bDeviceProtocol = 0x0003 
+  bMaxPacketSize0 = 0x0009 
+  idVendor = 0x0000 
+  idProduct = 0x0000 
+  bcdDevice = 0x0100 
+  iManufacturer = 0x0001  <Generic>
+  iProduct = 0x0002  <XHCI root HUB>
+  iSerialNumber = 0x0000  <no string>
+  bNumConfigurations = 0x0001 
+
+ugen5.1: <XHCI root HUB Generic> at usbus5, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+
+  bLength = 0x0012 
+  bDescriptorType = 0x0001 
+  bcdUSB = 0x0300 
+  bDeviceClass = 0x0009  <HUB>
+  bDeviceSubClass = 0x0000 
+  bDeviceProtocol = 0x0003 
+  bMaxPacketSize0 = 0x0009 
+  idVendor = 0x0000 
+  idProduct = 0x0000 
+  bcdDevice = 0x0100 
+  iManufacturer = 0x0001  <Generic>
+  iProduct = 0x0002  <XHCI root HUB>
+  iSerialNumber = 0x0000  <no string>
+  bNumConfigurations = 0x0001 
+
+ugen6.1: <XHCI root HUB Generic> at usbus6, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+
+  bLength = 0x0012 
+  bDescriptorType = 0x0001 
+  bcdUSB = 0x0300 
+  bDeviceClass = 0x0009  <HUB>
+  bDeviceSubClass = 0x0000 
+  bDeviceProtocol = 0x0003 
+  bMaxPacketSize0 = 0x0009 
+  idVendor = 0x0000 
+  idProduct = 0x0000 
+  bcdDevice = 0x0100 
+  iManufacturer = 0x0001  <Generic>
+  iProduct = 0x0002  <XHCI root HUB>
+  iSerialNumber = 0x0000  <no string>
+  bNumConfigurations = 0x0001 
+
+ugen8.1: <XHCI root HUB Generic> at usbus8, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+
+  bLength = 0x0012 
+  bDescriptorType = 0x0001 
+  bcdUSB = 0x0300 
+  bDeviceClass = 0x0009  <HUB>
+  bDeviceSubClass = 0x0000 
+  bDeviceProtocol = 0x0003 
+  bMaxPacketSize0 = 0x0009 
+  idVendor = 0x0000 
+  idProduct = 0x0000 
+  bcdDevice = 0x0100 
+  iManufacturer = 0x0001  <Generic>
+  iProduct = 0x0002  <XHCI root HUB>
+  iSerialNumber = 0x0000  <no string>
+  bNumConfigurations = 0x0001 
+
+ugen7.1: <XHCI root HUB Generic> at usbus7, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+
+  bLength = 0x0012 
+  bDescriptorType = 0x0001 
+  bcdUSB = 0x0300 
+  bDeviceClass = 0x0009  <HUB>
+  bDeviceSubClass = 0x0000 
+  bDeviceProtocol = 0x0003 
+  bMaxPacketSize0 = 0x0009 
+  idVendor = 0x0000 
+  idProduct = 0x0000 
+  bcdDevice = 0x0100 
+  iManufacturer = 0x0001  <Generic>
+  iProduct = 0x0002  <XHCI root HUB>
+  iSerialNumber = 0x0000  <no string>
+  bNumConfigurations = 0x0001 
+
+ugen9.1: <XHCI root HUB Generic> at usbus9, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+
+  bLength = 0x0012 
+  bDescriptorType = 0x0001 
+  bcdUSB = 0x0300 
+  bDeviceClass = 0x0009  <HUB>
+  bDeviceSubClass = 0x0000 
+  bDeviceProtocol = 0x0003 
+  bMaxPacketSize0 = 0x0009 
+  idVendor = 0x0000 
+  idProduct = 0x0000 
+  bcdDevice = 0x0100 
+  iManufacturer = 0x0001  <Generic>
+  iProduct = 0x0002  <XHCI root HUB>
+  iSerialNumber = 0x0000  <no string>
+  bNumConfigurations = 0x0001 
+
+ugen7.2: <Hub Terminus Technology Inc.> at usbus7, cfg=0 md=HOST spd=HIGH (480Mbps) pwr=SAVE (100mA)
+
+  bLength = 0x0012 
+  bDescriptorType = 0x0001 
+  bcdUSB = 0x0200 
+  bDeviceClass = 0x0009  <HUB>
+  bDeviceSubClass = 0x0000 
+  bDeviceProtocol = 0x0001 
+  bMaxPacketSize0 = 0x0040 
+  idVendor = 0x1a40 
+  idProduct = 0x0101 
+  bcdDevice = 0x0111 
+  iManufacturer = 0x0000  <no string>
+  iProduct = 0x0001  <USB 2.0 Hub>
+  iSerialNumber = 0x0000  <no string>
+  bNumConfigurations = 0x0001 
+
+ugen7.3: <product 0x1bac Corsair> at usbus7, cfg=0 md=HOST spd=FULL (12Mbps) pwr=ON (500mA)
+
+  bLength = 0x0012 
+  bDescriptorType = 0x0001 
+  bcdUSB = 0x0200 
+  bDeviceClass = 0x0000  <Probed by interface class>
+  bDeviceSubClass = 0x0000 
+  bDeviceProtocol = 0x0000 
+  bMaxPacketSize0 = 0x0040 
+  idVendor = 0x1b1c 
+  idProduct = 0x1bac 
+  bcdDevice = 0x0107 
+  iManufacturer = 0x0001  <retrieving string failed>
+  iProduct = 0x0002  <retrieving string failed>
+  iSerialNumber = 0x0003  <retrieving string failed>
+  bNumConfigurations = 0x0001 
+
+ugen7.4: <product 0x0133 Microdia> at usbus7, cfg=0 md=HOST spd=FULL (12Mbps) pwr=ON (100mA)
+
+  bLength = 0x0012 
+  bDescriptorType = 0x0001 
+  bcdUSB = 0x0110 
+  bDeviceClass = 0x0000  <Probed by interface class>
+  bDeviceSubClass = 0x0000 
+  bDeviceProtocol = 0x0000 
+  bMaxPacketSize0 = 0x0008 
+  idVendor = 0x0c45 
+  idProduct = 0x0133 
+  bcdDevice = 0x0200 
+  iManufacturer = 0x0001  <retrieving string failed>
+  iProduct = 0x0002  <retrieving string failed>
+  iSerialNumber = 0x0000  <no string>
+  bNumConfigurations = 0x0001 
+

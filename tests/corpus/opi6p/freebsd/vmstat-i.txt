@@ -1,0 +1,67 @@
+interrupt                                             total       rate
+gic0,s237: panthor0                                       3          0
+gic0,s239: panthor0                                       1          0
+gic0,s243: xhci7                                        285          4
+gic0,s293:-dnc_i2c6                                     252          3
+gic0,s324: komeda0                                     4086         53
+gic0,s336:-y1_dptx0                                       3          0
+gic0,s470:-ky1_gpt0                                   30086        389
+its0,0: nvme0:admin                                     191          2
+its0,1: nvme0:io0                                      4920         64
+its0,2: nvme0:io1                                      4897         63
+its0,7: nvme0:io6                                      1491         19
+its0,8: nvme0:io7                                      1591         21
+its0,9: nvme0:io8                                       840         11
+its0,10: nvme0:io9                                      928         12
+its0,11: nvme0:io10                                    3749         48
+its0,12: nvme0:io11                                    3822         49
+its0,33:-vme1:admin                                      76          1
+its0,34: nvme1:io0                                       23          0
+its0,35: nvme1:io1                                       33          0
+its0,41: nvme1:io7                                       11          0
+its0,42: nvme1:io8                                        4          0
+its0,43: nvme1:io9                                       11          0
+its0,45: nvme1:io11                                      20          0
+cpu1:ast                                                  8          0
+cpu3:ast                                                  1          0
+cpu7:ast                                                  1          0
+cpu8:ast                                                  3          0
+cpu10:ast                                                 4          0
+cpu11:ast                                                 2          0
+cpu0:preempt                                          14560        188
+cpu1:preempt                                          15220        197
+cpu2:preempt                                             15          0
+cpu3:preempt                                             14          0
+cpu4:preempt                                             18          0
+cpu5:preempt                                             16          0
+cpu6:preempt                                           5248         68
+cpu7:preempt                                           4519         58
+cpu8:preempt                                           2880         37
+cpu9:preempt                                           2599         34
+cpu10:preempt                                         12454        161
+cpu11:preempt                                         12569        162
+cpu0:rendezvous                                          38          0
+cpu1:rendezvous                                          34          0
+cpu2:rendezvous                                          31          0
+cpu3:rendezvous                                          32          0
+cpu4:rendezvous                                          31          0
+cpu5:rendezvous                                          31          0
+cpu6:rendezvous                                          35          0
+cpu7:rendezvous                                          37          0
+cpu8:rendezvous                                          34          0
+cpu9:rendezvous                                          34          0
+cpu10:rendezvous                                         39          1
+cpu11:rendezvous                                         12          0
+cpu1:hardclock                                         8551        110
+cpu2:hardclock                                          119          2
+cpu3:hardclock                                          414          5
+cpu4:hardclock                                           80          1
+cpu5:hardclock                                           77          1
+cpu6:hardclock                                         1855         24
+cpu7:hardclock                                         1954         25
+cpu8:hardclock                                         2376         31
+cpu9:hardclock                                          991         13
+cpu10:hardclock                                        6137         79
+cpu11:hardclock                                        7116         92
+its0,50: rge0                                          2030         26
+Total                                                159542       2061
