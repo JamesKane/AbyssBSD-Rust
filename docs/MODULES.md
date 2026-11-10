@@ -1,7 +1,7 @@
 # Driver Selection and Loadable Modules
 
-Status: **draft, high-level design** (2026-11-10). Decision record:
-[ADR-0021](adr/0021-driver-selection-and-modules.md) (Proposed). It amends
+Status: **accepted high-level design** (2026-11-10). Decision record:
+[ADR-0021](adr/0021-driver-selection-and-modules.md) (Accepted). It amends
 [ADR-0005](adr/0005-monolithic-static-kernel.md) and refines
 [ADR-0020](adr/0020-platform-crates.md) decision 6 and [DRIVER-MODEL.md](DRIVER-MODEL.md) §7.1 and §14.
 

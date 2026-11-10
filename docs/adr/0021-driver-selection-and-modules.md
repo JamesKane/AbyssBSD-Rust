@@ -1,6 +1,6 @@
 # ADR-0021: Drivers selected per ISA at build time; large drivers as same-build loadable modules that import no kernel symbols
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-10
 
 ## Context

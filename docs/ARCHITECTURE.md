@@ -6,8 +6,9 @@ specification. The internal design is ours, and it is shaped by Rust's ownership
 ## 1. Overall shape
 
 - **Monolithic, statically linked kernel.** It is a single ELF image. Drivers and file systems are
-  compiled in and chosen by Cargo features and per-platform configuration crates. A Rust-native
-  module system may come later ([ADR-0005](adr/0005-monolithic-static-kernel.md)).
+  compiled in, from one driver table per ISA in `kernel/table`. Large, rarely present drivers
+  (GPUs) become same-build loadable modules after v1.0 ([ADR-0005](adr/0005-monolithic-static-kernel.md),
+  [ADR-0021](adr/0021-driver-selection-and-modules.md), [MODULES.md](MODULES.md)).
 - **SMP and fully preemptible** from Phase 2. There is no "giant lock" stage.
 - **Higher-half kernel with a physical direct map (DMAP)** on all architectures, as FreeBSD does.
   User space occupies the lower half.

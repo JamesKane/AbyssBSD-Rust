@@ -1,6 +1,7 @@
 # ADR-0005: Monolithic, statically linked kernel
 
-- Status: Accepted
+- Status: Accepted; amended by [ADR-0021](0021-driver-selection-and-modules.md) (2026-11-10: drivers
+  selected per ISA, and large drivers such as GPUs as loadable modules)
 - Date: 2026-10-17
 
 ## Context

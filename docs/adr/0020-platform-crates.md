@@ -1,6 +1,7 @@
 # ADR-0020: Platform knowledge in per-SoC crates behind one interface; the ACPI bus names no vendor
 
-- Status: Accepted
+- Status: Accepted; decision 6 refined by [ADR-0021](0021-driver-selection-and-modules.md)
+  (2026-11-10: every platform of the kernel's ISA is built in)
 - Date: 2026-11-09
 
 ## Context

@@ -11,7 +11,7 @@ Status values: **Proposed** (awaiting owner confirmation) · **Accepted** · **S
 | [0002](0002-dependency-policy.md) | Dependency policy: `core` + `alloc` in kernel, `std` on host, no external crates | Accepted |
 | [0003](0003-stable-rust-builtin-targets.md) | Pinned stable Rust with built-in targets only | Accepted |
 | [0004](0004-abi-target.md) | FreeBSD 15.x native 64-bit userland as the primary ABI target | Accepted |
-| [0005](0005-monolithic-static-kernel.md) | Monolithic, statically linked kernel | Accepted |
+| [0005](0005-monolithic-static-kernel.md) | Monolithic, statically linked kernel | Accepted; amended by 0021 |
 | [0006](0006-uefi-acpi-only-own-loader-and-acpi.md) | UEFI + ACPI only, with our own loader and our own ACPI/AML implementation | Accepted |
 | [0007](0007-license-and-clean-implementation.md) | BSD-2-Clause, with FreeBSD as specification rather than source | Accepted |
 | [0008](0008-arm64-reference-board-orange-pi-6-plus.md) | Orange Pi 6 Plus as the ARM64 physical reference board | Accepted |
@@ -26,8 +26,8 @@ Status values: **Proposed** (awaiting owner confirmation) · **Accepted** · **S
 | [0017](0017-rv64-reference-board-bpi-sm10.md) | Banana Pi BPI-SM10 (SpacemiT K3) as the RV64 physical reference board, booted UEFI with ACPI through SpacemiT's edk2 port | Accepted |
 | [0018](0018-desktop-architecture.md) | The desktop is the AbyssBSD Swift desktop, run unmodified as FreeBSD userland; this repository builds the kernel beneath it | Accepted; amended 2026-10-30 |
 | [0019](0019-networking.md) | Networking: the wire as the specification (differential captures), per-VNET state from the start, host-tested packet, TCP, and crypto crates, lock-free lookups in a network epoch, FreeBSD 15.1's default TCP, `vtnet` on the `EtherQueues` class, in-tree kernel TLS | Accepted |
-| [0020](0020-platform-crates.md) | Platform knowledge in per-SoC crates behind one interface; the ACPI bus names no vendor | Accepted |
-| [0021](0021-driver-selection-and-modules.md) | Drivers selected per ISA at build time; large drivers as same-build loadable modules that import no kernel symbols | Proposed |
+| [0020](0020-platform-crates.md) | Platform knowledge in per-SoC crates behind one interface; the ACPI bus names no vendor | Accepted; refined by 0021 |
+| [0021](0021-driver-selection-and-modules.md) | Drivers selected per ISA at build time; large drivers as same-build loadable modules that import no kernel symbols | Accepted |
 
 Template:
 
