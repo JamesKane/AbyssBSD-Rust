@@ -45,6 +45,21 @@ pub use manager::{
     AttachRequestError, DEVCTL_DEFAULT_QUEUE, DetachError, Manager, Options, init, manager,
 };
 pub use platform::Platform;
+
+/// `bootverbose`: the loader's `boot_verbose` (`boot -v`), and
+/// `debug.bootverbose`. Drivers print their diagnostics only with it.
+static BOOTVERBOSE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Whether drivers print what only bring-up needs (`bootverbose`).
+#[must_use]
+pub fn bootverbose() -> bool {
+    BOOTVERBOSE.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Sets [`bootverbose`].
+pub fn set_bootverbose(on: bool) {
+    BOOTVERBOSE.store(on, core::sync::atomic::Ordering::Relaxed);
+}
 pub use roothold::{RootHold, root_mount_hold, root_mount_wait};
 pub use space::{AddressSpace, Range, Sharing};
 pub use sysctl::device_node;

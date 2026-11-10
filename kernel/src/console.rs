@@ -484,15 +484,7 @@ pub(crate) struct Howto {
 /// from the consoles it found (`parse_uefi_con_out`): both, serial first;
 /// or the one found.
 pub(crate) fn howto() -> Howto {
-    let var = |k: &str| {
-        crate::boot::cmdline()
-            .split_ascii_whitespace()
-            .find_map(|w| match w.split_once('=') {
-                Some((key, v)) if key == k => Some(!v.eq_ignore_ascii_case("no")),
-                None if w == k => Some(true),
-                _ => None,
-            })
-    };
+    let var = loader_flag;
     match (var("boot_multicons"), var("boot_serial")) {
         (None, None) => {
             let video = VIDEO.load(core::sync::atomic::Ordering::Relaxed);
@@ -506,6 +498,18 @@ pub(crate) fn howto() -> Howto {
             serial: s.unwrap_or(false),
         },
     }
+}
+
+/// A `boothowto` loader variable (`boot_env_to_howto`): set unless
+/// "no", if given.
+pub(crate) fn loader_flag(k: &str) -> Option<bool> {
+    crate::boot::cmdline()
+        .split_ascii_whitespace()
+        .find_map(|w| match w.split_once('=') {
+            Some((key, v)) if key == k => Some(!v.eq_ignore_ascii_case("no")),
+            None if w == k => Some(true),
+            _ => None,
+        })
 }
 
 /// The consoles kernel messages go to, serial and video: every one with
@@ -659,6 +663,7 @@ impl uart::ConsolePort for Port {
 
     fn enable_input(&self, unit: u32) {
         crate::tty::create_console(unit, write_tty);
+        SERIAL_UNIT.store(unit, core::sync::atomic::Ordering::Release);
         if let Some(serial) = &CONSOLE.lock().serial {
             serial.enable_rx_interrupt();
         }
@@ -810,10 +815,15 @@ macro_rules! kprintln {
     ($($t:tt)*) => { $crate::console::print(format_args!("{}\n", format_args!($($t)*))) };
 }
 
+/// The unit of the `uart` that is the console's serial port, once it
+/// has attached (`u32::MAX` before).
+static SERIAL_UNIT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(u32::MAX);
+
 /// `kern.console` (`sysctl_kern_console`): the consoles in use, the best
 /// first, then `/` and every console the kernel has: the serial port's
-/// named `ttyu0` once it is a console (`uart_tty_attach`), `uart` before.
-/// libc's `getttyent` reads it for `/etc/ttys`'s `onifconsole`.
+/// named for its terminal once its `uart` attached (`uart_tty_attach`'s
+/// `ttyu%r`: `ttyu2` for `uart2`), `uart` before. libc's `getttyent`
+/// reads it for `/etc/ttys`'s `onifconsole`.
 pub(crate) fn sysctl_init(s: &sched::Sleepable) {
     use sysctl::{Number, Value};
     crate::sysctl::with(s, |t| {
@@ -827,9 +837,15 @@ pub(crate) fn sysctl_init(s: &sched::Sleepable) {
                 let (serial, video) = consoles();
                 let serial = serial && has_serial();
                 let video = video && VIDEO.load(core::sync::atomic::Ordering::Relaxed);
+                let unit = SERIAL_UNIT.load(core::sync::atomic::Ordering::Acquire);
+                let name = if unit == u32::MAX {
+                    alloc::string::String::from("uart")
+                } else {
+                    alloc::format!("ttyu{unit}")
+                };
                 let mut active: Vec<&str> = Vec::new();
                 if serial {
-                    active.push("ttyu0");
+                    active.push(&name);
                 }
                 if video {
                     active.push("ttyv0");
@@ -841,8 +857,9 @@ pub(crate) fn sysctl_init(s: &sched::Sleepable) {
                     out.extend_from_slice(c.as_bytes());
                     out.push(b',');
                 }
-                out.extend_from_slice(if serial { b"/ttyu0," } else { b"/uart," });
-                out.extend_from_slice(b"ttyv0,");
+                out.push(b'/');
+                out.extend_from_slice(if serial { name.as_bytes() } else { b"uart" });
+                out.extend_from_slice(b",ttyv0,");
             })),
         )
         .expect("kern.console");

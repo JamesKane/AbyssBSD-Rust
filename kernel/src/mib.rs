@@ -2,7 +2,8 @@
 //! Small nodes `rc` and the base's programs read at boot, each where
 //! FreeBSD keeps it: `user.localbase` (`kern_mib.c`), `kern.module_path`
 //! (`kern_linker.c`), `vfs.root_mount_hold` (`vfs_mountroot.c`), and
-//! `kern.boottrace` (`kern_boottrace.c`), which is off unless the loader
+//! `debug.bootverbose` (`kern_mib.c`), `kern.boottrace`
+//! (`kern_boottrace.c`), which is off unless the loader
 //! enables it, as in GENERIC, so what init and `rc` trace is dropped.
 
 use alloc::boxed::Box;
@@ -80,6 +81,25 @@ pub(crate) fn sysctl_init(s: &Sleepable) {
             "module load search path",
             &MODULE,
         );
+        // `debug.bootverbose` (`kern_mib.c`), from the loader's
+        // `boot_verbose`.
+        let debug = t
+            .child(root, "debug")
+            .or_else(|| t.add_node(root, Number::Auto, "debug", "Debugging").ok())
+            .expect("debug node");
+        t.add_writable(
+            debug,
+            Number::Auto,
+            "bootverbose",
+            "Control the output of verbose kernel messages",
+            0,
+            Value::Int(Box::new(|| i32::from(bus::bootverbose()))),
+            sysctl::int_writer(|n| {
+                bus::set_bootverbose(n != 0);
+                Ok(())
+            }),
+        )
+        .expect("debug.bootverbose");
         // Nothing holds the root mount once init runs.
         t.add_value(
             vfs,

@@ -224,6 +224,7 @@ pub(crate) fn init(s: &Sleepable) {
     // `vt` takes the framebuffer; keyboards type into its windows.
     crate::vtcons::start();
     input::set_consumer(alloc::sync::Arc::new(crate::tty::ConsoleInput));
+    bus::set_bootverbose(crate::console::loader_flag("boot_verbose").unwrap_or(false));
     let drivers = drivers();
     let root = bus::init(
         s,

@@ -233,7 +233,14 @@ impl Driver for Sky1Pinctrl {
         if regs.len() < usize::from(c.pads()) * 4 {
             return Err(AttachError::Device("register window too small"));
         }
-        for d in differences(&groups, |off| regs::Mmio::read32(&regs, off)) {
+        // What the firmware left differs from what it declares in many
+        // places, all harmless so far: a bring-up note (`bootverbose`).
+        let notes = if bus::bootverbose() {
+            differences(&groups, |off| regs::Mmio::read32(&regs, off))
+        } else {
+            Vec::new()
+        };
+        for d in notes {
             bus::manager().log(format_args!(
                 "sky1_pinctrl{}: {} pad {}: firmware declares {:#05x}, the pad holds {:#05x}",
                 cx.unit(),
