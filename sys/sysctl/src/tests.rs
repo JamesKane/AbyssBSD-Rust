@@ -253,3 +253,36 @@ fn handler_nodes() {
         Err(AddError::NoParent)
     );
 }
+
+#[test]
+fn query_nodes_are_listed() {
+    let mut t = sample();
+    let d = t.add_node(t.root(), Number::Auto, "dev", "").unwrap();
+    let unit = t.add_node(d, Number::Fixed(0), "0", "").unwrap();
+    let q = t
+        .add_query(
+            unit,
+            Number::Auto,
+            "delivered_mhz",
+            "",
+            ctltype::INT | ctlflag::RD,
+            "I",
+            alloc::sync::Arc::new(|_, out: &mut Vec<u8>| {
+                out.extend_from_slice(&1899i32.to_ne_bytes());
+                Ok(())
+            }),
+        )
+        .unwrap();
+    // A leaf: `sysctl -a` lists it, and nothing goes under it.
+    let mut cur = Vec::new();
+    let mut seen = Vec::new();
+    while let Some(next) = t.next(&cur, true) {
+        seen.push(t.name(&next).unwrap());
+        cur = next;
+    }
+    assert_eq!(seen.last().map(String::as_str), Some("dev.0.delivered_mhz"));
+    assert_eq!(
+        t.add_node(q, Number::Auto, "under", "").err(),
+        Some(AddError::NoParent)
+    );
+}

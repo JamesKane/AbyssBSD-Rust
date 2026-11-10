@@ -50,6 +50,35 @@ pub(crate) fn installed_files(full: &Path) -> Result<crate::multiuser::Installed
     Ok(files)
 }
 
+/// What `bsdinstall` adds for a board: every interface by DHCP
+/// (`ifconfig_DEFAULT`, as rc.conf(5) has it, since a board's NIC
+/// has no one name) and `sshd`, letting root in with a key only.
+const RC_CONF_BOARD: &str = "ifconfig_DEFAULT=\"DHCP\"\n\
+                             sshd_enable=\"YES\"\n\
+                             sshd_flags=\"-o PermitRootLogin=prohibit-password\"\n";
+
+/// [`crate::multiuser::installed_files`] for a board: the network's
+/// `rc.conf` and `key` (an OpenSSH public key's line) as root's
+/// `authorized_keys`.
+pub(crate) fn board_files(full: &Path, key: &str) -> Result<crate::multiuser::InstalledFiles> {
+    let key = key.trim();
+    if !key.starts_with("ssh-") && !key.starts_with("ecdsa-") {
+        return Err(format!("not an OpenSSH public key: `{key}`").into());
+    }
+    let mut files = crate::multiuser::installed_files(full)?;
+    for (path, _, data) in &mut files {
+        if *path == "etc/rc.conf" {
+            data.extend_from_slice(RC_CONF_BOARD.as_bytes());
+        }
+    }
+    files.push((
+        "root/.ssh/authorized_keys",
+        0o600,
+        format!("{key}\n").into_bytes(),
+    ));
+    Ok(files)
+}
+
 /// The guest's ssh port.
 const SSH: u16 = 22;
 

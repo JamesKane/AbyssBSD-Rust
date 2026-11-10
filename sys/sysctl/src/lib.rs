@@ -285,6 +285,14 @@ struct Node {
     depth: usize,
 }
 
+impl Node {
+    /// Whether it is read itself rather than through children: a value,
+    /// a handler, or a query.
+    fn is_leaf(&self) -> bool {
+        self.value.is_some() || self.handler.is_some() || self.query.is_some()
+    }
+}
+
 /// The tree.
 pub struct Tree {
     slots: Vec<Option<Node>>,
@@ -402,7 +410,7 @@ impl Tree {
     /// Adds a node under `parent`.
     pub fn add(&mut self, parent: NodeId, spec: Spec<'_>) -> Result<NodeId, AddError> {
         let p = self.node(parent).ok_or(AddError::NoParent)?;
-        if p.value.is_some() || p.handler.is_some() {
+        if p.is_leaf() {
             return Err(AddError::NoParent);
         }
         if spec.name.is_empty() || spec.name.contains('.') {
@@ -820,7 +828,7 @@ impl Tree {
             let before = path.as_slice() < after && !after.starts_with(path);
             if !before {
                 // A handler node lists as a leaf, as in FreeBSD.
-                if (n.value.is_some() || n.handler.is_some()) && path.as_slice() > after {
+                if n.is_leaf() && path.as_slice() > after {
                     return Some(path.clone());
                 }
                 if let Some(found) = self.next_under(c, path, after, honor_skip) {

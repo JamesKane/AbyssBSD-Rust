@@ -1418,6 +1418,10 @@ impl Manager {
             let _ = self.detach(c, DetachReason::Parent, s);
         }
         provides.revoke();
+        // The sources hold the driver's implementations, and with them
+        // its grants (a controller's registers): gone before the ledger
+        // is checked.
+        drop(provides);
         self.space.lock().forget(id);
         // 3-7. The binding's own teardown. Children a bus driver created
         // go with it, before its instance: their bus data may hold the

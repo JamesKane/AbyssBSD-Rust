@@ -33,6 +33,7 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     let opts = build::Options::from_args(&mut args);
     let cmdline = args.take_value("--cmdline")?.unwrap_or_default();
     let root = args.take_value("--root")?;
+    let key = args.take_value("--authorized-key")?;
     args.finish()?;
     let path = match root.as_deref() {
         None | Some("md") => build(arch, opts, &cmdline)?,
@@ -47,7 +48,21 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
             let _lock = lock()?;
             build_installed_root(arch, opts, cmdline)?
         }
-        Some(other) => return Err(format!("unknown root `{other}` (md, installed)").into()),
+        // That, on the network with `sshd` and root's key
+        // (`--authorized-key`, the public key's text): for a board.
+        Some("board") => {
+            let key = key.ok_or("--root board needs --authorized-key <public key>")?;
+            let cmdline = if cmdline.is_empty() {
+                "boot_multicons=YES boot_serial=YES"
+            } else {
+                &cmdline
+            };
+            let _lock = lock()?;
+            ufs_root(arch, opts, cmdline, Root::Board, Some(&key))?
+        }
+        Some(other) => {
+            return Err(format!("unknown root `{other}` (md, installed, board)").into());
+        }
     };
     println!("{}", path.display());
     Ok(())
@@ -364,7 +379,7 @@ echo atf-done-$((6*7))
 /// [`PJDFSTEST`]. The loader finds the kernel there and
 /// hands the kernel the fstab's root; there is no memory disk.
 pub(crate) fn build_ufs_root(arch: Arch, opts: build::Options, cmdline: &str) -> Result<PathBuf> {
-    ufs_root(arch, opts, cmdline, Root::Tests)
+    ufs_root(arch, opts, cmdline, Root::Tests, None)
 }
 
 /// As [`build_ufs_root`], with what FreeBSD's installer adds to the base
@@ -375,21 +390,21 @@ pub(crate) fn build_installed_root(
     opts: build::Options,
     cmdline: &str,
 ) -> Result<PathBuf> {
-    ufs_root(arch, opts, cmdline, Root::Installed)
+    ufs_root(arch, opts, cmdline, Root::Installed, None)
 }
 
 /// As [`build_installed_root`], with the installer's lines for a DHCP and
 /// SLAAC `vtnet0` and `sshd` ([`crate::net`]): the networked boot's root
 /// (docs/NETWORKING.md §16.4).
 pub(crate) fn build_net_root(arch: Arch, opts: build::Options, cmdline: &str) -> Result<PathBuf> {
-    ufs_root(arch, opts, cmdline, Root::Net)
+    ufs_root(arch, opts, cmdline, Root::Net, None)
 }
 
 /// As [`build_installed_root`], with all of FreeBSD's `/usr/tests` (from
 /// `tests.txz`): the root `cargo xtask kyua` runs the suite on
 /// (docs/MULTIUSER.md §14).
 pub(crate) fn build_kyua_root(arch: Arch, opts: build::Options, cmdline: &str) -> Result<PathBuf> {
-    ufs_root(arch, opts, cmdline, Root::Kyua)
+    ufs_root(arch, opts, cmdline, Root::Kyua, None)
 }
 
 /// Which UFS2 root to make.
@@ -403,9 +418,18 @@ enum Root {
     Net,
     /// That, with the whole of FreeBSD's test suite.
     Kyua,
+    /// The installed root on whatever network a board has, with `sshd`
+    /// and root's key ([`crate::net::board_files`]).
+    Board,
 }
 
-fn ufs_root(arch: Arch, opts: build::Options, cmdline: &str, root: Root) -> Result<PathBuf> {
+fn ufs_root(
+    arch: Arch,
+    opts: build::Options,
+    cmdline: &str,
+    root: Root,
+    authorized_key: Option<&str>,
+) -> Result<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     let images = build::all(arch, opts)?;
     let read = |p: &PathBuf| fs::read(p).map_err(|e| format!("{}: {e}", p.display()));
@@ -416,6 +440,7 @@ fn ufs_root(arch: Arch, opts: build::Options, cmdline: &str, root: Root) -> Resu
         Root::Installed => "installedroot",
         Root::Net => "netroot",
         Root::Kyua => "kyuaroot",
+        Root::Board => "boardroot",
     };
     // What goes over the base: made afresh each time.
     let stage = dir.join(name);
@@ -429,6 +454,8 @@ fn ufs_root(arch: Arch, opts: build::Options, cmdline: &str, root: Root) -> Resu
         let full = crate::base::full(arch)?;
         let files = if root == Root::Net {
             crate::net::installed_files(&full)?
+        } else if root == Root::Board {
+            crate::net::board_files(&full, authorized_key.unwrap_or_default())?
         } else {
             crate::multiuser::installed_files(&full)?
         };
@@ -439,6 +466,11 @@ fn ufs_root(arch: Arch, opts: build::Options, cmdline: &str, root: Root) -> Resu
             }
             fs::write(&dst, data)?;
             fs::set_permissions(&dst, fs::Permissions::from_mode(mode))?;
+        }
+        // sshd refuses keys in a directory others can read.
+        let ssh = stage.join("root/.ssh");
+        if ssh.is_dir() {
+            fs::set_permissions(&ssh, fs::Permissions::from_mode(0o700))?;
         }
     }
     if let Some(md) = crate::base::md_image(arch, &[])? {
@@ -561,7 +593,7 @@ fn ufs_root(arch: Arch, opts: build::Options, cmdline: &str, root: Root) -> Resu
     fs::remove_file(&img)?;
     let cmdline = match root {
         Root::Tests => with_shell(cmdline),
-        Root::Installed | Root::Net | Root::Kyua => cmdline.to_owned(),
+        Root::Installed | Root::Net | Root::Kyua | Root::Board => cmdline.to_owned(),
     };
     let disk = make_disk(
         arch,
@@ -578,6 +610,7 @@ fn ufs_root(arch: Arch, opts: build::Options, cmdline: &str, root: Root) -> Resu
         Root::Installed => "disk-installed.img",
         Root::Net => "disk-net.img",
         Root::Kyua => "disk-kyua.img",
+        Root::Board => "disk-board.img",
     });
     fs::write(&path, &disk)?;
     Ok(path)
