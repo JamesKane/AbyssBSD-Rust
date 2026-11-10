@@ -43,7 +43,7 @@ that runs unmodified FreeBSD userland. Read `docs/ROADMAP.md` for the current ph
     Its ground truth (FreeBSD and Linux, captured 2026-11-09) is in `tests/corpus/opi6p/`.
   - "Nothing special": no board-specific config knobs. A board setting means a driver bug.
 - AMD64 reference machine: **Ryzen 9 7900X / Gigabyte X870E AORUS ELITE WIFI7**, Fedora 44 at
-  `192.168.0.30` (key login; `sudo` needs the user's password, so root steps go through a script
+  `192.168.0.16` (key login; `sudo` needs the user's password, so root steps go through a script
   the user runs). Board facts: `docs/HARDWARE.md` §5.
   - AbyssBSD may write **only to the second NVMe** (the media disk), identified by serial number.
     The Samsung 980 PRO is Fedora's system disk. The WD 8 TB ×2 (`md0`) and HGST 6 TB (`md1`) hold

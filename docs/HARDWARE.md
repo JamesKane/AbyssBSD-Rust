@@ -238,7 +238,7 @@ The AMD64 Tier 1 physical machine. Surveyed read-only from its Fedora 44 install
 
 **Access and workflow.**
 
-- Fedora 44 at `192.168.0.30` (user `jkane`, key login; `sudo` requires the user's password, so
+- Fedora 44 at `192.168.0.16` (user `jkane`, key login; `sudo` requires the user's password, so
   root steps go through a script the user runs).
 - Fedora stays as the Linux ground truth (ACPI dumps, `lspci`, register state).
 - AbyssBSD is installed onto the **second NVMe**, with its own ESP and its own UEFI boot entry,
