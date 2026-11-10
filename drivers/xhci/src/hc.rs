@@ -1419,13 +1419,23 @@ impl HostController for Hc {
                 index: p.index,
                 length: p.length,
             };
-            chain.push(with_chain(tt::setup(&sp, 0)));
+            // Three TDs (xHCI 1.2 §4.11.2.2, FreeBSD's
+            // `xhci_setup_generic_chain`): the setup stage alone, the data
+            // stage's TRBs chained to each other but not to the status
+            // stage, and the status stage, the one that interrupts. A real
+            // controller (the Sky1's) hangs on a setup TRB chained into its
+            // data stage; QEMU's accepts it.
+            chain.push(tt::setup(&sp, 0));
             lens.push(0);
             for (i, &(addr, l)) in segs.iter().enumerate() {
                 left -= l;
                 let last = i + 1 == segs.len();
                 let size = tt::td_size(left, mp, last);
-                let f = flag::CHAIN | flag::ISP;
+                let f = if last {
+                    flag::ISP
+                } else {
+                    flag::CHAIN | flag::ISP
+                };
                 let trb = if i == 0 {
                     tt::data(addr, l, size, is_in, f, 0)
                 } else {
@@ -1612,10 +1622,6 @@ fn segments(segs: &[vm::dma::Segment]) -> Vec<(u64, u32)> {
     segs.iter()
         .map(|g| (g.bus, u32::try_from(g.len).unwrap_or(trb::MAX_TRB_BYTES)))
         .collect()
-}
-
-fn with_chain(t: Trb) -> Trb {
-    Trb([t.0[0], t.0[1], t.0[2], t.0[3] | flag::CHAIN])
 }
 
 /// The transfer with its buffer unmapped, for handing back.
