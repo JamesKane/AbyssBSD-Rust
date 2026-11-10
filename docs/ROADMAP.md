@@ -2540,8 +2540,12 @@ machines against FreeBSD on bare metal; the exit criteria above.
     where the vendor devicetree pulls up. Attach writes nothing: it logs any grouped pad whose
     register differs from its declaration. Every group a consumer names exists, except the four
     I2S `*_dbg` groups firmware never declared.
-  - Next: the FCH CRU (`UCRU`) and `DMA0`, which hold back COM0, COM1, and COM3, then GPIO, I2C,
-    and the GPT timer.
+  - `FixedDMA` edges are optional (DRIVER-MODEL §6.1): whether a device works without its DMA
+    engine is its driver's call, and a PL011 runs on programmed I/O, as FreeBSD's does. So the
+    UARTs no longer wait for the FCH DMA-350 (`DMA0`).
+  - `kernel/table`'s `nothing_with_a_driver_waits_forever` keeps the ledger of devices with a
+    driver that would still wait: the Sky1's COM0, COM1, and COM3, on the FCH CRU (`UCRU`). Next:
+    `UCRU`, then GPIO, I2C, and the GPT timer.
 
 ## Phase 9: Self-hosting and hardening = **v1.0 / Day 1 complete** (L)
 

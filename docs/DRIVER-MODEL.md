@@ -393,7 +393,7 @@ firmware, before any driver runs:
 | DMAR / IVRS (P9) | IOMMU unit → each device in its scope |
 | MADT / GSI routing | interrupt controller → each device using its GSIs (mostly satisfied by adoption) |
 | `_PRT` link devices | PCI interrupt link → device |
-| `_CRS` `FixedDMA` | DMA engine → device (with `_DSD` `dma-names` for the channel's role) |
+| `_CRS` `FixedDMA` | DMA engine → device (with `_DSD` `dma-names` for the channel's role). Optional: a driver that cannot work without its channel declares the need in attach (a PL011 runs on programmed I/O) |
 | `_CRS` `PinFunction`, `PinConfig`, `PinGroup*` | Pin controller → device |
 | `GenericSerialBus` and `GeneralPurposeIo` operation regions; `EmbeddedControl`, `SMBus`, and `IPMI` regions | I2C/SPI or GPIO controller its field's `Connection` names; the device declaring an EC, SMBus, or IPMI region → device whose AML uses the region (a `_PS0` that talks to a PMIC, a battery's `_BST`). Optional, since AML may not touch the region before `_REG` connects it |
 | `_DSD` reference properties, from a table of known names (`mboxes`, `shmem`, `power-domains`, `phys`, `dp_phy`, `usb4-host-interface`, `phy-handle`, `backlight`, …) | Referenced object → device, with the kind the table gives |

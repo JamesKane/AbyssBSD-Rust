@@ -352,12 +352,12 @@ fn nothing_with_a_driver_waits_forever() {
             r.iter().map(|s| String::from(*s)).collect::<Vec<_>>(),
         )
     };
-    // COM0, COM1, and COM3 name the FCH CRU (`sky1,fch_cru`) and the FCH
-    // DMA controller (their `FixedDMA` lines); neither has a driver yet.
+    // COM0, COM1, and COM3 name the FCH CRU (`sky1,fch_cru`), which has
+    // no driver yet.
     let sky1 = alloc::vec![
-        pair("\\_SB_.COM0", &["\\_SB_.DMA0", "\\_SB_.UCRU"]),
-        pair("\\_SB_.COM1", &["\\_SB_.DMA0", "\\_SB_.UCRU"]),
-        pair("\\_SB_.COM3", &["\\_SB_.DMA0", "\\_SB_.UCRU"]),
+        pair("\\_SB_.COM0", &["\\_SB_.UCRU"]),
+        pair("\\_SB_.COM1", &["\\_SB_.UCRU"]),
+        pair("\\_SB_.COM3", &["\\_SB_.UCRU"]),
     ];
     // The Q8B (Tier 2): two PCIe hosts wait for Qualcomm's power
     // framework device and its PCIe power device.

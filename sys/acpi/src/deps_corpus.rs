@@ -198,6 +198,7 @@ fn opi6p_graph() {
         &deps,
         &[
             ("Optional \"backlight\" device", 1),
+            ("Optional Dma device", 7),
             ("Order \"remote-endpoint\" device", 22),
             ("Power \"power-domains\" sub", 3),
             ("Power \"power-supply\" device", 1),
@@ -207,7 +208,6 @@ fn opi6p_graph() {
             ("Required \"mboxes\" device", 6),
             ("Required \"pwms\" device", 1),
             ("Required \"shmem\" device", 2),
-            ("Required Dma device", 7),
             ("Required Gpio device", 22),
             ("Required Interrupt device", 10),
             ("Required Pin device", 42),
@@ -268,7 +268,7 @@ fn opi6p_graph() {
         ("\\_SB_.I2S9", "\\_SB_.DMA1"),
     ] {
         let e = edge(&i, &deps, consumer, supplier);
-        assert_eq!((e.kind, &e.via), (EdgeKind::Required, &Via::Dma));
+        assert_eq!((e.kind, &e.via), (EdgeKind::Optional, &Via::Dma));
     }
 }
 

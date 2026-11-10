@@ -633,6 +633,12 @@ fn nearest(
 /// The DMA controller serving each `FixedDMA` request line: the CSRT says
 /// which controller serves the line, and the controller is the device
 /// whose `_CRS` begins with its MMIO base.
+///
+/// The edges are optional: whether a device works without its DMA engine
+/// is its driver's to say. A PL011 runs on programmed I/O (FreeBSD's
+/// `uart` never uses DMA), so the Sky1's UARTs must not wait for the FCH
+/// DMA-350; a driver that cannot work without its channel declares the
+/// need in attach. FreeBSD reads no `FixedDMA` at all.
 fn fixed_dma(
     interp: &mut Interpreter,
     host: &mut dyn aml::Host,
@@ -662,7 +668,7 @@ fn fixed_dma(
             v
         });
         match by_base.iter().find(|&&(b, _)| b == c.mmio_base) {
-            Some(&(_, s)) => out.edge(s, d, EdgeKind::Required, Via::Dma),
+            Some(&(_, s)) => out.edge(s, d, EdgeKind::Optional, Via::Dma),
             None => out.unresolved(
                 d,
                 Via::Dma,
