@@ -233,6 +233,50 @@ impl Geometry {
         }
     }
 
+    /// The most level-1 descriptors a two-level table has: FreeBSD's
+    /// `STRTAB_L1_SZ_SHIFT` (a 1 MiB level-1 table), so 25 StreamID bits
+    /// with [`Self::SPLIT`]; the board's 32-bit StreamIDs are covered
+    /// that far, as on FreeBSD and Linux (docs/IOMMU.md §3.2).
+    pub const L1_MAX_LOG2: u8 = 17;
+    /// The largest linear table: 2^16 STEs (4 MiB), for an SMMU without
+    /// two-level tables but with many StreamID bits (FreeBSD would size
+    /// it for every StreamID).
+    pub const LINEAR_MAX_LOG2: u8 = 16;
+
+    /// The driver's form for an SMMU with `sid_bits` StreamID bits:
+    /// two-level when `two_level` ([`crate::regs::Features::two_level`]:
+    /// offered, and more StreamID bits than [`Self::SPLIT`]), its level-1
+    /// table capped at [`Self::L1_MAX_LOG2`] descriptors; linear
+    /// otherwise, capped at [`Self::LINEAR_MAX_LOG2`] (FreeBSD's
+    /// `smmu_init_strtab`). StreamIDs past the table are
+    /// `C_BAD_STREAMID`.
+    #[must_use]
+    pub const fn for_smmu(sid_bits: u8, two_level: bool) -> Self {
+        if two_level && sid_bits > Self::SPLIT {
+            let max = Self::SPLIT + Self::L1_MAX_LOG2;
+            Self::TwoLevel {
+                log2size: if sid_bits > max { max } else { sid_bits },
+                split: Self::SPLIT,
+            }
+        } else {
+            Self::Linear {
+                log2size: if sid_bits > Self::LINEAR_MAX_LOG2 {
+                    Self::LINEAR_MAX_LOG2
+                } else {
+                    sid_bits
+                },
+            }
+        }
+    }
+
+    /// The number of StreamIDs the table covers.
+    #[must_use]
+    pub const fn streams(&self) -> u64 {
+        match *self {
+            Self::Linear { log2size } | Self::TwoLevel { log2size, .. } => 1 << log2size,
+        }
+    }
+
     /// The STRTAB_BASE_CFG value.
     #[must_use]
     pub const fn cfg(&self) -> crate::regs::StrtabCfg {
@@ -409,5 +453,42 @@ mod tests {
         };
         assert_eq!(g.slot(1 << 12), None);
         assert_eq!(g.base_bytes(), 8 << 6);
+    }
+
+    #[test]
+    fn the_drivers_geometry() {
+        // The board: 32 SID bits, 25 covered, a 1 MiB level-1 table
+        // ("covers 25/32 bits of SID" in its Linux log).
+        let g = Geometry::for_smmu(32, true);
+        assert_eq!(
+            g,
+            Geometry::TwoLevel {
+                log2size: 25,
+                split: 8
+            }
+        );
+        assert_eq!(g.base_bytes(), 1 << 20);
+        assert_eq!(g.streams(), 1 << 25);
+        assert_eq!(g.slot(1 << 25), None);
+        // QEMU: 16 SID bits, two levels (as FreeBSD), a 2 KiB level 1.
+        let g = Geometry::for_smmu(16, true);
+        assert_eq!(
+            g,
+            Geometry::TwoLevel {
+                log2size: 16,
+                split: 8
+            }
+        );
+        assert_eq!(g.base_bytes(), 2048);
+        // Linear: no two-level support, or too few SID bits for it.
+        assert_eq!(
+            Geometry::for_smmu(8, false),
+            Geometry::Linear { log2size: 8 }
+        );
+        assert_eq!(
+            Geometry::for_smmu(32, false),
+            Geometry::Linear { log2size: 16 }
+        );
+        assert_eq!(Geometry::for_smmu(0, false).streams(), 1);
     }
 }

@@ -40,6 +40,62 @@ pub mod code {
     pub const F_CFG_CONFLICT: u8 = 0x21;
     pub const E_PAGE_REQUEST: u8 = 0x24;
     pub const F_VMS_FETCH: u8 = 0x25;
+
+    /// FreeBSD's name and explanation of a type (`smmu.c`'s `events`
+    /// table), as its `Event %s (%s) received.` line prints them; `None`
+    /// for a type it does not list (`Event 0x%x received`).
+    #[must_use]
+    pub const fn freebsd(code: u8) -> Option<(&'static str, &'static str)> {
+        Some(match code {
+            F_UUT => ("F_UUT", "Unsupported Upstream Transaction."),
+            C_BAD_STREAMID => ("C_BAD_STREAMID", "Transaction StreamID out of range."),
+            F_STE_FETCH => ("F_STE_FETCH", "Fetch of STE caused external abort."),
+            C_BAD_STE => ("C_BAD_STE", "Used STE invalid."),
+            F_BAD_ATS_TREQ => (
+                "F_BAD_ATS_TREQ",
+                "Address Translation Request disallowed for a StreamID and a PCIe ATS \
+                 Translation Request received.",
+            ),
+            F_STREAM_DISABLED => (
+                "F_STREAM_DISABLED",
+                "The STE of a transaction marks non-substream transactions disabled.",
+            ),
+            F_TRANSL_FORBIDDEN => (
+                "F_TRANSL_FORBIDDEN",
+                "An incoming PCIe transaction is marked Translated but SMMU bypass is \
+                 disallowed for this StreamID.",
+            ),
+            C_BAD_SUBSTREAMID => (
+                "C_BAD_SUBSTREAMID",
+                "Incoming SubstreamID present, but configuration is invalid.",
+            ),
+            F_CD_FETCH => ("F_CD_FETCH", "Fetch of CD caused external abort."),
+            C_BAD_CD => ("C_BAD_CD", "Fetched CD invalid."),
+            F_WALK_EABT => (
+                "F_WALK_EABT",
+                "An external abort occurred fetching (or updating) a translation table \
+                 descriptor.",
+            ),
+            F_TRANSLATION => ("F_TRANSLATION", "Translation fault."),
+            F_ADDR_SIZE => ("F_ADDR_SIZE", "Address Size fault."),
+            F_ACCESS => (
+                "F_ACCESS",
+                "Access flag fault due to AF == 0 in a page or block TTD.",
+            ),
+            F_PERMISSION => ("F_PERMISSION", "Permission fault occurred on page access."),
+            F_TLB_CONFLICT => (
+                "F_TLB_CONFLICT",
+                "A TLB conflict occurred because of the transaction.",
+            ),
+            F_CFG_CONFLICT => (
+                "F_CFG_CONFLICT",
+                "A configuration cache conflict occurred due to the transaction.",
+            ),
+            E_PAGE_REQUEST => ("E_PAGE_REQUEST", "Speculative page request hint."),
+            F_VMS_FETCH => ("F_VMS_FETCH", "Fetch of VMS caused external abort."),
+            _ => return None,
+        })
+    }
 }
 
 /// The access that faulted.
@@ -523,7 +579,20 @@ mod tests {
                 assert_eq!(Event::decode(&w), e, "{}", record.name());
                 assert_eq!(lo8(w[0]), record.code());
             }
+            // FreeBSD's table names every type the architecture defines by
+            // the same name.
+            if !matches!(record, Record::Other { .. }) {
+                assert_eq!(
+                    code::freebsd(record.code()).map(|(n, _)| n),
+                    Some(record.name())
+                );
+            }
         }
+        assert_eq!(
+            code::freebsd(code::C_BAD_STE),
+            Some(("C_BAD_STE", "Used STE invalid."))
+        );
+        assert_eq!(code::freebsd(0x7f), None);
     }
 
     #[test]

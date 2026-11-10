@@ -2,21 +2,39 @@
 //! `smmu`: the Arm SMMUv3 (Arm IHI 0070) as the IORT describes it, a
 //! child of `acpi0` (docs/IOMMU.md).
 //!
-//! So far (IOMMU.md §8, stage 0) the driver probes, claims its registers
-//! and its event, sync, and gerror interrupts (not PRI, as FreeBSD),
-//! reads the identification registers, and leaves the hardware as
-//! firmware left it: no register is written, nothing is translated, and
-//! `dev.smmu.N.dma` reads 0. The queues, stream tables, and translation
-//! come with stages 2 and 3.
+//! The driver probes, claims its registers and its event, sync, and gerror
+//! interrupts (not PRI, as FreeBSD), and reads the identification
+//! registers. Then, with DMA translation on (`hw.iommu.dma`, IOMMU.md
+//! §4.12) and the features it needs, it runs the SMMU (stage 2 of IOMMU.md
+//! §8; [`unit`]):
+//!
+//! - Every stream starts invalid: DMA from a device nobody gave a context
+//!   aborts, with a `C_BAD_STE` event.
+//! - The streams with reserved memory (IORT RMR nodes) are bypassed before
+//!   the unit is enabled, and FreeBSD's `N streams bypassed (reserved
+//!   memory)` reports them; so are named components' streams with
+//!   `hw.smmu.bypass_named=1` (IOMMU.md §4.9).
+//! - It publishes a [`bus::iommu::Iommu`] provider. The broker asks it for
+//!   a device's context when the device first needs DMA (its tag or MSI);
+//!   for now every context is pass-through (a bypass STE), as FreeBSD's
+//!   disabled requesters. `dev.smmu.N.dma` stays 0: nothing is translated
+//!   until stage 3.
+//! - Events are drained in the event interrupt's thread and printed as
+//!   FreeBSD's `smmu_print_event` does, rate-limited per stream; global
+//!   errors are acknowledged, a refused command skipped.
+//! - At shutdown (after every device it translates has stopped) it turns
+//!   the SMMU off and leaves `GBPA` as firmware had it (IOMMU.md §4.11).
+//!
+//! With `hw.iommu.dma=0` the unit attaches, prints the board port's `left
+//! disabled: DMA translation is off (hw.iommu.dma)`, and leaves the
+//! hardware as firmware left it. An SMMU without a feature the driver
+//! needs attaches the same way, with FreeBSD's messages: what it would
+//! translate runs untranslated, as on FreeBSD when its attach fails.
 //!
 //! - Probe takes the generic SMMUv3 only (IORT model 0), as FreeBSD's
 //!   `smmu_acpi_probe`.
-//! - An SMMU without a feature the driver needs still attaches, with
-//!   translation off (IOMMU.md §4.7): what it would translate then runs
-//!   untranslated, as on FreeBSD when its attach fails.
 //! - It refuses a voluntary detach: the devices it translates depend on
-//!   it (`devctl detach` of a unit is FreeBSD's too, but nothing there
-//!   holds its consumers to it).
+//!   it.
 //! - `hw.smmu.bypass_named` (`CTLFLAG_RDTUN`, 0): what becomes of the
 //!   streams of named components without a driver (IOMMU.md §4.9).
 //!
@@ -28,8 +46,17 @@
 
 extern crate alloc;
 
+pub mod hw;
+pub mod unit;
+
+#[cfg(test)]
+mod tests;
+
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicI32, Ordering};
 
 use abi::sysctl::ctlflag;
@@ -39,9 +66,18 @@ use bus::{
     AttachCx, AttachError, Busy, Driver, DriverDecl, Ident, Ids, IrqLine, MmioGrant, StartCx,
     StopCx, StopReason,
 };
-use iommu::smmu::{Endian, Features, Idr, Missing, reg};
+use iommu::event::{EVENT_WORDS, Event, code};
+use iommu::regs::{Features, Missing, gerror, off};
+use iommu::ste::{Geometry, STE_WORDS, Ste};
+use irq::Filter;
 use regs::Bytes;
+use sched::{IrqCx, Sleepable};
+use sync::SpinLock;
 use sysctl::{Number, Tree, Value};
+use vm::dma::{Coherency, DmaCoherent, DmaConstraints, DmaTag};
+
+use crate::hw::Hw;
+use crate::unit::{Notice, Unit};
 
 /// `hw.smmu.bypass_named`.
 static BYPASS_NAMED: AtomicI32 = AtomicI32::new(0);
@@ -86,115 +122,445 @@ pub fn sysctl_init(t: &mut Tree) {
     }
 }
 
-/// The registers the driver reads.
-pub trait Regs: Send + Sync {
-    /// The 32-bit register at `off`.
-    fn read32(&self, off: usize) -> u32;
-}
-
-impl Regs for MmioGrant<Bytes> {
-    fn read32(&self, off: usize) -> u32 {
-        regs::Mmio::read32(self, off)
-    }
-}
-
-/// What the SMMU says it is, read once at attach.
+/// The identification registers, read once at attach: IDR0, IDR1, IDR3,
+/// IDR5, IIDR.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Identity {
-    /// The identification registers as read.
-    pub idr: Idr,
-    /// What it supports, or what it lacks that the driver needs.
-    pub features: Result<Features, Missing>,
-    /// Whether its accesses are coherent: the IORT's COHACC override, or
-    /// `IDR0.COHACC`.
-    pub coherent: bool,
+pub struct Idr(pub [u32; 5]);
+
+impl Idr {
+    /// Reads them with `read32`.
+    pub fn read(read32: impl Fn(u32) -> u32) -> Self {
+        Self([off::IDR0, off::IDR1, off::IDR3, off::IDR5, off::IIDR].map(read32))
+    }
+
+    /// What they say, with the IORT's coherency override (`COHACC`).
+    #[must_use]
+    pub fn features(&self, firmware: &SmmuV3) -> Features {
+        let [i0, i1, i3, i5, ii] = self.0;
+        Features::decode(i0, i1, i3, i5, ii, firmware.coherent())
+    }
+
+    /// The `bootverbose` line with the raw registers.
+    pub fn verbose(&self, mut line: impl FnMut(core::fmt::Arguments<'_>)) {
+        let [i0, i1, i3, i5, ii] = self.0;
+        line(format_args!(
+            "IDR0 {i0:#x} IDR1 {i1:#x} IDR3 {i3:#x} IDR5 {i5:#x} IIDR {ii:#x}"
+        ));
+    }
 }
 
-impl Identity {
-    /// Reads the identification registers.
-    pub fn read(r: &impl Regs, firmware: &SmmuV3) -> Self {
-        let idr = Idr {
-            idr0: r.read32(reg::IDR0),
-            idr1: r.read32(reg::IDR1),
-            idr3: r.read32(reg::IDR3),
-            idr5: r.read32(reg::IDR5),
-            iidr: r.read32(reg::IIDR),
+/// The streams that bypass the SMMU from the start (IOMMU.md §4.9): every
+/// RMR stream on it, and with `named` every named component's, without
+/// duplicates, in table order. The `bootverbose` line for each.
+#[must_use]
+pub fn bypassed_streams(node: &SmmuNode, named: bool) -> Vec<(u32, String)> {
+    let mut out: Vec<(u32, String)> = Vec::new();
+    let mut add = |sid: u32, why: String| {
+        if !out.iter().any(|(s, _)| *s == sid) {
+            out.push((sid, why));
+        }
+    };
+    for r in &node.reserved {
+        for sid in r.streams.iter().cloned().flatten() {
+            for &(base, len) in &r.ranges {
+                add(
+                    sid,
+                    alloc::format!(
+                        "stream {sid:#x}: reserved {base:#x}-{:#x}{}",
+                        base.saturating_add(len).saturating_sub(1),
+                        if r.remap { "" } else { " (no remapping)" }
+                    ),
+                );
+            }
+        }
+    }
+    if named {
+        for n in &node.named {
+            for sid in n.streams.iter().cloned().flatten() {
+                add(sid, alloc::format!("stream {sid:#x}: {}", n.name));
+            }
+        }
+    }
+    out
+}
+
+/// The kernel's [`Hw`]: the granted registers, and memory from the unit's
+/// own direct tag (the SMMU's accesses are not translated).
+pub struct Kernel {
+    regs: MmioGrant<Bytes>,
+    tag: DmaTag,
+}
+
+impl core::fmt::Debug for Kernel {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Kernel").field("tag", &self.tag).finish()
+    }
+}
+
+fn at(off: u32) -> usize {
+    usize::try_from(off).unwrap_or(usize::MAX)
+}
+
+impl Hw for Kernel {
+    type Mem = DmaCoherent<u64>;
+
+    fn read32(&self, off: u32) -> u32 {
+        self.regs.read32(at(off))
+    }
+
+    fn write32(&self, off: u32, v: u32) {
+        self.regs.write32(at(off), v);
+    }
+
+    fn alloc(&self, bytes: u64, align: u64) -> Option<DmaCoherent<u64>> {
+        let c = DmaConstraints {
+            align,
+            ..DmaConstraints::UNLIMITED
         };
-        let features = Features::decode(&idr);
-        let coherent = firmware.coherent() || features.as_ref().is_ok_and(|f| f.coherent);
-        Self {
-            idr,
-            features,
-            coherent,
+        // The backend does not matter for coherent memory, which is
+        // allocated within the tag's reach either way.
+        let n = usize::try_from(bytes.div_ceil(8)).ok()?;
+        self.tag.derive(&c, 0).coherent(n).ok()
+    }
+
+    fn pa(&self, m: &DmaCoherent<u64>) -> u64 {
+        m.bus_addr()
+    }
+
+    fn load(&self, m: &DmaCoherent<u64>, word: usize) -> u64 {
+        u64::from_le(m.read(word))
+    }
+
+    fn store(&self, m: &DmaCoherent<u64>, word: usize, v: u64) {
+        m.write(word, v.to_le());
+    }
+
+    fn load32(&self, m: &DmaCoherent<u64>, off: usize) -> u32 {
+        u32::from_le(m.read_at::<u32>(off))
+    }
+
+    fn write_barrier(&self) {
+        hal::dma::write_barrier();
+    }
+
+    fn doorbell_barrier(&self) {
+        hal::dma::doorbell_barrier();
+    }
+
+    fn read_barrier(&self) {
+        hal::dma::read_barrier();
+    }
+
+    fn now_ns(&self) -> u64 {
+        sched::now_ns()
+    }
+
+    fn relax(&self) {
+        core::hint::spin_loop();
+    }
+}
+
+/// The events of one stream, for the log's rate limit and for tests.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StreamEvents {
+    /// Events seen.
+    pub total: u64,
+    /// The last one.
+    pub last: Option<Event>,
+    /// When the current one-second window began.
+    window: u64,
+    /// Logged in it.
+    logged: u32,
+    /// Not logged in it.
+    suppressed: u64,
+}
+
+/// How many events of one stream are printed per second; the rest are
+/// counted (IOMMU.md §4.10).
+pub const EVENTS_PER_SECOND: u32 = 5;
+
+/// What a unit shares with its interrupt threads and its provider.
+struct Shared {
+    unit_no: u32,
+    unit: SpinLock<Option<Unit<Kernel>>>,
+    streams: SpinLock<BTreeMap<u32, StreamEvents>>,
+}
+
+impl Shared {
+    fn log(&self, args: core::fmt::Arguments<'_>) {
+        bus::manager().log(format_args!("smmu{}: {args}", self.unit_no));
+    }
+
+    /// Prints what the unit noted.
+    fn report(&self, notices: Vec<Notice>) {
+        for n in notices {
+            match n {
+                Notice::WasEnabled => {
+                    self.log(format_args!("smmu_reset: Warning: SMMU is enabled"))
+                }
+                Notice::SyncTimeout => self.log(format_args!("Failed to sync")),
+                Notice::EventOverflow => {
+                    self.log(format_args!("event queue overflowed: events lost"));
+                }
+                Notice::CommandError {
+                    error,
+                    index,
+                    words,
+                } => {
+                    self.log(format_args!("SMMU Global Error"));
+                    let name = iommu::cmd::Command::decode(&words).map_or("unknown", |c| c.name());
+                    self.log(format_args!(
+                        "CMDQ_ERR: {error:?} on command {index} ({name}: {:#x} {:#x}), skipped",
+                        words[0], words[1]
+                    ));
+                }
+                Notice::GlobalError(bits) => {
+                    self.log(format_args!("SMMU Global Error"));
+                    let mut b = bits;
+                    while b != 0 {
+                        let bit = b.isolate_lowest_one();
+                        self.log(format_args!("{}", gerror::name(bit)));
+                        b &= !bit;
+                    }
+                }
+            }
         }
     }
 
-    /// The lines FreeBSD's `smmu_check_features` prints under
-    /// `bootverbose`, in its order, and the raw registers.
-    pub fn verbose(&self, mut line: impl FnMut(core::fmt::Arguments<'_>)) {
-        let i = &self.idr;
-        line(format_args!(
-            "IDR0 {:#x} IDR1 {:#x} IDR3 {:#x} IDR5 {:#x} IIDR {:#x}",
-            i.idr0, i.idr1, i.idr3, i.idr5, i.iidr
-        ));
-        let Ok(f) = &self.features else {
-            return;
-        };
-        if f.two_level_streams {
-            line(format_args!("2-level stream table supported."));
-        }
-        if f.two_level_cds {
-            line(format_args!("2-level CD table supported."));
-        }
-        line(format_args!(
-            "{}",
-            match f.endian {
-                Endian::Mixed => "Mixed endianness supported.",
-                Endian::Little => "Little endian supported only.",
-                Endian::Big => "Big endian supported only.",
+    /// The event interrupt's work: drains the queue and prints each event
+    /// as FreeBSD's `smmu_print_event` does (the record's 32-bit words,
+    /// then the stream's STE), at most [`EVENTS_PER_SECOND`] per stream.
+    fn drain_events(&self) {
+        type Dump = (Option<u64>, Option<[u64; STE_WORDS]>);
+        let mut seen: Vec<(Event, [u64; EVENT_WORDS], Dump)> = Vec::new();
+        let notices = {
+            let mut g = self.unit.lock();
+            let Some(u) = g.as_mut() else {
+                return;
+            };
+            let mut raw = Vec::new();
+            u.drain_events(|e, w| raw.push((e, w)));
+            for (e, w) in raw {
+                let dump = u.ste_words(e.sid.0);
+                seen.push((e, w, dump));
             }
-        ));
-        if f.msi {
-            line(format_args!("MSI feature present."));
+            u.take_notices()
+        };
+        self.report(notices);
+        let now = sched::now_ns();
+        for (e, w, (l1, ste)) in seen {
+            let (show, more) = {
+                let mut s = self.streams.lock();
+                let st = s.entry(e.sid.0).or_default();
+                st.total += 1;
+                st.last = Some(e);
+                let mut more = 0;
+                if now.wrapping_sub(st.window) >= 1_000_000_000 {
+                    more = core::mem::take(&mut st.suppressed);
+                    st.window = now;
+                    st.logged = 0;
+                }
+                let show = st.logged < EVENTS_PER_SECOND;
+                if show {
+                    st.logged += 1;
+                } else {
+                    st.suppressed += 1;
+                }
+                (show, more)
+            };
+            if more != 0 {
+                self.log(format_args!(
+                    "SID {:x}: {more} more events not shown",
+                    e.sid.0
+                ));
+            }
+            if !show {
+                continue;
+            }
+            let c = e.record.code();
+            match code::freebsd(c) {
+                Some((name, msg)) => self.log(format_args!("Event {name} ({msg}) received.")),
+                None => self.log(format_args!("Event {c:#x} received")),
+            }
+            let words32: Vec<u32> = w
+                .iter()
+                .flat_map(|d| {
+                    let [a, b, c, d2, e2, f, g, h] = d.to_le_bytes();
+                    [
+                        u32::from_le_bytes([a, b, c, d2]),
+                        u32::from_le_bytes([e2, f, g, h]),
+                    ]
+                })
+                .collect();
+            self.log(format_args!("SID {:x}, Input Address: {:x}", e.sid.0, w[2]));
+            for (i, x) in words32.iter().enumerate() {
+                self.log(format_args!("evt[{i}] {x:x}"));
+            }
+            if let Some(l1) = l1 {
+                self.log(format_args!("L1 ste == {l1:x}"));
+            }
+            if let Some(ste) = ste {
+                for (i, x) in ste.iter().enumerate() {
+                    self.log(format_args!("ste[{i}] == {x:x}"));
+                }
+            }
         }
-        if f.hyp {
-            line(format_args!("HYP feature present."));
-        }
-        if f.stage1 {
-            line(format_args!("Stage 1 translation supported."));
-        }
-        if f.stage2 {
-            line(format_args!("Stage 2 translation supported."));
-        }
-        line(format_args!("ASID bits {}", f.asid_bits));
-        line(format_args!("CMD queue bits {}", f.cmdq_bits));
-        line(format_args!("EVENT queue bits {}", f.evtq_bits));
-        if f.pri {
-            line(format_args!("PRI queue bits {}", f.priq_bits));
-        }
-        line(format_args!("SSID bits {}", f.ssid_bits));
-        line(format_args!("SID bits {}", f.sid_bits));
     }
+
+    /// The gerror interrupt's work.
+    fn gerror(&self) {
+        let notices = {
+            let mut g = self.unit.lock();
+            let Some(u) = g.as_mut() else {
+                return;
+            };
+            u.handle_gerror();
+            u.take_notices()
+        };
+        self.report(notices);
+    }
+
+    /// Gives `sid` the STE `ste`, reporting what the unit noted.
+    fn set_stream(&self, sid: u32, ste: Ste) -> Result<(), unit::Error> {
+        let (r, notices) = {
+            let mut g = self.unit.lock();
+            let Some(u) = g.as_mut() else {
+                return Err(unit::Error::NoStream(sid));
+            };
+            if u.state() != unit::State::Enabled {
+                return Err(unit::Error::NoStream(sid));
+            }
+            let r = u.set_stream(sid, ste);
+            (r, u.take_notices())
+        };
+        self.report(notices);
+        r
+    }
+}
+
+/// The unit as the broker sees it.
+struct Provider(Arc<Shared>);
+
+impl bus::iommu::Iommu for Provider {
+    fn pass_through(&self, stream: u32) -> Result<(), bus::iommu::IommuError> {
+        self.0
+            .set_stream(stream, Ste::Bypass)
+            .map_err(unit::Error::for_bus)
+    }
+}
+
+/// The running units, for [`set_stream`] and [`stream_events`].
+static UNITS: SpinLock<Vec<Arc<Shared>>> = SpinLock::new(Vec::new());
+
+fn running(unit: u32) -> Option<Arc<Shared>> {
+    UNITS.lock().iter().find(|s| s.unit_no == unit).cloned()
+}
+
+/// What a stream's STE says, as [`set_stream`] sets it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamState {
+    /// Invalid: traffic aborts with `C_BAD_STE`.
+    Invalid,
+    /// Config abort: traffic aborts without an event.
+    Abort,
+    /// Bypass: traffic reaches memory untranslated.
+    Bypass,
+}
+
+/// Whether `smmuN` is running (attached, translation on, enabled).
+#[must_use]
+pub fn is_running(unit: u32) -> bool {
+    running(unit).is_some()
+}
+
+/// Sets stream `sid` of `smmuN` (tests and diagnostics: the broker owns
+/// streams of devices with contexts).
+///
+/// # Errors
+///
+/// [`unit::Error::NoStream`] if the unit is not running or the stream is
+/// beyond its table; or the unit's.
+pub fn set_stream(unit: u32, sid: u32, state: StreamState) -> Result<(), unit::Error> {
+    let s = running(unit).ok_or(unit::Error::NoStream(sid))?;
+    s.set_stream(
+        sid,
+        match state {
+            StreamState::Invalid => Ste::Invalid,
+            StreamState::Abort => Ste::Abort,
+            StreamState::Bypass => Ste::Bypass,
+        },
+    )
+}
+
+/// What stream `sid` of `smmuN` does now; `None` if the unit is not
+/// running (or the stream translates, which nothing does yet).
+#[must_use]
+pub fn stream(unit: u32, sid: u32) -> Option<StreamState> {
+    let s = running(unit)?;
+    let g = s.unit.lock();
+    match g.as_ref()?.stream(sid) {
+        Ste::Invalid => Some(StreamState::Invalid),
+        Ste::Abort => Some(StreamState::Abort),
+        Ste::Bypass => Some(StreamState::Bypass),
+        Ste::Stage1(_) => None,
+    }
+}
+
+/// The events `smmuN` has drained for stream `sid`.
+#[must_use]
+pub fn stream_events(unit: u32, sid: u32) -> StreamEvents {
+    running(unit)
+        .and_then(|s| s.streams.lock().get(&sid).copied())
+        .unwrap_or_default()
+}
+
+/// Why the unit does not translate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Off {
+    /// It lacks a feature.
+    Missing(Missing),
+    /// `hw.iommu.dma` is 0.
+    Disabled,
 }
 
 /// An `smmuN` instance.
 pub struct Smmu {
     unit: u32,
-    identity: Identity,
-    /// Its registers, held for stage 2; not written.
-    _regs: MmioGrant<Bytes>,
-    /// The event, sync, and gerror lines: granted, no handlers yet (the
-    /// sync line never gets one, as on FreeBSD).
-    _lines: [IrqLine; 3],
+    idr: Idr,
+    features: Features,
+    off: Option<Off>,
+    /// The streams bypassed from the start, with their `bootverbose`
+    /// lines; those beyond the table.
+    bypassed: Vec<(u32, String)>,
+    out_of_range: Vec<u32>,
+    shared: Arc<Shared>,
+    /// The registers when no unit holds them (translation off).
+    _regs: Option<MmioGrant<Bytes>>,
+    /// The event, sync, and gerror lines, until `start` installs the
+    /// handlers; the sync line is kept without one, as on FreeBSD.
+    lines: SpinLock<Vec<IrqLine>>,
 }
 
 impl core::fmt::Debug for Smmu {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Smmu")
             .field("unit", &self.unit)
-            .field("identity", &self.identity)
+            .field("idr", &self.idr)
+            .field("off", &self.off)
             .finish_non_exhaustive()
     }
+}
+
+fn filter(_: &Smmu, _: usize, _: &IrqCx) -> Filter {
+    Filter::Schedule
+}
+
+fn event_thread(d: &Smmu, _: usize, _: &Sleepable) {
+    d.shared.drain_events();
+}
+
+fn gerror_thread(d: &Smmu, _: usize, _: &Sleepable) {
+    d.shared.gerror();
 }
 
 impl Driver for Smmu {
@@ -206,44 +572,111 @@ impl Driver for Smmu {
     }
 
     fn attach(cx: &mut AttachCx<'_>) -> Result<Self, AttachError> {
-        let node = cx.bus_data::<SmmuNode>().ok_or(AttachError::Decline)?;
+        let node = cx
+            .bus_data::<SmmuNode>()
+            .ok_or(AttachError::Decline)?
+            .clone();
         // FreeBSD's probe: the generic model only.
         if node.smmu.model != SmmuV3::MODEL_GENERIC {
             return Err(AttachError::Decline);
         }
-        let firmware = node.smmu;
         let regs = cx.mmio_bytes(0)?;
         // Interrupt lines are event, PRI, sync, gerror; PRI is not used.
-        let lines = [cx.irq(0)?, cx.irq(2)?, cx.irq(3)?];
-        let identity = Identity::read(&regs, &firmware);
+        let lines = alloc::vec![cx.irq(0)?, cx.irq(2)?, cx.irq(3)?];
+        let idr = Idr::read(|o| regs.read32(at(o)));
+        let features = idr.features(&node.smmu);
+        let bypassed = bypassed_streams(&node, bypass_named());
+        let off = match features.check() {
+            Err(m) => Some(Off::Missing(m)),
+            Ok(()) if !iommu_framework::dma() => Some(Off::Disabled),
+            Ok(()) => None,
+        };
+        let mut out_of_range = Vec::new();
+        let (unit, idle) = if off.is_some() {
+            (None, Some(regs))
+        } else {
+            // The unit's structures: within its output size, cacheable
+            // when it is coherent.
+            let oas = u8::try_from(features.idr5.oas.bits()).unwrap_or(48);
+            let tag = cx.dma_tag(DmaConstraints {
+                addr_bits: oas,
+                coherency: if features.coherent {
+                    Coherency::Coherent
+                } else {
+                    Coherency::NonCoherent
+                },
+                ..DmaConstraints::UNLIMITED
+            })?;
+            let hw = Kernel { regs, tag };
+            let mut u = Unit::new(hw, features).map_err(|_| AttachError::NoMemory)?;
+            for &(sid, _) in &bypassed {
+                match u.set_stream(sid, Ste::Bypass) {
+                    Ok(()) => {}
+                    Err(unit::Error::NoStream(_)) => out_of_range.push(sid),
+                    Err(_) => return Err(AttachError::NoMemory),
+                }
+            }
+            (Some(u), None)
+        };
         Ok(Self {
             unit: cx.unit(),
-            identity,
-            _regs: regs,
-            _lines: lines,
+            idr,
+            features,
+            off,
+            bypassed,
+            out_of_range,
+            shared: Arc::new(Shared {
+                unit_no: cx.unit(),
+                unit: SpinLock::new(unit),
+                streams: SpinLock::new(BTreeMap::new()),
+            }),
+            _regs: idle,
+            lines: SpinLock::new(lines),
         })
     }
 
     fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
-        let m = bus::manager();
-        let unit = self.unit;
-        if bus::bootverbose() {
-            self.identity
-                .verbose(|l| m.log(format_args!("smmu{unit}: {l}")));
+        let sh = &self.shared;
+        let verbose = bus::bootverbose();
+        // The board port prints its count before the unit is reset.
+        if !self.bypassed.is_empty() {
+            sh.log(format_args!(
+                "{} streams bypassed (reserved memory{})",
+                self.bypassed.len(),
+                if bypass_named() { ", ACPI devices" } else { "" }
+            ));
         }
-        if let Err(missing) = self.identity.features {
-            m.log(format_args!("smmu{unit}: {}", missing.describe()));
-            m.log(format_args!(
-                "smmu{unit}: Some features are required but not supported by hardware."
-            ));
-        } else if !iommu_framework::dma() {
-            m.log(format_args!(
-                "smmu{unit}: left disabled: DMA translation is off (hw.iommu.dma)"
-            ));
+        if verbose {
+            for (_, line) in &self.bypassed {
+                sh.log(format_args!("{line}"));
+            }
+            self.idr.verbose(|l| sh.log(l));
+            self.features.verbose(|t, v| match v {
+                Some(v) => sh.log(format_args!("{t} {v}")),
+                None => sh.log(format_args!("{t}")),
+            });
+        }
+        for sid in &self.out_of_range {
+            sh.log(format_args!("reserved stream {sid:#x} out of range"));
+        }
+        match self.off {
+            Some(Off::Missing(m)) => {
+                sh.log(format_args!("{}", m.describe()));
+                sh.log(format_args!(
+                    "Some features are required but not supported by hardware."
+                ));
+            }
+            Some(Off::Disabled) => {
+                sh.log(format_args!(
+                    "left disabled: DMA translation is off (hw.iommu.dma)"
+                ));
+            }
+            None => self.run(cx)?,
         }
         // `dev.smmu.N.dma`: whether this unit translates DMA; none does
         // yet (IOMMU.md §8, stage 3).
-        m.sysctl(cx.sleepable(), &mut |t| {
+        let unit = self.unit;
+        bus::manager().sysctl(cx.sleepable(), &mut |t| {
             if let Some(n) = bus::device_node(t, Self::NAME, unit) {
                 let _ = t.add_value(n, Number::Auto, "dma", "DMA ops enabled", Value::int(0));
             }
@@ -252,7 +685,15 @@ impl Driver for Smmu {
     }
 
     fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {
-        // Nothing to stop: the hardware is as firmware left it.
+        UNITS.lock().retain(|s| !Arc::ptr_eq(s, &self.shared));
+        let r = {
+            let mut g = self.shared.unit.lock();
+            g.as_mut().map(Unit::quiesce)
+        };
+        if let Some(Err(e)) = r {
+            self.shared
+                .log(format_args!("Could not disable SMMU ({e:?})."));
+        }
     }
 
     fn may_detach(&self) -> Result<(), Busy> {
@@ -260,93 +701,57 @@ impl Driver for Smmu {
     }
 }
 
-/// The declaration for the build's driver table.
-pub const DRIVER: DriverDecl = DriverDecl::of::<Smmu>();
-
-#[cfg(test)]
-mod tests {
-    extern crate std;
-
-    use alloc::vec::Vec;
-    use std::collections::BTreeMap;
-
-    use super::*;
-
-    struct Fake(BTreeMap<usize, u32>);
-
-    impl Regs for Fake {
-        fn read32(&self, off: usize) -> u32 {
-            self.0.get(&off).copied().unwrap_or(0)
+impl Smmu {
+    /// Installs the handlers, resets and enables the unit, and publishes
+    /// it.
+    fn run(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
+        let sh = &self.shared;
+        if bus::bootverbose()
+            && let Some(u) = sh.unit.lock().as_ref()
+        {
+            let (c, e) = u.queue_sizes();
+            let g = u.geometry();
+            let form = match g {
+                Geometry::Linear { log2size } => alloc::format!("linear, {log2size} SID bits"),
+                Geometry::TwoLevel { log2size, split } => {
+                    alloc::format!("2-level, {log2size} SID bits, split {split}")
+                }
+            };
+            sh.log(format_args!(
+                "stream table {form}; CMD queue {c} bits, EVENT queue {e} bits; sync {:?}",
+                u.sync_mode()
+            ));
         }
-    }
-
-    fn firmware(flags: u32) -> SmmuV3 {
-        SmmuV3 {
-            base: 0x905_0000,
-            flags,
-            model: 0,
-            event_gsiv: 106,
-            pri_gsiv: 107,
-            gerr_gsiv: 109,
-            sync_gsiv: 108,
-            id_mapping_index: Some(0),
+        let mut lines = core::mem::take(&mut *self.lines.lock());
+        // Event, sync, gerror, as claimed.
+        if lines.len() == 3 {
+            let gerr = lines.pop().ok_or(AttachError::Device("smmu: lines"))?;
+            let sync = lines.pop().ok_or(AttachError::Device("smmu: lines"))?;
+            let event = lines.pop().ok_or(AttachError::Device("smmu: lines"))?;
+            cx.interrupt(event, Some(filter), Some(event_thread), 0)?;
+            cx.interrupt(gerr, Some(filter), Some(gerror_thread), 0)?;
+            self.lines.lock().push(sync);
         }
-    }
-
-    /// Two-level stream tables, little-endian, AArch64 tables, stages 1
-    /// and 2, ASID16, 16-bit stream IDs, 44-bit output.
-    fn fake(cohacc: bool) -> Fake {
-        let idr0 = 1 << 27 | 2 << 21 | 1 << 12 | u32::from(cohacc) << 4 | 2 << 2 | 3;
-        Fake(BTreeMap::from([
-            (reg::IDR0, idr0),
-            (reg::IDR1, 19 << 21 | 19 << 16 | 16),
-            (reg::IDR5, 1 << 4 | 4),
-        ]))
-    }
-
-    #[test]
-    fn identifies_and_takes_coherency_from_either_source() {
-        let id = Identity::read(&fake(false), &firmware(1));
-        assert!(id.coherent, "the IORT's override");
-        let f = id.features.unwrap();
-        assert_eq!((f.sid_bits, f.oas), (16, Some(44)));
-        assert!(Identity::read(&fake(true), &firmware(0)).coherent);
-        assert!(!Identity::read(&fake(false), &firmware(0)).coherent);
-        let mut lines = Vec::new();
-        id.verbose(|l| lines.push(alloc::format!("{l}")));
-        assert_eq!(
-            lines,
-            [
-                "IDR0 0x840100b IDR1 0x2730010 IDR3 0x0 IDR5 0x14 IIDR 0x0",
-                "2-level stream table supported.",
-                "Little endian supported only.",
-                "Stage 1 translation supported.",
-                "Stage 2 translation supported.",
-                "ASID bits 16",
-                "CMD queue bits 19",
-                "EVENT queue bits 19",
-                "SSID bits 0",
-                "SID bits 16",
-            ]
-        );
-    }
-
-    #[test]
-    fn a_missing_feature_is_reported() {
-        let mut f = fake(false);
-        f.0.insert(reg::IDR0, f.0[&reg::IDR0] & !(1 << 1));
-        let id = Identity::read(&f, &firmware(1));
-        assert_eq!(id.features, Err(Missing::Stage1));
-    }
-
-    #[test]
-    fn tunables_and_sysctls() {
-        set_tunables(&|n| (n == "hw.smmu.bypass_named").then_some(1));
-        assert!(bypass_named());
-        set_tunables(&|n| (n == "hw.smmu.bypass_named").then_some(0));
-        assert!(!bypass_named());
-        let mut t = Tree::new();
-        sysctl_init(&mut t);
-        assert!(t.name2oid("hw.smmu.bypass_named").is_some());
+        let (r, notices) = {
+            let mut g = sh.unit.lock();
+            match g.as_mut() {
+                Some(u) => (u.enable(), u.take_notices()),
+                None => return Err(AttachError::Device("smmu: no unit")),
+            }
+        };
+        sh.report(notices);
+        if let Err(e) = r {
+            sh.log(format_args!("Couldn't reset SMMU ({e:?})."));
+            return Err(AttachError::Device("smmu: reset failed"));
+        }
+        cx.provide_iommu(Arc::new(Provider(Arc::clone(sh))));
+        UNITS.lock().push(Arc::clone(sh));
+        // Anything raised before the handlers were in.
+        sh.gerror();
+        sh.drain_events();
+        Ok(())
     }
 }
+
+/// The declaration for the build's driver table.
+pub const DRIVER: DriverDecl = DriverDecl::of::<Smmu>();

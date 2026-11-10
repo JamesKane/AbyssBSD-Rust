@@ -10,10 +10,15 @@ abi = { path = "../../lib/abi" }
 acpi = { path = "../../sys/acpi" }
 acpi-tables = { path = "../../lib/acpi-tables" }
 bus = { path = "../../sys/bus" }
+hal = { path = "../../arch/hal" }
 iommu = { path = "../../lib/iommu" }
 iommu-framework = { path = "../../sys/iommu" }
+irq = { path = "../../sys/irq" }
 regs = { path = "../../lib/regs" }
+sched = { path = "../../sys/sched" }
+sync = { path = "../../sys/sync" }
 sysctl = { path = "../../sys/sysctl" }
+vm = { path = "../../sys/vm" }
 
 [lints]
 workspace = true

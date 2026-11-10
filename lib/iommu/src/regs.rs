@@ -484,7 +484,9 @@ pub struct Features {
     pub iidr: Iidr,
     /// Range invalidation (IDR3.RIL).
     pub range_invalidation: bool,
-    /// Two-level stream tables.
+    /// Two-level stream tables are offered and worth using: more StreamID
+    /// bits than one level-2 table resolves ([`STRTAB_SPLIT`]), as
+    /// FreeBSD's `smmu_check_features` decides.
     pub two_level: bool,
     /// SEV on sync completion, after errata.
     pub sev: bool,
@@ -499,13 +501,21 @@ pub struct Features {
     pub erratum: Option<Erratum>,
 }
 
-/// Why the SMMU cannot translate for this design.
+/// Why the SMMU cannot translate for this design: a feature the driver
+/// needs is missing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Missing {
-    /// No stage 1 (IDR0.S1P).
-    Stage1,
+    /// IDR0.TTENDIAN is the reserved encoding.
+    Endianness,
+    /// Big-endian table walks only: the CPU's tables are little-endian.
+    BigEndian,
     /// No AArch64 tables (IDR0.TTF).
     Aarch64Tables,
+    /// An embedded implementation: preset table or queue addresses, or
+    /// relative ones (IDR1.TABLES_PRESET, QUEUES_PRESET, REL).
+    Embedded,
+    /// No stage 1 (IDR0.S1P).
+    Stage1,
     /// No 4 KiB granule (IDR5.GRAN4K).
     Granule4K,
     /// A stream-table form in a reserved encoding.
@@ -513,6 +523,29 @@ pub enum Missing {
     /// Queues too small to use (`CMDQS` or `EVENTQS` below 1).
     Queues,
 }
+
+impl Missing {
+    /// The message for it: FreeBSD's `smmu_check_features` line where it
+    /// has one.
+    #[must_use]
+    pub const fn describe(self) -> &'static str {
+        match self {
+            Self::Endianness => "Unsupported endianness.",
+            Self::BigEndian => "Big endian supported only.",
+            Self::Aarch64Tables => "No AArch64 table format support.",
+            Self::Embedded => "Embedded implementations not supported by this driver.",
+            Self::Stage1 => "No stage 1 translation support.",
+            Self::Granule4K => "No 4KB translation granule support.",
+            Self::StreamTable => "Unsupported stream table format.",
+            Self::Queues => "Unsupported queue sizes.",
+        }
+    }
+}
+
+/// FreeBSD's `STRTAB_SPLIT`: the StreamID bits a level-2 stream table
+/// resolves. An SMMU with no more StreamID bits than this uses a linear
+/// table, whatever IDR0 offers.
+pub const STRTAB_SPLIT: u8 = 8;
 
 impl Features {
     /// Decodes IDR0, IDR1, IDR3, IDR5, and IIDR. `cohacc_override` is the
@@ -527,6 +560,7 @@ impl Features {
         cohacc_override: bool,
     ) -> Self {
         let i0 = Idr0::decode(idr0);
+        let i1 = Idr1::decode(idr1);
         let ii = Iidr::decode(iidr);
         let erratum = if ii.implementer == IMPLEMENTER_ARM
             && ii.product_id == PRODUCT_MMU_600
@@ -538,11 +572,11 @@ impl Features {
         };
         Self {
             idr0: i0,
-            idr1: Idr1::decode(idr1),
+            idr1: i1,
             idr5: Idr5::decode(idr5),
             iidr: ii,
             range_invalidation: idr3 & IDR3_RIL != 0,
-            two_level: matches!(i0.st_level, StLevel::TwoLevel),
+            two_level: matches!(i0.st_level, StLevel::TwoLevel) && i1.sidsize > STRTAB_SPLIT,
             sev: i0.sev && erratum.is_none(),
             msi: i0.msi,
             coherent: i0.cohacc || cohacc_override,
@@ -551,14 +585,29 @@ impl Features {
         }
     }
 
-    /// Whether everything the design needs is there: stage 1 with AArch64
-    /// tables and a 4 KiB granule, a known stream-table form, and queues.
+    /// Whether everything the design needs is there, checked in FreeBSD's
+    /// order (`smmu_check_features`): known little-endian table walks,
+    /// AArch64 tables, tables and queues where the driver puts them; then
+    /// stage 1 with a 4 KiB granule, a known stream-table form, and
+    /// queues.
+    ///
+    /// # Errors
+    ///
+    /// The first feature missing.
     pub fn check(&self) -> Result<(), Missing> {
-        if !self.idr0.s1p {
-            return Err(Missing::Stage1);
+        match self.idr0.ttendian {
+            0 | 2 => {}
+            3 => return Err(Missing::BigEndian),
+            _ => return Err(Missing::Endianness),
         }
         if !self.idr0.ttf.aarch64() {
             return Err(Missing::Aarch64Tables);
+        }
+        if self.idr1.tables_preset || self.idr1.queues_preset || self.idr1.rel {
+            return Err(Missing::Embedded);
+        }
+        if !self.idr0.s1p {
+            return Err(Missing::Stage1);
         }
         if !self.idr5.gran4k {
             return Err(Missing::Granule4K);
@@ -570,6 +619,45 @@ impl Features {
             return Err(Missing::Queues);
         }
         Ok(())
+    }
+
+    /// The lines FreeBSD's `smmu_check_features` prints under
+    /// `bootverbose`, in its order: each a text and, for a count, its
+    /// value.
+    pub fn verbose(&self, mut line: impl FnMut(&'static str, Option<u8>)) {
+        let i0 = &self.idr0;
+        if matches!(i0.st_level, StLevel::TwoLevel) {
+            line("2-level stream table supported.", None);
+        }
+        if i0.cd2l {
+            line("2-level CD table supported.", None);
+        }
+        match i0.ttendian {
+            0 => line("Mixed endianness supported.", None),
+            2 => line("Little endian supported only.", None),
+            3 => line("Big endian supported only.", None),
+            _ => {}
+        }
+        if self.msi {
+            line("MSI feature present.", None);
+        }
+        if i0.hyp {
+            line("HYP feature present.", None);
+        }
+        if i0.s1p {
+            line("Stage 1 translation supported.", None);
+        }
+        if i0.s2p {
+            line("Stage 2 translation supported.", None);
+        }
+        line("ASID bits", Some(self.asid_bits()));
+        line("CMD queue bits", Some(self.idr1.cmdqs));
+        line("EVENT queue bits", Some(self.idr1.eventqs));
+        if i0.pri {
+            line("PRI queue bits", Some(self.idr1.priqs));
+        }
+        line("SSID bits", Some(self.idr1.ssidsize));
+        line("SID bits", Some(self.idr1.sidsize));
     }
 
     /// StreamID bits.
@@ -978,6 +1066,8 @@ impl StrtabCfg {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
     use super::*;
 
     #[test]
@@ -1126,6 +1216,96 @@ mod tests {
         assert_eq!(
             Features::decode(idr0, 32, 0, idr5, 0, false).check(),
             Err(Missing::Queues)
+        );
+    }
+
+    /// QEMU 10.2's SMMUv3, as `virt,iommu=smmuv3` reads (the driver's
+    /// `bootverbose` line, IOMMU.md §14): two-level stream tables,
+    /// terminate model, little-endian, AArch64 tables, stages 1 and 2,
+    /// coherent, ASID16, VMID16, 16-bit stream IDs; range invalidation;
+    /// 44-bit output, every granule.
+    const QEMU: [u32; 5] = [0x0d44_101b, 0x0273_0010, 0x1414, 0x74, 0];
+
+    fn qemu(f: impl FnOnce(&mut [u32; 5])) -> Features {
+        let mut r = QEMU;
+        f(&mut r);
+        Features::decode(r[0], r[1], r[2], r[3], r[4], false)
+    }
+
+    #[test]
+    fn qemu_features() {
+        let f = qemu(|_| {});
+        assert_eq!(f.check(), Ok(()));
+        assert!(f.two_level && !f.idr0.cd2l);
+        assert_eq!(f.idr0.ttendian, 2);
+        assert!(f.idr0.s1p && f.idr0.s2p && f.coherent && f.range_invalidation);
+        assert!(!f.msi && !f.idr0.pri && !f.idr0.ats && !f.sev && !f.idr0.hyp);
+        assert!(f.idr0.term_model && f.idr0.vmid16);
+        assert_eq!(f.idr0.stall_model, StallModel::Terminate);
+        assert_eq!(f.idr0.httu, Httu::None);
+        assert_eq!(f.asid_bits(), 16);
+        assert_eq!((f.idr1.cmdqs, f.idr1.eventqs, f.idr1.priqs), (19, 19, 0));
+        assert_eq!((f.idr1.ssidsize, f.sid_bits()), (0, 16));
+        assert_eq!(f.idr5.oas, Oas::Bits44);
+        assert!(f.idr5.gran4k && f.idr5.gran16k && f.idr5.gran64k);
+        assert_eq!(f.idr5.vax, 0);
+        assert_eq!(f.erratum, None);
+        let mut lines = std::vec::Vec::new();
+        f.verbose(|t, v| {
+            lines.push(match v {
+                Some(v) => std::format!("{t} {v}"),
+                None => t.into(),
+            })
+        });
+        assert_eq!(
+            lines,
+            [
+                "2-level stream table supported.",
+                "Little endian supported only.",
+                "Stage 1 translation supported.",
+                "Stage 2 translation supported.",
+                "ASID bits 16",
+                "CMD queue bits 19",
+                "EVENT queue bits 19",
+                "SSID bits 0",
+                "SID bits 16",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_small_stream_space_is_linear() {
+        // Two levels offered, but 8 StreamID bits fit one level-2 table
+        // (FreeBSD clears the feature).
+        let f = qemu(|r| r[1] = (r[1] & !0x3f) | 8);
+        assert!(!f.two_level && f.idr0.st_level == StLevel::TwoLevel);
+        assert!(qemu(|r| r[1] = (r[1] & !0x3f) | 9).two_level);
+    }
+
+    #[test]
+    fn missing_features_in_freebsds_order() {
+        assert_eq!(
+            qemu(|r| r[0] = (r[0] & !(3 << 21)) | 1 << 21).check(),
+            Err(Missing::Endianness)
+        );
+        assert_eq!(qemu(|r| r[0] |= 3 << 21).check(), Err(Missing::BigEndian));
+        // Endianness is checked before the table format.
+        assert_eq!(
+            qemu(|r| r[0] = (r[0] | 3 << 21) & !(3 << 2)).check(),
+            Err(Missing::BigEndian)
+        );
+        assert_eq!(
+            qemu(|r| r[0] &= !(2 << 2)).check(),
+            Err(Missing::Aarch64Tables)
+        );
+        for b in [28, 29, 30] {
+            assert_eq!(qemu(|r| r[1] |= 1 << b).check(), Err(Missing::Embedded));
+        }
+        assert_eq!(qemu(|r| r[0] &= !(1 << 1)).check(), Err(Missing::Stage1));
+        assert_eq!(qemu(|r| r[3] &= !(1 << 4)).check(), Err(Missing::Granule4K));
+        assert_eq!(
+            Missing::Embedded.describe(),
+            "Embedded implementations not supported by this driver."
         );
     }
 

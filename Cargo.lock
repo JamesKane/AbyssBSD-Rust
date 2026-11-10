@@ -801,10 +801,15 @@ dependencies = [
  "acpi",
  "acpi-tables",
  "bus",
+ "hal",
  "iommu",
  "iommu-framework",
+ "irq",
  "regs",
+ "sched",
+ "sync",
  "sysctl",
+ "vm",
 ]
 
 [[package]]

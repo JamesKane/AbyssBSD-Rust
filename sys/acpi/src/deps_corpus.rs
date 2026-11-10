@@ -740,6 +740,20 @@ fn opi6p_iort() {
         "event, PRI, sync, gerror"
     );
     assert_eq!(p.smmus[1].gsivs(), [141, 150, 142, 146]);
+    // The RMR: the firmware framebuffer's ten display streams, on smmu1
+    // only (IOMMU.md §3.1), which FreeBSD's count line reports.
+    assert!(p.smmus[0].reserved.is_empty());
+    let r = &p.smmus[1].reserved;
+    assert_eq!(r.len(), 1);
+    let rmr: Vec<u32> = r[0].streams.iter().cloned().flatten().collect();
+    assert_eq!(rmr, [0x0, 0x1, 0x6, 0x7, 0xc, 0xd, 0x12, 0x13, 0x18, 0x19]);
+    assert_eq!(r[0].ranges, [(0x8480_0000, 8 << 20)]);
+    assert!(r[0].remap);
+    // Every named component's streams, present or not: all on smmu1.
+    assert!(p.smmus[0].named.is_empty());
+    let named: Vec<&str> = p.smmus[1].named.iter().map(|n| n.name.as_str()).collect();
+    assert_eq!(named.len(), 14, "{named:?}");
+    assert!(named.contains(&"\\_SB_.CBD2"), "{named:?}");
     let by = |smmu: usize| -> Vec<&str> {
         p.consumers
             .iter()
@@ -805,6 +819,7 @@ fn qemu_virt_smmuv3_iort() {
     assert_eq!(p.smmus.len(), 1);
     assert_eq!(p.smmus[0].smmu.base, 0x905_0000);
     assert_eq!(p.smmus[0].gsivs(), [106, 107, 108, 109]);
+    assert!(p.smmus[0].reserved.is_empty() && p.smmus[0].named.is_empty());
     assert_eq!(p.consumers.len(), 1);
     let c = &p.consumers[0];
     assert_eq!((c.smmu, c.path.as_str()), (0, "\\_SB_.PCI0"));

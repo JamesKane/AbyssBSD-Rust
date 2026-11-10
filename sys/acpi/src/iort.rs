@@ -47,6 +47,34 @@ pub struct SmmuNode {
     pub node: usize,
     /// What the node says.
     pub smmu: SmmuV3,
+    /// Its streams with reserved memory (RMR nodes), in table order:
+    /// bypassed before the unit is enabled (docs/IOMMU.md §4.9).
+    pub reserved: Vec<ReservedStreams>,
+    /// The streams of every named component the table maps to it, in
+    /// table order, whether or not the namespace has the device:
+    /// `hw.smmu.bypass_named` decides them (IOMMU.md §4.9).
+    pub named: Vec<NamedStreams>,
+}
+
+/// One RMR node's streams on an SMMU, with its memory.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReservedStreams {
+    /// The streams, mapping by mapping.
+    pub streams: Vec<RangeInclusive<u32>>,
+    /// The reserved ranges: base and length.
+    pub ranges: Vec<(u64, u64)>,
+    /// Whether the OS may remap the ranges (else the streams stay
+    /// bypassed even when their device gets a driver).
+    pub remap: bool,
+}
+
+/// One named component's streams on an SMMU.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamedStreams {
+    /// Its namespace path, as the table writes it.
+    pub name: String,
+    /// The streams, mapping by mapping.
+    pub streams: Vec<RangeInclusive<u32>>,
 }
 
 impl SmmuNode {
@@ -116,7 +144,31 @@ pub fn plan(
 ) -> IortPlan {
     let smmus: Vec<SmmuNode> = iort
         .smmu_v3s()
-        .map(|(node, smmu)| SmmuNode { node, smmu })
+        .map(|(node, smmu)| SmmuNode {
+            node,
+            smmu,
+            reserved: iort
+                .rmrs()
+                .filter_map(|(at, r)| {
+                    let streams: Vec<RangeInclusive<u32>> = iort.node_streams(at, node).collect();
+                    (!streams.is_empty()).then(|| ReservedStreams {
+                        streams,
+                        ranges: r.ranges().map(|m| (m.base, m.len)).collect(),
+                        remap: r.remap_permitted(),
+                    })
+                })
+                .collect(),
+            named: iort
+                .named_components()
+                .filter_map(|(at, c)| {
+                    let streams: Vec<RangeInclusive<u32>> = iort.node_streams(at, node).collect();
+                    (!streams.is_empty()).then(|| NamedStreams {
+                        name: c.name.into(),
+                        streams,
+                    })
+                })
+                .collect(),
+        })
         .collect();
     let unit = |offset: usize| smmus.iter().position(|s| s.node == offset);
     let mut consumers = Vec::new();
