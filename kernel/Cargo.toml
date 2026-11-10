@@ -60,6 +60,7 @@ sched = { path = "../sys/sched" }
 security = { path = "../sys/security" }
 mbuf = { path = "../sys/mbuf" }
 net = { path = "../sys/net" }
+nvme = { path = "../drivers/nvme" }
 socket = { path = "../sys/socket" }
 inet = { path = "../sys/inet" }
 tcp = { path = "../sys/tcp" }

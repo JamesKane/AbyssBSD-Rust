@@ -233,6 +233,8 @@ pub(crate) fn init(s: &Sleepable) {
     crate::vtcons::start();
     input::set_consumer(alloc::sync::Arc::new(crate::tty::ConsoleInput));
     bus::set_bootverbose(crate::console::loader_flag("boot_verbose").unwrap_or(false));
+    // `hw.nvme.*` (`TUNABLE_INT_FETCH`), before any controller attaches.
+    nvme::set_tunables(&|name| crate::boot::value(name).and_then(|v| v.parse::<i32>().ok()));
     let drivers = drivers();
     let root = bus::init(
         s,

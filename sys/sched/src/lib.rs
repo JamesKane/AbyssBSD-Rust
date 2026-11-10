@@ -134,6 +134,16 @@ pub fn now() -> u64 {
     platform_now()
 }
 
+/// The platform clock in nanoseconds (FreeBSD's `sbinuptime` for a
+/// driver's deadlines); 0 before [`init`].
+#[must_use]
+pub fn now_ns() -> u64 {
+    PLATFORM.get().map_or(0, |p| {
+        let f = u128::from(p.frequency().max(1));
+        u64::try_from(u128::from(p.now()) * 1_000_000_000 / f).unwrap_or(u64::MAX)
+    })
+}
+
 /// A thread leaves its sleep (woken, interrupted, or never gone): its wait
 /// message and channel are cleared, as `sleepq_resume_thread` does, and
 /// its CPU-share window passes over the time asleep.

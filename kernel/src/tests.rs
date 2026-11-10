@@ -3642,6 +3642,122 @@ ktest! {
     }
 }
 
+/// `dev.nvme.0.<name>`, a 64-bit counter (or a 32-bit `u_int`).
+fn nvme0_counter(s: &sched::Sleepable, name: &str) -> i64 {
+    crate::sysctl::read(s, |t| {
+        let oid = t.name2oid(&alloc::format!("dev.nvme.0.{name}"))?;
+        let mut out = alloc::vec::Vec::new();
+        t.read(&oid, &mut out).ok()?;
+        match out.len() {
+            4 => Some(i64::from(u32::from_ne_bytes(out[..4].try_into().ok()?))),
+            8 => Some(i64::from_ne_bytes(out[..8].try_into().ok()?)),
+            _ => None,
+        }
+    })
+    .unwrap_or_else(|| panic!("dev.nvme.0.{name}"))
+}
+
+/// Faults injected into `nvme0` for the scope of a test, with a one-second
+/// I/O timeout.
+struct Nvme0Faults;
+
+impl Nvme0Faults {
+    fn new() -> Self {
+        nvme::fault::target(Some(0));
+        nvme::fault::timeout_ms(Some(1000));
+        Self
+    }
+}
+
+impl Drop for Nvme0Faults {
+    fn drop(&mut self) {
+        nvme::fault::target(None);
+    }
+}
+
+/// Writes and reads back 8 KiB at `at` on `nda0` under the faults in
+/// force; the milliseconds it took.
+fn nvme0_round_trip(s: &sched::Sleepable, at: u64, fill: u8) -> u64 {
+    let nda = storage::find("nda0").expect("nda0");
+    let data = alloc::vec![fill; 8192];
+    let start = crate::time::counter();
+    nda.write(s, at, &data).expect("write");
+    let back = nda.read(s, at, data.len()).expect("read back");
+    assert!(
+        back == data,
+        "{} bytes at {at:#x} read back differ",
+        data.len()
+    );
+    (crate::time::counter() - start) * 1000 / crate::time::frequency()
+}
+
+ktest! {
+    fn nvme_timeout_polls_a_missed_interrupt() {
+        // Interrupts do nothing: the watchdog finds each command past its
+        // deadline, polls the queue (`nvme_qpair_timeout`'s last try),
+        // and completes it, with no reset.
+        let s = cx();
+        let m = bus::manager();
+        assert!(find_named(m, &s, crate::devices::nexus(), "nvme0").is_some());
+        let _ = m.take_events();
+        let (retries, cmds) = (nvme0_counter(&s, "num_retries"), nvme0_counter(&s, "num_cmds"));
+        let ms = {
+            let _faults = Nvme0Faults::new();
+            nvme::fault::ignore_interrupts(true);
+            nvme0_round_trip(&s, 2 << 20, 0x3c)
+        };
+        assert!(ms >= 1000, "completed in {ms} ms, before the timeout");
+        let events = m.take_events();
+        assert!(
+            !events.iter().any(|e| e.contains("type=RESET")),
+            "no reset: {events:?}"
+        );
+        assert_eq!(nvme0_counter(&s, "num_retries"), retries, "nothing sent again");
+        assert!(nvme0_counter(&s, "num_cmds") >= cmds + 2);
+        // Interrupts again: as fast as ever.
+        let after = nvme0_round_trip(&s, 2 << 20, 0xc3);
+        assert!(after < 1000, "{after} ms with interrupts back");
+        kprintln!("nvme0: missed interrupts made up by the watchdog in {ms} ms");
+    }
+}
+
+ktest! {
+    fn nvme_timeout_resets_and_resends() {
+        // A completion lost (the controller never answers, as far as the
+        // driver can tell): the watchdog's poll finds nothing, so it
+        // resets the controller, which sends the command again.
+        let s = cx();
+        let m = bus::manager();
+        assert!(find_named(m, &s, crate::devices::nexus(), "nvme0").is_some());
+        let _ = m.take_events();
+        let retries = nvme0_counter(&s, "num_retries");
+        let ms = {
+            let _faults = Nvme0Faults::new();
+            nvme::fault::lose_completions(1);
+            nvme0_round_trip(&s, 3 << 20, 0x5a)
+        };
+        assert!(ms >= 1000, "completed in {ms} ms, before the timeout");
+        let events = m.take_events();
+        for want in ["event=\"start\"", "event=\"success\""] {
+            assert!(
+                events
+                    .iter()
+                    .any(|e| e.contains("system=nvme subsystem=controller type=RESET")
+                        && e.contains("name=\"nvme0\"")
+                        && e.contains(want)),
+                "a RESET {want} event: {events:?}"
+            );
+        }
+        assert!(nvme0_counter(&s, "num_retries") > retries, "the lost command was sent again");
+        assert_eq!(nvme0_counter(&s, "ioq.0.recovery"), 0);
+        // The controller works as before, and the whole disk too.
+        let after = nvme0_round_trip(&s, 3 << 20, 0xa5);
+        assert!(after < 1000, "{after} ms after the reset");
+        exercise_disk(&s, &storage::find("nda0").expect("nda0"));
+        kprintln!("nvme0: reset after a lost completion, I/O done in {ms} ms");
+    }
+}
+
 ktest! {
     fn ahci_writes_and_reads_back() {
         let s = cx();
