@@ -67,6 +67,8 @@ pub(crate) struct Found {
     pub(crate) ident: AcpiIdent,
     pub(crate) deps: Vec<ChildDep>,
     pub(crate) lines: Vec<ChildLine>,
+    /// Whether its DMA snoops the CPU's caches (`_CCA`), if firmware says.
+    pub(crate) coherent: Option<bool>,
 }
 
 /// IDs FreeBSD keeps even when `_STA` says absent.
@@ -161,11 +163,13 @@ pub(crate) fn walk(
         // D0 before any driver sees it.
         let _ = crate::power::to_d0(interp, node, host);
         let crs = interp.crs(node, host).ok().flatten().unwrap_or_default();
+        let coherent = cache_coherency(interp, host, node);
         found.push(Found {
             device: AcpiDevice { node, path, crs },
             ident,
             deps: Vec::new(),
             lines: Vec::new(),
+            coherent,
         });
     }
     let mut notes = Vec::new();
@@ -383,6 +387,31 @@ fn connection_lines(
     out
 }
 
+/// Whether a device's DMA is cache-coherent (ACPI 6.5 §6.2.17 `_CCA`): its
+/// own `_CCA`, or else the nearest ancestor's, since a `_CCA` covers the
+/// devices below it. `None` when no `_CCA` says: such a device keeps its
+/// driver's own constraints (coherent), which is what every machine
+/// without `_CCA` has needed so far. FreeBSD's arm64 drivers that read it
+/// (`pci_host_generic_acpi`, `ahci_generic`) take an absent one as
+/// non-coherent.
+pub(crate) fn cache_coherency(
+    interp: &mut aml::Interpreter,
+    host: &mut dyn aml::Host,
+    node: aml::NodeId,
+) -> Option<bool> {
+    let mut at = Some(node);
+    while let Some(n) = at {
+        if interp.child(n, "_CCA").is_some() {
+            return match interp.evaluate_child(n, "_CCA", Vec::new(), host) {
+                Ok(Some(aml::Value::Integer(v))) => Some(v != 0),
+                _ => None,
+            };
+        }
+        at = interp.parent(n);
+    }
+    None
+}
+
 /// The mailbox channels a device's `_DSD` `mboxes` names, in order: pairs
 /// of a mailbox and its channel number (the devicetree binding's
 /// `#mbox-cells` = 1, which is what the Sky1's firmware gives). A pair
@@ -595,6 +624,19 @@ impl Driver for AcpiBus {
                 Some(Arc::new(f.device)),
                 res,
             );
+            if let Some(coherent) = f.coherent {
+                cx.set_dma_constraints(
+                    id,
+                    vm::dma::DmaConstraints {
+                        coherency: if coherent {
+                            vm::dma::Coherency::Coherent
+                        } else {
+                            vm::dma::Coherency::NonCoherent
+                        },
+                        ..vm::dma::DmaConstraints::UNLIMITED
+                    },
+                );
+            }
             added.push((path, id, f.deps, f.lines));
         }
         let child = |path: &str| added.iter().find(|a| a.0 == path).map(|a| a.1);

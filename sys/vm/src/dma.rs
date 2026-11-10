@@ -10,7 +10,15 @@
 //!   reach). An IOMMU backend comes in P7.
 //! - [`DmaCoherent`] is memory shared for a binding's whole life (queues,
 //!   rings), allocated within the device's reach and accessed only through
-//!   volatile reads and writes of whole [`DeviceShared`] elements.
+//!   volatile reads and writes of whole [`DeviceShared`] elements. For a
+//!   device that does not snoop the CPU's caches, each access keeps the
+//!   caches right itself: a read cleans and invalidates the element's lines
+//!   first, so it sees what the device wrote, and a write is cleaned to the
+//!   point of coherency after, so the device sees it (FreeBSD's USB stack
+//!   does the same around each access, `usb_pc_cpu_invalidate` and
+//!   `usb_pc_cpu_flush`). The memory stays cacheable; FreeBSD's busdma maps
+//!   it uncached instead, which needs the direct map split. Memory both the
+//!   CPU and the device write is therefore not supported on such devices.
 //! - [`DmaTag::map`] hands an I/O buffer to the device as a [`Mapped`]:
 //!   it does the pre-transfer sync (bounce copy, cache clean) and yields
 //!   the bus segments; [`Mapped::unmap`] does the post-transfer sync and
@@ -376,6 +384,7 @@ impl DmaTag {
             n: n.max(1),
             bytes,
             mem: self.mem,
+            non_coherent: self.constraints.coherency == Coherency::NonCoherent,
             _t: PhantomData,
         })
     }
@@ -388,6 +397,8 @@ pub struct DmaCoherent<T: DeviceShared> {
     n: usize,
     bytes: u64,
     mem: &'static dyn DmaMemory,
+    /// The device does not snoop: accesses maintain the caches.
+    non_coherent: bool,
     _t: PhantomData<T>,
 }
 
@@ -436,9 +447,11 @@ impl<T: DeviceShared> DmaCoherent<T> {
     #[must_use]
     pub fn read(&self, i: usize) -> T {
         assert!(i < self.n, "DMA index out of range");
+        let p = self.va.as_ptr().wrapping_add(i);
+        self.for_cpu(p.cast(), size_of::<T>());
         // SAFETY: in bounds, aligned (page-aligned base, `T`'s natural
         // stride), and every bit pattern is a valid `T`.
-        unsafe { self.va.as_ptr().add(i).read_volatile() }
+        unsafe { p.read_volatile() }
     }
 
     /// Writes element `i`.
@@ -448,8 +461,26 @@ impl<T: DeviceShared> DmaCoherent<T> {
     /// If `i` is out of range.
     pub fn write(&self, i: usize, v: T) {
         assert!(i < self.n, "DMA index out of range");
+        let p = self.va.as_ptr().wrapping_add(i);
         // SAFETY: as for `read`.
-        unsafe { self.va.as_ptr().add(i).write_volatile(v) }
+        unsafe { p.write_volatile(v) };
+        self.for_device(p.cast(), size_of::<T>());
+    }
+
+    /// Before the CPU reads `[p, p + len)`: drops cached copies, so the
+    /// read sees what a non-snooping device wrote.
+    fn for_cpu(&self, p: *const u8, len: usize) {
+        if self.non_coherent {
+            self.mem.invalidate(p, len);
+        }
+    }
+
+    /// After the CPU wrote `[p, p + len)`: writes it to memory, where a
+    /// non-snooping device reads.
+    fn for_device(&self, p: *const u8, len: usize) {
+        if self.non_coherent {
+            self.mem.clean(p, len);
+        }
     }
 }
 
@@ -473,9 +504,11 @@ impl<T: DeviceShared> DmaCoherent<T> {
     /// If `off` is misaligned for `U` or out of range.
     #[must_use]
     pub fn read_at<U: DeviceShared>(&self, off: usize) -> U {
+        let p = self.at::<U>(off);
+        self.for_cpu(p.cast(), size_of::<U>());
         // SAFETY: in bounds and aligned (checked by `at`); every bit
         // pattern is a valid `U`.
-        unsafe { self.at::<U>(off).read_volatile() }
+        unsafe { p.read_volatile() }
     }
 
     /// Writes a `U` at byte offset `off`.
@@ -484,8 +517,10 @@ impl<T: DeviceShared> DmaCoherent<T> {
     ///
     /// If `off` is misaligned for `U` or out of range.
     pub fn write_at<U: DeviceShared>(&self, off: usize, v: U) {
+        let p = self.at::<U>(off);
         // SAFETY: as for `read_at`.
-        unsafe { self.at::<U>(off).write_volatile(v) }
+        unsafe { p.write_volatile(v) };
+        self.for_device(p.cast(), size_of::<U>());
     }
 }
 
@@ -500,6 +535,7 @@ impl DmaCoherent<u8> {
         let end = off.checked_add(dst.len()).expect("DMA range overflows");
         assert!(end <= self.n, "DMA range out of range");
         core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+        self.for_cpu(self.va.as_ptr().wrapping_add(off), dst.len());
         // SAFETY: in bounds; the device is done with the range, and `u8`
         // has no invalid values.
         unsafe {
@@ -520,6 +556,7 @@ impl DmaCoherent<u8> {
         unsafe {
             core::ptr::copy_nonoverlapping(src.as_ptr(), self.va.as_ptr().add(off), src.len())
         };
+        self.for_device(self.va.as_ptr().wrapping_add(off), src.len());
         core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
     }
 }

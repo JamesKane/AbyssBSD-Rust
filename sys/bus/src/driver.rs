@@ -625,11 +625,14 @@ impl<'a> AttachCx<'a> {
         self.resources
     }
 
-    /// A DMA tag with the device's constraints (and, later, its bus's).
+    /// A DMA tag with the device's constraints and those of every bus
+    /// above it ([`StartCx::set_dma_constraints`]: an ACPI device's
+    /// `_CCA`, say).
     pub fn dma_tag(&mut self, c: DmaConstraints) -> Result<DmaTag, ResourceError> {
         if self.injected() {
             return Err(ResourceError::MapFailed);
         }
+        let c = c.intersect(&self.mgr.dma_limits(self.s, self.node));
         let p = self.mgr.platform();
         Ok(DmaTag::new(p.dma_memory(), c, p.top_of_ram()))
     }
@@ -1015,6 +1018,15 @@ impl<D: Driver> StartCx<'_, D> {
     pub fn set_lines(&mut self, consumer: DeviceId, lines: Vec<Line>) {
         if self.children_contains(consumer) {
             self.mgr.set_lines(self.s, consumer, lines);
+        }
+    }
+
+    /// Puts DMA limits on child `consumer` and its descendants: their
+    /// tags satisfy these as well as their drivers' own. A bus says what
+    /// firmware says of the path to memory (ACPI `_CCA`).
+    pub fn set_dma_constraints(&mut self, consumer: DeviceId, c: DmaConstraints) {
+        if self.children_contains(consumer) {
+            self.mgr.set_dma(self.s, consumer, c);
         }
     }
 

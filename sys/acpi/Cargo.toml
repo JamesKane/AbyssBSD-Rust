@@ -14,6 +14,7 @@ irq = { path = "../irq" }
 pci = { path = "../pci" }
 sched = { path = "../sched" }
 sync = { path = "../sync" }
+vm = { path = "../vm" }
 
 [dev-dependencies]
 acpi-corpus = { path = "../../lib/acpi-corpus" }

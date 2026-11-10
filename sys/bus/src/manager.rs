@@ -83,6 +83,9 @@ struct Node {
     lines: Vec<Line>,
     /// The providers its driver published.
     provides: Provides,
+    /// The DMA limits its bus puts on it and its descendants (ACPI
+    /// `_CCA`), if any.
+    dma: Option<vm::dma::DmaConstraints>,
 }
 
 /// The providers a node's driver published (DRIVER-MODEL.md §9.3).
@@ -344,6 +347,7 @@ pub fn init(
         nomatch_sent: false,
         lines: Vec::new(),
         provides: Provides::default(),
+        dma: None,
     }));
     topo.graph.add_node(0);
     let faults = (o.fault_one_in > 0).then_some(Faults {
@@ -540,6 +544,7 @@ impl Manager {
                 nomatch_sent: false,
                 lines: Vec::new(),
                 provides: Provides::default(),
+                dma: None,
             };
             if index as usize == t.nodes.len() {
                 t.nodes.push(Some(node));
@@ -608,6 +613,7 @@ impl Manager {
             nomatch_sent: false,
             lines: Vec::new(),
             provides: Provides::default(),
+            dma: None,
         };
         let (index, generation) = match t.free.pop() {
             Some((i, g)) => (i, g),
@@ -773,6 +779,31 @@ impl Manager {
         }
     }
 
+    /// Records the DMA limits `id`'s bus puts on it.
+    pub(crate) fn set_dma(&self, s: &Sleepable, id: DeviceId, c: vm::dma::DmaConstraints) {
+        if let Some(n) = self.topo.write(s).node_mut(id) {
+            n.dma = Some(c);
+        }
+    }
+
+    /// The DMA limits on `id`: those of every bus between it and the root,
+    /// combined (FreeBSD's `bus_get_dma_tag` up the tree).
+    pub(crate) fn dma_limits(&self, s: &Sleepable, id: DeviceId) -> vm::dma::DmaConstraints {
+        let t = self.topo.read(s);
+        let mut c = vm::dma::DmaConstraints::UNLIMITED;
+        let mut at = t.node(id);
+        while let Some(n) = at {
+            if let Some(d) = &n.dma {
+                c = c.intersect(d);
+            }
+            at = n
+                .parent
+                .and_then(|p| t.nodes.get(p as usize))
+                .and_then(Option::as_ref);
+        }
+        c
+    }
+
     /// The lines `id` consumes.
     pub(crate) fn lines(&self, s: &Sleepable, id: DeviceId) -> Vec<Line> {
         self.topo
@@ -862,6 +893,7 @@ impl Manager {
             nomatch_sent: false,
             lines: Vec::new(),
             provides: Provides::default(),
+            dma: None,
         };
         let (index, generation) = match t.free.pop() {
             Some((i, g)) => (i, g),

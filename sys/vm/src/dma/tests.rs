@@ -470,3 +470,52 @@ fn pools_recycle() {
     drop(pool);
     assert_eq!(mem.pages_used(), 0);
 }
+
+/// Shared memory for a device that does not snoop: each read drops the
+/// element's cached lines first, each write is cleaned after; a coherent
+/// device's accesses touch no cache.
+#[test]
+fn non_coherent_shared_memory_keeps_the_caches_right() {
+    let mem = Fake::new(4 * MIB);
+    let tag = DmaTag::new(
+        mem,
+        DmaConstraints {
+            coherency: Coherency::NonCoherent,
+            ..DmaConstraints::UNLIMITED
+        },
+        4 * MIB,
+    );
+    let ring = tag.coherent::<u32>(16).unwrap();
+    let at = ring.bus_addr() as usize;
+    mem.log.lock().unwrap().clear();
+    ring.write(3, 7);
+    assert_eq!(ring.read(3), 7);
+    ring.write_at::<u64>(8, 1);
+    let _ = ring.read_at::<u64>(8);
+    assert_eq!(
+        *mem.log.lock().unwrap(),
+        [
+            ("clean", at + 12, 4),
+            ("invalidate", at + 12, 4),
+            ("clean", at + 8, 8),
+            ("invalidate", at + 8, 8),
+        ]
+    );
+    let bytes = tag.coherent::<u8>(64).unwrap();
+    let at = bytes.bus_addr() as usize;
+    mem.log.lock().unwrap().clear();
+    bytes.copy_from_slice(4, &[1, 2, 3]);
+    let mut out = [0u8; 3];
+    bytes.copy_to_slice(4, &mut out);
+    assert_eq!(out, [1, 2, 3]);
+    assert_eq!(
+        *mem.log.lock().unwrap(),
+        [("clean", at + 4, 3), ("invalidate", at + 4, 3)]
+    );
+    let plain = DmaTag::new(mem, DmaConstraints::UNLIMITED, 4 * MIB);
+    let c = plain.coherent::<u32>(4).unwrap();
+    mem.log.lock().unwrap().clear();
+    c.write(0, 1);
+    let _ = c.read(0);
+    assert!(mem.log.lock().unwrap().is_empty());
+}

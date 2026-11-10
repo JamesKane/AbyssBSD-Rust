@@ -644,3 +644,48 @@ fn the_scmi_agent_gets_its_mailbox_channels() {
         ]
     );
 }
+
+/// What `_CCA` says of each machine's devices: the Sky1's USB hosts do not
+/// snoop the caches, its PCIe hosts do; QEMU's virt machine says coherent
+/// for its PCIe host; the PCs say nothing.
+#[test]
+fn devices_say_whether_their_dma_is_coherent() {
+    let coherency = |name: &str| -> BTreeMap<String, Option<bool>> {
+        let (mut i, mut h) = acpi_corpus::load(name);
+        let w = crate::bus::walk(
+            &mut i,
+            &mut h,
+            &dma_controllers(name),
+            &[],
+            &FirmwareIdentity::default(),
+        );
+        w.found
+            .into_iter()
+            .map(|f| (f.device.path, f.coherent))
+            .collect()
+    };
+    let sky1 = coherency("opi6p");
+    for usb in ["XHC0", "XHC5", "USB0", "USB3"] {
+        assert_eq!(sky1[&alloc::format!("\\_SB_.{usb}")], Some(false), "{usb}");
+    }
+    let listed: Vec<_> = sky1
+        .iter()
+        .filter(|(p, c)| p.starts_with("\\_SB_.PCI") && c.is_some())
+        .map(|(p, c)| (p.clone(), *c))
+        .collect();
+    assert_eq!(
+        listed,
+        ["PCI0", "PCI1", "PCI2", "PCI3"].map(|p| (alloc::format!("\\_SB_.{p}"), Some(true)))
+    );
+    // Every USB host on the Sky1 says non-coherent: all ten.
+    let usb = sky1
+        .iter()
+        .filter(|(p, c)| (p.contains("XHC") || p.contains(".USB")) && **c == Some(false))
+        .count();
+    assert_eq!(usb, 10);
+    let virt = coherency("qemu-virt");
+    assert!(virt.values().all(|c| *c != Some(false)));
+    assert_eq!(virt["\\_SB_.PCI0"], Some(true));
+    let x870e = coherency("x870e");
+    assert!(x870e.values().all(Option::is_none));
+}

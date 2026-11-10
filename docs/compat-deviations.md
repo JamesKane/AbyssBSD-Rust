@@ -26,6 +26,7 @@ where AbyssBSD differs, and why. A difference not listed here is a bug.
 | ACPI devices whose `_STA` says absent | Added, disabled | Not added (except `PNP0C0F` and `PNP0B00`) | `devinfo -v` shows neither; the recorded trees match. |
 | Devices on an I2C bus (`I2cSerialBusV2`) | `acpi_iicbus` deletes them from `acpi0` and adds them under `iicbus` | They stay children of `acpi0`, with the controller as a supplier | DRIVER-MODEL.md §5.3: a device needing a bus controller is a node with that supplier, as one needing a GPIO controller is. `iicbus` and its `iic` device (`/dev/iicN`) are not built yet. |
 | GPIO controllers' children | `gpioN` has `gpiobusN` (and `gpiocN`), and `gpio_aeiN` is a child of `gpiobusN` | `gpio_aeiN` is a child of `gpioN`; no `gpiobus` or `gpioc` | Consumers reach pins through the dependency graph, not `gpiobus`. `gpiobus` and `gpioc` (`/dev/gpiocN`) come with userland GPIO access. |
+| DMA of an ACPI device without `_CCA` on arm64 | Non-coherent: busdma tags are, unless a driver that reads `_CCA` says otherwise, and `bus_dmamem_alloc` memory is uncacheable | Coherent: `acpi0` imposes coherency only where a `_CCA` (the device's or an ancestor's) says so | Every arm64 machine so far gives `_CCA` where it matters (QEMU `virt`: 1; the Sky1: 0 for its USB hosts, 1 for PCIe). A non-coherent device's shared memory stays cacheable, with its cache lines cleaned or invalidated around each access (as FreeBSD's USB stack also does), because the direct map cannot yet be split to map it uncached. |
 
 ## System calls and process behavior
 
