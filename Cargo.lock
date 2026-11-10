@@ -679,6 +679,7 @@ dependencies = [
  "iommu-framework",
  "irq",
  "sync",
+ "vm",
 ]
 
 [[package]]

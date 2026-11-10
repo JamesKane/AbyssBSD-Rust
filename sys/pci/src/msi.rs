@@ -9,13 +9,29 @@
 //! CPU) and writes it into the source, masked. Enabling MSI or MSI-X on a
 //! function is the bus's job ([`enable_msix`], [`enable_msi`]): drivers
 //! get interrupt lines, never the capability.
+//!
+//! A message is a memory write by the function, so under an IOMMU it goes
+//! through the function's context like its DMA (docs/IOMMU.md §4.8).
+//! Enabling messages for a translated context maps the platform's
+//! doorbell page into its domain once ([`MsiPlatform::doorbell`],
+//! FreeBSD's `MSI_IOMMU_INIT` and `iommu_map_msi`); connecting an input
+//! composes the message as ever and then moves its address into that
+//! mapping (`intr_map_msi`'s `iommu_translate_msi`). This layer sees only
+//! the domain (`vm::dma::IoDomain`), never the unit behind it.
+//!
+//! Behavior reference: sys/kern/subr_intr.c (`intr_alloc_msix`,
+//! `intr_map_msi`), sys/arm64/arm64/gicv3_its.c (`gicv3_iommu_init`),
+//! sys/dev/iommu/iommu_gas.c (`iommu_map_msi`, `iommu_translate_msi`).
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use bus::iommu::Context;
 use devtree::strings::PciAddress;
 use hal::CpuId;
 use irq::{IrqDomain, IrqError, Polarity, Trigger};
 use sync::{Once, SpinLock};
+use vm::dma::IoDomain;
 
 use crate::bus::PciChild;
 use crate::caps::{self, Capability};
@@ -31,6 +47,12 @@ pub trait MsiPlatform: Sync {
     fn compose(&self, from: PciAddress, cpu: CpuId) -> Option<(u64, u32, u32)>;
     /// Frees a root from [`MsiPlatform::compose`].
     fn release(&self, from: PciAddress, cpu: CpuId, root: u32);
+    /// The physical address function `from`'s messages are written to,
+    /// whose page a translating IOMMU must map (on arm64 the ITS's
+    /// `GITS_TRANSLATER`). `None` when messages are not DMA an IOMMU
+    /// translates: amd64's interrupt address range, which DMAR and AMD-Vi
+    /// treat as interrupts.
+    fn doorbell(&self, from: PciAddress) -> Option<u64>;
     /// Maps `len` bytes of device memory at `pa` uncached.
     fn map(&self, pa: u64, len: u64) -> Option<usize>;
     /// Unmaps a mapping from [`MsiPlatform::map`].
@@ -70,9 +92,19 @@ enum Source {
     },
 }
 
+/// One input of the domain: a message source, and the IOMMU domain its
+/// messages go through, with the doorbell page mapped (`None`: physical
+/// addresses). It holds the domain, so the doorbell's mapping lives as
+/// long as a message can use it (docs/IOMMU.md §4.4).
+#[derive(Clone)]
+struct Input {
+    source: Source,
+    window: Option<Arc<dyn IoDomain>>,
+}
+
 /// The PCI MSI domain.
 pub struct MsiDomain {
-    sources: SpinLock<Vec<Option<Source>>>,
+    sources: SpinLock<Vec<Option<Input>>>,
 }
 
 /// The one domain for every function's messages.
@@ -165,10 +197,23 @@ impl Source {
 
 impl MsiDomain {
     fn source(&self, hw: u32) -> Option<Source> {
-        *self.sources.lock().get(hw as usize)?
+        Some(self.sources.lock().get(hw as usize)?.as_ref()?.source)
     }
 
-    fn add(&self, s: Source) -> u32 {
+    fn input(&self, hw: u32) -> Option<Input> {
+        self.sources.lock().get(hw as usize)?.clone()
+    }
+
+    /// The mapped MSI-X table input `hw`'s entry is in.
+    #[cfg(test)]
+    pub(crate) fn table_of(&self, hw: u32) -> Option<usize> {
+        match self.source(hw)? {
+            Source::MsiX { table, .. } => Some(table),
+            Source::Msi { .. } => None,
+        }
+    }
+
+    fn add(&self, s: Input) -> u32 {
         let mut v = self.sources.lock();
         let i = match v.iter().position(Option::is_none) {
             Some(i) => i,
@@ -188,8 +233,12 @@ impl MsiDomain {
         let mut tables = Vec::new();
         for &h in hws {
             if let Some(slot) = v.get_mut(h as usize)
-                && let Some(Source::MsiX {
-                    table, table_len, ..
+                && let Some(Input {
+                    source:
+                        Source::MsiX {
+                            table, table_len, ..
+                        },
+                    ..
                 }) = slot.take()
                 && !tables.contains(&(table, table_len))
             {
@@ -199,8 +248,9 @@ impl MsiDomain {
         let unused: Vec<(usize, u64)> = tables
             .into_iter()
             .filter(|&(t, _)| {
-                !v.iter()
-                    .any(|s| matches!(s, Some(Source::MsiX { table, .. }) if *table == t))
+                !v.iter().any(|s| {
+                    matches!(s, Some(Input { source: Source::MsiX { table, .. }, .. }) if *table == t)
+                })
             })
             .collect();
         drop(v);
@@ -222,9 +272,23 @@ impl IrqDomain for MsiDomain {
     }
 
     fn connect(&self, hw: u32, _: Trigger, _: Polarity, cpu: CpuId) -> Result<u32, IrqError> {
-        let src = self.source(hw).ok_or(IrqError::NoSuchInput)?;
+        let Input {
+            source: src,
+            window,
+        } = self.input(hw).ok_or(IrqError::NoSuchInput)?;
         let p = PLATFORM.get().ok_or(IrqError::NoSuchInput)?;
         let (addr, data, root) = p.compose(src.function(), cpu).ok_or(IrqError::NoVector)?;
+        // FreeBSD's `intr_map_msi`: the composed address, then
+        // `iommu_translate_msi` into the doorbell's mapping, which
+        // enabling made (so this only looks it up).
+        let addr = match window.as_deref().map(|d| d.doorbell(addr)) {
+            None => addr,
+            Some(Ok(a)) => a,
+            Some(Err(_)) => {
+                p.release(src.function(), cpu, root);
+                return Err(IrqError::NoVector);
+            }
+        };
         src.set_masked(true);
         src.write_message(addr, data);
         Ok(root)
@@ -265,6 +329,28 @@ pub enum MsiError {
     BadTable,
     /// The table could not be mapped.
     MapFailed,
+    /// The function's IOMMU context could not be made, or the doorbell
+    /// not mapped in its domain (FreeBSD's `MSI_IOMMU_INIT` failing).
+    Iommu,
+}
+
+/// The domain a function's messages go through, its doorbell page mapped
+/// there first (FreeBSD's `gicv3_iommu_init`): `None` for a function
+/// without a context, a pass-through one, or a platform whose messages no
+/// IOMMU translates.
+fn window(
+    p: &dyn MsiPlatform,
+    from: PciAddress,
+    ctx: Option<&Context>,
+) -> Result<Option<Arc<dyn IoDomain>>, MsiError> {
+    let Some(Context::Translated(d)) = ctx else {
+        return Ok(None);
+    };
+    let Some(pa) = p.doorbell(from) else {
+        return Ok(None);
+    };
+    d.doorbell(pa).map_err(|_| MsiError::Iommu)?;
+    Ok(Some(Arc::clone(d)))
 }
 
 /// The MSI-X vectors a function supports, if it has the capability.
@@ -276,10 +362,20 @@ pub fn msix_count(child: &PciChild) -> Option<u16> {
 
 /// Enables MSI-X on `f` with `want` vectors (at most its table size),
 /// every entry masked and INTx disabled. Returns the domain inputs, one per
-/// vector, in table order.
-pub fn enable_msix(child: &PciChild, want: u16) -> Result<Vec<u32>, MsiError> {
+/// vector, in table order. `ctx` is the function's IOMMU context, if it
+/// has one: a translated one gets the doorbell mapped in its domain, and
+/// the messages go there.
+///
+/// # Errors
+///
+/// Why messages could not be enabled; the function is left as it was.
+pub fn enable_msix(
+    child: &PciChild,
+    want: u16,
+    ctx: Option<&Context>,
+) -> Result<Vec<u32>, MsiError> {
     let (cfg, f) = (child.cfg, &child.function);
-    let p = PLATFORM.get().ok_or(MsiError::Unavailable)?;
+    let p = *PLATFORM.get().ok_or(MsiError::Unavailable)?;
     let cap: Capability = caps::find(&f.caps, caps::id::MSIX).ok_or(MsiError::NoCapability)?;
     let a = f.addr;
     let at = u16::from(cap.offset);
@@ -297,6 +393,7 @@ pub fn enable_msix(child: &PciChild, want: u16) -> Result<Vec<u32>, MsiError> {
     if offset + len > bar.size {
         return Err(MsiError::BadTable);
     }
+    let window = window(p, a, ctx)?;
     let va = p.map(bar.base + offset, len).ok_or(MsiError::MapFailed)?;
     // Function mask on while the entries are set up; INTx off.
     cfg.write16(a, at + 2, ctl | MSIX_ENABLE | MSIX_FUNCTION_MASK);
@@ -311,7 +408,10 @@ pub fn enable_msix(child: &PciChild, want: u16) -> Result<Vec<u32>, MsiError> {
                 addr: a,
             };
             s.set_masked(true);
-            PCI_MSI.add(s)
+            PCI_MSI.add(Input {
+                source: s,
+                window: window.clone(),
+            })
         })
         .collect();
     cfg.write16(a, at + 2, (ctl | MSIX_ENABLE) & !MSIX_FUNCTION_MASK);
@@ -346,14 +446,17 @@ pub fn disable_msi(child: &PciChild) {
 }
 
 /// Enables MSI on `f` with one message, masked where the function allows,
-/// INTx disabled. Returns the domain input.
-pub fn enable_msi(child: &PciChild) -> Result<u32, MsiError> {
+/// INTx disabled. Returns the domain input. `ctx` as for [`enable_msix`].
+///
+/// # Errors
+///
+/// Why messages could not be enabled; the function is left as it was.
+pub fn enable_msi(child: &PciChild, ctx: Option<&Context>) -> Result<u32, MsiError> {
     let (cfg, f) = (child.cfg, &child.function);
-    if PLATFORM.get().is_none() {
-        return Err(MsiError::Unavailable);
-    }
+    let p = *PLATFORM.get().ok_or(MsiError::Unavailable)?;
     let cap = caps::find(&f.caps, caps::id::MSI).ok_or(MsiError::NoCapability)?;
     let a = f.addr;
+    let window = window(p, a, ctx)?;
     let at = u16::from(cap.offset);
     let s = Source::Msi {
         cfg,
@@ -366,5 +469,5 @@ pub fn enable_msi(child: &PciChild) -> Result<u32, MsiError> {
     cfg.write16(a, at + 2, ctl | MSI_ENABLE);
     let cmd = cfg.read16(a, COMMAND);
     cfg.write16(a, COMMAND, cmd | CMD_INTX_DISABLE);
-    Ok(PCI_MSI.add(s))
+    Ok(PCI_MSI.add(Input { source: s, window }))
 }

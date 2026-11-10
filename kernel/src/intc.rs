@@ -472,6 +472,12 @@ impl pci::msi::MsiPlatform for LapicMsi {
         ::irq::free_vector(cpu, root);
     }
 
+    /// None: the interrupt address range is not DMA to DMAR or AMD-Vi
+    /// (both deferred, docs/IOMMU.md §9).
+    fn doorbell(&self, _: pci::PciAddress) -> Option<u64> {
+        None
+    }
+
     fn map(&self, pa: u64, len: u64) -> Option<usize> {
         let va = crate::mm::map_device(addr::PhysAddr::new(pa), len).ok()?;
         usize::try_from(va.get()).ok()

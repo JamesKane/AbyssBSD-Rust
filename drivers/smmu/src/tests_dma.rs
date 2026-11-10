@@ -646,6 +646,55 @@ fn the_doorbell_is_mapped_once() {
     r.assert_clean();
 }
 
+/// A message as the PCI layer composes it (docs/IOMMU.md §4.8, §17):
+/// enabling messages maps the doorbell page holding `GITS_TRANSLATER`
+/// (FreeBSD's `iommu_map_msi`), connecting moves the composed address
+/// into that mapping (`iommu_translate_msi`). The function's write to the
+/// result reaches the ITS's page through its domain; a pass-through
+/// stream's write to the physical address bypasses; the doorbell is one
+/// mapping per domain, and never shared between them.
+#[test]
+fn msi_writes_reach_the_its_doorbell() {
+    const TRANSLATER: u64 = 0x0808_0000 + 0x1_0040;
+    let r = Rig::new(Config::board());
+    let d = r.domain(0x100);
+    // Enable, then connect (the composed address is TRANSLATER).
+    let first = d.doorbell(TRANSLATER).unwrap();
+    let addr = d.doorbell(TRANSLATER).unwrap();
+    assert_eq!(addr, first);
+    assert_eq!(addr % PAGE, TRANSLATER % PAGE);
+    assert_ne!(addr & !(PAGE - 1), TRANSLATER & !(PAGE - 1));
+    match r.probe(0x100, addr, Access::WRITE) {
+        Ok(Translation::Mapped { pa, attrs, .. }) => {
+            assert_eq!(pa, TRANSLATER);
+            assert_eq!(attrs.cache, Cache::Device);
+        }
+        other => panic!("{other:?}"),
+    }
+    // Only the doorbell page: its neighbours fault, and the physical
+    // address is not a bus address of the domain.
+    assert!(r.probe(0x100, addr + PAGE, Access::WRITE).is_err());
+    assert!(r.probe(0x100, TRANSLATER, Access::WRITE).is_err());
+    // Another function's domain maps it on its own.
+    let other = r.domain(0x200);
+    let theirs = other.doorbell(TRANSLATER).unwrap();
+    match r.probe(0x200, theirs, Access::WRITE) {
+        Ok(Translation::Mapped { pa, .. }) => assert_eq!(pa, TRANSLATER),
+        x => panic!("{x:?}"),
+    }
+    // A pass-through context (a virtio device without ACCESS_PLATFORM):
+    // the message keeps the physical address, and its write gets there.
+    assert!(matches!(
+        r.context(0x8, Want::PassThrough, &[]),
+        Context::PassThrough
+    ));
+    assert_eq!(
+        r.probe(0x8, TRANSLATER, Access::WRITE),
+        Ok(Translation::Bypass(TRANSLATER))
+    );
+    r.assert_clean();
+}
+
 #[test]
 fn event_lines_name_the_device() {
     use iommu::event::Fault;

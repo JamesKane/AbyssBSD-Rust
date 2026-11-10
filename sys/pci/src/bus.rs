@@ -217,11 +217,15 @@ pub fn msix_lines(
     let child = cx
         .bus_data_arc::<PciChild>()
         .ok_or(crate::msi::MsiError::NoCapability)?;
-    // A message is a write to memory: the function needs its IOMMU
-    // context first, if it has no DMA tag yet (docs/IOMMU.md §4.8). A
-    // failure shows when the driver asks for its tag.
-    let _ = cx.iommu_context();
-    let hws = crate::msi::enable_msix(&child, want)?;
+    // A message is a write to memory: the function's IOMMU context comes
+    // first, made here if the driver has no DMA tag yet, and a translated
+    // one maps the doorbell (docs/IOMMU.md §4.8; FreeBSD's
+    // `MSI_IOMMU_INIT` in `intr_alloc_msix`, whose failure fails the
+    // allocation).
+    let ctx = cx
+        .iommu_context()
+        .map_err(|_| crate::msi::MsiError::Iommu)?;
+    let hws = crate::msi::enable_msix(&child, want, ctx.as_ref())?;
     let owner = Messages {
         child,
         hws,
@@ -237,8 +241,10 @@ pub fn msi_line(cx: &mut AttachCx<'_>) -> Result<(bus::IrqLine, Messages), crate
         .bus_data_arc::<PciChild>()
         .ok_or(crate::msi::MsiError::NoCapability)?;
     // As for MSI-X.
-    let _ = cx.iommu_context();
-    let hw = crate::msi::enable_msi(&child)?;
+    let ctx = cx
+        .iommu_context()
+        .map_err(|_| crate::msi::MsiError::Iommu)?;
+    let hw = crate::msi::enable_msi(&child, ctx.as_ref())?;
     let owner = Messages {
         child,
         hws: alloc::vec![hw],

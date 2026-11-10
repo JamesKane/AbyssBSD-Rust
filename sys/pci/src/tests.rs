@@ -535,3 +535,214 @@ fn requester_ids_match_freebsd() {
         assert_eq!(&show(up.requester(*a, true)), want, "{dev}");
     }
 }
+
+/// The ITS's `GITS_TRANSLATER` in the tests below.
+const TRANSLATER: u64 = 0x0808_0000 + 0x1_0040;
+/// Where the fake domain maps the doorbell page.
+const DOORBELL_IOVA: u64 = 0x7000;
+
+/// The platform's composer, as the ITS: every message is a write to
+/// `GITS_TRANSLATER`. The MSI-X table "mapping" is host memory.
+struct FakeIts;
+
+impl msi::MsiPlatform for FakeIts {
+    fn compose(&self, _: PciAddress, _: hal::CpuId) -> Option<(u64, u32, u32)> {
+        Some((TRANSLATER, 7, 8192))
+    }
+    fn release(&self, _: PciAddress, _: hal::CpuId, _: u32) {}
+    fn doorbell(&self, _: PciAddress) -> Option<u64> {
+        Some(TRANSLATER)
+    }
+    fn map(&self, _: u64, _: u64) -> Option<usize> {
+        let table: &'static mut [u32; 64] =
+            alloc::boxed::Box::leak(alloc::boxed::Box::new([0; 64]));
+        Some((&raw mut *table).expose_provenance())
+    }
+    fn unmap(&self, _: usize, _: u64) {}
+}
+
+static FAKE_ITS: FakeIts = FakeIts;
+
+/// An IOMMU domain that maps one doorbell page, as `sys/iommu`'s does
+/// (the real one is tested against the SMMU model in `drivers/smmu`).
+#[derive(Default)]
+struct FakeDomain {
+    page: std::sync::Mutex<Option<u64>>,
+    maps: core::sync::atomic::AtomicUsize,
+    fail: bool,
+}
+
+impl vm::dma::IoDomain for FakeDomain {
+    fn reach(&self) -> u64 {
+        1 << 40
+    }
+    fn map(
+        &self,
+        _: &[(u64, u64)],
+        _: bool,
+        _: &vm::dma::DmaConstraints,
+    ) -> Result<vm::dma::IoMapping, vm::dma::DmaError> {
+        unreachable!()
+    }
+    fn unmap(&self, _: &vm::dma::IoMapping) {}
+    fn doorbell(&self, pa: u64) -> Result<u64, vm::dma::DmaError> {
+        if self.fail {
+            return Err(vm::dma::DmaError::NoMemory);
+        }
+        let mut g = self.page.lock().unwrap();
+        match *g {
+            Some(p) if p != pa & !0xfff => Err(vm::dma::DmaError::Unsatisfiable),
+            Some(_) => Ok(DOORBELL_IOVA + pa % 0x1000),
+            None => {
+                *g = Some(pa & !0xfff);
+                self.maps
+                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                Ok(DOORBELL_IOVA + pa % 0x1000)
+            }
+        }
+    }
+}
+
+/// A function with an MSI-X capability at 0x40 (four entries, table at
+/// BAR 0) and a 64-bit MSI one at 0x60.
+fn msi_function() -> crate::bus::PciChild {
+    use crate::bus::{PciBusData, PciChild};
+    use alloc::sync::Arc;
+
+    let cfg: &'static Shared = alloc::boxed::Box::leak(alloc::boxed::Box::new(Shared(
+        std::sync::Mutex::new([0; 1024]),
+    )));
+    let a = addr(0, 3, 0);
+    cfg.write32(a, 0x40, 0x11 | (0x60 << 8) | (3 << 16));
+    cfg.write32(a, 0x44, 0);
+    cfg.write32(a, 0x60, 0x05 | (1 << 7) << 16);
+    let function = Function {
+        addr: a,
+        header: header::read(
+            &{
+                let f = Fake::default();
+                f.add(0, 3, 0, device(0x1b36, 0x0010, 0x01_08_02, 0));
+                f
+            },
+            a,
+        )
+        .unwrap(),
+        bars: vec![Bar {
+            index: 0,
+            kind: BarKind::Memory64,
+            base: 0x1000_0000,
+            size: 0x4000,
+            prefetchable: false,
+        }],
+        bad_bars: Vec::new(),
+        caps: vec![
+            Capability {
+                id: caps::id::MSIX,
+                offset: 0x40,
+            },
+            Capability {
+                id: caps::id::MSI,
+                offset: 0x60,
+            },
+        ],
+        ext_caps: Vec::new(),
+        bridge: None,
+        depth: 0,
+    };
+    PciChild {
+        cfg,
+        function,
+        bus: Arc::new(PciBusData {
+            cfg,
+            adr_paths: Vec::new(),
+            intx: Vec::new(),
+            depth: 0,
+            upstream: crate::requester::Upstream::Host,
+        }),
+    }
+}
+
+/// docs/IOMMU.md §4.8: a translated function's messages are written to
+/// the doorbell's mapping in its domain (FreeBSD's `iommu_map_msi` when
+/// they are enabled, `iommu_translate_msi` when each is composed); a
+/// pass-through context or none keeps the physical address; a domain that
+/// cannot map the doorbell fails the allocation and leaves the function
+/// as it was.
+#[test]
+fn messages_go_through_the_functions_domain() {
+    use ::bus::iommu::Context;
+    use alloc::sync::Arc;
+    use core::sync::atomic::Ordering::Relaxed;
+    use irq::IrqDomain;
+
+    msi::set_platform(&FAKE_ITS);
+    let child = msi_function();
+    let cpu = hal::CpuId::BOOT;
+    let (edge, high) = (irq::Trigger::Edge, irq::Polarity::High);
+
+    // MSI-X, translated: the doorbell is mapped once, at enable.
+    let domain = Arc::new(FakeDomain::default());
+    let ctx = Context::Translated(Arc::clone(&domain) as _);
+    let hws = msi::enable_msix(&child, 2, Some(&ctx)).unwrap();
+    assert_eq!(hws.len(), 2);
+    assert_eq!(domain.maps.load(Relaxed), 1);
+    assert_eq!(*domain.page.lock().unwrap(), Some(TRANSLATER & !0xfff));
+    // The inputs hold the domain (the window lives while they do).
+    assert_eq!(Arc::strong_count(&domain), 4);
+    let table = msi::PCI_MSI.table_of(hws[0]).expect("an MSI-X input");
+    let read = |entry: usize, dword: usize| {
+        // SAFETY: the fake platform's table, 64 dwords, leaked.
+        unsafe { core::ptr::with_exposed_provenance::<u32>(table + entry * 16 + dword * 4).read() }
+    };
+    for (i, &hw) in hws.iter().enumerate() {
+        assert_eq!(msi::PCI_MSI.connect(hw, edge, high, cpu), Ok(8192));
+        let addr = u64::from(read(i, 0)) | u64::from(read(i, 1)) << 32;
+        assert_eq!(addr, DOORBELL_IOVA + 0x40, "entry {i}");
+        assert_eq!(read(i, 2), 7);
+    }
+    assert_eq!(domain.maps.load(Relaxed), 1);
+    msi::PCI_MSI.remove(&hws);
+    msi::disable_msix(&child);
+    assert_eq!(Arc::strong_count(&domain), 2);
+
+    // MSI, pass-through (a virtio device without ACCESS_PLATFORM) and
+    // without a context (no IOMMU): the physical address.
+    for ctx in [Some(Context::PassThrough), None] {
+        let hw = msi::enable_msi(&child, ctx.as_ref()).unwrap();
+        assert_eq!(msi::PCI_MSI.connect(hw, edge, high, cpu), Ok(8192));
+        let addr = u64::from(child.read32(0x64)) | u64::from(child.read32(0x68)) << 32;
+        assert_eq!(addr, TRANSLATER);
+        assert_eq!(child.read16(0x6c), 7);
+        msi::PCI_MSI.remove(&[hw]);
+        msi::disable_msi(&child);
+    }
+
+    // A domain that cannot map the doorbell: no messages, nothing enabled.
+    let broken = Arc::new(FakeDomain {
+        fail: true,
+        ..FakeDomain::default()
+    });
+    let ctx = Context::Translated(Arc::clone(&broken) as _);
+    let before = (
+        child.read32(0x40),
+        child.read32(0x60),
+        child.read16(COMMAND),
+    );
+    assert_eq!(
+        msi::enable_msix(&child, 2, Some(&ctx)),
+        Err(msi::MsiError::Iommu)
+    );
+    assert_eq!(
+        msi::enable_msi(&child, Some(&ctx)),
+        Err(msi::MsiError::Iommu)
+    );
+    assert_eq!(
+        (
+            child.read32(0x40),
+            child.read32(0x60),
+            child.read16(COMMAND)
+        ),
+        before
+    );
+    assert_eq!(Arc::strong_count(&broken), 2);
+}

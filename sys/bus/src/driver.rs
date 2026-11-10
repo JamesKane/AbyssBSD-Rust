@@ -689,6 +689,22 @@ impl<'a> AttachCx<'a> {
             .map_err(ResourceError::Iommu)
     }
 
+    /// [`AttachCx::iommu_context`] for a device that uses physical
+    /// addresses (a virtio device that does not accept platform
+    /// translation, as [`AttachCx::dma_tag_pass_through`]): its requester's
+    /// first request makes the stream pass through.
+    ///
+    /// # Errors
+    ///
+    /// As [`AttachCx::iommu_context`].
+    pub fn iommu_context_pass_through(
+        &mut self,
+    ) -> Result<Option<crate::iommu::Context>, ResourceError> {
+        self.mgr
+            .iommu_context(self.s, self.node, crate::iommu::Want::PassThrough)
+            .map_err(ResourceError::Iommu)
+    }
+
     /// The device's `index`th mailbox channel, in firmware's order (ACPI
     /// `_DSD` `mboxes`; an SCMI agent's sending channel comes first).
     pub fn mailbox(

@@ -12,6 +12,7 @@ hal = { path = "../../arch/hal" }
 iommu-framework = { path = "../iommu" }
 irq = { path = "../irq" }
 sync = { path = "../sync" }
+vm = { path = "../vm" }
 
 [lints]
 workspace = true

@@ -461,6 +461,12 @@ impl pci::msi::MsiPlatform for ItsMsi {
         }
     }
 
+    /// `GITS_TRANSLATER`, every function's (one ITS; FreeBSD's
+    /// `gicv3_iommu_init` maps the page holding it).
+    fn doorbell(&self, _: pci::PciAddress) -> Option<u64> {
+        ITS.lock().as_ref().map(|its| its.translater)
+    }
+
     fn map(&self, pa: u64, len: u64) -> Option<usize> {
         let va = crate::mm::map_device(PhysAddr::new(pa), len).ok()?;
         usize::try_from(va.get()).ok()

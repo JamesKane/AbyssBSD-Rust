@@ -228,6 +228,21 @@ impl VirtioDevice {
         self.set_status(self.status() | status::FAILED);
     }
 
+    /// Whether [`VirtioDevice::negotiate`] will accept `ACCESS_PLATFORM`:
+    /// a modern device offers it. Read before any driver negotiates (the
+    /// transport's MSI-X setup), then the device is reset again.
+    pub(crate) fn offers_access_platform(&self) -> bool {
+        if !self.is_modern() {
+            return false;
+        }
+        self.reset();
+        self.set_status(status::ACKNOWLEDGE);
+        self.set_status(status::ACKNOWLEDGE | status::DRIVER);
+        let offered = self.device_features() & feature::ACCESS_PLATFORM != 0;
+        self.reset();
+        offered
+    }
+
     fn device_features(&self) -> u64 {
         match &self.regs {
             Regs::Modern { .. } => {

@@ -149,9 +149,30 @@ impl VirtioPci {
         dev.reset();
         let mut msix = Vec::new();
         let mut irqs = Vec::new();
-        if pci::msi::available()
+        // The function's messages go through its IOMMU context (docs/
+        // IOMMU.md §4.8), which this, the function's first DMA, makes. The
+        // context is the one its device's DMA will want: a device that
+        // does not accept platform translation uses physical addresses
+        // (§4.4), so its stream passes through and its messages go to the
+        // doorbell's physical address. Without a context the device's
+        // writes would abort, so a failure keeps it on INTx.
+        let ctx = if pci::msi::available() && pci::msi::msix_count(&child).is_some() {
+            if dev.offers_access_platform() {
+                cx.iommu_context()
+            } else {
+                cx.iommu_context_pass_through()
+            }
+            .map_err(|_| ())
+        } else {
+            Err(())
+        };
+        if let Ok(ctx) = ctx
             && let Some(table) = pci::msi::msix_count(&child)
-            && let Ok(hws) = pci::msi::enable_msix(&child, table.min(dev.queues.saturating_add(1)))
+            && let Ok(hws) = pci::msi::enable_msix(
+                &child,
+                table.min(dev.queues.saturating_add(1)),
+                ctx.as_ref(),
+            )
         {
             irqs = hws
                 .iter()
