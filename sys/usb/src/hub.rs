@@ -282,6 +282,15 @@ impl Hub {
     }
 
     /// Enumerates the device on `port`.
+    /// Says which step of a port's enumeration failed (the summary after
+    /// the attempts says only how).
+    fn failed_at(&self, port: u8, step: &str, e: UsbError) {
+        ::bus::manager().log(format_args!(
+            "uhub: {}: port {port}: {step} failed: {e:?}",
+            self.dev.ugen()
+        ));
+    }
+
     fn attach_port(&self, s: &Sleepable, bus: &Arc<Bus>, port: u8) -> Result<(), UsbError> {
         let hc = &bus.hc;
         let mut st = self.ports.state(s, port)?;
@@ -291,7 +300,10 @@ impl Hub {
         // A USB 2 port needs a reset to be enabled; a USB 3 port is once
         // its link trains.
         if !st.enabled {
-            st = self.ports.reset(s, port)?;
+            st = self
+                .ports
+                .reset(s, port)
+                .inspect_err(|e| self.failed_at(port, "port reset", *e))?;
         }
         let speed = st.speed.ok_or(UsbError::Protocol("unknown port speed"))?;
         let parent = &self.dev;
@@ -312,19 +324,22 @@ impl Hub {
             }),
             _ => parent.tt,
         };
-        let Addressed { slot, address } = hc.enable_device(
-            s,
-            &NewDevice {
-                speed,
-                route,
-                root_port,
-                tt,
-            },
-        )?;
+        let Addressed { slot, address } = hc
+            .enable_device(
+                s,
+                &NewDevice {
+                    speed,
+                    route,
+                    root_port,
+                    tt,
+                },
+            )
+            .inspect_err(|e| self.failed_at(port, "enable and address", *e))?;
         let r = enumerate(s, &**hc, slot, speed);
         let e = match r {
             Ok(e) => e,
             Err(err) => {
+                self.failed_at(port, "descriptors and configuration", err);
                 hc.disable_device(s, slot);
                 return Err(err);
             }

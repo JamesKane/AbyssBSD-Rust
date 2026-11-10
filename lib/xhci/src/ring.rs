@@ -335,6 +335,12 @@ impl<M: TrbMemory> EventRing<M> {
         Some(t)
     }
 
+    /// The slot the next event goes in, as the controller left it, and
+    /// the cycle state an event there must have (diagnostics).
+    pub fn next_slot(&self) -> (Trb, bool) {
+        (self.mem.read(self.dequeue), self.cycle)
+    }
+
     /// The dequeue pointer to write to `ERDP`: the next slot to read.
     #[must_use]
     pub fn erdp(&self) -> u64 {

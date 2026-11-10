@@ -626,6 +626,7 @@ impl Hc {
             finished(&w)
         });
         if !ok {
+            self.log_stuck(&t);
             // Abort the ring; the command completes as aborted (or the
             // ring reports itself stopped).
             let crcr = self.regs.op + op::CRCR;
@@ -643,6 +644,44 @@ impl Hc {
         }
         let r = w.result.lock().take().ok_or(UsbError::TimedOut)?;
         Ok(r)
+    }
+
+    /// Bring-up diagnostics for a command that got no completion: the
+    /// controller's state, where the rings are, and what the event slot we
+    /// wait on holds (an event the controller wrote but we cannot see, or
+    /// none at all).
+    fn log_stuck(&self, t: &Trb) {
+        self.log_state(format_args!(
+            "command {:08x} {:08x} {:08x} {:08x}",
+            t.0[0], t.0[1], t.0[2], t.0[3]
+        ));
+    }
+
+    /// The controller's state after `what` got no completion.
+    fn log_state(&self, what: core::fmt::Arguments<'_>) {
+        let op = |o: usize| self.regs.mmio.read32(self.regs.op + o);
+        let crcr = u64::from(op(op::CRCR)) | u64::from(op(op::CRCR + 4)) << 32;
+        let erdp_at = self.regs.interrupter(rt::ERDP);
+        let erdp = u64::from(self.regs.mmio.read32(erdp_at))
+            | u64::from(self.regs.mmio.read32(erdp_at + 4)) << 32;
+        let iman = self.regs.mmio.read32(self.regs.interrupter(rt::IMAN));
+        let (cmd_deq, cmd_cycle) = self.cmd.lock().dequeue();
+        let ev = self.events.lock();
+        let (slot, want) = ev.next_slot();
+        ::bus::manager().log(format_args!(
+            "xhci: {what} not completed: USBCMD {:#x} USBSTS {:#x} \
+             CRCR {crcr:#x} IMAN {iman:#x} ERDP {erdp:#x}; command ring dequeue {cmd_deq:#x} \
+             (cycle {cmd_cycle}), next event at {:#x} wants cycle {want}: {:08x} {:08x} {:08x} {:08x}; \
+             DCBAA {:#x}",
+            op(op::USBCMD),
+            op(op::USBSTS),
+            ev.erdp(),
+            slot.0[0],
+            slot.0[1],
+            slot.0[2],
+            slot.0[3],
+            self.dcbaa.bus_addr(),
+        ));
     }
 
     /// Runs a command that must succeed.
@@ -765,6 +804,10 @@ impl Hc {
         }
         // Only the stream that ran out: the others' commands go on.
         for (slot, dci, n) in expired {
+            self.log_state(format_args!(
+                "a transfer on slot {slot} endpoint {}",
+                dci.get()
+            ));
             self.cancel(s, slot, dci, UsbError::Cancelled, true, Some(n));
         }
     }
@@ -963,6 +1006,10 @@ impl HostController for Hc {
                 return Ok(self.root_port_state(port));
             }
         }
+        ::bus::manager().log(format_args!(
+            "xhci: port {port} reset did not finish: PORTSC {:#x}",
+            self.regs.mmio.read32(at)
+        ));
         Err(UsbError::TimedOut)
     }
 
@@ -1392,6 +1439,11 @@ impl Hc {
         m.log(format_args!(
             "xhci{unit}: {ctx} bytes context size, {dma}-bit DMA"
         ));
+        // FreeBSD's ACPI attachments say it under bootverbose ("Bus is not
+        // cache-coherent"); worth saying on a machine where it matters.
+        if self.tag.constraints().coherency == vm::dma::Coherency::NonCoherent {
+            m.log(format_args!("xhci{unit}: DMA is not cache-coherent"));
+        }
         if self.xecp.is_empty() {
             m.log(format_args!("xhci{unit}: xECP: no capabilities found"));
         } else {
