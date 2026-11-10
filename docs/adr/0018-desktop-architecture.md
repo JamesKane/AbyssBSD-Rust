@@ -4,6 +4,8 @@
 - Date: 2026-10-29
 - Amended: 2026-10-30. Swift does not exist on FreeBSD riscv64, which blocks an rv64 desktop. The
   desktop's Swift implementation will be rewritten in Rust, in the monorepo (decision 7).
+- Amended: 2026-11-10. M-G is accepted on stock Wayland and Sway; `undertow` is M-D's acceptance
+  (Consequences).
 
 ## Context
 
@@ -63,8 +65,9 @@ Writing a second one would split the work across two products.
 - M-D's first step needs no graphics. The harness's `--live` lanes run `undertow` headless with
   wlroots' pixman renderer, so they can run once P6 exits (DESKTOP.md §5, M-D.1). That makes the
   desktop a broad test of the P6 ABI well before M-G.
-- M-G's exits are stated in terms of the desktop: `undertow` on `gop-kms` (M-G.1), with virtio-gpu
-  acceleration (M-G.3), and on native RDNA2 (M-G.6).
+- M-G's exits are stated with stock Wayland and Sway, not the desktop (amended 2026-11-10,
+  GRAPHICS.md §14). The desktop's `undertow` follows each step in M-D: on `gop-kms` after M-G.1,
+  with virtio-gpu acceleration after M-G.3, and on native RDNA2 after M-G.6.
 - New kernel work that the original plan did not schedule: nullfs, the MAC framework with
   `mac_priority`, and `sound(4)` with OSS, `snd_dummy`, and the `sndstat` nvlist ioctls
   (DESKTOP.md §3.2). ZFS (M-Z) is needed for the installer's default

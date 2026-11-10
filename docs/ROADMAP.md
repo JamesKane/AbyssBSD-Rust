@@ -2807,8 +2807,13 @@ ports see it, implemented natively, and a step order for this milestone).
   RDNA2, which the desktop's metal target and all three amd64 Tier 1 machines have
   ([ADR-0018](adr/0018-desktop-architecture.md)).
 - evdev-compatible input interface: done in the USB track.
-- The desktop (M-D) is the acceptance workload: its `undertow` compositor on `gop-kms`, then
-  accelerated on virtio-gpu, then on RDNA2 ([DESKTOP.md](DESKTOP.md) §4).
+- Acceptance is **stock Wayland and Sway** from FreeBSD 15.1 packages, unmodified: on `gop-kms`
+  with software rendering, then accelerated on virtio-gpu (Venus), then on the Orange Pi 6 Plus
+  (`panthor`) and RDNA2. Each step exits with a `grim` screenshot of Sway showing a `foot` window
+  running `fastfetch` and, in another window, glmark2's 3D jellyfish scene with its frame rate on
+  screen ([GRAPHICS.md](GRAPHICS.md) §14).
+- The desktop (M-D) follows on the same kernel: its `undertow` compositor is M-D's acceptance, not
+  M-G's ([DESKTOP.md](DESKTOP.md) §4).
 
 ### M-D: Desktop
 

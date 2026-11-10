@@ -21,7 +21,7 @@ hardware is an aggregate of drivers behind a KMS class.
 
 | # | Goal | Why |
 |---|---|---|
-| G1 | **FreeBSD's graphics userland runs unmodified**: `pkg install mesa-dri mesa-libs libdrm wayland` and a compositor from ports work as on FreeBSD with `drm-kmod` | The ABI target is FreeBSD userland ([ADR-0004](adr/0004-abi-target.md)). Vulkan and GL drivers are far beyond what we can write; Mesa already has panvk, Turnip, RADV, and Venus |
+| G1 | **FreeBSD's graphics userland runs unmodified**: `pkg install mesa-dri mesa-libs libdrm wayland sway` works as on FreeBSD with `drm-kmod` | The ABI target is FreeBSD userland ([ADR-0004](adr/0004-abi-target.md)). Vulkan and GL drivers are far beyond what we can write; Mesa already has panvk, Turnip, RADV, and Venus |
 | G2 | **Drivers are safe Rust** and follow the driver model: framework-owned lifecycle, gates, grants | [DRIVER-MODEL.md](DRIVER-MODEL.md) G2, G4 |
 | G3 | **No fence deadlock by construction**: the paths that signal fences cannot wait on memory reclaim | The defining bug class of GPU drivers (panthor 08 §8.4.2) |
 | G4 | **A device can go away**: unbind, reset, or hang recovery never leaves userland holding memory the device can still reach, and never crashes the kernel | DRIVER-MODEL.md G2, G7 |
@@ -394,9 +394,10 @@ Components (ADR-0014), each against FreeBSD with `drm-kmod` on the same machine:
 - `drm.submit`: submission rate and latency of empty and small jobs (virtio-gpu, amdgpu);
 - `drm.bo`: buffer create, map, fault, and free;
 - `drm.prime`: export and import, and cross-device scanout of a rendered buffer;
-- `drm.flip`: page-flip latency to the vblank, and compositor frame time under `weston` or `sway`;
+- `drm.flip`: page-flip latency to the vblank, and compositor frame time under `sway`;
 - `drm.fence`: wait latency for an already-signalled and a just-signalled fence;
-- application benchmarks (`vkmark`, `glmark2`) as diagnostics.
+- application benchmarks (`vkmark`, `glmark2`, including the jellyfish scene of the acceptance
+  capture, §14) as diagnostics.
 
 Where FreeBSD has no driver (panthor on Sky1, msm on the Q8B), there is no baseline, and
 [PERFORMANCE.md](PERFORMANCE.md) has no rule for that case yet (§13 question 7). Until it does,
@@ -428,12 +429,27 @@ those results are recorded and do not gate.
 
 ## 14. Phasing within M-G
 
+M-G is accepted on **stock Wayland and Sway**: FreeBSD 15.1 packages (`pkg install sway foot
+fastfetch glmark2 grim`), unmodified, with no AbyssBSD patches or settings beyond the renderer
+choice in `WLR_RENDERER`. The desktop's `undertow` is M-D's acceptance, not M-G's (DESKTOP.md §4).
+
+Each step that puts a display up exits with the same **acceptance capture**: a `grim` screenshot of
+a Sway session, taken on the machine under test and kept with the run's results, showing two
+windows in their Sway frames:
+
+1. a `foot` terminal running `fastfetch`, which names AbyssBSD, the kernel, the CPU, and the GPU;
+2. glmark2's 3D jellyfish scene (`glmark2-es2-wayland -b jellyfish --run-forever --show-fps`),
+   with its frame rate on screen.
+
+The run's log records glmark2's `GL_RENDERER` and Sway's renderer, so the capture says what drew
+it. Frame rates are diagnostics (§12), not gates.
+
 | Step | Work |
 |---|---|
 | **M-G.0** | This document finalized, the ADR for open decisions 6 and 7, and FreeBSD `drm-kmod` behavior recorded (§13 question 2) |
-| **M-G.1** | `sys/drm` core (files, GEM, KMS atomic core, events), `gop-kms`, `vt` handover. Exit: a compositor from ports runs on `gop-kms` in QEMU and on both reference machines, with software rendering, and the desktop's `undertow` does too (DESKTOP.md M-D.2) |
-| **M-G.2** | `sys/fence`, syncobj, sync files, dma-buf, `BufferObject` and its pager, `virtio-gpu` 2D. Exit: igt's core tests pass in QEMU |
-| **M-G.3** | `virtio-gpu` 3D (Venus), with dma-buf import and export through DRM format modifiers. Exit: `vkcube` and Vulkan CTS subsets in QEMU, and a wlroots compositor on its Vulkan renderer (the desktop's `undertow`, DESKTOP.md §3.3) |
-| **M-G.4** | Sky1 display aggregate. Exit: native modesetting on the Orange Pi 6 Plus, hotplug, backlight |
-| **M-G.5** | `panthor`. Exit: panvk runs `vkcube` and the CTS subset on the Orange Pi 6 Plus |
-| **M-G.6** | amd64 native GPU (RDNA2). Exit: parity with FreeBSD `drm-kmod` on the X870E and the Z690-A, with the desktop running accelerated (DESKTOP.md M-D.4) |
+| **M-G.1** | `sys/drm` core (files, GEM, KMS atomic core, events), `gop-kms`, `vt` handover. Exit: the acceptance capture on `gop-kms` in QEMU and on both reference machines, with software rendering (Sway on `pixman`, jellyfish on llvmpipe) |
+| **M-G.2** | `sys/fence`, syncobj, sync files, dma-buf, `BufferObject` and its pager, `virtio-gpu` 2D. Exit: igt's core tests pass in QEMU, and the acceptance capture on `virtio-gpu` 2D with software rendering |
+| **M-G.3** | `virtio-gpu` 3D (Venus), with dma-buf import and export through DRM format modifiers. Exit: `vkcube` and Vulkan CTS subsets in QEMU, and the acceptance capture accelerated: Sway on wlroots' Vulkan renderer over Venus (`WLR_RENDERER=vulkan`, with explicit sync), jellyfish on Zink over Venus |
+| **M-G.4** | Sky1 display aggregate. Exit: native modesetting on the Orange Pi 6 Plus, hotplug, backlight, and the acceptance capture on the Sky1 display with software rendering |
+| **M-G.5** | `panthor`. Exit: panvk runs `vkcube` and the CTS subset on the Orange Pi 6 Plus, and the acceptance capture there accelerated: Sway on Vulkan over panvk, jellyfish on panfrost |
+| **M-G.6** | amd64 native GPU (RDNA2). Exit: parity with FreeBSD `drm-kmod` on the X870E and the Z690-A, and the acceptance capture on each accelerated: Sway on Vulkan over RADV, jellyfish on radeonsi. The desktop running accelerated is M-D.4, which follows |
