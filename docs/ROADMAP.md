@@ -2661,6 +2661,13 @@ no hangs, no reboot loops, nothing that needs the screen, and P8's remaining exi
     power-off 3 s after a failure.
 - **The rest of the board:** the RX8900 RTC on I2C3, the PD controllers, `iicbus`/`iic` and
   `gpioc`, the `GeneralPurposeIo` and `GenericSerialBus` operation-region handlers.
+- **SMMUv3** ([IOMMU.md](IOMMU.md)): PCIe DMA translated through the SMMUs the IORT describes,
+  FreeBSD's design (an `smmu` unit per IORT node under `acpi0`, a domain per requester, `gas`
+  IOVAs, a third `vm::dma` backend, the ITS doorbell mapped per domain, RMR streams bypassed), as
+  on the FreeBSD the board runs. Untranslated, DMA to the RAM at `0x80_0000_0000` lands elsewhere
+  and hangs the board (2026-11-10). Until this lands the board runs with `hw.physmem=29G`
+  (`kernel/src/mm/mod.rs`), which leaves that RAM unused; it comes out of `loader.conf` once
+  translated DMA has run clean on the board.
 - **Driver selection** ([ADR-0021](adr/0021-driver-selection-and-modules.md), MODULES.md §3):
   one driver table per ISA in `kernel/table`, so the aarch64 kernel stops carrying `isa`, `atrtc`,
   `ichwd`, `amdsbwd`, and the x86 timers, and the x86_64 kernel the Sky1 drivers and `cix-sky1`.
