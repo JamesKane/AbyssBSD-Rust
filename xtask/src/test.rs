@@ -410,10 +410,12 @@ const BOOT_CASES: &[BootCase] = &[
         el2: false,
         iommu: true,
         warm_reset: false,
-        // The SMMU (docs/IOMMU.md §8): stage 2 runs it, every device's
-        // stream bypassed, the edu device's (which no driver takes)
-        // aborting; the user-memory tests are the plain case's.
-        cmdline: "abyss.test.skip=kernel::tests::user_memory",
+        // The SMMU translating (docs/IOMMU.md §8, stage 3): every device's
+        // DMA through its own domain, the edu device's stream (which no
+        // driver takes) aborting until a test gives it a context. On
+        // INTx until MSI goes through the SMMU (stage 4); the user-memory
+        // tests are the plain case's.
+        cmdline: "hw.pci.enable_msix=0 abyss.test.skip=kernel::tests::user_memory",
         pass_status: 0,
         expect: Some("smmu0: <ARM System Memory Management Unit> on acpi0"),
         expect_saved: None,

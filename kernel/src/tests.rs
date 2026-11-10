@@ -3022,9 +3022,10 @@ ktest! {
 
 ktest! {
     /// The IORT's SMMUs under `acpi0` (docs/IOMMU.md §4.2, stage 0): one
-    /// `smmu` per SMMUv3 node, attached, FreeBSD's strings, translating
-    /// nothing yet; the host bridges they translate waited for them and
-    /// record the unit. None without an IORT SMMU (x86, plain `virt`).
+    /// `smmu` per SMMUv3 node, attached, FreeBSD's strings, `dev.smmu.N.dma`
+    /// 1 when it translates (stage 3: `hw.iommu.dma`, with message-signalled
+    /// interrupts off); the host bridges they translate waited for them
+    /// and record the unit. None without an IORT SMMU (x86, plain `virt`).
     fn smmu_units_under_acpi0() {
         use bus::NodeState;
         let s = cx();
@@ -3054,7 +3055,8 @@ ktest! {
                 .expect("dev.smmu.N.dma");
             let mut v = alloc::vec::Vec::new();
             crate::sysctl::read_oid(&s, &dma, &mut v).unwrap();
-            assert_eq!(v, 0i32.to_ne_bytes(), "nothing is translated yet");
+            let translates = i32::from(iommu_framework::translating());
+            assert_eq!(v, translates.to_ne_bytes(), "{p}.dma");
         }
         if listed == 0 {
             return;
@@ -3135,14 +3137,20 @@ mod smmu_running {
                     continue;
                 }
                 // The storage and virtio functions do DMA: each got its
-                // context through its tag (or its MSI-X).
+                // context through its tag (or its MSI-X): translated when
+                // the unit translates (stage 3), bypassed otherwise.
                 let dma = ["nvme", "ahci", "virtio_pci", "xhci"].iter().any(|d| name.starts_with(d));
                 if state == NodeState::Attached && dma {
-                    assert_eq!(smmu::stream(0, sid), Some(StreamState::Bypass), "{name} (stream {sid:#x})");
+                    let want = if smmu::translates(0) {
+                        StreamState::Translated
+                    } else {
+                        StreamState::Bypass
+                    };
+                    assert_eq!(smmu::stream(0, sid), Some(want), "{name} (stream {sid:#x})");
                     bypassed += 1;
                 }
             }
-            assert!(bypassed >= 2, "{bypassed} functions bypassed");
+            assert!(bypassed >= 2, "{bypassed} functions with contexts");
             let Some((a, sid)) = edu else {
                 kprintln!("smmu: no edu device; the abort half is the aarch64-smmu case's");
                 return;
@@ -3247,6 +3255,213 @@ mod smmu_running {
             for pa in pages {
                 crate::mm::free_pages(pa, vm::Order::ZERO);
             }
+        }
+    }
+
+    ktest! {
+        /// Translated DMA (docs/IOMMU.md §8, stage 3). Every function
+        /// with DMA has a translated context: its event lines name it,
+        /// and PCIe relaxed ordering is off. Then QEMU's `edu`, given a
+        /// context by the broker as a driver's first tag would, moves
+        /// memory through IOVAs: a mapped buffer reaches the device both
+        /// ways; a DMA to an IOVA never mapped is stopped with a
+        /// translation fault naming the device; and once a buffer is
+        /// unmapped, its old IOVA faults and the page stays as the CPU
+        /// left it (strict unmap).
+        fn smmu_translates_dma() {
+            use bus::iommu::{Context, Want};
+            use bus::{Ident, NodeState};
+            use smmu::StreamState;
+            use vm::dma::{dir, Backend, DmaBuf, DmaConstraints, DmaTag};
+            let s = cx();
+            let m = bus::manager();
+            if !smmu::translates(0) {
+                kprintln!("smmu: not translating (MSI on, or hw.iommu.dma=0); stage 3's checks skipped");
+                return;
+            }
+            let smmu0 = m.snapshot(&s).into_iter().find(|n| n.2 == "smmu0").expect("smmu0").0;
+            let mut edu = None;
+            let mut nvme = 0;
+            for (id, _, name, _, state) in m.snapshot(&s) {
+                let Some(Ident::Pci(ident, a, _)) = m.ident(id, &s) else {
+                    continue;
+                };
+                let Some(sid) = m
+                    .dma_translation(&s, id)
+                    .filter(|t| t.unit() == smmu0)
+                    .and_then(|t| t.stream(pci::requester::rid(a)))
+                else {
+                    continue;
+                };
+                if (ident.vendor, ident.device) == (0x1234, 0x11e8) {
+                    edu = Some((id, a, sid));
+                    continue;
+                }
+                if state != NodeState::Attached || !name.starts_with("nvme") {
+                    continue;
+                }
+                // The §4.10 name, and relaxed ordering off (§4.4).
+                assert_eq!(smmu::stream(0, sid), Some(StreamState::Translated), "{name}");
+                assert_eq!(
+                    smmu::stream_device(0, sid),
+                    Some(alloc::format!("{name} (rid {:#x})", pci::requester::rid(a)))
+                );
+                let cfg = crate::pci::config_for(a).expect("config space");
+                let caps = pci::caps::list(cfg, a);
+                let pcie = pci::caps::find(&caps, pci::caps::id::PCIE).expect("PCIe");
+                let devctl = cfg.read16(a, u16::from(pcie.offset) + 8);
+                assert_eq!(devctl & (1 << 4), 0, "{name}: relaxed ordering on ({devctl:#x})");
+                nvme += 1;
+            }
+            assert!(nvme >= 1, "no translated NVMe controller");
+            let Some((node, a, sid)) = edu else {
+                kprintln!("smmu: no edu device; the DMA half is the aarch64-smmu case's");
+                return;
+            };
+            assert_eq!(smmu::stream(0, sid), Some(StreamState::Invalid), "edu has no context");
+            // Out of the rate limit's window of the stream's earlier events
+            // (the abort test's), so the unit prints this test's.
+            crate::time::sleep_ns(&s, 1_100_000_000);
+            // The broker's context, as for a driver's first tag.
+            let Ok(Some(Context::Translated(domain))) = m.iommu_context(&s, node, Want::Translate)
+            else {
+                panic!("edu: no translated context");
+            };
+            assert_eq!(smmu::stream(0, sid), Some(StreamState::Translated));
+            let label = smmu::stream_device(0, sid).expect("edu's label");
+            assert_eq!(
+                label,
+                alloc::format!("pci0:{}:{}:{} (rid {:#x})", a.bus, a.slot, a.function, pci::requester::rid(a)),
+                "a function no driver has is named by its selector"
+            );
+            let tag = DmaTag::translated(&crate::mm::dma::KERNEL_DMA, DmaConstraints::UNLIMITED, domain);
+            assert_eq!(tag.backend(), Backend::Iommu);
+
+            // edu's registers, memory decoding and bus mastering on.
+            let cfg = crate::pci::config_for(a).expect("edu's config space");
+            let command = cfg.read16(a, pci::header::COMMAND);
+            cfg.write16(a, pci::header::COMMAND, command | 0x6);
+            let bar = cfg.read32(a, 0x10);
+            let mut base = u64::from(bar & !0xf);
+            if (bar >> 1) & 3 == 2 {
+                base |= u64::from(cfg.read32(a, 0x14)) << 32;
+            }
+            let regs = crate::mm::map_device(addr::PhysAddr::new(base), 0x100).expect("edu's BAR");
+            let reg = |off: u64| (regs.get() + off) as *mut u64;
+            // SAFETY: edu's register page, mapped above, unmapped below.
+            let r32 = |off: u64| unsafe { (reg(off) as *const u32).read_volatile() };
+            // SAFETY: as above; the DMA registers take 64-bit accesses.
+            let w64 = |off: u64, v: u64| unsafe { reg(off).write_volatile(v) };
+            const BUF: u64 = 0x4_0000;
+            let dma = |src: u64, dst: u64, to_ram: bool| {
+                w64(0x80, src);
+                w64(0x88, dst);
+                w64(0x90, 64);
+                w64(0x98, 1 | if to_ram { 2 } else { 0 });
+                for _ in 0..200 {
+                    if r32(0x98) & 1 == 0 {
+                        return;
+                    }
+                    crate::time::sleep_ns(&s, 10_000_000);
+                }
+                panic!("edu's DMA did not finish");
+            };
+            // Waits for the events of a faulting transfer to stop coming,
+            // and returns the last.
+            let last_event = |before: u64| {
+                let mut ev = smmu::stream_events(0, sid);
+                for _ in 0..100 {
+                    if ev.total > before {
+                        break;
+                    }
+                    crate::time::sleep_ns(&s, 10_000_000);
+                    ev = smmu::stream_events(0, sid);
+                }
+                assert!(ev.total > before, "no event for stream {sid:#x}");
+                loop {
+                    crate::time::sleep_ns(&s, 100_000_000);
+                    let now = smmu::stream_events(0, sid);
+                    if now.total == ev.total {
+                        break;
+                    }
+                    ev = now;
+                }
+                ev.last.expect("the event")
+            };
+
+            /// A page of the test's: payload only, as a buffer-cache page.
+            struct Page(addr::PhysAddr);
+            impl Page {
+                fn get(&self) -> [u8; 64] {
+                    let mut b = [0; 64];
+                    // SAFETY: a page the test owns, through the direct
+                    // map; the device writes it only while it is mapped
+                    // and the test is waiting.
+                    unsafe { core::ptr::copy_nonoverlapping(self.range(0).0, b.as_mut_ptr(), 64) };
+                    b
+                }
+                fn put(&mut self, v: &[u8; 64]) {
+                    // SAFETY: as above, and the CPU holds the page.
+                    unsafe { core::ptr::copy_nonoverlapping(v.as_ptr(), self.range(0).0, 64) };
+                }
+            }
+            // SAFETY: a page the test owns, through the direct map.
+            unsafe impl DmaBuf for Page {
+                fn range(&self, _: usize) -> (*mut u8, usize) {
+                    (bootproto::layout::dmap(self.0).unwrap().get() as *mut u8, 4096)
+                }
+                fn payload_only(&self) -> bool {
+                    true
+                }
+            }
+            let pattern: [u8; 64] = core::array::from_fn(|i| 0x5a ^ u8::try_from(i).unwrap_or(0));
+            let mut src = Page(crate::mm::alloc_pages(vm::Order::ZERO).expect("page"));
+            let mut dst = Page(crate::mm::alloc_pages(vm::Order::ZERO).expect("page"));
+            src.put(&pattern);
+            dst.put(&[0; 64]);
+
+            // Mapped: memory to the device and back, through IOVAs.
+            let out = tag.map::<dir::ToDevice, _>(src).map_err(|(_, e)| e).expect("map");
+            let inn = tag.map::<dir::FromDevice, _>(dst).map_err(|(_, e)| e).expect("map");
+            let (o, i) = (out.segments()[0].bus, inn.segments()[0].bus);
+            assert!(o < 1 << 32 && i < 1 << 32, "IOVAs {o:#x} {i:#x} are low");
+            dma(o, BUF, false);
+            dma(BUF, i, true);
+            let src = out.unmap();
+            let mut dst = inn.unmap();
+            assert_eq!(dst.get(), pattern, "a translated transfer");
+
+            // Unmap before reuse: the old IOVA is gone for the device.
+            dst.put(&[0x11; 64]);
+            let before = smmu::stream_events(0, sid).total;
+            dma(BUF, i, true);
+            assert_eq!(dst.get(), [0x11; 64], "a write through an unmapped IOVA");
+
+            let e = last_event(before);
+            assert_eq!(e.sid.0, sid);
+            assert_eq!(e.record.name(), "F_TRANSLATION", "{e:?}");
+            let input = e.record.input().expect("an address");
+            assert_eq!(input.addr.get() & !0xfff, i & !0xfff);
+            assert!(!input.access.read);
+
+            // A deliberate fault: a read of an IOVA never mapped.
+            let never = 0x7654_3000;
+            let before = smmu::stream_events(0, sid).total;
+            dma(never, BUF, false);
+            let e = last_event(before);
+            assert_eq!(e.record.name(), "F_TRANSLATION", "{e:?}");
+            let input = e.record.input().expect("an address");
+            assert_eq!((input.addr.get() & !0xfff, input.access.read), (never, true));
+            kprintln!("smmu: {}", smmu::event_line(&label, &e));
+
+            // Back as it was: no context, no bus mastering.
+            drop(tag);
+            smmu::release_context(0, sid).expect("release");
+            assert_eq!(smmu::stream(0, sid), Some(StreamState::Invalid));
+            cfg.write16(a, pci::header::COMMAND, command);
+            crate::mm::unmap_device(regs, 0x100);
+            crate::mm::free_pages(src.0, vm::Order::ZERO);
+            crate::mm::free_pages(dst.0, vm::Order::ZERO);
         }
     }
 }

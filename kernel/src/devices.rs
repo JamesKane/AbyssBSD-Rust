@@ -240,6 +240,11 @@ pub(crate) fn init(s: &Sleepable) {
     // FreeBSD's IOMMU knobs are the SMMU's (x86 DMAR and AMD-Vi are
     // deferred, §9).
     iommu_framework::set_tunables(&tunable);
+    iommu_framework::set_env(crate::boot::value);
+    // Until MSI goes through the SMMU (docs/IOMMU.md §8 stage 4), the
+    // units translate only while messages are off (`pci::init` installed
+    // the ITS, or did not).
+    iommu_framework::set_messages_untranslated(pci::msi::available());
     #[cfg(target_arch = "aarch64")]
     {
         smmu::set_tunables(&tunable);
