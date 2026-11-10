@@ -2424,6 +2424,27 @@ board.
 **P8.5 Conformance, performance, and exit.** kyua on the Orange Pi 6 Plus; every suite on both
 machines against FreeBSD on bare metal; the exit criteria above.
 
+- Progress 2026-11-09 (P8.0): both machines' ground truth is in the corpus
+  (`tests/corpus/opi6p`, `tests/corpus/x870e`, their tables in `tests/corpus/acpi`). Every DSDT
+  and SSDT loads without warnings, and `lib/aml`'s corpus tests hold each namespace to Linux's
+  view of the machine: the same devices, `_HID`, `_UID`, `_ADR`, and `_STA` (the firmware
+  variables the AML reads seeded as Linux's results imply; the X870E's CPM-decided `_STA` aside).
+- Progress 2026-11-09 (P8.1, graph builder): `sys/acpi::deps` reads each device's dependencies
+  from the namespace (`_DEP`, `_CRS` resource sources, `_PR0`/`_PR3`, and `_DSD` reference
+  properties through the Hierarchical Data Extension, classified by `lib/devtree::dsd`) and
+  names the provider serving each supplier: a device, a sub-handle of one (`_STA = 0` stubs, data
+  nodes), `acpi0` (power resources), or nothing (a device left out, logged). The graph gains the
+  Order and Power edge kinds and the new origins; cycles break on optional and order edges
+  first, never on power edges. The corpus tests report each machine's edges: the Sky1 has no
+  `_DEP` at all (171 edges among the devices it enumerates, most from `_DSD`), its only unresolved reference is `DPR1`'s graph
+  endpoint to the undefined `\_SB.I2C0.UXC0`, and its SCMI agent runs over the CIX mailbox
+  (`mboxes` MBX6/MBX7, `shmem` SHM0/SHM1), serving the GPU's, VPU's, and NPU's power domain as
+  `SCMI.DVFS`. Only optional and order edges close cycles on any machine. Still to come: pin
+  group and `FixedDMA` edges, operation-region edges (GPIO, serial bus, PCC), and the
+  platform description. Boot tier: `x86_64-warm-reset` passes; the plain `x86_64` and
+  `aarch64` cases stop at `usb_disk_unplugged_while_mounted` (no forced unmount after the
+  unplug), which fails the same way on main without this change.
+
 ## Phase 9: Self-hosting and hardening = **v1.0 / Day 1 complete** (L)
 
 - **Self-hosting:** `pkg install rust` on AbyssBSD, then build AbyssBSD on AbyssBSD (amd64 and

@@ -77,12 +77,12 @@ fn osc_absent_is_none() {
 #[test]
 fn q8b_dependencies() {
     let mut i = load(Q8B);
-    let found = crate::bus::walk(&mut i, &mut Quiet);
+    let found = crate::bus::walk(&mut i, &mut Quiet).found;
     let paths: std::vec::Vec<&str> = found.iter().map(|f| f.device.path.as_str()).collect();
     let mut forward = 0;
     let mut edges = 0;
     for (n, f) in found.iter().enumerate() {
-        for d in &f.deps {
+        for (d, _, _) in &f.deps {
             edges += 1;
             assert_ne!(d, &f.device.path, "a device depends on itself");
             // Every dependency names a device the walk found, or one that

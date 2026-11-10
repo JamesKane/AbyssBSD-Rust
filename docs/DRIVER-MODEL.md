@@ -1375,7 +1375,11 @@ These are not Day-1 work. The design keeps room for them so they do not need a n
    that call SCMI over PCC. The clean-room `sky1-soc` specification describes an SCMI agent over
    the CIX mailbox (`_DSD` `mboxes`) and a separate SCMI-over-SMC agent for power domains. Both may
    be true at once. The Orange Pi 6 Plus DSDT, once captured into `tests/corpus/`, settles which
-   providers §9.3 needs first.
+   providers §9.3 needs first. Partly answered (2026-11-09, `sys/acpi`'s corpus graph tests):
+   `\_SB.SCMI` names the CIX mailbox (`mboxes` `MBX6`, `MBX7`) and shared memory (`shmem`
+   `SHM0`, `SHM1`), and the GPU, VPU, and NPU take their power domain from `\_SB.SCMI.DVFS`, a
+   child of it that is not enumerated (a sub-handle). The clock methods' PCC path is still to
+   be traced (operation-region edges).
 8. **Platform description format.** §5.5 tables are `const` Rust data. Whether CIX's in-AML tables
    are extracted at boot or transcribed at build time from the corpus is open. Extraction follows
    firmware updates, and transcription is simpler to review.

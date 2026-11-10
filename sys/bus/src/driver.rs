@@ -687,18 +687,21 @@ impl<D: Driver> StartCx<'_, D> {
 }
 
 impl<D: Driver> StartCx<'_, D> {
-    /// Makes child `consumer` wait for `supplier` (another node), for a
-    /// firmware dependency that names a sibling added after it. Children
-    /// do not attach before their parent's `start` returns, so edges added
-    /// here always hold them back.
+    /// Makes child `consumer` depend on `supplier` (another node), for a
+    /// firmware dependency that names a sibling added after it, with the
+    /// edge's kind and where firmware said so. Children do not attach
+    /// before their parent's `start` returns, so a required or power edge
+    /// added here always holds the consumer back.
     pub fn add_dependency(
         &mut self,
         consumer: DeviceId,
         supplier: DeviceId,
         kind: devtree::graph::EdgeKind,
+        origin: devtree::graph::Origin,
     ) {
         if self.children_contains(consumer) {
-            self.mgr.add_dependency(self.s, consumer, supplier, kind);
+            self.mgr
+                .add_dependency(self.s, consumer, supplier, kind, origin);
         }
     }
 

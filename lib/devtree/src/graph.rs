@@ -8,21 +8,44 @@
 //! waiting can always say what for ([`Graph::blocking`]).
 //!
 //! Firmware can describe cycles. [`Graph::break_cycles`] removes edges
-//! until none remain: optional edges first, then non-tree edges whose
-//! consumer is a tree ancestor of another node in the cycle, then any
-//! non-tree edge. Tree edges are never removed.
+//! until none remain: optional and order edges first, then non-tree edges
+//! whose consumer is a tree ancestor of another node in the cycle, then
+//! any other non-tree edge. Tree and power edges are never removed.
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
-/// Whether a consumer can attach without the supplier.
+/// What an edge holds the consumer to (DRIVER-MODEL.md §6.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum EdgeKind {
-    /// The consumer cannot attach until the supplier has.
+    /// The consumer cannot attach until the supplier has (`_DEP`, a
+    /// `GpioInt`).
     Required,
     /// The consumer attaches regardless and is told when the supplier
     /// appears.
     Optional,
+    /// Attach is not gated, but transitions are ordered: the supplier
+    /// suspends after the consumer and resumes before it (a USB4 port's
+    /// `usb4-host-interface`, a media pipeline's endpoints).
+    Order,
+    /// As [`EdgeKind::Required`], and the supplier stays powered while the
+    /// consumer is (a power domain, a supply). Never dropped to break a
+    /// cycle.
+    Power,
+}
+
+impl EdgeKind {
+    /// Whether the consumer waits for the supplier to attach (and detaches
+    /// before it).
+    #[must_use]
+    pub const fn gates_attach(self) -> bool {
+        matches!(self, Self::Required | Self::Power)
+    }
+
+    /// Whether cycle breaking drops this kind first.
+    const fn soft(self) -> bool {
+        matches!(self, Self::Optional | Self::Order)
+    }
 }
 
 /// Where an edge came from.
@@ -46,6 +69,17 @@ pub enum Origin {
     InterruptLink,
     /// The interrupt controller serving a GSI.
     Gsi,
+    /// A `_DSD` reference property (`power-domains`, `mboxes`, a graph
+    /// endpoint).
+    Dsd,
+    /// A `_CRS` pin function, configuration, or group.
+    Pin,
+    /// A `_CRS` `FixedDMA` channel.
+    Dma,
+    /// A GPIO or serial-bus operation region the consumer's AML uses.
+    Region,
+    /// The platform description (DRIVER-MODEL.md §5.5).
+    Platform,
     /// Declared by a driver during attach.
     Driver,
 }
@@ -69,8 +103,8 @@ impl<N> Edge<N> {
     }
 }
 
-/// Nodes whose edges form a cycle that cannot be broken (only tree edges,
-/// which cannot happen in a well-formed tree).
+/// Nodes whose edges form a cycle that cannot be broken (only tree and
+/// power edges).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cycle<N>(pub Vec<N>);
 
@@ -142,13 +176,16 @@ impl<N: Copy + Ord> Graph<N> {
         self.edges.iter().filter(move |e| e.supplier == n)
     }
 
-    /// The required suppliers of `n` that are not attached; empty means
-    /// `n` is ready.
+    /// The suppliers `n` waits for (required and power edges) that are
+    /// not attached, each once; empty means `n` is ready.
     pub fn missing(&self, n: N, attached: impl Fn(N) -> bool) -> Vec<N> {
-        self.suppliers(n)
-            .filter(|e| e.kind == EdgeKind::Required && !attached(e.supplier))
-            .map(|e| e.supplier)
-            .collect()
+        let mut out: Vec<N> = Vec::new();
+        for e in self.suppliers(n) {
+            if e.kind.gates_attach() && !attached(e.supplier) && !out.contains(&e.supplier) {
+                out.push(e.supplier);
+            }
+        }
+        out
     }
 
     /// Why `n` waits: for each missing required supplier, the chain from
@@ -289,23 +326,24 @@ impl<N: Copy + Ord> Graph<N> {
     }
 
     /// Removes edges until the graph is acyclic; returns the removed edges
-    /// in removal order, or the nodes of a cycle made only of tree edges.
+    /// in removal order, or the nodes of a cycle made only of tree and
+    /// power edges.
     pub fn break_cycles(&mut self) -> Result<Vec<Edge<N>>, Cycle<N>> {
         let mut dropped = Vec::new();
         while let Some(cycle) = self.find_cycle() {
             let members: Vec<N> = cycle.iter().map(|e| e.supplier).collect();
+            let breakable = |e: &&Edge<N>| !e.is_tree() && e.kind != EdgeKind::Power;
             let pick = cycle
                 .iter()
-                .find(|e| e.kind == EdgeKind::Optional)
+                .find(|e| e.kind.soft())
                 .or_else(|| {
-                    cycle.iter().find(|e| {
-                        !e.is_tree()
-                            && members
-                                .iter()
-                                .any(|&m| m != e.consumer && self.tree_ancestor(e.consumer, m))
+                    cycle.iter().filter(breakable).find(|e| {
+                        members
+                            .iter()
+                            .any(|&m| m != e.consumer && self.tree_ancestor(e.consumer, m))
                     })
                 })
-                .or_else(|| cycle.iter().find(|e| !e.is_tree()))
+                .or_else(|| cycle.iter().find(breakable))
                 .copied();
             let Some(e) = pick else {
                 return Err(Cycle(members));
@@ -404,6 +442,28 @@ mod tests {
     }
 
     #[test]
+    fn order_edges_go_first_and_power_edges_stay() {
+        // A pipeline: the encoder(3) sits in the display controller's(2)
+        // power domain, and the controller uses the encoder downstream.
+        let mut g = sample();
+        g.add_edge(dep(2, 3, EdgeKind::Power));
+        g.add_edge(dep(3, 2, EdgeKind::Order));
+        let dropped = g.break_cycles().unwrap();
+        assert_eq!(dropped, vec![dep(3, 2, EdgeKind::Order)]);
+        // Power gates attach as required edges do; order edges do not.
+        assert_eq!(g.missing(3, |n| n <= 1), vec![2]);
+        let mut g = sample();
+        g.add_edge(dep(4, 2, EdgeKind::Order));
+        assert!(g.missing(2, |n| n <= 1).is_empty());
+        // Power edges are never dropped: a cycle of them is reported.
+        let mut g = Graph::new();
+        g.add_edge(tree(0, 1));
+        g.add_edge(dep(1, 2, EdgeKind::Power));
+        g.add_edge(dep(2, 1, EdgeKind::Power));
+        assert!(matches!(g.break_cycles(), Err(Cycle(_))));
+    }
+
+    #[test]
     fn unbreakable_cycle_is_reported() {
         let mut g = Graph::new();
         g.add_edge(tree(1, 2));
@@ -435,10 +495,11 @@ mod tests {
                 let s = next(u64::from(nodes)) as u32;
                 let c = next(u64::from(nodes)) as u32;
                 if s != c {
-                    let kind = if next(2) == 0 {
-                        EdgeKind::Required
-                    } else {
-                        EdgeKind::Optional
+                    // No power edges: a cycle of them is unbreakable.
+                    let kind = match next(3) {
+                        0 => EdgeKind::Required,
+                        1 => EdgeKind::Optional,
+                        _ => EdgeKind::Order,
                     };
                     g.add_edge(dep(s, c, kind));
                 }

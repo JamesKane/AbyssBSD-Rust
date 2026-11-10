@@ -550,16 +550,19 @@ impl Manager {
         id
     }
 
-    /// Records that `consumer` also needs `supplier`: a firmware dependency
-    /// found once both exist (a forward `_DEP`). A consumer already
-    /// attaching is not held back. An edge that closes a cycle is broken
-    /// again, as firmware cycles are, and reported.
+    /// Records that `consumer` also depends on `supplier`: a firmware
+    /// dependency found once both exist (a forward `_DEP`). A consumer
+    /// already attaching is not held back. An edge that closes a cycle is
+    /// broken again, as firmware cycles are, and reported if the consumer
+    /// waited on it (optional and order edges close cycles by design: a
+    /// media pipeline's links run both ways).
     pub(crate) fn add_dependency(
         &self,
         s: &Sleepable,
         consumer: DeviceId,
         supplier: DeviceId,
         kind: EdgeKind,
+        origin: Origin,
     ) {
         let mut t = self.topo.write(s);
         if consumer == supplier || t.node(consumer).is_none() || t.node(supplier).is_none() {
@@ -569,10 +572,10 @@ impl Manager {
             supplier: supplier.index,
             consumer: consumer.index,
             kind,
-            origin: Origin::Dep,
+            origin,
         });
         if let Ok(broken) = t.graph.break_cycles() {
-            for e in broken {
+            for e in broken.into_iter().filter(|e| e.kind.gates_attach()) {
                 let (a, b) = (
                     t.nameunit(self.drivers, e.supplier),
                     t.nameunit(self.drivers, e.consumer),
@@ -1125,9 +1128,10 @@ impl Manager {
             let n = t.node_mut(id).expect("checked above");
             n.state = NodeState::Detaching(why);
             let binding = n.binding.take();
-            // Graph consumers detach before their suppliers too.
+            // Graph consumers that wait on it (required and power edges)
+            // detach before it too.
             for e in t.graph.consumers(id.index) {
-                if e.kind == EdgeKind::Required
+                if e.kind.gates_attach()
                     && let Some(c) = t.id(e.consumer)
                     && !children.contains(&c)
                 {

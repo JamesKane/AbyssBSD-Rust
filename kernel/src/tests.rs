@@ -1390,10 +1390,10 @@ pub(crate) mod bus_test {
         fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
             let mut add = |model| cx.add_child(Ident::Test(TestIdent { model }), None, vec![]);
             let (early, late, a, b) = (add(8), add(9), add(10), add(11));
-            use devtree::graph::EdgeKind::Required;
-            cx.add_dependency(early, late, Required);
-            cx.add_dependency(a, b, Required);
-            cx.add_dependency(b, a, Required);
+            use devtree::graph::{EdgeKind::Required, Origin::Dep};
+            cx.add_dependency(early, late, Required, Dep);
+            cx.add_dependency(a, b, Required, Dep);
+            cx.add_dependency(b, a, Required, Dep);
             Ok(())
         }
         fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}

@@ -11,21 +11,23 @@
 //!   devices and the RTC, which FreeBSD always keeps.
 //! - Children get the resources their `_CRS` consumes; ranges a bridge
 //!   produces stay with the bridge's driver.
-//! - `_DEP` becomes a dependency edge on the named device when that device
-//!   was added first.
+//! - What the namespace says a child depends on ([`crate::deps`]) becomes
+//!   a dependency edge on the child that serves the supplier. A reference
+//!   to nothing, or to a device left out, is logged.
 
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use aml::Uid;
 use aml::resource::{AddressKind, Resource as AmlResource};
-use aml::{DepRef, Uid};
 use bus::{
     AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, Resource, StartCx, StopCx, StopReason,
 };
-use devtree::graph::EdgeKind;
+use devtree::graph::{EdgeKind, Origin};
 use devtree::ids::AcpiIdent;
 
+use crate::deps::Provider;
 use crate::{Ops, service};
 
 /// What a child of `acpi0` carries for its driver (its bus data).
@@ -40,11 +42,15 @@ pub struct AcpiDevice {
     pub crs: Vec<AmlResource>,
 }
 
+/// A dependency on another child: the path of the device that serves the
+/// supplier, the edge's kind, and where firmware said so.
+pub(crate) type ChildDep = (String, EdgeKind, Origin);
+
 /// One device found in the namespace.
 pub(crate) struct Found {
     pub(crate) device: AcpiDevice,
     pub(crate) ident: AcpiIdent,
-    pub(crate) deps: Vec<String>,
+    pub(crate) deps: Vec<ChildDep>,
 }
 
 /// IDs FreeBSD keeps even when `_STA` says absent.
@@ -55,62 +61,89 @@ fn always_present(ident: &AcpiIdent) -> bool {
         .is_some_and(|h| h == "PNP0C0F" || h == "PNP0B00")
 }
 
-pub(crate) fn walk(interp: &mut aml::Interpreter, host: &mut dyn aml::Host) -> Vec<Found> {
-    let mut out = Vec::new();
+/// The identity of a device `acpi0` adds a child for, or `None` for one it
+/// leaves out: no `_HID` or `_CID`, or absent by `_STA` (but for the IDs
+/// FreeBSD always keeps).
+pub(crate) fn enumerated(
+    interp: &mut aml::Interpreter,
+    host: &mut dyn aml::Host,
+    node: aml::NodeId,
+) -> Option<AcpiIdent> {
+    if alloc::format!("{}", interp.path(node)) == "\\_TZ_" {
+        return None;
+    }
+    let hid = interp.hid(node, host).ok().flatten();
+    let cids = interp.cids(node, host).unwrap_or_default();
+    if hid.is_none() && cids.is_empty() {
+        return None;
+    }
+    let uid = interp.uid(node, host).ok().flatten().map(|u| match u {
+        Uid::Integer(n) => alloc::format!("{n}"),
+        Uid::String(s) => s,
+    });
+    let ident = AcpiIdent { hid, cids, uid };
+    let present = interp.sta(node, host).map_or(true, |sta| sta & 1 != 0);
+    (present || always_present(&ident)).then_some(ident)
+}
+
+/// What the namespace walk found: the children, and what to log about
+/// their dependencies.
+pub(crate) struct Walk {
+    pub(crate) found: Vec<Found>,
+    /// References to objects that do not exist, and suppliers nothing will
+    /// serve.
+    pub(crate) notes: Vec<String>,
+}
+
+pub(crate) fn walk(interp: &mut aml::Interpreter, host: &mut dyn aml::Host) -> Walk {
+    let mut found = Vec::new();
     for node in interp.devices() {
         let path = alloc::format!("{}", interp.path(node));
-        if path == "\\_TZ_" {
+        let Some(ident) = enumerated(interp, host, node) else {
             continue;
-        }
-        let hid = interp.hid(node, host).ok().flatten();
-        let cids = interp.cids(node, host).unwrap_or_default();
-        if hid.is_none() && cids.is_empty() {
-            continue;
-        }
-        let uid = interp.uid(node, host).ok().flatten().map(|u| match u {
-            Uid::Integer(n) => alloc::format!("{n}"),
-            Uid::String(s) => s,
-        });
-        let ident = AcpiIdent { hid, cids, uid };
-        let present = interp.sta(node, host).map_or(true, |sta| sta & 1 != 0);
-        if !present && !always_present(&ident) {
-            continue;
-        }
+        };
         // D0 before any driver sees it.
         let _ = crate::power::to_d0(interp, node, host);
         let crs = interp.crs(node, host).ok().flatten().unwrap_or_default();
-        let mut deps: Vec<String> = interp
-            .dep(node, host)
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|d| match d {
-                DepRef::Resolved(n) => Some(alloc::format!("{}", interp.path(n))),
-                DepRef::Unresolved(_) => None,
-            })
-            .collect();
-        // The producers of its resources: interrupt controllers, GPIO
-        // controllers, serial bus controllers.
-        for r in &crs {
-            let source = match r {
-                AmlResource::ExtendedIrq(e) => e.source.as_ref(),
-                AmlResource::Gpio(g) => Some(&g.source),
-                AmlResource::SerialBus(b) => Some(&b.source),
-                _ => None,
-            };
-            if let Some(n) = source.and_then(|src| interp.resolve(node, &src.name)) {
-                let p = alloc::format!("{}", interp.path(n));
-                if p != path && !deps.contains(&p) {
-                    deps.push(p);
-                }
-            }
-        }
-        out.push(Found {
+        found.push(Found {
             device: AcpiDevice { node, path, crs },
             ident,
-            deps,
+            deps: Vec::new(),
         });
     }
-    out
+    let nodes: Vec<aml::NodeId> = found.iter().map(|f| f.device.node).collect();
+    let deps = crate::deps::build(interp, host, &nodes);
+    let mut notes = Vec::new();
+    for e in &deps.edges {
+        let what = e.via.describe();
+        let Some(f) = found.iter_mut().find(|f| f.device.node == e.consumer) else {
+            continue;
+        };
+        match e.provider {
+            Provider::Device(n) | Provider::Sub { owner: n, .. } => {
+                let dep = (alloc::format!("{}", interp.path(n)), e.kind, e.via.origin());
+                if dep.0 != f.device.path && !f.deps.contains(&dep) {
+                    f.deps.push(dep);
+                }
+            }
+            // acpi0 itself: the tree already orders it first.
+            Provider::Bus(_) => {}
+            Provider::Absent(n) => notes.push(alloc::format!(
+                "acpi0: {}: {what} names {}, which is not present",
+                f.device.path,
+                interp.path(n)
+            )),
+        }
+    }
+    for u in &deps.unresolved {
+        notes.push(alloc::format!(
+            "acpi0: {}: {} names {}, which does not exist",
+            interp.path(u.consumer),
+            u.via.describe(),
+            u.name
+        ));
+    }
+    Walk { found, notes }
 }
 
 fn trigger(t: aml::resource::Trigger) -> irq::Trigger {
@@ -261,11 +294,14 @@ impl Driver for AcpiBus {
                 Vec::new(),
             );
         }
-        let found = svc.run(cx.sleepable(), walk);
+        let Walk { found, notes } = svc.run(cx.sleepable(), walk);
+        for note in &notes {
+            svc.ops().log(format_args!("{note}"));
+        }
         // Every child first, in namespace order (FreeBSD's creation
         // order), then the edges between them: a dependency may name a
         // device that comes later. None attaches before this returns.
-        let mut added: Vec<(String, bus::DeviceId, Vec<String>)> = Vec::new();
+        let mut added: Vec<(String, bus::DeviceId, Vec<ChildDep>)> = Vec::new();
         for f in found {
             let res = resources(svc.ops(), &f.device.crs);
             let path = f.device.path.clone();
@@ -277,9 +313,9 @@ impl Driver for AcpiBus {
             added.push((path, id, f.deps));
         }
         for (_, id, deps) in &added {
-            for d in deps {
+            for (d, kind, origin) in deps {
                 if let Some((_, sup, _)) = added.iter().find(|(p, _, _)| p == d) {
-                    cx.add_dependency(*id, *sup, EdgeKind::Required);
+                    cx.add_dependency(*id, *sup, *kind, *origin);
                 }
             }
         }

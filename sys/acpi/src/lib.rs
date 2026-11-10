@@ -20,6 +20,9 @@ extern crate alloc;
 pub mod bus;
 pub mod button;
 pub mod cpc;
+pub mod deps;
+#[cfg(test)]
+mod deps_corpus;
 pub mod events;
 pub mod ged;
 mod host;

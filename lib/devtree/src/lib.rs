@@ -18,6 +18,7 @@
 extern crate alloc;
 
 pub mod devctl;
+pub mod dsd;
 pub mod graph;
 pub mod ids;
 pub mod matching;
