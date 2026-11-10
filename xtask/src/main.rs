@@ -24,6 +24,7 @@ mod policy;
 mod qemu;
 mod qmp;
 mod remote;
+mod rgegen;
 mod syscalls;
 mod test;
 mod ufsverify;
@@ -74,6 +75,7 @@ commands:
   check                                                  fmt, clippy (host and targets), policy
   policy                                                 dependency and license-header rules
   syscallgen  [--src DIR] [--check]                      regenerate lib/abi syscall tables
+  rgegen      [--src DIR] [--check]                      regenerate drivers/rge register programs
   abi-check   [--arch <a|all>]                           verify ABI layouts on the build server
   unsafe-report                                          count unsafe per crate
 
@@ -131,6 +133,7 @@ fn run() -> Result<()> {
         "check" => test::cmd_check(args),
         "policy" => policy::cmd(args),
         "syscallgen" => syscalls::cmd(args),
+        "rgegen" => rgegen::cmd(args),
         "abi-check" => abicheck::cmd(args),
         "unsafe-report" => policy::cmd_unsafe_report(args),
         other => Err(format!("unknown command `{other}`\n\n{USAGE}").into()),

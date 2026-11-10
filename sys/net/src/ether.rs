@@ -24,6 +24,26 @@ pub const VLAN_ENCAP_LEN: usize = 4;
 /// `etherbroadcastaddr`.
 pub const BROADCAST: [u8; ADDR_LEN] = [0xff; ADDR_LEN];
 
+/// The big-endian CRC-32 of `buf` (`ether_crc32_be`), which drivers hash
+/// multicast addresses with for their filters.
+#[must_use]
+pub fn crc32_be(buf: &[u8]) -> u32 {
+    const POLY_BE: u32 = 0x04c1_1db6;
+    let mut crc = 0xffff_ffffu32;
+    for &byte in buf {
+        let mut data = byte;
+        for _ in 0..8 {
+            let carry = (crc >> 31) ^ u32::from(data & 1);
+            crc <<= 1;
+            if carry != 0 {
+                crc = (crc ^ POLY_BE) | carry;
+            }
+            data >>= 1;
+        }
+    }
+    crc
+}
+
 /// EtherTypes (`ETHERTYPE_*`).
 pub mod ty {
     pub const IP: u16 = 0x0800;
@@ -222,4 +242,20 @@ pub fn set_pcp(m: &mut Packet, pcp: u8, hwtag: bool) -> Result<(), Errno> {
 pub fn encap(m: &mut Packet, h: &Header) -> Result<(), Errno> {
     m.prepend(HDR_LEN)?.copy_from_slice(&h.bytes());
     Ok(())
+}
+
+#[cfg(test)]
+mod crc_tests {
+    /// Against the bit-reversed zlib CRC-32 before its final inversion,
+    /// which is the same function computed the other way round.
+    #[test]
+    fn crc32_be_vectors() {
+        for (a, want) in [
+            ([0x01, 0x00, 0x5e, 0x00, 0x00, 0x01], 0x7fa3_2d9b),
+            ([0x33, 0x33, 0x00, 0x00, 0x00, 0x01], 0xf99b_aaba),
+            ([0xff; 6], 0xff48_647d),
+        ] {
+            assert_eq!(super::crc32_be(&a), want, "{a:02x?}");
+        }
+    }
 }

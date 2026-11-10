@@ -379,6 +379,12 @@ impl Manager {
         self.platform.sleep_ns(s, ms.saturating_mul(1_000_000));
     }
 
+    /// Busy-waits for `us` microseconds (FreeBSD's `DELAY`): a register
+    /// protocol's short polled wait, in any context.
+    pub fn delay_us(&self, us: u64) {
+        self.platform.delay_us(us);
+    }
+
     /// Writes a console line (attach announcements, driver messages).
     pub fn log(&self, args: core::fmt::Arguments<'_>) {
         self.platform.log(args);

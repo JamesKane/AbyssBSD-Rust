@@ -93,6 +93,14 @@ impl Platform for KernelPlatform {
         crate::time::sleep_ns(s, ns);
     }
 
+    fn delay_us(&self, us: u64) {
+        let ticks = u128::from(us) * u128::from(crate::time::frequency()) / 1_000_000;
+        let start = crate::time::counter();
+        while u128::from(crate::time::counter().wrapping_sub(start)) < ticks {
+            core::hint::spin_loop();
+        }
+    }
+
     fn log(&self, args: core::fmt::Arguments<'_>) {
         kprintln!("{args}");
     }

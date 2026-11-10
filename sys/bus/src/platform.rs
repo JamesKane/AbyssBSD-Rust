@@ -28,6 +28,9 @@ pub trait Platform: Sync {
     fn io_write(&self, port: u16, width: u8, v: u32);
     /// Sleeps for `ns` nanoseconds (bounded waits in attach and stop).
     fn sleep_ns(&self, s: &Sleepable, ns: u64);
+    /// Busy-waits for `us` microseconds (FreeBSD's `DELAY`): the short,
+    /// polled waits register protocols need, too short to sleep for.
+    fn delay_us(&self, us: u64);
     /// A console line (attach messages, diagnostics).
     fn log(&self, args: core::fmt::Arguments<'_>);
 }

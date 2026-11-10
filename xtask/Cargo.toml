@@ -13,6 +13,7 @@ font = { path = "../lib/font" }
 gpt = { path = "../lib/gpt" }
 guid = { path = "../lib/guid" }
 ktest = { path = "../lib/ktest" }
+rgegen = { path = "../tools/rgegen" }
 syscallgen = { path = "../tools/syscallgen" }
 ufs = { path = "../lib/ufs" }
 ustar = { path = "../lib/ustar" }
