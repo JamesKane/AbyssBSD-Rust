@@ -482,11 +482,24 @@ fn drivers_write_only_device_registers() {
     child.write32(0x80, 0x1122_3344).unwrap();
     child.write8(0x82, 0xaa).unwrap();
     assert_eq!(child.read32(0x80), 0x11aa_3344);
-    // Decoding and bus mastering go through the bus.
-    child.enable_decoding();
+    // Decoding and bus mastering go through the bus. As in FreeBSD, a
+    // driver that maps only memory leaves its I/O BAR's decoding off
+    // (the Orange Pi's rge: `bar [10] = type I/O Port, ..., disabled`),
+    // and each space is turned on only when its BAR is used.
+    child.cfg.write16(addr, COMMAND, 0);
+    child.enable_memory();
     child.set_bus_master(true);
-    assert_eq!(child.read16(COMMAND), CMD_MEMORY | CMD_IO | CMD_BUS_MASTER);
+    assert_eq!(child.read16(COMMAND), CMD_MEMORY | CMD_BUS_MASTER);
+    child.cfg.write16(addr, COMMAND, 0);
+    child.enable_io();
+    assert_eq!(child.read16(COMMAND), CMD_IO);
+    child.enable_memory();
+    assert_eq!(child.read16(COMMAND), CMD_MEMORY | CMD_IO);
     child.set_bus_master(false);
+    assert_eq!(child.read16(COMMAND), CMD_MEMORY | CMD_IO);
+    // What firmware turned on stays on.
+    child.cfg.write16(addr, COMMAND, CMD_IO);
+    child.enable_memory();
     assert_eq!(child.read16(COMMAND), CMD_MEMORY | CMD_IO);
 }
 

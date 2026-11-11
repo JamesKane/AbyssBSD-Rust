@@ -651,7 +651,7 @@ impl Driver for Ahci {
             .position(|b| b.index == 5)
             .ok_or(AttachError::Device("no AHCI base address"))?;
         let mmio = cx.mmio_bytes(index)?;
-        child.enable_decoding();
+        child.enable_memory();
         child.set_bus_master(true);
         // AHCI mode, then a controller reset.
         mmio.write32(GHC, mmio.read32(GHC) | GHC_AE);

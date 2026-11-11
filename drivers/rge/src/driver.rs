@@ -714,7 +714,7 @@ impl Driver for Rge {
     fn attach(cx: &mut AttachCx<'_>) -> Result<Self, AttachError> {
         let child = cx.bus_data_arc::<PciChild>().ok_or(AttachError::Decline)?;
         let bar = Bar(Arc::new(cx.mmio_bytes(0)?));
-        child.enable_decoding();
+        child.enable_memory();
         child.set_bus_master(true);
         let hwrev = bar.read32(r::TXCFG) & r::TXCFG_HWREV;
         let log = |a: core::fmt::Arguments<'_>| bus::manager().log(a);

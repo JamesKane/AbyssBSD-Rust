@@ -292,7 +292,7 @@ impl Driver for XhciPci {
             |(_, n)| String::from(*n),
         );
         let mmio = cx.mmio_bytes(0)?;
-        child.enable_decoding();
+        child.enable_memory();
         child.set_bus_master(true);
         let unit = cx.unit();
         let (tag, data_tag) = hc::tags(cx, &mmio)?;

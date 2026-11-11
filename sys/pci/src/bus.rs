@@ -149,11 +149,17 @@ impl PciChild {
         self.cfg.write16(a, COMMAND, (cmd | set) & !clear);
     }
 
-    /// Turns on decoding of the function's BARs: memory, and I/O ports if
-    /// it has I/O BARs.
-    pub fn enable_decoding(&self) {
-        let io = self.function.bars.iter().any(|b| b.kind == BarKind::Io);
-        self.set_command(CMD_MEMORY | if io { CMD_IO } else { 0 }, 0);
+    /// Turns on decoding of the function's memory BARs, for a driver
+    /// that maps one (FreeBSD's `pci_activate_resource` of a memory BAR,
+    /// `PCIM_CMD_MEMEN`). I/O decoding is left as firmware left it.
+    pub fn enable_memory(&self) {
+        self.set_command(CMD_MEMORY, 0);
+    }
+
+    /// Turns on decoding of the function's I/O BARs, for a driver that
+    /// uses one (`PCIM_CMD_PORTEN`). Memory decoding is left as it is.
+    pub fn enable_io(&self) {
+        self.set_command(CMD_IO, 0);
     }
 
     /// Lets the function master the bus (DMA, and message-signalled

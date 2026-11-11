@@ -1456,7 +1456,7 @@ impl Driver for Nvme {
         let child = cx.bus_data_arc::<PciChild>().ok_or(AttachError::Decline)?;
         let s = cx.sleepable();
         let mmio = cx.mmio_bytes(0)?;
-        child.enable_decoding();
+        child.enable_memory();
         child.set_bus_master(true);
         let mut regs = Regs { mmio, stride: 4 };
         let cap = regs.read64(reg::CAP);

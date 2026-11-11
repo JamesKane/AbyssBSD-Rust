@@ -144,7 +144,16 @@ impl VirtioPci {
         child: Arc<PciChild>,
         mut dev: VirtioDevice,
     ) -> Result<Self, AttachError> {
-        child.enable_decoding();
+        // The legacy interface's registers are I/O ports, plus the MSI-X
+        // table's memory BAR; the modern one maps memory only.
+        if matches!(dev.regs, Regs::Legacy { .. }) {
+            child.enable_io();
+            if child.function.bars.iter().any(|b| b.kind != BarKind::Io) {
+                child.enable_memory();
+            }
+        } else {
+            child.enable_memory();
+        }
         child.set_bus_master(true);
         dev.reset();
         let mut msix = Vec::new();
