@@ -2954,6 +2954,16 @@ hang.
   `wait4`'s rusage missed reaped grandchildren, and the timers counted on the raw counter rather
   than `CLOCK_MONOTONIC`'s steered clock. Open: a `reboot` after the first run hung the board
   (needed a power cycle; not reproduced since, with the serial console recorded).
+- Progress 2026-11-11 (perf on the board, `a0474a5`): `p4`, `p5`, `p6` per core class, 3 runs a
+  side (BUILD-AND-TEST.md, "Performance on the Orange Pi 6 Plus"), against the board's FreeBSD
+  without `WITNESS`/`INVARIANTS` (`kernel.nodebug`). No hang or panic in six runs. Not yet at
+  parity: on the big cores, components `sig` 4.93 (`sig.deliver` 4.8 µs against 1.0), `proc` 1.93
+  (`proc.exec` 2.87, `vfork_exec` 1.82, `fork` 1.43), `syscall` 1.19, `exec` 1.19, `pty` 1.15,
+  `unix` 1.05, `vm` 1.03 fail; `fs.ufs` 0.68, `fs.tmpfs` 0.68, `io` 0.56, `thr` 0.88, `event` 0.90
+  pass. The other classes are alike (the A520s also fail `pipe` and `syscall` 1.74). Many
+  benchmarks are noisy at 3 runs (FreeBSD CV over 1%); the 10-run gate waits for the gaps to
+  close. Also to do: `p2` (AbyssBSD's `abyss.bench` powers off after the suite, a power cycle on
+  the board) and `p7` over `rge`.
 - Progress 2026-11-10 (the known defects, in QEMU; none yet tried on the board):
   - `MNT_RELOAD`: `nmount`'s `reload` on a read-only mount (`vfs_domount_update`'s rule), with
     `ffs` taken as `ufs` (`chkdoreload` asks for `ffs`, which is why the root's failed with
