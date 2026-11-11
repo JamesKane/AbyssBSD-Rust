@@ -12,6 +12,7 @@
 //! - [`units`]: unit numbers per devclass.
 //! - [`strings`]: pnpinfo and location strings, byte for byte FreeBSD's.
 //! - [`udevice`]: `hw.bus.devices` records for `devinfo(8)`.
+//! - [`rman`]: `hw.bus.rman`, the resource managers and what they hold.
 //! - [`devctl`]: `/dev/devctl` event lines for devd(8).
 
 #![no_std]
@@ -25,6 +26,7 @@ pub mod graph;
 pub mod ids;
 pub mod matching;
 pub mod platform;
+pub mod rman;
 pub mod strings;
 pub mod udevice;
 pub mod units;
