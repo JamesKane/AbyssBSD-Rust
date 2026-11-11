@@ -60,6 +60,7 @@ pt = { path = "../lib/pt" }
 regs = { path = "../lib/regs" }
 sched = { path = "../sys/sched" }
 security = { path = "../sys/security" }
+smbios = { path = "../lib/smbios" }
 mbuf = { path = "../sys/mbuf" }
 net = { path = "../sys/net" }
 nvme = { path = "../drivers/nvme" }

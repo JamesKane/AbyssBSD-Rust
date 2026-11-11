@@ -56,6 +56,7 @@ mod klog;
 mod ktrace;
 mod md;
 mod mdisk;
+mod memdev;
 mod mib;
 mod mm;
 mod net;
