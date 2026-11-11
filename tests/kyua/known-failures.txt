@@ -181,3 +181,4 @@ sys/net/if_wg:wg_basic_netmap # wg(4), a P7 non-goal
 sys/net/if_wg:wg_key_peerdev_makeshared # wg(4), a P7 non-goal
 sys/net/if_wg:wg_key_peerdev_shared # wg(4), a P7 non-goal
 sys/net/if_wg:wg_vnet_parent_routing # wg(4), a P7 non-goal
+sys/kern/pdrfork:efault # timing: the child, returning 0, fails the check and races the parent to the results file as on FreeBSD 15.1; whichever write lands last decides, and at parallelism 12 on the Orange Pi 6 Plus it was the child's abort
