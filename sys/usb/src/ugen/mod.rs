@@ -100,9 +100,25 @@ pub(crate) static USB_DEBUG: AtomicI32 = AtomicI32::new(0);
 /// logged, as FreeBSD's `DPRINTFN(6, "cmd=...")` is at 6.
 pub(crate) static UGEN_DEBUG: AtomicI32 = AtomicI32::new(0);
 
-/// The `ugen` links, in the order they were made: `USB_READ_DIR`'s
-/// list (FreeBSD's `usb_sym_head`).
-static LINKS: SpinLock<Vec<String>> = SpinLock::new(Vec::new());
+/// The `ugen` links: `USB_READ_DIR`'s list (FreeBSD's `usb_sym_head`,
+/// in the order they were made), each with where it goes in it.
+static LINKS: SpinLock<Vec<(String, Place)>> = SpinLock::new(Vec::new());
+
+/// Where a link goes in [`LINKS`]. FreeBSD lists the links in the order
+/// its buses' explore threads made them: at boot, every root hub (each
+/// bus makes its own at once), then the devices, the buses' interleaved
+/// as their threads ran. The boot's links here go in that shape with the
+/// race taken out: root hubs by bus, then the devices of the buses'
+/// first exploring by bus and index. A link made later goes at the end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Place {
+    BootRoot(u32),
+    BootDevice(u32, u8),
+    Later(u64),
+}
+
+/// Orders the links made after the boot.
+static LATER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// The opens of a device's FIFOs (FreeBSD's `udev->fifo`): the control
 /// node's (each its own pair of FIFOs, `USB_FIFO_MAX / 2` at most), and
@@ -130,7 +146,8 @@ fn ep_path(bus: u32, index: u8, ep: u8) -> String {
 }
 
 /// A device was addressed (`usb_alloc_device`): its control node and link.
-pub(crate) fn device_added(dev: &UsbDevice) {
+/// `boot` says it was found in its bus's first exploring.
+pub(crate) fn device_added(dev: &UsbDevice, boot: bool) {
     let (bus, index) = (dev.bus, dev.index);
     let node = Node {
         bus,
@@ -143,14 +160,22 @@ pub(crate) fn device_added(dev: &UsbDevice) {
     let _ = vfs::devices::make_dev(path.as_bytes(), 0o600, 0, GID_OPERATOR, Arc::new(node));
     let link = format!("ugen{bus}.{index}");
     let _ = vfs::devices::make_dev_alias(link.as_bytes(), path.as_bytes());
-    LINKS.lock().push(link);
+    let place = match (boot, dev.slot().is_none()) {
+        (true, true) => Place::BootRoot(bus),
+        (true, false) => Place::BootDevice(bus, index),
+        // Unique only: nothing is ordered by it but the list.
+        (false, _) => Place::Later(LATER.fetch_add(1, Ordering::Relaxed)),
+    };
+    let mut l = LINKS.lock();
+    let at = l.partition_point(|(_, p)| *p < place);
+    l.insert(at, (link, place));
 }
 
 /// A device left (`usb_free_device`).
 pub(crate) fn device_removed(s: &Sleepable, dev: &UsbDevice) {
     let (bus, index) = (dev.bus, dev.index);
     let link = format!("ugen{bus}.{index}");
-    LINKS.lock().retain(|l| *l != link);
+    LINKS.lock().retain(|(l, _)| *l != link);
     vfs::devices::destroy_dev(s, link.as_bytes());
     vfs::devices::destroy_dev(s, ep_path(bus, index, 0).as_bytes());
 }
@@ -212,7 +237,7 @@ impl CharDevice for Ctl {
         match req {
             USB_READ_DIR => {
                 let rd = UsbReadDir::from_bytes(arg).ok_or(Errno::EINVAL)?;
-                let names = LINKS.lock().clone();
+                let names: Vec<String> = LINKS.lock().iter().map(|(l, _)| l.clone()).collect();
                 let b = usb::ugen::read_dir(
                     names.iter().map(String::as_str),
                     rd.urd_startentry,

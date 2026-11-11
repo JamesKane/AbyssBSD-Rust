@@ -61,6 +61,9 @@ static BUSES: SpinLock<Vec<Weak<Bus>>> = SpinLock::new(Vec::new());
 /// Tells a device from one plugged in later at the same place.
 static SESSIONS: AtomicU64 = AtomicU64::new(1);
 
+/// Woken as each bus's root hub has its driver ([`Bus::root_done`]).
+static ROOTS: WaitQueue = WaitQueue::new();
+
 /// A new device's session (kept by a re-enumeration).
 pub(crate) fn new_session() -> u64 {
     // Unique only: nothing is ordered by it.
@@ -105,6 +108,12 @@ pub struct Bus {
     devices: SpinLock<Vec<Option<Arc<UsbDevice>>>>,
     /// Endpoints to cancel ([`defer_abort`]).
     aborts: SpinLock<Vec<(Arc<dyn Pipe>, u8)>>,
+    /// Its root hub has its driver, or it never will (the bus stopped):
+    /// the next bus's may come.
+    root_done: AtomicBool,
+    /// Its first exploring (the boot's) is not over: devices it finds go
+    /// in `ugen`'s boot order.
+    pub(crate) booting: AtomicBool,
 }
 
 impl core::fmt::Debug for Bus {
@@ -143,6 +152,12 @@ impl Bus {
         }
     }
 
+    /// Lets the next bus's root hub come.
+    fn root_done(&self) {
+        self.root_done.store(true, Ordering::Release);
+        ROOTS.wake_all();
+    }
+
     /// One pass over every hub, root first.
     fn explore(self: &Arc<Self>, s: &Sleepable) {
         let aborts = core::mem::take(&mut *self.aborts.lock());
@@ -164,7 +179,22 @@ impl Bus {
         let hold = ::bus::root_mount_hold(alloc::format!("usbus{}", self.unit));
         m.wait_idle(s);
         let e = Arc::clone(&self.explorer);
+        // Root hubs come one bus after another, in unit order, so that
+        // their `ugen` links, `uhub` units, and lines are always in the
+        // same order. (FreeBSD's per-bus explore threads race for it; on
+        // a uniprocessor boot their order is the scheduler's.) Only the
+        // root hub waits: the ports are explored in parallel.
+        ROOTS.wait_until(s, || {
+            e.stop.load(Ordering::Acquire)
+                || BUSES
+                    .lock()
+                    .iter()
+                    .filter_map(Weak::upgrade)
+                    .filter(|b| b.unit < self.unit)
+                    .all(|b| b.root_done.load(Ordering::Acquire))
+        });
         if e.stop.load(Ordering::Acquire) {
+            self.root_done();
             return;
         }
         let root = Arc::new(self.root_hub());
@@ -176,7 +206,7 @@ impl Bus {
             self.unit
         ));
         self.set_device(&root);
-        crate::ugen::device_added(&root);
+        crate::ugen::device_added(&root, true);
         crate::ugen::endpoints_added(&root);
         let iface = UsbInterface {
             desc: root.config.interfaces[0].clone(),
@@ -193,6 +223,8 @@ impl Bus {
         if let Some(c) = root.ifaces.lock().get_mut(0) {
             *c = Some(child);
         }
+        m.wait_settled(child, s);
+        self.root_done();
         // The first pass, whatever has changed yet; then root may mount
         // (`usb_root_mount_rel` after `usb_bus_explore`).
         // The root hub's driver first: until it attaches there is nothing
@@ -200,6 +232,16 @@ impl Bus {
         // none is new (FreeBSD's `uhub_explore` goes down into them at
         // once).
         m.wait_settled(node, s);
+        // Every bus's root hub before any bus's devices, as FreeBSD's
+        // threads make them at boot.
+        ROOTS.wait_until(s, || {
+            e.stop.load(Ordering::Acquire)
+                || BUSES
+                    .lock()
+                    .iter()
+                    .filter_map(Weak::upgrade)
+                    .all(|b| b.root_done.load(Ordering::Acquire))
+        });
         loop {
             e.pending.store(false, Ordering::Release);
             let hubs = self.hubs.lock().len();
@@ -208,6 +250,7 @@ impl Bus {
                 break;
             }
         }
+        self.booting.store(false, Ordering::Release);
         drop(hold);
         loop {
             e.queue.wait_until(s, || {
@@ -306,6 +349,8 @@ impl Driver for Usbus {
                 indices: SpinLock::new(1 << 1),
                 devices: SpinLock::new(alloc::vec![None; usize::from(MAX_INDEX) + 1]),
                 aborts: SpinLock::new(Vec::new()),
+                root_done: AtomicBool::new(false),
+                booting: AtomicBool::new(true),
             }),
             thread: SpinLock::new(None),
         })
@@ -334,6 +379,7 @@ impl Driver for Usbus {
         let e = &self.bus.explorer;
         e.stop.store(true, Ordering::Release);
         e.queue.wake_all();
+        ROOTS.wake_all();
         let t = self.thread.lock().take();
         if let Some(t) = t {
             t.join(cx.sleepable());

@@ -15,6 +15,9 @@
  * works after; then the device is enumerated again (libusb_reset_device)
  * and its driver comes back.
  *
+ * With the argument "list", prints the names USB_READ_DIR gives, in its
+ * order (usbconfig's), and does nothing else.
+ *
  * Runs on FreeBSD too (as root). Exits 0 on success; prints what failed
  * otherwise.
  *
@@ -382,12 +385,18 @@ check_bulk(libusb_context *ctx)
 }
 
 int
-main(void)
+main(int argc, char **argv)
 {
 	libusb_context *ctx;
 	int i, r;
 
 	read_dir();
+	/* "usbtest list": the devices as USB_READ_DIR lists them. */
+	if (argc > 1 && strcmp(argv[1], "list") == 0) {
+		for (i = 0; i < nnames; i++)
+			printf("%s\n", names[i]);
+		return (failed);
+	}
 	if (nnames == 0) {
 		/* A machine without USB (FreeBSD's usertests VM). */
 		printf("usbtest: no USB devices; nothing checked\n");

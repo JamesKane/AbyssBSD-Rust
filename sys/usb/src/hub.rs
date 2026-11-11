@@ -182,6 +182,29 @@ impl core::fmt::Debug for Hub {
 const ATTEMPTS: u32 = 3;
 
 impl Hub {
+    /// A hub just attached on `port` is explored at once, before the next
+    /// port, as `uhub_explore_sub` goes down into it, so the devices below
+    /// it are numbered before those on later ports.
+    fn explore_new_hub(&self, s: &Sleepable, bus: &Arc<Bus>, port: u8) {
+        let dev = self
+            .port_state
+            .lock()
+            .get(usize::from(port - 1))
+            .and_then(|p| p.attached.as_ref().map(|a| Arc::clone(&a.dev)));
+        let Some(dev) = dev else {
+            return;
+        };
+        let hub = bus
+            .hubs
+            .lock()
+            .iter()
+            .find(|h| Arc::ptr_eq(&h.dev, &dev))
+            .cloned();
+        if let Some(h) = hub {
+            h.explore(s, bus);
+        }
+    }
+
     fn is_root(&self) -> bool {
         self.dev.slot.is_none()
     }
@@ -250,6 +273,9 @@ impl Hub {
                         )),
                     }
                 }
+                if ok {
+                    self.explore_new_hub(s, bus, port);
+                }
                 if !ok {
                     self.ports.disable(s, port);
                     if let Some(p) = self.port_state.lock().get_mut(usize::from(port - 1)) {
@@ -304,7 +330,10 @@ impl Hub {
             bus.unit
         ));
         bus.set_device(&dev);
-        crate::ugen::device_added(&dev);
+        crate::ugen::device_added(
+            &dev,
+            bus.booting.load(core::sync::atomic::Ordering::Acquire),
+        );
         if let Some(p) = self.port_state.lock().get_mut(usize::from(port - 1)) {
             p.attached = Some(Attached {
                 dev: Arc::clone(&dev),
