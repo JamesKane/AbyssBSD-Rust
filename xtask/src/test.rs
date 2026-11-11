@@ -787,6 +787,7 @@ fn shell(
                 if vmm == Vmm::Qemu {
                     session.script(crate::expect::pciconf(arch), Duration::from_secs(60))?;
                 }
+                session.script(crate::expect::SYSINFO, Duration::from_secs(120))?;
                 session.script(&crate::diff::steps(), Duration::from_secs(900))?;
                 if !quick {
                     session.script(crate::expect::DYNAMIC_TESTS, Duration::from_secs(900))?;

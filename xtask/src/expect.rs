@@ -298,6 +298,60 @@ pub(crate) const DYNAMIC: &[Step] = &[
     ),
 ];
 
+/// What system-information tools read (fastfetch's fields, ROADMAP P9):
+/// the loader's SMBIOS variables, `hw.model`, a disk's GEOM attributes,
+/// and devstat through FreeBSD's own `iostat`, `gstat`, and `systat`
+/// (none of which may complain about devstat). It shows each tool's
+/// output for the log, then checks what holds on any machine: the first
+/// NVMe, virtio, or ATA disk `kern.disks` names has a rotation rate and an identifier, and
+/// `gstat` lists it. It writes nothing, so it runs on FreeBSD's
+/// read-only single-user root too.
+pub(crate) const SYSINFO: &[Step] = &[
+    step(
+        "kenv | grep smbios; sysctl hw.model hw.acpi.battery kern.devstat.numdevs; \
+         geom disk list; iostat -x; gstat -b -I 100ms; echo show-$((1 + 1))\n",
+        "\nshow-2\r\n",
+        "the tools' output",
+    ),
+    step(
+        "kenv | grep -c '^smbios\\.version='\n",
+        "\n1\r\n",
+        "the loader's SMBIOS variables",
+    ),
+    step(
+        "kenv hint.smbios.0.mem | cut -c1-2\n",
+        "\n0x\r\n",
+        "hint.smbios.0.mem",
+    ),
+    step("sysctl -n hw.model | grep -c .\n", "\n1\r\n", "hw.model"),
+    step(
+        "d=$(sysctl -n kern.disks | tr ' ' '\\n' | grep -E '^(nda|vtbd|ada)' | sort | head -1); \
+         geom disk list $d | grep -c -e 'rotationrate: ' -e 'ident: [^( ]'\n",
+        "\n2\r\n",
+        "geom disk list: a rotation rate and an identifier",
+    ),
+    step(
+        "iostat -x -c 2 -w 1 > /dev/null && echo iostat-$((6 * 7))\n",
+        "\niostat-42\r\n",
+        "iostat",
+    ),
+    step(
+        "gstat -b -I 100ms -f \"^$d\\$\" | grep -c \" $d\\$\"\n",
+        "\n1\r\n",
+        "gstat lists the disk",
+    ),
+    step(
+        "script -q /dev/null timeout 2 systat -vmstat 1 | grep -c devstat\n",
+        "\n0\r\n",
+        "systat -vmstat finds devstat",
+    ),
+    step(
+        "stty sane; echo sane-$((2 + 2))\n",
+        "\nsane-4\r\n",
+        "the terminal",
+    ),
+];
+
 /// The user tests again, dynamically linked (ROADMAP P6.1's exit), from
 /// a UFS2 root: each is named on the console as it starts, and each that
 /// fails is named again, with what it printed. They run
@@ -734,7 +788,7 @@ impl Session {
     }
 }
 
-/// `cargo xtask freebsd-shell`: runs [`SHELL`] and [`DYNAMIC`] against
+/// `cargo xtask freebsd-shell`: runs [`SHELL`], [`DYNAMIC`], and [`SYSINFO`] against
 /// FreeBSD 15.1's `/rescue/sh` in bhyve, proving the scripts and this
 /// harness.
 pub(crate) fn cmd_freebsd_shell(args: Args) -> Result<()> {
@@ -760,6 +814,7 @@ pub(crate) fn cmd_freebsd_shell(args: Args) -> Result<()> {
         session.expect("# ", Duration::from_secs(30))?;
         session.script(SHELL, Duration::from_secs(30))?;
         session.script(DYNAMIC, Duration::from_secs(30))?;
+        session.script(SYSINFO, Duration::from_secs(120))?;
         session.send("exit\n")
     })();
     let exited = session.finish(Duration::from_secs(180))?;
@@ -769,7 +824,7 @@ pub(crate) fn cmd_freebsd_shell(args: Args) -> Result<()> {
     }
     println!(
         "freebsd-shell: {} steps passed against FreeBSD; console in {}",
-        SHELL.len() + DYNAMIC.len(),
+        SHELL.len() + DYNAMIC.len() + SYSINFO.len(),
         log.display()
     );
     Ok(())
