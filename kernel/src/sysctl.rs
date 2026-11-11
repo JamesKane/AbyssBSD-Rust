@@ -189,7 +189,7 @@ pub(crate) fn init() {
     // on LP64 (`newfs_msdos` and `dd` size their I/O by it).
     add(
         k,
-        Number::Auto,
+        Number::Fixed(kern::MAXPHYS),
         "maxphys",
         "Maximum block I/O access size",
         Value::Ulong(alloc::boxed::Box::new(|| crate::aio::MAXPHYS)),

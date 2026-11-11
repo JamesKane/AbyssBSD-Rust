@@ -954,6 +954,13 @@ ktest! {
             v
         });
         assert_eq!(maxphys, (1u64 << 20).to_ne_bytes());
+        // `newfs_msdos` asks by number, `{CTL_KERN, KERN_MAXPHYS}`.
+        let by_number = crate::sysctl::read(&s, |t| {
+            let mut v = alloc::vec::Vec::new();
+            t.read(&[1, 38], &mut v).expect("kern.maxphys by number");
+            v
+        });
+        assert_eq!(by_number, (1u64 << 20).to_ne_bytes());
         let what = crate::sysctl::what();
         assert!(
             what.starts_with(b"@(#)FreeBSD 15.1-RELEASE ABYSSBSD (AbyssBSD "),

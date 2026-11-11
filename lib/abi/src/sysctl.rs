@@ -118,6 +118,8 @@ pub mod kern {
     pub const IOV_MAX: i32 = 35;
     /// `kern.arandom` (bytes).
     pub const ARND: i32 = 37;
+    /// `kern.maxphys` (u_long).
+    pub const MAXPHYS: i32 = 38;
     /// `kern.clockrate` (struct clockinfo).
     pub const CLOCKRATE: i32 = 12;
     /// `kern.bootfile` (string).
@@ -278,6 +280,7 @@ pub const CONSTANTS: &[ConstValue] = &[
     c("KERN_USRSTACK", kern::USRSTACK as i64),
     c("KERN_IOV_MAX", kern::IOV_MAX as i64),
     c("KERN_ARND", kern::ARND as i64),
+    c("KERN_MAXPHYS", kern::MAXPHYS as i64),
     c("KERN_CLOCKRATE", kern::CLOCKRATE as i64),
     c("KERN_BOOTFILE", kern::BOOTFILE as i64),
     v("VM_TOTAL", vm::TOTAL),
