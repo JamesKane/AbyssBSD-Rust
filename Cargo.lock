@@ -382,6 +382,7 @@ version = "0.0.0"
 dependencies = [
  "abi",
  "acpi",
+ "acpi-corpus",
  "aml",
  "bus",
  "sched",
@@ -499,6 +500,7 @@ version = "0.0.0"
 dependencies = [
  "abi",
  "acpi",
+ "acpi-corpus",
  "aml",
  "bus",
  "devtree",

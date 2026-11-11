@@ -7,7 +7,8 @@
 //! every pin, and, for an ACPI controller, `gpio_aei` for its `_AEI`
 //! (FreeBSD's `acpi_gpiobus`, whose description it takes). Firmware's own
 //! consumers reach the pins through their supplier edges, not through
-//! the bus.
+//! the bus; its AML reaches them through the `GeneralPurposeIo` handler
+//! the bus installs on an ACPI controller's node ([`acpi_space`]).
 //!
 //! `gpioc` passes each request to the controller past any driver's claim on
 //! the pin, as FreeBSD's `gpiobus` does. Pin names set with `GPIOSETNAME`
@@ -24,6 +25,7 @@
 
 extern crate alloc;
 
+pub mod acpi_space;
 #[cfg(test)]
 #[allow(unsafe_code)]
 mod tests;
@@ -80,6 +82,8 @@ pub struct GpioBus {
     bus: Arc<Bus>,
     controller: DeviceId,
     acpi: Option<aml::NodeId>,
+    /// Whether the `GeneralPurposeIo` handler is installed on `acpi`.
+    handler: core::sync::atomic::AtomicBool,
 }
 
 impl core::fmt::Debug for GpioBus {
@@ -113,6 +117,7 @@ impl Driver for GpioBus {
             }),
             controller: d.controller,
             acpi: d.acpi,
+            handler: core::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -129,12 +134,51 @@ impl Driver for GpioBus {
             Vec::new(),
         );
         if let Some(node) = self.acpi {
+            self.install_handler(cx.sleepable(), node);
             acpi::aei::add(cx, node, self.controller);
         }
         Ok(())
     }
 
-    fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
+    fn stop(&self, cx: &mut StopCx<'_>, _: StopReason) {
+        use core::sync::atomic::Ordering;
+        if let (Some(node), Some(svc)) = (self.acpi, acpi::service())
+            && self.handler.swap(false, Ordering::AcqRel)
+        {
+            let r = svc.remove_handler(cx.sleepable(), node, aml::RegionSpace::GeneralPurposeIo);
+            for (dev, e) in &r.failed {
+                svc.ops().log(format_args!(
+                    "gpiobus{}: _REG of {dev} failed: {e:?}",
+                    self.bus.unit
+                ));
+            }
+        }
+    }
+}
+
+impl GpioBus {
+    /// `acpi_gpiobus_attach`'s `AcpiInstallAddressSpaceHandler`: the
+    /// controller's `GeneralPurposeIo` regions reach its pins.
+    fn install_handler(&self, s: &Sleepable, node: aml::NodeId) {
+        use core::sync::atomic::Ordering;
+        let Some(svc) = acpi::service() else { return };
+        let h = Arc::new(acpi_space::SpaceHandler::new(Arc::clone(&self.bus.source)));
+        match svc.install_handler(s, node, aml::RegionSpace::GeneralPurposeIo, h) {
+            Ok(r) => {
+                self.handler.store(true, Ordering::Release);
+                for (dev, e) in &r.failed {
+                    svc.ops().log(format_args!(
+                        "gpiobus{}: _REG of {dev} failed: {e:?}",
+                        self.bus.unit
+                    ));
+                }
+            }
+            Err(_) => svc.ops().log(format_args!(
+                "gpiobus{}: Failed to install GPIO address space handler",
+                self.bus.unit
+            )),
+        }
+    }
 }
 
 /// The description of the `gpiobus` a controller adds:

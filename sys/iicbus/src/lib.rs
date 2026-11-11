@@ -17,6 +17,9 @@
 //!   (`dev.iicbus.N.frequency`).
 //! - Then `iic` is added at address 0, as its identify routine does after
 //!   the bus's enumeration, and makes `/dev/iicN` (`root:wheel`, 0600).
+//! - Last, an ACPI-hinted bus installs the `GenericSerialBus` handler on
+//!   its controller's node ([`acpi_space`]), so the AML of the regions
+//!   under it reaches the bus; detach removes it.
 //!
 //! The kernel installs its user-memory access ([`set_user_memory`])
 //! before devices attach; `iic`'s requests are in [`iic`].
@@ -31,6 +34,7 @@
 
 extern crate alloc;
 
+pub mod acpi_space;
 pub mod iic;
 
 use alloc::format;
@@ -69,6 +73,9 @@ pub struct Iicbus {
     unit: u32,
     /// `dev.iicbus.N.frequency`.
     frequency: Arc<AtomicU32>,
+    /// The controller's node, while the bus's `GenericSerialBus` handler
+    /// is installed on it.
+    handler: sync::SpinLock<Option<aml::NodeId>>,
 }
 
 impl Driver for Iicbus {
@@ -102,6 +109,7 @@ impl Driver for Iicbus {
             acpi,
             unit: cx.unit(),
             frequency: Arc::new(AtomicU32::new(acpi::iicbus::DEFAULT_FREQUENCY)),
+            handler: sync::SpinLock::new(None),
         })
     }
 
@@ -144,13 +152,61 @@ impl Driver for Iicbus {
             }) as Arc<dyn Any + Send + Sync>),
             Vec::new(),
         );
+        if let Some(path) = &self.acpi {
+            self.install_handler(cx.sleepable(), path);
+        }
         Ok(())
     }
 
-    fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
+    fn stop(&self, cx: &mut StopCx<'_>, _: StopReason) {
+        let node = self.handler.lock().take();
+        if let (Some(node), Some(svc)) = (node, acpi::service()) {
+            let r = svc.remove_handler(cx.sleepable(), node, aml::RegionSpace::GenericSerialBus);
+            for (dev, e) in &r.failed {
+                svc.ops().log(format_args!(
+                    "iicbus{}: _REG of {dev} failed: {e:?}",
+                    self.unit
+                ));
+            }
+        }
+    }
 }
 
 impl Iicbus {
+    /// `acpi_iicbus_install_address_space_handler`: the controller's
+    /// `GenericSerialBus` regions reach this bus.
+    fn install_handler(&self, s: &Sleepable, path: &str) {
+        let Some(svc) = acpi::service() else { return };
+        let Ok(parsed) = aml::AmlPath::parse(path) else {
+            return;
+        };
+        let Some(node) = svc.run(s, move |interp, _| interp.lookup(&parsed)) else {
+            return;
+        };
+        let handler = Arc::new(acpi_space::SpaceHandler::new(Arc::clone(&self.source)));
+        match svc.install_handler(s, node, aml::RegionSpace::GenericSerialBus, handler) {
+            Ok(r) => {
+                *self.handler.lock() = Some(node);
+                for (dev, e) in &r.failed {
+                    svc.ops().log(format_args!(
+                        "iicbus{}: _REG of {dev} failed: {e:?}",
+                        self.unit
+                    ));
+                }
+                if bus::bootverbose() && r.ran > 0 {
+                    svc.ops().log(format_args!(
+                        "iicbus{}: GenericSerialBus handler on {path}, {} _REG ran",
+                        self.unit, r.ran
+                    ));
+                }
+            }
+            Err(_) => svc.ops().log(format_args!(
+                "iicbus{}: Failed to install GSBUS Address Space Handler in ACPI",
+                self.unit
+            )),
+        }
+    }
+
     /// `acpi_iicbus_enumerate_children`: the devices on the controller at
     /// `path`, taken from `acpi0`, and the bus clock they allow.
     fn adopt_acpi_children(&self, cx: &mut StartCx<'_, Self>, path: &str) {

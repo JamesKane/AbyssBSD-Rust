@@ -10,6 +10,8 @@
 //! - [`bus`]: the `acpi` bus driver.
 //! - [`pcib`]: the ACPI host-PCI bridge.
 //! - [`iort`]: the SMMUs the IORT lists, and the devices they translate.
+//! - [`opregion`]: drivers' handlers for the operation regions only they
+//!   can serve (I2C, GPIO).
 //!
 //! Behavior reference: sys/dev/acpica/acpi.c.
 
@@ -35,6 +37,7 @@ pub mod iicbus;
 #[cfg(test)]
 mod iicbus_corpus;
 pub mod iort;
+pub mod opregion;
 pub mod pcib;
 pub mod power;
 pub mod properties;

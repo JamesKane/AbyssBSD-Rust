@@ -16,3 +16,6 @@ vfs = { path = "../vfs" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+acpi-corpus = { path = "../../lib/acpi-corpus" }

@@ -6,16 +6,21 @@
     reason = "region accesses narrow values to the declared access width"
 )]
 
-use aml::{AccessWidth, Host, HostError, NodeId, RegionAccess, RegionSpace};
+use aml::{
+    AccessWidth, BufferTransfer, GpioAccess, Host, HostError, NodeId, RegionAccess, RegionSpace,
+};
 use sched::Sleepable;
 
 use crate::Ops;
+use crate::opregion::Handlers;
 
 pub(crate) struct AmlHost<'a> {
     pub(crate) ops: &'static dyn Ops,
     pub(crate) s: &'a Sleepable,
     /// `Notify`s sent during the current job, delivered after it.
     pub(crate) notified: alloc::vec::Vec<(NodeId, u64)>,
+    /// The drivers' address-space handlers.
+    pub(crate) regions: &'a Handlers,
 }
 
 fn bytes(w: AccessWidth) -> u8 {
@@ -117,6 +122,24 @@ impl Host for AmlHost<'_> {
             RegionSpace::PciConfig => self.pci_write(a, v),
             _ => Err(HostError::Unsupported),
         }
+    }
+
+    fn transfer(&mut self, req: &BufferTransfer<'_>) -> Result<alloc::vec::Vec<u8>, HostError> {
+        self.regions
+            .get(req.handler, req.space)?
+            .transfer(self.s, req)
+    }
+
+    fn gpio_read(&mut self, a: &GpioAccess<'_>) -> Result<u64, HostError> {
+        self.regions
+            .get(a.handler, RegionSpace::GeneralPurposeIo)?
+            .gpio_read(self.s, a)
+    }
+
+    fn gpio_write(&mut self, a: &GpioAccess<'_>, value: u64) -> Result<(), HostError> {
+        self.regions
+            .get(a.handler, RegionSpace::GeneralPurposeIo)?
+            .gpio_write(self.s, a, value)
     }
 
     fn sleep(&mut self, ms: u64) {

@@ -21,6 +21,7 @@ use sync::{Once, SpinLock};
 
 use crate::Ops;
 use crate::host::AmlHost;
+use crate::opregion::Handlers;
 
 /// The AML thread's stack.
 const STACK: usize = 64 * 1024;
@@ -42,6 +43,8 @@ pub struct Service {
     queue: WaitQueue,
     handlers: SpinLock<Vec<(NotifyId, NodeId, NotifyFn)>>,
     next_handler: core::sync::atomic::AtomicU64,
+    /// The address-space handlers drivers installed.
+    regions: Handlers,
 }
 
 impl core::fmt::Debug for Service {
@@ -88,6 +91,7 @@ pub fn init(ops: &'static dyn Ops, s: &Sleepable) -> Option<LoadSummary> {
             queue: WaitQueue::new(),
             handlers: SpinLock::new(Vec::new()),
             next_handler: core::sync::atomic::AtomicU64::new(0),
+            regions: Handlers::new(),
         })
         .is_err()
     {
@@ -142,6 +146,7 @@ impl Service {
             ops: self.ops,
             s,
             notified: Vec::new(),
+            regions: &self.regions,
         };
         loop {
             let mut job = None;
@@ -205,6 +210,11 @@ impl Service {
             out.is_some()
         });
         out.expect("job result")
+    }
+
+    /// The address-space handlers drivers installed.
+    pub(crate) fn handlers(&self) -> &Handlers {
+        &self.regions
     }
 
     /// The kernel services.
