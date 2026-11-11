@@ -662,12 +662,22 @@ fn newaddr(net: &NetLock, body: &[u8], o: &mut Outcome) -> Result<(), Errno> {
     let loopback = n
         .by_name(&name)
         .is_some_and(|i| i.flags & iff::LOOPBACK != 0);
+    let p2p = n
+        .by_name(&name)
+        .is_some_and(|i| i.flags & iff::POINTOPOINT != 0);
+    if let Some(i) = n.by_name(&name) {
+        crate::bridge::member_addr_check(&n, i)?;
+    }
     let dst = match (local, address) {
         (Some(_), Some(d)) if d != addr => Some(d),
         // A loopback IPv4 address is its own destination.
         _ if loopback && family == Family::Inet => Some(addr),
         _ => None,
     };
+    // `in_aifaddr_ioctl`: a point-to-point link's other end is needed.
+    if p2p && family == Family::Inet && dst.is_none() {
+        return Err(Errno::EDESTADDRREQ);
+    }
     let broadcast = ip_attr(family, find(&a, ifa::BROADCAST));
     // `in6_aifaddr` (by way of `in6_control`): its prefix is listed.
     let update = if family == Family::Inet6 {

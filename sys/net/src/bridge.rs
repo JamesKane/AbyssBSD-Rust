@@ -1852,6 +1852,33 @@ fn in6_ifdetach(n: &mut Net, index: u16) {
     }
 }
 
+/// `in_aifaddr_ioctl` and `in6_addifaddr` on interface `i` of `n`: a
+/// bridge's member may have addresses, with a warning, only while
+/// `net.link.bridge.member_ifaddrs` allows.
+///
+/// # Errors
+///
+/// `EINVAL` when it does not.
+pub fn member_addr_check(n: &Net, i: &Ifnet) -> Result<(), Errno> {
+    if i.bridge.is_none() || i.ty == IFT_GIF {
+        return Ok(());
+    }
+    if n.owner
+        .upgrade()
+        .is_some_and(|v| !Conf::get(&v.bridge.member_ifaddrs))
+    {
+        return Err(Errno::EINVAL);
+    }
+    crate::log(
+        6,
+        &format!(
+            "{}: WARNING: Assigning an IP address to an interface which is also a bridge member is deprecated and will be unsupported in a future release.\n",
+            i.name
+        ),
+    );
+    Ok(())
+}
+
 /// `bridge_clone_create`: bridge `unit` in `vnet`, down, with an address
 /// of its own; returns its name.
 pub(crate) fn create(vnet: &Arc<Vnet>, unit: i32, ctx: &Ctx) -> String {

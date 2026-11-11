@@ -143,33 +143,18 @@ sys/netinet/so_reuseport_lb_test:basic_ipv6      # SO_REUSEPORT_LB groups (NETWO
 sys/netinet/so_reuseport_lb_test:connect_bound   # SO_REUSEPORT_LB groups (NETWORKING.md §14), P7.8
 sys/netinet/so_reuseport_lb_test:connect_not_bound # SO_REUSEPORT_LB groups (NETWORKING.md §14), P7.8
 sys/netinet/udp_bindings:gethostname_jailed      # a jail with ip4.addr: AF_INET jails, P7.8
-sys/net/if_bridge_test:bridge_svi_in_bridge # bridge(4), a P7 non-goal
-sys/net/if_bridge_test:bridge_transmit_ipv4_unicast # bridge(4), a P7 non-goal
-sys/net/if_bridge_test:delete_with_members # bridge(4), a P7 non-goal
-sys/net/if_bridge_test:gif # bridge(4), a P7 non-goal
-sys/net/if_bridge_test:inherit_mac # bridge(4), a P7 non-goal
-sys/net/if_bridge_test:mac_conflict # bridge(4), a P7 non-goal
-sys/net/if_bridge_test:member_ifaddrs_disabled # bridge(4), a P7 non-goal
-sys/net/if_bridge_test:member_ifaddrs_enabled # bridge(4), a P7 non-goal
-sys/net/if_bridge_test:member_ifaddrs_vlan # bridge(4), a P7 non-goal
-sys/net/if_bridge_test:mtu # bridge(4), a P7 non-goal
-sys/net/if_bridge_test:span # bridge(4), a P7 non-goal
-sys/net/if_bridge_test:static # bridge(4), a P7 non-goal
-sys/net/if_bridge_test:stp # bridge(4), a P7 non-goal
-sys/net/if_bridge_test:stp_validation # bridge(4), a P7 non-goal
-sys/net/if_bridge_test:stp_vlan # bridge(4), a P7 non-goal
-sys/net/if_bridge_test:vlan # bridge(4), a P7 non-goal
-sys/net/if_bridge_test:vlan_defuntagged # bridge(4), a P7 non-goal
-sys/net/if_bridge_test:vlan_filtering # bridge(4), a P7 non-goal
-sys/net/if_bridge_test:vlan_ifconfig_iftagged # bridge(4), a P7 non-goal
-sys/net/if_bridge_test:vlan_pvid # bridge(4), a P7 non-goal
-sys/net/if_bridge_test:vlan_pvid_1q # bridge(4), a P7 non-goal
-sys/net/if_bridge_test:vlan_pvid_filtered # bridge(4), a P7 non-goal
-sys/net/if_bridge_test:vlan_pvid_tagged # bridge(4), a P7 non-goal
-sys/net/if_bridge_test:vlan_qinq # bridge(4), a P7 non-goal
-sys/net/if_bridge_test:vlan_svi # bridge(4), a P7 non-goal
-sys/net/if_bridge_test:vlan_untagged # bridge(4), a P7 non-goal
-sys/net/if_bridge_test:vstatic # bridge(4), a P7 non-goal
+sys/net/if_bridge_test:bridge_svi_in_bridge # vlan(4) interfaces at the bridge's ends (not planned, ROADMAP P9)
+sys/net/if_bridge_test:gif # a gif(4) member (not planned, ROADMAP P9)
+sys/net/if_bridge_test:member_ifaddrs_vlan # vlan(4) interfaces at the bridge's ends (not planned, ROADMAP P9)
+sys/net/if_bridge_test:mtu # a gif(4) member (not planned, ROADMAP P9)
+sys/net/if_bridge_test:stp # the spanning tree, which no member joins (compat-deviations)
+sys/net/if_bridge_test:stp_vlan # the spanning tree, which no member joins (compat-deviations)
+sys/net/if_bridge_test:vlan # vlan(4) interfaces at the bridge's ends (not planned, ROADMAP P9)
+sys/net/if_bridge_test:vlan_filtering # vlan(4) interfaces at the bridge's ends (not planned, ROADMAP P9)
+sys/net/if_bridge_test:vlan_pvid_1q # vlan(4) interfaces at the bridge's ends (not planned, ROADMAP P9)
+sys/net/if_bridge_test:vlan_pvid_tagged # vlan(4) interfaces at the bridge's ends (not planned, ROADMAP P9)
+sys/net/if_bridge_test:vlan_qinq # vlan(4) interfaces at the bridge's ends (not planned, ROADMAP P9)
+sys/net/if_bridge_test:vlan_svi # vlan(4) interfaces at the bridge's ends (not planned, ROADMAP P9)
 sys/net/if_gif:4in4 # gif(4), a P7 non-goal
 sys/net/if_gif:4in6 # gif(4), a P7 non-goal
 sys/net/if_gif:6in4 # gif(4), a P7 non-goal
@@ -179,9 +164,6 @@ sys/net/if_gif:etherip6 # gif(4), a P7 non-goal
 sys/net/if_lagg_test:create # lagg(4), a P7 non-goal
 sys/net/if_lagg_test:set_ether # lagg(4), a P7 non-goal
 sys/net/if_lagg_test:updown # lagg(4), a P7 non-goal
-sys/net/if_tun_test:235704 # tun(4), a P7 non-goal
-sys/net/if_tun_test:basic # tun(4), a P7 non-goal
-sys/net/if_tun_test:transient # tun(4), a P7 non-goal
 sys/net/if_vlan:basic # vlan(4), a P7 non-goal
 sys/net/if_vlan:bpf_pcp # vlan(4), a P7 non-goal
 sys/net/if_vlan:bridge_vlandev # vlan(4), a P7 non-goal
