@@ -94,10 +94,15 @@ name = "arch-aarch64"
 version = "0.0.0"
 dependencies = [
  "addr",
+ "arch-aarch64-mem",
  "hal",
  "pt",
  "regs",
 ]
+
+[[package]]
+name = "arch-aarch64-mem"
+version = "0.0.0"
 
 [[package]]
 name = "arch-x86_64"

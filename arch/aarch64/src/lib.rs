@@ -13,6 +13,9 @@
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+// The kernel's `memcpy` and `memset`: linked for its symbols.
+use mem as _;
+
 pub mod cache;
 
 #[cfg(target_os = "none")]

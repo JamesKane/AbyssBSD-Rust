@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "xtask",
     "arch/aarch64",
+    "arch/aarch64/mem",
     "arch/hal",
     "arch/x86_64",
     "arch/x86_64/mem",
@@ -123,6 +124,7 @@ members = [
 # else runs on the host and is what a bare `cargo test` exercises.
 default-members = [
     "xtask",
+    "arch/aarch64/mem",
     "arch/hal",
     "arch/x86_64/mem",
     "boot/bootproto",
