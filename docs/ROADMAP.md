@@ -2722,6 +2722,15 @@ no hangs, no reboot loops, nothing that needs the screen, and P8's remaining exi
     Pi's should read `pcib0`, `pcib1` (its port), `pcib2`, ... as on FreeBSD. Left: `hostb`,
     `vgapci`, and `ichsmb` (QEMU's and bhyve's host bridge, VGA, and SMBus show as `none`), and
     the comparison with `tests/corpus/opi6p/freebsd/pciconf-lvbc.txt` on the board.
+  - Progress 2026-11-10: `tun`, `tap`, `vmnet`, and `if_bridge` as FreeBSD 15.1's (NETWORKING.md
+    §5.5): cloners and devfs cloning of `/dev/tun*`, `/dev/tap*`; the devices' reads, writes,
+    `poll`/`kevent`, `SIGIO`, and `TUN*`/`TAP*` requests; bridges with learning, forwarding,
+    span and private ports, VLAN filtering, and every `BRDG*` request `ifconfig` sends, the
+    spanning tree's parameters but not the tree (compat-deviations); `SIOCSIFNAME`; `kldload`
+    of `if_tuntap`, `if_tun`, `if_tap`, `if_bridge` answering `EEXIST`. Checked by the
+    `tunbridge` differential scenario (two VNET jails pinging over a bridge of epairs, IP through
+    `nc --tun`; both architectures as on FreeBSD) and kyua: `if_tun_test` and `if_clone_test`
+    all pass, `if_bridge_test` all but the cases needing `vlan(4)`, `gif(4)`, or STP.
 - **Verification:** kyua's arm64 target on the board; fsx with `fsck_ffs` on the NVMe and a USB
   disk (done with the SMMU's stage 5, IOMMU.md §18); the device tree against FreeBSD's `devinfo`
   wherever FreeBSD has a driver. No day-long looped runs (the user, 2026-11-10): kyua and the
