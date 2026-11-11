@@ -47,7 +47,8 @@ follows them; where it departs from them, FreeBSD's behavior is the target.
   [COMPATIBILITY.md §2.1](COMPATIBILITY.md#21-system-calls)), CARP, `pfsync`, and MAC.
 - Pseudo-interfaces other than `lo`, `epair`, and those `rc` creates by default: `bridge`,
   `vlan`, `lagg`, `gif`, `gre`, `stf`, `tun`, `tap`, `wg`, `ovpn`, `geneve`. kyua's tests for them
-  are left out until the phase that brings them, as `ktls_test` was in P6.
+  are left out until the phase that brings them, as `ktls_test` was in P6. (`tun`, `tap`, and
+  `bridge` came in P9, §5.5.)
 - TCP stacks other than the default (`net.inet.tcp.functions_default` is `freebsd`): RACK and BBR,
   TCP offload engines, TCP Fast Open (off by default in 15.1), and the `tcp_log` black box.
   Congestion control is NewReno and CUBIC (15.1's default; `net.inet.tcp.cc.available` lists
@@ -161,6 +162,49 @@ and `virt` machines and on bhyve it is a PCI function, the same transport `vtblk
 `lo0` keeps its P6 configuration and gains a data path: output queues the packet to the input
 side through `netisr` (`if_simloop`), so a send never recurses into a receive. `epair` pairs
 deliver each other's frames, and either end can move into a VNET jail (§10).
+
+### 5.5 `tun`, `tap`, and `bridge` (P9)
+
+As FreeBSD 15.1's `if_tuntap.c` and `if_bridge.c` (`sys/net::tuntap`, `sys/net::bridge`, and
+their device and request sides in `kernel/src/net/tuntap.rs` and `bridge.rs`):
+
+- **`tun`, `tap`, `vmnet`.** Cloners (`ifconfig tun create`), and devfs cloning: a lookup of
+  `/dev/tun`, `/dev/tap`, `/dev/vmnet`, or one of them with a unit no node has makes the device
+  and its interface (`dev_clone`, a `lookup_clone` hook of devfs's root directory, its result
+  never cached), for the privileged and with `net.link.{tun,tap}.devfs_cloning` (`tap` for
+  anyone with `net.link.tap.user_open`). Units are the system's, as the nodes are; nodes are
+  `crw------- uucp:dialer`, and a renamed interface's device gets an alias by its new name. One
+  open at a time; reads take one packet (as much as fits), sleeping unless non-blocking; writes
+  are one packet each (`EIO` past the MRU, ignored while down); `poll`, `kevent` (read: packets
+  waiting; write: always, with the MTU), `FIOASYNC` and `FIOSETOWN` with `SIGIO`. A `tun` is
+  `IFT_PPP`, point-to-point, `DLT_NULL`; plain mode carries IPv4 only, `TUNSIFHEAD` the family
+  before each packet, `TUNSLMODE` its destination; output while closed is `EHOSTDOWN`. A `tap`
+  is Ethernet with gigabit media, active while open, its writes received only if addressed to it
+  (or promiscuous); `TAPSVNETHDR` puts a virtio-net header before each frame. The last close
+  takes the interface down and its addresses away (not a `vmnet`'s, nor a `tap`'s with `link0`),
+  and destroys it if it was made transient (`TUNSTRANSIENT`). The queue holds 50
+  (`IFQ_MAXLEN`). `net.link.tun.*`, `net.link.tap.*`, `debug.if_tun_debug`.
+- **`bridge`.** Members are Ethernet interfaces of the bridge's VNET, put in promiscuous mode
+  with their offloads cut to those all members share; the first sets the bridge's MTU, later
+  ones take it. A frame a member receives teaches the bridge where its source is, then is this
+  host's if it is for the bridge's address (or a member's, with `member_ifaddrs`), else goes out
+  of the member its destination was learned on, or out of every other member (`DISCOVER` ones
+  for unknown unicast, all for broadcasts and multicasts, the reserved 802.1D groups never;
+  private members do not talk to each other). A broadcast also arrives on the bridge interface
+  and on the member. What this host sends from the bridge interface, or from a member with an
+  address (`bridge_output`), is bridged the same way. The forwarding table has FreeBSD's size
+  (2000) and timeout (1200 s, pruned every 300 s), static and sticky entries, per-member
+  limits, and VLANs; VLAN filtering (`vlanfilter`, untagged and tagged VLANs, Q-in-Q) and span
+  ports are FreeBSD's. Every `BRDG*` request `ifconfig` sends (`SIOCGDRVSPEC`, `SIOCSDRVSPEC`)
+  is answered, with `bridge_ioctl`'s size and privilege checks. The spanning tree's parameters
+  are kept and reported as `bridgestp` reports them with no port taking part; ports cannot take
+  part (compat-deviations), and BPDUs are dropped. `net.link.bridge.*` is each VNET's.
+- **Around them:** `SIOCSIFNAME` (`if_rename`, announced as a departure and arrival and to
+  `devd` as `RENAME`), `SIOCGIFSTATUS` from the driver, point-to-point addresses' routes (a host
+  route to the other end, the address through `lo0`), `EDESTADDRREQ` without the other end, and
+  IPv6 interface identifiers 64 bits long on bridges and PPP links too. The packet path's only
+  addition is a test of the receiving interface's bridge in Ethernet input and of the sending
+  interface's at the frame queue's flush; neither costs a lock or an allocation when it is none.
 
 ## 6. Concurrency
 
