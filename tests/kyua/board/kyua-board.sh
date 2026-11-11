@@ -11,7 +11,7 @@ sys=$1
 S=${2:?usage: kyua-board.sh fbsd16|abyss WORKDIR}
 B=${ABYSS_BOARD:-192.168.0.25}
 LOG=$S/kyua-$sys-serial.log
-SSHOPT="-o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
+SSHOPT="-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
 mkdir -p "$S"
 fb() { timeout 300 ssh $SSHOPT jkane@$B "su root -c '$*' < /dev/null" 2>/dev/null; }
 ab() { timeout 300 ssh $SSHOPT -o UserKnownHostsFile=$S/abyss_known_hosts root@$B "$*" 2>/dev/null; }
