@@ -128,10 +128,16 @@ impl Usage {
 
 /// A thread's usage: its run time divided into user and system time by
 /// its statistics ticks (`calcru`), its context switches.
-fn thread_usage(t: &sched::Thread) -> Usage {
+/// `t`'s user and system time in microseconds, as reported: never below
+/// what was reported before (`calcru1`).
+pub(crate) fn thread_times(t: &sched::Thread) -> (u64, u64) {
     let us = crate::time::ticks_to_ns(t.runtime()) / 1000;
     let (user, sys) = crate::statclock::split_runtime(us, t.stat_ticks());
-    let (user, sys) = t.monotonic_times(user, sys, us);
+    t.monotonic_times(user, sys, us)
+}
+
+fn thread_usage(t: &sched::Thread) -> Usage {
+    let (user, sys) = thread_times(t);
     let (nvcsw, nivcsw) = t.context_switches();
     Usage {
         utime_us: user,
@@ -143,20 +149,19 @@ fn thread_usage(t: &sched::Thread) -> Usage {
     }
 }
 
-/// What `p`'s threads used, those gone included (their run time, as
-/// system time).
+/// What `p`'s threads used, those gone included (as last reported when
+/// they left, `ruxagg`).
 pub(crate) fn process_usage(p: &Process) -> Usage {
     let mut u = Usage::default();
-    let mut live_ticks = 0;
     p.each_thread(|t| {
         if let Some(s) = t.sched() {
-            live_ticks += s.runtime();
             u.add(&thread_usage(&s));
         }
         true
     });
-    let gone = crate::time::ticks_to_ns(p.runtime().saturating_sub(live_ticks)) / 1000;
-    u.stime_us += gone;
+    let (user, sys) = p.dead_times();
+    u.utime_us += user;
+    u.stime_us += sys;
     let (nvcsw, nivcsw) = p.dead_switches();
     u.nvcsw += nvcsw;
     u.nivcsw += nivcsw;

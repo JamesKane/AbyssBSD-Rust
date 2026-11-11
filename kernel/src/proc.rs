@@ -707,6 +707,10 @@ pub(crate) struct Process {
     /// Their voluntary and involuntary context switches (`p_ru`'s
     /// `ru_nvcsw` and `ru_nivcsw`, which `thread_exit` adds to).
     dead_switches: [AtomicU64; 2],
+    /// The user and system time its threads that have left had last been
+    /// reported to use, in microseconds (FreeBSD keeps the split in
+    /// `p_rux`): what the process reports for them stays at least that.
+    dead_times: [AtomicU64; 2],
     /// The shortest timeout a umtx wait takes, in nanoseconds
     /// (`UMTX_OP_SET_MIN_TIMEOUT`, FreeBSD's `p_umtx_min_timeout`).
     pub(crate) umtx_min_timeout: AtomicU64,
@@ -1032,6 +1036,7 @@ impl Process {
                 had_threads: AtomicBool::new(false),
                 dead_runtime: AtomicU64::new(0),
                 dead_switches: [AtomicU64::new(0), AtomicU64::new(0)],
+                dead_times: [AtomicU64::new(0), AtomicU64::new(0)],
                 nice: AtomicI32::new(parent.map_or(0, |p| p.nice.load(Ordering::Relaxed))),
                 umtx_min_timeout: AtomicU64::new(
                     parent.map_or(0, |p| p.umtx_min_timeout.load(Ordering::Relaxed)),
@@ -1504,9 +1509,21 @@ impl Process {
     fn bank_current_usage(&self) {
         self.dead_runtime
             .fetch_add(sched::current_runtime(), Ordering::Relaxed);
+        let (user, sys) = crate::kinfo::thread_times(sched::current());
+        self.dead_times[0].fetch_add(user, Ordering::Relaxed);
+        self.dead_times[1].fetch_add(sys, Ordering::Relaxed);
         let (v, i) = sched::current().context_switches();
         self.dead_switches[0].fetch_add(v, Ordering::Relaxed);
         self.dead_switches[1].fetch_add(i, Ordering::Relaxed);
+    }
+
+    /// The user and system time of its threads that have left, in
+    /// microseconds.
+    pub(crate) fn dead_times(&self) -> (u64, u64) {
+        (
+            self.dead_times[0].load(Ordering::Relaxed),
+            self.dead_times[1].load(Ordering::Relaxed),
+        )
     }
 
     /// Its thread `tid`.
