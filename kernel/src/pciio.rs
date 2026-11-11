@@ -181,7 +181,7 @@ fn list_vpd(s: &Sleepable, arg: &mut [u8]) -> Result<(), Errno> {
 }
 
 /// What a `pbm_memattr` maps as. Write-through and write-protected
-/// (amd64), and nGnRnE and tagged (arm64), have no mapping of their own
+/// (amd64), and nGnRnE (arm64), have no mapping of their own
 /// here.
 fn memattr(attr: i32) -> Option<vm::object::MemAttr> {
     use vm::object::MemAttr;

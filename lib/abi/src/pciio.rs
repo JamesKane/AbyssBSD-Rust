@@ -303,8 +303,8 @@ pub mod memattr_arm64 {
     pub const WRITE_BACK: i32 = 2;
     pub const WRITE_THROUGH: i32 = 3;
     pub const DEVICE_NGNRE: i32 = 4;
-    pub const TAGGED: i32 = 5;
     pub const DEVICE: i32 = DEVICE_NGNRE;
+    /// The kernel's alias (`_KERNEL` only in 15.1's header).
     pub const WRITE_COMBINING: i32 = WRITE_THROUGH;
 }
 
@@ -410,13 +410,7 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
         memattr_arm64::DEVICE_NGNRE,
         Arches::Arm64,
     ),
-    vm("VM_MEMATTR_TAGGED", memattr_arm64::TAGGED, Arches::Arm64),
     vm("VM_MEMATTR_DEVICE", memattr_arm64::DEVICE, Arches::Arm64),
-    vm(
-        "VM_MEMATTR_WRITE_COMBINING",
-        memattr_arm64::WRITE_COMBINING,
-        Arches::Arm64,
-    ),
 ];
 
 const fn vm(c_name: &'static str, value: i32, arches: Arches) -> ConstValue {
