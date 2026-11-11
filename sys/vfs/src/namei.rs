@@ -360,6 +360,9 @@ impl Namespace {
                 Ok(v)
             }
             Err(Errno::ENOENT) => {
+                if let Some(r) = d.lookup_clone(s, name) {
+                    return dir.mount().vget(s, r?);
+                }
                 if negative {
                     cache::enter(dir, name, None);
                 }

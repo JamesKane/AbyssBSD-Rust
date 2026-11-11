@@ -523,6 +523,7 @@ pub fn announce(e: &Event) -> Option<(Option<Family>, Vec<u8>)> {
             Some((Some(addr.family), rtmsg::ifa_record_typed(ifp, addr, ty)))
         }
         Event::Reply { family, msg, .. } => Some((*family, msg.clone())),
+        Event::Rename { .. } => None,
         Event::Route { rtsock: true, .. } => None,
         Event::Route { ty, route, ifp, .. } => {
             let h = RtMsghdr {

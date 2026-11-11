@@ -17,7 +17,7 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use abi::net::{IFT_ETHER, nd6_iff, rtf};
+use abi::net::{IFT_BRIDGE, IFT_ETHER, IFT_L2VLAN, IFT_PPP, nd6_iff, rtf};
 use mbuf::Packet;
 use net::Family;
 use net::Vnet;
@@ -730,9 +730,10 @@ fn prelist_update(n: &mut Net, st: &State, new: Prefix, router: Option<In6>, mca
         }
     }
     if !matched && new.vltime != 0 {
-        // `in6_if2idlen`: Ethernet interfaces' identifiers are 64 bits.
+        // `in6_if2idlen`: Ethernet, bridge, VLAN, and PPP interfaces'
+        // identifiers are 64 bits.
         let idlen = match n.by_index(ifindex).map(|i| i.ty) {
-            Some(IFT_ETHER) => 64,
+            Some(IFT_ETHER | IFT_BRIDGE | IFT_L2VLAN | IFT_PPP) => 64,
             _ => return,
         };
         if usize::from(new.plen) + idlen != 128 {

@@ -593,11 +593,17 @@ pub(super) fn sysarch(op: u64, _parms: u64) -> SysResult {
     Err(Errno::EINVAL)
 }
 
-/// Modules built into the kernel, by the names `kldload` takes.
-/// `if_bridge` is answered as one though there are no bridges, so that
-/// `vnet.subr`'s `vnet_init` (`kldload -n if_bridge`) lets the VNET tests
-/// run (docs/compat-deviations.md); `modfind` does not find it.
-const BUILT_IN: &[&[u8]] = &[b"geom_md", b"if_epair", b"if_bridge"];
+/// Modules built into the kernel, by the names `kldload` takes: the
+/// tunnel devices' module and its two aliases (`if_tuntap`, `if_tun`,
+/// `if_tap`), the bridge, `epair`, and `md`.
+const BUILT_IN: &[&[u8]] = &[
+    b"geom_md",
+    b"if_epair",
+    b"if_bridge",
+    b"if_tuntap",
+    b"if_tun",
+    b"if_tap",
+];
 
 /// `kldload(file)`: there are no loadable modules; one built in is
 /// `EEXIST`, as FreeBSD answers for a module compiled into its kernel.
@@ -658,6 +664,10 @@ const MODULES: &[&[u8]] = &[
     b"null",
     b"if_lo",
     b"if_epair",
+    b"if_tuntap",
+    b"if_tun",
+    b"if_tap",
+    b"if_bridge",
     b"netlink",
     b"kbdmux",
     b"watchdog",

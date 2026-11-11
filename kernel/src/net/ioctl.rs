@@ -187,6 +187,11 @@ pub(crate) fn ifioctl(
             return Ok(0);
         }
         sio::SIOCIFGCLONERS => return cloners(arg),
+        // `ifhwioctl` leaves these to the driver: the bridge's requests.
+        sio::SIOCGDRVSPEC | sio::SIOCSDRVSPEC => {
+            return super::bridge::drvspec(req == sio::SIOCSDRVSPEC, arg);
+        }
+        sio::SIOCSIFNAME => return rename(arg),
         _ => {}
     }
     match req {
@@ -209,8 +214,9 @@ pub(crate) fn ifioctl(
         sio::SIOCGIFMEDIA | sio::SIOCGIFXMEDIA => return media(arg),
         sio::SIOCADDMULTI | sio::SIOCDELMULTI => return multi(req == sio::SIOCADDMULTI, arg),
         sio::SIOCSLANPCP | sio::SIOCGLANPCP => return lanpcp(req, arg),
+        sio::SIOCGIFSTATUS => return status(arg),
         // `lo_ioctl` takes none of these.
-        sio::SIOCGIFSTATUS | sio::SIOCGIFCAPNV | sio::SIOCGTUNFIB => {
+        sio::SIOCGIFCAPNV | sio::SIOCGTUNFIB => {
             ifp(&curvnet().net.lock(), arg)?;
             return Err(Errno::EINVAL);
         }
@@ -225,6 +231,42 @@ pub(crate) fn ifioctl(
             Err(Errno::EOPNOTSUPP)
         }
     }
+}
+
+/// `SIOCSIFNAME` (`if_rename`): the new name is at `ifr_data`.
+fn rename(arg: &[u8]) -> Result<usize, Errno> {
+    priv_check(Priv::NetSetifname)?;
+    let ptr = u64::from_ne_bytes(arg[IFRU..IFRU + 8].try_into().unwrap_or([0; 8]));
+    let mut new = [0u8; IFNAMSIZ];
+    uaccess::copy_in(&mut new, ptr).map_err(|_| Errno::EFAULT)?;
+    // `copyinstr` of at most `IFNAMSIZ` bytes, the NUL among them.
+    let end = new
+        .iter()
+        .position(|&b| b == 0)
+        .ok_or(Errno::ENAMETOOLONG)?;
+    let new = core::str::from_utf8(&new[..end]).map_err(|_| Errno::EINVAL)?;
+    curvnet().net.lock().rename(name_of(arg), new)?;
+    Ok(0)
+}
+
+/// `SIOCGIFSTATUS`: the driver's text (`ifs_ascii`), `EINVAL` from one
+/// that has none.
+fn status(arg: &mut [u8]) -> Result<usize, Errno> {
+    let text = {
+        let vn = curvnet();
+        let n = vn.net.lock();
+        let i = ifp(&n, arg)?;
+        i.link
+            .0
+            .as_ref()
+            .and_then(|l| l.status())
+            .ok_or(Errno::EINVAL)?
+    };
+    let ascii = arg.get_mut(IFNAMSIZ..).ok_or(Errno::EINVAL)?;
+    ascii.fill(0);
+    let k = text.len().min(ascii.len().saturating_sub(1));
+    ascii[..k].copy_from_slice(&text.as_bytes()[..k]);
+    Ok(0)
 }
 
 /// `if_vmove_loan` (`loan`) and `if_vmove_reclaim`: moves the interface
@@ -475,11 +517,18 @@ fn set(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
                 ifp(&curvnet().net.lock(), arg)?;
                 return Err(Errno::EINVAL);
             }
-            curvnet()
-                .net
-                .lock()
-                .with_iface(&name, |i| i.mtu = v)
-                .ok_or(Errno::ENXIO)?;
+            let vn = curvnet();
+            let mut n = vn.net.lock();
+            let i = ifp(&n, arg)?;
+            // `ifhwioctl`: not on a bridge's member.
+            if i.bridge.is_some() {
+                return Err(Errno::EOPNOTSUPP);
+            }
+            // `bridge_ioctl`: a bridge's MTU is its members' too.
+            if let Some(b) = net::bridge::of(i).and_then(net::bridge::Bridge::arc) {
+                b.set_mtu(&mut n, v)?;
+            }
+            n.set_mtu(&name, v)?;
         }
         sio::SIOCSIFCAP => {
             priv_check(Priv::NetSetifcap)?;
@@ -599,6 +648,30 @@ fn first4(i: &Ifnet, want: Option<[u8; 4]>) -> Option<&Ifaddr> {
     })
 }
 
+/// `in_aifaddr_ioctl` and `in6_addifaddr` on a bridge's member: allowed,
+/// with a warning, while `net.link.bridge.member_ifaddrs` is.
+fn member_ifaddrs(vn: &net::Vnet, i: &Ifnet) -> Result<(), Errno> {
+    if i.bridge.is_none() || i.ty == abi::net::IFT_GIF {
+        return Ok(());
+    }
+    if vn
+        .bridge
+        .member_ifaddrs
+        .load(core::sync::atomic::Ordering::Relaxed)
+        == 0
+    {
+        return Err(Errno::EINVAL);
+    }
+    crate::klog::log(
+        abi::syslog::LOG_INFO,
+        format_args!(
+            "{}: WARNING: Assigning an IP address to an interface which is also a bridge member is deprecated and will be unsupported in a future release.\n",
+            i.name
+        ),
+    );
+    Ok(())
+}
+
 /// `in_control` for an `AF_INET` socket.
 fn in_control(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
     let name = name_of(arg).to_vec();
@@ -641,6 +714,12 @@ fn in_control(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
             let i = ifp(&n, arg)?;
             let loopback = i.flags & iff::LOOPBACK != 0;
             let p2p = i.flags & iff::POINTOPOINT != 0;
+            // `in_aifaddr_ioctl`: the other end of a point-to-point link is
+            // needed.
+            if p2p && dst.is_none() {
+                return Err(Errno::EDESTADDRREQ);
+            }
+            member_ifaddrs(&vn, i)?;
             // With no mask, the old one or the classful default.
             let plen = match mask {
                 Some(m) => plen_of(m),
@@ -945,13 +1024,20 @@ fn in6_control(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
             if vl != 0 && pl > vl {
                 return Err(Errno::EINVAL);
             }
-            curvnet().net.lock().add_addr_flags(
+            let vn = curvnet();
+            let mut n = vn.net.lock();
+            let i = ifp(&n, arg)?;
+            member_ifaddrs(&vn, i)?;
+            // A point-to-point interface's other end (`ifra_dstaddr`).
+            let dst =
+                req_addr6(arg, 44).filter(|d| *d != [0; 16] && i.flags & iff::POINTOPOINT != 0);
+            n.add_addr_flags(
                 &name,
                 Ifaddr {
                     family: Family::Inet6,
                     addr,
                     plen,
-                    dst: None,
+                    dst,
                     broadcast: None,
                     flags6,
                     vltime: if vl == 0 { INFINITE } else { vl },

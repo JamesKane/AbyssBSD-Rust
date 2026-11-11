@@ -8,6 +8,7 @@
 //! sys/netinet6/in6_ifattach.c.
 
 pub(crate) mod bpf;
+pub(crate) mod bridge;
 pub(crate) mod ioctl;
 #[cfg(feature = "ktest")]
 mod ktests;
@@ -15,6 +16,7 @@ pub(crate) mod memstat;
 pub(crate) mod netlink;
 pub(crate) mod splice;
 mod sysctl;
+pub(crate) mod tuntap;
 
 use sched::Sleepable;
 
@@ -151,6 +153,8 @@ fn start_route_expiry() {
             net::view::reclaim(&mut || crate::time::sleep_ns(s, 1_000_000));
             let now = u64::try_from(now_s()).unwrap_or(0);
             let up = uptime_s();
+            // `bridge_timer`: each bridge's table pruned in its period.
+            net::bridge::tick(up);
             for v in net::Vnet::all() {
                 let mut n = v.net.lock();
                 if n.routes.iter().any(|r| r.expire != 0) {
@@ -182,6 +186,13 @@ impl net::announce::Listener for Devd {
         use net::announce::Event;
         let m = bus::manager();
         match e {
+            // A rename's departure and arrival are not `devd`'s, its
+            // notice is (`if_rename`).
+            Event::Announce { ifp, .. } if ifp.flags & abi::net::iff::RENAMING != 0 => {}
+            Event::Rename { ifp, old } => {
+                let data = alloc::format!("name={}", ifp.name);
+                m.notify("IFNET", old, "RENAME", Some(&data));
+            }
             Event::Announce { ifp, arrival } => {
                 let kind = if *arrival { "ATTACH" } else { "DETACH" };
                 m.notify("IFNET", &ifp.name, kind, None);
@@ -246,6 +257,7 @@ pub(crate) fn init(s: &Sleepable) {
         net::vnet0().net.listen(l);
     }
     bpf::init();
+    tuntap::init();
     inet::set_hooks(inet::Hooks {
         now: crate::time::now_ns,
         random: random_u32,

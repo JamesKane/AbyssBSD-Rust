@@ -377,6 +377,7 @@ impl Cred {
             && matches!(
                 p,
                 Priv::NetRoute
+                    | Priv::NetBridge
                     | Priv::NetSetifmtu
                     | Priv::NetSetifflags
                     | Priv::NetSetifcap

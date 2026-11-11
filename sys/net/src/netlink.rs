@@ -1364,7 +1364,7 @@ pub fn notify(e: &crate::announce::Event, now_s: u64) -> Option<(u32, Vec<u8>)> 
             };
             Some((g, fix(route_msg(&ctx, &hdr(t), &[route], false), t)))
         }
-        Event::Reply { .. } => None,
+        Event::Reply { .. } | Event::Rename { .. } => None,
     }
 }
 

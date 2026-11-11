@@ -269,6 +269,15 @@ pub trait DirectoryNode: Node {
     /// The inode named `name` (never `.` or `..`), or `ENOENT`.
     fn lookup(&self, s: &Sleepable, name: &[u8]) -> Result<u64, Errno>;
 
+    /// A name [`DirectoryNode::lookup`] did not find, which the directory
+    /// may make on the spot (devfs's `dev_clone`): `None` if it does not
+    /// clone such names, else the node it made for this lookup or why it
+    /// did not. Neither is cached, as each lookup may make another.
+    fn lookup_clone(&self, s: &Sleepable, name: &[u8]) -> Option<Result<u64, Errno>> {
+        let _ = (s, name);
+        None
+    }
+
     /// The inode of `..` (this directory's own at the file system's root).
     fn parent(&self) -> u64;
 

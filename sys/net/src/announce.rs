@@ -33,6 +33,12 @@ pub enum Event {
     /// `RTM_IFINFO` as [`Event::Info`], and `devd`'s `LINK_UP` or
     /// `LINK_DOWN`.
     Link { ifp: Ifnet, up: bool },
+    /// An interface was renamed from `old` (`if_rename`'s `devctl`
+    /// notice; its departure and arrival are announced before it).
+    Rename {
+        ifp: Ifnet,
+        old: alloc::string::String,
+    },
     /// An address was added or deleted (`RTM_NEWADDR`, `RTM_DELADDR`), on
     /// the interface as it was then.
     Addr { add: bool, ifp: Ifnet, addr: Ifaddr },
@@ -240,6 +246,7 @@ impl Drop for NetGuard<'_> {
                     };
                     // `ether_output_frame`'s `ether_do_pcp`.
                     if i.ty == abi::net::IFT_ETHER
+                        && i.bridge.is_none()
                         && (i.pcp != crate::ifnet::PCP_NONE
                             || m.hdr.flags & mbuf::flags::VLANTAG != 0)
                     {
@@ -251,7 +258,9 @@ impl Drop for NetGuard<'_> {
                     let Some(link) = i.link.0.clone() else {
                         continue;
                     };
-                    tx.push((index, family, i.flags, link, m));
+                    // `ether_output`'s `BRIDGE_OUTPUT`: a member's frames
+                    // are bridged.
+                    tx.push((index, family, i.flags, link, i.bridge.clone(), m));
                 }
                 for e in g.isrq.drain(..) {
                     isr.push(e);
@@ -272,8 +281,13 @@ impl Drop for NetGuard<'_> {
             for (proto, m) in isr.into_iter() {
                 let _ = v.netisr.queue(proto, m);
             }
-            for (index, family, flags, link, m) in tx.into_iter() {
-                let _ = crate::ether::output_frame(&v, index, &link, flags, family, m);
+            for (index, family, flags, link, bridge, m) in tx.into_iter() {
+                match bridge {
+                    Some(b) => b.output(&v, index, m),
+                    None => {
+                        let _ = crate::ether::output_frame(&v, index, &link, flags, family, m);
+                    }
+                }
             }
         }
     }

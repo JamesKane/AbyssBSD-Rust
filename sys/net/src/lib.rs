@@ -20,6 +20,9 @@ pub mod addr;
 pub mod announce;
 pub mod arp;
 pub mod bpf;
+pub mod bridge;
+#[cfg(test)]
+mod bridge_tests;
 pub mod clone;
 pub mod defer;
 pub mod ether;
@@ -36,6 +39,7 @@ pub mod rtmsg;
 pub mod rtsock;
 #[cfg(test)]
 mod tests;
+pub mod tuntap;
 pub mod view;
 mod vnet;
 

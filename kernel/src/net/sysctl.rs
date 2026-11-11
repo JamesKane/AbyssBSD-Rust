@@ -600,6 +600,212 @@ fn bpf_knobs(t: &mut Tree, net: sysctl::NodeId) {
     );
 }
 
+/// `net.link.tun`, `net.link.tap`, and `debug.if_tun_debug`
+/// (`if_tuntap.c`).
+fn tuntap_knobs(t: &mut Tree, root: sysctl::NodeId, link: sysctl::NodeId) {
+    use net::tuntap;
+    let tun = t
+        .add_node(
+            link,
+            Number::Auto,
+            "tun",
+            "IP tunnel software network interface",
+        )
+        .expect("net.link.tun");
+    rw_tun(
+        t,
+        tun,
+        "devfs_cloning",
+        "Enable legacy devfs interface creation",
+        &tuntap::TUN_DEVFS_CLONING,
+    );
+    let tap = t
+        .add_node(
+            link,
+            Number::Auto,
+            "tap",
+            "Ethernet tunnel software network interface",
+        )
+        .expect("net.link.tap");
+    rw_i32(
+        t,
+        tap,
+        "user_open",
+        "Enable legacy devfs interface creation for all users",
+        &tuntap::TAP_USER_OPEN,
+        |_| true,
+    );
+    rw_i32(
+        t,
+        tap,
+        "up_on_open",
+        "Bring interface up when /dev/tap is opened",
+        &tuntap::TAP_UP_ON_OPEN,
+        |_| true,
+    );
+    rw_tun(
+        t,
+        tap,
+        "devfs_cloning",
+        "Enable legacy devfs interface creation",
+        &tuntap::TAP_DEVFS_CLONING,
+    );
+    rw_i32(t, tap, "debug", "", &tuntap::DEBUG, |_| true);
+    let debug = t
+        .child(root, "debug")
+        .or_else(|| t.add_node(root, Number::Auto, "debug", "Debugging").ok());
+    if let Some(d) = debug {
+        rw_i32(t, d, "if_tun_debug", "", &tuntap::DEBUG, |_| true);
+    }
+}
+
+/// A `CTLFLAG_RWTUN` `int`.
+fn rw_tun(t: &mut Tree, parent: sysctl::NodeId, name: &str, descr: &str, a: &'static AtomicI32) {
+    t.add_writable(
+        parent,
+        Number::Auto,
+        name,
+        descr,
+        ctlflag::TUN,
+        // Relaxed: a tunable.
+        Value::Int(Box::new(move || a.load(Ordering::Relaxed))),
+        sysctl::int_writer(move |v| {
+            a.store(v, Ordering::Relaxed);
+            Ok(())
+        }),
+    )
+    .expect("a net.link sysctl");
+}
+
+/// `net.link.bridge` (`if_bridge.c`): each the current VNET's.
+fn bridge_knobs(t: &mut Tree, link: sysctl::NodeId) {
+    type Field = fn(&net::bridge::Conf) -> &AtomicI32;
+    let bridge = node(t, link, i32::from(abi::net::IFT_BRIDGE), "bridge", "Bridge");
+    let knobs: [(&str, &str, u32, bool, Field); 11] = [
+        (
+            "pfil_onlyip",
+            "Only pass IP packets when pfil is enabled",
+            ctlflag::TUN,
+            false,
+            |c| &c.pfil_onlyip,
+        ),
+        (
+            "pfil_bridge",
+            "Packet filter on the bridge interface",
+            ctlflag::TUN,
+            false,
+            |c| &c.pfil_bridge,
+        ),
+        (
+            "ipfw_arp",
+            "Filter ARP packets through IPFW layer2",
+            ctlflag::TUN,
+            false,
+            |c| &c.ipfw_arp,
+        ),
+        (
+            "pfil_member",
+            "Packet filter on the member interface",
+            ctlflag::TUN,
+            false,
+            |c| &c.pfil_member,
+        ),
+        (
+            "pfil_local_phys",
+            "Packet filter on the physical interface for locally destined packets",
+            ctlflag::TUN,
+            false,
+            |c| &c.pfil_local_phys,
+        ),
+        (
+            "log_stp",
+            "Log STP state changes",
+            ctlflag::TUN,
+            false,
+            |c| &c.log_stp,
+        ),
+        (
+            "inherit_mac",
+            "Inherit MAC address from the first bridge member",
+            ctlflag::TUN,
+            false,
+            |c| &c.inherit_mac,
+        ),
+        (
+            "allow_llz_overlap",
+            "Allow overlap of link-local scope zones of a bridge interface and the member interfaces",
+            0,
+            false,
+            |c| &c.allow_llz_overlap,
+        ),
+        (
+            "log_mac_flap",
+            "Log MAC address port flapping",
+            0,
+            true,
+            |c| &c.log_mac_flap,
+        ),
+        (
+            "member_ifaddrs",
+            "Allow layer 3 addresses on bridge members (deprecated)",
+            0,
+            true,
+            |c| &c.member_ifaddrs,
+        ),
+        ("ipfw", "Layer2 filter with IPFW", 0, false, |c| &c.ipfw),
+    ];
+    for (name, descr, flags, boolean, field) in knobs {
+        let value = if boolean {
+            // `SYSCTL_BOOL`.
+            Value::U8(Box::new(move || {
+                u8::from(field(&super::curvnet().bridge).load(Ordering::Relaxed) != 0)
+            }))
+        } else {
+            Value::Int(Box::new(move || {
+                field(&super::curvnet().bridge).load(Ordering::Relaxed)
+            }))
+        };
+        let writer = if boolean {
+            sysctl::u8_writer(move |v| {
+                // Relaxed: a setting.
+                field(&super::curvnet().bridge).store(i32::from(v != 0), Ordering::Relaxed);
+                Ok(())
+            })
+        } else {
+            sysctl::int_writer(move |v| {
+                let vn = super::curvnet();
+                let c = &vn.bridge;
+                // Relaxed: settings.
+                if name == "ipfw" {
+                    // `sysctl_pfil_ipfw`: on, it takes over from pfil.
+                    let on = v & 1;
+                    if on != c.ipfw.load(Ordering::Relaxed) {
+                        c.ipfw.store(on, Ordering::Relaxed);
+                        if on != 0 {
+                            c.pfil_onlyip.store(0, Ordering::Relaxed);
+                            c.pfil_bridge.store(0, Ordering::Relaxed);
+                            c.pfil_member.store(0, Ordering::Relaxed);
+                        }
+                    }
+                    return Ok(());
+                }
+                field(c).store(v, Ordering::Relaxed);
+                Ok(())
+            })
+        };
+        t.add_writable(
+            bridge,
+            Number::Auto,
+            name,
+            descr,
+            ctlflag::VNET | flags,
+            value,
+            writer,
+        )
+        .expect("a net.link.bridge sysctl");
+    }
+}
+
 fn node(
     t: &mut Tree,
     parent: sysctl::NodeId,
@@ -1373,6 +1579,8 @@ pub(crate) fn init(s: &Sleepable) {
         bpf_knobs(t, net);
         let lo = node(t, link, 24, "loif", "");
         let _ = lo;
+        tuntap_knobs(t, root, link);
+        bridge_knobs(t, link);
 
         // `net.routetable` (`PF_ROUTE`): `sysctl_rtsock`.
         t.add_handler(

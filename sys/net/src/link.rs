@@ -91,6 +91,22 @@ pub trait Link: Send + Sync {
     /// Called under the interfaces' lock, as `flags_changed` is.
     fn multicast_changed(&self, _groups: &[[u8; 6]]) {}
 
+    /// Whether a packet may go out now, checked before it is queued
+    /// (`tunoutput`'s `EHOSTDOWN` while no one has the device open).
+    ///
+    /// # Errors
+    ///
+    /// Why it may not.
+    fn ready(&self) -> Result<(), abi::errno::Errno> {
+        Ok(())
+    }
+
+    /// The status text `SIOCGIFSTATUS` returns, if the driver has one
+    /// (`tunifioctl`'s "Opened by PID").
+    fn status(&self) -> Option<alloc::string::String> {
+        None
+    }
+
     fn as_any(&self) -> &dyn Any;
 }
 

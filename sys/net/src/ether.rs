@@ -99,10 +99,11 @@ pub fn input(vnet: &Arc<Vnet>, mut m: Packet) {
     // The interface under the network epoch, borrowed, no lock or
     // reference (`ether_input` runs in a `NET_EPOCH` section).
     let section = crate::view::enter();
-    let Some(i) = vnet.net.view(&section).by_index(index) else {
+    let view = vnet.net.view(&section);
+    let Some(mut i) = view.by_index(index) else {
         return;
     };
-    let (ifflags, lladdr, tap, fib, stats) = (i.flags, i.lladdr, &i.bpf, i.fib, &*i.stats);
+    let (ifflags, tap, fib, stats) = (i.flags, &i.bpf, i.fib, &*i.stats);
     if ifflags & iff::UP == 0 {
         return;
     }
@@ -143,12 +144,37 @@ pub fn input(vnet: &Arc<Vnet>, mut m: Packet) {
         }
     }
     m.hdr.fib = fib;
+    // `BRIDGE_INPUT`: a bridge's member's frame is the bridge's, which
+    // hands back what is this host's, on the interface it is for.
+    if let Some(b) = &i.bridge {
+        m.hdr.flags &= !flags::PROMISC;
+        let Some(back) = b.input(vnet, view, m, &eh) else {
+            return;
+        };
+        m = back;
+        if m.hdr.rcvif != index {
+            let Some(to) = view.by_index(m.hdr.rcvif) else {
+                return;
+            };
+            i = to;
+        }
+    }
     // Not for this interface's address: only for the tap and whoever asked
     // for promiscuous frames.
-    if !is_multicast(&eh.dst) && lladdr.is_some_and(|l| l != eh.dst) {
+    if !is_multicast(&eh.dst) && i.lladdr.is_some_and(|l| l != eh.dst) {
         m.hdr.flags |= flags::PROMISC;
     }
-    demux(vnet, ifflags, stats, eh.ty, m);
+    demux(vnet, i.flags, &i.stats, eh.ty, m);
+}
+
+/// Whether interfaces of type `ty` carry Ethernet frames: Ethernet
+/// itself, VLANs, and bridges (`IFT_ETHER`, `IFT_L2VLAN`, `IFT_BRIDGE`).
+#[must_use]
+pub const fn is_ether(ty: u8) -> bool {
+    matches!(
+        ty,
+        abi::net::IFT_ETHER | abi::net::IFT_L2VLAN | abi::net::IFT_BRIDGE
+    )
 }
 
 /// `ether_demux`: to the protocol for its type, the header off.

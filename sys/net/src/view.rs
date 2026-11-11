@@ -49,6 +49,8 @@ pub struct IfView {
     pub addrs: Vec<Ifaddr>,
     /// The driver's side (`if_transmit`).
     pub link: LinkRef,
+    /// The bridge it is a member of (`if_bridge`).
+    pub bridge: Option<Arc<crate::bridge::Bridge>>,
 }
 
 impl IfView {
@@ -89,6 +91,7 @@ impl View {
                     stats: Arc::clone(&i.stats),
                     addrs: i.addrs.clone(),
                     link: LinkRef(i.link.0.clone()),
+                    bridge: i.bridge.clone(),
                 })
                 .collect(),
             routes: n.routes.clone(),

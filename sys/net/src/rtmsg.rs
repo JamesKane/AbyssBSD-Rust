@@ -89,7 +89,7 @@ pub fn if_data(ifp: &Ifnet) -> IfData {
         ifi_imcasts: c(&s.imcasts),
         ifi_omcasts: c(&s.omcasts),
         ifi_iqdrops: c(&s.iqdrops),
-        ifi_oqdrops: 0,
+        ifi_oqdrops: c(&s.oqdrops),
         ifi_noproto: c(&s.noproto),
         // `LO_CSUM_FEATURES | LO_CSUM_FEATURES6`.
         ifi_hwassist: 0x0000_0e1e,

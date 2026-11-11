@@ -17,7 +17,7 @@ use alloc::vec::Vec;
 
 use abi::errno::Errno;
 use abi::inet::AF_LINK;
-use abi::net::{IFT_ETHER, RTM_VERSION, RtMsghdr, iff, rta, rtf, rtm};
+use abi::net::{RTM_VERSION, RtMsghdr, iff, rta, rtf, rtm};
 use mbuf::Packet;
 
 use crate::Family;
@@ -262,7 +262,7 @@ impl Net {
                     let gw_is_dst = r.gateway == Gateway::Addr(*addr);
                     let rifp = self.by_index(r.ifindex);
                     let ok_if = rifp.is_some_and(|i| {
-                        i.ty == IFT_ETHER && i.flags & (iff::NOARP | iff::STATICARP) == 0
+                        crate::ether::is_ether(i.ty) && i.flags & (iff::NOARP | iff::STATICARP) == 0
                     });
                     if !host || !ok_if || !gw_is_dst {
                         return false;
@@ -312,7 +312,7 @@ impl Net {
                 }
                 // Only Ethernet interfaces have link-layer headers to
                 // make (`lltable_calc_llheader`).
-                if ifty != IFT_ETHER {
+                if !crate::ether::is_ether(ifty) {
                     return Err(Errno::EINVAL);
                 }
                 let nlen = usize::from(gw[5]);

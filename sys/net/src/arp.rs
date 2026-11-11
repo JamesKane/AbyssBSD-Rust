@@ -14,7 +14,7 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicI32, Ordering};
 
 use abi::errno::Errno;
-use abi::net::{IFT_ETHER, iff};
+use abi::net::iff;
 use mbuf::{Packet, flags};
 
 use crate::Family;
@@ -620,7 +620,7 @@ pub fn ifinit(n: &mut Net, ifindex: u16, addr: [u8; 4]) {
     let Some(ifp) = n.by_index(ifindex) else {
         return;
     };
-    if ifp.ty != IFT_ETHER || addr == [0; 4] {
+    if !crate::ether::is_ether(ifp.ty) || addr == [0; 4] {
         return;
     }
     let Some(ll) = ifp.lladdr else {

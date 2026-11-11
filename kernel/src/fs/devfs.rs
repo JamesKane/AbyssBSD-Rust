@@ -513,6 +513,27 @@ pub(crate) fn add(
     Some(ino)
 }
 
+/// What a [`Cloner`] did with a name.
+pub(crate) enum CloneResult {
+    /// It does not make devices of that name.
+    NotMine,
+    /// It would, but may not now (the caller's privilege, a setting).
+    Refused,
+    /// It made (or found) the device at this path.
+    Made(Vec<u8>),
+}
+
+/// A driver's `dev_clone` handler: given a name looked up in `/dev` that
+/// no node has.
+pub(crate) type Cloner = fn(&Sleepable, &[u8]) -> CloneResult;
+
+static CLONERS: SpinLock<Vec<Cloner>> = SpinLock::new(Vec::new());
+
+/// Registers `f` (`EVENTHANDLER_REGISTER(dev_clone, ...)`).
+pub(crate) fn add_cloner(f: Cloner) {
+    CLONERS.lock().push(f);
+}
+
 /// Adds `path` as a symbolic link to `target` (`make_dev_alias`).
 pub(crate) fn link(path: &[u8], target: &[u8]) -> Option<u64> {
     let t = super::now();
@@ -549,9 +570,44 @@ fn forget_names_in(m: &Mount, path: &[u8]) {
 
 /// Takes the node at `path` away; its vnode, if in core, is doomed.
 pub(crate) fn remove(s: &Sleepable, path: &[u8]) {
-    let Some(ino) = with(|r| r.remove(path)) else {
-        return;
-    };
+    if let Some(ino) = unlink(path) {
+        reclaim(s, ino);
+    }
+}
+
+/// Takes the node at `path` out of the namespace now, its names out of
+/// the cache, without doom for its vnodes yet ([`reclaim`] does that):
+/// for a driver that cannot wait where its device goes. Returns its
+/// inode.
+pub(crate) fn unlink(path: &[u8]) -> Option<u64> {
+    let ino = with(|r| r.remove(path))?;
+    for m in mounts() {
+        if let Some(v) = m.cached(ino) {
+            vfs::cache::purge(&v);
+        }
+    }
+    Some(ino)
+}
+
+/// [`unlink`] of the device at `path` only if its device is `ops`
+/// (another may have taken the name since).
+pub(crate) fn unlink_dev(path: &[u8], ops: &Arc<dyn CharDevice>) -> Option<u64> {
+    let same = with(|r| {
+        let ino = r.lookup(path)?;
+        match &r.nodes.get(&ino)?.what {
+            What::Dev(d) => Some(core::ptr::addr_eq(Arc::as_ptr(&d.ops), Arc::as_ptr(ops))),
+            _ => Some(false),
+        }
+    });
+    if same == Some(true) {
+        unlink(path)
+    } else {
+        None
+    }
+}
+
+/// Dooms the vnodes of node `ino`, which [`unlink`] took away.
+pub(crate) fn reclaim(s: &Sleepable, ino: u64) {
     for m in mounts() {
         if let Some(v) = m.cached(ino) {
             vfs::cache::purge(&v);
@@ -1229,6 +1285,35 @@ impl SymlinkNode for View {
 }
 
 impl DirectoryNode for View {
+    /// `devfs_lookupx`'s `dev_clone`: a name under `/dev` no node has,
+    /// which a driver may make a device for (`/dev/tun`, `/dev/tap3`); the
+    /// lookup finds that device.
+    fn lookup_clone(&self, s: &Sleepable, name: &[u8]) -> Option<Result<u64, Errno>> {
+        if self.ino != ROOT_INO {
+            return None;
+        }
+        let handlers: Vec<Cloner> = CLONERS.lock().clone();
+        let mut mine = false;
+        for h in handlers {
+            match h(s, name) {
+                CloneResult::NotMine => {}
+                CloneResult::Refused => mine = true,
+                CloneResult::Made(path) => {
+                    let id = self.m.id;
+                    return Some(self.m.with(|r, v| {
+                        let ino = r.lookup(&path).ok_or(Errno::ENOENT)?;
+                        if DevMount::visible(r, v, ino, id) {
+                            Ok(ino)
+                        } else {
+                            Err(Errno::ENOENT)
+                        }
+                    }));
+                }
+            }
+        }
+        mine.then_some(Err(Errno::ENOENT))
+    }
+
     /// A hidden node, or another mount's link, is not there.
     fn lookup(&self, _s: &Sleepable, name: &[u8]) -> Result<u64, Errno> {
         let (ino, id) = (self.ino, self.m.id);

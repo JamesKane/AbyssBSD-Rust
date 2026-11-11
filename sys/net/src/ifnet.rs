@@ -40,6 +40,7 @@ pub struct Stats {
     pub imcasts: sync::PerCpuU64,
     pub omcasts: sync::PerCpuU64,
     pub iqdrops: sync::PerCpuU64,
+    pub oqdrops: sync::PerCpuU64,
     pub noproto: sync::PerCpuU64,
     pub oerrors: sync::PerCpuU64,
     pub ierrors: sync::PerCpuU64,
@@ -123,6 +124,7 @@ impl Default for Stats {
             imcasts: sync::PerCpuU64::new(),
             omcasts: sync::PerCpuU64::new(),
             iqdrops: sync::PerCpuU64::new(),
+            oqdrops: sync::PerCpuU64::new(),
             noproto: sync::PerCpuU64::new(),
             oerrors: sync::PerCpuU64::new(),
             ierrors: sync::PerCpuU64::new(),
@@ -268,6 +270,8 @@ pub struct Ifnet {
     /// The 802.1p priority its frames are tagged with (`if_pcp`),
     /// [`PCP_NONE`] for none.
     pub pcp: u8,
+    /// The bridge it is a member of (`if_bridge`).
+    pub bridge: Option<Arc<crate::bridge::Bridge>>,
 }
 
 /// `IFNET_PCP_NONE`.
@@ -518,6 +522,25 @@ impl Net {
     /// Removes interface `index` with its addresses and the routes
     /// through it (`if_detach`), returning it.
     pub fn detach(&mut self, index: u16) -> Option<Ifnet> {
+        let at = self.ifaces.iter().position(|i| i.index == index)?;
+        // `bridge_ifdetach`: a member leaves its bridge, a span port every
+        // bridge's list; a bridge's members leave it (`bridge_reassign`,
+        // `bridge_clone_destroy`).
+        if let Some(b) = self.ifaces[at].bridge.clone() {
+            b.departed(self, index);
+        }
+        let bridges: Vec<Arc<crate::bridge::Bridge>> = self
+            .ifaces
+            .iter()
+            .filter_map(|i| crate::bridge::of(i).and_then(crate::bridge::Bridge::arc))
+            .collect();
+        for b in bridges {
+            if b.home().1 == index {
+                b.delete_all(self);
+            } else {
+                b.departed(self, index);
+            }
+        }
         let at = self.ifaces.iter().position(|i| i.index == index)?;
         // `if_detach`: IPv6's state for it goes (`in6_ifdetach`), then its
         // addresses and routes, announced.
@@ -825,6 +848,7 @@ impl Net {
             return Vec::new();
         };
         let loopback = ifp.flags & iff::LOOPBACK != 0;
+        let p2p = ifp.flags & iff::POINTOPOINT != 0;
         let lo = self
             .ifaces
             .iter()
@@ -856,6 +880,18 @@ impl Net {
                     here,
                 ));
             }
+            // `ia_getrtprefix`'s point-to-point case: a host route to the
+            // other end through the interface, and the address itself
+            // through `lo0` unless both ends are the same
+            // (`ia_need_loopback_route`).
+            Family::Inet if p2p => {
+                if let Some(d) = a.dst {
+                    out.push(route(d, 32, rtf::UP | rtf::HOST | rtf::PINNED, here));
+                }
+                if a.dst != Some(a.addr) {
+                    out.push(route(a.addr, 32, local, lo));
+                }
+            }
             Family::Inet => {
                 if a.plen < 32 {
                     out.push(route(a.addr, a.plen, rtf::UP | rtf::PINNED, here));
@@ -866,6 +902,11 @@ impl Net {
             // its prefix's.
             Family::Inet6 => {
                 out.push(route(a.addr, 128, local, if loopback { here } else { lo }));
+                // `in6_broadcast_ifa`: a point-to-point /128 with a
+                // destination routes to it as a host.
+                if let Some(d) = a.dst.filter(|_| p2p && a.plen == 128) {
+                    out.push(route(d, 128, rtf::UP | rtf::HOST | rtf::PINNED, here));
+                }
                 if a.plen < 128 {
                     out.push(route(a.addr, a.plen, rtf::UP | rtf::PINNED, here));
                 }
@@ -964,7 +1005,7 @@ impl Net {
             Family::Inet6 => {
                 let ll = self
                     .by_index(index)
-                    .filter(|i| i.ty == abi::net::IFT_ETHER)
+                    .filter(|i| crate::ether::is_ether(i.ty))
                     .and_then(|i| i.lladdr);
                 if let Some(ll) = ll {
                     let f = crate::lltable::lle::IFADDR | crate::lltable::lle::STATIC;
@@ -1350,6 +1391,104 @@ impl Net {
         r
     }
 
+    /// Mutable access to the interface with `index`.
+    pub fn with_index<R>(&mut self, index: u16, f: impl FnOnce(&mut Ifnet) -> R) -> Option<R> {
+        let r = self.ifaces.iter_mut().find(|i| i.index == index).map(f);
+        self.bump();
+        r
+    }
+
+    /// `if_link_state_change`: interface `index`'s link is now `state`,
+    /// announced to the routing sockets and `devd`; a bridge it is a
+    /// member of looks at its own (`bridge_linkstate`).
+    pub fn link_state_change(&mut self, index: u16, state: u8) {
+        let Some(ifp) = self.ifaces.iter_mut().find(|i| i.index == index) else {
+            return;
+        };
+        if ifp.link_state == state {
+            return;
+        }
+        ifp.link_state = state;
+        let snap = ifp.clone();
+        let bridge = ifp.bridge.clone();
+        self.outbox.push(Event::Link {
+            ifp: snap,
+            up: state == LINK_STATE_UP,
+        });
+        self.bump();
+        if let Some(b) = bridge {
+            b.linkcheck(self);
+        }
+    }
+
+    /// `if_purgeaddrs`: every IPv4 and IPv6 address of interface `index`
+    /// goes, with its routes.
+    pub fn purge_addrs(&mut self, index: u16) {
+        let addrs: Vec<Ifaddr> = self.by_index(index).map_or(Vec::new(), |i| i.addrs.clone());
+        for a in addrs {
+            let _ = self.delete_addr_at(index, a.family, &a.addr);
+        }
+    }
+
+    /// `SIOCSIFMTU` once the driver took it: the MTU, announced
+    /// (`rt_ifmsg`).
+    ///
+    /// # Errors
+    ///
+    /// `ENXIO` for no such interface.
+    pub fn set_mtu(&mut self, name: &[u8], mtu: u32) -> Result<(), Errno> {
+        let ifp = self.by_name_mut(name).ok_or(Errno::ENXIO)?;
+        if ifp.mtu == mtu {
+            return Ok(());
+        }
+        ifp.mtu = mtu;
+        let snap = ifp.clone();
+        self.outbox.push(Event::Info(snap));
+        self.bump();
+        Ok(())
+    }
+
+    /// `if_rename`: interface `name` becomes `new`, announced as leaving
+    /// and arriving again (`ifnet_departure_event`, `ifnet_arrival_event`,
+    /// with `IFF_RENAMING` set); a bridge keeps it as a member, and a
+    /// tunnel device gets an alias by the new name.
+    ///
+    /// # Errors
+    ///
+    /// `EINVAL` for an empty name, `EEXIST` if one has it, `ENXIO` for no
+    /// such interface.
+    pub fn rename(&mut self, name: &[u8], new: &str) -> Result<(), Errno> {
+        if new.is_empty() {
+            return Err(Errno::EINVAL);
+        }
+        if name == new.as_bytes() {
+            return self.by_name(name).map(|_| ()).ok_or(Errno::ENXIO);
+        }
+        if self.by_name(new.as_bytes()).is_some() {
+            return Err(Errno::EEXIST);
+        }
+        let ifp = self.by_name_mut(name).ok_or(Errno::ENXIO)?;
+        let mut gone = ifp.clone();
+        gone.flags |= iff::RENAMING;
+        let old = core::mem::replace(&mut ifp.name, String::from(new));
+        let mut back = ifp.clone();
+        back.flags |= iff::RENAMING;
+        let link = ifp.link.clone();
+        self.outbox.push(Event::Announce {
+            ifp: gone,
+            arrival: false,
+        });
+        self.outbox.push(Event::Announce {
+            ifp: back.clone(),
+            arrival: true,
+        });
+        back.flags &= !iff::RENAMING;
+        self.outbox.push(Event::Rename { ifp: back, old });
+        self.bump();
+        crate::tuntap::renamed(&link, new);
+        Ok(())
+    }
+
     /// What an interface gets when it comes up (`in6_ifattach`): a
     /// loopback interface `::1/128` (`in6_ifattach_loopback`) when no
     /// interface of the VNET has it yet, and with
@@ -1544,6 +1683,7 @@ pub fn loopback(index: u16, now: i64, stats: Arc<Stats>) -> Ifnet {
         pcount: 0,
         maddrs: Vec::new(),
         pcp: PCP_NONE,
+        bridge: None,
     }
 }
 

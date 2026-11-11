@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! Interface cloners (`ifconfig <name> create`, `destroy`, `-C`): `lo`,
-//! further loopback interfaces, and `epair`, pairs of Ethernet interfaces
+//! further loopback interfaces; `epair`, pairs of Ethernet interfaces
 //! whose frames come out of each other, either end of which can be moved
-//! into a VNET jail.
+//! into a VNET jail; and `tun`, `tap`, `vmnet` ([`crate::tuntap`]) and
+//! `bridge` ([`crate::bridge`]).
 //!
 //! Behavior reference: sys/net/if_clone.c (`ifc_name2unit`,
 //! `ifc_alloc_unit`, `if_clone_create`, `if_clone_destroy`), sys/net/if_loop.c
@@ -30,8 +31,9 @@ pub const ETHERMTU: u32 = 1500;
 const MAXUNIT: i32 = 0x7fff;
 
 /// The cloners, as `SIOCIFGCLONERS` lists them (most recently attached
-/// first: `epair` is a module loaded after `lo`).
-pub const CLONERS: [&str; 2] = ["epair", "lo"];
+/// first: `if_bridge` and `if_epair` are modules loaded after the
+/// kernel's own, `lo` and `tuntap`'s three).
+pub const CLONERS: [&str; 6] = ["bridge", "epair", "lo", "vmnet", "tap", "tun"];
 
 /// What a create needs from the creating thread: the time, and for
 /// `epair`'s addresses the host UUID and jail name, or random bytes.
@@ -283,6 +285,7 @@ fn epair_ifnet(
         pcount: 0,
         maddrs: Vec::new(),
         pcp: crate::ifnet::PCP_NONE,
+        bridge: None,
         link: LinkRef(Some(link)),
     }
 }
@@ -338,6 +341,19 @@ pub fn create(vnet: &Arc<Vnet>, name: &[u8], ctx: &Ctx) -> Result<String, Errno>
     let unit = name2unit(name)?;
     if matches("epair", name) {
         return create_epair(vnet, unit, ctx);
+    }
+    if let Some((kind, unit)) = crate::tuntap::Kind::parse(name) {
+        return crate::tuntap::create(vnet, kind, unit, ctx);
+    }
+    if matches("bridge", name) {
+        let named = |u: i32| {
+            vnet.net
+                .lock()
+                .by_name(format!("bridge{u}").as_bytes())
+                .is_some()
+        };
+        let u = vnet.alloc_unit("bridge", unit, &named)?;
+        return Ok(crate::bridge::create(vnet, u, ctx));
     }
     if matches("lo", name) {
         let named = |u: i32| {
@@ -406,10 +422,10 @@ fn create_epair(vnet: &Arc<Vnet>, unit: Option<i32>, ctx: &Ctx) -> Result<String
 /// `ENXIO` if there is no such interface, `EINVAL` if no cloner made it
 /// or it is `lo0`.
 pub fn destroy(vnet: &Arc<Vnet>, name: &[u8]) -> Result<Vec<(Arc<Vnet>, Ifnet)>, Errno> {
-    let (dname, dunit, link, index) = {
+    let (dname, dunit, link, index, home) = {
         let n = vnet.net.lock();
         let i = n.by_name(name).ok_or(Errno::ENXIO)?;
-        (i.dname, i.dunit, i.link.clone(), i.index)
+        (i.dname, i.dunit, i.link.clone(), i.index, i.home)
     };
     if !CLONERS.contains(&dname) || dname == "lo" && dunit == 0 {
         return Err(Errno::EINVAL);
@@ -431,8 +447,19 @@ pub fn destroy(vnet: &Arc<Vnet>, name: &[u8]) -> Result<Vec<(Arc<Vnet>, Ifnet)>,
         if let Some(origin) = e.origin.upgrade() {
             origin.free_unit("epair", e.unit);
         }
+    } else if let Some(t) = link
+        .0
+        .as_ref()
+        .and_then(|l| l.as_any().downcast_ref::<crate::tuntap::Tun>())
+    {
+        crate::tuntap::destroy(t);
     } else {
-        vnet.free_unit(dname, dunit);
+        // The unit is its home VNET's, which made it.
+        let v = Vnet::all()
+            .into_iter()
+            .find(|v| v.id == home)
+            .unwrap_or_else(|| Arc::clone(vnet));
+        v.free_unit(dname, dunit);
     }
     if let Some(i) = vnet.net.lock().detach(index) {
         untap(&i);

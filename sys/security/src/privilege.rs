@@ -264,6 +264,8 @@ pub enum Priv {
     DevfsSymlink = 371,
     /// `PRIV_RANDOM_RESEED`: Closing /dev/random reseeds.
     RandomReseed = 380,
+    /// `PRIV_NET_BRIDGE`: Administer bridge.
+    NetBridge = 390,
     /// `PRIV_NET_RAW`: Open raw socket.
     NetRaw = 395,
     /// `PRIV_NET_ROUTE`: Administer routing.

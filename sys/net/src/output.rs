@@ -10,7 +10,7 @@
 //! sys/net/if.c (`if_simloop`).
 
 use abi::errno::Errno;
-use abi::net::{IFT_ETHER, IFT_LOOP, iff};
+use abi::net::{IFT_LOOP, IFT_PPP, iff};
 use mbuf::{Packet, csum, flags};
 
 use crate::Family;
@@ -49,7 +49,16 @@ pub fn output(
             n.txq.push((ifindex, Some(family), m));
             Ok(())
         }
-        IFT_ETHER => {
+        // A point-to-point link with no link layer (`tunoutput`): the
+        // packet as it is, with its family.
+        IFT_PPP => {
+            if let Some(l) = &ifp.link.0 {
+                l.ready()?;
+            }
+            n.txq.push((ifindex, Some(family), m));
+            Ok(())
+        }
+        t if ether::is_ether(t) => {
             let src = lladdr.ok_or(Errno::EAFNOSUPPORT)?;
             let mut slot = Some(m);
             let dst = match family {

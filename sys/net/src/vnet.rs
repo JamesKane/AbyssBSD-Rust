@@ -32,6 +32,8 @@ pub struct Vnet {
     pub netisr: Queues,
     /// The units its cloners have handed out (`ifc_unrhdr`).
     pub(crate) units: SpinLock<Vec<(&'static str, i32)>>,
+    /// Its `net.link.bridge` settings.
+    pub bridge: crate::bridge::Conf,
     /// The internet protocols' state in it (their `VNET_DEFINE`s), made
     /// by them on first use.
     pub inet: Once<Arc<dyn core::any::Any + Send + Sync>>,
@@ -65,6 +67,7 @@ impl Vnet {
                 lotap,
                 netisr: Queues::new(),
                 units: SpinLock::new(alloc::vec![("lo", 0)]),
+                bridge: crate::bridge::Conf::new(),
                 inet: Once::new(),
             }
         });

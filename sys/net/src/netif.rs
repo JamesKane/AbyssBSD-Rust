@@ -17,7 +17,6 @@ use mbuf::Packet;
 use sync::SpinLock;
 
 use crate::Vnet;
-use crate::announce::Event;
 use crate::bpf::Tap;
 use crate::ifnet::{Ifnet, Stats};
 use crate::link::{Link, LinkRef};
@@ -72,18 +71,8 @@ impl Port {
         let (Some(v), index) = self.home() else {
             return;
         };
-        let mut n = v.net.lock();
         let state = if up { LINK_STATE_UP } else { LINK_STATE_DOWN };
-        let Some(ifp) = n.ifaces.iter_mut().find(|i| i.index == index) else {
-            return;
-        };
-        if ifp.link_state == state {
-            return;
-        }
-        ifp.link_state = state;
-        let snap = ifp.clone();
-        n.outbox.push(Event::Link { ifp: snap, up });
-        n.bump();
+        v.net.lock().link_state_change(index, state);
     }
 }
 
@@ -143,6 +132,7 @@ pub fn attach_ether(e: &Ether, port: &Arc<Port>, link: Arc<dyn Link>) -> String 
         pcount: 0,
         maddrs: alloc::vec::Vec::new(),
         pcp: crate::ifnet::PCP_NONE,
+        bridge: None,
     };
     n.attach(i);
     name
