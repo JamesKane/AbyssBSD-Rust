@@ -2693,6 +2693,7 @@ no hangs, no reboot loops, nothing that needs the screen, and P8's remaining exi
     poudriere; moved here from M-D's list), `cd9660` (ISO images through `md`).
   - **Tools' fields:** fastfetch's fields: SMBIOS kenv, `/dev/mem` read-only, `hw.model`, route
     dump `RTA_IFP`, devstat and disk attributes, `hw.acpi.battery`.
+  - **Also needed** (found on the way): `hidraw`/`uhid` (hidapi's FreeBSD backend, libfido2's FIDO2 keys); USB devices enumerated in FreeBSD's order (hubs' children are numbered on a later explore pass than FreeBSD's, so `ugen0.7`/`0.8` differ).
   - **Already P9 above:** the consumer and system-control HID collections (`hcons`, `hsctrl`:
     volume, brightness and power keys), the RX8900 RTC, the PD controllers, the operation-region
     handlers, real `rman` resources (`devinfo -u`).
