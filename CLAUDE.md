@@ -30,10 +30,10 @@ that runs unmodified FreeBSD userland. Read `docs/ROADMAP.md` for the current ph
 
 - FreeBSD reference source: `../freebsd-src` (16.0-CURRENT). The ABI target is FreeBSD 15.x
   userland (ADR-0004).
-- Build/test server: `ssh abyss-build` (alias in ~/.ssh/config, currently 192.168.0.17; FreeBSD 15.1 amd64, 20 threads, 128 GiB, `doas`). Used
+- Build/test server: `ssh abyss-build` (alias in ~/.ssh/config, currently 192.168.0.14; FreeBSD 15.1 amd64, 20 threads, 128 GiB, `doas`). Used
   for UFS2 images (`makefs`), `fsck_ffs`, `abi-check`, bhyve, kyua, and differential tests.
 - Local: Rust 1.99, `qemu-system-{x86_64,aarch64}`, edk2 firmware under `/usr/share/edk2/`.
-- ARM64 reference board: **Orange Pi 6 Plus** (CIX P1/Sky1), at `192.168.0.25` in Ubuntu or FreeBSD
+- ARM64 reference board: **Orange Pi 6 Plus** (CIX P1/Sky1), at `192.168.0.19` (DHCP; it moves after a router reset) in Ubuntu or FreeBSD
   (key login as `jkane`; Ubuntu has passwordless `sudo`, FreeBSD `su`). FreeBSD 16-CURRENT is on the same NVMe. Board
   facts: `docs/HARDWARE.md` §4. Prior bring-up notes are in the sibling project
   `../AbyssBSD/docs/boards/orangepi-6-plus/`, plus `../AbyssBSD/docs/boards/radxa-dragon-q8b/lessons.md`.
