@@ -553,6 +553,7 @@ dependencies = [
  "fb-console",
  "geom",
  "gpt",
+ "guid",
  "hal",
  "idregs",
  "iicbus",

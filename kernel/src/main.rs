@@ -91,6 +91,7 @@ mod uaccess;
 mod uidinfo;
 mod umtx;
 mod uthread;
+mod uuid;
 mod vmmeter;
 mod vtcons;
 

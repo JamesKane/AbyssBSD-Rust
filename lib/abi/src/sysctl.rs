@@ -84,6 +84,10 @@ pub mod kern {
     pub const VERSION: i32 = 4;
     /// `kern.maxfiles` (int).
     pub const MAXFILES: i32 = 7;
+    /// `kern.maxfilesperproc` (int).
+    pub const MAXFILESPERPROC: i32 = 27;
+    /// `kern.maxprocperuid` (int).
+    pub const MAXPROCPERUID: i32 = 28;
     /// `kern.file` (`struct xfile` records).
     pub const FILE: i32 = 15;
     /// `kern.argmax` (int).
@@ -258,6 +262,8 @@ pub const CONSTANTS: &[ConstValue] = &[
     c("KERN_FILE", kern::FILE as i64),
     c("KERN_VERSION", kern::VERSION as i64),
     c("KERN_MAXFILES", kern::MAXFILES as i64),
+    c("KERN_MAXFILESPERPROC", kern::MAXFILESPERPROC as i64),
+    c("KERN_MAXPROCPERUID", kern::MAXPROCPERUID as i64),
     c("KERN_ARGMAX", kern::ARGMAX as i64),
     c("KERN_HOSTNAME", kern::HOSTNAME as i64),
     c("KERN_SECURELVL", kern::SECURELVL as i64),

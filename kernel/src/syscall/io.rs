@@ -232,6 +232,65 @@ pub(super) fn close(s: &Sleepable, fd: u64) -> SysResult {
     })
 }
 
+/// `getdtablesize()`: the most descriptors the process may have open
+/// (`getmaxfd`: `RLIMIT_NOFILE`'s soft limit, as an `int`, within
+/// `kern.maxfilesperproc`).
+pub(super) fn getdtablesize() -> SysResult {
+    let lim =
+        with_process(|p| Ok(p.limits.lock()[abi::resource::rlimit::NOFILE as usize].rlim_cur))?;
+    // FreeBSD's `(int)` of the limit: its low 32 bits.
+    let lim = int(lim);
+    let most = i32::try_from(crate::proc::maxfilesperproc()).unwrap_or(i32::MAX);
+    Ok(i64::from(lim.min(most)).cast_unsigned())
+}
+
+/// `posix_fadvise(fd, offset, len, advice)` (`kern_posix_fadvise`): the
+/// range and advice must make sense, and the file must be a regular file
+/// (`ESPIPE` for one that cannot seek, `ENODEV` for one that is no
+/// regular file). The advice is taken and has no effect: no read-ahead
+/// follows `POSIX_FADV_SEQUENTIAL` or `RANDOM`, and the page cache does
+/// not age pages for `DONTNEED` or read ahead for `WILLNEED`
+/// (docs/compat-deviations.md). The error is the call's value, not
+/// `errno` (`kern_posix_error`).
+pub(super) fn posix_fadvise(
+    s: &Sleepable,
+    fd: u64,
+    offset: u64,
+    len: u64,
+    advice: u64,
+) -> SysResult {
+    let r = (|| {
+        let (offset, len) = (offset.cast_signed(), len.cast_signed());
+        if offset < 0 || len < 0 || offset > i64::MAX - len {
+            return Err(Errno::EINVAL);
+        }
+        match u32::try_from(int(advice)).map_err(|_| Errno::EINVAL)? {
+            POSIX_FADV_NORMAL
+            | POSIX_FADV_RANDOM
+            | POSIX_FADV_SEQUENTIAL
+            | POSIX_FADV_WILLNEED
+            | POSIX_FADV_DONTNEED
+            | POSIX_FADV_NOREUSE => {}
+            _ => return Err(Errno::EINVAL),
+        }
+        let f = current_file(s, fd, &R::NO)?;
+        match f.kind() {
+            // `DTYPE_VNODE`, a regular file.
+            FileKind::Vnode(vf)
+                if vf.device.is_none() && vf.vnode.vnode().kind() == vfs::Kind::Regular =>
+            {
+                Ok(())
+            }
+            // Seekable, but no regular file: devices and other vnodes,
+            // and shared memory.
+            FileKind::Vnode(_) | FileKind::Shm(_) => Err(Errno::ENODEV),
+            // Without `DFLAG_SEEKABLE`.
+            _ => Err(Errno::ESPIPE),
+        }
+    })();
+    Ok(r.err().map_or(0, |e| u64::from(e.get().cast_unsigned())))
+}
+
 /// `close_range(lowfd, highfd, flags)` (libc's `closefrom` too).
 pub(super) fn close_range(s: &Sleepable, lo: u64, hi: u64, flags: u64) -> SysResult {
     let flags = u32::try_from(flags).map_err(|_| Errno::EINVAL)?;

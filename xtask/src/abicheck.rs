@@ -40,7 +40,10 @@ const PARTS: &[(&str, &str)] = &[
 /// Types whose C declaration is the kernel's own, in no header, so
 /// `abi-check` cannot compare them: the Rust type and where FreeBSD
 /// declares it. Each pins its size at compile time instead.
-const PRIVATE: &[(&str, &str)] = &[("ModuleStatV2", "sys/kern/kern_module.c")];
+const PRIVATE: &[(&str, &str)] = &[
+    ("ModuleStatV2", "sys/kern/kern_module.c"),
+    ("MsdosfsArgs", "sys/fs/msdosfs/msdosfsmount.h"),
+];
 
 /// The boundary structures `abi-check` would not check
 /// (docs/MULTIUSER.md §13), from the workspace's Rust sources (path and

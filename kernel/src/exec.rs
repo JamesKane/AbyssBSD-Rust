@@ -291,7 +291,8 @@ pub(crate) fn load(
         et_dyn_addr = rnd_base(min, maxv / 2, headers.maxalign)?;
     }
     load_sections(s, space, &object, &elf, et_dyn_addr)?;
-    let daddr = enforce_limits(&elf, et_dyn_addr, limits)?;
+    let (daddr, dsize) = enforce_limits(&elf, et_dyn_addr, limits)?;
+    space.set_data_segment(daddr, dsize);
 
     // The interpreter loads where `mmap(0, …)` would put it, leaving the
     // heap room to grow to its limit.
@@ -823,10 +824,10 @@ fn load_sections(
 }
 
 /// Checks the image's sizes against the limits and returns the data
-/// segment's start (FreeBSD's `vm_daddr`): the largest executable segment
-/// is the text, and the last other one the data (FreeBSD's
-/// `enforce_limits`).
-fn enforce_limits(elf: &Elf<'_>, rbase: u64, limits: &Limits) -> Result<u64, Errno> {
+/// segment's start and size (FreeBSD's `vm_daddr` and `vm_dsize`): the
+/// largest executable segment is the text, and the last other one the
+/// data (FreeBSD's `enforce_limits`).
+fn enforce_limits(elf: &Elf<'_>, rbase: u64, limits: &Limits) -> Result<(u64, u64), Errno> {
     let (mut text_size, mut text_addr) = (0, 0);
     let (mut data_size, mut data_addr) = (0, 0);
     let mut total: u64 = 0;
@@ -852,7 +853,7 @@ fn enforce_limits(elf: &Elf<'_>, rbase: u64, limits: &Limits) -> Result<u64, Err
     {
         return Err(Errno::ENOMEM);
     }
-    Ok(data_addr)
+    Ok((data_addr, data_size))
 }
 
 /// How much of a file `exec` reads to parse its headers (FreeBSD reads a

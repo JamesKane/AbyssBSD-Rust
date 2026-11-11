@@ -6,9 +6,10 @@ use core::sync::atomic::Ordering;
 
 use abi::errno::Errno;
 use abi::thr::{
-    CPU_LEVEL_CPUSET, CPU_LEVEL_ROOT, CPU_LEVEL_WHICH, CPU_WHICH_CPUSET, CPU_WHICH_INTRHANDLER,
-    CPU_WHICH_IRQ, CPU_WHICH_ITHREAD, CPU_WHICH_JAIL, CPU_WHICH_PID, CPU_WHICH_TID,
-    CPU_WHICH_TIDPID, CPUSET_BYTES, EXTERRCTL_DISABLE, EXTERRCTL_ENABLE,
+    CPU_LEVEL_CPUSET, CPU_LEVEL_ROOT, CPU_LEVEL_WHICH, CPU_WHICH_CPUSET, CPU_WHICH_DOMAIN,
+    CPU_WHICH_INTRHANDLER, CPU_WHICH_IRQ, CPU_WHICH_ITHREAD, CPU_WHICH_JAIL, CPU_WHICH_PID,
+    CPU_WHICH_TID, CPU_WHICH_TIDPID, CPUSET_BYTES, DOMAINSET_KERNEL_BYTES, DOMAINSET_MAXSIZE,
+    DOMAINSET_POLICY_INVALID, DOMAINSET_POLICY_MAX, EXTERRCTL_DISABLE, EXTERRCTL_ENABLE,
 };
 
 use alloc::sync::Arc;
@@ -125,12 +126,16 @@ impl Target {
     }
 }
 
-/// The numbered set `which` and `id` name: a set's id itself, a jail's
-/// root set (a jail below the caller's), or the set of the thread's or
-/// process's.
+/// The numbered set `which` and `id` name: a set's id itself (-1 for the
+/// caller's), a jail's root set (a jail below the caller's), or the set
+/// of the thread's or process's.
 fn set_of(which: u64, id: u64) -> Result<i32, Errno> {
     if which == u64::from(CPU_WHICH_CPUSET) {
         let id = i32::try_from(id.cast_signed()).map_err(|_| Errno::ESRCH)?;
+        // -1: the caller's own set (`cpuset_refbase` of its thread's).
+        if id == -1 {
+            return Ok(process()?.cpuset());
+        }
         crate::cpuset::mask(id)?;
         return Ok(id);
     }
@@ -389,6 +394,129 @@ pub(super) fn cpuset_setaffinity(
     match target {
         Target::Thread(t) => t.set_own_cpus(bits),
         Target::Process(p) => p.set_own_cpus(bits),
+    }
+    Ok(0)
+}
+
+/// A `domainset_t` size the domain calls take: from the kernel's set to
+/// user space's largest (`ERANGE` otherwise).
+fn domainset_size(size: u64) -> Result<usize, Errno> {
+    usize::try_from(size)
+        .ok()
+        .filter(|&n| (DOMAINSET_KERNEL_BYTES..=DOMAINSET_MAXSIZE as usize / 8).contains(&n))
+        .ok_or(Errno::ERANGE)
+}
+
+/// `EINVAL` for what a domain call's `which` names besides threads and
+/// sets: an interrupt or a domain, which take no domain policy.
+fn domain_which_check(which: u64) -> Result<(), Errno> {
+    if which == u64::from(CPU_WHICH_DOMAIN) || is_irq(which) {
+        return Err(Errno::EINVAL);
+    }
+    Ok(())
+}
+
+/// `cpuset_getdomain(level, which, id, domainsetsize, mask, policy)`
+/// (`kern_cpuset_getdomain`): the memory domains and policy of a thread
+/// (at `CPU_LEVEL_WHICH`; a process's last thread's), or of a numbered
+/// set or its root. One domain: the mask is always domain 0, a preferred
+/// domain included.
+pub(super) fn cpuset_getdomain(
+    level: u64,
+    which: u64,
+    id: u64,
+    size: u64,
+    mask: u64,
+    policy: u64,
+) -> SysResult {
+    let size = domainset_size(size)?;
+    let level = u32::try_from(level).map_err(|_| Errno::EINVAL)?;
+    check_capabilities(level, which, id)?;
+    domain_which_check(which)?;
+    let p = match level {
+        CPU_LEVEL_ROOT | CPU_LEVEL_CPUSET => {
+            crate::cpuset::policy(at_level(level, set_of(which, id)?))?
+        }
+        CPU_LEVEL_WHICH if names_set(which) => crate::cpuset::policy(set_of(which, id)?)?,
+        CPU_LEVEL_WHICH => match Target::find(which, id)? {
+            Target::Thread(t) => t.domain_policy(),
+            Target::Process(p) => p
+                .threads()
+                .last()
+                .map_or(crate::cpuset::FIRSTTOUCH, |t| t.domain_policy()),
+        },
+        _ => return Err(Errno::EINVAL),
+    };
+    let mut set = [0u8; DOMAINSET_MAXSIZE as usize / 8];
+    set[0] = 1;
+    uaccess::copy_out(mask, &set[..size]).map_err(|_| Errno::EFAULT)?;
+    uaccess::UserPtr::<i32>::new(policy)
+        .write(&i32::from(p))
+        .map_err(|_| Errno::EFAULT)?;
+    Ok(0)
+}
+
+/// `cpuset_setdomain(level, which, id, domainsetsize, mask, policy)`
+/// (`kern_cpuset_setdomain`, `domainset_populate`): any policy, over
+/// domain 0, the one there is (a preferred domain must be it alone); for
+/// a thread or every thread of a process, as its own, or for a numbered
+/// set or its root (`cpuset_modify_domain`).
+pub(super) fn cpuset_setdomain(
+    level: u64,
+    which: u64,
+    id: u64,
+    size: u64,
+    mask: u64,
+    policy: u64,
+) -> SysResult {
+    let level = u32::try_from(level).map_err(|_| Errno::EINVAL)?;
+    check_capabilities(level, which, id)?;
+    let size = domainset_size(size)?;
+    let mut set = [0u8; DOMAINSET_MAXSIZE as usize / 8];
+    uaccess::copy_in(&mut set[..size], mask).map_err(|_| Errno::EFAULT)?;
+    let policy = u32::try_from(super::int(policy)).map_err(|_| Errno::EINVAL)?;
+    if policy == DOMAINSET_POLICY_INVALID || policy > DOMAINSET_POLICY_MAX {
+        return Err(Errno::EINVAL);
+    }
+    // Past the kernel's set, nothing may be set.
+    if set[DOMAINSET_KERNEL_BYTES..].iter().any(|&b| b != 0) {
+        return Err(Errno::EINVAL);
+    }
+    let kernel = &set[..DOMAINSET_KERNEL_BYTES];
+    if kernel.iter().all(|&b| b == 0) {
+        return Err(Errno::EDEADLK);
+    }
+    // Only domain 0 exists (`all_domains`); a preferred domain is one,
+    // so it.
+    if kernel[0] & !1 != 0 || kernel[1..].iter().any(|&b| b != 0) {
+        return Err(Errno::EINVAL);
+    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "at most DOMAINSET_POLICY_MAX"
+    )]
+    let policy = policy as u8;
+    match level {
+        CPU_LEVEL_ROOT | CPU_LEVEL_CPUSET => {
+            domain_which_check(which)?;
+            let set = at_level(level, set_of(which, id)?);
+            crate::cpuset::modify_policy(&*process()?, set, policy)?;
+        }
+        CPU_LEVEL_WHICH if names_set(which) => {
+            crate::cpuset::modify_policy(&*process()?, set_of(which, id)?, policy)?;
+        }
+        CPU_LEVEL_WHICH => {
+            domain_which_check(which)?;
+            match Target::find(which, id)? {
+                Target::Thread(t) => t.set_domain_policy(policy),
+                Target::Process(p) => {
+                    for t in p.threads() {
+                        t.set_domain_policy(policy);
+                    }
+                }
+            }
+        }
+        _ => return Err(Errno::EINVAL),
     }
     Ok(0)
 }
@@ -689,4 +817,263 @@ pub(super) fn modfind(name: u64) -> SysResult {
         .position(|m| *m == name.as_slice())
         .map(|i| i as u64 + 1)
         .ok_or(Errno::ENOENT)
+}
+
+/// `uuidgen(store, count)`: `count` version-1 UUIDs, 1 to 2048 of them,
+/// consecutive in time (`sys_uuidgen`, `kern_uuidgen`).
+pub(super) fn uuidgen(store: u64, count: u64) -> SysResult {
+    let count = usize::try_from(super::int(count))
+        .ok()
+        .filter(|n| (1..=2048).contains(n))
+        .ok_or(Errno::EINVAL)?;
+    let mut out = alloc::vec::Vec::new();
+    out.try_reserve_exact(count).map_err(|_| Errno::ENOMEM)?;
+    out.resize(count, [0u8; 16]);
+    crate::uuid::generate(&mut out);
+    uaccess::copy_out(store, out.as_flattened()).map_err(|_| Errno::EFAULT)?;
+    Ok(0)
+}
+
+/// The `membarrier` commands there are (`MEMBARRIER_SUPPORTED_CMDS`).
+const MEMBARRIER_SUPPORTED: u32 = abi::thr::MEMBARRIER_CMD_GLOBAL
+    | abi::thr::MEMBARRIER_CMD_GLOBAL_EXPEDITED
+    | abi::thr::MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED
+    | abi::thr::MEMBARRIER_CMD_PRIVATE_EXPEDITED
+    | abi::thr::MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED
+    | abi::thr::MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE
+    | abi::thr::MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE
+    | abi::thr::MEMBARRIER_CMD_GET_REGISTRATIONS;
+
+/// `membarrier(cmd, flags, cpu_id)` (`kern_membarrier`): a full memory
+/// barrier on the CPUs that run the process's threads (`PRIVATE`, once
+/// registered) or any user thread (`GLOBAL`), by an interrupt to each;
+/// the registrations, which `execve` ends; and `QUERY`, the commands
+/// there are. `MEMBARRIER_CMD_GLOBAL` interrupts every CPU where FreeBSD
+/// waits for each to switch threads, and `GLOBAL_EXPEDITED` every CPU,
+/// not only those running a registered process (docs/compat-deviations.md).
+pub(super) fn membarrier(cmd: u64, flags: u64, _cpu_id: u64) -> SysResult {
+    use crate::proc::p2;
+    use abi::thr::{
+        MEMBARRIER_CMD_GET_REGISTRATIONS, MEMBARRIER_CMD_GLOBAL, MEMBARRIER_CMD_GLOBAL_EXPEDITED,
+        MEMBARRIER_CMD_PRIVATE_EXPEDITED, MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE,
+        MEMBARRIER_CMD_QUERY, MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED,
+        MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED,
+        MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE,
+    };
+    let cmd = super::int(cmd).cast_unsigned();
+    if super::int(flags) != 0 || cmd & !MEMBARRIER_SUPPORTED != 0 {
+        return Err(Errno::EINVAL);
+    }
+    if cmd == MEMBARRIER_CMD_QUERY {
+        return Ok(u64::from(MEMBARRIER_SUPPORTED));
+    }
+    let p = process()?;
+    let f = p.flag2.load(Ordering::Relaxed);
+    let register = |bit: u32| {
+        p.flag2.fetch_or(bit, Ordering::Relaxed);
+        Ok(0)
+    };
+    match cmd {
+        MEMBARRIER_CMD_GLOBAL_EXPEDITED if f & p2::MEMBAR_GLOBE == 0 => Err(Errno::EPERM),
+        MEMBARRIER_CMD_GLOBAL | MEMBARRIER_CMD_GLOBAL_EXPEDITED => {
+            crate::smp::barrier_cpus(all_cpus());
+            Ok(0)
+        }
+        MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED => register(p2::MEMBAR_GLOBE),
+        MEMBARRIER_CMD_PRIVATE_EXPEDITED if f & p2::MEMBAR_PRIVE == 0 => Err(Errno::EPERM),
+        MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE if f & p2::MEMBAR_PRIVE_SYNCORE == 0 => {
+            Err(Errno::EPERM)
+        }
+        MEMBARRIER_CMD_PRIVATE_EXPEDITED | MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE => {
+            crate::smp::barrier_cpus(p.space().loaded_cpus());
+            Ok(0)
+        }
+        MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED => register(p2::MEMBAR_PRIVE),
+        MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE => register(p2::MEMBAR_PRIVE_SYNCORE),
+        MEMBARRIER_CMD_GET_REGISTRATIONS => {
+            let mut res = 0;
+            for (bit, reg) in [
+                (p2::MEMBAR_GLOBE, MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED),
+                (p2::MEMBAR_PRIVE, MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED),
+                (
+                    p2::MEMBAR_PRIVE_SYNCORE,
+                    MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE,
+                ),
+            ] {
+                if f & bit != 0 {
+                    res |= reg;
+                }
+            }
+            Ok(u64::from(res))
+        }
+        // More than one command at once.
+        _ => Err(Errno::EINVAL),
+    }
+}
+
+/// A process `kcmp` compares (`kcmp_pget`): the caller, or one it may
+/// debug that is not exiting.
+fn kcmp_process(me: &Arc<Process>, pid: i32) -> Result<Arc<Process>, Errno> {
+    if pid == me.pid() {
+        return Ok(Arc::clone(me));
+    }
+    let p = crate::proc::find(pid).ok_or(Errno::ESRCH)?;
+    if p.has_exited() {
+        return Err(Errno::ESRCH);
+    }
+    me.can_debug(&p)?;
+    Ok(p)
+}
+
+/// `kcmp`'s order of two kernel objects (`kcmp_cmp`): 0 for the same,
+/// 1 if the first comes first, 2 if after.
+fn kcmp_order(a: usize, b: usize) -> u64 {
+    match a.cmp(&b) {
+        core::cmp::Ordering::Equal => 0,
+        core::cmp::Ordering::Less => 1,
+        core::cmp::Ordering::Greater => 2,
+    }
+}
+
+/// What a file is open on, for `KCMP_FILEOBJ` (`fo_cmp`): its kind and
+/// the object's address. Vnodes and named pipes are their vnode; kinds
+/// whose objects have one open file each are the file itself.
+fn kcmp_object(f: &Arc<crate::fs::file::File>) -> (u8, usize) {
+    use crate::fs::file::FileKind as K;
+    let file = Arc::as_ptr(f).addr();
+    match f.kind() {
+        K::Vnode(v) => (0, Arc::as_ptr(v.vnode.vnode()).addr()),
+        K::Fifo(v) => (1, Arc::as_ptr(v.vnode.vnode()).addr()),
+        K::Shm(m) => (2, Arc::as_ptr(m).addr()),
+        K::Timerfd(t) => (3, Arc::as_ptr(t).addr()),
+        K::Eventfd(e) => (4, Arc::as_ptr(e).addr()),
+        K::Pts(m) => (5, Arc::as_ptr(m).addr()),
+        K::Pipe(_) => (6, file),
+        K::Process(_) => (7, file),
+        K::Jail(_) => (8, file),
+        K::Socket(_) | K::Inet(_) | K::Netlink(_) => (9, file),
+        K::Kqueue(_) => (10, file),
+        K::Inotify(_) => (11, file),
+    }
+}
+
+/// `kcmp(pid1, pid2, type, idx1, idx2)` (`kern_kcmp`): whether two
+/// processes share a kernel object, and if not, an order of the two: an
+/// open file (`KCMP_FILE`), what two files are open on (`KCMP_FILEOBJ`;
+/// 3 for files of different kinds), the descriptor table, the signal
+/// actions, or the address space.
+pub(super) fn kcmp(
+    s: &sched::Sleepable,
+    pid1: u64,
+    pid2: u64,
+    ty: u64,
+    idx1: u64,
+    idx2: u64,
+) -> SysResult {
+    let me = process()?;
+    let p1 = kcmp_process(&me, super::int(pid1))?;
+    let p2 = kcmp_process(&me, super::int(pid2))?;
+    let ty = super::int(ty).cast_unsigned();
+    match ty {
+        abi::thr::KCMP_FILE | abi::thr::KCMP_FILEOBJ => {
+            let f1 = p1.files.lock(s).get(super::int(idx1))?;
+            let f2 = p2.files.lock(s).get(super::int(idx2))?;
+            if ty == abi::thr::KCMP_FILE {
+                return Ok(kcmp_order(Arc::as_ptr(&f1).addr(), Arc::as_ptr(&f2).addr()));
+            }
+            let (k1, o1) = kcmp_object(&f1);
+            let (k2, o2) = kcmp_object(&f2);
+            if k1 != k2 {
+                return Ok(3);
+            }
+            Ok(kcmp_order(o1, o2))
+        }
+        abi::thr::KCMP_FILES => Ok(kcmp_order(
+            Arc::as_ptr(&p1.files).addr(),
+            Arc::as_ptr(&p2.files).addr(),
+        )),
+        // Each process has signal actions of its own (no `RFSIGSHARE`).
+        abi::thr::KCMP_SIGHAND => Ok(kcmp_order(Arc::as_ptr(&p1).addr(), Arc::as_ptr(&p2).addr())),
+        abi::thr::KCMP_VM => Ok(kcmp_order(
+            Arc::as_ptr(&p1.space()).addr(),
+            Arc::as_ptr(&p2.space()).addr(),
+        )),
+        _ => Err(Errno::EINVAL),
+    }
+}
+
+/// What `abort2` logs, and the signal it ends the process with
+/// (`kern_abort2`): `SIGABRT`, or `SIGKILL` if what it was given cannot
+/// be read.
+fn abort2_reason(why: u64, nargs: u64, args: u64) -> (alloc::string::String, u32) {
+    use core::fmt::Write;
+    let mut msg = alloc::string::String::new();
+    if let Some(p) = Process::current() {
+        let comm = p.with_comm(|c| alloc::string::String::from_utf8_lossy(c).into_owned());
+        let _ = write!(
+            msg,
+            "{comm}(pid {} uid {}) aborted: ",
+            p.pid(),
+            p.cred().uid
+        );
+    }
+    let nargs = super::int(nargs);
+    let mut ok = (0..=16).contains(&nargs);
+    let n = usize::try_from(nargs).unwrap_or(0).min(16);
+    let mut raw = [0u8; 16 * 8];
+    if ok && n > 0 {
+        ok = args != 0 && uaccess::copy_in(&mut raw[..n * 8], args).is_ok();
+    }
+    if ok {
+        if why == 0 {
+            msg.push_str("(null)");
+        } else {
+            // At most 128 bytes of it.
+            let mut text = [0u8; 128];
+            match uaccess::copy_in_str(why, &mut text) {
+                Ok(len) => msg.push_str(&alloc::string::String::from_utf8_lossy(&text[..len])),
+                Err(uaccess::StrError::TooLong) => {
+                    msg.push_str(&alloc::string::String::from_utf8_lossy(&text));
+                }
+                Err(_) => ok = false,
+            }
+        }
+    }
+    if ok && n > 0 {
+        msg.push('(');
+        for (i, w) in raw[..n * 8].as_chunks::<8>().0.iter().enumerate() {
+            let a = u64::from_ne_bytes(*w);
+            let sep = if i == 0 { "" } else { ", " };
+            // The kernel's `%p`: no `0x` before a null pointer.
+            let _ = if a == 0 {
+                write!(msg, "{sep}0")
+            } else {
+                write!(msg, "{sep}{a:#x}")
+            };
+        }
+        msg.push(')');
+    }
+    if !ok {
+        while msg.ends_with(' ') {
+            msg.pop();
+        }
+        msg.push_str(" (Reason text inaccessible)");
+    }
+    msg.push('\n');
+    let sig = if ok {
+        abi::signal::SIGABRT
+    } else {
+        abi::signal::SIGKILL
+    };
+    (msg, sig)
+}
+
+/// `abort2(why, nargs, args)` (`kern_abort2`): logs why the process
+/// aborts, with up to 16 pointer arguments, and ends it with `SIGABRT`,
+/// or `SIGKILL` given what it cannot read.
+pub(super) fn abort2(s: &sched::Sleepable, why: u64, nargs: u64, args: u64) -> ! {
+    let (msg, sig) = abort2_reason(why, nargs, args);
+    crate::klog::log(abi::syslog::LOG_INFO, format_args!("{msg}"));
+    drop(msg);
+    crate::signal::kill_self(s, sig)
 }

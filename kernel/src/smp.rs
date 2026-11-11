@@ -270,7 +270,6 @@ enum Targets {
     AllOthers,
     One(CpuId),
     /// A set of CPUs, one bit each, never this one.
-    #[cfg_attr(target_arch = "aarch64", allow(dead_code))] // TLBI broadcasts there
     Mask(u64),
 }
 
@@ -304,6 +303,21 @@ pub(crate) fn ping(cpu: CpuId) {
     if cpu != hal::cpu_id() {
         cross_call(VirtAddr::new(0), 0, Targets::One(cpu));
     }
+}
+
+/// Makes every CPU in `mask` (one bit each) execute a full memory
+/// barrier, and waits until each has (`membarrier`'s
+/// `smp_rendezvous_cpus`): the cross-call interrupt, whose handler
+/// fences, and whose return synchronizes the instruction stream too
+/// (`cpu_sync_core`). This CPU fences itself. Same calling rules as
+/// [`shootdown`].
+pub(crate) fn barrier_cpus(mask: u64) {
+    core::sync::atomic::fence(Ordering::SeqCst);
+    let others = mask & !(1 << hal::cpu_id().0);
+    if others != 0 && sched::online_cpus() > 1 {
+        cross_call(VirtAddr::new(0), 0, Targets::Mask(others));
+    }
+    core::sync::atomic::fence(Ordering::SeqCst);
 }
 
 /// Sends the cross-call IPI to `targets`, asking each to flush
@@ -408,6 +422,8 @@ pub(crate) fn on_call_ipi() {
     } else if len > 0 {
         crate::mm::flush_range(va, len);
     }
+    // A full barrier for `membarrier`'s callers, before the answer.
+    core::sync::atomic::fence(Ordering::SeqCst);
     CALL_PENDING.fetch_sub(1, Ordering::AcqRel);
 }
 

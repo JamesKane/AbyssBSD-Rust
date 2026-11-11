@@ -50,6 +50,15 @@ pub const MADV_NOCORE: u32 = 8;
 pub const MADV_CORE: u32 = 9;
 pub const MADV_PROTECT: u32 = 10;
 
+/// `mincore`'s answer for a page.
+pub const MINCORE_INCORE: u8 = 0x1;
+pub const MINCORE_REFERENCED: u8 = 0x2;
+pub const MINCORE_MODIFIED: u8 = 0x4;
+pub const MINCORE_REFERENCED_OTHER: u8 = 0x8;
+pub const MINCORE_MODIFIED_OTHER: u8 = 0x10;
+pub const MINCORE_SUPER: u8 = 0x60;
+pub const MINCORE_PSIND_SHIFT: u32 = 5;
+
 /// `msync` flags.
 pub const MS_SYNC: u32 = 0x0000;
 pub const MS_ASYNC: u32 = 0x0001;
@@ -102,6 +111,13 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("MADV_NOCORE", MADV_NOCORE),
     c("MADV_CORE", MADV_CORE),
     c("MADV_PROTECT", MADV_PROTECT),
+    c("MINCORE_INCORE", MINCORE_INCORE as u32),
+    c("MINCORE_REFERENCED", MINCORE_REFERENCED as u32),
+    c("MINCORE_MODIFIED", MINCORE_MODIFIED as u32),
+    c("MINCORE_REFERENCED_OTHER", MINCORE_REFERENCED_OTHER as u32),
+    c("MINCORE_MODIFIED_OTHER", MINCORE_MODIFIED_OTHER as u32),
+    c("MINCORE_SUPER", MINCORE_SUPER as u32),
+    c("MINCORE_PSIND_SHIFT", MINCORE_PSIND_SHIFT),
     c("MS_SYNC", MS_SYNC),
     c("MS_ASYNC", MS_ASYNC),
     c("MS_INVALIDATE", MS_INVALIDATE),

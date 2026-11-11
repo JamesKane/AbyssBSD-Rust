@@ -127,6 +127,36 @@ pub(super) fn getrlimit(which: u64, rlp: u64) -> SysResult {
     Ok(0)
 }
 
+/// `getrlimitusage(which, flags, res)`: what limit `which` counts for
+/// the process now, the per-user ones for its real user, or with
+/// `GETRLIMITUSAGE_EUID` its effective one (`getrlimitusage_one`, as
+/// `kern.proc.rlimit_usage` reports it); `ENXIO` for a limit nothing
+/// counts.
+pub(super) fn getrlimitusage(s: &Sleepable, which: u64, flags: u64, res: u64) -> SysResult {
+    const GETRLIMITUSAGE_EUID: i32 = 0x0001;
+    let flags = int(flags);
+    if flags & !GETRLIMITUSAGE_EUID != 0 {
+        return Err(Errno::EINVAL);
+    }
+    // A `u_int`: the low 32 bits.
+    let which = int(which).cast_unsigned();
+    if usize::try_from(which).map_or(true, |w| w >= rlimit::NLIMITS) {
+        return Err(Errno::EINVAL);
+    }
+    let p = process()?;
+    let c = p.cred();
+    let uid = if flags & GETRLIMITUSAGE_EUID != 0 {
+        c.uid
+    } else {
+        c.ruid
+    };
+    let v = crate::kinfo::misc::usage_of(s, &p, which, uid).ok_or(Errno::ENXIO)?;
+    UserPtr::<u64>::new(res)
+        .write(&v)
+        .map_err(|_| Errno::EFAULT)?;
+    Ok(0)
+}
+
 /// `setrlimit(which, rlp)` (`kern_proc_setrlimit`): raising either limit
 /// past the hard one takes `PRIV_PROC_SETRLIMIT`; a soft limit above the
 /// hard one comes down to it, and some limits stop at the system's
@@ -157,9 +187,9 @@ pub(super) fn setrlimit(s: &Sleepable, which: u64, rlp: u64) -> SysResult {
     match which {
         rlimit::DATA => clamp(&mut l, crate::exec::MAXDSIZ),
         rlimit::STACK => clamp(&mut l, crate::exec::MAXSSIZ),
-        rlimit::NOFILE => clamp(&mut l, crate::proc::MAXFILESPERPROC),
+        rlimit::NOFILE => clamp(&mut l, crate::proc::maxfilesperproc()),
         rlimit::NPROC => {
-            clamp(&mut l, crate::proc::MAXPROCPERUID);
+            clamp(&mut l, crate::proc::maxprocperuid());
             l.rlim_cur = l.rlim_cur.max(1);
             l.rlim_max = l.rlim_max.max(1);
         }

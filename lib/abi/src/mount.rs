@@ -144,6 +144,60 @@ pub const MNT_FORCE: u64 = 0x0008_0000;
 /// `unmount`: the path is `FSID:<val0>:<val1>`.
 pub const MNT_BYFSID: u64 = 0x0800_0000;
 
+/// `struct oexport_args`, the export information the old `mount(2)`
+/// arguments carry: kept whole, never read (no file system here exports).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OexportArgs {
+    pub ex_flags: i32,
+    pub ex_root: u32,
+    /// `struct xucred ex_anon` and the address, mask, and index-file
+    /// fields after it.
+    pub rest: [u64; 16],
+}
+
+/// `struct ufs_args`: UFS's arguments to the old `mount(2)`
+/// (`ffs_cmount`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UfsArgs {
+    /// The device's path.
+    pub fspec: u64,
+    pub export: OexportArgs,
+}
+
+/// `struct msdosfs_args`: msdosfs's arguments to the old `mount(2)`
+/// (`msdosfs_cmount`). The kernel's own (its header shows it only under
+/// `_KERNEL`), so `abi-check` cannot see it; its size is pinned below.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MsdosfsArgs {
+    pub fspec: u64,
+    pub export: OexportArgs,
+    pub uid: u32,
+    pub gid: u32,
+    pub mask: u16,
+    pub _pad0: u16,
+    /// `MSDOSFSMNT_*`.
+    pub flags: i32,
+    pub unused1: i32,
+    pub unused2: [u16; 128],
+    pub _pad1: u32,
+    pub cs_win: u64,
+    pub cs_dos: u64,
+    pub cs_local: u64,
+    pub dirmask: u16,
+    pub _pad2: [u16; 3],
+}
+const _: () =
+    assert!(size_of::<MsdosfsArgs>() == 456 && core::mem::offset_of!(MsdosfsArgs, dirmask) == 448);
+
+/// `msdosfs_args` flags (`fs/msdosfs/msdosfsmount.h`).
+pub const MSDOSFSMNT_SHORTNAME: i32 = 1;
+pub const MSDOSFSMNT_LONGNAME: i32 = 2;
+pub const MSDOSFSMNT_NOWIN95: i32 = 4;
+pub const MSDOSFSMNT_KICONV: i32 = 0x10;
+
 /// `getfsstat` modes.
 pub const MNT_WAIT: u32 = 1;
 pub const MNT_NOWAIT: u32 = 2;

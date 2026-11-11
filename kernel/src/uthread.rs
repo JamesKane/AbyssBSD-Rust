@@ -24,7 +24,7 @@
 
 use alloc::collections::BTreeMap;
 use alloc::sync::{Arc, Weak};
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use abi::errno::Errno;
 use abi::kinfo::MAXCOMLEN;
@@ -91,6 +91,9 @@ pub(crate) fn find(tid: i32) -> Option<Arc<UserThread>> {
 pub(crate) struct Cpus {
     pub(crate) mask: u64,
     pub(crate) own: bool,
+    /// A memory-domain policy of its own (`DOMAINSET_POLICY_*`), or 0 to
+    /// follow its set's.
+    pub(crate) domain: u8,
 }
 
 /// The CPU a thread with set `mask` is bound to: its one CPU, if it has
@@ -157,6 +160,8 @@ pub(crate) struct UserThread {
     cpus: AtomicU64,
     /// They are its own, not its set's (see [`Cpus`]).
     own_cpus: AtomicBool,
+    /// Its own memory-domain policy, 0 for its set's (see [`Cpus`]).
+    domain: AtomicU8,
     /// The TLS base `sysarch(AMD64_SET_TLSBASE)` recorded, `u64::MAX` for
     /// none.
     tls_base: AtomicU64,
@@ -209,6 +214,7 @@ impl UserThread {
                 rtprio: SpinLock::new(rtprio),
                 cpus: AtomicU64::new(cpus.mask),
                 own_cpus: AtomicBool::new(cpus.own),
+                domain: AtomicU8::new(cpus.domain),
                 tls_base: AtomicU64::new(tls_base.unwrap_or(u64::MAX)),
                 woken: AtomicBool::new(false),
                 suspend_wait: WaitQueue::new(),
@@ -307,7 +313,24 @@ impl UserThread {
         Cpus {
             mask: self.cpus(),
             own: self.own_cpus.load(Ordering::Relaxed),
+            domain: self.domain.load(Ordering::Relaxed),
         }
+    }
+
+    /// Its memory-domain policy: its own, or its set's.
+    pub(crate) fn domain_policy(&self) -> u8 {
+        crate::cpuset::thread_policy(self.domain.load(Ordering::Relaxed), self.process.cpuset())
+    }
+
+    /// Gives it a memory-domain policy of its own (`_cpuset_setthread`
+    /// with a domain set); its set's own is none of its own.
+    pub(crate) fn set_domain_policy(&self, policy: u8) {
+        let own = if crate::cpuset::policy(self.process.cpuset()) == Ok(policy) {
+            0
+        } else {
+            policy
+        };
+        self.domain.store(own, Ordering::Relaxed);
     }
 
     /// Gives it CPUs of its own (`cpuset_setthread`, an anonymous set).

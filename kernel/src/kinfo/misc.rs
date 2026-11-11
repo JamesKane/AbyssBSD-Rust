@@ -36,9 +36,15 @@ unsafe impl Plain for KinfoLockf {}
 /// The program's text and data sizes in pages (`vm_tsize`, `vm_dsize`),
 /// from its program headers as exec sized them (`__elfN(enforce_limits)`):
 /// the largest executable segment is the text, the last other one the
-/// data, each from its page to the end of its memory, rounded up.
+/// data, each from its page to the end of its memory, rounded up, and the
+/// data's end where `break` has moved it since.
 pub(crate) fn image_sizes(s: &Sleepable, p: &Process) -> (u64, u64) {
-    image_layout(s, p).map_or((0, 0), |l| (l.1, l.3))
+    let (tsize, dsize) = image_layout(s, p).map_or((0, 0), |l| (l.1, l.3));
+    let (_, bytes) = p.space().data_segment();
+    if bytes != 0 {
+        return (tsize, bytes / ::vm::PAGE_SIZE);
+    }
+    (tsize, dsize)
 }
 
 /// The text's and data's first page and sizes in pages, relative to the
@@ -126,11 +132,11 @@ pub(crate) fn ps_strings(p: &Process) -> u64 {
     p.layout().stack_top - core::mem::size_of::<abi::exec::PsStrings>() as u64
 }
 
-/// What `which`'s limit counts for `p` now (`getrlimitusage_one`), or
-/// `None` where nothing is counted (FreeBSD's `ENXIO`).
-fn usage_of(s: &Sleepable, p: &Process, which: u32) -> Option<u64> {
+/// What `which`'s limit counts for `p` now (`getrlimitusage_one`), the
+/// per-user limits counting user `uid`'s, or `None` where nothing is
+/// counted (FreeBSD's `ENXIO`).
+pub(crate) fn usage_of(s: &Sleepable, p: &Process, which: u32, uid: u32) -> Option<u64> {
     let page = ::vm::PAGE_SIZE;
-    let ruid = p.cred().ruid;
     Some(match which {
         rlimit::CPU => crate::time::ticks_to_ns(p.runtime()) / 1_000_000_000,
         rlimit::DATA => image_sizes(s, p).1 * page,
@@ -145,11 +151,11 @@ fn usage_of(s: &Sleepable, p: &Process, which: u32) -> Option<u64> {
                 * page
         }
         rlimit::MEMLOCK => p.space().wired().count * page,
-        rlimit::NPROC => u64::try_from(Process::count_of(ruid)).unwrap_or(0),
+        rlimit::NPROC => u64::try_from(Process::count_of(uid)).unwrap_or(0),
         rlimit::NOFILE => u64::try_from(p.files.lock(s).count()).unwrap_or(0),
         rlimit::VMEM => super::space_sizes(s, p).0,
-        rlimit::NPTS => crate::uidinfo::count(ruid, crate::uidinfo::Kind::Ptys),
-        rlimit::KQUEUES => crate::uidinfo::count(ruid, crate::uidinfo::Kind::Kqueues),
+        rlimit::NPTS => crate::uidinfo::count(uid, crate::uidinfo::Kind::Ptys),
+        rlimit::KQUEUES => crate::uidinfo::count(uid, crate::uidinfo::Kind::Kqueues),
         rlimit::SBSIZE | rlimit::SWAP | rlimit::UMTXP | rlimit::PIPEBUF => 0,
         _ => return None,
     })
@@ -464,7 +470,8 @@ pub(crate) fn add_nodes(t: &mut Tree, kern: sysctl::NodeId, procs: sysctl::NodeI
             let p = process(pid, Access::Debug)?;
             let s = sleepable();
             let value = |w: u32| {
-                usage_of(&s, &p, w).map_or(-1i64, |v| i64::try_from(v).unwrap_or(i64::MAX))
+                usage_of(&s, &p, w, p.cred().ruid)
+                    .map_or(-1i64, |v| i64::try_from(v).unwrap_or(i64::MAX))
             };
             match one {
                 Some(w) if w as usize >= rlimit::NLIMITS => return Err(ReadError::Invalid),

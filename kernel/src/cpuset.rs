@@ -9,9 +9,17 @@
 //! A thread whose mask is its set's has none of its own, and takes a new
 //! set's whole (`cpuset_setproc_setthread_mask` decides the same way).
 //!
+//! Each set also has a memory-domain policy (`cs_domain`). There is one
+//! memory domain, so a policy is all a domain set says: the domains are
+//! always domain 0, and a preferred one is it. A new set takes its
+//! parent's policy, a set's change carries to the sets under it that had
+//! its old one (`cpuset_update_domain`), and a thread with a policy of
+//! its own (`cpuset_setdomain` at `CPU_LEVEL_WHICH`) keeps it; one
+//! without follows its set's.
+//!
 //! Behavior reference: sys/kern/kern_cpuset.c (`sys_cpuset`,
 //! `kern_cpuset_getid`, `kern_cpuset_setid`, `cpuset_modify`,
-//! `cpuset_setproc`).
+//! `cpuset_modify_domain`, `cpuset_setproc`).
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -35,7 +43,12 @@ struct Set {
     parent: i32,
     /// A root set (`CPU_SET_ROOT`): the first two and each jail's.
     root: bool,
+    /// Its memory-domain policy (`DOMAINSET_POLICY_*`).
+    policy: u8,
 }
+
+/// The policy sets 0 and 1 start with (`domainset0`: first-touch).
+pub(crate) const FIRSTTOUCH: u8 = 2;
 
 /// The sets besides the first two, by id, and set 1 once narrowed.
 static SETS: SpinLock<BTreeMap<i32, Set>> = SpinLock::new(BTreeMap::new());
@@ -53,6 +66,7 @@ fn first() -> Set {
         mask: all(),
         parent: ROOT,
         root: true,
+        policy: FIRSTTOUCH,
     }
 }
 
@@ -65,11 +79,64 @@ fn get(id: i32) -> Option<Set> {
     }
 }
 
-/// A new set under `parent` with `mask`.
+/// A new set under `parent` with `mask`, and the parent's domain policy
+/// (`cpuset_init`).
 fn insert(parent: i32, mask: u64, root: bool) -> i32 {
+    let policy = get(parent).map_or(FIRSTTOUCH, |p| p.policy);
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
-    SETS.lock().insert(id, Set { mask, parent, root });
+    SETS.lock().insert(
+        id,
+        Set {
+            mask,
+            parent,
+            root,
+            policy,
+        },
+    );
     id
+}
+
+/// Set `id`'s domain policy; `ESRCH` for no such set.
+pub(crate) fn policy(id: i32) -> Result<u8, Errno> {
+    get(id).map(|s| s.policy).ok_or(Errno::ESRCH)
+}
+
+/// The domain policy a thread with `own` (0 for none) in set `set`
+/// allocates by.
+pub(crate) fn thread_policy(own: u8, set: i32) -> u8 {
+    if own != 0 {
+        own
+    } else {
+        policy(set).unwrap_or(FIRSTTOUCH)
+    }
+}
+
+/// `cpuset_modify_domain`: set `id` takes `new` (`PRIV_SCHED_CPUSET`;
+/// `EPERM` for the set of every CPU, which is read-only, or in a jail
+/// for a root set), and so do the sets under it that had its policy
+/// (`cpuset_update_domain`).
+pub(crate) fn modify_policy(me: &Process, id: i32, new: u8) -> Result<(), Errno> {
+    me.priv_check(crate::cred::Priv::SchedCpuset)?;
+    let set = get(id).ok_or(Errno::ESRCH)?;
+    if me.cred().jailed() && set.root {
+        return Err(Errno::EPERM);
+    }
+    if id == ROOT {
+        return Err(Errno::EPERM);
+    }
+    let mut sets = SETS.lock();
+    // Parents before children, each with the policy it had.
+    let mut todo: Vec<(i32, u8)> = alloc::vec![(id, set.policy)];
+    while let Some((s, old)) = todo.pop() {
+        for (&cid, c) in sets.iter() {
+            if c.parent == s && cid != s && c.policy == old {
+                todo.push((cid, c.policy));
+            }
+        }
+        // Only `id` can be missing: set 1, never changed before.
+        sets.entry(s).or_insert(set).policy = new;
+    }
+    Ok(())
 }
 
 /// Set `id`'s CPUs; `ESRCH` for no such set.

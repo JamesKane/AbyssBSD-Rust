@@ -296,6 +296,9 @@ pub(crate) struct AddressSpace {
     wxorx: core::sync::atomic::AtomicBool,
     /// The pages `mlock` wired (`MAP_ENTRY_USER_WIRED`).
     wired: SpinLock<Wired>,
+    /// The program's data segment, as `break` moves its end: its first
+    /// page and its size in bytes (`vm_daddr`, `vm_dsize`).
+    data: SpinLock<(u64, u64)>,
 }
 
 /// User-wired pages, as ranges of page numbers (`[start, end)`), merged.
@@ -567,6 +570,7 @@ impl AddressSpace {
             sysv_shm: sync::PreemptLock::new(alloc::vec::Vec::new()),
             wxorx: core::sync::atomic::AtomicBool::new(false),
             wired: SpinLock::new(Wired::default()),
+            data: SpinLock::new((0, 0)),
         }))
     }
 
@@ -932,6 +936,7 @@ impl AddressSpace {
         drop(map);
         let child = Self::with_map(forked.child)?;
         child.set_wxorx(self.wxorx());
+        *child.data.lock() = *self.data.lock();
         // The child shares the segments attached (`shmfork`).
         let attached = self.sysv_shm.lock().clone();
         crate::sysv::shm_forked(&attached);
@@ -1143,6 +1148,86 @@ impl AddressSpace {
             done += n;
         }
         done
+    }
+
+    /// The program's data segment: its first page and its size in bytes
+    /// (`vm_daddr`, `vm_dsize`).
+    pub(crate) fn data_segment(&self) -> (u64, u64) {
+        *self.data.lock()
+    }
+
+    /// Records the program's data segment, as `execve` sized it.
+    pub(crate) fn set_data_segment(&self, base: u64, size: u64) {
+        *self.data.lock() = (base, size);
+    }
+
+    /// Moves the data segment's end to `new`, page-aligned (`kern_break`):
+    /// up maps zero-filled memory after it, read-write, which must not
+    /// overlap a mapping (`MapError`), and wired after
+    /// `mlockall(MCL_FUTURE)`; down unmaps what is past it. Checking the
+    /// limits is the caller's, with the map locked: `allowed` gets the old
+    /// end and the space's size, and refuses with `false` (`NoSpace`).
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn set_break(
+        &self,
+        s: &Sleepable,
+        new: u64,
+        allowed: impl FnOnce(u64, u64) -> bool,
+    ) -> Result<(), SpaceError> {
+        let mut map = self.map.lock(s);
+        let (base, size) = *self.data.lock();
+        let old = base + size;
+        let total = map
+            .entries()
+            .map(|e| e.range().end.get() - e.range().start.get())
+            .sum();
+        if !allowed(old, total) {
+            return Err(MapError::NoSpace.into());
+        }
+        let range = VirtAddr::new(old.min(new))..VirtAddr::new(old.max(new));
+        if new > old {
+            map.insert(Entry::anonymous(range.clone(), Prot::RW, Prot::ALL))?;
+            drop(map);
+            if self.wired().future {
+                let _ = self.wire(s, range);
+            }
+        } else if new < old {
+            self.unmap_locked(&mut map, range)?;
+        }
+        self.data.lock().1 = new - base;
+        Ok(())
+    }
+
+    /// How `va`'s page is mapped, if it is (`pmap_mincore`'s lookup).
+    pub(crate) fn mapping(&self, va: VirtAddr) -> Option<pt::Translation> {
+        self.tables.lock().translate(&mut Frames, va)
+    }
+
+    /// Whether `[start, end)` is mapped throughout, without holes
+    /// (`kern_mincore`'s walk of the entries).
+    pub(crate) fn mapped_throughout(&self, s: &Sleepable, start: VirtAddr, end: VirtAddr) -> bool {
+        let map = self.map.lock(s);
+        let mut at = start;
+        for e in map.entries() {
+            let r = e.range();
+            if r.end <= at {
+                continue;
+            }
+            if r.start > at {
+                return false;
+            }
+            at = r.end;
+            if at >= end {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The CPUs this space is loaded on now, one bit each
+    /// (`pmap_active_cpus`).
+    pub(crate) fn loaded_cpus(&self) -> u64 {
+        self.loaded_on.load(Ordering::SeqCst)
     }
 
     /// The physical page `va` is mapped to, if it is (for tests).

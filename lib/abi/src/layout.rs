@@ -936,6 +936,14 @@ pub static LAYOUTS: &[StructLayout] = &[
         d_pad1 => "d_pad1",
         d_name => "d_name",
     }),
+    layout!(crate::mount::OexportArgs, "struct oexport_args", ["sys/param.h", "sys/mount.h"], All, {
+        ex_flags => "ex_flags",
+        ex_root => "ex_root",
+    }),
+    layout!(crate::mount::UfsArgs, "struct ufs_args", ["sys/param.h", "sys/mount.h", "ufs/ufs/extattr.h", "ufs/ufs/quota.h", "ufs/ufs/ufsmount.h"], All, {
+        fspec => "fspec",
+        export => "export",
+    }),
     layout!(crate::mount::Xvfsconf, "struct xvfsconf", ["sys/param.h", "sys/mount.h"], All, {
         vfc_vfsops => "vfc_vfsops",
         vfc_name => "vfc_name",

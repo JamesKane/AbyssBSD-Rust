@@ -174,7 +174,7 @@ fn start_route_expiry() {
 
 /// `devd`'s interface events, from the system's VNET (`if_attach`'s,
 /// `ether_ifattach`'s, `if_detach`'s, and `do_link_state_change`'s
-/// `devctl_notify`).
+/// `devctl_notify`), and Ethernet addresses for the UUID generator.
 struct Devd;
 
 impl net::announce::Listener for Devd {
@@ -187,6 +187,17 @@ impl net::announce::Listener for Devd {
                 m.notify("IFNET", &ifp.name, kind, None);
                 if *arrival && ifp.ty == abi::net::IFT_ETHER {
                     m.notify("ETHERNET", &ifp.name, "IFATTACH", None);
+                }
+                // The UUID generator's node (`ether_ifattach`'s
+                // `uuid_ether_add`, `ether_ifdetach`'s `uuid_ether_del`).
+                if ifp.ty == abi::net::IFT_ETHER
+                    && let Some(mac) = ifp.lladdr
+                {
+                    if *arrival {
+                        crate::uuid::ether_add(mac);
+                    } else {
+                        crate::uuid::ether_del(mac);
+                    }
                 }
             }
             Event::Link { ifp, up } => {

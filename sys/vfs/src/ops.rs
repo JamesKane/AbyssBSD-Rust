@@ -438,7 +438,9 @@ fn ends_differ(from: &Arc<Vnode>, to: Option<&Arc<Vnode>>) -> Result<bool, Errno
 
 /// Renames `fname` in `fdir` to `tname` in `tdir` (`rename`), with
 /// FreeBSD's rules: a file over a file, a directory over an empty
-/// directory, never a directory into itself.
+/// directory, never a directory into itself; with `noreplace`
+/// (`AT_RENAME_NOREPLACE`), never over anything (`EEXIST`, before the
+/// other checks of the target, as `kern_renameat` makes it).
 pub fn rename(
     s: &Sleepable,
     fdir: &Arc<Vnode>,
@@ -446,6 +448,7 @@ pub fn rename(
     tdir: &Arc<Vnode>,
     tname: &[u8],
     cred: &Cred,
+    noreplace: bool,
 ) -> Result<(), Errno> {
     for n in [fname, tname] {
         match n {
@@ -472,6 +475,9 @@ pub fn rename(
         let st = fdir.write(s);
         from = entry(s, fdir, &st, fname)?.ok_or(Errno::ENOENT)?;
         to = entry(s, fdir, &st, tname)?;
+        if noreplace && to.is_some() {
+            return Err(Errno::EEXIST);
+        }
         if !ends_differ(&from, to.as_ref())? {
             return Ok(());
         }
@@ -490,6 +496,11 @@ pub fn rename(
         let tst = tdir.read(s);
         to = entry(s, tdir, &tst, tname)?;
         drop(tst);
+        // A target that appears once the locks are taken starts the
+        // rename over, and is found here.
+        if noreplace && to.is_some() {
+            return Err(Errno::EEXIST);
+        }
         if !ends_differ(&from, to.as_ref())? {
             return Ok(());
         }
@@ -520,7 +531,7 @@ pub fn rename(
             // Lost a race with a creation or removal: start over.
             drop(held);
             drop(_serial);
-            return rename(s, fdir, fname, tdir, tname, cred);
+            return rename(s, fdir, fname, tdir, tname, cred, noreplace);
         }
     }
     let fda = attr_of(guard_of(&mut held, fdir))?;

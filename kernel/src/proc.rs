@@ -534,10 +534,25 @@ pub(crate) enum Suspension {
     Single(Mode),
 }
 
-/// `kern.maxfilesperproc`: the most `RLIMIT_NOFILE` may be.
+/// `kern.maxfilesperproc`'s value at boot: the most `RLIMIT_NOFILE` may
+/// be.
 pub(crate) const MAXFILESPERPROC: u64 = 116_964;
-/// `kern.maxprocperuid`: the most `RLIMIT_NPROC` may be.
+/// `kern.maxprocperuid`'s value at boot: the most `RLIMIT_NPROC` may be.
 pub(crate) const MAXPROCPERUID: u64 = 6_000;
+/// `kern.maxfilesperproc` (`CTLFLAG_RW`) now.
+pub(crate) static MAX_FILES_PER_PROC: AtomicU64 = AtomicU64::new(MAXFILESPERPROC);
+/// `kern.maxprocperuid` (`CTLFLAG_RW`) now.
+pub(crate) static MAX_PROC_PER_UID: AtomicU64 = AtomicU64::new(MAXPROCPERUID);
+
+/// `maxfilesperproc`.
+pub(crate) fn maxfilesperproc() -> u64 {
+    MAX_FILES_PER_PROC.load(Ordering::Relaxed)
+}
+
+/// `maxprocperuid`.
+pub(crate) fn maxprocperuid() -> u64 {
+    MAX_PROC_PER_UID.load(Ordering::Relaxed)
+}
 
 /// The CPU time a process may use before the next `SIGXCPU`, in seconds
 /// (`p_cpulimit`), checked once a second while one is finite.
@@ -621,12 +636,12 @@ pub(crate) fn default_limits() -> [Rlimit; rlimit::NLIMITS] {
     };
     l[rlimit::CORE as usize] = inf;
     l[rlimit::NOFILE as usize] = Rlimit {
-        rlim_cur: MAXFILESPERPROC,
-        rlim_max: MAXFILESPERPROC,
+        rlim_cur: maxfilesperproc(),
+        rlim_max: maxfilesperproc(),
     };
     l[rlimit::NPROC as usize] = Rlimit {
-        rlim_cur: MAXPROCPERUID,
-        rlim_max: MAXPROCPERUID,
+        rlim_cur: maxprocperuid(),
+        rlim_max: maxprocperuid(),
     };
     l
 }
@@ -762,6 +777,11 @@ pub(crate) mod p2 {
     pub(crate) const NO_NEW_PRIVS: u32 = 0x0000_8000;
     pub(crate) const WXORX_DISABLE: u32 = 0x0001_0000;
     pub(crate) const WXORX_ENABLE_EXEC: u32 = 0x0002_0000;
+    /// `membarrier` registrations, which `execve` ends and children do
+    /// not inherit.
+    pub(crate) const MEMBAR_PRIVE: u32 = 0x0010_0000;
+    pub(crate) const MEMBAR_PRIVE_SYNCORE: u32 = 0x0020_0000;
+    pub(crate) const MEMBAR_GLOBE: u32 = 0x0040_0000;
     pub(crate) const LOGSIGEXIT_ENABLE: u32 = 0x0080_0000;
     pub(crate) const LOGSIGEXIT_CTL: u32 = 0x0100_0000;
     /// What a child inherits (`fork1`).
@@ -934,6 +954,7 @@ impl NewThread {
             cpus: crate::uthread::Cpus {
                 mask: cpu.map_or(u64::MAX, |c| 1 << c.0),
                 own: false,
+                domain: 0,
             },
             rtprio: crate::uthread::NORMAL,
             context: None,
@@ -1795,6 +1816,7 @@ impl Process {
                     crate::uthread::Cpus {
                         mask: u64::MAX,
                         own: false,
+                        domain: 0,
                     },
                 ));
         let new = NewThread {
@@ -1963,6 +1985,7 @@ impl Process {
         if f2 & p2::STKGAP_DISABLE_EXEC == 0 {
             clear |= p2::STKGAP_DISABLE;
         }
+        clear |= p2::MEMBAR_PRIVE | p2::MEMBAR_PRIVE_SYNCORE | p2::MEMBAR_GLOBE;
         self.flag2.fetch_and(!clear, Ordering::Relaxed);
         self.exterr.store(0, Ordering::Relaxed);
         crate::event::proc_execed(self);

@@ -68,6 +68,41 @@ pub const CPU_WHICH_TIDPID: u32 = 9;
 pub const CPU_SETSIZE: u32 = 1024;
 /// Bytes in a `cpuset_t`.
 pub const CPUSET_BYTES: usize = CPU_SETSIZE as usize / 8;
+pub const CPU_WHICH_DOMAIN: u32 = 6;
+
+/// Memory domain policies (`sys/domainset.h`).
+pub const DOMAINSET_POLICY_INVALID: u32 = 0;
+pub const DOMAINSET_POLICY_ROUNDROBIN: u32 = 1;
+pub const DOMAINSET_POLICY_FIRSTTOUCH: u32 = 2;
+pub const DOMAINSET_POLICY_PREFER: u32 = 3;
+pub const DOMAINSET_POLICY_INTERLEAVE: u32 = 4;
+pub const DOMAINSET_POLICY_MAX: u32 = DOMAINSET_POLICY_INTERLEAVE;
+/// Bytes in the kernel's `domainset_t` (`MAXMEMDOM` bits): the least a
+/// domain call takes.
+pub const DOMAINSET_KERNEL_BYTES: usize = 8;
+/// Bits in user space's `domainset_t` (`DOMAINSET_MAXSIZE`): the most a
+/// domain call takes.
+pub const DOMAINSET_MAXSIZE: u32 = 256;
+
+/// `membarrier` commands (`sys/membarrier.h`), one bit each.
+pub const MEMBARRIER_CMD_QUERY: u32 = 0;
+pub const MEMBARRIER_CMD_GLOBAL: u32 = 0x1;
+pub const MEMBARRIER_CMD_GLOBAL_EXPEDITED: u32 = 0x2;
+pub const MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED: u32 = 0x4;
+pub const MEMBARRIER_CMD_PRIVATE_EXPEDITED: u32 = 0x8;
+pub const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED: u32 = 0x10;
+pub const MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE: u32 = 0x20;
+pub const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE: u32 = 0x40;
+pub const MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ: u32 = 0x80;
+pub const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ: u32 = 0x100;
+pub const MEMBARRIER_CMD_GET_REGISTRATIONS: u32 = 0x200;
+
+/// `kcmp` types (`sys/unistd.h`).
+pub const KCMP_FILE: u32 = 100;
+pub const KCMP_FILEOBJ: u32 = 101;
+pub const KCMP_FILES: u32 = 102;
+pub const KCMP_SIGHAND: u32 = 103;
+pub const KCMP_VM: u32 = 104;
 
 pub const SIGFASTBLOCK_SETPTR: u32 = 1;
 pub const SIGFASTBLOCK_UNBLOCK: u32 = 2;
@@ -117,6 +152,57 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("CPU_WHICH_JAIL", CPU_WHICH_JAIL, "sys/cpuset.h"),
     c("CPU_WHICH_TIDPID", CPU_WHICH_TIDPID, "sys/cpuset.h"),
     c("CPU_SETSIZE", CPU_SETSIZE, "sys/cpuset.h"),
+    c("CPU_WHICH_DOMAIN", CPU_WHICH_DOMAIN, "sys/cpuset.h"),
+    d("DOMAINSET_POLICY_INVALID", DOMAINSET_POLICY_INVALID),
+    d("DOMAINSET_POLICY_ROUNDROBIN", DOMAINSET_POLICY_ROUNDROBIN),
+    d("DOMAINSET_POLICY_FIRSTTOUCH", DOMAINSET_POLICY_FIRSTTOUCH),
+    d("DOMAINSET_POLICY_PREFER", DOMAINSET_POLICY_PREFER),
+    d("DOMAINSET_POLICY_INTERLEAVE", DOMAINSET_POLICY_INTERLEAVE),
+    d("DOMAINSET_POLICY_MAX", DOMAINSET_POLICY_MAX),
+    d("DOMAINSET_MAXSIZE", DOMAINSET_MAXSIZE),
+    m("MEMBARRIER_CMD_QUERY", MEMBARRIER_CMD_QUERY),
+    m("MEMBARRIER_CMD_GLOBAL", MEMBARRIER_CMD_GLOBAL),
+    m(
+        "MEMBARRIER_CMD_GLOBAL_EXPEDITED",
+        MEMBARRIER_CMD_GLOBAL_EXPEDITED,
+    ),
+    m(
+        "MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED",
+        MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED,
+    ),
+    m(
+        "MEMBARRIER_CMD_PRIVATE_EXPEDITED",
+        MEMBARRIER_CMD_PRIVATE_EXPEDITED,
+    ),
+    m(
+        "MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED",
+        MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED,
+    ),
+    m(
+        "MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE",
+        MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE,
+    ),
+    m(
+        "MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE",
+        MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE,
+    ),
+    m(
+        "MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ",
+        MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ,
+    ),
+    m(
+        "MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ",
+        MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ,
+    ),
+    m(
+        "MEMBARRIER_CMD_GET_REGISTRATIONS",
+        MEMBARRIER_CMD_GET_REGISTRATIONS,
+    ),
+    c("KCMP_FILE", KCMP_FILE, "sys/unistd.h"),
+    c("KCMP_FILEOBJ", KCMP_FILEOBJ, "sys/unistd.h"),
+    c("KCMP_FILES", KCMP_FILES, "sys/unistd.h"),
+    c("KCMP_SIGHAND", KCMP_SIGHAND, "sys/unistd.h"),
+    c("KCMP_VM", KCMP_VM, "sys/unistd.h"),
     c(
         "SIGFASTBLOCK_SETPTR",
         SIGFASTBLOCK_SETPTR,
@@ -138,6 +224,14 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("EXTERRCTL_ENABLE", EXTERRCTL_ENABLE, "sys/exterrvar.h"),
     c("EXTERRCTL_DISABLE", EXTERRCTL_DISABLE, "sys/exterrvar.h"),
 ];
+
+const fn d(c_name: &'static str, value: u32) -> ConstValue {
+    c(c_name, value, "sys/domainset.h")
+}
+
+const fn m(c_name: &'static str, value: u32) -> ConstValue {
+    c(c_name, value, "sys/membarrier.h")
+}
 
 const fn c(c_name: &'static str, value: u32, header: &'static str) -> ConstValue {
     ConstValue {

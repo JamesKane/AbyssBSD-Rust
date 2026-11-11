@@ -751,5 +751,41 @@ pub(crate) fn init(s: &Sleepable) {
             }),
         )
         .expect("kern.maxfiles");
+        // `kern.maxfilesperproc` and `kern.maxprocperuid` (`CTLFLAG_RW`):
+        // what `setrlimit` holds `RLIMIT_NOFILE` and `RLIMIT_NPROC` to.
+        for (number, name, descr, value) in [
+            (
+                abi::sysctl::kern::MAXFILESPERPROC,
+                "maxfilesperproc",
+                "Maximum files allowed open per process",
+                &crate::proc::MAX_FILES_PER_PROC,
+            ),
+            (
+                abi::sysctl::kern::MAXPROCPERUID,
+                "maxprocperuid",
+                "Maximum processes allowed per userid",
+                &crate::proc::MAX_PROC_PER_UID,
+            ),
+        ] {
+            t.add_writable(
+                kern,
+                Number::Fixed(number),
+                name,
+                descr,
+                0,
+                sysctl::Value::Int(alloc::boxed::Box::new(move || {
+                    i32::try_from(value.load(core::sync::atomic::Ordering::Relaxed))
+                        .unwrap_or(i32::MAX)
+                })),
+                sysctl::int_writer(move |v| {
+                    value.store(
+                        u64::try_from(v).unwrap_or(0),
+                        core::sync::atomic::Ordering::Relaxed,
+                    );
+                    Ok(())
+                }),
+            )
+            .expect("kern.maxfilesperproc");
+        }
     });
 }

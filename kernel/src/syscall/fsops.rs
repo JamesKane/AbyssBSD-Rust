@@ -29,7 +29,13 @@ use super::path::path;
 use super::{SysResult, int, process};
 use crate::fs::{At, Walk};
 use crate::proc::Process;
-use crate::uaccess::UserPtr;
+use crate::uaccess::{Plain, UserPtr};
+
+// SAFETY: integers and pointers as integers, padding explicit
+// (`abi-check` holds the layout; msdosfs's is pinned in lib/abi).
+unsafe impl Plain for abi::mount::UfsArgs {}
+// SAFETY: as above.
+unsafe impl Plain for abi::mount::MsdosfsArgs {}
 
 const ACCESSPERMS: u16 = 0o777;
 const S_IFWHT: u16 = 0o160_000;
@@ -202,6 +208,24 @@ pub(super) fn renameat(
     tofd: u64,
     to_ptr: u64,
 ) -> SysResult {
+    renameat2(s, fromfd, from_ptr, tofd, to_ptr, 0)
+}
+
+/// `renameat2(oldfd, old, newfd, new, flags)` (`kern_renameat`):
+/// `renameat`, with `AT_RENAME_NOREPLACE` failing with `EEXIST` if the
+/// new name exists.
+pub(super) fn renameat2(
+    s: &Sleepable,
+    fromfd: u64,
+    from_ptr: u64,
+    tofd: u64,
+    to_ptr: u64,
+    flags: u64,
+) -> SysResult {
+    let flags = int(flags).cast_unsigned();
+    if flags & !abi::fcntl::AT_RENAME_NOREPLACE != 0 {
+        return Err(Errno::EINVAL);
+    }
     let p = process()?;
     let from = path(from_ptr)?;
     let to = path(to_ptr)?;
@@ -219,7 +243,15 @@ pub(super) fn renameat(
         &to,
         false,
     )?;
-    vfs::ops::rename(s, &f.dir, &f.name, &t.dir, &t.name, &crate::fs::cred())?;
+    vfs::ops::rename(
+        s,
+        &f.dir,
+        &f.name,
+        &t.dir,
+        &t.name,
+        &crate::fs::cred(),
+        flags & abi::fcntl::AT_RENAME_NOREPLACE != 0,
+    )?;
     Ok(0)
 }
 
@@ -716,6 +748,125 @@ fn option_flags(opts: &[MountOption], mut flags: u64) -> u64 {
 /// options. Mounting takes `PRIV_VFS_MOUNT` (`vfs.usermount` is 0).
 pub(super) fn nmount(s: &Sleepable, iov: u64, iovcnt: u64, flags: u64) -> SysResult {
     let opts = options(iov, iovcnt)?;
+    mount_opts(s, &opts, flags)
+}
+
+/// The file system types the old `mount(2)` takes, by the name it is
+/// given (`vfs_byname`, `ffs` as UFS), and whether each has the old
+/// interface (`vfs_cmount`).
+const MOUNT_TYPES: &[(&[u8], bool)] = &[
+    (b"ufs", true),
+    (b"ffs", true),
+    (b"msdosfs", true),
+    (b"tmpfs", false),
+    (b"devfs", false),
+];
+
+/// A string from user memory, as a mount option (`mount_argsu`): up to
+/// `max` bytes with its NUL.
+fn user_option(name: &[u8], at: u64, max: usize) -> Result<MountOption, Errno> {
+    let v = crate::uaccess::copy_in_str_vec(at, max).map_err(|e| match e {
+        crate::uaccess::StrError::Fault => Errno::EFAULT,
+        crate::uaccess::StrError::TooLong => Errno::ENAMETOOLONG,
+    })?;
+    Ok((name.to_vec(), v))
+}
+
+/// A boolean option: `name` if `on`, else `no` and `name`
+/// (`mount_argb`, given the `no` form).
+fn flag_option(on: bool, name: &[u8]) -> MountOption {
+    let mut n = Vec::new();
+    if !on {
+        n.extend_from_slice(b"no");
+    }
+    n.extend_from_slice(name);
+    (n, Vec::new())
+}
+
+/// The options `sys_mount` gives every file system: where, and the
+/// flags it has options for.
+fn push_common(opts: &mut Vec<MountOption>, fspath: MountOption, flags: u64) {
+    use abi::mount::{MNT_NOEXEC, MNT_NOSUID, MNT_RDONLY};
+    opts.push(fspath);
+    opts.push(flag_option(flags & MNT_RDONLY != 0, b"ro"));
+    opts.push(flag_option(flags & MNT_NOSUID == 0, b"suid"));
+    opts.push(flag_option(flags & MNT_NOEXEC == 0, b"exec"));
+}
+
+/// `mount(type, path, flags, data)`, the old interface (`sys_mount`):
+/// the file system's own arguments in `data` become `nmount` options
+/// (`ffs_cmount`, `msdosfs_cmount`), for UFS and msdosfs; tmpfs and
+/// devfs have no such arguments (`EOPNOTSUPP`), and a type there is no
+/// file system for is `EINVAL`.
+pub(super) fn mount(s: &Sleepable, ty: u64, path: u64, flags: u64, data: u64) -> SysResult {
+    use abi::mount::{MFSNAMELEN, MNAMELEN, MNT_ROOTFS};
+    // An `int`, widened with its sign; never `MNT_ROOTFS`.
+    let flags = i64::from(int(flags)).cast_unsigned() & !MNT_ROOTFS;
+    let (_, fstype) = user_option(b"fstype", ty, MFSNAMELEN)?;
+    let cmount = MOUNT_TYPES
+        .iter()
+        .find(|(n, _)| *n == fstype.as_slice())
+        .map(|&(_, c)| c)
+        .ok_or(Errno::EINVAL)?;
+    if !cmount {
+        return Err(Errno::EOPNOTSUPP);
+    }
+    // A string that cannot be read fails the mount once the file
+    // system's arguments are read (`kernel_mount`'s `ma->error`).
+    let fspath = user_option(b"fspath", path, MNAMELEN);
+    if data == 0 {
+        return Err(Errno::EINVAL);
+    }
+    let mut opts = alloc::vec![(b"fstype".to_vec(), fstype.clone())];
+    let path_max = abi::fcntl::PATH_MAX;
+    if fstype == b"msdosfs" {
+        use abi::mount::{
+            MSDOSFSMNT_KICONV, MSDOSFSMNT_LONGNAME, MSDOSFSMNT_NOWIN95, MSDOSFSMNT_SHORTNAME,
+        };
+        let a = UserPtr::<abi::mount::MsdosfsArgs>::new(data)
+            .read()
+            .map_err(|_| Errno::EFAULT)?;
+        push_common(&mut opts, fspath?, flags);
+        opts.push(user_option(b"from", a.fspec, path_max)?);
+        opts.push((b"export".to_vec(), Vec::new()));
+        for (name, v) in [
+            (&b"uid"[..], i64::from(a.uid.cast_signed())),
+            (b"gid", i64::from(a.gid.cast_signed())),
+            (b"mask", i64::from(a.mask)),
+            (b"dirmask", i64::from(a.dirmask)),
+        ] {
+            opts.push((name.to_vec(), alloc::format!("{v}").into_bytes()));
+        }
+        opts.push(flag_option(
+            a.flags & MSDOSFSMNT_SHORTNAME != 0,
+            b"shortname",
+        ));
+        opts.push(flag_option(a.flags & MSDOSFSMNT_LONGNAME != 0, b"longname"));
+        opts.push(flag_option(a.flags & MSDOSFSMNT_NOWIN95 == 0, b"win95"));
+        opts.push(flag_option(a.flags & MSDOSFSMNT_KICONV != 0, b"kiconv"));
+        for (name, at) in [
+            (&b"cs_win"[..], a.cs_win),
+            (b"cs_dos", a.cs_dos),
+            (b"cs_local", a.cs_local),
+        ] {
+            if at != 0 {
+                opts.push(user_option(name, at, 32)?);
+            }
+        }
+    } else {
+        let a = UserPtr::<abi::mount::UfsArgs>::new(data)
+            .read()
+            .map_err(|_| Errno::EFAULT)?;
+        push_common(&mut opts, fspath?, flags);
+        opts.push(user_option(b"from", a.fspec, path_max)?);
+        opts.push((b"export".to_vec(), Vec::new()));
+    }
+    mount_opts(s, &opts, flags)
+}
+
+/// `vfs_donmount` with the options gathered: mounts, or with
+/// `MNT_UPDATE` changes a mount.
+fn mount_opts(s: &Sleepable, opts: &[MountOption], flags: u64) -> SysResult {
     let get = |name: &[u8]| {
         opts.iter()
             .find(|(n, _)| n == name)
@@ -728,7 +879,7 @@ pub(super) fn nmount(s: &Sleepable, iov: u64, iovcnt: u64, flags: u64) -> SysRes
         _ => fstype,
     };
     let fspath = get(b"fspath").ok_or(Errno::EINVAL)?;
-    let flags = option_flags(&opts, flags);
+    let flags = option_flags(opts, flags);
     let p = process()?;
     p.priv_check(crate::cred::Priv::VfsMount)?;
     // In a jail, only a file system marked for jails, with its

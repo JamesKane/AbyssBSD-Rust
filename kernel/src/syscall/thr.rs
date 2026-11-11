@@ -82,6 +82,39 @@ fn sched_target(pid: u64) -> Result<Arc<UserThread>, Errno> {
     }
 }
 
+/// `sched_rr_get_interval(pid, interval)`: the round-robin quantum, the
+/// same for every thread (`ksched_rr_get_interval`): ULE's slice, 12 of
+/// `stathz`'s 127 ticks, in whole `hz` ticks (`sched_rr_interval`), so
+/// 94 ms. A process the caller cannot see is `ESRCH`.
+pub(super) fn sched_rr_get_interval(pid: u64, interval: u64) -> SysResult {
+    let t = sched_target(pid)?;
+    if int(pid) != 0 {
+        process()?.can_see(t.process())?;
+    }
+    let hz = u64::try_from(crate::statclock::HZ).unwrap_or(1000);
+    let stathz = crate::statclock::STATHZ;
+    // `sched_slice`: `realstathz / SCHED_SLICE_DEFAULT_DIVISOR`.
+    let slice = stathz / 10;
+    let ticks = ((slice * hz + stathz / 2) / stathz).max(1);
+    let ts = Timespec {
+        tv_sec: 0,
+        tv_nsec: i64::try_from(1_000_000_000 / hz * ticks).unwrap_or(0),
+    };
+    UserPtr::<Timespec>::new(interval)
+        .write(&ts)
+        .map_err(|_| Errno::EFAULT)?;
+    Ok(0)
+}
+
+/// `yield()`: as `sched_yield`, after which a time-sharing thread
+/// competes at the least time-sharing priority until the scheduler next
+/// computes its own (`sys_yield`'s `sched_prio(PRI_MAX_TIMESHARE)`; the
+/// scheduler here yields alone).
+pub(super) fn yield_() -> SysResult {
+    sched::yield_now();
+    Ok(0)
+}
+
 /// POSIX's policy for a class (`getscheduler`).
 fn policy_of(r: Rtprio) -> i32 {
     match r.type_ {

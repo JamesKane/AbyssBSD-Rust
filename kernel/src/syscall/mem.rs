@@ -433,6 +433,108 @@ pub(super) fn madvise(addr: u64, len: u64, behav: u64) -> SysResult {
     Ok(0)
 }
 
+/// `mincore(addr, len, vec)` (`kern_mincore`, with FreeBSD's default
+/// `vm.mincore_mapped`: this process's mappings, not other processes'
+/// pages): a byte per page of `[addr, addr + len)`, which must be mapped
+/// throughout (`ENOMEM`), `MINCORE_INCORE` where a page is mapped, with
+/// the page size's index in `MINCORE_SUPER`, `MINCORE_REFERENCED` (and
+/// `_OTHER`) as the entry's accessed bit says, and `MINCORE_MODIFIED`
+/// (and `_OTHER`) where it is writable, which the hardware's dirty bit,
+/// always set here, does not narrow (docs/compat-deviations.md).
+pub(super) fn mincore(s: &Sleepable, addr: u64, len: u64, vec: u64) -> SysResult {
+    let first = addr & !(PAGE_SIZE - 1);
+    let end = addr
+        .checked_add(len)
+        .and_then(|e| e.checked_next_multiple_of(PAGE_SIZE))
+        .ok_or(Errno::ENOMEM)?;
+    if end > USER_END || end < first {
+        return Err(Errno::ENOMEM);
+    }
+    let space = Process::current().ok_or(Errno::EINVAL)?.space();
+    if first < USER_START
+        || !space.mapped_throughout(s, VirtAddr::new(first), VirtAddr::new(end.max(first + 1)))
+    {
+        return Err(Errno::ENOMEM);
+    }
+    let mut chunk = [0u8; 512];
+    let mut at = first;
+    while at < end {
+        let n = usize::try_from(((end - at) / PAGE_SIZE).min(chunk.len() as u64)).unwrap_or(0);
+        for (i, b) in chunk[..n].iter_mut().enumerate() {
+            let va = VirtAddr::new(at + i as u64 * PAGE_SIZE);
+            *b = space.mapping(va).map_or(0, mincore_bits);
+        }
+        let out = vec + (at - first) / PAGE_SIZE;
+        crate::uaccess::copy_out(out, &chunk[..n]).map_err(|_| Errno::EFAULT)?;
+        at += n as u64 * PAGE_SIZE;
+    }
+    Ok(0)
+}
+
+/// What `mincore` says of a mapped page (`pmap_mincore`).
+fn mincore_bits(t: pt::Translation) -> u8 {
+    // The leaf's index among the page sizes: amd64's 2 MiB and 1 GiB are
+    // 1 and 2, arm64's 2 and 3 (a contiguous 4 KiB run there is 1).
+    let psind: u8 = match t.size {
+        pt::PageSize::Size4K => 0,
+        pt::PageSize::Size2M if cfg!(target_arch = "x86_64") => 1,
+        pt::PageSize::Size2M => 2,
+        pt::PageSize::Size1G if cfg!(target_arch = "x86_64") => 2,
+        pt::PageSize::Size1G => 3,
+    };
+    // Leaves are made accessed and, on amd64, dirty: writable is modified.
+    let mut v = MINCORE_INCORE
+        | ((psind << MINCORE_PSIND_SHIFT) & MINCORE_SUPER)
+        | MINCORE_REFERENCED
+        | MINCORE_REFERENCED_OTHER;
+    if t.attrs.write {
+        v |= MINCORE_MODIFIED | MINCORE_MODIFIED_OTHER;
+    }
+    v
+}
+
+/// `break(nsize)` (`kern_break`, amd64 only: arm64's is `ENOSYS`): moves
+/// the end of the program's data segment to `nsize`, rounded up to a
+/// page, within `RLIMIT_DATA` (only to grow), `RLIMIT_VMEM`, and after
+/// `mlockall(MCL_FUTURE)` `RLIMIT_MEMLOCK`; an address below the segment
+/// moves nothing and returns where it ends (libc's first `sbrk`).
+#[cfg(target_arch = "x86_64")]
+pub(super) fn obreak(s: &Sleepable, nsize: u64) -> SysResult {
+    use abi::resource::rlimit;
+    let p = Process::current().ok_or(Errno::EINVAL)?;
+    let limits = *p.limits.lock();
+    let cur = |w: u32| limits[w as usize].rlim_cur;
+    let new = nsize
+        .checked_next_multiple_of(PAGE_SIZE)
+        .ok_or(Errno::ENOMEM)?;
+    let space = p.space();
+    let (base, size) = space.data_segment();
+    let old = base + size;
+    if new < base {
+        return Ok(old);
+    }
+    if new > USER_END || (new - base > cur(rlimit::DATA) && new > old) {
+        return Err(Errno::ENOMEM);
+    }
+    let wired = space.wired();
+    let lock_limit_hit = wired.future
+        && wired
+            .count
+            .saturating_mul(PAGE_SIZE)
+            .saturating_add(new.saturating_sub(old))
+            > cur(rlimit::MEMLOCK);
+    drop(wired);
+    if lock_limit_hit {
+        return Err(Errno::ENOMEM);
+    }
+    space
+        .set_break(s, new, |old, total| {
+            new <= old || total.saturating_add(new - old) <= cur(rlimit::VMEM)
+        })
+        .map_err(|_| Errno::ENOMEM)?;
+    Ok(new)
+}
+
 /// The most a mapping without `PROT_MAX` may become (`kern_mmap_maxprot`):
 /// everything, unless the process forced implied maxima on
 /// (`PROC_PROTMAX_CTL`; `vm.imply_prot_max` is 0), when it is what was

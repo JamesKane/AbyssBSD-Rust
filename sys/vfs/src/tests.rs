@@ -210,7 +210,7 @@ fn rm(ns: &Namespace, path: &[u8], dir_wanted: bool) -> Result<(), Errno> {
 fn mv(ns: &Namespace, from: &[u8], to: &[u8]) -> Result<(), Errno> {
     let (fd, fname) = try_parent(ns, from)?;
     let (td, tname) = try_parent(ns, to)?;
-    ops::rename(&s(), &fd, &fname, &td, &tname, &Cred::root())
+    ops::rename(&s(), &fd, &fname, &td, &tname, &Cred::root(), false)
 }
 
 fn read_all(v: &Vnode) -> Vec<u8> {
@@ -725,6 +725,34 @@ fn rename_rules() {
     ops::link(&s, &f, &dir, b"h", &Cred::root()).unwrap();
     mv(&ns, b"/g", b"/h").unwrap();
     assert_eq!(f.stat(&s).unwrap().st_nlink, 2);
+}
+
+#[test]
+fn rename_noreplace_refuses_any_target() {
+    let ns = tmp();
+    let s = s();
+    mk(&ns, b"/d", NewNode::Directory).unwrap();
+    mk(&ns, b"/f", NewNode::Regular).unwrap();
+    mk(&ns, b"/g", NewNode::Regular).unwrap();
+    mk(&ns, b"/d/x", NewNode::Regular).unwrap();
+    let mvn = |from: &[u8], to: &[u8]| {
+        let (fd, fname) = try_parent(&ns, from)?;
+        let (td, tname) = try_parent(&ns, to)?;
+        ops::rename(&s, &fd, &fname, &td, &tname, &Cred::root(), true)
+    };
+    // In one directory and across two; before the kinds are compared, and
+    // for a second name of the file itself.
+    assert_eq!(mvn(b"/f", b"/g"), Err(Errno::EEXIST));
+    assert_eq!(mvn(b"/f", b"/d/x"), Err(Errno::EEXIST));
+    assert_eq!(mvn(b"/f", b"/d"), Err(Errno::EEXIST));
+    let f = lookup(&ns, b"/f", true).unwrap();
+    let (dir, _) = parent(&ns, b"/h");
+    ops::link(&s, &f, &dir, b"h", &Cred::root()).unwrap();
+    assert_eq!(mvn(b"/f", b"/h"), Err(Errno::EEXIST));
+    // A free name is taken as by `rename`.
+    mvn(b"/f", b"/d/y").unwrap();
+    assert!(Arc::ptr_eq(&lookup(&ns, b"/d/y", true).unwrap(), &f));
+    assert!(lookup(&ns, b"/f", true).is_err());
 }
 
 #[test]

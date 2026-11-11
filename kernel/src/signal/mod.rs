@@ -1324,7 +1324,7 @@ pub(crate) static LOGSIGEXIT: core::sync::atomic::AtomicBool =
 /// `kern.logsigexit` or the process's `PROC_LOGSIGEXIT_CTL` says. The
 /// caller holds no references: nothing on a stack that never unwinds may
 /// keep them.
-pub(super) fn kill_self(s: &Sleepable, sig: u32) -> ! {
+pub(crate) fn kill_self(s: &Sleepable, sig: u32) -> ! {
     let mut how = Exit::Signal(sig);
     if prop(sig) & CORE != 0 {
         let outcome = UserThread::with_current(|t| {

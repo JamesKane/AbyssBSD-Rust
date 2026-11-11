@@ -20,6 +20,7 @@ bufcache = { path = "../sys/bufcache" }
 fat = { path = "../lib/fat" }
 geom = { path = "../lib/geom" }
 gpt = { path = "../lib/gpt" }
+guid = { path = "../lib/guid" }
 abi = { path = "../lib/abi" }
 acpi-tables = { path = "../lib/acpi-tables" }
 addr = { path = "../lib/addr" }

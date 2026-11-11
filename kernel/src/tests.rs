@@ -5308,7 +5308,8 @@ mod user_memory {
         /// and `ls -lRnT` and `md5 -r` over it print exactly what FreeBSD's
         /// printed over the same image: from virtio-blk (vtbd2), every
         /// file's digest; from NVMe (nda1) and AHCI (ada1), the listing
-        /// and the largest file's. Skipped when the disk or FreeBSD's
+        /// and the largest file's. Then the old `mount(2)` mounts it too
+        /// (`misccalls mount`). Skipped when the disk or FreeBSD's
         /// listings are not there (no `fetch-base` from the server).
         fn ufs_reads_as_freebsd_reads_it() {
             use crate::proc::Process;
@@ -5344,7 +5345,10 @@ mod user_memory {
                     b" /mnt || exit 1; cd /mnt && TZ=UTC ls -lRnT . > /tmp/ufs.ls || exit 2; md5 -r ",
                     files,
                     b" > /tmp/ufs.md5 || exit 3; touch /mnt/x 2>/dev/null && exit 4; \
-                      cd / && umount /mnt || exit 5; exit 7",
+                      cd / && umount /mnt || exit 5; \
+                      /usr/tests/abyss/misccalls mount /dev/",
+                    disk.as_bytes(),
+                    b" /mnt || exit 6; exit 7",
                 ]
                 .concat();
                 let p = Process::spawn(
