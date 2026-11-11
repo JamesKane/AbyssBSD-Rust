@@ -1,0 +1,131 @@
+$ ifconfig bridge0 addm epair0a addm epair1a up
+(exit 0)
+$ sh -c jexec h1 ping -q -c 1 -t 5 10.97.0.2 > /dev/null
+(exit 0)
+$ sh -c jexec h2 ping -q -c 1 -t 5 10.97.0.1 > /dev/null
+(exit 0)
+$ ifconfig bridge0
+bridge0: flags=1008843<UP,BROADCAST,RUNNING,SIMPLEX,MULTICAST,LOWER_UP> metric 0 mtu 1500
+options=10<VLAN_HWTAGGING>
+ether <mac>
+id <mac> priority 32768 hellotime 2 fwddelay 15
+maxage 20 holdcnt 6 proto rstp maxaddr 2000 timeout 1200
+root id <mac> priority 32768 ifcost 0 port 0
+bridge flags=0<>
+member: epair1a flags=143<LEARNING,DISCOVER,AUTOEDGE,AUTOPTP>
+port 4 priority 128 path cost 2000 vlan protocol 802.1q
+member: epair0a flags=143<LEARNING,DISCOVER,AUTOEDGE,AUTOPTP>
+port 2 priority 128 path cost 2000 vlan protocol 802.1q
+groups: bridge
+nd6 options=9<PERFORMNUD,IFDISABLED>
+(exit 0)
+$ ifconfig bridge0 addr
+<mac> Vlan0 epair1a <expire> flags=0<>
+<mac> Vlan0 epair0a <expire> flags=0<>
+(exit 0)
+$ ifconfig epair0a
+epair0a: flags=1008943<UP,BROADCAST,RUNNING,PROMISC,SIMPLEX,MULTICAST,LOWER_UP> metric 0 mtu 1500
+options=60001b<RXCSUM,TXCSUM,VLAN_MTU,VLAN_HWTAGGING,RXCSUM_IPV6,TXCSUM_IPV6>
+ether <mac>
+groups: epair
+media: Ethernet 10Gbase-T (10Gbase-T <full-duplex>)
+status: active
+nd6 options=29<PERFORMNUD,IFDISABLED,AUTO_LINKLOCAL>
+(exit 0)
+$ ifconfig bridge0 deletem epair0a
+(exit 0)
+$ ifconfig bridge0 addm epair0a
+(exit 0)
+$ ifconfig bridge0 addm epair0a
+ifconfig: BRDGADD epair0a: File exists
+(exit 1)
+$ ifconfig bridge0 addm nonesuch0
+ifconfig: BRDGADD nonesuch0: No such file or directory
+(exit 1)
+$ ifconfig bridge0 static epair0a <time>:<time>
+(exit 0)
+$ ifconfig bridge0 maxaddr 100 timeout 600 ifmaxaddr epair1a 5 private epair1a
+(exit 0)
+$ ifconfig bridge0
+bridge0: flags=1008843<UP,BROADCAST,RUNNING,SIMPLEX,MULTICAST,LOWER_UP> metric 0 mtu 1500
+options=10<VLAN_HWTAGGING>
+ether <mac>
+id <mac> priority 32768 hellotime 2 fwddelay 15
+maxage 20 holdcnt 6 proto rstp maxaddr 100 timeout 600
+root id <mac> priority 32768 ifcost 0 port 0
+bridge flags=0<>
+member: epair0a flags=143<LEARNING,DISCOVER,AUTOEDGE,AUTOPTP>
+port 2 priority 128 path cost 2000 vlan protocol 802.1q
+member: epair1a flags=943<LEARNING,DISCOVER,PRIVATE,AUTOEDGE,AUTOPTP>
+ifmaxaddr 5 port 4 priority 128 path cost 2000 vlan protocol 802.1q
+groups: bridge
+nd6 options=9<PERFORMNUD,IFDISABLED>
+(exit 0)
+$ ifconfig bridge0 deladdr <time>:<time>
+(exit 0)
+$ ifconfig bridge0 flushall
+(exit 0)
+$ ifconfig bridge0 addr
+(exit 0)
+$ sysctl net.link.bridge
+net.link.bridge.ipfw: 0
+net.link.bridge.member_ifaddrs: 1
+net.link.bridge.log_mac_flap: 1
+net.link.bridge.allow_llz_overlap: 0
+net.link.bridge.inherit_mac: 0
+net.link.bridge.log_stp: 0
+net.link.bridge.pfil_local_phys: 0
+net.link.bridge.pfil_member: 0
+net.link.bridge.ipfw_arp: 0
+net.link.bridge.pfil_bridge: 0
+net.link.bridge.pfil_onlyip: 1
+(exit 0)
+$ ifconfig tun0
+tun0: flags=8010<POINTOPOINT,MULTICAST> metric 0 mtu 1500
+options=4080000<LINKSTATE,MEXTPG>
+groups: tun
+nd6 options=29<PERFORMNUD,IFDISABLED,AUTO_LINKLOCAL>
+(exit 0)
+$ -l /dev/tun0 /dev/tun0
+crw------- uucp dialer /dev/tun0
+(exit 0)
+$ sh -c jexec h2 ping -q -c 1 -t 5 10.96.0.1 > /dev/null
+(exit 0)
+$ jexec h1 ifconfig tun0
+tun0: flags=1008051<UP,POINTOPOINT,RUNNING,MULTICAST,LOWER_UP> metric 0 mtu 1500
+options=4080000<LINKSTATE,MEXTPG>
+inet 10.96.0.1 --> 10.96.0.2 netmask <addr>
+groups: tun
+nd6 options=29<PERFORMNUD,IFDISABLED,AUTO_LINKLOCAL>
+Opened by PID <n1>
+(exit 0)
+$ jexec h1 netstat -rn -f inet
+Routing tables
+
+Internet:
+Destination Gateway Flags Netif Expire
+10.96.0.1 link#7 UHS lo0
+10.96.0.2 link#9 UH tun0
+10.97.0.0/24 link#3 U epair0b
+10.97.0.1 link#7 UHS lo0
+(exit 0)
+$ sysctl net.link.tun net.link.tap
+net.link.tun.devfs_cloning: 1
+net.link.tap.debug: 0
+net.link.tap.devfs_cloning: 1
+net.link.tap.up_on_open: 0
+net.link.tap.user_open: 0
+(exit 0)
+$ ifconfig tap0
+tap0: flags=8802<BROADCAST,SIMPLEX,MULTICAST> metric 0 mtu 1500
+options=4080000<LINKSTATE,MEXTPG>
+ether <mac>
+groups: tap
+media: Ethernet 1000baseT <full-duplex>
+status: no carrier
+nd6 options=29<PERFORMNUD,IFDISABLED,AUTO_LINKLOCAL>
+(exit 0)
+$ ifconfig tap0 destroy
+(exit 0)
+h2: removed
+h1: removed
