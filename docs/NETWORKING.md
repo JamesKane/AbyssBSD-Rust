@@ -321,7 +321,10 @@ control plane in P7.2, before the protocols, and every protocol milestone is tes
 
 - **Routes.** Per-VNET FIBs (`net.fibs`, default 1; `setfib`, `SO_SETFIB`), next-hop objects
   shared by routes, longest-prefix lookup inside the epoch, interface and gateway routes, reject
-  and blackhole routes, and the route attributes `route` and `netstat -r` show.
+  and blackhole routes, and the route attributes `route` and `netstat -r` show. The
+  `net.route` dumps are `sysctl_rtsock`'s: `NET_RT_DUMP`, and `NET_RT_FLAGS` with a flag
+  (`RTF_GATEWAY` finds the default route, its interface's `sockaddr_dl` as `RTAX_IFP` and its
+  source as `RTAX_IFA`, as fastfetch reads it) or with `RTF_LLINFO` (the ARP and ND tables).
 - **Routing socket.** `PF_ROUTE` sockets: `RTM_ADD`, `RTM_DELETE`, `RTM_CHANGE`, `RTM_GET`, and
   the announcements (`RTM_IFINFO`, `RTM_NEWADDR`, `RTM_DELADDR`, `RTM_IFANNOUNCE`, route changes)
   that `dhclient`, `route monitor`, and `rtsold` listen for.

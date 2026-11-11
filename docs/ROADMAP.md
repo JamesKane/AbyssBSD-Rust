@@ -2691,6 +2691,8 @@ no hangs, no reboot loops, nothing that needs the screen, and P8's remaining exi
   - **Subsystems:** `tun`/`tap` (VPN clients, VM networking), `if_bridge` (VMs and jails),
     `fdescfs` (`/dev/fd` beyond 0 to 2: OpenJDK, shells' process substitution), `nullfs` (jails,
     poudriere; moved here from M-D's list), `cd9660` (ISO images through `md`).
+  - **Tools' fields:** fastfetch's fields: SMBIOS kenv, `/dev/mem` read-only, `hw.model`, route
+    dump `RTA_IFP`, devstat and disk attributes, `hw.acpi.battery`.
   - **Already P9 above:** the consumer and system-control HID collections (`hcons`, `hsctrl`:
     volume, brightness and power keys), the RX8900 RTC, the PD controllers, the operation-region
     handlers, real `rman` resources (`devinfo -u`).
@@ -2731,6 +2733,21 @@ no hangs, no reboot loops, nothing that needs the screen, and P8's remaining exi
     `tunbridge` differential scenario (two VNET jails pinging over a bridge of epairs, IP through
     `nc --tun`; both architectures as on FreeBSD) and kyua: `if_tun_test` and `if_clone_test`
     all pass, `if_bridge_test` all but the cases needing `vlan(4)`, `gif(4)`, or STP.
+  - Progress 2026-11-10 (fastfetch's fields, in QEMU): the loader reads SMBIOS as FreeBSD's does
+    (`stand/libsa/smbios.c`, `lib/smbios`) and hands `hint.smbios.0.mem` and the `smbios.*`
+    variables over in the handoff (v4), which `kenv` lists sorted by name (the Orange Pi's table,
+    rebuilt from its `dmidecode`, gives exactly its FreeBSD kenv's 28 lines); `/dev/mem` and
+    `/dev/kmem` read and map memory and firmware tables only, never device registers or holes
+    (compat-deviations); `hw.model` as `identcpu.c` names the boot CPU (`ARM Cortex-A720 r0p1`),
+    and amd64's `hw.clockrate`; `NET_RT_FLAGS` dumps the routes with the flags asked for, with
+    `RTAX_IFP` and `RTAX_IFA` (fastfetch's "Local IP"); `hw.acpi.battery` with no batteries
+    (`units` 0: "No batteries found"); devstat (`kern.devstat.*`, `/dev/devstat`, each request
+    counted on its partition's and disk's providers and the disk's list entry, about 100 ns a
+    request); and the disks' `descr`, `ident`, `lunid` and `rotationrate` from `nda`, `ada`,
+    `da` and `vtbd` as FreeBSD's drivers give them. `tests/user/sysinfo` passes here on both
+    architectures; the UFS2 shell cases run `kenv`, `geom disk list`, `iostat`, `gstat -b` and
+    `systat -vmstat` (`expect::SYSINFO`). fastfetch itself is not in the test images (no
+    packages in them); its fields' interfaces are what the tests check.
 - **Verification:** kyua's arm64 target on the board; fsx with `fsck_ffs` on the NVMe and a USB
   disk (done with the SMMU's stage 5, IOMMU.md §18); the device tree against FreeBSD's `devinfo`
   wherever FreeBSD has a driver. No day-long looped runs (the user, 2026-11-10): kyua and the

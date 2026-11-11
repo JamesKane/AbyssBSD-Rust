@@ -1012,7 +1012,7 @@ disk and iflib (S§13.3).
 
 | Class (crate) | Driver trait | Published as | User-visible names |
 |---|---|---|---|
-| storage (`sys/storage`) | `DiskQueues`: submit a batch of bios to a hardware queue, completion via the class's callback | GEOM-lite disk provider | `nda*`, `ada*`, `vtbd*`, plus partitions |
+| storage (`sys/storage`) | `DiskQueues`: submit a batch of bios to a hardware queue, completion via the class's callback; `describe` (GEOM's `descr`, `ident`, `lunid`, rotation rate) and `set_devstat` (CAM's devstat type) | GEOM-lite disk provider, with devstat entries for it and its partitions (`kern.devstat`, `/dev/devstat`) | `nda*`, `ada*`, `vtbd*`, plus partitions |
 | net (`sys/net`, P7) | `EtherQueues`: tx/rx queue pairs, offload capabilities, link state, filter programming (iflib-shaped) | `ifnet` | `vtnet*`, `re*`, `igc*`, … |
 | tty (`sys/tty`) | `UartHw`: line settings, tx/rx FIFOs, modem lines | tty | `ttyu*`, `cuau*` |
 | console | `ConsoleOut`, `ConsoleIn` | Kernel console | `/dev/console`, `ttyv*` (with fb) |

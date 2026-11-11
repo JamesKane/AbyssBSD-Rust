@@ -165,7 +165,9 @@ leak: port I/O, `cli`/`sti` semantics, a strongly ordered memory model, and fixe
      slide, seeded from `EFI_RNG_PROTOCOL`, else `RDRAND`, else timer jitter, and applies its
      RELATIVE relocations. On aarch64 it cleans the image to the point of coherency.
    - gathers the memory map, RSDP (ACPI 2.0+ only), GOP framebuffer, SMBIOS, UEFI runtime services
-     table, command line, the kernel's ELF symbol table (for backtraces), and entropy. It finds
+     table, command line, the kernel's ELF symbol table (for backtraces), and entropy. From SMBIOS
+     it sets the kernel environment's `hint.smbios.0.mem` and `smbios.*` variables as FreeBSD's
+     loader does (`lib/smbios`), handed over as `BootInfo::env`. It finds
      the serial console through SPCR, then DBG2 (COM1 on x86 when neither exists).
    - sets up the persistent log ring. Its address is kept in an NV variable; if the ring survived
      a reset, the previous boot's log is saved to `\EFI\ABYSS\PREVLOG.TXT`.
