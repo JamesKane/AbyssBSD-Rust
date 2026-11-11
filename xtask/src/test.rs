@@ -1011,7 +1011,14 @@ fn boot(
         }
         (Vmm::Qemu, false) => "abyss.verifier=1 abyss.qemu_exit=1 abyss.test.power_button=1",
     };
-    let cmdline = format!("{base} {}", case.cmdline);
+    // `ABYSS_TEST_ONLY=a::b,c::d`: only those kernel tests, for a quicker
+    // look while working on them (not for a milestone's runs).
+    let only = std::env::var("ABYSS_TEST_ONLY")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(|v| format!(" abyss.test.only={v}"))
+        .unwrap_or_default();
+    let cmdline = format!("{base} {}{only}", case.cmdline);
     let cmdline = cmdline.trim();
     let lock = image::lock()?;
     let disk = image::build(

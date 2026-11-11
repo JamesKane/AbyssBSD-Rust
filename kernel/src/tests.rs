@@ -5823,6 +5823,139 @@ mod user_memory {
         }
     }
 
+    /// Runs `script` with `/rescue/sh`; returns its exit.
+    fn rescue_sh(s: &sched::Sleepable, script: &str) -> crate::proc::Exit {
+        let p = crate::proc::Process::spawn(
+            s,
+            b"/rescue/sh",
+            &[b"sh", b"-c", script.as_bytes()],
+            &[b"PATH=/rescue", b"HOME=/"],
+            Some(hal::cpu_id()),
+        )
+        .unwrap();
+        p.wait(s)
+    }
+
+    ktest! {
+        /// FreeBSD's own `mount_nullfs`, `mount -t nullfs -o ro`, and
+        /// `mount -t fdescfs` (plain and `linrdlnk`) work, and `mount`
+        /// lists them as FreeBSD does (the ATF-style checks are
+        /// `tests/user/layers.c`).
+        fn nullfs_and_fdescfs_mount_with_freebsd_tools() {
+            let s = cx();
+            let script = "mount -t tmpfs tmpfs /mnt || exit 1; \
+                mkdir /mnt/lower /mnt/upper /mnt/fd || exit 2; \
+                echo hello > /mnt/lower/f || exit 3; \
+                mount_nullfs /mnt/lower /mnt/upper || exit 4; \
+                [ \"$(cat /mnt/upper/f)\" = hello ] || exit 5; \
+                echo there >> /mnt/upper/f || exit 6; \
+                [ \"$(tail -n 1 /mnt/lower/f)\" = there ] || exit 7; \
+                case \"$(mount)\" in *'/mnt/lower on /mnt/upper (nullfs, local)'*) ;; *) exit 8;; esac; \
+                umount /mnt/upper || exit 9; \
+                mount -t nullfs -o ro /mnt/lower /mnt/upper || exit 10; \
+                ( : > /mnt/upper/g ) 2>/dev/null && exit 11; \
+                case \"$(mount)\" in *'/mnt/lower on /mnt/upper (nullfs, local, read-only)'*) ;; *) exit 12;; esac; \
+                umount /mnt 2>/dev/null && exit 13; \
+                umount /mnt/upper || exit 14; \
+                mount -t fdescfs fdesc /mnt/fd || exit 15; \
+                exec 3< /mnt/lower/f; \
+                [ -c /mnt/fd/3 ] || exit 16; \
+                [ \"$(head -n 1 /mnt/fd/3)\" = hello ] || exit 17; \
+                case \"$(mount)\" in *'fdescfs on /mnt/fd (fdescfs)'*) ;; *) exit 18;; esac; \
+                umount /mnt/fd || exit 19; \
+                mount -t fdescfs -o linrdlnk fdesc /mnt/fd || exit 20; \
+                case \"$(ls -l /mnt/fd/3)\" in *'/mnt/fd/3 -> /mnt/lower/f') ;; *) exit 21;; esac; \
+                umount /mnt/fd || exit 22; \
+                exec 3<&-; \
+                umount /mnt || exit 23; exit 0";
+            // 13: the tmpfs went though nullfs was on it.
+            assert_eq!(rescue_sh(&s, script), crate::proc::Exit::Code(0));
+        }
+    }
+
+    ktest! {
+        /// The ISO 9660 test volume, attached with `mdconfig -t vnode`
+        /// and mounted with `mount_cd9660` each way FreeBSD's listings
+        /// were made (Rock Ridge, Joliet, plain, versions, owner and
+        /// masks): `ls -aliRnT` (file numbers included) and `md5 -r`
+        /// print what FreeBSD's cd9660 printed. Skipped without the
+        /// volume (no `fetch-base` from the server).
+        fn cd9660_reads_as_freebsd_reads_it() {
+            let s = cx();
+            if read_whole(&s, b"/usr/tests/iso/iso-test.files").is_none() {
+                kprintln!("cd9660: no test volume; skipped");
+                return;
+            }
+            const VIEWS: &[(&str, &str)] = &[
+                ("rr", ""),
+                ("joliet", "-r"),
+                ("iso", "-r -j"),
+                ("gens", "-r -j -g"),
+                ("masks", "-U 5 -G 6 -m 640 -M 755"),
+            ];
+            let mut script = alloc::string::String::from(
+                "mount -t tmpfs tmpfs /mnt || exit 1; mkdir /mnt/cd || exit 2; \
+                 cp /usr/tests/iso/iso-test.iso /mnt/t.iso || exit 3; \
+                 md=$(mdconfig -a -t vnode -f /mnt/t.iso) || exit 4; \
+                 case $md in md[0-9]*) ;; *) exit 5;; esac; \
+                 mount -t cd9660 /dev/$md /mnt/cd || exit 6; \
+                 ( cd /mnt/cd && while IFS= read -r f; do md5 -r \"$f\"; done \
+                   < /usr/tests/iso/iso-test.files > /mnt/iso.md5 ) || exit 7; \
+                 mdconfig -d -u $md 2>/dev/null && exit 8; \
+                 umount /mnt/cd || exit 9; ",
+            );
+            for (name, flags) in VIEWS {
+                script.push_str(&alloc::format!(
+                    "mount_cd9660 {flags} /dev/$md /mnt/cd || exit 10; \
+                     ( cd /mnt/cd && TZ=UTC BLOCKSIZE=512 ls -aliRnT . > /mnt/{name}.ls ) || exit 11; \
+                     umount /mnt/cd || exit 12; "
+                ));
+            }
+            // The listings stay on the tmpfs, read before it goes.
+            script.push_str("mdconfig -d -u $md || exit 13; exit 0");
+            let exit = rescue_sh(&s, &script);
+            assert_eq!(exit, crate::proc::Exit::Code(0), "the cd9660 script failed");
+            // The root's `..` is the mount point's parent, and the root's
+            // total counts it: neither is the volume's.
+            let unrooted = |l: &[u8]| -> alloc::vec::Vec<u8> {
+                let mut out = alloc::vec::Vec::new();
+                let mut first = true;
+                for line in l.split(|&c| c == b'\n') {
+                    if line.is_empty() {
+                        first = false;
+                    }
+                    if first && (line.starts_with(b"total ") || line.ends_with(b" ..")) {
+                        continue;
+                    }
+                    let words: alloc::vec::Vec<&[u8]> =
+                        line.split(|&c| c == b' ').filter(|w| !w.is_empty()).collect();
+                    out.extend_from_slice(&words.join(&b' '));
+                    out.push(b'\n');
+                }
+                out
+            };
+            let mut same = true;
+            for (name, _) in VIEWS {
+                let want = read_whole(&s, alloc::format!("/usr/tests/iso/iso-test-{name}.ls").as_bytes())
+                    .unwrap_or_default();
+                let got = read_whole(&s, alloc::format!("/mnt/{name}.ls").as_bytes()).unwrap_or_default();
+                let (want, got) = (unrooted(&want), unrooted(&got));
+                first_difference(&alloc::format!("cd9660 {name}: ls -aliRnT"), &got, &want);
+                if got != want {
+                    kprintln!("cd9660 {name}: got:\n{}", alloc::string::String::from_utf8_lossy(&got));
+                    same = false;
+                }
+            }
+            let want_md5 = read_whole(&s, b"/usr/tests/iso/iso-test.md5").unwrap_or_default();
+            let got_md5 = read_whole(&s, b"/mnt/iso.md5").unwrap_or_default();
+            first_difference("cd9660: md5 -r", &got_md5, &want_md5);
+            let cleaned = rescue_sh(&s, "umount /mnt");
+            assert!(same && got_md5 == want_md5, "cd9660 differs from FreeBSD");
+            assert_eq!(cleaned, crate::proc::Exit::Code(0));
+            kprintln!("cd9660: {} views and the digests match FreeBSD's", VIEWS.len());
+        }
+    }
+
     ktest! {
         fn fuzzing_leaves_nothing_behind() {
             // The fuzzer twice with the same seed: the first run warms

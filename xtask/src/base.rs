@@ -141,14 +141,29 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
                     .arg(local.join(name)),
             )?;
         }
+        // And the ISO 9660 test volume, with FreeBSD's views of it.
+        for name in crate::isotest::files() {
+            let remote = format!(
+                "{}:abyss/dist/{RELEASE}/{}/{name}",
+                crate::remote::host(),
+                Arch::X86_64.freebsd_name()
+            );
+            util::run(
+                Command::new("scp")
+                    .arg("-q")
+                    .arg(&remote)
+                    .arg(local.join(&name)),
+            )?;
+        }
         println!(
-            "fetch-base: the UFS2 and FAT test disks in {}",
+            "fetch-base: the UFS2, FAT, and ISO 9660 test disks in {}",
             local.display()
         );
         return Ok(());
     }
     ufs_test(&dir(Arch::X86_64), &root(Arch::X86_64)?)?;
     crate::fattest::build(&dir(Arch::X86_64))?;
+    crate::isotest::build(&dir(Arch::X86_64))?;
     soft_test(&dir(Arch::X86_64))?;
     for arch in arches {
         let root = root(arch)?;
@@ -1088,6 +1103,23 @@ pub(crate) fn md_image(arch: Arch, extra: &[(&str, &Path)]) -> Result<Option<Vec
             append(
                 &mut md,
                 &format!("usr/tests/fat/{name}"),
+                b'0',
+                0o444,
+                &fs::read(file)?,
+            )?;
+        }
+    }
+    // The ISO 9660 test volume and FreeBSD's views of it, for the kernel
+    // test (`mdconfig -t vnode` of the image).
+    let iso = crate::isotest::files();
+    if crate::isotest::file(&iso[0]).is_some() {
+        append(&mut md, "usr/tests/iso/", b'5', 0o755, &[])?;
+    }
+    for name in &iso {
+        if let Some(file) = crate::isotest::file(name) {
+            append(
+                &mut md,
+                &format!("usr/tests/iso/{name}"),
                 b'0',
                 0o444,
                 &fs::read(file)?,

@@ -82,10 +82,15 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
         util::output(Command::new("git").args(["describe", "--always", "--dirty", "--abbrev=12"]))
             .map_or_else(|_| "unknown".into(), |r| r.trim().to_owned());
     // `ABYSS_ATF` and `ABYSS_DIFF` (a feature's tests only) go along.
-    let atf: String = ["ABYSS_ATF", "ABYSS_ATF_TIMEOUT", "ABYSS_DIFF"]
-        .iter()
-        .filter_map(|k| std::env::var(k).ok().map(|v| format!("{k}={} ", quote(&v))))
-        .collect();
+    let atf: String = [
+        "ABYSS_ATF",
+        "ABYSS_ATF_TIMEOUT",
+        "ABYSS_DIFF",
+        "ABYSS_TEST_ONLY",
+    ]
+    .iter()
+    .filter_map(|k| std::env::var(k).ok().map(|v| format!("{k}={} ", quote(&v))))
+    .collect();
     let script = format!(
         "cd {} && {atf}ABYSS_REV={} PATH=$HOME/.cargo/bin:$PATH cargo xtask {}",
         remote_dir(),

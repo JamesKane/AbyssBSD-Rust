@@ -14,6 +14,7 @@ mod expect;
 mod fattest;
 mod fs;
 mod image;
+mod isotest;
 mod kyua;
 mod multiuser;
 mod net;
