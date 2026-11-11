@@ -6040,6 +6040,111 @@ mod user_memory {
     }
 
     ktest! {
+        /// A USB stick as desktops partition it: FreeBSD 15.1's MBR with
+        /// one active FAT32 slice that `newfs_msdos` made
+        /// (tests/corpus/gpart/mbr-fat), written to the Bulk-Only disk
+        /// (`da0`) through its node. The last writer's close has it tasted:
+        /// `da0s1` appears, `gpart show` prints what FreeBSD printed, and
+        /// `/rescue`'s `mount_msdosfs` mounts it, a file written there is
+        /// read back after `fsck_msdosfs -n` finds the volume clean. Then
+        /// an MBR slice with a disklabel in it. Wiped after, so the disk
+        /// has no table again. Skipped without the USB set.
+        fn mbr_fat_stick_mounts_with_mount_msdosfs() {
+            struct Nothing;
+            impl vfs::CharDevice for Nothing {
+                fn read(&self, _: &sched::Sleepable, _: &mut dyn vfs::Uio, _: u64, _: bool)
+                    -> Result<usize, abi::errno::Errno> {
+                    Ok(0)
+                }
+                fn write(&self, _: &sched::Sleepable, _: &mut dyn vfs::Uio, _: u64, _: bool)
+                    -> Result<usize, abi::errno::Errno> {
+                    Ok(0)
+                }
+            }
+            let s = cx();
+            let Some(da0) = storage::find("da0") else {
+                kprintln!("mbr: no USB disks; skipped");
+                return;
+            };
+            assert_eq!(da0.bytes(), 64 << 20, "the Bulk-Only disk's size");
+            // Written as through its node: the table appears at the close.
+            let nothing = alloc::sync::Arc::new(Nothing) as alloc::sync::Arc<dyn vfs::CharDevice>;
+            let writer = crate::geom_kern::open(&s, nothing, &da0, "da0", true).expect("da0 for writing");
+            // The FAT's tables are within the first MiB; what was there goes.
+            da0.write(&s, 0, &alloc::vec![0u8; 1 << 20]).unwrap();
+            // A corpus image's nonzero sectors (`SECTOR HEX` lines).
+            let write_sectors = |d: &storage::Disk, image: &str| {
+                for line in image.lines().skip(1) {
+                    let (lba, hex) = line.split_once(' ').unwrap();
+                    let sector: alloc::vec::Vec<u8> = (0..512)
+                        .map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap())
+                        .collect();
+                    d.write(&s, lba.parse::<u64>().unwrap() * 512, &sector).unwrap();
+                }
+            };
+            write_sectors(&da0, include_str!("../../tests/corpus/gpart/mbr-fat.sectors"));
+            drop(writer);
+            crate::geom_kern::run(&s, alloc::boxed::Box::new(|_| {}));
+            assert!(storage::find("da0s1").is_some(), "da0s1 tasted at the last close");
+            let script = "mount -t tmpfs tmpfs /mnt || exit 1; mkdir /mnt/stick || exit 2; \
+                gpart show da0 > /mnt/show || exit 3; \
+                mount_msdosfs /dev/da0s1 /mnt/stick || exit 4; \
+                echo hello > /mnt/stick/HELLO.TXT || exit 5; \
+                [ \"$(ls /mnt/stick)\" = HELLO.TXT ] || exit 6; \
+                umount /mnt/stick || exit 7; \
+                fsck_msdosfs -n /dev/da0s1 > /dev/null 2>&1 || exit 8; \
+                mount -t msdosfs -o ro /dev/da0s1 /mnt/stick || exit 9; \
+                [ \"$(cat /mnt/stick/HELLO.TXT)\" = hello ] || exit 10; \
+                umount /mnt/stick || exit 11; exit 0";
+            let exit = rescue_sh(&s, script);
+            let show = read_whole(&s, b"/mnt/show").unwrap_or_default();
+            let cleaned = rescue_sh(&s, "umount /mnt");
+            // FreeBSD's `gpart show md0` of the image, for a disk of the
+            // same name's length.
+            let want = "=>     1  131071  da0  MBR  (64M)\n       1  131071    1  fat32lba  [active]  (64M)\n\n";
+            first_difference("gpart show da0", &show, want.as_bytes());
+            assert_eq!(exit, crate::proc::Exit::Code(0), "the stick's script failed");
+            assert_eq!(show, want.as_bytes());
+            assert_eq!(cleaned, crate::proc::Exit::Code(0));
+            // Then a FreeBSD install the old way (tests/corpus/gpart/mbr-bsd):
+            // a `freebsd` slice holding a disklabel, whose partitions are
+            // tasted in the slice: `a`, `b`, `d` (`c`, the raw one, has
+            // no provider), as FreeBSD's `gpart show` printed them.
+            let nothing = alloc::sync::Arc::new(Nothing) as alloc::sync::Arc<dyn vfs::CharDevice>;
+            let writer = crate::geom_kern::open(&s, nothing, &da0, "da0", true).expect("da0 for writing");
+            assert!(storage::find("da0s1").is_none(), "spoiled by the writer");
+            da0.write(&s, 0, &alloc::vec![0u8; 1 << 20]).unwrap();
+            write_sectors(&da0, include_str!("../../tests/corpus/gpart/mbr-bsd.sectors"));
+            drop(writer);
+            crate::geom_kern::run(&s, alloc::boxed::Box::new(|_| {}));
+            for (name, there) in [("da0s1a", true), ("da0s1b", true), ("da0s1c", false), ("da0s1d", true)] {
+                assert_eq!(storage::find(name).is_some(), there, "{name}");
+            }
+            assert_eq!(storage::find("da0s1b").map(|d| d.bytes()), Some(8 << 20));
+            let exit = rescue_sh(
+                &s,
+                "mount -t tmpfs tmpfs /mnt && gpart show da0s1 > /mnt/show && [ -c /dev/da0s1d ]",
+            );
+            let show = read_whole(&s, b"/mnt/show").unwrap_or_default();
+            let cleaned = rescue_sh(&s, "umount /mnt");
+            let want = "=>     0  131071  da0s1  BSD  (64M)\n       0   81920      1  freebsd-ufs  (40M)\n   81920   16384      2  freebsd-swap  (8.0M)\n   98304   32767      4  freebsd-ufs  (16M)\n\n";
+            first_difference("gpart show da0s1", &show, want.as_bytes());
+            assert_eq!(exit, crate::proc::Exit::Code(0));
+            assert_eq!(show, want.as_bytes());
+            assert_eq!(cleaned, crate::proc::Exit::Code(0));
+            // Wiped: the tables go at the close, the label's with the slice.
+            let nothing = alloc::sync::Arc::new(Nothing) as alloc::sync::Arc<dyn vfs::CharDevice>;
+            let writer = crate::geom_kern::open(&s, nothing, &da0, "da0", true).expect("da0 for writing");
+            assert!(storage::find("da0s1").is_none() && storage::find("da0s1a").is_none(), "spoiled");
+            da0.write(&s, 0, &alloc::vec![0u8; 1 << 20]).unwrap();
+            drop(writer);
+            crate::geom_kern::run(&s, alloc::boxed::Box::new(|_| {}));
+            assert!(storage::find("da0s1").is_none());
+            kprintln!("mbr: the FAT32 stick mounted with mount_msdosfs; the disklabel's partitions read");
+        }
+    }
+
+    ktest! {
         /// `/dev/full`: root's, wheel's (0, 0: the test image has no
         /// names for them), 0666; zeros to read, and every
         /// write fails with `ENOSPC`.

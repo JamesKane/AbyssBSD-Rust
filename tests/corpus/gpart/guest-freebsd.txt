@@ -151,6 +151,90 @@ md47 destroyed
 + gpart show md47
 gpart: No such geom: md47.
 = 1
++ gpart create -s mbr -n 8 md47
+gpart: entries '8': Invalid argument
+= 1
++ gpart create -s mbr md47
+md47 created
+= 0
++ gpart add -t fat32lba -s 40m md47
+md47s1 added
+= 0
++ gpart add -t !131 -s 1m md47
+md47s2 added
+= 0
++ gpart add -t linux-data -l x -s 1m md47
+gpart: Invalid argument
+= 1
++ gpart add -t ms-basic-data -s 1m md47
+gpart: Invalid argument
+= 1
++ gpart set -a active -i 1 md47
+active set on md47s1
+= 0
++ gpart set -a bootme -i 1 md47
+gpart: attrib 'bootme': Invalid argument
+= 1
++ gpart bootcode -b pmbr md47
+gpart: Operation not supported by device
+= 1
++ gpart show md47
+=>     1  131071  md47  MBR  (64M)
+       1   81920     1  fat32lba  [active]  (40M)
+   81921    2048     2  linux-data  (1.0M)
+   83969   47103        - free -  (23M)
+
+= 0
++ gpart show -r md47
+=>     1  131071  md47  MBR  (64M)
+       1   81920     1  12  [active]  (40M)
+   81921    2048     2  131  (1.0M)
+   83969   47103        - free -  (23M)
+
+= 0
++ gpart show -p md47
+=>     1  131071    md47  MBR  (64M)
+       1   81920  md47s1  fat32lba  [active]  (40M)
+   81921    2048  md47s2  linux-data  (1.0M)
+   83969   47103          - free -  (23M)
+
+= 0
++ gpart backup md47
+MBR 4
+1   fat32lba      1  81920   [active] 
+2 linux-data  81921   2048  
+= 0
++ newfs_msdos -F 32 -c 1 /dev/md47s1
+= 0
++ mount_msdosfs /dev/md47s1 m
+= 0
++ gpart delete -i 1 md47
+gpart: Device busy
+= 1
++ umount m
+= 0
++ mount -t msdosfs -o ro /dev/md47s1 m
+= 0
++ cat m/HELLO.TXT
+hello
+= 0
++ umount m
+= 0
++ gpart modify -i 2 -t linux-swap md47
+md47s2 modified
+= 0
++ gpart delete -i 1 md47
+md47s1 deleted
+= 0
++ gpart destroy md47
+gpart: Device busy
+= 1
++ gpart destroy -F md47
+md47 destroyed
+= 0
++ gpart show md47
+gpart: No such geom: md47.
+= 1
 + mdconfig -d -u 47
 = 0
 + dd if=/dev/zero of=disk.img bs=1m count=0 seek=64

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: BSD-2-Clause
 # FreeBSD's gpart on a memory disk, malloc then vnode: create, add,
 # show, newfs and mount, what is refused while mounted, resize, modify,
-# undo, delete, destroy, bootcode, backup and restore. The kernel test
+# undo, delete, destroy, bootcode, backup and restore; then MBR. The kernel test
 # runs it from /rescue in the guest (T=/mnt, a tmpfs) and compares what
 # it prints with guest-freebsd.txt, which FreeBSD 15.1 printed: run
 # there as root, T=DIR sh guest.sh.
@@ -74,8 +74,39 @@ sequence() {
 	run gpart destroy -F $md
 	run gpart show $md
 }
+mbr() {
+	run gpart create -s mbr -n 8 $md
+	run gpart create -s mbr $md
+	run gpart add -t fat32lba -s 40m $md
+	run gpart add -t '!131' -s 1m $md
+	run gpart add -t linux-data -l x -s 1m $md
+	run gpart add -t ms-basic-data -s 1m $md
+	run gpart set -a active -i 1 $md
+	run gpart set -a bootme -i 1 $md
+	run gpart bootcode -b pmbr $md
+	run gpart show $md
+	run gpart show -r $md
+	run gpart show -p $md
+	run gpart backup $md
+	quiet newfs_msdos -F 32 -c 1 /dev/${md}s1
+	run mount_msdosfs /dev/${md}s1 m
+	echo hello > m/HELLO.TXT
+	run gpart delete -i 1 $md
+	run umount m
+	run mount -t msdosfs -o ro /dev/${md}s1 m
+	run cat m/HELLO.TXT
+	run umount m
+	run gpart modify -i 2 -t linux-swap $md
+	run gpart delete -i 1 $md
+	run gpart destroy $md
+	run gpart destroy -F $md
+	run gpart show $md
+}
+printf 'ABYSS-GCTL-BOOT' > pmbr
+mkdir -p m
 run mdconfig -a -t malloc -s 64m -u $U
 sequence
+mbr
 run mdconfig -d -u $U
 quiet dd if=/dev/zero of=disk.img bs=1m count=0 seek=64
 run mdconfig -a -t vnode -f disk.img -u $U
@@ -83,7 +114,6 @@ sequence
 run gpart create -s gpt $md
 run gpart add -t efi -s 1m -l gctl-esp $md
 run gpart add -t freebsd-ufs -s 8m -l gctl-keep $md
-printf 'ABYSS-GCTL-BOOT' > pmbr
 run gpart bootcode -b pmbr $md
 run gpart bootcode -p pmbr -i 1 $md
 quiet newfs -U /dev/gpt/gctl-keep

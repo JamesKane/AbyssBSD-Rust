@@ -185,6 +185,9 @@ pub(crate) const USB_SLOT: &str = "30,xhci,tablet";
 
 /// The size of each USB scratch disk.
 const USB_DISK_SIZE: u64 = 32 << 20;
+/// The Bulk-Only one's: room for a FAT32 stick (`newfs_msdos` wants 65525
+/// clusters), which the MBR test writes there.
+const USB_BBB_DISK_SIZE: u64 = 64 << 20;
 
 /// Host CPUs per physical core on the build server (P-cores have SMT).
 pub(crate) const PIN_STRIDE: u32 = 2;
@@ -602,7 +605,12 @@ impl Vm {
     fn usb_args(&self) -> Result<Vec<String>> {
         let scratch = |what: &str| -> Result<PathBuf> {
             let p = self.disk.with_extension(format!("usb-{what}.img"));
-            fs::File::create(&p)?.set_len(USB_DISK_SIZE)?;
+            let size = if what == "bbb" {
+                USB_BBB_DISK_SIZE
+            } else {
+                USB_DISK_SIZE
+            };
+            fs::File::create(&p)?.set_len(size)?;
             Ok(p)
         };
         let drive = |what: &str| -> Result<String> {

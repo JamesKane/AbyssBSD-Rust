@@ -22,7 +22,7 @@ use alloc::vec::Vec;
 use abi::errno::Errno;
 use abi::geom::{GCTL_VERSION, GEOM_CTL, GEOM_CTL_ARG_MAX};
 use geom::ctl::{Arg, Request, Show};
-use geom::table::{Media, Table, Topology};
+use geom::table::{Media, Provider, Table, Topology};
 use sched::Sleepable;
 use storage::Disk;
 use sync::SpinLock;
@@ -276,9 +276,10 @@ struct Topo<'a> {
     s: &'a Sleepable,
 }
 
-/// The whole disk `name` names.
+/// The disk or partition named `name` (a geom's name is its provider's;
+/// tables nest in partitions).
 fn whole(name: &str) -> Option<Arc<Disk>> {
-    storage::find(name).filter(|d| d.partition().is_none())
+    storage::disk::all().into_iter().find(|d| d.name() == name)
 }
 
 /// Partition `index` (1-based) of `disk`.
@@ -310,11 +311,18 @@ impl Topology for Topo<'_> {
         }
     }
 
-    fn provider(&self, name: &str) -> Option<(Media, Option<u32>)> {
+    fn provider(&self, name: &str) -> Option<Provider> {
         let d = storage::find(name)?;
-        // A partition's provider answers `PART::depth` with its table's.
-        let depth = d.partition().map(|_| 0);
-        Some((media(&d), depth))
+        // A partition's provider answers `PART::depth`, `PART::scheme`,
+        // and `PART::isleaf` with its table's.
+        let part = d
+            .partition()
+            .and_then(|(parent, _)| parent.table())
+            .map(|t| (t.part.depth, t.part.scheme, t.part.isleaf));
+        Some(Provider {
+            media: media(&d),
+            part,
+        })
     }
 
     fn access(&mut self, geom: &str, open: bool) -> Result<(), Errno> {

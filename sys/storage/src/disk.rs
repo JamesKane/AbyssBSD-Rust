@@ -95,8 +95,9 @@ enum Target {
         parent: Arc<Disk>,
         /// Byte offset on the parent.
         first: u64,
-        /// Its entry and names, which a control request may change.
-        state: SpinLock<PartitionState>,
+        /// Its entry and names, which a control request may change (boxed:
+        /// the entry is large).
+        state: Box<SpinLock<PartitionState>>,
         /// When it was made, with the others made then (a serial, ordered
         /// with disks'): GEOM's tastes of the new providers follow.
         batch: u64,
@@ -128,6 +129,8 @@ pub struct PartitionEntry {
     pub last_lba: u64,
     /// Its attribute bits (`bootme`, ...).
     pub attributes: u64,
+    /// The PART class's entry: its scheme and raw fields.
+    pub raw: geom::table::Entry,
     /// Its name as stored: UTF-16 code units, NUL-padded.
     pub name: [u16; gpt::NAME_UNITS],
     /// Its name.
@@ -145,6 +148,7 @@ impl PartitionEntry {
             first_lba: e.start,
             last_lba: e.end,
             attributes: e.ent.attr,
+            raw: e.clone(),
             name: e.ent.name,
             label: geom::label::utf16_name(&e.ent.name),
         }
@@ -154,13 +158,14 @@ impl PartitionEntry {
     /// GUID.
     #[must_use]
     pub fn type_name(&self) -> String {
-        geom::part::gpt_type(&self.raw_type())
+        self.raw.type_name()
     }
 
-    /// The type's GUID, in lower case (`rawtype`).
+    /// The raw type (`rawtype`): GPT's GUID in lower case, MBR's or
+    /// BSD's number.
     #[must_use]
     pub fn raw_type(&self) -> String {
-        format!("{}", self.type_guid).to_ascii_lowercase()
+        self.raw.raw_type()
     }
 
     /// Its own GUID, in lower case (`rawuuid`).
@@ -174,6 +179,10 @@ impl PartitionEntry {
     /// usable one, and `gptid/` and its GUID.
     #[must_use]
     pub fn label_names(&self) -> Vec<String> {
+        // `g_label_gpt` tastes GPT's partitions only.
+        if self.raw.scheme != geom::table::Scheme::Gpt {
+            return Vec::new();
+        }
         geom::label::gpt(&self.name)
             .into_iter()
             .chain(geom::label::gptid(&self.raw_uuid()))
@@ -952,26 +961,50 @@ fn new_partition(disk: &Arc<Disk>, e: &geom::table::Entry, batch: u64) -> Arc<Di
         target: Target::Partition {
             parent: Arc::clone(disk),
             first: e.start * u64::from(disk.sector_size),
-            state: SpinLock::new(PartitionState {
+            state: Box::new(SpinLock::new(PartitionState {
                 labels: entry.label_names(),
                 entry,
                 labeled: batch,
-            }),
+            })),
             batch,
         },
     })
 }
 
+/// Where `disk` nests (`PART::depth`, `PART::scheme`): 0 and none for
+/// a disk; `None` for a partition nothing may nest in (`PART::isleaf`).
+fn nesting(disk: &Disk) -> Option<(u32, Option<geom::table::Scheme>)> {
+    match &disk.target {
+        Target::Device { .. } => Some((0, None)),
+        Target::Partition { parent, .. } => {
+            let t = parent.table()?;
+            (!t.part.isleaf).then_some((t.part.depth + 1, Some(t.part.scheme)))
+        }
+    }
+}
+
 /// Publishes the partitions a taste of `disk` finds, if it has a table
-/// (`g_part_taste`).
+/// (`g_part_taste`), and tastes them in turn.
 fn publish_table(s: &Sleepable, disk: &Arc<Disk>, retasted: bool) {
+    let Some((depth, parent)) = nesting(disk) else {
+        return;
+    };
     let media = disk.media();
-    let Some(part) = geom::table::taste(&media, &disk.name, &mut disk.io(s), check_integrity())
-    else {
+    let Some(part) = geom::table::taste(
+        &media,
+        &disk.name,
+        &mut disk.io(s),
+        check_integrity(),
+        depth,
+        parent,
+    ) else {
         return;
     };
     let born = next_serial();
-    let parts: Vec<Arc<Disk>> = part.live().map(|e| new_partition(disk, e, born)).collect();
+    let parts: Vec<Arc<Disk>> = part
+        .providers()
+        .map(|e| new_partition(disk, e, born))
+        .collect();
     *disk.table.lock() = Some(Table {
         part,
         born,
@@ -980,6 +1013,29 @@ fn publish_table(s: &Sleepable, disk: &Arc<Disk>, retasted: bool) {
     DISKS.lock().extend(parts.iter().cloned());
     for p in &parts {
         tell(s, Event::Published(p));
+    }
+    for p in &parts {
+        publish_table(s, p, false);
+    }
+}
+
+/// Removes `disk`'s partitions, and theirs, from the published disks.
+fn take_descendants(disk: &Arc<Disk>) -> Vec<Arc<Disk>> {
+    let mut disks = DISKS.lock();
+    let mut gone: Vec<Arc<Disk>> = Vec::new();
+    loop {
+        let before = gone.len();
+        disks.retain(|d| {
+            let child = matches!(&d.target, Target::Partition { parent, .. }
+                if Arc::ptr_eq(parent, disk) || gone.iter().any(|g| Arc::ptr_eq(parent, g)));
+            if child {
+                gone.push(Arc::clone(d));
+            }
+            !child
+        });
+        if gone.len() == before {
+            return gone;
+        }
     }
 }
 
@@ -1010,7 +1066,7 @@ pub fn set_table(s: &Sleepable, disk: &Arc<Disk>, t: Option<geom::table::Table>)
 fn sync(s: &Sleepable, disk: &Arc<Disk>) {
     let live: Vec<geom::table::Entry> = disk
         .table()
-        .map(|t| t.part.live().cloned().collect())
+        .map(|t| t.part.providers().cloned().collect())
         .unwrap_or_default();
     let ss = u64::from(disk.sector_size);
     let mut gone = Vec::new();
@@ -1034,7 +1090,11 @@ fn sync(s: &Sleepable, disk: &Arc<Disk>) {
         DISKS
             .lock()
             .retain(|d| !gone.iter().any(|g| Arc::ptr_eq(d, g)));
+        let mut under = Vec::new();
         for d in &gone {
+            under.extend(take_descendants(d));
+        }
+        for d in under.iter().chain(&gone) {
             tell(s, Event::Withdrawn(d));
         }
     }
@@ -1047,6 +1107,9 @@ fn sync(s: &Sleepable, disk: &Arc<Disk>) {
     DISKS.lock().extend(new.iter().cloned());
     for p in &new {
         tell(s, Event::Published(p));
+    }
+    for p in &new {
+        publish_table(s, p, false);
     }
 }
 
@@ -1073,15 +1136,7 @@ pub fn relabel(s: &Sleepable, part: &Arc<Disk>) {
 /// when another opens the disk for writing (`g_part_spoiled`): the table
 /// may be rewritten. The caller sees that none of them is open.
 pub fn spoil(s: &Sleepable, disk: &Arc<Disk>) {
-    let mut gone = Vec::new();
-    DISKS.lock().retain(|d| {
-        let mine =
-            matches!(&d.target, Target::Partition { parent, .. } if Arc::ptr_eq(parent, disk));
-        if mine {
-            gone.push(Arc::clone(d));
-        }
-        !mine
-    });
+    let gone = take_descendants(disk);
     *disk.table.lock() = None;
     for d in &gone {
         tell(s, Event::Withdrawn(d));
@@ -1092,7 +1147,7 @@ pub fn spoil(s: &Sleepable, disk: &Arc<Disk>) {
 /// on the last write close): a table written there is published. Nothing
 /// happens while its partitions are still there, or once it is withdrawn.
 pub fn retaste(s: &Sleepable, disk: &Arc<Disk>) {
-    if disk.partition().is_some() || disk.is_gone() || disk.table().is_some() {
+    if disk.is_gone() || disk.table().is_some() {
         return;
     }
     if !DISKS.lock().iter().any(|d| Arc::ptr_eq(d, disk)) {
@@ -1186,15 +1241,9 @@ pub fn withdraw(s: &Sleepable, disk: &Arc<Disk>) {
         let base = &disk.name[..i];
         UNITS.lock().retain(|&(n, u)| !(n == base && u == unit));
     }
-    let mut gone = Vec::new();
-    DISKS.lock().retain(|d| {
-        let keep = !Arc::ptr_eq(d, disk)
-            && !matches!(&d.target, Target::Partition { parent, .. } if Arc::ptr_eq(parent, disk));
-        if !keep {
-            gone.push(Arc::clone(d));
-        }
-        keep
-    });
+    let mut gone = take_descendants(disk);
+    DISKS.lock().retain(|d| !Arc::ptr_eq(d, disk));
+    gone.push(Arc::clone(disk));
     for d in &gone {
         tell(s, Event::Withdrawn(d));
     }
@@ -1269,16 +1318,26 @@ mod tests {
         for (n, u) in name.iter_mut().zip(label.encode_utf16()) {
             *n = u;
         }
-        PartitionEntry {
-            index: 1,
-            type_guid: gpt::types::FREEBSD_UFS,
-            unique_guid: gpt::Guid::must_parse("8B5D3C2A-11E4-4F0B-9C1D-0123456789AB"),
-            first_lba: 2048,
-            last_lba: 4095,
-            attributes: 0,
-            name,
-            label: label.into(),
-        }
+        PartitionEntry::of(&geom::table::Entry {
+            index: 2,
+            start: 2048,
+            end: 4095,
+            created: false,
+            modified: false,
+            deleted: false,
+            internal: false,
+            scheme: geom::table::Scheme::Gpt,
+            ent: geom::table::Ent {
+                type_guid: gpt::types::FREEBSD_UFS,
+                uuid: gpt::Guid::must_parse("8B5D3C2A-11E4-4F0B-9C1D-0123456789AB"),
+                lba_start: 2048,
+                lba_end: 4095,
+                attr: 0,
+                name,
+            },
+            dos: geom::table::mbr::Dos::default(),
+            bsd: geom::table::bsd::Part::default(),
+        })
     }
 
     #[test]

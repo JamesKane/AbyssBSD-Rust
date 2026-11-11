@@ -331,8 +331,11 @@ impl CharDevice for DiskDev {
                     .unwrap_or(i64::MAX)
                     .to_ne_bytes(),
             ),
-            // No firmware geometry, as for NVMe disks on FreeBSD.
-            DIOCGFWSECTORS | DIOCGFWHEADS => put(arg, &0u32.to_ne_bytes()),
+            // `GEOM::fwsectors`, `GEOM::fwheads`: the driver's (none for
+            // NVMe, as on FreeBSD), a memory disk's own, a partition's
+            // table's.
+            DIOCGFWSECTORS => put(arg, &crate::geom_kern::fw_geometry(&self.0).1.to_ne_bytes()),
+            DIOCGFWHEADS => put(arg, &crate::geom_kern::fw_geometry(&self.0).0.to_ne_bytes()),
             DIOCGSTRIPESIZE | DIOCGSTRIPEOFFSET => put(arg, &0i64.to_ne_bytes()),
             DIOCGFLUSH => self.0.flush(s).map_err(bio_errno)?,
             // No serial number is known.

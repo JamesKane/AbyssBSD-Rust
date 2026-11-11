@@ -215,23 +215,34 @@ fn mounts() -> Vec<(&'static str, String, bool, u64)> {
 /// Whether `disk` or a partition of it is open or mounted, or its table
 /// has changes to commit (md's `opencount`).
 pub(crate) fn in_use(disk: &Arc<Disk>) -> bool {
-    let serial = disk.serial();
-    disk.table().is_some_and(|t| t.part.opened)
-        || OPENS.lock().iter().any(|o| o.serial == serial)
-        || mounts()
-            .iter()
-            .any(|(_, from, _, _)| storage::find(from).is_some_and(|d| d.serial() == serial))
-        || partitions_in_use(disk)
+    busy(disk)
 }
 
-/// Whether partition `part` is open or mounted, under any of its names
-/// (its provider's access counts are not all zero).
-pub(crate) fn busy(part: &Arc<Disk>) -> bool {
-    let serial = part.serial();
-    OPENS.lock().iter().any(|o| o.serial == serial)
-        || mounts()
-            .iter()
-            .any(|(_, from, _, _)| storage::find(from).is_some_and(|d| d.serial() == serial))
+/// `disk` and the partitions under it, however deep (a BSD label's in
+/// an MBR slice).
+fn subtree(disk: &Arc<Disk>) -> Vec<Arc<Disk>> {
+    let mut out = vec![Arc::clone(disk)];
+    let mut i = 0;
+    while i < out.len() {
+        let next = storage::partitions(&out[i]);
+        out.extend(next);
+        i += 1;
+    }
+    out
+}
+
+/// Whether `disk` or anything under it is open or mounted, under any of
+/// its names, or holds a table with changes to commit (its provider's
+/// access counts are not all zero).
+pub(crate) fn busy(disk: &Arc<Disk>) -> bool {
+    let tree = subtree(disk);
+    let serials: Vec<u64> = tree.iter().map(|d| d.serial()).collect();
+    tree.iter()
+        .any(|d| d.table().is_some_and(|t| t.part.opened))
+        || OPENS.lock().iter().any(|o| serials.contains(&o.serial))
+        || mounts().iter().any(|(_, from, _, _)| {
+            storage::find(from).is_some_and(|d| serials.contains(&d.serial()))
+        })
 }
 
 /// `g_access(cp, 1, 1, 1)` of a table's consumer on whole disk `disk`:
@@ -253,18 +264,9 @@ pub(crate) fn table_access(disk: &Arc<Disk>) -> Result<(), Errno> {
     Ok(())
 }
 
-/// Whether a partition of `disk` is open or mounted.
+/// Whether a partition of `disk` (or one under it) is in use.
 fn partitions_in_use(disk: &Arc<Disk>) -> bool {
-    let parts: Vec<u64> = storage::partitions(disk)
-        .iter()
-        .map(|p| p.serial())
-        .collect();
-    if OPENS.lock().iter().any(|o| parts.contains(&o.serial)) {
-        return true;
-    }
-    mounts()
-        .iter()
-        .any(|(_, from, _, _)| storage::find(from).is_some_and(|d| parts.contains(&d.serial())))
+    storage::partitions(disk).iter().any(busy)
 }
 
 /// An open disk node: its I/O goes to the node's device; closing it
@@ -317,7 +319,8 @@ pub(crate) fn open(
         });
         first
     };
-    if first_writer && whole && disk.table().is_some() && !partitions_in_use(disk) {
+    // A partition's own table (a label in a slice) goes too.
+    if first_writer && disk.table().is_some() && !partitions_in_use(disk) {
         storage::spoil(s, disk);
     }
     Ok(Arc::new(Opened {
@@ -325,7 +328,7 @@ pub(crate) fn open(
         id,
         disk: Arc::downgrade(disk),
         serial: disk.serial(),
-        rewrites: write && whole,
+        rewrites: write,
         relabels: write && !whole,
     }))
 }
@@ -337,14 +340,13 @@ impl Drop for Opened {
             opens.retain(|o| o.id != self.id);
             !opens.iter().any(|o| o.serial == self.serial && o.write)
         };
-        if (self.rewrites || self.relabels) && last_writer {
+        if self.rewrites && last_writer {
             let disk = Weak::clone(&self.disk);
-            let whole = self.rewrites;
+            let relabels = self.relabels;
             post(Box::new(move |s| {
                 if let Some(d) = disk.upgrade() {
-                    if whole {
-                        storage::retaste(s, &d);
-                    } else {
+                    storage::retaste(s, &d);
+                    if relabels {
                         storage::relabel(s, &d);
                     }
                 }
@@ -444,6 +446,31 @@ struct Builder<'a> {
 /// A label provider made, for its DEV geom: its partition's serial, its
 /// first id slot, its name, and its provider.
 type Made = (u64, u64, String, ProviderRef);
+
+/// A disk's firmware geometry (a memory disk's own): heads, sectors.
+fn firmware(d: &Arc<Disk>) -> (u32, u32) {
+    crate::mdisk::info(d).map_or_else(
+        || {
+            let desc = d.description();
+            (desc.fwheads, desc.fwsectors)
+        },
+        |md| (md.fwheads, md.fwsectors),
+    )
+}
+
+/// What a disk's or partition's provider answers for `GEOM::fwheads`
+/// and `GEOM::fwsectors`: a disk's firmware geometry, a partition's
+/// table's (`g_part_start`), which is the disk's when it reports one.
+pub(crate) fn fw_geometry(d: &Arc<Disk>) -> (u32, u32) {
+    let Some((parent, _)) = d.partition() else {
+        return firmware(d);
+    };
+    let fw = fw_geometry(parent);
+    match parent.table() {
+        Some(t) if fw.0 == 0 || fw.1 == 0 => (t.part.heads, t.part.sectors),
+        _ => fw,
+    }
+}
 
 /// A partition's provider's size and alignment.
 fn partition_media(part: &Arc<Disk>, e: &storage::PartitionEntry) -> Media {
@@ -578,8 +605,10 @@ impl Builder<'_> {
         // A destroyed table's geometry is none (`g_part_null_scheme`).
         let (heads, sectors) = if part.scheme == Scheme::Null {
             (0, 0)
+        } else if fw.0 != 0 && fw.1 != 0 {
+            fw
         } else {
-            geom::part::geometry(d.sectors(), Some(fw))
+            (part.heads, part.sectors)
         };
         self.m.set_geom_config(
             g,
@@ -614,6 +643,7 @@ impl Builder<'_> {
             .filter(|p| p.partition_times().is_some_and(|(b, _)| b == batch))
             .collect();
         parts.sort_by_key(|p| p.serial());
+        let Some(table) = d.table() else { return };
         let mut made = Vec::new();
         for part in &parts {
             let Some((_, e)) = part.partition() else {
@@ -623,35 +653,18 @@ impl Builder<'_> {
             let p = self
                 .m
                 .add_provider(g, id(part.serial(), PROVIDER), part.name(), media);
-            let (index, ty, raw_type, raw_uuid) =
-                (e.index + 1, e.type_name(), e.raw_type(), e.raw_uuid());
-            let offset = e.first_lba * u64::from(part.sector_size());
-            let mut config = vec![
-                Field::new("start", e.first_lba),
-                Field::new("end", e.last_lba),
-                Field::new("index", index),
-                Field::new("type", &ty),
-                Field::new("offset", offset),
-                Field::new("length", part.bytes()),
-                Field::new("label", geom::label::utf16_name(&e.name)),
-            ];
-            for (bit, name) in geom::part::GPT_ATTRIBUTES {
-                if e.attributes & bit != 0 {
-                    config.push(Field::new("attrib", name));
-                }
-            }
-            config.push(Field::new("rawtype", &raw_type));
-            config.push(Field::new("rawuuid", &raw_uuid));
-            config.push(Field::new(
-                "efimedia",
-                geom::part::gpt_efimedia(index, &raw_uuid, e.first_lba, e.last_lba),
-            ));
-            let txt = format!(" i {index} o {offset} ty {ty} xs GPT xt {raw_type}");
+            let (config, txt) =
+                e.raw
+                    .provider_config(&table.part, part.sector_size(), part.bytes());
             self.m.set_provider_config(p, config, txt);
             made.push((Arc::clone(part), p, media));
         }
         let mut labels = Vec::new();
         for (part, p, media) in &made {
+            // The PART class tastes a new provider first: a table in it.
+            if part.table().is_some_and(|t| t.at_publication) {
+                self.table(part, *p, firmware(part));
+            }
             if part.partition_times().is_some_and(|(b, l)| l == b) {
                 labels.extend(self.labels(part, *p, *media));
             }
@@ -778,8 +791,10 @@ pub(crate) fn build() -> Mesh {
     // did.
     let all = storage::disk::all();
     let mut events: Vec<(u64, Happened<'_>)> = Vec::new();
-    for d in all.iter().filter(|d| d.partition().is_none()) {
-        events.push((d.serial(), Happened::Disk(d)));
+    for d in &all {
+        if d.partition().is_none() {
+            events.push((d.serial(), Happened::Disk(d)));
+        }
         let Some(t) = d.table() else { continue };
         if !t.at_publication {
             events.push((t.born, Happened::Table(d)));
@@ -808,14 +823,7 @@ pub(crate) fn build() -> Mesh {
             Happened::Disk(d) => b.disk(d),
             Happened::Table(d) => {
                 if let Some(p) = b.m.provider(d.name()) {
-                    let fw = crate::mdisk::info(d).map_or_else(
-                        || {
-                            let desc = d.description();
-                            (desc.fwheads, desc.fwsectors)
-                        },
-                        |md| (md.fwheads, md.fwsectors),
-                    );
-                    b.table(d, p, fw);
+                    b.table(d, p, firmware(d));
                 }
             }
             Happened::Batch(d, batch) => b.batch(d, batch),
