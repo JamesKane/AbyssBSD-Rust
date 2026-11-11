@@ -208,6 +208,17 @@ fn serve(
     Ok((out, new.and(writer)))
 }
 
+/// `kern.arandom` answers as many bytes as there is room for (up to
+/// 256): `value` is trimmed to that, so no `ENOMEM`.
+fn trim_arandom(oid: &[i32], value: &mut Vec<u8>, oldp: u64, oldlenp: u64) {
+    if oid != [abi::sysctl::ctl::KERN, abi::sysctl::kern::ARND] || oldp == 0 || oldlenp == 0 {
+        return;
+    }
+    if let Ok(room) = UserPtr::<u64>::new(oldlenp).read() {
+        value.truncate(usize::try_from(room).unwrap_or(usize::MAX));
+    }
+}
+
 /// Hands `value` back through `oldp`/`oldlenp`, FreeBSD's way.
 fn reply(value: &[u8], oldp: u64, oldlenp: u64) -> SysResult {
     if oldlenp == 0 {
@@ -262,7 +273,8 @@ pub(super) fn sysctl(
         .map_err(|_| Errno::EFAULT)?;
     trace(s, &oid);
     let new = new_value(newp, newlen)?;
-    let (value, writer) = serve(s, &oid, new.as_deref(), oldp != 0)?;
+    let (mut value, writer) = serve(s, &oid, new.as_deref(), oldp != 0)?;
+    trim_arandom(&oid, &mut value, oldp, oldlenp);
     reply(&value, oldp, oldlenp)?;
     // The old value is out; now the new one goes in (a handler's
     // `SYSCTL_OUT` before its `SYSCTL_IN`).
@@ -296,7 +308,8 @@ pub(super) fn sysctlbyname(
     })?;
     trace(s, &oid);
     let new = new_value(newp, newlen)?;
-    let (value, writer) = serve(s, &oid, new.as_deref(), oldp != 0)?;
+    let (mut value, writer) = serve(s, &oid, new.as_deref(), oldp != 0)?;
+    trim_arandom(&oid, &mut value, oldp, oldlenp);
     reply(&value, oldp, oldlenp)?;
     // The old value is out; now the new one goes in (a handler's
     // `SYSCTL_OUT` before its `SYSCTL_IN`).

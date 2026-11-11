@@ -82,6 +82,9 @@ fn cpu_source() -> u32 {
 
 /// `kern.random.harvest.mask`, `mask_bin`, and `mask_symbolic`
 /// (`random_harvestq.c`).
+/// The most `kern.arandom` gives at once.
+pub(crate) const ARND_MAX: usize = 256;
+
 pub(crate) fn sysctl_init(s: &sched::Sleepable) {
     use alloc::boxed::Box;
     use sysctl::{Number, Value};
@@ -90,6 +93,24 @@ pub(crate) fn sysctl_init(s: &sched::Sleepable) {
     }
     crate::sysctl::with(s, |t| {
         let kern = t.child(t.root(), "kern").expect("kern node");
+        // `kern.arandom` (`sysctl_kern_arnd`): random bytes, as many as
+        // asked up to 256 (the system call trims the answer to the room).
+        t.add_value(
+            kern,
+            Number::Fixed(abi::sysctl::kern::ARND),
+            "arandom",
+            "arc4rand",
+            Value::Opaque {
+                format: "",
+                read: Box::new(|out| {
+                    let mut b = [0u8; ARND_MAX];
+                    if fill(&mut b).is_ok() {
+                        out.extend_from_slice(&b);
+                    }
+                }),
+            },
+        )
+        .expect("kern.arandom");
         let random = t
             .child(kern, "random")
             .or_else(|| {
