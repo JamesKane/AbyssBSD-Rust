@@ -2808,6 +2808,17 @@ no hangs, no reboot loops, nothing that needs the screen, and P8's remaining exi
     by `GET_REPORT` and immediate reads, a keyboard's LED report, poll and kqueue, load and
     unload) passes on both arches here and on FreeBSD 15.1. Reports arriving on the interrupt
     pipe were checked by hand with QMP typing; `uhid` is not needed (it never wins over `usbhid`).
+  - Progress 2026-11-10 (`hcons`, `hsctrl`, in QEMU; not yet on the board): FreeBSD's consumer
+    and system-control drivers on `hidbus`, over a shared `hidmap` (`lib/hid::hidmap`, the
+    kernel half in `sys/hid::hidmap`; `hms` now uses it too) with `hcons.c`'s and `hsctrl.c`'s
+    tables: volume, mute, media, brightness, and application keys, power, sleep, and wake as
+    evdev key events (USB.md §6.2), FreeBSD's attach lines, descriptions, pnpinfo, `dev.*.N.debug`,
+    and evdev identity. The power key is evdev's alone, as on FreeBSD. Host tests drive the tables
+    with a media-key descriptor laid out as the board keyboard's interface 1 and four other forms
+    (relative and absolute Volume, a bitmap, a System Control array); the ktest attaches it over
+    a test transport and `tests/user/hcons` reads FreeBSD's events from the nodes, both arches.
+    The board keyboard's own report descriptor is not in the corpus (Linux's `lsusb` could not
+    read it), so its exact layout is still to be checked on the board.
   - Progress 2026-11-10 (`/dev/geom.ctl` and `/dev/full`, in QEMU, both architectures):
     `GEOM_CTL` as `geom_ctl.c` takes it (`struct gctl_req` held to 15.1's header by
     `abi-check`), run on GEOM's event thread; `getxml` for every class, and the PART class's

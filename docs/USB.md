@@ -5,7 +5,7 @@ the xHCI driver, the USB bus and hubs, HID and the input class, `vt` virtual ter
 mass storage. [ADR-0015](adr/0015-usb-input-vt.md) records the decision.
 
 Behavior reference: sys/dev/usb (controller/xhci.c, usb_hub.c, usb_device.c, usb_transfer.c,
-input/usbhid.c, storage/umass.c), sys/dev/hid (hidbus.c, hkbd.c, hms.c), sys/dev/kbd,
+input/usbhid.c, storage/umass.c), sys/dev/hid (hidbus.c, hidmap.c, hkbd.c, hms.c, hcons.c, hsctrl.c), sys/dev/kbd,
 sys/dev/kbdmux, sys/dev/evdev, sys/dev/vt and sys/teken. FreeBSD is the specification of what
 userland sees, not the source of the code ([ADR-0007](adr/0007-license-and-clean-implementation.md)).
 Where FreeBSD has no driver (UAS, virtio-input), the specifications are the reference: xHCI 1.2,
@@ -73,16 +73,16 @@ USB 2.0 and 3.2, HID 1.11 and its usage tables, T10 SAM/SPC/SBC and UAS-2, and v
 |---|---|---|
 | `lib/xhci` | pure, host-tested, fuzzed | Register layouts, TRB types and encoding, rings (command, transfer, event; link TRBs, cycle state), input/device/endpoint/slot contexts in 32- and 64-byte forms, the event decoder |
 | `lib/usb` | pure, host-tested, fuzzed | Standard descriptors (device, configuration, interface, endpoint, SuperSpeed companion, BOS, string), standard requests, speeds and max-packet rules, route strings |
-| `lib/hid` | pure, host-tested, fuzzed | Report-descriptor parser into typed collections, report fields and usages; report extraction; the usage tables used (generic desktop, keyboard, buttons, LEDs) |
+| `lib/hid` | pure, host-tested, fuzzed | Report-descriptor parser into typed collections, report fields and usages; report extraction; the usage tables used (generic desktop, keyboard, buttons, LEDs); `hidmap`, usages mapped to evdev events by a driver's tables |
 | `lib/scsi` | pure, host-tested | CDBs, `INQUIRY`/`READ CAPACITY` data, fixed and descriptor sense data, BBB CBW/CSW, UAS IUs |
 | `lib/vtterm` | pure, host-tested, fuzzed | The terminal emulator: an ECMA-48 parser with `teken`'s xterm behavior, a screen of cells, scrollback, and a damage set |
 | `sys/usb` | kernel | The USB bus: devices, endpoints and pipes, transfers, the explore thread, enumeration, hubs (root and external), `ugen` and `/dev/usb` |
-| `sys/hid` | kernel | `hidbus`: children by top-level collection, report routing, `hidraw` |
+| `sys/hid` | kernel | `hidbus`: children by top-level collection, report routing, `hidraw`; `hidmap`'s kernel half (the evdev device a driver's tables describe) |
 | `sys/input` | kernel | The input class: kbd and `kbdmux`, keymaps, `sysmouse` |
 | `sys/evdev` | kernel | evdev: `/dev/input/eventN`, per-open client queues, the `EVIOC*` ioctls, the `kern.evdev` sysctls |
 | `sys/vt` | kernel | Virtual terminals: windows over `lib/vtterm`, the framebuffer renderer, switching, the console sink |
 | `drivers/xhci` | driver | The controller, on PCI and ACPI |
-| `drivers/usbhid`, `drivers/hkbd`, `drivers/hms` | drivers | The USB transport for `hidbus`; the keyboard and mouse drivers on `hidbus` |
+| `drivers/usbhid`, `drivers/hkbd`, `drivers/hms`, `drivers/hcons`, `drivers/hsctrl` | drivers | The USB transport for `hidbus`; the keyboard, mouse, consumer-control, and system-control drivers on `hidbus` |
 | `drivers/umass` | driver | USB mass storage, BBB and UAS, publishing `da*` |
 | `drivers/virtio-input` | driver | virtio keyboards and tablets, publishing to the input class directly |
 
@@ -331,6 +331,27 @@ default) it never wins an interface. `tests/user/hidraw.c` checks it here and on
   device's).
 - `hms` turns mouse and tablet reports into relative or absolute pointer events and buttons, wheel
   and horizontal wheel included.
+- `hcons` (Consumer Control, page 0x0c usage 1) and `hsctrl` (System Control, Generic Desktop usage
+  0x80) are a keyboard's or remote's extra collections: volume, mute, media, brightness, browser
+  and application keys, and power, sleep, and wake. Each reports through its own evdev device
+  ("<name> Consumer Control", "<name> System Control", phys `hconsN`/`hsctrlN`), with
+  `hcons.c`'s and `hsctrl.c`'s usage-to-key tables; a relative Volume becomes `KEY_VOLUMEUP` or
+  `KEY_VOLUMEDOWN` pressed and released once per step. As on FreeBSD, the power key is an evdev
+  `KEY_POWER` and nothing more: it does not shut down or reach `acpi_button`.
+- `hms`, `hcons`, and `hsctrl` share `hidmap` (FreeBSD's `hidmap.c`): `lib/hid::hidmap` probes a
+  collection against a driver's tables (entries for one usage or a run, events or callbacks,
+  required or forbidden), makes an item per mapped input value, and turns each report into the
+  events whose values changed. Array slots release the key they held and press the one their
+  value names; where two usages share a key (`hcons`'s Sleep and Sleep Mode), a report's presses
+  and releases are merged first and reported in code order, as `hidmap_sync_keys` does. FreeBSD's
+  quirks are kept: values past a short report's end read 0, and a range array reports its map
+  entry's first code. `sys/hid::hidmap` builds the evdev device from the items, starts the reports
+  at the first open and stops them at the last close, and adds `dev.<driver>.N.debug` (15.1's
+  GENERIC has `HID_DEBUG`). The ktest `hcons_and_hsctrl_on_a_media_key_interface` attaches a
+  `hidbus` over a test transport with `hid::MEDIA_KEYS` (the board keyboard's collections: a
+  Consumer Control array and System Control bits) and the board keyboard's identity, and
+  `tests/user/hcons.c` checks the nodes' identity, bits, sysctls, and attach lines and reads the
+  events its reports become. QEMU has no USB device with these collections.
 - `virtio-input` (`vtinputN`, after FreeBSD's `vtblk` and `vtrnd`) reads the device's name,
   serial, ID, properties, event bits, and axis ranges from its configuration space into an evdev
   device as it stands, and keeps the event queue full of buffers. Events are already evdev events.
