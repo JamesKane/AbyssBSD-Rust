@@ -49,8 +49,8 @@ what userland sees, not the source of the code ([ADR-0007](adr/0007-license-and-
 - Swap and the full pageout daemon (P11). Core dumps to swap (`dumpon`, `savecore`) find no dump
   device, as on a machine without one.
 - Linux and 32-bit ABIs (permanent, [COMPATIBILITY.md §1](COMPATIBILITY.md#1-target)).
-- POSIX AIO beyond what the base boot and kyua's `lib/libc` need; `EVFILT_AIO`, `EVFILT_LIO`,
-  `EVFILT_SENDFILE` (P7, with `sendfile`). (`inotify`, listed here at first as 16-CURRENT's,
+- `EVFILT_SENDFILE` (P7, with `sendfile`). POSIX AIO, with `EVFILT_AIO` and `EVFILT_LIO`, came
+  in P9 (§7.6). (`inotify`, listed here at first as 16-CURRENT's,
   is in 15.1 and kyua's `sys/kern`, and came in P6.10.)
 
 ## 2. Principles
@@ -300,6 +300,27 @@ end of file per object type) follow FreeBSD.
 on every clock with `TIMER_ABSTIME`, `settimeofday`/`clock_settime`/`adjtime`/`ntp_adjtime`
 (privileged, securelevel-limited), and `clock_getcpuclockid2`. The shared page's timehands (P4)
 already serve `clock_gettime` without a system call.
+
+The clock is disciplined as FreeBSD's is (P9): `ntp_adjtime` and `ntp_gettime` drive and read
+the PLL/FLL and leap-second state machine of `clock::ntp` (kern_ntptime.c), and `adjtime` slews
+at 500 ppm (5000 ppm while more than a second is left) instead of stepping; `settimeofday` and
+`clock_settime` still step. Each windup that crosses a second boundary hands the second to the
+discipline, as `tc_windup` does, and rescales the counter by the adjustment it returns; windups
+are timed just past each boundary. The kernel's timers stay on the raw counter, lengthened while
+the clock runs slow, and the realtime base its own timestamps use is refreshed every windup.
+`kern.ntp_pll`, `kern.timecounter`, and `kern.eventtimer` show what FreeBSD's do
+(compat-deviations). `CLOCK_TAI` needs `ntpd`'s TAI offset (`EINVAL` without one).
+
+### 7.6 Asynchronous I/O
+
+`aio_*` and `lio_listio` (vfs_aio.c): the bookkeeping of a process's requests is the host-tested
+`sys/aio` crate; `kernel/src/aio.rs` does the I/O. Files and disks go to a pool of kernel threads
+(`aiodN`) that take on the requester's address space and transfer as `pread`/`pwrite` would;
+only regular files and directories on local file systems, and disks given whole sectors, are
+safe there, and anything else is `EOPNOTSUPP` unless `vfs.aio.enable_unsafe` is set, as in
+FreeBSD. Sockets have a queue per socket buffer, worked through without blocking by a second
+pool (`soaiodN`) when the socket says it is ready. Completion is told by signal (`SI_ASYNCIO`) or
+kevent (`EVFILT_AIO`, `EVFILT_LIO`); exit and exec cancel what waits and wait for what runs.
 
 ## 8. Sockets
 

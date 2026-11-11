@@ -2713,7 +2713,8 @@ no hangs, no reboot loops, nothing that needs the screen, and P8's remaining exi
     (`AT_RENAME_NOREPLACE`), `abort2`, amd64's `break` (`sbrk`; `ENOSYS` on arm64, as FreeBSD),
     and the old `mount` for UFS and msdosfs (`ffs_cmount`, `msdosfs_cmount`). `tests/user/misccalls`
     passes on FreeBSD 15.1 and here; the shell cases run `uuidgen` and `cpuset`. Left of the
-    system calls: `ntp_adjtime`, `ntp_gettime` and `adjtime` slewing, and POSIX AIO.
+    system calls then: `ntp_adjtime`, `ntp_gettime` and `adjtime` slewing, and POSIX AIO (done
+    since; below).
   - Progress 2026-11-10 (`/dev/pci` and the bridges, in QEMU; not yet on the board): `/dev/pci`
     answers every `pci_user.c` request (`PCIOCGETCONF` with patterns and paging, `PCIOCREAD`,
     `PCIOCWRITE`, `PCIOCGETBAR`, `PCIOCATTACHED`, `PCIOCLISTVPD`, `PCIOCBARMMAP`, `PCIOCBARIO`;
@@ -2771,6 +2772,18 @@ no hangs, no reboot loops, nothing that needs the screen, and P8's remaining exi
     2104.8 ms before and 2097.1 ms after on average; on bhyve, which has no PCI-PCI bridge (so
     nothing waits for a turn), six samples each (p6's `boot.kernel` runs and the bhyve boot case)
     spread from 45 to 477 ms within either tree, too noisy to show a difference.
+  - Progress 2026-11-10 (the clock discipline and POSIX AIO, in QEMU, both architectures;
+    MULTIUSER.md §7.5-§7.6): `ntp_adjtime` and `ntp_gettime` over FreeBSD's PLL/FLL and
+    leap-second state machine (`clock::ntp`, host-tested to kern_ntptime.c's arithmetic and around
+    a simulated clock), `adjtime` slewing at FreeBSD's rates, `kern.ntp_pll`, `kern.timecounter`,
+    `kern.eventtimer`, `machdep.tsc_freq`, and `CLOCK_TAI`. Base's `ntpd` in QEMU on the build
+    server selects its `ntpd`, settles at 53.9 ppm with the offset within half a millisecond, and
+    `ntptime` reports `TIME_OK` (`ABYSS_NTP=25`). POSIX AIO: every `aio_*` call and `lio_listio`,
+    worker threads for files and disks, per-socket queues, signals and `EVFILT_AIO`/`EVFILT_LIO`,
+    the safe-file rule and `vfs.aio.*`, cancellation at exit and exec (`sys/aio`, host-tested);
+    `kern.arandom`, which libc's `srandomdev` needs. FreeBSD's `sys/aio` tests and
+    `unix_dgram:event` end as on FreeBSD 15.1 in the shell cases, and `tests/user/ntp` and
+    `tests/user/aio` pass on FreeBSD 15.1 and here. Not on the board yet.
 - **Verification:** kyua's arm64 target on the board; fsx with `fsck_ffs` on the NVMe and a USB
   disk (done with the SMMU's stage 5, IOMMU.md §18); the device tree against FreeBSD's `devinfo`
   wherever FreeBSD has a driver. No day-long looped runs (the user, 2026-11-10): kyua and the

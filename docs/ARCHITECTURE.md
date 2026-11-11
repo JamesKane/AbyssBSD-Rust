@@ -320,7 +320,8 @@ We follow FreeBSD's Mach-derived design, adapted to Rust ownership:
 ### 5.4 Time (`sys/time`)
 
 - A `timecounter` abstraction (TSC, ARM generic counter, HPET fallback), driven by NTP-disciplined
-  `timehands`.
+  `timehands`: each second the timehands pass goes to `clock::ntp`'s FreeBSD PLL/FLL, whose
+  adjustment rescales the counter (MULTIUSER.md §7.5).
 - The **shared page** exports `vdso_timehands` so FreeBSD libc's userspace `clock_gettime` fast
   path works.
 

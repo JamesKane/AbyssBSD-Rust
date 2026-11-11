@@ -466,6 +466,10 @@ While working on a feature, four environment variables shorten the loop (and pas
 - `ABYSS_ATF="usr/tests/sys/kern/ptrace_test ..."`: the shell case's `run-atf` runs only those of
   FreeBSD's test directories or programs (from `image::FREEBSD_TESTS`), after making the root
   read-write, and skips the rest of the UFS2 steps. Its verdict covers only what ran.
+- `ABYSS_NTP=MINUTES`: the network cases (and `freebsd-net`) run base's `ntpd` that long after
+  their other steps, against the router (on the build server, its own `ntpd`), printing a line
+  `ntp-sample` a minute with `ntptime`'s offset and frequency, then require `ntpd` to have selected
+  the server and the kernel's discipline to be locked (`TIME_OK`, `STA_PLL`).
 - `ABYSS_ATF_TIMEOUT=30`: each case's limit instead of kyua's 300 seconds, so that a hang costs
   little.
 - `ABYSS_TEST_ONLY=kernel::tests::user_memory::cd9660_reads_as_freebsd_reads_it,...`: the boot
