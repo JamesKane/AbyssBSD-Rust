@@ -103,6 +103,7 @@ where AbyssBSD differs, and why. A difference not listed here is a bug.
 | `hidraw.ko` | A module file: `kldstat` shows its load address and size | Built in and attached only once loaded; `kldstat` lists `hidraw.ko` with address and size 0 | No loadable modules yet (ADR-0021) |
 | `HIDRAW_SET_REPORT_DESC` | Replaces the device's report descriptor and enumerates the bus's children again | `EOPNOTSUPP` (after the `FWRITE` and `PRIV_DRIVER` checks) | Re-enumerating a `hidbus` from a new descriptor is not done yet; no program here asks for it |
 | `hidraw` and `FIOASYNC` | The open's process gets `SIGIO` when a report arrives | No `SIGIO` | hidapi and libfido2 poll; it comes with a program that needs it |
+| USB root hub and device order at boot | Each bus's explore thread makes its root hub and explores its ports as the scheduler runs it, so `ugenB.1` lines, `uhubN` units, and `usbconfig`'s listing (`USB_READ_DIR`) come in a boot-dependent order (the Orange Pi's FreeBSD: 1.1 to 4.1, 0.1, 5.1, 6.1, 8.1, 7.1, 9.1, `uhub0` on `usbus1`) | Root hubs in bus-unit order (`uhubN` on `usbusN`), all before any bus explores; the boot's devices listed by bus and index after them; ports still explored in parallel, so devices' lines of different buses interleave as FreeBSD's do | A fixed order where FreeBSD's is a race; the shape (root hubs, then devices) is FreeBSD's |
 
 ## System calls and process behavior
 

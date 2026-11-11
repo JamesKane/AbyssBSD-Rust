@@ -58,6 +58,14 @@ USB 2.0 and 3.2, HID 1.11 and its usage tables, T10 SAM/SPC/SBC and UAS-2, and v
    appears), each bus holds the root mount back (`root_mount_hold`, as `usbusN`): a root not
    found yet, such as a USB disk, is waited for, with FreeBSD's `Root mount waiting for:` line
    each second; a root already there is mounted at once. The ktests wait for the holds too.
+   A hub found on a port is explored at once, before the next port, as `uhub_explore_sub`
+   goes down into it, so devices behind hubs are numbered as FreeBSD numbers them. At boot the
+   root hubs come in bus-unit order, each once the one before has its `uhub`, and no bus
+   explores until every root hub is there (FreeBSD's per-bus threads race for this; the shape,
+   every root hub first, is FreeBSD's). `USB_READ_DIR` (§5.5), and so `usbconfig`, lists the
+   boot's devices root hubs by bus, then the first exploring's devices by bus and index, and
+   later ones as they come. Every xHCI bus is USB 3.0 (`5.0Gbps Super Speed USB v3.0`) with a
+   SuperSpeed root hub, whatever ports the controller has, as FreeBSD's `xhci` sets `usbrev`.
 
 ## 3. Crates
 
