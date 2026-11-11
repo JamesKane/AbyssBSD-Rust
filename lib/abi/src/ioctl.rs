@@ -18,8 +18,17 @@ pub const IOCPARM_MASK: u32 = 0x1fff;
 /// The largest argument (`IOCPARM_MAX`).
 pub const IOCPARM_MAX: u32 = 1 << 13;
 
-const fn ioc(dir: u32, group: u8, num: u8, len: u32) -> u32 {
+pub(crate) const fn ioc(dir: u32, group: u8, num: u8, len: u32) -> u32 {
     dir | ((len & IOCPARM_MASK) << 16) | (group as u32) << 8 | num as u32
+}
+
+/// [`ioc`] for an argument of `len` bytes (a structure's size).
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "every argument is under IOCPARM_MAX"
+)]
+pub(crate) const fn ioc_of(dir: u32, group: u8, num: u8, len: usize) -> u32 {
+    ioc(dir, group, num, len as u32)
 }
 
 /// The size of a request's argument.
