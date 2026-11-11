@@ -2800,8 +2800,14 @@ no hangs, no reboot loops, nothing that needs the screen, and P8's remaining exi
     with `umass` detached, a stall cleared, a reset bringing `umass` back) passes on both arches,
     and on FreeBSD 15.1 (`freebsd-usertests --usb`).
     Left (compat-deviations): isochronous transfers, other alternate settings, `read(2)` and
-    `write(2)` on endpoint nodes, selective suspend, the quirk table; `uhid`/`hidraw` (where
-    `USB_GET_REPORT_DESC` is answered) have no driver.
+    `write(2)` on endpoint nodes, selective suspend, the quirk table.
+  - Progress 2026-11-10 (`hidraw`, in QEMU): `kldload hidraw` attaches FreeBSD's `hidraw` to
+    every `hidbus` beside `hkbd` and `hms`, printing FreeBSD's lines, and `kldunload` detaches it;
+    `/dev/hidrawN` answers the uhid and Linux requests hidapi and libfido2 use, reads and writes
+    reports, and polls (USB.md §6.1). `tests/user/hidraw` (descriptors, identity, input reports
+    by `GET_REPORT` and immediate reads, a keyboard's LED report, poll and kqueue, load and
+    unload) passes on both arches here and on FreeBSD 15.1. Reports arriving on the interrupt
+    pipe were checked by hand with QMP typing; `uhid` is not needed (it never wins over `usbhid`).
 - **Verification:** kyua's arm64 target on the board; fsx with `fsck_ffs` on the NVMe and a USB
   disk (done with the SMMU's stage 5, IOMMU.md §18); the device tree against FreeBSD's `devinfo`
   wherever FreeBSD has a driver. No day-long looped runs (the user, 2026-11-10): kyua and the

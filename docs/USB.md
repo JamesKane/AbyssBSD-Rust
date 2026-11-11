@@ -299,6 +299,23 @@ on a bad descriptor; it returns an error and `usbhid` falls back to the boot pro
 interface supports it. An interface that gives no descriptor at all attaches with an empty one, so
 nothing binds under its `hidbus` (FreeBSD's `hidbus_attach` ignores the failed request).
 
+`hidraw` (`sys/hid/src/hidraw.rs`, FreeBSD's `hidraw.c`) gives hidapi and libfido2 a device's
+reports raw. As on FreeBSD, where it is a module GENERIC leaves out, it attaches only once loaded:
+`kldload hidraw` (or `hidraw_load=YES` on the kernel command line) gives every `hidbus` a child of
+its own, index 255 ("<name> Raw HID Device", alongside `hkbd` and `hms`, which keep their
+collections), and `kldunload` detaches them (`hidrawN: detached`); `kldstat` lists `hidraw.ko` while
+it is loaded. `/dev/hidrawN` is `root:operator` 0600 and opens once at a time. An open starts the
+interrupt stream and queues the reports whole (63 at most, the ID byte kept); `read(2)` returns one
+report, or after `HIDRAW_GET_REPORT_DESC` (uhid mode) whole input-report-sized chunks, or with
+`HIDRAW_SET_IMMED` one read by `GET_REPORT`; `write(2)` sends an output report on the interrupt
+OUT pipe, or by `SET_REPORT` without one (`hidbus_write`). It answers the uhid-style requests
+(`HIDRAW_GET_REPORT_DESC`, `HIDRAW_GET_REPORT`, `HIDRAW_SET_REPORT`, `HIDRAW_SET_IMMED`,
+`HIDRAW_GET_REPORT_ID`, `HIDRAW_GET_DEVICEINFO`) and the Linux-style ones (`HIDIOCGRDESCSIZE`,
+`HIDIOCGRDESC`, `HIDIOCGRAWINFO`, `HIDIOCGRAWNAME`, `HIDIOCGRAWPHYS`, `HIDIOCGRAWUNIQ`, and the
+feature, input, and output gets and sets), with report sizes from `hid_report_size_max`; poll and
+kqueue say when a report is queued. FreeBSD's `uhid` is not here: with `usbhid` enabled (the
+default) it never wins an interface. `tests/user/hidraw.c` checks it here and on FreeBSD 15.1.
+
 ### 6.2 Keyboards and mice
 
 - `hkbd` turns keyboard reports into key down/up events (with rollover detection), LEDs from the
