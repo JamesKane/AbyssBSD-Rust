@@ -71,5 +71,6 @@ pub mod ucontext;
 pub mod ucred;
 pub mod uio;
 pub mod umtx;
+pub mod usb;
 pub mod vdso;
 pub mod watchdog;
