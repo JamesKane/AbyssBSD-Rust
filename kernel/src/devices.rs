@@ -275,6 +275,7 @@ pub(crate) fn init(s: &Sleepable) {
     // The platform root, and the devices the kernel set up itself, as
     // FreeBSD's tree shows them.
     let m = bus::manager();
+    crate::ugen::init(s);
     evdev::init(
         s,
         evdev::Clocks {

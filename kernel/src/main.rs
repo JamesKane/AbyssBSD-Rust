@@ -94,6 +94,7 @@ mod timers;
 mod topology;
 mod tty;
 mod uaccess;
+mod ugen;
 mod uidinfo;
 mod umtx;
 mod uthread;

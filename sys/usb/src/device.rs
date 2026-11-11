@@ -5,10 +5,12 @@ use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
+use bus::DeviceId;
 use devtree::ids::{UsbIdent, UsbPlace};
 use sched::Sleepable;
+use sync::SpinLock;
 use usb::descriptor::{Configuration, DeviceDescriptor, Endpoint, Interface};
 use usb::{Setup, Speed};
 use vm::object::IoBuf;
@@ -16,7 +18,7 @@ use vm::object::IoBuf;
 use crate::UsbError;
 use crate::bus::Bus;
 use crate::hc::{HostController, SlotId, Tt};
-use crate::transfer::{Rejected, Transfer, Waiter};
+use crate::transfer::{Rejected, Stats, Transfer, Waiter};
 
 /// How long a control request may take (FreeBSD's `USB_DEFAULT_TIMEOUT`
 /// is 1 s per stage; descriptor reads get 5 s in all).
@@ -62,7 +64,71 @@ pub struct UsbDevice {
     pub product: String,
     /// The serial number string, or empty.
     pub serial: String,
+    /// The device descriptor's bytes, as the device sent them.
+    pub raw_desc: [u8; 18],
+    /// When it was plugged in (FreeBSD's `plugtime`, in ticks of a
+    /// millisecond): libusb tells a device from its successor by it. A
+    /// re-enumeration keeps it.
+    pub plugtime: u32,
+    /// The power its configuration draws, in mA (`bMaxPower` × 2).
+    pub power: u16,
+    /// Its configuration is self-powered (and, if it can be either, the
+    /// device said so).
+    pub self_powered: bool,
+    /// A hub's downstream ports; 0 for other devices.
+    pub nports: u8,
+    /// The parent hub's USB address (0 for the root hub).
+    pub hub_address: u8,
+    /// The ports from the root hub down to it (empty for the root hub).
+    pub port_path: Vec<u8>,
+    /// Its requests, by transfer type.
+    pub(crate) stats: Arc<Stats>,
+    /// `USB_POWER_MODE_*`.
+    pub(crate) power_mode: AtomicU8,
+    /// The configuration index: 0, or `USB_UNCONFIG_INDEX` once
+    /// unconfigured (powered off, or `USB_SET_CONFIG` to none).
+    pub(crate) config_index: AtomicU8,
+    /// What the explore thread is to do to it ([`Pending`]).
+    pub(crate) pending: AtomicU8,
+    /// For [`Pending::SetConfig`]: the index.
+    pub(crate) next_config: AtomicU8,
+    /// Its interfaces' nodes, by interface index; `None` once a driver
+    /// was detached from userland (`USB_IFACE_DRIVER_DETACH`).
+    pub(crate) ifaces: SpinLock<Vec<Option<DeviceId>>>,
+    /// The transfer type of each endpoint, by `(address & 0xf) | in << 4`.
+    ep_types: [u8; 32],
+    /// Tells it from a device plugged in later at the same place; a
+    /// re-enumeration keeps it.
+    pub session: u64,
+    slot_freed: AtomicBool,
     gone: AtomicBool,
+}
+
+/// What the explore thread is asked to do to a device (FreeBSD's
+/// `re_enumerate_wait`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum Pending {
+    /// Nothing (`USB_RE_ENUM_DONE`).
+    Done = 0,
+    /// Reset it and enumerate it again (`USB_RE_ENUM_START`).
+    Start = 1,
+    /// Unconfigure it and disable its port (`USB_RE_ENUM_PWR_OFF`).
+    PowerOff = 2,
+    /// Select configuration [`UsbDevice::next_config`]
+    /// (`USB_RE_ENUM_SET_CONFIG`).
+    SetConfig = 3,
+}
+
+impl Pending {
+    fn of(v: u8) -> Self {
+        match v {
+            1 => Self::Start,
+            2 => Self::PowerOff,
+            3 => Self::SetConfig,
+            _ => Self::Done,
+        }
+    }
 }
 
 impl core::fmt::Debug for UsbDevice {
@@ -95,11 +161,58 @@ pub(crate) struct DeviceInit {
     pub manufacturer: String,
     pub product: String,
     pub serial: String,
+    pub raw_desc: [u8; 18],
+    pub plugtime: u32,
+    pub session: u64,
+    pub power: u16,
+    pub self_powered: bool,
+    pub nports: u8,
+    pub hub_address: u8,
+    pub port_path: Vec<u8>,
+    /// `USB_POWER_MODE_*` to start in.
+    pub power_mode: u8,
+}
+
+/// FreeBSD's `ticks` (a millisecond each): a device's `plugtime`.
+pub(crate) fn ticks() -> u32 {
+    // Wraps, as FreeBSD's does.
+    u32::try_from(sched::now_ns() / 1_000_000 % (1 << 32)).unwrap_or(0)
+}
+
+/// The transfer types of a configuration's endpoints, by
+/// `(address & 0xf) | in << 4` (control for the default endpoint).
+fn ep_types(c: &Configuration) -> [u8; 32] {
+    let mut t = [0; 32];
+    for e in c.interfaces.iter().flat_map(|i| &i.endpoints) {
+        t[ep_slot(e.address)] = e.attributes & 3;
+    }
+    t
+}
+
+fn ep_slot(address: u8) -> usize {
+    usize::from(address & 0xf) | usize::from(address >> 7) << 4
 }
 
 impl UsbDevice {
     pub(crate) fn new(i: DeviceInit) -> Self {
+        let iface_count = i.config.defaults().count();
         Self {
+            ep_types: ep_types(&i.config),
+            raw_desc: i.raw_desc,
+            plugtime: i.plugtime,
+            power: i.power,
+            self_powered: i.self_powered,
+            nports: i.nports,
+            hub_address: i.hub_address,
+            port_path: i.port_path,
+            stats: Arc::new(Stats::default()),
+            power_mode: AtomicU8::new(i.power_mode),
+            config_index: AtomicU8::new(0),
+            pending: AtomicU8::new(Pending::Done as u8),
+            next_config: AtomicU8::new(0),
+            ifaces: SpinLock::new(vec![None; iface_count]),
+            session: i.session,
+            slot_freed: AtomicBool::new(false),
             hc: i.hc,
             bus_ref: i.bus_ref,
             tt: i.tt,
@@ -145,6 +258,113 @@ impl UsbDevice {
     #[must_use]
     pub fn is_gone(&self) -> bool {
         self.gone.load(Ordering::Acquire)
+    }
+
+    /// Its configuration index (`curr_config_index`): 0, or
+    /// `USB_UNCONFIG_INDEX`.
+    #[must_use]
+    pub fn config_index(&self) -> u8 {
+        self.config_index.load(Ordering::Acquire)
+    }
+
+    /// Whether a configuration is selected.
+    #[must_use]
+    pub fn is_configured(&self) -> bool {
+        self.config_index() != abi::usb::USB_UNCONFIG_INDEX
+    }
+
+    /// `USB_POWER_MODE_*`.
+    #[must_use]
+    pub fn power_mode(&self) -> u8 {
+        self.power_mode.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_power_mode(&self, m: u8) {
+        self.power_mode.store(m, Ordering::Release);
+    }
+
+    /// What the explore thread has yet to do to it.
+    pub(crate) fn pending(&self) -> Pending {
+        Pending::of(self.pending.load(Ordering::Acquire))
+    }
+
+    /// Asks the explore thread to do `p` unless something else is asked
+    /// already; `false` if it is.
+    pub(crate) fn ask(&self, p: Pending) -> bool {
+        self.pending
+            .compare_exchange(
+                Pending::Done as u8,
+                p as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    pub(crate) fn done(&self) {
+        self.pending.store(Pending::Done as u8, Ordering::Release);
+    }
+
+    /// The configuration index [`Pending::SetConfig`] selects.
+    pub(crate) fn next_config(&self) -> u8 {
+        self.next_config.load(Ordering::Acquire)
+    }
+
+    /// It has no configuration now.
+    pub(crate) fn unconfigured(&self) {
+        self.config_index
+            .store(abi::usb::USB_UNCONFIG_INDEX, Ordering::Release);
+    }
+
+    /// Its slot was given back to the controller (by a re-enumeration);
+    /// it must not be freed again.
+    pub(crate) fn slot_freed(&self) {
+        self.slot_freed.store(true, Ordering::Release);
+    }
+
+    /// Whether its slot is still its own.
+    pub(crate) fn owns_slot(&self) -> bool {
+        !self.slot_freed.load(Ordering::Acquire)
+    }
+
+    /// The endpoint at `address` in its configuration.
+    #[must_use]
+    pub fn endpoint(&self, address: u8) -> Option<&Endpoint> {
+        if !self.is_configured() {
+            return None;
+        }
+        self.config
+            .interfaces
+            .iter()
+            .flat_map(|i| &i.endpoints)
+            .find(|e| e.address == address)
+    }
+
+    /// Its requests by transfer type: successes, then failures.
+    #[must_use]
+    pub fn stats(&self) -> ([u32; 4], [u32; 4]) {
+        self.stats.get()
+    }
+
+    /// `t`, counted against endpoint `address`'s type.
+    fn counted(&self, address: u8, mut t: Transfer) -> Transfer {
+        let kind = if address & 0x7f == 0 {
+            0
+        } else {
+            self.ep_types[ep_slot(address)]
+        };
+        t.stats = Some((Arc::clone(&self.stats), kind));
+        t
+    }
+
+    /// The interface node at `index`, if a driver may have it.
+    #[must_use]
+    pub fn interface_node(&self, index: u8) -> Option<DeviceId> {
+        self.ifaces
+            .lock()
+            .get(usize::from(index))
+            .copied()
+            .flatten()
     }
 
     pub(crate) fn set_gone(&self) {
@@ -208,11 +428,37 @@ impl UsbDevice {
         setup: Setup,
         out: Option<&[u8]>,
     ) -> Result<Vec<u8>, UsbError> {
-        let slot = self.slot.ok_or(UsbError::Invalid)?;
         if self.is_gone() {
             return Err(UsbError::Gone);
         }
-        control(&*self.hc, s, slot, setup, out)
+        let Some(slot) = self.slot else {
+            // The root hub: the controller driver's emulation
+            // (`xhci_roothub_exec`), which moves no data out.
+            if !setup.is_in() && setup.length != 0 {
+                return Err(UsbError::Invalid);
+            }
+            let mut v = usb::ugen::root_hub_request(&setup, &self.manufacturer, 1)
+                .ok_or(UsbError::Stalled)?;
+            v.truncate(usize::from(setup.length));
+            return Ok(v);
+        };
+        let w = Waiter::new();
+        let buf = match out {
+            Some(d) if !setup.is_in() => d[..d.len().min(usize::from(setup.length))].to_vec(),
+            _ if setup.is_in() => vec![0; usize::from(setup.length)],
+            _ => Vec::new(),
+        };
+        let t = self.counted(0, w.transfer(IoBuf::from(buf), CONTROL_TIMEOUT_MS));
+        self.hc
+            .submit(slot, 0, Some(setup), t)
+            .map_err(|r| r.error)?;
+        let (buf, r) = w.wait(s);
+        let n = r?;
+        let IoBuf::Owned(mut v) = buf else {
+            return Err(UsbError::Invalid);
+        };
+        v.truncate(n);
+        Ok(v)
     }
 
     /// Starts a control request without waiting: `t` carries the data
@@ -235,7 +481,7 @@ impl UsbDevice {
                 error: UsbError::Gone,
             });
         }
-        self.hc.submit(slot, 0, Some(setup), t)
+        self.hc.submit(slot, 0, Some(setup), self.counted(0, t))
     }
 
     /// Submits a transfer on endpoint `endpoint` (an address).
@@ -256,7 +502,8 @@ impl UsbDevice {
                 error: UsbError::Gone,
             });
         }
-        self.hc.submit(slot, endpoint, None, t)
+        self.hc
+            .submit(slot, endpoint, None, self.counted(endpoint, t))
     }
 
     /// Clears a halted endpoint: `CLEAR_FEATURE(ENDPOINT_HALT)` on the

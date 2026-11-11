@@ -21,7 +21,10 @@
 //! [`Ident::Usb`]: bus::Ident::Usb
 
 #![no_std]
-#![forbid(unsafe_code)]
+// Host tests need a `Sleepable` (which only `unsafe` makes); the kernel's
+// code has no unsafe code.
+#![cfg_attr(not(test), forbid(unsafe_code))]
+#![cfg_attr(test, deny(unsafe_code))]
 
 extern crate alloc;
 
@@ -30,6 +33,7 @@ pub mod device;
 pub mod hc;
 pub mod hub;
 pub mod transfer;
+pub mod ugen;
 
 pub use bus::USBUS;
 pub use device::{UsbDevice, UsbInterface};

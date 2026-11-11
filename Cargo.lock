@@ -603,6 +603,7 @@ dependencies = [
  "uart-pl011",
  "ufs",
  "umtx",
+ "usbus",
  "ustar",
  "vfs",
  "virtio-random",
@@ -972,11 +973,14 @@ version = "0.0.0"
 name = "usbus"
 version = "0.0.0"
 dependencies = [
+ "abi",
  "bus",
  "devtree",
  "sched",
  "sync",
+ "sysctl",
  "usb",
+ "vfs",
  "vm",
 ]
 

@@ -3,9 +3,9 @@
 //! explore thread, and adds the root hub.
 
 use alloc::string::String;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use bus::{
     AttachCx, AttachError, DeviceId, Driver, DriverDecl, Ident, Ids, StartCx, StopCx, StopReason,
@@ -13,11 +13,12 @@ use bus::{
 use sched::{Sleepable, Thread, WaitQueue};
 use sync::SpinLock;
 use usb::Speed;
-use usb::descriptor::{Configuration, DeviceDescriptor, Interface, class};
+use usb::descriptor::{Configuration, DeviceDescriptor};
 
 use crate::device::{DeviceInit, UsbDevice, UsbInterface};
 use crate::hc::HostController;
 use crate::hub::Hub;
+use crate::ugen::fs::Pipe;
 
 /// What a controller gives its `usbus` child as bus data.
 pub struct UsbusData {
@@ -53,6 +54,44 @@ impl Explorer {
 /// The highest device index (FreeBSD's `USB_MAX_DEVICES` less one).
 const MAX_INDEX: u8 = 127;
 
+/// Every bus, by unit, for finding a device by its location
+/// (`devclass_get_softc(usb_devclass_ptr, ...)`).
+static BUSES: SpinLock<Vec<Weak<Bus>>> = SpinLock::new(Vec::new());
+
+/// Tells a device from one plugged in later at the same place.
+static SESSIONS: AtomicU64 = AtomicU64::new(1);
+
+/// A new device's session (kept by a re-enumeration).
+pub(crate) fn new_session() -> u64 {
+    // Unique only: nothing is ordered by it.
+    SESSIONS.fetch_add(1, Ordering::Relaxed)
+}
+
+/// The device at index `index` of bus `bus` (`bus->devices[index]`).
+pub(crate) fn device_at(bus: u32, index: u8) -> Option<Arc<UsbDevice>> {
+    let b = BUSES
+        .lock()
+        .iter()
+        .filter_map(Weak::upgrade)
+        .find(|b| b.unit == bus)?;
+    b.devices.lock().get(usize::from(index))?.clone()
+}
+
+/// Cancels what is queued on endpoint `address` of `pipe` from the
+/// explore thread of bus `bus` (an open closed without stopping its
+/// transfers, where nothing may sleep).
+pub(crate) fn defer_abort(bus: u32, pipe: Arc<dyn Pipe>, address: u8) {
+    let b = BUSES
+        .lock()
+        .iter()
+        .filter_map(Weak::upgrade)
+        .find(|b| b.unit == bus);
+    if let Some(b) = b {
+        b.aborts.lock().push((pipe, address));
+        b.explorer.kick();
+    }
+}
+
 /// A bus.
 pub struct Bus {
     /// `usbusN`'s unit.
@@ -62,6 +101,10 @@ pub struct Bus {
     pub(crate) hubs: SpinLock<Vec<Arc<Hub>>>,
     /// Device indices in use; 1 is the root hub's.
     indices: SpinLock<u128>,
+    /// The devices, by index.
+    devices: SpinLock<Vec<Option<Arc<UsbDevice>>>>,
+    /// Endpoints to cancel ([`defer_abort`]).
+    aborts: SpinLock<Vec<(Arc<dyn Pipe>, u8)>>,
 }
 
 impl core::fmt::Debug for Bus {
@@ -85,8 +128,27 @@ impl Bus {
         }
     }
 
+    /// Puts `dev` at its index (or replaces what is there: a device
+    /// enumerated again).
+    pub(crate) fn set_device(&self, dev: &Arc<UsbDevice>) {
+        if let Some(d) = self.devices.lock().get_mut(usize::from(dev.index)) {
+            *d = Some(Arc::clone(dev));
+        }
+    }
+
+    /// Takes the device at `index` away.
+    pub(crate) fn clear_device(&self, index: u8) {
+        if let Some(d) = self.devices.lock().get_mut(usize::from(index)) {
+            *d = None;
+        }
+    }
+
     /// One pass over every hub, root first.
     fn explore(self: &Arc<Self>, s: &Sleepable) {
+        let aborts = core::mem::take(&mut *self.aborts.lock());
+        for (pipe, address) in aborts {
+            pipe.abort(s, address);
+        }
         let hubs = self.hubs.lock().clone();
         for h in hubs {
             h.explore(s, self);
@@ -113,11 +175,14 @@ impl Bus {
             root.product,
             self.unit
         ));
+        self.set_device(&root);
+        crate::ugen::device_added(&root);
+        crate::ugen::endpoints_added(&root);
         let iface = UsbInterface {
             desc: root.config.interfaces[0].clone(),
-            device: root,
+            device: Arc::clone(&root),
         };
-        m.add_child(
+        let child = m.add_child(
             s,
             node,
             Ident::Usb(iface.ident(), iface.place()),
@@ -125,6 +190,9 @@ impl Bus {
             Vec::new(),
             &[],
         );
+        if let Some(c) = root.ifaces.lock().get_mut(0) {
+            *c = Some(child);
+        }
         // The first pass, whatever has changed yet; then root may mount
         // (`usb_root_mount_rel` after `usb_bus_explore`).
         // The root hub's driver first: until it attaches there is nothing
@@ -153,21 +221,20 @@ impl Bus {
         }
     }
 
-    /// The root hub as a device: FreeBSD's `ugenB.1`.
+    /// The root hub as a device: FreeBSD's `ugenB.1`, with the xHCI
+    /// root hub's descriptors (`xhci_devd`, `xhci_confd`).
     fn root_hub(self: &Arc<Self>) -> UsbDevice {
-        // FreeBSD's xHCI root hub descriptor: USB 3.0, IDs 0, a
-        // SuperSpeed hub.
-        let usb3 = self.hc.bus_speed().contains("Super");
-        let iface = Interface {
-            number: 0,
-            alternate: 0,
-            class: class::HUB,
-            subclass: 0,
-            protocol: 0,
+        let raw_desc = usb::ugen::ROOT_HUB_DEVICE;
+        let desc = DeviceDescriptor::parse(&raw_desc).unwrap_or_default();
+        let raw_config = usb::ugen::ROOT_HUB_CONFIG.to_vec();
+        let config = Configuration::parse(&raw_config).unwrap_or(Configuration {
+            value: 1,
             string: 0,
-            endpoints: Vec::new(),
-            extra: Vec::new(),
-        };
+            attributes: 0x40,
+            max_power: 0,
+            interfaces_declared: 0,
+            interfaces: Vec::new(),
+        });
         UsbDevice::new(DeviceInit {
             hc: Arc::clone(&self.hc),
             bus_ref: Arc::downgrade(self),
@@ -176,32 +243,31 @@ impl Bus {
             bus: self.unit,
             index: 1,
             address: 1,
-            speed: if usb3 { Speed::Super } else { Speed::High },
+            speed: if self.hc.bus_speed().contains("Super") {
+                Speed::Super
+            } else {
+                Speed::High
+            },
             hub_index: 0,
             port: 0,
             route: 0,
             root_port: 0,
             depth: 0,
-            desc: DeviceDescriptor {
-                usb: if usb3 { 0x0300 } else { 0x0200 },
-                class: class::HUB,
-                protocol: if usb3 { 3 } else { 1 },
-                release: 0x0100,
-                configurations: 1,
-                ..DeviceDescriptor::default()
-            },
-            config: Configuration {
-                value: 1,
-                string: 0,
-                attributes: 0x40,
-                max_power: 0,
-                interfaces_declared: 1,
-                interfaces: alloc::vec![iface],
-            },
-            raw_config: Vec::new(),
+            desc,
+            config,
+            raw_config,
             manufacturer: String::from(self.hc.root_hub_vendor()),
             product: String::from("XHCI root HUB"),
             serial: String::new(),
+            raw_desc,
+            plugtime: crate::device::ticks(),
+            session: new_session(),
+            power: 0,
+            self_powered: true,
+            nports: self.hc.root_ports(),
+            hub_address: 0,
+            port_path: Vec::new(),
+            power_mode: abi::usb::power_mode::SAVE,
         })
     }
 }
@@ -238,6 +304,8 @@ impl Driver for Usbus {
                 explorer: Arc::new(Explorer::default()),
                 hubs: SpinLock::new(Vec::new()),
                 indices: SpinLock::new(1 << 1),
+                devices: SpinLock::new(alloc::vec![None; usize::from(MAX_INDEX) + 1]),
+                aborts: SpinLock::new(Vec::new()),
             }),
             thread: SpinLock::new(None),
         })
@@ -245,6 +313,11 @@ impl Driver for Usbus {
 
     fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
         let bus = &self.bus;
+        {
+            let mut all = BUSES.lock();
+            all.retain(|b| b.strong_count() > 0);
+            all.push(Arc::downgrade(bus));
+        }
         ::bus::manager().log(format_args!("usbus{}: {}", bus.unit, bus.hc.bus_speed()));
         bus.hc.set_explorer(Arc::clone(&bus.explorer));
         let (b, node) = (Arc::clone(bus), cx.node());
@@ -265,6 +338,17 @@ impl Driver for Usbus {
         if let Some(t) = t {
             t.join(cx.sleepable());
         }
+        // The root hub's nodes, once its driver (a child) is gone.
+        let s = cx.sleepable();
+        if let Some(root) = device_at(self.bus.unit, 1) {
+            crate::ugen::endpoints_removed(s, &root);
+            crate::ugen::device_removed(s, &root);
+            root.set_gone();
+        }
+        self.bus.clear_device(1);
+        BUSES
+            .lock()
+            .retain(|b| b.upgrade().is_some_and(|b| !Arc::ptr_eq(&b, &self.bus)));
     }
 }
 

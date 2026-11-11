@@ -10,7 +10,7 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use sched::{Sleepable, WaitQueue};
 use sync::SpinLock;
@@ -34,7 +34,39 @@ pub struct Transfer {
     /// ([`HostController::open_streams`](crate::HostController::open_streams));
     /// 0 otherwise.
     pub stream: u16,
+    /// Where its outcome is counted (the device's requests by transfer
+    /// type, as `USB_DEVICESTATS` reports them), and its type.
+    pub(crate) stats: Option<(Arc<Stats>, u8)>,
     done: Option<Done>,
+}
+
+/// A device's requests by transfer type (`UE_CONTROL` to
+/// `UE_INTERRUPT`): FreeBSD's `stats_ok` and `stats_err`.
+#[derive(Debug, Default)]
+pub struct Stats {
+    ok: [AtomicU32; 4],
+    failed: [AtomicU32; 4],
+}
+
+impl Stats {
+    /// Counts one outcome of a transfer of type `kind` (`bmAttributes &
+    /// 3`): cancelled ones are not counted, as FreeBSD keeps them apart.
+    fn count(&self, kind: u8, r: &Result<usize, UsbError>) {
+        let k = usize::from(kind & 3);
+        // Counters only: nothing is ordered by them.
+        match r {
+            Ok(_) => self.ok[k].fetch_add(1, Ordering::Relaxed),
+            Err(UsbError::Cancelled) => return,
+            Err(_) => self.failed[k].fetch_add(1, Ordering::Relaxed),
+        };
+    }
+
+    /// The counts: successes, then failures, by type.
+    #[must_use]
+    pub fn get(&self) -> ([u32; 4], [u32; 4]) {
+        let load = |a: &[AtomicU32; 4]| core::array::from_fn(|i| a[i].load(Ordering::Relaxed));
+        (load(&self.ok), load(&self.failed))
+    }
 }
 
 impl core::fmt::Debug for Transfer {
@@ -58,6 +90,7 @@ impl Transfer {
             buf,
             timeout_ms,
             stream: 0,
+            stats: None,
             done: Some(Box::new(done)),
         }
     }
@@ -83,6 +116,9 @@ impl Transfer {
 
     /// Completes it: `Ok` with the bytes moved, or the error.
     pub fn complete(mut self, r: Result<usize, UsbError>) {
+        if let Some((st, kind)) = self.stats.take() {
+            st.count(kind, &r);
+        }
         if let Some(done) = self.done.take() {
             done(core::mem::take(&mut self.buf), r);
         }

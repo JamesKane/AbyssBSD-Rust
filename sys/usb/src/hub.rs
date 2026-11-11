@@ -24,7 +24,7 @@ use vm::object::IoBuf;
 
 use crate::UsbError;
 use crate::bus::{Bus, Explorer};
-use crate::device::{self, DeviceInit, UsbDevice, UsbInterface};
+use crate::device::{self, DeviceInit, Pending, UsbDevice, UsbInterface};
 use crate::hc::{Addressed, HostController, HubInfo, NewDevice, PortState, SlotId, Tt};
 use crate::transfer::Transfer;
 
@@ -222,6 +222,18 @@ impl Hub {
             {
                 p.failed = false;
             }
+            if present && st.connected && !st.connect_changed {
+                let dev = self
+                    .port_state
+                    .lock()
+                    .get(usize::from(port - 1))
+                    .and_then(|p| p.attached.as_ref().map(|a| Arc::clone(&a.dev)));
+                if let Some(dev) = dev
+                    && dev.pending() != Pending::Done
+                {
+                    self.handle_pending(s, bus, port, &dev);
+                }
+            }
             let failed = failed && !st.connect_changed;
             if st.connected && !st.over_current && !failed && !self.has_device(port) {
                 let mut ok = false;
@@ -267,16 +279,7 @@ impl Hub {
             gone(s, bus, &a.dev, true);
             // Its interfaces' nodes are this hub's children whose location
             // names the port.
-            let mgr = ::bus::manager();
-            for c in mgr.children(self.node, s) {
-                let here = matches!(
-                    mgr.ident(c, s),
-                    Some(Ident::Usb(_, p)) if p.port == port && p.dev_addr == a.dev.index
-                );
-                if here {
-                    let _ = mgr.detach(c, DetachReason::Gone, s);
-                }
-            }
+            self.unconfigure(s, &a.dev, DetachReason::Gone);
             finish(s, bus, &a.dev);
         }
     }
@@ -292,14 +295,46 @@ impl Hub {
     }
 
     fn attach_port(&self, s: &Sleepable, bus: &Arc<Bus>, port: u8) -> Result<(), UsbError> {
+        let dev = self.bring_up(s, bus, port, None, 0)?;
+        ::bus::manager().log(format_args!(
+            "{}: <{} {}> at usbus{}",
+            dev.ugen(),
+            dev.manufacturer,
+            dev.product,
+            bus.unit
+        ));
+        bus.set_device(&dev);
+        crate::ugen::device_added(&dev);
+        if let Some(p) = self.port_state.lock().get_mut(usize::from(port - 1)) {
+            p.attached = Some(Attached {
+                dev: Arc::clone(&dev),
+            });
+        }
+        self.configure_children(s, bus, &dev);
+        Ok(())
+    }
+
+    /// Resets the device on `port`, addresses it, reads its descriptors,
+    /// and selects configuration `config_index`: a new device, or, with
+    /// `old`, that device enumerated again (its index, `plugtime`, and
+    /// power mode kept, as FreeBSD's `usbd_req_re_enumerate` keeps its
+    /// `usb_device`).
+    fn bring_up(
+        &self,
+        s: &Sleepable,
+        bus: &Arc<Bus>,
+        port: u8,
+        old: Option<&UsbDevice>,
+        config_index: u8,
+    ) -> Result<Arc<UsbDevice>, UsbError> {
         let hc = &bus.hc;
         let mut st = self.ports.state(s, port)?;
         if !st.connected {
             return Err(UsbError::Gone);
         }
         // A USB 2 port needs a reset to be enabled; a USB 3 port is once
-        // its link trains.
-        if !st.enabled {
+        // its link trains. A device enumerated again is reset.
+        if !st.enabled || old.is_some() {
             st = self
                 .ports
                 .reset(s, port)
@@ -335,7 +370,7 @@ impl Hub {
                 },
             )
             .inspect_err(|e| self.failed_at(port, "enable and address", *e))?;
-        let r = enumerate(s, &**hc, slot, speed);
+        let r = enumerate(s, &**hc, slot, speed, config_index);
         let e = match r {
             Ok(e) => e,
             Err(err) => {
@@ -344,11 +379,25 @@ impl Hub {
                 return Err(err);
             }
         };
-        let Some(index) = bus.alloc_index() else {
-            hc.disable_device(s, slot);
-            return Err(UsbError::NoMemory);
+        let index = match old {
+            Some(o) => o.index,
+            None => {
+                let Some(index) = bus.alloc_index() else {
+                    hc.disable_device(s, slot);
+                    return Err(UsbError::NoMemory);
+                };
+                index
+            }
         };
-        let dev = Arc::new(UsbDevice::new(DeviceInit {
+        let mut port_path = parent.port_path.clone();
+        port_path.push(port);
+        let power_mode = match old {
+            Some(o) => o.power_mode(),
+            // `uhub_attach` lets hubs save power.
+            None if e.desc.class == class::HUB => abi::usb::power_mode::SAVE,
+            None => abi::usb::power_mode::ON,
+        };
+        Ok(Arc::new(UsbDevice::new(DeviceInit {
             hc: Arc::clone(hc),
             bus_ref: Arc::downgrade(bus),
             tt,
@@ -363,24 +412,29 @@ impl Hub {
             root_port,
             depth,
             desc: e.desc,
+            power: u16::from(e.config.max_power) * 2,
+            self_powered: e.self_powered,
+            nports: e.nports,
             config: e.config,
             raw_config: e.raw_config,
             manufacturer: e.manufacturer,
             product: e.product,
             serial: e.serial,
-        }));
-        ::bus::manager().log(format_args!(
-            "{}: <{} {}> at usbus{}",
-            dev.ugen(),
-            dev.manufacturer,
-            dev.product,
-            bus.unit
-        ));
-        if let Some(p) = self.port_state.lock().get_mut(usize::from(port - 1)) {
-            p.attached = Some(Attached {
-                dev: Arc::clone(&dev),
-            });
-        }
+            raw_desc: e.raw_desc,
+            plugtime: old.map_or_else(crate::device::ticks, |o| o.plugtime),
+            session: old.map_or_else(crate::bus::new_session, |o| o.session),
+            hub_address: parent.address,
+            port_path,
+            power_mode,
+        })))
+    }
+
+    /// A configured device's endpoint nodes and interfaces (each a child
+    /// of this hub's node), its drivers attached before the next port is
+    /// looked at, as FreeBSD's are, so its lines come together.
+    fn configure_children(&self, s: &Sleepable, bus: &Bus, dev: &Arc<UsbDevice>) {
+        bus.set_device(dev);
+        crate::ugen::endpoints_added(dev);
         let mut ifaces: Vec<_> = dev.config.defaults().cloned().collect();
         ifaces.sort_by_key(|i| i.number);
         let m = ::bus::manager();
@@ -388,7 +442,7 @@ impl Hub {
             .into_iter()
             .map(|desc| {
                 let i = UsbInterface {
-                    device: Arc::clone(&dev),
+                    device: Arc::clone(dev),
                     desc,
                 };
                 m.add_child(
@@ -401,12 +455,86 @@ impl Hub {
                 )
             })
             .collect();
-        // As FreeBSD: the device's drivers attach before the next port is
-        // looked at, so its lines come together.
+        {
+            let mut v = dev.ifaces.lock();
+            for (slot, &c) in v.iter_mut().zip(&children) {
+                *slot = Some(c);
+            }
+        }
         for c in children {
             m.wait_settled(c, s);
         }
-        Ok(())
+    }
+
+    /// `usb_unconfigure`: the device's interface drivers detach (each
+    /// saying so), its endpoint nodes go, and it has no configuration.
+    fn unconfigure(&self, s: &Sleepable, dev: &UsbDevice, why: DetachReason) {
+        let mgr = ::bus::manager();
+        let hub = mgr.nameunit(self.node, s).unwrap_or_default();
+        for c in mgr.children(self.node, s) {
+            let here = matches!(
+                mgr.ident(c, s),
+                Some(Ident::Usb(_, p)) if p.port == dev.port && p.dev_addr == dev.index
+            );
+            if !here || mgr.state(c, s) != Some(::bus::NodeState::Attached) {
+                continue;
+            }
+            if let Some(name) = mgr.nameunit(c, s) {
+                mgr.log(format_args!(
+                    "{name}: at {hub}, port {}, addr {} (disconnected)",
+                    dev.port, dev.address
+                ));
+            }
+            let _ = mgr.detach(c, why, s);
+        }
+        dev.ifaces.lock().iter_mut().for_each(|c| *c = None);
+        if dev.is_configured() {
+            crate::ugen::endpoints_removed(s, dev);
+        }
+        dev.unconfigured();
+    }
+
+    /// What `ugen` asked of the device on `port` (FreeBSD's
+    /// `uhub_explore_handle_re_enumerate`).
+    fn handle_pending(&self, s: &Sleepable, bus: &Arc<Bus>, port: u8, dev: &Arc<UsbDevice>) {
+        let unconfig = |dev: &UsbDevice| {
+            self.unconfigure(s, dev, DetachReason::Requested);
+            let _ = dev.control(s, Setup::set_configuration(0), None);
+        };
+        let pending = dev.pending();
+        let next = dev.next_config();
+        match pending {
+            Pending::Done => return,
+            Pending::PowerOff => {
+                unconfig(dev);
+                // Clear the port's enable.
+                self.ports.disable(s, port);
+            }
+            Pending::SetConfig if next == abi::usb::USB_UNCONFIG_INDEX => unconfig(dev),
+            Pending::Start | Pending::SetConfig => {
+                let index = if pending == Pending::Start { 0 } else { next };
+                self.unconfigure(s, dev, DetachReason::Requested);
+                if let Some(slot) = dev.slot()
+                    && dev.owns_slot()
+                {
+                    bus.hc.disable_device(s, slot);
+                    dev.slot_freed();
+                }
+                match self.bring_up(s, bus, port, Some(dev), index) {
+                    Ok(new) => {
+                        dev.set_gone();
+                        if let Some(p) = self.port_state.lock().get_mut(usize::from(port - 1)) {
+                            p.attached = Some(Attached {
+                                dev: Arc::clone(&new),
+                            });
+                        }
+                        self.configure_children(s, bus, &new);
+                    }
+                    Err(e) => self.failed_at(port, "re-enumeration", e),
+                }
+            }
+        }
+        dev.done();
     }
 
     /// For `uhub`'s stop: no more exploring, and every device below goes.
@@ -425,6 +553,9 @@ impl Hub {
             .collect();
         for d in devs {
             gone(s, &bus, &d, false);
+            if d.is_configured() {
+                crate::ugen::endpoints_removed(s, &d);
+            }
             finish(s, &bus, &d);
         }
     }
@@ -444,9 +575,14 @@ fn gone(_: &Sleepable, bus: &Bus, dev: &UsbDevice, unplugged: bool) {
     }
 }
 
-/// Frees a gone device's slot and index, once its drivers are detached.
+/// Frees a gone device's nodes, slot, and index, once its drivers are
+/// detached.
 fn finish(s: &Sleepable, bus: &Bus, dev: &UsbDevice) {
-    if let Some(slot) = dev.slot {
+    crate::ugen::device_removed(s, dev);
+    bus.clear_device(dev.index);
+    if let Some(slot) = dev.slot
+        && dev.owns_slot()
+    {
         bus.hc.disable_device(s, slot);
     }
     bus.free_index(dev.index);
@@ -455,6 +591,9 @@ fn finish(s: &Sleepable, bus: &Bus, dev: &UsbDevice) {
 /// What enumeration learned.
 struct Enumerated {
     desc: DeviceDescriptor,
+    raw_desc: [u8; 18],
+    self_powered: bool,
+    nports: u8,
     config: Configuration,
     raw_config: Vec<u8>,
     manufacturer: String,
@@ -468,6 +607,7 @@ fn enumerate(
     hc: &dyn HostController,
     slot: SlotId,
     speed: Speed,
+    config_index: u8,
 ) -> Result<Enumerated, UsbError> {
     let ctl = |setup: Setup| device::control(hc, s, slot, setup, None);
     let short = |_| UsbError::Protocol("bad descriptor");
@@ -481,10 +621,22 @@ fn enumerate(
     let len = u16::try_from(DeviceDescriptor::LEN).unwrap_or(18);
     let b = ctl(Setup::get_descriptor(kind::DEVICE, 0, 0, len))?;
     let desc = DeviceDescriptor::parse(&b).map_err(short)?;
+    let mut raw_desc = [0; 18];
+    raw_desc.copy_from_slice(b.get(..18).ok_or(UsbError::Protocol("bad descriptor"))?);
     let head_len = u16::try_from(descriptor::CONFIGURATION_LEN).unwrap_or(9);
-    let head = ctl(Setup::get_descriptor(kind::CONFIGURATION, 0, 0, head_len))?;
+    let head = ctl(Setup::get_descriptor(
+        kind::CONFIGURATION,
+        config_index,
+        0,
+        head_len,
+    ))?;
     let total = descriptor::configuration_total(&head).map_err(short)?;
-    let raw_config = ctl(Setup::get_descriptor(kind::CONFIGURATION, 0, 0, total))?;
+    let raw_config = ctl(Setup::get_descriptor(
+        kind::CONFIGURATION,
+        config_index,
+        0,
+        total,
+    ))?;
     let config = Configuration::parse(&raw_config).map_err(short)?;
 
     let string = |index: u8| -> Option<String> {
@@ -505,6 +657,16 @@ fn enumerate(
         .unwrap_or_else(|| alloc::format!("product 0x{:04x}", desc.product));
     let serial = string(desc.serial).unwrap_or_default();
 
+    // Self-powered, if the configuration says only that, or the device
+    // says so when it could be either (`usbd_set_config_index`).
+    let self_powered = match config.attributes & 0xc0 {
+        0x40 => true,
+        0xc0 => ctl(Setup::get_status())
+            .ok()
+            .and_then(|b| b.first().copied())
+            .is_some_and(|b| b & 1 != 0),
+        _ => false,
+    };
     let hub = if desc.class == class::HUB {
         let b = ctl(h::get_hub_descriptor(speed.is_super(), 32))?;
         let d = HubDescriptor::parse(&b).map_err(short)?;
@@ -525,6 +687,9 @@ fn enumerate(
     ctl(Setup::set_configuration(config.value))?;
     Ok(Enumerated {
         desc,
+        raw_desc,
+        self_powered,
+        nports: hub.map_or(0, |h| h.ports),
         config,
         raw_config,
         manufacturer,
