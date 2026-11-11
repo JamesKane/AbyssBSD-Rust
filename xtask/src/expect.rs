@@ -560,9 +560,11 @@ const CAM_USB: &[Step] = &[
         "\nabyssuaslun1\r\n",
         "camcontrol inquiry -S: LUN 1 over UAS",
     ),
+    // The Bulk-Only disk is `qemu::USB_BBB_DISK_SIZE`, 64 MiB of 512-byte
+    // blocks.
     step(
         "camcontrol readcap da0\n",
-        "\nLast Block: 65535, Block Length: 512 bytes\r\n",
+        "\nLast Block: 131071, Block Length: 512 bytes\r\n",
         "camcontrol readcap",
     ),
     step(
