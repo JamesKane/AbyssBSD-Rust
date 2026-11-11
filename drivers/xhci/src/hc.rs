@@ -1011,12 +1011,11 @@ impl HostController for Hc {
         &self.name
     }
 
+    /// FreeBSD's xHCI bus is USB 3.0 whatever ports it has
+    /// (`sc_bus.usbrev = USB_REV_3_0`), so its root hub is SuperSpeed even
+    /// on a controller with USB 2 ports only (the Sky1's last four).
     fn bus_speed(&self) -> &str {
-        if self.protocols.iter().any(|p| p.major >= 3) {
-            "5.0Gbps Super Speed USB v3.0"
-        } else {
-            "480Mbps High Speed USB v2.0"
-        }
+        "5.0Gbps Super Speed USB v3.0"
     }
 
     fn root_hub_vendor(&self) -> &str {
