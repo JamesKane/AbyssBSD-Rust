@@ -2821,8 +2821,9 @@ no hangs, no reboot loops, nothing that needs the screen, and P8's remaining exi
     copies, the backup used when the primary is bad). Host tests replay six sequences FreeBSD
     15.1's `gpart` ran on md disks and must write the same sectors (`tests/corpus/gpart`); the
     boot cases run FreeBSD's `gpart` on malloc and vnode `md` disks (create, add, `newfs` and
-    mount by label, resize while mounted, modify, undo, destroy) and must print what FreeBSD
-    printed, all 344 lines; the vnode image the guest leaves reads back on FreeBSD 15.1
+    mount by label, resize while mounted, modify, undo, destroy, `bootcode -b` and `-p`, backup
+    and restore) and must print what FreeBSD printed, all 366 lines; the vnode image the guest
+    leaves reads back on FreeBSD 15.1
     (`gpart show`, `fsck_ffs`) with the same tables as FreeBSD's own run, byte for byte but the
     UUIDs and CRCs. `/dev/full` as `null.c`'s, and `/dev/null` and `/dev/zero` now answer
     `null.c`'s requests (`FIONBIO`, `FIOASYNC`, `DIOCSKERNELDUMP`) and `kevent`. FreeBSD 15.1's

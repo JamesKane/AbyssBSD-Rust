@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: BSD-2-Clause
 # FreeBSD's gpart on a memory disk, malloc then vnode: create, add,
 # show, newfs and mount, what is refused while mounted, resize, modify,
-# undo, delete, destroy. The kernel test runs it from /rescue in the guest
-# (T=/mnt, a tmpfs) and compares what it prints with guest-freebsd.txt,
-# which FreeBSD 15.1 printed: run there as root, T=DIR sh guest.sh.
+# undo, delete, destroy, bootcode, backup and restore. The kernel test
+# runs it from /rescue in the guest (T=/mnt, a tmpfs) and compares what
+# it prints with guest-freebsd.txt, which FreeBSD 15.1 printed: run
+# there as root, T=DIR sh guest.sh.
 # It leaves disk.img with a table and a file system.
 T=${T:-/mnt}
 cd $T || exit 1
@@ -84,7 +85,13 @@ run gpart add -t efi -s 1m -l gctl-esp $md
 run gpart add -t freebsd-ufs -s 8m -l gctl-keep $md
 printf 'ABYSS-GCTL-BOOT' > pmbr
 run gpart bootcode -b pmbr $md
+run gpart bootcode -p pmbr -i 1 $md
 quiet newfs -U /dev/gpt/gctl-keep
+gpart backup $md > bk
+run cat bk
+run gpart destroy -F $md
+run gpart restore -l $md < bk
+run gpart show -l $md
 run mdconfig -d -u $U
 run mdconfig -a -t vnode -f disk.img -u $U
 run gpart show -l $md

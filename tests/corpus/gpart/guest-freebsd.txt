@@ -320,17 +320,39 @@ md47p2 added
 + gpart bootcode -b pmbr md47
 bootcode written to md47
 = 0
++ gpart bootcode -p pmbr -i 1 md47
+partcode written to md47p1
+= 0
 + newfs -U /dev/gpt/gctl-keep
+= 0
++ cat bk
+GPT 128
+1           efi     40   2048 gctl-esp 
+2   freebsd-ufs   2088  16384 gctl-keep 
+= 0
++ gpart destroy -F md47
+md47 destroyed
+= 0
++ gpart restore -l md47
+= 0
++ gpart show -l md47
+=>    34  131005  md47  GPT  (64M)
+      34       6        - free -  (3.0K)
+      40    2048     1  gctl-esp  (1.0M)
+    2088   16384     2  gctl-keep  (8.0M)
+   18472  112567        - free -  (55M)
+
 = 0
 + mdconfig -d -u 47
 = 0
 + mdconfig -a -t vnode -f disk.img -u 47
 = 0
 + gpart show -l md47
-=>    40  130992  md47  GPT  (64M)
+=>    34  131005  md47  GPT  (64M)
+      34       6        - free -  (3.0K)
       40    2048     1  gctl-esp  (1.0M)
     2088   16384     2  gctl-keep  (8.0M)
-   18472  112560        - free -  (55M)
+   18472  112567        - free -  (55M)
 
 = 0
 + fsck_ffs -n /dev/gpt/gctl-keep
