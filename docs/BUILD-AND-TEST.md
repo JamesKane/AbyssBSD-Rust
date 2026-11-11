@@ -200,7 +200,14 @@ compares every entry's mode, owner, size, modification time, contents, and link 
 tree. `fetch-base` also makes the UFS2 test disk: `ufs-test.img` (`makefs` of `/rescue`, `/lib`,
 `/usr/include`) and FreeBSD's `ls -lRnT`, file list, and `md5 -r` of it, mounted read-only. The
 boot tests attach the disk read-only as vtbd2, nda1, and ada1, and the kernel test mounts each
-with `/rescue/mount` and must print the same.
+with `/rescue/mount` and must print the same. Likewise the ISO 9660 test volume
+(`xtask/src/isotest.rs`): `iso-test.iso`, made by `bsdtar --format iso9660` (Rock Ridge and
+Joliet; `makefs` writes no Joliet) from a tree with long names, a directory Rock Ridge relocates,
+links, modes, and fixed times, and FreeBSD's `ls -aliRnT` of it attached with `mdconfig -t vnode`
+and mounted by `mount_cd9660` five ways (Rock Ridge, `-r`, `-r -j`, `-r -j -g`, and with `-U`,
+`-G`, `-m`, `-M`), with `md5 -r` of its files. The memory disk carries them under
+`/usr/tests/iso`; the kernel test mounts the image the same five ways and must print the same, and
+`lib/cd9660`'s host test compares its own listing with them.
 
 Planned for later phases:
 
@@ -453,7 +460,7 @@ runs them one after another), each as its own `xtask test --tier boot --case NAM
 output in `build/boot-tier/NAME.out`, printed whole when it ends, longest first. Each case boots
 its own copy of its image; images are made one at a time under `build/.image-lock`.
 
-While working on a feature, three environment variables shorten the loop (and pass through
+While working on a feature, four environment variables shorten the loop (and pass through
 `--remote`):
 
 - `ABYSS_ATF="usr/tests/sys/kern/ptrace_test ..."`: the shell case's `run-atf` runs only those of
@@ -461,6 +468,9 @@ While working on a feature, three environment variables shorten the loop (and pa
   read-write, and skips the rest of the UFS2 steps. Its verdict covers only what ran.
 - `ABYSS_ATF_TIMEOUT=30`: each case's limit instead of kyua's 300 seconds, so that a hang costs
   little.
+- `ABYSS_TEST_ONLY=kernel::tests::user_memory::cd9660_reads_as_freebsd_reads_it,...`: the boot
+  cases run only those kernel tests (the kernel's `abyss.test.only`), each name a prefix of the
+  tests' paths.
 - `ABYSS_REMOTE_DIR=abyss/src-other`: the server mirror to use instead of `abyss/src`, for a second
   worktree whose remote runs would otherwise overwrite the first's.
 

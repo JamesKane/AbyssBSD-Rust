@@ -68,7 +68,9 @@ sees, not the source of the code ([ADR-0007](adr/0007-license-and-clean-implemen
 | `sys/storage` | `Bio`, disks, GPT partitions, FreeBSD names (exists since P3) | host, kernel |
 | `lib/ufs` | UFS2 on-disk layout, and an engine over a `BlockIo` trait: superblock, cylinder groups, inodes, block maps, allocation, directories, truncation, then soft updates | host, against `makefs`/`newfs` images and `fsck_ffs` on the build server |
 | `lib/fat` | FAT12/16/32 and VFAT long names, same structure | host, against `newfs_msdos` images and `fsck_msdosfs` |
-| `kernel/src/fs/{tmpfs,devfs,ufs,msdosfs}` | Glue: the node traits over the engines, pagers, mount options | kernel, user tests |
+| `lib/cd9660` | ISO 9660 with Rock Ridge and Joliet, read-only, same structure (§10.7) | host, against hand-made records, `makefs -t cd9660` and `bsdtar --format iso9660` images, and FreeBSD's `ls -aliRnT` of the test volume |
+| `sys/vfs/src/nullfs.rs` | nullfs, the loopback layer (§10.5): nothing kernel-specific, so beside tmpfs | host, kernel, user tests |
+| `kernel/src/fs/{tmpfs,devfs,ufs,msdosfs,fdescfs,cd9660}` | Glue: the node traits over the engines, pagers, mount options | kernel, user tests |
 
 The loader reads the kernel from UFS2 with `lib/ufs`'s read side (no_std, no allocation in the
 block path).
@@ -351,8 +353,113 @@ file id for that place (a directory's from its first cluster). A rename moves an
 file's vnode keeps its number, recorded so lookups keep finding it. The kernel mounts the ESP at `/boot/efi` read-write. Names, time zones
 (local time, as FreeBSD's msdosfs with no `-L`), and `stat` results match FreeBSD's msdosfs.
 
+### 10.5 nullfs
+
+A second view of a directory (or, `VFCF_FILEMOUNT`, a regular file) of another mount, as FreeBSD's
+loopback file system gives it (`sys/vfs/src/nullfs.rs`). Each nullfs vnode stacks on the vnode
+below it and holds a use of it (`null_node`'s `null_lowervp`); its number is the lower file's,
+and its node passes every operation down:
+
+- **Data**: reads, writes, `fsync`, and the VM object are the lower vnode's, so the layer caches
+  nothing and a mapping through it maps the lower file's pages (`null_open` sharing
+  `v_object`). A memory-disk file's resident object is keyed by the lowest vnode too.
+- **What belongs to the file, not the name**: advisory locks, the writer and text counts
+  (`ETXTBSY`), a FIFO's pipe, and a bound socket are the lower vnode's. `Vnode` keeps the lower
+  vnode it stacks on (`Node::lower`, asked once as the vnode is made), and `lockf`,
+  `add_writer`, `add_text` and the rest go to it; FIFOs open `Vnode::lowest`, and sockets bind
+  at `Vnode::unp_vnode`, the lowest unless the mount says `nounixbypass`.
+- **Names are not cached here** (`FileSystem::name_cache` false; `null_lookup` enters nothing):
+  each lookup asks the lower directory, whose name cache answers. `getcwd` and `vn_fullpath`
+  find a layered vnode's name through `Node::vptocnp` (FreeBSD's `VOP_VPTOCNP`), which asks the
+  lower vnode's name-cache link.
+- **Changes are made below, through the generic layer**: `create`, `link`, `remove`, `rmdir`,
+  and `setattr` of a layered node call `vfs::ops` on the lower vnodes, after the generic layer
+  checked this layer's rules with the caller's credential (the attributes are the lower ones,
+  so the answers are the same; the lower call runs as the superuser). A rename is delegated
+  whole before any lock is taken (`ops::rename`), since the lower mount's rename lock may not
+  be taken under vnode locks. Two ends on different mounts are `EXDEV` first, the lower mount
+  included; a read-only layer is `EROFS`.
+- **`stat`** reports the lower attributes with this mount's `st_dev` (`null_getattr`);
+  **`statfs`** the lower mount's counts and type number (`nullfs_statfs`). `MNT_LOCAL` is the
+  lower mount's.
+- **Vnodes nothing uses**: kept while the mount caches (`cache`, the default; FreeBSD's
+  `vfs.nullfs.cache_vnodes` and `NULLM_CACHE`), and given up with their last use with `nocache`
+  (`Node::recycle_when_unused`, `null_want_recycle`). Either way the vnode reclaimer takes idle
+  ones.
+- **Removals below**: a mount records the mounts layered on it (`Mount::add_upper`,
+  `vfs_register_upper_from_vp`). A file removed or replaced in a mount with layers on it lets
+  their idle vnodes of it go, top first (`Mount::notify_unlinked`, FreeBSD's
+  `nullfs_unlink_lowervp`), so the lower file is freed as soon as nothing uses it.
+- **Mounting and unmounting** (`nullfs_mount`, `nullfs_unmount`): `from` or mount_nullfs's
+  `target`, of the covered vnode's type; a nullfs vnode as the covered one over its own lower
+  vnode is `EDEADLK`. A busy layer does not unmount unless forced (its files are then doomed),
+  and the lower mount does not unmount at all while a layer is on it, forced or not (`dounmount`'s
+  `mnt_uppers` check). `MNT_UPDATE` accepts only `export`. It mounts in a jail with
+  `allow.mount.nullfs` (`VFCF_JAIL`).
+
+Locks: a layered operation holds this layer's vnode locks, then takes the lower ones (the same
+class, parent before child per layer); nothing below calls up. A layered load gets the lower
+vnode from its mount, so the `vget` class nests (`dup_ok`), always upper first.
+
+### 10.6 fdescfs
+
+`/dev/fd` as FreeBSD 15.1's fdescfs shows it (`kernel/src/fs/fdescfs.rs`): the root (number 1)
+lists the calling process's descriptors, and descriptor `N` is a character device numbered
+`N + 3`, mode `0555`, root's, timed at boot (`fdesc_getattr`; its directory entry is numbered
+`N + 5`, as `fdesc_readdir` numbers it). One vnode serves every process's `N`. Opening it shares
+the descriptor (`dupfdopen`): its node's device answers `dup_fd`, which the open path already
+serves for devfs's `/dev/fd/0`–`2`, kept for when no fdescfs is mounted. `linrdlnk` makes the
+entries say they are symbolic links (`Attr::kind`) that a lookup does not follow, which
+`readlink(2)` reads (`Node::read_link`, `VV_READLINK`): the path of the descriptor's vnode, or
+`anon_inode:[unknown]`; opening one still shares the descriptor. `rdlnk` makes them links that
+are followed. With `nodup`, a vnode's descriptor looks up as that vnode, so an open is a new
+open of the file and a directory's descriptor can be walked through.
+
+The descriptor table is locked before vnodes and open files' offsets, which callers of lookups
+and `getdirentries` hold, so fdescfs answers lookups, `readdir`, `readlink`, and `setattr` from
+`FileSystem` hooks the generic layer calls without the vnode lock (`lookup_unlocked`,
+`readdir_unlocked`, `readlink_unlocked`, `setattr_unlocked`), taking the table with a try-lock
+(FreeBSD drops its vnode lock around them likewise; a try checks no order, as FreeBSD's
+`LOP_TRYLOCK`). Access is not checked (`checks_access`, FreeBSD's `VOP_NULL`); names can be
+neither made nor removed (`fixed_names`: `EROFS` to remove or rename, a lookup's own answer to
+make). `setattr` goes to the descriptor's file with that file system's checks. Mounts are never
+`MNT_LOCAL`, `statfs` shows only `MNT_IGNORE` of the flags (`FsStats::flags_mask`), and
+`MNT_UPDATE` is `EOPNOTSUPP`. It mounts in a jail with `allow.mount.fdescfs`.
+
+### 10.7 cd9660
+
+ISO 9660 volumes, read-only, with Rock Ridge (IEEE P1282 over SUSP: `PX`, `PN`, `SL`, `NM`,
+`CL`, `PL`, `RE`, `TF`, `RR`, `CE`, `ST`, found by the root's `SP` and `ER`) and Joliet, as
+FreeBSD 15.1's cd9660 reads them. `lib/cd9660` holds the engine over a `BlockIo`; the kernel's
+glue (`kernel/src/fs/cd9660.rs`) reads directory records through the disk's buffer cache and
+file data through the page cache, with a pager over each file's one extent.
+
+- The volume descriptors from block 16 plus `ssector`; the primary one, and a Joliet
+  supplementary one when Rock Ridge is not used (`iso_mountfs`); High Sierra volumes too.
+  Options: `norrip` (`-r`), `nojoliet` (`-j`), `gens` (`-g`), `extatt` (`-e`), `brokenjoliet`
+  (`-b`), `uid`, `gid`, `mask`, `dirmask`, `ssector`. `kiconv` (`-C`) is not supported.
+- A file's number is where its record lies on the volume, a directory's where its data starts
+  (`isodirino`); its attributes come from the record its lookup found (a lookup leaves the
+  record for the load that follows), or for a number alone from the record at that place.
+- Names: Rock Ridge's, or ISO 9660 and Joliet names lower-cased with versions dropped and only
+  the last of consecutive versions listed (`isofntrans`, `iso_shipdir`); lookups ignore case
+  and version (`isofncmp`). `getdirentries` reports no types (`DT_UNKNOWN`).
+- `stat` is `cd9660_getattr` through `vop_stdstat`: masks and the mount's owner applied,
+  `st_blocks` the size in whole 512-byte blocks, `st_blksize` the page size, no birth time,
+  generation 1, a link's size its target's length when unrecorded.
+- Everything read is untrusted: records are checked against their block, System Use entries
+  against their record, and an entry too short for its kind gives the record's defaults, as
+  FreeBSD's fix of PR 296853 does; a malformed Rock Ridge root fails the mount (`EINVAL`).
+
+It mounts from a disk device, such as a vnode-backed memory disk (`mdconfig -a -t vnode -f
+image.iso`, whose requests go through the image file's page cache). The boot tier mounts
+`fetch-base`'s test volume (`bsdtar --format iso9660`, Rock Ridge and Joliet) each way FreeBSD's
+listings of it were made, and `ls -aliRnT` and `md5 -r` must print what FreeBSD's printed.
+
 ## 11. Mounting
 
+- File systems: tmpfs, devfs, UFS2, msdosfs, nullfs, fdescfs, and cd9660 (§10), as `nmount` types
+  and in `vfs.conflist`.
 - `nmount(2)` takes FreeBSD's option iovec (`fstype`, `fspath`, `from`, `errmsg`, `ro`, `rw`,
   `update`, `noatime`, `nosuid`, `noexec`, `sync`, `async`, and each file system's own). `mount(2)`
   is the old interface, and `unmount(2)` takes `MNT_FORCE`.
