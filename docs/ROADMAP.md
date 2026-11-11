@@ -2711,6 +2711,17 @@ no hangs, no reboot loops, nothing that needs the screen, and P8's remaining exi
     and the old `mount` for UFS and msdosfs (`ffs_cmount`, `msdosfs_cmount`). `tests/user/misccalls`
     passes on FreeBSD 15.1 and here; the shell cases run `uuidgen` and `cpuset`. Left of the
     system calls: `ntp_adjtime`, `ntp_gettime` and `adjtime` slewing, and POSIX AIO.
+  - Progress 2026-11-10 (`/dev/pci` and the bridges, in QEMU; not yet on the board): `/dev/pci`
+    answers every `pci_user.c` request (`PCIOCGETCONF` with patterns and paging, `PCIOCREAD`,
+    `PCIOCWRITE`, `PCIOCGETBAR`, `PCIOCATTACHED`, `PCIOCLISTVPD`, `PCIOCBARMMAP`, `PCIOCBARIO`;
+    DRIVER-MODEL.md §11.5), structures held to 15.1's headers by `abi-check`. FreeBSD 15.1's
+    `pciconf` runs unmodified in both shell cases (`-lvbcB`, `-r`, `-w`, `-a`, `-D`, and as
+    `nobody`), printing FreeBSD's lines for QEMU's NVMe controller and root port. arm64's host
+    bridges are `pci_host_generic_acpi` ("Generic PCI host controller"), and bridges, with the
+    devices on their buses, are numbered as FreeBSD's serial attach numbers them, so the Orange
+    Pi's should read `pcib0`, `pcib1` (its port), `pcib2`, ... as on FreeBSD. Left: `hostb`,
+    `vgapci`, and `ichsmb` (QEMU's and bhyve's host bridge, VGA, and SMBus show as `none`), and
+    the comparison with `tests/corpus/opi6p/freebsd/pciconf-lvbc.txt` on the board.
 - **Verification:** kyua's arm64 target on the board; fsx with `fsck_ffs` on the NVMe and a USB
   disk (done with the SMMU's stage 5, IOMMU.md §18); the device tree against FreeBSD's `devinfo`
   wherever FreeBSD has a driver. No day-long looped runs (the user, 2026-11-10): kyua and the
