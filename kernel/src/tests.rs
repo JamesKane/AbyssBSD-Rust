@@ -574,14 +574,26 @@ ktest! {
             last = t;
         }
         // The kernel's own clock and the timehands agree to well under a
-        // microsecond plus the read gap; the closest of a few tries, as an
-        // interrupt (or, under emulation, a slow vCPU) can come between
-        // the two reads.
+        // microsecond plus the read gap, once what the discipline moved
+        // the timehands by is taken out: the kernel's clock is the raw
+        // counter, and a slew (`adjtime`, `ntpd`; `tests/user/ntp` makes
+        // one) moves the timehands' uptime, as FreeBSD's moves
+        // `binuptime`. A windup just before makes that what it is now,
+        // and with no adjustment ever made it is 0. The closest of a few
+        // tries, as an interrupt (or, under emulation, a slow vCPU) can
+        // come between the two reads.
+        wind();
+        let moved = i128::from(crate::shared_page::disciplined_ns());
         let (a, b) = (0..16)
             .map(|_| (to_ns(uptime()), crate::time::now_ns()))
-            .min_by_key(|&(a, b)| a.abs_diff(b))
+            .min_by_key(|&(a, b)| (i128::from(a) - i128::from(b) - moved).unsigned_abs())
             .unwrap_or_default();
-        assert!(a.abs_diff(b) < 100_000, "timehands {a} ns, clock {b} ns");
+        let off = i128::from(a) - i128::from(b) - moved;
+        assert!(
+            off.unsigned_abs() < 100_000,
+            "timehands {a} ns, clock {b} ns, disciplined by {moved} ns; ntp {:?}",
+            crate::ntp::state()
+        );
         // The time of day moves with the uptime: each sample bounds the
         // boot time between two uptime reads, and the bounds overlap.
         let boot = || {

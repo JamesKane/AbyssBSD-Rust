@@ -41,6 +41,14 @@ pub(crate) fn tai() -> i64 {
     NTP.lock().tai()
 }
 
+/// The discipline's frequency (`l_fp` ns/s), slew left (us), and status,
+/// for tests.
+#[cfg(feature = "ktest")]
+pub(crate) fn state() -> (i64, i64, i32) {
+    let d = NTP.lock();
+    (d.time_freq(), d.adjtime_left(), d.status())
+}
+
 /// The time of day as a timespec.
 fn nanotime() -> Timespec {
     let ns = crate::shared_page::to_ns(crate::shared_page::realtime());

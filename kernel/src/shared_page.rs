@@ -44,7 +44,7 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use core::pin::Pin;
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering, fence};
+use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering, fence};
 
 use abi::vdso::{Bintime, Timehands, Timekeep};
 use addr::VirtAddr;
@@ -141,6 +141,14 @@ static WINDUP: Once<(Pin<&'static Timer>, u64)> = Once::new();
 /// `kern.timecounter.fast_gettime`: libc may read the time from the page
 /// (`vdso_th_enable`).
 static FAST_GETTIME: AtomicBool = AtomicBool::new(true);
+
+/// How far the discipline has moved the timehands' uptime from the
+/// counter's ([`crate::time::now_ns`]), in nanoseconds, as of the last
+/// windup: 0 until `adjtime` or `ntpd` adjusts the rate, and from then on
+/// what the slews and frequency corrections added up to. FreeBSD's kernel
+/// has no such gap, its own clock being the timehands; this kernel's
+/// timers run on the raw counter.
+static DISCIPLINED_NS: AtomicI64 = AtomicI64::new(0);
 
 fn timekeep() -> *mut Timekeep {
     let p = PAGE.get().expect("shared page");
@@ -276,6 +284,8 @@ fn windup(boottime: Option<Bintime>) -> Bintime {
     w.current = next;
     w.th = th;
     drop(w);
+    let up = i128::from(to_ns(th.th_offset)) - i128::from(raw_up);
+    DISCIPLINED_NS.store(i64::try_from(up).unwrap_or(0), Ordering::Relaxed);
     if th.th_boottime.sec > 0 {
         crate::time::rebase_realtime(to_ns(bt), raw_up);
     }
@@ -327,6 +337,13 @@ fn on_windup(_: usize, _: &IrqCx) {
 #[cfg(feature = "ktest")]
 pub(crate) fn wind() {
     windup(None);
+}
+
+/// [`DISCIPLINED_NS`]: the timehands' uptime minus the counter's, at the
+/// last windup.
+#[cfg(feature = "ktest")]
+pub(crate) fn disciplined_ns() -> i64 {
+    DISCIPLINED_NS.load(Ordering::Relaxed)
 }
 
 /// The boot time: the time of day at uptime zero (`th_boottime`), which
