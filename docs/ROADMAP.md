@@ -2784,6 +2784,24 @@ no hangs, no reboot loops, nothing that needs the screen, and P8's remaining exi
     `kern.arandom`, which libc's `srandomdev` needs. FreeBSD's `sys/aio` tests and
     `unix_dgram:event` end as on FreeBSD 15.1 in the shell cases, and `tests/user/ntp` and
     `tests/user/aio` pass on FreeBSD 15.1 and here. Not on the board yet.
+    Pi's should read `pcib0`, `pcib1` (its port), `pcib2`, ... as on FreeBSD. Left: `hostb`,
+    `vgapci`, and `ichsmb` (QEMU's and bhyve's host bridge, VGA, and SMBus show as `none`), and
+    the comparison with `tests/corpus/opi6p/freebsd/pciconf-lvbc.txt` on the board.
+  - Progress 2026-11-10 (`ugen` and `/dev/usb`, in QEMU; not yet on the board): `/dev/usbctl`,
+    `/dev/usb/B.D.E` and the `ugenB.D` links with FreeBSD's owners and modes, made and destroyed
+    as devices come, go, and are configured; every `usb_ioctl.h` request `usbconfig` and libusb make
+    (USB.md §5.5), the FIFO transfers (`USB_FS_*`) with completions for `poll` and kqueue,
+    re-enumeration, configuration changes and power off and on through the explore thread, and
+    `hw.usb`'s knobs; structures held to 15.1's headers by `abi-check`. FreeBSD 15.1's `usbconfig`
+    prints what it prints on FreeBSD for the QEMU set (`list`, `dump_device_desc`,
+    `dump_curr_config_desc`, `dump_string`, `get_template`, `show_ifdrv`, `power_*`, `do_request`,
+    `reset`, `set_config`, and as `nobody`) in both QEMU shell cases; `tests/user/usbtest`
+    (libusb: descriptors, control transfers, an INQUIRY over the Bulk-Only disk's bulk endpoints
+    with `umass` detached, a stall cleared, a reset bringing `umass` back) passes on both arches,
+    and on FreeBSD 15.1 (`freebsd-usertests --usb`).
+    Left (compat-deviations): isochronous transfers, other alternate settings, `read(2)` and
+    `write(2)` on endpoint nodes, selective suspend, the quirk table; `uhid`/`hidraw` (where
+    `USB_GET_REPORT_DESC` is answered) have no driver.
 - **Verification:** kyua's arm64 target on the board; fsx with `fsck_ffs` on the NVMe and a USB
   disk (done with the SMMU's stage 5, IOMMU.md §18); the device tree against FreeBSD's `devinfo`
   wherever FreeBSD has a driver. No day-long looped runs (the user, 2026-11-10): kyua and the
