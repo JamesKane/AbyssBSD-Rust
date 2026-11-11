@@ -33,6 +33,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use abi::errno::Errno;
 use bus::Gate;
 use sched::lock::{LockClass, Mutex};
 use sched::{Sleepable, WaitQueue};
@@ -52,6 +53,13 @@ pub trait DiskQueues: Send + Sync {
     /// removing them from the vector. The rest stay, and the class
     /// submits them again when the driver calls [`Disk::resume`].
     fn submit(&self, s: &Sleepable, q: usize, bios: &mut Vec<Bio>);
+
+    /// A request GEOM's DISK class leaves to the driver (`d_ioctl`):
+    /// `None` if it has no such request (`ENOTTY`).
+    fn ioctl(&self, s: &Sleepable, req: u32, arg: &mut [u8]) -> Option<Result<(), Errno>> {
+        let _ = (s, req, arg);
+        None
+    }
 }
 
 /// A disk as its driver describes it.
@@ -507,6 +515,26 @@ impl Disk {
                 }
             }
         }
+    }
+
+    /// A request for the disk's driver (`d_ioctl`, which GEOM's DISK
+    /// class calls for what it does not answer itself): `None` if it has
+    /// none, as for a partition.
+    pub fn driver_ioctl(
+        &self,
+        s: &Sleepable,
+        req: u32,
+        arg: &mut [u8],
+    ) -> Option<Result<(), Errno>> {
+        let Target::Device { queues, gate, .. } = &self.target else {
+            return None;
+        };
+        let Ok(_inside) = gate.enter() else {
+            return Some(Err(Errno::ENXIO));
+        };
+        // Cloned in its own statement: no spinlock across the call.
+        let queues = queues.lock().clone();
+        queues?.ioctl(s, req, arg)
     }
 
     /// Resubmits what waits on queue `q`. The driver calls it when a

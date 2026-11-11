@@ -342,7 +342,13 @@ impl CharDevice for DiskDev {
                 let name = self.0.name().as_bytes();
                 put(arg, &name[..name.len().min(arg.len() - 1)]);
             }
-            _ => return Err(Errno::ENOTTY),
+            // The rest is the driver's (`g_disk_ioctl` to `d_ioctl`).
+            _ => {
+                return self
+                    .0
+                    .driver_ioctl(s, req, arg)
+                    .unwrap_or(Err(Errno::ENOTTY));
+            }
         }
         Ok(())
     }
