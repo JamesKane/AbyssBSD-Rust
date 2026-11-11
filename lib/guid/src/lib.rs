@@ -10,6 +10,8 @@
 
 use core::fmt;
 
+pub mod v1;
+
 /// A 128-bit globally unique identifier.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Guid {
