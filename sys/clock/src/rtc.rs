@@ -91,7 +91,7 @@ impl Timespec {
             .checked_add(u64::from(self.nsec))
     }
 
-    /// `timespecadd` of `us` microseconds' worth of nanoseconds.
+    /// `timespecadd` of `ns` nanoseconds.
     #[must_use]
     pub fn plus_ns(self, ns: u32) -> Self {
         let n = self.nsec + ns % Self::NANOS;
@@ -273,10 +273,12 @@ pub fn unregister(s: &Sleepable, clock: &Arc<dyn RealTimeClock>) {
         at.map(|i| v.remove(i))
     };
     let Some(inst) = inst else { return };
-    inst.gone.store(true, Ordering::Release);
+    // SeqCst with the writer's `busy` store and `gone` load: either it sees
+    // `gone`, or this sees it `busy` and waits.
+    inst.gone.store(true, Ordering::SeqCst);
     inst.pending.store(false, Ordering::Release);
     if let Some(o) = OPS.get() {
-        while inst.busy.load(Ordering::Acquire) {
+        while inst.busy.load(Ordering::SeqCst) {
             o.wait_timeout(
                 s,
                 &DONE,
@@ -476,8 +478,9 @@ fn settime_thread(s: &Sleepable) {
                 let q = WaitQueue::new();
                 ops.wait_timeout(s, &q, &mut || false, wait);
             }
-            c.busy.store(true, Ordering::Release);
-            if c.pending.swap(false, Ordering::AcqRel) && !c.gone.load(Ordering::Acquire) {
+            // SeqCst: see `unregister`.
+            c.busy.store(true, Ordering::SeqCst);
+            if c.pending.swap(false, Ordering::AcqRel) && !c.gone.load(Ordering::SeqCst) {
                 settime(*ops, &c, s);
             }
             c.busy.store(false, Ordering::Release);
