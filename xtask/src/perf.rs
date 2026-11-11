@@ -1099,6 +1099,31 @@ const USB_RECORDINGS: &[(&str, &str)] = &[
         "sysctl.txt",
     ),
     ("kbdcontrol -i < /dev/ttyv0", "kbdcontrol-i.txt"),
+    // `ugen`'s requests, through usbconfig (the QEMU set's Bulk-Only disk
+    // is ugen0.2 and its keyboard ugen0.4): each command, then what it
+    // printed and its status.
+    (
+        "for c in 'usbconfig -d ugen0.1 dump_string 0' 'usbconfig -d ugen0.1 dump_string 1' \
+         'usbconfig -d ugen0.2 dump_string 0' 'usbconfig -d ugen0.2 dump_string 2' \
+         'usbconfig -d ugen0.2 dump_string 9' 'usbconfig get_template' \
+         'usbconfig -d ugen0.2 show_ifdrv' 'usbconfig -d ugen0.4 show_ifdrv' \
+         'usbconfig -d ugen0.1 show_ifdrv' 'usbconfig -d ugen0.2 dump_info' \
+         'usbconfig -d ugen0.2 power_on' 'usbconfig -d ugen0.2 power_save' 'usbconfig -d ugen0.2' \
+         'usbconfig -d ugen0.2 power_on' 'usbconfig -d ugen0.2' \
+         'usbconfig -d ugen0.2 do_request 0x80 0 0 0 2' \
+         'usbconfig -d ugen0.1 do_request 0x80 0 0 0 2' \
+         'usbconfig -d ugen0.2 do_request 0x80 6 0x100 0 18' \
+         'usbconfig -d ugen0.2 do_request 0x80 6 0x300 0 4' \
+         'usbconfig -d ugen0.1 do_request 0x80 6 0x200 0 255' \
+         'usbconfig -d ugen0.1 dump_curr_config_desc' 'usbconfig -d ugen0.2 dump_all_config_desc' \
+         'usbconfig -d ugen0.2 dump_stats' 'usbconfig -d ugen0.9 dump_info' 'usbconfig -u 0 -a 2' \
+         'usbconfig -d ugen0.4 power_off' 'usbconfig -d ugen0.4' 'usbconfig -d ugen0.4 power_on' \
+         'sleep 3' 'usbconfig -d ugen0.4' 'usbconfig -d ugen0.2 reset' 'sleep 3' \
+         'usbconfig -d ugen0.2 show_ifdrv' 'usbconfig -d ugen0.2 set_config 255' 'usbconfig -d ugen0.2' \
+         'usbconfig -d ugen0.2 set_config 0' 'sleep 3' 'usbconfig -d ugen0.2 show_ifdrv'; \
+         do echo \"# $c\"; $c; echo \"status $?\"; done",
+        "usbconfig-ugen.txt",
+    ),
     // devd's events for each device as it goes away and comes back: devd
     // stopped, /dev/devctl read directly, each device's port powered off
     // and on.

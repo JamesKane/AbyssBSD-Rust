@@ -20,6 +20,7 @@ disk and prints the output on its serial console). Each file is one command's ou
 | `dev-input-usb.txt` | `ls -lR /dev/input /dev/usb` |
 | `sysctl.txt` | `sysctl kern.evdev hw.usb`, without the `.debug` knobs |
 | `kbdcontrol-i.txt` | `kbdcontrol -i < /dev/ttyv0` |
+| `usbconfig-ugen.txt` | `usbconfig`'s `ugen` requests, each command followed by what it printed and its status: strings, the template, interface drivers, info, power modes, `do_request` (status and descriptors), configuration descriptors, statistics, a device that is not there, power off and on, `reset`, and `set_config` (in QEMU the Bulk-Only disk is `ugen0.2`, the keyboard `ugen0.4`) |
 | `devctl.txt` | `/dev/devctl` read with `devd` stopped, while each device's port (root hubs aside) is powered off and on with `usbconfig power_off`/`power_on` |
 
 Things to know when comparing against these:

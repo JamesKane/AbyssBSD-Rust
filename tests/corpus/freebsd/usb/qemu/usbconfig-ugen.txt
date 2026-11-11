@@ -1,0 +1,230 @@
+# usbconfig -d ugen0.1 dump_string 0
+STRING_0x00 = 0x04, 0x03, 0x01, 0x00
+status 0
+# usbconfig -d ugen0.1 dump_string 1
+STRING_0x01 = <(0x1b36)>
+status 0
+# usbconfig -d ugen0.2 dump_string 0
+STRING_0x00 = 0x04, 0x03, 0x09, 0x04
+status 0
+# usbconfig -d ugen0.2 dump_string 2
+STRING_0x02 = <QEMU USB HARDDRIVE>
+status 0
+# usbconfig -d ugen0.2 dump_string 9
+STRING_0x09 = <read error>
+status 0
+# usbconfig get_template
+USB template: 4294967295
+status 0
+# usbconfig -d ugen0.2 show_ifdrv
+ugen0.2: <QEMU USB HARDDRIVE QEMU> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=ON (0mA)
+ugen0.2.0: umass0: <QEMU QEMU USB HARDDRIVE, class 0/0, rev 3.00/0.00, addr 1>
+status 0
+# usbconfig -d ugen0.4 show_ifdrv
+ugen0.4: <QEMU Tablet Adomax Technology Co., Ltd> at usbus0, cfg=0 md=HOST spd=HIGH (480Mbps) pwr=ON (100mA)
+ugen0.4.0: usbhid0: <QEMU QEMU USB Keyboard, class 0/0, rev 2.00/0.00, addr 3>
+status 0
+# usbconfig -d ugen0.1 show_ifdrv
+ugen0.1: <XHCI root HUB (0x1b36)> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+ugen0.1.0: uhub0: <(0x1b36) XHCI root HUB, class 9/0, rev 3.00/1.00, addr 1>
+status 0
+# usbconfig -d ugen0.2 dump_info
+ugen0.2: <QEMU USB HARDDRIVE QEMU> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=ON (0mA)
+
+status 0
+# usbconfig -d ugen0.2 power_on
+status 0
+# usbconfig -d ugen0.2 power_save
+status 0
+# usbconfig -d ugen0.2
+ugen0.2: <QEMU USB HARDDRIVE QEMU> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+status 0
+# usbconfig -d ugen0.2 power_on
+status 0
+# usbconfig -d ugen0.2
+ugen0.2: <QEMU USB HARDDRIVE QEMU> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=ON (0mA)
+status 0
+# usbconfig -d ugen0.2 do_request 0x80 0 0 0 2
+REQUEST = <0x01 0x00><>
+status 0
+# usbconfig -d ugen0.1 do_request 0x80 0 0 0 2
+REQUEST = <0x01 0x00><>
+status 0
+# usbconfig -d ugen0.2 do_request 0x80 6 0x100 0 18
+REQUEST = <0x12 0x01 0x00 0x03 0x00 0x00 0x00 0x09 0xf4 0x46 0x01 0x00 0x00 0x00 0x01 0x02 0x03 0x01><F>
+status 0
+# usbconfig -d ugen0.2 do_request 0x80 6 0x300 0 4
+REQUEST = <0x04 0x03 0x09 0x04><>
+status 0
+# usbconfig -d ugen0.1 do_request 0x80 6 0x200 0 255
+REQUEST = <0x09 0x02 0x1f 0x00 0x01 0x01 0x00 0x40 0x00 0x09 0x04 0x00 0x00 0x01 0x09 0x00 0x00 0x00 0x07 0x05 0x81 0x03 0x02 0x00 0xff 0x06 0x30 0x00 0x00 0x00 0x00><@0>
+status 0
+# usbconfig -d ugen0.1 dump_curr_config_desc
+ugen0.1: <XHCI root HUB (0x1b36)> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+
+
+ Configuration index 0
+
+    bLength = 0x0009 
+    bDescriptorType = 0x0002 
+    wTotalLength = 0x001f 
+    bNumInterfaces = 0x0001 
+    bConfigurationValue = 0x0001 
+    iConfiguration = 0x0000  <no string>
+    bmAttributes = 0x0040 
+    bMaxPower = 0x0000 
+
+    Interface 0
+      bLength = 0x0009 
+      bDescriptorType = 0x0004 
+      bInterfaceNumber = 0x0000 
+      bAlternateSetting = 0x0000 
+      bNumEndpoints = 0x0001 
+      bInterfaceClass = 0x0009  <HUB>
+      bInterfaceSubClass = 0x0000 
+      bInterfaceProtocol = 0x0000 
+      iInterface = 0x0000  <no string>
+
+     Endpoint 0
+        bLength = 0x0007 
+        bDescriptorType = 0x0005 
+        bEndpointAddress = 0x0081  <IN>
+        bmAttributes = 0x0003  <INTERRUPT>
+        wMaxPacketSize = 0x0002 
+        bInterval = 0x00ff 
+        bRefresh = 0x0000 
+        bSynchAddress = 0x0000 
+
+      Additional Descriptor
+
+      bLength = 0x06
+      bDescriptorType = 0x30
+      bDescriptorSubType = 0x00
+       RAW dump: 
+       0x00 | 0x06, 0x30, 0x00, 0x00, 0x00, 0x00
+
+
+
+
+status 0
+# usbconfig -d ugen0.2 dump_all_config_desc
+ugen0.2: <QEMU USB HARDDRIVE QEMU> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=ON (0mA)
+
+
+ Configuration index 0
+
+    bLength = 0x0009 
+    bDescriptorType = 0x0002 
+    wTotalLength = 0x002c 
+    bNumInterfaces = 0x0001 
+    bConfigurationValue = 0x0001 
+    iConfiguration = 0x0006  <Super speed config (usb 3.0)>
+    bmAttributes = 0x00c0 
+    bMaxPower = 0x0000 
+
+    Interface 0
+      bLength = 0x0009 
+      bDescriptorType = 0x0004 
+      bInterfaceNumber = 0x0000 
+      bAlternateSetting = 0x0000 
+      bNumEndpoints = 0x0002 
+      bInterfaceClass = 0x0008  <Mass storage>
+      bInterfaceSubClass = 0x0006 
+      bInterfaceProtocol = 0x0050 
+      iInterface = 0x0000  <no string>
+
+     Endpoint 0
+        bLength = 0x0007 
+        bDescriptorType = 0x0005 
+        bEndpointAddress = 0x0081  <IN>
+        bmAttributes = 0x0002  <BULK>
+        wMaxPacketSize = 0x0400 
+        bInterval = 0x0000 
+        bRefresh = 0x0000 
+        bSynchAddress = 0x0000 
+
+      Additional Descriptor
+
+      bLength = 0x06
+      bDescriptorType = 0x30
+      bDescriptorSubType = 0x0f
+       RAW dump: 
+       0x00 | 0x06, 0x30, 0x0f, 0x00, 0x00, 0x00
+
+
+     Endpoint 1
+        bLength = 0x0007 
+        bDescriptorType = 0x0005 
+        bEndpointAddress = 0x0002  <OUT>
+        bmAttributes = 0x0002  <BULK>
+        wMaxPacketSize = 0x0400 
+        bInterval = 0x0000 
+        bRefresh = 0x0000 
+        bSynchAddress = 0x0000 
+
+      Additional Descriptor
+
+      bLength = 0x06
+      bDescriptorType = 0x30
+      bDescriptorSubType = 0x0f
+       RAW dump: 
+       0x00 | 0x06, 0x30, 0x0f, 0x00, 0x00, 0x00
+
+
+
+
+status 0
+# usbconfig -d ugen0.2 dump_stats
+ugen0.2: <QEMU USB HARDDRIVE QEMU> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=ON (0mA)
+
+{
+    UE_CONTROL_OK       : 47
+    UE_ISOCHRONOUS_OK   : 0
+    UE_BULK_OK          : 191
+    UE_INTERRUPT_OK     : 0
+    UE_CONTROL_FAIL     : 0
+    UE_ISOCHRONOUS_FAIL : 0
+    UE_BULK_FAIL        : 0
+    UE_INTERRUPT_FAIL   : 0
+}
+
+status 0
+# usbconfig -d ugen0.9 dump_info
+No device match or lack of permissions.
+status 0
+# usbconfig -u 0 -a 2
+ugen0.2: <QEMU USB HARDDRIVE QEMU> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=ON (0mA)
+status 0
+# usbconfig -d ugen0.4 power_off
+status 0
+# usbconfig -d ugen0.4
+ugen0.4: <QEMU Tablet Adomax Technology Co., Ltd> at usbus0, cfg=255 md=HOST spd=HIGH (480Mbps) pwr=OFF (100mA)
+status 0
+# usbconfig -d ugen0.4 power_on
+status 0
+# sleep 3
+status 0
+# usbconfig -d ugen0.4
+ugen0.4: <QEMU Tablet Adomax Technology Co., Ltd> at usbus0, cfg=0 md=HOST spd=HIGH (480Mbps) pwr=ON (100mA)
+status 0
+# usbconfig -d ugen0.2 reset
+status 0
+# sleep 3
+status 0
+# usbconfig -d ugen0.2 show_ifdrv
+ugen0.2: <QEMU USB HARDDRIVE QEMU> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=ON (0mA)
+ugen0.2.0: umass0: <QEMU QEMU USB HARDDRIVE, class 0/0, rev 3.00/0.00, addr 1>
+status 0
+# usbconfig -d ugen0.2 set_config 255
+status 0
+# usbconfig -d ugen0.2
+ugen0.2: <QEMU USB HARDDRIVE QEMU> at usbus0, cfg=255 md=HOST spd=SUPER (5.0Gbps) pwr=ON (0mA)
+status 0
+# usbconfig -d ugen0.2 set_config 0
+status 0
+# sleep 3
+status 0
+# usbconfig -d ugen0.2 show_ifdrv
+ugen0.2: <QEMU USB HARDDRIVE QEMU> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=ON (0mA)
+ugen0.2.0: umass0: <QEMU QEMU USB HARDDRIVE, class 0/0, rev 3.00/0.00, addr 1>
+status 0
