@@ -756,6 +756,20 @@ fn shell(
     };
     drop(lock);
     let log = disk.with_file_name(format!("shell{suffix}.log"));
+    // CAM's disks (crate::expect::cam) beside the NVMe root and the USB
+    // disks: on x86 a SATA disk on q35's AHCI controller, blank, 16 MiB,
+    // and never written.
+    let mut devices = Vec::new();
+    if vmm == Vmm::Qemu && arch == Arch::X86_64 {
+        let sata = disk.with_file_name("sata-shell.img");
+        std::fs::File::create(&sata)?.set_len(16 << 20)?;
+        devices.extend([
+            "-drive".into(),
+            format!("if=none,id=sata0,format=raw,file={}", sata.display()),
+            "-device".into(),
+            "ide-hd,drive=sata0,bus=ide.0,serial=abyssata".into(),
+        ]);
+    }
     let vm = Vm {
         smp: 4,
         // As FreeBSD's shell VM (`freebsd-shell`): tests such as
@@ -763,6 +777,7 @@ fn shell(
         mem: "2G".into(),
         nvme: ufs_root,
         usb,
+        devices,
         ..Vm::new(vmm, arch, disk.clone())
     };
     let mut session = crate::expect::Session::start(vm, &log)?;
@@ -790,6 +805,9 @@ fn shell(
                     // recorded on.
                     if usb {
                         session.script(crate::expect::USBCONFIG, Duration::from_secs(60))?;
+                    }
+                    for steps in crate::expect::cam(arch, usb) {
+                        session.script(steps, Duration::from_secs(60))?;
                     }
                 }
                 session.script(crate::expect::SYSINFO, Duration::from_secs(120))?;

@@ -369,6 +369,222 @@ pub(crate) const DYNAMIC_TESTS: &[Step] = &[step(
     "the user tests, dynamically linked",
 )];
 
+/// FreeBSD's `camcontrol` and `nvmecontrol` through CAM's user
+/// interfaces and the NVMe control devices (docs/DRIVER-MODEL.md §11.5),
+/// on the shell VM's QEMU disks: the NVMe root (`nvme0`, serial
+/// `abyssboot`), on x86 a SATA disk on q35's AHCI controller (`ada0`,
+/// serial `abyssata`), and with USB the four `da` LUNs. Each line is what
+/// FreeBSD 15.1's tools print for the device; `scbus` and `pass` numbers
+/// follow attach order, and the NVMe firmware revision QEMU's version,
+/// so those are matched as patterns. Then `tests/user/cam.c`.
+pub(crate) fn cam(arch: Arch, usb: bool) -> Vec<&'static [Step]> {
+    let mut v = vec![CAM_COMMON];
+    if arch == Arch::X86_64 {
+        v.push(CAM_AHCI);
+    }
+    v.push(match arch {
+        Arch::X86_64 => CAM_WILDCARDS_X86_64,
+        Arch::Aarch64 => CAM_WILDCARDS_AARCH64,
+    });
+    if usb {
+        v.push(CAM_USB);
+    }
+    v.push(CAM_USER_TEST);
+    v
+}
+
+const CAM_COMMON: &[Step] = &[
+    step(
+        "ls -l /dev/xpt0 /dev/pass0 | cut -c1-27\n",
+        "\ncrw-------  1 root operator\r\ncrw-------  1 root operator\r\n",
+        "xpt0 and pass0 are root:operator 0600",
+    ),
+    step(
+        "ls -l /dev/nvme0 /dev/nvme0n1 | cut -c1-24; readlink /dev/nvme0ns1\n",
+        "\ncrw-------  1 root wheel\r\ncrw-------  1 root wheel\r\nnvme0n1\r\n",
+        "nvme0, nvme0n1, and its alias nvme0ns1",
+    ),
+    step(
+        "camcontrol devlist | grep -cx '<QEMU NVMe Ctrl [0-9.]*> *at scbus[0-9] target 0 lun 1 (pass[0-9],nda0)'\n",
+        "\n1\r\n",
+        "camcontrol devlist: nda0",
+    ),
+    step(
+        "camcontrol devlist -v | tail -2\n",
+        "\nscbus-1 on xpt0 bus 0:\r\n<>                                 at scbus-1 target -1 lun ffffffff (xpt0)\r\n",
+        "camcontrol devlist -v: the transport layer's bus",
+    ),
+    step(
+        "camcontrol devlist -b | grep -c '^scbus[0-9] on nvme0 bus 0$'\n",
+        "\n1\r\n",
+        "camcontrol devlist -b",
+    ),
+    step(
+        "camcontrol periphlist nda0 | sed 's/^pass[0-9]*/passN/'\n",
+        "\npassN:  generation: 4 index: 1 status: MORE\r\nnda0:  generation: 4 index: 2 status: LAST\r\n",
+        "camcontrol periphlist (XPT_GDEVLIST)",
+    ),
+    step(
+        "camcontrol identify nda0 | grep -e '^Serial Number' -e '^Model Number'\n",
+        "\nSerial Number:               abyssboot\r\nModel Number:                QEMU NVMe Ctrl\r\n",
+        "camcontrol identify: NVMe (XPT_DEV_ADVINFO)",
+    ),
+    step(
+        "camcontrol rescan all | head -1\n",
+        "\nRe-scan of bus 0 was successful\r\n",
+        "camcontrol rescan",
+    ),
+    step(
+        "nvmecontrol devlist | head -2 | sed 's/([0-9]*MB)/(NMB)/'\n",
+        "\n nvme0: QEMU NVMe Ctrl\r\n    nvme0ns1 (NMB)\r\n",
+        "nvmecontrol devlist",
+    ),
+    step(
+        "nvmecontrol identify nvme0 | grep -e '^Serial Number' -e '^Model Number' -e '^Version'\n",
+        "\nSerial Number:               abyssboot\r\nModel Number:                QEMU NVMe Ctrl\r\nVersion:                     1.4.0\r\n",
+        "nvmecontrol identify nvme0",
+    ),
+    step(
+        "[ \"$(nvmecontrol identify nvme0ns1)\" = \"$(nvmecontrol identify nda0)\" ] && \
+         nvmecontrol identify nvme0ns1 | grep -c '^LBA Format #0[0-7]: Data Size:'\n",
+        "\n8\r\n",
+        "nvmecontrol identify of a namespace, by its node and by nda0",
+    ),
+    step(
+        "nvmecontrol logpage -p 2 nvme0 | head -3\n",
+        "\nSMART/Health Information Log\r\n============================\r\nCritical Warning State:         0x00\r\n",
+        "nvmecontrol logpage -p 2 (SMART)",
+    ),
+    step(
+        "nvmecontrol logpage -p 1 nvme0\n",
+        "\nError Information Log\r\n=====================\r\nNo error entries found\r\n",
+        "nvmecontrol logpage -p 1 (errors)",
+    ),
+    step(
+        "nvmecontrol power -l nvme0 | head -2\n",
+        "\nPower States Supported: 1\r\n",
+        "nvmecontrol power -l",
+    ),
+    step(
+        "nvmecontrol ns active nvme0; nvmecontrol ns controllers nvme0\n",
+        "\nActive namespaces:\r\n         1\r\nNVM subsystem includes 1 controller(s):\r\n  0x0000\r\n",
+        "nvmecontrol ns",
+    ),
+    step(
+        "nvmecontrol reset nvme0 2>&1 | grep -v event=; nvmecontrol devlist | head -1\n",
+        "\n nvme0: QEMU NVMe Ctrl\r\n",
+        "nvmecontrol reset",
+    ),
+    // Only root opens them.
+    step(
+        "su -m nobody -c 'nvmecontrol devlist; camcontrol devlist' 2>&1\n",
+        "\nnvmecontrol: could not open /dev/nvme0\r\n\r\nNo NVMe controllers found.\r\ncamcontrol: couldn't open /dev/xpt0: Permission denied\r\n",
+        "nvmecontrol and camcontrol as nobody",
+    ),
+];
+
+const CAM_AHCI: &[Step] = &[
+    step(
+        "camcontrol devlist | grep -cx '<QEMU HARDDISK 2.5+>               at scbus[0-9] target 0 lun 0 (pass[0-9],ada0)'\n",
+        "\n1\r\n",
+        "camcontrol devlist: ada0",
+    ),
+    step(
+        "camcontrol devlist -b | grep -c '^scbus[0-9] on ahcich[0-5] bus 0$'\n",
+        "\n6\r\n",
+        "camcontrol devlist -b: the AHCI channels",
+    ),
+    step(
+        "camcontrol identify ada0 | sed 's/^pass[0-9]*/passN/' | head -2\n",
+        "\npassN: <QEMU HARDDISK 2.5+> ATA-7 SATA device\r\npassN: 150.000MB/s transfers (SATA 1.x, UDMA5, PIO 8192bytes)\r\n",
+        "camcontrol identify: ATA (XPT_ATA_IO, transfer settings)",
+    ),
+    step(
+        "camcontrol identify ada0 | grep -e '^serial number' -e '^LBA48'\n",
+        "\nserial number         abyssata\r\nLBA48 supported       32768 sectors\r\n",
+        "camcontrol identify: the identify data",
+    ),
+    // SMART RETURN STATUS: its result registers say the drive is well.
+    step(
+        "camcontrol cmd ada0 -a 'B0 DA 0 4F C2 0 0 0 0 0 0 0' -r -\n",
+        "\n50 00 00 4F C2 00 00 00 00 00 00",
+        "camcontrol cmd -a -r: SMART RETURN STATUS (CAM_ATAIO_NEEDRESULT)",
+    ),
+    step(
+        "camcontrol tags ada0 -v | sed 's/^(pass[0-9]*:ahcich[0-9]:0:0:0): //' | grep tags\n",
+        "\nmintags       2\r\nmaxtags       32\r\n",
+        "camcontrol tags (XPT_GDEV_STATS)",
+    ),
+    step(
+        "camcontrol inquiry ada0; echo inq-$?\n",
+        "\ninq-1\r\n",
+        "camcontrol inquiry of an ATA disk (XPT_SCSI_IO refused)",
+    ),
+];
+
+const CAM_WILDCARDS_X86_64: &[Step] = &[step(
+    "camcontrol devlist -v | grep -cx '<>                                 at scbus[0-9] target -1 lun ffffffff ()'\n",
+    "\n7\r\n",
+    "camcontrol devlist -v: the SIMs' wildcard devices",
+)];
+
+const CAM_WILDCARDS_AARCH64: &[Step] = &[step(
+    "camcontrol devlist -v | grep -cx '<>                                 at scbus[0-9] target -1 lun ffffffff ()'\n",
+    "\n1\r\n",
+    "camcontrol devlist -v: the SIMs' wildcard devices",
+)];
+
+const CAM_USB: &[Step] = &[
+    step(
+        "camcontrol devlist | grep -cx '<QEMU QEMU HARDDISK 2.5+>          at scbus[0-9] target 0 lun [01] (da[0-3],pass[0-9])'\n",
+        "\n4\r\n",
+        "camcontrol devlist: the USB disks",
+    ),
+    step(
+        "camcontrol devlist -b | grep -c '^scbus[0-9] on umass-sim\\([0-2]\\) bus \\1$'\n",
+        "\n3\r\n",
+        "camcontrol devlist -b: umass-simN bus N",
+    ),
+    step(
+        "camcontrol periphlist da0 | sed 's/^pass[0-9]*/passN/'\n",
+        "\nda0:  generation: 4 index: 1 status: MORE\r\npassN:  generation: 4 index: 2 status: LAST\r\n",
+        "camcontrol periphlist: SCSI's order",
+    ),
+    step(
+        "camcontrol inquiry da0 | sed 's/^pass[0-9]*/passN/'\n",
+        "\npassN: <QEMU QEMU HARDDISK 2.5+> Fixed Direct Access SPC-3 SCSI device\r\npassN: Serial Number abyssbbb\r\npassN: 400.000MB/s transfers\r\n",
+        "camcontrol inquiry (XPT_SCSI_IO over Bulk-Only)",
+    ),
+    step(
+        "camcontrol inquiry da2 -S\n",
+        "\nabyssuaslun1\r\n",
+        "camcontrol inquiry -S: LUN 1 over UAS",
+    ),
+    step(
+        "camcontrol readcap da0\n",
+        "\nLast Block: 65535, Block Length: 512 bytes\r\n",
+        "camcontrol readcap",
+    ),
+    step(
+        "camcontrol tur da1\n",
+        "\nUnit is ready\r\n",
+        "camcontrol tur",
+    ),
+    // QEMU's USB disks do not translate ATA (no SAT): refused with
+    // sense data, as camcontrol reports it.
+    step(
+        "camcontrol identify da0 2>&1 | head -1\n",
+        "\ncamcontrol: ATA ATA_IDENTIFY via pass_16 failed\r\n",
+        "camcontrol identify through SAT",
+    ),
+];
+
+const CAM_USER_TEST: &[Step] = &[step(
+    "/usr/tests/abyss-dynamic/cam && echo cam-ok\n",
+    "\ncam-ok\r\n",
+    "tests/user/cam.c",
+)];
+
 /// FreeBSD's `pciconf` through `/dev/pci` (docs/DRIVER-MODEL.md §11.5),
 /// on the shell VM's QEMU devices, whose IDs QEMU fixes: the boot NVMe
 /// controller (`1b36:0010`) and the PCIe root port (`1b36:000c`) with the
