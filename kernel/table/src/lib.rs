@@ -55,6 +55,7 @@ macro_rules! drivers {
             usbus::UHUB,
             hidbus::USBHID,
             hidbus::HIDBUS,
+            hidbus::hidraw::HIDRAW,
             hkbd::DRIVER,
             hms::DRIVER,
             umass::DRIVER,

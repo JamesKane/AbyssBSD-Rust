@@ -393,6 +393,7 @@ version = "0.0.0"
 name = "hidbus"
 version = "0.0.0"
 dependencies = [
+ "abi",
  "bus",
  "devtree",
  "hid",
@@ -400,6 +401,7 @@ dependencies = [
  "sync",
  "usb",
  "usbus",
+ "vfs",
  "vm",
 ]
 
@@ -569,6 +571,7 @@ dependencies = [
  "gpt",
  "guid",
  "hal",
+ "hidbus",
  "idregs",
  "iicbus",
  "inet",

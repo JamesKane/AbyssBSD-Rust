@@ -33,6 +33,7 @@ input = { path = "../sys/input" }
 kcrypto = { path = "../sys/crypto" }
 ktls = { path = "../sys/ktls" }
 usbus = { path = "../sys/usb" }
+hidbus = { path = "../sys/hid" }
 vt = { path = "../sys/vt" }
 clock = { path = "../sys/clock" }
 kaio = { path = "../sys/aio", package = "aio" }

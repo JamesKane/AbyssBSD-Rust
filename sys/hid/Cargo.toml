@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+abi = { path = "../../lib/abi" }
 bus = { path = "../bus" }
 devtree = { path = "../../lib/devtree" }
 hid = { path = "../../lib/hid" }
@@ -13,6 +14,7 @@ sched = { path = "../sched" }
 sync = { path = "../sync" }
 usb = { path = "../../lib/usb" }
 usbus = { path = "../usb" }
+vfs = { path = "../vfs" }
 vm = { path = "../vm" }
 
 [lints]

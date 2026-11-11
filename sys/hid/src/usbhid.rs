@@ -21,9 +21,10 @@ use usb::request::rt;
 use usbus::{Transfer, UsbDevice, UsbInterface};
 use vm::object::IoBuf;
 
-use crate::{HidTransport, HidbusData, Sink};
+use crate::{HidTransport, HidbusData, Sink, TransportError};
 
 /// HID class requests (HID 1.11 §7.2).
+const GET_REPORT: u8 = 0x01;
 const SET_REPORT: u8 = 0x09;
 const SET_IDLE: u8 = 0x0a;
 const SET_PROTOCOL: u8 = 0x0b;
@@ -50,6 +51,8 @@ struct Transport {
     iface: u8,
     ep: u8,
     len: u16,
+    /// The interrupt OUT endpoint and its packet size, if it has one.
+    out: Option<(u8, u16)>,
     sink: SpinLock<Option<Sink>>,
     running: AtomicBool,
     /// Interrupt transfers queued.
@@ -112,7 +115,70 @@ impl HidTransport for Arc<Transport> {
         let t = Transfer::new(IoBuf::from(data), 1000, |_, _| {});
         let _ = self.dev.control_async(setup, t);
     }
+
+    /// `usbhid_get_report`: what the device returned, padded to `len`,
+    /// as FreeBSD reports `maxlen` moved.
+    fn get_report(
+        &self,
+        s: &Sleepable,
+        kind: u8,
+        id: u8,
+        len: u16,
+    ) -> Result<Vec<u8>, TransportError> {
+        let value = (u16::from(kind) << 8) | u16::from(id);
+        let mut setup = class_request(GET_REPORT, value, self.iface, len);
+        setup.request_type |= rt::IN;
+        let mut v = self
+            .dev
+            .control(s, setup, None)
+            .map_err(|_| TransportError)?;
+        v.resize(usize::from(len), 0);
+        Ok(v)
+    }
+
+    /// `usbhid_set_report`.
+    fn set_report(
+        &self,
+        s: &Sleepable,
+        kind: u8,
+        id: u8,
+        data: &[u8],
+    ) -> Result<(), TransportError> {
+        let value = (u16::from(kind) << 8) | u16::from(id);
+        let len = u16::try_from(data.len()).map_err(|_| TransportError)?;
+        let setup = class_request(SET_REPORT, value, self.iface, len);
+        self.dev
+            .control(s, setup, Some(data))
+            .map(|_| ())
+            .map_err(|_| TransportError)
+    }
+
+    /// `usbhid_write`, on the interrupt OUT pipe.
+    fn write(&self, s: &Sleepable, data: &[u8]) -> Option<Result<(), TransportError>> {
+        let (ep, _) = self.out?;
+        let w = usbus::transfer::Waiter::new();
+        let t = w.transfer(IoBuf::from(data.to_vec()), WRITE_TIMEOUT_MS);
+        if self.dev.submit(ep, t).is_err() {
+            return Some(Err(TransportError));
+        }
+        let (_, r) = w.wait(s);
+        Some(r.map(|_| ()).map_err(|_| TransportError))
+    }
+
+    /// The interrupt OUT transfer's buffer (the output report's size), or
+    /// the control one's (the largest report's), as `usbhid_intr_setup`
+    /// sizes them.
+    fn write_max(&self, osize: usize, largest: usize) -> usize {
+        match self.out {
+            Some((_, mps)) if osize == 0 => usize::from(mps),
+            Some(_) => osize,
+            None => largest,
+        }
+    }
 }
+
+/// How long an interrupt OUT write may take (`USB_DEFAULT_TIMEOUT`).
+const WRITE_TIMEOUT_MS: u32 = 5000;
 
 /// The `usbhid` driver.
 pub struct Usbhid {
@@ -155,6 +221,12 @@ impl Driver for Usbhid {
             .find(|e| e.is_in() && e.transfer_type() == TransferType::Interrupt)
             .ok_or(AttachError::Device("no interrupt endpoint"))?;
         let (ep, len) = (ep.address, ep.max_packet().max(1));
+        let out = iface
+            .desc
+            .endpoints
+            .iter()
+            .find(|e| !e.is_in() && e.transfer_type() == TransferType::Interrupt)
+            .map(|e| (e.address, e.max_packet()));
         // The HID descriptor names the report descriptor's length.
         let report_len = iface
             .class_descriptors()
@@ -197,6 +269,7 @@ impl Driver for Usbhid {
             iface: number,
             ep,
             len,
+            out,
             sink: SpinLock::new(None),
             running: AtomicBool::new(false),
             pending: AtomicUsize::new(0),
@@ -215,6 +288,8 @@ impl Driver for Usbhid {
                 },
                 name,
                 serial: dev.serial.clone(),
+                raw: raw.unwrap_or_default(),
+                rdesc_size: report_len.unwrap_or(0),
             }),
             dev,
             unit: cx.unit(),

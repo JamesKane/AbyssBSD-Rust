@@ -78,7 +78,13 @@ pub fn set_kernel(k: &'static dyn Kernel) {
     let _ = KERNEL.set(k);
 }
 
-fn kernel() -> Result<&'static dyn Kernel, Errno> {
+/// The kernel's side, for other drivers whose requests carry pointers
+/// (`hidraw`).
+///
+/// # Errors
+///
+/// `EFAULT` before the kernel set it.
+pub fn kernel() -> Result<&'static dyn Kernel, Errno> {
     KERNEL.get().copied().ok_or(Errno::EFAULT)
 }
 

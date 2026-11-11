@@ -276,6 +276,11 @@ pub(crate) fn init(s: &Sleepable) {
     // FreeBSD's tree shows them.
     let m = bus::manager();
     crate::ugen::init(s);
+    // `hidraw_load="YES"` (loader.conf's, on the command line): loaded
+    // before the buses attach.
+    if crate::boot::value("hidraw_load").is_some_and(|v| v.eq_ignore_ascii_case("yes")) {
+        hidbus::set_hidraw(s, true);
+    }
     evdev::init(
         s,
         evdev::Clocks {

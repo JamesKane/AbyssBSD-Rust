@@ -607,7 +607,7 @@ const BUILT_IN: &[&[u8]] = &[
 
 /// `kldload(file)`: there are no loadable modules; one built in is
 /// `EEXIST`, as FreeBSD answers for a module compiled into its kernel.
-pub(super) fn kldload(file: u64) -> SysResult {
+pub(super) fn kldload(s: &sched::Sleepable, file: u64) -> SysResult {
     let file = super::path::path(file)?;
     let p = Process::current().ok_or(Errno::EINVAL)?;
     // Nothing loads above securelevel 0 (FreeBSD's `kern_kldload`).
@@ -616,10 +616,50 @@ pub(super) fn kldload(file: u64) -> SysResult {
     cred.priv_check(crate::cred::Priv::KldLoad)?;
     let name = file.rsplit(|&b| b == b'/').next().unwrap_or(&file);
     let name = name.strip_suffix(b".ko").unwrap_or(name);
+    if name == HIDRAW_NAME {
+        // A driver that is a module on FreeBSD (not in GENERIC): built
+        // in, it attaches only once loaded.
+        if hidbus::set_hidraw(s, true) {
+            return Err(Errno::EEXIST);
+        }
+        return Ok(HIDRAW_FILE as u64);
+    }
     if BUILT_IN.contains(&name) {
         Err(Errno::EEXIST)
     } else {
         Err(Errno::ENOENT)
+    }
+}
+
+/// `hidraw.ko`: built in, but attached only once loaded, as FreeBSD's
+/// stock kernel has it as a module (docs/compat-deviations.md).
+const HIDRAW_NAME: &[u8] = b"hidraw";
+/// Its file's id while loaded.
+const HIDRAW_FILE: i32 = 2;
+/// Its module, `hidbus/hidraw`.
+const HIDRAW_MODULE: &[u8] = b"hidbus/hidraw";
+
+/// Its module's id while loaded: after the kernel's.
+fn hidraw_module() -> Option<i32> {
+    hidbus::hidraw_loaded()
+        .then(|| i32::try_from(MODULES.len() + 1).ok())
+        .flatten()
+}
+
+/// `kldunload(fileid)` and `kldunloadf(fileid, flags)`: `hidraw.ko`
+/// detaches; the kernel cannot go.
+pub(super) fn kldunload(s: &sched::Sleepable, fileid: u64) -> SysResult {
+    let p = Process::current().ok_or(Errno::EINVAL)?;
+    let cred = p.cred();
+    cred.securelevel_gt(0)?;
+    cred.priv_check(crate::cred::Priv::KldUnload)?;
+    match super::int(fileid) {
+        HIDRAW_FILE if hidbus::hidraw_loaded() => {
+            hidbus::set_hidraw(s, false);
+            Ok(0)
+        }
+        KERNEL_FILE => Err(Errno::EBUSY),
+        _ => Err(Errno::ENOENT),
     }
 }
 
@@ -691,6 +731,9 @@ const MODULES: &[&[u8]] = &[
 
 /// The module with id `id`.
 fn module(id: i32) -> Result<(i32, &'static [u8]), Errno> {
+    if Some(id) == hidraw_module() {
+        return Ok((id, HIDRAW_MODULE));
+    }
     let i = usize::try_from(id).ok().and_then(|i| i.checked_sub(1));
     let name = i.and_then(|i| MODULES.get(i)).ok_or(Errno::ENOENT)?;
     Ok((id, name))
@@ -698,9 +741,12 @@ fn module(id: i32) -> Result<(i32, &'static [u8]), Errno> {
 
 /// `kldnext(fileid)`: the file after `fileid`, the kernel after 0.
 pub(super) fn kldnext(fileid: u64) -> SysResult {
+    let hidraw = hidbus::hidraw_loaded();
     match super::int(fileid) {
         0 => Ok(KERNEL_FILE as u64),
+        KERNEL_FILE if hidraw => Ok(HIDRAW_FILE as u64),
         KERNEL_FILE => Ok(0),
+        HIDRAW_FILE if hidraw => Ok(0),
         _ => Err(Errno::ENOENT),
     }
 }
@@ -713,6 +759,9 @@ pub(super) fn kldfind(file: u64) -> SysResult {
     // if_epair.ko` succeeds as it does where the module was loaded, which
     // is what a jail, unable to load it, checks for (`vnet_init`).
     let module = name.strip_suffix(b".ko").filter(|m| BUILT_IN.contains(m));
+    if hidbus::hidraw_loaded() && name.strip_suffix(b".ko").unwrap_or(name) == HIDRAW_NAME {
+        return Ok(HIDRAW_FILE as u64);
+    }
     if name == b"kernel" || module.is_some() {
         Ok(KERNEL_FILE as u64)
     } else {
@@ -724,13 +773,32 @@ pub(super) fn kldfind(file: u64) -> SysResult {
 /// size. The address is the link address, not where KASLR put it.
 pub(super) fn kldstat(fileid: u64, stat: u64) -> SysResult {
     use abi::linker::{KLD_FILE_STAT_1_SIZE, KldFileStat};
-    if super::int(fileid) != KERNEL_FILE {
+    let id = super::int(fileid);
+    let hidraw = id == HIDRAW_FILE && hidbus::hidraw_loaded();
+    if id != KERNEL_FILE && !hidraw {
         return Err(Errno::ENOENT);
     }
     let version = uaccess::load_u32(stat).map_err(|_| Errno::EFAULT)?;
     let version = usize::try_from(version).unwrap_or(usize::MAX);
     if version != KLD_FILE_STAT_1_SIZE && version != size_of::<KldFileStat>() {
         return Err(Errno::EINVAL);
+    }
+    if hidraw {
+        // Its code is the kernel's: no address or size of its own.
+        let mut st = KldFileStat {
+            version: i32::try_from(version).unwrap_or(0),
+            name: [0; abi::linker::MAXPATHLEN],
+            refs: 1,
+            id: HIDRAW_FILE,
+            _pad0: [0; 4],
+            address: 0,
+            size: 0,
+            pathname: [0; abi::linker::MAXPATHLEN],
+        };
+        st.name[..9].copy_from_slice(b"hidraw.ko");
+        st.pathname[..22].copy_from_slice(b"/boot/kernel/hidraw.ko");
+        uaccess::copy_out(stat, &uaccess::bytes_of(&st)[..version]).map_err(|_| Errno::EFAULT)?;
+        return Ok(0);
     }
     let k = crate::boot::info().kernel;
     let mut st = KldFileStat {
@@ -751,6 +819,11 @@ pub(super) fn kldstat(fileid: u64, stat: u64) -> SysResult {
 
 /// `kldfirstmod(fileid)`: the kernel's first module.
 pub(super) fn kldfirstmod(fileid: u64) -> SysResult {
+    if super::int(fileid) == HIDRAW_FILE
+        && let Some(m) = hidraw_module()
+    {
+        return Ok(u64::from(m.cast_unsigned()));
+    }
     if super::int(fileid) != KERNEL_FILE {
         return Err(Errno::ENOENT);
     }
@@ -760,8 +833,13 @@ pub(super) fn kldfirstmod(fileid: u64) -> SysResult {
 /// `modnext(modid)`: the module after `modid`, the first after 0; 0
 /// after the last.
 pub(super) fn modnext(modid: u64) -> SysResult {
-    match super::int(modid) {
+    let id = super::int(modid);
+    match id {
         0 => Ok(1),
+        // The kernel's last, then the loaded file's.
+        _ if usize::try_from(id).is_ok_and(|i| i == MODULES.len()) => {
+            Ok(hidraw_module().map_or(0, |m| u64::from(m.cast_unsigned())))
+        }
         _ => modfnext(modid),
     }
 }
@@ -769,7 +847,9 @@ pub(super) fn modnext(modid: u64) -> SysResult {
 /// `modfnext(modid)`: the next module in `modid`'s file.
 pub(super) fn modfnext(modid: u64) -> SysResult {
     let (id, _) = module(super::int(modid))?;
-    Ok(if usize::try_from(id).is_ok_and(|i| i < MODULES.len()) {
+    Ok(if Some(id) == hidraw_module() {
+        0
+    } else if usize::try_from(id).is_ok_and(|i| i < MODULES.len()) {
         u64::from(id.cast_unsigned()) + 1
     } else {
         0
@@ -826,6 +906,11 @@ pub(super) fn modfind(name: u64) -> SysResult {
         uaccess::StrError::Fault => Errno::EFAULT,
         uaccess::StrError::TooLong => Errno::ENAMETOOLONG,
     })?;
+    if name.as_slice() == HIDRAW_MODULE
+        && let Some(m) = hidraw_module()
+    {
+        return Ok(u64::from(m.cast_unsigned()));
+    }
     MODULES
         .iter()
         .position(|m| *m == name.as_slice())

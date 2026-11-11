@@ -714,6 +714,10 @@ pub(super) fn ioctl(s: &Sleepable, fd: u64, com: u64, data: u64) -> SysResult {
     } else if indirect.is_none() && com & IOC_VOID != 0 && len == 4 {
         // An `int` passed by value.
         arg.copy_from_slice(&int(data).to_ne_bytes());
+    } else if indirect.is_none() && com & IOC_VOID != 0 && len == 0 {
+        // No argument: the driver gets the caller's value itself, as
+        // FreeBSD's `data = &uap->data` (`HIDIOCGRDESC`'s pointer).
+        arg = data.to_ne_bytes().to_vec();
     }
     let ret = match com {
         FIONBIO | FIOASYNC => {

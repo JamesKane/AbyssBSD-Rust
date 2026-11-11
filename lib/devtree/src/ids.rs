@@ -453,6 +453,8 @@ pub struct HidId {
     usage: Option<u32>,
     vendor: Option<u16>,
     product: Option<u16>,
+    /// A child of the bus's own, not a collection: its index.
+    index: Option<u8>,
     rank: Rank,
 }
 
@@ -465,7 +467,22 @@ impl HidId {
             usage: Some(usage),
             vendor: None,
             product: None,
+            index: None,
             rank: Rank::DEFAULT,
+        }
+    }
+
+    /// Matches the child with index `index` whatever its usage, at
+    /// [`Rank::GENERIC`]: a child a driver adds to every bus for itself
+    /// (`hidraw`'s, index 255).
+    #[must_use]
+    pub const fn index(index: u8) -> Self {
+        Self {
+            usage: None,
+            vendor: None,
+            product: None,
+            index: Some(index),
+            rank: Rank::GENERIC,
         }
     }
 
@@ -489,6 +506,7 @@ impl HidId {
 impl Matches<HidIdent> for HidId {
     fn rank_for(&self, i: &HidIdent) -> Option<Rank> {
         (self.usage.is_none_or(|u| u == i.usage)
+            && self.index.is_none_or(|x| x == i.index)
             && self.vendor.is_none_or(|v| v == i.vendor)
             && self.product.is_none_or(|p| p == i.product))
         .then_some(self.rank)
@@ -501,6 +519,7 @@ impl Witness<HidIdent> for HidId {
             usage: self.usage.unwrap_or(0),
             vendor: self.vendor.unwrap_or(0),
             product: self.product.unwrap_or(0),
+            index: self.index.unwrap_or(0),
             ..HidIdent::default()
         }
     }
