@@ -216,9 +216,13 @@ check_node(int fd, const char *driver, int unit, int event,
 	    strerror(errno));
 	len += 4096;
 	msgbuf = calloc(1, len + 1);
-	if (msgbuf != NULL &&
-	    sysctlbyname("kern.msgbuf", msgbuf, &len, NULL, 0) == 0)
-		CHECK(strstr(msgbuf, want) != NULL, "no \"%s\" in dmesg", want);
+	/* The buffer may hold NULs (binary a program wrote): memmem. */
+	CHECK(msgbuf != NULL &&
+	    sysctlbyname("kern.msgbuf", msgbuf, &len, NULL, 0) == 0, "%s",
+	    strerror(errno));
+	if (msgbuf != NULL)
+		CHECK(memmem(msgbuf, len, want, strlen(want)) != NULL,
+		    "no \"%s\" in dmesg (%zu bytes)", want, len);
 	free(msgbuf);
 }
 
