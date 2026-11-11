@@ -222,6 +222,17 @@ impl Topology {
         })
     }
 
+    /// Node `index`'s `dv_handle` (0 if there is none): its slot and
+    /// generation, never 0.
+    fn handle(&self, index: u32) -> usize {
+        self.nodes
+            .get(index as usize)
+            .and_then(Option::as_ref)
+            .map_or(0, |n| {
+                (usize::try_from(n.generation).unwrap_or(0) << 32) | (index as usize + 1)
+            })
+    }
+
     fn nameunit(&self, drivers: &[DriverDecl], index: u32) -> String {
         let Some(n) = self.nodes.get(index as usize).and_then(Option::as_ref) else {
             return String::new();
@@ -273,6 +284,9 @@ pub struct Manager {
     idle_q: WaitQueue,
     /// Granted ranges, and the ranges firmware or another device shares.
     space: SpinLock<ResourceSpace>,
+    /// The rmans, and the ranges buses recorded beyond their children's
+    /// resources (`hw.bus.rman`).
+    rmans: SpinLock<crate::rman::Registry>,
     /// devctl event lines, for /dev/devctl, bounded.
     events: SpinLock<devctl::Events>,
     /// Called after a line is queued: /dev/devctl's wakeup.
@@ -409,6 +423,7 @@ pub fn init(
             jobs_done: AtomicU32::new(0),
             idle_q: WaitQueue::new(),
             space: SpinLock::new(ResourceSpace::new()),
+            rmans: SpinLock::new(crate::rman::Registry::new()),
             events: SpinLock::new(devctl::Events::new(o.devctl_queue, o.devctl_nomatch)),
             on_event: Once::new(),
             generation: AtomicU32::new(1),
@@ -1725,6 +1740,7 @@ impl Manager {
         // and the ranges it recorded have no children to share them.
         core::mem::take(&mut n.provides).revoke();
         self.space.lock().forget(id);
+        self.rmans.lock().forget(id);
         let unit = n.unit.take();
         n.driver = None;
         n.start = StartPhase::Attach;
@@ -1921,6 +1937,7 @@ impl Manager {
         // is checked.
         drop(provides);
         self.space.lock().forget(id);
+        self.rmans.lock().forget(id);
         // 3-7. The binding's own teardown. Children a bus driver created
         // go with it, before its instance: their bus data may hold the
         // bus's grants (a transport's registers).
@@ -2045,6 +2062,203 @@ impl Manager {
         }
     }
 
+    /// Declares an rman (`rman_init` and its regions): the platform's
+    /// (`owner` `None`, made before any device) or a bus's, whose
+    /// children allocate from it.
+    pub fn add_rman(&self, owner: Option<DeviceId>, spec: crate::RmanSpec) -> crate::RmanId {
+        self.rmans.lock().add(owner, owner, spec)
+    }
+
+    /// The platform's rman described as `spec` is, made now (in `anchor`'s
+    /// place in the order) if there is none.
+    pub(crate) fn platform_rman(&self, anchor: DeviceId, spec: crate::RmanSpec) -> crate::RmanId {
+        self.rmans.lock().platform(anchor, spec)
+    }
+
+    /// Records that `dev` holds `start..=end` of `kind`, in `rman` or in
+    /// the rman of its nearest ancestor (else the platform's) that manages
+    /// the range. It goes when `by` detaches.
+    pub fn hold(
+        &self,
+        by: DeviceId,
+        dev: DeviceId,
+        kind: crate::RmanKind,
+        (start, end): (u64, u64),
+        rman: Option<crate::RmanId>,
+    ) {
+        use abi::bus::rf;
+        self.rmans.lock().holds.push(crate::rman::Hold {
+            dev,
+            kind,
+            start,
+            end,
+            flags: rf::ALLOCATED | rf::ACTIVE,
+            rman: rman.map(|r| r.0),
+            by,
+        });
+    }
+
+    /// Records that `dev` installed a handler on interrupt line `number`:
+    /// its holder is `dev`, or `dev`'s bus where the bus accounts for its
+    /// resources (a transport, which allocates its child's interrupts in
+    /// FreeBSD: `virtio_pci0` holds `vtblk0`'s). It goes when `dev`
+    /// detaches.
+    pub(crate) fn hold_irq(&self, dev: DeviceId, number: u64) {
+        let holder = {
+            let reg = self.rmans.lock();
+            reg.held_by_bus
+                .iter()
+                .find(|&&(c, _)| c == dev)
+                .map_or(dev, |&(_, bus)| bus)
+        };
+        self.hold(dev, holder, crate::RmanKind::Irq, (number, number), None);
+    }
+
+    /// Records that bus `by` accounts for its child `child`'s resources
+    /// itself (`acpi0` holds the system-resource devices' ranges, merged):
+    /// they are not listed as the child's.
+    pub(crate) fn hold_for_child(&self, by: DeviceId, child: DeviceId) {
+        self.rmans.lock().held_by_bus.push((child, by));
+    }
+
+    /// Appends `hw.bus.rman.<generation>.<rman>.<res>`'s record to `out`:
+    /// the `rman`th rman's `struct u_rman` for `res` -1, else its `res`th
+    /// resource's `struct u_resource`; `None` past the last
+    /// (`sysctl_rman`).
+    pub(crate) fn rman_record(
+        &self,
+        s: &Sleepable,
+        rman: usize,
+        res: i32,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        use abi::bus::rf;
+        use devtree::rman as dr;
+        let t = self.topo.read(s);
+        // Tree order, and each node's place in it.
+        let mut order: Vec<u32> = Vec::new();
+        let mut pos: Vec<Option<usize>> = alloc::vec![None; t.nodes.len()];
+        let mut stack = alloc::vec![0u32];
+        while let Some(i) = stack.pop() {
+            let Some(n) = t.nodes.get(i as usize).and_then(Option::as_ref) else {
+                continue;
+            };
+            pos[i as usize] = Some(order.len());
+            order.push(i);
+            stack.extend(n.children.iter().rev());
+        }
+        let node = |i: u32| t.nodes[i as usize].as_ref();
+        let nodes: Vec<dr::TreeNode> = order
+            .iter()
+            .map(|&i| dr::TreeNode {
+                parent: node(i).and_then(|n| n.parent).and_then(|p| pos[p as usize]),
+            })
+            .collect();
+        let at = |id: DeviceId| t.node(id).and(pos[id.index as usize]);
+        let reg = self.rmans.lock();
+        let rmans: Vec<dr::Rman> = reg
+            .rmans
+            .iter()
+            .filter_map(|r| {
+                let owner = match r.owner {
+                    Some(o) => Some(at(o)?),
+                    None => None,
+                };
+                Some(dr::Rman {
+                    handle: r.handle,
+                    descr: r.spec.descr.clone(),
+                    kind: r.spec.kind,
+                    start: r.spec.start,
+                    end: r.spec.end,
+                    regions: r.spec.regions.clone(),
+                    owner,
+                    anchor: r.anchor.and_then(at),
+                    grows: r.spec.grows,
+                })
+            })
+            .collect();
+        let mut requests = Vec::new();
+        for (p, &i) in order.iter().enumerate() {
+            let Some(n) = node(i) else { continue };
+            if n.state == NodeState::Gone {
+                continue;
+            }
+            let id = DeviceId {
+                index: i,
+                generation: n.generation,
+            };
+            if reg.held_by_bus.iter().any(|&(c, _)| c == id) {
+                continue;
+            }
+            let dev = p;
+            let active = if n.state == NodeState::Attached {
+                rf::ACTIVE
+            } else {
+                0
+            };
+            for r in &n.resources {
+                let (kind, start, len, pf) = match *r {
+                    Resource::Memory {
+                        base,
+                        len,
+                        prefetchable,
+                    } => (crate::RmanKind::Memory, base, len, prefetchable),
+                    Resource::IoPort { base, len } => (
+                        crate::RmanKind::IoPort,
+                        u64::from(base),
+                        u64::from(len),
+                        false,
+                    ),
+                    Resource::Irq { .. } => continue,
+                };
+                if len == 0 || inherited(&t, n.parent, r) {
+                    continue;
+                }
+                let prefetch = if pf { rf::PREFETCHABLE } else { 0 };
+                requests.push(dr::Request {
+                    dev,
+                    kind,
+                    start,
+                    end: start.saturating_add(len - 1),
+                    flags: rf::ALLOCATED | active | prefetch,
+                    rman: None,
+                });
+            }
+        }
+        for h in &reg.holds {
+            if let Some(dev) = at(h.dev) {
+                requests.push(dr::Request {
+                    dev,
+                    kind: h.kind,
+                    start: h.start,
+                    end: h.end,
+                    flags: h.flags,
+                    rman: h.rman,
+                });
+            }
+        }
+        drop(reg);
+        let tables = dr::build(&nodes, &rmans, &requests);
+        let table = tables.get(rman)?;
+        if res == -1 {
+            dr::urman_bytes(&dr::urman(table.rman), out);
+            return Some(());
+        }
+        let k = usize::try_from(res).ok()?;
+        let e = table.entries.get(k)?;
+        let holder = e
+            .dev
+            .map(|d| (t.handle(order[d]), t.nameunit(self.drivers, order[d])));
+        let u = dr::uresource(
+            table.rman.handle,
+            (table.rman.handle << 24) | (k + 1),
+            e,
+            holder.as_ref().map(|(h, n)| (*h, n.as_str())),
+        );
+        dr::uresource_bytes(&u, out);
+        Some(())
+    }
+
     /// Appends the `index`th device's `hw.bus.devices` record to `out`,
     /// in node-table order (any order serves: `devinfo` links records by
     /// handle); `None` past the last, or if its fields do not fit. It is
@@ -2060,11 +2274,7 @@ impl Manager {
             .filter_map(|(i, n)| Some((i, n.as_ref()?)))
             .nth(index)?;
         let i = u32::try_from(i).ok()?;
-        let handle = |i: u32| {
-            t.nodes[i as usize].as_ref().map_or(0, |n| {
-                (usize::try_from(n.generation).unwrap_or(0) << 32) | (i as usize + 1)
-            })
-        };
+        let handle = |i: u32| t.handle(i);
         let root = n.parent.is_none();
         let nameunit = t.nameunit(self.drivers, i);
         let driver = match n.class(self.drivers) {
@@ -2192,6 +2402,34 @@ impl Manager {
         }
         out
     }
+}
+
+/// Whether an ancestor of a node (from `parent` up) has `r` among its
+/// own resources: a range a bus handed on to its child (a transport's
+/// registers), which FreeBSD's child does not allocate again.
+fn inherited(t: &Topology, mut parent: Option<u32>, r: &Resource) -> bool {
+    let same = |a: &Resource| match (a, r) {
+        (
+            Resource::Memory { base, len, .. },
+            Resource::Memory {
+                base: b2, len: l2, ..
+            },
+        ) => base == b2 && len == l2,
+        (Resource::IoPort { base, len }, Resource::IoPort { base: b2, len: l2 }) => {
+            base == b2 && len == l2
+        }
+        _ => false,
+    };
+    while let Some(p) = parent {
+        let Some(n) = t.nodes.get(p as usize).and_then(Option::as_ref) else {
+            return false;
+        };
+        if n.resources.iter().any(same) {
+            return true;
+        }
+        parent = n.parent;
+    }
+    false
 }
 
 /// Why an attach request was refused.

@@ -205,6 +205,47 @@ fn sbsa_watchdogs() -> alloc::vec::Vec<acpi_tables::gtdt::Watchdog> {
         .collect()
 }
 
+/// The platform root's rmans, in the order FreeBSD's nexus makes them
+/// (x86/x86/nexus.c, arm64/arm64/nexus.c `nexus_attach`), for
+/// `hw.bus.rman`: what no bus below has an rman for is listed in these.
+fn platform_rmans(m: &bus::Manager) {
+    use bus::{RmanKind, RmanSpec};
+    #[cfg(target_arch = "x86_64")]
+    {
+        // The I/O APICs' pins from the start; each MSI line as it is
+        // allocated (`nexus_add_irq`). Lines are numbered as `vmstat -i`
+        // numbers them, MSIs from `irq::MSI_FIRST`.
+        let pins = u64::from(crate::intc::ioapic_pins());
+        let top = (1u64 << crate::arch::cpu::phys_addr_bits()) - 1;
+        for spec in [
+            RmanSpec::new(
+                "Interrupt request lines",
+                RmanKind::Irq,
+                0,
+                u64::from(u32::MAX),
+            )
+            .managing(alloc::vec![(0, pins - 1)])
+            .growing(),
+            RmanSpec::new("DMA request lines", RmanKind::Drq, 0, 7).managing(alloc::vec![(0, 7)]),
+            RmanSpec::new("I/O ports", RmanKind::IoPort, 0, 0xffff)
+                .managing(alloc::vec![(0, 0xffff)]),
+            RmanSpec::new("I/O memory addresses", RmanKind::Memory, 0, top)
+                .managing(alloc::vec![(0, top)]),
+        ] {
+            m.add_rman(None, spec);
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    for spec in [
+        RmanSpec::new("I/O memory addresses", RmanKind::Memory, 0, u64::MAX)
+            .managing(alloc::vec![(0, u64::MAX)]),
+        RmanSpec::new("Interrupts", RmanKind::Irq, 0, u64::MAX)
+            .managing(alloc::vec![(0, u64::MAX)]),
+    ] {
+        m.add_rman(None, spec);
+    }
+}
+
 /// Detaches every device, consumers before suppliers, so none is still
 /// doing DMA when firmware takes over.
 pub(crate) fn shutdown(s: &Sleepable) {
@@ -297,8 +338,22 @@ pub(crate) fn init(s: &Sleepable) {
         kprintln!("input: no keyboard thread");
     }
     let nexus = m.adopt(s, root, "nexus", "", bus::Ident::Platform);
+    platform_rmans(m);
     #[cfg(target_arch = "x86_64")]
-    m.adopt(s, nexus, "apic", "APIC resources", bus::Ident::Platform);
+    {
+        let apic = m.adopt(s, nexus, "apic", "APIC resources", bus::Ident::Platform);
+        // The local APIC's and I/O APICs' registers, as FreeBSD's apic0
+        // holds them (x86/io_apic.c: LAPIC_MEM_REGION, IOAPIC_MEM_REGION).
+        let mut windows = alloc::vec![(crate::arch::apic::xapic_phys(), 0x540)];
+        windows.extend(
+            crate::intc::ioapic_windows()
+                .into_iter()
+                .map(|pa| (pa, 0x20)),
+        );
+        for (pa, len) in windows {
+            m.hold(apic, apic, bus::RmanKind::Memory, (pa, pa + len - 1), None);
+        }
+    }
     let _ = NEXUS.set(nexus);
     // The GTDT's non-secure SBSA watchdogs.
     #[cfg(target_arch = "aarch64")]

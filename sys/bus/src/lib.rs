@@ -15,6 +15,7 @@
 //! - [`space`]: granted memory and I/O ranges, and the ranges firmware
 //!   or another device shares.
 //! - [`iommu`]: the IOMMU translation and requester IDs buses record.
+//! - [`rman`]: the resource spaces as FreeBSD's rmans, for `devinfo -u`.
 //!
 //! The pure logic it builds on (ranking, the graph, units, FreeBSD's
 //! strings) is in `lib/devtree`.
@@ -34,6 +35,7 @@ pub mod mailbox;
 pub mod manager;
 pub mod platform;
 pub mod provider;
+pub mod rman;
 mod roothold;
 pub mod space;
 mod sysctl;
@@ -49,6 +51,7 @@ pub use manager::{
     no_hints,
 };
 pub use platform::Platform;
+pub use rman::{RmanId, RmanKind, RmanSpec};
 
 /// `bootverbose`: the loader's `boot_verbose` (`boot -v`), and
 /// `debug.bootverbose`. Drivers print their diagnostics only with it.

@@ -1018,6 +1018,10 @@ impl<D: Driver> StartCx<'_, D> {
         };
         let installed = irq::install(domain, hw, trigger, polarity, hal::CpuId::BOOT, handler)
             .map_err(ResourceError::Irq)?;
+        // Its line, as FreeBSD's interrupt resource: the line's number in
+        // the platform's interrupt rman (`hw.bus.rman`).
+        let n = u64::from(installed.number());
+        self.mgr.hold_irq(self.binding.node, n);
         // The line's grant is now held by the installed handler, and its
         // pin with it.
         let mut line = line;
@@ -1165,6 +1169,38 @@ impl<D: Driver> StartCx<'_, D> {
     /// two of the children: both may hold grants overlapping in it.
     pub fn declare_shared(&mut self, r: Range) {
         self.mgr.declare_shared(self.binding.node, r);
+    }
+
+    /// Declares an rman this bus's children allocate from (a bridge's
+    /// window: `pcib1 memory window`), for `hw.bus.rman` (§11.1). A
+    /// child's resource in one of its regions is listed there rather than
+    /// further up. It goes when this device detaches.
+    pub fn add_rman(&mut self, spec: crate::RmanSpec) -> crate::RmanId {
+        self.mgr.add_rman(Some(self.binding.node), spec)
+    }
+
+    /// The platform-wide rman `spec` describes, made now if there is none
+    /// (a PCI domain's bus numbers, which its first bus takes from). It
+    /// stays when this device detaches.
+    pub fn platform_rman(&mut self, spec: crate::RmanSpec) -> crate::RmanId {
+        self.mgr.platform_rman(self.binding.node, spec)
+    }
+
+    /// Records that this device holds `start..=end` of `kind` beyond its
+    /// resources (a bridge's window, its bus numbers), in `rman`, else in
+    /// its nearest ancestor's rman that manages the range, else the
+    /// platform's. It goes when this device detaches.
+    pub fn hold(&mut self, kind: crate::RmanKind, range: (u64, u64), rman: Option<crate::RmanId>) {
+        let node = self.binding.node;
+        self.mgr.hold(node, node, kind, range, rman);
+    }
+
+    /// Records that this bus accounts for child `child`'s resources
+    /// itself ([`StartCx::hold`]): they are not listed as the child's.
+    /// FreeBSD's `acpi0` allocates the system-resource devices' ranges,
+    /// merged, and manages them.
+    pub fn hold_for_child(&mut self, child: DeviceId) {
+        self.mgr.hold_for_child(self.binding.node, child);
     }
 
     /// Publishes this device as a clock provider: consumers whose lines

@@ -147,6 +147,29 @@ pub(crate) fn init_ap(_cpu: CpuId) {
 static IOAPICS: sync::SpinLock<alloc::vec::Vec<arch::apic::IoApic>> =
     sync::SpinLock::new(alloc::vec::Vec::new());
 
+/// The I/O APICs' register windows (physical), in MADT order.
+#[cfg(target_arch = "x86_64")]
+static IOAPIC_PHYS: sync::SpinLock<alloc::vec::Vec<u64>> =
+    sync::SpinLock::new(alloc::vec::Vec::new());
+
+/// The I/O APICs' register windows (physical addresses).
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn ioapic_windows() -> alloc::vec::Vec<u64> {
+    IOAPIC_PHYS.lock().clone()
+}
+
+/// The interrupt pins the I/O APICs have: one past the highest GSI
+/// (FreeBSD's `num_io_irqs` before the MSI range).
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn ioapic_pins() -> u32 {
+    IOAPICS
+        .lock()
+        .iter()
+        .map(|io| io.gsi_base + io.inputs)
+        .max()
+        .unwrap_or(16)
+}
+
 /// Sets up interrupt controllers and the clock on the boot CPU.
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn init_boot_cpu() {
@@ -181,9 +204,11 @@ pub(crate) fn init_boot_cpu() {
                 kprintln!("irq: cannot map I/O APIC {}", io.id);
                 continue;
             };
+            let phys = u64::from(io.address);
             // SAFETY: the window was just mapped for this I/O APIC alone.
             let io = unsafe { apic::IoApic::new(va.get(), io.gsi_base) };
             io.mask_all();
+            IOAPIC_PHYS.lock().push(phys);
             ioapics += 1;
             IOAPICS.lock().push(io);
         }

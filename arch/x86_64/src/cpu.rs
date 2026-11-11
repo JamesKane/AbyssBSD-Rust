@@ -193,6 +193,18 @@ pub fn frame_pointer() -> u64 {
     v
 }
 
+/// The physical address width in bits (CPUID 8000_0008h EAX[7:0], what
+/// FreeBSD's `cpu_maxphyaddr` holds), 36 where the leaf is missing.
+#[must_use]
+pub fn phys_addr_bits() -> u32 {
+    let max = core::arch::x86_64::__cpuid(0x8000_0000).eax;
+    if max >= 0x8000_0008 {
+        core::arch::x86_64::__cpuid(0x8000_0008).eax & 0xff
+    } else {
+        36
+    }
+}
+
 /// Whether the time-stamp counter runs at a constant rate in every
 /// power state (CPUID 8000_0007h EDX bit 8, `tsc_is_invariant`).
 #[must_use]

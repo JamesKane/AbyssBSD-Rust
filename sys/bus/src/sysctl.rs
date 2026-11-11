@@ -98,16 +98,24 @@ pub(crate) fn register(mgr: &'static Manager, s: &Sleepable, workers: usize) {
         });
         let _ = t.add_handler(bus, Number::Auto, "devices", "system device tree", devices);
         // `hw.bus.rman.<generation>.<rman>.<resource>` (`sysctl_rman`),
-        // which `libdevinfo` reads after the devices: no resource manager
-        // is listed yet, so its walk ends at the first (ENOENT).
-        let rman = Arc::new(move |rest: &[i32], _: &mut Vec<u8>| {
-            let &[generation, _, _] = rest else {
+        // which `libdevinfo` reads after the devices: the `rman`th rman's
+        // `u_rman` for resource -1, else its resources' `u_resource`s in
+        // order, ENOENT past the last of either.
+        let rman = Arc::new(move |rest: &[i32], out: &mut Vec<u8>| {
+            let &[generation, rman, res] = rest else {
                 return Err(ReadError::Invalid);
             };
             if generation.cast_unsigned() != mgr.generation() {
                 return Err(ReadError::Invalid);
             }
-            Err(ReadError::NotFound)
+            let rman = usize::try_from(rman).map_err(|_| ReadError::NotFound)?;
+            if res < -1 {
+                return Err(ReadError::NotFound);
+            }
+            // SAFETY: as for `devices`: thread context, no spin lock held.
+            let s = unsafe { Sleepable::assume() };
+            mgr.rman_record(&s, rman, res, out)
+                .ok_or(ReadError::NotFound)
         });
         let _ = t.add_handler(bus, Number::Auto, "rman", "kernel resource manager", rman);
         // kern_devctl.c's knobs (`CTLFLAG_RWTUN`: the kernel environment

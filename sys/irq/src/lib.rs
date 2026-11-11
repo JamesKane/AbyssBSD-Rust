@@ -569,6 +569,13 @@ impl Installed {
         unsafe { &*(*self.entry).line }
     }
 
+    /// The line's number, as `vmstat -i` shows it: its pin's, or an
+    /// MSI's from [`MSI_FIRST`] on.
+    #[must_use]
+    pub fn number(&self) -> u32 {
+        self.line().number
+    }
+
     /// The root id the input arrives at.
     #[must_use]
     pub fn root(&self) -> u32 {
