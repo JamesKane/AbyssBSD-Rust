@@ -168,6 +168,7 @@ pub fn resize(object: &Arc<Object>, old: u64, new: u64) {
     if within != 0
         && let Some(pfn) = object.page_here(new.min(old) / PAGE)
     {
+        object.forget_synced(new.min(old) / PAGE);
         object.access(pfn, &mut |p| p[within..].fill(0));
     }
 }

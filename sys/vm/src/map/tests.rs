@@ -1142,3 +1142,92 @@ fn a_forked_stack_grows_on_its_own() {
     // The parent's gap is untouched.
     assert_eq!(p.map.entry(va(900)).unwrap().prot(), Prot::NONE);
 }
+
+/// The instruction-cache "synced" bit of a file's page (ARCHITECTURE.md
+/// §5.2): set after a sync, honored only for the same frame while clean
+/// and with no writable shared mapping, and gone wherever the contents may
+/// change or the page leaves.
+#[test]
+fn icache_synced_bit_follows_the_contents() {
+    let pages = Pages::new();
+    let file = Arc::new(ClusterFile {
+        pages: 4,
+        runs: std::sync::Mutex::new(Vec::new()),
+    });
+    let object = crate::object::Object::with_pager(
+        pages,
+        Arc::clone(&file) as Arc<dyn crate::object::Pager>,
+    );
+    let mut pfn = [Pfn(0); 4];
+    for (i, p) in pfn.iter_mut().enumerate() {
+        *p = object.fill(i as u64).unwrap();
+    }
+    // The file's own pages, through a shadow too.
+    let shadow = crate::object::Object::shadow(Arc::clone(&object), 1);
+    let (o, i) = shadow.code_page(0).unwrap();
+    assert!(Arc::ptr_eq(&o, &object));
+    assert_eq!(i, 1);
+    // Anonymous memory keeps no bit.
+    let anon = crate::object::Object::anonymous(pages);
+    anon.get_or_insert(0, None).unwrap();
+    assert!(anon.code_page(0).is_none());
+
+    // Set, and honored for that frame only.
+    assert!(!object.icache_synced(0, pfn[0]));
+    object.set_icache_synced(0, pfn[0]);
+    assert!(object.icache_synced(0, pfn[0]));
+    assert!(!object.icache_synced(0, pfn[1]));
+    // A wrong frame sets nothing.
+    object.set_icache_synced(1, pfn[0]);
+    assert!(!object.icache_synced(1, pfn[1]));
+
+    // Written: gone, and not set again while dirty.
+    object.mark_dirty(0);
+    assert!(!object.icache_synced(0, pfn[0]));
+    object.set_icache_synced(0, pfn[0]);
+    assert!(!object.icache_synced(0, pfn[0]));
+
+    // The write paths' lookups clear it before the caller writes.
+    object.set_icache_synced(1, pfn[1]);
+    object.page_for_write(1).unwrap();
+    assert!(!object.icache_synced(1, pfn[1]));
+    object.set_icache_synced(2, pfn[2]);
+    object.page_for_overwrite(2).unwrap();
+    assert!(!object.icache_synced(2, pfn[2]));
+    object.set_icache_synced(3, pfn[3]);
+    object.page_filled(3, &mut |_| {}).unwrap();
+    assert!(!object.icache_synced(3, pfn[3]));
+    object.set_icache_synced(3, pfn[3]);
+    object.forget_synced(3);
+    assert!(!object.icache_synced(3, pfn[3]));
+
+    // A writable shared mapping: every bit goes, none is honored or set
+    // while it lasts.
+    object.set_icache_synced(3, pfn[3]);
+    object.add_writemappings(4096);
+    assert!(!object.icache_synced(3, pfn[3]));
+    object.set_icache_synced(3, pfn[3]);
+    object.sub_writemappings(4096);
+    assert!(!object.icache_synced(3, pfn[3]));
+
+    // Truncated while someone else holds the object: zeroed in place, so
+    // gone.
+    object.set_icache_synced(3, pfn[3]);
+    let held = Arc::clone(&object);
+    held.truncate(3);
+    assert!(!object.icache_synced(3, pfn[3]));
+    drop(held);
+
+    // A page that leaves and comes back starts without it.
+    let file2 = Arc::new(ClusterFile {
+        pages: 1,
+        runs: std::sync::Mutex::new(Vec::new()),
+    });
+    let o2 = crate::object::Object::with_pager(pages, file2 as Arc<dyn crate::object::Pager>);
+    let p = o2.fill(0).unwrap();
+    o2.set_icache_synced(0, p);
+    assert!(o2.icache_synced(0, p));
+    assert_eq!(Arc::clone(&o2).drop_clean(usize::MAX), 1);
+    let q = o2.fill(0).unwrap();
+    assert!(!o2.icache_synced(0, q));
+}

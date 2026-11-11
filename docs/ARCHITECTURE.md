@@ -250,7 +250,7 @@ We follow FreeBSD's Mach-derived design, adapted to Rust ownership:
   user pointers by construction.
 - **Unified buffer/page cache** for file data (FreeBSD's VMIO model). Metadata is cached through a
   small buffer cache API used by UFS2 and msdosfs.
-- **Instruction cache coherence** (arm64; proposed, 2026-11-11). A page mapped executable is
+- **Instruction cache coherence** (arm64). A page mapped executable is
   synced first (`sync_icache`: clean to the point of unification unless `CTR_EL0.IDC`, then
   invalidate unless `CTR_EL0.DIC`). A fault syncs its page and its prefaulted neighbors as one
   batch, and past 32 KiB invalidates the whole instruction cache once (`IC IALLUIS`), as FreeBSD's
@@ -261,24 +261,30 @@ We follow FreeBSD's Mach-derived design, adapted to Rust ownership:
   while a page has a mapping and none writable; cleared when a writable mapping is created or the
   last mapping goes), so the same idea is kept per VM object, where the page cache already tracks
   dirty pages and writable shared mappings:
-  - A bit per page of a **vnode object**, kept with the page in the object's page map: the
-    instruction cache holds nothing older than the page's contents. Anonymous memory and
-    copy-on-write copies have no bit and are synced on every executable mapping, as now.
+  - A bit per page of a **vnode object** (one whose written pages go back to a pager), kept with
+    the page in the object's page map (`vm::object`'s `Page`): the instruction cache holds
+    nothing older than the page's contents. The fault finds the object holding the page along the
+    entry's chain (`Object::code_page`). Anonymous memory (tmpfs files included) and
+    copy-on-write copies have no bit and are synced on every executable mapping.
   - **Set** after syncing the page for an executable mapping, with the object locked, if the page
     is not dirty and the object has no writable shared mapping (`writemappings == 0`).
   - **Skip** the sync only if the bit is set and `writemappings == 0`.
-  - **Clear** it wherever the contents can change: where a page is marked dirty (`write(2)`, and
-    the first write fault through a shared mapping), where truncation zeroes the tail of the last
-    page, and for every page of the object when `writemappings` goes from 0 to 1. A page that
-    leaves the object (freed, reclaimed, replaced) takes its bit with it; a refilled page arrives
-    without one.
+  - **Clear** it wherever the contents can change: in the lookups a writer takes a page with
+    (`page_for_write`, `page_for_overwrite`, `page_filled`'s held page), where a page is marked
+    dirty (`write(2)`, and the first write fault through a shared mapping), where truncation or
+    `deallocate` zeroes pages in place and the page cache zeroes the tail of the last page, and
+    for every page of the object when `writemappings` goes from 0 to 1. A page that leaves the
+    object (freed, reclaimed, replaced) takes its bit with it; a refilled page arrives without one
+    (every fill goes into fresh pages).
   - Stricter than FreeBSD's rule in one way: a `write(2)` into a text page that stays mapped
     makes the next executable mapping sync again (FreeBSD keeps the bit while any mapping
     remains). `ptrace` writes go to a private copy (`Access::Copy`) and sync it themselves.
-  - To check before it lands: that nothing fills a resident page in place (a re-read into the
-    same frame) without marking it dirty or replacing it; and a test that rewrites a binary with
-    `write(2)` between two `exec`s of it, and one that writes code through a shared writable
-    mapping and executes it through another.
+  - Tests: `vm`'s `icache_synced_bit_follows_the_contents`, and `tests/user/icache.c` (code
+    rewritten with `write(2)` with and without a mapping kept, and written through a shared
+    writable mapping, each run from a new executable mapping). On the board's big cores, from a
+    clean file on UFS: `proc.exec` 194 to 122 µs (FreeBSD 108), `proc.vfork_exec` 193 to 133 µs
+    (169), `proc.fork` 48 to 32 µs (45). A binary just written is dirty until the syncer writes it
+    back, and synced on every mapping meanwhile.
 - **Free pages** (`vm::pageout`, `kernel/src/mm/pageout.rs`), as FreeBSD keeps them:
   - FreeBSD's thresholds, from `vm_pageout_init_domain`'s formulas: `v_free_reserved`,
     `v_free_min`, `v_free_severe`, `v_free_target`, and the wakeup mark, 90% of the target.

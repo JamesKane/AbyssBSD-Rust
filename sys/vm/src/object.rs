@@ -642,8 +642,27 @@ unsafe impl crate::dma::DmaBuf for IoBuf {
     }
 }
 
+/// A page an object holds.
+#[derive(Clone, Copy, Debug)]
+struct Page {
+    pfn: Pfn,
+    /// The instruction cache holds nothing older than the page's contents
+    /// (synced for an executable mapping since it last changed): another
+    /// executable mapping needs no sync. Only for pages of objects whose
+    /// written pages go back to a pager (files), and only while the page
+    /// is clean and the object has no writable shared mapping
+    /// (ARCHITECTURE.md §5.2). A page that leaves takes it along.
+    synced: bool,
+}
+
+impl Page {
+    const fn new(pfn: Pfn) -> Self {
+        Self { pfn, synced: false }
+    }
+}
+
 struct Inner {
-    pages: BTreeMap<PageIndex, Pfn>,
+    pages: BTreeMap<PageIndex, Page>,
     /// Pages written since they were last written back (only for pagers
     /// that write back).
     dirty: BTreeSet<PageIndex>,
@@ -848,7 +867,7 @@ impl Object {
                 }
                 let Inner { pages, dirty, .. } = &mut *inner;
                 let room = DROP_BATCH.min(want - r.freed);
-                for (&i, &pfn) in pages.range(from..) {
+                for (&i, &Page { pfn, .. }) in pages.range(from..) {
                     r.scanned += 1;
                     if !dirty.contains(&i) {
                         batch[k] = (i, pfn);
@@ -897,7 +916,13 @@ impl Object {
     }
 
     pub(crate) fn add_writemappings(&self, bytes: u64) {
-        self.writemappings.fetch_add(bytes, Ordering::AcqRel);
+        // The first writable shared mapping may change any page: none is
+        // synced for execution any more.
+        if self.writemappings.fetch_add(bytes, Ordering::AcqRel) == 0 && bytes != 0 {
+            for p in self.inner.lock().pages.values_mut() {
+                p.synced = false;
+            }
+        }
     }
 
     pub(crate) fn sub_writemappings(&self, bytes: u64) {
@@ -940,7 +965,7 @@ impl Object {
             return Ok(Found::Fill(Arc::clone(self), index));
         } else {
             let inner = self.inner.lock();
-            if let Some(&pfn) = inner.pages.get(&index) {
+            if let Some(&Page { pfn, .. }) = inner.pages.get(&index) {
                 return Ok(Found::Top(pfn));
             }
             let foldable = fold
@@ -976,14 +1001,14 @@ impl Object {
         if let Some(d) = self.device {
             return Self::device_page(d, index).ok();
         }
-        if let Some(&pfn) = self.inner.lock().pages.get(&index) {
+        if let Some(&Page { pfn, .. }) = self.inner.lock().pages.get(&index) {
             return Some(pfn);
         }
         let mut next = self.backing();
         let mut index = index;
         while let Some((object, off)) = next {
             index += off;
-            if let Some(&pfn) = object.inner.lock().pages.get(&index) {
+            if let Some(&Page { pfn, .. }) = object.inner.lock().pages.get(&index) {
                 return Some(pfn);
             }
             next = object.backing();
@@ -994,7 +1019,7 @@ impl Object {
     /// This object's page `index`: present, or (with `fill`) filled now if
     /// this is a pager object.
     fn page_or_fill(&self, index: PageIndex, fill: bool) -> Result<Option<Pfn>, LookupError> {
-        if let Some(&pfn) = self.inner.lock().pages.get(&index) {
+        if let Some(&Page { pfn, .. }) = self.inner.lock().pages.get(&index) {
             return Ok(Some(pfn));
         }
         let Some(pager) = &self.pager else {
@@ -1196,12 +1221,12 @@ impl Object {
     /// there first (then that page wins and this one is freed).
     fn insert_filled(&self, index: PageIndex, new: Pfn) -> Pfn {
         let mut inner = self.inner.lock();
-        if let Some(&pfn) = inner.pages.get(&index) {
+        if let Some(&Page { pfn, .. }) = inner.pages.get(&index) {
             drop(inner);
             self.pages_ops.free(new);
             return pfn;
         }
-        inner.pages.insert(index, new);
+        inner.pages.insert(index, Page::new(new));
         new
     }
 
@@ -1244,7 +1269,7 @@ impl Object {
     /// If another fault inserted the page meanwhile, that page wins and the
     /// new one is freed.
     pub fn get_or_insert(&self, index: PageIndex, below: Option<Pfn>) -> Option<Pfn> {
-        if let Some(&pfn) = self.inner.lock().pages.get(&index) {
+        if let Some(&Page { pfn, .. }) = self.inner.lock().pages.get(&index) {
             return Some(pfn);
         }
         // Allocate (and zero or copy) outside the lock.
@@ -1259,12 +1284,12 @@ impl Object {
             None => self.pages_ops.alloc_zeroed()?,
         };
         let mut inner = self.inner.lock();
-        if let Some(&pfn) = inner.pages.get(&index) {
+        if let Some(&Page { pfn, .. }) = inner.pages.get(&index) {
             drop(inner);
             self.pages_ops.free(new);
             return Some(pfn);
         }
-        inner.pages.insert(index, new);
+        inner.pages.insert(index, Page::new(new));
         Some(new)
     }
 
@@ -1278,6 +1303,7 @@ impl Object {
         fill: &mut dyn FnMut(&mut [u8]),
     ) -> Result<Filled, LookupError> {
         if let Some(pfn) = self.page_here(index) {
+            self.forget_synced(index);
             return Ok(Filled::Held(pfn));
         }
         let new = self
@@ -1285,7 +1311,7 @@ impl Object {
             .alloc_filled(fill)
             .ok_or(LookupError::OutOfMemory)?;
         let mut inner = self.inner.lock();
-        if let Some(&pfn) = inner.pages.get(&index) {
+        if let Some(&Page { pfn, .. }) = inner.pages.get(&index) {
             drop(inner);
             // Lost a race (a fill or a fault): the bytes go to the winner.
             let mut bytes = Vec::new();
@@ -1296,7 +1322,7 @@ impl Object {
             self.pages_ops.free(new);
             return Ok(Filled::New(pfn));
         }
-        inner.pages.insert(index, new);
+        inner.pages.insert(index, Page::new(new));
         Ok(Filled::New(new))
     }
 
@@ -1314,8 +1340,8 @@ impl Object {
         core::mem::swap(&mut doomed, &mut keep);
         inner.pages.append(&mut keep);
         drop(inner);
-        for pfn in doomed.into_values() {
-            self.pages_ops.free(pfn);
+        for page in doomed.into_values() {
+            self.pages_ops.free(page.pfn);
         }
     }
 
@@ -1328,13 +1354,14 @@ impl Object {
     /// Page `index` of this object, if it holds it.
     #[must_use]
     pub fn page_here(&self, index: PageIndex) -> Option<Pfn> {
-        self.inner.lock().pages.get(&index).copied()
+        self.inner.lock().pages.get(&index).map(|p| p.pfn)
     }
 
     /// Page `index` of this object to write into: held, read from the
     /// pager, or (for an anonymous object, or past the pager's data) a new
     /// zeroed page.
     pub fn page_for_write(&self, index: PageIndex) -> Result<Pfn, LookupError> {
+        self.forget_synced(index);
         match self.page_or_fill(index, true) {
             Ok(Some(pfn)) => Ok(pfn),
             Ok(None) | Err(LookupError::PastEnd) => self
@@ -1348,6 +1375,7 @@ impl Object {
     /// held, or a new zeroed page, never read from the pager.
     pub fn page_for_overwrite(&self, index: PageIndex) -> Result<Pfn, LookupError> {
         if let Some(pfn) = self.page_here(index) {
+            self.forget_synced(index);
             return Ok(pfn);
         }
         self.get_or_insert(index, None)
@@ -1373,8 +1401,64 @@ impl Object {
 
     /// Records that page `index` was written.
     pub fn mark_dirty(&self, index: PageIndex) {
-        if self.tracks_dirty() && self.inner.lock().dirty.insert(index) {
+        let mut inner = self.inner.lock();
+        if let Some(p) = inner.pages.get_mut(&index) {
+            p.synced = false;
+        }
+        if self.tracks_dirty() && inner.dirty.insert(index) {
             DIRTY.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Page `index` is about to be written in place (by the caller, not a
+    /// mapping): no longer synced for execution.
+    pub fn forget_synced(&self, index: PageIndex) {
+        if let Some(p) = self.inner.lock().pages.get_mut(&index) {
+            p.synced = false;
+        }
+    }
+
+    /// The object along this one's chain that holds page `index`, and the
+    /// page's index there, if that object can keep pages synced for
+    /// execution: one whose written pages go back to a pager (a file).
+    #[must_use]
+    pub fn code_page(self: &Arc<Self>, index: PageIndex) -> Option<(Arc<Self>, PageIndex)> {
+        let mut object = Arc::clone(self);
+        let mut index = index;
+        loop {
+            if object.inner.lock().pages.contains_key(&index) {
+                return object.tracks_dirty().then_some((object, index));
+            }
+            let (next, off) = object.backing()?;
+            index = index.checked_add(off)?;
+            object = next;
+        }
+    }
+
+    /// Whether page `index`, still `pfn`, needs no instruction-cache sync
+    /// for an executable mapping (synced since it last changed, and no
+    /// writable shared mapping can change it).
+    #[must_use]
+    pub fn icache_synced(&self, index: PageIndex, pfn: Pfn) -> bool {
+        let inner = self.inner.lock();
+        self.writemappings.load(Ordering::Acquire) == 0
+            && inner
+                .pages
+                .get(&index)
+                .is_some_and(|p| p.synced && p.pfn == pfn)
+    }
+
+    /// Records that page `index`, still `pfn`, was synced for execution:
+    /// kept only while it is clean and no writable shared mapping exists.
+    pub fn set_icache_synced(&self, index: PageIndex, pfn: Pfn) {
+        let mut inner = self.inner.lock();
+        if self.writemappings.load(Ordering::Acquire) != 0 || inner.dirty.contains(&index) {
+            return;
+        }
+        if let Some(p) = inner.pages.get_mut(&index)
+            && p.pfn == pfn
+        {
+            p.synced = true;
         }
     }
 
@@ -1383,6 +1467,9 @@ impl Object {
     pub fn mark_mapped_writable(&self, index: PageIndex) {
         if self.tracks_dirty() {
             let mut inner = self.inner.lock();
+            if let Some(p) = inner.pages.get_mut(&index) {
+                p.synced = false;
+            }
             if inner.dirty.insert(index) {
                 DIRTY.fetch_add(1, Ordering::Relaxed);
             }
@@ -1419,7 +1506,7 @@ impl Object {
                     inner.dirty.remove(&i);
                     DIRTY.fetch_sub(1, Ordering::Relaxed);
                 }
-                if let Some(&pfn) = inner.pages.get(&i) {
+                if let Some(&Page { pfn, .. }) = inner.pages.get(&i) {
                     out.push((i, pfn));
                 }
             }
@@ -1481,7 +1568,7 @@ impl Object {
                     inner.dirty.remove(&i);
                     DIRTY.fetch_sub(1, Ordering::Relaxed);
                 }
-                if let Some(&pfn) = inner.pages.get(&i) {
+                if let Some(&Page { pfn, .. }) = inner.pages.get(&i) {
                     out.push((i, pfn));
                 }
             }
@@ -1581,7 +1668,15 @@ impl Object {
             // Kept for whoever still holds the object, but zeroed: should
             // the file grow again, they must read as zeros, not as what
             // was cut off.
-            let kept: Vec<Pfn> = inner.pages.range(pages..).map(|(_, &p)| p).collect();
+            // Rewritten in place: no longer synced for execution.
+            let kept: Vec<Pfn> = inner
+                .pages
+                .range_mut(pages..)
+                .map(|(_, p)| {
+                    p.synced = false;
+                    p.pfn
+                })
+                .collect();
             drop(inner);
             for pfn in kept {
                 self.pages_ops.access(pfn, &mut |p| p.fill(0));
@@ -1590,8 +1685,8 @@ impl Object {
         }
         let doomed = inner.pages.split_off(&pages);
         drop(inner);
-        for pfn in doomed.into_values() {
-            self.pages_ops.free(pfn);
+        for page in doomed.into_values() {
+            self.pages_ops.free(page.pfn);
         }
     }
 
@@ -1608,8 +1703,12 @@ impl Object {
             .inner
             .lock()
             .pages
-            .range(start..end)
-            .map(|(_, &p)| p)
+            .range_mut(start..end)
+            .map(|(_, p)| {
+                // Rewritten in place: no longer synced for execution.
+                p.synced = false;
+                p.pfn
+            })
             .collect();
         for pfn in kept {
             self.pages_ops.access(pfn, &mut |p| p.fill(0));
@@ -1664,7 +1763,7 @@ impl Object {
             }
             let mut below = backing.inner.lock();
             let mut freed = alloc::vec::Vec::new();
-            for (index, pfn) in core::mem::take(&mut below.pages) {
+            for (index, page) in core::mem::take(&mut below.pages) {
                 // Only the window this object sees moves up; the rest of
                 // the backing object is unreachable.
                 let moved = index
@@ -1672,9 +1771,9 @@ impl Object {
                     .filter(|i| !inner.pages.contains_key(i));
                 match moved {
                     Some(i) => {
-                        inner.pages.insert(i, pfn);
+                        inner.pages.insert(i, page);
                     }
-                    None => freed.push(pfn),
+                    None => freed.push(page.pfn),
                 }
             }
             inner.backing = below.backing.take().map(|(o, off)| (o, off + offset));
@@ -1692,8 +1791,8 @@ impl Drop for Object {
     fn drop(&mut self) {
         let inner = self.inner.get_mut();
         DIRTY.fetch_sub(inner.dirty.len(), Ordering::Relaxed);
-        for pfn in core::mem::take(&mut inner.pages).into_values() {
-            self.pages_ops.free(pfn);
+        for page in core::mem::take(&mut inner.pages).into_values() {
+            self.pages_ops.free(page.pfn);
         }
         // Long chains would recurse through `Drop`; unlink them one at a
         // time instead, stopping at an object someone else still holds.

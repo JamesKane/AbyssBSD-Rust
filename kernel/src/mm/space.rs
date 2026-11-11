@@ -1041,16 +1041,30 @@ impl AddressSpace {
         // instruction cache once rather than line by line. Outside the
         // tables' spin lock, which masks interrupts: the map's lock, held
         // throughout, keeps the space's mappings as they were looked at.
+        // A file's page synced since it last changed is not synced again
+        // (ARCHITECTURE.md §5.2): every exec maps the same text.
         #[cfg(target_arch = "aarch64")]
         {
             let code =
                 |x: &fault::Resolved| x.prot.contains(Prot::EXEC) && x.attr == MemAttr::WriteBack;
-            let pages: alloc::vec::Vec<usize> = core::iter::once(&r)
-                .chain(near.iter())
-                .filter(|x| code(x))
-                .map(|x| KernelPages::page(x.pfn) as usize)
-                .collect();
+            let mut pages = alloc::vec::Vec::new();
+            let mut synced = alloc::vec::Vec::new();
+            for x in core::iter::once(&r).chain(near.iter()).filter(|x| code(x)) {
+                let origin = map
+                    .entry(x.page)
+                    .and_then(|e| e.object().and_then(|o| o.code_page(e.index_of(x.page))));
+                if let Some((object, index)) = origin {
+                    if object.icache_synced(index, x.pfn) {
+                        continue;
+                    }
+                    synced.push((object, index, x.pfn));
+                }
+                pages.push(KernelPages::page(x.pfn) as usize);
+            }
             arch::cache::sync_icache_ranges(&pages, PAGE_BYTES);
+            for (object, index, pfn) in synced {
+                object.set_icache_synced(index, pfn);
+            }
         }
         let mut tables = self.tables.lock();
         let replaced = tables
