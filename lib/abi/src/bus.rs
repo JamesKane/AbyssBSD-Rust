@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! The device tree as `devinfo(8)` and `devctl(8)` read it: `hw.bus.info`
 //! (`struct u_businfo`) and `hw.bus.devices.<n>` (`struct u_device`), with
-//! the device states and flags they report, and `/dev/devctl2`'s
-//! requests (`struct devreq`, `DEV_*`).
+//! the device states and flags they report, the resource managers of
+//! `hw.bus.rman.<n>` (`struct u_rman`, `struct u_resource`), and
+//! `/dev/devctl2`'s requests (`struct devreq`, `DEV_*`).
 
 use crate::ioctl::{IOC_IN, IOC_OUT};
 
@@ -75,6 +76,73 @@ pub mod df {
     pub const ATTACHED_ONCE: u16 = 0x400;
     /// A nomatch event is pending.
     pub const NEEDNOMATCH: u16 = 0x800;
+}
+
+/// `RM_TEXTLEN`: an rman's description and a resource's device name.
+pub const RM_TEXTLEN: usize = 32;
+
+/// `struct u_rman`, `hw.bus.rman.<generation>.<rman>.-1`: a resource
+/// manager (sys/rman.h).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct URman {
+    /// An opaque handle identifying the rman.
+    pub rm_handle: usize,
+    /// Its description, NUL-terminated (`I/O memory addresses`).
+    pub rm_descr: [u8; RM_TEXTLEN],
+    /// The base of the managed region (`rman_res_t`).
+    pub rm_start: u64,
+    /// Its size: `rm_end - rm_start + 1`, which is 0 for the whole
+    /// 64-bit space.
+    pub rm_size: u64,
+    /// `RMAN_*` (`enum rman_type`).
+    pub rm_type: i32,
+}
+
+/// `struct u_resource`, `hw.bus.rman.<generation>.<rman>.<n>`: one
+/// resource of an rman, allocated or free.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UResource {
+    /// An opaque handle identifying the resource.
+    pub r_handle: usize,
+    /// Its rman's handle.
+    pub r_parent: usize,
+    /// The owning device's `dv_handle`, 0 for a free span.
+    pub r_device: usize,
+    /// The owner's name and unit (`nomatch` without a name), empty for a
+    /// free span.
+    pub r_devname: [u8; RM_TEXTLEN],
+    /// The first address.
+    pub r_start: u64,
+    /// The size: `r_end - r_start + 1`.
+    pub r_size: u64,
+    /// `RF_*`.
+    pub r_flags: u32,
+}
+
+/// `enum rman_type`.
+pub mod rman_type {
+    /// Not set up.
+    pub const UNINIT: i32 = 0;
+    /// A gauge (unused by FreeBSD's buses).
+    pub const GAUGE: i32 = 1;
+    /// An array of addresses: what every bus's rman is.
+    pub const ARRAY: i32 = 2;
+}
+
+/// `RF_*` resource flags.
+pub mod rf {
+    /// Reserved.
+    pub const ALLOCATED: u32 = 0x0001;
+    /// Activated (mapped, or its interrupt set up).
+    pub const ACTIVE: u32 = 0x0002;
+    /// May be shared.
+    pub const SHAREABLE: u32 = 0x0004;
+    /// The first of a sharing list.
+    pub const FIRSTSHARE: u32 = 0x0020;
+    /// Prefetchable memory.
+    pub const PREFETCHABLE: u32 = 0x0040;
 }
 
 /// `struct devreq_buffer`: a caller's buffer and its length.

@@ -234,6 +234,22 @@ pub static LAYOUTS: &[StructLayout] = &[
         dv_state => "dv_state",
         dv_fields => "dv_fields",
     }),
+    layout!(bus::URman, "struct u_rman", ["sys/types.h", "sys/rman.h"], All, {
+        rm_handle => "rm_handle",
+        rm_descr => "rm_descr",
+        rm_start => "rm_start",
+        rm_size => "rm_size",
+        rm_type => "rm_type",
+    }),
+    layout!(bus::UResource, "struct u_resource", ["sys/types.h", "sys/rman.h"], All, {
+        r_handle => "r_handle",
+        r_parent => "r_parent",
+        r_device => "r_device",
+        r_devname => "r_devname",
+        r_start => "r_start",
+        r_size => "r_size",
+        r_flags => "r_flags",
+    }),
     layout!(devfs::DevfsRule, "struct devfs_rule", ["sys/types.h", "sys/queue.h", "fs/devfs/devfs.h"], All, {
         dr_magic => "dr_magic",
         dr_id => "dr_id",
