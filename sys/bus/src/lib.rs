@@ -69,5 +69,5 @@ pub use sysctl::device_node;
 pub use types::{
     Announce, AttachError, Busy, Concurrency, DetachReason, DeviceId, Ident, Ids, IicIdent, Line,
     LineDetail, LineKind, Need, NodeState, Resource, ResourceError, StopReason, TestId, TestIdent,
-    WaitReason,
+    UnitOrder, WaitReason,
 };

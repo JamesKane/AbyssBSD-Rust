@@ -98,6 +98,9 @@ pub struct PciPciBridge {
 impl Driver for PciPciBridge {
     const NAME: &'static str = "pcib";
     const IDS: Ids = Ids::Pci(&[PciId::subclass(0x06, 0x04).rank(RANK)]);
+    // Bridges behind it are numbered before its siblings' (FreeBSD's
+    // one-at-a-time attach).
+    const UNIT_ORDER: bus::UnitOrder = bus::UnitOrder::Serial;
 
     fn describe(_: &Ident) -> String {
         "PCI-PCI bridge".into()

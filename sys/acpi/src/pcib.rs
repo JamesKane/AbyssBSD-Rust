@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! `pcib`: the ACPI host-PCI bridge (FreeBSD's `acpi_pcib`) and the ACPI
-//! PCI-PCI bridge (`acpi_pcib_pci`), each with its `pci` bus as its child.
+//! `pcib`: the ACPI host-PCI bridge (FreeBSD's `acpi_pcib_acpi` on x86,
+//! `pci_host_generic_acpi` on arm64) and the ACPI PCI-PCI bridge
+//! (`acpi_pcib_pci`, x86 only), each with its `pci` bus as its child.
 //!
 //! - The host bridge's `_OSC` is told what the OS supports and asked for
 //!   no control at attach, as FreeBSD does; drivers that take over native
@@ -20,6 +21,7 @@ use aml::resource::{AddressKind, Resource as AmlResource};
 use aml::{PrtSource, Value};
 use bus::{
     AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, Resource, StartCx, StopCx, StopReason,
+    UnitOrder,
 };
 use devtree::ids::{AcpiId, PciId};
 use devtree::matching::Rank;
@@ -289,9 +291,10 @@ fn resolve(ops: &dyn crate::Ops, routes: Vec<(u8, u8, Route)>) -> Vec<(u8, u8, R
         .collect()
 }
 
-/// `pcibN` (ACPI host bridge).
+/// An ACPI host bridge: its `pci` child's data, where it is, and what
+/// `_OSC` said. The x86 and arm64 drivers below share it.
 #[derive(Debug)]
-pub struct AcpiPcib {
+pub struct HostBridge {
     data: Arc<PciBusData>,
     /// The `_OSC` answer at attach, if the bridge has one.
     pub osc: Option<Osc>,
@@ -299,14 +302,7 @@ pub struct AcpiPcib {
     bus: u8,
 }
 
-impl Driver for AcpiPcib {
-    const NAME: &'static str = "pcib";
-    const IDS: Ids = Ids::Acpi(&[AcpiId::new("PNP0A08"), AcpiId::new("PNP0A03")]);
-
-    fn describe(_: &Ident) -> String {
-        "ACPI Host-PCI bridge".into()
-    }
-
+impl HostBridge {
     fn attach(cx: &mut AttachCx<'_>) -> Result<Self, AttachError> {
         let svc = service().ok_or(AttachError::Device("no ACPI namespace"))?;
         let dev = cx
@@ -344,7 +340,7 @@ impl Driver for AcpiPcib {
         })
     }
 
-    fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
+    fn start<D: Driver>(&self, cx: &mut StartCx<'_, D>) {
         cx.add_child(
             Ident::PciBus {
                 domain: self.segment,
@@ -354,14 +350,72 @@ impl Driver for AcpiPcib {
             Some(Arc::clone(&self.data) as Arc<dyn core::any::Any + Send + Sync>),
             Vec::new(),
         );
+    }
+}
+
+/// The IDs of a PCI root bridge (FreeBSD's probes look for
+/// `ACPI_PCI_ROOT_BRIDGE`, which these IDs set).
+const ROOT_BRIDGE_IDS: Ids = Ids::Acpi(&[AcpiId::new("PNP0A08"), AcpiId::new("PNP0A03")]);
+
+/// `pcibN` on x86: FreeBSD's `acpi_pcib_acpi`, "ACPI Host-PCI bridge".
+/// A host bridge takes its unit at its turn, so the bridges below it are
+/// numbered before the next host bridge.
+#[derive(Debug)]
+pub struct AcpiPcib(pub HostBridge);
+
+impl Driver for AcpiPcib {
+    const NAME: &'static str = "pcib";
+    const IDS: Ids = ROOT_BRIDGE_IDS;
+    const UNIT_ORDER: UnitOrder = UnitOrder::Serial;
+
+    fn describe(_: &Ident) -> String {
+        "ACPI Host-PCI bridge".into()
+    }
+
+    fn attach(cx: &mut AttachCx<'_>) -> Result<Self, AttachError> {
+        HostBridge::attach(cx).map(Self)
+    }
+
+    fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
+        self.0.start(cx);
         Ok(())
     }
 
     fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
 }
 
-/// The declaration for the build's driver table.
+/// x86's host bridge, for its driver table.
 pub const PCIB: DriverDecl = DriverDecl::of::<AcpiPcib>();
+
+/// `pcibN` on arm64: FreeBSD's `pci_host_generic_acpi`, "Generic PCI
+/// host controller" (arm64 builds no `acpi_pcib_acpi`), numbered as
+/// [`AcpiPcib`] is.
+#[derive(Debug)]
+pub struct GenericPcieAcpi(pub HostBridge);
+
+impl Driver for GenericPcieAcpi {
+    const NAME: &'static str = "pcib";
+    const IDS: Ids = ROOT_BRIDGE_IDS;
+    const UNIT_ORDER: UnitOrder = UnitOrder::Serial;
+
+    fn describe(_: &Ident) -> String {
+        "Generic PCI host controller".into()
+    }
+
+    fn attach(cx: &mut AttachCx<'_>) -> Result<Self, AttachError> {
+        HostBridge::attach(cx).map(Self)
+    }
+
+    fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
+        self.0.start(cx);
+        Ok(())
+    }
+
+    fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
+}
+
+/// arm64's host bridge, for its driver table.
+pub const GENERIC_PCIB: DriverDecl = DriverDecl::of::<GenericPcieAcpi>();
 
 /// `pcibN` (ACPI PCI-PCI bridge): a bridge with a namespace node, whose
 /// `_PRT` (if any) routes the interrupts behind it.
@@ -376,6 +430,7 @@ impl Driver for AcpiPciBridge {
     const NAME: &'static str = "pcib";
     // FreeBSD's acpi_pcib_pci probes at -1000, above the plain bridge.
     const IDS: Ids = Ids::Pci(&[PciId::subclass(0x06, 0x04).rank(Rank(-1000))]);
+    const UNIT_ORDER: UnitOrder = UnitOrder::Serial;
 
     fn describe(_: &Ident) -> String {
         "ACPI PCI-PCI bridge".into()
@@ -416,5 +471,6 @@ impl Driver for AcpiPciBridge {
     fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
 }
 
-/// The declaration for the build's driver table.
+/// The declaration for x86's driver table (arm64 builds no
+/// `acpi_pcib_pci`: its bridges are plain `pci_pci`).
 pub const PCI_PCI_BRIDGE: DriverDecl = DriverDecl::of::<AcpiPciBridge>();

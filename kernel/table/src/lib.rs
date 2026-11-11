@@ -29,8 +29,6 @@ macro_rules! drivers {
     ($($isa:expr),* $(,)?) => {
         &[
             acpi::DRIVER,
-            acpi::PCIB,
-            acpi::PCI_PCI_BRIDGE,
             acpi::BUTTON,
             acpi::CPU,
             acpi::CPPC,
@@ -66,9 +64,13 @@ macro_rules! drivers {
     };
 }
 
-/// The x86_64 kernel's drivers: the chipset's (`files.x86`, `files.amd64`).
+/// The x86_64 kernel's drivers: the ACPI host and PCI-PCI bridges
+/// (`acpi_pcib_acpi`, `acpi_pcib_pci`: `files.x86`), and the chipset's
+/// (`files.x86`, `files.amd64`).
 #[cfg(any(target_arch = "x86_64", not(target_os = "none")))]
 pub static X86_64: &[DriverDecl] = drivers![
+    acpi::PCIB,
+    acpi::PCI_PCI_BRIDGE,
     isa::ISAB,
     isa::ISA,
     atrtc::DRIVER,
@@ -79,7 +81,8 @@ pub static X86_64: &[DriverDecl] = drivers![
     amdsbwd::DRIVER,
 ];
 
-/// The aarch64 kernel's drivers: the SBSA watchdog, the SMMUv3 the IORT
+/// The aarch64 kernel's drivers: the ACPI host bridge
+/// (`pci_host_generic_acpi`), the SBSA watchdog, the SMMUv3 the IORT
 /// lists, and the xHCI that firmware describes in ACPI (`files.arm64`;
 /// `smmu` is `optional iommu`, which the board's FreeBSD and its
 /// AbyssBSD have, IOMMU.md §2.2), `gpiobus` and `gpioc`
@@ -88,6 +91,7 @@ pub static X86_64: &[DriverDecl] = drivers![
 /// which FreeBSD lacks or builds for arm64 only (`cdnc_i2c`).
 #[cfg(any(target_arch = "aarch64", not(target_os = "none")))]
 pub static AARCH64: &[DriverDecl] = drivers![
+    acpi::GENERIC_PCIB,
     sbsa_gwdt::DRIVER,
     smmu::DRIVER,
     xhci_driver::ACPI,

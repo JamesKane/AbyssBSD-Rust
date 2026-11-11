@@ -153,6 +153,9 @@ enum StartPhase {
     /// Attach queued or running.
     #[default]
     Attach,
+    /// Waiting for every earlier node to start before taking its unit
+    /// ([`crate::UnitOrder::Serial`]); its attach is not queued yet.
+    Turn,
     /// Attached, waiting for every earlier node to start.
     Parked(Box<dyn Bound>, Option<sysctl::NodeId>),
     /// Start queued or running.
@@ -1288,6 +1291,45 @@ impl Manager {
             return;
         };
         let decl = &self.drivers[d];
+        // A serial driver's device takes its unit at its turn.
+        let unit = if decl.unit_order == crate::types::UnitOrder::Serial {
+            None
+        } else {
+            match self.take_unit(t, id, d) {
+                Some(u) => Some(u),
+                None => return,
+            }
+        };
+        let desc = match t.node(id) {
+            Some(n) => (decl.describe)(&n.ident, n.bus_data.as_deref()),
+            None => (decl.describe)(&Ident::Root, None),
+        };
+        let missing = t.graph.missing(id.index, |i| t.supply(i));
+        let state = if missing.is_empty() {
+            NodeState::Attaching
+        } else {
+            NodeState::Waiting(WaitReason::Suppliers(
+                missing.iter().filter_map(|&i| t.id(i)).collect(),
+            ))
+        };
+        let queue = state == NodeState::Attaching;
+        if let Some(n) = t.node_mut(id) {
+            n.driver = Some(d);
+            n.unit = unit;
+            n.desc = desc;
+            n.state = state;
+        }
+        if queue {
+            self.queue(t, id);
+        }
+    }
+
+    /// Allocates `id`'s unit for driver `d`: the one the driver chooses or
+    /// a hint wires, else the lowest free. `None` if the hints disable
+    /// the device, which is then named but never attached. Topology lock
+    /// held.
+    fn take_unit(&self, t: &mut Topology, id: DeviceId, d: usize) -> Option<u32> {
+        let decl = &self.drivers[d];
         let wired = t.node(id).and_then(|n| {
             decl.hints
                 .iter()
@@ -1311,38 +1353,34 @@ impl Manager {
         if (self.disabled_hint)(decl.name, unit) {
             if let Some(n) = t.node_mut(id) {
                 n.disabled = Some(decl.name);
+                n.driver = None;
+                n.desc = String::new();
                 n.unit = Some(unit);
                 n.state = NodeState::NotPresent;
+                n.start = StartPhase::Attach;
             }
             self.release_consumers(t, id.index);
-            return;
+            return None;
         }
-        let desc = match t.node(id) {
-            Some(n) => (decl.describe)(&n.ident, n.bus_data.as_deref()),
-            None => (decl.describe)(&Ident::Root, None),
-        };
-        let missing = t.graph.missing(id.index, |i| t.supply(i));
-        let state = if missing.is_empty() {
-            NodeState::Attaching
-        } else {
-            NodeState::Waiting(WaitReason::Suppliers(
-                missing.iter().filter_map(|&i| t.id(i)).collect(),
-            ))
-        };
-        let queue = state == NodeState::Attaching;
-        if let Some(n) = t.node_mut(id) {
-            n.driver = Some(d);
-            n.unit = Some(unit);
-            n.desc = desc;
-            n.state = state;
-        }
-        if queue {
-            self.queue(id);
-        }
+        Some(unit)
     }
 
-    fn queue(&self, id: DeviceId) {
-        self.push(Job::Attach(id));
+    /// Queues the attach of `id`, which is `Attaching`; a device whose
+    /// unit waits for its turn waits for it first. Topology lock held.
+    fn queue(&self, t: &mut Topology, id: DeviceId) {
+        let turn = t.node(id).is_some_and(|n| {
+            n.unit.is_none()
+                && n.driver
+                    .is_some_and(|d| self.drivers[d].unit_order == crate::types::UnitOrder::Serial)
+        });
+        if turn {
+            if let Some(n) = t.node_mut(id) {
+                n.start = StartPhase::Turn;
+            }
+            self.release_starts(t);
+        } else {
+            self.push(Job::Attach(id));
+        }
     }
 
     fn push(&self, job: Job) {
@@ -1394,22 +1432,43 @@ impl Manager {
         key
     }
 
-    /// Starts the earliest attaching node, in tree order, if it is parked.
-    /// Topology lock held.
+    /// Starts the earliest attaching node, in tree order, if it is parked;
+    /// if its unit waits for its turn, gives it its unit and queues its
+    /// attach. Topology lock held.
     fn release_starts(&self, t: &mut Topology) {
-        let earliest = (0..u32::try_from(t.nodes.len()).unwrap_or(0))
-            .filter(|&i| {
-                t.nodes[i as usize]
-                    .as_ref()
-                    .is_some_and(|n| n.state == NodeState::Attaching)
-            })
-            .min_by_key(|&i| Self::tree_key(t, i));
-        let Some(i) = earliest else {
+        loop {
+            let earliest = (0..u32::try_from(t.nodes.len()).unwrap_or(0))
+                .filter(|&i| {
+                    t.nodes[i as usize]
+                        .as_ref()
+                        .is_some_and(|n| n.state == NodeState::Attaching)
+                })
+                .min_by_key(|&i| Self::tree_key(t, i));
+            let Some(id) = earliest.and_then(|i| t.id(i)) else {
+                return;
+            };
+            let turn = t
+                .node(id)
+                .and_then(|n| matches!(n.start, StartPhase::Turn).then_some(n.driver))
+                .flatten();
+            let Some(d) = turn else {
+                break self.start_parked(t, id);
+            };
+            // Disabled by the hints: no longer attaching; look again.
+            let Some(unit) = self.take_unit(t, id, d) else {
+                continue;
+            };
+            if let Some(n) = t.node_mut(id) {
+                n.unit = Some(unit);
+                n.start = StartPhase::Attach;
+            }
+            self.push(Job::Attach(id));
             return;
-        };
-        let Some(id) = t.id(i) else {
-            return;
-        };
+        }
+    }
+
+    /// Starts `id`, the earliest attaching node, if it is parked.
+    fn start_parked(&self, t: &mut Topology, id: DeviceId) {
         if let Some(n) = t.node_mut(id)
             && matches!(n.start, StartPhase::Parked(..))
             && let StartPhase::Parked(b, sysctl) =
@@ -1578,7 +1637,7 @@ impl Manager {
                 && ready
             {
                 n.state = NodeState::Attaching;
-                self.queue(cid);
+                self.queue(t, cid);
             }
         }
     }
@@ -1668,7 +1727,7 @@ impl Manager {
             && let Some(n) = t.node_mut(consumer)
         {
             n.state = NodeState::Attaching;
-            self.queue(consumer);
+            self.queue(t, consumer);
         }
     }
 

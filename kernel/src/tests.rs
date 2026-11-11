@@ -3842,7 +3842,13 @@ ktest! {
         };
         let acpi0 = named(crate::devices::nexus(), "acpi0");
         let pcib0 = named(acpi0, "pcib0");
-        assert_eq!(m.description(pcib0, &s).as_deref(), Some("ACPI Host-PCI bridge"));
+        // x86's `acpi_pcib_acpi`, arm64's `pci_host_generic_acpi`.
+        let host = if cfg!(target_arch = "x86_64") {
+            "ACPI Host-PCI bridge"
+        } else {
+            "Generic PCI host controller"
+        };
+        assert_eq!(m.description(pcib0, &s).as_deref(), Some(host));
         let pci0 = named(pcib0, "pci0");
         assert_eq!(m.description(pci0, &s).as_deref(), Some("ACPI PCI bus"));
         let mut lines = alloc::vec::Vec::new();

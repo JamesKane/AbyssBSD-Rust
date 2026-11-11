@@ -56,6 +56,8 @@ pub trait Driver: Sized + Send + Sync + 'static {
     /// at a hint's I/O port takes its unit, and the others skip the
     /// hinted units (`acpi_hint_device_unit`, `devclass_alloc_unit`).
     const HINTS: &'static [Hint] = &[];
+    /// When its devices take their units.
+    const UNIT_ORDER: crate::types::UnitOrder = crate::types::UnitOrder::Discovery;
 
     /// The unit the device must take, for a driver whose units are
     /// numbers the system already gave (FreeBSD's `acpi_cpu_probe` sets a
@@ -110,6 +112,7 @@ pub struct DriverDecl {
     /// Its hinted units ([`Driver::HINTS`]).
     pub hints: &'static [Hint],
     pub(crate) announce: Announce,
+    pub(crate) unit_order: crate::types::UnitOrder,
     pub(crate) describe: fn(&Ident, Option<&(dyn Any + Send + Sync)>) -> String,
     pub(crate) unit: fn(&Ident, Option<&(dyn Any + Send + Sync)>) -> Option<u32>,
     pub(crate) attach: fn(&mut AttachCx<'_>) -> Result<Box<dyn Bound>, AttachError>,
@@ -140,6 +143,7 @@ impl DriverDecl {
             yields: D::YIELDS,
             hints: D::HINTS,
             announce: D::ANNOUNCE,
+            unit_order: D::UNIT_ORDER,
             describe: D::describe_with,
             unit: D::unit,
             attach: attach_erased::<D>,

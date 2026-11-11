@@ -332,6 +332,18 @@ pub enum Announce {
     FirstUnit,
 }
 
+/// When a device takes its unit (DRIVER-MODEL.md §4.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnitOrder {
+    /// When its bus adds it: the order the bus found its children in.
+    Discovery,
+    /// When every device before it in the tree has attached, as FreeBSD's
+    /// one-at-a-time attach numbers it: for a bridge, whose descendants
+    /// can be more bridges (a host bridge's root ports are numbered right
+    /// after it, before the next host bridge). Its attach waits for that.
+    Serial,
+}
+
 /// A hardware resource a bus describes for a child.
 #[derive(Clone, Copy)]
 pub enum Resource {

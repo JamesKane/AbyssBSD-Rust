@@ -50,7 +50,9 @@ pub use cppc::CPPC;
 pub use cpu::CPU;
 pub use events::{Block, FixedHardware, Space};
 pub use ged::GED;
-pub use pcib::{AcpiPciBridge, AcpiPcib, PCI_PCI_BRIDGE, PCIB};
+pub use pcib::{
+    AcpiPciBridge, AcpiPcib, GENERIC_PCIB, GenericPcieAcpi, HostBridge, PCI_PCI_BRIDGE, PCIB,
+};
 pub use service::{LoadSummary, init, service};
 pub use thermal::THERMAL;
 
