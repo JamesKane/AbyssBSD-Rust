@@ -977,6 +977,16 @@ impl Session {
     }
 }
 
+/// FreeBSD's single-user root is mounted read-only, where AbyssBSD's shell
+/// case has a writable one: memory file systems on `/tmp`, `/var/run`,
+/// and `/var/log` let [`DYNAMIC`]'s steps write there (`syslogd`'s socket
+/// and log file, the jail's root), as multi-user's writable root would.
+const FREEBSD_SINGLE_USER: &[Step] = &[step(
+    "mount -t tmpfs tmpfs /tmp && mount -t tmpfs tmpfs /var/run && mount -t tmpfs tmpfs /var/log && echo var-rw\n",
+    "\nvar-rw\r\n",
+    "tmpfs on /tmp, /var/run, and /var/log",
+)];
+
 /// `cargo xtask freebsd-shell`: runs [`SHELL`], [`DYNAMIC`], and [`SYSINFO`] against
 /// FreeBSD 15.1's `/rescue/sh` in bhyve, proving the scripts and this
 /// harness.
@@ -1002,6 +1012,7 @@ pub(crate) fn cmd_freebsd_shell(args: Args) -> Result<()> {
         session.send("/rescue/sh\n")?;
         session.expect("# ", Duration::from_secs(30))?;
         session.script(SHELL, Duration::from_secs(30))?;
+        session.script(FREEBSD_SINGLE_USER, Duration::from_secs(30))?;
         session.script(DYNAMIC, Duration::from_secs(30))?;
         session.script(SYSINFO, Duration::from_secs(120))?;
         session.send("exit\n")

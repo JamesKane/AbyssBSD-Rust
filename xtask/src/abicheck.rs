@@ -10,7 +10,7 @@
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Write as _;
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 
 use abi::layout::{Arches, CONSTANTS, LAYOUTS};
 
@@ -243,6 +243,19 @@ fn sysroot(arch: Arch) -> Option<String> {
     (arch != Arch::X86_64).then(|| format!("abyss/sysroot/{RELEASE}-{}", arch.freebsd_name()))
 }
 
+/// `script` run on the build server: over ssh from a workstation, or in a
+/// shell from the home directory (where ssh would start it) when xtask runs
+/// on FreeBSD itself, as `xtask --remote abi-check` does there.
+fn on_server(script: &str) -> Command {
+    if cfg!(target_os = "freebsd") {
+        let mut c = Command::new("sh");
+        c.args(["-c", &format!("cd \"$HOME\" && {script}")]);
+        c
+    } else {
+        remote::ssh(script)
+    }
+}
+
 fn compile_remote(arch: Arch, source: &str) -> Result<()> {
     let mut flags = format!(
         "--target={} -std=c11 -fsyntax-only -Werror",
@@ -265,11 +278,11 @@ fn compile_remote(arch: Arch, source: &str) -> Result<()> {
              fetch -q -o - {url} | tar -xf - -C {root}.tmp ./usr/include && \
              mv {root}.tmp {root}; }}"
         );
-        util::run(&mut remote::ssh(&setup))?;
+        util::run(&mut on_server(&setup))?;
         let _ = write!(flags, " --sysroot=$HOME/{root}");
     }
     let script = format!("cc {flags} -x c -");
-    let mut child = remote::ssh(&script)
+    let mut child = on_server(&script)
         .stdin(Stdio::piped())
         .spawn()
         .map_err(|e| format!("cannot run ssh: {e}"))?;
