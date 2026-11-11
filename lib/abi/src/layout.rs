@@ -7,8 +7,8 @@
 //! actually use against what FreeBSD's C compiler computes.
 
 use crate::{
-    bus, consio, devfs, devstat, evdev, fbio, inet, kbio, md, mouse, net, netlink, signal, socket,
-    stat, time, ucontext, vdso,
+    bus, consio, devfs, devstat, evdev, fbio, geom, inet, kbio, md, mouse, net, netlink, signal,
+    socket, stat, time, ucontext, vdso,
 };
 
 /// Architectures a layout applies to.
@@ -94,6 +94,7 @@ pub const CONSTANTS: &[&[ConstValue]] = &[
     crate::mount::CONSTANTS,
     crate::ioctl::CONSTANTS,
     crate::md::CONSTANTS,
+    crate::geom::CONSTANTS,
     crate::socket::CONSTANTS,
     crate::inet::CONSTANTS,
     crate::inotify::CONSTANTS,
@@ -394,6 +395,26 @@ pub static LAYOUTS: &[StructLayout] = &[
         priority => "priority",
         id => "id",
         sequence1 => "sequence1",
+    }),
+    layout!(geom::GctlReqArg, "struct gctl_req_arg", ["sys/types.h", "geom/geom_ctl.h"], All, {
+        nlen => "nlen",
+        name => "name",
+        offset => "offset",
+        flag => "flag",
+        len => "len",
+        value => "value",
+        kvalue => "kvalue",
+    }),
+    layout!(geom::GctlReq, "struct gctl_req", ["sys/types.h", "geom/geom_ctl.h"], All, {
+        version => "version",
+        serial => "serial",
+        narg => "narg",
+        arg => "arg",
+        lerror => "lerror",
+        error => "error",
+        reqt => "reqt",
+        nerror => "nerror",
+        serror => "serror",
     }),
     layout!(md::MdIoctl, "struct md_ioctl", ["sys/types.h", "sys/mdioctl.h"], All, {
         md_version => "md_version",

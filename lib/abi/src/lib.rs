@@ -30,6 +30,7 @@ pub mod event;
 pub mod exec;
 pub mod fbio;
 pub mod fcntl;
+pub mod geom;
 pub mod gpio;
 pub mod hidraw;
 pub mod iic;
