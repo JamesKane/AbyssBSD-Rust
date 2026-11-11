@@ -54,6 +54,9 @@ pub const DIOCGIDENT: u32 = ioc(IOC_OUT, b'd', 137, 256);
 pub const DIOCGPROVIDERNAME: u32 = ioc(IOC_OUT, b'd', 138, 1024);
 pub const DIOCGSTRIPESIZE: u32 = ioc(IOC_OUT, b'd', 139, 8);
 pub const DIOCGSTRIPEOFFSET: u32 = ioc(IOC_OUT, b'd', 140, 8);
+/// Sets (or, on `/dev/null`, clears) the kernel dump device: a
+/// `struct diocskerneldump_arg`, 152 bytes.
+pub const DIOCSKERNELDUMP: u32 = ioc(IOC_IN, b'd', 145, 152);
 
 /// `struct termios` is 44 bytes, `struct winsize` 8.
 const TERMIOS: u32 = 44;
@@ -125,6 +128,7 @@ pub const TTYDISC: u32 = 0;
 pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("IOC_VOID", "sys/ioccom.h", IOC_VOID),
     c("DIOCGSECTORSIZE", "sys/disk.h", DIOCGSECTORSIZE),
+    c("DIOCSKERNELDUMP", "sys/disk.h", DIOCSKERNELDUMP),
     c("DIOCGMEDIASIZE", "sys/disk.h", DIOCGMEDIASIZE),
     c("DIOCGFWSECTORS", "sys/disk.h", DIOCGFWSECTORS),
     c("DIOCGFWHEADS", "sys/disk.h", DIOCGFWHEADS),

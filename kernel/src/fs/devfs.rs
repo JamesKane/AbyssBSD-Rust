@@ -57,6 +57,49 @@ impl CharDevice for Null {
     fn write(&self, _: &Sleepable, uio: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
         Ok(uio.resid())
     }
+
+    /// `null_ioctl`: `DIOCSKERNELDUMP` removes every dump device (there
+    /// are none to remove; `dumpon off` asks), and `zero_ioctl`'s.
+    fn ioctl(&self, s: &Sleepable, req: u32, arg: &mut [u8]) -> Result<(), Errno> {
+        if req == abi::ioctl::DIOCSKERNELDUMP {
+            let p = crate::proc::Process::current().ok_or(Errno::EPERM)?;
+            return p.priv_check(security::Priv::Setdumper);
+        }
+        Zero.ioctl(s, req, arg)
+    }
+
+    /// Never readable, always writable.
+    fn kqfilter(&self, kev: &abi::event::Kevent) -> Result<Box<dyn event::Filter>, Errno> {
+        null_kqfilter(kev, false, true)
+    }
+}
+
+/// `null.c`'s `kqfilter`: a read or write filter that is always active
+/// (`one_ev`) or never (`zero_ev`); no others.
+fn null_kqfilter(
+    kev: &abi::event::Kevent,
+    read: bool,
+    write: bool,
+) -> Result<Box<dyn event::Filter>, Errno> {
+    match kev.filter {
+        abi::event::EVFILT_READ => Ok(Box::new(Constant(read))),
+        abi::event::EVFILT_WRITE => Ok(Box::new(Constant(write))),
+        _ => Err(Errno::EOPNOTSUPP),
+    }
+}
+
+/// A knote filter that is always active, or never.
+struct Constant(bool);
+
+impl event::Filter for Constant {
+    fn event(&self, _: &event::Knote, _: &mut event::Note, _: u64) -> bool {
+        self.0
+    }
+
+    /// `knote_triv_copy`.
+    fn fork(&self, _: &event::Knote) -> Option<Box<dyn event::Filter>> {
+        Some(Box::new(Constant(self.0)))
+    }
 }
 
 /// `/dev/zero`: zeros forever; writes vanish.
@@ -64,21 +107,66 @@ struct Zero;
 
 static ZEROS: [u8; 4096] = [0; 4096];
 
+/// `zero_read`: zeros, as many as asked for.
+fn read_zeros(uio: &mut dyn Uio) -> Result<usize, Errno> {
+    let mut done = 0;
+    while uio.resid() > 0 {
+        done += uio.copy_out(&ZEROS)?;
+    }
+    Ok(done)
+}
+
 impl CharDevice for Zero {
     fn maps_as_zeros(&self) -> bool {
         true
     }
 
     fn read(&self, _: &Sleepable, uio: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
-        let mut done = 0;
-        while uio.resid() > 0 {
-            done += uio.copy_out(&ZEROS)?;
-        }
-        Ok(done)
+        read_zeros(uio)
     }
 
     fn write(&self, _: &Sleepable, uio: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
         Ok(uio.resid())
+    }
+
+    /// `zero_ioctl`: non-blocking means nothing here, and asynchronous
+    /// I/O cannot be had.
+    fn ioctl(&self, _: &Sleepable, req: u32, arg: &mut [u8]) -> Result<(), Errno> {
+        match req {
+            abi::ioctl::FIONBIO => Ok(()),
+            abi::ioctl::FIOASYNC => {
+                let on = arg.get(..4).is_some_and(|b| b.iter().any(|&c| c != 0));
+                if on { Err(Errno::EINVAL) } else { Ok(()) }
+            }
+            _ => Err(Errno::ENOTTY),
+        }
+    }
+
+    fn kqfilter(&self, kev: &abi::event::Kevent) -> Result<Box<dyn event::Filter>, Errno> {
+        null_kqfilter(kev, true, true)
+    }
+}
+
+/// `/dev/full`: zeros forever, as `/dev/zero`; every write fails, the
+/// disk being full.
+struct Full;
+
+impl CharDevice for Full {
+    fn read(&self, _: &Sleepable, uio: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
+        read_zeros(uio)
+    }
+
+    fn write(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
+        Err(Errno::ENOSPC)
+    }
+
+    fn ioctl(&self, s: &Sleepable, req: u32, arg: &mut [u8]) -> Result<(), Errno> {
+        Zero.ioctl(s, req, arg)
+    }
+
+    /// Always readable, never writable.
+    fn kqfilter(&self, kev: &abi::event::Kevent) -> Result<Box<dyn event::Filter>, Errno> {
+        null_kqfilter(kev, true, false)
     }
 }
 
@@ -800,6 +888,8 @@ pub(crate) fn init() {
         None => Arc::new(Console),
     };
     add(b"console", 0o600, 0, 0, console);
+    // `null_modevent`: full, null, and zero, in that order.
+    add(b"full", 0o666, 0, 0, Arc::new(Full));
     add(b"null", 0o666, 0, 0, Arc::new(Null));
     add(b"random", 0o644, 0, 0, Arc::new(Random));
     let t = super::now();

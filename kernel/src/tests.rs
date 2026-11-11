@@ -5983,6 +5983,22 @@ mod user_memory {
     }
 
     ktest! {
+        /// `/dev/full`: root's, wheel's (0, 0: the test image has no
+        /// names for them), 0666; zeros to read, and every
+        /// write fails with `ENOSPC`.
+        fn dev_full_reads_zeros_and_is_full() {
+            let s = cx();
+            let script = "[ -c /dev/full ] || exit 1; \
+                case \"$(ls -l /dev/full | sed 's/  */ /g')\" in 'crw-rw-rw- 1 0 0 '*) ;; *) exit 2;; esac; \
+                if echo x 2>/dev/null > /dev/full; then exit 3; fi; \
+                [ \"$(dd if=/dev/full bs=8 count=3 2>/dev/null | md5)\" = \"$(dd if=/dev/zero bs=8 count=3 2>/dev/null | md5)\" ] || exit 4; \
+                case \"$(dd if=/dev/zero of=/dev/full count=1 2>&1)\" in *'No space left on device'*) ;; *) exit 5;; esac; \
+                exit 0";
+            assert_eq!(rescue_sh(&s, script), crate::proc::Exit::Code(0));
+        }
+    }
+
+    ktest! {
         fn fuzzing_leaves_nothing_behind() {
             // The fuzzer twice with the same seed: the first run warms
             // whatever the kernel caches; the second must leave free
