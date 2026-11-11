@@ -188,6 +188,16 @@ replaces ivars.
   chosen when the driver is chosen, before attach. Attaches then run in parallel (§6.4), but units
   never depend on attach timing. Differential tests against FreeBSD on the same VM configuration
   check that the names match (`nvme0`, `nvme1`, `vtblk0`, …).
+- **Bridges are numbered serially.** FreeBSD takes a unit at probe and attaches one device at a
+  time, depth first, so a host bridge's root ports are numbered before the next host bridge
+  (the Orange Pi's `pcib0`, its port `pcib1`, then `pcib2`). Allocation at discovery would number
+  all of `acpi0`'s host bridges first, and a function after a root port before those behind it
+  (QEMU's virtio inputs before the virtio-rng behind its root port). A driver declaring
+  `UnitOrder::Serial` (the host bridges, both PCI-PCI bridge drivers), and every device on the bus
+  such a bridge provides, takes its unit only once every bridge before it in tree order, and that
+  bridge's bus, has started; its attach waits for that turn. A bridge attaches quickly, so the wait
+  is short; devices after a bridge on the same bus lose only the overlap of their attach with the
+  attaches before that bridge's start.
 - **A driver may choose the unit** (`Driver::unit`) when the system already numbers the devices:
   `cpu` takes its CPU's ID, as FreeBSD's `acpi_cpu_probe` does with `device_set_unit`, and
   `cpufreqN` its CPU's. A unit already taken falls back to the next free one.
@@ -1273,9 +1283,17 @@ each bus provides. All operations need root privileges and are refused inside ja
 
 ### 11.5 Other surfaces
 
-- **`/dev/pci`** (`sys/pci`): `PCIOCGETCONF` (with `pd_name` and `pd_unit` from the tree),
-  `PCIOCREAD`/`WRITE` (writes limited as in FreeBSD and gated by securelevel), `PCIOCATTACHED`,
-  `PCIOCGETBAR`, `PCIOCLISTVPD`, `PCIOCBARMMAP`, `PCIOCBARIO`.
+- **`/dev/pci`** (`sys/pci/src/user.rs`, `kernel/src/pciio.rs`; done 2026-11-10): every
+  request of `pci_user.c`. `PCIOCGETCONF` walks the functions in the order the `pci` buses found
+  them (FreeBSD's `pci_devq`, with its generation for paging), with `pd_name` and `pd_unit` from
+  the tree and FreeBSD's patterns. `PCIOCREAD`/`WRITE` reach any register, as root on FreeBSD
+  can: the node is `root:wheel` 0644, opening it for writing needs securelevel 0 or below, and a
+  read-only descriptor may only list functions, BARs, and VPD. `PCIOCGETBAR` reports the BARs as
+  `pci_add_map` records them (unassigned ones too), `PCIOCATTACHED` the node's state,
+  `PCIOCLISTVPD` the VPD read as `pci_parse_vpd` reads it, `PCIOCBARMMAP` maps a BAR shared into
+  the caller, and `PCIOCBARIO` reaches a BAR of a function with no driver. FreeBSD 15.1's
+  `pciconf` runs unmodified (`-l`, `-v`, `-b`, `-c`, `-B`, `-r`, `-w`, `-a`, `-D`; the shell
+  cases' `expect::pciconf`). Differences are in compat-deviations.
 - **devfs**: cdevs are created through `StartCx::cdev` (gated), with FreeBSD names, modes, and
   owners. `devfs.rules` applies unchanged.
 - **`kldstat`, `modfind`, `kldfind`**: report the driver table as built-in modules

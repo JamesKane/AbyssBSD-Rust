@@ -149,6 +149,9 @@ checks every entry of the base with `mtree` (owners, modes, flags, links, sizes,
 copies a tree with `tar` and `cp -R`. The boot shell there is base's own dynamic `/bin/sh` (the
 kernel falls back to `/rescue/sh`), and the `DYNAMIC` script runs base's dynamically linked programs,
 `ldd`, rtld itself, and rtld's `LD_*` variables; `freebsd-shell` runs it too, after `SHELL`.
+On QEMU, `expect::pciconf` then runs FreeBSD's `pciconf` through `/dev/pci` on the shell VM's
+NVMe controller and PCIe root port, whose IDs QEMU fixes (`-l`, `-v`, `-b`, `-c`, `-B`, `-r`, `-w`,
+`-a`, `-D`, and as `nobody`).
 `DYNAMIC_TESTS` then runs every `tests/user` program again, built dynamic (a PIE, against the
 server's full base) into `/usr/tests/abyss-dynamic`, under `daemon -f` so that each runs as the
 kernel tests run them, in a session of its own; a source that says "Built static only" is left out. The
