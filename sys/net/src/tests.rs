@@ -412,7 +412,7 @@ mod rtsock {
         assert_eq!(paths(&v), [(5, 4)]);
         // The dump lists each path.
         add(11, 1, rtm::ADD).unwrap();
-        let d = crate::rtmsg::dump(&v.net.lock(), abi::inet::AF_INET, Some(0));
+        let d = crate::rtmsg::dump(&v.net.lock(), abi::inet::AF_INET, Some(0), 0);
         let mut at = 0;
         let mut seen = 0;
         while at < d.len() {
@@ -423,6 +423,60 @@ mod rtsock {
             at += usize::from(h.rtm_msglen);
         }
         assert_eq!(seen, 2);
+    }
+
+    /// `NET_RT_FLAGS` with `RTF_GATEWAY`, as fastfetch's
+    /// `ffNetifGetDefaultRouteImplV4` reads it: only the gateway routes,
+    /// each with its interface's `sockaddr_dl` (`RTAX_IFP`) and source
+    /// address (`RTAX_IFA`) after the destination and gateway.
+    #[test]
+    fn flags_dump_keeps_gateway_routes_with_their_interface() {
+        let (v, index) = setup();
+        let m = msg(
+            rtm::ADD,
+            rtf::GATEWAY | rtf::STATIC,
+            &[
+                (rta::DST, sin([0, 0, 0, 0])),
+                (rta::GATEWAY, sin([192, 0, 2, 254])),
+                (rta::NETMASK, sin([0, 0, 0, 0])),
+            ],
+        );
+        crate::rtsock::request(&mut v.net.lock(), &m, 1, true, 0)
+            .1
+            .unwrap();
+        let all = crate::rtmsg::dump(&v.net.lock(), abi::inet::AF_INET, Some(0), 0);
+        let d = crate::rtmsg::dump(&v.net.lock(), abi::inet::AF_INET, Some(0), rtf::GATEWAY);
+        assert!(all.len() > d.len());
+        let h = hdr(&d);
+        assert_eq!(usize::from(h.rtm_msglen), d.len(), "the one gateway route");
+        assert_ne!(h.rtm_flags & rtf::GATEWAY, 0);
+        assert_eq!(h.rtm_index, index);
+        assert_eq!(
+            h.rtm_addrs,
+            rta::DST | rta::GATEWAY | rta::NETMASK | rta::IFP | rta::IFA
+        );
+        // Walk the addresses as `get_rt_address` does (`SA_SIZE` each).
+        let mut at = size_of::<RtMsghdr>();
+        let mut sas = Vec::new();
+        for _ in 0..5 {
+            let len = usize::from(d[at]);
+            sas.push(&d[at..at + len]);
+            at += if len == 0 { 8 } else { 1 + ((len - 1) | 7) };
+        }
+        assert_eq!(at, d.len());
+        let sdl = sas[3];
+        assert_eq!(sdl[1], abi::inet::AF_LINK);
+        assert_eq!(u16::from_ne_bytes([sdl[2], sdl[3]]), index);
+        assert_eq!(&sdl[8..8 + usize::from(sdl[5])], b"epair0a");
+        assert_eq!(
+            (sas[4][1], &sas[4][4..8]),
+            (abi::inet::AF_INET, &[192, 0, 2, 1][..])
+        );
+        // No IPv6 default route here.
+        assert!(
+            crate::rtmsg::dump(&v.net.lock(), abi::inet::AF_INET6, Some(0), rtf::GATEWAY)
+                .is_empty()
+        );
     }
 
     #[test]

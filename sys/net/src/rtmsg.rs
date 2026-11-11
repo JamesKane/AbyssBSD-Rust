@@ -317,27 +317,24 @@ pub(crate) fn ifinfo_record(ifp: &Ifnet) -> Vec<u8> {
 }
 
 /// `NET_RT_DUMP` of family `af` (0 for all): each route as
-/// `sysctl_dumpnhop` writes it.
+/// `sysctl_dumpnhop` writes it. With `flags` non-zero it is
+/// `NET_RT_FLAGS`'s dump: only the routes whose next hop has one of
+/// those `RTF_*` flags.
 #[must_use]
-pub fn dump(n: &Net, af: u8, fib: Option<u16>) -> Vec<u8> {
+pub fn dump(n: &Net, af: u8, fib: Option<u16>, flags: i32) -> Vec<u8> {
     let mut out = Vec::new();
     let mut routes: Vec<_> = n
         .routes
         .iter()
         .filter(|r| fib.is_none_or(|f| r.fib == f) && (af == 0 || r.family.af() == af))
+        .filter(|r| flags == 0 || (r.flags | host_flag(r)) & flags != 0)
         .collect();
     // A radix walk: by family, then address.
     routes.sort_by_key(|r| (r.family, crate::ifnet::route_key(r), r.plen));
     for r in routes {
         let h = abi::net::RtMsghdr {
             rtm_index: r.ifindex,
-            rtm_flags: r.flags
-                | rtf::UP
-                | if r.plen == max_plen(r.family) {
-                    rtf::HOST
-                } else {
-                    0
-                },
+            rtm_flags: r.flags | rtf::UP | host_flag(r),
             rtm_rmx: abi::net::RtMetrics {
                 rmx_mtu: u64::from(r.mtu),
                 rmx_weight: u64::from(r.weight),
@@ -367,9 +364,21 @@ pub fn dump(n: &Net, af: u8, fib: Option<u16>) -> Vec<u8> {
         if r.plen != max_plen(r.family) {
             addrs[2] = Some(mask_of(r.family, r.plen));
         }
+        // The interface (`RTAX_IFP`, its link address) and the address
+        // the route's packets leave from (`RTAX_IFA`); a point-to-point
+        // link's other end as `RTAX_BRD`.
         if let Some(f) = ifp {
             addrs[4] = Some(link_sockaddr(f));
             addrs[5] = Some(sa_of(r.family, &r.ifa, r.ifindex));
+            if f.flags & abi::net::iff::POINTOPOINT != 0
+                && let Some(d) = f
+                    .addrs
+                    .iter()
+                    .find(|a| a.family == r.family && a.addr == r.ifa)
+                    .and_then(|a| a.dst)
+            {
+                addrs[7] = Some(sa_of(r.family, &d, r.ifindex));
+            }
         }
         let (mut rec, bits) = record(v, rtm::GET, &addrs);
         rec[core::mem::offset_of!(abi::net::RtMsghdr, rtm_addrs)..][..4]
@@ -378,6 +387,16 @@ pub fn dump(n: &Net, af: u8, fib: Option<u16>) -> Vec<u8> {
     }
     let _ = (net_rt::DUMP, rta::DST);
     out
+}
+
+/// `RTF_HOST`, for a route to a single address (a next hop's
+/// `rtflags` carry it).
+fn host_flag(r: &crate::ifnet::Route) -> i32 {
+    if r.plen == max_plen(r.family) {
+        rtf::HOST
+    } else {
+        0
+    }
 }
 
 pub(crate) const fn max_plen(f: Family) -> u8 {

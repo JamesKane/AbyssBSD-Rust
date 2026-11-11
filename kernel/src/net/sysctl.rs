@@ -1663,11 +1663,11 @@ fn rtsock(r: &[i32], out: &mut Vec<u8>) -> Result<(), ReadError> {
     let n = vn.net.lock();
     match op {
         net_rt::DUMP | net_rt::FLAGS => {
-            if op == net_rt::FLAGS {
+            if op == net_rt::FLAGS && (arg == 0 || arg & abi::net::rtf::LLINFO != 0) {
                 // `lltable_sysctl_dumparp`: the ARP or ND entries, of one
-                // family.
-                if arg & abi::net::rtf::LLINFO == 0 {
-                    return Ok(());
+                // family (which the caller must name).
+                if af == 0 {
+                    return Err(ReadError::Failed(Errno::EINVAL));
                 }
                 let family = net::Family::from_af(af).ok_or(ReadError::Failed(Errno::EINVAL))?;
                 let now = u64::try_from(super::now_s()).unwrap_or(0);
@@ -1677,7 +1677,17 @@ fn rtsock(r: &[i32], out: &mut Vec<u8>) -> Result<(), ReadError> {
             if af != 0 && af != abi::inet::AF_INET && af != abi::inet::AF_INET6 {
                 return Err(ReadError::Failed(Errno::EAFNOSUPPORT));
             }
-            out.extend(inet::rtmsg::dump(&n, af, fib));
+            // `NET_RT_FLAGS` walks table 0 (`sysctl_rtsock` leaves `fib`
+            // at 0 for it), keeping the routes with one of `arg`'s flags
+            // (`sysctl_dumpnhop`): `RTF_GATEWAY` finds the default route,
+            // with its interface and source address (`RTAX_IFP`,
+            // `RTAX_IFA`), as fastfetch and others look for it.
+            let (fib, flags) = if op == net_rt::FLAGS {
+                (Some(0), arg)
+            } else {
+                (fib, 0)
+            };
+            out.extend(inet::rtmsg::dump(&n, af, fib, flags));
         }
         net_rt::IFLIST | net_rt::IFLISTL => {
             out.extend(inet::rtmsg::iflist(&n, af, arg, op == net_rt::IFLISTL));
