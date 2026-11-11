@@ -11,6 +11,9 @@
 //!   NCQ commands when the drive supports them (up to its queue depth),
 //!   else one DMA command at a time; flushes wait for the queue to drain.
 //! - A port error fails what was outstanding and restarts the port.
+//! - Each channel is a CAM bus (`ahcich` unit N), its drive a device on
+//!   it; `XPT_ATA_IO` from the drive's pass device runs on the port
+//!   (`sim.rs`).
 //!
 //! The port state lives in [`Port`], shared by the controller (which
 //! services interrupts) and the channel (which submits), the way
@@ -28,6 +31,9 @@
 
 extern crate alloc;
 
+mod sim;
+
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -130,6 +136,8 @@ const KNOWN: &[(u16, u16, &str)] = &[
 pub struct Ctlr {
     mmio: MmioGrant<Bytes>,
     cap: u32,
+    /// Its PCI IDs, for CAM's path inquiries.
+    ident: devtree::ids::PciIdent,
 }
 
 impl core::fmt::Debug for Ctlr {
@@ -146,20 +154,76 @@ enum Data {
     Write(Mapped<IoBuf, dir::ToDevice>),
 }
 
+/// What a command was issued for.
+enum Req {
+    /// A disk's request.
+    Bio(Bio),
+    /// A pass-through command (`XPT_ATA_IO`), whose sender waits.
+    Pass(Arc<sim::Waiter>),
+}
+
 struct InFlight {
-    bio: Bio,
+    req: Req,
     data: Data,
 }
 
-impl InFlight {
-    fn finish(self) -> Bio {
-        let Self { mut bio, data } = self;
-        match data {
-            Data::None => {}
-            Data::Read(d) => bio.buf = d.unmap(),
-            Data::Write(d) => bio.buf = d.unmap(),
+impl Data {
+    fn unmap(self) -> IoBuf {
+        match self {
+            Data::None => IoBuf::Owned(Vec::new()),
+            Data::Read(d) => d.unmap(),
+            Data::Write(d) => d.unmap(),
         }
-        bio
+    }
+}
+
+/// How a command ended, for its sender.
+enum Ended {
+    Bio(Bio, Result<(), BioError>),
+    Pass(Arc<sim::Waiter>, sim::Done),
+}
+
+impl Ended {
+    fn deliver(self) {
+        match self {
+            Self::Bio(bio, r) => bio.complete(r),
+            Self::Pass(w, d) => w.finish(d),
+        }
+    }
+}
+
+impl InFlight {
+    /// Ends it: a bio with `r`; a pass-through command with the task
+    /// file `tfd`, the received D2H register FIS, and the bytes moved.
+    fn end(self, r: Result<(), BioError>, tfd: u32, rfis: [u8; 20], bytecount: u32) -> Ended {
+        let Self { req, data } = self;
+        match req {
+            Req::Bio(mut bio) => {
+                if !matches!(data, Data::None) {
+                    bio.buf = data.unmap();
+                }
+                Ended::Bio(bio, r)
+            }
+            Req::Pass(w) => Ended::Pass(
+                w,
+                sim::Done {
+                    ok: r.is_ok(),
+                    tfd,
+                    rfis,
+                    bytecount,
+                    buf: data.unmap(),
+                },
+            ),
+        }
+    }
+
+    /// Whether nothing may run beside it: a flush, or a pass-through
+    /// command.
+    fn exclusive(&self) -> bool {
+        match &self.req {
+            Req::Bio(b) => b.op == BioOp::Flush,
+            Req::Pass(_) => true,
+        }
     }
 }
 
@@ -207,6 +271,8 @@ pub struct Drive {
     sector_size: u32,
     /// NCQ queue depth, if the drive and controller support NCQ.
     ncq: Option<usize>,
+    /// The identify data, as the drive sent it.
+    ident: Box<[u8; 512]>,
 }
 
 struct PortState {
@@ -441,6 +507,10 @@ impl Port {
         if !lba48 || sectors == 0 || !sector_size.is_power_of_two() {
             return Err(AttachError::Device("drive without 48-bit addressing"));
         }
+        let mut ident = Box::new([0u8; 512]);
+        for (i, b) in ident.iter_mut().enumerate() {
+            *b = buf.read(i);
+        }
         Ok(Some(Drive {
             model,
             serial,
@@ -449,6 +519,7 @@ impl Port {
             sectors,
             sector_size,
             ncq,
+            ident,
         }))
     }
 
@@ -460,10 +531,13 @@ impl Port {
             let is = self.read(PX_IS);
             self.write(PX_IS, is);
             if is & IS_ERRORS != 0 && st.issued != 0 {
-                // Fail everything outstanding and restart the port.
-                for slot in st.slots.iter_mut() {
-                    if let Some(f) = slot.take() {
-                        done.push((f.finish(), Err(BioError::Io)));
+                // Fail everything outstanding and restart the port; a
+                // pass-through command gets the task file it ended with.
+                let (tfd, rfis) = (self.read(PX_TFD), Self::rfis(&st));
+                for i in 0..SLOTS {
+                    if let Some(f) = st.slots[i].take() {
+                        let n = Self::bytecount(&st.mem, i);
+                        done.push(f.end(Err(BioError::Io), tfd, rfis, n));
                     }
                 }
                 st.issued = 0;
@@ -472,23 +546,39 @@ impl Port {
             } else {
                 let active = self.read(PX_CI) | self.read(PX_SACT);
                 let finished = st.issued & !active;
+                let tfd = self.read(PX_TFD);
                 for slot in 0..SLOTS {
                     if finished & (1 << slot) != 0
                         && let Some(f) = st.slots[slot].take()
                     {
-                        done.push((f.finish(), Ok(())));
+                        let (rfis, n) = (Self::rfis(&st), Self::bytecount(&st.mem, slot));
+                        done.push(f.end(Ok(()), tfd, rfis, n));
                     }
                 }
                 st.issued &= active;
             }
         }
-        for (bio, r) in done {
-            bio.complete(r);
+        for e in done {
+            e.deliver();
         }
         let disk = self.disk.lock().clone();
         if let Some(d) = disk {
             d.resume(s, 0);
         }
+    }
+
+    /// The received D2H register FIS.
+    fn rfis(st: &PortState) -> [u8; 20] {
+        let mut f = [0u8; 20];
+        for (i, b) in f.iter_mut().enumerate() {
+            *b = st.mem.read(FIS + 0x40 + i);
+        }
+        f
+    }
+
+    /// The bytes slot `slot`'s last command moved (its header's PRDBC).
+    fn bytecount(mem: &DmaCoherent<u8>, slot: usize) -> u32 {
+        mem.read_at::<u32>(LIST + slot * 32 + 4)
     }
 
     fn map(&self, bio: &mut Bio) -> Result<Data, ()> {
@@ -531,10 +621,7 @@ impl DiskQueues for Port {
             let blocked = !refused.is_empty()
                 || slot.is_none()
                 || (!queued && busy != 0)
-                || st
-                    .slots
-                    .iter()
-                    .any(|s| matches!(s, Some(f) if f.bio.op == BioOp::Flush))
+                || st.slots.iter().flatten().any(InFlight::exclusive)
                 || (drive.ncq.is_none() && busy != 0);
             let Some(slot) = slot.filter(|_| !blocked) else {
                 refused.push(bio);
@@ -552,9 +639,8 @@ impl DiskQueues for Port {
                 Data::Write(d) => d.segments(),
             };
             if segs.len() > PRDS {
-                InFlight { bio, data }
-                    .finish()
-                    .complete(Err(BioError::Invalid));
+                bio.buf = data.unmap();
+                bio.complete(Err(BioError::Invalid));
                 continue;
             }
             let write = bio.op == BioOp::Write;
@@ -570,7 +656,10 @@ impl DiskQueues for Port {
                 (BioOp::Write, false) => Self::fis(ATA_WRITE_DMA_EXT, lba, count, 0, 0x40),
             };
             Self::build(&st, slot, &fis, segs, write);
-            st.slots[slot] = Some(InFlight { bio, data });
+            st.slots[slot] = Some(InFlight {
+                req: Req::Bio(bio),
+                data,
+            });
             ci |= 1 << slot;
             if queued {
                 sact |= 1 << slot;
@@ -667,6 +756,7 @@ impl Driver for Ahci {
         }
         mmio.write32(GHC, mmio.read32(GHC) | GHC_AE);
         let cap = mmio.read32(CAP);
+        let ident = child.function.header.ident;
         let implemented = mmio.read32(PI);
         let channels = ((32 - implemented.leading_zeros()) as usize).max((cap & 0x1f) as usize + 1);
         let tag = cx.dma_tag(DmaConstraints {
@@ -687,7 +777,7 @@ impl Driver for Ahci {
                 Err(_) => (cx.irq(0)?, None),
             },
         };
-        let ctlr = Arc::new(Ctlr { mmio, cap });
+        let ctlr = Arc::new(Ctlr { mmio, cap, ident });
         let mut ports = Vec::new();
         for index in 0..32usize {
             if implemented & (1 << index) == 0 {
@@ -757,9 +847,12 @@ impl Driver for Ahci {
 /// An `ahcichN` instance.
 pub struct AhciCh {
     port: Arc<Port>,
-    /// Its CAM bus number, from start: FreeBSD registers a bus for each
-    /// channel, drive or not.
-    scbus: SpinLock<Option<u32>>,
+    unit: u32,
+    /// Its CAM bus, from start: FreeBSD registers a bus for each channel,
+    /// drive or not, and keeps a wildcard path on it.
+    bus: SpinLock<Option<cam::Bus>>,
+    /// Its drive's CAM device.
+    device: SpinLock<Option<cam::Device>>,
 }
 
 impl core::fmt::Debug for AhciCh {
@@ -785,14 +878,31 @@ impl Driver for AhciCh {
         port.state.lock(cx.sleepable()).drive = drive;
         Ok(Self {
             port,
-            scbus: SpinLock::new(None),
+            unit: cx.unit(),
+            bus: SpinLock::new(None),
+            device: SpinLock::new(None),
         })
     }
 
     fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
         let s = cx.sleepable();
-        *self.scbus.lock() = Some(storage::alloc_bus());
-        let Some(drive) = self.port.state.lock(s).drive.clone() else {
+        let bus = cam::Bus::register(
+            cam::SimName {
+                name: "ahcich",
+                unit: self.unit,
+                bus_id: 0,
+            },
+            Arc::new(sim::ChannelSim {
+                port: Arc::downgrade(&self.port),
+                unit: self.unit,
+                cap: self.port.ctlr.cap,
+                ident: self.port.ctlr.ident,
+            }),
+            true,
+        );
+        let drive = self.port.state.lock(s).drive.clone();
+        let Some(drive) = drive else {
+            *self.bus.lock() = Some(bus);
             return Ok(());
         };
         let info = DiskInfo {
@@ -829,12 +939,25 @@ impl Driver for AhciCh {
         });
         disk.set_devstat(storage::devstat::Kind::ATA);
         *self.port.disk.lock() = Some(disk);
+        // `ada` on CAM's bus, with its pass device.
+        let dev = bus.add_device(sim::device_info(&drive, info.unit));
+        *self.device.lock() = Some(dev);
+        *self.bus.lock() = Some(bus);
         Ok(())
     }
 
     fn stop(&self, cx: &mut StopCx<'_>, _: StopReason) {
         let s = cx.sleepable();
-        // Taken in its own statement: no spinlock held while withdrawing.
+        // CAM's device and bus first. Each taken in its own statement: no
+        // spinlock held while they go.
+        let dev = self.device.lock().take();
+        if let Some(d) = dev {
+            d.remove(s);
+        }
+        let bus = self.bus.lock().take();
+        if let Some(b) = bus {
+            b.deregister(s);
+        }
         let disk = self.port.disk.lock().take();
         if let Some(disk) = disk {
             storage::withdraw(s, &disk);
@@ -848,10 +971,7 @@ impl Driver for AhciCh {
             st.slots.iter_mut().filter_map(Option::take).collect()
         };
         for f in held {
-            f.finish().complete(Err(BioError::Gone));
-        }
-        if let Some(b) = self.scbus.lock().take() {
-            storage::free_bus(b);
+            f.end(Err(BioError::Gone), 0, [0; 20], 0).deliver();
         }
     }
 }
