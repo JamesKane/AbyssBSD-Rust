@@ -92,7 +92,10 @@ pub static X86_64: &[DriverDecl] = drivers![
 /// AbyssBSD have, IOMMU.md §2.2), `gpiobus` and `gpioc`
 /// (arm64's `std.dev` has `device gpio`; amd64's GENERIC does not), and
 /// the Sky1's SoC blocks,
-/// which FreeBSD lacks or builds for arm64 only (`cdnc_i2c`).
+/// which FreeBSD lacks or builds for arm64 only (`cdnc_i2c`), and the
+/// devices on its I2C buses, which FreeBSD builds where it has FDT
+/// (`rx8803`, `files` `optional rx8803 iicbus fdt`) or the sibling port
+/// for arm64 alone (`rts5453`).
 #[cfg(any(target_arch = "aarch64", not(target_os = "none")))]
 pub static AARCH64: &[DriverDecl] = drivers![
     acpi::GENERIC_PCIB,
@@ -110,6 +113,8 @@ pub static AARCH64: &[DriverDecl] = drivers![
     gpiobus::GPIOBUS,
     gpiobus::GPIOC,
     cdnc_i2c::DRIVER,
+    rx8803::DRIVER,
+    rts5453::DRIVER,
 ];
 
 /// The x86_64 kernel's platforms (ADR-0020): none yet.
