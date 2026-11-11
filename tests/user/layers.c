@@ -13,7 +13,8 @@
  *
  * In a jail with allow.mount and allow.mount.nullfs (enforce_statfs 1),
  * nullfs and fdescfs mount within it, named from its root; with
- * allow.mount.nonullfs, nullfs is EPERM.
+ * allow.mount.nonullfs, nullfs is EPERM; allow.mount.nullfs given the
+ * value 0 allows it, as a flag's name sets it whatever its value.
  *
  * fdescfs (FreeBSD 15.1's): the caller's descriptors as character
  * devices numbered fd + 3 (listed as fd + 5), opens that share the
@@ -257,13 +258,17 @@ nullfs(void)
 	OK(unlink("/mnt/over"));
 }
 
-/* A persistent jail at `path`, nullfs mounts allowed or not; its jid. */
+/*
+ * A persistent jail at `path`; its jid. `how` names nullfs's flag: 0 as
+ * allow.mount.nonullfs, 1 as allow.mount.nullfs alone, 2 as
+ * allow.mount.nullfs with the int 0, which sets it all the same.
+ */
 static int
-make_jail(const char *path, int nullfs_allowed)
+make_jail(const char *path, int how)
 {
 	struct iovec iov[14];
 	char errmsg[256];
-	int one = 1, statfs1 = 1, n = 0, jid;
+	int one = 1, zero = 0, statfs1 = 1, n = 0, jid;
 
 #define	PARAM(name, value, len) do {					\
 	iov[n].iov_base = (void *)(uintptr_t)(name);			\
@@ -275,8 +280,10 @@ make_jail(const char *path, int nullfs_allowed)
 	PARAM("persist", NULL, 0);
 	PARAM("allow.mount", &one, sizeof(one));
 	/* A flag is set by its name, whatever its value (vfs_flagopt). */
-	if (nullfs_allowed)
+	if (how == 1)
 		PARAM("allow.mount.nullfs", NULL, 0);
+	else if (how == 2)
+		PARAM("allow.mount.nullfs", &zero, sizeof(zero));
 	else
 		PARAM("allow.mount.nonullfs", NULL, 0);
 	PARAM("allow.mount.fdescfs", &one, sizeof(one));
@@ -344,6 +351,12 @@ jailed(void)
 	if (jid > 0) {
 		r = in_jail(jid, 0);
 		CHECK(r == 0, "in the jail with allow.mount.nonullfs: %d", r);
+		OK(jail_remove(jid));
+	}
+	jid = make_jail("/mnt/jroot", 2);
+	if (jid > 0) {
+		r = in_jail(jid, 1);
+		CHECK(r == 0, "in the jail with allow.mount.nullfs=0: %d", r);
 		OK(jail_remove(jid));
 	}
 	OK(unlink("/mnt/jroot/src/file"));

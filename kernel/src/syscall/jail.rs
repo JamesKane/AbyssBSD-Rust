@@ -368,14 +368,11 @@ fn set(
             )
         }));
     for (yes, no, bit) in flag_names {
-        // `libjail` passes a boolean as an `int`, or as its name alone.
-        if let Some(o) = opts.find(&yes) {
-            match o.value.as_deref() {
-                Some(v) if v.len() == 4 && i32::from_ne_bytes([v[0], v[1], v[2], v[3]]) == 0 => {
-                    ch_allow |= bit;
-                }
-                _ => pr_allow |= bit,
-            }
+        // A flag is set by its name and cleared by its `no` name, whatever
+        // the value given (`vfs_flagopt`): `libjail` turns `allow.X=0`
+        // into `allow.noX`.
+        if opts.flag(&yes) {
+            pr_allow |= bit;
         }
         if opts.flag(&no) {
             ch_allow |= bit;
