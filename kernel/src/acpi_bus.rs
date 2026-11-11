@@ -385,6 +385,7 @@ pub(crate) fn init(s: &sched::Sleepable) -> bool {
                     String::new()
                 },
             );
+            crate::sysctl::with(s, acpi::battery::add_sysctl);
             true
         }
         None => false,

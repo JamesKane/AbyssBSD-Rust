@@ -19,6 +19,7 @@
 extern crate alloc;
 
 pub mod aei;
+pub mod battery;
 pub mod bus;
 pub mod button;
 pub mod cpc;
