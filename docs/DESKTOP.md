@@ -101,7 +101,7 @@ check that it is in place for this program.
 | **Networking for the desktop**: `getifaddrs` with `AF_LINK`, `PF_ROUTE` sockets, `wlan(4)`, `wpa_supplicant`, `ifconfig wlanN create` | Network pane, Wi-Fi, Firefox | P7; Wi-Fi drivers after P7 |
 | **ZFS**: `zpool`, `zfs`, boot environments, `zfs snapshot/rollback` | Installer default layout, Disk Utility, `abyss update` | M-Z |
 | **GELI** (`geom_eli`, keys from the loader's boot key buffer) | Encrypted installs: one password for disk and login (INSTALLER.md §3.4) | Not scheduled; before M-D.5's encrypted installs |
-| **GEOM tools**: `geom disk list`, `gpart`, `newfs_msdos`, `mdconfig` | Installer, harness | Done for GPT (P9: `/dev/geom.ctl`, the PART class's verbs); no MBR or `glabel` verbs yet |
+| **GEOM tools**: `geom disk list`, `gpart`, `newfs_msdos`, `mdconfig` | Installer, harness | Done for GPT and MBR (P9: `/dev/geom.ctl`, the PART class's verbs); BSD labels read only; no `glabel` verbs yet |
 | **`allow.rtprio` jail parameter, power-button devctl notify** | Desktop features its fork plans (ADR-0018 rule 5) | When the fork defines them |
 | **`vmm`, `nmdm`** | `--full` lanes (nested bhyve) | Not planned (AbyssBSD is not a bhyve host); those lanes become QEMU boots (§5.3) |
 

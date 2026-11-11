@@ -2850,6 +2850,21 @@ no hangs, no reboot loops, nothing that needs the screen, and P8's remaining exi
     are in compat-deviations. Left: smartmontools (not in the images; its FreeBSD paths,
     `NVME_PASSTHROUGH_CMD` and SAT through `XPT_SCSI_IO`/`XPT_ATA_IO`, are what the test drives),
     and the comparison with `tests/corpus/opi6p/freebsd/storage.txt` on the board.
+  - Progress 2026-11-10 (MBR, and BSD labels read, in QEMU, both architectures): the MBR scheme
+    as `g_part_mbr.c` has it (probe, read with the geometry its entries imply, CHS addresses,
+    the active flag, boot code keeping the disk serial number, `efimedia`), with `gpart`'s
+    verbs on it (`create -s mbr`, `add` with its types or `!N`, `delete`, `modify -t`, `resize`,
+    `set`/`unset -a active`, `bootcode -b`, `destroy`); BSD disklabels read as `g_part_bsd.c`
+    reads them, its raw `c` kept internal. Partitions are tasted like disks, so tables nest as
+    FreeBSD's (`da0s1a`), go with their slice, and partitions answer `DIOCGFWSECTORS` and
+    `DIOCGFWHEADS` with their table's geometry (`newfs_msdos` needs it). Host tests: an MBR
+    stick and a sequence of edits written sector for sector as FreeBSD 15.1's `gpart` wrote
+    them, and its disklabels (in a slice, and on a whole disk) read as it reads them
+    (`tests/corpus/gpart`). In the guest, FreeBSD's `gpart` runs an MBR sequence on an md disk
+    (450 lines in all, as FreeBSD printed them, `newfs_msdos` and `mount_msdosfs` on the
+    slice), and FreeBSD's images on the Bulk-Only USB disk (64 MiB now) show `da0s1`, which
+    `mount_msdosfs` mounts, and a disklabel's `da0s1a`, `b`, and `d`, with `gpart show` as
+    FreeBSD's. Left: writing BSD labels, and `glabel label`'s `label/` names (compat-deviations).
 - **Verification:** kyua's arm64 target on the board; fsx with `fsck_ffs` on the NVMe and a USB
   disk (done with the SMMU's stage 5, IOMMU.md §18); the device tree against FreeBSD's `devinfo`
   wherever FreeBSD has a driver. No day-long looped runs (the user, 2026-11-10): kyua and the
