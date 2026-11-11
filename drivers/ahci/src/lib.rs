@@ -66,6 +66,10 @@ const CAP_S64A: u32 = 1 << 31;
 const CAP_SNCQ: u32 = 1 << 30;
 const CAP_SSS: u32 = 1 << 27;
 
+/// Where the first port's registers start, and each port's span.
+const PORT_BASE: u64 = 0x100;
+const PORT_STEP: u64 = 0x80;
+
 /// Port registers, at 0x100 + 0x80 per port.
 const PX_CLB: usize = 0x00;
 const PX_FB: usize = 0x08;
@@ -306,7 +310,7 @@ fn sleep_ms(s: &Sleepable, ms: u64) {
 
 impl Port {
     fn reg(&self, off: usize) -> usize {
-        0x100 + 0x80 * self.index + off
+        PORT_BASE as usize + PORT_STEP as usize * self.index + off
     }
 
     fn read(&self, off: usize) -> u32 {
@@ -682,6 +686,8 @@ pub struct Ahci {
     ports: Vec<Arc<Port>>,
     channels: usize,
     implemented: u32,
+    /// ABAR's physical extent, first and last address.
+    abar: (u64, u64),
     line: SpinLock<Option<IrqLine>>,
     _messages: Option<Messages>,
 }
@@ -739,6 +745,12 @@ impl Driver for Ahci {
             .filter(|b| b.kind != BarKind::Io)
             .position(|b| b.index == 5)
             .ok_or(AttachError::Device("no AHCI base address"))?;
+        let abar = child
+            .function
+            .bars
+            .iter()
+            .find(|b| b.index == 5)
+            .map_or((0, 0), |b| (b.base, b.base + b.size.max(1) - 1));
         let mmio = cx.mmio_bytes(index)?;
         child.enable_memory();
         child.set_bus_master(true);
@@ -807,6 +819,7 @@ impl Driver for Ahci {
             ports,
             channels,
             implemented,
+            abar,
             line: SpinLock::new(Some(line)),
             _messages: messages,
         })
@@ -821,6 +834,18 @@ impl Driver for Ahci {
         let m = &self.ctlr.mmio;
         m.write32(IS, u32::MAX);
         m.write32(GHC, m.read32(GHC) | GHC_IE);
+        // ABAR as the channels' rman (FreeBSD's `sc_iomem`), each channel
+        // holding its port registers in it (`ahci_alloc_resource`: 128
+        // bytes from 0x100), for `devinfo -u`.
+        cx.add_rman(
+            bus::RmanSpec::new(
+                "I/O memory addresses",
+                bus::RmanKind::Memory,
+                self.abar.0,
+                self.abar.1,
+            )
+            .managing(alloc::vec![self.abar]),
+        );
         for ch in 0..self.channels {
             let ident = Ident::Channel {
                 class: "ahcich",
@@ -828,7 +853,12 @@ impl Driver for Ahci {
             };
             match self.ports.iter().find(|p| p.index == ch) {
                 Some(p) if self.implemented & (1 << ch) != 0 => {
-                    cx.add_child(ident, Some(Arc::clone(p) as _), Vec::<Resource>::new());
+                    let regs = Resource::Memory {
+                        base: self.abar.0 + PORT_BASE + PORT_STEP * ch as u64,
+                        len: PORT_STEP,
+                        prefetchable: false,
+                    };
+                    cx.add_child(ident, Some(Arc::clone(p) as _), alloc::vec![regs]);
                 }
                 _ => {
                     cx.add_disabled_child(ident);

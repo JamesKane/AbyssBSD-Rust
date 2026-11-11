@@ -300,6 +300,10 @@ pub struct HostBridge {
     pub osc: Option<Osc>,
     segment: u32,
     bus: u8,
+    /// Its `_CRS` ranges, as the arm64 driver reads them.
+    ranges: Vec<crate::ranges::HostRange>,
+    /// Its configuration space's window, where the platform reports it.
+    ecam: Option<(u64, u64)>,
 }
 
 impl HostBridge {
@@ -327,6 +331,8 @@ impl HostBridge {
             .ok_or(AttachError::Device("no configuration space for the bridge"))?;
         let intx = resolve(ops, found.below.routes.unwrap_or_default());
         Ok(Self {
+            ranges: crate::ranges::host_ranges(&dev.crs),
+            ecam: ops.ecam(found.segment, found.bus),
             osc: found.osc,
             data: Arc::new(PciBusData {
                 cfg,
@@ -338,6 +344,39 @@ impl HostBridge {
             segment: found.segment,
             bus: found.bus,
         })
+    }
+
+    /// What FreeBSD's `pci_host_generic` shows in `hw.bus.rman`: its
+    /// prefetch, memory, and I/O port windows' rmans, each managing its
+    /// ranges at their PCI addresses, and, taken from the platform, its
+    /// configuration space and each range at its CPU address. (ACPI
+    /// ranges are never marked prefetchable there, so that rman stays
+    /// empty.)
+    fn publish_resources<D: Driver>(&self, cx: &mut StartCx<'_, D>) {
+        use bus::{RmanKind, RmanSpec};
+        let name = alloc::format!("{}{}", D::NAME, cx.unit());
+        let (mut mem, mut io) = (Vec::new(), Vec::new());
+        for r in &self.ranges {
+            let list = if r.io { &mut io } else { &mut mem };
+            list.push((r.pci_min, r.pci_max));
+        }
+        for (what, kind, regions) in [
+            ("prefetch", RmanKind::Memory, Vec::new()),
+            ("memory", RmanKind::Memory, mem),
+            ("I/O port", RmanKind::IoPort, io),
+        ] {
+            cx.add_rman(
+                RmanSpec::new(alloc::format!("{name} {what} window"), kind, 0, u64::MAX)
+                    .managing(regions),
+            );
+        }
+        if let Some((base, len)) = self.ecam.filter(|e| e.1 > 0) {
+            cx.hold(RmanKind::Memory, (base, base + (len - 1)), None);
+        }
+        for r in &self.ranges {
+            let end = r.cpu_min.wrapping_add(r.pci_max - r.pci_min);
+            cx.hold(RmanKind::Memory, (r.cpu_min, end), None);
+        }
     }
 
     fn start<D: Driver>(&self, cx: &mut StartCx<'_, D>) {
@@ -407,6 +446,7 @@ impl Driver for GenericPcieAcpi {
     }
 
     fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
+        self.0.publish_resources(cx);
         self.0.start(cx);
         Ok(())
     }
@@ -424,6 +464,8 @@ pub struct AcpiPciBridge {
     data: Arc<PciBusData>,
     domain: u32,
     bus: u8,
+    subordinate: u8,
+    windows: pci::bridge::Windows,
 }
 
 impl Driver for AcpiPciBridge {
@@ -452,10 +494,20 @@ impl Driver for AcpiPciBridge {
             data: Arc::new(data),
             domain: child.function.addr.domain,
             bus,
+            subordinate: child.function.bridge.map_or(bus, |b| b.subordinate),
+            windows: pci::bridge::child_windows(&child),
         })
     }
 
     fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
+        let name = alloc::format!("{}{}", Self::NAME, cx.unit());
+        pci::bridge::publish_resources(
+            cx,
+            &name,
+            self.domain,
+            (self.bus, self.subordinate),
+            &self.windows,
+        );
         cx.add_child(
             Ident::PciBus {
                 domain: self.domain,

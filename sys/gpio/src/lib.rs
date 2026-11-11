@@ -122,6 +122,13 @@ impl Driver for GpioBus {
     }
 
     fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
+        // Its pins' interrupts, for `devinfo -u` (`gpiobus_init_softc`'s
+        // `sc_intr_rman`, the whole space managed). Children's GPIO
+        // interrupts are listed with the platform's lines they arrive on.
+        cx.add_rman(
+            bus::RmanSpec::new("GPIO Interrupts", bus::RmanKind::GpioIrq, 0, u64::MAX)
+                .managing(alloc::vec![(0, u64::MAX)]),
+        );
         let all: Vec<u32> = (0..self.bus.source.pins()).collect();
         cx.add_child(
             Ident::Pins {

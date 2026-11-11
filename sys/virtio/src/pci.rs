@@ -224,11 +224,14 @@ impl VirtioPci {
     }
 
     fn start_child<D: Driver>(&self, cx: &mut StartCx<'_, D>) {
-        cx.add_child(
+        let child = cx.add_child(
             Ident::Virtio(self.ident),
             Some(Arc::clone(&self.dev) as _),
             self.irqs.clone(),
         );
+        // The interrupts it set up for the child are the transport's, as
+        // FreeBSD's virtio_pci allocates them (`hw.bus.rman`).
+        cx.hold_for_child(child);
     }
 }
 

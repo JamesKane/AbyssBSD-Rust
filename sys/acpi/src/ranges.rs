@@ -166,6 +166,92 @@ pub fn windows(crs: &[Resource]) -> Vec<(u64, u64)> {
         .collect()
 }
 
+/// The system-resource devices' ranges as `acpi0` takes them (FreeBSD's
+/// `acpi_sysres_attach`, in device order): a range inside one already
+/// taken is dropped, one overlapping it widens it, and the rest are
+/// added. `acpi0` holds each and manages them in its rmans.
+#[must_use]
+pub fn system_resource_ranges(ranges: impl IntoIterator<Item = Range>) -> Vec<Range> {
+    let mut out: Vec<Range> = Vec::new();
+    for r in ranges {
+        if r.len == 0 {
+            continue;
+        }
+        let (start, end) = (r.base, r.end() - 1);
+        let mut placed = false;
+        for b in out.iter_mut().filter(|b| b.space == r.space) {
+            let (bs, be) = (b.base, b.end() - 1);
+            if start >= bs && end <= be {
+                placed = true;
+                break;
+            }
+            let mut grown = false;
+            if start < bs && end >= bs {
+                b.len += bs - start;
+                b.base = start;
+                grown = true;
+            }
+            if start <= be && end > be {
+                b.len += end - be;
+                grown = true;
+            }
+            if grown {
+                placed = true;
+                break;
+            }
+        }
+        if !placed {
+            out.push(r);
+        }
+    }
+    out
+}
+
+/// A range a host bridge's `_CRS` describes, as FreeBSD's
+/// `pci_host_generic_acpi` reads them: every memory or I/O address
+/// descriptor (and fixed memory), at its PCI address (`_MIN` to `_MAX`)
+/// and its CPU address (`_MIN` plus `_TRA`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HostRange {
+    /// I/O space on the PCI side (otherwise memory).
+    pub io: bool,
+    /// The first PCI address.
+    pub pci_min: u64,
+    /// The last PCI address.
+    pub pci_max: u64,
+    /// The CPU address of `pci_min`.
+    pub cpu_min: u64,
+}
+
+/// A host bridge's ranges, in `_CRS` order.
+#[must_use]
+pub fn host_ranges(crs: &[Resource]) -> Vec<HostRange> {
+    crs.iter()
+        .filter_map(|r| match r {
+            Resource::Address(a) if a.max >= a.min => {
+                let io = match a.kind {
+                    AddressKind::Memory { .. } => false,
+                    AddressKind::Io { .. } => true,
+                    _ => return None,
+                };
+                Some(HostRange {
+                    io,
+                    pci_min: a.min,
+                    pci_max: a.max,
+                    cpu_min: a.min.wrapping_add(a.translation),
+                })
+            }
+            Resource::FixedMemory32(m) if m.length > 0 => Some(HostRange {
+                io: false,
+                pci_min: m.min.into(),
+                pci_max: u64::from(m.min) + u64::from(m.length) - 1,
+                cpu_min: m.min.into(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
 /// What a device's range overlaps.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

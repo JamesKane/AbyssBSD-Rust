@@ -107,6 +107,14 @@ pub trait Ops: Sync {
     fn firmware_identity(&self) -> acpi_platform::FirmwareIdentity {
         acpi_platform::FirmwareIdentity::default()
     }
+    /// The ECAM window (physical base, length) MCFG gives for `bus` of
+    /// PCI segment `segment`: what an arm64 host bridge holds (FreeBSD's
+    /// `pci_host_generic` allocates it). None by default, and on x86,
+    /// whose host bridge leaves it to the platform.
+    fn ecam(&self, segment: u32, bus: u8) -> Option<(u64, u64)> {
+        let _ = (segment, bus);
+        None
+    }
     /// The IORT, if firmware has one: its SMMUs become children of
     /// `acpi0`, and the devices they translate depend on them
     /// ([`iort`]). None by default.

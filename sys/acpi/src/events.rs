@@ -77,6 +77,8 @@ pub struct FixedHardware {
     pub power_button: bool,
     /// The PM timer's width in bits (24 or 32), if there is one.
     pub pm_timer_bits: Option<u8>,
+    /// The PM timer's counter register (4 bytes), if there is one.
+    pub pm_timer: Option<Block>,
 }
 
 /// PM1 status and enable bits.

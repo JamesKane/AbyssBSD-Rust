@@ -248,6 +248,7 @@ impl acpi::Ops for KernelAcpi {
                 .zip(f.acpi_enable_disable().map(|(on, _)| on)),
             power_button: !f.flags().is_some_and(|fl| fl.pwr_button()),
             pm_timer_bits: f.pm_timer().map(|t| t.bits),
+            pm_timer: f.pm_timer().and_then(|t| block(Some(t.block), Some(4))),
         })
     }
 
@@ -309,6 +310,11 @@ impl acpi::Ops for KernelAcpi {
 
     fn iort(&self) -> Option<acpi_tables::Sdt<'static>> {
         crate::acpi::find(*b"IORT")
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn ecam(&self, segment: u32, bus: u8) -> Option<(u64, u64)> {
+        crate::pci::ecam_extent(segment, bus)
     }
 
     fn dma_controllers(&self) -> Vec<acpi::DmaController> {

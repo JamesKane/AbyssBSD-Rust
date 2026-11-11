@@ -791,3 +791,83 @@ fn messages_go_through_the_functions_domain() {
 
 mod dev_pci;
 mod ordering;
+
+/// A bridge's windows as FreeBSD's `pcib_probe_windows` reads them: QEMU's
+/// root port (I/O implemented but closed, a 32-bit memory window, a
+/// 64-bit prefetchable one), and a bridge whose I/O and prefetchable base
+/// registers are hardwired to zero (the Sky1's root ports have no I/O
+/// window).
+#[test]
+fn bridge_windows() {
+    use crate::bridge::{Window, windows};
+    /// Header type 1 registers; writes to `fixed` offsets' low half are
+    /// lost.
+    struct Bridge {
+        regs: RefCell<BTreeMap<u16, u32>>,
+        fixed: Vec<u16>,
+    }
+    impl ConfigSpace for Bridge {
+        fn read32(&self, _: PciAddress, offset: u16) -> u32 {
+            *self.regs.borrow().get(&offset).unwrap_or(&0)
+        }
+        fn write32(&self, _: PciAddress, offset: u16, v: u32) {
+            let mut regs = self.regs.borrow_mut();
+            let old = *regs.get(&offset).unwrap_or(&0);
+            let keep = if self.fixed.contains(&offset) {
+                0xffff
+            } else {
+                0
+            };
+            regs.insert(offset, (v & !keep) | (old & keep));
+        }
+    }
+    let qemu = Bridge {
+        regs: RefCell::new(BTreeMap::from([
+            // I/O base 0xf1 (32-bit), limit 0x01: closed.
+            (0x1c, 0x0000_01f1),
+            // Memory 0x8100_0000-0x811f_ffff.
+            (0x20, 0x8110_8100),
+            // Prefetchable 64-bit, 0xc0_0000_0000-0xc0_01ff_ffff.
+            (0x24, 0x01f1_0001),
+            (0x28, 0xc0),
+            (0x2c, 0xc0),
+        ])),
+        fixed: Vec::new(),
+    };
+    let w = windows(&qemu, addr(0, 3, 0));
+    assert_eq!(
+        w.io,
+        Some(Window {
+            base: 0xf000,
+            limit: 0x0fff,
+            max: 0xffff_ffff
+        })
+    );
+    assert!(!w.io.unwrap().is_open());
+    assert_eq!(
+        w.mem,
+        Window {
+            base: 0x8100_0000,
+            limit: 0x811f_ffff,
+            max: 0xffff_ffff
+        }
+    );
+    assert_eq!(
+        w.pmem,
+        Some(Window {
+            base: 0xc0_0000_0000,
+            limit: 0xc0_01ff_ffff,
+            max: u64::MAX
+        })
+    );
+    let sky1 = Bridge {
+        regs: RefCell::new(BTreeMap::from([(0x20, 0x6000_6000)])),
+        fixed: vec![0x1c, 0x24],
+    };
+    let w = windows(&sky1, addr(192, 0, 0));
+    assert_eq!((w.io, w.pmem), (None, None));
+    assert_eq!((w.mem.base, w.mem.limit), (0x6000_0000, 0x600f_ffff));
+    assert!(w.mem.is_open());
+    // The probe put back what it wrote.
+    assert_eq!(*sky1.regs.borrow().get(&0x1c).unwrap(), 0);
+}

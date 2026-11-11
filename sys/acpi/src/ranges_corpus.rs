@@ -171,3 +171,81 @@ fn only_field_extents_are_shared() {
         [(0x065d_0000, 8), (0x065d_000c, 0x70), (0x065d_0080, 4)]
     );
 }
+
+/// The system-resource devices' ranges as `acpi0` takes them: bhyve's
+/// are what FreeBSD 15.1's `ACPI I/O ports` and `ACPI I/O memory
+/// addresses` manage there (tests/corpus/freebsd/rman/bhyve).
+#[test]
+fn system_resources_as_acpi0_takes_them() {
+    use crate::ranges::system_resource_ranges;
+    let (mut i, mut h) = acpi_corpus::load("bhyve");
+    let mut all = Vec::new();
+    for d in crate::deps::devices(&mut i, &mut h) {
+        let ident = crate::bus::enumerated(&mut i, &mut h, d).unwrap();
+        if system_resource(&ident) {
+            let crs = i.crs(d, &mut h).ok().flatten().unwrap_or_default();
+            all.extend(consumed(&crs));
+        }
+    }
+    let held = system_resource_ranges(all);
+    let list = |space| -> Vec<(u64, u64)> {
+        held.iter()
+            .filter(|r| r.space == space)
+            .map(|r| (r.base, r.end() - 1))
+            .collect()
+    };
+    let mut io = list(bus::AddressSpace::IoPort);
+    io.sort_unstable();
+    assert_eq!(
+        io,
+        [
+            (0x61, 0x61),
+            (0x72, 0x77),
+            (0x84, 0x84),
+            (0xb2, 0xb2),
+            (0x400, 0x407),
+            (0x4d0, 0x4d1)
+        ]
+    );
+    assert_eq!(
+        list(bus::AddressSpace::Memory),
+        [(0xe000_0000, 0xefff_ffff)]
+    );
+    // Contained ranges go, overlapping ones widen what is held.
+    let io = |base, len| Range {
+        space: bus::AddressSpace::IoPort,
+        base,
+        len,
+    };
+    let merged = system_resource_ranges([io(0x400, 8), io(0x402, 2), io(0x3fe, 4), io(0x406, 4)]);
+    assert_eq!(merged, [io(0x3fe, 12)]);
+}
+
+/// QEMU `virt`'s host bridge as FreeBSD's `pci_host_generic_acpi` reads
+/// it: the 32-bit memory window, the I/O window (CPU address by `_TRA`),
+/// and the 64-bit one, which FreeBSD's pcib0 holds at those CPU
+/// addresses (tests/corpus/freebsd/rman/qemu-aarch64).
+#[test]
+fn host_bridge_ranges() {
+    use crate::ranges::{HostRange, host_ranges};
+    let (mut i, mut h) = acpi_corpus::load("qemu-virt");
+    let pci0 = crate::deps::devices(&mut i, &mut h)
+        .into_iter()
+        .find(|&d| i.path(d).to_text() == "\\_SB_.PCI0")
+        .unwrap();
+    let crs = i.crs(pci0, &mut h).ok().flatten().unwrap();
+    let r = |io, pci_min, pci_max, cpu_min| HostRange {
+        io,
+        pci_min,
+        pci_max,
+        cpu_min,
+    };
+    assert_eq!(
+        host_ranges(&crs),
+        [
+            r(false, 0x1000_0000, 0x3efe_ffff, 0x1000_0000),
+            r(true, 0, 0xffff, 0x3eff_0000),
+            r(false, 0x80_0000_0000, 0xff_ffff_ffff, 0x80_0000_0000),
+        ]
+    );
+}

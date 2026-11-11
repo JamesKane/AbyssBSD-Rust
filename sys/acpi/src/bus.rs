@@ -617,6 +617,55 @@ fn resources(ops: &dyn Ops, crs: &[AmlResource]) -> Vec<Resource> {
     out
 }
 
+/// The PM timer's counter register as its node's resource.
+fn timer_resources(b: Option<crate::events::Block>) -> Vec<Resource> {
+    let Some(b) = b else { return Vec::new() };
+    match b.space {
+        crate::events::Space::Io => u16::try_from(b.address)
+            .map(|base| {
+                alloc::vec![Resource::IoPort {
+                    base,
+                    len: b.len.into()
+                }]
+            })
+            .unwrap_or_default(),
+        crate::events::Space::Memory => alloc::vec![Resource::Memory {
+            base: b.address,
+            len: b.len.into(),
+            prefetchable: false,
+        }],
+    }
+}
+
+/// `acpi0`'s rmans (FreeBSD's `acpi_rman_io`, `acpi_rman_mem`), which
+/// manage the system-resource devices' ranges: `acpi0` holds each, merged
+/// (`acpi_sysres_alloc`), and a child's range inside one is listed there.
+fn system_resources(cx: &mut StartCx<'_, AcpiBus>, sysres: Vec<bus::Range>) {
+    use bus::{RmanKind, RmanSpec};
+    let held = crate::ranges::system_resource_ranges(sysres);
+    let regions = |space: AddressSpace| -> Vec<(u64, u64)> {
+        held.iter()
+            .filter(|r| r.space == space)
+            .map(|r| (r.base, r.end() - 1))
+            .collect()
+    };
+    cx.add_rman(
+        RmanSpec::new("ACPI I/O ports", RmanKind::IoPort, 0, 0xffff)
+            .managing(regions(AddressSpace::IoPort)),
+    );
+    cx.add_rman(
+        RmanSpec::new("ACPI I/O memory addresses", RmanKind::Memory, 0, u64::MAX)
+            .managing(regions(AddressSpace::Memory)),
+    );
+    for r in &held {
+        let kind = match r.space {
+            AddressSpace::Memory => RmanKind::Memory,
+            AddressSpace::IoPort => RmanKind::IoPort,
+        };
+        cx.hold(kind, (r.base, r.end() - 1), None);
+    }
+}
+
 /// `acpi0`.
 #[derive(Debug)]
 pub struct AcpiBus {
@@ -674,7 +723,8 @@ impl Driver for AcpiBus {
             }
         }
         // The PM timer, as FreeBSD's acpi_timer identify adds it first.
-        if let Some(bits) = svc.ops().fixed_hardware().and_then(|h| h.pm_timer_bits) {
+        let fixed = svc.ops().fixed_hardware();
+        if let Some(bits) = fixed.and_then(|h| h.pm_timer_bits) {
             let desc = if bits == 32 {
                 "32-bit timer at 3.579545MHz"
             } else {
@@ -686,7 +736,9 @@ impl Driver for AcpiBus {
                     desc,
                 },
                 None,
-                Vec::new(),
+                // Its counter register, which FreeBSD's acpi_timer
+                // allocates (`acpi_timer_identify`'s resource).
+                timer_resources(fixed.and_then(|h| h.pm_timer)),
             );
         }
         let dma = svc.ops().dma_controllers();
@@ -725,7 +777,13 @@ impl Driver for AcpiBus {
         // The memory windows each device produces (a host bridge's), for
         // the domains of the devices behind it.
         let mut windows: Vec<(String, Vec<(u64, u64)>)> = Vec::new();
+        // The system-resource devices' ranges, which acpi0 holds itself.
+        let mut sysres: Vec<bus::Range> = Vec::new();
         for f in found {
+            let system = crate::ranges::system_resource(&f.ident);
+            if system {
+                sysres.extend(crate::ranges::consumed(&f.device.crs));
+            }
             let res = resources(svc.ops(), &f.device.crs);
             let path = f.device.path.clone();
             let w = crate::ranges::windows(&f.device.crs);
@@ -737,6 +795,9 @@ impl Driver for AcpiBus {
                 Some(Arc::new(f.device)),
                 res,
             );
+            if system {
+                cx.hold_for_child(id);
+            }
             if let Some(coherent) = f.coherent {
                 cx.set_dma_constraints(
                     id,
@@ -752,6 +813,7 @@ impl Driver for AcpiBus {
             }
             added.push((path, id, f.deps, f.lines));
         }
+        system_resources(cx, sysres);
         // The SMMUs the IORT lists, in table order, after the namespace's
         // devices: FreeBSD's identify routines add theirs once the
         // namespace walk has (`smmu0` sits after the CPUs and `gic0` in

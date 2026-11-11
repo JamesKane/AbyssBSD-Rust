@@ -362,6 +362,21 @@ impl Driver for PciBus {
     }
 
     fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
+        // Its bus number, from the bridge above's range or the domain's
+        // (`pci_attach_common`'s `PCI_RES_BUS`; the domain's rman is
+        // made when its first bus takes its number, `pci_domain_alloc_bus`).
+        let kind = bus::RmanKind::BusNumber(self.domain);
+        cx.platform_rman(
+            bus::RmanSpec::new(
+                alloc::format!("PCI domain {} bus numbers", self.domain),
+                kind,
+                0,
+                255,
+            )
+            .managing(alloc::vec![(0, 255)]),
+        );
+        let n = u64::from(self.bus);
+        cx.hold(kind, (n, n), None);
         for f in scan(self.data.cfg, self.domain, self.bus, self.data.depth) {
             let res = resources(&f, &self.data);
             let path = acpi_path(&self.data, f.addr);

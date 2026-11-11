@@ -11,9 +11,17 @@ use sync::Once;
 
 static WINDOWS: Once<Vec<Ecam>> = Once::new();
 
+/// A mapped window's segment, first and last bus, physical base, and
+/// length.
+type Extent = (u32, u8, u8, u64, u64);
+
+/// Each mapped window's extent.
+static EXTENTS: Once<Vec<Extent>> = Once::new();
+
 /// Maps every ECAM window in MCFG. Call once, before the device manager.
 pub(crate) fn init() {
     let mut windows = Vec::new();
+    let mut extents = Vec::new();
     let regions = crate::acpi::find(*b"MCFG").and_then(|t| acpi_tables::mcfg::parse(&t).ok());
     for r in regions.iter().flat_map(|m| m.regions()) {
         let Ok(r) = r else {
@@ -27,6 +35,7 @@ pub(crate) fn init() {
         let len = u64::from(r.bus_count()) << 20;
         match crate::devices::map_reserved(PhysAddr::new(pa), len) {
             Ok(va) => {
+                extents.push((u32::from(r.segment), r.start_bus, r.end_bus, pa, len));
                 kprintln!(
                     "pci: segment {} buses {}-{} ECAM at {pa:#x}",
                     r.segment,
@@ -49,12 +58,24 @@ pub(crate) fn init() {
         }
     }
     let _ = WINDOWS.set(windows);
+    let _ = EXTENTS.set(extents);
     crate::intc::init_msi();
 }
 
 /// The ECAM windows.
 pub(crate) fn windows() -> &'static [Ecam] {
     WINDOWS.get().map_or(&[], Vec::as_slice)
+}
+
+/// The physical extent (base, length) of the ECAM window serving `bus` of
+/// `segment`.
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
+pub(crate) fn ecam_extent(segment: u32, bus: u8) -> Option<(u64, u64)> {
+    EXTENTS
+        .get()?
+        .iter()
+        .find(|e| e.0 == segment && (e.1..=e.2).contains(&bus))
+        .map(|e| (e.3, e.4))
 }
 
 /// The window serving `a`.
