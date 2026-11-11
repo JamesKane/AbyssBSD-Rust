@@ -783,6 +783,10 @@ fn shell(
                 };
                 session.script(ufs, Duration::from_secs(600))?;
                 session.script(crate::expect::DYNAMIC, Duration::from_secs(60))?;
+                // QEMU's devices have the IDs the script expects.
+                if vmm == Vmm::Qemu {
+                    session.script(crate::expect::pciconf(arch), Duration::from_secs(60))?;
+                }
                 session.script(&crate::diff::steps(), Duration::from_secs(900))?;
                 if !quick {
                     session.script(crate::expect::DYNAMIC_TESTS, Duration::from_secs(900))?;

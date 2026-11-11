@@ -315,6 +315,102 @@ pub(crate) const DYNAMIC_TESTS: &[Step] = &[step(
     "the user tests, dynamically linked",
 )];
 
+/// FreeBSD's `pciconf` through `/dev/pci` (docs/DRIVER-MODEL.md §11.5),
+/// on the shell VM's QEMU devices, whose IDs QEMU fixes: the boot NVMe
+/// controller (`1b36:0010`) and the PCIe root port (`1b36:000c`) with the
+/// virtio-rng behind it. Each line is what FreeBSD 15.1's `pciconf` prints
+/// for the device: the selector, IDs, and names from the device tree
+/// (`-l`), `pci_vendors` (`-v`), BARs (`-b`), capabilities (`-c`), bridge
+/// windows (`-B`), configuration reads and writes (`-r`, `-w`),
+/// attachment (`-a`), and a BAR mapped (`-D`). The slots differ by
+/// architecture (x86's VGA takes slot 1), so each has its own script.
+pub(crate) fn pciconf(arch: Arch) -> &'static [Step] {
+    match arch {
+        Arch::X86_64 => PCICONF_X86_64,
+        Arch::Aarch64 => PCICONF_AARCH64,
+    }
+}
+
+/// The steps both architectures share, given the root port's name.
+macro_rules! pciconf_steps {
+    ($nvme_line:literal, $port_line:literal, $rng_sel:literal, $rng_line:literal) => {
+        &[
+            step(
+                "ls -l /dev/pci\n",
+                "crw-r--r--  1 root wheel ",
+                "/dev/pci is root:wheel 0644",
+            ),
+            step("pciconf -l nvme0\n", $nvme_line, "pciconf -l: a function by name"),
+            // Everything, for the log: FreeBSD's whole listing.
+            step(
+                "pciconf -lvbcB\n",
+                "\n    class      = mass storage\r\n",
+                "pciconf -lvbcB: every function",
+            ),
+            step(
+                "pciconf -lv nvme0\n",
+                "\n    vendor     = 'Red Hat, Inc.'\r\n    device     = 'QEMU NVM Express Controller'\r\n    class      = mass storage\r\n    subclass   = NVM\r\n",
+                "pciconf -v: names from pci_vendors",
+            ),
+            step(
+                "pciconf -lb nvme0\n",
+                "\n    bar   [10] = type Memory, range 64, base 0x",
+                "pciconf -b: BARs",
+            ),
+            step(
+                "pciconf -lc nvme0 | grep -c -e 'cap 10\\[[0-9a-f]*\\] = PCI-Express 2 ' \
+                 -e 'cap 11\\[[0-9a-f]*\\] = MSI-X supports'\n",
+                "\n2\r\n",
+                "pciconf -c: capabilities",
+            ),
+            step("pciconf -l pcib1\n", $port_line, "the root port"),
+            step(
+                "pciconf -lB pcib1\n",
+                "\n    bus range  = 1-1\r\n",
+                "pciconf -B: the bus behind the root port",
+            ),
+            step($rng_sel, $rng_line, "a function by selector, behind the bridge"),
+            step("pciconf -r nvme0 0\n", "\n00101b36 \r\n", "pciconf -r: a dword"),
+            step("pciconf -r -h nvme0 2\n", "\n0010 \r\n", "pciconf -r -h: a word"),
+            // The cache line size is writable on every QEMU device and
+            // means nothing to one emulated; it is put back.
+            step(
+                "o=$(pciconf -r -b nvme0 0xc); pciconf -w -b nvme0 0xc 0x10 && \
+                 n=$(pciconf -r -b nvme0 0xc); pciconf -w -b nvme0 0xc 0x$o; echo cls-$n\n",
+                "\ncls-10\r\n",
+                "pciconf -w: a byte",
+            ),
+            step("pciconf -a nvme0\n", "\nnvme0: attached\r\n", "pciconf -a"),
+            // NVMe's VS register (offset 8): version 1.4.
+            step(
+                "pciconf -D nvme0 0x10 2 1 | od -An -tx4\n",
+                " 00010400",
+                "pciconf -D: the BAR mapped (PCIOCBARMMAP)",
+            ),
+            // Anyone may list; only root opens it for writing.
+            step(
+                "su -m nobody -c 'pciconf -l nvme0 | cut -c1-6; pciconf -r nvme0 0' 2>&1\n",
+                "\nnvme0@\r\npciconf: /dev/pci: Permission denied\r\n",
+                "pciconf as nobody",
+            ),
+        ]
+    };
+}
+
+const PCICONF_X86_64: &[Step] = pciconf_steps!(
+    "\nnvme0@pci0:0:2:0:\tclass=0x010802 rev=0x02 hdr=0x00 vendor=0x1b36 device=0x0010 subvendor=0x1af4 subdevice=0x1100\r\n",
+    "\npcib1@pci0:0:3:0:\tclass=0x060400 rev=0x00 hdr=0x01 vendor=0x1b36 device=0x000c subvendor=0x1b36 subdevice=0x0000\r\n",
+    "pciconf -l pci0:1:0:0\n",
+    "\nvirtio_pci0@pci0:1:0:0:\tclass=0x00ff00 rev=0x01 hdr=0x00 vendor=0x1af4 device=0x1044 subvendor=0x1af4 subdevice=0x1100\r\n"
+);
+
+const PCICONF_AARCH64: &[Step] = pciconf_steps!(
+    "\nnvme0@pci0:0:1:0:\tclass=0x010802 rev=0x02 hdr=0x00 vendor=0x1b36 device=0x0010 subvendor=0x1af4 subdevice=0x1100\r\n",
+    "\npcib1@pci0:0:2:0:\tclass=0x060400 rev=0x00 hdr=0x01 vendor=0x1b36 device=0x000c subvendor=0x1b36 subdevice=0x0000\r\n",
+    "pciconf -l pci0:1:0:0\n",
+    "\nvirtio_pci0@pci0:1:0:0:\tclass=0x00ff00 rev=0x01 hdr=0x00 vendor=0x1af4 device=0x1044 subvendor=0x1af4 subdevice=0x1100\r\n"
+);
+
 /// What FreeBSD's tests need of the UFS2 root when `ABYSS_ATF` runs them
 /// alone ([`crate::image::atf_only`]): it read-write, and base's
 /// programs first in the path.
