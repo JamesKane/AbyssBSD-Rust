@@ -337,10 +337,12 @@ pub enum Announce {
 pub enum UnitOrder {
     /// When its bus adds it: the order the bus found its children in.
     Discovery,
-    /// When every device before it in the tree has attached, as FreeBSD's
-    /// one-at-a-time attach numbers it: for a bridge, whose descendants
-    /// can be more bridges (a host bridge's root ports are numbered right
-    /// after it, before the next host bridge). Its attach waits for that.
+    /// As FreeBSD's one-at-a-time, depth-first attach numbers it: for a
+    /// bridge, whose subtree can hold more devices of any class (a host
+    /// bridge's root ports are numbered right after it, before the next
+    /// host bridge). The bridge, and every device on the bus it provides,
+    /// takes its unit once every bridge before it in the tree, and each
+    /// such bridge's bus, has started; its attach waits for that.
     Serial,
 }
 

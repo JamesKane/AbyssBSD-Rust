@@ -153,8 +153,8 @@ enum StartPhase {
     /// Attach queued or running.
     #[default]
     Attach,
-    /// Waiting for every earlier node to start before taking its unit
-    /// ([`crate::UnitOrder::Serial`]); its attach is not queued yet.
+    /// Waiting for its turn to take its unit (`Manager::release_starts`);
+    /// its attach is not queued yet.
     Turn,
     /// Attached, waiting for every earlier node to start.
     Parked(Box<dyn Bound>, Option<sysctl::NodeId>),
@@ -1291,8 +1291,9 @@ impl Manager {
             return;
         };
         let decl = &self.drivers[d];
-        // A serial driver's device takes its unit at its turn.
-        let unit = if decl.unit_order == crate::types::UnitOrder::Serial {
+        // A bridge, or a device on a bus below one, takes its unit at its
+        // turn.
+        let unit = if self.takes_turn(t, id, d) {
             None
         } else {
             match self.take_unit(t, id, d) {
@@ -1368,11 +1369,9 @@ impl Manager {
     /// Queues the attach of `id`, which is `Attaching`; a device whose
     /// unit waits for its turn waits for it first. Topology lock held.
     fn queue(&self, t: &mut Topology, id: DeviceId) {
-        let turn = t.node(id).is_some_and(|n| {
-            n.unit.is_none()
-                && n.driver
-                    .is_some_and(|d| self.drivers[d].unit_order == crate::types::UnitOrder::Serial)
-        });
+        let turn = t
+            .node(id)
+            .is_some_and(|n| n.unit.is_none() && n.driver.is_some());
         if turn {
             if let Some(n) = t.node_mut(id) {
                 n.start = StartPhase::Turn;
@@ -1432,29 +1431,92 @@ impl Manager {
         key
     }
 
-    /// Starts the earliest attaching node, in tree order, if it is parked;
-    /// if its unit waits for its turn, gives it its unit and queues its
-    /// attach. Topology lock held.
+    /// Whether node `index` has a driver of [`UnitOrder::Serial`].
+    ///
+    /// [`UnitOrder::Serial`]: crate::types::UnitOrder::Serial
+    fn serial(&self, t: &Topology, index: u32) -> bool {
+        t.nodes
+            .get(index as usize)
+            .and_then(Option::as_ref)
+            .and_then(|n| n.driver)
+            .is_some_and(|d| self.drivers[d].unit_order == crate::types::UnitOrder::Serial)
+    }
+
+    /// Whether `id`, matched to driver `d`, takes its unit at its turn
+    /// rather than now: a bridge ([`crate::types::UnitOrder::Serial`]),
+    /// or a device on the bus a bridge provides, whose number FreeBSD's
+    /// serial attach gives after everything in the bridges before it.
+    fn takes_turn(&self, t: &Topology, id: DeviceId, d: usize) -> bool {
+        if self.drivers[d].unit_order == crate::types::UnitOrder::Serial {
+            return true;
+        }
+        let grandparent = t
+            .node(id)
+            .and_then(|n| n.parent)
+            .and_then(|p| t.nodes.get(p as usize)?.as_ref()?.parent);
+        grandparent.is_some_and(|g| self.serial(t, g))
+    }
+
+    /// Gives the nodes waiting for their turn their units, in tree order:
+    /// a node's turn comes when no bridge before it in the tree (one that
+    /// is not its ancestor), nor the bus a bridge provides, has yet to
+    /// start, so every device FreeBSD would have numbered first has its
+    /// unit. Then starts the earliest attaching node if it is parked.
+    /// Topology lock held.
     fn release_starts(&self, t: &mut Topology) {
-        loop {
-            let earliest = (0..u32::try_from(t.nodes.len()).unwrap_or(0))
-                .filter(|&i| {
-                    t.nodes[i as usize]
+        let count = u32::try_from(t.nodes.len()).unwrap_or(0);
+        let mut pending: Vec<(Vec<u32>, u32)> = (0..count)
+            .filter(|&i| {
+                t.nodes[i as usize]
+                    .as_ref()
+                    .is_some_and(|n| n.state == NodeState::Attaching)
+            })
+            .map(|i| (Self::tree_key(t, i), i))
+            .collect();
+        pending.sort_unstable();
+        // Bridges and their buses not started yet.
+        let unstarted: Vec<&Vec<u32>> = pending
+            .iter()
+            .filter(|(_, i)| {
+                self.serial(t, *i)
+                    || t.nodes[*i as usize]
                         .as_ref()
-                        .is_some_and(|n| n.state == NodeState::Attaching)
-                })
-                .min_by_key(|&i| Self::tree_key(t, i));
-            let Some(id) = earliest.and_then(|i| t.id(i)) else {
-                return;
+                        .and_then(|n| n.parent)
+                        .is_some_and(|p| self.serial(t, p))
+            })
+            .map(|(k, _)| k)
+            .collect();
+        let mut turns = Vec::new();
+        for (key, i) in &pending {
+            let waiting = t.nodes[*i as usize]
+                .as_ref()
+                .is_some_and(|n| matches!(n.start, StartPhase::Turn));
+            if !waiting {
+                continue;
+            }
+            let blocked = unstarted
+                .iter()
+                .any(|b| *b < key && !key.starts_with(b.as_slice()));
+            if blocked {
+                // Whatever blocks it blocks every later one too.
+                break;
+            }
+            turns.push(*i);
+        }
+        for i in turns {
+            let Some(id) = t.id(i) else {
+                continue;
             };
-            let turn = t
+            // Still waiting (a nested call, through a disabled node's
+            // consumers, may have given it its unit).
+            let Some(d) = t
                 .node(id)
-                .and_then(|n| matches!(n.start, StartPhase::Turn).then_some(n.driver))
-                .flatten();
-            let Some(d) = turn else {
-                break self.start_parked(t, id);
+                .filter(|n| matches!(n.start, StartPhase::Turn))
+                .and_then(|n| n.driver)
+            else {
+                continue;
             };
-            // Disabled by the hints: no longer attaching; look again.
+            // Disabled by the hints: no longer attaching.
             let Some(unit) = self.take_unit(t, id, d) else {
                 continue;
             };
@@ -1463,7 +1525,12 @@ impl Manager {
                 n.start = StartPhase::Attach;
             }
             self.push(Job::Attach(id));
-            return;
+        }
+        let earliest = pending.first().and_then(|&(_, i)| t.id(i));
+        if let Some(id) = earliest
+            && t.node(id).is_some_and(|n| n.state == NodeState::Attaching)
+        {
+            self.start_parked(t, id);
         }
     }
 
