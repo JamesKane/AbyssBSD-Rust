@@ -153,6 +153,22 @@ pub(crate) fn acquire(class: &'static LockClass, lock: usize) {
     h.len += 1;
 }
 
+/// Records the acquisition of `lock` (of `class`) by a try that
+/// succeeded: no order is checked, as a try cannot wait for a lock held
+/// in the other order (FreeBSD's `LOP_TRYLOCK`).
+pub(crate) fn acquire_try(class: &'static LockClass, lock: usize) {
+    if !ENABLED {
+        return;
+    }
+    let h = held();
+    if h.len == MAX_HELD {
+        violation(format_args!("witness: more than {MAX_HELD} locks held"));
+        return;
+    }
+    h.entries[h.len] = Entry { class, lock };
+    h.len += 1;
+}
+
 /// Records the release of `lock`.
 pub(crate) fn release(lock: usize) {
     if !ENABLED {

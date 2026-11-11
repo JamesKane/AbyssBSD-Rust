@@ -411,7 +411,7 @@ macro_rules! shared_exclusive {
                 if !self.core.try_write(me) {
                     return None;
                 }
-                witness::acquire(self.core.class, ptr::from_ref(&self.core).addr());
+                witness::acquire_try(self.core.class, ptr::from_ref(&self.core).addr());
                 Some(WriteGuard {
                     core: &self.core,
                     value: &self.value,

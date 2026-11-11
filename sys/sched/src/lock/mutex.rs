@@ -325,7 +325,7 @@ impl<T> Mutex<T> {
             .owner
             .compare_exchange(0, me, Ordering::Acquire, Ordering::Relaxed)
             .ok()?;
-        witness::acquire(self.core.class, ptr::from_ref(&self.core).addr());
+        witness::acquire_try(self.core.class, ptr::from_ref(&self.core).addr());
         Some(MutexGuard {
             mutex: self,
             _not_send: PhantomData,
