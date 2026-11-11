@@ -759,7 +759,36 @@ Each bus that hands out ranges keeps a **resource space** (the `rman` equivalent
   its own lock.
 - **Splitting a claim.** `Mmio<R>::split` turns one granted window into typed sub-blocks, for a
   window that holds several register blocks (a GPU window that also holds its management unit).
-- The resource spaces are exported as `hw.bus.rman` for `devinfo -r` and `-u` (§11.1).
+- **The resource spaces as FreeBSD's rmans** (`sys/bus::rman`, `lib/devtree::rman`), exported
+  as `hw.bus.rman` for `devinfo -r` and `-u` (§11.1). Grants decide who may touch a range; the
+  rmans only list who holds what, with FreeBSD's names, so `devinfo` and `libdevinfo` see
+  FreeBSD's resource managers.
+  - **Who declares them.** The platform root declares FreeBSD's nexus rmans (x86: `Interrupt
+    request lines`, `DMA request lines`, `I/O ports`, `I/O memory addresses` up to the CPU's
+    physical address width; arm64: `I/O memory addresses`, `Interrupts`). Buses declare theirs as
+    they start, each with the regions it manages: `acpi0` its `ACPI I/O ports` and `ACPI I/O
+    memory addresses`, over the system-resource devices' ranges merged as `acpi_sysres_attach`
+    merges them; the arm64 host bridge its `pcibN prefetch window`, `memory window`, and `I/O port
+    window` over its `_CRS` ranges at their PCI addresses; a PCI-PCI bridge its `pcibN bus
+    numbers` and one rman per window it implements (probed as `pcib_probe_windows` does); the
+    first PCI bus of a domain the platform's `PCI domain N bus numbers`; AHCI the channels'
+    `I/O memory addresses` over ABAR; each `gpiobus` its `GPIO Interrupts`. An rman goes when its
+    bus detaches.
+  - **What is held.** Every memory and I/O-port resource a bus described for a node, attached or
+    not (FreeBSD's ACPI and PCI buses reserve their children's ranges), except one a bus handed
+    on unchanged (a transport's) and those of children whose bus accounts for them itself
+    (`acpi0` holds the system-resource ranges, a virtio transport its child's interrupts). Buses
+    record what is not a child's resource: a bridge's bus range and open windows, a host bridge's
+    ranges at their CPU addresses and its ECAM window (arm64), each PCI bus its number, `apic0`
+    the APIC registers (x86). Each installed interrupt handler records its line, numbered as
+    `vmstat -i` numbers it.
+  - **Where a range is listed** is FreeBSD's walk up the tree: in the rman of the nearest
+    ancestor that declared one of its kind managing the range, else in the platform's. A
+    function behind a root port lands in the port's window, the port's window in the host
+    bridge's (arm64) or the platform's (x86, whose host bridge passes requests up). Each rman
+    lists its regions in order, the free spans as resources of no device, the holders of one
+    range newest first; the rmans come in tree order of the node that declared them, the
+    platform's first, which is FreeBSD's creation order under its one-at-a-time attach.
 
 ### 8.2 Typed register blocks
 
@@ -1262,7 +1291,7 @@ server (strings and behavior, from the same bhyve and QEMU configurations).
 |---|---|---|
 | `hw.bus.info` | `u_businfo { ub_version: 2, ub_generation }` | The generation increments on every structural change and every state change visible in `u_device` |
 | `hw.bus.devices.<n>` | One `u_device` per node, in tree order | `dv_fields` packs `name\0desc\0driver\0pnpinfo\0location\0`. Encoding lives in `lib/devtree` and is host-tested |
-| `hw.bus.rman.<n>`, `hw.bus.rman.<n>.<m>` | Resource spaces and their allocations | For `devinfo -r` and `-u` |
+| `hw.bus.rman.<generation>.<n>.<m>` | `struct u_rman` for `m` -1, else the `m`th `struct u_resource` (allocations and free spans) of the `n`th rman (§8.1); `ENOENT` past the last, `EINVAL` for a stale generation, as `sysctl_rman` | For `devinfo -r` and `-u`. Built from the tree and the recorded holdings on each read |
 | `dev.<class>.<unit>.%desc`, `%driver`, `%location`, `%pnpinfo`, `%parent`, `%iommu`, `%domain` | Node fields | Created when a driver is chosen, removed when the node loses it |
 | `dev.<class>.%parent` | Parent bus class | |
 | `dev.<class>.<unit>.*` | Driver sysctls | Created through `StartCx`, part of the binding, removed at detach step 5 |

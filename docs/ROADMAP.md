@@ -2916,6 +2916,20 @@ no hangs, no reboot loops, nothing that needs the screen, and P8's remaining exi
     the board's (ESP, ext4, swap, UFS, the vendor partition) to the bottom, the nestings FreeBSD
     refuses, and 3000 garbage disks; the guest's gpart script builds the same layout and runs
     `fsck_ffs -p` on it, printing what FreeBSD printed (533 lines).
+  - Progress 2026-11-10 (real `rman` resources, `devinfo -u`, in QEMU and bhyve; not yet on the
+    board): `hw.bus.rman` lists FreeBSD's resource managers (DRIVER-MODEL.md §8.1, §11.1), and
+    FreeBSD's `devinfo -u` and `-rv` run unmodified: nexus's rmans per architecture, `acpi0`'s
+    system-resource rmans, the arm64 host bridge's windows, each PCI-PCI bridge's bus numbers
+    and windows, the domain's bus numbers, AHCI's channels, `gpiobus`'s `GPIO Interrupts`; in
+    them every node's bus-described ranges (unattached nodes' as `unknown`, as FreeBSD's ACPI and
+    PCI buses reserve them), bridges' windows and bus ranges, a host bridge's CPU-side ranges and
+    ECAM, and installed interrupts by their `vmstat -i` numbers. The shell cases compare both
+    listings with FreeBSD 15.1's in the same VMs (`freebsd-record --shell-vm`,
+    `tests/corpus/freebsd/rman`): on QEMU (both arches) and bhyve the same rmans in the same
+    order, and every device both have holding the same in each but for drivers' own
+    differences (the RTC's ports, `vtrnd`'s interrupt, bhyve's HPET, `attimer`, and shared COM
+    lines, the arm64 root port's hot-plug interrupt; compat-deviations). Not there: `ram0`,
+    `gic0`, `its0` (no such devices), FreeBSD's interrupt numbering.
 - **Verification:** kyua's arm64 target on the board; fsx with `fsck_ffs` on the NVMe and a USB
   disk (done with the SMMU's stage 5, IOMMU.md §18); the device tree against FreeBSD's `devinfo`
   wherever FreeBSD has a driver. No day-long looped runs (the user, 2026-11-10): kyua and the
