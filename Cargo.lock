@@ -145,6 +145,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "cd9660"
+version = "0.0.0"
+
+[[package]]
 name = "cdnc-i2c"
 version = "0.0.0"
 dependencies = [
@@ -541,6 +545,7 @@ dependencies = [
  "bootproto",
  "bufcache",
  "bus",
+ "cd9660",
  "clock",
  "demangle",
  "devtree",
