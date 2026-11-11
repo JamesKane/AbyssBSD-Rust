@@ -9,7 +9,7 @@
 # WORKDIR/abyss_known_hosts.
 sys=$1
 S=${2:?usage: kyua-board.sh fbsd16|abyss WORKDIR}
-B=${ABYSS_BOARD:-192.168.0.25}
+B=${ABYSS_BOARD:-192.168.0.19}
 LOG=$S/kyua-$sys-serial.log
 SSHOPT="-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
 mkdir -p "$S"

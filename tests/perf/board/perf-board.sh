@@ -18,7 +18,7 @@ RUNS=${2:?usage: perf-board.sh WORKDIR RUNS SUITE...}
 shift 2
 SUITES="$*"
 [ -n "$SUITES" ] || { echo "usage: perf-board.sh WORKDIR RUNS SUITE..." >&2; exit 2; }
-B=${ABYSS_BOARD:-192.168.0.25}
+B=${ABYSS_BOARD:-192.168.0.19}
 SSHOPT="-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
 mkdir -p "$S"
 fb() { timeout "${T:-120}" ssh $SSHOPT jkane@$B "su root -c '$*' < /dev/null" 2>/dev/null; }
