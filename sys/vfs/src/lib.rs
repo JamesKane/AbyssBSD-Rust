@@ -33,6 +33,7 @@ pub mod lockf;
 pub mod mount;
 pub mod namei;
 pub mod node;
+pub mod nullfs;
 pub mod ops;
 pub mod pagecache;
 pub mod tarfs;

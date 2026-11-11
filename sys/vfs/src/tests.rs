@@ -1467,3 +1467,242 @@ fn inotify_watches_and_events() {
     sc.close();
     assert_eq!(inotify::WATCHES.load(Ordering::Relaxed), 0);
 }
+
+/// A nullfs of `from` mounted on `on`, as the kernel's `nmount` makes one.
+fn null_mount(
+    ns: &Namespace,
+    from: &[u8],
+    on: &[u8],
+    opts: nullfs::Options,
+    flags: u64,
+) -> Arc<Mount> {
+    let s = s();
+    let lower = lookup(ns, from, true).unwrap();
+    let covered = lookup(ns, on, true).unwrap();
+    let fs = nullfs::NullFs::new(&lower, opts).unwrap();
+    let m = Mount::new(info("nullfs", flags), alloc::boxed::Box::new(fs));
+    m.fs()
+        .as_any()
+        .downcast_ref::<nullfs::NullFs>()
+        .unwrap()
+        .attach(&m)
+        .unwrap();
+    ns.mount(&s, covered, Arc::clone(&m), on).unwrap();
+    m
+}
+
+#[test]
+fn nullfs_shows_the_lower_tree_and_changes_it() {
+    let ns = tmp();
+    let s = s();
+    mk(&ns, b"/lower", NewNode::Directory).unwrap();
+    mk(&ns, b"/mnt", NewNode::Directory).unwrap();
+    let a = mk(&ns, b"/lower/a", NewNode::Regular).unwrap();
+    write_all(&a, 0, b"hello");
+    let null = null_mount(&ns, b"/lower", b"/mnt", nullfs::Options::default(), 0);
+    let ua = lookup(&ns, b"/mnt/a", true).unwrap();
+    assert_eq!(read_all(&ua), b"hello");
+    // The lower file's number, this mount's device (`null_getattr`).
+    let (ls, us) = (a.stat(&s).unwrap(), ua.stat(&s).unwrap());
+    assert_eq!(ls.st_ino, us.st_ino);
+    assert_ne!(ls.st_dev, us.st_dev);
+    assert_eq!(us.st_dev, null.id);
+    // One page cache: the same object, writes seen both ways.
+    assert!(Arc::ptr_eq(&a.object(&s).unwrap(), &ua.object(&s).unwrap()));
+    write_all(&ua, 5, b", world");
+    assert_eq!(read_all(&a), b"hello, world");
+    // One set of advisory locks.
+    assert!(core::ptr::eq(a.lockf(), ua.lockf()));
+    // Made, listed, renamed, and removed below.
+    mk(&ns, b"/mnt/b", NewNode::Regular).unwrap();
+    mk(&ns, b"/mnt/d", NewNode::Directory).unwrap();
+    assert!(lookup(&ns, b"/lower/b", true).is_ok());
+    assert!(lookup(&ns, b"/lower/d", true).unwrap().is_dir());
+    let mut want = names(&lookup(&ns, b"/lower", true).unwrap());
+    let mut got = names(&lookup(&ns, b"/mnt", true).unwrap());
+    want.sort();
+    got.sort();
+    assert_eq!(got, want);
+    mv(&ns, b"/mnt/a", b"/mnt/d/a2").unwrap();
+    assert_eq!(lookup(&ns, b"/lower/a", true).unwrap_err(), Errno::ENOENT);
+    assert_eq!(
+        read_all(&lookup(&ns, b"/lower/d/a2", true).unwrap()),
+        b"hello, world"
+    );
+    assert_eq!(
+        read_all(&lookup(&ns, b"/mnt/d/a2", true).unwrap()),
+        b"hello, world"
+    );
+    rm(&ns, b"/mnt/b", false).unwrap();
+    assert_eq!(lookup(&ns, b"/lower/b", true).unwrap_err(), Errno::ENOENT);
+    // Between this mount and another, even the one below: EXDEV.
+    assert_eq!(mv(&ns, b"/mnt/d/a2", b"/lower/x"), Err(Errno::EXDEV));
+    assert_eq!(mv(&ns, b"/lower/d/a2", b"/mnt/x"), Err(Errno::EXDEV));
+    let (dir, _) = parent(&ns, b"/mnt/x");
+    let lower_a2 = lookup(&ns, b"/lower/d/a2", true).unwrap();
+    assert_eq!(
+        ops::link(&s, &lower_a2, &dir, b"x", &Cred::root()),
+        Err(Errno::EXDEV)
+    );
+    // Links within the layer are made below.
+    let ua2 = lookup(&ns, b"/mnt/d/a2", true).unwrap();
+    ops::link(&s, &ua2, &dir, b"x", &Cred::root()).unwrap();
+    assert_eq!(lower_a2.attr(&s).unwrap().nlink, 2);
+    // `..` from the layer's root is the covered directory's parent, and
+    // paths name the layer.
+    let d = lookup(&ns, b"/mnt/d", true).unwrap();
+    assert_eq!(ns.path_of(&s, &d, ns.root()).unwrap(), b"/mnt/d");
+    assert_eq!(ns.path_of(&s, &ua2, ns.root()).unwrap(), b"/mnt/d/a2");
+    assert!(Arc::ptr_eq(
+        &lookup(&ns, b"/mnt/d/../..", true).unwrap(),
+        ns.root()
+    ));
+    // `statfs` counts the lower mount's, with its type number.
+    let lower_mount = a.mount();
+    let st = null.statfs(&s).unwrap();
+    assert_eq!(st.type_num, Some(lower_mount.type_num));
+    assert_eq!(st.blocks, lower_mount.statfs(&s).unwrap().blocks);
+}
+
+#[test]
+fn a_read_only_nullfs_refuses_changes_its_lower_mount_takes() {
+    use abi::mount::MNT_RDONLY;
+    let ns = tmp();
+    let s = s();
+    mk(&ns, b"/lower", NewNode::Directory).unwrap();
+    mk(&ns, b"/mnt", NewNode::Directory).unwrap();
+    mk(&ns, b"/lower/f", NewNode::Regular).unwrap();
+    mk(&ns, b"/lower/g", NewNode::Regular).unwrap();
+    null_mount(
+        &ns,
+        b"/lower",
+        b"/mnt",
+        nullfs::Options::default(),
+        MNT_RDONLY,
+    );
+    let f = lookup(&ns, b"/mnt/f", true).unwrap();
+    assert_eq!(
+        f.write_at(&s, 0, &mut WriteBuf::new(b"x")).unwrap_err(),
+        Errno::EROFS
+    );
+    assert_eq!(
+        mk(&ns, b"/mnt/new", NewNode::Regular).unwrap_err(),
+        Errno::EROFS
+    );
+    assert_eq!(rm(&ns, b"/mnt/f", false), Err(Errno::EROFS));
+    assert_eq!(mv(&ns, b"/mnt/f", b"/mnt/h"), Err(Errno::EROFS));
+    let chmod = SetAttr {
+        mode: Some(0o600),
+        ..SetAttr::default()
+    };
+    assert_eq!(
+        ops::setattr(&s, &f, &chmod, &Cred::root(), false),
+        Err(Errno::EROFS)
+    );
+    // Below, everything still changes, and shows through.
+    let lf = lookup(&ns, b"/lower/f", true).unwrap();
+    write_all(&lf, 0, b"below");
+    assert_eq!(read_all(&f), b"below");
+    ops::setattr(&s, &lf, &chmod, &Cred::root(), false).unwrap();
+    assert_eq!(f.attr(&s).unwrap().mode, 0o600);
+    mv(&ns, b"/lower/g", b"/lower/h").unwrap();
+    assert!(lookup(&ns, b"/mnt/h", true).is_ok());
+    assert_eq!(lookup(&ns, b"/mnt/g", true).unwrap_err(), Errno::ENOENT);
+}
+
+#[test]
+fn nullfs_unmounts_only_when_idle_and_keeps_its_lower_mount() {
+    let ns = tmp();
+    let s = s();
+    let lower = tmpfs_mount(heap_pages());
+    let d = mk(&ns, b"/lower", NewNode::Directory).unwrap();
+    ns.mount(&s, d, Arc::clone(&lower), b"/lower").unwrap();
+    mk(&ns, b"/mnt", NewNode::Directory).unwrap();
+    let f = mk(&ns, b"/lower/f", NewNode::Regular).unwrap();
+    write_all(&f, 0, b"data");
+    let null = null_mount(&ns, b"/lower", b"/mnt", nullfs::Options::default(), 0);
+    // The lower mount stays while a layer is on it, forced or not.
+    assert_eq!(ns.unmount(&s, &lower, false), Err(Errno::EBUSY));
+    assert_eq!(ns.unmount(&s, &lower, true), Err(Errno::EBUSY));
+    let open = lookup(&ns, b"/mnt/f", true).unwrap().use_ref();
+    assert_eq!(ns.unmount(&s, &null, false), Err(Errno::EBUSY));
+    // Forced, its files are doomed; the lower one is untouched.
+    ns.unmount(&s, &null, true).unwrap();
+    assert_eq!(open.stat(&s).unwrap_err(), Errno::EBADF);
+    assert_eq!(read_all(&f), b"data");
+    drop(open);
+    // Gone from above, the lower mount may go.
+    drop(f);
+    ns.unmount(&s, &lower, false).unwrap();
+}
+
+#[test]
+fn files_removed_below_are_freed_and_nocache_vnodes_go() {
+    let pages = heap_pages();
+    let ns = tmp_with(pages);
+    let s = s();
+    mk(&ns, b"/lower", NewNode::Directory).unwrap();
+    mk(&ns, b"/mnt", NewNode::Directory).unwrap();
+    mk(&ns, b"/nc", NewNode::Directory).unwrap();
+    let cached = null_mount(&ns, b"/lower", b"/mnt", nullfs::Options::default(), 0);
+    let nocache = null_mount(
+        &ns,
+        b"/lower",
+        b"/nc",
+        nullfs::Options {
+            cache: false,
+            ..nullfs::Options::default()
+        },
+        0,
+    );
+    let f = mk(&ns, b"/mnt/f", NewNode::Regular).unwrap();
+    write_all(&f, 0, &[7; 8192]);
+    let ino = f.ino();
+    let before = pages.live();
+    assert!(before >= 2);
+    drop(f);
+    // Kept while caching, though unused.
+    assert!(cached.cached(ino).is_some());
+    // Without caching, a vnode goes with its last use.
+    let n = lookup(&ns, b"/nc/f", true).unwrap();
+    let u = n.use_ref();
+    drop(n);
+    drop(u);
+    assert!(nocache.cached(ino).is_none());
+    // Removed below: the idle layered vnode lets go, and the file is freed.
+    rm(&ns, b"/lower/f", false).unwrap();
+    assert!(cached.cached(ino).is_none());
+    assert_eq!(pages.live(), before - 2);
+    // Open through the layer, it lives until closed.
+    let g = mk(&ns, b"/lower/g", NewNode::Regular).unwrap();
+    write_all(&g, 0, b"kept");
+    drop(g);
+    let open = lookup(&ns, b"/mnt/g", true).unwrap().use_ref();
+    rm(&ns, b"/mnt/g", false).unwrap();
+    assert_eq!(read_all(&open), b"kept");
+    assert_eq!(open.stat(&s).unwrap().st_nlink, 0);
+    drop(open);
+    assert_eq!(lookup(&ns, b"/lower/g", true).unwrap_err(), Errno::ENOENT);
+}
+
+#[test]
+fn nullfs_mounts_a_file_over_a_file_and_shares_its_counts() {
+    let ns = tmp();
+    let s = s();
+    let lf = mk(&ns, b"/file", NewNode::Regular).unwrap();
+    write_all(&lf, 0, b"contents");
+    mk(&ns, b"/over", NewNode::Regular).unwrap();
+    let m = null_mount(&ns, b"/file", b"/over", nullfs::Options::default(), 0);
+    let uf = lookup(&ns, b"/over", true).unwrap();
+    assert!(uf.is_mount_root());
+    assert_eq!(read_all(&uf), b"contents");
+    // A program running it below keeps it from being written above.
+    lf.add_text().unwrap();
+    assert_eq!(uf.add_writer(), Err(Errno::ETXTBSY));
+    lf.drop_text();
+    uf.add_writer().unwrap();
+    assert_eq!(lf.add_text(), Err(Errno::ETXTBSY));
+    uf.drop_writer();
+    drop(uf);
+    ns.unmount(&s, &m, false).unwrap();
+}
