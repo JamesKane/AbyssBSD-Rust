@@ -11,11 +11,12 @@ sys=$1
 S=${2:?usage: kyua-board.sh fbsd16|abyss WORKDIR}
 B=${ABYSS_BOARD:-192.168.0.25}
 LOG=$S/kyua-$sys-serial.log
+SSHOPT="-o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
 mkdir -p "$S"
-fb() { ssh -o BatchMode=yes -o ConnectTimeout=5 jkane@$B "su root -c '$*' < /dev/null" 2>/dev/null; }
-ab() { ssh -o BatchMode=yes -o ConnectTimeout=5 -o UserKnownHostsFile=$S/abyss_known_hosts root@$B "$*" 2>/dev/null; }
+fb() { timeout 300 ssh $SSHOPT jkane@$B "su root -c '$*' < /dev/null" 2>/dev/null; }
+ab() { timeout 300 ssh $SSHOPT -o UserKnownHostsFile=$S/abyss_known_hosts root@$B "$*" 2>/dev/null; }
 which_os() {
-	if ssh -o BatchMode=yes -o ConnectTimeout=5 jkane@$B 'uname -v' 2>/dev/null | grep -q orangepi; then echo fbsd16
+	if timeout 60 ssh $SSHOPT jkane@$B 'uname -v' 2>/dev/null | grep -q orangepi; then echo fbsd16
 	elif ab 'uname -v' | grep -q AbyssBSD; then echo abyss
 	else echo down; fi
 }
@@ -51,7 +52,7 @@ while :; do
 		fi
 		echo "$(date +%T) unexpected system $os"; exit 1
 	fi
-	on 'mount -p | grep -q " /mnt " || { fsck_ffs -p /dev/gpt/kyuawork; mount /dev/gpt/kyuawork /mnt; }'
+	on 'df /mnt | grep -q kyuawork || { fsck_ffs -p /dev/gpt/kyuawork; mount /dev/gpt/kyuawork /mnt; }'
 	if on "test -f /mnt/run-$sys/end"; then
 		echo "$(date +%T) done"
 		on "tail -1 /mnt/run-$sys/progress.log; cat /mnt/run-$sys/crashed.txt 2>/dev/null"

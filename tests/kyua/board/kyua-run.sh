@@ -45,6 +45,7 @@ i=0
 echo $$ > $out/pid
 (while :; do
 	sleep 30
+	sync
 	say "free $(sysctl -n vm.stats.vm.v_free_count) pages"
 	say "running" $(ps -axo command= | grep -o '^/usr/tests/[^ ]*' | sort -u)
 done) < /dev/null > /dev/null 2>&1 &
