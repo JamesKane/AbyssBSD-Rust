@@ -14,6 +14,7 @@
 #![forbid(unsafe_code)]
 
 pub mod acl;
+pub mod aio;
 pub mod bpf;
 pub mod bridge;
 pub mod bus;

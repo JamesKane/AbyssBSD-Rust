@@ -67,6 +67,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "aio"
+version = "0.0.0"
+dependencies = [
+ "abi",
+]
+
+[[package]]
 name = "amdsbwd"
 version = "0.0.0"
 dependencies = [
@@ -540,6 +547,7 @@ dependencies = [
  "acpi-platform",
  "acpi-tables",
  "addr",
+ "aio",
  "aml",
  "arch-aarch64",
  "arch-x86_64",

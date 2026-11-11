@@ -85,6 +85,7 @@ pub const CONSTANTS: &[&[ConstValue]] = &[
     crate::signal::CONSTANTS,
     crate::time::CONSTANTS,
     crate::timex::CONSTANTS,
+    crate::aio::CONSTANTS,
     crate::resource::CONSTANTS,
     crate::vdso::CONSTANTS,
     crate::ucontext::CONSTANTS,
@@ -1409,6 +1410,18 @@ pub static LAYOUTS: &[StructLayout] = &[
     layout!(crate::event::Itimerspec, "struct itimerspec", ["sys/types.h", "time.h"], All, {
         it_interval => "it_interval",
         it_value => "it_value",
+    }),
+    layout!(crate::aio::Aiocb, "struct aiocb", ["sys/types.h", "aio.h"], All, {
+        aio_fildes => "aio_fildes",
+        aio_offset => "aio_offset",
+        aio_buf => "aio_buf",
+        aio_nbytes => "aio_nbytes",
+        aio_lio_opcode => "aio_lio_opcode",
+        aio_reqprio => "aio_reqprio",
+        status => "_aiocb_private.status",
+        error => "_aiocb_private.error",
+        kernelinfo => "_aiocb_private.spare",
+        aio_sigevent => "aio_sigevent",
     }),
     layout!(crate::timex::Ntptimeval, "struct ntptimeval", ["sys/types.h", "sys/timex.h"], All, {
         time => "time",
