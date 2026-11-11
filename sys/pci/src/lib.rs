@@ -9,7 +9,8 @@
 //! - [`enumerate`]: scanning a bus, and the depth-first walk of a host
 //!   bridge's buses.
 //! - [`bus`]: the `pci` bus driver.
-//! - [`bridge`]: the PCI-PCI bridge driver.
+//! - [`bridge`]: the PCI-PCI bridge driver; [`hostb`]: host bridge
+//!   functions.
 //! - [`msi`]: MSI and MSI-X as an interrupt domain.
 //! - [`user`]: what `/dev/pci` reports; [`vpd`]: Vital Product Data.
 //!
@@ -35,6 +36,7 @@ pub mod caps;
 pub mod config;
 pub mod enumerate;
 pub mod header;
+pub mod hostb;
 pub mod msi;
 pub mod requester;
 pub mod user;

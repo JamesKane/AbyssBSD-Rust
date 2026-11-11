@@ -387,7 +387,7 @@ pub(crate) fn pciconf(arch: Arch) -> &'static [Step] {
 
 /// The steps both architectures share, given the root port's name.
 macro_rules! pciconf_steps {
-    ($nvme_line:literal, $port_line:literal, $rng_sel:literal, $rng_line:literal) => {
+    ($nvme_line:literal, $port_line:literal, $rng_sel:literal, $rng_line:literal, $hostb_line:literal) => {
         &[
             step(
                 "ls -l /dev/pci\n",
@@ -418,6 +418,7 @@ macro_rules! pciconf_steps {
                 "pciconf -c: capabilities",
             ),
             step("pciconf -l pcib1\n", $port_line, "the root port"),
+            step("pciconf -l hostb0\n", $hostb_line, "the host bridge function (hostb)"),
             step(
                 "pciconf -lB pcib1\n",
                 "\n    bus range  = 1-1\r\n",
@@ -455,14 +456,16 @@ const PCICONF_X86_64: &[Step] = pciconf_steps!(
     "\nnvme0@pci0:0:2:0:\tclass=0x010802 rev=0x02 hdr=0x00 vendor=0x1b36 device=0x0010 subvendor=0x1af4 subdevice=0x1100\r\n",
     "\npcib1@pci0:0:3:0:\tclass=0x060400 rev=0x00 hdr=0x01 vendor=0x1b36 device=0x000c subvendor=0x1b36 subdevice=0x0000\r\n",
     "pciconf -l pci0:1:0:0\n",
-    "\nvirtio_pci0@pci0:1:0:0:\tclass=0x00ff00 rev=0x01 hdr=0x00 vendor=0x1af4 device=0x1044 subvendor=0x1af4 subdevice=0x1100\r\n"
+    "\nvirtio_pci0@pci0:1:0:0:\tclass=0x00ff00 rev=0x01 hdr=0x00 vendor=0x1af4 device=0x1044 subvendor=0x1af4 subdevice=0x1100\r\n",
+    "\nhostb0@pci0:0:0:0:\tclass=0x060000 rev=0x00 hdr=0x00 vendor=0x8086 device=0x29c0 subvendor=0x1af4 subdevice=0x1100\r\n"
 );
 
 const PCICONF_AARCH64: &[Step] = pciconf_steps!(
     "\nnvme0@pci0:0:1:0:\tclass=0x010802 rev=0x02 hdr=0x00 vendor=0x1b36 device=0x0010 subvendor=0x1af4 subdevice=0x1100\r\n",
     "\npcib1@pci0:0:2:0:\tclass=0x060400 rev=0x00 hdr=0x01 vendor=0x1b36 device=0x000c subvendor=0x1b36 subdevice=0x0000\r\n",
     "pciconf -l pci0:1:0:0\n",
-    "\nvirtio_pci0@pci0:1:0:0:\tclass=0x00ff00 rev=0x01 hdr=0x00 vendor=0x1af4 device=0x1044 subvendor=0x1af4 subdevice=0x1100\r\n"
+    "\nvirtio_pci0@pci0:1:0:0:\tclass=0x00ff00 rev=0x01 hdr=0x00 vendor=0x1af4 device=0x1044 subvendor=0x1af4 subdevice=0x1100\r\n",
+    "\nhostb0@pci0:0:0:0:\tclass=0x060000 rev=0x00 hdr=0x00 vendor=0x1b36 device=0x0008 subvendor=0x1af4 subdevice=0x1100\r\n"
 );
 
 /// What FreeBSD's tests need of the UFS2 root when `ABYSS_ATF` runs them

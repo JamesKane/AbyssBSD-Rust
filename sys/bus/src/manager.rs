@@ -1653,6 +1653,7 @@ impl Manager {
             t.node(id).and_then(|n| {
                 let parent = t.nameunit(self.drivers, n.parent.unwrap_or(0));
                 Some(match decl.announce {
+                    Announce::Quiet => return None,
                     Announce::FirstUnit if unit != 0 => return None,
                     Announce::Description | Announce::FirstUnit if !n.desc.is_empty() => {
                         alloc::format!("{}{unit}: <{}> on {parent}", decl.name, n.desc)

@@ -330,6 +330,8 @@ pub enum Announce {
     /// (FreeBSD's `acpi_cpu` makes every processor but the first
     /// `device_quiet`).
     FirstUnit,
+    /// Nothing at boot (FreeBSD's `device_quiet`, as `hostb` is).
+    Quiet,
 }
 
 /// When a device takes its unit (DRIVER-MODEL.md §4.3).

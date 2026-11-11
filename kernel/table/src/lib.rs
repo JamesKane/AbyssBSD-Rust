@@ -39,6 +39,7 @@ macro_rules! drivers {
             uart::DRIVER,
             pci::bus::DRIVER,
             pci::bridge::DRIVER,
+            pci::hostb::DRIVER,
             virtio::pci::MODERN,
             virtio::pci::LEGACY,
             virtio_blk::DRIVER,
