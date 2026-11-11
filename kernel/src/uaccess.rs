@@ -60,6 +60,23 @@ unsafe impl Plain for abi::linker::KldFileStat {}
 unsafe impl Plain for abi::linker::ModuleStat {}
 // SAFETY: as above.
 unsafe impl Plain for abi::linker::ModuleStatV2 {}
+// SAFETY: integers and byte arrays; every pad C leaves is a field, and the
+// sizes are pinned to FreeBSD's (abi::pciio's asserts, abi-check).
+unsafe impl Plain for abi::pciio::PciConf {}
+// SAFETY: as above.
+unsafe impl Plain for abi::pciio::PciMatchConf {}
+// SAFETY: as above.
+unsafe impl Plain for abi::pciio::PciConfIo {}
+// SAFETY: as above.
+unsafe impl Plain for abi::pciio::PciIo {}
+// SAFETY: as above.
+unsafe impl Plain for abi::pciio::PciBarIo {}
+// SAFETY: as above.
+unsafe impl Plain for abi::pciio::PciListVpdIo {}
+// SAFETY: as above.
+unsafe impl Plain for abi::pciio::PciBarMmap {}
+// SAFETY: as above.
+unsafe impl Plain for abi::pciio::PciBarIoreq {}
 
 /// The bytes of a [`Plain`] value (for replies built in the kernel).
 pub(crate) fn bytes_of<T: Plain>(v: &T) -> &[u8] {

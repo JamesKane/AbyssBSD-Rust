@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 
 use devtree::strings::PciAddress;
 
-use crate::bar::{self, Bar, BarError};
+use crate::bar::{self, Bar, BarError, Map};
 use crate::caps::{self, Capability, ExtCapability};
 use crate::config::ConfigSpace;
 use crate::header::{self, BridgeBuses, Header, HeaderType};
@@ -22,6 +22,8 @@ pub struct Function {
     pub bars: Vec<Bar>,
     /// BARs that failed validation, by number.
     pub bad_bars: Vec<(u8, BarError)>,
+    /// Its BARs as FreeBSD records them, for `/dev/pci`.
+    pub maps: Vec<Map>,
     /// Its standard capabilities.
     pub caps: Vec<Capability>,
     /// Its extended capabilities (PCIe functions).
@@ -102,7 +104,8 @@ pub fn scan(cfg: &dyn ConfigSpace, segment: u32, bus: u8, depth: u8) -> Vec<Func
 fn probe(cfg: &dyn ConfigSpace, addr: PciAddress, h: Header, depth: u8) -> Function {
     let mut bars = Vec::new();
     let mut bad_bars = Vec::new();
-    for b in bar::read_all(cfg, addr, h.kind.bars()) {
+    let (sized, maps) = bar::read_all(cfg, addr, h.kind.bars());
+    for b in sized {
         match b {
             Ok(b) => bars.push(b),
             Err(e) => bad_bars.push(e),
@@ -115,11 +118,22 @@ fn probe(cfg: &dyn ConfigSpace, addr: PciAddress, h: Header, depth: u8) -> Funct
         Vec::new()
     };
     let bridge = (h.kind == HeaderType::Bridge).then(|| header::bridge_buses(cfg, addr));
+    // A bridge's subsystem IDs are in its subsystem capability, as
+    // FreeBSD's `pci_read_cap` (PCIY_SUBVENDOR) takes them.
+    let mut h = h;
+    if h.kind == HeaderType::Bridge
+        && let Some(c) = caps::find(&caps, caps::id::SUBVENDOR)
+    {
+        let s = cfg.read32(addr, u16::from(c.offset) + 4);
+        h.ident.subvendor = s as u16;
+        h.ident.subdevice = (s >> 16) as u16;
+    }
     Function {
         addr,
         header: h,
         bars,
         bad_bars,
+        maps,
         caps,
         ext_caps,
         bridge,

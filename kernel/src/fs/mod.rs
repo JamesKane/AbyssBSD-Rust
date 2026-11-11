@@ -184,6 +184,7 @@ pub(crate) fn init() {
     devfs::init();
     crate::mdisk::init();
     crate::devctl::init();
+    crate::pciio::init();
     crate::efidev::init();
     crate::fido::init();
     crate::klog::init(&s);

@@ -36,6 +36,73 @@ pub struct Bar {
     pub prefetchable: bool,
 }
 
+/// A BAR as FreeBSD records it (`struct pci_map`), for `/dev/pci`: every
+/// BAR that decodes a plausible size, assigned or not, with its value at
+/// enumeration (type bits included) and its size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Map {
+    /// Its register (`PCIR_BAR(n)`).
+    pub reg: u16,
+    /// The BAR's value, both halves of a 64-bit one (`pm_value`).
+    pub value: u64,
+    /// log2 of its size (`pm_size`).
+    pub size_log2: u8,
+}
+
+impl Map {
+    /// Whether it decodes memory rather than I/O ports (`PCI_BAR_MEM`).
+    #[must_use]
+    pub fn is_memory(&self) -> bool {
+        self.value & 1 == 0
+    }
+
+    /// Its size in bytes.
+    #[must_use]
+    pub fn size(&self) -> u64 {
+        1u64 << self.size_log2
+    }
+
+    /// The address it decodes at (`pci_mapbase`).
+    #[must_use]
+    pub fn base(&self) -> u64 {
+        if self.is_memory() {
+            self.value & !0xf
+        } else {
+            self.value & !0x3
+        }
+    }
+}
+
+/// FreeBSD's record of a sized BAR (`pci_add_map`): `value` as read and
+/// `test` as read back after all-ones, both halves of a 64-bit BAR. I/O
+/// BARs with the reserved bit, memory under 16 bytes, and I/O under 4
+/// are not recorded.
+#[must_use]
+pub fn map_of(reg: u16, value: u64, test: u64) -> Option<Map> {
+    let io = value & 1 != 0;
+    let base = if test & 1 != 0 {
+        test & !0x3
+    } else {
+        test & !0xf
+    };
+    let size_log2 = if base == 0 {
+        0
+    } else {
+        u8::try_from(base.trailing_zeros()).unwrap_or(0)
+    };
+    if test & 1 != 0 && test & 0x2 != 0 {
+        return None;
+    }
+    if (!io && size_log2 < 4) || (io && size_log2 < 2) {
+        return None;
+    }
+    Some(Map {
+        reg,
+        value,
+        size_log2,
+    })
+}
+
 /// Why a BAR is not usable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BarError {
@@ -66,7 +133,8 @@ pub fn read(
     } else {
         CMD_MEMORY
     };
-    with_decoding_off(cfg, a, off, || size(cfg, a, index, count))
+    let (r, slots, _) = with_decoding_off(cfg, a, off, || size(cfg, a, index, count));
+    (r, slots)
 }
 
 /// Runs `f` with the `bits` decoding enables of `a` cleared, writing the
@@ -91,22 +159,21 @@ fn with_decoding_off<R>(
     r
 }
 
+/// The result of sizing one BAR: the BAR, how many slots it took, and
+/// FreeBSD's record of it if it makes one.
+type SizedBar = (Result<Option<Bar>, BarError>, u8, Option<Map>);
+
 /// Sizes a BAR; the caller has turned decoding off.
-fn size(
-    cfg: &dyn ConfigSpace,
-    a: PciAddress,
-    index: u8,
-    count: u8,
-) -> (Result<Option<Bar>, BarError>, u8) {
+fn size(cfg: &dyn ConfigSpace, a: PciAddress, index: u8, count: u8) -> SizedBar {
     let reg = BAR0 + 4 * u16::from(index);
     let lo = cfg.read32(a, reg);
     let io = lo & 1 != 0;
     let wide = !io && (lo >> 1) & 3 == 2;
     if !io && (lo >> 1) & 3 == 3 {
-        return (Err(BarError::ReservedType), 1);
+        return (Err(BarError::ReservedType), 1, None);
     }
     if wide && index + 1 >= count {
-        return (Err(BarError::Truncated), 1);
+        return (Err(BarError::Truncated), 1, None);
     }
     let hi = if wide { cfg.read32(a, reg + 4) } else { 0 };
 
@@ -122,10 +189,15 @@ fn size(
     }
 
     let slots = if wide { 2 } else { 1 };
+    let map = map_of(
+        reg,
+        (u64::from(hi) << 32) | u64::from(lo),
+        (u64::from(test_hi) << 32) | u64::from(test_lo),
+    );
     let flags: u32 = if io { 0x3 } else { 0xf };
     let bits = test_lo & !flags;
     if bits == 0 && (!wide || test_hi == 0) {
-        return (Ok(None), slots);
+        return (Ok(None), slots, map);
     }
     // The low address bits that read back as zero give the size, in the
     // BAR's own width. I/O BARs may decode only 16 bits, the upper ones
@@ -138,15 +210,15 @@ fn size(
         u64::from((!bits).wrapping_add(1))
     };
     if size == 0 || !size.is_power_of_two() {
-        return (Err(BarError::BadSize), slots);
+        return (Err(BarError::BadSize), slots, map);
     }
     let base = ((u64::from(hi) << 32) | u64::from(lo)) & !u64::from(flags);
     let base = if io { base & 0xffff_ffff } else { base };
     if base == 0 {
-        return (Err(BarError::Unassigned), slots);
+        return (Err(BarError::Unassigned), slots, map);
     }
     if base.checked_add(size).is_none() {
-        return (Err(BarError::Overflow), slots);
+        return (Err(BarError::Overflow), slots, map);
     }
     let bar = Bar {
         index,
@@ -161,28 +233,33 @@ fn size(
         size,
         prefetchable: !io && lo & 8 != 0,
     };
-    (Ok(Some(bar)), slots)
+    (Ok(Some(bar)), slots, map)
 }
+
+/// What sizing a function's BARs found: the usable BARs and the failures,
+/// and FreeBSD's records of them.
+pub type Sized = (
+    alloc::vec::Vec<Result<Bar, (u8, BarError)>>,
+    alloc::vec::Vec<Map>,
+);
 
 /// Sizes every BAR of a function with `count` BAR slots, with memory and
 /// I/O decoding off once for all of them.
-pub fn read_all(
-    cfg: &dyn ConfigSpace,
-    a: PciAddress,
-    count: u8,
-) -> alloc::vec::Vec<Result<Bar, (u8, BarError)>> {
+pub fn read_all(cfg: &dyn ConfigSpace, a: PciAddress, count: u8) -> Sized {
     with_decoding_off(cfg, a, CMD_IO | CMD_MEMORY, || {
         let mut out = alloc::vec::Vec::new();
+        let mut maps = alloc::vec::Vec::new();
         let mut i = 0;
         while i < count {
-            let (r, slots) = size(cfg, a, i, count);
+            let (r, slots, map) = size(cfg, a, i, count);
             match r {
                 Ok(Some(b)) => out.push(Ok(b)),
                 Ok(None) => {}
                 Err(e) => out.push(Err((i, e))),
             }
+            maps.extend(map);
             i += slots;
         }
-        out
+        (out, maps)
     })
 }

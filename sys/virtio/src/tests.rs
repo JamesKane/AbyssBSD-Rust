@@ -390,6 +390,7 @@ fn function(caps: &[(u8, u8, u32, u32)]) -> (Cfg, Function) {
             prefetchable: true,
         }],
         bad_bars: Vec::new(),
+        maps: Vec::new(),
         caps: list,
         ext_caps: Vec::new(),
         bridge: None,

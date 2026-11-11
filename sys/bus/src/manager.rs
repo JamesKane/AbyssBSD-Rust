@@ -2013,6 +2013,19 @@ impl Manager {
         self.topo.read(s).node(id)?.unit
     }
 
+    /// `id`'s devclass and unit (`device_get_name`, `device_get_unit`),
+    /// and whether it is attached, if it has a class and a unit.
+    #[must_use]
+    pub fn class_unit(&self, id: DeviceId, s: &Sleepable) -> Option<(&'static str, u32, bool)> {
+        let t = self.topo.read(s);
+        let n = t.node(id)?;
+        Some((
+            n.class(self.drivers)?,
+            n.unit?,
+            n.state == NodeState::Attached,
+        ))
+    }
+
     /// `id`'s name with unit (`nvme0`), if it has a driver.
     #[must_use]
     pub fn nameunit(&self, id: DeviceId, s: &Sleepable) -> Option<String> {

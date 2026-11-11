@@ -285,6 +285,9 @@ pub enum MemAttr {
     /// Uncached but write-combining (`VM_MEMATTR_WRITE_COMBINING`):
     /// frame buffers.
     WriteCombining,
+    /// Device registers: uncached, no speculation or combining
+    /// (`VM_MEMATTR_DEVICE`), for a BAR mapped through `/dev/pci`.
+    Device,
 }
 
 /// A device object's physical pages.

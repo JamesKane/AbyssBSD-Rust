@@ -47,6 +47,7 @@ pub mod mount;
 pub mod mouse;
 pub mod net;
 pub mod netlink;
+pub mod pciio;
 pub mod procctl;
 pub mod procdesc;
 pub mod ptrace;

@@ -3,6 +3,37 @@
 
 use devtree::strings::PciAddress;
 
+/// The width of one configuration access.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Width {
+    Byte,
+    Word,
+    Dword,
+}
+
+impl Width {
+    /// The width of `n` bytes: 1, 2, or 4.
+    #[must_use]
+    pub fn of(n: i32) -> Option<Self> {
+        match n {
+            1 => Some(Self::Byte),
+            2 => Some(Self::Word),
+            4 => Some(Self::Dword),
+            _ => None,
+        }
+    }
+
+    /// Its bytes.
+    #[must_use]
+    pub fn bytes(self) -> u16 {
+        match self {
+            Self::Byte => 1,
+            Self::Word => 2,
+            Self::Dword => 4,
+        }
+    }
+}
+
 /// 32-bit access to functions' configuration space. Offsets are dword
 /// aligned; narrower accesses are derived. An implementation returns
 /// all-ones for a function that is not there, as hardware does.
@@ -27,6 +58,36 @@ pub trait ConfigSpace {
     /// Reads the byte at `offset`.
     fn read8(&self, a: PciAddress, offset: u16) -> u8 {
         (self.read32(a, offset & !3) >> ((offset & 3) * 8)) as u8
+    }
+
+    /// Reads `width` bytes at `offset`, aligned to `width`, as one access
+    /// where the mechanism has narrow accesses (FreeBSD's
+    /// `pci_read_config`). Outside configuration space: all-ones.
+    fn read_width(&self, a: PciAddress, offset: u16, width: Width) -> u32 {
+        match width {
+            Width::Byte => u32::from(self.read8(a, offset)),
+            Width::Word => u32::from(self.read16(a, offset)),
+            Width::Dword => self.read32(a, offset),
+        }
+    }
+
+    /// Writes `width` bytes at `offset`, aligned to `width`, as one access
+    /// where the mechanism has narrow accesses (FreeBSD's
+    /// `pci_write_config`). The default rewrites the rest of the dword,
+    /// as read.
+    fn write_width(&self, a: PciAddress, offset: u16, width: Width, v: u32) {
+        let shift = 8 * u32::from(offset & 3);
+        let mask = match width {
+            Width::Byte => 0xff,
+            Width::Word => 0xffff,
+            Width::Dword => u32::MAX,
+        };
+        if mask == u32::MAX {
+            self.write32(a, offset, v);
+            return;
+        }
+        let old = self.read32(a, offset & !3) & !(mask << shift);
+        self.write32(a, offset & !3, old | (v & mask) << shift);
     }
 
     /// Writes the word at `offset` (2-byte aligned), preserving its
@@ -99,12 +160,18 @@ impl Ecam {
     }
 
     fn addr(&self, a: PciAddress, offset: u16) -> Option<*mut u32> {
+        self.addr_of(a, offset, Width::Dword)
+    }
+
+    /// The address of a `width` access at `offset`, which must be aligned
+    /// to it.
+    fn addr_of<T>(&self, a: PciAddress, offset: u16, width: Width) -> Option<*mut T> {
         if a.domain != self.segment
             || !self.buses().contains(&a.bus)
             || a.slot > 31
             || a.function > 7
             || offset >= 4096
-            || offset & 3 != 0
+            || !offset.is_multiple_of(width.bytes())
         {
             return None;
         }
@@ -117,6 +184,43 @@ impl Ecam {
 }
 
 impl ConfigSpace for Ecam {
+    // ECAM takes byte and word accesses (PCIe Base §7.2.2), as FreeBSD's
+    // `generic_pcie_read_config` and `pciereg_cfgread` make them.
+    fn read_width(&self, a: PciAddress, offset: u16, width: Width) -> u32 {
+        match width {
+            Width::Dword => self.read32(a, offset),
+            Width::Word => match self.addr_of::<u16>(a, offset, width) {
+                // SAFETY: inside the mapped window, aligned (checked by
+                // `addr_of`), per `new`'s contract.
+                Some(p) => u32::from(unsafe { p.read_volatile() }),
+                None => u32::MAX,
+            },
+            Width::Byte => match self.addr_of::<u8>(a, offset, width) {
+                // SAFETY: as above.
+                Some(p) => u32::from(unsafe { p.read_volatile() }),
+                None => u32::MAX,
+            },
+        }
+    }
+
+    fn write_width(&self, a: PciAddress, offset: u16, width: Width, v: u32) {
+        match width {
+            Width::Dword => self.write32(a, offset, v),
+            Width::Word => {
+                if let Some(p) = self.addr_of::<u16>(a, offset, width) {
+                    // SAFETY: as in `read_width`.
+                    unsafe { p.write_volatile(v as u16) }
+                }
+            }
+            Width::Byte => {
+                if let Some(p) = self.addr_of::<u8>(a, offset, width) {
+                    // SAFETY: as in `read_width`.
+                    unsafe { p.write_volatile(v as u8) }
+                }
+            }
+        }
+    }
+
     fn read32(&self, a: PciAddress, offset: u16) -> u32 {
         match self.addr(a, offset) {
             // SAFETY: inside the mapped window (checked by `addr`), per

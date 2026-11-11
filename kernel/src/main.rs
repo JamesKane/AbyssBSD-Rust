@@ -61,6 +61,7 @@ mod mm;
 mod net;
 mod panic;
 mod pci;
+mod pciio;
 mod power;
 mod prison;
 mod proc;

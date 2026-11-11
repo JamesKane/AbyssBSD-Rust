@@ -60,6 +60,8 @@ pub struct PciChild {
     pub function: Function,
     /// The bus it is on (a bridge routes its interrupts through it).
     pub(crate) bus: Arc<PciBusData>,
+    /// Its VPD, once read (`/dev/pci`).
+    pub(crate) vpd: sync::Once<Option<crate::vpd::Vpd>>,
 }
 
 impl core::fmt::Debug for PciChild {
@@ -361,8 +363,10 @@ impl Driver for PciBus {
                 cfg: self.data.cfg,
                 function: f,
                 bus: Arc::clone(&self.data),
+                vpd: sync::Once::new(),
             });
             let id = cx.add_child(ident, Some(Arc::clone(&child) as _), res);
+            crate::user::add(id, Arc::clone(&child));
             if let Some(rid) = rid {
                 cx.set_requester_id(id, rid);
                 cx.set_requester_hook(id, child);
@@ -371,7 +375,10 @@ impl Driver for PciBus {
         Ok(())
     }
 
-    fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
+    fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {
+        // Its children go with it (`pci_delete_child`).
+        crate::user::remove_bus(self.domain, self.bus);
+    }
 }
 
 /// The declaration for the build's driver table.

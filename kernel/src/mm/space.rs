@@ -154,6 +154,7 @@ const fn attrs(prot: Prot, attr: MemAttr) -> Attrs {
         cache: match attr {
             MemAttr::WriteBack => Cache::WriteBack,
             MemAttr::WriteCombining => Cache::WriteCombining,
+            MemAttr::Device => Cache::Device,
         },
     }
 }

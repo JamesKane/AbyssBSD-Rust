@@ -120,7 +120,23 @@ fn bars_are_sized_with_decoding_off_and_restored() {
     f.regs.insert(0x20, 0xc001);
     f.bar_masks.insert(0x20, 0x0000_ffe0);
     fake.add(0, 3, 0, f);
-    let bars = bar::read_all(&fake, addr(0, 3, 0), 6);
+    let (bars, maps) = bar::read_all(&fake, addr(0, 3, 0), 6);
+    // FreeBSD's records: value with type bits, log2 size.
+    let m = |reg, value, size_log2| bar::Map {
+        reg,
+        value,
+        size_log2,
+    };
+    assert_eq!(
+        maps,
+        [
+            m(0x10, 0xfe00_0000, 14),
+            m(0x18, 0x8_0000_000c, 20),
+            m(0x20, 0xc001, 5)
+        ]
+    );
+    assert_eq!((maps[1].base(), maps[1].size()), (0x8_0000_0000, 0x10_0000));
+    assert_eq!((maps[2].base(), maps[2].is_memory()), (0xc000, false));
     assert_eq!(
         bars,
         vec![
@@ -175,7 +191,16 @@ fn hostile_bars_are_rejected() {
     // Reserved memory type.
     f.regs.insert(0x14, 0x6);
     fake.add(0, 1, 0, f);
-    let bars = bar::read_all(&fake, addr(0, 1, 0), 6);
+    let (bars, maps) = bar::read_all(&fake, addr(0, 1, 0), 6);
+    // FreeBSD records the odd-sized BAR by its lowest bit, nothing else.
+    assert_eq!(
+        maps,
+        [bar::Map {
+            reg: 0x10,
+            value: 0xfe00_0000,
+            size_log2: 13
+        }]
+    );
     assert_eq!(
         bars,
         vec![
@@ -401,6 +426,7 @@ fn drivers_write_only_device_registers() {
             prefetchable: false,
         }],
         bad_bars: Vec::new(),
+        maps: Vec::new(),
         caps: vec![
             Capability {
                 id: caps::id::MSIX,
@@ -424,6 +450,7 @@ fn drivers_write_only_device_registers() {
         depth: 0,
     };
     let child = PciChild {
+        vpd: sync::Once::new(),
         cfg,
         function,
         bus: Arc::new(PciBusData {
@@ -635,6 +662,7 @@ fn msi_function() -> crate::bus::PciChild {
             prefetchable: false,
         }],
         bad_bars: Vec::new(),
+        maps: Vec::new(),
         caps: vec![
             Capability {
                 id: caps::id::MSIX,
@@ -650,6 +678,7 @@ fn msi_function() -> crate::bus::PciChild {
         depth: 0,
     };
     PciChild {
+        vpd: sync::Once::new(),
         cfg,
         function,
         bus: Arc::new(PciBusData {
@@ -746,3 +775,5 @@ fn messages_go_through_the_functions_domain() {
     );
     assert_eq!(Arc::strong_count(&broken), 2);
 }
+
+mod dev_pci;

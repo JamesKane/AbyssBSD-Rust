@@ -11,6 +11,7 @@
 //! - [`bus`]: the `pci` bus driver.
 //! - [`bridge`]: the PCI-PCI bridge driver.
 //! - [`msi`]: MSI and MSI-X as an interrupt domain.
+//! - [`user`]: what `/dev/pci` reports; [`vpd`]: Vital Product Data.
 //!
 //! Everything read from a device is untrusted: lists are walked with
 //! bounds, BARs are validated, and a function reading all-ones is absent.
@@ -36,6 +37,8 @@ pub mod enumerate;
 pub mod header;
 pub mod msi;
 pub mod requester;
+pub mod user;
+pub mod vpd;
 
 pub use bar::{Bar, BarError, BarKind};
 pub use caps::{Capability, ExtCapability};

@@ -16,6 +16,8 @@ pub mod id {
     pub const MSI: u8 = 0x05;
     /// Vendor specific (virtio uses it).
     pub const VENDOR: u8 = 0x09;
+    /// A bridge's subsystem IDs.
+    pub const SUBVENDOR: u8 = 0x0d;
     /// PCI Express.
     pub const PCIE: u8 = 0x10;
     /// MSI-X.
