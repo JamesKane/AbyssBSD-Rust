@@ -348,8 +348,8 @@ default) it never wins an interface. `tests/user/hidraw.c` checks it here and on
   entry's first code. `sys/hid::hidmap` builds the evdev device from the items, starts the reports
   at the first open and stops them at the last close, and adds `dev.<driver>.N.debug` (15.1's
   GENERIC has `HID_DEBUG`). The ktest `hcons_and_hsctrl_on_a_media_key_interface` attaches a
-  `hidbus` over a test transport with `hid::MEDIA_KEYS` (the board keyboard's collections: a
-  Consumer Control array and System Control bits) and the board keyboard's identity, and
+  `hidbus` over a test transport with the board keyboard's interface 1 (`hid::OPI6P_KEYBOARD_MEDIA`,
+  captured on the board: Consumer Control and System Control as bits) and its identity, and
   `tests/user/hcons.c` checks the nodes' identity, bits, sysctls, and attach lines and reads the
   events its reports become. QEMU has no USB device with these collections.
 - `virtio-input` (`vtinputN`, after FreeBSD's `vtblk` and `vtrnd`) reads the device's name,

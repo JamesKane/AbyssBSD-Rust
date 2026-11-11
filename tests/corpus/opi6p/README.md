@@ -32,6 +32,7 @@ was written to the board's disk.
 | `ifconfig-a.txt` | `ifconfig -a` |
 | `storage.txt` | `nvmecontrol devlist; nvmecontrol identify nvme0; camcontrol devlist; geom disk list; gpart show` |
 | `efi.txt` | `efibootmgr -v; efivar -l` |
+| `kbd-consumer-hid.txt` | The USB keyboard's (Microdia `0c45:0133`, `ugen7.4`) interface 1 report descriptor, the one `hcons0` and `hsctrl0` attach to: `usbconfig -d ugen7.4 do_request 0x81 0x06 0x2200 1 66` (`GET_DESCRIPTOR` of the HID report descriptor, interface 1, 66 bytes), then FreeBSD's `usbhidctl -r` parse of it. Captured 2026-11-10 |
 
 This build's `acpidump` has no `-b`, so the binary tables come from Linux. Do not read them through
 `/dev/mem` on FreeBSD: that panicked the board.

@@ -3,14 +3,15 @@
  *
  * hcons: hcons(4) and hsctrl(4), FreeBSD's consumer-control and
  * system-control HID drivers, through their evdev nodes. With "inject",
- * the kernel test has attached a keyboard's media-key interface (report 1:
- * Consumer Control, two 16-bit slots indexing usages 0 to 0x3ff; report
- * 2: System Control's Power Down, Sleep, and Wake Up bits) with the
- * Orange Pi 6 Plus keyboard's identity, Microdia 0c45:0133, and sends
- * the reports listed below once both nodes are open. This finds the nodes
+ * the kernel test has attached the Orange Pi 6 Plus keyboard's media-key
+ * interface (Microdia 0c45:0133, interface 1; report 1: Consumer
+ * Control, eight bits for Next, Previous, Play/Pause, Mute, Volume Up and
+ * Down, Home, and Mail; report 2: System Control's Power Down, Sleep, and
+ * Wake Up bits) with its identity, and sends the reports listed below
+ * once both nodes are open. This finds the nodes
  * by EVIOCGPHYS and checks each one's name, uniq (none), and id, its event
- * types and keys (all 148 keys hcons_map has for usages up to 0x3ff;
- * hsctrl's three), the attach lines in the message buffer, the devices'
+ * types and keys (the eight keys hcons_map has for its bits; hsctrl's
+ * three), the attach lines in the message buffer, the devices'
  * dev.hcons.N and dev.hsctrl.N sysctls and kern.evdev.input.M, and then
  * reads the events the reports become, as FreeBSD's hidmap pushes them.
  *
@@ -55,20 +56,15 @@ struct ev {
 #define	SYN	{ EV_SYN, SYN_REPORT, 1 }
 
 /*
- * Consumer Control's reports (slot 0, slot 1):
- *   Mute, -; Mute, Volume Up; Volume Up, -; -, -; Sleep, Sleep Mode;
- *   Brightness Up, Play/Pause; -, -.
- * Two usages of one key merge; a report's keys go out in code order.
+ * Consumer Control's reports: Mute; Mute and Volume Up; Play/Pause and
+ * Home; none. A report's keys go out in its bits' order.
  */
 static const struct ev hcons_events[] = {
 	{ EV_KEY, KEY_MUTE, 1 }, SYN,
 	{ EV_KEY, KEY_VOLUMEUP, 1 }, SYN,
-	{ EV_KEY, KEY_MUTE, 0 }, SYN,
-	{ EV_KEY, KEY_VOLUMEUP, 0 }, SYN,
-	{ EV_KEY, KEY_SLEEP, 1 }, SYN,
-	{ EV_KEY, KEY_SLEEP, 0 }, { EV_KEY, KEY_PLAYPAUSE, 1 },
-	    { EV_KEY, KEY_BRIGHTNESSUP, 1 }, SYN,
-	{ EV_KEY, KEY_PLAYPAUSE, 0 }, { EV_KEY, KEY_BRIGHTNESSUP, 0 }, SYN,
+	{ EV_KEY, KEY_PLAYPAUSE, 1 }, { EV_KEY, KEY_MUTE, 0 },
+	    { EV_KEY, KEY_VOLUMEUP, 0 }, { EV_KEY, KEY_HOMEPAGE, 1 }, SYN,
+	{ EV_KEY, KEY_PLAYPAUSE, 0 }, { EV_KEY, KEY_HOMEPAGE, 0 }, SYN,
 };
 
 /* System Control's: Power Down; none; Sleep and Wake Up; none. */
@@ -164,15 +160,12 @@ check_node(int fd, const char *driver, int unit, int event,
 	CHECK(ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(keys)), keys) >= 0, "%s",
 	    strerror(errno));
 	if (strcmp(driver, "hcons") == 0) {
-		CHECK(count(keys, KEY_CNT) == 148, "hcons has %d keys",
+		CHECK(count(keys, KEY_CNT) == 8 && bit(keys, KEY_NEXTSONG) &&
+		    bit(keys, KEY_PREVIOUSSONG) && bit(keys, KEY_PLAYPAUSE) &&
+		    bit(keys, KEY_MUTE) && bit(keys, KEY_VOLUMEUP) &&
+		    bit(keys, KEY_VOLUMEDOWN) && bit(keys, KEY_HOMEPAGE) &&
+		    bit(keys, KEY_MAIL), "hcons has %d keys",
 		    count(keys, KEY_CNT));
-		CHECK(bit(keys, KEY_MUTE) && bit(keys, KEY_VOLUMEUP) &&
-		    bit(keys, KEY_VOLUMEDOWN) && bit(keys, KEY_BRIGHTNESSUP) &&
-		    bit(keys, KEY_BRIGHTNESSDOWN) && bit(keys, KEY_PLAYPAUSE) &&
-		    bit(keys, KEY_NEXTSONG) && bit(keys, KEY_CALC) &&
-		    bit(keys, KEY_SLEEP) && bit(keys, KEY_POWER) &&
-		    bit(keys, BTN_MISC) && bit(keys, KEY_SCALE) &&
-		    !bit(keys, KEY_A), "hcons keys");
 	} else {
 		CHECK(count(keys, KEY_CNT) == 3 && bit(keys, KEY_POWER) &&
 		    bit(keys, KEY_SLEEP) && bit(keys, KEY_WAKEUP),

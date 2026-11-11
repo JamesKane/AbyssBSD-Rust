@@ -1,0 +1,20 @@
+REQUEST = <0x05 0x0c 0x09 0x01 0xa1 0x01 0x85 0x01 0x15 0x00 0x25 0x01 0x75 0x01 0x95 0x08 0x09 0xb5 0x09 0xb6 0x09 0xcd 0x09 0xe2 0x09 0xe9 0x09 0xea 0x0a 0x23 0x02 0x0a 0x8a 0x01 0x81 0x02 0xc0 0x05 0x01 0x09 0x80 0xa1 0x01 0x85 0x02 0x05 0x01 0x19 0x81 0x29 0x83 0x15 0x00 0x25 0x01 0x75 0x01 0x95 0x03 0x81 0x06 0x95 0x05 0x81 0x01 0xc0><%u#)%u>
+Report descriptor:
+Collection type=Application page=Consumer usage=Consumer_Control
+Input   rid=1 pos=0 size=1 count=1 page=Consumer usage=Scan_Next_Track, logical range 0..1
+Input   rid=1 pos=1 size=1 count=1 page=Consumer usage=Scan_Previous_Track, logical range 0..1
+Input   rid=1 pos=2 size=1 count=1 page=Consumer usage=Play/Pause, logical range 0..1
+Input   rid=1 pos=3 size=1 count=1 page=Consumer usage=Mute, logical range 0..1
+Input   rid=1 pos=4 size=1 count=1 page=Consumer usage=Volume_Increment, logical range 0..1
+Input   rid=1 pos=5 size=1 count=1 page=Consumer usage=Volume_Decrement, logical range 0..1
+Input   rid=1 pos=6 size=1 count=1 page=Consumer usage=AC_Home, logical range 0..1
+Input   rid=1 pos=7 size=1 count=1 page=Consumer usage=AL_Email_Reader, logical range 0..1
+End collection
+Collection type=Application page=Generic_Desktop usage=System_Control
+Input   rid=2 pos=0 size=1 count=1 page=Generic_Desktop usage=System_Power_Down, logical range 0..1
+Input   rid=2 pos=1 size=1 count=1 page=Generic_Desktop usage=System_Sleep, logical range 0..1
+Input   rid=2 pos=2 size=1 count=1 page=Generic_Desktop usage=System_Wake_Up, logical range 0..1
+End collection
+Total   input size 2 bytes
+Total  output size 0 bytes
+Total feature size 0 bytes

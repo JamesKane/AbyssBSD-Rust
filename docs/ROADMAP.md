@@ -2814,11 +2814,11 @@ no hangs, no reboot loops, nothing that needs the screen, and P8's remaining exi
     tables: volume, mute, media, brightness, and application keys, power, sleep, and wake as
     evdev key events (USB.md §6.2), FreeBSD's attach lines, descriptions, pnpinfo, `dev.*.N.debug`,
     and evdev identity. The power key is evdev's alone, as on FreeBSD. Host tests drive the tables
-    with a media-key descriptor laid out as the board keyboard's interface 1 and four other forms
-    (relative and absolute Volume, a bitmap, a System Control array); the ktest attaches it over
-    a test transport and `tests/user/hcons` reads FreeBSD's events from the nodes, both arches.
-    The board keyboard's own report descriptor is not in the corpus (Linux's `lsusb` could not
-    read it), so its exact layout is still to be checked on the board.
+    with the board keyboard's interface 1 descriptor (captured on the board under FreeBSD,
+    `tests/corpus/opi6p/freebsd/kbd-consumer-hid.txt`) and five other forms (an array of usages
+    with merged keys, relative and absolute Volume, a bitmap, a System Control array); the ktest
+    attaches the board's over a test transport and `tests/user/hcons` reads FreeBSD's events
+    from the nodes, both arches.
   - Progress 2026-11-10 (`/dev/geom.ctl` and `/dev/full`, in QEMU, both architectures):
     `GEOM_CTL` as `geom_ctl.c` takes it (`struct gctl_req` held to 15.1's header by
     `abi-check`), run on GEOM's event thread; `getxml` for every class, and the PART class's

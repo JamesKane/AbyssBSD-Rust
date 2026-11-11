@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! `hsctrl`'s table through `hidmap`, on a media-key interface laid out as
-//! the board keyboard's, and on an array form. Each expectation is what
+//! `hsctrl`'s table through `hidmap`, on the board keyboard's media-key
+//! interface and on an array form. Each expectation is what
 //! FreeBSD 15.1's `hidmap_intr` pushes to evdev for the report.
 
 extern crate std;
 
 use abi::evdev as ev;
 use hid::hidmap::{Hidmap, Recorder, probe};
-use hid::{Descriptor, MEDIA_KEYS};
+use hid::{Descriptor, OPI6P_KEYBOARD_MEDIA};
 
 use super::MAP;
 
@@ -26,23 +26,27 @@ fn attach(d: &Descriptor, tlc: usize) -> (Hidmap, Recorder) {
 }
 
 #[test]
-fn media_keys_system_collection_is_hsctrl_only() {
-    let d = Descriptor::parse(MEDIA_KEYS).unwrap();
+fn board_system_collection_is_hsctrl_only() {
+    let d = Descriptor::parse(OPI6P_KEYBOARD_MEDIA).unwrap();
     assert_eq!(d.collections[1].usage, super::SYSTEM_CONTROL);
-    // Power Down, Sleep, and Wake Up; the padding is not a value.
+    // Power Down, Sleep, and Wake Up; the padding is not a value. The
+    // bits are relative (Input 0x06), which hsctrl's keys take: their
+    // entries are `HIDMAP_KEY`, relative or absolute alike.
     assert_eq!(probe(&d, 1, &MAP).0, 3);
     assert_eq!(probe(&d, 0, &MAP).0, 0);
 }
 
 #[test]
 fn power_sleep_and_wake_bits() {
-    let d = Descriptor::parse(MEDIA_KEYS).unwrap();
+    let d = Descriptor::parse(OPI6P_KEYBOARD_MEDIA).unwrap();
     let (mut m, mut r) = attach(&d, 1);
     assert_eq!(r.types, [ev::EV_KEY]);
     assert_eq!(r.keys, [ev::KEY_POWER, ev::KEY_SLEEP, ev::KEY_WAKEUP]);
     assert!(!m.merges_keys());
     assert!(m.items().iter().all(|i| i.id == 2));
-    // The power key, pressed and released: evdev events, nothing else.
+    // The power key, pressed and released: evdev events, nothing else. A
+    // key compares with its last value even when relative, so a held bit
+    // is not pressed again.
     m.intr(2, &[0b001], &mut r);
     assert_eq!(r.take(), [key(ev::KEY_POWER, 1), SYN]);
     m.intr(2, &[0b000], &mut r);

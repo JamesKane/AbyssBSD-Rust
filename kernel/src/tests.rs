@@ -6876,9 +6876,9 @@ impl MediaKeys {
 }
 
 ktest! {
-    /// `hcons` and `hsctrl` on a keyboard's media-key interface laid out
-    /// as the board keyboard's (`hid::MEDIA_KEYS`, with Microdia
-    /// `0c45:0133`'s identity): each attaches to its collection with
+    /// `hcons` and `hsctrl` on the board keyboard's media-key interface
+    /// (`hid::OPI6P_KEYBOARD_MEDIA`, with Microdia `0c45:0133`'s
+    /// identity): each attaches to its collection with
     /// FreeBSD's description, pnpinfo, and location, and
     /// `tests/user/hcons.c` reads the reports below from their evdev nodes
     /// as FreeBSD's events (the program lists them).
@@ -6891,7 +6891,7 @@ ktest! {
             sink: sync::SpinLock::new(None),
             starts: core::sync::atomic::AtomicUsize::new(0),
         });
-        let desc = hid::Descriptor::parse(hid::MEDIA_KEYS).expect("descriptor");
+        let desc = hid::Descriptor::parse(hid::OPI6P_KEYBOARD_MEDIA).expect("descriptor");
         let data = hidbus::HidbusData {
             transport: Arc::clone(&keys) as Arc<dyn hidbus::HidTransport>,
             desc: Arc::new(desc),
@@ -6905,8 +6905,8 @@ ktest! {
             },
             name: "vendor 0x0c45 product 0x0133".into(),
             serial: alloc::string::String::new(),
-            raw: hid::MEDIA_KEYS.into(),
-            rdesc_size: u16::try_from(hid::MEDIA_KEYS.len()).unwrap(),
+            raw: hid::OPI6P_KEYBOARD_MEDIA.into(),
+            rdesc_size: u16::try_from(hid::OPI6P_KEYBOARD_MEDIA.len()).unwrap(),
         };
         let bus = m.add_child(&s, m.root(), Ident::Nexus("hidbus"), Some(Arc::new(data)), alloc::vec![], &[]);
         m.wait_idle(&s);
@@ -6945,17 +6945,14 @@ ktest! {
                 assert!(crate::time::now_ns() < deadline, "tests/user/hcons.c never opened both nodes");
                 crate::time::sleep_ns(&s, 10_000_000);
             }
-            // The program's list: Consumer Control's two slots
-            // (little-endian usages), then System Control's bits. Each
-            // node's events fit its clients' ring, read or not.
+            // The program's list: Consumer Control's bits, then System
+            // Control's. Each node's events fit its clients' ring, read
+            // or not.
             for r in [
-                &[1, 0xe2, 0, 0, 0][..],
-                &[1, 0xe2, 0, 0xe9, 0],
-                &[1, 0xe9, 0, 0, 0],
-                &[1, 0, 0, 0, 0],
-                &[1, 0x32, 0, 0x34, 0],
-                &[1, 0x6f, 0, 0xcd, 0],
-                &[1, 0, 0, 0, 0],
+                &[1, 0x08][..],
+                &[1, 0x18],
+                &[1, 0x44],
+                &[1, 0x00],
                 &[2, 0b001],
                 &[2, 0b000],
                 &[2, 0b110],

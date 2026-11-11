@@ -166,3 +166,29 @@ fn an_empty_descriptor_parses_to_nothing() {
     assert!(d.collections.is_empty());
     assert!(d.fields.is_empty());
 }
+
+/// The board keyboard's descriptor is the corpus's capture, byte for
+/// byte, and parses into its two collections.
+#[test]
+fn opi6p_keyboard_media_is_the_captured_descriptor() {
+    let text = include_str!("../../../tests/corpus/opi6p/freebsd/kbd-consumer-hid.txt");
+    let line = text
+        .lines()
+        .find_map(|l| l.strip_prefix("REQUEST = <"))
+        .expect("the do_request line");
+    let bytes: Vec<u8> = line
+        .split('>')
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .map(|b| u8::from_str_radix(b.trim_start_matches("0x"), 16).unwrap())
+        .collect();
+    assert_eq!(bytes, crate::OPI6P_KEYBOARD_MEDIA);
+    let d = Descriptor::parse(crate::OPI6P_KEYBOARD_MEDIA).unwrap();
+    assert_eq!(d.collections.len(), 2);
+    assert_eq!(d.collections[0].usage, 0x000c_0001);
+    assert_eq!(d.collections[1].usage, 0x0001_0080);
+    assert!(d.uses_ids);
+    assert_eq!(d.report_len(Kind::Input, 1), 1);
+    assert_eq!(d.report_len(Kind::Input, 2), 1);
+}

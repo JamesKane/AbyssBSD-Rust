@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! `hcons`'s table through `hidmap`, on a media-key interface laid out as
-//! the board keyboard's, and on the other forms Consumer Control takes.
+//! `hcons`'s table through `hidmap`, on the board keyboard's media-key
+//! interface and on the other forms Consumer Control takes.
 //! Each expectation is what FreeBSD 15.1's `hidmap_intr` pushes to evdev
 //! for the report.
 
@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 
 use abi::evdev as ev;
 use hid::hidmap::{Hidmap, Recorder, probe};
-use hid::{Descriptor, MEDIA_KEYS};
+use hid::{Descriptor, OPI6P_KEYBOARD_MEDIA};
 
 use super::MAP;
 
@@ -31,6 +31,16 @@ fn attach(d: &Descriptor, tlc: usize) -> (Hidmap, Recorder) {
     (m, r)
 }
 
+/// A media-key interface as an array: Consumer Control as report 1, two
+/// 16-bit slots indexing usages 0 to 0x3ff, then System Control's three
+/// bits as report 2.
+const MEDIA_ARRAY: &[u8] = &[
+    0x05, 0x0c, 0x09, 0x01, 0xa1, 0x01, 0x85, 0x01, 0x19, 0x00, 0x2a, 0xff, 0x03, 0x15, 0x00, 0x26,
+    0xff, 0x03, 0x75, 0x10, 0x95, 0x02, 0x81, 0x00, 0xc0, 0x05, 0x01, 0x09, 0x80, 0xa1, 0x01, 0x85,
+    0x02, 0x19, 0x81, 0x29, 0x83, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x03, 0x81, 0x02, 0x95,
+    0x05, 0x81, 0x01, 0xc0,
+];
+
 /// Report 1 with the two slots' usages.
 fn slots(a: u16, b: u16) -> Vec<u8> {
     let (a, b) = (a.to_le_bytes(), b.to_le_bytes());
@@ -38,8 +48,8 @@ fn slots(a: u16, b: u16) -> Vec<u8> {
 }
 
 #[test]
-fn media_keys_consumer_collection_is_hcons_only() {
-    let d = Descriptor::parse(MEDIA_KEYS).unwrap();
+fn array_consumer_collection_is_hcons_only() {
+    let d = Descriptor::parse(MEDIA_ARRAY).unwrap();
     assert_eq!(d.collections.len(), 2);
     assert_eq!(d.collections[0].usage, super::CONSUMER_CONTROL);
     // Two array slots, each mapped.
@@ -50,7 +60,7 @@ fn media_keys_consumer_collection_is_hcons_only() {
 
 #[test]
 fn supports_every_key_in_the_slots_range_once() {
-    let d = Descriptor::parse(MEDIA_KEYS).unwrap();
+    let d = Descriptor::parse(MEDIA_ARRAY).unwrap();
     let (m, r) = attach(&d, 0);
     assert_eq!(r.types, [ev::EV_KEY]);
     // Every key entry (usages 0 to 0x3ff cover the table), each code
@@ -78,8 +88,8 @@ fn supports_every_key_in_the_slots_range_once() {
 }
 
 #[test]
-fn media_keys_reports_become_freebsds_events() {
-    let d = Descriptor::parse(MEDIA_KEYS).unwrap();
+fn array_reports_become_freebsds_events() {
+    let d = Descriptor::parse(MEDIA_ARRAY).unwrap();
     let (mut m, mut r) = attach(&d, 0);
     let mut send = |a: u16, b: u16| {
         m.intr(1, &slots(a, b), &mut r);
@@ -130,7 +140,7 @@ fn media_keys_reports_become_freebsds_events() {
 
 #[test]
 fn other_reports_and_short_ones() {
-    let d = Descriptor::parse(MEDIA_KEYS).unwrap();
+    let d = Descriptor::parse(MEDIA_ARRAY).unwrap();
     let (mut m, mut r) = attach(&d, 0);
     // Report 2 is System Control's.
     m.intr(2, &[0x01], &mut r);
@@ -247,5 +257,68 @@ fn variable_bits_report_each_change() {
     );
     // The unmapped bit changes nothing.
     m.intr(4, &[0b1100_0001], &mut r);
+    assert_eq!(r.take(), []);
+}
+
+/// The board keyboard's interface (`tests/corpus/opi6p/freebsd/kbd-consumer-hid.txt`):
+/// eight variable bits, each a key, with no two on one key.
+#[test]
+fn board_keyboard_maps_its_eight_bits() {
+    let d = Descriptor::parse(OPI6P_KEYBOARD_MEDIA).unwrap();
+    assert_eq!(probe(&d, 0, &MAP).0, 8);
+    assert_eq!(probe(&d, 1, &MAP).0, 0);
+    let (mut m, mut r) = attach(&d, 0);
+    assert_eq!(r.types, [ev::EV_KEY]);
+    assert_eq!(
+        r.keys,
+        [
+            ev::KEY_NEXTSONG,
+            ev::KEY_PREVIOUSSONG,
+            ev::KEY_PLAYPAUSE,
+            ev::KEY_MUTE,
+            ev::KEY_VOLUMEUP,
+            ev::KEY_VOLUMEDOWN,
+            ev::KEY_HOMEPAGE,
+            ev::KEY_MAIL
+        ]
+    );
+    assert!(!m.merges_keys());
+    assert!(m.items().iter().all(|i| i.id == 1));
+    let mut send = |b: u8| {
+        m.intr(1, &[b], &mut r);
+        r.take()
+    };
+    // The reports the ktest sends and tests/user/hcons.c expects...
+    assert_eq!(send(0x08), [key(ev::KEY_MUTE, 1), SYN]);
+    assert_eq!(send(0x18), [key(ev::KEY_VOLUMEUP, 1), SYN]);
+    assert_eq!(
+        send(0x44),
+        [
+            key(ev::KEY_PLAYPAUSE, 1),
+            key(ev::KEY_MUTE, 0),
+            key(ev::KEY_VOLUMEUP, 0),
+            key(ev::KEY_HOMEPAGE, 1),
+            SYN
+        ]
+    );
+    assert_eq!(
+        send(0),
+        [key(ev::KEY_PLAYPAUSE, 0), key(ev::KEY_HOMEPAGE, 0), SYN]
+    );
+    // ...and the other bits, in bit order; a report that changes nothing
+    // reports nothing.
+    assert_eq!(
+        send(0xa3),
+        [
+            key(ev::KEY_NEXTSONG, 1),
+            key(ev::KEY_PREVIOUSSONG, 1),
+            key(ev::KEY_VOLUMEDOWN, 1),
+            key(ev::KEY_MAIL, 1),
+            SYN
+        ]
+    );
+    assert_eq!(send(0xa3), []);
+    // System Control's report is not this collection's.
+    m.intr(2, &[1], &mut r);
     assert_eq!(r.take(), []);
 }
