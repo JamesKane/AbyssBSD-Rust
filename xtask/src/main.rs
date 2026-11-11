@@ -26,6 +26,7 @@ mod qemu;
 mod qmp;
 mod remote;
 mod rgegen;
+mod rman;
 mod syscalls;
 mod test;
 mod ufsverify;
@@ -69,8 +70,9 @@ commands:
   fetch-base  [--arch <a|all>]                           FreeBSD base.txz: /rescue image, sysroot (server only)
   acpidump    --arch <a> [--vmm qemu|bhyve] [--machine M] [--iommu] --out DIR
                                                          capture a VM's ACPI tables
-  freebsd-record [--out DIR] [--usb]                     record FreeBSD's device tree in bhyve; --usb: its USB
-                                                         and input devices, in QEMU and bhyve (server only)
+  freebsd-record [--out DIR] [--usb | --shell-vm]        record FreeBSD's device tree in bhyve; --usb: its USB
+                                                         and input devices, in QEMU and bhyve; --shell-vm: its
+                                                         resources (devinfo -u, -rv) in the shell VMs (server only)
   fs-image    --fs ufs2|msdos --out IMG [--from DIR] [--size S] [--softdep]
                                                          make a file-system image with FreeBSD's tools (server only)
   fs-check    --fs ufs2|msdos IMG                        fsck an image read-only; fails unless clean (server only)

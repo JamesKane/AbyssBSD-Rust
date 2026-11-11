@@ -811,6 +811,7 @@ fn shell(
                     }
                 }
                 session.script(crate::expect::SYSINFO, Duration::from_secs(120))?;
+                session.script(crate::rman::STEPS, Duration::from_secs(120))?;
                 session.script(&crate::diff::steps(), Duration::from_secs(900))?;
                 if !quick {
                     session.script(crate::expect::DYNAMIC_TESTS, Duration::from_secs(900))?;
@@ -836,6 +837,11 @@ fn shell(
             .map_err(|e| e.to_string()),
         Ok(()) if ufs_root => crate::diff::verdict(arch, &console)
             .map(|n| println!("{arch}-shell{suffix}: {n} differential scenarios as on FreeBSD"))
+            .and_then(|()| {
+                crate::rman::verdict(arch, vmm, &console).map(|n| {
+                    println!("{arch}-shell{suffix}: {n} devices' resources as on FreeBSD");
+                })
+            })
             .and_then(|()| {
                 if quick {
                     return Ok(());

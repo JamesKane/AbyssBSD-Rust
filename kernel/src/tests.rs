@@ -2991,6 +2991,201 @@ fn check_bus_sysctls(s: &sched::Sleepable) {
     assert_eq!(read(&o), Err(sysctl::ReadError::Invalid));
 }
 
+/// One rman as `devinfo -u` lists it: its description, its size (0 for
+/// the whole space), and each resource's start, size, and holder's name
+/// (`None` for a free span, empty for a holder with no name).
+type RmanListing = (
+    alloc::string::String,
+    u64,
+    alloc::vec::Vec<(u64, u64, Option<alloc::string::String>)>,
+);
+
+/// `hw.bus.rman` read as libdevinfo's `devinfo_init_resources` reads it:
+/// rman after rman (resource -1), then resource after resource, to the
+/// first `ENOENT` of each, the holders named through `hw.bus.devices`.
+fn read_rmans(s: &sched::Sleepable) -> alloc::vec::Vec<RmanListing> {
+    use abi::bus::{UDevice, UResource, URman};
+    use core::mem::offset_of;
+    let oid = |name: &str| {
+        crate::sysctl::read(s, |t| t.name2oid(name)).unwrap_or_else(|| panic!("{name}"))
+    };
+    let mut info = alloc::vec::Vec::new();
+    crate::sysctl::read_oid(s, &oid("hw.bus.info"), &mut info).unwrap();
+    let generation = i32::from_ne_bytes(info[4..8].try_into().unwrap());
+    let word = |b: &[u8], at: usize| u64::from_ne_bytes(b[at..at + 8].try_into().unwrap());
+    let text = |b: &[u8]| {
+        let n = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+        alloc::string::String::from_utf8(b[..n].to_vec()).unwrap()
+    };
+    let mut names = alloc::collections::BTreeMap::new();
+    let devices = oid("hw.bus.devices");
+    for index in 0.. {
+        let mut o = devices.clone();
+        o.extend([generation, index]);
+        let mut b = alloc::vec::Vec::new();
+        if crate::sysctl::read_oid(s, &o, &mut b).is_err() {
+            break;
+        }
+        let at = offset_of!(UDevice, dv_fields);
+        names.insert(word(&b, 0), text(&b[at..]));
+    }
+    let rman = oid("hw.bus.rman");
+    let mut out = alloc::vec::Vec::new();
+    for r in 0.. {
+        let mut o = rman.clone();
+        o.extend([generation, r, -1]);
+        let mut b = alloc::vec::Vec::new();
+        match crate::sysctl::read_oid(s, &o, &mut b) {
+            Ok(()) => {}
+            Err(sysctl::ReadError::NotFound) => break,
+            Err(e) => panic!("hw.bus.rman.{r}: {e:?}"),
+        }
+        assert_eq!(b.len(), size_of::<URman>());
+        let handle = word(&b, offset_of!(URman, rm_handle));
+        let descr = text(&b[offset_of!(URman, rm_descr)..][..abi::bus::RM_TEXTLEN]);
+        let size = word(&b, offset_of!(URman, rm_size));
+        let mut list = alloc::vec::Vec::new();
+        for k in 0.. {
+            let mut o = rman.clone();
+            o.extend([generation, r, k]);
+            let mut b = alloc::vec::Vec::new();
+            match crate::sysctl::read_oid(s, &o, &mut b) {
+                Ok(()) => {}
+                Err(sysctl::ReadError::NotFound) => break,
+                Err(e) => panic!("hw.bus.rman.{r}.{k}: {e:?}"),
+            }
+            assert_eq!(b.len(), size_of::<UResource>());
+            assert_eq!(word(&b, offset_of!(UResource, r_parent)), handle);
+            let dev = word(&b, offset_of!(UResource, r_device));
+            let holder = (dev != 0).then(|| names.get(&dev).cloned().unwrap_or_default());
+            list.push((
+                word(&b, offset_of!(UResource, r_start)),
+                word(&b, offset_of!(UResource, r_size)),
+                holder,
+            ));
+        }
+        out.push((descr, size, list));
+    }
+    // A stale generation is refused.
+    let mut o = rman.clone();
+    o.extend([generation.wrapping_sub(1), 0, -1]);
+    let mut b = alloc::vec::Vec::new();
+    assert_eq!(
+        crate::sysctl::read_oid(s, &o, &mut b),
+        Err(sysctl::ReadError::Invalid)
+    );
+    out
+}
+
+/// `devinfo -u`'s lines for `rmans`, as usr.sbin/devinfo prints them.
+fn devinfo_u_text(rmans: &[RmanListing]) -> alloc::vec::Vec<alloc::string::String> {
+    let mut out = alloc::vec::Vec::new();
+    for (descr, size, list) in rmans {
+        out.push(alloc::format!("{descr}:"));
+        let hex = *size > 1000 || *size == 0;
+        for (start, len, holder) in list {
+            let end = start.wrapping_add(*len).wrapping_sub(1);
+            let range = match (hex, *len > 1) {
+                (true, true) => alloc::format!("{start:#x}-{end:#x}"),
+                (true, false) => alloc::format!("{start:#x}"),
+                (false, true) => alloc::format!("{start}-{end}"),
+                (false, false) => alloc::format!("{start}"),
+            };
+            let who = match holder {
+                None => alloc::string::String::from("----"),
+                Some(n) if n.is_empty() => alloc::string::String::from("(unknown)"),
+                Some(n) => alloc::format!("({n})"),
+            };
+            out.push(alloc::format!("    {range} {who}"));
+        }
+    }
+    out
+}
+
+ktest! {
+    /// `hw.bus.rman` as `devinfo -u` reads it (DRIVER-MODEL.md §11.1):
+    /// FreeBSD's rmans for QEMU's devices, in FreeBSD's order (its
+    /// recording in the shell VM, tests/corpus/freebsd/rman), each listing
+    /// its whole managed space: allocations by address, free spans
+    /// between, nothing overlapping but a shared range. The PCI bus
+    /// numbers and the root port's windows hold what FreeBSD's do.
+    fn rman_as_devinfo_reads_it() {
+        let s = cx();
+        bus::manager().wait_idle(&s);
+        let rmans = read_rmans(&s);
+        for line in devinfo_u_text(&rmans) {
+            kprintln!("devinfo -u: {line}");
+        }
+        let descrs: alloc::vec::Vec<&str> = rmans.iter().map(|r| r.0.as_str()).collect();
+        let platform: &[&str] = if cfg!(target_arch = "x86_64") {
+            &["Interrupt request lines", "DMA request lines", "I/O ports", "I/O memory addresses"]
+        } else {
+            &["I/O memory addresses", "Interrupts"]
+        };
+        assert_eq!(&descrs[..platform.len()], platform, "{descrs:?}");
+        assert_eq!(
+            &descrs[platform.len()..platform.len() + 2],
+            ["ACPI I/O ports", "ACPI I/O memory addresses"]
+        );
+        // FreeBSD's rmans in the same machine, in its order, those of
+        // devices AbyssBSD has (QEMU's AHCI controller's own rman only
+        // where one attached).
+        let recorded = if cfg!(target_arch = "x86_64") {
+            include_str!("../../tests/corpus/freebsd/rman/qemu-x86_64/devinfo-u.txt")
+        } else {
+            include_str!("../../tests/corpus/freebsd/rman/qemu-aarch64/devinfo-u.txt")
+        };
+        let theirs: alloc::vec::Vec<&str> = recorded
+            .lines()
+            .filter_map(|l| l.strip_suffix(':'))
+            .filter(|l| !l.starts_with(' '))
+            .collect();
+        let ahci = rmans.iter().any(|r| r.2.iter().any(|e| e.2.as_deref() == Some("ahci0")));
+        let mut want: alloc::vec::Vec<&str> = theirs.clone();
+        if !ahci {
+            want.pop_if(|d| *d == "I/O memory addresses");
+        }
+        let mut ours = descrs.clone();
+        // The ktest machine's extra AHCI controllers and bridges come
+        // after QEMU's own.
+        ours.truncate(want.len());
+        assert_eq!(ours, want);
+        for (descr, size, list) in &rmans {
+            // Contiguous within each region, by address.
+            for w in list.windows(2) {
+                let end = w[0].0.wrapping_add(w[0].1).wrapping_sub(1);
+                assert!(
+                    w[1].0 > end || (w[1].0 == w[0].0 && w[1].1 == w[0].1),
+                    "{descr}: {:#x} after {:#x}-{end:#x}",
+                    w[1].0,
+                    w[0].0
+                );
+            }
+            let _ = size;
+        }
+        let find = |d: &str| rmans.iter().find(|r| r.0 == d).unwrap_or_else(|| panic!("{d}"));
+        let holds = |d: &str, start: u64, who: &str| {
+            find(d).2.iter().any(|e| e.0 == start && e.2.as_deref() == Some(who))
+        };
+        assert!(holds("PCI domain 0 bus numbers", 0, "pci0"));
+        assert!(holds("PCI domain 0 bus numbers", 1, "pcib1"));
+        assert!(holds("pcib1 bus numbers", 1, "pci1"));
+        // The virtio-rng behind the root port, in its windows.
+        let behind = find("pcib1 memory window").2.iter().any(|e| {
+            e.2.as_deref().is_some_and(|n| n.starts_with("virtio_pci"))
+        });
+        assert!(behind, "the root port's memory window holds the function behind it");
+        // The NVMe controller: its BAR and its MSI-X lines.
+        let irqs = if cfg!(target_arch = "x86_64") { "Interrupt request lines" } else { "Interrupts" };
+        let nvme = rmans
+            .iter()
+            .filter(|r| r.0 != irqs)
+            .any(|r| r.2.iter().any(|e| e.2.as_deref() == Some("nvme0")));
+        assert!(nvme, "nvme0's BAR");
+        assert!(find(irqs).2.iter().filter(|e| e.2.as_deref() == Some("nvme0")).count() >= 2);
+    }
+}
+
 /// A `dev.*` string node's text, if the node exists.
 fn dev_text(s: &sched::Sleepable, name: &str) -> Option<alloc::string::String> {
     let oid = crate::sysctl::read(s, |t| t.name2oid(name))?;

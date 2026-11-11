@@ -1,0 +1,219 @@
+nexus0
+  acpi0 <BOCHS BXPC>
+    cpu0 <ACPI CPU> pnpinfo _HID=ACPI0007 _UID=0 _CID=none at handle=\_SB_.C000
+    cpu1 <ACPI CPU> pnpinfo _HID=ACPI0007 _UID=1 _CID=none at handle=\_SB_.C001
+    cpu2 <ACPI CPU> pnpinfo _HID=ACPI0007 _UID=2 _CID=none at handle=\_SB_.C002
+    cpu3 <ACPI CPU> pnpinfo _HID=ACPI0007 _UID=3 _CID=none at handle=\_SB_.C003
+    uart0 <PrimeCell UART (PL011)> pnpinfo _HID=ARMH0011 _UID=0 _CID=none at handle=\_SB_.COM0
+        I/O memory addresses:
+            0x9000000-0x9000fff
+        Interrupts:
+            0x0
+    unknown pnpinfo _HID=QEMU0002 _UID=0 _CID=none at handle=\_SB_.FWCF
+        I/O memory addresses:
+            0x9020000-0x9020017
+    unknown pnpinfo _HID=LNRO0005 _UID=0 _CID=none at handle=\_SB_.VR00
+        I/O memory addresses:
+            0xa000000-0xa0001ff
+    unknown pnpinfo _HID=LNRO0005 _UID=1 _CID=none at handle=\_SB_.VR01
+        I/O memory addresses:
+            0xa000200-0xa0003ff
+    unknown pnpinfo _HID=LNRO0005 _UID=2 _CID=none at handle=\_SB_.VR02
+        I/O memory addresses:
+            0xa000400-0xa0005ff
+    unknown pnpinfo _HID=LNRO0005 _UID=3 _CID=none at handle=\_SB_.VR03
+        I/O memory addresses:
+            0xa000600-0xa0007ff
+    unknown pnpinfo _HID=LNRO0005 _UID=4 _CID=none at handle=\_SB_.VR04
+        I/O memory addresses:
+            0xa000800-0xa0009ff
+    unknown pnpinfo _HID=LNRO0005 _UID=5 _CID=none at handle=\_SB_.VR05
+        I/O memory addresses:
+            0xa000a00-0xa000bff
+    unknown pnpinfo _HID=LNRO0005 _UID=6 _CID=none at handle=\_SB_.VR06
+        I/O memory addresses:
+            0xa000c00-0xa000dff
+    unknown pnpinfo _HID=LNRO0005 _UID=7 _CID=none at handle=\_SB_.VR07
+        I/O memory addresses:
+            0xa000e00-0xa000fff
+    unknown pnpinfo _HID=LNRO0005 _UID=8 _CID=none at handle=\_SB_.VR08
+        I/O memory addresses:
+            0xa001000-0xa0011ff
+    unknown pnpinfo _HID=LNRO0005 _UID=9 _CID=none at handle=\_SB_.VR09
+        I/O memory addresses:
+            0xa001200-0xa0013ff
+    unknown pnpinfo _HID=LNRO0005 _UID=10 _CID=none at handle=\_SB_.VR10
+        I/O memory addresses:
+            0xa001400-0xa0015ff
+    unknown pnpinfo _HID=LNRO0005 _UID=11 _CID=none at handle=\_SB_.VR11
+        I/O memory addresses:
+            0xa001600-0xa0017ff
+    unknown pnpinfo _HID=LNRO0005 _UID=12 _CID=none at handle=\_SB_.VR12
+        I/O memory addresses:
+            0xa001800-0xa0019ff
+    unknown pnpinfo _HID=LNRO0005 _UID=13 _CID=none at handle=\_SB_.VR13
+        I/O memory addresses:
+            0xa001a00-0xa001bff
+    unknown pnpinfo _HID=LNRO0005 _UID=14 _CID=none at handle=\_SB_.VR14
+        I/O memory addresses:
+            0xa001c00-0xa001dff
+    unknown pnpinfo _HID=LNRO0005 _UID=15 _CID=none at handle=\_SB_.VR15
+        I/O memory addresses:
+            0xa001e00-0xa001fff
+    unknown pnpinfo _HID=LNRO0005 _UID=16 _CID=none at handle=\_SB_.VR16
+        I/O memory addresses:
+            0xa002000-0xa0021ff
+    unknown pnpinfo _HID=LNRO0005 _UID=17 _CID=none at handle=\_SB_.VR17
+        I/O memory addresses:
+            0xa002200-0xa0023ff
+    unknown pnpinfo _HID=LNRO0005 _UID=18 _CID=none at handle=\_SB_.VR18
+        I/O memory addresses:
+            0xa002400-0xa0025ff
+    unknown pnpinfo _HID=LNRO0005 _UID=19 _CID=none at handle=\_SB_.VR19
+        I/O memory addresses:
+            0xa002600-0xa0027ff
+    unknown pnpinfo _HID=LNRO0005 _UID=20 _CID=none at handle=\_SB_.VR20
+        I/O memory addresses:
+            0xa002800-0xa0029ff
+    unknown pnpinfo _HID=LNRO0005 _UID=21 _CID=none at handle=\_SB_.VR21
+        I/O memory addresses:
+            0xa002a00-0xa002bff
+    unknown pnpinfo _HID=LNRO0005 _UID=22 _CID=none at handle=\_SB_.VR22
+        I/O memory addresses:
+            0xa002c00-0xa002dff
+    unknown pnpinfo _HID=LNRO0005 _UID=23 _CID=none at handle=\_SB_.VR23
+        I/O memory addresses:
+            0xa002e00-0xa002fff
+    unknown pnpinfo _HID=LNRO0005 _UID=24 _CID=none at handle=\_SB_.VR24
+        I/O memory addresses:
+            0xa003000-0xa0031ff
+    unknown pnpinfo _HID=LNRO0005 _UID=25 _CID=none at handle=\_SB_.VR25
+        I/O memory addresses:
+            0xa003200-0xa0033ff
+    unknown pnpinfo _HID=LNRO0005 _UID=26 _CID=none at handle=\_SB_.VR26
+        I/O memory addresses:
+            0xa003400-0xa0035ff
+    unknown pnpinfo _HID=LNRO0005 _UID=27 _CID=none at handle=\_SB_.VR27
+        I/O memory addresses:
+            0xa003600-0xa0037ff
+    unknown pnpinfo _HID=LNRO0005 _UID=28 _CID=none at handle=\_SB_.VR28
+        I/O memory addresses:
+            0xa003800-0xa0039ff
+    unknown pnpinfo _HID=LNRO0005 _UID=29 _CID=none at handle=\_SB_.VR29
+        I/O memory addresses:
+            0xa003a00-0xa003bff
+    unknown pnpinfo _HID=LNRO0005 _UID=30 _CID=none at handle=\_SB_.VR30
+        I/O memory addresses:
+            0xa003c00-0xa003dff
+    unknown pnpinfo _HID=LNRO0005 _UID=31 _CID=none at handle=\_SB_.VR31
+        I/O memory addresses:
+            0xa003e00-0xa003fff
+    pci_link0 <ACPI PCI Link L000> pnpinfo _HID=PNP0C0F _UID=0 _CID=none at handle=\_SB_.L000
+    pci_link1 <ACPI PCI Link L001> pnpinfo _HID=PNP0C0F _UID=1 _CID=none at handle=\_SB_.L001
+    pci_link2 <ACPI PCI Link L002> pnpinfo _HID=PNP0C0F _UID=2 _CID=none at handle=\_SB_.L002
+    pci_link3 <ACPI PCI Link L003> pnpinfo _HID=PNP0C0F _UID=3 _CID=none at handle=\_SB_.L003
+    pcib0 <Generic PCI host controller> pnpinfo _HID=PNP0A08 _UID=0 _CID=PNP0A03 at handle=\_SB_.PCI0
+        I/O memory addresses:
+            0x10000000-0x3efeffff
+            0x3eff0000-0x3effffff
+            0x4010000000-0x401fffffff
+            0x8000000000-0xffffffffff
+      pci0 <ACPI PCI bus>
+          PCI domain 0 bus numbers:
+              0
+        hostb0 <Host to PCI bridge> pnpinfo vendor=0x1b36 device=0x0008 subvendor=0x1af4 subdevice=0x1100 class=0x060000 at slot=0 function=0 dbsf=pci0:0:0:0 handle=\_SB_.PCI0.S00_
+        nvme0 <Generic NVMe Device> pnpinfo vendor=0x1b36 device=0x0010 subvendor=0x1af4 subdevice=0x1100 class=0x010802 at slot=1 function=0 dbsf=pci0:0:1:0 handle=\_SB_.PCI0.S08_
+            Interrupts:
+                0x2a
+                0x2b
+                0x2c
+                0x2d
+                0x2e
+            pcib0 memory window:
+                0x800010c000-0x800010ffff
+        pcib1 <PCI-PCI bridge> pnpinfo vendor=0x1b36 device=0x000c subvendor=0x1b36 subdevice=0x0000 class=0x060400 at slot=2 function=0 dbsf=pci0:0:2:0 handle=\_SB_.PCI0.S10_
+            Interrupts:
+                0x2f
+            pcib0 memory window:
+                0x10000000-0x101fffff
+                0x10202000-0x10202fff
+                0x8000000000-0x80000fffff
+            PCI domain 0 bus numbers:
+                1
+          pci1 <PCI bus>
+              pcib1 bus numbers:
+                  1
+            virtio_pci0 <VirtIO PCI (modern) Entropy adapter> pnpinfo vendor=0x1af4 device=0x1044 subvendor=0x1af4 subdevice=0x1100 class=0x00ff00 at slot=0 function=0 dbsf=pci0:1:0:0
+                pcib1 memory window:
+                    0x10000000-0x10000fff
+                pcib1 prefetch window:
+                    0x8000000000-0x8000003fff
+              vtrnd0 <VirtIO Entropy Adapter> pnpinfo vendor=0x00001af4 device=0x1044 subvendor=0x1af4 device_type=0x00000004
+        xhci0 <XHCI (generic) USB 3.0 controller> pnpinfo vendor=0x1b36 device=0x000d subvendor=0x1af4 subdevice=0x1100 class=0x0c0330 at slot=3 function=0 dbsf=pci0:0:3:0 handle=\_SB_.PCI0.S18_
+            Interrupts:
+                0x30
+            pcib0 memory window:
+                0x8000108000-0x800010bfff
+          usbus0
+            uhub0 <(0x1b36) XHCI root HUB, class 9/0, rev 3.00/1.00, addr 1>
+              umass0 <QEMU QEMU USB HARDDRIVE, class 0/0, rev 3.00/0.00, addr 1> pnpinfo vendor=0x46f4 product=0x0001 devclass=0x00 devsubclass=0x00 devproto=0x00 sernum="abyssbbb" release=0x0000 mode=host intclass=0x08 intsubclass=0x06 intprotocol=0x50 at bus=0 hubaddr=1 port=4 devaddr=2 interface=0 ugen=ugen0.2
+              usbhid0 <QEMU QEMU USB Keyboard, class 0/0, rev 2.00/0.00, addr 3> pnpinfo vendor=0x0627 product=0x0001 devclass=0x00 devsubclass=0x00 devproto=0x00 sernum="68284-0000:00:03.0-1" release=0x0000 mode=host intclass=0x03 intsubclass=0x01 intprotocol=0x01 at bus=0 hubaddr=1 port=9 devaddr=4 interface=0 ugen=ugen0.4
+                hidbus0 <HID bus>
+                  hkbd0 <QEMU QEMU USB Keyboard> pnpinfo page=0x0001 usage=0x0006 bus=0x03 vendor=0x0627 product=0x0001 version=0x0000 at index=0
+              usbhid1 <QEMU QEMU USB Tablet, class 0/0, rev 2.00/0.00, addr 4> pnpinfo vendor=0x0627 product=0x0001 devclass=0x00 devsubclass=0x00 devproto=0x00 sernum="28754-0000:00:03.0-2" release=0x0000 mode=host intclass=0x03 intsubclass=0x00 intprotocol=0x00 at bus=0 hubaddr=1 port=10 devaddr=5 interface=0 ugen=ugen0.5
+                hidbus1 <HID bus>
+                  hms0 <QEMU QEMU USB Tablet> pnpinfo page=0x0001 usage=0x0002 bus=0x03 vendor=0x0627 product=0x0001 version=0x0000 at index=0
+              uhub1 <QEMU QEMU USB Hub, class 9/0, rev 1.10/1.01, addr 5> pnpinfo vendor=0x0409 product=0x55aa devclass=0x09 devsubclass=0x00 devproto=0x00 sernum="314159-0000:00:03.0-3" release=0x0101 mode=host intclass=0x09 intsubclass=0x00 intprotocol=0x00 at bus=0 hubaddr=1 port=11 devaddr=6 interface=0 ugen=ugen0.6
+                usbhid2 <QEMU QEMU USB Mouse, class 0/0, rev 2.00/0.00, addr 6> pnpinfo vendor=0x0627 product=0x0001 devclass=0x00 devsubclass=0x00 devproto=0x00 sernum="89126-0000:00:03.0-3.1" release=0x0000 mode=host intclass=0x03 intsubclass=0x01 intprotocol=0x02 at bus=0 hubaddr=6 port=1 devaddr=7 interface=0 ugen=ugen0.7
+                  hidbus2 <HID bus>
+                    hms1 <QEMU QEMU USB Mouse> pnpinfo page=0x0001 usage=0x0002 bus=0x03 vendor=0x0627 product=0x0001 version=0x0000 at index=0
+        virtio_pci1 <VirtIO PCI (modern) Input adapter> pnpinfo vendor=0x1af4 device=0x1052 subvendor=0x1af4 subdevice=0x1100 class=0x090000 at slot=4 function=0 dbsf=pci0:0:4:0 handle=\_SB_.PCI0.S20_
+            pcib0 memory window:
+                0x10201000-0x10201fff
+                0x8000100000-0x8000103fff
+          unknown pnpinfo vendor=0x00001af4 device=0x1052 subvendor=0x1af4 device_type=0x00000012
+        virtio_pci2 <VirtIO PCI (modern) Input adapter> pnpinfo vendor=0x1af4 device=0x1052 subvendor=0x1af4 subdevice=0x1100 class=0x098000 at slot=5 function=0 dbsf=pci0:0:5:0 handle=\_SB_.PCI0.S28_
+            pcib0 memory window:
+                0x10200000-0x10200fff
+                0x8000104000-0x8000107fff
+          unknown pnpinfo vendor=0x00001af4 device=0x1052 subvendor=0x1af4 device_type=0x00000012
+    acpi_sysresource0 <System Resource> pnpinfo _HID=PNP0C02 _UID=0 _CID=none at handle=\_SB_.PCI0.RES0
+    acpi_ged0 <Generic Event Device> pnpinfo _HID=ACPI0013 _UID=0 _CID=none at handle=\_SB_.GED_
+        Interrupts:
+            0x21
+    acpi_button0 <Power Button> pnpinfo _HID=PNP0C0C _UID=0 _CID=none at handle=\_SB_.PWRB
+    unknown pnpinfo _HID=PNP0C33 _UID=0 _CID=none at handle=\_SB_.GEDD
+    psci0 <ARM Power State Co-ordination Interface Driver> pnpinfo unknown
+      smccc0 <ARM SMCCC v1.0>
+    gic0 <ARM Generic Interrupt Controller v3.0> pnpinfo unknown
+        I/O memory addresses:
+            0x8000000-0x800ffff
+            0x80a0000-0x8ffffff
+      its0 <ARM GIC Interrupt Translation Service>
+          I/O memory addresses:
+              0x8080000-0x809ffff
+      vgic0
+    generic_timer0 <ARM Generic Timer> pnpinfo unknown
+        Interrupts:
+            0x22
+            0x23
+            0x24
+            0x25
+    pmu0 <Performance Monitoring Unit> pnpinfo unknown
+        Interrupts:
+            0x26
+            0x27
+            0x28
+            0x29
+  ram0 <System RAM>
+      I/O memory addresses:
+          0x40232000-0xb41fffff
+          0xb56d7000-0xbc46ffff
+          0xbcb40000-0xbcb40fff
+          0xbcb44000-0xbfe1ffff
+          0xbfeb0000-0xbfebffff
+          0xbffe0000-0xbfffffff
+  efirtc0 <EFI Realtime Clock>
+  smbios0 <System Management BIOS>
+  cryptosoft0 <software crypto>
+  armv8crypto0 <AES-CBC,AES-XTS,AES-GCM>

@@ -1149,6 +1149,14 @@ const USB_RECORDINGS: &[(&str, &str)] = &[
 /// `tests/corpus/freebsd/usb`.
 pub(crate) fn cmd_record(mut args: Args) -> Result<()> {
     let usb = args.take_flag("--usb");
+    if args.take_flag("--shell-vm") {
+        let out = PathBuf::from(
+            args.take_value("--out")?
+                .unwrap_or_else(|| "tests/corpus/freebsd/rman".into()),
+        );
+        args.finish()?;
+        return record_shell_vm(&out);
+    }
     let default = if usb {
         "tests/corpus/freebsd/usb"
     } else {
@@ -1219,6 +1227,61 @@ pub(crate) fn cmd_record(mut args: Args) -> Result<()> {
         ..Vm::new(Vmm::Bhyve, Arch::X86_64, freebsd)
     };
     record(&vm, RECORDINGS, &work.join("console.log"), &out)
+}
+
+/// What `freebsd-record --shell-vm` captures: the resource managers
+/// (`hw.bus.rman`) and each device's resources.
+const RMAN_RECORDINGS: &[(&str, &str)] = &[
+    ("devinfo -u", "devinfo-u.txt"),
+    ("devinfo -rv", "devinfo-rv.txt"),
+];
+
+/// `freebsd-record --shell-vm [--out DIR]`: FreeBSD 15.1's installed
+/// image in the boot tier's shell VMs (the boot disk on NVMe, the USB
+/// set, 4 CPUs, 2 GiB), so the devices are the ones AbyssBSD's shell
+/// cases see: QEMU on both architectures and bhyve, each into its own
+/// directory under `DIR` (default `tests/corpus/freebsd/rman`). The
+/// commands run from `rc.local`, which then powers off.
+fn record_shell_vm(out: &Path) -> Result<()> {
+    if !cfg!(target_os = "freebsd") {
+        return Err("freebsd-record needs the build server".into());
+    }
+    let mut rc = String::from("#!/bin/sh\n# AbyssBSD cargo xtask freebsd-record --shell-vm\n");
+    for (i, (cmd, _)) in RMAN_RECORDINGS.iter().enumerate() {
+        let _ = writeln!(
+            rc,
+            "echo 'record: begin {i}' > /dev/console\n( {cmd} ) 2>&1 | sed 's/^/record: | /' > /dev/console\necho 'record: end' > /dev/console"
+        );
+    }
+    rc.push_str("echo 'record: done' > /dev/console\npoweroff\n");
+    for (arch, vmm, dir) in [
+        (Arch::X86_64, Vmm::Qemu, "qemu-x86_64"),
+        (Arch::Aarch64, Vmm::Qemu, "qemu-aarch64"),
+        (Arch::X86_64, Vmm::Bhyve, "bhyve"),
+    ] {
+        let (image, work) = freebsd_multiuser_image(arch)?;
+        let work = work.join(format!("record-{dir}"));
+        fs::create_dir_all(&work)?;
+        let disk = work.join("disk.img");
+        crate::multiuser::copy_sparse(&image, &disk)?;
+        mounted_root(&disk, &work.join("mnt"), |mnt| {
+            install_files(mnt, &[("etc/rc.local", 0o755, rc.clone().into_bytes())])
+        })?;
+        let vm = Vm {
+            smp: 4,
+            mem: "2G".into(),
+            nvme: true,
+            usb: true,
+            ..Vm::new(vmm, arch, disk)
+        };
+        record(
+            &vm,
+            RMAN_RECORDINGS,
+            &work.join("console.log"),
+            &out.join(dir),
+        )?;
+    }
+    Ok(())
 }
 
 /// A UFS disk whose `run.sh` runs `commands`, framing each one's output
