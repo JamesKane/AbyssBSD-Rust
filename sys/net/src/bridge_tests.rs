@@ -492,14 +492,36 @@ fn gone(t: &crate::tuntap::Tun) {
 
 fn renamed(_t: &crate::tuntap::Tun, _n: &str) {}
 
-fn tun_setup() -> Arc<Vnet> {
+/// A VNET for a tun/tap test, held with the others' lock: units are
+/// shared by every VNET (as FreeBSD's are), so a test checking that a
+/// destroyed device's unit is free must not run beside one taking it.
+struct TunTest {
+    v: Arc<Vnet>,
+    _units: std::sync::MutexGuard<'static, ()>,
+}
+
+impl core::ops::Deref for TunTest {
+    type Target = Arc<Vnet>;
+    fn deref(&self) -> &Arc<Vnet> {
+        &self.v
+    }
+}
+
+fn tun_setup() -> TunTest {
+    static UNITS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let units = UNITS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     crate::init();
     crate::tuntap::set_hooks(crate::tuntap::Hooks {
         made,
         gone,
         renamed,
     });
-    Vnet::new(0)
+    TunTest {
+        v: Vnet::new(0),
+        _units: units,
+    }
 }
 
 #[test]
