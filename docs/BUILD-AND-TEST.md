@@ -86,6 +86,7 @@ Kernel command-line words understood so far:
 | `abyss.test.skip=P[,P]` | Test kernels leave out the tests whose names start with any `P` |
 | `abyss.test.only=P[,P]` | Test kernels run only the tests whose names start with any `P` (and are not skipped) |
 | `abyss.stress=S` | Run the Phase 2 stress test for S seconds, then report and power off |
+| `abyss.test.gpart.dump=1` | The `gpart` test prints the vnode disk it leaves (`gpart-dump: SECTOR HEX`, nonzero sectors), for FreeBSD's `gpart` and `fsck_ffs` to read on the build server |
 
 `--tier stress` runs the Phase 2 stress test on both architectures with 8 CPUs and 2 GiB,
 for `--duration` seconds (default 600). It uses 64 threads doing lock ping-pong, ordered

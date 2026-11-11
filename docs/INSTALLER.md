@@ -223,7 +223,7 @@ userland on this kernel:
 | Step | Interfaces | Where here |
 |---|---|---|
 | Find disks | `geom disk list`, `kern.disks`, `DIOCGMEDIASIZE` | GEOM work in progress (`lib/geom`, `geom_kern`); P3.7 |
-| Partition | `gpart create/add/destroy` (GEOM's `gctl` requests), `/dev/gpt/*` labels | GEOM work in progress |
+| Partition | `gpart create/add/destroy` (GEOM's `gctl` requests), `/dev/gpt/*` labels | GPT done (P9, `/dev/geom.ctl`); MBR not yet |
 | ESP | `newfs_msdos`, `mount_msdosfs` | P5.6 |
 | Root | `zpool create`, `zfs create`, `bootfs` (ZFS); `newfs -U -j` (UFS, §6) | M-Z; P5.5, P5.7 |
 | Extract, configure | `tar` (libarchive), `pw -R`, `pwd_mkdb`, file flags and ACLs | P5, P6.7 |

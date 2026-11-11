@@ -2808,6 +2808,26 @@ no hangs, no reboot loops, nothing that needs the screen, and P8's remaining exi
     by `GET_REPORT` and immediate reads, a keyboard's LED report, poll and kqueue, load and
     unload) passes on both arches here and on FreeBSD 15.1. Reports arriving on the interrupt
     pipe were checked by hand with QMP typing; `uhid` is not needed (it never wins over `usbhid`).
+  - Progress 2026-11-10 (`/dev/geom.ctl` and `/dev/full`, in QEMU, both architectures):
+    `GEOM_CTL` as `geom_ctl.c` takes it (`struct gctl_req` held to 15.1's header by
+    `abi-check`), run on GEOM's event thread; `getxml` for every class, and the PART class's
+    verbs for GPT as `g_part.c` and `g_part_gpt.c` do them (`lib/geom`'s `table`): create, add,
+    delete, destroy, modify, resize, set and unset (`bootme`, `bootonce`, `bootfailed`,
+    `active`, `lenovofix`), bootcode, commit, undo, recover, and so `gpart backup` and
+    `restore`, with the `C` flag's commit, FreeBSD's error texts, and its refusals (busy
+    partitions, overlaps, ranges, corrupt tables, `kern.geom.debugflags` 0x10 for writing a
+    disk with a mounted partition). Partitions appear, change, and go as each verb runs, their
+    `gpt/` and `gptid/` names following a commit; tables are tasted as FreeBSD tastes them (both
+    copies, the backup used when the primary is bad). Host tests replay six sequences FreeBSD
+    15.1's `gpart` ran on md disks and must write the same sectors (`tests/corpus/gpart`); the
+    boot cases run FreeBSD's `gpart` on malloc and vnode `md` disks (create, add, `newfs` and
+    mount by label, resize while mounted, modify, undo, destroy) and must print what FreeBSD
+    printed, all 344 lines; the vnode image the guest leaves reads back on FreeBSD 15.1
+    (`gpart show`, `fsck_ffs`) with the same tables as FreeBSD's own run, byte for byte but the
+    UUIDs and CRCs. `/dev/full` as `null.c`'s, and `/dev/null` and `/dev/zero` now answer
+    `null.c`'s requests (`FIONBIO`, `FIOASYNC`, `DIOCSKERNELDUMP`) and `kevent`. FreeBSD 15.1's
+    kyua tests for `gpart` all need `gnop` (and MBR or BSD), so they skip. Left: the MBR and BSD
+    schemes, and the LABEL class's verbs and `label/` names (compat-deviations).
 - **Verification:** kyua's arm64 target on the board; fsx with `fsck_ffs` on the NVMe and a USB
   disk (done with the SMMU's stage 5, IOMMU.md §18); the device tree against FreeBSD's `devinfo`
   wherever FreeBSD has a driver. No day-long looped runs (the user, 2026-11-10): kyua and the
