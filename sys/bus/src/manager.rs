@@ -1652,11 +1652,16 @@ impl Manager {
             let t = self.topo.read(s);
             t.node(id).and_then(|n| {
                 let parent = t.nameunit(self.drivers, n.parent.unwrap_or(0));
+                // `iicbus_print_child`: a device's address, if it has one.
+                let at = match &n.ident {
+                    crate::Ident::Iic(i) if i.addr != 0 => alloc::format!(" at addr {:#x}", i.addr),
+                    _ => alloc::string::String::new(),
+                };
                 Some(match decl.announce {
                     Announce::Quiet => return None,
                     Announce::FirstUnit if unit != 0 => return None,
                     Announce::Description | Announce::FirstUnit if !n.desc.is_empty() => {
-                        alloc::format!("{}{unit}: <{}> on {parent}", decl.name, n.desc)
+                        alloc::format!("{}{unit}: <{}>{at} on {parent}", decl.name, n.desc)
                     }
                     _ => alloc::format!("{}{unit} on {parent}", decl.name),
                 })
