@@ -371,6 +371,8 @@ impl MrsRead {
 }
 
 /// `AT_HWCAP` bits (`HWCAP_*`, the same as Linux's).
+pub mod midr;
+
 pub mod hwcap {
     pub const FP: u64 = 1 << 0;
     pub const ASIMD: u64 = 1 << 1;

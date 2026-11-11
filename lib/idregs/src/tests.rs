@@ -177,3 +177,22 @@ fn fields_are_well_formed() {
         }
     }
 }
+
+#[test]
+fn hw_model_names_the_midr_as_freebsd() {
+    extern crate std;
+    use crate::midr::Model;
+    use std::string::ToString;
+    // The Orange Pi 6 Plus's boot CPU, as its FreeBSD `hw.model` says.
+    assert_eq!(Model(0x410f_d811).to_string(), "ARM Cortex-A720 r0p1");
+    assert_eq!(Model(0x413f_d0c1).to_string(), "ARM Neoverse-N1 r3p1");
+    // A known implementer's unknown part, and QEMU's `max` (implementer 0).
+    assert_eq!(
+        Model(0x410f_d999).to_string(),
+        "ARM Unknown CPU r0p9 (midr: 410fd999)"
+    );
+    assert_eq!(
+        Model(0x000f_0510).to_string(),
+        "Unknown Implementer (midr: 000f0510)"
+    );
+}

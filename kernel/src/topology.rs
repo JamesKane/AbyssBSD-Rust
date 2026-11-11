@@ -189,9 +189,54 @@ pub(crate) struct CpuInfo {
 
 static CPUS: SpinLock<[Option<CpuInfo>; MAX_CPUS]> = SpinLock::new([None; MAX_CPUS]);
 
+/// `hw.model`: the boot CPU's name, as `identcpu.c` makes it.
+static MODEL: sync::Once<alloc::string::String> = sync::Once::new();
+
+/// `hw.model`.
+pub(crate) fn model() -> &'static str {
+    MODEL.get().map_or("", alloc::string::String::as_str)
+}
+
+/// The boot CPU's `hw.model`: on arm64 its MIDR's implementer, part,
+/// variant, and revision (`print_cpu_midr`); on amd64 the CPUID brand
+/// string without its leading spaces, else "Hammer" (`printcpuinfo`).
+fn this_model() -> alloc::string::String {
+    #[cfg(target_arch = "aarch64")]
+    {
+        alloc::format!(
+            "{}",
+            idregs::midr::Model(u32::try_from(crate::arch::cpu::midr() & 0xffff_ffff).unwrap_or(0))
+        )
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        use core::arch::x86_64::__cpuid;
+        let mut brand = alloc::vec::Vec::with_capacity(48);
+        if __cpuid(0x8000_0000).eax >= 0x8000_0004 {
+            for leaf in 0x8000_0002u32..0x8000_0005 {
+                let r = __cpuid(leaf);
+                for w in [r.eax, r.ebx, r.ecx, r.edx] {
+                    brand.extend_from_slice(&w.to_le_bytes());
+                }
+            }
+        }
+        let end = brand.iter().position(|&b| b == 0).unwrap_or(brand.len());
+        let start = brand[..end].iter().position(|&b| b != b' ').unwrap_or(end);
+        let s = core::str::from_utf8(&brand[start..end]).unwrap_or("");
+        if s.is_empty() {
+            alloc::string::String::from("Hammer")
+        } else {
+            alloc::string::String::from(s)
+        }
+    }
+}
+
 /// Identifies this CPU, records its place, and tells the scheduler its
 /// capacity. Runs on each CPU as it comes up.
 pub(crate) fn record_this_cpu(cpu: CpuId) {
+    if cpu == CpuId::BOOT {
+        let _ = MODEL.set(this_model());
+    }
     let ident = Ident::this_cpu();
     let (package, cluster, core, smt_thread) = place();
     let info = CpuInfo {

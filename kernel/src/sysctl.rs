@@ -255,6 +255,29 @@ pub(crate) fn init() {
         "System architecture",
         Value::text(MACHINE_ARCH),
     );
+    // `hw.model` (identcpu.c's `cpu_model`): the boot CPU's name, recorded
+    // when it is identified, after this tree is built.
+    add(
+        h,
+        Number::Fixed(hw::MODEL),
+        "model",
+        "Machine model",
+        Value::Str(alloc::boxed::Box::new(|out| {
+            out.push_str(crate::topology::model());
+        })),
+    );
+    // `hw.clockrate` (x86 identcpu.c): the TSC's rate in MHz, rounded.
+    // arm64 has none.
+    #[cfg(target_arch = "x86_64")]
+    add(
+        h,
+        Number::Auto,
+        "clockrate",
+        "CPU instruction clock rate",
+        Value::Int(alloc::boxed::Box::new(|| {
+            i32::try_from((crate::time::frequency() + 5000) / 1_000_000).unwrap_or(0)
+        })),
+    );
     add(
         k,
         Number::Auto,
