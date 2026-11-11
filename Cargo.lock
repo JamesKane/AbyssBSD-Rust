@@ -209,6 +209,7 @@ dependencies = [
 name = "clock"
 version = "0.0.0"
 dependencies = [
+ "abi",
  "sync",
 ]
 

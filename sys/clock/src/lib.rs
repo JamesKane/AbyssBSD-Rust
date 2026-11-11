@@ -14,6 +14,8 @@
 
 extern crate alloc;
 
+pub mod ntp;
+
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 

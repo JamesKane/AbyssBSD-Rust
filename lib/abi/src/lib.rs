@@ -64,6 +64,7 @@ pub mod syslog;
 pub mod termios;
 pub mod thr;
 pub mod time;
+pub mod timex;
 pub mod tun;
 pub mod ucontext;
 pub mod ucred;
