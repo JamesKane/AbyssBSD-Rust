@@ -1061,10 +1061,24 @@ enum Next {
 /// Takes the next signal that needs action from those sent to thread `t`
 /// or its process (the thread's first), dropping ignored ones on the way.
 /// `None` when nothing is deliverable.
+/// Whether a terminal's stop signal (`SIGTSTP`, `SIGTTIN`, `SIGTTOU`) is
+/// ready for `t` with its default action: the only case in which whether
+/// the process group is orphaned matters. FreeBSD's `issignal` looks at
+/// the group's `PGRP_ORPHANED` only there; finding it out here walks the
+/// process table, so it is not done for every other signal.
+fn tty_stop_ready(p: &Process, t: &UserThread) -> bool {
+    let st = p.signals.lock();
+    let ts = t.sig.lock();
+    let ready = st.pending().union(ts.queue.pending()).minus(ts.mask);
+    [SIGTSTP, SIGTTIN, SIGTTOU]
+        .into_iter()
+        .any(|s| ready.has(s) && st.action(s).sa_handler == SIG_DFL)
+}
+
 fn next(t: &UserThread) -> Option<Next> {
     let p = t.process();
     let fast = fastblocked(t);
-    let orphaned = crate::proc::pgrp_orphaned(p.pgid());
+    let orphaned = tty_stop_ready(p, t) && crate::proc::pgrp_orphaned(p.pgid());
     let mut st = p.signals.lock();
     let mut ts = t.sig.lock();
     loop {
@@ -1483,7 +1497,7 @@ fn interrupted_by(s: &Sleepable) -> (Option<Errno>, bool) {
             }
         }
         let fast = fastblocked(&t);
-        let orphaned = crate::proc::pgrp_orphaned(p.pgid());
+        let orphaned = tty_stop_ready(p, &t) && crate::proc::pgrp_orphaned(p.pgid());
         let mut st = p.signals.lock();
         let mut ts = t.sig.lock();
         let ready = st.pending().union(ts.queue.pending()).minus(ts.mask);
