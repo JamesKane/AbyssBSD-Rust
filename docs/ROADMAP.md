@@ -2700,6 +2700,17 @@ no hangs, no reboot loops, nothing that needs the screen, and P8's remaining exi
     and NPU (post Day 1). Not planned: `pf`, `ipfw`, `vlan`, `lagg`, IPsec, NFS, `procfs`, SPI
     (`spigen`), kernel dumps, swap (P11). Not loaded by FreeBSD's GENERIC either, so not needed to
     match it: `mqueuefs`, SCTP, `hwpmc`, and RACCT (`kern.racct.enable=0`).
+  - Progress 2026-11-10 (system calls, in QEMU): `getdtablesize` (with `kern.maxfilesperproc`
+    and `kern.maxprocperuid` as writable sysctls), `posix_fadvise` (checked as FreeBSD checks it;
+    the advice steers nothing yet), `mincore` (this process's mappings, `vm.mincore_mapped`'s
+    default), `cpuset_getdomain` and `cpuset_setdomain` (one domain; policies per numbered set
+    and per thread, so `cpuset -g` and `cpuset -n rr:0` print what FreeBSD prints),
+    `sched_rr_get_interval`, `yield`, `uuidgen` (`kern_uuid.c`'s version-1 UUIDs, the node the
+    first Ethernet interface's; `uuidgen(1)`), `membarrier`, `kcmp`, `getrlimitusage`, `renameat2`
+    (`AT_RENAME_NOREPLACE`), `abort2`, amd64's `break` (`sbrk`; `ENOSYS` on arm64, as FreeBSD),
+    and the old `mount` for UFS and msdosfs (`ffs_cmount`, `msdosfs_cmount`). `tests/user/misccalls`
+    passes on FreeBSD 15.1 and here; the shell cases run `uuidgen` and `cpuset`. Left of the
+    system calls: `ntp_adjtime`, `ntp_gettime` and `adjtime` slewing, and POSIX AIO.
 - **Verification:** kyua's arm64 target on the board; fsx with `fsck_ffs` on the NVMe and a USB
   disk (done with the SMMU's stage 5, IOMMU.md §18); the device tree against FreeBSD's `devinfo`
   wherever FreeBSD has a driver. No day-long looped runs (the user, 2026-11-10): kyua and the
