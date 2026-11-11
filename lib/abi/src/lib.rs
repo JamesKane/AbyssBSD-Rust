@@ -31,6 +31,7 @@ pub mod exec;
 pub mod fbio;
 pub mod fcntl;
 pub mod gpio;
+pub mod hidraw;
 pub mod iic;
 pub mod inet;
 pub mod inotify;

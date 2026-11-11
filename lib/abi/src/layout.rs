@@ -122,6 +122,7 @@ pub const CONSTANTS: &[&[ConstValue]] = &[
     crate::watchdog::CONSTANTS,
     crate::pciio::CONSTANTS,
     crate::usb::CONSTANTS,
+    crate::hidraw::CONSTANTS,
 ];
 
 const fn bus_const(c_name: &'static str, value: i64) -> ConstValue {
@@ -2320,6 +2321,41 @@ pub static LAYOUTS: &[StructLayout] = &[
         bm_attributes => "bmAttributes",
         w_max_packet_size => "wMaxPacketSize",
         b_interval => "bInterval",
+    }),
+    layout!(crate::hidraw::HidrawGenDescriptor, "struct hidraw_gen_descriptor", ["sys/types.h", "dev/hid/hidraw.h"], All, {
+        hgd_data => "hgd_data",
+        hgd_lang_id => "hgd_lang_id",
+        hgd_maxlen => "hgd_maxlen",
+        hgd_actlen => "hgd_actlen",
+        hgd_offset => "hgd_offset",
+        hgd_config_index => "hgd_config_index",
+        hgd_string_index => "hgd_string_index",
+        hgd_iface_index => "hgd_iface_index",
+        hgd_altif_index => "hgd_altif_index",
+        hgd_endpt_index => "hgd_endpt_index",
+        hgd_report_type => "hgd_report_type",
+        reserved => "reserved",
+    }),
+    layout!(crate::hidraw::HidrawDeviceInfo, "struct hidraw_device_info", ["sys/types.h", "dev/hid/hidraw.h"], All, {
+        hdi_product => "hdi_product",
+        hdi_vendor => "hdi_vendor",
+        hdi_version => "hdi_version",
+        occupied => "occupied",
+        hdi_bustype => "hdi_bustype",
+        reserved => "reserved",
+        hdi_name => "hdi_name",
+        hdi_phys => "hdi_phys",
+        hdi_uniq => "hdi_uniq",
+        hdi_release => "hdi_release",
+    }),
+    layout!(crate::hidraw::HidrawReportDescriptor, "struct hidraw_report_descriptor", ["sys/types.h", "dev/hid/hidraw.h"], All, {
+        size => "size",
+        value => "value",
+    }),
+    layout!(crate::hidraw::HidrawDevinfo, "struct hidraw_devinfo", ["sys/types.h", "dev/hid/hidraw.h"], All, {
+        bustype => "bustype",
+        vendor => "vendor",
+        product => "product",
     }),
     layout!(bus::DevreqBuffer, "struct devreq_buffer", ["sys/types.h", "sys/bus.h"], All, {
         buffer => "buffer",
