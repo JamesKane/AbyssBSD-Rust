@@ -36,9 +36,21 @@ use crate::softclock::Callout;
 
 pub(crate) const NANOS: u64 = 1_000_000_000;
 
-/// Nanoseconds of uptime.
+/// Nanoseconds of uptime, as `clock_gettime(CLOCK_MONOTONIC)` reads it
+/// (the shared page's, which `ntp_adjtime` and `adjtime` steer): FreeBSD's
+/// timers count on `sbinuptime`, the same clock its `CLOCK_MONOTONIC`
+/// reads, so an absolute time a program took from one is due on the other
+/// (`timerfd__absolute_timer_in_the_past` counted a period short once the
+/// two drifted apart).
 pub(crate) fn now() -> u64 {
-    crate::time::now_ns()
+    crate::shared_page::to_ns(crate::shared_page::uptime())
+}
+
+/// Nanoseconds from now until `at`, on [`now`]'s clock: a callout's delay.
+/// A callout that runs early, the counter having run ahead of the steered
+/// clock, finds its time not yet come and is armed again for what is left.
+fn until(at: u64) -> u64 {
+    at.saturating_sub(now())
 }
 
 /// `ts` in nanoseconds, if it is a valid interval (`timespecvalid_interval`).
@@ -173,7 +185,7 @@ impl KqTimer {
 
     fn arm(&self, at: u64) {
         let me = core::ptr::from_ref(self).expose_provenance();
-        self.callout.as_ref().reset_at(at, Self::expire, me);
+        self.callout.as_ref().reset(until(at), Self::expire, me);
     }
 
     /// `filt_timerexpire`, on the softclock thread.
@@ -404,7 +416,7 @@ impl Timerfd {
 
     fn arm(&self, at: u64) {
         let me = core::ptr::from_ref(self).expose_provenance();
-        self.callout.as_ref().reset_at(at, Self::expire, me);
+        self.callout.as_ref().reset(until(at), Self::expire, me);
     }
 
     /// `timerfd_expire`.
@@ -688,7 +700,7 @@ impl PosixTimer {
             return;
         };
         let me = core::ptr::from_ref(self).expose_provenance();
-        self.callout.as_ref().reset_at(at, Self::expire, me);
+        self.callout.as_ref().reset(until(at), Self::expire, me);
     }
 
     /// `realtimer_expire_l`.
@@ -869,7 +881,7 @@ impl Timers {
             } else {
                 self.real
                     .as_ref()
-                    .reset_at(st.itimers[0].value, Self::real_expire, me);
+                    .reset(until(st.itimers[0].value), Self::real_expire, me);
             }
         } else if value != 0 {
             self.cpu
@@ -894,7 +906,9 @@ impl Timers {
             if it.value == 0 {
                 false
             } else if t < it.value {
-                me.real.as_ref().reset_at(it.value, Self::real_expire, arg);
+                me.real
+                    .as_ref()
+                    .reset(until(it.value), Self::real_expire, arg);
                 false
             } else {
                 if it.interval == 0 {
@@ -903,7 +917,9 @@ impl Timers {
                     while it.value <= t {
                         it.value += it.interval;
                     }
-                    me.real.as_ref().reset_at(it.value, Self::real_expire, arg);
+                    me.real
+                        .as_ref()
+                        .reset(until(it.value), Self::real_expire, arg);
                 }
                 true
             }
