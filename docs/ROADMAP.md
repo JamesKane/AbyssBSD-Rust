@@ -2672,6 +2672,34 @@ no hangs, no reboot loops, nothing that needs the screen, and P8's remaining exi
   one driver table per ISA in `kernel/table`, so the aarch64 kernel stops carrying `isa`, `atrtc`,
   `ichwd`, `amdsbwd`, and the x86 timers, and the x86_64 kernel the Sky1 drivers and `cix-sky1`.
   Host checks per table, and one that catches a driver in the wrong table.
+- **What desktop and development software need** (the user, 2026-11-10: anything P9 or earlier
+  that they need is completed here). A comparison with FreeBSD on the board (its corpus, `devinfo`,
+  `sysctl -a`, and FreeBSD's own tools run on AbyssBSD) found these missing. Each item is done
+  when FreeBSD 15.1's tool or library runs unmodified against it:
+  - **Device interfaces:** `/dev/pci` (`pciconf`, libpciaccess, libdrm's enumeration), with the
+    arm64 host bridges named and numbered as FreeBSD's (`pci_host_generic_acpi`'s "Generic PCI
+    host controller", each host's bridges after it); `ugen` and `/dev/usb` (`usbconfig`, libusb,
+    USB.md §5.5, from P6's track U); `/dev/nvmeN` and `nvmeNnsM` (`nvmecontrol`, smartmontools);
+    CAM's `xpt0` and `pass` for the disks it names (`camcontrol devlist`, SCSI pass-through for
+    `smartctl` and disc tools); `/dev/geom.ctl` for the PART class (`gpart create`, `add`,
+    `delete`, `resize`, `modify`, `set`); devstat (`iostat`, `gstat`, `systat`); `/dev/full`.
+  - **System calls** (ENOSYS today, all in 15.1): `getdtablesize`, `posix_fadvise`, `mincore`,
+    `cpuset_getdomain` and `cpuset_setdomain` (`cpuset -g`), `sched_rr_get_interval`, `uuidgen`,
+    `membarrier`, `kcmp`, `getrlimitusage`, `renameat2`, `abort2`, `yield`; `ntp_adjtime` and
+    `ntp_gettime` with `adjtime` slewing (`ntpd`, chrony); POSIX AIO (`aio_*`, `lio_listio`);
+    `break` (amd64's `sbrk`) and the old `mount`.
+  - **Subsystems:** `tun`/`tap` (VPN clients, VM networking), `if_bridge` (VMs and jails),
+    `fdescfs` (`/dev/fd` beyond 0 to 2: OpenJDK, shells' process substitution), `nullfs` (jails,
+    poudriere; moved here from M-D's list), `cd9660` (ISO images through `md`).
+  - **Already P9 above:** the consumer and system-control HID collections (`hcons`, `hsctrl`:
+    volume, brightness and power keys), the RX8900 RTC, the PD controllers, the operation-region
+    handlers, real `rman` resources (`devinfo -u`).
+  - **Left where they are** (recorded in compat-deviations where userland sees them): graphics
+    (M-G); sound, the MAC framework, ACPI sleep, buttons, the battery, the AC adapter and
+    `/dev/acpi` (M-D); GELI and the `crypto(9)` framework with the installer (M-Z); video codec
+    and NPU (post Day 1). Not planned: `pf`, `ipfw`, `vlan`, `lagg`, IPsec, NFS, `procfs`, SPI
+    (`spigen`), kernel dumps, swap (P11). Not loaded by FreeBSD's GENERIC either, so not needed to
+    match it: `mqueuefs`, SCTP, `hwpmc`, and RACCT (`kern.racct.enable=0`).
 - **Verification:** kyua's arm64 target on the board; fsx with `fsck_ffs` on the NVMe and a USB
   disk (done with the SMMU's stage 5, IOMMU.md §18); the device tree against FreeBSD's `devinfo`
   wherever FreeBSD has a driver. No day-long looped runs (the user, 2026-11-10): kyua and the
@@ -2834,7 +2862,7 @@ Plan: [DESKTOP.md](DESKTOP.md) under [ADR-0018](adr/0018-desktop-architecture.md
   application jails, and its installer. AbyssBSD designs no desktop of its own. It runs this one
   as FreeBSD userland, installed from packages built for FreeBSD 15.1, unmodified.
 - The work here is the kernel beneath it. Most of what the desktop uses is P4–P6 ABI and is done.
-  Still to schedule: nullfs, the MAC framework with `mac_priority`, `sound(4)` (OSS, `sndstat`,
+  Still to schedule: the MAC framework with `mac_priority`, `sound(4)` (OSS, `sndstat`,
   `snd_dummy`, then HDA), ACPI sleep and buttons, and ZFS (M-Z) for the installer's default
   layout and boot environments (DESKTOP.md §3.2).
 - The desktop's own harness becomes a conformance suite, each lane compared with FreeBSD 15.1 as
