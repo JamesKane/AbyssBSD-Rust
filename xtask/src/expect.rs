@@ -276,6 +276,26 @@ pub(crate) const DYNAMIC: &[Step] = &[
         "\n0\r\n       1\r\n",
         "the jail is gone, and the host's name is its own",
     ),
+    // `uuidgen(2)`: version-1 UUIDs, the RFC 4122 variant, a batch
+    // consecutive in time.
+    step(
+        "uuidgen -n 3 | grep -c \
+         '^[0-9a-f]\\{8\\}-[0-9a-f]\\{4\\}-1[0-9a-f]\\{3\\}-[89ab][0-9a-f]\\{3\\}-[0-9a-f]\\{12\\}$'\n",
+        "\n3\r\n",
+        "uuidgen",
+    ),
+    // One memory domain, first-touch, as on a FreeBSD machine with one;
+    // `-n` sets a policy for the command it runs.
+    step(
+        "cpuset -g | grep domain\n",
+        "\npid -1 domain policy: first-touch mask: 0\r\n",
+        "cpuset -g",
+    ),
+    step(
+        "cpuset -n rr:0 cpuset -g | grep domain\n",
+        "\npid -1 domain policy: round-robin mask: 0\r\n",
+        "cpuset -n",
+    ),
 ];
 
 /// The user tests again, dynamically linked (ROADMAP P6.1's exit), from
