@@ -1015,54 +1015,56 @@ impl AddressSpace {
         access: Access,
     ) -> Result<(), FaultError> {
         let (map, r) = self.resolve(s, va, access)?;
-        // Code reaches instruction fetch only once synced (aarch64; x86
-        // keeps the caches coherent).
-        #[cfg(target_arch = "aarch64")]
-        if r.prot.contains(Prot::EXEC) && r.attr == MemAttr::WriteBack {
-            let kva = KernelPages::page(r.pfn);
-            arch::cache::sync_icache(kva as usize, PAGE_BYTES);
-        }
-        let replaced = self
-            .tables
-            .lock()
-            .set(&mut Frames, r.page, r.pfn.addr(), attrs(r.prot, r.attr))
-            .map_err(|_| FaultError::OutOfMemory)?;
-        if replaced.is_some() {
-            self.flush(r.page, PAGE_SIZE);
-        }
         // Not after a write: the neighbors would be mapped read-only, and
         // a process writing a run of copy-on-write pages would then take a
         // protection fault and a flush for each instead of a cheap fault.
-        if access != Access::Write {
-            self.prefault(&map, va);
-        }
-        Ok(())
-    }
-
-    /// Maps the resident pages around a read or execute fault, read-only,
-    /// where nothing is mapped yet (FreeBSD's `vm_fault_prefault`, four
-    /// pages each side): a program touching its text or data in order
-    /// faults once per few pages instead of once per page. New entries
-    /// need no flush.
-    fn prefault(&self, map: &VmMap, va: VirtAddr) {
+        // After a read or execute, the resident pages around it are mapped
+        // too, read-only, where nothing is mapped yet (FreeBSD's
+        // `vm_fault_prefault`, four pages each side): a program touching
+        // its text or data in order faults once per few pages instead of
+        // once per page. New entries need no flush.
         const AROUND: u64 = 4;
-        let near = fault::prefault(map, va, AROUND);
-        if near.is_empty() {
-            return;
+        let near = if access == Access::Write {
+            alloc::vec::Vec::new()
+        } else {
+            fault::prefault(&map, va, AROUND)
+        };
+        let near: alloc::vec::Vec<_> = {
+            let tables = self.tables.lock();
+            near.into_iter()
+                .filter(|n| tables.translate(&mut Frames, n.page).is_none())
+                .collect()
+        };
+        // Code reaches instruction fetch only once synced (aarch64; x86
+        // keeps the caches coherent): the faulting page and its new
+        // neighbors in one batch, which past 32 KiB invalidates the
+        // instruction cache once rather than line by line. Outside the
+        // tables' spin lock, which masks interrupts: the map's lock, held
+        // throughout, keeps the space's mappings as they were looked at.
+        #[cfg(target_arch = "aarch64")]
+        {
+            let code =
+                |x: &fault::Resolved| x.prot.contains(Prot::EXEC) && x.attr == MemAttr::WriteBack;
+            let pages: alloc::vec::Vec<usize> = core::iter::once(&r)
+                .chain(near.iter())
+                .filter(|x| code(x))
+                .map(|x| KernelPages::page(x.pfn) as usize)
+                .collect();
+            arch::cache::sync_icache_ranges(&pages, PAGE_BYTES);
         }
         let mut tables = self.tables.lock();
-        for r in near {
-            if tables.translate(&mut Frames, r.page).is_some() {
-                continue;
-            }
-            #[cfg(target_arch = "aarch64")]
-            if r.prot.contains(Prot::EXEC) && r.attr == MemAttr::WriteBack {
-                let kva = KernelPages::page(r.pfn);
-                arch::cache::sync_icache(kva as usize, PAGE_BYTES);
-            }
+        let replaced = tables
+            .set(&mut Frames, r.page, r.pfn.addr(), attrs(r.prot, r.attr))
+            .map_err(|_| FaultError::OutOfMemory)?;
+        for n in near {
             // Out of table memory: the page faults in later instead.
-            let _ = tables.set(&mut Frames, r.page, r.pfn.addr(), attrs(r.prot, r.attr));
+            let _ = tables.set(&mut Frames, n.page, n.pfn.addr(), attrs(n.prot, n.attr));
         }
+        drop(tables);
+        if replaced.is_some() {
+            self.flush(r.page, PAGE_SIZE);
+        }
+        Ok(())
     }
 
     /// Unmaps everything (at exit); the empty space stays loaded until its
