@@ -6,6 +6,8 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+vfs = { path = "../../sys/vfs" }
+cam = { path = "../../sys/cam" }
 abi = { path = "../../lib/abi" }
 hal = { path = "../../arch/hal" }
 bus = { path = "../../sys/bus" }

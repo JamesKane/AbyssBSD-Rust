@@ -695,6 +695,7 @@ version = "0.0.0"
 dependencies = [
  "abi",
  "bus",
+ "cam",
  "devtree",
  "hal",
  "irq",
@@ -704,6 +705,7 @@ dependencies = [
  "storage",
  "sync",
  "sysctl",
+ "vfs",
  "vm",
 ]
 

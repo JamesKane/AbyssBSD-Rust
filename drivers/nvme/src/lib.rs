@@ -29,6 +29,9 @@
 //!   held fails with `EIO`, and its namespaces are withdrawn (`ENXIO`).
 //! - Stop stops the watchdog, withdraws the namespaces, shuts the
 //!   controller down normally, disables it, and fails what it still held.
+//! - Userland reaches it through `/dev/nvmeN`, `/dev/nvmeNnM`, and CAM's
+//!   `nvme` bus (`user.rs`); their pass-through commands run on the same
+//!   queues (`pass.rs`).
 //!
 //! Everything the controller writes is checked: a completion's command ID
 //! must name an outstanding command.
@@ -47,8 +50,10 @@
 extern crate alloc;
 
 pub mod fault;
+mod pass;
 mod status;
 mod timeout;
+mod user;
 
 pub use timeout::set_tunables;
 
@@ -163,12 +168,20 @@ const KNOWN: &[(u16, u16, &str)] = &[
 #[derive(Clone, Copy, Debug, Default)]
 struct Command {
     opcode: u8,
+    /// Fused operation (a pass-through command's own).
+    fuse: u8,
     nsid: u32,
+    /// Dwords 2 and 3 (reserved, or command-specific).
+    cdw2: u32,
+    cdw3: u32,
     prp1: u64,
     prp2: u64,
     cdw10: u32,
     cdw11: u32,
     cdw12: u32,
+    cdw13: u32,
+    cdw14: u32,
+    cdw15: u32,
 }
 
 /// A completion queue entry.
@@ -228,19 +241,23 @@ impl Rings {
     fn push(&mut self, c: &Command, cid: u16) {
         let at = usize::from(self.tail) * SQE;
         let m = &self.sq;
-        m.write_at::<u32>(at, u32::from(c.opcode) | u32::from(cid) << 16);
+        m.write_at::<u32>(
+            at,
+            u32::from(c.opcode) | u32::from(c.fuse) << 8 | u32::from(cid) << 16,
+        );
         m.write_at::<u32>(at + 4, c.nsid);
-        for off in (8..24).step_by(8) {
-            m.write_at::<u64>(at + off, 0);
-        }
+        m.write_at::<u32>(at + 8, c.cdw2);
+        m.write_at::<u32>(at + 12, c.cdw3);
+        // No metadata.
+        m.write_at::<u64>(at + 16, 0);
         m.write_at::<u64>(at + 24, c.prp1);
         m.write_at::<u64>(at + 32, c.prp2);
         m.write_at::<u32>(at + 40, c.cdw10);
         m.write_at::<u32>(at + 44, c.cdw11);
         m.write_at::<u32>(at + 48, c.cdw12);
-        for off in (52..64).step_by(4) {
-            m.write_at::<u32>(at + off, 0);
-        }
+        m.write_at::<u32>(at + 52, c.cdw13);
+        m.write_at::<u32>(at + 56, c.cdw14);
+        m.write_at::<u32>(at + 60, c.cdw15);
         self.tail = (self.tail + 1) % self.entries;
     }
 
@@ -322,9 +339,18 @@ enum Data {
     Write(Mapped<IoBuf, dir::ToDevice>),
 }
 
+/// What a command was sent for.
+enum Req {
+    /// A disk's request.
+    Bio(Bio),
+    /// A pass-through command (`NVME_PASSTHROUGH_CMD`, `XPT_NVME_IO`),
+    /// whose sender waits.
+    Pass(Arc<pass::Waiter>),
+}
+
 /// An outstanding command (FreeBSD's tracker and request).
 struct InFlight {
-    bio: Bio,
+    req: Req,
     data: Data,
     /// The command as sent, to send again.
     cmd: Command,
@@ -333,15 +359,48 @@ struct InFlight {
     deadline: Deadline,
 }
 
-impl InFlight {
-    fn finish(self) -> Bio {
-        let Self { mut bio, data, .. } = self;
-        match data {
-            Data::None => {}
-            Data::Read(d) => bio.buf = d.unmap(),
-            Data::Write(d) => bio.buf = d.unmap(),
+impl Data {
+    /// The buffer back from the controller.
+    fn unmap(self) -> IoBuf {
+        match self {
+            Data::None => IoBuf::Owned(Vec::new()),
+            Data::Read(d) => d.unmap(),
+            Data::Write(d) => d.unmap(),
         }
-        bio
+    }
+}
+
+impl InFlight {
+    /// Ends it: a bio with `r`, a pass-through command with its
+    /// completion (`status`, dword 0) from queue `sqid`.
+    fn end(
+        self,
+        out: &mut Reaped,
+        r: Result<(), BioError>,
+        status: Status,
+        dw0: u32,
+        sqid: u16,
+        cid: u16,
+    ) {
+        let Self { req, data, .. } = self;
+        match req {
+            Req::Bio(mut bio) => {
+                if !matches!(data, Data::None) {
+                    bio.buf = data.unmap();
+                }
+                out.done.push((bio, r));
+            }
+            Req::Pass(w) => out.passed.push((
+                w,
+                pass::Done {
+                    status,
+                    dw0,
+                    sqid,
+                    cid,
+                    buf: data.unmap(),
+                },
+            )),
+        }
     }
 }
 
@@ -423,6 +482,8 @@ struct Namespace {
     blocks: u64,
     /// Its world-wide name, from its NGUID or EUI-64.
     lunid: Option<String>,
+    /// Its identify data.
+    nsdata: Box<[u8; 4096]>,
 }
 
 /// The watchdog's state (the qpair callout's `timer_armed`).
@@ -471,6 +532,14 @@ pub struct Controller {
     admin: Mutex<Admin>,
     /// Identify data, for the admin commands.
     identify: DmaCoherent<u8>,
+    /// The identify controller data attach read (`cdata`).
+    cdata: Box<[u8; 4096]>,
+    /// The VS register: the version implemented.
+    vs: u32,
+    /// The PRP list of an admin pass-through command.
+    admin_prp: DmaCoherent<u64>,
+    /// CAM's devices for the namespaces.
+    cam_devices: SpinLock<Vec<cam::Device>>,
     /// CAP.TO: how long CSTS.RDY may take to change.
     ready_timeout_ms: u64,
     /// `is_failed`: every request fails.
@@ -500,6 +569,8 @@ struct NsQueues {
 #[derive(Default)]
 struct Reaped {
     done: Vec<(Bio, Result<(), BioError>)>,
+    /// Pass-through commands ended.
+    passed: Vec<(Arc<pass::Waiter>, pass::Done)>,
     /// Commands that completed (or were sent again).
     found: usize,
     /// Lines to print.
@@ -507,6 +578,21 @@ struct Reaped {
 }
 
 impl Controller {
+    /// `nvmeN`.
+    fn name(&self) -> String {
+        format!("nvme{}", self.unit)
+    }
+
+    /// The most commands outstanding at once (`max_hw_pend_io`).
+    fn max_pending(&self) -> u32 {
+        let per = self
+            .knobs
+            .stats
+            .first()
+            .map_or(1, |q| q.entries.saturating_sub(1));
+        (per * self.queues.len() as u32 * 3 / 4).max(1)
+    }
+
     fn log(&self, args: core::fmt::Arguments<'_>) {
         bus::manager().log(format_args!("nvme{}: {args}", self.unit));
     }
@@ -616,7 +702,7 @@ impl Controller {
             match outcome {
                 Outcome::Done => {
                     io.free.push(cid);
-                    out.done.push((f.finish(), Ok(())));
+                    f.end(&mut out, Ok(()), cpl.status, cpl.dw0, io.id, cid);
                 }
                 Outcome::Retry => {
                     QueueStats::add(&stats.retries, 1);
@@ -631,7 +717,7 @@ impl Controller {
                         QueueStats::add(&stats.failures, 1);
                     }
                     io.free.push(cid);
-                    out.done.push((f.finish(), Err(BioError::Io)));
+                    f.end(&mut out, Err(BioError::Io), cpl.status, cpl.dw0, io.id, cid);
                 }
             }
         }
@@ -652,6 +738,9 @@ impl Controller {
         }
         for (bio, res) in r.done {
             bio.complete(res);
+        }
+        for (w, d) in r.passed {
+            w.finish(d);
         }
     }
 
@@ -903,7 +992,7 @@ impl Controller {
                         }
                         Self::note_failure(&mut r.notes, sqid, cid, &f, &Cpl { cid, ..aborted });
                         io.free.push(cid);
-                        r.done.push((f.finish(), Err(BioError::Io)));
+                        f.end(&mut r, Err(BioError::Io), aborted.status, 0, sqid, cid);
                     }
                 }
             }
@@ -940,20 +1029,25 @@ impl Controller {
                     let Some(f) = io.slots[i].take() else {
                         continue;
                     };
-                    if r.done.is_empty() {
+                    if r.done.is_empty() && r.passed.is_empty() {
                         r.notes.push("failing outstanding i/o".into());
                     }
                     let cid = i as u16;
                     Self::note_failure(&mut r.notes, sqid, cid, &f, &Cpl { cid, ..dead });
                     io.free.push(cid);
-                    r.done.push((f.finish(), Err(BioError::Io)));
+                    f.end(&mut r, Err(BioError::Io), dead.status, 0, sqid, cid);
                 }
             }
             self.deliver(r);
         }
         // The namespaces go (`nvme_sim_fail_all_ns`): what waits on them
-        // fails, and so does anything sent to them later. Taken in its own
-        // statement: no spinlock held while withdrawing.
+        // fails, and so does anything sent to them later; CAM loses its
+        // devices. Taken in their own statements: no spinlock held while
+        // withdrawing.
+        let devices = core::mem::take(&mut *self.cam_devices.lock());
+        for d in devices {
+            d.remove(s);
+        }
         let disks = core::mem::take(&mut *self.disks.lock());
         for disk in disks {
             storage::withdraw(s, &disk);
@@ -994,6 +1088,33 @@ impl Controller {
     }
 }
 
+/// Whether `segs` follow the PRP rules: every segment after the first
+/// starts page-aligned, and every one but the last ends at a page
+/// boundary; and whether a list of `max` entries holds them.
+fn prp_shaped(segs: &[vm::dma::Segment], max: usize) -> bool {
+    segs.len() <= max + 1
+        && segs.iter().enumerate().all(|(i, g)| {
+            (i == 0 || g.bus % PAGE as u64 == 0)
+                && (i + 1 == segs.len() || (g.bus + g.len) % PAGE as u64 == 0)
+        })
+}
+
+/// PRP entries 1 and 2 for `segs` (PRP-shaped), entries past the second
+/// written to `list` from entry `base`.
+fn prp_pair(segs: &[vm::dma::Segment], list: &DmaCoherent<u64>, base: usize) -> (u64, u64) {
+    match segs {
+        [] => (0, 0),
+        [a] => (a.bus, 0),
+        [a, b] => (a.bus, b.bus),
+        [a, rest @ ..] => {
+            for (i, g) in rest.iter().enumerate() {
+                list.write(base + i, g.bus);
+            }
+            (a.bus, list.bus_addr() + (base * 8) as u64)
+        }
+    }
+}
+
 /// The admin commands creating I/O queue `qid`'s completion and
 /// submission queues of `size + 1` entries, interrupting on `vector`.
 fn queue_commands(qid: u16, vector: usize, size: u32, cq: u64, sq: u64) -> (Command, Command) {
@@ -1019,6 +1140,12 @@ fn queue_commands(qid: u16, vector: usize, size: u32, cq: u64, sq: u64) -> (Comm
 impl DiskQueues for NsQueues {
     fn queues(&self) -> usize {
         self.ctrl.queues.len()
+    }
+
+    /// `ndaioctl`: the namespace's controller and ID, and pass-through
+    /// commands as I/O commands.
+    fn ioctl(&self, s: &Sleepable, req: u32, arg: &mut [u8]) -> Option<Result<(), Errno>> {
+        Some(user::nda_ioctl(&self.ctrl, self.nsid, s, req, arg))
     }
 
     fn submit(&self, s: &Sleepable, q: usize, bios: &mut Vec<Bio>) {
@@ -1058,36 +1185,12 @@ impl DiskQueues for NsQueues {
                 Data::Read(d) => d.segments(),
                 Data::Write(d) => d.segments(),
             };
-            // PRP rules: segments after the first start page-aligned, and
-            // all but the last end at a page boundary.
-            let prp_ok = segs.iter().enumerate().all(|(i, g)| {
-                (i == 0 || g.bus % PAGE as u64 == 0)
-                    && (i + 1 == segs.len() || (g.bus + g.len) % PAGE as u64 == 0)
-            });
-            if !prp_ok || segs.len() > PRP_LIST / 8 + 1 {
-                InFlight {
-                    bio,
-                    data,
-                    cmd: Command::default(),
-                    retries: 0,
-                    deadline: Deadline::Unset,
-                }
-                .finish()
-                .complete(Err(BioError::Invalid));
+            if !prp_shaped(segs, PRP_LIST / 8) {
+                bio.buf = data.unmap();
+                bio.complete(Err(BioError::Invalid));
                 continue;
             }
-            let (prp1, prp2) = match segs {
-                [] => (0, 0),
-                [a] => (a.bus, 0),
-                [a, b] => (a.bus, b.bus),
-                [a, rest @ ..] => {
-                    let base = usize::from(cid) * (PRP_LIST / 8);
-                    for (i, g) in rest.iter().enumerate() {
-                        io.prps.write(base + i, g.bus);
-                    }
-                    (a.bus, io.prps.bus_addr() + (base * 8) as u64)
-                }
-            };
+            let (prp1, prp2) = prp_pair(segs, &io.prps, usize::from(cid) * (PRP_LIST / 8));
             let lba = bio.offset >> self.shift;
             let opcode = match bio.op {
                 BioOp::Read => IO_READ,
@@ -1102,11 +1205,12 @@ impl DiskQueues for NsQueues {
                 cdw10: lba as u32,
                 cdw11: (lba >> 32) as u32,
                 cdw12: blocks.saturating_sub(1),
+                ..Command::default()
             };
             io.free.pop();
             io.rings.push(&c, cid);
             io.slots[usize::from(cid)] = Some(InFlight {
-                bio,
+                req: Req::Bio(bio),
                 data,
                 cmd: c,
                 retries: 0,
@@ -1252,6 +1356,12 @@ pub struct Nvme {
     model: String,
     serial: String,
     watchdog: SpinLock<Option<Arc<Thread>>>,
+    /// Its PCI function, for CAM's path inquiries.
+    pci: Arc<PciChild>,
+    /// Its CAM bus, while started.
+    cam_bus: SpinLock<Option<cam::Bus>>,
+    /// Its device nodes, while started.
+    nodes: SpinLock<Vec<String>>,
 }
 
 impl core::fmt::Debug for Nvme {
@@ -1517,6 +1627,14 @@ impl Driver for Nvme {
             return Err(AttachError::Device("identify controller failed"));
         }
         let bytes = |a: usize, b: usize| (a..b).map(|i| identify.read(i)).collect::<Vec<u8>>();
+        let page = || {
+            let mut b = Box::new([0u8; 4096]);
+            for (i, v) in b.iter_mut().enumerate() {
+                *v = identify.read(i);
+            }
+            b
+        };
+        let cdata = page();
         let model = ascii(&bytes(24, 64));
         let serial = ascii(&bytes(4, 24));
         // As `nda` shows them; read now, before the namespaces' identify
@@ -1636,8 +1754,12 @@ impl Driver for Nvme {
                 shift,
                 blocks,
                 lunid: lunid(&field(104, 120), &field(120, 128)),
+                nsdata: page(),
             });
         }
+        let admin_prp = rings_tag
+            .coherent::<u64>(PRP_LIST / 8)
+            .map_err(|_| AttachError::NoMemory)?;
         // Unmask (INTx and MSI; MSI-X ignores the masks).
         regs.mmio.write32(reg::INTMC, u32::MAX);
         let unit = cx.unit();
@@ -1664,6 +1786,10 @@ impl Driver for Nvme {
                 disks: SpinLock::new(Vec::new()),
                 admin: Mutex::new(&ADMIN_LOCK, admin),
                 identify,
+                cdata,
+                vs: version,
+                admin_prp,
+                cam_devices: SpinLock::new(Vec::new()),
                 ready_timeout_ms: timeout_ms,
                 failed: AtomicBool::new(false),
                 isr_warned: AtomicBool::new(false),
@@ -1679,6 +1805,9 @@ impl Driver for Nvme {
             msix,
             _messages: messages,
             watchdog: SpinLock::new(None),
+            pci: child,
+            cam_bus: SpinLock::new(None),
+            nodes: SpinLock::new(Vec::new()),
         })
     }
 
@@ -1701,6 +1830,37 @@ impl Driver for Nvme {
             if self.msix > 0 { "MSI-X" } else { "INTx" }
         ));
         self.add_sysctls(cx.sleepable());
+        // The controller's node (`nvme_ctrlr_construct`), and its CAM bus
+        // (`nvme_sim_new_controller`), which keeps a wildcard path.
+        let s = cx.sleepable();
+        let name = self.ctrl.name();
+        let ctrl_dev = Arc::new(user::CtrlDev {
+            ctrl: Arc::downgrade(&self.ctrl),
+        });
+        let _ = vfs::devices::make_dev(name.as_bytes(), 0o600, 0, 0, ctrl_dev);
+        self.nodes.lock().push(name.clone());
+        let sim = Arc::new(user::NvmeSim {
+            ctrl: Arc::downgrade(&self.ctrl),
+            pci: Arc::clone(&self.pci),
+            unit: self.unit,
+            vs: self.ctrl.vs,
+            nn: u32::from_le_bytes([
+                self.ctrl.cdata[516],
+                self.ctrl.cdata[517],
+                self.ctrl.cdata[518],
+                self.ctrl.cdata[519],
+            ]),
+            maxio: u32::try_from(self.ctrl.max_transfer).unwrap_or(u32::MAX),
+        });
+        let bus = cam::Bus::register(
+            cam::SimName {
+                name: "nvme",
+                unit: self.unit,
+                bus_id: 0,
+            },
+            sim,
+            true,
+        );
         let mut disks = Vec::new();
         for ns in &self.namespaces {
             let block = 1u32 << ns.shift;
@@ -1717,7 +1877,9 @@ impl Driver for Nvme {
                 nsid: ns.nsid,
                 shift: ns.shift,
             };
-            let disk = storage::publish(cx.sleepable(), info, Arc::new(queues));
+            // `nda` on CAM's bus, with its pass device.
+            user::announce(&self.ctrl, info.unit, bus.path_id(), ns.nsid);
+            let disk = storage::publish(s, info, Arc::new(queues));
             // What `nda` gives GEOM (`ndaregister`): the model and serial
             // number, a solid-state disk, and CAM's devstat entry.
             disk.describe(storage::Description {
@@ -1728,9 +1890,23 @@ impl Driver for Nvme {
                 ..storage::Description::default()
             });
             disk.set_devstat(storage::devstat::Kind::NVME);
+            let dev = bus.add_device(user::cam_device(&self.ctrl, ns.nsid, &ns.nsdata, info.unit));
+            self.ctrl.cam_devices.lock().push(dev);
+            // `nvmeNnM`, and its alias `nvmeNnsM` (`nvme_ns_construct`).
+            let node = format!("{name}n{}", ns.nsid);
+            let alias = format!("{name}ns{}", ns.nsid);
+            let ns_dev = Arc::new(user::NsDev {
+                ctrl: Arc::downgrade(&self.ctrl),
+                disk: Arc::clone(&disk),
+                nsid: ns.nsid,
+            });
+            let _ = vfs::devices::make_dev(node.as_bytes(), 0o600, 0, 0, ns_dev);
+            let _ = vfs::devices::make_dev_alias(alias.as_bytes(), node.as_bytes());
+            self.nodes.lock().extend([alias, node]);
             disks.push(disk);
         }
         *self.ctrl.disks.lock() = disks;
+        *self.cam_bus.lock() = Some(bus);
         Ok(())
     }
 
@@ -1745,7 +1921,21 @@ impl Driver for Nvme {
         if let Some(t) = t {
             t.join(s);
         }
-        // Taken in its own statement: no spinlock held while withdrawing.
+        // What userland reaches it by goes first: CAM's devices and bus,
+        // and the device nodes. Each taken in its own statement: no
+        // spinlock held while they go.
+        let devices = core::mem::take(&mut *self.ctrl.cam_devices.lock());
+        for d in devices {
+            d.remove(s);
+        }
+        let bus = self.cam_bus.lock().take();
+        if let Some(b) = bus {
+            b.deregister(s);
+        }
+        let nodes = core::mem::take(&mut *self.nodes.lock());
+        for n in nodes {
+            vfs::devices::destroy_dev(s, n.as_bytes());
+        }
         let disks = core::mem::take(&mut *self.ctrl.disks.lock());
         for disk in disks {
             storage::withdraw(s, &disk);
@@ -1779,15 +1969,27 @@ impl Driver for Nvme {
         // asserted once our handler is gone.
         regs.mmio.write32(reg::INTMS, u32::MAX);
         regs.mmio.write32(reg::CC, 0);
+        let gone = status::make(0, status::SC_ABORTED_BY_REQUEST, true);
         for q in &self.ctrl.queues {
-            let held: Vec<InFlight> = q
-                .lock(s)
-                .slots
-                .iter_mut()
-                .filter_map(Option::take)
-                .collect();
-            for f in held {
-                f.finish().complete(Err(BioError::Gone));
+            let mut r = Reaped::default();
+            let (sqid, held): (u16, Vec<(usize, InFlight)>) = {
+                let mut io = q.lock(s);
+                let held = io
+                    .slots
+                    .iter_mut()
+                    .enumerate()
+                    .filter_map(|(i, f)| f.take().map(|f| (i, f)))
+                    .collect();
+                (io.id, held)
+            };
+            for (i, f) in held {
+                f.end(&mut r, Err(BioError::Gone), gone, 0, sqid, i as u16);
+            }
+            for (bio, res) in r.done {
+                bio.complete(res);
+            }
+            for (w, d) in r.passed {
+                w.finish(d);
             }
         }
     }
