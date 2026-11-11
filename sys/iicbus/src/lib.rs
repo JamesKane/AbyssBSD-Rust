@@ -65,6 +65,23 @@ pub fn set_user_memory(m: &'static dyn UserMemory) {
     let _ = USER.set(m);
 }
 
+/// `iic2errno`: the error number a device driver returns for a failed
+/// transfer, from the status FreeBSD's controller would give.
+#[must_use]
+pub fn iic2errno(e: bus::provider::ProviderError) -> Errno {
+    use bus::provider::ProviderError as P;
+    match e {
+        P::BusError | P::ArbitrationLost => Errno::EALREADY,
+        P::NoAck => Errno::EIO,
+        P::Timeout => Errno::ETIMEDOUT,
+        P::BusBusy => Errno::EAGAIN,
+        P::Unsupported => Errno::EOPNOTSUPP,
+        P::OutOfRange => Errno::EOVERFLOW,
+        P::Revoked => Errno::ENXIO,
+        _ => Errno::EPROTO,
+    }
+}
+
 /// `iicbusN`.
 #[derive(Debug)]
 pub struct Iicbus {
