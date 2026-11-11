@@ -1,0 +1,46 @@
++ gpart create -s gpt -n 4 md0
+md0 created
++ gpart add -t freebsd-swap -b 100 -s 1000 md0
+md0p1 added
++ gpart add -t freebsd-ufs -a 1m -l data md0
+md0p2 added
++ gpart add -t !0fc63daf-8483-4772-8e79-3d69d8477de4 -i 4 -s 200 md0
+md0p4 added
++ gpart add -t freebsd-zfs md0
+md0p3 added
++ gpart add -t freebsd-zfs md0
+gpart: index '5': No space left on device
+exit 1
++ gpart resize -i 1 -s 500 md0
+md0p1 resized
++ gpart modify -i 2 -l renamed label -t freebsd-vinum md0
+md0p2 modified
++ gpart delete -i 4 md0
+md0p4 deleted
++ gpart add -t ms-basic-data -i 3 -s 64 md0
+gpart: index '3': File exists
+exit 1
++ gpart resize -i 2 md0
+md0p2 resized
++ gpart set -a lenovofix md0
+lenovofix set on md0
++ gpart show md0
+=>   8  9984  md0  GPT  (4.9M)
+     8    92       - free -  (46K)
+   100   500    1  freebsd-swap  (250K)
+   600  1448       - free -  (724K)
+  2048  6144    2  freebsd-vinum  (3.0M)
+  8192  1800    3  freebsd-zfs  (900K)
+
++ gpart show -l md0
+=>   8  9984  md0  GPT  (4.9M)
+     8    92       - free -  (46K)
+   100   500    1  (null)  (250K)
+   600  1448       - free -  (724K)
+  2048  6144    2  renamed label  (3.0M)
+  8192  1800    3  (null)  (900K)
+
+GPT 4
+1  freebsd-swap  100  500  
+2 freebsd-vinum 2048 6144 renamed label 
+3   freebsd-zfs 8192 1800  

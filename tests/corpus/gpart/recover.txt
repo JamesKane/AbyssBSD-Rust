@@ -1,0 +1,19 @@
++ gpart create -s gpt md0
+md0 created
++ gpart add -t freebsd-ufs -s 4m md0
+md0p1 added
++ gpart show md0
+=>   40  16304  md0  GPT  (8.0M) [CORRUPT]
+     40   8192    1  freebsd-ufs  (4.0M)
+   8232   8112       - free -  (4.0M)
+
++ gpart add -t freebsd-swap md0
+gpart: table 'md0' is corrupt: Operation not permitted
+exit 1
++ gpart recover md0
+md0 recovered
++ gpart show md0
+=>   40  16304  md0  GPT  (8.0M)
+     40   8192    1  freebsd-ufs  (4.0M)
+   8232   8112       - free -  (4.0M)
+

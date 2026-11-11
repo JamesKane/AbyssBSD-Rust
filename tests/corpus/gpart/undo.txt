@@ -1,0 +1,19 @@
++ gpart create -s gpt md0
+md0 created
++ gpart add -t freebsd-ufs -s 1m -f x md0
+md0p1 added
++ gpart show md0
+=>   40  16304  md0  GPT  (8.0M)
+     40   2048    1  freebsd-ufs  (1.0M)
+   2088  14256       - free -  (7.0M)
+
+modified: true
++ gpart undo md0
++ gpart add -t freebsd-ufs -s 2m -l later -f x md0
+md0p1 added
++ gpart commit md0
++ gpart show -l md0
+=>   40  16304  md0  GPT  (8.0M)
+     40   4096    1  later  (2.0M)
+   4136  12208       - free -  (6.0M)
+

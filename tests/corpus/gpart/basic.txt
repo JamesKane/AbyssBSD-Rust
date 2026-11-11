@@ -1,0 +1,82 @@
++ gpart create -s gpt md0
+md0 created
++ gpart add -t efi -s 40m -l efiboot md0
+md0p1 added
++ gpart add -t freebsd-ufs -l test md0
+md0p2 added
++ gpart set -a bootme -i 2 md0
+bootme set on md0p2
++ gpart set -a bootonce -i 1 md0
+bootonce set on md0p1
++ gpart unset -a bootme -i 1 md0
+bootme unset on md0p1
++ gpart bootcode -b /boot/pmbr md0
+bootcode written to md0
++ gpart set -a active md0
+active set on md0
++ gpart show md0
+=>    40  130992  md0  GPT  (64M)
+      40   81920    1  efi  [bootonce]  (40M)
+   81960   49072    2  freebsd-ufs  [bootme]  (24M)
+
++ gpart show -l md0
+=>    40  130992  md0  GPT  (64M)
+      40   81920    1  efiboot  [bootonce]  (40M)
+   81960   49072    2  test  [bootme]  (24M)
+
++ gpart show -r md0
+=>    40  130992  md0  GPT  (64M)
+      40   81920    1  c12a7328-f81f-11d2-ba4b-00a0c93ec93b  [bootonce]  (40M)
+   81960   49072    2  516e7cb6-6ecf-11d6-8ff8-00022d09712b  [bootme]  (24M)
+
++ gpart show -p md0
+=>    40  130992    md0  GPT  (64M)
+      40   81920  md0p1  efi  [bootonce]  (40M)
+   81960   49072  md0p2  freebsd-ufs  [bootme]  (24M)
+
+GPT 128
+1           efi     40  81920 efiboot  [bootonce] 
+2   freebsd-ufs  81960  49072 test  [bootme] 
+Geom name: md0
+modified: false
+state: OK
+fwheads: 255
+fwsectors: 1
+last: 131031
+first: 40
+entries: 128
+scheme: GPT
+Providers:
+   Mediasize: 41943040 (40M)
+   Sectorsize: 512
+   Stripesize: 0
+   Stripeoffset: 20480
+   Mode: r0w0e0
+   rawtype: c12a7328-f81f-11d2-ba4b-00a0c93ec93b
+   attrib: bootonce
+   label: efiboot
+   length: 41943040
+   offset: 20480
+   type: efi
+   index: 1
+   end: 81959
+   start: 40
+   Mediasize: 25124864 (24M)
+   Sectorsize: 512
+   Stripesize: 0
+   Stripeoffset: 41963520
+   Mode: r0w0e0
+   rawtype: 516e7cb6-6ecf-11d6-8ff8-00022d09712b
+   attrib: bootme
+   label: test
+   length: 25124864
+   offset: 41963520
+   type: freebsd-ufs
+   index: 2
+   end: 131031
+   start: 81960
+Consumers:
+   Mediasize: 67108864 (64M)
+   Sectorsize: 512
+   Mode: r0w0e0
+

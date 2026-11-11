@@ -1,0 +1,13 @@
++ gpart create -s gpt md0
+md0 created
++ gpart add -t freebsd-ufs md0
+md0p1 added
++ gpart destroy md0
+gpart: Device busy
+exit 1
++ gpart destroy -F md0
+md0 destroyed
++ gpart create -s gpt md0
+md0 created
++ gpart destroy md0
+md0 destroyed

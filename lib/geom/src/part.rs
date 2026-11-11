@@ -94,6 +94,16 @@ pub fn gpt_type(guid: &str) -> String {
         .map_or_else(|| format!("!{guid}"), |(_, name)| String::from(*name))
 }
 
+/// The GUID (lower case) of the GPT type `gpart` names `alias` (any
+/// case: `gpt_parse_type`'s `strcasecmp`).
+#[must_use]
+pub fn gpt_type_guid(alias: &[u8]) -> Option<&'static str> {
+    GPT_TYPES
+        .iter()
+        .find(|(_, name)| name.as_bytes().eq_ignore_ascii_case(alias))
+        .map(|(g, _)| *g)
+}
+
 /// `%#jx`: hexadecimal with `0x`, but plain `0` for zero.
 fn alt_hex(v: u64) -> String {
     if v == 0 {
@@ -199,6 +209,12 @@ mod tests {
             gpt_type("01234567-89ab-cdef-0123-456789abcdef"),
             "!01234567-89ab-cdef-0123-456789abcdef"
         );
+        assert_eq!(
+            gpt_type_guid(b"FreeBSD-UFS"),
+            Some("516e7cb6-6ecf-11d6-8ff8-00022d09712b")
+        );
+        // MBR's names are not GPT's.
+        assert_eq!(gpt_type_guid(b"fat32"), None);
     }
 
     #[test]

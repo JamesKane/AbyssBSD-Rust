@@ -5,5 +5,10 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[dependencies]
+abi = { path = "../abi" }
+crc = { path = "../crc" }
+guid = { path = "../guid" }
+
 [lints]
 workspace = true

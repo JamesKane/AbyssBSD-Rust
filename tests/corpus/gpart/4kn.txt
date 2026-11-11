@@ -1,0 +1,11 @@
++ gpart create -s gpt md0
+md0 created
++ gpart add -t freebsd-boot -s 512k md0
+md0p1 added
++ gpart add -t freebsd-ufs -l root md0
+md0p2 added
++ gpart show md0
+=>    6  16373  md0  GPT  (64M)
+      6    128    1  freebsd-boot  (512K)
+    134  16245    2  freebsd-ufs  (63M)
+

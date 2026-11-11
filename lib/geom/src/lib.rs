@@ -13,8 +13,12 @@
 //!   escaping `dumpconf` applies.
 //! - [`part`]: the PART class's GPT details: type names, `efimedia`, and
 //!   the geometry `g_part` makes up for disks without one.
+//! - [`table`]: the PART class's tables: tasted, changed by `gpart`'s
+//!   verbs ([`table::ctlreq`]), and committed to disk.
+//! - [`ctl`]: a control request (`struct gctl_req`) as a class sees it.
 //!
 //! Behavior reference: sys/geom/geom_dump.c, sys/geom/geom_subr.c,
+//! sys/geom/geom_ctl.c,
 //! sys/geom/geom_slice.c, sys/geom/part/g_part.c, g_part_gpt.c,
 //! sys/geom/label/g_label.c, g_label_gpt.c.
 
@@ -23,8 +27,10 @@
 
 extern crate alloc;
 
+pub mod ctl;
 pub mod label;
 pub mod mesh;
 pub mod part;
+pub mod table;
 
 pub use mesh::{Access, ClassRef, ConsumerRef, Field, GeomRef, Kind, Media, Mesh, ProviderRef};
