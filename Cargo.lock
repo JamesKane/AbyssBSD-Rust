@@ -55,7 +55,9 @@ version = "0.0.0"
 name = "ahci"
 version = "0.0.0"
 dependencies = [
+ "abi",
  "bus",
+ "cam",
  "devtree",
  "irq",
  "pci",
@@ -968,7 +970,9 @@ dependencies = [
 name = "umass"
 version = "0.0.0"
 dependencies = [
+ "abi",
  "bus",
+ "cam",
  "devtree",
  "sched",
  "scsi",

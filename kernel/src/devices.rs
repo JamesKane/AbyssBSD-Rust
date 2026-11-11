@@ -351,6 +351,9 @@ pub(crate) fn init(s: &Sleepable) {
     // FreeBSD finishes autoconfiguration before mounting root.
     bus::manager().wait_idle(s);
     let took_us = crate::time::now_ns().saturating_sub(began) / 1000;
+    // Then what drivers deferred to that point, in the order they
+    // deferred it (FreeBSD's interrupt-driven configuration hooks).
+    bus::run_config_hooks(s);
     crate::time::set_realtime();
     kprintln!(
         "bus: device manager up, {} driver(s), {workers} attach worker(s), attached in {}.{:03} ms{}",

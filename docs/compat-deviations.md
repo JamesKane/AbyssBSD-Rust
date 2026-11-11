@@ -60,7 +60,6 @@ where AbyssBSD differs, and why. A difference not listed here is a bug.
 
 | What | FreeBSD | AbyssBSD | Why |
 |---|---|---|---|
-| `scbusN` order | Buses are numbered as SIMs register; NVMe controllers register from a configuration hook (`nvme_ctrlr_start_config_hook`), after the controllers attached at boot (QEMU's q35: `ahcich0`–`5` are `scbus0`–`5`, `nvme0` `scbus6`) | Numbered as the drivers start, in attach order: in the same QEMU machine `nvme0` is `scbus0` and the AHCI channels `scbus1`–`6`. On a machine without AHCI (the Orange Pi) the numbers are FreeBSD's | There is no configuration-hook stage after boot-time attach to defer to; disk names and units do not depend on it |
 | CAM's peripheral drivers | `da`, `ada`, `nda`, `cd`, `sa`, `ses`, `ch`, `pt`, `sg`, `targ`, `enc`, `pass` | The disks' names and `pass` only. No ATAPI, enclosure, tape, or changer devices are probed | The storage drivers find disks only |
 | Rescans (`XPT_SCAN_BUS`, `XPT_SCAN_TGT`, `XPT_SCAN_LUN`, `camcontrol rescan`) | Probe the bus again, adding and removing devices | Succeed and change nothing | The drivers register what they find at attach (and on hotplug: USB); CAM does no probing of its own |
 | Queued pass interface (`CAMIOQUEUE`, `CAMIOGET`) | Asynchronous CCBs on a pass device | `ENOTTY` | Not used by `camcontrol`, libcam's synchronous calls, or smartmontools |

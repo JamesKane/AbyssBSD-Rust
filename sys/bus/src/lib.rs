@@ -24,6 +24,7 @@
 
 extern crate alloc;
 
+mod confighook;
 pub mod driver;
 pub mod gate;
 pub mod gpio;
@@ -63,6 +64,7 @@ pub fn bootverbose() -> bool {
 pub fn set_bootverbose(on: bool) {
     BOOTVERBOSE.store(on, core::sync::atomic::Ordering::Relaxed);
 }
+pub use confighook::{config_intrhook_oneshot, run_config_hooks};
 pub use roothold::{RootHold, root_mount_hold, root_mount_wait};
 pub use space::{AddressSpace, Range, Sharing};
 pub use sysctl::device_node;

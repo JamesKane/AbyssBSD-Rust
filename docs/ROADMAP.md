@@ -2844,7 +2844,9 @@ no hangs, no reboot loops, nothing that needs the screen, and P8's remaining exi
     `cmd -a` for SMART, `tags`, `rescan`) and `nvmecontrol` (`devlist`, `identify` of controller,
     namespace and `nda0`, `logpage -p 1`/`-p 2`, `power -l`, `ns`, `reset`) print FreeBSD's lines in
     the shell cases (`expect::cam`); `tests/user/cam.c` passes on FreeBSD 15.1 and here.
-    Differences (scbus order, no `cd`/`sa`/`ses`, `perftest`, the Linux-compatible NVMe requests)
+    Buses are numbered as FreeBSD numbers them: NVMe registers from a configuration hook
+    (`bus::config_intrhook_oneshot`, run after the boot's attach pass as `config_intrhook`s are),
+    after the AHCI channels. Differences (no `cd`/`sa`/`ses`, `perftest`, the Linux-compatible NVMe requests)
     are in compat-deviations. Left: smartmontools (not in the images; its FreeBSD paths,
     `NVME_PASSTHROUGH_CMD` and SAT through `XPT_SCSI_IO`/`XPT_ATA_IO`, are what the test drives),
     and the comparison with `tests/corpus/opi6p/freebsd/storage.txt` on the board.

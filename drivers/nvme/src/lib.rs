@@ -29,6 +29,8 @@
 //!   held fails with `EIO`, and its namespaces are withdrawn (`ENXIO`).
 //! - Stop stops the watchdog, withdraws the namespaces, shuts the
 //!   controller down normally, disables it, and fails what it still held.
+//! - Its namespaces' disks, nodes, and CAM bus come from a configuration
+//!   hook, after the boot's attach pass (`nvme_ctrlr_start_config_hook`).
 //! - Userland reaches it through `/dev/nvmeN`, `/dev/nvmeNnM`, and CAM's
 //!   `nvme` bus (`user.rs`); their pass-through commands run on the same
 //!   queues (`pass.rs`).
@@ -150,6 +152,9 @@ const _: () = assert!(PAGE.is_multiple_of(PRP_LIST));
 const ADMIN_FAILED: Status = 0xffff;
 
 static QUEUE_LOCK: LockClass = LockClass::new("nvme queue", 500);
+/// Outside everything the configuration hook takes (publishing a disk
+/// reads it).
+static CONFIG_LOCK: LockClass = LockClass::new("nvme config", 400);
 static ADMIN_LOCK: LockClass = LockClass::new("nvme admin", 490);
 
 /// Known controllers' descriptions, as FreeBSD's table has them (vendor,
@@ -475,6 +480,7 @@ impl QueueStats {
 }
 
 /// A namespace as a disk.
+#[derive(Clone)]
 struct Namespace {
     nsid: u32,
     /// log2 of the block size.
@@ -540,6 +546,13 @@ pub struct Controller {
     admin_prp: DmaCoherent<u64>,
     /// CAM's devices for the namespaces.
     cam_devices: SpinLock<Vec<cam::Device>>,
+    /// Its CAM bus, once configured.
+    cam_bus: SpinLock<Option<cam::Bus>>,
+    /// Its device nodes.
+    nodes: SpinLock<Vec<String>>,
+    /// Whether the controller has stopped: held while its configuration
+    /// hook runs, and by stop, so neither runs into the other.
+    stopped: Mutex<bool>,
     /// CAP.TO: how long CSTS.RDY may take to change.
     ready_timeout_ms: u64,
     /// `is_failed`: every request fails.
@@ -1358,10 +1371,6 @@ pub struct Nvme {
     watchdog: SpinLock<Option<Arc<Thread>>>,
     /// Its PCI function, for CAM's path inquiries.
     pci: Arc<PciChild>,
-    /// Its CAM bus, while started.
-    cam_bus: SpinLock<Option<cam::Bus>>,
-    /// Its device nodes, while started.
-    nodes: SpinLock<Vec<String>>,
 }
 
 impl core::fmt::Debug for Nvme {
@@ -1790,6 +1799,9 @@ impl Driver for Nvme {
                 vs: version,
                 admin_prp,
                 cam_devices: SpinLock::new(Vec::new()),
+                cam_bus: SpinLock::new(None),
+                nodes: SpinLock::new(Vec::new()),
+                stopped: Mutex::new(&CONFIG_LOCK, false),
                 ready_timeout_ms: timeout_ms,
                 failed: AtomicBool::new(false),
                 isr_warned: AtomicBool::new(false),
@@ -1806,8 +1818,6 @@ impl Driver for Nvme {
             _messages: messages,
             watchdog: SpinLock::new(None),
             pci: child,
-            cam_bus: SpinLock::new(None),
-            nodes: SpinLock::new(Vec::new()),
         })
     }
 
@@ -1830,83 +1840,27 @@ impl Driver for Nvme {
             if self.msix > 0 { "MSI-X" } else { "INTx" }
         ));
         self.add_sysctls(cx.sleepable());
-        // The controller's node (`nvme_ctrlr_construct`), and its CAM bus
-        // (`nvme_sim_new_controller`), which keeps a wildcard path.
-        let s = cx.sleepable();
+        // The controller's node (`nvme_ctrlr_construct`).
         let name = self.ctrl.name();
         let ctrl_dev = Arc::new(user::CtrlDev {
             ctrl: Arc::downgrade(&self.ctrl),
         });
         let _ = vfs::devices::make_dev(name.as_bytes(), 0o600, 0, 0, ctrl_dev);
-        self.nodes.lock().push(name.clone());
-        let sim = Arc::new(user::NvmeSim {
-            ctrl: Arc::downgrade(&self.ctrl),
-            pci: Arc::clone(&self.pci),
-            unit: self.unit,
-            vs: self.ctrl.vs,
-            nn: u32::from_le_bytes([
-                self.ctrl.cdata[516],
-                self.ctrl.cdata[517],
-                self.ctrl.cdata[518],
-                self.ctrl.cdata[519],
-            ]),
-            maxio: u32::try_from(self.ctrl.max_transfer).unwrap_or(u32::MAX),
+        self.ctrl.nodes.lock().push(name);
+        // The namespaces and the CAM bus come from the configuration hook
+        // (`nvme_ctrlr_start_config_hook`), once the boot has attached
+        // what it found: CAM numbers the bus after those that attach
+        // registered, as FreeBSD's. It holds the controller weakly; one
+        // stopped first configures nothing.
+        let ctrl = Arc::downgrade(&self.ctrl);
+        let pci = Arc::clone(&self.pci);
+        let namespaces = self.namespaces.clone();
+        let names = (self.model.clone(), self.serial.clone());
+        bus::config_intrhook_oneshot(cx.sleepable(), &format!("nvme{}", self.unit), move |s| {
+            if let Some(ctrl) = ctrl.upgrade() {
+                configure(&ctrl, &pci, &namespaces, &names, s);
+            }
         });
-        let bus = cam::Bus::register(
-            cam::SimName {
-                name: "nvme",
-                unit: self.unit,
-                bus_id: 0,
-            },
-            sim,
-            true,
-        );
-        let mut disks = Vec::new();
-        for ns in &self.namespaces {
-            let block = 1u32 << ns.shift;
-            let info = DiskInfo {
-                name: "nda",
-                unit: storage::alloc_unit("nda"),
-                sector_size: block,
-                sectors: ns.blocks,
-                max_transfer: self.ctrl.max_transfer,
-                read_only: false,
-            };
-            let queues = NsQueues {
-                ctrl: Arc::clone(&self.ctrl),
-                nsid: ns.nsid,
-                shift: ns.shift,
-            };
-            // `nda` on CAM's bus, with its pass device.
-            user::announce(&self.ctrl, info.unit, bus.path_id(), ns.nsid);
-            let disk = storage::publish(s, info, Arc::new(queues));
-            // What `nda` gives GEOM (`ndaregister`): the model and serial
-            // number, a solid-state disk, and CAM's devstat entry.
-            disk.describe(storage::Description {
-                descr: self.model.clone(),
-                ident: self.serial.clone(),
-                lunid: ns.lunid.clone(),
-                rotation: storage::Rotation::NonRotating,
-                ..storage::Description::default()
-            });
-            disk.set_devstat(storage::devstat::Kind::NVME);
-            let dev = bus.add_device(user::cam_device(&self.ctrl, ns.nsid, &ns.nsdata, info.unit));
-            self.ctrl.cam_devices.lock().push(dev);
-            // `nvmeNnM`, and its alias `nvmeNnsM` (`nvme_ns_construct`).
-            let node = format!("{name}n{}", ns.nsid);
-            let alias = format!("{name}ns{}", ns.nsid);
-            let ns_dev = Arc::new(user::NsDev {
-                ctrl: Arc::downgrade(&self.ctrl),
-                disk: Arc::clone(&disk),
-                nsid: ns.nsid,
-            });
-            let _ = vfs::devices::make_dev(node.as_bytes(), 0o600, 0, 0, ns_dev);
-            let _ = vfs::devices::make_dev_alias(alias.as_bytes(), node.as_bytes());
-            self.nodes.lock().extend([alias, node]);
-            disks.push(disk);
-        }
-        *self.ctrl.disks.lock() = disks;
-        *self.cam_bus.lock() = Some(bus);
         Ok(())
     }
 
@@ -1921,6 +1875,10 @@ impl Driver for Nvme {
         if let Some(t) = t {
             t.join(s);
         }
+        // A configuration hook still to run finds it stopped.
+        let mut stopped = self.ctrl.stopped.lock(s);
+        *stopped = true;
+        drop(stopped);
         // What userland reaches it by goes first: CAM's devices and bus,
         // and the device nodes. Each taken in its own statement: no
         // spinlock held while they go.
@@ -1928,11 +1886,11 @@ impl Driver for Nvme {
         for d in devices {
             d.remove(s);
         }
-        let bus = self.cam_bus.lock().take();
+        let bus = self.ctrl.cam_bus.lock().take();
         if let Some(b) = bus {
             b.deregister(s);
         }
-        let nodes = core::mem::take(&mut *self.nodes.lock());
+        let nodes = core::mem::take(&mut *self.ctrl.nodes.lock());
         for n in nodes {
             vfs::devices::destroy_dev(s, n.as_bytes());
         }
@@ -1993,6 +1951,93 @@ impl Driver for Nvme {
             }
         }
     }
+}
+
+/// The configuration hook's work (`nvme_ctrlr_start_config_hook` through
+/// `nvme_sim_new_controller` and `nvme_ns_construct`): the CAM bus, which
+/// keeps a wildcard path; each namespace's `nda` disk, its CAM device and
+/// pass device, and its nodes `nvmeNnM` and `nvmeNnsM`.
+/// `names` are the model and serial number as `nda` shows them.
+fn configure(
+    ctrl: &Arc<Controller>,
+    pci: &Arc<PciChild>,
+    namespaces: &[Namespace],
+    names: &(String, String),
+    s: &Sleepable,
+) {
+    let stopped = ctrl.stopped.lock(s);
+    if *stopped || ctrl.failed.load(Ordering::Acquire) {
+        return;
+    }
+    let name = ctrl.name();
+    let sim = Arc::new(user::NvmeSim {
+        ctrl: Arc::downgrade(ctrl),
+        pci: Arc::clone(pci),
+        unit: ctrl.unit,
+        vs: ctrl.vs,
+        nn: u32::from_le_bytes([
+            ctrl.cdata[516],
+            ctrl.cdata[517],
+            ctrl.cdata[518],
+            ctrl.cdata[519],
+        ]),
+        maxio: u32::try_from(ctrl.max_transfer).unwrap_or(u32::MAX),
+    });
+    let bus = cam::Bus::register(
+        cam::SimName {
+            name: "nvme",
+            unit: ctrl.unit,
+            bus_id: 0,
+        },
+        sim,
+        true,
+    );
+    let mut disks = Vec::new();
+    for ns in namespaces {
+        let block = 1u32 << ns.shift;
+        let info = DiskInfo {
+            name: "nda",
+            unit: storage::alloc_unit("nda"),
+            sector_size: block,
+            sectors: ns.blocks,
+            max_transfer: ctrl.max_transfer,
+            read_only: false,
+        };
+        let queues = NsQueues {
+            ctrl: Arc::clone(ctrl),
+            nsid: ns.nsid,
+            shift: ns.shift,
+        };
+        // `nda` on CAM's bus, with its pass device.
+        user::announce(ctrl, info.unit, bus.path_id(), ns.nsid);
+        let disk = storage::publish(s, info, Arc::new(queues));
+        // What `nda` gives GEOM (`ndaregister`): the model and serial
+        // number, a solid-state disk, and CAM's devstat entry.
+        disk.describe(storage::Description {
+            descr: names.0.clone(),
+            ident: names.1.clone(),
+            lunid: ns.lunid.clone(),
+            rotation: storage::Rotation::NonRotating,
+            ..storage::Description::default()
+        });
+        disk.set_devstat(storage::devstat::Kind::NVME);
+        let dev = bus.add_device(user::cam_device(ctrl, ns.nsid, &ns.nsdata, info.unit));
+        ctrl.cam_devices.lock().push(dev);
+        let node = format!("{name}n{}", ns.nsid);
+        let alias = format!("{name}ns{}", ns.nsid);
+        let ns_dev = Arc::new(user::NsDev {
+            ctrl: Arc::downgrade(ctrl),
+            disk: Arc::clone(&disk),
+            nsid: ns.nsid,
+        });
+        let _ = vfs::devices::make_dev(node.as_bytes(), 0o600, 0, 0, ns_dev);
+        let _ = vfs::devices::make_dev_alias(alias.as_bytes(), node.as_bytes());
+        ctrl.nodes.lock().extend([alias, node]);
+        disks.push(disk);
+    }
+    *ctrl.disks.lock() = disks;
+    *ctrl.cam_bus.lock() = Some(bus);
+    drop(stopped);
 }
 
 /// The declaration for the build's driver table.

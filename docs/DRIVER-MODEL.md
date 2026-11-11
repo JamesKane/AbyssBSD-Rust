@@ -1298,7 +1298,10 @@ each bus provides. All operations need root privileges and are refused inside ja
   (`da`, `ada`, `nda`) without a CAM layer in their I/O path, and CAM is only what userland sees
   of it. Each SIM registers a bus (`cam::Bus::register`: `ahcich` per AHCI channel, `nvme` per
   controller, `umass-sim` per USB mass-storage interface, numbered `scbusN` in the order they
-  register, the transport layer's `xpt0` bus last) and each probed device on it
+  register, the transport layer's `xpt0` bus last). As on FreeBSD, AHCI channels register as
+  they attach, NVMe controllers from a configuration hook (`bus::config_intrhook_oneshot`,
+  FreeBSD's `config_intrhook`: run after the boot's attach pass, in establishment order, holding
+  the root mount until done), and USB disks as their bus's explore thread finds them and each probed device on it
   (`Bus::add_device`: target, LUN, inquiry or identify data as CAM's probe keeps it, the serial
   number, NVMe's identify pages), with its disk peripheral and a `pass` peripheral, in FreeBSD's
   order (`da0,pass2` for SCSI, `pass0,ada0` and `pass1,nda0` otherwise). SIMs that keep a
