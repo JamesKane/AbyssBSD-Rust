@@ -7,10 +7,11 @@
 # interleave as the two are scheduled), and what the file system
 # decides (inode, device, times, block size) masked.
 
-# Pids by name; the stat fields a file system decides masked.
+# Pids by name (never digits within a hex number, such as an address);
+# the stat fields a file system decides masked.
 names() {
 	awk '{ print $2, $1 }' .pids | while read -r n p; do
-		echo "s/(^|[^0-9])$p([^0-9]|\$)/\\1<$n>\\2/g"
+		echo "s/(^|[^0-9a-fx])$p([^0-9a-f]|\$)/\\1<$n>\\2/g"
 	done > names.sed
 	sed -E -f names.sed |
 	    sed -E 's/(dev|ino|rdev|atime|mtime|ctime|birthtime|blksize|blocks)=[^,}]*/\1=*/g'

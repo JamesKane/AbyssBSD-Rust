@@ -4,9 +4,10 @@
 # only what lies between the markers is compared, the child's lines
 # apart, and what the file system decides masked.
 
+# Pids by name, never digits within a hex number (an address).
 names() {
 	awk '{ print $2, $1 }' .pids | while read -r n p; do
-		echo "s/(^|[^0-9])$p([^0-9]|\$)/\\1<$n>\\2/g"
+		echo "s/(^|[^0-9a-fx])$p([^0-9a-f]|\$)/\\1<$n>\\2/g"
 	done > names.sed
 	sed -E -f names.sed |
 	    sed -E 's/(inode|dev|blksize)=[0-9]+/\1=*/g'
