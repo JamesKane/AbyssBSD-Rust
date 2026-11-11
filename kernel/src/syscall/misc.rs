@@ -595,10 +595,9 @@ pub(super) fn sysarch(op: u64, _parms: u64) -> SysResult {
 
 /// Modules built into the kernel, by the names `kldload` takes: the
 /// tunnel devices' module and its two aliases (`if_tuntap`, `if_tun`,
-/// `if_tap`), the bridge, `epair`, `md`, and POSIX message queues.
+/// `if_tap`), the bridge, `epair`, and `md`.
 const BUILT_IN: &[&[u8]] = &[
     b"geom_md",
-    b"mqueuefs",
     b"if_epair",
     b"if_bridge",
     b"if_tuntap",
@@ -731,9 +730,6 @@ const MODULES: &[&[u8]] = &[
     b"fdescfs",
     b"cd9660",
     b"aio",
-    // POSIX message queues (`uipc_mqueue.c`'s `DECLARE_MODULE`), which
-    // tests ask for by name (`ATF_REQUIRE_KERNEL_MODULE`).
-    b"mqueuefs",
 ];
 
 /// The module with id `id`.

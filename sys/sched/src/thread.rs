@@ -341,6 +341,10 @@ pub struct Thread {
     /// kernel, and in an interrupt thread (`td_uticks`, `td_sticks`,
     /// `td_iticks`): how its run time divides (`calcru`).
     pub(crate) stat_ticks: [AtomicU64; 3],
+    /// The user and system times last reported, and the run time they
+    /// divided (`rux_uu`, `rux_su`, `rux_tu`), in microseconds: reports
+    /// never go back (`calcru1`).
+    reported: SpinLock<[u64; 3]>,
     /// Locks held, for the witness and priority un-lending. Only the
     /// thread itself touches it.
     pub(crate) held: UnsafeCell<crate::lock::witness::Held>,
@@ -446,6 +450,7 @@ impl Thread {
             exited: AtomicBool::new(false),
             joiners: WaitQueue::new(),
             runtime: AtomicU64::new(0),
+            reported: SpinLock::new([0; 3]),
             switches: AtomicU64::new(0),
             voluntary: AtomicU64::new(0),
             involuntary: AtomicU64::new(0),
@@ -540,6 +545,25 @@ impl Thread {
         } else {
             done
         }
+    }
+
+    /// `user` and `sys`, a division of `total` microseconds of run time,
+    /// made monotonic as `calcru1` makes them: with the run time grown,
+    /// neither falls below what was last reported; with it a little
+    /// behind (the clock steered, within 3 us or 1%), the last report
+    /// stands.
+    pub fn monotonic_times(&self, user: u64, sys: u64, total: u64) -> (u64, u64) {
+        let mut r = self.reported.lock();
+        let [ru, rs, rt] = *r;
+        let (u, s, t) = if total >= rt {
+            (user.max(ru), sys.max(rs), total)
+        } else if total + 3 > rt || u128::from(total) * 101 > u128::from(rt) * 100 {
+            (ru, rs, rt)
+        } else {
+            (user, sys, total)
+        };
+        *r = [u, s, t];
+        (u, s)
     }
 
     /// Times the thread has been switched to.

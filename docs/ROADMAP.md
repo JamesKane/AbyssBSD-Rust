@@ -2941,6 +2941,19 @@ no hangs, no reboot loops, nothing that needs the screen, and P8's remaining exi
 compat-deviations with a reason, and kyua and the performance suites run on the board without a
 hang.
 
+- Progress 2026-11-11 (kyua on the board): stock FreeBSD 15.1 does not run on the Orange Pi 6
+  Plus, so the baseline is its 16-CURRENT (`GENERIC-HMP-IOMMU`) running 15.1's arm64
+  `tests.txz` (BUILD-AND-TEST.md, `tests/kyua/freebsd/freebsd-16.0-CURRENT-aarch64-opi6p.txt`:
+  8151 of 9831 cases pass; FreeBSD itself panics in `sys/net` and `usr.sbin/ctladm`). AbyssBSD
+  meets the target in all four areas (`bin` 98.6%, `lib/libc` 99.2%, `sys/kern` 98.5%,
+  `usr.bin` 99.2%), the whole suite in 1848 s to FreeBSD's 2155. The first run hung in
+  `lib/libthr`: `preempt_point`, called from `UMTX_OP_NWAKE_PRIVATE`'s loop with interrupts
+  enabled, could be preempted again inside `switch_away`, leaving the thread marked running on
+  no CPU and unkillable; it now masks interrupts (20 runs of `lib/libthr` since, no hang). Also
+  found: CPU time missed the running slice (and is now kept monotonic, as `calcru1` keeps it),
+  `wait4`'s rusage missed reaped grandchildren, and the timers counted on the raw counter rather
+  than `CLOCK_MONOTONIC`'s steered clock. Open: a `reboot` after the first run hung the board
+  (needed a power cycle; not reproduced since, with the serial console recorded).
 - Progress 2026-11-10 (the known defects, in QEMU; none yet tried on the board):
   - `MNT_RELOAD`: `nmount`'s `reload` on a read-only mount (`vfs_domount_update`'s rule), with
     `ffs` taken as `ufs` (`chkdoreload` asks for `ffs`, which is why the root's failed with

@@ -131,6 +131,7 @@ impl Usage {
 fn thread_usage(t: &sched::Thread) -> Usage {
     let us = crate::time::ticks_to_ns(t.runtime()) / 1000;
     let (user, sys) = crate::statclock::split_runtime(us, t.stat_ticks());
+    let (user, sys) = t.monotonic_times(user, sys, us);
     let (nvcsw, nivcsw) = t.context_switches();
     Usage {
         utime_us: user,
