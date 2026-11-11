@@ -947,6 +947,13 @@ ktest! {
             v
         });
         assert_eq!(ident, b"ABYSSBSD\0");
+        let maxphys = crate::sysctl::read(&s, |t| {
+            let oid = t.name2oid("kern.maxphys").expect("kern.maxphys");
+            let mut v = alloc::vec::Vec::new();
+            t.read(&oid, &mut v).expect("read");
+            v
+        });
+        assert_eq!(maxphys, (1u64 << 20).to_ne_bytes());
         let what = crate::sysctl::what();
         assert!(
             what.starts_with(b"@(#)FreeBSD 15.1-RELEASE ABYSSBSD (AbyssBSD "),

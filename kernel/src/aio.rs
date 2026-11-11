@@ -96,7 +96,7 @@ static SO_LIFETIME: AtomicI32 = AtomicI32::new(30_000);
 /// `IOSIZE_MAX` with `debug.iosize_max_clamp` off.
 const IOSIZE_MAX: u64 = i64::MAX as u64;
 /// `maxphys`: the largest single disk transfer (`si_iosize_max` too).
-const MAXPHYS: u64 = 1 << 20;
+pub(crate) const MAXPHYS: u64 = 1 << 20;
 /// `_SIG_MAXSIG`.
 const SIG_MAX: i32 = 128;
 

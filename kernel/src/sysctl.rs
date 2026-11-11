@@ -185,6 +185,15 @@ pub(crate) fn init() {
         "Kernel identifier",
         Value::text(KERN_IDENT),
     );
+    // `maxphys`: the largest single block transfer, FreeBSD's `MAXPHYS`
+    // on LP64 (`newfs_msdos` and `dd` size their I/O by it).
+    add(
+        k,
+        Number::Auto,
+        "maxphys",
+        "Maximum block I/O access size",
+        Value::Ulong(alloc::boxed::Box::new(|| crate::aio::MAXPHYS)),
+    );
     add(
         k,
         Number::Fixed(kern::OSRELDATE),
