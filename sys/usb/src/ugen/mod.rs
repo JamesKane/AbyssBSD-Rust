@@ -651,16 +651,14 @@ impl Open {
                 }
                 self.fs_uninit(s);
                 let (i, alt) = (arg[0], arg[1]);
-                let ifaces: Vec<_> = dev.config.defaults().collect();
-                let Some(iface) = ifaces.get(usize::from(i)).filter(|_| dev.is_configured()) else {
+                if usize::from(i) >= Self::interface_count(&dev) {
                     return Err(Errno::EIO);
-                };
-                // The one selected: nothing to do (FreeBSD optimizes the
-                // request away). Another is not supported.
-                if alt == 0 || dev.config.interface(iface.number, alt).is_none() {
-                    return if alt == 0 { Ok(()) } else { Err(Errno::EIO) };
                 }
-                Err(Errno::EIO)
+                // The one selected: nothing to do (FreeBSD optimizes the
+                // request away). One that does not exist is FreeBSD's
+                // `EIO`; selecting another is not supported
+                // (compat-deviations).
+                if alt == 0 { Ok(()) } else { Err(Errno::EIO) }
             }
             USB_GET_DEVICE_DESC => {
                 arg.copy_from_slice(&dev.raw_desc);

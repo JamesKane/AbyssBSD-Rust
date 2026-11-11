@@ -467,7 +467,8 @@ impl Hub {
     }
 
     /// `usb_unconfigure`: the device's interface drivers detach (each
-    /// saying so), its endpoint nodes go, and it has no configuration.
+    /// saying so; a USB driver's detach cannot be refused), its endpoint
+    /// nodes go, and it has no configuration.
     fn unconfigure(&self, s: &Sleepable, dev: &UsbDevice, why: DetachReason) {
         let mgr = ::bus::manager();
         let hub = mgr.nameunit(self.node, s).unwrap_or_default();
@@ -498,7 +499,7 @@ impl Hub {
     /// `uhub_explore_handle_re_enumerate`).
     fn handle_pending(&self, s: &Sleepable, bus: &Arc<Bus>, port: u8, dev: &Arc<UsbDevice>) {
         let unconfig = |dev: &UsbDevice| {
-            self.unconfigure(s, dev, DetachReason::Requested);
+            self.unconfigure(s, dev, DetachReason::Forced);
             let _ = dev.control(s, Setup::set_configuration(0), None);
         };
         let pending = dev.pending();
@@ -513,7 +514,7 @@ impl Hub {
             Pending::SetConfig if next == abi::usb::USB_UNCONFIG_INDEX => unconfig(dev),
             Pending::Start | Pending::SetConfig => {
                 let index = if pending == Pending::Start { 0 } else { next };
-                self.unconfigure(s, dev, DetachReason::Requested);
+                self.unconfigure(s, dev, DetachReason::Forced);
                 if let Some(slot) = dev.slot()
                     && dev.owns_slot()
                 {

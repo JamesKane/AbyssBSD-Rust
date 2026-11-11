@@ -409,7 +409,7 @@ impl Fs {
         k: &dyn Kernel,
         index: u8,
     ) -> Result<(), Errno> {
-        let (tag, pipe, address, kind, max_packet, limits, ep_ptr) = {
+        let (tag, pipe, address, kind, limits, ep_ptr) = {
             let g = self.inner.lock();
             let x = g
                 .xfers
@@ -425,7 +425,6 @@ impl Fs {
                 Arc::clone(&x.pipe),
                 x.address,
                 x.kind,
-                x.max_packet,
                 x.limits,
                 g.ep_ptr,
             )
@@ -532,7 +531,6 @@ impl Fs {
             self.first_transfer(index, tag, r, x.stream)
         };
         self.send(&*pipe, address, setup, t);
-        let _ = max_packet;
         Ok(())
     }
 
