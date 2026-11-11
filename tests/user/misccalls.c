@@ -5,7 +5,9 @@
  * there: getdtablesize, posix_fadvise, mincore, cpuset_getdomain and
  * cpuset_setdomain, sched_rr_get_interval, yield, uuidgen, membarrier,
  * kcmp, getrlimitusage, renameat2, abort2, sbrk (amd64; arm64 has no
- * break), and the old mount(2)'s refusals.
+ * break), the old mount(2)'s refusals, and wait4's and wait6's rusage of
+ * a child whose own child did the work (exit1 adds a process's reaped
+ * children's use to its own).
  *
  * With arguments "mount DEVICE DIR", mounts the UFS file system on
  * DEVICE read-only at DIR through the old mount(2) and ufs_args, checks
@@ -386,6 +388,68 @@ usage(void)
 	FAILS(getrlimitusage(RLIMIT_NOFILE, 2, &v), EINVAL);
 }
 
+/* CPU time in `r`, in microseconds. */
+static long long
+cpu_us(const struct rusage *r)
+{
+	return ((long long)(r->ru_utime.tv_sec + r->ru_stime.tv_sec) *
+	    1000000 + r->ru_utime.tv_usec + r->ru_stime.tv_usec);
+}
+
+/*
+ * A child that forks a grandchild, which spins until its own rusage shows
+ * 100 ms of CPU, reaps it, and exits: the child's exit rusage holds the
+ * grandchild's.
+ */
+static pid_t
+spawn_worker(void)
+{
+	pid_t pid = fork();
+
+	if (pid == 0) {
+		pid_t g = fork();
+		if (g == 0) {
+			struct rusage r;
+			volatile unsigned long n = 0;
+			do {
+				for (int i = 0; i < 100000; i++)
+					n++;
+				getrusage(RUSAGE_SELF, &r);
+			} while (cpu_us(&r) < 100000);
+			_exit(0);
+		}
+		_exit(waitpid(g, NULL, 0) == g ? 0 : 1);
+	}
+	return (pid);
+}
+
+static void
+child_usage(void)
+{
+	struct __wrusage wru;
+	struct rusage r;
+	int status;
+	pid_t pid;
+
+	pid = spawn_worker();
+	CHECK(wait4(pid, &status, 0, &r) == pid && WIFEXITED(status) &&
+	    WEXITSTATUS(status) == 0, "wait4: %s", strerror(errno));
+	CHECK(cpu_us(&r) >= 100000, "wait4's rusage %lld us",
+	    cpu_us(&r));
+	pid = spawn_worker();
+	CHECK(wait6(P_PID, pid, &status, WEXITED, &wru, NULL) == pid,
+	    "wait6: %s", strerror(errno));
+	CHECK(cpu_us(&wru.wru_self) >= 100000, "wru_self %lld us",
+	    cpu_us(&wru.wru_self));
+	CHECK(cpu_us(&wru.wru_children) >= 100000, "wru_children %lld us",
+	    cpu_us(&wru.wru_children));
+	CHECK(cpu_us(&wru.wru_self) >= cpu_us(&wru.wru_children),
+	    "wru_self %lld us below wru_children %lld us",
+	    cpu_us(&wru.wru_self), cpu_us(&wru.wru_children));
+	CHECK(getrusage(RUSAGE_CHILDREN, &r) == 0 && cpu_us(&r) >= 200000,
+	    "RUSAGE_CHILDREN %lld us", cpu_us(&r));
+}
+
 static void
 renames(void)
 {
@@ -533,6 +597,7 @@ main(int argc, char **argv)
 	barriers();
 	compare();
 	usage();
+	child_usage();
 	renames();
 	aborts();
 	heap();

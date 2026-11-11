@@ -528,10 +528,18 @@ impl Thread {
         self.joiners.wait_until(s, || self.has_exited());
     }
 
-    /// CPU time consumed, in platform time units, as of its last switch.
+    /// CPU time consumed, in platform time units, the slice in progress
+    /// included (`calcru`): a thread alone on its CPU may not switch for
+    /// as long as it runs.
     #[must_use]
     pub fn runtime(&self) -> u64 {
-        self.runtime.load(Ordering::Relaxed)
+        let inner = self.inner.lock();
+        let done = self.runtime.load(Ordering::Relaxed);
+        if inner.state == State::Running && !self.idle {
+            done + crate::platform().now().saturating_sub(inner.since)
+        } else {
+            done
+        }
     }
 
     /// Times the thread has been switched to.

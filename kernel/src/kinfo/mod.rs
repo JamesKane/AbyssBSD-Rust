@@ -188,18 +188,22 @@ pub(crate) fn getrusage(
     Ok(u.rusage())
 }
 
-/// `p`'s child `c` was reaped: what it and its own children used goes to
-/// `p`'s children's usage (`proc_reap`'s `ruadd`).
+/// `p`'s child `c` was reaped: its exit usage, which holds its own
+/// children's, goes to `p`'s children's usage (`proc_reap`'s `ruadd`).
 pub(crate) fn reaped(p: &Process, c: &Process) {
-    let (mut u, children) = exit_usage(c);
-    u.add(&children);
+    let (u, _) = exit_usage(c);
     p.child_usage.lock().add(&u);
 }
 
-/// What an exited `c` used, and what its reaped children did: `wait6`'s
-/// `__wrusage` (`proc_reap`'s `wru_self` and `wru_children`).
+/// What an exited `c` used, its reaped children's use included, as
+/// `exit1` adds `p_cru` into `p_ru` before the parent sees it; and what
+/// its reaped children used: `wait6`'s `__wrusage` (`wait_fill_wrusage`'s
+/// `wru_self` and `wru_children`). `wait4`'s rusage is the first.
 pub(crate) fn exit_usage(c: &Process) -> (Usage, Usage) {
-    (process_usage(c), *c.child_usage.lock())
+    let children = *c.child_usage.lock();
+    let mut own = process_usage(c);
+    own.add(&children);
+    (own, children)
 }
 
 /// `p`'s address space, as kinfo_proc counts it: the bytes it maps but
