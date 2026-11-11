@@ -209,11 +209,73 @@ in its completion. `Rejected` hands the transfer back, so even a failed submissi
 
 ### 5.5 `ugen` and `/dev/usb`
 
-`usbconfig` and `libusb` use `/dev/usb/B.D.E` nodes and `/dev/ugenB.D` symlinks with the `USB_*`
-ioctls of `usb_ioctl.h`. The track implements the read-only set `usbconfig` uses (`USB_GET_DEVICEINFO`,
-`USB_GET_RX/TX_*` descriptor reads, `USB_DEVICEENUMERATE` refused, `USB_GET_IFACE_DRIVER`, the
-`usbconfig dump_*` requests), with the layouts in `lib/abi` checked by `abi-check`. Generic
-transfers from userland (`libusb` I/O) follow later.
+`usbconfig` and libusb (FreeBSD's `libusb20` with its `ugen20` backend) reach devices through
+`/dev/usbctl`, the `/dev/usb/B.D.E` nodes, and the `/dev/ugenB.D` links, with the `USB_*` requests
+of `usb_ioctl.h` (FreeBSD's `usb_dev.c`, `usb_generic.c`, `usb_device.c`). `sys/usb/src/ugen`
+implements them; the structures and request numbers are in `lib/abi/src/usb.rs`, held to 15.1's
+headers by `abi-check`, and what depends on data alone (the request checks, the `USB_READ_DIR`
+listing, the root hub's descriptors, FIFO buffer sizes) in `lib/usb/src/ugen.rs`.
+
+- **Nodes.** `/dev/usbctl` is `root:operator` 0644. A device gets `usb/B.D.0` (its default control
+  endpoint) and the link `ugenB.D` when it is addressed, and `usb/B.D.E` for each endpoint number
+  of its configuration (every alternate setting's; read for IN, write for OUT) while it is
+  configured, all `root:operator` 0600 and gone with the device or its configuration, the
+  endpoint nodes last made first, as FreeBSD destroys them. The root hub is `ugenB.1` with
+  FreeBSD's xHCI root hub descriptors (`xhci_devd`, `xhci_confd`: a USB 3.0 hub with a status
+  endpoint), and answers standard requests itself, as `xhci_roothub_exec` does (its language
+  table is FreeBSD's `"\001"`).
+- **Finding devices.** Nodes name a location (bus, index); each request finds the device there,
+  as `usb_ref_device` does, and fails with `ENXIO` once it left. A device's session (kept by a
+  re-enumeration) tells it from one plugged in later at the same place; an endpoint node's opens
+  end with the configuration they were made under. Each open of the control node is its own pair
+  of FIFOs (64 at most); an endpoint node opens once per direction (`EBUSY`).
+- **`/dev/usbctl`.** `USB_READ_DIR` lists the links in the order they were made
+  (`usb_read_symlink`'s format); `USB_GET_TEMPLATE` and `USB_SET_TEMPLATE` (`PRIV_DRIVER`) keep
+  `hw.usb.template`, which nothing reads: there is no device side.
+- **Requests about the device.** `USB_GET_DEVICEINFO` (`usbd_fill_deviceinfo`), the device and
+  configuration descriptors (`USB_GET_FULL_DESC` reads another index from the device),
+  `USB_GET_STRING_DESC` (length first, then the whole, into FreeBSD's 255-byte area),
+  `USB_GET_CONFIG`, `USB_GET_ALTINTERFACE`, `USB_GET_PLUGTIME`, `USB_GET_POWER_MODE`,
+  `USB_GET_POWER_USAGE` (`bMaxPower` × 2), `USB_GET_DEV_PORT_PATH`, `USB_DEVICESTATS` (each
+  device counts its transfers' outcomes by type), `USB_GET_IFACE_DRIVER` (`umass0: <...>`),
+  `USB_IFACE_DRIVER_ACTIVE`, and the endpoint FIFOs' interface and endpoint descriptors.
+- **Control transfers.** `USB_DO_REQUEST` needs the descriptor open for writing; `SET_ADDRESS`,
+  `SET_CONFIGURATION`, and `SET_INTERFACE` need `PRIV_DRIVER`; a standard request to an endpoint
+  needs that endpoint, and clearing its halt resets the controller's side too
+  (`usb_check_request`). A short read is an error (`EIO`) unless `USB_SHORT_XFER_OK`.
+- **Changing the device.** `USB_IFACE_DRIVER_DETACH` (`PRIV_DRIVER`) detaches an interface's
+  driver with FreeBSD's `umass0: at uhub0, port 4, addr 1 (disconnected)` line, and none attaches
+  to it until the device is configured again. `USB_DEVICEENUMERATE` (`PRIV_DRIVER`), `USB_SET_CONFIG`,
+  and `USB_SET_POWER_MODE` to off (the device unconfigured, its port disabled) and back on are
+  done by the bus's explore thread, as FreeBSD's `re_enumerate_wait` has `uhub_explore` do them,
+  and the request waits until it has. Enumerating again resets the port, addresses the device on a
+  new slot, reads its descriptors, and configures it, keeping its index, `plugtime`, session, and
+  power mode, so libusb's handles stay good. Hubs (the root hub too) start in `SAVE`, other devices
+  in `ON`, as `uhub_attach` and `usb_alloc_device` leave them.
+- **FIFO transfers** (`USB_FS_*`, `sys/usb/src/ugen/fs.rs`): `USB_FS_INIT` names the open's array
+  of `usb_fs_endpoint`s, `USB_FS_OPEN` (and `_STREAM`) opens one on an endpoint with
+  `usbd_transfer_setup`'s sizes, `USB_FS_START` reads its frames' lengths and a write's data from
+  user memory, `USB_FS_COMPLETE` writes a read's data, the lengths moved, the frames done, and the
+  status back, `USB_FS_STOP` cancels, `USB_FS_CLEAR_STALL_SYNC` clears a halt, `USB_FS_CLOSE` and
+  `USB_FS_UNINIT` end them (a descriptor closed without it has its transfers cancelled by the
+  explore thread). Frames go to the endpoint one after another; a short frame read ends the
+  transfer unless `USB_FS_FLAG_MULTI_SHORT_OK`, and is `USB_ERR_SHORT_XFER` unless a short flag
+  is set; `USB_FS_FLAG_FORCE_SHORT` ends a write of whole packets with a zero-length one. A control
+  transfer's first frame is its setup packet, checked as `USB_DO_REQUEST` checks it. `poll` and
+  kqueue report a completion waiting (`POLLIN` on a descriptor open for reading, as FreeBSD keeps
+  the transfers on the read FIFO).
+- **Knobs.** `hw.usb` has FreeBSD's for the parts of the stack here, in GENERIC's order: the
+  core's, `hw.usb.timings`, and `uhub`'s, `ugen`'s, `dev`'s, `usbhid`'s, `umass`'s, and `xhci`'s.
+  `hw.usb.ugen.debug` logs each `ugen` request; the other debug levels are only kept. FreeBSD has
+  no `dev.ugen` nodes (`ugen` is not a newbus device), and neither does this.
+
+The ways this differs from FreeBSD (isochronous transfers, other alternate settings, `read(2)` and
+`write(2)` on endpoint nodes, power saving, quirks, hub-class requests to the root hub) are in
+[compat-deviations.md](compat-deviations.md#drivers). `tests/user/usbtest.c` checks the nodes and
+libusb (descriptors, strings, control transfers, an INQUIRY over a Bulk-Only disk's bulk endpoints
+after detaching `umass`, a stall cleared, a reset bringing the driver back) here and on FreeBSD
+15.1 (`freebsd-usertests --usb`); the QEMU shell cases run 15.1's own `usbconfig` against what it
+prints there (`tests/corpus/freebsd/usb/qemu/usbconfig-ugen.txt`).
 
 ## 6. HID and the input class
 
@@ -476,7 +538,9 @@ ready, `BUSY`/`TASK SET FULL`, and a broken transport once recovered. LUNs come 
   unmount and the disk coming back. Hot unplug over QMP (`cargo xtask qmp --unplug bbb0`, and
   `uas0`) of mounted disks during fsx is checked by hand the same way.
 - **Differential.** The same `usbconfig`, `devinfo`, `ls /dev`, and `kbdcontrol`/`vidcontrol` runs on
-  FreeBSD 15.1 and AbyssBSD in the same QEMU machine, compared.
+  FreeBSD 15.1 and AbyssBSD in the same QEMU machine, compared. The QEMU shell cases run 15.1's
+  `usbconfig` (`xtask/src/expect.rs`'s `USBCONFIG`) against `freebsd-record --usb`'s
+  `usbconfig-ugen.txt`; `tests/user/usbtest.c` drives libusb on both systems (§5.5).
 
 ## 10. Performance
 

@@ -131,9 +131,12 @@ into `build/dist/`, so clang and lld build the same programs locally. Each image
 programs check FreeBSD's behavior, not ours, so each also passes on FreeBSD 15.1 itself
 (`cc -static` on the server): a check that fails there is wrong. A source that needs a library
 says so on a line `Links with: -lthr` in its header comment, and both builds pass it on.
-`cargo xtask --remote freebsd-usertests [--arch A] [--test NAME,...]` runs the programs, static and
-dynamic, on FreeBSD 15.1's release image itself (arm64 in QEMU with the `max` CPU, so with SVE), so
-arm64's checks are held to FreeBSD too.
+`cargo xtask --remote freebsd-usertests [--arch A] [--test NAME,...] [--usb]` runs the programs,
+static and dynamic, on FreeBSD 15.1's release image itself (arm64 in QEMU with the `max` CPU, so with
+SVE), so arm64's checks are held to FreeBSD too; `--usb` gives the VM the boot tier's USB set
+(bhyve's xHCI tablet on amd64), for `usbtest`. A test whose `Links with:` names a library a
+workstation's sysroot lacks (copied by an older `fetch-base`) is left out of the memory disk with a
+line saying so.
 `freebsd-shell` boots FreeBSD single-user in bhyve and runs `xtask/src/expect.rs`'s `SHELL`
 script against its `/rescue/sh`. The boot tier runs the same script against AbyssBSD: each
 architecture's `<arch>-shell` case (and `x86_64-bhyve-shell` on the server) boots a normal kernel
@@ -152,6 +155,10 @@ kernel falls back to `/rescue/sh`), and the `DYNAMIC` script runs base's dynamic
 On QEMU, `expect::pciconf` then runs FreeBSD's `pciconf` through `/dev/pci` on the shell VM's
 NVMe controller and PCIe root port, whose IDs QEMU fixes (`-l`, `-v`, `-b`, `-c`, `-B`, `-r`, `-w`,
 `-a`, `-D`, and as `nobody`).
+Then `expect::USBCONFIG` runs FreeBSD's `usbconfig` through `/dev/usbctl` and the `ugen`
+nodes on the QEMU USB set (strings, drivers, descriptors, power modes, `do_request`, `reset`,
+`set_config`, and as `nobody`), each line what FreeBSD printed for the same devices
+(`tests/corpus/freebsd/usb/qemu/usbconfig-ugen.txt`).
 `DYNAMIC_TESTS` then runs every `tests/user` program again, built dynamic (a PIE, against the
 server's full base) into `/usr/tests/abyss-dynamic`, under `daemon -f` so that each runs as the
 kernel tests run them, in a session of its own; a source that says "Built static only" is left out. The
