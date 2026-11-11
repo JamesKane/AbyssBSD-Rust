@@ -2661,6 +2661,34 @@ no hangs, no reboot loops, nothing that needs the screen, and P8's remaining exi
     power-off 3 s after a failure.
 - **The rest of the board:** the RX8900 RTC on I2C3, the PD controllers, `iicbus`/`iic` and
   `gpioc`, the `GeneralPurposeIo` and `GenericSerialBus` operation-region handlers.
+  - Progress 2026-11-10 (the region handlers, the RTC, the PD controllers; in QEMU and on the
+    host, not yet on the board):
+    - Region handlers (DRIVER-MODEL §9.3): `lib/aml` keeps the OS's handlers per node and space
+      and names the nearest above an access, as ACPICA searches; installing runs `_REG (space, 1)`
+      in the devices it serves, removing `_REG (space, 0)`. An ACPI-hinted `iicbus` installs the
+      `GenericSerialBus` handler on its controller (`acpi_iicbus_space_handler`: every ACPI 6.5
+      attribute, FreeBSD's status codes), a `gpiobus` the `GeneralPurposeIo` one
+      (`acpi_gpiobus_space_handler`). `AccessAs` with a length in `AccessField`'s short form was
+      decoded as the attribute itself, fixed. Tested on the Q8B's AML (`IRTC._GRT` reads a model
+      clock behind `IC13` once its `_REG` has run; `GIO0`'s two GPIO fields). The Sky1 declares
+      no such regions (its EC drives I2C6 through `SystemMemory`), so nothing on the board uses
+      them; the region edges stay optional, `_REG` being how a consumer learns of its handler.
+    - Time-of-day clocks as `subr_rtc.c`: registration by resolution with FreeBSD's line, `inittodr`
+      with its half-resolution and `utc_offset` adjustments and its warnings, `resettodr` from
+      `settime` and `machdep.adjkerntz` on an `rtc` thread at each clock's scheduled offset,
+      `machdep.rtc_save_period` (only while NTP says the time is good), `machdep.wall_cmos_clock`,
+      `machdep.disable_rtc_set`, `debug.clock_show_io`, `debug.clock_do_io`. `efirtc` takes its
+      resolution from `GetTime`'s capabilities and writes through `SetTime`; `atrtc` can be set.
+    - `rx8803` (`<Epson RX8900 Real Time Clock>`, `RX008900`): the voltage-low check, BCD time,
+      set with the clock stopped and the voltage flags cleared, one-second resolution, written one
+      nanosecond into a second; FreeBSD's double rounding and BCD increment left out
+      (compat-deviations). `rts5453` (`CIXH200D`): the sibling port's polled status, change lines,
+      acknowledgements, and seven sysctls, checked against FreeBSD's recorded values. Both in the
+      aarch64 table, attached with their buses (the board's FreeBSD loads them as modules later).
+    - In the guest: `rx8900_and_rts5453_on_an_i2c_bus` attaches both real drivers to register
+      models behind a test controller (registration after `efirtc0`, reading, a `resettodr`
+      round trip, the sysctls, an acknowledged change, detach). An I2C device's announce line now
+      has FreeBSD's ` at addr 0x32`.
 - **SMMUv3** ([IOMMU.md](IOMMU.md)): PCIe DMA translated through the SMMUs the IORT describes,
   FreeBSD's design (an `smmu` unit per IORT node under `acpi0`, a domain per requester, `gas`
   IOVAs, a third `vm::dma` backend, the ITS doorbell mapped per domain, RMR streams bypassed), as
@@ -2920,8 +2948,8 @@ hang.
     under each I2C controller with the namespace's devices at their addresses (taken from `acpi0`,
     as `acpi_iicbus` does) and `iic` (`/dev/iicN`, `i2c(8)`, tried in QEMU against a test
     controller). Buses and their nodes take their controller's unit, as FreeBSD's one-at-a-time
-    attach numbers them. Next on these buses: the RX8900 and RTS5453 drivers, and the
-    `GenericSerialBus` and `GeneralPurposeIo` region handlers.
+    attach numbers them. On these buses since: the RX8900 and RTS5453 drivers, and the
+    `GenericSerialBus` and `GeneralPurposeIo` region handlers (above, "The rest of the board").
   - A silent hang, idle, after 2 to 26 minutes (no output, serial and network dead), twice on
     the `efirt` kernel; once AbyssBSD read a file back wrong just before. Possibly the bring-up's
     held-key hang too. Being chased: `/dev/fido` for `watchdogd` first, so a hang resets the board

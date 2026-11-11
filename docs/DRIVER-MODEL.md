@@ -409,7 +409,7 @@ firmware, before any driver runs:
 | `_PRT` link devices | PCI interrupt link → device |
 | `_CRS` `FixedDMA` | DMA engine → device (with `_DSD` `dma-names` for the channel's role). Optional: a driver that cannot work without its channel declares the need in attach (a PL011 runs on programmed I/O) |
 | `_CRS` `PinFunction`, `PinConfig`, `PinGroup*` | Pin controller → device |
-| `GenericSerialBus` and `GeneralPurposeIo` operation regions; `EmbeddedControl`, `SMBus`, and `IPMI` regions | I2C/SPI or GPIO controller its field's `Connection` names; the device declaring an EC, SMBus, or IPMI region → device whose AML uses the region (a `_PS0` that talks to a PMIC, a battery's `_BST`). Optional, since AML may not touch the region before `_REG` connects it |
+| `GenericSerialBus` and `GeneralPurposeIo` operation regions; `EmbeddedControl`, `SMBus`, and `IPMI` regions | I2C/SPI or GPIO controller its field's `Connection` names; the device declaring an EC, SMBus, or IPMI region → device whose AML uses the region (a `_PS0` that talks to a PMIC, a battery's `_BST`). Optional, since AML may not touch the region before `_REG` connects it: the consumer attaches first and is told when the handler arrives by the `_REG (space, 1)` its installation runs (§9.3) |
 | `_DSD` reference properties, from a table of known names (`mboxes`, `shmem`, `power-domains`, `phys`, `dp_phy`, `usb4-host-interface`, `phy-handle`, `backlight`, …) | Referenced object → device, with the kind the table gives |
 | `_DSD` graph ports and endpoints | Upstream → downstream in a media pipeline (a DPU → its DP transmitter) |
 | Platform description (§5.5) | Whatever it declares: vendor clock and reset tables, Qualcomm `PEP0` consumers, synthetic nodes |
@@ -1116,8 +1116,42 @@ moved node keeps its `AcpiDevice` bus data, its lines, and its firmware edges bo
 driver for it (the RX8900, the RTS5453) reaches its bus with `cx.i2c(0)`, its `GpioInt`s, and its
 AML as any ACPI device does. It is matched again as `Ident::Iic` (`addr=0x32
 handle=\_SB_.I2C3.RTC0`) by drivers that declare `Ids::IicAcpi`, which no `acpi0` child matches,
-so an I2C device's driver attaches only under its bus. Last, `iic` (`Ids::IicGeneric`, address 0)
+so an I2C device's driver attaches only under its bus. Then `iic` (`Ids::IicGeneric`, address 0)
 makes `/dev/iicN`.
+
+**Operation-region handlers** (as built, P9). AML reaches I2C devices and GPIO pins through
+`GenericSerialBus` and `GeneralPurposeIo` operation regions, served by the buses as FreeBSD's
+`acpi_iicbus` and `acpi_gpiobus` serve them:
+
+- A bus installs its handler on its controller's namespace node (`Service::install_handler`,
+  `AcpiInstallAddressSpaceHandler` on the controller's handle): an ACPI-hinted `iicbus` last in
+  its `start`, after its children and `iic`; a `gpiobus` for an ACPI controller before
+  `gpio_aei`. Each removes it in `stop`.
+- `lib/aml` keeps the handlers by node and space and names the one that serves an access: the
+  nearest at or above the region with one installed, as ACPICA searches, which is the controller
+  whose scope declares it (ACPI requires both kinds of region to be declared there). With none the
+  access fails, as ACPICA's `AE_NOT_EXIST` does.
+- Installing runs `_REG (space, 1)` once in each device under the node that declares a region the
+  handler now serves, and removing runs `_REG (space, 0)` first. That is how firmware that waits
+  for `_REG` (the Q8B's `IC13` sets `AVBL`) learns the region is there, and why the region edges
+  of §6.1 are optional rather than required.
+- `iicbus::acpi_space` decodes the field's `Connection` (`I2cSerialBusV2`; 10-bit addresses
+  refused, as FreeBSD refuses them), sizes the buffer per access attribute as ACPICA does (status,
+  length, then 1, 2, or 255 bytes), and runs the attribute's messages on the bus with the status
+  byte FreeBSD's handler gives (the `iicbus` error code). It does FreeBSD's attributes
+  (`SendReceive`, `Byte`, `Word`, `Block`, `Bytes (n)`) and those FreeBSD refuses (`Quick`,
+  `ProcessCall`, `BlockProcessCall`, `RawBytes (n)`, `RawProcessBytes (n)`), from ACPI 6.5
+  §19.6.7. A block read takes the SMBus limit of 32 bytes after the count, as the controller
+  interface cannot continue a read by its first byte (`IIC_M_NOSTART`).
+- `gpiobus::acpi_space` reads and drives the connection's pins past any driver's claim, bit `i`
+  of the value at the pin table's entry for the field's bit offset plus `i`; an input-only
+  connection is not driven, an output-only one not read, and nothing changes a pin's direction,
+  as in FreeBSD's.
+- A region a method creates after the handler arrived gets no `_REG` (ACPICA runs one when such a
+  region is first initialized). No firmware in the corpus does that for these spaces.
+
+Of the corpus machines only the Radxa Q8B has such regions (its `IRTC` reads a clock behind `IC13`,
+`QPPX` drives a pin of `GIO0`); the Sky1's EC reaches I2C6 through `SystemMemory` instead.
 
 Provider handles held by a consumer go through the same `Gate` mechanism. A supplier cannot detach
 while it has attached consumers, because the graph detaches consumers first (§10.1). The gate makes
