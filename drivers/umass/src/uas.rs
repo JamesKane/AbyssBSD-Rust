@@ -151,11 +151,22 @@ impl Uas {
 
     /// A status pipe read, waited for and parsed.
     fn read_status(w: &Waiter, s: &Sleepable) -> Result<Status, UsbError> {
+        Self::read_status_sense(w, s, &mut Vec::new())
+    }
+
+    /// [`Self::read_status`], keeping a sense IU's sense data in `sense`.
+    fn read_status_sense(
+        w: &Waiter,
+        s: &Sleepable,
+        sense: &mut Vec<u8>,
+    ) -> Result<Status, UsbError> {
         let (b, r) = w.wait(s);
         let n = r?;
         match b {
             IoBuf::Owned(v) => {
-                Status::parse(&v[..n.min(v.len())]).ok_or(UsbError::Protocol("bad UAS IU"))
+                let iu = &v[..n.min(v.len())];
+                *sense = Status::sense_bytes(iu).to_vec();
+                Status::parse(iu).ok_or(UsbError::Protocol("bad UAS IU"))
             }
             _ => Err(UsbError::Protocol("bad UAS IU")),
         }
@@ -169,6 +180,20 @@ impl Uas {
         lun: u16,
         cdb: &Cdb,
         data: Data,
+    ) -> (IoBuf, Result<u32, CmdError>) {
+        self.command_sense(s, lane, lun, cdb, data, &mut Vec::new())
+    }
+
+    /// [`Self::command`], keeping the sense data the device sent in
+    /// `sense`.
+    pub(crate) fn command_sense(
+        &self,
+        s: &Sleepable,
+        lane: u16,
+        lun: u16,
+        cdb: &Cdb,
+        data: Data,
+        sense: &mut Vec<u8>,
     ) -> (IoBuf, Result<u32, CmdError>) {
         let (len, is_in, buf) = data.split();
         if self.dev.is_gone() {
@@ -204,7 +229,7 @@ impl Uas {
             return (held, Err(self.broken(s, tag, lun, e)));
         }
         let mut moved = 0;
-        let mut status = Self::read_status(&st, s);
+        let mut status = Self::read_status_sense(&st, s, sense);
         if !self.streams {
             // The device asks for the data phase, then sends the status.
             let ready = match status {
@@ -230,7 +255,7 @@ impl Uas {
                     Ok(n) => {
                         moved = n;
                         match self.post(self.status, status_buf(), STATUS_MS, tag) {
-                            Ok(w) => Self::read_status(&w, s),
+                            Ok(w) => Self::read_status_sense(&w, s, sense),
                             Err((_, e)) => Err(e),
                         }
                     }

@@ -109,20 +109,43 @@ impl Bbb {
         cdb: &Cdb,
         data: Data,
     ) -> (IoBuf, Result<u32, CmdError>) {
+        self.command_sense(s, lun, cdb, data, SENSE_LEN, &mut alloc::vec::Vec::new())
+    }
+
+    /// [`Self::command`], asking for `sense_len` bytes of sense data
+    /// after a failure (none if 0) and keeping them in `sense`.
+    pub(crate) fn command_sense(
+        &self,
+        s: &Sleepable,
+        lun: u8,
+        cdb: &Cdb,
+        data: Data,
+        sense_len: u8,
+        sense: &mut alloc::vec::Vec<u8>,
+    ) -> (IoBuf, Result<u32, CmdError>) {
         let (buf, r) = self.raw(s, lun, cdb, data);
         let e = match r {
             Ok(residue) => return (buf, Ok(residue)),
             Err(Raw::Gone) => CmdError::Gone,
             Err(Raw::Transport) => CmdError::Transport,
+            Err(Raw::Failed) if sense_len == 0 => CmdError::Check(None),
             Err(Raw::Failed) => {
                 let (b, r) = self.raw(
                     s,
                     lun,
-                    &Cdb::request_sense(SENSE_LEN),
-                    Data::In(IoBuf::from(vec![0; SENSE_LEN.into()])),
+                    &Cdb::request_sense(sense_len),
+                    Data::In(IoBuf::from(vec![0; sense_len.into()])),
                 );
                 match (b, r) {
-                    (IoBuf::Owned(v), Ok(_)) => CmdError::Check(Sense::parse(&v)),
+                    (IoBuf::Owned(mut v), Ok(residue)) => {
+                        let n = v
+                            .len()
+                            .saturating_sub(usize::try_from(residue).unwrap_or(0));
+                        v.truncate(n);
+                        let parsed = Sense::parse(&v);
+                        *sense = v;
+                        CmdError::Check(parsed)
+                    }
                     (_, Err(Raw::Gone)) => CmdError::Gone,
                     _ => CmdError::Check(None),
                 }

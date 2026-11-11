@@ -54,6 +54,17 @@ impl Cdb {
         }
     }
 
+    /// A CDB of 1 to 16 bytes, as given (a pass-through command's).
+    #[must_use]
+    pub fn from_bytes(b: &[u8]) -> Option<Self> {
+        if b.is_empty() || b.len() > 16 {
+            return None;
+        }
+        let mut c = Self::new(u8::try_from(b.len()).ok()?);
+        c.bytes[..b.len()].copy_from_slice(b);
+        Some(c)
+    }
+
     /// The command's bytes.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
@@ -640,6 +651,18 @@ pub mod uas {
                 IU_WRITE_READY => Some(Self::WriteReady(tag)),
                 _ => None,
             }
+        }
+
+        /// A sense IU's sense data, as the device sent it.
+        #[must_use]
+        pub fn sense_bytes(b: &[u8]) -> &[u8] {
+            if b.first() != Some(&IU_SENSE) {
+                return &[];
+            }
+            let len = b
+                .get(14..16)
+                .map_or(0, |l| usize::from(u16::from_be_bytes([l[0], l[1]])));
+            b.get(16..).map_or(&[], |d| &d[..len.min(d.len())])
         }
 
         /// Its tag.

@@ -14,6 +14,11 @@
 //!   a `NOT READY` that is becoming ready, `BUSY`, and a broken transport
 //!   (recovered first), up to four times.
 //! - Unplugged, what is queued and what is in flight fail with `ENXIO`.
+//! - CAM's view (`umass_cam_attach_sim`): a bus for the interface,
+//!   `umass-sim` unit N, bus N, each LUN a device on it with its inquiry
+//!   data and a `pass` device. `XPT_SCSI_IO` from a pass device is a
+//!   command among the disk's (a worker runs it), its sense data fetched
+//!   as the CCB asks.
 //!
 //! Behavior reference: sys/dev/usb/storage/umass.c, sys/cam/scsi/scsi_da.c
 //! (`da_retry_count`, `daerror`), sys/cam/scsi/scsi_all.c (sense actions).
@@ -24,6 +29,7 @@
 extern crate alloc;
 
 mod bbb;
+mod sim;
 mod uas;
 
 use alloc::collections::VecDeque;
@@ -138,6 +144,32 @@ impl Transport {
         }
     }
 
+    /// [`Self::command`], with the sense data of a failure (up to
+    /// `sense_len` bytes asked for, over Bulk-Only) kept in `sense`.
+    #[allow(clippy::too_many_arguments, reason = "the transports' own arguments")]
+    fn command_sense(
+        &self,
+        s: &Sleepable,
+        lane: u16,
+        lun: u16,
+        cdb: &Cdb,
+        data: Data,
+        sense_len: u8,
+        sense: &mut Vec<u8>,
+    ) -> (IoBuf, Result<u32, CmdError>) {
+        match self {
+            Self::Bbb(b) => b.command_sense(
+                s,
+                u8::try_from(lun).unwrap_or(0),
+                cdb,
+                data,
+                sense_len,
+                sense,
+            ),
+            Self::Uas(u) => u.command_sense(s, lane, lun, cdb, data, sense),
+        }
+    }
+
     /// Runs `cdb` reading `len` bytes, with one retry after a unit
     /// attention: what came back.
     fn read(&self, s: &Sleepable, lun: u16, cdb: &Cdb, len: usize) -> Result<Vec<u8>, CmdError> {
@@ -166,6 +198,8 @@ impl Transport {
 struct Probed {
     lun: u16,
     inquiry: Inquiry,
+    /// The inquiry data as the device sent it.
+    inq_raw: Vec<u8>,
     /// The unit serial number (VPD page 0x80), if it has one.
     serial: Option<String>,
     capacity: Capacity,
@@ -175,10 +209,10 @@ struct Probed {
 /// Probes `lun` as CAM's `probe` and `da` do: `None` if nothing is there,
 /// it is not a disk, or its medium never comes ready.
 fn probe(s: &Sleepable, t: &Transport, lun: u16) -> Result<Probed, &'static str> {
-    let inquiry = t
+    let inq_raw = t
         .read(s, lun, &Cdb::inquiry(36), 36)
-        .map_err(|_| "INQUIRY failed")
-        .and_then(|b| Inquiry::parse(&b).ok_or("bad INQUIRY data"))?;
+        .map_err(|_| "INQUIRY failed")?;
+    let inquiry = Inquiry::parse(&inq_raw).ok_or("bad INQUIRY data")?;
     if inquiry.absent {
         return Err("LUN not present");
     }
@@ -245,6 +279,7 @@ fn probe(s: &Sleepable, t: &Transport, lun: u16) -> Result<Probed, &'static str>
     Ok(Probed {
         lun,
         inquiry,
+        inq_raw,
         serial,
         capacity,
         read_only,
@@ -257,12 +292,18 @@ struct Unit {
     block: u32,
 }
 
+/// What a worker runs: a disk's request, or a pass-through command, each
+/// with the index of its unit.
+enum Work {
+    Bio(usize, Bio),
+    Pass(usize, Arc<sim::Job>),
+}
+
 /// What the instance and its workers share.
 struct Inner {
     t: Transport,
     units: Vec<Unit>,
-    /// Requests, with the index of their unit.
-    queue: SpinLock<VecDeque<(usize, Bio)>>,
+    queue: SpinLock<VecDeque<Work>>,
     wq: WaitQueue,
     stop: AtomicBool,
 }
@@ -355,17 +396,26 @@ impl Inner {
                 self.stop.load(Ordering::Acquire) || !self.queue.lock().is_empty()
             });
             if self.stop.load(Ordering::Acquire) {
-                let left: Vec<(usize, Bio)> = self.queue.lock().drain(..).collect();
-                for (_, b) in left {
-                    b.complete(Err(BioError::Gone));
+                let left: Vec<Work> = self.queue.lock().drain(..).collect();
+                for w in left {
+                    match w {
+                        Work::Bio(_, b) => b.complete(Err(BioError::Gone)),
+                        Work::Pass(_, j) => j.gone(),
+                    }
                 }
                 return;
             }
             let next = self.queue.lock().pop_front();
-            let Some((i, bio)) = next else { continue };
-            match self.units.get(i) {
-                Some(u) if !self.t.dev().is_gone() => self.run(s, lane, u, bio),
-                _ => bio.complete(Err(BioError::Gone)),
+            match next {
+                None => {}
+                Some(Work::Bio(i, bio)) => match self.units.get(i) {
+                    Some(u) if !self.t.dev().is_gone() => self.run(s, lane, u, bio),
+                    _ => bio.complete(Err(BioError::Gone)),
+                },
+                Some(Work::Pass(i, job)) => match self.units.get(i) {
+                    Some(u) if !self.t.dev().is_gone() => job.run(s, &self.t, lane, u.lun),
+                    _ => job.gone(),
+                },
             }
         }
     }
@@ -387,7 +437,7 @@ impl DiskQueues for Queues {
         self.inner
             .queue
             .lock()
-            .extend(bios.drain(..).map(|b| (u, b)));
+            .extend(bios.drain(..).map(|b| Work::Bio(u, b)));
         self.inner.wq.wake_all();
     }
 }
@@ -397,8 +447,10 @@ pub struct Umass {
     inner: Arc<Inner>,
     unit: u32,
     luns: Vec<Probed>,
-    /// Its CAM bus number, while started.
-    scbus: SpinLock<Option<u32>>,
+    /// Its CAM bus, while started.
+    bus: SpinLock<Option<cam::Bus>>,
+    /// CAM's devices for the LUNs.
+    devices: SpinLock<Vec<cam::Device>>,
     disks: SpinLock<Vec<Arc<Disk>>>,
     threads: SpinLock<Vec<Arc<Thread>>>,
 }
@@ -505,7 +557,8 @@ impl Driver for Umass {
             }),
             unit: cx.unit(),
             luns: found,
-            scbus: SpinLock::new(None),
+            bus: SpinLock::new(None),
+            devices: SpinLock::new(Vec::new()),
             disks: SpinLock::new(Vec::new()),
             threads: SpinLock::new(Vec::new()),
         })
@@ -528,21 +581,48 @@ impl Driver for Umass {
             "umass{u}:  SCSI over {}; quirks = 0x0",
             self.inner.t.name()
         ));
-        let scbus = storage::alloc_bus();
-        *self.scbus.lock() = Some(scbus);
+        // `umass-sim` unit N, bus N (`umass_cam_attach_sim`).
+        let max_lun = self.luns.iter().map(|p| p.lun).max().unwrap_or(0);
+        let bus = cam::Bus::register(
+            cam::SimName {
+                name: "umass-sim",
+                unit: u,
+                bus_id: u,
+            },
+            Arc::new(sim::UmassSim {
+                inner: Arc::downgrade(&self.inner),
+                unit: u,
+                speed: dev.speed,
+                max_lun: u32::from(max_lun),
+            }),
+            false,
+        );
+        let scbus = bus.path_id();
         // FreeBSD prints this with USB_DEBUG, which GENERIC has.
         mgr.log(format_args!(
             "umass{u}:{scbus}:{u}: Attached to scbus{scbus}"
         ));
         for (i, p) in self.luns.iter().enumerate() {
-            let disk = self.publish(cx.sleepable(), scbus, i, p, dev.speed);
+            let (disk, unit) = self.publish(cx.sleepable(), scbus, i, p, dev.speed);
+            let d = bus.add_device(sim::device_info(p, unit));
+            self.devices.lock().push(d);
             self.disks.lock().push(disk);
         }
+        *self.bus.lock() = Some(bus);
         Ok(())
     }
 
     fn stop(&self, cx: &mut StopCx<'_>, _: StopReason) {
         let s = cx.sleepable();
+        // CAM's devices and bus first.
+        let devices: Vec<cam::Device> = self.devices.lock().drain(..).collect();
+        for d in devices {
+            d.remove(s);
+        }
+        let bus = self.bus.lock().take();
+        if let Some(b) = bus {
+            b.deregister(s);
+        }
         let disks: Vec<Arc<Disk>> = self.disks.lock().drain(..).collect();
         for d in disks {
             storage::withdraw(s, &d);
@@ -553,20 +633,25 @@ impl Driver for Umass {
         for t in threads {
             t.join(s);
         }
-        if let Some(b) = self.scbus.lock().take() {
-            storage::free_bus(b);
-        }
     }
 }
 
 impl Umass {
-    /// Publishes LUN `p` (unit `i`) as `daN`, with CAM's lines.
-    fn publish(&self, s: &Sleepable, scbus: u32, i: usize, p: &Probed, speed: Speed) -> Arc<Disk> {
+    /// Publishes LUN `p` (unit `i`) as `daN`, with CAM's lines: the disk
+    /// and its unit.
+    fn publish(
+        &self,
+        s: &Sleepable,
+        scbus: u32,
+        i: usize,
+        p: &Probed,
+        speed: Speed,
+    ) -> (Arc<Disk>, u32) {
         let mgr = bus::manager();
         let (u, inq) = (self.unit, &p.inquiry);
         let unit = storage::alloc_unit("da");
         mgr.log(format_args!(
-            "da{unit} at umass-sim{u} bus 0 scbus{scbus} target 0 lun {}",
+            "da{unit} at umass-sim{u} bus {u} scbus{scbus} target 0 lun {}",
             p.lun
         ));
         let spc = match inq.version {
@@ -629,7 +714,7 @@ impl Umass {
         disk.set_devstat(storage::devstat::Kind::SCSI);
         // umass's SIM says PIM_NO_6_BYTE, which da keeps as a quirk.
         mgr.log(format_args!("da{unit}: quirks=0x2<NO_6_BYTE>"));
-        disk
+        (disk, unit)
     }
 }
 
