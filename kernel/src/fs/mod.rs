@@ -188,6 +188,7 @@ pub(crate) fn init() {
     crate::efidev::init();
     crate::fido::init();
     crate::memdev::init();
+    crate::devstat::make_dev();
     crate::klog::init(&s);
     crate::panic::init(&s);
     let dev = Mount::new(

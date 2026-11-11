@@ -18,6 +18,7 @@
 extern crate alloc;
 
 pub mod bio;
+pub mod devstat;
 pub mod disk;
 
 pub use bio::{Bio, BioError, BioOp};

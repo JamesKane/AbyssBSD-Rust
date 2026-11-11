@@ -33,6 +33,7 @@ mod cpuset;
 mod cred;
 mod devctl;
 mod devices;
+mod devstat;
 mod efidev;
 mod efirtc;
 mod errata;
@@ -160,6 +161,7 @@ fn kmain(boot_info: PhysAddr) -> ! {
     idregs::finish();
     topology::summarize();
     pci::init();
+    devstat::init(&s);
     devices::init(&s);
     random::start_harvester();
     // After the clock is set, as FreeBSD mounts root once devices attach.

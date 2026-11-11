@@ -20,6 +20,7 @@ pub mod bus;
 pub mod capsicum;
 pub mod consio;
 pub mod devfs;
+pub mod devstat;
 pub mod dirent;
 pub mod efi;
 pub mod errno;

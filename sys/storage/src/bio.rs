@@ -77,6 +77,8 @@ pub struct Bio {
     /// completing. A write may lend a file's pages rather than a copy.
     pub buf: IoBuf,
     done: Option<Done>,
+    /// The statistics it counts in, ended when it completes.
+    pub(crate) trail: crate::devstat::Trail,
 }
 
 impl core::fmt::Debug for Bio {
@@ -102,6 +104,7 @@ impl Bio {
             offset,
             buf,
             done: Some(Box::new(done)),
+            trail: crate::devstat::Trail::default(),
         }
     }
 
@@ -119,6 +122,11 @@ impl Bio {
 
     /// Completes the request.
     pub fn complete(mut self, r: Result<(), BioError>) {
+        let bytes = match (r, self.op) {
+            (Ok(()), BioOp::Read | BioOp::Write) => u64::try_from(self.buf.len()).unwrap_or(0),
+            _ => 0,
+        };
+        self.trail.end(self.op, bytes);
         if let Some(done) = self.done.take() {
             done(core::mem::take(&mut self.buf), r);
         }
@@ -127,6 +135,7 @@ impl Bio {
 
 impl Drop for Bio {
     fn drop(&mut self) {
+        self.trail.end(self.op, 0);
         if let Some(done) = self.done.take() {
             DROPPED.fetch_add(1, Ordering::Relaxed);
             assert!(

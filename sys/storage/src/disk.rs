@@ -35,6 +35,7 @@ use sync::{PreemptLock, SpinLock};
 use vm::object::IoBuf;
 
 use crate::bio::{Bio, BioError, BioOp, Waiter};
+use crate::devstat::{self, Stat};
 
 /// What a disk driver implements: hardware queues that take batches.
 pub trait DiskQueues: Send + Sync {
@@ -210,6 +211,11 @@ pub struct Disk {
     /// A disk's partition table, while its partitions are published.
     table: SpinLock<Option<Table>>,
     description: SpinLock<Description>,
+    /// Its GEOM provider's statistics (`gstat`).
+    provider_stat: Option<Arc<Stat>>,
+    /// A disk's entry in the device list (`iostat`): `geom_disk`'s
+    /// `d_devstat`, or its driver's.
+    device_stat: Option<Arc<Stat>>,
     target: Target,
 }
 
@@ -343,6 +349,15 @@ impl Disk {
         *self.description.lock() = d;
     }
 
+    /// What its entry in the device list says of it, for a driver whose
+    /// FreeBSD counterpart makes its own (CAM's `nda`, `ada`, `da`)
+    /// rather than `geom_disk`'s.
+    pub fn set_devstat(&self, kind: devstat::Kind) {
+        if let Some(s) = &self.device_stat {
+            s.set_kind(kind);
+        }
+    }
+
     /// For a partition: its parent and GPT entry.
     #[must_use]
     pub fn partition(&self) -> Option<(&Arc<Disk>, &PartitionEntry)> {
@@ -374,11 +389,16 @@ impl Disk {
         Ok(())
     }
 
-    /// Sends `bio` to the disk (FreeBSD's `g_io_request`).
+    /// Sends `bio` to the disk (FreeBSD's `g_io_request`), counting it
+    /// on the way (its provider's statistics, then the disk's).
     pub fn strategy(&self, s: &Sleepable, mut bio: Bio) {
         if let Err(e) = self.check(&bio) {
             bio.complete(Err(e));
             return;
+        }
+        if let Some(st) = &self.provider_stat {
+            let now = bio.trail.started().unwrap_or_else(devstat::now);
+            bio.trail.start(st, now);
         }
         match &self.target {
             Target::Partition { parent, first, .. } => {
@@ -402,6 +422,10 @@ impl Disk {
                     bio.complete(Err(BioError::Gone));
                     return;
                 };
+                if let Some(st) = &self.device_stat {
+                    let now = bio.trail.started().unwrap_or_else(devstat::now);
+                    bio.trail.start(st, now);
+                }
                 let q = sched::this_cpu().id().index() % deferred.len();
                 let mut waiting = deferred[q].lock(s);
                 // Behind anything already waiting, to keep order.
@@ -820,15 +844,18 @@ fn taste(s: &Sleepable, disk: &Arc<Disk>, retasted: bool) -> Option<(Table, Vec<
         .map(|p| {
             let mut label = String::new();
             let _ = p.write_name(&mut label);
+            let serial = next_serial();
             Arc::new(Disk {
                 name: format!("{}p{}", disk.name, p.index + 1),
-                serial: next_serial(),
+                serial,
                 sector_size: disk.sector_size,
                 sectors: p.sectors(),
                 max_transfer: disk.max_transfer,
                 read_only: disk.read_only,
                 table: SpinLock::new(None),
                 description: SpinLock::new(Description::default()),
+                provider_stat: devstat::for_provider(serial),
+                device_stat: None,
                 target: Target::Partition {
                     parent: Arc::clone(disk),
                     first: p.first_lba * ss,
@@ -926,15 +953,23 @@ pub fn all() -> Vec<Arc<Disk>> {
 pub fn publish(s: &Sleepable, info: DiskInfo, queues: Arc<dyn DiskQueues>) -> Arc<Disk> {
     let n = queues.queues().max(1);
     let queues = PreemptLock::new(Some(queues));
+    let serial = next_serial();
     let disk = Arc::new(Disk {
         name: format!("{}{}", info.name, info.unit),
-        serial: next_serial(),
+        serial,
         sector_size: info.sector_size,
         sectors: info.sectors,
         max_transfer: info.max_transfer,
         read_only: info.read_only,
         table: SpinLock::new(None),
         description: SpinLock::new(Description::default()),
+        provider_stat: devstat::for_provider(serial),
+        device_stat: Stat::device(
+            info.name,
+            info.unit,
+            info.sector_size,
+            devstat::Kind::GEOM_DISK,
+        ),
         target: Target::Device {
             queues,
             gate: alloc::boxed::Box::new(Gate::new()),
@@ -976,6 +1011,11 @@ pub fn withdraw(s: &Sleepable, disk: &Arc<Disk>) {
     });
     for d in &gone {
         tell(s, Event::Withdrawn(d));
+    }
+    // Out of the device list now; the entry goes with the last request
+    // that counts in it.
+    if let Some(st) = &disk.device_stat {
+        devstat::unlist(st);
     }
     if let Target::Device {
         gate,

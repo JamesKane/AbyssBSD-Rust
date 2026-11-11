@@ -7,8 +7,8 @@
 //! actually use against what FreeBSD's C compiler computes.
 
 use crate::{
-    bus, consio, devfs, evdev, fbio, inet, kbio, md, mouse, net, netlink, signal, socket, stat,
-    time, ucontext, vdso,
+    bus, consio, devfs, devstat, evdev, fbio, inet, kbio, md, mouse, net, netlink, signal, socket,
+    stat, time, ucontext, vdso,
 };
 
 /// Architectures a layout applies to.
@@ -113,6 +113,7 @@ pub const CONSTANTS: &[&[ConstValue]] = &[
     crate::ptrace::CONSTANTS,
     crate::syslog::CONSTANTS,
     crate::devfs::CONSTANTS,
+    crate::devstat::CONSTANTS,
     crate::efi::CONSTANTS,
     crate::gpio::CONSTANTS,
     crate::iic::CONSTANTS,
@@ -366,6 +367,29 @@ pub static LAYOUTS: &[StructLayout] = &[
         fuzz => "fuzz",
         flat => "flat",
         resolution => "resolution",
+    }),
+    layout!(devstat::Devstat, "struct devstat", ["sys/types.h", "sys/devicestat.h"], All, {
+        sequence0 => "sequence0",
+        allocated => "allocated",
+        start_count => "start_count",
+        end_count => "end_count",
+        busy_from => "busy_from",
+        dev_links => "dev_links",
+        device_number => "device_number",
+        device_name => "device_name",
+        unit_number => "unit_number",
+        bytes => "bytes",
+        operations => "operations",
+        duration => "duration",
+        busy_time => "busy_time",
+        creation_time => "creation_time",
+        block_size => "block_size",
+        tag_types => "tag_types",
+        flags => "flags",
+        device_type => "device_type",
+        priority => "priority",
+        id => "id",
+        sequence1 => "sequence1",
     }),
     layout!(md::MdIoctl, "struct md_ioctl", ["sys/types.h", "sys/mdioctl.h"], All, {
         md_version => "md_version",

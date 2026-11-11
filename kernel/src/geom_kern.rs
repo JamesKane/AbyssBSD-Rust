@@ -81,6 +81,13 @@ fn id(serial: u64, slot: u64) -> u64 {
     OBJECT_IDS | (serial << 8) | (slot << 3)
 }
 
+/// The id of the provider of the disk or partition with serial `serial`,
+/// which its statistics carry (`devstat`'s `id`), so that `gstat` finds
+/// it in `confxml`.
+pub(crate) fn provider_id(serial: u64) -> u64 {
+    id(serial, PROVIDER)
+}
+
 // --- The event thread ---------------------------------------------------
 
 type Event = Box<dyn FnOnce(&Sleepable) + Send>;
