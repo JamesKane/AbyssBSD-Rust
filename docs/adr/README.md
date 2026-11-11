@@ -29,6 +29,7 @@ Status values: **Proposed** (awaiting owner confirmation) · **Accepted** · **S
 | [0020](0020-platform-crates.md) | Platform knowledge in per-SoC crates behind one interface; the ACPI bus names no vendor | Accepted; refined by 0021 |
 | [0021](0021-driver-selection-and-modules.md) | Drivers selected per ISA at build time; large drivers as same-build loadable modules that import no kernel symbols | Accepted |
 | [0022](0022-smmuv3-in-p9.md) | The SMMUv3 in Phase 9, in FreeBSD's split: `smmu` units under `acpi0`, a framework and a third DMA backend, a domain per requester with strict invalidation, and a settle edge | Accepted |
+| [0023](0023-hardware-scope-consumer-decade.md) | Hardware scope is what consumers could buy in the last decade, where we have a machine; the AMD64 firmware floor is 64-bit EFI 1.10 | Proposed |
 
 Template:
 

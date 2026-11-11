@@ -6,8 +6,8 @@ AbyssBSD supports machines that provide:
 
 | Requirement | AMD64 | ARM64 | RV64 (Day 2) |
 |---|---|---|---|
-| Firmware | UEFI 2.7+ (64-bit), CSM disabled | UEFI 2.7+, **Arm SystemReady (SR/ES/IR-with-ACPI) or SBSA/BSA-conformant** | UEFI + ACPI (RVI BRS) |
-| ACPI | 6.0+: RSDP 2.0/XSDT, MADT, FADT, MCFG, DSDT | 6.3+: MADT (GICC/GICD/GICR/ITS), GTDT, MCFG, SPCR, IORT, PPTT | 6.6+: RHCT, MADT (RINTC/IMSIC/APLIC) |
+| Firmware | 64-bit **EFI 1.10+** with GOP. A CSM may be present; it is never used ([ADR-0023](adr/0023-hardware-scope-consumer-decade.md)) | UEFI 2.7+, **Arm SystemReady (SR/ES/IR-with-ACPI) or SBSA/BSA-conformant** | UEFI + ACPI (RVI BRS) |
+| ACPI | 2.0+ layout: RSDP 2.0/XSDT, MADT, FADT, MCFG, DSDT, at any later table revision | 6.3+: MADT (GICC/GICD/GICR/ITS), GTDT, MCFG, SPCR, IORT, PPTT | 6.6+: RHCT, MADT (RINTC/IMSIC/APLIC) |
 | CPU | x86-64-v2 minimum (SSE4.2, POPCNT, CMPXCHG16B). xAPIC **and** x2APIC (firmware may leave x2APIC disabled, as on the X870E) | Armv8.1-A minimum (LSE atomics, PAN, VHE) | RV64GC + Zicsr/Zifencei, Sstc preferred |
 | Interrupts | x2APIC + IOAPIC, MSI/MSI-X | GICv3 + ITS (GICv2 only as a stretch for RPi4) | AIA (IMSIC + APLIC) |
 | Storage boot | GPT disk with an ESP | GPT disk with an ESP | GPT disk with an ESP |
@@ -15,12 +15,19 @@ AbyssBSD supports machines that provide:
 Machines that provide only a device tree (most hobby ARM SBCs without SystemReady firmware) are
 out of scope for Day 1.
 
+The scope is the machines mainstream consumers could buy in the last decade that boot UEFI with
+ACPI, wherever we have one to test on ([ADR-0023](adr/0023-hardware-scope-consumer-decade.md)).
+The AMD64 floor is what the loader and kernel use: EFI 1.10's boot and runtime services, GOP, and
+an ACPI 2.0 RSDP. Anything newer (the RNG protocol, SMBIOS 3) is optional and has a fallback. Out of
+scope until we have such a machine: 32-bit EFI on 64-bit CPUs, and T2 Macs.
+
 ## 2. Reference platforms
 
 | Tier | AMD64 | ARM64 | RV64 (Day 2, P12) |
 |---|---|---|---|
 | **Tier 1, virtual** (CI gate) | QEMU q35 + OVMF; bhyve UEFI | QEMU virt (gicv3, acpi=on) + edk2 | QEMU virt (aia=aplic-imsic, acpi=on) + edk2 |
 | **Tier 1, physical** (untouched until P6's exit, gating from P8; RV64: untouched until P12's QEMU exit, gating from then) | **Ryzen 9 7900X on Gigabyte X870E AORUS ELITE WIFI7** (dedicated test machine, [§5](#5-board-profile-amd64-ryzen-9-7900x--x870e-aorus-elite-wifi7), [ADR-0009](adr/0009-amd64-reference-machine-ryzen-x870e.md)); **Ryzen 7 9700X on ASRock B650E Taichi Lite** (dev workstation, [§6](#6-board-profile-amd64-ryzen-7-9700x--asrock-b650e-taichi-lite)); **Core i7-12700KF on MSI PRO Z690-A DDR4** (build/test server, [§7](#7-board-profile-amd64-intel-core-i7-12700kf--msi-pro-z690-a-ddr4)) | **Orange Pi 6 Plus** (CIX P1 / Sky1), see [§4](#4-board-profile-orange-pi-6-plus-cix-p1--sky1) and [ADR-0008](adr/0008-arm64-reference-board-orange-pi-6-plus.md) | **Banana Pi BPI-SM10** (SpacemiT K3), see [§8](#8-board-profile-rv64-banana-pi-bpi-sm10-spacemit-k3) and [ADR-0017](adr/0017-rv64-reference-board-bpi-sm10.md). Tier 1 only once it boots UEFI with ACPI |
+| **Tier 2, physical (in hand)**: profiled here, booted at milestone exits, not gating merges, no performance gate | **Mac Pro (Late 2013, `MacPro6,1`)**, Apple EFI 1.10, see [§9](#9-board-profile-amd64-mac-pro-late-2013-macpro61) | — | — |
 | **Tier 2, best effort** | Other UEFI desktops/laptops | Radxa Orion O6 (same SoC), **Radxa Dragon Q8B** (see below), other SystemReady boards, Raspberry Pi 4/5 with community UEFI+ACPI firmware | Other UEFI+ACPI (RVI BRS) boards |
 
 The three AMD64 reference machines cover both major x86 vendors and microarchitectural families:
@@ -333,3 +340,34 @@ APLIC MSI mode, so it does not run here today. There is no FreeBSD ground truth 
 FreeBSD performance baseline on the board (ADR-0017). Linux on the shipped firmware is the
 reference for what the hardware does, used as observation only.
 
+
+## 9. Board profile: AMD64 Mac Pro (Late 2013, `MacPro6,1`)
+
+The first Tier 2 physical machine ([ADR-0023](adr/0023-hardware-scope-consumer-decade.md)), owned
+and on hand as of 2026-11-10. Facts are from Apple's published specifications and public knowledge
+of the model, **not yet captured from this machine**: every row is to be checked, and the
+configuration (CPU, GPUs, SSD, boot ROM version) recorded, by the capture below.
+
+| Item | Expected | What it means for AbyssBSD |
+|---|---|---|
+| Model | Mac Pro (Late 2013), `MacPro6,1`, A1481. SMBIOS maker `Apple Inc.` | `platform/apple-mac` matches the maker, as FreeBSD's `acpi_apple_darwin_osi` does |
+| CPU | One Intel Xeon E5 v2 (Ivy Bridge-EP): E5-1620 v2 (4 cores), 1650 v2 (6), 1680 v2 (8), or 2697 v2 (12), with SMT. AVX, no AVX2. x2APIC-capable | x86-64-v2 holds. Single socket, so no NUMA. Whether firmware leaves the APIC in xAPIC mode is to check |
+| Memory | Four DDR3 ECC RDIMM slots | Size from the memory map |
+| Firmware | Apple EFI, 64-bit, system table revision **EFI 1.10** with GOP added. CSM present (Boot Camp). No Secure Boot, no T2. Boot ROM `MP61.*`, updated only by macOS installers; NVMe boot needs `MP61.0120.B00` or later | The EFI 1.10 floor of §1. The Option key opens the Startup Manager, which lists a FAT ESP's `\EFI\BOOT\BOOTX64.EFI` as "EFI Boot" |
+| Boot selection | Apple's own variables (`efi-boot-device`, set by `bless`); standard `BootOrder`/`Boot####`/`BootNext` largely ignored | Installer and `efibootmgr` behavior to check on the machine. The Startup Manager works for every test boot meanwhile |
+| ACPI | XSDT with FACP, APIC, HPET, MCFG, DMAR, SSDTs; older table revisions than ACPI 6. AML keys power and visibility on `_OSI("Darwin")` (`OSYS` = 10000) | The first pre-ACPI-5.0 corpus (`tests/corpus/macpro61/`). `_OSI` answers `Darwin` per ADR-0023 §4 |
+| Chipset | Intel C602J (Patsburg) PCH | `ichwd` needs Patsburg's LPC IDs (FreeBSD's table has them; ours stops at ICH10) |
+| Timers | Invariant TSC, HPET, ACPI PM timer, LAPIC (TSC-deadline capable) | Existing paths |
+| Display | Two AMD FirePro D300 (Pitcairn), D500, or D700 (Tahiti): GCN 1, "Southern Islands". Outputs on six Thunderbolt 2 ports and one HDMI 1.4 port | GOP framebuffer console. Which output GOP lights, and at what mode, is to check. Native graphics is Southern Islands under M-G (FreeBSD: `radeonkms`) |
+| Storage | Apple PCIe SSD on a proprietary connector, **AHCI** (not NVMe) | `ahci` matches by class. The disk AbyssBSD may write is decided before the first install (macOS likely lives on it) |
+| Network | Two Broadcom BCM57762 GbE. Broadcom BCM4360 802.11ac, Bluetooth 4.0 | `bge` is new work. Wi-Fi is out of scope |
+| USB | Four USB 3 ports; the controller (not in the C602J) is to identify | `xhci` if it is standard xHCI |
+| Thunderbolt | Three Intel Thunderbolt 2 controllers, six ports | Powered and enumerated only under the Darwin `_OSI`. Hot plug is later work |
+| Console | No serial port | As on the X870E: framebuffer, the loader's log on the ESP, the watchdog |
+| Other | Apple SMC (fans run on their own; sensors via FreeBSD's `asmc`), HDA audio | Not Day 1 |
+
+**Capture before the first AbyssBSD boot** (read-only, from a FreeBSD 15.1 memstick booted through
+the Startup Manager; 16-CURRENT for its Darwin `_OSI` behavior): `acpidump -dt`, `pciconf -lvc`,
+`devinfo -rv`, `dmesg` (verbose boot), `kenv` (SMBIOS), `efivar -l`, `efibootmgr -v`, and the GOP
+modes. If macOS is installed, also its boot ROM version and `bless --info`. The results go to
+`tests/corpus/macpro61/` and replace "Expected" above.
