@@ -210,6 +210,7 @@ pub(crate) fn shutdown(s: &Sleepable) {
 /// Starts the device manager. Call once, after the other CPUs are up.
 pub(crate) fn init(s: &Sleepable) {
     reserve_boot_devices();
+    let began = crate::time::now_ns();
     let workers = if crate::boot::flag("abyss.bus.serial") {
         1
     } else {
@@ -342,10 +343,13 @@ pub(crate) fn init(s: &Sleepable) {
     // Boot goes on once the devices found so far have attached, as
     // FreeBSD finishes autoconfiguration before mounting root.
     bus::manager().wait_idle(s);
+    let took_us = crate::time::now_ns().saturating_sub(began) / 1000;
     crate::time::set_realtime();
     kprintln!(
-        "bus: device manager up, {} driver(s), {workers} attach worker(s){}",
+        "bus: device manager up, {} driver(s), {workers} attach worker(s), attached in {}.{:03} ms{}",
         drivers.len(),
+        took_us / 1000,
+        took_us % 1000,
         match (verifier, faults) {
             (false, 0) => alloc::string::String::new(),
             (true, 0) => ", verifier on".into(),
