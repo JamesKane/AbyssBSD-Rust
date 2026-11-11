@@ -20,6 +20,7 @@
 
 extern crate alloc;
 
+pub mod hidmap;
 pub mod hidraw;
 pub mod usbhid;
 
