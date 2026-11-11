@@ -990,13 +990,10 @@ impl Drop for PreemptGuard {
 }
 
 /// The current thread's CPU time, in platform time units, its running
-/// slice included (what `calcru` brings up to date for the caller;
-/// [`Thread::runtime`] is as of the last switch).
+/// slice included ([`Thread::runtime`]).
 #[must_use]
 pub fn current_runtime() -> u64 {
-    let t = current();
-    let since = t.inner.lock().since;
-    t.runtime() + platform().now().saturating_sub(since)
+    current().runtime()
 }
 
 /// When the current time slice ends, if threads are waiting for this CPU
@@ -1041,9 +1038,16 @@ pub fn tick(slice: u64) {
     });
 }
 
-/// Called on the way out of an interrupt handler, interrupts masked: if a
-/// reschedule is pending and preemption is allowed, switches threads.
+/// If a reschedule is pending and preemption is allowed, switches
+/// threads: on the way out of an interrupt handler (interrupts masked), or
+/// from a long kernel loop (`UMTX_OP_NWAKE_PRIVATE`). Interrupts are masked
+/// here either way: an interrupt taken inside `switch_away`, after it
+/// queued the thread and before the switch, would preempt again from its
+/// exit, and the thread, switched away twice but queued once, would be
+/// left marked running on no CPU (the hang kyua's `cond_test:broadcast`
+/// found on the Orange Pi 6 Plus).
 pub fn preempt_point() {
+    let irq = hal::irq::disable();
     let c = this_cpu();
     if c.need_resched.load(Ordering::Relaxed) {
         if hal::critical::depth() == 0 {
@@ -1053,6 +1057,7 @@ pub fn preempt_point() {
             hal::critical::owe_preempt(true);
         }
     }
+    hal::irq::restore(irq);
 }
 
 /// Switches to the best runnable thread. Interrupts must be masked. The
@@ -1096,9 +1101,12 @@ pub(crate) fn switch_away() {
         }
     }
     c.prev_moving.set(moving);
+    // Under the thread lock, with the state changed: `runtime` adds the
+    // slice in progress only while the thread is running, so the two
+    // never count it twice or not at all.
+    cur.runtime.fetch_add(elapsed, Ordering::Relaxed);
     // Never carry the thread lock across the switch.
     drop(inner);
-    cur.runtime.fetch_add(elapsed, Ordering::Relaxed);
     let owned = match state {
         // The idle thread is never queued; it is the fallback.
         State::Running if cur.idle => None,
