@@ -389,25 +389,41 @@ impl Builder<'_> {
             } else {
                 "read-write"
             };
-            let config = vec![
+            let mut config = vec![
                 Field::new("unit", md.unit),
                 Field::new("sectorsize", d.sector_size()),
                 Field::new("fwheads", md.fwheads),
                 Field::new("fwsectors", md.fwsectors),
+            ];
+            // A vnode-backed disk's file and `ident` (`g_md_dumpconf`).
+            let file = md
+                .file
+                .as_ref()
+                .map(|(f, ident)| (String::from_utf8_lossy(f).into_owned(), ident.clone()));
+            if let Some((_, ident)) = &file {
+                config.push(Field::new("ident", ident));
+            }
+            config.extend([
                 Field::new("length", d.bytes()),
                 Field::new("compression", if md.compress { "on" } else { "off" }),
                 Field::new("access", access),
                 Field::new("type", md.kind),
-                Field::new("label", ""),
-            ];
+            ]);
+            if let Some((f, _)) = &file {
+                config.push(Field::new("file", f));
+                config.push(Field::new("cache", "off"));
+            }
+            config.push(Field::new("label", ""));
             let txt = format!(
-                " u {} s {} f {} fs {} l {} t {} label ",
+                " u {} s {} f {} fs {} l {} t {}{} label ",
                 md.unit,
                 d.sector_size(),
                 md.fwheads,
                 md.fwsectors,
                 d.bytes(),
-                md.kind
+                md.kind,
+                file.as_ref()
+                    .map_or_else(String::new, |(f, _)| format!(" file {f}")),
             );
             self.m.set_provider_config(p, config, txt);
             (p, (md.fwheads, md.fwsectors))

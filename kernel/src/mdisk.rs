@@ -1,8 +1,13 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! md(4) memory disks: `/dev/mdctl` attaches and detaches disks held in
-//! kernel memory (`mdconfig -a -t malloc`), which `sys/storage` publishes
-//! as `mdN` like any other disk, so devfs, `newfs`, and `mount` see them
-//! as FreeBSD's.
+//! kernel memory (`mdconfig -a -t malloc`) or backed by a regular file
+//! (`mdconfig -a -t vnode -f FILE`), which `sys/storage` publishes as
+//! `mdN` like any other disk, so devfs, `newfs`, and `mount` see them as
+//! FreeBSD's.
+//!
+//! A vnode-backed disk holds its file open, for writing unless read-only
+//! (`mdcreate_vnode`), and does its requests through the file's page
+//! cache; reading past the file's end reads zeros.
 //!
 //! A disk's pages are allocated when first written; an unwritten page
 //! reads as zeros, as FreeBSD's malloc disks do without `reserve`. Swap
@@ -21,8 +26,8 @@ use core::mem::offset_of;
 
 use abi::errno::Errno;
 use abi::md::{
-    MD_AUTOUNIT, MD_COMPRESS, MD_FORCE, MD_MALLOC, MD_READONLY, MD_SWAP, MDIOCATTACH, MDIOCDETACH,
-    MDIOCQUERY, MDIOVERSION, MdIoctl,
+    MD_ASYNC, MD_AUTOUNIT, MD_CACHE, MD_COMPRESS, MD_FORCE, MD_MALLOC, MD_MUSTDEALLOC, MD_READONLY,
+    MD_SWAP, MD_VERIFY, MD_VNODE, MDIOCATTACH, MDIOCDETACH, MDIOCQUERY, MDIOVERSION, MdIoctl,
 };
 use sched::{Sleepable, WaitQueue};
 use storage::{Bio, BioError, BioOp, Disk, DiskInfo, DiskQueues};
@@ -96,8 +101,53 @@ impl Pages {
     }
 }
 
+/// A vnode-backed disk's file (`s_vnode`), open while attached.
+struct Backing {
+    vnode: vfs::VnodeUse,
+    /// Counted as a writer (opened `FWRITE`).
+    writer: bool,
+}
+
+impl Drop for Backing {
+    fn drop(&mut self) {
+        if self.writer {
+            self.vnode.drop_writer();
+        }
+    }
+}
+
+impl Backing {
+    /// A request on the file (`mdstart_vnode`).
+    fn transfer(
+        &self,
+        s: &Sleepable,
+        offset: u64,
+        buf: &mut [u8],
+        write: bool,
+    ) -> Result<(), BioError> {
+        if write {
+            let mut w = vfs::WriteBuf::new(buf);
+            let n = self
+                .vnode
+                .write_at(s, offset, &mut w)
+                .map_err(|_| BioError::Io)?;
+            if n != buf.len() {
+                return Err(BioError::Io);
+            }
+        } else {
+            let mut r = vfs::ReadBuf::new(buf);
+            self.vnode
+                .read_at(s, offset, &mut r)
+                .map_err(|_| BioError::Io)?;
+            let n = r.filled().len();
+            buf[n..].fill(0);
+        }
+        Ok(())
+    }
+}
+
 /// A disk's thread: does its requests until the disk is detached.
-fn worker(s: &Sleepable, q: &Queue) {
+fn worker(s: &Sleepable, q: &Queue, backing: Option<Backing>) {
     let mut pages = Pages(BTreeMap::new());
     loop {
         q.wake.wait_until(s, || {
@@ -112,21 +162,29 @@ fn worker(s: &Sleepable, q: &Queue) {
             let r = if gone {
                 Err(BioError::Gone)
             } else {
-                match bio.op {
-                    BioOp::Read => {
+                match (bio.op, &backing) {
+                    (BioOp::Read | BioOp::Write, Some(b)) => {
+                        let write = bio.op == BioOp::Write;
+                        let mut buf = core::mem::take(&mut bio.buf).into_vec();
+                        let r = b.transfer(s, bio.offset, &mut buf, write);
+                        bio.buf = buf.into();
+                        r
+                    }
+                    (BioOp::Flush, Some(b)) => b.vnode.fsync(s).map_err(|_| BioError::Io),
+                    (BioOp::Read, None) => {
                         let mut buf = core::mem::take(&mut bio.buf).into_vec();
                         pages.transfer(bio.offset, &mut buf, false);
                         bio.buf = buf.into();
                         Ok(())
                     }
-                    BioOp::Write => {
+                    (BioOp::Write, None) => {
                         // Lent pages are copied: memory to memory either way.
                         let mut buf = core::mem::take(&mut bio.buf).into_vec();
                         pages.transfer(bio.offset, &mut buf, true);
                         bio.buf = buf.into();
                         Ok(())
                     }
-                    BioOp::Flush => Ok(()),
+                    (BioOp::Flush, None) => Ok(()),
                 }
             };
             bio.complete(r);
@@ -149,6 +207,9 @@ struct Unit {
     /// References to the disk with nothing using it (the disk lists' and
     /// devfs's); more means a mount holds it.
     idle_refs: usize,
+    /// A vnode-backed disk's file: its path as given, and what `ident`
+    /// shows (`MD-DEV<fsid>-INO<fileid>`).
+    file: Option<(Vec<u8>, alloc::string::String)>,
 }
 
 static UNITS: SpinLock<BTreeMap<u32, Unit>> = SpinLock::new(BTreeMap::new());
@@ -175,8 +236,8 @@ fn put(arg: &mut [u8], at: usize, v: &[u8]) {
 /// `MDIOCATTACH`: a new disk; its unit is written back.
 fn attach(s: &Sleepable, arg: &mut [u8]) -> Result<(), Errno> {
     let kind = get_u32(arg, offset_of!(MdIoctl, md_type));
-    let options = get_u32(arg, offset_of!(MdIoctl, md_options));
-    if kind != MD_MALLOC && kind != MD_SWAP {
+    let mut options = get_u32(arg, offset_of!(MdIoctl, md_options));
+    if kind != MD_MALLOC && kind != MD_SWAP && kind != MD_VNODE {
         return Err(Errno::EOPNOTSUPP);
     }
     let sector_size = match get_u32(arg, offset_of!(MdIoctl, md_sectorsize)) {
@@ -185,9 +246,25 @@ fn attach(s: &Sleepable, arg: &mut [u8]) -> Result<(), Errno> {
     };
     let size =
         u64::try_from(get_i64(arg, offset_of!(MdIoctl, md_mediasize))).map_err(|_| Errno::EDOM)?;
-    if size == 0 || !size.is_multiple_of(u64::from(sector_size)) {
-        return Err(Errno::EDOM);
-    }
+    let (backing, file) = if kind == MD_VNODE {
+        // `kern_mdattach_locked`: no smaller than a sector.
+        if size < u64::from(sector_size) {
+            return Err(Errno::EINVAL);
+        }
+        let (b, path, ident) = open_backing(s, arg, options)?;
+        if !b.writer {
+            options |= MD_READONLY;
+        }
+        // The options a vnode disk keeps (`sc->flags`).
+        options &=
+            MD_ASYNC | MD_CACHE | MD_FORCE | MD_VERIFY | MD_MUSTDEALLOC | MD_READONLY | MD_AUTOUNIT;
+        (Some(b), Some((path, ident)))
+    } else {
+        if size == 0 || !size.is_multiple_of(u64::from(sector_size)) {
+            return Err(Errno::EDOM);
+        }
+        (None, None)
+    };
     let unit = if options & MD_AUTOUNIT != 0 {
         storage::alloc_unit(NAME)
     } else {
@@ -202,7 +279,11 @@ fn attach(s: &Sleepable, arg: &mut [u8]) -> Result<(), Errno> {
         wake: WaitQueue::new(),
     });
     let q = Arc::clone(&queue);
-    if sched::spawn("md", sched::Priority::KERNEL, move |s| worker(s, &q)).is_err() {
+    if sched::spawn("md", sched::Priority::KERNEL, move |s| {
+        worker(s, &q, backing)
+    })
+    .is_err()
+    {
         return Err(Errno::ENOMEM);
     }
     let info = DiskInfo {
@@ -233,18 +314,65 @@ fn attach(s: &Sleepable, arg: &mut [u8]) -> Result<(), Errno> {
             fwsectors,
             fwheads,
             idle_refs,
+            file,
         },
     );
     put(arg, offset_of!(MdIoctl, md_unit), &unit.to_ne_bytes());
     Ok(())
 }
 
+/// Opens the file a vnode-backed disk is attached to (`mdcreate_vnode`):
+/// `md_file`'s path, for reading and, unless `MD_READONLY`, writing; a
+/// regular file. Returns it, its path, and the disk's `ident`.
+fn open_backing(
+    s: &Sleepable,
+    arg: &[u8],
+    options: u32,
+) -> Result<(Backing, Vec<u8>, alloc::string::String), Errno> {
+    let at = offset_of!(MdIoctl, md_file);
+    let ptr = u64::from_ne_bytes(arg[at..at + 8].try_into().map_err(|_| Errno::EINVAL)?);
+    let path = crate::uaccess::copy_in_str_vec(ptr, abi::fcntl::PATH_MAX).map_err(|e| match e {
+        crate::uaccess::StrError::Fault => Errno::EFAULT,
+        crate::uaccess::StrError::TooLong => Errno::ENAMETOOLONG,
+    })?;
+    let p = crate::proc::Process::current().ok_or(Errno::EINVAL)?;
+    let v = crate::fs::lookup(s, &p, crate::fs::At::Cwd, &path, crate::fs::Walk::FOLLOW)?;
+    let write = options & MD_READONLY == 0;
+    let cred = crate::fs::cred();
+    let mut want = vfs::ops::VREAD;
+    if write {
+        if v.is_dir() {
+            return Err(Errno::EISDIR);
+        }
+        if v.mount().read_only() && v.kind() == vfs::Kind::Regular {
+            return Err(Errno::EROFS);
+        }
+        want |= vfs::ops::VWRITE;
+    }
+    vfs::acl::access(s, &v, &cred, want)?;
+    if v.kind() != vfs::Kind::Regular {
+        return Err(Errno::EINVAL);
+    }
+    if write {
+        v.add_writer()?;
+    }
+    let backing = Backing {
+        vnode: v.use_ref(),
+        writer: write,
+    };
+    let st = v.stat(s)?;
+    let ident = alloc::format!("MD-DEV{}-INO{}", st.st_dev, st.st_ino);
+    Ok((backing, path, ident))
+}
+
 /// What GEOM's MD class shows of a memory disk (`g_md_dumpconf`).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Info {
     pub(crate) unit: u32,
-    /// `malloc` or `swap`.
+    /// `malloc`, `vnode`, or `swap`.
     pub(crate) kind: &'static str,
+    /// A vnode-backed disk's file and `ident`.
+    pub(crate) file: Option<(Vec<u8>, alloc::string::String)>,
     pub(crate) compress: bool,
     pub(crate) read_only: bool,
     pub(crate) fwsectors: u32,
@@ -257,7 +385,12 @@ pub(crate) fn info(disk: &Arc<Disk>) -> Option<Info> {
     let (&unit, u) = units.iter().find(|(_, u)| Arc::ptr_eq(&u.disk, disk))?;
     Some(Info {
         unit,
-        kind: if u.kind == MD_SWAP { "swap" } else { "malloc" },
+        kind: match u.kind {
+            MD_SWAP => "swap",
+            MD_VNODE => "vnode",
+            _ => "malloc",
+        },
+        file: u.file.clone(),
         compress: u.options & MD_COMPRESS != 0,
         read_only: u.options & MD_READONLY != 0,
         fwsectors: u.fwsectors,
@@ -308,6 +441,16 @@ fn query(arg: &mut [u8]) -> Result<(), Errno> {
         offset_of!(MdIoctl, md_sectorsize),
         &u.disk.sector_size().to_ne_bytes(),
     );
+    // A vnode disk's file, to the caller's buffer (`kern_mdquery_locked`).
+    if let Some((path, _)) = &u.file {
+        let at = offset_of!(MdIoctl, md_file);
+        let ptr = u64::from_ne_bytes(arg[at..at + 8].try_into().map_err(|_| Errno::EINVAL)?);
+        if ptr != 0 {
+            let mut out = path.clone();
+            out.push(0);
+            crate::uaccess::copy_out(ptr, &out).map_err(|_| Errno::EFAULT)?;
+        }
+    }
     Ok(())
 }
 
