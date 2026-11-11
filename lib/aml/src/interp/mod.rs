@@ -304,6 +304,9 @@ pub struct Interpreter {
     pub(crate) loading: bool,
     pub(crate) warnings: Vec<LoadWarning>,
     dsdt_loaded: bool,
+    /// The address-space handlers the OS installed, each on a node
+    /// ([`Interpreter::install_handler`]).
+    handlers: Vec<(NodeId, crate::host::RegionSpace)>,
 }
 
 impl Interpreter {
@@ -328,6 +331,7 @@ impl Interpreter {
             loading: false,
             warnings: Vec::new(),
             dsdt_loaded: false,
+            handlers: Vec::new(),
         };
         let root = Namespace::root();
         let os = Value::String(me.config.os_name.clone());
@@ -767,6 +771,103 @@ impl Interpreter {
         let mut errors = Vec::new();
         for p in parents {
             let args = alloc::vec![Value::Integer(u64::from(space.to_u8())), Value::Integer(1)];
+            match self.evaluate_child(p, "_REG", args, host) {
+                Ok(Some(_)) => ran += 1,
+                Ok(None) => {}
+                Err(e) => errors.push((p, e)),
+            }
+        }
+        (ran, errors)
+    }
+
+    /// Installs the OS's handler for `space` on `node` (ACPICA's
+    /// `AcpiInstallAddressSpaceHandler`): accesses to a region in that
+    /// space at or below `node`, with no nearer handler, now name `node`
+    /// ([`BufferTransfer::handler`], [`GpioAccess::handler`]), and the
+    /// `_REG(space, 1)` of each device declaring such a region runs, to
+    /// tell its AML the region is usable (ACPI 6.5 §6.5.4). Returns how
+    /// many `_REG` methods ran, and their failures. Installing a handler
+    /// already installed changes nothing and runs nothing.
+    ///
+    /// [`BufferTransfer::handler`]: crate::host::BufferTransfer::handler
+    /// [`GpioAccess::handler`]: crate::host::GpioAccess::handler
+    pub fn install_handler(
+        &mut self,
+        node: NodeId,
+        space: crate::host::RegionSpace,
+        host: &mut dyn Host,
+    ) -> (usize, Vec<(NodeId, Error)>) {
+        if self.handlers.contains(&(node, space)) {
+            return (0, Vec::new());
+        }
+        self.handlers.push((node, space));
+        self.run_reg_under(node, space, true, host)
+    }
+
+    /// Removes a handler [`Interpreter::install_handler`] installed,
+    /// running `_REG(space, 0)` first for the regions it served (ACPICA's
+    /// `AcpiRemoveAddressSpaceHandler`). Returns as `install_handler`
+    /// does; removing one not installed runs nothing.
+    pub fn remove_handler(
+        &mut self,
+        node: NodeId,
+        space: crate::host::RegionSpace,
+        host: &mut dyn Host,
+    ) -> (usize, Vec<(NodeId, Error)>) {
+        if !self.handlers.contains(&(node, space)) {
+            return (0, Vec::new());
+        }
+        let r = self.run_reg_under(node, space, false, host);
+        self.handlers.retain(|&h| h != (node, space));
+        r
+    }
+
+    /// The node whose handler serves `region` (in `space`): the nearest
+    /// at or above the region with one installed, as ACPICA searches from
+    /// the region up to the root.
+    #[must_use]
+    pub fn handler_of(&self, region: NodeId, space: crate::host::RegionSpace) -> Option<NodeId> {
+        if self.handlers.is_empty() {
+            return None;
+        }
+        let mut cur = Some(region);
+        while let Some(n) = cur {
+            if self.handlers.contains(&(n, space)) {
+                return Some(n);
+            }
+            cur = self.ns.parent(n);
+        }
+        None
+    }
+
+    /// `_REG(space, connect)` of each device under `node` (or `node`
+    /// itself) declaring a region in `space` that `node`'s handler serves,
+    /// once per device.
+    fn run_reg_under(
+        &mut self,
+        node: NodeId,
+        space: crate::host::RegionSpace,
+        connect: bool,
+        host: &mut dyn Host,
+    ) -> (usize, Vec<(NodeId, Error)>) {
+        let mut parents = Vec::new();
+        for n in self.ns.walk(node) {
+            if let Some(Object::Region(r)) = self.ns.object(n)
+                && r.space == space
+                && self.handler_of(n, space) == Some(node)
+                && let Some(p) = self.ns.parent(n)
+                && !parents.contains(&p)
+            {
+                parents.push(p);
+            }
+        }
+        let mut ran = 0;
+        let mut errors = Vec::new();
+        for p in parents {
+            let args = alloc::vec![
+                Value::Integer(u64::from(space.to_u8())),
+                Value::Integer(u64::from(connect)),
+            ];
             match self.evaluate_child(p, "_REG", args, host) {
                 Ok(Some(_)) => ran += 1,
                 Ok(None) => {}

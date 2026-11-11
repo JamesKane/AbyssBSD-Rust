@@ -207,6 +207,7 @@ impl Interpreter {
                     access_len: f.access_len,
                     connection: f.connection.as_deref(),
                     write: None,
+                    handler: self.handler_of(*rnode, reg.space),
                 };
                 let b = h.transfer(&req).map_err(Error::Host)?;
                 return Ok(Value::Buffer(b));
@@ -218,6 +219,7 @@ impl Interpreter {
                     connection: conn,
                     pin: f.bit_offset,
                     count: f.bit_len,
+                    handler: self.handler_of(*rnode, reg.space),
                 };
                 let v = h.gpio_read(&a).map_err(Error::Host)?;
                 return Ok(Value::Integer(self.width.mask(v & low_mask(f.bit_len))));
@@ -289,6 +291,7 @@ impl Interpreter {
                     access_len: f.access_len,
                     connection: f.connection.as_deref(),
                     write: Some(&data),
+                    handler: self.handler_of(*rnode, reg.space),
                 };
                 let b = h.transfer(&req).map_err(Error::Host)?;
                 return Ok(Some(Value::Buffer(b)));
@@ -300,6 +303,7 @@ impl Interpreter {
                     connection: conn,
                     pin: f.bit_offset,
                     count: f.bit_len,
+                    handler: self.handler_of(*rnode, reg.space),
                 };
                 let x = v.to_integer(self.width)? & low_mask(f.bit_len);
                 h.gpio_write(&a, x).map_err(Error::Host)?;

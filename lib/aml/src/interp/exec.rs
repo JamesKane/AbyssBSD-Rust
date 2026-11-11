@@ -11,6 +11,10 @@ use alloc::vec::Vec;
 
 use super::{Flow, Interpreter, LoadWarning};
 use crate::Error;
+use crate::host::attrib::{
+    BYTES as ATTRIB_BYTES, RAW_BYTES as ATTRIB_RAW_BYTES,
+    RAW_PROCESS_BYTES as ATTRIB_RAW_PROCESS_BYTES,
+};
 use crate::host::{Host, RegionSpace};
 use crate::name::{Anchor, NameSeg, NameString, starts_name_string};
 use crate::namespace::{
@@ -669,10 +673,18 @@ impl Interpreter {
                 }
                 0x01 => {
                     list.u8()?;
+                    // AccessType's bits 7:6 name an attribute that
+                    // takes a length (ACPI 6.5 §20.2.5.2): the byte after
+                    // is that length, not an attribute.
                     let t = list.u8()?;
-                    attrib = list.u8()?;
+                    let b = list.u8()?;
                     access = access_type(t & 0x0f)?;
-                    access_len = if t >> 6 == 0 { 0 } else { attrib };
+                    (attrib, access_len) = match t >> 6 {
+                        0 => (b, 0),
+                        1 => (ATTRIB_BYTES, b),
+                        2 => (ATTRIB_RAW_BYTES, b),
+                        _ => (ATTRIB_RAW_PROCESS_BYTES, b),
+                    };
                 }
                 0x03 => {
                     list.u8()?;

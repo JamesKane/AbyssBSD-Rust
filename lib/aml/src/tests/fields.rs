@@ -510,6 +510,114 @@ fn smbus_fields_transfer_buffers() {
     );
 }
 
+/// `AccessAs` with a length (`AttribBytes(n)` and the raw forms, in
+/// `AccessField`'s short form and `ExtendedAccessField`), and the handler
+/// a transfer names: the nearest above its region with one installed for
+/// its space, whose installation runs `_REG` in the devices it serves.
+#[test]
+fn serial_bus_attributes_and_handlers() {
+    const ARG1: u8 = 0x69;
+    const INCREMENT: u8 = 0x75;
+    let list = field(
+        "SB0",
+        BUFFER_ACC,
+        &[
+            F::AccessAs(BUFFER_ACC | 0x40, 7),
+            F::Named("AB", 8),
+            F::AccessAs(BUFFER_ACC | 0x80, 3),
+            F::Named("RB", 8),
+            F::AccessAs(BUFFER_ACC | 0xc0, 2),
+            F::Named("RP", 8),
+            F::AccessAs(BUFFER_ACC, 0x08),
+            F::Named("WD", 8),
+        ],
+    );
+    // `ExtendedAccessField (BufferAcc, AttribRawBytes, 9)`.
+    let ext = pkg(
+        &[0x5b, 0x81],
+        &cat(&[
+            &name("SB0"),
+            &[BUFFER_ACC, 0x03, BUFFER_ACC, 0x0e, 9],
+            b"XB__",
+            &[8],
+        ]),
+    );
+    // `_REG` counts its calls in `REGC` and keeps its last `Arg1`.
+    let reg = method(
+        "_REG",
+        2,
+        &cat(&[
+            &[INCREMENT],
+            &name("\\REGC"),
+            &store(&[ARG1], &name("\\REGA")),
+        ]),
+    );
+    let sub = device(
+        "SUB",
+        &cat(&[
+            &region("SB1", 9, 0, 0x100),
+            &field("SB1", BUFFER_ACC, &[F::Named("SW", 8)]),
+        ]),
+    );
+    let aml = cat(&[
+        &name_op("REGC", &int(0)),
+        &name_op("REGA", &int(9)),
+        &device(
+            "CTL",
+            &cat(&[&region("SB0", 9, 0, 0x100), &list, &ext, &reg, &sub]),
+        ),
+        &read_method("RAB", "\\CTL.AB"),
+        &read_method("RRB", "\\CTL.RB"),
+        &read_method("RRP", "\\CTL.RP"),
+        &read_method("RWD", "\\CTL.WD"),
+        &read_method("RXB", "\\CTL.XB"),
+        &read_method("RSW", "\\CTL.SUB.SW"),
+    ]);
+    let (mut i, mut h) = load(&aml);
+    let ctl = i.resolve(i.root(), "CTL").unwrap();
+    let sub = i.resolve(i.root(), "CTL.SUB").unwrap();
+    let sb0 = i.resolve(i.root(), "CTL.SB0").unwrap();
+    let gsb = RegionSpace::GenericSerialBus;
+    // No handler yet: a transfer names none.
+    eval(&mut i, &mut h, "\\RAB", Vec::new());
+    assert_eq!(h.protocols, [(0x0b, 7, None)]);
+    // Installed on CTL: its `_REG(9, 1)` runs once, and CTL serves its
+    // own regions and SUB's.
+    assert_eq!(i.install_handler(ctl, gsb, &mut h), (1, Vec::new()));
+    assert_eq!(eval_int(&mut i, &mut h, "\\REGC"), 1);
+    assert_eq!(eval_int(&mut i, &mut h, "\\REGA"), 1);
+    assert_eq!(i.install_handler(ctl, gsb, &mut h), (0, Vec::new()));
+    assert_eq!(i.handler_of(sb0, gsb), Some(ctl));
+    assert_eq!(i.handler_of(sb0, RegionSpace::GeneralPurposeIo), None);
+    h.protocols.clear();
+    for m in ["\\RAB", "\\RRB", "\\RRP", "\\RWD", "\\RXB", "\\RSW"] {
+        eval(&mut i, &mut h, m, Vec::new());
+    }
+    assert_eq!(
+        h.protocols,
+        [
+            (0x0b, 7, Some(ctl)),
+            (0x0e, 3, Some(ctl)),
+            (0x0f, 2, Some(ctl)),
+            (0x08, 0, Some(ctl)),
+            (0x0e, 9, Some(ctl)),
+            (0, 0, Some(ctl)),
+        ]
+    );
+    // A nearer handler on SUB takes its region; SUB has no `_REG`.
+    assert_eq!(i.install_handler(sub, gsb, &mut h), (0, Vec::new()));
+    h.protocols.clear();
+    eval(&mut i, &mut h, "\\RSW", Vec::new());
+    assert_eq!(h.protocols, [(0, 0, Some(sub))]);
+    // Removing CTL's runs `_REG(9, 0)`; its regions then have none.
+    assert_eq!(i.remove_handler(ctl, gsb, &mut h), (1, Vec::new()));
+    assert_eq!(eval_int(&mut i, &mut h, "\\REGA"), 0);
+    assert_eq!(i.remove_handler(ctl, gsb, &mut h), (0, Vec::new()));
+    h.protocols.clear();
+    eval(&mut i, &mut h, "\\RAB", Vec::new());
+    assert_eq!(h.protocols, [(0x0b, 7, None)]);
+}
+
 #[test]
 fn gpio_fields_use_the_connection() {
     // GpioIo (Exclusive, PullUp, 0, 0, IoRestrictionNone, "\\_SB.GPI0")

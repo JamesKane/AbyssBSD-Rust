@@ -175,6 +175,35 @@ impl RegionAccess {
     }
 }
 
+/// The access attributes of SMBus and `GenericSerialBus` fields
+/// (`AccessAs`'s `AccessAttribute`, ACPI 6.5 §19.6.7): which protocol a
+/// field's transfer uses.
+pub mod attrib {
+    /// `AttribQuick`: the address alone, the read/write bit as data.
+    pub const QUICK: u8 = 0x02;
+    /// `AttribSendReceive`: one byte, no command.
+    pub const SEND_RECEIVE: u8 = 0x04;
+    /// `AttribByte`: a command, then one byte.
+    pub const BYTE: u8 = 0x06;
+    /// `AttribWord`: a command, then two bytes.
+    pub const WORD: u8 = 0x08;
+    /// `AttribBlock`: a command, then a count and that many bytes.
+    pub const BLOCK: u8 = 0x0a;
+    /// `AttribBytes(n)`: a command, then `n` bytes.
+    pub const BYTES: u8 = 0x0b;
+    /// `AttribProcessCall`: a command and a word written, a word read
+    /// back.
+    pub const PROCESS_CALL: u8 = 0x0c;
+    /// `AttribBlockProcessCall`: a command and a block written, a block
+    /// read back.
+    pub const BLOCK_PROCESS_CALL: u8 = 0x0d;
+    /// `AttribRawBytes(n)`: `n` bytes, no command.
+    pub const RAW_BYTES: u8 = 0x0e;
+    /// `AttribRawProcessBytes(n)`: `n` bytes written, then read back, no
+    /// command.
+    pub const RAW_PROCESS_BYTES: u8 = 0x0f;
+}
+
 /// A buffer-protocol field access (SMBus, IPMI, `GenericSerialBus`).
 #[derive(Clone, Copy, Debug)]
 pub struct BufferTransfer<'a> {
@@ -193,6 +222,12 @@ pub struct BufferTransfer<'a> {
     pub connection: Option<&'a [u8]>,
     /// The data written, or `None` for a read.
     pub write: Option<&'a [u8]>,
+    /// The node whose handler serves the region: the nearest at or above
+    /// it with one installed for its space ([`Interpreter::install_handler`]),
+    /// as ACPICA finds a region's handler. `None` if no handler is.
+    ///
+    /// [`Interpreter::install_handler`]: crate::Interpreter::install_handler
+    pub handler: Option<NodeId>,
 }
 
 /// A GPIO field access.
@@ -206,6 +241,9 @@ pub struct GpioAccess<'a> {
     pub pin: u64,
     /// Number of pins.
     pub count: u64,
+    /// The node whose handler serves the region, as for
+    /// [`BufferTransfer::handler`].
+    pub handler: Option<NodeId>,
 }
 
 /// Why a host operation failed.

@@ -32,6 +32,8 @@ pub(crate) struct FakeHost {
     pub(crate) debug: Vec<Value>,
     pub(crate) sleeps: u64,
     pub(crate) transfers: Vec<(u64, Option<Vec<u8>>)>,
+    /// Each transfer's attribute, access length, and handler node.
+    pub(crate) protocols: Vec<(u8, u8, Option<NodeId>)>,
     pub(crate) gpio: BTreeMap<u64, bool>,
     pub(crate) gl_acquires: u32,
     pub(crate) gl_releases: u32,
@@ -161,6 +163,8 @@ impl Host for FakeHost {
         if self.transfers.len() < LOG_CAP {
             self.transfers
                 .push((req.command, req.write.map(<[u8]>::to_vec)));
+            self.protocols
+                .push((req.attrib, req.access_len, req.handler));
         }
         // Status 0, length 2, data.
         Ok(alloc::vec![0, 2, 0x34, 0x12])
