@@ -468,6 +468,185 @@ const PCICONF_AARCH64: &[Step] = pciconf_steps!(
     "\nhostb0@pci0:0:0:0:\tclass=0x060000 rev=0x00 hdr=0x00 vendor=0x1b36 device=0x0008 subvendor=0x1af4 subdevice=0x1100\r\n"
 );
 
+/// FreeBSD's `usbconfig` through `/dev/usbctl` and the `ugen` nodes
+/// (docs/USB.md §5.5), on the QEMU USB set: each line is what FreeBSD
+/// 15.1 prints for the same devices
+/// (`tests/corpus/freebsd/usb/qemu/usbconfig-ugen.txt` and its
+/// neighbours): the Bulk-Only disk is `ugen0.2`, the keyboard `ugen0.4`.
+/// Strings, the template, interface drivers, descriptors, power modes,
+/// control requests, a device powered off and on, re-enumerated, and
+/// unconfigured and configured again; and that `nobody` sees no device.
+pub(crate) const USBCONFIG: &[Step] = &[
+    step(
+        "ls -l /dev/usbctl /dev/usb/0.2.0 /dev/usb/0.2.1 | cut -c1-27\n",
+        "\ncrw-------  1 root operator\r\ncrw-------  1 root operator\r\ncrw-r--r--  1 root operator\r\n",
+        "the nodes are root:operator, 0600 and usbctl 0644",
+    ),
+    step(
+        "readlink /dev/ugen0.2\n",
+        "\nusb/0.2.0\r\n",
+        "/dev/ugen0.2 is a link to its control node",
+    ),
+    // The whole list, for the log.
+    step(
+        "usbconfig\n",
+        "\nugen0.1: <XHCI root HUB (0x1b36)> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)\r\n\
+         ugen0.2: <QEMU USB HARDDRIVE QEMU> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=ON (0mA)\r\n\
+         ugen0.3: <USB Attached SCSI HBA QEMU> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=ON (0mA)\r\n\
+         ugen0.4: <QEMU Tablet Adomax Technology Co., Ltd> at usbus0, cfg=0 md=HOST spd=HIGH (480Mbps) pwr=ON (100mA)\r\n",
+        "usbconfig: the devices",
+    ),
+    step(
+        "usbconfig -d ugen0.1 dump_string 0\n",
+        "\nSTRING_0x00 = 0x04, 0x03, 0x01, 0x00\r\n",
+        "dump_string: the root hub's language table",
+    ),
+    step(
+        "usbconfig -d ugen0.1 dump_string 1\n",
+        "\nSTRING_0x01 = <(0x1b36)>\r\n",
+        "dump_string: the root hub's vendor",
+    ),
+    step(
+        "usbconfig -d ugen0.2 dump_string 0\n",
+        "\nSTRING_0x00 = 0x04, 0x03, 0x09, 0x04\r\n",
+        "dump_string: a device's language table",
+    ),
+    step(
+        "usbconfig -d ugen0.2 dump_string 2\n",
+        "\nSTRING_0x02 = <QEMU USB HARDDRIVE>\r\n",
+        "dump_string: a device's product",
+    ),
+    step(
+        "usbconfig -d ugen0.2 dump_string 9\n",
+        "\nSTRING_0x09 = <read error>\r\n",
+        "dump_string: a string the device lacks",
+    ),
+    step(
+        "usbconfig get_template\n",
+        "\nUSB template: 4294967295\r\n",
+        "get_template",
+    ),
+    step(
+        "usbconfig -d ugen0.2 show_ifdrv\n",
+        "\nugen0.2: <QEMU USB HARDDRIVE QEMU> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=ON (0mA)\r\n\
+         ugen0.2.0: umass0: <QEMU QEMU USB HARDDRIVE, class 0/0, rev 3.00/0.00, addr 1>\r\n",
+        "show_ifdrv: the disk's driver",
+    ),
+    step(
+        "usbconfig -d ugen0.4 show_ifdrv\n",
+        "\nugen0.4.0: usbhid0: <QEMU QEMU USB Keyboard, class 0/0, rev 2.00/0.00, addr 3>\r\n",
+        "show_ifdrv: the keyboard's driver",
+    ),
+    step(
+        "usbconfig -d ugen0.1 show_ifdrv\n",
+        "\nugen0.1.0: uhub0: <(0x1b36) XHCI root HUB, class 9/0, rev 3.00/1.00, addr 1>\r\n",
+        "show_ifdrv: the root hub's driver",
+    ),
+    step(
+        "usbconfig -d ugen0.2 dump_device_desc\n",
+        "\n  bLength = 0x0012 \r\n  bDescriptorType = 0x0001 \r\n  bcdUSB = 0x0300 \r\n\
+         \x20 bDeviceClass = 0x0000  <Probed by interface class>\r\n  bDeviceSubClass = 0x0000 \r\n\
+         \x20 bDeviceProtocol = 0x0000 \r\n  bMaxPacketSize0 = 0x0009 \r\n  idVendor = 0x46f4 \r\n\
+         \x20 idProduct = 0x0001 \r\n  bcdDevice = 0x0000 \r\n  iManufacturer = 0x0001  <QEMU>\r\n\
+         \x20 iProduct = 0x0002  <QEMU USB HARDDRIVE>\r\n  iSerialNumber = 0x0003  <abyssbbb>\r\n\
+         \x20 bNumConfigurations = 0x0001 \r\n",
+        "dump_device_desc",
+    ),
+    step(
+        "usbconfig -d ugen0.2 dump_curr_config_desc\n",
+        "\n    iConfiguration = 0x0006  <Super speed config (usb 3.0)>\r\n    bmAttributes = 0x00c0 \r\n\
+         \x20   bMaxPower = 0x0000 \r\n\r\n    Interface 0\r\n      bLength = 0x0009 \r\n\
+         \x20     bDescriptorType = 0x0004 \r\n      bInterfaceNumber = 0x0000 \r\n\
+         \x20     bAlternateSetting = 0x0000 \r\n      bNumEndpoints = 0x0002 \r\n\
+         \x20     bInterfaceClass = 0x0008  <Mass storage>\r\n",
+        "dump_curr_config_desc: the disk's configuration",
+    ),
+    step(
+        "usbconfig -d ugen0.1 dump_curr_config_desc\n",
+        "\n        bEndpointAddress = 0x0081  <IN>\r\n        bmAttributes = 0x0003  <INTERRUPT>\r\n\
+         \x20       wMaxPacketSize = 0x0002 \r\n        bInterval = 0x00ff \r\n",
+        "dump_curr_config_desc: the root hub's status endpoint",
+    ),
+    step(
+        "usbconfig -d ugen0.2 power_save && usbconfig -d ugen0.2\n",
+        "\nugen0.2: <QEMU USB HARDDRIVE QEMU> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)\r\n",
+        "power_save",
+    ),
+    step(
+        "usbconfig -d ugen0.2 power_on && usbconfig -d ugen0.2\n",
+        "\nugen0.2: <QEMU USB HARDDRIVE QEMU> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=ON (0mA)\r\n",
+        "power_on",
+    ),
+    step(
+        "usbconfig -d ugen0.2 do_request 0x80 0 0 0 2\n",
+        "\nREQUEST = <0x01 0x00><>\r\n",
+        "do_request: GET_STATUS of the disk",
+    ),
+    step(
+        "usbconfig -d ugen0.1 do_request 0x80 0 0 0 2\n",
+        "\nREQUEST = <0x01 0x00><>\r\n",
+        "do_request: GET_STATUS of the root hub",
+    ),
+    step(
+        "usbconfig -d ugen0.2 do_request 0x80 6 0x100 0 18\n",
+        "\nREQUEST = <0x12 0x01 0x00 0x03 0x00 0x00 0x00 0x09 0xf4 0x46 0x01 0x00 0x00 0x00 0x01 0x02 0x03 0x01><F>\r\n",
+        "do_request: the disk's device descriptor",
+    ),
+    step(
+        "usbconfig -d ugen0.1 do_request 0x80 6 0x200 0 255\n",
+        "\nREQUEST = <0x09 0x02 0x1f 0x00 0x01 0x01 0x00 0x40 0x00 0x09 0x04 0x00 0x00 0x01 0x09 0x00 0x00 0x00 0x07 0x05 0x81 0x03 0x02 0x00 0xff 0x06 0x30 0x00 0x00 0x00 0x00><@0>\r\n",
+        "do_request: the root hub's configuration, short",
+    ),
+    step(
+        "usbconfig -d ugen0.2 dump_stats | grep -c '_OK'\n",
+        "\n4\r\n",
+        "dump_stats",
+    ),
+    step(
+        "usbconfig -d ugen0.9 dump_info\n",
+        "\nNo device match or lack of permissions.\r\n",
+        "no such device",
+    ),
+    step(
+        "usbconfig -u 0 -a 2\n",
+        "\nugen0.2: <QEMU USB HARDDRIVE QEMU> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=ON (0mA)\r\n",
+        "a device by bus and address",
+    ),
+    step(
+        "usbconfig -d ugen0.4 power_off && usbconfig -d ugen0.4\n",
+        "\nugen0.4: <QEMU Tablet Adomax Technology Co., Ltd> at usbus0, cfg=255 md=HOST spd=HIGH (480Mbps) pwr=OFF (100mA)\r\n",
+        "power_off: the keyboard unconfigured",
+    ),
+    step(
+        "usbconfig -d ugen0.4 power_on && sleep 3 && usbconfig -d ugen0.4 show_ifdrv\n",
+        "\nugen0.4: <QEMU Tablet Adomax Technology Co., Ltd> at usbus0, cfg=0 md=HOST spd=HIGH (480Mbps) pwr=ON (100mA)\r\n\
+         ugen0.4.0: usbhid0: <QEMU QEMU USB Keyboard, class 0/0, rev 2.00/0.00, addr 3>\r\n",
+        "power_on: the keyboard back",
+    ),
+    step(
+        "usbconfig -d ugen0.2 reset && sleep 3 && usbconfig -d ugen0.2 show_ifdrv\n",
+        "\nugen0.2.0: umass0: <QEMU QEMU USB HARDDRIVE, class 0/0, rev 3.00/0.00, addr 1>\r\n",
+        "reset: the disk enumerated again",
+    ),
+    step(
+        "usbconfig -d ugen0.2 set_config 255 && usbconfig -d ugen0.2\n",
+        "\nugen0.2: <QEMU USB HARDDRIVE QEMU> at usbus0, cfg=255 md=HOST spd=SUPER (5.0Gbps) pwr=ON (0mA)\r\n",
+        "set_config 255: unconfigured",
+    ),
+    step(
+        "usbconfig -d ugen0.2 set_config 0 && sleep 3 && usbconfig -d ugen0.2 show_ifdrv\n",
+        "\nugen0.2: <QEMU USB HARDDRIVE QEMU> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=ON (0mA)\r\n\
+         ugen0.2.0: umass0: <QEMU QEMU USB HARDDRIVE, class 0/0, rev 3.00/0.00, addr 1>\r\n",
+        "set_config 0: configured again",
+    ),
+    // Anyone may read the list; only root opens the devices.
+    step(
+        "su -m nobody -c usbconfig 2>&1\n",
+        "\nNo device match or lack of permissions.\r\n",
+        "usbconfig as nobody",
+    ),
+];
+
 /// What FreeBSD's tests need of the UFS2 root when `ABYSS_ATF` runs them
 /// alone ([`crate::image::atf_only`]): it read-write, and base's
 /// programs first in the path.

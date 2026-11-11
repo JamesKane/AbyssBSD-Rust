@@ -42,6 +42,7 @@ const SYSROOT_MEMBERS: &[&str] = &[
     "usr/lib/libthr.a",
     "usr/lib/libjail.a",
     "usr/lib/libm.a",
+    "usr/lib/libusb.a",
 ];
 
 /// Where the memory disk puts the test programs.
@@ -401,6 +402,15 @@ pub(crate) fn cc_static_with(arch: Arch, source: &Path, args: &[&str], out: &Pat
             .arg(source)
             .args(args),
     )
+}
+
+/// The first of `libs` (`-lusb`) the sysroot has no static archive of.
+fn missing_library(arch: Arch, libs: &[String]) -> Option<String> {
+    let root = sysroot(arch).ok()?;
+    libs.iter()
+        .filter_map(|l| l.strip_prefix("-l"))
+        .map(|l| format!("lib{l}.a"))
+        .find(|a| !root.join("usr/lib").join(a).exists())
 }
 
 /// The libraries a test program's source asks for, on a line
@@ -1046,8 +1056,16 @@ pub(crate) fn md_image(arch: Arch, extra: &[(&str, &Path)]) -> Result<Option<Vec
             (Ok(s), Ok(b)) => s > b || built_by.is_none_or(|x| x > b),
             _ => true,
         };
+        let libs = link_args(&src);
+        // A library a workstation's sysroot, copied before a test needed
+        // it, lacks: the test is left out until `fetch-base` copies it.
+        if let Some(lib) = missing_library(arch, &libs) {
+            println!(
+                "xtask: {arch}: {name} left out: the sysroot has no {lib} (run `cargo xtask fetch-base`)"
+            );
+            continue;
+        }
         if stale {
-            let libs = link_args(&src);
             let libs: Vec<&str> = libs.iter().map(String::as_str).collect();
             cc_static_with(arch, &src, &libs, &bin)?;
         }

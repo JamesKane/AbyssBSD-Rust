@@ -786,6 +786,11 @@ fn shell(
                 // QEMU's devices have the IDs the script expects.
                 if vmm == Vmm::Qemu {
                     session.script(crate::expect::pciconf(arch), Duration::from_secs(60))?;
+                    // And its USB set is the one FreeBSD's usbconfig was
+                    // recorded on.
+                    if usb {
+                        session.script(crate::expect::USBCONFIG, Duration::from_secs(60))?;
+                    }
                 }
                 session.script(crate::expect::SYSINFO, Duration::from_secs(120))?;
                 session.script(&crate::diff::steps(), Duration::from_secs(900))?;

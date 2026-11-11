@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! `cargo xtask --remote freebsd-usertests`: `tests/user` against FreeBSD
+//! `cargo xtask --remote freebsd-usertests [--usb]`: `tests/user` against FreeBSD
 //! 15.1 itself, on either architecture.
 //!
 //! The test programs check FreeBSD's behavior, so each must pass on
@@ -30,17 +30,20 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
     let only: Option<Vec<String>> = args
         .take_value("--test")?
         .map(|v| v.split(',').map(String::from).collect());
+    // The boot tier's USB set (bhyve's tablet on amd64), for the tests
+    // that use USB devices.
+    let usb = args.take_flag("--usb");
     args.finish()?;
     if !cfg!(target_os = "freebsd") {
         return Err("freebsd-usertests needs the build server (mdconfig, the full base)".into());
     }
     for arch in arches {
-        run(arch, only.as_deref())?;
+        run(arch, only.as_deref(), usb)?;
     }
     Ok(())
 }
 
-fn run(arch: Arch, only: Option<&[String]>) -> Result<()> {
+fn run(arch: Arch, only: Option<&[String]>, usb: bool) -> Result<()> {
     let (image, work) = crate::perf::freebsd_multiuser_image(arch)?;
     let dir = work.join(format!("usertests-{arch}"));
     fs::create_dir_all(&dir)?;
@@ -98,6 +101,7 @@ fn run(arch: Arch, only: Option<&[String]>) -> Result<()> {
     let vm = Vm {
         smp: 4,
         mem: "2G".into(),
+        usb,
         ..Vm::new(vmm, arch, disk)
     };
     let mut session = Session::start(vm, &log)?;
