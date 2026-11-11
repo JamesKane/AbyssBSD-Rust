@@ -23,6 +23,7 @@ mod kernel;
 mod logring;
 mod paging;
 mod rng;
+mod smbios;
 #[cfg(feature = "ktest")]
 mod tests;
 mod ufs;
@@ -259,7 +260,17 @@ fn boot(image: Handle, st: SystemTable) -> Result<core::convert::Infallible, Err
         .memory_map_size()
         .map_err(|s| Error::Efi("memory map size", s))?
         + 16 * 1024;
-    let handoff = handoff::prepare(&st, map_bytes / 40 + 64, &cmdline)?;
+    let env = smbios::environment(&st);
+    if let Some((_, v)) = env.iter().find(|(n, _)| *n == "smbios.version") {
+        let _ = writeln!(
+            con,
+            "loader: SMBIOS {}, {} variables",
+            core::str::from_utf8(v).unwrap_or("?"),
+            env.len()
+        );
+    }
+    let env = smbios::serialize(&env);
+    let handoff = handoff::prepare(&st, map_bytes / 40 + 64, &cmdline, &env)?;
     let mut map_buf = alloc::vec![0u8; map_bytes];
 
     let firmware = bootproto::Firmware {

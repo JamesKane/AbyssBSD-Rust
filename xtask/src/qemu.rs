@@ -45,6 +45,19 @@ const AARCH64_VARS: &[&str] = &[
     "/usr/share/qemu/edk2-arm-vars.fd",
 ];
 
+/// The SMBIOS strings test machines carry, which kernel/src/kenv.rs's
+/// test expects in the kernel environment.
+const SMBIOS_ARGS: &[&str] = &[
+    "-smbios",
+    "type=0,vendor=AbyssBSD Firmware,version=7.1,date=11/10/2026,release=7.1",
+    "-smbios",
+    "type=1,manufacturer=AbyssBSD Project,product=Abyss Test Machine,version=1.0,\
+     serial=ABYSS-0001,uuid=4abe6a8f-1c2d-4e5f-8a9b-0c1d2e3f4a5b,sku=T1,family=Test",
+    "-smbios",
+    "type=2,manufacturer=AbyssBSD Project,product=Abyss Test Board,version=2.0",
+    "-smbios",
+    "type=3,manufacturer=AbyssBSD Project,version=3.0",
+];
 const BHYVE_CODE: &str = "/usr/local/share/uefi-firmware/BHYVE_UEFI_CODE.fd";
 const BHYVE_VARS: &str = "/usr/local/share/uefi-firmware/BHYVE_UEFI_VARS.fd";
 
@@ -482,6 +495,10 @@ impl Vm {
                 Arch::X86_64 => c.args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]),
                 Arch::Aarch64 => c.args(["-semihosting-config", "enable=on,target=native"]),
             };
+            // Known SMBIOS strings, which the loader must put in the kernel
+            // environment as FreeBSD's does (`smbios.*`; kernel/src/kenv.rs's
+            // test).
+            c.args(SMBIOS_ARGS);
         }
         // EL2 for the guest needs TCG (KVM would need nested virtualization).
         if kvm_available(self.arch) && !self.el2 {

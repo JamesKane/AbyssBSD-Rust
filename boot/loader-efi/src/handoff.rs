@@ -19,24 +19,34 @@ pub(crate) struct Handoff {
     capacity: usize,
     cmdline: PhysAddr,
     cmdline_len: usize,
+    env: PhysAddr,
+    env_len: usize,
 }
 
 const INFO_SPACE: usize = size_of::<BootInfo>().next_multiple_of(64);
 
 /// Allocates room for the handoff, a memory map of up to `capacity`
-/// entries, and a copy of `cmdline`.
-pub(crate) fn prepare(st: &SystemTable, capacity: usize, cmdline: &[u8]) -> Result<Handoff, Error> {
+/// entries, and copies of `cmdline` and `env` (the environment's
+/// variables).
+pub(crate) fn prepare(
+    st: &SystemTable,
+    capacity: usize,
+    cmdline: &[u8],
+    env: &[u8],
+) -> Result<Handoff, Error> {
     let regions_bytes = capacity * size_of::<MemoryRegion>();
-    let total = INFO_SPACE + regions_bytes + cmdline.len();
+    let total = INFO_SPACE + regions_bytes + cmdline.len() + env.len();
     let base = st
         .allocate_pages(Allocate::Anywhere, memtype::BOOT_DATA, total.div_ceil(4096))
         .map_err(|s| Error::Efi("allocate handoff", s))?;
     let base = PhysAddr::new(base);
     let regions = base + INFO_SPACE as u64;
     let cmd = regions + regions_bytes as u64;
+    let envp = cmd + cmdline.len() as u64;
     // SAFETY: freshly allocated, identity-mapped pages sized above.
     unsafe {
         core::ptr::copy_nonoverlapping(cmdline.as_ptr(), cmd.get() as *mut u8, cmdline.len());
+        core::ptr::copy_nonoverlapping(env.as_ptr(), envp.get() as *mut u8, env.len());
     }
     Ok(Handoff {
         info: base,
@@ -44,6 +54,8 @@ pub(crate) fn prepare(st: &SystemTable, capacity: usize, cmdline: &[u8]) -> Resu
         capacity,
         cmdline: cmd,
         cmdline_len: cmdline.len(),
+        env: envp,
+        env_len: env.len(),
     })
 }
 
@@ -95,6 +107,7 @@ impl Handoff {
             framebuffer: f.framebuffer.into(),
             firmware: f.firmware,
             cmdline: Table::new(self.cmdline, self.cmdline_len as u64),
+            env: Table::new(self.env, self.env_len as u64),
             symbols: f.symbols.into(),
             entropy: f.entropy,
             log: f.log.into(),

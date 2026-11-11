@@ -64,6 +64,12 @@ pub(crate) fn cmdline() -> &'static str {
     core::str::from_utf8(slice(info().cmdline)).unwrap_or("")
 }
 
+/// The loader's environment variables: `name=value` strings, each
+/// NUL-terminated.
+pub(crate) fn env() -> &'static [u8] {
+    slice(info().env)
+}
+
 /// Whether `word` (or `word=1`) appears on the command line.
 pub(crate) fn flag(word: &str) -> bool {
     cmdline()

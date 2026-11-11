@@ -33,20 +33,32 @@ const SIZE: usize = 512;
 /// The variables, `name=value` each, in the order set.
 static ENV: SpinLock<Vec<Vec<u8>>> = SpinLock::new(Vec::new());
 
-/// Fills the environment from the loader's command line: each `name=value`
-/// word (bare words are kernel flags, not variables).
+/// Fills the environment from the loader's: the variables it set itself
+/// (SMBIOS's), then each `name=value` word of the command line (bare
+/// words are kernel flags, not variables), a later setting replacing an
+/// earlier one. They are kept sorted by name, as FreeBSD's loader keeps
+/// its environment (stand/libsa/environment.c), which is the order the
+/// kernel's static environment, and so `kenv`, lists them in.
 pub(crate) fn init() {
     let mut env = ENV.lock();
-    for w in crate::boot::cmdline().split_ascii_whitespace() {
-        if let Some((name, _)) = w.split_once('=')
-            && !name.is_empty()
-            && env.len() < SIZE
-        {
-            let name = name.as_bytes();
-            env.retain(|e| !is(e, name));
-            env.push(w.as_bytes().to_vec());
+    let loader = crate::boot::env()
+        .split(|&b| b == 0)
+        .filter(|e| e.iter().position(|&b| b == b'=').is_some_and(|i| i > 0));
+    let cmdline = crate::boot::cmdline()
+        .split_ascii_whitespace()
+        .map(str::as_bytes)
+        .filter(|w| w.iter().position(|&b| b == b'=').is_some_and(|i| i > 0));
+    for w in loader.chain(cmdline) {
+        let name = &w[..w.iter().position(|&b| b == b'=').unwrap_or(0)];
+        env.retain(|e| !is(e, name));
+        if env.len() < SIZE {
+            env.push(w.to_vec());
         }
     }
+    env.sort_by(|a, b| {
+        let key = |e: &[u8]| e.split(|&c| c == b'=').next().unwrap_or(&[]).to_vec();
+        key(a).cmp(&key(b))
+    });
 }
 
 /// Whether `entry` (`name=value`) is the variable `name`.
@@ -170,4 +182,55 @@ fn str_errno(e: uaccess::StrError) -> Errno {
 /// The calling process.
 fn current() -> Result<alloc::sync::Arc<crate::proc::Process>, Errno> {
     crate::proc::Process::current().ok_or(Errno::EINVAL)
+}
+
+#[cfg(feature = "ktest")]
+mod ktests {
+    use ktest::ktest;
+
+    use super::*;
+
+    fn val(name: &str) -> alloc::string::String {
+        get(name.as_bytes())
+            .map(|v| alloc::string::String::from_utf8_lossy(&v).into_owned())
+            .unwrap_or_default()
+    }
+
+    ktest! {
+        /// The loader's SMBIOS variables, as FreeBSD's loader sets them;
+        /// in QEMU, the strings xtask gives it (`-smbios`).
+        fn kenv_has_the_loaders_smbios_variables() {
+            let hint = val("hint.smbios.0.mem");
+            assert!(hint.starts_with("0x") && hint.len() > 2, "hint {hint:?}");
+            assert!(
+                matches!(val("smbios.entry_point_type").as_str(), "v3 (64-bit)" | "v2.1 (32-bit)"),
+                "{:?}",
+                val("smbios.entry_point_type")
+            );
+            assert!(!val("smbios.version").is_empty());
+            if val("smbios.system.maker") == "AbyssBSD Project" {
+                assert_eq!(val("smbios.system.product"), "Abyss Test Machine");
+                assert_eq!(val("smbios.system.version"), "1.0");
+                assert_eq!(val("smbios.system.serial"), "ABYSS-0001");
+                // SMBIOS 2.6 and later: the first three fields little-endian,
+                // which FreeBSD prints as written.
+                assert_eq!(val("smbios.system.uuid"), "4abe6a8f-1c2d-4e5f-8a9b-0c1d2e3f4a5b");
+                assert_eq!(val("smbios.system.sku"), "T1");
+                assert_eq!(val("smbios.system.family"), "Test");
+                assert_eq!(val("smbios.bios.vendor"), "AbyssBSD Firmware");
+                assert_eq!(val("smbios.bios.version"), "7.1");
+                assert_eq!(val("smbios.bios.reldate"), "11/10/2026");
+                assert_eq!(val("smbios.bios.revision"), "7.1");
+                assert_eq!(val("smbios.planar.product"), "Abyss Test Board");
+                assert_eq!(val("smbios.chassis.version"), "3.0");
+            }
+            // Sorted by name, as the loader keeps them.
+            let env = ENV.lock();
+            let names: alloc::vec::Vec<&[u8]> = env
+                .iter()
+                .map(|e| e.split(|&c| c == b'=').next().unwrap_or(&[]))
+                .collect();
+            assert!(names.windows(2).all(|w| w[0] < w[1]));
+        }
+    }
 }

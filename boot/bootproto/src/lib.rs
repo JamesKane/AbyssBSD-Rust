@@ -35,7 +35,7 @@ pub use addr::{PhysAddr, PhysRange, VirtAddr};
 /// `"ABYSSBI\0"`, little-endian.
 pub const MAGIC: u64 = u64::from_le_bytes(*b"ABYSSBI\0");
 /// The handoff version this crate describes.
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 
 /// A C-layout optional value.
 ///
@@ -180,6 +180,11 @@ pub struct BootInfo {
     pub firmware: Firmware,
     /// The kernel command line, UTF-8, not NUL-terminated.
     pub cmdline: Table<u8>,
+    /// Variables the loader sets in the kernel environment (FreeBSD's
+    /// static environment: `hint.smbios.0.mem`, `smbios.*`), each
+    /// `name=value` and NUL-terminated, sorted by name. The command line's
+    /// `name=value` words are set after them.
+    pub env: Table<u8>,
     /// The kernel's ELF symbol table, for symbolized backtraces.
     pub symbols: Opt<Symbols>,
     /// Random bytes from the firmware RNG, or zero if it had none.

@@ -576,6 +576,7 @@ dependencies = [
  "sbsa-gwdt",
  "sched",
  "security",
+ "smbios",
  "smmu",
  "socket",
  "storage",
@@ -625,6 +626,7 @@ dependencies = [
  "ktest",
  "logring",
  "pt",
+ "smbios",
  "ufs",
 ]
 
@@ -802,6 +804,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "smbios"
+version = "0.0.0"
+
+[[package]]
 name = "smmu"
 version = "0.0.0"
 dependencies = [
@@ -835,6 +841,7 @@ dependencies = [
 name = "storage"
 version = "0.0.0"
 dependencies = [
+ "abi",
  "bus",
  "geom",
  "gpt",

@@ -594,6 +594,8 @@ pub mod tables {
 
     /// ACPI 2.0+ RSDP.
     pub const ACPI_20: Guid = Guid::must_parse("8868E871-E4F1-11D3-BC22-0080C73C8881");
+    /// SMBIOS 2.1 (32-bit) entry point.
+    pub const SMBIOS: Guid = Guid::must_parse("EB9D2D31-2D88-11D3-9A16-0090273FC14D");
     /// SMBIOS 3.0 entry point.
     pub const SMBIOS3: Guid = Guid::must_parse("F2FD1544-9794-4A2C-992E-E5BBCF20E394");
 }
