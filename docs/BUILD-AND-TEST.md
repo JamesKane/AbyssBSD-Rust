@@ -111,6 +111,7 @@ cargo xtask --remote netdiff [--freebsd] [--scenario NAME,...]  # packet capture
 cargo xtask --remote freebsd-usertests             # tests/user on FreeBSD 15.1 itself, either arch
 cargo xtask --remote kyua-baseline [--resume] [--only DIR,...]  # FreeBSD's kyua results, per test case, in bhyve
 cargo xtask --remote kyua [--resume] [--only DIR,...]  # AbyssBSD's, compared with them
+cargo xtask kyua-board --dir DIR --name NAME [--freebsd] [--out FILE]  # a board run's results
 ```
 
 `--freebsd-only` records FreeBSD's numbers alone, for a suite AbyssBSD cannot run yet (`p4`
@@ -386,6 +387,30 @@ as its result depends on timing and says nothing). Such failures outside the fou
 lines for cases that now pass are reported as stale. Test programs whose subject comes in a later
 phase (`DEFERRED` in `xtask/src/kyua.rs`, empty now) are counted on a line of their own and left out
 of the target.
+
+### kyua on the Orange Pi 6 Plus
+
+Stock FreeBSD 15.1 does not run on the board, so arm64's baseline is the closest FreeBSD that does
+(PERFORMANCE.md §4): the board's own FreeBSD 16-CURRENT (the `orangepi-6-plus` branch's
+`GENERIC-HMP-IOMMU`, as installed on the Crucial disk), running FreeBSD 15.1's arm64 `tests.txz`,
+the same test programs AbyssBSD runs. Everything a run keeps is on the Samsung disk's `kyuawork`
+partition (`nda1p3`, 64 GB, UFS2): `usr/tests` from `tests.txz`, null-mounted over `/usr/tests`
+for the run; `kyua-run.sh` and `kyua.conf` from `tests/kyua/board/`; and per system its results
+(`run-<system>/`) and kyua's work directories (`tmp-<system>/`, as `TMPDIR`). The Crucial disk is
+written by nothing but kyua's tests themselves. `kyua-run.sh` is the bhyve guest's `rc.local`
+loop, started over `ssh` instead of at boot, with kyua's parallelism at the board's 12 CPUs; it
+turns FreeBSD's `debug.debugger_on_panic` off for the boot, so a panic reboots it in 15 seconds.
+Neither system gets packages (`PATH` is the base system's), so tests needing Python, `scapy`, or
+`jq` skip on both, and `net.fibs` stays 1 on both.
+
+`tests/kyua/board/kyua-board.sh fbsd16|abyss WORKDIR`, on the workstation with the board's serial
+adapter, logs the serial console into `WORKDIR`, starts the run and starts it again after each
+reboot (for AbyssBSD by `BootNext` from FreeBSD, the default boot, which a panic or the watchdog
+lands in), and copies `run-<system>/` into `WORKDIR` at the end. `cargo xtask kyua-board --freebsd
+--dir WORKDIR/run-fbsd16 --name ...` writes the baseline,
+`tests/kyua/freebsd/freebsd-16.0-CURRENT-aarch64-opi6p.txt`; without `--freebsd`, with `--out`,
+AbyssBSD's results, compared with it as `kyua` compares bhyve's, against the same
+`known-failures.txt`.
 
 ### The network soak
 

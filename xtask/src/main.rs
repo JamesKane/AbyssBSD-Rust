@@ -67,6 +67,7 @@ commands:
   freebsd-diff [--arch <a|all>] [--scenario N,...]    record FreeBSD's output of tests/diff's scenarios (server only)
   kyua-baseline [--resume] [--only DIR,...]              record FreeBSD's kyua results per test case in bhyve (server only)
   kyua        [--resume] [--only DIR,...]                kyua's suite on AbyssBSD in bhyve, against FreeBSD's results (server only)
+  kyua-board  --dir DIR --name NAME [--freebsd] [--out FILE]  a board run's results (tests/kyua/board), against the board's baseline
   fetch-base  [--arch <a|all>]                           FreeBSD base.txz: /rescue image, sysroot (server only)
   acpidump    --arch <a> [--vmm qemu|bhyve] [--machine M] [--iommu] --out DIR
                                                          capture a VM's ACPI tables
@@ -135,6 +136,7 @@ fn run() -> Result<()> {
         "freebsd-diff" => diff::cmd_freebsd_diff(args),
         "kyua-baseline" => kyua::cmd_kyua_baseline(args),
         "kyua" => kyua::cmd_kyua(args),
+        "kyua-board" => kyua::cmd_kyua_board(args),
         "acpidump" => acpidump::cmd(args),
         "check" => test::cmd_check(args),
         "policy" => policy::cmd(args),

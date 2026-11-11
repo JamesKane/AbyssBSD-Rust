@@ -334,6 +334,60 @@ pub(crate) fn cmd_kyua(mut args: Args) -> Result<()> {
     report.verdict()
 }
 
+/// The Orange Pi 6 Plus's runs (`tests/kyua/board/`): the machine and its
+/// CPUs, as the results files are named, and its baseline. Stock FreeBSD
+/// 15.1 does not run on the board, so the baseline is the closest FreeBSD
+/// that does (PERFORMANCE.md §4's rule): its 16-CURRENT, with 15.1's
+/// `tests.txz`, the same test programs AbyssBSD runs.
+const BOARD_MACHINE: &str = "aarch64-opi6p";
+const BOARD_CPUS: u32 = 12;
+pub(crate) const BOARD_BASELINE: &str = "tests/kyua/freebsd/freebsd-16.0-CURRENT-aarch64-opi6p.txt";
+
+/// `cargo xtask kyua-board --dir DIR --name NAME [--freebsd] [--out FILE]`:
+/// a board run's directory (`run-<system>` on `kyuawork`, copied off the
+/// board by `tests/kyua/board/kyua-board.sh`) into a results file. With
+/// `--freebsd` it is the baseline ([`BOARD_BASELINE`]); otherwise it is
+/// AbyssBSD's, written to `--out` and held to the baseline as
+/// `cargo xtask kyua` holds bhyve's.
+pub(crate) fn cmd_kyua_board(mut args: Args) -> Result<()> {
+    let freebsd = args.take_flag("--freebsd");
+    let dir = PathBuf::from(args.take_value("--dir")?.ok_or("--dir DIR is needed")?);
+    let name = args.take_value("--name")?.ok_or("--name NAME is needed")?;
+    let out = args.take_value("--out")?;
+    args.finish()?;
+    let root = crate::util::root();
+    let out = match (freebsd, out) {
+        (true, None) => root.join(BOARD_BASELINE),
+        (_, Some(o)) => PathBuf::from(o),
+        (false, None) => return Err("--out FILE is needed for AbyssBSD's results".into()),
+    };
+    // The board's runs carry no packages: the Crucial disk's FreeBSD is
+    // not written beyond kyua's own use of it.
+    let text = collect(
+        &dir,
+        &name,
+        BOARD_MACHINE,
+        BOARD_CPUS,
+        Duration::ZERO,
+        "none",
+    )?;
+    fs::write(&out, text)?;
+    println!("kyua-board: results in {}", out.display());
+    if freebsd {
+        return Ok(());
+    }
+    let report = compare(
+        &fs::read_to_string(root.join(BOARD_BASELINE))?,
+        &fs::read_to_string(&out)?,
+        &fs::read_to_string(root.join(KNOWN_FAILURES))?,
+    );
+    let compared = out.with_extension("compare.txt");
+    fs::write(&compared, report.text())?;
+    print!("{}", report.summary());
+    println!("kyua-board: comparison in {}", compared.display());
+    report.verdict()
+}
+
 fn run(
     system: System,
     work: &Path,
@@ -473,6 +527,8 @@ fn run(
         text = collect(
             &results(root),
             &system.name(),
+            MACHINE,
+            CPUS,
             started.elapsed(),
             &package_names(&packages)?,
         )?;
@@ -614,7 +670,14 @@ fn in_chunk(case: &str, chunk: &str) -> bool {
 }
 
 /// Reads the guest's reports in `dir` into the results file's text.
-fn collect(dir: &Path, system: &str, wall: Duration, packages: &str) -> Result<String> {
+fn collect(
+    dir: &Path,
+    system: &str,
+    machine: &str,
+    cpus: u32,
+    wall: Duration,
+    packages: &str,
+) -> Result<String> {
     let read = |name: &str| fs::read_to_string(dir.join(name)).unwrap_or_default();
     let listed: Vec<String> = read("list.txt")
         .lines()
@@ -661,7 +724,7 @@ fn collect(dir: &Path, system: &str, wall: Duration, packages: &str) -> Result<S
         .zip(read("start").trim().parse::<u64>().ok())
         .map(|(e, s)| e.saturating_sub(s));
     let mut text = format!(
-        "# kyua on {system}, {MACHINE}, {CPUS} CPUs, parallelism={CPUS}\n\
+        "# kyua on {system}, {machine}, {cpus} CPUs, parallelism={cpus}\n\
          # written by cargo xtask kyua; {} test cases\n",
         cases.len()
     );
