@@ -6,7 +6,8 @@
  * link counts, rename's rules, symbolic links, writing and truncating,
  * modes and the umask, times, flags, directory listings, FIFOs, advisory
  * locks (flock and fcntl, between processes too), getcwd, statfs, and
- * unmount's EBUSY.
+ * unmount's EBUSY, which a child that exited in a mount (a zombie, its
+ * working directory gone with it, `pdescfree`) does not cause.
  *
  * Runs on FreeBSD too (as root, with nothing mounted on /mnt), where the
  * expected errnos come from.
@@ -559,6 +560,43 @@ places(void)
 	OK(rmdir("/mnt/v"));
 }
 
+/*
+ * A process that exited keeps no working or root directory: a mount it
+ * worked in unmounts while it is still a zombie (FreeBSD's exit1 drops
+ * them with `pdescfree`, before the parent can wait).
+ */
+static void
+zombie_cwd(void)
+{
+	struct iovec iov[4];
+	siginfo_t si;
+	pid_t pid;
+	int status;
+
+	OK(mkdir("/mnt/z", 0755));
+	iov_set(&iov[0], "fstype", "tmpfs");
+	iov_set(&iov[2], "fspath", "/mnt/z");
+	if (nmount(iov, 4, 0) != 0) {
+		CHECK(0, "nmount /mnt/z: %s", strerror(errno));
+		return;
+	}
+	OK(mkdir("/mnt/z/w", 0755));
+	pid = fork();
+	if (pid == 0) {
+		if (chdir("/mnt/z/w") != 0 || chroot("/mnt/z") != 0)
+			_exit(1);
+		_exit(0);
+	}
+	CHECK(pid > 0, "fork: %s", strerror(errno));
+	/* Exited, not reaped. */
+	OK(waitid(P_PID, pid, &si, WEXITED | WNOWAIT));
+	CHECK(si.si_status == 0, "child status %d", si.si_status);
+	OK(unmount("/mnt/z", 0));
+	CHECK(waitpid(pid, &status, 0) == pid && WIFEXITED(status) &&
+	    WEXITSTATUS(status) == 0, "waitpid");
+	OK(rmdir("/mnt/z"));
+}
+
 int
 main(void)
 {
@@ -580,6 +618,7 @@ main(void)
 	locks();
 	mappings();
 	places();
+	zombie_cwd();
 	if (unmount("/mnt", 0) != 0) {
 		printf("vfs: unmount: %s\n", strerror(errno));
 		failed = 1;

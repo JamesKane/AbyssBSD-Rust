@@ -2417,6 +2417,14 @@ impl Process {
         };
         crate::fs::closed(self.pid, &closed);
         drop(closed);
+        // Its working and root directories go too, before the parent can
+        // wait (`pdescfree` in `exit1`): a zombie, or a process whose
+        // last thread is still being torn down, keeps no mount busy. The
+        // system's root stands in for the working directory.
+        let root = self.root.lock().take();
+        drop(root);
+        let cwd = core::mem::replace(&mut *self.cwd.lock(), crate::fs::root().use_ref());
+        drop(cwd);
         crate::ktrace::exit(s);
         if self.pid == self.sid() {
             crate::tty::session_ended(s, self.pid);
