@@ -1016,3 +1016,224 @@ fn bsd_labels_read_as_freebsd_reads_them() {
     ];
     assert_eq!(f.issue(a, "create"), Err("19 provider".to_string()));
 }
+
+/// A provider's bytes as [`Io`], without copying them.
+struct SliceIo<'a>(&'a [u8]);
+
+impl Io for SliceIo<'_> {
+    fn read(&mut self, offset: u64, len: usize) -> Result<Vec<u8>, Errno> {
+        let at = usize::try_from(offset).map_err(|_| Errno::EIO)?;
+        self.0
+            .get(at..at.checked_add(len).ok_or(Errno::EIO)?)
+            .map(<[u8]>::to_vec)
+            .ok_or(Errno::EIO)
+    }
+
+    fn write(&mut self, _: u64, _: &[u8]) -> Result<(), Errno> {
+        Err(Errno::EROFS)
+    }
+
+    fn log(&mut self, _: &str) {}
+}
+
+/// One table a walk found: its provider's name, scheme, first and last
+/// sectors, geometry, and how many providers it has.
+type Found = (String, Scheme, u64, u64, (u32, u32), usize);
+
+/// Every table on `img` and in its partitions, however deep, tasted as
+/// sys/storage tastes them: oldest first (a queue, not a recursion), each
+/// partition with its table's depth and scheme, and answering its table's
+/// geometry (`g_part_start`). Stops at `limit` levels.
+fn walk(img: &[u8], limit: u32) -> Vec<Found> {
+    let mut out = Vec::new();
+    let mut queue = VecDeque::new();
+    queue.push_back((
+        String::from("md0"),
+        0usize,
+        img.len(),
+        0u32,
+        None,
+        (0u32, 0u32),
+    ));
+    while let Some((name, at, len, depth, parent, fw)) = queue.pop_front() {
+        if depth >= limit {
+            continue;
+        }
+        let bytes = &img[at..at + len];
+        let m = Media {
+            mediasize: len as u64,
+            sectorsize: 512,
+            fwheads: fw.0,
+            fwsectors: fw.1,
+            ..Media::default()
+        };
+        let Some(t) = taste(&m, &name, &mut SliceIo(bytes), true, depth, parent) else {
+            continue;
+        };
+        out.push((
+            name.clone(),
+            t.scheme,
+            t.first,
+            t.last,
+            (t.heads, t.sectors),
+            t.providers().count(),
+        ));
+        let fw = if fw.0 != 0 && fw.1 != 0 {
+            fw
+        } else {
+            (t.heads, t.sectors)
+        };
+        for e in t.providers() {
+            let (Ok(s), Ok(n)) = (
+                usize::try_from(e.start * 512),
+                usize::try_from((e.end - e.start + 1) * 512),
+            ) else {
+                continue;
+            };
+            if s.checked_add(n).is_some_and(|end| end <= len) {
+                queue.push_back((
+                    std::format!("{name}{}", e.name()),
+                    at + s,
+                    n,
+                    depth + 1,
+                    Some(t.scheme),
+                    fw,
+                ));
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn the_boards_disk_nests_as_on_freebsd() {
+    // tests/corpus/gpart/board.txt: FreeBSD's gpart show of each level.
+    let found = walk(&corpus("board"), 16);
+    assert_eq!(
+        found,
+        [
+            ("md0".into(), Scheme::Gpt, 40, 524_247, (64, 9), 5),
+            // The vendor partition's FAT boot sector: an MBR with no
+            // entries, with the disk table's geometry.
+            ("md0p5".into(), Scheme::Mbr, 9, 114_607, (64, 9), 0),
+        ]
+    );
+}
+
+#[test]
+fn nesting_stops_where_freebsd_stops() {
+    // A slice with a disklabel: MBR, then BSD, then nothing in BSD's.
+    let found = walk(&corpus("mbr-bsd"), 16);
+    let schemes: Vec<(String, Scheme)> = found.iter().map(|f| (f.0.clone(), f.1)).collect();
+    assert_eq!(
+        schemes,
+        [("md0".into(), Scheme::Mbr), ("md0s1".into(), Scheme::Bsd)]
+    );
+    // A slice whose first sector is the disk's MBR again (it starts at 1,
+    // and sector 1 is a copy of sector 0): no MBR in an MBR.
+    let mut img = corpus("mbr-fat");
+    let s0 = img[..512].to_vec();
+    img[512..1024].copy_from_slice(&s0);
+    let found = walk(&img, 16);
+    assert_eq!(found.len(), 1, "{found:?}");
+    // A GPT inside a slice is not tasted (GPT is a disk's only).
+    let gpt = corpus("basic");
+    let mut img = alloc::vec![0u8; gpt.len() + 40 * 512];
+    img[40 * 512..].copy_from_slice(&gpt);
+    let mut f = Fake::new(alloc::vec![0u8; img.len()], 512);
+    f.gpart("create", &[("scheme", "mbr")]).unwrap();
+    let n = (gpt.len() / 512).to_string();
+    f.gpart("add", &[("type", "freebsd"), ("start", "40"), ("size", &n)])
+        .unwrap();
+    img[..512].copy_from_slice(&f.disk[..512]);
+    let found = walk(&img, 16);
+    let schemes: Vec<Scheme> = found.iter().map(|f| f.1).collect();
+    assert_eq!(schemes, [Scheme::Mbr], "{found:?}");
+}
+
+/// A deterministic generator for the garbage test.
+fn xorshift(state: &mut u64) -> u64 {
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    *state
+}
+
+#[test]
+fn garbage_never_panics_nor_nests_deep() {
+    // Disks a taste must survive: random sectors, then random sectors
+    // shaped like each scheme's (an MBR's magic and flags, BSD's magic
+    // numbers and sector size, GPT's signature), at every depth under
+    // every parent.
+    let mut seed = 0x5eed_6e0d_u64;
+    let mut seen = [0u32; 4];
+    for round in 0..3000u32 {
+        let sectors = 8 + usize::try_from(xorshift(&mut seed) % 2048).unwrap();
+        let mut img = alloc::vec![0u8; sectors * 512];
+        let fill = usize::try_from(xorshift(&mut seed) % 24)
+            .unwrap()
+            .min(sectors);
+        for b in &mut img[..fill * 512] {
+            *b = u8::try_from(xorshift(&mut seed) & 0xff).unwrap();
+        }
+        match round % 4 {
+            1 => {
+                img[510] = 0x55;
+                img[511] = 0xaa;
+                for i in 0..4 {
+                    img[446 + 16 * i] = if xorshift(&mut seed).is_multiple_of(2) {
+                        0
+                    } else {
+                        0x80
+                    };
+                }
+            }
+            2 => {
+                img[512..516].copy_from_slice(&0x8256_4557u32.to_le_bytes());
+                img[512 + 132..512 + 136].copy_from_slice(&0x8256_4557u32.to_le_bytes());
+                img[512 + 40..512 + 44].copy_from_slice(&512u32.to_le_bytes());
+                img[512 + 44..512 + 48].copy_from_slice(&63u32.to_le_bytes());
+                img[512 + 48..512 + 52].copy_from_slice(&16u32.to_le_bytes());
+                let n = u32::try_from(sectors).unwrap();
+                img[512 + 60..512 + 64].copy_from_slice(&n.to_le_bytes());
+                let parts = 8 + u16::try_from(xorshift(&mut seed) % 13).unwrap();
+                img[512 + 138..512 + 140].copy_from_slice(&parts.to_le_bytes());
+            }
+            3 => img[512..520].copy_from_slice(b"EFI PART"),
+            _ => {}
+        }
+        // At most a disk's table, its slices', and theirs.
+        let found = walk(&img, 8);
+        assert!(
+            found.len() <= 1 + 4 + 4 * 20,
+            "round {round}: {}",
+            found.len()
+        );
+        for f in &found {
+            seen[match f.1 {
+                Scheme::Null => 0,
+                Scheme::Gpt => 1,
+                Scheme::Mbr => 2,
+                Scheme::Bsd => 3,
+            }] += 1;
+        }
+        for depth in 0..4 {
+            for parent in [
+                None,
+                Some(Scheme::Gpt),
+                Some(Scheme::Mbr),
+                Some(Scheme::Bsd),
+            ] {
+                let m = Media {
+                    mediasize: img.len() as u64,
+                    sectorsize: 512,
+                    ..Media::default()
+                };
+                let _ = taste(&m, "md0", &mut SliceIo(&img), true, depth, parent);
+            }
+        }
+    }
+    // The shaped rounds reached MBR's and BSD's readers (a random GPT
+    // header never has its CRCs right).
+    assert!(seen[2] > 0 && seen[3] > 0, "{seen:?}");
+}

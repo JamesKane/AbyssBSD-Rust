@@ -267,7 +267,7 @@ pub struct Disk {
     max_transfer: usize,
     read_only: bool,
     /// A disk's partition table, while its partitions are published.
-    table: SpinLock<Option<Table>>,
+    table: SpinLock<Option<Arc<Table>>>,
     description: SpinLock<Description>,
     /// Its GEOM provider's statistics (`gstat`).
     provider_stat: Option<Arc<Stat>>,
@@ -389,7 +389,7 @@ impl Disk {
 
     /// A disk's partition table, while its partitions are published.
     #[must_use]
-    pub fn table(&self) -> Option<Table> {
+    pub fn table(&self) -> Option<Arc<Table>> {
         self.table.lock().clone()
     }
 
@@ -422,6 +422,16 @@ impl Disk {
     pub fn partition(&self) -> Option<(&Arc<Disk>, PartitionEntry)> {
         match &self.target {
             Target::Partition { parent, state, .. } => Some((parent, state.lock().entry.clone())),
+            Target::Device { .. } => None,
+        }
+    }
+
+    /// For a partition: its parent, and its index in the table (`p1` is
+    /// 0), without copying its entry.
+    #[must_use]
+    pub fn partition_index(&self) -> Option<(&Arc<Disk>, u32)> {
+        match &self.target {
+            Target::Partition { parent, state, .. } => Some((parent, state.lock().entry.index)),
             Target::Device { .. } => None,
         }
     }
@@ -927,14 +937,40 @@ impl Disk {
     #[must_use]
     pub fn media(&self) -> geom::table::Media {
         let d = self.description();
+        let (fwheads, fwsectors) = self.firmware();
         geom::table::Media {
             mediasize: self.bytes(),
             sectorsize: self.sector_size,
             stripesize: d.stripesize,
             stripeoffset: d.stripeoffset,
-            fwheads: d.fwheads,
-            fwsectors: d.fwsectors,
+            fwheads,
+            fwsectors,
         }
+    }
+
+    /// What its provider answers for `GEOM::fwheads` and
+    /// `GEOM::fwsectors`: a disk's driver's geometry, a partition's
+    /// table's (`g_part_start`), which is its disk's when that has one.
+    #[must_use]
+    pub fn firmware(&self) -> (u32, u32) {
+        let mut fw = {
+            let d = self.description();
+            (d.fwheads, d.fwsectors)
+        };
+        // From the disk down: each table's geometry is its provider's
+        // when that reports one, else its own (a loop, not a recursion).
+        let mut chain = Vec::new();
+        let mut cur = self;
+        while let Target::Partition { parent, .. } = &cur.target {
+            chain.push(Arc::clone(parent));
+            cur = parent;
+        }
+        for t in chain.iter().rev().filter_map(|p| p.table()) {
+            if fw.0 == 0 || fw.1 == 0 {
+                fw = (t.part.heads, t.part.sectors);
+            }
+        }
+        fw
     }
 
     /// Reads and writes it for the PART class.
@@ -978,16 +1014,35 @@ fn nesting(disk: &Disk) -> Option<(u32, Option<geom::table::Scheme>)> {
         Target::Device { .. } => Some((0, None)),
         Target::Partition { parent, .. } => {
             let t = parent.table()?;
-            (!t.part.isleaf).then_some((t.part.depth + 1, Some(t.part.scheme)))
+            let depth = t.part.depth + 1;
+            (!t.part.isleaf && depth < MAX_DEPTH).then_some((depth, Some(t.part.scheme)))
         }
     }
 }
 
+/// How deep tables nest at most. The schemes' own rules stop sooner (GPT
+/// only on a disk, MBR never in MBR, nothing in a BSD partition: three
+/// levels); this bound holds whatever a disk says.
+const MAX_DEPTH: u32 = 4;
+
 /// Publishes the partitions a taste of `disk` finds, if it has a table
-/// (`g_part_taste`), and tastes them in turn.
+/// (`g_part_taste`), and tastes them in turn, oldest first, as GEOM's
+/// event queue does (a loop: what a disk holds decides how many).
 fn publish_table(s: &Sleepable, disk: &Arc<Disk>, retasted: bool) {
+    let mut queue = alloc::collections::VecDeque::new();
+    queue.push_back((Arc::clone(disk), retasted));
+    while let Some((d, retasted)) = queue.pop_front() {
+        for p in taste_one(s, &d, retasted) {
+            queue.push_back((p, false));
+        }
+    }
+}
+
+/// Tastes `disk` once: publishes the partitions of the table found, and
+/// returns them.
+fn taste_one(s: &Sleepable, disk: &Arc<Disk>, retasted: bool) -> Vec<Arc<Disk>> {
     let Some((depth, parent)) = nesting(disk) else {
-        return;
+        return Vec::new();
     };
     let media = disk.media();
     let Some(part) = geom::table::taste(
@@ -998,25 +1053,23 @@ fn publish_table(s: &Sleepable, disk: &Arc<Disk>, retasted: bool) {
         depth,
         parent,
     ) else {
-        return;
+        return Vec::new();
     };
     let born = next_serial();
     let parts: Vec<Arc<Disk>> = part
         .providers()
         .map(|e| new_partition(disk, e, born))
         .collect();
-    *disk.table.lock() = Some(Table {
+    *disk.table.lock() = Some(Arc::new(Table {
         part,
         born,
         at_publication: !retasted,
-    });
+    }));
     DISKS.lock().extend(parts.iter().cloned());
     for p in &parts {
         tell(s, Event::Published(p));
     }
-    for p in &parts {
-        publish_table(s, p, false);
-    }
+    parts
 }
 
 /// Removes `disk`'s partitions, and theirs, from the published disks.
@@ -1049,13 +1102,13 @@ pub fn set_table(s: &Sleepable, disk: &Arc<Disk>, t: Option<geom::table::Table>)
         let mut table = disk.table.lock();
         match (t, table.as_mut()) {
             (None, _) => *table = None,
-            (Some(t), Some(cur)) => cur.part = t,
+            (Some(t), Some(cur)) => Arc::make_mut(cur).part = t,
             (Some(t), None) => {
-                *table = Some(Table {
+                *table = Some(Arc::new(Table {
                     part: t,
                     born: next_serial(),
                     at_publication: false,
-                });
+                }));
             }
         }
     }
@@ -1275,10 +1328,14 @@ pub fn partitions(disk: &Arc<Disk>) -> Vec<Arc<Disk>> {
     let mut out: Vec<Arc<Disk>> = DISKS
         .lock()
         .iter()
-        .filter(|d| d.partition().is_some_and(|(p, _)| Arc::ptr_eq(p, disk)))
+        .filter(|d| {
+            d.partition_index()
+                .is_some_and(|(p, _)| Arc::ptr_eq(p, disk))
+        })
         .cloned()
         .collect();
-    out.sort_by_key(|d| d.partition().map(|(_, e)| e.index));
+    // By index, which is cheap to read (no entry copied per comparison).
+    out.sort_unstable_by_key(|d| d.partition_index().map(|(_, i)| i));
     out
 }
 

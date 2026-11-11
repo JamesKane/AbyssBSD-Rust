@@ -1,0 +1,26 @@
++ gpart show md0
+=>    40  524208  md0  GPT  (256M)
+      40   81920    1  efi  (40M)
+   81960  131072    2  linux-data  (64M)
+  213032   65536    3  freebsd-swap  (32M)
+  278568  131072    4  freebsd-ufs  (64M)
+  409640  114608    5  !a04d3adf-b82f-49fd-a235-f347b70355d4  (56M)
+
++ gpart show md0p1
+gpart: No such geom: md0p1.
++ gpart show md0p2
+gpart: No such geom: md0p2.
++ gpart show md0p3
+gpart: No such geom: md0p3.
++ gpart show md0p4
+gpart: No such geom: md0p4.
++ gpart show md0p5
+=>     9  114599  md0p5  MBR  (56M)
+       9  114599         - free -  (56M)
+
+fwheads: 64
+fwsectors: 9
+last: 114607
+first: 9
+fwheads: 64
+fwsectors: 9

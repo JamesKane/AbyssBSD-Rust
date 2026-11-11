@@ -297,13 +297,15 @@ pub(crate) fn open(
     name: &str,
     write: bool,
 ) -> Result<Arc<dyn CharDevice>, Errno> {
-    let whole = disk.partition().is_none();
+    let whole = disk.partition_index().is_none();
     if write {
-        let m = mesh(s);
-        if let Some(p) = m.provider(name)
-            && m.provider_access(p).e > 0
-            && !(footshooting() && m.provider_rank(p) == 1)
-        {
+        let node = String::from(name);
+        let held = with_mesh(s, move |m| {
+            m.provider(&node).is_some_and(|p| {
+                m.provider_access(p).e > 0 && !(footshooting() && m.provider_rank(p) == 1)
+            })
+        });
+        if held {
             return Err(Errno::EPERM);
         }
     }
@@ -441,6 +443,10 @@ struct Builder<'a> {
     held: &'a Holders,
     /// The PART geoms made, by their disk's serial.
     tables: Vec<(u64, GeomRef)>,
+    /// Providers made whose tastes are still to come, oldest first, as
+    /// GEOM's event queue holds them (`g_new_provider_event`): drained
+    /// in a loop, so no nesting of tables deepens the stack.
+    tastes: VecDeque<Vec<(Arc<Disk>, ProviderRef, Media)>>,
 }
 
 /// A label provider made, for its DEV geom: its partition's serial, its
@@ -462,7 +468,7 @@ fn firmware(d: &Arc<Disk>) -> (u32, u32) {
 /// and `GEOM::fwsectors`: a disk's firmware geometry, a partition's
 /// table's (`g_part_start`), which is the disk's when it reports one.
 pub(crate) fn fw_geometry(d: &Arc<Disk>) -> (u32, u32) {
-    let Some((parent, _)) = d.partition() else {
+    let Some((parent, _)) = d.partition_index() else {
         return firmware(d);
     };
     let fw = fw_geometry(parent);
@@ -631,9 +637,16 @@ impl Builder<'_> {
         self.batch(d, t.born);
     }
 
+    /// Runs the tastes queued, and those they queue.
+    fn settle(&mut self) {
+        while let Some(made) = self.tastes.pop_front() {
+            self.taste(&made);
+        }
+    }
+
     /// The partitions of disk `d` published together in `batch`: their
-    /// providers, then each one's LABEL geoms and DEV geom, then the
-    /// labels' DEV geoms, as the tastes of each new provider make them.
+    /// providers now, as the PART class makes them, and their tastes
+    /// queued ([`Self::taste`]).
     fn batch(&mut self, d: &Arc<Disk>, batch: u64) {
         let Some(&(_, g)) = self.tables.iter().find(|(s, _)| *s == d.serial()) else {
             return;
@@ -642,7 +655,7 @@ impl Builder<'_> {
             .into_iter()
             .filter(|p| p.partition_times().is_some_and(|(b, _)| b == batch))
             .collect();
-        parts.sort_by_key(|p| p.serial());
+        parts.sort_unstable_by_key(|p| p.serial());
         let Some(table) = d.table() else { return };
         let mut made = Vec::new();
         for part in &parts {
@@ -659,8 +672,15 @@ impl Builder<'_> {
             self.m.set_provider_config(p, config, txt);
             made.push((Arc::clone(part), p, media));
         }
+        self.tastes.push_back(made);
+    }
+
+    /// The tastes of a batch of new partitions' providers `made`: each
+    /// one's own table (whose providers are made then, their tastes
+    /// queued), LABEL geoms, and DEV geom, then the labels' DEV geoms.
+    fn taste(&mut self, made: &[(Arc<Disk>, ProviderRef, Media)]) {
         let mut labels = Vec::new();
-        for (part, p, media) in &made {
+        for (part, p, media) in made {
             // The PART class tastes a new provider first: a table in it.
             if part.table().is_some_and(|t| t.at_publication) {
                 self.table(part, *p, firmware(part));
@@ -761,11 +781,31 @@ enum Happened<'a> {
     Relabel(Arc<Disk>),
 }
 
-/// The mesh now, once the events posted so far have run.
-fn mesh(s: &Sleepable) -> Mesh {
-    drain(s);
-    build()
+/// `f` of the mesh now, once the events posted so far have run. The mesh
+/// is built on the event thread, whose stack is GEOM's (as FreeBSD's
+/// topology work is `g_event`'s), not on the caller's system call stack;
+/// inline only if there is no event thread.
+fn with_mesh<T: Send + 'static>(s: &Sleepable, f: impl FnOnce(&Mesh) -> T + Send + 'static) -> T {
+    // Acquire: pairs with the release once the thread is up.
+    if !RUNNING.load(Ordering::Acquire) {
+        return f(&build());
+    }
+    let slot: Arc<SpinLock<Option<T>>> = Arc::new(SpinLock::new(None));
+    let out = Arc::clone(&slot);
+    run(
+        s,
+        Box::new(move |_| {
+            let r = f(&build());
+            *out.lock() = Some(r);
+        }),
+    );
+    let r = slot.lock().take();
+    r.unwrap_or_else(|| unreachable!("the event ran before the drain returned"))
 }
+
+/// The event thread's stack: what building the mesh and running control
+/// requests take, with room to spare.
+const EVENT_STACK: usize = 64 << 10;
 
 /// The mesh as it is (on the event thread, which must not wait for
 /// itself).
@@ -782,6 +822,7 @@ pub(crate) fn build() -> Mesh {
         m: Mesh::new(),
         held: &held,
         tables: Vec::new(),
+        tastes: VecDeque::new(),
     };
     for (i, name) in (0u64..).zip(CLASSES) {
         b.m.add_class(CLASS_IDS + (i << 8), name);
@@ -792,7 +833,7 @@ pub(crate) fn build() -> Mesh {
     let all = storage::disk::all();
     let mut events: Vec<(u64, Happened<'_>)> = Vec::new();
     for d in &all {
-        if d.partition().is_none() {
+        if d.partition_index().is_none() {
             events.push((d.serial(), Happened::Disk(d)));
         }
         let Some(t) = d.table() else { continue };
@@ -817,7 +858,8 @@ pub(crate) fn build() -> Mesh {
                 .map(|batch| (batch, Happened::Batch(d, batch))),
         );
     }
-    events.sort_by_key(|(when, _)| *when);
+    // Serials are unique: no two events tie.
+    events.sort_unstable_by_key(|(when, _)| *when);
     for (_, e) in events {
         match e {
             Happened::Disk(d) => b.disk(d),
@@ -829,6 +871,7 @@ pub(crate) fn build() -> Mesh {
             Happened::Batch(d, batch) => b.batch(d, batch),
             Happened::Relabel(p) => b.relabel(&p),
         }
+        b.settle();
     }
     b.mounts();
     b.m
@@ -853,7 +896,11 @@ pub(crate) fn init(s: &Sleepable) {
     use abi::sysctl::{ctlflag, ctltype};
     use sysctl::Number;
     crate::geom_ctl::init();
-    match sched::spawn("g_event", sched::Priority::KERNEL, run_events) {
+    match sched::Builder::new("g_event")
+        .priority(sched::Priority::KERNEL)
+        .stack(EVENT_STACK)
+        .spawn(run_events)
+    {
         // Release: pairs with `post`'s acquire.
         Ok(_) => RUNNING.store(true, Ordering::Release),
         Err(_) => kprintln!("geom: no event thread"),
@@ -864,7 +911,7 @@ pub(crate) fn init(s: &Sleepable) {
                 return Err(Errno::EPERM);
             }
             let s = crate::kinfo::sleepable();
-            out.extend_from_slice(f(&mesh(&s)).as_bytes());
+            out.extend_from_slice(with_mesh(&s, f).as_bytes());
             out.push(0);
             Ok(())
         })

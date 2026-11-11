@@ -2904,6 +2904,18 @@ no hangs, no reboot loops, nothing that needs the screen, and P8's remaining exi
     slice), and FreeBSD's images on the Bulk-Only USB disk (64 MiB now) show `da0s1`, which
     `mount_msdosfs` mounts, and a disklabel's `da0s1a`, `b`, and `d`, with `gpart show` as
     FreeBSD's. Left: writing BSD labels, and `glabel label`'s `label/` names (compat-deviations).
+  - Progress 2026-11-10 (the board's boot, fixed in QEMU): with partitions tasted, the Orange
+    Pi's vendor partition (`nda0p5`, a FAT boot sector FreeBSD also takes for an empty MBR)
+    gave the mesh a nested table, and building the mesh, recursively and with large frames, on
+    the 16 KiB stack of the system call that opened a disk (rc's `fsck_ufs`) overflowed it.
+    The mesh is now built on GEOM's event thread (64 KiB, as FreeBSD's topology work is
+    `g_event`'s), in a loop over a FIFO of tastes (`g_new_provider_event`'s order) instead of a
+    recursion, tables are tasted in a loop too and bounded at four levels, a partition's media
+    carry its table's geometry (`fixgeom`, so the nested MBR's first sector is FreeBSD's), and
+    sorting partitions copies no entries. Host tests walk FreeBSD's image of a disk laid out as
+    the board's (ESP, ext4, swap, UFS, the vendor partition) to the bottom, the nestings FreeBSD
+    refuses, and 3000 garbage disks; the guest's gpart script builds the same layout and runs
+    `fsck_ffs -p` on it, printing what FreeBSD printed (533 lines).
 - **Verification:** kyua's arm64 target on the board; fsx with `fsck_ffs` on the NVMe and a USB
   disk (done with the SMMU's stage 5, IOMMU.md §18); the device tree against FreeBSD's `devinfo`
   wherever FreeBSD has a driver. No day-long looped runs (the user, 2026-11-10): kyua and the

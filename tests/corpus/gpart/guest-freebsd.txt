@@ -237,6 +237,89 @@ gpart: No such geom: md47.
 = 1
 + mdconfig -d -u 47
 = 0
++ mdconfig -a -t malloc -s 256m -u 47
+= 0
++ gpart create -s gpt md47
+md47 created
+= 0
++ gpart add -t efi -s 40m md47
+md47p1 added
+= 0
++ gpart add -t linux-data -s 64m md47
+md47p2 added
+= 0
++ gpart add -t freebsd-swap -s 32m md47
+md47p3 added
+= 0
++ gpart add -t freebsd-ufs -s 64m md47
+md47p4 added
+= 0
++ gpart add -t !a04d3adf-b82f-49fd-a235-f347b70355d4 -l vectra md47
+md47p5 added
+= 0
++ newfs_msdos -F 32 -c 1 /dev/md47p1
+= 0
++ dd if=/dev/zero of=blk bs=2048 count=1
+= 0
++ dd if=magic of=blk bs=1 seek=1080 conv=notrunc
+= 0
++ dd if=blk of=/dev/md47p2 bs=2048 count=1
+= 0
++ newfs -U /dev/md47p4
+= 0
++ newfs_msdos -F 16 -L VECTRAFS /dev/md47p5
+= 0
++ dd if=/dev/md47p5 of=s0 bs=512 count=1
+= 0
++ dd if=one of=s0 bs=1 seek=447 conv=notrunc
+= 0
++ dd if=s0 of=/dev/md47p5 bs=512 count=1
+= 0
++ gpart show md47
+=>    40  524208  md47  GPT  (256M)
+      40   81920     1  efi  (40M)
+   81960  131072     2  linux-data  (64M)
+  213032   65536     3  freebsd-swap  (32M)
+  278568  131072     4  freebsd-ufs  (64M)
+  409640  114608     5  !a04d3adf-b82f-49fd-a235-f347b70355d4  (56M)
+
+= 0
++ gpart show -p md47
+=>    40  524208    md47  GPT  (256M)
+      40   81920  md47p1  efi  (40M)
+   81960  131072  md47p2  linux-data  (64M)
+  213032   65536  md47p3  freebsd-swap  (32M)
+  278568  131072  md47p4  freebsd-ufs  (64M)
+  409640  114608  md47p5  !a04d3adf-b82f-49fd-a235-f347b70355d4  (56M)
+
+= 0
++ gpart show md47p5
+=>     9  114599  md47p5  MBR  (56M)
+       9  114599          - free -  (56M)
+
+= 0
++ fsck_ffs -p /dev/md47p4
+/dev/md47p4: FILE SYSTEM CLEAN; SKIPPING CHECKS
+/dev/md47p4: clean, 15749 free (21 frags, 1966 blocks, 0.1% fragmentation)
+= 0
++ fsck_ffs -p /dev/gpt/vectra
+Attempted recovery for standard superblock: failed
+Attempted extraction of recovery data from standard superblock: failed
+Attempt to find boot zone recovery data.
+Finding an alternate superblock failed.
+Check for only non-critical errors in standard superblock
+Failed, superblock has critical errors
+SEARCH FOR ALTERNATE SUPER-BLOCK FAILED. YOU MUST USE THE
+-b OPTION TO FSCK TO SPECIFY THE LOCATION OF AN ALTERNATE
+SUPER-BLOCK TO SUPPLY NEEDED INFORMATION; SEE fsck_ffs(8).
+/dev/gpt/vectra: CAN'T CHECK FILE SYSTEM.
+/dev/gpt/vectra: UNEXPECTED INCONSISTENCY; RUN fsck MANUALLY.
+= 8
++ gpart destroy -F md47
+md47 destroyed
+= 0
++ mdconfig -d -u 47
+= 0
 + dd if=/dev/zero of=disk.img bs=1m count=0 seek=64
 = 0
 + mdconfig -a -t vnode -f disk.img -u 47

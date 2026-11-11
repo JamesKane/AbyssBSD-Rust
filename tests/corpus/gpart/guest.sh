@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: BSD-2-Clause
 # FreeBSD's gpart on a memory disk, malloc then vnode: create, add,
 # show, newfs and mount, what is refused while mounted, resize, modify,
-# undo, delete, destroy, bootcode, backup and restore; then MBR. The kernel test
+# undo, delete, destroy, bootcode, backup and restore; then MBR, and a
+# disk laid out as the Orange Pi's. The kernel test
 # runs it from /rescue in the guest (T=/mnt, a tmpfs) and compares what
 # it prints with guest-freebsd.txt, which FreeBSD 15.1 printed: run
 # there as root, T=DIR sh guest.sh.
@@ -102,11 +103,43 @@ mbr() {
 	run gpart destroy -F $md
 	run gpart show $md
 }
+board() {
+	# The Orange Pi's first NVMe disk, smaller: an ESP, an ext4-looking
+	# Linux partition, swap, UFS, and a vendor partition whose FAT boot
+	# sector FreeBSD tastes as an (empty) MBR. Then fsck_ffs -p opens the
+	# UFS partition for writing, as rc's file-system checks do.
+	run gpart create -s gpt $md
+	run gpart add -t efi -s 40m $md
+	run gpart add -t linux-data -s 64m $md
+	run gpart add -t freebsd-swap -s 32m $md
+	run gpart add -t freebsd-ufs -s 64m $md
+	run gpart add -t '!a04d3adf-b82f-49fd-a235-f347b70355d4' -l vectra $md
+	quiet newfs_msdos -F 32 -c 1 /dev/${md}p1
+	quiet dd if=/dev/zero of=blk bs=2048 count=1
+	printf '\123\357' > magic
+	quiet dd if=magic of=blk bs=1 seek=1080 conv=notrunc
+	quiet dd if=blk of=/dev/${md}p2 bs=2048 count=1
+	quiet newfs -U /dev/${md}p4
+	quiet newfs_msdos -F 16 -L VECTRAFS /dev/${md}p5
+	quiet dd if=/dev/${md}p5 of=s0 bs=512 count=1
+	printf '\001' > one
+	quiet dd if=one of=s0 bs=1 seek=447 conv=notrunc
+	quiet dd if=s0 of=/dev/${md}p5 bs=512 count=1
+	run gpart show $md
+	run gpart show -p $md
+	run gpart show ${md}p5
+	run fsck_ffs -p /dev/${md}p4
+	run fsck_ffs -p /dev/gpt/vectra
+	run gpart destroy -F $md
+}
 printf 'ABYSS-GCTL-BOOT' > pmbr
 mkdir -p m
 run mdconfig -a -t malloc -s 64m -u $U
 sequence
 mbr
+run mdconfig -d -u $U
+run mdconfig -a -t malloc -s 256m -u $U
+board
 run mdconfig -d -u $U
 quiet dd if=/dev/zero of=disk.img bs=1m count=0 seek=64
 run mdconfig -a -t vnode -f disk.img -u $U

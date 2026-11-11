@@ -286,7 +286,7 @@ fn whole(name: &str) -> Option<Arc<Disk>> {
 fn partition(disk: &Arc<Disk>, index: u32) -> Option<Arc<Disk>> {
     storage::partitions(disk)
         .into_iter()
-        .find(|p| p.partition().is_some_and(|(_, e)| e.index + 1 == index))
+        .find(|p| p.partition_index().is_some_and(|(_, i)| i + 1 == index))
 }
 
 /// A disk's media as its provider shows it: a memory disk's geometry is
@@ -302,7 +302,7 @@ fn media(d: &Arc<Disk>) -> Media {
 
 impl Topology for Topo<'_> {
     fn table(&self, geom: &str) -> Option<Table> {
-        whole(geom)?.table().map(|t| t.part)
+        whole(geom)?.table().map(|t| t.part.clone())
     }
 
     fn store(&mut self, geom: &str, table: Option<Table>) {
