@@ -229,6 +229,7 @@ pub(crate) fn init(s: &Sleepable) {
     // Drivers' device nodes go to devfs.
     vfs::devices::set_registry(&crate::fs::devfs::Hook);
     crate::iic::init();
+    crate::cam::init();
     let _ = uart::TERMINALS.set(&crate::tty::serial::HOST);
     // `vt` takes the framebuffer; keyboards type into its windows.
     crate::vtcons::start();

@@ -1,0 +1,16 @@
+[package]
+name = "cam"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+abi = { path = "../../lib/abi" }
+sched = { path = "../sched" }
+storage = { path = "../storage" }
+sync = { path = "../sync" }
+vfs = { path = "../vfs" }
+
+[lints]
+workspace = true

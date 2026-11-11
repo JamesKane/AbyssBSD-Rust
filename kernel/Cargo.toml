@@ -44,6 +44,7 @@ acpi-platform = { path = "../lib/acpi-platform" }
 aml = { path = "../lib/aml" }
 driver-table = { path = "table" }
 iicbus = { path = "../sys/iicbus" }
+cam = { path = "../sys/cam" }
 random = { path = "../sys/random" }
 storage = { path = "../sys/storage" }
 ufs = { path = "../lib/ufs" }

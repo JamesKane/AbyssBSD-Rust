@@ -152,6 +152,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "cam"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "sched",
+ "storage",
+ "sync",
+ "vfs",
+]
+
+[[package]]
 name = "cd9660"
 version = "0.0.0"
 
@@ -561,6 +572,7 @@ dependencies = [
  "bootproto",
  "bufcache",
  "bus",
+ "cam",
  "cd9660",
  "clock",
  "demangle",

@@ -28,6 +28,7 @@ mod beep;
 #[cfg(not(feature = "ktest"))]
 mod bench;
 mod boot;
+mod cam;
 mod capsicum;
 mod coredump;
 mod cpuset;
