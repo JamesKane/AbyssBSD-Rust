@@ -1,0 +1,343 @@
++ mdconfig -a -t malloc -s 64m -u 47
+= 0
++ gpart create -s gpt md47
+md47 created
+= 0
++ gpart create -s gpt md47
+gpart: geom 'md47': File exists
+= 1
++ gpart add -t efi -s 40m -l gctl-efi md47
+md47p1 added
+= 0
++ gpart add -t bogus -s 1m md47
+gpart: Invalid argument
+= 1
++ gpart add -t freebsd-ufs -s 16m -l gctl-test md47
+md47p2 added
+= 0
++ gpart add -t freebsd-ufs -b 100 -s 1m md47
+gpart: start '100': No space left on device
+= 1
++ gpart set -a bootme -i 2 md47
+bootme set on md47p2
+= 0
++ gpart show md47
+=>    40  130992  md47  GPT  (64M)
+      40   81920     1  efi  (40M)
+   81960   32768     2  freebsd-ufs  [bootme]  (16M)
+  114728   16304        - free -  (8.0M)
+
+= 0
++ gpart show -l md47
+=>    40  130992  md47  GPT  (64M)
+      40   81920     1  gctl-efi  (40M)
+   81960   32768     2  gctl-test  [bootme]  (16M)
+  114728   16304        - free -  (8.0M)
+
+= 0
++ gpart show -p md47
+=>    40  130992    md47  GPT  (64M)
+      40   81920  md47p1  efi  (40M)
+   81960   32768  md47p2  freebsd-ufs  [bootme]  (16M)
+  114728   16304          - free -  (8.0M)
+
+= 0
++ gpart show -r md47
+=>    40  130992  md47  GPT  (64M)
+      40   81920     1  c12a7328-f81f-11d2-ba4b-00a0c93ec93b  (40M)
+   81960   32768     2  516e7cb6-6ecf-11d6-8ff8-00022d09712b  [bootme]  (16M)
+  114728   16304        - free -  (8.0M)
+
+= 0
++ gpart backup md47
+GPT 128
+1           efi     40  81920 gctl-efi 
+2   freebsd-ufs  81960  32768 gctl-test  [bootme] 
+= 0
++ ls /dev/gpt/gctl-*
+gctl-efi
+gctl-test
++ newfs -U /dev/gpt/gctl-test
+= 0
++ mount /dev/gpt/gctl-test m
+= 0
++ gpart delete -i 2 md47
+gpart: Device busy
+= 1
++ gpart resize -i 2 -s 8m md47
+gpart: Device busy
+= 1
++ gpart resize -i 2 md47
+md47p2 resized
+= 0
++ gpart show md47
+=>    40  130992  md47  GPT  (64M)
+      40   81920     1  efi  (40M)
+   81960   49072     2  freebsd-ufs  [bootme]  (24M)
+
+= 0
++ dd if=/dev/md47 of=/dev/md47 count=1
+= 1
++ sysctl kern.geom.debugflags=16
+kern.geom.debugflags: 0 -> 16
+= 0
++ dd if=/dev/md47 of=/dev/md47 count=1
+= 0
++ sysctl kern.geom.debugflags=0
+kern.geom.debugflags: 16 -> 0
+= 0
++ umount m
+= 0
++ fsck_ffs -n /dev/gpt/gctl-test
+** Phase 1 - Check Blocks and Sizes
+** Phase 2 - Check Pathnames
+** Phase 3 - Check Connectivity
+** Phase 4 - Check Reference Counts
+** Phase 5 - Check Cyl groups
++ gpart resize -i 2 -s 16m md47
+md47p2 resized
+= 0
++ gpart modify -i 2 -l gctl-renamed -t freebsd-zfs md47
+md47p2 modified
+= 0
++ ls /dev/gpt/gctl-*
+gctl-efi
+gctl-renamed
++ gpart modify -i 2 -t freebsd-ufs md47
+md47p2 modified
+= 0
++ mount -o ro /dev/gpt/gctl-renamed m
+= 0
++ cat m/f
+hello
+= 0
++ umount m
+= 0
++ gpart add -t freebsd-swap -s 1m -f x md47
+md47p3 added
+= 0
++ gpart show -l md47
+=>    40  130992  md47  GPT  (64M)
+      40   81920     1  gctl-efi  (40M)
+   81960   32768     2  gctl-renamed  [bootme]  (16M)
+  114728    2048     3  (null)  (1.0M)
+  116776   14256        - free -  (7.0M)
+
+= 0
++ gpart undo md47
+= 0
++ gpart show -l md47
+=>    40  130992  md47  GPT  (64M)
+      40   81920     1  gctl-efi  (40M)
+   81960   32768     2  gctl-renamed  [bootme]  (16M)
+  114728   16304        - free -  (8.0M)
+
+= 0
++ gpart commit md47
+gpart: Operation not permitted
+= 1
++ gpart unset -a bootme -i 2 md47
+bootme unset on md47p2
+= 0
++ gpart delete -i 1 md47
+md47p1 deleted
+= 0
++ gpart destroy md47
+gpart: Device busy
+= 1
++ gpart destroy -F md47
+md47 destroyed
+= 0
++ gpart show md47
+gpart: No such geom: md47.
+= 1
++ mdconfig -d -u 47
+= 0
++ dd if=/dev/zero of=disk.img bs=1m count=0 seek=64
+= 0
++ mdconfig -a -t vnode -f disk.img -u 47
+= 0
++ gpart create -s gpt md47
+md47 created
+= 0
++ gpart create -s gpt md47
+gpart: geom 'md47': File exists
+= 1
++ gpart add -t efi -s 40m -l gctl-efi md47
+md47p1 added
+= 0
++ gpart add -t bogus -s 1m md47
+gpart: Invalid argument
+= 1
++ gpart add -t freebsd-ufs -s 16m -l gctl-test md47
+md47p2 added
+= 0
++ gpart add -t freebsd-ufs -b 100 -s 1m md47
+gpart: start '100': No space left on device
+= 1
++ gpart set -a bootme -i 2 md47
+bootme set on md47p2
+= 0
++ gpart show md47
+=>    40  130992  md47  GPT  (64M)
+      40   81920     1  efi  (40M)
+   81960   32768     2  freebsd-ufs  [bootme]  (16M)
+  114728   16304        - free -  (8.0M)
+
+= 0
++ gpart show -l md47
+=>    40  130992  md47  GPT  (64M)
+      40   81920     1  gctl-efi  (40M)
+   81960   32768     2  gctl-test  [bootme]  (16M)
+  114728   16304        - free -  (8.0M)
+
+= 0
++ gpart show -p md47
+=>    40  130992    md47  GPT  (64M)
+      40   81920  md47p1  efi  (40M)
+   81960   32768  md47p2  freebsd-ufs  [bootme]  (16M)
+  114728   16304          - free -  (8.0M)
+
+= 0
++ gpart show -r md47
+=>    40  130992  md47  GPT  (64M)
+      40   81920     1  c12a7328-f81f-11d2-ba4b-00a0c93ec93b  (40M)
+   81960   32768     2  516e7cb6-6ecf-11d6-8ff8-00022d09712b  [bootme]  (16M)
+  114728   16304        - free -  (8.0M)
+
+= 0
++ gpart backup md47
+GPT 128
+1           efi     40  81920 gctl-efi 
+2   freebsd-ufs  81960  32768 gctl-test  [bootme] 
+= 0
++ ls /dev/gpt/gctl-*
+gctl-efi
+gctl-test
++ newfs -U /dev/gpt/gctl-test
+= 0
++ mount /dev/gpt/gctl-test m
+= 0
++ gpart delete -i 2 md47
+gpart: Device busy
+= 1
++ gpart resize -i 2 -s 8m md47
+gpart: Device busy
+= 1
++ gpart resize -i 2 md47
+md47p2 resized
+= 0
++ gpart show md47
+=>    40  130992  md47  GPT  (64M)
+      40   81920     1  efi  (40M)
+   81960   49072     2  freebsd-ufs  [bootme]  (24M)
+
+= 0
++ dd if=/dev/md47 of=/dev/md47 count=1
+= 1
++ sysctl kern.geom.debugflags=16
+kern.geom.debugflags: 0 -> 16
+= 0
++ dd if=/dev/md47 of=/dev/md47 count=1
+= 0
++ sysctl kern.geom.debugflags=0
+kern.geom.debugflags: 16 -> 0
+= 0
++ umount m
+= 0
++ fsck_ffs -n /dev/gpt/gctl-test
+** Phase 1 - Check Blocks and Sizes
+** Phase 2 - Check Pathnames
+** Phase 3 - Check Connectivity
+** Phase 4 - Check Reference Counts
+** Phase 5 - Check Cyl groups
++ gpart resize -i 2 -s 16m md47
+md47p2 resized
+= 0
++ gpart modify -i 2 -l gctl-renamed -t freebsd-zfs md47
+md47p2 modified
+= 0
++ ls /dev/gpt/gctl-*
+gctl-efi
+gctl-renamed
++ gpart modify -i 2 -t freebsd-ufs md47
+md47p2 modified
+= 0
++ mount -o ro /dev/gpt/gctl-renamed m
+= 0
++ cat m/f
+hello
+= 0
++ umount m
+= 0
++ gpart add -t freebsd-swap -s 1m -f x md47
+md47p3 added
+= 0
++ gpart show -l md47
+=>    40  130992  md47  GPT  (64M)
+      40   81920     1  gctl-efi  (40M)
+   81960   32768     2  gctl-renamed  [bootme]  (16M)
+  114728    2048     3  (null)  (1.0M)
+  116776   14256        - free -  (7.0M)
+
+= 0
++ gpart undo md47
+= 0
++ gpart show -l md47
+=>    40  130992  md47  GPT  (64M)
+      40   81920     1  gctl-efi  (40M)
+   81960   32768     2  gctl-renamed  [bootme]  (16M)
+  114728   16304        - free -  (8.0M)
+
+= 0
++ gpart commit md47
+gpart: Operation not permitted
+= 1
++ gpart unset -a bootme -i 2 md47
+bootme unset on md47p2
+= 0
++ gpart delete -i 1 md47
+md47p1 deleted
+= 0
++ gpart destroy md47
+gpart: Device busy
+= 1
++ gpart destroy -F md47
+md47 destroyed
+= 0
++ gpart show md47
+gpart: No such geom: md47.
+= 1
++ gpart create -s gpt md47
+md47 created
+= 0
++ gpart add -t efi -s 1m -l gctl-esp md47
+md47p1 added
+= 0
++ gpart add -t freebsd-ufs -s 8m -l gctl-keep md47
+md47p2 added
+= 0
++ gpart bootcode -b pmbr md47
+bootcode written to md47
+= 0
++ newfs -U /dev/gpt/gctl-keep
+= 0
++ mdconfig -d -u 47
+= 0
++ mdconfig -a -t vnode -f disk.img -u 47
+= 0
++ gpart show -l md47
+=>    40  130992  md47  GPT  (64M)
+      40    2048     1  gctl-esp  (1.0M)
+    2088   16384     2  gctl-keep  (8.0M)
+   18472  112560        - free -  (55M)
+
+= 0
++ fsck_ffs -n /dev/gpt/gctl-keep
+** Phase 1 - Check Blocks and Sizes
+** Phase 2 - Check Pathnames
+** Phase 3 - Check Connectivity
+** Phase 4 - Check Reference Counts
+** Phase 5 - Check Cyl groups
++ mdconfig -d -u 47
+= 0

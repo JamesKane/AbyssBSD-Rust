@@ -341,6 +341,37 @@ impl Mesh {
     /// `kern.geom.confxml` (`g_conf_specific`).
     #[must_use]
     pub fn confxml(&self) -> String {
+        self.conf_specific(None)
+    }
+
+    /// What a control request's `getxml` gets (`g_ctl_getxml`): the mesh
+    /// with only class `class`'s geoms named `name` (all of them for
+    /// `None`) and, with `parents`, the geoms of the providers they
+    /// consume. `None` if there is no such class.
+    #[must_use]
+    pub fn getxml(&self, class: &str, name: Option<&str>, parents: bool) -> Option<String> {
+        let c = self.classes.iter().find(|c| c.name == class)?;
+        let mut gps = Vec::new();
+        for &g in &c.geoms {
+            let gp = &self.geoms[g];
+            if name.is_some_and(|n| n != gp.name) {
+                continue;
+            }
+            gps.push(g);
+            if parents {
+                gps.extend(
+                    gp.consumers
+                        .iter()
+                        .map(|&cc| self.providers[self.consumers[cc].provider].geom),
+                );
+            }
+        }
+        Some(self.conf_specific(Some(&gps)))
+    }
+
+    /// `g_conf_specific`: every class, with the geoms of `gps` (all for
+    /// `None`).
+    fn conf_specific(&self, gps: Option<&[usize]>) -> String {
         let mut sb = String::from("<mesh>\n");
         for c in &self.classes {
             let _ = writeln!(sb, "  <class id=\"{:#x}\">", c.id);
@@ -348,12 +379,20 @@ impl Mesh {
             escape(&mut sb, c.name);
             sb.push_str("</name>\n");
             for &g in &c.geoms {
-                self.xml_geom(&mut sb, g);
+                if gps.is_none_or(|gps| gps.contains(&g)) {
+                    self.xml_geom(&mut sb, g);
+                }
             }
             sb.push_str("  </class>\n");
         }
         sb.push_str("</mesh>\n");
         sb
+    }
+
+    /// The rank of provider `p`'s geom.
+    #[must_use]
+    pub fn provider_rank(&self, p: ProviderRef) -> u32 {
+        self.geoms[self.providers[p.0].geom].rank
     }
 
     fn class_id(&self, class: usize) -> u64 {
@@ -650,6 +689,24 @@ mod tests {
             "z0x11 [shape=hexagon,label=\"vtbd0\\nr1w1e3\\nerr#0\\nsector=512\\nstripe=0\"];\nz0x11 -> z0x10;\n"
         ));
         assert!(d.ends_with("}\n"));
+    }
+
+    #[test]
+    fn getxml_as_geom_ctl_selects() {
+        let m = sample();
+        let x = m.getxml("PART", Some("vtbd0"), true).unwrap();
+        // The table and its disk's geom; every class, the rest empty.
+        assert!(x.contains("<geom id=\"0x20\">") && x.contains("<geom id=\"0x10\">"));
+        assert!(!x.contains("<geom id=\"0x30\">"));
+        assert!(x.contains("    <name>VFS</name>\n  </class>\n"));
+        let x = m.getxml("PART", Some("vtbd0"), false).unwrap();
+        assert!(!x.contains("<geom id=\"0x10\">"));
+        let none = m.getxml("PART", Some("nope"), true).unwrap();
+        assert!(none.contains("<name>PART</name>\n  </class>"));
+        assert_eq!(m.getxml("NOPE", None, false), None);
+        let dev = m.getxml("DEV", None, false).unwrap();
+        assert_eq!(dev.matches("<geom id").count(), 3);
+        assert_eq!(m.provider_rank(m.provider("gpt/root").unwrap()), 3);
     }
 
     #[test]

@@ -273,9 +273,7 @@ impl CharDevice for DiskDev {
         write: bool,
     ) -> Result<Option<Arc<dyn CharDevice>>, Errno> {
         let dev = Arc::new(DiskDev(Arc::clone(&self.0), self.1.clone()));
-        Ok(Some(crate::geom_kern::open(
-            s, dev, &self.0, &self.1, write,
-        )))
+        crate::geom_kern::open(s, dev, &self.0, &self.1, write).map(Some)
     }
 
     fn read(&self, s: &Sleepable, uio: &mut dyn Uio, offset: u64, _: bool) -> Result<usize, Errno> {
@@ -850,6 +848,22 @@ fn disk_event(s: &Sleepable, e: storage::disk::Event<'_>) {
                 remove(s, name.as_bytes());
             }
         }
+        // Names tasted again: those gone go, the new come.
+        storage::disk::Event::Relabeled { disk, old } => {
+            let new = disk.label_names();
+            for name in old.iter().filter(|n| !new.contains(n)) {
+                remove(s, name.as_bytes());
+            }
+            for name in new.iter().filter(|n| !old.contains(n)) {
+                let _ = add(
+                    name.as_bytes(),
+                    0o640,
+                    0,
+                    GID_OPERATOR,
+                    Arc::new(DiskDev(Arc::clone(disk), name.clone())),
+                );
+            }
+        }
     }
 }
 
@@ -858,9 +872,7 @@ fn disk_event(s: &Sleepable, e: storage::disk::Event<'_>) {
 /// partition is open by its own name; these stay).
 fn names(d: &storage::Disk) -> Vec<alloc::string::String> {
     let mut out = alloc::vec![d.name().into()];
-    if let Some((_, e)) = d.partition() {
-        out.extend(e.aliases());
-    }
+    out.extend(d.aliases());
     out
 }
 

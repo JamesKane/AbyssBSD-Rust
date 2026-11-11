@@ -19,7 +19,19 @@
 //! on an event thread (`g_event`); the sysctls wait for the events
 //! posted before them (`g_waitfor_event`), so what a writer leaves is
 //! what the next read shows. A partition opened or mounted for writing
-//! hides its other names (the LABEL geoms GEOM withers then).
+//! hides its other names (the LABEL geoms GEOM withers then). As
+//! `g_access` refuses it, a node is not opened for writing while
+//! something else holds its provider exclusively (`EPERM`): a mounted
+//! file system, a partition of the disk in use, uncommitted changes to
+//! its table; `kern.geom.debugflags` 0x10 (`G_F_FOOTSHOOTING`) lets a
+//! whole disk (rank 1) be written anyway.
+//!
+//! Control requests (`/dev/geom.ctl`, [`crate::geom_ctl`]) run on the
+//! event thread too ([`run`]). Partitions a request makes appear in the
+//! mesh when it made them, after what came before: their providers,
+//! then their LABEL and DEV geoms, as the tastes of new providers make
+//! them; names tasted again after a commit (`g_media_changed`) are LABEL
+//! geoms made then.
 //!
 //! Behavior reference: sys/geom/geom_kern.c, geom_dump.c, geom_disk.c
 //! (`g_disk_dumpconf`, `sysctl_disks`), geom_dev.c (`g_dev_open`),
@@ -36,10 +48,11 @@ use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
 use abi::errno::Errno;
-use geom::{Access, Field, Kind, Media, Mesh, ProviderRef};
+use geom::table::Scheme;
+use geom::{Access, Field, GeomRef, Kind, Media, Mesh, ProviderRef};
 use sched::{Sleepable, WaitQueue};
 use storage::{Disk, Rotation};
 use sync::SpinLock;
@@ -59,6 +72,11 @@ const CLASSES: &[&str] = &[
 const CLASSES: &[&str] = &[
     "MD", "DEV", "DISK", "Flashmap", "VFS", "LABEL", "PART", "SWAP", "RAID",
 ];
+
+/// The class named `name`, if the kernel has it.
+pub(crate) fn class_named(name: &[u8]) -> Option<&'static str> {
+    CLASSES.iter().copied().find(|c| c.as_bytes() == name)
+}
 
 /// Where the synthetic ids start: classes, then everything else.
 const CLASS_IDS: u64 = 0xffff_ffff_8190_0000;
@@ -90,7 +108,7 @@ pub(crate) fn provider_id(serial: u64) -> u64 {
 
 // --- The event thread ---------------------------------------------------
 
-type Event = Box<dyn FnOnce(&Sleepable) + Send>;
+pub(crate) type Event = Box<dyn FnOnce(&Sleepable) + Send>;
 
 struct Events {
     queue: VecDeque<Event>,
@@ -120,6 +138,27 @@ fn post(e: Event) {
         q.posted += 1;
     }
     WORK.wake_one();
+}
+
+/// Runs `e` on the event thread and waits for it (`g_waitfor_event`).
+pub(crate) fn run(s: &Sleepable, e: Event) {
+    post(e);
+    drain(s);
+}
+
+/// `kern.geom.debugflags` (`g_debugflags`).
+static DEBUGFLAGS: AtomicI32 = AtomicI32::new(0);
+
+/// `kern.geom.debugflags`.
+pub(crate) fn debugflags() -> u32 {
+    // A setting; nothing is ordered after it.
+    u32::from_ne_bytes(DEBUGFLAGS.load(Ordering::Relaxed).to_ne_bytes())
+}
+
+/// Whether opens and resizes that would shoot one's foot are allowed
+/// (`G_F_FOOTSHOOTING`).
+fn footshooting() -> bool {
+    debugflags() & geom::table::G_F_FOOTSHOOTING != 0
 }
 
 /// Waits until the events posted so far have run.
@@ -173,15 +212,45 @@ fn mounts() -> Vec<(&'static str, String, bool, u64)> {
         .collect()
 }
 
-/// Whether `disk` or a partition of it is open or mounted (md's
-/// `opencount`).
+/// Whether `disk` or a partition of it is open or mounted, or its table
+/// has changes to commit (md's `opencount`).
 pub(crate) fn in_use(disk: &Arc<Disk>) -> bool {
     let serial = disk.serial();
-    OPENS.lock().iter().any(|o| o.serial == serial)
+    disk.table().is_some_and(|t| t.part.opened)
+        || OPENS.lock().iter().any(|o| o.serial == serial)
         || mounts()
             .iter()
             .any(|(_, from, _, _)| storage::find(from).is_some_and(|d| d.serial() == serial))
         || partitions_in_use(disk)
+}
+
+/// Whether partition `part` is open or mounted, under any of its names
+/// (its provider's access counts are not all zero).
+pub(crate) fn busy(part: &Arc<Disk>) -> bool {
+    let serial = part.serial();
+    OPENS.lock().iter().any(|o| o.serial == serial)
+        || mounts()
+            .iter()
+            .any(|(_, from, _, _)| storage::find(from).is_some_and(|d| d.serial() == serial))
+}
+
+/// `g_access(cp, 1, 1, 1)` of a table's consumer on whole disk `disk`:
+/// refused (`EPERM`) while another writes the disk (an open of its node
+/// for writing, a read-write mount) or holds it exclusively (a mount),
+/// unless the foot is to be shot (a disk is of rank 1).
+pub(crate) fn table_access(disk: &Arc<Disk>) -> Result<(), Errno> {
+    if footshooting() {
+        return Ok(());
+    }
+    let serial = disk.serial();
+    let written = OPENS.lock().iter().any(|o| o.serial == serial && o.write);
+    let mounted = mounts()
+        .iter()
+        .any(|(_, from, _, _)| storage::find(from).is_some_and(|d| d.serial() == serial));
+    if written || mounted {
+        return Err(Errno::EPERM);
+    }
+    Ok(())
 }
 
 /// Whether a partition of `disk` is open or mounted.
@@ -208,20 +277,34 @@ struct Opened {
     /// A write open of a whole disk, which retastes it when the last
     /// one closes.
     rewrites: bool,
+    /// A write open of a partition, whose names are tasted again when
+    /// the last one closes.
+    relabels: bool,
 }
 
 /// Counts an open of disk node `name` (of `disk`), for writing if
 /// `write`; the returned device serves the open file's I/O through `dev`
 /// until it closes. The first write open of a whole disk spoils its
-/// partition table, unless a partition is in use.
+/// partition table, unless a partition is in use. `EPERM` for writing a
+/// provider another holds exclusively (`g_access`), but a whole disk with
+/// `kern.geom.debugflags` 0x10.
 pub(crate) fn open(
     s: &Sleepable,
     dev: Arc<dyn CharDevice>,
     disk: &Arc<Disk>,
     name: &str,
     write: bool,
-) -> Arc<dyn CharDevice> {
+) -> Result<Arc<dyn CharDevice>, Errno> {
     let whole = disk.partition().is_none();
+    if write {
+        let m = mesh(s);
+        if let Some(p) = m.provider(name)
+            && m.provider_access(p).e > 0
+            && !(footshooting() && m.provider_rank(p) == 1)
+        {
+            return Err(Errno::EPERM);
+        }
+    }
     let id = NEXT_OPEN.fetch_add(1, Ordering::Relaxed);
     let first_writer = {
         let mut opens = OPENS.lock();
@@ -237,13 +320,14 @@ pub(crate) fn open(
     if first_writer && whole && disk.table().is_some() && !partitions_in_use(disk) {
         storage::spoil(s, disk);
     }
-    Arc::new(Opened {
+    Ok(Arc::new(Opened {
         dev,
         id,
         disk: Arc::downgrade(disk),
         serial: disk.serial(),
         rewrites: write && whole,
-    })
+        relabels: write && !whole,
+    }))
 }
 
 impl Drop for Opened {
@@ -253,11 +337,16 @@ impl Drop for Opened {
             opens.retain(|o| o.id != self.id);
             !opens.iter().any(|o| o.serial == self.serial && o.write)
         };
-        if self.rewrites && last_writer {
+        if (self.rewrites || self.relabels) && last_writer {
             let disk = Weak::clone(&self.disk);
+            let whole = self.rewrites;
             post(Box::new(move |s| {
                 if let Some(d) = disk.upgrade() {
-                    storage::retaste(s, &d);
+                    if whole {
+                        storage::retaste(s, &d);
+                    } else {
+                        storage::relabel(s, &d);
+                    }
                 }
             }));
         }
@@ -348,6 +437,28 @@ fn rotation(r: Rotation) -> String {
 struct Builder<'a> {
     m: Mesh,
     held: &'a Holders,
+    /// The PART geoms made, by their disk's serial.
+    tables: Vec<(u64, GeomRef)>,
+}
+
+/// A label provider made, for its DEV geom: its partition's serial, its
+/// first id slot, its name, and its provider.
+type Made = (u64, u64, String, ProviderRef);
+
+/// A partition's provider's size and alignment.
+fn partition_media(part: &Arc<Disk>, e: &storage::PartitionEntry) -> Media {
+    let desc = part.description();
+    let offset = e.first_lba * u64::from(part.sector_size());
+    let mut stripeoffset = desc.stripeoffset + offset;
+    if desc.stripesize > 0 {
+        stripeoffset %= desc.stripesize;
+    }
+    Media {
+        mediasize: part.bytes(),
+        sectorsize: part.sector_size(),
+        stripesize: desc.stripesize,
+        stripeoffset,
+    }
 }
 
 impl Builder<'_> {
@@ -447,16 +558,15 @@ impl Builder<'_> {
             self.m.set_provider_config(p, config, txt);
             (p, (desc.fwheads, desc.fwsectors))
         };
-        if d.table().is_some_and(|t| !t.retasted) {
+        if d.table().is_some_and(|t| t.at_publication) {
             self.table(d, p, fw);
         }
         self.dev(serial, DEV, d.name(), p);
     }
 
     /// Disk `d`'s partition table (on its provider `dp`, with firmware
-    /// geometry `fw`): the PART geom and its providers, then each
-    /// partition's LABEL and DEV geoms, then the labels' DEV geoms, as
-    /// the tastes of each new provider make them.
+    /// geometry `fw`): the PART geom, its consumer (held open while the
+    /// table has changes to commit), and the partitions found with it.
     fn table(&mut self, d: &Arc<Disk>, dp: ProviderRef, fw: (u32, u32)) {
         let Some(t) = d.table() else { return };
         let serial = d.serial();
@@ -464,45 +574,58 @@ impl Builder<'_> {
         let g = self
             .m
             .add_geom(c, id(serial, PART_GEOM), d.name(), Kind::Part);
-        let ss = u64::from(d.sector_size());
-        let (heads, sectors) = geom::part::geometry(d.sectors(), Some(fw));
+        let part = &t.part;
+        // A destroyed table's geometry is none (`g_part_null_scheme`).
+        let (heads, sectors) = if part.scheme == Scheme::Null {
+            (0, 0)
+        } else {
+            geom::part::geometry(d.sectors(), Some(fw))
+        };
         self.m.set_geom_config(
             g,
             vec![
-                Field::new("scheme", "GPT"),
-                Field::new("entries", t.entries),
-                Field::new("first", t.first),
-                Field::new("last", t.last),
+                Field::new("scheme", part.scheme.name()),
+                Field::new("entries", part.entries),
+                Field::new("first", part.first),
+                Field::new("last", part.last),
                 Field::new("fwsectors", sectors),
                 Field::new("fwheads", heads),
-                Field::new("state", if t.corrupt { "CORRUPT" } else { "OK" }),
-                Field::new("modified", "false"),
+                Field::new("state", if part.corrupt { "CORRUPT" } else { "OK" }),
+                Field::new("modified", if part.opened { "true" } else { "false" }),
             ],
         );
-        self.m.attach(g, id(serial, PART_CONSUMER), dp);
-        let desc = d.description();
-        let parts = storage::partitions(d);
+        let cp = self.m.attach(g, id(serial, PART_CONSUMER), dp);
+        if part.opened {
+            self.m.open(cp, Access::new(1, 1, 1));
+        }
+        self.tables.push((serial, g));
+        self.batch(d, t.born);
+    }
+
+    /// The partitions of disk `d` published together in `batch`: their
+    /// providers, then each one's LABEL geoms and DEV geom, then the
+    /// labels' DEV geoms, as the tastes of each new provider make them.
+    fn batch(&mut self, d: &Arc<Disk>, batch: u64) {
+        let Some(&(_, g)) = self.tables.iter().find(|(s, _)| *s == d.serial()) else {
+            return;
+        };
+        let mut parts: Vec<Arc<Disk>> = storage::partitions(d)
+            .into_iter()
+            .filter(|p| p.partition_times().is_some_and(|(b, _)| b == batch))
+            .collect();
+        parts.sort_by_key(|p| p.serial());
         let mut made = Vec::new();
         for part in &parts {
             let Some((_, e)) = part.partition() else {
                 continue;
             };
-            let offset = e.first_lba * ss;
-            let mut stripeoffset = desc.stripeoffset + offset;
-            if desc.stripesize > 0 {
-                stripeoffset %= desc.stripesize;
-            }
-            let media = Media {
-                mediasize: part.bytes(),
-                sectorsize: part.sector_size(),
-                stripesize: desc.stripesize,
-                stripeoffset,
-            };
+            let media = partition_media(part, &e);
             let p = self
                 .m
                 .add_provider(g, id(part.serial(), PROVIDER), part.name(), media);
             let (index, ty, raw_type, raw_uuid) =
                 (e.index + 1, e.type_name(), e.raw_type(), e.raw_uuid());
+            let offset = e.first_lba * u64::from(part.sector_size());
             let mut config = vec![
                 Field::new("start", e.first_lba),
                 Field::new("end", e.last_lba),
@@ -529,47 +652,67 @@ impl Builder<'_> {
         }
         let mut labels = Vec::new();
         for (part, p, media) in &made {
-            let Some((_, e)) = part.partition() else {
-                continue;
-            };
-            let names = e.label_names();
-            // Written through its own name: GEOM withered its labels;
-            // through one of them: the others.
-            let keep: Vec<bool> = if self.held.writes(part.name()) {
-                vec![false; names.len()]
-            } else if let Some(w) = names.iter().position(|n| self.held.writes(n)) {
-                (0..names.len()).map(|i| i == w).collect()
-            } else {
-                vec![true; names.len()]
-            };
-            for (n, (name, keep)) in (0u64..).zip(names.iter().zip(keep)) {
-                // A name another provider has already is not made again.
-                if !keep || self.m.provider(name).is_some() {
-                    continue;
-                }
-                let s = part.serial();
-                let c = self.class("LABEL");
-                let base = LABEL + 5 * n;
-                let lg = self.m.add_geom(c, id(s, base), part.name(), Kind::Label);
-                self.m.attach(lg, id(s, base + 1), *p);
-                let lp = self.m.add_provider(lg, id(s, base + 2), name, *media);
-                let len = media.mediasize;
-                self.m.set_provider_config(
-                    lp,
-                    vec![
-                        Field::new("index", 0),
-                        Field::new("length", len),
-                        Field::new("seclength", len / 512),
-                        Field::new("offset", 0),
-                        Field::new("secoffset", 0),
-                    ],
-                    String::from(" i 0 o 0"),
-                );
-                labels.push((s, base, name.clone(), lp));
+            if part.partition_times().is_some_and(|(b, l)| l == b) {
+                labels.extend(self.labels(part, *p, *media));
             }
             self.dev(part.serial(), DEV, part.name(), *p);
         }
         for (s, base, name, lp) in labels {
+            self.dev(s, base + 3, &name, lp);
+        }
+    }
+
+    /// Partition `part`'s LABEL geoms (on its provider `p`), the names
+    /// its writers leave: the label providers made.
+    fn labels(&mut self, part: &Arc<Disk>, p: ProviderRef, media: Media) -> Vec<Made> {
+        let names = part.label_names();
+        // Written through its own name: GEOM withered its labels;
+        // through one of them: the others.
+        let keep: Vec<bool> = if self.held.writes(part.name()) {
+            vec![false; names.len()]
+        } else if let Some(w) = names.iter().position(|n| self.held.writes(n)) {
+            (0..names.len()).map(|i| i == w).collect()
+        } else {
+            vec![true; names.len()]
+        };
+        let mut made = Vec::new();
+        for (n, (name, keep)) in (0u64..).zip(names.iter().zip(keep)) {
+            // A name another provider has already is not made again.
+            if !keep || self.m.provider(name).is_some() {
+                continue;
+            }
+            let s = part.serial();
+            let c = self.class("LABEL");
+            let base = LABEL + 5 * n;
+            let lg = self.m.add_geom(c, id(s, base), part.name(), Kind::Label);
+            self.m.attach(lg, id(s, base + 1), p);
+            let lp = self.m.add_provider(lg, id(s, base + 2), name, media);
+            let len = media.mediasize;
+            self.m.set_provider_config(
+                lp,
+                vec![
+                    Field::new("index", 0),
+                    Field::new("length", len),
+                    Field::new("seclength", len / 512),
+                    Field::new("offset", 0),
+                    Field::new("secoffset", 0),
+                ],
+                String::from(" i 0 o 0"),
+            );
+            made.push((s, base, name.clone(), lp));
+        }
+        made
+    }
+
+    /// Partition `part`'s names, tasted again after its provider was
+    /// made (`g_media_changed`, or its last writer's close): its LABEL
+    /// geoms, then their DEV geoms.
+    fn relabel(&mut self, part: &Arc<Disk>) {
+        let (Some(p), Some((_, e))) = (self.m.provider(part.name()), part.partition()) else {
+            return;
+        };
+        let media = partition_media(part, &e);
+        for (s, base, name, lp) in self.labels(part, p, media) {
             self.dev(s, base + 3, &name, lp);
         }
     }
@@ -593,9 +736,27 @@ impl Builder<'_> {
     }
 }
 
+/// What made part of the mesh, in the order it happened.
+enum Happened<'a> {
+    /// A disk was published.
+    Disk(&'a Arc<Disk>),
+    /// A table was found or made on it after its publication.
+    Table(&'a Arc<Disk>),
+    /// Partitions of it were published (a control request).
+    Batch(&'a Arc<Disk>, u64),
+    /// A partition's names were tasted again.
+    Relabel(Arc<Disk>),
+}
+
 /// The mesh now, once the events posted so far have run.
 fn mesh(s: &Sleepable) -> Mesh {
     drain(s);
+    build()
+}
+
+/// The mesh as it is (on the event thread, which must not wait for
+/// itself).
+pub(crate) fn build() -> Mesh {
     let held = Holders {
         opens: OPENS
             .lock()
@@ -607,44 +768,70 @@ fn mesh(s: &Sleepable) -> Mesh {
     let mut b = Builder {
         m: Mesh::new(),
         held: &held,
+        tables: Vec::new(),
     };
     for (i, name) in (0u64..).zip(CLASSES) {
         b.m.add_class(CLASS_IDS + (i << 8), name);
     }
-    // Disks as they were published, and the tables found later when
-    // those were found (their first partition's serial).
+    // Disks as they were published; the tables found or made later, and
+    // the partitions and names that came after their tables, when they
+    // did.
     let all = storage::disk::all();
-    let mut events: Vec<(u64, &Arc<Disk>, bool)> = Vec::new();
+    let mut events: Vec<(u64, Happened<'_>)> = Vec::new();
     for d in all.iter().filter(|d| d.partition().is_none()) {
-        events.push((d.serial(), d, false));
-        if d.table().is_some_and(|t| t.retasted) {
-            let when = storage::partitions(d)
-                .iter()
-                .map(|p| p.serial())
-                .min()
-                .unwrap_or(u64::MAX);
-            events.push((when, d, true));
+        events.push((d.serial(), Happened::Disk(d)));
+        let Some(t) = d.table() else { continue };
+        if !t.at_publication {
+            events.push((t.born, Happened::Table(d)));
         }
-    }
-    events.sort_by_key(|&(when, _, _)| when);
-    for (_, d, table) in events {
-        if table {
-            if let Some(p) = b.m.provider(d.name()) {
-                let fw = crate::mdisk::info(d).map_or_else(
-                    || {
-                        let desc = d.description();
-                        (desc.fwheads, desc.fwsectors)
-                    },
-                    |md| (md.fwheads, md.fwsectors),
-                );
-                b.table(d, p, fw);
+        let mut batches = Vec::new();
+        for p in storage::partitions(d) {
+            let Some((batch, labeled)) = p.partition_times() else {
+                continue;
+            };
+            if batch != t.born && !batches.contains(&batch) {
+                batches.push(batch);
             }
-        } else {
-            b.disk(d);
+            if labeled != batch {
+                events.push((labeled, Happened::Relabel(p)));
+            }
+        }
+        events.extend(
+            batches
+                .into_iter()
+                .map(|batch| (batch, Happened::Batch(d, batch))),
+        );
+    }
+    events.sort_by_key(|(when, _)| *when);
+    for (_, e) in events {
+        match e {
+            Happened::Disk(d) => b.disk(d),
+            Happened::Table(d) => {
+                if let Some(p) = b.m.provider(d.name()) {
+                    let fw = crate::mdisk::info(d).map_or_else(
+                        || {
+                            let desc = d.description();
+                            (desc.fwheads, desc.fwsectors)
+                        },
+                        |md| (md.fwheads, md.fwsectors),
+                    );
+                    b.table(d, p, fw);
+                }
+            }
+            Happened::Batch(d, batch) => b.batch(d, batch),
+            Happened::Relabel(p) => b.relabel(&p),
         }
     }
     b.mounts();
     b.m
+}
+
+/// A tunable's value from the kernel environment (`TUNABLE_INT`), else
+/// `default`.
+fn tunable(name: &str, default: i32) -> i32 {
+    crate::boot::value(name)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 /// One of the mesh's text forms.
@@ -657,6 +844,7 @@ type View = fn(&Mesh) -> String;
 pub(crate) fn init(s: &Sleepable) {
     use abi::sysctl::{ctlflag, ctltype};
     use sysctl::Number;
+    crate::geom_ctl::init();
     match sched::spawn("g_event", sched::Priority::KERNEL, run_events) {
         // Release: pairs with `post`'s acquire.
         Ok(_) => RUNNING.store(true, Ordering::Release),
@@ -688,6 +876,40 @@ pub(crate) fn init(s: &Sleepable) {
             t.add_query(g, Number::Auto, name, descr, kind, "", text(f))
                 .expect("kern.geom.conf*");
         }
+        DEBUGFLAGS.store(tunable("kern.geom.debugflags", 0), Ordering::Relaxed);
+        t.add_writable(
+            g,
+            Number::Auto,
+            "debugflags",
+            "Set various trace levels for GEOM debugging",
+            ctlflag::TUN,
+            sysctl::Value::Int(Box::new(|| DEBUGFLAGS.load(Ordering::Relaxed))),
+            sysctl::int_writer(|n| {
+                DEBUGFLAGS.store(n, Ordering::Relaxed);
+                Ok(())
+            }),
+        )
+        .expect("kern.geom.debugflags");
+        let part = t
+            .add_node(g, Number::Auto, "part", "GEOM_PART stuff")
+            .expect("kern.geom.part");
+        let check = tunable("kern.geom.part.check_integrity", 1) != 0;
+        storage::CHECK_INTEGRITY.store(check, Ordering::Relaxed);
+        t.add_writable(
+            part,
+            Number::Auto,
+            "check_integrity",
+            "Enable integrity checking",
+            ctlflag::TUN,
+            sysctl::Value::Uint(Box::new(|| {
+                u32::from(storage::CHECK_INTEGRITY.load(Ordering::Relaxed))
+            })),
+            sysctl::int_writer(|n| {
+                storage::CHECK_INTEGRITY.store(n != 0, Ordering::Relaxed);
+                Ok(())
+            }),
+        )
+        .expect("kern.geom.part.check_integrity");
         t.add_query(
             kern,
             Number::Auto,

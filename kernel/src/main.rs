@@ -44,6 +44,7 @@ mod fido;
 mod firmware;
 mod firstuse;
 mod fs;
+mod geom_ctl;
 mod geom_kern;
 #[cfg(target_arch = "aarch64")]
 mod idregs;

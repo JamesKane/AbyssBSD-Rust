@@ -5983,6 +5983,63 @@ mod user_memory {
     }
 
     ktest! {
+        /// FreeBSD's `gpart` (from `/rescue`, through `/dev/geom.ctl`) on a
+        /// malloc and then a vnode memory disk: create, add with labels,
+        /// show four ways, backup, `newfs` and mount by GPT label, what is
+        /// refused while mounted (delete, shrink, writing the disk until
+        /// `kern.geom.debugflags=16`), a grow while mounted, `fsck_ffs`,
+        /// modify (the label's node follows), an uncommitted add undone,
+        /// delete, destroy; then a table left on the vnode disk read back
+        /// by a new attach. Everything printed must be what FreeBSD 15.1
+        /// printed for the same script (tests/corpus/gpart/guest.sh).
+        /// With `abyss.test.gpart.dump=1` the image's nonzero sectors are
+        /// printed (`gpart-dump: SECTOR HEX`), for FreeBSD to read it.
+        fn gpart_does_what_freebsd_does() {
+            let s = cx();
+            let script = alloc::format!(
+                "mount -t tmpfs tmpfs /mnt || exit 99\n{{\n{}\n}} > /mnt/gpart.out 2>&1\n",
+                include_str!("../../tests/corpus/gpart/guest.sh")
+            );
+            let exit = rescue_sh(&s, &script);
+            let got = read_whole(&s, b"/mnt/gpart.out").unwrap_or_default();
+            let want = include_bytes!("../../tests/corpus/gpart/guest-freebsd.txt");
+            first_difference("gpart", &got, want);
+            if got != want {
+                kprintln!("gpart: got:\n{}", alloc::string::String::from_utf8_lossy(&got));
+            }
+            if crate::boot::value("abyss.test.gpart.dump") == Some("1") {
+                let root = crate::fs::root();
+                let l = vfs::namei::Lookup {
+                    start: &root,
+                    root: &root,
+                    follow: true,
+                    beneath: false,
+                    create: false,
+                    cred: &crate::fs::cred(),
+                };
+                let v = crate::fs::namespace().lookup(&s, &l, b"/mnt/disk.img").unwrap();
+                let mut sector = [0u8; 512];
+                for i in 0..v.size(&s).unwrap() / 512 {
+                    let mut r = vfs::ReadBuf::new(&mut sector);
+                    assert_eq!(v.read_at(&s, i * 512, &mut r), Ok(512));
+                    if sector.iter().any(|&b| b != 0) {
+                        let mut hex = alloc::string::String::new();
+                        for b in sector {
+                            let _ = core::fmt::Write::write_fmt(&mut hex, format_args!("{b:02x}"));
+                        }
+                        kprintln!("gpart-dump: {i} {hex}");
+                    }
+                }
+            }
+            let cleaned = rescue_sh(&s, "umount /mnt");
+            assert_eq!(exit, crate::proc::Exit::Code(0), "the gpart script failed");
+            assert!(got == want, "gpart differs from FreeBSD");
+            assert_eq!(cleaned, crate::proc::Exit::Code(0));
+            kprintln!("gpart: {} lines as FreeBSD printed them", want.split(|&c| c == b'\n').count());
+        }
+    }
+
+    ktest! {
         /// `/dev/full`: root's, wheel's (0, 0: the test image has no
         /// names for them), 0666; zeros to read, and every
         /// write fails with `ENOSPC`.
@@ -6355,7 +6412,7 @@ ktest! {
         )
         .unwrap();
         let tail = size - 33 * 512;
-        let writer = crate::geom_kern::open(&s, nothing(), &scratch, "vtbd1", true);
+        let writer = crate::geom_kern::open(&s, nothing(), &scratch, "vtbd1", true).expect("opened for writing");
         scratch.write(&s, 0, &image[..34 * 512]).unwrap();
         scratch.write(&s, tail as u64, &image[tail..]).unwrap();
         assert!(storage::find("vtbd1p1").is_none(), "not tasted while open");
@@ -6375,7 +6432,7 @@ ktest! {
         }
         // A writer of the partition: counted, and its labels wither.
         let part = storage::find("vtbd1p1").unwrap();
-        let writer = crate::geom_kern::open(&s, nothing(), &part, "vtbd1p1", true);
+        let writer = crate::geom_kern::open(&s, nothing(), &part, "vtbd1p1", true).expect("opened for writing");
         let xml = read("kern.geom.confxml");
         assert!(!xml.contains("gpt/geom%20test"), "labels wither while written");
         assert!(xml.contains("\t  <mode>r1w1e0</mode>\n\t  <name>vtbd1p1</name>\n"), "{xml}");
@@ -6384,7 +6441,7 @@ ktest! {
         drop(part);
         assert!(read("kern.geom.confxml").contains("gpt/geom%20test"));
         // Opened for writing, the table goes; overwritten, it stays gone.
-        let writer = crate::geom_kern::open(&s, nothing(), &scratch, "vtbd1", true);
+        let writer = crate::geom_kern::open(&s, nothing(), &scratch, "vtbd1", true).expect("opened for writing");
         assert!(storage::find("vtbd1p1").is_none(), "spoiled");
         scratch.write(&s, 0, &alloc::vec![0u8; 34 * 512]).unwrap();
         scratch.write(&s, tail as u64, &alloc::vec![0u8; 33 * 512]).unwrap();
