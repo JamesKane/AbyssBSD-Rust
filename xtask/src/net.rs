@@ -215,6 +215,63 @@ impl Lab {
     }
 }
 
+/// `ABYSS_NTP=MINUTES`: after its other steps the script runs base's
+/// `ntpd` that long against the router, which on the build server is its
+/// own `ntpd` (QEMU's user network reaches the host's loopback), then
+/// checks that the kernel's discipline is locked (docs/BUILD-AND-TEST.md).
+fn ntp_minutes() -> Option<u32> {
+    std::env::var("ABYSS_NTP")
+        .ok()?
+        .parse()
+        .ok()
+        .filter(|&m| m > 0)
+}
+
+impl Lab {
+    /// [`ntp_minutes`]'s steps: `ntpd` polling the router every 16 s,
+    /// a line `ntp-sample` a minute with the offset and frequency
+    /// `ntptime` reports, then `ntp_adjtime` must say `TIME_OK` with
+    /// `STA_PLL` on and `ntpd` must have selected the server.
+    fn ntp_steps(&self, minutes: u32) -> Vec<Step> {
+        let s = |t: String| -> &'static str { Box::leak(t.into_boxed_str()) };
+        let router = self.router4;
+        vec![
+            step(
+                s(format!(
+                    "printf 'server {router} iburst minpoll 4 maxpoll 4\\ndriftfile /var/db/ntpd.drift\\n' \
+                     > /tmp/ntp.conf && ntpd -g -c /tmp/ntp.conf -p /tmp/ntpd.pid && echo ntpd-$((6*7))\n"
+                )),
+                "\nntpd-42\r\n",
+                "ntpd starts",
+            ),
+            step(
+                s(format!(
+                    "for i in $(jot {minutes}); do sleep 60; echo ntp-sample $i \
+                     $(ntptime | sed -n 's/^  offset \\([-0-9.]*\\) us, frequency \\([-0-9.]*\\) ppm.*/offset=\\1us freq=\\2ppm/p'); \
+                     done; echo ntp-done-$((6*7))\n"
+                )),
+                "\nntp-done-42\r\n",
+                "ntpd runs",
+            ),
+            step(
+                "ntpq -pn | sed -n 's/^\\*/selected /p' | cut -c1-30; ntptime\n",
+                "\nselected ",
+                "ntpd selected the server",
+            ),
+            step(
+                "ntptime | grep -c -e '^ntp_adjtime() returns code 0 (OK)' -e '^  status 0x[0-9a-f]* (PLL'\n",
+                "\n2\r\n",
+                "the kernel's discipline is locked",
+            ),
+            step(
+                "kill $(cat /tmp/ntpd.pid) && echo stopped-$((6*7))\n",
+                "\nstopped-42\r\n",
+                "ntpd stops",
+            ),
+        ]
+    }
+}
+
 /// Waits for `login:` on the serial console (failing at once on any of
 /// `give_up` before it), logs in as root, and sets [`PROMPT`].
 pub(crate) fn login(session: &mut Session, boot_timeout: Duration, give_up: &[&str]) -> Result<()> {
@@ -299,6 +356,13 @@ pub(crate) fn net_script(
         login(&mut session, boot_timeout, give_up)?;
         // `pkg` and the waits for addresses take minutes under emulation.
         run(&mut session, &lab.steps(), Duration::from_secs(900))?;
+        if let Some(minutes) = ntp_minutes() {
+            run(
+                &mut session,
+                &lab.ntp_steps(minutes),
+                Duration::from_secs(u64::from(minutes) * 60 + 600),
+            )?;
+        }
         session.send(&format!(
             "mkdir -p -m 700 /root/.ssh && echo '{}' > /root/.ssh/authorized_keys && echo key-$((6*7))\n",
             public.trim()
