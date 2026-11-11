@@ -1,0 +1,47 @@
++ gpart create -s mbr md0
+md0 created
++ gpart add -t fat32 -b 63 -s 4m md0
+md0s1 added
++ gpart add -t ntfs -s 4m md0
+md0s2 added
++ gpart add -t linux-data -i 4 -s 2m md0
+md0s4 added
++ gpart add -t freebsd md0
+md0s3 added
++ gpart add -t !12 -s 1m md0
+gpart: autofill: No space left on device
+exit 1
++ gpart delete -i 2 md0
+md0s2 deleted
++ gpart add -t ms-basic-data -i 2 -s 1m md0
+gpart: Invalid argument
+exit 1
++ gpart set -a active -i 3 md0
+active set on md0s3
++ gpart unset -a active -i 3 md0
+active unset on md0s3
++ gpart set -a active -i 4 md0
+active set on md0s4
++ gpart resize -i 4 -s 3m md0
+gpart: end '22590': No space left on device
+exit 1
++ gpart show md0
+=>    1  65535  md0  MBR  (32M)
+      1     62       - free -  (31K)
+     63   8192    1  fat32  (4.0M)
+   8255   8192       - free -  (4.0M)
+  16447   4096    4  linux-data  [active]  (2.0M)
+  20543  44993    3  freebsd  (22M)
+
++ gpart show -r md0
+=>    1  65535  md0  MBR  (32M)
+      1     62       - free -  (31K)
+     63   8192    1  11  (4.0M)
+   8255   8192       - free -  (4.0M)
+  16447   4096    4  131  [active]  (2.0M)
+  20543  44993    3  165  (22M)
+
+MBR 4
+1      fat32    63  8192  
+4 linux-data 16447  4096   [active] 
+3    freebsd 20543 44993  

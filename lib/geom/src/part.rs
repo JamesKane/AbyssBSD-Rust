@@ -105,7 +105,7 @@ pub fn gpt_type_guid(alias: &[u8]) -> Option<&'static str> {
 }
 
 /// `%#jx`: hexadecimal with `0x`, but plain `0` for zero.
-fn alt_hex(v: u64) -> String {
+pub(crate) fn alt_hex(v: u64) -> String {
     if v == 0 {
         String::from("0")
     } else {
@@ -136,7 +136,7 @@ pub const GPT_ATTRIBUTES: &[(u64, &str)] = &[
 /// how much the best head count (of 1, 2, 16, 32, 64, 128, 255) whose
 /// cylinders (at most 1023) cover covers, and that count (0, 0 if none
 /// fits).
-fn geometry_heads(blocks: u64, sectors: u64) -> (u64, u64) {
+pub(crate) fn geometry_heads(blocks: u64, sectors: u64) -> (u64, u64) {
     let (mut best_chs, mut best_heads) = (0, 0);
     for heads in [1u64, 2, 16, 32, 64, 128, 255] {
         let cylinders = blocks / heads / sectors;

@@ -1,0 +1,11 @@
++ gpart create -s bsd md0
+md0 created
++ gpart add -t freebsd-ufs -s 8m md0
+md0a added
++ gpart add -t freebsd-swap md0
+md0b added
++ gpart show md0
+=>    0  32768  md0  BSD  (16M)
+      0  16384    1  freebsd-ufs  (8.0M)
+  16384  16384    2  freebsd-swap  (8.0M)
+

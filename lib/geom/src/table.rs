@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! The PART class's partition tables: what a taste reads from a disk, the
 //! table each verb of `gpart` changes in memory, and what a commit writes
-//! back. GPT is the one scheme ([`Scheme::Gpt`]); [`Scheme::Null`] is the
-//! empty table `destroy` leaves until it is committed.
+//! back. The schemes are GPT, MBR ([`mbr`]), and BSD ([`bsd`], read
+//! only); [`Scheme::Null`] is the empty table `destroy` leaves until it
+//! is committed. A partition is tasted like a disk, so tables nest as
+//! FreeBSD's do: a BSD label in an MBR slice.
 //!
 //! The model follows `g_part.c`'s split: the class keeps the table's
 //! entries with their `created`, `modified`, and `deleted` marks, and the
@@ -15,6 +17,7 @@
 //! ([`Topology`]).
 //!
 //! Behavior reference: sys/geom/part/g_part.c, sys/geom/part/g_part_gpt.c,
+//! sys/geom/part/g_part_mbr.c, sys/geom/part/g_part_bsd.c,
 //! sys/sys/disk/gpt.h, sys/sys/disk/mbr.h, sys/kern/kern_uuid.c
 //! (`parse_uuid`).
 
@@ -28,6 +31,10 @@ use crc::crc32;
 use guid::Guid;
 
 use crate::ctl::{Request, Show};
+use crate::mesh::Field;
+
+pub mod bsd;
+pub mod mbr;
 
 /// The protective MBR's size, and the boot code GPT keeps (`MBRSIZE`).
 pub const MBRSIZE: usize = 512;
@@ -104,6 +111,10 @@ pub enum Scheme {
     Null,
     /// The GUID Partition Table.
     Gpt,
+    /// The PC's master boot record.
+    Mbr,
+    /// A BSD disklabel.
+    Bsd,
 }
 
 impl Scheme {
@@ -113,6 +124,8 @@ impl Scheme {
         match self {
             Self::Null => "(none)",
             Self::Gpt => "GPT",
+            Self::Mbr => "MBR",
+            Self::Bsd => "BSD",
         }
     }
 }
@@ -187,26 +200,119 @@ pub struct Entry {
     pub modified: bool,
     /// Deleted since the last commit (its provider is gone).
     pub deleted: bool,
+    /// Kept, but with no provider (BSD's raw partition, `c`).
+    pub internal: bool,
+    /// Its table's scheme.
+    pub scheme: Scheme,
+    /// GPT's entry.
     pub ent: Ent,
+    /// MBR's entry.
+    pub dos: mbr::Dos,
+    /// BSD's partition.
+    pub bsd: bsd::Part,
 }
 
 impl Entry {
-    /// The provider's name suffix (`g_part_gpt_name`): `s` and the index
-    /// for the `freebsd` type, `p` and the index otherwise.
+    /// The provider's name suffix (`G_PART_NAME`): for GPT `s` and the
+    /// index for the `freebsd` type, `p` and the index otherwise; for MBR
+    /// `s` and the index; for BSD a letter.
     #[must_use]
     pub fn name(&self) -> String {
-        let c = if self.ent.type_guid == TYPE_FREEBSD {
-            's'
-        } else {
-            'p'
-        };
-        format!("{c}{}", self.index)
+        match self.scheme {
+            Scheme::Bsd => {
+                let c = u8::try_from(self.index - 1).map_or('?', |i| char::from(b'a' + i));
+                format!("{c}")
+            }
+            Scheme::Mbr => format!("s{}", self.index),
+            Scheme::Gpt | Scheme::Null => {
+                let c = if self.ent.type_guid == TYPE_FREEBSD {
+                    's'
+                } else {
+                    'p'
+                };
+                format!("{c}{}", self.index)
+            }
+        }
     }
 
-    /// The type as `gpart` names it (`g_part_gpt_type`).
+    /// The type as `gpart` names it (`G_PART_TYPE`).
     #[must_use]
     pub fn type_name(&self) -> String {
-        crate::part::gpt_type(&lower(self.ent.type_guid))
+        match self.scheme {
+            Scheme::Mbr => mbr::type_name(self.dos.typ),
+            Scheme::Bsd => bsd::type_name(self.bsd.fstype),
+            Scheme::Gpt | Scheme::Null => crate::part::gpt_type(&lower(self.ent.type_guid)),
+        }
+    }
+
+    /// The raw type (`rawtype`): GPT's GUID, MBR's or BSD's number.
+    #[must_use]
+    pub fn raw_type(&self) -> String {
+        match self.scheme {
+            Scheme::Mbr => format!("{}", self.dos.typ),
+            Scheme::Bsd => format!("{}", self.bsd.fstype),
+            Scheme::Gpt | Scheme::Null => lower(self.ent.type_guid),
+        }
+    }
+
+    /// What `g_part_dumpconf` shows of the entry's provider of `length`
+    /// bytes on a table `t` of `ss`-byte sectors: its `confxml` lines and
+    /// its `conftxt` words.
+    #[must_use]
+    pub fn provider_config(&self, t: &Table, ss: u32, length: u64) -> (Vec<Field>, String) {
+        let ty = self.type_name();
+        let offset = self.start * u64::from(ss);
+        let mut c = vec![
+            Field::new("start", self.start),
+            Field::new("end", self.end),
+            Field::new("index", self.index),
+            Field::new("type", &ty),
+            Field::new("offset", offset),
+            Field::new("length", length),
+        ];
+        let size = self.end - self.start + 1;
+        match self.scheme {
+            Scheme::Gpt | Scheme::Null => {
+                let uuid = lower(self.ent.uuid);
+                c.push(Field::new(
+                    "label",
+                    crate::label::utf16_name(&self.ent.name),
+                ));
+                for (bit, name) in crate::part::GPT_ATTRIBUTES {
+                    if self.ent.attr & bit != 0 {
+                        c.push(Field::new("attrib", name));
+                    }
+                }
+                c.push(Field::new("rawtype", self.raw_type()));
+                c.push(Field::new("rawuuid", &uuid));
+                c.push(Field::new(
+                    "efimedia",
+                    crate::part::gpt_efimedia(self.index, &uuid, self.start, self.end),
+                ));
+            }
+            Scheme::Mbr => {
+                c.push(Field::new("rawtype", self.raw_type()));
+                if self.dos.flag & 0x80 != 0 {
+                    c.push(Field::new("attrib", "active"));
+                }
+                c.push(Field::new(
+                    "efimedia",
+                    mbr::efimedia(self.index, t.dsn(), self.start, size),
+                ));
+            }
+            Scheme::Bsd => c.push(Field::new("rawtype", self.raw_type())),
+        }
+        let xs = match self.scheme {
+            Scheme::Mbr => "MBR",
+            Scheme::Bsd => "BSD",
+            Scheme::Gpt | Scheme::Null => "GPT",
+        };
+        let txt = format!(
+            " i {} o {offset} ty {ty} xs {xs} xt {}",
+            self.index,
+            self.raw_type()
+        );
+        (c, txt)
     }
 }
 
@@ -248,6 +354,10 @@ pub struct Table {
     /// The entries, by index.
     pub list: Vec<Entry>,
     mbr: [u8; MBRSIZE],
+    /// The disk reports its own geometry (`gpt_fixgeom`).
+    fixgeom: bool,
+    /// Nothing nests in its partitions (BSD's).
+    pub isleaf: bool,
     hdr: Option<Hdr>,
     lba: [u64; 4],
     state: [State; 4],
@@ -289,6 +399,8 @@ impl Table {
             smtail: 0,
             list: Vec::new(),
             mbr: [0; MBRSIZE],
+            fixgeom: false,
+            isleaf: false,
             hdr: None,
             lba: [0; 4],
             state: [State::Unknown; 4],
@@ -307,11 +419,17 @@ impl Table {
         self.list.iter().filter(|e| !e.deleted)
     }
 
+    /// The entries that have providers: in use and not internal.
+    pub fn providers(&self) -> impl Iterator<Item = &Entry> {
+        self.live().filter(|e| !e.internal)
+    }
+
     /// `g_part_geometry`.
     fn geometry(&mut self, m: &Media) {
         let (heads, sectors) = crate::part::geometry(m.blocks(), Some((m.fwheads, m.fwsectors)));
         self.heads = heads;
         self.sectors = sectors;
+        self.fixgeom = m.fwheads != 0 && m.fwsectors != 0;
     }
 
     /// `g_part_new_entry`: the entry at `index`, made (in order) if there
@@ -329,7 +447,11 @@ impl Table {
                         created: false,
                         modified: false,
                         deleted: false,
+                        internal: false,
+                        scheme: self.scheme,
                         ent: Ent::ZERO,
+                        dos: mbr::Dos::default(),
+                        bsd: bsd::Part::default(),
                     },
                 );
                 i
@@ -352,7 +474,7 @@ impl Table {
         enforce: bool,
     ) -> Result<(), Errno> {
         let mut failed = self.last < self.first || self.last > m.blocks().wrapping_sub(1);
-        let live: Vec<&Entry> = self.live().collect();
+        let live: Vec<&Entry> = self.providers().collect();
         for (i, e1) in live.iter().enumerate() {
             if e1.start < self.first
                 || e1.start > self.last
@@ -695,18 +817,72 @@ fn matched(a: Option<&Hdr>, b: Option<&Hdr>) -> bool {
         && a.crc_table == b.crc_table
 }
 
-/// `g_part_taste` with the GPT scheme: the table on a provider of media
-/// `m` named `name`, if one is there and passes the integrity check
-/// (`enforce`: `kern.geom.part.check_integrity`).
+/// `g_part_probe`: the scheme whose probe is surest of a table on a
+/// provider of media `m` at nesting depth `depth` (in a table of scheme
+/// `parent`), as a new table.
+fn probe(m: &Media, io: &mut dyn Io, depth: u32, parent: Option<Scheme>) -> Option<Table> {
+    let mut best: Option<(i32, Scheme)> = None;
+    let probes: [(Scheme, Result<i32, Errno>); 3] = [
+        (Scheme::Bsd, bsd::probe(m, io)),
+        // GPT does not nest (`allow_nesting`).
+        (
+            Scheme::Gpt,
+            if depth == 0 {
+                probe_gpt(m, io)
+            } else {
+                Err(Errno::ENXIO)
+            },
+        ),
+        (Scheme::Mbr, mbr::probe(m, io, parent)),
+    ];
+    for (scheme, pri) in probes {
+        if let Ok(pri) = pri
+            && pri <= 0
+            && best.is_none_or(|(b, _)| pri > b)
+        {
+            best = Some((pri, scheme));
+        }
+    }
+    best.map(|(_, scheme)| Table::new(scheme, depth))
+}
+
+impl Table {
+    /// `G_PART_READ`.
+    fn read_scheme(
+        &mut self,
+        m: &Media,
+        name: &str,
+        io: &mut dyn Io,
+        enforce: bool,
+    ) -> Result<(), Errno> {
+        match self.scheme {
+            Scheme::Gpt => self.read(m, name, io, enforce),
+            Scheme::Mbr => self.read_mbr(m, io),
+            Scheme::Bsd => self.read_bsd(m, name, io),
+            Scheme::Null => Err(Errno::ENXIO),
+        }
+    }
+}
+
+/// `g_part_taste`: the table on a provider of media `m` named `name`, at
+/// nesting depth `depth` (0 on a disk) in a table of scheme `parent`, if
+/// a scheme finds one and it passes the integrity check (`enforce`:
+/// `kern.geom.part.check_integrity`).
 #[must_use]
-pub fn taste(m: &Media, name: &str, io: &mut dyn Io, enforce: bool) -> Option<Table> {
+pub fn taste(
+    m: &Media,
+    name: &str,
+    io: &mut dyn Io,
+    enforce: bool,
+    depth: u32,
+    parent: Option<Scheme>,
+) -> Option<Table> {
     if m.mediasize == 0 || m.sectorsize == 0 {
         return None;
     }
-    probe_gpt(m, io).ok()?;
-    let mut t = Table::new(Scheme::Gpt, 0);
+    let mut t = probe(m, io, depth, parent)?;
     t.geometry(m);
-    t.read(m, name, io, enforce).ok()?;
+    t.read_scheme(m, name, io, enforce).ok()?;
     t.check_integrity(m, name, io, enforce).ok()?;
     Some(t)
 }
@@ -1013,9 +1189,8 @@ pub trait Topology {
     /// Stores the table of geom `geom`, making the geom (attached to the
     /// provider of that name) if there is none; `None` withers it.
     fn store(&mut self, geom: &str, table: Option<Table>);
-    /// The provider named `name`: its media, and (for a partition) the
-    /// depth of the table it is in (`PART::depth`).
-    fn provider(&self, name: &str) -> Option<(Media, Option<u32>)>;
+    /// The provider named `name`.
+    fn provider(&self, name: &str) -> Option<Provider>;
     /// `g_access(cp, n, n, n)` on geom `geom`'s consumer, `n` 1 if `open`
     /// else -1. A geom being made is attached first.
     ///
@@ -1047,6 +1222,15 @@ pub trait Topology {
     fn check_integrity(&self) -> bool;
     /// Prints a line on the console.
     fn log(&mut self, line: &str);
+}
+
+/// A provider as a control request sees it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Provider {
+    pub media: Media,
+    /// For a partition, its table's depth and scheme (`PART::depth`,
+    /// `PART::scheme`) and whether nothing nests in it (`PART::isleaf`).
+    pub part: Option<(u32, Scheme, bool)>,
 }
 
 /// A geom's provider through [`Topology`], as [`Io`].
@@ -1120,6 +1304,8 @@ struct Parms {
     size: u64,
     start: u64,
     type_: Vec<u8>,
+    scheme: Option<Scheme>,
+    skip_dsn: u32,
 }
 
 impl Parms {
@@ -1262,12 +1448,17 @@ fn parse_parm(
         }
         P_SCHEME => {
             let s = ascii(req)?;
-            if !s.eq_ignore_ascii_case(b"GPT") {
+            gpp.scheme = Some(if s.eq_ignore_ascii_case(b"GPT") {
+                Scheme::Gpt
+            } else if s.eq_ignore_ascii_case(b"MBR") {
+                Scheme::Mbr
+            } else {
                 return Err(bad(req, &Show(&s)));
-            }
+            });
         }
         P_SIZE => gpp.size = quad(req)?,
-        P_SKIP_DSN | P_VERSION => {
+        P_SKIP_DSN => gpp.skip_dsn = uint32(req)?,
+        P_VERSION => {
             uint32(req)?;
         }
         P_START => gpp.start = quad(req)?,
@@ -1379,6 +1570,24 @@ pub fn ctlreq(req: &mut Request, verb: &[u8], topo: &mut dyn Topology) {
         }
     }
 
+    // BSD tables are only read here.
+    if modifies
+        && gpp.has(P_GEOM)
+        && topo
+            .table(&gpp.geom)
+            .is_some_and(|t| t.scheme == Scheme::Bsd)
+    {
+        let e = fail(req, Errno::EOPNOTSUPP);
+        if close_on_error {
+            let _ = topo.access(&gpp.geom, false);
+            if let Some(mut t) = topo.table(&gpp.geom) {
+                t.opened = false;
+                topo.store(&gpp.geom, Some(t));
+            }
+        }
+        let _ = e;
+        return;
+    }
     let mut r = match ctl {
         Ctl::Add => ctl_add(req, &gpp, topo),
         Ctl::Bootcode => ctl_bootcode(req, &gpp, topo),
@@ -1425,7 +1634,10 @@ fn fail(req: &mut Request, e: Errno) -> Result<(), Errno> {
 
 fn ctl_add(req: &mut Request, gpp: &Parms, topo: &mut dyn Topology) -> Result<(), Errno> {
     let mut t = table_of(gpp, topo)?;
-    let m = topo.provider(&gpp.geom).map(|p| p.0).unwrap_or_default();
+    let m = topo
+        .provider(&gpp.geom)
+        .map(|p| p.media)
+        .unwrap_or_default();
     let end = (gpp.start + gpp.size).wrapping_sub(1);
     if gpp.start < t.first || gpp.start > t.last {
         req.error(format_args!(
@@ -1458,6 +1670,9 @@ fn ctl_add(req: &mut Request, gpp: &Parms, topo: &mut dyn Topology) -> Result<()
         }
         if e.index == index {
             index = e.index + 1;
+        }
+        if e.internal {
+            continue;
         }
         if gpp.start >= e.start && gpp.start <= e.end {
             req.error(format_args!(
@@ -1498,7 +1713,11 @@ fn ctl_add(req: &mut Request, gpp: &Parms, topo: &mut dyn Topology) -> Result<()
             created: false,
             modified: false,
             deleted: false,
+            internal: false,
+            scheme: t.scheme,
             ent: Ent::ZERO,
+            dos: mbr::Dos::default(),
+            bsd: bsd::Part::default(),
         },
         |i| t.list[i].clone(),
     );
@@ -1506,23 +1725,45 @@ fn ctl_add(req: &mut Request, gpp: &Parms, topo: &mut dyn Topology) -> Result<()
     entry.start = gpp.start;
     entry.end = end;
     // G_PART_ADD.
-    if t.scheme != Scheme::Gpt {
-        return fail(req, Errno::ENXIO);
-    }
-    let type_guid = match parse_type(&gpp.type_) {
-        Ok(g) => g,
-        Err(e) => return fail(req, e),
-    };
-    entry.ent.type_guid = type_guid;
-    entry.ent.uuid = topo.uuidgen();
-    entry.ent.lba_start = entry.start;
-    entry.ent.lba_end = entry.end;
-    if entry.deleted {
-        entry.ent.attr = 0;
-        entry.ent.name = [0; NAME_UNITS];
-    }
-    if gpp.has(P_LABEL) {
-        entry.ent.name = utf8_to_utf16(&gpp.label);
+    match t.scheme {
+        Scheme::Gpt => {
+            let type_guid = match parse_type(&gpp.type_) {
+                Ok(g) => g,
+                Err(e) => return fail(req, e),
+            };
+            entry.ent.type_guid = type_guid;
+            entry.ent.uuid = topo.uuidgen();
+            entry.ent.lba_start = entry.start;
+            entry.ent.lba_end = entry.end;
+            if entry.deleted {
+                entry.ent.attr = 0;
+                entry.ent.name = [0; NAME_UNITS];
+            }
+            if gpp.has(P_LABEL) {
+                entry.ent.name = utf8_to_utf16(&gpp.label);
+            }
+        }
+        Scheme::Mbr => {
+            // MBR entries have no labels; `mbr_align` changes nothing
+            // (`kern.geom.part.mbr.enforce_chs` is 0).
+            if gpp.has(P_LABEL) {
+                return fail(req, Errno::EINVAL);
+            }
+            if entry.deleted {
+                entry.dos = mbr::Dos::default();
+            }
+            // Both fit: the table ends below 2^32 sectors.
+            entry.dos.start = u32::try_from(entry.start).unwrap_or(u32::MAX);
+            entry.dos.size = u32::try_from(entry.end - entry.start + 1).unwrap_or(u32::MAX);
+            let mut d = entry.dos;
+            t.set_chs(&mut d, true, true);
+            entry.dos = d;
+            match mbr::parse_type(&gpp.type_) {
+                Ok(typ) => entry.dos.typ = typ,
+                Err(e) => return fail(req, e),
+            }
+        }
+        Scheme::Bsd | Scheme::Null => return fail(req, Errno::ENXIO),
     }
     if let Some(i) = delent {
         entry.deleted = false;
@@ -1555,15 +1796,21 @@ fn ctl_add(req: &mut Request, gpp: &Parms, topo: &mut dyn Topology) -> Result<()
 
 fn ctl_bootcode(req: &mut Request, gpp: &Parms, topo: &mut dyn Topology) -> Result<(), Errno> {
     let mut t = table_of(gpp, topo)?;
-    if t.scheme != Scheme::Gpt {
+    if !matches!(t.scheme, Scheme::Gpt | Scheme::Mbr) {
         return fail(req, Errno::ENODEV);
     }
     if gpp.bootcode.len() > BOOTCODESZ {
         return fail(req, Errno::EFBIG);
     }
-    t.mbr[..DOSPARTOFF].fill(0);
-    let n = DOSPARTOFF.min(gpp.bootcode.len());
-    t.mbr[..n].copy_from_slice(&gpp.bootcode[..n]);
+    if t.scheme == Scheme::Mbr {
+        if let Err(e) = t.bootcode_mbr(&gpp.bootcode, gpp.skip_dsn != 0) {
+            return fail(req, e);
+        }
+    } else {
+        t.mbr[..DOSPARTOFF].fill(0);
+        let n = DOSPARTOFF.min(gpp.bootcode.len());
+        t.mbr[..n].copy_from_slice(&gpp.bootcode[..n]);
+    }
     topo.store(&gpp.geom, Some(t));
     if gpp.has(P_OUTPUT) {
         req.set_output(&format!("bootcode written to {}\n", gpp.geom));
@@ -1576,7 +1823,10 @@ fn ctl_commit(req: &mut Request, gpp: &Parms, topo: &mut dyn Topology) -> Result
     if !t.opened {
         return fail(req, Errno::EPERM);
     }
-    let m = topo.provider(&gpp.geom).map(|p| p.0).unwrap_or_default();
+    let m = topo
+        .provider(&gpp.geom)
+        .map(|p| p.media)
+        .unwrap_or_default();
     let ss = m.ss_usize();
     let zero = vec![0u8; ss];
     while t.smhead != 0 {
@@ -1601,13 +1851,14 @@ fn ctl_commit(req: &mut Request, gpp: &Parms, topo: &mut dyn Topology) -> Result
         topo.store(&gpp.geom, None);
         return Ok(());
     }
-    let r = t.write(
-        &m,
-        &mut GeomIo {
-            topo,
-            geom: &gpp.geom,
-        },
-    );
+    let mut io = GeomIo {
+        topo,
+        geom: &gpp.geom,
+    };
+    let r = match t.scheme {
+        Scheme::Mbr => t.write_mbr(&m, &mut io),
+        _ => t.write(&m, &mut io),
+    };
     if let Err(e) = r {
         topo.store(&gpp.geom, Some(t));
         return fail(req, e);
@@ -1643,7 +1894,13 @@ fn ctl_create(req: &mut Request, gpp: &mut Parms, topo: &mut dyn Topology) -> Re
         req.error(format_args!("{} geom '{pp}'", Errno::EEXIST.get()));
         return Err(Errno::EEXIST);
     }
-    if gpp.has(P_ENTRIES) && !(GPS_MINENT..=GPS_MAXENT).contains(&gpp.entries) {
+    let scheme = gpp.scheme.unwrap_or(Scheme::Gpt);
+    let (minent, defent, maxent) = if scheme == Scheme::Mbr {
+        (4, 4, 4)
+    } else {
+        (GPS_MINENT, GPS_DEFENT, GPS_MAXENT)
+    };
+    if gpp.has(P_ENTRIES) && !(minent..=maxent).contains(&gpp.entries) {
         req.error(format_args!(
             "{} entries '{}'",
             Errno::EINVAL.get(),
@@ -1651,14 +1908,15 @@ fn ctl_create(req: &mut Request, gpp: &mut Parms, topo: &mut dyn Topology) -> Re
         ));
         return Err(Errno::EINVAL);
     }
-    let Some((m, parent_depth)) = topo.provider(&pp) else {
+    let Some(provider) = topo.provider(&pp) else {
         return fail(req, Errno::ENXIO);
     };
-    let mut t = Table::new(Scheme::Gpt, 0);
+    let m = provider.media;
+    let mut t = Table::new(scheme, 0);
     t.entries = if gpp.has(P_ENTRIES) {
         gpp.entries
     } else {
-        GPS_DEFENT
+        defent
     };
     if let Some(n) = &null {
         t.opened = n.opened;
@@ -1682,31 +1940,43 @@ fn ctl_create(req: &mut Request, gpp: &mut Parms, topo: &mut dyn Topology) -> Re
     if m.mediasize == 0 || m.sectorsize == 0 {
         return undo(topo, req, Errno::ENODEV);
     }
-    t.depth = parent_depth.map_or(0, |d| d + 1);
+    // `PART::isleaf`: nothing nests in a BSD partition.
+    if provider.part.is_some_and(|(_, _, leaf)| leaf) {
+        return undo(topo, req, Errno::ENODEV);
+    }
+    t.depth = provider.part.map_or(0, |(d, _, _)| d + 1);
     t.geometry(&m);
-    // G_PART_CREATE: GPT nests only where allowed (it is not).
-    if t.depth != 0 {
-        return undo(topo, req, Errno::ENXIO);
+    if scheme == Scheme::Mbr {
+        if let Err(e) = t.create_mbr(&m) {
+            return undo(topo, req, e);
+        }
+    } else {
+        // G_PART_CREATE: GPT nests only where allowed (it is not).
+        if t.depth != 0 {
+            return undo(topo, req, Errno::ENXIO);
+        }
+        let tblsz = (u64::from(t.entries) * u64::from(ENT_SIZE)).div_ceil(m.ss());
+        if us(m.sectorsize) < MBRSIZE
+            || m.mediasize < (3 + 2 * tblsz + u64::from(t.entries)) * m.ss()
+        {
+            return undo(topo, req, Errno::ENOSPC);
+        }
+        t.create_pmbr(&m);
+        t.hdr = Some(Hdr {
+            revision: GPT_HDR_REVISION,
+            size: GPT_HDR_SIZE,
+            lba_self: 0,
+            lba_alt: 0,
+            lba_start: 0,
+            lba_end: 0,
+            uuid: topo.uuidgen(),
+            lba_table: 0,
+            entries: t.entries,
+            entsz: ENT_SIZE,
+            crc_table: 0,
+        });
+        t.set_defaults(&m, gpp.restore());
     }
-    let tblsz = (u64::from(t.entries) * u64::from(ENT_SIZE)).div_ceil(m.ss());
-    if us(m.sectorsize) < MBRSIZE || m.mediasize < (3 + 2 * tblsz + u64::from(t.entries)) * m.ss() {
-        return undo(topo, req, Errno::ENOSPC);
-    }
-    t.create_pmbr(&m);
-    t.hdr = Some(Hdr {
-        revision: GPT_HDR_REVISION,
-        size: GPT_HDR_SIZE,
-        lba_self: 0,
-        lba_alt: 0,
-        lba_start: 0,
-        lba_end: 0,
-        uuid: topo.uuidgen(),
-        lba_table: 0,
-        entries: t.entries,
-        entsz: ENT_SIZE,
-        crc_table: 0,
-    });
-    t.set_defaults(&m, gpp.restore());
     t.created = true;
     topo.store(&pp, Some(t));
     gpp.parms |= P_GEOM;
@@ -1757,19 +2027,26 @@ fn ctl_destroy(req: &mut Request, gpp: &Parms, topo: &mut dyn Topology) -> Resul
     if gpp.force != 0 {
         t.list.clear();
     }
-    if t.scheme != Scheme::Gpt {
+    if !matches!(t.scheme, Scheme::Gpt | Scheme::Mbr) {
         return fail(req, Errno::ENXIO);
     }
-    let m = topo.provider(&gpp.geom).map(|p| p.0).unwrap_or_default();
+    let m = topo
+        .provider(&gpp.geom)
+        .map(|p| p.media)
+        .unwrap_or_default();
     // G_PART_DESTROY: wipe what holds valid metadata.
     let mut null = Table::new(Scheme::Null, t.depth);
     null.smhead = t.smhead;
     null.smtail = t.smtail;
-    if t.state[PRIHDR] == State::Ok {
-        null.smhead |= 3;
-    }
-    if t.state[SECHDR] == State::Ok && t.lba[SECHDR] == m.blocks() - 1 {
-        null.smtail |= 1;
+    if t.scheme == Scheme::Mbr {
+        null.smhead |= 1;
+    } else {
+        if t.state[PRIHDR] == State::Ok {
+            null.smhead |= 3;
+        }
+        if t.state[SECHDR] == State::Ok && t.lba[SECHDR] == m.blocks() - 1 {
+            null.smtail |= 1;
+        }
     }
     null.last = m.blocks() - 1;
     null.opened = t.opened;
@@ -1783,18 +2060,31 @@ fn ctl_destroy(req: &mut Request, gpp: &Parms, topo: &mut dyn Topology) -> Resul
 fn ctl_modify(req: &mut Request, gpp: &Parms, topo: &mut dyn Topology) -> Result<(), Errno> {
     let mut t = table_of(gpp, topo)?;
     let i = find(req, &t, gpp.index)?;
-    if t.scheme != Scheme::Gpt {
-        return fail(req, Errno::ENXIO);
-    }
     let e = &mut t.list[i];
-    if gpp.has(P_TYPE) {
-        match parse_type(&gpp.type_) {
-            Ok(g) => e.ent.type_guid = g,
-            Err(err) => return fail(req, err),
+    match e.scheme {
+        Scheme::Gpt => {
+            if gpp.has(P_TYPE) {
+                match parse_type(&gpp.type_) {
+                    Ok(g) => e.ent.type_guid = g,
+                    Err(err) => return fail(req, err),
+                }
+            }
+            if gpp.has(P_LABEL) {
+                e.ent.name = utf8_to_utf16(&gpp.label);
+            }
         }
-    }
-    if gpp.has(P_LABEL) {
-        e.ent.name = utf8_to_utf16(&gpp.label);
+        Scheme::Mbr => {
+            if gpp.has(P_LABEL) {
+                return fail(req, Errno::EINVAL);
+            }
+            if gpp.has(P_TYPE) {
+                match mbr::parse_type(&gpp.type_) {
+                    Ok(typ) => e.dos.typ = typ,
+                    Err(err) => return fail(req, err),
+                }
+            }
+        }
+        Scheme::Bsd | Scheme::Null => return fail(req, Errno::ENXIO),
     }
     if !e.created {
         e.modified = true;
@@ -1811,8 +2101,14 @@ fn ctl_recover(req: &mut Request, gpp: &Parms, topo: &mut dyn Topology) -> Resul
     let mut t = table_of(gpp, topo)?;
     let mut recovered = false;
     if t.corrupt {
-        let m = topo.provider(&gpp.geom).map(|p| p.0).unwrap_or_default();
-        let r = if t.scheme == Scheme::Gpt {
+        let m = topo
+            .provider(&gpp.geom)
+            .map(|p| p.media)
+            .unwrap_or_default();
+        let r = if t.scheme == Scheme::Mbr {
+            // `default_recover`.
+            Err(Errno::ENOSYS)
+        } else if t.scheme == Scheme::Gpt {
             t.create_pmbr(&m);
             t.set_defaults(&m, false);
             t.corrupt = false;
@@ -1868,12 +2164,22 @@ fn ctl_resize(req: &mut Request, gpp: &Parms, topo: &mut dyn Topology) -> Result
         // Deny shrinking of an opened partition.
         return fail(req, Errno::EBUSY);
     }
-    if t.scheme != Scheme::Gpt {
+    if !matches!(t.scheme, Scheme::Gpt | Scheme::Mbr) {
         return fail(req, Errno::ENXIO);
     }
-    let e = &mut t.list[i];
+    let mut e = t.list[i].clone();
     e.end = e.start + gpp.size - 1;
-    e.ent.lba_end = e.end;
+    if t.scheme == Scheme::Mbr {
+        // Below 2^32 sectors: the table's end is.
+        e.dos.size = u32::try_from(gpp.size).unwrap_or(u32::MAX);
+        let mut d = e.dos;
+        t.set_chs(&mut d, false, true);
+        e.dos = d;
+    } else {
+        e.ent.lba_end = e.end;
+    }
+    t.list[i] = e;
+    let e = &mut t.list[i];
     if !e.created {
         e.modified = true;
     }
@@ -1897,9 +2203,14 @@ fn ctl_setunset(
     } else {
         None
     };
-    let m = topo.provider(&gpp.geom).map(|p| p.0).unwrap_or_default();
+    let m = topo
+        .provider(&gpp.geom)
+        .map(|p| p.media)
+        .unwrap_or_default();
     let attrib = gpp.attrib.to_ascii_lowercase();
-    let r = if t.scheme != Scheme::Gpt {
+    let r = if t.scheme == Scheme::Mbr {
+        t.setunset_mbr(i, &attrib, set)
+    } else if t.scheme != Scheme::Gpt {
         Err(Errno::ENXIO)
     } else if attrib == b"active" {
         if t.bootcamp {
@@ -1989,7 +2300,10 @@ fn ctl_undo(req: &mut Request, gpp: &Parms, topo: &mut dyn Topology) -> Result<(
         e.modified = false;
         !(e.created || e.deleted)
     });
-    let m = topo.provider(&gpp.geom).map(|p| p.0).unwrap_or_default();
+    let m = topo
+        .provider(&gpp.geom)
+        .map(|p| p.media)
+        .unwrap_or_default();
     let geom = gpp.geom.clone();
     let enforce = topo.check_integrity();
     let reprobe = t.scheme == Scheme::Null || t.created;
@@ -1998,20 +2312,20 @@ fn ctl_undo(req: &mut Request, gpp: &Parms, topo: &mut dyn Topology) -> Result<(
             topo.store(&geom, Some(t));
             return fail(req, Errno::EBUSY);
         }
-        let probed = probe_gpt(&m, &mut GeomIo { topo, geom: &geom });
-        if probed.is_err() {
+        let parent = topo.provider(&geom).and_then(|p| p.part).map(|(_, s, _)| s);
+        let depth = t.depth;
+        let Some(probed) = probe(&m, &mut GeomIo { topo, geom: &geom }, depth, parent) else {
             let _ = topo.access(&geom, false);
             topo.store(&geom, None);
             return Ok(());
-        }
-        let depth = t.depth;
-        t = Table::new(Scheme::Gpt, depth);
+        };
+        t = probed;
         t.geometry(&m);
         t.opened = true;
     }
     let mut io = GeomIo { topo, geom: &geom };
     let r = t
-        .read(&m, &geom, &mut io, enforce)
+        .read_scheme(&m, &geom, &mut io, enforce)
         .and_then(|()| t.check_integrity(&m, &geom, &mut io, enforce));
     if let Err(e) = r {
         topo.store(&geom, Some(t));

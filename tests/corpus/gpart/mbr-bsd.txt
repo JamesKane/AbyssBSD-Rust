@@ -1,0 +1,92 @@
++ gpart create -s mbr md0
+md0 created
++ gpart add -t freebsd md0
+md0s1 added
++ gpart set -a active -i 1 md0
+active set on md0s1
++ gpart create -s bsd md0s1
+md0s1 created
++ gpart add -t freebsd-ufs -s 40m md0s1
+md0s1a added
++ gpart add -t freebsd-swap -s 8m md0s1
+md0s1b added
++ gpart add -t freebsd-ufs md0s1
+md0s1d added
+/dev/md0s1a: 40.0MB (81920 sectors) block size 32768, fragment size 4096
+	using 4 cylinder groups of 10.03MB, 321 blks, 1408 inodes.
+	with soft updates
+super-block backups (for fsck_ffs -b #) at:
+ 192, 20736, 41280, 61824
++ gpart show md0
+=>     1  131071  md0  MBR  (64M)
+       1  131071    1  freebsd  [active]  (64M)
+
++ gpart show md0s1
+=>     0  131071  md0s1  BSD  (64M)
+       0   81920      1  freebsd-ufs  (40M)
+   81920   16384      2  freebsd-swap  (8.0M)
+   98304   32767      4  freebsd-ufs  (16M)
+
++ gpart show -r md0s1
+=>     0  131071  md0s1  BSD  (64M)
+       0   81920      1  7  (40M)
+   81920   16384      2  1  (8.0M)
+   98304   32767      4  7  (16M)
+
+BSD 8
+1  freebsd-ufs      0  81920  
+2 freebsd-swap  81920  16384  
+4  freebsd-ufs  98304  32767  
+Geom name: md0s1
+modified: false
+state: OK
+fwheads: 255
+fwsectors: 1
+last: 131070
+first: 0
+entries: 8
+scheme: BSD
+Providers:
+   Mediasize: 41943040 (40M)
+   Sectorsize: 512
+   Stripesize: 0
+   Stripeoffset: 512
+   Mode: r0w0e0
+   rawtype: 7
+   length: 41943040
+   offset: 0
+   type: freebsd-ufs
+   index: 1
+   end: 81919
+   start: 0
+   Mediasize: 8388608 (8.0M)
+   Sectorsize: 512
+   Stripesize: 0
+   Stripeoffset: 41943552
+   Mode: r0w0e0
+   rawtype: 1
+   length: 8388608
+   offset: 41943040
+   type: freebsd-swap
+   index: 2
+   end: 98303
+   start: 81920
+   Mediasize: 16776704 (16M)
+   Sectorsize: 512
+   Stripesize: 0
+   Stripeoffset: 50332160
+   Mode: r0w0e0
+   rawtype: 7
+   length: 16776704
+   offset: 50331648
+   type: freebsd-ufs
+   index: 4
+   end: 131070
+   start: 98304
+Consumers:
+   Mediasize: 67108352 (64M)
+   Sectorsize: 512
+   Stripesize: 0
+   Stripeoffset: 512
+   Mode: r0w0e0
+

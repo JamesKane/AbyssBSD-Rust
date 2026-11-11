@@ -1,0 +1,53 @@
++ gpart create -s mbr md0
+md0 created
++ gpart add -t fat32lba md0
+md0s1 added
++ gpart set -a active -i 1 md0
+active set on md0s1
++ gpart bootcode -b /boot/mbr md0
+bootcode written to md0
+/dev/md0s1: 129022 sectors in 129022 FAT32 clusters (512 bytes/cluster)
+BytesPerSec=512 SecPerClust=1 ResSectors=32 FATs=2 Media=0xf0 SecPerTrack=1 Heads=255 HiddenSecs=0 HugeSectors=131071 FATsecs=1008 RootCluster=2 FSInfo=1 Backup=2
++ gpart show md0
+=>     1  131071  md0  MBR  (64M)
+       1  131071    1  fat32lba  [active]  (64M)
+
++ gpart show -r md0
+=>     1  131071  md0  MBR  (64M)
+       1  131071    1  12  [active]  (64M)
+
++ gpart show -p md0
+=>     1  131071    md0  MBR  (64M)
+       1  131071  md0s1  fat32lba  [active]  (64M)
+
+MBR 4
+1 fat32lba      1 131071   [active] 
+Geom name: md0
+modified: false
+state: OK
+fwheads: 255
+fwsectors: 1
+last: 131071
+first: 1
+entries: 4
+scheme: MBR
+Providers:
+   Mediasize: 67108352 (64M)
+   Sectorsize: 512
+   Stripesize: 0
+   Stripeoffset: 512
+   Mode: r0w0e0
+   efimedia: HD(1,MBR,0x90909090,0x1,0x1ffff)
+   attrib: active
+   rawtype: 12
+   length: 67108352
+   offset: 512
+   type: fat32lba
+   index: 1
+   end: 131071
+   start: 1
+Consumers:
+   Mediasize: 67108864 (64M)
+   Sectorsize: 512
+   Mode: r0w0e0
+

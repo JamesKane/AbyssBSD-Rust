@@ -74,7 +74,7 @@ impl Fake {
             debugflags: 0,
         };
         let m = f.media();
-        f.table = taste(&m, "md0", &mut f.io(), true);
+        f.table = taste(&m, "md0", &mut f.io(), true, 0, None);
         f
     }
 
@@ -175,10 +175,18 @@ impl Topology for Fake {
         }
     }
 
-    fn provider(&self, name: &str) -> Option<(Media, Option<u32>)> {
+    fn provider(&self, name: &str) -> Option<Provider> {
+        let media = self.media();
         match name {
-            "md0" => Some((self.media(), None)),
-            "md0p1" if self.table.is_some() => Some((self.media(), Some(0))),
+            "md0" => Some(Provider { media, part: None }),
+            "md0p1" if self.table.is_some() => Some(Provider {
+                media,
+                part: Some((0, Scheme::Gpt, false)),
+            }),
+            "md0s1a" => Some(Provider {
+                media,
+                part: Some((1, Scheme::Bsd, true)),
+            }),
             _ => None,
         }
     }
@@ -332,6 +340,7 @@ fn basic_sequence_writes_what_freebsd_writes() {
     assert_eq!(f.changed, [2, 1, 1]);
     // And it reads back as it was written.
     let t = Fake::new(f.disk.clone(), 512).table.unwrap();
+    assert_eq!(t.scheme, Scheme::Gpt);
     let live: Vec<(u32, u64, u64, u64)> = t
         .live()
         .map(|e| (e.index, e.start, e.end, e.ent.attr))
@@ -571,8 +580,8 @@ fn refusals() {
         Err("22 arg0 'md0'".to_string())
     );
     assert_eq!(
-        f.gpart("create", &[("scheme", "mbr")]),
-        Err("22 scheme 'mbr'".to_string())
+        f.gpart("create", &[("scheme", "apm")]),
+        Err("22 scheme 'apm'".to_string())
     );
     assert_eq!(f.gpart("frob", &[]), Err("22 verb 'frob'".to_string()));
     f.gpart("create", &[("scheme", "gpt")]).unwrap();
@@ -742,4 +751,268 @@ fn numbers_as_strtoq_reads_them() {
     assert_eq!(strtoq(b""), None);
     assert_eq!(strtoq(b"-5"), Some(-5));
     assert_eq!(strtoq(b"99999999999999999999"), Some(i64::MAX));
+}
+
+/// The table a taste finds on `disk` (as a provider of `depth` in a
+/// table of scheme `parent`).
+fn taste_of(disk: &[u8], depth: u32, parent: Option<Scheme>) -> Option<Table> {
+    let mut v = disk.to_vec();
+    let mut log = Vec::new();
+    let m = Media {
+        mediasize: v.len() as u64,
+        sectorsize: 512,
+        ..Media::default()
+    };
+    taste(
+        &m,
+        "md0",
+        &mut DiskIo {
+            disk: &mut v,
+            log: &mut log,
+        },
+        true,
+        depth,
+        parent,
+    )
+}
+
+/// A field's value in a provider's configuration.
+fn field<'a>(c: &'a [Field], name: &str) -> Vec<&'a str> {
+    c.iter()
+        .filter(|f| f.name == name)
+        .map(|f| f.value.as_str())
+        .collect()
+}
+
+#[test]
+fn mbr_stick_writes_what_freebsd_writes() {
+    let mut f = Fake::new(blank("mbr-fat"), 512);
+    assert_eq!(
+        f.gpart("create", &[("scheme", "MBR")]).unwrap(),
+        "md0 created\n"
+    );
+    let t = f.table.clone().unwrap();
+    assert_eq!(
+        (t.scheme, t.first, t.last, t.entries),
+        (Scheme::Mbr, 1, 131_071, 4)
+    );
+    assert_eq!(
+        f.gpart(
+            "add",
+            &[("type", "fat32lba"), ("start", "1"), ("size", "131071")]
+        )
+        .unwrap(),
+        "md0s1 added\n"
+    );
+    assert_eq!(
+        f.gpart("set", &[("attrib", "active"), ("index", "1")])
+            .unwrap(),
+        "active set on md0s1\n"
+    );
+    // /boot/mbr, the whole file.
+    let code = corpus("mbr-fat")[..512].to_vec();
+    let a = alloc::vec![
+        Arg::ascii("class", "PART"),
+        Arg::ascii("verb", "bootcode"),
+        Arg::ascii("flags", "C"),
+        Arg::new("bootcode", GCTL_PARAM_RD, &code),
+        Arg::new("skip_dsn", GCTL_PARAM_RD, &0i32.to_ne_bytes()),
+        Arg::ascii("arg0", "md0"),
+        Arg::new("output", GCTL_PARAM_WR | GCTL_PARAM_ASCII, &[0; 64]),
+    ];
+    assert_eq!(f.issue(a, "bootcode").unwrap(), "bootcode written to md0\n");
+    assert_eq!(
+        f.disk[..512],
+        corpus("mbr-fat")[..512],
+        "the MBR FreeBSD wrote"
+    );
+    // As FreeBSD's dumpconf shows it.
+    let t = taste_of(&corpus("mbr-fat"), 0, None).unwrap();
+    assert_eq!(
+        (t.scheme, t.first, t.last, t.heads, t.sectors),
+        (Scheme::Mbr, 1, 131_071, 255, 1)
+    );
+    let e = t.providers().next().unwrap();
+    assert_eq!(e.name(), "s1");
+    let (c, txt) = e.provider_config(&t, 512, 67_108_352);
+    assert_eq!(field(&c, "type"), ["fat32lba"]);
+    assert_eq!(field(&c, "rawtype"), ["12"]);
+    assert_eq!(field(&c, "attrib"), ["active"]);
+    assert_eq!(field(&c, "offset"), ["512"]);
+    assert_eq!(field(&c, "efimedia"), ["HD(1,MBR,0x90909090,0x1,0x1ffff)"]);
+    assert_eq!(txt, " i 1 o 512 ty fat32lba xs MBR xt 12");
+    // The FAT volume inside is no MBR (it nests in one), nor is FreeBSD's
+    // own boot sector with no entries.
+    let slice = &corpus("mbr-fat")[512..];
+    assert!(taste_of(slice, 1, Some(Scheme::Mbr)).is_none());
+}
+
+#[test]
+fn mbr_edits_write_what_freebsd_writes() {
+    let mut f = Fake::new(blank("mbr-edits"), 512);
+    f.gpart("create", &[("scheme", "mbr")]).unwrap();
+    for (args, out) in [
+        (
+            &[("type", "fat32"), ("start", "63"), ("size", "8192")][..],
+            Ok("md0s1 added\n"),
+        ),
+        (
+            &[("type", "ntfs"), ("start", "8255"), ("size", "8192")],
+            Ok("md0s2 added\n"),
+        ),
+        (
+            &[
+                ("type", "linux-data"),
+                ("index", "4"),
+                ("start", "16447"),
+                ("size", "4096"),
+            ],
+            Ok("md0s4 added\n"),
+        ),
+        (
+            &[("type", "freebsd"), ("start", "20543"), ("size", "44993")],
+            Ok("md0s3 added\n"),
+        ),
+        (
+            &[("type", "linux-data"), ("start", "1"), ("size", "2")],
+            Err("28 index '5'"),
+        ),
+    ] {
+        assert_eq!(
+            f.gpart("add", args),
+            out.map(String::from).map_err(String::from),
+            "{args:?}"
+        );
+    }
+    f.gpart("delete", &[("index", "2")]).unwrap();
+    assert_eq!(
+        f.gpart(
+            "add",
+            &[
+                ("type", "ms-basic-data"),
+                ("index", "2"),
+                ("start", "8255"),
+                ("size", "2048")
+            ]
+        ),
+        Err("22".to_string())
+    );
+    f.gpart("set", &[("attrib", "active"), ("index", "3")])
+        .unwrap();
+    f.gpart("unset", &[("attrib", "active"), ("index", "3")])
+        .unwrap();
+    f.gpart("set", &[("attrib", "active"), ("index", "4")])
+        .unwrap();
+    assert_eq!(
+        f.gpart("resize", &[("index", "4"), ("size", "6144")]),
+        Err("28 end '22590'".to_string())
+    );
+    same_as(&f.disk, "mbr-edits");
+    // What MBR refuses.
+    assert_eq!(
+        f.gpart(
+            "add",
+            &[
+                ("type", "fat16"),
+                ("start", "8255"),
+                ("size", "8"),
+                ("label", "x")
+            ]
+        ),
+        Err("22".to_string())
+    );
+    assert_eq!(
+        f.gpart("set", &[("attrib", "bootme"), ("index", "1")]),
+        Err("22 attrib 'bootme'".to_string())
+    );
+    assert_eq!(
+        f.gpart("set", &[("attrib", "active")]),
+        Err("19 attrib 'active'".to_string())
+    );
+    assert_eq!(
+        f.gpart("recover", &[]).unwrap(),
+        "md0 recovering is not needed\n"
+    );
+    let a = alloc::vec![
+        Arg::ascii("class", "PART"),
+        Arg::ascii("verb", "bootcode"),
+        Arg::new("bootcode", GCTL_PARAM_RD, &[0u8; 446]),
+        Arg::ascii("arg0", "md0"),
+    ];
+    assert_eq!(f.issue(a, "bootcode"), Err("19".to_string()));
+    // Entries: exactly four.
+    let mut g = Fake::new(blank("mbr-edits"), 512);
+    assert_eq!(
+        g.gpart("create", &[("scheme", "mbr"), ("entries", "8")]),
+        Err("22 entries '8'".to_string())
+    );
+    // Types: by name, or a number.
+    assert_eq!(mbr::parse_type(b"!12"), Ok(12));
+    assert_eq!(mbr::parse_type(b"!0x83"), Ok(0x83));
+    assert!(mbr::parse_type(b"!256").is_err() && mbr::parse_type(b"!0").is_err());
+    assert_eq!(mbr::type_name(0x0f), "ebr");
+    assert_eq!(mbr::type_name(0x99), "!153");
+    // Destroyed: the first sector wiped.
+    f.gpart("destroy", &[("force", "1")]).unwrap();
+    assert!(f.disk[..512].iter().all(|&b| b == 0));
+}
+
+#[test]
+fn bsd_labels_read_as_freebsd_reads_them() {
+    let img = corpus("mbr-bsd");
+    let t = taste_of(&img, 0, None).unwrap();
+    assert_eq!(t.scheme, Scheme::Mbr);
+    let s1 = t.providers().next().unwrap();
+    assert_eq!(
+        (s1.name(), s1.type_name(), s1.start, s1.end),
+        ("s1".into(), "freebsd".into(), 1, 131_071)
+    );
+    // The slice: a label, its partitions relative to `c`'s offset.
+    let slice = &img[512..];
+    let b = taste_of(slice, 1, Some(Scheme::Mbr)).expect("the slice's label");
+    assert_eq!(
+        (b.scheme, b.entries, b.first, b.last, b.isleaf),
+        (Scheme::Bsd, 8, 0, 131_070, true)
+    );
+    let parts: Vec<(String, String, u64, u64)> = b
+        .providers()
+        .map(|e| (e.name(), e.type_name(), e.start, e.end))
+        .collect();
+    assert_eq!(
+        parts,
+        [
+            ("a".into(), "freebsd-ufs".into(), 0, 81_919),
+            ("b".into(), "freebsd-swap".into(), 81_920, 98_303),
+            ("d".into(), "freebsd-ufs".into(), 98_304, 131_070),
+        ]
+    );
+    let d = b.providers().nth(2).unwrap();
+    let (c, txt) = d.provider_config(&b, 512, 16_776_704);
+    assert_eq!(field(&c, "rawtype"), ["7"]);
+    assert_eq!(field(&c, "offset"), ["50331648"]);
+    assert_eq!(txt, " i 4 o 50331648 ty freebsd-ufs xs BSD xt 7");
+    // A label on a whole disk.
+    let w = taste_of(&corpus("bsd-whole"), 0, None).unwrap();
+    let parts: Vec<(String, u64, u64)> =
+        w.providers().map(|e| (e.name(), e.start, e.end)).collect();
+    assert_eq!(
+        parts,
+        [("a".into(), 0, 16_383), ("b".into(), 16_384, 32_767)]
+    );
+    // Read only: its verbs are refused, and none nests in it.
+    let mut f = Fake::new(corpus("bsd-whole"), 512);
+    assert_eq!(f.table.as_ref().map(|t| t.scheme), Some(Scheme::Bsd));
+    assert_eq!(f.gpart("delete", &[("index", "2")]), Err("45".to_string()));
+    assert_eq!(f.opens, 0);
+    assert_eq!(
+        f.gpart("create", &[("scheme", "bsd")]),
+        Err("22 scheme 'bsd'".to_string())
+    );
+    let a = alloc::vec![
+        Arg::ascii("class", "PART"),
+        Arg::ascii("verb", "create"),
+        Arg::ascii("scheme", "MBR"),
+        Arg::ascii("arg0", "md0s1a"),
+    ];
+    assert_eq!(f.issue(a, "create"), Err("19 provider".to_string()));
 }
