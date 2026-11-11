@@ -504,7 +504,11 @@ Implemented (`sys/vt`, `kernel/src/vtcons.rs`):
 
 `umass` attaches to interface class 8 with subclass 6 (SCSI) and protocol `0x50` (BBB) or `0x62`
 (UAS). It publishes one `da*` disk per logical unit to the storage class (`DiskQueues`), without
-CAM: there is no `pass*` device or `camcontrol` in this track.
+CAM in the I/O path. CAM's user interfaces (DRIVER-MODEL.md §11.5) see each interface as a
+`umass-sim` bus (unit and bus number the interface's unit) and each LUN as a device on it with a
+`pass*` device beside its `da*`: `XPT_SCSI_IO` from `camcontrol` or smartmontools is queued
+with the disk's requests and run by a worker, with its sense data (Bulk-Only asks for as much as
+the CCB's `sense_len`; UAS returns what came with the status).
 
 Worker threads run the requests, one per command the transport takes at once, and retry as
 FreeBSD's `da` does (up to four retries): after `UNIT ATTENTION`, a `NOT READY` that is becoming

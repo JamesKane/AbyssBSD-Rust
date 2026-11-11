@@ -56,6 +56,27 @@ where AbyssBSD differs, and why. A difference not listed here is a bug.
 | `/dev/pci` `PCIOCBARMMAP` memory attributes | Any valid `vm_memattr_t` | amd64: UC, UC-, WC, WB; arm64: Device-nGnRE (`VM_MEMATTR_DEVICE`), non-cacheable, WB. Others (`WRITE_THROUGH`, `WRITE_PROTECTED`, nGnRnE) are `EINVAL`; the mapping is not held to `RLIMIT_VMEM` | The page tables have those three memory types; `pciconf -D` asks for `VM_MEMATTR_DEVICE` |
 | `/dev/pci` list after `devctl delete` of a PCI function | `pci_delete_child` takes it off and bumps the generation | Taken off the list it reports, without bumping the generation | Deleting PCI functions is a forced `devctl delete` only |
 
+## CAM and the NVMe control devices
+
+| What | FreeBSD | AbyssBSD | Why |
+|---|---|---|---|
+| `scbusN` order | Buses are numbered as SIMs register; NVMe controllers register from a configuration hook (`nvme_ctrlr_start_config_hook`), after the controllers attached at boot (QEMU's q35: `ahcich0`–`5` are `scbus0`–`5`, `nvme0` `scbus6`) | Numbered as the drivers start, in attach order: in the same QEMU machine `nvme0` is `scbus0` and the AHCI channels `scbus1`–`6`. On a machine without AHCI (the Orange Pi) the numbers are FreeBSD's | There is no configuration-hook stage after boot-time attach to defer to; disk names and units do not depend on it |
+| CAM's peripheral drivers | `da`, `ada`, `nda`, `cd`, `sa`, `ses`, `ch`, `pt`, `sg`, `targ`, `enc`, `pass` | The disks' names and `pass` only. No ATAPI, enclosure, tape, or changer devices are probed | The storage drivers find disks only |
+| Rescans (`XPT_SCAN_BUS`, `XPT_SCAN_TGT`, `XPT_SCAN_LUN`, `camcontrol rescan`) | Probe the bus again, adding and removing devices | Succeed and change nothing | The drivers register what they find at attach (and on hotplug: USB); CAM does no probing of its own |
+| Queued pass interface (`CAMIOQUEUE`, `CAMIOGET`) | Asynchronous CCBs on a pass device | `ENOTTY` | Not used by `camcontrol`, libcam's synchronous calls, or smartmontools |
+| Pass transfers' largest size | `cpi.maxio`: about 1 MiB for AHCI (`AHCI_SG_ENTRIES`), `maxphys` for USB 3 mass storage | What the driver takes per command: 128 KiB (AHCI), 64 KiB (`umass`), the controller's (NVMe); longer is `E2BIG` | The drivers' own limits; `XPT_PATH_INQ`'s `maxio` says the same |
+| Pass data buffers | Wired user pages (or a kernel copy up to `periph_mapmem_thresh`) | Always a kernel copy, copied out whole after the command | Simpler, and the buffers are at most a transfer |
+| `XPT_ATA_IO` control commands (`CAM_ATAIO_CONTROL`: soft resets) and ATAPI `XPT_SCSI_IO` on AHCI | Run | `CAM_REQ_INVALID` | No ATAPI devices or port multipliers are driven |
+| `XPT_ATA_IO` auxiliary and ICC fields | Sent in the FIS | Not sent | NCQ's TRIM and priorities are not used through pass |
+| `CAM_PASS_ERR_RECOVER` | `cam_periph_error`'s recovery, retrying unit attentions and selection timeouts | A unit attention is retried, up to `retry_count` times; nothing else | The SIMs do their own recovery |
+| `XPT_DEV_ADVINFO` | Device identification for every protocol (VPD page 0x83, an ATA disk's WWN), `RCAPLONG` from `da`'s probe, the physical path stored | The NVMe namespace's (from its NGUID or EUI-64) only; `RCAPLONG` and `EXT_INQ` empty; a physical path is accepted and not kept | Nothing userland lists needs the rest yet |
+| `XPT_GDEV_STATS` | The device queue's openings, active, allocated, queued, and held counts | Openings and tag limits; the counts are 0 | There is no CAM device queue |
+| `XPT_CALC_GEOMETRY` on a pass device | Computed for SCSI disks | `CAM_REQ_INVALID` | Only `da`'s attach uses it |
+| NVMe Linux-compatible requests (`NVME_IOCTL_ID`, `NVME_IOCTL_ADMIN_CMD`, `NVME_IOCTL_IO_CMD`, `NVME_IOCTL_RESET`) | Answered (`nvme_linux.h`) | `ENOTTY` | The header is not installed; FreeBSD's own tools use `NVME_PASSTHROUGH_CMD` |
+| `NVME_IO_TEST`, `NVME_BIO_TEST` (`nvmecontrol perftest`) on `nvmeNnsM` | Kernel threads time reads or writes and report their counts | `EINVAL` (`ndaN` answers `ENOTTY`, as FreeBSD's) | A benchmark of the driver from inside the kernel; `cargo xtask perf` measures the disks |
+| `NVME_RESET_CONTROLLER` | Queues the reset and returns | Resets the controller before returning | The same reset (`nvme_ctrlr_reset_task`'s), run by the caller |
+| An NVMe pass-through command that never completes | Times out like any command and resets the controller | An admin command is polled for `admin_timeout_period` and ends aborted (do not retry) without a reset; an I/O command is the I/O watchdog's | The admin queue is polled here |
+
 ## Drivers
 
 | What | FreeBSD | AbyssBSD | Why |

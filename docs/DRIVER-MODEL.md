@@ -1012,7 +1012,7 @@ disk and iflib (S§13.3).
 
 | Class (crate) | Driver trait | Published as | User-visible names |
 |---|---|---|---|
-| storage (`sys/storage`) | `DiskQueues`: submit a batch of bios to a hardware queue, completion via the class's callback; `describe` (GEOM's `descr`, `ident`, `lunid`, rotation rate) and `set_devstat` (CAM's devstat type) | GEOM-lite disk provider, with devstat entries for it and its partitions (`kern.devstat`, `/dev/devstat`) | `nda*`, `ada*`, `vtbd*`, plus partitions |
+| storage (`sys/storage`) | `DiskQueues`: submit a batch of bios to a hardware queue, completion via the class's callback; `ioctl` for the driver's own requests (`d_ioctl`); `describe` (GEOM's `descr`, `ident`, `lunid`, rotation rate) and `set_devstat` (CAM's devstat type) | GEOM-lite disk provider, with devstat entries for it and its partitions (`kern.devstat`, `/dev/devstat`); CAM's view of it (`sys/cam`, §11.5) | `nda*`, `ada*`, `vtbd*`, plus partitions; `pass*`, `xpt0` |
 | net (`sys/net`, P7) | `EtherQueues`: tx/rx queue pairs, offload capabilities, link state, filter programming (iflib-shaped) | `ifnet` | `vtnet*`, `re*`, `igc*`, … |
 | tty (`sys/tty`) | `UartHw`: line settings, tx/rx FIFOs, modem lines | tty | `ttyu*`, `cuau*` |
 | console | `ConsoleOut`, `ConsoleIn` | Kernel console | `/dev/console`, `ttyv*` (with fb) |
@@ -1294,6 +1294,39 @@ each bus provides. All operations need root privileges and are refused inside ja
   the caller, and `PCIOCBARIO` reaches a BAR of a function with no driver. FreeBSD 15.1's
   `pciconf` runs unmodified (`-l`, `-v`, `-b`, `-c`, `-B`, `-r`, `-w`, `-a`, `-D`; the shell
   cases' `expect::pciconf`). Differences are in compat-deviations.
+- **CAM's user interfaces** (`sys/cam`; done 2026-11-10): the disks keep FreeBSD's CAM names
+  (`da`, `ada`, `nda`) without a CAM layer in their I/O path, and CAM is only what userland sees
+  of it. Each SIM registers a bus (`cam::Bus::register`: `ahcich` per AHCI channel, `nvme` per
+  controller, `umass-sim` per USB mass-storage interface, numbered `scbusN` in the order they
+  register, the transport layer's `xpt0` bus last) and each probed device on it
+  (`Bus::add_device`: target, LUN, inquiry or identify data as CAM's probe keeps it, the serial
+  number, NVMe's identify pages), with its disk peripheral and a `pass` peripheral, in FreeBSD's
+  order (`da0,pass2` for SCSI, `pass0,ada0` and `pass1,nda0` otherwise). SIMs that keep a
+  wildcard path (`ahcich`, `nvme`) show an unconfigured device at target -1. `/dev/xpt0`
+  (`root:operator` 0600) answers `XPT_DEV_MATCH` (FreeBSD's pattern matching, the EDT or the
+  peripheral drivers' lists, paged with generations), `XPT_PATH_INQ`, the scans (which find
+  nothing new) and `CAMGETPASSTHRU`; each `/dev/passN` (the same mode) answers
+  `CAMGETPASSTHRU`, `XPT_GDEV_TYPE`, `XPT_GDEVLIST`, `XPT_PATH_INQ`, the transfer settings,
+  `XPT_DEV_ADVINFO`, `XPT_GDEV_STATS`, and the I/O CCBs, which go to the driver's own
+  submission path through the SIM trait (`cam::Sim`): `XPT_SCSI_IO` to `umass`'s worker queue
+  (sense data fetched as the CCB asks), `XPT_ATA_IO` to an AHCI port (alone on it, the result
+  registers from the received FIS), `XPT_NVME_IO`/`XPT_NVME_ADMIN` to the NVMe queues. The
+  CCB is marshalled in place at `lib/abi`'s offsets (`cam::ccb`), which `abi-check` holds to
+  15.1's headers on both architectures. FreeBSD 15.1's `camcontrol` (`devlist`, `periphlist`,
+  `inquiry`, `identify`, `readcap`, `tur`, `cmd`, `tags`, `rescan`) runs unmodified (the
+  shell cases' `expect::cam`, `tests/user/cam.c`). SIMs hold their drivers weakly, so CAM never
+  keeps a detached driver's grants.
+- **NVMe control devices** (`drivers/nvme/src/user.rs`; done 2026-11-10): `/dev/nvmeN` and
+  `/dev/nvmeNnM` with its alias `nvmeNnsM` (`root:wheel` 0600, as 15.1 makes them), with every
+  ioctl of `nvme_ctrlr.c` and `nvme_ns.c` but the Linux-compatible ones and `perftest`'s:
+  `NVME_PASSTHROUGH_CMD` (admin commands on the controller's node, polled on the admin queue;
+  I/O commands on a namespace's, on the caller's CPU's I/O queue beside the disk's requests),
+  `NVME_RESET_CONTROLLER`, `NVME_GET_NSID`, `NVME_GET_MAX_XFER_SIZE`,
+  `NVME_GET_CONTROLLER_DATA`, `DIOCGIDENT`, `DIOCGMEDIASIZE`, `DIOCGSECTORSIZE`; `ndaN` takes
+  `NVME_GET_NSID` and `NVME_PASSTHROUGH_CMD` too (`ndaioctl`, through the storage class's
+  `DiskQueues::ioctl`). `nvmecontrol` (`devlist`, `identify`, `logpage`, `power`, `ns`,
+  `passthru`, `reset`) runs unmodified. As in 15.1 (not 16-CURRENT, whose board capture shows
+  `nvme_sim0`), the NVMe SIM is not a device of its own in the tree.
 - **devfs**: cdevs are created through `StartCx::cdev` (gated), with FreeBSD names, modes, and
   owners. `devfs.rules` applies unchanged.
 - **`kldstat`, `modfind`, `kldfind`**: report the driver table as built-in modules

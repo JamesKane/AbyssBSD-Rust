@@ -2829,6 +2829,25 @@ no hangs, no reboot loops, nothing that needs the screen, and P8's remaining exi
     `null.c`'s requests (`FIONBIO`, `FIOASYNC`, `DIOCSKERNELDUMP`) and `kevent`. FreeBSD 15.1's
     kyua tests for `gpart` all need `gnop` (and MBR or BSD), so they skip. Left: the MBR and BSD
     schemes, and the LABEL class's verbs and `label/` names (compat-deviations).
+  - Progress 2026-11-10 (NVMe control devices and CAM's user interfaces, in QEMU; not yet on the
+    board): `/dev/nvmeN` and `/dev/nvmeNnM` (alias `nvmeNnsM`) with `NVME_PASSTHROUGH_CMD` (admin
+    on the controller's node, I/O on a namespace's, beside the disk's requests),
+    `NVME_RESET_CONTROLLER`, `NVME_GET_NSID`, `NVME_GET_MAX_XFER_SIZE`,
+    `NVME_GET_CONTROLLER_DATA`, and the `DIOCG*` requests; `ndaN` answers `NVME_GET_NSID` and
+    pass-through too. `sys/cam` is CAM's table without a CAM I/O path: each SIM (`ahcich`,
+    `nvme`, `umass-sim`) registers its bus and probed devices, `/dev/xpt0` answers
+    `XPT_DEV_MATCH` and `CAMGETPASSTHRU`, and each `/dev/passN` its device's CCBs, the I/O ones
+    (`XPT_SCSI_IO`, `XPT_ATA_IO`, `XPT_NVME_IO`/`ADMIN`) on the drivers' own submission paths.
+    `union ccb` and its members, the match patterns and results, and the NVMe requests' structures
+    are held to 15.1's headers by `abi-check` on both architectures. FreeBSD 15.1's `camcontrol`
+    (`devlist [-v|-b]`, `periphlist`, `inquiry`, `identify` for ATA and NVMe, `readcap`, `tur`,
+    `cmd -a` for SMART, `tags`, `rescan`) and `nvmecontrol` (`devlist`, `identify` of controller,
+    namespace and `nda0`, `logpage -p 1`/`-p 2`, `power -l`, `ns`, `reset`) print FreeBSD's lines in
+    the shell cases (`expect::cam`); `tests/user/cam.c` passes on FreeBSD 15.1 and here.
+    Differences (scbus order, no `cd`/`sa`/`ses`, `perftest`, the Linux-compatible NVMe requests)
+    are in compat-deviations. Left: smartmontools (not in the images; its FreeBSD paths,
+    `NVME_PASSTHROUGH_CMD` and SAT through `XPT_SCSI_IO`/`XPT_ATA_IO`, are what the test drives),
+    and the comparison with `tests/corpus/opi6p/freebsd/storage.txt` on the board.
 - **Verification:** kyua's arm64 target on the board; fsx with `fsck_ffs` on the NVMe and a USB
   disk (done with the SMMU's stage 5, IOMMU.md §18); the device tree against FreeBSD's `devinfo`
   wherever FreeBSD has a driver. No day-long looped runs (the user, 2026-11-10): kyua and the
