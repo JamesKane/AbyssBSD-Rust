@@ -250,6 +250,35 @@ We follow FreeBSD's Mach-derived design, adapted to Rust ownership:
   user pointers by construction.
 - **Unified buffer/page cache** for file data (FreeBSD's VMIO model). Metadata is cached through a
   small buffer cache API used by UFS2 and msdosfs.
+- **Instruction cache coherence** (arm64; proposed, 2026-11-11). A page mapped executable is
+  synced first (`sync_icache`: clean to the point of unification unless `CTR_EL0.IDC`, then
+  invalidate unless `CTR_EL0.DIC`). A fault syncs its page and its prefaulted neighbors as one
+  batch, and past 32 KiB invalidates the whole instruction cache once (`IC IALLUIS`), as FreeBSD's
+  `arm64_idc_pipt_icache_sync_range` does. On the Orange Pi 6 Plus (IDC, no DIC) the syncs are
+  still about 45% of an `exec`: every exec maps the same text pages again and syncs each. FreeBSD
+  stopped doing that in `ce0268cc1e` (2026-09-25, `PGA_ICACHE_SYNCED`, after the board's
+  FreeBSD and after 15.1). AbyssBSD has no pmap PV lists to hang FreeBSD's per-page rule on (set
+  while a page has a mapping and none writable; cleared when a writable mapping is created or the
+  last mapping goes), so the same idea is kept per VM object, where the page cache already tracks
+  dirty pages and writable shared mappings:
+  - A bit per page of a **vnode object**, kept with the page in the object's page map: the
+    instruction cache holds nothing older than the page's contents. Anonymous memory and
+    copy-on-write copies have no bit and are synced on every executable mapping, as now.
+  - **Set** after syncing the page for an executable mapping, with the object locked, if the page
+    is not dirty and the object has no writable shared mapping (`writemappings == 0`).
+  - **Skip** the sync only if the bit is set and `writemappings == 0`.
+  - **Clear** it wherever the contents can change: where a page is marked dirty (`write(2)`, and
+    the first write fault through a shared mapping), where truncation zeroes the tail of the last
+    page, and for every page of the object when `writemappings` goes from 0 to 1. A page that
+    leaves the object (freed, reclaimed, replaced) takes its bit with it; a refilled page arrives
+    without one.
+  - Stricter than FreeBSD's rule in one way: a `write(2)` into a text page that stays mapped
+    makes the next executable mapping sync again (FreeBSD keeps the bit while any mapping
+    remains). `ptrace` writes go to a private copy (`Access::Copy`) and sync it themselves.
+  - To check before it lands: that nothing fills a resident page in place (a re-read into the
+    same frame) without marking it dirty or replacing it; and a test that rewrites a binary with
+    `write(2)` between two `exec`s of it, and one that writes code through a shared writable
+    mapping and executes it through another.
 - **Free pages** (`vm::pageout`, `kernel/src/mm/pageout.rs`), as FreeBSD keeps them:
   - FreeBSD's thresholds, from `vm_pageout_init_domain`'s formulas: `v_free_reserved`,
     `v_free_min`, `v_free_severe`, `v_free_target`, and the wakeup mark, 90% of the target.

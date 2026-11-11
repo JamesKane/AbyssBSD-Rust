@@ -2964,6 +2964,17 @@ hang.
   benchmarks are noisy at 3 runs (FreeBSD CV over 1%); the 10-run gate waits for the gaps to
   close. Also to do: `p2` (AbyssBSD's `abyss.bench` powers off after the suite, a power cycle on
   the board) and `p7` over `rge`.
+- Progress 2026-11-11 (the arm64 gaps, traced with `abyss.prof` on the board's big cores): every
+  signal walked the process table to see whether its group was orphaned (`fc2c7d0`); a fault
+  synced code pages line by line, page by page, partly with interrupts masked (`b827df1`); the
+  kernel's `memcpy`/`memset` moved a word per iteration (`97d7b9b`, now 64 bytes as `LDP`/`STP`
+  pairs); and each delivery and `sigreturn` used the heap for FPU images and the SVE context
+  (`e5329d7`). One run each, not the gate: `sig.deliver` 5.0 to 1.8 µs (FreeBSD 0.97),
+  `proc.exec` 286 to 194 µs (108), `proc.vfork_exec` 285 to 193 µs (169), `proc.fork` 65.7 to
+  48.3 µs (45.4), `vm.fault.anon` 926 to 814 ns. Next: the instruction-cache "synced" bit per
+  vnode-object page (ARCHITECTURE.md §5.2, proposed), still about 45% of an `exec`; then lazy SVE
+  (FreeBSD's `vfp.c` traps the first use, so threads that never use SVE save and restore only the
+  V registers and get no SVE signal context).
 - Progress 2026-11-10 (the known defects, in QEMU; none yet tried on the board):
   - `MNT_RELOAD`: `nmount`'s `reload` on a read-only mount (`vfs_domount_update`'s rule), with
     `ffs` taken as `ufs` (`chkdoreload` asks for `ffs`, which is why the root's failed with
