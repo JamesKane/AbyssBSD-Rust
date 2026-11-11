@@ -155,6 +155,10 @@ static TEST_DRIVERS: &[DriverDecl] = &[
     crate::tests::bus_test::IIC_TAKER,
     crate::tests::bus_test::IIC_TEST_DEV,
     crate::tests::bus_test::IIC_STAYS,
+    #[cfg(target_arch = "aarch64")]
+    crate::tests::sky_i2c::SKY_BUS,
+    #[cfg(target_arch = "aarch64")]
+    crate::tests::sky_i2c::SKY_CTL,
 ];
 
 /// Drivers that call into the kernel itself (firmware services).

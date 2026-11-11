@@ -15,6 +15,9 @@ use ktest::ktest;
 use crate::arch;
 use crate::devices::find_named;
 
+#[cfg(target_arch = "aarch64")]
+pub(crate) mod sky_i2c;
+
 /// A [`sched::Sleepable`] for test code, which runs only in threads (the
 /// boot thread or ones it spawns), never in interrupt handlers.
 fn cx() -> sched::Sleepable {
