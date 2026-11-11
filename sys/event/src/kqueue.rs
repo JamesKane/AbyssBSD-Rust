@@ -198,6 +198,14 @@ impl Knote {
         self.set(0, status::ACTIVE);
     }
 
+    /// Drops it from its kqueue (`knote_drop`), as [`crate::Notify::delete`]
+    /// does for an object that is freed.
+    pub fn delete(&self) {
+        if let Some(kq) = self.kq.upgrade() {
+            kq.drop_knote(self);
+        }
+    }
+
     /// A notification: runs the filter, the note and the object's list
     /// locked; returns its kqueue if it newly has an event and is watched.
     pub(crate) fn deliver(&self, hint: u64) -> Option<Arc<Kqueue>> {

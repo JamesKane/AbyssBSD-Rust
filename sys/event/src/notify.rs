@@ -206,6 +206,20 @@ impl Notify {
         }
     }
 
+    /// The object is freed (`knlist_delete`): its knotes leave their
+    /// kqueues at once, reported or not.
+    pub fn delete(&self) {
+        let knotes = {
+            let mut i = self.inner.lock();
+            let k = core::mem::take(&mut i.knotes);
+            Self::rearm(&self.armed, &i);
+            k
+        };
+        for kn in knotes {
+            kn.delete();
+        }
+    }
+
     /// The knotes whose notes satisfy `f` (for `knote_fork`, which
     /// registers more for each).
     pub fn knotes_where(&self, f: impl Fn(&crate::Note) -> bool) -> Vec<Arc<Knote>> {
