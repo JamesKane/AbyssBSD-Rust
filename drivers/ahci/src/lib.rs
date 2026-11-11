@@ -163,10 +163,46 @@ impl InFlight {
     }
 }
 
+/// An IDENTIFY string as CAM keeps it (`ata_param_fixup`): each word's
+/// bytes high first, NULs and underscores as spaces, trailing spaces
+/// dropped, and runs of spaces packed to one (`ata_btrim`, `ata_bpack`).
+fn ata_string(words: &[u16]) -> String {
+    let mut b: Vec<u8> = words.iter().flat_map(|w| w.to_be_bytes()).collect();
+    for c in &mut b {
+        if *c == 0 || *c == b'_' {
+            *c = b' ';
+        }
+    }
+    while b.last() == Some(&b' ') {
+        b.pop();
+    }
+    let mut out = String::new();
+    let mut blank = false;
+    for (i, &c) in b.iter().enumerate() {
+        if c == b' ' {
+            if blank || i == 0 {
+                blank = true;
+                continue;
+            }
+            blank = true;
+        } else {
+            blank = false;
+        }
+        out.push(char::from(c));
+    }
+    out
+}
+
 /// What identify says about a drive.
 #[derive(Clone, Debug)]
 pub struct Drive {
     model: String,
+    /// Its serial number (`ident`).
+    serial: String,
+    /// Word 217, the nominal media rotation rate (`d_rotation_rate`).
+    rotation: u16,
+    /// Its world-wide name (words 108-111), when word 87 says it has one.
+    wwn: Option<String>,
     sectors: u64,
     sector_size: u32,
     /// NCQ queue depth, if the drive and controller support NCQ.
@@ -376,14 +412,17 @@ impl Port {
             return Err(AttachError::Device("IDENTIFY DEVICE failed"));
         }
         let word = |i: usize| u16::from_le_bytes([buf.read(2 * i), buf.read(2 * i + 1)]);
-        let mut model = String::new();
-        for w in 27..47 {
-            let v = word(w);
-            for b in [(v >> 8) as u8, v as u8] {
-                model.push(char::from(b));
+        let model = ata_string(&(27..47).map(word).collect::<Vec<u16>>());
+        let serial = ata_string(&(10..20).map(word).collect::<Vec<u16>>());
+        let wwn = (word(87) & 0xc000 == 0x4000 && word(87) & (1 << 8) != 0).then(|| {
+            use core::fmt::Write;
+            let mut s = String::new();
+            for w in 108..112 {
+                let _ = write!(s, "{:04x}", word(w));
             }
-        }
-        let model = model.trim().into();
+            s
+        });
+        let rotation = word(217);
         let lba48 = word(83) & (1 << 10) != 0;
         let sectors = if lba48 {
             (0..4).fold(0u64, |a, i| a | u64::from(word(100 + i)) << (16 * i))
@@ -404,6 +443,9 @@ impl Port {
         }
         Ok(Some(Drive {
             model,
+            serial,
+            rotation,
+            wwn,
             sectors,
             sector_size,
             ncq,
@@ -771,6 +813,21 @@ impl Driver for AhciCh {
             }
         ));
         let disk = storage::publish(s, info, Arc::clone(&self.port) as _);
+        // What `ada` gives GEOM (`adaregister`): the model, the serial
+        // number, the rotation rate, the WWN as its LUN id; CAM's devstat
+        // entry.
+        disk.describe(storage::Description {
+            descr: drive.model.clone(),
+            ident: drive.serial.clone(),
+            lunid: drive.wwn.clone(),
+            rotation: match drive.rotation {
+                0 => storage::Rotation::Unknown,
+                1 => storage::Rotation::NonRotating,
+                r => storage::Rotation::Rpm(r),
+            },
+            ..storage::Description::default()
+        });
+        disk.set_devstat(storage::devstat::Kind::ATA);
         *self.port.disk.lock() = Some(disk);
         Ok(())
     }

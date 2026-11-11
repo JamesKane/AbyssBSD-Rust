@@ -52,6 +52,10 @@ const CFG_BLK_SIZE: u16 = 20;
 const T_IN: u32 = 0;
 const T_OUT: u32 = 1;
 const T_FLUSH: u32 = 4;
+/// `VIRTIO_BLK_T_GET_ID`: the device's identifier, up to
+/// `VIRTIO_BLK_ID_BYTES` (20) bytes.
+const T_GET_ID: u32 = 8;
+const ID_BYTES: usize = 20;
 const S_OK: u8 = 0;
 
 /// Capacity is in 512-byte sectors whatever the block size.
@@ -170,6 +174,54 @@ impl Shared {
             }
         }
         out
+    }
+}
+
+impl Shared {
+    /// `vtblk_ident`: the device's identifier (`VIRTIO_BLK_T_GET_ID`),
+    /// asked once before the disk is published, with nothing else in
+    /// flight, and polled (the queue's interrupts off meanwhile). Empty if
+    /// the device has none or fails the request.
+    fn ident(&self, s: &Sleepable) -> String {
+        let Ok(buf) = self.tag.coherent::<u8>(SLOT + ID_BYTES) else {
+            return String::new();
+        };
+        let mut q = self.queue.lock(s);
+        q.vq.set_interrupts(false);
+        buf.write_at::<u32>(0, T_GET_ID);
+        buf.write_at::<u32>(4, 1);
+        buf.write_at::<u64>(8, 0);
+        buf.write(16, 0xff);
+        let base = buf.bus_addr();
+        let id = (base + SLOT as u64, u32::try_from(ID_BYTES).unwrap_or(0));
+        let pushed = q.vq.push(&[(base, 16)], &[id, (base + 16, 1)]);
+        let mut got = false;
+        if pushed.is_ok() {
+            q.vq.kick();
+            for _ in 0..1000 {
+                match q.vq.pop() {
+                    Ok(Some(_)) => {
+                        got = true;
+                        break;
+                    }
+                    Ok(None) => bus::manager().sleep_ms(s, 1),
+                    Err(_) => break,
+                }
+            }
+        }
+        let _ = q.vq.rearm();
+        q.vq.set_interrupts(true);
+        drop(q);
+        if !got || buf.read(16) != S_OK {
+            return String::new();
+        }
+        // NUL-terminated if shorter than the field (`d_ident` is read as
+        // a C string).
+        let bytes: Vec<u8> = (0..ID_BYTES)
+            .map(|i| buf.read(SLOT + i))
+            .take_while(|&b| b != 0)
+            .collect();
+        String::from_utf8_lossy(&bytes).into_owned()
     }
 }
 
@@ -390,7 +442,14 @@ impl Driver for VtBlk {
             cx.interrupt(line, Some(filter), Some(completions), 0)?;
         }
         self.dev.ready();
+        let ident = self.shared.ident(cx.sleepable());
         let disk = storage::publish(cx.sleepable(), self.info, Arc::clone(&self.shared) as _);
+        // What `vtblk` gives GEOM: its identifier alone (no description,
+        // no rotation rate), and `geom_disk`'s devstat entry.
+        disk.describe(storage::Description {
+            ident,
+            ..storage::Description::default()
+        });
         *self.shared.disk.lock() = Some(disk);
         Ok(())
     }

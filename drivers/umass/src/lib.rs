@@ -613,6 +613,20 @@ impl Umass {
                 unit: i,
             }),
         );
+        // What `da` gives GEOM (`daregister`): INQUIRY's vendor and
+        // product, the unit serial number (VPD page 0x80, CAM's
+        // `GEOM::ident`); no rotation rate without the block device
+        // characteristics page; CAM's devstat entry.
+        disk.describe(storage::Description {
+            descr: alloc::format!("{} {}", scsi::ident(&inq.vendor), scsi::ident(&inq.product)),
+            ident: p
+                .serial
+                .as_deref()
+                .map(|s| String::from(s.trim_start_matches(' ')))
+                .unwrap_or_default(),
+            ..storage::Description::default()
+        });
+        disk.set_devstat(storage::devstat::Kind::SCSI);
         // umass's SIM says PIM_NO_6_BYTE, which da keeps as a quirk.
         mgr.log(format_args!("da{unit}: quirks=0x2<NO_6_BYTE>"));
         disk

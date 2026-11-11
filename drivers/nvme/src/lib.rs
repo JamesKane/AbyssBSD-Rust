@@ -421,6 +421,8 @@ struct Namespace {
     /// log2 of the block size.
     shift: u32,
     blocks: u64,
+    /// Its world-wide name, from its NGUID or EUI-64.
+    lunid: Option<String>,
 }
 
 /// The watchdog's state (the qpair callout's `timer_armed`).
@@ -1191,6 +1193,42 @@ fn wait_ready(regs: &Regs, s: &Sleepable, ready: bool, timeout_ms: u64) -> Resul
     Err(AttachError::Device("controller ready timeout"))
 }
 
+/// An identify field as CAM shows it (`cam_strvis_flag` with
+/// `CAM_STRVIS_FLAG_NONASCII_SPC`): leading spaces and trailing spaces
+/// and NULs trimmed, anything not printable ASCII a space.
+fn strvis(b: &[u8]) -> String {
+    let start = b.iter().position(|&c| c != b' ').unwrap_or(b.len());
+    let end = b
+        .iter()
+        .rposition(|&c| c != b' ' && c != 0)
+        .map_or(start, |i| i + 1)
+        .max(start);
+    b[start..end]
+        .iter()
+        .map(|&c| {
+            if (0x20..0x80).contains(&c) {
+                char::from(c)
+            } else {
+                ' '
+            }
+        })
+        .collect()
+}
+
+/// A namespace's `GEOM::lunid` (`nvme_xpt`'s device id, as `xpt_getattr`
+/// prints it): its NGUID in hex if it has one, else its EUI-64.
+fn lunid(nguid: &[u8], eui64: &[u8]) -> Option<String> {
+    use core::fmt::Write;
+    let id = [nguid, eui64]
+        .into_iter()
+        .find(|b| b.iter().any(|&c| c != 0))?;
+    let mut s = String::new();
+    for b in id {
+        let _ = write!(s, "{b:02x}");
+    }
+    Some(s)
+}
+
 /// An ASCII identify field, without its padding (spaces, or NULs).
 fn ascii(b: &[u8]) -> String {
     String::from_utf8_lossy(b)
@@ -1209,6 +1247,10 @@ pub struct Nvme {
     /// The MSI-X vectors, given back when the instance goes.
     _messages: Option<pci::bus::Messages>,
     identity: String,
+    /// The model and serial number, as `nda` shows them (`descr`,
+    /// `ident`).
+    model: String,
+    serial: String,
     watchdog: SpinLock<Option<Arc<Thread>>>,
 }
 
@@ -1477,6 +1519,9 @@ impl Driver for Nvme {
         let bytes = |a: usize, b: usize| (a..b).map(|i| identify.read(i)).collect::<Vec<u8>>();
         let model = ascii(&bytes(24, 64));
         let serial = ascii(&bytes(4, 24));
+        // As `nda` shows them; read now, before the namespaces' identify
+        // data replaces the controller's in the buffer.
+        let (nda_model, nda_serial) = (strvis(&bytes(24, 64)), strvis(&bytes(4, 24)));
         let firmware = ascii(&bytes(64, 72));
         let mdts = identify.read(77);
         let max_transfer = if mdts == 0 {
@@ -1585,16 +1630,20 @@ impl Driver for Nvme {
             if blocks == 0 || !(9..=16).contains(&shift) {
                 continue;
             }
+            let field = |a: usize, b: usize| (a..b).map(|i| identify.read(i)).collect::<Vec<u8>>();
             namespaces.push(Namespace {
                 nsid,
                 shift,
                 blocks,
+                lunid: lunid(&field(104, 120), &field(120, 128)),
             });
         }
         // Unmask (INTx and MSI; MSI-X ignores the masks).
         regs.mmio.write32(reg::INTMC, u32::MAX);
         let unit = cx.unit();
         Ok(Self {
+            model: nda_model,
+            serial: nda_serial,
             identity: alloc::format!(
                 "{model} (serial {serial}, firmware {firmware}, NVMe {}.{})",
                 version >> 16,
@@ -1668,7 +1717,18 @@ impl Driver for Nvme {
                 nsid: ns.nsid,
                 shift: ns.shift,
             };
-            disks.push(storage::publish(cx.sleepable(), info, Arc::new(queues)));
+            let disk = storage::publish(cx.sleepable(), info, Arc::new(queues));
+            // What `nda` gives GEOM (`ndaregister`): the model and serial
+            // number, a solid-state disk, and CAM's devstat entry.
+            disk.describe(storage::Description {
+                descr: self.model.clone(),
+                ident: self.serial.clone(),
+                lunid: ns.lunid.clone(),
+                rotation: storage::Rotation::NonRotating,
+                ..storage::Description::default()
+            });
+            disk.set_devstat(storage::devstat::Kind::NVME);
+            disks.push(disk);
         }
         *self.ctrl.disks.lock() = disks;
         Ok(())
