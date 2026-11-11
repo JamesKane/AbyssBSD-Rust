@@ -1,0 +1,11 @@
+#
+# GENERIC-HMP-IOMMU-NODEBUG -- the Orange Pi 6 Plus's FreeBSD kernel
+# (GENERIC-HMP-IOMMU, branch orangepi-6-plus at f12c9f4ee6) without
+# INVARIANTS and WITNESS: the perf baseline on the board, as a release's
+# GENERIC is (docs/PERFORMANCE.md §2). Copied to sys/arm64/conf to build.
+#
+
+include		GENERIC-HMP-IOMMU
+include		"../../conf/std.nodebug"
+
+ident		GENERIC-HMP-IOMMU-NODEBUG

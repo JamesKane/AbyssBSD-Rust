@@ -26,6 +26,7 @@ use crate::image;
 use crate::qemu::{Outcome, Vm, Vmm};
 use crate::util::{self, Result};
 
+mod board;
 mod p7;
 
 const VM_IMAGE: &str = "FreeBSD-15.1-RELEASE-amd64-ufs.raw.xz";
@@ -41,7 +42,8 @@ const MAX_CV: f64 = 0.01;
 const BOOTSTRAP: usize = 2000;
 
 const USAGE: &str = "usage: cargo xtask --remote perf [--suite p2|p3|p4|p5|p6|p6.thr|p6.event|p6.unix|p6.pty|p7|vt|diag] [--runs N] [--prepare] \
-                     [--freebsd-only [--prof] | --abyss-only [--prof [--prof-cpu N]]]";
+                     [--freebsd-only [--prof] | --abyss-only [--prof [--prof-cpu N]]]\n       \
+                     cargo xtask perf --platform opi6p --dir DIR [--rev REV]";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Side {
@@ -59,6 +61,23 @@ impl Side {
 }
 
 pub(crate) fn cmd(mut args: Args) -> Result<()> {
+    // The Orange Pi 6 Plus: tests/perf/board/perf-board.sh runs the suites;
+    // this makes the report from its logs.
+    if let Some(platform) = args.take_value("--platform")? {
+        let dir = args.take_value("--dir")?;
+        let rev = args.take_value("--rev")?;
+        args.finish()?;
+        let (true, Some(dir)) = (platform == "opi6p", dir) else {
+            return Err(USAGE.into());
+        };
+        let rev = match rev {
+            Some(r) => r,
+            None => util::output(Command::new("git").args(["rev-parse", "--short", "HEAD"]))?
+                .trim()
+                .to_owned(),
+        };
+        return board::report(Path::new(&dir), &rev);
+    }
     let suite = args.take_value("--suite")?.unwrap_or_else(|| "p2".into());
     let runs: usize = args
         .take_value("--runs")?
@@ -1621,8 +1640,15 @@ impl Report {
     }
 
     fn render(&self, suite: &str, rev: &str, runs: usize) -> String {
+        self.render_titled(&format!(
+            "perf suite {suite}, AbyssBSD {rev} vs FreeBSD {RELEASE}, bhyve, {runs} runs per side"
+        ))
+    }
+
+    /// The report, under `title`.
+    fn render_titled(&self, title: &str) -> String {
         let mut s = format!(
-            "perf suite {suite}, AbyssBSD {rev} vs FreeBSD {RELEASE}, bhyve, {runs} runs per side\n\
+            "{title}\n\
              ratio = median(AbyssBSD) / median(FreeBSD); pass <= {BOUND:.2}; \
              noisy = FreeBSD CV > {:.0}%\n\n",
             MAX_CV * 100.0

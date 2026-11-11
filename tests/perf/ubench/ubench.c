@@ -13,6 +13,15 @@
  *	./ubench p6	(built with -DUB_P6 -lthr; runs base's programs)
  *	./ubench p7 PEER	(the same build; PEER runs `ubench p7.peer PEER`)
  *
+ * Two settings from the environment, for machines other than the bhyve
+ * guests (tests/perf/README.md, "Settings"):
+ *
+ *	UBENCH_DISK	the scratch disk p5 formats (default /dev/nda0); p5
+ *			refuses one that holds an MBR or GPT
+ *	UBENCH_CPUS	the CPUs the suites bind to, as a comma list: the
+ *			suite's CPU i is the list's entry i modulo its length
+ *			(default: CPU i itself)
+ *
  * p4 uses Tier A system calls (docs/COMPATIBILITY.md §2.1), plus
  * cpuset_setaffinity to bind itself as kbench binds its workers. p5 adds
  * the file-system calls, and runs /rescue's newfs, tar, and rm, and fsx.
@@ -77,11 +86,13 @@
 #define	UB_STORM	1000		/* files per create/rename/unlink round */
 #define	UB_FILE		(64UL << 20)	/* fs.*.seq_* and rand_* file size */
 #define	UB_IO		65536		/* fs.*.seq_* transfer size */
-#define	UB_DISK		"/dev/nda0"	/* the scratch disk p5 formats */
+#define	UB_DISK		"/dev/nda0"	/* p5's scratch disk, unless UBENCH_DISK */
 #define	UB_TREE		"/tmp/tree.tar"	/* fs.*.extract input */
 #define	UB_FSX		"/tmp/fsx"
 
 static const char *self;
+static int ub_cpus[256];	/* UBENCH_CPUS */
+static int ub_ncpus;		/* 0: CPU i is CPU i */
 
 static void
 die(const char *what)
@@ -95,13 +106,20 @@ die(const char *what)
  * Unbound, a freshly exec'd child lands on an idle CPU, and proc.vfork_exec
  * measured that CPU's wake-up and cold caches: 550 us where it takes 100.
  */
+/* The suite's CPU `i`: UBENCH_CPUS's entry, or `i` itself. */
+static int
+ub_cpu(int i)
+{
+	return (ub_ncpus > 0 ? ub_cpus[i % ub_ncpus] : i);
+}
+
 static void
 bind_cpu(int cpu)
 {
 	cpuset_t set;
 
 	CPU_ZERO(&set);
-	CPU_SET(cpu, &set);
+	CPU_SET(ub_cpu(cpu), &set);
 	if (cpuset_setaffinity(CPU_LEVEL_WHICH, CPU_WHICH_PID, -1, sizeof(set),
 	    &set) != 0)
 		die("cpuset_setaffinity");
@@ -579,6 +597,37 @@ mount_fs(const char *type, const char *path, const char *from)
 		die("nmount");
 }
 
+/*
+ * p5's scratch disk: UBENCH_DISK, or UB_DISK. A disk that starts with a
+ * partition table (an MBR's signature, a GPT's header) is a machine's own
+ * disk, never a scratch disk: refused.
+ */
+static const char *ub_disk;
+
+static const char *
+scratch_disk(void)
+{
+	const char *disk = getenv("UBENCH_DISK");
+	unsigned char lba[2][512];
+	int fd;
+
+	if (disk == NULL || *disk == '\0')
+		disk = UB_DISK;
+	fd = open(disk, O_RDONLY);
+	if (fd < 0)
+		die(disk);
+	if (pread(fd, lba, sizeof(lba), 0) != (ssize_t)sizeof(lba))
+		die(disk);
+	close(fd);
+	if ((lba[0][510] == 0x55 && lba[0][511] == 0xaa) ||
+	    memcmp(lba[1], "EFI PART", 8) == 0) {
+		fprintf(stderr, "ubench: %s holds a partition table: "
+		    "not a scratch disk (UBENCH_DISK)\n", disk);
+		exit(1);
+	}
+	return (disk);
+}
+
 /* `<dir>/<name>`, in a static buffer per slot. */
 static const char *
 at(int slot, const char *dir, const char *name)
@@ -848,7 +897,7 @@ bench_cold_read(const char *path)
 
 		if (unmount(UB_UFS, 0) != 0)
 			die("unmount");
-		mount_fs("ufs", UB_UFS, UB_DISK);
+		mount_fs("ufs", UB_UFS, ub_disk);
 		if ((fd = open(path, O_RDONLY)) < 0)
 			die("open");
 		t0 = now();
@@ -1070,10 +1119,12 @@ suite_vt(void)
 static void
 suite_p5(void)
 {
-	char *newfs[] = { "/rescue/newfs", "-U", UB_DISK, NULL };
+	char *newfs[] = { "/rescue/newfs", "-U", NULL, NULL };
 
+	ub_disk = scratch_disk();
+	newfs[2] = (char *)(uintptr_t)ub_disk;
 	run_quiet(newfs);
-	mount_fs("ufs", UB_UFS, UB_DISK);
+	mount_fs("ufs", UB_UFS, ub_disk);
 	mount_fs("tmpfs", UB_TMPFS, NULL);
 	suite_fs("ufs", UB_UFS);
 	suite_fs("tmpfs", UB_TMPFS);
@@ -1097,7 +1148,7 @@ bind_thread(int cpu)
 	cpuset_t set;
 
 	CPU_ZERO(&set);
-	CPU_SET(cpu, &set);
+	CPU_SET(ub_cpu(cpu), &set);
 	if (cpuset_setaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, sizeof(set),
 	    &set) != 0)
 		die("cpuset_setaffinity");
@@ -2259,6 +2310,18 @@ main(int argc, char **argv)
 		    UB_HAS_P6 ? " | p6 | p6.thr | p6.event | p6.unix | p6.pty"
 		    " | p7 PEER | p7.peer ADDR" : "");
 		return (2);
+	}
+	if (getenv("UBENCH_CPUS") != NULL) {
+		char *list = getenv("UBENCH_CPUS"), *end;
+
+		while (*list != '\0' && ub_ncpus < (int)nitems(ub_cpus)) {
+			ub_cpus[ub_ncpus++] = (int)strtol(list, &end, 10);
+			if (end == list || (*end != ',' && *end != '\0')) {
+				fprintf(stderr, "ubench: bad UBENCH_CPUS\n");
+				return (2);
+			}
+			list = *end == ',' ? end + 1 : end;
+		}
 	}
 	printf("kbench begin %s cpus=%ld\n", argv[1],
 	    sysconf(_SC_NPROCESSORS_ONLN));

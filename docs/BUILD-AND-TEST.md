@@ -412,6 +412,31 @@ lands in), and copies `run-<system>/` into `WORKDIR` at the end. `cargo xtask ky
 AbyssBSD's results, compared with it as `kyua` compares bhyve's, against the same
 `known-failures.txt`.
 
+### Performance on the Orange Pi 6 Plus
+
+The userland suites (`p4`, `p5`, `p6`) compare AbyssBSD's release kernel with the board's FreeBSD
+16-CURRENT built without its debugging options: `GENERIC-HMP-IOMMU-NODEBUG`
+(`tests/perf/board/`, the branch's `f12c9f4ee6` with `std.nodebug`), installed on the Crucial disk
+as `/boot/kernel.nodebug` and booted one boot at a time with `nextboot -k`, the default kernel
+staying as it is. The board's default kernel has `WITNESS` and `INVARIANTS`, which a perf baseline
+may not (PERFORMANCE.md §2).
+
+`tests/perf/board/perf-run.sh SUITE...`, on the board as root, runs each suite once per core class
+(`big`: the A720s at 2.6 and 2.5 GHz, CPUs 0, 1, 10, 11; `mid`: those at 2.3 and 2.2 GHz, 6-9;
+`little`: the A520s, 2-5; `all`: `ubench`'s own CPUs 0-7), through `UBENCH_CPUS`. Both kernels run
+the same userland, AbyssBSD's root (FreeBSD 15.1's base): FreeBSD mounts it read-only and runs the
+suites chrooted into it. Both get a fresh tmpfs `/tmp`, every cluster held at its highest frequency
+with `powerd` stopped, FreeBSD's idle held at C1 (WFI, the only idle state AbyssBSD has yet), and a
+quiet start (load under 0.3). `p5` formats the Samsung's `abyssbench` partition (`nda1p4`, 16 GiB),
+through `UBENCH_DISK`. Its inputs are in the `kyuawork` partition's `perf/`: `ubench` and its `p6`
+build (`ubench-p6`), the arm64 `fsx`, `tree.tar` from arm64's `base.txz`, and `perf-run.sh`.
+
+`tests/perf/board/perf-board.sh WORKDIR RUNS SUITE...`, on the workstation, runs it `RUNS` times on
+each system, alternating them and which goes first, rebooting between (FreeBSD always leaves
+`nextboot` set, so the next FreeBSD boot is the NODEBUG kernel). Each run's output is
+`WORKDIR/<side>-<run>.log`; rerun to resume. `cargo xtask perf --platform opi6p --dir WORKDIR`
+writes the report, one table per core class, to `WORKDIR/report.txt`.
+
 ### The network soak
 
 `cargo xtask --remote net-soak [--duration SECONDS] [--freebsd]` runs `iperf3` between the guest

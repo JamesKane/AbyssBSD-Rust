@@ -27,6 +27,17 @@ kbench end <suite>
 `<value>` is a decimal number. Every unit is "larger is slower": `ns/op` (elapsed time over
 operations completed, so the inverse of throughput) or `ns` (a latency percentile).
 
+## Settings
+
+`ubench` takes two settings from the environment, for machines other than the bhyve guests (the
+Orange Pi 6 Plus: `board/perf-run.sh`). Unset, it behaves as in the guests.
+
+- `UBENCH_DISK`: the scratch disk `p5` formats, instead of `/dev/nda0`. `p5` refuses a disk that
+  starts with a partition table (an MBR signature, a GPT header): that is a machine's own disk,
+  never a scratch one.
+- `UBENCH_CPUS`: the CPUs the suites bind to, as a comma list. The suite's CPU *i* is the list's
+  entry *i* modulo its length, so the same suite runs on one core class.
+
 ## Common rules
 
 - The VM has 8 vCPUs. The coordinator runs bound to CPU 0. Worker *i* of *T* runs bound to CPU
