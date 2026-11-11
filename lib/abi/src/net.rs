@@ -69,11 +69,24 @@ pub mod ifcap {
     pub const RXCSUM_IPV6: u32 = 1 << 21;
     pub const TXCSUM_IPV6: u32 = 1 << 22;
     pub const HWSTATS: u32 = 1 << 23;
+    pub const MEXTPG: u32 = 1 << 26;
+    pub const TOE4: u32 = 1 << 14;
+    pub const TOE6: u32 = 1 << 15;
+    /// `IFCAP_TSO`, `IFCAP_TOE`, `IFCAP_HWCSUM`, `IFCAP_HWCSUM_IPV6`.
+    pub const TSO: u32 = TSO4 | TSO6;
+    pub const TOE: u32 = TOE4 | TOE6;
+    pub const HWCSUM: u32 = RXCSUM | TXCSUM;
+    pub const HWCSUM_IPV6: u32 = RXCSUM_IPV6 | TXCSUM_IPV6;
 }
 
 /// `IFT_ETHER`, `IFT_LOOP`, `LINK_STATE_UP`.
 pub const IFT_ETHER: u8 = 0x6;
 pub const IFT_LOOP: u8 = 0x18;
+/// `IFT_PPP` (`tun`), `IFT_L2VLAN`, `IFT_BRIDGE`, `IFT_GIF`.
+pub const IFT_PPP: u8 = 0x17;
+pub const IFT_L2VLAN: u8 = 0x87;
+pub const IFT_BRIDGE: u8 = 0xd1;
+pub const IFT_GIF: u8 = 0xf0;
 pub const LINK_STATE_UNKNOWN: u8 = 0;
 pub const LINK_STATE_DOWN: u8 = 1;
 pub const LINK_STATE_UP: u8 = 2;
@@ -466,6 +479,9 @@ pub mod sio {
         IFREQ, IN, IN6IFREQ, INOUT, Ifaliasreq, Ifconf, Ifgroupreq, Ifstat, In6Addrpolicy,
         In6Aliasreq, In6Ndifreq, In6Ndireq, OUT, ioc,
     };
+    use crate::bridge::Ifdrv;
+    pub const SIOCSDRVSPEC: u32 = ioc(IN, b'i', 123, size_of::<Ifdrv>());
+    pub const SIOCGDRVSPEC: u32 = ioc(INOUT, b'i', 123, size_of::<Ifdrv>());
     pub const SIOCATMARK: u32 = ioc(OUT, b's', 7, 4);
     pub const SIOCSPGRP: u32 = ioc(IN, b's', 8, 4);
     pub const SIOCGPGRP: u32 = ioc(OUT, b's', 9, 4);
@@ -594,6 +610,15 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("IFCAP_TXCSUM_IPV6", "net/if.h", ifcap::TXCSUM_IPV6 as i64),
     c("IFT_ETHER", "net/if_types.h", IFT_ETHER as i64),
     c("IFT_LOOP", "net/if_types.h", IFT_LOOP as i64),
+    c("IFT_PPP", "net/if_types.h", IFT_PPP as i64),
+    c("IFT_L2VLAN", "net/if_types.h", IFT_L2VLAN as i64),
+    c("IFT_BRIDGE", "net/if_types.h", IFT_BRIDGE as i64),
+    c("IFT_GIF", "net/if_types.h", IFT_GIF as i64),
+    c("IFCAP_MEXTPG", "net/if.h", ifcap::MEXTPG as i64),
+    c("IFCAP_TOE4", "net/if.h", ifcap::TOE4 as i64),
+    c("IFCAP_TOE6", "net/if.h", ifcap::TOE6 as i64),
+    c("SIOCSDRVSPEC", "sys/sockio.h", sio::SIOCSDRVSPEC as i64),
+    c("SIOCGDRVSPEC", "sys/sockio.h", sio::SIOCGDRVSPEC as i64),
     c("LINK_STATE_UNKNOWN", "net/if.h", LINK_STATE_UNKNOWN as i64),
     c("LINK_STATE_DOWN", "net/if.h", LINK_STATE_DOWN as i64),
     c("LINK_STATE_UP", "net/if.h", LINK_STATE_UP as i64),

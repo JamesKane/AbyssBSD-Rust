@@ -15,6 +15,7 @@
 
 pub mod acl;
 pub mod bpf;
+pub mod bridge;
 pub mod bus;
 pub mod capsicum;
 pub mod consio;
@@ -62,6 +63,7 @@ pub mod syslog;
 pub mod termios;
 pub mod thr;
 pub mod time;
+pub mod tun;
 pub mod ucontext;
 pub mod ucred;
 pub mod uio;
