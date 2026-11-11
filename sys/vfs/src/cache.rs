@@ -527,6 +527,10 @@ pub fn lookup(dir: &Vnode, name: &[u8]) -> Option<Hit> {
 /// and a file's for the process information that names open and mapped
 /// files (FreeBSD's `vn_fullpath`, through the name cache).
 pub fn enter(dir: &Arc<Vnode>, name: &[u8], target: Option<&Arc<Vnode>>) {
+    // A file system whose names are not cached (`FileSystem::name_cache`).
+    if !dir.mount().names_cached() {
+        return;
+    }
     if let Some(t) = target {
         t.set_named(dir, name);
     }
@@ -539,6 +543,9 @@ pub fn enter(dir: &Arc<Vnode>, name: &[u8], target: Option<&Arc<Vnode>>) {
 /// `MAKEENTRY`): its first lookup does, and names it, so `vn_fullpath`
 /// finds it from then on.
 pub fn enter_made(dir: &Arc<Vnode>, name: &[u8], target: &Arc<Vnode>) {
+    if !dir.mount().names_cached() {
+        return;
+    }
     // In a watched directory a file is entered too, so that its events
     // find the watch (`vn_open_cred` asks for `MAKEENTRY` then).
     if target.is_dir() || crate::inotify::watched(dir) {

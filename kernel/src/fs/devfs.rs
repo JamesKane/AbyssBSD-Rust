@@ -1175,7 +1175,7 @@ impl View {
 }
 
 impl Node for View {
-    fn attr(&self) -> Attr {
+    fn attr(&self, _s: &Sleepable) -> Attr {
         self.m
             .with(|r, v| {
                 let n = r.nodes.get(&self.ino)?;
@@ -1248,17 +1248,18 @@ impl Node for View {
 }
 
 impl DeviceNode for View {
-    fn device(&self) -> Device {
-        self.node(|n| match &n.what {
-            What::Dev(d) => Some(d.clone()),
-            _ => None,
-        })
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| Device {
-            rdev: 0,
-            ops: Arc::new(Gone),
-        })
+    fn device(&self, _s: &Sleepable) -> Result<Device, Errno> {
+        Ok(self
+            .node(|n| match &n.what {
+                What::Dev(d) => Some(d.clone()),
+                _ => None,
+            })
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| Device {
+                rdev: 0,
+                ops: Arc::new(Gone),
+            }))
     }
 }
 
@@ -1330,7 +1331,7 @@ impl DirectoryNode for View {
         })
     }
 
-    fn parent(&self) -> u64 {
+    fn parent(&self, _s: &Sleepable) -> u64 {
         self.node(|n| n.parent).unwrap_or(ROOT_INO)
     }
 

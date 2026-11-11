@@ -106,6 +106,12 @@ pub struct Vnode {
     /// `VIRF_INOTIFY_PARENT`): see [`crate::inotify`].
     inotify: PreemptLock<Vec<Arc<crate::inotify::Watch>>>,
     inotify_flags: core::sync::atomic::AtomicU8,
+    /// The vnode this one stacks on (a nullfs vnode's lower one), fixed
+    /// for its life: advisory locks and the writer and text counts are
+    /// that one's ([`crate::Node::lower`]).
+    lower: Option<Arc<Vnode>>,
+    /// A socket bound here is the lower vnode's ([`crate::Node::unp_bypass`]).
+    unp_bypass: bool,
 }
 
 /// Vnode recency as a generation, advanced by each reclaim pass
@@ -137,7 +143,11 @@ impl core::fmt::Debug for Vnode {
 
 impl Vnode {
     pub(crate) fn new(mount: Arc<Mount>, ino: u64, ops: NodeOps) -> Self {
+        let lower = ops.node().lower();
+        let unp_bypass = ops.node().unp_bypass();
         Self {
+            lower,
+            unp_bypass,
             kind: ops.kind(),
             fs: mount.id,
             mount,
@@ -226,8 +236,40 @@ impl Vnode {
         self.dying.load(Ordering::SeqCst)
     }
 
+    /// The vnode this one stacks on, if it is a layered file system's.
+    #[must_use]
+    pub fn lower(&self) -> Option<&Arc<Vnode>> {
+        self.lower.as_ref()
+    }
+
+    /// The vnode at the bottom of the stack this one is in (itself, unless
+    /// it is a layered file system's): the one whose FIFO an open shares.
+    #[must_use]
+    pub fn lowest(&self) -> &Vnode {
+        let mut v = self;
+        while let Some(l) = &v.lower {
+            v = l;
+        }
+        v
+    }
+
+    /// The vnode a UNIX-domain socket bound at this one belongs to: the
+    /// lowest, unless a layer keeps its own (`nounixbypass`).
+    #[must_use]
+    pub fn unp_vnode(&self) -> &Vnode {
+        let mut v = self;
+        while let Some(l) = v.lower.as_ref().filter(|_| v.unp_bypass) {
+            v = l;
+        }
+        v
+    }
+
     /// Counts an open file writing it: `ETXTBSY` while a program runs it.
+    /// A layer's count is the vnode's below (`null_add_writecount`).
     pub fn add_writer(&self) -> Result<(), Errno> {
+        if let Some(l) = &self.lower {
+            return l.add_writer();
+        }
         self.writecount
             .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
                 (n >= 0).then_some(n + 1)
@@ -238,12 +280,18 @@ impl Vnode {
 
     /// An open file writing it closed.
     pub fn drop_writer(&self) {
+        if let Some(l) = &self.lower {
+            return l.drop_writer();
+        }
         self.writecount.fetch_sub(1, Ordering::AcqRel);
     }
 
     /// Counts a program running it: `ETXTBSY` while a file writes it
-    /// (FreeBSD's `VOP_SET_TEXT`).
+    /// (FreeBSD's `VOP_SET_TEXT`, which nullfs passes down).
     pub fn add_text(&self) -> Result<(), Errno> {
+        if let Some(l) = &self.lower {
+            return l.add_text();
+        }
         self.writecount
             .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
                 (n <= 0).then_some(n - 1)
@@ -254,12 +302,18 @@ impl Vnode {
 
     /// A program running it ended or replaced itself.
     pub fn drop_text(&self) {
+        if let Some(l) = &self.lower {
+            return l.drop_text();
+        }
         self.writecount.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Whether a program runs it (FreeBSD's `VV_TEXT`).
     #[must_use]
     pub fn is_text(&self) -> bool {
+        if let Some(l) = &self.lower {
+            return l.is_text();
+        }
         self.writecount.load(Ordering::Acquire) < 0
     }
 
@@ -281,10 +335,14 @@ impl Vnode {
         self.used.load(Ordering::Relaxed)
     }
 
-    /// The advisory locks on this file.
+    /// The advisory locks on this file: a layer's are the file's below
+    /// (`null_advlock`).
     #[must_use]
     pub fn lockf(&self) -> &crate::lockf::Lockf {
-        &self.lockf
+        match &self.lower {
+            Some(l) => l.lockf(),
+            None => &self.lockf,
+        }
     }
 
     #[must_use]
@@ -397,13 +455,13 @@ impl Vnode {
     }
 
     pub fn attr(&self, s: &Sleepable) -> Result<Attr, Errno> {
-        Ok(self.read(s).live()?.node().attr())
+        Ok(self.read(s).live()?.node().attr(s))
     }
 
     /// `struct stat` (FreeBSD's `vn_stat`).
     pub fn stat(&self, s: &Sleepable) -> Result<Stat, Errno> {
         // The node's attributes made in place, not through a result.
-        let a = self.read(s).live()?.node().attr();
+        let a = self.read(s).live()?.node().attr(s);
         Ok(self.stat_of(&a))
     }
 
@@ -419,7 +477,7 @@ impl Vnode {
             st_dev: self.mount.id,
             st_ino: if a.fileid != 0 { a.fileid } else { self.ino },
             st_nlink: a.nlink,
-            st_mode: self.kind.ifmt() | (a.mode & 0o7777),
+            st_mode: a.kind.unwrap_or(self.kind).ifmt() | (a.mode & 0o7777),
             st_uid: a.uid,
             st_gid: a.gid,
             st_rdev: a.rdev,
@@ -462,7 +520,7 @@ impl Vnode {
         let watched = self.watched();
         let mut st = self.write(s);
         let before = if watched {
-            st.live()?.node().attr().size
+            st.live()?.node().attr(s).size
         } else {
             0
         };
@@ -491,7 +549,7 @@ impl Vnode {
     /// The contents of a memory-resident regular file.
     pub fn resident(&self, s: &Sleepable) -> Option<&'static [u8]> {
         match self.read(s).live().ok()? {
-            NodeOps::Regular(f) => f.resident(),
+            NodeOps::Regular(f) => f.resident(s),
             _ => None,
         }
     }
@@ -500,7 +558,7 @@ impl Vnode {
     /// keeps one.
     pub fn object(&self, s: &Sleepable) -> Option<Arc<vm::object::Object>> {
         match self.read(s).live().ok()? {
-            NodeOps::Regular(f) => f.object(),
+            NodeOps::Regular(f) => f.object(s),
             _ => None,
         }
     }
@@ -518,18 +576,22 @@ impl Vnode {
         st.live_mut()?.node_mut().fsync(s)
     }
 
-    /// A symbolic link's target.
+    /// A symbolic link's target, or what a node that answers
+    /// `readlink(2)` reads ([`crate::Node::read_link`]).
     pub fn readlink(&self, s: &Sleepable) -> Result<Vec<u8>, Errno> {
+        if let Some(r) = self.mount.fs().readlink_unlocked(s, self) {
+            return r;
+        }
         match self.read(s).live()? {
             NodeOps::Symlink(l) => l.target(s),
-            _ => Err(Errno::EINVAL),
+            other => other.node().read_link(s),
         }
     }
 
     /// The device behind a devfs node.
     pub fn device(&self, s: &Sleepable) -> Result<Device, Errno> {
         match self.read(s).live()? {
-            NodeOps::Device(d) => Ok(d.device()),
+            NodeOps::Device(d) => d.device(s),
             // A device node outside devfs (FreeBSD: `ENXIO`).
             NodeOps::Other(Kind::CharDevice | Kind::BlockDevice, _) => Err(Errno::ENXIO),
             _ => Err(Errno::ENODEV),
@@ -543,6 +605,9 @@ impl Vnode {
         from: u64,
         f: &mut dyn FnMut(DirEntry<'_>) -> bool,
     ) -> Result<(), Errno> {
+        if let Some(r) = self.mount.fs().readdir_unlocked(s, self, from, f) {
+            return r;
+        }
         match self.read(s).live()? {
             NodeOps::Directory(d) => d.readdir(s, from, f),
             _ => Err(Errno::ENOTDIR),
@@ -591,18 +656,21 @@ impl Vnode {
         {
             return;
         }
-        let unlinked = {
+        let (unlinked, recycle) = {
             let mut st = self.write(s);
             let Ok(ops) = st.live_mut() else {
                 return;
             };
             let node = ops.node_mut();
             node.inactive(s);
-            node.attr().nlink == 0
+            (node.attr(s).nlink == 0, node.recycle_when_unused())
         };
         // A use taken meanwhile keeps it.
         if unlinked && self.uses() == 0 {
             self.reclaim(s);
+        } else if recycle && self.uses() == 0 {
+            // Unless someone else holds it now (`vrecycle`'s check).
+            self.mount.reclaim_if_idle_held(s, self);
         }
     }
 }

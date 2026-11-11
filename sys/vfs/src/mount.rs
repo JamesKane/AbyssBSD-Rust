@@ -38,6 +38,12 @@ pub struct FsStats {
     pub bavail: i64,
     pub files: u64,
     pub ffree: i64,
+    /// The type number `statfs` reports, when it is not the mount's own
+    /// (nullfs reports the lower file system's, `nullfs_statfs`).
+    pub type_num: Option<u32>,
+    /// The `MNT_*` flags `statfs` shows of the mount's, when not all
+    /// (fdescfs shows only `MNT_IGNORE`, `fdesc_statfs`).
+    pub flags_mask: Option<u64>,
 }
 
 /// The nodes a rename involves, locked exclusive (docs/VFS.md §5).
@@ -119,6 +125,76 @@ pub trait FileSystem: Send + Sync + Any {
         true
     }
 
+    /// Whether the name cache holds this file system's names. nullfs's
+    /// lookups go to the layer below each time, whose cache answers
+    /// (`null_lookup` enters nothing); fdescfs's names are each process's
+    /// own descriptors.
+    fn name_cache(&self) -> bool {
+        true
+    }
+
+    /// [`crate::namei::Namespace::child`]'s lookup in `dir` without the
+    /// directory's lock, for a file system whose names are not cached:
+    /// `None` takes the lock and asks the node. fdescfs answers here from
+    /// the caller's descriptor table, which is locked before vnodes
+    /// (FreeBSD's `fdesc_lookup` unlocks its directory likewise).
+    fn lookup_unlocked(
+        &self,
+        _s: &Sleepable,
+        _dir: &Arc<Vnode>,
+        _name: &[u8],
+    ) -> Option<Result<Arc<Vnode>, Errno>> {
+        None
+    }
+
+    /// `readdir` of `dir` without its lock (fdescfs's), or `None`.
+    fn readdir_unlocked(
+        &self,
+        _s: &Sleepable,
+        _dir: &Vnode,
+        _from: u64,
+        _f: &mut dyn FnMut(crate::node::DirEntry<'_>) -> bool,
+    ) -> Option<Result<(), Errno>> {
+        None
+    }
+
+    /// `readlink` of `v` without its lock (fdescfs's), or `None`.
+    fn readlink_unlocked(&self, _s: &Sleepable, _v: &Vnode) -> Option<Result<Vec<u8>, Errno>> {
+        None
+    }
+
+    /// `setattr` of `v` for `cred` in place of the generic layer's, or
+    /// `None`: fdescfs passes it to the file the descriptor holds.
+    fn setattr_unlocked(
+        &self,
+        _s: &Sleepable,
+        _v: &Vnode,
+        _a: &crate::node::SetAttr,
+        _cred: &crate::ops::Cred,
+    ) -> Option<Result<(), Errno>> {
+        None
+    }
+
+    /// Whether `getdirentries` reports entries' types; cd9660 reports
+    /// `DT_UNKNOWN` (`cd9660_readdir`).
+    fn reports_dtype(&self) -> bool {
+        true
+    }
+
+    /// Whether names can neither be made nor removed here (fdescfs's):
+    /// removals and renames are `EROFS`, a new name is what its lookup
+    /// says (`EEXIST`, or its error).
+    fn fixed_names(&self) -> bool {
+        false
+    }
+
+    /// Whether access is checked against its nodes' modes. fdescfs grants
+    /// everything (`VOP_NULL`), leaving it to the descriptor an open
+    /// shares.
+    fn checks_access(&self) -> bool {
+        true
+    }
+
     fn as_any(&self) -> &dyn Any;
 }
 
@@ -159,7 +235,9 @@ pub struct MountInfo {
 
 /// Taken under vnode locks (a lookup's directory), and held while the
 /// file system loads an inode, which takes the file system's own locks.
-static VGET: LockClass = LockClass::new("vget", 342);
+/// A layered file system's load gets the vnode below from its mount, so
+/// two nest: always the upper mount's first, as nothing below calls up.
+static VGET: LockClass = LockClass::new_dup_ok("vget", 342);
 static RENAME: LockClass = LockClass::new("rename", 320);
 
 /// A mounted file system.
@@ -187,6 +265,15 @@ pub struct Mount {
     root: Once<Weak<Vnode>>,
     /// An unmount is under way (`MNTK_UNMOUNT`).
     unmounting: AtomicBool,
+    /// The mounts layered on this one (nullfs's, `mnt_uppers`): told of
+    /// files that go, and keeping this one mounted.
+    uppers: PreemptLock<Vec<(u64, Weak<Mount>)>>,
+    /// Whether `uppers` has any, read without its lock on every removal.
+    has_uppers: AtomicBool,
+    /// [`FileSystem::name_cache`] and [`FileSystem::checks_access`], asked
+    /// once: lookups and access checks read them on every call.
+    names_cached: bool,
+    access_checked: bool,
 }
 
 impl core::fmt::Debug for Mount {
@@ -229,7 +316,11 @@ impl Mount {
     #[must_use]
     pub fn new(info: MountInfo, fs: Box<dyn FileSystem>) -> Arc<Self> {
         let type_num = type_num(info.type_name);
+        let names_cached = fs.name_cache();
+        let access_checked = fs.checks_access();
         Arc::new(Self {
+            names_cached,
+            access_checked,
             id: new_fsid(type_num),
             type_num,
             flags: AtomicU64::new(info.flags),
@@ -242,7 +333,95 @@ impl Mount {
             covered: PreemptLock::new(None),
             root: Once::new(),
             unmounting: AtomicBool::new(false),
+            uppers: PreemptLock::new(Vec::new()),
+            has_uppers: AtomicBool::new(false),
         })
+    }
+
+    /// Records `upper` as layered on this mount (`vfs_register_upper_from_vp`):
+    /// until it goes, this one stays mounted. `ENOENT` while this one is
+    /// being unmounted.
+    pub fn add_upper(&self, upper: &Arc<Mount>) -> Result<(), Errno> {
+        if self.unmounting.load(Ordering::Acquire) {
+            return Err(Errno::ENOENT);
+        }
+        let mut u = self.uppers.lock();
+        u.push((upper.id, Arc::downgrade(upper)));
+        self.has_uppers.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// The mount whose id is `upper` is unmounted
+    /// (`vfs_unregister_upper`).
+    pub fn remove_upper(&self, upper: u64) {
+        let mut u = self.uppers.lock();
+        u.retain(|(id, _)| *id != upper);
+        self.has_uppers.store(!u.is_empty(), Ordering::Release);
+    }
+
+    /// Whether its names go in the name cache ([`FileSystem::name_cache`]).
+    #[must_use]
+    pub fn names_cached(&self) -> bool {
+        self.names_cached
+    }
+
+    /// Whether access to its nodes is checked
+    /// ([`FileSystem::checks_access`]).
+    #[must_use]
+    pub fn access_checked(&self) -> bool {
+        self.access_checked
+    }
+
+    /// Whether mounts are layered on this one.
+    #[must_use]
+    pub fn has_uppers(&self) -> bool {
+        self.has_uppers.load(Ordering::Acquire)
+    }
+
+    /// Inode `ino` was removed or replaced: the mounts layered on this one
+    /// let their idle vnodes of it go, top first, so the file is freed
+    /// once nothing uses it (`vfs_notify_upper` with
+    /// `VFS_NOTIFY_UPPER_UNLINK`).
+    pub fn notify_unlinked(&self, s: &Sleepable, ino: u64) {
+        if !self.has_uppers() {
+            return;
+        }
+        let uppers: Vec<Arc<Mount>> = self
+            .uppers
+            .lock()
+            .iter()
+            .filter_map(|(_, w)| w.upgrade())
+            .collect();
+        for u in uppers {
+            u.notify_unlinked(s, ino);
+            u.reclaim_if_idle(s, ino);
+        }
+    }
+
+    /// Reclaims the vnode of `ino` if nothing but the table refers to it
+    /// and it is not in use; returns whether it went.
+    pub fn reclaim_if_idle(&self, s: &Sleepable, ino: u64) -> bool {
+        let v = {
+            let mut t = self.table.lock();
+            let Some(v) = t.get(&ino) else {
+                return false;
+            };
+            if v.uses() != 0 || v.is_mount_root() {
+                return false;
+            }
+            // Marked dying first, as `prune` claims: a name-cache hit
+            // meanwhile misses, or its reference is counted here.
+            v.set_dying(true);
+            if Arc::strong_count(v) != 1 || v.uses() != 0 {
+                v.set_dying(false);
+                return false;
+            }
+            let v = Arc::clone(v);
+            t.remove(&ino);
+            v
+        };
+        v.reclaim(s);
+        true
     }
 
     /// Marks an unmount under way: `false` if one already is.
@@ -379,6 +558,29 @@ impl Mount {
     #[must_use]
     pub fn vnodes(&self) -> usize {
         self.table.lock().len()
+    }
+
+    /// [`Self::reclaim_if_idle`] for `v`, which the caller holds a
+    /// reference to (its last use going): reclaimed if nothing else does.
+    pub(crate) fn reclaim_if_idle_held(&self, s: &Sleepable, v: &Arc<Vnode>) {
+        let claimed = {
+            let mut t = self.table.lock();
+            let ours = t.get(&v.ino()).is_some_and(|x| Arc::ptr_eq(x, v));
+            if !ours || v.uses() != 0 || v.is_mount_root() {
+                return;
+            }
+            v.set_dying(true);
+            if Arc::strong_count(v) == 2 && v.uses() == 0 {
+                t.remove(&v.ino());
+                true
+            } else {
+                v.set_dying(false);
+                false
+            }
+        };
+        if claimed {
+            v.reclaim(s);
+        }
     }
 
     /// Takes `v` out of the table (it was doomed or reclaimed).

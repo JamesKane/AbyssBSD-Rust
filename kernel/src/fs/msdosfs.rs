@@ -471,6 +471,7 @@ impl FileSystem for MsdosFs {
             bavail: i64::try_from(free).unwrap_or(i64::MAX),
             files: root_ents,
             ffree: 0,
+            ..FsStats::default()
         })
     }
 
@@ -562,7 +563,7 @@ impl FileSystem for MsdosFs {
 }
 
 impl Node for MsdosNode {
-    fn attr(&self) -> Attr {
+    fn attr(&self, _s: &Sleepable) -> Attr {
         // FreeBSD's `msdosfs_getattr`.
         let s = sleepable();
         let shared = &self.fs;
@@ -649,6 +650,7 @@ impl Node for MsdosNode {
             } else {
                 0
             },
+            kind: None,
         }
     }
 
@@ -871,7 +873,7 @@ impl vfs::RegularNode for MsdosNode {
         written
     }
 
-    fn object(&self) -> Option<Arc<Object>> {
+    fn object(&self, _s: &Sleepable) -> Option<Arc<Object>> {
         self.object.clone()
     }
 }
@@ -888,7 +890,7 @@ impl DirectoryNode for MsdosNode {
         Ok(self.fs.id_of(&n))
     }
 
-    fn parent(&self) -> u64 {
+    fn parent(&self, _s: &Sleepable) -> u64 {
         self.parent
     }
 

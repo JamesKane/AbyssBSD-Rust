@@ -341,7 +341,12 @@ pub fn new_file_mode(m: u16, dacl: &Acl) -> u16 {
 
 /// Whether `v`'s mount keeps POSIX.1e ACLs.
 pub fn enabled(v: &Vnode) -> bool {
-    v.mount().flags() & MNT_ACLS != 0
+    // A layer's ACLs are the file system's below (nullfs bypasses
+    // `VOP_GETACL` and `VOP_ACCESS`).
+    match v.lower() {
+        Some(l) => enabled(l),
+        None => v.mount().flags() & MNT_ACLS != 0,
+    }
 }
 
 /// The stored ACL of `ty` on `node`, if it has one.
@@ -391,12 +396,21 @@ pub(crate) fn inherit(s: &Sleepable, v: &Vnode, m: u16, dacl: &Acl) -> Result<()
 /// Whether `cred` may access `v` as `want` says (`ufs_accessx`): by its
 /// access ACL on a mount that keeps them, by its mode otherwise.
 pub fn access(s: &Sleepable, v: &Vnode, cred: &Cred, want: u32) -> Result<(), Errno> {
+    // fdescfs checks nothing (`VOP_NULL`); a layer asks the vnode below
+    // (`null_access`), the caller having refused writes to a read-only
+    // layer.
+    if !v.mount().access_checked() {
+        return Ok(());
+    }
+    if let Some(l) = v.lower() {
+        return access(s, l, cred, want);
+    }
     if !enabled(v) {
         return ops::access(&v.attr(s)?, v.kind(), cred, want);
     }
     let st = v.read(s);
     let node = st.live()?.node();
-    access_locked(s, v, node, &node.attr(), cred, want)
+    access_locked(s, v, node, &node.attr(s), cred, want)
 }
 
 /// `access`, for `v` locked, its node `node` with attributes `a`.
@@ -408,6 +422,12 @@ pub(crate) fn access_locked(
     cred: &Cred,
     want: u32,
 ) -> Result<(), Errno> {
+    if !v.mount().access_checked() {
+        return Ok(());
+    }
+    if let Some(l) = v.lower() {
+        return access(s, l, cred, want);
+    }
     if enabled(v)
         && let Ok(Some(mut acl)) = stored(s, node, Type::Access)
     {

@@ -90,15 +90,15 @@ fn owner(a: &Attr, cred: &Cred) -> Result<(), Errno> {
 }
 
 /// The node's attributes, locked.
-fn attr_of(st: &State) -> Result<Attr, Errno> {
-    Ok(st.live()?.node().attr())
+fn attr_of(s: &Sleepable, st: &State) -> Result<Attr, Errno> {
+    Ok(st.live()?.node().attr(s))
 }
 
 /// `access` for `v`, locked as `st`, by its ACL where its mount keeps them
 /// (`VOP_ACCESS`).
 fn access_st(s: &Sleepable, v: &Vnode, st: &State, cred: &Cred, want: u32) -> Result<(), Errno> {
     let node = st.live()?.node();
-    crate::acl::access_locked(s, v, node, &node.attr(), cred, want)
+    crate::acl::access_locked(s, v, node, &node.attr(s), cred, want)
 }
 
 fn read_only(dir: &Vnode) -> Result<(), Errno> {
@@ -117,10 +117,12 @@ fn entry(
     st: &State,
     name: &[u8],
 ) -> Result<Option<Arc<Vnode>>, Errno> {
-    match cache::lookup(dir, name) {
-        Some(Hit::Positive(v)) => return Ok(Some(v)),
-        Some(Hit::Negative) => return Ok(None),
-        None => {}
+    if dir.mount().names_cached() {
+        match cache::lookup(dir, name) {
+            Some(Hit::Positive(v)) => return Ok(Some(v)),
+            Some(Hit::Negative) => return Ok(None),
+            None => {}
+        }
     }
     let NodeOps::Directory(d) = st.live()? else {
         return Err(Errno::ENOTDIR);
@@ -129,6 +131,15 @@ fn entry(
         Ok(ino) => Ok(Some(dir.mount().vget(s, ino)?)),
         Err(Errno::ENOENT) => Ok(None),
         Err(e) => Err(e),
+    }
+}
+
+/// Why `name` cannot be made in `dir`, a directory whose names cannot
+/// change: it exists (`EEXIST`), or its lookup's error.
+fn fixed_name(s: &Sleepable, dir: &Arc<Vnode>, name: &[u8]) -> Errno {
+    match crate::namei::Namespace::child(s, dir, name) {
+        Ok(_) => Errno::EEXIST,
+        Err(e) => e,
     }
 }
 
@@ -168,6 +179,10 @@ pub fn create(
         }
         _ => {}
     }
+    // Names that cannot change (fdescfs's): only what the lookup says.
+    if dir.mount().fs().fixed_names() {
+        return Err(fixed_name(s, dir, name));
+    }
     let mut st = dir.write(s);
     if let Some(v) = entry(s, dir, &st, name)? {
         return if exclusive {
@@ -177,7 +192,7 @@ pub fn create(
         };
     }
     read_only(dir)?;
-    let da = attr_of(&st)?;
+    let da = attr_of(s, &st)?;
     access_st(s, dir, &st, cred, VWRITE | VEXEC)?;
     if da.flags & IMMUTABLE != 0 {
         return Err(Errno::EPERM);
@@ -239,6 +254,11 @@ pub fn remove(
         b"." | b".." => return Err(Errno::EINVAL),
         _ => {}
     }
+    // fdescfs: a removal is refused before the name is looked up
+    // (`fdesc_lookup`'s `DELETE`).
+    if dir.mount().fs().fixed_names() {
+        return Err(Errno::EROFS);
+    }
     let child = {
         let mut st = dir.write(s);
         let child = entry(s, dir, &st, name)?.ok_or(Errno::ENOENT)?;
@@ -251,10 +271,10 @@ pub fn remove(
             return Err(Errno::EBUSY);
         }
         read_only(dir)?;
-        let da = attr_of(&st)?;
+        let da = attr_of(s, &st)?;
         access_st(s, dir, &st, cred, VWRITE | VEXEC)?;
         let mut cst = child.write(s);
-        may_unlink(&da, &attr_of(&cst)?, cred)?;
+        may_unlink(&da, &attr_of(s, &cst)?, cred)?;
         let NodeOps::Directory(d) = st.live_mut()? else {
             return Err(Errno::ENOTDIR);
         };
@@ -284,6 +304,8 @@ pub fn remove(
         child
     };
     child.release_if_unlinked(s);
+    // Layers above let their idle vnodes of it go.
+    dir.mount().notify_unlinked(s, child.ino());
     Ok(())
 }
 
@@ -305,6 +327,9 @@ pub fn link(
     if target.is_dir() {
         return Err(Errno::EPERM);
     }
+    if dir.mount().fs().fixed_names() {
+        return Err(fixed_name(s, dir, name));
+    }
     let mut st = dir.write(s);
     if entry(s, dir, &st, name)?.is_some() {
         return Err(Errno::EEXIST);
@@ -312,7 +337,7 @@ pub fn link(
     read_only(dir)?;
     access_st(s, dir, &st, cred, VWRITE | VEXEC)?;
     let mut tst = target.write(s);
-    if attr_of(&tst)?.flags & (IMMUTABLE | APPEND) != 0 {
+    if attr_of(s, &tst)?.flags & (IMMUTABLE | APPEND) != 0 {
         return Err(Errno::EPERM);
     }
     let NodeOps::Directory(d) = st.live_mut()? else {
@@ -406,7 +431,7 @@ fn is_under(s: &Sleepable, dir: &Arc<Vnode>, ancestor: &Vnode) -> Result<bool, E
         }
         let v = m.vget(s, ino)?;
         let parent = match v.read(s).live()? {
-            NodeOps::Directory(d) => d.parent(),
+            NodeOps::Directory(d) => d.parent(s),
             _ => return Err(Errno::ENOTDIR),
         };
         ino = parent;
@@ -458,11 +483,37 @@ pub fn rename(
         }
     }
     // A read-only side is EROFS before the mounts are compared, as
-    // FreeBSD's lookups for a rename report it.
+    // FreeBSD's lookups for a rename report it; so is fdescfs.
     read_only(fdir)?;
     read_only(tdir)?;
+    if fdir.mount().fs().fixed_names() || tdir.mount().fs().fixed_names() {
+        return Err(Errno::EROFS);
+    }
     if fdir.mount().id != tdir.mount().id {
         return Err(Errno::EXDEV);
+    }
+    // A layered file system's rename is its lower one's, done there with
+    // that mount's rename lock and vnode locks (`null_rename`); the ends
+    // are checked here first as they stand in this layer.
+    if let (Some(lf), Some(lt)) = (fdir.lower(), tdir.lower()) {
+        let from = crate::namei::Namespace::child(s, fdir, fname)?;
+        let to = match crate::namei::Namespace::child(s, tdir, tname) {
+            Ok(v) => Some(v),
+            Err(Errno::ENOENT) => None,
+            Err(e) => return Err(e),
+        };
+        if noreplace && to.is_some() {
+            return Err(Errno::EEXIST);
+        }
+        if !ends_differ(&from, to.as_ref())? {
+            return Ok(());
+        }
+        rename(s, lf, fname, lt, tname, cred, noreplace)?;
+        rename_notes(fdir, tdir, &from, to.as_deref());
+        if let Some(t) = to {
+            t.release_if_unlinked(s);
+        }
+        return Ok(());
     }
     let same_dir = Arc::ptr_eq(fdir, tdir);
     let _serial = (!same_dir).then(|| fdir.mount().rename_lock().lock(s));
@@ -534,9 +585,9 @@ pub fn rename(
             return rename(s, fdir, fname, tdir, tname, cred, noreplace);
         }
     }
-    let fda = attr_of(guard_of(&mut held, fdir))?;
-    let tda = attr_of(guard_of(&mut held, tdir))?;
-    let fa = attr_of(guard_of(&mut held, &from))?;
+    let fda = attr_of(s, guard_of(&mut held, fdir))?;
+    let tda = attr_of(s, guard_of(&mut held, tdir))?;
+    let fa = attr_of(s, guard_of(&mut held, &from))?;
     access_st(s, fdir, guard_of(&mut held, fdir), cred, VWRITE | VEXEC)?;
     may_unlink(&fda, &fa, cred)?;
     access_st(s, tdir, guard_of(&mut held, tdir), cred, VWRITE | VEXEC)?;
@@ -544,7 +595,7 @@ pub fn rename(
         return Err(Errno::EPERM);
     }
     if let Some(t) = &to {
-        let ta = attr_of(guard_of(&mut held, t))?;
+        let ta = attr_of(s, guard_of(&mut held, t))?;
         may_unlink(&tda, &ta, cred)?;
         if t.is_dir() && !empty_dir(s, guard_of(&mut held, t))? {
             return Err(Errno::ENOTEMPTY);
@@ -617,6 +668,7 @@ pub fn rename(
             cache::purge(&t);
         }
         t.release_if_unlinked(s);
+        tdir.mount().notify_unlinked(s, t.ino());
     }
     Ok(())
 }
@@ -663,11 +715,16 @@ pub fn setattr(
     if *a == SetAttr::default() {
         return Ok(());
     }
+    // fdescfs changes the file a descriptor holds, with that file
+    // system's checks (`fdesc_setattr`).
+    if let Some(r) = v.mount().fs().setattr_unlocked(s, v, a, cred) {
+        return r;
+    }
     if v.mount().read_only() {
         return Err(Errno::EROFS);
     }
     let mut st = v.write(s);
-    let cur = attr_of(&st)?;
+    let cur = attr_of(s, &st)?;
     let mut a = *a;
     if let Some(flags) = a.flags {
         owner(&cur, cred)?;
@@ -800,6 +857,7 @@ pub fn getdirentries(
     }
     let mut next = from;
     let mut full = false;
+    let dtype = dir.mount().fs().reports_dtype();
     dir.readdir(s, from, &mut |e| {
         let len = dirent::reclen(e.name.len());
         if out.len() + len > room {
@@ -812,7 +870,11 @@ pub fn getdirentries(
         r[0..8].copy_from_slice(&e.ino.to_ne_bytes());
         r[8..16].copy_from_slice(&e.next.to_ne_bytes());
         r[16..18].copy_from_slice(&u16::try_from(len).unwrap_or(u16::MAX).to_ne_bytes());
-        r[18] = e.kind.dtype();
+        r[18] = if dtype {
+            e.kind.dtype()
+        } else {
+            dirent::DT_UNKNOWN
+        };
         r[20..22].copy_from_slice(&u16::try_from(e.name.len()).unwrap_or(0).to_ne_bytes());
         r[NAME_OFFSET..NAME_OFFSET + e.name.len()].copy_from_slice(e.name);
         next = e.next;

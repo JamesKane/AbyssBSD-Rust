@@ -190,12 +190,12 @@ impl Namespace {
         m: Arc<Mount>,
         on: &[u8],
     ) -> Result<(), Errno> {
-        if !covered.is_dir() {
-            return Err(Errno::ENOTDIR);
-        }
+        // A directory, or for nullfs a file over a file
+        // (`VFCF_FILEMOUNT`; the caller allows it).
         let root = m.root(s)?;
-        if !root.is_dir() {
-            return Err(Errno::ENOTDIR);
+        match (covered.kind(), root.kind()) {
+            (Kind::Directory, Kind::Directory) | (Kind::Regular, Kind::Regular) => {}
+            _ => return Err(Errno::ENOTDIR),
         }
         let mut mounts = self.mounts.lock();
         if covered.mounted().is_some() {
@@ -233,7 +233,9 @@ impl Namespace {
             .lock()
             .iter()
             .any(|x| x.covered().is_some_and(|c| c.mount().id == m.id));
-        if busy {
+        // A mount layered on it (nullfs's) keeps it, forced or not
+        // (`dounmount`'s `mnt_uppers` check).
+        if busy || m.has_uppers() {
             return Err(Errno::EBUSY);
         }
         let vnodes = m.all_vnodes();
@@ -321,9 +323,16 @@ impl Namespace {
         {
             return Ok(p);
         }
-        let ino = match v.read(s).live()? {
-            NodeOps::Directory(d) => d.parent(),
-            _ => return Err(Errno::ENOTDIR),
+        let ino = {
+            let st = v.read(s);
+            let ops = st.live()?;
+            match ops.node().vptocnp(s) {
+                Some((ino, _)) => ino,
+                None => match ops {
+                    NodeOps::Directory(d) => d.parent(s),
+                    _ => return Err(Errno::ENOTDIR),
+                },
+            }
         };
         v.mount().vget(s, ino)
     }
@@ -341,13 +350,19 @@ impl Namespace {
         name: &[u8],
         negative: bool,
     ) -> Result<Arc<Vnode>, Errno> {
-        match cache::lookup(dir, name) {
-            Some(Hit::Positive(v)) => {
-                v.touch();
-                return Ok(v);
+        let cached = dir.mount().names_cached();
+        if cached {
+            match cache::lookup(dir, name) {
+                Some(Hit::Positive(v)) => {
+                    v.touch();
+                    return Ok(v);
+                }
+                Some(Hit::Negative) => return Err(Errno::ENOENT),
+                None => {}
             }
-            Some(Hit::Negative) => return Err(Errno::ENOENT),
-            None => {}
+        }
+        if !cached && let Some(r) = dir.mount().fs().lookup_unlocked(s, dir, name) {
+            return r;
         }
         let st = dir.read(s);
         let NodeOps::Directory(d) = st.live()? else {
@@ -356,14 +371,16 @@ impl Namespace {
         match d.lookup(s, name) {
             Ok(ino) => {
                 let v = dir.mount().vget(s, ino)?;
-                cache::enter(dir, name, Some(&v));
+                if cached {
+                    cache::enter(dir, name, Some(&v));
+                }
                 Ok(v)
             }
             Err(Errno::ENOENT) => {
                 if let Some(r) = d.lookup_clone(s, name) {
                     return dir.mount().vget(s, r?);
                 }
-                if negative {
+                if negative && cached {
                     cache::enter(dir, name, None);
                 }
                 Err(Errno::ENOENT)
@@ -556,7 +573,10 @@ impl Namespace {
             }
             let name = match v.named() {
                 Some((np, name)) if Arc::ptr_eq(&np, &p) => name,
-                _ => name_in(s, &p, v.ino())?,
+                _ => match v.read(s).live()?.node().vptocnp(s) {
+                    Some((pino, name)) if pino == p.ino() && p.mount().id == v.mount().id => name,
+                    _ => name_in(s, &p, v.ino())?,
+                },
             };
             total += name.len() + 1;
             if total >= PATH_MAX {

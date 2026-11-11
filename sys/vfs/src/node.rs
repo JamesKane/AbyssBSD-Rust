@@ -93,6 +93,10 @@ pub struct Attr {
     /// system whose numbers can repeat, as msdosfs's FAT32 root shares
     /// FreeBSD's number with the first entry in it.
     pub fileid: u64,
+    /// The type `stat` reports, when it is not the vnode's: fdescfs's
+    /// `linrdlnk` entries say they are symbolic links (`va_type` `VLNK`)
+    /// though lookups do not follow them (`VV_READLINK`).
+    pub kind: Option<Kind>,
 }
 
 /// Changes to a node's attributes, each optional (FreeBSD's `VOP_SETATTR`
@@ -162,7 +166,7 @@ pub struct DirEntry<'a> {
 
 /// Operations every node has.
 pub trait Node: Send + Sync + Any {
-    fn attr(&self) -> Attr;
+    fn attr(&self, s: &Sleepable) -> Attr;
 
     /// Applies `a`; the generic layer checked permissions and that a size
     /// change is for a regular file.
@@ -218,6 +222,40 @@ pub trait Node: Send + Sync + Any {
         Err(Errno::EOPNOTSUPP)
     }
 
+    /// The directory holding this node and its name there, when the file
+    /// system knows them itself (FreeBSD's `VOP_VPTOCNP`): a layered file
+    /// system answers from the layer below, whose name cache keeps them.
+    /// `None` leaves the name cache and the directory's entries to tell.
+    fn vptocnp(&self, _s: &Sleepable) -> Option<(u64, Vec<u8>)> {
+        None
+    }
+
+    /// The vnode this one stacks on, for a layered file system (FreeBSD's
+    /// `null_lowervp`): its advisory locks, writer and text counts, FIFO,
+    /// and bound socket are that vnode's. Asked once, as the vnode is made.
+    fn lower(&self) -> Option<Arc<crate::Vnode>> {
+        None
+    }
+
+    /// Whether a UNIX-domain socket bound here is the lower vnode's
+    /// (nullfs's `unixbypass`, its default); asked with [`Self::lower`].
+    fn unp_bypass(&self) -> bool {
+        true
+    }
+
+    /// What `readlink(2)` reads from a node that is not a symbolic link
+    /// but answers it (FreeBSD's `VV_READLINK`: fdescfs's `linrdlnk`
+    /// entries); `EINVAL` for the rest.
+    fn read_link(&self, _s: &Sleepable) -> Result<Vec<u8>, Errno> {
+        Err(Errno::EINVAL)
+    }
+
+    /// Whether the vnode goes as soon as its last use does, as nullfs's go
+    /// on a mount without `cache` (`null_want_recycle`).
+    fn recycle_when_unused(&self) -> bool {
+        false
+    }
+
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
@@ -234,13 +272,13 @@ pub trait RegularNode: Node {
 
     /// The whole contents, if they sit in memory for the kernel's
     /// lifetime (the memory disk's files): mapping them needs no I/O.
-    fn resident(&self) -> Option<&'static [u8]> {
+    fn resident(&self, _s: &Sleepable) -> Option<&'static [u8]> {
         None
     }
 
     /// The VM object holding the file's pages, which mappings share
     /// (FreeBSD's `v_object`), if the file system keeps one.
-    fn object(&self) -> Option<Arc<vm::object::Object>> {
+    fn object(&self, _s: &Sleepable) -> Option<Arc<vm::object::Object>> {
         None
     }
 }
@@ -279,7 +317,7 @@ pub trait DirectoryNode: Node {
     }
 
     /// The inode of `..` (this directory's own at the file system's root).
-    fn parent(&self) -> u64;
+    fn parent(&self, s: &Sleepable) -> u64;
 
     /// Makes a node and links it as `name`, which does not exist; returns
     /// its inode, and the node itself if the file system has it at hand
@@ -500,7 +538,9 @@ impl core::fmt::Debug for Device {
 
 /// A device node: devfs's, whose opens reach the device.
 pub trait DeviceNode: Node {
-    fn device(&self) -> Device;
+    /// The device: `ENXIO` for a node that reaches none (a layer over a
+    /// device node outside devfs).
+    fn device(&self, s: &Sleepable) -> Result<Device, Errno>;
 }
 
 /// A node, by kind.

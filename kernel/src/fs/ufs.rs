@@ -1039,6 +1039,7 @@ impl FileSystem for UfsFs {
             bavail: st.bavail.saturating_add_unsigned(pending),
             files: st.files,
             ffree: st.ffree,
+            ..FsStats::default()
         })
     }
 
@@ -1222,7 +1223,7 @@ fn sleepable() -> Sleepable {
 
 impl Node for UfsNode {
     /// From the inode's [`StatCopy`], taking no lock.
-    fn attr(&self) -> Attr {
+    fn attr(&self, _s: &Sleepable) -> Attr {
         let [
             ids,
             mode_flags,
@@ -1259,6 +1260,7 @@ impl Node for UfsNode {
             rdev,
             blksize: self.fs.ufs.superblock().bsize,
             fileid: 0,
+            kind: None,
         }
     }
 
@@ -1770,7 +1772,7 @@ impl vfs::RegularNode for UfsNode {
         written
     }
 
-    fn object(&self) -> Option<Arc<Object>> {
+    fn object(&self, _s: &Sleepable) -> Option<Arc<Object>> {
         self.object.clone()
     }
 }
@@ -1898,7 +1900,7 @@ impl DirectoryNode for UfsNode {
             .ok_or(Errno::ENOENT)
     }
 
-    fn parent(&self) -> u64 {
+    fn parent(&self, _s: &Sleepable) -> u64 {
         self.parent
     }
 

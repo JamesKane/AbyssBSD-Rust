@@ -342,7 +342,7 @@ impl View {
 }
 
 impl Node for View {
-    fn attr(&self) -> Attr {
+    fn attr(&self, _s: &Sleepable) -> Attr {
         self.fixed().attr
     }
 
@@ -363,7 +363,7 @@ impl Node for View {
 
 impl RegularNode for View {
     fn read(&self, _s: &Sleepable, offset: u64, uio: &mut dyn Uio) -> Result<usize, Errno> {
-        let Some(data) = self.resident() else {
+        let Some(data) = self.resident(_s) else {
             return Err(Errno::EINVAL);
         };
         let start = usize::try_from(offset).unwrap_or(usize::MAX);
@@ -377,7 +377,7 @@ impl RegularNode for View {
         Err(Errno::EROFS)
     }
 
-    fn resident(&self) -> Option<&'static [u8]> {
+    fn resident(&self, _s: &Sleepable) -> Option<&'static [u8]> {
         match &self.fixed().data {
             FixedData::Leaf(Leaf::Regular(d)) => Some(d),
             _ => None,
@@ -395,10 +395,10 @@ impl SymlinkNode for View {
 }
 
 impl DeviceNode for View {
-    fn device(&self) -> Device {
+    fn device(&self, _s: &Sleepable) -> Result<Device, Errno> {
         match &self.fixed().data {
-            FixedData::Leaf(Leaf::Device(d)) => d.clone(),
-            _ => unreachable!("only device views are device nodes"),
+            FixedData::Leaf(Leaf::Device(d)) => Ok(d.clone()),
+            _ => Err(Errno::ENODEV),
         }
     }
 }
@@ -414,7 +414,7 @@ impl DirectoryNode for View {
             .map_err(|_| Errno::ENOENT)
     }
 
-    fn parent(&self) -> u64 {
+    fn parent(&self, _s: &Sleepable) -> u64 {
         match &self.fixed().data {
             FixedData::Dir { parent, .. } => *parent,
             FixedData::Leaf(_) => ino(self.index),
@@ -545,6 +545,7 @@ impl FileSystem for TreeFs {
             bavail: 0,
             files: self.nodes.len() as u64,
             ffree: 0,
+            ..FsStats::default()
         })
     }
 

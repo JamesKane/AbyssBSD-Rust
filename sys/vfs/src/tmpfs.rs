@@ -348,7 +348,7 @@ impl Node for TmpNode {
             .collect())
     }
 
-    fn attr(&self) -> Attr {
+    fn attr(&self, _s: &Sleepable) -> Attr {
         let mut a = self.attr;
         if let Some(t) = self.pending.get() {
             a.mtime = t;
@@ -475,7 +475,7 @@ impl RegularNode for TmpNode {
         Ok(n)
     }
 
-    fn object(&self) -> Option<Arc<vm::object::Object>> {
+    fn object(&self, _s: &Sleepable) -> Option<Arc<vm::object::Object>> {
         match &self.data {
             Data::Regular(o, _) => Some(Arc::clone(o)),
             _ => None,
@@ -500,7 +500,7 @@ impl DirectoryNode for TmpNode {
             .ok_or(Errno::ENOENT)
     }
 
-    fn parent(&self) -> u64 {
+    fn parent(&self, _s: &Sleepable) -> u64 {
         self.dir().map_or(self.ino, |d| d.parent)
     }
 
@@ -717,6 +717,7 @@ impl FileSystem for TmpFs {
             bavail: i64::try_from(total - used).unwrap_or(i64::MAX),
             files: nodes + (1 << 20),
             ffree: 1 << 20,
+            ..FsStats::default()
         })
     }
 

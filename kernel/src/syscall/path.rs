@@ -782,8 +782,10 @@ fn statfs_mount(s: &Sleepable, m: &vfs::Mount) -> Result<alloc::boxed::Box<Statf
     let c = m.statfs(s)?;
     let info = m.info();
     let mut st = alloc::boxed::Box::<Statfs>::default();
-    st.f_type = m.type_num;
-    st.f_flags = m.flags();
+    // nullfs reports the lower file system's type, fdescfs only some
+    // flags (`nullfs_statfs`, `fdesc_statfs`).
+    st.f_type = c.type_num.unwrap_or(m.type_num);
+    st.f_flags = m.flags() & c.flags_mask.unwrap_or(u64::MAX);
     st.f_bsize = c.bsize;
     st.f_iosize = c.iosize;
     st.f_blocks = c.blocks;
