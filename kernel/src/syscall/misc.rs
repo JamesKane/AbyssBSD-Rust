@@ -686,6 +686,7 @@ const MODULES: &[&[u8]] = &[
     b"nullfs",
     b"fdescfs",
     b"cd9660",
+    b"aio",
 ];
 
 /// The module with id `id`.

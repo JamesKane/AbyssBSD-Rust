@@ -679,6 +679,12 @@ pub(crate) struct Process {
     last_child: AtomicI32,
     /// Its interval and POSIX timers, made on first use (`p_itimers`).
     timers: sync::Once<Box<crate::timers::Timers>>,
+    /// Its asynchronous I/O requests, from its first (`p_aioinfo`).
+    pub(crate) aio: SpinLock<Option<Arc<crate::aio::Kaio>>>,
+    /// Block reads and writes and messages sent and received that
+    /// `aio_return` and `aio_waitcomplete` charged it (`td_ru`'s
+    /// `ru_inblock`, `ru_oublock`, `ru_msgsnd`, `ru_msgrcv`).
+    pub(crate) io_counts: [AtomicU64; 4],
     /// Kernel code waiting for this process to exit (it may have no
     /// parent).
     waiters: WaitQueue,
@@ -1014,6 +1020,8 @@ impl Process {
                 pd_sel: event::Notify::new(),
                 last_child: AtomicI32::new(0),
                 timers: sync::Once::new(),
+                aio: SpinLock::new(None),
+                io_counts: [const { AtomicU64::new(0) }; 4],
                 waiters: WaitQueue::new(),
                 child_gen: AtomicU64::new(0),
                 child_wait: WaitQueue::new(),
@@ -1932,6 +1940,9 @@ impl Process {
         let argv: Vec<&[u8]> = argv.iter().map(Vec::as_slice).collect();
         let (path, argv) = (&path[..], &argv[..]);
         let _ = self.single(s, &me, Mode::Exit);
+        // Its asynchronous I/O is cancelled or waited for, in the old
+        // image's memory (`aio_proc_rundown_exec`).
+        crate::aio::rundown(s, self);
         // The old image's robust mutexes go before its memory does.
         crate::umtx::exec(s, &me);
         // No way back from here.
@@ -2368,6 +2379,9 @@ impl Process {
         if self.is_traced() {
             self.traced.store(false, Ordering::Release);
         }
+        // Its asynchronous I/O is cancelled or waited for while its
+        // memory is still there (`aio_proc_rundown`).
+        crate::aio::rundown(s, self);
         // Its semaphore adjustments are undone (`semexit`).
         crate::sysv::sem_exited(self.pid);
         // A vfork parent waits on until this is a zombie (below).

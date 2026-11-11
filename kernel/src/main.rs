@@ -23,6 +23,7 @@ use arch_x86_64 as arch;
 mod console;
 mod acpi;
 mod acpi_bus;
+mod aio;
 mod beep;
 #[cfg(not(feature = "ktest"))]
 mod bench;
@@ -186,6 +187,7 @@ fn kmain(boot_info: PhysAddr) -> ! {
     vmmeter::init(&s);
     ntp::sysctl_init(&s);
     timecounter::sysctl_init(&s);
+    aio::sysctl_init(&s);
     statclock::start_loadav();
     prison::sysctl_init(&s);
     sysctl::features_init(&s);

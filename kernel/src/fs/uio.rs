@@ -102,6 +102,26 @@ impl UserIo {
         })
     }
 
+    /// The buffers left, as (base, length) pairs (AIO's checks of a disk
+    /// request's shape).
+    pub(crate) fn segments(&self) -> Vec<(u64, u64)> {
+        let all: &[Iovec] = match &self.iov {
+            Buffers::One(v) => core::slice::from_ref(v),
+            Buffers::Many(v) => v,
+        };
+        all.iter()
+            .skip(self.at)
+            .map(|v| (v.iov_base, v.iov_len))
+            .collect()
+    }
+
+    /// Consumes the first `n` bytes without touching user memory: what a
+    /// transfer of `n` bytes leaves, for one resumed from a copy taken
+    /// before it (an AIO socket send, which copies in more than it sends).
+    pub(crate) fn skip(&mut self, n: usize) {
+        let _ = self.each(n, |_, _, _| Ok(()));
+    }
+
     /// The first `n` bytes of these buffers, at most `max`, read back
     /// from user memory: what a copy made before a transfer of `n` bytes
     /// saw (`ktrgenio`'s). It stops at a fault.

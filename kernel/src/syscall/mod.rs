@@ -48,6 +48,7 @@ mod time;
 mod timers;
 mod umtx;
 
+pub(crate) use mem::mlock_in;
 pub(crate) use path::{open_core_file, open_trace_file};
 
 use alloc::sync::Arc;
@@ -352,6 +353,18 @@ fn run(s: &Sleepable, frame: &mut TrapFrame, call: Call) -> Result<Option<u64>, 
         Sysno::Adjtime => timers::adjtime(a0, a1),
         Sysno::NtpAdjtime => timers::ntp_adjtime(a0),
         Sysno::NtpGettime => timers::ntp_gettime(a0),
+        Sysno::AioRead => crate::aio::submit(s, a0, abi::aio::LIO_READ),
+        Sysno::AioReadv => crate::aio::submit(s, a0, abi::aio::LIO_READV),
+        Sysno::AioWrite => crate::aio::submit(s, a0, abi::aio::LIO_WRITE),
+        Sysno::AioWritev => crate::aio::submit(s, a0, abi::aio::LIO_WRITEV),
+        Sysno::AioMlock => crate::aio::submit(s, a0, abi::aio::LIO_MLOCK),
+        Sysno::AioFsync => crate::aio::fsync(s, int(a0), a1),
+        Sysno::AioReturn => crate::aio::aio_return(a0),
+        Sysno::AioError => crate::aio::aio_error(a0),
+        Sysno::AioSuspend => crate::aio::suspend(s, a0, int(a1), a2),
+        Sysno::AioCancel => crate::aio::cancel(s, int(a0), a1),
+        Sysno::AioWaitcomplete => crate::aio::waitcomplete(s, a0, a1),
+        Sysno::LioListio => crate::aio::lio_listio(s, int(a0), a1, int(a2), a3),
         Sysno::ClockGetcpuclockid2 => timers::clock_getcpuclockid2(a0, a1, a2),
         Sysno::Setitimer => timers::setitimer(s, a0, a1, a2),
         Sysno::Getitimer => timers::getitimer(s, a0, a1),

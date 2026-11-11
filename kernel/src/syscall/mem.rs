@@ -563,6 +563,13 @@ fn implied_max(prot: Prot) -> Prot {
 /// is resident, so wiring only counts.
 pub(super) fn mlock(s: &Sleepable, addr: u64, len: u64) -> SysResult {
     let p = Process::current().ok_or(Errno::EINVAL)?;
+    mlock_in(s, &p, addr, len)?;
+    Ok(0)
+}
+
+/// `kern_mlock` for process `p`, from any thread (`aio_mlock`'s worker
+/// too): its credential and limits, its address space.
+pub(crate) fn mlock_in(s: &Sleepable, p: &Process, addr: u64, len: u64) -> Result<(), Errno> {
     p.priv_check(crate::cred::Priv::VmMlock)?;
     let last = addr.checked_add(len).ok_or(Errno::EINVAL)?;
     let start = addr & !(PAGE_SIZE - 1);
@@ -589,7 +596,7 @@ pub(super) fn mlock(s: &Sleepable, addr: u64, len: u64) -> SysResult {
     space
         .wire(s, VirtAddr::new(start)..VirtAddr::new(end))
         .ok_or(Errno::ENOMEM)?;
-    Ok(0)
+    Ok(())
 }
 
 /// `munlock(addr, len)`: with `PRIV_VM_MUNLOCK`, over memory mapped

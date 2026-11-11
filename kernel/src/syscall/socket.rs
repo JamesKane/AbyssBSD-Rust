@@ -355,6 +355,10 @@ pub(super) fn connect(s: &Sleepable, sock_fd: u64, addr: u64, len: u64) -> SysRe
 /// `listen(s, backlog)`.
 pub(super) fn listen(s: &Sleepable, sock_fd: u64, backlog: u64) -> SysResult {
     let f = sock(s, sock_fd, &crate::capsicum::rights::LISTEN)?;
+    // Not with asynchronous requests queued (`solisten_proto_check`).
+    if crate::aio::socket_busy(&f) {
+        return Err(Errno::EINVAL);
+    }
     if let Some(so) = super::inet::so_of(&f) {
         return super::inet::listen(so, int(backlog));
     }

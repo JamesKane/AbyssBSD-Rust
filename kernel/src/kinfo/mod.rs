@@ -93,6 +93,8 @@ pub(crate) struct Usage {
     pub(crate) maxrss_kb: i64,
     pub(crate) nvcsw: u64,
     pub(crate) nivcsw: u64,
+    /// `ru_inblock`, `ru_oublock`, `ru_msgsnd`, `ru_msgrcv`.
+    pub(crate) io: [u64; 4],
 }
 
 impl Usage {
@@ -103,6 +105,9 @@ impl Usage {
         self.maxrss_kb = self.maxrss_kb.max(o.maxrss_kb);
         self.nvcsw += o.nvcsw;
         self.nivcsw += o.nivcsw;
+        for (a, b) in self.io.iter_mut().zip(o.io) {
+            *a += b;
+        }
     }
 
     pub(crate) fn rusage(&self) -> Rusage {
@@ -112,6 +117,10 @@ impl Usage {
             ru_maxrss: self.maxrss_kb,
             ru_nvcsw: i64::try_from(self.nvcsw).unwrap_or(i64::MAX),
             ru_nivcsw: i64::try_from(self.nivcsw).unwrap_or(i64::MAX),
+            ru_inblock: i64::try_from(self.io[0]).unwrap_or(i64::MAX),
+            ru_oublock: i64::try_from(self.io[1]).unwrap_or(i64::MAX),
+            ru_msgsnd: i64::try_from(self.io[2]).unwrap_or(i64::MAX),
+            ru_msgrcv: i64::try_from(self.io[3]).unwrap_or(i64::MAX),
             ..Rusage::default()
         }
     }
@@ -129,6 +138,7 @@ fn thread_usage(t: &sched::Thread) -> Usage {
         maxrss_kb: 0,
         nvcsw,
         nivcsw,
+        io: [0; 4],
     }
 }
 
@@ -149,6 +159,9 @@ pub(crate) fn process_usage(p: &Process) -> Usage {
     let (nvcsw, nivcsw) = p.dead_switches();
     u.nvcsw += nvcsw;
     u.nivcsw += nivcsw;
+    for (a, c) in u.io.iter_mut().zip(&p.io_counts) {
+        *a += c.load(core::sync::atomic::Ordering::Relaxed);
+    }
     u
 }
 

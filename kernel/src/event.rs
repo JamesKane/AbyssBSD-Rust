@@ -157,6 +157,7 @@ impl Source for Changes<'_> {
             EVFILT_PROC | EVFILT_SIGNAL | EVFILT_TIMER | EVFILT_USER | EVFILT_FS => {
                 Ok(Ident::Other)
             }
+            f if crate::aio::user_filter(f).is_some() => Ok(Ident::Other),
             _ => Err(Errno::EINVAL),
         }
     }
@@ -175,6 +176,7 @@ impl Source for Changes<'_> {
             EVFILT_TIMER => crate::timers::kevent_timer(kev),
             EVFILT_USER => Ok(Box::new(event::UserFilter)),
             EVFILT_FS => Ok(Box::new(FsFilter)),
+            f if let Some(e) = crate::aio::user_filter(f) => Err(e),
             _ => {
                 let f = self.file(kev)?;
                 if let crate::fs::file::FileKind::Kqueue(k) = f.kind()
