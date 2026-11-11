@@ -113,7 +113,50 @@ pub(crate) fn report(kind: Kind, what: fmt::Arguments<'_>) {
     let _ = fmt::write(&mut h, what);
     h.add(program.as_bytes());
     if first(h.0) {
-        kprintln!("first use: {} {} by {}", kind.name(), what, program);
+        kprintln!(
+            "first use: {} {} by {}",
+            kind.name(),
+            Escaped(what),
+            program
+        );
+    }
+}
+
+/// What a first use names, as the console may show it: names come from
+/// programs (a sysctl name, an ioctl's argument), so control characters
+/// are written as `\xNN` and the whole is cut at [`ESCAPED_MAX`] characters.
+struct Escaped<'a>(fmt::Arguments<'a>);
+
+/// Characters of a first use's name printed at most.
+const ESCAPED_MAX: usize = 200;
+
+impl fmt::Display for Escaped<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        struct Out<'a, 'b> {
+            f: &'a mut fmt::Formatter<'b>,
+            n: usize,
+        }
+        impl fmt::Write for Out<'_, '_> {
+            fn write_str(&mut self, s: &str) -> fmt::Result {
+                for c in s.chars() {
+                    if self.n == ESCAPED_MAX {
+                        self.f.write_str("...")?;
+                        self.n += 1;
+                    }
+                    if self.n > ESCAPED_MAX {
+                        return Ok(());
+                    }
+                    self.n += 1;
+                    if c.is_control() {
+                        write!(self.f, "\\x{:02x}", u32::from(c))?;
+                    } else {
+                        self.f.write_char(c)?;
+                    }
+                }
+                Ok(())
+            }
+        }
+        fmt::write(&mut Out { f, n: 0 }, self.0)
     }
 }
 
