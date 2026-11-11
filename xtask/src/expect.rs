@@ -528,6 +528,13 @@ pub(crate) fn atf_verdict(console: &str) -> Result<usize> {
         };
         ran.insert(case);
         let status = result.split(':').next().unwrap_or(result).trim();
+        // A case that expected to hang and was killed for it: kyua
+        // reports that as `expected_failure`.
+        let status = if status == "expected_timeout" {
+            "expected_failure"
+        } else {
+            status
+        };
         match freebsd.get(case) {
             Some(&want) if want == status => matched += 1,
             _ if known.contains(&case) => {}

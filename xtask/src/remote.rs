@@ -81,12 +81,14 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
     let rev =
         util::output(Command::new("git").args(["describe", "--always", "--dirty", "--abbrev=12"]))
             .map_or_else(|_| "unknown".into(), |r| r.trim().to_owned());
-    // `ABYSS_ATF` and `ABYSS_DIFF` (a feature's tests only) go along.
+    // `ABYSS_ATF`, `ABYSS_DIFF`, `ABYSS_TEST_ONLY`, and `ABYSS_NTP` (a
+    // feature's tests only) go along.
     let atf: String = [
         "ABYSS_ATF",
         "ABYSS_ATF_TIMEOUT",
         "ABYSS_DIFF",
         "ABYSS_TEST_ONLY",
+        "ABYSS_NTP",
     ]
     .iter()
     .filter_map(|k| std::env::var(k).ok().map(|v| format!("{k}={} ", quote(&v))))
