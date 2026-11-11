@@ -54,18 +54,38 @@ const fn sve_ctx_size(vl: usize) -> usize {
     (SVE_HEADER + sve_buf_size(vl)).next_multiple_of(4)
 }
 
-/// The SVE state in a save area as an SVE context's data: the register
-/// file as it lies there, with FPSR and FPCR narrowed to 32 bits.
-fn sve_state(fpu: &FpuImage, vl: usize) -> alloc::vec::Vec<u8> {
+/// Writes an SVE context of the state in `fpu` at `at`: its header, the
+/// register file as it lies in the save area, then FPSR and FPCR narrowed
+/// to 32 bits and zeros to its size.
+fn write_sve(at: u64, fpu: &FpuImage, vl: usize) -> Result<(), ()> {
+    let size = sve_ctx_size(vl);
+    let mut head = [0u8; SVE_HEADER];
+    head[..4].copy_from_slice(&CTX_SVE.to_le_bytes());
+    head[4..8].copy_from_slice(&u32::try_from(size).map_err(|_| ())?.to_le_bytes());
+    head[8..10].copy_from_slice(&u16::try_from(vl).map_err(|_| ())?.to_le_bytes());
     let b = fpu.bytes();
     let regs = 32 * vl + 17 * vl / 8;
     let (sr, cr) = crate::arch::fpu::status_offsets();
-    let mut out = alloc::vec::Vec::with_capacity(sve_buf_size(vl));
-    out.extend_from_slice(&b[..regs]);
-    out.extend_from_slice(&b[sr..sr + 4]);
-    out.extend_from_slice(&b[cr..cr + 4]);
-    out.resize(sve_buf_size(vl), 0);
-    out
+    let mut tail = [0u8; 16];
+    tail[..4].copy_from_slice(&b[sr..sr + 4]);
+    tail[4..8].copy_from_slice(&b[cr..cr + 4]);
+    let data = at.wrapping_add(SVE_HEADER as u64);
+    crate::uaccess::copy_out(at, &head).map_err(|_| ())?;
+    crate::uaccess::copy_out(data, &b[..regs]).map_err(|_| ())?;
+    // The status words, then zeros to the context's end.
+    let rest = size - SVE_HEADER - regs;
+    let mut off = 0;
+    while off < rest {
+        let n = (rest - off).min(tail.len());
+        let chunk = if off == 0 {
+            &tail[..n]
+        } else {
+            &[0u8; 16][..n]
+        };
+        crate::uaccess::copy_out(data.wrapping_add((regs + off) as u64), chunk).map_err(|_| ())?;
+        off += n;
+    }
+    Ok(())
 }
 
 /// SPSR: the mode bits (EL0t is 0), AArch32 state, and the DAIF masks.
@@ -83,20 +103,18 @@ pub(super) fn set_io_access(_frame: &mut TrapFrame, _on: bool) {}
 
 /// The thread's registers as an `mcontext_t`.
 fn mcontext(f: &TrapFrame, fpu: &FpuImage) -> McontextArm {
-    let a = crate::arch::fpu::status_offsets();
+    let (sr, cr) = crate::arch::fpu::status_offsets();
     let b = fpu.bytes();
-    let word = |o: usize| {
-        let mut w = [0u8; 8];
-        w.copy_from_slice(&b[o..o + 8]);
-        u64::from_le_bytes(w)
-    };
+    // Each V register is a Z register's low 16 bytes, `stride` apart.
+    let stride = crate::arch::fpu::vreg_offset(1);
     let mut fp = Fpregs::default();
-    for (n, q) in fp.fp_q.iter_mut().enumerate() {
-        let o = crate::arch::fpu::vreg_offset(n);
-        *q = [word(o), word(o + 8)];
+    for (q, at) in fp.fp_q.iter_mut().zip(b.chunks(stride)) {
+        let half = |o: usize| u64::from_le_bytes(at[o..o + 8].try_into().unwrap_or_default());
+        *q = [half(0), half(8)];
     }
-    fp.fp_sr = u32::try_from(word(a.0) & 0xffff_ffff).unwrap_or(0);
-    fp.fp_cr = u32::try_from(word(a.1) & 0xffff_ffff).unwrap_or(0);
+    let word = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap_or_default());
+    fp.fp_sr = word(sr);
+    fp.fp_cr = word(cr);
     let mut gp = Gpregs::default();
     gp.gp_x.copy_from_slice(&f.x[..30]);
     gp.gp_lr = f.x[30];
@@ -124,17 +142,8 @@ pub(super) fn sendsig(frame: &mut TrapFrame, d: &Delivery<'_>) -> Result<(), ()>
         .map_err(|_| ())?;
     let vl = crate::arch::fpu::vector_length();
     if vl != 0 {
-        let size = sve_ctx_size(vl);
-        first = first.wrapping_sub(size as u64);
-        let mut ctx = alloc::vec::Vec::with_capacity(size);
-        ctx.extend_from_slice(&CTX_SVE.to_le_bytes());
-        ctx.extend_from_slice(&u32::try_from(size).map_err(|_| ())?.to_le_bytes());
-        ctx.extend_from_slice(&u16::try_from(vl).map_err(|_| ())?.to_le_bytes());
-        // Flags and reserved.
-        ctx.extend_from_slice(&[0; 6]);
-        ctx.extend_from_slice(&sve_state(&fpu, vl));
-        ctx.resize(size, 0);
-        crate::uaccess::copy_out(first, &ctx).map_err(|_| ())?;
+        first = first.wrapping_sub(sve_ctx_size(vl) as u64);
+        write_sve(first, &fpu, vl)?;
     }
     let fp = first.wrapping_sub(size_of::<SigframeArm>() as u64) & !15;
     let mut mc = mcontext(frame, &fpu);
@@ -197,32 +206,37 @@ pub(crate) fn prepare_context(frame: &mut TrapFrame, mc: &McontextArm) -> Result
         let (sr, cr) = crate::arch::fpu::status_offsets();
         let b = img.bytes_mut();
         let vl = crate::arch::fpu::vector_length();
-        let mut v = [[0u8; 16]; 32];
-        for (n, q) in v.iter_mut().enumerate() {
-            let o = crate::arch::fpu::vreg_offset(n);
-            q.copy_from_slice(&b[o..o + 16]);
+        let stride = crate::arch::fpu::vreg_offset(1);
+        // An SVE context alone leaves the V registers as they were (its
+        // low 128 bits do not set them, as FreeBSD's sync goes).
+        let mut keep = [[0u8; 16]; 32];
+        let restore = sve.is_some() && !fp_valid;
+        if restore {
+            for (q, at) in keep.iter_mut().zip(b.chunks(stride)) {
+                q.copy_from_slice(&at[..16]);
+            }
         }
         match &sve {
             // The whole register file; FPSR and FPCR come from the V
             // state below, as FreeBSD's sync does.
-            Some(state) => {
+            Some(at) => {
                 let regs = 32 * vl + 17 * vl / 8;
-                b[..regs].copy_from_slice(&state[..regs]);
+                crate::uaccess::copy_in(&mut b[..regs], *at).map_err(|_| Errno::EINVAL)?;
             }
             // Writing the V registers clears what SVE adds to them.
             None => crate::arch::fpu::clear_sve_extra(b),
         }
         if fp_valid {
-            for (n, q) in mc.mc_fpregs.fp_q.iter().enumerate() {
-                v[n][..8].copy_from_slice(&q[0].to_le_bytes());
-                v[n][8..].copy_from_slice(&q[1].to_le_bytes());
+            for (q, at) in mc.mc_fpregs.fp_q.iter().zip(b.chunks_mut(stride)) {
+                at[..8].copy_from_slice(&q[0].to_le_bytes());
+                at[8..16].copy_from_slice(&q[1].to_le_bytes());
             }
             b[sr..sr + 8].copy_from_slice(&u64::from(mc.mc_fpregs.fp_sr & FPSR_BITS).to_le_bytes());
             b[cr..cr + 8].copy_from_slice(&u64::from(mc.mc_fpregs.fp_cr & FPCR_BITS).to_le_bytes());
-        }
-        for (n, q) in v.iter().enumerate() {
-            let o = crate::arch::fpu::vreg_offset(n);
-            b[o..o + 16].copy_from_slice(q);
+        } else if restore {
+            for (q, at) in keep.iter().zip(b.chunks_mut(stride)) {
+                at[..16].copy_from_slice(q);
+            }
         }
         Some(img)
     } else {
@@ -245,8 +259,8 @@ pub(crate) fn prepare_context(frame: &mut TrapFrame, mc: &McontextArm) -> Result
 /// Walks the extra-context list at `ptr` (0 for none), as FreeBSD's
 /// `set_mcontext` does: each 4-byte aligned, at most one SVE context (of
 /// this CPU's size, and only where there is SVE), then the end marker.
-/// Returns the SVE context's data, if one was given.
-fn sve_context(mut ptr: u64) -> Result<Option<alloc::vec::Vec<u8>>, Errno> {
+/// Returns where the SVE context's data is, if one was given.
+fn sve_context(mut ptr: u64) -> Result<Option<u64>, Errno> {
     if ptr == 0 {
         return Ok(None);
     }
@@ -265,10 +279,7 @@ fn sve_context(mut ptr: u64) -> Result<Option<alloc::vec::Vec<u8>>, Errno> {
                 if sve.is_some() || vl == 0 || size as usize != sve_ctx_size(vl) {
                     return Err(Errno::EINVAL);
                 }
-                let mut state = alloc::vec![0u8; sve_buf_size(vl)];
-                crate::uaccess::copy_in(&mut state, ptr.wrapping_add(SVE_HEADER as u64))
-                    .map_err(|_| Errno::EINVAL)?;
-                sve = Some(state);
+                sve = Some(ptr.wrapping_add(SVE_HEADER as u64));
             }
             _ => return Err(Errno::EINVAL),
         }

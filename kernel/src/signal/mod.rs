@@ -594,14 +594,36 @@ impl FpuImage {
     /// The registers as they are now, or `None` without memory.
     pub(crate) fn saved() -> Option<Self> {
         let len = hal::fpu::area_size();
-        // Zeroed: XSAVE leaves most of its header alone (XCOMP_BV and the
-        // reserved bytes must read as zero to be loaded again).
-        // SAFETY: a nonzero size and a valid alignment.
-        let ptr =
-            core::ptr::NonNull::new(unsafe { alloc::alloc::alloc_zeroed(Self::layout(len)) })?;
-        // SAFETY: a fresh area of the size and alignment the HAL needs.
+        let ptr = match core::ptr::NonNull::new(
+            Self::cache_slot().swap(core::ptr::null_mut(), core::sync::atomic::Ordering::Acquire),
+        ) {
+            Some(p) => {
+                // As fresh: XSAVE leaves most of its header alone
+                // (XCOMP_BV and the reserved bytes must read as zero to be
+                // loaded again).
+                // SAFETY: a cached area of `len` bytes, now ours alone.
+                unsafe { core::ptr::write_bytes(p.as_ptr(), 0, len) };
+                p
+            }
+            None => {
+                // SAFETY: a nonzero size and a valid alignment.
+                let fresh = unsafe { alloc::alloc::alloc_zeroed(Self::layout(len)) };
+                core::ptr::NonNull::new(fresh)?
+            }
+        };
+        // SAFETY: a zeroed area of the size and alignment the HAL needs.
         unsafe { hal::fpu::save(ptr.as_ptr()) };
         Some(Self { ptr, len })
+    }
+
+    /// This CPU's one cached area: every signal delivered and every
+    /// `sigreturn` takes an image and drops it, so they come from here
+    /// rather than from the allocator. Atomic, so a thread that moves to
+    /// another CPU meanwhile uses that CPU's slot, which is as good.
+    fn cache_slot() -> &'static core::sync::atomic::AtomicPtr<u8> {
+        static CACHE: [core::sync::atomic::AtomicPtr<u8>; hal::MAX_CPUS] =
+            [const { core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()) }; hal::MAX_CPUS];
+        &CACHE[hal::cpu_id().0 as usize % hal::MAX_CPUS]
     }
 
     /// The initial state.
@@ -643,6 +665,19 @@ impl FpuImage {
 
 impl Drop for FpuImage {
     fn drop(&mut self) {
+        // Back to this CPU's cache if it is empty (every image has the
+        // one size, `area_size`).
+        if Self::cache_slot()
+            .compare_exchange(
+                core::ptr::null_mut(),
+                self.ptr.as_ptr(),
+                core::sync::atomic::Ordering::Release,
+                core::sync::atomic::Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            return;
+        }
         // SAFETY: allocated in `saved` with this layout.
         unsafe { alloc::alloc::dealloc(self.ptr.as_ptr(), Self::layout(self.len)) };
     }

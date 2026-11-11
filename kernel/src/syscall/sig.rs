@@ -133,8 +133,9 @@ pub(super) fn sigsuspend(s: &Sleepable, sigmask: u64) -> SysResult {
 /// `sigreturn(sigcntxp)`: back from a handler to the context its frame
 /// saved (or any context user code built), checked first.
 pub(super) fn sigreturn(frame: &mut TrapFrame, ucp: u64) -> SysResult {
+    let mut buf = core::mem::MaybeUninit::uninit();
     let uc = UserPtr::<Ucontext<Mcontext>>::new(ucp)
-        .read()
+        .read_into(&mut buf)
         .map_err(|_| Errno::EFAULT)?;
     // arm64's `sys_sigreturn` leaves the thread in no system call
     // (`td_sa.code = -1`), which its return then reports.
@@ -143,7 +144,7 @@ pub(super) fn sigreturn(frame: &mut TrapFrame, ucp: u64) -> SysResult {
     {
         t.set_syscall_code(u32::MAX);
     }
-    set_context(frame, &uc)?;
+    set_context(frame, uc)?;
     Err(Errno::EJUSTRETURN)
 }
 
@@ -177,10 +178,11 @@ pub(super) fn getcontext(frame: &TrapFrame, ucp: u64) -> SysResult {
 
 /// `setcontext(ucp)`.
 pub(super) fn setcontext(frame: &mut TrapFrame, ucp: u64) -> SysResult {
+    let mut buf = core::mem::MaybeUninit::uninit();
     let uc = UserPtr::<Ucontext<Mcontext>>::new(ucp)
-        .read()
+        .read_into(&mut buf)
         .map_err(|_| Errno::EFAULT)?;
-    set_context(frame, &uc)?;
+    set_context(frame, uc)?;
     Err(Errno::EJUSTRETURN)
 }
 

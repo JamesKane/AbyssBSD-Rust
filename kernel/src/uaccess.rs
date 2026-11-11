@@ -234,6 +234,19 @@ impl<T: Plain> UserPtr<T> {
         Ok(unsafe { v.assume_init() })
     }
 
+    /// Reads the value into `v`, in place: for a large one (a context)
+    /// that would otherwise be copied again on its way out.
+    pub(crate) fn read_into(self, v: &mut MaybeUninit<T>) -> Result<&T, Fault> {
+        // SAFETY: the buffer is the value's own storage, `size_of::<T>()`
+        // bytes.
+        let bytes =
+            unsafe { core::slice::from_raw_parts_mut(v.as_mut_ptr().cast::<u8>(), size_of::<T>()) };
+        copy_in(bytes, self.addr)?;
+        // SAFETY: every byte was written, and any bit pattern is a valid
+        // `T` (`Plain`).
+        Ok(unsafe { v.assume_init_ref() })
+    }
+
     /// Writes `v`.
     pub(crate) fn write(self, v: &T) -> Result<(), Fault> {
         // SAFETY: `T` has no padding (`Plain`), so every byte is
