@@ -2748,6 +2748,19 @@ no hangs, no reboot loops, nothing that needs the screen, and P8's remaining exi
     architectures; the UFS2 shell cases run `kenv`, `geom disk list`, `iostat`, `gstat -b` and
     `systat -vmstat` (`expect::SYSINFO`). fastfetch itself is not in the test images (no
     packages in them); its fields' interfaces are what the tests check.
+  - Progress 2026-11-10 (`nullfs`, `fdescfs`, `cd9660`, in QEMU, both architectures; VFS.md
+    §10.5-§10.7): FreeBSD 15.1's `mount`, `mount_nullfs`, and `mount_cd9660` work unmodified, and
+    `mount -t fdescfs`. nullfs is a layer of vnodes over the lower ones, sharing their page cache,
+    locks, and writer counts, with FreeBSD's `ro`, `cache`/`nocache`, `EXDEV` between mounts,
+    busy unmounts, the lower mount kept while a layer is on it, file-over-file mounts, and jails
+    (`allow.mount.nullfs`). fdescfs is 15.1's, with `linrdlnk`, `rdlnk`, and `nodup`; devfs's
+    `/dev/fd/0`-`2` stay for when it is not mounted. cd9660 reads Rock Ridge, Joliet, plain ISO
+    9660 and High Sierra (`-r`, `-j`, `-g`, `-e`, `-b`, `-U`, `-G`, `-m`, `-M`, `-s`; no `-C`,
+    which needs `kiconv`) from `mdconfig -t vnode`, which md now does. `tests/user/layers` passes
+    on FreeBSD 15.1 and here; the boot cases mount the ISO test volume five ways and must print
+    FreeBSD's `ls -aliRnT` and `md5 -r`, and run the real mount commands. FreeBSD 15.1 has no kyua
+    tests for the three (its `tests/sys/fs/fdescfs` and `cd9660` are 16's). Left: the old
+    `mount(2)` for cd9660 (`struct iso_args`).
 - **Verification:** kyua's arm64 target on the board; fsx with `fsck_ffs` on the NVMe and a USB
   disk (done with the SMMU's stage 5, IOMMU.md §18); the device tree against FreeBSD's `devinfo`
   wherever FreeBSD has a driver. No day-long looped runs (the user, 2026-11-10): kyua and the
