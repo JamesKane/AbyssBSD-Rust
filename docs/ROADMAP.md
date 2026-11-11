@@ -2721,9 +2721,9 @@ no hangs, no reboot loops, nothing that needs the screen, and P8's remaining exi
     `nobody`), printing FreeBSD's lines for QEMU's NVMe controller and root port. arm64's host
     bridges are `pci_host_generic_acpi` ("Generic PCI host controller"), and bridges, with the
     devices on their buses, are numbered as FreeBSD's serial attach numbers them, so the Orange
-    Pi's should read `pcib0`, `pcib1` (its port), `pcib2`, ... as on FreeBSD. Left: `hostb`,
-    `vgapci`, and `ichsmb` (QEMU's and bhyve's host bridge, VGA, and SMBus show as `none`), and
-    the comparison with `tests/corpus/opi6p/freebsd/pciconf-lvbc.txt` on the board.
+    Pi's should read `pcib0`, `pcib1` (its port), `pcib2`, ... as on FreeBSD. Left: `vgapci` and
+    `ichsmb` (QEMU's and bhyve's VGA and SMBus show as `none`), and the comparison with
+    `tests/corpus/opi6p/freebsd/pciconf-lvbc.txt` on the board.
   - Progress 2026-11-10: `tun`, `tap`, `vmnet`, and `if_bridge` as FreeBSD 15.1's (NETWORKING.md
     §5.5): cloners and devfs cloning of `/dev/tun*`, `/dev/tap*`; the devices' reads, writes,
     `poll`/`kevent`, `SIGIO`, and `TUN*`/`TAP*` requests; bridges with learning, forwarding,
@@ -2761,6 +2761,15 @@ no hangs, no reboot loops, nothing that needs the screen, and P8's remaining exi
     FreeBSD's `ls -aliRnT` and `md5 -r`, and run the real mount commands. FreeBSD 15.1 has no kyua
     tests for the three (its `tests/sys/fs/fdescfs` and `cd9660` are 16's). Left: the old
     `mount(2)` for cd9660 (`struct iso_args`).
+  - Progress 2026-11-11: on the board every `pciconf -lvbc` device line matches FreeBSD's; the
+    `rge`'s I/O BAR read "enabled", as drivers turned on I/O decoding for any function with an
+    I/O BAR. Decoding of each space is now turned on only by a driver that uses it, as FreeBSD's
+    `pci_activate_resource` does. `hostb` (FreeBSD's `pci_hostb`, quiet at boot) names host bridge
+    functions. Bridge numbering costs nothing measurable at boot: device attach (the manager's
+    `attached in` line) on x86_64 QEMU with a root port and devices after it, six boots each,
+    2104.8 ms before and 2097.1 ms after on average; on bhyve, which has no PCI-PCI bridge (so
+    nothing waits for a turn), six samples each (p6's `boot.kernel` runs and the bhyve boot case)
+    spread from 45 to 477 ms within either tree, too noisy to show a difference.
 - **Verification:** kyua's arm64 target on the board; fsx with `fsck_ffs` on the NVMe and a USB
   disk (done with the SMMU's stage 5, IOMMU.md §18); the device tree against FreeBSD's `devinfo`
   wherever FreeBSD has a driver. No day-long looped runs (the user, 2026-11-10): kyua and the
