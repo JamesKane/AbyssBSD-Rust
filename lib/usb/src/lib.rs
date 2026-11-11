@@ -17,6 +17,7 @@ extern crate alloc;
 pub mod descriptor;
 pub mod hub;
 pub mod request;
+pub mod ugen;
 
 #[cfg(test)]
 mod tests;
