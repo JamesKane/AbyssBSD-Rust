@@ -54,6 +54,8 @@ pub(crate) fn shutdown_nice(s: &Sleepable, howto: i32) {
 /// `kern_reboot`: syncs and unmounts every file system unless
 /// `RB_NOSYNC`, prints the uptime, then powers off, halts, or resets.
 pub(crate) fn kern_reboot(s: &Sleepable, howto: i32) -> ! {
+    // `shutdown_pre_sync`'s `shutdown_resettodr`.
+    crate::rtc::shutdown(s);
     if howto & RB_NOSYNC == 0 {
         crate::fs::shutdown(s);
     }

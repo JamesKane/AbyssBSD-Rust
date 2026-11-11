@@ -354,7 +354,7 @@ pub(crate) fn init(s: &Sleepable) {
     // Then what drivers deferred to that point, in the order they
     // deferred it (FreeBSD's interrupt-driven configuration hooks).
     bus::run_config_hooks(s);
-    crate::time::set_realtime();
+    crate::time::set_realtime(s);
     kprintln!(
         "bus: device manager up, {} driver(s), {workers} attach worker(s), attached in {}.{:03} ms{}",
         drivers.len(),

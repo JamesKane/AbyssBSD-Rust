@@ -4459,17 +4459,21 @@ ktest! {
 
 ktest! {
     fn real_time_clocks_agree() {
-        let clocks = clock::read_all();
+        let s = cx();
+        let clocks = clock::read_all(&s);
         for (name, t) in &clocks {
             kprintln!("{name}: {t:?}");
         }
         assert!(!clocks.is_empty(), "a real-time clock");
+        // In order of resolution, as FreeBSD's list keeps them.
+        let res: alloc::vec::Vec<u32> = clock::registered().iter().map(|r| r.1).collect();
+        assert!(res.is_sorted(), "{res:?}");
         let now = crate::time::realtime_ns().expect("the time of day was set") / 1_000_000_000;
         // After this was written, and before 2100.
         assert!((1_790_000_000..4_102_444_800).contains(&now), "{now}");
         // Every clock that answers agrees with it within a few seconds.
         for (name, t) in clocks {
-            let Some(t) = t else { continue };
+            let Ok(t) = t else { continue };
             let secs = t.unix_seconds().expect("valid");
             assert!(secs.abs_diff(now) <= 3, "{name} is {secs}, the kernel {now}");
         }

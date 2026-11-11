@@ -139,6 +139,17 @@ pub(crate) fn get_time() -> Result<Time, Errno> {
     Ok(t)
 }
 
+/// `GetTime`'s capabilities (`efi_get_time_capabilities`): the clock's
+/// resolution in counts per second, its accuracy, and whether `SetTime`
+/// zeroes the part of the second below its resolution.
+pub(crate) fn get_time_capabilities() -> Result<TimeCapabilities, Errno> {
+    let mut t = Time::default();
+    let mut cap = TimeCapabilities::default();
+    // SAFETY: both are on the kernel stack.
+    status(unsafe { call(|rs| (rs.get_time)(&raw mut t, &raw mut cap)) })?;
+    Ok(cap)
+}
+
 /// The time from UEFI's `GetTime`, if runtime services are available.
 pub(crate) fn time() -> Option<Time> {
     get_time().ok()

@@ -1,11 +1,8 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! The real-time clock class: calendar time from battery-backed clocks
-//! (`atrtc`, `efirtc`), which the kernel reads once to know the time of
-//! day.
-//!
-//! Clocks register themselves; [`read`] asks them in registration order
-//! and takes the first answer, as FreeBSD's `inittodr` takes the
-//! registered clock's.
+//! (`atrtc`, `efirtc`, `rx8803`), which the kernel reads at boot to know
+//! the time of day and writes back when the time is set ([`rtc`]), and
+//! the NTP clock discipline ([`ntp`]).
 //!
 //! Behavior reference: sys/kern/subr_rtc.c, sys/kern/subr_clock.c.
 
@@ -14,12 +11,15 @@
 
 extern crate alloc;
 
+pub mod bcd;
 pub mod ntp;
+pub mod rtc;
 
-use alloc::sync::Arc;
-use alloc::vec::Vec;
-
-use sync::SpinLock;
+pub use bcd::Bcd;
+pub use rtc::{
+    RealTimeClock, Timespec, dbgprint, dbgprint_bcd, dbgprint_err, drain, flags, read, read_all,
+    read_discard, register, registered, resettodr, schedule, unregister, utc_offset,
+};
 
 /// A calendar time, UTC.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,44 +128,6 @@ impl core::fmt::Display for DateTime {
             self.year, self.month, self.day, self.hour, self.minute, self.second
         )
     }
-}
-
-/// A battery-backed clock.
-pub trait RealTimeClock: Send + Sync {
-    /// Its name (`atrtc0`).
-    fn name(&self) -> &str;
-    /// The current time, or `None` if it cannot be read.
-    fn read(&self) -> Option<DateTime>;
-}
-
-static CLOCKS: SpinLock<Vec<Arc<dyn RealTimeClock>>> = SpinLock::new(Vec::new());
-
-/// Registers `clock`.
-pub fn register(clock: Arc<dyn RealTimeClock>) {
-    CLOCKS.lock().push(clock);
-}
-
-/// Unregisters `clock` (its driver is detaching).
-pub fn unregister(clock: &Arc<dyn RealTimeClock>) {
-    CLOCKS.lock().retain(|c| !Arc::ptr_eq(c, clock));
-}
-
-/// The first registered clock's valid answer, with its name.
-#[must_use]
-pub fn read() -> Option<(alloc::string::String, DateTime)> {
-    let clocks = CLOCKS.lock().clone();
-    clocks.iter().find_map(|c| {
-        c.read()
-            .filter(DateTime::valid)
-            .map(|t| (c.name().into(), t))
-    })
-}
-
-/// Every registered clock's answer (diagnostics and tests).
-#[must_use]
-pub fn read_all() -> Vec<(alloc::string::String, Option<DateTime>)> {
-    let clocks = CLOCKS.lock().clone();
-    clocks.iter().map(|c| (c.name().into(), c.read())).collect()
 }
 
 #[cfg(test)]

@@ -117,9 +117,11 @@ version = "0.0.0"
 name = "atrtc"
 version = "0.0.0"
 dependencies = [
+ "abi",
  "bus",
  "clock",
  "devtree",
+ "sched",
  "sync",
 ]
 
@@ -230,6 +232,7 @@ name = "clock"
 version = "0.0.0"
 dependencies = [
  "abi",
+ "sched",
  "sync",
 ]
 
@@ -295,6 +298,8 @@ dependencies = [
  "nvme",
  "pci",
  "rge",
+ "rts5453",
+ "rx8803",
  "sbsa-gwdt",
  "sky1-clk",
  "sky1-pinctrl",
@@ -798,6 +803,31 @@ dependencies = [
 [[package]]
 name = "rgegen"
 version = "0.0.0"
+
+[[package]]
+name = "rts5453"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "bus",
+ "devtree",
+ "iicbus",
+ "sched",
+ "sync",
+ "sysctl",
+]
+
+[[package]]
+name = "rx8803"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "bus",
+ "clock",
+ "devtree",
+ "iicbus",
+ "sched",
+]
 
 [[package]]
 name = "sbsa-gwdt"

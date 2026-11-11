@@ -7,6 +7,13 @@
 //! hour 12- or 24-hour, as register B says. Years below 70 are 20xx, as
 //! FreeBSD takes them.
 //!
+//! Setting it (`atrtc_settime`) halts the updates (register B's SET bit),
+//! writes every field and the day of the week in the format register B
+//! keeps, and lets it run again. Registered with a one-second
+//! resolution, so the time written is half a second ahead and the time
+//! read taken as half a second on, as FreeBSD's `clock_register` makes
+//! them.
+//!
 //! Behavior reference: sys/x86/isa/atrtc.c.
 
 #![no_std]
@@ -17,10 +24,11 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::sync::Arc;
 
+use abi::errno::Errno;
 use bus::{
     AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, IoGrant, StartCx, StopCx, StopReason,
 };
-use clock::{DateTime, RealTimeClock};
+use clock::{DateTime, RealTimeClock, Timespec};
 use devtree::ids::AcpiId;
 use sync::SpinLock;
 
@@ -28,6 +36,7 @@ use sync::SpinLock;
 const SECONDS: u8 = 0x00;
 const MINUTES: u8 = 0x02;
 const HOURS: u8 = 0x04;
+const WEEKDAY: u8 = 0x06;
 const DAY: u8 = 0x07;
 const MONTH: u8 = 0x08;
 const YEAR: u8 = 0x09;
@@ -35,7 +44,9 @@ const STATUS_A: u8 = 0x0a;
 const STATUS_B: u8 = 0x0b;
 /// Register A: an update is in progress.
 const A_UIP: u8 = 0x80;
-/// Register B: binary (else BCD), 24-hour (else 12-hour).
+/// Register B: updates halted for a set, binary (else BCD), 24-hour
+/// (else 12-hour).
+const B_SET: u8 = 0x80;
 const B_BINARY: u8 = 0x04;
 const B_24H: u8 = 0x02;
 /// 12-hour mode: the hour's PM bit.
@@ -91,6 +102,57 @@ impl RealTimeClock for Cmos {
         &self.name
     }
 
+    fn gettime(&self, _: &sched::Sleepable) -> Result<DateTime, Errno> {
+        self.read().ok_or(Errno::EINVAL)
+    }
+
+    fn settime(&self, _: &sched::Sleepable, ts: Timespec) -> Result<(), Errno> {
+        let t = ts.to_datetime().ok_or(Errno::EINVAL)?;
+        let b = clock::Bcd::from_datetime(&t);
+        clock::dbgprint_bcd(&self.name, clock::rtc::DBG_WRITE, &b);
+        let io = self.io.lock();
+        let statusb = Self::reg(&io, STATUS_B);
+        let conv = |v: u8| {
+            if statusb & B_BINARY != 0 {
+                v
+            } else {
+                clock::bcd::to_bcd(v)
+            }
+        };
+        let hour = if statusb & B_24H != 0 {
+            conv(t.hour)
+        } else {
+            // 12-hour: 12 for hour 0, the PM bit from noon.
+            let h12 = match t.hour % 12 {
+                0 => 12,
+                h => h,
+            };
+            conv(h12) | if t.hour >= 12 { PM } else { 0 }
+        };
+        let year = u8::try_from(t.year % 100).unwrap_or(0);
+        Self::set(&io, STATUS_B, statusb | B_SET);
+        for (r, v) in [
+            (SECONDS, conv(t.second)),
+            (MINUTES, conv(t.minute)),
+            (HOURS, hour),
+            (WEEKDAY, conv(b.dow + 1)),
+            (DAY, conv(t.day)),
+            (MONTH, conv(t.month)),
+            (YEAR, conv(year)),
+        ] {
+            Self::set(&io, r, v);
+        }
+        Self::set(&io, STATUS_B, statusb & !B_SET);
+        Ok(())
+    }
+}
+
+impl Cmos {
+    fn set(io: &IoGrant, r: u8, v: u8) {
+        io.write8(0, r);
+        io.write8(1, v);
+    }
+
     fn read(&self) -> Option<DateTime> {
         let io = self.io.lock();
         let mut prev = Self::raw(&io)?;
@@ -122,7 +184,11 @@ impl RealTimeClock for Cmos {
             second: conv(s),
             nanosecond: 0,
         };
-        t.valid().then_some(t)
+        let t = t.valid().then_some(t);
+        if let Some(t) = &t {
+            clock::dbgprint(&self.name, clock::rtc::DBG_READ, t);
+        }
+        t
     }
 }
 
@@ -158,13 +224,13 @@ impl Driver for AtRtc {
     }
 
     fn start(&self, _: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
-        clock::register(Arc::clone(&self.clock) as _);
+        clock::register(Arc::clone(&self.clock) as _, 1_000_000, 0);
         Ok(())
     }
 
-    fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {
+    fn stop(&self, cx: &mut StopCx<'_>, _: StopReason) {
         let c: Arc<dyn RealTimeClock> = Arc::clone(&self.clock) as _;
-        clock::unregister(&c);
+        clock::unregister(cx.sleepable(), &c);
     }
 }
 

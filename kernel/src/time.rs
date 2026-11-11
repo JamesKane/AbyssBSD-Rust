@@ -62,16 +62,18 @@ static REALTIME_BASE: AtomicU64 = AtomicU64::new(0);
 static SLOW_PAD: AtomicU64 = AtomicU64::new(0);
 
 /// Sets the time of day from the real-time clocks (FreeBSD's
-/// `inittodr`).
-pub(crate) fn set_realtime() {
-    match clock::read() {
-        Some((name, t)) => {
-            let unix_ns = t.unix_seconds().unwrap_or(0) * 1_000_000_000 + u64::from(t.nanosecond);
+/// `inittodr`): the first in order of resolution that answers.
+pub(crate) fn set_realtime(s: &Sleepable) {
+    match clock::read(s) {
+        Ok((name, ts)) => {
+            let unix_ns = ts.as_ns().unwrap_or(0);
             REALTIME_BASE.store(unix_ns.saturating_sub(now_ns()), Ordering::Release);
             crate::shared_page::set_realtime(unix_ns);
-            kprintln!("clock: {t} from {name}");
+            if let Some(t) = ts.to_datetime() {
+                kprintln!("clock: {t} from {name}");
+            }
         }
-        None => kprintln!("clock: no real-time clock answered; the time of day is unknown"),
+        Err(e) => kprintln!("{}", clock::rtc::inittodr_failure(e)),
     }
 }
 

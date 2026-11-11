@@ -75,6 +75,7 @@ mod prof;
 mod ptrace;
 mod qemu;
 mod random;
+mod rtc;
 mod shared_page;
 mod shutdown;
 mod signal;
@@ -168,6 +169,7 @@ fn kmain(boot_info: PhysAddr) -> ! {
     topology::summarize();
     pci::init();
     devstat::init(&s);
+    rtc::init();
     devices::init(&s);
     random::start_harvester();
     // After the clock is set, as FreeBSD mounts root once devices attach.
@@ -189,6 +191,7 @@ fn kmain(boot_info: PhysAddr) -> ! {
     fido::sysctl_init(&s);
     vmmeter::init(&s);
     ntp::sysctl_init(&s);
+    rtc::sysctl_init(&s);
     timecounter::sysctl_init(&s);
     aio::sysctl_init(&s);
     statclock::start_loadav();

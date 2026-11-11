@@ -36,6 +36,12 @@ pub(crate) fn seconds(sec: &mut i64, boot_sec: &mut i64, count: i64) -> i64 {
     adj
 }
 
+/// `ntp_is_time_error`: whether the discipline says the time is not to
+/// be trusted (unsynchronized, as it is until `ntpd` says otherwise).
+pub(crate) fn time_error() -> bool {
+    Discipline::is_time_error(NTP.lock().status())
+}
+
 /// The TAI offset in seconds (0 until `ntpd` sets it).
 pub(crate) fn tai() -> i64 {
     NTP.lock().tai()

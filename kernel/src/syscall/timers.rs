@@ -525,6 +525,8 @@ fn set_time(unix_ns: u64) -> Result<(), Errno> {
     let before = super::clock_ns(clock::REALTIME)?;
     crate::time::set_time_of_day(to);
     crate::timers::clock_jumped();
+    // `settime`: the clocks get the new time.
+    ::clock::resettodr();
     // `tc_setclock`'s report, with `kern.timecounter.stepwarnings`.
     if crate::timecounter::STEP_WARNINGS.load(core::sync::atomic::Ordering::Relaxed) != 0 {
         let after = super::clock_ns(clock::REALTIME)?;
