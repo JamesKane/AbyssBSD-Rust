@@ -707,6 +707,13 @@ fn options(iov: u64, iovcnt: u64) -> Result<Vec<MountOption>, Errno> {
     Ok(out)
 }
 
+/// The value of option `name` among `opts`.
+fn opt<'a>(opts: &'a [MountOption], name: &[u8]) -> Option<&'a [u8]> {
+    opts.iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, v)| v.as_slice())
+}
+
 /// The `MNT_*` flags the generic options among `opts` set or clear, in
 /// order, on top of `flags` (FreeBSD's `vfs_donmount`).
 fn option_flags(opts: &[MountOption], mut flags: u64) -> u64 {
@@ -760,6 +767,10 @@ const MOUNT_TYPES: &[(&[u8], bool)] = &[
     (b"msdosfs", true),
     (b"tmpfs", false),
     (b"devfs", false),
+    (b"nullfs", false),
+    (b"fdescfs", true),
+    // `cd9660_cmount` (`struct iso_args`) is not served.
+    (b"cd9660", false),
 ];
 
 /// A string from user memory, as a mount option (`mount_argsu`): up to
@@ -814,10 +825,15 @@ pub(super) fn mount(s: &Sleepable, ty: u64, path: u64, flags: u64, data: u64) ->
     // A string that cannot be read fails the mount once the file
     // system's arguments are read (`kernel_mount`'s `ma->error`).
     let fspath = user_option(b"fspath", path, MNAMELEN);
+    let mut opts = alloc::vec![(b"fstype".to_vec(), fstype.clone())];
+    // fdescfs has no arguments (`fdesc_cmount`).
+    if fstype == b"fdescfs" {
+        push_common(&mut opts, fspath?, flags);
+        return mount_opts(s, &opts, flags);
+    }
     if data == 0 {
         return Err(Errno::EINVAL);
     }
-    let mut opts = alloc::vec![(b"fstype".to_vec(), fstype.clone())];
     let path_max = abi::fcntl::PATH_MAX;
     if fstype == b"msdosfs" {
         use abi::mount::{
@@ -897,7 +913,10 @@ fn mount_opts(s: &Sleepable, opts: &[MountOption], flags: u64) -> SysResult {
         }
     }
     let covered = crate::fs::lookup(s, &p, At::Cwd, fspath, Walk::FOLLOW)?;
-    if !covered.is_dir() {
+    // A directory, or a regular file for a type that mounts on files
+    // (nullfs, `VFCF_FILEMOUNT`; `vfs_domount_first`).
+    let file_mount = fstype == b"nullfs" && covered.kind() == vfs::Kind::Regular;
+    if !covered.is_dir() && !file_mount {
         return Err(Errno::ENOTDIR);
     }
     let devfs = fstype.strip_suffix(b"\0").unwrap_or(fstype) == b"devfs";
@@ -907,6 +926,30 @@ fn mount_opts(s: &Sleepable, opts: &[MountOption], flags: u64) -> SysResult {
         0
     };
     if flags & abi::mount::MNT_UPDATE != 0 {
+        match fstype {
+            // Updates only export, which is not kept (`nullfs_mount`);
+            // fdescfs takes none (`fdesc_mount`).
+            b"nullfs" if covered.is_mount_root() && get(b"export").is_some() => return Ok(0),
+            b"nullfs" | b"fdescfs" if covered.is_mount_root() => return Err(Errno::EOPNOTSUPP),
+            // Always read-only, on the same device (`cd9660_mount`).
+            b"cd9660" if covered.is_mount_root() && get(b"export").is_none() => {
+                let from = get(b"from").ok_or(Errno::EINVAL)?;
+                let disk = disk_at(s, &p, from)?;
+                let same = covered
+                    .mount()
+                    .fs()
+                    .as_any()
+                    .downcast_ref::<crate::fs::cd9660::Cd9660Fs>()
+                    .is_some_and(|fs| fs.disk().name() == disk.name());
+                if !same {
+                    return Err(Errno::EINVAL);
+                }
+                let force = flags & abi::mount::MNT_FORCE != 0;
+                return update(s, &covered, fstype, flags | abi::mount::MNT_RDONLY, force);
+            }
+            b"cd9660" if covered.is_mount_root() => return Ok(0),
+            _ => {}
+        }
         let force = flags & abi::mount::MNT_FORCE != 0 || get(b"force").is_some();
         let r = update(s, &covered, fstype, flags, force)?;
         // `devfs_mount`'s update: a new ruleset, applied at once.
@@ -1039,11 +1082,146 @@ fn mount_opts(s: &Sleepable, opts: &[MountOption], flags: u64) -> SysResult {
             },
             Box::new(crate::fs::devfs::DevFs::new(rsnum)),
         ),
+        b"nullfs" => null_mount(s, &p, &covered, opts, flags)?,
+        b"fdescfs" => {
+            // `fdesc_mount`: its own options, and never `MNT_LOCAL` (for
+            // `fts`).
+            let opts = crate::fs::fdescfs::Opts {
+                linrdlnk: get(b"linrdlnk").is_some(),
+                rdlnk: get(b"rdlnk").is_some(),
+                nodup: get(b"nodup").is_some(),
+            };
+            vfs::Mount::new(
+                vfs::MountInfo {
+                    type_name: "fdescfs",
+                    flags: flags & !abi::mount::MNT_LOCAL,
+                    from: b"fdescfs".to_vec(),
+                    io_size: 512,
+                },
+                Box::new(crate::fs::fdescfs::FdescFs::new(opts)),
+            )
+        }
+        b"cd9660" => {
+            let from = get(b"from").ok_or(Errno::EINVAL)?;
+            let disk = disk_at(s, &p, from)?;
+            let iso = cd9660_opts(opts);
+            let fs = crate::fs::cd9660::Cd9660Fs::mount(s, disk, &iso)?;
+            let m = vfs::Mount::new(
+                vfs::MountInfo {
+                    type_name: "cd9660",
+                    // Read-only whatever was asked (`cd9660_mount`).
+                    flags: abi::mount::MNT_LOCAL | abi::mount::MNT_RDONLY | flags,
+                    from: from.strip_suffix(b"\0").unwrap_or(from).to_vec(),
+                    io_size: fs.block_size(),
+                },
+                Box::new(fs),
+            );
+            if let Some(fs) = m
+                .fs()
+                .as_any()
+                .downcast_ref::<crate::fs::cd9660::Cd9660Fs>()
+            {
+                fs.set_mount(&m);
+            }
+            m
+        }
         _ => return Err(Errno::ENODEV),
     };
     let on = crate::fs::namespace().path_of(s, &covered, &crate::fs::root())?;
-    crate::fs::namespace().mount(s, covered, m, &on)?;
+    if let Err(e) = crate::fs::namespace().mount(s, covered, Arc::clone(&m), &on) {
+        // A nullfs let go of the mount below.
+        if let Some(n) = m.fs().as_any().downcast_ref::<vfs::nullfs::NullFs>() {
+            n.detach();
+        }
+        return Err(e);
+    }
     Ok(0)
+}
+
+/// A nullfs over `from` (or mount_nullfs's `target`) for mounting on
+/// `covered` (FreeBSD's `nullfs_mount`): a directory over a directory or
+/// a file over a file, not the vnode of another nullfs over the same one
+/// (`EDEADLK`), with `cache` unless `nocache`, and sockets bound below
+/// unless `nounixbypass`.
+fn null_mount(
+    s: &Sleepable,
+    p: &crate::proc::Process,
+    covered: &Arc<vfs::Vnode>,
+    opts: &[MountOption],
+    flags: u64,
+) -> Result<Arc<vfs::Mount>, Errno> {
+    let get = |name: &[u8]| opt(opts, name);
+    let target = get(b"from")
+        .or_else(|| get(b"target"))
+        .ok_or(Errno::EINVAL)?;
+    let target = target.strip_suffix(b"\0").unwrap_or(target);
+    if target.is_empty() {
+        return Err(Errno::EINVAL);
+    }
+    let lower = crate::fs::lookup(s, p, At::Cwd, target, Walk::FOLLOW)?;
+    if covered.lower().is_some_and(|l| Arc::ptr_eq(l, &lower)) {
+        return Err(Errno::EDEADLK);
+    }
+    if !matches!(lower.kind(), vfs::Kind::Directory | vfs::Kind::Regular)
+        || lower.kind() != covered.kind()
+    {
+        return Err(Errno::EINVAL);
+    }
+    let opts = vfs::nullfs::Options {
+        cache: get(b"cache").is_some() || get(b"nocache").is_none(),
+        unp_bypass: get(b"unixbypass").is_some() || get(b"nounixbypass").is_none(),
+    };
+    let fs = vfs::nullfs::NullFs::new(&lower, opts)?;
+    let below = lower.mount();
+    let m = vfs::Mount::new(
+        vfs::MountInfo {
+            type_name: "nullfs",
+            flags: (below.flags() & abi::mount::MNT_LOCAL) | (flags & !abi::mount::MNT_LOCAL),
+            from: target.to_vec(),
+            io_size: below.info().io_size,
+        },
+        Box::new(fs),
+    );
+    m.fs()
+        .as_any()
+        .downcast_ref::<vfs::nullfs::NullFs>()
+        .ok_or(Errno::EINVAL)?
+        .attach(&m)?;
+    Ok(m)
+}
+
+/// mount_cd9660's options (`iso_mountfs`), numbers as `vfs_scanopt("%d")`
+/// reads them. `kiconv` is ignored, as by a FreeBSD kernel without
+/// `cd9660_iconv`.
+fn cd9660_opts(opts: &[MountOption]) -> cd9660::Options {
+    let get = |name: &[u8]| opt(opts, name);
+    let int = |name: &[u8]| -> Option<i64> {
+        let v = get(name)?;
+        let v = v.strip_suffix(b"\0").unwrap_or(v);
+        let t = core::str::from_utf8(v).ok()?.trim_start();
+        let (neg, t) = match t.strip_prefix('-') {
+            Some(r) => (true, r),
+            None => (false, t.strip_prefix('+').unwrap_or(t)),
+        };
+        let digits = t.bytes().take_while(u8::is_ascii_digit).count();
+        let n: i64 = t.get(..digits)?.parse().ok()?;
+        Some(if neg { -n } else { n })
+    };
+    let to32 = |n: i64| u32::from_ne_bytes(i32::try_from(n).unwrap_or(0).to_ne_bytes());
+    cd9660::Options {
+        norrip: get(b"norrip").is_some(),
+        gens: get(b"gens").is_some(),
+        extatt: get(b"extatt").is_some(),
+        nojoliet: get(b"nojoliet").is_some(),
+        brokenjoliet: get(b"brokenjoliet").is_some(),
+        uid: int(b"uid").map(to32),
+        gid: int(b"gid").map(to32),
+        mask: int(b"mask").map(to32),
+        dirmask: int(b"dirmask").map(to32),
+        ssector: int(b"ssector")
+            .and_then(|n| u32::try_from(n).ok())
+            .unwrap_or(0),
+    }
 }
 
 /// `nmount` with `MNT_UPDATE`: the mount whose root `v` is goes

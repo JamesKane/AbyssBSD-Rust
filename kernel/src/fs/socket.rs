@@ -31,7 +31,11 @@ use crate::signal::Woke;
 /// The sockets bound to names, by node (FreeBSD's `v_unpcb`).
 static BOUND: SpinLock<BTreeMap<(u64, u64), Weak<Socket>>> = SpinLock::new(BTreeMap::new());
 
+/// The key of the node a socket binds at `v`: through nullfs, the one
+/// below unless the mount says `nounixbypass` (`null_vnodeops`' bypass of
+/// `VOP_UNP_BIND`).
 fn key(v: &Vnode) -> (u64, u64) {
+    let v = v.unp_vnode();
     (v.mount().id, v.ino())
 }
 

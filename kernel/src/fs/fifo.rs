@@ -137,7 +137,8 @@ impl FifoFile {
         write: bool,
         nonblock: bool,
     ) -> Result<Self, Errno> {
-        let fifo = Fifo::of(v);
+        // Through nullfs, the FIFO below (`null_bypass` of `VOP_OPEN`).
+        let fifo = Fifo::of(v.lowest());
         let (rgen, wgen) = {
             let mut st = fifo.state.lock(s);
             if write && !read && nonblock && st.readers == 0 {

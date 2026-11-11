@@ -16,8 +16,10 @@
 //! sys/kern/vfs_mountroot.c.
 
 pub(crate) mod block;
+pub(crate) mod cd9660;
 pub(crate) mod devfs;
 pub(crate) mod eventfd;
+pub(crate) mod fdescfs;
 pub(crate) mod fdtable;
 pub(crate) mod fifo;
 pub(crate) mod file;
@@ -375,6 +377,15 @@ const TYPES: &[(&str, i32)] = &[
     ("tarfs", abi::mount::VFCF_JAIL | abi::mount::VFCF_READONLY),
     ("ufs", abi::mount::VFCF_FILEREVINC),
     ("msdosfs", 0),
+    (
+        "nullfs",
+        abi::mount::VFCF_LOOPBACK | abi::mount::VFCF_JAIL | abi::mount::VFCF_FILEMOUNT,
+    ),
+    (
+        "fdescfs",
+        abi::mount::VFCF_SYNTHETIC | abi::mount::VFCF_JAIL,
+    ),
+    ("cd9660", abi::mount::VFCF_READONLY),
 ];
 
 /// Adds `vfs.conflist` (what `getvfsbyname` and `lsvfs` read) to the
@@ -780,7 +791,8 @@ pub(crate) fn object(s: &Sleepable, v: &Vnode) -> Option<Arc<vm::object::Object>
         None => {
             let data = v.resident(s)?;
             let mut objects = OBJECTS.lock();
-            Arc::clone(objects.entry(v.id()).or_insert_with(|| {
+            // Through nullfs, the file's below: one object for both.
+            Arc::clone(objects.entry(v.lowest().id()).or_insert_with(|| {
                 vm::object::Object::with_pager(
                     crate::mm::space::page_ops(),
                     Arc::new(ResidentPager { data }),

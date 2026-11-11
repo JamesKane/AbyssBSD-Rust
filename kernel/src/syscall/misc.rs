@@ -683,6 +683,9 @@ const MODULES: &[&[u8]] = &[
     b"hidbus/hms",
     b"acpi/uart",
     b"nexus/efirtc",
+    b"nullfs",
+    b"fdescfs",
+    b"cd9660",
 ];
 
 /// The module with id `id`.

@@ -17,6 +17,7 @@ ktest = []
 
 [dependencies]
 bufcache = { path = "../sys/bufcache" }
+cd9660 = { path = "../lib/cd9660" }
 fat = { path = "../lib/fat" }
 geom = { path = "../lib/geom" }
 gpt = { path = "../lib/gpt" }

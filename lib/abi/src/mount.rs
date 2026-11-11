@@ -102,6 +102,7 @@ pub const VFCF_READONLY: i32 = 0x0004_0000;
 pub const VFCF_SYNTHETIC: i32 = 0x0008_0000;
 pub const VFCF_LOOPBACK: i32 = 0x0010_0000;
 pub const VFCF_JAIL: i32 = 0x0040_0000;
+pub const VFCF_FILEMOUNT: i32 = 0x0200_0000;
 pub const VFCF_FILEREVINC: i32 = 0x0400_0000;
 
 pub const MNT_RDONLY: u64 = 0x0000_0001;
@@ -234,6 +235,7 @@ pub(crate) const CONSTANTS: &[ConstValue] = &[
     c("VFCF_SYNTHETIC", VFCF_SYNTHETIC as i64),
     c("VFCF_LOOPBACK", VFCF_LOOPBACK as i64),
     c("VFCF_JAIL", VFCF_JAIL as i64),
+    c("VFCF_FILEMOUNT", VFCF_FILEMOUNT as i64),
     c("VFCF_FILEREVINC", VFCF_FILEREVINC as i64),
     c("MNT_WAIT", MNT_WAIT as i64),
     c("MNT_NOWAIT", MNT_NOWAIT as i64),
