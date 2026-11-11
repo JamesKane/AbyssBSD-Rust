@@ -284,9 +284,11 @@ dependencies = [
  "cpufreq",
  "devtree",
  "gpiobus",
+ "hcons",
  "hidbus",
  "hkbd",
  "hms",
+ "hsctrl",
  "ichwd",
  "iicbus",
  "isa",
@@ -404,8 +406,22 @@ name = "hal"
 version = "0.0.0"
 
 [[package]]
+name = "hcons"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "bus",
+ "devtree",
+ "hid",
+ "hidbus",
+]
+
+[[package]]
 name = "hid"
 version = "0.0.0"
+dependencies = [
+ "abi",
+]
 
 [[package]]
 name = "hidbus"
@@ -414,9 +430,11 @@ dependencies = [
  "abi",
  "bus",
  "devtree",
+ "evdev",
  "hid",
  "sched",
  "sync",
+ "sysctl",
  "usb",
  "usbus",
  "vfs",
@@ -448,6 +466,17 @@ dependencies = [
  "hid",
  "hidbus",
  "sync",
+]
+
+[[package]]
+name = "hsctrl"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "bus",
+ "devtree",
+ "hid",
+ "hidbus",
 ]
 
 [[package]]
@@ -590,6 +619,7 @@ dependencies = [
  "gpt",
  "guid",
  "hal",
+ "hid",
  "hidbus",
  "idregs",
  "iicbus",

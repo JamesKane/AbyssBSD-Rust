@@ -1,0 +1,16 @@
+[package]
+name = "hcons"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+abi = { path = "../../lib/abi" }
+bus = { path = "../../sys/bus" }
+devtree = { path = "../../lib/devtree" }
+hid = { path = "../../lib/hid" }
+hidbus = { path = "../../sys/hid" }
+
+[lints]
+workspace = true

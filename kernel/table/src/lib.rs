@@ -58,6 +58,8 @@ macro_rules! drivers {
             hidbus::hidraw::HIDRAW,
             hkbd::DRIVER,
             hms::DRIVER,
+            hcons::DRIVER,
+            hsctrl::DRIVER,
             umass::DRIVER,
             iicbus::IICBUS,
             iicbus::IIC,

@@ -12,9 +12,11 @@ ahci = { path = "../../drivers/ahci" }
 acpi = { path = "../../sys/acpi" }
 bus = { path = "../../sys/bus" }
 cpufreq = { path = "../../sys/cpufreq" }
+hcons = { path = "../../drivers/hcons" }
 hidbus = { path = "../../sys/hid" }
 hkbd = { path = "../../drivers/hkbd" }
 hms = { path = "../../drivers/hms" }
+hsctrl = { path = "../../drivers/hsctrl" }
 iicbus = { path = "../../sys/iicbus" }
 nvme = { path = "../../drivers/nvme" }
 pci = { path = "../../sys/pci" }
