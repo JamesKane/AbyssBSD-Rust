@@ -257,6 +257,17 @@ pub fn configure_timer() {
     }
 }
 
+/// The local timer's rate in Hz, for a TSC of `tsc_hz`: the TSC's own in
+/// TSC-deadline mode, else the calibrated count rate at divide-by-1.
+#[must_use]
+pub fn timer_frequency(tsc_hz: u64) -> u64 {
+    if TSC_DEADLINE.load(Ordering::Relaxed) {
+        return tsc_hz;
+    }
+    let f = (u128::from(tsc_hz) * u128::from(TIMER_PER_TSC.load(Ordering::Relaxed))) >> 32;
+    u64::try_from(f).unwrap_or(u64::MAX)
+}
+
 /// Whether the timer uses TSC-deadline mode.
 #[must_use]
 pub fn uses_tsc_deadline() -> bool {

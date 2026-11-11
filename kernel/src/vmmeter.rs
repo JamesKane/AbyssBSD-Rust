@@ -441,7 +441,10 @@ pub(crate) fn init(s: &Sleepable) {
             Value::Opaque {
                 format: "S,timeval",
                 read: Box::new(|out| {
-                    let tv = crate::kinfo::timeval(crate::time::realtime_base_ns() / 1000);
+                    // `th_boottime`: only a step or a leap second moves
+                    // it, not the discipline's rate.
+                    let boot = crate::shared_page::to_us(crate::shared_page::boottime());
+                    let tv = crate::kinfo::timeval(boot);
                     out.extend_from_slice(&tv.tv_sec.to_ne_bytes());
                     out.extend_from_slice(&tv.tv_usec.to_ne_bytes());
                 }),

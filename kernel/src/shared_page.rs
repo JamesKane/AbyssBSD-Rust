@@ -22,9 +22,16 @@
 //!   raced an update sees the change and retries.
 //! - The kernel's own clock system calls read the slots the same way, so a
 //!   value from the system call and one from libc never disagree.
+//! - Each windup that finds the time of day in a new second hands that
+//!   second to the NTP discipline ([`crate::ntp`]), which may move it (a
+//!   leap second moves the boot time) and gives the rate adjustment for
+//!   the second to come; the scale is recomputed from it. Windups are
+//!   timed to fall just past each second boundary, so that a leap second
+//!   and each second's adjustment take effect on time.
 //!
 //! Behavior reference: sys/kern/kern_sharedpage.c, sys/kern/kern_tc.c
-//! (`tc_windup`), lib/libsys/__vdso_gettimeofday.c, sys/tools/amd64_vdso.sh,
+//! (`tc_windup`, `recalculate_scaling_factor_and_large_delta`),
+//! lib/libsys/__vdso_gettimeofday.c, sys/tools/amd64_vdso.sh,
 //! sys/amd64/amd64/sigtramp.S.
 
 #![allow(
@@ -37,7 +44,7 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use core::pin::Pin;
 use core::ptr;
-use core::sync::atomic::{AtomicU32, Ordering, fence};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering, fence};
 
 use abi::vdso::{Bintime, Timehands, Timekeep};
 use addr::VirtAddr;
@@ -78,14 +85,27 @@ unsafe impl Sync for Page {}
 
 static PAGE: Once<Page> = Once::new();
 
+/// `LARGE_STEP`: a jump of more seconds than this is passed to the
+/// discipline as two seconds (one may be a leap second), not one by one.
+const LARGE_STEP: i64 = 200;
+
 /// The writer's state: the current slot and a copy of its contents.
 struct Writer {
     current: u32,
     th: Timehands,
+    /// The second of the time of day at the last windup
+    /// (`th_microtime.tv_sec`).
+    last_sec: i64,
+    /// The counter's rate, unshifted, and how far it is read shifted.
+    freq: u64,
+    shift: u32,
 }
 
 static WRITER: SpinLock<Writer> = SpinLock::new(Writer {
     current: 0,
+    last_sec: 0,
+    freq: 1,
+    shift: 0,
     th: Timehands {
         th_algo: 0,
         th_gen: 0,
@@ -117,6 +137,10 @@ static SHIFT: AtomicU32 = AtomicU32::new(0);
 
 /// The timer that winds up the timehands, and its period.
 static WINDUP: Once<(Pin<&'static Timer>, u64)> = Once::new();
+
+/// `kern.timecounter.fast_gettime`: libc may read the time from the page
+/// (`vdso_th_enable`).
+static FAST_GETTIME: AtomicBool = AtomicBool::new(true);
 
 fn timekeep() -> *mut Timekeep {
     let p = PAGE.get().expect("shared page");
@@ -220,10 +244,12 @@ pub(crate) fn realtime() -> Bintime {
 }
 
 /// Extends the current slot to now into the next one and makes that
-/// current; with `boottime`, also sets the time of day.
-fn windup(boottime: Option<Bintime>) {
+/// current; with `boottime`, also sets the time of day. Returns the time
+/// of day it wound up to.
+fn windup(boottime: Option<Bintime>) -> Bintime {
     let mut w = WRITER.lock();
-    let tc = count();
+    let (raw, raw_up) = crate::time::counter_and_uptime();
+    let tc = (raw >> w.shift) as u32;
     let mut th = w.th;
     let delta = tc.wrapping_sub(th.th_offset_count) & th.th_counter_mask;
     th.th_offset = advance(th.th_offset, th.th_scale, delta);
@@ -231,11 +257,29 @@ fn windup(boottime: Option<Bintime>) {
     if let Some(b) = boottime {
         th.th_boottime = b;
     }
+    // NTP's second processing: once per second passed, but a large jump
+    // (a step) counts as two, in case one was a leap second.
+    let mut bt = add(th.th_offset, th.th_boottime);
+    let mut seconds = bt.sec - w.last_sec;
+    if seconds > 0 {
+        if seconds > LARGE_STEP {
+            seconds = 2;
+        }
+        let adjustment = crate::ntp::seconds(&mut bt.sec, &mut th.th_boottime.sec, seconds);
+        th.th_scale = clock::ntp::scale(w.freq, w.shift, adjustment);
+        crate::time::set_slow_pad(clock::ntp::slow_pad(adjustment));
+    }
+    w.last_sec = bt.sec;
     th.th_gen = th.th_gen.wrapping_add(1).max(1);
     let next = (w.current + 1) % SLOTS;
     publish(next, &th);
     w.current = next;
     w.th = th;
+    drop(w);
+    if th.th_boottime.sec > 0 {
+        crate::time::rebase_realtime(to_ns(bt), raw_up);
+    }
+    bt
 }
 
 /// Writes slot `i` and makes it current. Called with `WRITER` held.
@@ -252,13 +296,30 @@ fn publish(i: u32, th: &Timehands) {
         ptr::write_volatile(s, Timehands { th_gen: 0, ..*th });
         gen_.store(th.th_gen, Ordering::Release);
         AtomicU32::from_ptr(&raw mut (*tk).tk_current).store(i, Ordering::Release);
+        AtomicU32::from_ptr(&raw mut (*tk).tk_enabled).store(
+            u32::from(FAST_GETTIME.load(Ordering::Relaxed)),
+            Ordering::Release,
+        );
     }
 }
 
+/// The time until the windup after one at time of day `bt`: the period,
+/// or sooner to fall just past the next second boundary.
+fn next_windup(bt: Bintime, period: u64) -> u64 {
+    let into = to_ns(Bintime {
+        sec: 0,
+        frac: bt.frac,
+    });
+    // A microsecond past the boundary: the timer runs on the counter, but
+    // it is lengthened while the disciplined clock runs slower, so it
+    // never falls short of the boundary by more than rounding.
+    (NANOS - into + 1000).min(period)
+}
+
 fn on_windup(_: usize, _: &IrqCx) {
-    windup(None);
+    let bt = windup(None);
     if let Some(&(t, period)) = WINDUP.get() {
-        t.reset(period, on_windup, 0);
+        t.reset(next_windup(bt, period), on_windup, 0);
     }
 }
 
@@ -266,6 +327,36 @@ fn on_windup(_: usize, _: &IrqCx) {
 #[cfg(feature = "ktest")]
 pub(crate) fn wind() {
     windup(None);
+}
+
+/// The boot time: the time of day at uptime zero (`th_boottime`), which
+/// only a step or a leap second moves.
+pub(crate) fn boottime() -> Bintime {
+    WRITER.lock().th.th_boottime
+}
+
+/// The counter as the timehands read it: shifted, truncated to 32 bits
+/// (`tc_get_timecount`).
+pub(crate) fn timecount() -> u32 {
+    count()
+}
+
+/// The timehands' counter rate in Hz (`tc_frequency`), and the shift it
+/// is read with.
+pub(crate) fn tc_frequency() -> (u64, u32) {
+    let w = WRITER.lock();
+    (w.freq >> w.shift, w.shift)
+}
+
+/// `kern.timecounter.fast_gettime`.
+pub(crate) fn fast_gettime() -> bool {
+    FAST_GETTIME.load(Ordering::Relaxed)
+}
+
+/// Sets `kern.timecounter.fast_gettime`: off, libc makes the system call
+/// for the time (from the next windup, as FreeBSD defers it).
+pub(crate) fn set_fast_gettime(on: bool) {
+    FAST_GETTIME.store(on, Ordering::Relaxed);
 }
 
 /// Sets the time of day: the Unix time is `unix_ns` now.
@@ -320,6 +411,8 @@ pub(crate) fn init() {
     let base = crate::time::realtime_base_ns();
     {
         let mut w = WRITER.lock();
+        w.freq = freq;
+        w.shift = shift;
         let th = &mut w.th;
         // Seconds per shifted tick, from the unshifted rate (exact).
         th.th_scale = u64::try_from((1u128 << (64 + shift)) / u128::from(freq)).unwrap_or(u64::MAX);
@@ -350,7 +443,7 @@ pub(crate) fn init() {
 
     let t: Pin<&'static Timer> = Pin::static_ref(Box::leak(Box::new(Timer::new())));
     let _ = WINDUP.set((t, period));
-    t.reset(period, on_windup, 0);
+    t.reset(next_windup(realtime(), period), on_windup, 0);
     kprintln!(
         "time: timehands count at {} MHz (shift {shift}), wound up every {} ms",
         tc_freq / 1_000_000,

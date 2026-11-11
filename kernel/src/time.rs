@@ -49,8 +49,17 @@ static SCALE: AtomicU64 = AtomicU64::new(0);
 static EPOCH: AtomicU64 = AtomicU64::new(0);
 
 /// The Unix time, in nanoseconds, at counter zero (0 until a clock has
-/// been read).
+/// been read). The clock discipline makes the time of day run at a rate
+/// slightly off the counter's, so the timehands refresh this at every
+/// windup: the time of day is this plus [`now_ns`] to within the
+/// discipline's drift over one windup (half a millisecond at most).
 static REALTIME_BASE: AtomicU64 = AtomicU64::new(0);
+
+/// How much longer, as a fraction of 2^32, a timer must wait on the
+/// counter to last its time on the disciplined clock: nonzero while the
+/// clock runs slower than the counter (`clock::ntp::slow_pad`). Set by
+/// the timehands at each second.
+static SLOW_PAD: AtomicU64 = AtomicU64::new(0);
 
 /// Sets the time of day from the real-time clocks (FreeBSD's
 /// `inittodr`).
@@ -71,6 +80,34 @@ pub(crate) fn set_realtime() {
 pub(crate) fn set_time_of_day(unix_ns: u64) {
     REALTIME_BASE.store(unix_ns.saturating_sub(now_ns()).max(1), Ordering::Release);
     crate::shared_page::set_realtime(unix_ns);
+}
+
+/// The timehands' time of day moved: `unix_ns` is the Unix time at
+/// `uptime_ns` on the counter's clock ([`counter_and_uptime`]).
+pub(crate) fn rebase_realtime(unix_ns: u64, uptime_ns: u64) {
+    REALTIME_BASE.store(unix_ns.saturating_sub(uptime_ns).max(1), Ordering::Release);
+}
+
+/// Sets [`SLOW_PAD`].
+pub(crate) fn set_slow_pad(pad: u64) {
+    // Relaxed: a timer armed with the old pad is off by at most the
+    // change in one second's rate.
+    SLOW_PAD.store(pad, Ordering::Relaxed);
+}
+
+/// Counter ticks for a timer of `ns` nanoseconds on the disciplined
+/// clock: [`ns_to_ticks`], lengthened by [`SLOW_PAD`] while the clock
+/// runs slow.
+#[inline]
+fn timer_ticks(ns: u64) -> u64 {
+    let t = ns_to_ticks(ns);
+    // Relaxed: see `set_slow_pad`.
+    let pad = SLOW_PAD.load(Ordering::Relaxed);
+    if pad == 0 {
+        return t;
+    }
+    let more = (u128::from(t) * u128::from(pad)) >> 32;
+    t.saturating_add(u64::try_from(more).unwrap_or(u64::MAX))
 }
 
 /// The Unix time in nanoseconds, if a real-time clock has set it.
@@ -313,7 +350,7 @@ impl Timer {
     /// Arms the timer to run `func(arg)` `ns` nanoseconds from now,
     /// replacing any pending arming (FreeBSD's `callout_reset`).
     pub(crate) fn reset(self: Pin<&Self>, ns: u64, func: TimerFn, arg: usize) {
-        let deadline = counter().saturating_add(ns_to_ticks(ns));
+        let deadline = counter().saturating_add(timer_ticks(ns));
         let me = ptr::from_ref(self.get_ref());
         let c = self.cpu.index();
         // The queue lock masks interrupts, as `reprogram` needs.

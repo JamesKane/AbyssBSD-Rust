@@ -69,9 +69,21 @@ pub(super) fn read(id: u64) -> Result<u64, Errno> {
     })
 }
 
-/// `clock_gettime(clock_id, tp)`.
+/// `clock_gettime(clock_id, tp)`. `CLOCK_TAI` is the time of day plus
+/// the TAI offset `ntpd` set, and `EINVAL` while none is set
+/// (`sysclock_snap2bintime`).
 pub(super) fn clock_gettime(id: u64, tp: u64) -> SysResult {
-    let ts = timespec(read(id)?);
+    let ns = if id == u64::from(clock::TAI) {
+        let tai = crate::ntp::tai();
+        if tai == 0 {
+            return Err(Errno::EINVAL);
+        }
+        let off = u64::try_from(tai).unwrap_or(0).saturating_mul(NANOS);
+        read(id)?.saturating_add(off)
+    } else {
+        read(id)?
+    };
+    let ts = timespec(ns);
     UserPtr::<Timespec>::new(tp)
         .write(&ts)
         .map_err(|_| Errno::EFAULT)?;

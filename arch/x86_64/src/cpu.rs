@@ -193,6 +193,22 @@ pub fn frame_pointer() -> u64 {
     v
 }
 
+/// Whether the time-stamp counter runs at a constant rate in every
+/// power state (CPUID 8000_0007h EDX bit 8, `tsc_is_invariant`).
+#[must_use]
+pub fn tsc_invariant() -> bool {
+    let max = core::arch::x86_64::__cpuid(0x8000_0000).eax;
+    max >= 0x8000_0007 && core::arch::x86_64::__cpuid(0x8000_0007).edx & (1 << 8) != 0
+}
+
+/// Whether the local APIC timer keeps running in deep C-states (ARAT,
+/// CPUID 6 EAX bit 2).
+#[must_use]
+pub fn apic_timer_always_running() -> bool {
+    let max = core::arch::x86_64::__cpuid(0).eax;
+    max >= 6 && core::arch::x86_64::__cpuid(6).eax & (1 << 2) != 0
+}
+
 /// Reads the time-stamp counter.
 pub fn timestamp() -> u64 {
     let (lo, hi): (u32, u32);

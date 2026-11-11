@@ -522,13 +522,31 @@ fn set_time(unix_ns: u64) -> Result<(), Errno> {
             st.1 = now / SEC;
         }
     }
+    let before = super::clock_ns(clock::REALTIME)?;
     crate::time::set_time_of_day(to);
     crate::timers::clock_jumped();
+    // `tc_setclock`'s report, with `kern.timecounter.stepwarnings`.
+    if crate::timecounter::STEP_WARNINGS.load(core::sync::atomic::Ordering::Relaxed) != 0 {
+        let after = super::clock_ns(clock::REALTIME)?;
+        crate::klog::log(
+            abi::syslog::LOG_INFO,
+            format_args!(
+                "Time stepped from {}.{:09} to {}.{:09} ({}.{:09})\n",
+                before / NANOS,
+                before % NANOS,
+                after / NANOS,
+                after % NANOS,
+                unix_ns / NANOS,
+                unix_ns % NANOS
+            ),
+        );
+    }
     Ok(())
 }
 
-/// `adjtime(delta, olddelta)`: the clock is stepped, not slewed (no
-/// `ntpd` here yet); the old delta is always none.
+/// `adjtime(delta, olddelta)`: the clock is slewed by `delta` (5000 ppm
+/// while more than a second is left, then 500 ppm), replacing any slew in
+/// progress; `olddelta` gets what was left of that one.
 pub(super) fn adjtime(delta: u64, olddelta: u64) -> SysResult {
     let d = if delta == 0 {
         None
@@ -539,18 +557,40 @@ pub(super) fn adjtime(delta: u64, olddelta: u64) -> SysResult {
                 .map_err(|_| Errno::EFAULT)?,
         )
     };
-    if let Some(d) = d {
+    if d.is_some() {
         process()?.priv_check(Priv::Adjtime)?;
-        let now = i128::from(super::clock_ns(clock::REALTIME)?);
-        let step = i128::from(d.tv_sec) * i128::from(NANOS) + i128::from(d.tv_usec) * 1000;
-        set_time(u64::try_from((now + step).max(0)).unwrap_or(0))?;
     }
+    let old = crate::ntp::adjtime(d.as_ref());
     if olddelta != 0 {
         UserPtr::<Timeval>::new(olddelta)
-            .write(&Timeval::default())
+            .write(&old)
             .map_err(|_| Errno::EFAULT)?;
     }
     Ok(0)
+}
+
+/// `ntp_adjtime(tp)`: changes what `tp->modes` selects (any change needs
+/// `PRIV_NTP_ADJTIME`) and returns the discipline's state in `*tp`; the
+/// result is the clock state (`TIME_ERROR` while unsynchronized).
+pub(super) fn ntp_adjtime(tp: u64) -> SysResult {
+    let p = UserPtr::<abi::timex::Timex>::new(tp);
+    let mut tx = p.read().map_err(|_| Errno::EFAULT)?;
+    if tx.modes != 0 {
+        process()?.priv_check(Priv::NtpAdjtime)?;
+    }
+    let state = crate::ntp::adjtime_ntp(&mut tx);
+    p.write(&tx).map_err(|_| Errno::EFAULT)?;
+    Ok(u64::from(state.cast_unsigned()))
+}
+
+/// `ntp_gettime(ntvp)`: the time of day, its error bounds, the TAI
+/// offset, and the clock state, which is also the result.
+pub(super) fn ntp_gettime(ntvp: u64) -> SysResult {
+    let ntv = crate::ntp::gettime();
+    UserPtr::<abi::timex::Ntptimeval>::new(ntvp)
+        .write(&ntv)
+        .map_err(|_| Errno::EFAULT)?;
+    Ok(u64::from(ntv.time_state.cast_unsigned()))
 }
 
 /// `clock_getcpuclockid2(id, which, clock_id)`: a process's or thread's
