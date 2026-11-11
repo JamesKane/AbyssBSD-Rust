@@ -143,10 +143,13 @@ impl PciChild {
         Ok(())
     }
 
+    /// Sets and clears command bits, the change in effect on return
+    /// ([`crate::config::write_command`]): a driver's next access may
+    /// depend on it.
     fn set_command(&self, set: u16, clear: u16) {
         let a = self.function.addr;
         let cmd = self.cfg.read16(a, COMMAND);
-        self.cfg.write16(a, COMMAND, (cmd | set) & !clear);
+        crate::config::write_command(self.cfg, a, (cmd | set) & !clear);
     }
 
     /// Turns on decoding of the function's memory BARs, for a driver

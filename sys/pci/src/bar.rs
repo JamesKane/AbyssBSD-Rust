@@ -149,11 +149,13 @@ fn with_decoding_off<R>(
     let cmd = cfg.read16(a, COMMAND);
     if cmd & bits != 0 {
         cfg.decoding_paused(a, true);
-        cfg.write16(a, COMMAND, cmd & !bits);
+        crate::config::write_command(cfg, a, cmd & !bits);
     }
     let r = f();
+    // Decoding back on before whatever was paused (a boot framebuffer in
+    // a BAR) touches the function again.
     if cmd & bits != 0 {
-        cfg.write16(a, COMMAND, cmd);
+        crate::config::write_command(cfg, a, cmd);
         cfg.decoding_paused(a, false);
     }
     r

@@ -107,6 +107,24 @@ pub trait ConfigSpace {
     }
 }
 
+/// Writes function `a`'s command register and reads it back, so that the
+/// change has reached the function before anything that depends on it.
+///
+/// A configuration write may complete early: ECAM is device memory with
+/// early write acknowledgement, and an access to a BAR goes to another
+/// peripheral, which Arm does not order after it (Arm ARM B2.8, Device
+/// memory's Early Write Acknowledgement and ordering between peripherals).
+/// So a driver's first register read right after turning on memory
+/// decoding can reach the function while it still decodes nothing, a
+/// synchronous external abort (QEMU `virt`, under TCG). A read of the same
+/// register is ordered after the write, and returns only once the function
+/// has taken it. PCIe makes configuration writes non-posted, so the read
+/// costs one round trip and no more.
+pub fn write_command(cfg: &dyn ConfigSpace, a: PciAddress, v: u16) {
+    cfg.write16(a, crate::header::COMMAND, v);
+    let _ = cfg.read16(a, crate::header::COMMAND);
+}
+
 /// An ECAM region (PCIe enhanced configuration access): 4 KiB of
 /// configuration space per function, at `base + (bus << 20 | slot << 15 |
 /// function << 12)`, for one segment's bus range.

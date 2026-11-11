@@ -69,10 +69,14 @@ pub fn secondary(
     if f.depth >= MAX_DEPTH {
         return Err(AttachError::Device("bridges nested too deep"));
     }
+    // In effect before the bus behind it is scanned and its devices
+    // attach.
     let cmd = child.cfg.read16(f.addr, COMMAND);
-    child
-        .cfg
-        .write16(f.addr, COMMAND, cmd | CMD_IO | CMD_MEMORY | CMD_BUS_MASTER);
+    crate::config::write_command(
+        child.cfg,
+        f.addr,
+        cmd | CMD_IO | CMD_MEMORY | CMD_BUS_MASTER,
+    );
     let intx = intx.unwrap_or_else(|| swizzle(&child.bus.intx, f.addr.slot));
     let express = crate::requester::express_type(child.cfg, f.addr, &f.caps);
     Ok((
