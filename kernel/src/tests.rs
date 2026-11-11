@@ -6846,3 +6846,131 @@ extern "C" fn crypto_between() {
     let c = kcrypto::Cbc::new(&[8; 32]).unwrap();
     c.with(|e| e.cbc_decrypt(&mut [0; 16], &mut d[..96]));
 }
+
+/// A `hidbus` transport for tests: it delivers what the test sends, and
+/// counts the times a child started its reports (an evdev node opened).
+struct MediaKeys {
+    sink: sync::SpinLock<Option<hidbus::Sink>>,
+    starts: core::sync::atomic::AtomicUsize,
+}
+
+impl hidbus::HidTransport for MediaKeys {
+    fn start(&self, sink: hidbus::Sink) {
+        *self.sink.lock() = Some(sink);
+        self.starts.fetch_add(1, Ordering::SeqCst);
+    }
+    fn pause(&self) {}
+    fn stop(&self, _: &sched::Sleepable) {
+        *self.sink.lock() = None;
+    }
+    fn output(&self, _: u8, _: alloc::vec::Vec<u8>) {}
+}
+
+impl MediaKeys {
+    /// Delivers one input report, its ID byte first, as an interrupt
+    /// transfer's completion does.
+    fn send(&self, report: &[u8]) {
+        let sink = self.sink.lock().clone().expect("reports started");
+        sink(report);
+    }
+}
+
+ktest! {
+    /// `hcons` and `hsctrl` on a keyboard's media-key interface laid out
+    /// as the board keyboard's (`hid::MEDIA_KEYS`, with Microdia
+    /// `0c45:0133`'s identity): each attaches to its collection with
+    /// FreeBSD's description, pnpinfo, and location, and
+    /// `tests/user/hcons.c` reads the reports below from their evdev nodes
+    /// as FreeBSD's events (the program lists them).
+    fn hcons_and_hsctrl_on_a_media_key_interface() {
+        use alloc::sync::Arc;
+        use bus::{Ident, NodeState};
+        let s = cx();
+        let m = bus::manager();
+        let keys = Arc::new(MediaKeys {
+            sink: sync::SpinLock::new(None),
+            starts: core::sync::atomic::AtomicUsize::new(0),
+        });
+        let desc = hid::Descriptor::parse(hid::MEDIA_KEYS).expect("descriptor");
+        let data = hidbus::HidbusData {
+            transport: Arc::clone(&keys) as Arc<dyn hidbus::HidTransport>,
+            desc: Arc::new(desc),
+            ident: devtree::ids::HidIdent {
+                usage: 0,
+                bus: abi::evdev::BUS_USB,
+                vendor: 0x0c45,
+                product: 0x0133,
+                version: 0x0200,
+                index: 0,
+            },
+            name: "vendor 0x0c45 product 0x0133".into(),
+            serial: alloc::string::String::new(),
+            raw: hid::MEDIA_KEYS.into(),
+            rdesc_size: u16::try_from(hid::MEDIA_KEYS.len()).unwrap(),
+        };
+        let bus = m.add_child(&s, m.root(), Ident::Nexus("hidbus"), Some(Arc::new(data)), alloc::vec![], &[]);
+        m.wait_idle(&s);
+        assert_eq!(m.state(bus, &s), Some(NodeState::Attached));
+        let kids = m.children(bus, &s);
+        assert_eq!(kids.len(), 2, "one child per collection");
+        let want = [
+            ("hcons", "Consumer Control", "page=0x000c usage=0x0001", "index=0"),
+            ("hsctrl", "System Control", "page=0x0001 usage=0x0080", "index=1"),
+        ];
+        for (k, (driver, suffix, usage, index)) in kids.iter().zip(want) {
+            assert_eq!(m.state(*k, &s), Some(NodeState::Attached), "{driver}");
+            assert!(m.nameunit(*k, &s).is_some_and(|n| n.starts_with(driver)), "{driver}");
+            assert_eq!(
+                m.description(*k, &s),
+                Some(alloc::format!("vendor 0x0c45 product 0x0133 {suffix}"))
+            );
+            let ident = m.ident(*k, &s).expect("ident");
+            let (mut loc, mut pnp) = (alloc::string::String::new(), alloc::string::String::new());
+            ident.location(&mut loc);
+            ident.pnpinfo(&mut pnp);
+            assert_eq!(loc, index);
+            assert_eq!(
+                pnp,
+                alloc::format!("{usage} bus=0x03 vendor=0x0c45 product=0x0133 version=0x0200")
+            );
+        }
+        if crate::md::archive().is_some() {
+            let prog: &[u8] = b"/usr/tests/abyss/hcons";
+            let p = crate::proc::Process::spawn(&s, prog, &[b"hcons", b"inject"], &[], None)
+                .expect("spawn hcons");
+            // Both nodes open: the program is reading.
+            let deadline = crate::time::now_ns() + 60_000_000_000;
+            while keys.starts.load(Ordering::SeqCst) < 2 {
+                assert!(!p.has_exited(), "tests/user/hcons.c ended early: {:?}", p.wait(&s));
+                assert!(crate::time::now_ns() < deadline, "tests/user/hcons.c never opened both nodes");
+                crate::time::sleep_ns(&s, 10_000_000);
+            }
+            // The program's list: Consumer Control's two slots
+            // (little-endian usages), then System Control's bits. Each
+            // node's events fit its clients' ring, read or not.
+            for r in [
+                &[1, 0xe2, 0, 0, 0][..],
+                &[1, 0xe2, 0, 0xe9, 0],
+                &[1, 0xe9, 0, 0, 0],
+                &[1, 0, 0, 0, 0],
+                &[1, 0x32, 0, 0x34, 0],
+                &[1, 0x6f, 0, 0xcd, 0],
+                &[1, 0, 0, 0, 0],
+                &[2, 0b001],
+                &[2, 0b000],
+                &[2, 0b110],
+                &[2, 0b000],
+            ] {
+                keys.send(r);
+            }
+            assert_eq!(p.wait(&s), crate::proc::Exit::Code(0), "tests/user/hcons.c");
+        }
+        // Detaching the bus takes the drivers and their evdev nodes.
+        m.shutdown_under(bus, &s);
+        assert_ne!(m.state(bus, &s), Some(NodeState::Attached));
+        for k in kids {
+            assert_eq!(m.state(k, &s), None);
+        }
+        let _ = m.take_events();
+    }
+}
