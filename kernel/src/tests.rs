@@ -924,6 +924,20 @@ ktest! {
         assert_eq!(oid, [1, 24]);
         assert_eq!(value, 1_501_000i32.to_ne_bytes());
         assert_eq!(next, Some(alloc::vec![1, 2]), "kern.osrelease follows kern.ostype");
+        // `uname -i`, and the kernel file's string `freebsd-version -k` reads.
+        let ident = crate::sysctl::read(&s, |t| {
+            let oid = t.name2oid("kern.ident").expect("kern.ident");
+            let mut v = alloc::vec::Vec::new();
+            t.read(&oid, &mut v).expect("read");
+            v
+        });
+        assert_eq!(ident, b"ABYSSBSD\0");
+        let what = crate::sysctl::what();
+        assert!(
+            what.starts_with(b"@(#)FreeBSD 15.1-RELEASE ABYSSBSD (AbyssBSD "),
+            "{}",
+            core::str::from_utf8(what).unwrap_or("?")
+        );
         let ncpu = crate::sysctl::read(&s, |t| {
             let mut v = alloc::vec::Vec::new();
             t.read(&[6, 3], &mut v).expect("hw.ncpu");

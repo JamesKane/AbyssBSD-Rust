@@ -10,7 +10,7 @@ This document says which interfaces we must provide and how we prove that we do.
 | Primary binary target | FreeBSD **15.x-RELEASE** `base.txz` / `kernel`-less installs for amd64 and arm64 ([ADR-0004](adr/0004-abi-target.md)) |
 | Reference source | `../freebsd-src` (16.0-CURRENT, `__FreeBSD_version` 1600028 as of 2026-10-13) |
 | Forward tracking | Syscalls and sysctls that 16-CURRENT libc adds are implemented as they appear. We switch the primary target to 16.x once it is released |
-| Reported identity | `kern.ostype = FreeBSD`, with `kern.osrelease` / `kern.osreldate` matching the targeted userland. `kern.abyss.version` identifies us honestly |
+| Reported identity | `kern.ostype = FreeBSD` (`uname -s`), with `kern.osrelease` / `kern.osreldate` matching the targeted userland: build systems and scripts choose their code paths by that name (FreeBSD's own `bsd.compiler.mk` and `host-target.mk`, autotools, CMake, the ports' `OPSYS`), as Linux programs do by the "Linux" FreeBSD's Linuxulator reports, so it stays FreeBSD (the user, 2026-11-10). AbyssBSD is named wherever nothing keys on the name: `kern.version` (`uname -v`), the boot banner, `kern.abyss.version`, and `kern.ident` (`uname -i`), which is `ABYSSBSD` where FreeBSD has its configuration's `GENERIC`. The kernel file's `what(1)` string reads `FreeBSD 15.1-RELEASE ABYSSBSD (AbyssBSD x.y.z)`, so `freebsd-version -k` finds the release |
 | ABIs | Native ELF64 only: `amd64` (LP64, SysV ABI), `aarch64` (LP64, AAPCS64). Later `riscv64` (LP64D). No 32-bit compat |
 
 ## 2. Interface surfaces

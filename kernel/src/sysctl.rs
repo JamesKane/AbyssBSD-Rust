@@ -175,6 +175,16 @@ pub(crate) fn init() {
             );
         })),
     );
+    // FreeBSD's kernel configuration name (`uname -i`); this kernel has
+    // its own (the user, 2026-11-10), so FreeBSD's update tools never take
+    // it for their GENERIC.
+    add(
+        k,
+        Number::Auto,
+        "ident",
+        "Kernel identifier",
+        Value::text(KERN_IDENT),
+    );
     add(
         k,
         Number::Fixed(kern::OSRELDATE),
@@ -713,6 +723,47 @@ pub(crate) fn features_init(s: &Sleepable) {
     });
 }
 
+/// `kern.ident`: the kernel's configuration name, as FreeBSD's `GENERIC`.
+const KERN_IDENT: &str = "ABYSSBSD";
+
+/// The kernel file's `what(1)` string, as FreeBSD's `vers.c` puts `@(#)`
+/// before its version: `freebsd-version -k` reads the installed kernel's
+/// release from the first one (`what -qs`), which must read "FreeBSD", the
+/// release, and a space. The AbyssBSD version follows.
+#[used]
+static WHAT: [u8; WHAT_STR.len()] = match WHAT_STR.first_chunk() {
+    Some(bytes) => *bytes,
+    None => panic!("WHAT_STR"),
+};
+
+const WHAT_STR: &[u8] = concat!(
+    "@(#)FreeBSD 15.1-RELEASE ABYSSBSD (AbyssBSD ",
+    env!("CARGO_PKG_VERSION"),
+    ")\0"
+)
+.as_bytes();
+
+// The release in the `what(1)` string is the one the kernel reports.
+const _: () = {
+    let release = identity::OSRELEASE.as_bytes();
+    let at = b"@(#)FreeBSD ".len();
+    let mut i = 0;
+    while i < release.len() {
+        assert!(WHAT_STR[at + i] == release[i], "WHAT names another release");
+        i += 1;
+    }
+    assert!(
+        WHAT_STR[at + release.len()] == b' ',
+        "WHAT names another release"
+    );
+};
+
+/// The kernel file's `what(1)` string, without its NUL.
+#[cfg(feature = "ktest")]
+pub(crate) fn what() -> &'static [u8] {
+    &WHAT[..WHAT.len() - 1]
+}
+
 /// What a program in capability mode may read (FreeBSD's `CTLFLAG_CAPRD`
 /// nodes): the system's identity and shape, which libc and the run-time
 /// linker ask for.
@@ -721,6 +772,7 @@ const CAPABILITY_READABLE: &[&str] = &[
     "kern.osrelease",
     "kern.osrevision",
     "kern.version",
+    "kern.ident",
     "kern.argmax",
     "kern.posix1version",
     "kern.ngroups",
