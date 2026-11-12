@@ -502,7 +502,15 @@ documents named; this section keeps what is done and what is open.
   semaphore ping-pongs (1.07 to 1.09), `thr.create` (1.09), and the in-kernel `ctxsw.same`
   (1.29) and `ctxsw.cross` (1.14). To do:
   - after `p5` has run in the same boot, `poll1000`, `select1000` and `kevent.pipe1000` are a
-    quarter slower until a reboot (found 2026-11-12): what `p5` leaves behind, to find;
+    quarter slower until a reboot; FreeBSD's are not (282 and 280 us). Creating and deleting a
+    tree of files brings it on in proportion (three rounds on tmpfs 9%, three more on UFS 13%),
+    only the thousand-descriptor benchmarks show it, and the direct map is 1 GiB leaves, so it
+    is not the TLB: the heap is size classes shared by every type, and the holes the file
+    systems' objects leave scatter the next thousand pipes and files among what stayed.
+    FreeBSD's `uma` zones are per type, so its pipes and files stay together. The cure is typed
+    zones (ARCHITECTURE.md §5.2 plans `Zone<T>`; not built) for files, pipes, and sockets.
+    Still ahead of FreeBSD after `p5` (`poll1000` 176 us against 280), but `kevent.pipe1000`
+    is level with it then;
   - `rw`/`sx` readers at four threads (1.8 to 2.0 of FreeBSD's) and `page.miss` (1.60);
   - the contended writer locks (`mtx`, `rw.wr`, `sx.wr` at t2 and t4) read a flat 16.5 ns against
     FreeBSD's 47 to 70: probably one thread getting the lock back unfairly, to settle before
