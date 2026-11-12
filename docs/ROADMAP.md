@@ -501,24 +501,20 @@ documents named; this section keeps what is done and what is open.
   userland suites are at or ahead of FreeBSD but for `sig.deliver` (1.42), the unix socket and
   semaphore ping-pongs (1.07 to 1.09), `thr.create` (1.09), and the in-kernel `ctxsw.same`
   (1.29) and `ctxsw.cross` (1.14). To do:
-  - after `p5` has run in the same boot, `poll1000`, `select1000` and `kevent.pipe1000` are a
-    quarter slower until a reboot; FreeBSD's are not (282 and 280 us). Creating and deleting a
-    tree of files brings it on in proportion (three rounds on tmpfs 9%, three more on UFS 13%),
-    only the thousand-descriptor benchmarks show it, and the direct map is 1 GiB leaves, so it
-    is not the TLB: the heap is size classes shared by every type, and the holes the file
-    systems' objects leave scatter the next thousand pipes and files among what stayed.
-    FreeBSD's `uma` zones are per type, so its pipes and files stay together. The cure proposed
-    is zones as exact-layout classes of the heap ([ADR-0024](adr/0024-zones-as-exact-layout-classes.md),
-    awaiting a decision; its first stage is a prototype measured on the board).
-    Still ahead of FreeBSD after `p5` (`poll1000` 176 us against 280), but `kevent.pipe1000`
-    is level with it then;
+  - after `p5` has run in the same boot, `kevent.pipe1000` is 7% slower until a reboot
+    (`poll1000` and `select1000` were a quarter slower and are no longer: ADR-0024's zones, and
+    the pipe's `Notify` in the pipe). Each knote's filter is still its own allocation;
   - `rw`/`sx` readers at four threads (1.8 to 2.0 of FreeBSD's) and `page.miss` (1.60);
   - the contended writer locks (`mtx`, `rw.wr`, `sx.wr` at t2 and t4) read a flat 16.5 ns against
     FreeBSD's 47 to 70: probably one thread getting the lock back unfairly, to settle before
     believing;
   - `p7` over `rge`; the SMMU's stage 6; then the 10-run gate on every class.
-- **Hangs seen once, not reproduced:** a `reboot` after the first kyua run (power cycle); a held
-  key on `vt`; `aarch64-el2` (INTx) in `tests/user/cam`, once in three runs in QEMU.
+- **The board does not always come back from a reset** (three times in some forty: after the
+  first kyua run, from FreeBSD, and from AbyssBSD on 2026-11-12): the system shuts down, issues
+  the reset (`PSCI SYSTEM_RESET` on AbyssBSD's console), and no loader starts; a power cycle
+  recovers. Seen from both kernels, so the firmware's reset path is the suspect.
+- **Hangs seen once, not reproduced:** a held key on `vt`; `aarch64-el2` (INTx) in
+  `tests/user/cam`, once in three runs in QEMU.
 - **To check on the board:** the RX8900 and the PD controllers, `hcons`' media keys, the `devinfo`
   comparison, and FreeBSD's recordings for storage and USB (`tests/corpus/opi6p/freebsd/`).
 - **Small gaps** (compat-deviations): `vgapci` and `ichsmb` names, the old `mount(2)` for cd9660,

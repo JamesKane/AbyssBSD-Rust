@@ -52,9 +52,10 @@ const RECLAIM_BATCH: usize = 256;
 /// The heap's zones (ADR-0024), under FreeBSD's names: the objects a walk
 /// over many descriptors touches, kept together whatever else of their
 /// size comes and goes.
-const ZONES: [vm::slab::ZoneSpec; 2] = [
+const ZONES: [vm::slab::ZoneSpec; 3] = [
     vm::slab::ZoneSpec::of_arc::<crate::fs::file::File>("Files"),
     vm::slab::ZoneSpec::of_arc::<crate::fs::pipe::Pipe>("pipe"),
+    vm::slab::ZoneSpec::of_arc::<event::Knote>("KNOTE"),
 ];
 
 #[global_allocator]

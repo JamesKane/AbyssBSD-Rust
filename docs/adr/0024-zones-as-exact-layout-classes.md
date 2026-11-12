@@ -98,7 +98,8 @@ pipe's `Notify`, an allocation of its own that the suite churns too (every vnode
 zone for it changed nothing. With the `Notify` in the pipe, as FreeBSD's `pipe_sel` lies in
 `struct pipe`, 148.9 and 148.3 µs: the after-effect is gone for `poll` and `select`. Zones keep
 types apart; an object that is always reached through another belongs in it. `kevent.pipe1000`
-keeps 12% (903 and 1016 ns): its knotes are the next candidate (`KNOTE`).
+kept 12% (903 and 1016 ns); with a `KNOTE` zone 7% (894 and 960 ns). Each knote's filter is
+still an allocation of its own (`Box<dyn Filter>`), the likely rest.
 
 ## Consequences
 
