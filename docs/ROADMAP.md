@@ -507,8 +507,9 @@ documents named; this section keeps what is done and what is open.
     only the thousand-descriptor benchmarks show it, and the direct map is 1 GiB leaves, so it
     is not the TLB: the heap is size classes shared by every type, and the holes the file
     systems' objects leave scatter the next thousand pipes and files among what stayed.
-    FreeBSD's `uma` zones are per type, so its pipes and files stay together. The cure is typed
-    zones (ARCHITECTURE.md §5.2 plans `Zone<T>`; not built) for files, pipes, and sockets.
+    FreeBSD's `uma` zones are per type, so its pipes and files stay together. The cure proposed
+    is zones as exact-layout classes of the heap ([ADR-0024](adr/0024-zones-as-exact-layout-classes.md),
+    awaiting a decision; its first stage is a prototype measured on the board).
     Still ahead of FreeBSD after `p5` (`poll1000` 176 us against 280), but `kevent.pipe1000`
     is level with it then;
   - `rw`/`sx` readers at four threads (1.8 to 2.0 of FreeBSD's) and `page.miss` (1.60);
