@@ -512,11 +512,16 @@ documents named; this section keeps what is done and what is open.
     in 4 KiB pages, about 20 first-level data-TLB refills a `write` on an A520 (none on the big
     cores), which cost most when the core's neighbour ran. Its segments are now 2 MiB-aligned
     and it is in 2 MiB leaves, as FreeBSD's: a 1-byte `write` to `/dev/null` on cpu2 went from
-    537 ns to about 475 (FreeBSD: 500 to 540) and `getpid` from 294 to 270. Left: some
-    processes still run that `write` at about 715 ns, in spells: the same instructions, no
-    cache misses, and 3 first-level instruction-TLB refills a call at about 185 cycles each,
-    though that TLB holds some 30 pages. Not explained; stale or duplicate translations are
-    the first suspect. The suites are not rerun yet;
+    537 ns to about 475 (FreeBSD: 500 to 540) and `getpid` from 294 to 270. The second: once a
+    process had run some 30 pages of code (the A520's first-level instruction TLB), every
+    system call took 2 to 4 instruction-TLB refills of about 230 cycles each, one of them at
+    EL0, until the thread next slept: that `write` at 715 to 800 ns. FreeBSD sets
+    `TCR_EL1.E0PD1` (FEAT_E0PD: an EL0 access to the kernel half faults with no lookup and no
+    walk) and is immune; now AbyssBSD sets it too and the state is gone (475 to 490 ns
+    whatever ran before). Running at EL2 with VHE, CnP, and no PAN were tried and change
+    nothing. Left: a program's own code layout still moves that `write` between 470 and
+    620 ns (one test program built `-O1`, `-O2`, `-O3`), where FreeBSD stays at about 510.
+    The suites are not rerun yet;
   - the 10-run gating set, `p2` on the mid and little cores, and `p7`;
   - the arm64 kernel's target makes no unaligned access, so an integer read out of a byte
     slice is a byte load each (it was 144 ns of every signal): a sweep of the hot paths that
