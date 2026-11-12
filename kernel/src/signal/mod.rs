@@ -585,6 +585,8 @@ pub(crate) struct FpuImage {
     len: usize,
 }
 
+const _: () = assert!(hal::fpu::ALIGN >= align_of::<u64>());
+
 impl FpuImage {
     fn layout(len: usize) -> core::alloc::Layout {
         core::alloc::Layout::from_size_align(len.max(16), hal::fpu::ALIGN)
@@ -616,6 +618,28 @@ impl FpuImage {
         Some(Self { ptr, len })
     }
 
+    /// An image of nothing: every byte zero, for a caller that sets all
+    /// of it (no registers are saved).
+    #[cfg_attr(target_arch = "x86_64", allow(dead_code))]
+    pub(super) fn zeroed() -> Option<Self> {
+        let len = hal::fpu::area_size();
+        let cached =
+            Self::cache_slot().swap(core::ptr::null_mut(), core::sync::atomic::Ordering::Acquire);
+        let ptr = match core::ptr::NonNull::new(cached) {
+            Some(p) => {
+                // SAFETY: a cached area of `len` bytes, now ours alone.
+                unsafe { core::ptr::write_bytes(p.as_ptr(), 0, len) };
+                p
+            }
+            None => {
+                // SAFETY: a nonzero size and a valid alignment.
+                let fresh = unsafe { alloc::alloc::alloc_zeroed(Self::layout(len)) };
+                core::ptr::NonNull::new(fresh)?
+            }
+        };
+        Some(Self { ptr, len })
+    }
+
     /// This CPU's one cached area: every signal delivered and every
     /// `sigreturn` takes an image and drops it, so they come from here
     /// rather than from the allocator. Atomic, so a thread that moves to
@@ -644,6 +668,23 @@ impl FpuImage {
     pub(crate) fn bytes(&self) -> &[u8] {
         // SAFETY: `len` initialized bytes, ours.
         unsafe { core::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
+    }
+
+    /// The image as 64-bit words, for moving registers a word at a time:
+    /// the kernel's arm64 target makes no unaligned access, so a word read
+    /// out of the byte view is eight byte loads.
+    #[cfg_attr(target_arch = "x86_64", allow(dead_code))]
+    pub(super) fn words(&self) -> &[u64] {
+        // SAFETY: the area is `len` initialized bytes, aligned to
+        // `hal::fpu::ALIGN` (at least a word's), ours.
+        unsafe { core::slice::from_raw_parts(self.ptr.as_ptr().cast::<u64>(), self.len / 8) }
+    }
+
+    /// [`Self::words`], to write.
+    #[cfg_attr(target_arch = "x86_64", allow(dead_code))]
+    pub(super) fn words_mut(&mut self) -> &mut [u64] {
+        // SAFETY: as `words`, borrowed mutably.
+        unsafe { core::slice::from_raw_parts_mut(self.ptr.as_ptr().cast::<u64>(), self.len / 8) }
     }
 
     pub(super) fn bytes_mut(&mut self) -> &mut [u8] {
@@ -787,10 +828,16 @@ pub(crate) fn user_info(sig: u32, from: i32, code: i32) -> Siginfo {
 /// current thread if it is `p`'s and does not block it, else the first
 /// that does not, else the first. `None` for a process with no threads.
 fn sigtd(p: &Process, sig: u32) -> Option<Arc<UserThread>> {
+    sigtd_masked(p, sig).map(|(t, _)| t)
+}
+
+/// [`sigtd`], and whether the thread it found has `sig` blocked (only
+/// the last resort, the first thread, has).
+fn sigtd_masked(p: &Process, sig: u32) -> Option<(Arc<UserThread>, bool)> {
     let mine = UserThread::current()
         .filter(|t| ptr::eq(t.process().as_ref(), p) && !t.sig.lock().mask.has(sig));
-    if mine.is_some() {
-        return mine;
+    if let Some(t) = mine {
+        return Some((t, false));
     }
     let mut pick = None;
     p.each_thread(|t| {
@@ -800,7 +847,10 @@ fn sigtd(p: &Process, sig: u32) -> Option<Arc<UserThread>> {
         pick = Some(Arc::clone(t));
         false
     });
-    pick.or_else(|| p.first_thread())
+    match pick {
+        Some(t) => Some((t, false)),
+        None => p.first_thread().map(|t| (t, true)),
+    }
 }
 
 /// Drops every pending `sig` sent to `p` or to any of its threads
@@ -959,14 +1009,16 @@ fn send_as(
         {
             (continued, None)
         } else {
+            // The thread to tell, and whether it has the signal blocked.
             let target = match to {
                 Some(t) => {
-                    t.sig.lock().queue.add_as(info, ptrace)?;
-                    Some(Arc::clone(t))
+                    let mut ts = t.sig.lock();
+                    ts.queue.add_as(info, ptrace)?;
+                    Some((Arc::clone(t), ts.mask.has(sig)))
                 }
                 None => {
                     st.queue.add_as(info, ptrace)?;
-                    sigtd(p, sig)
+                    sigtd_masked(p, sig)
                 }
             };
             // The target looks at its signals on its way out
@@ -974,8 +1026,8 @@ fn send_as(
             // to a process not traced (`tdsendsignal`).
             let stopped = p.job.lock().stopped != 0;
             let notify = target
-                .filter(|t| !t.sig.lock().mask.has(sig))
-                .map(|t| (t, !stopped || (sig == SIGKILL && !traced)));
+                .filter(|(_, masked)| !masked)
+                .map(|(t, _)| (t, !stopped || (sig == SIGKILL && !traced)));
             (continued, notify)
         }
     };
@@ -1084,7 +1136,7 @@ fn set_fastblock_pending(t: &UserThread) {
 /// What to do about the next deliverable signal.
 enum Next {
     /// Run its handler.
-    Handle(u32, Siginfo, Sigaction),
+    Handle(u32, Siginfo, Sigaction, (Sigset, StackT)),
     /// End the process (with the signal's `si_code`).
     Kill(u32, i32),
     /// Stop the process (done in place, after which delivery goes on).
@@ -1096,29 +1148,19 @@ enum Next {
 /// Takes the next signal that needs action from those sent to thread `t`
 /// or its process (the thread's first), dropping ignored ones on the way.
 /// `None` when nothing is deliverable.
-/// Whether a terminal's stop signal (`SIGTSTP`, `SIGTTIN`, `SIGTTOU`) is
-/// ready for `t` with its default action: the only case in which whether
-/// the process group is orphaned matters. FreeBSD's `issignal` looks at
-/// the group's `PGRP_ORPHANED` only there; finding it out here walks the
-/// process table, so it is not done for every other signal.
-fn tty_stop_ready(p: &Process, t: &UserThread) -> bool {
-    let st = p.signals.lock();
-    let ts = t.sig.lock();
-    let ready = st.pending().union(ts.queue.pending()).minus(ts.mask);
-    [SIGTSTP, SIGTTIN, SIGTTOU]
-        .into_iter()
-        .any(|s| ready.has(s) && st.action(s).sa_handler == SIG_DFL)
-}
-
 fn next(t: &UserThread) -> Option<Next> {
     let p = t.process();
     let fast = fastblocked(t);
-    let orphaned = tty_stop_ready(p, t) && crate::proc::pgrp_orphaned(p.pgid());
     let mut st = p.signals.lock();
     let mut ts = t.sig.lock();
     loop {
         let ready = st.pending().union(ts.queue.pending()).minus(ts.mask);
         let Some(sig) = ready.minus(fast).first() else {
+            // A `sigsuspend` whose signal reached no handler gets its
+            // mask back.
+            if let Some(m) = ts.saved_mask.take() {
+                ts.mask = m;
+            }
             if !ready.is_empty() {
                 drop(ts);
                 drop(st);
@@ -1141,13 +1183,29 @@ fn next(t: &UserThread) -> Option<Next> {
             continue;
         }
         if action.sa_handler != SIG_DFL {
-            return Some(Next::Handle(sig, info, action));
+            // With the mask `sigreturn` restores and the alternate stack,
+            // which `handle` needs: the lock is held here.
+            let state = (ts.saved_mask.take().unwrap_or(ts.mask), ts.altstack);
+            return Some(Next::Handle(sig, info, action, state));
         }
         let prop = prop(sig);
         if prop & STOP != 0 {
             // A traced process's stops are its debugger's to make.
-            if (prop & TTYSTOP != 0 && orphaned) || p.is_traced() {
+            if p.is_traced() {
                 continue;
+            }
+            // A terminal's stop does not stop an orphaned group. Whether
+            // it is one is looked up only here, the one case that asks
+            // (FreeBSD's `issignal` tests `PGRP_ORPHANED` there alone),
+            // and with the locks let go: it reads the process table.
+            if prop & TTYSTOP != 0 {
+                drop(ts);
+                drop(st);
+                if crate::proc::pgrp_orphaned(p.pgid()) {
+                    st = p.signals.lock();
+                    ts = t.sig.lock();
+                    continue;
+                }
             }
             return Some(Next::Stop(sig));
         }
@@ -1310,15 +1368,8 @@ fn deliver(s: &Sleepable, frame: &mut TrapFrame) -> bool {
             return false;
         };
         match next(&t) {
-            None => {
-                // A `sigsuspend` whose signal reached no handler gets its
-                // mask back.
-                let mut ts = t.sig.lock();
-                if let Some(m) = ts.saved_mask.take() {
-                    ts.mask = m;
-                }
-                return built;
-            }
+            // (`next` gave a `sigsuspend` its mask back.)
+            None => return built,
             // Nothing on this stack may keep a reference.
             Some(Next::Kill(sig, code)) => {
                 if crate::ktrace::point(abi::ktrace::KTR_PSIG) {
@@ -1333,8 +1384,8 @@ fn deliver(s: &Sleepable, frame: &mut TrapFrame) -> bool {
             }
             Some(Next::Stop(sig)) => stop(s, &t, sig),
             Some(Next::Trace(sig, info)) => crate::ptrace::signal_stop(s, &t, sig, info),
-            Some(Next::Handle(sig, info, action)) => {
-                if !handle(s, &t, frame, sig, &info, &action) {
+            Some(Next::Handle(sig, info, action, state)) => {
+                if !handle(s, &t, frame, sig, &info, &action, Some(state)) {
                     drop(t);
                     kill_self(s, SIGILL);
                 }
@@ -1425,12 +1476,15 @@ fn handle(
     sig: u32,
     info: &Siginfo,
     action: &Sigaction,
+    state: Option<(Sigset, StackT)>,
 ) -> bool {
     let p = t.process();
-    let (mask, altstack) = {
+    // The mask `sigreturn` restores and the alternate stack: `next`'s,
+    // taken under its lock, or looked up here (a trap's signal).
+    let (mask, altstack) = state.unwrap_or_else(|| {
         let mut ts = t.sig.lock();
         (ts.saved_mask.take().unwrap_or(ts.mask), ts.altstack)
-    };
+    });
     if crate::ktrace::point(abi::ktrace::KTR_PSIG) {
         crate::ktrace::psig(sig, action.sa_handler, &mask, info.si_code);
     }
@@ -1461,9 +1515,13 @@ fn handle(
         if action.sa_flags & SA_RESETHAND != 0 && sig != SIGILL && sig != SIGTRAP {
             st.actions[(sig - 1) as usize] = Sigaction::default();
         }
-        ts.mask.minus(old)
+        // Only what is pending for the process and newly blocked here
+        // can need another thread.
+        st.pending().intersect(ts.mask.minus(old))
     };
-    reschedule(p, blocked);
+    if !blocked.is_empty() {
+        reschedule(p, blocked);
+    }
     true
 }
 
@@ -1489,14 +1547,29 @@ pub(crate) fn recheck(t: &UserThread) {
 /// blocked), as `sigprocmask` and contexts do; returns the old one.
 /// Process-directed signals it now blocks go to another thread.
 pub(crate) fn set_mask(t: &UserThread, mask: Sigset) -> Sigset {
-    let (old, new) = {
+    // One look under the locks: the mask changes, and what follows from
+    // it (FreeBSD's `kern_sigprocmask` does both under the process lock).
+    let (old, blocked, deliverable) = {
+        let st = t.process().signals.lock();
         let mut ts = t.sig.lock();
         let old = ts.mask;
         ts.mask = mask.minus(cant_mask());
-        (old, ts.mask)
+        let pending = st.pending();
+        (
+            old,
+            // Pending for the process and newly blocked here: another
+            // thread's to take.
+            pending.intersect(ts.mask.minus(old)),
+            !pending.union(ts.queue.pending()).minus(ts.mask).is_empty(),
+        )
     };
-    reschedule(t.process(), new.minus(old));
-    recheck(t);
+    if !blocked.is_empty() {
+        reschedule(t.process(), blocked);
+    }
+    // As `recheck`: a deliverable one is looked at before user mode.
+    if deliverable {
+        sched::interrupt_current(AST_SIGNAL);
+    }
     old
 }
 
@@ -1532,7 +1605,6 @@ fn interrupted_by(s: &Sleepable) -> (Option<Errno>, bool) {
             }
         }
         let fast = fastblocked(&t);
-        let orphaned = tty_stop_ready(p, &t) && crate::proc::pgrp_orphaned(p.pgid());
         let mut st = p.signals.lock();
         let mut ts = t.sig.lock();
         let ready = st.pending().union(ts.queue.pending()).minus(ts.mask);
@@ -1568,7 +1640,10 @@ fn interrupted_by(s: &Sleepable) -> (Option<Errno>, bool) {
             }
             drop(ts);
             drop(st);
-            if !(prop(sig) & TTYSTOP != 0 && orphaned) && !p.is_traced() {
+            // An orphaned group's terminal stops are dropped (looked up
+            // here, with the locks let go).
+            let orphaned = prop(sig) & TTYSTOP != 0 && crate::proc::pgrp_orphaned(p.pgid());
+            if !orphaned && !p.is_traced() {
                 stop(s, &t, sig);
                 stopped = true;
             }

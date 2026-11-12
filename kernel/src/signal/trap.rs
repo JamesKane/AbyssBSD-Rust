@@ -231,7 +231,7 @@ pub(crate) fn trap(s: &Sleepable, report: &crate::arch::TrapReport, frame: &mut 
     let blocked = t.sig.lock().mask.has(fault.sig);
     // A traced process's go by the debugger (`trapsignal`).
     if action.sa_handler > SIG_IGN && !blocked && !p.is_traced() {
-        if !handle(s, &t, frame, fault.sig, &info, &action) {
+        if !handle(s, &t, frame, fault.sig, &info, &action, None) {
             drop(t);
             drop(p);
             super::kill_self(s, SIGILL);

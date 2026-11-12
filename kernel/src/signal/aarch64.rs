@@ -103,18 +103,18 @@ pub(super) fn set_io_access(_frame: &mut TrapFrame, _on: bool) {}
 
 /// The thread's registers as an `mcontext_t`.
 fn mcontext(f: &TrapFrame, fpu: &FpuImage) -> McontextArm {
+    // A word at a time (the target is little-endian, and the byte view
+    // would be read a byte at a time: `FpuImage::words`). Each V register
+    // is a Z register's low two words, `stride` words apart.
     let (sr, cr) = crate::arch::fpu::status_offsets();
-    let b = fpu.bytes();
-    // Each V register is a Z register's low 16 bytes, `stride` apart.
-    let stride = crate::arch::fpu::vreg_offset(1);
+    let w = fpu.words();
+    let stride = crate::arch::fpu::vreg_offset(1) / 8;
     let mut fp = Fpregs::default();
-    for (q, at) in fp.fp_q.iter_mut().zip(b.chunks(stride)) {
-        let half = |o: usize| u64::from_le_bytes(at[o..o + 8].try_into().unwrap_or_default());
-        *q = [half(0), half(8)];
+    for (q, at) in fp.fp_q.iter_mut().zip(w.chunks(stride)) {
+        *q = [at[0], at[1]];
     }
-    let word = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap_or_default());
-    fp.fp_sr = word(sr);
-    fp.fp_cr = word(cr);
+    fp.fp_sr = u32::try_from(w[sr / 8] & 0xffff_ffff).unwrap_or(0);
+    fp.fp_cr = u32::try_from(w[cr / 8] & 0xffff_ffff).unwrap_or(0);
     let mut gp = Gpregs::default();
     gp.gp_x.copy_from_slice(&f.x[..30]);
     gp.gp_lr = f.x[30];
@@ -202,41 +202,46 @@ pub(crate) fn prepare_context(frame: &mut TrapFrame, mc: &McontextArm) -> Result
     let sve = sve_context(mc.mc_ptr)?;
     let fp_valid = mc.mc_flags & MC_FP_VALID != 0;
     let fpu = if fp_valid || sve.is_some() {
-        let mut img = FpuImage::saved().ok_or(Errno::ENOMEM)?;
-        let (sr, cr) = crate::arch::fpu::status_offsets();
-        let b = img.bytes_mut();
-        let vl = crate::arch::fpu::vector_length();
-        let stride = crate::arch::fpu::vreg_offset(1);
-        // An SVE context alone leaves the V registers as they were (its
-        // low 128 bits do not set them, as FreeBSD's sync goes).
-        let mut keep = [[0u8; 16]; 32];
+        // An SVE context alone leaves the V registers and the status as
+        // they are (its low 128 bits do not set them, as FreeBSD's sync
+        // goes), so the registers are saved first; any other context sets
+        // everything, on an image of zeros (nothing to save).
         let restore = sve.is_some() && !fp_valid;
+        let mut img = if restore {
+            FpuImage::saved()
+        } else {
+            FpuImage::zeroed()
+        }
+        .ok_or(Errno::ENOMEM)?;
+        let (sr, cr) = crate::arch::fpu::status_offsets();
+        let vl = crate::arch::fpu::vector_length();
+        let stride = crate::arch::fpu::vreg_offset(1) / 8;
+        let mut keep = [[0u64; 2]; 32];
         if restore {
-            for (q, at) in keep.iter_mut().zip(b.chunks(stride)) {
-                q.copy_from_slice(&at[..16]);
+            for (q, at) in keep.iter_mut().zip(img.words().chunks(stride)) {
+                *q = [at[0], at[1]];
             }
         }
-        match &sve {
-            // The whole register file; FPSR and FPCR come from the V
-            // state below, as FreeBSD's sync does.
-            Some(at) => {
-                let regs = 32 * vl + 17 * vl / 8;
-                crate::uaccess::copy_in(&mut b[..regs], *at).map_err(|_| Errno::EINVAL)?;
+        // The whole register file, if the context has one; FPSR and FPCR
+        // come from the V state below, as FreeBSD's sync does. Without
+        // one, what SVE adds to the V registers is clear: the image is
+        // zeros.
+        if let Some(at) = &sve {
+            let regs = 32 * vl + 17 * vl / 8;
+            crate::uaccess::copy_in(&mut img.bytes_mut()[..regs], *at)
+                .map_err(|_| Errno::EINVAL)?;
+        }
+        // A word at a time (`FpuImage::words`).
+        let w = img.words_mut();
+        let v = if fp_valid { &mc.mc_fpregs.fp_q } else { &keep };
+        if fp_valid || restore {
+            for (q, at) in v.iter().zip(w.chunks_mut(stride)) {
+                at[..2].copy_from_slice(q);
             }
-            // Writing the V registers clears what SVE adds to them.
-            None => crate::arch::fpu::clear_sve_extra(b),
         }
         if fp_valid {
-            for (q, at) in mc.mc_fpregs.fp_q.iter().zip(b.chunks_mut(stride)) {
-                at[..8].copy_from_slice(&q[0].to_le_bytes());
-                at[8..16].copy_from_slice(&q[1].to_le_bytes());
-            }
-            b[sr..sr + 8].copy_from_slice(&u64::from(mc.mc_fpregs.fp_sr & FPSR_BITS).to_le_bytes());
-            b[cr..cr + 8].copy_from_slice(&u64::from(mc.mc_fpregs.fp_cr & FPCR_BITS).to_le_bytes());
-        } else if restore {
-            for (q, at) in keep.iter().zip(b.chunks_mut(stride)) {
-                at[..16].copy_from_slice(q);
-            }
+            w[sr / 8] = u64::from(mc.mc_fpregs.fp_sr & FPSR_BITS);
+            w[cr / 8] = u64::from(mc.mc_fpregs.fp_cr & FPCR_BITS);
         }
         Some(img)
     } else {

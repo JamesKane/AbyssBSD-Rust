@@ -291,6 +291,11 @@ impl UserThread {
 
     /// Interrupts the thread for `ast` work (see [`sched::Thread::interrupt`]).
     pub(crate) fn interrupt(&self, ast: u32) {
+        // The running thread (a signal to itself): no reference to take.
+        if Self::with_current(|c| core::ptr::eq(c, self)) == Some(true) {
+            sched::interrupt_current(ast);
+            return;
+        }
         if let Some(t) = self.sched() {
             t.interrupt(ast);
         }

@@ -696,6 +696,11 @@ impl Thread {
         // one of us sees the other.
         self.interrupted.store(true, Ordering::SeqCst);
         self.request_ast(ast);
+        // The running thread itself: not asleep on any queue, and on this
+        // CPU, so nothing to wake and nobody to kick.
+        if core::ptr::eq(alloc::sync::Arc::as_ptr(self), crate::current()) {
+            return;
+        }
         let woken = {
             let _abort = self.abort.lock();
             let q = self.wchan.load(Ordering::SeqCst);

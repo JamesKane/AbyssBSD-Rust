@@ -565,6 +565,15 @@ pub fn current_thread() -> Arc<Thread> {
     current_arc()
 }
 
+/// [`Thread::interrupt`] for the running thread, which needs no
+/// reference and wakes nothing: its next interruptible sleep ends at
+/// once, and `ast` is looked at on its way to user mode.
+pub fn interrupt_current(ast: u32) {
+    let t = current();
+    t.interrupted.store(true, Ordering::SeqCst);
+    t.request_ast(ast);
+}
+
 /// A new reference to the running thread.
 pub(crate) fn current_arc() -> Arc<Thread> {
     let p = ptr::from_ref(current());
