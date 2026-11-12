@@ -923,6 +923,16 @@ fn map_segment(
                 .map_err(space_error)?;
         }
     }
+    // What of the file is resident, mapped now (`MAP_PREFAULT`, as
+    // FreeBSD's loader maps segments): the program does not fault its
+    // text in a few pages at a time, and its code is synced as one batch.
+    if seg.file_size > 0 {
+        space.prefault_range(
+            s,
+            VirtAddr::new(start)..VirtAddr::new(up(file_end)),
+            usize::MAX,
+        );
+    }
     Ok(())
 }
 

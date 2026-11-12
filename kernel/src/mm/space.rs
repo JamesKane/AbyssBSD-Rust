@@ -145,6 +145,41 @@ pub(crate) fn page_ops() -> &'static dyn PageOps {
 }
 
 /// The page-table attributes for a mapping with rights `prot`.
+/// Makes the code pages among `pages`, about to be mapped in `map`'s space,
+/// visible to instruction fetch (aarch64; x86 keeps the caches coherent),
+/// as one batch, which past 32 KiB invalidates the instruction cache once
+/// rather than line by line. Called with the map's lock held and not the
+/// tables' (a spin lock, which masks interrupts): the map's lock keeps the
+/// mappings as they were looked at. A file's page synced since it last
+/// changed is not synced again (ARCHITECTURE.md §5.2): every exec maps the
+/// same text.
+#[cfg_attr(not(target_arch = "aarch64"), allow(unused_variables))]
+fn sync_code<'a>(map: &VmMap, pages: impl Iterator<Item = &'a fault::Resolved>) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        let code =
+            |x: &fault::Resolved| x.prot.contains(Prot::EXEC) && x.attr == MemAttr::WriteBack;
+        let mut kva = alloc::vec::Vec::new();
+        let mut synced = alloc::vec::Vec::new();
+        for x in pages.filter(|x| code(x)) {
+            let origin = map
+                .entry(x.page)
+                .and_then(|e| e.object().and_then(|o| o.code_page(e.index_of(x.page))));
+            if let Some((object, index)) = origin {
+                if object.icache_synced(index, x.pfn) {
+                    continue;
+                }
+                synced.push((object, index, x.pfn));
+            }
+            kva.push(KernelPages::page(x.pfn) as usize);
+        }
+        arch::cache::sync_icache_ranges(&kva, PAGE_BYTES);
+        for (object, index, pfn) in synced {
+            object.set_icache_synced(index, pfn);
+        }
+    }
+}
+
 const fn attrs(prot: Prot, attr: MemAttr) -> Attrs {
     Attrs {
         write: prot.contains(Prot::WRITE),
@@ -1035,37 +1070,9 @@ impl AddressSpace {
                 .filter(|n| tables.translate(&mut Frames, n.page).is_none())
                 .collect()
         };
-        // Code reaches instruction fetch only once synced (aarch64; x86
-        // keeps the caches coherent): the faulting page and its new
-        // neighbors in one batch, which past 32 KiB invalidates the
-        // instruction cache once rather than line by line. Outside the
-        // tables' spin lock, which masks interrupts: the map's lock, held
-        // throughout, keeps the space's mappings as they were looked at.
-        // A file's page synced since it last changed is not synced again
-        // (ARCHITECTURE.md §5.2): every exec maps the same text.
-        #[cfg(target_arch = "aarch64")]
-        {
-            let code =
-                |x: &fault::Resolved| x.prot.contains(Prot::EXEC) && x.attr == MemAttr::WriteBack;
-            let mut pages = alloc::vec::Vec::new();
-            let mut synced = alloc::vec::Vec::new();
-            for x in core::iter::once(&r).chain(near.iter()).filter(|x| code(x)) {
-                let origin = map
-                    .entry(x.page)
-                    .and_then(|e| e.object().and_then(|o| o.code_page(e.index_of(x.page))));
-                if let Some((object, index)) = origin {
-                    if object.icache_synced(index, x.pfn) {
-                        continue;
-                    }
-                    synced.push((object, index, x.pfn));
-                }
-                pages.push(KernelPages::page(x.pfn) as usize);
-            }
-            arch::cache::sync_icache_ranges(&pages, PAGE_BYTES);
-            for (object, index, pfn) in synced {
-                object.set_icache_synced(index, pfn);
-            }
-        }
+        // Code reaches instruction fetch only once synced: the faulting
+        // page and its new neighbors in one batch.
+        sync_code(&map, core::iter::once(&r).chain(near.iter()));
         let mut tables = self.tables.lock();
         let replaced = tables
             .set(&mut Frames, r.page, r.pfn.addr(), attrs(r.prot, r.attr))
@@ -1079,6 +1086,36 @@ impl AddressSpace {
             self.flush(r.page, PAGE_SIZE);
         }
         Ok(())
+    }
+
+    /// Maps the resident pages of `range`, at most `limit`, read-only where
+    /// nothing is mapped yet (FreeBSD's `vm_map_pmap_enter`): the ELF
+    /// loader's segments all at once (`MAP_PREFAULT`), so a new program does
+    /// not fault its text in a few pages at a time, and its code is synced
+    /// as one batch. New entries need no flush.
+    pub(crate) fn prefault_range(
+        &self,
+        s: &Sleepable,
+        range: core::ops::Range<VirtAddr>,
+        limit: usize,
+    ) {
+        let map = self.map.lock(s);
+        let run = fault::resident_run(&map, range.start, range.end, limit);
+        if run.is_empty() {
+            return;
+        }
+        let run: alloc::vec::Vec<_> = {
+            let tables = self.tables.lock();
+            run.into_iter()
+                .filter(|n| tables.translate(&mut Frames, n.page).is_none())
+                .collect()
+        };
+        sync_code(&map, run.iter());
+        let mut tables = self.tables.lock();
+        for n in run {
+            // Out of table memory: the page faults in later instead.
+            let _ = tables.set(&mut Frames, n.page, n.pfn.addr(), attrs(n.prot, n.attr));
+        }
     }
 
     /// Unmaps everything (at exit); the empty space stays loaded until its

@@ -229,3 +229,43 @@ pub fn prefault(map: &VmMap, va: VirtAddr, around: u64) -> alloc::vec::Vec<Resol
     }
     out
 }
+
+/// The pages of `start..end` (page-aligned, within one entry) that some
+/// object of the entry's chain already holds, at most `limit` of them in
+/// address order, each to be mapped read-only as [`prefault`]'s are
+/// (FreeBSD's `vm_map_pmap_enter`, for `MAP_PREFAULT` and
+/// `MAP_PREFAULT_PARTIAL`). Nothing for a device's mapping: its pages are
+/// the device's, mapped as faults ask.
+#[must_use]
+pub fn resident_run(
+    map: &VmMap,
+    start: VirtAddr,
+    end: VirtAddr,
+    limit: usize,
+) -> alloc::vec::Vec<Resolved> {
+    let mut out = alloc::vec::Vec::new();
+    let Some(entry) = map.entry(start) else {
+        return out;
+    };
+    let Some(object) = &entry.object else {
+        return out;
+    };
+    let prot = entry.prot.without(Prot::WRITE);
+    if prot == Prot::NONE || object.is_device() {
+        return out;
+    }
+    let end = end.min(entry.end());
+    let mut addr = start.align_down(PAGE_SIZE);
+    while addr < end && out.len() < limit {
+        if let Some(pfn) = object.resident_page(entry.index_of(addr)) {
+            out.push(Resolved {
+                page: addr,
+                pfn,
+                prot,
+                attr: object.memattr(),
+            });
+        }
+        addr = VirtAddr::new(addr.get() + PAGE_SIZE);
+    }
+    out
+}
