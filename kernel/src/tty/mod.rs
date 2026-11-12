@@ -1228,15 +1228,16 @@ impl Tty {
                         break 'chunks;
                     }
                     taken += st.d.write(&buf[taken..n]);
-                    if taken < n {
-                        // The high watermark: the device may drain at once.
-                        st.d.set_hiwat_out();
-                    }
-                    self.outwakeup(&mut st);
-                    self.mirror(&st);
                     if taken == n {
+                        // The device hears once, at the end of the write
+                        // (`ttydisc_write`'s `done`), not for each chunk.
+                        self.mirror(&st);
                         break;
                     }
+                    // The high watermark: the device may drain at once.
+                    st.d.set_hiwat_out();
+                    self.outwakeup(&mut st);
+                    self.mirror(&st);
                     if nonblock {
                         done += taken;
                         result = Err(Errno::EAGAIN);
@@ -1263,6 +1264,14 @@ impl Tty {
                 }
             }
             done += n;
+        }
+        // `done:`: the device is told what was queued, unless it is gone.
+        {
+            let mut st = self.st.lock(s);
+            if !st.gone {
+                self.outwakeup(&mut st);
+                self.mirror(&st);
+            }
         }
         match result {
             Err(e) if done == 0 => Err(e),
