@@ -497,12 +497,20 @@ documents named; this section keeps what is done and what is open.
 **Open:**
 - **Performance** (the exit's gate: every suite within 2% of FreeBSD on the board, per core
   class, P7's over `rge`). The first runs (`tests/perf/board/results/`) found arm64 well short;
-  the gaps closed since are in git (`fc2c7d0` to `3c85e15`). On the big cores, one run each, the
-  userland suites are at or ahead of FreeBSD but for `thr.sem.pingpong` (1.10), `thr.create`
-  (1.06), the unix socket ping-pongs (1.02 to 1.04), `sig.deliver` (1.02), and contended
-  `thr.mutex` at two and eight threads (1.2 to 1.4, noisy); in the kernel, `ctxsw.same` (1.27),
-  `ipi.rtt` (1.2), `callout.armcancel` (1.18), and `ctxsw.cross` (1.02 to 1.14 from run to run).
+  the gaps closed since are in git (`fc2c7d0` to `3e968c5`). Three runs a side of `p4`, `p5`,
+  and `p6` at `c03b69d` (`tests/perf/board/results/2026-11-12-c03b69d.txt`): every component
+  passes in every class (big, mid, little, all), overall 0.64 to 0.72 of FreeBSD's time, the
+  closest `sig` (1.018) and, on the little cores, `syscall` (0.993). Benchmarks behind: `thr.create`
+  (1.10 to 1.12 everywhere), `thr.sem.pingpong` (1.11), the unix socket ping-pongs (1.06 to
+  1.10), contended `thr.mutex` at two and eight threads (1.1 to 1.4), `fs.ufs.fsx` (1.05); on the
+  little cores `io.null.write` (1.68), `kevent.pipe1` (1.6), `unix.rights` (1.49),
+  `tmpfs.open_close` (1.36), where `getpid` is level. In the kernel (`p2`, big cores, one run):
+  `ctxsw.same` (1.27), `ipi.rtt` (1.2), `callout.armcancel` (1.18), `ctxsw.cross` (1.02 to 1.14).
   To do:
+  - the little cores: short system calls that do more than `getpid` take 1.4 to 1.7 of FreeBSD's
+    time there and 0.75 on the big cores. Not looked at; the byte loads below are the first
+    suspect on an in-order core;
+  - the 10-run gating set, `p2` on the mid and little cores, and `p7`;
   - the arm64 kernel's target makes no unaligned access, so an integer read out of a byte
     slice is a byte load each (it was 144 ns of every signal): a sweep of the hot paths that
     parse bytes (packet headers, on-disk structures) for the same;
