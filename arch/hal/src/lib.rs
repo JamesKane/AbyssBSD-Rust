@@ -164,6 +164,81 @@ pub unsafe fn set_cpu_local(p: *mut ()) {
     let _ = p;
 }
 
+/// A pause between looks at something another CPU is about to change
+/// (FreeBSD's `cpu_spinwait`): `PAUSE` on amd64, `YIELD` on arm64. Rust's
+/// own hint is `ISB` on arm64, many times longer, which stretched every
+/// lock's backoff and the idle loop's spin past FreeBSD's.
+#[inline(always)]
+pub fn spin_hint() {
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: `YIELD` is a hint with no effect on memory or registers.
+    unsafe {
+        core::arch::asm!("yield", options(nomem, nostack, preserves_flags));
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    core::hint::spin_loop();
+}
+
+/// Atomics for contended words.
+///
+/// The arm64 kernel is built for ARMv8.0, whose atomics are
+/// exclusive-load and exclusive-store loops: fastest alone, but two CPUs
+/// after one word keep failing each other's stores. Where the CPUs have
+/// the ARMv8.1 atomics (FEAT_LSE), [`cas`] uses the single compare-and-swap
+/// instruction instead, as FreeBSD selects its atomics at boot. A lock's
+/// first try stays the plain one; its retries, which only run when the
+/// word is contended, come here.
+pub mod atomic {
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// Whether every CPU has FEAT_LSE.
+    static LSE: AtomicBool = AtomicBool::new(false);
+
+    /// Records whether this CPU has FEAT_LSE: used only if the boot CPU
+    /// has it and no later CPU lacks it. Called by the architecture as
+    /// each CPU starts, the boot CPU first.
+    pub fn cpu_has_lse(boot: bool, has: bool) {
+        if boot || !has {
+            LSE.store(has, Ordering::Relaxed);
+        }
+    }
+
+    /// Whether [`cas`] uses the ARMv8.1 instruction.
+    #[must_use]
+    pub fn lse() -> bool {
+        LSE.load(Ordering::Relaxed)
+    }
+
+    /// Compare-and-swap for a retry on a contended word: `new` if it holds
+    /// `old`, and the value found either way, with acquire and release
+    /// ordering. Never fails spuriously.
+    ///
+    /// # Errors
+    ///
+    /// The value found, when it was not `old`.
+    #[inline]
+    pub fn cas(a: &AtomicUsize, old: usize, new: usize) -> Result<usize, usize> {
+        #[cfg(target_arch = "aarch64")]
+        if LSE.load(Ordering::Relaxed) {
+            let mut found = old;
+            // SAFETY: `CASAL` on the atomic's own word, which is valid and
+            // aligned; every CPU has the instruction (`LSE`).
+            unsafe {
+                core::arch::asm!(
+                    ".arch_extension lse",
+                    "casal {found}, {new}, [{p}]",
+                    found = inout(reg) found,
+                    new = in(reg) new,
+                    p = in(reg) a.as_ptr(),
+                    options(nostack, preserves_flags),
+                );
+            }
+            return if found == old { Ok(old) } else { Err(found) };
+        }
+        a.compare_exchange(old, new, Ordering::AcqRel, Ordering::Acquire)
+    }
+}
+
 /// What the architecture keeps per thread, at the start of every thread
 /// [`set_current_thread`] names (the scheduler's thread puts it first):
 /// arm64 reaches it from `SP_EL0` in one load, where per-CPU data takes

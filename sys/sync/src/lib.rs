@@ -68,7 +68,7 @@ impl Spins {
 
     #[inline(always)]
     fn spin<L>(&mut self, lock: &L) {
-        core::hint::spin_loop();
+        hal::spin_hint();
         self.n = self.n.wrapping_add(1);
         if self.n.is_multiple_of(STUCK_EVERY) {
             stuck(core::ptr::from_ref(lock) as usize, &mut self.since);

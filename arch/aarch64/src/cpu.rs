@@ -209,6 +209,13 @@ pub(crate) unsafe fn init_boot_cpu() {
     }
 }
 
+/// Tells the HAL whether this CPU has the ARMv8.1 atomics
+/// (`ID_AA64ISAR0_EL1.Atomic`, bits 23:20, 2 or more).
+pub(crate) fn report_lse(boot: bool) {
+    let has = (read_sysreg!("id_aa64isar0_el1") >> 20) & 0xf >= 2;
+    hal::atomic::cpu_has_lse(boot, has);
+}
+
 /// One CPU's `TPIDR_EL1` block. The boot CPU's is static; the kernel
 /// allocates one per other CPU. All-zero memory is a valid unused block.
 #[derive(Debug)]

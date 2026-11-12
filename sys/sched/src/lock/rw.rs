@@ -92,13 +92,10 @@ impl RwCore {
     /// Takes a read hold if readers may enter now.
     fn try_read(&self) -> bool {
         let mut w = self.word.load(Ordering::Relaxed);
+        // Only after the fast path lost the word to someone: the
+        // contended compare-and-swap (`hal::atomic::cas`).
         while w & (READ | WRITE_WAITERS) == READ {
-            match self.word.compare_exchange_weak(
-                w,
-                w + ONE_READER,
-                Ordering::Acquire,
-                Ordering::Relaxed,
-            ) {
+            match hal::atomic::cas(&self.word, w, w + ONE_READER) {
                 Ok(_) => return true,
                 Err(v) => w = v,
             }
@@ -119,7 +116,7 @@ impl RwCore {
             if w & READ == 0 && Self::writer_running(w) {
                 note.spins += 1;
                 for _ in 0..backoff {
-                    core::hint::spin_loop();
+                    hal::spin_hint();
                 }
                 backoff = (backoff * 2).min(max_backoff);
                 continue;
@@ -168,6 +165,7 @@ impl RwCore {
     fn read_unlock(&self) {
         witness::release(ptr::from_ref(self).addr());
         let mut w = self.word.load(Ordering::Relaxed);
+        let mut first = true;
         loop {
             // The last reader out wakes sleepers; others just leave.
             let last_with_waiters = readers(w) == 1 && w & (READ_WAITERS | WRITE_WAITERS) != 0;
@@ -175,16 +173,24 @@ impl RwCore {
                 self.release_and_wake(w);
                 return;
             }
-            // Release: our reads happen before a writer's writes.
-            match self.word.compare_exchange_weak(
-                w,
-                w - ONE_READER,
-                Ordering::Release,
-                Ordering::Relaxed,
-            ) {
+            // Release: our reads happen before a writer's writes. The
+            // first try is the plain one; a retry means other readers
+            // are at the word.
+            let r = if first {
+                self.word.compare_exchange_weak(
+                    w,
+                    w - ONE_READER,
+                    Ordering::Release,
+                    Ordering::Relaxed,
+                )
+            } else {
+                hal::atomic::cas(&self.word, w, w - ONE_READER)
+            };
+            match r {
                 Ok(_) => return,
                 Err(v) => w = v,
             }
+            first = false;
         }
     }
 
@@ -207,12 +213,7 @@ impl RwCore {
         let mut w = self.word.load(Ordering::Relaxed);
         while w & READ != 0 && readers(w) == 0 {
             let keep = w & (READ_WAITERS | WRITE_WAITERS);
-            match self.word.compare_exchange_weak(
-                w,
-                me | keep,
-                Ordering::Acquire,
-                Ordering::Relaxed,
-            ) {
+            match hal::atomic::cas(&self.word, w, me | keep) {
                 Ok(_) => return true,
                 Err(v) => w = v,
             }
@@ -240,7 +241,7 @@ impl RwCore {
             if spin {
                 note.spins += 1;
                 for _ in 0..backoff {
-                    core::hint::spin_loop();
+                    hal::spin_hint();
                 }
                 backoff = (backoff * 2).min(max_backoff);
                 continue;

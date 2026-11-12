@@ -830,7 +830,7 @@ pub(crate) fn make_runnable(t: Arc<Thread>) {
     // each other's outgoing threads can form. That CPU is mid-switch with
     // interrupts masked and waits for nothing, so this spin is short.
     while t.on_cpu.load(Ordering::Acquire) {
-        core::hint::spin_loop();
+        hal::spin_hint();
     }
     let mut inner = t.inner.lock();
     if !matches!(inner.state, State::Sleeping | State::New) {
@@ -1162,7 +1162,7 @@ pub(crate) fn switch_away() {
     // never waits in practice; the Acquire pairs with the Release in
     // `finish_switch`, ordering the saved context before we load it.
     while next.on_cpu.load(Ordering::Acquire) {
-        core::hint::spin_loop();
+        hal::spin_hint();
     }
     next.on_cpu.store(true, Ordering::Relaxed);
     {
@@ -1607,7 +1607,7 @@ fn idle_loop() {
                 if c.need_resched.load(Ordering::Relaxed) {
                     break;
                 }
-                core::hint::spin_loop();
+                hal::spin_hint();
             }
         }
         // Only on the way to a halt: with a thread already queued (the

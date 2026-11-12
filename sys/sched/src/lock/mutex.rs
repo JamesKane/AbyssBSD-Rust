@@ -85,11 +85,8 @@ impl MutexCore {
         loop {
             let word = self.owner.load(Ordering::Relaxed);
             if word == 0 {
-                if self
-                    .owner
-                    .compare_exchange_weak(0, me_word, Ordering::Acquire, Ordering::Relaxed)
-                    .is_ok()
-                {
+                // Contended (the fast path lost): `hal::atomic::cas`.
+                if hal::atomic::cas(&self.owner, 0, me_word).is_ok() {
                     return;
                 }
                 continue;
@@ -103,7 +100,7 @@ impl MutexCore {
             if running {
                 note.spins += 1;
                 for _ in 0..backoff {
-                    core::hint::spin_loop();
+                    hal::spin_hint();
                 }
                 backoff = (backoff * 2).min(max_backoff);
                 continue;

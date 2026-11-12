@@ -247,6 +247,7 @@ extern "C" fn start(boot_info: u64, from_el2: u64) -> ! {
     // SAFETY: we are the boot CPU, running once.
     unsafe {
         crate::cpu::init_boot_cpu();
+        crate::cpu::report_lse(true);
         crate::trap::init_boot_cpu();
     }
     // SAFETY: defined by the kernel through `kernel_hooks!`.

@@ -61,6 +61,7 @@ pub(crate) extern "C" fn ap_start(start: u64) -> ! {
         let s = &*(start as *const ApStart);
         crate::mmu::disable_lower_half();
         crate::cpu::init_cpu(&mut *s.block, s.cpu);
+        crate::cpu::report_lse(false);
         crate::trap::init_boot_cpu();
         crate::abyss_ap_main(s.arg)
     }
