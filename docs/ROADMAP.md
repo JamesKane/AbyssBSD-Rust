@@ -498,19 +498,23 @@ documents named; this section keeps what is done and what is open.
 - **Performance** (the exit's gate: every suite within 2% of FreeBSD on the board, per core
   class, P7's over `rge`). The first runs (`tests/perf/board/results/`) found arm64 well short;
   the gaps closed since are in git (`fc2c7d0` to `3c85e15`). On the big cores, one run each, the
-  userland suites are at or ahead of FreeBSD but for the unix socket and semaphore ping-pongs
-  (1.07 to 1.09), `thr.create` (1.09), and `sig.deliver` (1.02); in the kernel, `ctxsw.same`
-  (1.29) and `ctxsw.cross` (1.14). To do:
+  userland suites are at or ahead of FreeBSD but for `thr.sem.pingpong` (1.10), `thr.create`
+  (1.06), the unix socket ping-pongs (1.02 to 1.04), `sig.deliver` (1.02), and contended
+  `thr.mutex` at two and eight threads (1.2 to 1.4, noisy); in the kernel, `ctxsw.same` (1.27),
+  `ipi.rtt` (1.2), `callout.armcancel` (1.18), and `ctxsw.cross` (1.02 to 1.14 from run to run).
+  To do:
   - the arm64 kernel's target makes no unaligned access, so an integer read out of a byte
     slice is a byte load each (it was 144 ns of every signal): a sweep of the hot paths that
     parse bytes (packet headers, on-disk structures) for the same;
   - after `p5` has run in the same boot, `kevent.pipe1000` is 7% slower until a reboot
     (`poll1000` and `select1000` were a quarter slower and are no longer: ADR-0024's zones, and
     the pipe's `Notify` in the pipe). Each knote's filter is still its own allocation;
-  - `rw`/`sx` readers at four threads (1.8 to 2.0 of FreeBSD's) and `page.miss` (1.60);
-  - the contended writer locks (`mtx`, `rw.wr`, `sx.wr` at t2 and t4) read a flat 16.5 ns against
-    FreeBSD's 47 to 70: probably one thread getting the lock back unfairly, to settle before
-    believing;
+  - `rw`/`sx` readers at four threads are 1.24 to 1.3 of FreeBSD's (they were 1.8 to 2.0): a
+    reader's first try is the ARMv8.0 compare-and-swap, which fails with others at the word. A
+    kernel built all LSE is level there (65 ns) and 5 ns slower on every uncontended pair
+    (`tests/perf/board/results/2026-11-12-p2-big-lse.txt`); and `page.miss` (1.6);
+  - the contended writer locks (`mtx`, `rw.wr`, `sx.wr` at t2 and t4) read 18 to 23 ns against
+    FreeBSD's 47 to 70, with the same backoff and now the same spin hint: not explained;
   - `p7` over `rge`; the SMMU's stage 6; then the 10-run gate on every class.
 - **The board does not always come back from a reset** (three times in some forty: after the
   first kyua run, from FreeBSD, and from AbyssBSD on 2026-11-12): the system shuts down, issues
