@@ -2,11 +2,14 @@
 //! Contended acquisitions of sleepable locks, by class: how often a lock
 //! was found held, how many backoff rounds were spun on it, and how often
 //! its taker slept (FreeBSD's `LOCK_PROFILING`, much reduced). Only the
-//! slow paths count, so an uncontended lock pays nothing; the profiler
-//! reports and clears the counts per benchmark.
+//! slow paths count, and only while the profiler asks ([`enable`]): the
+//! counts are one table every CPU writes, and a contended lock that also
+//! contends for the table is twice as slow (FreeBSD compiles its
+//! profiling out). The profiler reports and clears the counts per
+//! benchmark.
 
 use core::ptr;
-use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 use super::witness::LockClass;
 
@@ -29,6 +32,14 @@ static SLOTS_IN_USE: [Slot; SLOTS] = [const {
     }
 }; SLOTS];
 
+/// Whether contention is counted.
+static ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Starts counting (the profiler, `abyss.prof`).
+pub fn enable() {
+    ENABLED.store(true, Ordering::Relaxed);
+}
+
 /// One contended acquisition under way: counted as it ends.
 pub(super) struct Note {
     class: &'static LockClass,
@@ -48,6 +59,9 @@ impl Note {
 
 impl Drop for Note {
     fn drop(&mut self) {
+        if !ENABLED.load(Ordering::Relaxed) {
+            return;
+        }
         let want = ptr::from_ref(self.class).cast_mut();
         for s in &SLOTS_IN_USE {
             let found = match s.class.compare_exchange(

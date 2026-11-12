@@ -114,6 +114,7 @@ pub(crate) fn start_cpu() {
         if let Some(t) = crate::boot::value("abyss.prof.thread") {
             let _ = ONLY_THREAD.set(t);
         }
+        sched::lock::contention::enable();
         storage::disk::set_wait_hook(storage::disk::WaitHook {
             now: crate::time::now_ns,
             waited: io_waited,

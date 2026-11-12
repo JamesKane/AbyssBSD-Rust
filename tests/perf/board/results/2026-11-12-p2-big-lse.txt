@@ -1,0 +1,32 @@
+p2 on the Orange Pi 6 Plus, big cores (cpus 2,0,1,10,11), one run each, 2026-11-12
+AbyssBSD at 775bb98 plus the contention-count change; the same built with -C target-feature=+lse (an experiment, not committed); FreeBSD 16.0-CURRENT f12c9f4ee6 GENERIC-HMP-IOMMU-NODEBUG
+
+benchmark                AbyssBSD   with LSE    FreeBSD
+callout.armcancel            67.8       62.3       55.6
+callout.latency.p50         440.0      410.0     1260.0
+callout.latency.p99         830.0      850.0     1920.0
+ctxsw.cross                1035.8     1050.9      973.1
+ctxsw.same                  370.0      342.5      290.5
+ipi.rtt                     867.5      893.0      759.2
+malloc.hit.t1                41.3       41.4       41.0
+malloc.miss.t1               42.4       42.1       41.5
+mtx.t1                       16.1       21.6       23.5
+mtx.t2                       16.1       34.8       51.3
+mtx.t4                       16.6       25.3       46.7
+page.hit.t1                  36.8       36.9       49.1
+page.miss.t1                 83.0       84.1       52.3
+rw.rd.t1                     17.1       22.1       24.4
+rw.rd.t2                     54.7       35.2       55.9
+rw.rd.t4                    121.1       64.6       65.8
+rw.wr.t1                     16.4       21.5       23.6
+rw.wr.t2                     16.5       27.3       60.4
+rw.wr.t4                     16.9       22.5       69.7
+sx.rd.t1                     17.1       22.2       24.4
+sx.rd.t2                     54.7       48.2       54.9
+sx.rd.t4                    117.2       67.8       65.7
+sx.wr.t1                     16.5       21.6       23.7
+sx.wr.t2                     16.5       23.0       61.3
+sx.wr.t4                     16.9       22.1       70.6
+tlb.shootdown               335.8      335.2      321.7
+wakeup.latency.p50         1080.0     1010.0     1520.0
+wakeup.latency.p99         1330.0     1180.0     2550.0
