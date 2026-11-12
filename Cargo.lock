@@ -618,6 +618,7 @@ dependencies = [
  "cam",
  "cd9660",
  "clock",
+ "cpufreq",
  "demangle",
  "devtree",
  "driver-table",

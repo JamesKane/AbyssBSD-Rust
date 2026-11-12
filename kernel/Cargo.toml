@@ -41,6 +41,7 @@ kaio = { path = "../sys/aio", package = "aio" }
 devtree = { path = "../lib/devtree" }
 pci = { path = "../sys/pci" }
 acpi = { path = "../sys/acpi" }
+cpufreq = { path = "../sys/cpufreq" }
 acpi-platform = { path = "../lib/acpi-platform" }
 aml = { path = "../lib/aml" }
 driver-table = { path = "table" }

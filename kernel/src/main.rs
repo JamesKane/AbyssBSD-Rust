@@ -226,6 +226,13 @@ fn kmain(boot_info: PhysAddr) -> ! {
         if let Some(suite) = boot::value("abyss.bench") {
             let ran = bench::run(&s, suite);
             qemu::exit(ran);
+            // A board that cannot be powered on again from afar resets
+            // instead (`abyss.bench.reboot`): its default boot follows.
+            if boot::flag("abyss.bench.reboot") {
+                fs::shutdown(&s);
+                devices::shutdown(&s);
+                power::reset()
+            }
             power_off(&s)
         }
         if boot::flag("abyss.halt") {

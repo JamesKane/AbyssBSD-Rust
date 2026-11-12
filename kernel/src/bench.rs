@@ -132,6 +132,12 @@ pub(crate) fn run(s: &Sleepable, suite: &str) -> bool {
         kprintln!("bench: needs {CPUS} CPUs, have {cpus}");
         return false;
     }
+    // Every CPU at its highest frequency, as the FreeBSD side is held
+    // (tests/perf/board/perf-run.sh): nothing has set it this early in
+    // boot. A request for the most gives each cluster its own top level.
+    if cpufreq::set_all(s, 1_000_000, cpufreq::PRIO_USER).is_ok() {
+        kprintln!("bench: CPU frequencies at their highest");
+    }
     if !sched::lock::witness::ENABLED {
         kprintln!("kbench begin {suite} cpus={cpus}");
     } else {
@@ -140,7 +146,7 @@ pub(crate) fn run(s: &Sleepable, suite: &str) -> bool {
     }
     let t = sched::Builder::new("bench")
         .priority(Priority::KERNEL)
-        .bind(CpuId(0))
+        .bind(cpu(0))
         .spawn(body)
         .expect("bench: spawn coordinator");
     t.join(s);
@@ -178,9 +184,38 @@ impl Run {
     }
 }
 
+/// The boot option `abyss.bench.cpus=c,w1,w2,...` (tests/perf/README.md,
+/// "Settings": one core class at a time on a machine that has several):
+/// the coordinator's CPU, then the workers'. None without one, or with
+/// fewer than two CPUs, or a CPU that is not a number.
+fn cpu_list() -> Option<Vec<u32>> {
+    let list = crate::boot::value("abyss.bench.cpus")?;
+    let ids: Option<Vec<u32>> = list.split(',').map(|c| c.trim().parse().ok()).collect();
+    ids.filter(|ids| ids.len() >= 2)
+}
+
+/// The suite's CPU `i`: with `abyss.bench.cpus`, its first entry for 0,
+/// else entry `i - 1` of the workers' (modulo their number); CPU `i`
+/// itself without.
+fn cpu(i: u32) -> CpuId {
+    match cpu_list() {
+        None => CpuId(i),
+        Some(ids) if i == 0 => CpuId(ids[0]),
+        Some(ids) => CpuId(ids[1 + (i as usize - 1) % (ids.len() - 1)]),
+    }
+}
+
+/// Whether `workers` threads each have a CPU of their own: a benchmark
+/// with more workers than `abyss.bench.cpus` has CPUs for them is left out
+/// on both sides (two kernel-priority threads on one CPU would measure
+/// FreeBSD's not time-slicing them).
+fn fits(workers: usize) -> bool {
+    cpu_list().is_none_or(|ids| workers < ids.len())
+}
+
 /// Worker `i`'s CPU in the default placement.
 fn default_cpu(i: usize) -> CpuId {
-    CpuId(u32::try_from((i + 1) % CPUS).unwrap_or(0))
+    cpu(u32::try_from((i + 1) % CPUS).unwrap_or(0))
 }
 
 /// Starts one worker per entry of `cpus`, each running `body(run, index)`,
@@ -296,6 +331,9 @@ fn throughput_with<S: 'static>(
     init: fn() -> S,
     op: impl Fn(&mut S, &Sleepable) -> u64 + Send + Sync + Clone + 'static,
 ) {
+    if !fits(workers) {
+        return;
+    }
     let cpus: Vec<CpuId> = (0..workers).map(default_cpu).collect();
     report_median(name, || {
         let run = Run::new();
@@ -351,6 +389,9 @@ fn lock_throughput<F: Fn(&LockSet, &Sleepable) -> u64 + Copy + Send + Sync + 'st
     sets: &[&'static LockSet],
     op: F,
 ) {
+    if !fits(workers) {
+        return;
+    }
     let cpus: Vec<CpuId> = (0..workers).map(default_cpu).collect();
     let mut sum = 0;
     for &set in sets {
@@ -385,8 +426,8 @@ fn free_256(p: *mut u8) {
 }
 
 fn suite_p2(s: &Sleepable) {
-    ctxsw(s, "ctxsw.same", CpuId(1), CpuId(1));
-    ctxsw(s, "ctxsw.cross", CpuId(1), CpuId(2));
+    ctxsw(s, "ctxsw.same", cpu(1), cpu(1));
+    ctxsw(s, "ctxsw.cross", cpu(1), cpu(2));
 
     let sets = lock_sets();
     for t in [1, 2, 4, 8] {
@@ -473,7 +514,7 @@ fn suite_p2(s: &Sleepable) {
     wakeup_latency(s);
 
     throughput(s, "ipi.rtt", 1, |_| {
-        crate::smp::ping(CpuId(2));
+        crate::smp::ping(cpu(2));
         1
     });
     tlb_shootdown(s);
@@ -1009,7 +1050,7 @@ fn suite_diag(s: &Sleepable) {
         });
     }
     throughput(s, "diag.ping_idle", 1, |_| {
-        crate::smp::ping(CpuId(2));
+        crate::smp::ping(cpu(2));
         1
     });
     // The same with CPU 2 running a spinning thread: no halt to wake from.
@@ -1017,7 +1058,7 @@ fn suite_diag(s: &Sleepable) {
     SPIN.store(true, Ordering::Relaxed);
     let spinner = sched::Builder::new("spinner")
         .priority(Priority::KERNEL)
-        .bind(CpuId(2))
+        .bind(cpu(2))
         .spawn(|_| {
             while SPIN.load(Ordering::Relaxed) {
                 core::hint::spin_loop();
@@ -1026,7 +1067,7 @@ fn suite_diag(s: &Sleepable) {
         .expect("bench: spinner");
     time::sleep_ns(s, 10_000_000);
     throughput(s, "diag.ping_busy", 1, |_| {
-        crate::smp::ping(CpuId(2));
+        crate::smp::ping(cpu(2));
         1
     });
     SPIN.store(false, Ordering::Relaxed);
@@ -1151,7 +1192,7 @@ fn wakeup_latency(s: &Sleepable) {
     });
     let sh = Arc::clone(&shared);
     let run = Run::new();
-    launch(s, &run, &[CpuId(1), CpuId(2)], 0, move |_, me, ws| {
+    launch(s, &run, &[cpu(1), cpu(2)], 0, move |_, me, ws| {
         if me == 0 {
             let mut local = Vec::with_capacity(LAT_WAKEUP);
             for i in 0..LAT_WAKEUP {

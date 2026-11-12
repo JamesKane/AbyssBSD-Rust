@@ -47,8 +47,12 @@
 #include <vm/vm_page.h>
 
 #include <machine/atomic.h>
-#include <machine/clock.h>
 #include <machine/cpufunc.h>
+#if defined(__amd64__)
+#include <machine/clock.h>		/* tsc_freq */
+#elif defined(__aarch64__)
+#include <machine/armreg.h>		/* READ_SPECIALREG */
+#endif
 
 MALLOC_DEFINE(M_KBENCH, "kbench", "kbench benchmark buffers");
 
@@ -60,12 +64,34 @@ MALLOC_DEFINE(M_KBENCH, "kbench", "kbench benchmark buffers");
 #define	KB_MISS_OBJS	4096
 #define	KB_MISS_PAGES	1024
 
+/*
+ * The CPU counter (tests/perf/README.md): the TSC on amd64, the generic
+ * timer's virtual count on arm64, as AbyssBSD's side reads them.
+ */
+#if defined(__amd64__)
+#define	kb_ticks()	rdtsc()
+#define	kb_freq		tsc_freq
+#elif defined(__aarch64__)
+static uint64_t kb_freq;
+
+static inline uint64_t
+kb_ticks(void)
+{
+	uint64_t v;
+
+	__asm __volatile("isb\n\tmrs %0, cntvct_el0" : "=r" (v));
+	return (v);
+}
+#else
+#error "kbench: no CPU counter for this architecture"
+#endif
+
 static uint64_t
 tsc_ns(uint64_t t)
 {
 	/* No 128-bit division in the kernel; this cannot overflow. */
-	return (t / tsc_freq * 1000000000 +
-	    t % tsc_freq * 1000000000 / tsc_freq);
+	return (t / kb_freq * 1000000000 +
+	    t % kb_freq * 1000000000 / kb_freq);
 }
 
 /* One benchmark run: workers, start/stop flags, and per-worker results. */
@@ -96,12 +122,60 @@ struct kb_arg {
 static struct kb_arg kb_args[KB_MAXT];
 static struct mtx kb_go_mtx;
 
+/*
+ * debug.kbench.cpus, "c,w1,w2,...", as AbyssBSD's abyss.bench.cpus
+ * (tests/perf/README.md, "Settings"): the coordinator's CPU, then the
+ * workers'. The suite's CPU 0 is `c`, and its CPU i >= 1 is entry i - 1 of
+ * the workers' list (modulo its length); empty, CPU i is CPU i. A
+ * benchmark with more workers than the list has CPUs is left out
+ * (kb_fits): a kernel-priority thread is not time-sliced, so two on one
+ * CPU would measure that.
+ */
+static char kb_cpulist[64];
+
+/* The list's CPUs into `ids`; how many (0 for none, or a bad list). */
+static int
+kb_cpus(int *ids)
+{
+	int n = 0;
+	char *p = kb_cpulist, *end;
+
+	while (*p != '\0' && n < MAXCPU) {
+		long v = strtol(p, &end, 10);
+
+		if (end == p || v < 0 || v > mp_maxid || CPU_ABSENT(v))
+			return (0);
+		ids[n++] = (int)v;
+		p = *end == ',' ? end + 1 : end;
+	}
+	return (n < 2 ? 0 : n);
+}
+
+static int
+kb_cpu(int i)
+{
+	int ids[MAXCPU], n = kb_cpus(ids);
+
+	if (n == 0)
+		return (i);
+	return (i == 0 ? ids[0] : ids[1 + (i - 1) % (n - 1)]);
+}
+
+/* Whether `nthreads` workers each have a CPU of their own. */
+static bool
+kb_fits(int nthreads)
+{
+	int ids[MAXCPU], n = kb_cpus(ids);
+
+	return (n == 0 || nthreads <= n - 1);
+}
+
 static void
 kb_bind(int cpu)
 {
 	thread_lock(curthread);
 	sched_prio(curthread, PRI_MIN_KERN);
-	sched_bind(curthread, cpu);
+	sched_bind(curthread, kb_cpu(cpu));
 	thread_unlock(curthread);
 }
 
@@ -162,19 +236,19 @@ kb_launch(struct kb_run *r, int ms)
 		mtx_unlock(&kb_go_mtx);
 		pause("kbrdy", 1);
 	}
-	t0 = rdtsc();
+	t0 = kb_ticks();
 	r->go = 1;
 	wakeup(__DEVOLATILE(void *, &r->go));
 	mtx_unlock(&kb_go_mtx);
 	if (ms > 0) {
 		pause("kbrun", ms * hz / 1000);
 		atomic_store_rel_int(&r->stop, 1);
-		t1 = rdtsc();
+		t1 = kb_ticks();
 	}
 	while (atomic_load_acq_int(&r->done) < r->nthreads)
 		pause("kbdone", 1);
 	if (ms == 0)
-		t1 = rdtsc();
+		t1 = kb_ticks();
 	return (t1 - t0);
 }
 
@@ -235,6 +309,8 @@ kb_throughput(const char *name, kb_body_t *body, int nthreads)
 {
 	static struct kb_run r;
 
+	if (!kb_fits(nthreads))
+		return;
 	r.body = body;
 	r.nthreads = nthreads;
 	kb_default_cpus(&r);
@@ -341,6 +417,8 @@ kb_lock_throughput(const char *name, kb_body_t *body, int nthreads)
 	static struct kb_run r;
 	uint64_t sum = 0, milli;
 
+	if (!kb_fits(nthreads))
+		return;
 	r.body = body;
 	r.nthreads = nthreads;
 	kb_default_cpus(&r);
@@ -485,7 +563,7 @@ kb_armcancel_body(struct kb_run *r, int idx)
 static void
 kb_fire(void *arg __unused)
 {
-	kb_fire_tsc = rdtsc();
+	kb_fire_tsc = kb_ticks();
 	mtx_lock_spin(&kb_spin);
 	kb_fired = 1;
 	wakeup(__DEVOLATILE(void *, &kb_fired));
@@ -497,7 +575,7 @@ static uint64_t *kb_samples;
 static void
 kb_callout_lat_body(struct kb_run *r __unused, int idx __unused)
 {
-	uint64_t one_ms = tsc_freq / 1000;
+	uint64_t one_ms = kb_freq / 1000;
 
 	for (int i = 0; i < KB_LAT_CALLOUT; i++) {
 		uint64_t t0;
@@ -505,7 +583,7 @@ kb_callout_lat_body(struct kb_run *r __unused, int idx __unused)
 
 		mtx_lock_spin(&kb_spin);
 		kb_fired = 0;
-		t0 = rdtsc();
+		t0 = kb_ticks();
 		s0 = sbinuptime();
 		callout_reset_sbt_on(&kb_callout, s0 + SBT_1MS, 0, kb_fire,
 		    NULL, curcpu, C_ABSOLUTE | C_DIRECT_EXEC);
@@ -537,13 +615,13 @@ kb_wakeup_body(struct kb_run *r __unused, int idx)
 			while (kb_seq == (uint64_t)i)
 				mtx_sleep(__DEVOLATILE(void *, &kb_seq),
 				    &kb_mtx, 0, "kbwl", 0);
-			t1 = rdtsc();
+			t1 = kb_ticks();
 			mtx_unlock(&kb_mtx);
 			kb_samples[i] = tsc_ns(t1 - kb_wake_tsc);
 		}
 	} else {
 		/* Waker. */
-		uint64_t spin = tsc_freq / 20000;	/* 50 us */
+		uint64_t spin = kb_freq / 20000;	/* 50 us */
 
 		for (int i = 0; i < KB_LAT_WAKEUP; i++) {
 			uint64_t t;
@@ -551,11 +629,11 @@ kb_wakeup_body(struct kb_run *r __unused, int idx)
 			/* The sleeper announces each iteration it sleeps for. */
 			while (atomic_load_acq_int(&kb_asleep) != i + 1)
 				cpu_spinwait();
-			t = rdtsc();
-			while (rdtsc() - t < spin)
+			t = kb_ticks();
+			while (kb_ticks() - t < spin)
 				cpu_spinwait();
 			mtx_lock(&kb_mtx);
-			kb_wake_tsc = rdtsc();
+			kb_wake_tsc = kb_ticks();
 			kb_seq = i + 1;
 			wakeup(__DEVOLATILE(void *, &kb_seq));
 			mtx_unlock(&kb_mtx);
@@ -576,7 +654,7 @@ kb_ipi_body(struct kb_run *r, int idx)
 	cpuset_t map;
 	uint64_t n = 0;
 
-	CPU_SETOF(2, &map);
+	CPU_SETOF(kb_cpu(2), &map);
 	while (!kb_stopped(r)) {
 		smp_rendezvous_cpus(map, smp_no_rendezvous_barrier, kb_ipi_nop,
 		    smp_no_rendezvous_barrier, NULL);
@@ -585,7 +663,27 @@ kb_ipi_body(struct kb_run *r, int idx)
 	r->slot[idx].ops = n;
 }
 
-static vm_offset_t kb_va;
+/* What kva_alloc returns: vm_offset_t in 15.1, a pointer in 16. */
+static __typeof(kva_alloc(PAGE_SIZE)) kb_va;
+
+/*
+ * Invalidates kernel page `va` on every CPU: amd64's pmap_invalidate_page
+ * (an IPI to each), arm64's broadcast TLBI, as its pmap_s1_invalidate_page
+ * does it for the kernel pmap (that one is not exported).
+ */
+static void
+kb_invalidate(vm_offset_t va)
+{
+#if defined(__amd64__)
+	pmap_invalidate_page(kernel_pmap, va);
+#elif defined(__aarch64__)
+	__asm __volatile(
+	    "dsb ishst\n\t"
+	    "tlbi vaae1is, %0\n\t"
+	    "dsb ish\n\t"
+	    "isb" : : "r" (va >> PAGE_SHIFT) : "memory");
+#endif
+}
 
 static void
 kb_tlb_body(struct kb_run *r, int idx)
@@ -593,7 +691,7 @@ kb_tlb_body(struct kb_run *r, int idx)
 	uint64_t n = 0;
 
 	while (!kb_stopped(r)) {
-		pmap_invalidate_page(kernel_pmap, kb_va);
+		kb_invalidate((vm_offset_t)kb_va);
 		n++;
 	}
 	r->slot[idx].ops = n;
@@ -796,16 +894,16 @@ static void
 kb_qd1_body(struct kb_run *r __unused, int idx __unused)
 {
 	void *buf = malloc(4096, M_KBENCH, M_WAITOK);
-	uint64_t base = rdtsc();
+	uint64_t base = kb_ticks();
 
 	for (int i = 0; i < KB_BLK_LAT; i++) {
 		off_t off = kb_rand_off();
-		uint64_t t0 = rdtsc();
+		uint64_t t0 = kb_ticks();
 
 		kb_starts[i] = tsc_ns(t0 - base);
 
 		kb_read_sync(buf, off, 4096);
-		kb_samples[i] = tsc_ns(rdtsc() - t0);
+		kb_samples[i] = tsc_ns(kb_ticks() - t0);
 	}
 	free(buf, M_KBENCH);
 }
@@ -961,11 +1059,11 @@ kb_aml(void)
 
 	for (int i = 0; i < KB_ROUNDS; i++) {
 		int n = 0;
-		uint64_t t0 = rdtsc();
+		uint64_t t0 = kb_ticks();
 
 		AcpiWalkNamespace(ACPI_TYPE_DEVICE, ACPI_ROOT_OBJECT, 100,
 		    kb_aml_one, NULL, &n, NULL);
-		m[i] = tsc_ns(rdtsc() - t0) * 1000 / MAX(n, 1);
+		m[i] = tsc_ns(kb_ticks() - t0) * 1000 / MAX(n, 1);
 	}
 	qsort(m, KB_ROUNDS, sizeof(m[0]), kb_cmp);
 	milli = m[KB_ROUNDS / 2];
@@ -1082,19 +1180,19 @@ kb_dev(void)
 	for (int i = 0; i < KB_DEV_CYCLES; i++) {
 		uint64_t t0, t1, t2;
 
-		t0 = rdtsc();
+		t0 = kb_ticks();
 		bus_topo_lock();
 		if (device_detach(parent) != 0)
 			panic("kbench: detach");
 		bus_topo_unlock();
 		g_waitidle(curthread);
-		t1 = rdtsc();
+		t1 = kb_ticks();
 		bus_topo_lock();
 		if (device_probe_and_attach(parent) != 0)
 			panic("kbench: attach");
 		bus_topo_unlock();
 		g_waitidle(curthread);
-		t2 = rdtsc();
+		t2 = kb_ticks();
 		attach[i] = tsc_ns(t2 - t1);
 		cycle[i] = tsc_ns(t2 - t0);
 	}
@@ -1134,9 +1232,9 @@ kb_aml_load(void)
 		for (size_t j = 0; j < sizeof(kb_ssdt); j++)
 			sum += ((uint8_t *)t)[j];
 		t->Checksum = -sum;
-		t0 = rdtsc();
+		t0 = kb_ticks();
 		st = AcpiLoadTable(t, &idx);
-		m[i] = tsc_ns(rdtsc() - t0);
+		m[i] = tsc_ns(kb_ticks() - t0);
 		if (ACPI_FAILURE(st))
 			panic("kbench: AcpiLoadTable: %s", AcpiFormatException(st));
 		st = AcpiUnloadTable(idx);
@@ -1163,7 +1261,7 @@ static volatile uint64_t kb_intr_fired;
 static void
 kb_et_cb(struct eventtimer *et __unused, void *arg __unused)
 {
-	atomic_store_rel_64(&kb_intr_fired, rdtsc());
+	atomic_store_rel_64(&kb_intr_fired, kb_ticks());
 }
 
 static void
@@ -1179,16 +1277,16 @@ kb_intr(void)
 		return;
 	}
 	ns = malloc(KB_INTR_SAMPLES * sizeof(*ns), M_KBENCH, M_WAITOK);
-	ahead = tsc_freq * KB_INTR_AHEAD_NS / 1000000000;
+	ahead = kb_freq * KB_INTR_AHEAD_NS / 1000000000;
 	for (int i = 0; i < KB_INTR_SAMPLES; i++) {
 		uint64_t t0, f, deadline;
 
 		atomic_store_rel_64(&kb_intr_fired, 0);
-		t0 = rdtsc();
+		t0 = kb_ticks();
 		et_start(et, nstosbt(KB_INTR_AHEAD_NS), 0);
-		deadline = t0 + tsc_freq / 100;
+		deadline = t0 + kb_freq / 100;
 		while ((f = atomic_load_acq_64(&kb_intr_fired)) == 0 &&
-		    rdtsc() < deadline)
+		    kb_ticks() < deadline)
 			cpu_spinwait();
 		if (f == 0)
 			break;
@@ -1257,6 +1355,11 @@ kb_sysctl_run(SYSCTL_HANDLER_ARGS)
 	if (strcmp(suite, "p2") != 0 && strcmp(suite, "p3") != 0 &&
 	    strcmp(suite, "diag") != 0)
 		return (EINVAL);
+#ifndef __amd64__
+	/* p3 and diag read bhyve's disks, HPET, and q35 SSDT. */
+	if (strcmp(suite, "p2") != 0)
+		return (EOPNOTSUPP);
+#endif
 	if (mp_ncpus < KB_NCPU) {
 		printf("kbench: needs %d CPUs, have %d\n", KB_NCPU, mp_ncpus);
 		return (ENXIO);
@@ -1279,6 +1382,9 @@ kb_sysctl_run(SYSCTL_HANDLER_ARGS)
 
 static SYSCTL_NODE(_debug, OID_AUTO, kbench, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
     "In-kernel benchmarks");
+SYSCTL_STRING(_debug_kbench, OID_AUTO, cpus, CTLFLAG_RW, kb_cpulist,
+    sizeof(kb_cpulist), "The suites' CPUs, a,b,...: the suite's CPU i is "
+    "entry i modulo the list's length (empty: CPU i)");
 SYSCTL_PROC(_debug_kbench, OID_AUTO, run,
     CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_MPSAFE, NULL, 0, kb_sysctl_run, "A",
     "Run a benchmark suite (p2, p3, diag)");
@@ -1288,6 +1394,9 @@ kb_modevent(module_t mod __unused, int type, void *data __unused)
 {
 	switch (type) {
 	case MOD_LOAD:
+#ifdef __aarch64__
+		kb_freq = READ_SPECIALREG(cntfrq_el0);
+#endif
 		mtx_init(&kb_mtx, "kbench mtx", NULL, MTX_DEF);
 		mtx_init(&kb_go_mtx, "kbench go", NULL, MTX_DEF);
 		mtx_init(&kb_spin, "kbench spin", NULL, MTX_SPIN);

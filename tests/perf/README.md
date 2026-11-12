@@ -38,6 +38,17 @@ Orange Pi 6 Plus: `board/perf-run.sh`). Unset, it behaves as in the guests.
 - `UBENCH_CPUS`: the CPUs the suites bind to, as a comma list. The suite's CPU *i* is the list's
   entry *i* modulo its length, so the same suite runs on one core class.
 
+The in-kernel suites take the same kind of list: AbyssBSD's boot option `abyss.bench.cpus=c,w1,w2,...`
+and the module's `debug.kbench.cpus`. Its first entry is the coordinator's CPU (the suite's CPU
+0), the rest the workers' (the suite's CPU *i* ≥ 1 is entry *i* − 1 of the rest, modulo their
+number), so the workers never share the coordinator's CPU. A benchmark with more workers than the
+list has worker CPUs is left out on both sides: a kernel-priority thread is not time-sliced on
+FreeBSD, so two on one CPU would measure that (`t8` on a class of four). On arm64 the module
+counts with the generic timer (`CNTVCT_EL0` at `CNTFRQ_EL0`) where amd64 uses the TSC, and runs
+`p2` only (`p3` and `diag` are bhyve's). AbyssBSD's `abyss.bench.reboot` resets the machine after
+the suite instead of powering it off, and before a suite the kernel raises every CPU to its
+highest frequency.
+
 ## Common rules
 
 - The VM has 8 vCPUs. The coordinator runs bound to CPU 0. Worker *i* of *T* runs bound to CPU
