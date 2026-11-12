@@ -1233,7 +1233,11 @@ fn steal(c: &PerCpu) -> Option<Arc<Thread>> {
         if o.id == c.id {
             continue;
         }
-        let n = o.runq.lock().len();
+        // The published length, without the lock (FreeBSD's steal reads
+        // `tdq_load` so): a CPU going idle would otherwise take every
+        // other CPU's queue lock on each switch. The one chosen is
+        // looked at again under its lock.
+        let n = o.runq.len_hint();
         if n > busiest.map_or(0, |b| b.1) {
             busiest = Some((o, n));
         }
