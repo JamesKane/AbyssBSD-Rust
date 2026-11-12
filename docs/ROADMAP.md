@@ -2984,10 +2984,12 @@ hang.
   `proc.vfork_exec` 285 to 123 µs (169), `syscall.getpid` 140 to 81 ns (117), `io.null.write`
   242 to 143 ns (186), `sig.deliver` 4.9 to 1.56 µs (0.97), `exec.true` 572 to 371 µs (461).
   Found on the way: a reaped process could report less CPU time than it had seen (`99c48b1`).
-  Lazy SVE is put back: at the board's 128-bit vectors it saves 34 bytes a switch. Next: the
-  per-CPU critical-section count, still reached with interrupts masked (FreeBSD keeps it per
-  thread, `td_critnest`); then `p2` on the board (context switch, wakeup, IPI), for the
-  ping-pong gaps the profiler cannot see into.
+  Lazy SVE is put back: at the board's 128-bit vectors it saves 34 bytes a switch. Then the
+  critical-section depth moved to the thread, as FreeBSD's `td_critnest` (`80803f1`):
+  `proc.exec` 92 µs, `proc.fork` 42.6 µs (45.4), `vm.fault.anon` 618 ns (883), `thr.create`
+  5.4 µs (4.8). Open: `aarch64-el2` (INTx) hung once in three runs in `tests/user/cam`, as it did
+  once before these changes (`99c48b1`); not yet looked into. Next: `p2` on the board (context
+  switch, wakeup, IPI), for the ping-pong gaps the profiler cannot see into.
 - Progress 2026-11-10 (the known defects, in QEMU; none yet tried on the board):
   - `MNT_RELOAD`: `nmount`'s `reload` on a read-only mount (`vfs_domount_update`'s rule), with
     `ffs` taken as `ufs` (`chkdoreload` asks for `ffs`, which is why the root's failed with
