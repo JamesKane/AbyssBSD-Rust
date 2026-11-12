@@ -135,6 +135,56 @@ const CLASSES: [ClassSpec; 15] = [
 ];
 const NCLASSES: usize = CLASSES.len();
 
+/// Zones a heap may have (ADR-0024).
+pub const MAX_ZONES: usize = 8;
+/// Classes and zones together: what the per-class state is indexed by.
+const NSLOTS: usize = NCLASSES + MAX_ZONES;
+
+/// A zone: a class of its own for one exact layout (ADR-0024), so that
+/// objects of one type lie together whatever other types of their size do
+/// (FreeBSD's `uma` zones). An allocation whose size rounds up to `size`'s
+/// 16-byte granule and whose alignment is `align` is the zone's; every
+/// other goes to its size class.
+#[derive(Clone, Copy, Debug)]
+pub struct ZoneSpec {
+    /// FreeBSD's name for the zone (`vmstat -z`).
+    pub name: &'static str,
+    /// The objects' size in bytes.
+    pub size: usize,
+    /// Their alignment, at most 16.
+    pub align: usize,
+}
+
+impl ZoneSpec {
+    /// The zone of `Arc<T>`'s allocations: two counters, then the value
+    /// (the standard library's `ArcInner`, `repr(C)` but not promised: a
+    /// kernel test holds it).
+    #[must_use]
+    pub const fn of_arc<T>(name: &'static str) -> Self {
+        let align = if align_of::<T>() > align_of::<usize>() {
+            align_of::<T>()
+        } else {
+            align_of::<usize>()
+        };
+        let data = (2 * size_of::<usize>()).next_multiple_of(align);
+        Self {
+            name,
+            size: (data + size_of::<T>()).next_multiple_of(align),
+            align,
+        }
+    }
+}
+
+/// What a zone's use looks like (`vm.zone_stats`).
+#[derive(Clone, Copy, Debug)]
+pub struct ZoneStats {
+    pub name: &'static str,
+    /// The size its objects take (the granule).
+    pub size: usize,
+    /// Objects out of its slabs: in use, or cached in magazines.
+    pub used: u64,
+}
+
 /// The largest request served from a size class.
 pub const MAX_SMALL: usize = 4096;
 
@@ -213,10 +263,11 @@ struct Mag {
 
 const _: () = assert!(size_of::<Mag>() <= PAGE);
 
-/// Objects a magazine of class `c` holds: about 64 KiB worth (256 for
-/// 256-byte objects, UMA's largest bucket), at least 16, at most a page.
-const fn capacity(c: usize) -> usize {
-    let n = 64 * 1024 / CLASSES[c].size;
+/// Objects a magazine of objects of `size` bytes holds: about 64 KiB
+/// worth (256 for 256-byte objects, UMA's largest bucket), at least 16, at
+/// most a page.
+const fn capacity(size: usize) -> usize {
+    let n = 64 * 1024 / size;
     if n < 16 {
         16
     } else if n > MAG_SLOTS {
@@ -358,9 +409,16 @@ pub struct HeapStats {
 /// (zero disables them).
 pub struct Heap<S, const CPUS: usize> {
     source: S,
-    classes: [SpinLock<ClassState>; NCLASSES],
-    depots: [SpinLock<Depot>; NCLASSES],
-    magazines: [[UnsafeCell<CpuMags>; NCLASSES]; CPUS],
+    classes: [SpinLock<ClassState>; NSLOTS],
+    depots: [SpinLock<Depot>; NSLOTS],
+    magazines: [[UnsafeCell<CpuMags>; NSLOTS]; CPUS],
+    /// The zones' classes (unused ones are a 16-byte class nothing maps
+    /// to), names, and alignments.
+    zones: [ClassSpec; MAX_ZONES],
+    zone_names: [&'static str; MAX_ZONES],
+    zone_aligns: [usize; MAX_ZONES],
+    /// The zone slot for each 16-byte granule count, or 0.
+    zone_of: [u8; MAX_SMALL / 16 + 1],
     magazine_pages: AtomicU64,
     large_pages: AtomicU64,
 }
@@ -381,9 +439,50 @@ impl<S, const CPUS: usize> core::fmt::Debug for Heap<S, CPUS> {
 }
 
 impl<S: PageSource, const CPUS: usize> Heap<S, CPUS> {
-    /// An empty heap.
+    /// An empty heap, with no zones.
     pub const fn new(source: S) -> Self {
+        Self::with_zones(source, &[])
+    }
+
+    /// An empty heap with `zones` (ADR-0024), fixed for its life: an
+    /// object allocated before its zone existed would be freed into it.
+    ///
+    /// # Panics
+    ///
+    /// At build time, when there are more than [`MAX_ZONES`], one is
+    /// larger than [`MAX_SMALL`] or more aligned than 16, or two have the
+    /// same granule.
+    pub const fn with_zones(source: S, zones: &[ZoneSpec]) -> Self {
+        assert!(zones.len() <= MAX_ZONES, "too many zones");
+        let mut specs = [ClassSpec::new(16); MAX_ZONES];
+        let mut names = [""; MAX_ZONES];
+        let mut aligns = [0; MAX_ZONES];
+        let mut zone_of = [0u8; MAX_SMALL / 16 + 1];
+        let mut i = 0;
+        while i < zones.len() {
+            let z = &zones[i];
+            assert!(z.size > 0 && z.size <= MAX_SMALL, "a zone's size");
+            assert!(
+                z.align.is_power_of_two() && z.align <= 16,
+                "a zone's alignment"
+            );
+            let g = z.size.div_ceil(16);
+            assert!(zone_of[g] == 0, "two zones of one size");
+            specs[i] = ClassSpec::new(g * 16);
+            names[i] = z.name;
+            aligns[i] = z.align;
+            // At most `NSLOTS` (23): the index fits.
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                zone_of[g] = (NCLASSES + i) as u8;
+            }
+            i += 1;
+        }
         Self {
+            zones: specs,
+            zone_names: names,
+            zone_aligns: aligns,
+            zone_of,
             source,
             classes: [const {
                 SpinLock::new(ClassState {
@@ -392,12 +491,46 @@ impl<S: PageSource, const CPUS: usize> Heap<S, CPUS> {
                     slabs: 0,
                     used: 0,
                 })
-            }; NCLASSES],
-            depots: [const { SpinLock::new(Depot::new()) }; NCLASSES],
-            magazines: [const { [const { UnsafeCell::new(CpuMags::new()) }; NCLASSES] }; CPUS],
+            }; NSLOTS],
+            depots: [const { SpinLock::new(Depot::new()) }; NSLOTS],
+            magazines: [const { [const { UnsafeCell::new(CpuMags::new()) }; NSLOTS] }; CPUS],
             magazine_pages: AtomicU64::new(0),
             large_pages: AtomicU64::new(0),
         }
+    }
+
+    /// The class or zone slot for `layout`, or `None` for a large
+    /// allocation: its zone's if its granule and alignment are a zone's.
+    #[inline]
+    fn class_of(&self, layout: Layout) -> Option<usize> {
+        if layout.size() <= MAX_SMALL {
+            let z = usize::from(self.zone_of[layout.size().div_ceil(16)]);
+            if z != 0 && self.zone_aligns[z - NCLASSES] == layout.align() {
+                return Some(z);
+            }
+        }
+        class_for(layout)
+    }
+
+    /// Slot `c`'s geometry.
+    #[inline]
+    const fn spec(&self, c: usize) -> ClassSpec {
+        if c < NCLASSES {
+            CLASSES[c]
+        } else {
+            self.zones[c - NCLASSES]
+        }
+    }
+
+    /// Each zone's use.
+    pub fn zone_stats(&self) -> impl Iterator<Item = ZoneStats> + '_ {
+        (0..MAX_ZONES)
+            .filter(|&i| !self.zone_names[i].is_empty())
+            .map(|i| ZoneStats {
+                name: self.zone_names[i],
+                size: self.zones[i].size,
+                used: self.classes[NCLASSES + i].lock().used,
+            })
     }
 
     /// The page source.
@@ -416,7 +549,7 @@ impl<S: PageSource, const CPUS: usize> Heap<S, CPUS> {
     }
 
     fn try_allocate(&self, layout: Layout) -> *mut u8 {
-        match class_for(layout) {
+        match self.class_of(layout) {
             Some(c) => self.alloc_small(c),
             None => self.alloc_large(layout),
         }
@@ -433,8 +566,8 @@ impl<S: PageSource, const CPUS: usize> Heap<S, CPUS> {
         if hal::interrupt::active() {
             return ptr::null_mut();
         }
-        let order = match class_for(layout) {
-            Some(c) => CLASSES[c].order,
+        let order = match self.class_of(layout) {
+            Some(c) => self.spec(c).order,
             None => match Order::for_bytes(layout.size().max(layout.align()) as u64) {
                 Some(o) => o,
                 None => return ptr::null_mut(),
@@ -456,7 +589,7 @@ impl<S: PageSource, const CPUS: usize> Heap<S, CPUS> {
     /// `p` came from `allocate(layout)` on this heap and is not used
     /// afterwards.
     pub unsafe fn deallocate(&self, p: *mut u8, layout: Layout) {
-        match class_for(layout) {
+        match self.class_of(layout) {
             // SAFETY: per the caller's contract.
             Some(c) => unsafe { self.free_small(c, p) },
             // SAFETY: as above.
@@ -467,7 +600,7 @@ impl<S: PageSource, const CPUS: usize> Heap<S, CPUS> {
     #[inline]
     fn alloc_small(&self, c: usize) -> *mut u8 {
         if CPUS == 0 || hal::interrupt::active() {
-            return self.classes[c].lock().alloc(c, &self.source);
+            return self.classes[c].lock().alloc(&self.spec(c), &self.source);
         }
         self.with_mags(c, |m| {
             let l = m.loaded;
@@ -510,7 +643,7 @@ impl<S: PageSource, const CPUS: usize> Heap<S, CPUS> {
                 }
                 drop(d);
                 let mut class = self.classes[c].lock();
-                let first = class.alloc(c, &self.source);
+                let first = class.alloc(&self.spec(c), &self.source);
                 if first.is_null() {
                     return first;
                 }
@@ -525,8 +658,8 @@ impl<S: PageSource, const CPUS: usize> Heap<S, CPUS> {
                 let l = m.loaded;
                 // SAFETY: our (empty) magazine.
                 unsafe {
-                    while (*l).count < capacity(c) / 2 {
-                        let p = class.alloc(c, &self.source);
+                    while (*l).count < capacity(self.spec(c).size) / 2 {
+                        let p = class.alloc(&self.spec(c), &self.source);
                         if p.is_null() {
                             break;
                         }
@@ -555,14 +688,14 @@ impl<S: PageSource, const CPUS: usize> Heap<S, CPUS> {
     unsafe fn free_small(&self, c: usize, p: *mut u8) {
         if CPUS == 0 || hal::interrupt::active() {
             // SAFETY: per the caller's contract.
-            unsafe { self.classes[c].lock().free(c, p, &self.source) };
+            unsafe { self.classes[c].lock().free(&self.spec(c), p, &self.source) };
             return;
         }
         self.with_mags(c, |m| {
             let l = m.loaded;
             // SAFETY: our magazines (`with_mags`).
             unsafe {
-                if !l.is_null() && (*l).count < capacity(c) {
+                if !l.is_null() && (*l).count < capacity(self.spec(c).size) {
                     (*l).objects[(*l).count] = p;
                     (*l).count += 1;
                     return;
@@ -581,7 +714,7 @@ impl<S: PageSource, const CPUS: usize> Heap<S, CPUS> {
     /// As for [`Self::free_small`].
     #[cold]
     unsafe fn free_flush(&self, c: usize, m: &mut CpuMags, p: *mut u8) {
-        if !m.prev.is_null() && mag_count(m.prev) < capacity(c) {
+        if !m.prev.is_null() && mag_count(m.prev) < capacity(self.spec(c).size) {
             core::mem::swap(&mut m.loaded, &mut m.prev);
         } else {
             let mut d = self.depots[c].lock();
@@ -600,7 +733,7 @@ impl<S: PageSource, const CPUS: usize> Heap<S, CPUS> {
             if m.loaded.is_null() {
                 // No page for a magazine: free straight to the slab.
                 // SAFETY: per the caller's contract.
-                unsafe { self.classes[c].lock().free(c, p, &self.source) };
+                unsafe { self.classes[c].lock().free(&self.spec(c), p, &self.source) };
                 return;
             }
         }
@@ -650,7 +783,7 @@ impl<S: PageSource, const CPUS: usize> Heap<S, CPUS> {
     /// Returns this CPU's cached objects, and every full magazine in the
     /// depots, to their classes, and frees the magazines involved.
     pub fn drain_this_cpu(&self) {
-        for c in 0..if CPUS == 0 { 0 } else { NCLASSES } {
+        for c in 0..if CPUS == 0 { 0 } else { NSLOTS } {
             let (mut mags, empties) = self.depots[c].lock().take(0);
             self.with_mags(c, |m| {
                 for own in [&mut m.loaded, &mut m.prev] {
@@ -668,7 +801,7 @@ impl<S: PageSource, const CPUS: usize> Heap<S, CPUS> {
     /// Gives back the magazines beyond each class's working set. From
     /// thread context, every [`TRIM_SECONDS`].
     pub fn trim(&self) {
-        for c in 0..if CPUS == 0 { 0 } else { NCLASSES } {
+        for c in 0..if CPUS == 0 { 0 } else { NSLOTS } {
             let (mags, empties) = {
                 let mut d = self.depots[c].lock();
                 d.update_working_set();
@@ -682,7 +815,7 @@ impl<S: PageSource, const CPUS: usize> Heap<S, CPUS> {
     /// Gives back every magazine in the depots (`uma_reclaim`'s drain):
     /// memory is short. From thread context.
     pub fn reclaim(&self) {
-        for c in 0..if CPUS == 0 { 0 } else { NCLASSES } {
+        for c in 0..if CPUS == 0 { 0 } else { NSLOTS } {
             let (mags, empties) = self.depots[c].lock().take(0);
             self.release(c, mags, empties);
         }
@@ -704,7 +837,7 @@ impl<S: PageSource, const CPUS: usize> Heap<S, CPUS> {
                 unsafe {
                     let mag = &mut *x;
                     for &q in &mag.objects[..mag.count] {
-                        class.free(c, q, &self.source);
+                        class.free(&self.spec(c), q, &self.source);
                     }
                     mag.count = 0;
                     Depot::push(&mut empties, x);
@@ -759,7 +892,8 @@ impl<S: PageSource, const CPUS: usize> Heap<S, CPUS> {
             large_pages: self.large_pages.load(Ordering::Relaxed),
             ..HeapStats::default()
         };
-        for (c, spec) in CLASSES.iter().enumerate() {
+        for c in 0..NSLOTS {
+            let spec = self.spec(c);
             let class = self.classes[c].lock();
             s.live_objects += class.used;
             s.slabs += class.slabs as u64;
@@ -773,7 +907,7 @@ impl<S: PageSource, const CPUS: usize> Heap<S, CPUS> {
             }
         }
         for (c, d) in self.depots.iter().enumerate() {
-            s.cached_objects += (d.lock().nfull * capacity(c)) as u64;
+            s.cached_objects += (d.lock().nfull * capacity(self.spec(c).size)) as u64;
         }
         s.magazine_pages = self.magazine_pages.load(Ordering::Relaxed);
         s.live_objects -= s.cached_objects;
@@ -782,8 +916,7 @@ impl<S: PageSource, const CPUS: usize> Heap<S, CPUS> {
 }
 
 impl ClassState {
-    fn alloc(&mut self, c: usize, source: &impl PageSource) -> *mut u8 {
-        let spec = &CLASSES[c];
+    fn alloc(&mut self, spec: &ClassSpec, source: &impl PageSource) -> *mut u8 {
         if self.available.is_null() {
             let Some(page) = source.alloc_pages(spec.order) else {
                 return ptr::null_mut();
@@ -833,8 +966,7 @@ impl ClassState {
     /// # Safety
     ///
     /// `p` is an allocated object of class `c` from this class's slabs.
-    unsafe fn free(&mut self, c: usize, p: *mut u8, source: &impl PageSource) {
-        let spec = &CLASSES[c];
+    unsafe fn free(&mut self, spec: &ClassSpec, p: *mut u8, source: &impl PageSource) {
         let slab = p
             .map_addr(|a| a & !(spec.slab_bytes() - 1))
             .cast::<SlabHeader>();
@@ -1166,6 +1298,93 @@ mod tests {
         let out = heap.source().out.load(Ordering::Relaxed);
         assert_eq!(s.magazine_pages, 0);
         assert_eq!(out, i64::try_from(s.slab_pages).unwrap());
+    }
+
+    /// A zone's objects come from slabs of their own (ADR-0024): never
+    /// one a size class's objects are in, whatever those do; an
+    /// allocation of the zone's size but another alignment is the size
+    /// class's; and everything goes back.
+    #[test]
+    fn zones_keep_their_objects_apart() {
+        const ZONES: [ZoneSpec; 2] = [
+            ZoneSpec {
+                name: "Files",
+                size: 136,
+                align: 8,
+            },
+            ZoneSpec {
+                name: "pipe",
+                size: 400,
+                align: 8,
+            },
+        ];
+        let heap: Heap<HostPages, 1> = Heap::with_zones(
+            HostPages {
+                out: AtomicI64::new(0),
+                limit: None,
+            },
+            &ZONES,
+        );
+        let slab = |p: *mut u8| p.addr() & !(PAGE - 1);
+        let zone = layout(136, 8);
+        let (same_class, other_align) = (layout(140, 4), layout(136, 4));
+        // Holes among long-lived objects in the size class, as a file
+        // system's churn leaves.
+        let mut kept = Vec::new();
+        let mut holes = Vec::new();
+        for i in 0..2000 {
+            let p = heap.allocate(same_class);
+            if i % 2 == 0 {
+                kept.push(p)
+            } else {
+                holes.push(p)
+            }
+        }
+        for p in holes {
+            // SAFETY: allocated above with this layout.
+            unsafe { heap.deallocate(p, same_class) };
+        }
+        let files: Vec<*mut u8> = (0..500).map(|_| heap.allocate(zone)).collect();
+        let classes: std::collections::HashSet<usize> = kept.iter().map(|&p| slab(p)).collect();
+        assert!(
+            files
+                .iter()
+                .all(|&p| !p.is_null() && !classes.contains(&slab(p)))
+        );
+        // 144-byte objects, 28 to a page: 500 lie together, in the 18
+        // slabs they need and the few a magazine's refill reaches into.
+        let mine: std::collections::HashSet<usize> = files.iter().map(|&p| slab(p)).collect();
+        assert!(
+            mine.len() <= 500usize.div_ceil((PAGE - 32) / 144) + 4,
+            "{}",
+            mine.len()
+        );
+        let stats: Vec<ZoneStats> = heap.zone_stats().collect();
+        assert_eq!(stats.len(), 2);
+        assert_eq!((stats[0].name, stats[0].size), ("Files", 144));
+        // In use, and what the magazine holds.
+        assert!(stats[0].used >= 500, "{}", stats[0].used);
+        assert_eq!(stats[1].used, 0);
+        // Another alignment is not the zone's.
+        let q = heap.allocate(other_align);
+        assert!(!mine.contains(&slab(q)));
+        assert_eq!(
+            heap.zone_stats().next().map(|z| z.used),
+            Some(stats[0].used)
+        );
+        // SAFETY: each allocated above with the layout given.
+        unsafe {
+            heap.deallocate(q, other_align);
+            for p in files {
+                heap.deallocate(p, zone);
+            }
+            for p in kept {
+                heap.deallocate(p, same_class);
+            }
+        }
+        heap.drain_this_cpu();
+        heap.reclaim();
+        assert_eq!(heap.stats().live_objects, 0);
     }
 
     #[test]

@@ -239,7 +239,10 @@ We follow FreeBSD's Mach-derived design, adapted to Rust ownership:
 - **Physical**: buddy allocator over per-NUMA-domain free lists (`vm_phys`). Page metadata lives
   in a `VmPage` array. `Pfn`, `PhysAddr`, and `VirtAddr` are distinct newtypes.
 - **Kernel allocation**: slab/zone allocator (UMA-equivalent) with per-CPU caches, which also backs
-  `alloc::GlobalAlloc`. Typed zones (`Zone<T>`) return `ZBox<T>`.
+  `alloc::GlobalAlloc`. Zones (FreeBSD's `uma` zones: `Files`, `pipe`) are classes of that heap
+  for one exact layout each, declared at build time, so a hot type's objects lie together
+  whatever else of their size comes and goes ([ADR-0024](adr/0024-zones-as-exact-layout-classes.md));
+  `vmstat -z` lists them.
 - **Address spaces**: `VmMap` (an ordered map of `VmEntry`), `VmObject` (anonymous, vnode,
   device, physical), and shadow chains for COW. `Pmap` is the per-arch page-table backend behind
   the HAL trait.

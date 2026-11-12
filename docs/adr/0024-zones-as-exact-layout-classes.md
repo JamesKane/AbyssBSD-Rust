@@ -1,6 +1,6 @@
 # ADR-0024: Zones are exact-layout classes of the one heap, declared at build time; `Zone<T>` and `ZBox<T>` are not built
 
-- Status: Proposed
+- Status: Accepted (the user, 2026-11-12)
 - Date: 2026-11-12
 
 ## Context
@@ -47,7 +47,7 @@ and alignment.
    size class as now. `dealloc` gets the same `Layout` and makes the same choice. A zone has what
    a class has, from the same code: its own slabs, its own depot, a pair of magazines per CPU.
 2. **Zones are declared at build time**, in one table in the kernel crate handed to
-   `Heap::new`, each with FreeBSD's zone name and the layout computed from the type in a
+   `Heap::with_zones`, each with FreeBSD's zone name and the layout computed from the type in a
    constant expression. The granule-to-class table the heap already indexes is built from it in a
    `const fn`, so an allocation's path is the same single table load; the alignment is compared
    only when the granule is a zone's. There is no registration at run time: an object allocated
@@ -89,6 +89,16 @@ and alignment.
 2. `Files` and `pipe` declared; the kernel test of point 3; `vm.zone_stats`; the board's event
    suite and `p2`'s `malloc` benchmarks, which must not move.
 3. Further zones, one measurement each.
+
+## Stage 0's result (2026-11-12)
+
+On the board, `poll1000` before and after the file-system suite: with no zones 150 and 200 µs;
+with `Files` and `pipe` 145 and 169 µs. A timing probe put the rest in the first touch of each
+pipe's `Notify`, an allocation of its own that the suite churns too (every vnode has one), and a
+zone for it changed nothing. With the `Notify` in the pipe, as FreeBSD's `pipe_sel` lies in
+`struct pipe`, 148.9 and 148.3 µs: the after-effect is gone for `poll` and `select`. Zones keep
+types apart; an object that is always reached through another belongs in it. `kevent.pipe1000`
+keeps 12% (903 and 1016 ns): its knotes are the next candidate (`KNOTE`).
 
 ## Consequences
 

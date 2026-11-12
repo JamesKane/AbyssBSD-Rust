@@ -39,16 +39,28 @@ fn record(name: &str, s: zone::Stats) -> UmaTypeHeader {
     }
 }
 
-fn zones() -> [UmaTypeHeader; 6] {
+/// The mbuf zones, then the heap's (ADR-0024: `Files`, `pipe`, ...), each
+/// with its objects out of its slabs as the allocations.
+fn zones() -> Vec<UmaTypeHeader> {
     let r = |z: &zone::Zone| record(z.name(), z.stats());
-    [
+    let mut v = alloc::vec![
         r(&zone::MBUF),
         r(&zone::CLUSTER),
         record("mbuf_packet", zone::Stats::default()),
         r(&zone::JUMBOP),
         r(&zone::JUMBO9),
         r(&zone::JUMBO16),
-    ]
+    ];
+    for z in crate::mm::zone_stats() {
+        v.push(UmaTypeHeader {
+            uth_name: name_of(z.name),
+            uth_size: u32::try_from(z.size).unwrap_or(0),
+            uth_rsize: u32::try_from(z.size).unwrap_or(0),
+            uth_allocs: z.used,
+            ..UmaTypeHeader::default()
+        });
+    }
+    v
 }
 
 fn zone_stats(out: &mut Vec<u8>) {

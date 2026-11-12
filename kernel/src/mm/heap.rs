@@ -49,8 +49,22 @@ unsafe impl PageSource for KernelPages {
 /// the block it needs.
 const RECLAIM_BATCH: usize = 256;
 
+/// The heap's zones (ADR-0024), under FreeBSD's names: the objects a walk
+/// over many descriptors touches, kept together whatever else of their
+/// size comes and goes.
+const ZONES: [vm::slab::ZoneSpec; 2] = [
+    vm::slab::ZoneSpec::of_arc::<crate::fs::file::File>("Files"),
+    vm::slab::ZoneSpec::of_arc::<crate::fs::pipe::Pipe>("pipe"),
+];
+
 #[global_allocator]
-static HEAP: Heap<KernelPages, { hal::MAX_CPUS }> = Heap::new(KernelPages);
+static HEAP: Heap<KernelPages, { hal::MAX_CPUS }> = Heap::with_zones(KernelPages, &ZONES);
+
+/// Each zone's name, object size, and objects out of its slabs
+/// (`vm.zone_stats`).
+pub(crate) fn zone_stats() -> alloc::vec::Vec<vm::slab::ZoneStats> {
+    HEAP.zone_stats().collect()
+}
 
 /// Gives back all the magazines the heap's depots hold: memory is short.
 pub(crate) fn heap_reclaim() {
