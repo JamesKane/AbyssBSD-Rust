@@ -22,7 +22,63 @@ pub trait Wake: Send + Sync {
 struct Inner {
     knotes: Vec<Arc<Knote>>,
     /// Pollers, until their call ends (a dead one is pruned).
-    pollers: Vec<Weak<dyn Wake>>,
+    pollers: Pollers,
+}
+
+/// An object's pollers: the first in place, the others in a list. Nearly
+/// every object polled has one poller, and `poll` over a thousand
+/// descriptors registers with each: a list's buffer for each would be a
+/// thousand more allocations to touch, wherever the heap put them.
+#[derive(Default)]
+struct Pollers {
+    first: Option<Weak<dyn Wake>>,
+    rest: Vec<Weak<dyn Wake>>,
+}
+
+impl Pollers {
+    const fn new() -> Self {
+        Self {
+            first: None,
+            rest: Vec::new(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.first.is_none() && self.rest.is_empty()
+    }
+
+    /// Drops the pollers whose calls have ended.
+    fn prune(&mut self) {
+        if self.first.as_ref().is_some_and(|p| p.strong_count() == 0) {
+            self.first = None;
+        }
+        if !self.rest.is_empty() {
+            self.rest.retain(|p| p.strong_count() > 0);
+        }
+    }
+
+    fn contains(&self, w: *const dyn Wake) -> bool {
+        self.first
+            .iter()
+            .chain(&self.rest)
+            .any(|p| core::ptr::addr_eq(p.as_ptr(), w))
+    }
+
+    fn push(&mut self, w: Weak<dyn Wake>) {
+        if self.first.is_none() {
+            self.first = Some(w);
+        } else {
+            self.rest.push(w);
+        }
+    }
+
+    /// Takes every poller off.
+    fn drain(&mut self) -> impl Iterator<Item = Weak<dyn Wake>> + use<> {
+        self.first
+            .take()
+            .into_iter()
+            .chain(core::mem::take(&mut self.rest))
+    }
 }
 
 /// An object's waiters (FreeBSD's `struct selinfo` and its `knlist`).
@@ -58,7 +114,7 @@ impl Notify {
             armed: AtomicBool::new(false),
             inner: SpinLock::new(Inner {
                 knotes: Vec::new(),
-                pollers: Vec::new(),
+                pollers: Pollers::new(),
             }),
         }
     }
@@ -68,9 +124,8 @@ impl Notify {
     pub fn record(&self, w: &Arc<dyn Wake>) {
         {
             let mut i = self.inner.lock();
-            i.pollers.retain(|p| p.strong_count() > 0);
-            let me = Arc::as_ptr(w);
-            if !i.pollers.iter().any(|p| core::ptr::addr_eq(p.as_ptr(), me)) {
+            i.pollers.prune();
+            if !i.pollers.contains(Arc::as_ptr(w)) {
                 i.pollers.push(Arc::downgrade(w));
             }
             self.armed.store(true, Ordering::Relaxed);
@@ -137,7 +192,7 @@ impl Notify {
             return;
         }
         let mut i = self.inner.lock();
-        for p in i.pollers.drain(..) {
+        for p in i.pollers.drain() {
             if let Some(p) = p.upgrade() {
                 p.wake();
             }
@@ -162,12 +217,13 @@ impl Notify {
         // Taken off under the lock, woken after it: a wakeup (and the
         // interrupt to another CPU it may send) does not hold up the
         // object's other waiters and notifiers.
-        let woken = {
+        let mut woken = {
             let mut i = self.inner.lock();
-            let woken = if pollers {
-                core::mem::take(&mut i.pollers)
+            // Nothing moves when no poller waits (a kqueue's object).
+            let woken = if pollers && !i.pollers.is_empty() {
+                Some(core::mem::take(&mut i.pollers))
             } else {
-                Vec::new()
+                None
             };
             for kn in &i.knotes {
                 if let Some(kq) = kn.deliver(hint) {
@@ -177,7 +233,7 @@ impl Notify {
             Self::rearm(&self.armed, &i);
             woken
         };
-        for p in woken {
+        for p in woken.iter_mut().flat_map(Pollers::drain) {
             if let Some(p) = p.upgrade() {
                 p.wake();
             }
@@ -193,7 +249,7 @@ impl Notify {
     pub fn clear(&self) {
         let knotes = {
             let mut i = self.inner.lock();
-            for p in i.pollers.drain(..) {
+            for p in i.pollers.drain() {
                 if let Some(p) = p.upgrade() {
                     p.wake();
                 }
