@@ -188,6 +188,9 @@ pub(crate) struct UserThread {
     /// process's credential, shared across `fork`, would move between
     /// CPUs on every count.
     cred: PreemptLock<(u64, Arc<Ucred>)>,
+    /// The generation in `cred`, for the check at every system call
+    /// without the lock (only the thread itself changes either).
+    cred_seen: AtomicU64,
 }
 
 impl UserThread {
@@ -227,6 +230,7 @@ impl UserThread {
                 dbg: crate::ptrace::ThreadDebug::default(),
                 vfork_child: SpinLock::new(None),
                 cred: PreemptLock::new(own_cred(process)),
+                cred_seen: AtomicU64::new(u64::MAX),
             }
         });
         tid.map(|_| t)
@@ -258,12 +262,16 @@ impl UserThread {
     /// did (`thread_cow_update`, at `syscallenter`). Only the thread
     /// itself calls this.
     pub(crate) fn update_cred(&self) {
-        if self.cred.lock().0 == self.process.cred_gen() {
+        if self.cred_seen.load(Ordering::Relaxed) == self.process.cred_gen() {
             return;
         }
-        let new = own_cred(&self.process);
-        let old = core::mem::replace(&mut *self.cred.lock(), new);
-        drop(old);
+        if self.cred.lock().0 != self.process.cred_gen() {
+            let new = own_cred(&self.process);
+            let old = core::mem::replace(&mut *self.cred.lock(), new);
+            drop(old);
+        }
+        let seen = self.cred.lock().0;
+        self.cred_seen.store(seen, Ordering::Relaxed);
     }
 
     pub(crate) fn umtx(&self) -> &Arc<crate::umtx::Entry> {
