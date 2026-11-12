@@ -146,11 +146,30 @@ struct Channel {
     readable: WaitQueue,
     writable: WaitQueue,
     /// Its pollers and knotes; a FIFO's pipes share the FIFO's.
-    notify: Arc<Notify>,
+    notify: ChannelNotify,
+}
+
+/// A channel's `Notify`: its own, in the pipe (FreeBSD's `pipe_sel` lies
+/// in `struct pipe`), so a `poll` over many pipes touches no object but
+/// the pipes; or a FIFO's, which its vnode shares.
+enum ChannelNotify {
+    Own(Notify),
+    Shared(Arc<Notify>),
+}
+
+impl core::ops::Deref for ChannelNotify {
+    type Target = Notify;
+
+    fn deref(&self) -> &Notify {
+        match self {
+            Self::Own(n) => n,
+            Self::Shared(n) => n,
+        }
+    }
 }
 
 impl Channel {
-    fn new(initial: usize, notify: Arc<Notify>) -> Self {
+    fn new(initial: usize, notify: ChannelNotify) -> Self {
         Self {
             ring: Mutex::new(&PIPE_LOCK, Ring::new()),
             initial,
@@ -200,7 +219,12 @@ pub(crate) fn named(notify: &Arc<Notify>) -> (End, End) {
 
 fn pair_with(notify: Option<&Arc<Notify>>) -> (End, End) {
     let ino = NEXT_INO.fetch_add(2, Ordering::Relaxed);
-    let n = || notify.map_or_else(|| Arc::new(Notify::new()), Arc::clone);
+    let n = || {
+        notify.map_or_else(
+            || ChannelNotify::Own(Notify::new()),
+            |n| ChannelNotify::Shared(Arc::clone(n)),
+        )
+    };
     let pipe = Arc::new(Pipe {
         channels: [
             Channel::new(PIPE_SIZE, n()),
