@@ -3189,7 +3189,11 @@ ktest! {
             .filter(|r| r.0 != irqs)
             .any(|r| r.2.iter().any(|e| e.2.as_deref() == Some("nvme0")));
         assert!(nvme, "nvme0's BAR");
-        assert!(find(irqs).2.iter().filter(|e| e.2.as_deref() == Some("nvme0")).count() >= 2);
+        // Its admin and I/O queues' MSI-X lines, or with MSI-X off (the
+        // EL2 case's `hw.pci.enable_msix=0`) its one INTx line.
+        let lines = find(irqs).2.iter().filter(|e| e.2.as_deref() == Some("nvme0")).count();
+        let msix = crate::boot::value("hw.pci.enable_msix") != Some("0");
+        assert!(lines >= if msix { 2 } else { 1 }, "nvme0 has {lines} interrupt lines");
     }
 }
 
