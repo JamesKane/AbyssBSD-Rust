@@ -305,6 +305,11 @@ pub(super) fn kill(pid: u64, signum: u64) -> SysResult {
         return Err(Errno::EINVAL);
     }
     let info = user_info(sig, me.pid(), SI_USER);
+    if pid == me.pid() {
+        // Itself: no look through the process table.
+        send(&me, &me, sig, info)?;
+        return Ok(0);
+    }
     if pid > 0 {
         let p = crate::proc::find(pid).ok_or(Errno::ESRCH)?;
         send(&me, &p, sig, info)?;
