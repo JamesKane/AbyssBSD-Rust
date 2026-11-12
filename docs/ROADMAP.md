@@ -2975,6 +2975,19 @@ hang.
   vnode-object page (ARCHITECTURE.md §5.2, proposed), still about 45% of an `exec`; then lazy SVE
   (FreeBSD's `vfp.c` traps the first use, so threads that never use SVE save and restore only the
   V registers and get no SVE signal context).
+- Progress 2026-11-11 (the arm64 gaps, continued; one run each through `perf-run.sh` on the big
+  cores, the binary in tmpfs as the gate runs it): the icache bit landed (`0aa907d`); the ELF
+  loader now maps each segment's resident pages at once, as FreeBSD's `MAP_PREFAULT` does
+  (`d44618b`); the running thread is read from `SP_EL0` instead of through `TPIDR_EL1` with
+  interrupts masked (`21da16e`); and the credential check at every system call takes no lock
+  (`83d053f`). Against the first board run: `proc.exec` 286 to 110 µs (FreeBSD 108),
+  `proc.vfork_exec` 285 to 123 µs (169), `syscall.getpid` 140 to 81 ns (117), `io.null.write`
+  242 to 143 ns (186), `sig.deliver` 4.9 to 1.56 µs (0.97), `exec.true` 572 to 371 µs (461).
+  Found on the way: a reaped process could report less CPU time than it had seen (`99c48b1`).
+  Lazy SVE is put back: at the board's 128-bit vectors it saves 34 bytes a switch. Next: the
+  per-CPU critical-section count, still reached with interrupts masked (FreeBSD keeps it per
+  thread, `td_critnest`); then `p2` on the board (context switch, wakeup, IPI), for the
+  ping-pong gaps the profiler cannot see into.
 - Progress 2026-11-10 (the known defects, in QEMU; none yet tried on the board):
   - `MNT_RELOAD`: `nmount`'s `reload` on a read-only mount (`vfs_domount_update`'s rule), with
     `ffs` taken as `ufs` (`chkdoreload` asks for `ffs`, which is why the root's failed with
