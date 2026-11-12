@@ -2988,8 +2988,23 @@ hang.
   critical-section depth moved to the thread, as FreeBSD's `td_critnest` (`80803f1`):
   `proc.exec` 92 µs, `proc.fork` 42.6 µs (45.4), `vm.fault.anon` 618 ns (883), `thr.create`
   5.4 µs (4.8). Open: `aarch64-el2` (INTx) hung once in three runs in `tests/user/cam`, as it did
-  once before these changes (`99c48b1`); not yet looked into. Next: `p2` on the board (context
-  switch, wakeup, IPI), for the ping-pong gaps the profiler cannot see into.
+  once before these changes (`99c48b1`); not yet looked into.
+- Progress 2026-11-12 (`p2` on the board, `789a605`; big cores, one run each,
+  `tests/perf/board/results/2026-11-12-p2-big.txt`): `kbench.ko` builds for arm64 and runs from
+  the kyuawork partition; AbyssBSD runs the suite at boot and resets. AbyssBSD is ahead on wakeup
+  and callout latency (0.69 and 0.47 of FreeBSD's p50), uncontended locks (0.70), `page.hit`
+  (0.75); behind on context switches, `rw`/`sx` readers at four threads (1.8-2.0), and
+  `page.miss` (1.60). The contended writer locks (`mtx`, `rw.wr`, `sx.wr` at t2 and t4) read a
+  flat 16.5 ns, against FreeBSD's 47-70: likely one thread getting the lock back unfairly, to
+  look into before believing. A phase probe found the switch spending its time around the
+  register switch, not in it, and each clock read (ISB, CNTVCT) at about 50 ns: `470571d`
+  takes two reads and two 128-bit divisions off every switch, `ctxsw.same` 464 to 371 ns
+  (FreeBSD 291). `ctxsw.cross` stays 1.6x (1560 ns, 973): a second probe found the idle spin
+  working (3% of 1.9 million remote wakeups needed an IPI), so the cost is in the two switches
+  each CPU makes per handoff and what they share (the woken thread's lock, the target's run
+  queue, per-CPU fields read remotely). The board's first `p2` attempt hung FreeBSD (a worker on
+  the coordinator's CPU is never preempted there) and needed a power cycle; the CPU list now
+  keeps them apart.
 - Progress 2026-11-10 (the known defects, in QEMU; none yet tried on the board):
   - `MNT_RELOAD`: `nmount`'s `reload` on a read-only mount (`vfs_domount_update`'s rule), with
     `ffs` taken as `ufs` (`chkdoreload` asks for `ffs`, which is why the root's failed with
