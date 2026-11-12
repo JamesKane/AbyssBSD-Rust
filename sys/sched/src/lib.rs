@@ -1063,6 +1063,10 @@ pub fn preempt_point() {
 /// Switches to the best runnable thread. Interrupts must be masked. The
 /// current thread's state says what happens to it (see the crate docs).
 pub(crate) fn switch_away() {
+    // No thread leaves in a critical section: the depth a thread has is
+    // its own while it runs (FreeBSD's `td_critnest`), and every switch
+    // happens with it zero.
+    debug_assert_eq!(hal::critical::depth(), 0, "a switch in a critical section");
     let c = this_cpu();
     c.need_resched.store(false, Ordering::Relaxed);
     // SAFETY: we own `current`'s reference until we hand it on below.

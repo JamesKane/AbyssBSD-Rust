@@ -311,8 +311,11 @@ impl Drop for FpuArea {
     }
 }
 
-/// A kernel thread.
+/// A kernel thread. `#[repr(C)]`, its architecture block first: the HAL
+/// finds that at the thread pointer it is given (`hal::ThreadLocal`).
+#[repr(C)]
 pub struct Thread {
+    hal: hal::ThreadLocal,
     tid: Tid,
     name: Name,
     pub(crate) inner: SpinLock<Inner>,
@@ -419,6 +422,7 @@ impl Thread {
         };
         let kstack_top = stack.as_ref().map_or(0, |s| s.top);
         Self {
+            hal: hal::ThreadLocal::new(),
             // Relaxed: uniqueness is all that matters.
             tid: Tid(NEXT_TID.fetch_add(1, Ordering::Relaxed)),
             name: Name::new(name),

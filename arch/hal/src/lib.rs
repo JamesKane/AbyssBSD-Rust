@@ -164,6 +164,35 @@ pub unsafe fn set_cpu_local(p: *mut ()) {
     let _ = p;
 }
 
+/// What the architecture keeps per thread, at the start of every thread
+/// [`set_current_thread`] names (the scheduler's thread puts it first):
+/// arm64 reaches it from `SP_EL0` in one load, where per-CPU data takes
+/// two, which a preemption could split. The critical-section depth and
+/// the owed preemption live here there, as FreeBSD keeps `td_critnest`
+/// and `td_owepreempt` per thread; the scheduler never switches in a
+/// critical section, so each thread's depth is its own. Only the thread
+/// itself, and interrupt handlers on its CPU (whose sections balance),
+/// touch it: plain loads and stores.
+#[repr(C)]
+#[derive(Debug, Default)]
+pub struct ThreadLocal {
+    /// Critical-section depth.
+    pub critical: core::sync::atomic::AtomicU32,
+    /// A preemption is owed.
+    pub owed: core::sync::atomic::AtomicU32,
+}
+
+impl ThreadLocal {
+    /// A thread's, at its start: in no section, owing nothing.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            critical: core::sync::atomic::AtomicU32::new(0),
+            owed: core::sync::atomic::AtomicU32::new(0),
+        }
+    }
+}
+
 /// The running thread's pointer, as last set on this CPU by
 /// [`set_current_thread`] (null until then). Safe to call with interrupts
 /// enabled: a preemption cannot make it return another CPU's thread.
@@ -182,7 +211,8 @@ pub fn current_thread() -> *const () {
 /// # Safety
 ///
 /// Call with interrupts masked, as part of a context switch; `p` must
-/// stay valid while it runs here (readers of [`current_thread`] trust it).
+/// stay valid while it runs here (readers of [`current_thread`] trust it),
+/// and start with a [`ThreadLocal`].
 pub unsafe fn set_current_thread(p: *const ()) {
     #[cfg(target_os = "none")]
     // SAFETY: defined by the linked arch crate with this signature.

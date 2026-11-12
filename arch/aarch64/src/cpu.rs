@@ -2,6 +2,7 @@
 //! System registers and CPU control.
 
 use core::arch::asm;
+use core::sync::atomic::Ordering::Relaxed;
 
 use crate::Racy;
 
@@ -299,32 +300,62 @@ fn with_local<R>(f: impl FnOnce(&mut CpuLocal) -> R) -> R {
     r
 }
 
-/// Enters a critical section.
+/// The running thread's [`hal::ThreadLocal`], from `SP_EL0` in one read
+/// (no preemption can split it), or none before a thread runs here: the
+/// per-CPU block's counts serve until then.
+fn thread_local() -> Option<&'static hal::ThreadLocal> {
+    let t = current_thread().cast::<hal::ThreadLocal>();
+    // SAFETY: a thread named by `set_current_thread` starts with its
+    // `ThreadLocal` (the HAL's contract) and outlives its run here.
+    unsafe { t.as_ref() }
+}
+
+/// Enters a critical section: the thread's depth, as FreeBSD's
+/// `critical_enter` raises `td_critnest`.
 pub fn critical_enter() {
-    with_local(|l| l.critical += 1);
+    match thread_local() {
+        Some(t) => t.critical.store(t.critical.load(Relaxed) + 1, Relaxed),
+        None => with_local(|l| l.critical += 1),
+    }
 }
 
 /// Leaves one; true when the outermost section ended.
 pub fn critical_exit() -> bool {
-    with_local(|l| {
-        l.critical -= 1;
-        l.critical == 0
-    })
+    match thread_local() {
+        Some(t) => {
+            let d = t.critical.load(Relaxed) - 1;
+            t.critical.store(d, Relaxed);
+            d == 0
+        }
+        None => with_local(|l| {
+            l.critical -= 1;
+            l.critical == 0
+        }),
+    }
 }
 
 /// The critical-section depth.
 pub fn critical_depth() -> u32 {
-    with_local(|l| l.critical)
+    match thread_local() {
+        Some(t) => t.critical.load(Relaxed),
+        None => with_local(|l| l.critical),
+    }
 }
 
 /// Records or clears an owed preemption.
 pub fn owe_preempt(owed: bool) {
-    with_local(|l| l.owed = u32::from(owed));
+    match thread_local() {
+        Some(t) => t.owed.store(u32::from(owed), Relaxed),
+        None => with_local(|l| l.owed = u32::from(owed)),
+    }
 }
 
 /// Whether a preemption is owed.
 pub fn preempt_owed() -> bool {
-    with_local(|l| l.owed != 0)
+    match thread_local() {
+        Some(t) => t.owed.load(Relaxed) != 0,
+        None => with_local(|l| l.owed != 0),
+    }
 }
 
 /// Adds `delta` to the interrupt nesting; returns the new value.
@@ -344,8 +375,18 @@ pub(crate) fn read_sp_el0() -> u64 {
 pub fn set_current_thread(t: *const ()) {
     let p = read_sysreg!("tpidr_el1") as *mut CpuLocal;
     // SAFETY: as above; only this CPU writes its block. `SP_EL0` is the
-    // kernel's to use while it runs ([`current_thread`]).
+    // kernel's to use while it runs ([`current_thread`]). The first
+    // thread on this CPU takes over the counts kept here until now (a
+    // section begun before it, ended after).
     unsafe {
+        if (*p).thread.is_null()
+            && let Some(first) = t.cast::<hal::ThreadLocal>().as_ref()
+        {
+            first.critical.store((*p).critical, Relaxed);
+            first.owed.store((*p).owed, Relaxed);
+            (*p).critical = 0;
+            (*p).owed = 0;
+        }
         (*p).thread = t;
         asm!("msr sp_el0, {}", in(reg) t.addr(), options(nomem, nostack));
     }
