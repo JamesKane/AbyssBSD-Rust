@@ -507,9 +507,16 @@ documents named; this section keeps what is done and what is open.
   `tmpfs.open_close` (1.36), where `getpid` is level. In the kernel (`p2`, big cores, one run):
   `ctxsw.same` (1.27), `ipi.rtt` (1.2), `callout.armcancel` (1.18), `ctxsw.cross` (1.02 to 1.14).
   To do:
-  - the little cores: short system calls that do more than `getpid` take 1.4 to 1.7 of FreeBSD's
-    time there and 0.75 on the big cores. Not looked at; the byte loads below are the first
-    suspect on an in-order core;
+  - the little cores: short system calls that do more than `getpid` took 1.4 to 1.7 of FreeBSD's
+    time there and 0.75 on the big cores. One cause is fixed: the image past its first 4 MiB was
+    in 4 KiB pages, about 20 first-level data-TLB refills a `write` on an A520 (none on the big
+    cores), which cost most when the core's neighbour ran. Its segments are now 2 MiB-aligned
+    and it is in 2 MiB leaves, as FreeBSD's: a 1-byte `write` to `/dev/null` on cpu2 went from
+    537 ns to about 475 (FreeBSD: 500 to 540) and `getpid` from 294 to 270. Left: some
+    processes still run that `write` at about 715 ns, in spells: the same instructions, no
+    cache misses, and 3 first-level instruction-TLB refills a call at about 185 cycles each,
+    though that TLB holds some 30 pages. Not explained; stale or duplicate translations are
+    the first suspect. The suites are not rerun yet;
   - the 10-run gating set, `p2` on the mid and little cores, and `p7`;
   - the arm64 kernel's target makes no unaligned access, so an integer read out of a byte
     slice is a byte load each (it was 144 ns of every signal): a sweep of the hot paths that
