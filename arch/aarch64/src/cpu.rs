@@ -159,6 +159,10 @@ pub fn id_register(crm: u8, op2: u8) -> u64 {
     )
 }
 
+/// Where [`CpuLocal`]'s running thread lies, for the exception entry,
+/// which puts it in `SP_EL0`.
+pub(crate) const THREAD_OFFSET: usize = core::mem::offset_of!(CpuLocal, thread);
+
 /// Per-CPU data reached through `TPIDR_EL1`.
 #[repr(C)]
 #[derive(Debug)]
@@ -199,6 +203,8 @@ pub(crate) unsafe fn init_boot_cpu() {
     unsafe {
         (*cpu0).self_ptr = cpu0;
         asm!("msr tpidr_el1, {}", in(reg) cpu0, options(nostack));
+        // No thread runs yet (`current_thread`).
+        asm!("msr sp_el0, xzr", options(nostack));
     }
 }
 
@@ -237,8 +243,11 @@ impl Default for CpuBlock {
 pub(crate) unsafe fn init_cpu(block: &'static mut CpuBlock, cpu: u32) {
     block.0.cpu = cpu;
     block.0.self_ptr = &raw const block.0;
-    // SAFETY: per the contract.
-    unsafe { asm!("msr tpidr_el1, {}", in(reg) &raw const block.0, options(nostack)) };
+    // SAFETY: per the contract; no thread runs on it yet.
+    unsafe {
+        asm!("msr tpidr_el1, {}", in(reg) &raw const block.0, options(nostack));
+        asm!("msr sp_el0, xzr", options(nostack));
+    }
 }
 
 /// The current CPU's number.
@@ -262,19 +271,16 @@ pub fn set_cpu_local(v: *mut ()) {
     unsafe { (*p).kernel = v };
 }
 
-/// The running thread. Finding the block and reading it are two loads, so
-/// interrupts are masked between them: a preemption there could move the
-/// thread to another CPU and return that CPU's thread.
+/// The running thread, from `SP_EL0`, one read: no preemption can split
+/// it. In the kernel `SP_EL0` holds the running thread (the kernel's own
+/// stack is `SP_EL1`): the exception entry from EL0 saves the user's stack
+/// pointer and puts the thread there, the return to EL0 puts the user's
+/// back, and a switch moves it along ([`set_current_thread`]), as Linux
+/// keeps its current task. FreeBSD reads `curthread` through `x18`, which
+/// it reserves for the per-CPU block; the per-CPU block's copy is what
+/// the entry loads.
 pub fn current_thread() -> *const () {
-    let daif = read_sysreg!("daif");
-    // SAFETY: masking IRQs on this CPU; restored below.
-    unsafe { asm!("msr daifset, #2", options(nomem, nostack)) };
-    let p = read_sysreg!("tpidr_el1") as *const CpuLocal;
-    // SAFETY: TPIDR_EL1 points at this CPU's block from `init_boot_cpu` on.
-    let t = unsafe { (*p).thread };
-    // SAFETY: restores the saved mask.
-    unsafe { asm!("msr daif, {}", in(reg) daif, options(nomem, nostack)) };
-    t
+    read_sysreg!("sp_el0") as *const ()
 }
 
 /// Runs `f` on this CPU's block with IRQs masked: finding the block and
@@ -329,11 +335,20 @@ pub fn interrupt_nest(delta: i32) -> u32 {
     })
 }
 
+/// `SP_EL0`'s value (the running thread, in the kernel).
+pub(crate) fn read_sp_el0() -> u64 {
+    read_sysreg!("sp_el0")
+}
+
 /// Records the running thread. Interrupts must be masked.
 pub fn set_current_thread(t: *const ()) {
     let p = read_sysreg!("tpidr_el1") as *mut CpuLocal;
-    // SAFETY: as above; only this CPU writes its block.
-    unsafe { (*p).thread = t };
+    // SAFETY: as above; only this CPU writes its block. `SP_EL0` is the
+    // kernel's to use while it runs ([`current_thread`]).
+    unsafe {
+        (*p).thread = t;
+        asm!("msr sp_el0, {}", in(reg) t.addr(), options(nomem, nostack));
+    }
 }
 
 /// Waits for an interrupt with interrupts masked; WFI wakes on a pending

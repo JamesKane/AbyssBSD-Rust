@@ -68,10 +68,15 @@ abyss_el1_common:
     stp x26, x27, [sp, #208]
     stp x28, x29, [sp, #224]
     add x1, sp, #{frame}
-    /* Slots 8 and up come from EL0: its stack pointer is SP_EL0. */
+    /* Slots 8 and up come from EL0: its stack pointer is SP_EL0. In the
+       kernel SP_EL0 holds the running thread (`cpu::current_thread`),
+       from this CPU's block. */
     cmp x0, #8
     b.lo 1f
     mrs x1, sp_el0
+    mrs x2, tpidr_el1
+    ldr x2, [x2, #{thread}]
+    msr sp_el0, x2
 1:  stp x30, x1, [sp, #240]
     mrs x1, elr_el1
     mrs x2, spsr_el1
@@ -113,6 +118,7 @@ abyss_el1_exit:
     "#,
     frame = const FRAME_SIZE,
     dispatch = sym dispatch,
+    thread = const crate::cpu::THREAD_OFFSET,
 );
 
 unsafe extern "C" {

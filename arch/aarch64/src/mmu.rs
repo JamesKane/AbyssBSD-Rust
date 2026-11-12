@@ -105,7 +105,12 @@ pub unsafe fn with_tables<R>(root: PhysAddr, f: impl FnOnce() -> R) -> R {
             options(nostack),
         );
     }
+    // The firmware may use SP_EL0, which holds the running thread
+    // (`cpu::current_thread`): kept across the call.
+    let sp_el0 = crate::cpu::read_sp_el0();
     let r = f();
+    // SAFETY: puts back what it held, the running thread.
+    unsafe { asm!("msr sp_el0, {}", in(reg) sp_el0, options(nomem, nostack)) };
     // SAFETY: restores the lower half that was live on entry; the
     // firmware table's entries are dropped from this CPU's TLB.
     unsafe {

@@ -180,6 +180,9 @@ abyss_ap_start:
     ldr x9, [x9, :lo12:4f]
     br x9
 3:
+    /* The kernel runs on SP_EL1 (EL1h): SP_EL0 holds the running thread
+       (`cpu::current_thread`), whatever mode the firmware entered in. */
+    msr spsel, #1
     cbnz x21, 5f
     adrp x9, __boot_stack_top
     add x9, x9, :lo12:__boot_stack_top
