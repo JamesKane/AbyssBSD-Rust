@@ -119,13 +119,22 @@ fn platform_now() -> u64 {
     PLATFORM.get().map_or(0, |p| p.now())
 }
 
-/// The platform clock in FreeBSD's `hz` ticks ([`pctcpu::HZ`]), or 0
-/// before [`init`].
+/// `hz` ticks per platform clock tick, as a fixed-point fraction with
+/// [`HZ_SHIFT`] bits, set by [`init`]: a switch converts with a multiply
+/// and a shift, not a 128-bit division.
+static HZ_MULT: AtomicU64 = AtomicU64::new(0);
+const HZ_SHIFT: u32 = 40;
+
+/// Platform clock `t` in FreeBSD's `hz` ticks ([`pctcpu::HZ`]); 0 before
+/// [`init`]. The multiplier is exact to a part in a million.
+fn hz_of(t: u64) -> u64 {
+    let m = u128::from(HZ_MULT.load(Ordering::Relaxed));
+    u64::try_from((u128::from(t) * m) >> HZ_SHIFT).unwrap_or(u64::MAX)
+}
+
+/// The platform clock in `hz` ticks, or 0 before [`init`].
 fn hz_now() -> u64 {
-    PLATFORM.get().map_or(0, |p| {
-        let f = u128::from(p.frequency().max(1));
-        u64::try_from(u128::from(p.now()) * u128::from(pctcpu::HZ) / f).unwrap_or(u64::MAX)
-    })
+    hz_of(platform_now())
 }
 
 /// The platform clock (see [`Platform::now`]); 0 before [`init`].
@@ -413,6 +422,8 @@ pub fn online_cpus() -> usize {
 /// Sets the platform hooks. Call once, before [`init_cpu`].
 pub fn init(p: &'static dyn Platform) {
     assert!(PLATFORM.set(p).is_ok(), "sched::init called twice");
+    let mult = (u128::from(pctcpu::HZ) << HZ_SHIFT) / u128::from(p.frequency().max(1));
+    HZ_MULT.store(u64::try_from(mult).unwrap_or(u64::MAX), Ordering::Relaxed);
     hal::critical::set_preempt_handler(owed_preempt);
 }
 
@@ -1079,7 +1090,7 @@ pub(crate) fn switch_away() {
     let elapsed = now.saturating_sub(inner.since);
     if !cur.idle {
         // `sched_switch`: the time since the last update was spent running.
-        inner.pct.update(hz_now(), true);
+        inner.pct.update(hz_of(now), true);
         match state {
             State::Running => cur.involuntary.fetch_add(1, Ordering::Relaxed),
             _ => cur.voluntary.fetch_add(1, Ordering::Relaxed),
@@ -1149,7 +1160,7 @@ pub(crate) fn switch_away() {
         let mut inner = next.inner.lock();
         inner.state = State::Running;
         // The incoming thread's window: it did not run meanwhile.
-        inner.pct.update(hz_now(), false);
+        inner.pct.update(hz_of(now), false);
         inner.cpu = c.id;
         inner.since = now;
         c.slice_start.set(now);
